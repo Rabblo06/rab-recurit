@@ -71,7 +71,14 @@ if ('${name}' === 'bootstrap' && code === 0 && process.env.CREWFLOW_DB_TARGET_FI
 if ('${name}' === 'bootstrap' && code === 0 && process.env.CREWFLOW_DB_TARGET_FILE && readCtl('/ctl/no-target', null) === null) {
   fs.writeFileSync(process.env.CREWFLOW_DB_TARGET_FILE, JSON.stringify({ v: 1, host: 'db', port: 5432, database: 'crewflow', params: { sslmode: 'verify-full' } }) + '\\n');
 }
-console.log('STUB ${name} tf=' + (process.env.CREWFLOW_DB_TARGET_FILE ? 'set' : '-') + ' pid=' + process.pid + ' ppid=' + process.ppid + ' t=' + process.hrtime.bigint() + ' upgrade=' + (process.env.CREWFLOW_UPGRADE_INCOMPLETE || '-') + ' ca=' + (process.env.PG_SSL_CA_CERT_PATH || '-') + ' admin=' + admin + ' admin1=' + admin1 + ' url=' + url + ' self=' + keys('/proc/self/environ').join(',') + ' pid1=' + keys('/proc/1/environ').join(','));
+// Re-check R1/R2: fd 9 is the volume's .db-setup.flock (inherited from db-setup.sh).
+let fd9 = 'no';
+try {
+  const lockFile = require('path').join(require('path').dirname(process.env.CREWFLOW_DB_TARGET_FILE || '/x/y'), '.db-setup.flock');
+  const a = fs.fstatSync(9), b = fs.lstatSync(lockFile);
+  fd9 = a.ino === b.ino && a.dev === b.dev ? 'flock' : 'other';
+} catch {}
+console.log('STUB ${name} fd9=' + fd9 + ' tf=' + (process.env.CREWFLOW_DB_TARGET_FILE ? 'set' : '-') + ' pid=' + process.pid + ' ppid=' + process.ppid + ' t=' + process.hrtime.bigint() + ' upgrade=' + (process.env.CREWFLOW_UPGRADE_INCOMPLETE || '-') + ' ca=' + (process.env.PG_SSL_CA_CERT_PATH || '-') + ' admin=' + admin + ' admin1=' + admin1 + ' url=' + url + ' self=' + keys('/proc/self/environ').join(',') + ' pid1=' + keys('/proc/1/environ').join(','));
 process.exit(code);
 `;
 const STUBS = {
@@ -166,7 +173,7 @@ process.exit(code);
 
 // Option A: `target` = 'present' (a target file db-setup wrote, mounted read-only), 'absent' (the empty volume, read-only) or
 // 'rw' (db-setup's writable view; `targetDir` names the host directory so a case can inspect it). Default: present.
-function run(name, env, { ctl = {}, entry = 'api-prestart.sh', withPrestart = true, dockerArgs = [], target = 'present', targetDir = null } = {}) {
+function run(name, env, { ctl = {}, entry = 'api-prestart.sh', withPrestart = true, dockerArgs = [], target = 'present', targetDir = null, cmd = null } = {}) {
   const ctlDir = path.join(work, `ctl-${name}`);
   fs.mkdirSync(ctlDir);
   for (const [k, v] of Object.entries(ctl)) fs.writeFileSync(path.join(ctlDir, k), String(v));
@@ -190,7 +197,8 @@ function run(name, env, { ctl = {}, entry = 'api-prestart.sh', withPrestart = tr
   args.push('-v', `${ctlDir}:/ctl:ro`);
   for (const [k, v] of Object.entries(env)) args.push('-e', `${k}=${v}`);
   const [script, ...scriptArgs] = entry.split(' ');
-  args.push(IMAGE, 'sh', `/app/${script}`, ...scriptArgs);
+  if (cmd) args.push(IMAGE, 'sh', '-c', cmd);
+  else args.push(IMAGE, 'sh', `/app/${script}`, ...scriptArgs);
   const r = spawnSync('docker', args, { encoding: 'utf8' });
   return { code: r.status, out: `${r.stdout}${r.stderr}` };
 }
@@ -692,6 +700,25 @@ for (const [label, url, extra, want] of [
   r = run('setup-lock-released-fail', S, { entry: 'db-setup.sh', ctl: { bootstrap: 64 }, target: 'rw', targetDir: sd });
   check('14n2 F1: ... and on a refusal', r.code === 64 && !fs.readdirSync(sd).includes('.db-setup.lock'), fs.readdirSync(sd).join(','));
 }
+{
+  // Re-check R1/R2: the kernel lock. A holder of the volume's flock (another db-setup) -> this one refuses (70) before the
+  // child runs; the child inherits fd 9 (the flock file) and the marker; a symlinked lock file is refused.
+  sd = setupDir('flock-held', true);
+  r = run('setup-flock-held', S, { target: 'rw', targetDir: sd, cmd: '(flock -n 9 && sleep 4) 9>>/run/crewflow/db-target/.db-setup.flock & sleep 1; sh /app/db-setup.sh; echo "exit=$?"' });
+  check('14p R1/R2: while another process holds the volume\'s kernel lock, db-setup.sh refuses (70) before the child runs, and touches no file',
+    /another db-setup is running on this setup volume/.test(r.out) && /exit=70/.test(r.out) && !line(r.out, 'bootstrap') && targetText(sd) === 'STALE', r.out);
+  sd = setupDir('flock-inherited', true);
+  r = run('setup-flock-inherited', S, { entry: 'db-setup.sh', target: 'rw', targetDir: sd });
+  check('14q R1/R2: the child inherits fd 9 = the volume\'s .db-setup.flock and CREWFLOW_DB_SETUP_FLOCK_FD; the lock is free again after the run',
+    r.code === 0 && field(line(r.out, 'bootstrap'), 'fd9') === 'flock' && keysOf(line(r.out, 'bootstrap'), 'self').includes('CREWFLOW_DB_SETUP_FLOCK_FD'), r.out);
+  r = run('setup-flock-free', S, { target: 'rw', targetDir: sd, cmd: 'flock -n 9 9>>/run/crewflow/db-target/.db-setup.flock && echo flock-free' });
+  check('14q2 R1/R2: after the run the kernel lock is free (nothing to clean up)', /flock-free/.test(r.out), r.out);
+  sd = setupDir('flock-symlink', true);
+  r = run('setup-flock-symlink', S, { target: 'rw', targetDir: sd, cmd: 'ln -s /tmp/elsewhere /run/crewflow/db-target/.db-setup.flock && sh /app/db-setup.sh; echo "exit=$?"' });
+  check('14r R1/R2: a symlinked .db-setup.flock is refused (70) before the child runs', /exit=70/.test(r.out) && /run lock file in the setup volume is a symlink/.test(r.out) && !line(r.out, 'bootstrap'), r.out);
+  check('14s I3: db-setup.sh runs the child in the background and forwards TERM/INT (the EXIT trap still releases the lock directory)',
+    /&\nCHILD=\$!\ntrap 'kill -TERM "\$CHILD"[^\n]*exit 143' TERM INT\nwait "\$CHILD"/.test(fs.readFileSync(DB_SETUP, 'utf8')), 'db-setup.sh does not forward signals to the child');
+}
 sd = setupDir('readonly', false);
 r = run('setup-readonly', S, { entry: 'db-setup.sh', target: 'rw', targetDir: sd, dockerArgs: ['--read-only', '--user', '1000:1000'] });
 check('14h read-only root, uid 1000 (as shipped), only the target volume writable: the setup completes', r.code === 0 && targetText(sd) !== null, r.out);
@@ -709,7 +736,7 @@ const setupSource = fs.readFileSync(DB_SETUP, 'utf8');
 check('12l worker-start.sh writes no file, never traces (set -x) and never runs the bootstrap child', !/mktemp|\/tmp\//.test(workerSource) && !/set -[a-z]*x/.test(workerSource) && !/bootstrap-owner-login/.test(workerSource), 'worker-start.sh writes a file, traces, or runs the bootstrap child');
 check('12n option 2: api-prestart.sh never runs the bootstrap child and never traces (set -x)', !/bootstrap-owner-login/.test(prestartSource) && !/set -[a-z]*x/.test(prestartSource), 'api-prestart.sh runs the bootstrap child or enables tracing');
 check('12r I2 + A2: neither start script bounds its wait by the clock (no `date +%s`), and neither wraps the derive step in `timeout` (its watcher holds the fd-4 pipe until the bound)',
-  ![prestartSource, workerSource].some((t) => /date \+%s/.test(t)) && [prestartSource, workerSource].every((t) => /RUNTIME_URL="\$\(node "\$DERIVE_RUNTIME_URL" 4>&1 1>&2\)"/.test(t) && !/\btimeout\b[^\n]*DERIVE_RUNTIME_URL/.test(t)), 'a start script uses the clock or wraps the derive step in timeout');
+  ![prestartSource, workerSource].some((t) => /date \+%s/.test(t)) && [prestartSource, workerSource].every((t) => /RUNTIME_URL="\$\(CREWFLOW_RUNTIME_URL_FD=4 node "\$DERIVE_RUNTIME_URL" 4>&1 1>&2\)"/.test(t) && !/\btimeout\b[^\n]*DERIVE_RUNTIME_URL/.test(t)), 'a start script uses the clock or wraps the derive step in timeout');
 check('14l security review L2: db-setup.sh no longer names the never-used $TARGET.tmp', !/\$TARGET\.tmp/.test(setupSource), 'db-setup.sh still names $TARGET.tmp');
 {
   const beforeChild = setupSource.slice(0, setupSource.indexOf('node packages/rab-server/dist/database/typeorm/scripts/owner-login/bootstrap-owner-login.js'));

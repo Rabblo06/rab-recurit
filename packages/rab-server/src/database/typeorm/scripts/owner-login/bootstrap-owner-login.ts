@@ -46,14 +46,17 @@ async function main(): Promise<number> {
     process.stdout.write(`${resultLine(refused)}\n`);
     return refused.exitCode;
   }
-  // Security re-review F1: one run per setup volume. Under the lock, the previous target and any temp files a killed run
-  // left are removed first (db-setup.sh no longer touches them before the lock is held).
-  let lock: DbSetupLock;
+  // Security re-review F1/R1/R2: one run per setup volume (db-setup-lock.ts: db-setup.sh's kernel lock on fd 9, plus the
+  // lock directory). Under it, the previous target and any temp files a killed run left are removed first (db-setup.sh no
+  // longer touches them before the lock is held).
+  let lock: DbSetupLock | null = null;
   try {
     lock = acquireDbSetupLock(targetFile, process.env);
     removeDbTargetFile(targetFile);
     removeLeftoverTempFiles(targetFile);
   } catch (error) {
+    // A lock this process took (the cleanup after it failed) is released here; db-setup.sh releases its own on exit.
+    if (lock && !lock.releasedByShell) lock.release();
     const failure =
       error instanceof DbSetupLockError
         ? new OwnerBootstrapFailure(error.message, 'LOCKED')
@@ -63,11 +66,12 @@ async function main(): Promise<number> {
     process.stdout.write(`${resultLine(failed)}\n`);
     return failed.exitCode;
   }
+  const held = lock as DbSetupLock; // set: the catch above returned otherwise
   try {
     return await runLocked(targetFile, log);
   } finally {
     // db-setup.sh passed its token: it releases the lock on exit, after its own checks. Otherwise (a direct run) here.
-    if (!lock.releasedByShell) lock.release();
+    if (!held.releasedByShell) held.release();
   }
 }
 

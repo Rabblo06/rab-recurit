@@ -462,7 +462,7 @@ function credentialMountProblems(services, where = '', { redisUser = true } = {}
  * committed files use `rab-production`); no volume may be a host bind through `driver_opts` (`o: bind`, or `type: none`
  * with a `device`); the password volume itself is a plain local volume (not external, no driver options). Pure.
  */
-function topLevelVolumeProblems(model, where = '') {
+function topLevelVolumeProblems(model, where = '', { strict = false } = {}) {
   const out = [];
   const vols = model?.volumes && typeof model.volumes === 'object' ? model.volumes : {};
   const project = String(model?.name ?? '');
@@ -474,6 +474,10 @@ function topLevelVolumeProblems(model, where = '') {
       out.push(`volume ${key}: names db-setup's password volume${where} (a second name for it would mount the crewflow_owner password file elsewhere)`);
     }
     const opts = v?.driver_opts && typeof v.driver_opts === 'object' ? v.driver_opts : {};
+    // R4 (the deployed model): no driver options and no driver but `local` on ANY volume.
+    if (strict && (Object.keys(opts).length || (v?.driver !== undefined && v.driver !== 'local'))) {
+      out.push(`volume ${key}: has driver options or a non-local driver${where} (never in a deployment: a host path or a remote store)`);
+    }
     if (/(^|,)\s*r?bind\s*(,|$)/.test(String(opts.o ?? '')) || (String(opts.type ?? '') === 'none' && opts.device)) {
       out.push(`volume ${key}: is a host bind through driver_opts${where} (never: it can reach the Docker volume store)`);
     }
@@ -481,6 +485,10 @@ function topLevelVolumeProblems(model, where = '') {
   const t = vols[DB_TARGET_VOLUME];
   if (t && (t.external || (t.driver_opts && Object.keys(t.driver_opts).length) || (t.driver && t.driver !== 'local'))) {
     out.push(`volume ${DB_TARGET_VOLUME}: must be a plain local volume${where} (not external, no driver or driver options)`);
+  }
+  // I4: its Docker name is exactly <project>_crewflow-db-target (never an explicit `name:` pointing at another volume).
+  if (t && project && nameOf(DB_TARGET_VOLUME, t) !== `${project}_${DB_TARGET_VOLUME}`) {
+    out.push(`volume ${DB_TARGET_VOLUME}: its name must be ${project}_${DB_TARGET_VOLUME}${where} (another name would mount a different volume as the password volume)`);
   }
   return out;
 }

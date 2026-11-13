@@ -16,10 +16,11 @@
 # In every mode it then writes the CREDENTIAL-FREE target file /run/crewflow/db-target/target.json
 # ({"v":1,"host","port","database","params"}: no user, no password; temp file + rename, mode 0644). Both files live on a
 # small named volume that rab-api and rab-worker mount read-only; they never see PG_DATABASE_URL.
-# One run per volume (security re-review F1): the bootstrap child takes the lock directory .db-setup.lock in the volume
-# with this script's token (CREWFLOW_DB_SETUP_LOCK_TOKEN), and only while it holds it removes the previous target file
-# and the temp files a killed run left; a second run on the same volume stops (exit 70) and this script then removes
-# nothing. This script releases the lock on exit, and only when the owner token in it is its own. The password file is
+# One run per volume (security re-check F1, R1/R2): this script first takes the kernel lock (flock -n on fd 9, the
+# volume's .db-setup.flock; a second run stops with exit 70); the bootstrap child inherits it and also takes the lock
+# directory .db-setup.lock with this script's token (CREWFLOW_DB_SETUP_LOCK_TOKEN), and only then removes the previous
+# target file and the temp files a killed run left. This script releases the directory on exit, only when the owner token
+# in it is its own; the kernel releases the flock however the processes end. The password file is
 # never removed here (it is the credential of an existing role). Exit 0 = done; 64 = refusal;
 # anything else = failure (rab-api is not started: depends_on service_completed_successfully, and its own bounded wait).
 # Prints fixed lines only (the child's): never a URL, a password, a host or a database name. Never traces the shell.
@@ -33,6 +34,19 @@ refuse() {
   echo "db-setup: REFUSED - $1" >&2
   exit "${2:-64}"
 }
+
+# One run per setup volume, held by the KERNEL (security re-review R1/R2): fd 9 on the volume's .db-setup.flock, `flock -n`
+# before anything else. The bootstrap child inherits fd 9; the kernel releases the lock when the last holder dies, however
+# it dies (SIGKILL, OOM, reboot), so a killed run never blocks the next one and two runs never overlap.
+FLOCK_FILE="$DIR/.db-setup.flock"
+if [ -L "$FLOCK_FILE" ]; then
+  refuse 'the run lock file in the setup volume is a symlink.' 70
+fi
+exec 9>>"$FLOCK_FILE"
+if ! flock -n 9; then
+  refuse 'another db-setup is running on this setup volume; nothing was changed. Start again when it has finished.' 70
+fi
+export CREWFLOW_DB_SETUP_FLOCK_FD=9
 
 if [ "$#" -ne 0 ]; then
   refuse 'db-setup.sh takes no arguments.'
@@ -90,7 +104,13 @@ crewflow_bundled_db_ca() {
 crewflow_bundled_db_ca
 
 STATUS=0
-node packages/rab-server/dist/database/typeorm/scripts/owner-login/bootstrap-owner-login.js || STATUS=$?
+# The child runs in the background so a stop (TERM/INT to this PID 1) reaches it, and this script still exits through its
+# EXIT trap (the lock directory is released; the kernel lock goes with the processes).
+node packages/rab-server/dist/database/typeorm/scripts/owner-login/bootstrap-owner-login.js &
+CHILD=$!
+trap 'kill -TERM "$CHILD" 2>/dev/null; wait "$CHILD" 2>/dev/null; exit 143' TERM INT
+wait "$CHILD" || STATUS=$?
+trap - TERM INT
 case "$STATUS" in
   0) ;;
   64) clean_after_failure; refuse 'the database setup step refused (see the [owner-bootstrap] line above).' 64 ;;

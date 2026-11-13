@@ -4,22 +4,24 @@ import * as path from 'node:path';
 
 import {
   acquireDbSetupLock,
+  DB_SETUP_FLOCK_NAME,
+  DB_SETUP_FLOCK_VAR,
   DB_SETUP_LOCK_MESSAGES,
   DB_SETUP_LOCK_NAME,
   DB_SETUP_LOCK_OWNER_FILE,
-  DB_SETUP_LOCK_STALE_MS,
   DB_SETUP_LOCK_TOKEN_VAR,
   DbSetupLockError,
   type DbSetupLockIo,
   dbSetupLockPath,
-  isStaleLock,
   removeLeftoverTempFiles,
+  volumeFlockHeld,
 } from './db-setup-lock';
 
 /**
- * Security re-review F1: one db-setup run per setup volume (an exclusive lock directory in the volume). The denial cases:
- * a held lock stops the second run (exit 70 upstream); only a stale lock is taken over; a run never removes another run's
- * lock.
+ * Security re-review F1 / R1 / R2: one db-setup run per setup volume. The kernel lock (flock on fd 9, taken by db-setup.sh)
+ * is the authority; the lock directory is a second layer and the only one for a direct run. Denials: a held lock stops the
+ * second run; without the kernel lock a leftover directory is never taken over (no pid / boot-id / age guessing); with it,
+ * of two interleaved takers exactly one wins; a run never removes another run's lock.
  */
 let dir: string;
 let target: string;
@@ -31,101 +33,110 @@ beforeEach(() => {
 });
 afterEach(() => fs.rmSync(dir, { recursive: true, force: true }));
 
-const io = (o: Partial<DbSetupLockIo> = {}): DbSetupLockIo => ({
-  now: () => 1_000_000_000,
-  pid: () => 4242,
-  host: () => 'container-a',
-  bootId: () => '11111111-1111-1111-1111-111111111111',
-  pidAlive: () => true,
-  ...o,
-});
-const owner = () => JSON.parse(fs.readFileSync(path.join(lock, DB_SETUP_LOCK_OWNER_FILE), 'utf8')) as Record<string, unknown>;
-const heldBy = (o: Record<string, unknown>) => {
+const io = (kernel: boolean, extra: Partial<DbSetupLockIo> = {}): DbSetupLockIo => ({ volumeFlockHeld: () => kernel, ...extra });
+const ownerOf = () => JSON.parse(fs.readFileSync(path.join(lock, DB_SETUP_LOCK_OWNER_FILE), 'utf8')) as { v: number; token: string };
+const leftBehind = () => {
   fs.mkdirSync(lock);
-  fs.writeFileSync(path.join(lock, DB_SETUP_LOCK_OWNER_FILE), JSON.stringify({ v: 1, token: 'f'.repeat(32), host: 'container-b', pid: 7, boot: '11111111-1111-1111-1111-111111111111', started: 1_000_000_000, ...o }));
+  fs.writeFileSync(path.join(lock, DB_SETUP_LOCK_OWNER_FILE), JSON.stringify({ v: 1, token: 'f'.repeat(32) }));
+};
+const outcome = (f: () => unknown): string => {
+  try {
+    f();
+    return 'ok';
+  } catch (error) {
+    return error instanceof DbSetupLockError && error.message === DB_SETUP_LOCK_MESSAGES.held ? 'held' : String((error as Error).message);
+  }
 };
 
 describe('db-setup lock', () => {
-  it('lives in the setup volume beside the target; the holder records who it is; release removes it', () => {
+  it('lives in the setup volume beside the target; the holder records its token; release removes it', () => {
     expect(lock).toBe(path.join(dir, DB_SETUP_LOCK_NAME));
-    const held = acquireDbSetupLock(target, {}, io());
-    expect(fs.statSync(lock).isDirectory()).toBe(true);
-    expect(owner()).toMatchObject({ v: 1, host: 'container-a', pid: 4242, boot: '11111111-1111-1111-1111-111111111111' });
-    expect(String(owner().token)).toMatch(/^[0-9a-f]{32}$/);
+    const held = acquireDbSetupLock(target, {}, io(false));
+    expect(ownerOf().v).toBe(1);
+    expect(ownerOf().token).toMatch(/^[0-9a-f]{32}$/);
     expect(held.releasedByShell).toBe(false);
+    expect(held.kernelLock).toBe(false);
     held.release();
     expect(fs.existsSync(lock)).toBe(false);
   });
 
-  it('DENIAL: a second run while the lock is held stops with fixed text (another host, live, recent); the lock stays', () => {
-    const first = acquireDbSetupLock(target, {}, io());
-    let error: unknown = null;
-    try {
-      acquireDbSetupLock(target, {}, io({ host: () => 'container-b', pid: () => 9 }));
-    } catch (e) {
-      error = e;
-    }
-    expect(error).toBeInstanceOf(DbSetupLockError);
-    expect((error as Error).message).toBe(DB_SETUP_LOCK_MESSAGES.held);
-    expect(fs.existsSync(lock)).toBe(true);
+  it('DENIAL: a second run while the lock is held stops with fixed text; the first lock stays', () => {
+    const first = acquireDbSetupLock(target, {}, io(false));
+    const token = ownerOf().token;
+    expect(outcome(() => acquireDbSetupLock(target, {}, io(false)))).toBe('held');
+    expect(ownerOf().token).toBe(token);
     first.release();
+  });
+
+  it('R1/R2 DENIAL: without the kernel lock a leftover directory is NEVER taken over (no pid, boot-id or age heuristics)', () => {
+    leftBehind();
+    expect(outcome(() => acquireDbSetupLock(target, {}, io(false)))).toBe('held');
+    expect(ownerOf().token).toBe('f'.repeat(32));
+    const source = fs.readFileSync(path.join(__dirname, 'db-setup-lock.ts'), 'utf8');
+    expect(source).not.toMatch(/boot_id|pidAlive|process\.kill|STALE_MS/);
+  });
+
+  it('under the kernel lock a leftover directory (a run that died) is taken over, through a tombstone that is removed', () => {
+    leftBehind();
+    const held = acquireDbSetupLock(target, {}, io(true));
+    expect(held.kernelLock).toBe(true);
+    expect(ownerOf().token).not.toBe('f'.repeat(32));
+    expect(fs.readdirSync(dir).filter((n) => n.includes('.stale-'))).toEqual([]);
+    held.release();
+  });
+
+  it('R2: two takers interleaved between judging the leftover directory and taking it over -> exactly one wins', () => {
+    leftBehind();
+    let inner = '';
+    const outer = outcome(() =>
+      acquireDbSetupLock(target, {}, io(true, { beforeTakeover: () => void (inner = outcome(() => acquireDbSetupLock(target, {}, io(true)))) })),
+    );
+    expect([outer, inner].sort()).toEqual(['held', 'ok']);
+    expect(fs.statSync(lock).isDirectory()).toBe(true);
+    expect(ownerOf().token).not.toBe('f'.repeat(32)); // the winner's lock is in place, never removed by the loser
   });
 
   it('db-setup.sh token: used as the owner token, and release by this process is left to the shell', () => {
     const token = 'a'.repeat(32);
-    const held = acquireDbSetupLock(target, { [DB_SETUP_LOCK_TOKEN_VAR]: token }, io());
-    expect(owner().token).toBe(token);
+    const held = acquireDbSetupLock(target, { [DB_SETUP_LOCK_TOKEN_VAR]: token }, io(false));
+    expect(ownerOf().token).toBe(token);
     expect(held.releasedByShell).toBe(true);
-    const ignored = acquireDbSetupLock(path.join(fs.mkdtempSync(path.join(dir, 'x')), 'target.json'), { [DB_SETUP_LOCK_TOKEN_VAR]: 'not-a-token' }, io());
+    held.release();
+    const other = path.join(fs.mkdtempSync(path.join(dir, 'x')), 'target.json');
+    const ignored = acquireDbSetupLock(other, { [DB_SETUP_LOCK_TOKEN_VAR]: 'not-a-token' }, io(false));
     expect(ignored.releasedByShell).toBe(false);
     ignored.release();
   });
 
-  it('never removes another run\'s lock: release checks the owner token', () => {
-    const held = acquireDbSetupLock(target, {}, io());
-    fs.writeFileSync(path.join(lock, DB_SETUP_LOCK_OWNER_FILE), JSON.stringify({ ...owner(), token: 'b'.repeat(32) }));
+  it("never removes another run's lock: release checks the owner token", () => {
+    const held = acquireDbSetupLock(target, {}, io(false));
+    fs.writeFileSync(path.join(lock, DB_SETUP_LOCK_OWNER_FILE), JSON.stringify({ v: 1, token: 'b'.repeat(32) }));
     held.release();
     expect(fs.existsSync(lock)).toBe(true);
   });
 
-  it('stale: another boot; a dead pid (or this pid) on the same host; older than the bound; an unreadable owner by age only', () => {
-    heldBy({ boot: '22222222-2222-2222-2222-222222222222' });
-    expect(isStaleLock(lock, io())).toBe(true);
-    fs.rmSync(lock, { recursive: true });
-    heldBy({ host: 'container-a', pid: 7 });
-    expect(isStaleLock(lock, io({ pidAlive: () => false }))).toBe(true);
-    expect(isStaleLock(lock, io({ pidAlive: () => true }))).toBe(false);
-    expect(isStaleLock(lock, io({ pid: () => 7 }))).toBe(true);
-    fs.rmSync(lock, { recursive: true });
-    heldBy({});
-    expect(isStaleLock(lock, io())).toBe(false); // another host, recent: never taken over
-    expect(isStaleLock(lock, io({ now: () => 1_000_000_000 + DB_SETUP_LOCK_STALE_MS + 1 }))).toBe(true);
-    fs.writeFileSync(path.join(lock, DB_SETUP_LOCK_OWNER_FILE), 'garbage');
-    expect(isStaleLock(lock, io({ now: () => Date.now() }))).toBe(false);
-    expect(isStaleLock(lock, io({ now: () => Date.now() + DB_SETUP_LOCK_STALE_MS + 60_000 }))).toBe(true);
-  });
-
-  it('a stale lock is taken over once (the new owner is this run)', () => {
-    heldBy({ boot: '22222222-2222-2222-2222-222222222222' });
-    const held = acquireDbSetupLock(target, {}, io());
-    expect(owner()).toMatchObject({ host: 'container-a', pid: 4242 });
-    held.release();
-  });
-
   it('DENIAL: a lock path that is not a plain directory (a file, or a symlink to a directory) is refused, never followed', () => {
     fs.writeFileSync(lock, 'x');
-    expect(() => acquireDbSetupLock(target, {}, io())).toThrow(DB_SETUP_LOCK_MESSAGES.unusable);
+    expect(outcome(() => acquireDbSetupLock(target, {}, io(true)))).toBe(DB_SETUP_LOCK_MESSAGES.unusable);
     fs.rmSync(lock);
     if (process.platform !== 'win32') {
       const elsewhere = fs.mkdtempSync(path.join(os.tmpdir(), 'db-setup-lock-elsewhere-'));
       try {
         fs.symlinkSync(elsewhere, lock);
-        expect(() => acquireDbSetupLock(target, {}, io())).toThrow(DB_SETUP_LOCK_MESSAGES.unusable);
+        expect(outcome(() => acquireDbSetupLock(target, {}, io(true)))).toBe(DB_SETUP_LOCK_MESSAGES.unusable);
         expect(fs.readdirSync(elsewhere)).toEqual([]);
       } finally {
         fs.rmSync(elsewhere, { recursive: true, force: true });
       }
     }
+  });
+
+  it("the kernel-lock proof needs the marker AND fd 9 being the volume's .db-setup.flock", () => {
+    expect(volumeFlockHeld(target, {})).toBe(false);
+    fs.writeFileSync(path.join(dir, DB_SETUP_FLOCK_NAME), '');
+    // The marker alone proves nothing: fd 9 of this test process is not that file.
+    expect(volumeFlockHeld(target, { [DB_SETUP_FLOCK_VAR]: '9' })).toBe(false);
+    expect(volumeFlockHeld(target, { [DB_SETUP_FLOCK_VAR]: '8' })).toBe(false);
   });
 
   it('leftover temp files of a killed run are removed; the pending file, the password file and the target are not', () => {

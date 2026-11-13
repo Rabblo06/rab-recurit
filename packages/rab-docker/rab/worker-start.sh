@@ -70,7 +70,7 @@ ATTEMPT=0
 while :; do
   ATTEMPT=$((ATTEMPT + 1))
   STATUS=0
-  RUNTIME_URL="$(node "$DERIVE_RUNTIME_URL" 4>&1 1>&2)" || STATUS=$?
+  RUNTIME_URL="$(CREWFLOW_RUNTIME_URL_FD=4 node "$DERIVE_RUNTIME_URL" 4>&1 1>&2)" || STATUS=$?
   if [ "$STATUS" -ne 75 ]; then break; fi
   RUNTIME_URL=""
   if [ "$ATTEMPT" -ge "$ATTEMPTS" ]; then

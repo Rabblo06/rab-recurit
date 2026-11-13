@@ -12,7 +12,10 @@
  * PURE: it NEVER connects and never imports `pg` (a spec fails if it does). It writes the runtime URL to file descriptor 4,
  * the command-substitution pattern of api-prestart.sh / worker-start.sh (never a file, never argv, never stdout):
  *
- *   RUNTIME_URL="$(node packages/rab-server/dist/database/typeorm/scripts/owner-login/derive-runtime-url.js 4>&1 1>&2)"
+ *   RUNTIME_URL="$(CREWFLOW_RUNTIME_URL_FD=4 node packages/rab-server/dist/database/typeorm/scripts/owner-login/derive-runtime-url.js 4>&1 1>&2)"
+ *
+ * CREWFLOW_RUNTIME_URL_FD=4 is the caller's statement that it opened fd 4 for the URL, and fd 4 must be a pipe or a socket
+ * (security re-review I2); otherwise exit 64 with the usage line.
  *
  * Exit codes: 0 written; 75 (EX_TEMPFAIL) the target or the password file is not there yet (db-setup has not finished; the
  * scripts wait, bounded); 64 refusal (a malformed file, any PG_DATABASE_URL beside the target file, no target file and no
@@ -22,7 +25,7 @@
  * Without CREWFLOW_DB_TARGET_FILE (development only): a crewflow_owner PG_DATABASE_URL is written back unchanged; any other
  * login is refused (there is nothing to build a crewflow_owner password from).
  */
-import { readlinkSync, writeSync } from 'node:fs';
+import { fstatSync, writeSync } from 'node:fs';
 
 import { readPrimaryDatabaseUrl } from '../../../postgres/pg-config';
 import { DB_TARGET_FILE_VAR, DbTargetError, runtimeUrlFromDbTarget } from '../../../owner-login/db-target';
@@ -48,7 +51,7 @@ export const DERIVE_MESSAGES = {
   passwordNotReady: `${PREFIX} the crewflow_owner password file is not there yet: the db-setup step has not finished (the start script waits).`,
   targetWithAdminUrl: `${PREFIX} ${DB_TARGET_FILE_VAR} and PG_DATABASE_URL are both set. The API and the Worker never hold PG_DATABASE_URL (any login): only the db-setup service does. Remove PG_DATABASE_URL from this service. Refusing.`,
   noTargetNoOwnerUrl: `${PREFIX} no ${DB_TARGET_FILE_VAR} and no crewflow_owner PG_DATABASE_URL: there is no crewflow_owner credential to use. Refusing.`,
-  fdNotOpen: `${PREFIX} file descriptor ${RUNTIME_URL_FD} is not open. Run it as: RUNTIME_URL="$(node derive-runtime-url.js ${RUNTIME_URL_FD}>&1 1>&2)".`,
+  fdNotOpen: `${PREFIX} file descriptor ${RUNTIME_URL_FD} is not open (or not a pipe the caller opened). Run it as: RUNTIME_URL="$(CREWFLOW_RUNTIME_URL_FD=${RUNTIME_URL_FD} node derive-runtime-url.js ${RUNTIME_URL_FD}>&1 1>&2)".`,
   unexpected: `${PREFIX} FAILED: unexpected error (details not shown).`,
 } as const;
 
@@ -60,26 +63,31 @@ export interface DeriveIo {
   error: (line: string) => void;
 }
 
+/** Set (to "4") only by api-prestart.sh / worker-start.sh on the derive command line: "I opened fd 4 for you". */
+export const RUNTIME_URL_FD_VAR = 'CREWFLOW_RUNTIME_URL_FD';
+
 /**
- * Linux: fd 4 must be one the CALLER opened. When the caller opened none, the runtime may already use descriptor 4 for
- * itself (libuv's epoll / eventfd / io_uring descriptors, `anon_inode:[...]`): writing the URL there would neither reach
- * the caller nor fail cleanly. Such a descriptor counts as "not open" (EBADF -> exit 64 with the usage line).
+ * fd 4 must be one the CALLER opened for this (security re-review I2): the caller says so (RUNTIME_URL_FD_VAR=4), and on
+ * POSIX fd 4 is a pipe (the command substitution) or a socket (a parent's IPC pipe), never a regular file, a terminal or a
+ * descriptor the runtime opened for itself (libuv's epoll / eventfd / io_uring are anonymous inodes). Anything else counts
+ * as "not open" (EBADF -> exit 64 with the usage line); the URL is never written there.
  */
-function assertCallerOpenedRuntimeUrlFd(): void {
-  if (process.platform !== 'linux') return;
-  let target: string;
+function assertCallerOpenedRuntimeUrlFd(env: Record<string, string | undefined>): void {
+  const notOpen = () => Object.assign(new Error('fd not open'), { code: 'EBADF' });
+  if (env[RUNTIME_URL_FD_VAR] !== String(RUNTIME_URL_FD)) throw notOpen();
+  if (process.platform === 'win32') return;
+  let st;
   try {
-    target = readlinkSync(`/proc/self/fd/${RUNTIME_URL_FD}`);
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException | null)?.code === 'ENOENT') throw Object.assign(new Error('fd not open'), { code: 'EBADF' });
-    return; // no /proc: the write below decides
+    st = fstatSync(RUNTIME_URL_FD);
+  } catch {
+    throw notOpen();
   }
-  if (target.startsWith('anon_inode:')) throw Object.assign(new Error('fd not open'), { code: 'EBADF' });
+  if (!(st.isFIFO() || st.isSocket())) throw notOpen();
 }
 
 const processIo: DeriveIo = {
   writeRuntimeUrl: (url) => {
-    assertCallerOpenedRuntimeUrlFd();
+    assertCallerOpenedRuntimeUrlFd(process.env);
     writeSync(RUNTIME_URL_FD, url);
   },
   log: (line) => process.stdout.write(`${line}\n`),
