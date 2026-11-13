@@ -89,7 +89,7 @@ crewflow_runtime_db_config() {
     refuse "CREWFLOW_UPGRADE_INCOMPLETE was retired (OWNER-DB-ULTIMATE Part B3): nothing sets it, and no gate accepts a pending migration any more. Remove it from the environment. Refusing to start."
   fi
   if [ "${NODE_ENV:-}" != test ]; then
-    for seam in CREWFLOW_MIGRATION_TEST_STOP_BEFORE CREWFLOW_MIGRATION_TEST_FAIL_AT CREWFLOW_TEST_DEFER_SERVER_PROVISIONING; do
+    for seam in CREWFLOW_MIGRATION_TEST_STOP_BEFORE CREWFLOW_MIGRATION_TEST_FAIL_AT CREWFLOW_TEST_UPGRADE_COMMANDS CREWFLOW_TEST_UPGRADE_FAIL_COMMAND CREWFLOW_TEST_DEFER_SERVER_PROVISIONING; do
       eval "seam_value=\${$seam:-}"
       if [ -n "$seam_value" ]; then refuse "$seam is a test seam: it is allowed only with NODE_ENV=test on a disposable test database. Remove it. Refusing to start."; fi
     done
