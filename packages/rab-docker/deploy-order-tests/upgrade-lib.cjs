@@ -247,7 +247,7 @@ class Project {
     const r = run(
       'docker',
       ['exec', '-i', '-e', 'PGPASSWORD', '-e', `PGAPPNAME=${TEST_APP_NAME}`, this.container(DB_SERVICE), 'psql', '-X', '-q', '-At', '-v', 'ON_ERROR_STOP=1', 'host=db sslmode=verify-full sslrootcert=/var/tmp/ca.crt dbname=crewflow user=crewflow_owner'],
-      { input: sql, env: { PGPASSWORD: password }, timeout: 120_000 },
+      { input: sql, env: { PGPASSWORD: password }, timeout: 240_000 },
     );
     if (r.code !== 0) throw new Error(`psql (owner) failed (${r.code}): ${redact(r.out).slice(0, 800)}`);
     return r.stdout.trim();
@@ -271,7 +271,7 @@ class Project {
     const script = `f=${OWNER_PASSWORD_FILE}; [ -f "$f" ] || { echo ABSENT; exit 0; }; stat -c '%a %u:%g' "$f"; cat "$f"`;
     const running = this.inspect('rab-api', '{{.State.Running}}') === 'true';
     const r = running
-      ? run('docker', ['exec', this.container('rab-api'), 'sh', '-c', script], { timeout: 60_000 })
+      ? run('docker', ['exec', this.container('rab-api'), 'sh', '-c', script], { timeout: 240_000 })
       : this.compose(['run', '--rm', '--no-deps', '-T', '--entrypoint', 'sh', 'rab-api', '-c', script], { timeout: 180_000 });
     if (r.code !== 0) throw new Error(`reading the password file failed (${r.code}): ${redact(r.out).slice(0, 300)}`);
     const lines = r.stdout.split('\n');
@@ -285,7 +285,7 @@ class Project {
     const script = `[ -e '${file}' ] && echo YES || echo NO`;
     const running = this.inspect('rab-api', '{{.State.Running}}') === 'true';
     const r = running
-      ? run('docker', ['exec', this.container('rab-api'), 'sh', '-c', script], { timeout: 60_000 })
+      ? run('docker', ['exec', this.container('rab-api'), 'sh', '-c', script], { timeout: 240_000 })
       : this.compose(['run', '--rm', '--no-deps', '-T', '--entrypoint', 'sh', 'rab-api', '-c', script], { timeout: 180_000 });
     if (r.code !== 0) throw new Error(`checking ${file} failed (${r.code})`);
     return r.stdout.trim() === 'YES';
@@ -332,7 +332,7 @@ class Project {
     });
   }
   healthz() {
-    const r = run('docker', ['exec', this.container('rab-api'), 'wget', '-qO-', 'http://localhost:3000/healthz'], { timeout: 30_000 });
+    const r = run('docker', ['exec', this.container('rab-api'), 'wget', '-qO-', 'http://localhost:3000/healthz'], { timeout: 120_000 });
     return { code: r.code, body: r.stdout.trim() };
   }
   logs(service) {

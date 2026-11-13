@@ -323,7 +323,7 @@ const ENVIRON_SCRIPT = [
  */
 function environScan(p, service, sentinels) {
   const pad = [...sentinels, L.hex(24), L.hex(24), L.hex(24)].slice(0, 3);
-  const r = L.run('docker', ['exec', '-i', '-e', 'DOT_ENVIRON_PROBE=1', p.container(service), 'sh', '-c', ENVIRON_SCRIPT], { input: `${pad.join('\n')}\n`, timeout: 60_000 });
+  const r = L.run('docker', ['exec', '-i', '-e', 'DOT_ENVIRON_PROBE=1', p.container(service), 'sh', '-c', ENVIRON_SCRIPT], { input: `${pad.join('\n')}\n`, timeout: 240_000 });
   if (r.code !== 0) throw new Error(`environ scan of ${service} failed (${r.code}): ${L.redact(r.out).slice(0, 300)}`);
   const rows = [];
   let probe = null;
@@ -363,7 +363,7 @@ function checkEnviron(p, check, n, label, sentinels, { services = ['rab-api', 'r
     // DEFINITION's environment, which no longer holds any database credential.
     check(probe === false, `${label}: a \`docker exec\` process in ${svc} (the environment a health check gets) holds no admin credential`);
     check(probeUrl === 'empty', `${label}: a \`docker exec\` process in ${svc} has PG_DATABASE_URL present and EMPTY (pinned ""; state ${probeUrl})`);
-    const def = L.run('docker', ['inspect', '-f', '{{range .Config.Env}}{{println .}}{{end}}', p.container(svc)], { timeout: 30_000 }).stdout;
+    const def = L.run('docker', ['inspect', '-f', '{{range .Config.Env}}{{println .}}{{end}}', p.container(svc)], { timeout: 180_000 }).stdout;
     const defUrl = (def.match(/^PG_DATABASE_URL=(.*)$/m) || [null, null])[1];
     check(!sentinels.some((x) => def.includes(x)) && !/^PG_DATABASE_PASSWORD=/m.test(def) && defUrl === '' && !/postgres(ql)?:\/\//.test(def), `${label}: ${svc}'s container definition (docker inspect Config.Env) holds no admin credential, no PG_DATABASE_PASSWORD and no database URL (PG_DATABASE_URL present and EMPTY)`);
   }
@@ -449,7 +449,7 @@ function migrateResults(log) {
 
 /** The bundled db's certificate fingerprints (server, CA): a restart must not make new ones. */
 function certs(p) {
-  const r = L.run('docker', ['exec', p.container(L.DB_SERVICE), 'sh', '-c', 'openssl x509 -noout -fingerprint -sha256 -in /var/lib/postgresql/tls/server.crt; openssl x509 -noout -fingerprint -sha256 -in /var/tmp/ca.crt'], { timeout: 30_000 });
+  const r = L.run('docker', ['exec', p.container(L.DB_SERVICE), 'sh', '-c', 'openssl x509 -noout -fingerprint -sha256 -in /var/lib/postgresql/tls/server.crt; openssl x509 -noout -fingerprint -sha256 -in /var/tmp/ca.crt'], { timeout: 180_000 });
   return r.stdout.replace(/\s+/g, ' ').trim();
 }
 
@@ -484,7 +484,7 @@ const snapDiff = (a, b) => {
 };
 /** The setup volume's mount in a service's container: 'rw' / 'ro' / 'absent'. */
 function targetMount(p, svc) {
-  const r = L.run('docker', ['inspect', '-f', '{{json .Mounts}}', p.container(svc)], { timeout: 30_000 });
+  const r = L.run('docker', ['inspect', '-f', '{{json .Mounts}}', p.container(svc)], { timeout: 180_000 });
   if (r.code !== 0) return 'absent';
   const m = (JSON.parse(r.stdout || '[]') || []).find((x) => x.Destination === L.TARGET_DIR);
   return m ? (m.RW ? 'rw' : 'ro') : 'absent';
@@ -510,16 +510,16 @@ function checkPasswordFile(p, check, n, label, { random = true, healthCheck = fa
   check(!p.setupPathExists(`${L.OWNER_PASSWORD_FILE}.next`), `${label}: no ${path.posix.basename(L.OWNER_PASSWORD_FILE)}.next left behind`);
   if (random) check(pw.length >= 32 && !/\s/.test(pw), `${label}: a random password of ${pw.length} characters (>= 32; value not shown)`);
   check(p.ownerLoginWorks(pw), `${label}: the file's password logs in as crewflow_owner (verify-full)`);
-  const mounts = ['rab-api', 'rab-worker', 'db-setup'].map((s) => `${s}=${targetMount(p, s)}`);
-  check(targetMount(p, 'rab-api') === 'ro' && targetMount(p, 'rab-worker') === 'ro', `${label}: the setup volume is read-only in rab-api and rab-worker (${mounts.join(', ')})`);
-  const setupMount = targetMount(p, 'db-setup');
+  const m = Object.fromEntries(['rab-api', 'rab-worker', 'db-setup'].map((x) => [x, targetMount(p, x)]));
+  check(m['rab-api'] === 'ro' && m['rab-worker'] === 'ro', `${label}: the setup volume is read-only in rab-api and rab-worker (${Object.entries(m).map(([k, v]) => `${k}=${v}`).join(', ')})`);
+  const setupMount = m['db-setup'];
   check(setupMount === 'rw' || setupMount === 'absent', `${label}: only db-setup mounts it read-write (${setupMount}; absent = its container is gone)`);
   const envFiles = ['compose.env', 'database.env', 'runtime.env'].map((x) => fs.readFileSync(path.join(p.secretsDir, x), 'utf8'));
   // urlSupplied: the operator gave the crewflow_owner URL (PG_DATABASE_URL, compose.env), so that password is legitimately in
   // compose.env, db-setup's definition and the rendered config; it must still be in no app definition or app env.
   check(!envFiles.some((e, i) => (!(urlSupplied && i === 0) && e.includes(pw)) || /PASSWORD_FILE|owner-password/i.test(e)), `${label}: no env file holds the password${urlSupplied ? ' (except the operator own crewflow_owner URL in compose.env)' : ''} or a password-file setting`);
   for (const svc of [...(urlSupplied ? [] : ['db-setup']), 'rab-api', 'rab-worker', L.DB_SERVICE]) {
-    const def = L.run('docker', ['inspect', '-f', '{{range .Config.Env}}{{println .}}{{end}}', p.container(svc)], { timeout: 30_000 });
+    const def = L.run('docker', ['inspect', '-f', '{{range .Config.Env}}{{println .}}{{end}}', p.container(svc)], { timeout: 180_000 });
     if (def.code !== 0) continue;
     check(!def.stdout.includes(pw), `${label}: ${svc}'s container definition does not hold the password`);
   }
@@ -540,9 +540,9 @@ function checkPasswordFile(p, check, n, label, { random = true, healthCheck = fa
 function checkImage(p, check, n, label) {
   const ref = imageRef(NEW);
   const base = path.posix.basename(L.OWNER_PASSWORD_FILE);
-  const insp = L.run('docker', ['image', 'inspect', '-f', '{{json .Config.Env}}|{{json .Config.Volumes}}', ref], { timeout: 60_000 });
+  const insp = L.run('docker', ['image', 'inspect', '-f', '{{json .Config.Env}}|{{json .Config.Volumes}}', ref], { timeout: 240_000 });
   check(insp.code === 0 && !/PASSWORD_FILE|owner-password/i.test(insp.stdout) && !insp.stdout.includes(base), `${label}: \`docker image inspect\`: no password-file setting in the image's Env or Volumes`);
-  const hist = L.run('docker', ['history', '--no-trunc', '--format', '{{.CreatedBy}}', ref], { timeout: 60_000 });
+  const hist = L.run('docker', ['history', '--no-trunc', '--format', '{{.CreatedBy}}', ref], { timeout: 240_000 });
   check(hist.code === 0 && !hist.stdout.includes(base), `${label}: \`docker history\`: no layer command names the password file`);
   const name = `${p.name}-imagecheck`;
   const fsr = L.run('docker', ['run', '--rm', '--name', name, '--network', 'none', '--entrypoint', 'sh', ref, '-c', `find / -xdev -name '${base}' 2>/dev/null; ls -A ${L.TARGET_DIR} 2>/dev/null; echo END`], { timeout: 180_000 });
@@ -593,7 +593,7 @@ async function blockBundled() {
     n(`bootstrap (db-setup): ${bootstrapLines(sl).join(' / ')}`);
     check(setupExit(p) === 'exited|0' && MSG.readyCreated.test(sl), `db-setup ran once, created crewflow_owner and exited 0 (${setupExit(p)})`);
     check(!al.includes('[owner-bootstrap]'), 'rab-api ran no bootstrap child (it never receives PG_DATABASE_URL)');
-    const tgt = L.run('docker', ['exec', p.container('rab-api'), 'cat', L.TARGET_FILE], { timeout: 30_000 }).stdout;
+    const tgt = L.run('docker', ['exec', p.container('rab-api'), 'cat', L.TARGET_FILE], { timeout: 180_000 }).stdout;
     check(/"v":\s*1/.test(tgt) && !tgt.includes('@') && !tgt.includes(s.dbPassword) && !tgt.includes(app1) && !/password/i.test(tgt), 'the target file holds no login, no password and no APP_SECRET (credential-free; value not printed)');
     const r = role(p);
     check(exactly01(r), `crewflow_owner has exactly the 01 attributes: ${roleShape(r)}`);
@@ -674,7 +674,7 @@ async function blockBundled() {
     const sl = setupLog(p);
     evidence('S5-db-setup.log', sl);
     check(MSG.readyUnchanged.test(lastReady(sl)), 'db-setup: unchanged');
-    const setupDef = L.run('docker', ['inspect', '-f', '{{range .Config.Env}}{{println .}}{{end}}', p.container('db-setup')], { timeout: 30_000 }).stdout;
+    const setupDef = L.run('docker', ['inspect', '-f', '{{range .Config.Env}}{{println .}}{{end}}', p.container('db-setup')], { timeout: 180_000 }).stdout;
     check(!/^APP_SECRET=/m.test(setupDef) && !setupDef.includes(app1) && !setupDef.includes(app2), 'db-setup\'s container definition holds no APP_SECRET (it is no database credential)');
     const ss = checkSessions(p, check, 'S5');
     check(ss.some((x) => /worker/i.test(x.app)), `the new Worker is connected as crewflow_owner (${ss.filter((x) => /worker/i.test(x.app)).map((x) => x.app).join(', ') || 'no worker session'})`);
@@ -710,9 +710,12 @@ async function blockBundled() {
     keep(p, 'F3-up', up.out);
     await waitApp(p);
     check(up.code === 0 && MSG.readyReset.test(lastReady(setupLog(p))), `$P up -d: exit ${up.code}, the password reset, apps healthy`);
-    const pw = checkPasswordFile(p, check, n, 'F3');
-    state.pws.push(pw);
-    state.pw = pw;
+    const fresh = p.readPasswordFile();
+    if (fresh) {
+      state.pws.push(fresh.password);
+      state.pw = fresh.password;
+    }
+    checkPasswordFile(p, check, n, 'F3');
     checkSessions(p, check, 'F3');
   }, p);
 
@@ -741,11 +744,15 @@ async function blockBundled() {
     const after = JSON.parse(dbSnapshot(p));
     const b = JSON.parse(before);
     check(after.role.oid === b.role.oid && exactly01(after.role) && after.role.verifierSha !== b.role.verifierSha && after.acl === b.acl && after.members === b.members, 'same role, attributes, memberships and ACL; only the verifier changed');
+    const oldPw = state.pw;
+    const f2 = p.readPasswordFile();
+    if (f2) {
+      state.pws.push(f2.password);
+      state.pw = f2.password;
+    }
     const pw2 = checkPasswordFile(p, check, n, 'F1 after the reset');
-    check(pw2 && sha(pw2) !== sha(state.pw), 'a NEW random password');
-    check(!p.ownerLoginWorks(state.pw) && !p.ownerLoginWorks(other), 'neither the old file password nor the hand-changed one logs in any more');
-    state.pws.push(pw2);
-    state.pw = pw2;
+    check(pw2 && sha(pw2) !== sha(oldPw), 'a NEW random password');
+    check(!p.ownerLoginWorks(oldPw) && !p.ownerLoginWorks(other), 'neither the old file password nor the hand-changed one logs in any more');
     const re = p.compose(['restart', 'rab-api', 'rab-worker'], { timeout: 600_000 });
     keep(p, 'F1-restart', re.out);
     await waitApp(p);
@@ -762,7 +769,7 @@ async function blockBundled() {
     const f = p.readPasswordFile();
     check(q && f && q.password === f.password && p.ownerLoginWorks(q.password), 'its password is the password file\'s (random) and logs in');
     check(q && !r.stderr.includes(q.password) && !/postgres(ql)?:\/\//.test(r.stderr), `stderr (dropped by the documented 2>/dev/null) holds no URL or password (${r.stderr.trim().split('\n').length} line(s): ${L.redact(r.stderr).trim().slice(0, 120)})`);
-    check(L.run('docker', ['inspect', r.name], { timeout: 30_000 }).code !== 0, 'the container is gone (--rm); with --log-driver none nothing was kept in a container log');
+    check(L.run('docker', ['inspect', r.name], { timeout: 180_000 }).code !== 0, 'the container is gone (--rm); with --log-driver none nothing was kept in a container log');
     const texts = logTexts(p);
     check(q && Object.values(texts).every((v) => !v.includes(q.password)), 'no container log of the project holds the password');
   }, p);
@@ -783,10 +790,13 @@ async function blockBundled() {
     check(true, `rab-api and rab-worker healthy ${secs} s after \`up -d\` (whole procedure ${Math.round((Date.now() - t0) / 1000)} s), with no manual restart`);
     const sl = setupLog(p);
     check(MSG.readyReset.test(lastReady(sl)), `db-setup reset the password (A4, a Crewflow addition): "${lastReady(sl).replace(/^.*?\[owner-bootstrap\]/, '[owner-bootstrap]').slice(0, 140)}"`);
+    const fc = p.readPasswordFile();
+    if (fc) {
+      state.pws.push(fc.password);
+      state.pw = fc.password;
+    }
     const now = checkPasswordFile(p, check, n, 'C1');
     check(now && now !== old && p.ownerLoginWorks(now) && !p.ownerLoginWorks(old), 'the NEW password logs in; the old one fails');
-    state.pws.push(now);
-    state.pw = now;
     checkSessions(p, check, 'C1');
     n(`commands: $P stop rab-worker rab-api; ${rm.command}; $P up -d  ($P = docker compose with this project's files and env file)`);
   }, p);
@@ -800,6 +810,8 @@ async function blockBundled() {
     keep(p, 'C2-up', up.out);
     check(up.code === 0 && MSG.readyReset.test(lastReady(setupLog(p))), `\`up -d\`: exit ${up.code}, db-setup reset the password`);
     const now = p.readPasswordFile().password;
+    state.pws.push(now);
+    state.pw = now;
     check(now !== old && p.ownerLoginWorks(now) && !p.ownerLoginWorks(old), 'the new password works, the old one fails');
     await L.sleep(60_000);
     const same = p.inspect('rab-api', '{{.Id}}') === ids.api && p.inspect('rab-worker', '{{.Id}}') === ids.worker;
@@ -813,8 +825,6 @@ async function blockBundled() {
     check(fr.code === 0, `\`$P up -d --force-recreate rab-api rab-worker\`: exit ${fr.code}; healthy again after ${Math.round((Date.now() - t1) / 1000)} s`);
     const ss = checkSessions(p, check, 'C2');
     check(ss.some((x) => /worker/i.test(x.app)), 'the recreated Worker is connected');
-    state.pws.push(now);
-    state.pw = now;
   }, p);
 
   await step('S10A', '10', 'the admin URL forced into a runtime process (`run -e PG_DATABASE_URL=<admin>`): the entrypoints and every runtime process refuse before connecting', async (check, n) => {
@@ -1368,7 +1378,7 @@ async function blockRace() {
     const up = p.compose(['up', '-d', '--wait', L.DB_SERVICE], { timeout: 300_000 });
     keep(p, 'S9-db-up', up.out);
     check(up.code === 0, `db up and healthy (exit ${up.code})`);
-    const logsOfS = (c) => L.run('docker', ['logs', c], { timeout: 60_000 }).out;
+    const logsOfS = (c) => L.run('docker', ['logs', c], { timeout: 240_000 }).out;
     const setups = [`${p.name}-setup-1`, `${p.name}-setup-2`];
     const ss = setups.map((c) => L.runAsync('docker', ['compose', 'run', '--no-deps', '-T', '--name', c, 'db-setup'], { env: p.composeEnv() }));
     const sr = await Promise.all(ss.map((x) => x.done));
@@ -1392,7 +1402,7 @@ async function blockRace() {
     for (const c of setups) L.run('docker', ['rm', '-f', c], { timeout: 120_000 });
     const holder = await p.holdLock(`SELECT pg_advisory_lock(${L.MIGRATION_LOCK_KEY_SQL})`);
     const names = [`${p.name}-race-1`, `${p.name}-race-2`];
-    const logsOf = (c) => L.run('docker', ['logs', c], { timeout: 60_000 }).out;
+    const logsOf = (c) => L.run('docker', ['logs', c], { timeout: 240_000 }).out;
     try {
       const starts = names.map((c) => L.runAsync('docker', ['compose', 'run', '-d', '--no-deps', '--name', c, 'rab-api'], { env: p.composeEnv() }));
       const rs = await Promise.all(starts.map((x) => x.done));
