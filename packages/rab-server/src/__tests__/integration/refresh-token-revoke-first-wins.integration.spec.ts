@@ -71,12 +71,17 @@ describeIfDb('refresh token revocation: first revocation wins (XP-09 Q6)', () =>
     return row;
   }
 
+  /**
+   * Backdates one token's revoked_at and returns the stored value, read back with a SELECT: TypeORM's `query()` returns
+   * `[rows, affectedCount]` for an UPDATE … RETURNING on postgres, so destructuring its result would yield `undefined`
+   * (and a first-wins assertion against `undefined` would test nothing).
+   */
   async function setRevokedAt(token: string, sql: string): Promise<Date> {
     // sql-injection-reviewed: `sql` is one of this file's literal interval expressions, never input
-    const [row] = await adminDataSource.query<Array<{ revoked_at: Date }>>(`UPDATE core.refresh_token SET revoked_at = ${sql} WHERE token_hash = $1 RETURNING revoked_at`, [
-      hashOf(token),
-    ]);
-    return row!.revoked_at;
+    await adminDataSource.query(`UPDATE core.refresh_token SET revoked_at = ${sql} WHERE token_hash = $1`, [hashOf(token)]);
+    const { revoked_at } = await rowOf(token);
+    if (!(revoked_at instanceof Date)) throw new Error('fixture: revoked_at was not set');
+    return revoked_at;
   }
 
   const ctx = () => ({ organisationId: staff.organisationId, workspaceId: null, userId: staff.userId, role: '' });
