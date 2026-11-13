@@ -6911,3 +6911,21 @@ injection), `schema-resolver.service.spec.ts` (ST-07), `session-role-reset.spec.
   real harness cannot be exercised in review, and it would drop platform / env-file variables the children need): a NEW
   credential that is not listed, not `PG*` / `POSTGRES_*` and does not carry an 8+ character admin password still reaches
   the children; an admin password shorter than 8 characters is matched only as the exact URL value.
+
+## XA-08 — the forgot-password address is handed over in router state, never the URL (branch phase-x2/x62-forgot-email-router-state, 2026-11-12, PR #112)
+
+Phase X Part 2 finding XA-08 (`docs/plans/PHASE-X-STAGE0-PART2.md` §2.6). Front only: no server, env or header change.
+
+- **Asset:** the e-mail address a person typed on the sign-in screen (or their own address on Settings → Security).
+  **Actor:** anyone with read access to browser history/sync, a server, CDN or proxy access log, an analytics tool, or a
+  third-party page receiving a `Referer` (`Referrer-Policy: no-referrer` is set only in `rab-front/vercel.json`).
+- **Before:** `Login.tsx` ("Forgot password?") and `PasswordCard.tsx` ("Reset password") linked to
+  `/forgot-password?email=<address>`, and `ForgotPassword.tsx` pre-filled the field from that query string.
+- **Control:** both links pass `{ email }` as react-router state; `ForgotPassword` pre-fills only from a string
+  `location.state.email` and no longer reads `?email=` (a legacy link opens with an empty field). The address is in no
+  URL, so it reaches no access log, history entry or Referer. The pre-filled field (the UX) is unchanged.
+- **Tests:** `ForgotPasswordEmailHandover.spec.tsx`: from both entry points the field is pre-filled and the address
+  (raw or encoded) is in no `pathname`/`search`/`hash` the router ever held; a legacy `?email=` and non-string state are
+  ignored. Fails 3 of 5 on the previous code.
+- **Residual:** router state lives in `history.state`, which a browser may keep in its session-restore data on the
+  device; it is never sent over the network.
