@@ -7020,3 +7020,19 @@ Phase X Part 2 finding XA-08 (`docs/plans/PHASE-X-STAGE0-PART2.md` §2.6). Front
   personal value in the path would send it (review F4, not fixed in this PR). Thrown `HttpException`s with status >= 500
   are not reported (owner text: the 500 branch only). Exception events carry the scrubbed request URL path (path
   segments are kept, as in P0-sentry). No user or organisation is attached to these events.
+
+## XP-09 Q2/Q3 — Worker auth cleanup steps are isolated and drain the backlog in bounded batches (branch fix/worker-auth-cleanup-loop, 2026-11-13, PR #131)
+- **Threat:** a failure in the refresh-token cleanup (e.g. the XP-09 23503) stopped the whole cycle, so the OAuth sign-in
+  state cleanup after it never ran and rows holding provider e-mails were kept past their retention; and at most one batch
+  of 1,000 rows per day meant a busy deployment never caught up.
+- **Control:** the two steps (`auth-tokens` = core.worker_cleanup_auth_tokens, `oauth-transaction-state`) run isolated: a
+  failing step is recorded with its step name and a SQLSTATE only (nothing else from the error), the other step still runs,
+  then each failure is logged with a fixed message and reported through the existing failure path (no error text, no
+  e-mails). Each step calls its function again until a batch comes back short; every call is its own autocommit
+  transaction; the whole run is capped at 20 batches or 60 s, with one batch reserved for every later step so the OAuth
+  cleanup always gets to run.
+- **Residual:** refresh and password-reset tokens are deleted by one SQL function and cannot be isolated from each other
+  without an SQL change. A run can outlast the 30 s Worker shutdown drain; only the in-flight batch rolls back.
+- **Tests:** `token-cleanup.job.spec.ts` (isolation, fixed-text reporting, loop and caps on a fake clock),
+  `token-cleanup-loop.integration.spec.ts` (5,000-row backlog drained in one run; a backlog above the cap stops at 20
+  batches and finishes next run; a locked token table fails that step with 55P03 while OAuth rows are still deleted).
