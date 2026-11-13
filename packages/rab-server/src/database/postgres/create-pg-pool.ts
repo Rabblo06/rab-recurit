@@ -85,9 +85,7 @@ function selectEndpoint(resolved: ResolvedPgEnvironment, request: PgConnectionRe
   if (name === 'elevated') {
     if (!resolved.elevated) {
       throw new PgConfigError(
-        resolved.ops
-          ? 'this ops command needs the elevated session: set PG_DATABASE_URL (the migration identity) in the one-off ops container. Refusing.'
-          : resolved.production
+        resolved.production
           ? 'this command needs the elevated owner connection, which production does not configure (DATABASE_URL_UNPOOLED is refused in production). Refusing.'
           : 'this command needs the elevated owner connection: set DATABASE_URL_UNPOOLED (deprecated; non-production only). Refusing.',
       );

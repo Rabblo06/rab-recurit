@@ -491,7 +491,7 @@ for (const sig of ['SIGINT', 'SIGTERM']) {
     return 'no write outside the jobs tmpfs (EROFS)';
   });
 
-  await step('M06', 'Tmp dirs: jobs tmpfs ownership/mode/noexec (two mounts); the API has none', async () => {
+  await step('M06', 'Tmp dirs: jobs tmpfs ownership/mode/noexec (two mounts); the API has no tmpfs writable by its uid 1000', async () => {
     const w = containerId('rab-worker');
     const tm = mounts(w).filter((m) => m.type === 'tmpfs' && /crewflow/.test(m.target));
     write(tm.map((m) => `${m.target} ${m.options}`).join('\n'));
@@ -502,9 +502,25 @@ for (const sig of ['SIGINT', 'SIGTERM']) {
     assert(/^ok$/m.test(own.out), 'jobs cannot use its own tmp');
     assert(/exec-from-tmp=126/.test(own.out), 'a binary in the jobs tmpfs executed (noexec missing)');
     const apiTmpfs = mounts(containerId('rab-api')).filter((m) => m.type === 'tmpfs' && !m.target.startsWith('/dev') && !m.target.startsWith('/proc') && !m.target.startsWith('/sys'));
-    write(`rab-api tmpfs mounts (excluding /dev,/proc,/sys): ${apiTmpfs.map((m) => m.target).join(' ') || '(none)'}`);
-    assert(apiTmpfs.length === 0, 'the API has a tmpfs');
-    return 'noexec,nosuid,nodev jobs tmpfs; API has none';
+    write(`rab-api tmpfs mounts (excluding /dev,/proc,/sys): ${apiTmpfs.map((m) => `${m.target} ${m.options}`).join('; ') || '(none)'}`);
+    // The ONLY tmpfs the API may have is docker-compose.image.yml's OpenShip import guard: one /tmp, root-owned, mode 0555,
+    // so it is not writable by the API's uid 1000. (A uid-0 process is refused too as probed below, with cap_drop ALL
+    // leaving no DAC override, but as the owner it could still chmod the directory; the API never runs as uid 0.)
+    // docker-compose.production.yml has none. Anything else, or a guard that can be written to, fails.
+    const other = apiTmpfs.filter((m) => m.target !== '/tmp');
+    assert(other.length === 0, `the API has a tmpfs other than the /tmp import guard: ${other.map((m) => m.target).join(' ')}`);
+    const guard = apiTmpfs.filter((m) => m.target === '/tmp');
+    assert(guard.length <= 1, `the API has ${guard.length} /tmp tmpfs mounts`);
+    if (guard.length === 0) return 'noexec,nosuid,nodev jobs tmpfs; API has no tmpfs';
+    const st = execAs('rab-api', '0:0', 'stat -c "%u:%g %a" /tmp');
+    const probe = (user) => execAs('rab-api', user, 'if ( : > /tmp/.h6-guard-$$ ) 2>/dev/null; then echo WRITABLE; rm -f /tmp/.h6-guard-$$; else echo refused; fi; if mkdir /tmp/.h6-guard-d-$$ 2>/dev/null; then echo WRITABLE; rmdir /tmp/.h6-guard-d-$$; fi').out.trim();
+    const asApp = probe('1000:1000');
+    const asRoot = probe('0:0');
+    write(`rab-api /tmp guard: stat ${st.out.trim()}; uid 1000: ${asApp}; root: ${asRoot}`);
+    assert(/(^|,)mode=0?555(,|$)/.test(guard[0].options), `the /tmp guard is not mode 0555: ${guard[0].options}`);
+    assert(st.out.trim() === '0:0 555', `the /tmp guard is not root-owned mode 0555: ${st.out.trim()}`);
+    assert(asApp === 'refused' && asRoot === 'refused', `the /tmp guard is writable (uid 1000: ${asApp}; root: ${asRoot})`);
+    return 'noexec,nosuid,nodev jobs tmpfs; API: only the /tmp import guard (0555, root-owned, not writable by uid 1000)';
   });
 
   await step('M07', 'Code permissions: /app and /opt/crewflow-bundle root-owned, not group/other-writable (both services)', async () => {

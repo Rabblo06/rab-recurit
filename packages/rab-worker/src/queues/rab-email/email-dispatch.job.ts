@@ -3,6 +3,7 @@ import { organisationIds } from '@rab/server/engine/worker-shared/maintenance-ca
 import { TenantContextService } from '@rab/server/engine/core-modules/tenant/tenant-context.service';
 import { QueuePublishUnavailableError } from '@rab/server/engine/worker-shared/queue-producer-connection';
 import { noteLegacyBatchLimitReached } from '../../core/wake/legacy-batch-limit';
+import { shipAuditRowAfterCommit } from '@rab/server/engine/core-modules/audit-events/audit-event-shipping';
 
 const BATCH_SIZE = 50;
 
@@ -99,7 +100,7 @@ export interface EmailDispatchResult {
  *     ever republished after DURABLY bumping `dispatch_generation` (CAS'd
  *     by the row's own UPDATE) and using `republish()`'s generation-suffixed
  *     jobId — this is what actually fixes the confirmed bug: the OLD
- *     BullMQ job's terminal state (completed, retained for up to 7 days; or
+ *     BullMQ job's terminal state (completed, retained for up to 4 hours; or
  *     failed-and-removed) can no longer block the new attempt from ever
  *     running, because the new attempt gets a genuinely new job identity.
  *   - Republishing itself is only done when it's SAFE: if a PROCESSING row
@@ -448,7 +449,7 @@ export async function dispatchEmailScope(
 
         // Wave 5 lane OPS (defensive): a PENDING row with dispatch_generation > 0 already had an earlier attempt (an operator
         // replay or any future path that resets a row to PENDING). That attempt's BullMQ job (attempt.0 or attempt.<n>) may
-        // still be retained (removeOnFail 30 d), and BullMQ silently drops an add() with an existing jobId — so publish it
+        // still be retained (removeOnFail 7 d, X3.4), and BullMQ silently drops an add() with an existing jobId — so publish it
         // under its CURRENT generation's jobId, never attempt.0. (DB5's core.replay_failed_email moves FAILED -> RETRY with
         // a bump, which the stale-RETRY recovery below already republishes under a fresh generation.)
         for (const row of firstAttempt) {
@@ -520,7 +521,11 @@ export async function dispatchEmailScope(
   return total;
 }
 
-/** Append-only audit uses the same scoped transaction as its state change. */
+/**
+ * Append-only audit uses the same scoped transaction as its state change. X1.1: the row then takes the same off-host path
+ * as `AuditService.record` (shipAuditRowAfterCommit — queued after this transaction commits, never awaited; today's
+ * e-mail delivery actions are not in the security catalogue, so nothing is queued for them).
+ */
 async function writeAuditRow(
   manager: import('typeorm').EntityManager,
   organisationId: string,
@@ -528,13 +533,16 @@ async function writeAuditRow(
   action: string,
   extraMetadata: Record<string, unknown>,
 ): Promise<void> {
-  await manager.query(
+  const inserted = await manager.query<Array<{ id?: string }> | undefined>(
     `INSERT INTO core.audit_log (organisation_id, actor_user_id, action, metadata)
-     VALUES ($1, NULL, $2, $3::jsonb)`,
+     VALUES ($1, NULL, $2, $3::jsonb)
+     RETURNING id`,
     [
       organisationId,
       action,
       JSON.stringify({ emailOutboxId, ...extraMetadata }),
     ],
   );
+  const auditLogId = Array.isArray(inserted) ? inserted[0]?.id : undefined;
+  if (typeof auditLogId === 'string') shipAuditRowAfterCommit(manager, { organisationId, auditLogId, action });
 }

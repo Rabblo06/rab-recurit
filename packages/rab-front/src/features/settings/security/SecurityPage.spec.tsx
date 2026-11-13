@@ -130,7 +130,7 @@ describe('page states (server values only)', () => {
     ).toBeEnabled();
     expect(
       screen.getByRole('link', { name: 'Reset password' }),
-    ).toHaveAttribute('href', '/forgot-password?email=me%40example.test');
+    ).toHaveAttribute('href', '/forgot-password');
     expect(screen.queryByText(/Last updated/)).not.toBeInTheDocument();
     const session = await screen.findByRole('region', {
       name: 'Current session',

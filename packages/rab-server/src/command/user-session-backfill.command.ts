@@ -1,4 +1,4 @@
-import { Command, CommandRunner, Option } from 'nest-commander';
+import { Command, Option } from 'nest-commander';
 import { DataSource } from 'typeorm';
 
 import { resolvePgEnvironmentCached } from '../database/postgres';
@@ -12,9 +12,10 @@ import {
 import { TenantContextService } from '../engine/core-modules/tenant/tenant-context.service';
 import { ElevatedOpsSession, ElevatedOpsSessionError, verifyOpsAppSession } from './ops/elevated-ops-session';
 import { OPS_ELEVATED_PLANS } from './ops/ops-statements';
-import { assertOpsRun, describeOpsLabel, opsAuditMetadata } from './ops/ops-run';
+import { OpsCommandRunner, opsLabelFlagsOf } from './ops/ops-command-runner';
+import { assertOpsRun, describeOpsLabel, opsAuditMetadata, OpsLabelFlags } from './ops/ops-run';
 
-interface Options {
+interface Options extends OpsLabelFlags {
   batch?: number;
   dryRun?: boolean;
   apply?: boolean;
@@ -27,25 +28,28 @@ interface Options {
  * `UserSessionBackfillService`'s own doc comment for the full algorithm (consistency check,
  * fail-closed, terminal-state derivation, idempotency).
  *
- * Phase B (ops container, owner decision): runs ONLY in the one-off operations container (command/ops/ops-run.ts), with the
- * operator label required, at the minimum effective role per mode:
- *   --verify    crewflow_app only (`core.count_user_session_backfill_status()`, EXECUTE crewflow_app). PG_DATABASE_URL (the
- *               migration identity) is REFUSED for this mode. Run it first: when missing = 0 no privileged run is needed.
- *   --dry-run   the verified elevated session, `SET LOCAL ROLE rab_secure_owner`, READ ONLY: the cross-organisation
- *               candidate scan of `core.refresh_token` (rab_secure_owner-owned, not FORCE'd: only its owner sees every
- *               tenant). Zero writes.
- *   --apply     the same scan READ ONLY, then one READ WRITE elevated transaction per family (`SET LOCAL ROLE
+ * Phase X2.2 (owner decision 2026-11-12): runs ONLY as a one-off of the API service under the owner login crewflow_owner
+ * (command/ops/ops-run.ts), with the label flags required (--operator "<name>" and --change-ref; --operator-source
+ * optional). Per mode:
+ *   --verify    the owner login's own DataSource only (`core.count_user_session_backfill_status()`); no narrowed session.
+ *               Run it first: when missing = 0 no other run is needed.
+ *   --dry-run   crewflow_owner narrowed by `SET LOCAL ROLE rab_secure_owner`, READ ONLY: the cross-organisation candidate
+ *               scan of `core.refresh_token` (rab_secure_owner-owned, not FORCE'd: only its owner sees every tenant). Zero
+ *               writes.
+ *   --apply     the same scan READ ONLY, then one READ WRITE narrowed transaction per family (`SET LOCAL ROLE
  *               rab_secure_owner`, bind the family's own identity, idempotent INSERT into `core.user_session`, whose INSERT
- *               privilege only its owner holds). Then ONE actor-less audit row per organisation through crewflow_app, carrying
- *               the operational label. Idempotent: re-running reports already-present, never duplicates.
- * Every elevated transaction is verified (elevated-ops-session.ts) and runs only the frozen statements of its plan
- * (ops-statements.ts). `DB_TARGET` and the boot gates already ran in `command/main.ts`.
+ *               privilege only its owner holds). Then ONE actor-less audit row per organisation through the CLI's own
+ *               owner-login DataSource in tenant context, carrying the operational label. Idempotent: re-running reports
+ *               already-present, never duplicates.
+ * Every narrowed transaction is verified (elevated-ops-session.ts) and runs only the frozen statements of its plan
+ * (ops-statements.ts); no second credential exists. `DB_TARGET` and the boot gates already ran in `command/main.ts`.
+ * (The separated-mode rab-ops container is removed.)
  */
 @Command({
   name: 'user-session:backfill',
   description: 'Backfill core.user_session rows for existing refresh_token families (dry-run by default)',
 })
-export class UserSessionBackfillCommand extends CommandRunner {
+export class UserSessionBackfillCommand extends OpsCommandRunner {
   constructor(
     private readonly backfill: UserSessionBackfillService,
     private readonly dataSource: DataSource,
@@ -81,8 +85,8 @@ export class UserSessionBackfillCommand extends CommandRunner {
     const mode: 'dry-run' | 'apply' | 'verify' = options.verify ? 'verify' : options.apply ? 'apply' : 'dry-run';
     const batchSize = options.batch && options.batch > 0 ? options.batch : 500;
     const resolved = resolvePgEnvironmentCached(process.env);
-    // Layer 2: ops container, operator label, and PG_DATABASE_URL present exactly when this mode needs it.
-    const label = assertOpsRun('user-session:backfill', mode, { needsElevated: mode !== 'verify' }, resolved);
+    // Layer 2: the CLI process, the owner login, the operator label.
+    const label = assertOpsRun('user-session:backfill', mode, resolved, process.env, opsLabelFlagsOf(options));
     // eslint-disable-next-line no-console
     console.log(describeOpsLabel(label));
     const app = await verifyOpsAppSession(this.dataSource, resolved, process.env, label.command);

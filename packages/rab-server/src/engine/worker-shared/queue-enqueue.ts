@@ -60,6 +60,25 @@ export function assertTenantScope(queue: string, scope: unknown): JobTenantScope
   return s as JobTenantScope;
 }
 
+/** X1.1: a system-scoped job name of an organisation queue (registry `systemScopedJobs`) takes exactly `{ kind: 'system' }`. */
+function assertSystemScope(queue: string, scope: unknown): JobTenantScope {
+  if (!scope || typeof scope !== 'object' || (scope as { kind?: unknown }).kind !== 'system' || Object.keys(scope).length !== 1) {
+    throw new QueueEnqueueRefusedError(queue, 'this job requires a system scope');
+  }
+  return scope as JobTenantScope;
+}
+
+/**
+ * X1.1: builds (and validates) one SYSTEM-scoped job of an organisation queue — a job name the registry lists under
+ * `systemScopedJobs` (the audit queue's pre-auth failed login). Same checks as `registeredJob` with that job's own keys.
+ */
+export function registeredSystemScopedJob<N extends QueueName, D extends object>(queue: N, name: JobNameOf<N>, data: D, opts: { jobId: string }): RegisteredJob<N, D> {
+  if (!Object.prototype.hasOwnProperty.call(queueSettingsOf(queue).systemScopedJobs ?? {}, name)) throw new QueueEnqueueRefusedError(queue, 'not a system-scoped job of this queue');
+  assertRegisteredPayload(queue, name, { kind: 'system' }, data);
+  if (typeof opts?.jobId !== 'string' || !opts.jobId || opts.jobId.length > 200) throw new QueueEnqueueRefusedError(queue, 'a deterministic jobId is required');
+  return { queue, name, data, opts: { jobId: opts.jobId, ...bullmqJobOptionsOf(queue) } };
+}
+
 /**
  * Builds (and validates) one job for `queue`: the declared scope, an accepted job name, an ids-only payload whose keys
  * the registry lists, and the registry's job options plus the caller's deterministic jobId (and optional delay).
@@ -96,13 +115,15 @@ export function scanJobTemplate<N extends ScanQueueName, D extends object>(
 function assertRegisteredPayload(queue: QueueName, name: string, scope: unknown, data: unknown): void {
   const settings = queueSettingsOf(queue);
   if (!settings.jobNames.includes(name)) throw new QueueEnqueueRefusedError(queue, 'unknown job name');
-  const checked = assertTenantScope(queue, scope);
+  const systemKeys = Object.prototype.hasOwnProperty.call(settings.systemScopedJobs ?? {}, name) ? settings.systemScopedJobs![name]! : null;
+  const checked = systemKeys ? assertSystemScope(queue, scope) : assertTenantScope(queue, scope);
+  const payloadKeys = systemKeys ?? settings.payloadKeys;
   if (!data || typeof data !== 'object' || Array.isArray(data) || Object.getPrototypeOf(data) !== Object.prototype) {
     throw new QueueEnqueueRefusedError(queue, 'the payload must be a plain object');
   }
   const entries = Object.entries(data);
   for (const [key, value] of entries) {
-    if (!settings.payloadKeys.includes(key)) throw new QueueEnqueueRefusedError(queue, `payload key ${JSON.stringify(key).slice(0, 40)} is not an identifier this queue carries`);
+    if (!payloadKeys.includes(key)) throw new QueueEnqueueRefusedError(queue, `payload key ${JSON.stringify(key).slice(0, 40)} is not an identifier this queue carries`);
     const scalar = value === null || (typeof value === 'number' && Number.isFinite(value)) || (typeof value === 'string' && value.length <= MAX_PAYLOAD_STRING);
     if (!scalar) throw new QueueEnqueueRefusedError(queue, `payload key ${key} must be an identifier or short scalar`);
   }

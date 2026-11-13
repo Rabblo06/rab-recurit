@@ -2,6 +2,7 @@ import { CanActivate, ExecutionContext, Injectable, Logger } from '@nestjs/commo
 import { ThrottlerException } from '@nestjs/throttler';
 
 import { AuthenticatedRequest } from '../../../engine/core-modules/auth/guards/jwt-auth.guard';
+import { isRateLimitBypassEnabled } from '../../../engine/core-modules/throttler/rate-limit-bypass';
 import { ThrottlerRedisClientProvider } from '../../../engine/core-modules/throttler/throttler-redis-client.provider';
 
 const LIMIT = 10;
@@ -53,14 +54,11 @@ export class AttendancePerUserThrottleGuard implements CanActivate {
   constructor(private readonly redis: ThrottlerRedisClientProvider) {}
 
   async canActivate(context: ExecutionContext): Promise<boolean> {
-    // Same convention as `RabThrottlerModule`'s own skip — the integration
-    // suite exercises the same seeded Staff account well beyond 10 clock
-    // actions across one spec file; none of that is the abuse this guard
-    // exists to catch. `rate-limiting.integration.spec.ts` is the one file
-    // that already flips `RAB_DISABLE_RATE_LIMIT` back to 'false' to
-    // exercise real throttling end-to-end, so this guard is bound by the
-    // same flag rather than an independent one.
-    if (process.env.JEST_WORKER_ID !== undefined && process.env.RAB_DISABLE_RATE_LIMIT !== 'false') {
+    // The ONE rate-limit switch, shared with `RabThrottlerModule` (rate-limit-bypass.ts, X1.2): on only when
+    // explicitly set, never in a production runtime (and production refuses to boot with it set). The Jest setup sets it because the
+    // integration suite exercises the same seeded Staff account well beyond 10 clock actions across one spec file;
+    // `attendance-abuse-cases.integration.spec.ts` sets it to 'false' to exercise this guard for real.
+    if (isRateLimitBypassEnabled(process.env)) {
       return true;
     }
 

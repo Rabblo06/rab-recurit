@@ -1,8 +1,8 @@
 /**
  * Security review L-4: the ONE list of environment variables that must never be present (non-empty) in a long-running
  * runtime process — the API, the ordinary Worker jobs process and the workspace provisioner child. Each is migration,
- * bootstrap, command or operations authority that belongs to a short-lived step (rab-migrate / deploy-prepare, the
- * one-off ops container, a CLI command). A credential sitting unused in a
+ * bootstrap or command authority that belongs to a short-lived step (rab-migrate / deploy-prepare, a CLI command), or a
+ * retired separated-mode name (the removed rab-ops container) that is never valid. A credential sitting unused in a
  * long-lived process's environment is still readable (/proc/<pid>/environ, crash dumps, error reporters), which Phase B P7
  * says must never happen.
  *
@@ -48,7 +48,8 @@ export interface NeverInRuntimeEnvEntry {
 const MIGRATION_ONLY = 'Migration authority is consumed only by the short-lived migration step and never reaches a long-running process.';
 const BOOTSTRAP_ONLY = 'Role bootstrap passwords belong to the migration / setup step only and never reach a long-running process.';
 const COMMAND_ONLY = 'It is command authority (migrations and CLI commands only); a running server is not a command.';
-const OPS_ONLY = 'It belongs to the one-off operations container only (`docker compose --profile ops run --rm rab-ops ...`).';
+const RETIRED_OPS =
+  'It is a retired separated-mode operations variable (the removed rab-ops container) and is never valid. The ops commands run as one-off CLI commands under the owner login. Remove it.';
 const ONE_URL =
   'The API, the Worker and the migrate child use ONE database URL, PG_DATABASE_URL (the crewflow_owner login). Remove this second database URL.';
 const ROLE_PASSWORD = 'Role passwords never belong in application configuration: the runtime connects only as the PG_DATABASE_URL owner login. Remove it.';
@@ -79,11 +80,11 @@ export const NEVER_IN_RUNTIME_ENV: readonly NeverInRuntimeEnvEntry[] = Object.fr
     name: 'CREWFLOW_DEPLOYMENT_IDENTITY_BOOTSTRAP',
     why: 'It is honoured only by production database commands. Remove it.',
   },
-  { name: 'CREWFLOW_OPS_RUN', why: OPS_ONLY },
-  { name: 'PG_OPS_APP_DATABASE_URL', why: OPS_ONLY },
-  { name: 'CREWFLOW_OPS_ACTOR_SOURCE', why: OPS_ONLY },
-  { name: 'CREWFLOW_OPS_ACTOR_ID', why: OPS_ONLY },
-  { name: 'CREWFLOW_OPS_CHANGE_REF', why: OPS_ONLY },
+  { name: 'CREWFLOW_OPS_RUN', why: RETIRED_OPS },
+  { name: 'PG_OPS_APP_DATABASE_URL', why: RETIRED_OPS },
+  { name: 'CREWFLOW_OPS_ACTOR_SOURCE', why: RETIRED_OPS },
+  { name: 'CREWFLOW_OPS_ACTOR_ID', why: RETIRED_OPS },
+  { name: 'CREWFLOW_OPS_CHANGE_REF', why: RETIRED_OPS },
   // Owner-login architecture (PERMANENT-OWNER-LOGIN-ADDENDUM): one PG_DATABASE_URL. Legacy and second database URLs and role
   // passwords are refused in the API and Worker. (The removed CREWFLOW_DB_MODE is refused by runtime-db-config.ts, which the
   // runtime guard also runs, with its own actionable message.) `allowedIn: ['provisioner']` leaves the

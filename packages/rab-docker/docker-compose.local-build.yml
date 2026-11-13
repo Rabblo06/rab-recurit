@@ -37,9 +37,9 @@
 # CREWFLOW_UPGRADE_INCOMPLETE (set only by api-prestart.sh), WORKER_SCHEDULER=interval; and any override of the keys
 # committed below.
 #
-# SECURITY POSTURE: PT-01 (runbook section 1, THREAT-MODEL.md). SUPERSEDED, KEPT UNTIL THE FINAL CLEAN-UP PR (#9, owner
-# approval): rab-ops (profile "ops"). O1: the Worker bundle launcher and its separate Dockerfile are gone; the API and
-# the Worker build the SAME image (rab/Dockerfile) and differ only by command.
+# SECURITY POSTURE: PT-01 (runbook section 1, THREAT-MODEL.md). There is no operations service: the owner CLI commands run
+# as one-off commands of the rab-api image under crewflow_owner (X2.2). O1: the Worker bundle launcher and its separate
+# Dockerfile are gone; the API and the Worker build the SAME image (rab/Dockerfile) and differ only by command.
 
 name: rab-local-build
 
@@ -199,30 +199,6 @@ services:
         condition: service_healthy
         restart: true
     restart: unless-stopped
-
-  # rab-ops — SUPERSEDED (separated mode), kept unchanged and never started by `up` until the final clean-up PR (#9, owner
-  # approval). Do not run it against an owner-login deployment.
-  rab-ops:
-    build:
-      context: ../..
-      dockerfile: packages/rab-docker/rab/Dockerfile
-    profiles: ["ops"]
-    env_file:
-      - .env.ops
-    environment:
-      NODE_ENV: production
-      RAB_RUNTIME_ENV: production
-      DB_TARGET: production
-      AI_ENABLED: 'false'
-      HWS_RUNTIME_ENABLED: "false"
-    entrypoint: ["node", "packages/rab-server/dist/command/main.js"]
-    command: ["--help"]
-    restart: "no"
-    read_only: true
-    cap_drop: [ALL]
-    security_opt: ["no-new-privileges:true"]
-    tmpfs:
-      - /tmp
 
 volumes:
   rab-redis-data:
