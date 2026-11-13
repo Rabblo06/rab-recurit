@@ -174,6 +174,10 @@ describeIfB1('the logbook through the real application (new workspace, /healthz,
       forgetStatus();
       res = await http().get('/rest/v1/admin/health/report').set('Authorization', `Bearer ${adminToken}`);
       expect(res.body.upgrade).toMatchObject({ state: 'failed', step: last, attempt: next });
+      // The banner card: degraded, names the step and attempt, never the stored message.
+      const card = (res.body.cards as { key: string; status: string; detail: string }[]).find((c) => c.key === 'upgrade');
+      expect(card?.status).toBe('degraded');
+      expect(card?.detail).toContain(last);
       expect(JSON.stringify(res.body)).not.toMatch(/planted/);
       // /healthz follows the logbook too: upgradeFailed true, upgrade "failed", still 200, still no name or message.
       forgetStatus();
