@@ -14,9 +14,9 @@ The API validates its environment when it starts (`packages/rab-server/src/engin
 
 | Variable | Purpose |
 | --- | --- |
-| `PG_DATABASE_URL` | The one database setting of a deployment (`compose.env`): your PostgreSQL's admin URL, an existing `crewflow_owner` URL, or unset for the bundled `db` (`PG_DATABASE_PASSWORD`). Only the one-shot `db-setup` service receives it; the API and the Worker refuse it and build the `crewflow_owner` URL from `db-setup`'s target file and `APP_SECRET`. In local development a process reads it directly. Outside production the deprecated `DATABASE_URL` is still accepted with a warning; production refuses it. |
+| `PG_DATABASE_URL` | The one database setting of a deployment (`compose.env`): your PostgreSQL's admin URL, an existing `crewflow_owner` URL, or unset for the bundled `db` (`PG_DATABASE_PASSWORD`). Only the one-shot `db-setup` service receives it; the API and the Worker refuse it and build the `crewflow_owner` URL from `db-setup`'s target file and its `crewflow_owner` password file (a random password, kept on `db-setup`'s volume). In local development a process reads it directly. Outside production the deprecated `DATABASE_URL` is still accepted with a warning; production refuses it. |
 | `REDIS_URL` | Redis for queues, rate limiting and caches. |
-| `APP_SECRET` | Root secret; also used to derive the shift QR signing key and the `crewflow_owner` database password. Changing it changes that password at the next `docker compose up` (admin URL or bundled `db`; with a `crewflow_owner` URL, see `OWNER-LOGIN-DEPLOYMENT.md` section 7). |
+| `APP_SECRET` | Root secret; also used to derive the shift QR signing key. Never part of a database credential: changing it never touches the database. |
 
 ## Core
 

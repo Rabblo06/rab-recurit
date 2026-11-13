@@ -7021,146 +7021,124 @@ Phase X Part 2 finding XA-08 (`docs/plans/PHASE-X-STAGE0-PART2.md` §2.6). Front
   are not reported (owner text: the 500 branch only). Exception events carry the scrubbed request URL path (path
   segments are kept, as in P0-sentry). No user or organisation is attached to these events.
 
-## DB-SETUP — database setup like Twenty: one database setting, crewflow_owner created by db-setup (branch deploy/db-setup-like-twenty, 2026-11-12; PR #125 option 2, 2026-11-13)
+## DB-SETUP — database setup the Twenty Helm way: one database setting, crewflow_owner created by db-setup, a random password in a file (branch deploy/db-setup-like-twenty; owner-approved design 2026-11-13)
 
-- **Change (2026-11-12).** `PG_DATABASE_URL` became the database ADMIN URL (the bundled `db` service's `postgres`
-  superuser by default, built by compose from `PG_DATABASE_PASSWORD`; or the operator's own database's admin URL). A
-  short-lived bootstrap child (`scripts/owner-login/bootstrap-owner-login.ts`), the ONLY process that connects with that
-  URL, creates `crewflow_owner` (`LOGIN NOSUPERUSER NOBYPASSRLS NOREPLICATION NOCREATEDB CREATEROLE INHERIT`), or resets
-  its password when a probe login fails, and grants it CONNECT, CREATE, TEMPORARY on the database. The password is
-  `hex(HKDF-SHA256(APP_SECRET, salt = empty, info = "crewflow-owner-db-password-v1", 32 bytes))`
-  (`owner-login/owner-credential.ts`). The pure derive step (`derive-runtime-url.ts`, never connects) builds the
-  `crewflow_owner` URL. `docker-compose.local-db.yml` is retired; both deploy compose files carry the bundled `db`.
-- **Change, PR #125 option A (2026-11-13; replaced by option 2 the same day).** The bootstrap child moved out of rab-api
-  into a one-shot `db-setup` service (same image, entrypoint `db-setup.sh`, `restart: "no"`, no port, the same hardening as
-  rab-api). It runs on every `up` and writes a credential-free target file (`{"v":1,"host","port","database","params"}`,
-  no user, no password) to the `crewflow-db-target` volume; rab-api starts after it (`depends_on: condition:
-  service_completed_successfully`). rab-api and rab-worker mount that volume read-only. Option A kept a crewflow_owner URL
-  in the apps' `PG_DATABASE_URL` and added a second variable, `PG_DATABASE_ADMIN_URL`, for the admin URL.
-- **Change, PR #125 option 2 (owner decision 2026-11-13, current).** ONE database setting, like Twenty:
-  - `PG_DATABASE_URL` in `compose.env` is the admin URL of the operator's own PostgreSQL (16, 17 or 18), or an existing
-    `crewflow_owner` URL, or unset (the bundled db: compose builds its superuser URL from `PG_DATABASE_PASSWORD`). It is
-    interpolated into the one-shot `db-setup` service only (`${PG_DATABASE_URL:-<bundled db>}`). `PG_DATABASE_ADMIN_URL`
-    is removed; the compose.env lint refuses it.
-  - rab-api and rab-worker commit the literal `PG_DATABASE_URL: ""`, so no env-file value can reach them.
-    `api-prestart.sh` / `worker-start.sh` refuse any non-empty value (exit 64), and the derive step refuses a
-    `PG_DATABASE_URL` next to the target file (64). They always build the `crewflow_owner` URL from db-setup's target file
-    and APP_SECRET, waiting at most 120 s for the file (then exit 75).
-  - db-setup, admin URL or bundled db: creates `crewflow_owner` or resets its password to the derived one, grants the
-    database, writes the target file.
-  - db-setup, `crewflow_owner` URL: logs in with the DERIVED password first (read-only checks, no write). Only if that
-    fails with 28P01, it logs in with the URL's own password, runs every refusal before any write, then sets
-    `crewflow_owner`'s OWN password to the derived SCRAM verifier, once, under the bootstrap advisory lock, and re-verifies
-    with the derived login. No CREATE ROLE, GRANT or attribute change on this path. Later runs take the first path. Then it
-    writes the target file.
-  - db-setup removes the old target file first. Exit 0 = done, 64 = refused (fixed message), anything else = failed.
-  - The new deploy-time SQL of the `crewflow_owner` path (`OWNER_SELF_O1_SESSION`, `OWNER_SELF_O4C_DO` in
-    `owner-bootstrap-sql.ts`) awaits the owner's SQL review.
-- **Owner acceptance.** TM-DB-1 to TM-DB-4 and the trade-offs T-1 to T-5 were accepted by the owner on 2026-11-12. The
-  option-2 changes below (TM-DB-1, TM-DB-2, TM-DB-3 changed; TM-DB-5 and T-8 new) are NOT yet accepted.
+- **History.** 2026-11-12: one admin URL; a bootstrap child created `crewflow_owner` with a password derived from
+  APP_SECRET (HKDF). 2026-11-13 option A, then option 2: the bootstrap moved into the one-shot `db-setup` service, and
+  `PG_DATABASE_URL` became the one setting, given to db-setup only. Option 2 still derived the password from APP_SECRET
+  and changed an existing `crewflow_owner`'s password. All of that is replaced by the Helm model below
+  (`docs/plans/phase-x3/OWNER-DB-FINAL.md` Part A, `DB-SETUP-HELM-PLAN.md`): the HKDF derivation, the APP_SECRET rotation
+  procedure, the derive/print commands, the owner-path password change and the strict-provider text are gone.
+- **Install.** Bundled database: set `PG_DATABASE_PASSWORD` and `APP_SECRET`, then `docker compose up`. Your own
+  database: put its admin URL, or an existing `crewflow_owner` URL, in `PG_DATABASE_URL` (compose.env). Nothing else: no
+  SQL, no `psql`, no setup command, no second variable.
+- **Change (Helm model).** `PG_DATABASE_URL` reaches the one-shot `db-setup` service only; rab-api and rab-worker pin it
+  to `""` and refuse any value (exit 64). db-setup no longer receives APP_SECRET.
+  - Bundled db or an admin URL, first start: db-setup generates a random 32-byte password and writes it atomically to the
+    password file `/run/crewflow/db-target/owner-password` on the setup volume (0400, owner 1000:1000) BEFORE its transaction; then creates
+    `crewflow_owner` only if it is missing (the `01-crewflow-owner.sql` attributes and grants). Later starts: the file
+    exists and logs in, nothing changes.
+  - An existing `crewflow_owner` URL: O1 and the read-only refusals only; the URL's password is copied into the file. The
+    database is never written to and the password is never changed.
+  - rab-api and rab-worker mount the setup volume read-only and build the `crewflow_owner` URL from `target.json`
+    (host, port, database, TLS; no credential) and the password file. They wait (bounded, 120 s) for both, then exit 75.
+  - A crash leaves either nothing in the database (the next start reuses the file) or a matching role: the file is written
+    before the transaction.
+- **Like Twenty** (`twentyhq/twenty` `main` @ `eedb0a73`, Helm chart). Only the setup step holds the admin credential, and
+  only for the bundled database (`packages/twenty-docker/helm/twenty/templates/deployment-server.yaml:81-130`); it creates the user if missing and
+  never changes an existing user's password (`:99-116`); the app password is random, kept apart and reused on upgrades
+  (`.../templates/secret-db-url.yaml:3-8`); the server and worker receive only the app user's URL
+  (`deployment-server.yaml:142-156`, `deployment-worker.yaml:76-90`); an external database is used as given
+  (`secret-db-url.yaml:24-30`, `_helpers.tpl:56-83`). APP_SECRET is never part of a database credential, in Twenty or here.
+- **Crewflow additions (not in Twenty; labelled per OWNER-DB-FINAL A4).**
+  - **A client's admin URL → db-setup creates `crewflow_owner`.** Twenty would run the app as that login (superuser by
+    default). Crewflow's tenant isolation needs RLS, which a superuser or BYPASSRLS login skips, so the app must run as
+    `crewflow_owner`.
+  - **Password file lost + admin URL → db-setup sets a new password** (new random password → file → `ALTER ROLE
+    crewflow_owner PASSWORD`, Q4c). With Twenty, a lost secret leaves the app unable to log in. The admin login needs
+    CREATEROLE and ADMIN OPTION on `crewflow_owner` (or superuser), else db-setup refuses (64) and names the fix. db-setup
+    logs `crewflow_owner is ready (password reset because the password file was missing (Crewflow addition))`.
+- **Refusals (exit 64, fixed message, nothing written).**
+  - The password file exists but no longer logs in (the password was changed in the database): `"The stored crewflow_owner password no longer logs in (it was changed in the database). Delete the password file and start again with the admin address in PG_DATABASE_URL. Refusing."`. No
+    automatic reset (as Twenty: the existing user is skipped).
+  - An admin URL names a database that does not exist: `"The database named in PG_DATABASE_URL does not exist (SQLSTATE 3D000). db-setup never creates a database: create it at your provider (the bundled db creates its own), then start again. Refusing."`. db-setup never creates a database (the bundled one
+    is created by the postgres image, `POSTGRES_DB`).
+  - Kept from option 2 (Crewflow has RLS, Twenty has not; OWNER-DB-FINAL A5): a `crewflow_owner` that is SUPERUSER,
+    BYPASSRLS, REPLICATION or CREATEDB, has privileged memberships or lacks the required grants; PostgreSQL below 16; an
+    admin that cannot create roles or grant; the H1 / N1 / N2 ownership and `search_path` refusals (TM-DB-3).
+- **APP_SECRET never touches the database.** Changing it changes no database password and needs no database step.
+- **Owner acceptance.** TM-DB-1, TM-DB-3, TM-DB-4 and T-1 to T-5 were accepted on 2026-11-12; the Helm model was approved
+  by the owner on 2026-11-13 (OWNER-DB-FINAL Part A). TM-DB-2 below is new with it.
 
-### TM-DB-1 (accepted risk; option 2: db-setup is the only holder) — the database URL sits in db-setup's definition
+### TM-DB-1 (accepted risk) — the database URL sits in db-setup's definition
 - **Actor → action → consequence.** Anyone who can read the compose project / OpenShip service definition (compose.env,
   `docker compose config`), or run `docker inspect` on the `db-setup` container, reads `PG_DATABASE_URL` → with an admin
   URL, full control of the database (superuser on the bundled db, bypassing RLS, COPY ... PROGRAM inside the db
-  container; owner / CREATEROLE on a managed one). With a `crewflow_owner` URL, its password works only until the first
-  db-setup run replaces it (TM-DB-5).
+  container; owner / CREATEROLE on a managed one); with a `crewflow_owner` URL, the schema owner login.
 - **Controls.** `PG_DATABASE_URL` is interpolated ONLY into db-setup (and `PG_DATABASE_PASSWORD` only into db-setup's
-  default URL and the bundled db's `POSTGRES_PASSWORD`). rab-api and rab-worker pin it to `""` in every mode, a
-  `crewflow_owner` URL included (before option 2 that URL was in their definition): it is not in their PID 1, a runtime
-  process, a `docker exec` process or a health check. db-setup runs only the bootstrap child and exits; it holds no port
-  and the same hardening as rab-api. The entrypoints refuse a non-empty `PG_DATABASE_URL` (64); the derive step refuses
-  one next to the target file (64); in production the API, the Worker and the migrate child refuse a non-`crewflow_owner`
-  login before connecting (`runtime-db-config.ts` `checkRuntimeLogin`). The gates (compose-owner-login,
-  verify-image-compose static and `--environment`) refuse a non-empty or interpolated `PG_DATABASE_URL` on rab-api /
-  rab-worker, a compose file that interpolates `${PG_DATABASE_URL...}` more than once, any database credential or
-  postgres:// value anywhere in their definition (health check, command, labels, overlays), and require db-setup's exact
+  default URL and the bundled db's `POSTGRES_PASSWORD`). rab-api and rab-worker pin it to `""`: it is not in their PID 1,
+  a runtime process, a `docker exec` process or a health check. db-setup runs only the bootstrap child and exits; it holds
+  no port and the same hardening as rab-api. The entrypoints refuse a non-empty `PG_DATABASE_URL` (64); in production the
+  API, the Worker and the migrate child refuse a non-`crewflow_owner` login before connecting (`runtime-db-config.ts`
+  `checkRuntimeLogin`). The gates (compose-owner-login, verify-image-compose static and `--environment`) refuse a non-empty
+  or interpolated `PG_DATABASE_URL` on rab-api / rab-worker, a compose file that interpolates `${PG_DATABASE_URL...}` more
+  than once, any database credential or postgres:// value anywhere in their definition, and require db-setup's exact
   shape. The compose.env lint refuses a former separated login, TLS below verify-full, a transaction pooler, a URL without
-  a password, and `PG_DATABASE_ADMIN_URL`; `PG_DATABASE_URL` in database.env / runtime.env is refused. The owner CLI
-  one-off (`docker compose run rab-api ...`) builds the same `crewflow_owner` URL from the target file. The bundled db is
+  a password, and `PG_DATABASE_ADMIN_URL`; `PG_DATABASE_URL` in database.env / runtime.env is refused. The bundled db is
   never published and sits on an internal network.
-- **Measured.** Before option A: every RUNNING process of rab-api and rab-worker, PID 1 included, held no admin URL (live
-  stacks, both compose files, postgres 16 / 17 / 18; area 6 S6), but a `docker exec` process or health check still got it
-  from the container definition. Option A, PostgreSQL 16.15 with a prototype of the server side: S6 found no admin
-  credential in any process of rab-api / rab-worker, in a `docker exec` process, in the health-check processes caught while
-  running (3 API, 1 Worker in 40 s), or in either container definition. Option 2: NOT re-measured on a live stack (16, 17
-  or 18).
+- **Measured.** Option A and option 2 (PostgreSQL 16, live stacks): no admin credential in any rab-api / rab-worker
+  process, `docker exec` process, health check or container definition. The Helm model: NOT re-measured on a live stack in this docs change (the CODE agent updated the live harness scenarios for OWNER-DB-FINAL A6 in d43696f8).
 - **Residual.** As Twenty: the deployment configuration (compose.env, db-setup's definition) must be protected like the
-  database itself; who can read it is outside Crewflow. db-setup also receives APP_SECRET, which is itself a database
-  credential now (TM-DB-2, T-6).
+  database itself; who can read it is outside Crewflow.
 
-### TM-DB-2 (changed by option 2) — APP_SECRET controls the database login, in every mode
-- **Actor → action → consequence.** Whoever learns APP_SECRET and can reach the database port derives the
-  `crewflow_owner` password and logs in as the schema owner (RLS is FORCED, but the owner can alter policies). Before,
-  an APP_SECRET compromise meant token forgery and decryption; now it is also a database login. Since option 2 this holds
-  for every deployment, a hand-made `crewflow_owner` included (before, a pass-through URL did not use APP_SECRET).
-- **Controls.** The bundled db is reachable only from the app network; an external database only through the provider's
-  allow-list; verify-full TLS. The HKDF label is unique (a spec compares every `hkdfSync` label in the repository).
-  Rotating APP_SECRET on every service rotates the database password at the next `up`: db-setup resets it with the admin
-  URL or the bundled superuser (measured before option A with the API-side bootstrap, area 6 S5; not re-measured on
-  option 2). A Worker that logs in before that reset (SQLSTATE 28P01) retries with backoff for at most 120 s with a fixed
-  message, then exits and the restart policy brings it back (`rab-worker/src/core/runtime/owner-password-wait.ts`).
-- **Residual.** APP_SECRET and the database password cannot be rotated independently. Two deployments with different
-  APP_SECRETs on one database would reset the password back and forth. With a `crewflow_owner` URL (no admin), rotating
-  APP_SECRET needs one extra step (OWNER-LOGIN-DEPLOYMENT.md section 7): BEFORE the change, run the documented derive
-  command (SENSITIVE output: the `crewflow_owner` URL with the current derived password) and put that URL in
-  `PG_DATABASE_URL`; then change APP_SECRET and start: step b logs in with the old derived password and sets the new one;
-  the next start takes step a. Fallback: the admin URL in `PG_DATABASE_URL` for one start, except on a database
-  `crewflow_owner` owns through a membership (every transitioned database: owner `rab_owner`), where the admin URL is
-  refused (H1) and the derive step is the only path. Without either, db-setup refuses
-  (64, a fixed message naming both), writes nothing, and the apps wait, then exit 75. Tested live on the bootstrap child,
-  PostgreSQL 16 and 18 (scenario `owner-url-app-secret-rotation-procedure`, CODE agent; not on a full stack). Exposure of
-  the procedure (security review M1; an in-process alternative is an open owner decision): the print step writes the live
-  `crewflow_owner` URL to the container's stdout, so it must run with container logging off or with no log shipper
-  reading that output; and from step 2 until step 3 succeeds, the LIVE credential is in `compose.env` and in db-setup's
-  container definition (TM-DB-1). After step 3 the URL left in `compose.env` holds the OLD derived password, which no
-  longer logs in (it is not a working credential any more). A password changed by hand at the provider no longer sticks: the next db-setup sets the
-  derived one again.
+### TM-DB-2 (new, Helm model) — the crewflow_owner password file on the setup volume
+- **Actor → action → consequence.** Anyone who can read the setup volume (root on the host, `docker run -v` on it, a copy
+  of a volume backup) reads the `crewflow_owner` password → the schema owner login (RLS is FORCED, but the owner can alter
+  policies).
+- **Controls.** The file is written atomically (temp file + rename), mode 0400, owner 1000:1000, by db-setup only;
+  rab-api and rab-worker mount the volume read-only. It is never logged or printed, never in an env file, a compose
+  variable or the image: the gates refuse a variable carrying the `crewflow_owner` password and any mount at the
+  password-file path other than db-setup's volume (db-setup read-write, the apps read-only), and the image gate fails on
+  any file under `/run/crewflow/db-target` in the image. A lost file is replaced only with an exclusive create (a
+  concurrent db-setup that stored one first wins; this one fails, exit 70, and changes nothing). The password is random (32 bytes), not derived from anything, so an
+  APP_SECRET leak gives no database login. The bundled db is reachable only from the app network; an external database
+  only through the provider's allow-list; verify-full TLS.
+- **Residual.** Volume backups and snapshots contain the password: protect and encrypt them like the database. Rotating it
+  means deleting the file and starting once with the admin URL (the A4 reset).
 
-### TM-DB-3 (changed by option 2) — a bootstrap runs with admin rights on every `up` (db-setup)
+### TM-DB-3 (accepted; changed by the Helm model) — a bootstrap runs with admin rights on every `up` (db-setup)
 - **Actor → action → consequence.** A bug in, or an attacker-controlled input to, the bootstrap child could misuse admin
-  rights (or, on the `crewflow_owner` path, the schema owner's rights).
+  rights.
 - **Controls.** Fixed SQL only; the only interpolated values are the database name (`%I`) and the SCRAM verifier (`%L`
   inside a DO block, delivered as a bind parameter and a transaction-local setting, never in statement text). It never
-  changes an existing role's attributes: it creates the role, sets its password, grants on the current database. It
-  refuses (exit 64, fixed message) an existing `crewflow_owner` that is SUPERUSER, BYPASSRLS, REPLICATION, CREATEDB,
-  NOLOGIN, NOINHERIT, expired, or a member of a privileged role; an admin that cannot create roles or grant on the database;
-  and a server below PostgreSQL 16. A password reset needs CREATEROLE with ADMIN OPTION on `crewflow_owner` (or superuser).
-  It takes a transaction advisory lock (key 7165901520526864244), re-reads the facts under it, and retries a lost race
-  (including XX000 "tuple concurrently updated") a bounded number of times (at most 3 attempts) before failing; it
-  re-verifies the result and re-probes the login after commit. It prints fixed text and SQLSTATE classes only, never a
-  URL, password, verifier, host or database name. The plaintext password never reaches the server (a pre-hashed SCRAM
-  verifier is sent); a superuser admin turns statement and parameter logging off for its session.
-- **Controls, `crewflow_owner` path (option 2).** The same refusals run before any write (plus: the session must be
-  `crewflow_owner` itself, and it must hold CONNECT, CREATE, TEMPORARY WITH GRANT OPTION). The only write is
-  `ALTER ROLE crewflow_owner PASSWORD <verifier>` by `crewflow_owner` itself, inside a DO block that re-checks the session
-  and the role's attributes; no CREATE ROLE, GRANT or extension. Same lock, bounded retry and re-verification.
-- **Residual.** With a NON-superuser login whose provider logs statements with bind parameters (`log_statement=all`,
-  pgaudit with parameters), the SCRAM verifier, never the password, lands in the provider's log (measured: 2 occurrences
-  per bootstrap with `log_statement=all`; the `crewflow_owner` path cannot turn logging off either). A verifier does not
-  allow a login; offline guessing of a 256-bit HKDF output is infeasible. Each password reset leaves one "password
-  authentication failed for user crewflow_owner" line. No plaintext fallback (D6): a provider that refuses pre-hashed
-  passwords (for example `credcheck.encrypted_password_allowed = off`) is refused (64) on both paths, and the message says
-  this configuration is not supported. There is no workaround: a hand-set password would need the derived password printed
-  and typed into SQL (a plaintext password in the provider's statement log), and the derive command needs a target file
-  that a refused db-setup withdraws (security review M2).
+  changes an existing role's attributes. It writes only when `crewflow_owner` is missing (CREATE ROLE and the narrow
+  grants, not `GRANT ALL`) or on the A4 reset (ALTER ROLE ... PASSWORD). It refuses (exit 64, fixed message) an existing
+  `crewflow_owner` that is SUPERUSER, BYPASSRLS, REPLICATION, CREATEDB, NOLOGIN, NOINHERIT, expired, or a member of a
+  privileged role; an admin that cannot create roles or grant on the database; and a server below PostgreSQL 16. It takes a
+  transaction advisory lock (key 7165901520526864244), re-reads the facts under it, retries a lost race a bounded number of
+  times (at most 3 attempts), re-verifies the result and re-probes the login after commit. It prints fixed text and
+  SQLSTATE classes only, never a URL, password, verifier, host or database name. The plaintext password never reaches the
+  server (a pre-hashed SCRAM verifier is sent); a superuser admin turns statement and parameter logging off for its session.
+  The `crewflow_owner` URL path runs read-only statements only.
 - **Session pinning (security review H1, CVE-2018-1058 class).** A `crewflow_owner` that owns the database (directly or
   through an inherited role) could set a database-level `search_path` and plant an operator that the admin session's
-  unqualified `=` would then run with admin rights. Every bootstrap connection (admin, probe, both option-2 steps, the
-  re-verify login) is opened with the startup options `-c search_path=pg_catalog,pg_temp -c default_transaction_read_only=off`
-  (they override role and database defaults), and the first statement of every session sets the same search_path again.
-  In addition, the admin path refuses (64) before any write when `crewflow_owner` owns the database (directly or through
-  ANY role membership, inherited or SET-only: `pg_has_role(..., 'MEMBER')`, re-review N2), or when a database-wide or
-  `crewflow_owner`-level `search_path` default exists. Tested live on PG16 and PG18 (scenarios
-  `h1-search-path-plant-db-owner` / `-inherited-owner`: refused, zero calls of the planted operator, and a sanity query
-  proving the plant was live; `h1-search-path-default-refused`; `n2-set-only-membership-of-owner`). Residual (re-review N1):
-  every database that went through `transition-from-separated.sql` is owned by `rab_owner`, of which `crewflow_owner` is a
-  member, so it must use the `crewflow_owner` URL, never the admin URL (runbook 5.4; tested live:
-  `n1-transition-shaped-database`). Changing the database owner to make the admin URL work is not a supported fix.
-- **Evidence.** The bootstrap harness ran live on PostgreSQL 16 and 18 with `log_statement=all`, server-log scan included
-  (CODE agent, DB-SETUP-LEAD.md "Option 2 — SQL for the owner's review", REVISED).
+  unqualified `=` would then run with admin rights. Every bootstrap connection is opened with the startup options
+  `-c search_path=pg_catalog,pg_temp -c default_transaction_read_only=off` (they override role and database defaults), and
+  the first statement of every session sets the same search_path again. The admin path refuses (64) before any write when
+  `crewflow_owner` owns the database (directly or through ANY role membership, inherited or SET-only:
+  `pg_has_role(..., 'MEMBER')`, re-review N2), or when a database-wide or `crewflow_owner`-level `search_path` default
+  exists. Residual (re-review N1): every database that went through `transition-from-separated.sql` is owned by
+  `rab_owner`, of which `crewflow_owner` is a member, so it must use the `crewflow_owner` URL, never the admin URL
+  (runbook 5.4). Changing the database owner to make the admin URL work is not a supported fix.
+- **Residual.** With a NON-superuser admin whose provider logs statements with bind parameters (`log_statement=all`,
+  pgaudit with parameters), the SCRAM verifier, never the password, lands in the provider's log. A verifier does not allow
+  a login; offline guessing of a random 256-bit password is infeasible. A provider that refuses pre-hashed passwords is
+  refused (64): there is no plaintext path (owner decision D6).
+- **Evidence.** The H1 / N1 / N2 scenarios ran live on PostgreSQL 16 and 18 before the Helm model (option 2 harness). The Helm-model
+  harness scenarios (d43696f8: fresh, restart, lost file, stale file, missing database, crewflow_owner URL unchanged,
+  refusals, H1, N1, N2) are listed under Tests; their live results are not recorded here.
 
-### TM-DB-4 (changed) — the bundled database password in the environment
+### TM-DB-4 (accepted) — the bundled database password in the environment
 - **Change.** `PG_DATABASE_PASSWORD` is the bundled db's superuser password, read by compose only: the db's
   `POSTGRES_PASSWORD` and the default admin URL. It reaches no rab-api / rab-worker variable (the gates refuse it on every
   service but db, and in database.env / runtime.env; api-prestart.sh, worker-start.sh and db-setup.sh refuse it if present).
@@ -7174,73 +7152,41 @@ Phase X Part 2 finding XA-08 (`docs/plans/PHASE-X-STAGE0-PART2.md` §2.6). Front
   SCRAM-only, and any db environment key outside an exact allow-list, in the committed AND the deployed model.
 - **Residual.** The superuser can log in over the internal network (needed by db-setup's bootstrap child; T-3).
 
-### TM-DB-5 (new, option 2) — db-setup replaces the password of an existing crewflow_owner
-- **Actor → action → consequence.** An operator puts a hand-made `crewflow_owner` URL in `PG_DATABASE_URL` → the first
-  db-setup run sets `crewflow_owner`'s own password to the APP_SECRET-derived one, without a prompt → the password the
-  operator made stops working for everything else that uses it (a backup job, a reporting tool, a second deployment, the
-  previous release after a rollback).
-- **Controls.** It happens only after every refusal passes, so a privileged role is never touched; only `crewflow_owner`'s
-  own password changes, by `crewflow_owner` itself, re-checked inside the DO block; under the advisory lock; re-verified
-  with the derived login; db-setup logs a fixed line saying so. Documented in `env/compose.env.example` and
-  OWNER-LOGIN-DEPLOYMENT.md (sections 2 and 3.6: the derived URL for a rollback).
-- **Residual.** The URL's old password stays in compose.env and db-setup's definition, unused. `PG_DATABASE_URL` must
-  stay set afterwards: unset means the bundled db (a fresh, empty install there). Tested live on the bootstrap child
-  (PostgreSQL 16 and 18, CODE agent), not on a full stack.
-
-### Trade-offs applied (SECURITY TRADE-OFF blocks; T-1 to T-5 owner-accepted 2026-11-12, T-1 changed and T-8 new with option 2)
-- **T-1 — privileged URL in a container definition, db-setup's only (options A and 2).** The compose.env lint accepts a
-  provider-admin login in `PG_DATABASE_URL`, which reaches db-setup only; it still refuses the former separated logins and
-  schema roles, TLS below verify-full, a transaction pooler and a URL without a password. rab-api / rab-worker carry
-  `""` only. Residual: TM-DB-1.
+### Trade-offs applied (SECURITY TRADE-OFF blocks, owner-accepted 2026-11-12)
+- **T-1 — privileged URL in a container definition, db-setup's only.** The compose.env lint accepts a provider-admin login
+  in `PG_DATABASE_URL`, which reaches db-setup only; it still refuses the former separated logins and schema roles, TLS
+  below verify-full, a transaction pooler and a URL without a password. rab-api / rab-worker carry `""` only. Residual:
+  TM-DB-1.
 - **T-2 — `POSTGRES_PASSWORD` from an environment variable** on the bundled db, in both compose files (decision D4;
   OpenShip has no secret files). Residual: visible in the compose config / `docker inspect db`.
 - **T-3 — the superuser may log in over the internal network** on the bundled db, only from db-setup's bootstrap child
   in practice (no other service holds its password), and only over TLS with SCRAM (`hostssl`). Still: no port, an
-  internal network. Not narrowed to db-setup's address: pg_hba cannot name a compose service reliably (addresses change
-  per start).
+  internal network. Not narrowed to db-setup's address: pg_hba cannot name a compose service reliably.
 - **T-4 — not applied** (D1 = a: verify-full kept for the bundled db; no plaintext exception).
-- **T-5 — retired by options A and 2.** "No admin URL in a runtime process" no longer depends on the entrypoints: rab-api /
-  rab-worker never receive any database URL. The entrypoints build the `crewflow_owner` URL from the target file and
-  refuse any non-empty `PG_DATABASE_URL`; the gates still require `./api-prestart.sh` / `./worker-start.sh` /
-  `./db-setup.sh`, and a runtime started any other way still refuses a non-`crewflow_owner` login in production before
-  connecting.
-- **T-6 (option A, still applies) — db-setup reads the whole runtime.env in `docker-compose.image.yml`.** It needs only
-  APP_SECRET, but Compose cannot pick one key from an env file, so db-setup also receives the other runtime secrets (Redis,
-  S3, email) that rab-api and rab-worker already hold. Stricter alternative: a separate env file holding only APP_SECRET (a
-  second copy of the root secret to keep in sync). Residual: one more short-lived container definition with those values;
-  db-setup runs only the bootstrap child. `docker-compose.production.yml` gives it APP_SECRET alone.
-- **T-7 (option A, still applies) — the API's wait is on the target file only.** api-prestart.sh waits (120 s) for
-  db-setup's target file, not for a successful `crewflow_owner` login; db-setup removes the old file before it runs and the
-  bootstrap child writes the new one only after the role is ready. A stale-password window (an API that restarts on its own
-  while db-setup is still resetting the password after an APP_SECRET change) ends in a refused start and Docker's restart,
-  never an admin connection. The Worker retries 28P01 for 120 s itself (finding 8).
-- **T-8 (new, option 2, NOT yet owner-accepted) — db-setup logs in as `crewflow_owner` with the URL's password and
-  changes that role's own password once, without asking.**
-  - Control relaxed: before option 2 a `crewflow_owner` URL was passed through unchanged; Crewflow never connected with
-    an operator-made `crewflow_owner` password to write, and never wrote to a role it did not create.
-  - Why: the owner's option 2 (one setting; the password is derived from APP_SECRET in every mode, so rab-api /
-    rab-worker never receive any URL).
-  - What still holds: every refusal before the write; only its own password; lock; re-verification; a fixed log line.
-  - Residual: TM-DB-5.
-  - Veto (CODE agent's proposal): refuse `crewflow_owner` URLs in db-setup altogether (admin URL or the bundled db only).
-    A narrower veto: refuse (64) a `crewflow_owner` URL whose password is not the derived one and ask for the admin URL.
-- **OpenShip.** OpenShip discards `depends_on` conditions: `service_completed_successfully` is NOT VERIFIED there, nor how
-  it treats a one-shot service. The API does not rely on it: it waits, bounded, for the target file and refuses (exit 75)
-  without it; it never takes an admin path.
+- **T-5 — retired.** rab-api / rab-worker never receive any database URL; the entrypoints build the `crewflow_owner` URL
+  from the target file and the password file and refuse any non-empty `PG_DATABASE_URL`; a runtime started any other way
+  still refuses a non-`crewflow_owner` login in production before connecting.
+- **T-6 — closed by the Helm model.** db-setup reads `database.env` only, never `runtime.env`, so it receives no APP_SECRET
+  and no runtime secret; `db-setup.sh` refuses APP_SECRET (exit 64) and the gates refuse it on db-setup.**
+- **T-7 — the API's wait is on the files only.** api-prestart.sh waits (120 s) for db-setup's target file and password
+  file, not for a successful login; db-setup writes the target only after the role is ready. A start that finds a file but
+  cannot log in is refused and restarted by Docker; it never takes an admin path.
+- **OpenShip.** OpenShip discards `depends_on` conditions: `service_completed_successfully` is NOT VERIFIED there. The API
+  does not rely on it: it waits, bounded, for the files and refuses (exit 75) without them.
 - **Deployment identity (lead decision 2026-11-12): `db` joins `LOCAL_DATABASE_SERVICE_HOSTS`.** Outside production, an
-  unmarked database at the single-label host `db` is treated as local (warn and continue) instead of remote (refused
-  without the disposable-test setting). Production is unaffected. Residual: a non-production process whose `db` resolves
-  through a DNS search domain to a remote database is not refused for a missing marker.
+  unmarked database at the single-label host `db` is treated as local (warn and continue). Production is unaffected.
+  Residual: a non-production process whose `db` resolves through a DNS search domain to a remote database is not refused
+  for a missing marker.
 - **Owner CLI one-off authority.** With arguments, `api-prestart.sh` takes `DB_TARGET` / `ALLOW_PRODUCTION_DB_COMMANDS`
-  out of its environment before its refusal loops and hands them back only to the one-off command (the CLI applies its own
-  production-command rules); an API start without arguments still refuses both.
+  out of its environment before its refusal loops and hands them back only to the one-off command; an API start without
+  arguments still refuses both.
 
 ### Open follow-up (pre-existing, NOT fixed here) — finding B (area 6, Low)
 A migrate child started with a `crewflow_owner` that is SUPERUSER is refused (exit 67, "the login is SUPERUSER"), but
 before the refusal its DataSource has already created the `uuid-ossp` and `citext` extensions (owned by that login).
-Root cause: the identity gate runs after the TypeORM DataSource initialise. Option 2: in the deploy compose files db-setup
-refuses such a role before any write and rab-api never starts, so this is reachable only by a migrate child started some
-other way. A separate follow-up (fail-closed ordering in the migrate child) is for the owner.
+Root cause: the identity gate runs after the TypeORM DataSource initialise. In the deploy compose files db-setup refuses
+such a role before any write and rab-api never starts, so this is reachable only by a migrate child started some other
+way. A separate follow-up (fail-closed ordering in the migrate child) is for the owner.
 
 ### Upgrade hazard (PR #125 review, finding 3) — a `database.env` URL is silently overridden
 `docker-compose.image.yml` commits `PG_DATABASE_URL: ""` on rab-api / rab-worker and `${PG_DATABASE_URL:-<bundled db>}` on
@@ -7258,15 +7204,19 @@ makes every process refuse the bundled database. Residual: an operator who skips
 ### Rollback
 A rollback across this release needs the previous release's compose files (its image has no `worker-start.sh`,
 `db-setup.sh` or bootstrap child: under this release's files db-setup fails and rab-api never starts) and a
-`crewflow_owner` URL with the derived password (`derive-runtime-url.js` with `CREWFLOW_DB_TARGET_FILE`, SENSITIVE: run it
-with `-T`, never with a remote logging driver) or a new password set with `01-crewflow-owner.sql` (runbook 3.6). Since
-option 2 this holds for a hand-made `crewflow_owner` too: its old password no longer works (TM-DB-5).
+`crewflow_owner` URL in `PG_DATABASE_URL`. With a `crewflow_owner` URL in compose.env it is that same URL (db-setup never
+changed its password). With an admin URL or the bundled db, the password is the content of the password file
+(`/run/crewflow/db-target/owner-password` on the `crewflow-db-target` volume; runbook 3.6), or a new password set with
+`01-crewflow-owner.sql`. The file is the live credential: read it only with container logging off, never in CI or a
+recorded session.
 
-- **Tests.** owner-credential / derive-runtime-url / owner-bootstrap / runtime-db-config / never-in-runtime-env /
-  deployment-identity specs (option 2: the `crewflow_owner` path, steps a and b, refusals before any write, the race
-  retry); the bootstrap harness `bootstrap-owner-login-check.ts` (PG 16/17/18, refusals, idempotent restart); the prestart
-  shell tests (target file, any non-empty `PG_DATABASE_URL` refused, the bounded wait, PID 1, one-off, worker-start.sh,
-  db-setup.sh); the compose gates and their tests (option 2 denials: a non-empty or interpolated `PG_DATABASE_URL` on
-  rab-api / rab-worker, a second interpolation, `PG_DATABASE_ADMIN_URL` anywhere, a credential in a health check, command
-  or label, db-setup's shape); area 6's `deploy-order-tests/run-db-setup-tests.cjs` (S1-S10C) on postgres 16, 17 and 18,
-  NOT yet re-run on option 2.
+- **Tests.** owner-credential / owner-password-file / derive-runtime-url / owner-bootstrap / db-target / runtime-login /
+  runtime-db-config / never-in-runtime-env / deployment-identity specs; the Worker's `owner-password-wait` spec; the
+  bootstrap harness `bootstrap-owner-login-check.ts` (OWNER-DB-FINAL A6: fresh, restart, lost file, stale file, missing
+  database, crewflow_owner URL unchanged, refusals, H1, N1, N2); the prestart shell tests (target and password files, any
+  non-empty `PG_DATABASE_URL` refused, APP_SECRET refused by db-setup.sh, the bounded wait, PID 1, one-off); the compose
+  gates and their tests (a variable carrying the crewflow_owner password, a mount at the password-file path other than
+  db-setup's volume (db-setup read-write, rab-api / rab-worker read-only), APP_SECRET on db-setup, a non-empty or
+  interpolated `PG_DATABASE_URL` on rab-api / rab-worker, `PG_DATABASE_ADMIN_URL`); the image gate (any file under
+  `/run/crewflow/db-target` in the image fails it); area 6's `deploy-order-tests/run-db-setup-tests.cjs` on postgres 16,
+  17 and 18, NOT yet re-run on the Helm model.
