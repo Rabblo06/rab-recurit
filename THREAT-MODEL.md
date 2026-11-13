@@ -7107,9 +7107,12 @@ Phase X Part 2 finding XA-08 (`docs/plans/PHASE-X-STAGE0-PART2.md` §2.6). Front
   `PG_DATABASE_URL`; then change APP_SECRET and start: step b logs in with the old derived password and sets the new one;
   the next start takes step a. Fallback: the admin URL in `PG_DATABASE_URL` for one start. Without either, db-setup refuses
   (64, a fixed message naming both), writes nothing, and the apps wait, then exit 75. Tested live on the bootstrap child,
-  PostgreSQL 16 and 18 (scenario `owner-url-app-secret-rotation-procedure`, CODE agent; not on a full stack). The
-  procedure puts the derived password into compose.env, so the deployment configuration holds a working `crewflow_owner`
-  credential from then on (TM-DB-1). A password changed by hand at the provider no longer sticks: the next db-setup sets the
+  PostgreSQL 16 and 18 (scenario `owner-url-app-secret-rotation-procedure`, CODE agent; not on a full stack). Exposure of
+  the procedure (security review M1; an in-process alternative is an open owner decision): the print step writes the live
+  `crewflow_owner` URL to the container's stdout, so it must run with container logging off or with no log shipper
+  reading that output; and from step 2 until step 3 succeeds, the LIVE credential is in `compose.env` and in db-setup's
+  container definition (TM-DB-1). After step 3 the URL left in `compose.env` holds the OLD derived password, which no
+  longer logs in (it is not a working credential any more). A password changed by hand at the provider no longer sticks: the next db-setup sets the
   derived one again.
 
 ### TM-DB-3 (changed by option 2) — a bootstrap runs with admin rights on every `up` (db-setup)
@@ -7134,13 +7137,23 @@ Phase X Part 2 finding XA-08 (`docs/plans/PHASE-X-STAGE0-PART2.md` §2.6). Front
   pgaudit with parameters), the SCRAM verifier, never the password, lands in the provider's log (measured: 2 occurrences
   per bootstrap with `log_statement=all`; the `crewflow_owner` path cannot turn logging off either). A verifier does not
   allow a login; offline guessing of a 256-bit HKDF output is infeasible. Each password reset leaves one "password
-  authentication failed for user crewflow_owner" line. No plaintext fallback (D6): a provider that refuses a pre-hashed
-  password (for example `credcheck.encrypted_password_allowed = off`) is refused (64) on both paths, and both messages name
-  the one working path: the database admin sets `crewflow_owner`'s password BY HAND to the derived one (`01-crewflow-owner.sql`
-  or `ALTER ROLE`; the server hashes it) and puts that `crewflow_owner` URL in `PG_DATABASE_URL`; db-setup then takes
-  step a and writes nothing. A provider-specific exception, not part of a normal install. The bootstrap harness ran live on
-  PostgreSQL 16 (28/28) and 18 (28/28) with `log_statement=all`, server-log scan included (CODE agent, DB-SETUP-LEAD.md
-  "Option 2 — SQL for the owner's review").
+  authentication failed for user crewflow_owner" line. No plaintext fallback (D6): a provider that refuses pre-hashed
+  passwords (for example `credcheck.encrypted_password_allowed = off`) is refused (64) on both paths, and the message says
+  this configuration is not supported. There is no workaround: a hand-set password would need the derived password printed
+  and typed into SQL (a plaintext password in the provider's statement log), and the derive command needs a target file
+  that a refused db-setup withdraws (security review M2).
+- **Session pinning (security review H1, CVE-2018-1058 class).** A `crewflow_owner` that owns the database (directly or
+  through an inherited role) could set a database-level `search_path` and plant an operator that the admin session's
+  unqualified `=` would then run with admin rights. Every bootstrap connection (admin, probe, both option-2 steps, the
+  re-verify login) is opened with the startup options `-c search_path=pg_catalog,pg_temp -c default_transaction_read_only=off`
+  (they override role and database defaults), and the first statement of every session sets the same search_path again.
+  In addition, the admin path refuses (64) before any write when `crewflow_owner` owns the database (directly or through
+  an inherited role), or when a database-wide or `crewflow_owner`-level `search_path` default exists. Tested live on PG16 and
+  PG18 (scenarios `h1-search-path-plant-db-owner` / `-inherited-owner`: refused, zero calls of the planted operator, and a
+  sanity query proving the plant was live; `h1-search-path-default-refused`). Residual: a database whose legitimate owner
+  setup or `search_path` default matches these rules must be changed before db-setup will run (the refusal names the fix).
+- **Evidence.** The bootstrap harness ran live on PostgreSQL 16 and 18 with `log_statement=all`, server-log scan included
+  (CODE agent, DB-SETUP-LEAD.md "Option 2 — SQL for the owner's review", REVISED).
 
 ### TM-DB-4 (changed) — the bundled database password in the environment
 - **Change.** `PG_DATABASE_PASSWORD` is the bundled db's superuser password, read by compose only: the db's

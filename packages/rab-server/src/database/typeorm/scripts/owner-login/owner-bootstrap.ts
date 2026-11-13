@@ -44,6 +44,7 @@ import {
   OWNER_BOOTSTRAP_ROLLBACK,
   OWNER_SELF_O1_SESSION,
   OWNER_SELF_O4C_DO,
+  BOOTSTRAP_SESSION_STARTUP_OPTIONS,
 } from './owner-bootstrap-sql';
 
 export const OWNER_BOOTSTRAP_EXIT = Object.freeze({ ok: 0, refused: 64, unexpected: 70 } as const);
@@ -65,13 +66,10 @@ export const MAX_ATTEMPTS = 3;
 export const RACE_SQLSTATES: ReadonlySet<string> = new Set(['42710', '23505', 'XX000', '40001', '40P01']);
 
 /**
- * The one working path when a provider refuses a pre-hashed (SCRAM verifier) password, the only form the bootstrap ever
- * sends: the operator sets crewflow_owner's password to the DERIVED one by hand, as the database admin (01-crewflow-owner.sql
- * for a new role, ALTER ROLE for an existing one; the server hashes it), and keeps that crewflow_owner URL in
- * PG_DATABASE_URL: db-setup then takes step a (the derived password works) and writes nothing.
+ * Security review M2: a provider that refuses a pre-hashed (SCRAM verifier) password, the only form the bootstrap ever sends,
+ * is NOT supported (D6: no plaintext path). The refusal says so and offers no workaround.
  */
-const PREHASHED_REFUSED_FALLBACK =
-  "Then set crewflow_owner's password by hand, as the database admin (01-crewflow-owner.sql, or ALTER ROLE for an existing crewflow_owner), to the password in the crewflow_owner URL the documented derive command prints for this APP_SECRET, and put that crewflow_owner URL in PG_DATABASE_URL: db-setup then only checks it and changes nothing.";
+const PREHASHED_REFUSED_UNSUPPORTED = 'If this provider refuses pre-hashed passwords, this configuration is not supported.';
 
 /** Every fixed line this module can print (tests assert them exactly). */
 export const OWNER_BOOTSTRAP_MESSAGES = Object.freeze({
@@ -82,8 +80,12 @@ export const OWNER_BOOTSTRAP_MESSAGES = Object.freeze({
   ownerNoPassword:
     "crewflow_owner's password matches neither the one derived from APP_SECRET nor the one in PG_DATABASE_URL. After an APP_SECRET change, put in PG_DATABASE_URL for one start either the database admin URL, or the crewflow_owner URL the documented derive command printed with the PREVIOUS APP_SECRET. Refusing.",
   ownerWriteRefused: (sqlstate: string) =>
-    `The database refused to change crewflow_owner's own password (SQLSTATE ${sqlstate}); the provider may refuse a pre-hashed password (for example credcheck.encrypted_password_allowed = off). ${PREHASHED_REFUSED_FALLBACK} Refusing.`,
+    `The database refused to change crewflow_owner's own password (SQLSTATE ${sqlstate}). ${PREHASHED_REFUSED_UNSUPPORTED} Refusing.`,
   pgTooOld: 'PostgreSQL 16 or later is required.',
+  ownerOwnsDatabase:
+    'crewflow_owner owns this database (directly or through a role it inherits). The database setup step runs as the admin here and refuses a database whose owner is the app login (it could plant objects the admin session would run). Make the admin login (or another role crewflow_owner is not a member of) the database owner. Refusing.',
+  searchPathDefault:
+    'A database-wide or crewflow_owner search_path default is set (ALTER DATABASE ... SET search_path / ALTER ROLE crewflow_owner SET search_path). Remove it (ALTER DATABASE ... RESET search_path / ALTER ROLE crewflow_owner RESET search_path). Refusing.',
   privilegedAttributes: (attributes: readonly string[]) =>
     // sql-injection-reviewed: an error MESSAGE (printed, never executed); attributes are the fixed attribute names of the facts row.
     `crewflow_owner exists with ${attributes.join(', ')}; Crewflow never runs as a privileged login. Fix the role (ALTER ROLE crewflow_owner NOSUPERUSER ...) or drop it; the API never changes an existing role's attributes.`,
@@ -107,7 +109,7 @@ export const OWNER_BOOTSTRAP_MESSAGES = Object.freeze({
   adminUnreachable: 'The database did not accept a connection within 60 s. Giving up (the restart policy retries).',
   adminConnectFailed: (code: string) => `Connecting with PG_DATABASE_URL failed (${code}).`,
   writeRefused: (sqlstate: string) =>
-    `The database refused to create or update crewflow_owner (SQLSTATE ${sqlstate}): the PG_DATABASE_URL login lacks a needed right, or the provider refuses a pre-hashed password (for example credcheck.encrypted_password_allowed = off). In the second case: ${PREHASHED_REFUSED_FALLBACK} Refusing.`,
+    `The database refused to create or update crewflow_owner (SQLSTATE ${sqlstate}): the PG_DATABASE_URL login lacks a needed right, or the provider refuses pre-hashed passwords. ${PREHASHED_REFUSED_UNSUPPORTED} Refusing.`,
   writeFailed: (sqlstate: string) => `Setting up crewflow_owner failed (SQLSTATE ${sqlstate}). Nothing was committed.`,
   reverifyFailed: 'crewflow_owner is not exactly as required after the setup step (attributes, grant or login). Refusing to continue.',
   raceRetry: 'crewflow_owner was being created by another start at the same moment; reading the facts again.',
@@ -166,6 +168,10 @@ export interface OwnerFacts {
   adminHasAdminOption: boolean;
   oPrivilegedMemberships: number | null;
   oHasDbGrant: boolean;
+  /** H1: crewflow_owner owns the current database, directly or through an inherited role. */
+  oOwnsDb: boolean;
+  /** H1: a database-wide or crewflow_owner-level search_path default exists. */
+  searchPathDefaultSet: boolean;
 }
 
 type Row = Record<string, unknown>;
@@ -192,6 +198,8 @@ export function factsFromRow(row: Row | undefined): OwnerFacts {
     adminHasAdminOption: row.admin_has_admin_option === true,
     oPrivilegedMemberships: count === null || count === undefined ? null : Number(count),
     oHasDbGrant: row.o_has_db_grant === true,
+    oOwnsDb: row.o_owns_db === true,
+    searchPathDefaultSet: row.search_path_default_set === true,
   };
 }
 
@@ -215,6 +223,10 @@ export function privilegedAttributesOf(f: OwnerFacts): string[] {
 export function decideBeforeProbe(f: OwnerFacts): string[] {
   const notes: string[] = [];
   if (!(f.serverVersionNum >= MIN_SERVER_VERSION_NUM)) throw new OwnerBootstrapRefusal(OWNER_BOOTSTRAP_MESSAGES.pgTooOld);
+  // H1 (defence in depth beside the pinned search_path): the admin session never works in a database the app login owns,
+  // nor under a planted search_path default.
+  if (f.oOwnsDb) throw new OwnerBootstrapRefusal(OWNER_BOOTSTRAP_MESSAGES.ownerOwnsDatabase);
+  if (f.searchPathDefaultSet) throw new OwnerBootstrapRefusal(OWNER_BOOTSTRAP_MESSAGES.searchPathDefault);
   const privileged = privilegedAttributesOf(f);
   if (privileged.length > 0) throw new OwnerBootstrapRefusal(OWNER_BOOTSTRAP_MESSAGES.privilegedAttributes(privileged));
   if (f.ownerExists && f.oCreateRole === false) notes.push(OWNER_BOOTSTRAP_MESSAGES.noCreateRoleHardened);
@@ -571,6 +583,7 @@ export async function setupOwnerUrlWithIo(io: OwnerUrlIo, retryWindowMs = ADMIN_
   }
   if (derived) {
     try {
+      await derived.query(OWNER_BOOTSTRAP_Q0_SESSION);
       await checkOwnerSelf(derived, io, true);
       return { ...OWNER_URL_UNCHANGED };
     } finally {
@@ -610,6 +623,7 @@ export async function setupOwnerUrlWithIo(io: OwnerUrlIo, retryWindowMs = ADMIN_
       throw new OwnerBootstrapFailure(OWNER_BOOTSTRAP_MESSAGES.reverifyFailed, errorCode(error));
     }
     try {
+      await verify.query(OWNER_BOOTSTRAP_Q0_SESSION);
       await checkOwnerSelf(verify, io, false);
     } catch (error) {
       if (error instanceof OwnerBootstrapRefusal) throw new OwnerBootstrapFailure(OWNER_BOOTSTRAP_MESSAGES.reverifyFailed, error.code);
@@ -643,6 +657,45 @@ export function failureResult(error: unknown): OwnerBootstrapResult {
 /** The one place a connection is constructed here: the factory's explicit config, with this step's fixed application_name. */
 function openClient(config: PgDriverConfig): Client {
   return new Client(config);
+}
+
+/** H1: every bootstrap connection carries the fixed session pin (search_path, read-write) as startup options. */
+function pinned(config: PgDriverConfig): PgDriverConfig {
+  const options = [config.options, BOOTSTRAP_SESSION_STARTUP_OPTIONS].filter((o) => typeof o === 'string' && o !== '').join(' ');
+  return { ...config, options };
+}
+
+/**
+ * Every driver config the bootstrap child uses: the URL's own login (the admin, or crewflow_owner in option-2 step b),
+ * the probe and the derived crewflow_owner session (option-2 step a and the re-verify), each pinned (H1). Exported for the
+ * spec that asserts the pin is on all of them.
+ */
+export function bootstrapDriverConfigs(resolved: ResolvedPgEnvironment, runtimeUrl: string): { admin: PgDriverConfig; probe: PgDriverConfig; derived: PgDriverConfig } {
+  const admin = pinned({
+    ...pgClientConfig(resolved, {
+      endpoint: 'primary',
+      purpose: 'owner-bootstrap',
+      sessionAffinity: true,
+      statementTimeoutMs: 30_000,
+      queryTimeoutMs: 35_000,
+      idleInTransactionTimeoutMs: 60_000,
+      connectTimeoutMs: 10_000,
+    }),
+    application_name: OWNER_BOOTSTRAP_APPLICATION_NAME,
+  });
+  const probe = pinned({
+    ...pgClientConfig(resolved, {
+      url: runtimeUrl,
+      urlLabel: 'the derived crewflow_owner connection',
+      purpose: 'owner-probe',
+      sessionAffinity: true,
+      statementTimeoutMs: 10_000,
+      queryTimeoutMs: 15_000,
+      connectTimeoutMs: 10_000,
+    }),
+    application_name: OWNER_PROBE_APPLICATION_NAME,
+  });
+  return { admin, probe, derived: { ...probe, application_name: OWNER_BOOTSTRAP_APPLICATION_NAME } };
 }
 
 /** One connected session (one attempt; the callers retry). */
@@ -719,30 +772,7 @@ export async function runOwnerBootstrap(env: Record<string, string | undefined>,
       throw error;
     }
 
-    const adminConfig: PgDriverConfig = {
-      ...pgClientConfig(resolved, {
-        endpoint: 'primary',
-        purpose: 'owner-bootstrap',
-        sessionAffinity: true,
-        statementTimeoutMs: 30_000,
-        queryTimeoutMs: 35_000,
-        idleInTransactionTimeoutMs: 60_000,
-        connectTimeoutMs: 10_000,
-      }),
-      application_name: OWNER_BOOTSTRAP_APPLICATION_NAME,
-    };
-    const probeConfig: PgDriverConfig = {
-      ...pgClientConfig(resolved, {
-        url: plan.runtimeUrl,
-        urlLabel: 'the derived crewflow_owner connection',
-        purpose: 'owner-probe',
-        sessionAffinity: true,
-        statementTimeoutMs: 10_000,
-        queryTimeoutMs: 15_000,
-        connectTimeoutMs: 10_000,
-      }),
-      application_name: OWNER_PROBE_APPLICATION_NAME,
-    };
+    const { admin: adminConfig, probe: probeConfig, derived: derivedConfig } = bootstrapDriverConfigs(resolved, plan.runtimeUrl);
 
     const io: OwnerBootstrapIo = {
       openAdmin: () => connectSession(adminConfig),
@@ -769,7 +799,7 @@ export async function runOwnerBootstrap(env: Record<string, string | undefined>,
         ? await setupOwnerUrlWithIo(
             {
               openUrl: () => connectSession(adminConfig),
-              openDerived: () => connectSession({ ...probeConfig, application_name: OWNER_BOOTSTRAP_APPLICATION_NAME }),
+              openDerived: () => connectSession(derivedConfig),
               probeOwner: io.probeOwner,
               verifier: io.verifier,
               log,

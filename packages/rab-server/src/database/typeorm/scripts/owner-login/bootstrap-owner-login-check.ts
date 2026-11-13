@@ -34,6 +34,7 @@ import { buildRuntimeDatabaseUrl, deriveOwnerPassword, scramSha256Verifier } fro
 import { createPgClientForUrl } from '../../../postgres';
 import { DERIVE_EXIT, runDeriveRuntimeUrl } from './derive-runtime-url';
 import { OWNER_BOOTSTRAP_MESSAGES, OWNER_BOOTSTRAP_RESULT_PREFIX, OwnerBootstrapResult } from './owner-bootstrap';
+import { OWNER_BOOTSTRAP_Q4B_SET_INPUTS, OWNER_SELF_O4C_DO } from './owner-bootstrap-sql';
 
 /**
  * Option A (PR #125): every child writes the credential-free target here (CREWFLOW_DB_TARGET_FILE). reset() seeds a STALE
@@ -784,6 +785,113 @@ const SCENARIOS: Scenario[] = [
       assertCleanOutput(run);
       expect(run.code === 64 && run.result?.outcome === 'refused', `seam outside test: exit ${run.code}`);
       return ['exit 64'];
+    },
+  },
+  // -------------------------------------------------------------------------------------------------------------------
+  // Security review H1 (CVE-2018-1058 class): a crewflow_owner that owns the database (directly, or through an INHERITed
+  // membership of the owning role) plants a schema, a `name = name` operator that records current_user into a
+  // PUBLIC-insertable table, and a database-level search_path that puts that schema before pg_catalog. The bootstrap run
+  // with the (superuser) admin URL must refuse (64) AND the planted operator must never have run as the admin. A sanity
+  // query afterwards (an unpinned superuser session) proves the plant is live, so "zero calls" means something.
+  // -------------------------------------------------------------------------------------------------------------------
+  ...(['db-owner', 'inherited-owner'] as const).map(
+    (variant): Scenario => ({
+      id: `h1-search-path-plant-${variant}`,
+      covers: `H1: crewflow_owner ${variant === 'db-owner' ? 'OWNS the database' : 'INHERITs the role that owns the database'}; planted operator + database search_path; admin run refused (64), planted code never ran as the admin`,
+      async run(ctx) {
+        const ownerPw = remember(secret());
+        let db: string;
+        if (variant === 'db-owner') {
+          await sql(ctx.admin, 'postgres', `CREATE ROLE crewflow_owner LOGIN NOSUPERUSER NOBYPASSRLS NOREPLICATION NOCREATEDB CREATEROLE INHERIT`);
+          await setOwnerPassword(ctx.admin, ownerPw);
+          db = await createDb(ctx, 'h1o', OWNER);
+        } else {
+          const dbo = `obc_dbo_${RUN}`;
+          await sql(ctx.admin, 'postgres', `CREATE ROLE ${ident(dbo)} NOLOGIN NOSUPERUSER NOBYPASSRLS`);
+          ctx.roles.push(dbo);
+          NAMES.add(dbo);
+          await sql(ctx.admin, 'postgres', `CREATE ROLE crewflow_owner LOGIN NOSUPERUSER NOBYPASSRLS NOREPLICATION NOCREATEDB CREATEROLE INHERIT`);
+          await setOwnerPassword(ctx.admin, ownerPw);
+          await sql(ctx.admin, 'postgres', `GRANT ${ident(dbo)} TO crewflow_owner`);
+          db = await createDb(ctx, 'h1i', dbo);
+          await sql(ctx.admin, 'postgres', `GRANT CONNECT, CREATE, TEMPORARY ON DATABASE ${ident(db)} TO crewflow_owner WITH GRANT OPTION`);
+        }
+        // The plant, made as crewflow_owner itself (never as the superuser).
+        const plant = createPgClientForUrl(urlFor(ctx.admin, OWNER, ownerPw, db), 'the planting crewflow_owner session', { purpose: 'check' }, {});
+        await plant.connect();
+        try {
+          await plant.query(`CREATE SCHEMA h1x`);
+          await plant.query(`CREATE TABLE h1x.calls (who text NOT NULL, at timestamptz NOT NULL DEFAULT pg_catalog.now())`);
+          await plant.query(`GRANT USAGE ON SCHEMA h1x TO PUBLIC`);
+          await plant.query(`GRANT INSERT ON h1x.calls TO PUBLIC`);
+          await plant.query(
+            `CREATE FUNCTION h1x.spy_eq(a name, b name) RETURNS boolean LANGUAGE plpgsql AS $f$ BEGIN INSERT INTO h1x.calls(who) VALUES (current_user::text); RETURN a::text OPERATOR(pg_catalog.=) b::text; END $f$`,
+          );
+          await plant.query(`GRANT EXECUTE ON FUNCTION h1x.spy_eq(name, name) TO PUBLIC`);
+          await plant.query(`CREATE OPERATOR h1x.= (LEFTARG = name, RIGHTARG = name, FUNCTION = h1x.spy_eq)`);
+          await plant.query(`ALTER DATABASE ${ident(db)} SET search_path = h1x, pg_catalog`);
+        } finally {
+          await plant.end();
+        }
+        const calls = async (): Promise<number> => Number((await sql(ctx.admin, db, `SELECT pg_catalog.count(*) AS n FROM h1x.calls`))[0]?.n ?? -1);
+        const before = await ownerState(ctx.admin);
+        const run = await runChild(suUrl(ctx, db), remember(appSecret()));
+        assertCleanOutput(run);
+        expectResult(run, 64, 'refused', `H1 ${variant}`);
+        expectLine(run, OWNER_BOOTSTRAP_MESSAGES.ownerOwnsDatabase, `H1 ${variant}`);
+        expect((await calls()) === 0, `H1 ${variant}: the planted operator ran (${await calls()} call(s)) during the admin bootstrap`);
+        expect(JSON.stringify(await ownerState(ctx.admin)) === JSON.stringify(before), `H1 ${variant}: crewflow_owner changed`);
+        // Sanity: an UNPINNED superuser session in that database does run the planted operator (the plant is live).
+        await sql(ctx.admin, db, `SELECT 'a'::name = 'a'::name AS same`);
+        const live = await calls();
+        expect(live >= 1, `H1 ${variant}: the sanity query did not reach the planted operator, so the zero above proves nothing`);
+        return [`refused 64 (${variant}); planted operator calls during the bootstrap: 0; sanity (unpinned superuser) calls: ${live}`];
+      },
+    }),
+  ),
+  {
+    id: 'h1-search-path-default-refused',
+    covers: 'H1 (fix 3): a database-wide search_path default (set by the superuser, crewflow_owner not the owner) is refused (64) before any write',
+    async run(ctx) {
+      const db = await createDb(ctx, 'h1s');
+      await sql(ctx.admin, 'postgres', `ALTER DATABASE ${ident(db)} SET search_path = public, pg_catalog`);
+      const run = await runChild(suUrl(ctx, db), remember(appSecret()));
+      assertCleanOutput(run);
+      expectResult(run, 64, 'refused', 'search_path default');
+      expectLine(run, OWNER_BOOTSTRAP_MESSAGES.searchPathDefault, 'search_path default');
+      expect(!(await ownerState(ctx.admin)).exists, 'search_path default: crewflow_owner was created anyway');
+      return ['exit 64, fixed message, nothing created'];
+    },
+  },
+  {
+    id: 'i1-o4c-malformed-verifier',
+    covers: 'I1: O4c refuses a malformed verifier with SQLSTATE 22023 and changes nothing (run directly as crewflow_owner)',
+    async run(ctx) {
+      const db = await createDb(ctx, 'i1');
+      const pw = remember(secret());
+      await presetOwner(ctx, db, '', pw);
+      const before = await ownerState(ctx.admin);
+      const c = createPgClientForUrl(urlFor(ctx.admin, OWNER, pw, db), 'crewflow_owner', { purpose: 'check' }, {});
+      await c.connect();
+      const codes: string[] = [];
+      try {
+        for (const bad of ['plaintext-password-0123456789', 'SCRAM-SHA-256$4096:c2FsdA==', 'md5' + '0'.repeat(32)]) {
+          await c.query('BEGIN');
+          await c.query(OWNER_BOOTSTRAP_Q4B_SET_INPUTS, [bad, 'true']);
+          try {
+            await c.query(OWNER_SELF_O4C_DO);
+            codes.push('none');
+          } catch (error) {
+            codes.push(String((error as { code?: unknown }).code ?? 'no-code'));
+          }
+          await c.query('ROLLBACK');
+        }
+      } finally {
+        await c.end();
+      }
+      expect(codes.every((code) => code === '22023'), `I1: expected 22023 for every malformed verifier, got ${codes.join(',')}`);
+      expect((await ownerState(ctx.admin)).passwordHash === before.passwordHash, 'I1: rolpassword changed');
+      return [`3 malformed verifiers -> ${codes.join(', ')}; rolpassword unchanged`];
     },
   },
   {

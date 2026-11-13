@@ -8,6 +8,7 @@ import * as path from 'path';
 
 import { deriveOwnerPassword, OWNER_CREDENTIAL_MESSAGES } from '../../../owner-login/owner-credential';
 import {
+  bootstrapDriverConfigs,
   bootstrapOwnerWithIo,
   classifyAdminConnectError,
   classifyWriteError,
@@ -40,7 +41,10 @@ import {
   OWNER_SELF_O1_SESSION,
   OWNER_SELF_O4C_DO,
   OWNER_SELF_STATEMENTS,
+  BOOTSTRAP_SESSION_STARTUP_OPTIONS,
 } from './owner-bootstrap-sql';
+import { planDbSetup, scramSha256Verifier } from '../../../owner-login/owner-credential';
+import { resolvePgEnvironment } from '../../../postgres';
 
 const SECRET = 'a'.repeat(16) + 'B'.repeat(16) + 'unit-test-only-secret';
 const ADMIN_PW = 'adminpw0123456789';
@@ -63,6 +67,8 @@ const base: OwnerFacts = {
   adminHasAdminOption: false,
   oPrivilegedMemberships: null,
   oHasDbGrant: false,
+  oOwnsDb: false,
+  searchPathDefaultSet: false,
 };
 const existing: OwnerFacts = {
   ...base,
@@ -605,7 +611,7 @@ describe('owner bootstrap, option 2: PG_DATABASE_URL is crewflow_owner itself (s
     const f = ownerIo({ derivedErrors: [''] });
     const result = await setupOwnerUrlWithIo(f.io, 0);
     expect(result).toEqual({ outcome: 'pass-through', exitCode: 0, created: false, passwordSet: false, grantAdded: false, code: null });
-    expect(f.sent.map((q) => q.text)).toEqual([OWNER_SELF_O1_SESSION, OWNER_BOOTSTRAP_Q2_FACTS]);
+    expect(f.sent.map((q) => q.text)).toEqual([OWNER_BOOTSTRAP_Q0_SESSION, OWNER_SELF_O1_SESSION, OWNER_BOOTSTRAP_Q2_FACTS]);
     expect(f.sent.every((q) => q.via === 'derived')).toBe(true);
   });
 
@@ -642,7 +648,7 @@ describe('owner bootstrap, option 2: PG_DATABASE_URL is crewflow_owner itself (s
     const inputs = f.sent.find((q) => q.text === OWNER_BOOTSTRAP_Q4B_SET_INPUTS)!;
     expect(inputs.values).toEqual([VERIFIER, 'true']);
     // Then the re-verify on a NEW session with the derived password.
-    expect(f.sent.filter((q) => q.via === 'derived').map((q) => q.text)).toEqual([OWNER_SELF_O1_SESSION, OWNER_BOOTSTRAP_Q2_FACTS]);
+    expect(f.sent.filter((q) => q.via === 'derived').map((q) => q.text)).toEqual([OWNER_BOOTSTRAP_Q0_SESSION, OWNER_SELF_O1_SESSION, OWNER_BOOTSTRAP_Q2_FACTS]);
   });
 
   it.each<[string, Partial<OwnerFacts>]>([
@@ -767,5 +773,60 @@ describe('owner bootstrap, option 2: PG_DATABASE_URL is crewflow_owner itself (s
     expect(OWNER_SELF_O4C_DO).toContain("session_user::text <> 'crewflow_owner' OR current_user::text <> session_user::text");
     // Never anything but the password: no CREATE ROLE, no GRANT, no attribute, no extension.
     expect(OWNER_SELF_O4C_DO).not.toMatch(/CREATE |GRANT |EXTENSION|SUPERUSER |BYPASSRLS |VALID UNTIL/);
+  });
+});
+
+describe('owner bootstrap: security review H1 / L2 / M2 / I1 / I2', () => {
+  it('H1/L2: every bootstrap driver config (admin, probe, derived) carries search_path=pg_catalog,pg_temp and default_transaction_read_only=off', () => {
+    for (const url of [ADMIN_URL, 'postgres://crewflow_owner:ownerpw0123456789@db.internal.example:5432/crewflow_unit']) {
+      const env = { PG_DATABASE_URL: url, APP_SECRET: SECRET, NODE_ENV: 'test' };
+      const plan = planDbSetup({ databaseUrl: url, appSecret: SECRET });
+      const configs = bootstrapDriverConfigs(resolvePgEnvironment(env, { processRole: 'migrate' }), plan.runtimeUrl);
+      for (const [name, config] of Object.entries(configs)) {
+        const options = String(config.options ?? '');
+        expect({ name, pinned: options.includes('-c search_path=pg_catalog,pg_temp') }).toEqual({ name, pinned: true });
+        expect({ name, rw: options.includes('-c default_transaction_read_only=off') }).toEqual({ name, rw: true });
+        // The pin comes LAST, after the factory's own options (a later -c wins in the startup packet).
+        expect(options.endsWith(BOOTSTRAP_SESSION_STARTUP_OPTIONS)).toBe(true);
+      }
+    }
+  });
+
+  it('H1: Q0 pins search_path before anything else; Q2 reads the database owner and the search_path defaults', () => {
+    expect(OWNER_BOOTSTRAP_Q0_SESSION.startsWith('SET search_path TO pg_catalog, pg_temp;')).toBe(true);
+    expect(OWNER_BOOTSTRAP_Q2_FACTS).toContain("pg_catalog.pg_has_role(o.oid, d.datdba, 'USAGE')");
+    expect(OWNER_BOOTSTRAP_Q2_FACTS).toContain('FROM pg_catalog.pg_db_role_setting s');
+  });
+
+  it('H1: the admin path refuses (64) a database crewflow_owner owns, and a database-wide / crewflow_owner search_path default', () => {
+    expect(refusalOf(() => decideBeforeProbe({ ...existing, oOwnsDb: true, searchPathDefaultSet: false }))).toBe(OWNER_BOOTSTRAP_MESSAGES.ownerOwnsDatabase);
+    expect(refusalOf(() => decideBeforeProbe({ ...existing, oOwnsDb: false, searchPathDefaultSet: true }))).toBe(OWNER_BOOTSTRAP_MESSAGES.searchPathDefault);
+    expect(decideBeforeProbe({ ...existing, oOwnsDb: false, searchPathDefaultSet: false })).toEqual([]);
+  });
+
+  it('M2: the pre-hashed refusals say the configuration is not supported and offer no workaround', () => {
+    for (const message of [OWNER_BOOTSTRAP_MESSAGES.writeRefused('42501'), OWNER_BOOTSTRAP_MESSAGES.ownerWriteRefused('42501')]) {
+      expect(message).toContain('If this provider refuses pre-hashed passwords, this configuration is not supported.');
+      expect(message).not.toMatch(/by hand|ALTER ROLE|01-crewflow-owner|derive command/);
+    }
+  });
+
+  it('I1: the O4c shape check accepts a real verifier and rejects malformed values (the 22023 branch)', () => {
+    const match = /OPERATOR\(pg_catalog\.~\) '([^']+)'/.exec(OWNER_SELF_O4C_DO);
+    expect(match).not.toBeNull();
+    const pattern = new RegExp(match![1]!);
+    expect(pattern.test(scramSha256Verifier('a'.repeat(64)))).toBe(true);
+    for (const bad of ['', 'a'.repeat(64), 'SCRAM-SHA-256$4096:c2FsdA==', 'SCRAM-SHA-256$x:c2FsdA==$a:b', 'SCRAM-SHA-256$4096:c2FsdA==$a:b;DROP', 'md5abc', 'SCRAM-SHA-256$4096:c2FsdA==$a:b\n']) {
+      expect({ bad, ok: pattern.test(bad) }).toEqual({ bad, ok: false });
+    }
+    expect(OWNER_SELF_O4C_DO).toContain("RAISE EXCEPTION 'not a pre-hashed verifier' USING ERRCODE = '22023';");
+  });
+
+  it('I2: O4c re-checks the recursive privileged membership inside the statement, before the ALTER', () => {
+    const at = (needle: string) => OWNER_SELF_O4C_DO.indexOf(needle);
+    expect(at('WITH RECURSIVE up(oid)')).toBeGreaterThan(0);
+    expect(at("RAISE EXCEPTION 'crewflow_owner is a member of a privileged role'")).toBeGreaterThan(0);
+    expect(at('WITH RECURSIVE up(oid)')).toBeLessThan(at('ALTER ROLE crewflow_owner PASSWORD'));
+    for (const role of ['pg_read_all_data', 'pg_write_all_data', 'pg_execute_server_program', 'pg_maintain']) expect(OWNER_SELF_O4C_DO).toContain(`'${role}'`);
   });
 });

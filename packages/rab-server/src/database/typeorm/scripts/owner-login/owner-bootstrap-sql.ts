@@ -16,8 +16,22 @@
 /** "crewboot" (0x63726577626f6f74). Transaction-scoped: one bootstrap at a time per database (two API replicas). */
 export const OWNER_BOOTSTRAP_LOCK_KEY = '7165901520526864244';
 
-/** Q0: user-settable; stops a failing statement's parameters being logged. */
-export const OWNER_BOOTSTRAP_Q0_SESSION = `SET log_parameter_max_length_on_error = 0;`;
+/**
+ * Q0 (REVISED, security review H1): first pin the session's search_path to pg_catalog (then pg_temp, which is never searched
+ * for functions or operators), so no unqualified operator or function in Q1 / Q2 / the DO blocks can resolve to an object
+ * a schema owner planted (CVE-2018-1058 class: e.g. a database-level `search_path = x, pg_catalog` and an `x.=` operator).
+ * The same pin is also sent as a startup option on every bootstrap connection (BOOTSTRAP_SESSION_STARTUP_OPTIONS), which
+ * overrides any role- or database-level search_path default. Then: user-settable; stops a failing statement's parameters
+ * being logged. Two statements, one simple-protocol message (no bind parameters).
+ */
+export const OWNER_BOOTSTRAP_Q0_SESSION = `SET search_path TO pg_catalog, pg_temp; SET log_parameter_max_length_on_error = 0;`;
+
+/**
+ * Startup options (libpq `options`) appended to EVERY bootstrap connection (admin, probe, option-2 steps a and b, the
+ * re-verify login). They win over ALTER ROLE / ALTER DATABASE ... SET defaults, so a planted search_path or a forced
+ * read-only default never applies to these sessions. Fixed text; a spec asserts every driver config carries it.
+ */
+export const BOOTSTRAP_SESSION_STARTUP_OPTIONS = '-c search_path=pg_catalog,pg_temp -c default_transaction_read_only=off';
 
 /** Q1: superuser-only settings; a no-op row for a non-superuser admin (same trick as 01-crewflow-owner.sql). */
 export const OWNER_BOOTSTRAP_Q1_SUPERUSER_LOGGING = `SELECT pg_catalog.set_config('log_statement', 'none', false),
@@ -25,7 +39,12 @@ export const OWNER_BOOTSTRAP_Q1_SUPERUSER_LOGGING = `SELECT pg_catalog.set_confi
        pg_catalog.set_config('log_parameter_max_length', '0', false)
   FROM pg_catalog.pg_roles WHERE rolname = current_user AND rolsuper;`;
 
-/** Q2: the facts, one read, no writes. (`pg_maintain` exists only on PG17+; naming a missing role in IN (...) is harmless.) */
+/**
+ * Q2 (REVISED, security review H1): the facts, one read, no writes. (`pg_maintain` exists only on PG17+; naming a missing
+ * role in IN (...) is harmless.) Two new facts for the admin path's refusal: o_owns_db (crewflow_owner owns the current
+ * database, directly or through an inherited role) and search_path_default_set (a database-wide or crewflow_owner-level
+ * search_path default exists in pg_db_role_setting).
+ */
 export const OWNER_BOOTSTRAP_Q2_FACTS = `SELECT pg_catalog.current_setting('server_version_num')::int                      AS server_version_num,
        current_user::text                                                         AS admin,
        a.rolsuper                                                                 AS admin_super,
@@ -58,8 +77,16 @@ export const OWNER_BOOTSTRAP_Q2_FACTS = `SELECT pg_catalog.current_setting('serv
         AND pg_catalog.has_database_privilege(o.oid, pg_catalog.current_database(), 'CONNECT WITH GRANT OPTION')
         AND pg_catalog.has_database_privilege(o.oid, pg_catalog.current_database(), 'CREATE WITH GRANT OPTION')
         AND pg_catalog.has_database_privilege(o.oid, pg_catalog.current_database(), 'TEMPORARY WITH GRANT OPTION'))
-                                                                                  AS o_has_db_grant
+                                                                                  AS o_has_db_grant,
+       (o.oid IS NOT NULL AND pg_catalog.pg_has_role(o.oid, d.datdba, 'USAGE'))  AS o_owns_db,
+       EXISTS (SELECT 1
+                 FROM pg_catalog.pg_db_role_setting s
+                 CROSS JOIN LATERAL pg_catalog.unnest(s.setconfig) AS c(setting)
+                WHERE ((s.setdatabase = d.oid AND s.setrole = 0) OR (o.oid IS NOT NULL AND s.setrole = o.oid))
+                  AND pg_catalog.lower(pg_catalog.split_part(c.setting, '=', 1)) = 'search_path')
+                                                                                  AS search_path_default_set
   FROM pg_catalog.pg_roles a
+  JOIN pg_catalog.pg_database d ON d.datname = pg_catalog.current_database()
   LEFT JOIN pg_catalog.pg_roles o ON o.rolname = 'crewflow_owner'
  WHERE a.rolname = current_user;`;
 
@@ -154,15 +181,30 @@ BEGIN
     IF session_user::text <> 'crewflow_owner' OR current_user::text <> session_user::text THEN
       RAISE EXCEPTION 'not the crewflow_owner session' USING ERRCODE = '42501';
     END IF;
-    SELECT rolsuper, rolbypassrls, rolreplication, rolcreatedb, rolcanlogin, rolinherit
+    SELECT oid, rolsuper, rolbypassrls, rolreplication, rolcreatedb, rolcanlogin, rolinherit
       INTO r FROM pg_catalog.pg_roles WHERE rolname = 'crewflow_owner';
     IF NOT FOUND OR r.rolsuper OR r.rolbypassrls OR r.rolreplication OR r.rolcreatedb OR NOT r.rolcanlogin OR NOT r.rolinherit THEN
       RAISE EXCEPTION 'crewflow_owner has privileged or wrong attributes' USING ERRCODE = '42501';
     END IF;
-    -- Never a plaintext password: only the pre-hashed SCRAM form (mechanism$iterations:salt$keys). Written without the
-    -- literal verifier prefix so the server-log hygiene scans keep meaning "a verifier value appeared".
-    IF v_verifier IS NULL OR pg_catalog.split_part(v_verifier, '$', 1) <> 'SCRAM-SHA-256'
-       OR pg_catalog.split_part(v_verifier, '$', 3) = '' THEN
+    -- The privileged-membership refusal again, inside the statement (a grant made since the checks outside is caught).
+    IF EXISTS (
+      WITH RECURSIVE up(oid) AS (
+        SELECT r.oid
+        UNION
+        SELECT m.roleid FROM pg_catalog.pg_auth_members m JOIN up ON m.member = up.oid)
+      SELECT 1 FROM up JOIN pg_catalog.pg_roles x ON x.oid = up.oid
+       WHERE x.oid <> r.oid
+         AND (x.rolsuper OR x.rolbypassrls
+              OR x.rolname IN ('pg_read_all_data','pg_write_all_data','pg_execute_server_program',
+                               'pg_read_server_files','pg_write_server_files','pg_create_subscription',
+                               'pg_signal_backend','pg_checkpoint','pg_maintain'))) THEN
+      RAISE EXCEPTION 'crewflow_owner is a member of a privileged role' USING ERRCODE = '42501';
+    END IF;
+    -- Never a plaintext password: only the full pre-hashed SCRAM shape (mechanism$iterations:salt$storedkey:serverkey).
+    -- The pattern spells the dollar signs as [$], so the verifier prefix never appears in the SQL text (the server-log
+    -- hygiene scans keep meaning "a verifier value appeared").
+    IF v_verifier IS NULL
+       OR NOT (v_verifier OPERATOR(pg_catalog.~) '^SCRAM-SHA-256[$][0-9]+:[A-Za-z0-9+/=]+[$][A-Za-z0-9+/=]+:[A-Za-z0-9+/=]+$') THEN
       RAISE EXCEPTION 'not a pre-hashed verifier' USING ERRCODE = '22023';
     END IF;
     EXECUTE pg_catalog.format('ALTER ROLE crewflow_owner PASSWORD %L', v_verifier);
