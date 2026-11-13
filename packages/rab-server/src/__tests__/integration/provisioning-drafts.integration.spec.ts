@@ -14,7 +14,7 @@
  * failure injection and catalog reads only through the disposable cluster's superuser connection.
  */
 import 'reflect-metadata';
-import { ForbiddenException, INestApplication, NotFoundException, ValidationPipe } from '@nestjs/common';
+import { ForbiddenException, INestApplication, NotFoundException } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
 import { randomUUID } from 'node:crypto';
 import { Client } from 'pg';
@@ -44,6 +44,7 @@ import { WorkspaceProvisioningService } from '../../modules/manager-workspace/se
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
 import { withServerProvisioningDeferred } from '../../modules/manager-workspace/services/workspace-provisioning-test-seam';
+import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-pipe';
 
 const { appUrl } = resolveIntegrationTestDatabase(process.env);
 
@@ -121,8 +122,7 @@ describe('Phase B P8 provisioning guards + counts-only health (migrations 178672
 
   beforeAll(async () => {
     const moduleRef = await Test.createTestingModule({ imports: [AppModule] }).compile();
-    app = moduleRef.createNestApplication();
-    app.useGlobalPipes(new ValidationPipe({ whitelist: true, forbidNonWhitelisted: true, transform: true }));
+    app = applyGlobalValidationPipe(moduleRef.createNestApplication());
     await app.init();
     runtime = app.get(DataSource);
     admin = createAdminDataSource();

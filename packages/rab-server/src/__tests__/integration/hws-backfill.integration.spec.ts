@@ -16,6 +16,7 @@ import { Client } from 'pg';
 import { DataSource } from 'typeorm';
 
 import { AppModule } from '../../app.module';
+import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-pipe';
 import { PasswordHashingService } from '../../engine/core-modules/auth/services/password-hashing.service';
 import { SchemaResolverService, WorkspaceRoutingError } from '../../engine/core-modules/tenant/schema-resolver.service';
 import { TenantContextService } from '../../engine/core-modules/tenant/tenant-context.service';
@@ -85,7 +86,7 @@ describeIfDb('hws:backfill (integration)', () => {
 
   beforeAll(async () => {
     const moduleRef = await Test.createTestingModule({ imports: [AppModule] }).compile();
-    app = moduleRef.createNestApplication();
+    app = applyGlobalValidationPipe(moduleRef.createNestApplication());
     await app.init();
     dataSource = app.get(DataSource);
     passwordHashing = app.get(PasswordHashingService);

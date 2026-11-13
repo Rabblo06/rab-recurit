@@ -1,5 +1,5 @@
 import 'reflect-metadata';
-import { INestApplication, ValidationPipe } from '@nestjs/common';
+import { INestApplication } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
 import { randomUUID } from 'node:crypto';
 import request from 'supertest';
@@ -8,6 +8,7 @@ import { DataSource } from 'typeorm';
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { MockOidcProvider } from './helpers/mock-oidc-provider';
 import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
+import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-pipe';
 
 /**
  * Cutover safety: with AUTH_OAUTH_HANDOFF_ENABLED unset (the default), the ORIGINAL direct-cookie callback keeps
@@ -37,8 +38,7 @@ describeIfDb('Google sign-in, legacy direct-cookie mode (cutover default)', () =
     const { TenantContextService } = await import('../../engine/core-modules/tenant/tenant-context.service');
     const { PasswordHashingService } = await import('../../engine/core-modules/auth/services/password-hashing.service');
     const moduleRef = await Test.createTestingModule({ imports: [AppModule] }).compile();
-    app = moduleRef.createNestApplication();
-    app.useGlobalPipes(new ValidationPipe({ whitelist: true, forbidNonWhitelisted: true, transform: true }));
+    app = applyGlobalValidationPipe(moduleRef.createNestApplication());
     await app.init();
     owner = createAdminDataSource();
     await owner.initialize();

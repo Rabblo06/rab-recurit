@@ -1,6 +1,6 @@
 import 'reflect-metadata';
 import { ManagerType, PermissionFlag } from '@rab/shared';
-import { INestApplication, ValidationPipe } from '@nestjs/common';
+import { INestApplication } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
 import { randomUUID } from 'node:crypto';
 import request from 'supertest';
@@ -14,6 +14,7 @@ import { ROLE_DEFS } from '../../modules/manager/services/manager.service';
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { BootstrapTimer } from './helpers/bootstrap-trace';
 import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
+import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-pipe';
 
 /**
  * Hyper Workspace Phase 3, Part 1 and 2 (decision C). Two Venue Manager creation flows, kept strictly separate:
@@ -42,8 +43,7 @@ describeIfDb('Venue Manager creation: normal Manager flow and CEO/admin flow (in
     const __bt = new BootstrapTimer('venue-manager-creation');
     const moduleRef = await Test.createTestingModule({ imports: [AppModule] }).compile();
     __bt.mark('compile');
-    app = moduleRef.createNestApplication();
-    app.useGlobalPipes(new ValidationPipe({ whitelist: true, forbidNonWhitelisted: true, transform: true }));
+    app = applyGlobalValidationPipe(moduleRef.createNestApplication());
     await app.init();
     __bt.mark('init');
     await app.get(DataSource).query('SELECT 1');

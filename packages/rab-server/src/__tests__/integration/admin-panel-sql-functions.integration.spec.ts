@@ -5,6 +5,7 @@ import { randomUUID } from 'node:crypto';
 import { DataSource, EntityManager } from 'typeorm';
 
 import { AppModule } from '../../app.module';
+import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-pipe';
 import {
   ADMIN_AUDIT_ACTIONS_1786720100000,
   ADMIN_AUDIT_VIA_ACTIONS_1786720100000,
@@ -58,7 +59,7 @@ describeIfDb('admin panel SQL functions (integration, crewflow_app)', () => {
 
   beforeAll(async () => {
     const moduleRef = await Test.createTestingModule({ imports: [AppModule] }).compile();
-    app = moduleRef.createNestApplication();
+    app = applyGlobalValidationPipe(moduleRef.createNestApplication());
     await app.init();
     dataSource = moduleRef.get(DataSource);
     owner = createAdminDataSource();

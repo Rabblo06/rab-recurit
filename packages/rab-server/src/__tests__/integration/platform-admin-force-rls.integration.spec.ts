@@ -1,5 +1,5 @@
 import 'reflect-metadata';
-import { ForbiddenException, INestApplication, ValidationPipe } from '@nestjs/common';
+import { ForbiddenException, INestApplication } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
 import { randomUUID } from 'node:crypto';
 import request from 'supertest';
@@ -11,6 +11,7 @@ import { PlatformAdminService } from '../../engine/core-modules/platform-admin/p
 import { TenantContextService } from '../../engine/core-modules/tenant/tenant-context.service';
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
+import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-pipe';
 
 /**
  * M-T1 platform_admin recursion guard (HIGH, found on PR #72, fixed in place in PreAuthTablesForceOwnerOnly1786721400000;
@@ -60,8 +61,7 @@ describeIfDb('M-T1 platform_admin under FORCE: no policy recursion, admin flows 
 
   beforeAll(async () => {
     const moduleRef = await Test.createTestingModule({ imports: [AppModule] }).compile();
-    app = moduleRef.createNestApplication();
-    app.useGlobalPipes(new ValidationPipe({ whitelist: true, forbidNonWhitelisted: true, transform: true }));
+    app = applyGlobalValidationPipe(moduleRef.createNestApplication());
     await app.init();
     admin = createAdminDataSource();
     await admin.initialize();

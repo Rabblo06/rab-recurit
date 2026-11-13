@@ -1,6 +1,6 @@
 import './helpers/use-local-storage-env'; // FIRST: env is frozen when AppModule is imported
 import 'reflect-metadata';
-import { INestApplication, ValidationPipe } from '@nestjs/common';
+import { INestApplication } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
 import { createHash, randomUUID } from 'node:crypto';
 import { DataSource, EntityManager } from 'typeorm';
@@ -27,6 +27,7 @@ import { toTstzRange } from '../../modules/scheduling/utils/tstzrange';
 import { Venue } from '../../modules/venue/entities/venue.entity';
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
+import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-pipe';
 
 /**
  * PHASE 8 — storage cleanup/reconcile race safety, against the LOCAL driver
@@ -82,14 +83,7 @@ describe('storage cleanup/reconcile correctness (LOCAL driver, no cloud infra)',
     const moduleRef = await Test.createTestingModule({
       imports: [AppModule],
     }).compile();
-    app = moduleRef.createNestApplication();
-    app.useGlobalPipes(
-      new ValidationPipe({
-        whitelist: true,
-        forbidNonWhitelisted: true,
-        transform: true,
-      }),
-    );
+    app = applyGlobalValidationPipe(moduleRef.createNestApplication());
     await app.init();
     dataSource = moduleRef.get(DataSource);
     tenantContext = moduleRef.get(TenantContextService);

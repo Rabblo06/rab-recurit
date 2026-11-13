@@ -4,6 +4,7 @@ import { Test } from '@nestjs/testing';
 import { DataSource, EntityManager, QueryRunner } from 'typeorm';
 
 import { AppModule } from '../../app.module';
+import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-pipe';
 import { PasswordHashingService } from '../../engine/core-modules/auth/services/password-hashing.service';
 import { TenantContextService } from '../../engine/core-modules/tenant/tenant-context.service';
 import { createAdminDataSource } from './helpers/admin-datasource';
@@ -91,7 +92,7 @@ const RUN = Boolean(process.env.DATABASE_URL);
     const __bt = new BootstrapTimer('venue-manager-staff-composite-fk');
     const moduleRef = await Test.createTestingModule({ imports: [AppModule] }).compile();
     __bt.mark('compile');
-    app = moduleRef.createNestApplication();
+    app = applyGlobalValidationPipe(moduleRef.createNestApplication());
     await app.init();
     __bt.mark('init');
     await app.get(DataSource).query('SELECT 1');

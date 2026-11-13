@@ -12,7 +12,7 @@ process.env.METADATA_L1_CACHE_ENABLED = PROFILE === 'l1' ? 'true' : 'false';
 process.env.METADATA_L1_CACHE_TTL_MS = '2000';
 
 import 'reflect-metadata';
-import { INestApplication, ValidationPipe } from '@nestjs/common';
+import { INestApplication } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import * as http from 'node:http';
@@ -28,6 +28,7 @@ import { MetadataL1CacheService } from '../../engine/core-modules/entity-cache/m
 import { TenantContextService } from '../../engine/core-modules/tenant/tenant-context.service';
 import { createAdminDataSource } from '../integration/helpers/admin-datasource';
 import { TestIdentityFactory } from '../integration/helpers/test-identities';
+import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-pipe';
 
 /**
  * WAVE 5 LANE OPS — L1 metadata cache load test (opt-in; excluded from the default suite):
@@ -104,8 +105,7 @@ describeIf(`metadata L1 load test (profile=${PROFILE})`, () => {
 
   beforeAll(async () => {
     const moduleRef = await Test.createTestingModule({ imports: [AppModule] }).compile();
-    app = moduleRef.createNestApplication();
-    app.useGlobalPipes(new ValidationPipe({ whitelist: true, forbidNonWhitelisted: true, transform: true }));
+    app = applyGlobalValidationPipe(moduleRef.createNestApplication());
     await app.init();
     await app.listen(0, '127.0.0.1');
     port = (app.getHttpServer().address() as AddressInfo).port;

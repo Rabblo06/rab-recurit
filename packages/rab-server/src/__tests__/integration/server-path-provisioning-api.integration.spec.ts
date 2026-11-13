@@ -1,5 +1,5 @@
 import 'reflect-metadata';
-import { INestApplication, NotFoundException, ValidationPipe } from '@nestjs/common';
+import { INestApplication, NotFoundException } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
 import { randomUUID } from 'node:crypto';
 import { Client } from 'pg';
@@ -15,6 +15,7 @@ import { WorkspaceProvisioningService } from '../../modules/manager-workspace/se
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
 import { withServerProvisioningDeferred } from '../../modules/manager-workspace/services/workspace-provisioning-test-seam';
+import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-pipe';
 
 /**
  * Server-path workspace provisioning — SERVER layer (owner's brief §13). The real HTTP route `POST
@@ -39,8 +40,7 @@ describeIfDb('server-path workspace provisioning — API layer (two replicas, cr
 
   const boot = async (): Promise<INestApplication> => {
     const moduleRef = await Test.createTestingModule({ imports: [AppModule] }).compile();
-    const app = moduleRef.createNestApplication();
-    app.useGlobalPipes(new ValidationPipe({ whitelist: true, forbidNonWhitelisted: true, transform: true }));
+    const app = applyGlobalValidationPipe(moduleRef.createNestApplication());
     await app.init();
     return app;
   };

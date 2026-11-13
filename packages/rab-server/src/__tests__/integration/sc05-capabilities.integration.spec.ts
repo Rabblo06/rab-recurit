@@ -1,5 +1,5 @@
 import 'reflect-metadata';
-import { INestApplication, ValidationPipe } from '@nestjs/common';
+import { INestApplication } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
 import { PermissionFlag, PermissionFlagType } from '@rab/shared';
 import request from 'supertest';
@@ -13,6 +13,7 @@ import { TenantContextService } from '../../engine/core-modules/tenant/tenant-co
 import { RequestCompletePayload, subscribeToRequestMetrics } from '../../engine/observability/request-context';
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
+import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-pipe';
 
 /**
  * SC-05 (Phase X Stage 0, S0-C-caches.md): `GET /auth/capabilities` ran one `userHasPermission` per flag, i.e. 18
@@ -97,8 +98,7 @@ describeIfDb('SC-05 GET /auth/capabilities answers from the resolved permission 
 
   beforeAll(async () => {
     const moduleRef = await Test.createTestingModule({ imports: [AppModule] }).compile();
-    app = moduleRef.createNestApplication();
-    app.useGlobalPipes(new ValidationPipe({ whitelist: true, forbidNonWhitelisted: true, transform: true }));
+    app = applyGlobalValidationPipe(moduleRef.createNestApplication());
     await app.init();
     owner = createAdminDataSource();
     await owner.initialize();

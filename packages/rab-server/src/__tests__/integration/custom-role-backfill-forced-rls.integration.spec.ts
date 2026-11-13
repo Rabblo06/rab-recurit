@@ -5,6 +5,7 @@ import { randomUUID } from 'node:crypto';
 import { DataSource, QueryRunner } from 'typeorm';
 
 import { AppModule } from '../../app.module';
+import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-pipe';
 import { BackfillCustomRoleObjectRules1786717200000 } from '../../database/typeorm/core/migrations/1786717200000-BackfillCustomRoleObjectRules';
 import { BackfillCustomRoleObjectRulesUnderForcedRls1786717600000 } from '../../database/typeorm/core/migrations/1786717600000-BackfillCustomRoleObjectRulesUnderForcedRls';
 import { PasswordHashingService } from '../../engine/core-modules/auth/services/password-hashing.service';
@@ -112,7 +113,7 @@ describeIfDb(
       const moduleRef = await Test.createTestingModule({
         imports: [AppModule],
       }).compile();
-      app = moduleRef.createNestApplication();
+      app = applyGlobalValidationPipe(moduleRef.createNestApplication());
       await app.init();
       admin = createAdminDataSource();
       await admin.initialize();

@@ -8,7 +8,7 @@ process.env.REALTIME_ENABLED = 'true';
 
 import 'reflect-metadata';
 import { EmploymentStatus } from '@rab/shared';
-import { INestApplication, ValidationPipe } from '@nestjs/common';
+import { INestApplication } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
 import { randomUUID } from 'node:crypto';
 import { DataSource } from 'typeorm';
@@ -28,6 +28,7 @@ import { NotificationService } from '../../modules/notification/services/notific
 import { PasswordHashingService } from '../../engine/core-modules/auth/services/password-hashing.service';
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { TestIdentityFactory, TestIdentity } from './helpers/test-identities';
+import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-pipe';
 
 /**
  * Real-time outbox (Stage 1) — `core.realtime_event`
@@ -63,8 +64,7 @@ describeIfDb('realtime event outbox — core.realtime_event (integration)', () =
 
   beforeAll(async () => {
     const moduleRef = await Test.createTestingModule({ imports: [AppModule] }).compile();
-    app = moduleRef.createNestApplication();
-    app.useGlobalPipes(new ValidationPipe({ whitelist: true, forbidNonWhitelisted: true, transform: true }));
+    app = applyGlobalValidationPipe(moduleRef.createNestApplication());
     await app.init();
 
     dataSource = moduleRef.get(DataSource);

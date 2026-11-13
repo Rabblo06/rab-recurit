@@ -2,7 +2,7 @@ process.env.WORKSPACE_METADATA_CACHE_ENABLED = 'true';
 
 import 'reflect-metadata';
 import { ManagerType, UserStatus } from '@rab/shared';
-import { INestApplication, ValidationPipe } from '@nestjs/common';
+import { INestApplication } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
 import { randomUUID } from 'node:crypto';
 import { DataSource } from 'typeorm';
@@ -19,6 +19,7 @@ import { ManagerWorkspace } from '../../modules/manager-workspace/entities/manag
 import { Organisation, Role, User, UserRole } from '../../modules/identity/entities';
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { generateFixturePassword } from './helpers/fixture-password';
+import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-pipe';
 
 /**
  * Redis checkpoint — Workspace Metadata Cache, exercised directly through `SchemaResolverService`
@@ -45,8 +46,7 @@ describeIfDb('Workspace Metadata Cache (integration)', () => {
 
   beforeAll(async () => {
     const moduleRef = await Test.createTestingModule({ imports: [AppModule] }).compile();
-    app = moduleRef.createNestApplication();
-    app.useGlobalPipes(new ValidationPipe({ whitelist: true, forbidNonWhitelisted: true, transform: true }));
+    app = applyGlobalValidationPipe(moduleRef.createNestApplication());
     await app.init();
 
     dataSource = moduleRef.get(DataSource);

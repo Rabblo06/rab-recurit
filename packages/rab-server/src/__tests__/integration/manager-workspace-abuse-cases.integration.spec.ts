@@ -1,6 +1,6 @@
 import 'reflect-metadata';
 import { ManagerType, UserStatus } from '@rab/shared';
-import { INestApplication, ValidationPipe } from '@nestjs/common';
+import { INestApplication } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
 import { randomUUID } from 'node:crypto';
 import request from 'supertest';
@@ -15,6 +15,7 @@ import { BootstrapTimer } from './helpers/bootstrap-trace';
 import { withPoolTrace } from './helpers/pool-probe';
 import { TestIdentityFactory } from './helpers/test-identities';
 import { generateFixturePassword } from './helpers/fixture-password';
+import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-pipe';
 
 const FIXTURE_PASSWORD = generateFixturePassword();
 
@@ -67,8 +68,7 @@ describeIfDb('manager workspace abuse cases (integration)', () => {
     const __bt = new BootstrapTimer('manager-workspace-abuse-cases');
     const moduleRef = await Test.createTestingModule({ imports: [AppModule] }).compile();
     __bt.mark('compile');
-    app = moduleRef.createNestApplication();
-    app.useGlobalPipes(new ValidationPipe({ whitelist: true, forbidNonWhitelisted: true, transform: true }));
+    app = applyGlobalValidationPipe(moduleRef.createNestApplication());
     await app.init();
     __bt.mark('init');
     await app.get(DataSource).query('SELECT 1');

@@ -9,7 +9,7 @@ const ORIGINAL = { WORKSPACE_BASE_DOMAIN: process.env.WORKSPACE_BASE_DOMAIN, COR
 process.env.WORKSPACE_BASE_DOMAIN = 'rab.test';
 process.env.CORS_ORIGINS = 'http://localhost:5173';
 
-import { INestApplication, ValidationPipe } from '@nestjs/common';
+import { INestApplication } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
 import cookieParser from 'cookie-parser';
 import { randomUUID } from 'crypto';
@@ -24,6 +24,7 @@ import { TenantContextService } from '../../engine/core-modules/tenant/tenant-co
 import { WorkspaceHostLookupService } from '../../engine/core-modules/workspace-host/workspace-host-lookup.service';
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
+import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-pipe';
 
 const RUN = Boolean(process.env.DATABASE_URL) && process.env.HOST_LABEL_CONTRACT_DB === '1';
 const describeContract = RUN ? describe : describe.skip;
@@ -47,8 +48,7 @@ describeContract('wave 3 lane H × S2 — host-label registry contract (real fun
 
   beforeAll(async () => {
     const moduleRef = await Test.createTestingModule({ imports: [AppModule] }).compile();
-    app = moduleRef.createNestApplication();
-    app.useGlobalPipes(new ValidationPipe({ whitelist: true, forbidNonWhitelisted: true, transform: true }));
+    app = applyGlobalValidationPipe(moduleRef.createNestApplication());
     const env = moduleRef.get(EnvironmentService);
     const realGet = env.get.bind(env);
     jest.spyOn(env, 'get').mockImplementation(((key: keyof EnvironmentVariables) =>
