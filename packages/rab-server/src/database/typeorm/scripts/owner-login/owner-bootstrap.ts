@@ -223,12 +223,13 @@ export function privilegedAttributesOf(f: OwnerFacts): string[] {
 export function decideBeforeProbe(f: OwnerFacts): string[] {
   const notes: string[] = [];
   if (!(f.serverVersionNum >= MIN_SERVER_VERSION_NUM)) throw new OwnerBootstrapRefusal(OWNER_BOOTSTRAP_MESSAGES.pgTooOld);
-  // H1 (defence in depth beside the pinned search_path): the admin session never works in a database the app login owns,
-  // nor under a planted search_path default.
-  if (f.oOwnsDb) throw new OwnerBootstrapRefusal(OWNER_BOOTSTRAP_MESSAGES.ownerOwnsDatabase);
-  if (f.searchPathDefaultSet) throw new OwnerBootstrapRefusal(OWNER_BOOTSTRAP_MESSAGES.searchPathDefault);
   const privileged = privilegedAttributesOf(f);
   if (privileged.length > 0) throw new OwnerBootstrapRefusal(OWNER_BOOTSTRAP_MESSAGES.privilegedAttributes(privileged));
+  // H1 (defence in depth beside the pinned search_path): the admin session never works in a database the app login owns,
+  // nor under a planted search_path default. After the attribute refusal, so a SUPERUSER crewflow_owner (a member of every
+  // role, the owner included) is named as such.
+  if (f.oOwnsDb) throw new OwnerBootstrapRefusal(OWNER_BOOTSTRAP_MESSAGES.ownerOwnsDatabase);
+  if (f.searchPathDefaultSet) throw new OwnerBootstrapRefusal(OWNER_BOOTSTRAP_MESSAGES.searchPathDefault);
   if (f.ownerExists && f.oCreateRole === false) notes.push(OWNER_BOOTSTRAP_MESSAGES.noCreateRoleHardened);
   if (f.ownerExists && (f.oPrivilegedMemberships ?? 0) > 0) throw new OwnerBootstrapRefusal(OWNER_BOOTSTRAP_MESSAGES.privilegedMembership);
   if (f.ownerExists && f.oExpired === true) throw new OwnerBootstrapRefusal(OWNER_BOOTSTRAP_MESSAGES.expired);

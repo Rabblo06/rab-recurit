@@ -802,6 +802,8 @@ describe('owner bootstrap: security review H1 / L2 / M2 / I1 / I2', () => {
     expect(refusalOf(() => decideBeforeProbe({ ...existing, oOwnsDb: true, searchPathDefaultSet: false }))).toBe(OWNER_BOOTSTRAP_MESSAGES.ownerOwnsDatabase);
     expect(refusalOf(() => decideBeforeProbe({ ...existing, oOwnsDb: false, searchPathDefaultSet: true }))).toBe(OWNER_BOOTSTRAP_MESSAGES.searchPathDefault);
     expect(decideBeforeProbe({ ...existing, oOwnsDb: false, searchPathDefaultSet: false })).toEqual([]);
+    // A SUPERUSER crewflow_owner is a member of every role (the database owner included): named by its attribute first.
+    expect(refusalOf(() => decideBeforeProbe({ ...existing, oSuper: true, oOwnsDb: true }))).toBe(OWNER_BOOTSTRAP_MESSAGES.privilegedAttributes(['SUPERUSER']));
   });
 
   it('M2: the pre-hashed refusals say the configuration is not supported and offer no workaround', () => {
