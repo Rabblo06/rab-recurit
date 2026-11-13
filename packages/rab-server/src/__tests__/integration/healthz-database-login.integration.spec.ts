@@ -4,6 +4,8 @@ import { Test } from '@nestjs/testing';
 import { HealthIndicatorService, TerminusModule } from '@nestjs/terminus';
 import { getDataSourceToken, TypeOrmModule } from '@nestjs/typeorm';
 import { randomBytes } from 'node:crypto';
+import { Agent, get as httpGet } from 'node:http';
+import type { AddressInfo } from 'node:net';
 import { Client } from 'pg';
 import request from 'supertest';
 import { DataSource } from 'typeorm';
@@ -18,6 +20,7 @@ import {
   DatabaseLoginHealthIndicator,
 } from '../../engine/core-modules/health/database-login.health';
 import { HealthController } from '../../engine/core-modules/health/health.controller';
+import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-pipe';
 
 /**
  * Owner decision 2026-11-13, the incident reproduced on a real PostgreSQL: the API's login has its password changed (or
@@ -77,8 +80,10 @@ describeIfDb('/healthz goes down when the API can no longer open a NEW database 
         },
       ],
     }).compile();
-    app = moduleRef.createNestApplication({ logger: false });
+    app = applyGlobalValidationPipe(moduleRef.createNestApplication({ logger: false }));
     await app.init();
+    // A real listening socket for the burst below (supertest would open one ephemeral server per request).
+    await app.listen(0, '127.0.0.1');
     pool = moduleRef.get<DataSource>(getDataSourceToken());
   });
 
@@ -140,8 +145,27 @@ describeIfDb('/healthz goes down when the API can no longer open a NEW database 
   it('bounded: a burst of 50 /healthz requests opens exactly one new connection', async () => {
     await sleep(DATABASE_LOGIN_PROBE_CACHE_MS + 100);
     const before = probesOpened;
-    const responses = await Promise.all(Array.from({ length: 50 }, () => healthz()));
-    expect(responses.filter((r) => r.status !== 200).map((r) => r.body)).toEqual([]);
+    // 50 requests in flight at once over ONE keep-alive agent with 5 sockets: they queue on the agent instead of opening
+    // 50 sockets (which reset under CI load: read ECONNRESET), and all of them still reach /healthz inside one probe.
+    const { port } = app.getHttpServer().address() as AddressInfo;
+    const agent = new Agent({ keepAlive: true, maxSockets: 5 });
+    try {
+      const statuses = await Promise.all(
+        Array.from(
+          { length: 50 },
+          () =>
+            new Promise<number>((resolve, reject) => {
+              httpGet({ host: '127.0.0.1', port, path: '/healthz', agent }, (res) => {
+                res.resume();
+                res.on('end', () => resolve(res.statusCode ?? 0));
+              }).on('error', reject);
+            }),
+        ),
+      );
+      expect(statuses.filter((s) => s !== 200)).toEqual([]);
+    } finally {
+      agent.destroy();
+    }
     expect(probesOpened - before).toBe(1);
   });
 
