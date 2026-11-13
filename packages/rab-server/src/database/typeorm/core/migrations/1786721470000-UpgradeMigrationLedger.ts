@@ -24,7 +24,8 @@ import {
  * decision B2). tools/check-rls-coverage.ts asserts ENABLE + FORCE explicitly (FORCED_NON_TENANT_TABLES), as does the boot
  * gate (owner-login-posture.ts FORCED_NON_TENANT).
  *
- * Append-only: nobody holds UPDATE, DELETE or TRUNCATE (the owner keeps SELECT + INSERT); the workspace FK cascade is the
+ * Append-only: nobody holds UPDATE or TRUNCATE; the owner keeps SELECT + INSERT + DELETE (DELETE only for the FK cascade,
+ * which runs as the owner; no DELETE policy, so every other DELETE removes nothing). The workspace FK cascade is the
  * only delete path. Replaces draft #105 (ReleaseUpgradeLedger1786721460000, never merged).
  *
  * Self-check before commit: the exact owner / RLS / ACL / column / constraint / index / policy state, and

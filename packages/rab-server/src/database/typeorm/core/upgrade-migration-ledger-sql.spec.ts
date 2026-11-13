@@ -35,10 +35,12 @@ describe('upgrade logbook SQL (OWNER-DB-ULTIMATE Part B, UpgradeMigrationLedger1
     expect(all).not.toMatch(/SECURITY DEFINER/i);
     expect(UPGRADE_LEDGER_UP_SQL).toContain('ALTER TABLE core.upgrade_migration ENABLE ROW LEVEL SECURITY');
     expect(UPGRADE_LEDGER_UP_SQL).toContain('ALTER TABLE core.upgrade_migration FORCE ROW LEVEL SECURITY');
-    expect(UPGRADE_LEDGER_UP_SQL).toContain('GRANT SELECT, INSERT ON TABLE core.upgrade_migration TO rab_secure_owner');
-    expect(all).not.toMatch(/GRANT[^;]*(UPDATE|DELETE|TRUNCATE)/i);
+    // DELETE for the owner only (the FK cascade runs as the owner and checks it); never UPDATE / TRUNCATE.
+    expect(UPGRADE_LEDGER_UP_SQL).toContain('GRANT SELECT, INSERT, DELETE ON TABLE core.upgrade_migration TO rab_secure_owner');
+    expect(UPGRADE_LEDGER_UP_SQL.filter((q) => /^GRANT /.test(q))).toEqual(['GRANT SELECT, INSERT, DELETE ON TABLE core.upgrade_migration TO rab_secure_owner']);
+    expect(all).not.toMatch(/GRANT[^;]*(UPDATE|TRUNCATE)/i);
     expect(all).not.toMatch(/FOR (UPDATE|DELETE)/i);
-    expect(UPGRADE_LEDGER_EXPECTED_STATE.table_acl).toBe('rab_secure_owner:INSERT:false,rab_secure_owner:SELECT:false');
+    expect(UPGRADE_LEDGER_EXPECTED_STATE.table_acl).toBe('rab_secure_owner:DELETE:false,rab_secure_owner:INSERT:false,rab_secure_owner:SELECT:false');
     expect(UPGRADE_LEDGER_EXPECTED_STATE.functions).toBe(0);
   });
 
