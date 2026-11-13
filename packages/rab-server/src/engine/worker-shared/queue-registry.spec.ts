@@ -11,6 +11,7 @@ import {
   LEGACY_BULL_PREFIX,
   prefixOf,
   QUEUE_NAMES,
+  QUEUE_RETENTION,
   QUEUE_SETTINGS,
   QueueName,
   QueueSettings,
@@ -22,8 +23,9 @@ import {
   SCAN_QUEUE_NAMES,
   UnknownQueueError,
 } from './queue-registry';
-import { registeredJob, QueueEnqueueRefusedError } from './queue-enqueue';
+import { registeredJob, registeredSystemScopedJob, QueueEnqueueRefusedError, scanJobTemplate } from './queue-enqueue';
 import { TIMER_TRIGGER_QUEUE_NAME } from './timer-trigger.contract';
+import { AUDIT_EVENT_QUEUE_NAME } from './audit-event.contract';
 
 /**
  * Phase D-Q1 "queue registry": every queue's options are explicit, complete at compile time, and EXACTLY the values in
@@ -34,10 +36,12 @@ import { TIMER_TRIGGER_QUEUE_NAME } from './timer-trigger.contract';
  *   - scan Worker options: bullmq-scheduler.ts startBullmqScheduler (`scanJobsOn(queue).length`, `lockDurationMsFor`);
  *   - job options: email-queue.service.ts / push-queue.service.ts EMAIL|PUSH_QUEUE_JOB_OPTIONS, report.processors.ts
  *     (statements), ai-turn-queue.service.ts AI_TURN_JOB_OPTIONS, queue-registry.ts SCAN_JOB_OPTIONS.
+ * The one deliberate change since: Phase X3.4 replaced EVERY queue's retention with Twenty's (`X34_RETENTION` below, written
+ * out by hand from twenty-server queue-retention.constants.ts); attempts and backoff keep their pre-D-Q1 values.
  */
 const DAY = 86_400;
 /** The queues that existed before D-Q4b (the pre-D-Q1 tables below cover exactly these; D-Q4b's queue is pinned on its own). */
-type PreDq4bQueueName = Exclude<QueueName, typeof TIMER_TRIGGER_QUEUE_NAME>;
+type PreDq4bQueueName = Exclude<QueueName, typeof TIMER_TRIGGER_QUEUE_NAME | typeof AUDIT_EVENT_QUEUE_NAME>;
 const PRE_DQ1_WORKER_OPTIONS: Record<PreDq4bQueueName, { concurrency: number; lockDuration: number; maxStalledCount: number; stalledInterval: number }> = {
   'rab-email': { concurrency: 5, lockDuration: 30_000, maxStalledCount: 1, stalledInterval: 30_000 },
   'rab-push': { concurrency: 10, lockDuration: 30_000, maxStalledCount: 1, stalledInterval: 30_000 },
@@ -62,6 +66,8 @@ const EXPECTED_WORKER_OPTIONS: Record<QueueName, { concurrency: number; lockDura
   'crewflow-scan-maintenance': { ...PRE_DQ1_WORKER_OPTIONS['crewflow-scan-maintenance'], concurrency: 8 },
   // Phase D-Q4b (plan §4): a NEW consumer starts at concurrency 2; stall settings are BullMQ's defaults, written out.
   'crewflow-timer-triggers': { concurrency: 2, lockDuration: 30_000, maxStalledCount: 1, stalledInterval: 30_000 },
+  // Phase X Part 2, X1.1: a NEW consumer, concurrency 2 like D-Q4b's; stall settings are BullMQ's defaults, written out.
+  'crewflow-audit-events': { concurrency: 2, lockDuration: 30_000, maxStalledCount: 1, stalledInterval: 30_000 },
 };
 const OUTBOX = {
   attempts: 5,
@@ -70,6 +76,11 @@ const OUTBOX = {
   removeOnFail: { age: 30 * DAY },
 };
 const SCAN = { attempts: 1, removeOnComplete: { age: 3600, count: 1000 }, removeOnFail: { age: 604_800 } };
+/**
+ * Phase X3.4: Twenty's QUEUE_RETENTION (twenty-server message-queue/constants/queue-retention.constants.ts at eedb0a73):
+ * completedMaxAge 14400 s (4 h), completedMaxCount 1000, failedMaxAge 604800 s (7 days), failedMaxCount 1000.
+ */
+const X34_RETENTION = { removeOnComplete: { age: 14_400, count: 1000 }, removeOnFail: { age: 604_800, count: 1000 } };
 const PRE_DQ1_JOB_OPTIONS: Record<PreDq4bQueueName, object> = {
   'rab-email': OUTBOX,
   'rab-push': OUTBOX,
@@ -85,7 +96,7 @@ const PRE_DQ1_JOB_OPTIONS: Record<PreDq4bQueueName, object> = {
 };
 
 describe('queue registry (Phase D-Q1)', () => {
-  it('lists exactly the twelve BullMQ queues Crewflow uses (the eleven pre-D-Q4b names unchanged + crewflow-timer-triggers)', () => {
+  it('lists exactly the thirteen BullMQ queues Crewflow uses (the eleven pre-D-Q4b names unchanged + crewflow-timer-triggers + X1.1 crewflow-audit-events)', () => {
     expect([...QUEUE_NAMES].sort()).toEqual(
       [
         'rab-email',
@@ -100,6 +111,7 @@ describe('queue registry (Phase D-Q1)', () => {
         'crewflow-scan-maintenance',
         'crewflow-scan-realtime',
         'crewflow-timer-triggers',
+        'crewflow-audit-events',
       ].sort(),
     );
     expect(Object.values(CONSUMER_QUEUES).map((q) => [q.name, q.jobName, q.prefix])).toEqual([
@@ -108,6 +120,7 @@ describe('queue registry (Phase D-Q1)', () => {
       ['rab-shift-statements', 'generate-shift-statement', 'bull'],
       ['rab-ai', 'ai-turn', 'bull'],
       ['crewflow-timer-triggers', 'offer-expiry-trigger', 'bull'],
+      ['crewflow-audit-events', 'audit-event-ship', 'bull'],
     ]);
   });
 
@@ -117,7 +130,7 @@ describe('queue registry (Phase D-Q1)', () => {
 
   it('Phase D-Q2: the only Worker-option change is one more crewflow-scan-maintenance slot for ai-stale-turn-sweep', () => {
     const changed = (Object.keys(PRE_DQ1_WORKER_OPTIONS) as PreDq4bQueueName[]).filter((n) => JSON.stringify(bullmqWorkerOptionsOf(n)) !== JSON.stringify(PRE_DQ1_WORKER_OPTIONS[n]));
-    expect(QUEUE_NAMES.filter((n) => !(n in PRE_DQ1_WORKER_OPTIONS))).toEqual(['crewflow-timer-triggers']);
+    expect(QUEUE_NAMES.filter((n) => !(n in PRE_DQ1_WORKER_OPTIONS))).toEqual(['crewflow-timer-triggers', 'crewflow-audit-events']);
     expect(changed).toEqual(['crewflow-scan-maintenance']);
     expect(bullmqWorkerOptionsOf('crewflow-scan-maintenance').concurrency - PRE_DQ1_WORKER_OPTIONS['crewflow-scan-maintenance'].concurrency).toBe(1);
     expect(acceptsJobName('crewflow-scan-maintenance', 'ai-stale-turn-sweep')).toBe(true);
@@ -126,15 +139,15 @@ describe('queue registry (Phase D-Q1)', () => {
     expect(acceptsJobName('rab-ai', 'ai-stale-turn-sweep')).toBe(false);
   });
 
-  it.each(Object.keys(PRE_DQ1_JOB_OPTIONS) as PreDq4bQueueName[])('%s: job options (attempts, backoff, retention) equal the pre-D-Q1 producer options', (name) => {
-    expect(bullmqJobOptionsOf(name)).toEqual(PRE_DQ1_JOB_OPTIONS[name]);
+  it.each(Object.keys(PRE_DQ1_JOB_OPTIONS) as PreDq4bQueueName[])('%s: job options keep the pre-D-Q1 attempts and backoff, with the X3.4 retention', (name) => {
+    expect(bullmqJobOptionsOf(name)).toEqual({ ...PRE_DQ1_JOB_OPTIONS[name], ...X34_RETENTION });
     // No job timeout exists in bullmq 5.x; the registry records the absence and never emits one.
     expect(QUEUE_SETTINGS[name].job.timeoutMs).toBeNull();
     expect(bullmqJobOptionsOf(name)).not.toHaveProperty('timeout');
   });
 
   it('the compatibility views keep their pre-D-Q1 values (SCAN_JOB_OPTIONS, SCAN_JOB_DATA, consumer concurrency/lock)', () => {
-    expect(SCAN_JOB_OPTIONS).toEqual(SCAN);
+    expect(SCAN_JOB_OPTIONS).toEqual({ ...SCAN, ...X34_RETENTION });
     expect(SCAN_JOB_DATA).toEqual({ v: 1 });
     expect(Object.values(CONSUMER_QUEUES).map((q) => [q.key, q.concurrency, q.lockDurationMs, q.logName])).toEqual([
       ['email', 5, 30_000, 'email'],
@@ -142,6 +155,7 @@ describe('queue registry (Phase D-Q1)', () => {
       ['shiftStatements', 2, 30_000, 'shift statement'],
       ['ai', 4, 60_000, 'ai turn'],
       ['timerTriggers', 2, 30_000, 'timer trigger'],
+      ['auditEvents', 2, 30_000, 'audit event'],
     ]);
   });
 
@@ -170,6 +184,7 @@ describe('queue registry (Phase D-Q1)', () => {
       'rab-shift-statements': ['organisation', ['payrollRecordId', 'organisationId', 'workspaceId', 'generation']],
       'rab-ai': ['organisation', ['v', 'kind', 'turnId', 'conversationId', 'organisationId', 'workspaceId', 'userId', 'pausedTurnId', 'cause', 'refId']],
       'crewflow-timer-triggers': ['organisation', ['organisationId', 'workspaceId', 'subjectId', 'dueAtEpochMs']],
+      'crewflow-audit-events': ['organisation', ['organisationId', 'auditLogId']],
       ...Object.fromEntries(SCAN_QUEUE_NAMES.map((n) => [n, ['system', ['v']]])),
     });
   });
@@ -181,6 +196,7 @@ describe('queue registry (Phase D-Q1)', () => {
       ['rab-shift-statements', ['generate-shift-statement']],
       ['rab-ai', ['ai-turn', 'ai-title']],
       ['crewflow-timer-triggers', ['offer-expiry-trigger', 'manager-confirmation-trigger', 'no-show-trigger', 'late-clock-in-trigger']],
+      ['crewflow-audit-events', ['audit-event-ship', 'audit-preauth-login-failed']],
     ]);
     expect(acceptsJobName('rab-email', 'send-push')).toBe(false);
     expect(acceptsJobName('rab-ai', 'ai-agent' + '-run')).toBe(false); // EX-3 not approved: never accepted
@@ -215,12 +231,12 @@ describe('queue registry (Phase D-Q1)', () => {
       expect(QUEUE_SETTINGS[TIMER_TRIGGER_QUEUE_NAME]).toMatchObject({ kind: 'consumer', prefix: 'legacy-bull', tenantScope: 'organisation' });
     });
 
-    it('job options: attempts 3, exponential from 5 s (jitter 0.5), 1 h / 1000 completed, 7 d / 5000 failed', () => {
+    it('job options: attempts 3, exponential from 5 s (jitter 0.5), the X3.4 retention (4 h / 1000 completed, 7 d / 1000 failed)', () => {
       expect(bullmqJobOptionsOf(TIMER_TRIGGER_QUEUE_NAME)).toEqual({
         attempts: 3,
         backoff: { type: 'exponential', delay: 5_000, jitter: 0.5 },
-        removeOnComplete: { age: 3600, count: 1000 },
-        removeOnFail: { age: 7 * DAY, count: 5000 },
+        removeOnComplete: { age: 4 * 3600, count: 1000 },
+        removeOnFail: { age: 7 * DAY, count: 1000 },
       });
     });
 
@@ -251,6 +267,86 @@ describe('queue registry (Phase D-Q1)', () => {
     });
   });
 
+  describe('Phase X Part 2, X1.1: crewflow-audit-events', () => {
+    const ORG = '11111111-1111-4111-8111-111111111111';
+    const OTHER = '22222222-2222-4222-8222-222222222222';
+    const ROW = '44444444-4444-4444-8444-444444444444';
+    const data = { organisationId: ORG, auditLogId: ROW };
+    const job = (d: object, scope: object | undefined = { kind: 'organisation', organisationId: ORG }, name = 'audit-event-ship') =>
+      registeredJob(AUDIT_EVENT_QUEUE_NAME, name as 'audit-event-ship', scope as never, d, { jobId: `audit-event.${ROW}` });
+
+    it('legacy `bull` prefix, a consumer queue, organisation-scoped, ids-only {organisationId, auditLogId}', () => {
+      expect(prefixOf(AUDIT_EVENT_QUEUE_NAME, resolveScanPrefix('production', undefined))).toBe(LEGACY_BULL_PREFIX);
+      expect(QUEUE_SETTINGS[AUDIT_EVENT_QUEUE_NAME]).toMatchObject({ kind: 'consumer', prefix: 'legacy-bull', tenantScope: 'organisation', payloadKeys: ['organisationId', 'auditLogId'] });
+    });
+
+    it("job options: attempts 10, exponential from 5 s (jitter 0.5); Twenty's retention (4 h / 1000 completed, 7 d / 1000 failed)", () => {
+      expect(bullmqJobOptionsOf(AUDIT_EVENT_QUEUE_NAME)).toEqual({
+        attempts: 10,
+        backoff: { type: 'exponential', delay: 5_000, jitter: 0.5 },
+        removeOnComplete: { age: 4 * 3600, count: 1000 },
+        removeOnFail: { age: 7 * DAY, count: 1000 },
+      });
+    });
+
+    it('a valid job: ids-only payload, the deterministic jobId and the registry options', () => {
+      expect(job(data)).toEqual({ queue: AUDIT_EVENT_QUEUE_NAME, name: 'audit-event-ship', data, opts: { jobId: `audit-event.${ROW}`, ...bullmqJobOptionsOf(AUDIT_EVENT_QUEUE_NAME) } });
+    });
+
+    it.each<[string, () => unknown]>([
+      ['no scope', () => job(data, null as never)],
+      ['a system scope', () => job(data, { kind: 'system' })],
+      ['a scope organisation different from the payload organisation (cross-tenant)', () => job(data, { kind: 'organisation', organisationId: OTHER })],
+      ['the action or metadata in the payload', () => job({ ...data, action: 'user.deleted' })],
+      ['an e-mail in the payload', () => job({ ...data, email: 'x@example.com' })],
+      ['a nested object', () => job({ ...data, auditLogId: { id: ROW } })],
+      ['an unknown job name', () => job(data, undefined, 'audit-event')],
+    ])('ABUSE: %s is refused before Redis (QueueEnqueueRefusedError)', (_label, build) => {
+      expect(build).toThrow(QueueEnqueueRefusedError);
+    });
+
+    describe('owner decision 2026-11-12 (b): the system-scoped pre-auth failed-login job', () => {
+      const pre = { v: 1, reason: 'invalid_credentials', provider: 'password', email: 'a***@example.com', at: 1_800_000_000_000 };
+      const build = (d: object) => registeredSystemScopedJob(AUDIT_EVENT_QUEUE_NAME, 'audit-preauth-login-failed', d, { jobId: `audit-preauth.${ROW}` });
+
+      it('is declared as a system-scoped job of the (organisation-scoped) audit queue, with its own scalar keys', () => {
+        expect(QUEUE_SETTINGS[AUDIT_EVENT_QUEUE_NAME].jobNames).toEqual(['audit-event-ship', 'audit-preauth-login-failed']);
+        expect(QUEUE_SETTINGS[AUDIT_EVENT_QUEUE_NAME].systemScopedJobs).toEqual({ 'audit-preauth-login-failed': ['v', 'reason', 'provider', 'providerReason', 'email', 'at'] });
+        expect(QUEUE_SETTINGS[AUDIT_EVENT_QUEUE_NAME].tenantScope).toBe('organisation');
+      });
+
+      it('a valid job: system scope, the registry options', () => {
+        expect(build(pre)).toEqual({ queue: AUDIT_EVENT_QUEUE_NAME, name: 'audit-preauth-login-failed', data: pre, opts: { jobId: `audit-preauth.${ROW}`, ...bullmqJobOptionsOf(AUDIT_EVENT_QUEUE_NAME) } });
+      });
+
+      it.each<[string, () => unknown]>([
+        ['an organisationId in its payload', () => build({ ...pre, organisationId: ORG })],
+        ['an unknown key (a raw password field)', () => build({ ...pre, password: 'x' })],
+        ['a nested object', () => build({ ...pre, email: { raw: 'x@y.z' } })],
+        ['a long string', () => build({ ...pre, email: 'x'.repeat(200) })],
+        ['an organisation scope through registeredJob', () => registeredJob(AUDIT_EVENT_QUEUE_NAME, 'audit-preauth-login-failed' as never, { kind: 'organisation', organisationId: ORG }, pre, { jobId: 'x' })],
+        ['the org-scoped job name through registeredSystemScopedJob', () => registeredSystemScopedJob(AUDIT_EVENT_QUEUE_NAME, 'audit-event-ship', { organisationId: ORG, auditLogId: ROW }, { jobId: 'x' })],
+      ])('ABUSE: %s is refused before Redis (QueueEnqueueRefusedError)', (_label, run) => {
+        expect(run).toThrow(QueueEnqueueRefusedError);
+      });
+
+      it('the boot check refuses a system-scoped job that names organisationId or is not a job of the queue', () => {
+        const clone = (): Record<string, QueueSettings> => JSON.parse(JSON.stringify(QUEUE_SETTINGS));
+        const withOrg = clone();
+        (withOrg[AUDIT_EVENT_QUEUE_NAME] as unknown as { systemScopedJobs: Record<string, string[]> }).systemScopedJobs = { 'audit-preauth-login-failed': ['v', 'organisationId'] };
+        expect(() => assertQueueRegistryValid(withOrg)).toThrow(/never a tenant or user id \(organisationId\)/);
+        for (const key of ['organisation_id', 'orgId', 'tenantId', 'userId']) {
+          const bad = clone();
+          (bad[AUDIT_EVENT_QUEUE_NAME] as unknown as { systemScopedJobs: Record<string, string[]> }).systemScopedJobs = { 'audit-preauth-login-failed': ['v', key] };
+          expect(() => assertQueueRegistryValid(bad)).toThrow(`never a tenant or user id (${key})`);
+        }
+        const stray = clone();
+        (stray[AUDIT_EVENT_QUEUE_NAME] as unknown as { systemScopedJobs: Record<string, string[]> }).systemScopedJobs = { 'not-a-job': ['v'] };
+        expect(() => assertQueueRegistryValid(stray)).toThrow(/not a job of this consumer queue/);
+      });
+    });
+  });
+
   describe('assertQueueRegistryValid (boot check)', () => {
     const clone = (): Record<string, QueueSettings> => JSON.parse(JSON.stringify(QUEUE_SETTINGS));
 
@@ -276,6 +372,38 @@ describe('queue registry (Phase D-Q1)', () => {
       const registry = clone();
       corrupt(registry);
       expect(() => assertQueueRegistryValid(registry)).toThrow(/queue registry is invalid/);
+    });
+  });
+
+  /**
+   * Phase X3.4: Twenty's retention on EVERY queue. The cases are derived from the registry itself (`QUEUE_SETTINGS` keys), so a
+   * queue added later is covered without editing this spec, and a queue given its own retention fails here.
+   */
+  describe('Phase X3.4: every registered queue gets the Twenty retention', () => {
+    it("QUEUE_RETENTION is Twenty's QUEUE_RETENTION: completed 4 h / 1000, failed 7 days / 1000", () => {
+      expect(QUEUE_RETENTION).toEqual({ completedMaxAgeSeconds: 14_400, completedMaxCount: 1000, failedMaxAgeSeconds: 604_800, failedMaxCount: 1000 });
+      expect(Object.isFrozen(QUEUE_RETENTION)).toBe(true);
+    });
+
+    it('QUEUE_NAMES is every key of QUEUE_SETTINGS (no registered queue escapes the cases below)', () => {
+      expect([...QUEUE_NAMES].sort()).toEqual(Object.keys(QUEUE_SETTINGS).sort());
+      expect(QUEUE_NAMES.length).toBeGreaterThanOrEqual(12);
+    });
+
+    it.each(Object.keys(QUEUE_SETTINGS) as QueueName[])('%s: removeOnComplete / removeOnFail are the X3.4 retention (settings and BullMQ job options)', (name) => {
+      const { job } = queueSettingsOf(name);
+      expect(job.removeOnComplete).toEqual({ age: QUEUE_RETENTION.completedMaxAgeSeconds, count: QUEUE_RETENTION.completedMaxCount });
+      expect(job.removeOnFail).toEqual({ age: QUEUE_RETENTION.failedMaxAgeSeconds, count: QUEUE_RETENTION.failedMaxCount });
+      // The BullMQ options every producer and scheduler template passes: both caps present (a count is never omitted).
+      expect(bullmqJobOptionsOf(name)).toMatchObject(X34_RETENTION);
+      expect(bullmqJobOptionsOf(name).removeOnComplete.count).toBe(1000);
+      expect(bullmqJobOptionsOf(name).removeOnFail.count).toBe(1000);
+    });
+
+    it.each(SCAN_QUEUE_NAMES.map((n) => [n]))('%s: a scheduler template carries the X3.4 retention (scan failures included)', (name) => {
+      const jobName = QUEUE_SETTINGS[name].jobNames[0]!;
+      const template = scanJobTemplate(name, jobName as never, { kind: 'system' }, { ...SCAN_JOB_DATA });
+      expect(template.opts).toMatchObject(X34_RETENTION);
     });
   });
 

@@ -99,10 +99,10 @@ describeIfDb('real WorkerModule: discovery + every scan adapter as crewflow_app 
 
     const registry = moduleRef.get(ProcessorExplorer).explore();
     expect(() => validateHandlerRegistry(registry)).not.toThrow();
-    // By name, not just a count: exactly these 28 handlers (23 scans incl. ai-retention, workspace-provisioning-health, D-Q2's ai-stale-turn-sweep and D-Q4a's shift-scan-combined + 5 consumers incl. rab-ai and D-Q4b's timer triggers).
+    // By name, not just a count: exactly these 29 handlers (23 scans incl. ai-retention, workspace-provisioning-health, D-Q2's ai-stale-turn-sweep and D-Q4a's shift-scan-combined + 6 consumers incl. rab-ai, D-Q4b's timer triggers and X1.1's audit events).
     const discovered = [...registry.handlers.values()].map((h) => `${h.queue}/${h.jobName}`);
     expect(discovered.sort()).toEqual([...EXPECTED_HANDLERS].sort());
-    expect(registry.handlers.size).toBe(28);
+    expect(registry.handlers.size).toBe(29);
     expect(registry.get('crewflow-scan-maintenance', 'ai-retention')).toBeDefined();
     expect(registry.get('rab-ai', 'ai-turn')).toBeDefined();
     // ...and every scan that will be scheduled is exactly the expected set.

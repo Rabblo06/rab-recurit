@@ -4,6 +4,7 @@ import Redis from 'ioredis';
 import { EntityManager } from 'typeorm';
 import { DataSource } from 'typeorm';
 
+import { shipAuditRowAfterCommit } from '../audit-events/audit-event-shipping';
 import { AuditService } from '../audit/audit.service';
 import { StepUpReauthService } from '../auth/services/step-up-reauth.service';
 import { EMAIL_QUEUE_NAME } from '../email/email-queue.constants';
@@ -200,6 +201,18 @@ export class OutboxOperationsService implements OnModuleDestroy {
       const r = rows[0]?.r as ReplayResult | undefined;
       if (r !== 'REPLAYED') return { result: r, generation: null };
       const gen: Array<{ g: number }> = await manager.query('SELECT dispatch_generation AS g FROM core.email_outbox WHERE id = $1', [emailId]);
+      // X1.1: the function's own `email.replay_requested` row (written by core.replay_failed_email in THIS transaction; the
+      // function returns no id and its SQL is frozen with its migration) takes the same off-host path as
+      // AuditService.record: found by its shape — this email, this actor, this transaction's timestamp — and queued after
+      // commit, never awaited.
+      const replayRow: Array<{ id: string }> = await manager.query(
+        `SELECT id FROM core.audit_log
+          WHERE action = 'email.replay_requested' AND entity_type = 'email_outbox' AND entity_id = $1 AND actor_user_id = $2
+            AND created_at = transaction_timestamp()
+          ORDER BY id LIMIT 1`,
+        [emailId, actor.userId],
+      );
+      if (replayRow[0]?.id) shipAuditRowAfterCommit(manager, { organisationId, auditLogId: replayRow[0].id, action: 'email.replay_requested' });
       // Admin Panel: the admin's reason, in the SAME transaction as DB5's own `email.replay_requested` row (no function change).
       if (reason) {
         await recordAdminPanelAudit(this.audit, manager, { organisationId, userId: actor.userId }, 'admin.email_replay_reason', {

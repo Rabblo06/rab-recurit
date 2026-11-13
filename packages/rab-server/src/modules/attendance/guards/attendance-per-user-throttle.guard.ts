@@ -2,10 +2,27 @@ import { CanActivate, ExecutionContext, Injectable, Logger } from '@nestjs/commo
 import { ThrottlerException } from '@nestjs/throttler';
 
 import { AuthenticatedRequest } from '../../../engine/core-modules/auth/guards/jwt-auth.guard';
+import { isRateLimitBypassEnabled } from '../../../engine/core-modules/throttler/rate-limit-bypass';
 import { ThrottlerRedisClientProvider } from '../../../engine/core-modules/throttler/throttler-redis-client.provider';
 
 const LIMIT = 10;
 const WINDOW_SECONDS = 60;
+
+/**
+ * X1.7 (cleanup audit DUP-02): the fixed-window step as ONE atomic Redis script. It used to be `INCR`, then a separate
+ * `EXPIRE` only when the count was 1: if `EXPIRE` failed after `INCR` succeeded (command timeout, dropped connection, crash),
+ * the key kept no TTL, every later request incremented it, and from the 11th on that staff member got 429 on Clock In /
+ * Clock Out / geofence exit permanently. Now the increment and the expiry run together, and the expiry is set whenever the
+ * key has none (PTTL < 0), so the window is still fixed from its first request (never extended) and a key left without a
+ * TTL by the old code heals on its next request. Same key, same limit, same window; returns the new count.
+ */
+export const ATTENDANCE_THROTTLE_SCRIPT = `
+local count = redis.call('INCR', KEYS[1])
+if redis.call('PTTL', KEYS[1]) < 0 then
+  redis.call('PEXPIRE', KEYS[1], ARGV[1])
+end
+return count
+`;
 
 /**
  * Per-USER (not per-IP) limit on Clock In / Clock Out / geofence-exit —
@@ -24,7 +41,7 @@ const WINDOW_SECONDS = 60;
  *
  * Reuses the SAME Redis instance `RabThrottlerModule` already requires
  * (`ThrottlerRedisClientProvider`) rather than a second rate-limiting
- * system, via a plain fixed-window INCR/EXPIRE (not `nestjs/throttler`'s own
+ * system, via a plain fixed-window counter (one atomic INCR + PEXPIRE script, X1.7; not `nestjs/throttler`'s own
  * tiered `ThrottlerGuard`, whose named-tier metadata is shared with the
  * global guard — reusing it here would risk silently narrowing or widening
  * the global per-IP tier for these routes instead of adding an independent
@@ -37,14 +54,11 @@ export class AttendancePerUserThrottleGuard implements CanActivate {
   constructor(private readonly redis: ThrottlerRedisClientProvider) {}
 
   async canActivate(context: ExecutionContext): Promise<boolean> {
-    // Same convention as `RabThrottlerModule`'s own skip — the integration
-    // suite exercises the same seeded Staff account well beyond 10 clock
-    // actions across one spec file; none of that is the abuse this guard
-    // exists to catch. `rate-limiting.integration.spec.ts` is the one file
-    // that already flips `RAB_DISABLE_RATE_LIMIT` back to 'false' to
-    // exercise real throttling end-to-end, so this guard is bound by the
-    // same flag rather than an independent one.
-    if (process.env.JEST_WORKER_ID !== undefined && process.env.RAB_DISABLE_RATE_LIMIT !== 'false') {
+    // The ONE rate-limit switch, shared with `RabThrottlerModule` (rate-limit-bypass.ts, X1.2): on only when
+    // explicitly set, never in a production runtime (and production refuses to boot with it set). The Jest setup sets it because the
+    // integration suite exercises the same seeded Staff account well beyond 10 clock actions across one spec file;
+    // `attendance-abuse-cases.integration.spec.ts` sets it to 'false' to exercise this guard for real.
+    if (isRateLimitBypassEnabled(process.env)) {
       return true;
     }
 
@@ -55,13 +69,14 @@ export class AttendancePerUserThrottleGuard implements CanActivate {
     // fail open here rather than crash on a null key.
     if (!userId) return true;
 
+    // Key unchanged (no namespace added): a new name would orphan live counters, and the heal-on-next-request above only
+    // reaches keys under this exact name.
     const key = `attendance-clock-throttle:${userId}`;
     let count: number;
     try {
-      count = await this.redis.client.incr(key);
-      if (count === 1) {
-        await this.redis.client.expire(key, WINDOW_SECONDS);
-      }
+      const reply = await this.redis.client.eval(ATTENDANCE_THROTTLE_SCRIPT, 1, key, WINDOW_SECONDS * 1000);
+      if (typeof reply !== 'number' || !Number.isInteger(reply)) throw new Error('unexpected throttle script reply');
+      count = reply;
     } catch (error) {
       // CF-17 (owner decision 2026-10-15): clock-in/out is an ordinary authorised route. While the rate-limit store is
       // unavailable a Staff member must still be able to clock in and out (the request is already authenticated against

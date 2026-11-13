@@ -96,8 +96,9 @@ describeIfDb('rate limiting (integration)', () => {
   });
 
   it('throttles repeated /auth/forgot-password attempts the same way', async () => {
-    const email = `ratelimit-${randomUUID()}@example.test`;
-    const attempt = () => request(app.getHttpServer()).post('/rest/v1/auth/forgot-password').send({ email });
+    // A different address per attempt: one address alone stops at 3 (X1.4 per-address limit,
+    // forgot-password-email-limit.integration.spec.ts); this test is about the per-IP route limit.
+    const attempt = () => request(app.getHttpServer()).post('/rest/v1/auth/forgot-password').send({ email: `ratelimit-${randomUUID()}@example.test` });
 
     for (let i = 0; i < 5; i++) {
       const res = await attempt();
@@ -132,6 +133,41 @@ describeIfDb('rate limiting (integration)', () => {
       const res = await request(app.getHttpServer()).get('/healthz');
       expect(res.status).toBe(200);
     }
+  });
+
+  // X1.2 (audit XA-01 / DUP-03): the one rate-limit switch is read per request, so these flip the flag for one test only.
+  // A unique trusted client IP per test keeps each bucket away from every other test.
+  const forgotFrom = (clientIp: string) => () =>
+    request(app.getHttpServer())
+      .post('/rest/v1/auth/forgot-password')
+      .set('CF-Connecting-IP', clientIp)
+      .send({ email: `ratelimit-bypass-${randomUUID()}@example.test` });
+  const withFlag = async (value: string | undefined, body: () => Promise<void>) => {
+    const previous = process.env.RAB_DISABLE_RATE_LIMIT;
+    if (value === undefined) delete process.env.RAB_DISABLE_RATE_LIMIT;
+    else process.env.RAB_DISABLE_RATE_LIMIT = value;
+    try {
+      await body();
+    } finally {
+      if (previous === undefined) delete process.env.RAB_DISABLE_RATE_LIMIT;
+      else process.env.RAB_DISABLE_RATE_LIMIT = previous;
+    }
+  };
+
+  it('X1.2: the explicit switch still works (RAB_DISABLE_RATE_LIMIT=true): 8 auth requests from one IP, no 429', async () => {
+    const attempt = forgotFrom(`198.51.100.${10 + Math.floor(Math.random() * 50)}`);
+    await withFlag('true', async () => {
+      for (let i = 0; i < 8; i++) expect((await attempt()).status).toBe(204);
+    });
+  });
+
+  it('X1.2 abuse case: JEST_WORKER_ID with the flag UNSET no longer skips the throttle (the old hidden `!== "false"` bypass did)', async () => {
+    expect(process.env.JEST_WORKER_ID).toBeDefined();
+    const attempt = forgotFrom(`203.0.113.${10 + Math.floor(Math.random() * 50)}`);
+    await withFlag(undefined, async () => {
+      for (let i = 0; i < 5; i++) expect((await attempt()).status).toBe(204);
+      expect((await attempt()).status).toBe(429);
+    });
   });
 
   describe('trust proxy (SEC-03 / PHASE 11 EDGE-01)', () => {

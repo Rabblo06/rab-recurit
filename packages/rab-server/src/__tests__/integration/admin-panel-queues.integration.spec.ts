@@ -134,6 +134,8 @@ describeIfDb('admin panel queues (integration, real BullMQ)', () => {
     expect(res.body.queues.find((q: { name: string }) => q.name === 'rab-ai').actions).toEqual({ retry: [], delete: [], lockedReason: expect.stringMatching(/run once by design/) });
     // Phase D-Q4b: the timer-trigger queue is listed for health but read-only (the backstop scans own a lost or failed trigger).
     expect(res.body.queues.find((q: { name: string }) => q.name === 'crewflow-timer-triggers').actions).toEqual({ retry: [], delete: [], lockedReason: expect.stringMatching(/backstop scan/) });
+    // Phase X Part 2, X1.1: the audit-event queue is listed for health but read-only (no D7 action on a new queue).
+    expect(res.body.queues.find((q: { name: string }) => q.name === 'crewflow-audit-events').actions).toEqual({ retry: [], delete: [], lockedReason: expect.stringMatching(/best effort/) });
   });
 
   it('job list: ids + safe error class + allowlisted ids only — never data, the failure message or a token', async () => {
@@ -222,7 +224,7 @@ describeIfDb('admin panel queues (integration, real BullMQ)', () => {
     service.schedulerStatus.mockResolvedValueOnce(null);
     const overview = await http().get('/rest/v1/admin/queues').set(bearer(adminToken));
     expect(overview.body.mode).toBe('interval');
-    expect(overview.body.queues.map((q: { name: string }) => q.name)).toEqual(['rab-email', 'rab-push', 'rab-shift-statements', 'rab-ai', 'crewflow-timer-triggers']);
+    expect(overview.body.queues.map((q: { name: string }) => q.name)).toEqual(['rab-email', 'rab-push', 'rab-shift-statements', 'rab-ai', 'crewflow-timer-triggers', 'crewflow-audit-events']);
     service.schedulerStatus.mockResolvedValueOnce(null);
     expect((await http().get('/rest/v1/admin/queues/crewflow-scan-offers/jobs?state=failed').set(bearer(adminToken))).status).toBe(404);
   });

@@ -72,9 +72,9 @@ describeIfDb('hws:backfill (integration)', () => {
   let ownerClient: Client; // rab_owner, raw pg — provisionWorkspaceSchema
   let backfillOwnerDataSource: DataSource; // the disposable cluster's bootstrap owner, TypeORM entities:[]
   /**
-   * Phase B ops container (owner decision): the physical copy (`HwsBackfillService.ownerDataSource`, i.e. `writePhysical`)
-   * runs as the RESTRICTED runtime login crewflow_app — the same injected DataSource as every read — so that is what this
-   * suite proves by default. HWS_BACKFILL_PROOF_WRITER=crewflow (the previous production writer) or =owner (the disposable
+   * The physical copy (`HwsBackfillService.ownerDataSource`, i.e. `writePhysical`) runs on the command's injected
+   * DataSource, the same as every read, and FORCE RLS binds it. This suite proves it as the RESTRICTED runtime login
+   * crewflow_app by default. HWS_BACKFILL_PROOF_WRITER=crewflow (the previous production writer) or =owner (the disposable
    * cluster's bootstrap superuser) re-runs the identical assertions, for the side-by-side proof in the runbook's ops section.
    */
   let backfillWriter: DataSource;

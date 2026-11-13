@@ -13,8 +13,8 @@
 # Every application service runs a prebuilt image by IMMUTABLE DIGEST. Nothing is built on the host: this file has no
 # `build:` section anywhere, so a host can never rebuild the release from whatever commit it happens to have checked out.
 #
-#   rab-api, rab-worker, rab-ops  ${CREWFLOW_IMAGE_REPOSITORY}@${CREWFLOW_IMAGE_TAG}
-#   rab-redis                     ${CREWFLOW_REDIS_IMAGE} (repository@sha256:<digest>)
+#   rab-api, rab-worker  ${CREWFLOW_IMAGE_REPOSITORY}@${CREWFLOW_IMAGE_TAG}
+#   rab-redis            ${CREWFLOW_REDIS_IMAGE} (repository@sha256:<digest>)
 # CREWFLOW_IMAGE_TAG is the multi-platform INDEX digest (amd64 + arm64, sha256:<64 hex>) of the approved release, never a
 # tag (the variable is named like Twenty's TAG; the `@` form and compose-owner-login.cjs refuse a plain tag); compose
 # refuses to render without it. CREWFLOW_IMAGE_DIGEST (its name until 2026-11-11) is retired and refused in compose.env.
@@ -56,11 +56,12 @@
 # capability bounding set, no-new-privileges, read-only root, PID and memory limits; "[worker-isolation] ..." log line).
 #
 # WHERE IT RUNS: plain `docker compose` (v2.24+) on a VM the operator controls. Never OpenShip (it drops user / read_only /
-# tmpfs / cap_drop / security_opt / pids_limit / env_file / depends_on conditions); the long-form tmpfs on rab-ops makes
-# OpenShip refuse to import this file (docs/release/OPENSHIP-COMPATIBILITY.md).
+# tmpfs / cap_drop / security_opt / pids_limit / env_file / depends_on conditions); the long-form tmpfs on rab-api's /tmp
+# makes OpenShip refuse to import this file (docs/release/OPENSHIP-COMPATIBILITY.md).
 #
-# SUPERSEDED, KEPT UNTIL THE FINAL CLEAN-UP PR (#9, owner approval): rab-ops (profile "ops", never started by `up`) still
-# names .env.ops and its separated-mode credentials; it is not part of the owner-login deployment and must not be run.
+# There is no operations service: the owner CLI commands run as one-off `docker compose run --rm --no-deps rab-api ...`
+# commands under crewflow_owner (X2.2; the exact invocation is in docs/release/OWNER-LOGIN-DEPLOYMENT.md). The retired
+# operations service, its .env.ops and every CREWFLOW_OPS_* / PG_OPS_* name stay refused by the gates and the processes.
 
 name: rab-production
 
@@ -141,6 +142,16 @@ services:
     volumes:
       # The CA that signs the database server certificate (verify-full): PG_SSL_CA_CERT_PATH=/run/crewflow/pg-ca.crt.
       - ${CREWFLOW_PG_CA_FILE:?CREWFLOW_PG_CA_FILE must name the PostgreSQL CA certificate file}:/run/crewflow/pg-ca.crt:ro
+      # The OpenShip IMPORT GUARD: OpenShip refuses a long-form `type: tmpfs` volume as blocking, so this file can never be
+      # imported there (and silently lose the isolation keys). It moved here from the removed operations service (PR 2 of
+      # that removal; before that from rab-migrate, O3); staging/verify-image-compose.cjs requires it. image.yml ONLY:
+      # docker-compose.production.yml deliberately has none. Mode 0555 on a root-owned tmpfs: the API (uid 1000) still
+      # cannot write anywhere (api-prestart.sh writes no file; H6 M05), so the guard adds no writable path.
+      - type: tmpfs
+        target: /tmp
+        tmpfs:
+          size: 16777216
+          mode: 0555
 
     environment:
       NODE_ENV: production
@@ -317,35 +328,6 @@ services:
         restart: true
 
     restart: unless-stopped
-
-  # ---------------------------------------------------------------------------
-  # rab-ops — SUPERSEDED (separated mode). Kept unchanged, never started by `up`, until the final clean-up PR (#9) with
-  # owner approval. Do not run it against an owner-login deployment.
-  # ---------------------------------------------------------------------------
-  rab-ops:
-    image: ${CREWFLOW_IMAGE_REPOSITORY:-adhin007/adolphus}@${CREWFLOW_IMAGE_TAG:?CREWFLOW_IMAGE_TAG must be the release image index digest (sha256:<64 hex>), never a tag}
-    profiles: ["ops"]
-    env_file:
-      - .env.ops
-    environment:
-      NODE_ENV: production
-      RAB_RUNTIME_ENV: production
-      DB_TARGET: production
-      AI_ENABLED: 'false'
-      HWS_RUNTIME_ENABLED: "false"
-    entrypoint: ["node", "packages/rab-server/dist/command/main.js"]
-    command: ["--help"]
-    restart: "no"
-    read_only: true
-    cap_drop: [ALL]
-    security_opt: ["no-new-privileges:true"]
-    # The long-form tmpfs is the OpenShip IMPORT GUARD (OpenShip refuses a `type: tmpfs` volume as blocking, so this file
-    # can never be imported there). It moved here from the removed rab-migrate (O3); verify-image-compose.cjs requires it.
-    volumes:
-      - type: tmpfs
-        target: /tmp
-        tmpfs:
-          size: 16777216
 
 volumes:
   rab-redis-data:

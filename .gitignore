@@ -107,7 +107,7 @@ packages/rab-e2e-testing/web/.qa-shots/
 # Phase B: the one-off rab-migrate credential file (template: packages/rab-docker/.env.migrate.example)
 .env.migrate
 **/.env.migrate
-# Phase B (ops): the one-off rab-ops container's environment (template: packages/rab-docker/.env.ops.example)
+# Retired (rab-ops removed): still ignored so a leftover .env.ops holding old credentials is never committed
 .env.ops
 **/.env.ops
 /activation_email.html
