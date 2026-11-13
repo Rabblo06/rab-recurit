@@ -11,6 +11,19 @@ jest.mock('../../shared/api', () => ({
   api: { get: jest.fn(), post: jest.fn() },
 }));
 
+// Deterministic presence (CI flake, 2026-11-13): the detail panel swaps its tab content inside
+// `<AnimatePresence mode="wait">`, so the next tab (e.g. Assigned staff, and its GET
+// /venue-managers/:id/staff) mounts only after the previous tab's exit animation has run in REAL
+// time on animation frames. On a starved CI runner that wall-clock wait plus the renders outran
+// waitFor's 1 s budget. These tests assert what the panel shows and which routes it calls, not
+// motion, so presence is rendered synchronously here (the same passthrough as
+// ProfileFeedback.spec.tsx / WelcomeOverlay.spec.tsx); every other framer-motion export is real.
+// The product's animation is unchanged.
+jest.mock('framer-motion', () => ({
+  ...jest.requireActual('framer-motion'),
+  AnimatePresence: ({ children }: { children?: unknown }) => children,
+}));
+
 const mockApi = api as unknown as { get: jest.Mock; post: jest.Mock };
 
 /**
