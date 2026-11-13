@@ -32,7 +32,10 @@ const cleanRaw = () => ({ 'rab-api': ['/secrets/database.env'], 'rab-worker': ['
 
 test('the committed shape (no rab-ops, nothing of the ops environment) passes every check', () => {
   assert.deepEqual(failed(opsRefusalChecks(REL, clean(), cleanRaw())), []);
-  assert.deepEqual(failed(opsRefusalChecks(REL, clean(), null)), []);
+});
+
+test('DENIAL (X1.9): no env_file names (raw null: the yaml parser did not run) is a FAILED check, never a skip', () => {
+  refused(opsRefusalChecks(REL, clean(), null), /the env_file names were read from the committed YAML/);
 });
 
 test('the gate still lists exactly the five retired ops names', () => {
@@ -44,16 +47,16 @@ test('the gate still lists exactly the five retired ops names', () => {
 test('DENIAL: a rab-ops service is present (with or without the old profile)', () => {
   const s = clean();
   s['rab-ops'] = { environment: {} };
-  refused(opsRefusalChecks(REL, s, null), /has no rab-ops service/);
+  refused(opsRefusalChecks(REL, s, cleanRaw()), /has no rab-ops service/);
   s['rab-ops'].profiles = ['ops'];
-  refused(opsRefusalChecks(REL, s, null), /has no rab-ops service/);
-  refused(opsRefusalChecks(REL, s, null), /rab-ops has no "ops" profile/);
+  refused(opsRefusalChecks(REL, s, cleanRaw()), /has no rab-ops service/);
+  refused(opsRefusalChecks(REL, s, cleanRaw()), /rab-ops has no "ops" profile/);
 });
 
 test('DENIAL: any service under the "ops" profile, whatever its name', () => {
   const s = clean();
   s.operations = { profiles: ['ops'], environment: {} };
-  refused(opsRefusalChecks(REL, s, null), /operations has no "ops" profile/);
+  refused(opsRefusalChecks(REL, s, cleanRaw()), /operations has no "ops" profile/);
 });
 
 test('DENIAL: a service naming .env.ops as its env_file (every path spelling)', () => {
@@ -68,7 +71,7 @@ test('DENIAL: a value from the .env.ops sentinel reaching a service', () => {
   for (const svc of ['rab-api', 'rab-worker']) {
     const s = clean();
     s[svc].environment.SOME_URL = OPS_SENTINEL_APP_URL;
-    refused(opsRefusalChecks(REL, s, null), new RegExp(`${svc} carries no value of the ops environment`));
+    refused(opsRefusalChecks(REL, s, cleanRaw()), new RegExp(`${svc} carries no value of the ops environment`));
   }
 });
 
@@ -77,7 +80,7 @@ test('DENIAL: each retired ops-only name (PG_OPS_* / CREWFLOW_OPS_*) on any serv
     for (const svc of ['rab-api', 'rab-worker', 'rab-redis']) {
       const s = clean();
       (s[svc].environment ??= {})[name] = 'one-off';
-      refused(opsRefusalChecks(REL, s, null), new RegExp(`${svc} holds no ops-only variable \\(${name}\\)`));
+      refused(opsRefusalChecks(REL, s, cleanRaw()), new RegExp(`${svc} holds no ops-only variable \\(${name}\\)`));
     }
   }
 });
@@ -85,7 +88,7 @@ test('DENIAL: each retired ops-only name (PG_OPS_* / CREWFLOW_OPS_*) on any serv
 test('an ops-only name declared EMPTY is not a value (compose renders an unset `KEY:` as empty)', () => {
   const s = clean();
   s['rab-api'].environment.CREWFLOW_OPS_RUN = '';
-  assert.deepEqual(failed(opsRefusalChecks(REL, s, null)), []);
+  assert.deepEqual(failed(opsRefusalChecks(REL, s, cleanRaw())), []);
 });
 
 function dockerCompose() {
@@ -115,8 +118,9 @@ test('DENIAL (rendered): a file that reads .env.ops, or re-adds rab-ops under th
     ].join('\n'));
     // render() plants the sentinel .env.ops in its throw-away project and renders with --profile ops.
     const model = render(path.relative(repo, file));
-    const checks = opsRefusalChecks('rendered', model.services ?? {}, null);
+    const checks = opsRefusalChecks('rendered', model.services ?? {}, rawEnvFiles(path.relative(repo, file)));
     refused(checks, /has no rab-ops service/);
+    refused(checks, /rab-api does not name \.env\.ops/);
     refused(checks, /rab-ops has no "ops" profile/);
     refused(checks, /rab-api carries no value of the ops environment/);
     refused(checks, /rab-api holds no ops-only variable \(.*CREWFLOW_OPS_RUN/);
@@ -131,9 +135,9 @@ test('DENIAL (rendered): a file that reads .env.ops, or re-adds rab-ops under th
 test('DENIAL: in a production file, a service with any profile (rab-maint, profile "maint")', () => {
   const s = clean();
   s['rab-maint'] = { profiles: ['maint'], environment: {} };
-  refused(opsRefusalChecks(REL, s, null, { production: true }), /rab-maint has no profile/);
+  refused(opsRefusalChecks(REL, s, cleanRaw(), { production: true }), /rab-maint has no profile/);
   // The dev / QA files keep their own profiles (s3, tools, migrate): the any-profile rule is for the production files only.
-  assert.deepEqual(failed(opsRefusalChecks(REL, s, null)), []);
+  assert.deepEqual(failed(opsRefusalChecks(REL, s, cleanRaw())), []);
 });
 
 /** A copy of a committed compose file with `rab-maint` (profile "maint", reading .env.ops) added before `volumes:`. */
@@ -174,13 +178,13 @@ for (const file of ['docker-compose.production.yml', 'docker-compose.image.yml']
         for (const k of Object.keys(process.env)) if (!(k in prev)) delete process.env[k];
       }
       const rel = path.relative(repo, copy);
-      let raw = null;
-      try { raw = rawEnvFiles(rel); } catch { raw = null; }
+      // X1.9: the env_file names are always read (a missing parser throws here and fails the test, never a skip).
+      const raw = rawEnvFiles(rel);
       const checks = opsRefusalChecks(file, model.services ?? {}, raw, { production: true });
       refused(checks, /rab-maint has no profile/);
       refused(checks, /rab-maint carries no value of the ops environment/);
       refused(checks, /rab-maint holds no ops-only variable \(.*CREWFLOW_OPS_RUN/);
-      if (raw) refused(checks, /rab-maint does not name \.env\.ops/);
+      refused(checks, /rab-maint does not name \.env\.ops/);
     } finally {
       fs.rmSync(dir, { recursive: true, force: true });
     }
