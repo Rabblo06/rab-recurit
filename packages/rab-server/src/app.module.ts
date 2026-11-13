@@ -9,8 +9,10 @@ import { AuthModule } from './engine/core-modules/auth/auth.module';
 import { EmailModule } from './engine/core-modules/email/email.module';
 import { PushModule } from './engine/core-modules/push/push.module';
 import { TimerTriggerModule } from './engine/core-modules/timer-trigger/timer-trigger.module';
+import { ShiftStatementWakeModule } from './engine/core-modules/statement-wake/shift-statement-wake.module';
 import { PushHttpModule } from './engine/core-modules/push/push-http.module';
 import { EnvironmentModule } from './engine/core-modules/environment/environment.module';
+import { ExceptionHandlerModule } from './engine/core-modules/exception-handler/exception-handler.module';
 import { HealthModule } from './engine/core-modules/health/health.module';
 import { PermissionsModule } from './engine/core-modules/permissions/permissions.module';
 import { AdminPanelModule } from './engine/core-modules/platform-admin/admin-panel.module';
@@ -49,6 +51,8 @@ import { UuidPathParamsInterceptor } from './engine/interceptors/uuid-path-param
 @Module({
   imports: [
     EnvironmentModule,
+    // Phase X3.2: server errors to Sentry (when SENTRY_DSN is set) from AllExceptionsFilter's 500 branch.
+    ExceptionHandlerModule,
     TypeOrmModule.forRoot(coreDataSourceOptions),
     HealthModule,
     RabThrottlerModule,
@@ -64,6 +68,8 @@ import { UuidPathParamsInterceptor } from './engine/interceptors/uuid-path-param
     PushModule,
     // Phase D-Q4b: timer-trigger producer (WORKER_TIMER_TRIGGERS; off by default = no Redis connection, no job).
     TimerTriggerModule,
+    // Phase X J1b: pay-statement dispatcher wake after a payroll approval commits (bullmq mode only; writes nothing).
+    ShiftStatementWakeModule,
     PushHttpModule,
     UserDeletionModule,
     AuthModule,

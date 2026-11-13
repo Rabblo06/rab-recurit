@@ -473,7 +473,20 @@ async function bootstrap(): Promise<void> {
   );
   // The consumers — one Worker each, both modes, legacy `bull` prefix, options from the queue registry (5 / 10 / 2 / 4, and
   // D-Q4b's timer triggers 2 only when WORKER_TIMER_TRIGGERS is not off).
-  const consumers = createConsumerWorkers(registry, redis, logger, (def) => def.key !== 'timerTriggers' || timerTriggers.mode !== 'off');
+  // X1.1: the crewflow-audit-events consumer only when this process has a security audit sink (CREWFLOW_AUDIT_SINK is not
+  // none — production requires stdout); without one nothing is ever produced, so no extra BullMQ Worker polls Redis.
+  const auditSinkMode = securityMonitoring.sink.mode;
+  logger.log(
+    auditSinkMode === 'none'
+      ? 'security audit events: CREWFLOW_AUDIT_SINK=none — no audit-event consumer (nothing is shipped off-host)'
+      : `security audit events: CREWFLOW_AUDIT_SINK=${auditSinkMode} — audit-event consumer concurrency 2 (best effort, BullMQ retries)`,
+  );
+  const consumers = createConsumerWorkers(
+    registry,
+    redis,
+    logger,
+    (def) => (def.key !== 'timerTriggers' || timerTriggers.mode !== 'off') && (def.key !== 'auditEvents' || auditSinkMode !== 'none'),
+  );
 
   const runtime = new WorkerRuntime(redis, {
     // interval: whole-object stats writes, exactly as before. bullmq: per-field writes (replicas take turns).

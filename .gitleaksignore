@@ -37,3 +37,10 @@ c283cd08f49d8bd3f28c8d8bcfaa3cb92a6cef41:packages/rab-docker/deploy-order-tests/
 # next to the hex. Not a credential. The line now carries `gitleaks:allow`; this entry covers the commit that introduced
 # it. Reviewed 2026-11-13.
 f7056939f52d971ed56b5624a38e4406e50b382b:packages/rab-server/src/database/owner-login/owner-credential.spec.ts:generic-api-key:77
+
+# Phase X3.2 (PR #118): exception-handler Sentry-egress spec. Synthetic markers the scrubber must remove, not credentials:
+# the JWT payload decodes to {"sub":"x32-sentry-jwt-marker"} (signature segment = base64 "x32-sentry-jwt-signature"), and
+# the TOTP value is the made-up base32 string 'JBSWY3DPX32TOTPSECRET'. The lines now carry `gitleaks:allow`; these entries
+# cover the commit that introduced them. Reviewed 2026-11-12.
+ecca38cfd0e21cbcbc239963368db49f26fc54f1:packages/rab-server/src/engine/core-modules/exception-handler/exception-handler.service.spec.ts:jwt:27
+ecca38cfd0e21cbcbc239963368db49f26fc54f1:packages/rab-server/src/engine/core-modules/exception-handler/exception-handler.service.spec.ts:generic-api-key:40

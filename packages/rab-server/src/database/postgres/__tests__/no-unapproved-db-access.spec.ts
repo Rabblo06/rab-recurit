@@ -29,7 +29,7 @@ const BASELINE: Record<string, { hits: number; why: string }> = {
   // (Phase B A7: the identity guards — runtime-database-guard.ts, database-target.ts, the boot gates and db:bind-identity —
   // now resolve and connect through the factory only, so their entries are gone.)
   // Test routing (TEST_DATABASE_URL* → DATABASE_URL*). (L-5: the posture snapshot's clients now come from the factory.)
-  'packages/rab-server/src/database/typeorm/core/test-database-guard.ts': { hits: 3, why: 'Jest routing writes DATABASE_URL*, probe Client' },
+  'packages/rab-server/src/database/typeorm/core/test-database-guard.ts': { hits: 4, why: 'Jest routing writes DATABASE_URL*, probe Client; X1.8 worker-login switch writes DATABASE_URL' },
   // Constructs the TypeORM migration DataSource class around the factory's options (the options ARE from the factory).
   'packages/rab-server/src/database/typeorm/core/core.datasource.ts': { hits: 1, why: 'GuardedMigrationDataSource built from factory options' },
   // Worker call sites that take a config/string the factory now produces (pgClientConfig / pgConnectionString).

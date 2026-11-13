@@ -19,6 +19,7 @@ import { AuthContextCacheService } from './services/auth-context-cache.service';
 import { AuthSecuritySnapshotService } from './services/auth-security-snapshot.service';
 import { AuthService } from './services/auth.service';
 import { LoginAttemptLimiterService } from './services/login-attempt-limiter.service';
+import { PasswordResetEmailLimiterService } from './services/password-reset-email-limiter.service';
 import { AuthCookieMigrationService } from './services/auth-cookie-migration.service';
 import { LoginSecondFactorPolicyService } from './services/login-second-factor-policy.service';
 import { OAuthInvitationHandlerRegistry } from './services/oauth-invitation-handler.registry';
@@ -74,6 +75,7 @@ import { OrganisationSuspendedGuard } from './guards/organisation-suspended.guar
     OAuthInvitationHandlerRegistry,
     LoginSecondFactorPolicyService,
     LoginAttemptLimiterService,
+    PasswordResetEmailLimiterService,
     AuthCookieMigrationService,
     PasswordSessionRevocationService,
     JwtAuthGuard,

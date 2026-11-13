@@ -33,9 +33,23 @@
  *     `docker compose up`, so a profile-gated service is a hidden extra container. A re-added operations container under
  *     another name and profile (e.g. `rab-maint`, `profiles: ["maint"]`, reading .env.ops) is refused here whatever it is
  *     called. Profiles, not a service allowlist, so a new always-on service (the coming `db` service) needs no gate change.
+ *   - a Redis service can be reached from the host. A Redis service is rab-redis; any service whose name or image names
+ *     redis; any service whose command, entrypoint or healthcheck test runs redis-server / redis-cli; and the service named
+ *     by the host of rab-api's / rab-worker's committed REDIS_URL. It is refused when it has `ports:` in either syntax
+ *     (short "6379:6379" / "127.0.0.1:6379:6379" / "6379", or long `target:`/`published:`; a loopback bind is refused
+ *     too), a `network_mode` (host would bind Redis on the host's interfaces; service:/container: would put it in another
+ *     container's namespace), or joins a network that resolves to the host network (name `host`) or whose driver is host,
+ *     macvlan or ipvlan (Redis would sit directly on the host or the LAN); any other service with network_mode
+ *     service:<that Redis> is refused too (it shares the Redis namespace). `expose:` is also refused, as a review-hygiene
+ *     rule: it publishes nothing, but a Redis service then carries no port declaration at all. X1.6 (owner decision
+ *     2026-11-12): the production Redis has no password and is protected by the private Compose network only, exactly as
+ *     Twenty's packages/twenty-docker/docker-compose.yml `redis` service (no ports, no password); so it must never be
+ *     reachable from outside that network. Not covered (accepted, recorded in THREAT-MODEL): a forwarder in another
+ *     service that proxies to rab-redis:6379 and publishes its own port, and anything outside the committed files.
  * Scope (owner decision D): the DEPLOY files only. The test-only compose files (system e2e, H6 runtime test, cost harness,
  * BullMQ integration, the weakened rehearsal) and the dev stacks (docker-compose.yml, docker-compose.qa.yml,
- * docker-compose.local-build.yml) are deliberately not checked.
+ * docker-compose.local-build.yml) are deliberately not checked, except that docker-compose.local-build.yml (the former
+ * production file, treated as production by compose-credential-isolation.cjs) gets the Redis rule (REDIS_ONLY_COMBOS).
  */
 const { execFileSync } = require('node:child_process');
 const path = require('node:path');
@@ -48,6 +62,15 @@ const DEPLOY_COMBOS = Object.freeze([
   ['docker-compose.image.yml'],
   ['docker-compose.image.yml', 'staging/docker-compose.staging.yml'],
   ['docker-compose.image.yml', 'staging/rehearsal/docker-compose.image-rehearsal.yml'],
+]);
+
+/**
+ * X1.6: files that get ONLY the Redis rule (checkRedisPrivate). docker-compose.local-build.yml builds from source, so the
+ * one-image rules do not apply to it, but it is the former production file and compose-credential-isolation.cjs treats it
+ * as a production file; its Redis is just as unauthenticated, so it must not publish a port either.
+ */
+const REDIS_ONLY_COMBOS = Object.freeze([
+  ['docker-compose.local-build.yml'],
 ]);
 
 const IMAGE_VAR = 'CREWFLOW_IMAGE_TAG';
@@ -154,12 +177,103 @@ function checkModel(model, label, { allowDefaultDigest = false } = {}) {
     if (Array.isArray(s.command) ? s.command.length > 0 : (s.command !== undefined && s.command !== null)) p(`${name}: must have no command (${script}, the entrypoint, takes none)`);
     if (s.init === true) p(`${name}: init: true is refused (docker-init would be PID 1 with the admin URL)`);
   }
+  return problems.concat(checkRedisPrivate(model, label));
+}
+
+/** X1.6: Redis is never reachable from the host (private Compose network only, as in Twenty). */
+function checkRedisPrivate(model, label) {
+  const services = model?.services ?? {};
+  const problems = [];
+  if (!services['rab-redis']) problems.push(`${label}: rab-redis is missing`);
+  const redisNames = redisServiceNames(services);
+  for (const name of redisNames) {
+    for (const problem of redisHostExposureProblems(services[name], model?.networks)) problems.push(`${label}: ${name}: ${problem}`);
+  }
+  // A service sharing a Redis's network namespace (network_mode service:<redis>) reaches 6379 as its own localhost.
+  for (const [name, s] of Object.entries(services)) {
+    const mode = String(s?.network_mode ?? '');
+    const target = /^service:(.+)$/.exec(mode)?.[1];
+    if (target && redisNames.includes(target) && !redisNames.includes(name)) {
+      problems.push(`${label}: ${name}: sets network_mode "${mode}" (it would share the Redis network namespace); Redis stays on the private Compose network only (X1.6)`);
+    }
+  }
+  return problems;
+}
+
+const REDIS_BINARY = /redis-(server|cli)/i;
+const asText = (v) => (Array.isArray(v) ? v.map(String).join(' ') : v === undefined || v === null ? '' : String(v));
+const envOfService = (s) => (Array.isArray(s?.environment)
+  ? Object.fromEntries(s.environment.map((e) => [String(e).split('=')[0], String(e).split('=').slice(1).join('=')]))
+  : s?.environment ?? {});
+
+/** The service name in a committed redis:// or rediss:// URL (null for an env-file value, a variable or garbage). */
+function redisUrlHost(value) {
+  try {
+    const url = new URL(String(value ?? ''));
+    return url.protocol === 'redis:' || url.protocol === 'rediss:' ? url.hostname || null : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Every service that is a Redis (a renamed, second or privately-built Redis gets the same rule): by name or image, by a
+ * command / entrypoint / health check that runs redis-server or redis-cli, or as the host of the app's committed REDIS_URL.
+ */
+function redisServiceNames(services) {
+  const urlHosts = new Set(['rab-api', 'rab-worker'].map((n) => redisUrlHost(envOfService(services[n]).REDIS_URL)).filter(Boolean));
+  return Object.keys(services).filter((name) => {
+    const s = services[name] ?? {};
+    return /redis/i.test(name)
+      || /redis/i.test(String(s.image ?? ''))
+      || REDIS_BINARY.test(asText(s.command))
+      || REDIS_BINARY.test(asText(s.entrypoint))
+      || REDIS_BINARY.test(asText(s.healthcheck?.test))
+      || urlHosts.has(name);
+  });
+}
+
+/** Network drivers that put a container directly on the host or the LAN, outside the private Compose network. */
+const HOST_REACHABLE_DRIVERS = ['host', 'macvlan', 'ipvlan'];
+
+/** One rendered (non-interpolated) port entry, short string or long mapping, for the message. Ports are not secrets. */
+function describePort(entry) {
+  if (typeof entry === 'string' || typeof entry === 'number') return `short syntax "${entry}"`;
+  const e = entry ?? {};
+  const host = e.published === undefined || e.published === '' ? 'a random host port' : `host ${e.host_ip ? `${e.host_ip}:` : ''}${e.published}`;
+  return `long syntax target ${e.target} -> ${host}`;
+}
+
+/**
+ * Problems that make a Redis service reachable from outside the private Compose network. `networks` is the model's
+ * top-level networks map: each network the service joins is resolved there (its `name`, else its key) and refused when it
+ * is the host network or uses a host / macvlan / ipvlan driver.
+ */
+function redisHostExposureProblems(service, networks = {}) {
+  const problems = [];
+  const s = service ?? {};
+  const joined = Array.isArray(s.networks) ? s.networks : Object.keys(s.networks ?? {});
+  for (const key of joined) {
+    const net = (networks ?? {})[key] ?? {};
+    const resolved = String(net.name ?? key);
+    const driver = String(net.driver ?? '');
+    if (resolved === 'host' || key === 'host') problems.push(`joins network "${key}", which is the host network; Redis stays on the private Compose network only (X1.6)`);
+    else if (HOST_REACHABLE_DRIVERS.includes(driver)) problems.push(`joins network "${key}" with driver ${driver}, which is reachable from the host or the LAN; Redis stays on the private Compose network only (X1.6)`);
+  }
+  for (const entry of Array.isArray(s.ports) ? s.ports : s.ports ? [s.ports] : []) {
+    problems.push(`publishes a port (${describePort(entry)}); Redis is never published (X1.6: private Compose network only, as in Twenty)`);
+  }
+  const expose = Array.isArray(s.expose) ? s.expose : s.expose ? [s.expose] : [];
+  if (expose.length) problems.push(`declares expose (${expose.join(', ')}); a Redis service carries no port declaration (X1.6)`);
+  if (s.network_mode !== undefined && s.network_mode !== null && String(s.network_mode) !== '') {
+    problems.push(`sets network_mode "${s.network_mode}"; Redis stays on the private Compose network only (X1.6)`);
+  }
   return problems;
 }
 
 function render(files) {
   const args = ['compose', '--project-directory', DOCKER_DIR];
-  for (const f of files) args.push('-f', path.join(DOCKER_DIR, f));
+  for (const f of files) args.push('-f', path.resolve(DOCKER_DIR, f)); // relative to packages/rab-docker, or absolute
   // Every profile is enabled so a profile-gated service (a re-added ops container) is rendered and refused, never hidden.
   args.push('--profile', '*', 'config', '--no-interpolate', '--no-env-resolution', '--format', 'json');
   return JSON.parse(execFileSync('docker', args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }));
@@ -180,10 +294,23 @@ function main() {
     console.log(`[compose-one-image] ${found.length ? 'FAIL' : 'PASS'} ${label}`);
     problems = problems.concat(found);
   }
+  for (const combo of REDIS_ONLY_COMBOS) {
+    const label = `${combo.join(' + ')} (Redis rule only)`;
+    let model;
+    try {
+      model = render(combo);
+    } catch (e) {
+      problems.push(`${label}: docker compose config failed: ${String(e.stderr || e.message).trim().slice(0, 400)}`);
+      continue;
+    }
+    const found = checkRedisPrivate(model, label);
+    console.log(`[compose-one-image] ${found.length ? 'FAIL' : 'PASS'} ${label}`);
+    problems = problems.concat(found);
+  }
   for (const msg of problems) console.error(`[compose-one-image] ${msg}`);
   if (problems.length) process.exit(1);
-  console.log(`[compose-one-image] OK: ${DEPLOY_COMBOS.length} deploy combinations use one image variable (${IMAGE_VAR}), API first, Worker after`);
+  console.log(`[compose-one-image] OK: ${DEPLOY_COMBOS.length} deploy combinations use one image variable (${IMAGE_VAR}), API first, Worker after; no Redis port is reachable from the host in any of the ${DEPLOY_COMBOS.length + REDIS_ONLY_COMBOS.length} combinations`);
 }
 
-module.exports = { checkModel, DEPLOY_COMBOS, ONE_IMAGE_REF, PINNED_DIGEST_IMAGE_REF, DB_IMAGE_REF, DEFAULT_DIGEST_COMBOS, allowsDefaultDigest, render };
+module.exports = { checkModel, checkRedisPrivate, redisHostExposureProblems, render, DEPLOY_COMBOS, REDIS_ONLY_COMBOS, ONE_IMAGE_REF, PINNED_DIGEST_IMAGE_REF, DB_IMAGE_REF, DEFAULT_DIGEST_COMBOS, allowsDefaultDigest };
 if (require.main === module) main();

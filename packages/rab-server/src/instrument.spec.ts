@@ -755,9 +755,37 @@ describe('instrument.ts — Sentry privacy options', () => {
       // 3. a truncated JWT (header + part of the payload)
       ['jwt eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJ1 cut', 'jwt [Filtered] cut'],
       ['header only eyJhbGciOiJIUzI1NiJ9', 'header only [Filtered]'],
+      // 4. X3.2 review F3: camelCase / snake_case compound names, bare and as JSON keys
+      ['newPassword=HUNTER2SECRET', 'newPassword=[Filtered]'], // gitleaks:allow (synthetic scrubber marker)
+      ['change failed: currentPassword = "cp-SECRET-x32"', 'change failed: currentPassword = [Filtered]'], // gitleaks:allow (synthetic scrubber marker)
+      ['refreshToken: RT-x32-SECRET-value', 'refreshToken: [Filtered]'], // gitleaks:allow (synthetic scrubber marker)
+      ['access_token=AT-x32-SECRET', 'access_token=[Filtered]'], // gitleaks:allow (synthetic scrubber marker)
+      ['clientSecret: cs-x32-SECRET', 'clientSecret: [Filtered]'], // gitleaks:allow (synthetic scrubber marker)
+      ['mfaCode=123987 mfa_code: 456123 totpCode=789456', 'mfaCode=[Filtered] mfa_code: [Filtered] totpCode=[Filtered]'],
+      ['totp: 482913', 'totp: [Filtered]'],
+      ['recoveryCode=ABCD-EFGH backup_codes: WXYZ-1234', 'recoveryCode=[Filtered] backup_codes: [Filtered]'],
+      [
+        'body {"currentPassword":"cp-SECRET-x32","accessToken":"at-SECRET-x32","mfaCode":"123987","shiftId":"s-1"}', // gitleaks:allow (synthetic scrubber marker)
+        'body {"currentPassword":"[Filtered]","accessToken":"[Filtered]","mfaCode":"[Filtered]","shiftId":"s-1"}',
+      ],
+      // 5. X3.2 review F3: a URL-encoded @ in an email, also inside an otpauth:// label
+      ['invite for bob%40example.com failed', 'invite for [Filtered] failed'],
+      [
+        'otpauth://totp/Crewflow:bob%40example.com?secret=JBSWX32OTPAUTH&issuer=Crewflow', // gitleaks:allow (synthetic scrubber marker)
+        'otpauth://totp/Crewflow:[Filtered]?secret=[Filtered]&issuer=Crewflow',
+      ],
+      // 6. X3.2 review F3: a password containing `@`, a host without a TLD — everything up to the LAST @ goes
+      ['connect postgres://user:p@SECRET@localhost:5432/rab failed', 'connect postgres://localhost:5432/rab failed'], // gitleaks:allow (synthetic scrubber marker)
+      ['redis://:pw@x32@SECRET@10.0.0.7:6379', 'redis://10.0.0.7:6379'], // gitleaks:allow (synthetic scrubber marker)
     ])('redactString(%j)', (input, expected) => {
       expect(redactString(input)).toBe(expected);
       expect(redactString(redactString(input))).toBe(expected);
+    });
+
+    it('keeps ordinary diagnostics readable (no over-matching from the compound names, X3.2)', () => {
+      for (const text of ['code: 23505', 'state: DRAFT', 'tokens issued: 3', 'shiftId=s-1 status=PUBLISHED', 'https://example.test/a@b/c']) {
+        expect(redactString(text)).toBe(text);
+      }
     });
 
     it.each([
@@ -768,6 +796,32 @@ describe('instrument.ts — Sentry privacy options', () => {
     ])('scrubData filters the %s key', (key) => {
       const out = instrument.scrubData({ [key]: 'HASH-VALUE-s3cr', keep: 1 });
       expect(out).toEqual({ [key]: '[Filtered]', keep: 1 });
+    });
+
+    // Phase X3.2: MFA fields never leave the process, whatever their value looks like.
+    it.each([
+      ['mfaCode', '123456'],
+      ['mfa_code', '123456'],
+      ['totpCode', '654321'],
+      ['otp', '111222'],
+      ['totpSecret', 'JBSWY3DPEHPK3PXP'],
+      ['totp_secret_encrypted', 'v1:abc'],
+      ['mfaSecret', 'JBSWY3DPEHPK3PXP'],
+      ['challengeToken', 'opaque-challenge-s3cr'],
+      ['manualKey', 'JBSW Y3DP EHPK 3PXP'],
+      ['otpauthUri', 'otpauth://totp/Crewflow:bob%40example.com?secret=JBSWY3DPEHPK3PXP&issuer=Crewflow'],
+      ['qrDataUrl', 'data:image/png;base64,iVBORw0KGgo'],
+      ['recoveryCodes', ['ABCD-EFGH', 'IJKL-MNOP']],
+      ['recovery_codes', ['ABCD-EFGH']],
+      ['backupCodes', ['ABCD-EFGH']],
+    ])('scrubData filters the MFA field %s (X3.2)', (key, value) => {
+      const out = instrument.scrubData({ [key]: value, keep: 1 });
+      expect(out).toEqual({ [key]: '[Filtered]', keep: 1 });
+    });
+
+    it('keeps MFA status fields that hold no secret (X3.2)', () => {
+      const status = { totpEnabled: true, recoveryCodesRemaining: 7, mfa_enabled_at: '2026-11-12' };
+      expect(instrument.scrubData(status)).toEqual(status);
     });
   });
 
