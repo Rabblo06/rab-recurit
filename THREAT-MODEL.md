@@ -7026,9 +7026,10 @@ Phase X Part 2 finding XA-08 (`docs/plans/PHASE-X-STAGE0-PART2.md` §2.6). Front
   change, reuse detection). Each one rewrote `core.refresh_token.revoked_at` on every row of the family or user, including
   rows already revoked. That erased when a token actually stopped being valid (reuse-investigation evidence) and restarted
   the 181-day retention clock of `core.worker_cleanup_auth_tokens`, so repeated replays could keep dead token rows forever.
-- **Control:** `RefreshTokenService.revokeFamily` and `revokeAllForUser` stamp only rows `WHERE revoked_at IS NULL` — the
-  same rule as `revokeAllForOrganisation` and the `user_session` CAS. Live rows are still revoked; revoked rows keep their
+- **Control:** `RefreshTokenService.revokeFamily`, `revokeAllForUser` and `revokeAllForUserExcept` ("log out of other
+  devices" and the MFA-change path, profile.service.ts / mfa-management.service.ts) stamp only rows
+  `WHERE revoked_at IS NULL` — the same rule as `revokeAllForOrganisation` and the `user_session` CAS. Live rows are still revoked; revoked rows keep their
   first time. No row can become un-revoked.
 - **Tests:** `refresh-token-revoke-first-wins.integration.spec.ts` (revoke, then revoke again later → revoked_at unchanged,
-  for both methods; replaying a rotated token twice keeps its rotation time; fails 3/3 on the previous code) and unit tests
+  for all three methods, incl. revokeAllForUserExcept keeping the excepted family live and backdated times unchanged; replaying a rotated token twice keeps its rotation time; fails 3/3 on the previous code) and unit tests
   in `refresh-token.service.spec.ts`.
