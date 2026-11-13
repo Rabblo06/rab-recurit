@@ -136,7 +136,11 @@ describe('assertSupportedUpgradeStart: the decision table', () => {
   it('an existing R254 database upgrades (the published v0.4.0 / cd7c7e32 / 4c38aa1a set)', () => {
     const d = assertSupportedUpgradeStart({ ...prod, state: 'CHAIN-PARTIAL', applied: R254 });
     expect(d).toMatchObject({ allowed: true, release: 'R254' });
-    expect(d.reason).toMatch(/contains R254; 2 migration\(s\) to apply/);
+    // Derived from the chain, not a literal: every migration added after R254 is one more to apply (the two R256 index
+    // migrations, then XP-09's TokenCleanupRotationOrder1786721460000, then whatever comes next).
+    const remaining = CODE.length - R254.length;
+    expect(remaining).toBeGreaterThanOrEqual(R256.length - R254.length);
+    expect(d.reason).toContain(`contains R254; ${remaining} migration(s) to apply`);
   });
 
   it('a partial upgrade past R254 resumes', () => {
