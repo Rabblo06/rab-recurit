@@ -1,5 +1,14 @@
 #!/bin/sh
-# API start (the image's default command). Runs from /app (the image WORKDIR).
+# API start: rab-api's ENTRYPOINT in every deploy compose file (DB-SETUP; also the image's default command). Runs from /app
+# (the image WORKDIR).
+#
+# DB-SETUP (Twenty Helm model, OWNER-DB-FINAL.md Part A): this container NEVER receives PG_DATABASE_URL, in any form (only the
+# one-shot db-setup service does: the admin URL, an existing crewflow_owner URL, or the bundled db's). This script is PID 1
+# (compose `entrypoint: ["./api-prestart.sh"]`, no compose init), refuses a PG_DATABASE_URL in its environment (exit 64),
+# builds the crewflow_owner URL from the credential-free target file and the crewflow_owner password file db-setup wrote
+# (both read-only), then execs the init: `exec /sbin/tini -s -- node packages/rab-server/dist/main.js`. Run with arguments (the owner CLI
+# one-off: `docker compose run --rm --no-deps rab-api node packages/rab-server/dist/command/main.js <command>`), it does
+# the same refusals and builds the same crewflow_owner URL, then `exec /sbin/tini -s -- "$@"`: nothing migrates or registers.
 #
 # Owner-login architecture (owner's FINAL decision 2026-11-04; M0 §7): the API, the Worker and the migrate child all use the
 # ONE database URL, PG_DATABASE_URL (the schema-owning crewflow_owner login). This script:
@@ -10,10 +19,13 @@
 #      CREWFLOW_UPGRADE_FAILURE (continue | refuse, default continue — O3 C3; the deprecated CREWFLOW_UPGRADE_FAILURE_POLICY
 #      maps refuse -> refuse, continue-if-compatible -> continue and must agree); the removed CREWFLOW_DB_MODE is refused
 #      (exit 64). CREWFLOW_UPGRADE_INCOMPLETE is set ONLY by this script: an inherited value is refused (exit 64);
-#   2. refuses to start when a second database URL, a role password, migration/command authority or an operations variable
+#   2. refuses to start when a second database URL, a role password (PG_DATABASE_PASSWORD included: only compose reads it,
+#      for the bundled db), migration/command authority or an operations variable
 #      reached the API's environment (exit 64). The one exception is the per-release approval token
 #      (CREWFLOW_MIGRATION_APPROVED) when CREWFLOW_MIGRATE_ON_START=true AND CREWFLOW_MIGRATION_APPROVAL_MODE=token: it is
 #      taken out of this shell's environment first, handed ONLY to the short-lived migrate child, and never reaches main.js;
+#   2b. DB-SETUP (Twenty Helm model): refuses any PG_DATABASE_URL (64); builds the crewflow_owner runtime URL from db-setup's
+#      credential-free target file and its crewflow_owner password file, waiting (bounded) for both (details below);
 #   3. CREWFLOW_MIGRATE_ON_START=true (and DISABLE_DB_MIGRATIONS not true): runs the short-lived migrate child (Agent 1:
 #      migration lock, fresh-install classifier, post-checks, upgrade-failure policy). Exit 0 = current / applied / ledger
 #      ahead; 70 = an UPGRADE migration FAILED and CREWFLOW_UPGRADE_FAILURE=continue (degraded start, loud ERROR/WARNING);
@@ -29,7 +41,7 @@
 #      reports 70 for one, and the relay below vetoes a 70 result that names one.
 # Every failure other than a configuration refusal waits CREWFLOW_STARTUP_FAILURE_DELAY_SECONDS (default 15, 0-300) before
 # exiting, so a restart policy cannot turn a broken release into a tight restart storm against the database.
-# The Worker never runs this, and never migrates.
+# The Worker never runs this, and never migrates: its entrypoint is worker-start.sh (derive + swap only, never the admin).
 set -eu
 
 SCRIPTS=packages/rab-server/dist/database/typeorm/scripts
@@ -160,6 +172,17 @@ if [ "$MIGRATE_ON_START" = true ] && [ "$APPROVAL_MODE" = token ] && [ -n "${CRE
   MIGRATION_APPROVAL="$CREWFLOW_MIGRATION_APPROVED"
   unset CREWFLOW_MIGRATION_APPROVED
 fi
+# The owner CLI one-off (arguments given) and ONLY it: its per-invocation command authority (DB_TARGET and
+# ALLOW_PRODUCTION_DB_COMMANDS, passed with `docker compose run -e`, never in a service or env file) is taken out of this
+# shell's environment before the refusal loops below (which refuse it in every other case) and handed back only to the
+# one-off command, which applies its own production-command rules. The API start (no arguments) refuses both, as before.
+ONEOFF_DB_TARGET=""
+ONEOFF_ALLOW_PRODUCTION_DB_COMMANDS=""
+if [ "$#" -gt 0 ]; then
+  ONEOFF_DB_TARGET="${DB_TARGET:-}"
+  ONEOFF_ALLOW_PRODUCTION_DB_COMMANDS="${ALLOW_PRODUCTION_DB_COMMANDS:-}"
+  unset DB_TARGET ALLOW_PRODUCTION_DB_COMMANDS
+fi
 
 # Security review L-4: these two loops plus the owner-login loop below are a literal copy of the shared list in
 # packages/rab-server/src/database/typeorm/core/never-in-runtime-env.ts (forbiddenRuntimeEnvNames('api')), which main.js
@@ -181,7 +204,7 @@ done
 # Owner-login architecture: ONE database URL (PG_DATABASE_URL). Legacy and second database URLs and role passwords never
 # belong here. (The removed CREWFLOW_DB_MODE is refused above by the runtime-db-config copy, with its own message.)
 for name in DATABASE_URL DATABASE_DIRECT_URL PG_DATABASE_REPLICA_URL PG_WORKER_DATABASE_URL CREWFLOW_WORKER_BOOTSTRAP_PASSWORD \
-    CREWFLOW_OWNER_PASSWORD CREWFLOW_OWNER_BOOTSTRAP_PASSWORD; do
+    CREWFLOW_OWNER_PASSWORD CREWFLOW_OWNER_BOOTSTRAP_PASSWORD PG_DATABASE_PASSWORD; do
   eval "value=\${$name:-}"
   if [ -n "$value" ]; then refuse "$name must never be set on the api service: the API, the Worker and the migrate child use ONE database URL, PG_DATABASE_URL (the crewflow_owner login), and no role password belongs in application configuration."; fi
 done
@@ -235,6 +258,87 @@ isolation_report() {
   fi
 }
 isolation_report
+
+# DB-SETUP (Twenty Helm model, OWNER-DB-FINAL.md Part A): rab-api NEVER receives PG_DATABASE_URL (admin URL, crewflow_owner
+# URL, anything). Only the one-shot db-setup service does; its bootstrap child creates crewflow_owner if missing (random
+# password, stored in /run/crewflow/db-target/owner-password, 0400; for an existing crewflow_owner URL, that URL's
+# password) and writes the CREDENTIAL-FREE target file /run/crewflow/db-target/target.json
+# ({"v":1,"host","port","database","params"}: no user, no password); both are mounted read-only here. Twenty: the server
+# receives only the app user's URL (helm/twenty/templates/deployment-server.yaml:142-156). This shell builds the crewflow_owner runtime URL with the pure derive step (never connects; the URL comes back on
+# fd 4 through a command substitution: never a file, never argv, never the log):
+#   - PG_DATABASE_URL set (non-empty) here, any login: refused (64) before anything runs. An empty value is unset.
+#   - CREWFLOW_DB_TARGET_FILE=<that file> -> the URL from the target and the password file. A file that is not there yet
+#     (derive exit 75) is waited for, 2 s apart, at most 120 s (60 attempts: bounded by a COUNT, never by the clock, so a
+#     clock step cannot stretch or end the wait), with a fixed message, because a platform may not honour depends_on:
+#     condition: service_completed_successfully (OpenShip: NOT VERIFIED); then exit 75. There is no other path. The derive
+#     run is NOT wrapped in busybox `timeout`: its watcher process inherits the command-substitution pipe (fd 4) and keeps it
+#     open until the bound expires, so every start paid the full bound (measured: 20 s with `timeout 20` for a step that takes
+#     0 s), and a slow cold start was killed. A hang is prevented inside the step instead: both files are opened
+#     O_NONBLOCK|O_NOFOLLOW and fstat-checked, so a FIFO, a symlink or a directory is refused at once (exit 64).
+# Then PG_DATABASE_URL = the runtime URL; PG_DATABASE_PASSWORD and CREWFLOW_DB_TARGET_FILE are unset.
+# TLS (D1 a): when the runtime URL's host is exactly `db` and PG_SSL_CA_CERT_PATH is unset (or blank), it is set to the
+# bundled db's own CA (mounted read-only). The block below is identical in worker-start.sh and db-setup.sh
+# (run-prestart-shell-tests.cjs compares them).
+# BEGIN crewflow bundled-db CA
+crewflow_bundled_db_ca() {
+  db_rest="${PG_DATABASE_URL#*://}"
+  db_authority="${db_rest%%[/?#]*}"
+  db_hostport="${db_authority##*@}"
+  db_host="${db_hostport%%:*}"
+  if [ "$db_host" = db ] && [ -z "${PG_SSL_CA_CERT_PATH:-}" ]; then
+    export PG_SSL_CA_CERT_PATH=/run/crewflow/db-ca/ca.crt
+  fi
+  unset db_rest db_authority db_hostport db_host
+}
+# END crewflow bundled-db CA
+DERIVE_RUNTIME_URL="$SCRIPTS/owner-login/derive-runtime-url.js"
+DB_TARGET_FILE=/run/crewflow/db-target/target.json
+DB_SETUP_WAIT_SECONDS=120
+# Test seam (NODE_ENV=test only, like the migration seams above): a shorter bound for the shell tests.
+if [ -n "${CREWFLOW_TEST_DB_SETUP_WAIT_SECONDS:-}" ]; then
+  if [ "${NODE_ENV:-}" != test ]; then refuse 'CREWFLOW_TEST_DB_SETUP_WAIT_SECONDS is a test seam: it is allowed only with NODE_ENV=test. Remove it. Refusing to start.'; fi
+  case "$CREWFLOW_TEST_DB_SETUP_WAIT_SECONDS" in ''|*[!0-9]*) refuse 'CREWFLOW_TEST_DB_SETUP_WAIT_SECONDS must be a whole number of seconds.' ;; esac
+  DB_SETUP_WAIT_SECONDS="$CREWFLOW_TEST_DB_SETUP_WAIT_SECONDS"
+fi
+unset CREWFLOW_TEST_DB_SETUP_WAIT_SECONDS
+if [ -n "${PG_DATABASE_URL:-}" ]; then
+  refuse 'PG_DATABASE_URL must never be set on the api service: it belongs only to the one-shot db-setup service (the admin URL, an existing crewflow_owner URL, or the bundled db). The API builds the crewflow_owner URL from the target and password files db-setup writes. Value not shown. Refusing to start.'
+fi
+unset PG_DATABASE_URL
+export CREWFLOW_DB_TARGET_FILE="$DB_TARGET_FILE"
+DB_SETUP_ATTEMPTS=$(( (DB_SETUP_WAIT_SECONDS + 1) / 2 ))
+if [ "$DB_SETUP_ATTEMPTS" -lt 1 ]; then DB_SETUP_ATTEMPTS=1; fi
+ATTEMPT=0
+while :; do
+  ATTEMPT=$((ATTEMPT + 1))
+  STATUS=0
+  RUNTIME_URL="$(CREWFLOW_RUNTIME_URL_FD=4 node "$DERIVE_RUNTIME_URL" 4>&1 1>&2)" || STATUS=$?
+  if [ "$STATUS" -ne 75 ]; then break; fi
+  RUNTIME_URL=""
+  if [ "$ATTEMPT" -ge "$DB_SETUP_ATTEMPTS" ]; then
+    fail_after_delay 75 "the database target file did not appear within ${DB_SETUP_WAIT_SECONDS}s: db-setup (the only service with the admin URL) has not completed"
+  fi
+  echo "api-prestart: waiting for db-setup: the database target file is not there yet (attempt ${ATTEMPT} of ${DB_SETUP_ATTEMPTS}, 2 s apart)"
+  run_step sleep 2 || true
+done
+if [ "$STATUS" -ne 0 ]; then
+  RUNTIME_URL=""
+  fail_after_delay "$STATUS" "could not build the crewflow_owner connection (see the derive-runtime-url line above)"
+fi
+if [ -z "$RUNTIME_URL" ]; then
+  fail_after_delay 70 'the derive step returned an empty crewflow_owner connection'
+fi
+export PG_DATABASE_URL="$RUNTIME_URL"
+unset RUNTIME_URL PG_DATABASE_PASSWORD CREWFLOW_DB_TARGET_FILE
+crewflow_bundled_db_ca
+# The owner CLI one-off: no migrate child, no scheduler registration, no API; the cleaned environment only.
+if [ "$#" -gt 0 ]; then
+  trap - TERM INT
+  echo "api-prestart: one-off command: running it as crewflow_owner (no migration, no scheduler registration, no API)"
+  if [ -n "$ONEOFF_DB_TARGET" ]; then export DB_TARGET="$ONEOFF_DB_TARGET"; fi
+  if [ -n "$ONEOFF_ALLOW_PRODUCTION_DB_COMMANDS" ]; then export ALLOW_PRODUCTION_DB_COMMANDS="$ONEOFF_ALLOW_PRODUCTION_DB_COMMANDS"; fi
+  exec /sbin/tini -s -- "$@"
+fi
 
 # The short-lived migrate child (Agent 1). Its stdout/stderr are relayed line by line; its LAST line is
 #   TWENTY_MIGRATE_RESULT {"state":...,"applied":[...],"pending":[...],"exitCode":N,"serve":...,"policy":...,"reason":...,
@@ -363,8 +467,9 @@ else
   fi
 fi
 
+# PID 1 hand-over: tini replaces this shell as PID 1 with the cleaned environment and runs main.js as its child.
 trap - TERM INT
 if [ -n "$UPGRADE_INCOMPLETE" ]; then
-  CREWFLOW_UPGRADE_INCOMPLETE="$UPGRADE_INCOMPLETE" exec node packages/rab-server/dist/main.js
+  CREWFLOW_UPGRADE_INCOMPLETE="$UPGRADE_INCOMPLETE" exec /sbin/tini -s -- node packages/rab-server/dist/main.js
 fi
-exec node packages/rab-server/dist/main.js
+exec /sbin/tini -s -- node packages/rab-server/dist/main.js

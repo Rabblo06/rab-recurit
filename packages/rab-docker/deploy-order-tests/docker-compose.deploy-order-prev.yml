@@ -1,0 +1,34 @@
+# Deploy-order real-container tests - TEST-ONLY overlay for an image OLDER than DB-SETUP (R254 cd7c7e32, R256 0e0a6edd):
+# such an image has no worker-start.sh and an api-prestart.sh that is not meant to be the entrypoint, so its deploys use
+# the previous release's OWN start-up, exactly as that release's docker-compose.image.yml declared it
+# (`git show 0e0a6edd:packages/rab-docker/docker-compose.image.yml`): the image's ENTRYPOINT (tini -s), rab-api command
+# ./api-prestart.sh, rab-worker command `node packages/rab-worker/dist/main.js` under compose's init, and the
+# PG_DATABASE_URL interpolation value on both (that release's runtime login). The drivers add this file only while
+# CREWFLOW_IMAGE_TAG is such a digest, and always with a crewflow_owner URL (those images read PG_DATABASE_URL as their
+# runtime login and cannot use an admin URL). PR #125 never changes an existing crewflow_owner's password, so the same
+# crewflow_owner URL serves NEW and a rollback.
+#
+# Consequence measured by run-db-setup-tests.cjs S7: rolling back to a pre-DB-SETUP digest with THIS release's compose files
+# alone leaves rab-worker unable to start (./worker-start.sh is not in the old image): a rollback across DB-SETUP uses the
+# previous release's compose files.
+#
+# PR #125: such an image has no db-setup.sh either, so db-setup does nothing here (exit 0, rab-api's
+# depends_on is satisfied). PR #125 pins `PG_DATABASE_URL: ""` on rab-api / rab-worker in this release's files; this
+# overlay restores the previous release's `${PG_DATABASE_URL:-}` for the old image only.
+
+services:
+  db-setup:
+    entrypoint: ["/bin/sh", "-c", "exit 0"]
+
+  rab-api:
+    entrypoint: ["/sbin/tini", "-s", "--"]
+    command: ["./api-prestart.sh"]
+    environment:
+      PG_DATABASE_URL: ${PG_DATABASE_URL:-}
+
+  rab-worker:
+    entrypoint: ["/sbin/tini", "-s", "--"]
+    command: ["node", "packages/rab-worker/dist/main.js"]
+    init: true
+    environment:
+      PG_DATABASE_URL: ${PG_DATABASE_URL:-}

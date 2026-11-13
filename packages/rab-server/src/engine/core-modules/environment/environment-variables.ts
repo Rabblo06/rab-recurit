@@ -31,10 +31,14 @@ export class EnvironmentVariables {
   PORT: number = 3000;
 
   /**
-   * Phase B (B1): the database connection. `PG_DATABASE_URL` is the one primary variable in every process; each process
-   * gets its own credential through its own environment. The full rules — legacy names accepted only outside production
-   * (with a deprecation warning), conflicts refused, URL parameter policy, TLS, strict numbers — live in
-   * src/database/postgres/pg-config.ts, which env.validation.ts runs. The declarations below only give the keys a shape.
+   * Phase B (B1) / DB-SETUP: the database connection. `PG_DATABASE_URL` is the one primary variable. In a deployment it is
+   * the database ADMIN URL; api-prestart.sh (after the bootstrap child) and worker-start.sh replace it, before any runtime
+   * process starts, with the derived crewflow_owner URL (database/owner-login/owner-credential.ts), so every runtime process
+   * sees ONLY the crewflow_owner login: in production the API, the Worker and the migrate child refuse any other login
+   * before connecting (database/owner-login/runtime-db-config.ts checkRuntimeLogin). A crewflow_owner URL is passed through
+   * unchanged. The full rules — legacy names accepted only outside production (with a deprecation warning), conflicts
+   * refused, URL parameter policy, TLS, strict numbers — live in src/database/postgres/pg-config.ts, which
+   * env.validation.ts runs. The declarations below only give the keys a shape.
    */
   @IsOptional()
   @IsString()

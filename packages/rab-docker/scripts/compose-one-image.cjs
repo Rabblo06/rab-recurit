@@ -19,6 +19,11 @@
  *     replaces the API, so an old Worker never runs beside a new API), or for a healthy rab-redis;
  *   - rab-api runs with the Worker-only switches (it must migrate and register the schedulers), or rab-worker without them;
  *   - rab-api's stop_grace_period is below 40 s;
+ *   - DB-SETUP (owner decisions D1 a / D3): the bundled database `db` is missing, its image is not EXACTLY
+ *     ${CREWFLOW_POSTGRES_IMAGE:-postgres@sha256:<64 hex>} (the one non-app image allowed a committed default: the official
+ *     postgres repository by digest, never a tag), rab-api does not wait for it healthy, or the PID 1 shape is not exact:
+ *     rab-api's entrypoint ./api-prestart.sh and rab-worker's ./worker-start.sh, no command, no compose init (each script
+ *     cleans the environment, then execs the image's tini; T-5);
  *   - a `rab-ops` service, or any service under an `ops` profile, is present. The separated operations container was
  *     removed (rab-ops removal, PR 2); operations run as one-off owner-login commands of the API image
  *     (`docker compose run --rm --no-deps rab-api node packages/rab-server/dist/command/main.js <command>`), so the
@@ -55,7 +60,6 @@ const DOCKER_DIR = path.resolve(__dirname, '..');
 const DEPLOY_COMBOS = Object.freeze([
   ['docker-compose.production.yml'],
   ['docker-compose.image.yml'],
-  ['docker-compose.image.yml', 'docker-compose.local-db.yml'],
   ['docker-compose.image.yml', 'staging/docker-compose.staging.yml'],
   ['docker-compose.image.yml', 'staging/rehearsal/docker-compose.image-rehearsal.yml'],
 ]);
@@ -78,6 +82,8 @@ const PINNED_DIGEST_IMAGE_REF = /^(\$\{CREWFLOW_IMAGE_REPOSITORY(:-[a-z0-9./_-]+
 /** The deploy combinations whose image line may carry the pinned release digest as its default (owner decision 2026-11-12). */
 const DEFAULT_DIGEST_COMBOS = Object.freeze(['docker-compose.production.yml']);
 const allowsDefaultDigest = (combo) => combo.length === 1 && DEFAULT_DIGEST_COMBOS.includes(combo[0]);
+/** DB-SETUP: the bundled db's image expression (no-interpolate render): the official postgres repository, a full digest. */
+const DB_IMAGE_REF = /^\$\{CREWFLOW_POSTGRES_IMAGE:-postgres@sha256:[0-9a-f]{64}\}$/;
 
 function durationSeconds(v) {
   if (v === undefined || v === null) return NaN;
@@ -110,7 +116,9 @@ function checkModel(model, label, { allowDefaultDigest = false } = {}) {
     if (Array.isArray(s?.profiles) && s.profiles.length) p(`${name}: has profiles ${JSON.stringify(s.profiles)} (a deploy file has no profile-gated service; every service starts with the stack)`);
   }
 
-  const appServices = ['rab-api', 'rab-worker'];
+  // PR #125 option A: the one-shot db-setup runs the SAME image (the bootstrap child ships in it).
+  const appServices = ['rab-api', 'rab-worker', 'db-setup'].filter((n) => n !== 'db-setup' || services[n]);
+  if (!services['db-setup']) p('db-setup is missing (PR #125 option A: the one-shot database setup, the only service with the admin URL)');
   for (const name of appServices) {
     const s = services[name];
     if (s.build !== undefined) p(`${name}: has a build section (a server never builds; use the gated image)`);
@@ -150,6 +158,25 @@ function checkModel(model, label, { allowDefaultDigest = false } = {}) {
   }
   if (!(durationSeconds(api.stop_grace_period) >= MIN_API_STOP_GRACE_S)) p(`rab-api: stop_grace_period below ${MIN_API_STOP_GRACE_S}s`);
 
+  // DB-SETUP: the bundled database and the Worker wrapper.
+  const db = services.db;
+  if (!db) p('db: the bundled database service is missing (DB-SETUP D3: it replaces docker-compose.local-db.yml)');
+  else {
+    if (db.build !== undefined) p('db: has a build section');
+    if (!DB_IMAGE_REF.test(String(db.image ?? ''))) p(`db: image must be \${CREWFLOW_POSTGRES_IMAGE:-postgres@sha256:<64 hex>} (the official postgres repository by digest), got ${JSON.stringify(db.image)}`);
+  }
+  if (api.depends_on?.db?.condition !== 'service_healthy') p('rab-api: must depend on db with condition service_healthy');
+  if (api.depends_on?.['db-setup']?.condition !== 'service_completed_successfully') p('rab-api: must depend on db-setup with condition service_completed_successfully (option A: crewflow_owner exists and the target file is written)');
+  if (services['db-setup'] && services['db-setup'].depends_on?.db?.condition !== 'service_healthy') p('db-setup: must depend on db with condition service_healthy');
+  // DB-SETUP PID 1 (lead decision 2026-11-12): the cleaning scripts are the ENTRYPOINT (PID 1) and exec the image's tini only
+  // once the environment is clean; no command, no compose init (docker-init would keep the admin URL at PID 1).
+  for (const [name, script] of [['rab-api', './api-prestart.sh'], ['rab-worker', './worker-start.sh'], ['db-setup', './db-setup.sh']]) {
+    const s = services[name];
+    if (!s) continue;
+    if (JSON.stringify(s.entrypoint ?? null) !== JSON.stringify([script])) p(`${name}: entrypoint must be exactly ["${script}"] (DB-SETUP: PID 1 cleans the environment before the init starts)`);
+    if (Array.isArray(s.command) ? s.command.length > 0 : (s.command !== undefined && s.command !== null)) p(`${name}: must have no command (${script}, the entrypoint, takes none)`);
+    if (s.init === true) p(`${name}: init: true is refused (docker-init would be PID 1 with the admin URL)`);
+  }
   return problems.concat(checkRedisPrivate(model, label));
 }
 
@@ -285,5 +312,5 @@ function main() {
   console.log(`[compose-one-image] OK: ${DEPLOY_COMBOS.length} deploy combinations use one image variable (${IMAGE_VAR}), API first, Worker after; no Redis port is reachable from the host in any of the ${DEPLOY_COMBOS.length + REDIS_ONLY_COMBOS.length} combinations`);
 }
 
-module.exports = { checkModel, checkRedisPrivate, redisHostExposureProblems, render, DEPLOY_COMBOS, REDIS_ONLY_COMBOS, ONE_IMAGE_REF, PINNED_DIGEST_IMAGE_REF, DEFAULT_DIGEST_COMBOS, allowsDefaultDigest };
+module.exports = { checkModel, checkRedisPrivate, redisHostExposureProblems, render, DEPLOY_COMBOS, REDIS_ONLY_COMBOS, ONE_IMAGE_REF, PINNED_DIGEST_IMAGE_REF, DB_IMAGE_REF, DEFAULT_DIGEST_COMBOS, allowsDefaultDigest };
 if (require.main === module) main();

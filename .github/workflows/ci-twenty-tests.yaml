@@ -30,7 +30,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        pg: ['16', '18']
+        pg: ['16', '17', '18']
     services:
       redis:
         image: redis:7-alpine

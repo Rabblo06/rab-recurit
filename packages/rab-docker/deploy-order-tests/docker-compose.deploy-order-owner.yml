@@ -1,0 +1,13 @@
+# Deploy-order real-container tests - TEST-ONLY overlay for the PASS-THROUGH scenarios (DB-SETUP §7.1, owner decision D5):
+# a database that already has the hand-made crewflow_owner, as every R254 / R256 deployment has. The bundled db's FIRST
+# start runs the shipped fallback postgres-init/owner-login/01-crewflow-owner.sql (the manual step those releases
+# documented), with the per-run password file from the test's secret directory; compose.env then holds that
+# crewflow_owner URL as the PG_DATABASE_URL interpolation value (compose.env): PR #125, db-setup checks it read-only and
+# copies its password into the setup volume's password file, never changing it (rab-api / rab-worker never receive the URL).
+# Not used by the bundled-database cases of run-db-setup-tests.cjs, where only db-setup's bootstrap child creates the role.
+
+services:
+  db:
+    volumes:
+      - ./postgres-init/owner-login/01-crewflow-owner.sql:/docker-entrypoint-initdb.d/01-crewflow-owner.sql:ro
+      - ${CREWFLOW_SECRETS_DIR:?}/crewflow-owner-password:/run/secrets/crewflow-owner-password:ro
