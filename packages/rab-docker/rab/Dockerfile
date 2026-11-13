@@ -124,7 +124,7 @@ RUN --mount=type=bind,from=runtime-modules,source=/app/node_modules,target=/api/
 
 # Final stage = THE image (O1, owner decision "exactly like Twenty"): ONE image runs every Crewflow process, chosen by
 # command: rab-api (the default CMD, ./api-prestart.sh), rab-worker (`node packages/rab-worker/dist/main.js`), and the
-# one-off rab-migrate / rab-ops. It is also the Dockerfile's last stage,
+# one-off rab-migrate and the owner-login one-off commands. It is also the Dockerfile's last stage,
 # which Docker builds by default when no `--target` is given (OpenShip and Render cannot pass one): keep it last.
 # The same pinned Node image as `base`, WITHOUT base's native build toolchain (python3/make/g++/gcc): those are build-only
 # (image scan 2026-10-30: python3 3.14.8 = 4 CRITICAL) and the runtime compiles nothing. Keep the digest in step with `base`.
@@ -163,8 +163,8 @@ RUN set -eu; \
     for p in /usr/lib/chromium /usr/bin/chromium /usr/bin/chromium-browser; do test ! -e "$p"; done
 # Dependency scan (2026-10-30): every library finding Trivy reports for the base image (undici 6.27.0, tar, brace-expansion,
 # ip-address, postcss-selector-parser) is inside the npm CLI the node image bundles. The runtime never runs npm or npx (the
-# API, the Worker bundle, rab-migrate and rab-ops all start `node <file>`; npx is used by the build stage only, which keeps
-# it), so the final stage drops the npm CLI.
+# API, the Worker bundle, rab-migrate and the one-off commands all start `node <file>`; npx is used by the build stage only,
+# which keeps it), so the final stage drops the npm CLI.
 # H3: the other package managers the node image ships go too: Yarn 1 (/opt/yarn-v*, the yarn/yarnpkg links) and Corepack
 # (the yarn/pnpm launcher). Dependencies are installed in the build stages only; nothing at runtime installs, resolves or
 # downloads a package, so a package manager in the runtime image is unused build tooling.

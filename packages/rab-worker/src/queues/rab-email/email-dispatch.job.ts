@@ -100,7 +100,7 @@ export interface EmailDispatchResult {
  *     ever republished after DURABLY bumping `dispatch_generation` (CAS'd
  *     by the row's own UPDATE) and using `republish()`'s generation-suffixed
  *     jobId — this is what actually fixes the confirmed bug: the OLD
- *     BullMQ job's terminal state (completed, retained for up to 7 days; or
+ *     BullMQ job's terminal state (completed, retained for up to 4 hours; or
  *     failed-and-removed) can no longer block the new attempt from ever
  *     running, because the new attempt gets a genuinely new job identity.
  *   - Republishing itself is only done when it's SAFE: if a PROCESSING row
@@ -449,7 +449,7 @@ export async function dispatchEmailScope(
 
         // Wave 5 lane OPS (defensive): a PENDING row with dispatch_generation > 0 already had an earlier attempt (an operator
         // replay or any future path that resets a row to PENDING). That attempt's BullMQ job (attempt.0 or attempt.<n>) may
-        // still be retained (removeOnFail 30 d), and BullMQ silently drops an add() with an existing jobId — so publish it
+        // still be retained (removeOnFail 7 d, X3.4), and BullMQ silently drops an add() with an existing jobId — so publish it
         // under its CURRENT generation's jobId, never attempt.0. (DB5's core.replay_failed_email moves FAILED -> RETRY with
         // a bump, which the stale-RETRY recovery below already republishes under a fresh generation.)
         for (const row of firstAttempt) {

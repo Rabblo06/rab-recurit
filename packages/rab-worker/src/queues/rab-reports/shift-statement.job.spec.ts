@@ -26,11 +26,16 @@ function responder(candidates: unknown[], generation: number | null = 4) {
 
 describe('shift statement dispatch', () => {
   it('per_scope: the discovery scan and the per-row CAS are byte-for-byte the pre-Phase-D SQL', async () => {
-    const { tenant, dataSource, statements } = fakeTenant(responder([{ id: P1, organisation_id: ORG, workspace_id: WS, statement_status: 'pending' }]));
+    const { tenant, dataSource, statements, options } = fakeTenant(responder([{ id: P1, organisation_id: ORG, workspace_id: WS, statement_status: 'pending' }]));
     const publish = jest.fn(async () => undefined);
     const result = await runShiftStatementDispatchCycle(dataSource as never, tenant as never, publish);
     const scan = statements.find((s) => s.sql.startsWith('SELECT id, organisation_id, workspace_id, statement_status'))!;
     const cas = statements.find((s) => s.sql.startsWith("UPDATE payroll_record SET statement_status = 'queued'"))!;
+    // T-1 / ST-02: the discovery transaction is READ ONLY through the tenant-context option (folded into the binding
+    // SELECT), and no longer sends its own SET TRANSACTION READ ONLY; the CAS transaction stays read-write.
+    expect(options[scan.tx]).toEqual({ readOnly: true });
+    expect(statements.filter((s) => s.tx === scan.tx && s.sql === 'SET TRANSACTION READ ONLY')).toEqual([]);
+    expect(options[cas.tx]).toBeUndefined();
     expect(sha256(scan.sql)).toBe(PRE_PHASE_D_SQL_SHA256.statementScan);
     expect(sha256(cas.sql)).toBe(PRE_PHASE_D_SQL_SHA256.statementCas);
     expect(publish).toHaveBeenCalledWith({ payrollRecordId: P1, organisationId: ORG, workspaceId: WS, generation: 4 });
@@ -38,12 +43,14 @@ describe('shift statement dispatch', () => {
   });
 
   it('global: scans only the claimed ids in a READ ONLY worker-context transaction of the pointer\'s workspace, then the SAME CAS per row', async () => {
-    const { tenant, statements, contexts } = fakeTenant(responder([{ id: P1, organisation_id: ORG, workspace_id: WS, statement_status: 'none' }]));
+    const { tenant, statements, contexts, options } = fakeTenant(responder([{ id: P1, organisation_id: ORG, workspace_id: WS, statement_status: 'none' }]));
     const publish = jest.fn(async () => undefined);
     const result = await dispatchStatementScope(tenant as never, ORG, WS, [P1, P2], publish);
     expect(contexts.every((c) => c.organisationId === ORG && c.workspaceId === WS && c.actorType === 'worker')).toBe(true);
     const scan = statements.find((s) => s.sql.startsWith('SELECT id, organisation_id, workspace_id, statement_status'))!;
-    expect(statements[statements.indexOf(scan) - 1]!.sql).toBe('SET TRANSACTION READ ONLY');
+    // T-1 / ST-02: READ ONLY through the option (same round trip as the binding SELECT), not a separate statement.
+    expect(options[scan.tx]).toEqual({ readOnly: true });
+    expect(statements.filter((s) => s.tx === scan.tx && s.sql === 'SET TRANSACTION READ ONLY')).toEqual([]);
     expect(scan.sql).toContain('AND id = ANY($1::uuid[])');
     expect(scan.params).toEqual([[P1, P2]]);
     const cas = statements.find((s) => s.sql.startsWith("UPDATE payroll_record SET statement_status = 'queued'"))!;

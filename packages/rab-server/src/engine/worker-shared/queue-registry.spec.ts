@@ -11,6 +11,7 @@ import {
   LEGACY_BULL_PREFIX,
   prefixOf,
   QUEUE_NAMES,
+  QUEUE_RETENTION,
   QUEUE_SETTINGS,
   QueueName,
   QueueSettings,
@@ -22,7 +23,7 @@ import {
   SCAN_QUEUE_NAMES,
   UnknownQueueError,
 } from './queue-registry';
-import { registeredJob, registeredSystemScopedJob, QueueEnqueueRefusedError } from './queue-enqueue';
+import { registeredJob, registeredSystemScopedJob, QueueEnqueueRefusedError, scanJobTemplate } from './queue-enqueue';
 import { TIMER_TRIGGER_QUEUE_NAME } from './timer-trigger.contract';
 import { AUDIT_EVENT_QUEUE_NAME } from './audit-event.contract';
 
@@ -35,6 +36,8 @@ import { AUDIT_EVENT_QUEUE_NAME } from './audit-event.contract';
  *   - scan Worker options: bullmq-scheduler.ts startBullmqScheduler (`scanJobsOn(queue).length`, `lockDurationMsFor`);
  *   - job options: email-queue.service.ts / push-queue.service.ts EMAIL|PUSH_QUEUE_JOB_OPTIONS, report.processors.ts
  *     (statements), ai-turn-queue.service.ts AI_TURN_JOB_OPTIONS, queue-registry.ts SCAN_JOB_OPTIONS.
+ * The one deliberate change since: Phase X3.4 replaced EVERY queue's retention with Twenty's (`X34_RETENTION` below, written
+ * out by hand from twenty-server queue-retention.constants.ts); attempts and backoff keep their pre-D-Q1 values.
  */
 const DAY = 86_400;
 /** The queues that existed before D-Q4b (the pre-D-Q1 tables below cover exactly these; D-Q4b's queue is pinned on its own). */
@@ -73,6 +76,11 @@ const OUTBOX = {
   removeOnFail: { age: 30 * DAY },
 };
 const SCAN = { attempts: 1, removeOnComplete: { age: 3600, count: 1000 }, removeOnFail: { age: 604_800 } };
+/**
+ * Phase X3.4: Twenty's QUEUE_RETENTION (twenty-server message-queue/constants/queue-retention.constants.ts at eedb0a73):
+ * completedMaxAge 14400 s (4 h), completedMaxCount 1000, failedMaxAge 604800 s (7 days), failedMaxCount 1000.
+ */
+const X34_RETENTION = { removeOnComplete: { age: 14_400, count: 1000 }, removeOnFail: { age: 604_800, count: 1000 } };
 const PRE_DQ1_JOB_OPTIONS: Record<PreDq4bQueueName, object> = {
   'rab-email': OUTBOX,
   'rab-push': OUTBOX,
@@ -131,15 +139,15 @@ describe('queue registry (Phase D-Q1)', () => {
     expect(acceptsJobName('rab-ai', 'ai-stale-turn-sweep')).toBe(false);
   });
 
-  it.each(Object.keys(PRE_DQ1_JOB_OPTIONS) as PreDq4bQueueName[])('%s: job options (attempts, backoff, retention) equal the pre-D-Q1 producer options', (name) => {
-    expect(bullmqJobOptionsOf(name)).toEqual(PRE_DQ1_JOB_OPTIONS[name]);
+  it.each(Object.keys(PRE_DQ1_JOB_OPTIONS) as PreDq4bQueueName[])('%s: job options keep the pre-D-Q1 attempts and backoff, with the X3.4 retention', (name) => {
+    expect(bullmqJobOptionsOf(name)).toEqual({ ...PRE_DQ1_JOB_OPTIONS[name], ...X34_RETENTION });
     // No job timeout exists in bullmq 5.x; the registry records the absence and never emits one.
     expect(QUEUE_SETTINGS[name].job.timeoutMs).toBeNull();
     expect(bullmqJobOptionsOf(name)).not.toHaveProperty('timeout');
   });
 
   it('the compatibility views keep their pre-D-Q1 values (SCAN_JOB_OPTIONS, SCAN_JOB_DATA, consumer concurrency/lock)', () => {
-    expect(SCAN_JOB_OPTIONS).toEqual(SCAN);
+    expect(SCAN_JOB_OPTIONS).toEqual({ ...SCAN, ...X34_RETENTION });
     expect(SCAN_JOB_DATA).toEqual({ v: 1 });
     expect(Object.values(CONSUMER_QUEUES).map((q) => [q.key, q.concurrency, q.lockDurationMs, q.logName])).toEqual([
       ['email', 5, 30_000, 'email'],
@@ -223,12 +231,12 @@ describe('queue registry (Phase D-Q1)', () => {
       expect(QUEUE_SETTINGS[TIMER_TRIGGER_QUEUE_NAME]).toMatchObject({ kind: 'consumer', prefix: 'legacy-bull', tenantScope: 'organisation' });
     });
 
-    it('job options: attempts 3, exponential from 5 s (jitter 0.5), 1 h / 1000 completed, 7 d / 5000 failed', () => {
+    it('job options: attempts 3, exponential from 5 s (jitter 0.5), the X3.4 retention (4 h / 1000 completed, 7 d / 1000 failed)', () => {
       expect(bullmqJobOptionsOf(TIMER_TRIGGER_QUEUE_NAME)).toEqual({
         attempts: 3,
         backoff: { type: 'exponential', delay: 5_000, jitter: 0.5 },
-        removeOnComplete: { age: 3600, count: 1000 },
-        removeOnFail: { age: 7 * DAY, count: 5000 },
+        removeOnComplete: { age: 4 * 3600, count: 1000 },
+        removeOnFail: { age: 7 * DAY, count: 1000 },
       });
     });
 
@@ -364,6 +372,38 @@ describe('queue registry (Phase D-Q1)', () => {
       const registry = clone();
       corrupt(registry);
       expect(() => assertQueueRegistryValid(registry)).toThrow(/queue registry is invalid/);
+    });
+  });
+
+  /**
+   * Phase X3.4: Twenty's retention on EVERY queue. The cases are derived from the registry itself (`QUEUE_SETTINGS` keys), so a
+   * queue added later is covered without editing this spec, and a queue given its own retention fails here.
+   */
+  describe('Phase X3.4: every registered queue gets the Twenty retention', () => {
+    it("QUEUE_RETENTION is Twenty's QUEUE_RETENTION: completed 4 h / 1000, failed 7 days / 1000", () => {
+      expect(QUEUE_RETENTION).toEqual({ completedMaxAgeSeconds: 14_400, completedMaxCount: 1000, failedMaxAgeSeconds: 604_800, failedMaxCount: 1000 });
+      expect(Object.isFrozen(QUEUE_RETENTION)).toBe(true);
+    });
+
+    it('QUEUE_NAMES is every key of QUEUE_SETTINGS (no registered queue escapes the cases below)', () => {
+      expect([...QUEUE_NAMES].sort()).toEqual(Object.keys(QUEUE_SETTINGS).sort());
+      expect(QUEUE_NAMES.length).toBeGreaterThanOrEqual(12);
+    });
+
+    it.each(Object.keys(QUEUE_SETTINGS) as QueueName[])('%s: removeOnComplete / removeOnFail are the X3.4 retention (settings and BullMQ job options)', (name) => {
+      const { job } = queueSettingsOf(name);
+      expect(job.removeOnComplete).toEqual({ age: QUEUE_RETENTION.completedMaxAgeSeconds, count: QUEUE_RETENTION.completedMaxCount });
+      expect(job.removeOnFail).toEqual({ age: QUEUE_RETENTION.failedMaxAgeSeconds, count: QUEUE_RETENTION.failedMaxCount });
+      // The BullMQ options every producer and scheduler template passes: both caps present (a count is never omitted).
+      expect(bullmqJobOptionsOf(name)).toMatchObject(X34_RETENTION);
+      expect(bullmqJobOptionsOf(name).removeOnComplete.count).toBe(1000);
+      expect(bullmqJobOptionsOf(name).removeOnFail.count).toBe(1000);
+    });
+
+    it.each(SCAN_QUEUE_NAMES.map((n) => [n]))('%s: a scheduler template carries the X3.4 retention (scan failures included)', (name) => {
+      const jobName = QUEUE_SETTINGS[name].jobNames[0]!;
+      const template = scanJobTemplate(name, jobName as never, { kind: 'system' }, { ...SCAN_JOB_DATA });
+      expect(template.opts).toMatchObject(X34_RETENTION);
     });
   });
 

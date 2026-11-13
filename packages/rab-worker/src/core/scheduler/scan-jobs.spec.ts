@@ -120,8 +120,8 @@ describe('scan job registry (BullMQ migration M2/M4)', () => {
     expect(() => resolveScanPrefix('test', 'bull:x')).toThrow(/legacy/);
   });
 
-  it('scan job options: attempts 1, removeOnComplete {age 3600, count 1000}, removeOnFail {age 604800}; payload is metadata only', () => {
-    expect(SCAN_JOB_OPTIONS).toEqual({ attempts: 1, removeOnComplete: { age: 3600, count: 1000 }, removeOnFail: { age: 604800 } });
+  it('scan job options: attempts 1, X3.4 retention removeOnComplete {age 14400, count 1000}, removeOnFail {age 604800, count 1000}; payload is metadata only', () => {
+    expect(SCAN_JOB_OPTIONS).toEqual({ attempts: 1, removeOnComplete: { age: 14400, count: 1000 }, removeOnFail: { age: 604800, count: 1000 } });
     expect(SCAN_JOB_DATA).toEqual({ v: 1 });
   });
 
