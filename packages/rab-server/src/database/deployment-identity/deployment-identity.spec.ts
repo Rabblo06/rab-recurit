@@ -251,11 +251,12 @@ describe('deployment identity: the marker decision (pure)', () => {
 
   it('final review F4: only the listed compose database services count as local single-label hosts; any other single-label name is remote and refused unmarked', async () => {
     // The list is exactly the repository's own compose / harness database services (no env-var widening exists).
-    expect([...LOCAL_DATABASE_SERVICE_HOSTS].sort()).toEqual(['devdb', 'pg', 'postgres']);
-    for (const host of ['devdb', 'postgres', 'pg', 'POSTGRES', ' devdb ']) expect(isRemoteDatabaseHost(host)).toBe(false);
+    expect([...LOCAL_DATABASE_SERVICE_HOSTS].sort()).toEqual(['db', 'devdb', 'pg', 'postgres']);
+    for (const host of ['db', 'devdb', 'postgres', 'pg', 'POSTGRES', ' devdb ', 'DB']) expect(isRemoteDatabaseHost(host)).toBe(false);
     // Resolved through a DNS search domain or a Kubernetes namespace: remote, whatever it looks like.
     // O1: pg-other (the retired bundle-test harness's second cluster) is remote again.
-    const unlisted = ['db', 'gatedb', 'database', 'prod-db', 'postgresql', 'postgres-primary', 'devdb2', 'pg_other', 'pg-other', 'localhost.'];
+    // DB-SETUP (lead decision 2026-11-12): `db`, the bundled database service, is listed now; near-misses stay remote.
+    const unlisted = ['db2', 'dbx', 'gatedb', 'database', 'prod-db', 'postgresql', 'postgres-primary', 'devdb2', 'pg_other', 'pg-other', 'localhost.'];
     for (const host of unlisted) expect(isRemoteDatabaseHost(host)).toBe(true);
     for (const connectionHost of unlisted) {
       for (const state of ['absent', 'unbound'] as const) {
@@ -268,13 +269,17 @@ describe('deployment identity: the marker decision (pure)', () => {
     // End to end: a non-production runtime on an unlisted single-label host with no marker is refused; NODE_ENV=test needs
     // the server-side disposable-test setting exactly as for a dotted remote host.
     await expect(
+      assertDeploymentIdentity(fakeQuery({ present: false }), { processLabel: 'api process', production: false, connectionHost: 'gatedb', env: { NODE_ENV: 'development' } }),
+    ).rejects.toThrow(/remote host "gatedb"/);
+    await expect(
+      assertDeploymentIdentity(fakeQuery({ present: false }), { processLabel: 'api process', production: false, connectionHost: 'gatedb', env: { NODE_ENV: 'test' } }),
+    ).rejects.toThrow(/remote host "gatedb"/);
+    await expect(
+      assertDeploymentIdentity(fakeQuery({ present: false, disposableTest: true }), { processLabel: 'api process', production: false, connectionHost: 'gatedb', env: { NODE_ENV: 'test' } }),
+    ).resolves.toMatchObject({ summary: 'absent' });
+    // DB-SETUP (lead decision 2026-11-12): the bundled `db` service is listed: unmarked outside production = local (warn).
+    await expect(
       assertDeploymentIdentity(fakeQuery({ present: false }), { processLabel: 'api process', production: false, connectionHost: 'db', env: { NODE_ENV: 'development' } }),
-    ).rejects.toThrow(/remote host "db"/);
-    await expect(
-      assertDeploymentIdentity(fakeQuery({ present: false }), { processLabel: 'api process', production: false, connectionHost: 'db', env: { NODE_ENV: 'test' } }),
-    ).rejects.toThrow(/remote host "db"/);
-    await expect(
-      assertDeploymentIdentity(fakeQuery({ present: false, disposableTest: true }), { processLabel: 'api process', production: false, connectionHost: 'db', env: { NODE_ENV: 'test' } }),
     ).resolves.toMatchObject({ summary: 'absent' });
     // isSingleLabelHost (the F7 production-bind rule) is shape only: listed or not.
     for (const host of ['devdb', 'postgres', 'db']) expect(isSingleLabelHost(host)).toBe(true);
@@ -293,8 +298,10 @@ describe('deployment identity: the marker decision (pure)', () => {
     const used = new Set<string>();
     for (const file of files) {
       const text = readFileSync(join(repo, file), 'utf8');
-      // The host of every postgres URL the file spells out (comments included: they are the operator instructions).
-      for (const m of text.matchAll(/postgres(?:ql)?:\/\/[^@\s]*@([A-Za-z0-9_.-]+)[:/]/g)) if (isSingleLabelHost(m[1])) used.add(m[1].toLowerCase());
+      // The host of every postgres URL the file spells out (comments included: they are the operator instructions). A
+      // compose interpolation in the userinfo (`${PG_DATABASE_PASSWORD:?a message with spaces}`) is one token.
+      // The alternatives are disjoint (a `$` starts `${...}` only; any other character is not `$`): linear, no backtracking.
+      for (const m of text.matchAll(/postgres(?:ql)?:\/\/(?:\$\{[^}]*\}|\$(?!\{)|[^@\s$])*@([A-Za-z0-9_.-]+)[:/]/g)) if (isSingleLabelHost(m[1])) used.add(m[1].toLowerCase());
     }
     expect([...used].sort()).toEqual([...LOCAL_DATABASE_SERVICE_HOSTS].sort());
   });

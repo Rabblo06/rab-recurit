@@ -1,43 +1,21 @@
-# Deploy-order real-container tests - TEST-ONLY INFRASTRUCTURE overlay, used ONLY by
-# deploy-order-tests/run-deploy-order-tests.cjs:
+# Deploy-order real-container tests - TEST-ONLY INFRASTRUCTURE overlay, used ONLY by the drivers of this folder
+# (run-deploy-order-tests.cjs, run-upgrade-with-data-tests.cjs, run-db-setup-tests.cjs):
 #
-#   COMPOSE_PROJECT_NAME=dot-pg<major> COMPOSE_ENV_FILES=<secrets>/compose.env COMPOSE_PATH_SEPARATOR=';' \
-#   COMPOSE_FILE='docker-compose.image.yml;docker-compose.local-db.yml;deploy-order-tests/docker-compose.deploy-order.yml' \
+#   COMPOSE_PROJECT_NAME=<project> COMPOSE_ENV_FILES=<secrets>/compose.env COMPOSE_PATH_SEPARATOR=';' \
+#   COMPOSE_FILE='docker-compose.image.yml;deploy-order-tests/docker-compose.deploy-order.yml[;...]' \
 #     docker compose pull && docker compose up -d
 #
-# The application services (rab-api, rab-worker) are the production files UNCHANGED: same image variable
-# (CREWFLOW_IMAGE_TAG), same command, environment, hardening, health checks and depends_on (restart: true). This overlay
-# changes INFRASTRUCTURE only, so the stack is disposable and never needs a Docker volume:
-#   - rab-postgres: the PostgreSQL major under test (16 or 18, pinned by digest), data on a tmpfs; the TLS files are copied
-#     into the container's own tmpfs with mode 0600 before start (a Windows bind mount shows them as 0777, which PostgreSQL
-#     refuses for a private key). Same init SQL and the same pg_hba.conf as docker-compose.local-db.yml;
+# The application services (rab-api, rab-worker) and the bundled database (`db`, DB-SETUP) are the production file
+# UNCHANGED: same image variables, commands, environment, hardening, health checks and depends_on (restart: true). The db's
+# data and CA live in the project's own named volumes (`<project>_crewflow-db-data`, `<project>_crewflow-db-ca`), because
+# the app services read the db's CA from the shared volume and the restart cases need the data to survive a `down`/`up`;
+# every driver's cleanup is `docker compose down --volumes` of its own project. This overlay changes only:
 #   - rab-redis: data on a tmpfs;
-#   - rab-api: no host port (the driver uses `docker exec ... wget`).
+#   - rab-api: no host port (the drivers use `docker exec ... wget`).
+# (docker-compose.local-db.yml, which this overlay used to extend with a test rab-postgres, is retired: DB-SETUP D3.)
 # Relative paths resolve from packages/rab-docker (the first compose file's directory). Nothing here is a deployment file.
 
 services:
-  rab-postgres:
-    entrypoint: ["sh", "-c"]
-    command:
-      - >-
-        umask 077 && mkdir -p /tmp/dot-tls && cp /run/secrets/pg-tls/server.crt /run/secrets/pg-tls/server.key /tmp/dot-tls/ &&
-        chmod 600 /tmp/dot-tls/server.key &&
-        exec docker-entrypoint.sh postgres -c hba_file=/etc/crewflow-postgres/pg_hba.conf -c ssl=on
-        -c ssl_cert_file=/tmp/dot-tls/server.crt -c ssl_key_file=/tmp/dot-tls/server.key -c ssl_min_protocol_version=TLSv1.2
-        -c password_encryption=scram-sha-256 -c listen_addresses=*
-    environment:
-      PGDATA: /var/lib/postgresql/data
-    volumes: !override
-      - ./postgres-init/owner-login/01-crewflow-owner.sql:/docker-entrypoint-initdb.d/01-crewflow-owner.sql:ro
-      - ./local-db/pg_hba.conf:/etc/crewflow-postgres/pg_hba.conf:ro
-      - ${CREWFLOW_SECRETS_DIR:?}/pg-tls:/run/secrets/pg-tls:ro
-      - ${CREWFLOW_SECRETS_DIR:?}/postgres-superuser-password:/run/secrets/postgres-superuser-password:ro
-      - ${CREWFLOW_SECRETS_DIR:?}/crewflow-owner-password:/run/secrets/crewflow-owner-password:ro
-    tmpfs: !override
-      - /var/run/postgresql:uid=70,gid=70,mode=2775
-      - /tmp:uid=70,gid=70,mode=0700
-      - /var/lib/postgresql/data:uid=70,gid=70,mode=0700
-
   rab-redis:
     volumes: !override
       - ${CREWFLOW_SECRETS_DIR:?}/redis-users.acl:/run/secrets/redis-users.acl:ro

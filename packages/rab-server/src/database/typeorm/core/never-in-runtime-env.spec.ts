@@ -125,6 +125,23 @@ describe('never-in-runtime-env (security review L-4): one list, two enforcers', 
     expect(runtimeEnvRefusal({ DATABASE_URL: 'x' }, 'api')?.why).toMatch(/Rename it to PG_DATABASE_URL/);
   });
 
+  it('DB-SETUP (plan §2.2): PG_DATABASE_PASSWORD (the bundled db admin password) is refused in the API and the Worker, by both enforcers, value never echoed', () => {
+    for (const processName of ['api', 'worker'] as const) {
+      expect(forbiddenRuntimeEnvNames(processName)).toContain('PG_DATABASE_PASSWORD');
+      const refusal = runtimeEnvRefusal({ NODE_ENV: 'development', PG_DATABASE_PASSWORD: 'S3cret-PW-do-not-print' }, processName);
+      expect(refusal?.name).toBe('PG_DATABASE_PASSWORD');
+      expect(refusal?.why).toMatch(/only docker compose reads it/);
+      expect(refusal?.why).not.toContain('S3cret-PW-do-not-print');
+      // Production too, and a blank value (a compose `KEY=` line) counts as absent.
+      expect(runtimeEnvRefusal({ NODE_ENV: 'production', RAB_RUNTIME_ENV: 'production', PG_DATABASE_PASSWORD: 'x' }, processName)?.name).toBe('PG_DATABASE_PASSWORD');
+      expect(runtimeEnvRefusal({ PG_DATABASE_PASSWORD: ' ' }, processName)).toBeNull();
+    }
+    // The image enforcer (api-prestart.sh) names it too (the parity test above checks the whole list).
+    expect(prestartNames()).toContain('PG_DATABASE_PASSWORD');
+    // The superseded provisioner process is left exactly as it was.
+    expect(forbiddenRuntimeEnvNames('provisioner')).not.toContain('PG_DATABASE_PASSWORD');
+  });
+
   it('owner-login architecture: CREWFLOW_PROVISIONER_* is refused on the API and the Worker by prefix (deterministic, blank = absent), and api-prestart.sh has the same prefixes', () => {
     expect(forbiddenRuntimeEnvPrefixes('api')).toEqual(['CREWFLOW_PROVISIONER_']);
     expect(sorted(prestartPrefixes())).toEqual(sorted(forbiddenRuntimeEnvPrefixes('api')));

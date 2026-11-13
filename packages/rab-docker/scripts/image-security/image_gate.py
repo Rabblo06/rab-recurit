@@ -482,6 +482,19 @@ def _under(path: str, roots) -> bool:
     return any(path == r or path.startswith(r.rstrip('/') + '/') for r in roots)
 
 
+def credential_dir_problems(paths, dirs) -> list[str]:
+    """DB-SETUP (Twenty Helm model): a credential mount point (db-setup's volume: the crewflow_owner password file and the
+    target) must be EMPTY in the image: the password lives only on the named volume, never in a layer. Pure; names only."""
+    out = []
+    for d in dirs:
+        root = d.rstrip('/')
+        for path in sorted(paths):
+            if path.startswith(root + '/'):
+                out.append(f'{path} is in the image under the credential mount point {root} (the crewflow_owner password file '
+                           'and the database target live only on the db-setup volume, never in a layer)')
+    return out
+
+
 def cmd_fs(a, c: Check) -> None:
     rp = role_policy(a.role)
     pol = policy()
@@ -600,6 +613,8 @@ def cmd_fs(a, c: Check) -> None:
     for f in rp['required_files']:
         if f not in seen_paths:
             c.fail(f'required file {f} is missing')
+    for msg in credential_dir_problems(seen_paths, rp.get('credential_mount_dirs', [])):
+        c.fail(msg)
 
     # accounts
     passwd = captured.get('/etc/passwd', '')

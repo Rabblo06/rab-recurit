@@ -1,7 +1,7 @@
 'use strict';
 /**
  * UPGRADE-WITH-DATA REAL-CONTAINER TESTS (Phase X U-1b, TEST-ONLY). Proves the U-1 upgrade floor (release-floor.ts) and the
- * kept controls on REAL containers with a SEEDED database, on one PostgreSQL major per run (16 or 18), with the production
+ * kept controls on REAL containers with a SEEDED database, on one PostgreSQL major per run (16, 17 or 18), with the production
  * compose files unchanged and THE documented command `docker compose pull && docker compose up -d`:
  *
  *   DOT_REPOSITORY=127.0.0.1:<port>/adolphus            a LOCAL registry (never Docker Hub)
@@ -12,7 +12,7 @@
  *   [DOT_CONTROL_DIGEST=sha256:…] optional RED CONTROL: an image that still has N1 on the owner-login path (0e0a6edd / main
  *                                 before U-1a); it must refuse the seeded R254 database (SU-01), proving the test can fail
  *   DOT_PG_IMAGE=postgres@sha256:…  DOT_REDIS_IMAGE=redis@sha256:…
- *     node packages/rab-docker/deploy-order-tests/run-upgrade-with-data-tests.cjs <16|18> <out-dir> [--only=U1,U2,...]
+ *     node packages/rab-docker/deploy-order-tests/run-upgrade-with-data-tests.cjs <16|17|18> <out-dir> [--only=U1,U2,...]
  *
  *   [DOT_PROJECT_PREFIX=dou]       project names <prefix>-pg<major>-<case> (per agent / per run; never shared)
  *   <out-dir> must be OUTSIDE the repository (it holds the per-run secrets).
@@ -42,8 +42,18 @@
  *       a holder keeps the advisory lock): both wait, one applies exactly 2, the other applies 0 and finds CURRENT; no
  *       duplicate ledger rows.
  *
- * Limits kept: at most five running containers of this run (rab-postgres, rab-redis, rab-api, rab-worker + the operator's
- * registry; U7: two one-off migrate containers instead of rab-api/rab-worker); every data dir a tmpfs; cleanup is `down` of
+ * DB-SETUP: the database is docker-compose.image.yml's bundled `db` (DOT_PG_IMAGE = a DEBIAN postgres image of the major:
+ * the db service runs as 999:999 with the Debian volume layout; an alpine image does not fit it). Its first start runs the
+ * shipped 01-crewflow-owner.sql (docker-compose.deploy-order-owner.yml), so every case starts from the hand-made
+ * crewflow_owner every R254 deployment has, and compose.env holds that crewflow_owner URL as PG_DATABASE_URL: the
+ * PASS-THROUGH path (D5). PR #125 (the Twenty Helm way): only db-setup reads it, checks it read-only and copies its password
+ * into the setup volume's password file (never changing it); rab-api / rab-worker build their URL from the target file +
+ * that password file. PREV and the red control have no worker-start.sh: their deploys add docker-compose.deploy-order-prev.yml
+ * (the previous release's own start-up and its PG_DATABASE_URL), with the crewflow_owner URL whose password logs in now.
+ *
+ * Limits kept: at most five running containers of this run (db, rab-redis, rab-api, rab-worker + the operator's
+ * registry; U7: two one-off migrate containers instead of rab-api/rab-worker); redis on a tmpfs, the db in the project's own
+ * named volumes; cleanup is `down --volumes` of
  * this run's own projects only (never a prune, never another project). Secrets per run under <out>/secrets-<project>,
  * redacted from every output. Results: <out>/RESULTS.json, SUMMARY.md, run.log, evidence/.
  */
@@ -54,14 +64,14 @@ const L = require('./upgrade-lib.cjs');
 
 const argv = process.argv.slice(2);
 const MAJOR = argv[0];
-const OUT = argv[1] ? path.resolve(argv[1]) : '';
+const OUT = argv[1] ? path.resolve(process.platform === 'win32' ? argv[1].replace(/^\/([a-z])\//i, '$1:/') : argv[1]) : '';
 const ONLY = (argv.find((a) => a.startsWith('--only=')) ?? '').slice(7).split(',').filter(Boolean);
 const KEEP = argv.includes('--keep');
 function fail(msg) {
   console.error(msg);
   process.exit(2);
 }
-if (!['16', '18'].includes(MAJOR) || !OUT) fail('usage: run-upgrade-with-data-tests.cjs <16|18> <out-dir> [--only=U1,...] [--keep]');
+if (!['16', '17', '18'].includes(MAJOR) || !OUT) fail('usage: run-upgrade-with-data-tests.cjs <16|17|18> <out-dir> [--only=U1,...] [--keep]');
 const DIGEST = /^sha256:[0-9a-f]{64}$/;
 const REF = /^[a-z0-9./_:-]+@sha256:[0-9a-f]{64}$/;
 for (const k of ['DOT_PREV_DIGEST', 'DOT_NEW_DIGEST', 'DOT_PROBE_FAIL_DIGEST', 'DOT_PROBE_PARTIAL_DIGEST']) if (!DIGEST.test(process.env[k] ?? '')) fail(`${k} must be sha256:<64 hex>`);
@@ -89,13 +99,10 @@ const IMG = {
   control: process.env.DOT_CONTROL_DIGEST || null,
 };
 const REGISTRY_CONTAINER = process.env.DOT_REGISTRY_CONTAINER || 'deploy-order-registry';
-const MAX_CONTAINERS = 5;
+// + the one-shot db-setup (PR #125 options A and 2), which runs again on every `up -d` while the old stack may still run.
+const MAX_CONTAINERS = 6;
 const NEWER = ['OutboxClaimIndexes1786721440000', 'RefreshTokenReplacedByIndex1786721450000'];
-/** The tables the seed writes: their row sets (count + md5 of ids) per organisation must not change across an upgrade. */
-const SEEDED_TABLES = [
-  'attendance', 'job_offer', 'job_role', 'manager_profile', 'manager_workspace', 'payroll_calendar', 'payroll_calendar_period', 'payroll_record',
-  'payroll_run', 'payroll_run_line', 'role', 'shift', 'shift_assignment', 'staff_profile', 'user', 'venue', 'workspace_membership',
-];
+const { SEEDED_TABLES, facts, compareFacts, rlsCheck } = L; // shared with run-db-setup-tests.cjs (S7)
 
 fs.mkdirSync(path.join(OUT, 'evidence'), { recursive: true });
 const results = [];
@@ -137,8 +144,15 @@ function project(kind, opts) {
   L.writeSecrets(p.secretsDir);
   return p;
 }
+/**
+ * Points the project at `digest`; PREV (R254) and the red control predate DB-SETUP: their own start-up (prev overlay) and
+ * the crewflow_owner URL with the password that logs in now (the hand-made one: PR #125 never changes it). The NEW images
+ * keep the hand-made URL in compose.env (unchanged operator file): db-setup reads it and rab-api / rab-worker never do.
+ */
 function use(p, digest) {
-  L.writeComposeEnv(p, { repository: REPO, digest, pgImage: process.env.DOT_PG_IMAGE, redisImage: process.env.DOT_REDIS_IMAGE });
+  const prev = digest === IMG.prev || digest === IMG.control;
+  p.setPrev(prev);
+  L.writeComposeEnv(p, { repository: REPO, digest, pgImage: process.env.DOT_PG_IMAGE, redisImage: process.env.DOT_REDIS_IMAGE, databaseUrl: prev ? L.ownerUrl(p.ownerPasswordNow()) : L.ownerUrl() });
 }
 
 /** `p`: the case's project (failure logs, teardown). `down: false` keeps it running for the next case (U4 -> U5). */
@@ -194,56 +208,6 @@ async function freshSeeded(p, check, { seed = true } = {}) {
     p.psqlFile('seed-organisations.sql');
     check(p.psql(`SELECT count(*) FROM core.organisation WHERE slug::text LIKE 'dot-seed-%'`) === '2', 'seeded 2 synthetic organisations (users, staff, venues, shifts, offers, attendance, payroll)');
   }
-}
-
-function facts(p) {
-  const lines = p.psqlFile('data-facts.sql').split('\n').filter(Boolean);
-  const map = new Map(lines.map((l) => [l.slice(0, l.lastIndexOf('|')), l.slice(l.lastIndexOf('|') + 1)]));
-  return { lines, map };
-}
-
-/** Seeded row sets, row CONTENT and money equal; every FK holds; every cross-table organisation_id agrees. */
-function compareFacts(check, before, after, label) {
-  const seeded = [...before.map.keys()].filter((k) => k.startsWith('rows|') && SEEDED_TABLES.includes(k.split('|')[1]));
-  const changed = seeded.filter((k) => before.map.get(k) !== after.map.get(k));
-  check(seeded.length === SEEDED_TABLES.length * 2 && changed.length === 0, `${label}: the seeded row sets of ${SEEDED_TABLES.length} tables x 2 organisations are identical (count + md5 of ids)${changed.length ? `; changed: ${changed.join(', ')}` : ''}`);
-  const content = [...before.map.keys()].filter((k) => k.startsWith('content|'));
-  const contentChanged = content.filter((k) => before.map.get(k) !== after.map.get(k));
-  check(content.length === SEEDED_TABLES.length * 2 && contentChanged.length === 0, `${label}: the seeded rows' CONTENT is identical (status, money, minutes, tenant keys, references, key timestamps; ${content.length} hashes)${contentChanged.length ? `; changed: ${contentChanged.join(', ')}` : ''}`);
-  const nonZero = (k) => [...before.map.keys()].filter((key) => key.startsWith('rows|') && key.split('|')[1] === k && !before.map.get(key).startsWith('0:'));
-  check(nonZero('payroll_record').length === 2 && nonZero('attendance').length === 2, `${label}: the seed is really there (payroll and attendance rows in both organisations)`);
-  const money = [...before.map.keys()].filter((k) => k.startsWith('money|'));
-  const moneyChanged = money.filter((k) => before.map.get(k) !== after.map.get(k));
-  check(money.length === 6 && moneyChanged.length === 0, `${label}: payroll pence and worked minutes unchanged (${money.map((k) => `${k.slice(6)}=${after.map.get(k)}`).join(', ')})`);
-  const fkBad = [...after.map.entries()].filter(([k, v]) => k.startsWith('fk|') && v !== '0');
-  const fkCount = [...after.map.keys()].filter((k) => k.startsWith('fk|')).length;
-  check(fkCount > 100 && fkBad.length === 0, `${label}: all ${fkCount} core foreign keys hold row by row${fkBad.length ? `; orphans: ${fkBad.map(([k, v]) => `${k}=${v}`).join(', ')}` : ''}`);
-  const ownBad = [...after.map.entries()].filter(([k, v]) => k.startsWith('own|') && v !== '0');
-  const ownCount = [...after.map.keys()].filter((k) => k.startsWith('own|')).length;
-  check(ownCount > 20 && ownBad.length === 0, `${label}: tenant ownership holds on ${ownCount} cross-table references (child organisation_id = parent's)${ownBad.length ? `; violations: ${ownBad.map(([k, v]) => `${k}=${v}`).join(', ')}` : ''}`);
-}
-
-/** RLS regression as the runtime login: no context -> zero rows; organisation A's context -> exactly A's rows, none of B's. */
-function rlsCheck(p, check, label, { tamperExpected = false } = {}) {
-  const ids = p
-    .psql(`SELECT o.slug || ' ' || o.id || ' ' || w.id || ' ' || w.owner_user_id FROM core.organisation o JOIN core.manager_workspace w ON w.organisation_id = o.id WHERE o.slug::text LIKE 'dot-seed-%' ORDER BY o.slug`)
-    .split('\n')
-    .map((l) => l.split(' '));
-  const [a, b] = ids;
-  const uuid = /^[0-9a-f-]{36}$/;
-  if (!a || !b || ![...a.slice(1), ...b.slice(1)].every((v) => uuid.test(v))) throw new Error('cannot read the seeded organisation ids');
-  const tables = ['shift', 'shift_assignment', 'job_offer', 'attendance', 'payroll_record', 'payroll_run_line', 'staff_profile', 'venue'];
-  const counts = (where = '') => tables.map((t) => `(SELECT count(*) FROM core.${t}${where})`).join(" || ',' || ");
-  const none = p.psqlOwner(`SELECT ${counts()};`);
-  check(/^0(,0)*$/.test(none) && none.split(',').length === tables.length, `${label}: crewflow_owner with NO tenant context reads 0 rows from ${tables.length} tenant tables (${none})`);
-  const ctx = (org, ws, user) => `BEGIN; SELECT set_config('rab.organisation_id', '${org}', true), set_config('rab.workspace_id', '${ws}', true), set_config('rab.user_id', '${user}', true);`;
-  const own = p.psqlOwner(`${ctx(a[1], a[2], a[3])}\nSELECT 'A|' || ${counts()} || '|B|' || ${counts(` WHERE organisation_id = '${b[1]}'`)};\nCOMMIT;`).split('\n').pop();
-  const real = p.psql(`SELECT ${counts(` WHERE organisation_id = '${a[1]}'`)}`);
-  // Self-check only (review note 2): a deliberately wrong expectation must make this check FAIL.
-  const expected = tamperExpected ? real.replace(/^\d+/, (x) => String(Number(x) + 1)) : real;
-  check(own === `A|${expected}|B|${tables.map(() => '0').join(',')}`, `${label}: in organisation A's context it reads exactly A's rows (${expected}) and none of B's`);
-  const mixed = p.psqlOwner(`${ctx(a[1], b[2], a[3])}\nSELECT ${counts()};\nCOMMIT;`).split('\n').pop();
-  check(/^0(,0)*$/.test(mixed), `${label}: organisation A with organisation B's workspace reads 0 rows (${mixed})`);
 }
 
 /** Runs `fn` with a collecting `check` and returns the failed descriptions (the step's own checks are not touched). */
@@ -310,7 +274,7 @@ async function main() {
     if (IMG.control) {
       u1.setShortHealth(true);
       use(u1, IMG.control);
-      const since = L.nowS() - 1;
+      const since = L.watchEvents(u1.name); // live stream: the daemon's replay buffer overflows on a busy host
       const d = u1.deploy(900_000);
       evidence('U1-control-deploy.log', d.out);
       check(d.code !== 0, `RED CONTROL (N1 image ${IMG.control.slice(0, 19)}…): the deploy FAILS on the seeded R254 database (exit ${d.code})`);
@@ -323,7 +287,7 @@ async function main() {
       u1.setShortHealth(false);
     } else n('red control skipped (DOT_CONTROL_DIGEST not set)');
     use(u1, IMG.next);
-    const since = L.nowS() - 1;
+    const since = L.watchEvents(u1.name); // live stream: the daemon's replay buffer overflows on a busy host
     const d = u1.deploy();
     evidence('U1-new-deploy.log', d.out);
     check(d.code === 0, `deploy of NEW on the seeded R254 database: exit ${d.code} after ${Math.round(d.ms / 1000)} s`);
@@ -418,7 +382,7 @@ async function main() {
     use(u3, IMG.next);
     const dep = u3.deployAsync();
     try {
-      await L.waitFor('the API migrate child to block on the push_delivery index', () => u3.psql(`SELECT count(*) FROM pg_stat_activity WHERE wait_event_type = 'Lock' AND query ILIKE 'CREATE INDEX CONCURRENTLY%push_delivery_claim_idx%'`) === '1', 50_000, 1000);
+      await L.waitFor('the API migrate child to block on the push_delivery index', () => u3.psql(`SELECT count(*) FROM pg_stat_activity WHERE wait_event_type = 'Lock' AND query ILIKE 'CREATE INDEX CONCURRENTLY%push_delivery_claim_idx%'`) === '1', 120_000, 1000); // db-setup runs first (PR #125)
       check(true, 'the migrate child is inside OutboxClaimIndexes1786721440000, waiting for its second index');
       check(u3.neverStarted('rab-worker'), 'Worker waiting: the new Worker is not started while the API migrates');
       check(u3.psql(`SELECT indisvalid FROM pg_index WHERE indexrelid = to_regclass('core.email_outbox_claim_idx')`) === 't', 'the first index (email_outbox_claim_idx) is already built: partial DDL of a transaction=false migration');
@@ -507,8 +471,8 @@ async function main() {
   const u6 = project('u6', { shortHealth: true });
   await step('U6', 'a FOREIGN database is refused (67), nothing created, the Worker never started', async (check) => {
     use(u6, IMG.next);
-    const pg = u6.compose(['up', '-d', '--wait', 'rab-postgres'], { timeout: 300_000 });
-    check(pg.code === 0, `rab-postgres up (exit ${pg.code})`);
+    const pg = u6.compose(['up', '-d', '--wait', L.DB_SERVICE], { timeout: 300_000 });
+    check(pg.code === 0, `db up (exit ${pg.code})`);
     u6.psql(`CREATE TABLE public.not_crewflow (id int); INSERT INTO public.not_crewflow VALUES (1);`);
     const d = u6.deploy(900_000);
     evidence('U6-deploy.log', d.out);
@@ -528,10 +492,15 @@ async function main() {
     const stop = u7.compose(['stop', 'rab-worker', 'rab-api'], { timeout: 300_000 });
     check(stop.code === 0, 'rab-api and rab-worker stopped (the race is between two one-off migrate children)');
     use(u7, IMG.next);
-    const pull = u7.compose(['pull', 'rab-api'], { timeout: 600_000 });
+    const pull = u7.compose(['pull', 'rab-api', 'db-setup'], { timeout: 600_000 });
     check(pull.code === 0, 'NEW pulled');
+    // PR #125: rab-api never receives a database URL; the documented one-off form (the production entrypoint with a
+    // command) builds the crewflow_owner URL from db-setup's target file, so NEW's db-setup runs once first.
+    const setup = u7.compose(['run', '--rm', '-T', '--no-deps', 'db-setup'], { timeout: 300_000 });
+    evidence('U7-db-setup.log', setup.out);
+    check(setup.code === 0, `NEW's db-setup (one-off): exit ${setup.code} (target and password files written; crewflow_owner unchanged)`);
     const holder = await u7.holdLock(`SELECT pg_advisory_lock(${L.MIGRATION_LOCK_KEY_SQL})`);
-    const child = () => u7.composeAsync(['run', '--rm', '-T', '--no-deps', '--entrypoint', 'node', 'rab-api', 'packages/rab-server/dist/database/typeorm/scripts/migrate/twenty/twenty-migrate.js']);
+    const child = () => u7.composeAsync(['run', '--rm', '-T', '--no-deps', 'rab-api', 'node', 'packages/rab-server/dist/database/typeorm/scripts/migrate/twenty/twenty-migrate.js']);
     const c1 = child();
     const c2 = child();
     try {
