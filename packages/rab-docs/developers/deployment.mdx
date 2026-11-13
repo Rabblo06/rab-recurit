@@ -6,7 +6,9 @@ icon: "cloud-arrow-up"
 
 ## Images and processes
 
-`packages/rab-docker/rab/Dockerfile` (Node 24 Alpine, no browser) builds ONE application image, which the API, the Worker and `rab-ops` run with different commands; it includes the Worker-only packages, including the native PDF renderer. The image contains no browser: the build fails if Chromium is installed, and the image gate fails if Chromium, Playwright or any library only Chromium pulled in comes back. Both builds fail if Node or libexpat is below the minimum versions in `packages/rab-docker/rab/security-floors.env`.
+`packages/rab-docker/rab/Dockerfile` (Node 24 Alpine, no browser) builds ONE application image, which the API and the Worker run with different commands; it includes the Worker-only packages, including the native PDF renderer. The image contains no browser: the build fails if Chromium is installed, and the image gate fails if Chromium, Playwright or any library only Chromium pulled in comes back. Both builds fail if Node or libexpat is below the minimum versions in `packages/rab-docker/rab/security-floors.env`.
+
+The three operations commands (`containment:suspend-test-accounts`, `user-session:backfill`, `hws:backfill`) have no service of their own. Like `bootstrap-admin`, each run is a one-off container of the API service (`run --rm --no-deps rab-api node packages/rab-server/dist/command/main.js <command> ...`), from the same image and under the same owner login `crewflow_owner`; any other login is refused. Every run takes the operator label flags (`--operator "<name>"` and `--change-ref <ref>`), the per-run production authority, a host directory for its files and a kept copy of its output. The procedure is in `packages/rab-docker/docs/release/OWNER-LOGIN-DEPLOYMENT.md`, section 7, "Operations commands". There is no separate operations container any more. Of its old variables, the five retired names are refused in every process, and the compose lint refuses the whole `CREWFLOW_OPS_*` / `PG_OPS_*` prefix.
 
 | Service | Command | Database login | Notes |
 | --- | --- | --- | --- |

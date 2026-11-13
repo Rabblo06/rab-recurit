@@ -71,7 +71,9 @@ test('with the real parser, the env_file names are read from the committed compo
   const OPS = /(^|\/)\.env\.ops$/;
   for (const rel of ['packages/rab-docker/docker-compose.production.yml', 'packages/rab-docker/docker-compose.local-build.yml']) {
     const raw = isolation.rawEnvFiles(rel, YAML);
-    assert.ok(names(raw['rab-ops'], OPS), `${rel}: rab-ops names .env.ops`);
+    // rab-ops removal (PR 2): the operations container is gone and nothing names .env.ops.
+    assert.ok(!('rab-ops' in raw), `${rel}: has no rab-ops service`);
+    assert.ok(Object.values(raw).every((files) => !names(files, OPS)), `${rel}: nothing names .env.ops`);
     for (const runtime of ['rab-api', 'rab-worker']) {
       assert.ok(runtime in raw, `${rel}: ${runtime} is parsed`);
       assert.ok(!names(raw[runtime], MIGRATE) && !names(raw[runtime], OPS), `${rel}: ${runtime} names neither`);

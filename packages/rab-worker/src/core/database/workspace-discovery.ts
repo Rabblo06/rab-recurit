@@ -61,12 +61,11 @@ export async function discoverInWorkspaces<T>(
     for (let offset = 0; offset < scopes.length; offset += CONCURRENCY) {
       const batches = await Promise.allSettled(
         scopes.slice(offset, offset + CONCURRENCY).map((scope) =>
+          // T-1 / ST-02: READ ONLY from the binding SELECT on (same round trip), not a separate SET TRANSACTION READ ONLY.
           tenant.runInTenantContext(
             { organisationId: scope.organisation_id, workspaceId: scope.workspace_id, userId: '', role: '', actorType: 'worker' },
-            async (manager) => {
-              await manager.query('SET TRANSACTION READ ONLY');
-              return scan(manager);
-            },
+            (manager) => scan(manager),
+            { readOnly: true },
           ),
         ),
       );
@@ -141,7 +140,6 @@ export async function discoverMembersInWorkspaces(runtime: DataSource, tenant: T
           tenant.runInTenantContext(
             { organisationId: scope.organisation_id, workspaceId: scope.workspace_id, userId: '', role: '', actorType: 'worker' },
             async (manager) => {
-              await manager.query('SET TRANSACTION READ ONLY');
               const results: Array<{ key: string } & WalkMemberResult> = [];
               for (const member of active) {
                 await manager.query(`SAVEPOINT ${MEMBER_SAVEPOINT}`);
@@ -157,6 +155,8 @@ export async function discoverMembersInWorkspaces(runtime: DataSource, tenant: T
               }
               return results;
             },
+            // T-1 / ST-02: READ ONLY from the binding SELECT on (same round trip), not a separate SET TRANSACTION READ ONLY.
+            { readOnly: true },
           ),
         ),
       );

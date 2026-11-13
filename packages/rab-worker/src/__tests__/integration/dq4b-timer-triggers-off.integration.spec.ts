@@ -84,10 +84,12 @@ describeIfDb('D-Q4b WORKER_TIMER_TRIGGERS=off (default): no trigger job, no cons
 
   it("main.ts's consumer predicate with mode off creates no trigger consumer (the other consumers are unaffected)", async () => {
     const mode: string = 'off';
+    // X1.1: main.ts also skips the audit-event consumer when this process has no sink (CREWFLOW_AUDIT_SINK=none, as here).
+    const auditSinkMode: string = 'none';
     const registry = buildHandlerRegistry(
       Object.values(CONSUMER_QUEUES).map((q) => ({ queue: q.name, jobName: q.jobName, source: `test.${q.key}`, handler: async () => undefined })),
     );
-    const workers = createConsumerWorkers(registry, redis, { log: () => undefined, warn: () => undefined, error: () => undefined } as unknown as Logger, (def) => def.key !== 'timerTriggers' || mode !== 'off');
+    const workers = createConsumerWorkers(registry, redis, { log: () => undefined, warn: () => undefined, error: () => undefined } as unknown as Logger, (def) => (def.key !== 'timerTriggers' || mode !== 'off') && (def.key !== 'auditEvents' || auditSinkMode !== 'none'));
     try {
       expect([...workers.keys()]).toEqual(['email', 'push', 'shiftStatements', 'ai']);
     } finally {

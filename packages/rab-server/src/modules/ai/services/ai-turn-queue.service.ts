@@ -13,7 +13,8 @@ import { bullmqJobOptionsOf } from '../../../engine/worker-shared/queue-registry
  * BullMQ options of every `rab-ai` job. attempts: 1 — a failed turn or title is never re-run automatically (the user
  * resubmits); a stalled job's second delivery finds the turn `running` with an expired lease and ends it
  * AI_WORKER_INTERRUPTED instead of calling the model again. Kept short in Redis: the turn row in PostgreSQL is the record.
- * D-Q1: read from the queue registry (values unchanged: attempts 1, 1 h / 1000 completed, 7 d / 5000 failed).
+ * D-Q1: read from the queue registry (attempts 1; retention since X3.4 is the shared QUEUE_RETENTION: 4 h / 1000
+ * completed, 7 d / 1000 failed).
  */
 export const AI_TURN_JOB_OPTIONS = Object.freeze(bullmqJobOptionsOf(AI_QUEUE_NAME));
 

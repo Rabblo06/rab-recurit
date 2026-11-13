@@ -189,6 +189,9 @@ jobs:
         run: node --test packages/rab-docker/scripts/compose-credential-isolation.test.cjs
       - name: Compose credential isolation (docker compose config)
         run: node packages/rab-docker/scripts/compose-credential-isolation.cjs
+      # rab-ops removal (PR 2): the gate's refusals of the retired operations container and its environment.
+      - name: Compose credential isolation, retired-ops refusals (self-tests)
+        run: node --test packages/rab-docker/scripts/compose-credential-isolation.ops.test.cjs
       # Docker hardening H5: the H1-L1 apk-option check (no `apk -X…/--rep…/--allow-u…/--keys-dir` in a Dockerfile) now runs
       # in image-security-gate.yaml's static job, which the image-gate job below (and every release) calls.
 

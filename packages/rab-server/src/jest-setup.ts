@@ -5,13 +5,11 @@
 // does not get that for free.
 import 'reflect-metadata';
 
-// RabThrottlerModule skips rate limiting whenever this is 'true' AND
-// JEST_WORKER_ID is set (the latter can never be true outside an actual
-// Jest run, so this can't leak into a real deployment even by accident).
-// The integration suite shares one IP across many spec files that each hit
-// /auth/login repeatedly within the same 60s window — none of that is real
-// abuse. `rate-limiting.integration.spec.ts` flips this back to 'false' at
-// its own top level to exercise the real throttle end-to-end.
+// The one rate-limit switch (engine/core-modules/throttler/rate-limit-bypass.ts, X1.2): RabThrottlerModule, the login/MFA
+// limiter and the attendance per-user throttle skip rate limiting while this is exactly 'true', never in a production runtime
+// (production refuses to boot with it set). JEST_WORKER_ID plays no part. The integration suite shares one IP across many
+// spec files that each hit /auth/login repeatedly within the same 60s window; none of that is real abuse.
+// `rate-limiting.integration.spec.ts` (and the other limiter suites) set it to 'false' to exercise the real throttles.
 process.env.RAB_DISABLE_RATE_LIMIT = 'true';
 
 // EMAIL_DRIVER is forced to LOGGER for every Jest run, unconditionally,
@@ -57,9 +55,11 @@ process.env.AUTH_MICROSOFT_CLIENT_ID ??= 'jest-test-microsoft-client-id';
 process.env.AUTH_MICROSOFT_CLIENT_SECRET ??= 'jest-test-microsoft-client-secret';
 process.env.AUTH_MICROSOFT_CALLBACK_URL ??= 'http://localhost:3000/rest/v1/auth/microsoft/callback';
 
-// Test database routing. Under NODE_ENV=test this REQUIRES TEST_DATABASE_URL and TEST_DATABASE_URL_UNPOOLED (no fallback to
-// the developer's .env DATABASE_URL names, which can point at a remote database), validates that both target the same
-// logical database, and points DATABASE_URL names at that validated pair. Runs before any module reads them. See
+// Test database routing. NODE_ENV must be test (any other value under Jest is refused: X1.2 / DBT-01, a developer .env loaded
+// by Nx can set it). This REQUIRES TEST_DATABASE_URL and TEST_DATABASE_URL_UNPOOLED (no fallback to the developer's .env
+// DATABASE_URL names, which can point at a remote database), validates that both target the same logical database, refuses
+// an inherited PG_DATABASE_URL (or other database URL) that would redirect a connection, and points DATABASE_URL names at
+// that validated pair. Runs before any module reads them. See
 // src/database/typeorm/core/test-database-guard.ts and jest-global-setup.ts (the live identity proof).
 // AI Phase 1 "real models only" (PHASE1_TWENTY_PLAN §5, EX-1 control 11): tests never see a real provider key or a retired
 // AI setting, whatever the developer's local `.env` holds (ConfigModule loads `<cwd>/.env` for a Jest run too, and dotenv
