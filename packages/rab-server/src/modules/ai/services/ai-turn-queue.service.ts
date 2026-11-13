@@ -6,7 +6,7 @@ import { EnvironmentService } from '../../../engine/core-modules/environment/env
 import { AI_TITLE_JOB_NAME, AiJobDataV2, AiResumeJobData, AiTitleJobData, AiTurnJobDataV2 } from '../../../engine/worker-shared/ai-jobs.contract';
 import { AI_QUEUE_NAME, AI_TURN_JOB_NAME, aiTitleJobId, aiTurnJobId } from '../../../engine/worker-shared/ai-queue.constants';
 import { enqueueRegisteredJob, RegisteredJob, registeredJob } from '../../../engine/worker-shared/queue-enqueue';
-import { QUEUE_PRODUCER_REDIS_OPTIONS } from '../../../engine/worker-shared/queue-producer-connection';
+import { closeQueueProducer, createQueueProducerConnection, ProducerRedisConnection } from '../../../engine/worker-shared/queue-producer-connection';
 import { bullmqJobOptionsOf } from '../../../engine/worker-shared/queue-registry';
 
 /**
@@ -52,10 +52,11 @@ export class AiTurnQueueService implements OnModuleDestroy {
   private readonly queue: Queue<AiJobDataV2>;
 
   constructor(env: EnvironmentService) {
-    // Fail fast: exactly the four values of QUEUE_PRODUCER_REDIS_OPTIONS (D-Q1 reads them from there; unchanged).
-    this.connection = new Redis(env.get('REDIS_URL'), { ...QUEUE_PRODUCER_REDIS_OPTIONS });
-    this.connection.on('error', () => undefined);
-    this.queue = new Queue<AiJobDataV2>(AI_QUEUE_NAME, { connection: this.connection });
+    // Fail fast: exactly the four values of QUEUE_PRODUCER_REDIS_OPTIONS (D-Q1 reads them from there; unchanged), with the
+    // client's own 'error' absorbed (createQueueProducerConnection). ProducerRedisConnection: a queue closed while the
+    // client is still making a connect attempt can never leak an unhandled 'error' (queue-producer-connection.ts).
+    this.connection = createQueueProducerConnection(env.get('REDIS_URL'));
+    this.queue = new Queue<AiJobDataV2>(AI_QUEUE_NAME, { connection: this.connection }, ProducerRedisConnection);
     this.queue.on('error', () => undefined);
   }
 
@@ -92,7 +93,7 @@ export class AiTurnQueueService implements OnModuleDestroy {
   }
 
   async onModuleDestroy(): Promise<void> {
-    await this.queue.close().catch(() => undefined);
-    await this.connection.quit().catch(() => this.connection.disconnect());
+    // Bounded (never hangs on a dead Redis): quit when ready, otherwise disconnect.
+    await closeQueueProducer(this.queue, this.connection);
   }
 }
