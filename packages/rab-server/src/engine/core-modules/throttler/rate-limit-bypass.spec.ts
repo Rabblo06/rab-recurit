@@ -72,6 +72,11 @@ describe('the one rate-limit switch (X1.2, audit XA-01 / DUP-03)', () => {
         'rab-server/src/engine/core-modules/environment/env.validation.ts',
       ].map((file) => path.join(packages, file)),
     );
+    // X1.8: the test-database guard reads JEST_WORKER_ID only to recognise a Jest process (so a test file is never
+    // unrouted). It may name JEST_WORKER_ID, never the rate-limit switch.
+    const jestDetectionOnly = new Set(
+      ['rab-server/src/database/typeorm/core/test-database-guard.ts'].map((file) => path.join(packages, file)),
+    );
     const skippedDirs = new Set(['node_modules', '__tests__', 'dist', 'dist-cjs', 'dist-esm', 'coverage', '.nx']);
     const names = [RATE_LIMIT_BYPASS_ENV_NAME, 'JEST_WORKER_ID'];
     const offenders: string[] = [];
@@ -82,7 +87,8 @@ describe('the one rate-limit switch (X1.2, audit XA-01 / DUP-03)', () => {
           if (!skippedDirs.has(entry.name)) walk(full);
         } else if (/\.(ts|js|cjs|mjs|sh|json|ya?ml|env|example)$/.test(entry.name) && !/\.spec\.ts$/.test(entry.name) && !allowed.has(full)) {
           const text = fs.readFileSync(full, 'utf8');
-          if (names.some((name) => text.includes(name))) offenders.push(path.relative(packages, full));
+          const checked = jestDetectionOnly.has(full) ? [RATE_LIMIT_BYPASS_ENV_NAME] : names;
+          if (checked.some((name) => text.includes(name))) offenders.push(path.relative(packages, full));
         }
       }
     };

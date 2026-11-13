@@ -6853,3 +6853,61 @@ injection), `schema-resolver.service.spec.ts` (ST-07), `session-role-reset.spec.
   `audit-event-shipping.spec.ts`, `outbox-operations.replay-audit-event.spec.ts`, `queue-registry.spec.ts` (X1.1 block),
   `audit-event.handler.spec.ts`, `account-invite-cleanup.audit-events.spec.ts`,
   `audit-events-delivery.integration.spec.ts` (E1–E7).
+
+## Phase X1.8 — test database isolation fails closed (cleanup audit DBT-01, DBT-02, DBT-10, DBT-12, XD-03; PR #27)
+
+- **Asset:** the development database and any non-test database reachable from a developer machine; the disposable test
+  cluster's bootstrap superuser credential. **Actor:** not an attacker: a developer `.env`, a shell export or a harness
+  that hands the wrong environment to a test or e2e process (the 2026-10-05 incident class the guard exists for).
+- **DBT-01 (reproduced 2026-11-02, disposable `rab_x1_int` + an unreachable decoy):** with `packages/rab-server/.env` =
+  `NODE_ENV=development` + a decoy `DATABASE_URL` (127.0.0.1:1), `nx test rab-server` passed globalSetup (the TEST pair was
+  valid) and then 1,089 application connection attempts went to the decoy: Nx loads `.env` into the task without
+  overriding, the Nx Jest executor and Jest only default `NODE_ENV` when it is unset, and `applyIntegrationTestDatabaseEnv`
+  returned early for any NODE_ENV but `test`, while fixtures used the TEST admin URL. CI was not affected (`NODE_ENV: test`).
+- **Control (`test-database-guard.ts`):** the guard no longer depends on `NODE_ENV=test`. Under Jest any NODE_ENV but `test`
+  (unset included) is refused in every test file (setupFiles, `JEST_WORKER_ID` set) and in globalSetup
+  (`resolveForJestGlobalSetup`); outside Jest a non-test NODE_ENV stays inert, so runtime and CLI processes are unchanged.
+  The database rules themselves never read NODE_ENV. Refused: the development database (rab-devdb 127.0.0.1:15432 on any
+  loopback alias, compose host `devdb`, or the `DEVDB_URL` database); an inherited `PG_DATABASE_URL`,
+  `PG_OPS_APP_DATABASE_URL` or `CREWFLOW_*_DATABASE_URL` naming another database or another login (DBT-02; empty = unset;
+  the working directory's `.env` and `DOTENV_CONFIG_PATH` are read as data so a value @nestjs/config would load later is
+  checked too); a non-empty `DATABASE_DIRECT_URL` or `PG_DATABASE_REPLICA_URL`; target-changing libpq variables (`PGHOST`,
+  `PGPORT`, `PGUSER`, `PGDATABASE`, ...); a percent-encoded host; a TEST URL without its login; `TEST_DATABASE_CREWFLOW_URL`
+  / `TEST_DATABASE_WORKER_URL` on another database (DBT-10). The catalog disposable marker and the same-cluster probe are
+  unchanged. Messages carry variable names, host, port and database only. `seed-ai-e2e.ts` refuses a null routing.
+- **XD-03 (`rab-worker/.../helpers/worker-login-env.ts`):** the Phase D worker-login switch copied
+  `TEST_DATABASE_WORKER_URL` into `DATABASE_URL` unchecked. It now calls `applyWorkerLoginTestDatabaseEnv`, which, whatever
+  NODE_ENV says, requires the valid TEST pair, the worker URL on the TEST database with its own login and no redirecting
+  inherited URL or libpq variable, and refuses an `options` query parameter on the worker URL and the logins of
+  `TEST_DATABASE_URL_UNPOOLED`, `MIGRATION_SECURITY_ADMIN_URL` and `TEST_DATABASE_CREWFLOW_URL` (compared by name);
+  nothing is changed on refusal. When the switch is on, the worker Jest globalSetup also connects as the worker login
+  (`assertWorkerLoginNotPrivilegedAtRuntime`) and refuses when that login (`session_user`) is, or is a member (direct or
+  inherited, `pg_has_role(session_user, r.oid, 'MEMBER')`) of, any superuser or BYPASSRLS role, or does not reach the
+  TEST database.
+- **DBT-12 (`run-ai-e2e.sh`):** the API, the rab-ai consumer, Vite and Playwright start through `runtime-env.sh`
+  (`ai_e2e_runtime_exec` / `ai_e2e_client_exec`), which remove from the child: every `TEST_DATABASE_*` URL,
+  `MIGRATION_SECURITY_ADMIN_URL`, the role bootstrap passwords, the legacy URLs, `DOTENV_CONFIG_PATH` and command authority;
+  every libpq `PG*` name (`PGPASSWORD`, ...), every `PG_*URL` but `PG_DATABASE_URL`, every `POSTGRES_*` name; and any name
+  whose value equals the superuser URL or `MIGRATION_SECURITY_ADMIN_URL`, or contains their password (8+ characters; the
+  password and the value are each compared as written and percent-decoded; a URL scheme is ignored for this match). Names
+  are read from `env -0`, so names bash cannot use as variables (e.g. `ADMIN.URL`) are covered. Clients also lose
+  `PG_DATABASE_URL` and
+  `APP_SECRET`. Only the seed keeps the admin connection. The harness refuses to start when `PG_DATABASE_URL` itself holds
+  the admin credential, and runs the API and Worker in a fresh empty directory (`AI_E2E_WORK/runtime-cwd.*`, proved free of
+  `.env`), so an env file kept as `AI_E2E_WORK/.env` is never loaded by ConfigModule.
+- **Regression tests:** `test-database-guard.spec.ts` (the database rules refuse the development database by their own rule
+  for NODE_ENV unset / empty / development / production / staging; the worker-login switch is refused for the development
+  database, another database, a remote host, a missing TEST pair, no login, the superuser / migration-admin / crewflow
+  logins, an `options` query parameter and redirecting env; the live privilege check runs against the real TEST database
+  and refuses a superuser login and a non-superuser login that is a member of a superuser role);
+  `run-ai-e2e-env.test.cjs` runs the REAL `run-ai-e2e.sh` with `node` / `curl` / `powershell.exe` stubbed on PATH and
+  asserts on every spawned child's environment (unknown children fail): the superuser credential as URL, `postgresql://`,
+  `?sslmode=`, `localhost`, keyword string, `POSTGRES_PASSWORD`, inherited `PGPASSWORD`, an encoded source password, a raw
+  source password with a percent-encoded copy, a bash-invalid name (`ADMIN.URL`) and an `AI_E2E_WORK/.env` file all reach
+  the seed only. Wired into `ci-e2e` spec-coverage.
+- **Residual:** a developer who sets `NODE_ENV=test` and points `TEST_DATABASE_URL` at a real database that also carries
+  `crewflow.disposable_test_database = 'true'` is not stopped (the marker is the positive opt-in, by design). The devdb
+  endpoint list is the repository's own compose shape. `runtime-env.sh` is a deny-list (an allow-list was not taken: the
+  real harness cannot be exercised in review, and it would drop platform / env-file variables the children need): a NEW
+  credential that is not listed, not `PG*` / `POSTGRES_*` and does not carry an 8+ character admin password still reaches
+  the children; an admin password shorter than 8 characters is matched only as the exact URL value.
