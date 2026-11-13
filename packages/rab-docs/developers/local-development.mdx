@@ -87,10 +87,10 @@ flutter run --dart-define=API_URL=http://10.0.2.2:3000/rest/v1   # Android emula
 | --- | --- |
 | `yarn build` | Build every package |
 | `yarn lint` | Lint and typecheck every package |
-| `yarn test` | Run Jest suites across the monorepo |
+| `yarn test` | Run Jest suites across the monorepo. Jest refuses to start unless `NODE_ENV=test`, and refuses an inherited `PG_DATABASE_URL` (or `.env` value) that names another database, so run it as `NODE_ENV=test PG_DATABASE_URL= npx nx test rab-server` with the `TEST_DATABASE_URL` pair set (see [Testing](./testing)) |
 | `yarn check-rls` | Fail if any tenant table lacks Row-Level Security |
 | `npx nx run rab-server:command -- <name>` | Run a CLI command (see below) |
 
 CLI commands include `bootstrap-admin`, `grant-platform-admin`, `secret:rotate`, `storage:migrate-local`, `storage:reconcile` and `seed`.
 
-The three owner operations `containment:suspend-test-accounts`, `hws:backfill` and `user-session:backfill` run only in the one-off operations container (`CREWFLOW_OPS_RUN=one-off`, `PG_OPS_APP_DATABASE_URL` for `crewflow_app`, the migration identity as `PG_DATABASE_URL` only for the modes that need it, and the operator label `CREWFLOW_OPS_ACTOR_SOURCE` / `CREWFLOW_OPS_ACTOR_ID` / `CREWFLOW_OPS_CHANGE_REF`); they refuse anywhere else. See `docs/runbooks/database.md` section 15.
+The three owner operations `containment:suspend-test-accounts`, `hws:backfill` and `user-session:backfill` are ordinary CLI commands that run only under the owner login: `PG_DATABASE_URL` must name `crewflow_owner`, and any other login is refused before connecting and again on the database. Each run also needs the operator label flags `--operator "<name>"` and `--change-ref <ref>` (`--operator-source` is optional and defaults to `manual-console`). The dry run is the default mode. In a deployment they run as a one-off container of the API service; the procedure is in `packages/rab-docker/docs/release/OWNER-LOGIN-DEPLOYMENT.md`, section 7, "Operations commands". There is no separate operations container: every `CREWFLOW_OPS_*` and `PG_OPS_*` variable is refused, for these commands and for every other process.

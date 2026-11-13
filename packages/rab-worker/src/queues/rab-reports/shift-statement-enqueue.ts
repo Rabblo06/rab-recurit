@@ -6,7 +6,7 @@ import { SHIFT_STATEMENT_JOB_NAME, ShiftStatementJobData } from '@rab/server/mod
  * Phase D-Q1: the ONE builder of a `rab-shift-statements` job, used by BOTH claim modes (per_scope: the report
  * processor's dispatcher adapter; global: dispatch-wiring's statement binding). The declared tenant scope is the claimed
  * `payroll_record` row's own organisation (the dispatcher read it under RLS in the claim transaction — never a client
- * value); the payload is the four identifiers, built field by field; the options (attempts 1, 7 d completed / 30 d failed)
+ * value); the payload is the four identifiers, built field by field; the options (attempts 1, the X3.4 retention: 4 h / 1000 completed, 7 d / 1000 failed)
  * come from the queue registry and the jobId keeps its format `shift-statement.<payrollRecordId>.gen.<generation>`.
  * `shift-statement-enqueue.spec.ts` pins it equal to the pre-D-Q1 literal (`shiftStatementJobOptions`).
  */

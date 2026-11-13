@@ -222,7 +222,7 @@ export default function Login() {
             <div style={{position:'relative'}}><input id="password" style={{...s.input,paddingRight:42}} type={showPassword ? 'text' : 'password'} placeholder="Enter your password" value={password} onChange={e => setPassword(e.target.value)} autoComplete="current-password" autoFocus required aria-invalid={credentialsError || undefined} aria-describedby={error ? 'login-error' : undefined} />
               <button type="button" style={s.eyeBtn} aria-label={showPassword ? 'Hide password' : 'Show password'} onClick={() => setShowPassword(v => !v)}>{showPassword ? <IconEyeOff size={16} /> : <IconEye size={16} />}</button>
             </div>
-            <Link className="auth-forgot-link" to={`/forgot-password?email=${encodeURIComponent(email)}`}>Forgot password?</Link>
+            <Link className="auth-forgot-link" to="/forgot-password" state={email ? { email } : undefined}>Forgot password?</Link>
             <button type="submit" style={{...s.submitBtn,opacity:loading || coolingDown ? .65 : 1}} disabled={loading || coolingDown}>{loading ? 'Signing in…' : coolingDown ? 'Please wait before trying again' : error ? 'Try again' : 'Sign in'}</button>
           </form>
           <button type="button" style={s.backBtn} onClick={() => {setStep('email');setError('');setPassword('');}}>← Back to sign in</button>

@@ -3,7 +3,8 @@ import { Link } from 'react-router-dom';
 /**
  * The design's Password card. There is no change-password route and no "password changed" timestamp (UI_PLAN §2, §7
  * #4–5), so "Change password" is "Reset password", which opens the existing email reset flow with the email filled in,
- * and the "Last updated" row is left out. Only shown to accounts that have a password.
+ * and the "Last updated" row is left out. Only shown to accounts that have a password. The address travels in router
+ * state, never the URL (XA-08), so it never lands in browser history, server/proxy logs or a Referer.
  */
 export default function PasswordCard({ email }: { email?: string }) {
   return (
@@ -19,11 +20,8 @@ export default function PasswordCard({ email }: { email?: string }) {
         </div>
         <Link
           className="acs-btn acs-btn--secondary"
-          to={
-            email
-              ? `/forgot-password?email=${encodeURIComponent(email)}`
-              : '/forgot-password'
-          }
+          to="/forgot-password"
+          state={email ? { email } : undefined}
         >
           Reset password
         </Link>

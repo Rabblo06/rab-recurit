@@ -16,12 +16,12 @@
  *   - An unexpected domain error stops the run. Nothing is bypassed with raw SQL.
  *   - Results contain user and organisation ids and outcomes only. No email, token or credential is recorded.
  *
- * Phase B (ops container): the cross-tenant READS are the frozen, named statements below (CONTAINMENT_READ_STATEMENTS). In
- * the one-off ops container they run on the verified elevated session (migration identity, `SET LOCAL ROLE
+ * Phase X2.2 (owner-login one-off): the cross-tenant READS are the frozen, named statements below
+ * (CONTAINMENT_READ_STATEMENTS). They run on the verified narrowed session (crewflow_owner, `SET LOCAL ROLE
  * rab_secure_owner`, READ ONLY transaction — command/ops/elevated-ops-session.ts); organisation and user are
  * rab_secure_owner-owned and not FORCE'd, so only their owner sees every tenant's rows. A test may pass a plain DataSource
- * instead (dataSourceReadSession: same statements, READ ONLY transaction). The WRITES always go through the restricted
- * runtime login (crewflow_app) in each target's own tenant context.
+ * instead (dataSourceReadSession: same statements, READ ONLY transaction). The WRITES always go through the command's
+ * injected DataSource in each target's own tenant context (FORCE RLS-bound), never the narrowed session.
  */
 import { assertTransition, USER_STATUS_TRANSITIONS, UserStatus } from '@rab/shared';
 import { DataSource, EntityManager } from 'typeorm';
@@ -177,7 +177,7 @@ export async function suspendContainmentTargets(
     execute: boolean;
     onOutcome: (o: ContainmentOutcome) => void;
     onProgress?: (done: number, total: number) => void;
-    /** Extra audit metadata on every ACCOUNT_SUSPENDED row (the ops container's operational label). */
+    /** Extra audit metadata on every ACCOUNT_SUSPENDED row (the ops run's operational label). */
     auditMetadata?: Record<string, unknown>;
   },
 ): Promise<void> {
