@@ -639,10 +639,17 @@ const SCENARIOS: Scenario[] = [
     async run(ctx) {
       const a = await createDb(ctx, 'ca');
       const b = await createDb(ctx, 'cb');
-      // One volume, one password file: stored beforehand (the first-start file race is a separate, refused-and-retried case).
+      // The same stored password for every start (the first-start file race is a separate, refused-and-retried case). Each
+      // child gets its own copy of the volume directory: on a Windows test host, concurrent renames over ONE target file fail
+      // with EPERM (Linux renames are atomic; a deployment has one db-setup per volume anyway).
       const pw = remember(secret().slice(0, 32) + secret().slice(0, 32));
       writeOwnerPasswordFile(PASSWORD_FILE, pw);
-      const runs = await Promise.all([runChild(suUrl(ctx, a)), runChild(suUrl(ctx, a)), runChild(suUrl(ctx, b)), runChild(suUrl(ctx, b))]);
+      const dirs = [0, 1, 2, 3].map(() => mkdtempSync(join(tmpdir(), 'obc-conc-')));
+      for (const d of dirs) writeOwnerPasswordFile(ownerPasswordFilePath(join(d, 'target.json')), pw);
+      const runs = await Promise.all(
+        [a, a, b, b].map((db, i) => runChild(suUrl(ctx, db), { CREWFLOW_DB_TARGET_FILE: join(dirs[i] as string, 'target.json') })),
+      );
+      for (const d of dirs) rmSync(d, { recursive: true, force: true });
       for (const r of runs) {
         assertCleanOutput(r);
         expect(r.code === 0, `a concurrent start exited ${r.code} (${r.result?.outcome ?? 'none'} ${r.result?.code ?? ''}; all: ${runs.map((x) => `${x.code}/${x.result?.code ?? '-'}`).join(' ')})`);
