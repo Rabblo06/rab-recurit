@@ -132,6 +132,8 @@ describe('owner password file', () => {
     let read = readOwnerPasswordFile(file);
     expect(read.state === 'ready' && read.password === 'old-password').toBe(true);
     expect(fs.existsSync(next)).toBe(true);
+    // The same length, one character different: still refused (the byte compare, not only the length check).
+    expect(() => promoteOwnerPasswordFile(next, file, { expected: 'another-runs-passworX' })).toThrow(OwnerPasswordMismatchError);
     fs.rmSync(next, { force: true });
     expect(() => promoteOwnerPasswordFile(next, file, { expected: 'this-runs-password' })).toThrow(OwnerPasswordMismatchError);
     writeOwnerPasswordFile(next, 'this-runs-password', { exclusive: true });
@@ -140,6 +142,7 @@ describe('owner password file', () => {
     expect(read.state === 'ready' && read.password === 'this-runs-password').toBe(true);
     const source = fs.readFileSync(path.join(__dirname, 'owner-password-file.ts'), 'utf8');
     expect(source).toMatch(/timingSafeEqual\(/);
+    expect(source).not.toMatch(/createHash\(/); // a plain constant-time byte compare, never a fast hash of a password
   });
 
   it('missing is `missing`; an EMPTY file, a newline, a control character or an oversized file is refused with fixed text', () => {

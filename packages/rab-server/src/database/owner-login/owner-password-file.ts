@@ -28,7 +28,7 @@
  * FIFO, a wrong owner or mode, a newline or control character, oversized, unreadable — is an OwnerPasswordFileError (exit 64).
  * Errors carry fixed text only, never a value or a path.
  */
-import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
+import { randomBytes, timingSafeEqual } from 'node:crypto';
 import * as fs from 'node:fs';
 import { basename, dirname, join } from 'node:path';
 
@@ -65,9 +65,14 @@ export class OwnerPasswordMismatchError extends Error {
   }
 }
 
-/** Constant-time equality of two passwords (SHA-256 first, so the length is not compared in variable time either). */
+/**
+ * Constant-time equality of the raw password bytes. The length check first is not a useful leak: the pending password is
+ * always a password this process generated (64 hex characters), so both sides have a fixed, public length.
+ */
 function samePassword(a: string, b: string): boolean {
-  return timingSafeEqual(createHash('sha256').update(a, 'utf8').digest(), createHash('sha256').update(b, 'utf8').digest());
+  const left = Buffer.from(a, 'utf8');
+  const right = Buffer.from(b, 'utf8');
+  return left.length === right.length && timingSafeEqual(left, right);
 }
 
 /** The password file of a target file path: the same directory, `owner-password`. */
