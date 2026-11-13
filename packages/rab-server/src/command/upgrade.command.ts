@@ -56,7 +56,7 @@ export async function runUpgradeCommand(args: readonly string[], env: NodeJS.Pro
   let pid: number | null = null;
   installSigtermSelfCancel(env, () => pid, log);
   const result = await runMigrateOnStart(
-    { migrationApprovalMode: config.migrationApprovalMode, upgradeFailurePolicy: config.upgradeFailurePolicy },
+    { migrationApprovalMode: config.migrationApprovalMode },
     { env, log, onSession: (p) => (pid = p), ...(force ? { upgradeForce: true as const } : {}) },
   );
   const exitCode = STARTUP_EXIT_CODES[result.outcome];

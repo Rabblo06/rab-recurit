@@ -1,3 +1,4 @@
+import { EXPECTED_WORKSPACE_FINGERPRINTS_PG17 } from './expected-fingerprints-pg17';
 import { EXPECTED_WORKSPACE_FINGERPRINTS_PG18 } from './expected-fingerprints-pg18';
 
 /**
@@ -44,27 +45,29 @@ export const PENDING_FINGERPRINT_VERSIONS: readonly number[] = [];
 /**
  * Twenty Mode Option A, owner decision D4 (2026-11-04): catalog renderings differ between PostgreSQL major versions (PG18
  * adds `contype = 'n'` NOT NULL constraint rows, M0 finding B4), so a workspace fingerprint is only meaningful against the
- * values generated on the SAME major. PostgreSQL 16 keeps the values above, unchanged; PostgreSQL 18 has its own set
- * (expected-fingerprints-pg18.ts). Every other major is unsupported.
+ * values generated on the SAME major. PostgreSQL 16 keeps the values above, unchanged; PostgreSQL 17 and 18 each have their
+ * own set (expected-fingerprints-pg17.ts, added by DB-SETUP §6; expected-fingerprints-pg18.ts). Every other major is
+ * unsupported.
  *
  * `EXPECTED_WORKSPACE_FINGERPRINTS` (below) is what every caller reads: the frozen migrations, the TypeScript provisioner,
  * the migrator and the drift job. It is a read-only view of the table selected for this process's database server:
  *   - nothing selected (every existing process that never calls the selector): the PostgreSQL 16 table, exactly as
  *     before, so separated mode on PostgreSQL 16 is unchanged byte for byte;
- *   - selectWorkspaceFingerprintsForServer(...) with 16 or 18: that major's table. A process talks to ONE server, so a
+ *   - selectWorkspaceFingerprintsForServer(...) with 16, 17 or 18: that major's table. A process talks to ONE server, so a
  *     second selection with a different major is refused (never a silent switch).
  * The frozen migrations read the view inside up() (never at import), so a migration run selected for PostgreSQL 18 bakes
  * the PostgreSQL 18 literal into core.provision_workspace(uuid), and the TypeScript provisioner compares against the same
  * major. A wrong selection fails closed: the fingerprint comparison refuses (FINGERPRINT_MISMATCH), it never passes.
  */
-export { EXPECTED_WORKSPACE_FINGERPRINTS_PG18 };
-export const SUPPORTED_FINGERPRINT_MAJORS = [16, 18] as const;
+export { EXPECTED_WORKSPACE_FINGERPRINTS_PG17, EXPECTED_WORKSPACE_FINGERPRINTS_PG18 };
+export const SUPPORTED_FINGERPRINT_MAJORS = [16, 17, 18] as const;
 export type FingerprintMajor = (typeof SUPPORTED_FINGERPRINT_MAJORS)[number];
 /** Below this, Twenty Mode refuses the server outright (M0 F-E1: CREATEROLE can grant pg_execute_server_program on <= 15). */
 export const MINIMUM_POSTGRES_MAJOR = 16;
 
 const TABLES: Readonly<Record<FingerprintMajor, Readonly<Record<number, string>>>> = {
   16: EXPECTED_WORKSPACE_FINGERPRINTS_PG16,
+  17: EXPECTED_WORKSPACE_FINGERPRINTS_PG17,
   18: EXPECTED_WORKSPACE_FINGERPRINTS_PG18,
 };
 
@@ -99,7 +102,7 @@ export function postgresMajorOf(serverVersionNum: string | number): number {
 /**
  * Pure decision for a server major:
  *   below MINIMUM_POSTGRES_MAJOR  refused (UnsupportedPostgresVersionError);
- *   16 or 18                      that major;
+ *   16, 17 or 18                  that major;
  *   anything else                 refused: no reviewed fingerprints exist for it (generate and commit them first).
  */
 export function assertSupportedPostgresMajor(major: number): FingerprintMajor {
@@ -111,7 +114,7 @@ export function assertSupportedPostgresMajor(major: number): FingerprintMajor {
   }
   if (!(SUPPORTED_FINGERPRINT_MAJORS as readonly number[]).includes(major)) {
     throw new UnsupportedPostgresVersionError(
-      `PostgreSQL ${major} is not supported: workspace fingerprints are generated for ${SUPPORTED_FINGERPRINT_MAJORS.join(' and ')} only ` +
+      `PostgreSQL ${major} is not supported: workspace fingerprints are generated for ${SUPPORTED_FINGERPRINT_MAJORS.join(', ')} only ` +
         '(workspace-schema/v1/expected-fingerprints*.ts). Generate and review them on that major first.',
     );
   }

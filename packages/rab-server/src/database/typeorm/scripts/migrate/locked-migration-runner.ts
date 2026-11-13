@@ -29,7 +29,7 @@
  *      PostgreSQL rolls back the open migration transaction and frees the lock together; earlier migrations of that run
  *      stay committed with their ledger rows, so a re-run continues from exactly there. (A `transaction = false` migration
  *      that dies mid-way can leave partial DDL without a ledger row; each of them is written to be re-run safely. The
- *      list is owner-login/upgrade-failure-policy.ts NON_TRANSACTIONAL_MIGRATIONS, ten today, checked against the
+ *      list is owner-login/non-transactional-migrations.ts NON_TRANSACTIONAL_MIGRATIONS, ten today, checked against the
  *      migration sources by its spec: 1786676100000, 1786719810000, 1786719920000, 1786719950000, 1786720110000,
  *      1786721090000, 1786721320000, 1786721430000, 1786721440000, 1786721450000.)
  *

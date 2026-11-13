@@ -4,7 +4,7 @@
  * child all use the one `PG_DATABASE_URL` (the schema-owning `crewflow_owner` login, M0 §5.1). No I/O, no database, no
  * logging. Consumers:
  *   - env.validation.ts (API and Worker configuration validation at boot);
- *   - the migrate child and the upgrade-failure policy (Agent 1; they delegate to these parsers);
+ *   - the migrate child and the manual `upgrade` command (they delegate to these parsers);
  *   - packages/rab-docker/rab/api-prestart.sh keeps a literal SHELL copy of the same rules (it runs before Node);
  *     runtime-db-config.spec.ts runs that shell copy against the same table of cases and fails when the two drift.
  *
@@ -20,37 +20,38 @@
  *                                     false. A present value is always validated.
  *   CREWFLOW_MIGRATION_APPROVAL_MODE  none | token. Default none EVERYWHERE, production included (owner decision BC-11,
  *                                     2026-11-05: optional and off by default, like Twenty). A present value is validated.
- *   CREWFLOW_UPGRADE_FAILURE          continue (default) | refuse. Owner decision C3 (2026-11-05, "exactly like Twenty"): an
- *                                     UPGRADE whose migration fails is logged as an ERROR and the API starts anyway (exit 70);
- *                                     a first install, the configuration, the identity, the lock, the approval and the post-
- *                                     checks stay fail-closed. refuse = the previous behaviour (the API never starts).
- *   CREWFLOW_UPGRADE_FAILURE_POLICY   DEPRECATED alias, still honoured: refuse -> refuse, continue-if-compatible -> continue.
- *                                     Set together with CREWFLOW_UPGRADE_FAILURE, the two must agree (else exit 64).
  *
  * Removed names, refused with an actionable message so nobody believes they still do something:
- *   CREWFLOW_DB_MODE        there is no mode switch any more (one architecture: the owner login).
+ *   CREWFLOW_DB_MODE                  there is no mode switch any more (one architecture: the owner login).
+ *   CREWFLOW_UPGRADE_FAILURE          OWNER-DB-ULTIMATE Part B3 (owner: "Remove the CREWFLOW_UPGRADE_FAILURE choices"): a
+ *   CREWFLOW_UPGRADE_FAILURE_POLICY   failed migration always refuses (66) and the next start retries it; only a failed
+ *                                     upgrade COMMAND serves (70). There is nothing left to choose.
  *
  * Values are compared exactly (case-sensitive, no trimming); unset and blank are the same thing (a compose `KEY=` line).
  * A refusal names the variable and the allowed values and never echoes the value.
+ *
+ * DB-SETUP (plan §2.2, 2026-11-12): checkRuntimeLogin is the runtime-login rule — in production the API, the Worker and the
+ * migrate child refuse any PG_DATABASE_URL login other than crewflow_owner BEFORE connecting. It parses the URL with the
+ * policy parser (owner-credential.ts isOwnerLoginUrl) but is still pure: no I/O, no connection, no logging. It is a separate function on
+ * purpose (see its comment): the prestart shell copy and the bootstrap child legitimately hold the admin URL.
  */
 
+import { readPrimaryDatabaseUrl } from '../postgres/pg-config';
+import { isOwnerLoginUrl, OWNER_LOGIN, OwnerCredentialError } from './owner-credential';
+
 export type MigrationApprovalMode = 'none' | 'token';
-export type UpgradeFailurePolicy = 'continue' | 'refuse';
 
 export const MIGRATE_ON_START_VAR = 'CREWFLOW_MIGRATE_ON_START';
 /** Owner decision C1 (2026-11-05): Twenty's switch, accepted — true = this process never migrates (see the header). */
 export const DISABLE_DB_MIGRATIONS_VAR = 'DISABLE_DB_MIGRATIONS';
 export const MIGRATION_APPROVAL_MODE_VAR = 'CREWFLOW_MIGRATION_APPROVAL_MODE';
-export const UPGRADE_FAILURE_VAR = 'CREWFLOW_UPGRADE_FAILURE';
-/** Deprecated alias of CREWFLOW_UPGRADE_FAILURE (owner decision C3): its two values map onto the new ones. */
-export const UPGRADE_FAILURE_POLICY_VAR = 'CREWFLOW_UPGRADE_FAILURE_POLICY';
-export const DEPRECATED_UPGRADE_FAILURE_POLICY_VALUES: Readonly<Record<string, UpgradeFailurePolicy>> = Object.freeze({
-  refuse: 'refuse',
-  'continue-if-compatible': 'continue',
-});
 /** Names that no longer exist; refused (see the header). */
+const UPGRADE_FAILURE_REMOVED =
+  'was removed (OWNER-DB-ULTIMATE Part B3): a failed migration always refuses to start and is retried on the next start; only a failed upgrade command serves, with upgrade:"failed" on /healthz. Remove it from the environment.';
 export const REMOVED_DB_CONFIG_VARS: Readonly<Record<string, string>> = Object.freeze({
   CREWFLOW_DB_MODE: 'There is no database mode switch any more: the API, the Worker and migrations all use the one PG_DATABASE_URL owner login. Remove CREWFLOW_DB_MODE.',
+  CREWFLOW_UPGRADE_FAILURE: `CREWFLOW_UPGRADE_FAILURE ${UPGRADE_FAILURE_REMOVED}`,
+  CREWFLOW_UPGRADE_FAILURE_POLICY: `CREWFLOW_UPGRADE_FAILURE_POLICY ${UPGRADE_FAILURE_REMOVED}`,
 });
 
 /**
@@ -67,9 +68,7 @@ export const MIGRATION_TEST_SEAM_VARS = Object.freeze(['CREWFLOW_MIGRATION_TEST_
 export const TEST_SEAM_VARS = Object.freeze([...MIGRATION_TEST_SEAM_VARS, 'CREWFLOW_TEST_DEFER_SERVER_PROVISIONING'] as const);
 
 export const MIGRATION_APPROVAL_MODES: readonly MigrationApprovalMode[] = Object.freeze(['none', 'token'] as const);
-export const UPGRADE_FAILURE_POLICIES: readonly UpgradeFailurePolicy[] = Object.freeze(['continue', 'refuse'] as const);
 export const DEFAULT_MIGRATION_APPROVAL_MODE: MigrationApprovalMode = 'none';
-export const DEFAULT_UPGRADE_FAILURE_POLICY: UpgradeFailurePolicy = 'continue';
 
 /**
  * Start-up exit codes (M0 §7, agreed with Agent 1 through the lead). 64 is the only one this parser produces; the rest are
@@ -83,7 +82,10 @@ export const STARTUP_EXIT_CODES = Object.freeze({
   identity: 67,
   postCheck: 68,
   lockTimeout: 69,
-  /** An UPGRADE migration failed and CREWFLOW_UPGRADE_FAILURE=continue (the default): ERROR logged, the API starts anyway. */
+  /**
+   * OWNER-DB-ULTIMATE Part B3: only an upgrade COMMAND failed; every migration applied and the post-checks passed (the schema
+   * matches the code), so the API starts and /healthz reports upgrade:"failed". Internal: api-prestart.sh serves on it.
+   */
   degradedContinue: 70,
 } as const);
 
@@ -118,7 +120,6 @@ export interface RuntimeDbConfig {
   /** The EFFECTIVE value: CREWFLOW_MIGRATE_ON_START=true and DISABLE_DB_MIGRATIONS not true. */
   migrateOnStart: boolean;
   migrationApprovalMode: MigrationApprovalMode;
-  upgradeFailurePolicy: UpgradeFailurePolicy;
 }
 
 /** DISABLE_DB_MIGRATIONS (see the header): exactly true or false; unset or blank = false. */
@@ -155,27 +156,6 @@ export function readMigrationApprovalMode(env: Env, options: ReadRuntimeDbConfig
   return value === undefined ? DEFAULT_MIGRATION_APPROVAL_MODE : oneOf(MIGRATION_APPROVAL_MODE_VAR, value, MIGRATION_APPROVAL_MODES);
 }
 
-/** CREWFLOW_UPGRADE_FAILURE, with its deprecated alias (see the header). Agent 1's parseUpgradeFailurePolicy delegates here. */
-export function readUpgradeFailurePolicy(env: Env): UpgradeFailurePolicy {
-  const value = raw(env, UPGRADE_FAILURE_VAR);
-  const current = value === undefined ? undefined : oneOf(UPGRADE_FAILURE_VAR, value, UPGRADE_FAILURE_POLICIES);
-  const legacy = raw(env, UPGRADE_FAILURE_POLICY_VAR);
-  // Own keys only: an inherited name ('constructor', 'toString', ...) is not a deprecated value.
-  const aliased =
-    legacy !== undefined && Object.prototype.hasOwnProperty.call(DEPRECATED_UPGRADE_FAILURE_POLICY_VALUES, legacy)
-      ? DEPRECATED_UPGRADE_FAILURE_POLICY_VALUES[legacy]
-      : undefined;
-  if (legacy !== undefined && aliased === undefined) {
-    throw new RuntimeDbConfigError(
-      `${UPGRADE_FAILURE_POLICY_VAR} is deprecated and must be exactly one of: ${Object.keys(DEPRECATED_UPGRADE_FAILURE_POLICY_VALUES).join(', ')}; use ${UPGRADE_FAILURE_VAR}=continue|refuse instead. Refusing to start.`,
-    );
-  }
-  if (current !== undefined && aliased !== undefined && current !== aliased) {
-    throw new RuntimeDbConfigError(`${UPGRADE_FAILURE_VAR} and the deprecated ${UPGRADE_FAILURE_POLICY_VAR} disagree; remove ${UPGRADE_FAILURE_POLICY_VAR}. Refusing to start.`);
-  }
-  return current ?? aliased ?? DEFAULT_UPGRADE_FAILURE_POLICY;
-}
-
 /** Every remaining database start-up setting, validated together. Throws RuntimeDbConfigError (exit 64) on the first problem. */
 export function readRuntimeDbConfig(env: Env, options: ReadRuntimeDbConfigOptions = {}): RuntimeDbConfig {
   for (const [name, why] of Object.entries(REMOVED_DB_CONFIG_VARS)) {
@@ -192,7 +172,68 @@ export function readRuntimeDbConfig(env: Env, options: ReadRuntimeDbConfigOption
     disableDbMigrations: readDisableDbMigrations(env),
     migrateOnStart: readMigrateOnStart(env, options),
     migrationApprovalMode: readMigrationApprovalMode(env, options),
-    upgradeFailurePolicy: readUpgradeFailurePolicy(env),
+  };
+}
+
+/**
+ * DB-SETUP (plan §2.2 / §5.2, "database setup like Twenty"): the ONE login a runtime process may connect as is
+ * owner-credential.ts OWNER_LOGIN (crewflow_owner). In a deployment, `PG_DATABASE_URL` in the container definition is the
+ * database ADMIN URL; api-prestart.sh (after the bootstrap child) and worker-start.sh replace it with the derived
+ * crewflow_owner URL before any runtime process starts. A crewflow_owner URL is passed through unchanged (owner decision D5),
+ * so it is accepted here exactly as before.
+ */
+export type RuntimeLoginProcess = 'api' | 'worker' | 'migrate';
+
+/**
+ * Production for this rule, fail closed: NODE_ENV, RAB_RUNTIME_ENV or DB_TARGET says production (trimmed, any case). A
+ * superset of pg-config.ts isPgProductionEnvironment and never-in-runtime-env.ts, so a half-declared or mis-cased production
+ * never falls into the warning branch.
+ */
+function looksLikeProduction(env: Env): boolean {
+  return ['NODE_ENV', 'RAB_RUNTIME_ENV', 'DB_TARGET'].some((name) => env[name]?.trim().toLowerCase() === 'production');
+}
+
+export interface RuntimeLoginCheck {
+  /** Outside production only: a non-crewflow_owner login is allowed (dev and test suites use other logins) but reported. */
+  warning: string | null;
+}
+
+/**
+ * The runtime-login rule (plan §2.2): in production, a runtime process whose `PG_DATABASE_URL` login is anything other than
+ * crewflow_owner is refused (RuntimeDbConfigError, exit 64) BEFORE any connection is opened. Pure: it parses the URL with the
+ * same policy parser every connection uses (owner-credential.ts isOwnerLoginUrl -> pg-url-policy.ts parsePgUrl) and never connects, logs, or echoes a value (not
+ * the URL, not the login). Outside production it returns a warning instead.
+ *
+ * Deliberately NOT part of readRuntimeDbConfig and NOT in api-prestart.sh's literal shell copy: the prestart shell and the
+ * bootstrap child hold the ADMIN URL by design until the swap, and CLI commands validate their environment through
+ * env.validation.ts. Callers: runtime-database-guard.ts resolveRuntimeDatabase (API and Worker, also run by
+ * check-pending-migrations.ts) and the migrate child (twenty-migrate.ts). The superseded separate provisioner process is left
+ * exactly as it was (it is unused; removed in the final clean-up PR).
+ *
+ * An absent PG_DATABASE_URL is not this rule's business (pg-config.ts refuses it in production with its own message). A
+ * present but unparseable one is refused in production (fail closed) with the policy parser's value-free message.
+ */
+export function checkRuntimeLogin(env: Env, processName: RuntimeLoginProcess): RuntimeLoginCheck {
+  // The factory's own reader (pg-config.ts): PG_DATABASE_URL, or outside production the deprecated DATABASE_URL; trimmed.
+  const value = readPrimaryDatabaseUrl(env)?.value ?? '';
+  if (value === '') return { warning: null };
+  const production = looksLikeProduction(env);
+  let owner: boolean;
+  try {
+    owner = isOwnerLoginUrl(value);
+  } catch (error) {
+    if (!(error instanceof OwnerCredentialError)) throw error;
+    if (production) throw new RuntimeDbConfigError(`The ${processName} process: ${error.message}`);
+    return { warning: null };
+  }
+  if (owner) return { warning: null };
+  if (production) {
+    throw new RuntimeDbConfigError(
+      `The ${processName} process: PG_DATABASE_URL does not log in as ${OWNER_LOGIN}. In production a runtime process connects ONLY as ${OWNER_LOGIN}; this process was not started through api-prestart.sh / worker-start.sh, which replace the database admin URL with the derived ${OWNER_LOGIN} URL before any runtime process starts (login not shown). Refusing to start before connecting.`,
+    );
+  }
+  return {
+    warning: `The ${processName} process: PG_DATABASE_URL does not log in as ${OWNER_LOGIN} (login not shown). Allowed outside production only; production refuses it before connecting.`,
   };
 }
 

@@ -36,6 +36,7 @@ import { Client } from 'pg';
 import {
   EXPECTED_WORKSPACE_FINGERPRINTS,
   EXPECTED_WORKSPACE_FINGERPRINTS_PG16,
+  EXPECTED_WORKSPACE_FINGERPRINTS_PG17,
   EXPECTED_WORKSPACE_FINGERPRINTS_PG18,
   selectWorkspaceFingerprintMajor,
 } from '../workspace-schema/v1/expected-fingerprints';
@@ -78,6 +79,7 @@ async function withClient<T>(url: string, fn: (c: Client) => Promise<T>): Promis
 /** The table of the selected major, mutable for the generation build only. */
 function table(major: number): Record<number, string> {
   if (major === 18) return EXPECTED_WORKSPACE_FINGERPRINTS_PG18 as Record<number, string>;
+  if (major === 17) return EXPECTED_WORKSPACE_FINGERPRINTS_PG17 as Record<number, string>;
   if (major === 16) return EXPECTED_WORKSPACE_FINGERPRINTS_PG16 as Record<number, string>;
   throw new Error(`no fingerprint table for PostgreSQL ${major}`);
 }
@@ -121,7 +123,7 @@ async function buildDatabase(db: string): Promise<void> {
     }
   });
   const result = await runMigrateOnStart(
-    { migrationApprovalMode: 'none', upgradeFailurePolicy: 'refuse' },
+    { migrationApprovalMode: 'none' },
     { env: { PATH: process.env.PATH, NODE_ENV: 'development', PG_DATABASE_URL: adminUrl(db, { name: 'crewflow_owner', password: OWNER_PASSWORD }) }, log: () => undefined },
   );
   if (result.outcome !== 'ok') throw new Error(`the chain build failed: ${result.outcome} ${result.reason}`);
@@ -237,6 +239,7 @@ async function generate(major: number): Promise<void> {
 
 const TABLE_FILES: Readonly<Record<number, { file: string; exportName: string }>> = {
   16: { file: 'expected-fingerprints.ts', exportName: 'EXPECTED_WORKSPACE_FINGERPRINTS_PG16' },
+  17: { file: 'expected-fingerprints-pg17.ts', exportName: 'EXPECTED_WORKSPACE_FINGERPRINTS_PG17' },
   18: { file: 'expected-fingerprints-pg18.ts', exportName: 'EXPECTED_WORKSPACE_FINGERPRINTS_PG18' },
 };
 

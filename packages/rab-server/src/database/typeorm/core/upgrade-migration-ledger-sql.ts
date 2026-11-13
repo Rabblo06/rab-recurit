@@ -17,8 +17,9 @@
  *   status          SELECT, never with a tenant bound (/healthz, the admin banner);
  *   workspace_init  SELECT + INSERT (is_initial only) of a workspace in the bound organisation (workspace creation).
  * Request handlers never set it: their transactions see no row and insert nothing. crewflow_app (and its member
- * crewflow_worker) is denied outright. Nobody holds UPDATE, DELETE or TRUNCATE (not even the owner); the workspace FK
- * cascade is the only delete path (Twenty `:61-63`).
+ * crewflow_worker) is denied outright. Nobody holds UPDATE or TRUNCATE (not even the owner); the owner holds DELETE only so
+ * the workspace FK cascade can run (RI actions bypass RLS); no DELETE policy exists, so any other DELETE removes nothing.
+ * The workspace FK cascade is the only delete path (Twenty `:61-63`).
  *
  * BOUNDARY (SECURITY TRADE-OFF, UPGRADES-LEDGER-SQL.md "REVISED"): the setting is a code-path convention the database
  * enforces, not an authentication: any code running as crewflow_owner can set it, and crewflow_owner can, through its
@@ -49,7 +50,7 @@ const OWN_WORKSPACE = `EXISTS (SELECT 1 FROM core.manager_workspace w
                  WHERE w.id = upgrade_migration.workspace_id AND w.organisation_id = core.current_org())`;
 
 export const UPGRADE_LEDGER_TABLE_COMMENT_SQL =
-  "'OWNER-DB-ULTIMATE Part B: upgrade logbook shaped like Twenty''s core.\"upgradeMigration\". One row when a step ends (completed | failed; attempt = previous + 1 under the migration lock). Plain queries from the upgrade code only, chosen per transaction by rab.upgrade_scope (upgrade | status | workspace_init); request handlers see and write nothing. No UPDATE, DELETE or TRUNCATE privilege; rows leave only through the workspace FK cascade. error_message is stored as-is (length-capped) and may contain what the failing step printed.'";
+  "'OWNER-DB-ULTIMATE Part B: upgrade logbook shaped like Twenty''s core.\"upgradeMigration\". One row when a step ends (completed | failed; attempt = previous + 1 under the migration lock). Plain queries from the upgrade code only, chosen per transaction by rab.upgrade_scope (upgrade | status | workspace_init); request handlers see and write nothing. No UPDATE or TRUNCATE privilege and no DELETE policy (the owner holds DELETE only for the cascade); rows leave only through the workspace FK cascade. error_message is stored as-is (length-capped) and may contain what the failing step printed.'";
 
 export const UPGRADE_LEDGER_UP_SQL: readonly string[] = [
   `CREATE TABLE core.upgrade_migration (
@@ -81,7 +82,11 @@ export const UPGRADE_LEDGER_UP_SQL: readonly string[] = [
   'ALTER TABLE core.upgrade_migration OWNER TO rab_secure_owner',
   'REVOKE ALL ON TABLE core.upgrade_migration FROM PUBLIC, crewflow, crewflow_app',
   'REVOKE ALL ON TABLE core.upgrade_migration FROM rab_secure_owner',
-  'GRANT SELECT, INSERT ON TABLE core.upgrade_migration TO rab_secure_owner',
+  // DELETE for the OWNER only, and only so the workspace FK cascade can run: PostgreSQL executes an ON DELETE CASCADE as
+  // the owner of the referencing table and checks that owner's DELETE privilege (without it every core.manager_workspace
+  // delete fails 42501). The cascade bypasses RLS (RI actions are not subject to FORCE); every other DELETE, by the owner
+  // role too, meets FORCE RLS with no DELETE policy and removes nothing. Still no UPDATE or TRUNCATE for anyone.
+  'GRANT SELECT, INSERT, DELETE ON TABLE core.upgrade_migration TO rab_secure_owner',
   'ALTER TABLE core.upgrade_migration ENABLE ROW LEVEL SECURITY',
   'ALTER TABLE core.upgrade_migration FORCE ROW LEVEL SECURITY',
   `CREATE POLICY upgrade_migration_upgrade_select ON core.upgrade_migration
@@ -176,7 +181,7 @@ SELECT
 
 export const UPGRADE_LEDGER_EXPECTED_STATE = {
   tables: 'upgrade_migration:rab_secure_owner:r:true:true',
-  table_acl: ['rab_secure_owner:INSERT:false', 'rab_secure_owner:SELECT:false'].join(','),
+  table_acl: ['rab_secure_owner:DELETE:false', 'rab_secure_owner:INSERT:false', 'rab_secure_owner:SELECT:false'].join(','),
   column_acls: 0,
   columns: [
     'id:uuid:true',

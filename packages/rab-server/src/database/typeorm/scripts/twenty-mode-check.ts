@@ -22,8 +22,8 @@
  *
  * Interfaces (Agent 1, twa/db-lifecycle @ b5a03348):
  *   child  packages/rab-server/dist/database/typeorm/scripts/migrate/twenty/twenty-migrate.js
- *   exit   0 ok/ahead, 64 config, 65 behind, 66 failed, 67 identity, 68 post-check, 69 lock, 70 degraded continue
- *   stdout `TWENTY_MIGRATE_RESULT {state, applied, pending, failedMigration, outcome, exitCode, serve, policy, reason, checks[]}`
+ *   exit   0 ok/ahead, 64 config, 65 behind, 66 failed, 67 identity, 68 post-check, 69 lock, 70 an upgrade COMMAND failed (serve)
+ *   stdout `TWENTY_MIGRATE_RESULT {state, applied, pending, failedMigration, outcome, exitCode, serve, reason, checks[], upgrade}`
  *          `MIGRATION_EVENT {"event":"start"|"recorded","name","phase"}`
  *   seams  CREWFLOW_MIGRATION_TEST_STOP_BEFORE / CREWFLOW_MIGRATION_TEST_FAIL_AT (NODE_ENV=test + disposable database only)
  *
@@ -31,14 +31,15 @@
  * the exit code alone. Output: database names, migration names, counts. Never a URL or password.
  */
 import { spawn, spawnSync } from 'node:child_process';
-import { createHash, createHmac, pbkdf2Sync, randomBytes, randomUUID } from 'node:crypto';
-import { existsSync, readdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
+import { createHash, randomBytes, randomUUID } from 'node:crypto';
+import { existsSync, readdirSync, unlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 
 import { Client } from 'pg';
 
-import { compareWithGolden } from '../core/security-posture';
+import { scramSha256Verifier } from '../../owner-login/owner-credential';
+import { compareWithGolden, readSecurityPostureGoldens } from '../core/security-posture';
 
 class Refusal extends Error {}
 
@@ -55,7 +56,8 @@ const DEPLOY_PREPARE = join(DIST, 'deploy-prepare.js');
 const OWNER_SQL = join(REPO_ROOT, 'packages', 'rab-docker', 'postgres-init', 'owner-login', '01-crewflow-owner.sql');
 const TRANSITION_SQL = join(REPO_ROOT, 'packages', 'rab-docker', 'postgres-init', 'owner-login', 'transition-from-separated.sql');
 const MIGRATIONS_DIR = join(__dirname, '..', 'core', 'migrations');
-const GOLDEN = readFileSync(join(__dirname, '..', 'core', 'security-posture.golden.txt'), 'utf8').split('\n').filter(Boolean);
+/** The committed goldens; compareWithGolden picks the one for the server's major (DB-SETUP section 6 follow-up). */
+const GOLDEN = readSecurityPostureGoldens();
 const RUN_ID = `${Date.now().toString(36)}${randomBytes(2).toString('hex')}`;
 
 /** Seam targets (reviewed by name in the report). */
@@ -91,17 +93,12 @@ export function qi(name: string): string {
 }
 
 /**
- * A SCRAM-SHA-256 verifier computed HERE, so no plaintext password is ever part of a statement (a failed statement can be
+ * A SCRAM-SHA-256 verifier computed in Node, so no plaintext password is ever part of a statement (a failed statement can be
  * written to the server log with its text). PostgreSQL stores a pre-hashed verifier as-is (CREATE ROLE … PASSWORD '<verifier>').
+ * The implementation moved to owner-login/owner-credential.ts (`scramSha256Verifier`, DB-SETUP-PLAN §2.1); this name stays.
  */
 export function scramVerifier(password: string): string {
-  const salt = randomBytes(16);
-  const iterations = 4096;
-  const salted = pbkdf2Sync(password, salt, iterations, 32, 'sha256');
-  const hmac = (key: Buffer, text: string) => createHmac('sha256', key).update(text).digest();
-  const storedKey = createHash('sha256').update(hmac(salted, 'Client Key')).digest();
-  const serverKey = hmac(salted, 'Server Key');
-  return `SCRAM-SHA-256$${iterations}:${salt.toString('base64')}$${storedKey.toString('base64')}:${serverKey.toString('base64')}`;
+  return scramSha256Verifier(password);
 }
 
 export function assertHarnessDatabaseName(db: string): void {
@@ -665,9 +662,9 @@ async function lifecycle(ctx: Ctx, major: number): Promise<ScenarioReport[]> {
     await withClient(withDb(ctx.admin, head), (c) => c.query(`INSERT INTO core.migrations (timestamp, name) VALUES (9786700000000, 'NewerReleaseOnly9786700000000')`));
     try {
       const before = await readState(ctx, head);
-      for (const policy of ['refuse', 'continue']) {
-        const c = await child(head, { CREWFLOW_UPGRADE_FAILURE: policy });
-        expect(r, c.exitCode === EXIT.ok && c.result?.state === 'AHEAD' && (c.result?.applied ?? ['?']).length === 0, `policy ${policy}: exit 0, AHEAD, applied nothing (${summary(c)})`);
+      {
+        const c = await child(head, {});
+        expect(r, c.exitCode === EXIT.ok && c.result?.state === 'AHEAD' && (c.result?.applied ?? ['?']).length === 0, `exit 0, AHEAD, applied nothing (${summary(c)})`);
         expect(r, c.lines.some((l) => /AHEAD/.test(l) && /WARNING/.test(l)), 'a WARNING names the AHEAD ledger');
       }
       const after = await readState(ctx, head);
@@ -677,14 +674,12 @@ async function lifecycle(ctx: Ctx, major: number): Promise<ScenarioReport[]> {
     }
   });
 
-  await step('POST-1', 'post-check failure (RLS disabled on a tenant table): 68 under refuse AND under continue (C3: post-checks stay fail-closed); never serves', async (r) => {
+  await step('POST-1', 'post-check failure (RLS disabled on a tenant table): 68, never serves', async (r) => {
     r.database = head;
     await withClient(withDb(ctx.admin, head), (c) => c.query(`ALTER TABLE core.audit_log DISABLE ROW LEVEL SECURITY`));
     try {
-      const refuse = await child(head, { CREWFLOW_UPGRADE_FAILURE_POLICY: 'refuse' });
-      expect(r, refuse.exitCode === EXIT.postCheck && refuse.result?.serve === false, `refuse: exit 68, serve=false (${summary(refuse)})`);
-      const cont = await child(head, { CREWFLOW_UPGRADE_FAILURE: 'continue' });
-      expect(r, cont.exitCode === EXIT.postCheck && cont.result?.serve === false, `continue (C3): post-check still 68, serve=false (${summary(cont)}; checks ${checksSummary(cont)})`);
+      const refuse = await child(head, {});
+      expect(r, refuse.exitCode === EXIT.postCheck && refuse.result?.serve === false, `exit 68, serve=false (${summary(refuse)}; checks ${checksSummary(refuse)})`);
     } finally {
       await withClient(withDb(ctx.admin, head), (c) => c.query(`ALTER TABLE core.audit_log ENABLE ROW LEVEL SECURITY`));
     }
@@ -700,10 +695,9 @@ async function lifecycle(ctx: Ctx, major: number): Promise<ScenarioReport[]> {
     try {
       // sql-injection-reviewed: MIGRATION_LOCK_KEY_SQL is a code constant (the crewmigr bigint literal), no input
       await holder.query(`SELECT pg_advisory_lock(${MIGRATION_LOCK_KEY_SQL})`);
-      // C3 (Agent 1 76dade62): the lock timeout is 69 under EVERY policy (no longer 70 under continue); the default is continue.
-      for (const policy of ['refuse', 'continue', undefined]) {
-        const c = await child(head, { CREWFLOW_MIGRATION_LOCK_WAIT_SECONDS: '5', CREWFLOW_UPGRADE_FAILURE: policy }, { timeoutMs: 120_000 });
-        expect(r, c.exitCode === EXIT.lock && c.result?.serve === false, `policy ${policy ?? 'default (continue)'}: exit 69, serve=false (${summary(c)})`);
+      {
+        const c = await child(head, { CREWFLOW_MIGRATION_LOCK_WAIT_SECONDS: '5' }, { timeoutMs: 120_000 });
+        expect(r, c.exitCode === EXIT.lock && c.result?.serve === false, `exit 69, serve=false (${summary(c)})`);
         expect(r, c.ms < 60_000, `gave up within the bounded wait (${c.ms} ms)`);
       }
     } finally {
@@ -759,9 +753,10 @@ async function lifecycle(ctx: Ctx, major: number): Promise<ScenarioReport[]> {
     await providerStep(ctx, empty, r);
     const cases: Array<[string, Record<string, string | undefined>]> = [
       ['CREWFLOW_DB_MODE set', { CREWFLOW_DB_MODE: 'twenty' }],
-      ['CREWFLOW_UPGRADE_FAILURE_POLICY=ignore', { CREWFLOW_UPGRADE_FAILURE_POLICY: 'ignore' }],
-      ['CREWFLOW_UPGRADE_FAILURE=ignore', { CREWFLOW_UPGRADE_FAILURE: 'ignore' }],
-      ['CREWFLOW_UPGRADE_FAILURE and the deprecated alias disagree', { CREWFLOW_UPGRADE_FAILURE: 'continue', CREWFLOW_UPGRADE_FAILURE_POLICY: 'refuse' }],
+      // OWNER-DB-ULTIMATE Part B3: the removed CREWFLOW_UPGRADE_FAILURE choices are refused whatever their value.
+      ['CREWFLOW_UPGRADE_FAILURE_POLICY set (removed)', { CREWFLOW_UPGRADE_FAILURE_POLICY: 'continue-if-compatible' }],
+      ['CREWFLOW_UPGRADE_FAILURE set (removed)', { CREWFLOW_UPGRADE_FAILURE: 'continue' }],
+      ['CREWFLOW_UPGRADE_FAILURE=refuse (removed)', { CREWFLOW_UPGRADE_FAILURE: 'refuse' }],
       ['CREWFLOW_MIGRATION_APPROVAL_MODE=sometimes', { CREWFLOW_MIGRATION_APPROVAL_MODE: 'sometimes' }],
       ['CREWFLOW_MIGRATE_ON_START=maybe', { CREWFLOW_MIGRATE_ON_START: 'maybe' }],
     ];
@@ -881,9 +876,9 @@ async function lifecycle(ctx: Ctx, major: number): Promise<ScenarioReport[]> {
     const org = randomUUID();
     await withClient(withDb(ctx.admin, db), (c) => c.query(`INSERT INTO core.organisation (id, name, slug) VALUES ($1, 'twa t5 tenant', $2)`, [org, `twa-t5-${RUN_ID}`]));
     const before = await readState(ctx, db);
-    for (const policy of ['refuse', 'continue']) {
-      const c = await child(db, { CREWFLOW_UPGRADE_FAILURE: policy });
-      expect(r, c.exitCode !== EXIT.ok && c.exitCode !== EXIT.degraded && c.result?.serve === false, `policy ${policy}: refused, serve=false (${summary(c)}; reason ${(c.result?.reason ?? '').slice(0, 160)})`);
+    {
+      const c = await child(db, {});
+      expect(r, c.exitCode !== EXIT.ok && c.exitCode !== EXIT.degraded && c.result?.serve === false, `refused, serve=false (${summary(c)}; reason ${(c.result?.reason ?? '').slice(0, 160)})`);
       expect(r, !c.events.some((e) => /^(HwsHistoricalRowsPrivilegedCopy|AiActionProposalActivate|AiAssistantRoundOnly)\d{13}$/.test(e.name)), 'no ROW_COPY migration started');
     }
     const after = await readState(ctx, db);
@@ -892,17 +887,17 @@ async function lifecycle(ctx: Ctx, major: number): Promise<ScenarioReport[]> {
     expect(r, kept === 1, 'the tenant row is intact');
   });
 
-  await step('UPF-0', `an interrupted FIRST install (CHAIN-PARTIAL, still provably fresh) that fails (FAIL_AT=${FAIL_AT}) never serves under any policy (C3: default continue, continue, the alias)`, async (r) => {
+  await step('UPF-0', `an interrupted FIRST install (CHAIN-PARTIAL, still provably fresh) that fails (FAIL_AT=${FAIL_AT}) never serves`, async (r) => {
     const db = dbName('upf0');
     r.database = db;
     await partial(db, STOP_BEFORE, r);
-    for (const extra of [{}, { CREWFLOW_UPGRADE_FAILURE: 'continue' }, { CREWFLOW_UPGRADE_FAILURE_POLICY: 'continue-if-compatible' }] as Array<Record<string, string>>) {
-      const c = await child(db, { CREWFLOW_MIGRATION_TEST_FAIL_AT: FAIL_AT, ...extra });
-      expect(r, c.exitCode === EXIT.failed && c.result?.serve === false, `${JSON.stringify(extra)}: exit 66, serve=false (${summary(c)}; reason ${(c.result?.reason ?? '').slice(-120)})`);
+    {
+      const c = await child(db, { CREWFLOW_MIGRATION_TEST_FAIL_AT: FAIL_AT });
+      expect(r, c.exitCode === EXIT.failed && c.result?.serve === false, `exit 66, serve=false (${summary(c)}; reason ${(c.result?.reason ?? '').slice(-120)})`);
     }
   });
 
-  await step('UPF-1', `failed UPGRADE of a database holding tenant data (FAIL_AT=${FAIL_AT}): refuse → 66; continue (default, explicit, the alias) → ERROR + 70, serve; then recovery`, async (r) => {
+  await step('UPF-1', `failed UPGRADE of a database holding tenant data (FAIL_AT=${FAIL_AT}): 66 with an ERROR naming it, never serving (Part B3); then recovery`, async (r) => {
     const db = dbName('upf');
     r.database = db;
     await partial(db, STOP_BEFORE, r);
@@ -911,35 +906,27 @@ async function lifecycle(ctx: Ctx, major: number): Promise<ScenarioReport[]> {
     const preLedger = (await readState(ctx, db)).ledger;
     expect(r, (pre.exitCode === EXIT.ok || pre.exitCode === EXIT.postCheck) && preLedger.length === chainMigrationNames().filter((n) => Number(n.slice(-13)) < Number(FAIL_AT.slice(-13))).length, `advanced to just before ${FAIL_AT} (${summary(pre)})`);
     await withClient(withDb(ctx.admin, db), (c) => c.query(`INSERT INTO core.organisation (id, name, slug) VALUES ($1, 'twa t5 upf tenant', $2)`, [randomUUID(), `twa-t5-upf-${RUN_ID}`]));
-    const refuse = await child(db, { CREWFLOW_MIGRATION_TEST_FAIL_AT: FAIL_AT, CREWFLOW_UPGRADE_FAILURE_POLICY: 'refuse' });
-    expect(r, refuse.exitCode === EXIT.failed && refuse.result?.serve === false, `refuse: exit 66, serve=false (${summary(refuse)})`);
+    const refuse = await child(db, { CREWFLOW_MIGRATION_TEST_FAIL_AT: FAIL_AT });
+    expect(r, refuse.exitCode === EXIT.failed && refuse.result?.serve === false, `exit 66, serve=false (${summary(refuse)})`);
+    expect(r, refuse.lines.some((l) => /ERROR/.test(l) && l.includes(FAIL_AT)), `an ERROR names ${FAIL_AT}`);
     expect(r, refuse.result?.failedMigration === FAIL_AT, `failedMigration names ${FAIL_AT} (got ${refuse.result?.failedMigration})`);
     const s1 = await readState(ctx, db);
     const ts = Number(FAIL_AT.slice(-13));
     expect(r, !s1.ledger.includes(FAIL_AT) && s1.ledger.some((n) => Number(n.slice(-13)) >= Number(STOP_BEFORE) && Number(n.slice(-13)) < ts), 'the migrations before it committed; the failed one is not recorded');
     expect(r, s1.lockHolders === 0, 'lock released');
-    // C3 (owner decision 2026-11-05, Agent 1 76dade62): under continue a failed UPGRADE migration logs an ERROR naming it and
-    // exits 70 with serve=true when the deployment identity is OK; the other checks are reported as diagnostics only.
-    for (const extra of [{}, { CREWFLOW_UPGRADE_FAILURE: 'continue' }, { CREWFLOW_UPGRADE_FAILURE_POLICY: 'continue-if-compatible' }] as Array<Record<string, string>>) {
-      const cont = await child(db, { CREWFLOW_MIGRATION_TEST_FAIL_AT: FAIL_AT, ...extra });
-      r.evidence.push(`${JSON.stringify(extra)}: ${summary(cont)}; checks ${checksSummary(cont)}`);
-      expect(r, cont.exitCode === EXIT.degraded && cont.result?.serve === true && cont.result?.policy === 'continue', `${JSON.stringify(extra)}: exit 70, serve=true, policy continue (${summary(cont)})`);
-      expect(r, cont.result?.failedMigration === FAIL_AT && cont.lines.some((l) => /ERROR/.test(l) && l.includes(FAIL_AT)), `${JSON.stringify(extra)}: an ERROR names ${FAIL_AT}`);
-      expect(r, !(await readState(ctx, db)).ledger.includes(FAIL_AT), `${JSON.stringify(extra)}: the failed migration is not recorded`);
-    }
     const rec = await child(db, {});
     expect(r, rec.exitCode === EXIT.ok && rec.result?.state === 'CHAIN-PARTIAL', `recovery without the seam: exit 0 (${summary(rec)})`);
     await assertHeadState(ctx, db, r);
   });
 
-  await step('UPF-2', `failed FIRST install (FAIL_AT=${FRESH_FAIL_AT}) never serves under any policy (C3: default continue, the alias); a restart resumes`, async (r) => {
+  await step('UPF-2', `failed FIRST install (FAIL_AT=${FRESH_FAIL_AT}) never serves; a restart resumes`, async (r) => {
     const db = dbName('upf2');
     r.database = db;
     await createEmptyDatabase(ctx, db);
     await providerStep(ctx, db, r);
-    for (const extra of [{}, { CREWFLOW_UPGRADE_FAILURE_POLICY: 'continue-if-compatible' }] as Array<Record<string, string>>) {
-      const c = await child(db, { CREWFLOW_MIGRATION_TEST_FAIL_AT: FRESH_FAIL_AT, ...extra });
-      expect(r, c.exitCode === EXIT.failed && c.result?.serve === false, `${JSON.stringify(extra)}: exit 66, serve=false (${summary(c)})`);
+    {
+      const c = await child(db, { CREWFLOW_MIGRATION_TEST_FAIL_AT: FRESH_FAIL_AT });
+      expect(r, c.exitCode === EXIT.failed && c.result?.serve === false, `exit 66, serve=false (${summary(c)})`);
     }
     const rec = await child(db, {});
     expect(r, rec.exitCode === EXIT.ok, `restart without the seam completes the install (${summary(rec)})`);

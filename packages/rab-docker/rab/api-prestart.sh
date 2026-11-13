@@ -1,5 +1,14 @@
 #!/bin/sh
-# API start (the image's default command). Runs from /app (the image WORKDIR).
+# API start: rab-api's ENTRYPOINT in every deploy compose file (DB-SETUP; also the image's default command). Runs from /app
+# (the image WORKDIR).
+#
+# DB-SETUP (Twenty Helm model, OWNER-DB-FINAL.md Part A): this container NEVER receives PG_DATABASE_URL, in any form (only the
+# one-shot db-setup service does: the admin URL, an existing crewflow_owner URL, or the bundled db's). This script is PID 1
+# (compose `entrypoint: ["./api-prestart.sh"]`, no compose init), refuses a PG_DATABASE_URL in its environment (exit 64),
+# builds the crewflow_owner URL from the credential-free target file and the crewflow_owner password file db-setup wrote
+# (both read-only), then execs the init: `exec /sbin/tini -s -- node packages/rab-server/dist/main.js`. Run with arguments (the owner CLI
+# one-off: `docker compose run --rm --no-deps rab-api node packages/rab-server/dist/command/main.js <command>`), it does
+# the same refusals and builds the same crewflow_owner URL, then `exec /sbin/tini -s -- "$@"`: nothing migrates or registers.
 #
 # Owner-login architecture (owner's FINAL decision 2026-11-04; M0 §7): the API, the Worker and the migrate child all use the
 # ONE database URL, PG_DATABASE_URL (the schema-owning crewflow_owner login). This script:
@@ -7,29 +16,31 @@
 #      BEGIN/END markers below (runtime-db-config.spec.ts runs this copy against the TypeScript parser and fails on drift):
 #      DISABLE_DB_MIGRATIONS (true | false; true = this process never migrates — O3 C1), CREWFLOW_MIGRATE_ON_START is
 #      REQUIRED here (true | false) unless DISABLE_DB_MIGRATIONS=true, CREWFLOW_MIGRATION_APPROVAL_MODE (none | token),
-#      CREWFLOW_UPGRADE_FAILURE (continue | refuse, default continue — O3 C3; the deprecated CREWFLOW_UPGRADE_FAILURE_POLICY
-#      maps refuse -> refuse, continue-if-compatible -> continue and must agree); the removed CREWFLOW_DB_MODE is refused
-#      (exit 64). CREWFLOW_UPGRADE_INCOMPLETE is set ONLY by this script: an inherited value is refused (exit 64);
-#   2. refuses to start when a second database URL, a role password, migration/command authority or an operations variable
+#      the removed CREWFLOW_DB_MODE, CREWFLOW_UPGRADE_FAILURE and CREWFLOW_UPGRADE_FAILURE_POLICY are refused (exit 64;
+#      OWNER-DB-ULTIMATE Part B3 removed the C3 choices). The retired CREWFLOW_UPGRADE_INCOMPLETE is refused too (exit 64);
+#   2. refuses to start when a second database URL, a role password (PG_DATABASE_PASSWORD included: only compose reads it,
+#      for the bundled db), migration/command authority or an operations variable
 #      reached the API's environment (exit 64). The one exception is the per-release approval token
 #      (CREWFLOW_MIGRATION_APPROVED) when CREWFLOW_MIGRATE_ON_START=true AND CREWFLOW_MIGRATION_APPROVAL_MODE=token: it is
 #      taken out of this shell's environment first, handed ONLY to the short-lived migrate child, and never reaches main.js;
+#   2b. DB-SETUP (Twenty Helm model): refuses any PG_DATABASE_URL (64); builds the crewflow_owner runtime URL from db-setup's
+#      credential-free target file and its crewflow_owner password file, waiting (bounded) for both (details below);
 #   3. CREWFLOW_MIGRATE_ON_START=true (and DISABLE_DB_MIGRATIONS not true): runs the short-lived migrate child (Agent 1:
-#      migration lock, fresh-install classifier, post-checks, upgrade-failure policy). Exit 0 = current / applied / ledger
-#      ahead; 70 = an UPGRADE migration FAILED and CREWFLOW_UPGRADE_FAILURE=continue (degraded start, loud ERROR/WARNING);
+#      migration lock, fresh-install classifier, post-checks, the upgrade logbook). Exit 0 = current / applied / ledger
+#      ahead; 70 = every migration applied but an upgrade COMMAND failed (OWNER-DB-ULTIMATE Part B3: serve, loud WARNING,
+#      /healthz upgrade:"failed"); 66 = a migration failed (never serves; the next start retries it);
 #      69 = migration lock timeout (retried with bounded backoff); anything else = no start.
 #      Otherwise (CREWFLOW_MIGRATE_ON_START=false, or DISABLE_DB_MIGRATIONS=true): the read-only pending-migration check
 #      (exit 65 when the schema is behind);
 #   4. O3 C2 (like Twenty's entrypoint): unless DISABLE_CRON_JOBS_REGISTRATION=true, registers every scan's BullMQ job
 #      scheduler (one-shot packages/rab-worker/dist/register-schedulers.js: fixed ids, idempotent). A registration failure is
 #      a loud WARNING and the API starts anyway; the consume-only Worker reports any missing scheduler as an ERROR;
-#   5. execs main.js ONLY after exit 0 or a verified 70 (main.js runs its own boot gates as well), and after a verified 70
-#      with CREWFLOW_UPGRADE_INCOMPLETE=<the failed migration, or unknown> (the API's boot gate then accepts exactly that
-#      first pending migration; /healthz reports upgradeFailed: true, never the name). A fresh-install failure never serves: the child never
-#      reports 70 for one, and the relay below vetoes a 70 result that names one.
+#   5. execs main.js ONLY after exit 0 or a verified 70 (main.js runs its own boot gates as well; a 70 leaves no migration
+#      pending, so its gate 7 passes unchanged). A fresh-install failure never serves: the child never reports 70 for one,
+#      and the relay below vetoes a 70 result that names one, names a failed migration, or names no failed command.
 # Every failure other than a configuration refusal waits CREWFLOW_STARTUP_FAILURE_DELAY_SECONDS (default 15, 0-300) before
 # exiting, so a restart policy cannot turn a broken release into a tight restart storm against the database.
-# The Worker never runs this, and never migrates.
+# The Worker never runs this, and never migrates: its entrypoint is worker-start.sh (derive + swap only, never the admin).
 set -eu
 
 SCRIPTS=packages/rab-server/dist/database/typeorm/scripts
@@ -68,6 +79,12 @@ crewflow_runtime_db_config() {
   if [ -n "${CREWFLOW_DB_MODE:-}" ]; then
     refuse "There is no database mode switch any more: the API, the Worker and migrations all use the one PG_DATABASE_URL owner login. Remove CREWFLOW_DB_MODE. Refusing to start."
   fi
+  if [ -n "${CREWFLOW_UPGRADE_FAILURE:-}" ]; then
+    refuse "CREWFLOW_UPGRADE_FAILURE was removed (OWNER-DB-ULTIMATE Part B3): a failed migration always refuses to start and is retried on the next start; only a failed upgrade command serves, with upgrade:\"failed\" on /healthz. Remove it from the environment. Refusing to start."
+  fi
+  if [ -n "${CREWFLOW_UPGRADE_FAILURE_POLICY:-}" ]; then
+    refuse "CREWFLOW_UPGRADE_FAILURE_POLICY was removed (OWNER-DB-ULTIMATE Part B3): a failed migration always refuses to start and is retried on the next start; only a failed upgrade command serves, with upgrade:\"failed\" on /healthz. Remove it from the environment. Refusing to start."
+  fi
   if [ "${NODE_ENV:-}" != test ]; then
     for seam in CREWFLOW_MIGRATION_TEST_STOP_BEFORE CREWFLOW_MIGRATION_TEST_FAIL_AT CREWFLOW_TEST_DEFER_SERVER_PROVISIONING; do
       eval "seam_value=\${$seam:-}"
@@ -97,32 +114,15 @@ crewflow_runtime_db_config() {
     '') APPROVAL_MODE=none ;; # owner decision BC-11: optional, off by default everywhere (production included)
     *) refuse "CREWFLOW_MIGRATION_APPROVAL_MODE must be exactly one of: none, token. Refusing to start." ;;
   esac
-  # Owner decision C3 (2026-11-05): CREWFLOW_UPGRADE_FAILURE continue (default) | refuse; CREWFLOW_UPGRADE_FAILURE_POLICY is
-  # a deprecated alias (refuse -> refuse, continue-if-compatible -> continue); the two must agree when both are set.
-  case "${CREWFLOW_UPGRADE_FAILURE:-}" in
-    continue | refuse) UPGRADE_POLICY="$CREWFLOW_UPGRADE_FAILURE" ;;
-    '') UPGRADE_POLICY="" ;;
-    *) refuse "CREWFLOW_UPGRADE_FAILURE must be exactly one of: continue, refuse. Refusing to start." ;;
-  esac
-  case "${CREWFLOW_UPGRADE_FAILURE_POLICY:-}" in
-    refuse) UPGRADE_ALIAS=refuse ;;
-    continue-if-compatible) UPGRADE_ALIAS=continue ;;
-    '') UPGRADE_ALIAS="" ;;
-    *) refuse "CREWFLOW_UPGRADE_FAILURE_POLICY is deprecated and must be exactly one of: refuse, continue-if-compatible; use CREWFLOW_UPGRADE_FAILURE=continue|refuse instead. Refusing to start." ;;
-  esac
-  if [ -n "$UPGRADE_POLICY" ] && [ -n "$UPGRADE_ALIAS" ] && [ "$UPGRADE_POLICY" != "$UPGRADE_ALIAS" ]; then
-    refuse "CREWFLOW_UPGRADE_FAILURE and the deprecated CREWFLOW_UPGRADE_FAILURE_POLICY disagree; remove CREWFLOW_UPGRADE_FAILURE_POLICY. Refusing to start."
-  fi
-  if [ -z "$UPGRADE_POLICY" ]; then UPGRADE_POLICY="${UPGRADE_ALIAS:-continue}"; fi
 }
 # END owner-login runtime-db-config
 crewflow_runtime_db_config
 
-# O3 C3: CREWFLOW_UPGRADE_INCOMPLETE tells main.js (API boot gate 7, /healthz) that THIS start follows a failed upgrade. Only
-# this script sets it, after a verified exit 70 below; a value that reached the container from outside could relax the API's
-# pending-migration gate without any failure having happened, so it is refused, never silently overridden.
+# CREWFLOW_UPGRADE_INCOMPLETE (retired with the C3 continue path, OWNER-DB-ULTIMATE Part B3): nothing sets it any more. A
+# value that reached the container from outside could still relax the API's pending-migration gate (the API boot gate reads
+# it), so it is refused, never silently passed on.
 if [ -n "${CREWFLOW_UPGRADE_INCOMPLETE:-}" ]; then
-  refuse "CREWFLOW_UPGRADE_INCOMPLETE must never be set on the api service: api-prestart.sh sets it itself, only after a failed upgrade under CREWFLOW_UPGRADE_FAILURE=continue. Remove it."
+  refuse "CREWFLOW_UPGRADE_INCOMPLETE must never be set on the api service (retired: a failed migration always refuses to start, OWNER-DB-ULTIMATE Part B3). Remove it."
 fi
 # O3 C2: DISABLE_CRON_JOBS_REGISTRATION (Twenty's switch; exactly true or false, unset = false) and the scheduler mode the
 # Worker will run (WORKER_SCHEDULER unset = bullmq in production, interval elsewhere — env.validation.ts's rule).
@@ -160,6 +160,17 @@ if [ "$MIGRATE_ON_START" = true ] && [ "$APPROVAL_MODE" = token ] && [ -n "${CRE
   MIGRATION_APPROVAL="$CREWFLOW_MIGRATION_APPROVED"
   unset CREWFLOW_MIGRATION_APPROVED
 fi
+# The owner CLI one-off (arguments given) and ONLY it: its per-invocation command authority (DB_TARGET and
+# ALLOW_PRODUCTION_DB_COMMANDS, passed with `docker compose run -e`, never in a service or env file) is taken out of this
+# shell's environment before the refusal loops below (which refuse it in every other case) and handed back only to the
+# one-off command, which applies its own production-command rules. The API start (no arguments) refuses both, as before.
+ONEOFF_DB_TARGET=""
+ONEOFF_ALLOW_PRODUCTION_DB_COMMANDS=""
+if [ "$#" -gt 0 ]; then
+  ONEOFF_DB_TARGET="${DB_TARGET:-}"
+  ONEOFF_ALLOW_PRODUCTION_DB_COMMANDS="${ALLOW_PRODUCTION_DB_COMMANDS:-}"
+  unset DB_TARGET ALLOW_PRODUCTION_DB_COMMANDS
+fi
 
 # Security review L-4: these two loops plus the owner-login loop below are a literal copy of the shared list in
 # packages/rab-server/src/database/typeorm/core/never-in-runtime-env.ts (forbiddenRuntimeEnvNames('api')), which main.js
@@ -181,7 +192,7 @@ done
 # Owner-login architecture: ONE database URL (PG_DATABASE_URL). Legacy and second database URLs and role passwords never
 # belong here. (The removed CREWFLOW_DB_MODE is refused above by the runtime-db-config copy, with its own message.)
 for name in DATABASE_URL DATABASE_DIRECT_URL PG_DATABASE_REPLICA_URL PG_WORKER_DATABASE_URL CREWFLOW_WORKER_BOOTSTRAP_PASSWORD \
-    CREWFLOW_OWNER_PASSWORD CREWFLOW_OWNER_BOOTSTRAP_PASSWORD; do
+    CREWFLOW_OWNER_PASSWORD CREWFLOW_OWNER_BOOTSTRAP_PASSWORD PG_DATABASE_PASSWORD; do
   eval "value=\${$name:-}"
   if [ -n "$value" ]; then refuse "$name must never be set on the api service: the API, the Worker and the migrate child use ONE database URL, PG_DATABASE_URL (the crewflow_owner login), and no role password belongs in application configuration."; fi
 done
@@ -236,18 +247,100 @@ isolation_report() {
 }
 isolation_report
 
+# DB-SETUP (Twenty Helm model, OWNER-DB-FINAL.md Part A): rab-api NEVER receives PG_DATABASE_URL (admin URL, crewflow_owner
+# URL, anything). Only the one-shot db-setup service does; its bootstrap child creates crewflow_owner if missing (random
+# password, stored in /run/crewflow/db-target/owner-password, 0400; for an existing crewflow_owner URL, that URL's
+# password) and writes the CREDENTIAL-FREE target file /run/crewflow/db-target/target.json
+# ({"v":1,"host","port","database","params"}: no user, no password); both are mounted read-only here. Twenty: the server
+# receives only the app user's URL (helm/twenty/templates/deployment-server.yaml:142-156). This shell builds the crewflow_owner runtime URL with the pure derive step (never connects; the URL comes back on
+# fd 4 through a command substitution: never a file, never argv, never the log):
+#   - PG_DATABASE_URL set (non-empty) here, any login: refused (64) before anything runs. An empty value is unset.
+#   - CREWFLOW_DB_TARGET_FILE=<that file> -> the URL from the target and the password file. A file that is not there yet
+#     (derive exit 75) is waited for, 2 s apart, at most 120 s (60 attempts: bounded by a COUNT, never by the clock, so a
+#     clock step cannot stretch or end the wait), with a fixed message, because a platform may not honour depends_on:
+#     condition: service_completed_successfully (OpenShip: NOT VERIFIED); then exit 75. There is no other path. Each derive
+#     run has its own bound (`timeout 10`): a derive that hangs (a FIFO, a stuck volume) ends as exit 70, never a hung start.
+# Then PG_DATABASE_URL = the runtime URL; PG_DATABASE_PASSWORD and CREWFLOW_DB_TARGET_FILE are unset.
+# TLS (D1 a): when the runtime URL's host is exactly `db` and PG_SSL_CA_CERT_PATH is unset (or blank), it is set to the
+# bundled db's own CA (mounted read-only). The block below is identical in worker-start.sh and db-setup.sh
+# (run-prestart-shell-tests.cjs compares them).
+# BEGIN crewflow bundled-db CA
+crewflow_bundled_db_ca() {
+  db_rest="${PG_DATABASE_URL#*://}"
+  db_authority="${db_rest%%[/?#]*}"
+  db_hostport="${db_authority##*@}"
+  db_host="${db_hostport%%:*}"
+  if [ "$db_host" = db ] && [ -z "${PG_SSL_CA_CERT_PATH:-}" ]; then
+    export PG_SSL_CA_CERT_PATH=/run/crewflow/db-ca/ca.crt
+  fi
+  unset db_rest db_authority db_hostport db_host
+}
+# END crewflow bundled-db CA
+DERIVE_RUNTIME_URL="$SCRIPTS/owner-login/derive-runtime-url.js"
+DB_TARGET_FILE=/run/crewflow/db-target/target.json
+DB_SETUP_WAIT_SECONDS=120
+# Test seam (NODE_ENV=test only, like the migration seams above): a shorter bound for the shell tests.
+if [ -n "${CREWFLOW_TEST_DB_SETUP_WAIT_SECONDS:-}" ]; then
+  if [ "${NODE_ENV:-}" != test ]; then refuse 'CREWFLOW_TEST_DB_SETUP_WAIT_SECONDS is a test seam: it is allowed only with NODE_ENV=test. Remove it. Refusing to start.'; fi
+  case "$CREWFLOW_TEST_DB_SETUP_WAIT_SECONDS" in ''|*[!0-9]*) refuse 'CREWFLOW_TEST_DB_SETUP_WAIT_SECONDS must be a whole number of seconds.' ;; esac
+  DB_SETUP_WAIT_SECONDS="$CREWFLOW_TEST_DB_SETUP_WAIT_SECONDS"
+fi
+unset CREWFLOW_TEST_DB_SETUP_WAIT_SECONDS
+if [ -n "${PG_DATABASE_URL:-}" ]; then
+  refuse 'PG_DATABASE_URL must never be set on the api service: it belongs only to the one-shot db-setup service (the admin URL, an existing crewflow_owner URL, or the bundled db). The API builds the crewflow_owner URL from the target and password files db-setup writes. Value not shown. Refusing to start.'
+fi
+unset PG_DATABASE_URL
+export CREWFLOW_DB_TARGET_FILE="$DB_TARGET_FILE"
+DERIVE_TIMEOUT_SECONDS=10
+DB_SETUP_ATTEMPTS=$(( (DB_SETUP_WAIT_SECONDS + 1) / 2 ))
+if [ "$DB_SETUP_ATTEMPTS" -lt 1 ]; then DB_SETUP_ATTEMPTS=1; fi
+ATTEMPT=0
+while :; do
+  ATTEMPT=$((ATTEMPT + 1))
+  STATUS=0
+  RUNTIME_URL="$(timeout "$DERIVE_TIMEOUT_SECONDS" node "$DERIVE_RUNTIME_URL" 4>&1 1>&2)" || STATUS=$?
+  if [ "$STATUS" -ne 75 ]; then break; fi
+  RUNTIME_URL=""
+  if [ "$ATTEMPT" -ge "$DB_SETUP_ATTEMPTS" ]; then
+    fail_after_delay 75 "the database target file did not appear within ${DB_SETUP_WAIT_SECONDS}s: db-setup (the only service with the admin URL) has not completed"
+  fi
+  echo "api-prestart: waiting for db-setup: the database target file is not there yet (attempt ${ATTEMPT} of ${DB_SETUP_ATTEMPTS}, 2 s apart)"
+  run_step sleep 2 || true
+done
+case "$STATUS" in
+  124 | 137 | 143)
+    RUNTIME_URL=""
+    fail_after_delay 70 "the derive step did not finish within ${DERIVE_TIMEOUT_SECONDS}s (a stuck db-setup volume or a non-regular file?)"
+    ;;
+esac
+if [ "$STATUS" -ne 0 ]; then
+  RUNTIME_URL=""
+  fail_after_delay "$STATUS" "could not build the crewflow_owner connection (see the derive-runtime-url line above)"
+fi
+if [ -z "$RUNTIME_URL" ]; then
+  fail_after_delay 70 'the derive step returned an empty crewflow_owner connection'
+fi
+export PG_DATABASE_URL="$RUNTIME_URL"
+unset RUNTIME_URL PG_DATABASE_PASSWORD CREWFLOW_DB_TARGET_FILE
+crewflow_bundled_db_ca
+# The owner CLI one-off: no migrate child, no scheduler registration, no API; the cleaned environment only.
+if [ "$#" -gt 0 ]; then
+  trap - TERM INT
+  echo "api-prestart: one-off command: running it as crewflow_owner (no migration, no scheduler registration, no API)"
+  if [ -n "$ONEOFF_DB_TARGET" ]; then export DB_TARGET="$ONEOFF_DB_TARGET"; fi
+  if [ -n "$ONEOFF_ALLOW_PRODUCTION_DB_COMMANDS" ]; then export ALLOW_PRODUCTION_DB_COMMANDS="$ONEOFF_ALLOW_PRODUCTION_DB_COMMANDS"; fi
+  exec /sbin/tini -s -- "$@"
+fi
+
 # The short-lived migrate child (Agent 1). Its stdout/stderr are relayed line by line; its LAST line is
-#   TWENTY_MIGRATE_RESULT {"state":...,"applied":[...],"pending":[...],"exitCode":N,"serve":...,"policy":...,"reason":...,
-#                          "failedMigration":...,"checks":[...]}
-# and carries no secret. The relay (awk) prints every line and, for an exit-70 result, the loud WARNING naming the reason and
-# the failing migration. It VETOES (exits 66, which pipefail reports) a 70 result that does not say serve:true, names a
-# fresh install (EMPTY / BOOTSTRAP-PARTIAL) or another policy than "continue": a degraded start is never taken on the exit
-# code alone. For a verified 70 it hands the result's failedMigration back to this shell on fd 4 (the command substitution
-# in run_migrate_child; NO file is written: rab-api is read_only with no tmpfs writable by its uid 1000, O3 T8a-TMP;
-# image.yml's 0555 /tmp, not writable by the API's uid 1000, is only the OpenShip import guard) while every line still
-# streams to the log on fd 3. The shell accepts it only as a plain
-# migration name (letters, digits, _ - ., at most 200 characters; anything else -> "unknown") and passes it to main.js as
-# CREWFLOW_UPGRADE_INCOMPLETE.
+#   TWENTY_MIGRATE_RESULT {"state":...,"applied":[...],"pending":[...],"exitCode":N,"serve":...,"reason":...,
+#                          "failedMigration":...,"checks":[...],"upgrade":{...,"commandFailure":{"name":...}}}
+# and carries no secret. The relay (awk) prints every line and, for an exit-70 result (OWNER-DB-ULTIMATE Part B3: only an
+# upgrade COMMAND failed), the loud WARNING naming the command. It VETOES (exits 66, which pipefail reports) a 70 result
+# that does not say serve:true, names a fresh install (EMPTY / BOOTSTRAP-PARTIAL), names a failed migration, or names no
+# failed command: a serving start is never taken on the exit code alone. Every line streams to the log on fd 3; fd 4 (the
+# command substitution in run_migrate_child; NO file is written: rab-api is read_only, O3 T8a-TMP) carries only the
+# relay status back to this shell.
 MIGRATE_CHILD="$SCRIPTS/migrate/twenty/twenty-migrate.js"
 RELAY_AWK='
 function field(name,   m) {
@@ -257,28 +350,26 @@ function field(name,   m) {
 { print; fflush() }
 /^TWENTY_MIGRATE_RESULT / {
   if ($0 ~ /"exitCode":70[,}]/) {
-    failing = field("failedMigration")
-    if (failing !~ /^[A-Za-z0-9_.-]+$/ || length(failing) > 200) failing = "unknown"
-    printf "api-prestart: WARNING DEGRADED START - the schema upgrade FAILED and CREWFLOW_UPGRADE_FAILURE=continue; serving on the previous schema. reason=%s failing_migration=%s state=%s\n", field("reason"), failing, field("state") > "/dev/stderr"
+    command = ""
+    if (match($0, /"commandFailure":\{"name":"[A-Za-z0-9_.]+"/)) { command = substr($0, RSTART, RLENGTH); sub(/^"commandFailure":\{"name":"/, "", command); sub(/"$/, "", command) }
+    if (length(command) > 200) command = ""
+    printf "api-prestart: WARNING - an upgrade COMMAND FAILED (%s); every migration applied, so the API serves with upgrade:\"failed\" on /healthz. The next start retries it. reason=%s state=%s\n", (command == "" ? "unknown" : command), field("reason"), field("state") > "/dev/stderr"
     fflush("/dev/stderr")
-    if ($0 !~ /"serve":true/ || $0 ~ /"state":"(EMPTY|BOOTSTRAP-PARTIAL)"/ || $0 !~ /"policy":"continue"[,}]/) veto = 1
-    else { printf "failed-migration=%s\n", failing > "/dev/fd/4"; close("/dev/fd/4") }
+    if ($0 !~ /"serve":true/ || $0 ~ /"state":"(EMPTY|BOOTSTRAP-PARTIAL)"/ || $0 !~ /"failedMigration":null[,}]/ || command == "") veto = 1
   }
 }
 END {
   if (veto) {
-    print "api-prestart: REFUSED - the migrate child reported a degraded continue (70) that is not a verified continue upgrade (serve not true, a fresh install, or another policy)" > "/dev/stderr"
+    print "api-prestart: REFUSED - the migrate child reported exit 70 that is not a verified upgrade-command failure (serve not true, a fresh install, a failed migration, or no failed command)" > "/dev/stderr"
     exit 66
   }
 }
 '
 # run_migrate_child: fd 3 = this shell's stdout (the container log); inside the command substitution the relay's stdout is
-# fd 3 (every line streams to the log as before) and its fd 4 is the substitution's pipe, which carries only two
-# machine lines back to this shell: `failed-migration=<name>` (a verified 70) and `relay-status=<exit status of the
-# pipeline>` (the child's code, or the relay's veto 66). Sets FAILED_MIGRATION; returns the status.
-FAILED_MIGRATION=""
+# fd 3 (every line streams to the log as before) and its fd 4 is the substitution's pipe, which carries only the machine
+# line `relay-status=<exit status of the pipeline>` (the child's code, or the relay's veto 66) back to this shell. Returns
+# the status.
 run_migrate_child() {
-  FAILED_MIGRATION=""
   exec 3>&1
   RELAY_CAPTURE=$(
     if [ -n "$MIGRATION_APPROVAL" ]; then
@@ -290,16 +381,14 @@ run_migrate_child() {
   )
   exec 3>&-
   STATUS=$(printf '%s\n' "$RELAY_CAPTURE" | sed -n 's/^relay-status=\([0-9][0-9]*\)$/\1/p' | tail -n 1)
-  FAILED_MIGRATION=$(printf '%s\n' "$RELAY_CAPTURE" | sed -n 's/^failed-migration=//p' | tail -n 1)
   if [ -z "$STATUS" ]; then STATUS=1; fi
   return "$STATUS"
 }
 
-UPGRADE_INCOMPLETE=""
 if [ "$MIGRATE_ON_START" = true ]; then
   attempt=1
   while :; do
-    echo "api-prestart: applying pending migrations on start (CREWFLOW_MIGRATE_ON_START=true, approval=$APPROVAL_MODE, CREWFLOW_UPGRADE_FAILURE=$UPGRADE_POLICY, attempt $attempt of 3)"
+    echo "api-prestart: applying pending migrations on start (CREWFLOW_MIGRATE_ON_START=true, approval=$APPROVAL_MODE, attempt $attempt of 3)"
     STATUS=0
     run_migrate_child || STATUS=$?
     if [ "$STATUS" -eq 69 ] && [ "$attempt" -lt 3 ]; then
@@ -314,21 +403,12 @@ if [ "$MIGRATE_ON_START" = true ]; then
   case "$STATUS" in
     0) echo "api-prestart: the schema is current for this code" ;;
     70)
-      if [ "$UPGRADE_POLICY" != continue ]; then
-        fail_after_delay 66 "the migrate child reported a degraded continue (70) but CREWFLOW_UPGRADE_FAILURE is not continue"
-      fi
-      # The relay's failedMigration, re-validated here: a plain migration name of at most 200 characters, else unknown (which
-      # the API's gate 7 then refuses: fail closed).
-      UPGRADE_INCOMPLETE="$FAILED_MIGRATION"
-      case "$UPGRADE_INCOMPLETE" in
-        '' | *[!A-Za-z0-9_.-]*) UPGRADE_INCOMPLETE=unknown ;;
-      esac
-      if [ "${#UPGRADE_INCOMPLETE}" -gt 200 ]; then UPGRADE_INCOMPLETE=unknown; fi
-      echo "api-prestart: WARNING DEGRADED START - the upgrade FAILED at $UPGRADE_INCOMPLETE and CREWFLOW_UPGRADE_FAILURE=continue: the API serves on the previous schema (see the WARNING and TWENTY_MIGRATE_RESULT lines above; /healthz reports upgradeFailed: true). Fix the failing migration and redeploy. The Worker starts as well, on the partly-upgraded schema (owner decision 2026-11-05)." >&2
+      # OWNER-DB-ULTIMATE Part B3: verified by the relay (a failed upgrade COMMAND, no failed migration, not a fresh install).
+      echo "api-prestart: WARNING - an upgrade command failed; every migration is applied, so the API serves with upgrade:\"failed\" on /healthz and the admin banner. Fix the command and restart (it is retried; see the WARNING and TWENTY_MIGRATE_RESULT lines above)." >&2
       ;;
     64) fail_after_delay 64 "the migrate child refused its configuration" ;;
     65) fail_after_delay 65 "the schema is behind this code" ;;
-    66) fail_after_delay 66 "a migration failed (a fresh install never serves; an upgrade serves only with CREWFLOW_UPGRADE_FAILURE=continue and a verified result)" ;;
+    66) fail_after_delay 66 "a migration failed: the API does not start (OWNER-DB-ULTIMATE Part B3); the next start retries it" ;;
     67) fail_after_delay 67 "the deployment identity check failed" ;;
     68) fail_after_delay 68 "a post-migration check failed" ;;
     69) fail_after_delay 69 "the migration lock was not acquired after 3 attempts" ;;
@@ -363,8 +443,6 @@ else
   fi
 fi
 
+# PID 1 hand-over: tini replaces this shell as PID 1 with the cleaned environment and runs main.js as its child.
 trap - TERM INT
-if [ -n "$UPGRADE_INCOMPLETE" ]; then
-  CREWFLOW_UPGRADE_INCOMPLETE="$UPGRADE_INCOMPLETE" exec node packages/rab-server/dist/main.js
-fi
-exec node packages/rab-server/dist/main.js
+exec /sbin/tini -s -- node packages/rab-server/dist/main.js

@@ -36,6 +36,8 @@
       "accounts": { "node": 1000 },
       "home_dirs_root_owned": ["/home/node"],
       "writable_dirs": { "/app/storage": 1000, "/tmp/crewflow-jobs": 1000, "/run/crewflow-health/jobs": 1000 },
+      "_credential_mount_dirs": "DB-SETUP (Twenty Helm model): db-setup's volume mount point holds the crewflow_owner password file and the credential-free target at run time only. fs FAILS (every mode) on any file under it in the image.",
+      "credential_mount_dirs": ["/run/crewflow/db-target"],
       "required_files": ["/app/packages/rab-server/dist/main.js", "/app/api-prestart.sh", "/app/packages/rab-worker/dist/main.js", "/app/packages/rab-server/dist/database/typeorm/workspace-schema/provision-workspace-schema.js", "/opt/crewflow-bundle/worker-bundle-health.cjs"],
       "sbom_must_include": ["musl", "@nestjs/core", "typeorm"],
       "_forbidden": "P5 (PDF renderer migration): the Worker renders PDFs natively; Chromium, its driver and the OS packages only it pulled in must never return. forbidden_apk was derived from the MEASURED delta between the main 824f0824 Worker and API images (184 packages besides tini): it matches 149 of them (Chromium, ffmpeg and every codec, the X11/Wayland/Mesa/GTK stack, fonts, audio, libxml2, glib, cups-libs, cjson, ...); the 35 generic base libraries it does not name (libffi, pcre2, zstd-libs, xz-libs, sqlite-libs, libexpat, ...) are harmless alone and are not forbidden. fs FAILS (every mode) on any installed apk matching forbidden_apk or npm package matching forbidden_npm; attest FAILS if the SBOM names anything in sbom_must_not_include. Scoped to the runtime image only: the web e2e suite's own @playwright/test (rab-e2e-testing, CI runners) is untouched. Names ending in * are prefixes.",

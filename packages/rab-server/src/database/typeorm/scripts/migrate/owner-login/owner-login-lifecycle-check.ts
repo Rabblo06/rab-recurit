@@ -36,15 +36,14 @@ import { join } from 'node:path';
 import { Client } from 'pg';
 import { DataSource, DataSourceOptions } from 'typeorm';
 
-import { STARTUP_EXIT_CODES } from '../../../../owner-login/runtime-db-config';
+import { readRuntimeDbConfig, RuntimeDbConfigError, STARTUP_EXIT_CODES } from '../../../../owner-login/runtime-db-config';
 import { coreMigrationDataSourceOptions, GuardedMigrationDataSource } from '../../../core/core.datasource';
-import { compareWithGolden } from '../../../core/security-posture';
+import { compareWithGolden, readSecurityPostureGoldens } from '../../../core/security-posture';
 import { secureOwnerInvariantViolations } from '../../../core/secure-owner-invariants';
 import { deployPostCheckProblems } from '../deploy-post-checks';
 import { runLockedMigrations } from '../locked-migration-runner';
 import { MIGRATION_LOCK_KEY } from '../migration-lock';
 import { installSigtermSelfCancel, MigrateOnStartResult, RESULT_LINE_PREFIX, runMigrateOnStart, StartupOutcome } from './migrate-on-start';
-import { parseUpgradeFailurePolicy, UpgradeFailurePolicy } from './upgrade-failure-policy';
 import { PRIVILEGED_COPY_MIGRATION, SHIMMED_MIGRATIONS } from './row-copy-shim';
 
 /** The startup exit codes of the ONE runtime config module (Agent 2). */
@@ -56,7 +55,8 @@ const MIGRATIONS = readdirSync(MIGRATIONS_DIR)
   .filter((f) => /^\d{13}-[^.]+\.(ts|js)$/.test(f))
   .sort()
   .map((f) => ({ ts: Number(f.slice(0, 13)), name: `${f.slice(14).replace(/\.(ts|js)$/, '')}${f.slice(0, 13)}`, path: join(MIGRATIONS_DIR, f).replace(/\\/g, '/') }));
-const GOLDEN = readFileSync(join(__dirname, '..', '..', '..', 'core', 'security-posture.golden.txt'), 'utf8').split('\n').filter(Boolean);
+/** The committed goldens; compareWithGolden picks the one for the server's major (DB-SETUP section 6 follow-up). */
+const GOLDEN = readSecurityPostureGoldens();
 const OWNER_SQL = readFileSync(join(ROOT, 'packages', 'rab-docker', 'postgres-init', 'owner-login', '01-crewflow-owner.sql'), 'utf8');
 const TRANSITION_SQL = readFileSync(join(ROOT, 'packages', 'rab-docker', 'postgres-init', 'owner-login', 'transition-from-separated.sql'), 'utf8');
 
@@ -78,7 +78,6 @@ async function childMain(): Promise<void> {
   const result = await runMigrateOnStart(
     {
       migrationApprovalMode: (process.env.OWNER_LOGIN_CHILD_APPROVAL as 'none' | 'token') ?? 'none',
-      upgradeFailurePolicy: (process.env.OWNER_LOGIN_CHILD_POLICY as UpgradeFailurePolicy) ?? 'refuse',
     },
     { env: process.env, onSession: (p) => (pid = p) },
   );
@@ -188,15 +187,11 @@ function childEnv(db: string, extra: Record<string, string> = {}): NodeJS.Proces
 
 async function inProcess(
   db: string,
-  config: { approval?: 'none' | 'token'; policy?: UpgradeFailurePolicy } = {},
+  config: { approval?: 'none' | 'token' } = {},
   extra: Record<string, string> = {},
-  postureCheck?: () => Promise<string[]>,
   lines: string[] = [],
 ): Promise<MigrateOnStartResult> {
-  const result = await runMigrateOnStart(
-    { migrationApprovalMode: config.approval ?? 'none', upgradeFailurePolicy: config.policy ?? 'refuse' },
-    { env: childEnv(db, extra), log: (l) => lines.push(l), postureCheck },
-  );
+  const result = await runMigrateOnStart({ migrationApprovalMode: config.approval ?? 'none' }, { env: childEnv(db, extra), log: (l) => lines.push(l) });
   log(`  ${db}: state=${result.state} outcome=${result.outcome} applied=${result.applied.length} serve=${result.serve}`);
   if (result.outcome !== 'ok') for (const l of lines.slice(-6)) log(`    | ${sanitise(l).slice(0, 300)}`);
   return result;
@@ -211,7 +206,7 @@ function spawnChild(db: string, extra: Record<string, string> = {}): ChildHandle
   const tsNode = require.resolve('ts-node/dist/bin.js');
   const p = spawn(process.execPath, [tsNode, '--transpile-only', '-P', join(ROOT, 'packages', 'rab-server', 'tsconfig.app.json'), __filename, '--child'], {
     cwd: ROOT,
-    env: childEnv(db, { OWNER_LOGIN_CHILD_APPROVAL: 'none', OWNER_LOGIN_CHILD_POLICY: 'refuse', ...extra }),
+    env: childEnv(db, { OWNER_LOGIN_CHILD_APPROVAL: 'none', ...extra }),
   });
   let out = '';
   p.stdout.on('data', (d) => (out += String(d)));
@@ -526,24 +521,14 @@ async function lifecycleScenario(freshSnapshot: Record<string, string[]>): Promi
     legacy,
   );
 
-  // Lock timeout on a CURRENT database, then the upgrade-failure policy.
+  // Lock timeout on a CURRENT database: fail closed (exit 69, never serving).
   const f = `owl_fresh_${RUN}`;
   const holder = new Client({ connectionString: dbUrl(f, 'admin') });
   await holder.connect();
   try {
     await holder.query('SELECT pg_advisory_lock($1::bigint)', [MIGRATION_LOCK_KEY.toString()]);
-    const refuse = await inProcess(f, { policy: 'refuse' }, { CREWFLOW_MIGRATION_LOCK_WAIT_SECONDS: '2' });
-    check(refuse.outcome === 'lockTimeout' && !refuse.serve, 'lock timeout (refuse): exit 69, not serving');
-    // C3 (owner decision 2026-11-05): continue covers a MIGRATION failure of an upgrade only; a lock timeout stays fail-closed,
-    // even with every hook passing (it used to serve DEGRADED under continue-if-compatible).
-    for (const posture of [undefined, async () => [] as string[]]) {
-      const cont = await inProcess(f, { policy: 'continue' }, { CREWFLOW_MIGRATION_LOCK_WAIT_SECONDS: '2' }, posture);
-      check(
-        cont.outcome === 'lockTimeout' && !cont.serve,
-        `lock timeout (continue${posture ? ', every hook passing' : ''}): fail closed, exit 69, not serving (C3)`,
-        [cont.outcome, cont.reason],
-      );
-    }
+    const timedOut = await inProcess(f, {}, { CREWFLOW_MIGRATION_LOCK_WAIT_SECONDS: '2' });
+    check(timedOut.outcome === 'lockTimeout' && !timedOut.serve, 'lock timeout: exit 69, not serving');
   } finally {
     await holder.end().catch(() => undefined);
   }
@@ -586,7 +571,7 @@ async function lifecycleScenario(freshSnapshot: Record<string, string[]>): Promi
 
   // Test D: a superuser (or any other) login handed to the migrate-on-start child: refused, no legacy fallback.
   const asSuper = await runMigrateOnStart(
-    { migrationApprovalMode: 'none', upgradeFailurePolicy: 'refuse' },
+    { migrationApprovalMode: 'none' },
     { env: { ...childEnv(f), PG_DATABASE_URL: dbUrl(f, 'admin') }, log: () => undefined },
   );
   check(asSuper.outcome === 'identity', 'wrong identity (a superuser login): the child refuses, exit 67 (no legacy fallback)', [asSuper.reason]);
@@ -629,10 +614,10 @@ async function lifecycleScenario(freshSnapshot: Record<string, string[]>): Promi
 }
 
 /**
- * C3 (owner decision 2026-11-05, "exactly like Twenty"): CREWFLOW_UPGRADE_FAILURE=continue (the default) starts the API
- * after an UPGRADE whose migration failed (ERROR logged, exit 70); refuse keeps the failure (exit 66); a FIRST-INSTALL failure
- * never serves under any policy. The failure is injected with the migration test seam (NODE_ENV=test + a disposable test
- * database, crewflow.disposable_test_database).
+ * OWNER-DB-ULTIMATE Part B3 (the C3 CREWFLOW_UPGRADE_FAILURE choices are removed): a migration that fails during an UPGRADE
+ * refuses the start (exit 66, never serving) and the next start retries it; a FIRST-INSTALL failure never serves either. The
+ * failure is injected with the migration test seam (NODE_ENV=test + a disposable test database,
+ * crewflow.disposable_test_database).
  */
 async function upgradeFailureScenario(): Promise<void> {
   const target = 'PreAuthTablesForceOwnerOnly1786721400000';
@@ -641,8 +626,6 @@ async function upgradeFailureScenario(): Promise<void> {
     await providerAdminStep(db);
     await rows('postgres', `ALTER DATABASE "${db}" SET crewflow.disposable_test_database = 'true'`);
   };
-  const defaultPolicy = parseUpgradeFailurePolicy({});
-  check(defaultPolicy === 'continue', 'C3: the default CREWFLOW_UPGRADE_FAILURE is continue');
 
   // An existing database (tenant data) behind the code by its last migrations.
   const up = `owl_c3up_${RUN}`;
@@ -659,39 +642,40 @@ async function upgradeFailureScenario(): Promise<void> {
   await rows(up, `INSERT INTO core.organisation(name, slug) VALUES ('C3 Org', 'owl-c3-${RUN}')`);
   const ledgerBefore = await ledgerCount(up);
 
-  const refused = await inProcess(up, { policy: 'refuse' }, seam);
-  check(
-    refused.outcome === 'migrationFailed' && !refused.serve && refused.failedMigration === target && (await ledgerCount(up)) === ledgerBefore,
-    `C3 refuse (unchanged): an injected upgrade failure exits 66, not serving, nothing recorded (${String(refused.failedMigration)})`,
-    [refused.outcome, refused.reason],
-  );
-
   const lines: string[] = [];
-  const cont = await inProcess(up, { policy: defaultPolicy }, seam, undefined, lines);
-  const error = lines.find((l) => l.startsWith(`ERROR: the schema upgrade FAILED at ${target}:`) && /CREWFLOW_UPGRADE_FAILURE=continue: continuing startup .* \(exit 70\)/.test(l));
+  const refused = await inProcess(up, {}, seam, lines);
+  const error = lines.find((l) => l.startsWith(`ERROR: the schema upgrade FAILED at ${target}; refusing to start (exit 66)`));
   check(
-    cont.outcome === 'degradedContinue' &&
-      cont.serve &&
-      cont.policy === 'continue' &&
-      cont.failedMigration === target &&
-      cont.state === 'CHAIN-PARTIAL' &&
-      cont.pending[0] === target &&
+    refused.outcome === 'migrationFailed' &&
+      !refused.serve &&
+      refused.failedMigration === target &&
+      refused.state === 'CHAIN-PARTIAL' &&
+      refused.pending[0] === target &&
       error !== undefined &&
       (await ledgerCount(up)) === ledgerBefore,
-    'C3 continue (default): an injected UPGRADE failure logs an ERROR naming the migration and starts (exit 70, serve=true), nothing recorded',
-    [JSON.stringify({ outcome: cont.outcome, serve: cont.serve, state: cont.state, failed: cont.failedMigration, reason: cont.reason }), ...cont.checks.map((c) => `${c.name} ${c.ok}`)],
+    `Part B3: an injected UPGRADE migration failure refuses (exit 66, not serving), logs an ERROR naming it, nothing recorded (${String(refused.failedMigration)})`,
+    [JSON.stringify({ outcome: refused.outcome, serve: refused.serve, state: refused.state, failed: refused.failedMigration, reason: refused.reason })],
   );
-  const fixed = await inProcess(up, { policy: defaultPolicy });
-  check(fixed.outcome === 'ok' && (await ledgerCount(up)) === MIGRATIONS.length, 'C3: the next start without the failure completes the upgrade (exit 0)', [fixed.reason]);
+  for (const removed of [{ CREWFLOW_UPGRADE_FAILURE: 'continue' }, { CREWFLOW_UPGRADE_FAILURE_POLICY: 'continue-if-compatible' }]) {
+    let refusedConfig = false;
+    try {
+      readRuntimeDbConfig(removed);
+    } catch (e) {
+      refusedConfig = e instanceof RuntimeDbConfigError;
+    }
+    check(refusedConfig, `Part B3: ${Object.keys(removed)[0]} is refused (exit 64): the choice was removed`);
+  }
+  const fixed = await inProcess(up);
+  check(fixed.outcome === 'ok' && (await ledgerCount(up)) === MIGRATIONS.length, 'Part B3: the next start without the failure completes the upgrade (exit 0)', [fixed.reason]);
 
-  // A FIRST install whose migration fails: never serves, under either policy.
-  for (const policy of ['continue', 'refuse'] as const) {
-    const fresh = `owl_c3fresh_${policy}_${RUN}`;
+  // A FIRST install whose migration fails: never serves.
+  {
+    const fresh = `owl_c3fresh_${RUN}`;
     await disposable(fresh);
-    const r = await inProcess(fresh, { policy }, seam);
+    const r = await inProcess(fresh, {}, seam);
     check(
       r.outcome === 'migrationFailed' && !r.serve && (r.state === 'EMPTY' || r.state === 'BOOTSTRAP-PARTIAL'),
-      `C3 first install (${policy}): an injected failure exits 66 and never serves`,
+      'first install: an injected failure exits 66 and never serves',
       [r.outcome, r.state, r.reason],
     );
   }

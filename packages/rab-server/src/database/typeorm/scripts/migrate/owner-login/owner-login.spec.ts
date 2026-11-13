@@ -1,17 +1,20 @@
 /**
  * Owner-login lifecycle (PR 3): the pure decisions, database-free. The live behaviour (bootstrap, phases, shim, races,
- * kill points, golden equivalence on PostgreSQL 16 and 18) is exercised on disposable clusters by
+ * kill points, golden equivalence on PostgreSQL 16, 17 and 18) is exercised on disposable clusters by
  * scripts/migration-security-check.ts (scenario owner-login) and owner-login-lifecycle-check.ts.
  */
 import type { QueryRunner } from 'typeorm';
 
 import {
   EXPECTED_WORKSPACE_FINGERPRINTS,
+  assertFingerprintsComplete,
   EXPECTED_WORKSPACE_FINGERPRINTS_PG16,
+  EXPECTED_WORKSPACE_FINGERPRINTS_PG17,
   missingFingerprintVersions,
   postgresMajorOf,
   resetWorkspaceFingerprintSelectionForTests,
   selectWorkspaceFingerprintMajor,
+  SUPPORTED_FINGERPRINT_MAJORS,
   UnsupportedPostgresVersionError,
   workspaceFingerprintMajor,
 } from '../../../workspace-schema/v1/expected-fingerprints';
@@ -34,8 +37,7 @@ import {
   shimMigrationInstance,
   shimQueryRunner,
 } from './row-copy-shim';
-import { assessUpgradeFailure, parseUpgradeFailurePolicy } from './upgrade-failure-policy';
-import { STARTUP_EXIT_CODES } from '../../../../owner-login/runtime-db-config';
+import { readRuntimeDbConfig, RuntimeDbConfigError, STARTUP_EXIT_CODES } from '../../../../owner-login/runtime-db-config';
 import { assertDeploymentIdentity, MARKER_PRESENT_SQL, MARKER_READ_SQL } from '../../../../deployment-identity/deployment-identity';
 
 const spec = (name: string) => BOOTSTRAP_ROLES.find((r) => r.name === name)!;
@@ -269,16 +271,31 @@ describe('D4: workspace fingerprints selected by server major; PG16 unchanged', 
     expect(EXPECTED_WORKSPACE_FINGERPRINTS[19]).toBe('b2afa389eec7c5fb0a304ace57cb39d813bb5b6ac044be2387d4e67f804655c3');
     expect(Object.entries(EXPECTED_WORKSPACE_FINGERPRINTS)).toEqual(Object.entries(EXPECTED_WORKSPACE_FINGERPRINTS_PG16));
   });
-  it('18 selects the PG18 table; 17, 19 and below 16 are refused; a second, different major is refused', () => {
+  it('18 selects the PG18 table; 19 and below 16 are refused; a second, different major is refused', () => {
     selectWorkspaceFingerprintMajor(18);
     expect(workspaceFingerprintMajor()).toBe(18);
     expect(EXPECTED_WORKSPACE_FINGERPRINTS[19]).toBe('af115ec7490665c7df38fbc78128e95e680e59764bb626e4c21d0c061fe699e6');
     expect(missingFingerprintVersions(18)).toEqual([]);
     expect(() => selectWorkspaceFingerprintMajor(16)).toThrow(/cannot switch/);
     resetWorkspaceFingerprintSelectionForTests();
-    expect(() => selectWorkspaceFingerprintMajor(17)).toThrow(UnsupportedPostgresVersionError);
+    expect(() => selectWorkspaceFingerprintMajor(19)).toThrow(UnsupportedPostgresVersionError);
     expect(() => selectWorkspaceFingerprintMajor(19)).toThrow(/not supported/);
     expect(() => selectWorkspaceFingerprintMajor(15)).toThrow(/refused/);
+  });
+  it('DB-SETUP §6: 17 selects its own complete PG17 table, distinct from 16 and 18', () => {
+    expect(SUPPORTED_FINGERPRINT_MAJORS).toEqual([16, 17, 18]);
+    expect(missingFingerprintVersions(17)).toEqual([]);
+    expect(() => assertFingerprintsComplete(17)).not.toThrow();
+    selectWorkspaceFingerprintMajor(17);
+    expect(workspaceFingerprintMajor()).toBe(17);
+    expect(Object.entries(EXPECTED_WORKSPACE_FINGERPRINTS)).toEqual(Object.entries(EXPECTED_WORKSPACE_FINGERPRINTS_PG17));
+    for (const v of Object.keys(EXPECTED_WORKSPACE_FINGERPRINTS_PG17).map(Number)) {
+      expect(EXPECTED_WORKSPACE_FINGERPRINTS_PG17[v]).toMatch(/^[0-9a-f]{64}$/);
+    }
+    expect(() => selectWorkspaceFingerprintMajor(18)).toThrow(/cannot switch/);
+    resetWorkspaceFingerprintSelectionForTests();
+    expect(selectFingerprintsForRun('170006', true, () => undefined)).toBe(17);
+    expect(workspaceFingerprintMajor()).toBe(17);
   });
   it('server_version_num parsing; the runner is strict for the owner login and lenient for the legacy path', () => {
     expect(postgresMajorOf('160015')).toBe(16);
@@ -290,7 +307,8 @@ describe('D4: workspace fingerprints selected by server major; PG16 unchanged', 
     expect(missingFingerprintVersions(16)).toEqual([]);
     resetWorkspaceFingerprintSelectionForTests();
     const lines: string[] = [];
-    expect(selectFingerprintsForRun('170002', false, (l) => lines.push(l))).toBe(17);
+    // DB-SETUP §6: 17 is supported now, so the lenient path's "no reviewed fingerprints" warning is shown with 19.
+    expect(selectFingerprintsForRun('190001', false, (l) => lines.push(l))).toBe(19);
     expect(lines.join()).toMatch(/no reviewed workspace fingerprints/);
     expect(workspaceFingerprintMajor()).toBe(16);
   });
@@ -337,54 +355,22 @@ describe('migrate-on-start child: guard environment, post-check tolerance, outco
   });
 });
 
-describe('upgrade-failure policy', () => {
-  const base = { failedMigration: null, expectedMigrations: CODE, production: true, query: async () => [] };
-  it('a first-install failure never serves; refuse never serves; neither runs a check', async () => {
-    const fresh = await assessUpgradeFailure({ ...base, policy: 'continue', freshInstall: true });
-    expect(fresh).toMatchObject({ serve: false, checks: [] });
-    const refuse = await assessUpgradeFailure({ ...base, policy: 'refuse', freshInstall: false });
-    expect(refuse).toMatchObject({ serve: false, checks: [] });
+describe('OWNER-DB-ULTIMATE Part B3: the CREWFLOW_UPGRADE_FAILURE choices are removed', () => {
+  it('a failed migration refuses: outcome migrationFailed (66), never a degraded continue', () => {
+    expect(outcomeOf(Object.assign(new Error('x'), { name: 'QueryFailedError' }))).toBe('migrationFailed');
+    expect(STARTUP_EXIT_CODES.migrationFailed).toBe(66);
   });
 
-  it('C3 continue: fails closed on identity (no identity hook, or the hook reports a problem); every check is still reported', async () => {
-    const v = await assessUpgradeFailure({ ...base, policy: 'continue', freshInstall: false, failedMigration: 'AiSkillSchema1786721000000' });
-    expect(v.serve).toBe(false);
-    expect(v.reason).toMatch(/deployment identity check failed .*fail closed on identity/);
-    expect(v.checks.map((c) => c.name)).toEqual(['ledger-compatible', 'no-partial-migration', 'post-checks', 'required-functions', 'deployment-identity', 'posture']);
-    const wrong = await assessUpgradeFailure({ ...base, policy: 'continue', freshInstall: false, failedMigration: 'AiSkillSchema1786721000000', deploymentIdentityCheck: async () => 'bound to production/x' });
-    expect(wrong.serve).toBe(false);
+  it('CREWFLOW_UPGRADE_FAILURE and its old alias are refused (exit 64) whatever their value, so an old env file fails loudly', () => {
+    for (const env of [{ CREWFLOW_UPGRADE_FAILURE: 'continue' }, { CREWFLOW_UPGRADE_FAILURE: 'refuse' }, { CREWFLOW_UPGRADE_FAILURE_POLICY: 'continue-if-compatible' }]) {
+      expect(() => readRuntimeDbConfig(env)).toThrow(RuntimeDbConfigError);
+      expect(() => readRuntimeDbConfig(env)).toThrow(/was removed \(OWNER-DB-ULTIMATE Part B3\)/);
+    }
   });
 
-  it('C3 continue (the default): an UPGRADE migration failure serves (exit 70) with the identity OK; the other checks are diagnostics only', async () => {
-    const v = await assessUpgradeFailure({
-      ...base,
-      policy: 'continue',
-      freshInstall: false,
-      failedMigration: 'StatementDispatchPointer1786721320000',
-      deploymentIdentityCheck: async () => null,
-    });
-    expect(v.serve).toBe(true);
-    const byName = Object.fromEntries(v.checks.map((c) => [c.name, c.ok]));
-    // A partial transaction=false migration and the unwired posture monitor are REPORTED, but no longer stop the start.
-    expect(byName).toMatchObject({ 'no-partial-migration': false, posture: false, 'deployment-identity': true });
-    expect(v.reason).toMatch(/^continue: the upgrade FAILED at StatementDispatchPointer1786721320000; continuing startup on the previous schema \(exit 70\); \d+ diagnostic check\(s\) failed/);
-  });
-
-  it('C3 refuse: unchanged (no check, never serves)', async () => {
-    const v = await assessUpgradeFailure({ ...base, policy: 'refuse', freshInstall: false, failedMigration: 'AiSkillSchema1786721000000', deploymentIdentityCheck: async () => null });
-    expect(v).toEqual({ serve: false, policy: 'refuse', reason: 'CREWFLOW_UPGRADE_FAILURE=refuse: the API stays unready', checks: [] });
-  });
-
-  it('C3 config: CREWFLOW_UPGRADE_FAILURE=continue|refuse (default continue); the deprecated CREWFLOW_UPGRADE_FAILURE_POLICY is an alias', () => {
-    expect(parseUpgradeFailurePolicy({})).toBe('continue');
-    expect(parseUpgradeFailurePolicy({ CREWFLOW_UPGRADE_FAILURE: 'refuse' })).toBe('refuse');
-    expect(parseUpgradeFailurePolicy({ CREWFLOW_UPGRADE_FAILURE: 'continue' })).toBe('continue');
-    expect(parseUpgradeFailurePolicy({ CREWFLOW_UPGRADE_FAILURE_POLICY: 'refuse' })).toBe('refuse');
-    expect(parseUpgradeFailurePolicy({ CREWFLOW_UPGRADE_FAILURE_POLICY: 'continue-if-compatible' })).toBe('continue');
-    expect(parseUpgradeFailurePolicy({ CREWFLOW_UPGRADE_FAILURE: 'refuse', CREWFLOW_UPGRADE_FAILURE_POLICY: 'refuse' })).toBe('refuse');
-    expect(() => parseUpgradeFailurePolicy({ CREWFLOW_UPGRADE_FAILURE: 'continue', CREWFLOW_UPGRADE_FAILURE_POLICY: 'refuse' })).toThrow(/disagree/);
-    expect(() => parseUpgradeFailurePolicy({ CREWFLOW_UPGRADE_FAILURE: 'continue-if-compatible' })).toThrow(/must be exactly one of: continue, refuse/);
-    expect(() => parseUpgradeFailurePolicy({ CREWFLOW_UPGRADE_FAILURE_POLICY: 'continue' })).toThrow(/deprecated .* use CREWFLOW_UPGRADE_FAILURE=continue\|refuse/);
+  it('the new outcomes: the version check refuses as behind (65), an unbumped version as config (64)', () => {
+    expect(outcomeOf(Object.assign(new Error('x'), { name: 'UpgradeVersionTooOldError' }))).toBe('behind');
+    expect(outcomeOf(Object.assign(new Error('x'), { name: 'AppVersionError' }))).toBe('config');
   });
 });
 
@@ -655,9 +641,4 @@ describe('O3 (Agent 2): the migrate child and DISABLE_DB_MIGRATIONS / the result
     expect(STARTUP_EXIT_CODES.config).toBe(64);
   });
 
-  it('the result line carries policy "continue" EXACTLY for the default and the deprecated alias (the prestart relay vetoes any other string)', () => {
-    for (const env of [{}, { CREWFLOW_UPGRADE_FAILURE: 'continue' }, { CREWFLOW_UPGRADE_FAILURE_POLICY: 'continue-if-compatible' }]) {
-      expect(parseUpgradeFailurePolicy(env)).toBe('continue');
-    }
-  });
 });

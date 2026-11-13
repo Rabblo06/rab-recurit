@@ -2,26 +2,18 @@ import { spawnSync } from 'child_process';
 import * as fs from 'fs';
 import * as path from 'path';
 
-import {
-  DEPRECATED_UPGRADE_FAILURE_POLICY_VALUES,
-  MIGRATION_APPROVAL_MODES,
-  readRuntimeDbConfig,
-  RuntimeDbConfigError,
-  runtimeDbConfigProblems,
-  STARTUP_EXIT_CODES,
-  UPGRADE_FAILURE_POLICIES,
-} from './runtime-db-config';
+import { MIGRATION_APPROVAL_MODES, readRuntimeDbConfig, RuntimeDbConfigError, runtimeDbConfigProblems, STARTUP_EXIT_CODES } from './runtime-db-config';
 
 /**
  * Owner-login architecture: the one parser of DISABLE_DB_MIGRATIONS / CREWFLOW_MIGRATE_ON_START /
- * CREWFLOW_MIGRATION_APPROVAL_MODE / CREWFLOW_UPGRADE_FAILURE (+ its deprecated alias CREWFLOW_UPGRADE_FAILURE_POLICY), and its literal shell copy in api-prestart.sh (run here with the real `sh` and compared
+ * CREWFLOW_MIGRATION_APPROVAL_MODE (and the removed CREWFLOW_DB_MODE / CREWFLOW_UPGRADE_FAILURE / CREWFLOW_UPGRADE_FAILURE_POLICY), and its literal shell copy in api-prestart.sh (run here with the real `sh` and compared
  * case by case, messages included).
  */
 const PRESTART = path.resolve(__dirname, '../../../../rab-docker/rab/api-prestart.sh');
 const API = { requireMigrateOnStart: true } as const;
 
 type Env = Record<string, string | undefined>;
-type Outcome = { ok: { disableDbMigrations: boolean; migrateOnStart: boolean; migrationApprovalMode: string; upgradeFailurePolicy: string } } | { refused: string };
+type Outcome = { ok: { disableDbMigrations: boolean; migrateOnStart: boolean; migrationApprovalMode: string } } | { refused: string };
 
 function tsOutcome(env: Env, options = API): Outcome {
   try {
@@ -44,7 +36,7 @@ function shellOutcome(env: Env): Outcome {
     'refuse() { printf "REFUSED:%s\\n" "$1"; exit 64; }',
     script.slice(begin, end),
     'crewflow_runtime_db_config',
-    'printf "OK:%s:%s:%s:%s\\n" "$DISABLE_MIGRATIONS" "$MIGRATE_ON_START" "$APPROVAL_MODE" "$UPGRADE_POLICY"',
+    'printf "OK:%s:%s:%s\\n" "$DISABLE_MIGRATIONS" "$MIGRATE_ON_START" "$APPROVAL_MODE"',
   ].join('\n');
   const clean = Object.fromEntries(Object.entries(env).filter(([, v]) => v !== undefined)) as Record<string, string>;
   const r = spawnSync('sh', ['-c', driver], { encoding: 'utf8', env: { PATH: process.env.PATH ?? '', ...clean } });
@@ -54,8 +46,8 @@ function shellOutcome(env: Env): Outcome {
     return { refused: out.slice('REFUSED:'.length) };
   }
   expect(r.status).toBe(0);
-  const [, disabled, migrate, approval, policy] = out.split(':');
-  return { ok: { disableDbMigrations: disabled === 'true', migrateOnStart: migrate === 'true', migrationApprovalMode: approval!, upgradeFailurePolicy: policy! } };
+  const [, disabled, migrate, approval] = out.split(':');
+  return { ok: { disableDbMigrations: disabled === 'true', migrateOnStart: migrate === 'true', migrationApprovalMode: approval! } };
 }
 
 const CASES: Array<[string, Env]> = [
@@ -73,22 +65,15 @@ const CASES: Array<[string, Env]> = [
   ['" true" (spaces)', { CREWFLOW_MIGRATE_ON_START: ' true' }],
   ['approval Token', { CREWFLOW_MIGRATE_ON_START: 'false', CREWFLOW_MIGRATION_APPROVAL_MODE: 'Token' }],
   ['approval allowlist', { CREWFLOW_MIGRATE_ON_START: 'false', CREWFLOW_MIGRATION_APPROVAL_MODE: 'allowlist' }],
-  // Owner decision C3 (2026-11-05): CREWFLOW_UPGRADE_FAILURE continue (default) | refuse; the old name is a deprecated alias.
-  ['upgrade failure unset = continue', { CREWFLOW_MIGRATE_ON_START: 'true' }],
-  ['upgrade failure continue', { CREWFLOW_MIGRATE_ON_START: 'true', CREWFLOW_UPGRADE_FAILURE: 'continue' }],
-  ['upgrade failure refuse', { CREWFLOW_MIGRATE_ON_START: 'true', CREWFLOW_UPGRADE_FAILURE: 'refuse' }],
-  ['upgrade failure blank = continue', { CREWFLOW_MIGRATE_ON_START: 'true', CREWFLOW_UPGRADE_FAILURE: '' }],
-  ['upgrade failure Continue (case)', { CREWFLOW_MIGRATE_ON_START: 'true', CREWFLOW_UPGRADE_FAILURE: 'Continue' }],
-  ['upgrade failure continue-if-compatible (old value under the new name)', { CREWFLOW_MIGRATE_ON_START: 'true', CREWFLOW_UPGRADE_FAILURE: 'continue-if-compatible' }],
-  ['deprecated policy continue-if-compatible -> continue', { CREWFLOW_MIGRATE_ON_START: 'true', CREWFLOW_UPGRADE_FAILURE_POLICY: 'continue-if-compatible' }],
-  ['deprecated policy refuse -> refuse', { CREWFLOW_MIGRATE_ON_START: 'true', CREWFLOW_UPGRADE_FAILURE_POLICY: 'refuse' }],
-  ['deprecated policy continue (not a deprecated value)', { CREWFLOW_MIGRATE_ON_START: 'true', CREWFLOW_UPGRADE_FAILURE_POLICY: 'continue' }],
-  ['deprecated policy constructor (inherited name)', { CREWFLOW_MIGRATE_ON_START: 'true', CREWFLOW_UPGRADE_FAILURE_POLICY: 'constructor' }],
-  ['deprecated policy blank = unset', { CREWFLOW_MIGRATE_ON_START: 'true', CREWFLOW_UPGRADE_FAILURE_POLICY: '' }],
-  ['both names agree (refuse)', { CREWFLOW_MIGRATE_ON_START: 'true', CREWFLOW_UPGRADE_FAILURE: 'refuse', CREWFLOW_UPGRADE_FAILURE_POLICY: 'refuse' }],
-  ['both names agree (continue)', { CREWFLOW_MIGRATE_ON_START: 'true', CREWFLOW_UPGRADE_FAILURE: 'continue', CREWFLOW_UPGRADE_FAILURE_POLICY: 'continue-if-compatible' }],
-  ['both names disagree', { CREWFLOW_MIGRATE_ON_START: 'true', CREWFLOW_UPGRADE_FAILURE: 'continue', CREWFLOW_UPGRADE_FAILURE_POLICY: 'refuse' }],
-  ['new name invalid wins over a disagreeing alias', { CREWFLOW_MIGRATE_ON_START: 'true', CREWFLOW_UPGRADE_FAILURE: 'x', CREWFLOW_UPGRADE_FAILURE_POLICY: 'refuse' }],
+  // OWNER-DB-ULTIMATE Part B3: the C3 choices are removed; any value of either name is refused (blank = absent).
+  ['CREWFLOW_UPGRADE_FAILURE=continue (removed)', { CREWFLOW_MIGRATE_ON_START: 'true', CREWFLOW_UPGRADE_FAILURE: 'continue' }],
+  ['CREWFLOW_UPGRADE_FAILURE=refuse (removed)', { CREWFLOW_MIGRATE_ON_START: 'true', CREWFLOW_UPGRADE_FAILURE: 'refuse' }],
+  ['CREWFLOW_UPGRADE_FAILURE blank = absent', { CREWFLOW_MIGRATE_ON_START: 'true', CREWFLOW_UPGRADE_FAILURE: '' }],
+  ['CREWFLOW_UPGRADE_FAILURE_POLICY=continue-if-compatible (removed)', { CREWFLOW_MIGRATE_ON_START: 'true', CREWFLOW_UPGRADE_FAILURE_POLICY: 'continue-if-compatible' }],
+  ['CREWFLOW_UPGRADE_FAILURE_POLICY=refuse (removed)', { CREWFLOW_MIGRATE_ON_START: 'true', CREWFLOW_UPGRADE_FAILURE_POLICY: 'refuse' }],
+  ['CREWFLOW_UPGRADE_FAILURE_POLICY blank = absent', { CREWFLOW_MIGRATE_ON_START: 'true', CREWFLOW_UPGRADE_FAILURE_POLICY: '' }],
+  ['both removed names: the first is reported', { CREWFLOW_MIGRATE_ON_START: 'true', CREWFLOW_UPGRADE_FAILURE: 'continue', CREWFLOW_UPGRADE_FAILURE_POLICY: 'refuse' }],
+  ['a removed name wins over a bad value', { CREWFLOW_MIGRATE_ON_START: 'maybe', CREWFLOW_UPGRADE_FAILURE: 'x' }],
   ['CREWFLOW_DB_MODE=separated (removed)', { CREWFLOW_MIGRATE_ON_START: 'false', CREWFLOW_DB_MODE: 'separated' }],
   ['CREWFLOW_DB_MODE=twenty (removed)', { CREWFLOW_MIGRATE_ON_START: 'false', CREWFLOW_DB_MODE: 'twenty' }],
   ['CREWFLOW_DB_MODE blank = absent', { CREWFLOW_MIGRATE_ON_START: 'false', CREWFLOW_DB_MODE: '' }],
@@ -110,18 +95,21 @@ const CASES: Array<[string, Env]> = [
   ['provisioning deferral seam in production', { CREWFLOW_MIGRATE_ON_START: 'false', NODE_ENV: 'production', CREWFLOW_TEST_DEFER_SERVER_PROVISIONING: 'true' }],
   ['provisioning deferral seam under NODE_ENV=test (allowed)', { CREWFLOW_MIGRATE_ON_START: 'false', NODE_ENV: 'test', CREWFLOW_TEST_DEFER_SERVER_PROVISIONING: 'true' }],
   ['test seams under NODE_ENV=test (allowed)', { CREWFLOW_MIGRATE_ON_START: 'true', NODE_ENV: 'test', CREWFLOW_MIGRATION_TEST_STOP_BEFORE: 'a', CREWFLOW_MIGRATION_TEST_FAIL_AT: 'b' }],
+  // DB-SETUP (plan §2.2): the prestart shell holds the database ADMIN URL until the swap, so neither copy applies the
+  // runtime-login rule (checkRuntimeLogin; runtime-login.spec.ts) — both accept it here.
+  ['production with an admin PG_DATABASE_URL (runtime-login rule is not part of this parser)', { CREWFLOW_MIGRATE_ON_START: 'true', NODE_ENV: 'production', RAB_RUNTIME_ENV: 'production', PG_DATABASE_URL: 'postgres://doadmin:S3cret@db:5432/crewflow?sslmode=verify-full' }],
   ['DB_TARGET + ALLOW_PRODUCTION_DB_COMMANDS are outside this parser (CLI authority; the runtime guard refuses them)', { CREWFLOW_MIGRATE_ON_START: 'false', DB_TARGET: 'production', ALLOW_PRODUCTION_DB_COMMANDS: 'true' }],
 ];
 
 describe('runtime-db-config (owner-login architecture)', () => {
   it('the API entrypoint requires CREWFLOW_MIGRATE_ON_START; elsewhere unset means false', () => {
     expect(tsOutcome({})).toEqual({ refused: expect.stringMatching(/^CREWFLOW_MIGRATE_ON_START is required on the API service/) });
-    expect(readRuntimeDbConfig({}, {})).toEqual({ disableDbMigrations: false, migrateOnStart: false, migrationApprovalMode: 'none', upgradeFailurePolicy: 'continue' });
+    expect(readRuntimeDbConfig({}, {})).toEqual({ disableDbMigrations: false, migrateOnStart: false, migrationApprovalMode: 'none' });
     expect(runtimeDbConfigProblems({})).toEqual([]);
   });
 
-  it('defaults: approval none, upgrade failure continue — production included (BC-11: the approval token is optional, off by default; C3: continue)', () => {
-    expect(readRuntimeDbConfig({ CREWFLOW_MIGRATE_ON_START: 'true' }, API)).toEqual({ disableDbMigrations: false, migrateOnStart: true, migrationApprovalMode: 'none', upgradeFailurePolicy: 'continue' });
+  it('defaults: approval none — production included (BC-11: the approval token is optional, off by default)', () => {
+    expect(readRuntimeDbConfig({ CREWFLOW_MIGRATE_ON_START: 'true' }, API)).toEqual({ disableDbMigrations: false, migrateOnStart: true, migrationApprovalMode: 'none' });
     // Production with migrate-on-start and NO approval mode: accepted, none.
     expect(readRuntimeDbConfig({ CREWFLOW_MIGRATE_ON_START: 'true', NODE_ENV: 'production', RAB_RUNTIME_ENV: 'production' }, API).migrationApprovalMode).toBe('none');
     // Production with token: token (enforced by the migrate child).
@@ -133,8 +121,6 @@ describe('runtime-db-config (owner-login architecture)', () => {
 
   it('allowed sets are exactly the documented ones', () => {
     expect(MIGRATION_APPROVAL_MODES).toEqual(['none', 'token']);
-    expect(UPGRADE_FAILURE_POLICIES).toEqual(['continue', 'refuse']);
-    expect(DEPRECATED_UPGRADE_FAILURE_POLICY_VALUES).toEqual({ refuse: 'refuse', 'continue-if-compatible': 'continue' });
     expect(STARTUP_EXIT_CODES).toEqual({ ok: 0, config: 64, behind: 65, migrationFailed: 66, identity: 67, postCheck: 68, lockTimeout: 69, degradedContinue: 70 });
   });
 
@@ -167,15 +153,13 @@ describe('runtime-db-config (owner-login architecture)', () => {
     expect(() => readRuntimeDbConfig({ DISABLE_DB_MIGRATIONS: 'false' }, API)).toThrow(/^CREWFLOW_MIGRATE_ON_START is required on the API service/);
   });
 
-  it('CREWFLOW_UPGRADE_FAILURE (owner decision C3): continue by default; the deprecated alias maps and must agree', () => {
-    expect(readRuntimeDbConfig({}).upgradeFailurePolicy).toBe('continue');
-    expect(readRuntimeDbConfig({ CREWFLOW_UPGRADE_FAILURE: 'refuse' }).upgradeFailurePolicy).toBe('refuse');
-    expect(readRuntimeDbConfig({ CREWFLOW_UPGRADE_FAILURE_POLICY: 'refuse' }).upgradeFailurePolicy).toBe('refuse');
-    expect(readRuntimeDbConfig({ CREWFLOW_UPGRADE_FAILURE_POLICY: 'continue-if-compatible' }).upgradeFailurePolicy).toBe('continue');
-    for (const value of ['continue', 'constructor', 'toString', '__proto__', 'hasOwnProperty']) {
-      expect(() => readRuntimeDbConfig({ CREWFLOW_UPGRADE_FAILURE_POLICY: value })).toThrow(/CREWFLOW_UPGRADE_FAILURE_POLICY is deprecated and must be exactly one of: refuse, continue-if-compatible/);
+  it('CREWFLOW_UPGRADE_FAILURE and CREWFLOW_UPGRADE_FAILURE_POLICY are removed (OWNER-DB-ULTIMATE Part B3): any value refuses (64)', () => {
+    for (const name of ['CREWFLOW_UPGRADE_FAILURE', 'CREWFLOW_UPGRADE_FAILURE_POLICY']) {
+      for (const value of ['continue', 'refuse', 'continue-if-compatible', 'constructor']) {
+        expect(() => readRuntimeDbConfig({ [name]: value })).toThrow(new RegExp(`^${name} was removed \\(OWNER-DB-ULTIMATE Part B3\\)`));
+      }
+      expect(readRuntimeDbConfig({ [name]: '' })).toEqual({ disableDbMigrations: false, migrateOnStart: false, migrationApprovalMode: 'none' });
     }
-    expect(() => readRuntimeDbConfig({ CREWFLOW_UPGRADE_FAILURE: 'refuse', CREWFLOW_UPGRADE_FAILURE_POLICY: 'continue-if-compatible' })).toThrow(/disagree/);
   });
 
   it('RuntimeDbConfigError carries exit code 64', () => {

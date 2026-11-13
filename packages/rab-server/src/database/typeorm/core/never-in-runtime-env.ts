@@ -97,6 +97,14 @@ export const NEVER_IN_RUNTIME_ENV: readonly NeverInRuntimeEnvEntry[] = Object.fr
   { name: 'CREWFLOW_OWNER_PASSWORD', why: ROLE_PASSWORD, ...OWNER_LOGIN },
   // The provider step's / test harness's name for the owner password (twenty-test-env.cjs): never in a runtime process.
   { name: 'CREWFLOW_OWNER_BOOTSTRAP_PASSWORD', why: ROLE_PASSWORD, ...OWNER_LOGIN },
+  // DB-SETUP (plan §2.2, "database setup like Twenty"): the bundled database's admin password. Only docker compose reads it,
+  // to build the bundled admin URL (and the `db` service's POSTGRES_PASSWORD); api-prestart.sh and worker-start.sh unset it
+  // before any runtime process starts. Refused in the API and the Worker (the provisioner is left as it was).
+  {
+    name: 'PG_DATABASE_PASSWORD',
+    why: 'It is the bundled database admin password: only docker compose reads it, to build the admin URL; api-prestart.sh / worker-start.sh unset it, and a runtime process connects only as crewflow_owner. Remove it.',
+    ...OWNER_LOGIN,
+  },
 ]);
 
 /**

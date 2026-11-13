@@ -6,13 +6,14 @@ const SECRET = 'S3cret-PW-do-not-print';
 const PROD_POOLED = `postgres://rab_app:${SECRET}@ep-round-rain-aess0njf-pooler.c-2.us-east-2.aws.neon.tech/neondb?sslmode=require`;
 const PROD_DIRECT = `postgres://rab_owner:${SECRET}@ep-round-rain-aess0njf.c-2.us-east-2.aws.neon.tech/neondb?sslmode=require`;
 const OTHER_NEON = `postgres://rab_owner:${SECRET}@ep-other-endpoint-xyz.c-2.us-east-2.aws.neon.tech/neondb?sslmode=require`;
-// Phase B: production takes PG_DATABASE_URL only, a DIRECT connection (the Worker refuses a transaction pooler).
-const PROD_APP = `postgres://crewflow_app:${SECRET}@ep-round-rain-aess0njf.c-2.us-east-2.aws.neon.tech/neondb?sslmode=require`;
+// Phase B: production takes PG_DATABASE_URL only, a DIRECT connection (the Worker refuses a transaction pooler). DB-SETUP
+// (plan §2.2): the production API / Worker URL logs in as crewflow_owner (any other login is refused before connecting).
+const PROD_APP = `postgres://crewflow_owner:${SECRET}@ep-round-rain-aess0njf.c-2.us-east-2.aws.neon.tech/neondb?sslmode=require`;
 const PROD_PROVISIONER = `postgres://crewflow:${SECRET}@ep-round-rain-aess0njf.c-2.us-east-2.aws.neon.tech/neondb?sslmode=require`;
 const LOCAL_DIRECT_USER = `postgres://rab_direct:${SECRET}@127.0.0.1:55462/rab_crewflow_hws_phase3_validation`;
 const LOCAL = `postgres://rab_app:${SECRET}@127.0.0.1:55462/rab_crewflow_hws_phase3_validation`;
 const LOCAL_OWNER = `postgres://rab_owner:${SECRET}@127.0.0.1:55462/rab_crewflow_hws_phase3_validation`;
-const DO_PRIVATE = `postgres://crewflow_app:${SECRET}@private-db-postgresql-lon1-12345-do-user-1-0.b.db.ondigitalocean.com:25060/defaultdb?sslmode=verify-full`;
+const DO_PRIVATE = `postgres://crewflow_owner:${SECRET}@private-db-postgresql-lon1-12345-do-user-1-0.b.db.ondigitalocean.com:25060/defaultdb?sslmode=verify-full`;
 const PROD_ID = '6f1c2d3e-4a5b-4c6d-8e7f-0a1b2c3d4e5f';
 const DECLARED_PROD = { CREWFLOW_DEPLOYMENT_ENVIRONMENT: 'production', CREWFLOW_DEPLOYMENT_ID: PROD_ID };
 
@@ -87,7 +88,7 @@ describe('runtime database identity guard (API, worker and provisioner boot)', (
   it('4c. Phase B: the Worker and the provisioner (session locks) refuse a transaction-pooler URL; the API only warns', () => {
     expectRefused('worker', PROD_ENV({ PG_DATABASE_URL: PROD_POOLED }), /transaction-pooler shape/);
     expectRefused('provisioner', PROD_ENV({ PG_DATABASE_URL: PROD_POOLED.replace('rab_app', 'crewflow') }), /transaction-pooler shape/);
-    expect(resolve('api', PROD_ENV({ PG_DATABASE_URL: PROD_POOLED })).classification).toBe('PRODUCTION');
+    expect(resolve('api', PROD_ENV({ PG_DATABASE_URL: PROD_POOLED.replace('rab_app', 'crewflow_owner') })).classification).toBe('PRODUCTION');
   });
 
   it('5. BC-11: the production runtime declaration is optional; a partial or wrong one is refused; the marker check is live (deployment-identity.spec)', () => {
@@ -316,12 +317,13 @@ describe('runtime database identity guard (API, worker and provisioner boot)', (
 
   it('11d3. final review F4: an UNLISTED single-label host (search domain / k8s namespace) is REMOTE, never LOCAL; the compose services stay LOCAL', () => {
     for (const processName of ['api', 'worker', 'provisioner'] as const) {
-      for (const host of ['db', 'prod-db', 'postgresql']) {
+      // DB-SETUP (lead decision 2026-11-12): `db`, the bundled database service, is listed; near-misses stay remote.
+      for (const host of ['gatedb', 'prod-db', 'postgresql']) {
         const url = `postgres://crewflow_app:${SECRET}@${host}:5432/rab`;
         expectRefused(processName, { NODE_ENV: 'development', RAB_RUNTIME_ENV: 'development', PG_DATABASE_URL: url }, /development refuses a remote database/);
         expect(resolve(processName, { NODE_ENV: 'development', PG_DATABASE_URL: url }).classification).toBe('NON-PRODUCTION');
       }
-      for (const host of ['devdb', 'postgres', 'pg']) {
+      for (const host of ['db', 'devdb', 'postgres', 'pg']) {
         const url = `postgres://crewflow_app:${SECRET}@${host}:5432/rab`;
         expect(resolve(processName, { NODE_ENV: 'development', RAB_RUNTIME_ENV: 'development', PG_DATABASE_URL: url }).classification).toBe('LOCAL');
       }
@@ -444,13 +446,12 @@ describe('runtime database identity guard (API, worker and provisioner boot)', (
       expectRefused('api', { NODE_ENV: 'development', PG_DATABASE_URL: LOCAL, CREWFLOW_PROVISIONER_ENABLED: 'false' }, /^CREWFLOW_PROVISIONER_ENABLED is present in the api process's environment\. Workspace provisioning runs inside the Worker/);
     });
 
-    it('24. a malformed CREWFLOW_MIGRATE_ON_START / APPROVAL_MODE / UPGRADE_FAILURE_POLICY is refused in-process too (a start that skips api-prestart.sh)', () => {
+    it('24. a malformed CREWFLOW_MIGRATE_ON_START / APPROVAL_MODE, or a removed CREWFLOW_UPGRADE_FAILURE(_POLICY), is refused in-process too (a start that skips api-prestart.sh)', () => {
       expectRefused('api', { NODE_ENV: 'development', PG_DATABASE_URL: LOCAL, CREWFLOW_MIGRATE_ON_START: 'yes' }, /The api process: CREWFLOW_MIGRATE_ON_START must be exactly one of: true, false/);
       expectRefused('worker', { NODE_ENV: 'development', PG_DATABASE_URL: LOCAL, CREWFLOW_MIGRATION_APPROVAL_MODE: 'allowlist' }, /CREWFLOW_MIGRATION_APPROVAL_MODE must be exactly one of: none, token/);
-      // Owner decision C3 (2026-11-05): `continue` is a value of the NEW name only; under the deprecated alias it still refuses,
-      // now with the alias message (assertion change: the message text, not the refusal).
-      expectRefused('api', { NODE_ENV: 'development', PG_DATABASE_URL: LOCAL, CREWFLOW_UPGRADE_FAILURE_POLICY: 'continue' }, /CREWFLOW_UPGRADE_FAILURE_POLICY is deprecated and must be exactly one of: refuse, continue-if-compatible/);
-      expectRefused('api', { NODE_ENV: 'development', PG_DATABASE_URL: LOCAL, CREWFLOW_UPGRADE_FAILURE: 'continue-if-compatible' }, /CREWFLOW_UPGRADE_FAILURE must be exactly one of: continue, refuse/);
+      // OWNER-DB-ULTIMATE Part B3: the C3 choices are removed; any value of either name refuses.
+      expectRefused('api', { NODE_ENV: 'development', PG_DATABASE_URL: LOCAL, CREWFLOW_UPGRADE_FAILURE_POLICY: 'continue-if-compatible' }, /CREWFLOW_UPGRADE_FAILURE_POLICY was removed \(OWNER-DB-ULTIMATE Part B3\)/);
+      expectRefused('worker', { NODE_ENV: 'development', PG_DATABASE_URL: LOCAL, CREWFLOW_UPGRADE_FAILURE: 'continue' }, /CREWFLOW_UPGRADE_FAILURE was removed \(OWNER-DB-ULTIMATE Part B3\)/);
       expectRefused('worker', { NODE_ENV: 'development', PG_DATABASE_URL: LOCAL, DISABLE_DB_MIGRATIONS: 'yes' }, /DISABLE_DB_MIGRATIONS must be exactly one of: true, false/);
       // Owner decision C1: DISABLE_DB_MIGRATIONS=true is accepted on both processes (the Worker never migrates either way).
       expect(resolve('worker', { NODE_ENV: 'development', PG_DATABASE_URL: LOCAL, DISABLE_DB_MIGRATIONS: 'true' }).classification).toBe('LOCAL');
@@ -461,7 +462,7 @@ describe('runtime database identity guard (API, worker and provisioner boot)', (
       // Not required in-process (only the API image entrypoint requires it); valid values pass.
       expect(resolve('worker', { NODE_ENV: 'development', PG_DATABASE_URL: LOCAL }).classification).toBe('LOCAL');
       expect(
-        resolve('api', PROD_ENV({ CREWFLOW_MIGRATE_ON_START: 'true', CREWFLOW_MIGRATION_APPROVAL_MODE: 'token', CREWFLOW_UPGRADE_FAILURE_POLICY: 'continue-if-compatible' })).classification,
+        resolve('api', PROD_ENV({ CREWFLOW_MIGRATE_ON_START: 'true', CREWFLOW_MIGRATION_APPROVAL_MODE: 'token' })).classification,
       ).toBe('PRODUCTION');
     });
   });
