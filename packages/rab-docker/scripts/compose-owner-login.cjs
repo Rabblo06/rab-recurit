@@ -167,6 +167,8 @@ const FORBIDDEN_PATTERNS = Object.freeze([
   // Security review L1: the start scripts' and the bootstrap child's test seams (NODE_ENV=test only) never belong in a
   // compose or env file (CREWFLOW_TEST_DB_SETUP_WAIT_SECONDS, CREWFLOW_TEST_OWNER_SETUP_ABORT, ...).
   [/^CREWFLOW_TEST_/, 'a test seam (NODE_ENV=test only; never in a compose or env file)'],
+  // Security re-review N4: the migration-harness seams (CREWFLOW_MIGRATION_TEST_*) likewise.
+  [/^CREWFLOW_MIGRATION_TEST_/, 'a migration test seam (test harnesses only; never in a compose or env file)'],
   [/^(CREWFLOW_OPS_|PG_OPS_)/, 'a retired separated-mode operations variable (rab-ops was removed; never valid)'],
   [/^CREWFLOW_.*BOOTSTRAP_PASSWORD$/, 'a role password (role passwords never belong in app config)'],
   [/^BOOTSTRAP_ADMIN_/, 'bootstrap-admin input (a one-off operator command, never a runtime variable)'],

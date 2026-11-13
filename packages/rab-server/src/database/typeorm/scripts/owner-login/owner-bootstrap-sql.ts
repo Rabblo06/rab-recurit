@@ -42,7 +42,7 @@ export const OWNER_BOOTSTRAP_Q1_SUPERUSER_LOGGING = `SELECT pg_catalog.set_confi
 /**
  * Q2 (REVISED, security review H1): the facts, one read, no writes. (`pg_maintain` exists only on PG17+; naming a missing
  * role in IN (...) is harmless.) Two new facts for the admin path's refusal: o_owns_db (crewflow_owner owns the current
- * database, directly or through an inherited role) and search_path_default_set (a database-wide or crewflow_owner-level
+ * database, directly or through any role membership: MEMBER, re-review N2) and search_path_default_set (a database-wide or crewflow_owner-level
  * search_path default exists in pg_db_role_setting).
  */
 export const OWNER_BOOTSTRAP_Q2_FACTS = `SELECT pg_catalog.current_setting('server_version_num')::int                      AS server_version_num,
@@ -78,7 +78,7 @@ export const OWNER_BOOTSTRAP_Q2_FACTS = `SELECT pg_catalog.current_setting('serv
         AND pg_catalog.has_database_privilege(o.oid, pg_catalog.current_database(), 'CREATE WITH GRANT OPTION')
         AND pg_catalog.has_database_privilege(o.oid, pg_catalog.current_database(), 'TEMPORARY WITH GRANT OPTION'))
                                                                                   AS o_has_db_grant,
-       (o.oid IS NOT NULL AND pg_catalog.pg_has_role(o.oid, d.datdba, 'USAGE'))  AS o_owns_db,
+       (o.oid IS NOT NULL AND pg_catalog.pg_has_role(o.oid, d.datdba, 'MEMBER')) AS o_owns_db,
        EXISTS (SELECT 1
                  FROM pg_catalog.pg_db_role_setting s
                  CROSS JOIN LATERAL pg_catalog.unnest(s.setconfig) AS c(setting)
@@ -106,7 +106,7 @@ export const OWNER_BOOTSTRAP_Q4A_LOCK = `SELECT pg_catalog.pg_advisory_xact_lock
 export const OWNER_BOOTSTRAP_Q4B_SET_INPUTS = `SELECT pg_catalog.set_config('crewflow_bootstrap.verifier', $1, true),
        pg_catalog.set_config('crewflow_bootstrap.need_password', $2, true);`;
 
-/** Q4c */
+/** Q4c (REVISED, security re-review N3: the verifier shape check before CREATE / ALTER ROLE). */
 export const OWNER_BOOTSTRAP_Q4C_DO = `DO $bootstrap$
 DECLARE
   v_db       text := pg_catalog.current_database();
@@ -117,6 +117,12 @@ BEGIN
   BEGIN
     SELECT oid, rolsuper, rolbypassrls, rolreplication, rolcreatedb, rolcanlogin, rolinherit
       INTO r FROM pg_catalog.pg_roles WHERE rolname = 'crewflow_owner';
+    -- REVISED (security re-review N3): a password is only ever set from the exact pre-hashed SCRAM-SHA-256 shape (the same
+    -- pattern as OWNER_SELF_O4C_DO; dollar signs spelled [$]); anything else is 22023 before CREATE / ALTER ROLE.
+    IF (NOT FOUND OR v_set_pw)
+       AND (v_verifier IS NULL OR NOT (v_verifier OPERATOR(pg_catalog.~) '^SCRAM-SHA-256[$][1-9][0-9]{0,9}:[A-Za-z0-9+/]+={0,2}[$][A-Za-z0-9+/]{43}=:[A-Za-z0-9+/]{43}=$')) THEN
+      RAISE EXCEPTION 'not a pre-hashed verifier' USING ERRCODE = '22023';
+    END IF;
     IF NOT FOUND THEN
       EXECUTE pg_catalog.format(
         'CREATE ROLE crewflow_owner LOGIN NOSUPERUSER NOBYPASSRLS NOREPLICATION NOCREATEDB CREATEROLE INHERIT PASSWORD %L',
@@ -200,11 +206,12 @@ BEGIN
                                'pg_signal_backend','pg_checkpoint','pg_maintain'))) THEN
       RAISE EXCEPTION 'crewflow_owner is a member of a privileged role' USING ERRCODE = '42501';
     END IF;
-    -- Never a plaintext password: only the full pre-hashed SCRAM shape (mechanism$iterations:salt$storedkey:serverkey).
-    -- The pattern spells the dollar signs as [$], so the verifier prefix never appears in the SQL text (the server-log
-    -- hygiene scans keep meaning "a verifier value appeared").
+    -- Never a plaintext password: only the exact pre-hashed SCRAM-SHA-256 shape (mechanism$iterations:salt$storedkey:serverkey;
+    -- iterations 1-10 digits, no leading zero; base64 salt; 32-byte keys = 43 base64 characters + '='). The pattern spells
+    -- the dollar signs as [$], so the verifier prefix never appears in the SQL text (the server-log hygiene scans keep
+    -- meaning "a verifier value appeared").
     IF v_verifier IS NULL
-       OR NOT (v_verifier OPERATOR(pg_catalog.~) '^SCRAM-SHA-256[$][0-9]+:[A-Za-z0-9+/=]+[$][A-Za-z0-9+/=]+:[A-Za-z0-9+/=]+$') THEN
+       OR NOT (v_verifier OPERATOR(pg_catalog.~) '^SCRAM-SHA-256[$][1-9][0-9]{0,9}:[A-Za-z0-9+/]+={0,2}[$][A-Za-z0-9+/]{43}=:[A-Za-z0-9+/]{43}=$') THEN
       RAISE EXCEPTION 'not a pre-hashed verifier' USING ERRCODE = '22023';
     END IF;
     EXECUTE pg_catalog.format('ALTER ROLE crewflow_owner PASSWORD %L', v_verifier);

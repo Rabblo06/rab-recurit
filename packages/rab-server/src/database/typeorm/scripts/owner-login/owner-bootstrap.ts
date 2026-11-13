@@ -83,7 +83,7 @@ export const OWNER_BOOTSTRAP_MESSAGES = Object.freeze({
     `The database refused to change crewflow_owner's own password (SQLSTATE ${sqlstate}). ${PREHASHED_REFUSED_UNSUPPORTED} Refusing.`,
   pgTooOld: 'PostgreSQL 16 or later is required.',
   ownerOwnsDatabase:
-    'crewflow_owner owns this database (directly or through a role it inherits). The database setup step runs as the admin here and refuses a database whose owner is the app login (it could plant objects the admin session would run). Make the admin login (or another role crewflow_owner is not a member of) the database owner. Refusing.',
+    'crewflow_owner owns this database (directly or through a role it is a member of, e.g. rab_owner after transition-from-separated.sql). The database setup step never runs as the admin in a database the app login owns (it could plant objects the admin session would run). Put the crewflow_owner URL in PG_DATABASE_URL instead of the admin URL (db-setup then runs as crewflow_owner itself). Refusing.',
   searchPathDefault:
     'A database-wide or crewflow_owner search_path default is set (ALTER DATABASE ... SET search_path / ALTER ROLE crewflow_owner SET search_path). Remove it (ALTER DATABASE ... RESET search_path / ALTER ROLE crewflow_owner RESET search_path). Refusing.',
   privilegedAttributes: (attributes: readonly string[]) =>
@@ -168,7 +168,7 @@ export interface OwnerFacts {
   adminHasAdminOption: boolean;
   oPrivilegedMemberships: number | null;
   oHasDbGrant: boolean;
-  /** H1: crewflow_owner owns the current database, directly or through an inherited role. */
+  /** H1 / N2: crewflow_owner owns the current database, directly or through any role membership (MEMBER). */
   oOwnsDb: boolean;
   /** H1: a database-wide or crewflow_owner-level search_path default exists. */
   searchPathDefaultSet: boolean;
@@ -176,30 +176,50 @@ export interface OwnerFacts {
 
 type Row = Record<string, unknown>;
 
-const bool = (v: unknown): boolean | null => (v === null || v === undefined ? null : v === true);
+
+/** Security re-review N4: a fact column that is not a boolean is a failure (70), never silently `false`. */
+function strictBool(row: Row, column: string): boolean {
+  const v = row[column];
+  if (typeof v !== 'boolean') throw new OwnerBootstrapFailure(OWNER_BOOTSTRAP_MESSAGES.unexpected(`facts column ${column} is not a boolean`));
+  return v;
+}
+
+/** The same for a column that is NULL when crewflow_owner does not exist. */
+function strictBoolOrNull(row: Row, column: string): boolean | null {
+  const v = row[column];
+  if (v === null) return null;
+  if (typeof v !== 'boolean') throw new OwnerBootstrapFailure(OWNER_BOOTSTRAP_MESSAGES.unexpected(`facts column ${column} is not a boolean`));
+  return v;
+}
 
 export function factsFromRow(row: Row | undefined): OwnerFacts {
   if (!row) throw new OwnerBootstrapFailure(OWNER_BOOTSTRAP_MESSAGES.unexpected('facts query returned no row'));
   const count = row.o_privileged_memberships;
+  if (!(count === null || (typeof count === 'string' && /^[0-9]+$/.test(count)) || (typeof count === 'number' && Number.isInteger(count) && count >= 0))) {
+    throw new OwnerBootstrapFailure(OWNER_BOOTSTRAP_MESSAGES.unexpected('facts column o_privileged_memberships is not a count'));
+  }
+  const version = Number(row.server_version_num);
+  if (!Number.isInteger(version) || version <= 0) throw new OwnerBootstrapFailure(OWNER_BOOTSTRAP_MESSAGES.unexpected('facts column server_version_num is not a number'));
   return {
-    serverVersionNum: Number(row.server_version_num),
-    adminSuper: row.admin_super === true,
-    adminCreateRole: row.admin_createrole === true,
-    adminCanGrantDb: row.admin_can_grant_db === true,
-    ownerExists: row.owner_exists === true,
-    oLogin: bool(row.o_login),
-    oSuper: bool(row.o_super),
-    oBypassRls: bool(row.o_bypassrls),
-    oReplication: bool(row.o_replication),
-    oCreateDb: bool(row.o_createdb),
-    oCreateRole: bool(row.o_createrole),
-    oInherit: bool(row.o_inherit),
-    oExpired: bool(row.o_expired),
-    adminHasAdminOption: row.admin_has_admin_option === true,
-    oPrivilegedMemberships: count === null || count === undefined ? null : Number(count),
-    oHasDbGrant: row.o_has_db_grant === true,
-    oOwnsDb: row.o_owns_db === true,
-    searchPathDefaultSet: row.search_path_default_set === true,
+    serverVersionNum: version,
+    adminSuper: strictBool(row, 'admin_super'),
+    adminCreateRole: strictBool(row, 'admin_createrole'),
+    adminCanGrantDb: strictBool(row, 'admin_can_grant_db'),
+    ownerExists: strictBool(row, 'owner_exists'),
+    oLogin: strictBoolOrNull(row, 'o_login'),
+    oSuper: strictBoolOrNull(row, 'o_super'),
+    oBypassRls: strictBoolOrNull(row, 'o_bypassrls'),
+    oReplication: strictBoolOrNull(row, 'o_replication'),
+    oCreateDb: strictBoolOrNull(row, 'o_createdb'),
+    oCreateRole: strictBoolOrNull(row, 'o_createrole'),
+    oInherit: strictBoolOrNull(row, 'o_inherit'),
+    // NULL when crewflow_owner is missing (rolvaliduntil IS NOT NULL AND ... on a NULL row).
+    oExpired: strictBoolOrNull(row, 'o_expired'),
+    adminHasAdminOption: strictBool(row, 'admin_has_admin_option'),
+    oPrivilegedMemberships: count === null ? null : Number(count),
+    oHasDbGrant: strictBool(row, 'o_has_db_grant'),
+    oOwnsDb: strictBool(row, 'o_owns_db'),
+    searchPathDefaultSet: strictBool(row, 'search_path_default_set'),
   };
 }
 
