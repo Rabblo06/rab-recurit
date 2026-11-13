@@ -2452,8 +2452,10 @@ money (payroll attention, statements, reports, offers, emails) is triggered, and
 - **Stricter control not taken:** refuse bullmq mode unless REDIS_URL carries credentials.
 - **Why:** refusing would make bullmq mode impossible on every current environment without a Redis change that is the
   owner's decision D7; the risk is unchanged from today (the same Redis already carries the email/push queues).
-- **Revisit:** before production stage D — require Redis AUTH/ACL + AOF + explicit noeviction, then flip the warning to
-  a refusal for `NODE_ENV=production`.
+- **Revisit: CLOSED (owner decision X1.6, 2026-11-12).** No refusal will be added. The warning stays a warning, as in
+  Twenty (its compose Redis has no password and no published port). Redis is protected by the private Docker network
+  only; the compose gate refuses a published Redis port. See "X1.6 — Redis is protected by the private Docker network
+  only" at the end of this file.
 
 ## Account security step 1: optional 2FA for every role, verified on every sign-in once enrolled (2026-10-24)
 
@@ -2919,7 +2921,7 @@ platform admins the reasons, names only, and the key status as configured boolea
 | Trade-off | Entry | Status |
 |---|---|---|
 | Recent sign-in counts as step-up; OAuth-only accounts have no provider re-auth | LD-2 | Microsoft re-auth now exists (AS-5); Google-only accounts rely on TO-2. Lane D owner decisions 1–2 are still listed as open in `docs/ultimate/LANE_D_AUTH_REPORT.md` §8 |
-| Unauthenticated Redis is a warning in bullmq mode | Lane A | Open (owner decision D7, before production stage D) |
+| Unauthenticated Redis is a warning in bullmq mode | Lane A; X1.6 | Accepted by the owner, 2026-11-12 (X1.6: private Docker network only, as in Twenty; the compose gate refuses a published Redis port) |
 | Interval-mode changes (M1 durations, provisioner stats identity) | LA-5 | Accepted by the owner, 2026-10-24 |
 | TO-1, TO-2, TO-4, TO-F1 | Account security | Accepted by the owner, 2026-10-24 (decisions E3, E2, E7, E9) |
 | TO-5, TO-F2 | Account security | Open for veto |
@@ -6219,8 +6221,9 @@ grant, RLS, posture, payroll calculation, staffing or permission change; the D-Q
   sweep: offer expiry up to 5 min late (was 1 min), the start − 30 min withdrawal up to 2 min late (was 1 min) — that is
   notice the staff member loses, late clock-in up to 5 min late (was 2 min; still before the 30-minute no-show), no-show
   unchanged (shift monitor, 5 min). Triggers add database work (one READ ONLY decision plus the action per trigger); no
-  load reduction is claimed. Production Redis is AOF, `noeviction`, ACL-only and internal (gate-enforced; the Worker
-  refuses any other eviction policy), which is what keeps delayed trigger jobs from being evicted.
+  load reduction is claimed. Production Redis is AOF, `noeviction` and internal, never published (gate-enforced; the
+  Worker refuses any other eviction policy), which is what keeps delayed trigger jobs from being evicted. Only
+  `docker-compose.image.yml` adds an ACL; `docker-compose.production.yml` relies on the private network (X1.6).
 - **Smoke on the final config (disposable `psw-` stack, image `shd-adolphus:85332cc6`, code-identical to main ce7fc76e):**
   the Worker started consume-only with `WORKER_TIMER_TRIGGERS=on` and all four kinds; the API registered 17 schedulers,
   read back from Redis with `every` = offer-expiry 300 s, manager-confirmation-timeout 120 s, late-clock-in 300 s,
@@ -6911,3 +6914,45 @@ injection), `schema-resolver.service.spec.ts` (ST-07), `session-role-reset.spec.
   real harness cannot be exercised in review, and it would drop platform / env-file variables the children need): a NEW
   credential that is not listed, not `PG*` / `POSTGRES_*` and does not carry an 8+ character admin password still reaches
   the children; an admin password shorter than 8 characters is matched only as the exact URL value.
+
+## X1.6 — Redis is protected by the private Docker network only, as in Twenty (branch phase-x2/x16-redis-port-gate, 2026-11-12, PR #111)
+
+Owner decision 2026-11-12 (Phase X Part 2, "the Twenty way", §2): Twenty has no Redis authentication mechanism, so
+Crewflow adds none. No Redis setting changes. Twenty reference: `packages/twenty-docker/docker-compose.yml` (the `redis`
+service: no `ports:`, no password, `--maxmemory-policy noeviction`).
+
+- **Asset:** everything in Redis: BullMQ jobs, schedulers and locks (email, push, pay statements, timer triggers, scans),
+  rate-limit and throttle counters, the auth-context and entity caches, realtime Pub/Sub, Worker health stats.
+- **Actor:** anyone who can open a TCP connection to the Redis port.
+- **Accepted risk:** `docker-compose.production.yml` runs Redis with no password and no ACL (AOF + `noeviction` only).
+  Anyone who reaches it can read job payloads (ids, no secrets), add, delete or forge BullMQ jobs, clear throttles and
+  rate limits, poison caches, or stop scheduled work. Consumers check forged ids against committed, tenant-scoped rows
+  and refuse unknown job names, but a forged job can still trigger a send or scan earlier or again. Reach is limited to
+  the private Docker network of the stack: the containers of that Compose project and anything else an operator attaches
+  to it. `docker-compose.image.yml` keeps its ACL and `maxmemory`; this entry does not weaken it.
+- **Control (gate):** `packages/rab-docker/scripts/compose-one-image.cjs` refuses, in every deploy combination
+  (`production.yml`; `image.yml`, alone and with `local-db`, `staging` and the rehearsal overlay) and in
+  `docker-compose.local-build.yml`, any Redis service that has `ports:` in short or long syntax (loopback included), a
+  `network_mode`, or a network that resolves to the host network or uses a host / macvlan / ipvlan driver; and any other
+  service in a Redis network namespace (`network_mode: service:<redis>`). `expose:` is refused too, as a review-hygiene
+  rule (it publishes nothing). A Redis service is recognised by name or image, by a `redis-server` / `redis-cli`
+  command, entrypoint or health check, or as the host of the app's committed `REDIS_URL`. Before X1.6 no gate checked
+  `production.yml`'s Redis ports. Tests: `compose-one-image.test.cjs` (pure and rendered denials).
+- **Control (runtime):** the Worker's bullmq preflight still refuses any eviction policy other than `noeviction`. An
+  unauthenticated `REDIS_URL` is logged as a warning that states this accepted risk. No release will turn it into a
+  refusal.
+- **Operator rule:** never publish the Redis port, never put Redis on the host network, and never attach untrusted
+  containers to the stack's network. A platform that cannot keep Redis on a private network must use
+  `docker-compose.image.yml` (ACL file) or a managed Redis with auth.
+- **Residual (accepted by the owner, 2026-11-12):**
+  - any process on the Docker network, or a compromised container in the stack, has full read and write access to Redis;
+  - a forwarder in another service (for example a `socat`-style proxy, `tcp-listen:6379` → `tcp:rab-redis:6379`) that
+    publishes its own port is not recognised as Redis and passes the gate. Refusing it would need a deny-by-default
+    port allowlist for every service, a new mechanism the owner has not chosen;
+  - a Redis with no redis-named image or command that the app does not name in a committed `REDIS_URL` is not
+    recognised either (same reason);
+  - the gate checks only the committed compose files: a hand-edited server file, an operator `docker run -p`, or a
+    platform that publishes container ports on its own is outside it.
+
+  This closes the "Revisit: before production stage D" note of the Lane A trade-off (unauthenticated Redis is a
+  warning, not a refusal, in bullmq mode).
