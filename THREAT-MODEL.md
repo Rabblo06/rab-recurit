@@ -5465,6 +5465,9 @@ can set, so injection already crossed tenants on FORCE tables in the separated d
 
 PT-01 was **not** in this file before today. This entry records it.
 
+X1.1 (owner decision 2026-11-12): PT-01's audit consequence is mitigated only by a BEST-EFFORT off-host copy of security
+events (Twenty's model). No line of this file claims a guaranteed sink.
+
 **Accepted by the owner in the final prompt §2.** These are owner-accepted risks, listed separately on purpose. None of
 them is a control that "passed".
 
@@ -5542,8 +5545,10 @@ writes a warning instead.
    accepted (BC-03).
 2. **Account takeover with MFA bypass, platform admins included.** Accepted (BC-04).
 3. **Persistence that survives credential rotation.** Accepted (BC-09). The role inventory and the monitor detect it.
-4. **The audit trail becomes untrustworthy**, which breaks "audit_log is insert-only". Accepted (BC-07). The external
-   sink is required.
+4. **The audit trail becomes untrustworthy**, which breaks "audit_log is insert-only". Accepted (BC-07). A best-effort
+   off-host copy exists (X1.1, accepted by the owner 2026-11-12): it can lose events (Redis or sink failure beyond the
+   BullMQ retries, a process death between commit and publish) and ships what the row says when the Worker reads it, so a
+   row altered before shipping is shipped altered. It narrows, but does not close, the tampering window.
 5. **The deployment identity is effectively removable; the N1 approval list no longer gates the owner-login path.**
    Accepted by the owner 2026-11-05 (BC-11, above). Phase X U-1 (owner decision 2026-11-11): on the owner-login path
    (the migrate-on-start child and the owner-login release step) N1 is REPLACED by the upgrade floor
@@ -5714,7 +5719,7 @@ writes a warning instead.
 | G-02 | CRITICAL | Injection gets full DDL, and the posture gate cannot see policy or body rewrites | Accepted (BC-01, BC-05). **Detected** by the semantic posture monitor (at boot and on a timer). |
 | G-03 | CRITICAL | Cross-tenant account takeover with MFA bypass | Accepted (BC-04). The monitor detects a disabled trigger. |
 | G-04 | CRITICAL (IR) | Persistence after rotation: backdoor LOGIN roles, re-enabled NOLOGIN roles, trojaned definers | Accepted (BC-09). The inventory refuses backdoor members and NOLOGIN drift at boot and on the timer, and function bodies are hashed. Passwords of the expected logins are not visible (BC-17). |
-| G-05 | HIGH | audit_log insert-only defeated | Accepted (BC-07). Production requires an external append-only sink and fails closed without one. |
+| G-05 | HIGH | audit_log insert-only defeated | Accepted (BC-07). Production requires a security audit sink (`CREWFLOW_AUDIT_SINK=stdout` + an off-host log shipper) and refuses to start without one. The off-host copy is BEST EFFORT (X1.1, Twenty's event-log model, accepted by the owner 2026-11-12): security events are queued after commit and shipped by the Worker with retries; events can be lost when Redis or the sink fails, and an owner-login holder can alter or delete rows before they are shipped. It is a detection aid, never a guarantee. |
 | G-06 | HIGH | The runtime can rebind the deployment identity | Accepted by the owner 2026-11-05 (BC-11): deployment ID and approval token optional, off by default |
 | G-07 | HIGH | Unreviewed DDL at boot with approval mode `none` | Accepted by the owner 2026-11-05, like Twenty (item 13 above): the API migrates on start in production |
 | G-08 | MED | DBA-01 lost; a Worker RCE gets owner credentials | Accepted by the owner 2026-11-05 (BC-08) |
@@ -5779,12 +5784,38 @@ Each control below is tested. None of them prevents injection.
     settings and role memberships.
   - At boot it compares with the committed golden for the PG major. On the timer it compares with the boot snapshot.
   - Drift turns readiness off and raises an alert. The monitor never rewrites anything.
-- **External audit sink:** an interface plus redacted, structured events. Production requires it and fails closed
-  without it. Deployment dependency: an off-host append-only log shipper (not created here).
+- **External audit sink (best effort, X1.1, 2026-11-12):** redacted, structured security events (logins success and
+  failure, MFA, password reset and change, grants and revokes, role and permission changes, platform-admin actions,
+  payroll approval, account deletion, suspension, security configuration; allow-list in
+  `audit-events/security-audit-event-catalogue.ts`). `AuditService.record` and the Worker's direct inserts hand the row id
+  to `crewflow-audit-events` AFTER COMMIT; the Worker re-reads the row under FORCE RLS and writes it to the sink with
+  BullMQ retries; the pre-auth login failure (no organisation, no row) is queued by the API as a system-scoped job,
+  fire-and-forget (see the X1.1 entry's backlog guard). Nothing blocks or rolls back an action. Production requires the
+  sink configuration (BC-07 gate unchanged). Deployment dependency: an off-host append-only log shipper (not created
+  here). Not guaranteed: see G-05.
 - **SQL-injection lint** (`tools/check-sql-injection.cjs`) plus adversarial tests. The lint is a text scan, **not a
   complete defence**.
 
 ### Residual risks (no control above covers these)
+
+- The off-host audit copy is best effort (X1.1, accepted 2026-11-12): an event is lost when Redis is down at commit, when
+  the sink stays down past the job's retries (failed jobs are kept 7 days / 1,000), or when the process dies between the
+  commit and the publish; an owner-login holder can alter or delete an audit row before the Worker ships it; the frozen
+  privileged-copy migration's two rows are never shipped. Delivery gaps are visible only as failed jobs in the admin
+  panel's queue view and as missing lines in the log store.
+- A savepoint rollback that TypeORM sees (a nested `transaction()` / `queryRunner.rollbackTransaction()` on a savepoint)
+  makes the AfterCommitPublisher drop EVERY pending audit event registered on that transaction — including events for
+  rows that were written outside the savepoint and DID commit. This queue has no backstop scan (unlike the outbox
+  queues), so those events never reach the sink; the rows stay in core.audit_log. Accepted within the X1.1 "best effort"
+  decision (owner, 2026-11-12). (A raw `ROLLBACK TO SAVEPOINT`, which TypeORM does not see, is the opposite case: the
+  publish is kept and the Worker's re-read ships only what exists.)
+- A password typed into the login e-mail field that is itself shaped like a real address (for example `x@y.com`) cannot
+  be told apart from an address: its masked form (`x***@y.com`) ships in the `auth.login_failed` event. Anything else is
+  shipped as `[not-an-email]`. Accepted within the X1.1 best-effort decision.
+- In free text, an UNQUOTED secret value ends at `&` (a real query delimiter), so a password containing `&` written as
+  `password=hunter&2` ships its tail (`&2`). Quoted values are consumed whole. Accepted within the X1.1 best-effort decision.
+- Under a credential-stuffing flood that fills the audit queue, failed-login events beyond the 10,000 backlog limit are
+  not shipped off-host (only counted); `core.login_history` still records every attempt (X1.1, owner decision 2026-11-12).
 
 - Everything injection can do inside its own request (PT-01): read, rewrite, drop, persist.
 - Session-level settings other than the role (for example a session `rab.organisation_id`) that injected SQL leaves on
@@ -6791,3 +6822,34 @@ count can be attributed to the request that released the connection. Statement c
 **Regression tests:** `tenant-context.service.spec.ts` (exact sequences, framing-count guard),
 `tenant-context-framing.integration.spec.ts` (real PG, owner login, pool max 1: settings, revert, 25006, poisoned session,
 injection), `schema-resolver.service.spec.ts` (ST-07), `session-role-reset.spec.ts` (ST-05).
+
+## Phase X1.1 — security audit events, best effort (XR-01, owner decision 2026-11-12)
+
+- **Asset:** the evidence trail of security actions under the one owner login (G-05/BC-07).
+- **Before:** only `security.posture.drift` reached the sink (XR-01); logins, grants, role changes, payroll approvals and
+  deletions existed only in `core.audit_log`, which the owner login can rewrite.
+- **Control:** after commit, one BullMQ job per security audit row (ids only); the Worker re-reads the row under FORCE RLS
+  and writes the redacted event to the configured sink with retries. Redaction: secret-looking keys and `name=value`
+  pairs `[REDACTED]` (passwords, tokens, keys, private keys, JWTs, bearer/basic credentials, named one-time codes,
+  connection strings), e-mails masked (Unicode-aware; a login-field value that is not a valid address ships as
+  `[not-an-email]`, never the raw input), URLs replaced, length/depth bounded (~16 KB per event). The frozen
+  privileged-copy migration never ships (owner decision 2026-11-12).
+- **Failed-login events are dropped above a 10,000 backlog** (owner decision 2026-11-12): the pre-authentication failed
+  login (no organisation, no audit row) is queued fire-and-forget as a system-scoped audit job; when the audit queue's
+  backlog (waiting + delayed + prioritized, read at most every 2 s per process) is over 10,000, new failed-login events are
+  dropped and counted — a process counter plus a durable Redis total on one dedicated key, shown on the platform-admin
+  Health tab ("Security audit events"). A failed login never waits on or fails because of the audit path. Other audit
+  events are never dropped by this guard.
+- **Fail-open by design:** a Redis, queue or sink failure never blocks, delays or rolls back an action (Twenty's
+  event-log model). A rolled-back transaction ships nothing (publisher discard + the Worker's re-read).
+- **Abuse cases tested:** forged scope / cross-tenant payload ships nothing; forged id pairs under real RLS ship nothing;
+  extra payload keys (action, e-mail) refused before Redis; a malformed job fails without a retry or a read; a raw
+  savepoint rollback ships nothing; a hung or failing pre-auth add never changes the login response, status or timing
+  class.
+- **Residual:** see G-05 and Residual risks (events lost on Redis/sink failure; rows alterable before shipping; savepoint
+  discard; address-shaped passwords; unquoted `&`; failed-login drops under a flood).
+- **Tests:** `security-audit-event-catalogue.spec.ts` (incl. the repo-wide raw audit_log insert scan),
+  `build-security-audit-event.spec.ts`, `redaction.spec.ts`, `audit-event-queue.service.spec.ts`,
+  `audit-event-shipping.spec.ts`, `outbox-operations.replay-audit-event.spec.ts`, `queue-registry.spec.ts` (X1.1 block),
+  `audit-event.handler.spec.ts`, `account-invite-cleanup.audit-events.spec.ts`,
+  `audit-events-delivery.integration.spec.ts` (E1–E7).

@@ -33,6 +33,7 @@ import { MfaChallengeService, PendingLogin, PendingProviderLink } from './mfa-ch
 import type { WorkspaceHostContext } from '../../workspace-host/workspace-host.types';
 import { CAPABILITY_MFA_VERIFY, CLIENT_UPDATE_REQUIRED_BODY, hasClientCapability } from '../constants/client-capabilities';
 import { deactivatePushDeviceForUser } from '../../push/push-device-deactivation';
+import { shipPreAuthLoginFailure } from '../../audit-events/audit-event-shipping';
 
 export interface RequestMeta {
   ip?: string;
@@ -251,6 +252,8 @@ export class AuthService {
          VALUES ($1, $2, $3, $4, $5, $6)`,
         [null, null, email, meta.ip ?? null, meta.userAgent ?? null, false],
       );
+      // X1.1: no organisation and no audit row exist yet: a system-scoped audit-queue job, fire-and-forget (never awaited).
+      shipPreAuthLoginFailure({ email, reason: 'ambiguous_accounts', provider: 'password' });
       // Only someone holding the password of BOTH accounts ever sees this, so it discloses nothing the uniform message protects.
       throw new UnauthorizedException({
         code: 'AMBIGUOUS_ACCOUNTS',
@@ -272,6 +275,10 @@ export class AuthService {
     );
 
     if (!matched) {
+      // X1.1: the pre-auth login failure — no organisation, no audit row: queued fire-and-forget (never awaited; dropped and
+      // counted above the 10,000 audit backlog, owner decision 2026-11-12). The
+      // event is the same for a wrong e-mail and a wrong password (uniform, like the response) and masks the address.
+      shipPreAuthLoginFailure({ email, reason: 'invalid_credentials', provider: 'password' });
       throw new UnauthorizedException('Invalid email or password.');
     }
 
