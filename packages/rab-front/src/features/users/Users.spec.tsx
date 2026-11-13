@@ -1,4 +1,4 @@
-import { act, configure, fireEvent, getConfig, render, screen, waitFor, within } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { MemoryRouter } from 'react-router-dom';
@@ -23,7 +23,7 @@ jest.mock('framer-motion', () => ({
   ...jest.requireActual('framer-motion'),
   AnimatePresence: ({ children }: { children?: unknown }) => children,
 }));
-// A ceiling, not a wait: the panel test chains several role queries on a large DOM (see asyncUtilTimeout below).
+// A ceiling, not a wait: the panel test chains many role queries on a large DOM (its waits run on fake time, below).
 jest.setTimeout(30_000);
 
 const mockApi = api as unknown as { get: jest.Mock; post: jest.Mock };
@@ -530,15 +530,7 @@ describe('Users — a Manager sees and adds only their own Venue Managers', () =
   const managerCalls = () => mockApi.get.mock.calls.filter(([u]) => u === '/managers').length;
 
   beforeEach(() => mockApi.get.mockReset());
-  // Every wait in this block is on a mocked promise (no timers, no animation since presence is synchronous above), so
-  // only CPU throughput decides how long the full panel takes to render and be queried by role. A 50x repeat on a
-  // deliberately oversubscribed machine timed out the default 1 s budget at the FIRST findByRole; give these waits 5 s.
-  let asyncUtilTimeout = 1_000;
-  beforeAll(() => {
-    asyncUtilTimeout = getConfig().asyncUtilTimeout;
-    configure({ asyncUtilTimeout: 5_000 });
-  });
-  afterAll(() => configure({ asyncUtilTimeout }));
+  afterEach(() => jest.useRealTimers());
 
   it('with venue_manager.create: a "Venue managers" tab lists GET /venue-managers rows with their venue, offers "New venue manager", and never calls the CEO-only /managers', async () => {
     serve({ roles: ['manager'], isPlatformAdmin: false }, { 'venue_manager.create': true });
@@ -554,6 +546,10 @@ describe('Users — a Manager sees and adds only their own Venue Managers', () =
 
   it('clicking a Venue Manager opens the reference panel (Overview, Timeline, Email, More → Notes / Assigned staff; Add Staff on that tab) backed only by /venue-managers routes', async () => {
     serve({ roles: ['manager'], isPlatformAdmin: false }, { 'venue_manager.create': true });
+    // Fake time: every findBy / waitFor below advances Jest's clock instead of spending a 1 s wall-clock budget, so a
+    // starved runner (CPU, not the app) can no longer time a wait out. Everything awaited is a mocked promise.
+    jest.useFakeTimers();
+    const user = userEvent.setup({ advanceTimers: jest.advanceTimersByTime });
     // The panel is mounted by the app shell (Layout), next to the page.
     render(
       <QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
@@ -563,8 +559,8 @@ describe('Users — a Manager sees and adds only their own Venue Managers', () =
         </MemoryRouter>
       </QueryClientProvider>,
     );
-    await userEvent.click(await screen.findByRole('button', { name: /^Venue managers/ }));
-    await userEvent.click(await screen.findByRole('button', { name: /Venue Test 3$/ }));
+    await user.click(await screen.findByRole('button', { name: /^Venue managers/ }));
+    await user.click(await screen.findByRole('button', { name: /Venue Test 3$/ }));
     await waitFor(() => expect(mockApi.get).toHaveBeenCalledWith('/venue-managers/vm1'));
     for (const tab of [/Overview/, /Timeline/, /Email/]) expect(await screen.findByRole('tab', { name: tab })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: /2 More/ })).toHaveAttribute('aria-haspopup', 'menu');
@@ -573,10 +569,10 @@ describe('Users — a Manager sees and adds only their own Venue Managers', () =
     expect(screen.getAllByText('Venue Test 3').length).toBeGreaterThan(0);
     expect(screen.getByRole('button', { name: /Upload photo|Change photo|photo/i })).toBeInTheDocument();
     expect(screen.getAllByRole('button', { name: /Send Email/ }).length).toBeGreaterThan(0);
-    await userEvent.click(screen.getByRole('tab', { name: /Timeline/ }));
+    await user.click(screen.getByRole('tab', { name: /Timeline/ }));
     await waitFor(() => expect(mockApi.get).toHaveBeenCalledWith('/venue-managers/vm1/timeline'));
-    await userEvent.click(screen.getByRole('button', { name: /2 More/ }));
-    await userEvent.click(screen.getByRole('menuitem', { name: /Assigned staff/ }));
+    await user.click(screen.getByRole('button', { name: /2 More/ }));
+    await user.click(screen.getByRole('menuitem', { name: /Assigned staff/ }));
     await waitFor(() => expect(mockApi.get).toHaveBeenCalledWith('/venue-managers/vm1/staff'));
     expect(screen.getByRole('button', { name: /Add Staff/ })).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: /Send Email/ })).toBeNull();
