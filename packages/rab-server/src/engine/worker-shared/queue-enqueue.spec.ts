@@ -20,8 +20,8 @@ const ID = '11111111-1111-4111-8111-111111111111';
 const WS = '44444444-4444-4444-8444-444444444444';
 const USER = '55555555-5555-4555-8555-555555555555';
 const CONV = '66666666-6666-4666-8666-666666666666';
-const OUTBOX_OPTS = { attempts: 5, backoff: { type: 'exponential', delay: 5_000, jitter: 0.5 }, removeOnComplete: { age: 604_800 }, removeOnFail: { age: 2_592_000 } };
-const AI_OPTS = { attempts: 1, removeOnComplete: { age: 3600, count: 1000 }, removeOnFail: { age: 604_800, count: 5000 } };
+const OUTBOX_OPTS = { attempts: 5, backoff: { type: 'exponential', delay: 5_000, jitter: 0.5 }, removeOnComplete: { age: 14_400, count: 1000 }, removeOnFail: { age: 604_800, count: 1000 } };
+const AI_OPTS = { attempts: 1, removeOnComplete: { age: 14_400, count: 1000 }, removeOnFail: { age: 604_800, count: 1000 } };
 
 type Added = [string, unknown, Record<string, unknown>];
 const fakeQueue = (name: string) => {
@@ -83,11 +83,11 @@ describe('queue-enqueue (Phase D-Q1)', () => {
       ]);
     });
 
-    it('scan job scheduler template: system scope, `{ v: 1 }`, one attempt, 1 h / 1000 and 7 d retention', () => {
+    it('scan job scheduler template: system scope, `{ v: 1 }`, one attempt, the X3.4 retention (4 h / 1000, 7 d / 1000)', () => {
       expect(scanJobTemplate('crewflow-scan-offers', 'offer-expiry', { kind: 'system' }, { v: 1 })).toEqual({
         name: 'offer-expiry',
         data: { v: 1 },
-        opts: { attempts: 1, removeOnComplete: { age: 3600, count: 1000 }, removeOnFail: { age: 604_800 } },
+        opts: { attempts: 1, removeOnComplete: { age: 14_400, count: 1000 }, removeOnFail: { age: 604_800, count: 1000 } },
       });
     });
   });

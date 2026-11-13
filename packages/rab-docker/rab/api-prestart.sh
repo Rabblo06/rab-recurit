@@ -41,7 +41,9 @@ refuse() {
 
 # Signal handling while this shell is PID 1: a stop during a step terminates the child and exits.
 # O3 T8a-TMP trade-off (stated, not silent): the migrate child's output is captured by a command substitution (no file is
-# ever written: rab-api runs read_only with no tmpfs), and a POSIX shell runs a trap only after a command substitution ends.
+# ever written: rab-api runs read_only with no tmpfs writable by its uid 1000; docker-compose.image.yml mounts a 0555,
+# root-owned /tmp, not writable by the API's uid 1000, only as the OpenShip import guard), and a POSIX shell runs a trap
+# only after a command substitution ends.
 # A stop that arrives WHILE the migrate child runs is therefore acted on when the child ends (or by the platform's kill
 # after stop_grace_period); the child keeps its own lock and statement bounds. Every other step stays interruptible.
 CHILD=""
@@ -170,11 +172,11 @@ for name in DATABASE_URL_UNPOOLED CREWFLOW_MIGRATION_DATABASE_URL CREWFLOW_PREST
   eval "value=\${$name:-}"
   if [ -n "$value" ]; then refuse "$name must never be set on the api service (migration and command authority belong only to the migrate child and its per-release approval)."; fi
 done
-# Phase B (ops): the one-off operations container's variables (its own crewflow_app URL, its marker, the operator label) belong
-# to `docker compose --profile ops run --rm rab-ops ...` only. pg-config.ts refuses them in the API process as well.
+# Retired separated-mode operations variables (the removed rab-ops container's own crewflow_app URL, its marker, the operator
+# label). Nothing reads them any more; any value is refused here, and pg-config.ts refuses them in every process as well.
 for name in CREWFLOW_OPS_RUN PG_OPS_APP_DATABASE_URL CREWFLOW_OPS_ACTOR_SOURCE CREWFLOW_OPS_ACTOR_ID CREWFLOW_OPS_CHANGE_REF; do
   eval "value=\${$name:-}"
-  if [ -n "$value" ]; then refuse "$name must never be set on the api service (it belongs to the one-off ops container only)."; fi
+  if [ -n "$value" ]; then refuse "$name must never be set on the api service (a retired separated-mode variable; never valid)."; fi
 done
 # Owner-login architecture: ONE database URL (PG_DATABASE_URL). Legacy and second database URLs and role passwords never
 # belong here. (The removed CREWFLOW_DB_MODE is refused above by the runtime-db-config copy, with its own message.)
@@ -241,9 +243,11 @@ isolation_report
 # the failing migration. It VETOES (exits 66, which pipefail reports) a 70 result that does not say serve:true, names a
 # fresh install (EMPTY / BOOTSTRAP-PARTIAL) or another policy than "continue": a degraded start is never taken on the exit
 # code alone. For a verified 70 it hands the result's failedMigration back to this shell on fd 4 (the command substitution
-# in run_migrate_child; NO file is written: rab-api is read_only with no tmpfs, O3 T8a-TMP) while every line still streams
-# to the log on fd 3. The shell accepts it only as a plain migration name (letters, digits, _ - ., at most 200 characters;
-# anything else -> "unknown") and passes it to main.js as CREWFLOW_UPGRADE_INCOMPLETE.
+# in run_migrate_child; NO file is written: rab-api is read_only with no tmpfs writable by its uid 1000, O3 T8a-TMP;
+# image.yml's 0555 /tmp, not writable by the API's uid 1000, is only the OpenShip import guard) while every line still
+# streams to the log on fd 3. The shell accepts it only as a plain
+# migration name (letters, digits, _ - ., at most 200 characters; anything else -> "unknown") and passes it to main.js as
+# CREWFLOW_UPGRADE_INCOMPLETE.
 MIGRATE_CHILD="$SCRIPTS/migrate/twenty/twenty-migrate.js"
 RELAY_AWK='
 function field(name,   m) {
