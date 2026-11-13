@@ -465,7 +465,16 @@ function teardown(p) {
 }
 
 // ------------------------------------------------------------------------------------------- password file / snapshots
-const sha = (v) => require('node:crypto').createHash('sha256').update(String(v)).digest('hex');
+/**
+ * Whether two passwords (held in memory, never printed) are the same: the raw values compared in constant time after a
+ * length check. No hashing (a fast hash of a password is what CodeQL js/insufficient-password-hash flags).
+ */
+function samePassword(a, b) {
+  if (typeof a !== 'string' || typeof b !== 'string') return false;
+  const x = Buffer.from(a, 'utf8');
+  const y = Buffer.from(b, 'utf8');
+  return x.length === y.length && require('node:crypto').timingSafeEqual(x, y);
+}
 /** Everything about crewflow_owner and the database a setup run could change; compared as one string (no secret values). */
 function dbSnapshot(p) {
   const r = role(p);
@@ -640,7 +649,7 @@ async function blockBundled() {
     const after1 = dbSnapshot(p);
     check(after1 === before, `after the restart the database snapshot is identical (changed: ${snapDiff(before, after1)})`);
     const f1 = p.readPasswordFile();
-    check(f1 && sha(f1.password) === sha(state.pw) && f1.mode === '400 1000:1000', 'the same password file (sha256 compared, never printed), still 0400 1000:1000');
+    check(f1 && samePassword(f1.password, state.pw) && f1.mode === '400 1000:1000', 'the same password file (compared in memory, never printed), still 0400 1000:1000');
     check(MSG.readyUnchanged.test(lastReady(setupLog(p))) && setupExit(p) === 'exited|0', `db-setup ran again and changed nothing ("${lastReady(setupLog(p)).replace(/^.*?\[owner-bootstrap\]/, '[owner-bootstrap]')}")`);
     const down = p.compose(['down', '--timeout', '60'], { timeout: 300_000 });
     keep(p, 'S2-down', down.out);
@@ -651,7 +660,7 @@ async function blockBundled() {
     const after2 = dbSnapshot(p);
     check(after2 === before, `after down + up the database snapshot is identical (changed: ${snapDiff(before, after2)})`);
     const f2 = p.readPasswordFile();
-    check(f2 && sha(f2.password) === sha(state.pw), 'after down + up: the same password file');
+    check(f2 && samePassword(f2.password, state.pw), 'after down + up: the same password file');
     check(MSG.readyUnchanged.test(lastReady(setupLog(p))) && !MSG.readyCreated.test(setupLog(p)), 'the new db-setup container: unchanged');
     check(certs(p) === state.certs, 'the db kept its CA and server certificate');
     const mr = migrateResults(p.logs('rab-api')).pop() || {};
@@ -670,7 +679,7 @@ async function blockBundled() {
     const after = dbSnapshot(p);
     check(after === before, `the database snapshot is identical (changed: ${snapDiff(before, after)})`);
     const f = p.readPasswordFile();
-    check(f && sha(f.password) === sha(state.pw), 'the password file is unchanged');
+    check(f && samePassword(f.password, state.pw), 'the password file is unchanged');
     const sl = setupLog(p);
     evidence('S5-db-setup.log', sl);
     check(MSG.readyUnchanged.test(lastReady(sl)), 'db-setup: unchanged');
@@ -732,7 +741,7 @@ async function blockBundled() {
     check(MSG.wrongPasswordFix.test(sl), 'the fix message names deleting the password file and starting again with the admin URL');
     check(dbSnapshot(p) === before, `nothing changed in the database (changed: ${snapDiff(before, dbSnapshot(p))})`);
     const f = p.readPasswordFile();
-    check(f && sha(f.password) === sha(state.pw), 'the password file was left as it was');
+    check(f && samePassword(f.password, state.pw), 'the password file was left as it was');
     // the fix: delete the file, start again (the bundled admin URL)
     deletePasswordFile(p, 'F1-delete');
     check(p.readPasswordFile() === null, 'the password file is gone');
@@ -751,7 +760,7 @@ async function blockBundled() {
       state.pw = f2.password;
     }
     const pw2 = checkPasswordFile(p, check, n, 'F1 after the reset');
-    check(pw2 && sha(pw2) !== sha(oldPw), 'a NEW random password');
+    check(pw2 && !samePassword(pw2, oldPw), 'a NEW random password');
     check(!p.ownerLoginWorks(oldPw) && !p.ownerLoginWorks(other), 'neither the old file password nor the hand-changed one logs in any more');
     const re = p.compose(['restart', 'rab-api', 'rab-worker'], { timeout: 600_000 });
     keep(p, 'F1-restart', re.out);
@@ -990,7 +999,7 @@ async function blockExternal() {
     L.writeSecrets(p.secretsDir, { caPath: null, appSecret: app2 });
     const d2 = deploy(p, 'S3-app-secret');
     await waitApp(p);
-    check(d2.code === 0 && dbSnapshot(p) === snap && sha(p.readPasswordFile().password) === sha(fpw), `APP_SECRET change: the apps restart, the database and the file are unchanged (changed: ${snapDiff(snap, dbSnapshot(p))})`);
+    check(d2.code === 0 && dbSnapshot(p) === snap && samePassword(p.readPasswordFile().password, fpw), `APP_SECRET change: the apps restart, the database and the file are unchanged (changed: ${snapDiff(snap, dbSnapshot(p))})`);
     // lost file with this admin (it created crewflow_owner, so it has ADMIN OPTION): reset
     deletePasswordFile(p, 'S3-lost-file');
     const d3 = deploy(p, 'S3-reset');
@@ -998,7 +1007,7 @@ async function blockExternal() {
     evidence('S3-db-setup-reset.log', sl3);
     check(d3.code === 0 && MSG.readyReset.test(lastReady(sl3)), `lost file + the external admin URL: the password is reset (exit ${d3.code})`);
     const fpw2 = p.readPasswordFile();
-    check(fpw2 && sha(fpw2.password) !== sha(fpw) && p.ownerLoginWorks(fpw2.password) && !p.ownerLoginWorks(fpw), 'a new random password logs in, the old one does not');
+    check(fpw2 && !samePassword(fpw2.password, fpw) && p.ownerLoginWorks(fpw2.password) && !p.ownerLoginWorks(fpw), 'a new random password logs in, the old one does not');
     filePws.push(fpw2 && fpw2.password);
     const rr = p.compose(['restart', 'rab-api', 'rab-worker'], { timeout: 600_000 });
     keep(p, 'S3-restart-after-reset', rr.out);
