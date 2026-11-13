@@ -4,14 +4,15 @@
 # tini becomes PID 1 (signal forwarding, zombie reaping) and the Worker its child, so the Worker's watchdog SIGKILL (ignored
 # by the kernel for PID 1) still works without compose's `init: true`.
 #
-# PR #125 option 2 (owner decision 2026-11-13): this container NEVER receives PG_DATABASE_URL, in any form; only the
+# DB-SETUP (Twenty Helm model, OWNER-DB-FINAL.md Part A): this container NEVER receives PG_DATABASE_URL, in any form; only the
 # one-shot db-setup service does. This script:
 #   1. refuses arguments, PG_DATABASE_PASSWORD and a non-empty PG_DATABASE_URL (any login; exit 64);
 #   2. builds the crewflow_owner runtime URL with the same pure derive step as api-prestart.sh (never connects; the URL
 #      comes back on fd 4 through a command substitution: never a file, never argv, never the log), from db-setup's
 #      credential-free target file (CREWFLOW_DB_TARGET_FILE=/run/crewflow/db-target/target.json) and the crewflow_owner
 #      password file beside it (both mounted read-only; Twenty: the worker receives only the app user's URL,
-#      helm/twenty/templates/deployment-worker.yaml:76-90), waiting for both (derive exit 75) 2 s apart, at most 120 s;
+#      helm/twenty/templates/deployment-worker.yaml:76-90), waiting for both (derive exit 75) 2 s apart, at most 120 s
+#      (60 attempts: bounded by a COUNT, never by the clock); each derive run is bounded by `timeout 10` (a hang is exit 70);
 #   3. sets PG_SSL_CA_CERT_PATH to the bundled db's CA when the runtime URL's host is exactly `db` and it is unset (the block
 #      below is identical in api-prestart.sh and db-setup.sh; run-prestart-shell-tests.cjs compares them);
 #   4. exports the runtime URL as PG_DATABASE_URL and execs tini. The Worker itself retries a 28P01 first login (its
@@ -61,19 +62,28 @@ if [ -n "${PG_DATABASE_URL:-}" ]; then
 fi
 unset PG_DATABASE_URL
 export CREWFLOW_DB_TARGET_FILE="$DB_TARGET_FILE"
-STARTED="$(date +%s)"
+DERIVE_TIMEOUT_SECONDS=10
+ATTEMPTS=$(( (WAIT_SECONDS + 1) / 2 ))
+if [ "$ATTEMPTS" -lt 1 ]; then ATTEMPTS=1; fi
+ATTEMPT=0
 while :; do
+  ATTEMPT=$((ATTEMPT + 1))
   STATUS=0
-  RUNTIME_URL="$(node "$DERIVE_RUNTIME_URL" 4>&1 1>&2)" || STATUS=$?
+  RUNTIME_URL="$(timeout "$DERIVE_TIMEOUT_SECONDS" node "$DERIVE_RUNTIME_URL" 4>&1 1>&2)" || STATUS=$?
   if [ "$STATUS" -ne 75 ]; then break; fi
   RUNTIME_URL=""
-  WAITED=$(( $(date +%s) - STARTED ))
-  if [ "$WAITED" -ge "$WAIT_SECONDS" ]; then
+  if [ "$ATTEMPT" -ge "$ATTEMPTS" ]; then
     refuse "the database target file did not appear within ${WAIT_SECONDS}s: db-setup (the only service with the admin URL) has not completed." 75
   fi
-  echo "worker-start: waiting for db-setup: the database target file is not there yet (${WAITED}s of ${WAIT_SECONDS}s)" >&2
+  echo "worker-start: waiting for db-setup: the database target file is not there yet (attempt ${ATTEMPT} of ${ATTEMPTS}, 2 s apart)" >&2
   sleep 2
 done
+case "$STATUS" in
+  124 | 137 | 143)
+    RUNTIME_URL=""
+    refuse "the derive step did not finish within ${DERIVE_TIMEOUT_SECONDS}s (a stuck db-setup volume or a non-regular file?)." 70
+    ;;
+esac
 if [ "$STATUS" -ne 0 ]; then
   RUNTIME_URL=""
   refuse 'could not build the crewflow_owner connection (see the derive-runtime-url line above).' "$STATUS"

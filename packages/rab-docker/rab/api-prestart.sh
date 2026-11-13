@@ -2,7 +2,7 @@
 # API start: rab-api's ENTRYPOINT in every deploy compose file (DB-SETUP; also the image's default command). Runs from /app
 # (the image WORKDIR).
 #
-# PR #125 option 2 (owner decision 2026-11-13): this container NEVER receives PG_DATABASE_URL, in any form (only the
+# DB-SETUP (Twenty Helm model, OWNER-DB-FINAL.md Part A): this container NEVER receives PG_DATABASE_URL, in any form (only the
 # one-shot db-setup service does: the admin URL, an existing crewflow_owner URL, or the bundled db's). This script is PID 1
 # (compose `entrypoint: ["./api-prestart.sh"]`, no compose init), refuses a PG_DATABASE_URL in its environment (exit 64),
 # builds the crewflow_owner URL from the credential-free target file and the crewflow_owner password file db-setup wrote
@@ -24,7 +24,7 @@
 #      reached the API's environment (exit 64). The one exception is the per-release approval token
 #      (CREWFLOW_MIGRATION_APPROVED) when CREWFLOW_MIGRATE_ON_START=true AND CREWFLOW_MIGRATION_APPROVAL_MODE=token: it is
 #      taken out of this shell's environment first, handed ONLY to the short-lived migrate child, and never reaches main.js;
-#   2b. DB-SETUP option 2: refuses any PG_DATABASE_URL (64); builds the crewflow_owner runtime URL from db-setup's
+#   2b. DB-SETUP (Twenty Helm model): refuses any PG_DATABASE_URL (64); builds the crewflow_owner runtime URL from db-setup's
 #      credential-free target file and its crewflow_owner password file, waiting (bounded) for both (details below);
 #   3. CREWFLOW_MIGRATE_ON_START=true (and DISABLE_DB_MIGRATIONS not true): runs the short-lived migrate child (Agent 1:
 #      migration lock, fresh-install classifier, post-checks, upgrade-failure policy). Exit 0 = current / applied / ledger
@@ -259,7 +259,7 @@ isolation_report() {
 }
 isolation_report
 
-# DB-SETUP, PR #125 option 2 (owner decision 2026-11-13): rab-api NEVER receives PG_DATABASE_URL (admin URL, crewflow_owner
+# DB-SETUP (Twenty Helm model, OWNER-DB-FINAL.md Part A): rab-api NEVER receives PG_DATABASE_URL (admin URL, crewflow_owner
 # URL, anything). Only the one-shot db-setup service does; its bootstrap child creates crewflow_owner if missing (random
 # password, stored in /run/crewflow/db-target/owner-password, 0400; for an existing crewflow_owner URL, that URL's
 # password) and writes the CREDENTIAL-FREE target file /run/crewflow/db-target/target.json
@@ -268,8 +268,10 @@ isolation_report
 # fd 4 through a command substitution: never a file, never argv, never the log):
 #   - PG_DATABASE_URL set (non-empty) here, any login: refused (64) before anything runs. An empty value is unset.
 #   - CREWFLOW_DB_TARGET_FILE=<that file> -> the URL from the target and the password file. A file that is not there yet
-#     (derive exit 75) is waited for, 2 s apart, at most 120 s, with a fixed message, because a platform may not honour
-#     depends_on: condition: service_completed_successfully (OpenShip: NOT VERIFIED); then exit 75. There is no other path.
+#     (derive exit 75) is waited for, 2 s apart, at most 120 s (60 attempts: bounded by a COUNT, never by the clock, so a
+#     clock step cannot stretch or end the wait), with a fixed message, because a platform may not honour depends_on:
+#     condition: service_completed_successfully (OpenShip: NOT VERIFIED); then exit 75. There is no other path. Each derive
+#     run has its own bound (`timeout 10`): a derive that hangs (a FIFO, a stuck volume) ends as exit 70, never a hung start.
 # Then PG_DATABASE_URL = the runtime URL; PG_DATABASE_PASSWORD and CREWFLOW_DB_TARGET_FILE are unset.
 # TLS (D1 a): when the runtime URL's host is exactly `db` and PG_SSL_CA_CERT_PATH is unset (or blank), it is set to the
 # bundled db's own CA (mounted read-only). The block below is identical in worker-start.sh and db-setup.sh
@@ -301,19 +303,28 @@ if [ -n "${PG_DATABASE_URL:-}" ]; then
 fi
 unset PG_DATABASE_URL
 export CREWFLOW_DB_TARGET_FILE="$DB_TARGET_FILE"
-DB_SETUP_STARTED="$(date +%s)"
+DERIVE_TIMEOUT_SECONDS=10
+DB_SETUP_ATTEMPTS=$(( (DB_SETUP_WAIT_SECONDS + 1) / 2 ))
+if [ "$DB_SETUP_ATTEMPTS" -lt 1 ]; then DB_SETUP_ATTEMPTS=1; fi
+ATTEMPT=0
 while :; do
+  ATTEMPT=$((ATTEMPT + 1))
   STATUS=0
-  RUNTIME_URL="$(node "$DERIVE_RUNTIME_URL" 4>&1 1>&2)" || STATUS=$?
+  RUNTIME_URL="$(timeout "$DERIVE_TIMEOUT_SECONDS" node "$DERIVE_RUNTIME_URL" 4>&1 1>&2)" || STATUS=$?
   if [ "$STATUS" -ne 75 ]; then break; fi
   RUNTIME_URL=""
-  WAITED=$(( $(date +%s) - DB_SETUP_STARTED ))
-  if [ "$WAITED" -ge "$DB_SETUP_WAIT_SECONDS" ]; then
+  if [ "$ATTEMPT" -ge "$DB_SETUP_ATTEMPTS" ]; then
     fail_after_delay 75 "the database target file did not appear within ${DB_SETUP_WAIT_SECONDS}s: db-setup (the only service with the admin URL) has not completed"
   fi
-  echo "api-prestart: waiting for db-setup: the database target file is not there yet (${WAITED}s of ${DB_SETUP_WAIT_SECONDS}s)"
+  echo "api-prestart: waiting for db-setup: the database target file is not there yet (attempt ${ATTEMPT} of ${DB_SETUP_ATTEMPTS}, 2 s apart)"
   run_step sleep 2 || true
 done
+case "$STATUS" in
+  124 | 137 | 143)
+    RUNTIME_URL=""
+    fail_after_delay 70 "the derive step did not finish within ${DERIVE_TIMEOUT_SECONDS}s (a stuck db-setup volume or a non-regular file?)"
+    ;;
+esac
 if [ "$STATUS" -ne 0 ]; then
   RUNTIME_URL=""
   fail_after_delay "$STATUS" "could not build the crewflow_owner connection (see the derive-runtime-url line above)"

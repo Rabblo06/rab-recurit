@@ -115,7 +115,9 @@ function writeUrl(url: string, io: DeriveIo): number | null {
 
 /**
  * The runtime URL from the credential-free target file plus the crewflow_owner password file (both written by db-setup).
- * Either missing or empty: 75 (not ready). Malformed: 64. The URL is built by runtimeUrlFromDbTarget, i.e.
+ * The target missing or empty, or the password file missing: 75 (not ready). Malformed (an EMPTY password file included,
+ * security review L2; a symlink, a FIFO, a wrong owner or mode): 64. Only `owner-password` is read, never the pending
+ * `owner-password.next`. The URL is built by runtimeUrlFromDbTarget, i.e.
  * buildRuntimeDatabaseUrl's policy, rebuild and round-trip check.
  */
 function deriveFromFiles(env: Record<string, string | undefined>, io: DeriveIo): number {

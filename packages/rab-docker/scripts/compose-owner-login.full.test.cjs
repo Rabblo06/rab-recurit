@@ -539,3 +539,27 @@ test('DENIAL (rendered): docker-compose.image.yml with a "maint"-profile service
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });
+
+// Security review L3: the password volume can be reached or shadowed other than through `volumes:`. Each fixture must fail.
+const L3_FIXTURES = [
+  ['volumes_from on rab-redis', (s) => { s['rab-redis'].volumes_from = ['db-setup']; }, /rab-redis: has volumes_from/],
+  ['volumes_from on rab-api (even read-only)', (s) => { s['rab-api'].volumes_from = ['db-setup:ro']; }, /rab-api: has volumes_from/],
+  ['a secret targeting the password file', (s) => { s['rab-api'].secrets = [{ source: 'x', target: '/run/crewflow/db-target/owner-password' }]; }, /rab-api: a secrets entry targets \/run\/crewflow/],
+  ['a relative secret target climbing into /run/crewflow', (s) => { s['rab-worker'].secrets = [{ source: 'x', target: '../crewflow/db-ca/ca.crt' }]; }, /rab-worker: a secrets entry targets \/run\/crewflow/],
+  ['a config under /run/crewflow', (s) => { s['db-setup'].configs = [{ source: 'x', target: '/run/crewflow/db-target/target.json' }]; }, /db-setup: a configs entry targets \/run\/crewflow/],
+  ['a bind into Docker\'s volume store', (s) => { s['rab-redis'].volumes.push({ type: 'bind', source: '/var/lib/docker/volumes/crewflow_crewflow-db-target/_data', target: '/x', read_only: true }); }, /rab-redis: binds a path inside Docker's volume store/],
+  ['a bind into the rootless volume store', (s) => { s['rab-redis'].volumes.push({ type: 'bind', source: '/home/u/.local/share/docker/volumes/v/_data', target: '/x', read_only: true }); }, /rab-redis: binds a path inside Docker's volume store/],
+  ['a tmpfs over the password directory', (s) => { s['rab-api'].tmpfs = [...(s['rab-api'].tmpfs ?? []), '/run/crewflow/db-target:size=1m']; }, /rab-api: a tmpfs at \/run\/crewflow\/db-target/],
+  ['a tmpfs on a non-normalised path', (s) => { s['rab-worker'].tmpfs = ['/run/crewflow//db-target/../db-target/x']; }, /rab-worker: a tmpfs at \/run\/crewflow\/db-target\/x/],
+  ['a mount under the password directory via ..', (s) => { s['rab-redis'].volumes.push({ type: 'volume', source: 'rab-redis-data', target: '/run/crewflow/x/../db-target' }); }, /rab-redis: mounts something at \/run\/crewflow\/db-target/],
+  ['rab-redis as uid 1000', (s) => { s['rab-redis'].user = '1000:1000'; }, /rab-redis: user is "1000:1000", expected 999:<gid>/],
+  ['rab-redis without a user', (s) => { delete s['rab-redis'].user; }, /rab-redis: user is "", expected 999:<gid>/],
+];
+test('DENIAL security review L3: volumes_from, secrets/configs under /run/crewflow, Docker-volume-store binds, tmpfs, rab-redis uid', { skip }, () => {
+  for (const c of COMBOS) {
+    for (const [label, mutate, pattern] of L3_FIXTURES) {
+      assertRefused(problemsAfter(c.name, mutate), pattern);
+      assert.ok(label);
+    }
+  }
+});

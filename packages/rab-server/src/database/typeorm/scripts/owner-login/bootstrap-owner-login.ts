@@ -10,7 +10,10 @@
  *     success (atomic rename, 0644) and removed after a refusal or failure, so the apps keep waiting (exit 75);
  *   - `owner-password` beside it: the crewflow_owner password (owner-password-file.ts; atomic rename, 0400). Twenty's
  *     equivalent is the app user's own secret (twentyhq/twenty@eedb0a73 helm/twenty/templates/secret-db-url.yaml:3-8). It is
- *     written before any database change and NEVER removed by this process.
+ *     NEVER removed by this process;
+ *   - `owner-password.next`: a NEW password, stored exclusively before any database change and renamed over
+ *     `owner-password` only after the COMMIT and a login with it; a later start promotes it if it logs in and deletes it
+ *     otherwise (security review L1).
  *
  * Exit: 0 ok, 64 refusal, 70 unexpected. Prints fixed `[owner-bootstrap] ...` lines and exactly one `OWNER_BOOTSTRAP_RESULT
  * {...}` line (enums, booleans, a SQLSTATE). Never a URL, a password, a verifier, a host, a database, a login name or a
@@ -18,7 +21,14 @@
  */
 import { DbTargetError } from '../../../owner-login/db-target';
 import { dbTargetFilePath, removeDbTargetFile, writeDbTargetFile } from '../../../owner-login/db-target-file';
-import { ownerPasswordFilePath, readOwnerPasswordFile, writeOwnerPasswordFile } from '../../../owner-login/owner-password-file';
+import {
+  ownerPasswordFilePath,
+  ownerPasswordNextFilePath,
+  promoteOwnerPasswordFile,
+  readOwnerPasswordFile,
+  removeOwnerPasswordFile,
+  writeOwnerPasswordFile,
+} from '../../../owner-login/owner-password-file';
 import { failureResult, OWNER_BOOTSTRAP_LOG_PREFIX, OwnerBootstrapRefusal, resultLine, runOwnerBootstrap } from './owner-bootstrap';
 
 async function main(): Promise<number> {
@@ -34,10 +44,17 @@ async function main(): Promise<number> {
     return refused.exitCode;
   }
   const passwordFile = ownerPasswordFilePath(targetFile);
+  const nextFile = ownerPasswordNextFilePath(passwordFile);
   const result = await runOwnerBootstrap(process.env, {
     log,
-    readPasswordFile: () => readOwnerPasswordFile(passwordFile),
-    writePasswordFile: (password, exclusive) => writeOwnerPasswordFile(passwordFile, password, { exclusive }),
+    passwordFiles: {
+      readMain: () => readOwnerPasswordFile(passwordFile),
+      readNext: () => readOwnerPasswordFile(nextFile),
+      writeMain: (password) => writeOwnerPasswordFile(passwordFile, password),
+      writeNextExclusive: (password) => writeOwnerPasswordFile(nextFile, password, { exclusive: true }),
+      promoteNext: () => promoteOwnerPasswordFile(nextFile, passwordFile),
+      removeNext: () => removeOwnerPasswordFile(nextFile),
+    },
     publishTarget: (target) => writeDbTargetFile(targetFile, target),
     withdrawTarget: () => removeDbTargetFile(targetFile),
   });

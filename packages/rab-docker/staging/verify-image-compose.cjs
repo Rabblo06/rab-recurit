@@ -43,7 +43,7 @@ const path = require('node:path');
 
 const REPO = path.resolve(__dirname, '../../..');
 // The bundled db's environment rules, one definition for the committed and the deployed model (PR #125 review, finding 6).
-const { bundledDbEnvironmentProblems } = require('../scripts/compose-owner-login.cjs');
+const { bundledDbEnvironmentProblems, credentialMountProblems } = require('../scripts/compose-owner-login.cjs');
 const VARIANT = path.join(REPO, 'packages/rab-docker/docker-compose.image.yml');
 const PRODUCTION = path.join(REPO, 'packages/rab-docker/docker-compose.production.yml');
 
@@ -61,6 +61,8 @@ const RUNTIME_KEYS = [
   'user', 'read_only', 'cap_drop', 'cap_add', 'security_opt', 'tmpfs', 'pids_limit', 'mem_limit', 'memswap_limit', 'cpus',
   'stop_grace_period', 'privileged', 'healthcheck', 'restart', 'init', 'ipc', 'pid', 'network_mode', 'devices', 'shm_size',
   'ulimits', 'command', 'entrypoint', 'volumes',
+  // Security review L3: other ways to mount or shadow files (db-setup's password volume included).
+  'volumes_from', 'secrets', 'configs',
 ];
 /** Committed environment keys that must keep the production file's value on rab-api / rab-worker. */
 const PINNED_ENV = ['NODE_ENV', 'RAB_RUNTIME_ENV', 'AI_ENABLED', 'HWS_RUNTIME_ENABLED', 'STORAGE_DRIVER', 'STORAGE_KEY_PREFIX',
@@ -365,6 +367,9 @@ function checkVariant(variant, production, variantFiles = variant) {
   // PR #125 option A: db-setup is the same one-shot in both files, and the app services never hold a database URL.
   for (const pr of optionAProblems(services)) fail(pr);
   for (const pr of optionAProblems(production?.services ?? {}, ' in docker-compose.production.yml')) fail(pr);
+  // Security review L3: volumes_from, secrets/configs, Docker-volume-store binds, tmpfs, rab-redis's uid (one definition).
+  for (const pr of credentialMountProblems(services)) fail(pr);
+  for (const pr of credentialMountProblems(production?.services ?? {}, ' in docker-compose.production.yml', { redisUser: false })) fail(pr);
   const vset = services[DB_SETUP_SERVICE];
   const pset = production?.services?.[DB_SETUP_SERVICE];
   if (vset && pset) {
@@ -580,6 +585,7 @@ function checkDeployment(merged, production, envFileKeys = {}) {
   if (String(envOf(services['rab-api']).PG_DATABASE_URL ?? '') !== String(envOf(services['rab-worker']).PG_DATABASE_URL ?? '')) fail('PG_DATABASE_URL differs between rab-api and rab-worker in the deployed model');
   // PR #125 option 2: the app services never hold a database URL; db-setup alone carries it.
   for (const pr of optionAProblems(services, ' in the deployed model')) fail(pr);
+  for (const pr of credentialMountProblems(services, ' in the deployed model')) fail(pr);
   const setup = services[DB_SETUP_SERVICE];
   const pset = production?.services?.[DB_SETUP_SERVICE];
   if (setup) {

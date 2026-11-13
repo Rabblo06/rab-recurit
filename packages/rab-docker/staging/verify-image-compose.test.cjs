@@ -596,3 +596,29 @@ test('DENIAL PR #125 finding 6: environment mode applies the bundled db environm
     [(v) => { v.services.db.environment.EXTRA = 'x'; }, /db: environment has EXTRA \(only .* in the deployed model/],
   ]) assertRefused(run(mutate), re);
 });
+
+// Security review L3 (the shared rule, compose-owner-login.cjs credentialMountProblems): each fixture must fail, in the
+// variant and in the deployed model.
+const L3_VARIANT_FIXTURES = [
+  [(v) => { v.services['rab-redis'].volumes_from = ['db-setup']; }, /rab-redis: has volumes_from/],
+  [(v) => { v.services['rab-api'].secrets = [{ source: 'x', target: '/run/crewflow/db-target/owner-password' }]; }, /rab-api: a secrets entry targets \/run\/crewflow|rab-api\.secrets differs/],
+  [(v) => { v.services['db-setup'].configs = [{ source: 'x', target: '/run/crewflow/db-target/target.json' }]; }, /db-setup: a configs entry targets \/run\/crewflow/],
+  [(v) => { v.services['rab-redis'].volumes.push({ type: 'bind', source: '/var/lib/docker/volumes/p_crewflow-db-target/_data', target: '/x', read_only: true }); }, /rab-redis: binds a path inside Docker's volume store/],
+  [(v) => { v.services['rab-worker'].tmpfs = [...(v.services['rab-worker'].tmpfs ?? []), '/run/crewflow/db-target']; }, /rab-worker: a tmpfs at \/run\/crewflow\/db-target|rab-worker\.tmpfs differs/],
+  [(v) => { v.services['rab-redis'].user = '1000:1000'; }, /rab-redis: user is "1000:1000", expected 999:<gid>/],
+];
+test('DENIAL security review L3: the variant and the production reference refuse every other path to the password volume', { skip }, () => {
+  for (const [mutate, pattern] of L3_VARIANT_FIXTURES) assertRefused(problemsAfter((v) => mutate(v)), pattern);
+  // The production reference: the mount rules apply (its rab-redis has no `user:`, so the uid rule is the variant's).
+  assertRefused(problemsAfter((_v, _f, p) => { p.services['rab-redis'].volumes_from = ['db-setup']; }), /rab-redis: has volumes_from in docker-compose\.production\.yml/);
+  assertRefused(problemsAfter((_v, _f, p) => { p.services['rab-api'].tmpfs = ['/run/crewflow/db-target']; }), /rab-api: a tmpfs at \/run\/crewflow\/db-target in docker-compose\.production\.yml/);
+});
+test('DENIAL security review L3: the deployed model refuses the same paths (an override cannot add them)', { skip }, () => {
+  for (const [mutate, pattern] of [
+    [(v) => { v.services['rab-redis'].volumes_from = ['db-setup']; }, /rab-redis: has volumes_from in the deployed model/],
+    [(v) => { v.services['rab-api'].secrets = [{ source: 'x', target: '/run/crewflow/db-target/owner-password' }]; }, /rab-api: a secrets entry targets \/run\/crewflow in the deployed model/],
+    [(v) => { v.services['rab-redis'].volumes.push({ type: 'bind', source: '/var/lib/docker/volumes/v/_data', target: '/x', read_only: true }); }, /rab-redis: binds a path inside Docker's volume store in the deployed model/],
+    [(v) => { v.services['rab-api'].tmpfs = ['/run/crewflow/db-target:size=1m']; }, /rab-api: a tmpfs at \/run\/crewflow\/db-target in the deployed model/],
+    [(v) => { v.services['rab-redis'].user = '1000:1000'; }, /rab-redis: user is "1000:1000" in the deployed model, expected 999:<gid>/],
+  ]) assertRefused(deployed(mutate), pattern);
+});

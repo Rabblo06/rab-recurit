@@ -82,22 +82,20 @@ describe('derive-runtime-url from the target file + the password file', () => {
     }
   });
 
-  it('password file missing or empty: exit 75 "password file not there yet", nothing written', () => {
+  it('password file missing: exit 75 "password file not there yet", nothing written; a pending owner-password.next is never used', () => {
     writeDbTargetFile(file, TARGET);
-    for (const prepare of [() => undefined, () => fs.writeFileSync(pwFile, '')]) {
-      prepare();
-      const c = capture();
-      expect(runDeriveRuntimeUrl({ CREWFLOW_DB_TARGET_FILE: file }, c.io)).toBe(DERIVE_EXIT.notReady);
-      expect(c.written).toEqual([]);
-      expect(c.err).toEqual([DERIVE_MESSAGES.passwordNotReady]);
-    }
+    writeOwnerPasswordFile(`${pwFile}.next`, OWNER_PASSWORD, { exclusive: true });
+    const c = capture();
+    expect(runDeriveRuntimeUrl({ CREWFLOW_DB_TARGET_FILE: file }, c.io)).toBe(DERIVE_EXIT.notReady);
+    expect(c.written).toEqual([]);
+    expect(c.err).toEqual([DERIVE_MESSAGES.passwordNotReady]);
   });
 
-  it('a malformed password file (newline, control character, oversized): exit 64, nothing written, value never echoed', () => {
+  it('a malformed password file (EMPTY, newline, control character, oversized): exit 64, nothing written, value never echoed', () => {
     writeDbTargetFile(file, TARGET);
-    for (const bad of [`${OWNER_PASSWORD}\n`, `a\u0001b`, 'x'.repeat(5000)]) {
+    for (const bad of ['', `${OWNER_PASSWORD}\n`, `a\u0001b`, 'x'.repeat(5000)]) {
       fs.rmSync(pwFile, { force: true });
-      fs.writeFileSync(pwFile, bad);
+      fs.writeFileSync(pwFile, bad, { mode: 0o600 });
       const c = capture();
       expect(runDeriveRuntimeUrl({ CREWFLOW_DB_TARGET_FILE: file }, c.io)).toBe(DERIVE_EXIT.refused);
       expect(c.written).toEqual([]);

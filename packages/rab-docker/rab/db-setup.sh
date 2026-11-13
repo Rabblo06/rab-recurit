@@ -8,8 +8,9 @@
 # (scripts/owner-login/bootstrap-owner-login.js) with CREWFLOW_DB_TARGET_FILE set:
 #   - admin / bundled URL: crewflow_owner is created if missing, with a RANDOM password kept in the password file
 #     (/run/crewflow/db-target/owner-password, 0400) and reused on every later start (Twenty: secret-db-url.yaml:3-8); a
-#     stored password that no longer logs in is refused (64: delete the password file and start again with the admin
-#     address); a lost password file + the admin URL resets the password once (a Crewflow addition);
+#     stored password that does not log in is refused (64: delete the password file and start again with the admin
+#     address); a lost password file + the admin URL resets the password once (a Crewflow addition): the new password is
+#     stored first as owner-password.next and becomes owner-password only after the COMMIT and a login with it;
 #   - existing crewflow_owner URL: read-only checks only; its password is copied into the password file; the database is
 #     never written to and the password never changed.
 # In every mode it then writes the CREDENTIAL-FREE target file /run/crewflow/db-target/target.json
@@ -21,8 +22,9 @@
 # Prints fixed lines only (the child's): never a URL, a password, a host or a database name. Never traces the shell.
 set -eu
 
-TARGET=/run/crewflow/db-target/target.json
-PASSWORD_FILE=/run/crewflow/db-target/owner-password
+DIR=/run/crewflow/db-target
+TARGET="$DIR/target.json"
+PASSWORD_FILE="$DIR/owner-password"
 
 refuse() {
   echo "db-setup: REFUSED - $1" >&2
@@ -41,7 +43,14 @@ fi
 if [ -z "${PG_DATABASE_URL:-}" ]; then
   refuse 'PG_DATABASE_URL is required: the database admin URL, or an existing crewflow_owner URL (the bundled db by default).'
 fi
-rm -f "$TARGET" "$TARGET.tmp"
+# Temp files a killed earlier run may have left (owner-password-file.ts / db-target-file.ts name them
+# .<file>.<pid>.<random>.tmp; `.owner-password.*.tmp` also covers the pending `.owner-password.next.*.tmp`). The pending
+# owner-password.next itself is NOT removed here: the bootstrap child settles it (promoted if it logs in, else deleted).
+clean_temp_files() {
+  rm -f "$DIR"/.owner-password.*.tmp "$DIR"/.target.json.*.tmp
+}
+clean_temp_files
+rm -f "$TARGET"
 export CREWFLOW_DB_TARGET_FILE="$TARGET"
 
 # BEGIN crewflow bundled-db CA
@@ -62,14 +71,14 @@ STATUS=0
 node packages/rab-server/dist/database/typeorm/scripts/owner-login/bootstrap-owner-login.js || STATUS=$?
 case "$STATUS" in
   0) ;;
-  64) rm -f "$TARGET" "$TARGET.tmp"; refuse 'the database setup step refused (see the [owner-bootstrap] line above).' 64 ;;
-  *) rm -f "$TARGET" "$TARGET.tmp"; refuse "the database setup step failed (see the [owner-bootstrap] lines above; exit $STATUS)." "$STATUS" ;;
+  64) rm -f "$TARGET"; clean_temp_files; refuse 'the database setup step refused (see the [owner-bootstrap] line above).' 64 ;;
+  *) rm -f "$TARGET"; clean_temp_files; refuse "the database setup step failed (see the [owner-bootstrap] lines above; exit $STATUS)." "$STATUS" ;;
 esac
 if [ ! -s "$TARGET" ]; then
   refuse 'the database setup step reported success but wrote no target file; rab-api and rab-worker cannot start.' 70
 fi
 if [ ! -s "$PASSWORD_FILE" ]; then
-  rm -f "$TARGET" "$TARGET.tmp"
+  rm -f "$TARGET"
   refuse 'the database setup step reported success but no crewflow_owner password file exists; rab-api and rab-worker cannot start.' 70
 fi
 echo 'db-setup: done (crewflow_owner ready, database target file written)'

@@ -134,7 +134,7 @@ function synthUrl(target: DbTarget): string {
 }
 
 /**
- * The crewflow_owner runtime URL for a target and the derived password. Runs the SAME policy and rebuild as the admin-URL
+ * The crewflow_owner runtime URL for a target and the stored password (db-setup's owner-password file). Runs the SAME policy and rebuild as the admin-URL
  * path (buildRuntimeDatabaseUrl: no unknown parameter, no ssl* but sslmode, no session options, no transaction pooler),
  * then checks the result names exactly the file's host, port and database. Returns a secret: never log it.
  */

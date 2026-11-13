@@ -7,7 +7,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 
 import { OWNER_CREDENTIAL_MESSAGES } from '../../../owner-login/owner-credential';
-import { type OwnerPasswordRead } from '../../../owner-login/owner-password-file';
+import { type OwnerPasswordRead, OwnerPasswordFileError, OWNER_PASSWORD_FILE_MESSAGES } from '../../../owner-login/owner-password-file';
 import {
   bootstrapDriverConfigs,
   bootstrapOwnerWithIo,
@@ -21,8 +21,10 @@ import {
   OwnerBootstrapIo,
   OwnerBootstrapRefusal,
   OwnerFacts,
+  type OwnerPasswordFiles,
   OwnerUrlIo,
   planWrite,
+  resolveStoredPassword,
   resultLine,
   runOwnerBootstrap,
   setupOwnerUrlWithIo,
@@ -33,6 +35,8 @@ import {
   OWNER_BOOTSTRAP_BEGIN,
   OWNER_BOOTSTRAP_LOCK_KEY,
   OWNER_BOOTSTRAP_Q2_FACTS,
+  OWNER_BOOTSTRAP_Q2B_OTHER_DATABASES,
+  OWNER_URL_SESSION_STARTUP_OPTIONS,
   OWNER_BOOTSTRAP_Q4A_LOCK,
   OWNER_BOOTSTRAP_Q4B_SET_INPUTS,
   OWNER_BOOTSTRAP_Q4C_DO,
@@ -196,7 +200,11 @@ describe('owner bootstrap: error mapping', () => {
 });
 
 /** A fake admin session + probe recording every statement and its bind values. */
-function fakeIo(facts: OwnerFacts[], probes: Array<{ ok: true } | { ok: false; code: string }>, opts: { failOn?: string; failCode?: string; openErrors?: string[] } = {}) {
+function fakeIo(
+  facts: OwnerFacts[],
+  probes: Array<{ ok: true } | { ok: false; code: string }>,
+  opts: { failOn?: string; failCode?: string; openErrors?: string[]; otherDatabase?: unknown } = {},
+) {
   const sent: Array<{ text: string; values?: unknown[] }> = [];
   const lines: string[] = [];
   let clock = 0;
@@ -233,6 +241,7 @@ function fakeIo(facts: OwnerFacts[], probes: Array<{ ok: true } | { ok: false; c
         };
       }
       if (text === OWNER_BOOTSTRAP_Q4D_REVERIFY) return { rows: [{ ok: true }] };
+      if (text === OWNER_BOOTSTRAP_Q2B_OTHER_DATABASES) return { rows: [{ o_other_database: 'otherDatabase' in opts ? opts.otherDatabase : false }] };
       return { rows: [] };
     },
     async end() {
@@ -392,15 +401,259 @@ describe('owner bootstrap: the admin session', () => {
   });
 });
 
-const missingFile = (): OwnerPasswordRead => ({ state: 'missing' });
+describe('owner bootstrap: one Crewflow deployment per PostgreSQL cluster (security review L4, owner-approved, read-only)', () => {
+  it('Q2b is one fixed SELECT (no write, no parameter, no value), in the admin statement list', () => {
+    expect(OWNER_BOOTSTRAP_Q2B_OTHER_DATABASES.startsWith('SELECT EXISTS (')).toBe(true);
+    expect(OWNER_BOOTSTRAP_Q2B_OTHER_DATABASES).not.toMatch(/\b(INSERT|UPDATE|DELETE|CREATE|ALTER|DROP|GRANT|REVOKE|SET|DO|COPY|TRUNCATE|set_config|nextval|pg_advisory)\b|\$\d/i);
+    expect(OWNER_BOOTSTRAP_Q2B_OTHER_DATABASES).toContain('pg_catalog.pg_shdepend');
+    expect(OWNER_BOOTSTRAP_Q2B_OTHER_DATABASES).toContain('pg_catalog.current_database()');
+    expect(OWNER_BOOTSTRAP_ADMIN_STATEMENTS).toContain(OWNER_BOOTSTRAP_Q2B_OTHER_DATABASES);
+  });
+
+  it('DENIAL: an A4 reset while crewflow_owner is used by another database is refused (64) before anything is stored or written', async () => {
+    const stored: string[] = [];
+    const { io, sent } = fakeIo([existing, existing], [{ ok: true }], { otherDatabase: true });
+    io.passwordSource = 'new';
+    io.persistPassword = () => void stored.push('x');
+    const error = await bootstrapOwnerWithIo(io).catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(OwnerBootstrapRefusal);
+    expect((error as Error).message).toBe(OWNER_BOOTSTRAP_MESSAGES.ownerInOtherDatabase);
+    expect(OWNER_BOOTSTRAP_MESSAGES.ownerInOtherDatabase).toContain('one deployment per PostgreSQL cluster when using an admin URL');
+    expect(stored).toEqual([]);
+    const texts = sent.map((q) => q.text);
+    expect(texts).toContain(OWNER_BOOTSTRAP_Q2B_OTHER_DATABASES);
+    expect(texts).not.toContain(OWNER_BOOTSTRAP_BEGIN);
+    expect(texts).not.toContain(OWNER_BOOTSTRAP_Q4C_DO);
+  });
+
+  it('an A4 reset with no other database runs (Q2b false, before and under the lock)', async () => {
+    const { io, sent } = fakeIo([existing, existing, existing], [{ ok: true }], { otherDatabase: false });
+    io.passwordSource = 'new';
+    io.persistPassword = () => undefined;
+    expect(await bootstrapOwnerWithIo(io)).toMatchObject({ outcome: 'updated', passwordSet: true });
+    const texts = sent.map((q) => q.text);
+    expect(texts.filter((t) => t === OWNER_BOOTSTRAP_Q2B_OTHER_DATABASES)).toHaveLength(2);
+    expect(texts.lastIndexOf(OWNER_BOOTSTRAP_Q2B_OTHER_DATABASES)).toBeGreaterThan(texts.indexOf(OWNER_BOOTSTRAP_Q4A_LOCK));
+  });
+
+  it('Q2b is sent only before an A4 reset: never for a stored password, never when the role is created', async () => {
+    const restart = fakeIo([existing], [{ ok: true }], { otherDatabase: true });
+    expect(await bootstrapOwnerWithIo(restart.io)).toMatchObject({ outcome: 'unchanged' });
+    const fresh = fakeIo([base, base, existing], [{ ok: true }], { otherDatabase: true });
+    fresh.io.passwordSource = 'new';
+    fresh.io.persistPassword = () => undefined;
+    expect(await bootstrapOwnerWithIo(fresh.io)).toMatchObject({ outcome: 'created' });
+    for (const f of [restart, fresh]) expect(f.sent.map((q) => q.text)).not.toContain(OWNER_BOOTSTRAP_Q2B_OTHER_DATABASES);
+  });
+
+  it('fail closed: a Q2b row that is not exactly one boolean is a failure (70), never a reset', async () => {
+    for (const v of [null, 'false', 0, undefined]) {
+      const { io, sent } = fakeIo([existing, existing], [{ ok: true }], { otherDatabase: v });
+      io.passwordSource = 'new';
+      io.persistPassword = () => undefined;
+      await expect(bootstrapOwnerWithIo(io)).rejects.toBeInstanceOf(OwnerBootstrapFailure);
+      expect(sent.map((q) => q.text)).not.toContain(OWNER_BOOTSTRAP_Q4C_DO);
+    }
+  });
+});
+
+describe('owner bootstrap: the pending password file (security review L1)', () => {
+  const quiet = () => {
+    const lines: string[] = [];
+    let clock = 0;
+    return {
+      lines,
+      io: {
+        log: (l: string) => void lines.push(l),
+        sleep: async (ms: number) => {
+          clock += ms;
+        },
+        now: () => clock,
+      },
+    };
+  };
+  const neverProbed = async (): Promise<never> => {
+    throw new Error('the pending password must not be probed');
+  };
+
+  it('no pending file: owner-password decides (ready -> file, missing -> new); nothing is written', async () => {
+    const a = memFiles({ main: 'stored-password-1' });
+    const r1 = await resolveStoredPassword(a.files, neverProbed, quiet().io, 0);
+    expect(r1.source).toBe('file');
+    expect(r1.source === 'file' && r1.password).toBe('stored-password-1');
+    expect(Object.keys(r1)).toEqual(['source']); // the password is not enumerable
+    const b = memFiles();
+    expect(await resolveStoredPassword(b.files, neverProbed, quiet().io, 0)).toEqual({ source: 'new' });
+    expect([...a.calls, ...b.calls]).toEqual([]);
+  });
+
+  it('a pending password that logs in (or authenticates without CONNECT, 42501) is promoted and used', async () => {
+    for (const probe of [{ ok: true } as const, { ok: false, code: '42501' } as const]) {
+      const m = memFiles({ next: 'new-password-2' });
+      const q = quiet();
+      const tried: string[] = [];
+      const r = await resolveStoredPassword(m.files, async (pw) => (tried.push(pw), probe), q.io, 0);
+      expect(r.source === 'file' && r.password).toBe('new-password-2');
+      expect(tried).toEqual(['new-password-2']);
+      expect(m.state).toEqual({ main: 'new-password-2' });
+      expect(q.lines).toEqual([OWNER_BOOTSTRAP_MESSAGES.pendingPromoted]);
+    }
+  });
+
+  it('a pending password that does not log in (28P01) is deleted; owner-password decides', async () => {
+    const m = memFiles({ main: 'stored-password-1', next: 'new-password-2' });
+    const q = quiet();
+    const r = await resolveStoredPassword(m.files, async () => ({ ok: false, code: '28P01' }), q.io, 0);
+    expect(r.source === 'file' && r.password).toBe('stored-password-1');
+    expect(m.state).toEqual({ main: 'stored-password-1' });
+    expect(q.lines).toEqual([OWNER_BOOTSTRAP_MESSAGES.pendingDiscarded]);
+  });
+
+  it('the pending probe retries connection-refused within the window; any other failure keeps the pending file (70)', async () => {
+    const m = memFiles({ next: 'new-password-2' });
+    const probes = [{ ok: false, code: 'ECONNREFUSED' }, { ok: false, code: '57P03' }, { ok: true }] as const;
+    let i = 0;
+    const r = await resolveStoredPassword(m.files, async () => probes[i++]!, quiet().io, 60_000);
+    expect(r.source).toBe('file');
+    expect(i).toBe(3);
+    for (const code of ['TLS', '28000', 'ECONNREFUSED']) {
+      const k = memFiles({ next: 'new-password-2' });
+      const error = await resolveStoredPassword(k.files, async () => ({ ok: false, code }), quiet().io, 0).catch((e: unknown) => e);
+      expect(error).toBeInstanceOf(OwnerBootstrapFailure);
+      expect(k.state).toEqual({ next: 'new-password-2' });
+    }
+  });
+
+  it('an unusable pending file (empty, symlink, FIFO, ...) is deleted, never used; an unusable owner-password is a refusal (64)', async () => {
+    const m = memFiles({ main: 'stored-password-1', next: 'x' });
+    const files: OwnerPasswordFiles = {
+      ...m.files,
+      readNext: () => {
+        throw new OwnerPasswordFileError(OWNER_PASSWORD_FILE_MESSAGES.notRegular);
+      },
+    };
+    const q = quiet();
+    const r = await resolveStoredPassword(files, neverProbed, q.io, 0);
+    expect(r.source === 'file' && r.password).toBe('stored-password-1');
+    expect(m.state.next).toBeUndefined();
+    expect(q.lines).toEqual([OWNER_BOOTSTRAP_MESSAGES.pendingUnusable]);
+    const bad: OwnerPasswordFiles = {
+      ...memFiles().files,
+      readMain: () => {
+        throw new OwnerPasswordFileError(OWNER_PASSWORD_FILE_MESSAGES.invalid);
+      },
+    };
+    await expect(resolveStoredPassword(bad, neverProbed, quiet().io, 0)).rejects.toBeInstanceOf(OwnerBootstrapRefusal);
+  });
+
+  it('A4: the new password is stored as the pending file before the transaction and promoted only after COMMIT + the post-commit login', async () => {
+    const m = memFiles();
+    const { io, sent } = fakeIo([existing, existing, existing], [{ ok: true }]);
+    const order: string[] = [];
+    io.passwordSource = 'new';
+    io.persistPassword = () => {
+      order.push(`persist@${sent.length}`);
+      m.files.writeNextExclusive('new-password-2');
+    };
+    io.promotePassword = () => {
+      order.push(`promote@${sent.length}`);
+      m.files.promoteNext();
+    };
+    expect(await bootstrapOwnerWithIo(io)).toMatchObject({ outcome: 'updated', passwordSet: true });
+    const texts = sent.map((q) => q.text);
+    expect(Number(order[0]!.split('@')[1])).toBeLessThanOrEqual(texts.indexOf(OWNER_BOOTSTRAP_BEGIN));
+    expect(Number(order[1]!.split('@')[1])).toBeGreaterThan(texts.indexOf(OWNER_BOOTSTRAP_COMMIT));
+    expect(m.state).toEqual({ main: 'new-password-2' });
+  });
+
+  it('A4: Q4c throws 22023 after the new password was stored -> owner-password untouched; the next start probes 28P01, deletes the pending file and resets again', async () => {
+    // The role still has the old password P1; owner-password was lost (that is why A4 runs).
+    const m = memFiles();
+    const first = fakeIo([existing, existing], [{ ok: true }], { failOn: OWNER_BOOTSTRAP_Q4C_DO, failCode: '22023' });
+    first.io.passwordSource = 'new';
+    first.io.persistPassword = () => m.files.writeNextExclusive('new-password-2');
+    first.io.promotePassword = () => m.files.promoteNext();
+    await expect(bootstrapOwnerWithIo(first.io)).rejects.toBeInstanceOf(OwnerBootstrapRefusal);
+    expect(first.sent.map((q) => q.text)).toContain(OWNER_BOOTSTRAP_ROLLBACK);
+    expect(m.state).toEqual({ next: 'new-password-2' }); // never promoted: no file the role rejects
+
+    // The rerun: the pending password does not log in (nothing was committed).
+    const q = quiet();
+    const stored = await resolveStoredPassword(m.files, async () => ({ ok: false, code: '28P01' }), q.io, 0);
+    expect(stored).toEqual({ source: 'new' });
+    expect(m.state).toEqual({});
+    expect(q.lines).toEqual([OWNER_BOOTSTRAP_MESSAGES.pendingDiscarded]);
+
+    // ... and the intended A4 outcome: a fresh password, reset, promoted.
+    const second = fakeIo([existing, existing, existing], [{ ok: true }]);
+    second.io.passwordSource = 'new';
+    second.io.persistPassword = () => m.files.writeNextExclusive('new-password-3');
+    second.io.promotePassword = () => m.files.promoteNext();
+    expect(await bootstrapOwnerWithIo(second.io)).toMatchObject({ outcome: 'updated', passwordSet: true });
+    expect(m.state).toEqual({ main: 'new-password-3' });
+  });
+
+  it('a crash after COMMIT (before the promotion): the next start finds the pending password logs in and promotes it', async () => {
+    const m = memFiles();
+    const { io } = fakeIo([base, base, existing], [{ ok: true }]);
+    io.passwordSource = 'new';
+    io.persistPassword = () => m.files.writeNextExclusive('new-password-2');
+    io.promotePassword = () => {
+      throw Object.assign(new Error('/run/crewflow/db-target busy'), { code: 'EIO' });
+    };
+    const error = await bootstrapOwnerWithIo(io).catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(OwnerBootstrapFailure);
+    expect((error as Error).message).toBe(OWNER_BOOTSTRAP_MESSAGES.passwordPromoteFailed('EIO'));
+    expect(m.state).toEqual({ next: 'new-password-2' });
+    const r = await resolveStoredPassword(m.files, async () => ({ ok: true }), quiet().io, 0);
+    expect(r.source === 'file' && r.password).toBe('new-password-2');
+    expect(m.state).toEqual({ main: 'new-password-2' });
+  });
+
+  it('the stale-file and race messages are neutral (no claim about who changed what)', () => {
+    expect(OWNER_BOOTSTRAP_MESSAGES.passwordFileStale).toBe(
+      'The stored crewflow_owner password does not log in. Delete the password file and start again with the admin address in PG_DATABASE_URL. Refusing.',
+    );
+    expect(OWNER_BOOTSTRAP_MESSAGES.passwordFileRace).not.toMatch(/stored a crewflow_owner password/);
+  });
+});
+
+const ready = (password: string): OwnerPasswordRead => ({ state: 'ready', password });
+
+/** In-memory db-setup password files (`main` = owner-password, `next` = owner-password.next); `calls` records every write. */
+function memFiles(init: { main?: string; next?: string } = {}, calls: string[] = []) {
+  const state: { main?: string; next?: string } = { ...init };
+  const files: OwnerPasswordFiles = {
+    readMain: () => (state.main === undefined ? { state: 'missing' } : ready(state.main)),
+    readNext: () => (state.next === undefined ? { state: 'missing' } : ready(state.next)),
+    writeMain: (pw) => {
+      calls.push('write-main');
+      state.main = pw;
+    },
+    writeNextExclusive: (pw) => {
+      if (state.next !== undefined) throw Object.assign(new Error('exists'), { code: 'EEXIST' });
+      calls.push('write-next');
+      state.next = pw;
+    },
+    promoteNext: () => {
+      calls.push('promote');
+      state.main = state.next;
+      delete state.next;
+    },
+    removeNext: () => {
+      if (state.next !== undefined) calls.push('remove-next');
+      delete state.next;
+    },
+  };
+  return { files, state, calls };
+}
 describe('owner bootstrap: the whole step without a database', () => {
   const run = async (env: Record<string, string | undefined>, written: string[] = []) => {
     const lines: string[] = [];
     const result = await runOwnerBootstrap(env, {
       log: (l) => lines.push(l),
       retryWindowMs: 0,
-      readPasswordFile: missingFile,
-      writePasswordFile: (pw) => void written.push(pw),
+      passwordFiles: memFiles({}, written).files,
     });
     return { result, text: [...lines, resultLine(result)].join('\n') };
   };
@@ -453,7 +706,7 @@ describe('owner bootstrap: the whole step without a database', () => {
     const { OwnerPasswordFileError: E } = await import('../../../owner-login/owner-password-file');
     const result = await runOwnerBootstrap(
       { PG_DATABASE_URL: 'postgres://dbadmin:adminpw0123456789@127.0.0.1:1/crewflow_unit' },
-      { retryWindowMs: 0, readPasswordFile: () => { throw new E('bad'); }, writePasswordFile: () => undefined },
+      { retryWindowMs: 0, passwordFiles: { ...memFiles().files, readMain: () => { throw new E('bad'); } } },
     );
     expect(result).toMatchObject({ outcome: 'refused', exitCode: 64 });
   });
@@ -541,8 +794,7 @@ describe('owner bootstrap: option A target hooks (publish only after success, wi
       calls,
       options: {
         retryWindowMs: 0,
-        readPasswordFile: missingFile,
-        writePasswordFile: () => void calls.push('write-password'),
+        passwordFiles: memFiles({}, calls).files,
         publishTarget: () => void calls.push('publish'),
         withdrawTarget: () => void calls.push('withdraw'),
       },
@@ -576,8 +828,7 @@ describe('owner bootstrap: option A target hooks (publish only after success, wi
       { PG_DATABASE_URL: `${ADMIN_URL}?sslrootcert=/x` },
       {
         log: (l) => lines.push(l),
-        readPasswordFile: missingFile,
-        writePasswordFile: () => undefined,
+        passwordFiles: memFiles().files,
         withdrawTarget: () => {
           throw Object.assign(new Error('/run/crewflow/db-target/target.json busy'), { code: 'EBUSY' });
         },
@@ -705,14 +956,21 @@ describe('owner bootstrap: security review H1 / L2 / M2 / I1 / I2', () => {
     for (const url of [ADMIN_URL, 'postgres://crewflow_owner:ownerpw0123456789@db.internal.example:5432/crewflow_unit']) {
       const env = { PG_DATABASE_URL: url, NODE_ENV: 'test' };
       const configs = bootstrapDriverConfigs(resolvePgEnvironment(env, { processRole: 'migrate' }), buildRuntimeDatabaseUrl(url, 'f'.repeat(64)));
-      expect(Object.keys(configs).sort()).toEqual(['admin', 'probe']);
+      expect(Object.keys(configs).sort()).toEqual(['admin', 'ownerUrl', 'probe']);
       for (const [name, config] of Object.entries(configs)) {
         const options = String(config.options ?? '');
         expect({ name, pinned: options.includes('-c search_path=pg_catalog,pg_temp') }).toEqual({ name, pinned: true });
-        expect({ name, rw: options.includes('-c default_transaction_read_only=off') }).toEqual({ name, rw: true });
+        // I1: only the owner-URL mode's crewflow_owner session is read-only; the admin and probe sessions stay read-write.
+        const want = name === 'ownerUrl' ? OWNER_URL_SESSION_STARTUP_OPTIONS : BOOTSTRAP_SESSION_STARTUP_OPTIONS;
+        expect({ name, ro: options.includes('-c default_transaction_read_only=on') }).toEqual({ name, ro: name === 'ownerUrl' });
+        expect({ name, rw: options.includes('-c default_transaction_read_only=off') }).toEqual({ name, rw: name !== 'ownerUrl' });
         // The pin comes LAST, after the factory's own options (a later -c wins in the startup packet).
-        expect(options.endsWith(BOOTSTRAP_SESSION_STARTUP_OPTIONS)).toBe(true);
+        expect({ name, last: options.endsWith(want) }).toEqual({ name, last: true });
       }
+      // The same login, host and database: only the startup options differ.
+      const { options: _a, ...admin } = configs.admin;
+      const { options: _b, ...ownerUrl } = configs.ownerUrl;
+      expect(ownerUrl).toEqual(admin);
     }
   });
 

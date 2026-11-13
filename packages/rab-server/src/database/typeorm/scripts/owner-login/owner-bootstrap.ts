@@ -18,9 +18,11 @@
  *       password file present  -> its password; crewflow_owner created only if missing; an existing crewflow_owner must log
  *                                 in with it (else REFUSED 64: delete the password file and start again with the admin
  *                                 address; never an automatic reset); only a missing grant is added;
- *       password file missing  -> a NEW crypto-random password, written to the file atomically BEFORE the transaction; then
- *                                 crewflow_owner created, or (it exists: the file was lost) its password reset through Q4c
- *                                 (Crewflow addition A4; Twenty would leave the app unable to log in).
+ *       password file missing  -> a NEW crypto-random password, stored exclusively as the pending `owner-password.next`
+ *                                 BEFORE the transaction; then crewflow_owner created, or (it exists: the file was lost) its
+ *                                 password reset through Q4c (Crewflow addition A4; Twenty would leave the app unable to log
+ *                                 in); the pending file becomes `owner-password` only after the COMMIT and a login with it
+ *                                 (security review L1: a run that fails in between never leaves a file the role rejects).
  *   - OWNER-URL (an existing crewflow_owner URL): O1 + Q2 and the read-only refusals only, on a session logged in with the
  *     URL's own password; that password is copied into the file. Never a write to the database, never a password change.
  *
@@ -55,6 +57,7 @@ import {
   OWNER_BOOTSTRAP_Q0_SESSION,
   OWNER_BOOTSTRAP_Q1_SUPERUSER_LOGGING,
   OWNER_BOOTSTRAP_Q2_FACTS,
+  OWNER_BOOTSTRAP_Q2B_OTHER_DATABASES,
   OWNER_BOOTSTRAP_Q3_PROBE,
   OWNER_BOOTSTRAP_Q4A_LOCK,
   OWNER_BOOTSTRAP_Q4B_SET_INPUTS,
@@ -63,6 +66,7 @@ import {
   OWNER_BOOTSTRAP_ROLLBACK,
   OWNER_SELF_O1_SESSION,
   BOOTSTRAP_SESSION_STARTUP_OPTIONS,
+  OWNER_URL_SESSION_STARTUP_OPTIONS,
 } from './owner-bootstrap-sql';
 
 export const OWNER_BOOTSTRAP_EXIT = Object.freeze({ ok: 0, refused: 64, unexpected: 70 } as const);
@@ -96,11 +100,23 @@ export const OWNER_BOOTSTRAP_MESSAGES = Object.freeze({
   ownerNoDbGrant:
     'crewflow_owner lacks CONNECT, CREATE, TEMPORARY WITH GRANT OPTION on this database (01-crewflow-owner.sql grants it). Grant it as the database owner, or put the database admin URL in PG_DATABASE_URL. Refusing.',
   passwordFileStale:
-    'The stored crewflow_owner password no longer logs in (it was changed in the database). Delete the password file and start again with the admin address in PG_DATABASE_URL. Refusing.',
-  passwordFileLost: 'No crewflow_owner password file: a new random password was stored before any database change.',
+    'The stored crewflow_owner password does not log in. Delete the password file and start again with the admin address in PG_DATABASE_URL. Refusing.',
+  passwordFileLost:
+    'No crewflow_owner password file: a new random password is stored as a pending file before any database change, and becomes the password file only after it logs in.',
   passwordFileWriteFailed: (code: string) => `Storing the crewflow_owner password file failed (${code}); nothing was changed in the database.`,
-  passwordFileRace: 'Another db-setup stored a crewflow_owner password at the same moment; nothing was changed in the database. Start again (it will use the stored password).',
+  passwordFileRace:
+    'A pending crewflow_owner password file appeared while this run was starting (another db-setup at the same moment?); nothing was changed in the database. Start again.',
+  pendingPromoted: 'A pending new crewflow_owner password from an earlier run logs in; it is now the stored password.',
+  pendingDiscarded: 'A pending new crewflow_owner password from an earlier run that did not complete does not log in; it was deleted.',
+  pendingUnusable: 'A pending crewflow_owner password file was not usable; it was deleted.',
+  pendingProbeFailed: (sqlstateClass: string) =>
+    `Checking a pending new crewflow_owner password failed (SQLSTATE class ${sqlstateClass}); it is kept. Giving up (the restart policy retries).`,
+  pendingRemoveFailed: (code: string) => `Deleting a pending crewflow_owner password file failed (${code}); nothing was changed in the database.`,
+  passwordPromoteFailed: (code: string) =>
+    `crewflow_owner now uses the new password, but making it the stored password failed (${code}); the next start completes it.`,
   pgTooOld: 'PostgreSQL 16 or later is required.',
+  ownerInOtherDatabase:
+    'The crewflow_owner password file is missing, so its password would be reset, but crewflow_owner owns objects in, or holds a grant on, another database of this PostgreSQL cluster: another Crewflow deployment uses it, and the reset would break that deployment. Crewflow supports one deployment per PostgreSQL cluster when using an admin URL. Restore this deployment\'s password file, or put the crewflow_owner URL in PG_DATABASE_URL. Refusing.',
   ownerOwnsDatabase:
     'crewflow_owner owns this database (directly or through a role it is a member of, e.g. rab_owner after transition-from-separated.sql). The database setup step never runs as the admin in a database the app login owns (it could plant objects the admin session would run). Put the crewflow_owner URL in PG_DATABASE_URL instead of the admin URL (db-setup then runs as crewflow_owner itself). Refusing.',
   searchPathDefault:
@@ -406,13 +422,21 @@ export interface OwnerBootstrapIo {
   /** Where this run's password comes from (default `file`). */
   passwordSource?: PasswordSource;
   /**
-   * `new` only: stores this run's password in the password file. Called once the refusals passed and a write is needed, and
-   * always BEFORE the transaction, so a crash leaves either no database change (the next start reuses the file) or a
-   * matching role. A throw stops the run with nothing changed in the database.
+   * `new` only: stores this run's NEW password exclusively as the PENDING file `owner-password.next` (never over
+   * `owner-password`; EEXIST when one is already there). Called once the refusals passed and a write is needed, always BEFORE
+   * the transaction. A crash or failure after it leaves `owner-password` untouched; the role keeps its old password (nothing
+   * committed) or already has the new one (committed). The next start tells the two apart by logging in with the pending
+   * password: it logs in -> promoted; it does not (28P01) -> deleted (resolveStoredPassword). A throw stops the run with
+   * nothing changed in the database.
    */
   persistPassword?(): void;
   /** Set by attempt() once persistPassword succeeded (race retries do not store it again). */
   passwordPersisted?: boolean;
+  /**
+   * `new` only: renames the pending file over `owner-password` (security review L1). Called only after the COMMIT and a
+   * successful post-commit login with the new password. A throw is exit 70; the next start promotes it.
+   */
+  promotePassword?(): void;
   log(line: string): void;
   sleep(ms: number): Promise<void>;
   now(): number;
@@ -446,12 +470,25 @@ async function readFacts(session: SqlSession): Promise<OwnerFacts> {
   return factsFromRow(rows[0]);
 }
 
+/**
+ * Security review L4 (owner-approved, read-only): before an A4 reset, Q2b. Refused (64) when crewflow_owner is used by
+ * another database of the cluster. Strict: anything but one boolean row is a failure (70).
+ */
+async function assertNoOtherDatabase(session: SqlSession): Promise<void> {
+  const { rows } = await session.query(OWNER_BOOTSTRAP_Q2B_OTHER_DATABASES);
+  const v = rows.length === 1 ? rows[0]?.o_other_database : undefined;
+  if (typeof v !== 'boolean') throw new OwnerBootstrapFailure(OWNER_BOOTSTRAP_MESSAGES.unexpected('other-database fact'));
+  if (v) throw new OwnerBootstrapRefusal(OWNER_BOOTSTRAP_MESSAGES.ownerInOtherDatabase);
+}
+
 /** The facts, the decisions and the probe, in that order: one plan of what the write transaction must do. */
 async function planFromDatabase(session: SqlSession, io: OwnerBootstrapIo, logNotes: boolean): Promise<WritePlan> {
   const facts = await readFacts(session);
   const notes = decideBeforeProbe(facts);
   if (logNotes) for (const note of notes) io.log(note);
   const source = io.passwordSource ?? 'file';
+  // L4: an A4 reset (a new password for an existing role) never runs while another database of the cluster uses the role.
+  if (source === 'new' && facts.ownerExists) await assertNoOtherDatabase(session);
   const probe = facts.ownerExists && source === 'file' ? await io.probeOwner() : null;
   return planWrite(facts, probe, source);
 }
@@ -509,6 +546,14 @@ async function attempt(session: SqlSession, io: OwnerBootstrapIo): Promise<Owner
     throw new OwnerBootstrapFailure(OWNER_BOOTSTRAP_MESSAGES.reverifyFailed, after.code);
   }
   assertFactsExact(await readFacts(session));
+  // Security review L1: only now (COMMIT + a login with it) does the new password become the stored password.
+  if (io.passwordPersisted && io.promotePassword) {
+    try {
+      io.promotePassword();
+    } catch (error) {
+      throw new OwnerBootstrapFailure(OWNER_BOOTSTRAP_MESSAGES.passwordPromoteFailed(errorCode(error)), errorCode(error));
+    }
+  }
   return {
     outcome: plan.create ? 'created' : 'updated',
     exitCode: 0,
@@ -639,18 +684,21 @@ function openClient(config: PgDriverConfig): Client {
 }
 
 /** H1: every bootstrap connection carries the fixed session pin (search_path, read-write) as startup options. */
-function pinned(config: PgDriverConfig): PgDriverConfig {
-  const options = [config.options, BOOTSTRAP_SESSION_STARTUP_OPTIONS].filter((o) => typeof o === 'string' && o !== '').join(' ');
+function pinned(config: PgDriverConfig, startupOptions: string = BOOTSTRAP_SESSION_STARTUP_OPTIONS): PgDriverConfig {
+  const options = [config.options, startupOptions].filter((o) => typeof o === 'string' && o !== '').join(' ');
   return { ...config, options };
 }
 
 /**
- * Every driver config the bootstrap child uses: the URL's own login (the admin, or crewflow_owner in the owner-URL mode) and
- * the crewflow_owner probe with this run's password, each pinned (H1). Exported for the spec that asserts the pin is on all
- * of them.
+ * Every driver config the bootstrap child uses: the URL's own login as the admin (bootstrap mode), the same login as
+ * crewflow_owner in the owner-URL mode (`ownerUrl`: READ-ONLY, security review I1), and the crewflow_owner probe with this
+ * run's password, each pinned (H1). Exported for the spec that asserts the pin is on all of them.
  */
-export function bootstrapDriverConfigs(resolved: ResolvedPgEnvironment, runtimeUrl: string): { admin: PgDriverConfig; probe: PgDriverConfig } {
-  const admin = pinned({
+export function bootstrapDriverConfigs(
+  resolved: ResolvedPgEnvironment,
+  runtimeUrl: string,
+): { admin: PgDriverConfig; ownerUrl: PgDriverConfig; probe: PgDriverConfig } {
+  const urlLogin: PgDriverConfig = {
     ...pgClientConfig(resolved, {
       endpoint: 'primary',
       purpose: 'owner-bootstrap',
@@ -661,7 +709,9 @@ export function bootstrapDriverConfigs(resolved: ResolvedPgEnvironment, runtimeU
       connectTimeoutMs: 10_000,
     }),
     application_name: OWNER_BOOTSTRAP_APPLICATION_NAME,
-  });
+  };
+  const admin = pinned(urlLogin);
+  const ownerUrl = pinned(urlLogin, OWNER_URL_SESSION_STARTUP_OPTIONS);
   const probe = pinned({
     ...pgClientConfig(resolved, {
       url: runtimeUrl,
@@ -674,7 +724,7 @@ export function bootstrapDriverConfigs(resolved: ResolvedPgEnvironment, runtimeU
     }),
     application_name: OWNER_PROBE_APPLICATION_NAME,
   });
-  return { admin, probe };
+  return { admin, ownerUrl, probe };
 }
 
 /** One connected session (one attempt; the callers retry). */
@@ -690,15 +740,112 @@ async function connectSession(config: PgDriverConfig): Promise<SqlSession> {
   return client as unknown as SqlSession;
 }
 
+/**
+ * db-setup's two password files (owner-password-file.ts on the entry's paths; security review L1): `owner-password` (main)
+ * and the pending `owner-password.next`. None of them logs.
+ */
+export interface OwnerPasswordFiles {
+  readMain(): OwnerPasswordRead;
+  readNext(): OwnerPasswordRead;
+  /** Atomically replaces `owner-password` (owner-URL mode only). */
+  writeMain(password: string): void;
+  /** Creates `owner-password.next` exclusively (EEXIST when it exists). */
+  writeNextExclusive(password: string): void;
+  /** Renames `owner-password.next` over `owner-password`. */
+  promoteNext(): void;
+  /** Deletes `owner-password.next` (no error when it is gone). */
+  removeNext(): void;
+}
+
+export type StoredPassword = { source: 'file'; readonly password: string } | { source: 'new' };
+
+function storedFromFile(password: string): StoredPassword {
+  const out = { source: 'file' as const } as Extract<StoredPassword, { source: 'file' }>;
+  Object.defineProperty(out, 'password', { value: password, enumerable: false });
+  return out;
+}
+
+/**
+ * The bootstrap mode's start (security review L1): settle a pending `owner-password.next` left by an earlier run, then read
+ * `owner-password`.
+ *   pending file not usable (empty, symlink, FIFO, ...)        -> deleted (it was never the stored password);
+ *   pending password authenticates (ok, or 42501: no CONNECT)  -> promoted over `owner-password`; it is this run's password;
+ *   pending password does not log in (28P01)                   -> deleted; `owner-password` decides as before;
+ *   anything else (unreachable, TLS, pg_hba, ...)              -> failure 70, the pending file is kept for the next start.
+ * Then `owner-password`: ready -> `file`; missing -> `new`; anything else wrong -> refusal 64. Exported for the unit tests.
+ */
+export async function resolveStoredPassword(
+  files: OwnerPasswordFiles,
+  probeWith: (password: string) => Promise<ProbeResult>,
+  io: Pick<OwnerBootstrapIo, 'log' | 'sleep' | 'now'>,
+  retryWindowMs = ADMIN_CONNECT_RETRY_WINDOW_MS,
+): Promise<StoredPassword> {
+  const removeNext = () => {
+    try {
+      files.removeNext();
+    } catch (error) {
+      throw new OwnerBootstrapFailure(OWNER_BOOTSTRAP_MESSAGES.pendingRemoveFailed(errorCode(error)), errorCode(error));
+    }
+  };
+  let pending: OwnerPasswordRead;
+  try {
+    pending = files.readNext();
+  } catch (error) {
+    if (!(error instanceof OwnerPasswordFileError)) throw error;
+    removeNext();
+    io.log(OWNER_BOOTSTRAP_MESSAGES.pendingUnusable);
+    pending = { state: 'missing' };
+  }
+  if (pending.state === 'ready') {
+    const deadline = io.now() + retryWindowMs;
+    let probe: ProbeResult;
+    for (;;) {
+      probe = await probeWith(pending.password);
+      if (probe.ok || !RETRYABLE_CONNECT_CODES.has(probe.code) || io.now() + ADMIN_CONNECT_RETRY_INTERVAL_MS > deadline) break;
+      await io.sleep(ADMIN_CONNECT_RETRY_INTERVAL_MS);
+    }
+    if (probe.ok || probe.code === '42501') {
+      try {
+        files.promoteNext();
+      } catch (error) {
+        throw new OwnerBootstrapFailure(OWNER_BOOTSTRAP_MESSAGES.passwordPromoteFailed(errorCode(error)), errorCode(error));
+      }
+      io.log(OWNER_BOOTSTRAP_MESSAGES.pendingPromoted);
+      return storedFromFile(pending.password);
+    }
+    if (probe.code !== '28P01') throw new OwnerBootstrapFailure(OWNER_BOOTSTRAP_MESSAGES.pendingProbeFailed(sqlstateClass(probe.code)), probe.code);
+    removeNext();
+    io.log(OWNER_BOOTSTRAP_MESSAGES.pendingDiscarded);
+  }
+  let stored: OwnerPasswordRead;
+  try {
+    stored = files.readMain();
+  } catch (error) {
+    if (error instanceof OwnerPasswordFileError) throw new OwnerBootstrapRefusal(error.message);
+    throw error;
+  }
+  return stored.state === 'missing' ? { source: 'new' } : storedFromFile(stored.password);
+}
+
+/** Q3 as crewflow_owner on `config`: ok, or the error code ('TLS' for a TLS failure). One attempt. */
+async function probeOwnerOnce(config: PgDriverConfig): Promise<ProbeResult> {
+  const client = openClient(config);
+  client.on('error', () => undefined);
+  try {
+    await client.connect();
+    await client.query(OWNER_BOOTSTRAP_Q3_PROBE);
+    return { ok: true };
+  } catch (error) {
+    return { ok: false, code: isTlsError(error) ? 'TLS' : errorCode(error) };
+  } finally {
+    await client.end().catch(() => undefined);
+  }
+}
+
 export interface RunOwnerBootstrapOptions {
   log?: (line: string) => void;
-  /** Reads db-setup's password file (owner-password-file.ts readOwnerPasswordFile on the entry's path). Required. */
-  readPasswordFile?: () => OwnerPasswordRead;
-  /**
-   * Atomically writes db-setup's password file (owner-password-file.ts writeOwnerPasswordFile). `exclusive` for a NEW
-   * password (fails with EEXIST when another run stored one first). Required. Never logs.
-   */
-  writePasswordFile?: (password: string, exclusive: boolean) => void;
+  /** db-setup's password files. Required. */
+  passwordFiles?: OwnerPasswordFiles;
   /**
    * Publishes the credential-free database target after a SUCCESSFUL run (the entry writes CREWFLOW_DB_TARGET_FILE
    * atomically). A throw turns the run into a failure (exit 70) and the target is withdrawn.
@@ -718,7 +865,8 @@ export interface RunOwnerBootstrapOptions {
 export async function runOwnerBootstrap(env: Record<string, string | undefined>, options: RunOwnerBootstrapOptions = {}): Promise<OwnerBootstrapResult> {
   const log = options.log ?? (() => undefined);
   try {
-    if (!options.readPasswordFile || !options.writePasswordFile) throw new OwnerBootstrapFailure(OWNER_BOOTSTRAP_MESSAGES.unexpected('no password file I/O'));
+    const files = options.passwordFiles;
+    if (!files) throw new OwnerBootstrapFailure(OWNER_BOOTSTRAP_MESSAGES.unexpected('no password file I/O'));
     // The single decision (owner-credential.ts), refused (fixed text) BEFORE anything connects. Only PG_DATABASE_URL.
     const primary = readPrimaryDatabaseUrl(env);
     let plan: DbSetupPlan;
@@ -742,25 +890,34 @@ export async function runOwnerBootstrap(env: Record<string, string | undefined>,
     if (resolved.primary.target.sessionRoleOption) throw new OwnerBootstrapRefusal(OWNER_BOOTSTRAP_MESSAGES.sessionRoleOption);
     if (!sameTarget(resolved.primary.target, plan.urlTarget)) throw new OwnerBootstrapFailure(OWNER_BOOTSTRAP_MESSAGES.unexpected('admin target mismatch'));
 
-    // This run's crewflow_owner password: the URL's own (owner-URL mode), the stored one, or a new random one (file missing).
+    const databaseUrl = primary?.value as string;
+    const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+    const now = () => Date.now();
+    const retryWindowMs = options.retryWindowMs ?? ADMIN_CONNECT_RETRY_WINDOW_MS;
+
+    // This run's crewflow_owner password: the URL's own (owner-URL mode), the stored one (a pending one from an earlier run
+    // settled first: L1), or a new random one (file missing).
     let source: PasswordSource = 'file';
     let ownerPassword: string;
     if (plan.mode === 'owner-url') ownerPassword = plan.ownerPassword;
     else {
-      let stored: OwnerPasswordRead;
-      try {
-        stored = options.readPasswordFile();
-      } catch (error) {
-        if (error instanceof OwnerPasswordFileError) throw new OwnerBootstrapRefusal(error.message);
-        throw error;
-      }
-      if (stored.state === 'ready') ownerPassword = stored.password;
+      const probeWith = (password: string): Promise<ProbeResult> => {
+        let url: string;
+        try {
+          url = buildRuntimeDatabaseUrl(databaseUrl, password);
+        } catch (error) {
+          if (error instanceof OwnerCredentialError) throw new OwnerBootstrapRefusal(error.message);
+          throw error;
+        }
+        return probeOwnerOnce(bootstrapDriverConfigs(resolved, url).probe);
+      };
+      const stored = await resolveStoredPassword(files, probeWith, { log, sleep, now }, retryWindowMs);
+      if (stored.source === 'file') ownerPassword = stored.password;
       else {
         source = 'new';
         ownerPassword = generateOwnerPassword();
       }
     }
-    const databaseUrl = primary?.value as string;
     let runtimeUrl: string;
     let target: DbTarget;
     try {
@@ -772,23 +929,22 @@ export async function runOwnerBootstrap(env: Record<string, string | undefined>,
       throw error;
     }
 
-    const { admin: adminConfig, probe: probeConfig } = bootstrapDriverConfigs(resolved, runtimeUrl);
-    const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
-    const now = () => Date.now();
-    const writePasswordFile = options.writePasswordFile;
+    const { admin: adminConfig, ownerUrl: ownerUrlConfig, probe: probeConfig } = bootstrapDriverConfigs(resolved, runtimeUrl);
     let result: OwnerBootstrapResult;
     if (plan.mode === 'owner-url') {
-      result = await setupOwnerUrlWithIo({ openUrl: () => connectSession(adminConfig), log, sleep, now }, options.retryWindowMs ?? ADMIN_CONNECT_RETRY_WINDOW_MS);
-      // Only after every read-only refusal passed: the URL's password becomes the stored password (the apps read it).
-      // Unchanged when the file already holds it (a restart writes nothing).
+      // I1: the crewflow_owner session is read-only (default_transaction_read_only=on as a startup option).
+      result = await setupOwnerUrlWithIo({ openUrl: () => connectSession(ownerUrlConfig), log, sleep, now }, retryWindowMs);
+      // Only after every read-only refusal passed: the URL's password becomes the stored password (the apps read it), and a
+      // pending file of the bootstrap mode is dropped. Unchanged when the file already holds it (a restart writes nothing).
       try {
+        files.removeNext();
         let current: OwnerPasswordRead = { state: 'missing' };
         try {
-          current = options.readPasswordFile();
+          current = files.readMain();
         } catch {
           current = { state: 'missing' }; // an unreadable / invalid file is simply replaced by the URL's password
         }
-        if (!(current.state === 'ready' && current.password === ownerPassword)) writePasswordFile(ownerPassword, false);
+        if (!(current.state === 'ready' && current.password === ownerPassword)) files.writeMain(ownerPassword);
       } catch (error) {
         throw new OwnerBootstrapFailure(OWNER_BOOTSTRAP_MESSAGES.passwordFileWriteFailed(errorCode(error)), errorCode(error));
       }
@@ -796,27 +952,16 @@ export async function runOwnerBootstrap(env: Record<string, string | undefined>,
       if (source === 'new') log(OWNER_BOOTSTRAP_MESSAGES.passwordFileLost);
       const io: OwnerBootstrapIo = {
         openAdmin: () => connectSession(adminConfig),
-        async probeOwner() {
-          const client = openClient(probeConfig);
-          client.on('error', () => undefined);
-          try {
-            await client.connect();
-            await client.query(OWNER_BOOTSTRAP_Q3_PROBE);
-            return { ok: true };
-          } catch (error) {
-            return { ok: false, code: isTlsError(error) ? 'TLS' : errorCode(error) };
-          } finally {
-            await client.end().catch(() => undefined);
-          }
-        },
+        probeOwner: () => probeOwnerOnce(probeConfig),
         verifier: () => scramSha256Verifier(ownerPassword),
         passwordSource: source,
-        persistPassword: () => writePasswordFile(ownerPassword, true),
+        persistPassword: () => files.writeNextExclusive(ownerPassword),
+        promotePassword: () => files.promoteNext(),
         log,
         sleep,
         now,
       };
-      result = await bootstrapOwnerWithIo(io, options.retryWindowMs ?? ADMIN_CONNECT_RETRY_WINDOW_MS);
+      result = await bootstrapOwnerWithIo(io, retryWindowMs);
     }
     if (options.publishTarget) {
       try {
