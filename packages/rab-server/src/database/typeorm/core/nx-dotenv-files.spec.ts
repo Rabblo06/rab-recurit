@@ -2,7 +2,6 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'fs'
 import { tmpdir } from 'os';
 import { dirname, join, resolve } from 'path';
 
-import { assertOpsValuesNotFromDotenv } from '../../../command/ops/ops-run';
 import { readDotenvValues, resolveDbTarget } from './database-target';
 import * as nxDotenv from './nx-dotenv-files';
 import { NX_PROJECT_TARGETS, nxDotenvFiles, nxDotenvFilesForTarget, nxDotenvPaths, readDotenvFilesValues, readNxDotenvValues, WORKSPACE_ROOT } from './nx-dotenv-files';
@@ -168,16 +167,6 @@ describe('final review F6: the dotenv files Nx loads for the rab-server / rab-wo
           dotenvValues,
         }),
       ).toThrow(/production runtime values are present in a \.env file/);
-    });
-
-    it('the ops container refuses an ops value or PG_DATABASE_URL in any Nx dotenv file, not only <cwd>/.env', () => {
-      write('packages/rab-server/.env.command.local', 'PG_OPS_APP_DATABASE_URL=postgres://a@b/c\n');
-      expect(() => assertOpsValuesNotFromDotenv(root, onlyTmp)).toThrow(/PG_OPS_APP_DATABASE_URL.*present in a \.env file/);
-      rmSync(join(root, 'packages'), { recursive: true, force: true });
-      write('.local.env', 'PG_DATABASE_URL=postgres://a@b/c\n');
-      expect(() => assertOpsValuesNotFromDotenv(root, onlyTmp)).toThrow(/PG_DATABASE_URL/);
-      rmSync(join(root, '.local.env'));
-      expect(() => assertOpsValuesNotFromDotenv(root, onlyTmp)).not.toThrow();
     });
 
     it('nothing in any file: nothing is reported; values merge first-file-wins in Nx order, and a key in ANY file is present', () => {

@@ -2,13 +2,17 @@ import {
   emitPgWarnings,
   isPgProductionEnvironment,
   PgConfigError,
+  PgProcessRole,
   readPrimaryDatabaseUrl,
   readReplicaDatabaseUrl,
   resolvePgEnvironment,
+  resolvePgEnvironmentCached,
   ResolvePgOptions,
+  RETIRED_OPS_ENV_NAMES,
   selectMigrationEndpoint,
 } from '../pg-config';
 import { pgClientConfig } from '../create-pg-pool';
+import { NEVER_IN_RUNTIME_ENV } from '../../typeorm/core/never-in-runtime-env';
 
 // Phase B (B1): environment resolution — one primary variable, legacy names, conflicts, production rules, strict numbers,
 // pooler policy. Pure: every case passes its own env object.
@@ -350,89 +354,70 @@ describe('pg-config: optional read replica (PG_DATABASE_REPLICA_URL)', () => {
   });
 });
 
-describe('pg-config: the one-off operations container (Phase B ops)', () => {
+describe('pg-config: the retired operations-container variables (rab-ops removed)', () => {
   const MIGRATOR = `postgres://crewflow_migrator:${OTHER_SECRET}@localhost:5432/rab`;
-  const OPS = { CREWFLOW_OPS_RUN: 'one-off', PG_OPS_APP_DATABASE_URL: APP, PG_DATABASE_URL: MIGRATOR };
+  const OWNER = `postgres://crewflow_owner:${OTHER_SECRET}@localhost:5432/rab`;
+  // Every variable the removed rab-ops container read, with the value it used to carry.
+  const RETIRED: Record<(typeof RETIRED_OPS_ENV_NAMES)[number], string> = {
+    CREWFLOW_OPS_RUN: 'one-off',
+    PG_OPS_APP_DATABASE_URL: APP,
+    CREWFLOW_OPS_ACTOR_SOURCE: 'github-actions',
+    CREWFLOW_OPS_ACTOR_ID: 'repo:org/repo:environment:production',
+    CREWFLOW_OPS_CHANGE_REF: 'OPS-1',
+  };
+  const ALL_ROLES: readonly PgProcessRole[] = ['api', 'worker', 'provisioner', 'cli', 'migrate'];
 
-  it('ops: the primary is PG_OPS_APP_DATABASE_URL (crewflow_app), the elevated endpoint PG_DATABASE_URL (migration identity)', () => {
-    const r = resolvePgEnvironment(OPS, { processRole: 'ops' });
-    expect(r.ops).toBe(true);
-    expect(r.processRole).toBe('ops');
-    expect(r.primary.source).toBe('PG_OPS_APP_DATABASE_URL');
-    expect(r.primary.target.user).toBe('crewflow_app');
-    expect(r.elevated?.source).toBe('PG_DATABASE_URL');
-    expect(r.elevated?.target.user).toBe('crewflow_migrator');
-    expect(pgClientConfig(r, { purpose: 'runtime' }).application_name).toBe('crewflow-ops');
-    expect(pgClientConfig(r, { endpoint: 'elevated', purpose: 'containment-read' }).application_name).toBe('crewflow-ops-containment-read');
+  it('names exactly the five retired variables, and every one is also on the in-process runtime refusal list', () => {
+    expect([...RETIRED_OPS_ENV_NAMES].sort()).toEqual(Object.keys(RETIRED).sort());
+    const runtimeRefused = new Set(NEVER_IN_RUNTIME_ENV.map((entry) => entry.name));
+    for (const name of RETIRED_OPS_ENV_NAMES) expect(runtimeRefused.has(name)).toBe(true);
   });
 
-  it('the CLI resolution (boot gates, command target guard) inside the ops container IS the ops process', () => {
-    const r = resolvePgEnvironment(OPS, { processRole: 'cli' });
-    expect(r.ops).toBe(true);
-    expect(r.primary.source).toBe('PG_OPS_APP_DATABASE_URL');
-  });
-
-  it('ops without PG_DATABASE_URL: no elevated endpoint (the crewflow_app-only modes); asking for it refuses', () => {
-    const r = resolvePgEnvironment({ CREWFLOW_OPS_RUN: 'one-off', PG_OPS_APP_DATABASE_URL: APP }, { processRole: 'ops' });
-    expect(r.elevated).toBeNull();
-    expect(() => pgClientConfig(r, { endpoint: 'elevated', purpose: 'x' })).toThrow(/set PG_DATABASE_URL \(the migration identity\) in the one-off ops container/);
-  });
-
-  it('ops refusals: missing app URL, a bad CREWFLOW_OPS_RUN value, ops role without the flag, split databases, one login for both', () => {
-    expect(refusal({ CREWFLOW_OPS_RUN: 'one-off', PG_DATABASE_URL: MIGRATOR }, { processRole: 'ops' })).toMatch(/requires PG_OPS_APP_DATABASE_URL/);
-    expect(refusal({ ...OPS, CREWFLOW_OPS_RUN: 'yes' }, { processRole: 'ops' })).toMatch(/CREWFLOW_OPS_RUN must be unset or exactly "one-off"/);
-    expect(refusal({ PG_OPS_APP_DATABASE_URL: APP }, { processRole: 'ops' })).toMatch(/requires CREWFLOW_OPS_RUN=one-off/);
-    expect(refusal({ ...OPS, PG_DATABASE_URL: `postgres://crewflow_migrator:${OTHER_SECRET}@localhost:5432/other` }, { processRole: 'ops' })).toMatch(
-      /name different databases/,
-    );
-    expect(refusal({ ...OPS, PG_DATABASE_URL: APP.replace(SECRET, OTHER_SECRET) }, { processRole: 'ops' })).toMatch(/name the same login/);
-  });
-
-  it('ops refuses every legacy name and the replica, in every environment', () => {
-    for (const name of ['DATABASE_URL', 'DATABASE_URL_UNPOOLED', 'DATABASE_DIRECT_URL']) {
-      expect(refusal({ ...OPS, [name]: MIGRATOR }, { processRole: 'ops' })).toMatch(new RegExp(String.raw`refuses the legacy database variable\(s\) ${name}`));
-    }
-    expect(refusal({ ...OPS, DB_POOL_MAX: '5' }, { processRole: 'ops' })).toMatch(/DB_POOL_MAX/);
-    expect(refusal({ ...OPS, PG_DATABASE_REPLICA_URL: APP.replace('5432', '5433') }, { processRole: 'ops' })).toMatch(/refuses PG_DATABASE_REPLICA_URL/);
-  });
-
-  it('every other process refuses every ops variable (the ops credential and label never reach a runtime container)', () => {
-    const OPS_ONLY = {
-      CREWFLOW_OPS_RUN: 'one-off',
-      PG_OPS_APP_DATABASE_URL: APP,
-      CREWFLOW_OPS_ACTOR_SOURCE: 'github-actions',
-      CREWFLOW_OPS_ACTOR_ID: 'repo:org/repo:environment:production',
-      CREWFLOW_OPS_CHANGE_REF: 'OPS-1',
-    };
-    for (const role of ['api', 'worker', 'provisioner', 'migrate'] as const) {
-      for (const [name, value] of Object.entries(OPS_ONLY)) {
-        expect(refusal({ PG_DATABASE_URL: APP, [name]: value }, { processRole: role })).toMatch(
-          new RegExp(String.raw`the ${role} process refuses the operations-container variable\(s\) ${name}`),
-        );
+  it('EVERY process role refuses each retired variable, the cli included (no process reads them any more)', () => {
+    for (const role of ALL_ROLES) {
+      for (const [name, value] of Object.entries(RETIRED)) {
+        const message = refusal({ PG_DATABASE_URL: APP, [name]: value }, { processRole: role });
+        expect(message).toMatch(new RegExp(String.raw`^the ${role} process refuses the retired operations-container variable\(s\) ${name}: the rab-ops container was removed`));
+        // It names the replacement; it never echoes a value.
+        expect(message).toContain('one-off CLI commands under the owner login crewflow_owner');
+        expect(message).toContain('OWNER-LOGIN-DEPLOYMENT.md');
+        if (name !== 'CREWFLOW_OPS_RUN') expect(message).not.toContain(value); // 'one-off' is a word of the fixed text
       }
     }
-    // An ordinary CLI run: any ops name without CREWFLOW_OPS_RUN refuses (with it, the CLI IS the ops process).
-    expect(refusal({ PG_DATABASE_URL: APP, PG_OPS_APP_DATABASE_URL: APP }, { processRole: 'cli' })).toMatch(/the cli process refuses/);
-    expect(refusal({ PG_DATABASE_URL: APP, CREWFLOW_OPS_ACTOR_ID: 'x' }, { processRole: 'cli' })).toMatch(/CREWFLOW_OPS_ACTOR_ID/);
-    // Empty values count as unset (compose renders unset variables as empty strings).
-    expect(resolvePgEnvironment({ PG_DATABASE_URL: APP, PG_OPS_APP_DATABASE_URL: '' }, { processRole: 'api' }).ops).toBe(false);
   });
 
-  it('ops in production: PG_DATABASE_URL is optional, verify-full TLS still required on both', () => {
-    const prodApp = PROD;
-    const prodMigrator = PROD.replace('crewflow_app', 'crewflow_migrator').replace(SECRET, OTHER_SECRET);
-    const r = resolvePgEnvironment(
-      { NODE_ENV: 'production', DB_TARGET: 'production', CREWFLOW_OPS_RUN: 'one-off', PG_OPS_APP_DATABASE_URL: prodApp, PG_DATABASE_URL: prodMigrator },
-      { processRole: 'ops' },
+  it('the old ops-container invocation on the cli (CREWFLOW_OPS_RUN=one-off) is refused, never resolved as an ops process', () => {
+    // The exact old rab-ops environment: the app URL in PG_OPS_APP_DATABASE_URL and the migration identity in PG_DATABASE_URL.
+    const oldOps = { ...RETIRED, PG_DATABASE_URL: MIGRATOR };
+    expect(refusal(oldOps, { processRole: 'cli' })).toMatch(
+      /^the cli process refuses the retired operations-container variable\(s\) CREWFLOW_OPS_RUN, PG_OPS_APP_DATABASE_URL, CREWFLOW_OPS_ACTOR_SOURCE, CREWFLOW_OPS_ACTOR_ID, CREWFLOW_OPS_CHANGE_REF:/,
     );
-    expect(r.production).toBe(true);
-    expect(r.elevated?.target.user).toBe('crewflow_migrator');
-    expect(resolvePgEnvironment({ DB_TARGET: 'production', CREWFLOW_OPS_RUN: 'one-off', PG_OPS_APP_DATABASE_URL: prodApp }, { processRole: 'ops' }).elevated).toBeNull();
-    expect(
-      refusal({ DB_TARGET: 'production', CREWFLOW_OPS_RUN: 'one-off', PG_OPS_APP_DATABASE_URL: prodApp.replace('sslmode=verify-full', 'sslmode=disable') }, { processRole: 'ops' }),
-    ).toMatch(/verify-full|sslmode/);
-    expect(
-      refusal({ DB_TARGET: 'production', CREWFLOW_OPS_RUN: 'one-off', PG_OPS_APP_DATABASE_URL: prodApp, PG_DATABASE_URL: prodMigrator.replace('sslmode=verify-full', 'sslmode=disable') }, { processRole: 'ops' }),
-    ).toMatch(/verify-full|sslmode/);
+    // Without PG_DATABASE_URL the retired-variable refusal still comes first (not "PG_DATABASE_URL is required").
+    expect(refusal({ CREWFLOW_OPS_RUN: 'one-off', PG_OPS_APP_DATABASE_URL: APP }, { processRole: 'cli' })).toMatch(/refuses the retired operations-container variable/);
+    // Next to the owner login, with any CREWFLOW_OPS_RUN value, and in production.
+    for (const value of ['one-off', 'true', 'x']) {
+      expect(refusal({ PG_DATABASE_URL: OWNER, CREWFLOW_OPS_RUN: value }, { processRole: 'cli' })).toMatch(/the cli process refuses the retired operations-container variable\(s\) CREWFLOW_OPS_RUN/);
+    }
+    expect(refusal({ DB_TARGET: 'production', PG_DATABASE_URL: PROD, CREWFLOW_OPS_RUN: 'one-off' }, { processRole: 'cli' })).toMatch(/CREWFLOW_OPS_RUN/);
+    // The env.validation path (enforceProcessPolicy false) refuses them too.
+    expect(refusal({ PG_DATABASE_URL: APP, CREWFLOW_OPS_ACTOR_ID: 'x' }, { processRole: 'api', enforceProcessPolicy: false })).toMatch(/CREWFLOW_OPS_ACTOR_ID/);
+  });
+
+  it('empty values count as unset (compose renders unset variables as empty strings); the resolution has no ops field', () => {
+    for (const role of ALL_ROLES) {
+      const r = resolvePgEnvironment({ PG_DATABASE_URL: APP, CREWFLOW_OPS_RUN: '', PG_OPS_APP_DATABASE_URL: '  ' }, { processRole: role });
+      expect(r.processRole).toBe(role);
+      expect(r.primary.source).toBe('PG_DATABASE_URL');
+      expect(r.elevated).toBeNull();
+      expect('ops' in r).toBe(false);
+    }
+  });
+
+  it('the memoised resolution sees the retired names (a clean hit never hides a later retired value)', () => {
+    const clean = { PG_DATABASE_URL: APP, NODE_ENV: 'test' };
+    expect(resolvePgEnvironmentCached(clean, { processRole: 'cli' }).primary.source).toBe('PG_DATABASE_URL');
+    for (const name of RETIRED_OPS_ENV_NAMES) {
+      expect(() => resolvePgEnvironmentCached({ ...clean, [name]: RETIRED[name] }, { processRole: 'cli' })).toThrow(PgConfigError);
+    }
   });
 });

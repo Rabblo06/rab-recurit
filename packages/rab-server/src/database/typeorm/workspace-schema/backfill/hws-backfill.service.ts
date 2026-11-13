@@ -179,9 +179,9 @@ export class HwsBackfillError extends Error {
 export class HwsBackfillService {
   /**
    * The physical-copy writer, set by the command before any `apply()` call — never DI-injected, the same pattern
-   * `StorageReconcileCommand.catalogueDataSource` uses. `dryRun`/`verify` never need it (read-only). Phase B ops container:
-   * the command sets it to the injected restricted DataSource (crewflow_app) — every workspace table is FORCE'd, so the
-   * owner connection had no RLS advantage; proven equal under crewflow_app, crewflow and a superuser
+   * `StorageReconcileCommand.catalogueDataSource` uses. `dryRun`/`verify` never need it (read-only). The ops command
+   * (owner-login one-off) sets it to its injected DataSource — every workspace table is FORCE'd, so an owner connection has
+   * no RLS advantage; proven equal under crewflow_app, crewflow and a superuser
    * (hws-backfill.integration.spec.ts, HWS_BACKFILL_PROOF_WRITER). The name and the older notes in this file predate that.
    */
   ownerDataSource?: DataSource;

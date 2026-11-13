@@ -1,6 +1,7 @@
 import { Global, Module } from '@nestjs/common';
 
 import { AuthModule } from '../auth/auth.module';
+import { AuditEventQueueService } from '../audit-events/audit-event-queue.service';
 import { AuditController } from './audit.controller';
 import { AuditService } from './audit.service';
 
@@ -16,7 +17,8 @@ import { AuditService } from './audit.service';
 @Module({
   imports: [AuthModule],
   controllers: [AuditController],
-  providers: [AuditService],
-  exports: [AuditService],
+  // X1.1: the security audit event producer (disabled — no Redis, no Queue — unless CREWFLOW_AUDIT_SINK is set).
+  providers: [AuditService, AuditEventQueueService],
+  exports: [AuditService, AuditEventQueueService],
 })
 export class AuditModule {}

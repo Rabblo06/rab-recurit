@@ -4134,8 +4134,9 @@ databases only.
 - **Residuals:** the deploying host's operator account can read `.env.migrate`; it must be removed or the approval line
   dropped after each release (procedure, not enforced). Platforms that ignore compose `depends_on` conditions must run the
   step as a release job and promote only on exit 0.
-- **Owner decision (implemented, B7 below):** the owner CLI commands `containment`, `hws:backfill` and
-  `user-session:backfill` run only in the one-off `rab-ops` operations container, at a verified minimum role per mode.
+- **Owner decision (implemented, B7 below; superseded by X2.2):** the owner CLI commands `containment`, `hws:backfill` and
+  `user-session:backfill` run as one-off CLI commands of the API image under `crewflow_owner` (X2.2, #116; rab-ops
+  removed in PR 2 #124).
 
 ### B4: read replica — permission lag
 
@@ -4170,7 +4171,31 @@ databases only.
   organisation cannot initiate provisioning; there is no platform-admin exemption, at the service or in the function.
 - **Residual:** until G2 the privileged `crewflow` credential stays in the Worker launcher (root) and the provisioner child.
 
-### B7: owner operations container (`rab-ops`) — containment, hws:backfill, user-session:backfill (owner decision, branch phase-b/one-db-url, not merged)
+### B7: owner operations container (`rab-ops`) — containment, hws:backfill, user-session:backfill — SUPERSEDED (history)
+
+- **Status: SUPERSEDED (2026-11-12) by "X2.2 (PR #116): ops commands from the API image under crewflow_owner" below;
+  the container was removed in PR 2 #124.**
+  - **Now:** the three commands run as a one-off of the API service, from the same image, under the one owner login.
+  - **PR 2 removed:**
+    - the `rab-ops` service from the three compose files, and `.env.ops.example`;
+    - the `ops` process role in `pg-config.ts`;
+    - the ops-container branches of `ops-run.ts` and `elevated-ops-session.ts` (`assertOpsLoginFacts`,
+      `NEVER_LOGIN_ROLES`, the `crewflow_app` app-session branch);
+    - `assertOpsValuesNotFromDotenv`;
+    - the gates' positive checks of the operations container;
+    - `ops-elevated-session.integration.spec.ts`. #116 ported its live cases to `ops-owner-login.integration.spec.ts`.
+  - **Kept:** every refusal of `CREWFLOW_OPS_RUN`, `PG_OPS_APP_DATABASE_URL`, `CREWFLOW_OPS_ACTOR_SOURCE`,
+    `CREWFLOW_OPS_ACTOR_ID` and `CREWFLOW_OPS_CHANGE_REF`:
+    - `never-in-runtime-env.ts`;
+    - `api-prestart.sh`;
+    - `pg-config.ts`, now in every process, `cli` included;
+    - `ops-run.ts`;
+    - `compose-owner-login.cjs`, `compose-credential-isolation.cjs` and `verify-image-compose.cjs`;
+    - `run-h6-runtime.cjs`;
+    - the env-example refusal lists.
+  - `compose-one-image.cjs` now also refuses a `rab-ops` service or an `ops` profile.
+  - **No database change.** No ops-only role ever existed, so no role was dropped (plan §3).
+  - **History only.** The text below is unchanged and does not describe the current system.
 
 - **Threats:** a migration-capable credential in a long-running container (any RCE reaches every tenant's identity rows);
   an owner command run with more privilege than it needs (the bare migration login inherits BOTH owner roles); a code bug in
@@ -4337,12 +4362,14 @@ databases only.
   `.env`, which Nx 22.7 injects (`nx/dist/src/tasks-runner/task-env-paths.js` `getEnvPathsForTask`), went unseen: the
   checks read only `packages/rab-server/.env` (commands) or the working directory's `.env` (runtimes, ops). Control:
   `core/nx-dotenv-files.ts` lists every file Nx loads for every rab-server and rab-worker target under the repository root
-  and the working directory; `readDotenvValues` (commands, setup-db, the migration URL rule), `readRuntimeDotenvValues`
-  (API / Worker / provisioner, core.datasource, check-pending-migrations) and the ops container's dotenv refusal read all
-  of them. `.dockerignore` also excludes `.*.env`. Tests: `nx-dotenv-files.spec.ts` (list equals Nx's own function for
-  every target; target list pinned to both project.json files, no configurations; a production command, a production
-  runtime and the ops container refuse values in `.env.local`, `.local.env`, `.env.<target>`, `packages/rab-worker/.env.*`
-  and the root `.env`).
+  and the working directory; `readDotenvValues` (commands, setup-db, the migration URL rule) and `readRuntimeDotenvValues`
+  (API / Worker / provisioner, core.datasource, check-pending-migrations) read all of them. The ops container's own
+  dotenv refusal (`assertOpsValuesNotFromDotenv`) was removed with the container in PR 2 #124. An ops variable that
+  reaches a process's environment, Nx's dotenv injection included, is still refused by `pg-config.ts` in every process
+  and by `ops-run.ts` (B7 status). `.dockerignore` also excludes `.*.env`. Tests: `nx-dotenv-files.spec.ts` (list equals
+  Nx's own function for every target; target list pinned to both project.json files, no configurations; a production
+  command and a production runtime refuse values in `.env.local`, `.local.env`, `.env.<target>`,
+  `packages/rab-worker/.env.*` and the root `.env`; the ops-container case was deleted with its function in PR 2).
 - **Container-image dependencies (fixed; branch phase-b/sec-fixes) — undici, qs, deepmerge (Trivy / code scanning).**
   qs 6.15.3 (CVE-2026-82417, CVE-2026-82562, CVE-2026-110816; MEDIUM) under express 5.2.1 and superagent 10.3.0: deduped to
   6.17.0 (lockfile only). undici 6.27.0 (CVE-2026-19534, -87018, -109383, -109869 HIGH; four MEDIUM, one LOW): not a
@@ -4736,7 +4763,8 @@ payroll, attendance or staffing rule change; email preferences untouched (notify
   only by the existing 2-minute stale-PENDING rule (generation bump), the same as email.
 - **Not done (owner rule):** payroll statement approval is not fast-published — an identical path would need the
   dispatcher's `pending → queued` CAS, and a publish failing during a short Redis blip would then wait for the 10-minute
-  lease instead of the 5 s dispatcher, a lease-outcome change.
+  lease instead of the 5 s dispatcher, a lease-outcome change. (Phase X J1b, 2026-11-11, reopens this in a no-write form:
+  after commit the API only WAKES the unchanged dispatcher; it never claims. See the J1b entry below.)
 - **Residual:** at-least-once delivery is unchanged (exactly-once is not claimed). The worker bundle forwards the flag
   to the jobs child (allowlist), so it applies to Worker-originated notify() rows only when set on the Worker service.
 
@@ -5439,6 +5467,9 @@ can set, so injection already crossed tenants on FORCE tables in the separated d
 
 PT-01 was **not** in this file before today. This entry records it.
 
+X1.1 (owner decision 2026-11-12): PT-01's audit consequence is mitigated only by a BEST-EFFORT off-host copy of security
+events (Twenty's model). No line of this file claims a guaranteed sink.
+
 **Accepted by the owner in the final prompt §2.** These are owner-accepted risks, listed separately on purpose. None of
 them is a control that "passed".
 
@@ -5516,8 +5547,10 @@ writes a warning instead.
    accepted (BC-03).
 2. **Account takeover with MFA bypass, platform admins included.** Accepted (BC-04).
 3. **Persistence that survives credential rotation.** Accepted (BC-09). The role inventory and the monitor detect it.
-4. **The audit trail becomes untrustworthy**, which breaks "audit_log is insert-only". Accepted (BC-07). The external
-   sink is required.
+4. **The audit trail becomes untrustworthy**, which breaks "audit_log is insert-only". Accepted (BC-07). A best-effort
+   off-host copy exists (X1.1, accepted by the owner 2026-11-12): it can lose events (Redis or sink failure beyond the
+   BullMQ retries, a process death between commit and publish) and ships what the row says when the Worker reads it, so a
+   row altered before shipping is shipped altered. It narrows, but does not close, the tampering window.
 5. **The deployment identity is effectively removable; the N1 approval list no longer gates the owner-login path.**
    Accepted by the owner 2026-11-05 (BC-11, above). Phase X U-1 (owner decision 2026-11-11): on the owner-login path
    (the migrate-on-start child and the owner-login release step) N1 is REPLACED by the upgrade floor
@@ -5688,7 +5721,7 @@ writes a warning instead.
 | G-02 | CRITICAL | Injection gets full DDL, and the posture gate cannot see policy or body rewrites | Accepted (BC-01, BC-05). **Detected** by the semantic posture monitor (at boot and on a timer). |
 | G-03 | CRITICAL | Cross-tenant account takeover with MFA bypass | Accepted (BC-04). The monitor detects a disabled trigger. |
 | G-04 | CRITICAL (IR) | Persistence after rotation: backdoor LOGIN roles, re-enabled NOLOGIN roles, trojaned definers | Accepted (BC-09). The inventory refuses backdoor members and NOLOGIN drift at boot and on the timer, and function bodies are hashed. Passwords of the expected logins are not visible (BC-17). |
-| G-05 | HIGH | audit_log insert-only defeated | Accepted (BC-07). Production requires an external append-only sink and fails closed without one. |
+| G-05 | HIGH | audit_log insert-only defeated | Accepted (BC-07). Production requires a security audit sink (`CREWFLOW_AUDIT_SINK=stdout` + an off-host log shipper) and refuses to start without one. The off-host copy is BEST EFFORT (X1.1, Twenty's event-log model, accepted by the owner 2026-11-12): security events are queued after commit and shipped by the Worker with retries; events can be lost when Redis or the sink fails, and an owner-login holder can alter or delete rows before they are shipped. It is a detection aid, never a guarantee. |
 | G-06 | HIGH | The runtime can rebind the deployment identity | Accepted by the owner 2026-11-05 (BC-11): deployment ID and approval token optional, off by default |
 | G-07 | HIGH | Unreviewed DDL at boot with approval mode `none` | Accepted by the owner 2026-11-05, like Twenty (item 13 above): the API migrates on start in production |
 | G-08 | MED | DBA-01 lost; a Worker RCE gets owner credentials | Accepted by the owner 2026-11-05 (BC-08) |
@@ -5753,12 +5786,38 @@ Each control below is tested. None of them prevents injection.
     settings and role memberships.
   - At boot it compares with the committed golden for the PG major. On the timer it compares with the boot snapshot.
   - Drift turns readiness off and raises an alert. The monitor never rewrites anything.
-- **External audit sink:** an interface plus redacted, structured events. Production requires it and fails closed
-  without it. Deployment dependency: an off-host append-only log shipper (not created here).
+- **External audit sink (best effort, X1.1, 2026-11-12):** redacted, structured security events (logins success and
+  failure, MFA, password reset and change, grants and revokes, role and permission changes, platform-admin actions,
+  payroll approval, account deletion, suspension, security configuration; allow-list in
+  `audit-events/security-audit-event-catalogue.ts`). `AuditService.record` and the Worker's direct inserts hand the row id
+  to `crewflow-audit-events` AFTER COMMIT; the Worker re-reads the row under FORCE RLS and writes it to the sink with
+  BullMQ retries; the pre-auth login failure (no organisation, no row) is queued by the API as a system-scoped job,
+  fire-and-forget (see the X1.1 entry's backlog guard). Nothing blocks or rolls back an action. Production requires the
+  sink configuration (BC-07 gate unchanged). Deployment dependency: an off-host append-only log shipper (not created
+  here). Not guaranteed: see G-05.
 - **SQL-injection lint** (`tools/check-sql-injection.cjs`) plus adversarial tests. The lint is a text scan, **not a
   complete defence**.
 
 ### Residual risks (no control above covers these)
+
+- The off-host audit copy is best effort (X1.1, accepted 2026-11-12): an event is lost when Redis is down at commit, when
+  the sink stays down past the job's retries (failed jobs are kept 7 days / 1,000), or when the process dies between the
+  commit and the publish; an owner-login holder can alter or delete an audit row before the Worker ships it; the frozen
+  privileged-copy migration's two rows are never shipped. Delivery gaps are visible only as failed jobs in the admin
+  panel's queue view and as missing lines in the log store.
+- A savepoint rollback that TypeORM sees (a nested `transaction()` / `queryRunner.rollbackTransaction()` on a savepoint)
+  makes the AfterCommitPublisher drop EVERY pending audit event registered on that transaction — including events for
+  rows that were written outside the savepoint and DID commit. This queue has no backstop scan (unlike the outbox
+  queues), so those events never reach the sink; the rows stay in core.audit_log. Accepted within the X1.1 "best effort"
+  decision (owner, 2026-11-12). (A raw `ROLLBACK TO SAVEPOINT`, which TypeORM does not see, is the opposite case: the
+  publish is kept and the Worker's re-read ships only what exists.)
+- A password typed into the login e-mail field that is itself shaped like a real address (for example `x@y.com`) cannot
+  be told apart from an address: its masked form (`x***@y.com`) ships in the `auth.login_failed` event. Anything else is
+  shipped as `[not-an-email]`. Accepted within the X1.1 best-effort decision.
+- In free text, an UNQUOTED secret value ends at `&` (a real query delimiter), so a password containing `&` written as
+  `password=hunter&2` ships its tail (`&2`). Quoted values are consumed whole. Accepted within the X1.1 best-effort decision.
+- Under a credential-stuffing flood that fills the audit queue, failed-login events beyond the 10,000 backlog limit are
+  not shipped off-host (only counted); `core.login_history` still records every attempt (X1.1, owner decision 2026-11-12).
 
 - Everything injection can do inside its own request (PT-01): read, rewrite, drop, persist.
 - Session-level settings other than the role (for example a session `rab.organisation_id`) that injected SQL leaves on
@@ -6103,6 +6162,32 @@ RLS, the definers and lease fencing), but a governance gap.
   the Worker's dispatch resolver has no second, Worker-side re-check; env validation is the single layer added here (the
   compose gate remains the other).
 
+## JOBS — pay-statement dispatcher wake after an approval commits (branch phase-x/j1b-statement-wake, 2026-11-11, not merged)
+
+Phase X J1b, owner decision 2026-11-11 (reopens D-Q3a in its no-write form; stacked on J1a's 30 s sweep). After a payroll
+approval or a statement retry COMMITS, the API adds one `shift-statement-dispatch` job to the scan queue
+`crewflow-scan-reports` (scan prefix) through the engine `AfterCommitPublisher`. No migration, grant, RLS, guard or payroll
+rule change.
+
+- **Asset:** another person's pay statement (a payroll document) and its delivery time. **Actor:** a manager approving
+  payroll; anyone able to stall or wipe Redis; a second API or Worker replica.
+- **Why the D-Q3a concern does not apply:** the wake writes NOTHING. The approving session never touches a dispatch column
+  (`core.payroll_record_guard` would refuse it with 42501), so there is no claim that a failed publish could strand behind
+  the 10-minute lease. The only writers stay the Worker dispatcher's compare-and-set (`queued`, generation + 1) and the
+  consumer's generation / `statement_file_id IS NULL` / still-approved checks and UNIQUE `worker_event`.
+- **Controls:** published only after the outermost commit, never on rollback (any savepoint rollback discards it); one wake
+  per transaction; detached and bounded (3 s, 16 in flight); failures logged by error NAME only. Payload `{ v: 1 }` with the
+  `system` scope, validated against the queue registry before Redis: no organisation, record or user id is published. NO
+  fixed jobId (the scan queues keep completed jobs 1 h, so a fixed id would silently drop later wakes). The Worker runs the
+  unchanged dispatcher for it under the same overlap guard and cross-replica scan lock as the scheduled tick (a wake during a
+  running sweep is skipped). Active only with `WORKER_SCHEDULER=bullmq`; in interval mode no Redis connection is opened.
+- **Residual (accepted):** a lost or skipped wake delays the statement to the next sweep (≤ 30 s, J1a); Redis down stops both
+  paths, as for every scan. Each wake runs one whole-tenant sweep (the payload cannot be scoped without a registry change),
+  so an approval burst produces a burst of sweeps, mostly skipped as already running; each skip logs one WARN line.
+- **Tests:** `shift-statement-wake.service.spec.ts`, rab-worker `statement-wake.spec.ts`, and
+  `shift-statement-wake.integration.spec.ts` (after-commit only, rollback publishes nothing, the wake-run dispatcher claims
+  once per record and refuses a stale generation, Redis down: approval succeeds and the sweep delivers).
+
 ## CONFIG — Phase D switches: timer triggers on for all four kinds, the scans as safety sweeps (branch config/phase-d-switches, 2026-11-06, not merged)
 
 Owner decisions 2026-11-06. Configuration only: `WORKER_TIMER_TRIGGERS=on`,
@@ -6213,7 +6298,7 @@ server or network that fails at any stage; a database fault during revalidation.
 - **Changed — no address in logs (owner requirement 3):** nodemailer appends the server reply to its error message and
   SMTP replies echo the refused mailbox. A retryable attempt now throws `EmailSendAttemptError` (outbox id, code, reply
   code, sanitized reply) instead of the provider's error object, so the Worker's `failed` log line, BullMQ's
-  `failedReason` and the job stacktrace kept in Redis (30 days) carry no address. The sanitizer (also used for
+  `failedReason` and the job stacktrace kept in Redis (7 days, at most 1,000 failed jobs per queue since X3.4) carry no address. The sanitizer (also used for
   `last_error_message_sanitized`) bounds the input first (2 000 characters), removes the row's own recipient exactly
   (case-insensitive, any form: quoted or apostrophe local parts), removes keyword-labelled credentials with their
   separator and `Bearer`/`Basic` scheme, then replaces every other token containing `@` with `[address]`, and stores at
@@ -6577,6 +6662,258 @@ cache change. The layer-2 service checks stay in the services; this changes only
 - **Regression tests:** `attendance-per-user-throttle.guard.spec.ts` against real Redis (CI's service; skipped without
   `REDIS_URL`): EXPIRE failing after INCR leaves a TTL (failed before: `PTTL -1`), a TTL-less over-limit key heals, the
   10 / 11th contract and fixed window, per-user independence, fail-open with nothing written, unauthenticated pass-through.
+
+## CONFIG — OpenShip deploy: pinned default release digest and the full env listing (PR #122, 2026-11-12)
+- **Change.** `packages/rab-docker/docker-compose.production.yml` (the file OpenShip imports) now:
+  - pins a default release on the rab-api, rab-worker and rab-ops image lines,
+    `${CREWFLOW_IMAGE_TAG:-sha256:<64 hex>}`, so a deploy needs no `CREWFLOW_IMAGE_TAG`;
+  - lists every production environment variable with no secret value: 13 required (`:?`, so the platform refuses the
+    deploy before boot), the optional ones with their exact code defaults or no value, and the existing pinned values
+    unchanged.
+  - The three files uploaded directly to main on 2026-11-12 (`docker-compose.prod.yml`, `postgres-init-prod/*`) are
+    removed; they re-created the retired two-login model on PG17.
+- **Accepted risk (owner, 2026-11-12): the release is chosen by the commit on main.**
+  - Anyone who can merge to main picks what is deployed, and a deploy-from-main platform redeploys on that merge.
+  - The default is still an immutable, gate-verified index digest, never a mutable tag.
+  - `compose-one-image.cjs` accepts a default only in production.yml, only as a full `sha256:<64 lowercase hex>`, and
+    the same expression on every service. `docker-compose.image.yml` stays strict (`:?`, no default).
+  - Branch protection on `main` (changes only through reviewed PRs, required gates) is the control this relies on.
+    **It is NOT enabled yet** (2026-11-12: no protection rule or ruleset; a write collaborator pushed the reverted files
+    directly). Until the owner enables it, any write account can change the pinned digest without CI.
+  - The pinned default is the newest published release (`0e0a6edd`, 2026-11-11), which predates later fixes (#31, #93,
+    #96, #98, #99, #101, #103). It is meant for a fresh install; publish a new image from main and bump the default.
+- **Accepted risk: OpenShip service-scoped values override any committed value, pinned ones included.** No repository
+  gate can see that. The listing only makes more names visible; it is how OpenShip already worked.
+- **Residual.**
+  - Optional values without a default reach the containers as `""` on OpenShip. Every reader treats blank as unset
+    (verified against env validation and the direct readers).
+  - `CREWFLOW_RUNTIME_ISOLATION` is listed with its default `warn`; `enforce` on OpenShip stops the API and the Worker.
+- **Tests.** `compose-one-image.test.cjs` (digest default accepted only as a full digest in production.yml; tags, `latest`,
+  wrong lengths, other operators and mismatched expressions refused; image.yml has no default).
+
+## Phase X1.2 — one explicit rate-limit switch, refused in production (cleanup audit XA-01 / DUP-03)
+
+LOW (defence in depth)
+Failure:      whoever controls a service's environment (misconfiguration, a compromised deploy config or platform) sets
+              JEST_WORKER_ID (any value) → the API boots normally → the global per-IP throttle, the per-route auth tiers,
+              the login / MFA / admin-MFA-reset limiter and the attendance per-user throttle are all skipped, silently →
+              credential stuffing and brute force unthrottled.
+Actor:        the service environment (already high privilege; not an anonymous attacker).
+Location:     throttler.module.ts:63, login-attempt-limiter.service.ts:203, attendance-per-user-throttle.guard.ts:63 (main
+              843bd3fd): three copies of `JEST_WORKER_ID !== undefined && RAB_DISABLE_RATE_LIMIT !== 'false'`.
+Root cause:   the bypass treated an environment variable as proof of a Jest run, an UNSET flag satisfied `!== 'false'`, and
+              nothing refused it at boot. The comments claimed it "can never be true outside an actual Jest run".
+Fix:          one explicit switch, engine/core-modules/throttler/rate-limit-bypass.ts isRateLimitBypassEnabled:
+              RAB_DISABLE_RATE_LIMIT exactly 'true', never active when NODE_ENV, RAB_RUNTIME_ENV or DB_TARGET says
+              production. JEST_WORKER_ID plays no part. env.validation.ts refuses to boot a production process while
+              RAB_DISABLE_RATE_LIMIT holds anything but unset, blank or false (name only). The three limiters use the helper;
+              both Jest setups set the flag to 'true'. Comments corrected.
+Regression:   rate-limit-bypass.spec.ts (truth table incl. the old hidden-bypass abuse cases, the production refusal, a
+              source scan that no server/Worker source reads RAB_DISABLE_RATE_LIMIT or JEST_WORKER_ID outside the helper, and
+              that the three limiters call it); rate-limit-bypass.limiters.spec.ts and
+              attendance-per-user-throttle.bypass.spec.ts (flag unset with JEST_WORKER_ID set, flag '1', and flag 'true' in a
+              production runtime → the login/MFA/admin-MFA-reset limiter and the attendance guard reach their store);
+              env.validation.rate-limit-bypass.spec.ts (production + the flag → refused; RAB_RUNTIME_ENV=production →
+              refused; unset/blank/false/JEST_WORKER_ID accepted; development / test keep it); rate-limiting.integration.spec.ts
+              (flag 'true' still skips the auth throttle; flag UNSET under Jest → the 6th forgot-password gets 429).
+
+- **Unchanged:** every rate-limit value, key, 429 / 503 contract and Redis failure policy; InvitationRateLimitService and
+  AiQuotaService still have no bypass.
+- **Residual (accepted design, owner prompt §3):** outside production the switch is one variable. A development, QA or staging
+  service started with RAB_DISABLE_RATE_LIMIT=true runs unthrottled (before, it also needed JEST_WORKER_ID). Staging is not a
+  declared production value here unless it sets NODE_ENV / RAB_RUNTIME_ENV / DB_TARGET=production. No compose file, env
+  template or workflow sets the flag today (checked with git grep).
+
+### X3.4: BullMQ retention like Twenty (2026-11-12)
+- **Changed:** every BullMQ queue (5 consumers, 7 scan queues) keeps completed jobs 4 h / at most 1,000 and failed jobs
+  7 days / at most 1,000 (Twenty's QUEUE_RETENTION). Before: email/push/statements 7 d / 30 d with no count cap;
+  rab-ai and timer triggers 1 h / 1000 and 7 d / 5000; scan queues 1 h / 1000 and 7 d with no failed cap.
+- **Control:** a retained job is never the record and never decides correctness. Every consumer re-reads its row under
+  RLS and claims it with a compare-and-set. Email/push recovery republishes under a bumped generation. Statement claims
+  bump the generation. Timer triggers have the backstop scan.
+- **Residual:** failed BullMQ jobs, and manual admin retry of them, are available for 7 days instead of 30, for the newest
+  1,000 per queue. The outbox and worker_event rows remain the long-term record.
+
+### X2.2 (PR #116): ops commands from the API image under crewflow_owner (2026-11-12)
+- **Change.** The three ops commands (`containment:suspend-test-accounts`, `user-session:backfill`, `hws:backfill`) run as
+  a one-off of the API service, from the same image, under the one owner login, the Twenty way. The `rab-ops` container
+  path was removed in PR 2 #124 (B7, now SUPERSEDED).
+- **Actor → action → consequence.**
+  - A holder of the owner credential can already do everything these commands do (BC-01, BC-03, BC-16).
+  - The commands add no grant, no statement and no plan. Their cross-tenant reads and the session-row inserts still run
+    only through the frozen statement names, in a transaction narrowed to `rab_secure_owner` and verified each time.
+    The narrowed session gains nothing.
+  - **What is wider (security review L2).** The non-narrowed command code runs as `crewflow_owner`, where in the ops
+    container it ran as `crewflow_app`: RefreshTokenService, SecurityVersionService, AuditService, the HWS physical copy and
+    the tenant-context writes.
+    - That is the privilege the API already runs with (PT-01).
+    - But a bug in these commands now has the owner login's blast radius (BC-01, BC-05, BC-06), not the restricted
+      login's.
+  - **The frozen lists limit the command code, not the operator.** Whoever runs the one-off holds a login that can
+    `SET ROLE rab_secure_owner` directly (G-02). The operator is trusted exactly as far as any holder of the owner
+    credential.
+- **Controls.** Any other login is refused three times:
+  - before connecting (the URL user);
+  - at boot gate 1;
+  - on the database (`verifyOpsAppSession`).
+
+  The command body refuses to run inside the API, Worker or provisioner process. The operator label is required.
+  `SET LOCAL` ends with the transaction, and the pool's `RESET ROLE` still runs.
+- **Residual.**
+  - The label is an operator claim, not a verified identity. Accountability comes from the platform's job controls.
+  - **OPEN owner decision: read-only modes are unaudited.** `--dry-run`, `--verify` and the containment dry-run write no
+    `audit_log` row. Their only record is the console line and the operator's retained copy of stdout (the runbook
+    requires a `tee`); `--rm` with json-file logging loses the container log. Auditing them would need a new per-run
+    action and a choice of organisation, because `audit_log` is tenant-scoped. Not decided.
+  - Containment's outcome log needs the runbook's host bind-mount. Without it the log write fails after the suspensions
+    have committed, and the evidence is lost (the audit rows remain).
+  - Audit rows written by these commands are as tamperable by an owner-credential holder as any other row (BC-07).
+- **Tests.** `command/ops/ops-run.spec.ts`, `command/ops/elevated-ops-session.spec.ts`,
+  `__tests__/integration/ops-owner-login.integration.spec.ts`.
+
+## Phase X1.4 — forgot-password limit per address (XA-04)
+
+- **Asset:** a person's mailbox and our email sending reputation; the reset-email flow's anti-enumeration property.
+- **Actor → action → consequence (before):** anyone with many client IPs → `POST /auth/forgot-password` for one victim
+  address from each IP → an unbounded number of password-reset emails to that victim (mail-bombing; reset tokens
+  minted without limit; provider reputation burned). Only the per-IP route limit (`AUTH_THROTTLE`, 5/min/IP) applied.
+- **Control:** `PasswordResetEmailLimiterService` (Twenty's `password-reset-email:<email>` bucket, 3 per 15 minutes,
+  continuous refill), one atomic EVAL of the shared `TOKEN_BUCKET_SCRIPT` on the bounded auth-cache Redis client.
+  `AuthService.doForgotPassword` calls it FIRST, for every submitted address, before any account lookup, token, outbox row
+  or audit row. Key = sha256 of the trimmed, lower-cased address under `crewflow:{env}:password-reset-email:` (no email in
+  Redis). A refusal writes nothing (an exhausted address's wait is never extended).
+- **Enumeration:** the key, the decision and the 429 body (`PASSWORD_RESET_RATE_LIMITED`, constant, no retry time) depend
+  only on the submitted string, never on whether an account exists; the 150 ms response floor pads the 429 too.
+- **Failure policy:** Redis down → the route's `@RateLimitRequired` guard already answers 503 (CF-17, unchanged). A Redis
+  error inside the limiter (guard call succeeded, limiter call failed) → 503 `RATE_LIMIT_UNAVAILABLE`: no token, no email.
+  Never "send anyway".
+- **Unchanged:** per-IP route limit, reset-token TTL (1 h) / hashing / single-use consume, CF-06 password-provider gate,
+  outbox publish-after-commit.
+- **Residual:** an attacker can spend a victim's 3 reset emails per 15 minutes, delaying the victim's own reset by up to
+  ~5 minutes per token (continuous refill). Accepted as Twenty's trade-off; the values are code constants.
+- **Tests:** `password-reset-email-limiter.service.spec.ts`, `forgot-password-email-limit.integration.spec.ts`
+  (4 IPs → 3 emails then 429; 20 concurrent → ≤3; known = unknown status and body; per-IP limit kept).
+
+## PERF — tenant framing: search_path and the Worker read-only flag folded into the binding SELECT (T-1, branch phase-x/t1-tenant-framing, PR #95, 2026-11-11, not merged)
+
+**Change.** `TenantContextService.bindGucs` now sets `search_path` in the same `SELECT` as the identity GUCs when the
+schema is known before the bind (HWS off; HWS on without a workspace; a replica read whose schema was validated on the
+primary), as bound parameter `$6`, transaction-local. A new option `readOnly` adds
+`set_config('transaction_read_only', 'on', true)` to that `SELECT`; the Worker's four hot read-only scans use it instead of
+their own `SET TRANSACTION READ ONLY` (ST-01/ST-02). API transactions: 6 → 5 framing statements; Worker scans: 7 → 5.
+
+**Unchanged (owner decision P1-13):** both `RESET ROLE`s (G-09 layers 1 and 2) as their own statements; the
+`current_user = session_user` assertion; Admin Inspect's first-statement `SET TRANSACTION READ ONLY` (CF-02); the replica
+path's READ ONLY; the security snapshot's isolation statement; FORCE RLS; transaction-local context. A raw
+`BEGIN READ ONLY` that bypasses TypeORM stays rejected (ST-03: it would end the outer transaction early).
+
+**Threats considered.**
+- *search_path list injection.* A bound value prevents SQL injection but not a comma-separated list (`'x, core'` is two
+  schemas). Only `'core'` or a `workspaceSchemaName()` result that matched the registry is ever passed. ST-07 adds the same
+  check on a Redis cache hit: a cached name that is not exactly the derived name is dropped and decided from Postgres
+  (`name-mismatch` on any disagreement).
+- *Read-only weakened.* It is stricter: it now applies from the binding `SELECT`, before any business statement (it used
+  to follow setup). Writes fail with 25006 on PG16 and PG18, inside SAVEPOINTs too.
+- *Context surviving the transaction.* All folded settings are `is_local = true`; proven to revert after COMMIT and
+  ROLLBACK on the same pooled backend.
+- *Pool poisoning (G-09).* Unchanged; re-proven with the folded statement, for the checkout hook and for layer 2 alone.
+
+**Residual.** `request_complete.sqlCount` now includes the checkout `RESET ROLE` (ST-05); when the pool is full, that
+count can be attributed to the request that released the connection. Statement counts for decisions come from
+`pg_stat_statements` as `crewflow_owner`.
+
+**Regression tests:** `tenant-context.service.spec.ts` (exact sequences, framing-count guard),
+`tenant-context-framing.integration.spec.ts` (real PG, owner login, pool max 1: settings, revert, 25006, poisoned session,
+injection), `schema-resolver.service.spec.ts` (ST-07), `session-role-reset.spec.ts` (ST-05).
+
+## Phase X1.1 — security audit events, best effort (XR-01, owner decision 2026-11-12)
+
+- **Asset:** the evidence trail of security actions under the one owner login (G-05/BC-07).
+- **Before:** only `security.posture.drift` reached the sink (XR-01); logins, grants, role changes, payroll approvals and
+  deletions existed only in `core.audit_log`, which the owner login can rewrite.
+- **Control:** after commit, one BullMQ job per security audit row (ids only); the Worker re-reads the row under FORCE RLS
+  and writes the redacted event to the configured sink with retries. Redaction: secret-looking keys and `name=value`
+  pairs `[REDACTED]` (passwords, tokens, keys, private keys, JWTs, bearer/basic credentials, named one-time codes,
+  connection strings), e-mails masked (Unicode-aware; a login-field value that is not a valid address ships as
+  `[not-an-email]`, never the raw input), URLs replaced, length/depth bounded (~16 KB per event). The frozen
+  privileged-copy migration never ships (owner decision 2026-11-12).
+- **Failed-login events are dropped above a 10,000 backlog** (owner decision 2026-11-12): the pre-authentication failed
+  login (no organisation, no audit row) is queued fire-and-forget as a system-scoped audit job; when the audit queue's
+  backlog (waiting + delayed + prioritized, read at most every 2 s per process) is over 10,000, new failed-login events are
+  dropped and counted — a process counter plus a durable Redis total on one dedicated key, shown on the platform-admin
+  Health tab ("Security audit events"). A failed login never waits on or fails because of the audit path. Other audit
+  events are never dropped by this guard.
+- **Fail-open by design:** a Redis, queue or sink failure never blocks, delays or rolls back an action (Twenty's
+  event-log model). A rolled-back transaction ships nothing (publisher discard + the Worker's re-read).
+- **Abuse cases tested:** forged scope / cross-tenant payload ships nothing; forged id pairs under real RLS ship nothing;
+  extra payload keys (action, e-mail) refused before Redis; a malformed job fails without a retry or a read; a raw
+  savepoint rollback ships nothing; a hung or failing pre-auth add never changes the login response, status or timing
+  class.
+- **Residual:** see G-05 and Residual risks (events lost on Redis/sink failure; rows alterable before shipping; savepoint
+  discard; address-shaped passwords; unquoted `&`; failed-login drops under a flood).
+- **Tests:** `security-audit-event-catalogue.spec.ts` (incl. the repo-wide raw audit_log insert scan),
+  `build-security-audit-event.spec.ts`, `redaction.spec.ts`, `audit-event-queue.service.spec.ts`,
+  `audit-event-shipping.spec.ts`, `outbox-operations.replay-audit-event.spec.ts`, `queue-registry.spec.ts` (X1.1 block),
+  `audit-event.handler.spec.ts`, `account-invite-cleanup.audit-events.spec.ts`,
+  `audit-events-delivery.integration.spec.ts` (E1–E7).
+
+## Phase X1.8 — test database isolation fails closed (cleanup audit DBT-01, DBT-02, DBT-10, DBT-12, XD-03; PR #27)
+
+- **Asset:** the development database and any non-test database reachable from a developer machine; the disposable test
+  cluster's bootstrap superuser credential. **Actor:** not an attacker: a developer `.env`, a shell export or a harness
+  that hands the wrong environment to a test or e2e process (the 2026-10-05 incident class the guard exists for).
+- **DBT-01 (reproduced 2026-11-02, disposable `rab_x1_int` + an unreachable decoy):** with `packages/rab-server/.env` =
+  `NODE_ENV=development` + a decoy `DATABASE_URL` (127.0.0.1:1), `nx test rab-server` passed globalSetup (the TEST pair was
+  valid) and then 1,089 application connection attempts went to the decoy: Nx loads `.env` into the task without
+  overriding, the Nx Jest executor and Jest only default `NODE_ENV` when it is unset, and `applyIntegrationTestDatabaseEnv`
+  returned early for any NODE_ENV but `test`, while fixtures used the TEST admin URL. CI was not affected (`NODE_ENV: test`).
+- **Control (`test-database-guard.ts`):** the guard no longer depends on `NODE_ENV=test`. Under Jest any NODE_ENV but `test`
+  (unset included) is refused in every test file (setupFiles, `JEST_WORKER_ID` set) and in globalSetup
+  (`resolveForJestGlobalSetup`); outside Jest a non-test NODE_ENV stays inert, so runtime and CLI processes are unchanged.
+  The database rules themselves never read NODE_ENV. Refused: the development database (rab-devdb 127.0.0.1:15432 on any
+  loopback alias, compose host `devdb`, or the `DEVDB_URL` database); an inherited `PG_DATABASE_URL`,
+  `PG_OPS_APP_DATABASE_URL` or `CREWFLOW_*_DATABASE_URL` naming another database or another login (DBT-02; empty = unset;
+  the working directory's `.env` and `DOTENV_CONFIG_PATH` are read as data so a value @nestjs/config would load later is
+  checked too); a non-empty `DATABASE_DIRECT_URL` or `PG_DATABASE_REPLICA_URL`; target-changing libpq variables (`PGHOST`,
+  `PGPORT`, `PGUSER`, `PGDATABASE`, ...); a percent-encoded host; a TEST URL without its login; `TEST_DATABASE_CREWFLOW_URL`
+  / `TEST_DATABASE_WORKER_URL` on another database (DBT-10). The catalog disposable marker and the same-cluster probe are
+  unchanged. Messages carry variable names, host, port and database only. `seed-ai-e2e.ts` refuses a null routing.
+- **XD-03 (`rab-worker/.../helpers/worker-login-env.ts`):** the Phase D worker-login switch copied
+  `TEST_DATABASE_WORKER_URL` into `DATABASE_URL` unchecked. It now calls `applyWorkerLoginTestDatabaseEnv`, which, whatever
+  NODE_ENV says, requires the valid TEST pair, the worker URL on the TEST database with its own login and no redirecting
+  inherited URL or libpq variable, and refuses an `options` query parameter on the worker URL and the logins of
+  `TEST_DATABASE_URL_UNPOOLED`, `MIGRATION_SECURITY_ADMIN_URL` and `TEST_DATABASE_CREWFLOW_URL` (compared by name);
+  nothing is changed on refusal. When the switch is on, the worker Jest globalSetup also connects as the worker login
+  (`assertWorkerLoginNotPrivilegedAtRuntime`) and refuses when that login (`session_user`) is, or is a member (direct or
+  inherited, `pg_has_role(session_user, r.oid, 'MEMBER')`) of, any superuser or BYPASSRLS role, or does not reach the
+  TEST database.
+- **DBT-12 (`run-ai-e2e.sh`):** the API, the rab-ai consumer, Vite and Playwright start through `runtime-env.sh`
+  (`ai_e2e_runtime_exec` / `ai_e2e_client_exec`), which remove from the child: every `TEST_DATABASE_*` URL,
+  `MIGRATION_SECURITY_ADMIN_URL`, the role bootstrap passwords, the legacy URLs, `DOTENV_CONFIG_PATH` and command authority;
+  every libpq `PG*` name (`PGPASSWORD`, ...), every `PG_*URL` but `PG_DATABASE_URL`, every `POSTGRES_*` name; and any name
+  whose value equals the superuser URL or `MIGRATION_SECURITY_ADMIN_URL`, or contains their password (8+ characters; the
+  password and the value are each compared as written and percent-decoded; a URL scheme is ignored for this match). Names
+  are read from `env -0`, so names bash cannot use as variables (e.g. `ADMIN.URL`) are covered. Clients also lose
+  `PG_DATABASE_URL` and
+  `APP_SECRET`. Only the seed keeps the admin connection. The harness refuses to start when `PG_DATABASE_URL` itself holds
+  the admin credential, and runs the API and Worker in a fresh empty directory (`AI_E2E_WORK/runtime-cwd.*`, proved free of
+  `.env`), so an env file kept as `AI_E2E_WORK/.env` is never loaded by ConfigModule.
+- **Regression tests:** `test-database-guard.spec.ts` (the database rules refuse the development database by their own rule
+  for NODE_ENV unset / empty / development / production / staging; the worker-login switch is refused for the development
+  database, another database, a remote host, a missing TEST pair, no login, the superuser / migration-admin / crewflow
+  logins, an `options` query parameter and redirecting env; the live privilege check runs against the real TEST database
+  and refuses a superuser login and a non-superuser login that is a member of a superuser role);
+  `run-ai-e2e-env.test.cjs` runs the REAL `run-ai-e2e.sh` with `node` / `curl` / `powershell.exe` stubbed on PATH and
+  asserts on every spawned child's environment (unknown children fail): the superuser credential as URL, `postgresql://`,
+  `?sslmode=`, `localhost`, keyword string, `POSTGRES_PASSWORD`, inherited `PGPASSWORD`, an encoded source password, a raw
+  source password with a percent-encoded copy, a bash-invalid name (`ADMIN.URL`) and an `AI_E2E_WORK/.env` file all reach
+  the seed only. Wired into `ci-e2e` spec-coverage.
+- **Residual:** a developer who sets `NODE_ENV=test` and points `TEST_DATABASE_URL` at a real database that also carries
+  `crewflow.disposable_test_database = 'true'` is not stopped (the marker is the positive opt-in, by design). The devdb
+  endpoint list is the repository's own compose shape. `runtime-env.sh` is a deny-list (an allow-list was not taken: the
+  real harness cannot be exercised in review, and it would drop platform / env-file variables the children need): a NEW
+  credential that is not listed, not `PG*` / `POSTGRES_*` and does not carry an 8+ character admin password still reaches
+  the children; an admin password shorter than 8 characters is matched only as the exact URL value.
 
 ## X1.6 — Redis is protected by the private Docker network only, as in Twenty (branch phase-x2/x16-redis-port-gate, 2026-11-12, PR #111)
 

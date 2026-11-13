@@ -2,6 +2,7 @@ import { Injectable } from '@nestjs/common';
 import { EntityManager } from 'typeorm';
 
 import { AuditLog } from '../../../modules/identity/entities';
+import { shipAuditRowAfterCommit } from '../audit-events/audit-event-shipping';
 import { AuthContext } from '../tenant/auth-context.interface';
 import { TenantContextService } from '../tenant/tenant-context.service';
 
@@ -351,8 +352,8 @@ export const AuditAction = {
   AI_INPUT_REQUESTED: 'ai.input_requested',
   AI_INPUT_ANSWERED: 'ai.input_answered',
   /**
-   * Phase B ops container (command/ops): an owner operation wrote data in this organisation. Actor-less (no authenticated
-   * human); `metadata.operationalLabel` is the CI/deployment label (source, id, change ref, run id) — an OPERATIONAL label,
+   * Ops commands (command/ops, the owner-login one-off): an owner operation wrote data in this organisation. Actor-less (no
+   * authenticated human); `metadata.operationalLabel` is the operator label (source, id, change ref, run id) — an OPERATIONAL label,
    * not a database-verified identity — and `metadata.databaseVerified` the roles the session verified before writing.
    * Containment keeps ACCOUNT_SUSPENDED (with the same metadata) per user.
    */
@@ -424,6 +425,9 @@ export class AuditService {
       metadata,
     });
     await manager.save(entry);
+    // Phase X Part 2, X1.1: the off-host copy (security actions only), queued AFTER this transaction commits and never
+    // awaited — a Redis or sink problem cannot block or roll back the action (best effort; audit-event-queue.service.ts).
+    shipAuditRowAfterCommit(manager, { organisationId: entry.organisationId, auditLogId: entry.id, action });
   }
 
   /**

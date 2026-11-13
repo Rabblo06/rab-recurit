@@ -18,13 +18,16 @@
  *     names .env.migrate, nothing depends on a rab-migrate, and the runtime services carry no migration credential or
  *     authority and no legacy DATABASE_URL / DATABASE_DIRECT_URL key. The dev and QA files keep their one-off `migrate`.
  *
- * Phase B (ops, owner decision): the one-off owner operations container `rab-ops` (production file, profile "ops") reads
- * packages/rab-docker/.env.ops only. A sentinel .env.ops (ops crewflow_app URL with its own sentinel password, a migrator
- * URL, the operator label) is rendered with `--profile ops`, and:
- *   - rab-ops: names .env.ops, receives PG_OPS_APP_DATABASE_URL and CREWFLOW_OPS_RUN=one-off from it, has the "ops" profile
- *     (never started by `up`), restart "no", runs dist/command/main.js, publishes no port, keeps HWS off, nothing depends on it;
- *   - every OTHER service (API, Worker, migrate, and the dev/QA files): does not name .env.ops, carries no value of the ops
- *     sentinel and none of the ops-only names (CREWFLOW_OPS_*, PG_OPS_*).
+ * rab-ops removal (PR 2): the separated operations container `rab-ops` and its .env.ops are retired; operations run as
+ * one-off owner-login commands of the API image. The refusals stay, so neither can come back unnoticed. A sentinel .env.ops
+ * (a crewflow_app URL with its own sentinel password, a migrator URL, the operator label) is still planted in the
+ * throw-away project and every file is rendered with EVERY profile enabled (`--profile '*'`, security review of PR #124:
+ * a service re-added under any profile, e.g. `rab-maint` with `profiles: ["maint"]` reading .env.ops, is rendered, not
+ * hidden), and in every file:
+ *   - no service is named rab-ops and no service has the "ops" profile; in the production files (production.yml,
+ *     local-build.yml) no service has any profile at all (every service starts with the stack);
+ *   - no service names .env.ops, carries a value of the ops sentinel, or holds any ops-only name (CREWFLOW_OPS_*, PG_OPS_*).
+ * opsRefusalChecks() is the pure part; compose-credential-isolation.ops.test.cjs proves each refusal.
  * Exit 0 = all checks passed, 1 = a check failed, 2 = docker compose is unavailable (CI must have it).
  * Prints service names, variable NAMES and check results only; never a value.
  */
@@ -41,11 +44,6 @@ const MIGRATION_AUTHORITY = ['CREWFLOW_MIGRATION_APPROVED', 'CREWFLOW_MIGRATION_
 const OPS_SENTINEL_PASSWORD = 'SENTINEL-OPS-APP-PW-7c21de'; // gitleaks:allow (synthetic marker, not a credential)
 const OPS_SENTINEL_APP_URL = `postgresql://crewflow_app:${OPS_SENTINEL_PASSWORD}@db-direct.example:5432/rab?sslmode=verify-full`;
 const OPS_ONLY_NAMES = ['CREWFLOW_OPS_RUN', 'PG_OPS_APP_DATABASE_URL', 'CREWFLOW_OPS_ACTOR_SOURCE', 'CREWFLOW_OPS_ACTOR_ID', 'CREWFLOW_OPS_CHANGE_REF'];
-/** Compose files that define the one-off operations container, and its service name. */
-const OPS_SERVICES = {
-  'packages/rab-docker/docker-compose.production.yml': 'rab-ops',
-  'packages/rab-docker/docker-compose.local-build.yml': 'rab-ops',
-};
 
 /** [compose file, migration service (null = none, O3), runtime services, production?] */
 const FILES = [
@@ -66,6 +64,21 @@ const DUMMY_ENV = {
   QA_CREWFLOW_PASSWORD: 'dummy',
   QA_CREWFLOW_APP_PASSWORD: 'dummy',
   QA_APP_SECRET: 'dummy-dummy-dummy-dummy-dummy-dummy',
+  // docker-compose.production.yml's REQUIRED list (x-crewflow-required-env, owner request 2026-11-12: OpenShip shows every
+  // variable). The owner-login URL shape, never the migrator login or a sentinel.
+  PG_DATABASE_URL: 'postgresql://crewflow_owner:dummy@db-direct.example:5432/rab?sslmode=verify-full',
+  APP_SECRET: 'dummy-dummy-dummy-dummy-dummy-dummy',
+  APP_URL: 'https://app.example.com',
+  ACCOUNTS_URL: 'https://app.example.com',
+  CORS_ORIGINS: 'https://app.example.com',
+  TRUSTED_PROXY_CIDRS: '10.0.0.1/32',
+  EMAIL_DRIVER: 'SMTP',
+  S3_BUCKET: 'dummy',
+  S3_REGION: 'auto',
+  S3_ENDPOINT: 'https://s3.example.com',
+  S3_ACCESS_KEY_ID: 'dummy',
+  S3_SECRET_ACCESS_KEY: 'dummy',
+  CREWFLOW_AUDIT_SINK: 'stdout',
 };
 
 let failures = 0;
@@ -98,7 +111,7 @@ function render(rel) {
   try {
     const out = execFileSync(
       'docker',
-      ['compose', '--project-directory', project, '-p', 'compose-isolation-check', '-f', path.join(REPO, rel), '--profile', 'ops', 'config', '--format', 'json'],
+      ['compose', '--project-directory', project, '-p', 'compose-isolation-check', '-f', path.join(REPO, rel), '--profile', '*', 'config', '--format', 'json'],
       { env: { ...process.env, ...DUMMY_ENV, CREWFLOW_MIGRATION_DATABASE_URL: '', CREWFLOW_MIGRATION_APPROVED: '' }, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] },
     );
     return JSON.parse(out);
@@ -108,6 +121,28 @@ function render(rel) {
 }
 
 const envOf = (svc) => svc.environment ?? {};
+
+/**
+ * rab-ops removal (PR 2): the retired operations container and its environment must not come back. Pure: returns
+ * [ok, label] pairs for one rendered model (`services`) and the env_file names read from the committed YAML (`raw`, or
+ * null when the yaml package is unavailable; the env_file-name check is then skipped, as for .env.migrate).
+ */
+function opsRefusalChecks(rel, services, raw, { production = false } = {}) {
+  const out = [];
+  const namesOpsFile = (name) => (raw?.[name] ?? []).some((f) => /(^|\/)\.env\.ops$/.test(f));
+  out.push([!services['rab-ops'], `${rel}: has no rab-ops service (removed; operations run as one-off owner-login commands of rab-api)`]);
+  for (const [name, svc] of Object.entries(services)) {
+    const env = envOf(svc ?? {});
+    const values = Object.values(env).map((v) => String(v ?? ''));
+    out.push([!(Array.isArray(svc?.profiles) && svc.profiles.includes('ops')), `${rel}: ${name} has no "ops" profile (the rab-ops container was removed)`]);
+    if (production) out.push([!(Array.isArray(svc?.profiles) && svc.profiles.length), `${rel}: ${name} has no profile (a production file has no profile-gated service)`]);
+    if (raw) out.push([!namesOpsFile(name), `${rel}: ${name} does not name .env.ops`]);
+    out.push([!values.some((v) => v.includes(OPS_SENTINEL_PASSWORD)), `${rel}: ${name} carries no value of the ops environment`]);
+    const held = OPS_ONLY_NAMES.filter((k) => String(env[k] ?? '').trim() !== '');
+    out.push([held.length === 0, `${rel}: ${name} holds no ops-only variable${held.length ? ` (${held.join(', ')})` : ''}`]);
+  }
+  return out;
+}
 
 /**
  * `config` inlines env_file contents into `environment` and drops the key, so which service NAMES .env.migrate is read
@@ -148,34 +183,8 @@ function main() {
     const raw = rawEnvFiles(rel);
     if (raw === null) console.log(`[compose-isolation] note ${rel}: the yaml package is not installed; env_file names not checked`);
     const namesMigrateFile = (name) => (raw?.[name] ?? []).some((f) => /(^|\/)\.env\.migrate$/.test(f));
-    const namesOpsFile = (name) => (raw?.[name] ?? []).some((f) => /(^|\/)\.env\.ops$/.test(f));
-    const opsName = OPS_SERVICES[rel] ?? null;
-    // Phase B (ops): every service but the ops one (runtime AND migrate) carries nothing of the ops environment.
-    for (const [name, svc] of Object.entries(services)) {
-      if (name === opsName) continue;
-      const env = envOf(svc);
-      const values = Object.values(env).map((v) => String(v ?? ''));
-      if (raw) check(!namesOpsFile(name), `${rel}: ${name} does not name .env.ops`);
-      check(!values.some((v) => v.includes(OPS_SENTINEL_PASSWORD)), `${rel}: ${name} carries no value of the ops environment`);
-      const held = OPS_ONLY_NAMES.filter((k) => String(env[k] ?? '').trim() !== '');
-      check(held.length === 0, `${rel}: ${name} holds no ops-only variable${held.length ? ` (${held.join(', ')})` : ''}`);
-      if (opsName) check(!Object.keys(svc.depends_on ?? {}).includes(opsName), `${rel}: ${name} does not depend on ${opsName}`);
-    }
-    if (opsName) {
-      const ops = services[opsName];
-      check(Boolean(ops), `${rel}: ops service ${opsName} exists (rendered with --profile ops)`);
-      if (ops) {
-        const env = envOf(ops);
-        check(env.PG_OPS_APP_DATABASE_URL === OPS_SENTINEL_APP_URL, `${rel}: ${opsName} receives PG_OPS_APP_DATABASE_URL from .env.ops`);
-        check(env.CREWFLOW_OPS_RUN === 'one-off', `${rel}: ${opsName} declares CREWFLOW_OPS_RUN=one-off from .env.ops`);
-        if (raw) check(namesOpsFile(opsName) && !namesMigrateFile(opsName), `${rel}: ${opsName} names .env.ops (and not .env.migrate) as its env_file`);
-        check(Array.isArray(ops.profiles) && ops.profiles.length === 1 && ops.profiles[0] === 'ops', `${rel}: ${opsName} has only the "ops" profile (never started by up)`);
-        check(String(ops.restart ?? 'no') === 'no', `${rel}: ${opsName} restart is "no"`);
-        check(JSON.stringify(ops.entrypoint ?? []).includes('dist/command/main.js'), `${rel}: ${opsName} runs the CLI entrypoint`);
-        check(!ops.ports || ops.ports.length === 0, `${rel}: ${opsName} publishes no port`);
-        check(env.HWS_RUNTIME_ENABLED === 'false', `${rel}: ${opsName} keeps HWS_RUNTIME_ENABLED "false" (hws:backfill --apply needs --hws-cutover)`);
-      }
-    }
+    // rab-ops removal (PR 2): no service (runtime, migrate, or the dev/QA files) carries anything of the ops environment.
+    for (const [ok, label] of opsRefusalChecks(rel, services, raw, { production })) check(ok, label);
     const migrate = migrateName ? services[migrateName] : undefined;
     // The production file is on the owner login (single URL); the dev and QA files keep the separated contract.
     const ownerLogin = rel === 'packages/rab-docker/docker-compose.production.yml' || rel === 'packages/rab-docker/docker-compose.local-build.yml';
@@ -233,4 +242,5 @@ function main() {
   process.exit(failures === 0 ? 0 : 1);
 }
 
-main();
+module.exports = { opsRefusalChecks, render, rawEnvFiles, OPS_ONLY_NAMES, OPS_SENTINEL_PASSWORD, OPS_SENTINEL_APP_URL };
+if (require.main === module) main();

@@ -31,9 +31,16 @@ jobs:
       fail-fast: false
       matrix:
         pg: ['16', '18']
+    services:
+      redis:
+        image: redis:7-alpine
+        ports: ['6379:6379']
+        options: >-
+          --health-cmd "redis-cli ping" --health-interval 5s --health-timeout 5s --health-retries 10
     env:
       NODE_ENV: test
       DB_TARGET: local
+      REDIS_URL: redis://localhost:6379
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -101,6 +108,17 @@ jobs:
             console.log(`findings: EXPECTED-RISK=${by("EXPECTED-RISK").length} CONTROL-HOLDS=${by("CONTROL-HOLDS").length} HARD-FLOOR=${by("HARD-FLOOR").length}`);
             for (const l of by("EXPECTED-RISK")) console.log(`  [${l.severity}] ${l.id}: ${l.acceptance}`);' "$TWENTY_FINDINGS_FILE"
           exit $status
+      - name: X2.2 ops commands under the owner login (PostgreSQL ${{ matrix.pg }})
+        run: |
+          set -euo pipefail
+          set -a; source "${RUNNER_TEMP}/test-database.env"; set +a
+          eval "$(node packages/rab-server/src/database/typeorm/scripts/twenty-test-env.cjs "$OWNER_DB" --source bootstrap)"
+          unset TWENTY_MODE_TESTS
+          npx jest -c packages/rab-server/jest.config.ts --runInBand --testTimeout=180000 \
+            packages/rab-server/src/__tests__/integration/ops-owner-login.integration.spec.ts \
+            --json "--outputFile=${RUNNER_TEMP}/x22-pg${{ matrix.pg }}.json"
+          # Prove it ran (not skipped): at least one passed, none failed.
+          node -e 'const r=require(process.argv[1]);const t=r.testResults[0];const n=(s)=>t?t.assertionResults.filter((a)=>a.status===s).length:0;console.log(`ops-owner-login (PG${process.argv[2]}): passed=${n("passed")} failed=${n("failed")}`);process.exit(!t||n("passed")===0||n("failed")>0||n("pending")>0?1:0)' "${RUNNER_TEMP}/x22-pg${{ matrix.pg }}.json" "${{ matrix.pg }}"
       - name: Lifecycle scenarios (owner login, the real migrate child; transition is covered by ci-migration-security owner-login)
         if: success() || failure()
         run: |
