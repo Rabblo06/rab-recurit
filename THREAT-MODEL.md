@@ -4761,7 +4761,8 @@ payroll, attendance or staffing rule change; email preferences untouched (notify
   only by the existing 2-minute stale-PENDING rule (generation bump), the same as email.
 - **Not done (owner rule):** payroll statement approval is not fast-published — an identical path would need the
   dispatcher's `pending → queued` CAS, and a publish failing during a short Redis blip would then wait for the 10-minute
-  lease instead of the 5 s dispatcher, a lease-outcome change.
+  lease instead of the 5 s dispatcher, a lease-outcome change. (Phase X J1b, 2026-11-11, reopens this in a no-write form:
+  after commit the API only WAKES the unchanged dispatcher; it never claims. See the J1b entry below.)
 - **Residual:** at-least-once delivery is unchanged (exactly-once is not claimed). The worker bundle forwards the flag
   to the jobs child (allowlist), so it applies to Worker-originated notify() rows only when set on the Worker service.
 
@@ -6127,6 +6128,32 @@ RLS, the definers and lease fencing), but a governance gap.
 - **Residual:** none new. The pointer triggers keep firing in every mode (SJ-06, separate decision). Unlike the invite rule,
   the Worker's dispatch resolver has no second, Worker-side re-check; env validation is the single layer added here (the
   compose gate remains the other).
+
+## JOBS — pay-statement dispatcher wake after an approval commits (branch phase-x/j1b-statement-wake, 2026-11-11, not merged)
+
+Phase X J1b, owner decision 2026-11-11 (reopens D-Q3a in its no-write form; stacked on J1a's 30 s sweep). After a payroll
+approval or a statement retry COMMITS, the API adds one `shift-statement-dispatch` job to the scan queue
+`crewflow-scan-reports` (scan prefix) through the engine `AfterCommitPublisher`. No migration, grant, RLS, guard or payroll
+rule change.
+
+- **Asset:** another person's pay statement (a payroll document) and its delivery time. **Actor:** a manager approving
+  payroll; anyone able to stall or wipe Redis; a second API or Worker replica.
+- **Why the D-Q3a concern does not apply:** the wake writes NOTHING. The approving session never touches a dispatch column
+  (`core.payroll_record_guard` would refuse it with 42501), so there is no claim that a failed publish could strand behind
+  the 10-minute lease. The only writers stay the Worker dispatcher's compare-and-set (`queued`, generation + 1) and the
+  consumer's generation / `statement_file_id IS NULL` / still-approved checks and UNIQUE `worker_event`.
+- **Controls:** published only after the outermost commit, never on rollback (any savepoint rollback discards it); one wake
+  per transaction; detached and bounded (3 s, 16 in flight); failures logged by error NAME only. Payload `{ v: 1 }` with the
+  `system` scope, validated against the queue registry before Redis: no organisation, record or user id is published. NO
+  fixed jobId (the scan queues keep completed jobs 1 h, so a fixed id would silently drop later wakes). The Worker runs the
+  unchanged dispatcher for it under the same overlap guard and cross-replica scan lock as the scheduled tick (a wake during a
+  running sweep is skipped). Active only with `WORKER_SCHEDULER=bullmq`; in interval mode no Redis connection is opened.
+- **Residual (accepted):** a lost or skipped wake delays the statement to the next sweep (≤ 30 s, J1a); Redis down stops both
+  paths, as for every scan. Each wake runs one whole-tenant sweep (the payload cannot be scoped without a registry change),
+  so an approval burst produces a burst of sweeps, mostly skipped as already running; each skip logs one WARN line.
+- **Tests:** `shift-statement-wake.service.spec.ts`, rab-worker `statement-wake.spec.ts`, and
+  `shift-statement-wake.integration.spec.ts` (after-commit only, rollback publishes nothing, the wake-run dispatcher claims
+  once per record and refuses a stale generation, Redis down: approval succeeds and the sweep delivers).
 
 ## CONFIG — Phase D switches: timer triggers on for all four kinds, the scans as safety sweeps (branch config/phase-d-switches, 2026-11-06, not merged)
 
