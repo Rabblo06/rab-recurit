@@ -1,7 +1,7 @@
 import { Queue } from 'bullmq';
 import type Redis from 'ioredis';
 
-import { boundedPublish, closeQueueProducer } from '@rab/server/engine/worker-shared/queue-producer-connection';
+import { boundedPublish, closeQueueProducer, ProducerRedisConnection } from '@rab/server/engine/worker-shared/queue-producer-connection';
 
 /**
  * Lead follow-up (C-report §6.1): a BullMQ PRODUCER queue for the Worker whose every `add` is bounded by Agent C's
@@ -20,7 +20,7 @@ export class BoundedProducerQueue<D> extends Queue<D> {
     private readonly producerConnection: Redis,
     private readonly label: string,
   ) {
-    super(name, { connection: producerConnection });
+    super(name, { connection: producerConnection }, ProducerRedisConnection);
     // Reconnect noise during an outage: the failed publish itself is reported by its caller.
     this.on('error', () => undefined);
   }

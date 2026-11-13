@@ -3,7 +3,7 @@ import { Queue } from 'bullmq';
 import Redis from 'ioredis';
 
 import { enqueueRegisteredJob, registeredJob } from '../../worker-shared/queue-enqueue';
-import { boundedPublish, closeQueueProducer, createQueueProducerConnection } from '../../worker-shared/queue-producer-connection';
+import { boundedPublish, closeQueueProducer, createQueueProducerConnection, ProducerRedisConnection } from '../../worker-shared/queue-producer-connection';
 import { bullmqJobOptionsOf, OutboxJobOptions } from '../../worker-shared/queue-registry';
 
 import { EnvironmentService } from '../environment/environment.service';
@@ -31,7 +31,7 @@ export class PushQueueService implements OnModuleDestroy {
   constructor(env: EnvironmentService) {
     // D5: fail fast (no offline queue, bounded commands) — a lost publish is safe, the outbox row is durable.
     this.connection = createQueueProducerConnection(env.get('REDIS_URL'));
-    this.queue = new Queue<PushQueueJobData>(PUSH_QUEUE_NAME, { connection: this.connection });
+    this.queue = new Queue<PushQueueJobData>(PUSH_QUEUE_NAME, { connection: this.connection }, ProducerRedisConnection);
     this.queue.on('error', () => undefined);
   }
 
