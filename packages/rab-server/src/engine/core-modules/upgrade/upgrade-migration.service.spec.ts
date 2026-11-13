@@ -21,7 +21,7 @@ describe('withUpgradeScope needs ONE dedicated session (security review L4)', ()
   it('refuses a pooled connection whose statements land on different backends (rolled back, nothing committed)', async () => {
     let pid = 100;
     const { conn, calls } = scripted((sql) => {
-      if (sql.includes('txid_current_if_assigned')) return [{ free: true, scope: '', pid: (pid += 1) }];
+      if (sql.includes('txid_current_if_assigned')) return [{ free: true, fresh: true, scope: '', pid: (pid += 1) }];
       if (sql.includes('pg_backend_pid() AS pid')) return [{ pid: (pid += 1), scope: 'status' }];
       return [];
     });
@@ -31,7 +31,12 @@ describe('withUpgradeScope needs ONE dedicated session (security review L4)', ()
   });
 
   it('refuses a session already inside a transaction with a transaction id, or already carrying a scope (before BEGIN)', async () => {
-    for (const pre of [{ free: false, scope: '', pid: 1 }, { free: true, scope: 'status', pid: 1 }]) {
+    // R2: also an open READ-ONLY transaction (no transaction id yet, but transaction_timestamp() < statement_timestamp()).
+    for (const pre of [
+      { free: false, fresh: true, scope: '', pid: 1 },
+      { free: true, fresh: false, scope: '', pid: 1 },
+      { free: true, fresh: true, scope: 'status', pid: 1 },
+    ]) {
       const { conn, calls } = scripted((sql) => (sql.includes('txid_current_if_assigned') ? [pre] : []));
       await expect(withUpgradeScope(upgradeSessionOf(conn), 'upgrade', async () => 1)).rejects.toBeInstanceOf(UpgradeSessionError);
       expect(calls.map((c) => c.sql)).not.toContain('BEGIN');
@@ -40,7 +45,7 @@ describe('withUpgradeScope needs ONE dedicated session (security review L4)', ()
 
   it('a dedicated session: BEGIN, the scope, the work, the same backend, COMMIT', async () => {
     const { conn, calls } = scripted((sql) => {
-      if (sql.includes('txid_current_if_assigned')) return [{ free: true, scope: '', pid: 7 }];
+      if (sql.includes('txid_current_if_assigned')) return [{ free: true, fresh: true, scope: '', pid: 7 }];
       if (sql.includes('pg_backend_pid() AS pid')) return [{ pid: 7, scope: 'upgrade' }];
       return [];
     });
@@ -51,7 +56,7 @@ describe('withUpgradeScope needs ONE dedicated session (security review L4)', ()
 
   it('accepts a pg client result shape ({ rows })', async () => {
     const { conn } = scripted((sql) => {
-      if (sql.includes('txid_current_if_assigned')) return { rows: [{ free: true, scope: '', pid: 3 }] };
+      if (sql.includes('txid_current_if_assigned')) return { rows: [{ free: true, fresh: true, scope: '', pid: 3 }] };
       if (sql.includes('pg_backend_pid() AS pid')) return { rows: [{ pid: 3, scope: 'status' }] };
       return { rows: [] };
     });

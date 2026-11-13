@@ -77,7 +77,9 @@ const SET_SCOPE = `SELECT pg_catalog.set_config('${UPGRADE_SCOPE_SETTING}', $1, 
 /**
  * Runs `fn` in ONE transaction with `rab.upgrade_scope` set for that transaction only, on a DEDICATED session (security
  * review L4): before BEGIN the session must be outside any transaction that holds a transaction id
- * (txid_current_if_assigned() IS NULL) and carry no scope; before COMMIT the same backend must still be there with the
+ * (txid_current_if_assigned() IS NULL), not inside an open transaction at all (transaction_timestamp() =
+ * statement_timestamp(): an open read-only transaction has no transaction id but an older start time; review R2), and
+ * carry no scope; before COMMIT the same backend must still be there with the
  * same scope, so a pooled connection that hands statements to different backends is refused (rolled back). Commits on
  * success, rolls back on error and rethrows.
  */
@@ -85,10 +87,11 @@ export async function withUpgradeScope<T>(session: UpgradeSession, scope: Exclud
   const query = session.query;
   const [pre] = (await query(
     `SELECT pg_catalog.txid_current_if_assigned() IS NULL AS free,
+            pg_catalog.transaction_timestamp() = pg_catalog.statement_timestamp() AS fresh,
             COALESCE(pg_catalog.current_setting('${UPGRADE_SCOPE_SETTING}', true), '') AS scope,
             pg_catalog.pg_backend_pid() AS pid`,
-  )) as Array<{ free: boolean; scope: string; pid: number }>;
-  if (!pre || pre.free !== true || pre.scope !== '') {
+  )) as Array<{ free: boolean; fresh: boolean; scope: string; pid: number }>;
+  if (!pre || pre.free !== true || pre.fresh !== true || pre.scope !== '') {
     throw new UpgradeSessionError('withUpgradeScope needs a dedicated session outside any transaction and with no upgrade scope set. Refusing.');
   }
   await query('BEGIN');
