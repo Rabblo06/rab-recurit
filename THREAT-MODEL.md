@@ -7103,8 +7103,14 @@ Phase X Part 2 finding XA-08 (`docs/plans/PHASE-X-STAGE0-PART2.md` §2.6). Front
   concurrent db-setup that stored one first wins; this one fails, exit 70, and changes nothing). The password is random (32 bytes), not derived from anything, so an
   APP_SECRET leak gives no database login. The bundled db is reachable only from the app network; an external database
   only through the provider's allow-list; verify-full TLS.
-- **Residual.** Volume backups and snapshots contain the password: protect and encrypt them like the database. Rotating it
-  means deleting the file and starting once with the admin URL (the A4 reset).
+- **Residual.** Volume backups and snapshots contain the password: protect and encrypt them like the database. The file
+  is plaintext at rest (T-9). Changing it on purpose: stop rab-api and rab-worker, remove the file with a one-off db-setup
+  run, `up -d` (the A4 reset; runbook section 7; not yet run live). Running apps do not pick up a new password on their own:
+  their new connections fail with 28P01 until they are recreated, hence the stop.
+- **Crash during an A4 reset.** db-setup stores the NEW password before its transaction. A crash after that store and before
+  COMMIT leaves a file whose password the database does not have: the next start refuses with the stale-file message
+  (`passwordFileStale`, exit 64). Fail-closed; the fix is one operator step (delete the file, start again with the admin
+  URL or the bundled db).
 
 ### TM-DB-3 (accepted; changed by the Helm model) — a bootstrap runs with admin rights on every `up` (db-setup)
 - **Actor → action → consequence.** A bug in, or an attacker-controlled input to, the bootstrap child could misuse admin
@@ -7152,7 +7158,7 @@ Phase X Part 2 finding XA-08 (`docs/plans/PHASE-X-STAGE0-PART2.md` §2.6). Front
   SCRAM-only, and any db environment key outside an exact allow-list, in the committed AND the deployed model.
 - **Residual.** The superuser can log in over the internal network (needed by db-setup's bootstrap child; T-3).
 
-### Trade-offs applied (SECURITY TRADE-OFF blocks, owner-accepted 2026-11-12)
+### Trade-offs applied (SECURITY TRADE-OFF blocks; T-1 to T-5 owner-accepted 2026-11-12; T-9 follows the owner's Helm-model decision 2026-11-13)
 - **T-1 — privileged URL in a container definition, db-setup's only.** The compose.env lint accepts a provider-admin login
   in `PG_DATABASE_URL`, which reaches db-setup only; it still refuses the former separated logins and schema roles, TLS
   below verify-full, a transaction pooler and a URL without a password. rab-api / rab-worker carry `""` only. Residual:
@@ -7171,6 +7177,17 @@ Phase X Part 2 finding XA-08 (`docs/plans/PHASE-X-STAGE0-PART2.md` §2.6). Front
 - **T-7 — the API's wait is on the files only.** api-prestart.sh waits (120 s) for db-setup's target file and password
   file, not for a successful login; db-setup writes the target only after the role is ready. A start that finds a file but
   cannot log in is refused and restarted by Docker; it never takes an admin path.
+- **T-9 (Helm model; follows the owner's decision OWNER-DB-FINAL Part A) — the `crewflow_owner` password at rest in
+  plaintext in the setup volume file.**
+  - Control relaxed: the password is stored unencrypted in `/run/crewflow/db-target/owner-password` (0400, uid 1000).
+  - Who can read it: root on the host or anyone with Docker access (the volume, `docker cp`, a backup), and a process inside
+    rab-api, rab-worker or db-setup (`docker exec`), which run as uid 1000.
+  - Why: the owner chose the Twenty Helm model; this is the same class as Twenty's Kubernetes secret
+    (`secret-db-url.yaml:3-8`), which is also readable by whoever controls the cluster.
+  - What still holds: never in an env file, a compose variable, the image or a log; the apps mount it read-only; the gates
+    refuse other mounts at that path and a variable carrying it (TM-DB-2).
+  - Veto options: an encrypted file (needs a second secret to decrypt it, which then has the same exposure), or Docker
+    secrets (OpenShip has no secret files).
 - **OpenShip.** OpenShip discards `depends_on` conditions: `service_completed_successfully` is NOT VERIFIED there. The API
   does not rely on it: it waits, bounded, for the files and refuses (exit 75) without them.
 - **Deployment identity (lead decision 2026-11-12): `db` joins `LOCAL_DATABASE_SERVICE_HOSTS`.** Outside production, an
@@ -7205,10 +7222,9 @@ makes every process refuse the bundled database. Residual: an operator who skips
 A rollback across this release needs the previous release's compose files (its image has no `worker-start.sh`,
 `db-setup.sh` or bootstrap child: under this release's files db-setup fails and rab-api never starts) and a
 `crewflow_owner` URL in `PG_DATABASE_URL`. With a `crewflow_owner` URL in compose.env it is that same URL (db-setup never
-changed its password). With an admin URL or the bundled db, the password is the content of the password file
-(`/run/crewflow/db-target/owner-password` on the `crewflow-db-target` volume; runbook 3.6), or a new password set with
-`01-crewflow-owner.sql`. The file is the live credential: read it only with container logging off, never in CI or a
-recorded session.
+changed its password). With an admin URL or the bundled db, the URL is printed by a one-off `docker run` of the current
+image that runs the apps' own derive step on the read-only volume (`--log-driver none --network none --read-only --user
+1000:1000`; runbook 3.6; SENSITIVE output; not yet run live), or a new password is set with `01-crewflow-owner.sql`.
 
 - **Tests.** owner-credential / owner-password-file / derive-runtime-url / owner-bootstrap / db-target / runtime-login /
   runtime-db-config / never-in-runtime-env / deployment-identity specs; the Worker's `owner-password-wait` spec; the
