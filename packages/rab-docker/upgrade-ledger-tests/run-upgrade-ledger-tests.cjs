@@ -398,13 +398,14 @@ async function main() {
     check(ledgerIds(l8) === ids, 'the env variables forced nothing');
     fs.writeFileSync(runtimeEnv, original);
     l8.compose(['stop', 'rab-api', 'rab-worker'], { timeout: 300_000 });
-    // The owner's literal command (Part B3). The image's WORKDIR is /app, so `dist/command` must resolve there.
+    // Owner decision (2026-11-13, "force a"): the ONLY documented command is `node packages/rab-server/dist/command upgrade
+    // --force` (no shim). The short `dist/command` form from the first prompt must therefore FAIL (nothing applied).
     const literal = l8.compose(['run', '--rm', '--no-deps', 'rab-api', 'node', 'dist/command', 'upgrade', '--force'], { timeout: 900_000 });
     evidence('L8-force-literal.log', literal.out);
-    check(literal.code === 0, `the owner's literal command \`docker compose run --rm --no-deps rab-api node dist/command upgrade --force\`: exit ${literal.code}`);
-    const f = literal.code === 0 ? literal : l8.compose(['run', '--rm', '--no-deps', 'rab-api', 'node', FORCE_ENTRY, 'upgrade', '--force'], { timeout: 900_000 });
+    check(literal.code !== 0 && ledgerIds(l8) === ids, `the undocumented short form \`node dist/command upgrade --force\` fails (exit ${literal.code}) and applies nothing`);
+    const f = l8.compose(['run', '--rm', '--no-deps', 'rab-api', 'node', FORCE_ENTRY, 'upgrade', '--force'], { timeout: 900_000 });
     evidence('L8-force.log', f.out);
-    check(f.code === 0, `upgrade --force (${literal.code === 0 ? 'literal form' : FORCE_ENTRY}): exit ${f.code}`);
+    check(f.code === 0, `the documented \`docker compose run --rm --no-deps rab-api node ${FORCE_ENTRY} upgrade --force\`: exit ${f.code}`);
     const forcedRows = ledger(l8).filter((r) => r.forced);
     check(forcedRows.length > 0 && forcedRows.every((r) => r.version === NEW_VERSION), `the forced run wrote ${forcedRows.length} row(s), every one forced = true`);
     n(`${ledger(l8).length} logbook row(s) after the forced run`);
@@ -465,13 +466,33 @@ async function main() {
     check(l11.psql(`SELECT count(*) FROM core.upgrade_migration WHERE workspace_id = '${ws}'`) === '0', 'the deleted workspace\'s row is gone (cascade)');
     check(l11.psql(`SELECT count(*) FROM core.upgrade_migration WHERE workspace_id = '${other}'`) === '1', 'the other workspace keeps its row');
     check(l11.psql("SELECT count(*) FROM core.upgrade_migration WHERE workspace_id IS NULL") === instance, 'instance rows untouched');
-    const denied = L.run('docker', ['exec', '-i', '-e', 'PGPASSWORD', l11.container('rab-postgres'), 'psql', '-X', '-At', 'host=127.0.0.1 sslmode=require dbname=crewflow user=crewflow_owner'], {
-      input: "BEGIN; SELECT set_config('rab.upgrade_scope', 'upgrade', true); DELETE FROM core.upgrade_migration; ROLLBACK;",
-      env: { PGPASSWORD: L.secrets.owner },
-    });
-    // Refused (no privilege) or DELETE 0 (no RLS policy admits a delete): either way nothing goes.
-    check((denied.code !== 0 && /permission denied/i.test(denied.out)) || (denied.code === 0 && /DELETE 0/.test(denied.out)), `crewflow_owner in the upgrade scope deletes nothing (${denied.code === 0 ? 'no row matched' : 'refused'})`);
-    check(l11.psql('SELECT count(*) FROM core.upgrade_migration WHERE workspace_id IS NULL') === instance, 'the instance rows are all still there');
+    // Owner-required test: a direct DELETE as crewflow_owner, and after SET ROLE rab_secure_owner (the table owner, bound by
+    // FORCE RLS, no DELETE policy), removes 0 rows. Checked with and without the upgrade scope. psql without -q prints tags.
+    const ownerDelete = (prelude) =>
+      L.run('docker', ['exec', '-i', '-e', 'PGPASSWORD', l11.container('rab-postgres'), 'psql', '-X', '-At', '-v', 'ON_ERROR_STOP=1', 'host=127.0.0.1 sslmode=require dbname=crewflow user=crewflow_owner'], {
+        input: `BEGIN;
+${prelude}
+DELETE FROM core.upgrade_migration;
+DELETE FROM core.upgrade_migration WHERE workspace_id = '${other}';
+COMMIT;
+`,
+        env: { PGPASSWORD: L.secrets.owner },
+        timeout: 120_000,
+      });
+    const total = () => l11.psql('SELECT count(*) FROM core.upgrade_migration');
+    for (const [label, prelude] of [
+      ['crewflow_owner, no scope', ''],
+      ['crewflow_owner, upgrade scope', "SELECT set_config('rab.upgrade_scope', 'upgrade', true);"],
+      ['SET ROLE rab_secure_owner', 'SET LOCAL ROLE rab_secure_owner;'],
+      ['SET ROLE rab_secure_owner, upgrade scope', "SET LOCAL ROLE rab_secure_owner; SELECT set_config('rab.upgrade_scope', 'upgrade', true);"],
+    ]) {
+      const before = total();
+      const r = ownerDelete(prelude);
+      evidence(`L11-delete-${label.replace(/\W+/g, '-')}.log`, r.out);
+      const tags = (r.out.match(/^DELETE \d+$/gm) || []).join(',');
+      const refused = r.code !== 0 && /permission denied/i.test(r.out);
+      check((refused || tags === 'DELETE 0,DELETE 0') && total() === before, `${label}: a direct DELETE removes 0 rows (${refused ? 'refused' : tags || r.out.trim().slice(0, 120)}; ${before} rows before and after)`);
+    }
   }, l11);
 
   writeResults();

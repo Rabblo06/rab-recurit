@@ -481,6 +481,36 @@ describeIfLedger('core.upgrade_migration: the table, the scopes and the delete p
     expect(await snapshot()).toEqual(before);
   });
 
+  it('LD-2 (owner-required) a direct DELETE as crewflow_owner, and after SET ROLE rab_secure_owner, removes 0 rows', async () => {
+    const before = await snapshot();
+    const total = async () => asAdmin(async (c) => Number((await c.query('SELECT count(*) FROM core.upgrade_migration')).rows[0]!.count));
+    const n0 = await total();
+    for (const [label, setup] of [
+      ['crewflow_owner, no scope', [] as string[]],
+      ['crewflow_owner, upgrade scope + lock', ["SELECT set_config('rab.upgrade_scope', 'upgrade', true)", TAKE_LOCK_SQL]],
+      ['SET ROLE rab_secure_owner', ['SET LOCAL ROLE rab_secure_owner']],
+      ['SET ROLE rab_secure_owner + upgrade scope + lock', ['SET LOCAL ROLE rab_secure_owner', "SELECT set_config('rab.upgrade_scope', 'upgrade', true)", TAKE_LOCK_SQL]],
+    ] as const) {
+      // COMMITTED, not rolled back: a delete that "worked" must show in the table afterwards.
+      const r = await asOwner(async (c) => {
+        await c.query('BEGIN');
+        try {
+          for (const sql of setup) await c.query(sql);
+          const all = await attempt(c, 'DELETE FROM core.upgrade_migration');
+          const one = await attempt(c, 'DELETE FROM core.upgrade_migration WHERE workspace_id = $1', [A.workspace]);
+          await c.query('COMMIT');
+          return { all, one };
+        } catch (e) {
+          await c.query('ROLLBACK');
+          throw e;
+        }
+      });
+      expect([label, deletesNothing(r.all), deletesNothing(r.one)]).toEqual([label, true, true]);
+      expect([label, await total()]).toEqual([label, n0]);
+    }
+    expect(await snapshot()).toEqual(before);
+  });
+
   // ------------------------------------------------------------------------------------------------------------ LR-5
   it('LR-5 the RLS coverage gate (tools/check-rls-coverage.ts) passes as crewflow_owner with the ledger present', () => {
     const r = spawnSync(process.execPath, [join(REPO_ROOT, 'node_modules', 'tsx', 'dist', 'cli.mjs'), join(REPO_ROOT, 'tools', 'check-rls-coverage.ts')], {
