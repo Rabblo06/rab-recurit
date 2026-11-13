@@ -64,7 +64,10 @@ const PREAUTH_FORCED_TABLES = new Set<string>(PREAUTH_FORCE_TABLES);
  * FORCE the owner-only policies (CURRENT_USER = rab_secure_owner) still apply to it, and the runtime logins are denied by a
  * RESTRICTIVE policy on top of holding no privilege. They are never on NOT_FORCED_ALLOWLIST: no pre-auth lookup reads them.
  */
-const FORCED_NON_TENANT_TABLES = ['deployment_identity', 'deployment_identity_history'] as const;
+const FORCED_NON_TENANT_TABLES = ['deployment_identity', 'deployment_identity_history', 'release_upgrade_event'] as const;
+// + release_upgrade_event (Phase X U-2, ReleaseUpgradeLedger1786721460000; DRAFT for owner SQL review): the insert-only
+// release-upgrade attempt ledger, same posture as the deployment identity tables (owner rab_secure_owner, ENABLE + FORCE,
+// owner-only policies, RESTRICTIVE deny for crewflow / crewflow_app, written only by its SECURITY DEFINER function).
 
 /**
  * F4 (Wave 1 lane S): every physical workspace schema (`^workspace_[0-9a-f]{32}$`, Hyper Workspace V1) is checked too —

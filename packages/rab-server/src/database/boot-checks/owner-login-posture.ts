@@ -256,7 +256,8 @@ export async function ownerLoginRolePostureProblems(query: PostureQuery): Promis
 
 // --------------------------------------------------------------------------------------------- rule 4: objects
 
-const FORCED_NON_TENANT = ['deployment_identity', 'deployment_identity_history'];
+// + release_upgrade_event (Phase X U-2, DRAFT for owner SQL review): the insert-only release-upgrade attempt ledger.
+const FORCED_NON_TENANT = ['deployment_identity', 'deployment_identity_history', 'release_upgrade_event'];
 const WORKSPACE_RE = '^workspace_[0-9a-f]{32}$';
 
 /** One `kind|object|detail` row per problem. $1 = the tables that must be FORCE besides every tenant table. */
