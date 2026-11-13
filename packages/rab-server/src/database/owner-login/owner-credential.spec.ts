@@ -74,7 +74,7 @@ describe('deriveOwnerPassword (HKDF-SHA256, §4)', () => {
     // a plain HMAC, which CodeQL reports as an insecure password hash (PR #125 review), so they are pinned instead.
     expect(OWNER_PASSWORD_HKDF_INFO).toBe(OWNER_LABEL_LITERAL);
     const vectors: Array<[string, string]> = [
-      [APP_SECRET, 'a8004daf794dd15df01b5788f54e1aac22c533385d1caf5cdc6ec112b40ffc09'],
+      [APP_SECRET, 'a8004daf794dd15df01b5788f54e1aac22c533385d1caf5cdc6ec112b40ffc09'], // gitleaks:allow (HKDF test vector of the synthetic APP_SECRET fixture, not a credential)
       ['x'.repeat(32), '1f469d6e59903c1c658a49e25521157e7ac39423e2bb9930b57cec1505ee3998'],
       ['ünïcödé-secret-with-multibyte-chars-✓✓✓', '130fbff403cdb14f620c810299661cdf605ac343ff919ee50561509f2c84a084'],
     ];
