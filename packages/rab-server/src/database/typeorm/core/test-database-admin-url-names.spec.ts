@@ -6,36 +6,102 @@ import { TEST_DATABASE_ADMIN_URL, TEST_DATABASE_ADMIN_URL_NAMES, TEST_DATABASE_U
 
 /**
  * X3.5-S7 (audit DBT-08 step 6), release 1: the test admin URL (the disposable cluster's bootstrap SUPERUSER) has a new name,
- * TEST_DATABASE_ADMIN_URL, and the deprecated TEST_DATABASE_URL_UNPOOLED is still accepted. Every committed list that keeps
- * the admin URL away from a child process (the migrate / RLS-gate children, the e2e API, Worker, Vite and Playwright) must
- * remove BOTH names; a list that only knows the old name would hand the superuser URL to the child as soon as a developer or
- * CI sets the new one (the DBT-12 class). And the two CI helpers must emit both names with one value, so neither half of the
- * dual-name check can see two values.
+ * TEST_DATABASE_ADMIN_URL, and the deprecated TEST_DATABASE_URL_UNPOOLED is still accepted. Every place that keeps the admin
+ * URL away from a child process (the migrate / RLS-gate children, the e2e API, Worker, Vite and Playwright, spec-spawned
+ * runtime children) must handle BOTH names; one that only knows the old name would hand the superuser URL to the child as
+ * soon as a developer or CI sets the new one (the DBT-12 class).
+ *
+ * Review A-3: so this is not a list of known files. EVERY tracked code file is scanned, and every code line naming the
+ * deprecated name must name the new one too. The TypeScript strip sites import TEST_DATABASE_ADMIN_URL_NAMES instead of
+ * spelling the names. Exempt: tests (they plant either name on purpose), immutable migrations, docs, and the files listed in
+ * OLD_NAME_ONLY_ALLOWED with the reason.
  */
 const REPO = path.resolve(__dirname, '../../../../../..');
+const CODE_FILE = /\.(ts|tsx|js|cjs|mjs|sh|ya?ml)$/;
+const TEST_FILE = /\.(spec|test)\.(ts|cjs|js|mjs)$/;
+const SKIPPED_DIRS = new Set(['node_modules', '.git', 'dist', 'dist-cjs', 'dist-esm', 'coverage', '.nx', 'docs', 'migrations', 'test-results', 'build']);
 
-/** The committed strip lists (child-process environments) that name the admin URL, and the CI helpers that emit it. */
-const ADMIN_NAME_LISTS = [
-  'packages/rab-server/src/database/typeorm/scripts/migration-security-check.ts',
-  'packages/rab-server/src/database/typeorm/scripts/migrate/owner-login/owner-login-lifecycle-check.ts',
-  'packages/rab-e2e-testing/ai/runtime-env.sh',
-  'packages/rab-e2e-testing/live/run-live.sh',
-  'packages/rab-server/src/database/typeorm/scripts/twenty-test-env.cjs',
-  'packages/rab-server/src/database/typeorm/scripts/migration-security-test-env.cjs',
-];
+/** Files that may name only the old name, each with why. Paths are repository-relative with forward slashes. */
+const OLD_NAME_ONLY_ALLOWED: Record<string, string> = {
+  'packages/rab-server/src/database/typeorm/core/test-database-guard.ts': 'defines and resolves both names',
+  'packages/rab-server/src/__tests__/integration/twenty/twenty-kit.ts':
+    'a reader, not a strip list; the guard writes both names (moves to the gate helper in DEAD-07 B-2)',
+  '.github/workflows/ci-security.yaml': 'lead-owned setter, not a strip list; draft in LEGACY-NAMES-PLAN.md §5.1 (required at release 2)',
+  '.github/workflows/ci-migration-security.yaml': 'lead-owned reader of the helper output, which emits both names; draft in LEGACY-NAMES-PLAN.md §5.1',
+};
 
-describe('X3.5-S7 the test admin URL names in strip lists and CI helpers', () => {
+const isCommentLine = (line: string): boolean => /^\s*(#|\/\/|\*|\/\*)/.test(line);
+
+/** Code lines naming the deprecated admin name without the new one (prose comments excluded). */
+function oldNameOnlyLines(text: string): string[] {
+  return text
+    .split('\n')
+    .filter((line) => !isCommentLine(line) && line.includes(TEST_DATABASE_URL_UNPOOLED) && !line.includes(TEST_DATABASE_ADMIN_URL))
+    .map((line) => line.trim().slice(0, 100));
+}
+
+function trackedCodeFiles(): string[] {
+  const out: string[] = [];
+  const walk = (dir: string): void => {
+    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+      const full = path.join(dir, entry.name);
+      if (entry.isDirectory()) {
+        if (!SKIPPED_DIRS.has(entry.name)) walk(full);
+      } else if (CODE_FILE.test(entry.name) && !TEST_FILE.test(entry.name)) {
+        out.push(path.relative(REPO, full).split(path.sep).join('/'));
+      }
+    }
+  };
+  for (const root of ['packages', 'tools', '.github', 'deploy']) {
+    if (fs.existsSync(path.join(REPO, root))) walk(path.join(REPO, root));
+  }
+  return out;
+}
+
+describe('X3.5-S7 the test admin URL names everywhere they are stripped, set or emitted', () => {
   it('the guard knows exactly the two names, new name first', () => {
     expect(TEST_DATABASE_ADMIN_URL_NAMES).toEqual([TEST_DATABASE_ADMIN_URL, TEST_DATABASE_URL_UNPOOLED]);
   });
 
-  it.each(ADMIN_NAME_LISTS)('%s: every code line naming the deprecated name names the new name too', (file) => {
-    // Comment lines (#, //, *) are prose, often wrapped; only code lines are lists, loops or emitted exports.
-    const lines = fs.readFileSync(path.join(REPO, file), 'utf8').split('\n').filter((line) => !/^\s*(#|\/\/|\*|\/\*)/.test(line));
-    const naming = lines.filter((line) => line.includes(TEST_DATABASE_URL_UNPOOLED));
-    expect(naming.length).toBeGreaterThan(0);
-    const missing = naming.map((line) => line.trim().slice(0, 80)).filter((_l, i) => !naming[i].includes(TEST_DATABASE_ADMIN_URL));
-    expect(missing).toEqual([]);
+  it('the checker flags a strip list that knows only the old name (fixtures), and accepts both names or prose', () => {
+    for (const bad of [
+      'env -u DATABASE_URL -u TEST_DATABASE_URL_UNPOOLED node api.js',
+      'unset TEST_DATABASE_URL TEST_DATABASE_URL_UNPOOLED',
+      "for (const k of ['TEST_DATABASE_URL_UNPOOLED', 'APP_SECRET']) delete childEnv[k];",
+      'STRIPPED=(TEST_DATABASE_URL_UNPOOLED MIGRATION_SECURITY_ADMIN_URL)',
+      'delete env.TEST_DATABASE_URL_UNPOOLED;',
+    ]) {
+      expect(oldNameOnlyLines(`const a = 1;\n${bad}\n`)).toHaveLength(1);
+    }
+    for (const ok of [
+      'env -u TEST_DATABASE_ADMIN_URL -u TEST_DATABASE_URL_UNPOOLED node api.js',
+      '# prose naming TEST_DATABASE_URL_UNPOOLED, wrapped',
+      ' * TEST_DATABASE_URL_UNPOOLED in a doc comment',
+      "for (const k of [...TEST_DATABASE_ADMIN_URL_NAMES, 'APP_SECRET']) delete childEnv[k];",
+    ]) {
+      expect(oldNameOnlyLines(ok)).toEqual([]);
+    }
+  });
+
+  it('no tracked code file (tests, migrations and docs aside) names only the deprecated admin name', () => {
+    const files = trackedCodeFiles();
+    expect(files.length).toBeGreaterThan(500);
+    const offenders: string[] = [];
+    for (const file of files) {
+      if (file in OLD_NAME_ONLY_ALLOWED) continue;
+      for (const line of oldNameOnlyLines(fs.readFileSync(path.join(REPO, file), 'utf8'))) offenders.push(`${file}: ${line}`);
+    }
+    expect(offenders).toEqual([]);
+  });
+
+  it('the TypeScript strip sites use the shared list, not spelled names', () => {
+    for (const file of [
+      'packages/rab-server/src/database/typeorm/scripts/migration-security-check.ts',
+      'packages/rab-server/src/database/typeorm/scripts/migrate/owner-login/owner-login-lifecycle-check.ts',
+      'packages/rab-worker/src/__tests__/integration/helpers/runtime-child-env.ts',
+    ]) {
+      expect([file, fs.readFileSync(path.join(REPO, file), 'utf8').includes('...TEST_DATABASE_ADMIN_URL_NAMES')]).toEqual([file, true]);
+    }
   });
 
   describe('the CI helpers emit both names with the same value (synthetic, loopback values only; nothing printed)', () => {
