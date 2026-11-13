@@ -68,7 +68,7 @@ The owner login **cannot** take a logical backup: FORCE-RLS tables dump empty fo
 pg_dumpall -U <cluster-superuser> --roles-only > roles.sql             # roles are cluster-wide: not in pg_dump
 pg_dump    -U <cluster-superuser> -Fc --create -d <database> -f db.dump
 ```
-- **Bundled database:** run both inside the container over the local socket (`$P $L exec -T rab-postgres …`, user `postgres`), then copy the files out.
+- **Bundled database (DB-SETUP `db` service):** run both inside the container over its socket (`$P exec -T -e PGPASSWORD db …`, user `postgres`, `PGPASSWORD` = `PG_DATABASE_PASSWORD` from the operator's shell: every login to the bundled db needs the password), then copy the files out.
 - **Storage:** both files are secrets (`roles.sql` holds every role's password verifier). Keep them at `0600`, off the host, and encrypted. Check that both are non-empty before going on.
 
 **Managed provider:** record the provider's **PITR timestamp** (`SELECT now()` on the database, plus the provider's restore window), or take a **snapshot**, and record its id.

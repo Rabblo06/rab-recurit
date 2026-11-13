@@ -5,11 +5,12 @@ in the session scratchpad (not committed); each line names its source.
 
 | Area | Result | Evidence |
 |---|---|---|
-| Fresh install, lifecycle, transition from separated, Test C/D | **PASS on PostgreSQL 16 and 18**; the v20 workspace fingerprints for both majors are committed. The negative cases refuse as designed: a non-owner identity; PG15 (below 16); PG17 (no fingerprints) | Agent 1: `a1/batch-pg16*.log`, `a1/batch-pg18*.log`, `a1/batch-v20-*.log` ("all checks passed") |
+| Fresh install, lifecycle, transition from separated, Test C/D | **PASS on PostgreSQL 16, 17 and 18**; the v20 workspace fingerprints for all three majors are committed. The negative cases refuse as designed: a non-owner identity; PG15 (below 16) | Agent 1: `a1/batch-pg16*.log`, `a1/batch-pg18*.log`, `a1/batch-v20-*.log` ("all checks passed") |
 | End to end: empty database → API migrate-on-start → healthy → Worker → workspace READY | **PASS on PG16** (postgres:16-alpine; the API and Worker ran as host processes, not in the containers) | Agent 2: `twa-app/e2e.sh`, `twa-app/batch-e2e.log` ("E2E PASSED": state EMPTY → 254 ledger rows, `/healthz` 200, workspace provisioned in-process: attempted=1 ready=1), `twa-app/e2e-api.log`, `e2e-worker.log`, `e2e-healthz.json` |
 | Rollback | **PROVEN**: restore the pre-upgrade backup, then the previous image. R2: checksum equal on 112 facts, ledger 250, old api, Worker and provisioner healthy. R1: an old image on the upgraded database fails closed in production | Agent 1: `a1/rollback/r1b.log`, `r2.log`; [`OWNER-LOGIN-RECOVERY.md`](OWNER-LOGIN-RECOVERY.md) |
-| Bundled database (`docker-compose.local-db.yml` with Agent 1's init SQL) | **PASS**, 21/21 checks on PG16.15 (section 8) | Agent 4 |
-| Compose and env gate (`scripts/compose-owner-login.cjs`) | **PASS**: all 3 combinations (O3: default, bundled database, staging); the gate's own tests pass | `ci-deployment-owner-login.yaml` |
+| Database setup like Twenty (DB-SETUP, 2026-11-12): the bundled `db` service, one admin URL, crewflow_owner created by the API | **PASS** on disposable Debian postgres 16.15, 17.11 and 18.6: fresh install with only `PG_DATABASE_PASSWORD` + `APP_SECRET`, restart unchanged, external non-superuser admin, refusals (admin without rights, privileged crewflow_owner, PG15), APP_SECRET rotation, no admin credential in any process environment of rab-api / rab-worker (PID 1 included), R256 upgrade, logs, two simultaneous starts (section 8) | DB-SETUP areas 5 and 6 (`deploy-order-tests/run-db-setup-tests.cjs`) |
+| Retired: `docker-compose.local-db.yml` (DB-SETUP D3) | Replaced by the bundled `db` service of the image compose | — |
+| Compose and env gate (`scripts/compose-owner-login.cjs`) | **PASS**: all 3 combinations (bundled db, external `PG_DATABASE_URL`, staging); the gate's own tests pass | `ci-deployment-owner-login.yaml` |
 | Full CI on #72 | **Green at `79a083e1`** (12/12 workflow runs). At head `91a5e699` (2026-11-05) the run was still in progress, and its e2e `web-isolated` job had failed; it needs a re-check before review | GitHub Actions, `deploy/twenty-mode-a` |
 
 **NOT TESTED:**
@@ -40,24 +41,22 @@ git-ignored, so neither is committed.
 
 | File | Purpose | Lands |
 |---|---|---|
-| `docker-compose.image.yml` (in place) | The stack: `rab-api`, `rab-worker`, `rab-redis` (O3: no `rab-migrate`). The API migrates on start (approval mode `none` by default, `token` an opt-in of `compose.env`), registers the job schedulers, then serves; the Worker never migrates and only consumes the schedulers. | O3 |
-| `docker-compose.local-db.yml` | Optional bundled PostgreSQL 16. Its one init file is Agent 1's `postgres-init/owner-login/01-crewflow-owner.sql`. | now |
+| `docker-compose.image.yml` (in place) | The stack: `db` (the bundled PostgreSQL, DB-SETUP), `rab-api`, `rab-worker`, `rab-redis` (O3: no `rab-migrate`). The API creates `crewflow_owner` (bootstrap child), migrates on start (approval mode `none` by default, `token` an opt-in of `compose.env`), registers the job schedulers, then serves; the Worker never migrates and only consumes the schedulers. | O3, DB-SETUP |
 | `staging/docker-compose.staging.yml` (in place) | Project name and storage prefix only. The env files now come from the base file. | after #61/#62 |
 | `docker-compose.production.yml` (in place) | Image-based like Twenty (2026-11-11): the same `CREWFLOW_IMAGE_TAG` digest for rab-api and rab-worker, per-service environment instead of env files. Never builds. **OpenShip cannot run the owner-login Worker safely** (section 6). | 2026-11-11 |
 | `docker-compose.local-build.yml` | **LOCAL/DEV ONLY.** The former build-based production file; never run it on a server (a server only runs the gated image). | 2026-11-11 |
-| `env/database.env.example` | **Shared** database file: `PG_DATABASE_URL` and the optional deployment identity. Read by rab-api and rab-worker. | now |
+| `env/database.env.example` | **Shared** database file: the optional `PG_SSL_CA_CERT_PATH` (external database), `PG_EXPECTED_DATABASE_NAME` and deployment identity. Read by rab-api and rab-worker. Never `PG_DATABASE_URL` (DB-SETUP: compose.env). | now |
 | `env/runtime.env.example` | Runtime secrets for rab-api and rab-worker, and the optional `CREWFLOW_UPGRADE_FAILURE=refuse` opt-in (C3). | now |
-| `env/compose.env.example` | Interpolation values: digests, paths and limits. No secret. | now |
+| `env/compose.env.example` | Interpolation values: digests, paths and limits, and the two database values (DB-SETUP): `PG_DATABASE_PASSWORD` (required) and the optional `PG_DATABASE_URL` (your own database's admin URL). No other secret. | now |
 | `env/redis-users.acl.example` | Redis ACL: `default` off, app user stored by SHA-256, PING-only health user. | now |
-| `local-db/pg_hba.conf` | Bundled database: superuser on the local socket only; `crewflow_owner` over TLS only. | now |
-| `postgres-init/owner-login/01-crewflow-owner.sql`, `transition-from-separated.sql` | **Agent 1's** tested provider-admin SQL. Referenced here, never copied. | Agent 1 |
+| `local-db/pg_hba.conf` | Test harnesses only (deploy-order, system e2e); no deploy file mounts it since DB-SETUP. | now |
+| `postgres-init/owner-login/01-crewflow-owner.sql`, `transition-from-separated.sql` | **Agent 1's** tested provider-admin SQL, referenced here, never copied. Since DB-SETUP `01-crewflow-owner.sql` is an OPTIONAL fallback (section 4): the API creates `crewflow_owner` itself. | Agent 1 |
 | `docs/release/OWNER-LOGIN-RECOVERY.md` | Recovery and rollback: the mandatory pre-upgrade backup, restore-then-previous-image (proven), and why an old image on an upgraded database fails closed. | now |
 
 Shorthand, used from `packages/rab-docker/` on the host:
 
 ```bash
-I="-f docker-compose.image.yml"
-L="-f docker-compose.local-db.yml"             # bundled database only
+I="-f docker-compose.image.yml"                # includes the bundled `db` (DB-SETUP; docker-compose.local-db.yml is retired)
 P="docker compose --env-file /etc/crewflow/compose.env $I"        # production (the API migrates on start, O3)
 ```
 
@@ -65,12 +64,12 @@ P="docker compose --env-file /etc/crewflow/compose.env $I"        # production (
 for the operator's shell (for example in `/etc/profile.d/crewflow.sh`, root-only), so the bare command uses them:
 
 ```bash
-export COMPOSE_FILE=docker-compose.image.yml            # bundled database: docker-compose.image.yml:docker-compose.local-db.yml
+export COMPOSE_FILE=docker-compose.image.yml            # the bundled db is part of this file
 export COMPOSE_ENV_FILES=/etc/crewflow/compose.env
 cd /opt/crewflow/packages/rab-docker && docker compose pull && docker compose up -d
 ```
 
-`$P pull && $P [$L] up -d` is the same command with the flags spelled out. It updates rab-api and rab-worker together
+`$P pull && $P up -d` is the same command with the flags spelled out. It updates rab-api and rab-worker together
 from the one `CREWFLOW_IMAGE_TAG`; there is no API-only or Worker-only deploy.
 
 ---
@@ -115,12 +114,13 @@ PT-01 pointers:
 
 **Prerequisites:**
 - Linux, Docker Engine, Compose ≥ 2.24.
-- The approved index digests: API, Worker, Redis 7, and PostgreSQL 16 alpine if bundled.
-- A database:
-  - **EITHER** a managed PostgreSQL 16 where the provider admin has run **`postgres-init/owner-login/01-crewflow-owner.sql`** (section 4), and you hold the `crewflow_owner` URL at the **direct** host;
-  - **OR** the bundled database (`$L`), whose init runs that same file.
-- PostgreSQL 16 and 18 are supported (v20 workspace fingerprints for both). Below 16, and PG17, are refused.
-- **"A URL alone" never works:** a provider-admin step always comes first.
+- The approved index digests: the release image (API and Worker) and Redis 7. The bundled `db` image is pinned in the compose file (postgres:16 Debian by digest; `CREWFLOW_POSTGRES_IMAGE` may name a Debian postgres:16, :17 or :18 digest, never alpine).
+- A database, **one URL, no manual SQL step (DB-SETUP, like Twenty):**
+  - **Bundled (default):** set only `PG_DATABASE_PASSWORD` (`openssl rand -hex 32`) in `compose.env`. `PG_DATABASE_URL` then defaults to the `db` service's superuser, `sslmode=verify-full`; `db` makes its own CA and server certificate on its first start and rab-api / rab-worker mount the CA read-only.
+  - **Your own database:** set `PG_DATABASE_URL` in `compose.env` to its **admin** URL at the **direct** host (never a transaction pooler), `sslmode=verify-full`. The login must be able to create roles (CREATEROLE or superuser) and to grant CONNECT, CREATE and TEMPORARY on the database; a missing right is refused with a fixed message (exit 64). `db` still runs idle and still needs a `PG_DATABASE_PASSWORD`. A CA outside the system store: `CREWFLOW_PG_CA_FILE` in `compose.env` and `PG_SSL_CA_CERT_PATH=/run/crewflow/pg-ca.crt` in `database.env`.
+  - On every start, rab-api's `api-prestart.sh` runs the bootstrap child (the only process that connects as the admin): it creates `crewflow_owner` (`LOGIN NOSUPERUSER NOBYPASSRLS NOREPLICATION NOCREATEDB CREATEROLE INHERIT`), or resets its password when it no longer matches, with the password derived from `APP_SECRET` (HKDF), and grants it the database. It refuses an existing privileged `crewflow_owner`. Then the URL is replaced by the derived `crewflow_owner` URL before anything else runs; `worker-start.sh` does the same swap for the Worker and never connects as the admin.
+  - Optional fallback: create `crewflow_owner` by hand with `postgres-init/owner-login/01-crewflow-owner.sql` (section 4) and put its URL in `PG_DATABASE_URL`: a `crewflow_owner` URL is passed through unchanged and the bootstrap child does not connect.
+- PostgreSQL 16, 17 and 18 are supported (v20 workspace fingerprints and a semantic posture golden for each). Below 16 is refused; a major above 18 is refused until its fingerprints and golden are generated and reviewed.
 - **Production config refusals apply to every install, a trial included.** The API and Worker refuse to boot without:
   - `EMAIL_DRIVER` SMTP or RESEND;
   - S3 storage;
@@ -144,29 +144,15 @@ PT-01 pointers:
      chown 999:1000 /etc/crewflow/secrets/redis-users.acl && chmod 0640 /etc/crewflow/secrets/redis-users.acl
      ```
    - **Deployment id (optional, BC-11):** `CREWFLOW_DEPLOYMENT_ENVIRONMENT` / `CREWFLOW_DEPLOYMENT_ID` are commented out in the template. When you declare an id (`uuidgen`), every process and the release step match it against the database's identity marker and refuse a mismatch. When it is absent, startup warns and continues.
-3. **Bundled database only:** TLS and the two password files.
-   ```bash
-   cd /etc/crewflow/secrets && install -d -m 0755 pg-tls && cd pg-tls
-   openssl req -x509 -newkey rsa:3072 -nodes -keyout ca.key -out ca.crt -days 825 -subj "/CN=crewflow bundled-db CA"
-   openssl req -newkey rsa:3072 -nodes -keyout server.key -out server.csr -subj "/CN=rab-postgres"
-   printf 'subjectAltName=DNS:rab-postgres\n' > san.ext
-   openssl x509 -req -in server.csr -CA ca.crt -CAkey ca.key -CAcreateserial -out server.crt -days 825 -extfile san.ext
-   mv ca.key /root/crewflow-bundled-db-ca.key && chmod 0400 /root/crewflow-bundled-db-ca.key   # the CA key is never mounted
-   chown 70:70 server.key && chmod 0600 server.key && chmod 0644 ca.crt server.crt
-   openssl rand -hex 32 > ../crewflow-owner-password && openssl rand -hex 32 > ../postgres-superuser-password
-   chown 70:70 ../crewflow-owner-password ../postgres-superuser-password && chmod 0600 ../crewflow-owner-password ../postgres-superuser-password
-   ```
-   Set the following:
-   - in `compose.env`: `CREWFLOW_PG_CA_FILE=/etc/crewflow/secrets/pg-tls/ca.crt`;
-   - in `database.env`: `PG_DATABASE_URL=postgresql://crewflow_owner:<the owner password>@rab-postgres:5432/crewflow?sslmode=verify-full` and `PG_EXPECTED_DATABASE_NAME=crewflow`.
+3. **Database.** Bundled: `PG_DATABASE_PASSWORD=<openssl rand -hex 32>` in `compose.env`, `PG_EXPECTED_DATABASE_NAME=crewflow` in `database.env`. Nothing else: no certificate, no password file, no SQL. Your own database: `PG_DATABASE_URL=<admin URL>` in `compose.env` (plus `PG_DATABASE_PASSWORD` for the idle `db`). The bundled db reads `PG_DATABASE_PASSWORD` only on its volume's first start; to change it later, run `ALTER ROLE postgres PASSWORD ...` in the db container first (`docker compose exec -e PGPASSWORD db psql -U postgres -d crewflow`, `PGPASSWORD` = the current value: every login to the bundled db, socket included, needs the password).
 4. **Lint, then render.** Both print names only, never values.
    ```bash
    node scripts/compose-owner-login.cjs --lint-env-file compose  /etc/crewflow/compose.env
    node scripts/compose-owner-login.cjs --lint-env-file database /etc/crewflow/secrets/database.env
    node scripts/compose-owner-login.cjs --lint-env-file runtime  /etc/crewflow/secrets/runtime.env
    ```
-   Then render the files you will start, e.g. `$P [$L] config -q`.
-5. **Start:** `$P [$L] up -d --wait --wait-timeout 1200`. The API runs the check-first migration child under the lock (bootstrap, the whole chain, then the post-checks), registers the job schedulers, and serves only after it succeeds; a first-install failure never serves. The fresh chain took ~40 s on local PG16, NOT TESTED on any managed provider. The API has a 900 s `start_period`. The Worker follows a healthy API and Redis.
+   Then render the files you will start, e.g. `$P config -q`.
+5. **Start:** `$P up -d --wait --wait-timeout 1200`. `db` becomes healthy first (its first start creates the CA and the server certificate). The API runs the bootstrap child (`[owner-bootstrap] crewflow_owner is ready (created).`), then the check-first migration child under the lock (bootstrap, the whole chain, then the post-checks), registers the job schedulers, and serves only after it succeeds; a first-install failure never serves. The fresh chain took ~40 s on local PG16, NOT TESTED on any managed provider. The API has a 900 s `start_period`. The Worker follows a healthy API and Redis.
 6. **First platform admin (email only, activation link).** Once the API is healthy, run the existing `bootstrap-admin` command **once**, as a one-off container of the API service: the same image, the same owner login (`database.env`, which also supplies `CREWFLOW_DEPLOYMENT_ENVIRONMENT` / `CREWFLOW_DEPLOYMENT_ID`) and the same runtime config (`runtime.env`). The command creates the admin from an email address and sends an **activation link**; it takes no password (`BOOTSTRAP_ADMIN_PASSWORD` is ignored with a warning, so never set it).
    - Inputs: `BOOTSTRAP_ADMIN_EMAIL` (required); optional `BOOTSTRAP_ADMIN_FIRST_NAME`, `BOOTSTRAP_ADMIN_LAST_NAME`, `BOOTSTRAP_ADMIN_ORG_SLUG`, `BOOTSTRAP_ADMIN_ORG_NAME`.
    - The CLI requires **per-invocation command authority**: `DB_TARGET=production` and `ALLOW_PRODUCTION_DB_COMMANDS=true`, given on this one-off run ONLY, never in any service environment or env file.
@@ -176,7 +162,7 @@ PT-01 pointers:
      rab-api node packages/rab-server/dist/command/main.js bootstrap-admin
    unset BOOTSTRAP_ADMIN_EMAIL
    ```
-   (Add `-e BOOTSTRAP_ADMIN_FIRST_NAME` and the others the same way when you set them.) `run` publishes no port, `--no-deps` leaves the running stack alone, and the command replaces `api-prestart.sh`, so the authority never reaches a long-running process. The env-file lint refuses `DB_TARGET`, `ALLOW_PRODUCTION_DB_COMMANDS` and every `BOOTSTRAP_ADMIN_*` in every file.
+   (Add `-e BOOTSTRAP_ADMIN_FIRST_NAME` and the others the same way when you set them.) `run` publishes no port and `--no-deps` leaves the running stack alone. The command is handed to `api-prestart.sh`, rab-api's entrypoint, which in this one-off form runs its refusals, replaces the admin URL with the derived `crewflow_owner` URL, hands `DB_TARGET` / `ALLOW_PRODUCTION_DB_COMMANDS` to this one command only, and runs nothing else (no bootstrap child, no migration, no scheduler registration, no API); a normal API start still refuses both variables, so the authority never reaches a long-running process. The env-file lint refuses `DB_TARGET`, `ALLOW_PRODUCTION_DB_COMMANDS` and every `BOOTSTRAP_ADMIN_*` in every file.
 
 **Optional startup and watchdog knobs** (code defaults; set in `runtime.env` only to change them):
 
@@ -263,17 +249,18 @@ are untouched. Rollback: remove the line from both services in all three compose
 applied: its cutover gate needs every Worker to authenticate as `crewflow_worker`, which has no members and no password
 under the owner login (see `docs/phase-d-deployment-runbook.md` §4.1).
 
-**The Worker runs with `init: true`.** Its watchdog SIGKILLs a stalled process, and the kernel ignores that signal for PID 1, so the Worker refuses to start as PID 1. Docker's init must be PID 1; every compose file that runs the Worker sets it, and the gate fails CI otherwise.
+**PID 1 (DB-SETUP).** `api-prestart.sh` and `worker-start.sh` are the ENTRYPOINT of rab-api and rab-worker (no command, no compose `init`). Each runs as PID 1, removes the admin credential from its environment, then execs `/sbin/tini -s -- node .../main.js`: tini stays PID 1 with only the cleaned environment, and the Worker runs as its child, so the Worker's watchdog SIGKILL (ignored by the kernel for PID 1) still works. Compose's `init: true` is refused by the gates: docker-init at PID 1 would keep the container's environment, i.e. the admin URL.
 
 **Failure semantics:**
 - **First install:** non-zero exit; the API never becomes healthy. Docker restarts it with capped backoff. Each start re-classifies: EMPTY or BOOTSTRAP-PARTIAL bootstraps, CHAIN-PARTIAL resumes, FOREIGN refuses.
 - **Upgrade (O3 C3, like Twenty):** governed by `CREWFLOW_UPGRADE_FAILURE`, not committed (unset = `continue`). A failed upgrade migration exits 70 from the migration child; the API logs an ERROR, `/healthz` reports `upgradeFailed: true` (never the migration's name), and it serves; the Worker starts on the partly-upgraded schema. Fix forward with a corrected image, or restore (3.6). `CREWFLOW_UPGRADE_FAILURE=refuse` in `runtime.env` keeps the API down instead. The deprecated `CREWFLOW_UPGRADE_FAILURE_POLICY` is refused by the gate.
-- **Half-initialised bundled database** (the init failed, e.g. a missing password file): `rab-postgres` stays **unhealthy**, because its check also requires `crewflow_owner`. The volume holds no data. Recover with:
+- **Database setup refused (bootstrap child exit 64):** the API never starts and logs one fixed `[owner-bootstrap]` line naming the missing right or the privileged `crewflow_owner` attribute (never a value). Fix the role or the admin login, then restart. Exit 70 is unexpected (details not printed).
+- **Bundled db that never became healthy on its first start** (for example a `PG_DATABASE_PASSWORD` that is missing): the data volume may hold a half-initialised cluster. If it NEVER served traffic, remove it and start again:
   ```bash
-  $P $L down
-  docker volume rm <project>_crewflow-pg-data
+  $P down
+  docker volume rm <project>_crewflow-db-data <project>_crewflow-db-ca
   ```
-  Confirm the name with `docker volume ls` first. **Never** do this to a volume that has served traffic.
+  Confirm the names with `docker volume ls` first. **Never** do this to a volume that has served traffic.
 
 ---
 
@@ -283,7 +270,7 @@ under the owner login (see `docs/phase-d-deployment-runbook.md` §4.1).
 > The API starts first and migrates; the Worker starts when the API is healthy. Never update the API alone while an
 > older Worker keeps running. Take a provider snapshot/restore point before each production deploy.**
 
-Production runs `docker-compose.image.yml` (plus `$L` for a bundled database). **O3 (owner decisions C1-C5, 2026-11-05,
+Production runs `docker-compose.image.yml` (its bundled `db`, or your own database through `PG_DATABASE_URL`). **O3 (owner decisions C1-C5, 2026-11-05,
 "EXACTLY LIKE TWENTY"; G-07 accepted):** there is no release step and no `rab-migrate`. On start, the API
 (`api-prestart.sh`):
 1. applies every pending migration under the migration lock. Approval mode is `none` by default (C4: no token). `token`
@@ -357,9 +344,9 @@ Redis problem there is only a WARNING.
   - record the PITR restore time (`SELECT now()`) and the provider's window.
 
   Record it in the release notes.
-- **Bundled database:** as the superuser over the local socket:
+- **Bundled database:** as the superuser over the db container's socket (SCRAM: `PGPASSWORD` = `PG_DATABASE_PASSWORD`, from the operator's shell, never on the command line):
   ```bash
-  $P $L exec -T rab-postgres pg_dump -U postgres -d crewflow -Fc > /var/backups/crewflow-<release>.dump
+  $P exec -T -e PGPASSWORD db pg_dump -U postgres -d crewflow -Fc > /var/backups/crewflow-<release>.dump
   ```
   Use `0600` and keep a copy off the host, or snapshot the volume with the stack stopped. Test restores periodically.
 - Check that the backup is non-empty and record where it is. **No backup, no upgrade.**
@@ -371,7 +358,7 @@ Redis problem there is only a WARNING.
 > older Worker keeps running. Take a provider snapshot/restore point before each production deploy.**
 
 ```bash
-docker compose pull && docker compose up -d          # = $P pull && $P [$L] up -d
+docker compose pull && docker compose up -d          # = $P pull && $P up -d
 ```
 What Compose does, in this order (proved in real containers on PostgreSQL 16 and 18, `deploy-order-tests/`):
 - it stops the old Worker first (`depends_on: rab-api: restart: true`; the Worker drains its jobs within its 45 s stop
@@ -395,6 +382,8 @@ alone while an older Worker keeps running.
 **3.6 Rollback.** Restore-based rollback, the evidence, and why an old image on an upgraded database fails closed: [`OWNER-LOGIN-RECOVERY.md`](OWNER-LOGIN-RECOVERY.md).
 - **(a) Expand-only release, back to an O3 release** (only between owner-login releases reviewed as expand-only; never back across the transition): set `CREWFLOW_IMAGE_TAG=<previous digest>` in `compose.env` (it is in `compose.env.<old-sha>`; an old copy that still says `CREWFLOW_IMAGE_DIGEST=` needs the name changed), then the same one command, `docker compose pull && docker compose up -d`. The API and the Worker go back together. The old API's migration child classifies the ledger as AHEAD, warns and starts (the C-1 fix). **This is safe ONLY for expand-only releases.**
   - Back to a release from before O3 (e.g. the two-image v0.4.0): use that release's own compose files ([`OWNER-LOGIN-RECOVERY.md`](OWNER-LOGIN-RECOVERY.md) §4.4).
+  - **Back across DB-SETUP (to R256 or any release before it):** use THAT release's compose files, not this release's: its image has no `worker-start.sh` and no bootstrap child, so it cannot start under these files (measured: the Worker fails with `exec: "./worker-start.sh": no such file`). An earlier release reads `PG_DATABASE_URL` as the runtime login, so put back a `crewflow_owner` URL with the DERIVED password (below) or set a new password with `01-crewflow-owner.sql`. On the bundled db, keep the `db` service and its volumes (an earlier release's files do not define them): run the earlier files with your own database URL pointing at it, or export the data first.
+  - **The derived `crewflow_owner` URL (SENSITIVE):** `$P run --rm --no-deps --entrypoint /sbin/tini rab-api -s -- sh -c 'node packages/rab-server/dist/database/typeorm/scripts/owner-login/derive-runtime-url.js 4>&1 1>/dev/null'` prints the full `crewflow_owner` URL, password included, built from the configured `PG_DATABASE_URL` and `APP_SECRET`. It never connects. **Run it only when you need that URL, never in CI or a logged session, and treat the output as the database password.**
 - **(b) Contracting release, or a failed apply you will not fix forward:**
   1. `$P stop rab-worker rab-api` (both together; the restore needs no application session).
   2. Restore the 3.3 backup or PITR point. Every write since that point is lost.
@@ -410,7 +399,13 @@ alone while an older Worker keeps running.
 
 ---
 
-## 4. Provider-admin SQL (one time, per database)
+## 4. Provider-admin SQL (OPTIONAL fallback since DB-SETUP)
+
+**Not needed for a normal install:** with an admin `PG_DATABASE_URL` (or the bundled `db`), the API creates `crewflow_owner`
+itself on every start (section 2). Use `01-crewflow-owner.sql` only when you choose to create the login by hand (for example
+a provider that refuses a pre-hashed password: the bootstrap child then refuses with exit 64 and says so) and put the
+resulting `crewflow_owner` URL in `PG_DATABASE_URL` (passed through unchanged). `transition-from-separated.sql` is still the
+transition path (section 5).
 
 Two scripts, both **owned and tested by Agent 1**. Run them **as the provider admin**, **in SQL**, over the **direct**
 (non-pooler) host. **Never** create the login through a console, CLI or API user-creation feature: those logins carry
@@ -419,7 +414,7 @@ verification queries.
 
 | Situation | Script |
 |---|---|
-| Fresh, empty database | `packages/rab-docker/postgres-init/owner-login/01-crewflow-owner.sql`: creates `crewflow_owner` with the M0 §5.1 shape (`LOGIN NOSUPERUSER NOBYPASSRLS NOREPLICATION NOCREATEDB CREATEROLE INHERIT`) and grants `CONNECT, CREATE, TEMPORARY … WITH GRANT OPTION` on the database. The bundled database runs it as its only init script. |
+| Fresh, empty database | `packages/rab-docker/postgres-init/owner-login/01-crewflow-owner.sql`: creates `crewflow_owner` with the M0 §5.1 shape (`LOGIN NOSUPERUSER NOBYPASSRLS NOREPLICATION NOCREATEDB CREATEROLE INHERIT`) and grants `CONNECT, CREATE, TEMPORARY … WITH GRANT OPTION` on the database. Optional fallback (the bootstrap child does the same). |
 | Existing separated database | `packages/rab-docker/postgres-init/owner-login/transition-from-separated.sql`: section 5. |
 
 **Provider extras** (M0 §5.1 and §8; EXPECTED unless marked):
@@ -427,6 +422,7 @@ verification queries.
 | Provider | Extra admin steps | Status |
 |---|---|---|
 | Self-hosted 16 | Alternatively `CREATE DATABASE crewflow OWNER crewflow_owner;` | VERIFIED (M0) |
+| Self-hosted 17 | None beyond 16's. | VERIFIED (DB-SETUP area 3: fresh install, lifecycle, transition, ci-db, twenty catalogue) |
 | Self-hosted 18 | None beyond 16's. | VERIFIED (Agent 1, PG18 fresh install, lifecycle and transition) |
 | Neon | The console-created `crewflow_app` (BYPASSRLS, REPLICATION, `neon_superuser`) must first be deleted in the Neon console, which **NEEDS OWNER APPROVAL**. Use PG16 for new projects until D4. Direct host, never `-pooler`. **Never touch the temporary deployment's Neon project without approval.** | EXPECTED |
 | DigitalOcean | The admin may pre-create the extensions. Never the pool port 25061. Never `doadmin` as the app login. | EXPECTED |
@@ -439,7 +435,7 @@ verification queries.
 **Optional hardening after the install:** `ALTER ROLE crewflow_owner NOCREATEROLE;` (M0).
 - **Flagged assumption:** a later release whose migrations create roles would need CREATEROLE again. Check pending lists for `CREATE ROLE` before each release.
 
-**Fresh install from an empty database is VERIFIED on self-hosted PostgreSQL 16 and 18** (Agent 1; end to end on PG16 by Agent 2). It is EXPECTED on the managed providers above, and NOT TESTED on any of them.
+**Fresh install from an empty database is VERIFIED on self-hosted PostgreSQL 16, 17 and 18** (Agent 1; end to end on PG16 by Agent 2). It is EXPECTED on the managed providers above, and NOT TESTED on any of them.
 
 ---
 
@@ -508,7 +504,7 @@ The file's own verification queries must pass before anything else happens. **Af
 
 **5.6 Preflight:** 3.2 (the read-only pending check from the new image) → 3.3 (already done in 5.2). The classifier must report the separated ledger as an upgrade (CURRENT or behind), **never FOREIGN**. A FOREIGN or identity refusal means stop and roll back (5.9a).
 
-**5.7 Start (the API migrates on start, O3):** `$P [$L] up -d --wait --wait-timeout 1200`. A failed transition migration leaves the API serving with `upgradeFailed: true` (C3): treat it as 5.9b unless the owner approves a fix-forward.
+**5.7 Start (the API migrates on start, O3):** `$P up -d --wait --wait-timeout 1200`. A failed transition migration leaves the API serving with `upgradeFailed: true` (C3): treat it as 5.9b unless the owner approves a fix-forward.
 
 **5.8 Verify (owner-login stack):**
 - `/healthz`;
@@ -572,7 +568,7 @@ ACCEPTED by the owner.** The risks below are what the owner accepted; the contro
 > A mistaken upgrade is recovered by restore only. A failed UPGRADE serves degraded by default (C3), and the Worker runs on the partly-upgraded schema. Anything that reads or writes a not-yet-migrated object fails at that point. `/healthz` shows only `upgradeFailed: true|false`, never the migration's name. The gate fails CI if the production compose stops migrating on start, pins the approval mode to a literal instead of `${CREWFLOW_MIGRATION_APPROVAL_MODE:-none}`, renders anything but `none` or `token`, brings back a `rab-migrate`, or allows more than one API.
 
 **OpenShip is unsupported for the owner-login deployment (M0 D11).** OpenShip drops these keys: `user`, `read_only`, `tmpfs`, `cap_drop`, `security_opt`, `pids_limit`, `env_file` and the `depends_on` conditions. Since O1 the image's default user is the non-root `node`, but the other dropped keys still make it unsupported, and without `depends_on` conditions the Worker could start before the API has migrated.
-- **`docker-compose.production.yml` is OpenShip's file, and a push to `main` may redeploy it.** Merging its in-place edit would redeploy the temporary deployment into a shape that cannot start there: no `crewflow_owner` exists on its database.
+- **`docker-compose.production.yml` is OpenShip's file, and a push to `main` may redeploy it.** Since DB-SETUP it adds the bundled `db` and expects `PG_DATABASE_PASSWORD`; its pinned release digest must be a DB-SETUP image (with `worker-start.sh`) before anything deploys from it.
 - **NEEDS OWNER APPROVAL:** disable OpenShip auto-deploy, or accept the outage, before that PR merges.
 
 Use plain Docker Compose (`OWNER-LOGIN-ORACLE-VM-PLAN.md`).
@@ -581,7 +577,7 @@ Use plain Docker Compose (`OWNER-LOGIN-ORACLE-VM-PLAN.md`).
 
 - **Logs:** `json-file`, 10 MB × 5 per container. Ship them off the host, because forensics depend on them.
 - **Redis:** AOF `everysec`, `noeviction`, an ACL; never published.
-- **Owner password rotation:** done by the admin at the provider. Then update `database.env` and restart rab-api and rab-worker. After a suspected compromise, rotation is **not** remediation: inventory roles, memberships, ADMIN rows, definers, policies and triggers first (M0 §6.4 item 9).
+- **Owner password rotation (DB-SETUP):** the `crewflow_owner` password is derived from `APP_SECRET`. Rotating `APP_SECRET` (on both services) rotates it: the next API start resets it (the admin login needs CREATEROLE with ADMIN OPTION on `crewflow_owner`, or superuser) and the Worker reconnects. They cannot be rotated separately. Never run two API instances with different `APP_SECRET`s. With a hand-made `crewflow_owner` URL (pass-through), rotate as before at the provider, then update `PG_DATABASE_URL`. After a suspected compromise, rotation is **not** remediation: inventory roles, memberships, ADMIN rows, definers, policies and triggers first (M0 §6.4 item 9).
 - **Worker runtime-isolation self-check:** the separated root launcher's H6 report/enforce is ported into `rab-worker` itself (Agent 2). At start it logs `[worker-isolation] runtime isolation as declared: uid=1000 CapBnd=0000000000000000 NoNewPrivs=1 root=read-only pids.max=… memory.max=… mode=enforce`, and with `CREWFLOW_RUNTIME_ISOLATION=enforce` (committed in `docker-compose.image.yml`) it **refuses to start** when any of these is missing: uid 1000, an empty capability bounding set, no-new-privileges, a read-only root, a PID limit, a memory limit.
 - **Resources:**
   - API: 1 GB (raised from 768 MB for the migration child; the API migrates on start, O3; NOT MEASURED).
@@ -642,19 +638,19 @@ refuses the whole `CREWFLOW_OPS_*` / `PG_OPS_*` prefix.
   - Pipe every run through `tee` into a file in the same kept directory, e.g. `2>&1 | tee -a ops-run/<change-ref>.log`.
   - Keep that file with the change record.
 
-**Examples** (`$P` and `$L` are the compose command and layout from step 5; the `-e` flags are the only extra environment):
+**Examples** (`$P` is the compose command from step 5; the `-e` flags are the only extra environment; `api-prestart.sh`, the entrypoint, runs the command as `crewflow_owner` and hands the two authority variables to it only):
 
 ```bash
 mkdir -p ops-run && chown 1000:1000 ops-run    # the API image runs as uid 1000
 # Session backfill: verify first. When missing = 0, nothing else is needed.
-$P [$L] run --rm --no-deps -e DB_TARGET=production -e ALLOW_PRODUCTION_DB_COMMANDS=true -v "$PWD/ops-run:/ops" \
+$P run --rm --no-deps -e DB_TARGET=production -e ALLOW_PRODUCTION_DB_COMMANDS=true -v "$PWD/ops-run:/ops" \
   rab-api node packages/rab-server/dist/command/main.js user-session:backfill --verify \
   --operator "deploy@ops-host" --change-ref OPS-123 \
   2>&1 | tee -a ops-run/OPS-123.log
 # ...then a dry run, then --apply (each run takes the same label flags, the mount and the tee).
 
 # Containment: a dry run first. Add --execute only after the dry run matches the frozen totals.
-$P [$L] run --rm --no-deps -e DB_TARGET=production -e ALLOW_PRODUCTION_DB_COMMANDS=true -v "$PWD/ops-run:/ops" \
+$P run --rm --no-deps -e DB_TARGET=production -e ALLOW_PRODUCTION_DB_COMMANDS=true -v "$PWD/ops-run:/ops" \
   rab-api node packages/rab-server/dist/command/main.js containment:suspend-test-accounts \
   --target /ops/targets.tsv --expect-orgs 389 --expect-users 698 --expect-active 645 \
   --actor-user-id <active platform admin uuid> --log /ops/containment.jsonl \
@@ -693,10 +689,10 @@ only, never a value) and exits 1. A failed command body also exits 1.
 | Assumption | Owner |
 |---|---|
 | `CREWFLOW_MIGRATE_ON_START`, `CREWFLOW_MIGRATION_APPROVAL_MODE`, `DISABLE_DB_MIGRATIONS` (C1), `CREWFLOW_UPGRADE_FAILURE` (C3; the deprecated `CREWFLOW_UPGRADE_FAILURE_POLICY` is an alias the gate refuses in these files) are read with these names (`runtime-db-config.ts`). There is no `CREWFLOW_DB_MODE`. The production compose commits `CREWFLOW_MIGRATE_ON_START=true` and `CREWFLOW_MIGRATION_APPROVAL_MODE=${CREWFLOW_MIGRATION_APPROVAL_MODE:-none}` on rab-api (compose.env opt-in: `token`). `CREWFLOW_DEPLOYMENT_ENVIRONMENT` / `CREWFLOW_DEPLOYMENT_ID` are optional: matched when declared, a warning when absent. | Agents 1 and 2 |
-| `./api-prestart.sh` runs the migration child when `CREWFLOW_MIGRATE_ON_START=true` (and `DISABLE_DB_MIGRATIONS` is not true), then registers the job schedulers unless `DISABLE_CRON_JOBS_REGISTRATION=true` (C2), then `main.js`; it sets `CREWFLOW_UPGRADE_INCOMPLETE` itself after a failed upgrade under `continue` (C3) and refuses an inherited value. | Agent 2 |
+| `./api-prestart.sh` (rab-api's entrypoint, PID 1 until it execs tini) runs the bootstrap child and the URL swap (DB-SETUP), then the migration child when `CREWFLOW_MIGRATE_ON_START=true` (and `DISABLE_DB_MIGRATIONS` is not true), then registers the job schedulers unless `DISABLE_CRON_JOBS_REGISTRATION=true` (C2), then `/sbin/tini -s -- node .../main.js`; with arguments it runs a one-off command as `crewflow_owner` instead (no bootstrap, migration or registration); it sets `CREWFLOW_UPGRADE_INCOMPLETE` itself after a failed upgrade under `continue` (C3) and refuses an inherited value. | Agent 2 |
 | `check-pending-migrations.js` is the read-only pending check (exit 1 when pending), usable as a one-off `run --rm --no-deps rab-api` (3.2). `deploy-prepare.js` still exists but no committed compose file runs it (O3). | Agent 1 |
 | The Worker with `DISABLE_CRON_JOBS_REGISTRATION=true` consumes the schedulers only and reports a missing one as an ERROR; with `WORKER_SCHEDULER` unset, production runs `bullmq` (`interval` is refused in production). | Agent 2 |
-| `node packages/rab-worker/dist/main.js` runs standalone as uid 1000 with in-process provisioning and writes `CREWFLOW_INSTANCE_HEALTH_FILE`. | Agent 2 |
+| `node packages/rab-worker/dist/main.js` runs standalone as uid 1000 with in-process provisioning and writes `CREWFLOW_INSTANCE_HEALTH_FILE`; in the deploy files it is started by `worker-start.sh` (derive + swap) under tini. | Agent 2 |
 | `01-crewflow-owner.sql` reads the password file named by `-v owner_password_file=…` (default `/run/secrets/crewflow-owner-password`, at least 24 characters) inside psql, suppresses statement logging only for a superuser session, and grants on `:"DBNAME"`. (Agent 1, `twa/db-lifecycle`.) | Agent 1 |
 | `bootstrap-admin` is email-only with an activation link, runs as a one-off `run --rm` of `rab-api` on the owner login after the API is healthy, with per-invocation `DB_TARGET=production` + `ALLOW_PRODUCTION_DB_COMMANDS=true` on that run only (section 2, step 6). (Agent 1, confirmed.) | Agent 1 |
 | The Worker refuses to run as PID 1 (watchdog SIGKILL); `CREWFLOW_STARTUP_FAILURE_DELAY_SECONDS`, `CREWFLOW_WORKER_WATCHDOG_STALE_SECONDS`, `CREWFLOW_WORKER_SCHEMA_WAIT_SECONDS` with the ranges above. | Agent 2 |
@@ -704,7 +700,7 @@ only, never a value) and exits 1. A failed command body also exits 1.
 **Tested (Docker side, Agent 4):**
 - the gate: full mode on all 3 combinations (O3), and its self-tests;
 - `docker compose config` of every supported combination;
-- a disposable PG16.15 run of `docker-compose.local-db.yml` with **Agent 1's `01-crewflow-owner.sql` (`twa/db-lifecycle` b5a03348)** as its one init file, 21/21 checks:
+- (historical, before DB-SETUP) a disposable PG16.15 run of the now retired `docker-compose.local-db.yml` with **Agent 1's `01-crewflow-owner.sql` (`twa/db-lifecycle` b5a03348)** as its one init file, 21/21 checks:
   - the exact `crewflow_owner` attributes and the database grant `WITH GRANT OPTION`; no other role or membership created;
   - SCRAM storage; TLS on; verify-full accepted;
   - refused: a non-TLS login, the superuser over the network, another database, a wrong host name, a wrong password;
@@ -712,7 +708,17 @@ only, never a value) and exits 1. A failed command body also exits 1.
   - read-only root, `CapBnd` 0, `NoNewPrivs` 1;
   - a second start does not re-run the init; a short password refuses the init and the container never becomes healthy.
 
-**Tested elsewhere:** see the status table at the top: fresh install, lifecycle and transition on PG16/PG18 (Agent 1); end to end on PG16 (Agent 2); rollback R1/R2 (Agent 1).
+**Tested elsewhere:** see the status table at the top: fresh install, lifecycle and transition on PG16/PG17/PG18 (Agent 1, DB-SETUP area 3); end to end on PG16 (Agent 2); rollback R1/R2 (Agent 1).
+
+**Tested (DB-SETUP, 2026-11-12, disposable Debian postgres 16.15 / 17.11 / 18.6):** the bundled stack from both compose
+files with only `PG_DATABASE_PASSWORD` + `APP_SECRET` for the database (crewflow_owner created with the exact attributes
+and the grant, 256 migrations, every app session `crewflow_owner` over verify-full TLS, rab-api and rab-worker healthy);
+restart and recreate unchanged (same role, same stored verifier, no new certificate); every process of rab-api and
+rab-worker, PID 1 included, holds no admin URL, admin password or `PG_DATABASE_PASSWORD`; the bundled db refuses a
+password-less login over its socket and loopback; container logs hold no admin password, `APP_SECRET` or derived password;
+and area 6's owner tests S1-S10C (`deploy-order-tests/run-db-setup-tests.cjs`). With a non-superuser external admin and
+`log_statement=all`, the server log holds the SCRAM verifier of the bootstrap's role statement (never a password; THREAT-MODEL
+TM-DB-3).
 
 **NOT TESTED:**
 - a real production boot;

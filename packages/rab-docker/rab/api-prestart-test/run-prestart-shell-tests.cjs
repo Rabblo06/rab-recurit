@@ -474,8 +474,18 @@ check('13a one-off: derive, then tini (PID 1, clean) runs the command as its chi
   line(r.out, 'derive') && /STUB tini pid=1 admin=absent pgpw=absent argc=3/.test(r.out) && / ppid=1 /.test(cmdLine) && field(cmdLine, 'admin') === 'absent' && field(cmdLine, 'admin1') === 'absent' &&
   field(cmdLine, 'url') === hash(RUNTIME_URL) && !line(r.out, 'bootstrap') && !line(r.out, 'twentymigrate') && !line(r.out, 'check') && !line(r.out, 'register') && !line(r.out, 'main') &&
   /one-off command: running it as crewflow_owner/.test(r.out), r.out);
-r = run('oneoff-forbidden', { ...ADMIN, DB_TARGET: 'production' }, { entry: 'api-prestart.sh node /app/packages/rab-server/dist/command/main.js some:command', ctl: { 'derive-url': RUNTIME_URL } });
-check('13b one-off: every refusal still applies (DB_TARGET refused, 64), nothing ran', r.code === 64 && !line(r.out, 'derive') && !line(r.out, 'command') && !/STUB tini/.test(r.out), r.out);
+for (const [name, value] of [['CREWFLOW_MIGRATION_DATABASE_URL', 'postgres://x@db/rab'], ['PG_DATABASE_PASSWORD', 'x'.repeat(40)], ['CREWFLOW_OPS_RUN', 'one-off'], ['CREWFLOW_MIGRATION_APPROVED', `pending-1-${'0'.repeat(64)}`]]) {
+  r = run(`oneoff-forbidden-${name}`, { ...ADMIN, [name]: value }, { entry: 'api-prestart.sh node /app/packages/rab-server/dist/command/main.js some:command', ctl: { 'derive-url': RUNTIME_URL } });
+  check(`13b one-off: every other refusal still applies (${name} refused, 64), nothing ran`, r.code === 64 && !line(r.out, 'derive') && !line(r.out, 'command') && !/STUB tini/.test(r.out), r.out);
+}
+// The owner CLI's per-invocation authority (DB_TARGET / ALLOW_PRODUCTION_DB_COMMANDS on `docker compose run -e`): handed to
+// the one-off command only; the API start keeps refusing both (case 3).
+r = run('oneoff-authority', { ...ADMIN, DB_TARGET: 'production', ALLOW_PRODUCTION_DB_COMMANDS: 'true' }, { entry: 'api-prestart.sh node /app/packages/rab-server/dist/command/main.js bootstrap-admin', ctl: { 'derive-url': RUNTIME_URL } });
+check('13d one-off: DB_TARGET and ALLOW_PRODUCTION_DB_COMMANDS reach the command (and only through this path); the URL is still the derived one', r.code === 0 &&
+  ['DB_TARGET', 'ALLOW_PRODUCTION_DB_COMMANDS'].every((k) => keysOf(line(r.out, 'command'), 'self').includes(k)) && field(line(r.out, 'command'), 'url') === hash(RUNTIME_URL) &&
+  field(line(r.out, 'command'), 'admin') === 'absent' && !line(r.out, 'bootstrap'), r.out);
+r = run('api-authority', { ...MIGRATE_ON, PG_DATABASE_URL: ADMIN_URL, DB_TARGET: 'production', ALLOW_PRODUCTION_DB_COMMANDS: 'true' }, { ctl: DERIVED });
+check('13e the API start (no arguments) with DB_TARGET / ALLOW_PRODUCTION_DB_COMMANDS -> refused (64), nothing ran', r.code === 64 && !line(r.out, 'bootstrap') && !line(r.out, 'main') && !/STUB tini/.test(r.out), r.out);
 r = run('oneoff-derive-fails', ADMIN, { entry: 'api-prestart.sh node /app/packages/rab-server/dist/command/main.js some:command', ctl: { derive: 64 } });
 check('13c one-off: a failed derive step -> refused (64); the command never runs with the admin URL', r.code === 64 && !line(r.out, 'command') && !/STUB tini/.test(r.out), r.out);
 

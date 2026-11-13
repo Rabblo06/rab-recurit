@@ -6709,3 +6709,114 @@ Regression:   rate-limit-bypass.spec.ts (truth table incl. the old hidden-bypass
   - Audit rows written by these commands are as tamperable by an owner-credential holder as any other row (BC-07).
 - **Tests.** `command/ops/ops-run.spec.ts`, `command/ops/elevated-ops-session.spec.ts`,
   `__tests__/integration/ops-owner-login.integration.spec.ts`.
+
+## DB-SETUP — database setup like Twenty: one admin URL, crewflow_owner created by the API (branch deploy/db-setup-like-twenty, 2026-11-12)
+
+- **Change.** `PG_DATABASE_URL` is now the database ADMIN URL (the bundled `db` service's `postgres` superuser by default,
+  built by compose from `PG_DATABASE_PASSWORD`; or the operator's own database's admin URL). On every API start
+  `api-prestart.sh` runs a short-lived bootstrap child (`scripts/owner-login/bootstrap-owner-login.ts`), the ONLY process
+  that connects as the admin: it creates `crewflow_owner` (`LOGIN NOSUPERUSER NOBYPASSRLS NOREPLICATION NOCREATEDB
+  CREATEROLE INHERIT`), or resets its password when a probe login fails, and grants it CONNECT, CREATE, TEMPORARY on the
+  database. The password is `hex(HKDF-SHA256(APP_SECRET, salt = empty, info = "crewflow-owner-db-password-v1", 32 bytes))`
+  (`owner-login/owner-credential.ts`). The pure derive step (`derive-runtime-url.ts`, never connects) builds the
+  `crewflow_owner` URL; `api-prestart.sh` and `worker-start.sh` export it as `PG_DATABASE_URL` and unset the admin
+  credential before any runtime process starts. A `crewflow_owner` URL is passed through unchanged (no connection, no
+  APP_SECRET). `docker-compose.local-db.yml` is retired; both deploy compose files carry the bundled `db`.
+- **Owner acceptance.** TM-DB-1 to TM-DB-4 below and the trade-offs T-1 to T-5 were accepted by the owner on 2026-11-12.
+
+### TM-DB-1 (accepted risk) — the database admin credential sits in the deployment configuration
+- **Actor → action → consequence.** Anyone who can read the compose project / OpenShip service definition, run
+  `docker inspect`, or `docker exec` into rab-api / rab-worker (an exec'd process gets the container definition's
+  environment) reads the admin URL → full control of the database: superuser on the bundled db (bypassing RLS, COPY ...
+  PROGRAM inside the db container), owner / CREATEROLE on a managed one.
+- **Controls.** The admin URL is used only by the bootstrap child. `api-prestart.sh` and `worker-start.sh` are the
+  ENTRYPOINT (PID 1) of rab-api / rab-worker: they swap the URL and unset the admin credential, then exec
+  `/sbin/tini -s -- node ...`, so tini (PID 1) and the runtime processes inherit only the `crewflow_owner` URL. No compose
+  `init` (docker-init at PID 1 would keep the container environment); the gates refuse `init: true` and any other
+  entrypoint or a command. In production the API, the Worker and the migrate child refuse a `PG_DATABASE_URL` whose login
+  is not `crewflow_owner` BEFORE connecting (`runtime-db-config.ts` `checkRuntimeLogin`). The owner CLI one-off
+  (`docker compose run rab-api node .../command/main.js ...`) goes through the same swap and runs as `crewflow_owner`.
+  The bundled db is never published and sits on an internal network.
+- **Measured.** Every process of rab-api and rab-worker, PID 1 included, holds no admin URL, admin password or
+  `PG_DATABASE_PASSWORD` (live stacks, both compose files, postgres 16 / 17 / 18; area 6 S6).
+- **Residual.** As Twenty: the deployment configuration must be protected like the database itself; who can read it is
+  outside Crewflow. During the seconds of `api-prestart.sh` (before the hand-over to tini) PID 1 still holds the admin URL.
+
+### TM-DB-2 (new) — APP_SECRET now controls the database login
+- **Actor → action → consequence.** Whoever learns APP_SECRET and can reach the database port derives the
+  `crewflow_owner` password and logs in as the schema owner (RLS is FORCED, but the owner can alter policies). Before,
+  an APP_SECRET compromise meant token forgery and decryption; now it is also a database login.
+- **Controls.** The bundled db is reachable only from the app network; an external database only through the provider's
+  allow-list; verify-full TLS. The HKDF label is unique (a spec compares every `hkdfSync` label in the repository).
+  Rotating APP_SECRET on both services rotates the database password at the next API start (measured, area 6 S5).
+- **Residual.** APP_SECRET and the database password cannot be rotated independently. Two API instances with different
+  APP_SECRETs would reset the password back and forth (one rab-api in both compose files).
+
+### TM-DB-3 (new) — a bootstrap runs with admin rights on every API start
+- **Actor → action → consequence.** A bug in, or an attacker-controlled input to, the bootstrap child could misuse admin
+  rights.
+- **Controls.** Fixed SQL only; the only interpolated values are the database name (`%I`) and the SCRAM verifier (`%L`
+  inside a DO block, delivered as a bind parameter and a transaction-local setting, never in statement text). It never
+  changes an existing role's attributes: it creates the role, sets its password, grants on the current database. It
+  refuses (exit 64, fixed message) an existing `crewflow_owner` that is SUPERUSER, BYPASSRLS, REPLICATION, CREATEDB,
+  NOLOGIN, NOINHERIT, expired, or a member of a privileged role; an admin that cannot create roles or grant on the database;
+  and a server below PostgreSQL 16. A password reset needs CREATEROLE with ADMIN OPTION on `crewflow_owner` (or superuser).
+  It takes a transaction advisory lock (key 7165901520526864244), re-reads the facts under it, and retries a lost race
+  (including XX000 "tuple concurrently updated") a bounded number of times (at most 3 attempts) before failing; it
+  re-verifies the result and re-probes the login after commit. It prints fixed text and SQLSTATE classes only, never a
+  URL, password, verifier, host or database name. The plaintext password never reaches the server (a pre-hashed SCRAM
+  verifier is sent); a superuser admin turns statement and parameter logging off for its session. No plaintext fallback:
+  a provider that refuses a pre-hashed password gets exit 64 and the manual `01-crewflow-owner.sql` path (pass-through).
+- **Residual.** With a NON-superuser admin whose provider logs statements with bind parameters (`log_statement=all`,
+  pgaudit with parameters), the SCRAM verifier, never the password, lands in the provider's log (measured: 2 occurrences
+  per bootstrap with `log_statement=all`). A verifier does not allow a login; offline guessing of a 256-bit HKDF output is
+  infeasible. Each password reset leaves one "password authentication failed for user crewflow_owner" line (the probe).
+
+### TM-DB-4 (changed) — the bundled database password in the environment
+- **Change.** `PG_DATABASE_PASSWORD` is the bundled db's superuser password, read by compose only: the db's
+  `POSTGRES_PASSWORD` and the default admin URL. It reaches no rab-api / rab-worker variable (the gates refuse it on every
+  service but db, and in database.env / runtime.env; api-prestart.sh and worker-start.sh refuse it if present).
+- **Controls on the bundled db.** Digest-pinned official postgres image (Debian 16; 17 and 18 work with the same layout);
+  999:999, read-only root, `cap_drop ALL`, no-new-privileges, no port, internal network. It makes its own CA and a server
+  certificate for `db` on first start; the CA private key is deleted right after signing; the server key stays in the data
+  volume (0600); the app mounts only the CA certificate, read-only. initdb uses SCRAM for socket AND TCP logins (no trust,
+  no peer), so even a process inside the db container needs the password.
+- **Residual.** The superuser can log in over the internal network (needed by the bootstrap child; T-3).
+
+### Trade-offs applied (SECURITY TRADE-OFF blocks T-1 to T-5, owner-accepted 2026-11-12)
+- **T-1 — privileged URL in a container definition.** The compose gate no longer refuses a provider-admin login in
+  `PG_DATABASE_URL` (it still refuses the former separated logins and schema roles, TLS below verify-full, a transaction
+  pooler and a URL without a password). Residual: TM-DB-1.
+- **T-2 — `POSTGRES_PASSWORD` from an environment variable** on the bundled db, in both compose files (decision D4;
+  OpenShip has no secret files). Residual: visible in the compose config / `docker inspect db`.
+- **T-3 — the superuser may log in over the internal network** on the bundled db (the image's pg_hba, tightened to
+  SCRAM everywhere). Still: no port, an internal network, SCRAM.
+- **T-4 — not applied** (D1 = a: verify-full kept for the bundled db; no plaintext exception).
+- **T-5 — a runtime-env rule became a wrapper invariant.** "No admin URL in a runtime process" depends on the entrypoints
+  `./api-prestart.sh` / `./worker-start.sh`. The gates (compose-owner-login, compose-one-image, verify-image-compose)
+  require exactly that shape, and a runtime started any other way still refuses a non-`crewflow_owner` login in production
+  before connecting.
+- **Deployment identity (lead decision 2026-11-12): `db` joins `LOCAL_DATABASE_SERVICE_HOSTS`.** Outside production, an
+  unmarked database at the single-label host `db` is treated as local (warn and continue) instead of remote (refused
+  without the disposable-test setting). Production is unaffected. Residual: a non-production process whose `db` resolves
+  through a DNS search domain to a remote database is not refused for a missing marker.
+- **Owner CLI one-off authority.** With arguments, `api-prestart.sh` takes `DB_TARGET` / `ALLOW_PRODUCTION_DB_COMMANDS`
+  out of its environment before its refusal loops and hands them back only to the one-off command (the CLI applies its own
+  production-command rules); an API start without arguments still refuses both.
+
+### Open follow-up (pre-existing, NOT fixed here) — finding B (area 6, Low)
+With `PG_DATABASE_URL` = a `crewflow_owner` that is SUPERUSER (pass-through path), the start is refused (migrate child exit
+67, "the login is SUPERUSER"), but before the refusal the migrate child's DataSource has already created the `uuid-ossp`
+and `citext` extensions (owned by that login). The bootstrap-child path creates nothing. Root cause: the identity gate runs
+after the TypeORM DataSource initialise. Existed before this work; a separate follow-up (fail-closed ordering in the
+migrate child) is for the owner.
+
+### Rollback
+A rollback across this release needs the previous release's compose files (its image has no `worker-start.sh` or
+bootstrap child) and a `crewflow_owner` URL with the derived password (`derive-runtime-url.js`, SENSITIVE) or a new
+password set with `01-crewflow-owner.sql` (runbook 3.6).
+
+- **Tests.** owner-credential / derive-runtime-url / runtime-db-config / never-in-runtime-env / deployment-identity specs;
+  the bootstrap harness `bootstrap-owner-login-check.ts` (PG 16/17/18, refusals, idempotent restart); the prestart shell
+  tests (bootstrap, swap, PID 1, one-off, worker-start.sh); the compose gates and their tests; area 6's
+  `deploy-order-tests/run-db-setup-tests.cjs` (S1-S10C) on postgres 16, 17 and 18.

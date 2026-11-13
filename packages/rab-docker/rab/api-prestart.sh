@@ -173,6 +173,17 @@ if [ "$MIGRATE_ON_START" = true ] && [ "$APPROVAL_MODE" = token ] && [ -n "${CRE
   MIGRATION_APPROVAL="$CREWFLOW_MIGRATION_APPROVED"
   unset CREWFLOW_MIGRATION_APPROVED
 fi
+# The owner CLI one-off (arguments given) and ONLY it: its per-invocation command authority (DB_TARGET and
+# ALLOW_PRODUCTION_DB_COMMANDS, passed with `docker compose run -e`, never in a service or env file) is taken out of this
+# shell's environment before the refusal loops below (which refuse it in every other case) and handed back only to the
+# one-off command, which applies its own production-command rules. The API start (no arguments) refuses both, as before.
+ONEOFF_DB_TARGET=""
+ONEOFF_ALLOW_PRODUCTION_DB_COMMANDS=""
+if [ "$#" -gt 0 ]; then
+  ONEOFF_DB_TARGET="${DB_TARGET:-}"
+  ONEOFF_ALLOW_PRODUCTION_DB_COMMANDS="${ALLOW_PRODUCTION_DB_COMMANDS:-}"
+  unset DB_TARGET ALLOW_PRODUCTION_DB_COMMANDS
+fi
 
 # Security review L-4: these two loops plus the owner-login loop below are a literal copy of the shared list in
 # packages/rab-server/src/database/typeorm/core/never-in-runtime-env.ts (forbiddenRuntimeEnvNames('api')), which main.js
@@ -305,6 +316,8 @@ unset RUNTIME_URL PG_DATABASE_PASSWORD
 if [ "$#" -gt 0 ]; then
   trap - TERM INT
   echo "api-prestart: one-off command: running it as crewflow_owner (no migration, no scheduler registration, no API)"
+  if [ -n "$ONEOFF_DB_TARGET" ]; then export DB_TARGET="$ONEOFF_DB_TARGET"; fi
+  if [ -n "$ONEOFF_ALLOW_PRODUCTION_DB_COMMANDS" ]; then export ALLOW_PRODUCTION_DB_COMMANDS="$ONEOFF_ALLOW_PRODUCTION_DB_COMMANDS"; fi
   exec /sbin/tini -s -- "$@"
 fi
 

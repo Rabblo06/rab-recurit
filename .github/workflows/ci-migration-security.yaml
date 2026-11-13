@@ -108,7 +108,7 @@ jobs:
   # Owner-login lifecycle (PR 3): bootstrap, classifier, phases, the D3(b) ROW_COPY shim with GOLDEN EQUIVALENCE against
   # the superuser-run ROW_COPY chain, second boot, pending, four kill points, three concurrent children, lock timeout and
   # the upgrade-failure policy, AHEAD rollback, FOREIGN, wrong role, the separated -> owner-login transition SQL, and the
-  # version refusal, on PostgreSQL 16 AND 18 (and 15 / 17 refused). One fresh cluster per group: roles are cluster-wide.
+  # version refusal, on PostgreSQL 16, 17 AND 18 (and 15 refused). One fresh cluster per group: roles are cluster-wide.
   # See packages/rab-server/src/database/typeorm/scripts/migrate/owner-login/owner-login-lifecycle-check.ts.
   owner-login:
     runs-on: ubuntu-latest
@@ -118,12 +118,14 @@ jobs:
       matrix:
         include:
           - { pg: 16, scenarios: 'fresh,lifecycle' }
+          - { pg: 17, scenarios: 'fresh,lifecycle' }
           - { pg: 18, scenarios: 'fresh,lifecycle' }
           - { pg: 16, scenarios: 'transition' }
+          - { pg: 17, scenarios: 'transition' }
           - { pg: 18, scenarios: 'transition' }
           - { pg: 15, scenarios: 'unsupported' }
-          - { pg: 17, scenarios: 'unsupported' }
           - { pg: 16, scenarios: 'fingerprints' }
+          - { pg: 17, scenarios: 'fingerprints' }
           - { pg: 18, scenarios: 'fingerprints' }
     env:
       NODE_ENV: test
