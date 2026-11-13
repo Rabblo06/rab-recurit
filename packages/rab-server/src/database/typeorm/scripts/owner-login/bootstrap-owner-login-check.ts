@@ -655,6 +655,44 @@ const SCENARIOS: Scenario[] = [
     },
   },
   {
+    id: 'owner-url-app-secret-rotation-procedure',
+    covers: 'option 2: APP_SECRET rotation with only a crewflow_owner URL: before the change, PG_DATABASE_URL = the URL the derive command prints for the OLD secret; one start with the NEW secret takes step b; the next takes step a',
+    async run(ctx) {
+      const db = await createDb(ctx, 'our');
+      const oldSecret = remember(appSecret());
+      const oldDerived = remember(deriveOwnerPassword(oldSecret));
+      // The state after an earlier db-setup with the old APP_SECRET.
+      await presetOwner(ctx, db, '', oldDerived);
+      // Step 1 of the procedure: the derive command's output for the OLD secret (the target file + old APP_SECRET).
+      writeDbTargetFile(TARGET_FILE, { v: 1, host: ctx.admin.url.hostname, port: Number(ctx.admin.url.port), database: db, params: {} });
+      const printed: string[] = [];
+      const code = runDeriveRuntimeUrl(
+        { CREWFLOW_DB_TARGET_FILE: TARGET_FILE, APP_SECRET: oldSecret },
+        { writeRuntimeUrl: (u) => void printed.push(remember(u)), log: () => undefined, error: () => undefined },
+      );
+      expect(code === DERIVE_EXIT.ok && printed.length === 1, 'procedure: the derive command did not print the old crewflow_owner URL');
+      const before = await ownerState(ctx.admin);
+      // Step 2: PG_DATABASE_URL = that URL, APP_SECRET = the new secret: step b sets the new derived password.
+      const newSecret = remember(appSecret());
+      const rotated = await runChild(printed[0] as string, newSecret);
+      assertCleanOutput(rotated);
+      expectResult(rotated, 0, 'pass-through', 'rotation');
+      expect(rotated.result?.passwordSet === true, 'rotation: the new derived password was not set');
+      const mid = await ownerState(ctx.admin);
+      expect(mid.oid === before.oid && mid.attrs === before.attrs && mid.passwordHash !== before.passwordHash, 'rotation: role recreated, attributes changed, or rolpassword unchanged');
+      expect((await canLogin(ctx.admin, OWNER, remember(deriveOwnerPassword(newSecret)), db)).ok, 'rotation: the new derived password does not log in');
+      const stale = await canLogin(ctx.admin, OWNER, oldDerived, db);
+      expect(!stale.ok && stale.code === '28P01', 'rotation: the old derived password still logs in');
+      await assertDeriveFromTargetLogsIn(ctx, db, newSecret, 'rotation');
+      // Step 3: the next start (same, now stale, URL): step a, nothing written.
+      const next = await runChild(printed[0] as string, newSecret);
+      assertCleanOutput(next);
+      expectResult(next, 0, 'pass-through', 'after rotation');
+      expect(next.result?.passwordSet === false && (await ownerState(ctx.admin)).passwordHash === mid.passwordHash, 'after rotation: the password was set again');
+      return ['old-secret derive URL + new APP_SECRET: step b once (new derived password, old one refused 28P01); next start step a'];
+    },
+  },
+  {
     id: 'owner-url-already-derived',
     covers: 'option 2: a crewflow_owner URL whose role already has the derived password: step a, no ALTER',
     async run(ctx) {
