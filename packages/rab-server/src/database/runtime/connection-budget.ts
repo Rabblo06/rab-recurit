@@ -24,6 +24,10 @@
  * Boot probes are short-lived and sequential (runtime guard, boot gates, session probe); BOOT_PROBE_ALLOWANCE covers
  * the probes of one starting process plus one operator session.
  *
+ * Per API instance, on top of its pool: the /healthz `databaseLogin` probe (engine/core-modules/health/database-login.health.ts)
+ * opens ONE dedicated connection on the runtime login at a time (single flight, at most one login per 5 s, closed at once):
+ * API_HEALTH_LOGIN_PROBE_CONNECTIONS, counted against the runtime login like the pool.
+ *
  * Phase D event mode: + 1 listener connection per Worker replica (WORKER_DISPATCH_LISTENER_CONNECTIONS).
  *
  * Capacity: max_connections − superuser_reserved_connections − reserved_connections (PostgreSQL 16) − the RDS-style
@@ -37,6 +41,8 @@ export const WORKER_SCAN_LOCK_CONNECTIONS = 1;
 export const WORKER_STORAGE_LOCK_CONNECTIONS = 1;
 export const WORKER_PROVISIONER_CONNECTIONS = 2;
 export const BOOT_PROBE_ALLOWANCE = 3;
+/** The /healthz fresh-login probe of one API instance: single flight, so never more than one connection at once. */
+export const API_HEALTH_LOGIN_PROBE_CONNECTIONS = 1;
 /** Phase D (D2): the LISTEN crewflow_worker_wake connection of one Worker replica in WORKER_DISPATCH_MODE=event. */
 export const WORKER_DISPATCH_LISTENER_CONNECTIONS = 1;
 
@@ -147,6 +153,13 @@ function readWorkerDispatchMode(env: Env): 'poll' | 'event' {
 export function planConnectionBudget(shape: DeploymentShape): BudgetPlan {
   const rows: BudgetRow[] = [
     { item: 'API runtime pool', each: shape.apiPoolMax, count: shape.apiInstances, total: shape.apiPoolMax * shape.apiInstances, runtimeRole: true },
+    {
+      item: 'API health login probe',
+      each: API_HEALTH_LOGIN_PROBE_CONNECTIONS,
+      count: shape.apiInstances,
+      total: API_HEALTH_LOGIN_PROBE_CONNECTIONS * shape.apiInstances,
+      runtimeRole: true,
+    },
     {
       item: 'Worker runtime pool',
       each: shape.workerPoolMax,

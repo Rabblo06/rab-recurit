@@ -113,7 +113,7 @@ describe('DatabaseLoginHealthIndicator (/healthz databaseLogin)', () => {
 
   it(`bounded: a result (up or down) is reused for ${DATABASE_LOGIN_PROBE_CACHE_MS} ms, then a fresh login decides`, async () => {
     let now = 1_000_000;
-    jest.spyOn(Date, 'now').mockImplementation(() => now);
+    jest.spyOn(performance, 'now').mockImplementation(() => now);
     let refuse = false;
     const h = harness({ connect: async () => (refuse ? Promise.reject(DRIVER_ERROR) : undefined) });
     expect((await h.indicator.isHealthy()).databaseLogin!.status).toBe('up');
@@ -132,9 +132,24 @@ describe('DatabaseLoginHealthIndicator (/healthz databaseLogin)', () => {
     expect(h.factory).toHaveBeenCalledTimes(3);
   });
 
+  it('the cache age is monotonic: a wall clock stepped back an hour cannot keep a cached "up" alive', async () => {
+    let mono = 50_000;
+    let wall = Date.UTC(2026, 10, 13, 12, 0, 0);
+    jest.spyOn(performance, 'now').mockImplementation(() => mono);
+    jest.spyOn(Date, 'now').mockImplementation(() => wall);
+    let refuse = false;
+    const h = harness({ connect: async () => (refuse ? Promise.reject(DRIVER_ERROR) : undefined) });
+    expect((await h.indicator.isHealthy()).databaseLogin!.status).toBe('up');
+    refuse = true; // the login breaks ...
+    wall -= 3_600_000; // ... and the wall clock is stepped back an hour (NTP / VM resume)
+    mono += DATABASE_LOGIN_PROBE_CACHE_MS; // real time still moves forward
+    expect((await h.indicator.isHealthy()).databaseLogin).toEqual({ status: 'down', message: DATABASE_LOGIN_DOWN_MESSAGE });
+    expect(h.factory).toHaveBeenCalledTimes(2);
+  });
+
   it('logs once per change of state, with the SQLSTATE only — never the driver message', async () => {
     let now = 5_000_000;
-    jest.spyOn(Date, 'now').mockImplementation(() => now);
+    jest.spyOn(performance, 'now').mockImplementation(() => now);
     let refuse = true;
     const h = harness({ connect: async () => (refuse ? Promise.reject(DRIVER_ERROR) : undefined) });
     for (let i = 0; i < 3; i++) {

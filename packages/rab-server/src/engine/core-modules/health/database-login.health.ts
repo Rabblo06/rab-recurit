@@ -16,7 +16,10 @@ import { createPgClient, resolvePgEnvironmentCached } from '../../../database/po
  * Bounded so a public, unauthenticated /healthz can never be used to make the API churn logins:
  *  - single flight: concurrent requests share the one probe in progress;
  *  - cached: a result (up OR down) is reused for DATABASE_LOGIN_PROBE_CACHE_MS, so at most one login every 5 s whatever
- *    the request rate (the container check runs every 10 s and therefore always gets a fresh reading);
+ *    the request rate. The cache age is measured on the MONOTONIC clock (performance.now), never the wall clock: a wall
+ *    clock stepped back (NTP, a VM resume) must not keep an old reading alive. A container check whose interval is at
+ *    least 5 s (10 s in docker-compose.image/production/local-build, 5 s in docker-compose.yml/qa.yml) normally gets a
+ *    fresh reading; one that lands inside the 5 s window gets the previous reading, at most 5 s old;
  *  - deadline: connect 2.5 s, query 1.5 s and the whole probe 3 s (inside the container check's 5 s timeout); a probe
  *    still running at the deadline is reported down and its client is closed.
  * Never exposes details: the response carries only `status` and the fixed text below — no URL, host, user, SQLSTATE or
@@ -87,7 +90,7 @@ export class DatabaseLoginHealthIndicator {
 
   /** Cached, single-flight result of a fresh login. Never rejects. */
   canLogIn(): Promise<boolean> {
-    if (this.last && Date.now() - this.last.at < DATABASE_LOGIN_PROBE_CACHE_MS) return Promise.resolve(this.last.ok);
+    if (this.last && performance.now() - this.last.at < DATABASE_LOGIN_PROBE_CACHE_MS) return Promise.resolve(this.last.ok);
     if (!this.inFlight) {
       this.inFlight = this.probe().finally(() => {
         this.inFlight = null;
@@ -106,7 +109,7 @@ export class DatabaseLoginHealthIndicator {
       code = failureCode(error);
     }
     const previous = this.last?.ok;
-    this.last = { ok, at: Date.now() };
+    this.last = { ok, at: performance.now() }; // monotonic: never the wall clock
     if (!ok && previous !== false) this.logger.error(`a new database connection could not be opened (${code}); /healthz reports databaseLogin down`);
     if (ok && previous === false) this.logger.log('a new database connection opened again; /healthz reports databaseLogin up');
     return ok;
