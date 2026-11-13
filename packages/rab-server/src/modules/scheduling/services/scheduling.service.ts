@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { sentShiftPresentation } from './sent-shift-presentation';
+import { SENT_SHIFT_VIEW_SQL, sentShiftsPageAndCountsSql } from './sent-shifts-sql';
 import { ListSentShiftsDto, SentShiftView } from '../dto/list-sent-shifts.dto';
-import { SHIFT_ACTION_WINDOW_HOURS } from '../utils/shift-action-window';
 import { validateAssignmentTime, effectiveAssignmentBreakMinutes, assignmentEnvelope, defaultAssignmentTime } from '../utils/assignment-time';
 import { resolveVenueOfferStatus } from '../../offer/services/venue-offer-presentation';
 import { PermissionsService } from '../../../engine/core-modules/permissions/permissions.service';
@@ -561,80 +561,21 @@ export class SchedulingService {
       // bound; every scope predicate below applies unchanged.
       const after = decodeOptionalKeysetCursor(dto.cursor);
       const { skip, take } = keysetSkipTake(dto);
-      // One row per submitted request (shift), classified in SQL so tabs, totals and pagination agree. Offer counts use
-      // each recipient's LATEST offer; assignment state is authoritative after confirmation (the offer stays historical).
-      // Phase C1: the counts are computed per request (LATERAL, below) instead of in a CTE over every offer of the
-      // organisation joined back by shift id: same numbers, but bounded by the caller's own requests. Measured on synthetic
-      // volume (EXPLAIN ANALYZE, 100k offers in one organisation): the organisation-wide CTE cost ~0.2 s per call, and restricting it by
-      // a sub-select made the planner (blind to the RLS predicates' selectivity) re-aggregate it once per request (~18 s).
-      // sql-injection-reviewed: code-constant SQL fragment from a helper called with literal aliases; values are bound $n parameters.
-      const rowsSql = `WITH rows AS (
-          SELECT s.id, s.status, s.required_count AS "requiredCount", s.filled_count AS "filledCount",
-            coalesce(s.default_starts_at, s.starts_at) AS "startsAt", coalesce(s.default_ends_at, s.ends_at) AS "endsAt",
-            s.created_at AS "submittedAt", ${keysetTimestampSql('s.created_at')} AS keyset_ts, v.name AS "venueName", jr.name AS "roleName",
-            s.ends_at + make_interval(hours => ${SHIFT_ACTION_WINDOW_HOURS}) AS "actionExpiresAt",
-            now() >= s.ends_at + make_interval(hours => ${SHIFT_ACTION_WINDOW_HOURS}) AS "actionExpired",
-            coalesce(c.sent, 0) AS sent, coalesce(c.pending, 0) AS pending, coalesce(c.accepted, 0) AS accepted,
-            coalesce(c.confirmed, 0) AS confirmed, coalesce(c.no_show, 0) AS no_show, coalesce(c.cancelled, 0) AS cancelled,
-            coalesce(c.declined, 0) AS declined, coalesce(c.expired, 0) AS expired, coalesce(c.withdrawn, 0) AS withdrawn,
-            coalesce(c.rejected, 0) AS rejected, coalesce(c.not_confirmed_in_time, 0) AS not_confirmed_in_time,
-            s.status IN ('cancelled','completed','declined') AS terminal
-          FROM shift s JOIN venue v ON v.id = s.venue_id JOIN job_role jr ON jr.id = s.job_role_id
-          LEFT JOIN LATERAL (
-            SELECT count(*)::int AS sent,
-              count(*) FILTER (WHERE status = 'pending' AND assignment_status = 'offered')::int AS pending,
-              count(*) FILTER (WHERE assignment_status = 'staff_accepted')::int AS accepted,
-              count(*) FILTER (WHERE assignment_status IN ('confirmed','completed'))::int AS confirmed,
-              count(*) FILTER (WHERE assignment_status = 'no_show')::int AS no_show,
-              count(*) FILTER (WHERE assignment_status = 'cancelled')::int AS cancelled,
-              count(*) FILTER (WHERE status = 'declined')::int AS declined,
-              count(*) FILTER (WHERE status = 'expired')::int AS expired,
-              count(*) FILTER (WHERE status = 'withdrawn')::int AS withdrawn,
-              count(*) FILTER (WHERE status = 'manager_rejected')::int AS rejected,
-              count(*) FILTER (WHERE status = 'manager_rejected' AND rejected_by IS NULL AND rejection_reason = 'confirmation_deadline_passed')::int AS not_confirmed_in_time
-            FROM (
-              SELECT DISTINCT ON (o.staff_profile_id) o.status, sa.status AS assignment_status, o.rejected_by, o.rejection_reason
-                FROM shift_assignment sa JOIN job_offer o ON o.shift_assignment_id = sa.id
-               WHERE sa.shift_id = s.id AND sa.organisation_id = $1 AND o.organisation_id = $1
-               ORDER BY o.staff_profile_id, o.sent_at DESC, o.id DESC
-            ) latest
-          ) c ON true
-          WHERE s.organisation_id = $1 AND s.requested_by = $2 AND s.venue_id = ANY($3::uuid[]) AND ($4::uuid IS NULL OR s.id = $4)
-        ), classified AS (
-          SELECT r.*,
-            -- Genuinely expired: past the shift action window, or every recipient's latest offer expired with nobody
-            -- accepted/confirmed. Terminal requests (cancelled / completed / declined) keep their own state.
-            (NOT r.terminal AND (r."actionExpired" OR (r.sent > 0 AND r.expired = r.sent))) AS is_expired
-          FROM rows r
-        )`;
-      const VIEW_SQL: Record<SentShiftView, string> = {
-        all: 'NOT is_expired',
-        pending: `NOT is_expired AND NOT terminal AND (status = 'pending_manager_approval' OR pending > 0)`,
-        accepted: 'NOT is_expired AND NOT terminal AND accepted + confirmed > 0',
-        confirmed: '"requiredCount" > 0 AND confirmed >= "requiredCount" AND NOT terminal AND NOT is_expired',
-        declined: `(status = 'declined' OR (NOT terminal AND declined > 0)) AND NOT is_expired`,
-        expired: 'is_expired',
-      };
-      const params = [ctx.organisationId, ctx.userId, scope.venueIds, id ?? null];
-      const pageParams: unknown[] = [...params, take + 1, skip];
+      const pageParams: unknown[] = [ctx.organisationId, ctx.userId, scope.venueIds, id ?? null, take + 1, skip];
       // The window total counts the view BEFORE the cursor bound (applied outside it), so `total` is the whole view's.
       // sql-injection-reviewed: code-constant SQL fragment from a helper called with literal aliases; values are bound $n parameters.
       const bound = after ? `WHERE ${keysetBeforeSql('"submittedAt"', 'id', '$7', '$8')}` : '';
       if (after) pageParams.push(after.t, after.i);
-      const rows = await manager.query(
+      // XP-05: one statement for the page rows and the tab counts (sent-shifts-sql.ts).
+      const result: Array<Record<string, unknown>> = await manager.query(
         // sql-injection-reviewed: dynamic WHERE assembled only from literal fragments and $n / :named placeholders (values pushed to params); identifiers come from allow-lists. Reviewed 2026-11-04.
-        `${rowsSql} SELECT * FROM (SELECT *, count(*) OVER () AS view_total FROM classified WHERE ${id ? 'TRUE' : VIEW_SQL[view]}) v ${bound}
-          ORDER BY "submittedAt" DESC, id DESC LIMIT $5 OFFSET $6`,
+        sentShiftsPageAndCountsSql(id ? 'TRUE' : SENT_SHIFT_VIEW_SQL[view], bound),
         pageParams,
       );
-      if (id && !rows.length) throw new NotFoundException('Shift not found.');
       // Tab counts + the distinct number of submitted requests (one request = one, however many recipients).
-      const [tabs] = await manager.query(
-        // sql-injection-reviewed: dynamic WHERE assembled only from literal fragments and $n / :named placeholders (values pushed to params); identifiers come from allow-lists. Reviewed 2026-11-04.
-        `${rowsSql} SELECT ${Object.entries(VIEW_SQL).map(([k, w]) => `count(*) FILTER (WHERE ${w})::int AS "${k}"`).join(', ')},
-          count(*)::int AS submitted FROM classified`,
-        params,
-      );
+      const tabs = result[0].tab_counts as Record<SentShiftView | 'submitted', number>;
+      const rows = result.filter((r) => r.id !== null).map(({ tab_counts: _tabCounts, ...r }) => r);
+      if (id && !rows.length) throw new NotFoundException('Shift not found.');
       const total = rows[0] ? Number(rows[0].view_total) : after ? Number(tabs[view]) : 0;
       const page = keysetPage(rows, take, (r: any) => ({ t: r.keyset_ts as string, i: r.id as string }));
       return {
