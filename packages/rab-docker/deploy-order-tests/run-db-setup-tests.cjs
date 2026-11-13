@@ -125,7 +125,8 @@ const MSG = {
   readyCreated: /crewflow_owner is ready \(created/,
   readyUnchanged: /crewflow_owner is ready \((existing crewflow_owner URL, )?unchanged/,
   readyReset: /crewflow_owner is ready \(password (set|reset)/,
-  passwordFileRace: /Another db-setup stored a crewflow_owner password at the same moment/,
+  // a concurrent db-setup on the same volume: the password-file race message, or (per-volume lock) "another db-setup is running"
+  passwordFileRace: /Another db-setup stored a crewflow_owner password at the same moment|another db-setup is running/i,
   // api-prestart.sh / worker-start.sh: any non-empty PG_DATABASE_URL, any login.
   entrypointRefusal: /PG_DATABASE_URL must never be set on the (api|worker) service/,
   // runtime-db-config.ts checkRuntimeLogin
@@ -1381,7 +1382,7 @@ async function blockRace() {
     const okRuns = sr.filter((r) => r.code === 0).length;
     const lostRace = slogs.filter((l, i) => sr[i].code !== 0 && MSG.passwordFileRace.test(l)).length;
     n(`exits ${sr.map((r) => r.code).join(', ')}; created ${created}; lost the race with the fixed message: ${lostRace}`);
-    check(created === 1 && okRuns >= 1 && okRuns + lostRace === 2, `two db-setup runs at once: exactly one creates crewflow_owner; the other succeeds or refuses with the password-file race message (exits ${sr.map((r) => r.code).join(', ')})`);
+    check(created === 1 && okRuns >= 1 && okRuns + lostRace === 2, `two db-setup runs at once: exactly one creates crewflow_owner; the other succeeds or refuses (the password-file race / per-volume lock message, nothing changed) (exits ${sr.map((r) => r.code).join(', ')})`);
     check(exactly01(role(p)), `one crewflow_owner, exactly the 01 attributes (${roleShape(role(p))})`);
     const pf = p.readPasswordFile();
     check(pf && pf.mode === '400 1000:1000' && p.ownerLoginWorks(pf.password), `after the race the password file (${pf ? pf.mode : 'absent'}) logs in as crewflow_owner: the file and the role agree`);
