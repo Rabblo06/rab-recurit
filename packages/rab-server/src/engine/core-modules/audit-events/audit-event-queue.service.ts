@@ -20,7 +20,7 @@ import {
   auditPreAuthJobId,
 } from '../../worker-shared/audit-event.contract';
 import { enqueueRegisteredJob, RegisteredJob, registeredJob, registeredSystemScopedJob } from '../../worker-shared/queue-enqueue';
-import { boundedPublish, closeQueueProducer, createQueueProducerConnection, QUEUE_PUBLISH_TIMEOUT_MS } from '../../worker-shared/queue-producer-connection';
+import { boundedPublish, closeQueueProducer, createQueueProducerConnection, ProducerRedisConnection, QUEUE_PUBLISH_TIMEOUT_MS } from '../../worker-shared/queue-producer-connection';
 import { AuditEventShipper, AuditRowToShip, PreAuthLoginFailure, registerAuditEventShipper, unregisterAuditEventShipper } from './audit-event-shipping';
 import { maskEmailForAudit } from './build-security-audit-event';
 import { classifyAuditAction } from './security-audit-event-catalogue';
@@ -286,7 +286,7 @@ export class AuditEventQueueService implements OnModuleDestroy {
     this.dropsKey = auditPreAuthDropsKey(process.env.NODE_ENV?.trim() || 'development');
     if (!this.enabled) return;
     const connection = createQueueProducerConnection(env.get('REDIS_URL'));
-    const queue = new Queue<AuditEventJobData | AuditPreAuthJobData>(AUDIT_EVENT_QUEUE_NAME, { connection });
+    const queue = new Queue<AuditEventJobData | AuditPreAuthJobData>(AUDIT_EVENT_QUEUE_NAME, { connection }, ProducerRedisConnection);
     queue.on('error', () => undefined);
     this.connection = connection;
     this.queue = queue;

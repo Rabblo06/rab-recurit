@@ -45,9 +45,11 @@
  * DB-SETUP: the database is docker-compose.image.yml's bundled `db` (DOT_PG_IMAGE = a DEBIAN postgres image of the major:
  * the db service runs as 999:999 with the Debian volume layout; an alpine image does not fit it). Its first start runs the
  * shipped 01-crewflow-owner.sql (docker-compose.deploy-order-owner.yml), so every case starts from the hand-made
- * crewflow_owner every R254 deployment has, and the app services get that crewflow_owner URL as the PG_DATABASE_URL
- * interpolation value: the PASS-THROUGH path (D5), the bootstrap child never connects. PREV and the red control have no
- * worker-start.sh: their deploys add docker-compose.deploy-order-prev.yml (the previous release's rab-worker command).
+ * crewflow_owner every R254 deployment has, and compose.env holds that crewflow_owner URL as PG_DATABASE_URL: the
+ * PASS-THROUGH path (D5). PR #125 (the Twenty Helm way): only db-setup reads it, checks it read-only and copies its password
+ * into the setup volume's password file (never changing it); rab-api / rab-worker build their URL from the target file +
+ * that password file. PREV and the red control have no worker-start.sh: their deploys add docker-compose.deploy-order-prev.yml
+ * (the previous release's own start-up and its PG_DATABASE_URL), with the crewflow_owner URL whose password logs in now.
  *
  * Limits kept: at most five running containers of this run (db, rab-redis, rab-api, rab-worker + the operator's
  * registry; U7: two one-off migrate containers instead of rab-api/rab-worker); redis on a tmpfs, the db in the project's own
@@ -97,7 +99,8 @@ const IMG = {
   control: process.env.DOT_CONTROL_DIGEST || null,
 };
 const REGISTRY_CONTAINER = process.env.DOT_REGISTRY_CONTAINER || 'deploy-order-registry';
-const MAX_CONTAINERS = 5;
+// + the one-shot db-setup (PR #125 options A and 2), which runs again on every `up -d` while the old stack may still run.
+const MAX_CONTAINERS = 6;
 const NEWER = ['OutboxClaimIndexes1786721440000', 'RefreshTokenReplacedByIndex1786721450000'];
 const { SEEDED_TABLES, facts, compareFacts, rlsCheck } = L; // shared with run-db-setup-tests.cjs (S7)
 
@@ -141,10 +144,15 @@ function project(kind, opts) {
   L.writeSecrets(p.secretsDir);
   return p;
 }
-/** Points the project at `digest`; PREV (R254) and the red control predate DB-SETUP: their own rab-worker command. */
+/**
+ * Points the project at `digest`; PREV (R254) and the red control predate DB-SETUP: their own start-up (prev overlay) and
+ * the crewflow_owner URL with the password that logs in now (the hand-made one: PR #125 never changes it). The NEW images
+ * keep the hand-made URL in compose.env (unchanged operator file): db-setup reads it and rab-api / rab-worker never do.
+ */
 function use(p, digest) {
-  p.setPrev(digest === IMG.prev || digest === IMG.control);
-  L.writeComposeEnv(p, { repository: REPO, digest, pgImage: process.env.DOT_PG_IMAGE, redisImage: process.env.DOT_REDIS_IMAGE });
+  const prev = digest === IMG.prev || digest === IMG.control;
+  p.setPrev(prev);
+  L.writeComposeEnv(p, { repository: REPO, digest, pgImage: process.env.DOT_PG_IMAGE, redisImage: process.env.DOT_REDIS_IMAGE, databaseUrl: prev ? L.ownerUrl(p.ownerPasswordNow()) : L.ownerUrl() });
 }
 
 /** `p`: the case's project (failure logs, teardown). `down: false` keeps it running for the next case (U4 -> U5). */
@@ -266,7 +274,7 @@ async function main() {
     if (IMG.control) {
       u1.setShortHealth(true);
       use(u1, IMG.control);
-      const since = L.nowS() - 1;
+      const since = L.watchEvents(u1.name); // live stream: the daemon's replay buffer overflows on a busy host
       const d = u1.deploy(900_000);
       evidence('U1-control-deploy.log', d.out);
       check(d.code !== 0, `RED CONTROL (N1 image ${IMG.control.slice(0, 19)}…): the deploy FAILS on the seeded R254 database (exit ${d.code})`);
@@ -279,7 +287,7 @@ async function main() {
       u1.setShortHealth(false);
     } else n('red control skipped (DOT_CONTROL_DIGEST not set)');
     use(u1, IMG.next);
-    const since = L.nowS() - 1;
+    const since = L.watchEvents(u1.name); // live stream: the daemon's replay buffer overflows on a busy host
     const d = u1.deploy();
     evidence('U1-new-deploy.log', d.out);
     check(d.code === 0, `deploy of NEW on the seeded R254 database: exit ${d.code} after ${Math.round(d.ms / 1000)} s`);
@@ -374,7 +382,7 @@ async function main() {
     use(u3, IMG.next);
     const dep = u3.deployAsync();
     try {
-      await L.waitFor('the API migrate child to block on the push_delivery index', () => u3.psql(`SELECT count(*) FROM pg_stat_activity WHERE wait_event_type = 'Lock' AND query ILIKE 'CREATE INDEX CONCURRENTLY%push_delivery_claim_idx%'`) === '1', 50_000, 1000);
+      await L.waitFor('the API migrate child to block on the push_delivery index', () => u3.psql(`SELECT count(*) FROM pg_stat_activity WHERE wait_event_type = 'Lock' AND query ILIKE 'CREATE INDEX CONCURRENTLY%push_delivery_claim_idx%'`) === '1', 120_000, 1000); // db-setup runs first (PR #125)
       check(true, 'the migrate child is inside OutboxClaimIndexes1786721440000, waiting for its second index');
       check(u3.neverStarted('rab-worker'), 'Worker waiting: the new Worker is not started while the API migrates');
       check(u3.psql(`SELECT indisvalid FROM pg_index WHERE indexrelid = to_regclass('core.email_outbox_claim_idx')`) === 't', 'the first index (email_outbox_claim_idx) is already built: partial DDL of a transaction=false migration');
@@ -484,10 +492,15 @@ async function main() {
     const stop = u7.compose(['stop', 'rab-worker', 'rab-api'], { timeout: 300_000 });
     check(stop.code === 0, 'rab-api and rab-worker stopped (the race is between two one-off migrate children)');
     use(u7, IMG.next);
-    const pull = u7.compose(['pull', 'rab-api'], { timeout: 600_000 });
+    const pull = u7.compose(['pull', 'rab-api', 'db-setup'], { timeout: 600_000 });
     check(pull.code === 0, 'NEW pulled');
+    // PR #125: rab-api never receives a database URL; the documented one-off form (the production entrypoint with a
+    // command) builds the crewflow_owner URL from db-setup's target file, so NEW's db-setup runs once first.
+    const setup = u7.compose(['run', '--rm', '-T', '--no-deps', 'db-setup'], { timeout: 300_000 });
+    evidence('U7-db-setup.log', setup.out);
+    check(setup.code === 0, `NEW's db-setup (one-off): exit ${setup.code} (target and password files written; crewflow_owner unchanged)`);
     const holder = await u7.holdLock(`SELECT pg_advisory_lock(${L.MIGRATION_LOCK_KEY_SQL})`);
-    const child = () => u7.composeAsync(['run', '--rm', '-T', '--no-deps', '--entrypoint', 'node', 'rab-api', 'packages/rab-server/dist/database/typeorm/scripts/migrate/twenty/twenty-migrate.js']);
+    const child = () => u7.composeAsync(['run', '--rm', '-T', '--no-deps', 'rab-api', 'node', 'packages/rab-server/dist/database/typeorm/scripts/migrate/twenty/twenty-migrate.js']);
     const c1 = child();
     const c2 = child();
     try {

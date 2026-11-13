@@ -7021,6 +7021,22 @@ Phase X Part 2 finding XA-08 (`docs/plans/PHASE-X-STAGE0-PART2.md` §2.6). Front
   are not reported (owner text: the 500 branch only). Exception events carry the scrubbed request URL path (path
   segments are kept, as in P0-sentry). No user or organisation is attached to these events.
 
+## XP-09 Q2/Q3 — Worker auth cleanup steps are isolated and drain the backlog in bounded batches (branch fix/worker-auth-cleanup-loop, 2026-11-13, PR #131)
+- **Threat:** a failure in the refresh-token cleanup (e.g. the XP-09 23503) stopped the whole cycle, so the OAuth sign-in
+  state cleanup after it never ran and rows holding provider e-mails were kept past their retention; and at most one batch
+  of 1,000 rows per day meant a busy deployment never caught up.
+- **Control:** the two steps (`auth-tokens` = core.worker_cleanup_auth_tokens, `oauth-transaction-state`) run isolated: a
+  failing step is recorded with its step name and a SQLSTATE only (nothing else from the error), the other step still runs,
+  then each failure is logged with a fixed message and reported through the existing failure path (no error text, no
+  e-mails). Each step calls its function again until a batch comes back short; every call is its own autocommit
+  transaction; the whole run is capped at 20 batches or 60 s, with one batch reserved for every later step so the OAuth
+  cleanup always gets to run.
+- **Residual:** refresh and password-reset tokens are deleted by one SQL function and cannot be isolated from each other
+  without an SQL change. A run can outlast the 30 s Worker shutdown drain; only the in-flight batch rolls back.
+- **Tests:** `token-cleanup.job.spec.ts` (isolation, fixed-text reporting, loop and caps on a fake clock),
+  `token-cleanup-loop.integration.spec.ts` (5,000-row backlog drained in one run; a backlog above the cap stops at 20
+  batches and finishes next run; a locked token table fails that step with 55P03 while OAuth rows are still deleted).
+
 ## DB-SETUP — database setup the Twenty Helm way: one database setting, crewflow_owner created by db-setup, a random password in a file (branch deploy/db-setup-like-twenty; owner-approved design 2026-11-13)
 
 - **History.** 2026-11-12: one admin URL; a bootstrap child created `crewflow_owner` with a password derived from
@@ -7106,8 +7122,21 @@ Phase X Part 2 finding XA-08 (`docs/plans/PHASE-X-STAGE0-PART2.md` §2.6). Front
   then `fstat` on that descriptor must show a regular file of at most 4096 bytes owned by the reading uid with no
   group/other bit; an empty file, a symlink, a FIFO or a wrong owner/mode is refused (exit 64), never read as "missing".
   Writing loops until every byte is written, sets the mode on the descriptor (never a path-based chmod) and fsyncs the
-  file and the directory. A lost file is replaced only through the pending file below, created exclusively (a concurrent
-  db-setup that stored one first wins; this one fails, exit 70, and changes nothing). The password is random (32 bytes),
+  file and the directory. A lost file is replaced only through the pending file below. Runs never overlap on one volume
+  (security re-review F1, R1/R2): db-setup.sh first takes the KERNEL lock `flock -n` on fd 9 (`.db-setup.flock` in the
+  volume; a second run stops with exit 70 before it reads, deletes or writes any file; the kernel releases it however the
+  holder dies, so nothing is guessed about staleness), and the child also takes a lock directory (`.db-setup.lock`, mkdir);
+  under the kernel lock a leftover directory is taken over through a tombstone checked by inode, without it never. A
+  pending file is promoted only when it still holds this run's password (constant-time byte compare; otherwise exit 70 and
+  nothing is renamed). Before the lock, two runs on one volume could leave the apps' file on one password and the role on
+  another. The gates also refuse every other path to the volume from an added service (security re-review F2): a second
+  top-level name for it (`external` alias), a `driver_opts` bind, `pid`/`ipc`/`network_mode` sharing with db-setup,
+  rab-api or rab-worker (or any `container:`), a bind of the Docker root or its ancestors, and an added service running as
+  uid 0 or 1000. Re-check R3/R4/I4: uids are parsed as canonical decimals (`01000`, `00` refused); binds of Docker's
+  actual root (`docker info` DockerRootDir), its ancestors and descendants, of anything under `/run` or `/var/run` and of any
+  `*.sock` are refused; an added service must drop all capabilities, set no-new-privileges, use no host namespace, map no
+  device, add no group and run with no group 0; no volume of the deployed model has driver options or a non-local driver;
+  the password volume's Docker name is exactly `<project>_crewflow-db-target`. The password is random (32 bytes),
   not derived from anything, so an APP_SECRET leak gives no database login. The bundled db is reachable only from the app network; an external database
   only through the provider's allow-list; verify-full TLS.
 - **Residual.** Volume backups and snapshots contain the password: protect and encrypt them like the database. The file
@@ -7121,6 +7150,24 @@ Phase X Part 2 finding XA-08 (`docs/plans/PHASE-X-STAGE0-PART2.md` §2.6). Front
   committed) -> promoted; 28P01 (nothing committed) -> deleted, and the normal path runs (A4 again when `owner-password`
   is missing); any other error -> exit 70 with the pending file kept. The apps read only `owner-password`. The stale-file
   refusal (`passwordFileStale`, exit 64) is now reached only when the stored password really does not log in.
+- **Residuals after the third re-check (accepted, recorded).**
+  - The apps' start wait is bounded by a COUNT (60 derive attempts, 2 s apart), so its real worst case is
+    60 x (a cold `node` start + 2 s): about 2.5 min on an idle host, up to about 12 min if a cold start takes 10 s under load.
+    The derive step itself has no external timer (busybox `timeout` held the fd-4 pipe for its whole bound); a FIFO, a
+    symlink or a directory in place of a file is refused at once (O_NONBLOCK|O_NOFOLLOW + fstat), but a filesystem that
+    hangs below `open` is not bounded (optional I1, an in-process watchdog with async reads, not done).
+  - The derive step writes the URL only to an fd 4 its caller declared (`CREWFLOW_RUNTIME_URL_FD=4`, set only by
+    api-prestart.sh / worker-start.sh and the documented operator command) and that is a pipe or a socket.
+  - A run started WITHOUT db-setup.sh (development, the live harness) has no kernel lock; if it is killed it leaves
+    `.db-setup.lock`, which is never taken over automatically (the message says to remove it when no db-setup runs).
+  - `db` is in LOCAL_DATABASE_SERVICE_HOSTS (the bundled database's service name, as `devdb`/`postgres`/`pg`): non-production
+    processes and DB_TARGET=local|test commands treat an UNMARKED database on host `db` as local (no remote-unmarked
+    refusal). The identity marker does not protect it either: it is optional in production (BC-11) and its migration is not
+    approved for production, so a production bundled database is usually unmarked. What protects the production bundled
+    `db` is reachability: it publishes no port and sits only on the internal `crewflow-db` network (gate-enforced), where
+    only db-setup, rab-api and rab-worker are attached; a non-production process or command elsewhere cannot resolve or
+    reach that `db`. Only an override that attaches another service to `crewflow-db` could, and the gates refuse that (the
+    committed files' service list; in a deployed model an added service on `crewflow-db` is refused).
 - **One Crewflow deployment per PostgreSQL cluster when using an admin URL (security review L4, owner-approved).** Roles
   are cluster-wide: two deployments on one cluster share the one `crewflow_owner`, and an A4 reset by one (its password
   file lost) would change the password the other uses. Before an A4 reset the admin session runs one read-only SELECT

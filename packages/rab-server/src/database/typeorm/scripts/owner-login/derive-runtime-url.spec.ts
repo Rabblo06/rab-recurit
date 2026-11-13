@@ -197,9 +197,10 @@ describe('derive-runtime-url never connects and never reads APP_SECRET', () => {
 describe('derive-runtime-url as a process', () => {
   const SCRIPT = path.join(__dirname, 'derive-runtime-url.ts');
   const TSCONFIG = path.resolve(__dirname, '../../../../../tsconfig.app.json');
-  const run = (env: Record<string, string>, fd4: boolean) => {
+  // The callers (api-prestart.sh / worker-start.sh) state that they opened fd 4: CREWFLOW_RUNTIME_URL_FD=4.
+  const run = (env: Record<string, string>, fd4: boolean, marker = true) => {
     const result = spawnSync(process.execPath, ['-r', 'ts-node/register/transpile-only', SCRIPT], {
-      env: { PATH: process.env.PATH ?? '', SYSTEMROOT: process.env.SYSTEMROOT ?? '', TS_NODE_PROJECT: TSCONFIG, ...env },
+      env: { PATH: process.env.PATH ?? '', SYSTEMROOT: process.env.SYSTEMROOT ?? '', TS_NODE_PROJECT: TSCONFIG, ...(marker ? { CREWFLOW_RUNTIME_URL_FD: '4' } : {}), ...env },
       stdio: fd4 ? ['ignore', 'pipe', 'pipe', 'ignore', 'pipe'] : ['ignore', 'pipe', 'pipe'],
       encoding: 'utf8',
       timeout: 60_000,
@@ -224,6 +225,11 @@ describe('derive-runtime-url as a process', () => {
     expect(built.password === OWNER_PASSWORD).toBe(true);
     expect(ready.stdout).toBe(`${DERIVE_MESSAGES.fromTarget}\n`);
     expect(noSecret([ready.stdout, ready.stderr])).toBe(true);
+    // Re-check I2: fd 4 open, but the caller did not say it opened it -> the URL is never written (exit 64).
+    const noMarker = run({ CREWFLOW_DB_TARGET_FILE: file }, true, false);
+    expect(noMarker.status).toBe(64);
+    expect(noMarker.fd4).toBe('');
+    expect(noMarker.stderr).toContain('is not open');
     const noFd = run({ CREWFLOW_DB_TARGET_FILE: file }, false);
     expect(noFd.status).toBe(64);
     expect(noFd.stderr).toBe(`${DERIVE_MESSAGES.fdNotOpen}\n`);

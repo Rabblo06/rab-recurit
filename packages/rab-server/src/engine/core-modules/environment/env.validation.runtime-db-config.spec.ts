@@ -32,13 +32,11 @@ describe('env validation: owner-login database start-up settings', () => {
     );
   });
 
-  it('CREWFLOW_UPGRADE_INCOMPLETE (set only by api-prestart.sh after a verified exit 70) must be a migration name or unknown', () => {
-    for (const value of ['unknown', '1786730000000-Broken', 'StatementDispatchPointer1786721320000']) {
-      expect(validate({ ...base, CREWFLOW_UPGRADE_INCOMPLETE: value }).CREWFLOW_UPGRADE_INCOMPLETE).toBe(value);
+  it('CREWFLOW_UPGRADE_INCOMPLETE is retired (OWNER-DB-ULTIMATE Part B3): any value refuses; blank is unset', () => {
+    for (const value of ['unknown', 'StatementDispatchPointer1786721320000', 'a b']) {
+      expect(() => validate({ ...base, CREWFLOW_UPGRADE_INCOMPLETE: value })).toThrow(/CREWFLOW_UPGRADE_INCOMPLETE was retired \(OWNER-DB-ULTIMATE Part B3\)/);
     }
-    for (const value of ['a b', '<script>', 'x'.repeat(201), 'name;rm']) {
-      expect(() => validate({ ...base, CREWFLOW_UPGRADE_INCOMPLETE: value })).toThrow(/CREWFLOW_UPGRADE_INCOMPLETE must be a migration name/);
-    }
+    expect(() => validate({ ...base, CREWFLOW_UPGRADE_INCOMPLETE: '' })).not.toThrow();
   });
 
   it('refuses a value outside the allowed set, never echoing it', () => {
@@ -55,7 +53,8 @@ describe('env validation: owner-login database start-up settings', () => {
       } catch (error) {
         message = (error as Error).message;
       }
-      expect(message).toMatch(new RegExp(`${name} must be exactly`));
+      // Part B3: the two removed names are refused as removed (any value), the others for a value outside their set.
+      expect(message).toMatch(new RegExp(name.startsWith('CREWFLOW_UPGRADE_FAILURE') ? `${name} was removed \\(OWNER-DB-ULTIMATE Part B3\\)` : `${name} must be exactly`));
       expect(message).not.toContain('S3cret');
     }
   });

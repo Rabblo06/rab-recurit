@@ -22,8 +22,8 @@ Nothing here is a deployment file.
 |---|---|
 | `run-deploy-order-tests.cjs` | The driver. One PostgreSQL major per run. |
 | `docker-compose.deploy-order.yml` | The infrastructure overlay. Redis data lives on a tmpfs and the API publishes no host port. The app services and the bundled `db` (DB-SETUP) are not changed; the db's data and CA are the project's own named volumes. |
-| `docker-compose.deploy-order-owner.yml` | The pass-through scenarios: the db's first start runs the shipped `01-crewflow-owner.sql` (the hand-made crewflow_owner of an R254/R256 deployment), and the app services get that crewflow_owner URL as the `PG_DATABASE_URL` interpolation value (compose.env). |
-| `docker-compose.deploy-order-prev.yml` | Only while `CREWFLOW_IMAGE_TAG` is an image older than DB-SETUP: that release's own start-up (image ENTRYPOINT tini, rab-worker `node packages/rab-worker/dist/main.js` under `init: true`), because the old image has no `worker-start.sh`. |
+| `docker-compose.deploy-order-owner.yml` | The pass-through scenarios: the db's first start runs the shipped `01-crewflow-owner.sql` (the hand-made crewflow_owner of an R254/R256 deployment), and compose.env holds that crewflow_owner URL as `PG_DATABASE_URL`. PR #125: only db-setup reads it, checks it read-only and copies its password into the setup volume's password file; the password is never changed. |
+| `docker-compose.deploy-order-prev.yml` | Only while `CREWFLOW_IMAGE_TAG` is an image older than DB-SETUP: that release's own start-up (image ENTRYPOINT tini, rab-worker `node packages/rab-worker/dist/main.js` under `init: true`) and its `PG_DATABASE_URL: ${PG_DATABASE_URL:-}` on rab-api / rab-worker (PR #125 pins `""` there), because the old image has no `worker-start.sh` and reads its runtime login from that variable. PR #125 never changes an existing crewflow_owner's password, so a rollback uses the same crewflow_owner URL. |
 | `docker-compose.db-setup-logging.yml` | `run-db-setup-tests.cjs` only: the db's command plus worst-case server logging (`log_statement=all`, `log_connections=on`, user and application_name in every line). |
 | `docker-compose.deploy-order-t4.yml` | For T4 only: a shorter API health-check window. The Worker's `depends_on` is unchanged. |
 
@@ -96,32 +96,52 @@ DOT_PG_IMAGE=postgres@sha256:<Debian postgres 16, 17 or 18> DOT_REDIS_IMAGE=redi
 
 Projects are `<prefix>-pg<major>-u1` … `-u7` (`DOT_PROJECT_PREFIX`, default `dou`; give each agent or parallel run its own), run one after another and taken `down` after each case (U4 stays up for U5 when both run). The output directory must be outside the repository.
 
-## Database setup like Twenty (DB-SETUP, owner's tests)
+## Database setup the Twenty Helm way (PR #125, owner's A6 tests)
 
-`run-db-setup-tests.cjs` proves the owner's DB-SETUP test list (2026-11-12; DB-SETUP-PLAN.md §10) on real containers, one
-PostgreSQL major per run (16, 17, 18), with the production `docker-compose.image.yml` unchanged and the documented command.
+`run-db-setup-tests.cjs` proves the owner's A6 test list (OWNER-DB-FINAL.md Part A; DB-SETUP-HELM-PLAN.md) on real
+containers, one PostgreSQL major per run (16, 17, 18), with the production `docker-compose.image.yml` unchanged and the
+documented command. `PG_DATABASE_URL` reaches `db-setup` only. crewflow_owner's password lives in a file on the setup volume
+(0400, 1000:1000): random for the bundled db or an admin URL, the URL's own password for a crewflow_owner URL. The apps read it
+read-only together with the credential-free `target.json`. The harness reads the file into memory only (`Project.readPasswordFile()`,
+redacted, never printed); `DOT_OWNER_PASSWORD_FILE` overrides its path.
 
-| Case | Owner's test | What is proven |
+| Case | Block | What is proven |
 |---|---|---|
-| S1 | 1 | Bundled db, fresh, with ONLY `PG_DATABASE_PASSWORD` (compose.env) + `APP_SECRET` (runtime.env) + dummy non-database settings: the one-shot db-setup's bootstrap child creates crewflow_owner (db-setup exits 0; rab-api runs no bootstrap child; the target file rab-api reads holds no login, password or APP_SECRET) with exactly the 01 attributes and grant, 256 migrations as crewflow_owner, API and Worker healthy, every session crewflow_owner over verify-full TLS. |
-| S6 | 6 | `/proc/<pid>/environ` of EVERY process of rab-api and rab-worker (PID 1 included): no admin password, no `PG_DATABASE_PASSWORD`, `PG_DATABASE_URL` = crewflow_owner. PR #125 option A: the same for a `docker exec` process (the environment a health check gets), for the health-check processes caught while they run (a 40 s in-container scan), and for both container definitions (`docker inspect`: `PG_DATABASE_URL` empty, no credential). `pg_stat_activity`: every session crewflow_owner. The db log (`log_connections`): no admin connection but db-setup's bootstrap child (and the db's own `pg_isready`). |
-| S2 | 2 | `docker compose restart` (db-setup runs again), then `down` + the documented command: same role oid, byte-identical verifier (sha256 compared), same ACL, db-setup "ready (unchanged)", no new certificate. |
-| S5 | 5 | APP_SECRET rotation: db-setup "ready (password set)" once, the new derived password logs in and the old does not, the recreated Worker connects; an API restart changes nothing and the next `up` is "unchanged". |
-| S10A | 10 | The admin URL handed to rab-api / rab-worker anyway (`run -e PG_DATABASE_URL`): the production entrypoints refuse (derive `--owner-only`, 64), and a runtime process started without them (Worker main, API main, migrate child) refuses before connecting; none opens an admin connection. |
-| S8 | 8 | No log (db with `log_statement=all`, API, Worker, Redis, compose output) holds the admin password, an APP_SECRET, a derived password, a credentialed URL or a SCRAM verifier. |
-| S9 | 9 | Two db-setup runs at once on a fresh db: one bootstrap creates the role, the other reports it ready. Then two API starts at once (the migration lock held until both wait): one migrate child applies 256, the other finds CURRENT, no duplicate ledger rows. |
-| S4 | 4 | An existing crewflow_owner with SUPERUSER, then BYPASSRLS: db-setup exits 64 with the fixed message, the role untouched, nothing created. |
-| S10B | 10 | The same roles through the pass-through URL: db-setup passes it through, then the API's runtime guards refuse them, nothing created. |
-| S3 | 3 | An external non-superuser admin: no CREATEROLE -> refused; CREATEROLE but cannot grant on the database -> refused; CREATEROLE + owns the database -> works (fresh, restart, rotation); a second admin without ADMIN OPTION -> refused when a reset is needed. |
-| S8X | 8 | The same log scan for the external admin; a verifier may appear only in the db log (a non-superuser cannot turn statement logging off: the documented residual). |
-| S7 | 7 | An R256 database (R256's API + Worker, seeded): NEW with the unchanged crewflow_owner URL (pass-through, role untouched), then with the admin URL (password reset once, then unchanged); data, money, FKs, tenant ownership and RLS identical. Also records that R256 under THIS release's compose files alone cannot start (no `db-setup.sh` in its image: db-setup fails and rab-api never starts). |
-| S10C | 10 | PostgreSQL 15 as the db: "PostgreSQL 16 or later is required.", exit 64, nothing created. |
+| S1 | a | Bundled db, fresh, with ONLY `PG_DATABASE_PASSWORD` + `APP_SECRET`: crewflow_owner created (01 attributes and grant), migrations applied, API and Worker healthy. The password file is random (>= 32 characters), 0400 1000:1000, logs in, read-only in rab-api / rab-worker and read-write only in db-setup. It is absent from every env file, container definition and the rendered compose config, and from the image (`docker image inspect`, `docker history`, the image filesystem). It is not APP_SECRET. The target file is credential-free. |
+| S6 | a | No admin credential in any rab-api / rab-worker process (PID 1 included), `docker exec` process, health-check process caught while running, or container definition; `PG_DATABASE_URL` present and empty there. Every session is crewflow_owner. The only admin connection is db-setup's. |
+| S2 | a | `docker compose restart`, then `down` + up: the same password file (sha256 compared); ZERO database changes (role, verifier, memberships, ACL, role/database settings, owner, role count snapshots identical); db-setup "unchanged". |
+| S5 | a | APP_SECRET change: the apps are recreated and connect; the database snapshot and the file are unchanged; db-setup's definition holds no APP_SECRET. |
+| X1 | a | Red control (security review L5): the old option-2 expectation, crewflow_owner password = hex(HKDF(APP_SECRET)), FAILS for both APP_SECRETs used (does not log in, is not the stored password). The harness has no HKDF helper any more. |
+| F3 | a | An EMPTY password file: db-setup 64, nothing changed, no `.next` file; the documented recovery (stop the apps, the env-free removal, `up -d`) resets and the apps start. |
+| F1 | a | The file present but its password no longer logs in: 64 with "delete the password file…", nothing changed. Then the file deleted + the admin URL: reset (a Crewflow addition), a new random password, the old ones refused, the apps recover after a restart. |
+| R1 | a | The documented "print the crewflow_owner URL" command (OWNER-LOGIN-DEPLOYMENT.md §3.6 / DB-SETUP-LEAD.md operator command 1: `docker volume inspect` first, then `docker run … --entrypoint sh <IMAGE> -c 'CREWFLOW_RUNTIME_URL_FD=4 node …/derive-runtime-url.js 4>&1 1>&2'`, no `-t`; plus `--name`): exit 0, one stdout line, a crewflow_owner URL for `db:5432/crewflow` whose password is the file's random one and logs in; stderr holds no URL; the container is gone (`--rm`, `--log-driver none`); no container log holds the password. T3 uses the same command's output for its rollback to R254. |
+| C1 | a | The documented deliberate password change (`$P stop rab-worker rab-api`; `docker run --rm --network none --log-driver none --user 1000:1000 -v <project>_crewflow-db-target:/v <IMAGE> rm -f /v/owner-password`; `$P up -d`): reset (A4), a new password works, the old fails, the apps start healthy without a manual restart (timed). |
+| C2 | a | The same without stopping the apps: `up -d` does not recreate them, so they keep the old password (28P01 on new connections, counted), until `$P up -d --force-recreate rab-api rab-worker` (timed). |
+| S10A | a | The admin URL forced into the apps: the entrypoints (64) and every runtime process refuse before connecting. |
+| S8 | a | No log holds a password (admin, crewflow_owner, the hand-changed one), an APP_SECRET, a credentialed URL or a verifier. |
+| S11 | dep | `depends_on` ignored: rab-api / rab-worker started before db-setup on a fresh db wait without connecting, then become healthy once db-setup has run. |
+| S9 | race | Two db-setup at once: exactly one creates crewflow_owner; the other succeeds or refuses with the password-file race message having changed nothing; afterwards the password file logs in (file and role agree) and a third db-setup is "unchanged". Then two API starts at once: one migrate child applies, the other finds CURRENT. |
+| S4 | ext | An existing SUPERUSER / BYPASSRLS crewflow_owner on the admin path: 64, untouched, nothing created. |
+| S3 | ext | An external non-superuser admin URL: no CREATEROLE / cannot grant -> 64. CREATEROLE + owns the database -> created; restart and APP_SECRET change unchanged; lost file -> reset. A second admin without ADMIN OPTION + lost file -> 64. The admin URL is absent from every app process, `docker exec` process and definition. |
+| M1 | ext | An admin URL naming a missing database: 64 with a clear message, no database created. |
+| S8X | ext | The log scan for the external admin (a verifier only as the documented non-superuser residual in the db log). |
+| SP | ref | A database-wide search_path default: 64, nothing created. |
+| H1a / H1b | ref | crewflow_owner owns the database (directly / through an inherited role) and plants an operator + a database search_path: 64, ZERO planted calls during the setup; a sanity call by an unpinned superuser session proves the plant is live. |
+| N2 | ref | A SET-only membership of the owning role: 64, nothing written. |
+| N1 | ref | A transition-shaped database: the admin URL -> 64; the crewflow_owner URL -> exit 0, nothing written, the file holds that URL's password (runbook §5.4). |
+| P1 | pt | An existing crewflow_owner URL: used unchanged, with zero writes: every statement of the setup sessions is read-only in the db log (log_statement=all), and the role snapshot is identical. The OLD password still logs in and the file holds it. API and Worker are healthy. The same holds on the next start. |
+| P5 | pt | A non-empty `PG_DATABASE_URL` forced into the apps (a working crewflow_owner URL, the admin URL, junk): 64, no connection. |
+| S10B | pt | crewflow_owner made BYPASSRLS / SUPERUSER after db-setup: the runtime guards refuse it. |
+| F2 | pt | File lost, no admin URL: a valid crewflow_owner URL rewrites the file with no write. A crewflow_owner URL whose password no longer logs in -> 64 and no file; an app start then waits and exits 75 without connecting. |
+| P3 | ptx | The crewflow_owner URL of a SUPERUSER / BYPASSRLS crewflow_owner: 64, untouched, the hand-made password still logs in, no extension / object / core schema, the apps never start. |
+| S7 | r256 | An R256 database (seeded): NEW with its crewflow_owner URL (role and verifier exactly as R256 left them, the file holds the hand-made password), then with the bundled admin URL (unchanged); data, money, FKs, tenant ownership and RLS identical. R256 under this release's compose files alone cannot start (observed). |
+| S10C | pg15 | PostgreSQL 15: 64, nothing created. |
 
 ```bash
 DOT_REPOSITORY=127.0.0.1:5055/adolphus DOT_NEW_DIGEST=sha256:<new> DOT_R256_DIGEST=sha256:<0e0a6edd re-pushed> \
 DOT_PG_IMAGE=postgres@sha256:<Debian 16|17|18> DOT_PG15_IMAGE=postgres@sha256:<Debian 15> DOT_REDIS_IMAGE=redis@sha256:<7> \
-[DOT_PROJECT_PREFIX=dbs] \
-  node packages/rab-docker/deploy-order-tests/run-db-setup-tests.cjs <16|17|18> <out-dir> [--blocks=a,race,ext,r256,pg15]
+[DOT_PROJECT_PREFIX=dbs] [DOT_OWNER_PASSWORD_FILE=/run/crewflow/db-target/owner-password] \
+  node packages/rab-docker/deploy-order-tests/run-db-setup-tests.cjs <16|17|18> <out-dir> [--blocks=a,dep,race,ext,ref,pt,ptx,r256,pg15] [--only=S1,P1,...]
 ```
 
-Projects are `<prefix>-pg<major>-a`, `-race`, `-ext`, `-r256`, `-pg15`, each taken `down --volumes` after its block.
+Projects are `<prefix>-pg<major>-a`, `-dep`, `-race`, `-ext`, `-ref`, `-pt`, `-ptx`, `-r256`, `-pg15`, each taken `down --volumes` after its block (S1 also runs one `<prefix>-pg<major>-a-imagecheck` container, no network, removed on exit).

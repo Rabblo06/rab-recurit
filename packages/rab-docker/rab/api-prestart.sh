@@ -85,6 +85,9 @@ crewflow_runtime_db_config() {
   if [ -n "${CREWFLOW_UPGRADE_FAILURE_POLICY:-}" ]; then
     refuse "CREWFLOW_UPGRADE_FAILURE_POLICY was removed (OWNER-DB-ULTIMATE Part B3): a failed migration always refuses to start and is retried on the next start; only a failed upgrade command serves, with upgrade:\"failed\" on /healthz. Remove it from the environment. Refusing to start."
   fi
+  if [ -n "${CREWFLOW_UPGRADE_INCOMPLETE:-}" ]; then
+    refuse "CREWFLOW_UPGRADE_INCOMPLETE was retired (OWNER-DB-ULTIMATE Part B3): nothing sets it, and no gate accepts a pending migration any more. Remove it from the environment. Refusing to start."
+  fi
   if [ "${NODE_ENV:-}" != test ]; then
     for seam in CREWFLOW_MIGRATION_TEST_STOP_BEFORE CREWFLOW_MIGRATION_TEST_FAIL_AT CREWFLOW_TEST_DEFER_SERVER_PROVISIONING; do
       eval "seam_value=\${$seam:-}"
@@ -118,12 +121,6 @@ crewflow_runtime_db_config() {
 # END owner-login runtime-db-config
 crewflow_runtime_db_config
 
-# CREWFLOW_UPGRADE_INCOMPLETE (retired with the C3 continue path, OWNER-DB-ULTIMATE Part B3): nothing sets it any more. A
-# value that reached the container from outside could still relax the API's pending-migration gate (the API boot gate reads
-# it), so it is refused, never silently passed on.
-if [ -n "${CREWFLOW_UPGRADE_INCOMPLETE:-}" ]; then
-  refuse "CREWFLOW_UPGRADE_INCOMPLETE must never be set on the api service (retired: a failed migration always refuses to start, OWNER-DB-ULTIMATE Part B3). Remove it."
-fi
 # O3 C2: DISABLE_CRON_JOBS_REGISTRATION (Twenty's switch; exactly true or false, unset = false) and the scheduler mode the
 # Worker will run (WORKER_SCHEDULER unset = bullmq in production, interval elsewhere — env.validation.ts's rule).
 case "${DISABLE_CRON_JOBS_REGISTRATION:-}" in
@@ -258,8 +255,11 @@ isolation_report
 #   - CREWFLOW_DB_TARGET_FILE=<that file> -> the URL from the target and the password file. A file that is not there yet
 #     (derive exit 75) is waited for, 2 s apart, at most 120 s (60 attempts: bounded by a COUNT, never by the clock, so a
 #     clock step cannot stretch or end the wait), with a fixed message, because a platform may not honour depends_on:
-#     condition: service_completed_successfully (OpenShip: NOT VERIFIED); then exit 75. There is no other path. Each derive
-#     run has its own bound (`timeout 10`): a derive that hangs (a FIFO, a stuck volume) ends as exit 70, never a hung start.
+#     condition: service_completed_successfully (OpenShip: NOT VERIFIED); then exit 75. There is no other path. The derive
+#     run is NOT wrapped in busybox `timeout`: its watcher process inherits the command-substitution pipe (fd 4) and keeps it
+#     open until the bound expires, so every start paid the full bound (measured: 20 s with `timeout 20` for a step that takes
+#     0 s), and a slow cold start was killed. A hang is prevented inside the step instead: both files are opened
+#     O_NONBLOCK|O_NOFOLLOW and fstat-checked, so a FIFO, a symlink or a directory is refused at once (exit 64).
 # Then PG_DATABASE_URL = the runtime URL; PG_DATABASE_PASSWORD and CREWFLOW_DB_TARGET_FILE are unset.
 # TLS (D1 a): when the runtime URL's host is exactly `db` and PG_SSL_CA_CERT_PATH is unset (or blank), it is set to the
 # bundled db's own CA (mounted read-only). The block below is identical in worker-start.sh and db-setup.sh
@@ -291,14 +291,13 @@ if [ -n "${PG_DATABASE_URL:-}" ]; then
 fi
 unset PG_DATABASE_URL
 export CREWFLOW_DB_TARGET_FILE="$DB_TARGET_FILE"
-DERIVE_TIMEOUT_SECONDS=10
 DB_SETUP_ATTEMPTS=$(( (DB_SETUP_WAIT_SECONDS + 1) / 2 ))
 if [ "$DB_SETUP_ATTEMPTS" -lt 1 ]; then DB_SETUP_ATTEMPTS=1; fi
 ATTEMPT=0
 while :; do
   ATTEMPT=$((ATTEMPT + 1))
   STATUS=0
-  RUNTIME_URL="$(timeout "$DERIVE_TIMEOUT_SECONDS" node "$DERIVE_RUNTIME_URL" 4>&1 1>&2)" || STATUS=$?
+  RUNTIME_URL="$(CREWFLOW_RUNTIME_URL_FD=4 node "$DERIVE_RUNTIME_URL" 4>&1 1>&2)" || STATUS=$?
   if [ "$STATUS" -ne 75 ]; then break; fi
   RUNTIME_URL=""
   if [ "$ATTEMPT" -ge "$DB_SETUP_ATTEMPTS" ]; then
@@ -307,12 +306,6 @@ while :; do
   echo "api-prestart: waiting for db-setup: the database target file is not there yet (attempt ${ATTEMPT} of ${DB_SETUP_ATTEMPTS}, 2 s apart)"
   run_step sleep 2 || true
 done
-case "$STATUS" in
-  124 | 137 | 143)
-    RUNTIME_URL=""
-    fail_after_delay 70 "the derive step did not finish within ${DERIVE_TIMEOUT_SECONDS}s (a stuck db-setup volume or a non-regular file?)"
-    ;;
-esac
 if [ "$STATUS" -ne 0 ]; then
   RUNTIME_URL=""
   fail_after_delay "$STATUS" "could not build the crewflow_owner connection (see the derive-runtime-url line above)"

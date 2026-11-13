@@ -27,8 +27,9 @@ export const OWNER_BOOTSTRAP_LOCK_KEY = '7165901520526864244';
 export const OWNER_BOOTSTRAP_Q0_SESSION = `SET search_path TO pg_catalog, pg_temp; SET log_parameter_max_length_on_error = 0;`;
 
 /**
- * Startup options (libpq `options`) appended to EVERY bootstrap connection (the admin session, the crewflow_owner probe
- * and post-commit login, the pending-password probe, and the owner-URL mode's crewflow_owner session). They win over
+ * Startup options (libpq `options`) appended to the read-write bootstrap connections: the admin session, the crewflow_owner
+ * probe and post-commit login, and the pending-password probe (the owner-URL mode's crewflow_owner session gets
+ * OWNER_URL_SESSION_STARTUP_OPTIONS below: the same pin, read-only). They win over
  * ALTER ROLE / ALTER DATABASE ... SET defaults, so a planted search_path or a forced read-only default never applies to
  * these sessions. Fixed text; a spec asserts every driver config carries it.
  */

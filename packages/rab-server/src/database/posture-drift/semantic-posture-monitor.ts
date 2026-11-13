@@ -47,14 +47,6 @@ export async function assertSemanticPostureAtBoot(
     production: boolean;
     label: string;
     golden?: Readonly<Record<number, readonly string[]>>;
-    /**
-     * C3 (owner decision 2026-11-05): the first migration not applied when gate 7 applied its relaxation (the API with the
-     * named failed step first, or the Worker on an in-order pending tail). The golden describes the NEW release, so a database whose upgrade failed always differs
-     * from it: the comparison is skipped with a WARNING. The posture is still read and returned as the monitor's baseline,
-     * so any later policy / function / trigger / RLS change still turns readiness off. Everything else is unchanged
-     * (no golden for the major in production still refuses).
-     */
-    upgradeIncomplete?: string | null;
   },
 ): Promise<BootSemanticResult> {
   const posture = await readSemanticPosture(query);
@@ -63,15 +55,6 @@ export async function assertSemanticPostureAtBoot(
     const message = `no reviewed semantic posture golden for PostgreSQL ${posture.serverMajor} (supported: ${Object.keys(input.golden ?? SEMANTIC_GOLDEN_BY_MAJOR).join(', ') || 'none'})`;
     if (input.production) throw new SemanticPostureError(`the ${input.label} refuses to start: ${message}. Generate and review it before serving production.`);
     return { posture, warnings: [`semantic posture NOT verified at boot: ${message}`] };
-  }
-  if (input.upgradeIncomplete) {
-    return {
-      posture,
-      warnings: [
-        `semantic posture NOT compared with the golden: UPGRADE INCOMPLETE (owner decision C3, 2026-11-05) — the database is behind this release ` +
-          `(first migration not applied: ${input.upgradeIncomplete}); the boot snapshot is the runtime baseline (later drift still turns readiness off).`,
-      ],
-    };
   }
   const drifts = semanticDriftFromGolden(posture, golden);
   const warnings: string[] = [];

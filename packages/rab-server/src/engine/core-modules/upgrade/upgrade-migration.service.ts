@@ -133,12 +133,19 @@ export async function markAsInstanceInitial(query: Query, input: { name: string;
  * Twenty :139-172 + `workspace.service.ts:813`: a new workspace's is_initial row, INSIDE the caller's workspace-creation
  * transaction (tenant bound). Sets `rab.upgrade_scope = 'workspace_init'` for the statement pair and clears it again, so the
  * rest of the caller's transaction runs without it. Idempotent (an existing initial row with that name is left alone).
+ *
+ * The policy's organisation check reads core.manager_workspace under that table's own tenant RLS (visible: the workspace the
+ * transaction is bound to, or one the user owns). The creating user is not always the owner (an administrator may create a
+ * workspace for a manager), so `rab.workspace_id` is bound to the NEW workspace for the two statements and restored after,
+ * exactly as the creating transaction already binds it for the manager_profile write.
  */
 export async function markAsWorkspaceInitial(
   query: Query,
   input: { workspaceId: string; name: string; status: UpgradeMigrationStatus; executedByVersion: string },
 ): Promise<boolean> {
+  const [prior] = (await query(`SELECT pg_catalog.current_setting('rab.workspace_id', true) AS v`)) as Array<{ v: string | null }>;
   await query(SET_SCOPE, ['workspace_init']);
+  await query(`SELECT pg_catalog.set_config('rab.workspace_id', $1, true)`, [input.workspaceId]);
   try {
     const existing = (await query(
       `SELECT 1 FROM core.upgrade_migration m WHERE m.name = $1 AND m.attempt = 1 AND m.workspace_id = $2::uuid AND m.is_initial LIMIT 1`,
@@ -153,6 +160,7 @@ export async function markAsWorkspaceInitial(
     return true;
   } finally {
     await query(SET_SCOPE, ['']);
+    await query(`SELECT pg_catalog.set_config('rab.workspace_id', $1, true)`, [prior?.v ?? '']);
   }
 }
 

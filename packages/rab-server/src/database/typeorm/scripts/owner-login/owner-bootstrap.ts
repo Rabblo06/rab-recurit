@@ -49,7 +49,7 @@ import {
   planDbSetup,
   scramSha256Verifier,
 } from '../../../owner-login/owner-credential';
-import { type OwnerPasswordRead, OwnerPasswordFileError } from '../../../owner-login/owner-password-file';
+import { type OwnerPasswordRead, OwnerPasswordFileError, OwnerPasswordMismatchError } from '../../../owner-login/owner-password-file';
 import { pgClientConfig, PgConfigError, PgDriverConfig, readPrimaryDatabaseUrl, resolvePgEnvironment, ResolvedPgEnvironment, sameTarget } from '../../../postgres';
 import {
   OWNER_BOOTSTRAP_BEGIN,
@@ -112,6 +112,9 @@ export const OWNER_BOOTSTRAP_MESSAGES = Object.freeze({
   pendingProbeFailed: (sqlstateClass: string) =>
     `Checking a pending new crewflow_owner password failed (SQLSTATE class ${sqlstateClass}); it is kept. Giving up (the restart policy retries).`,
   pendingRemoveFailed: (code: string) => `Deleting a pending crewflow_owner password file failed (${code}); nothing was changed in the database.`,
+  pendingNotThisRun:
+    "crewflow_owner now uses this run's new password, but the pending password file no longer holds it (another db-setup changed it); it was not made the stored password. Start again (the next start settles the pending file).",
+  testSeamOutsideTest: 'CREWFLOW_TEST_DB_SETUP_PERSIST_DELAY_MS is a test seam: it is allowed only with NODE_ENV=test (0-60000). Refusing.',
   passwordPromoteFailed: (code: string) =>
     `crewflow_owner now uses the new password, but making it the stored password failed (${code}); the next start completes it.`,
   pgTooOld: 'PostgreSQL 16 or later is required.',
@@ -432,6 +435,8 @@ export interface OwnerBootstrapIo {
   persistPassword?(): void;
   /** Set by attempt() once persistPassword succeeded (race retries do not store it again). */
   passwordPersisted?: boolean;
+  /** Test seam (NODE_ENV=test only): awaited right after persistPassword, before the transaction (the live race test). */
+  afterPersist?(): Promise<void>;
   /**
    * `new` only: renames the pending file over `owner-password` (security review L1). Called only after the COMMIT and a
    * successful post-commit login with the new password. A throw is exit 70; the next start promotes it.
@@ -468,6 +473,14 @@ async function connectAdminWithRetry(io: OwnerBootstrapIo, windowMs: number): Pr
 async function readFacts(session: SqlSession): Promise<OwnerFacts> {
   const { rows } = await session.query(OWNER_BOOTSTRAP_Q2_FACTS);
   return factsFromRow(rows[0]);
+}
+
+/** A failed promotion: the pending file is not this run's (F1), or the rename failed. Exit 70 either way. */
+function promoteFailure(error: unknown): OwnerBootstrapFailure {
+  if (error instanceof OwnerPasswordMismatchError || error instanceof OwnerPasswordFileError) {
+    return new OwnerBootstrapFailure(OWNER_BOOTSTRAP_MESSAGES.pendingNotThisRun, 'MISMATCH');
+  }
+  return new OwnerBootstrapFailure(OWNER_BOOTSTRAP_MESSAGES.passwordPromoteFailed(errorCode(error)), errorCode(error));
 }
 
 /**
@@ -510,6 +523,7 @@ async function attempt(session: SqlSession, io: OwnerBootstrapIo): Promise<Owner
     try {
       io.persistPassword();
       io.passwordPersisted = true;
+      if (io.afterPersist) await io.afterPersist();
     } catch (error) {
       if (errorCode(error) === 'EEXIST') throw new OwnerBootstrapFailure(OWNER_BOOTSTRAP_MESSAGES.passwordFileRace, 'EEXIST');
       throw new OwnerBootstrapFailure(OWNER_BOOTSTRAP_MESSAGES.passwordFileWriteFailed(errorCode(error)), errorCode(error));
@@ -551,7 +565,7 @@ async function attempt(session: SqlSession, io: OwnerBootstrapIo): Promise<Owner
     try {
       io.promotePassword();
     } catch (error) {
-      throw new OwnerBootstrapFailure(OWNER_BOOTSTRAP_MESSAGES.passwordPromoteFailed(errorCode(error)), errorCode(error));
+      throw promoteFailure(error);
     }
   }
   return {
@@ -683,7 +697,11 @@ function openClient(config: PgDriverConfig): Client {
   return new Client(config);
 }
 
-/** H1: every bootstrap connection carries the fixed session pin (search_path, read-write) as startup options. */
+/**
+ * H1: every bootstrap connection carries a fixed session pin as startup options: search_path=pg_catalog,pg_temp always;
+ * read-write for the admin and probe sessions (BOOTSTRAP_SESSION_STARTUP_OPTIONS), read-only for the owner-URL mode's
+ * crewflow_owner session (OWNER_URL_SESSION_STARTUP_OPTIONS, I1).
+ */
 function pinned(config: PgDriverConfig, startupOptions: string = BOOTSTRAP_SESSION_STARTUP_OPTIONS): PgDriverConfig {
   const options = [config.options, startupOptions].filter((o) => typeof o === 'string' && o !== '').join(' ');
   return { ...config, options };
@@ -727,8 +745,8 @@ export function bootstrapDriverConfigs(
   return { admin, ownerUrl, probe };
 }
 
-/** One connected session (one attempt; the callers retry). */
-async function connectSession(config: PgDriverConfig): Promise<SqlSession> {
+/** One connected, pinned session on an explicit bootstrap config (one attempt; the callers retry). Exported for the live harness. */
+export async function connectSession(config: PgDriverConfig): Promise<SqlSession> {
   const client = openClient(config);
   client.on('error', () => undefined); // a dropped idle connection must not crash the process with its message
   try {
@@ -751,8 +769,11 @@ export interface OwnerPasswordFiles {
   writeMain(password: string): void;
   /** Creates `owner-password.next` exclusively (EEXIST when it exists). */
   writeNextExclusive(password: string): void;
-  /** Renames `owner-password.next` over `owner-password`. */
-  promoteNext(): void;
+  /**
+   * Renames `owner-password.next` over `owner-password`, only when it holds exactly `expected` (strict read, constant-time
+   * compare; F1). Otherwise OwnerPasswordMismatchError / OwnerPasswordFileError and nothing is renamed.
+   */
+  promoteNext(expected: string): void;
   /** Deletes `owner-password.next` (no error when it is gone). */
   removeNext(): void;
 }
@@ -806,9 +827,9 @@ export async function resolveStoredPassword(
     }
     if (probe.ok || probe.code === '42501') {
       try {
-        files.promoteNext();
+        files.promoteNext(pending.password);
       } catch (error) {
-        throw new OwnerBootstrapFailure(OWNER_BOOTSTRAP_MESSAGES.passwordPromoteFailed(errorCode(error)), errorCode(error));
+        throw promoteFailure(error);
       }
       io.log(OWNER_BOOTSTRAP_MESSAGES.pendingPromoted);
       return storedFromFile(pending.password);
@@ -892,6 +913,14 @@ export async function runOwnerBootstrap(env: Record<string, string | undefined>,
 
     const databaseUrl = primary?.value as string;
     const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+    // Test seam (the live same-volume race test): a pause between storing the pending password and BEGIN. NODE_ENV=test only.
+    let afterPersist: (() => Promise<void>) | undefined;
+    const seam = env.CREWFLOW_TEST_DB_SETUP_PERSIST_DELAY_MS;
+    if (seam !== undefined && seam !== '') {
+      if (env.NODE_ENV !== 'test' || !/^\d{1,5}$/.test(seam) || Number(seam) > 60_000) throw new OwnerBootstrapRefusal(OWNER_BOOTSTRAP_MESSAGES.testSeamOutsideTest);
+      const ms = Number(seam);
+      afterPersist = () => sleep(ms);
+    }
     const now = () => Date.now();
     const retryWindowMs = options.retryWindowMs ?? ADMIN_CONNECT_RETRY_WINDOW_MS;
 
@@ -956,7 +985,8 @@ export async function runOwnerBootstrap(env: Record<string, string | undefined>,
         verifier: () => scramSha256Verifier(ownerPassword),
         passwordSource: source,
         persistPassword: () => files.writeNextExclusive(ownerPassword),
-        promotePassword: () => files.promoteNext(),
+        promotePassword: () => files.promoteNext(ownerPassword),
+        afterPersist,
         log,
         sleep,
         now,

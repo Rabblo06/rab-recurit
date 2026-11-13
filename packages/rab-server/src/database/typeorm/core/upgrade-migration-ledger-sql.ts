@@ -163,7 +163,8 @@ SELECT
   (SELECT pg_catalog.string_agg(k.conname || ':' || k.contype::text
             || CASE WHEN k.contype = 'f' THEN ':' || k.confrelid::regclass::text || ':' || k.confdeltype::text ELSE '' END,
           ',' ORDER BY k.conname)
-     FROM t JOIN pg_catalog.pg_constraint k ON k.conrelid = t.oid) AS constraints,
+     FROM t JOIN pg_catalog.pg_constraint k ON k.conrelid = t.oid
+    WHERE k.contype <> 'n') AS constraints,
   (SELECT pg_catalog.string_agg(i.relname || ':' || x.indisunique::text, ',' ORDER BY i.relname)
      FROM t JOIN pg_catalog.pg_index x ON x.indrelid = t.oid JOIN pg_catalog.pg_class i ON i.oid = x.indexrelid) AS indexes,
   (SELECT pg_catalog.string_agg(x.v, ',' ORDER BY x.v) FROM (

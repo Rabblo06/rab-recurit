@@ -623,3 +623,79 @@ test('DENIAL security review L3: the deployed model refuses the same paths (an o
     [(v) => { v.services['rab-redis'].user = '1000:1000'; }, /rab-redis: user is "1000:1000" in the deployed model, expected 999:<gid>/],
   ]) assertRefused(deployed(mutate), pattern);
 });
+
+// Security re-review F2: the deployed model cannot reach the password volume through an added service.
+test('DENIAL security review F2: volume aliases, driver_opts binds, namespace sharing, Docker-root ancestor binds, extra services as uid 0/1000', { skip }, () => {
+  // A fully hardened added service (R4), so each fixture below tests exactly one route.
+  const extra = (v, s) => {
+    v.services.backup = { image: v.services['rab-api'].image, user: '2000:2000', cap_drop: ['ALL'], security_opt: ['no-new-privileges:true'], ...s };
+  };
+  for (const [mutate, pattern] of [
+    [(v) => { v.volumes.bk = { external: true, name: 'rab-production_crewflow-db-target' }; extra(v, { volumes: [{ type: 'volume', source: 'bk', target: '/x', read_only: true }] }); }, /volume bk: names db-setup's password volume in the deployed model/],
+    [(v) => { v.volumes.bk = { name: 'other', driver_opts: { type: 'none', o: 'bind', device: '/var/lib/docker/volumes' } }; extra(v, { volumes: [{ type: 'volume', source: 'bk', target: '/x' }] }); }, /volume bk: is a host bind through driver_opts in the deployed model/],
+    [(v) => { v.volumes['crewflow-db-target'] = { ...v.volumes['crewflow-db-target'], external: true }; }, /volume crewflow-db-target: must be a plain local volume in the deployed model/],
+    [(v) => { extra(v, { pid: 'service:rab-api' }); }, /backup: pid shares the namespace of rab-api in the deployed model/],
+    [(v) => { extra(v, { ipc: 'service:db-setup' }); }, /backup: ipc shares the namespace of db-setup in the deployed model/],
+    [(v) => { extra(v, { network_mode: 'service:rab-worker' }); }, /backup: network_mode shares the namespace of rab-worker in the deployed model/],
+    [(v) => { extra(v, { pid: 'container:rab-production-rab-api-1' }); }, /backup: pid joins another container's namespace in the deployed model/],
+    [(v) => { extra(v, { user: '1000:0', volumes: [{ type: 'bind', source: '/', target: '/host', read_only: true }] }); }, /backup: binds an ancestor of Docker's root directory in the deployed model/],
+    [(v) => { extra(v, { user: '1000:0', volumes: [{ type: 'bind', source: '/', target: '/host', read_only: true }] }); }, /backup: an added service must run as a numeric uid other than 0 and 1000 in the deployed model/],
+    [(v) => { extra(v, { volumes: [{ type: 'bind', source: '/var/lib', target: '/x', read_only: true }] }); }, /backup: binds an ancestor of Docker's root directory/],
+    [(v) => { extra(v, { volumes: [{ type: 'bind', source: '/var/', target: '/x', read_only: true }] }); }, /backup: binds an ancestor of Docker's root directory/],
+    [(v) => { extra(v, { volumes: [{ type: 'bind', source: '/home/ops/.local/share', target: '/x', read_only: true }] }); }, /backup: binds an ancestor of Docker's root directory/],
+    [(v) => { extra(v, { user: '0' }); }, /backup: an added service must run as a numeric uid other than 0 and 1000/],
+    [(v) => { extra(v, { user: undefined }); }, /backup: an added service must run as a numeric uid other than 0 and 1000/],
+  ]) assertRefused(deployed(mutate), pattern);
+  // An added service as another uid, mounting nothing of ours, is not refused by these rules.
+  const ok = deployed((v) => extra(v, { volumes: [{ type: 'bind', source: '/srv/backups', target: '/b', read_only: true }] }));
+  assert.ok(!ok.some((p) => /backup: (an added service|binds an ancestor|pid|ipc|network_mode)|volume /.test(p)), ok.join(' | '));
+  // The variant and the production reference: the same volume rules.
+  assertRefused(problemsAfter((v) => { v.volumes.bk = { external: true, name: 'x_crewflow-db-target' }; }), /volume bk: names db-setup's password volume/);
+  assertRefused(problemsAfter((_v, _f, p) => { p.volumes.bk = { driver_opts: { o: 'rw,bind', device: '/' } }; }), /volume bk: is a host bind through driver_opts in docker-compose\.production\.yml/);
+});
+
+// Security re-review R3 / R4 / I4: the deployed model, one DENIAL fixture per route.
+test('DENIAL security review R3/R4/I4: uid parsing, Docker root binds, added-service hardening, groups, host runtime paths, volume drivers, the password volume name', { skip }, () => {
+  const hardened = { image: undefined, user: '2000:2000', cap_drop: ['ALL'], security_opt: ['no-new-privileges:true'] };
+  const extra = (v, s) => {
+    v.services.backup = { ...hardened, image: v.services['rab-api'].image, ...s };
+  };
+  const m = fresh();
+  const run = (mutate, opts) => {
+    const mm = structuredClone(m);
+    mutate(mm.variantFiles);
+    return checkDeployment(mm.variantFiles, mm.production, {}, opts);
+  };
+  for (const [mutate, pattern, opts] of [
+    // R3: canonical decimal uids only
+    [(v) => extra(v, { user: '01000:2000' }), /backup: an added service must run as a numeric uid other than 0 and 1000/],
+    [(v) => extra(v, { user: '00' }), /backup: an added service must run as a numeric uid other than 0 and 1000/],
+    [(v) => extra(v, { user: '0000:2000' }), /backup: an added service must run as a numeric uid other than 0 and 1000/],
+    // R3: Docker's root from `docker info` (mocked), its ancestors and descendants
+    [(v) => extra(v, { volumes: [{ type: 'bind', source: '/srv/docker-data/volumes/x/_data', target: '/x', read_only: true }] }), /backup: binds Docker's root directory, an ancestor or a descendant of it in the deployed model/, { dockerRoot: '/srv/docker-data' }],
+    [(v) => extra(v, { volumes: [{ type: 'bind', source: '/srv', target: '/x', read_only: true }] }), /backup: binds Docker's root directory, an ancestor or a descendant of it/, { dockerRoot: '/srv/docker-data' }],
+    [(v) => extra(v, { volumes: [{ type: 'bind', source: '/srv/docker-data', target: '/x', read_only: true }] }), /backup: binds Docker's root directory, an ancestor or a descendant of it/, { dockerRoot: '/srv/docker-data' }],
+    // R4: added-service hardening
+    [(v) => extra(v, { cap_drop: [] }), /backup: an added service must drop all capabilities/],
+    [(v) => extra(v, { cap_add: ['DAC_READ_SEARCH'] }), /backup: an added service adds capabilities/],
+    [(v) => extra(v, { security_opt: [] }), /backup: an added service must set security_opt no-new-privileges:true/],
+    [(v) => extra(v, { privileged: true }), /backup: an added service is privileged/],
+    [(v) => extra(v, { pid: 'host' }), /backup: an added service uses the host pid/],
+    [(v) => extra(v, { devices: ['/dev/sda:/dev/sda'] }), /backup: an added service maps host devices/],
+    [(v) => extra(v, { networks: { 'crewflow-db': null } }), /backup: an added service is on the bundled database's crewflow-db network/],
+    [(v) => extra(v, { group_add: ['disk'] }), /backup: group_add on an added service/],
+    [(v) => extra(v, { user: '2000:0' }), /backup: an added service must not run with group 0/],
+    [(v) => extra(v, { user: '2000:docker' }), /backup: an added service must not run with group 0 or a non-numeric group/],
+    [(v) => extra(v, { volumes: [{ type: 'bind', source: '/var/run/containerd', target: '/x', read_only: true }] }), /backup: binds a path under \/run or \/var\/run/],
+    [(v) => extra(v, { volumes: [{ type: 'bind', source: '/run/user/1000', target: '/x', read_only: true }] }), /backup: binds a path under \/run or \/var\/run/],
+    [(v) => extra(v, { volumes: [{ type: 'bind', source: '/srv/podman.sock', target: '/x.sock', read_only: true }] }), /backup: binds a socket \(\*\.sock\)/],
+    // R4: any volume's driver / driver options
+    [(v) => { v.volumes.extra = { name: 'x', driver_opts: { type: 'tmpfs', device: 'tmpfs' } }; }, /volume extra: has driver options or a non-local driver in the deployed model/],
+    [(v) => { v.volumes.extra = { name: 'x', driver: 'rexray/ebs' }; }, /volume extra: has driver options or a non-local driver/],
+    // I4: the password volume's name is exactly <project>_crewflow-db-target
+    [(v) => { v.volumes['crewflow-db-target'] = { name: 'somebody-elses-volume' }; }, /volume crewflow-db-target: its name must be .*_crewflow-db-target in the deployed model/],
+  ]) assertRefused(run(mutate, opts), pattern);
+  // A fully hardened added service with an unrelated bind passes these rules.
+  const ok = run((v) => extra(v, { volumes: [{ type: 'bind', source: '/srv/backups', target: '/b', read_only: true }] }), { dockerRoot: '/srv/docker-data' });
+  assert.ok(!ok.some((p) => /^backup: (an added service|group_add|binds)|^volume /.test(p)), ok.join(' | '));
+});

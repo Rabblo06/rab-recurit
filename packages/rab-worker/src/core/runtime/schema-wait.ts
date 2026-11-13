@@ -1,4 +1,4 @@
-import { checkSchemaCompatibility, readUpgradeEvidence } from '@rab/server/database/boot-checks/database-boot-gates';
+import { checkSchemaCompatibility } from '@rab/server/database/boot-checks/database-boot-gates';
 import type { SchemaCompatibilityAssessment } from '@rab/server/database/boot-checks/schema-compatibility';
 
 /**
@@ -92,7 +92,8 @@ export async function waitForCompatibleSchema(options: SchemaWaitOptions): Promi
 export type WorkerSchemaQuery = (sql: string, params?: unknown[]) => Promise<unknown[]>;
 
 /**
- * ONE Worker schema check — the same call gate 7 makes for the Worker (database-boot-gates.ts), INCLUDING the C3 upgrade
+ * ONE Worker schema check — the same call gate 7 makes for the Worker (database-boot-gates.ts). OWNER-DB-ULTIMATE Part B3:
+ * any pending migration refuses (the C3 partly-upgraded relaxation described below is retired). Formerly: INCLUDING the C3 upgrade
  * evidence: `readUpgradeEvidence` (Agent 1's classifier CHAIN-PARTIAL + the physical fresh-install proof NOT fresh). Without it
  * `workerRelaxed` is always false and, after a failed upgrade, the wait refused the Worker that gate 7 would have started
  * (O3 T8a-WORKER, owner decision 2026-11-05 "the Worker starts too, like Twenty"). With it, an in-order pending tail on a
@@ -106,7 +107,6 @@ export function checkWorkerSchema(query: WorkerSchemaQuery, options: { expected:
     production: options.production,
     expected: options.expected,
     label: 'worker process',
-    readUpgradeEvidence: () => readUpgradeEvidence(query, options.expected),
   });
 }
 

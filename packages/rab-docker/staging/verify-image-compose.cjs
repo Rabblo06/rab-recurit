@@ -43,7 +43,7 @@ const path = require('node:path');
 
 const REPO = path.resolve(__dirname, '../../..');
 // The bundled db's environment rules, one definition for the committed and the deployed model (PR #125 review, finding 6).
-const { bundledDbEnvironmentProblems, credentialMountProblems } = require('../scripts/compose-owner-login.cjs');
+const { bundledDbEnvironmentProblems, credentialMountProblems, topLevelVolumeProblems } = require('../scripts/compose-owner-login.cjs');
 const VARIANT = path.join(REPO, 'packages/rab-docker/docker-compose.image.yml');
 const PRODUCTION = path.join(REPO, 'packages/rab-docker/docker-compose.production.yml');
 
@@ -204,6 +204,8 @@ const DB_TARGET_VOLUME = 'crewflow-db-target';
 const DB_TARGET_DIR = '/run/crewflow/db-target';
 /** db-setup keys that must be identical in the two files (besides RUNTIME_KEYS; the image differs only by its default). */
 const DB_SETUP_KEYS = [...RUNTIME_KEYS, 'networks', 'ports', 'profiles', 'build'];
+/** The five services of the committed files (anything else in a deployed model was added by an override). */
+const KNOWN_SERVICES = ['db', 'db-setup', 'rab-api', 'rab-redis', 'rab-worker'];
 const isPgUrlText = (v) => /postgres(ql)?:\/\//i.test(String(v ?? ''));
 /**
  * Option 2, both models: rab-api / rab-worker pin PG_DATABASE_URL to the literal empty string (any value, a crewflow_owner
@@ -370,6 +372,8 @@ function checkVariant(variant, production, variantFiles = variant) {
   // Security review L3: volumes_from, secrets/configs, Docker-volume-store binds, tmpfs, rab-redis's uid (one definition).
   for (const pr of credentialMountProblems(services)) fail(pr);
   for (const pr of credentialMountProblems(production?.services ?? {}, ' in docker-compose.production.yml', { redisUser: false })) fail(pr);
+  for (const pr of topLevelVolumeProblems(variant)) fail(pr);
+  for (const pr of topLevelVolumeProblems(production, ' in docker-compose.production.yml')) fail(pr);
   const vset = services[DB_SETUP_SERVICE];
   const pset = production?.services?.[DB_SETUP_SERVICE];
   if (vset && pset) {
@@ -559,7 +563,72 @@ function checkResolvedImages(model, allowed = [DEFAULT_APP_REPOSITORY]) {
  * read from the services' env files (names, the login part of database URLs and the two non-secret feature switches only,
  * never another value), or omitted when the files are not readable here.
  */
-function checkDeployment(merged, production, envFileKeys = {}) {
+/** Docker's root directory on this host (`docker info`), for the bind rule of the deployed model. Null when unknown. */
+function dockerRootDir() {
+  try {
+    const out = execFileSync('docker', ['info', '--format', '{{.DockerRootDir}}'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
+    return out.startsWith('/') ? out : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Security re-review R4: an ADDED service (not one of the five) gets the same container hardening as ours, and no route to
+ * the host's privileged groups or sockets. Pure: never prints a value.
+ */
+function addedServiceProblems(name, svc, where) {
+  const out = [];
+  const user = String(svc?.user ?? '');
+  const [uid, gid] = user.split(':');
+  // R3: a canonical decimal uid ("01000", "00", "0000" are refused, never normalised into an allowed value).
+  if (!/^(0|[1-9]\d*)$/.test(uid ?? '') || Number(uid) === 0 || Number(uid) === 1000) {
+    out.push(`${name}: an added service must run as a numeric uid other than 0 and 1000${where} (user "${user}"; uid 1000 owns db-setup's password file)`);
+  }
+  if (gid !== undefined && (!/^(0|[1-9]\d*)$/.test(gid) || Number(gid) === 0)) out.push(`${name}: an added service must not run with group 0 or a non-numeric group${where} (user "${user}")`);
+  if (svc?.group_add !== undefined && !(Array.isArray(svc.group_add) && svc.group_add.length === 0)) out.push(`${name}: group_add on an added service${where} (never: disk, docker or root groups reach the host)`);
+  if (!(Array.isArray(svc?.cap_drop) && svc.cap_drop.includes('ALL'))) out.push(`${name}: an added service must drop all capabilities (cap_drop: [ALL])${where}`);
+  if (Array.isArray(svc?.cap_add) && svc.cap_add.length) out.push(`${name}: an added service adds capabilities${where}`);
+  if (!(Array.isArray(svc?.security_opt) && svc.security_opt.includes('no-new-privileges:true'))) out.push(`${name}: an added service must set security_opt no-new-privileges:true${where}`);
+  if (svc?.privileged) out.push(`${name}: an added service is privileged${where}`);
+  for (const ns of ['pid', 'ipc', 'network_mode', 'userns_mode', 'uts', 'cgroup']) if (String(svc?.[ns] ?? '').startsWith('host')) out.push(`${name}: an added service uses the host ${ns}${where}`);
+  if (Array.isArray(svc?.devices) && svc.devices.length) out.push(`${name}: an added service maps host devices${where}`);
+  // The bundled database's internal network: only db, db-setup, rab-api and rab-worker are on it.
+  if (Object.keys(svc?.networks ?? {}).includes('crewflow-db')) out.push(`${name}: an added service is on the bundled database's crewflow-db network${where}`);
+  return out;
+}
+
+/**
+ * Security re-review R3/R4: binds (any service) of Docker's root directory, an ancestor or a descendant of it (the root
+ * from `docker info`; host sources are resolved with realpath when they exist), of anything under /run or /var/run, and of
+ * any *.sock. Pure apart from realpath.
+ */
+function hostBindProblems(services, where, rootDir) {
+  const out = [];
+  const root = rootDir ? path.posix.normalize(rootDir).replace(/\/+$/, '') || '/' : null;
+  for (const [name, svc] of Object.entries(services ?? {})) {
+    for (const v of Array.isArray(svc?.volumes) ? svc.volumes : []) {
+      if (v?.type !== 'bind') continue;
+      let source = String(v.source ?? '').replace(/\\/g, '/');
+      if (!source.startsWith('/')) continue;
+      try {
+        source = fs.realpathSync(source);
+      } catch {
+        /* not on this host: judged as written */
+      }
+      source = path.posix.normalize(source).replace(/\/+$/, '') || '/';
+      const under = (dir) => source === dir || source.startsWith(`${dir}/`);
+      if (root && (under(root) || root === source || root.startsWith(source === '/' ? '/' : `${source}/`))) {
+        out.push(`${name}: binds Docker's root directory, an ancestor or a descendant of it${where} (it reaches every volume, the crewflow_owner password file included)`);
+      }
+      if (under('/run') || under('/var/run')) out.push(`${name}: binds a path under /run or /var/run${where} (runtime sockets and secrets)`);
+      if (/\.sock$/.test(source) || /\.sock$/.test(String(v.target ?? ''))) out.push(`${name}: binds a socket (*.sock)${where}`);
+    }
+  }
+  return out;
+}
+
+function checkDeployment(merged, production, envFileKeys = {}, { dockerRoot = undefined } = {}) {
   const problems = [];
   const fail = (m) => problems.push(m);
   const services = merged?.services ?? {};
@@ -588,6 +657,14 @@ function checkDeployment(merged, production, envFileKeys = {}) {
   // PR #125 option 2: the app services never hold a database URL; db-setup alone carries it.
   for (const pr of optionAProblems(services, ' in the deployed model')) fail(pr);
   for (const pr of credentialMountProblems(services, ' in the deployed model')) fail(pr);
+  // Security re-review F2: an override may add services; none of them may run as root or as uid 1000 (the owner of the
+  // crewflow_owner password file), whatever it mounts.
+  for (const [name, svc] of Object.entries(services)) {
+    if (KNOWN_SERVICES.includes(name)) continue;
+    for (const pr of addedServiceProblems(name, svc, ' in the deployed model')) fail(pr);
+  }
+  for (const pr of hostBindProblems(services, ' in the deployed model', dockerRoot === undefined ? '/var/lib/docker' : dockerRoot)) fail(pr);
+  for (const pr of topLevelVolumeProblems(merged, ' in the deployed model', { strict: true })) fail(pr);
   const setup = services[DB_SETUP_SERVICE];
   const pset = production?.services?.[DB_SETUP_SERVICE];
   if (setup) {
@@ -827,7 +904,7 @@ function environmentMode(argv) {
     }
     envFileKeys[name] = entry;
   }
-  return { problems: [...images.problems, ...skippedEnvFiles, ...checkDeployment(model, production, envFileKeys)], lines: images.lines };
+  return { problems: [...images.problems, ...skippedEnvFiles, ...checkDeployment(model, production, envFileKeys, { dockerRoot: dockerRootDir() ?? '/var/lib/docker' })], lines: images.lines };
 }
 
 if (require.main === module) {

@@ -32,7 +32,7 @@ export class HealthController {
       () => this.db.pingCheck('database', { timeout: 5_000 }),
       () => this.securityPosture(),
       // OWNER-DB-ULTIMATE Part B3: plus the logbook's state (ok / failed / behind / ahead / none / unknown), never a name.
-      async () => upgradeStatusIndicator(process.env, this.upgrades ? (await this.upgrades.status()).state : undefined),
+      async () => upgradeStatusIndicator(this.upgrades ? (await this.upgrades.status()).state : undefined),
     ]);
   }
 
