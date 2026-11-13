@@ -7101,11 +7101,16 @@ Phase X Part 2 finding XA-08 (`docs/plans/PHASE-X-STAGE0-PART2.md` §2.6). Front
   option 2). A Worker that logs in before that reset (SQLSTATE 28P01) retries with backoff for at most 120 s with a fixed
   message, then exits and the restart policy brings it back (`rab-worker/src/core/runtime/owner-password-wait.ts`).
 - **Residual.** APP_SECRET and the database password cannot be rotated independently. Two deployments with different
-  APP_SECRETs on one database would reset the password back and forth. With a `crewflow_owner` URL (no admin), an
-  APP_SECRET change makes db-setup refuse (64): the derived login fails and the URL's password was already replaced on the
-  first run; the message says to put the database admin URL, or `crewflow_owner`'s current password, in `PG_DATABASE_URL`
-  (not measured; open: section "Open questions (option 2)"). A password changed by hand at the provider no longer sticks:
-  the next db-setup sets the derived one again.
+  APP_SECRETs on one database would reset the password back and forth. With a `crewflow_owner` URL (no admin), rotating
+  APP_SECRET needs one extra step (OWNER-LOGIN-DEPLOYMENT.md section 7): BEFORE the change, run the documented derive
+  command (SENSITIVE output: the `crewflow_owner` URL with the current derived password) and put that URL in
+  `PG_DATABASE_URL`; then change APP_SECRET and start: step b logs in with the old derived password and sets the new one;
+  the next start takes step a. Fallback: the admin URL in `PG_DATABASE_URL` for one start. Without either, db-setup refuses
+  (64, a fixed message naming both), writes nothing, and the apps wait, then exit 75. Tested live on the bootstrap child,
+  PostgreSQL 16 and 18 (scenario `owner-url-app-secret-rotation-procedure`, CODE agent; not on a full stack). The
+  procedure puts the derived password into compose.env, so the deployment configuration holds a working `crewflow_owner`
+  credential from then on (TM-DB-1). A password changed by hand at the provider no longer sticks: the next db-setup sets the
+  derived one again.
 
 ### TM-DB-3 (changed by option 2) — a bootstrap runs with admin rights on every `up` (db-setup)
 - **Actor → action → consequence.** A bug in, or an attacker-controlled input to, the bootstrap child could misuse admin
@@ -7129,8 +7134,13 @@ Phase X Part 2 finding XA-08 (`docs/plans/PHASE-X-STAGE0-PART2.md` §2.6). Front
   pgaudit with parameters), the SCRAM verifier, never the password, lands in the provider's log (measured: 2 occurrences
   per bootstrap with `log_statement=all`; the `crewflow_owner` path cannot turn logging off either). A verifier does not
   allow a login; offline guessing of a 256-bit HKDF output is infeasible. Each password reset leaves one "password
-  authentication failed for user crewflow_owner" line. No plaintext fallback: a provider that refuses a pre-hashed password
-  is refused (64) on both paths (open question below).
+  authentication failed for user crewflow_owner" line. No plaintext fallback (D6): a provider that refuses a pre-hashed
+  password (for example `credcheck.encrypted_password_allowed = off`) is refused (64) on both paths, and both messages name
+  the one working path: the database admin sets `crewflow_owner`'s password BY HAND to the derived one (`01-crewflow-owner.sql`
+  or `ALTER ROLE`; the server hashes it) and puts that `crewflow_owner` URL in `PG_DATABASE_URL`; db-setup then takes
+  step a and writes nothing. A provider-specific exception, not part of a normal install. The bootstrap harness ran live on
+  PostgreSQL 16 (28/28) and 18 (28/28) with `log_statement=all`, server-log scan included (CODE agent, DB-SETUP-LEAD.md
+  "Option 2 — SQL for the owner's review").
 
 ### TM-DB-4 (changed) — the bundled database password in the environment
 - **Change.** `PG_DATABASE_PASSWORD` is the bundled db's superuser password, read by compose only: the db's
@@ -7156,7 +7166,8 @@ Phase X Part 2 finding XA-08 (`docs/plans/PHASE-X-STAGE0-PART2.md` §2.6). Front
   with the derived login; db-setup logs a fixed line saying so. Documented in `env/compose.env.example` and
   OWNER-LOGIN-DEPLOYMENT.md (sections 2 and 3.6: the derived URL for a rollback).
 - **Residual.** The URL's old password stays in compose.env and db-setup's definition, unused. `PG_DATABASE_URL` must
-  stay set afterwards: unset means the bundled db (a fresh, empty install there). Not measured on a live stack.
+  stay set afterwards: unset means the bundled db (a fresh, empty install there). Tested live on the bootstrap child
+  (PostgreSQL 16 and 18, CODE agent), not on a full stack.
 
 ### Trade-offs applied (SECURITY TRADE-OFF blocks; T-1 to T-5 owner-accepted 2026-11-12, T-1 changed and T-8 new with option 2)
 - **T-1 — privileged URL in a container definition, db-setup's only (options A and 2).** The compose.env lint accepts a
@@ -7185,14 +7196,16 @@ Phase X Part 2 finding XA-08 (`docs/plans/PHASE-X-STAGE0-PART2.md` §2.6). Front
   bootstrap child writes the new one only after the role is ready. A stale-password window (an API that restarts on its own
   while db-setup is still resetting the password after an APP_SECRET change) ends in a refused start and Docker's restart,
   never an admin connection. The Worker retries 28P01 for 120 s itself (finding 8).
-- **T-8 (new, option 2) — db-setup changes an existing `crewflow_owner`'s password without asking.**
-  - Control relaxed: before option 2 a `crewflow_owner` URL was passed through unchanged, and Crewflow never wrote to a
-    role it did not create.
+- **T-8 (new, option 2, NOT yet owner-accepted) — db-setup logs in as `crewflow_owner` with the URL's password and
+  changes that role's own password once, without asking.**
+  - Control relaxed: before option 2 a `crewflow_owner` URL was passed through unchanged; Crewflow never connected with
+    an operator-made `crewflow_owner` password to write, and never wrote to a role it did not create.
   - Why: the owner's option 2 (one setting; the password is derived from APP_SECRET in every mode, so rab-api /
     rab-worker never receive any URL).
   - What still holds: every refusal before the write; only its own password; lock; re-verification; a fixed log line.
   - Residual: TM-DB-5.
-  - Veto: refuse (64) a `crewflow_owner` URL whose password is not the derived one and ask for the admin URL instead.
+  - Veto (CODE agent's proposal): refuse `crewflow_owner` URLs in db-setup altogether (admin URL or the bundled db only).
+    A narrower veto: refuse (64) a `crewflow_owner` URL whose password is not the derived one and ask for the admin URL.
 - **OpenShip.** OpenShip discards `depends_on` conditions: `service_completed_successfully` is NOT VERIFIED there, nor how
   it treats a one-shot service. The API does not rely on it: it waits, bounded, for the target file and refuses (exit 75)
   without it; it never takes an admin path.
@@ -7203,15 +7216,6 @@ Phase X Part 2 finding XA-08 (`docs/plans/PHASE-X-STAGE0-PART2.md` §2.6). Front
 - **Owner CLI one-off authority.** With arguments, `api-prestart.sh` takes `DB_TARGET` / `ALLOW_PRODUCTION_DB_COMMANDS`
   out of its environment before its refusal loops and hands them back only to the one-off command (the CLI applies its own
   production-command rules); an API start without arguments still refuses both.
-
-### Open questions (option 2, for the owner)
-- **APP_SECRET rotation with a `crewflow_owner` URL and no admin URL.** No procedure is written in the plan. The refusal
-  message offers "the database admin URL, or `crewflow_owner`'s current password"; the current password is the one
-  derived from the OLD APP_SECRET, which nothing shows except the SENSITIVE derive command (OWNER-LOGIN-DEPLOYMENT.md 3.6)
-  run before the change.
-- **A provider that refuses a pre-hashed password.** The admin path's refusal points to `01-crewflow-owner.sql` plus a
-  `crewflow_owner` URL; the `crewflow_owner` path then also sends a verifier and its refusal points back to the admin URL.
-  Option 2 has no working path for such a provider.
 
 ### Open follow-up (pre-existing, NOT fixed here) — finding B (area 6, Low)
 A migrate child started with a `crewflow_owner` that is SUPERUSER is refused (exit 67, "the login is SUPERUSER"), but
