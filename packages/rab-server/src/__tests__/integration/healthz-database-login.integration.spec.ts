@@ -21,6 +21,7 @@ import {
 } from '../../engine/core-modules/health/database-login.health';
 import { HealthController } from '../../engine/core-modules/health/health.controller';
 import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-pipe';
+import { integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
 
 /**
  * Owner decision 2026-11-13, the incident reproduced on a real PostgreSQL: the API's login has its password changed (or
@@ -32,7 +33,7 @@ import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-
  * A throw-away login (`cf_hz_<hex>`) is created for this file and dropped afterwards; no shared login is ever changed.
  * The real /healthz controller is used; only its two connections point at the throw-away login.
  */
-const RUN = Boolean(process.env.DATABASE_URL);
+const RUN = integrationTestDatabaseReady();
 const describeIfDb = RUN ? describe : describe.skip;
 jest.setTimeout(60_000);
 

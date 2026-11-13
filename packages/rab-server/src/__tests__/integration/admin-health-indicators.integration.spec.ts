@@ -19,6 +19,7 @@ import { ThrottlerRedisClientProvider } from '../../engine/core-modules/throttle
 import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-pipe';
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
+import { integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
 
 /**
  * Phase X Part 2, X2.4 — the Health tab indicators against a REAL PostgreSQL and Redis (the disposable test cluster):
@@ -30,7 +31,7 @@ import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
  *    connection) is checked against the server's `COMMAND INFO` flags.
  * Planted keys use a per-run prefix (`crewflow:test:x24-<run>`) and are deleted by exact name afterwards (no pattern delete).
  */
-const RUN = Boolean(process.env.DATABASE_URL && process.env.REDIS_URL);
+const RUN = integrationTestDatabaseReady() && Boolean(process.env.REDIS_URL);
 const describeIfDb = RUN ? describe : describe.skip;
 const RUN_ID = randomUUID().slice(0, 8);
 
