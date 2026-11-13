@@ -9,7 +9,8 @@
  *   node packages/rab-docker/scripts/compose-owner-login.cjs --static   # templates + the bundled-database override only
  *   node packages/rab-docker/scripts/compose-owner-login.cjs --lint-env-file <database|runtime|compose> <path>
  *
- * FULL mode renders, with `docker compose --env-file <throw-away> --project-directory <throw-away> config --format json`,
+ * FULL mode renders, with every profile enabled (`docker compose --env-file <throw-away> --project-directory <throw-away>
+ *   --profile '*' config --format json`; a profile-gated service is rendered and refused, review of PR #124),
  *   docker-compose.image.yml [+ docker-compose.local-db.yml]
  *   docker-compose.image.yml + staging/docker-compose.staging.yml
  * from sentinel env files only (no real .env, compose.env or secret of this machine is read; CREWFLOW_* / COMPOSE_* are
@@ -18,7 +19,7 @@
  *     read the one shared database.env), and no service carries any other database URL — no migrator, provisioner,
  *     worker, ops, replica, posture, drift or test URL, no legacy DATABASE_URL* name, no libpq PG* variable, no postgres://
  *     value under another key; no CREWFLOW_DB_MODE (there is no mode switch); nothing from a separated-mode env file
- *     (.env.migrate / .env.ops / per-service staging files) reaches any service;
+ *     (.env.migrate, the retired .env.ops, per-service staging files) reaches any service;
  *   - CREWFLOW_MIGRATION_APPROVED is never set by a compose or env file (a one-run `run -e` only), and no role password or
  *     command/ops authority reaches any service; CREWFLOW_UPGRADE_INCOMPLETE (api-prestart.sh's own flag) is never set;
  *   - the H1-H6 hardening on every service: image by digest and no `build:`, non-root numeric user, read_only, cap_drop ALL
@@ -111,7 +112,7 @@ const FORBIDDEN_PATTERNS = Object.freeze([
   [/REPLICA/, 'a read-replica setting (there is exactly one database URL)'],
   [/DATABASE_URL$/, 'a second database URL (there is exactly one: PG_DATABASE_URL)'],
   [/^TEST_/, 'a test-only variable'],
-  [/^(CREWFLOW_OPS_|PG_OPS_)/, 'ops-container authority (no ops credential in the owner-login deployment)'],
+  [/^(CREWFLOW_OPS_|PG_OPS_)/, 'a retired separated-mode operations variable (rab-ops was removed; never valid)'],
   [/^CREWFLOW_.*BOOTSTRAP_PASSWORD$/, 'a role password (role passwords never belong in app config)'],
   [/^BOOTSTRAP_ADMIN_/, 'bootstrap-admin input (a one-off operator command, never a runtime variable)'],
   [/^AUTH_.*_ISSUER_URL$/, 'a test-only issuer override'],
@@ -694,8 +695,8 @@ function renderModels(combos = COMBOS, extraComposeEnv = [], extraRuntimeEnv = [
     fs.mkdirSync(project);
     fs.writeFileSync(path.join(secrets, 'database.env'), DATABASE_ENV_TEXT, { mode: 0o600 });
     fs.writeFileSync(path.join(secrets, 'runtime.env'), RUNTIME_ENV_TEXT + extraRuntimeEnv.map((l) => `${l}\n`).join(''), { mode: 0o600 });
-    // The separated-mode env files (project-relative .env.migrate / .env.ops, per-service staging files) exist only so a
-    // file that still names them renders; the gate then fails on their marker.
+    // The separated-mode env files (project-relative .env.migrate, the retired .env.ops, per-service staging files) exist
+    // only so a file that still names them renders; the gate then fails on their marker.
     for (const f of ['.env.migrate', '.env.ops']) fs.writeFileSync(path.join(project, f), LEGACY_ENV_TEXT, { mode: 0o600 });
     for (const f of ['api.env', 'worker.env', 'migrate.env']) fs.writeFileSync(path.join(secrets, f), LEGACY_ENV_TEXT, { mode: 0o600 });
     const fwd = (p) => p.split(path.sep).join('/');
@@ -715,8 +716,11 @@ function renderModels(combos = COMBOS, extraComposeEnv = [], extraRuntimeEnv = [
     for (const combo of combos) {
       // --project-directory: relative env_file / bind paths resolve in the throw-away directory, never this checkout.
       const args = ['compose', '--env-file', composeEnv, '--project-directory', project];
-      for (const f of combo.files) args.push('-f', FILES[f]);
-      args.push('config', '--format', 'json');
+      // A combo names FILES keys; a test may pass a compose file path instead (a weakened copy of a committed file).
+      for (const f of combo.files) args.push('-f', FILES[f] ?? f);
+      // Every profile (security review of PR #124, MEDIUM): a profile-gated service is rendered, so the exact service list
+      // and the "has profiles" check refuse it, never a service hidden behind `profiles:` that `up --profile x` would start.
+      args.push('--profile', '*', 'config', '--format', 'json');
       models[combo.name] = JSON.parse(execFileSync('docker', args, { env: childEnv, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], maxBuffer: 16 * 1024 * 1024 }));
     }
     return models;

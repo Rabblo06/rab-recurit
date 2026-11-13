@@ -163,8 +163,8 @@ describeIf('Crewflow BullMQ scheduler lifecycle (integration, real Redis)', () =
       expect(job.data).toBe('{"v":1}');
       const opts = JSON.parse(job.opts);
       expect(opts.attempts).toBe(SCAN_JOB_OPTIONS.attempts);
-      expect(opts.removeOnComplete).toEqual({ age: 3600, count: 1000 });
-      expect(opts.removeOnFail).toEqual({ age: 604800 });
+      expect(opts.removeOnComplete).toEqual({ age: 14400, count: 1000 });
+      expect(opts.removeOnFail).toEqual({ age: 604800, count: 1000 });
     }
     // The raw scheduler hashes hold only name/every/template metadata — no ids, tokens, bodies, URLs. Phase D (D3): the
     // three daily scans now use firstRunAfterInterval, so their (new) scheduler also stores its `startDate` (a timestamp).

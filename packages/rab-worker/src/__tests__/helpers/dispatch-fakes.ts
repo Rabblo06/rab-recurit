@@ -25,10 +25,13 @@ export type Responder = (sql: string, params: unknown[]) => unknown;
 export function fakeTenant(respond: Responder) {
   const statements: RecordedStatement[] = [];
   const contexts: BoundContext[] = [];
+  /** The TenantContextOptions each scoped transaction was opened with, by tx index (T-1: `readOnly`). */
+  const options: Array<{ readOnly?: boolean } | undefined> = [];
   const tenant = {
-    runInTenantContext: async <T>(ctx: BoundContext, fn: (manager: unknown) => Promise<T>): Promise<T> => {
+    runInTenantContext: async <T>(ctx: BoundContext, fn: (manager: unknown) => Promise<T>, opts?: { readOnly?: boolean }): Promise<T> => {
       const tx = contexts.length;
       contexts.push(ctx);
+      options.push(opts);
       const manager = {
         query: async (sql: string, params: unknown[] = []) => {
           statements.push({ sql, params, tx });
@@ -52,7 +55,7 @@ export function fakeTenant(respond: Responder) {
         },
       }),
   };
-  return { tenant, dataSource, statements, contexts };
+  return { tenant, dataSource, statements, contexts, options };
 }
 
 export const sha256 = (text: string): string => createHash('sha256').update(text).digest('hex');

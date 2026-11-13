@@ -26,3 +26,10 @@ f78d830d32a21d0e24af019136c45dc451dfbca9:.gitleaksignore:generic-api-key:19
 # {"alg":"HS256"} / {"shiftId":"fixture","venueId":"v","ver":1} / "signature-fixture" — not signed with any key and not a
 # credential. The line now uses a plain fixture string; this entry covers the commit that introduced it. Reviewed 2026-11-04.
 1522b3181312b8815d53340d41a0c6031b6da420:packages/rab-worker/src/queues/rab-reports/native/pre-shift-report.native.spec.ts:jwt:211
+
+# Phase X3.2 (PR #118): exception-handler Sentry-egress spec. Synthetic markers the scrubber must remove, not credentials:
+# the JWT payload decodes to {"sub":"x32-sentry-jwt-marker"} (signature segment = base64 "x32-sentry-jwt-signature"), and
+# the TOTP value is the made-up base32 string 'JBSWY3DPX32TOTPSECRET'. The lines now carry `gitleaks:allow`; these entries
+# cover the commit that introduced them. Reviewed 2026-11-12.
+ecca38cfd0e21cbcbc239963368db49f26fc54f1:packages/rab-server/src/engine/core-modules/exception-handler/exception-handler.service.spec.ts:jwt:27
+ecca38cfd0e21cbcbc239963368db49f26fc54f1:packages/rab-server/src/engine/core-modules/exception-handler/exception-handler.service.spec.ts:generic-api-key:40

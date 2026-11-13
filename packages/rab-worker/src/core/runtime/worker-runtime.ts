@@ -2,6 +2,11 @@ import { Logger } from '@nestjs/common';
 import * as os from 'node:os';
 import Redis from 'ioredis';
 
+import {
+  defaultExceptionHandlerService,
+  ExceptionHandlerService,
+  shouldCaptureException,
+} from '@rab/server/engine/core-modules/exception-handler/exception-handler.service';
 import { WORKER_STATS_KEY } from '@rab/server/engine/worker-shared/heartbeat.constants';
 import { CycleMetrics, CycleOutcome } from './cycle-metrics';
 
@@ -110,6 +115,12 @@ export interface WorkerRuntimeOptions {
    * client's offline queue (`maxRetriesPerRequest: null`). Default: the runtime's own client.
    */
   ticksRedis?: Pick<Redis, 'multi'>;
+  /**
+   * Phase X3.2: where a failed cycle's error is reported (Twenty: message-queue.explorer.ts reports a failed job through
+   * ExceptionHandlerService). Default: the process's ExceptionHandlerService — Sentry when SENTRY_DSN is set and
+   * `@rab/server/instrument` initialised it, a no-op otherwise. A reporting failure never changes the cycle's outcome.
+   */
+  exceptionHandler?: Pick<ExceptionHandlerService, 'captureExceptions'>;
 }
 
 /** Phase B (P6, owner-approved): the scan-concurrency cap of the Worker jobs process. */
@@ -195,6 +206,7 @@ export class WorkerRuntime {
   private readonly statsWrite: 'whole' | 'fields';
   private readonly instance = `${os.hostname()}:${process.pid}`;
   private readonly slots: CycleSlots;
+  private readonly exceptionHandler: Pick<ExceptionHandlerService, 'captureExceptions'>;
 
   constructor(
     private readonly redis: Redis,
@@ -203,6 +215,7 @@ export class WorkerRuntime {
     this.statsKey = options.statsKey ?? WORKER_STATS_KEY;
     this.statsWrite = options.statsWrite ?? 'whole';
     this.slots = new CycleSlots(options.maxConcurrentCycles ?? WORKER_SCAN_CONCURRENCY);
+    this.exceptionHandler = options.exceptionHandler ?? defaultExceptionHandlerService();
     const flushMs = options.metricsFlushMs ?? 60_000;
     if (options.durationsKey && flushMs > 0) this.untracked(() => this.flushMetrics(), flushMs);
     const logMs = options.metricsLogMs ?? 15 * 60_000;
@@ -346,6 +359,7 @@ export class WorkerRuntime {
         this.stats[options.statKeys.failures] = Number(this.stats[options.statKeys.failures] ?? 0) + 1;
         this.writeChanged({ ...extra }, options.statKeys.failures);
         this.logger.error(`${options.name} cycle failed`, error as Error);
+        this.reportFailure(options.name, error);
         this.metrics.record(key, 'failed', Date.now() - runStartedAt);
         return 'failed';
       })
@@ -358,6 +372,16 @@ export class WorkerRuntime {
     this.inFlight.add(cycle);
     this.inFlightStartedAt.set(cycle, { name: options.name, startedAt });
     return cycle;
+  }
+
+  /** X3.2: reports a failed cycle (Sentry when on). Never throws: a broken reporter must never break a cycle. */
+  private reportFailure(name: string, error: unknown): void {
+    try {
+      if (!shouldCaptureException(error)) return;
+      this.exceptionHandler.captureExceptions([error], { operation: { type: 'worker-cycle', name } });
+    } catch {
+      // Reporting is best effort.
+    }
   }
 
   /** D-Q1: records that this loop's trigger fired (see `ticksKey`). Best-effort, never throws, never awaited. */
