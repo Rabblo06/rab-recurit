@@ -6709,3 +6709,26 @@ Regression:   rate-limit-bypass.spec.ts (truth table incl. the old hidden-bypass
   - Audit rows written by these commands are as tamperable by an owner-credential holder as any other row (BC-07).
 - **Tests.** `command/ops/ops-run.spec.ts`, `command/ops/elevated-ops-session.spec.ts`,
   `__tests__/integration/ops-owner-login.integration.spec.ts`.
+
+## Phase X1.4 — forgot-password limit per address (XA-04)
+
+- **Asset:** a person's mailbox and our email sending reputation; the reset-email flow's anti-enumeration property.
+- **Actor → action → consequence (before):** anyone with many client IPs → `POST /auth/forgot-password` for one victim
+  address from each IP → an unbounded number of password-reset emails to that victim (mail-bombing; reset tokens
+  minted without limit; provider reputation burned). Only the per-IP route limit (`AUTH_THROTTLE`, 5/min/IP) applied.
+- **Control:** `PasswordResetEmailLimiterService` (Twenty's `password-reset-email:<email>` bucket, 3 per 15 minutes,
+  continuous refill), one atomic EVAL of the shared `TOKEN_BUCKET_SCRIPT` on the bounded auth-cache Redis client.
+  `AuthService.doForgotPassword` calls it FIRST, for every submitted address, before any account lookup, token, outbox row
+  or audit row. Key = sha256 of the trimmed, lower-cased address under `crewflow:{env}:password-reset-email:` (no email in
+  Redis). A refusal writes nothing (an exhausted address's wait is never extended).
+- **Enumeration:** the key, the decision and the 429 body (`PASSWORD_RESET_RATE_LIMITED`, constant, no retry time) depend
+  only on the submitted string, never on whether an account exists; the 150 ms response floor pads the 429 too.
+- **Failure policy:** Redis down → the route's `@RateLimitRequired` guard already answers 503 (CF-17, unchanged). A Redis
+  error inside the limiter (guard call succeeded, limiter call failed) → 503 `RATE_LIMIT_UNAVAILABLE`: no token, no email.
+  Never "send anyway".
+- **Unchanged:** per-IP route limit, reset-token TTL (1 h) / hashing / single-use consume, CF-06 password-provider gate,
+  outbox publish-after-commit.
+- **Residual:** an attacker can spend a victim's 3 reset emails per 15 minutes, delaying the victim's own reset by up to
+  ~5 minutes per token (continuous refill). Accepted as Twenty's trade-off; the values are code constants.
+- **Tests:** `password-reset-email-limiter.service.spec.ts`, `forgot-password-email-limit.integration.spec.ts`
+  (4 IPs → 3 emails then 429; 20 concurrent → ≤3; known = unknown status and body; per-IP limit kept).

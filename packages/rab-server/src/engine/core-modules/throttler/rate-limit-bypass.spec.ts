@@ -90,11 +90,12 @@ describe('the one rate-limit switch (X1.2, audit XA-01 / DUP-03)', () => {
     expect(offenders).toEqual([]);
   });
 
-  it('the three limiters use it', () => {
+  it('the four limiters use it', () => {
     const src = path.resolve(__dirname, '../../..');
     for (const file of [
       'engine/core-modules/throttler/throttler-options.factory.ts',
       'engine/core-modules/auth/services/login-attempt-limiter.service.ts',
+      'engine/core-modules/auth/services/password-reset-email-limiter.service.ts',
       'modules/attendance/guards/attendance-per-user-throttle.guard.ts',
     ]) {
       expect(fs.readFileSync(path.join(src, file), 'utf8')).toMatch(/isRateLimitBypassEnabled\(process\.env\)/);

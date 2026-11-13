@@ -96,8 +96,9 @@ describeIfDb('rate limiting (integration)', () => {
   });
 
   it('throttles repeated /auth/forgot-password attempts the same way', async () => {
-    const email = `ratelimit-${randomUUID()}@example.test`;
-    const attempt = () => request(app.getHttpServer()).post('/rest/v1/auth/forgot-password').send({ email });
+    // A different address per attempt: one address alone stops at 3 (X1.4 per-address limit,
+    // forgot-password-email-limit.integration.spec.ts); this test is about the per-IP route limit.
+    const attempt = () => request(app.getHttpServer()).post('/rest/v1/auth/forgot-password').send({ email: `ratelimit-${randomUUID()}@example.test` });
 
     for (let i = 0; i < 5; i++) {
       const res = await attempt();

@@ -17,9 +17,10 @@
  * The Jest setups (rab-server and rab-worker `jest-setup.ts`) set the flag to `'true'`, because the integration suite shares
  * one client IP across hundreds of requests a minute; suites that exercise real throttling set it to `'false'`.
  *
- * Used by exactly three limiters, and no other code may read the flag:
+ * Used by exactly four limiters, and no other code may read the flag:
  *   - RabThrottlerModule (the global per-IP tier and the per-route auth tiers),
  *   - LoginAttemptLimiterService (login, MFA code, admin MFA reset),
+ *   - PasswordResetEmailLimiterService (forgot-password emails per address, X1.4),
  *   - AttendancePerUserThrottleGuard (clock in / clock out / geofence exit).
  * InvitationRateLimitService and AiQuotaService have no bypass and must not gain one.
  *
