@@ -850,6 +850,59 @@ const SCENARIOS: Scenario[] = [
     }),
   ),
   {
+    id: 'n1-transition-shaped-database',
+    covers: 'N1: a transition-shaped database (owner rab_owner, crewflow_owner an INHERIT member): admin URL -> 64 ownerOwnsDatabase, nothing written; the crewflow_owner URL -> succeeds',
+    async run(ctx) {
+      const rabOwner = `obc_rabowner_${RUN}`;
+      await sql(ctx.admin, 'postgres', `CREATE ROLE ${ident(rabOwner)} NOLOGIN NOSUPERUSER NOBYPASSRLS`);
+      ctx.roles.push(rabOwner);
+      NAMES.add(rabOwner);
+      const db = await createDb(ctx, 'n1t', rabOwner);
+      const own = remember(secret());
+      // transition-from-separated.sql's shape: NOCREATEROLE, the schema-role membership WITH INHERIT TRUE, the grant.
+      await sql(ctx.admin, 'postgres', `CREATE ROLE crewflow_owner LOGIN NOSUPERUSER NOBYPASSRLS NOREPLICATION NOCREATEDB NOCREATEROLE INHERIT`);
+      await sql(ctx.admin, 'postgres', `GRANT ${ident(rabOwner)} TO crewflow_owner WITH INHERIT TRUE, SET TRUE`);
+      await sql(ctx.admin, 'postgres', `GRANT CONNECT, CREATE, TEMPORARY ON DATABASE ${ident(db)} TO crewflow_owner WITH GRANT OPTION`);
+      await setOwnerPassword(ctx.admin, own);
+      const before = await ownerState(ctx.admin);
+      const s = remember(appSecret());
+      const admin = await runChild(suUrl(ctx, db), s);
+      assertCleanOutput(admin);
+      expectResult(admin, 64, 'refused', 'transition + admin URL');
+      expectLine(admin, OWNER_BOOTSTRAP_MESSAGES.ownerOwnsDatabase, 'transition + admin URL');
+      expect(JSON.stringify(await ownerState(ctx.admin)) === JSON.stringify(before), 'transition + admin URL: the role changed');
+      const viaOwner = await runChild(urlFor(ctx.admin, OWNER, own, db), s);
+      assertCleanOutput(viaOwner);
+      expectResult(viaOwner, 0, 'pass-through', 'transition + crewflow_owner URL');
+      expect(viaOwner.result?.passwordSet === true, 'transition + crewflow_owner URL: expected step b (password set)');
+      expectLine(viaOwner, OWNER_BOOTSTRAP_MESSAGES.noCreateRoleHardened, 'transition + crewflow_owner URL');
+      const after = await ownerState(ctx.admin);
+      expect(after.oid === before.oid && after.attrs === before.attrs && after.memberships === before.memberships, 'transition + crewflow_owner URL: role recreated, attributes or memberships changed');
+      await assertDeriveFromTargetLogsIn(ctx, db, s, 'transition + crewflow_owner URL');
+      return ['admin URL refused 64 (ownerOwnsDatabase), untouched; crewflow_owner URL: step b, password set, memberships unchanged'];
+    },
+  },
+  {
+    id: 'n2-set-only-membership-of-owner',
+    covers: 'N2: crewflow_owner a member of the owning role WITH INHERIT FALSE, SET TRUE -> admin bootstrap refused (64), nothing written',
+    async run(ctx) {
+      const dbo = `obc_dbo2_${RUN}`;
+      await sql(ctx.admin, 'postgres', `CREATE ROLE ${ident(dbo)} NOLOGIN NOSUPERUSER NOBYPASSRLS`);
+      ctx.roles.push(dbo);
+      NAMES.add(dbo);
+      const db = await createDb(ctx, 'n2', dbo);
+      await presetOwner(ctx, db, '', remember(secret()));
+      await sql(ctx.admin, 'postgres', `GRANT ${ident(dbo)} TO crewflow_owner WITH INHERIT FALSE, SET TRUE`);
+      const before = await ownerState(ctx.admin);
+      const run = await runChild(suUrl(ctx, db), remember(appSecret()));
+      assertCleanOutput(run);
+      expectResult(run, 64, 'refused', 'SET-only membership');
+      expectLine(run, OWNER_BOOTSTRAP_MESSAGES.ownerOwnsDatabase, 'SET-only membership');
+      expect(JSON.stringify(await ownerState(ctx.admin)) === JSON.stringify(before), 'SET-only membership: the role changed');
+      return ['exit 64 (ownerOwnsDatabase), role untouched'];
+    },
+  },
+  {
     id: 'h1-search-path-default-refused',
     covers: 'H1 (fix 3): a database-wide search_path default (set by the superuser, crewflow_owner not the owner) is refused (64) before any write',
     async run(ctx) {
@@ -875,7 +928,12 @@ const SCENARIOS: Scenario[] = [
       await c.connect();
       const codes: string[] = [];
       try {
-        for (const bad of ['plaintext-password-0123456789', 'SCRAM-SHA-256$4096:c2FsdA==', 'md5' + '0'.repeat(32)]) {
+        const key = 'A'.repeat(43) + '=';
+        for (const bad of [
+          'plaintext-password-0123456789', 'SCRAM-SHA-256$4096:c2FsdA==', 'md5' + '0'.repeat(32),
+          // Re-review N3: zero iterations and a short key.
+          `SCRAM-SHA-256$0:c2FsdA==$${key}:${key}`, `SCRAM-SHA-256$4096:c2FsdA==$${key}:${'A'.repeat(10)}=`,
+        ]) {
           await c.query('BEGIN');
           await c.query(OWNER_BOOTSTRAP_Q4B_SET_INPUTS, [bad, 'true']);
           try {
@@ -891,7 +949,7 @@ const SCENARIOS: Scenario[] = [
       }
       expect(codes.every((code) => code === '22023'), `I1: expected 22023 for every malformed verifier, got ${codes.join(',')}`);
       expect((await ownerState(ctx.admin)).passwordHash === before.passwordHash, 'I1: rolpassword changed');
-      return [`3 malformed verifiers -> ${codes.join(', ')}; rolpassword unchanged`];
+      return [`${codes.length} malformed verifiers -> ${codes.join(', ')}; rolpassword unchanged`];
     },
   },
   {

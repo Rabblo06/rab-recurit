@@ -7105,7 +7105,9 @@ Phase X Part 2 finding XA-08 (`docs/plans/PHASE-X-STAGE0-PART2.md` §2.6). Front
   APP_SECRET needs one extra step (OWNER-LOGIN-DEPLOYMENT.md section 7): BEFORE the change, run the documented derive
   command (SENSITIVE output: the `crewflow_owner` URL with the current derived password) and put that URL in
   `PG_DATABASE_URL`; then change APP_SECRET and start: step b logs in with the old derived password and sets the new one;
-  the next start takes step a. Fallback: the admin URL in `PG_DATABASE_URL` for one start. Without either, db-setup refuses
+  the next start takes step a. Fallback: the admin URL in `PG_DATABASE_URL` for one start, except on a database
+  `crewflow_owner` owns through a membership (every transitioned database: owner `rab_owner`), where the admin URL is
+  refused (H1) and the derive step is the only path. Without either, db-setup refuses
   (64, a fixed message naming both), writes nothing, and the apps wait, then exit 75. Tested live on the bootstrap child,
   PostgreSQL 16 and 18 (scenario `owner-url-app-secret-rotation-procedure`, CODE agent; not on a full stack). Exposure of
   the procedure (security review M1; an in-process alternative is an open owner decision): the print step writes the live
@@ -7148,10 +7150,13 @@ Phase X Part 2 finding XA-08 (`docs/plans/PHASE-X-STAGE0-PART2.md` §2.6). Front
   re-verify login) is opened with the startup options `-c search_path=pg_catalog,pg_temp -c default_transaction_read_only=off`
   (they override role and database defaults), and the first statement of every session sets the same search_path again.
   In addition, the admin path refuses (64) before any write when `crewflow_owner` owns the database (directly or through
-  an inherited role), or when a database-wide or `crewflow_owner`-level `search_path` default exists. Tested live on PG16 and
-  PG18 (scenarios `h1-search-path-plant-db-owner` / `-inherited-owner`: refused, zero calls of the planted operator, and a
-  sanity query proving the plant was live; `h1-search-path-default-refused`). Residual: a database whose legitimate owner
-  setup or `search_path` default matches these rules must be changed before db-setup will run (the refusal names the fix).
+  ANY role membership, inherited or SET-only: `pg_has_role(..., 'MEMBER')`, re-review N2), or when a database-wide or
+  `crewflow_owner`-level `search_path` default exists. Tested live on PG16 and PG18 (scenarios
+  `h1-search-path-plant-db-owner` / `-inherited-owner`: refused, zero calls of the planted operator, and a sanity query
+  proving the plant was live; `h1-search-path-default-refused`; `n2-set-only-membership-of-owner`). Residual (re-review N1):
+  every database that went through `transition-from-separated.sql` is owned by `rab_owner`, of which `crewflow_owner` is a
+  member, so it must use the `crewflow_owner` URL, never the admin URL (runbook 5.4; tested live:
+  `n1-transition-shaped-database`). Changing the database owner to make the admin URL work is not a supported fix.
 - **Evidence.** The bootstrap harness ran live on PostgreSQL 16 and 18 with `log_statement=all`, server-log scan included
   (CODE agent, DB-SETUP-LEAD.md "Option 2 — SQL for the owner's review", REVISED).
 

@@ -14,6 +14,7 @@ import {
   classifyWriteError,
   decideBeforeProbe,
   decideOwnerSelf,
+  factsFromRow,
   OWNER_BOOTSTRAP_MESSAGES,
   OwnerBootstrapFailure,
   OwnerBootstrapIo,
@@ -218,6 +219,8 @@ function fakeIo(facts: OwnerFacts[], probes: Array<{ ok: true } | { ok: false; c
               admin_has_admin_option: f.adminHasAdminOption,
               o_privileged_memberships: f.oPrivilegedMemberships === null ? null : String(f.oPrivilegedMemberships),
               o_has_db_grant: f.oHasDbGrant,
+              o_owns_db: f.oOwnsDb ?? false,
+              search_path_default_set: f.searchPathDefaultSet ?? false,
             },
           ],
         };
@@ -431,7 +434,8 @@ describe('owner bootstrap: the whole step without a database', () => {
 describe('owner bootstrap: statements and the advisory key', () => {
   it('no admin statement can carry a value: only the lock-key constant is interpolated, inputs are $1/$2', () => {
     for (const text of OWNER_BOOTSTRAP_ADMIN_STATEMENTS) {
-      expect(text).not.toMatch(/SCRAM-SHA-256|postgres:\/\//);
+      // No value, and not the verifier prefix either (the shape pattern spells its dollar signs as [$]).
+      expect(text).not.toMatch(/SCRAM-SHA-256\$|postgres:\/\//);
     }
     expect(OWNER_BOOTSTRAP_Q4B_SET_INPUTS).toContain("set_config('crewflow_bootstrap.verifier', $1, true)");
     expect(OWNER_BOOTSTRAP_Q4B_SET_INPUTS).toContain("set_config('crewflow_bootstrap.need_password', $2, true)");
@@ -571,6 +575,8 @@ describe('owner bootstrap, option 2: PG_DATABASE_URL is crewflow_owner itself (s
                 admin_has_admin_option: f.adminHasAdminOption,
                 o_privileged_memberships: f.oPrivilegedMemberships === null ? null : String(f.oPrivilegedMemberships),
                 o_has_db_grant: f.oHasDbGrant,
+                o_owns_db: f.oOwnsDb ?? false,
+                search_path_default_set: f.searchPathDefaultSet ?? false,
               },
             ],
           };
@@ -794,7 +800,7 @@ describe('owner bootstrap: security review H1 / L2 / M2 / I1 / I2', () => {
 
   it('H1: Q0 pins search_path before anything else; Q2 reads the database owner and the search_path defaults', () => {
     expect(OWNER_BOOTSTRAP_Q0_SESSION.startsWith('SET search_path TO pg_catalog, pg_temp;')).toBe(true);
-    expect(OWNER_BOOTSTRAP_Q2_FACTS).toContain("pg_catalog.pg_has_role(o.oid, d.datdba, 'USAGE')");
+    expect(OWNER_BOOTSTRAP_Q2_FACTS).toContain("pg_catalog.pg_has_role(o.oid, d.datdba, 'MEMBER')");
     expect(OWNER_BOOTSTRAP_Q2_FACTS).toContain('FROM pg_catalog.pg_db_role_setting s');
   });
 
@@ -818,10 +824,22 @@ describe('owner bootstrap: security review H1 / L2 / M2 / I1 / I2', () => {
     expect(match).not.toBeNull();
     const pattern = new RegExp(match![1]!);
     expect(pattern.test(scramSha256Verifier('a'.repeat(64)))).toBe(true);
-    for (const bad of ['', 'a'.repeat(64), 'SCRAM-SHA-256$4096:c2FsdA==', 'SCRAM-SHA-256$x:c2FsdA==$a:b', 'SCRAM-SHA-256$4096:c2FsdA==$a:b;DROP', 'md5abc', 'SCRAM-SHA-256$4096:c2FsdA==$a:b\n']) {
+    const key = 'A'.repeat(43) + '=';
+    for (const bad of [
+      '', 'a'.repeat(64), 'SCRAM-SHA-256$4096:c2FsdA==', 'SCRAM-SHA-256$x:c2FsdA==$a:b', 'SCRAM-SHA-256$4096:c2FsdA==$a:b;DROP', 'md5abc',
+      'SCRAM-SHA-256$4096:c2FsdA==$a:b\n',
+      // Re-review N3: zero / leading-zero iterations, short keys, padding in the middle, an over-long iteration count.
+      `SCRAM-SHA-256$0:c2FsdA==$${key}:${key}`, `SCRAM-SHA-256$04096:c2FsdA==$${key}:${key}`,
+      `SCRAM-SHA-256$4096:c2FsdA==$${'A'.repeat(42)}=:${key}`, `SCRAM-SHA-256$4096:c2FsdA==$${key}:${'A'.repeat(10)}=`,
+      `SCRAM-SHA-256$4096:c2=FsdA==$${key}:${key}`, `SCRAM-SHA-256$12345678901:c2FsdA==$${key}:${key}`,
+    ]) {
       expect({ bad, ok: pattern.test(bad) }).toEqual({ bad, ok: false });
     }
+    expect(pattern.test(`SCRAM-SHA-256$4096:c2FsdA==$${key}:${key}`)).toBe(true);
     expect(OWNER_SELF_O4C_DO).toContain("RAISE EXCEPTION 'not a pre-hashed verifier' USING ERRCODE = '22023';");
+    // N3: the admin path's Q4c carries the SAME pattern, before CREATE / ALTER ROLE.
+    expect(OWNER_BOOTSTRAP_Q4C_DO).toContain(`OPERATOR(pg_catalog.~) '${match![1]}'`);
+    expect(OWNER_BOOTSTRAP_Q4C_DO.indexOf('not a pre-hashed verifier')).toBeLessThan(OWNER_BOOTSTRAP_Q4C_DO.indexOf('CREATE ROLE crewflow_owner'));
   });
 
   it('I2: O4c re-checks the recursive privileged membership inside the statement, before the ALTER', () => {
@@ -830,5 +848,28 @@ describe('owner bootstrap: security review H1 / L2 / M2 / I1 / I2', () => {
     expect(at("RAISE EXCEPTION 'crewflow_owner is a member of a privileged role'")).toBeGreaterThan(0);
     expect(at('WITH RECURSIVE up(oid)')).toBeLessThan(at('ALTER ROLE crewflow_owner PASSWORD'));
     for (const role of ['pg_read_all_data', 'pg_write_all_data', 'pg_execute_server_program', 'pg_maintain']) expect(OWNER_SELF_O4C_DO).toContain(`'${role}'`);
+  });
+});
+
+describe('owner bootstrap: security re-review N2 / N4', () => {
+  it('N2: o_owns_db uses MEMBER (an INHERIT FALSE, SET TRUE membership of the owner counts)', () => {
+    expect(OWNER_BOOTSTRAP_Q2_FACTS).toContain("pg_catalog.pg_has_role(o.oid, d.datdba, 'MEMBER')");
+    expect(OWNER_BOOTSTRAP_Q2_FACTS).not.toContain("d.datdba, 'USAGE'");
+  });
+
+  it('N4: a facts column that is not a boolean (or a count) is a failure (70), never silently false', () => {
+    const row = {
+      server_version_num: 160004, admin_super: false, admin_createrole: true, admin_can_grant_db: true, owner_exists: true,
+      o_login: true, o_super: false, o_bypassrls: false, o_replication: false, o_createdb: false, o_createrole: true,
+      o_inherit: true, o_expired: false, admin_has_admin_option: true, o_privileged_memberships: '0', o_has_db_grant: true,
+      o_owns_db: false, search_path_default_set: false,
+    };
+    expect(factsFromRow(row).oOwnsDb).toBe(false);
+    for (const [column, value] of [['o_owns_db', 't'], ['search_path_default_set', undefined], ['admin_super', 1], ['o_super', 'false'], ['o_privileged_memberships', 'x'], ['server_version_num', 'abc']] as const) {
+      expect(() => factsFromRow({ ...row, [column]: value })).toThrow(OwnerBootstrapFailure);
+    }
+    // NULL is accepted only where crewflow_owner may be missing.
+    expect(factsFromRow({ ...row, owner_exists: false, o_login: null, o_super: null, o_privileged_memberships: null }).oSuper).toBeNull();
+    expect(() => factsFromRow({ ...row, o_owns_db: null })).toThrow(OwnerBootstrapFailure);
   });
 });
