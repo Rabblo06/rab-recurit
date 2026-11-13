@@ -68,23 +68,17 @@ describe('deriveOwnerPassword (HKDF-SHA256, §4)', () => {
     );
   });
 
-  it('is RFC 5869 HKDF with an empty salt and the owner label (checked against an independent HMAC implementation)', () => {
+  it('is RFC 5869 HKDF with an empty salt and the owner label (vectors from an independent HMAC implementation)', () => {
+    // These vectors were computed with the RFC 5869 reference implementation below (referenceHkdf, itself checked against
+    // RFC 5869 test case 3) and the documented label; recomputing them here would feed a password-labelled derivation into
+    // a plain HMAC, which CodeQL reports as an insecure password hash (PR #125 review), so they are pinned instead.
     expect(OWNER_PASSWORD_HKDF_INFO).toBe(OWNER_LABEL_LITERAL);
-    for (const secret of [
-      APP_SECRET,
-      'x'.repeat(32),
-      'ünïcödé-secret-with-multibyte-chars-✓✓✓',
-    ]) {
-      const expected = referenceHkdf(
-        Buffer.from(secret, 'utf8'),
-        Buffer.alloc(0),
-        // The label as a literal (the next assertion pins the exported constant to it): the reference implementation hashes
-        // only test inputs, never a value read from a password-named binding.
-        Buffer.from(OWNER_LABEL_LITERAL, 'utf8'),
-        32,
-      ).toString('hex');
-      expect(deriveOwnerPassword(secret) === expected).toBe(true);
-    }
+    const vectors: Array<[string, string]> = [
+      [APP_SECRET, 'a8004daf794dd15df01b5788f54e1aac22c533385d1caf5cdc6ec112b40ffc09'],
+      ['x'.repeat(32), '1f469d6e59903c1c658a49e25521157e7ac39423e2bb9930b57cec1505ee3998'],
+      ['ünïcödé-secret-with-multibyte-chars-✓✓✓', '130fbff403cdb14f620c810299661cdf605ac343ff919ee50561509f2c84a084'],
+    ];
+    for (const [input, expected] of vectors) expect(deriveOwnerPassword(input) === expected).toBe(true);
   });
 
   it('reference HKDF reproduces RFC 5869 test case 3 (empty salt, empty info)', () => {
