@@ -150,8 +150,9 @@ jobs:
   # Phase B (B6-A/B7): the deployment configuration, without a database: the API start scripts (api-prestart.sh / start.sh
   # never migrate, refuse migration credentials), every committed compose definition that runs the Worker (O1: the one
   # image, the Worker command, one non-root process under init, no CREWFLOW_PROVISIONER_*), the image's runtime-deps check,
-  # and the compose credential isolation (O3: the production files have no migration service and no .env.migrate; the
-  # dev/QA files keep their one-off migrate, which alone holds the migration login).
+  # and the compose credential isolation (O3: no file has a migration service or names .env.migrate; Part F2: dev and QA
+  # run Part A's bundled db + db-setup, their db is checked against production's, and every bundled db takes the
+  # one-server-per-volume lock).
   deployment-config:
     runs-on: ubuntu-latest
     timeout-minutes: 20
