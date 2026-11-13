@@ -33,7 +33,7 @@ describe('env validation: owner-login database start-up settings', () => {
   });
 
   it('CREWFLOW_UPGRADE_INCOMPLETE is retired (OWNER-DB-ULTIMATE Part B3): any value refuses; blank is unset', () => {
-    for (const value of ['unknown', 'StatementDispatchPointer1786721320000']) {
+    for (const value of ['unknown', 'StatementDispatchPointer1786721320000', 'a b']) {
       expect(() => validate({ ...base, CREWFLOW_UPGRADE_INCOMPLETE: value })).toThrow(/CREWFLOW_UPGRADE_INCOMPLETE was retired \(OWNER-DB-ULTIMATE Part B3\)/);
     }
     expect(() => validate({ ...base, CREWFLOW_UPGRADE_INCOMPLETE: '' })).not.toThrow();
