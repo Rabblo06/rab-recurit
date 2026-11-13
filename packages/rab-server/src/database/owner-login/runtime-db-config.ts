@@ -26,6 +26,7 @@
  *   CREWFLOW_UPGRADE_FAILURE          OWNER-DB-ULTIMATE Part B3 (owner: "Remove the CREWFLOW_UPGRADE_FAILURE choices"): a
  *   CREWFLOW_UPGRADE_FAILURE_POLICY   failed migration always refuses (66) and the next start retries it; only a failed
  *                                     upgrade COMMAND serves (70). There is nothing left to choose.
+ *   CREWFLOW_UPGRADE_INCOMPLETE       retired with the C3 relaxation (OWNER-DB-ULTIMATE Part B3).
  *
  * Values are compared exactly (case-sensitive, no trimming); unset and blank are the same thing (a compose `KEY=` line).
  * A refusal names the variable and the allowed values and never echoes the value.
@@ -52,6 +53,8 @@ export const REMOVED_DB_CONFIG_VARS: Readonly<Record<string, string>> = Object.f
   CREWFLOW_DB_MODE: 'There is no database mode switch any more: the API, the Worker and migrations all use the one PG_DATABASE_URL owner login. Remove CREWFLOW_DB_MODE.',
   CREWFLOW_UPGRADE_FAILURE: `CREWFLOW_UPGRADE_FAILURE ${UPGRADE_FAILURE_REMOVED}`,
   CREWFLOW_UPGRADE_FAILURE_POLICY: `CREWFLOW_UPGRADE_FAILURE_POLICY ${UPGRADE_FAILURE_REMOVED}`,
+  CREWFLOW_UPGRADE_INCOMPLETE:
+    'CREWFLOW_UPGRADE_INCOMPLETE was retired (OWNER-DB-ULTIMATE Part B3): nothing sets it, and no gate accepts a pending migration any more. Remove it from the environment.',
 });
 
 /**

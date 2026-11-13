@@ -85,6 +85,9 @@ crewflow_runtime_db_config() {
   if [ -n "${CREWFLOW_UPGRADE_FAILURE_POLICY:-}" ]; then
     refuse "CREWFLOW_UPGRADE_FAILURE_POLICY was removed (OWNER-DB-ULTIMATE Part B3): a failed migration always refuses to start and is retried on the next start; only a failed upgrade command serves, with upgrade:\"failed\" on /healthz. Remove it from the environment. Refusing to start."
   fi
+  if [ -n "${CREWFLOW_UPGRADE_INCOMPLETE:-}" ]; then
+    refuse "CREWFLOW_UPGRADE_INCOMPLETE was retired (OWNER-DB-ULTIMATE Part B3): nothing sets it, and no gate accepts a pending migration any more. Remove it from the environment. Refusing to start."
+  fi
   if [ "${NODE_ENV:-}" != test ]; then
     for seam in CREWFLOW_MIGRATION_TEST_STOP_BEFORE CREWFLOW_MIGRATION_TEST_FAIL_AT CREWFLOW_TEST_DEFER_SERVER_PROVISIONING; do
       eval "seam_value=\${$seam:-}"
@@ -118,12 +121,6 @@ crewflow_runtime_db_config() {
 # END owner-login runtime-db-config
 crewflow_runtime_db_config
 
-# CREWFLOW_UPGRADE_INCOMPLETE (retired with the C3 continue path, OWNER-DB-ULTIMATE Part B3): nothing sets it any more. A
-# value that reached the container from outside could still relax the API's pending-migration gate (the API boot gate reads
-# it), so it is refused, never silently passed on.
-if [ -n "${CREWFLOW_UPGRADE_INCOMPLETE:-}" ]; then
-  refuse "CREWFLOW_UPGRADE_INCOMPLETE must never be set on the api service (retired: a failed migration always refuses to start, OWNER-DB-ULTIMATE Part B3). Remove it."
-fi
 # O3 C2: DISABLE_CRON_JOBS_REGISTRATION (Twenty's switch; exactly true or false, unset = false) and the scheduler mode the
 # Worker will run (WORKER_SCHEDULER unset = bullmq in production, interval elsewhere — env.validation.ts's rule).
 case "${DISABLE_CRON_JOBS_REGISTRATION:-}" in

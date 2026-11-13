@@ -74,6 +74,8 @@ const CASES: Array<[string, Env]> = [
   ['CREWFLOW_UPGRADE_FAILURE_POLICY blank = absent', { CREWFLOW_MIGRATE_ON_START: 'true', CREWFLOW_UPGRADE_FAILURE_POLICY: '' }],
   ['both removed names: the first is reported', { CREWFLOW_MIGRATE_ON_START: 'true', CREWFLOW_UPGRADE_FAILURE: 'continue', CREWFLOW_UPGRADE_FAILURE_POLICY: 'refuse' }],
   ['a removed name wins over a bad value', { CREWFLOW_MIGRATE_ON_START: 'maybe', CREWFLOW_UPGRADE_FAILURE: 'x' }],
+  ['CREWFLOW_UPGRADE_INCOMPLETE (retired)', { CREWFLOW_MIGRATE_ON_START: 'true', CREWFLOW_UPGRADE_INCOMPLETE: 'Beta1786000000100' }],
+  ['CREWFLOW_UPGRADE_INCOMPLETE blank = absent', { CREWFLOW_MIGRATE_ON_START: 'true', CREWFLOW_UPGRADE_INCOMPLETE: '' }],
   ['CREWFLOW_DB_MODE=separated (removed)', { CREWFLOW_MIGRATE_ON_START: 'false', CREWFLOW_DB_MODE: 'separated' }],
   ['CREWFLOW_DB_MODE=twenty (removed)', { CREWFLOW_MIGRATE_ON_START: 'false', CREWFLOW_DB_MODE: 'twenty' }],
   ['CREWFLOW_DB_MODE blank = absent', { CREWFLOW_MIGRATE_ON_START: 'false', CREWFLOW_DB_MODE: '' }],

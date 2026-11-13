@@ -360,7 +360,7 @@ check('8h9 the child output still streams to the log (its own lines and the TWEN
 r = run('migrate-0-no-upgrade-flag', MIGRATE_ON, { ctl: { 'migrate-seq': '0', 'migrate-result': RESULT({ exitCode: 0, serve: true }) } });
 check('8h4 exit 0 -> main.js never receives CREWFLOW_UPGRADE_INCOMPLETE', r.code === 0 && upgradeOf(r.out) === '-' && !keysOf(line(r.out, 'main'), 'self').includes('CREWFLOW_UPGRADE_INCOMPLETE'), r.out);
 r = run('inherited-upgrade-incomplete', { ...BASE, CREWFLOW_UPGRADE_INCOMPLETE: 'Broken1786730000000' });
-check('8h5 an inherited CREWFLOW_UPGRADE_INCOMPLETE (retired) -> refused (64) before anything ran', r.code === 64 && /CREWFLOW_UPGRADE_INCOMPLETE must never be set on the api service/.test(r.out) && !line(r.out, 'check') && !line(r.out, 'main') && !line(r.out, 'register'), r.out);
+check('8h5 an inherited CREWFLOW_UPGRADE_INCOMPLETE (retired) -> refused (64) before anything ran', r.code === 64 && /CREWFLOW_UPGRADE_INCOMPLETE was retired \(OWNER-DB-ULTIMATE Part B3\)/.test(r.out) && !line(r.out, 'check') && !line(r.out, 'main') && !line(r.out, 'register'), r.out);
 r = run('migrate-66-fresh', MIGRATE_ON, { ctl: { 'migrate-seq': '66', 'migrate-result': JSON.stringify({ state: 'EMPTY', exitCode: 66, serve: false }) } });
 check('8i fresh-install failure (child 66) -> no start, exit 66, main never runs', r.code === 66 && /a migration failed/.test(r.out) && !line(r.out, 'main'), r.out);
 r = run('migrate-66-upgrade', MIGRATE_ON, { ctl: { 'migrate-seq': '66', 'migrate-result': RESULT({ exitCode: 66, serve: false, failedMigration: 'Broken1786730000000' }) } });
