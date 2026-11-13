@@ -14,7 +14,7 @@ import { createAdminDataSource } from './helpers/admin-datasource';
 import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
 
 /**
- * XP-09 Q6 (owner decision 2026-11-13): `revokeFamily` and `revokeAllForUser` stamp `core.refresh_token.revoked_at` only
+ * XP-09 Q6 (owner decision 2026-11-13): `revokeFamily`, `revokeAllForUser` and `revokeAllForUserExcept` stamp `core.refresh_token.revoked_at` only
  * where it is still NULL — the FIRST revocation wins and is never overwritten. Before, every call rewrote `revoked_at` on
  * every row of the family/user, including rows already revoked by rotation or by an earlier revoke. That
  * (a) erased when a token actually stopped being valid (the evidence a reuse investigation reads) and
@@ -125,6 +125,28 @@ describeIfDb('refresh token revocation: first revocation wins (XP-09 Q6)', () =>
     expect((await rowOf(a)).revoked_at).toEqual(aRevoked);
     expect((await rowOf(b)).revoked_at).toEqual(bRevoked);
     expect((await rowOf(c)).revoked_at).not.toBeNull();
+  });
+
+  it('revokeAllForUserExcept ("log out of other devices"): a second call never rewrites an existing revocation; the kept family stays live', async () => {
+    const { refreshToken: kept } = await factory.loginTokens(staff);
+    const { refreshToken: otherA } = await factory.loginTokens(staff);
+    const { refreshToken: otherB } = await factory.loginTokens(staff);
+    const keptFamily = (await rowOf(kept)).family_id;
+    expect(new Set([keptFamily, (await rowOf(otherA)).family_id, (await rowOf(otherB)).family_id]).size).toBe(3);
+    const aRevoked = await setRevokedAt(otherA, `now() - interval '20 days'`);
+    const revokeOthers = () => tenantContext.runInTenantContext(ctx(), (m) => refreshTokens.revokeAllForUserExcept(m, staff.userId, keptFamily, 'revoked_by_user'));
+
+    await revokeOthers();
+    expect((await rowOf(otherA)).revoked_at).toEqual(aRevoked);
+    expect((await rowOf(otherB)).revoked_at).not.toBeNull();
+    expect((await rowOf(kept)).revoked_at).toBeNull();
+
+    // "Later": the live family's first revocation is made visibly old, then the user logs out of other devices again.
+    const bRevoked = await setRevokedAt(otherB, `now() - interval '4 days'`);
+    await revokeOthers();
+    expect((await rowOf(otherA)).revoked_at).toEqual(aRevoked);
+    expect((await rowOf(otherB)).revoked_at).toEqual(bRevoked);
+    expect((await rowOf(kept)).revoked_at).toBeNull();
   });
 
   it('abuse case: replaying an old rotated token (reuse detection → revokeFamily) cannot move its revocation time and so cannot extend its retention', async () => {

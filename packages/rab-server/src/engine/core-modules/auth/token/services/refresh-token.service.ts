@@ -358,9 +358,10 @@ export class RefreshTokenService {
    * suspension, account deletion) is an admin/system-driven path that WANTS every session gone,
    * including whichever one the actor is using to trigger it; conflating the two would risk a
    * future caller passing the wrong exclusion by mistake in a security-sensitive path.
+   * XP-09 Q6: the token rows are stamped only WHERE revoked_at IS NULL too (first revocation wins).
    */
   async revokeAllForUserExcept(manager: EntityManager, userId: string, exceptFamilyId: string, reason = 'revoked_by_user'): Promise<void> {
-    await manager.query(`UPDATE core.refresh_token SET revoked_at = now() WHERE user_id = $1 AND family_id != $2`, [userId, exceptFamilyId]);
+    await manager.query(`UPDATE core.refresh_token SET revoked_at = now() WHERE user_id = $1 AND family_id != $2 AND revoked_at IS NULL`, [userId, exceptFamilyId]);
     await manager.query(
       `UPDATE core.user_session
           SET revoked_at = now(), revoked_reason = $3, security_version = security_version + 1
