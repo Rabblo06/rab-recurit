@@ -300,7 +300,8 @@ describe('deployment identity: the marker decision (pure)', () => {
       const text = readFileSync(join(repo, file), 'utf8');
       // The host of every postgres URL the file spells out (comments included: they are the operator instructions). A
       // compose interpolation in the userinfo (`${PG_DATABASE_PASSWORD:?a message with spaces}`) is one token.
-      for (const m of text.matchAll(/postgres(?:ql)?:\/\/(?:\$\{[^}]*\}|[^@\s])*@([A-Za-z0-9_.-]+)[:/]/g)) if (isSingleLabelHost(m[1])) used.add(m[1].toLowerCase());
+      // The alternatives are disjoint (a `$` starts `${...}` only; any other character is not `$`): linear, no backtracking.
+      for (const m of text.matchAll(/postgres(?:ql)?:\/\/(?:\$\{[^}]*\}|\$(?!\{)|[^@\s$])*@([A-Za-z0-9_.-]+)[:/]/g)) if (isSingleLabelHost(m[1])) used.add(m[1].toLowerCase());
     }
     expect([...used].sort()).toEqual([...LOCAL_DATABASE_SERVICE_HOSTS].sort());
   });

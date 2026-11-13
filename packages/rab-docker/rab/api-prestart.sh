@@ -270,8 +270,11 @@ isolation_report
 #   - CREWFLOW_DB_TARGET_FILE=<that file> -> the URL from the target and the password file. A file that is not there yet
 #     (derive exit 75) is waited for, 2 s apart, at most 120 s (60 attempts: bounded by a COUNT, never by the clock, so a
 #     clock step cannot stretch or end the wait), with a fixed message, because a platform may not honour depends_on:
-#     condition: service_completed_successfully (OpenShip: NOT VERIFIED); then exit 75. There is no other path. Each derive
-#     run has its own bound (`timeout 10`): a derive that hangs (a FIFO, a stuck volume) ends as exit 70, never a hung start.
+#     condition: service_completed_successfully (OpenShip: NOT VERIFIED); then exit 75. There is no other path. The derive
+#     run is NOT wrapped in busybox `timeout`: its watcher process inherits the command-substitution pipe (fd 4) and keeps it
+#     open until the bound expires, so every start paid the full bound (measured: 20 s with `timeout 20` for a step that takes
+#     0 s), and a slow cold start was killed. A hang is prevented inside the step instead: both files are opened
+#     O_NONBLOCK|O_NOFOLLOW and fstat-checked, so a FIFO, a symlink or a directory is refused at once (exit 64).
 # Then PG_DATABASE_URL = the runtime URL; PG_DATABASE_PASSWORD and CREWFLOW_DB_TARGET_FILE are unset.
 # TLS (D1 a): when the runtime URL's host is exactly `db` and PG_SSL_CA_CERT_PATH is unset (or blank), it is set to the
 # bundled db's own CA (mounted read-only). The block below is identical in worker-start.sh and db-setup.sh
@@ -303,14 +306,13 @@ if [ -n "${PG_DATABASE_URL:-}" ]; then
 fi
 unset PG_DATABASE_URL
 export CREWFLOW_DB_TARGET_FILE="$DB_TARGET_FILE"
-DERIVE_TIMEOUT_SECONDS=10
 DB_SETUP_ATTEMPTS=$(( (DB_SETUP_WAIT_SECONDS + 1) / 2 ))
 if [ "$DB_SETUP_ATTEMPTS" -lt 1 ]; then DB_SETUP_ATTEMPTS=1; fi
 ATTEMPT=0
 while :; do
   ATTEMPT=$((ATTEMPT + 1))
   STATUS=0
-  RUNTIME_URL="$(timeout "$DERIVE_TIMEOUT_SECONDS" node "$DERIVE_RUNTIME_URL" 4>&1 1>&2)" || STATUS=$?
+  RUNTIME_URL="$(node "$DERIVE_RUNTIME_URL" 4>&1 1>&2)" || STATUS=$?
   if [ "$STATUS" -ne 75 ]; then break; fi
   RUNTIME_URL=""
   if [ "$ATTEMPT" -ge "$DB_SETUP_ATTEMPTS" ]; then
@@ -319,12 +321,6 @@ while :; do
   echo "api-prestart: waiting for db-setup: the database target file is not there yet (attempt ${ATTEMPT} of ${DB_SETUP_ATTEMPTS}, 2 s apart)"
   run_step sleep 2 || true
 done
-case "$STATUS" in
-  124 | 137 | 143)
-    RUNTIME_URL=""
-    fail_after_delay 70 "the derive step did not finish within ${DERIVE_TIMEOUT_SECONDS}s (a stuck db-setup volume or a non-regular file?)"
-    ;;
-esac
 if [ "$STATUS" -ne 0 ]; then
   RUNTIME_URL=""
   fail_after_delay "$STATUS" "could not build the crewflow_owner connection (see the derive-runtime-url line above)"

@@ -7,7 +7,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 
 import { OWNER_CREDENTIAL_MESSAGES } from '../../../owner-login/owner-credential';
-import { type OwnerPasswordRead, OwnerPasswordFileError, OWNER_PASSWORD_FILE_MESSAGES } from '../../../owner-login/owner-password-file';
+import { type OwnerPasswordRead, OwnerPasswordFileError, OwnerPasswordMismatchError, OWNER_PASSWORD_FILE_MESSAGES } from '../../../owner-login/owner-password-file';
 import {
   bootstrapDriverConfigs,
   bootstrapOwnerWithIo,
@@ -557,7 +557,7 @@ describe('owner bootstrap: the pending password file (security review L1)', () =
     };
     io.promotePassword = () => {
       order.push(`promote@${sent.length}`);
-      m.files.promoteNext();
+      m.files.promoteNext('new-password-2');
     };
     expect(await bootstrapOwnerWithIo(io)).toMatchObject({ outcome: 'updated', passwordSet: true });
     const texts = sent.map((q) => q.text);
@@ -572,7 +572,7 @@ describe('owner bootstrap: the pending password file (security review L1)', () =
     const first = fakeIo([existing, existing], [{ ok: true }], { failOn: OWNER_BOOTSTRAP_Q4C_DO, failCode: '22023' });
     first.io.passwordSource = 'new';
     first.io.persistPassword = () => m.files.writeNextExclusive('new-password-2');
-    first.io.promotePassword = () => m.files.promoteNext();
+    first.io.promotePassword = () => m.files.promoteNext('new-password-2');
     await expect(bootstrapOwnerWithIo(first.io)).rejects.toBeInstanceOf(OwnerBootstrapRefusal);
     expect(first.sent.map((q) => q.text)).toContain(OWNER_BOOTSTRAP_ROLLBACK);
     expect(m.state).toEqual({ next: 'new-password-2' }); // never promoted: no file the role rejects
@@ -588,7 +588,7 @@ describe('owner bootstrap: the pending password file (security review L1)', () =
     const second = fakeIo([existing, existing, existing], [{ ok: true }]);
     second.io.passwordSource = 'new';
     second.io.persistPassword = () => m.files.writeNextExclusive('new-password-3');
-    second.io.promotePassword = () => m.files.promoteNext();
+    second.io.promotePassword = () => m.files.promoteNext('new-password-3');
     expect(await bootstrapOwnerWithIo(second.io)).toMatchObject({ outcome: 'updated', passwordSet: true });
     expect(m.state).toEqual({ main: 'new-password-3' });
   });
@@ -608,6 +608,33 @@ describe('owner bootstrap: the pending password file (security review L1)', () =
     const r = await resolveStoredPassword(m.files, async () => ({ ok: true }), quiet().io, 0);
     expect(r.source === 'file' && r.password).toBe('new-password-2');
     expect(m.state).toEqual({ main: 'new-password-2' });
+  });
+
+  it('F1: the pending file changed under this run (another run\'s password) -> exit 70, nothing renamed, owner-password untouched', async () => {
+    const m = memFiles({ main: 'stored-password-1' });
+    const { io } = fakeIo([existing, existing, existing], [{ ok: true }]);
+    io.passwordSource = 'new';
+    io.persistPassword = () => {
+      m.files.writeNextExclusive('this-run-password');
+      m.state.next = 'another-run-password'; // what the race used to do: another run replaced the pending file
+    };
+    io.promotePassword = () => m.files.promoteNext('this-run-password');
+    const error = await bootstrapOwnerWithIo(io).catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(OwnerBootstrapFailure);
+    expect((error as Error).message).toBe(OWNER_BOOTSTRAP_MESSAGES.pendingNotThisRun);
+    expect(m.state).toEqual({ main: 'stored-password-1', next: 'another-run-password' });
+    expect(m.calls).not.toContain('promote');
+  });
+
+  it('F1: settling promotes only the pending password it probed', async () => {
+    const m = memFiles({ next: 'probed-password' });
+    const files: OwnerPasswordFiles = { ...m.files, promoteNext: (expected) => m.files.promoteNext(expected === 'probed-password' ? expected : 'x') };
+    const r = await resolveStoredPassword(files, async () => ({ ok: true }), quiet().io, 0);
+    expect(r.source === 'file' && r.password).toBe('probed-password');
+    const k = memFiles({ next: 'probed-password' });
+    const swapped: OwnerPasswordFiles = { ...k.files, promoteNext: () => k.files.promoteNext('someone-else') };
+    await expect(resolveStoredPassword(swapped, async () => ({ ok: true }), quiet().io, 0)).rejects.toThrow(OWNER_BOOTSTRAP_MESSAGES.pendingNotThisRun);
+    expect(k.state).toEqual({ next: 'probed-password' });
   });
 
   it('the stale-file and race messages are neutral (no claim about who changed what)', () => {
@@ -635,7 +662,9 @@ function memFiles(init: { main?: string; next?: string } = {}, calls: string[] =
       calls.push('write-next');
       state.next = pw;
     },
-    promoteNext: () => {
+    promoteNext: (expected) => {
+      // As owner-password-file.ts: only the pending file holding exactly this run's password is promoted (F1).
+      if (state.next === undefined || state.next !== expected) throw new OwnerPasswordMismatchError();
       calls.push('promote');
       state.main = state.next;
       delete state.next;
@@ -695,6 +724,19 @@ describe('owner bootstrap: the whole step without a database', () => {
     await run({ PG_DATABASE_URL: 'postgres://dbadmin:adminpw0123456789@127.0.0.1:1/crewflow_unit' }, written);
     await run({ PG_DATABASE_URL: `${ADMIN_URL}?sslrootcert=/etc/x.pem` }, written);
     expect(written).toEqual([]);
+  });
+
+  it('the persist-delay test seam is refused outside NODE_ENV=test, or out of range, before connecting (64)', async () => {
+    for (const env of [
+      { PG_DATABASE_URL: ADMIN_URL, NODE_ENV: 'production', CREWFLOW_TEST_DB_SETUP_PERSIST_DELAY_MS: '10' },
+      { PG_DATABASE_URL: ADMIN_URL, NODE_ENV: 'test', CREWFLOW_TEST_DB_SETUP_PERSIST_DELAY_MS: '99999' },
+      { PG_DATABASE_URL: ADMIN_URL, NODE_ENV: 'test', CREWFLOW_TEST_DB_SETUP_PERSIST_DELAY_MS: '1e3' },
+    ]) {
+      const lines: string[] = [];
+      const result = await runOwnerBootstrap(env, { log: (l) => lines.push(l), retryWindowMs: 0, passwordFiles: memFiles().files });
+      expect(result).toMatchObject({ outcome: 'refused', exitCode: 64 });
+      expect(lines).toContain(OWNER_BOOTSTRAP_MESSAGES.testSeamOutsideTest);
+    }
   });
 
   it('without the password-file I/O the step fails closed (70)', async () => {

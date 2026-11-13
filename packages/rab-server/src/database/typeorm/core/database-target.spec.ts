@@ -237,10 +237,11 @@ describe('database target guard (pure resolution)', () => {
 
   it('17b. final review F4: an UNLISTED single-label host is REMOTE for DB_TARGET=local|test; the compose services stay local', () => {
     for (const DB_TARGET of ['local', 'test']) {
-      for (const host of ['db', 'prod-db', 'database']) {
+      for (const host of ['prod-db', 'database', 'dbserver']) {
         expectRefused({ DB_TARGET, PG_DATABASE_URL: `postgres://rab_owner:${SECRET}@${host}:5432/rab` }, new RegExp(`DB_TARGET=(local|test) refuses a remote host \\("${host}"\\)`));
       }
-      for (const host of ['devdb', 'postgres', 'pg']) {
+      // The repository's compose database services (LOCAL_DATABASE_SERVICE_HOSTS; `db` is the bundled database since DB-SETUP).
+      for (const host of ['db', 'devdb', 'postgres', 'pg']) {
         expect(run({ DB_TARGET, PG_DATABASE_URL: `postgres://rab_owner:${SECRET}@${host}:5432/rab` }).classification).toBe('NON-PRODUCTION');
       }
     }

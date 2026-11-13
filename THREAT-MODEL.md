@@ -7106,8 +7106,16 @@ Phase X Part 2 finding XA-08 (`docs/plans/PHASE-X-STAGE0-PART2.md` §2.6). Front
   then `fstat` on that descriptor must show a regular file of at most 4096 bytes owned by the reading uid with no
   group/other bit; an empty file, a symlink, a FIFO or a wrong owner/mode is refused (exit 64), never read as "missing".
   Writing loops until every byte is written, sets the mode on the descriptor (never a path-based chmod) and fsyncs the
-  file and the directory. A lost file is replaced only through the pending file below, created exclusively (a concurrent
-  db-setup that stored one first wins; this one fails, exit 70, and changes nothing). The password is random (32 bytes),
+  file and the directory. A lost file is replaced only through the pending file below. Runs never overlap on one volume
+  (security re-review F1): every db-setup run first takes an exclusive lock directory in the volume
+  (`.db-setup.lock`, mkdir; a second run stops with exit 70 before it reads, deletes or writes any file there; a lock left by
+  a killed run is taken over only when stale: another boot, a dead pid on the same host, or older than 15 minutes), and a
+  pending file is promoted only when it still holds this run's password (constant-time compare; otherwise exit 70 and
+  nothing is renamed). Before the lock, two runs on one volume could leave the apps' file on one password and the role on
+  another. The gates also refuse every other path to the volume from an added service (security re-review F2): a second
+  top-level name for it (`external` alias), a `driver_opts` bind, `pid`/`ipc`/`network_mode` sharing with db-setup,
+  rab-api or rab-worker (or any `container:`), a bind of the Docker root or its ancestors, and an added service running as
+  uid 0 or 1000. The password is random (32 bytes),
   not derived from anything, so an APP_SECRET leak gives no database login. The bundled db is reachable only from the app network; an external database
   only through the provider's allow-list; verify-full TLS.
 - **Residual.** Volume backups and snapshots contain the password: protect and encrypt them like the database. The file
