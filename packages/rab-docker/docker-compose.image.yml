@@ -23,19 +23,19 @@
 # (scripts/compose-owner-login.cjs refuses it in compose.env); rolling back to a two-digest release such as v0.4.0 uses
 # that release's own compose files (docs/release/OWNER-LOGIN-RECOVERY.md section 4.4).
 #
-# ONE DATABASE URL, LIKE TWENTY (DB-SETUP, owner decisions D1 a / D3 / D4 / D5). PG_DATABASE_URL is the database ADMIN URL,
-# an interpolation value of compose.env (template env/compose.env.example), byte-identical on rab-api and rab-worker:
-#   - BUNDLED (default): set only PG_DATABASE_PASSWORD in compose.env; the URL defaults to the bundled `db` service's
-#     superuser, postgres://postgres:<PG_DATABASE_PASSWORD>@db:5432/crewflow?sslmode=verify-full (db makes its own CA).
-#   - EXTERNAL: set PG_DATABASE_URL in compose.env to your provider's admin URL (DIRECT host, sslmode=verify-full; the CA
-#     file through CREWFLOW_PG_CA_FILE + PG_SSL_CA_CERT_PATH=/run/crewflow/pg-ca.crt in database.env when the system store
-#     does not hold it). `db` then runs idle (it still needs a PG_DATABASE_PASSWORD).
-#   - An existing crewflow_owner URL is passed through unchanged (D5).
-# No runtime process ever holds the admin URL: api-prestart.sh runs the bootstrap child (the ONLY admin connection: it
-# creates crewflow_owner, or resets its password to the one derived from APP_SECRET), then replaces PG_DATABASE_URL with the
-# derived crewflow_owner URL and unsets the admin credential before the migrate child and main.js; rab-worker's
-# worker-start.sh does the same swap and never connects as the admin (accepted risk TM-DB-1: the admin URL is in this
-# container definition, T-1). There is no migrator, provisioner, worker, ops or replica URL, no .env.migrate and no role
+# DATABASE SETUP LIKE TWENTY (DB-SETUP, owner decisions D1 a / D3 / D4 / D5; PR #125 option A, 2026-11-13). Interpolation
+# values of compose.env (template env/compose.env.example); exactly one way at a time:
+#   - BUNDLED (default): set only PG_DATABASE_PASSWORD; the admin URL is the bundled `db` service's superuser,
+#     postgres://postgres:<PG_DATABASE_PASSWORD>@db:5432/crewflow?sslmode=verify-full (db makes its own CA).
+#   - EXTERNAL: set PG_DATABASE_ADMIN_URL to your provider's admin URL (DIRECT host, sslmode=verify-full; the CA file
+#     through CREWFLOW_PG_CA_FILE + PG_SSL_CA_CERT_PATH=/run/crewflow/pg-ca.crt in database.env when the system store does
+#     not hold it). `db` then runs idle (it still needs a PG_DATABASE_PASSWORD).
+#   - PASS-THROUGH (an existing crewflow_owner, DB-SETUP-PLAN §7.1, D5): PG_DATABASE_URL = that crewflow_owner URL, exactly as
+#     before; rab-api and rab-worker receive it unchanged, db-setup does nothing. Any other login there is refused.
+# The admin URL reaches ONLY the one-shot `db-setup` service, which runs the bootstrap child (the ONLY admin connection: it
+# creates crewflow_owner, or resets its password to the one derived from APP_SECRET), writes a credential-free target file
+# to the crewflow-db-target volume and exits. rab-api and rab-worker never receive it: they build the crewflow_owner URL
+# from that file and APP_SECRET (accepted risk TM-DB-1: the admin URL is in db-setup's container definition, T-1). There is no migrator, provisioner, worker, ops or replica URL, no .env.migrate and no role
 # password in any env file. database.env holds the optional TLS/name/identity settings; the runtime settings (APP_SECRET,
 # REDIS_URL, URLs, email, S3) are in ${CREWFLOW_SECRETS_DIR}/runtime.env (template env/runtime.env.example), read by rab-api
 # and rab-worker. scripts/compose-owner-login.cjs enforces all of this in CI.
@@ -144,8 +144,8 @@ services:
   # the cluster's own, unused, file). Even a process inside this container needs the password (`docker compose exec -e PGPASSWORD db psql -U postgres -d crewflow`, PGPASSWORD = PG_DATABASE_PASSWORD).
   # pg_isready (the health check) does not authenticate. The image reads the superuser password ONLY when the data volume is
   # empty (first start): changing PG_DATABASE_PASSWORD later does not change it (ALTER ROLE postgres PASSWORD ... first).
-  # EXTERNAL DATABASE: set PG_DATABASE_URL to your database's admin URL (direct host, sslmode=verify-full); the app then
-  # ignores this service, which still runs idle and still needs a PG_DATABASE_PASSWORD (any strong value).
+  # EXTERNAL DATABASE: set PG_DATABASE_ADMIN_URL to your database's admin URL (direct host, sslmode=verify-full); the app
+  # then ignores this service, which still runs idle and still needs a PG_DATABASE_PASSWORD (any strong value).
   # Image: postgres:16 (Debian, 16.15), by its multi-platform index digest. CREWFLOW_POSTGRES_IMAGE may name a Debian
   # postgres:16, :17 or :18 image by digest. VOLUME LAYOUT, the same for all three (a fresh named volume takes the ownership
   # of the image directory it is mounted on, and as uid 999 the db can only use volumes whose root it can write):
@@ -214,7 +214,7 @@ services:
       POSTGRES_USER: postgres
       POSTGRES_DB: crewflow
       # T-2 (owner decision D4): an environment variable, like Twenty (OpenShip has no secret files).
-      POSTGRES_PASSWORD: ${PG_DATABASE_PASSWORD:?PG_DATABASE_PASSWORD is required for the bundled database (openssl rand -hex 32), also when PG_DATABASE_URL names your own database}
+      POSTGRES_PASSWORD: ${PG_DATABASE_PASSWORD:?PG_DATABASE_PASSWORD is required for the bundled database (openssl rand -hex 32), also with your own database}
       # SCRAM for socket and TCP logins alike: no trust (the image default for loopback TCP) and no peer.
       POSTGRES_INITDB_ARGS: --auth-local=scram-sha-256 --auth-host=scram-sha-256 --data-checksums
       # The cluster lives in a subdirectory of the data volume, beside the server's TLS key (tls/); fixed for every major.
@@ -254,17 +254,66 @@ services:
     cpus: ${CREWFLOW_POSTGRES_CPUS:-2}
 
   # ---------------------------------------------------------------------------
+  # db-setup — the ONE-SHOT database setup (PR #125 option A, owner decision 2026-11-13). The SAME image as rab-api and
+  # rab-worker; its entrypoint db-setup.sh runs only the bootstrap child (creates crewflow_owner, or resets its password to
+  # the one derived from APP_SECRET; a crewflow_owner PG_DATABASE_URL is passed through with no connection), writes the
+  # target file /run/crewflow/db-target/target.json on the crewflow-db-target volume, and exits. It is the ONLY service of
+  # the app image that receives the database ADMIN URL (PG_DATABASE_URL: the bundled db's superuser by default, or your own
+  # database's admin URL), plus APP_SECRET and the TLS CA. rab-api and rab-worker never receive it: they mount the target
+  # volume read-only and build the crewflow_owner URL from it (a credential-free target + APP_SECRET; or, in pass-through,
+  # the crewflow_owner URL itself). It runs again on every `docker compose up` (it removes the old target first), then
+  # rab-api starts (depends_on: service_completed_successfully). No port, no health check (it exits), never restarted.
+  # ---------------------------------------------------------------------------
+  db-setup:
+    image: ${CREWFLOW_IMAGE_REPOSITORY:-adhin007/adolphus}@${CREWFLOW_IMAGE_TAG:?CREWFLOW_IMAGE_TAG must be the release image index digest (sha256:<64 hex>), never a tag}
+    entrypoint: ["./db-setup.sh"]
+    # database.env: the TLS settings; runtime.env: APP_SECRET (compose cannot pick one key from a file, so db-setup reads
+    # the whole runtime.env, which rab-api and rab-worker also read; SECURITY TRADE-OFF in DB-SETUP-LEAD.md).
+    env_file:
+      - path: ${CREWFLOW_SECRETS_DIR:?CREWFLOW_SECRETS_DIR must name the host secret directory}/database.env
+        required: true
+      - path: ${CREWFLOW_SECRETS_DIR:?CREWFLOW_SECRETS_DIR must name the host secret directory}/runtime.env
+        required: true
+    environment:
+      # The database URL of the bootstrap child, this service only: compose.env's PG_DATABASE_URL (a crewflow_owner URL:
+      # pass-through, nothing to do), else PG_DATABASE_ADMIN_URL (your own database's admin URL), else the bundled db's
+      # superuser built from PG_DATABASE_PASSWORD.
+      PG_DATABASE_URL: ${PG_DATABASE_URL:-${PG_DATABASE_ADMIN_URL:-postgresql://postgres:${PG_DATABASE_PASSWORD:?PG_DATABASE_PASSWORD is required (the bundled db), or set PG_DATABASE_ADMIN_URL}@db:5432/crewflow?sslmode=verify-full}}
+      NODE_ENV: production
+      RAB_RUNTIME_ENV: production
+    networks: [default, crewflow-db]
+    volumes:
+      - crewflow-db-ca:/run/crewflow/db-ca:ro
+      # EXTERNAL database only: your provider's CA (as on rab-api).
+      - ${CREWFLOW_PG_CA_FILE:-/dev/null}:/run/crewflow/pg-ca.crt:ro
+      # The target file (written here; read-only in rab-api and rab-worker).
+      - crewflow-db-target:/run/crewflow/db-target
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: "no"
+    logging: *logging
+    user: "1000:1000"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    pids_limit: 64
+    mem_limit: 256m
+    cpus: 1
+    stop_grace_period: 40s
+
+  # ---------------------------------------------------------------------------
   # rab-api — the HTTP API. Migrates on start (O3 C1), registers the job schedulers (C2), then main.js. ONE instance (C5).
   # ---------------------------------------------------------------------------
   rab-api:
     image: ${CREWFLOW_IMAGE_REPOSITORY:-adhin007/adolphus}@${CREWFLOW_IMAGE_TAG:?CREWFLOW_IMAGE_TAG must be the release image index digest (sha256:<64 hex>), never a tag}
 
     # DB-SETUP PID 1 (lead decision 2026-11-12, owner requirement #5): api-prestart.sh is the ENTRYPOINT (PID 1; no command,
-    # no compose init). It runs the refusals, the runtime-isolation check, the bootstrap child, the URL swap, the migrate
-    # child and the scheduler registration, then `exec /sbin/tini -s -- node packages/rab-server/dist/main.js`: tini (PID 1
-    # from then on) and main.js inherit only the cleaned environment, so no process here holds the admin URL. Owner CLI
-    # one-offs: `docker compose run --rm --no-deps rab-api node packages/rab-server/dist/command/main.js <command>` (the
-    # script swaps the URL and runs the command as crewflow_owner, nothing else).
+    # no compose init). It runs the refusals, the runtime-isolation check, builds the crewflow_owner URL from db-setup's
+    # target file (option A: this service never receives the admin URL), waits (bounded, 120 s) for a working login, runs
+    # the migrate child and the scheduler registration, then `exec /sbin/tini -s -- node packages/rab-server/dist/main.js`.
+    # Owner CLI one-offs: `docker compose run --rm --no-deps rab-api node packages/rab-server/dist/command/main.js <command>`
+    # (the script builds the same crewflow_owner URL and runs the command with it, nothing else).
     entrypoint: ["./api-prestart.sh"]
 
     env_file:
@@ -283,6 +332,8 @@ services:
     volumes:
       # The bundled db's own CA (read-only; api-prestart.sh sets PG_SSL_CA_CERT_PATH=/run/crewflow/db-ca/ca.crt for host db).
       - crewflow-db-ca:/run/crewflow/db-ca:ro
+      # db-setup's target file (read-only): the crewflow_owner URL is built from it.
+      - crewflow-db-target:/run/crewflow/db-target:ro
       # EXTERNAL database only: the CA of your provider's server certificate (PG_SSL_CA_CERT_PATH=/run/crewflow/pg-ca.crt in
       # database.env). Unset = an empty file (the bundled db and providers in the system CA store need none).
       - ${CREWFLOW_PG_CA_FILE:-/dev/null}:/run/crewflow/pg-ca.crt:ro
@@ -298,9 +349,10 @@ services:
           mode: 0555
 
     environment:
-      # The database ADMIN URL (compose.env): the bundled db by default, or PG_DATABASE_URL. api-prestart.sh swaps it for
-      # the crewflow_owner URL before any runtime process starts. Identical on rab-worker.
-      PG_DATABASE_URL: ${PG_DATABASE_URL:-postgresql://postgres:${PG_DATABASE_PASSWORD:?PG_DATABASE_PASSWORD is required (the bundled db), or set PG_DATABASE_URL}@db:5432/crewflow?sslmode=verify-full}
+      # PR #125 option A: NEVER the admin URL. Empty by default (it builds the crewflow_owner URL from db-setup's target
+      # file); compose.env's PG_DATABASE_URL only for an existing crewflow_owner URL (pass-through, DB-SETUP-PLAN §7.1),
+      # which this service's entrypoint and the runtime refuse for any other login. An env-file value is overridden.
+      PG_DATABASE_URL: ${PG_DATABASE_URL:-}
       NODE_ENV: production
       RAB_RUNTIME_ENV: production
       AI_ENABLED: 'false'
@@ -353,9 +405,14 @@ services:
     depends_on:
       rab-redis:
         condition: service_healthy
-      # The bootstrap child connects to the bundled db first (idle when PG_DATABASE_URL names an external database).
+      # The bundled db (idle with your own database).
       db:
         condition: service_healthy
+      # Option A: db-setup (the only service with the admin URL) has created crewflow_owner and written the target file.
+      # Without this condition api-prestart.sh still waits, bounded (120 s), for the target file and a working
+      # crewflow_owner login, and never takes an admin path.
+      db-setup:
+        condition: service_completed_successfully
 
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://localhost:3000/healthz"]
@@ -388,10 +445,10 @@ services:
   rab-worker:
     image: ${CREWFLOW_IMAGE_REPOSITORY:-adhin007/adolphus}@${CREWFLOW_IMAGE_TAG:?CREWFLOW_IMAGE_TAG must be the release image index digest (sha256:<64 hex>), never a tag}
 
-    # DB-SETUP PID 1: worker-start.sh is the ENTRYPOINT (PID 1): it derives the crewflow_owner URL, unsets the admin
-    # credential, then `exec /sbin/tini -s -- node packages/rab-worker/dist/main.js`. tini is PID 1 (the Worker's watchdog
-    # SIGKILL, ignored by the kernel for PID 1, still works) and holds only the cleaned environment. NO compose `init: true`:
-    # docker-init would be PID 1 with the container's environment, i.e. the admin URL (compose-owner-login.cjs refuses it).
+    # DB-SETUP PID 1: worker-start.sh is the ENTRYPOINT (PID 1): it builds the crewflow_owner URL from db-setup's target
+    # file (option A: this service never receives the admin URL), then `exec /sbin/tini -s -- node
+    # packages/rab-worker/dist/main.js`. tini is PID 1 (the Worker's watchdog SIGKILL, ignored by the kernel for PID 1, still
+    # works). NO compose `init: true` (compose-owner-login.cjs refuses it).
     entrypoint: ["./worker-start.sh"]
     working_dir: /app
     env_file:
@@ -409,6 +466,7 @@ services:
     networks: [default, crewflow-db]
     volumes:
       - crewflow-db-ca:/run/crewflow/db-ca:ro
+      - crewflow-db-target:/run/crewflow/db-target:ro
       - ${CREWFLOW_PG_CA_FILE:-/dev/null}:/run/crewflow/pg-ca.crt:ro
     # Above the 30 s jobs drain plus margin, so a SIGTERM never cuts a drain short.
     stop_grace_period: 45s
@@ -423,8 +481,10 @@ services:
     logging: *logging
 
     environment:
-      # The same database ADMIN URL as rab-api; worker-start.sh swaps it for the crewflow_owner URL before the Worker starts.
-      PG_DATABASE_URL: ${PG_DATABASE_URL:-postgresql://postgres:${PG_DATABASE_PASSWORD:?PG_DATABASE_PASSWORD is required (the bundled db), or set PG_DATABASE_URL}@db:5432/crewflow?sslmode=verify-full}
+      # PR #125 option A: NEVER the admin URL. Empty by default (it builds the crewflow_owner URL from db-setup's target
+      # file); compose.env's PG_DATABASE_URL only for an existing crewflow_owner URL (pass-through, DB-SETUP-PLAN §7.1),
+      # which this service's entrypoint and the runtime refuse for any other login. An env-file value is overridden.
+      PG_DATABASE_URL: ${PG_DATABASE_URL:-}
       NODE_ENV: production
       RAB_RUNTIME_ENV: production
       AI_ENABLED: 'false'
@@ -486,12 +546,15 @@ services:
     restart: unless-stopped
 
 networks:
-  # The bundled db's network: internal (no route out), never published; only db, rab-api and rab-worker are on it.
+  # The bundled db's network: internal (no route out), never published; only db, db-setup, rab-api and rab-worker are on it.
   crewflow-db:
     internal: true
 
 volumes:
   rab-redis-data:
-  # The bundled db: its cluster and server TLS key; and its CA certificate (shared read-only with rab-api and rab-worker).
+  # The bundled db: its cluster and server TLS key; and its CA certificate (shared read-only with db-setup, rab-api and
+  # rab-worker).
   crewflow-db-data:
   crewflow-db-ca:
+  # db-setup's target file (option A): written by db-setup only, mounted read-only by rab-api and rab-worker.
+  crewflow-db-target:

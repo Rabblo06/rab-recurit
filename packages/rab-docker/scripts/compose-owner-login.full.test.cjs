@@ -46,23 +46,82 @@ test('every committed combination passes every check', { skip }, () => {
   for (const c of COMBOS) assert.deepEqual(checkModel(fresh(c.name), c), [], c.name);
 });
 
-test('one credential: a different or missing PG_DATABASE_URL on any app service is refused', { skip }, () => {
-  for (const c of [REL, EXT]) {
+const PT = 'pass-through';
+const SETUP = gate.DB_SETUP_SERVICE;
+
+test('DENIAL option A: rab-api / rab-worker with the admin URL, or anything but empty / the pass-through crewflow_owner URL, are refused', { skip }, () => {
+  for (const c of [REL, EXT, PT, 'staging']) {
     for (const svc of APP) {
-      assertRefused(problemsAfter(c, (s) => { s[svc].environment.PG_DATABASE_URL = gate.SENTINEL_URL.replace('db-direct', 'db-other'); }), /PG_DATABASE_URL differs/);
-      assertRefused(problemsAfter(c, (s) => { delete s[svc].environment.PG_DATABASE_URL; }), new RegExp(`${svc}: PG_DATABASE_URL is missing`));
+      // The admin URL (bundled or external), another crewflow_owner URL, or any other value: refused.
+      for (const url of [gate.BUNDLED_URL, gate.SENTINEL_ADMIN_URL, gate.SENTINEL_URL.replace('db-direct', 'db-other'), 'x', ...(c === PT ? [''] : [gate.SENTINEL_URL])]) {
+        assertRefused(problemsAfter(c, (s) => { s[svc].environment.PG_DATABASE_URL = url; }), new RegExp(`${svc}: PG_DATABASE_URL is not ${c === PT ? 'compose' : 'empty'}`));
+      }
+      assertRefused(problemsAfter(c, (s) => { delete s[svc].environment.PG_DATABASE_URL; }), new RegExp(`${svc}: PG_DATABASE_URL is not committed`));
     }
   }
 });
 
-test('DB-SETUP: the URL is the bundled db\'s admin URL by default and compose.env\'s PG_DATABASE_URL when set; a committed or env-file value is refused', { skip }, () => {
-  assert.equal(fresh(REL).services['rab-api'].environment.PG_DATABASE_URL, gate.BUNDLED_URL);
-  assert.equal(fresh(EXT).services['rab-worker'].environment.PG_DATABASE_URL, gate.SENTINEL_URL);
+test('DENIAL option A: a database credential anywhere in rab-api / rab-worker (healthcheck, command, labels, another key) is refused', { skip }, () => {
+  for (const c of [REL, EXT, PT, 'staging']) {
+    for (const svc of APP) {
+      for (const secret of [gate.SENTINEL_DB_PW, gate.SENTINEL_ADMIN_PW, gate.SENTINEL_OWNER_PW]) {
+        assertRefused(problemsAfter(c, (s) => { s[svc].healthcheck.test = ['CMD', 'env', `X=${secret}`, 'true']; }), new RegExp(`${svc}: carries a database credential`));
+        assertRefused(problemsAfter(c, (s) => { s[svc].labels = { note: secret }; }), new RegExp(`${svc}: carries a database credential`));
+        assertRefused(problemsAfter(c, (s) => { s[svc].command = ['node', secret]; }), new RegExp(`${svc}: carries a database credential`));
+      }
+      assertRefused(problemsAfter(c, (s) => { s[svc].healthcheck.test = ['CMD', 'psql', 'postgresql://h/db']; }), new RegExp(`${svc}: holds a postgres:// value`));
+    }
+  }
+});
+
+test('option A: db-setup alone receives the database URL: the bundled admin URL by default, compose.env\'s admin URL, or the crewflow_owner URL (pass-through)', { skip }, () => {
+  assert.equal(fresh(REL).services[SETUP].environment.PG_DATABASE_URL, gate.BUNDLED_URL);
+  assert.equal(fresh('staging').services[SETUP].environment.PG_DATABASE_URL, gate.BUNDLED_URL);
+  assert.equal(fresh(EXT).services[SETUP].environment.PG_DATABASE_URL, gate.SENTINEL_ADMIN_URL);
+  assert.equal(fresh(PT).services[SETUP].environment.PG_DATABASE_URL, gate.SENTINEL_URL);
+  for (const c of [REL, EXT, PT, 'staging']) for (const svc of APP) assert.equal(fresh(c).services[svc].environment.PG_DATABASE_URL, c === PT ? gate.SENTINEL_URL : '', `${c} ${svc}`);
   // The bundled default with TLS below verify-full, another host, or a URL that is not the compose.env value: each refused.
   for (const url of [gate.BUNDLED_URL.replace('verify-full', 'disable'), gate.BUNDLED_URL.replace('@db:', '@db.evil.example:'), gate.BUNDLED_URL.replace('postgres:', 'crewflow_owner:')]) {
-    assertRefused(problemsAfter(REL, (s) => { for (const svc of APP) s[svc].environment.PG_DATABASE_URL = url; }), /PG_DATABASE_URL is not the bundled db's admin URL/);
+    assertRefused(problemsAfter(REL, (s) => { s[SETUP].environment.PG_DATABASE_URL = url; }), /db-setup: PG_DATABASE_URL is not the committed/);
   }
-  assertRefused(problemsAfter(EXT, (s) => { for (const svc of APP) s[svc].environment.PG_DATABASE_URL = gate.BUNDLED_URL; }), /PG_DATABASE_URL is not compose\.env's PG_DATABASE_URL/);
+  assertRefused(problemsAfter(EXT, (s) => { s[SETUP].environment.PG_DATABASE_URL = gate.BUNDLED_URL; }), /db-setup: PG_DATABASE_URL is not the committed/);
+  assertRefused(problemsAfter(PT, (s) => { s[SETUP].environment.PG_DATABASE_URL = gate.SENTINEL_ADMIN_URL; }), /db-setup: PG_DATABASE_URL is not the committed/);
+  // Another service with a database URL, or the admin password under another key of db-setup: refused.
+  assertRefused(problemsAfter(REL, (s) => { s['rab-redis'].environment = { PG_DATABASE_URL: gate.BUNDLED_URL }; }), /rab-redis: has PG_DATABASE_URL/);
+  assertRefused(problemsAfter(EXT, (s) => { s[SETUP].environment.OTHER = gate.SENTINEL_ADMIN_PW; }), /db-setup: received the database admin credential \(OTHER\)/);
+  assertRefused(problemsAfter(PT, (s) => { s[SETUP].environment.OTHER = gate.SENTINEL_OWNER_PW; }), /db-setup: received the database credential \(OTHER\)/);
+});
+
+test('DENIAL option A: db-setup must keep exactly its one-shot shape', { skip }, () => {
+  for (const c of [REL, EXT, PT, 'staging']) {
+    const cases = [
+      [(s) => { delete s[SETUP]; }, /services are .*expected/],
+      [(s) => { s[SETUP].restart = 'unless-stopped'; }, /db-setup: restart is "unless-stopped", expected "no"/],
+      [(s) => { s[SETUP].profiles = ['setup']; }, /db-setup: has profiles/],
+      [(s) => { s[SETUP].ports = [{ target: 5432, published: '5432', host_ip: '127.0.0.1' }]; }, /db-setup: publishes a port/],
+      [(s) => { s[SETUP].entrypoint = ['./api-prestart.sh']; }, /db-setup: entrypoint is not exactly \.\/db-setup\.sh/],
+      [(s) => { s[SETUP].command = ['sh']; }, /db-setup: has a command/],
+      [(s) => { s[SETUP].init = true; }, /db-setup: init: true/],
+      [(s) => { s[SETUP].image = s[SETUP].image.replace(/sha256:0/, 'sha256:1'); }, /db-setup: image differs from rab-api/],
+      [(s) => { s[SETUP].user = '0:0'; }, /db-setup: user "0:0" is root/],
+      [(s) => { delete s[SETUP].read_only; }, /db-setup: read_only root filesystem is not set/],
+      [(s) => { s[SETUP].cap_drop = []; }, /db-setup: cap_drop ALL is missing/],
+      [(s) => { s[SETUP].security_opt = []; }, /db-setup: security_opt no-new-privileges:true is missing/],
+      [(s) => { delete s[SETUP].pids_limit; }, /db-setup: pids_limit is missing/],
+      [(s) => { delete s[SETUP].mem_limit; }, /db-setup: mem_limit is missing/],
+      [(s) => { delete s[SETUP].depends_on; }, /db-setup: depends_on must be exactly a healthy db/],
+      [(s) => { s[SETUP].depends_on.db.condition = 'service_started'; }, /db-setup: depends_on must be exactly a healthy db/],
+      [(s) => { s[SETUP].depends_on['rab-redis'] = { condition: 'service_healthy' }; }, /db-setup: depends_on must be exactly a healthy db/],
+      [(s) => { s[SETUP].volumes = s[SETUP].volumes.filter((v) => v.source !== gate.DB_TARGET_VOLUME); }, /db-setup: does not mount the target volume writable/],
+      [(s) => { for (const v of s[SETUP].volumes) if (v.source === gate.DB_TARGET_VOLUME) v.read_only = true; }, /db-setup: the target volume must be writable here/],
+      [(s) => { delete s['rab-api'].depends_on[SETUP]; }, /rab-api: does not wait for db-setup/],
+      [(s) => { s['rab-api'].depends_on[SETUP].condition = 'service_started'; }, /rab-api: does not wait for db-setup/],
+      [(s) => { for (const svc of APP) s[svc].volumes = s[svc].volumes.filter((v) => v.source !== gate.DB_TARGET_VOLUME); }, /rab-api: does not mount db-setup's target volume read-only/],
+      [(s) => { for (const v of s['rab-worker'].volumes) if (v.source === gate.DB_TARGET_VOLUME) v.read_only = false; }, /rab-worker: db-setup's target volume must be mounted read-only/],
+      [(s) => { s['rab-redis'].volumes.push({ type: 'volume', source: gate.DB_TARGET_VOLUME, target: gate.DB_TARGET_DIR, read_only: true }); }, /rab-redis: (unexpected named volume|mounts db-setup's target volume)/],
+    ];
+    for (const [mutate, pattern] of cases) assertRefused(problemsAfter(c, mutate), pattern);
+  }
 });
 
 test('DENIAL DB-SETUP: the bundled db password reaches no container except db (POSTGRES_PASSWORD) and, inside the default URL, the app', { skip }, () => {
@@ -452,7 +511,7 @@ test('DENIAL (rendered): docker-compose.image.yml with a "maint"-profile service
     fs.writeFileSync(copy, weakened);
     const c = { name: 'maint', files: [copy], localDb: false, staging: false };
     const problems = checkModel(renderModels([c])[c.name], c);
-    assertRefused(problems, /services are \[.*rab-maint.*\], expected \[db, rab-api, rab-redis, rab-worker\]/);
+    assertRefused(problems, /services are \[.*rab-maint.*\], expected \[db, db-setup, rab-api, rab-redis, rab-worker\]/);
     assertRefused(problems, /rab-maint: has profiles/);
     assertRefused(problems, /rab-maint: received a value from a separated-mode env file/);
   } finally {

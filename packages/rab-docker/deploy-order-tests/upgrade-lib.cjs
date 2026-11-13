@@ -10,8 +10,9 @@
  * DB-SETUP (docker-compose.local-db.yml retired, D3): the database is the production file's own `db` service. The
  * pass-through scenarios (an existing crewflow_owner, as every R254/R256 deployment has) add OWNER_OVERLAY, which runs the
  * shipped hand-made fallback 01-crewflow-owner.sql at the db's first start, and give the crewflow_owner URL as the compose
- * interpolation value PG_DATABASE_URL (image.yml commits `PG_DATABASE_URL: ${PG_DATABASE_URL:-<bundled admin URL>}` on both
- * app services, so a database.env URL would be overridden). An image older than DB-SETUP has no worker-start.sh: its
+ * interpolation value PG_DATABASE_URL (image.yml commits `PG_DATABASE_URL: ${PG_DATABASE_URL:-}` on rab-api / rab-worker,
+ * and db-setup, which then does nothing; PR #125 option A: an admin URL goes in PG_DATABASE_ADMIN_URL and reaches only the
+ * one-shot db-setup; a database.env URL would be overridden). An image older than DB-SETUP has no worker-start.sh: its
  * deploys add PREV_OVERLAY, the previous release's own rab-worker command.
  *
  * (run-deploy-order-tests.cjs, the PR #90 T1-T4 driver, keeps its own copy of the same helpers.)
@@ -309,8 +310,10 @@ function ownerUrl(password = secrets.owner) {
 }
 
 /**
- * compose.env. `databaseUrl`: the PG_DATABASE_URL interpolation value (default: the pass-through crewflow_owner URL);
- * `null` leaves it out, i.e. the production default, the bundled db's admin URL built from PG_DATABASE_PASSWORD.
+ * compose.env. `databaseUrl`: the database URL of the case (default: the pass-through crewflow_owner URL); `null` leaves it
+ * out, i.e. the production default, the bundled db's admin URL built from PG_DATABASE_PASSWORD. PR #125 option A: a
+ * crewflow_owner URL is written as PG_DATABASE_URL (rab-api / rab-worker receive it: pass-through), any other login as
+ * PG_DATABASE_ADMIN_URL (interpolated into the one-shot db-setup only).
  */
 function writeComposeEnv(project, { repository, digest, pgImage, redisImage, databaseUrl = ownerUrl() }) {
   const S = project.secretsDir.replace(/\\/g, '/');
@@ -321,7 +324,7 @@ function writeComposeEnv(project, { repository, digest, pgImage, redisImage, dat
     CREWFLOW_POSTGRES_IMAGE: pgImage,
     CREWFLOW_SECRETS_DIR: S,
     PG_DATABASE_PASSWORD: secrets.dbPassword,
-    ...(databaseUrl ? { PG_DATABASE_URL: databaseUrl } : {}),
+    ...(databaseUrl ? { [/^postgres(ql)?:\/\/crewflow_owner[:@]/.test(databaseUrl) ? 'PG_DATABASE_URL' : 'PG_DATABASE_ADMIN_URL']: databaseUrl } : {}),
     CREWFLOW_API_MEM_LIMIT: '1024m',
     CREWFLOW_API_CPUS: '2',
     CREWFLOW_WORKER_MEM_LIMIT: '1536m',

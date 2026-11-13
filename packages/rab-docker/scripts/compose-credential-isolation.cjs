@@ -30,9 +30,10 @@
  * opsRefusalChecks() is the pure part; compose-credential-isolation.ops.test.cjs proves each refusal.
  *
  * DB-SETUP (owner decisions D1 a / D4, T-2): the bundled database's superuser password, PG_DATABASE_PASSWORD, is a compose
- * interpolation value only. Rendered with a sentinel value, in every file: no service has a PG_DATABASE_PASSWORD key, and
- * the sentinel appears only in the bundled `db` service's POSTGRES_PASSWORD (the production files render PG_DATABASE_URL
- * from the dummy external URL, so the runtime services must not carry it at all). dbPasswordChecks() is the pure part.
+ * interpolation value only. Rendered with a sentinel value (and PG_DATABASE_URL unset, so the bundled default is rendered),
+ * in every file: no service has a PG_DATABASE_PASSWORD key, and the sentinel appears only in the bundled `db` service's
+ * POSTGRES_PASSWORD and, inside the default admin URL, in the one-shot `db-setup` service's PG_DATABASE_URL (PR #125 option
+ * A: rab-api and rab-worker never carry it, nor any database URL). dbPasswordChecks() is the pure part.
  * Exit 0 = all checks passed, 1 = a check failed, 2 = docker compose is unavailable (CI must have it).
  * Prints service names, variable NAMES and check results only; never a value.
  */
@@ -72,8 +73,8 @@ const DUMMY_ENV = {
   QA_CREWFLOW_APP_PASSWORD: 'dummy',
   QA_APP_SECRET: 'dummy-dummy-dummy-dummy-dummy-dummy',
   // docker-compose.production.yml's REQUIRED list (x-crewflow-required-env, owner request 2026-11-12: OpenShip shows every
-  // variable). The owner-login URL shape, never the migrator login or a sentinel.
-  PG_DATABASE_URL: 'postgresql://crewflow_owner:dummy@db-direct.example:5432/rab?sslmode=verify-full',
+  // variable). PG_DATABASE_URL is deliberately NOT set: db-setup then renders the bundled default admin URL, built from
+  // the PG_DATABASE_PASSWORD sentinel below, so its spread is checked (option A).
   APP_SECRET: 'dummy-dummy-dummy-dummy-dummy-dummy',
   APP_URL: 'https://app.example.com',
   ACCOUNTS_URL: 'https://app.example.com',
@@ -155,15 +156,21 @@ function opsRefusalChecks(rel, services, raw, { production = false } = {}) {
 
 /**
  * DB-SETUP: where the bundled db's password may appear in one rendered model. Pure: [ok, label] pairs. Only the `db`
- * service's POSTGRES_PASSWORD may hold it; no service may have a PG_DATABASE_PASSWORD key.
+ * service's POSTGRES_PASSWORD and (option A) the `db-setup` service's PG_DATABASE_URL may hold it; no service may have a
+ * PG_DATABASE_PASSWORD key; nothing else in any other service's definition (health check, command, labels) holds it.
  */
 function dbPasswordChecks(rel, services) {
   const out = [];
   for (const [name, svc] of Object.entries(services)) {
     const env = envOf(svc ?? {});
     out.push([!Object.prototype.hasOwnProperty.call(env, 'PG_DATABASE_PASSWORD'), `${rel}: ${name} has no PG_DATABASE_PASSWORD variable (a compose interpolation value only)`]);
-    const holders = Object.entries(env).filter(([k, v]) => String(v ?? '').includes(DB_SENTINEL_PASSWORD) && !(name === 'db' && k === 'POSTGRES_PASSWORD')).map(([k]) => k);
-    out.push([holders.length === 0, `${rel}: ${name} carries the bundled db's password only as db's POSTGRES_PASSWORD${holders.length ? ` (found in ${holders.join(', ')})` : ''}`]);
+    const allowedKey = name === 'db' ? 'POSTGRES_PASSWORD' : name === 'db-setup' ? 'PG_DATABASE_URL' : null;
+    const holders = Object.entries(env).filter(([k, v]) => String(v ?? '').includes(DB_SENTINEL_PASSWORD) && k !== allowedKey).map(([k]) => k);
+    out.push([holders.length === 0, `${rel}: ${name} carries the bundled db's password only as db's POSTGRES_PASSWORD or db-setup's PG_DATABASE_URL${holders.length ? ` (found in ${holders.join(', ')})` : ''}`]);
+    // Outside the environment (health check, command, entrypoint, labels): never, in any service.
+    const rest = { ...(svc ?? {}) };
+    delete rest.environment;
+    out.push([!JSON.stringify(rest).includes(DB_SENTINEL_PASSWORD), `${rel}: ${name} carries the bundled db's password nowhere outside its environment (health check, command, labels)`]);
   }
   return out;
 }

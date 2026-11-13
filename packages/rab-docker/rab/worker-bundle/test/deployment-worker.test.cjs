@@ -84,6 +84,8 @@ const TINI = ['/sbin/tini', '-s', '--'];
 const DEPLOY_FILES = ['packages/rab-docker/docker-compose.production.yml', 'packages/rab-docker/docker-compose.image.yml'];
 /** DB-SETUP (D1 a): the one mount the deploy app services may have, the bundled db's CA volume, read-only. */
 const DB_CA_MOUNT = 'crewflow-db-ca:/run/crewflow/db-ca:ro';
+/** PR #125 option A: db-setup's target file, read-only (the crewflow_owner URL is built from it). */
+const DB_TARGET_MOUNT = 'crewflow-db-target:/run/crewflow/db-target:ro';
 const JOBS_HEALTH = ['CMD', 'env', 'CREWFLOW_PROVISIONER_ENABLED=false', 'node', '/opt/crewflow-bundle/worker-bundle-health.cjs'];
 const JOBS_ENV = {
   HOME: '/nonexistent',
@@ -213,7 +215,8 @@ function sizeMiB(value) {
 
 /**
  * No privileged mode, host namespace, device, host mount (Docker socket included) or extra capability source. DB-SETUP
- * (D1 a): the one volume allowed is the bundled db's CA volume, read-only (a named volume, never a host path).
+ * (D1 a): the volumes allowed are the bundled db's CA volume and (option A) db-setup's target volume, both read-only (named
+ * volumes, never a host path).
  */
 function assertNoHostAccess(name, svc) {
   assert.notEqual(svc.privileged, true, `${name}: privileged`);
@@ -221,7 +224,7 @@ function assertNoHostAccess(name, svc) {
     assert.ok(!/^host$/i.test(String(svc[key] ?? '')), `${name}: ${key}=host`);
   }
   assert.equal(svc.devices, undefined, `${name}: devices`);
-  assert.deepEqual(svc.volumes ?? [], [DB_CA_MOUNT], `${name}: volumes (no host mount, no Docker socket; only the bundled db's CA, read-only)`);
+  assert.deepEqual(svc.volumes ?? [], [DB_CA_MOUNT, DB_TARGET_MOUNT], `${name}: volumes (no host mount, no Docker socket; only the bundled db's CA and db-setup's target, read-only)`);
   assert.equal(svc.volumes_from, undefined, `${name}: volumes_from`);
   for (const opt of svc.security_opt ?? []) {
     assert.ok(!/unconfined|label[:=]disable/i.test(opt), `${name}: security_opt ${opt}`);

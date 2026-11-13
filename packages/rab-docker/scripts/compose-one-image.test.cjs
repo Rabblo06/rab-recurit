@@ -20,8 +20,13 @@ function good() {
         image: IMG,
         entrypoint: ['./api-prestart.sh'],
         environment: { CREWFLOW_MIGRATE_ON_START: 'true' },
-        depends_on: { 'rab-redis': { condition: 'service_healthy' }, db: { condition: 'service_healthy' } },
+        depends_on: { 'rab-redis': { condition: 'service_healthy' }, db: { condition: 'service_healthy' }, 'db-setup': { condition: 'service_completed_successfully' } },
         stop_grace_period: '40s',
+      },
+      'db-setup': {
+        image: IMG,
+        entrypoint: ['./db-setup.sh'],
+        depends_on: { db: { condition: 'service_healthy' } },
       },
       'rab-worker': {
         image: IMG,
@@ -203,7 +208,7 @@ const { allowsDefaultDigest, DEPLOY_COMBOS, PINNED_DIGEST_IMAGE_REF } = require(
 const DIGEST = `sha256:${'d7'.repeat(32)}`;
 const withDefault = (value) => `\${CREWFLOW_IMAGE_REPOSITORY:-adhin007/adolphus}@\${CREWFLOW_IMAGE_TAG:-${value}}`;
 const allImages = (m, image) => {
-  for (const n of ['rab-api', 'rab-worker']) m.services[n].image = image;
+  for (const n of ['rab-api', 'rab-worker', 'db-setup']) m.services[n].image = image;
   return m;
 };
 const PROD = { allowDefaultDigest: true };
@@ -271,7 +276,7 @@ test('committed files: production.yml pins one full digest on every app service;
   const read = (f) => fs.readFileSync(path.join(__dirname, '..', f), 'utf8');
   const imageLines = (text) => [...text.matchAll(/^\s+image:\s*(\S+@\$\{CREWFLOW_IMAGE_TAG[^}]*\})\s*$/gm)].map((m) => m[1]);
   const prod = imageLines(read('docker-compose.production.yml'));
-  assert.equal(prod.length, 2, 'rab-api and rab-worker (rab-ops was removed)');
+  assert.equal(prod.length, 3, 'rab-api, rab-worker and db-setup (rab-ops was removed)');
   assert.equal(new Set(prod).size, 1, 'the same expression on every app service');
   assert.ok(PINNED_DIGEST_IMAGE_REF.test(prod[0]), prod[0]);
   const image = imageLines(read('docker-compose.image.yml'));
@@ -391,4 +396,30 @@ test('DB-SETUP + PR #124: the bundled db has no profile and passes the any-profi
     const dbBlock = text.slice(text.indexOf('\n  db:\n'), text.indexOf('\n  rab-', text.indexOf('\n  db:\n')));
     assert.ok(dbBlock.length > 100 && !/^\s+profiles\s*:/m.test(dbBlock), `${f}: the committed db has no profiles key`);
   }
+});
+
+// PR #125 option A: the one-shot db-setup runs the same image and rab-api waits for it.
+test('DENIAL option A: db-setup missing, on another image, with another entrypoint, or not waited for', () => {
+  let m = good();
+  assert.deepEqual(checkModel(m, 'fixture'), []);
+  delete m.services['db-setup'];
+  refused(m, /db-setup is missing/);
+  m = good();
+  m.services['db-setup'].image = IMG.replace('CREWFLOW_IMAGE_TAG', 'CREWFLOW_SETUP_TAG');
+  refused(m, /db-setup: image/);
+  m = good();
+  m.services['db-setup'].entrypoint = ['./api-prestart.sh'];
+  refused(m, /db-setup: entrypoint must be exactly \["\.\/db-setup\.sh"\]/);
+  m = good();
+  m.services['db-setup'].init = true;
+  refused(m, /db-setup: init: true is refused/);
+  m = good();
+  delete m.services['rab-api'].depends_on['db-setup'];
+  refused(m, /rab-api: must depend on db-setup with condition service_completed_successfully/);
+  m = good();
+  m.services['rab-api'].depends_on['db-setup'].condition = 'service_started';
+  refused(m, /rab-api: must depend on db-setup/);
+  m = good();
+  delete m.services['db-setup'].depends_on;
+  refused(m, /db-setup: must depend on db with condition service_healthy/);
 });

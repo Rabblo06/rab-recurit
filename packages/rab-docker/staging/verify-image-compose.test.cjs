@@ -176,6 +176,7 @@ test('environment mode: the deployed model passes, with the staging CA bind and 
     for (const s of ['rab-api', 'rab-worker']) {
       v.services[s].volumes = [
         { type: 'volume', source: 'crewflow-db-ca', target: '/run/crewflow/db-ca', read_only: true, volume: {} },
+        { type: 'volume', source: 'crewflow-db-target', target: '/run/crewflow/db-target', read_only: true, volume: {} },
         { type: 'bind', source: '/etc/x/pg-ca.crt', target: '/run/crewflow/pg-ca.crt', read_only: true },
       ];
       v.services[s].environment.STORAGE_KEY_PREFIX = 'staging';
@@ -302,7 +303,7 @@ const addMaint = (src) => src.replace(/\nnetworks:\n/, [
 test('DENIAL (rendered): docker-compose.image.yml with a "maint"-profile service reading .env.ops fails', { skip }, () => {
   renderWeakened(addMaint, (m) => {
     const problems = checkVariant(m.variant, m.production, m.variantFiles);
-    assertRefused(problems, /services are .*rab-maint.*; expected exactly db,rab-api,rab-redis,rab-worker/);
+    assertRefused(problems, /services are .*rab-maint.*; expected exactly db,db-setup,rab-api,rab-redis,rab-worker/);
     assertRefused(problems, /rab-maint: has profiles \["maint"\]/);
     assertRefused(problems, /rab-maint: carries a value of the retired \.env\.ops/);
     assertRefused(problems, /rab-maint: sets the retired CREWFLOW_OPS_RUN/);
@@ -354,7 +355,7 @@ test('a variant file that adds rab-ops back (ops profile, .env.ops) fails, stati
     ].join('\n')),
     (m) => {
       const problems = checkVariant(m.variant, m.production, m.variantFiles);
-      assertRefused(problems, /services are .*rab-ops.*; expected exactly db,rab-api,rab-redis,rab-worker/);
+      assertRefused(problems, /services are .*rab-ops.*; expected exactly db,db-setup,rab-api,rab-redis,rab-worker/);
       assertRefused(problems, /rab-ops: present \(removed/);
       assertRefused(problems, /rab-ops: has the "ops" profile/);
       assertRefused(problems, /rab-ops: names \.env\.ops/);
@@ -486,7 +487,7 @@ test('J2-3: with push on the verifier refuses a 2 s push sweep on either service
 // DB-SETUP (owner decisions D1 a / D3 / D4 / D5, T-1 / T-2 / T-5).
 test('DENIAL DB-SETUP static: the bundled db must be identical in both files, unpublished, internal; the Worker runs worker-start.sh', { skip }, () => {
   for (const [label, mutate, pattern] of [
-    ['db missing in the variant', (v) => { delete v.services.db; }, /services are .*expected exactly db,rab-api,rab-redis,rab-worker|db: missing in the variant/],
+    ['db missing in the variant', (v) => { delete v.services.db; }, /services are .*expected exactly db,db-setup,rab-api,rab-redis,rab-worker|db: missing in the variant/],
     ['db read-only root dropped', (v) => { v.services.db.read_only = false; }, /db\.read_only differs from docker-compose\.production\.yml/],
     ['db published', (v) => { v.services.db.ports = [{ target: 5432, host_ip: '127.0.0.1', published: '5432' }]; }, /db: publishes a port|db\.ports differs/],
     ['db password from somewhere else', (v) => { v.services.db.environment.POSTGRES_PASSWORD = 'postgres'; }, /db\.environment differs/],
@@ -519,15 +520,38 @@ test('DENIAL DB-SETUP environment mode: PG_DATABASE_URL never from an env file, 
   assertRefused(run({ 'rab-api': { ...ok, names: [...ok.names, 'PG_DATABASE_URL'] }, 'rab-worker': ok }), /rab-api: PG_DATABASE_URL is set in an env file/);
   assertRefused(run({ 'rab-api': ok, 'rab-worker': { ...ok, names: [...ok.names, 'PG_DATABASE_PASSWORD'] } }), /rab-worker: PG_DATABASE_PASSWORD reaches the container/);
   assertRefused(run({ 'rab-api': ok, 'rab-worker': ok }, (v) => { v.services['rab-api'].environment.PG_DATABASE_PASSWORD = 'x'; }), /rab-api: PG_DATABASE_PASSWORD reaches the container/);
-  const setUrl = (url, which = ['rab-api', 'rab-worker']) => (v) => { for (const n of which) v.services[n].environment.PG_DATABASE_URL = url; };
-  // T-1: a provider admin login is accepted; a former separated login is not.
-  assert.deepEqual(run({ 'rab-api': ok, 'rab-worker': ok }, setUrl('postgresql://doadmin:x@db-direct.example:5432/d?sslmode=verify-full')), []);
+  // PR #125 option A: db-setup alone carries the URL. T-1: a provider admin login is accepted there; a former separated
+  // login, or TLS below verify-full, is not; an env-file value or the password is refused there too.
+  const setSetupUrl = (url) => (v) => { v.services['db-setup'].environment.PG_DATABASE_URL = url; };
+  assert.deepEqual(run({ 'rab-api': ok, 'rab-worker': ok }, setSetupUrl('postgresql://doadmin:x@db-direct.example:5432/d?sslmode=verify-full')), []);
   for (const login of ['crewflow_app', 'crewflow_migrator', 'crewflow']) {
-    assertRefused(run({ 'rab-api': ok, 'rab-worker': ok }, setUrl(`postgresql://${login}:x@db-direct.example:5432/d?sslmode=verify-full`)), new RegExp(`PG_DATABASE_URL logs in as "${login}"`));
+    assertRefused(run({ 'rab-api': ok, 'rab-worker': ok }, setSetupUrl(`postgresql://${login}:x@db-direct.example:5432/d?sslmode=verify-full`)), new RegExp(`db-setup: PG_DATABASE_URL logs in as "${login}"`));
   }
-  assertRefused(run({ 'rab-api': ok, 'rab-worker': ok }, setUrl('postgresql://doadmin:x@db-direct.example:5432/d?sslmode=require')), /not sslmode=verify-full/);
-  assertRefused(run({ 'rab-api': ok, 'rab-worker': ok }, setUrl('postgresql://doadmin:x@other.example:5432/d?sslmode=verify-full', ['rab-worker'])), /PG_DATABASE_URL differs between rab-api and rab-worker/);
-  assertRefused(run({ 'rab-api': ok, 'rab-worker': ok }, (v) => { delete v.services['rab-api'].environment.PG_DATABASE_URL; }), /rab-api: PG_DATABASE_URL is missing/);
+  assertRefused(run({ 'rab-api': ok, 'rab-worker': ok }, setSetupUrl('postgresql://doadmin:x@db-direct.example:5432/d?sslmode=require')), /db-setup: PG_DATABASE_URL is not sslmode=verify-full/);
+  assertRefused(run({ 'rab-api': ok, 'rab-worker': ok }, (v) => { delete v.services['db-setup'].environment.PG_DATABASE_URL; }), /db-setup: PG_DATABASE_URL is missing/);
+  assertRefused(run({ 'rab-api': ok, 'rab-worker': ok, 'db-setup': { ...ok, names: [...ok.names, 'PG_DATABASE_URL'] } }), /db-setup: PG_DATABASE_URL is set in an env file/);
+  assertRefused(run({ 'rab-api': ok, 'rab-worker': ok, 'db-setup': { ...ok, names: [...ok.names, 'PG_DATABASE_PASSWORD'] } }), /db-setup: PG_DATABASE_PASSWORD reaches the container/);
+  // DENIAL option A: an override that hands rab-api / rab-worker a database URL (admin, crewflow_owner, anything), drops the
+  // committed ${PG_DATABASE_URL:-}, smuggles a postgres:// value into a health check, or weakens db-setup: refused.
+  for (const svc of ['rab-api', 'rab-worker']) {
+    for (const url of ['postgresql://postgres:x@db:5432/crewflow?sslmode=verify-full', 'postgresql://doadmin:x@db-direct.example:5432/d?sslmode=verify-full']) {
+      assertRefused(run({ 'rab-api': ok, 'rab-worker': ok }, (v) => { v.services[svc].environment.PG_DATABASE_URL = url; }), new RegExp(`${svc}: PG_DATABASE_URL is neither empty nor the crewflow_owner login in the deployed model`));
+    }
+    assertRefused(run({ 'rab-api': ok, 'rab-worker': ok }, (v) => { delete v.services[svc].environment.PG_DATABASE_URL; }), new RegExp(`${svc}: PG_DATABASE_URL is not committed`));
+    assertRefused(run({ 'rab-api': ok, 'rab-worker': ok }, (v) => { v.services[svc].environment.PG_DATABASE_URL = 'postgresql://crewflow_owner:x@db:5432/crewflow?sslmode=require'; }), new RegExp(`${svc}: PG_DATABASE_URL is not sslmode=verify-full`));
+    assertRefused(run({ 'rab-api': ok, 'rab-worker': ok }, (v) => { v.services[svc].healthcheck.test = ['CMD', 'psql', 'postgresql://postgres:x@db/crewflow']; }), new RegExp(`${svc}: holds a postgres:// value somewhere in its definition in the deployed model`));
+    assertRefused(run({ 'rab-api': ok, 'rab-worker': ok }, (v) => { v.services[svc].volumes = v.services[svc].volumes.filter((x) => x.source !== 'crewflow-db-target'); }), new RegExp(`${svc}: does not mount db-setup's target volume read-only in the deployed model`));
+  }
+  // Pass-through (DB-SETUP-PLAN §7.1): the same crewflow_owner URL on both app services passes; different ones do not.
+  const owner = 'postgresql://crewflow_owner:x@db-direct.example:5432/d?sslmode=verify-full';
+  assert.deepEqual(run({ 'rab-api': ok, 'rab-worker': ok }, (v) => { for (const n of ['rab-api', 'rab-worker', 'db-setup']) v.services[n].environment.PG_DATABASE_URL = owner; }), []);
+  assertRefused(run({ 'rab-api': ok, 'rab-worker': ok }, (v) => { v.services['rab-api'].environment.PG_DATABASE_URL = owner; }), /PG_DATABASE_URL differs between rab-api and rab-worker/);
+  assertRefused(run({ 'rab-api': ok, 'rab-worker': ok }, (v) => { delete v.services['db-setup']; }), /db-setup: missing in the deployed model/);
+  assertRefused(run({ 'rab-api': ok, 'rab-worker': ok }, (v) => { v.services['db-setup'].restart = 'unless-stopped'; }), /db-setup: restart is not "no" in the deployed model/);
+  assertRefused(run({ 'rab-api': ok, 'rab-worker': ok }, (v) => { v.services['db-setup'].read_only = false; }), /db-setup\.read_only differs from docker-compose\.production\.yml in the deployed model/);
+  assertRefused(run({ 'rab-api': ok, 'rab-worker': ok }, (v) => { v.services['db-setup'].ports = [{ target: 1, published: '1', host_ip: '127.0.0.1' }]; }), /db-setup: publishes a port in the deployed model/);
+  assertRefused(run({ 'rab-api': ok, 'rab-worker': ok }, (v) => { delete v.services['rab-api'].depends_on['db-setup']; }), /rab-api: does not wait for db-setup/);
+  assertRefused(run({ 'rab-api': ok, 'rab-worker': ok }, (v) => { v.services['rab-redis'].environment = { PG_DATABASE_URL: 'x' }; }), /rab-redis: has PG_DATABASE_URL in the deployed model/);
   assertRefused(run({ 'rab-api': ok, 'rab-worker': ok }, (v) => { v.services.db.read_only = false; }), /db\.read_only is overridden in the deployed model/);
   assertRefused(run({ 'rab-api': ok, 'rab-worker': ok }, (v) => { v.services.db.ports = [{ target: 5432, published: '5432' }]; }), /db: publishes a port in the deployed model|db\.ports is overridden/);
   assertRefused(run({ 'rab-api': ok, 'rab-worker': ok }, (v) => { delete v.services.db; }), /db: missing in the deployed model/);

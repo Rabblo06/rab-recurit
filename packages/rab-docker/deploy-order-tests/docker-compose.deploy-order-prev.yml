@@ -10,7 +10,14 @@
 # alone leaves rab-worker unable to start (./worker-start.sh is not in the old image): a rollback across DB-SETUP uses the
 # previous release's compose files.
 
+#
+# PR #125 option A: such an image has no db-setup.sh either, so db-setup does nothing here (exit 0, rab-api's depends_on is
+# satisfied); rab-api / rab-worker get the pass-through crewflow_owner URL from compose.env's PG_DATABASE_URL, as before.
+
 services:
+  db-setup:
+    entrypoint: ["/bin/sh", "-c", "exit 0"]
+
   rab-api:
     entrypoint: ["/sbin/tini", "-s", "--"]
     command: ["./api-prestart.sh"]

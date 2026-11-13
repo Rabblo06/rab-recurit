@@ -128,16 +128,24 @@ test('DENIAL (rendered): a file that reads .env.ops, or re-adds rab-ops under th
 });
 
 // DB-SETUP (owner decisions D1 a / D4, T-2): the bundled db's superuser password is a compose interpolation value only.
-test('DB-SETUP: the bundled db password may appear only as db POSTGRES_PASSWORD; no service has a PG_DATABASE_PASSWORD variable', () => {
+test('DB-SETUP: the bundled db password may appear only as db POSTGRES_PASSWORD and db-setup PG_DATABASE_URL; no service has a PG_DATABASE_PASSWORD variable', () => {
   const { dbPasswordChecks, DB_SENTINEL_PASSWORD } = require('./compose-credential-isolation.cjs');
-  const ok = { ...clean(), db: { environment: { POSTGRES_USER: 'postgres', POSTGRES_PASSWORD: DB_SENTINEL_PASSWORD } } };
+  const adminUrl = `postgresql://postgres:${DB_SENTINEL_PASSWORD}@db:5432/crewflow`;
+  const ok = { ...clean(), db: { environment: { POSTGRES_USER: 'postgres', POSTGRES_PASSWORD: DB_SENTINEL_PASSWORD } }, 'db-setup': { environment: { PG_DATABASE_URL: adminUrl } } };
   assert.deepEqual(failed(dbPasswordChecks(REL, ok)), []);
-  for (const [svc, key] of [['rab-api', 'PG_DATABASE_URL'], ['rab-worker', 'X'], ['rab-redis', 'Y'], ['db', 'OTHER']]) {
+  // PR #125 option A: rab-api / rab-worker never carry it (not even as PG_DATABASE_URL); db-setup only as PG_DATABASE_URL.
+  for (const [svc, key] of [['rab-api', 'PG_DATABASE_URL'], ['rab-worker', 'PG_DATABASE_URL'], ['rab-worker', 'X'], ['rab-redis', 'Y'], ['db', 'OTHER'], ['db-setup', 'OTHER']]) {
     const m = structuredClone(ok);
-    m[svc].environment = { ...(m[svc].environment ?? {}), [key]: `postgresql://postgres:${DB_SENTINEL_PASSWORD}@db:5432/crewflow` };
-    refused(dbPasswordChecks(REL, m), new RegExp(`${svc} carries the bundled db's password only as db's POSTGRES_PASSWORD \\(found in ${key}\\)`));
+    m[svc].environment = { ...(m[svc].environment ?? {}), [key]: adminUrl };
+    refused(dbPasswordChecks(REL, m), new RegExp(`${svc} carries the bundled db's password only as db's POSTGRES_PASSWORD or db-setup's PG_DATABASE_URL \\(found in ${key}\\)`));
   }
-  for (const svc of ['rab-api', 'rab-worker', 'db']) {
+  // Outside the environment (a health check, a label): refused in every service, db-setup included.
+  for (const svc of ['rab-api', 'rab-worker', 'db-setup']) {
+    const m = structuredClone(ok);
+    m[svc].healthcheck = { test: ['CMD', 'psql', adminUrl] };
+    refused(dbPasswordChecks(REL, m), new RegExp(`${svc} carries the bundled db's password nowhere outside its environment`));
+  }
+  for (const svc of ['rab-api', 'rab-worker', 'db', 'db-setup']) {
     const m = structuredClone(ok);
     m[svc].environment = { ...m[svc].environment, PG_DATABASE_PASSWORD: 'x' };
     refused(dbPasswordChecks(REL, m), new RegExp(`${svc} has no PG_DATABASE_PASSWORD variable`));
