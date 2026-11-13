@@ -43,7 +43,7 @@ const path = require('node:path');
 
 const REPO = path.resolve(__dirname, '../../..');
 // The bundled db's environment rules, one definition for the committed and the deployed model (PR #125 review, finding 6).
-const { bundledDbEnvironmentProblems, credentialMountProblems } = require('../scripts/compose-owner-login.cjs');
+const { bundledDbEnvironmentProblems, credentialMountProblems, topLevelVolumeProblems } = require('../scripts/compose-owner-login.cjs');
 const VARIANT = path.join(REPO, 'packages/rab-docker/docker-compose.image.yml');
 const PRODUCTION = path.join(REPO, 'packages/rab-docker/docker-compose.production.yml');
 
@@ -204,6 +204,8 @@ const DB_TARGET_VOLUME = 'crewflow-db-target';
 const DB_TARGET_DIR = '/run/crewflow/db-target';
 /** db-setup keys that must be identical in the two files (besides RUNTIME_KEYS; the image differs only by its default). */
 const DB_SETUP_KEYS = [...RUNTIME_KEYS, 'networks', 'ports', 'profiles', 'build'];
+/** The five services of the committed files (anything else in a deployed model was added by an override). */
+const KNOWN_SERVICES = ['db', 'db-setup', 'rab-api', 'rab-redis', 'rab-worker'];
 const isPgUrlText = (v) => /postgres(ql)?:\/\//i.test(String(v ?? ''));
 /**
  * Option 2, both models: rab-api / rab-worker pin PG_DATABASE_URL to the literal empty string (any value, a crewflow_owner
@@ -370,6 +372,8 @@ function checkVariant(variant, production, variantFiles = variant) {
   // Security review L3: volumes_from, secrets/configs, Docker-volume-store binds, tmpfs, rab-redis's uid (one definition).
   for (const pr of credentialMountProblems(services)) fail(pr);
   for (const pr of credentialMountProblems(production?.services ?? {}, ' in docker-compose.production.yml', { redisUser: false })) fail(pr);
+  for (const pr of topLevelVolumeProblems(variant)) fail(pr);
+  for (const pr of topLevelVolumeProblems(production, ' in docker-compose.production.yml')) fail(pr);
   const vset = services[DB_SETUP_SERVICE];
   const pset = production?.services?.[DB_SETUP_SERVICE];
   if (vset && pset) {
@@ -586,6 +590,16 @@ function checkDeployment(merged, production, envFileKeys = {}) {
   // PR #125 option 2: the app services never hold a database URL; db-setup alone carries it.
   for (const pr of optionAProblems(services, ' in the deployed model')) fail(pr);
   for (const pr of credentialMountProblems(services, ' in the deployed model')) fail(pr);
+  // Security re-review F2: an override may add services; none of them may run as root or as uid 1000 (the owner of the
+  // crewflow_owner password file), whatever it mounts.
+  for (const [name, svc] of Object.entries(services)) {
+    if (KNOWN_SERVICES.includes(name)) continue;
+    const uid = String(svc?.user ?? '').split(':')[0];
+    if (!/^\d+$/.test(uid) || uid === '0' || uid === '1000') {
+      fail(`${name}: an added service must run as a numeric uid other than 0 and 1000 in the deployed model (user "${svc?.user ?? ''}"; uid 1000 owns db-setup's password file)`);
+    }
+  }
+  for (const pr of topLevelVolumeProblems(merged, ' in the deployed model')) fail(pr);
   const setup = services[DB_SETUP_SERVICE];
   const pset = production?.services?.[DB_SETUP_SERVICE];
   if (setup) {

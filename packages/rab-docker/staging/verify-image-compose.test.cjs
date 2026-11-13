@@ -622,3 +622,32 @@ test('DENIAL security review L3: the deployed model refuses the same paths (an o
     [(v) => { v.services['rab-redis'].user = '1000:1000'; }, /rab-redis: user is "1000:1000" in the deployed model, expected 999:<gid>/],
   ]) assertRefused(deployed(mutate), pattern);
 });
+
+// Security re-review F2: the deployed model cannot reach the password volume through an added service.
+test('DENIAL security review F2: volume aliases, driver_opts binds, namespace sharing, Docker-root ancestor binds, extra services as uid 0/1000', { skip }, () => {
+  const extra = (v, s) => {
+    v.services.backup = { image: v.services['rab-api'].image, user: '2000:2000', ...s };
+  };
+  for (const [mutate, pattern] of [
+    [(v) => { v.volumes.bk = { external: true, name: 'rab-production_crewflow-db-target' }; extra(v, { volumes: [{ type: 'volume', source: 'bk', target: '/x', read_only: true }] }); }, /volume bk: names db-setup's password volume in the deployed model/],
+    [(v) => { v.volumes.bk = { name: 'other', driver_opts: { type: 'none', o: 'bind', device: '/var/lib/docker/volumes' } }; extra(v, { volumes: [{ type: 'volume', source: 'bk', target: '/x' }] }); }, /volume bk: is a host bind through driver_opts in the deployed model/],
+    [(v) => { v.volumes['crewflow-db-target'] = { ...v.volumes['crewflow-db-target'], external: true }; }, /volume crewflow-db-target: must be a plain local volume in the deployed model/],
+    [(v) => { extra(v, { pid: 'service:rab-api' }); }, /backup: pid shares the namespace of rab-api in the deployed model/],
+    [(v) => { extra(v, { ipc: 'service:db-setup' }); }, /backup: ipc shares the namespace of db-setup in the deployed model/],
+    [(v) => { extra(v, { network_mode: 'service:rab-worker' }); }, /backup: network_mode shares the namespace of rab-worker in the deployed model/],
+    [(v) => { extra(v, { pid: 'container:rab-production-rab-api-1' }); }, /backup: pid joins another container's namespace in the deployed model/],
+    [(v) => { extra(v, { user: '1000:0', volumes: [{ type: 'bind', source: '/', target: '/host', read_only: true }] }); }, /backup: binds an ancestor of Docker's root directory in the deployed model/],
+    [(v) => { extra(v, { user: '1000:0', volumes: [{ type: 'bind', source: '/', target: '/host', read_only: true }] }); }, /backup: an added service must run as a numeric uid other than 0 and 1000 in the deployed model/],
+    [(v) => { extra(v, { volumes: [{ type: 'bind', source: '/var/lib', target: '/x', read_only: true }] }); }, /backup: binds an ancestor of Docker's root directory/],
+    [(v) => { extra(v, { volumes: [{ type: 'bind', source: '/var/', target: '/x', read_only: true }] }); }, /backup: binds an ancestor of Docker's root directory/],
+    [(v) => { extra(v, { volumes: [{ type: 'bind', source: '/home/ops/.local/share', target: '/x', read_only: true }] }); }, /backup: binds an ancestor of Docker's root directory/],
+    [(v) => { extra(v, { user: '0' }); }, /backup: an added service must run as a numeric uid other than 0 and 1000/],
+    [(v) => { extra(v, { user: undefined }); }, /backup: an added service must run as a numeric uid other than 0 and 1000/],
+  ]) assertRefused(deployed(mutate), pattern);
+  // An added service as another uid, mounting nothing of ours, is not refused by these rules.
+  const ok = deployed((v) => extra(v, { volumes: [{ type: 'bind', source: '/srv/backups', target: '/b', read_only: true }] }));
+  assert.ok(!ok.some((p) => /backup: (an added service|binds an ancestor|pid|ipc|network_mode)|volume /.test(p)), ok.join(' | '));
+  // The variant and the production reference: the same volume rules.
+  assertRefused(problemsAfter((v) => { v.volumes.bk = { external: true, name: 'x_crewflow-db-target' }; }), /volume bk: names db-setup's password volume/);
+  assertRefused(problemsAfter((_v, _f, p) => { p.volumes.bk = { driver_opts: { o: 'rw,bind', device: '/' } }; }), /volume bk: is a host bind through driver_opts in docker-compose\.production\.yml/);
+});

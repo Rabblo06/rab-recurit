@@ -105,7 +105,7 @@ Restore into a **fresh** cluster or volume. That is the proven path, and the **o
    grep -v -E '^(CREATE|ALTER) ROLE <cluster-superuser>[ ;]' roles.sql > roles-restore.sql
    psql -X -v ON_ERROR_STOP=1 -U <cluster-superuser> -d postgres -f roles-restore.sql
    ```
-   **Bundled database, NOT TESTED:** the bundled `db` has no init script since DB-SETUP, but `db-setup` creates `crewflow_owner` on the first `up`. Restore with only `db` started (`$P up -d db`), before `db-setup` runs; otherwise exclude that role's `CREATE ROLE` line as well (keep its `ALTER ROLE`). After the restore, `db-setup` checks that the stored password file still logs in; if it refuses with `The stored crewflow_owner password no longer logs in ...`, delete the password file and start again (the bundled `db`'s superuser then sets a new random password).
+   **Bundled database, NOT TESTED:** the bundled `db` has no init script since DB-SETUP, but `db-setup` creates `crewflow_owner` on the first `up`. Restore with only `db` started (`$P up -d db`), before `db-setup` runs; otherwise exclude that role's `CREATE ROLE` line as well (keep its `ALTER ROLE`). After the restore, `db-setup` checks that the stored password file still logs in; if it refuses with `The stored crewflow_owner password does not log in. Delete the password file and start again with the admin address in PG_DATABASE_URL. Refusing.`, delete the password file (and any pending `owner-password.next`; OWNER-LOGIN-DEPLOYMENT.md section 7) and start again (the bundled `db`'s superuser then sets a new random password).
 4. **Restore the database:**
    ```bash
    pg_restore -U <cluster-superuser> --create -d postgres --exit-on-error db.dump

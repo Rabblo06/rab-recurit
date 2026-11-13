@@ -7106,13 +7106,21 @@ Phase X Part 2 finding XA-08 (`docs/plans/PHASE-X-STAGE0-PART2.md` §2.6). Front
   then `fstat` on that descriptor must show a regular file of at most 4096 bytes owned by the reading uid with no
   group/other bit; an empty file, a symlink, a FIFO or a wrong owner/mode is refused (exit 64), never read as "missing".
   Writing loops until every byte is written, sets the mode on the descriptor (never a path-based chmod) and fsyncs the
-  file and the directory. A lost file is replaced only through the pending file below, created exclusively (a concurrent
-  db-setup that stored one first wins; this one fails, exit 70, and changes nothing). The password is random (32 bytes),
+  file and the directory. A lost file is replaced only through the pending file below. Runs never overlap on one volume
+  (security re-review F1): every db-setup run first takes an exclusive lock directory in the volume
+  (`.db-setup.lock`, mkdir; a second run stops with exit 70 before it reads, deletes or writes any file there; a lock left by
+  a killed run is taken over only when stale: another boot, a dead pid on the same host, or older than 15 minutes), and a
+  pending file is promoted only when it still holds this run's password (constant-time compare; otherwise exit 70 and
+  nothing is renamed). Before the lock, two runs on one volume could leave the apps' file on one password and the role on
+  another. The gates also refuse every other path to the volume from an added service (security re-review F2): a second
+  top-level name for it (`external` alias), a `driver_opts` bind, `pid`/`ipc`/`network_mode` sharing with db-setup,
+  rab-api or rab-worker (or any `container:`), a bind of the Docker root or its ancestors, and an added service running as
+  uid 0 or 1000. The password is random (32 bytes),
   not derived from anything, so an APP_SECRET leak gives no database login. The bundled db is reachable only from the app network; an external database
   only through the provider's allow-list; verify-full TLS.
 - **Residual.** Volume backups and snapshots contain the password: protect and encrypt them like the database. The file
-  is plaintext at rest (T-9). Changing it on purpose: stop rab-api and rab-worker, remove the file with a one-off db-setup
-  run, `up -d` (the A4 reset; runbook section 7; not yet run live). Running apps do not pick up a new password on their own:
+  is plaintext at rest (T-9). Changing it on purpose: stop rab-api and rab-worker, remove `owner-password` and any pending
+  `owner-password.next` with a one-off, environment-free `docker run` of the current image on the volume, `up -d` (the A4 reset; runbook section 7; not yet run live). Running apps do not pick up a new password on their own:
   their new connections fail with 28P01 until they are recreated, hence the stop.
 - **Crash or failure during an A4 reset (security review L1, fixed).** db-setup stores the NEW password exclusively as the
   pending file `owner-password.next` before its transaction, and renames it over `owner-password` only after the COMMIT
@@ -7240,7 +7248,7 @@ A rollback across this release needs the previous release's compose files (its i
 `db-setup.sh` or bootstrap child: under this release's files db-setup fails and rab-api never starts) and a
 `crewflow_owner` URL in `PG_DATABASE_URL`. With a `crewflow_owner` URL in compose.env it is that same URL (db-setup never
 changed its password). With an admin URL or the bundled db, the URL is printed by a one-off `docker run` of the current
-image that runs the apps' own derive step on the read-only volume (`--log-driver none --network none --read-only --user
+image that runs the apps' own derive step on the read-only volume (`--pull never --log-driver none --network none --read-only --cap-drop ALL --user
 1000:1000`; runbook 3.6; SENSITIVE output; not yet run live), or a new password is set with `01-crewflow-owner.sql`.
 
 - **Tests.** owner-credential / owner-password-file / derive-runtime-url / owner-bootstrap / db-target / runtime-login /

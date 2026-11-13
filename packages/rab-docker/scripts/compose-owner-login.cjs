@@ -384,6 +384,13 @@ function durationSeconds(value) {
 const DOCKER_VOLUME_STORE = /(^|\/)(var\/lib\/docker|\.local\/share\/docker)(\/|$)/;
 const CREWFLOW_RUN_DIR = '/run/crewflow';
 const underDir = (target, dir) => target === dir || target.startsWith(`${dir}/`);
+/**
+ * Security re-review F2: a bind of the Docker root or ANY of its ancestors reaches the volume store as well (`/`, `/var`,
+ * `/var/lib`; rootless: a home directory, `~/.local`, `~/.local/share`).
+ */
+const DOCKER_ROOT_ANCESTOR = /^\/(var(\/lib)?|home|home\/[^/]+(\/\.local(\/share)?)?|root(\/\.local(\/share)?)?)?$/;
+/** The services db-setup's password volume belongs to. */
+const PASSWORD_VOLUME_SERVICES = ['rab-api', 'rab-worker', 'db-setup'];
 /** A container path as the engine resolves it: relative to `base`, `..` and `//` collapsed. */
 const containerPath = (target, base) => path.posix.resolve(base, String(target ?? '').replace(/\\/g, '/'));
 
@@ -423,6 +430,19 @@ function credentialMountProblems(services, where = '', { redisUser = true } = {}
         out.push(`${name}: mounts something at ${t}${where} (only ${DB_TARGET_VOLUME}, on db-setup / rab-api / rab-worker)`);
       }
     }
+    // F2: a bind of the Docker root's ancestors; namespace sharing with the three services that hold the password file.
+    for (const v of Array.isArray(s.volumes) ? s.volumes : []) {
+      const source = String(v?.source ?? '').replace(/\\/g, '/');
+      if (v?.type === 'bind' && source.startsWith('/') && DOCKER_ROOT_ANCESTOR.test(path.posix.normalize(source).replace(/\/+$/, '') || '/')) {
+        out.push(`${name}: binds an ancestor of Docker's root directory${where} (it reaches the volume store, the crewflow_owner password file included)`);
+      }
+    }
+    for (const key of ['pid', 'ipc', 'network_mode']) {
+      const value = String(s[key] ?? '');
+      const m = /^service:(.+)$/.exec(value);
+      if (/^container:/.test(value)) out.push(`${name}: ${key} joins another container's namespace${where} (container:..., never)`);
+      else if (m && PASSWORD_VOLUME_SERVICES.includes(m[1])) out.push(`${name}: ${key} shares the namespace of ${m[1]}${where} (it could read that service's files through /proc)`);
+    }
     const tmpfs = s.tmpfs === undefined || s.tmpfs === null ? [] : Array.isArray(s.tmpfs) ? s.tmpfs : [s.tmpfs];
     for (const entry of tmpfs) {
       const t = containerPath(String(entry).split(':')[0], '/');
@@ -432,6 +452,35 @@ function credentialMountProblems(services, where = '', { redisUser = true } = {}
   const redis = services?.['rab-redis'];
   if (redisUser && redis && !/^999:\d+$/.test(String(redis.user ?? ''))) {
     out.push(`rab-redis: user is "${redis.user ?? ''}"${where}, expected 999:<gid> (never uid 1000, the owner of the crewflow_owner password file)`);
+  }
+  return out;
+}
+
+/**
+ * Security re-review F2: the top-level volumes. Docker's name of a volume is `name`, else `<project>_<key>`. No other key
+ * may name db-setup's password volume (an `external: true` alias mounted by another service), on any project name (the
+ * committed files use `rab-production`); no volume may be a host bind through `driver_opts` (`o: bind`, or `type: none`
+ * with a `device`); the password volume itself is a plain local volume (not external, no driver options). Pure.
+ */
+function topLevelVolumeProblems(model, where = '') {
+  const out = [];
+  const vols = model?.volumes && typeof model.volumes === 'object' ? model.volumes : {};
+  const project = String(model?.name ?? '');
+  const nameOf = (key, v) => String(v?.name ?? (project ? `${project}_${key}` : key));
+  const targetName = vols[DB_TARGET_VOLUME] ? nameOf(DB_TARGET_VOLUME, vols[DB_TARGET_VOLUME]) : null;
+  for (const [key, v] of Object.entries(vols)) {
+    const name = nameOf(key, v);
+    if (key !== DB_TARGET_VOLUME && (name === targetName || name === DB_TARGET_VOLUME || name.endsWith(`_${DB_TARGET_VOLUME}`))) {
+      out.push(`volume ${key}: names db-setup's password volume${where} (a second name for it would mount the crewflow_owner password file elsewhere)`);
+    }
+    const opts = v?.driver_opts && typeof v.driver_opts === 'object' ? v.driver_opts : {};
+    if (/(^|,)\s*r?bind\s*(,|$)/.test(String(opts.o ?? '')) || (String(opts.type ?? '') === 'none' && opts.device)) {
+      out.push(`volume ${key}: is a host bind through driver_opts${where} (never: it can reach the Docker volume store)`);
+    }
+  }
+  const t = vols[DB_TARGET_VOLUME];
+  if (t && (t.external || (t.driver_opts && Object.keys(t.driver_opts).length) || (t.driver && t.driver !== 'local'))) {
+    out.push(`volume ${DB_TARGET_VOLUME}: must be a plain local volume${where} (not external, no driver or driver options)`);
   }
   return out;
 }
@@ -670,6 +719,7 @@ function checkModel(model, combo) {
   appCredentialProblems(services, p);
   dbSetupProblems(services, p, setupUrl);
   for (const msg of credentialMountProblems(services)) p(msg);
+  for (const msg of topLevelVolumeProblems(model)) p(msg);
   // DB-SETUP: the bundled db's password reaches only db (POSTGRES_PASSWORD) and, inside the default admin URL, db-setup's
   // PG_DATABASE_URL. Never under another key, never another service, never by its own name.
   for (const name of names) {
@@ -1084,7 +1134,7 @@ function main(argv) {
 if (require.main === module) process.exitCode = main(process.argv.slice(2));
 
 module.exports = {
-  FILES, TEMPLATES, COMBOS, STATIC_COMBO, DB_SERVICE, DB_SETUP_SERVICE, DB_TARGET_VOLUME, DB_TARGET_DIR, SENTINEL_ADMIN_PW, SENTINEL_ADMIN_URL, dbSetupProblems, appCredentialProblems, credentialMountProblems, bundledDbEnvironmentProblems, DB_INITDB_ARGS, DB_ENV_KEYS, DB_PASSWORD_KEY, SENTINEL_DB_PW, BUNDLED_URL, NOT_THE_APP_LOGIN, NOTIFICATION_DELIVERY, PHASE_D_SWITCHES, PHASE_D_UNCHANGED, STATEMENT_DISPATCH, FEATURE_SWEEPS, SWITCH_VALUES, featureSweepProblems, composeEnvValue, AUDIT_SINK_MODES, AUDIT_SINK_PRODUCTION_MODES, AUDIT_SINK_FAILURES,
+  FILES, TEMPLATES, COMBOS, STATIC_COMBO, DB_SERVICE, DB_SETUP_SERVICE, DB_TARGET_VOLUME, DB_TARGET_DIR, SENTINEL_ADMIN_PW, SENTINEL_ADMIN_URL, dbSetupProblems, appCredentialProblems, credentialMountProblems, topLevelVolumeProblems, bundledDbEnvironmentProblems, DB_INITDB_ARGS, DB_ENV_KEYS, DB_PASSWORD_KEY, SENTINEL_DB_PW, BUNDLED_URL, NOT_THE_APP_LOGIN, NOTIFICATION_DELIVERY, PHASE_D_SWITCHES, PHASE_D_UNCHANGED, STATEMENT_DISPATCH, FEATURE_SWEEPS, SWITCH_VALUES, featureSweepProblems, composeEnvValue, AUDIT_SINK_MODES, AUDIT_SINK_PRODUCTION_MODES, AUDIT_SINK_FAILURES,
   AUDIT_SINK_PRODUCTION_FAILURES, SENTINEL_URL, SENTINEL_OWNER_PW, SENTINEL_APP_SECRET,
   SENTINEL_REDIS_PW, SENTINEL_LEGACY_PW, forbiddenReason, durationSeconds, checkModel, checkStaticModel, parseEnvText,
   lintEnvText, lintComposeText, renderModels, staticProblems, main,

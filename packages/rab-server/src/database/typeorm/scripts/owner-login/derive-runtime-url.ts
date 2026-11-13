@@ -22,7 +22,7 @@
  * Without CREWFLOW_DB_TARGET_FILE (development only): a crewflow_owner PG_DATABASE_URL is written back unchanged; any other
  * login is refused (there is nothing to build a crewflow_owner password from).
  */
-import { writeSync } from 'node:fs';
+import { readlinkSync, writeSync } from 'node:fs';
 
 import { readPrimaryDatabaseUrl } from '../../../postgres/pg-config';
 import { DB_TARGET_FILE_VAR, DbTargetError, runtimeUrlFromDbTarget } from '../../../owner-login/db-target';
@@ -60,8 +60,26 @@ export interface DeriveIo {
   error: (line: string) => void;
 }
 
+/**
+ * Linux: fd 4 must be one the CALLER opened. When the caller opened none, the runtime may already use descriptor 4 for
+ * itself (libuv's epoll / eventfd / io_uring descriptors, `anon_inode:[...]`): writing the URL there would neither reach
+ * the caller nor fail cleanly. Such a descriptor counts as "not open" (EBADF -> exit 64 with the usage line).
+ */
+function assertCallerOpenedRuntimeUrlFd(): void {
+  if (process.platform !== 'linux') return;
+  let target: string;
+  try {
+    target = readlinkSync(`/proc/self/fd/${RUNTIME_URL_FD}`);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException | null)?.code === 'ENOENT') throw Object.assign(new Error('fd not open'), { code: 'EBADF' });
+    return; // no /proc: the write below decides
+  }
+  if (target.startsWith('anon_inode:')) throw Object.assign(new Error('fd not open'), { code: 'EBADF' });
+}
+
 const processIo: DeriveIo = {
   writeRuntimeUrl: (url) => {
+    assertCallerOpenedRuntimeUrlFd();
     writeSync(RUNTIME_URL_FD, url);
   },
   log: (line) => process.stdout.write(`${line}\n`),
