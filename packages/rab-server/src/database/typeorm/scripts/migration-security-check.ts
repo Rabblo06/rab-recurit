@@ -45,7 +45,7 @@
  */
 import { spawnSync } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
-import { readdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { readdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 import { Client } from 'pg';
@@ -61,7 +61,7 @@ import {
   prePhase0bMigrationFingerprint,
 } from '../core/migration-source-rules';
 import { PREAUTH_DEFINER_EXPRESSION, PREAUTH_FORCE_TABLES, preauthDefinerPolicyName } from '../core/preauth-force-sql';
-import { compareWithGolden } from '../core/security-posture';
+import { compareWithGolden, readSecurityPostureGoldens } from '../core/security-posture';
 import { TEST_DATABASE_ADMIN_URL_NAMES } from '../core/test-database-guard';
 import { WORKER_ROLE_FACTS_SQL, WorkerRoleFacts, workerRoleProblems } from '../core/worker-dispatch-pointer-sql';
 import { PENDING_FINGERPRINT_VERSIONS } from '../workspace-schema/v1/expected-fingerprints';
@@ -209,7 +209,8 @@ const MIGRATIONS: MigrationFile[] = readdirSync(MIGRATIONS_DIR)
 /** Pre-0b migrations admitted to the frozen set after Phase 0b was written, in timestamp order (see upgradeScenario). */
 const HELD = MIGRATIONS.filter((m) => PRE_PHASE_0B_HELD_TO_POST_0B_RULES.has(m.name));
 const NONE_HELD: ReadonlySet<string> = new Set();
-const GOLDEN = readFileSync(join(__dirname, '..', 'core', 'security-posture.golden.txt'), 'utf8').split('\n').filter(Boolean);
+/** The committed goldens; compareWithGolden picks the one for the server's major (DB-SETUP section 6 follow-up). */
+const GOLDEN = readSecurityPostureGoldens();
 
 /** Never echo a connection string, whatever a driver or a migration put in an error message. */
 const sanitise = (text: string) => text.replace(/postgres(ql)?:\/\/\S+/g, '<url>').replace(/PASSWORD\s+'[^']*'/gi, "PASSWORD '<redacted>'");

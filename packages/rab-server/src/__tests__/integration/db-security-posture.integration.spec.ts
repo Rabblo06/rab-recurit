@@ -1,9 +1,7 @@
-import { readFileSync } from 'node:fs';
-import { join } from 'node:path';
 import { Client } from 'pg';
 
 import { resolveIntegrationTestDatabase } from '../../database/typeorm/core/test-database-guard';
-import { compareWithGolden } from '../../database/typeorm/core/security-posture';
+import { compareWithGolden, readSecurityPostureGoldens } from '../../database/typeorm/core/security-posture';
 import { integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
 
 /**
@@ -18,8 +16,8 @@ describeIfDb('database security posture (integration)', () => {
   const { adminUrl, appUrl } = RUN ? resolveIntegrationTestDatabase(process.env) : ({} as never);
 
   it('matches the golden snapshot produced by a migrations-only build (core, and EVERY workspace schema against the template)', async () => {
-    const expected = readFileSync(join(__dirname, '../../database/typeorm/core/security-posture.golden.txt'), 'utf8').split('\n').filter(Boolean);
-    const report = await compareWithGolden(adminUrl, expected);
+    // DB-SETUP section 6 follow-up: the golden of this server's major (16 = the reference file; 17 / 18 = its own ws| template).
+    const report = await compareWithGolden(adminUrl, readSecurityPostureGoldens());
     expect(report.core).toEqual({ missing: [], unexpected: [] });
     // F4: each physical workspace_<32 hex> schema on its own. A drifted one is named here with its exact lines.
     expect(report.workspaces).toEqual([]);

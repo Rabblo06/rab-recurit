@@ -1,11 +1,10 @@
 import 'reflect-metadata';
 import { spawnSync } from 'node:child_process';
-import { readFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { Client } from 'pg';
 
 import { resolveIntegrationTestDatabase } from '../../database/typeorm/core/test-database-guard';
-import { compareWithGolden } from '../../database/typeorm/core/security-posture';
+import { compareWithGolden, readSecurityPostureGoldens, selectSecurityPostureGolden } from '../../database/typeorm/core/security-posture';
 import { integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
 
 /**
@@ -24,7 +23,6 @@ const describeIfDb = RUN ? describe : describe.skip;
 jest.setTimeout(180_000);
 
 const REPO_ROOT = resolve(__dirname, '../../../../..');
-const GOLDEN = join(__dirname, '../../database/typeorm/core/security-posture.golden.txt');
 
 interface Ws {
   id: string;
@@ -37,7 +35,8 @@ describeIfDb('F4: workspace schemas are covered by check-rls-coverage and the po
   const { adminUrl, appUrl } = RUN ? resolveIntegrationTestDatabase(process.env) : ({} as never);
   const suffix = Math.random().toString(36).slice(2, 8);
   let admin: Client;
-  const golden = readFileSync(GOLDEN, 'utf8').split('\n').filter(Boolean);
+  // DB-SETUP section 6 follow-up: compareWithGolden selects the golden of the server's major.
+  const goldens = readSecurityPostureGoldens();
 
   const provisionDisposable = async (label: string): Promise<Ws> => {
     const r = await admin.query(
@@ -81,14 +80,15 @@ describeIfDb('F4: workspace schemas are covered by check-rls-coverage and the po
     return { status: out.status, lines: text.split('\n').filter((l) => l.includes(schema)).map((l) => l.trim()) };
   };
 
-  const postureDrift = async (schema: string) => (await compareWithGolden(adminUrl, golden)).workspaces.find((d) => d.schema === schema);
+  const postureDrift = async (schema: string) => (await compareWithGolden(adminUrl, goldens)).workspaces.find((d) => d.schema === schema);
 
   beforeAll(async () => {
     admin = new Client({ connectionString: adminUrl });
     await admin.connect();
     const [{ rolsuper }] = (await admin.query(`SELECT rolsuper FROM pg_roles WHERE rolname = current_user`)).rows;
     if (!rolsuper) throw new Error('this suite needs the disposable database bootstrap superuser as TEST_DATABASE_URL_UNPOOLED');
-    expect(golden.filter((l) => l.startsWith('ws|')).length).toBeGreaterThan(300);
+    const [{ num }] = (await admin.query(`SELECT current_setting('server_version_num')::int AS num`)).rows;
+    expect(selectSecurityPostureGolden(goldens, Math.floor(num / 10000)).filter((l) => l.startsWith('ws|')).length).toBeGreaterThan(300);
   });
 
   afterAll(async () => {

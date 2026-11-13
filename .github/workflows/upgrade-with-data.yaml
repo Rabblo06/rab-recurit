@@ -19,11 +19,11 @@ concurrency:
 jobs:
   upgrade:
     runs-on: ubuntu-latest
-    timeout-minutes: 150
+    timeout-minutes: 240
     strategy:
       fail-fast: false
       matrix:
-        pg: ['16', '18']
+        pg: ['16', '17', '18']
     env:
       # R254 (rab/v0.4.0 = cd7c7e32 = 4c38aa1a migration set): the published cd7c7e32 image.
       PREV_IMAGE: docker.io/adhin007/adolphus@sha256:075b536c462fa16b80421d0bba0d12c3409b4aa6e321051758d1d649ed40281b
@@ -32,8 +32,12 @@ jobs:
       CONTROL_IMAGE: docker.io/adhin007/adolphus@sha256:d77500433c3a10a4130879faff8dd82b86161bd1f6ee3da41336c4c8b63fb8d7
       DOT_PROJECT_PREFIX: dou
       REGISTRY_IMAGE: registry@sha256:a3d8aaa63ed8681a604f1dea0aa03f100d5895b6a58ace528858a7b332415373
-      PG16_IMAGE: postgres@sha256:f4610795587492cd4fb887c2dc3de301b813278bb6f616992061141b5f15ac36
-      PG18_IMAGE: postgres@sha256:10a5c69a83035ab5239f5620d708520e8b28f5aa1f2b20143e6024532edadfb5
+      # DB-SETUP: the suites run the production bundled `db` service, which needs DEBIAN postgres images (index digests,
+      # pulled 2026-11-12): postgres:16 (16.15, the compose default), :17 (17.11), :18 (18.6); :15 for the PG15 refusal.
+      PG16_IMAGE: postgres@sha256:f9a7b9ebf6f56201f949db745e47bc423c0f0f8294bafe991cc10bf74b029657
+      PG17_IMAGE: postgres@sha256:ff87138949ad9a46f32ff23bd6852b52ce024a13dffe9b4087be98292cdd3b4f
+      PG18_IMAGE: postgres@sha256:e3d24f6906d0760bf4da0dae872415391ededefad23fd471c47dc53b0ddf3c42
+      PG15_IMAGE: postgres@sha256:1aac5b49cefd627f02816141ca4ad012d6cc19460dfe02a9b5168a105be3fc53
       REDIS_IMAGE: redis@sha256:57e4255cc971b1c8d6f8a6ca283ac01bc3ecdd914273ef6bfaede87aaecd6541
       REPO: 127.0.0.1:5055/adolphus
     steps:
@@ -75,9 +79,22 @@ jobs:
           pg_var="PG${{ matrix.pg }}_IMAGE"
           DOT_REPOSITORY="$REPO" DOT_PG_IMAGE="${!pg_var}" DOT_REDIS_IMAGE="$REDIS_IMAGE" DOT_REGISTRY_CONTAINER=deploy-order-registry \
             node packages/rab-docker/deploy-order-tests/run-upgrade-with-data-tests.cjs "${{ matrix.pg }}" "$RUNNER_TEMP/dou-pg${{ matrix.pg }}"
+      - name: DB-SETUP owner's tests (bundled, restart, external admin, refusals, rotation, environ, R256 upgrade, logs, lock) on PostgreSQL ${{ matrix.pg }}
+        if: always()
+        run: |
+          set -euo pipefail
+          pg_var="PG${{ matrix.pg }}_IMAGE"
+          # R256 = the published 0e0a6edd image, already pushed above as the red control ($DOT_CONTROL_DIGEST).
+          # PG15 refusal once (the 16 leg).
+          extra=(); [ "${{ matrix.pg }}" = 16 ] && extra+=(DOT_PG15_IMAGE="$PG15_IMAGE")
+          env "${extra[@]}" DOT_REPOSITORY="$REPO" DOT_NEW_DIGEST="$DOT_NEW_DIGEST" DOT_R256_DIGEST="$DOT_CONTROL_DIGEST" \
+            DOT_PG_IMAGE="${!pg_var}" DOT_REDIS_IMAGE="$REDIS_IMAGE" DOT_REGISTRY_CONTAINER=deploy-order-registry DOT_PROJECT_PREFIX=dbs \
+            node packages/rab-docker/deploy-order-tests/run-db-setup-tests.cjs "${{ matrix.pg }}" "$RUNNER_TEMP/dbs-pg${{ matrix.pg }}"
       - name: Summary
         if: always()
-        run: cat "$RUNNER_TEMP/dou-pg${{ matrix.pg }}/SUMMARY.md" >> "$GITHUB_STEP_SUMMARY" || true
+        run: |
+          cat "$RUNNER_TEMP/dou-pg${{ matrix.pg }}/SUMMARY.md" >> "$GITHUB_STEP_SUMMARY" || true
+          cat "$RUNNER_TEMP/dbs-pg${{ matrix.pg }}/SUMMARY.md" >> "$GITHUB_STEP_SUMMARY" || true
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: always()
         with:
@@ -88,9 +105,14 @@ jobs:
             ${{ runner.temp }}/dou-pg${{ matrix.pg }}/SUMMARY.md
             ${{ runner.temp }}/dou-pg${{ matrix.pg }}/run.log
             ${{ runner.temp }}/dou-pg${{ matrix.pg }}/evidence/
+            ${{ runner.temp }}/dbs-pg${{ matrix.pg }}/RESULTS.json
+            ${{ runner.temp }}/dbs-pg${{ matrix.pg }}/SUMMARY.md
+            ${{ runner.temp }}/dbs-pg${{ matrix.pg }}/run.log
+            ${{ runner.temp }}/dbs-pg${{ matrix.pg }}/evidence/
           if-no-files-found: warn
       - name: Cleanup (this job's own projects and registry only)
         if: always()
         run: |
-          for c in u1 u2 u3 u4 u6 u7; do docker compose -p "$DOT_PROJECT_PREFIX-pg${{ matrix.pg }}-$c" down --timeout 30 --remove-orphans >/dev/null 2>&1 || true; done
+          for c in u1 u2 u3 u4 u6 u7; do docker compose -p "$DOT_PROJECT_PREFIX-pg${{ matrix.pg }}-$c" down --timeout 30 --remove-orphans --volumes >/dev/null 2>&1 || true; done
+          for c in a race ext r256 pg15; do docker compose -p "dbs-pg${{ matrix.pg }}-$c" down --timeout 30 --remove-orphans --volumes >/dev/null 2>&1 || true; done
           docker rm -f deploy-order-registry >/dev/null 2>&1 || true

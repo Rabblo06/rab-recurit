@@ -26,6 +26,9 @@ on:
       - packages/rab-docker/scripts/compose-owner-login*.cjs
       - packages/rab-docker/scripts/compose-one-image*.cjs
       - packages/rab-docker/rab/worker-bundle/worker-bundle-health.cjs
+      - packages/rab-docker/rab/api-prestart.sh
+      - packages/rab-docker/rab/worker-start.sh
+      - packages/rab-docker/staging/verify-image-compose*.cjs
       - .github/workflows/ci-deployment-owner-login.yaml
       - .nvmrc
   push:
@@ -40,6 +43,9 @@ on:
       - packages/rab-docker/scripts/compose-owner-login*.cjs
       - packages/rab-docker/scripts/compose-one-image*.cjs
       - packages/rab-docker/rab/worker-bundle/worker-bundle-health.cjs
+      - packages/rab-docker/rab/api-prestart.sh
+      - packages/rab-docker/rab/worker-start.sh
+      - packages/rab-docker/staging/verify-image-compose*.cjs
       - .github/workflows/ci-deployment-owner-login.yaml
       - .nvmrc
   workflow_dispatch:
@@ -79,20 +85,22 @@ jobs:
             echo "CREWFLOW_REDIS_IMAGE=redis@sha256:$z"
             echo "CREWFLOW_POSTGRES_IMAGE=postgres@sha256:$z"
             echo "CREWFLOW_SECRETS_DIR=$t/secrets"
-            echo "CREWFLOW_PG_CA_FILE=/etc/crewflow/pg-ca.crt"
+            echo "PG_DATABASE_PASSWORD=$(printf '%064d' 0)"
           } > "$t/compose.env"
           D=packages/rab-docker
-          I="$D/docker-compose.image.yml"; L="$D/docker-compose.local-db.yml"; S="$D/staging/docker-compose.staging.yml"
+          I="$D/docker-compose.image.yml"; S="$D/staging/docker-compose.staging.yml"
+          # DB-SETUP D3: docker-compose.local-db.yml is retired (the bundled db is in the image compose).
+          test ! -e "$D/docker-compose.local-db.yml"
           # O3: docker-compose.migrate-on-start.yml is folded into the image compose (the API migrates on start).
           test ! -e "$D/docker-compose.migrate-on-start.yml"
-          for combo in "$I" "$I $L" "$I $S"; do
+          for combo in "$I" "$I $S"; do
             args=()
             for f in $combo; do args+=(-f "$f"); done
             echo "docker compose config: $combo"
             docker compose --env-file "$t/compose.env" --project-directory "$t/project" "${args[@]}" config -q
           done
           # Fail closed: a missing required interpolation value must refuse to render.
-          for var in CREWFLOW_IMAGE_TAG CREWFLOW_SECRETS_DIR CREWFLOW_PG_CA_FILE; do
+          for var in CREWFLOW_IMAGE_TAG CREWFLOW_SECRETS_DIR PG_DATABASE_PASSWORD; do
             grep -v "^$var=" "$t/compose.env" > "$t/compose-missing.env"
             if docker compose --env-file "$t/compose-missing.env" --project-directory "$t/project" -f "$I" config -q 2>/dev/null; then
               echo "::error::docker-compose.image.yml rendered without $var"

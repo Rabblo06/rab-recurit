@@ -1,5 +1,6 @@
 import { assertDeploymentIdentity, DeploymentIdentityError, MARKER_PRESENT_SQL, MARKER_READ_SQL, Query } from '../deployment-identity/deployment-identity';
 import { SEMANTIC_GOLDEN_PG16 } from './semantic-golden.pg16';
+import { SEMANTIC_GOLDEN_PG17 } from './semantic-golden.pg17';
 import { SEMANTIC_GOLDEN_PG18 } from './semantic-golden.pg18';
 import { POSTURE_EXCLUDED_SETTING, SEMANTIC_OBJECT_SQL } from './semantic-posture';
 
@@ -20,8 +21,8 @@ function fakeQuery(disposableTest: boolean): Query {
 }
 
 describe('the disposable-test marker is not part of the semantic posture', () => {
-  it('no golden line names crewflow.disposable_test_database (PG16 and PG18)', () => {
-    for (const golden of [SEMANTIC_GOLDEN_PG16, SEMANTIC_GOLDEN_PG18]) {
+  it('no golden line names crewflow.disposable_test_database (PG16, PG17 and PG18)', () => {
+    for (const golden of [SEMANTIC_GOLDEN_PG16, SEMANTIC_GOLDEN_PG17, SEMANTIC_GOLDEN_PG18]) {
       expect(golden.filter((l) => l.includes('disposable_test_database'))).toEqual([]);
     }
   });

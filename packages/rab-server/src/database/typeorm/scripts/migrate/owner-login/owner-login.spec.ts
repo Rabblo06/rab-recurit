@@ -1,17 +1,20 @@
 /**
  * Owner-login lifecycle (PR 3): the pure decisions, database-free. The live behaviour (bootstrap, phases, shim, races,
- * kill points, golden equivalence on PostgreSQL 16 and 18) is exercised on disposable clusters by
+ * kill points, golden equivalence on PostgreSQL 16, 17 and 18) is exercised on disposable clusters by
  * scripts/migration-security-check.ts (scenario owner-login) and owner-login-lifecycle-check.ts.
  */
 import type { QueryRunner } from 'typeorm';
 
 import {
   EXPECTED_WORKSPACE_FINGERPRINTS,
+  assertFingerprintsComplete,
   EXPECTED_WORKSPACE_FINGERPRINTS_PG16,
+  EXPECTED_WORKSPACE_FINGERPRINTS_PG17,
   missingFingerprintVersions,
   postgresMajorOf,
   resetWorkspaceFingerprintSelectionForTests,
   selectWorkspaceFingerprintMajor,
+  SUPPORTED_FINGERPRINT_MAJORS,
   UnsupportedPostgresVersionError,
   workspaceFingerprintMajor,
 } from '../../../workspace-schema/v1/expected-fingerprints';
@@ -269,16 +272,31 @@ describe('D4: workspace fingerprints selected by server major; PG16 unchanged', 
     expect(EXPECTED_WORKSPACE_FINGERPRINTS[19]).toBe('b2afa389eec7c5fb0a304ace57cb39d813bb5b6ac044be2387d4e67f804655c3');
     expect(Object.entries(EXPECTED_WORKSPACE_FINGERPRINTS)).toEqual(Object.entries(EXPECTED_WORKSPACE_FINGERPRINTS_PG16));
   });
-  it('18 selects the PG18 table; 17, 19 and below 16 are refused; a second, different major is refused', () => {
+  it('18 selects the PG18 table; 19 and below 16 are refused; a second, different major is refused', () => {
     selectWorkspaceFingerprintMajor(18);
     expect(workspaceFingerprintMajor()).toBe(18);
     expect(EXPECTED_WORKSPACE_FINGERPRINTS[19]).toBe('af115ec7490665c7df38fbc78128e95e680e59764bb626e4c21d0c061fe699e6');
     expect(missingFingerprintVersions(18)).toEqual([]);
     expect(() => selectWorkspaceFingerprintMajor(16)).toThrow(/cannot switch/);
     resetWorkspaceFingerprintSelectionForTests();
-    expect(() => selectWorkspaceFingerprintMajor(17)).toThrow(UnsupportedPostgresVersionError);
+    expect(() => selectWorkspaceFingerprintMajor(19)).toThrow(UnsupportedPostgresVersionError);
     expect(() => selectWorkspaceFingerprintMajor(19)).toThrow(/not supported/);
     expect(() => selectWorkspaceFingerprintMajor(15)).toThrow(/refused/);
+  });
+  it('DB-SETUP §6: 17 selects its own complete PG17 table, distinct from 16 and 18', () => {
+    expect(SUPPORTED_FINGERPRINT_MAJORS).toEqual([16, 17, 18]);
+    expect(missingFingerprintVersions(17)).toEqual([]);
+    expect(() => assertFingerprintsComplete(17)).not.toThrow();
+    selectWorkspaceFingerprintMajor(17);
+    expect(workspaceFingerprintMajor()).toBe(17);
+    expect(Object.entries(EXPECTED_WORKSPACE_FINGERPRINTS)).toEqual(Object.entries(EXPECTED_WORKSPACE_FINGERPRINTS_PG17));
+    for (const v of Object.keys(EXPECTED_WORKSPACE_FINGERPRINTS_PG17).map(Number)) {
+      expect(EXPECTED_WORKSPACE_FINGERPRINTS_PG17[v]).toMatch(/^[0-9a-f]{64}$/);
+    }
+    expect(() => selectWorkspaceFingerprintMajor(18)).toThrow(/cannot switch/);
+    resetWorkspaceFingerprintSelectionForTests();
+    expect(selectFingerprintsForRun('170006', true, () => undefined)).toBe(17);
+    expect(workspaceFingerprintMajor()).toBe(17);
   });
   it('server_version_num parsing; the runner is strict for the owner login and lenient for the legacy path', () => {
     expect(postgresMajorOf('160015')).toBe(16);
@@ -290,7 +308,8 @@ describe('D4: workspace fingerprints selected by server major; PG16 unchanged', 
     expect(missingFingerprintVersions(16)).toEqual([]);
     resetWorkspaceFingerprintSelectionForTests();
     const lines: string[] = [];
-    expect(selectFingerprintsForRun('170002', false, (l) => lines.push(l))).toBe(17);
+    // DB-SETUP §6: 17 is supported now, so the lenient path's "no reviewed fingerprints" warning is shown with 19.
+    expect(selectFingerprintsForRun('190001', false, (l) => lines.push(l))).toBe(19);
     expect(lines.join()).toMatch(/no reviewed workspace fingerprints/);
     expect(workspaceFingerprintMajor()).toBe(16);
   });

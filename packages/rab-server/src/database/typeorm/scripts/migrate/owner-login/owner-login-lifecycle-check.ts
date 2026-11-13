@@ -38,7 +38,7 @@ import { DataSource, DataSourceOptions } from 'typeorm';
 
 import { STARTUP_EXIT_CODES } from '../../../../owner-login/runtime-db-config';
 import { coreMigrationDataSourceOptions, GuardedMigrationDataSource } from '../../../core/core.datasource';
-import { compareWithGolden } from '../../../core/security-posture';
+import { compareWithGolden, readSecurityPostureGoldens } from '../../../core/security-posture';
 import { secureOwnerInvariantViolations } from '../../../core/secure-owner-invariants';
 import { deployPostCheckProblems } from '../deploy-post-checks';
 import { runLockedMigrations } from '../locked-migration-runner';
@@ -57,7 +57,8 @@ const MIGRATIONS = readdirSync(MIGRATIONS_DIR)
   .filter((f) => /^\d{13}-[^.]+\.(ts|js)$/.test(f))
   .sort()
   .map((f) => ({ ts: Number(f.slice(0, 13)), name: `${f.slice(14).replace(/\.(ts|js)$/, '')}${f.slice(0, 13)}`, path: join(MIGRATIONS_DIR, f).replace(/\\/g, '/') }));
-const GOLDEN = readFileSync(join(__dirname, '..', '..', '..', 'core', 'security-posture.golden.txt'), 'utf8').split('\n').filter(Boolean);
+/** The committed goldens; compareWithGolden picks the one for the server's major (DB-SETUP section 6 follow-up). */
+const GOLDEN = readSecurityPostureGoldens();
 const OWNER_SQL = readFileSync(join(ROOT, 'packages', 'rab-docker', 'postgres-init', 'owner-login', '01-crewflow-owner.sql'), 'utf8');
 const TRANSITION_SQL = readFileSync(join(ROOT, 'packages', 'rab-docker', 'postgres-init', 'owner-login', 'transition-from-separated.sql'), 'utf8');
 
