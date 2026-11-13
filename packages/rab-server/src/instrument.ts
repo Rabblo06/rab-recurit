@@ -53,16 +53,19 @@ const MAX_KEY_LENGTH = 256;
 // quantifier that could rescan the input is bounded.
 // ---------------------------------------------------------------------------------------------------------------------
 
-// `scheme://user:pass@` anywhere (postgres://, redis://, https://, IP hosts).
+// `scheme://user:pass@` anywhere (postgres://, redis://, https://, IP hosts). The userinfo runs to the LAST `@` before
+// the host (X3.2 review F3: a password may itself contain `@`, as in `postgres://user:p@SECRET@localhost`); the run stops
+// at whitespace or the first `/ ? #` and is bounded, so the backtrack to the last `@` is at most 256 steps.
 const USERINFO_RE =
-  /(?<![A-Za-z0-9+.-])([A-Za-z][A-Za-z0-9+.-]{0,31}:\/\/)[^\s/?#@]{1,256}@/g;
+  /(?<![A-Za-z0-9+.-])([A-Za-z][A-Za-z0-9+.-]{0,31}:\/\/)[^\s/?#]{1,256}@/g;
 // A JWS/JWE header always base64url-encodes `{"` → `eyJ`; also catches a truncated token (header + partial payload).
 const JWT_RE = /(?<![A-Za-z0-9_-])eyJ[A-Za-z0-9_-]{10,}(?:\.[A-Za-z0-9_-]*)*/g;
 // Other three-segment base64url tokens with long segments (opaque signed tokens with unusual headers).
 const DOTTED_TOKEN_RE =
   /(?<![A-Za-z0-9_-])[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{16,}(?![A-Za-z0-9_-])/g;
+// The `@` may be URL-encoded (`bob%40example.com`, as in an otpauth:// label or a query string) (X3.2 review F3).
 const EMAIL_RE =
-  /(?<![A-Z0-9._%+-])[A-Z0-9._%+-]{1,64}@[A-Z0-9-]{1,63}(?:\.[A-Z0-9-]{1,63}){0,8}\.[A-Z]{2,24}/gi;
+  /(?<![A-Z0-9._%+-])[A-Z0-9._%+-]{1,64}(?:@|%40)[A-Z0-9-]{1,63}(?:\.[A-Z0-9-]{1,63}){0,8}\.[A-Z]{2,24}/gi;
 const AUTH_SCHEME_RE =
   /\b(Bearer|Basic|Digest)\s{1,16}(?!\[Filtered\])[A-Za-z0-9._~+/=-]{1,4096}/gi;
 // Cookie / Set-Cookie / Authorization header lines quoted in a message.
@@ -75,19 +78,24 @@ const EQ_PARAM_NAMES =
 // `name: value` (log lines): only unambiguous credential names — `code: 23505` / `state: DRAFT` stay readable.
 const COLON_PARAM_NAMES =
   'token|access_token|refresh_token|id_token|password|passwd|secret|client_secret|api_key|apikey|otp|jwt';
+// camelCase / snake_case compound names (X3.2 review F3): `newPassword`, `currentPassword`, `refreshToken`, `accessToken`,
+// `clientSecret`, `mfaCode`, `mfa_code`, `totpCode`, `totp`, `recoveryCode`… — mirrors SENSITIVE_KEY_RE for free text. The prefix is
+// bounded (≤ 32 letters/underscores) and the alternative starts at a word boundary or a quote, so it stays linear.
+const COMPOUND_PARAM_NAME =
+  '[A-Za-z_]{0,32}(?:password|passwd|token|secret|otp|totp|(?:mfa|totp|otp)_?code|recovery_?codes?|backup_?codes?)';
 // The value: a single- or double-quoted string (closing quote optional, bounded), or a bare token.
 const PARAM_VALUE = String.raw`(?:"[^"\r\n]{0,512}"?|'[^'\r\n]{0,512}'?|(?!\[Filtered\])[^\s&"',;#]{1,1024})`;
 const EQ_PARAM_RE = new RegExp(
-  String.raw`\b(${EQ_PARAM_NAMES})(\s{0,16}=\s{0,16})${PARAM_VALUE}`,
+  String.raw`\b(${EQ_PARAM_NAMES}|${COMPOUND_PARAM_NAME})(\s{0,16}=\s{0,16})${PARAM_VALUE}`,
   'gi',
 );
 const COLON_PARAM_RE = new RegExp(
-  String.raw`\b(${COLON_PARAM_NAMES})(\s{0,16}:\s{0,16})${PARAM_VALUE}`,
+  String.raw`\b(${COLON_PARAM_NAMES}|${COMPOUND_PARAM_NAME})(\s{0,16}:\s{0,16})${PARAM_VALUE}`,
   'gi',
 );
 // `"name": "value"` (JSON embedded in a message).
 const JSON_PARAM_RE = new RegExp(
-  String.raw`("(?:${EQ_PARAM_NAMES}|authorization|cookie)"\s{0,16}:\s{0,16})"(?:[^"\\\r\n]|\\.){0,1024}"?`,
+  String.raw`("(?:${EQ_PARAM_NAMES}|authorization|cookie|${COMPOUND_PARAM_NAME})"\s{0,16}:\s{0,16})"(?:[^"\\\r\n]|\\.){0,1024}"?`,
   'gi',
 );
 
@@ -130,9 +138,15 @@ export function stripUrlQueryAndFragment(url: string): string {
 // Structured data (extra, tags, contexts, breadcrumb data, span attributes)
 // ---------------------------------------------------------------------------------------------------------------------
 
-/** Object keys whose value is replaced wholesale, whatever it is (`password_hash`, `passwordHash`, `oldPassword`, …). */
+/**
+ * Object keys whose value is replaced wholesale, whatever it is (`password_hash`, `passwordHash`, `oldPassword`, …).
+ * Phase X3.2 adds the MFA enrolment fields whose values carry the TOTP secret or a one-time code but whose names the
+ * older list missed: `otpauthUri` (the secret and the URL-encoded account email), `manualKey` (the base32 secret),
+ * `qrDataUrl` (the secret as an image), `recoveryCodes` / `backupCodes` and `totpCode`. `recoveryCodesRemaining` (a
+ * count) is not matched.
+ */
 const SENSITIVE_KEY_RE =
-  /pass(word|wd|phrase)|^pwd$|^pass$|secret|token|authori[sz]ation|cookie|api[-_]?key|private[-_]?key|credential|^otp$|^mfa[-_]?code$|^session([-_]?(id|token))?$|^jwt$|^signature$/i;
+  /pass(word|wd|phrase)|^pwd$|^pass$|secret|token|authori[sz]ation|cookie|api[-_]?key|private[-_]?key|credential|^otp$|^mfa[-_]?code$|^session([-_]?(id|token))?$|^jwt$|^signature$|otpauth|manual[-_]?key|qr[-_]?data[-_]?url|recovery[-_]?codes?$|backup[-_]?codes?$|^totp[-_]?code$/i;
 
 /**
  * Attributes that are dropped: SQL text, raw query strings/fragments, request/response headers and bodies, client IPs,
