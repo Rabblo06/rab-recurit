@@ -405,7 +405,8 @@ function writeSecrets(dir, { expectedDatabase, appSecret = secrets.appSecret, ca
 }
 
 /**
- * The documented "print the crewflow_owner URL" command (DB-SETUP-LEAD.md, Helm model, operator command 1), run exactly as
+ * The documented "print the crewflow_owner URL" command (OWNER-LOGIN-DEPLOYMENT.md §3.6 / DB-SETUP-LEAD.md operator
+ * command 1; CREWFLOW_RUNTIME_URL_FD=4 since f11bfb54), preceded by its `docker volume inspect` check, run exactly as
  * documented plus `--name` (every container of these suites is named): the CURRENT image, the project's setup volume
  * read-only, no network, read-only root, uid 1000, `--log-driver none`. stdout (the URL, SENSITIVE) stays in memory; the
  * documented `2>/dev/null` is stderr, which is captured here only to prove it carries no URL. Returns { code, url, stderr,
@@ -413,15 +414,21 @@ function writeSecrets(dir, { expectedDatabase, appSecret = secrets.appSecret, ca
  */
 function printOwnerUrl(project, imageRef) {
   const name = `${project.name}-print-url`;
+  const volume = `${project.name}_crewflow-db-target`;
+  // The runbook's first line: the volume must exist (a typo in -v silently creates a new, EMPTY volume).
+  const vi = run('docker', ['volume', 'inspect', volume], { timeout: 60_000 });
+  if (vi.code !== 0) return { code: -2, url: '', lines: 0, stderr: `docker volume inspect ${volume} failed`, parsed: null, name, command: `docker volume inspect ${volume}` };
   const r = spawnSync(
     'docker',
     [
       'run', '--rm', '--pull', 'never', '--name', name, '--log-driver', 'none', '--network', 'none', '--read-only',
       '--cap-drop', 'ALL', '--security-opt', 'no-new-privileges', '--user', '1000:1000',
-      '-v', `${project.name}_crewflow-db-target:${TARGET_DIR}:ro`,
+      '-v', `${volume}:${TARGET_DIR}:ro`,
       '-e', `CREWFLOW_DB_TARGET_FILE=${TARGET_FILE}`,
       '--entrypoint', 'sh', imageRef,
-      '-c', 'node packages/rab-server/dist/database/typeorm/scripts/owner-login/derive-runtime-url.js 4>&1 1>&2',
+      // Exactly the runbook (OWNER-LOGIN-DEPLOYMENT.md §3.6): CREWFLOW_RUNTIME_URL_FD=4 states that fd 4 is the caller's
+      // pipe; no -t (derive never writes the URL to a terminal). spawnSync's stdout is a pipe.
+      '-c', 'CREWFLOW_RUNTIME_URL_FD=4 node packages/rab-server/dist/database/typeorm/scripts/owner-login/derive-runtime-url.js 4>&1 1>&2',
     ],
     { cwd: RD, env: { ...process.env, MSYS_NO_PATHCONV: '1' }, encoding: 'utf8', timeout: 180_000 },
   );
@@ -433,7 +440,7 @@ function printOwnerUrl(project, imageRef) {
   } catch {
     parsed = null;
   }
-  return { code: r.status ?? -1, url, lines: url ? url.split('\n').length : 0, stderr: r.stderr || '', parsed, name, command: `docker run --rm --pull never --name ${name} --log-driver none --network none --read-only --cap-drop ALL --security-opt no-new-privileges --user 1000:1000 -v ${project.name}_crewflow-db-target:${TARGET_DIR}:ro -e CREWFLOW_DB_TARGET_FILE=${TARGET_FILE} --entrypoint sh <IMAGE> -c 'node packages/rab-server/dist/database/typeorm/scripts/owner-login/derive-runtime-url.js 4>&1 1>&2' 2>/dev/null` };
+  return { code: r.status ?? -1, url, lines: url ? url.split('\n').length : 0, stderr: r.stderr || '', parsed, name, command: `docker run --rm --pull never --name ${name} --log-driver none --network none --read-only --cap-drop ALL --security-opt no-new-privileges --user 1000:1000 -v ${volume}:${TARGET_DIR}:ro -e CREWFLOW_DB_TARGET_FILE=${TARGET_FILE} --entrypoint sh <IMAGE> -c 'CREWFLOW_RUNTIME_URL_FD=4 node packages/rab-server/dist/database/typeorm/scripts/owner-login/derive-runtime-url.js 4>&1 1>&2' 2>/dev/null` };
 }
 
 /**
