@@ -116,7 +116,7 @@ const MSG = {
   privileged: (attrs) => `crewflow_owner exists with ${attrs}; Crewflow never runs as a privileged login.`,
   cannotCreateRoles: "The PG_DATABASE_URL login cannot create roles (needs CREATEROLE, or use the provider's admin login).",
   cannotGrantDb: 'The PG_DATABASE_URL login cannot grant CONNECT, CREATE, TEMPORARY on this database',
-  noAdminOption: "crewflow_owner's password must be reset but the PG_DATABASE_URL login has no ADMIN OPTION on it",
+  noAdminOption: /must be reset, but the PG_DATABASE_URL login has no ADMIN OPTION on crewflow_owner|must be reset but the PG_DATABASE_URL login has no ADMIN OPTION on it/,
   ownerOwnsDatabase: /crewflow_owner owns this database/,
   searchPathDefault: /search_path default is set/,
   missingDb: /does not exist/,
@@ -500,7 +500,7 @@ function deletePasswordFile(p, label) {
  * in db-setup, never in an env file, a container definition, the rendered config, a docker exec / health-check process;
  * in an app process only inside the runtime's own crewflow_owner URL. Returns the password (memory only).
  */
-function checkPasswordFile(p, check, n, label, { random = true, healthCheck = false } = {}) {
+function checkPasswordFile(p, check, n, label, { random = true, healthCheck = false, urlSupplied = false } = {}) {
   const f = p.readPasswordFile();
   check(Boolean(f), `${label}: the password file exists on the setup volume`);
   if (!f) return null;
@@ -514,14 +514,18 @@ function checkPasswordFile(p, check, n, label, { random = true, healthCheck = fa
   const setupMount = targetMount(p, 'db-setup');
   check(setupMount === 'rw' || setupMount === 'absent', `${label}: only db-setup mounts it read-write (${setupMount}; absent = its container is gone)`);
   const envFiles = ['compose.env', 'database.env', 'runtime.env'].map((x) => fs.readFileSync(path.join(p.secretsDir, x), 'utf8'));
-  check(!envFiles.some((e) => e.includes(pw) || /PASSWORD_FILE|owner-password/i.test(e)), `${label}: no env file holds the password or a password-file setting`);
-  for (const svc of ['db-setup', 'rab-api', 'rab-worker', L.DB_SERVICE]) {
+  // urlSupplied: the operator gave the crewflow_owner URL (PG_DATABASE_URL, compose.env), so that password is legitimately in
+  // compose.env, db-setup's definition and the rendered config; it must still be in no app definition or app env.
+  check(!envFiles.some((e, i) => (!(urlSupplied && i === 0) && e.includes(pw)) || /PASSWORD_FILE|owner-password/i.test(e)), `${label}: no env file holds the password${urlSupplied ? ' (except the operator own crewflow_owner URL in compose.env)' : ''} or a password-file setting`);
+  for (const svc of [...(urlSupplied ? [] : ['db-setup']), 'rab-api', 'rab-worker', L.DB_SERVICE]) {
     const def = L.run('docker', ['inspect', '-f', '{{range .Config.Env}}{{println .}}{{end}}', p.container(svc)], { timeout: 30_000 });
     if (def.code !== 0) continue;
     check(!def.stdout.includes(pw), `${label}: ${svc}'s container definition does not hold the password`);
   }
-  const cfg = p.compose(['config'], { timeout: 120_000 });
-  check(cfg.code === 0 && !cfg.stdout.includes(pw), `${label}: the rendered compose config does not hold the password`);
+  if (!urlSupplied) {
+    const cfg = p.compose(['config'], { timeout: 120_000 });
+    check(cfg.code === 0 && !cfg.stdout.includes(pw), `${label}: the rendered compose config does not hold the password`);
+  }
   for (const svc of ['rab-api', 'rab-worker']) {
     const { rows, probe } = environScan(p, svc, [pw]);
     check(probe === false, `${label}: a \`docker exec\` process in ${svc} does not hold the password`);
@@ -863,9 +867,13 @@ async function blockDependsOnIgnored() {
     const up = p.compose(['up', '-d', '--wait', L.DB_SERVICE, 'rab-redis'], { timeout: 300_000 });
     keep(p, 'S11-infra-up', up.out);
     check(up.code === 0, `db and rab-redis up (exit ${up.code})`);
-    const apps = p.compose(['up', '-d', '--no-deps', 'rab-api', 'rab-worker'], { timeout: 300_000 });
-    keep(p, 'S11-apps-first', apps.out);
-    check(apps.code === 0, `rab-api and rab-worker started with --no-deps, db-setup NOT run (a platform that ignores depends_on; exit ${apps.code})`);
+    // A platform that ignores depends_on: compose only CREATES the two containers (compose itself would enforce
+    // depends_on even with --no-deps), and docker starts them directly; db-setup is never started here.
+    const created = p.compose(['create', 'rab-api', 'rab-worker'], { timeout: 300_000 });
+    keep(p, 'S11-create', created.out);
+    const started = L.run('docker', ['start', p.container('rab-api'), p.container('rab-worker')], { timeout: 120_000 });
+    keep(p, 'S11-start', started.out);
+    check(created.code === 0 && started.code === 0 && p.neverStarted('db-setup'), `rab-api and rab-worker started directly (\`docker start\`), db-setup NOT run (create exit ${created.code}, start exit ${started.code})`);
     await L.sleep(25_000);
     const al = p.logs('rab-api');
     const wl = p.logs('rab-worker');
@@ -994,7 +1002,7 @@ async function blockExternal() {
     const before2 = role(p);
     r = start('S3-no-admin-option');
     n(`no ADMIN OPTION: ${r.boot.join(' / ')}`);
-    check(r.code === 64 && r.out.includes(MSG.noAdminOption), `a second CREATEROLE admin without ADMIN OPTION, the file lost: exit ${r.code}, "${MSG.noAdminOption}…"`);
+    check(r.code === 64 && MSG.noAdminOption.test(r.out), `a second CREATEROLE admin without ADMIN OPTION, the file lost: exit ${r.code}, the no-ADMIN-OPTION refusal`);
     check(JSON.stringify(role(p)) === JSON.stringify(before2), 'the role is untouched');
     const left = p.readPasswordFile();
     n(`password file after that refusal: ${left ? `present; its password ${p.ownerLoginWorks(left.password) ? 'LOGS IN' : 'does NOT log in'}` : 'absent'}`);
@@ -1079,16 +1087,22 @@ async function blockRefusals() {
       if (variant === 'db-owner') p.psql('ALTER DATABASE crewflow OWNER TO crewflow_owner');
       else p.psql('CREATE ROLE cf_dbo NOLOGIN NOSUPERUSER NOBYPASSRLS; GRANT cf_dbo TO crewflow_owner; ALTER DATABASE crewflow OWNER TO cf_dbo;');
       plant();
+      // The test's own superuser queries (the snapshots) run UNPINNED in this database and do call the plant, so only the
+      // calls made while db-setup runs count: c0 just before it, c1 just after it, nothing else in between.
       const before = dbSnapshot(p);
-      const r = start(`${id}-admin`);
+      deletePasswordFile(p, `${id}-no-file`);
+      const c0 = calls();
+      const r = start(`${id}-admin`, { keepFile: true });
+      const c1 = calls();
       n(`bootstrap: ${r.boot.join(' / ')}`);
       check(r.code === 64 && MSG.ownerOwnsDatabase.test(r.out), `exit ${r.code}, the "crewflow_owner owns this database" refusal`);
-      check(calls() === 0, `the planted operator never ran during the setup (${calls()} call(s))`);
+      check(c1 === c0, `the planted operator never ran during the setup (${c1 - c0} call(s) while db-setup ran; ${c0} before it, all from the test's own unpinned superuser snapshot)`);
       check(dbSnapshot(p) === before, `crewflow_owner and the database unchanged (changed: ${snapDiff(before, dbSnapshot(p))})`);
       // sanity: an UNPINNED superuser session runs the plant, so the zero above means something
+      const c2 = calls();
       p.psql(`SELECT 'a'::name = 'a'::name`);
-      const live = calls();
-      check(live >= 1, `sanity: an unpinned superuser session does reach the planted operator (${live} call(s)), so "zero" proves the pinning`);
+      const live = calls() - c2;
+      check(live >= 1, `sanity: an unpinned superuser session does reach the planted operator (+${live} call(s)), so "zero" proves the pinning`);
       unplant();
       p.psql(`DROP OWNED BY crewflow_owner; DROP ROLE crewflow_owner;${variant === 'db-owner' ? '' : ' DROP ROLE cf_dbo;'}`);
     }, p);
@@ -1149,6 +1163,13 @@ async function blockPassThrough() {
     check(up.code === 0, 'db up with the hand-made crewflow_owner of 01-crewflow-owner.sql');
     const before = dbSnapshot(p);
     const from = p.logs(L.DB_SERVICE).length;
+    // db-setup ALONE first, so its zero writes are measured without the migrations a full start then applies.
+    const pull = p.compose(['pull', '--quiet'], { timeout: 600_000 });
+    const solo = p.compose(['up', '-d', 'db-setup'], { timeout: 300_000 });
+    keep(p, 'P1-db-setup-alone', solo.out);
+    await L.waitFor('db-setup to exit', () => p.inspect('db-setup', '{{.State.Status}}') === 'exited', 300_000, 2000);
+    const afterSetup = dbSnapshot(p);
+    check(pull.code === 0 && setupExit(p) === 'exited|0' && afterSetup === before, `db-setup alone (\`up -d db-setup\`): exit 0, the database snapshot is identical (changed: ${snapDiff(before, afterSetup)})`);
     const d = deploy(p, 'P1-deploy');
     check(d.code === 0, `compose.env PG_DATABASE_URL = the hand-made crewflow_owner URL, the documented command: exit ${d.code}`);
     await waitApp(p);
@@ -1162,9 +1183,10 @@ async function blockPassThrough() {
     check(stmts.length > 0 && writes.length === 0, `every statement of the setup sessions is read-only (${stmts.length} logged; writes: ${writes.map((x) => x.slice(0, 40)).join(' | ') || 'none'})`);
     const migrated = JSON.parse(dbSnapshot(p));
     const b = JSON.parse(before);
-    check(JSON.stringify(migrated.role) === JSON.stringify(b.role) && migrated.acl === b.acl && migrated.owner === b.owner, 'crewflow_owner (oid, attributes, verifier) and the database ACL / owner are exactly as before');
+    n(`after the full start (the migrations ran as crewflow_owner) the snapshot differs in: ${snapDiff(before, JSON.stringify(migrated))}`);
+    check(migrated.role && b.role && migrated.role.oid === b.role.oid && migrated.role.verifierSha === b.role.verifierSha && exactly01(migrated.role) && migrated.owner === b.owner, 'crewflow_owner keeps its oid, its VERIFIER (password never changed) and the 01 attributes; the database owner is unchanged');
     check(p.ownerLoginWorks(s.owner), 'the OLD (hand-made) password still logs in');
-    const pw = checkPasswordFile(p, check, n, 'P1', { random: false });
+    const pw = checkPasswordFile(p, check, n, 'P1', { random: false, urlSupplied: true });
     check(pw === s.owner, 'the password file holds the URL\'s own password (compared in memory)');
     checkSessions(p, check, 'P1');
     checkEnviron(p, check, n, 'P1', [s.dbPassword]);
