@@ -41,7 +41,7 @@ The temporary OpenShip deployment (rab-api / rab-worker / rab-redis, Neon databa
 ## Phase 1: decisions (owner)
 
 1. **Database.**
-   - (a) A managed PostgreSQL 16, 17 or 18. Its admin URL (CREATEROLE, able to grant on the database) goes in `PG_DATABASE_URL` in `compose.env`, the one database setting; the one-shot `db-setup` service creates `crewflow_owner` (DB-SETUP; PR #125 option 2: rab-api / rab-worker never receive `PG_DATABASE_URL`; no SQL or `psql` step). The direct host must be reachable from the VCN. DigitalOcean is the final home. Never Neon / adolphus without approval.
+   - (a) A managed PostgreSQL 16, 17 or 18. Its admin URL (CREATEROLE, able to grant on the database) goes in `PG_DATABASE_URL` in `compose.env`, the one database setting; the one-shot `db-setup` service creates `crewflow_owner` (DB-SETUP; PR #125: rab-api / rab-worker never receive `PG_DATABASE_URL`; no SQL or `psql` step). The direct host must be reachable from the VCN. DigitalOcean is the final home. Never Neon / adolphus without approval.
    - (b) The bundled `db` service of `docker-compose.image.yml` (DB-SETUP; `docker-compose.local-db.yml` is retired): the Debian `postgres:16` index digest (multi-platform, arm64 included), only `PG_DATABASE_PASSWORD` to set, its own CA, internal network, no host port, backups as in the runbook 3.3.
 
    **Recommendation: (a) for anything that holds real data; (b) for a trial.**
