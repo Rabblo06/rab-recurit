@@ -18,10 +18,41 @@
  * boundary against code that runs as the same login and sets the scope itself (see the SECURITY TRADE-OFF in
  * UPGRADES-LEDGER-SQL.md "REVISED"); a source-guard spec limits which files may name the setting.
  *
- * Every function takes a `Query` (a pg client, a TypeORM query runner or a DataSource), so the migrate child, the
- * `upgrade --force` command, the health read and workspace creation share one implementation.
+ * The read / write helpers take a `Query`; the transactions that SET the scope (withUpgradeScope) need an UpgradeSession,
+ * i.e. ONE dedicated connection (a TypeORM QueryRunner or a pg client), never a pool (security review L4).
  */
 export type Query = (sql: string, parameters?: unknown[]) => Promise<unknown[]>;
+
+/** One dedicated database connection: a TypeORM QueryRunner or a pg (Pool)Client. A DataSource / Pool is refused by type. */
+export interface UpgradeSession {
+  readonly upgradeSession: true;
+  readonly query: Query;
+}
+
+export class UpgradeSessionError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'UpgradeSessionError';
+  }
+}
+
+/**
+ * Wraps a dedicated connection. `createQueryRunner?: never` / `connect?: never` keep a DataSource or a pg Pool out at
+ * compile time; withUpgradeScope also checks at run time that every statement of its transaction ran on one backend.
+ */
+export function upgradeSessionOf(conn: {
+  query(sql: string, parameters?: unknown[]): Promise<unknown>;
+  createQueryRunner?: never;
+  totalCount?: never;
+}): UpgradeSession {
+  const query: Query = async (sql, parameters) => {
+    const out = (await conn.query(sql, parameters)) as unknown;
+    if (Array.isArray(out)) return out;
+    const rows = (out as { rows?: unknown[] } | undefined)?.rows;
+    return Array.isArray(rows) ? rows : [];
+  };
+  return { upgradeSession: true, query };
+}
 
 export const UPGRADE_SCOPE_SETTING = 'rab.upgrade_scope';
 export type UpgradeScope = 'upgrade' | 'status' | 'workspace_init';
@@ -44,15 +75,32 @@ export interface UpgradeMigrationRow {
 const SET_SCOPE = `SELECT pg_catalog.set_config('${UPGRADE_SCOPE_SETTING}', $1, true)`;
 
 /**
- * Runs `fn` in ONE transaction with `rab.upgrade_scope` set for that transaction only. The caller's session must not be
- * inside a transaction (the migrate child and the command call it on the locked session between steps). Commits on
+ * Runs `fn` in ONE transaction with `rab.upgrade_scope` set for that transaction only, on a DEDICATED session (security
+ * review L4): before BEGIN the session must be outside any transaction that holds a transaction id
+ * (txid_current_if_assigned() IS NULL) and carry no scope; before COMMIT the same backend must still be there with the
+ * same scope, so a pooled connection that hands statements to different backends is refused (rolled back). Commits on
  * success, rolls back on error and rethrows.
  */
-export async function withUpgradeScope<T>(query: Query, scope: Exclude<UpgradeScope, 'workspace_init'>, fn: (q: Query) => Promise<T>): Promise<T> {
+export async function withUpgradeScope<T>(session: UpgradeSession, scope: Exclude<UpgradeScope, 'workspace_init'>, fn: (q: Query) => Promise<T>): Promise<T> {
+  const query = session.query;
+  const [pre] = (await query(
+    `SELECT pg_catalog.txid_current_if_assigned() IS NULL AS free,
+            COALESCE(pg_catalog.current_setting('${UPGRADE_SCOPE_SETTING}', true), '') AS scope,
+            pg_catalog.pg_backend_pid() AS pid`,
+  )) as Array<{ free: boolean; scope: string; pid: number }>;
+  if (!pre || pre.free !== true || pre.scope !== '') {
+    throw new UpgradeSessionError('withUpgradeScope needs a dedicated session outside any transaction and with no upgrade scope set. Refusing.');
+  }
   await query('BEGIN');
   try {
     await query(SET_SCOPE, [scope]);
     const result = await fn(query);
+    const [post] = (await query(
+      `SELECT pg_catalog.pg_backend_pid() AS pid, COALESCE(pg_catalog.current_setting('${UPGRADE_SCOPE_SETTING}', true), '') AS scope`,
+    )) as Array<{ pid: number; scope: string }>;
+    if (!post || Number(post.pid) !== Number(pre.pid) || post.scope !== scope) {
+      throw new UpgradeSessionError('the upgrade scope transaction did not stay on one backend (a pooled connection?). Rolled back; refusing.');
+    }
     await query('COMMIT');
     return result;
   } catch (error) {
@@ -139,28 +187,38 @@ export async function markAsInstanceInitial(query: Query, input: { name: string;
  * workspace for a manager), so `rab.workspace_id` is bound to the NEW workspace for the two statements and restored after,
  * exactly as the creating transaction already binds it for the manager_profile write.
  */
-export async function markAsWorkspaceInitial(
+async function markAsWorkspaceInitial(
   query: Query,
   input: { workspaceId: string; name: string; status: UpgradeMigrationStatus; executedByVersion: string },
 ): Promise<boolean> {
   const [prior] = (await query(`SELECT pg_catalog.current_setting('rab.workspace_id', true) AS v`)) as Array<{ v: string | null }>;
   await query(SET_SCOPE, ['workspace_init']);
   await query(`SELECT pg_catalog.set_config('rab.workspace_id', $1, true)`, [input.workspaceId]);
+  // Security review L3: restore only after SUCCESS. After a failed statement the transaction is aborted: running the restore
+  // there would replace the original error with 25P02, and the caller rolls the transaction back anyway (the settings are
+  // transaction-local), so the original error is rethrown untouched.
+  let succeeded = false;
   try {
     const existing = (await query(
       `SELECT 1 FROM core.upgrade_migration m WHERE m.name = $1 AND m.attempt = 1 AND m.workspace_id = $2::uuid AND m.is_initial LIMIT 1`,
       [input.name, input.workspaceId],
     )) as unknown[];
-    if (existing.length) return false;
+    if (existing.length) {
+      succeeded = true;
+      return false;
+    }
     await query(
       `INSERT INTO core.upgrade_migration (name, status, attempt, executed_by_version, is_initial, workspace_id, forced)
        VALUES ($1, $2, 1, $3, true, $4::uuid, false)`,
       [input.name, input.status, input.executedByVersion, input.workspaceId],
     );
+    succeeded = true;
     return true;
   } finally {
-    await query(SET_SCOPE, ['']);
-    await query(`SELECT pg_catalog.set_config('rab.workspace_id', $1, true)`, [prior?.v ?? '']);
+    if (succeeded) {
+      await query(SET_SCOPE, ['']);
+      await query(`SELECT pg_catalog.set_config('rab.workspace_id', $1, true)`, [prior?.v ?? '']);
+    }
   }
 }
 
@@ -183,16 +241,26 @@ export async function getLastAttemptedInstanceStep(query: Query): Promise<Upgrad
   return r ? { ...r, attempt: Number(r.attempt), createdAt: new Date(r.createdAt) } : null;
 }
 
+/** The saved core.manager_workspace row createFor just wrote (its entity; never a free-form id). */
+export interface SavedWorkspace {
+  readonly id: string;
+  readonly organisationId: string;
+}
+
 /**
  * Workspace creation (ManagerWorkspaceService.createFor), inside its tenant transaction: the new workspace's is_initial row
  * at the code version, named after that version's last step, `completed` (Twenty workspace.service.ts:813; Crewflow has no
- * workspace commands before Part D, so the cursor is the version's last step). No row when the logbook table does not
- * exist yet (a database migrated outside the upgrade path). Lazy import keeps the module graph small.
+ * workspace commands before Part D, so the cursor is the version's last step). Takes the SAVED workspace entity (security
+ * review L3) and refuses one whose organisation is not the transaction's bound organisation. No row when the logbook table
+ * does not exist yet (a database migrated outside the upgrade path). Lazy import keeps the module graph small.
  */
-export async function markNewWorkspaceInitial(query: Query, workspaceId: string): Promise<boolean> {
+export async function markNewWorkspaceInitial(query: Query, workspace: SavedWorkspace): Promise<boolean> {
+  if (!workspace?.id || !workspace.organisationId) throw new Error('markNewWorkspaceInitial needs the saved workspace entity');
   if (!(await upgradeLedgerExists(query))) return false;
+  const [bound] = (await query(`SELECT COALESCE(pg_catalog.current_setting('rab.organisation_id', true), '') AS org`)) as Array<{ org: string }>;
+  if (bound?.org !== workspace.organisationId) throw new Error('markNewWorkspaceInitial: the workspace is not in the bound organisation');
   const { readAppVersion } = await import('./upgrade-version');
   const { lastStepOfVersion } = await import('./upgrade-sequence');
   const version = readAppVersion();
-  return markAsWorkspaceInitial(query, { workspaceId, name: lastStepOfVersion(version), status: 'completed', executedByVersion: version });
+  return markAsWorkspaceInitial(query, { workspaceId: workspace.id, name: lastStepOfVersion(version), status: 'completed', executedByVersion: version });
 }

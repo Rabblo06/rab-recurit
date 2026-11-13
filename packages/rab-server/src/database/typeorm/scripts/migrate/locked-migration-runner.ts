@@ -183,6 +183,8 @@ export interface LockedMigrationOptions {
    */
   beforeApply?: (ctx: {
     query: Query;
+    /** The locked session itself (the dedicated connection the upgrade logbook's scoped transactions need). */
+    queryRunner: QueryRunner;
     classification: Classification;
     proof: FreshInstallProof;
     pendingBefore: readonly string[];
@@ -193,7 +195,7 @@ export interface LockedMigrationOptions {
    * OWNER-DB-ULTIMATE Part B: a migration (step 4) or the still-pending check (step 5) failed. Runs with the lock held,
    * before the error propagates, so the failure can be recorded in the logbook. Must not throw (a throw is ignored).
    */
-  onApplyFailure?: (ctx: { query: Query; error: unknown }) => Promise<void>;
+  onApplyFailure?: (ctx: { query: Query; queryRunner: QueryRunner; error: unknown }) => Promise<void>;
   /** Called with the migration session's backend pid before the lock is taken (the child's SIGTERM self-cancel). */
   onSession?: (pid: number) => void;
   /**
@@ -512,6 +514,7 @@ export async function runLockedMigrations(options: LockedMigrationOptions): Prom
     if (mode === 'apply' && ownerLogin && ownerState && options.beforeApply) {
       await options.beforeApply({
         query,
+        queryRunner: session,
         classification: ownerState.classification,
         proof: ownerState.proof,
         pendingBefore,
@@ -543,7 +546,7 @@ export async function runLockedMigrations(options: LockedMigrationOptions): Prom
         if (still.length) throw new MigrationsStillPendingError(still);
       }
     } catch (error) {
-      if (mode === 'apply' && options.onApplyFailure) await options.onApplyFailure({ query, error }).catch(() => undefined);
+      if (mode === 'apply' && options.onApplyFailure) await options.onApplyFailure({ query, queryRunner: session, error }).catch(() => undefined);
       throw error;
     }
     // BC-17 (owner decision 2026-11-05): an owner-login install ends with the legacy logins crewflow / crewflow_app NOLOGIN

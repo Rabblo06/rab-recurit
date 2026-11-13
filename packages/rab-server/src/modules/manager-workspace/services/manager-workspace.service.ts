@@ -453,7 +453,7 @@ export class ManagerWorkspaceService {
     // OWNER-DB-ULTIMATE Part B3: a new workspace starts at the current version (Twenty workspace.service.ts:813 →
     // upgrade-migration.service.ts:139-172 markAsWorkspaceInitial), in THIS transaction, so a rolled-back create leaves
     // no row. The logbook's workspace_init policy admits only a workspace of the bound organisation.
-    await markNewWorkspaceInitial((sql, parameters) => manager.query(sql, parameters) as Promise<unknown[]>, workspace.id);
+    await markNewWorkspaceInitial((sql, parameters) => manager.query(sql, parameters) as Promise<unknown[]>, workspace);
 
     // This Manager now owns a real Workspace. Membership is written just
     // below (assignOwnWorkspace), which is what every subsequent request's
