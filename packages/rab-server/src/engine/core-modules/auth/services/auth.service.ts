@@ -26,6 +26,7 @@ import { PasswordHashingService } from './password-hashing.service';
 import { ProviderSignInError, ProviderSignInIdentity } from './provider-sign-in.error';
 import { isWellFormedWebSessionToken } from '../constants/web-session-cookie.constants';
 import { LoginAttemptLimiterService } from './login-attempt-limiter.service';
+import { PasswordResetEmailLimiterService } from './password-reset-email-limiter.service';
 import { LoginSecondFactorPolicyService } from './login-second-factor-policy.service';
 import { StepUpReauthService } from './step-up-reauth.service';
 import { MfaChallengeService, PendingLogin, PendingProviderLink } from './mfa-challenge.service';
@@ -135,6 +136,7 @@ export class AuthService {
     private readonly secondFactor: LoginSecondFactorPolicyService,
     private readonly mfaChallenges: MfaChallengeService,
     private readonly stepUp: StepUpReauthService,
+    private readonly passwordResetEmailLimiter: PasswordResetEmailLimiterService,
   ) {}
 
   /**
@@ -1000,6 +1002,10 @@ export class AuthService {
   }
 
   private async doForgotPassword(dto: { email: string; applicationTarget?: ApplicationTarget }, mobile = false): Promise<void> {
+    // X1.4: the per-address limit (3 per 15 min, PasswordResetEmailLimiterService) is checked FIRST, for every submitted
+    // address, before any account lookup, token, email or audit row: a known and an unknown address are refused the same
+    // way (429, one constant body), and the floor in forgotPassword() pads the refusal too. The per-IP route limit stays.
+    await this.passwordResetEmailLimiter.admit(dto.email);
     // Mobile reset links return to one universal login; this is navigation only.
     if (mobile) dto = { email: dto.email, applicationTarget: 'staff_app' };
     const candidates = await this.dataSource.query<LoginCandidate[]>(

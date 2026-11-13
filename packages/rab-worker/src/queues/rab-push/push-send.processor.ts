@@ -53,7 +53,7 @@ export function createPushSendProcessor(deps: PushSendProcessorDeps) {
     const outcome = await deps.tenantContext.runInTenantContext(ctx, async (manager) => {
       const row = await manager.findOne(PushDelivery, { where: { id: pushDeliveryId } });
       // E8 (D0-C §3.3): not visible (yet) — a producer or claim that published before its commit, or a different binding.
-      // Completing here would retain `push-delivery.<id>.attempt.0` as COMPLETED for 7 days, and the dispatcher's re-add of
+      // Completing here would retain `push-delivery.<id>.attempt.0` as COMPLETED (4 h since X3.4), and the dispatcher's re-add of
       // that jobId would be silently dropped by BullMQ, stranding the row PENDING. Throw instead: BullMQ retries THIS job
       // (no add(), so no jobId dedupe) with its jittered backoff; a row that never appears exhausts the attempts and nothing
       // is sent. Same rule as email-send.processor.ts. A later republish keeps the `.attempt.<generation>` convention.
