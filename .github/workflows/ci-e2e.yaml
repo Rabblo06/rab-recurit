@@ -44,6 +44,8 @@ jobs:
         run: npx nx run-many -t build -p rab-shared,rab-ui
       - name: Every web spec runs in exactly one CI job
         run: node packages/rab-e2e-testing/check-spec-coverage.mjs
+      - name: AI e2e harness children get no test superuser URL (X1.8 / DBT-12)
+        run: node --test packages/rab-e2e-testing/ai/run-ai-e2e-env.test.cjs
       - name: System e2e helper self-tests (pdf-text on Chromium and react-pdf fixtures; no stack, no browser)
         run: npx playwright test -c packages/rab-e2e-testing/system/playwright.selftest.config.ts
 

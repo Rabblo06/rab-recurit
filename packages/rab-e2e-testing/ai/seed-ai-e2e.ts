@@ -30,9 +30,11 @@ import { INestApplication, ValidationPipe } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
 import { DataSource } from 'typeorm';
 
-import { applyIntegrationTestDatabaseEnv } from '../../rab-server/src/database/typeorm/core/test-database-guard';
+import { applyIntegrationTestDatabaseEnv, assertSameDatabaseAtRuntime } from '../../rab-server/src/database/typeorm/core/test-database-guard';
 
-applyIntegrationTestDatabaseEnv(process.env);
+// X1.2: null means "not a test run" (NODE_ENV is not test): refuse rather than seed through whatever DATABASE_URL is set.
+const resolvedTestDatabase = applyIntegrationTestDatabaseEnv(process.env);
+if (!resolvedTestDatabase) throw new Error('refusing to seed: NODE_ENV must be "test" with the TEST_DATABASE_URL / TEST_DATABASE_URL_UNPOOLED pair');
 
 const H = 3600 * 1000;
 
@@ -56,6 +58,9 @@ function weekendStart(hourUtc: number): Date {
 async function main(): Promise<void> {
   const out = process.env.E2E_IDENTITIES_OUT;
   if (!out) throw new Error('E2E_IDENTITIES_OUT is required');
+  // Same database and cluster for both connections, and the CATALOG disposable marker (not a session setting), before the
+  // application module touches the database.
+  await assertSameDatabaseAtRuntime(resolvedTestDatabase!);
   // Imported after the env is routed so AppModule's ConfigModule validates the disposable-database settings.
   const { AppModule } = await import('../../rab-server/src/app.module');
   const { PasswordHashingService } = await import('../../rab-server/src/engine/core-modules/auth/services/password-hashing.service');

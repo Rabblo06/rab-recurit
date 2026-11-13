@@ -60,7 +60,7 @@ export interface CandidateRow {
 }
 
 /**
- * The frozen statements (Phase B ops container: the elevated session runs these by NAME, never SQL text —
+ * The frozen statements (the owner-login one-off's narrowed session runs these by NAME, never SQL text —
  * command/ops/ops-statements.ts). Unchanged SQL from before.
  */
 export const USER_SESSION_BACKFILL_CANDIDATES_SQL = `SELECT family_id,
@@ -94,7 +94,7 @@ export const USER_SESSION_BACKFILL_INSERT_SQL = `INSERT INTO core.user_session
              RETURNING id`;
 
 /**
- * Where the owner-level statements run. The ops container supplies one backed by its verified elevated session
+ * Where the owner-level statements run. The ops command supplies one backed by its verified narrowed session
  * (`SET LOCAL ROLE rab_secure_owner`, frozen statements); tests may set `ownerDataSource` instead.
  */
 export interface UserSessionBackfillExecutor {
@@ -126,9 +126,9 @@ export function dataSourceBackfillExecutor(owner: DataSource): UserSessionBackfi
  * and `docs/architecture/FULL-ARCHITECTURE-UPGRADE-PLAN.md` for the full design; this is the
  * session log of HOW it's implemented.
  *
- * Phase B (ops container): the owner here is `rab_secure_owner` (owner of refresh_token and user_session, both NOT FORCE'd
- * since the role split), reached by the migration identity through `SET LOCAL ROLE rab_secure_owner` inside the verified
- * elevated session of the one-off ops container (command/ops/elevated-ops-session.ts); `verify()` runs as crewflow_app.
+ * The owner here is `rab_secure_owner` (owner of refresh_token and user_session, both NOT FORCE'd since the role split),
+ * reached by the owner login crewflow_owner through `SET LOCAL ROLE rab_secure_owner` inside the verified narrowed session
+ * of the owner-login one-off (command/ops/elevated-ops-session.ts); `verify()` runs on the command's own DataSource.
  * The historical notes below still say `rab_owner` / FORCE'd.
  *
  * WHY an owner connection is required for BOTH halves (unlike `HwsBackfillService`, which only
@@ -165,14 +165,14 @@ export function dataSourceBackfillExecutor(owner: DataSource): UserSessionBackfi
 export class UserSessionBackfillService {
   /** Tests: a plain owner DataSource. Never the pooled runtime DataSource. */
   ownerDataSource?: DataSource;
-  /** The ops container: the verified elevated session's executor (takes precedence over ownerDataSource). */
+  /** The ops command: the verified narrowed session's executor (takes precedence over ownerDataSource). */
   executor?: UserSessionBackfillExecutor;
 
   private requireExecutor(): UserSessionBackfillExecutor {
     if (this.executor) return this.executor;
     if (!this.ownerDataSource) {
       throw new UserSessionBackfillError(
-        'An owner DataSource (tests) or an owner-level executor (the ops container\'s verified elevated session) is required for the user-session backfill scan/apply — see this command\'s own doc comment.',
+        'An owner DataSource (tests) or an owner-level executor (the ops command\'s verified narrowed session) is required for the user-session backfill scan/apply — see this command\'s own doc comment.',
       );
     }
     return dataSourceBackfillExecutor(this.ownerDataSource);
@@ -273,10 +273,10 @@ export class UserSessionBackfillService {
    * historical family has been accounted for).
    */
   async verify(dataSource?: DataSource): Promise<BackfillVerifyResult> {
-    // Phase B ops container: the restricted runtime DataSource (crewflow_app holds EXECUTE on the definer function); tests
-    // may still pass nothing and use ownerDataSource.
+    // The ops command passes its own DataSource (the owner login; EXECUTE on the definer function); tests may still pass
+    // nothing and use ownerDataSource.
     const owner = dataSource ?? this.ownerDataSource;
-    if (!owner) throw new UserSessionBackfillError('verify() needs a DataSource: the restricted runtime one in the ops container, or the owner DataSource in tests.');
+    if (!owner) throw new UserSessionBackfillError('verify() needs a DataSource: the ops command\'s own, or the owner DataSource in tests.');
     // Cross-organisation aggregate — see `count_user_session_backfill_status()`'s own doc
     // comment (in the owning migration) for why a plain LEFT JOIN from any single connection,
     // owner included, can't see this (user_session is FORCE'd).

@@ -152,4 +152,40 @@ describe('SchemaResolverService: workspace module version (Phase B schema compat
     expect(hit.queries).toHaveLength(0);
     expect(hit.invalidated).toEqual([]);
   });
+
+  // ST-07 (T-1): the cached name becomes search_path, so a name that is not exactly the derived one is never served.
+  describe('ST-07: a cached schema name is compared with the derived name', () => {
+    const OTHER = workspaceSchemaName('33333333-3333-4333-8333-333333333333');
+    it.each([
+      ['another workspace schema', OTHER],
+      ['a comma-separated list (search_path list injection)', `${SCHEMA}, core`],
+      ['core', 'core'],
+      ['public', 'public'],
+      ['upper-case variant', SCHEMA.toUpperCase()],
+      ['empty', ''],
+    ])('refuses a cached %s: dropped from the cache and decided from Postgres (the registry name)', async (_label, planted) => {
+      const s = setup(LATEST_WORKSPACE_MODULE_VERSION, { schemaName: planted, schemaVersion: 1, moduleVersion: LATEST_WORKSPACE_MODULE_VERSION });
+      await expect(s.service.resolve(s.manager, WS)).resolves.toBe(SCHEMA);
+      expect(s.invalidated).toEqual([WS]);
+      expect(s.queries).toHaveLength(1);
+    });
+
+    it('fails closed with name-mismatch when Postgres does not confirm the name either', async () => {
+      const queries: string[] = [];
+      const manager = {
+        query: async (sql: string) => {
+          queries.push(sql);
+          return [{ schema_name: OTHER, status: 'READY', schema_version: 1, module_version: LATEST_WORKSPACE_MODULE_VERSION }];
+        },
+      } as unknown as EntityManager;
+      const invalidated: string[] = [];
+      const cache = {
+        resolveSchema: async () => ({ schemaName: OTHER, schemaVersion: 1, moduleVersion: LATEST_WORKSPACE_MODULE_VERSION }),
+        invalidate: async (id: string) => void invalidated.push(id),
+      };
+      expect(await codeOf(new SchemaResolverService(cache as never).resolve(manager, WS))).toBe('name-mismatch');
+      expect(invalidated).toEqual([WS]);
+      expect(queries).toHaveLength(1);
+    });
+  });
 });

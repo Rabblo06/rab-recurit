@@ -208,8 +208,9 @@ $C config --quiet --no-env-resolution                 # renders without reading 
    **A missing `mode=enforce` means the image predates the enforce mode: STOP** (§9).
 8. **First admin**: the existing one-off `bootstrap-admin` operator command (the API image's
    `packages/rab-server/dist/command/main.js bootstrap-admin`, run once as the `crewflow` login with production command
-   authority and the staging identity; database runbook "bootstrap-admin"). It is not run through `rab-ops`, which
-   accepts only its three operations. Then run the smoke tests on synthetic accounts only:
+   authority and the staging identity; database runbook "bootstrap-admin"). It is a one-off run of the API image, the
+   same way the three operations commands run (`OWNER-LOGIN-DEPLOYMENT.md` section 7, "Operations commands"); there is
+   no separate operations container. Then run the smoke tests on synthetic accounts only:
    - sign-in;
    - a shift publish and offer;
    - an email to the sandbox;
