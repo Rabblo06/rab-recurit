@@ -54,6 +54,7 @@ import { EnvironmentService } from '../../engine/core-modules/environment/enviro
 import { SchemaResolverService } from '../../engine/core-modules/tenant/schema-resolver.service';
 import { TenantContextService } from '../../engine/core-modules/tenant/tenant-context.service';
 import { WorkspaceMembershipService } from '../../engine/core-modules/tenant/workspace-membership.service';
+import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-pipe';
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { provisionTypeScript, seedWorkspace } from './helpers/workspace-fixtures';
 import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
@@ -144,7 +145,7 @@ function userOf(url: string): string {
   beforeAll(async () => {
     expect(userOf(appUrl)).toBe(OWNER_LOGIN); // the suites run on the owner-login build; anything else is a harness error
     const moduleRef = await Test.createTestingModule({ imports: [AppModule] }).compile();
-    app = moduleRef.createNestApplication();
+    app = applyGlobalValidationPipe(moduleRef.createNestApplication());
     await app.init();
     dataSource = moduleRef.get(DataSource);
     tenantContext = moduleRef.get(TenantContextService);
