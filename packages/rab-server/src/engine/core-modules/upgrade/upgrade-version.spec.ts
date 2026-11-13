@@ -23,8 +23,14 @@ describe('upgrade-version (OWNER-DB-ULTIMATE Part B3)', () => {
   });
 
   it('reads CREWFLOW_APP_VERSION when set (strictly), else the root package.json', () => {
-    expect(readAppVersion({ CREWFLOW_APP_VERSION: '0.6.0' })).toBe('0.6.0');
+    const shipped = readAppVersion({});
+    expect(shipped).toMatch(/^\d+\.\d+\.\d+$/);
+    expect(readAppVersion({ CREWFLOW_APP_VERSION: shipped })).toBe(shipped);
     expect(() => readAppVersion({ CREWFLOW_APP_VERSION: '0.6' })).toThrow(AppVersionError);
-    expect(readAppVersion({})).toMatch(/^\d+\.\d+\.\d+$/);
+  });
+
+  it('security review I3: a CREWFLOW_APP_VERSION that differs from the shipped package.json refuses (config, 64)', () => {
+    expect(() => readAppVersion({ CREWFLOW_APP_VERSION: '9.9.9' })).toThrow(/differs from this code's release version/);
+    expect(() => readAppVersion({ CREWFLOW_APP_VERSION: '9.9.9' })).toThrow(AppVersionError);
   });
 });

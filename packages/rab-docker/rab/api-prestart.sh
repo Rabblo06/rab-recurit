@@ -121,6 +121,16 @@ crewflow_runtime_db_config() {
 # END owner-login runtime-db-config
 crewflow_runtime_db_config
 
+# Security review I3 (OWNER-DB-ULTIMATE Part B): CREWFLOW_APP_VERSION is baked into the image (Dockerfile ARG -> ENV). A
+# runtime value that differs from the release version of the code shipped in this image (/app/package.json) is refused
+# before anything runs: the upgrade logbook's version check must never run under a claimed release.
+if [ -n "${CREWFLOW_APP_VERSION:-}" ] && [ -f package.json ]; then
+  SHIPPED_VERSION="$(node -p "require('./package.json').version" 2>/dev/null || true)"
+  if [ "$SHIPPED_VERSION" != "$CREWFLOW_APP_VERSION" ]; then
+    refuse "CREWFLOW_APP_VERSION differs from this image's release version (package.json $SHIPPED_VERSION). Remove the runtime override. Refusing to start."
+  fi
+fi
+
 # O3 C2: DISABLE_CRON_JOBS_REGISTRATION (Twenty's switch; exactly true or false, unset = false) and the scheduler mode the
 # Worker will run (WORKER_SCHEDULER unset = bullmq in production, interval elsewhere — env.validation.ts's rule).
 case "${DISABLE_CRON_JOBS_REGISTRATION:-}" in
