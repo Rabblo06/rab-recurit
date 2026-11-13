@@ -146,6 +146,11 @@ export interface B1Interface {
   upgradeCommands(): { name: string; timestamp: number }[];
   /** Runs one command alone on `db` (run-twice idempotence). */
   runCommand(db: string, name: string): Promise<void>;
+  /**
+   * upgrade-version-check.ts decideUpgradeStart (pure, Twenty run-instance-commands.command.ts:124-168): returns the
+   * decision, or throws (refusal 65 = error name `UpgradeVersionTooOldError`).
+   */
+  decide(facts: UpgradeStartFactsLike): { kind: string; [k: string]: unknown };
   seams: {
     failMigrationEnv(migrationClass: string): Record<string, string>;
     /** CREWFLOW_TEST_UPGRADE_COMMANDS: no-op probe commands appended to the code version (interface §4). */
@@ -153,6 +158,44 @@ export interface B1Interface {
     /** CREWFLOW_TEST_UPGRADE_FAIL_COMMAND: that command fails (recorded failed; exit 70, serves). */
     failCommandEnv(command: string): Record<string, string>;
   };
+}
+
+/** Interface §2 `UpgradeStartFacts` (upgrade-version-check.ts), as the specs build it. */
+export interface UpgradeStartFactsLike {
+  codeVersion: string;
+  fresh: boolean;
+  force: boolean;
+  ledgerExists: boolean;
+  hasInstanceRows: boolean;
+  complete: Readonly<Record<string, boolean>>;
+  newerVersions: readonly string[];
+  attribution: { kind: 'release'; release: string; beyond: string[]; remaining: number } | { kind: 'older' | 'unknown'; detail: string } | null;
+  unrestrictedTarget: boolean;
+  previousVersions?: readonly string[];
+}
+
+/**
+ * The API's boot gates (database/boot-checks/database-boot-gates.ts runDatabaseBootGates('api')), in process, on `db` as
+ * crewflow_owner: what main.js runs after the migrate child exits 0 / 70 and before it serves. The FORCE-RLS spot check,
+ * the semantic posture and the schema gate live HERE, not in the migrate child. Returns the refusing gate or null.
+ */
+export async function apiBootGateRefusal(db: string): Promise<string | null> {
+  const gates = require(join(SERVER_SRC, 'database', 'boot-checks', 'database-boot-gates')) as {
+    runDatabaseBootGates(p: string, o: Record<string, unknown>): Promise<unknown>;
+  };
+  try {
+    await gates.runDatabaseBootGates('api', {
+      env: { NODE_ENV: 'test' },
+      connectionEnv: { NODE_ENV: 'test', PG_DATABASE_URL: withDatabase(urls.owner, db) },
+      retry: { attempts: 1 },
+      log: () => undefined,
+    });
+    return null;
+  } catch (e) {
+    const gate = (e as { gate?: unknown }).gate;
+    if (e instanceof Error && e.name === 'DatabaseBootGateError' && typeof gate === 'string') return gate;
+    throw e;
+  }
 }
 
 /** Connection URLs, set by the spec (never printed). */
@@ -294,6 +337,8 @@ export function b1(): B1Interface | null {
   const sequence = load<{ stepsForVersion(v: string): (string | { name: string })[] }>('upgrade-sequence');
   const service = load<{ isLastAttemptCompleted(q: Query, a: { name: string; workspaceId: string | null }): Promise<boolean> }>('upgrade-migration.service');
   if (!version || !sequence || !service || !LEDGER_MIGRATION_ON_BRANCH) return null;
+  const check = load<{ decideUpgradeStart(f: UpgradeStartFactsLike): { kind: string; [k: string]: unknown } }>('upgrade-version-check');
+  if (!check) return null;
   const registry = load<{ UPGRADE_COMMANDS: Record<string, { name: string; timestamp: number }[]> }>(join('upgrade-commands', 'registry'));
   const migrateEntry = join(SERVER_SRC, 'database', 'typeorm', 'scripts', 'migrate', 'twenty', 'twenty-migrate.ts');
   const currentVersion = version.readAppVersion(process.env);
@@ -321,7 +366,8 @@ export function b1(): B1Interface | null {
       const runnerMod = require(join(SERVER_SRC, 'database', 'typeorm', 'scripts', 'migrate', 'locked-migration-runner')) as LockedRunnerModule;
       const lines: string[] = [];
       const r = await mos.runMigrateOnStart(
-        { migrationApprovalMode: 'none', upgradeFailurePolicy: 'continue' },
+        // Part B3: CREWFLOW_UPGRADE_FAILURE / the `continue` policy are removed; the config is the approval mode only.
+        { migrationApprovalMode: 'none' },
         {
           env: { NODE_ENV: 'test', PG_DATABASE_URL: withDatabase(urls.owner, db), ...(opts.env ?? {}) },
           log: (l: string) => lines.push(redact(l)),
@@ -331,6 +377,7 @@ export function b1(): B1Interface | null {
       );
       return inProcessOutcome(r, lines);
     },
+    decide: (facts) => check.decideUpgradeStart(facts),
     upgradeCommand: (db, args, opts = {}) => runCommandEntry(db, args, opts.env),
     forceUpgrade: (db, opts = {}) => runCommandEntry(db, ['--force'], opts.env),
     upgradeCommands: () => registry?.UPGRADE_COMMANDS[version.majorMinorKey(currentVersion)] ?? [],

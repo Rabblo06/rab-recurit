@@ -77,10 +77,42 @@ describeIfB1('the logbook through the real application (new workspace, /healthz,
   });
 
   afterAll(async () => {
-    for (const id of createdWorkspaces) await admin.query('DELETE FROM core.manager_workspace WHERE id = $1', [id]).catch(() => undefined);
+    for (const id of createdWorkspaces) await deleteWorkspace(id).catch(() => undefined);
     await app.close();
     await admin.destroy();
   });
+
+  /**
+   * Superuser fixture: deletes a provisioned workspace the way an operator would. Its workspace schema is dropped, then the
+   * rows that reference it through a NON-cascading foreign key (manager_profile.workspace_id, the RESTRICT
+   * workspace_schema_registry (workspace_id, organisation_id), ...; found from the catalog, composite keys included) are
+   * removed, then the workspace itself, so the logbook's own ON DELETE CASCADE is what removes its row.
+   */
+  async function deleteWorkspace(id: string): Promise<void> {
+    const schemas = (await admin.query('SELECT schema_name FROM core.workspace_schema_registry WHERE workspace_id = $1', [id])) as { schema_name: string }[];
+    for (const { schema_name } of schemas) {
+      if (!/^workspace_[0-9a-f]{32}$/.test(schema_name)) throw new Error('unexpected workspace schema name');
+      // sql-injection-reviewed: schema_name matches ^workspace_[0-9a-f]{32}$
+      await admin.query(`DROP SCHEMA IF EXISTS ${schema_name} CASCADE`);
+    }
+    const refs = (await admin.query(
+      `SELECT n.nspname AS schema, c.relname AS "table",
+              array(SELECT a.attname::text FROM unnest(k.conkey) WITH ORDINALITY u(n, i) JOIN pg_catalog.pg_attribute a ON a.attrelid = k.conrelid AND a.attnum = u.n ORDER BY u.i) AS cols,
+              array(SELECT a.attname::text FROM unnest(k.confkey) WITH ORDINALITY u(n, i) JOIN pg_catalog.pg_attribute a ON a.attrelid = k.confrelid AND a.attnum = u.n ORDER BY u.i) AS refcols
+         FROM pg_catalog.pg_constraint k
+         JOIN pg_catalog.pg_class c ON c.oid = k.conrelid JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+        WHERE k.contype = 'f' AND k.confrelid = 'core.manager_workspace'::regclass AND k.confdeltype <> 'c'`,
+    )) as { schema: string; table: string; cols: string[]; refcols: string[] }[];
+    const qid = (x: string) => `"${x.replace(/"/g, '""')}"`;
+    for (const r of refs) {
+      // sql-injection-reviewed: identifiers come from the catalog and are quoted
+      await admin.query(
+        `DELETE FROM ${qid(r.schema)}.${qid(r.table)} WHERE (${r.cols.map(qid).join(', ')}) IN (SELECT ${r.refcols.map(qid).join(', ')} FROM core.manager_workspace WHERE id = $1)`,
+        [id],
+      );
+    }
+    await admin.query('DELETE FROM core.manager_workspace WHERE id = $1', [id]);
+  }
 
   async function ceoToken(label: string): Promise<{ token: string }> {
     const org = await factory.createOrganisation(label);
@@ -108,7 +140,7 @@ describeIfB1('the logbook through the real application (new workspace, /healthz,
     // Interface §3: name and status copied from the last attempted instance step (Twenty markAsWorkspaceInitial).
     const lastInstance = before.filter((r) => r.workspace_id === null && !r.is_initial).sort((a, b) => +new Date(a.created_at) - +new Date(b.created_at)).pop();
     if (lastInstance) expect({ name: added[0]!.name, status: added[0]!.status }).toEqual({ name: lastInstance.name, status: lastInstance.status });
-    await admin.query('DELETE FROM core.manager_workspace WHERE id = $1', [ws]);
+    await deleteWorkspace(ws);
     expect((await ledger()).filter((r) => r.workspace_id === ws)).toEqual([]);
     expect((await ledger()).map((r) => r.id).sort()).toEqual(before.map((r) => r.id).sort());
   });

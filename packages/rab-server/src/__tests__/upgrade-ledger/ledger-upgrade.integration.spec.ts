@@ -16,8 +16,10 @@
  *   LU-8   previous version incomplete (a skipped release) -> 65, nothing applied; `upgrade --force` applies with forced = true.
  *   LU-9   --force is unreachable from the environment.
  *   LU-10  a failed MIGRATION -> 66, refused, retried next start; a failed COMMAND only -> 70, serves (healthz `failed`).
- *   LU-11  rollback (a newer version completed in the ledger) -> serves with a WARNING; a loosened known object -> refused.
- *   LU-12  security refusals stay fatal, also under --force: the superuser login, BYPASSRLS, posture drift.
+ *   LU-11  rollback (a newer version completed in the ledger) -> serves with a WARNING (child 0, API boot gates pass); a
+ *          loosened known object (NO FORCE) -> refused at the API boot gate (`force-rls`).
+ *   LU-12  security refusals stay fatal, also under --force: the superuser login, BYPASSRLS, RLS disabled (post-check 68),
+ *          NO FORCE (the API boot gate; the migrate child checks ENABLE only).
  *          (PG < 16: the container suite, L10, with a real PostgreSQL 15 image.)
  *
  * Gated on b1() (B1's modules on the branch) and an owner-login disposable cluster (crewflow.disposable_cluster=on).
@@ -27,7 +29,7 @@ import { randomBytes } from 'node:crypto';
 import { Client } from 'pg';
 
 import { resolveIntegrationTestDatabase } from '../../database/typeorm/core/test-database-guard';
-import { ADOPTION, b1, EXIT, LEDGER_MIGRATION_NAME, LedgerRow, loginOf, migrationsStep, Query, urls, withDatabase } from './ledger-contract';
+import { ADOPTION, apiBootGateRefusal, b1, EXIT, LEDGER_MIGRATION_NAME, LedgerRow, loginOf, migrationsStep, Query, urls, withDatabase } from './ledger-contract';
 import { attemptProblems, Cluster, factDifferences, R254_LAST, R256_LAST } from './ledger-fixtures';
 
 jest.setTimeout(1_800_000);
@@ -304,13 +306,28 @@ describeIfB1("the upgrade logbook on real databases (Part B3, B1's start path an
       expect(ids(await cl.ledger(db))).toEqual(before);
     });
 
-    it('LU-12 --force never skips a security refusal: posture drift (FORCE RLS removed from a tenant table) still refuses', async () => {
+    it('LU-12 --force never skips a security refusal: RLS disabled on a tenant table -> the post-check refuses (68), nothing completed', async () => {
       const db = await skippedRelease('forcesec');
-      await cl.admin(db, 'ALTER TABLE core.payroll_record NO FORCE ROW LEVEL SECURITY');
+      await cl.admin(db, 'ALTER TABLE core.payroll_record DISABLE ROW LEVEL SECURITY');
       const before = ids(await cl.ledger(db));
       const out = await B1.forceUpgrade(db);
-      expect(out.exitCode).not.toBe(EXIT.ok);
-      expect(ids(await cl.ledger(db))).toEqual(before);
+      expect(out.exitCode).toBe(EXIT.postCheck);
+      // A refused run may log its own failure (failed, forced), never a completed step.
+      const added = (await cl.ledger(db)).filter((r) => !before.includes(r.id));
+      expect(added.filter((r) => r.status !== 'failed')).toEqual([]);
+      expect(await apiBootGateRefusal(db)).toBe('force-rls');
+    });
+
+    it('LU-12 posture drift the migrate child does not check (NO FORCE on a tenant table): --force or not, the API boot gate refuses', async () => {
+      // The migrate child's post-checks test ENABLE (deploy-post-checks.ts rls-disabled), the FORCE spot check is the API /
+      // Worker boot gate (database-boot-gate-rules.ts assertForceRlsGate, main.js after the child). --force skips neither:
+      // the start is refused at the gate whatever the upgrade did.
+      const db = await skippedRelease('forcenoforce');
+      await cl.admin(db, 'ALTER TABLE core.payroll_record NO FORCE ROW LEVEL SECURITY');
+      expect(await apiBootGateRefusal(db)).toBe('force-rls');
+      const out = await B1.forceUpgrade(db);
+      expect([EXIT.ok, EXIT.postCheck]).toContain(out.exitCode);
+      expect(await apiBootGateRefusal(db)).toBe('force-rls');
     });
   });
 
@@ -324,10 +341,15 @@ describeIfB1("the upgrade logbook on real databases (Part B3, B1's start path an
     expect([served.exitCode, served.serve]).toEqual([EXIT.ok, true]);
     expect(served.lines.join('\n')).toMatch(/WARN/i);
     expect(ids(await cl.ledger(db))).toEqual(before);
+    // The API (main.js boot gates) serves this AHEAD database: the schema gate tolerates a newer ledger (C-1).
+    expect(await apiBootGateRefusal(db)).toBeNull();
+    // A loosened known security object: the start is refused at the API boot gate (the FORCE spot check), with or without
+    // a successful migrate child.
     await cl.admin(db, 'ALTER TABLE core.payroll_record NO FORCE ROW LEVEL SECURITY');
-    const blocked = await B1.start(db);
-    expect(blocked.serve).toBe(false);
-    expect(blocked.exitCode).not.toBe(EXIT.ok);
+    const child = await B1.start(db);
+    expect([EXIT.ok, EXIT.postCheck]).toContain(child.exitCode);
+    expect(await apiBootGateRefusal(db)).toBe('force-rls');
+    expect(ids(await cl.ledger(db))).toEqual(before);
   });
 
   // ----------------------------------------------------------------------------------------------------------- LU-12

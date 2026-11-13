@@ -358,7 +358,7 @@ async function main() {
   }, l5);
 
   await step('L6', 'only an upgrade command fails: 70, serves, healthz upgrade "failed", Worker starts', async (check, n) => {
-    n('NOT RUNNABLE on 0.6.0: UPGRADE_COMMANDS[0-6] is empty (UPGRADE-LEDGER-INTERFACE.md §2) and the planned CREWFLOW_UPGRADE_TEST_FAIL_COMMAND seam is NODE_ENV=test only, which a production image never runs. Proven at server level once a test command exists (ledger-upgrade LU-4/LU-10).');
+    n('NOT RUNNABLE on 0.6.0: UPGRADE_COMMANDS[0-6] is empty (UPGRADE-LEDGER-INTERFACE.md §2) and the probe seams CREWFLOW_TEST_UPGRADE_COMMANDS / CREWFLOW_TEST_UPGRADE_FAIL_COMMAND (§4) are refused (64) unless NODE_ENV=test on a disposable test database, which a production image never runs. Proven at server level with those seams (ledger-upgrade LU-4/LU-10, ledger-http LH-2).');
     return 'NOT RUNNABLE';
   });
 
