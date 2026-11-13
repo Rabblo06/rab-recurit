@@ -106,7 +106,7 @@ describeIfOwnerCluster('the upgrade floor on real databases (production target s
   async function migrateOnStart(db: string, extraEnv: Record<string, string> = {}, seamDatabase = db) {
     const lines: string[] = [];
     const result = await runMigrateOnStart(
-      { migrationApprovalMode: 'none', upgradeFailurePolicy: 'continue' },
+      { migrationApprovalMode: 'none' },
       {
         env: { NODE_ENV: 'test', PG_DATABASE_URL: withDb(OWNER_URL, db), ...extraEnv } as NodeJS.ProcessEnv,
         log: (line) => lines.push(line),

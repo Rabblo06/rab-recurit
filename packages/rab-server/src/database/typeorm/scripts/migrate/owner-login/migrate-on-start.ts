@@ -23,15 +23,13 @@
  *     entity-cache-flush.ts: one INCR per cached entity, deletes nothing, touches no other key family: never bull:*,
  *     throttler keys or rab:* heartbeats). WARNING ONLY: a missing REDIS_URL, an unreachable Redis or a failed bump is
  *     logged and the start continues (cached entries then expire on their own TTL, at most 300 s).
- *   - on failure: upgrade-failure-policy.ts decides, on a fresh session of the same login, whether the API may start anyway.
- *     Owner decision C3 (2026-11-05, "exactly like Twenty"): CREWFLOW_UPGRADE_FAILURE=continue (the default) turns a failed
- *     UPGRADE MIGRATION into an ERROR line naming it and exit 70 (deployment identity still checked); configuration (64),
- *     approval / N1 / the upgrade floor (65), identity (67), post-check (68) and lock timeout (69) stay fail-closed, and a
- *     first-install
- *     failure never serves. refuse keeps the failure code.
+ *   - on failure: refuse (OWNER-DB-ULTIMATE Part B3; the C3 CREWFLOW_UPGRADE_FAILURE choices are removed): a failed
+ *     migration exits 66 and the next start retries it (the upgrade logbook records attempt N); configuration (64), the
+ *     version check / approval (65), identity (67), post-check (68) and lock timeout (69) likewise never serve. Only a failed
+ *     upgrade COMMAND, with every migration applied and the post-checks passed, serves (exit 70, upgrade:"failed").
  *
  * One machine-readable line on stdout at the end, never a secret:
- *   TWENTY_MIGRATE_RESULT {"state","applied","pending","failedMigration","exitCode","serve","policy","reason","checks"}
+ *   TWENTY_MIGRATE_RESULT {"state","applied","pending","failedMigration","exitCode","serve","reason","checks","upgrade"}
  * (the prefix name is the interface agreed with Agent 2 before the owner-login rename; it is kept for compatibility.)
  *
  * This module has no side effects on import. The process entry is migrate-on-start.main.ts (it reads Agent 2's
@@ -62,7 +60,6 @@ import { GuardedTarget, Query, runLockedMigrations } from '../locked-migration-r
 import { assertMigrationApproval, readMigrationApproval } from '../migration-approval';
 import { resolveMigrationConnection } from '../migration-database-url';
 import { Classification, classifyDatabaseState, FreshInstallProof } from './fresh-install';
-import { UpgradeCheck, UpgradeFailurePolicy } from './upgrade-failure-policy';
 import { runCacheFlush } from '../../cache-flush';
 import { UpgradeRun, UpgradeRunReport } from '../../../../../engine/core-modules/upgrade/upgrade-runner';
 import { UPGRADE_COMMANDS } from '../../../../../engine/core-modules/upgrade/upgrade-commands/registry';
@@ -131,7 +128,6 @@ export type StartupOutcome = 'ok' | 'config' | 'behind' | 'migrationFailed' | 'i
 
 export interface MigrateOnStartConfig {
   migrationApprovalMode: 'none' | 'token';
-  upgradeFailurePolicy: UpgradeFailurePolicy;
 }
 
 export interface MigrateOnStartResult {
@@ -141,9 +137,9 @@ export interface MigrateOnStartResult {
   failedMigration: string | null;
   outcome: StartupOutcome;
   serve: boolean;
-  policy: UpgradeFailurePolicy;
   reason: string;
-  checks: UpgradeCheck[];
+  /** Kept for the result-line shape (always empty since the C3 assessment was removed). */
+  checks: Array<{ name: string; ok: boolean; detail: string }>;
   /** OWNER-DB-ULTIMATE Part B: the upgrade logbook's view of this run (null when the run stopped before the check). */
   upgrade?: UpgradeRunReport | null;
 }
@@ -244,8 +240,6 @@ export interface MigrateOnStartDeps {
   env?: NodeJS.ProcessEnv;
   log?: (line: string) => void;
   runner?: typeof runLockedMigrations;
-  /** Agent 3's posture / drift monitor, when it exists (upgrade-failure-policy.ts). */
-  postureCheck?: (query: Query) => Promise<string[]>;
   /** Receives the migration session pid (the main entry's SIGTERM self-cancel). */
   onSession?: (pid: number) => void;
   /** Test seam: the allow-listed entity-cache epoch bump (default: cache-flush.ts runCacheFlush). */
@@ -385,7 +379,6 @@ export async function runMigrateOnStart(config: MigrateOnStartConfig, deps: Migr
     failedMigration: null,
     outcome,
     serve: outcome === 'ok',
-    policy: config.upgradeFailurePolicy,
     reason: outcome === 'ok' ? 'schema current' : outcome,
     checks: [],
     upgrade: upgradeRun?.report ?? null,
@@ -498,7 +491,7 @@ export async function runMigrateOnStart(config: MigrateOnStartConfig, deps: Migr
       // Unreadable after the failure: keep the failure, report nothing as pending-known.
     }
     // OWNER-DB-ULTIMATE Part B3 ("version too old, or a migration fails: refuse; retry next start"): every failure of the
-    // migrations or the gates refuses, whatever CREWFLOW_UPGRADE_FAILURE says (the C3 continue path is retired: a failed
+    // migrations or the gates refuses (the C3 continue path and CREWFLOW_UPGRADE_FAILURE are removed: a failed
     // migration never serves). The logbook already holds the failed row (UpgradeRun.onApplyFailure); the next start is
     // attempt N+1. Only a failed upgrade COMMAND serves (exit 70), decided above in the success path.
     if (outcome === 'migrationFailed') {

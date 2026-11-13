@@ -367,8 +367,8 @@ services:
       CREWFLOW_RUNTIME_ISOLATION: enforce
       # O3 C1 (owner decision 2026-11-05, like Twenty): the API migrates on start. Approval mode none by default (C4), token
       # an opt-in (BC-11): set CREWFLOW_MIGRATION_APPROVAL_MODE=token in compose.env (the ONLY place; the gate refuses it in
-      # database.env / runtime.env, where this line would silently override it). A failed UPGRADE starts degraded (C3:
-      # CREWFLOW_UPGRADE_FAILURE unset = continue; runtime.env may opt into refuse); a failed first install never serves. It
+      # database.env / runtime.env, where this line would silently override it). A failed migration never serves (exit 66,
+      # retried on the next start); only a failed upgrade COMMAND serves with upgrade:"failed" (OWNER-DB-ULTIMATE Part B3). It
       # registers the BullMQ job schedulers itself (C2: DISABLE_CRON_JOBS_REGISTRATION unset).
       CREWFLOW_MIGRATE_ON_START: "true"
       CREWFLOW_MIGRATION_APPROVAL_MODE: ${CREWFLOW_MIGRATION_APPROVAL_MODE:-none}

@@ -123,7 +123,7 @@ async function buildDatabase(db: string): Promise<void> {
     }
   });
   const result = await runMigrateOnStart(
-    { migrationApprovalMode: 'none', upgradeFailurePolicy: 'refuse' },
+    { migrationApprovalMode: 'none' },
     { env: { PATH: process.env.PATH, NODE_ENV: 'development', PG_DATABASE_URL: adminUrl(db, { name: 'crewflow_owner', password: OWNER_PASSWORD }) }, log: () => undefined },
   );
   if (result.outcome !== 'ok') throw new Error(`the chain build failed: ${result.outcome} ${result.reason}`);
