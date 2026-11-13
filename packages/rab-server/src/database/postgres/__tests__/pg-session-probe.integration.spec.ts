@@ -3,6 +3,7 @@ import { Client } from 'pg';
 import { createPgClient, createPgDataSource, pgClientConfig } from '../create-pg-pool';
 import { resolvePgEnvironment } from '../pg-config';
 import { probePgSessionAffinity, PgSessionProbeError } from '../pg-session-probe';
+import { integrationTestDatabaseReady } from '../../typeorm/core/integration-test-database-gate';
 
 // Phase B (B1/P4), against the disposable test database (TEST_DATABASE_URL, the restricted runtime role):
 //   - the session probe passes on a direct connection;
@@ -11,7 +12,7 @@ import { probePgSessionAffinity, PgSessionProbeError } from '../pg-session-probe
 // Optional: PGBOUNCER_TRANSACTION_URL (a throwaway PgBouncer in transaction mode in front of the same database) proves
 // the probe refuses a real transaction pooler.
 const appUrl = process.env.TEST_DATABASE_URL;
-const describeDb = appUrl ? describe : describe.skip;
+const describeDb = integrationTestDatabaseReady() ? describe : describe.skip;
 
 describeDb('pg factory against a real PostgreSQL', () => {
   const resolved = () => resolvePgEnvironment({ PG_DATABASE_URL: appUrl }, { processRole: 'worker' });

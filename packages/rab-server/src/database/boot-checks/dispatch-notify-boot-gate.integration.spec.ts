@@ -9,6 +9,7 @@ import {
   DISPATCH_NOTIFY_SESSION_SQL,
   DISPATCH_NOTIFY_STORED_SQL,
 } from './database-boot-gate-rules';
+import { integrationTestDatabaseReady } from '../typeorm/core/integration-test-database-gate';
 
 /**
  * Phase D wave 3 gate 1c ("dispatch-notify") against the real PostgreSQL catalog of the disposable test database (C1 schema;
@@ -21,7 +22,7 @@ import {
  */
 const appUrl = process.env.TEST_DATABASE_URL;
 const adminUrl = process.env.TEST_DATABASE_URL_UNPOOLED;
-const describeDb = appUrl && adminUrl ? describe : describe.skip;
+const describeDb = integrationTestDatabaseReady() ? describe : describe.skip;
 
 const resolved = (processRole: 'api' | 'worker' | 'cli', mode?: string) =>
   resolvePgEnvironment({ NODE_ENV: 'test', PG_DATABASE_URL: appUrl, ...(mode ? { WORKER_DISPATCH_MODE: mode } : {}) }, { processRole, enforceProcessPolicy: false });

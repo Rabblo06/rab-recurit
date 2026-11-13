@@ -1,5 +1,6 @@
 import { createPgDataSource, createPgPool } from '../create-pg-pool';
 import { PgProcessRole, resolvePgEnvironment } from '../pg-config';
+import { integrationTestDatabaseReady } from '../../typeorm/core/integration-test-database-gate';
 
 /**
  * Phase D, SQL review E-1, against the disposable test database (the restricted runtime login): the session setting
@@ -8,7 +9,7 @@ import { PgProcessRole, resolvePgEnvironment } from '../pg-config';
  * is a session parameter, not migration SQL; nothing is written.
  */
 const appUrl = process.env.TEST_DATABASE_URL;
-const describeDb = appUrl ? describe : describe.skip;
+const describeDb = integrationTestDatabaseReady() ? describe : describe.skip;
 
 const SHOW = `SELECT pg_catalog.current_setting('crewflow.dispatch_notify', true) AS v, pg_catalog.pg_backend_pid() AS pid`;
 

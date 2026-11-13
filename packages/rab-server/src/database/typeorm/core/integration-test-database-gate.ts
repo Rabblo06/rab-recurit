@@ -18,10 +18,19 @@
  * Pure apart from reading `env` (default process.env); opens no connection. Error messages never contain a URL.
  * integration-test-database-gate.spec.ts holds the abuse cases and the static scan that keeps every spec on this gate.
  */
-import { assertJestNodeEnv, resolveIntegrationTestDatabase } from './test-database-guard';
+import { assertJestNodeEnv, resolveIntegrationTestDatabase, ResolvedTestDatabase } from './test-database-guard';
+
+/**
+ * The validated TEST pair, for a suite whose opt-in depends on WHICH database or login it got (e.g. "only on the owner
+ * login": `integrationTestDatabase().app.login === 'crewflow_owner'`). Same rules and same throw as the gate below; never
+ * null, so an invalid pair cannot turn into a skip. `app.login` / `admin.login` are for comparisons only, never printing.
+ */
+export function integrationTestDatabase(env: Record<string, string | undefined> = process.env): ResolvedTestDatabase {
+  assertJestNodeEnv(env);
+  return resolveIntegrationTestDatabase(env);
+}
 
 export function integrationTestDatabaseReady(env: Record<string, string | undefined> = process.env): boolean {
-  assertJestNodeEnv(env);
-  resolveIntegrationTestDatabase(env);
+  integrationTestDatabase(env);
   return true;
 }

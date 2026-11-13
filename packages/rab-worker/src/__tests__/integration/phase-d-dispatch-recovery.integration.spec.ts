@@ -41,7 +41,7 @@ import { integrationTestDatabaseReady } from '@rab/server/database/typeorm/core/
  */
 const WORKER_URL = process.env.TEST_DATABASE_WORKER_URL;
 const APP_URL = process.env.TEST_DATABASE_URL;
-const RUN = process.env.PHASE_D_SQL_APPROVED === 'true' && Boolean(WORKER_URL && APP_URL) && integrationTestDatabaseReady();
+const RUN = process.env.PHASE_D_SQL_APPROVED === 'true' && Boolean(WORKER_URL) && integrationTestDatabaseReady();
 const describeIfApproved = RUN ? describe : describe.skip;
 const TEST_ENV = 'inttest';
 jest.setTimeout(240_000);

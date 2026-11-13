@@ -3,7 +3,7 @@ import * as path from 'path';
 
 import * as ts from 'typescript';
 
-import { integrationTestDatabaseReady } from './integration-test-database-gate';
+import { integrationTestDatabase, integrationTestDatabaseReady } from './integration-test-database-gate';
 import { TEST_DATABASE_URL, TEST_DATABASE_URL_UNPOOLED, TestDatabaseConfigError } from './test-database-guard';
 
 /**
@@ -22,6 +22,14 @@ describe('DEAD-07 integration test database gate', () => {
   describe('the gate', () => {
     it('is true for NODE_ENV=test and a valid TEST pair, and reads no legacy connection name', () => {
       expect(integrationTestDatabaseReady({ NODE_ENV: 'test', [TEST_DATABASE_URL]: APP, [TEST_DATABASE_URL_UNPOOLED]: ADMIN })).toBe(true);
+    });
+
+    it('integrationTestDatabase() hands an opt-in the validated identity, and throws (never null) on an invalid pair', () => {
+      const resolved = integrationTestDatabase({ NODE_ENV: 'test', [TEST_DATABASE_URL]: APP, [TEST_DATABASE_URL_UNPOOLED]: ADMIN });
+      expect(resolved.app.login).toBe('crewflow_owner');
+      expect(resolved.app.port).toBe('55462');
+      expect(() => integrationTestDatabase({ NODE_ENV: 'test', [TEST_DATABASE_URL]: APP })).toThrow(TestDatabaseConfigError);
+      expect(() => integrationTestDatabase({ NODE_ENV: 'development', [TEST_DATABASE_URL]: APP, [TEST_DATABASE_URL_UNPOOLED]: ADMIN })).toThrow(TestDatabaseConfigError);
     });
 
     it('is true in this Jest process (setupFiles routed it; globalSetup proved the pair live)', () => {
@@ -124,6 +132,7 @@ describe('DEAD-07 integration test database gate', () => {
         "const DB_URL = process.env.DATABASE_URL;\nconst describeIf = REDIS_URL && DB_URL ? describe : describe.skip;",
         "const RUN = Boolean(process.env.TEST_DATABASE_URL && process.env.TEST_DATABASE_URL_UNPOOLED);\nconst it2 = RUN ? it : it.skip;",
         "const A = process.env['PG_DATABASE_URL'];\nconst B = A;\nconst d = B ? describe : describe.skip;",
+        "const appUser = new URL(process.env.TEST_DATABASE_URL ?? '').username;\nconst OWNER = appUser === 'crewflow_owner';\nconst suite = OWNER ? describe : describe.skip;",
       ];
       for (const source of old) expect(offendingGates('fixture.spec.ts', source)).toHaveLength(1);
       const ok = [
@@ -131,6 +140,7 @@ describe('DEAD-07 integration test database gate', () => {
         "const DB_URL = process.env.DATABASE_URL;\nconst describeIf = REDIS_URL && integrationTestDatabaseReady() ? describe : describe.skip;\nopen(DB_URL);",
         "const RUN = integrationTestDatabaseReady() && process.env.RUN_PERF_BASELINE === 'true';\nconst d = RUN ? describe : describe.skip;",
         "const WORKER_URL = process.env.TEST_DATABASE_WORKER_URL;\nconst RUN = Boolean(WORKER_URL) && integrationTestDatabaseReady();\nconst d = RUN ? describe : describe.skip;",
+        "const env = integrationTestDatabase();\nconst OWNER = env.app.login === 'crewflow_owner';\nconst suite = OWNER ? describe : describe.skip;",
       ];
       for (const source of ok) expect(offendingGates('fixture.spec.ts', source)).toEqual([]);
     });
