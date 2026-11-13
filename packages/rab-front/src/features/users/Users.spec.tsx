@@ -1,4 +1,4 @@
-import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { act, configure, fireEvent, getConfig, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { MemoryRouter } from 'react-router-dom';
@@ -23,6 +23,8 @@ jest.mock('framer-motion', () => ({
   ...jest.requireActual('framer-motion'),
   AnimatePresence: ({ children }: { children?: unknown }) => children,
 }));
+// A ceiling, not a wait: the panel test chains several role queries on a large DOM (see asyncUtilTimeout below).
+jest.setTimeout(30_000);
 
 const mockApi = api as unknown as { get: jest.Mock; post: jest.Mock };
 
@@ -528,6 +530,15 @@ describe('Users — a Manager sees and adds only their own Venue Managers', () =
   const managerCalls = () => mockApi.get.mock.calls.filter(([u]) => u === '/managers').length;
 
   beforeEach(() => mockApi.get.mockReset());
+  // Every wait in this block is on a mocked promise (no timers, no animation since presence is synchronous above), so
+  // only CPU throughput decides how long the full panel takes to render and be queried by role. A 50x repeat on a
+  // deliberately oversubscribed machine timed out the default 1 s budget at the FIRST findByRole; give these waits 5 s.
+  let asyncUtilTimeout = 1_000;
+  beforeAll(() => {
+    asyncUtilTimeout = getConfig().asyncUtilTimeout;
+    configure({ asyncUtilTimeout: 5_000 });
+  });
+  afterAll(() => configure({ asyncUtilTimeout }));
 
   it('with venue_manager.create: a "Venue managers" tab lists GET /venue-managers rows with their venue, offers "New venue manager", and never calls the CEO-only /managers', async () => {
     serve({ roles: ['manager'], isPlatformAdmin: false }, { 'venue_manager.create': true });
