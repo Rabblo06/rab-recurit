@@ -7378,3 +7378,16 @@ image that runs the apps' own derive step on the read-only volume (`--pull never
   interpolated `PG_DATABASE_URL` on rab-api / rab-worker, `PG_DATABASE_ADMIN_URL`); the image gate (any file under
   `/run/crewflow/db-target` in the image fails it); area 6's `deploy-order-tests/run-db-setup-tests.cjs` on postgres 16,
   17 and 18, NOT yet re-run on the Helm model.
+
+## XP-09 Q6 — refresh-token revocation keeps the first revocation time (branch fix/refresh-token-revoke-first-wins, 2026-11-13, PR #132)
+- **Threat:** an attacker or user replays an old, rotated refresh token, or several revocations happen (logout, password
+  change, reuse detection). Each one rewrote `core.refresh_token.revoked_at` on every row of the family or user, including
+  rows already revoked. That erased when a token actually stopped being valid (reuse-investigation evidence) and restarted
+  the 181-day retention clock of `core.worker_cleanup_auth_tokens`, so repeated replays could keep dead token rows forever.
+- **Control:** `RefreshTokenService.revokeFamily`, `revokeAllForUser` and `revokeAllForUserExcept` ("log out of other
+  devices" and the MFA-change path, profile.service.ts / mfa-management.service.ts) stamp only rows
+  `WHERE revoked_at IS NULL` — the same rule as `revokeAllForOrganisation` and the `user_session` CAS. Live rows are still revoked; revoked rows keep their
+  first time. No row can become un-revoked.
+- **Tests:** `refresh-token-revoke-first-wins.integration.spec.ts` (revoke, then revoke again later → revoked_at unchanged,
+  for all three methods, incl. revokeAllForUserExcept keeping the excepted family live and backdated times unchanged; replaying a rotated token twice keeps its rotation time; fails 3/3 on the previous code) and unit tests
+  in `refresh-token.service.spec.ts`.
