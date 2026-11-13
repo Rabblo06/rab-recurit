@@ -488,10 +488,12 @@ function targetMount(p, svc) {
   const m = (JSON.parse(r.stdout || '[]') || []).find((x) => x.Destination === L.TARGET_DIR);
   return m ? (m.RW ? 'rw' : 'ro') : 'absent';
 }
-/** Delete the password file (as db-setup's own user, through its read-write mount; a one-off, no deps). */
+/** Delete the password file with the documented env-free command (operator command 2: docker run ... rm -f /v/owner-password). */
 function deletePasswordFile(p, label) {
-  const r = oneOff(p, 'db-setup', label, { entrypoint: 'rm', cmd: ['-f', L.OWNER_PASSWORD_FILE], timeout: 180_000 });
-  if (r.code !== 0) throw new Error(`deleting the password file failed (${r.code})`);
+  const r = L.removePasswordFile(p, imageRef(NEW));
+  keep(p, label, r.out);
+  if (r.code !== 0) throw new Error(`deleting the password file failed (${r.code}): ${L.redact(r.out).slice(0, 200)}`);
+  return r;
 }
 /**
  * The password file's facts for a running stack: present, 0400 1000:1000, logs in, read-only in both apps and read-write
@@ -504,6 +506,7 @@ function checkPasswordFile(p, check, n, label, { random = true, healthCheck = fa
   if (!f) return null;
   const pw = f.password;
   check(f.mode === '400 1000:1000', `${label}: the password file is 0400 1000:1000 (${f.mode})`);
+  check(!p.setupPathExists(`${L.OWNER_PASSWORD_FILE}.next`), `${label}: no ${path.posix.basename(L.OWNER_PASSWORD_FILE)}.next left behind`);
   if (random) check(pw.length >= 32 && !/\s/.test(pw), `${label}: a random password of ${pw.length} characters (>= 32; value not shown)`);
   check(p.ownerLoginWorks(pw), `${label}: the file's password logs in as crewflow_owner (verify-full)`);
   const mounts = ['rab-api', 'rab-worker', 'db-setup'].map((s) => `${s}=${targetMount(p, s)}`);
@@ -609,7 +612,7 @@ async function blockBundled() {
   }, p);
   if (!ok1 && !p.health('rab-api').startsWith('healthy|')) {
     note('S1 did not bring the stack up: the rest of block a is not run');
-    for (const id of ['S6', 'S2', 'S5', 'F1', 'R1', 'C1', 'C2', 'S10A', 'S8']) results.push({ id, owner: '-', title: 'not run (S1 failed)', status: 'NOT RUN', checks: [], notes: [] });
+    for (const id of ['S6', 'S2', 'S5', 'X1', 'F3', 'F1', 'R1', 'C1', 'C2', 'S10A', 'S8']) results.push({ id, owner: '-', title: 'not run (S1 failed)', status: 'NOT RUN', checks: [], notes: [] });
     teardown(p);
     return;
   }
@@ -673,6 +676,41 @@ async function blockBundled() {
     check(!/28P01|password authentication failed/i.test(p.logs('rab-worker')), 'the Worker log has no authentication failure');
   }, p);
 
+  await step('X1', 'L5', 'red control: the old option-2 expectation (crewflow_owner password = hex(HKDF(APP_SECRET))) FAILS on this design, for both APP_SECRETs used', async (check, n) => {
+    const crypto = require('node:crypto');
+    const hkdf = (secret) => L.rememberSecret(Buffer.from(crypto.hkdfSync('sha256', Buffer.from(secret, 'utf8'), Buffer.alloc(0), 'crewflow-owner-db-password-v1', 32)).toString('hex'));
+    const f = p.readPasswordFile();
+    for (const [label, secret] of [['APP_SECRET 1', app1], ['APP_SECRET 2', app2]]) {
+      const old = hkdf(secret);
+      check(!p.ownerLoginWorks(old) && (!f || f.password !== old), `red control (${label}): the HKDF-derived password does NOT log in and is not the stored one, so an HKDF assertion here would fail`);
+    }
+  }, p);
+
+  await step('F3', 'A6', 'an EMPTY password file: db-setup refuses (64) and changes nothing; the documented recovery (stop the apps, remove the file, `up -d`) resets and the apps start', async (check, n) => {
+    const base = path.posix.basename(L.OWNER_PASSWORD_FILE);
+    const mk = L.onSetupVolume(p, imageRef(NEW), ['sh', '-c', `rm -f /v/${base} && : > /v/${base} && chmod 400 /v/${base}`], 'empty-password-file');
+    check(mk.code === 0, 'an empty password file made on the setup volume (uid 1000, 0400)');
+    const before = dbSnapshot(p);
+    const d = deploy(p, 'F3-empty-file');
+    const sl = setupLog(p);
+    evidence('F3-db-setup.log', sl);
+    n(`bootstrap: ${bootstrapLines(sl).slice(-2).join(' / ')}`);
+    check(d.code !== 0 && setupExit(p) === 'exited|64', `the documented command fails: db-setup exits 64 (${setupExit(p)})`);
+    check(dbSnapshot(p) === before, `nothing changed in the database (changed: ${snapDiff(before, dbSnapshot(p))})`);
+    check(p.setupPathExists(L.OWNER_PASSWORD_FILE) && !p.setupPathExists(`${L.OWNER_PASSWORD_FILE}.next`), 'the empty file was left as it was; no .next file');
+    const stop = p.compose(['stop', 'rab-worker', 'rab-api'], { timeout: 300_000 });
+    check(stop.code === 0, '$P stop rab-worker rab-api');
+    deletePasswordFile(p, 'F3-rm');
+    const up = p.compose(['up', '-d'], { timeout: 900_000 });
+    keep(p, 'F3-up', up.out);
+    await waitApp(p);
+    check(up.code === 0 && MSG.readyReset.test(lastReady(setupLog(p))), `$P up -d: exit ${up.code}, the password reset, apps healthy`);
+    const pw = checkPasswordFile(p, check, n, 'F3');
+    state.pws.push(pw);
+    state.pw = pw;
+    checkSessions(p, check, 'F3');
+  }, p);
+
   await step('F1', 'A6', 'the password file present with a password that no longer logs in: refused 64 with the fix message, nothing changed; then the file deleted + the admin URL: reset (Crewflow addition), the apps recover', async (check, n) => {
     const other = L.hex(32);
     s['a:other'] = other;
@@ -729,9 +767,8 @@ async function blockBundled() {
     const t0 = Date.now();
     const stop = p.compose(['stop', 'rab-worker', 'rab-api'], { timeout: 300_000 });
     check(stop.code === 0, '`$P stop rab-worker rab-api`: exit 0');
-    const rm = p.compose(['run', '--rm', '--no-deps', '--entrypoint', 'rm', 'db-setup', '-f', L.OWNER_PASSWORD_FILE], { timeout: 180_000 });
-    keep(p, 'C1-rm', rm.out);
-    check(rm.code === 0 && p.readPasswordFile() === null, '`$P run --rm --no-deps --entrypoint rm db-setup -f /run/crewflow/db-target/owner-password`: exit 0, the file is gone');
+    const rm = deletePasswordFile(p, 'C1-rm');
+    check(rm.code === 0 && p.readPasswordFile() === null, `the documented env-free removal (${rm.command}): exit 0, the file is gone`);
     const t1 = Date.now();
     const up = p.compose(['up', '-d'], { timeout: 900_000 });
     keep(p, 'C1-up', up.out);
@@ -746,15 +783,14 @@ async function blockBundled() {
     state.pws.push(now);
     state.pw = now;
     checkSessions(p, check, 'C1');
-    n(`commands: $P stop rab-worker rab-api; $P run --rm --no-deps --entrypoint rm db-setup -f ${L.OWNER_PASSWORD_FILE}; $P up -d  ($P = docker compose with this project's files and env file)`);
+    n(`commands: $P stop rab-worker rab-api; ${rm.command}; $P up -d  ($P = docker compose with this project's files and env file)`);
   }, p);
 
   await step('C2', 'A6', 'the same WITHOUT stopping the apps first: the running apps are not recreated, keep their old URL (new connections would fail), and recover only after `up -d --force-recreate rab-api rab-worker` (timed)', async (check, n) => {
     const old = p.readPasswordFile().password;
     const ids = { api: p.inspect('rab-api', '{{.Id}}'), worker: p.inspect('rab-worker', '{{.Id}}') };
-    const rm = p.compose(['run', '--rm', '--no-deps', '--entrypoint', 'rm', 'db-setup', '-f', L.OWNER_PASSWORD_FILE], { timeout: 180_000 });
-    keep(p, 'C2-rm', rm.out);
-    check(rm.code === 0, 'the one-off rm: exit 0 (apps still running)');
+    const rm = deletePasswordFile(p, 'C2-rm');
+    check(rm.code === 0, 'the documented removal: exit 0 (apps still running)');
     const up = p.compose(['up', '-d'], { timeout: 900_000 });
     keep(p, 'C2-up', up.out);
     check(up.code === 0 && MSG.readyReset.test(lastReady(setupLog(p))), `\`up -d\`: exit ${up.code}, db-setup reset the password`);
