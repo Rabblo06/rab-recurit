@@ -84,7 +84,7 @@ export class TimerTriggerConsumer {
     return handleTimerTrigger(job, token, {
       mode: settings.mode,
       enabled: (kind) => settings.enabled(kind),
-      runScoped: (organisationId, workspaceId, fn) => runScopedForOrg(deps.tenantContext, organisationId, workspaceId, fn),
+      runScoped: (organisationId, workspaceId, fn, options) => runScopedForOrg(deps.tenantContext, organisationId, workspaceId, fn, options),
       actions: this.actions,
       lateClockInGraceMinutes: deps.environmentService.get('LATE_CLOCK_IN_GRACE_MINUTES'),
       recordOutcome: deps.timerTriggerOutcomes ?? (() => undefined),

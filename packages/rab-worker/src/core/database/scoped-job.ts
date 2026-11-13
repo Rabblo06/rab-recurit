@@ -1,6 +1,6 @@
 import { EntityManager } from 'typeorm';
 
-import { TenantContextService } from '@rab/server/engine/core-modules/tenant/tenant-context.service';
+import { TenantContextOptions, TenantContextService } from '@rab/server/engine/core-modules/tenant/tenant-context.service';
 
 /**
  * The one, uniform way every non-maintenance worker job touches a specific
@@ -37,8 +37,14 @@ export function runScopedForOrg<T>(
   organisationId: string,
   workspaceId: string | null,
   fn: (manager: EntityManager) => Promise<T>,
+  /** T-1: only `readOnly` is passed through (the D-Q4b timer decision). Never `useReplica` from a Worker job. */
+  options?: Pick<TenantContextOptions, 'readOnly'>,
 ): Promise<T> {
   // actorType 'worker': a system execution context, not a human. It impersonates no Manager; it only lets the staff_profile_worker_scan
   // policy show this workspace's Staff rows to the worker. Human policies are unchanged.
-  return tenantContext.runInTenantContext({ organisationId, workspaceId, userId: '', role: '', actorType: 'worker' }, fn);
+  return tenantContext.runInTenantContext(
+    { organisationId, workspaceId, userId: '', role: '', actorType: 'worker' },
+    fn,
+    options?.readOnly ? { readOnly: true } : undefined,
+  );
 }

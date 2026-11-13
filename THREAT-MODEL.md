@@ -6732,3 +6732,35 @@ Regression:   rate-limit-bypass.spec.ts (truth table incl. the old hidden-bypass
   ~5 minutes per token (continuous refill). Accepted as Twenty's trade-off; the values are code constants.
 - **Tests:** `password-reset-email-limiter.service.spec.ts`, `forgot-password-email-limit.integration.spec.ts`
   (4 IPs → 3 emails then 429; 20 concurrent → ≤3; known = unknown status and body; per-IP limit kept).
+
+## PERF — tenant framing: search_path and the Worker read-only flag folded into the binding SELECT (T-1, branch phase-x/t1-tenant-framing, PR #95, 2026-11-11, not merged)
+
+**Change.** `TenantContextService.bindGucs` now sets `search_path` in the same `SELECT` as the identity GUCs when the
+schema is known before the bind (HWS off; HWS on without a workspace; a replica read whose schema was validated on the
+primary), as bound parameter `$6`, transaction-local. A new option `readOnly` adds
+`set_config('transaction_read_only', 'on', true)` to that `SELECT`; the Worker's four hot read-only scans use it instead of
+their own `SET TRANSACTION READ ONLY` (ST-01/ST-02). API transactions: 6 → 5 framing statements; Worker scans: 7 → 5.
+
+**Unchanged (owner decision P1-13):** both `RESET ROLE`s (G-09 layers 1 and 2) as their own statements; the
+`current_user = session_user` assertion; Admin Inspect's first-statement `SET TRANSACTION READ ONLY` (CF-02); the replica
+path's READ ONLY; the security snapshot's isolation statement; FORCE RLS; transaction-local context. A raw
+`BEGIN READ ONLY` that bypasses TypeORM stays rejected (ST-03: it would end the outer transaction early).
+
+**Threats considered.**
+- *search_path list injection.* A bound value prevents SQL injection but not a comma-separated list (`'x, core'` is two
+  schemas). Only `'core'` or a `workspaceSchemaName()` result that matched the registry is ever passed. ST-07 adds the same
+  check on a Redis cache hit: a cached name that is not exactly the derived name is dropped and decided from Postgres
+  (`name-mismatch` on any disagreement).
+- *Read-only weakened.* It is stricter: it now applies from the binding `SELECT`, before any business statement (it used
+  to follow setup). Writes fail with 25006 on PG16 and PG18, inside SAVEPOINTs too.
+- *Context surviving the transaction.* All folded settings are `is_local = true`; proven to revert after COMMIT and
+  ROLLBACK on the same pooled backend.
+- *Pool poisoning (G-09).* Unchanged; re-proven with the folded statement, for the checkout hook and for layer 2 alone.
+
+**Residual.** `request_complete.sqlCount` now includes the checkout `RESET ROLE` (ST-05); when the pool is full, that
+count can be attributed to the request that released the connection. Statement counts for decisions come from
+`pg_stat_statements` as `crewflow_owner`.
+
+**Regression tests:** `tenant-context.service.spec.ts` (exact sequences, framing-count guard),
+`tenant-context-framing.integration.spec.ts` (real PG, owner login, pool max 1: settings, revert, 25006, poisoned session,
+injection), `schema-resolver.service.spec.ts` (ST-07), `session-role-reset.spec.ts` (ST-05).

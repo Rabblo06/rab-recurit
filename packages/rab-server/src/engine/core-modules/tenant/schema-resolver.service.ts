@@ -80,10 +80,13 @@ export class SchemaResolverService {
    * exactly as before, and `getOrFetch` (underneath `resolveSchema`) only ever caches a value this
    * callback actually returned, which can only be a validated, matching, `READY`, supported-version
    * success. A cache HIT therefore only ever returns a value that was ALREADY proven valid at the
-   * moment it was written — re-validating it again on every hit would be pure overhead against
-   * something structurally impossible to violate, so this deliberately doesn't. See
-   * `WorkspaceMetadataCacheService`'s own doc comment for the full "why this can never route to an
-   * unready/mismatched/inaccessible workspace" argument.
+   * moment it was written. See `WorkspaceMetadataCacheService`'s own doc comment for the full "why
+   * this can never route to an unready/mismatched/inaccessible workspace" argument.
+   *
+   * ST-07 (T-1): that argument holds only for values THIS code wrote. Redis is not the authority, and the returned name
+   * becomes `search_path` (now folded into a bound SELECT parameter, which stops SQL injection but not a comma-separated
+   * list). So a cached name is still compared with the name derived from the server-side workspace id, in memory (no
+   * round trip): anything else is dropped from the cache and decided from Postgres again, which throws on any mismatch.
    */
   async resolve(manager: EntityManager, workspaceId: string | null | undefined): Promise<string> {
     if (!workspaceId) throw new WorkspaceRoutingError('missing-context');
@@ -108,7 +111,12 @@ export class SchemaResolverService {
     let resolved = await this.workspaceMetadataCache.resolveSchema(workspaceId, fetch);
     // A cached value written by another image (no module version, or one below THIS code's floor) is never trusted:
     // drop it and decide from Postgres. A value this code wrote already passed the floor in `fetch`.
-    if (typeof resolved.moduleVersion !== 'number' || resolved.moduleVersion < MIN_COMPATIBLE_WORKSPACE_MODULE_VERSION) {
+    // ST-07: nor is a cached schema name that is not exactly the derived one (planted or corrupted in Redis).
+    if (
+      resolved.schemaName !== expected ||
+      typeof resolved.moduleVersion !== 'number' ||
+      resolved.moduleVersion < MIN_COMPATIBLE_WORKSPACE_MODULE_VERSION
+    ) {
       await this.workspaceMetadataCache.invalidate(workspaceId);
       resolved = await fetch();
     }
@@ -119,6 +127,8 @@ export class SchemaResolverService {
         `workspace ${workspaceId} schema is at module ${resolved.moduleVersion}, above this code's module ${LATEST_WORKSPACE_MODULE_VERSION} (an image rollback); routing continues`,
       );
     }
+    // Unreachable unless fetch() itself broke its contract (it throws 'name-mismatch'); fail closed regardless.
+    if (resolved.schemaName !== expected) throw new WorkspaceRoutingError('name-mismatch');
     return resolved.schemaName;
   }
 }
