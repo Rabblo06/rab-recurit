@@ -9,8 +9,11 @@ import type Redis from 'ioredis';
  *    lock, a scheduler) under memory pressure — scans would stop or run twice with no error anywhere. Read from
  *    `INFO memory` (works on managed Redis that disables CONFIG), falling back to `CONFIG GET`; if neither reveals the
  *    policy the preflight fails closed.
- *  - An unauthenticated connection (no password in REDIS_URL) is a WARNING, not a refusal: the compose Redis is reachable
- *    only on a private network. Production should require auth (owner decision D7).
+ *  - An unauthenticated connection (no password in REDIS_URL) is a WARNING and stays one: no later release turns it into a
+ *    refusal. X1.6 (owner decision 2026-11-12, as in Twenty, whose compose Redis has no password and no published port):
+ *    an unauthenticated Redis is protected by a private network only (the Docker network in compose), an accepted risk.
+ *    What keeps it private in compose is the gate: packages/rab-docker/scripts/compose-one-image.cjs refuses a published
+ *    or host-networked Redis in every production compose file.
  *
  * Messages never include REDIS_URL or any part of it.
  */
@@ -26,6 +29,13 @@ export interface RedisPreflightResult {
   authenticated: boolean;
   redisVersion: string | null;
 }
+
+/**
+ * The one warning for an unauthenticated Redis. It states the accepted risk and what the operator must keep true; it
+ * promises no later refusal (X1.6).
+ */
+export const UNAUTHENTICATED_REDIS_WARNING =
+  'Redis connection is unauthenticated (REDIS_URL carries no password): this Redis is protected only by the private network it runs on (accepted risk, as in Twenty). Never publish its port or expose it outside that network.';
 
 export function parseInfoField(info: string, field: string): string | null {
   const match = new RegExp(`^${field}:(.*)$`, 'm').exec(info);
@@ -90,7 +100,7 @@ export async function assertRedisReadyForBullmq(
   }
   const authenticated = redisUrlHasCredentials(redisUrl);
   if (!authenticated) {
-    logger.warn('Redis connection is unauthenticated (REDIS_URL carries no password) — acceptable only on a private network; production should require Redis AUTH/ACL');
+    logger.warn(UNAUTHENTICATED_REDIS_WARNING);
   }
   return { maxmemoryPolicy: policy, authenticated, redisVersion };
 }
