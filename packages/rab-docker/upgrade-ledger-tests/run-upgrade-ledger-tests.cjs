@@ -75,6 +75,8 @@ const REPO = process.env.ULT_REPOSITORY;
 const IMG = { r254: process.env.ULT_R254_DIGEST, r256: process.env.ULT_R256_DIGEST, next: process.env.ULT_NEW_DIGEST, probeFail: process.env.ULT_PROBE_FAIL_DIGEST };
 const NEW_VERSION = '0.6.0';
 const LEDGER_MIGRATION = 'UpgradeMigrationLedger1786721470000';
+/** B1's entry inside the image (WORKDIR /app): packages/rab-server/dist/command/index.js dispatches `upgrade`. */
+const FORCE_ENTRY = 'packages/rab-server/dist/command';
 const SEEDED_TABLES = [
   'attendance', 'job_offer', 'job_role', 'manager_profile', 'manager_workspace', 'payroll_calendar', 'payroll_calendar_period', 'payroll_record',
   'payroll_run', 'payroll_run_line', 'role', 'shift', 'shift_assignment', 'staff_profile', 'user', 'venue', 'workspace_membership',
@@ -368,9 +370,13 @@ async function main() {
     check(ledgerIds(l8) === ids, 'the env variables forced nothing');
     fs.writeFileSync(runtimeEnv, original);
     l8.compose(['stop', 'rab-api', 'rab-worker'], { timeout: 300_000 });
-    const f = l8.compose(['run', '--rm', '--no-deps', 'rab-api', 'node', 'dist/command', 'upgrade', '--force'], { timeout: 900_000 });
+    // The owner's literal command (Part B3). The image's WORKDIR is /app, so `dist/command` must resolve there.
+    const literal = l8.compose(['run', '--rm', '--no-deps', 'rab-api', 'node', 'dist/command', 'upgrade', '--force'], { timeout: 900_000 });
+    evidence('L8-force-literal.log', literal.out);
+    check(literal.code === 0, `the owner's literal command \`docker compose run --rm --no-deps rab-api node dist/command upgrade --force\`: exit ${literal.code}`);
+    const f = literal.code === 0 ? literal : l8.compose(['run', '--rm', '--no-deps', 'rab-api', 'node', FORCE_ENTRY, 'upgrade', '--force'], { timeout: 900_000 });
     evidence('L8-force.log', f.out);
-    check(f.code === 0, `docker compose run --rm --no-deps rab-api node dist/command upgrade --force: exit ${f.code}`);
+    check(f.code === 0, `upgrade --force (${literal.code === 0 ? 'literal form' : FORCE_ENTRY}): exit ${f.code}`);
     const forcedRows = ledger(l8).filter((r) => r.forced);
     check(forcedRows.length > 0 && forcedRows.every((r) => r.version === NEW_VERSION), `the forced run wrote ${forcedRows.length} row(s), every one forced = true`);
     n(`${ledger(l8).length} logbook row(s) after the forced run`);
@@ -403,7 +409,7 @@ async function main() {
       check(rs.every((x) => x.serve !== true), 'never served');
       check(!hasLedger(l10), 'nothing applied (no logbook table)');
       l10.compose(['stop', 'rab-api', 'rab-worker'], { timeout: 300_000 });
-      const f = l10.compose(['run', '--rm', '--no-deps', 'rab-api', 'node', 'dist/command', 'upgrade', '--force'], { timeout: 900_000 });
+      const f = l10.compose(['run', '--rm', '--no-deps', 'rab-api', 'node', FORCE_ENTRY, 'upgrade', '--force'], { timeout: 900_000 });
       evidence('L10-force.log', f.out);
       check(f.code !== 0 && !hasLedger(l10), `upgrade --force refused too (exit ${f.code}), nothing applied`);
     } finally {
