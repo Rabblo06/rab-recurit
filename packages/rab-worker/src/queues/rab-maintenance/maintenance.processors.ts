@@ -12,7 +12,7 @@ import { resolveInviteAutoDeleteEnabled, runAccountInviteCleanupCycle } from './
 import { runLoginHandoffCleanupCycle } from './login-handoff-cleanup.job';
 import { runOutboxRetentionCycle } from './outbox-retention.job';
 import { checkRecentStorageCleanup, runStorageCleanupCycle } from './storage-cleanup.job';
-import { runTokenCleanupCycle } from './token-cleanup.job';
+import { reportTokenCleanupResult, runTokenCleanupCycle } from './token-cleanup.job';
 import { defaultProvisioningHealthSinks, runWorkspaceProvisioningHealthCycle } from './workspace-provisioning-health.job';
 
 /**
@@ -45,12 +45,9 @@ export class MaintenanceScanProcessor {
   @Process('token-cleanup')
   async tokenCleanup(): Promise<void> {
     const { runtimeDataSource, logger } = this.deps.get();
-    const result = await runTokenCleanupCycle(runtimeDataSource);
-    if (result.refreshTokensDeleted || result.passwordResetTokensDeleted || result.oauthTransactionsDeleted) {
-      logger.log(
-        `token cleanup: refreshTokens=${result.refreshTokensDeleted} passwordResetTokens=${result.passwordResetTokensDeleted} oauthTransactions=${result.oauthTransactionsDeleted}`,
-      );
-    }
+    // XP-09 Q2/Q3: every step runs (a failing step never stops the others), batches loop until short within the run cap;
+    // a failed step is logged with a fixed message and then fails the cycle (tokenCleanupFailures + `cycle failed`).
+    reportTokenCleanupResult(await runTokenCleanupCycle(runtimeDataSource), logger);
   }
 
   // Wave 4/5 (DB5 contract §2, MFA-lane request): single-use cross-host login handoffs, purged 1 h past expiry/consumption
