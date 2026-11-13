@@ -117,6 +117,7 @@ export const SHIPPED_AUDIT_ACTIONS: Readonly<Record<string, SecurityAuditClassif
   'admin.queue_jobs_deleted': c('platform_admin', 'warning'),
   'admin.user_searched': c('platform_admin'),
   'admin.user_viewed': c('platform_admin'),
+  'admin.health_viewed': c('platform_admin'), // X2.4: a platform admin read the health report (as admin.user_viewed)
   'admin.organisation_searched': c('platform_admin'),
   'admin.test_email_sent': c('platform_admin'),
   'admin.email_replay_reason': c('platform_admin', 'warning'),

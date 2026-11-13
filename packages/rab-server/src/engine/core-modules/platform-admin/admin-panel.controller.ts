@@ -10,6 +10,7 @@ import { PlatformAdminService } from './platform-admin.service';
 import { AdminPanelService } from './admin-panel.service';
 import { OrganisationSuspensionService } from './organisation-suspension.service';
 import { MaintenanceModeDto } from './dto/maintenance-mode.dto';
+import { HealthReportQueryDto } from './dto/health-report-query.dto';
 import { RecentUsersQueryDto } from './dto/recent-users-query.dto';
 import { SuspendOrganisationDto } from './dto/suspend-organisation.dto';
 import { TestSmtpDto } from './dto/test-smtp.dto';
@@ -67,10 +68,13 @@ export class AdminPanelController {
     return { ...this.adminPanelService.getGeneral(), commit: this.adminConfig.general().commit };
   }
 
-  /** Admin Panel Health tab: bounded (2 s) probes, cached 10 s, fixed detail strings only. */
+  /**
+   * Admin Panel Health tab: bounded (2 s) read-only indicators (X2.4), cached 10 s in process, fixed detail strings only.
+   * Audited (`admin.health_viewed`); `?refresh=1` is the Refresh button (no cache, always audited).
+   */
   @Get('health/report')
-  getHealthReport(@AuthUser() ctx: AuthContext) {
-    return this.adminHealth.report(ctx);
+  getHealthReport(@AuthUser() ctx: AuthContext, @Query() query: HealthReportQueryDto) {
+    return this.adminHealth.report(ctx, { refresh: query.refresh === '1' });
   }
 
   /** Admin Panel Config tab: allowlisted environment variables — secrets and URLs as "set"/"not set" only (D8). */
