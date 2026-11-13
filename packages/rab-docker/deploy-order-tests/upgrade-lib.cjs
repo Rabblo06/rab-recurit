@@ -347,6 +347,37 @@ function writeSecrets(dir, { expectedDatabase, appSecret = secrets.appSecret, ca
   }
 }
 
+/**
+ * The documented "print the crewflow_owner URL" command (DB-SETUP-LEAD.md, Helm model, operator command 1), run exactly as
+ * documented plus `--name` (every container of these suites is named): the CURRENT image, the project's setup volume
+ * read-only, no network, read-only root, uid 1000, `--log-driver none`. stdout (the URL, SENSITIVE) stays in memory; the
+ * documented `2>/dev/null` is stderr, which is captured here only to prove it carries no URL. Returns { code, url, stderr,
+ * parsed } (parsed: user/host/port/db/password, password registered for redaction).
+ */
+function printOwnerUrl(project, imageRef) {
+  const name = `${project.name}-print-url`;
+  const r = spawnSync(
+    'docker',
+    [
+      'run', '--rm', '--name', name, '--log-driver', 'none', '--network', 'none', '--read-only', '--user', '1000:1000',
+      '-v', `${project.name}_crewflow-db-target:${TARGET_DIR}:ro`,
+      '-e', `CREWFLOW_DB_TARGET_FILE=${TARGET_FILE}`,
+      '--entrypoint', 'sh', imageRef,
+      '-c', 'node packages/rab-server/dist/database/typeorm/scripts/owner-login/derive-runtime-url.js 4>&1 1>&2',
+    ],
+    { cwd: RD, env: { ...process.env, MSYS_NO_PATHCONV: '1' }, encoding: 'utf8', timeout: 180_000 },
+  );
+  const url = (r.stdout || '').trim();
+  let parsed = null;
+  try {
+    const u = new URL(url);
+    parsed = { protocol: u.protocol, user: decodeURIComponent(u.username), password: rememberSecret(decodeURIComponent(u.password)), host: u.hostname, port: u.port || '5432', db: u.pathname.slice(1), params: [...u.searchParams.keys()] };
+  } catch {
+    parsed = null;
+  }
+  return { code: r.status ?? -1, url, lines: url ? url.split('\n').length : 0, stderr: r.stderr || '', parsed, name, command: `docker run --rm --name ${name} --log-driver none --network none --read-only --user 1000:1000 -v ${project.name}_crewflow-db-target:${TARGET_DIR}:ro -e CREWFLOW_DB_TARGET_FILE=${TARGET_FILE} --entrypoint sh <IMAGE> -c 'node packages/rab-server/dist/database/typeorm/scripts/owner-login/derive-runtime-url.js 4>&1 1>&2' 2>/dev/null` };
+}
+
 /** A URL of the bundled db for `user` (verify-full). Built here only, so no caller spells a credential into a URL literal. */
 function dbUrl(user, password, database = 'crewflow') {
   return `postgresql://${user}:${encodeURIComponent(password)}@db:5432/${database}?sslmode=verify-full`;
@@ -456,6 +487,7 @@ module.exports = {
   TARGET_FILE,
   compareFacts,
   dbUrl,
+  printOwnerUrl,
   rememberSecret,
   facts,
   fmtEvents,

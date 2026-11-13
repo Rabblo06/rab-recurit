@@ -609,7 +609,7 @@ async function blockBundled() {
   }, p);
   if (!ok1 && !p.health('rab-api').startsWith('healthy|')) {
     note('S1 did not bring the stack up: the rest of block a is not run');
-    for (const id of ['S6', 'S2', 'S5', 'F1', 'S10A', 'S8']) results.push({ id, owner: '-', title: 'not run (S1 failed)', status: 'NOT RUN', checks: [], notes: [] });
+    for (const id of ['S6', 'S2', 'S5', 'F1', 'R1', 'C1', 'C2', 'S10A', 'S8']) results.push({ id, owner: '-', title: 'not run (S1 failed)', status: 'NOT RUN', checks: [], notes: [] });
     teardown(p);
     return;
   }
@@ -708,6 +708,72 @@ async function blockBundled() {
     await waitApp(p);
     check(re.code === 0, 'rab-api and rab-worker restarted on the new password file and are healthy');
     checkSessions(p, check, 'F1');
+  }, p);
+
+  await step('R1', 'A6', 'the documented "print the crewflow_owner URL" command on the bundled db: exit 0, exactly one line, a crewflow_owner URL for db:5432/crewflow whose password is the file\'s random one and logs in; nothing on stderr but the fixed status line, nothing in any container log', async (check, n) => {
+    const r = L.printOwnerUrl(p, imageRef(NEW));
+    n(`command (redacted): ${r.command}`);
+    const q = r.parsed;
+    check(r.code === 0 && r.lines === 1 && q, `exit ${r.code}, ${r.lines} stdout line(s), a URL (value not shown)`);
+    check(q && /^postgres(ql)?:$/.test(q.protocol) && q.user === 'crewflow_owner' && q.host === 'db' && q.port === '5432' && q.db === 'crewflow', `crewflow_owner@${q ? `${q.host}:${q.port}/${q.db}` : '?'} (params ${q ? q.params.join(',') || '-' : '?'})`);
+    const f = p.readPasswordFile();
+    check(q && f && q.password === f.password && p.ownerLoginWorks(q.password), 'its password is the password file\'s (random) and logs in');
+    check(q && !r.stderr.includes(q.password) && !/postgres(ql)?:\/\//.test(r.stderr), `stderr (dropped by the documented 2>/dev/null) holds no URL or password (${r.stderr.trim().split('\n').length} line(s): ${L.redact(r.stderr).trim().slice(0, 120)})`);
+    check(L.run('docker', ['inspect', r.name], { timeout: 30_000 }).code !== 0, 'the container is gone (--rm); with --log-driver none nothing was kept in a container log');
+    const texts = logTexts(p);
+    check(q && Object.values(texts).every((v) => !v.includes(q.password)), 'no container log of the project holds the password');
+  }, p);
+
+  await step('C1', 'A6', 'changing the crewflow_owner password on purpose, exactly as documented (stop the apps, delete the password file with the one-off rm, `up -d`): a NEW password works, the old one fails, the apps start on it by themselves', async (check, n) => {
+    const old = p.readPasswordFile().password;
+    const t0 = Date.now();
+    const stop = p.compose(['stop', 'rab-worker', 'rab-api'], { timeout: 300_000 });
+    check(stop.code === 0, '`$P stop rab-worker rab-api`: exit 0');
+    const rm = p.compose(['run', '--rm', '--no-deps', '--entrypoint', 'rm', 'db-setup', '-f', L.OWNER_PASSWORD_FILE], { timeout: 180_000 });
+    keep(p, 'C1-rm', rm.out);
+    check(rm.code === 0 && p.readPasswordFile() === null, '`$P run --rm --no-deps --entrypoint rm db-setup -f /run/crewflow/db-target/owner-password`: exit 0, the file is gone');
+    const t1 = Date.now();
+    const up = p.compose(['up', '-d'], { timeout: 900_000 });
+    keep(p, 'C1-up', up.out);
+    check(up.code === 0, `\`$P up -d\`: exit ${up.code}`);
+    await waitApp(p);
+    const secs = Math.round((Date.now() - t1) / 1000);
+    check(true, `rab-api and rab-worker healthy ${secs} s after \`up -d\` (whole procedure ${Math.round((Date.now() - t0) / 1000)} s), with no manual restart`);
+    const sl = setupLog(p);
+    check(MSG.readyReset.test(lastReady(sl)), `db-setup reset the password (A4, a Crewflow addition): "${lastReady(sl).replace(/^.*?\[owner-bootstrap\]/, '[owner-bootstrap]').slice(0, 140)}"`);
+    const now = checkPasswordFile(p, check, n, 'C1');
+    check(now && now !== old && p.ownerLoginWorks(now) && !p.ownerLoginWorks(old), 'the NEW password logs in; the old one fails');
+    state.pws.push(now);
+    state.pw = now;
+    checkSessions(p, check, 'C1');
+    n(`commands: $P stop rab-worker rab-api; $P run --rm --no-deps --entrypoint rm db-setup -f ${L.OWNER_PASSWORD_FILE}; $P up -d  ($P = docker compose with this project's files and env file)`);
+  }, p);
+
+  await step('C2', 'A6', 'the same WITHOUT stopping the apps first: the running apps are not recreated, keep their old URL (new connections would fail), and recover only after `up -d --force-recreate rab-api rab-worker` (timed)', async (check, n) => {
+    const old = p.readPasswordFile().password;
+    const ids = { api: p.inspect('rab-api', '{{.Id}}'), worker: p.inspect('rab-worker', '{{.Id}}') };
+    const rm = p.compose(['run', '--rm', '--no-deps', '--entrypoint', 'rm', 'db-setup', '-f', L.OWNER_PASSWORD_FILE], { timeout: 180_000 });
+    keep(p, 'C2-rm', rm.out);
+    check(rm.code === 0, 'the one-off rm: exit 0 (apps still running)');
+    const up = p.compose(['up', '-d'], { timeout: 900_000 });
+    keep(p, 'C2-up', up.out);
+    check(up.code === 0 && MSG.readyReset.test(lastReady(setupLog(p))), `\`up -d\`: exit ${up.code}, db-setup reset the password`);
+    const now = p.readPasswordFile().password;
+    check(now !== old && p.ownerLoginWorks(now) && !p.ownerLoginWorks(old), 'the new password works, the old one fails');
+    await L.sleep(60_000);
+    const same = p.inspect('rab-api', '{{.Id}}') === ids.api && p.inspect('rab-worker', '{{.Id}}') === ids.worker;
+    const auth = ['rab-api', 'rab-worker'].map((sv) => (p.logs(sv).match(/28P01|password authentication failed/g) || []).length);
+    n(`60 s after \`up -d\`: containers ${same ? 'NOT recreated (same ids)' : 'recreated'}; health api ${p.health('rab-api')}, worker ${p.health('rab-worker')}; 28P01 lines api ${auth[0]}, worker ${auth[1]}`);
+    check(same, 'the running apps were NOT recreated by `up -d`: they still hold the OLD password in their runtime URL (documented: they do not recover on their own)');
+    const t1 = Date.now();
+    const fr = p.compose(['up', '-d', '--force-recreate', 'rab-api', 'rab-worker'], { timeout: 900_000 });
+    keep(p, 'C2-force-recreate', fr.out);
+    await waitApp(p);
+    check(fr.code === 0, `\`$P up -d --force-recreate rab-api rab-worker\`: exit ${fr.code}; healthy again after ${Math.round((Date.now() - t1) / 1000)} s`);
+    const ss = checkSessions(p, check, 'C2');
+    check(ss.some((x) => /worker/i.test(x.app)), 'the recreated Worker is connected');
+    state.pws.push(now);
+    state.pw = now;
   }, p);
 
   await step('S10A', '10', 'the admin URL forced into a runtime process (`run -e PG_DATABASE_URL=<admin>`): the entrypoints and every runtime process refuse before connecting', async (check, n) => {

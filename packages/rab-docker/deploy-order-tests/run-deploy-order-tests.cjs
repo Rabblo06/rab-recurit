@@ -264,10 +264,10 @@ function writeSecrets(dir, opts = {}) {
  * PR #125 (the Twenty Helm way): the NEW image's db-setup uses that URL unchanged (read-only checks, its password copied into
  * the setup volume's password file), so the same URL serves NEW and a rollback to PREV.
  */
-function writeComposeEnv(project, digest) {
+function writeComposeEnv(project, digest, urlOverride = null) {
   const prev = PREV_PRE_DB_SETUP && digest === PREV;
   project.files = [...project.baseFiles, ...(prev ? [PREV_OVERLAY] : [])];
-  const databaseUrl = prev ? L.ownerUrl(project.ownerPasswordNow()) : L.ownerUrl();
+  const databaseUrl = urlOverride ?? (prev ? L.ownerUrl(project.ownerPasswordNow()) : L.ownerUrl());
   L.writeComposeEnv(project, { repository: REPO, digest, pgImage: process.env.DOT_PG_IMAGE, redisImage: process.env.DOT_REDIS_IMAGE, databaseUrl });
 }
 
@@ -428,8 +428,15 @@ async function main() {
   // ------------------------------------------------------------------------------------------------------------ T3
   await step('T3', 'rollback to the previous digest with the same command: both go back together; the old API warns the schema is AHEAD and serves', async (check, n) => {
     const before = appState(main);
-    writeComposeEnv(main, PREV);
-    n('the rollback compose.env holds the same crewflow_owner URL (its password was never changed: the Twenty Helm way)');
+    // The documented "print the crewflow_owner URL" command (DB-SETUP-LEAD.md, operator command 1), with the CURRENT image,
+    // BEFORE the compose files are switched; its output (SENSITIVE, memory only) is the rollback's PG_DATABASE_URL.
+    const pr = L.printOwnerUrl(main, imageRef(NEW));
+    n(`print command (redacted): ${pr.command}`);
+    const q = pr.parsed;
+    check(pr.code === 0 && pr.lines === 1 && q && q.user === 'crewflow_owner' && q.host === 'db' && q.db === 'crewflow' && main.ownerLoginWorks(q.password), `the documented print command: exit ${pr.code}, one crewflow_owner URL for db/crewflow that logs in (value not shown)`);
+    check(q && !pr.stderr.includes(q.password) && L.run('docker', ['inspect', pr.name], { timeout: 30_000 }).code !== 0, 'nothing but the fixed status line on stderr; the container is gone (--rm, --log-driver none)');
+    writeComposeEnv(main, PREV, q ? pr.url : null);
+    n('the rollback compose.env holds the URL the documented print command produced');
     const since = nowS() - 1;
     const d = main.deploy();
     evidence('T3-deploy.log', d.out);
