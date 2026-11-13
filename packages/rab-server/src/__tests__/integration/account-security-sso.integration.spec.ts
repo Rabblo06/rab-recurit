@@ -1,5 +1,5 @@
 import 'reflect-metadata';
-import { INestApplication, ValidationPipe } from '@nestjs/common';
+import { INestApplication } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
 import { createHash, randomUUID } from 'node:crypto';
 import request from 'supertest';
@@ -9,6 +9,7 @@ import { createAdminDataSource } from './helpers/admin-datasource';
 import { codeAt, earlyInStep, secretFromOtpauth } from './helpers/mfa-test-kit';
 import { MockAccount, MockOidcProvider } from './helpers/mock-oidc-provider';
 import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
+import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-pipe';
 
 /**
  * Account security step 1 — Google / Microsoft: (#7) an enrolled account signing in with a provider is verified, and
@@ -138,8 +139,7 @@ describeIfDb('account security step 1 — provider sign-in is verified; SSO re-a
     const { EnvironmentService } = await import('../../engine/core-modules/environment/environment.service');
     const { AuthCacheRedisClientProvider } = await import('../../engine/core-modules/auth/services/auth-cache-redis-client.provider');
     const moduleRef = await Test.createTestingModule({ imports: [AppModule] }).compile();
-    app = moduleRef.createNestApplication();
-    app.useGlobalPipes(new ValidationPipe({ whitelist: true, forbidNonWhitelisted: true, transform: true }));
+    app = applyGlobalValidationPipe(moduleRef.createNestApplication());
     await app.init();
     owner = createAdminDataSource();
     await owner.initialize();

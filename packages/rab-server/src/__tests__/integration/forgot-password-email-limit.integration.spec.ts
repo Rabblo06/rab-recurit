@@ -13,7 +13,7 @@ const ORIGINAL = {
 process.env.RAB_DISABLE_RATE_LIMIT = 'false';
 process.env.TRUSTED_PROXY_CIDRS = '127.0.0.1/32,::1/128,::ffff:127.0.0.1/128';
 
-import { INestApplication, ValidationPipe } from '@nestjs/common';
+import { INestApplication } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
 import { randomUUID } from 'node:crypto';
 import request from 'supertest';
@@ -26,6 +26,7 @@ import { PasswordResetEmailLimiterService } from '../../engine/core-modules/auth
 import { EnvironmentService } from '../../engine/core-modules/environment/environment.service';
 import { TenantContextService } from '../../engine/core-modules/tenant/tenant-context.service';
 import { ThrottlerRedisClientProvider } from '../../engine/core-modules/throttler/throttler-redis-client.provider';
+import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-pipe';
 import { buildTrustProxyPredicate } from '../../engine/utils/trusted-proxy.util';
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { clearThrottleState } from './helpers/throttle-state';
@@ -64,8 +65,7 @@ describeIfDb('X1.4 forgot-password limit per address (REAL limiter, integration)
 
   beforeAll(async () => {
     const moduleRef = await Test.createTestingModule({ imports: [AppModule] }).compile();
-    app = moduleRef.createNestApplication();
-    app.useGlobalPipes(new ValidationPipe({ whitelist: true, forbidNonWhitelisted: true, transform: true }));
+    app = applyGlobalValidationPipe(moduleRef.createNestApplication());
     // Mirrors main.ts (Test.createTestingModule never runs bootstrap()): the same trusted-proxy predicate.
     app.getHttpAdapter().getInstance().set('trust proxy', buildTrustProxyPredicate(moduleRef.get(EnvironmentService).trustedProxyCidrs));
     await app.init();

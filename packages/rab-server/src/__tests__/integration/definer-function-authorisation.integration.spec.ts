@@ -5,6 +5,7 @@ import { Client } from 'pg';
 import { DataSource } from 'typeorm';
 
 import { AppModule } from '../../app.module';
+import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-pipe';
 import { resolveIntegrationTestDatabase } from '../../database/typeorm/core/test-database-guard';
 import { PasswordHashingService } from '../../engine/core-modules/auth/services/password-hashing.service';
 import { TenantContextService } from '../../engine/core-modules/tenant/tenant-context.service';
@@ -49,7 +50,7 @@ describeIfDb('CF-13 SECURITY DEFINER in-function authorisation (integration)', (
 
   beforeAll(async () => {
     const moduleRef = await Test.createTestingModule({ imports: [AppModule] }).compile();
-    app = moduleRef.createNestApplication();
+    app = applyGlobalValidationPipe(moduleRef.createNestApplication());
     await app.init();
     owner = createAdminDataSource();
     await owner.initialize();

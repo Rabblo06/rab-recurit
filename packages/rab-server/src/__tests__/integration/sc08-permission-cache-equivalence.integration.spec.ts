@@ -1,5 +1,5 @@
 import 'reflect-metadata';
-import { INestApplication, ValidationPipe } from '@nestjs/common';
+import { INestApplication } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
 import { PermissionFlag, PermissionFlagType } from '@rab/shared';
 import { createHash, randomUUID } from 'node:crypto';
@@ -21,6 +21,7 @@ import { ROLE_DEFS } from '../../modules/manager/services/manager.service';
 import { ManagerType } from '@rab/shared';
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
+import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-pipe';
 
 /**
  * SC-08 (Phase X Stage 0, S0-C-caches.md §C6): before any cache is switched on, prove that caching cannot change an
@@ -121,8 +122,7 @@ describeIfDb('SC-08 cached ≡ uncached for all 46 permissions, every identity s
 
   beforeAll(async () => {
     const moduleRef = await Test.createTestingModule({ imports: [AppModule] }).compile();
-    app = moduleRef.createNestApplication();
-    app.useGlobalPipes(new ValidationPipe({ whitelist: true, forbidNonWhitelisted: true, transform: true }));
+    app = applyGlobalValidationPipe(moduleRef.createNestApplication());
     await app.init();
     owner = createAdminDataSource();
     await owner.initialize();

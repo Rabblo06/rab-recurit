@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 
 import type { LanguageModelV3 } from '@ai-sdk/provider';
-import { INestApplication, ValidationPipe } from '@nestjs/common';
+import { INestApplication } from '@nestjs/common';
 import { Test, TestingModule } from '@nestjs/testing';
 import request from 'supertest';
 import { DataSource } from 'typeorm';
@@ -19,6 +19,7 @@ import { AiRedisClientProvider } from '../../../modules/ai/services/ai-redis-cli
 import { AiTurnRunnerService } from '../../../modules/ai/services/ai-turn-runner.service';
 import { createAdminDataSource } from './admin-datasource';
 import { TestIdentity, TestIdentityFactory } from './test-identities';
+import { applyGlobalValidationPipe } from '../../../engine/utils/global-validation-pipe';
 
 /**
  * Shared harness of the AI Phase 1 integration suites (`ai-*.integration.spec.ts`): the REAL AppModule (guards, pipes,
@@ -58,8 +59,7 @@ export async function bootAiKit(opts: { testModels?: readonly AiCatalogueModel[]
     .overrideProvider(AI_LANGUAGE_MODEL_FACTORY)
     .useValue(factoryOverride)
     .compile();
-  const app = moduleRef.createNestApplication();
-  app.useGlobalPipes(new ValidationPipe({ whitelist: true, forbidNonWhitelisted: true, transform: true }));
+  const app = applyGlobalValidationPipe(moduleRef.createNestApplication());
   await app.init();
   const owner = createAdminDataSource();
   await owner.initialize();

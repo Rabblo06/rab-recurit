@@ -1,5 +1,5 @@
 import 'reflect-metadata';
-import { HttpException, INestApplication, ValidationPipe } from '@nestjs/common';
+import { HttpException, INestApplication } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
 import request from 'supertest';
 import { randomUUID } from 'node:crypto';
@@ -14,6 +14,7 @@ import { RefreshTokenService } from '../../engine/core-modules/auth/token/servic
 import { TenantContextService } from '../../engine/core-modules/tenant/tenant-context.service';
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
+import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-pipe';
 
 /**
  * Wave 1 lane A — organisation "password sign-in disabled" (CF-06 / finding D-A2). Complements
@@ -68,8 +69,7 @@ describeIfDb('wave 1 lane A — password sign-in disabled: enforcement, cross-or
 
   beforeAll(async () => {
     const moduleRef = await Test.createTestingModule({ imports: [AppModule] }).compile();
-    app = moduleRef.createNestApplication();
-    app.useGlobalPipes(new ValidationPipe({ whitelist: true, forbidNonWhitelisted: true, transform: true }));
+    app = applyGlobalValidationPipe(moduleRef.createNestApplication());
     await app.init();
     owner = createAdminDataSource();
     await owner.initialize();

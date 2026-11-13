@@ -5,6 +5,7 @@ import { DataSource } from 'typeorm';
 import { randomUUID } from 'node:crypto';
 
 import { AppModule } from '../../app.module';
+import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-pipe';
 import { PasswordHashingService } from '../../engine/core-modules/auth/services/password-hashing.service';
 import { TenantContextService } from '../../engine/core-modules/tenant/tenant-context.service';
 import { AuthContext } from '../../engine/core-modules/tenant/auth-context.interface';
@@ -80,7 +81,7 @@ const RUN = Boolean(process.env.DATABASE_URL);
 
   beforeAll(async () => {
     const moduleRef = await Test.createTestingModule({ imports: [AppModule] }).compile();
-    app = moduleRef.createNestApplication();
+    app = applyGlobalValidationPipe(moduleRef.createNestApplication());
     await app.init();
     owner = createAdminDataSource();
     await owner.initialize();

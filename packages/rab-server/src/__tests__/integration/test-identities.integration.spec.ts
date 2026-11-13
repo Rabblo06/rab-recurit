@@ -1,5 +1,5 @@
 import 'reflect-metadata';
-import { INestApplication, ValidationPipe } from '@nestjs/common';
+import { INestApplication } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
 import { UserStatus } from '@rab/shared';
 import { randomUUID } from 'node:crypto';
@@ -13,6 +13,7 @@ import { Organisation, Role, User, UserRole } from '../../modules/identity/entit
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { TestIdentityFactory, TestSetupError } from './helpers/test-identities';
 import { generateFixturePassword } from './helpers/fixture-password';
+import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-pipe';
 
 const TEST_PASSWORD = generateFixturePassword();
 
@@ -35,8 +36,7 @@ describeIfDb('shared test identity factory + application access (integration)', 
 
   beforeAll(async () => {
     const moduleRef = await Test.createTestingModule({ imports: [AppModule] }).compile();
-    app = moduleRef.createNestApplication();
-    app.useGlobalPipes(new ValidationPipe({ whitelist: true, forbidNonWhitelisted: true, transform: true }));
+    app = applyGlobalValidationPipe(moduleRef.createNestApplication());
     await app.init();
     adminDataSource = createAdminDataSource();
     await adminDataSource.initialize();

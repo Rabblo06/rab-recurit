@@ -10,7 +10,7 @@ const ORIGINAL_TRUSTED_PROXY_CIDRS = process.env.TRUSTED_PROXY_CIDRS;
 process.env.RAB_DISABLE_RATE_LIMIT = 'false';
 delete process.env.TRUSTED_PROXY_CIDRS;
 
-import { INestApplication, ValidationPipe } from '@nestjs/common';
+import { INestApplication } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
 import { randomUUID } from 'node:crypto';
 import request from 'supertest';
@@ -22,6 +22,7 @@ import { ThrottlerRedisClientProvider } from '../../engine/core-modules/throttle
 import { buildTrustProxyPredicate } from '../../engine/utils/trusted-proxy.util';
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { clearThrottleState } from './helpers/throttle-state';
+import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-pipe';
 
 const RUN = Boolean(process.env.DATABASE_URL);
 const describeIfDb = RUN ? describe : describe.skip;
@@ -37,8 +38,7 @@ describeIfDb('client IP trust — untrusted-by-default topology (Phase 11 / EDGE
     await adminDataSource.initialize();
     redis = moduleRef.get(ThrottlerRedisClientProvider);
     await clearThrottleState(redis);
-    app = moduleRef.createNestApplication();
-    app.useGlobalPipes(new ValidationPipe({ whitelist: true, forbidNonWhitelisted: true, transform: true }));
+    app = applyGlobalValidationPipe(moduleRef.createNestApplication());
     const environmentService = moduleRef.get(EnvironmentService);
     // Mirrors main.ts's bootstrap() with the SAME (empty, default) config —
     // proves the shipped default, not a test-only relaxation.

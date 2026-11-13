@@ -1,6 +1,6 @@
 import 'reflect-metadata';
 import { ManagerType } from '@rab/shared';
-import { ForbiddenException, INestApplication, NotFoundException, ValidationPipe } from '@nestjs/common';
+import { ForbiddenException, INestApplication, NotFoundException } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
 import { createHash, randomUUID } from 'node:crypto';
 import request from 'supertest';
@@ -19,6 +19,7 @@ import { WorkspaceProvisioningService } from '../../modules/manager-workspace/se
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
 import { withServerProvisioningDeferred } from '../../modules/manager-workspace/services/workspace-provisioning-test-seam';
+import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-pipe';
 
 /**
  * Phase B P8 — the owner's own request is the only provisioning path (no privileged background builder):
@@ -72,8 +73,7 @@ describeIfDb('workspace provisioning — owner-driven flow (Phase B P8)', () => 
 
   beforeAll(async () => {
     const moduleRef = await Test.createTestingModule({ imports: [AppModule] }).compile();
-    app = moduleRef.createNestApplication();
-    app.useGlobalPipes(new ValidationPipe({ whitelist: true, forbidNonWhitelisted: true, transform: true }));
+    app = applyGlobalValidationPipe(moduleRef.createNestApplication());
     await app.init();
     admin = createAdminDataSource();
     await admin.initialize();

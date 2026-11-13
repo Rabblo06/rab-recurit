@@ -1,6 +1,6 @@
 import 'reflect-metadata';
 import { ManagerType, PermissionFlag } from '@rab/shared';
-import { ForbiddenException, INestApplication, ValidationPipe } from '@nestjs/common';
+import { ForbiddenException, INestApplication } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
 import request from 'supertest';
 import { DataSource } from 'typeorm';
@@ -13,6 +13,7 @@ import { ROLE_DEFS } from '../../modules/manager/services/manager.service';
 import { VenueManagerService } from '../../modules/manager/services/venue-manager.service';
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
+import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-pipe';
 
 /**
  * Workspace-scoped Venue Manager → Venue assignment (POST /rest/v1/venue-managers/:id/venues). The normal Manager's
@@ -62,8 +63,7 @@ describeIfDb('Venue Manager venue assignment inside the Manager\'s own workspace
 
   beforeAll(async () => {
     const moduleRef = await Test.createTestingModule({ imports: [AppModule] }).compile();
-    app = moduleRef.createNestApplication();
-    app.useGlobalPipes(new ValidationPipe({ whitelist: true, forbidNonWhitelisted: true, transform: true }));
+    app = applyGlobalValidationPipe(moduleRef.createNestApplication());
     await app.init();
     owner = createAdminDataSource();
     await owner.initialize();

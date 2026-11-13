@@ -12,7 +12,7 @@ const ORIGINAL = { WORKSPACE_BASE_DOMAIN: process.env.WORKSPACE_BASE_DOMAIN, COR
 process.env.WORKSPACE_BASE_DOMAIN = 'rab.test';
 process.env.CORS_ORIGINS = 'http://localhost:5173';
 
-import { INestApplication, ValidationPipe } from '@nestjs/common';
+import { INestApplication } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
 import cookieParser from 'cookie-parser';
 import request from 'supertest';
@@ -29,6 +29,7 @@ import { HostLabelResolution, WORKSPACE_HOST_MISMATCH } from '../../engine/core-
 import { buildCorsOptionsDelegate, WorkspaceOriginTrustService } from '../../engine/core-modules/workspace-host/workspace-origin-trust.service';
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
+import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-pipe';
 
 const RUN = Boolean(process.env.DATABASE_URL);
 const describeIfDb = RUN ? describe : describe.skip;
@@ -65,8 +66,7 @@ describeIfDb('wave 3 lane H — workspace host routing, wrong-host 404, registry
       .overrideProvider(WorkspaceHostLookupService)
       .useValue(lookup)
       .compile();
-    app = moduleRef.createNestApplication();
-    app.useGlobalPipes(new ValidationPipe({ whitelist: true, forbidNonWhitelisted: true, transform: true }));
+    app = applyGlobalValidationPipe(moduleRef.createNestApplication());
     env = moduleRef.get(EnvironmentService);
     resolver = moduleRef.get(WorkspaceHostResolverService);
     const realGet = env.get.bind(env);
