@@ -50,29 +50,29 @@ describeIfDb('token cleanup: batch loop within the run cap and step isolation (X
     // sign-in attempts expired 2 hours ago with a provider email. created_at is older than expires_at (oauth CHECK).
     await admin.query(
       `INSERT INTO core.refresh_token (organisation_id, user_id, token_hash, family_id, expires_at, revoked_at, created_at, application_target, family_expires_at)
-       SELECT $1, $2, $3 || g, gen_random_uuid(), now() - interval '400 days', now() - interval '400 days', now() - interval '401 days', 'staff_app', now() - interval '400 days'
-         FROM generate_series(1, $4) g`,
+       SELECT $1::uuid, $2::uuid, $3::text || g, gen_random_uuid(), now() - interval '400 days', now() - interval '400 days', now() - interval '401 days', 'staff_app', now() - interval '400 days'
+         FROM generate_series(1, $4::integer) g`,
       [organisationId, userId, `${prefix}-rt-`, counts.refresh],
     );
     await admin.query(
       `INSERT INTO core.password_reset_token (organisation_id, user_id, token_hash, purpose, expires_at, created_at)
-       SELECT $1, $2, $3 || g, 'forgot_password', now() - interval '400 days', now() - interval '401 days'
-         FROM generate_series(1, $4) g`,
+       SELECT $1::uuid, $2::uuid, $3::text || g, 'forgot_password', now() - interval '400 days', now() - interval '401 days'
+         FROM generate_series(1, $4::integer) g`,
       [organisationId, userId, `${prefix}-prt-`, counts.reset],
     );
     await admin.query(
       `INSERT INTO core.oauth_transaction_state (provider, pkce_code_verifier, nonce, return_to_path, created_at, expires_at, provider_email)
-       SELECT 'google', 'v', $1 || g, '/', now() - interval '3 hours', now() - interval '2 hours', 'person' || g || '@example.test'
-         FROM generate_series(1, $2) g`,
+       SELECT 'google', 'v', $1::text || g, '/', now() - interval '3 hours', now() - interval '2 hours', 'person' || g || '@example.test'
+         FROM generate_series(1, $2::integer) g`,
       [`${prefix}-n-`, counts.oauth],
     );
   }
 
   async function left(prefix: string): Promise<{ refresh: number; reset: number; oauth: number }> {
     const { rows } = await admin.query<{ refresh: string; reset: string; oauth: string }>(
-      `SELECT (SELECT count(*) FROM core.refresh_token WHERE token_hash LIKE $1 || '-rt-%') AS refresh,
-              (SELECT count(*) FROM core.password_reset_token WHERE token_hash LIKE $1 || '-prt-%') AS reset,
-              (SELECT count(*) FROM core.oauth_transaction_state WHERE nonce LIKE $1 || '-n-%') AS oauth`,
+      `SELECT (SELECT count(*) FROM core.refresh_token WHERE token_hash LIKE $1::text || '-rt-%') AS refresh,
+              (SELECT count(*) FROM core.password_reset_token WHERE token_hash LIKE $1::text || '-prt-%') AS reset,
+              (SELECT count(*) FROM core.oauth_transaction_state WHERE nonce LIKE $1::text || '-n-%') AS oauth`,
       [prefix],
     );
     return { refresh: Number(rows[0]!.refresh), reset: Number(rows[0]!.reset), oauth: Number(rows[0]!.oauth) };
@@ -90,7 +90,7 @@ describeIfDb('token cleanup: batch loop within the run cap and step isolation (X
     expect(who).toMatchObject({ u: 'crewflow_owner', bypass: false, superuser: false });
 
     const slug = `tcl-${randomUUID()}`;
-    organisationId = (await admin.query<{ id: string }>(`INSERT INTO core.organisation (name, slug) VALUES ($1, $1) RETURNING id`, [slug])).rows[0]!.id;
+    organisationId = (await admin.query<{ id: string }>(`INSERT INTO core.organisation (name, slug) VALUES ($1, $2) RETURNING id`, [slug, slug])).rows[0]!.id;
     userId = (
       await admin.query<{ id: string }>(
         `INSERT INTO core."user" (organisation_id, email, first_name, last_name, status) VALUES ($1, $2, 'Token', 'Cleanup', 'active') RETURNING id`,
