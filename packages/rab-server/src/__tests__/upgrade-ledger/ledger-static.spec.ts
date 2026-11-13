@@ -130,7 +130,12 @@ describe('the upgrade logbook: static guarantees (Part B2/B3)', () => {
       const text = code(readFileSync(f, 'utf8'));
       if (!/upgrade_scope/.test(text)) continue;
       const r = rel(f);
-      if (!ALLOWED.some((a) => a.test(r)) || FORBIDDEN_KIND.test(r)) offenders.push(`${r}: names upgrade_scope outside the allow-list`);
+      // Security review L2 (B1, 04bd8b0b): the tenant binding CLEARS the scope (`set_config('rab.upgrade_scope', '', true)`),
+      // so a request transaction can never inherit one. Outside the allow-list that clearing form is the ONLY admitted mention.
+      const outside = !ALLOWED.some((a) => a.test(r)) || FORBIDDEN_KIND.test(r);
+      if (outside && /upgrade_scope/.test(text.replace(/set_config\(\s*'rab\.upgrade_scope'\s*,\s*''\s*,\s*true\s*\)/g, ''))) {
+        offenders.push(`${r}: names upgrade_scope outside the allow-list (other than clearing it)`);
+      }
       // Every set_config of the scope outside the module's single helper must carry a literal value.
       for (const m of text.matchAll(/set_config\(\s*'rab\.upgrade_scope'\s*,\s*([^,)]+)/g)) {
         if (!/^'(upgrade|status|workspace_init|)'$/.test(m[1]!.trim()) && !/^\$\d+$/.test(m[1]!.trim())) offenders.push(`${r}: set_config('rab.upgrade_scope', ${m[1]!.trim()})`);
