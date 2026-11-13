@@ -38,8 +38,8 @@ export interface FastPublishRow {
  *    `email-outbox.<id>.attempt.0` / `push-delivery.<id>.attempt.0` with the same options (the existing public
  *    `EmailQueueService.publish` / `PushQueueService.publish`), because a row created a moment ago always has
  *    `dispatch_generation = 0`. When the dispatcher later sees the row (email PENDING → QUEUED; push PENDING with no
- *    `queued_at` → stamped) it adds the same jobId again, which BullMQ deduplicates (completed jobs are kept 7 days,
- *    failed 30). The consumers' own database compare-and-set (PENDING/QUEUED/RETRY → PROCESSING with a fencing token)
+ *    `queued_at` → stamped) it adds the same jobId again, which BullMQ deduplicates while the first job is retained
+ *    (X3.4: completed 4 h / 1000, failed 7 d / 1000) or still waiting/active. The consumers' own database compare-and-set (PENDING/QUEUED/RETRY → PROCESSING with a fencing token)
  *    is the second guard: one delivery.
  *  - provider_call_started_at, DELIVERY_UNCERTAIN, the idempotency key, attempts, backoff and leases are untouched.
  *  - Redis down or slow: each publish is already bounded by the producers' fail-fast connection (`boundedPublish`, 3 s);
