@@ -93,6 +93,11 @@ async function attempt(c: Client, sql: string, params: unknown[] = []): Promise<
     return { code: (e as { code?: string }).code ?? 'unknown', rowCount: 0, rows: [] };
   }
 }
+/**
+ * A DELETE by crewflow_owner deletes nothing: refused (no privilege) or 0 rows (the owner role keeps DELETE so the FK cascade
+ * can run as the table owner, but no RLS policy admits a DELETE, so a non-owner session matches no row).
+ */
+const deletesNothing = (r: { code: string | null; rowCount: number }) => r.code !== null || r.rowCount === 0;
 const count = async (c: Client, where = '', params: unknown[] = []) => {
   const r = await attempt(c, `SELECT count(*)::int AS n FROM core.upgrade_migration ${where}`, params);
   return r.code ? r.code : (r.rows[0]!.n as number);
@@ -321,7 +326,7 @@ describeIfLedger('core.upgrade_migration: the table, the scopes and the delete p
         expect((await attempt(c, INSERT_SQL, ins(STEP(40), 'completed', 1, { initial: true, ws: A.workspace }))).code).toBe('42501');
         expect((await attempt(c, INSERT_SQL, ins(STEP(41), 'completed', 1))).code).toBe('42501');
         expect((await attempt(c, "UPDATE core.upgrade_migration SET status = 'completed', forced = true")).code).toBe('42501');
-        expect((await attempt(c, 'DELETE FROM core.upgrade_migration')).code).toBe('42501');
+        expect(deletesNothing(await attempt(c, 'DELETE FROM core.upgrade_migration'))).toBe(true);
         expect((await attempt(c, 'TRUNCATE core.upgrade_migration')).code).toBe('42501');
       }),
     );
@@ -401,7 +406,7 @@ describeIfLedger('core.upgrade_migration: the table, the scopes and the delete p
           expect((await attempt(c, INSERT_SQL, ins(STEP(63), 'completed', 1))).code).toBe('42501');
           expect((await attempt(c, INSERT_SQL, ins(STEP(63), 'completed', 1, { initial: true, ws: A.workspace }))).code).toBe('42501');
           expect((await attempt(c, "UPDATE core.upgrade_migration SET forced = true")).code).toBe('42501');
-          expect((await attempt(c, 'DELETE FROM core.upgrade_migration')).code).toBe('42501');
+          expect(deletesNothing(await attempt(c, 'DELETE FROM core.upgrade_migration'))).toBe(true);
         }),
       );
     });
@@ -420,7 +425,7 @@ describeIfLedger('core.upgrade_migration: the table, the scopes and the delete p
           // It reads its own workspace's rows only: never A's / B's, never instance rows.
           expect(await count(c, 'WHERE workspace_id <> $1 OR workspace_id IS NULL', [W.workspace])).toBe(0);
           expect((await attempt(c, "UPDATE core.upgrade_migration SET forced = true WHERE workspace_id = $1", [W.workspace])).code).toBe('42501');
-          expect((await attempt(c, 'DELETE FROM core.upgrade_migration WHERE workspace_id = $1', [W.workspace])).code).toBe('42501');
+          expect(deletesNothing(await attempt(c, 'DELETE FROM core.upgrade_migration WHERE workspace_id = $1', [W.workspace]))).toBe(true);
         }),
       );
       // workspace_init with NO organisation bound: nothing.
@@ -469,7 +474,7 @@ describeIfLedger('core.upgrade_migration: the table, the scopes and the delete p
         await setScope(c, 'upgrade');
         expect((await c.query(TAKE_LOCK_SQL)).rows[0].ok).toBe(true);
         expect((await attempt(c, "UPDATE core.upgrade_migration SET status = 'completed', forced = true WHERE workspace_id = $1", [A.workspace])).code).toBe('42501');
-        expect((await attempt(c, 'DELETE FROM core.upgrade_migration WHERE workspace_id = $1', [A.workspace])).code).toBe('42501');
+        expect(deletesNothing(await attempt(c, 'DELETE FROM core.upgrade_migration WHERE workspace_id = $1', [A.workspace]))).toBe(true);
         expect((await attempt(c, 'TRUNCATE core.upgrade_migration')).code).toBe('42501');
       }),
     );

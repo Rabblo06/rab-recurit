@@ -9,7 +9,7 @@
  *   LW-3  the scope cannot come from the API: a body carrying upgrade_scope / upgradeScope / rab.upgrade_scope is a 400
  *         (forbidNonWhitelisted) and changes nothing; a header of the same name changes nothing either.
  *   LW-4  deleting the workspace removes its ledger row (the FK cascade).
- *   LH-1  /healthz: `upgrade.upgradeFailed` (boolean) and `upgrade.upgrade` in ok | failed | ahead | none; never a step
+ *   LH-1  /healthz: `upgrade.upgradeFailed` (boolean) and `upgrade.upgrade` in ok | failed | behind | ahead | none | unknown; never a step
  *         name or an error message.
  *   LH-2  GET /rest/v1/admin/health/report (platform admin): `upgrade` = { appVersion, state, step, executedByVersion,
  *         attempt, forced, at }, never error_message; a failed latest attempt shows state `failed` (the admin banner);
@@ -43,6 +43,11 @@ describeIfB1('the logbook through the real application (new workspace, /healthz,
   let admin: DataSource;
   let factory: TestIdentityFactory;
   let throttlerRedis: ThrottlerRedisClientProvider;
+  let statusService: { cached: unknown } | null = null;
+  /** UpgradeStatusService keeps its answer 30 s (B1); a test that changes the logbook forgets it. */
+  const forgetStatus = () => {
+    if (statusService) statusService.cached = null;
+  };
   let platformAdmin: TestIdentity;
   let adminToken: string;
   const http = () => request(app.getHttpServer());
@@ -56,6 +61,9 @@ describeIfB1('the logbook through the real application (new workspace, /healthz,
     admin = createAdminDataSource();
     await admin.initialize();
     throttlerRedis = moduleRef.get(ThrottlerRedisClientProvider);
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { UpgradeStatusService } = require('../../engine/core-modules/upgrade/upgrade-status.service');
+    statusService = moduleRef.get(UpgradeStatusService, { strict: false }) as { cached: unknown };
     factory = new TestIdentityFactory({
       app,
       dataSource: moduleRef.get(DataSource),
@@ -140,7 +148,9 @@ describeIfB1('the logbook through the real application (new workspace, /healthz,
     expect(res.status).toBe(200);
     const upgrade = res.body?.info?.upgrade ?? res.body?.details?.upgrade;
     expect(typeof upgrade?.upgradeFailed).toBe('boolean');
-    expect(['ok', 'failed', 'ahead', 'none']).toContain(upgrade?.upgrade);
+    expect(['ok', 'failed', 'behind', 'ahead', 'none', 'unknown']).toContain(upgrade?.upgrade);
+    // A fresh owner-login install at the code's version: the logbook says ok.
+    expect(upgrade?.upgrade).toBe('ok');
     expect(JSON.stringify(res.body)).not.toMatch(/TypeOrmMigrations|_[0-9]{13}|error_message|errorMessage/);
   });
 
@@ -161,12 +171,21 @@ describeIfB1('the logbook through the real application (new workspace, /healthz,
     );
     try {
       await throttlerRedis.client.del(ADMIN_HEALTH_CACHE_KEY);
+      forgetStatus();
       res = await http().get('/rest/v1/admin/health/report').set('Authorization', `Bearer ${adminToken}`);
       expect(res.body.upgrade).toMatchObject({ state: 'failed', step: last, attempt: next });
       expect(JSON.stringify(res.body)).not.toMatch(/planted/);
+      // /healthz follows the logbook too: upgradeFailed true, upgrade "failed", still 200, still no name or message.
+      forgetStatus();
+      const hz = await http().get('/healthz');
+      expect(hz.status).toBe(200);
+      const up = hz.body?.info?.upgrade ?? hz.body?.details?.upgrade;
+      expect({ upgrade: up?.upgrade, upgradeFailed: up?.upgradeFailed }).toEqual({ upgrade: 'failed', upgradeFailed: true });
+      expect(JSON.stringify(hz.body)).not.toMatch(/planted|TypeOrmMigrations/);
     } finally {
       await admin.query('DELETE FROM core.upgrade_migration WHERE id = $1', [id]);
       await throttlerRedis.client.del(ADMIN_HEALTH_CACHE_KEY);
+      forgetStatus();
     }
     const nonAdmin = await ceoToken('b2-ledger-nonadmin');
     const denied = await http().get('/rest/v1/admin/health/report').set('Authorization', `Bearer ${nonAdmin.token}`);

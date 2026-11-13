@@ -431,11 +431,13 @@ async function main() {
     check(l11.psql(`SELECT count(*) FROM core.upgrade_migration WHERE workspace_id = '${ws}'`) === '0', 'the deleted workspace\'s row is gone (cascade)');
     check(l11.psql(`SELECT count(*) FROM core.upgrade_migration WHERE workspace_id = '${other}'`) === '1', 'the other workspace keeps its row');
     check(l11.psql("SELECT count(*) FROM core.upgrade_migration WHERE workspace_id IS NULL") === instance, 'instance rows untouched');
-    const denied = L.run('docker', ['exec', '-i', '-e', 'PGPASSWORD', l11.container('rab-postgres'), 'psql', '-X', '-q', '-At', 'host=127.0.0.1 sslmode=require dbname=crewflow user=crewflow_owner'], {
+    const denied = L.run('docker', ['exec', '-i', '-e', 'PGPASSWORD', l11.container('rab-postgres'), 'psql', '-X', '-At', 'host=127.0.0.1 sslmode=require dbname=crewflow user=crewflow_owner'], {
       input: "BEGIN; SELECT set_config('rab.upgrade_scope', 'upgrade', true); DELETE FROM core.upgrade_migration; ROLLBACK;",
       env: { PGPASSWORD: L.secrets.owner },
     });
-    check(denied.code !== 0 && /permission denied/i.test(denied.out), 'crewflow_owner in the upgrade scope cannot DELETE (42501)');
+    // Refused (no privilege) or DELETE 0 (no RLS policy admits a delete): either way nothing goes.
+    check((denied.code !== 0 && /permission denied/i.test(denied.out)) || (denied.code === 0 && /DELETE 0/.test(denied.out)), `crewflow_owner in the upgrade scope deletes nothing (${denied.code === 0 ? 'no row matched' : 'refused'})`);
+    check(l11.psql('SELECT count(*) FROM core.upgrade_migration WHERE workspace_id IS NULL') === instance, 'the instance rows are all still there');
   }, l11);
 
   writeResults();
