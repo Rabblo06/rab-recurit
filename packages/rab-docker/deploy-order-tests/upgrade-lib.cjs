@@ -10,14 +10,15 @@
  * DB-SETUP (docker-compose.local-db.yml retired, D3): the database is the production file's own `db` service. The
  * pass-through scenarios (an existing crewflow_owner, as every R254/R256 deployment has) add OWNER_OVERLAY, which runs the
  * shipped hand-made fallback 01-crewflow-owner.sql at the db's first start, and give the crewflow_owner URL as the compose
- * interpolation value PG_DATABASE_URL. PR #125 option 2 (owner decision 2026-11-13): PG_DATABASE_URL is the ONE database
- * setting (an admin URL, an existing crewflow_owner URL, or unset = the bundled db) and is interpolated into the one-shot
- * db-setup ONLY; rab-api / rab-worker pin `PG_DATABASE_URL: ""` and always build the crewflow_owner URL from db-setup's
- * target file + HKDF(APP_SECRET). A crewflow_owner URL therefore gets the DERIVED password on the first NEW db-setup (step
- * b), after which the hand-made password no longer logs in: Project.ownerPasswordNow() finds the password that works, and
- * a deploy of an image older than DB-SETUP (a rollback) is given the crewflow_owner URL with THAT password (DB-SETUP-PLAN
- * §7.2). Such an image has no worker-start.sh: its deploys add PREV_OVERLAY, the previous release's own start-up, which
- * also gives its rab-api / rab-worker the PG_DATABASE_URL interpolation value back, as that release's compose files did.
+ * interpolation value PG_DATABASE_URL. PR #125, the Twenty Helm way (OWNER-DB-FINAL.md Part A, 2026-11-13):
+ * PG_DATABASE_URL is the ONE database setting (an admin URL, an existing crewflow_owner URL, or unset = the bundled db) and
+ * is interpolated into the one-shot db-setup ONLY. db-setup keeps crewflow_owner's password in a file on its setup volume
+ * (OWNER_PASSWORD_FILE, 0400 1000:1000; random for the bundled db / an admin URL, the URL's own password for a crewflow_owner
+ * URL, which is never changed); rab-api / rab-worker pin `PG_DATABASE_URL: ""` and build the crewflow_owner URL from the
+ * credential-free target file + that password file, both mounted read-only. Project.readPasswordFile() reads it into
+ * memory only (registered for redaction, never printed); Project.ownerPasswordNow() finds the password that logs in. An
+ * image older than DB-SETUP has no worker-start.sh: its deploys add PREV_OVERLAY, the previous release's own start-up,
+ * which also gives its rab-api / rab-worker the PG_DATABASE_URL interpolation value back, as that release's compose files did.
  *
  * (run-deploy-order-tests.cjs, the PR #90 T1-T4 driver, keeps its own copy of the same helpers.)
  */
@@ -36,8 +37,14 @@ const DB_SERVICE = 'db';
 const MIGRATION_LOCK_KEY_SQL = "x'637265776d696772'::bigint";
 /** application_name of the test's own psql sessions, so the admin-connection audit can tell them apart. */
 const TEST_APP_NAME = 'dot-test';
-/** DB-SETUP's derivation (owner-credential.ts): hex(HKDF-SHA256(APP_SECRET, salt = empty, info, 32)). */
-const OWNER_PASSWORD_HKDF_INFO = 'crewflow-owner-db-password-v1';
+/**
+ * The setup volume (crewflow-db-target): db-setup writes the credential-free target and crewflow_owner's password file
+ * there; rab-api / rab-worker mount it read-only. DOT_OWNER_PASSWORD_FILE overrides the file's path (interface of the
+ * CODE agent's owner-password-file.ts).
+ */
+const TARGET_DIR = '/run/crewflow/db-target';
+const TARGET_FILE = `${TARGET_DIR}/target.json`;
+const OWNER_PASSWORD_FILE = process.env.DOT_OWNER_PASSWORD_FILE || `${TARGET_DIR}/crewflow-owner-password`;
 
 const secrets = {};
 const hex = (n) => crypto.randomBytes(n).toString('hex');
@@ -50,19 +57,16 @@ function newSecrets() {
   return secrets;
 }
 
-/** Derived crewflow_owner passwords seen in this run: redacted like every secret, kept apart from `secrets`. */
-const derivedValues = new Set();
-
-/** The crewflow_owner password DB-SETUP derives from an APP_SECRET (never printed; registered for redaction). */
-function derivedOwnerPassword(appSecret) {
-  const v = Buffer.from(crypto.hkdfSync('sha256', Buffer.from(appSecret, 'utf8'), Buffer.alloc(0), OWNER_PASSWORD_HKDF_INFO, 32)).toString('hex');
-  derivedValues.add(v);
+/** Secrets the containers made (crewflow_owner passwords read from the password file): redacted like every secret. */
+const runtimeSecrets = new Set();
+function rememberSecret(v) {
+  if (v && v.length >= 8) runtimeSecrets.add(v);
   return v;
 }
 
 function redact(text) {
   let s = String(text ?? '');
-  for (const v of [...Object.values(secrets), ...derivedValues]) if (v && v.length >= 8) s = s.split(v).join('<redacted>');
+  for (const v of [...Object.values(secrets), ...runtimeSecrets]) if (v && v.length >= 8) s = s.split(v).join('<redacted>');
   return s.replace(/postgres(ql)?:\/\/[^\s'"]+/g, 'postgres://<redacted>').replace(/rediss?:\/\/[^\s'"]+/g, 'redis://<redacted>');
 }
 
@@ -213,13 +217,37 @@ class Project {
     }
   }
   /**
-   * The crewflow_owner password that logs in NOW (option 2: a NEW db-setup gives a hand-made crewflow_owner the password
-   * derived from APP_SECRET). Tried in order: the one the test last set, the derived one, the hand-made one. With the db
-   * not running (a fresh deploy): the one the test last set, else the hand-made one. Never printed.
+   * crewflow_owner's password file on the setup volume, as rab-api sees it (uid 1000, read-only mount): `null` when it is
+   * not there, else { password, mode: '<octal> <uid>:<gid>' }. Read in memory only: the value is registered for redaction
+   * and never written or printed. Uses the running rab-api when there is one, else a one-off rab-api container (no deps).
+   */
+  readPasswordFile() {
+    const script = `f=${OWNER_PASSWORD_FILE}; [ -f "$f" ] || { echo ABSENT; exit 0; }; stat -c '%a %u:%g' "$f"; cat "$f"`;
+    const running = this.inspect('rab-api', '{{.State.Running}}') === 'true';
+    const r = running
+      ? run('docker', ['exec', this.container('rab-api'), 'sh', '-c', script], { timeout: 60_000 })
+      : this.compose(['run', '--rm', '--no-deps', '-T', '--entrypoint', 'sh', 'rab-api', '-c', script], { timeout: 180_000 });
+    if (r.code !== 0) throw new Error(`reading the password file failed (${r.code}): ${redact(r.out).slice(0, 300)}`);
+    const lines = r.stdout.split('\n');
+    if (lines[0].trim() === 'ABSENT') return null;
+    const mode = lines[0].trim();
+    const password = rememberSecret(lines.slice(1).join('\n').replace(/\n$/, ''));
+    return { password, mode };
+  }
+  /**
+   * The crewflow_owner password that logs in NOW. Tried in order: the one the test last set, the password file's, the
+   * hand-made one (01-crewflow-owner.sql). With the db not running: the one the test last set, else the hand-made one.
    */
   ownerPasswordNow() {
     if (this.inspect(DB_SERVICE, '{{.State.Running}}') !== 'true') return this.ownerPassword ?? secrets.owner;
-    const candidates = [...new Set([this.ownerPassword, derivedOwnerPassword(this.appSecret ?? secrets.appSecret), secrets.owner].filter(Boolean))];
+    let filePw = null;
+    try {
+      const f = this.readPasswordFile();
+      filePw = f && f.password;
+    } catch {
+      filePw = null;
+    }
+    const candidates = [...new Set([this.ownerPassword, filePw, secrets.owner].filter(Boolean))];
     for (const c of candidates) if (this.ownerLoginWorks(c)) return c;
     return this.ownerPassword ?? secrets.owner;
   }
@@ -320,8 +348,8 @@ function writeSecrets(dir, { expectedDatabase, appSecret = secrets.appSecret, ca
 }
 
 /** A URL of the bundled db for `user` (verify-full). Built here only, so no caller spells a credential into a URL literal. */
-function dbUrl(user, password) {
-  return `postgresql://${user}:${encodeURIComponent(password)}@db:5432/crewflow?sslmode=verify-full`;
+function dbUrl(user, password, database = 'crewflow') {
+  return `postgresql://${user}:${encodeURIComponent(password)}@db:5432/${database}?sslmode=verify-full`;
 }
 
 /** The pass-through URL: the hand-made crewflow_owner at the bundled db, verify-full (as every R254/R256 deployment has). */
@@ -423,9 +451,12 @@ module.exports = {
   SEEDED_TABLES,
   TEST_APP_NAME,
   b64,
+  OWNER_PASSWORD_FILE,
+  TARGET_DIR,
+  TARGET_FILE,
   compareFacts,
   dbUrl,
-  derivedOwnerPassword,
+  rememberSecret,
   facts,
   fmtEvents,
   hex,

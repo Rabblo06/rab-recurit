@@ -7,9 +7,9 @@
  * The production file UNCHANGED (docker-compose.image.yml, with its bundled `db` service since DB-SETUP) plus the test-only
  * overlays deploy-order-tests/docker-compose.deploy-order.yml (infrastructure) and docker-compose.deploy-order-owner.yml (the
  * db's first start runs the shipped 01-crewflow-owner.sql: the hand-made crewflow_owner of an R254/R256 deployment, whose
- * URL compose.env holds as PG_DATABASE_URL: the DB-SETUP pass-through path, D5; PR #125 option 2: only db-setup reads it
- * and gives crewflow_owner the password derived from APP_SECRET on NEW's first start, so T3's rollback is given the
- * crewflow_owner URL with that password, DB-SETUP-PLAN §7.2), deployed with
+ * URL compose.env holds as PG_DATABASE_URL: the DB-SETUP pass-through path, D5; PR #125 the Twenty Helm way: only db-setup
+ * reads it, checks it read-only and copies its password into the setup volume's password file; the password is never
+ * changed, so T3's rollback uses the same crewflow_owner URL), deployed with
  * THE documented command, exactly:
  *
  *   docker compose pull && docker compose up -d
@@ -93,7 +93,7 @@ let peak = { count: 0, at: '', names: [] };
 const hex = (n) => crypto.randomBytes(n).toString('hex');
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-/** upgrade-lib's redaction: every per-run secret AND every derived crewflow_owner password (option 2), plus URLs. */
+/** upgrade-lib's redaction: every per-run secret AND every crewflow_owner password read from the password file, plus URLs. */
 function redact(text) {
   return L.redact(text);
 }
@@ -201,7 +201,7 @@ class Project {
       .map((e) => ({ t: BigInt(e.timeNano), action: e.Action, service: e.Actor?.Attributes?.['com.docker.compose.service'], id: String(e.Actor?.ID ?? e.id ?? '').slice(0, 12), image: e.Actor?.Attributes?.image }))
       .sort((a, b) => (a.t < b.t ? -1 : a.t > b.t ? 1 : 0));
   }
-  /** psql as crewflow_owner over TLS / the password that logs in now: upgrade-lib's (PR #125 option 2 rotation). */
+  /** psql as crewflow_owner over TLS / the password that logs in now / the password file: upgrade-lib's. */
   psqlOwner(sql, password) {
     return L.Project.prototype.psqlOwner.call(this, sql, password ?? this.ownerPasswordNow());
   }
@@ -210,6 +210,9 @@ class Project {
   }
   ownerPasswordNow() {
     return L.Project.prototype.ownerPasswordNow.call(this);
+  }
+  readPasswordFile() {
+    return L.Project.prototype.readPasswordFile.call(this);
   }
   down() {
     // This run's own disposable project only: its containers, networks and its OWN named volumes (the bundled db's).
@@ -258,15 +261,13 @@ function writeSecrets(dir, opts = {}) {
 }
 /**
  * compose.env with the pass-through crewflow_owner URL; a pre-DB-SETUP PREV digest also gets its own start-up (prev overlay).
- * PR #125 option 2: the NEW image's db-setup gives the hand-made crewflow_owner the password derived from APP_SECRET, so a
- * rollback to PREV (T3) is given the crewflow_owner URL with the password that logs in NOW (DB-SETUP-PLAN §7.2); the NEW
- * deploys keep the hand-made URL in compose.env (the operator's unchanged file: db-setup's step a then logs in with the
- * derived password and the URL's own password is no longer used).
+ * PR #125 (the Twenty Helm way): the NEW image's db-setup uses that URL unchanged (read-only checks, its password copied into
+ * the setup volume's password file), so the same URL serves NEW and a rollback to PREV.
  */
-function writeComposeEnv(project, digest, urlOverride = null) {
+function writeComposeEnv(project, digest) {
   const prev = PREV_PRE_DB_SETUP && digest === PREV;
   project.files = [...project.baseFiles, ...(prev ? [PREV_OVERLAY] : [])];
-  const databaseUrl = urlOverride ?? (prev ? L.ownerUrl(project.ownerPasswordNow()) : L.ownerUrl());
+  const databaseUrl = prev ? L.ownerUrl(project.ownerPasswordNow()) : L.ownerUrl();
   L.writeComposeEnv(project, { repository: REPO, digest, pgImage: process.env.DOT_PG_IMAGE, redisImage: process.env.DOT_REDIS_IMAGE, databaseUrl });
 }
 
@@ -393,13 +394,14 @@ async function main() {
       check(after[s].image === imageRef(NEW), `${s} runs the NEW digest ${after[s].image}`);
     }
     state.t2order = redeployOrder(check, evs, before, after);
-    // PR #125 option 2: compose.env still holds the hand-made crewflow_owner URL; db-setup (its only reader) gives
-    // crewflow_owner the password derived from APP_SECRET once (step b), and the apps build their URL from the target file.
+    // PR #125 (the Twenty Helm way): compose.env holds the hand-made crewflow_owner URL; db-setup (its only reader) checks it
+    // read-only and copies its password into the setup volume's password file; the apps build their URL from the target
+    // file + that password file. The password is never changed.
     const sl = main.logs('db-setup');
     evidence('T2-db-setup.log', sl);
-    check(/\[owner-bootstrap\] crewflow_owner is ready \(pass-through, its own password set to the derived one\)\./.test(sl) && main.inspect('db-setup', '{{.State.ExitCode}}') === '0', 'db-setup took the pass-through step b once: crewflow_owner now has the password derived from APP_SECRET (exit 0)');
-    const derived = L.derivedOwnerPassword(secrets.appSecret);
-    check(main.ownerLoginWorks(derived) && !main.ownerLoginWorks(secrets.owner), 'the derived password logs in; the hand-made one no longer does (a rollback needs the derived URL, DB-SETUP-PLAN §7.2)');
+    check(main.inspect('db-setup', '{{.State.ExitCode}}') === '0' && /\[owner-bootstrap\] crewflow_owner is ready/.test(sl), 'db-setup used the crewflow_owner URL and exited 0');
+    const pf = main.readPasswordFile();
+    check(pf && pf.password === secrets.owner && main.ownerLoginWorks(secrets.owner), 'the password file holds the URL\'s own (hand-made) password, which still logs in: nothing changed for a rollback');
     const ledger = main.psql('SELECT count(*) FROM core.migrations');
     n(`ledger: ${state.prevLedger} -> ${ledger} migrations (the new API migrated on start)`);
     check(Number(ledger) > Number(state.prevLedger), 'the new API applied the new release\'s migrations on start');
@@ -426,22 +428,8 @@ async function main() {
   // ------------------------------------------------------------------------------------------------------------ T3
   await step('T3', 'rollback to the previous digest with the same command: both go back together; the old API warns the schema is AHEAD and serves', async (check, n) => {
     const before = appState(main);
-    // The documented rollback command (OWNER-LOGIN-DEPLOYMENT.md, DB-SETUP-PLAN §7.2) prints the derived crewflow_owner
-    // URL from db-setup's target file and APP_SECRET, with THIS release's compose files, before they are switched. Its
-    // output (SENSITIVE: kept in memory only, never written or printed) becomes the rollback's compose.env URL.
-    const dr = main.compose(['run', '--rm', '--no-deps', '-T', '-e', 'CREWFLOW_DB_TARGET_FILE=/run/crewflow/db-target/target.json', '--entrypoint', '/sbin/tini', 'rab-api', '-s', '--', 'sh', '-c', 'node packages/rab-server/dist/database/typeorm/scripts/owner-login/derive-runtime-url.js 4>&1 1>&2'], { timeout: 180_000 });
-    const printed = dr.stdout.trim();
-    let documentedUrl = null;
-    try {
-      const u = new URL(printed);
-      if (/^postgres(ql)?:$/.test(u.protocol) && decodeURIComponent(u.username) === 'crewflow_owner' && decodeURIComponent(u.password) === L.derivedOwnerPassword(secrets.appSecret)) documentedUrl = printed;
-    } catch {
-      documentedUrl = null;
-    }
-    evidence('T3-documented-derive.log', `exit ${dr.code}; stdout lines ${printed ? printed.split('\n').length : 0}; other output:\n${redact(dr.out.replace(printed, '<the printed URL>'))}`);
-    check(dr.code === 0 && documentedUrl !== null && printed.split('\n').length === 1, `the documented rollback derive command (-e CREWFLOW_DB_TARGET_FILE=...) exits ${dr.code} and prints exactly one crewflow_owner URL whose password is the derived one (value not shown)`);
-    writeComposeEnv(main, PREV, documentedUrl);
-    n(`the rollback compose.env holds ${documentedUrl ? 'the URL the documented derive command printed' : 'the crewflow_owner URL with the password that logs in now (the documented command failed)'} (the derived password after T2: option 2)`);
+    writeComposeEnv(main, PREV);
+    n('the rollback compose.env holds the same crewflow_owner URL (its password was never changed: the Twenty Helm way)');
     const since = nowS() - 1;
     const d = main.deploy();
     evidence('T3-deploy.log', d.out);
