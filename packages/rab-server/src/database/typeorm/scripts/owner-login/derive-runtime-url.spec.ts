@@ -1,5 +1,11 @@
 import { spawnSync } from 'node:child_process';
+import * as fs from 'node:fs';
+import * as os from 'node:os';
 import * as path from 'node:path';
+
+import { type DbTarget } from '../../../owner-login/db-target';
+import { writeDbTargetFile } from '../../../owner-login/db-target-file';
+import { parsePgUrl } from '../../../postgres/pg-url-policy';
 
 import {
   buildRuntimeDatabaseUrl,
@@ -262,4 +268,157 @@ describe('derive-runtime-url as a process', () => {
       `derive-runtime-url: ${OWNER_CREDENTIAL_MESSAGES.appSecretMissing}\n`,
     );
   }, 90_000);
+});
+
+/** Option A (PR #125): the apps derive the crewflow_owner URL from the credential-free target file + HKDF(APP_SECRET). */
+describe('derive-runtime-url from CREWFLOW_DB_TARGET_FILE', () => {
+  const TARGET: DbTarget = {
+    v: 1,
+    host: 'db',
+    port: 5432,
+    database: 'crewflow',
+    params: { sslmode: 'verify-full' },
+  };
+  let dir: string;
+  let file: string;
+  beforeEach(() => {
+    dir = fs.mkdtempSync(path.join(os.tmpdir(), 'derive-target-spec-'));
+    file = path.join(dir, 'target.json');
+  });
+  afterEach(() => fs.rmSync(dir, { recursive: true, force: true }));
+
+  it('ready: writes the crewflow_owner URL for the target and the derived password, exit 0', () => {
+    writeDbTargetFile(file, TARGET);
+    const c = capture();
+    expect(
+      runDeriveRuntimeUrl(
+        { CREWFLOW_DB_TARGET_FILE: file, APP_SECRET },
+        c.io,
+      ),
+    ).toBe(DERIVE_EXIT.ok);
+    expect(c.written).toHaveLength(1);
+    const built = parsePgUrl(c.written[0] as string, 'built');
+    const direct = parsePgUrl(buildRuntimeDatabaseUrl(ADMIN_URL, DERIVED), 'direct');
+    expect(built.canonicalKey).toBe(direct.canonicalKey);
+    expect(built.password === DERIVED).toBe(true);
+    expect(built.sslmode).toBe('verify-full');
+    expect(c.out).toEqual([DERIVE_MESSAGES.fromTarget]);
+    expect(noSecret([...c.out, ...c.err])).toBe(true);
+  });
+
+  it('missing or empty file: exit 75, fixed "db target not ready", nothing written', () => {
+    for (const prepare of [() => undefined, () => fs.writeFileSync(file, ''), () => fs.writeFileSync(file, '\n')]) {
+      prepare();
+      const c = capture();
+      expect(
+        runDeriveRuntimeUrl(
+          { CREWFLOW_DB_TARGET_FILE: file, APP_SECRET },
+          c.io,
+        ),
+      ).toBe(DERIVE_EXIT.notReady);
+      expect(DERIVE_EXIT.notReady).toBe(75);
+      expect(c.err).toEqual([DERIVE_MESSAGES.targetNotReady]);
+      expect(c.written).toEqual([]);
+    }
+  });
+
+  it('malformed file (unknown key, unknown param, not JSON, refused by the URL policy): exit 64, nothing written', () => {
+    for (const text of [
+      JSON.stringify({ ...TARGET, user: 'postgres' }),
+      JSON.stringify({ ...TARGET, params: { sslrootcert: '/etc/x' } }),
+      '{not json',
+      `${JSON.stringify({ ...TARGET, params: { sslmode: 'bogus' } })}\n`,
+    ]) {
+      fs.writeFileSync(file, text);
+      const c = capture();
+      expect(
+        runDeriveRuntimeUrl(
+          { CREWFLOW_DB_TARGET_FILE: file, APP_SECRET },
+          c.io,
+        ),
+      ).toBe(DERIVE_EXIT.refused);
+      expect(c.written).toEqual([]);
+      expect(c.err).toHaveLength(1);
+      expect(c.err[0]).not.toContain('/etc/x');
+      expect(c.err[0]).not.toContain('bogus');
+    }
+  });
+
+  it('target file AND a non-owner PG_DATABASE_URL: exit 64 (the apps never hold the admin URL), nothing written', () => {
+    writeDbTargetFile(file, TARGET);
+    for (const url of [ADMIN_URL, 'not a url']) {
+      const c = capture();
+      expect(
+        runDeriveRuntimeUrl(
+          { CREWFLOW_DB_TARGET_FILE: file, PG_DATABASE_URL: url, APP_SECRET },
+          c.io,
+        ),
+      ).toBe(DERIVE_EXIT.refused);
+      expect(c.err).toEqual([DERIVE_MESSAGES.targetWithAdminUrl]);
+      expect(c.written).toEqual([]);
+      expect(noSecret(c.err)).toBe(true);
+    }
+  });
+
+  it('target file AND a crewflow_owner PG_DATABASE_URL: the unchanged pass-through', () => {
+    const c = capture();
+    expect(
+      runDeriveRuntimeUrl(
+        { CREWFLOW_DB_TARGET_FILE: file, PG_DATABASE_URL: OWNER_URL },
+        c.io,
+      ),
+    ).toBe(DERIVE_EXIT.ok);
+    expect(c.written).toEqual([OWNER_URL]);
+    expect(c.out).toEqual([DERIVE_MESSAGES.passThrough]);
+  });
+
+  it('ready target but a missing APP_SECRET: exit 64 with the credential message', () => {
+    writeDbTargetFile(file, TARGET);
+    const c = capture();
+    expect(
+      runDeriveRuntimeUrl({ CREWFLOW_DB_TARGET_FILE: file }, c.io),
+    ).toBe(DERIVE_EXIT.refused);
+    expect(c.err).toEqual([
+      `derive-runtime-url: ${OWNER_CREDENTIAL_MESSAGES.appSecretMissing}`,
+    ]);
+  });
+
+  it('a relative CREWFLOW_DB_TARGET_FILE is refused (64)', () => {
+    const c = capture();
+    expect(
+      runDeriveRuntimeUrl(
+        { CREWFLOW_DB_TARGET_FILE: 'relative/target.json', APP_SECRET },
+        c.io,
+      ),
+    ).toBe(DERIVE_EXIT.refused);
+  });
+
+  it('as a process: the URL on fd 4 (exit 0); exit 75 while the file is missing', () => {
+    const SCRIPT = path.join(__dirname, 'derive-runtime-url.ts');
+    const TSCONFIG = path.resolve(__dirname, '../../../../../tsconfig.app.json');
+    const run = () =>
+      spawnSync(process.execPath, ['-r', 'ts-node/register/transpile-only', SCRIPT], {
+        env: {
+          PATH: process.env.PATH ?? '',
+          SYSTEMROOT: process.env.SYSTEMROOT ?? '',
+          TS_NODE_PROJECT: TSCONFIG,
+          CREWFLOW_DB_TARGET_FILE: file,
+          APP_SECRET,
+        },
+        stdio: ['ignore', 'pipe', 'pipe', 'ignore', 'pipe'],
+        encoding: 'utf8',
+        timeout: 60_000,
+      });
+    const missing = run();
+    expect(missing.status).toBe(75);
+    expect(missing.stderr).toBe(`${DERIVE_MESSAGES.targetNotReady}\n`);
+    expect((missing.output[4] as string | null) ?? '').toBe('');
+    writeDbTargetFile(file, TARGET);
+    const ready = run();
+    expect(ready.status).toBe(0);
+    const built = parsePgUrl((ready.output[4] as string | null) ?? '', 'fd4');
+    expect(built.user).toBe('crewflow_owner');
+    expect(built.password === DERIVED).toBe(true);
+    expect(noSecret([ready.stdout, ready.stderr])).toBe(true);
+  }, 120_000);
 });

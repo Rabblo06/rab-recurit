@@ -440,3 +440,54 @@ describe('owner bootstrap: statements and the advisory key', () => {
     expect(found).not.toContain(key);
   });
 });
+
+describe('owner bootstrap: option A target hooks (publish only after success, withdraw on refusal/failure)', () => {
+  const hooks = () => {
+    const calls: string[] = [];
+    return {
+      calls,
+      options: {
+        retryWindowMs: 0,
+        publishTarget: () => void calls.push('publish'),
+        withdrawTarget: () => void calls.push('withdraw'),
+      },
+    };
+  };
+
+  it('pass-through: neither publishes nor withdraws', async () => {
+    const h = hooks();
+    const result = await runOwnerBootstrap({ PG_DATABASE_URL: 'postgres://crewflow_owner:x@127.0.0.1:1/crewflow_unit' }, h.options);
+    expect(result.outcome).toBe('pass-through');
+    expect(h.calls).toEqual([]);
+  });
+
+  it('a refusal (short APP_SECRET) withdraws the stale target and never publishes', async () => {
+    const h = hooks();
+    const result = await runOwnerBootstrap({ PG_DATABASE_URL: ADMIN_URL, APP_SECRET: 'short' }, h.options);
+    expect(result.exitCode).toBe(64);
+    expect(h.calls).toEqual(['withdraw']);
+  });
+
+  it('a failure (unreachable database) withdraws and never publishes', async () => {
+    const h = hooks();
+    const result = await runOwnerBootstrap({ PG_DATABASE_URL: 'postgres://dbadmin:adminpw0123456789@127.0.0.1:1/crewflow_unit', APP_SECRET: SECRET }, h.options);
+    expect(result.exitCode).toBe(70);
+    expect(h.calls).toEqual(['withdraw']);
+  });
+
+  it('a withdraw that fails is reported with a fixed line; the exit code is unchanged', async () => {
+    const lines: string[] = [];
+    const result = await runOwnerBootstrap(
+      { PG_DATABASE_URL: ADMIN_URL, APP_SECRET: 'short' },
+      {
+        log: (l) => lines.push(l),
+        withdrawTarget: () => {
+          throw Object.assign(new Error('/run/crewflow/db-target/target.json busy'), { code: 'EBUSY' });
+        },
+      },
+    );
+    expect(result.exitCode).toBe(64);
+    expect(lines).toContain(OWNER_BOOTSTRAP_MESSAGES.targetWithdrawFailed('EBUSY'));
+    expect(lines.join('\n')).not.toContain('/run/crewflow');
+  });
+});
