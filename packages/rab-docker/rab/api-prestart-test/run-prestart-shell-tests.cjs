@@ -51,7 +51,11 @@ const admin = raw('/proc/self/environ').includes('ADMINSENTINEL') ? 'present' : 
 const admin1 = raw('/proc/1/environ').includes('ADMINSENTINEL') ? 'present' : 'absent';
 const url = require('crypto').createHash('sha256').update(process.env.PG_DATABASE_URL || '').digest('hex').slice(0, 12);
 // The bootstrap child as db-setup (the agreed interface): on success it writes CREWFLOW_DB_TARGET_FILE (no user, no password)
-// in every mode (option 2: a crewflow_owner URL too) unless /ctl/no-target exists.
+// in every mode (option 2: a crewflow_owner URL too) unless /ctl/no-target exists; the Twenty Helm model also stores the
+// crewflow_owner password file beside it unless /ctl/no-password-file exists. The stub records whether APP_SECRET reached it.
+if ('${name}' === 'bootstrap' && code === 0 && process.env.CREWFLOW_DB_TARGET_FILE && readCtl('/ctl/no-password-file', null) === null) {
+  fs.writeFileSync(require('path').join(require('path').dirname(process.env.CREWFLOW_DB_TARGET_FILE), 'owner-password'), 'stubpassword0123');
+}
 if ('${name}' === 'bootstrap' && code === 0 && process.env.CREWFLOW_DB_TARGET_FILE && readCtl('/ctl/no-target', null) === null) {
   fs.writeFileSync(process.env.CREWFLOW_DB_TARGET_FILE, JSON.stringify({ v: 1, host: 'db', port: 5432, database: 'crewflow', params: { sslmode: 'verify-full' } }) + '\\n');
 }
@@ -121,6 +125,7 @@ if (url && tf) { console.error('derive-runtime-url: REFUSED: CREWFLOW_DB_TARGET_
 if (url) fs.writeSync(4, out(url));
 else if (tf) {
   if (!fs.existsSync(tf)) { console.error('derive-runtime-url: the database target file is not there yet'); process.exit(75); }
+  if (!fs.existsSync(require('path').join(require('path').dirname(tf), 'owner-password'))) { console.error('derive-runtime-url: the crewflow_owner password file is not there yet'); process.exit(75); }
   fs.writeSync(4, out('postgres://crewflow_owner:derived0123@db:5432/crewflow?sslmode=verify-full'));
 } else { console.error('derive-runtime-url: REFUSED: no PG_DATABASE_URL and no target file'); process.exit(64); }
 process.exit(0);
@@ -152,7 +157,10 @@ function run(name, env, { ctl = {}, entry = 'api-prestart.sh', withPrestart = tr
   for (const [k, v] of Object.entries(ctl)) fs.writeFileSync(path.join(ctlDir, k), String(v));
   const tDir = targetDir ?? path.join(work, `target-${name}`);
   fs.mkdirSync(tDir, { recursive: true });
-  if (target === 'present') fs.writeFileSync(path.join(tDir, 'target.json'), '{"version":1,"mode":"bootstrap","target":"postgresql://db:5432/crewflow?sslmode=verify-full"}\n');
+  if (target === 'present') {
+    fs.writeFileSync(path.join(tDir, 'target.json'), '{"version":1,"mode":"bootstrap","target":"postgresql://db:5432/crewflow?sslmode=verify-full"}\n');
+    fs.writeFileSync(path.join(tDir, 'owner-password'), 'stubpassword0123');
+  }
   const args = ['run', '--rm', '--network', 'none', ...dockerArgs, '-w', '/app', '-v', `${START}:/app/start.sh:ro`, '-v', `${WORKER_START}:/app/worker-start.sh:ro`, '-v', `${DB_SETUP}:/app/db-setup.sh:ro`];
   args.push('-v', `${tDir}:/run/crewflow/db-target${target === 'rw' ? '' : ':ro'}`);
   if (withPrestart) args.push('-v', `${PRESTART}:/app/api-prestart.sh:ro`);
@@ -558,7 +566,8 @@ check('13h DENIAL (option 2): a one-off with a crewflow_owner URL -> refused (64
 // 14. Option 2: db-setup.sh, the one-shot service's entrypoint and the ONLY holder of PG_DATABASE_URL. It removes the old
 // target, runs the bootstrap child (with PG_DATABASE_URL and CREWFLOW_DB_TARGET_FILE), checks that the target file was
 // written, and starts nothing else. A crewflow_owner URL (pass-through) takes the same path: the child writes the target.
-const S = { NODE_ENV: 'production', APP_SECRET: 'x'.repeat(40), PG_DATABASE_URL: ADMIN_URL };
+// Twenty Helm model: db-setup never receives APP_SECRET (it is refused below, 14f).
+const S = { NODE_ENV: 'production', PG_DATABASE_URL: ADMIN_URL };
 const setupDir = (name, stale) => {
   const d = path.join(work, `setup-${name}`);
   fs.mkdirSync(d, { recursive: true });
@@ -566,17 +575,26 @@ const setupDir = (name, stale) => {
   return d;
 };
 const targetText = (d) => { try { return fs.readFileSync(path.join(d, 'target.json'), 'utf8'); } catch { return null; } };
+const passwordText = (d) => { try { return fs.readFileSync(path.join(d, 'owner-password'), 'utf8'); } catch { return null; } };
 let sd = setupDir('ok', true);
 r = run('setup-ok', S, { entry: 'db-setup.sh', target: 'rw', targetDir: sd });
 check('14a db-setup.sh: the bootstrap child runs with the admin URL and CREWFLOW_DB_TARGET_FILE; the target file is written (the stale one replaced); exit 0', r.code === 0 &&
   field(line(r.out, 'bootstrap'), 'admin') === 'present' && field(line(r.out, 'bootstrap'), 'url') === hash(ADMIN_URL) && field(line(r.out, 'bootstrap'), 'tf') === 'set' &&
   /db-setup: done \(crewflow_owner ready/.test(r.out) && /"v":1/.test(targetText(sd) ?? ''), r.out);
+check('14a2 the crewflow_owner password file is stored beside the target; APP_SECRET never reached the child', passwordText(sd) === 'stubpassword0123' && !keysOf(line(r.out, 'bootstrap'), 'self').includes('APP_SECRET'), r.out);
 check('14b db-setup.sh starts nothing else (no derive, API, Worker, migration, tini) and never prints the admin URL', !line(r.out, 'derive') && !line(r.out, 'main') && !line(r.out, 'workermain') && !line(r.out, 'twentymigrate') && !/STUB tini/.test(r.out) && !r.out.includes('ADMINSENTINEL'), r.out);
 for (const code of [64, 70, 1]) {
   sd = setupDir(`bootstrap-${code}`, true);
   r = run(`setup-bootstrap-${code}`, S, { entry: 'db-setup.sh', ctl: { bootstrap: code }, target: 'rw', targetDir: sd });
   check(`14c the bootstrap child exits ${code} -> db-setup exits ${code}; no target file is left (the stale one was removed first)`, r.code === code && targetText(sd) === null && /the database setup step (refused|failed)/.test(r.out), r.out);
 }
+sd = setupDir('keeps-password', true);
+fs.writeFileSync(path.join(sd, 'owner-password'), 'existingpassword');
+r = run('setup-keeps-password', S, { entry: 'db-setup.sh', ctl: { bootstrap: 64 }, target: 'rw', targetDir: sd });
+check('14c2 a refused setup removes the target but NEVER the crewflow_owner password file (the credential of an existing role)', r.code === 64 && targetText(sd) === null && passwordText(sd) === 'existingpassword', r.out);
+sd = setupDir('no-password-file', true);
+r = run('setup-no-password-file', S, { entry: 'db-setup.sh', ctl: { 'no-password-file': '1' }, target: 'rw', targetDir: sd });
+check('14d2 the child reports success but no password file exists -> db-setup refuses (70) and removes the target (the apps keep waiting)', r.code === 70 && targetText(sd) === null && /no crewflow_owner password file exists/.test(r.out), r.out);
 sd = setupDir('no-target', true);
 r = run('setup-no-target', S, { entry: 'db-setup.sh', ctl: { 'no-target': '1' }, target: 'rw', targetDir: sd });
 check('14d the child reports success but writes no target file -> db-setup refuses (70): rab-api would otherwise wait for nothing', r.code === 70 && targetText(sd) === null && /wrote no target file/.test(r.out), r.out);
@@ -591,6 +609,7 @@ for (const [label, env, entry, pattern] of [
   ['arguments', S, 'db-setup.sh sh', /takes no arguments/],
   ['PG_DATABASE_PASSWORD', { ...S, PG_DATABASE_PASSWORD: 'y'.repeat(64) }, 'db-setup.sh', /PG_DATABASE_PASSWORD must never reach a container/],
   ['no PG_DATABASE_URL', { ...S, PG_DATABASE_URL: '' }, 'db-setup.sh', /PG_DATABASE_URL is required/],
+  ['APP_SECRET (Twenty Helm model: never part of a database credential)', { ...S, APP_SECRET: 'y'.repeat(64) }, 'db-setup.sh', /APP_SECRET must never reach db-setup/],
 ]) {
   sd = setupDir(`refuse-${label.replace(/[^a-z]+/gi, '-')}`, false);
   r = run(`setup-refuse-${label.replace(/[^a-z]+/gi, '-')}`, env, { entry, target: 'rw', targetDir: sd });

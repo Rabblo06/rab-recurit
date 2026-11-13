@@ -229,10 +229,19 @@ function optionAProblems(services, where = '') {
     const deps = setup.depends_on ?? {};
     if (stable(Object.keys(deps)) !== stable([DB_SERVICE]) || deps[DB_SERVICE]?.condition !== 'service_healthy') out.push(`${DB_SETUP_SERVICE}: depends_on must be exactly a healthy ${DB_SERVICE}${where}`);
     if (setup.image !== services['rab-api']?.image) out.push(`${DB_SETUP_SERVICE}: image differs from rab-api's${where} (O2: one image)`);
+    // Twenty Helm model (OWNER-DB-FINAL.md Part A): APP_SECRET is never part of a database credential; db-setup never has it.
+    if (Object.prototype.hasOwnProperty.call(envOf(setup), 'APP_SECRET')) out.push(`${DB_SETUP_SERVICE}: has APP_SECRET${where} (never part of a database credential)`);
   }
   if (services['rab-api']?.depends_on?.[DB_SETUP_SERVICE]?.condition !== 'service_completed_successfully') out.push(`rab-api: does not wait for ${DB_SETUP_SERVICE} (service_completed_successfully)${where}`);
   for (const [name, svc] of Object.entries(services)) {
     if (!['rab-api', 'rab-worker', DB_SETUP_SERVICE].includes(name) && (svc.volumes ?? []).some((v) => v.source === DB_TARGET_VOLUME)) out.push(`${name}: mounts db-setup's target volume${where}`);
+    // The crewflow_owner password file lives on that volume: nothing else may be mounted at (or under) its path.
+    for (const v of svc.volumes ?? []) {
+      const t = String(v.target ?? '');
+      if ((t === DB_TARGET_DIR || t.startsWith(`${DB_TARGET_DIR}/`)) && !(v.type === 'volume' && v.source === DB_TARGET_VOLUME && ['rab-api', 'rab-worker', DB_SETUP_SERVICE].includes(name))) {
+        out.push(`${name}: mounts something at ${t}${where} (db-setup's volume holds the crewflow_owner password file)`);
+      }
+    }
     if (name !== DB_SETUP_SERVICE && Object.prototype.hasOwnProperty.call(envOf(svc), 'PG_DATABASE_URL') && !['rab-api', 'rab-worker'].includes(name)) out.push(`${name}: has PG_DATABASE_URL${where} (only db-setup; rab-api / rab-worker pin it empty)`);
   }
   return out;
@@ -368,7 +377,8 @@ function checkVariant(variant, production, variantFiles = variant) {
     const deps = (x) => Object.fromEntries(Object.entries(x.depends_on ?? {}).map(([k, v]) => [k, v.condition]));
     if (stable(deps(vset)) !== stable(deps(pset))) fail(`${DB_SETUP_SERVICE}.depends_on differs from docker-compose.production.yml`);
     const files = envFiles(DB_SETUP_SERVICE).map(baseName);
-    if (stable(files) !== stable(['database.env', 'runtime.env'])) fail(`${DB_SETUP_SERVICE}: must read database.env and runtime.env (got ${files.join(', ') || 'none'})`);
+    // Twenty Helm model: database.env ONLY (the TLS settings); never runtime.env (no APP_SECRET, no runtime secret).
+    if (stable(files) !== stable(['database.env'])) fail(`${DB_SETUP_SERVICE}: must read database.env only (got ${files.join(', ') || 'none'}; never runtime.env)`);
   }
   for (const pr of retiredOpsProblems(services)) fail(pr);
   // DB-SETUP: the bundled db is the same service in both files (never a weaker copy in one of them), never published.
@@ -576,6 +586,7 @@ function checkDeployment(merged, production, envFileKeys = {}) {
     const fromFiles = envFileKeys[DB_SETUP_SERVICE]?.names ?? [];
     if (fromFiles.includes('PG_DATABASE_URL')) fail(`${DB_SETUP_SERVICE}: PG_DATABASE_URL is set in an env file (set it in compose.env; the committed default would silently override it)`);
     if (fromFiles.includes('PG_DATABASE_PASSWORD') || Object.prototype.hasOwnProperty.call(envOf(setup), 'PG_DATABASE_PASSWORD')) fail(`${DB_SETUP_SERVICE}: PG_DATABASE_PASSWORD reaches the container (compose.env only)`);
+    if (fromFiles.includes('APP_SECRET')) fail(`${DB_SETUP_SERVICE}: APP_SECRET reaches the container from an env file (db-setup reads database.env only)`);
     for (const [k, login] of Object.entries(envFileKeys[DB_SETUP_SERVICE]?.dbUsers ?? {})) {
       if (NOT_THE_APP_LOGIN.includes(login)) fail(`${DB_SETUP_SERVICE}: ${k} logs in as "${login}" (a former separated login)`);
     }

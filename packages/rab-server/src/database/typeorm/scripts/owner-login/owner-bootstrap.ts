@@ -1,34 +1,53 @@
 /**
- * DB setup like Twenty (DB-SETUP-PLAN §3, area 2): the core of the bootstrap child. The ONLY code in Crewflow that connects
- * with the database ADMIN URL (and, option 2, with an existing crewflow_owner URL). It makes sure `crewflow_owner` exists with exactly the 01-crewflow-owner.sql attributes, the
- * derived password (HKDF of APP_SECRET, area 1) and `CONNECT, CREATE, TEMPORARY ... WITH GRANT OPTION` on the current
- * database, then exits. The entry is bootstrap-owner-login.ts; api-prestart.sh runs it before the migrate child.
+ * Database setup the Twenty Helm way (OWNER-DB-FINAL.md Part A, DB-SETUP-HELM-PLAN.md): the core of the bootstrap child,
+ * run by the one-shot db-setup service, the ONLY holder of PG_DATABASE_URL. It makes sure `crewflow_owner` exists with
+ * exactly the 01-crewflow-owner.sql attributes and `CONNECT, CREATE, TEMPORARY ... WITH GRANT OPTION` on the current
+ * database, that db-setup's password file holds its password, and publishes the credential-free target. Entry:
+ * bootstrap-owner-login.ts.
  *
- * Flow
- *   1. planDbSetup (owner-credential.ts): the derived password and runtime URL, BEFORE anything connects; a missing/short
- *      APP_SECRET, a policy-refused URL or a pooler shape refuses here (exit 64). PR #125 option 2: a URL whose login is
- *      crewflow_owner itself is NOT skipped any more (setupOwnerUrlWithIo below: step a, the derived password works -> no
- *      change; step b, crewflow_owner sets its OWN password to the derived one after every refusal passed); the target
- *      file is published in both modes. Steps 4-6 below are the admin-URL mode.
- *   2-3. The same URL resolved through the shared factory (URL policy, TLS: verify-full in production).
- *   4. Admin session (application_name crewflow-owner-bootstrap; retried for up to 60 s on connection-refused / 57P03):
- *      Q0, Q1 (session hardening), Q2 (facts). Decisions (§3.3) — a refusal is exit 64 with a fixed message.
- *   5. Q3 probe (only when the role exists): a second, short connection as crewflow_owner with the derived password.
- *      Success => the password is NOT touched (idempotent restart: the stored verifier, salt included, stays byte-identical).
- *   6. Only when something is missing: the write transaction (Q4a lock; Q2 + probe AGAIN under the lock, so the write and
- *      the reported outcome follow what a concurrent start already committed; Q4b inputs as bind parameters, Q4c DO block,
- *      Q4d re-verify), COMMIT; then the probe again (must succeed) and Q2 again (must be exact), else exit 70.
+ * Twenty's Helm chart (twentyhq/twenty@eedb0a73, packages/twenty-docker/helm/twenty/templates/):
+ *   - the `ensure-database-exists` init container alone holds the superuser secret (deployment-server.yaml:81-130) and runs
+ *     `CREATE USER … IF NOT EXISTS`, never changing an existing user's password (:99-116);
+ *   - the app user's password is random (`randAlphaNum 32`), kept in its own secret and reused on every upgrade
+ *     (secret-db-url.yaml:3-8);
+ *   - an external database gets no setup step at all (secret-db-url.yaml:24-30, _helpers.tpl:56-83);
+ *   - APP_SECRET is never part of any database credential.
  *
- * Exit codes: 0 ok (incl. pass-through), 64 refusal (configuration / rights / a privileged crewflow_owner), 70 unexpected.
+ * Modes (owner-credential.ts planDbSetup):
+ *   - BOOTSTRAP (the bundled db's superuser, or a client's admin URL — the latter a Crewflow addition, required by RLS):
+ *       password file present  -> its password; crewflow_owner created only if missing; an existing crewflow_owner must log
+ *                                 in with it (else REFUSED 64: delete the password file and start again with the admin
+ *                                 address; never an automatic reset); only a missing grant is added;
+ *       password file missing  -> a NEW crypto-random password, written to the file atomically BEFORE the transaction; then
+ *                                 crewflow_owner created, or (it exists: the file was lost) its password reset through Q4c
+ *                                 (Crewflow addition A4; Twenty would leave the app unable to log in).
+ *   - OWNER-URL (an existing crewflow_owner URL): O1 + Q2 and the read-only refusals only, on a session logged in with the
+ *     URL's own password; that password is copied into the file. Never a write to the database, never a password change.
  *
+ * Admin session: application_name crewflow-owner-bootstrap, retried for up to 60 s on connection-refused / 57P03; every
+ * connection pinned (H1: search_path=pg_catalog,pg_temp). Q0, Q1, Q2, the refusals (§3.3 + H1/N1/N2), the probe (Q3) with
+ * the stored password, and only when something is missing the write transaction (Q4a lock; facts + probe again under the
+ * lock; Q4b inputs as bind parameters; Q4c DO block, text unchanged; Q4d re-verify), COMMIT, the probe again (must succeed)
+ * and Q2 again (must be exact), else exit 70.
+ *
+ * Exit codes: 0 ok, 64 refusal (configuration / rights / a privileged crewflow_owner / a stale password file), 70 unexpected.
  * Output: fixed strings plus a SQLSTATE at most. Never a URL, a password, a verifier, a host, a database or a login name,
- * and never a driver error's message / detail / where (they can quote values). The plaintext password exists only in this
- * process's memory; the server only ever receives the SCRAM verifier (§3.6).
+ * and never a driver error's message / detail / where. The plaintext password exists only in this process's memory and in
+ * the password file; the server only ever receives the SCRAM verifier (§3.6).
  */
 import { Client } from 'pg';
 
-import { type DbTarget, DbTargetError, dbTargetFromPlan } from '../../../owner-login/db-target';
-import { type DbSetupPlan, OWNER_LOGIN, OwnerCredentialError, planDbSetup, scramSha256Verifier } from '../../../owner-login/owner-credential';
+import { type DbTarget, DbTargetError, dbTargetFromRuntimeUrl } from '../../../owner-login/db-target';
+import {
+  buildRuntimeDatabaseUrl,
+  type DbSetupPlan,
+  generateOwnerPassword,
+  OWNER_LOGIN,
+  OwnerCredentialError,
+  planDbSetup,
+  scramSha256Verifier,
+} from '../../../owner-login/owner-credential';
+import { type OwnerPasswordRead, OwnerPasswordFileError } from '../../../owner-login/owner-password-file';
 import { pgClientConfig, PgConfigError, PgDriverConfig, readPrimaryDatabaseUrl, resolvePgEnvironment, ResolvedPgEnvironment, sameTarget } from '../../../postgres';
 import {
   OWNER_BOOTSTRAP_BEGIN,
@@ -43,7 +62,6 @@ import {
   OWNER_BOOTSTRAP_Q4D_REVERIFY,
   OWNER_BOOTSTRAP_ROLLBACK,
   OWNER_SELF_O1_SESSION,
-  OWNER_SELF_O4C_DO,
   BOOTSTRAP_SESSION_STARTUP_OPTIONS,
 } from './owner-bootstrap-sql';
 
@@ -73,14 +91,15 @@ const PREHASHED_REFUSED_UNSUPPORTED = 'If this provider refuses pre-hashed passw
 
 /** Every fixed line this module can print (tests assert them exactly). */
 export const OWNER_BOOTSTRAP_MESSAGES = Object.freeze({
-  passThrough: 'PG_DATABASE_URL is the crewflow_owner login: checking it, and giving it the password derived from APP_SECRET if it does not have it yet.',
+  passThrough: 'PG_DATABASE_URL is the crewflow_owner login: checking it (read-only) and storing its password for the API and the Worker; the database is not changed.',
   ownerNotSelf: 'The PG_DATABASE_URL session is not crewflow_owner itself (session_user and current_user must both be crewflow_owner). Refusing.',
   ownerNoDbGrant:
     'crewflow_owner lacks CONNECT, CREATE, TEMPORARY WITH GRANT OPTION on this database (01-crewflow-owner.sql grants it). Grant it as the database owner, or put the database admin URL in PG_DATABASE_URL. Refusing.',
-  ownerNoPassword:
-    "crewflow_owner's password matches neither the one derived from APP_SECRET nor the one in PG_DATABASE_URL. After an APP_SECRET change, put in PG_DATABASE_URL for one start either the database admin URL, or the crewflow_owner URL the documented derive command printed with the PREVIOUS APP_SECRET. Refusing.",
-  ownerWriteRefused: (sqlstate: string) =>
-    `The database refused to change crewflow_owner's own password (SQLSTATE ${sqlstate}). ${PREHASHED_REFUSED_UNSUPPORTED} Refusing.`,
+  passwordFileStale:
+    'The stored crewflow_owner password no longer logs in (it was changed in the database). Delete the password file and start again with the admin address in PG_DATABASE_URL. Refusing.',
+  passwordFileLost: 'No crewflow_owner password file: a new random password was stored before any database change.',
+  passwordFileWriteFailed: (code: string) => `Storing the crewflow_owner password file failed (${code}); nothing was changed in the database.`,
+  passwordFileRace: 'Another db-setup stored a crewflow_owner password at the same moment; nothing was changed in the database. Start again (it will use the stored password).',
   pgTooOld: 'PostgreSQL 16 or later is required.',
   ownerOwnsDatabase:
     'crewflow_owner owns this database (directly or through a role it is a member of, e.g. rab_owner after transition-from-separated.sql). The database setup step never runs as the admin in a database the app login owns (it could plant objects the admin session would run). Put the crewflow_owner URL in PG_DATABASE_URL instead of the admin URL (db-setup then runs as crewflow_owner itself). Refusing.',
@@ -96,15 +115,16 @@ export const OWNER_BOOTSTRAP_MESSAGES = Object.freeze({
   adminCannotGrantDb:
     'The PG_DATABASE_URL login cannot grant CONNECT, CREATE, TEMPORARY on this database (it must own the database or hold those privileges WITH GRANT OPTION).',
   adminNoAdminOption:
-    "crewflow_owner's password must be reset but the PG_DATABASE_URL login has no ADMIN OPTION on it (it was created by another login). Run, as that login or a superuser: GRANT crewflow_owner TO <your admin> WITH ADMIN OPTION; or reset it by hand with 01-crewflow-owner.sql.",
+    "The crewflow_owner password file is missing, so its password must be reset, but the PG_DATABASE_URL login has no ADMIN OPTION on crewflow_owner (it was created by another login). Run, as that login or a superuser: GRANT crewflow_owner TO <your admin> WITH ADMIN OPTION; or put the crewflow_owner URL in PG_DATABASE_URL. Refusing.",
   adminCannotResetPassword:
-    "crewflow_owner's password must be reset but the PG_DATABASE_URL login cannot change another role's password (it needs CREATEROLE and ADMIN OPTION on crewflow_owner, or superuser). Or reset it by hand with 01-crewflow-owner.sql.",
+    "The crewflow_owner password file is missing, so its password must be reset, but the PG_DATABASE_URL login cannot change another role's password (it needs CREATEROLE and ADMIN OPTION on crewflow_owner, or superuser); or put the crewflow_owner URL in PG_DATABASE_URL. Refusing.",
   probeFailed: (sqlstateClass: string) =>
     `crewflow_owner could not log in for a reason other than its password (SQLSTATE class ${sqlstateClass}); check pg_hba.conf and the role. Refusing.`,
   sessionRoleOption: 'PG_DATABASE_URL carries options=-c role=...; the database setup step connects as the URL login itself. Remove it. Refusing.',
   adminAuth: (sqlstate: string) =>
     `The database refused the PG_DATABASE_URL login (SQLSTATE ${sqlstate}: wrong password, or pg_hba.conf does not allow it). Refusing.`,
-  adminNoDatabase: 'The database named in PG_DATABASE_URL does not exist (SQLSTATE 3D000). Refusing.',
+  adminNoDatabase:
+    'The database named in PG_DATABASE_URL does not exist (SQLSTATE 3D000). db-setup never creates a database: create it at your provider (the bundled db creates its own), then start again. Refusing.',
   adminTls: 'TLS to the database failed (certificate, host name, or the server has no TLS). Check sslmode in PG_DATABASE_URL and PG_SSL_CA_CERT_PATH. Refusing.',
   adminUnreachable: 'The database did not accept a connection within 60 s. Giving up (the restart policy retries).',
   adminConnectFailed: (code: string) => `Connecting with PG_DATABASE_URL failed (${code}).`,
@@ -116,7 +136,6 @@ export const OWNER_BOOTSTRAP_MESSAGES = Object.freeze({
   raceExhausted: 'crewflow_owner kept changing while this start tried to set it up. Giving up (the restart policy retries).',
   unexpected: (code: string) => `Unexpected failure (${code}). Nothing secret is printed; see the database log for the SQLSTATE.`,
   ready: (what: string) => `crewflow_owner is ready (${what}).`,
-  testAbort: (point: string) => `TEST SEAM: stopping hard ${point} (NODE_ENV=test only).`,
   targetPublished: 'The database target (host, port, database, TLS parameters; no credential) was published for the API and the Worker.',
   targetPublishFailed: (code: string) => `Publishing the database target failed (${code}); the API and the Worker keep waiting.`,
   targetWithdrawFailed: (code: string) => `Removing the previous database target failed (${code}); the API and the Worker may start on it.`,
@@ -269,20 +288,34 @@ export interface WritePlan {
 }
 
 /**
- * §3.4 + the last row of §3.3. `probe` is null when the role does not exist (nothing to probe).
- *   success                          => the password is right; never touched;
- *   28P01                            => the password must be set (needs superuser, or CREATEROLE + ADMIN OPTION);
- *   42501 while the grant is missing => CONNECT is not granted yet, so the password is unknown: set it with the grant;
- *   anything else                    => refused with the SQLSTATE class only.
+ * Where this run's crewflow_owner password comes from: `file` = db-setup's password file (the normal start); `new` = the file
+ * was missing, so a fresh random password was generated (it is stored before any database write).
  */
-export function planWrite(f: OwnerFacts, probe: ProbeResult | null): WritePlan {
+export type PasswordSource = 'file' | 'new';
+
+/**
+ * §3.4 + the last row of §3.3, the Helm way. `probe` (Q3 with this run's password) is null when the role does not exist, or
+ * when the password is `new` (nothing to probe: it cannot match yet).
+ *   role missing                              => CREATE ROLE with this run's password;
+ *   `file`, probe ok                          => the password is right; never touched (Twenty: an existing user is skipped);
+ *   `file`, 28P01                             => REFUSED (64): the stored password no longer logs in; never an automatic reset;
+ *   `file`, 42501 while the grant is missing  => CONNECT is not granted yet: add only the grant (the probe after COMMIT
+ *                                                decides; a 28P01 then is the same refusal);
+ *   `file`, anything else                     => refused with the SQLSTATE class only;
+ *   `new`, role exists                        => A4 (Crewflow addition): reset its password to the new one (needs superuser,
+ *                                                or CREATEROLE + ADMIN OPTION).
+ */
+export function planWrite(f: OwnerFacts, probe: ProbeResult | null, source: PasswordSource = 'file'): WritePlan {
   const create = !f.ownerExists;
   let needPassword = create;
   if (!create) {
-    if (!probe) throw new OwnerBootstrapFailure(OWNER_BOOTSTRAP_MESSAGES.unexpected('no probe for an existing role'));
-    if (!probe.ok) {
-      if (probe.code === '28P01' || (probe.code === '42501' && !f.oHasDbGrant)) needPassword = true;
-      else throw new OwnerBootstrapRefusal(OWNER_BOOTSTRAP_MESSAGES.probeFailed(sqlstateClass(probe.code)), probe.code);
+    if (source === 'new') needPassword = true;
+    else {
+      if (!probe) throw new OwnerBootstrapFailure(OWNER_BOOTSTRAP_MESSAGES.unexpected('no probe for an existing role'));
+      if (!probe.ok) {
+        if (probe.code === '28P01') throw new OwnerBootstrapRefusal(OWNER_BOOTSTRAP_MESSAGES.passwordFileStale, probe.code);
+        if (!(probe.code === '42501' && !f.oHasDbGrant)) throw new OwnerBootstrapRefusal(OWNER_BOOTSTRAP_MESSAGES.probeFailed(sqlstateClass(probe.code)), probe.code);
+      }
     }
     if (needPassword) {
       if (!f.adminHasAdminOption) throw new OwnerBootstrapRefusal(OWNER_BOOTSTRAP_MESSAGES.adminNoAdminOption);
@@ -366,10 +399,20 @@ export interface SqlSession {
 export interface OwnerBootstrapIo {
   /** Opens one admin session (one attempt; the runner retries). */
   openAdmin(): Promise<SqlSession>;
-  /** Q3 as crewflow_owner with the derived password; resolves to ok, or the error code. */
+  /** Q3 as crewflow_owner with this run's password; resolves to ok, or the error code. */
   probeOwner(): Promise<ProbeResult>;
-  /** A fresh SCRAM verifier of the derived password. */
+  /** A fresh SCRAM verifier of this run's password. */
   verifier(): string;
+  /** Where this run's password comes from (default `file`). */
+  passwordSource?: PasswordSource;
+  /**
+   * `new` only: stores this run's password in the password file. Called once the refusals passed and a write is needed, and
+   * always BEFORE the transaction, so a crash leaves either no database change (the next start reuses the file) or a
+   * matching role. A throw stops the run with nothing changed in the database.
+   */
+  persistPassword?(): void;
+  /** Set by attempt() once persistPassword succeeded (race retries do not store it again). */
+  passwordPersisted?: boolean;
   log(line: string): void;
   sleep(ms: number): Promise<void>;
   now(): number;
@@ -408,8 +451,9 @@ async function planFromDatabase(session: SqlSession, io: OwnerBootstrapIo, logNo
   const facts = await readFacts(session);
   const notes = decideBeforeProbe(facts);
   if (logNotes) for (const note of notes) io.log(note);
-  const probe = facts.ownerExists ? await io.probeOwner() : null;
-  return planWrite(facts, probe);
+  const source = io.passwordSource ?? 'file';
+  const probe = facts.ownerExists && source === 'file' ? await io.probeOwner() : null;
+  return planWrite(facts, probe, source);
 }
 
 const UNCHANGED: OwnerBootstrapResult = { outcome: 'unchanged', exitCode: 0, created: false, passwordSet: false, grantAdded: false, code: null };
@@ -424,6 +468,16 @@ const UNCHANGED: OwnerBootstrapResult = { outcome: 'unchanged', exitCode: 0, cre
 async function attempt(session: SqlSession, io: OwnerBootstrapIo): Promise<OwnerBootstrapResult | 'race'> {
   const preLock = await planFromDatabase(session, io, true);
   if (!preLock.write) return { ...UNCHANGED };
+  // A new password reaches the file BEFORE anything is written to the database, once per run (race retries reuse it).
+  if ((io.passwordSource ?? 'file') === 'new' && io.persistPassword && !io.passwordPersisted) {
+    try {
+      io.persistPassword();
+      io.passwordPersisted = true;
+    } catch (error) {
+      if (errorCode(error) === 'EEXIST') throw new OwnerBootstrapFailure(OWNER_BOOTSTRAP_MESSAGES.passwordFileRace, 'EEXIST');
+      throw new OwnerBootstrapFailure(OWNER_BOOTSTRAP_MESSAGES.passwordFileWriteFailed(errorCode(error)), errorCode(error));
+    }
+  }
 
   let plan: WritePlan;
   await session.query(OWNER_BOOTSTRAP_BEGIN);
@@ -449,7 +503,11 @@ async function attempt(session: SqlSession, io: OwnerBootstrapIo): Promise<Owner
   }
 
   const after = await io.probeOwner();
-  if (!after.ok) throw new OwnerBootstrapFailure(OWNER_BOOTSTRAP_MESSAGES.reverifyFailed, after.code);
+  if (!after.ok) {
+    // Only the grant was added (the stored password could not be checked before): a wrong stored password is the refusal.
+    if (after.code === '28P01' && !plan.needPassword) throw new OwnerBootstrapRefusal(OWNER_BOOTSTRAP_MESSAGES.passwordFileStale, after.code);
+    throw new OwnerBootstrapFailure(OWNER_BOOTSTRAP_MESSAGES.reverifyFailed, after.code);
+  }
   assertFactsExact(await readFacts(session));
   return {
     outcome: plan.create ? 'created' : 'updated',
@@ -461,7 +519,7 @@ async function attempt(session: SqlSession, io: OwnerBootstrapIo): Promise<Owner
   };
 }
 
-/** Steps 4-6 on an already-derived credential. Exported for the integration harness and the unit tests. */
+/** The admin / bundled mode on an already-known password. Exported for the integration harness and the unit tests. */
 export async function bootstrapOwnerWithIo(io: OwnerBootstrapIo, retryWindowMs = ADMIN_CONNECT_RETRY_WINDOW_MS): Promise<OwnerBootstrapResult> {
   let session: SqlSession | null = null;
   try {
@@ -483,28 +541,17 @@ export async function bootstrapOwnerWithIo(io: OwnerBootstrapIo, retryWindowMs =
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
-// PR #125 option 2: PG_DATABASE_URL names crewflow_owner itself.
-//   a. Log in as crewflow_owner with the DERIVED password. If that works and every refusal passes: nothing is written.
-//   b. Otherwise (28P01 only) log in with the URL's own password, run every refusal BEFORE any write, then set
-//      crewflow_owner's OWN password to the derived one (SCRAM verifier as a bind parameter, OWNER_SELF_O4C_DO) under the
-//      bootstrap advisory lock, with the bounded race retry; COMMIT; then log in again with the derived password and re-run
-//      the refusals (must pass, else 70). A stop before the COMMIT changes nothing (step b runs again next time); a stop
-//      after it leaves the derived password in place (step a succeeds next time).
-// Never: CREATE ROLE, GRANT, any attribute change, any extension, any other write.
+// The OWNER-URL mode: PG_DATABASE_URL names an existing crewflow_owner. Twenty runs no setup step for an external database
+// (secret-db-url.yaml:24-30); Crewflow keeps the read-only RLS refusals: log in with the URL's own password, pin the
+// session (Q0), O1 + Q2, refuse anything privileged. NEVER a write to the database, never a password change.
 // ---------------------------------------------------------------------------------------------------------------------
 
 export interface OwnerUrlIo {
-  /** A session as crewflow_owner with the URL's OWN password (one attempt). */
+  /** A session as crewflow_owner with the URL's own password (one attempt). */
   openUrl(): Promise<SqlSession>;
-  /** A session as crewflow_owner with the DERIVED password (one attempt). */
-  openDerived(): Promise<SqlSession>;
-  /** SELECT 1 as crewflow_owner with the derived password on a fresh connection; ok, or the error code. */
-  probeOwner(): Promise<ProbeResult>;
-  verifier(): string;
   log(line: string): void;
   sleep(ms: number): Promise<void>;
   now(): number;
-  onCommit?: (point: 'before-commit' | 'after-commit') => void;
 }
 
 export interface OwnerSessionFacts {
@@ -512,7 +559,7 @@ export interface OwnerSessionFacts {
   currentLogin: string;
 }
 
-/** The refusals of option 2, on a session that should be crewflow_owner itself. Throws OwnerBootstrapRefusal; returns notes. */
+/** The refusals of the owner-URL mode, on a session that should be crewflow_owner itself. Throws OwnerBootstrapRefusal; returns notes. */
 export function decideOwnerSelf(session: OwnerSessionFacts, f: OwnerFacts): string[] {
   const notes: string[] = [];
   if (!(f.serverVersionNum >= MIN_SERVER_VERSION_NUM)) throw new OwnerBootstrapRefusal(OWNER_BOOTSTRAP_MESSAGES.pgTooOld);
@@ -536,13 +583,6 @@ async function readOwnerSelf(session: SqlSession): Promise<{ who: OwnerSessionFa
   return { who, facts: await readFacts(session) };
 }
 
-/** Reads and refuses (no write). */
-async function checkOwnerSelf(session: SqlSession, io: Pick<OwnerUrlIo, 'log'>, logNotes: boolean): Promise<void> {
-  const { who, facts } = await readOwnerSelf(session);
-  const notes = decideOwnerSelf(who, facts);
-  if (logNotes) for (const note of notes) io.log(note);
-}
-
 async function connectWithRetry(open: () => Promise<SqlSession>, io: Pick<OwnerUrlIo, 'sleep' | 'now'>, windowMs: number): Promise<SqlSession> {
   const deadline = io.now() + windowMs;
   for (;;) {
@@ -558,111 +598,29 @@ async function connectWithRetry(open: () => Promise<SqlSession>, io: Pick<OwnerU
 
 const OWNER_URL_UNCHANGED: OwnerBootstrapResult = { outcome: 'pass-through', exitCode: 0, created: false, passwordSet: false, grantAdded: false, code: null };
 
-/** Step b, one attempt on the URL-password session (the refusals already passed once outside the lock). 'race' = re-run. */
-async function ownerSelfAttempt(session: SqlSession, io: OwnerUrlIo): Promise<OwnerBootstrapResult | 'race'> {
-  await session.query(OWNER_BOOTSTRAP_BEGIN);
-  try {
-    await session.query(OWNER_BOOTSTRAP_Q4A_LOCK);
-    // Under the lock: a concurrent db-setup may already have set the derived password.
-    const probe = await io.probeOwner();
-    if (probe.ok) {
-      await session.query(OWNER_BOOTSTRAP_ROLLBACK);
-      return { ...OWNER_URL_UNCHANGED };
-    }
-    if (probe.code !== '28P01') throw new OwnerBootstrapRefusal(OWNER_BOOTSTRAP_MESSAGES.probeFailed(sqlstateClass(probe.code)), probe.code);
-    // Every refusal again, under the lock, before the write.
-    await checkOwnerSelf(session, io, false);
-    await session.query(OWNER_BOOTSTRAP_Q4B_SET_INPUTS, [io.verifier(), 'true']);
-    await session.query(OWNER_SELF_O4C_DO);
-    const { rows } = await session.query(OWNER_BOOTSTRAP_Q4D_REVERIFY);
-    if (rows.length !== 1 || rows[0]?.ok !== true) throw new OwnerBootstrapFailure(OWNER_BOOTSTRAP_MESSAGES.reverifyFailed);
-    io.onCommit?.('before-commit');
-    await session.query(OWNER_BOOTSTRAP_COMMIT);
-  } catch (error) {
-    await session.query(OWNER_BOOTSTRAP_ROLLBACK).catch(() => undefined);
-    const classified = classifyWriteError(error);
-    if (classified === 'race') return 'race';
-    // A database refusal of the write itself (not a decision of ours): the option-2 wording.
-    if (!(error instanceof OwnerBootstrapRefusal) && classified instanceof OwnerBootstrapRefusal) {
-      throw new OwnerBootstrapRefusal(OWNER_BOOTSTRAP_MESSAGES.ownerWriteRefused(String(classified.code)), classified.code);
-    }
-    throw classified;
-  }
-  io.onCommit?.('after-commit');
-  return { outcome: 'pass-through', exitCode: 0, created: false, passwordSet: true, grantAdded: false, code: null };
-}
-
-/** Option 2, steps a and b. Exported for the unit tests. */
+/** The owner-URL mode: read-only. Q0, O1, Q2, the refusals. Exported for the unit tests. */
 export async function setupOwnerUrlWithIo(io: OwnerUrlIo, retryWindowMs = ADMIN_CONNECT_RETRY_WINDOW_MS): Promise<OwnerBootstrapResult> {
-  // Step a: the derived password. Read-only.
-  let derived: SqlSession | null = null;
-  try {
-    derived = await connectWithRetry(() => io.openDerived(), io, retryWindowMs);
-  } catch (error) {
-    const code = errorCode(error);
-    if (code !== '28P01') throw classifyAdminConnectError(error, RETRYABLE_CONNECT_CODES.has(code));
-  }
-  if (derived) {
-    try {
-      await derived.query(OWNER_BOOTSTRAP_Q0_SESSION);
-      await checkOwnerSelf(derived, io, true);
-      return { ...OWNER_URL_UNCHANGED };
-    } finally {
-      await closeQuietly(derived);
-    }
-  }
-
-  // Step b: the URL's own password. Every refusal runs before any write.
   let session: SqlSession | null = null;
   try {
     try {
       session = await connectWithRetry(() => io.openUrl(), io, retryWindowMs);
     } catch (error) {
-      const code = errorCode(error);
-      if (code === '28P01') throw new OwnerBootstrapRefusal(OWNER_BOOTSTRAP_MESSAGES.ownerNoPassword, code);
-      throw classifyAdminConnectError(error, RETRYABLE_CONNECT_CODES.has(code));
+      throw classifyAdminConnectError(error, RETRYABLE_CONNECT_CODES.has(errorCode(error)));
     }
     await session.query(OWNER_BOOTSTRAP_Q0_SESSION);
-    await checkOwnerSelf(session, io, true);
-    let result: OwnerBootstrapResult | null = null;
-    for (let i = 1; i <= MAX_ATTEMPTS && result === null; i += 1) {
-      const r = await ownerSelfAttempt(session, io);
-      if (r !== 'race') result = r;
-      else if (i < MAX_ATTEMPTS) {
-        io.log(OWNER_BOOTSTRAP_MESSAGES.raceRetry);
-        await io.sleep(200 + Math.floor(Math.random() * 500)); // jitter
-      }
-    }
-    if (result === null) throw new OwnerBootstrapFailure(OWNER_BOOTSTRAP_MESSAGES.raceExhausted);
-    await closeQuietly(session);
-    session = null;
-    // Re-verify by logging in with the derived password, and every refusal once more on that session (else 70).
-    let verify: SqlSession;
-    try {
-      verify = await io.openDerived();
-    } catch (error) {
-      throw new OwnerBootstrapFailure(OWNER_BOOTSTRAP_MESSAGES.reverifyFailed, errorCode(error));
-    }
-    try {
-      await verify.query(OWNER_BOOTSTRAP_Q0_SESSION);
-      await checkOwnerSelf(verify, io, false);
-    } catch (error) {
-      if (error instanceof OwnerBootstrapRefusal) throw new OwnerBootstrapFailure(OWNER_BOOTSTRAP_MESSAGES.reverifyFailed, error.code);
-      throw error;
-    } finally {
-      await closeQuietly(verify);
-    }
-    return result;
+    const { who, facts } = await readOwnerSelf(session);
+    for (const note of decideOwnerSelf(who, facts)) io.log(note);
+    return { ...OWNER_URL_UNCHANGED };
   } finally {
     await closeQuietly(session);
   }
 }
 
 function describeReady(result: OwnerBootstrapResult): string {
-  if (result.outcome === 'pass-through') return result.passwordSet ? 'pass-through, its own password set to the derived one' : 'pass-through, unchanged';
+  if (result.outcome === 'pass-through') return 'existing crewflow_owner URL, unchanged; its password stored';
   if (result.created) return 'created';
   const parts: string[] = [];
-  if (result.passwordSet) parts.push('password set');
+  if (result.passwordSet) parts.push('password reset because the password file was missing (Crewflow addition)');
   if (result.grantAdded) parts.push('database grant added');
   return parts.length > 0 ? parts.join(', ') : 'unchanged';
 }
@@ -687,11 +645,11 @@ function pinned(config: PgDriverConfig): PgDriverConfig {
 }
 
 /**
- * Every driver config the bootstrap child uses: the URL's own login (the admin, or crewflow_owner in option-2 step b),
- * the probe and the derived crewflow_owner session (option-2 step a and the re-verify), each pinned (H1). Exported for the
- * spec that asserts the pin is on all of them.
+ * Every driver config the bootstrap child uses: the URL's own login (the admin, or crewflow_owner in the owner-URL mode) and
+ * the crewflow_owner probe with this run's password, each pinned (H1). Exported for the spec that asserts the pin is on all
+ * of them.
  */
-export function bootstrapDriverConfigs(resolved: ResolvedPgEnvironment, runtimeUrl: string): { admin: PgDriverConfig; probe: PgDriverConfig; derived: PgDriverConfig } {
+export function bootstrapDriverConfigs(resolved: ResolvedPgEnvironment, runtimeUrl: string): { admin: PgDriverConfig; probe: PgDriverConfig } {
   const admin = pinned({
     ...pgClientConfig(resolved, {
       endpoint: 'primary',
@@ -707,7 +665,7 @@ export function bootstrapDriverConfigs(resolved: ResolvedPgEnvironment, runtimeU
   const probe = pinned({
     ...pgClientConfig(resolved, {
       url: runtimeUrl,
-      urlLabel: 'the derived crewflow_owner connection',
+      urlLabel: 'the crewflow_owner connection',
       purpose: 'owner-probe',
       sessionAffinity: true,
       statementTimeoutMs: 10_000,
@@ -716,7 +674,7 @@ export function bootstrapDriverConfigs(resolved: ResolvedPgEnvironment, runtimeU
     }),
     application_name: OWNER_PROBE_APPLICATION_NAME,
   });
-  return { admin, probe, derived: { ...probe, application_name: OWNER_BOOTSTRAP_APPLICATION_NAME } };
+  return { admin, probe };
 }
 
 /** One connected session (one attempt; the callers retry). */
@@ -734,38 +692,38 @@ async function connectSession(config: PgDriverConfig): Promise<SqlSession> {
 
 export interface RunOwnerBootstrapOptions {
   log?: (line: string) => void;
+  /** Reads db-setup's password file (owner-password-file.ts readOwnerPasswordFile on the entry's path). Required. */
+  readPasswordFile?: () => OwnerPasswordRead;
   /**
-   * Option A (PR #125): publish the credential-free database target after a SUCCESSFUL bootstrap-mode run (the entry writes
-   * CREWFLOW_DB_TARGET_FILE atomically). A throw here turns the run into a failure (exit 70) and the target is withdrawn.
-   * Never called in pass-through mode.
+   * Atomically writes db-setup's password file (owner-password-file.ts writeOwnerPasswordFile). `exclusive` for a NEW
+   * password (fails with EEXIST when another run stored one first). Required. Never logs.
+   */
+  writePasswordFile?: (password: string, exclusive: boolean) => void;
+  /**
+   * Publishes the credential-free database target after a SUCCESSFUL run (the entry writes CREWFLOW_DB_TARGET_FILE
+   * atomically). A throw turns the run into a failure (exit 70) and the target is withdrawn.
    */
   publishTarget?: (target: DbTarget) => void;
-  /** Option A: remove any stale target after a refusal or failure, so the apps keep waiting. Never called in pass-through. */
+  /** Removes any stale target after a refusal or failure, so the apps keep waiting. The password file is never removed. */
   withdrawTarget?: () => void;
   /** Test seam (integration harness): a shorter connect-retry window. */
   retryWindowMs?: number;
-  /**
-   * Test seam (option 2, the "interrupted after the ALTER" cases): called right before / right after the COMMIT of
-   * crewflow_owner's own password change. The entry wires it only with NODE_ENV=test (bootstrap-owner-login.ts).
-   */
-  onOwnerPasswordCommit?: (point: 'before-commit' | 'after-commit') => void;
 }
 
 /**
  * The whole step for one environment (the child passes process.env). Never throws: every failure becomes a result with
- * exit code 64 or 70, and the one printed line for it is fixed text.
+ * exit code 64 or 70, and the one printed line for it is fixed text. Reads ONLY PG_DATABASE_URL (and the TLS settings);
+ * APP_SECRET plays no part.
  */
 export async function runOwnerBootstrap(env: Record<string, string | undefined>, options: RunOwnerBootstrapOptions = {}): Promise<OwnerBootstrapResult> {
   const log = options.log ?? (() => undefined);
   try {
-    // Area 1's single decision (owner-credential.ts), shared with the derive step so the two can never disagree. Pure:
-    // pass-through for a crewflow_owner URL (APP_SECRET not read), else the derived password and runtime URL, refused
-    // (OwnerCredentialError, fixed text) BEFORE anything connects. Only PG_DATABASE_URL, never a legacy name.
-    // Option 2: a crewflow_owner URL is no longer skipped; it needs APP_SECRET too and gets the derived password.
+    if (!options.readPasswordFile || !options.writePasswordFile) throw new OwnerBootstrapFailure(OWNER_BOOTSTRAP_MESSAGES.unexpected('no password file I/O'));
+    // The single decision (owner-credential.ts), refused (fixed text) BEFORE anything connects. Only PG_DATABASE_URL.
     const primary = readPrimaryDatabaseUrl(env);
     let plan: DbSetupPlan;
     try {
-      plan = planDbSetup({ databaseUrl: primary?.name === 'PG_DATABASE_URL' ? primary.value : undefined, appSecret: env.APP_SECRET });
+      plan = planDbSetup(primary?.name === 'PG_DATABASE_URL' ? primary.value : undefined);
     } catch (error) {
       if (error instanceof OwnerCredentialError) throw new OwnerBootstrapRefusal(error.message);
       throw error;
@@ -775,62 +733,91 @@ export async function runOwnerBootstrap(env: Record<string, string | undefined>,
     let resolved: ResolvedPgEnvironment;
     try {
       // The migrate process role: the same URL policy and TLS as every process, and a transaction-pooler shape is refused
-      // (the bootstrap needs one real session). The runtime login check (area 4) does not apply to this step.
+      // (the bootstrap needs one real session). The runtime login check does not apply to this step.
       resolved = resolvePgEnvironment(env, { processRole: 'migrate' });
     } catch (error) {
       if (error instanceof PgConfigError) throw new OwnerBootstrapRefusal(error.message);
       throw error;
     }
     if (resolved.primary.target.sessionRoleOption) throw new OwnerBootstrapRefusal(OWNER_BOOTSTRAP_MESSAGES.sessionRoleOption);
-    if (!sameTarget(resolved.primary.target, plan.mode === 'owner-url' ? plan.urlTarget : plan.adminTarget)) throw new OwnerBootstrapFailure(OWNER_BOOTSTRAP_MESSAGES.unexpected('admin target mismatch'));
-    const ownerPassword = plan.ownerPassword;
-    // Computed BEFORE anything connects: a target that cannot be described credential-free refuses here.
+    if (!sameTarget(resolved.primary.target, plan.urlTarget)) throw new OwnerBootstrapFailure(OWNER_BOOTSTRAP_MESSAGES.unexpected('admin target mismatch'));
+
+    // This run's crewflow_owner password: the URL's own (owner-URL mode), the stored one, or a new random one (file missing).
+    let source: PasswordSource = 'file';
+    let ownerPassword: string;
+    if (plan.mode === 'owner-url') ownerPassword = plan.ownerPassword;
+    else {
+      let stored: OwnerPasswordRead;
+      try {
+        stored = options.readPasswordFile();
+      } catch (error) {
+        if (error instanceof OwnerPasswordFileError) throw new OwnerBootstrapRefusal(error.message);
+        throw error;
+      }
+      if (stored.state === 'ready') ownerPassword = stored.password;
+      else {
+        source = 'new';
+        ownerPassword = generateOwnerPassword();
+      }
+    }
+    const databaseUrl = primary?.value as string;
+    let runtimeUrl: string;
     let target: DbTarget;
     try {
-      target = dbTargetFromPlan(plan);
+      runtimeUrl = buildRuntimeDatabaseUrl(databaseUrl, ownerPassword);
+      // Computed BEFORE anything connects: a target that cannot be described credential-free refuses here.
+      target = dbTargetFromRuntimeUrl(runtimeUrl, ownerPassword);
     } catch (error) {
-      if (error instanceof DbTargetError) throw new OwnerBootstrapRefusal(error.message);
+      if (error instanceof DbTargetError || error instanceof OwnerCredentialError) throw new OwnerBootstrapRefusal(error.message);
       throw error;
     }
 
-    const { admin: adminConfig, probe: probeConfig, derived: derivedConfig } = bootstrapDriverConfigs(resolved, plan.runtimeUrl);
-
-    const io: OwnerBootstrapIo = {
-      openAdmin: () => connectSession(adminConfig),
-      async probeOwner() {
-        const client = openClient(probeConfig);
-        client.on('error', () => undefined);
+    const { admin: adminConfig, probe: probeConfig } = bootstrapDriverConfigs(resolved, runtimeUrl);
+    const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+    const now = () => Date.now();
+    const writePasswordFile = options.writePasswordFile;
+    let result: OwnerBootstrapResult;
+    if (plan.mode === 'owner-url') {
+      result = await setupOwnerUrlWithIo({ openUrl: () => connectSession(adminConfig), log, sleep, now }, options.retryWindowMs ?? ADMIN_CONNECT_RETRY_WINDOW_MS);
+      // Only after every read-only refusal passed: the URL's password becomes the stored password (the apps read it).
+      // Unchanged when the file already holds it (a restart writes nothing).
+      try {
+        let current: OwnerPasswordRead = { state: 'missing' };
         try {
-          await client.connect();
-          await client.query(OWNER_BOOTSTRAP_Q3_PROBE);
-          return { ok: true };
-        } catch (error) {
-          return { ok: false, code: isTlsError(error) ? 'TLS' : errorCode(error) };
-        } finally {
-          await client.end().catch(() => undefined);
+          current = options.readPasswordFile();
+        } catch {
+          current = { state: 'missing' }; // an unreadable / invalid file is simply replaced by the URL's password
         }
-      },
-      verifier: () => scramSha256Verifier(ownerPassword),
-      log,
-      sleep: (ms) => new Promise((r) => setTimeout(r, ms)),
-      now: () => Date.now(),
-    };
-    const result =
-      plan.mode === 'owner-url'
-        ? await setupOwnerUrlWithIo(
-            {
-              openUrl: () => connectSession(adminConfig),
-              openDerived: () => connectSession(derivedConfig),
-              probeOwner: io.probeOwner,
-              verifier: io.verifier,
-              log,
-              sleep: io.sleep,
-              now: io.now,
-              onCommit: options.onOwnerPasswordCommit,
-            },
-            options.retryWindowMs ?? ADMIN_CONNECT_RETRY_WINDOW_MS,
-          )
-        : await bootstrapOwnerWithIo(io, options.retryWindowMs ?? ADMIN_CONNECT_RETRY_WINDOW_MS);
+        if (!(current.state === 'ready' && current.password === ownerPassword)) writePasswordFile(ownerPassword, false);
+      } catch (error) {
+        throw new OwnerBootstrapFailure(OWNER_BOOTSTRAP_MESSAGES.passwordFileWriteFailed(errorCode(error)), errorCode(error));
+      }
+    } else {
+      if (source === 'new') log(OWNER_BOOTSTRAP_MESSAGES.passwordFileLost);
+      const io: OwnerBootstrapIo = {
+        openAdmin: () => connectSession(adminConfig),
+        async probeOwner() {
+          const client = openClient(probeConfig);
+          client.on('error', () => undefined);
+          try {
+            await client.connect();
+            await client.query(OWNER_BOOTSTRAP_Q3_PROBE);
+            return { ok: true };
+          } catch (error) {
+            return { ok: false, code: isTlsError(error) ? 'TLS' : errorCode(error) };
+          } finally {
+            await client.end().catch(() => undefined);
+          }
+        },
+        verifier: () => scramSha256Verifier(ownerPassword),
+        passwordSource: source,
+        persistPassword: () => writePasswordFile(ownerPassword, true),
+        log,
+        sleep,
+        now,
+      };
+      result = await bootstrapOwnerWithIo(io, options.retryWindowMs ?? ADMIN_CONNECT_RETRY_WINDOW_MS);
+    }
     if (options.publishTarget) {
       try {
         options.publishTarget(target);

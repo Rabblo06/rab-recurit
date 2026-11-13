@@ -94,6 +94,23 @@ test('option 2: db-setup alone receives the database URL: the bundled admin URL 
   assertRefused(problemsAfter(PT, (s) => { s[SETUP].environment.OTHER = gate.SENTINEL_OWNER_PW; }), /db-setup: received the database credential \(OTHER\)/);
 });
 
+test('DENIAL Twenty Helm model: db-setup never receives APP_SECRET; nothing but db-setup\'s volume is mounted at the password-file path', { skip }, () => {
+  for (const c of [REL, EXT, PT, 'staging']) {
+    assert.equal('APP_SECRET' in (fresh(c).services[SETUP].environment ?? {}), false, `${c}: db-setup has APP_SECRET`);
+    assertRefused(problemsAfter(c, (s) => { s[SETUP].environment.APP_SECRET = gate.SENTINEL_APP_SECRET; }), /db-setup: has APP_SECRET/);
+    assertRefused(problemsAfter(c, (s) => { s[SETUP].environment.OTHER = gate.SENTINEL_APP_SECRET; }), /db-setup: received a runtime secret/);
+    // A bind mount (or another volume) at / under the password-file directory, on any service: refused.
+    for (const svc of ['rab-redis', 'rab-api', SETUP]) {
+      assertRefused(problemsAfter(c, (s) => { s[svc].volumes = [...(s[svc].volumes ?? []), { type: 'bind', source: '/srv/stolen', target: '/run/crewflow/db-target/owner-password', read_only: true }]; }), new RegExp(`${svc}: mounts something at /run/crewflow/db-target/owner-password`));
+    }
+    assertRefused(problemsAfter(c, (s) => { s['rab-redis'].volumes = [...(s['rab-redis'].volumes ?? []), { type: 'volume', source: 'crewflow-db-target', target: '/run/crewflow/db-target', read_only: true }]; }), /rab-redis: (unexpected named volume|mounts something) at \/run\/crewflow\/db-target/);
+    // A variable that would carry the crewflow_owner password: refused on every service.
+    for (const svc of ['rab-api', 'rab-worker', SETUP]) {
+      assertRefused(problemsAfter(c, (s) => { s[svc].environment.CREWFLOW_OWNER_PASSWORD = 'x'; }), new RegExp(`${svc}: environment has CREWFLOW_OWNER_PASSWORD`));
+    }
+  }
+});
+
 test('DENIAL option A: db-setup must keep exactly its one-shot shape', { skip }, () => {
   for (const c of [REL, EXT, PT, 'staging']) {
     const cases = [

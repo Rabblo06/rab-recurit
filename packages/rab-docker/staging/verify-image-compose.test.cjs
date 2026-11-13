@@ -548,6 +548,10 @@ test('DENIAL DB-SETUP environment mode: PG_DATABASE_URL never from an env file, 
   assertRefused(run({ 'rab-api': ok, 'rab-worker': ok }, (v) => { for (const n of ['rab-api', 'rab-worker', 'db-setup']) v.services[n].environment.PG_DATABASE_URL = owner; }), /rab-api: PG_DATABASE_URL is not empty in the deployed model/);
   assertRefused(run({ 'rab-api': ok, 'rab-worker': ok }, (v) => { v.services['rab-api'].environment.PG_DATABASE_URL = owner; }), /PG_DATABASE_URL differs between rab-api and rab-worker/);
   assertRefused(run({ 'rab-api': ok, 'rab-worker': ok }, (v) => { delete v.services['db-setup']; }), /db-setup: missing in the deployed model/);
+  // Twenty Helm model: db-setup never has APP_SECRET (committed or from an env file); nothing but its volume at the password path.
+  assertRefused(run({ 'rab-api': ok, 'rab-worker': ok }, (v) => { v.services['db-setup'].environment.APP_SECRET = 'x'; }), /db-setup: has APP_SECRET in the deployed model/);
+  assertRefused(run({ 'rab-api': ok, 'rab-worker': ok, 'db-setup': { ...ok, names: ['APP_SECRET'] } }), /db-setup: APP_SECRET reaches the container from an env file/);
+  assertRefused(run({ 'rab-api': ok, 'rab-worker': ok }, (v) => { v.services['rab-redis'].volumes = [...(v.services['rab-redis'].volumes ?? []), { type: 'bind', source: '/x', target: '/run/crewflow/db-target/owner-password', read_only: true }]; }), /rab-redis: mounts something at \/run\/crewflow\/db-target\/owner-password in the deployed model/);
   assertRefused(run({ 'rab-api': ok, 'rab-worker': ok }, (v) => { v.services['db-setup'].restart = 'unless-stopped'; }), /db-setup: restart is not "no" in the deployed model/);
   assertRefused(run({ 'rab-api': ok, 'rab-worker': ok }, (v) => { v.services['db-setup'].read_only = false; }), /db-setup\.read_only differs from docker-compose\.production\.yml in the deployed model/);
   assertRefused(run({ 'rab-api': ok, 'rab-worker': ok }, (v) => { v.services['db-setup'].ports = [{ target: 1, published: '1', host_ip: '127.0.0.1' }]; }), /db-setup: publishes a port in the deployed model/);

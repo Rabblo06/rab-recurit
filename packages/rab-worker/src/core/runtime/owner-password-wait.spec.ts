@@ -6,7 +6,7 @@ import {
   retryWhileOwnerPasswordStale,
 } from './owner-password-wait';
 
-/** DB-SETUP §4: the Worker waits, bounded, for the API to reset crewflow_owner's password after an APP_SECRET rotation. */
+/** DB-SETUP (Twenty Helm model): the Worker waits, bounded, while db-setup stores or resets crewflow_owner's password. */
 class ExitCalled extends Error {
   constructor(readonly code: number) {
     super(`exit(${code})`);
@@ -38,7 +38,7 @@ function harness() {
 }
 const mismatch = () => Object.assign(new Error('Cannot reach the primary database (driver code 28P01). Refusing to start.'), { driverCode: '28P01' });
 
-describe('worker owner-password wait (28P01 after an APP_SECRET rotation)', () => {
+describe('worker owner-password wait (28P01 while db-setup stores the password)', () => {
   it('recognises 28P01 from the driver (code) and from the runtime guard (driverCode), nothing else', () => {
     expect(isOwnerPasswordMismatch(Object.assign(new Error('x'), { code: '28P01' }))).toBe(true);
     expect(isOwnerPasswordMismatch(mismatch())).toBe(true);
@@ -60,7 +60,7 @@ describe('worker owner-password wait (28P01 after an APP_SECRET rotation)', () =
     expect(calls).toBe(3);
     expect(h.warn).toEqual([OWNER_PASSWORD_WAIT_MESSAGE, OWNER_PASSWORD_WAIT_MESSAGE]);
     expect(OWNER_PASSWORD_WAIT_MESSAGE).toBe(
-      'crewflow_owner login refused (password not yet reset by the API after an APP_SECRET change?); retrying',
+      'crewflow_owner login refused (db-setup may still be storing the crewflow_owner password); retrying',
     );
     expect(h.exits).toEqual([]);
     expect(h.errors).toEqual([]);

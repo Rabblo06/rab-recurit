@@ -1,5 +1,5 @@
 /**
- * Option A (PR #125): the credential-free database target. Writer side (dbTargetFromPlan: no login, no password, rebuilds
+ * The credential-free database target (Twenty Helm model). Writer side (dbTargetFromRuntimeUrl: no login, no password, rebuilds
  * the same connection) and reader side (strict schema, same URL policy as the admin-URL path). Generated test values only.
  */
 import { parsePgUrl } from '../postgres/pg-url-policy';
@@ -7,22 +7,21 @@ import {
   DB_TARGET_MESSAGES,
   type DbTarget,
   DbTargetError,
-  dbTargetFromPlan,
+  dbTargetFromRuntimeUrl,
   parseDbTarget,
   runtimeUrlFromDbTarget,
   serializeDbTarget,
   validateDbTarget,
 } from './db-target';
-import { buildRuntimeDatabaseUrl, deriveOwnerPassword, type OwnerLoginPlan, planOwnerLogin } from './owner-credential';
+import { buildRuntimeDatabaseUrl, generateOwnerPassword } from './owner-credential';
 
-const APP_SECRET = 'db-target-spec-app-secret-0123456789abcdef';
 const ADMIN_PASSWORD = 'adminSentinel7f3a91';
-const DERIVED = deriveOwnerPassword(APP_SECRET);
+const DERIVED = generateOwnerPassword();
+const APP_SECRET = 'never-part-of-a-database-credential-0123';
 
-function bootstrapPlan(adminUrl: string): Extract<OwnerLoginPlan, { mode: 'bootstrap' }> {
-  const plan = planOwnerLogin({ databaseUrl: adminUrl, appSecret: APP_SECRET });
-  if (plan.mode !== 'bootstrap') throw new Error('expected bootstrap mode');
-  return plan;
+/** The target the bootstrap child publishes for this URL and the stored password. */
+function targetFor(adminUrl: string) {
+  return dbTargetFromRuntimeUrl(buildRuntimeDatabaseUrl(adminUrl, DERIVED), DERIVED);
 }
 
 function messageOf(fn: () => unknown): string {
@@ -37,10 +36,10 @@ function messageOf(fn: () => unknown): string {
 
 const good: DbTarget = { v: 1, host: 'db', port: 5432, database: 'crewflow', params: { sslmode: 'verify-full' } };
 
-describe('db target: the writer side (dbTargetFromPlan)', () => {
+describe('db target: the writer side (dbTargetFromRuntimeUrl)', () => {
   it('keeps host, port, database and the kept parameters; drops application_name; carries no credential', () => {
     const admin = `postgres://dbadmin:${ADMIN_PASSWORD}@DB.Example.internal:6543/crewflow_prod?sslmode=verify-full&channel_binding=require&application_name=psql&connect_timeout=10`;
-    const target = dbTargetFromPlan(bootstrapPlan(admin));
+    const target = targetFor(admin);
     expect(target).toEqual({
       v: 1,
       host: 'db.example.internal',
@@ -61,7 +60,7 @@ describe('db target: the writer side (dbTargetFromPlan)', () => {
       `postgresql://postgres:${ADMIN_PASSWORD}@[::1]:5433/crewflow`,
       `postgres://neondb_owner:${ADMIN_PASSWORD}@ep-cool-name-123456.eu-west-2.aws.neon.tech/neondb?sslmode=require&options=endpoint%3Dep-cool-name-123456`,
     ]) {
-      const fromTarget = parsePgUrl(runtimeUrlFromDbTarget(dbTargetFromPlan(bootstrapPlan(admin)), DERIVED), 't');
+      const fromTarget = parsePgUrl(runtimeUrlFromDbTarget(targetFor(admin), DERIVED), 't');
       const direct = parsePgUrl(buildRuntimeDatabaseUrl(admin, DERIVED), 'd');
       expect(fromTarget.canonicalKey).toBe(direct.canonicalKey);
       expect(fromTarget.password === DERIVED).toBe(true);
@@ -125,8 +124,9 @@ describe('db target: the reader side (strict)', () => {
     expect(() => runtimeUrlFromDbTarget(validateDbTarget({ ...good, host: 'ep-x-pooler.eu-west-2.aws.neon.tech' }), DERIVED)).toThrow(DbTargetError);
   });
 
-  it('refuses a wrong password shape (it must be the derived 64-hex value)', () => {
-    expect(() => runtimeUrlFromDbTarget(good, 'not-hex')).toThrow(DbTargetError);
+  it('refuses an unusable stored password (empty, control characters, oversized); accepts any other', () => {
+    for (const bad of ['', 'line\nbreak', 'x'.repeat(1025)]) expect(() => runtimeUrlFromDbTarget(good, bad)).toThrow(DbTargetError);
+    expect(parsePgUrl(runtimeUrlFromDbTarget(good, 'p@ss:w/rd'), 't').password).toBe('p@ss:w/rd');
   });
 
   it('a database name that would not survive the URL round trip is refused, never silently changed', () => {
