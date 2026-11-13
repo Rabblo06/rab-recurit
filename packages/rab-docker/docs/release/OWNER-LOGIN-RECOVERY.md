@@ -10,6 +10,9 @@ Runs **R1** and **R2** are summarised in section 5. Each statement below is mark
 
 Release procedure, transition and approval token: [`OWNER-LOGIN-DEPLOYMENT.md`](OWNER-LOGIN-DEPLOYMENT.md), sections 3 and 5.
 
+The `psql`, `pg_dump` and `pg_restore` commands here are for backup, recovery and checks only. None of them is part of an
+install: since DB-SETUP (PR #125 option 2) `db-setup` creates `crewflow_owner` from the one `PG_DATABASE_URL` setting.
+
 ---
 
 ## 1. The rule
@@ -102,7 +105,7 @@ Restore into a **fresh** cluster or volume. That is the proven path, and the **o
    grep -v -E '^(CREATE|ALTER) ROLE <cluster-superuser>[ ;]' roles.sql > roles-restore.sql
    psql -X -v ON_ERROR_STOP=1 -U <cluster-superuser> -d postgres -f roles-restore.sql
    ```
-   **Bundled database, NOT TESTED:** a fresh bundled volume runs the `crewflow_owner` init before you can restore. Exclude that role's `CREATE ROLE` line as well (keep its `ALTER ROLE`), or restore into a plain PG16 container without the init script.
+   **Bundled database, NOT TESTED:** the bundled `db` has no init script since DB-SETUP, but `db-setup` creates `crewflow_owner` on the first `up`. Restore with only `db` started (`$P up -d db`), before `db-setup` runs; otherwise exclude that role's `CREATE ROLE` line as well (keep its `ALTER ROLE`). The next `db-setup` sets `crewflow_owner`'s password to the one derived from the current `APP_SECRET`.
 4. **Restore the database:**
    ```bash
    pg_restore -U <cluster-superuser> --create -d postgres --exit-on-error db.dump
