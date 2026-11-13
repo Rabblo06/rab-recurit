@@ -425,6 +425,9 @@ for (const seam of ['CREWFLOW_MIGRATION_TEST_STOP_BEFORE', 'CREWFLOW_MIGRATION_T
   r = run('app-version-match', { ...MIGRATE_ON, CREWFLOW_APP_VERSION: '0.6.0' }, { ctl: { 'migrate-seq': '0', 'migrate-result': RESULT({ exitCode: 0, serve: true }) }, dockerArgs: mount });
   check('8s2 CREWFLOW_APP_VERSION equal to /app/package.json -> starts', r.code === 0 && migrated(r.out) && line(r.out, 'main'), r.out);
   fs.rmSync(pkgDir, { recursive: true, force: true });
+  // Review R3: set, but no /app/package.json to verify it against -> refused (fail closed).
+  r = run('app-version-no-package', { ...MIGRATE_ON, CREWFLOW_APP_VERSION: '0.6.0' }, { ctl: { 'migrate-seq': '0' } });
+  check('8s3 CREWFLOW_APP_VERSION set without /app/package.json -> refused (64) before anything ran', r.code === 64 && /CREWFLOW_APP_VERSION is set but this image has no \/app\/package\.json/.test(r.out) && !migrated(r.out) && !line(r.out, 'main'), r.out);
 }
 r = run('seam-test', { ...MIGRATE_ON, NODE_ENV: 'test', CREWFLOW_MIGRATION_TEST_FAIL_AT: '1786700000000' }, { ctl: { 'migrate-seq': '0' } });
 check('8r a test seam under NODE_ENV=test reaches the migrate child (it applies its own three-condition check)', r.code === 0 && migrated(r.out).includes('CREWFLOW_MIGRATION_TEST_FAIL_AT'), r.out);

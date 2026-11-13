@@ -105,11 +105,11 @@ export function readAppVersion(env: Record<string, string | undefined> = process
   const file = findRootPackageJson(start);
   if (baked) {
     if (!isVersion(baked)) throw new AppVersionError(`${CREWFLOW_APP_VERSION_VAR} must be MAJOR.MINOR.PATCH (no leading zeros). Refusing.`);
-    if (file) {
-      const shipped = (JSON.parse(readFileSync(file, 'utf8')) as { version?: unknown }).version;
-      if (shipped !== baked) {
-        throw new AppVersionError(`${CREWFLOW_APP_VERSION_VAR} (${baked}) differs from this code's release version (${String(shipped).slice(0, 20)}). Remove the override. Refusing.`);
-      }
+    // Review R3: fail closed when the shipped package.json cannot be found (nothing to compare the override with).
+    if (!file) throw new AppVersionError(`${CREWFLOW_APP_VERSION_VAR} is set but this code's root package.json was not found, so the value cannot be verified. Refusing.`);
+    const shipped = (JSON.parse(readFileSync(file, 'utf8')) as { version?: unknown }).version;
+    if (shipped !== baked) {
+      throw new AppVersionError(`${CREWFLOW_APP_VERSION_VAR} (${baked}) differs from this code's release version (${String(shipped).slice(0, 20)}). Remove the override. Refusing.`);
     }
     return baked;
   }

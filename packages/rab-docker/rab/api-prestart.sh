@@ -124,7 +124,11 @@ crewflow_runtime_db_config
 # Security review I3 (OWNER-DB-ULTIMATE Part B): CREWFLOW_APP_VERSION is baked into the image (Dockerfile ARG -> ENV). A
 # runtime value that differs from the release version of the code shipped in this image (/app/package.json) is refused
 # before anything runs: the upgrade logbook's version check must never run under a claimed release.
-if [ -n "${CREWFLOW_APP_VERSION:-}" ] && [ -f package.json ]; then
+if [ -n "${CREWFLOW_APP_VERSION:-}" ]; then
+  # Review R3: fail closed when there is no package.json to verify the value against.
+  if [ ! -f package.json ]; then
+    refuse "CREWFLOW_APP_VERSION is set but this image has no /app/package.json to verify it against. Remove the runtime override. Refusing to start."
+  fi
   SHIPPED_VERSION="$(node -p "require('./package.json').version" 2>/dev/null || true)"
   if [ "$SHIPPED_VERSION" != "$CREWFLOW_APP_VERSION" ]; then
     refuse "CREWFLOW_APP_VERSION differs from this image's release version (package.json $SHIPPED_VERSION). Remove the runtime override. Refusing to start."

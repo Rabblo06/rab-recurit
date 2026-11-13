@@ -29,6 +29,12 @@ describe('upgrade-version (OWNER-DB-ULTIMATE Part B3)', () => {
     expect(() => readAppVersion({ CREWFLOW_APP_VERSION: '0.6' })).toThrow(AppVersionError);
   });
 
+  it('review R3: CREWFLOW_APP_VERSION set but no root package.json to verify it against refuses (fail closed)', () => {
+    const nowhere = require('node:os').tmpdir() as string;
+    expect(() => readAppVersion({ CREWFLOW_APP_VERSION: '0.6.0' }, nowhere)).toThrow(/root package.json was not found, so the value cannot be verified/);
+    expect(() => readAppVersion({}, nowhere)).toThrow(AppVersionError);
+  });
+
   it('security review I3: a CREWFLOW_APP_VERSION that differs from the shipped package.json refuses (config, 64)', () => {
     expect(() => readAppVersion({ CREWFLOW_APP_VERSION: '9.9.9' })).toThrow(/differs from this code's release version/);
     expect(() => readAppVersion({ CREWFLOW_APP_VERSION: '9.9.9' })).toThrow(AppVersionError);
