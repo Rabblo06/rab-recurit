@@ -19,7 +19,10 @@ jest.mock('../../queues/rab-maintenance/account-invite-cleanup.job', () => ({
   runAccountInviteCleanupCycle: jest.fn(),
   resolveInviteAutoDeleteEnabled: jest.requireActual('../../queues/rab-maintenance/account-invite-cleanup.job').resolveInviteAutoDeleteEnabled,
 }));
-jest.mock('../../queues/rab-maintenance/token-cleanup.job', () => ({ runTokenCleanupCycle: jest.fn() }));
+jest.mock('../../queues/rab-maintenance/token-cleanup.job', () => ({
+  runTokenCleanupCycle: jest.fn(),
+  reportTokenCleanupResult: jest.requireActual('../../queues/rab-maintenance/token-cleanup.job').reportTokenCleanupResult,
+}));
 jest.mock('../../queues/rab-maintenance/login-handoff-cleanup.job', () => ({ runLoginHandoffCleanupCycle: jest.fn() }));
 jest.mock('../../queues/rab-maintenance/storage-cleanup.job', () => ({ runStorageCleanupCycle: jest.fn() }));
 jest.mock('../../queues/rab-maintenance/outbox-retention.job', () => ({ runOutboxRetentionCycle: jest.fn() }));
@@ -185,7 +188,7 @@ describe('scan adapters call the existing cycles exactly as main.ts did', () => 
 
   it('maintenance scans: enable switches stay inside the cycle; disabled → false (never stamped); retention stats via ctx', async () => {
     (invite.runAccountInviteCleanupCycle as jest.Mock).mockResolvedValue({});
-    (token.runTokenCleanupCycle as jest.Mock).mockResolvedValue({});
+    (token.runTokenCleanupCycle as jest.Mock).mockResolvedValue({ refreshTokensDeleted: 0, passwordResetTokensDeleted: 0, oauthTransactionsDeleted: 0, batches: 2, capHit: false, steps: [] });
     (handoff.runLoginHandoffCleanupCycle as jest.Mock).mockResolvedValue({ ran: false });
     (storage.runStorageCleanupCycle as jest.Mock).mockResolvedValue({});
     (retention.runOutboxRetentionCycle as jest.Mock).mockResolvedValue({ ran: true, mode: 'report', rows: { email_outbox: 1, push_delivery: 2, realtime_event: 3, worker_event: 4 }, scopes: 1, truncated: false });
