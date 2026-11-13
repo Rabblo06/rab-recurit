@@ -3,7 +3,7 @@ import { Client } from 'pg';
 import { MIGRATION_LOCK_KEY } from '../../database/typeorm/scripts/migrate/migration-lock';
 import { resolveIntegrationTestDatabase } from '../../database/typeorm/core/test-database-guard';
 import { SeededWorkspace, seedWorkspace } from './helpers/workspace-fixtures';
-import { markNewWorkspaceInitial } from '../../engine/core-modules/upgrade/upgrade-migration.service';
+import { markNewWorkspaceInitial, upgradeSessionOf, UpgradeSessionError, withUpgradeScope } from '../../engine/core-modules/upgrade/upgrade-migration.service';
 import { bindGucsSql } from '../../engine/core-modules/tenant/tenant-context.service';
 
 /**
@@ -182,6 +182,20 @@ describeIfDb('core.upgrade_migration (integration, OWNER-DB-ULTIMATE Part B)', (
       await markNewWorkspaceInitial(q, { id: other.id, organisationId: ws.org });
     }));
     expect(err).toBe('42501');
+  });
+
+  it('R2: withUpgradeScope refuses a session inside an open read-only transaction, and leaves that transaction alone', async () => {
+    await app.query('BEGIN');
+    try {
+      await app.query(`SELECT pg_catalog.set_config('rab.r2_marker', 'open', true)`);
+      await app.query('SELECT 1');
+      await expect(withUpgradeScope(upgradeSessionOf(app), 'status', async () => 'read')).rejects.toBeInstanceOf(UpgradeSessionError);
+      // Still the caller's transaction (no COMMIT / ROLLBACK was issued for it): its transaction-local setting is there.
+      expect((await app.query(`SELECT pg_catalog.current_setting('rab.r2_marker', true) AS v`)).rows[0].v).toBe('open');
+    } finally {
+      await app.query('ROLLBACK');
+    }
+    expect((await app.query(`SELECT COALESCE(pg_catalog.current_setting('rab.r2_marker', true), '') AS v`)).rows[0].v).toBe('');
   });
 
   it('nobody may UPDATE or TRUNCATE it, the owner role included (42501)', async () => {
