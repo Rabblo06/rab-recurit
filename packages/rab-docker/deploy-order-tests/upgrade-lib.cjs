@@ -45,16 +45,19 @@ function newSecrets() {
   return secrets;
 }
 
+/** Derived crewflow_owner passwords seen in this run: redacted like every secret, kept apart from `secrets`. */
+const derivedValues = new Set();
+
 /** The crewflow_owner password DB-SETUP derives from an APP_SECRET (never printed; registered for redaction). */
 function derivedOwnerPassword(appSecret) {
   const v = Buffer.from(crypto.hkdfSync('sha256', Buffer.from(appSecret, 'utf8'), Buffer.alloc(0), OWNER_PASSWORD_HKDF_INFO, 32)).toString('hex');
-  secrets[`derived:${crypto.createHash('sha256').update(v).digest('hex').slice(0, 8)}`] = v;
+  derivedValues.add(v);
   return v;
 }
 
 function redact(text) {
   let s = String(text ?? '');
-  for (const v of Object.values(secrets)) if (v && v.length >= 8) s = s.split(v).join('<redacted>');
+  for (const v of [...Object.values(secrets), ...derivedValues]) if (v && v.length >= 8) s = s.split(v).join('<redacted>');
   return s.replace(/postgres(ql)?:\/\/[^\s'"]+/g, 'postgres://<redacted>').replace(/rediss?:\/\/[^\s'"]+/g, 'redis://<redacted>');
 }
 

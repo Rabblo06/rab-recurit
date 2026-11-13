@@ -26,3 +26,8 @@ f78d830d32a21d0e24af019136c45dc451dfbca9:.gitleaksignore:generic-api-key:19
 # {"alg":"HS256"} / {"shiftId":"fixture","venueId":"v","ver":1} / "signature-fixture" — not signed with any key and not a
 # credential. The line now uses a plain fixture string; this entry covers the commit that introduced it. Reviewed 2026-11-04.
 1522b3181312b8815d53340d41a0c6031b6da420:packages/rab-worker/src/queues/rab-reports/native/pre-shift-report.native.spec.ts:jwt:211
+
+# DB-SETUP (PR #125): area 6's run-db-setup-tests.cjs lists [service, case label, file path] triples; generic-api-key matched
+# the label 'S10A-migrate-child' next to a path. Not a credential. The line now carries `gitleaks:allow`; this entry covers
+# the commit that introduced it. Reviewed 2026-11-13.
+c283cd08f49d8bd3f28c8d8bcfaa3cb92a6cef41:packages/rab-docker/deploy-order-tests/run-db-setup-tests.cjs:generic-api-key:519

@@ -139,8 +139,9 @@ services:
   # server key stays in the data volume (0600, never shared); the CA certificate goes to the crewflow-db-ca volume, which
   # rab-api and rab-worker mount read-only (api-prestart.sh / worker-start.sh point PG_SSL_CA_CERT_PATH at it when the URL's
   # host is `db`): sslmode=verify-full holds with no client step. A regenerated certificate reaches the app at its next start.
-  # AUTHENTICATION: initdb gets SCRAM for socket AND TCP logins (no trust, no peer): even a process inside this container
-  # needs the password (`docker compose exec -e PGPASSWORD db psql -U postgres -d crewflow`, PGPASSWORD = PG_DATABASE_PASSWORD).
+  # AUTHENTICATION: the server reads the pg_hba.conf the entrypoint writes on every start (hba_file): SCRAM over the socket,
+  # hostssl + SCRAM for every TCP login (a plain-TCP connection is refused), no trust, no peer (initdb also gets SCRAM for
+  # the cluster's own, unused, file). Even a process inside this container needs the password (`docker compose exec -e PGPASSWORD db psql -U postgres -d crewflow`, PGPASSWORD = PG_DATABASE_PASSWORD).
   # pg_isready (the health check) does not authenticate. The image reads the superuser password ONLY when the data volume is
   # empty (first start): changing PG_DATABASE_PASSWORD later does not change it (ALTER ROLE postgres PASSWORD ... first).
   # EXTERNAL DATABASE: set PG_DATABASE_URL to your database's admin URL (direct host, sslmode=verify-full); the app then
@@ -187,6 +188,12 @@ services:
           chmod 0644 /var/tmp/ca.crt.new
           mv /var/tmp/ca.crt.new /var/tmp/ca.crt
         fi
+        # TLS-only network logins (PR #125 review, finding 5), written on every start so an existing volume gets it too:
+        # SCRAM over the socket; every TCP login must be TLS (hostssl) and SCRAM; there is no plain `host` line at all.
+        printf 'local all all scram-sha-256\nhostssl all all 0.0.0.0/0 scram-sha-256\nhostssl all all ::/0 scram-sha-256\n' > /var/lib/postgresql/tls/pg_hba.conf.new
+        chmod 0600 /var/lib/postgresql/tls/pg_hba.conf.new
+        if [ "$$(id -u)" = 0 ]; then chown postgres:postgres /var/lib/postgresql/tls/pg_hba.conf.new; fi
+        mv /var/lib/postgresql/tls/pg_hba.conf.new /var/lib/postgresql/tls/pg_hba.conf
         exec docker-entrypoint.sh "$$@"
       - crewflow-db
     command:
@@ -199,6 +206,8 @@ services:
       - ssl_key_file=/var/lib/postgresql/tls/server.key
       - -c
       - ssl_min_protocol_version=TLSv1.2
+      - -c
+      - hba_file=/var/lib/postgresql/tls/pg_hba.conf
       - -c
       - password_encryption=scram-sha-256
     environment:

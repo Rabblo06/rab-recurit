@@ -547,3 +547,23 @@ test('DB-SETUP: the verifier and the owner-login gate refuse the same former sep
   const verifier = require('./verify-image-compose.cjs');
   assert.deepEqual([...verifier.NOT_THE_APP_LOGIN].sort(), [...gate.NOT_THE_APP_LOGIN].sort());
 });
+
+test('DENIAL PR #125 finding 6: environment mode applies the bundled db environment rules to the deployed model', { skip }, () => {
+  const ok = { names: ['REDIS_URL', 'APP_SECRET'], unfilled: [], dbUsers: {} };
+  const run = (mutate) => {
+    const m = fresh();
+    mutate(m.variantFiles);
+    return checkDeployment(m.variantFiles, m.production, { 'rab-api': ok, 'rab-worker': ok });
+  };
+  // The render's dummy password is real-shaped (32+ URL-safe), so the committed shape passes.
+  assert.deepEqual(run(() => {}), []);
+  for (const [mutate, re] of [
+    [(v) => { v.services.db.environment.POSTGRES_HOST_AUTH_METHOD = 'trust'; }, /db: POSTGRES_HOST_AUTH_METHOD is set .* in the deployed model/],
+    [(v) => { v.services.db.environment.POSTGRES_INITDB_ARGS = '--auth-local=peer'; }, /db: POSTGRES_INITDB_ARGS must be exactly .* in the deployed model/],
+    [(v) => { v.services.db.environment.PGDATA = '/var/lib/postgresql/data'; }, /db: PGDATA must be .* in the deployed model/],
+    [(v) => { v.services.db.environment.POSTGRES_PASSWORD = 'postgres'; }, /db: POSTGRES_PASSWORD is missing or not 32\+ URL-safe .* in the deployed model/],
+    [(v) => { v.services.db.environment.PG_DATABASE_URL = 'postgresql://x:y@db/z'; }, /db: has PG_DATABASE_URL in the deployed model|db: PG_DATABASE_URL holds a PostgreSQL URL in the deployed model/],
+    [(v) => { v.services.db.environment.POSTGRES_USER = 'crewflow_owner'; }, /db: the superuser is the app login .* in the deployed model/],
+    [(v) => { v.services.db.environment.EXTRA = 'x'; }, /db: environment has EXTRA \(only .* in the deployed model/],
+  ]) assertRefused(run(mutate), re);
+});

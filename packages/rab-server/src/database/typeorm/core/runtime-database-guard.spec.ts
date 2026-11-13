@@ -317,12 +317,13 @@ describe('runtime database identity guard (API, worker and provisioner boot)', (
 
   it('11d3. final review F4: an UNLISTED single-label host (search domain / k8s namespace) is REMOTE, never LOCAL; the compose services stay LOCAL', () => {
     for (const processName of ['api', 'worker', 'provisioner'] as const) {
-      for (const host of ['db', 'prod-db', 'postgresql']) {
+      // DB-SETUP (lead decision 2026-11-12): `db`, the bundled database service, is listed; near-misses stay remote.
+      for (const host of ['gatedb', 'prod-db', 'postgresql']) {
         const url = `postgres://crewflow_app:${SECRET}@${host}:5432/rab`;
         expectRefused(processName, { NODE_ENV: 'development', RAB_RUNTIME_ENV: 'development', PG_DATABASE_URL: url }, /development refuses a remote database/);
         expect(resolve(processName, { NODE_ENV: 'development', PG_DATABASE_URL: url }).classification).toBe('NON-PRODUCTION');
       }
-      for (const host of ['devdb', 'postgres', 'pg']) {
+      for (const host of ['db', 'devdb', 'postgres', 'pg']) {
         const url = `postgres://crewflow_app:${SECRET}@${host}:5432/rab`;
         expect(resolve(processName, { NODE_ENV: 'development', RAB_RUNTIME_ENV: 'development', PG_DATABASE_URL: url }).classification).toBe('LOCAL');
       }

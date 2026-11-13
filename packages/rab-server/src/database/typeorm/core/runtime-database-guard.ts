@@ -90,9 +90,13 @@ export function recordedRuntimeDatabase(): Readonly<RecordedRuntimeDatabase> | n
 }
 
 export class RuntimeDbError extends Error {
-  constructor(message: string) {
+  /** The pg driver's SQLSTATE when the error is a failed connection (e.g. 28P01); never a value from the connection. */
+  readonly driverCode?: string;
+
+  constructor(message: string, driverCode?: string) {
     super(message);
     this.name = 'RuntimeDbError';
+    if (driverCode !== undefined) this.driverCode = driverCode;
   }
 }
 
@@ -337,7 +341,7 @@ export async function probeRuntimeIdentity(
   } catch (error) {
     await client.end().catch(() => undefined);
     const code = (error as { code?: string }).code ?? 'unknown';
-    throw new RuntimeDbError(`Cannot reach the ${label} database for the read-only identity probe (driver code ${code}). Refusing to start.`);
+    throw new RuntimeDbError(`Cannot reach the ${label} database for the read-only identity probe (driver code ${code}). Refusing to start.`, code);
   }
   try {
     const base = { database: row.db, systemIdentifier: row.sid, currentUser: row.usr };

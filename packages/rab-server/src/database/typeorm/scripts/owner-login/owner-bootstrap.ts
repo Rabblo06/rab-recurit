@@ -64,6 +64,7 @@ export const OWNER_BOOTSTRAP_MESSAGES = Object.freeze({
   passThrough: 'PG_DATABASE_URL is the crewflow_owner login: the database setup step is skipped.',
   pgTooOld: 'PostgreSQL 16 or later is required.',
   privilegedAttributes: (attributes: readonly string[]) =>
+    // sql-injection-reviewed: an error MESSAGE (printed, never executed); attributes are the fixed attribute names of the facts row.
     `crewflow_owner exists with ${attributes.join(', ')}; Crewflow never runs as a privileged login. Fix the role (ALTER ROLE crewflow_owner NOSUPERUSER ...) or drop it; the API never changes an existing role's attributes.`,
   noCreateRoleHardened: "crewflow_owner is NOCREATEROLE (hardened); a release that creates roles will need it back.",
   privilegedMembership: 'crewflow_owner is a member of a superuser, BYPASSRLS or predefined privileged role.',

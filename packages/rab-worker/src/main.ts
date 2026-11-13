@@ -49,6 +49,7 @@ import { ReconnectingPgClient } from './core/database/reconnecting-pg-client';
 import { BoundedProducerQueue } from './core/runtime/bounded-producer-queue';
 import { createInstanceHeartbeat } from './core/runtime/instance-heartbeat';
 import { resolveWatchdogStaleMs, startEventLoopWatchdog } from './core/runtime/event-loop-watchdog';
+import { retryWhileOwnerPasswordStale } from './core/runtime/owner-password-wait';
 import { enforceRuntimeIsolation } from './core/runtime/runtime-isolation';
 import { resolveSchemaWaitMs, waitForWorkerSchemaOn } from './core/runtime/schema-wait';
 import { startWorkspaceProvisioningLoops, WorkspaceProvisioningLoopsHandle } from './queues/rab-maintenance/workspace-provisioning.loops';
@@ -247,7 +248,9 @@ async function bootstrap(): Promise<void> {
   }
   // RUNTIME boundary: the database identity (both the application and owner-role connections) is verified BEFORE any
   // queue consumer, connection or job starts.
-  await assertRuntimeDatabaseIdentity('worker').catch(refuseStartup);
+  // DB-SETUP §4: after an APP_SECRET rotation the API resets crewflow_owner's password on its next start; until then this
+  // first login fails with 28P01. That one failure is retried, bounded (120 s, fixed message); anything else refuses at once.
+  await retryWhileOwnerPasswordStale(() => assertRuntimeDatabaseIdentity('worker')).catch(refuseStartup);
   // Owner-login architecture: the Worker NEVER migrates (the API start or the release step does). While the only schema
   // finding is "pending" — that migration still running — it waits, bounded (CREWFLOW_WORKER_SCHEMA_WAIT_SECONDS), instead
   // of the boot gate refusing it; anything else is refused exactly as before, by the wait or by the boot gates below.

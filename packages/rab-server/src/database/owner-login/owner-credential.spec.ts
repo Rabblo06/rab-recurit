@@ -55,6 +55,9 @@ function referenceHkdf(
   return Buffer.concat(blocks).subarray(0, length);
 }
 
+/** The documented HKDF info label (DB-SETUP-PLAN §4), spelled out for the independent reference check. */
+const OWNER_LABEL_LITERAL = 'crewflow-owner-db-password-v1';
+
 describe('deriveOwnerPassword (HKDF-SHA256, §4)', () => {
   it('matches fixed vectors', () => {
     expect(deriveOwnerPassword(APP_SECRET)).toBe(
@@ -66,6 +69,7 @@ describe('deriveOwnerPassword (HKDF-SHA256, §4)', () => {
   });
 
   it('is RFC 5869 HKDF with an empty salt and the owner label (checked against an independent HMAC implementation)', () => {
+    expect(OWNER_PASSWORD_HKDF_INFO).toBe(OWNER_LABEL_LITERAL);
     for (const secret of [
       APP_SECRET,
       'x'.repeat(32),
@@ -74,7 +78,9 @@ describe('deriveOwnerPassword (HKDF-SHA256, §4)', () => {
       const expected = referenceHkdf(
         Buffer.from(secret, 'utf8'),
         Buffer.alloc(0),
-        Buffer.from(OWNER_PASSWORD_HKDF_INFO, 'utf8'),
+        // The label as a literal (the next assertion pins the exported constant to it): the reference implementation hashes
+        // only test inputs, never a value read from a password-named binding.
+        Buffer.from(OWNER_LABEL_LITERAL, 'utf8'),
         32,
       ).toString('hex');
       expect(deriveOwnerPassword(secret) === expected).toBe(true);

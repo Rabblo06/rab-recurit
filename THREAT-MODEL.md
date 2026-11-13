@@ -6748,7 +6748,9 @@ Regression:   rate-limit-bypass.spec.ts (truth table incl. the old hidden-bypass
   an APP_SECRET compromise meant token forgery and decryption; now it is also a database login.
 - **Controls.** The bundled db is reachable only from the app network; an external database only through the provider's
   allow-list; verify-full TLS. The HKDF label is unique (a spec compares every `hkdfSync` label in the repository).
-  Rotating APP_SECRET on both services rotates the database password at the next API start (measured, area 6 S5).
+  Rotating APP_SECRET on both services rotates the database password at the next API start (measured, area 6 S5). A
+  Worker that logs in before that reset (SQLSTATE 28P01) retries with backoff for at most 120 s with a fixed message,
+  then exits and the restart policy brings it back (`rab-worker/src/core/runtime/owner-password-wait.ts`).
 - **Residual.** APP_SECRET and the database password cannot be rotated independently. Two API instances with different
   APP_SECRETs would reset the password back and forth (one rab-api in both compose files).
 
@@ -6779,8 +6781,11 @@ Regression:   rate-limit-bypass.spec.ts (truth table incl. the old hidden-bypass
 - **Controls on the bundled db.** Digest-pinned official postgres image (Debian 16; 17 and 18 work with the same layout);
   999:999, read-only root, `cap_drop ALL`, no-new-privileges, no port, internal network. It makes its own CA and a server
   certificate for `db` on first start; the CA private key is deleted right after signing; the server key stays in the data
-  volume (0600); the app mounts only the CA certificate, read-only. initdb uses SCRAM for socket AND TCP logins (no trust,
-  no peer), so even a process inside the db container needs the password.
+  volume (0600); the app mounts only the CA certificate, read-only. On every start its entrypoint writes the `pg_hba.conf`
+  the server reads (`hba_file`): `local all all scram-sha-256` and `hostssl all all ... scram-sha-256` only, so every TCP
+  login must use TLS and a password (a plain-TCP connection is refused), and even a process inside the db container needs
+  the password. The gates refuse any other `pg_hba` content, a `POSTGRES_HOST_AUTH_METHOD`, initdb arguments other than
+  SCRAM-only, and any db environment key outside an exact allow-list, in the committed AND the deployed model.
 - **Residual.** The superuser can log in over the internal network (needed by the bootstrap child; T-3).
 
 ### Trade-offs applied (SECURITY TRADE-OFF blocks T-1 to T-5, owner-accepted 2026-11-12)
@@ -6789,8 +6794,8 @@ Regression:   rate-limit-bypass.spec.ts (truth table incl. the old hidden-bypass
   pooler and a URL without a password). Residual: TM-DB-1.
 - **T-2 — `POSTGRES_PASSWORD` from an environment variable** on the bundled db, in both compose files (decision D4;
   OpenShip has no secret files). Residual: visible in the compose config / `docker inspect db`.
-- **T-3 — the superuser may log in over the internal network** on the bundled db (the image's pg_hba, tightened to
-  SCRAM everywhere). Still: no port, an internal network, SCRAM.
+- **T-3 — the superuser may log in over the internal network** on the bundled db (needed by the bootstrap child), but
+  only over TLS with SCRAM (`hostssl`). Still: no port, an internal network.
 - **T-4 — not applied** (D1 = a: verify-full kept for the bundled db; no plaintext exception).
 - **T-5 — a runtime-env rule became a wrapper invariant.** "No admin URL in a runtime process" depends on the entrypoints
   `./api-prestart.sh` / `./worker-start.sh`. The gates (compose-owner-login, compose-one-image, verify-image-compose)
@@ -6811,10 +6816,22 @@ and `citext` extensions (owned by that login). The bootstrap-child path creates 
 after the TypeORM DataSource initialise. Existed before this work; a separate follow-up (fail-closed ordering in the
 migrate child) is for the owner.
 
+### Upgrade hazard (PR #125 review, finding 3) — a `database.env` URL is silently overridden
+`docker-compose.image.yml` now commits `PG_DATABASE_URL: ${PG_DATABASE_URL:-<bundled db>}`, and a compose `environment:`
+value wins over `env_file`: an existing deployment that upgrades with `PG_DATABASE_URL` still in `database.env` connects to
+the new, empty bundled `db` and fresh-installs there (its real database is untouched; the service runs empty, and a
+declared deployment identity is auto-bound to the new database, which the plan's fresh-install rule allows). Not refused
+in code: the container only ever sees the winning value, and refusing a fresh install on the bundled `db` would need a new
+rule that also blocks a legitimate first install. Controls: the runbook's explicit upgrade step (3.2 step 0: move the line
+to `compose.env` before `pull`); `compose-owner-login.cjs --lint-env-file database` and the `verify-image-compose.cjs
+--environment` preflight both refuse a `database.env` that holds `PG_DATABASE_URL`; a `PG_EXPECTED_DATABASE_NAME` other
+than `crewflow` (the bundled db's name) makes every process refuse the bundled database. Residual: an operator who skips
+the lint and the preflight, with no `PG_EXPECTED_DATABASE_NAME` or one equal to `crewflow`.
+
 ### Rollback
 A rollback across this release needs the previous release's compose files (its image has no `worker-start.sh` or
-bootstrap child) and a `crewflow_owner` URL with the derived password (`derive-runtime-url.js`, SENSITIVE) or a new
-password set with `01-crewflow-owner.sql` (runbook 3.6).
+bootstrap child) and a `crewflow_owner` URL with the derived password (`derive-runtime-url.js`, SENSITIVE: run it with
+`-T`, never with a remote logging driver) or a new password set with `01-crewflow-owner.sql` (runbook 3.6).
 
 - **Tests.** owner-credential / derive-runtime-url / runtime-db-config / never-in-runtime-env / deployment-identity specs;
   the bootstrap harness `bootstrap-owner-login-check.ts` (PG 16/17/18, refusals, idempotent restart); the prestart shell

@@ -451,6 +451,16 @@ test('DENIAL bundled db: password only from PG_DATABASE_PASSWORD (T-2), never tr
   assertRefused(problemsAfter((s) => { delete s.db.environment.POSTGRES_PASSWORD; }), /POSTGRES_PASSWORD must be exactly/);
   assertRefused(problemsAfter((s) => { s.db.environment.POSTGRES_PASSWORD_FILE = '/run/secrets/x'; }), /POSTGRES_PASSWORD_FILE/);
   assertRefused(problemsAfter((s) => { s.db.environment.POSTGRES_HOST_AUTH_METHOD = 'trust'; }), /trust/);
+  // PR #125 finding 6: any value of the switch is refused, and the environment is an exact allow-list.
+  assertRefused(problemsAfter((s) => { s.db.environment.POSTGRES_HOST_AUTH_METHOD = 'scram-sha-256'; }), /POSTGRES_HOST_AUTH_METHOD is set/);
+  assertRefused(problemsAfter((s) => { s.db.environment.POSTGRES_INITDB_WALDIR = '/x'; }), /environment has POSTGRES_INITDB_WALDIR \(only/);
+  assertRefused(problemsAfter((s) => { s.db.environment.POSTGRES_USER = 'admin'; }), /POSTGRES_USER must be postgres/);
+  assertRefused(problemsAfter((s) => { s.db.environment.POSTGRES_DB = 'other'; }), /POSTGRES_DB must be crewflow/);
+  assertRefused(problemsAfter((s) => { s.db.environment.HOME = '/var/lib/postgresql'; }), /HOME must be \/tmp/);
+  // PR #125 finding 5: TLS-only network logins from the pg_hba.conf the entrypoint writes.
+  assertRefused(problemsAfter((s) => { s.db.command = s.db.command.filter((t) => !t.startsWith('hba_file=')); }), /does not read the TLS-only pg_hba\.conf/);
+  assertRefused(problemsAfter((s) => { s.db.entrypoint = s.db.entrypoint.map((t) => t.replace('hostssl all all 0.0.0.0/0', 'host all all 0.0.0.0/0')); }), /does not write exactly the TLS-only pg_hba\.conf/);
+  assertRefused(problemsAfter((s) => { s.db.entrypoint = s.db.entrypoint.map((t) => t.replace('exec docker-entrypoint.sh', "echo 'host all all all trust' >> x\n        exec docker-entrypoint.sh")); }), /does not write exactly the TLS-only pg_hba\.conf/);
   assertRefused(problemsAfter((s) => { s.db.environment.POSTGRES_INITDB_ARGS = '--auth-host=trust'; }), /trust/);
   assertRefused(problemsAfter((s) => { s.db.environment.PG_DATABASE_URL = 'postgresql://postgres:x@db:5432/crewflow'; }), /db: has PG_DATABASE_URL/);
   assertRefused(problemsAfter((s) => { s.db.environment.PGPASSWORD = 'x'; }), /db: environment has PGPASSWORD/);
@@ -459,7 +469,7 @@ test('DENIAL bundled db: password only from PG_DATABASE_PASSWORD (T-2), never tr
   assertRefused(problemsAfter((s) => { delete s.db.environment.PGDATA; }), /PGDATA is not set/);
   // Area 6 note (T-3 tightened): SCRAM for socket and TCP, never trust / peer.
   for (const args of ['--auth-local=peer --data-checksums', '--auth-local=scram-sha-256 --data-checksums', '--auth-host=scram-sha-256', '--auth-local=scram-sha-256 --auth-host=scram-sha-256 --auth-local=peer', '--auth-local=scram-sha-256 --auth-host=md5', '']) {
-    assertRefused(problemsAfter((s) => { s.db.environment.POSTGRES_INITDB_ARGS = args; }), /POSTGRES_INITDB_ARGS (lacks|sets an authentication method)/);
+    assertRefused(problemsAfter((s) => { s.db.environment.POSTGRES_INITDB_ARGS = args; }), /POSTGRES_INITDB_ARGS must be exactly/);
   }
   assertRefused(problemsAfter((s) => { s.db.environment.POSTGRES_INITDB_ARGS = '--auth=trust'; }), /trust/);
   assertRefused(problemsAfter((s) => { s.db.tmpfs = s.db.tmpfs.filter((t) => !t.startsWith('/var/lib/postgresql/data')); }), /not an empty read-only tmpfs/);
@@ -584,4 +594,12 @@ test('J2-1: lintEnvText refuses a switch that is not exactly true or false once 
   const [entry] = gate.parseEnvText('PUSH_ENABLED=true # on');
   assert.deepEqual([entry.key, entry.value, entry.unreadable], ['PUSH_ENABLED', 'true', false]);
   assert.equal(gate.parseEnvText('PUSH_ENABLED="true')[0].unreadable, true);
+});
+
+test('PR #125 finding 6: bundledDbEnvironmentProblems (shared with the deployed-model check) accepts the committed env and a real-shaped password', () => {
+  const ok = { POSTGRES_USER: 'postgres', POSTGRES_DB: 'crewflow', POSTGRES_PASSWORD: 'a'.repeat(64), POSTGRES_INITDB_ARGS: gate.DB_INITDB_ARGS, PGDATA: '/var/lib/postgresql/pgdata', HOME: '/tmp' };
+  assert.deepEqual(gate.bundledDbEnvironmentProblems(ok), []);
+  assertRefused(gate.bundledDbEnvironmentProblems({ ...ok, POSTGRES_PASSWORD: 'short' }), /POSTGRES_PASSWORD is missing or not 32\+ URL-safe/);
+  assertRefused(gate.bundledDbEnvironmentProblems({ ...ok, POSTGRES_PASSWORD: '' }), /POSTGRES_PASSWORD is missing/);
+  for (const msg of gate.bundledDbEnvironmentProblems({ ...ok, POSTGRES_PASSWORD: 'Kq7-unique-marker' })) assert.ok(!msg.includes('Kq7-unique-marker'), msg);
 });

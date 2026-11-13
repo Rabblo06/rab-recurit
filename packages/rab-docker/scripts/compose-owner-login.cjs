@@ -103,6 +103,13 @@ const DB_VOLUMES = Object.freeze({ '/var/lib/postgresql': 'crewflow-db-data', '/
 const DB_PGDATA = '/var/lib/postgresql/pgdata';
 /** initdb authentication: SCRAM for socket and TCP (the image default trusts loopback TCP; peer lets any uid-999 process in). */
 const DB_INITDB_AUTH = Object.freeze(['--auth-local=scram-sha-256', '--auth-host=scram-sha-256']);
+/** The exact initdb arguments (SCRAM for the cluster's own pg_hba.conf, data checksums). */
+const DB_INITDB_ARGS = `${DB_INITDB_AUTH.join(' ')} --data-checksums`;
+/** The bundled db's whole environment: these keys and no other (PR #125 review, finding 6). */
+const DB_ENV_KEYS = Object.freeze(['POSTGRES_USER', 'POSTGRES_DB', 'POSTGRES_PASSWORD', 'POSTGRES_INITDB_ARGS', 'PGDATA', 'HOME']);
+/** PR #125 review, finding 5: the server reads the pg_hba.conf the entrypoint writes on every start, TLS-only for TCP. */
+const DB_HBA_FILE = '/var/lib/postgresql/tls/pg_hba.conf';
+const DB_HBA_PRINTF = "printf 'local all all scram-sha-256\\nhostssl all all 0.0.0.0/0 scram-sha-256\\nhostssl all all ::/0 scram-sha-256\\n' > /var/lib/postgresql/tls/pg_hba.conf.new";
 /** The bundled db's image: the official postgres repository, by digest (the committed default is the postgres:16 index). */
 const DB_IMAGE = /^(docker\.io\/)?(library\/)?postgres@sha256:[0-9a-f]{64}$/;
 const MIN_FRESH_INSTALL_START_PERIOD_S = 600;
@@ -399,31 +406,20 @@ function bundledDbProblems(services, model, p) {
   // PR #124's rule for every deploy service: no profile (a profile-gated db would not start with the stack, or would hide).
   if (Array.isArray(db.profiles) && db.profiles.length) p(`${DB_SERVICE}: has profiles (it would not start with the stack)`);
   if (!DB_IMAGE.test(String(db.image ?? ''))) p(`${DB_SERVICE}: image is not the official postgres repository pinned by digest (postgres@sha256:<64 hex>)`);
-  const env = db.environment ?? {};
-  const superuser = String(env.POSTGRES_USER ?? 'postgres');
-  if (superuser === OWNER_LOGIN) p(`${DB_SERVICE}: the superuser is the app login (crewflow_owner must never be a superuser)`);
-  if (String(env.POSTGRES_PASSWORD ?? '') !== SENTINEL_DB_PW) p(`${DB_SERVICE}: POSTGRES_PASSWORD must be exactly \${${DB_PASSWORD_KEY}:?...} (T-2), nothing else`);
-  if ('POSTGRES_PASSWORD_FILE' in env) p(`${DB_SERVICE}: POSTGRES_PASSWORD_FILE is set (one source: PG_DATABASE_PASSWORD)`);
-  if (String(env.POSTGRES_HOST_AUTH_METHOD ?? '').toLowerCase() === 'trust') p(`${DB_SERVICE}: POSTGRES_HOST_AUTH_METHOD=trust`);
-  const initdbArgs = String(env.POSTGRES_INITDB_ARGS ?? '').split(/\s+/).filter(Boolean);
-  if (initdbArgs.some((a) => /^--auth(-host|-local)?=/.test(a) && !DB_INITDB_AUTH.includes(a))) p(`${DB_SERVICE}: POSTGRES_INITDB_ARGS sets an authentication method other than scram-sha-256 (trust / peer / md5 / password)`);
-  for (const a of DB_INITDB_AUTH) if (!initdbArgs.includes(a)) p(`${DB_SERVICE}: POSTGRES_INITDB_ARGS lacks ${a} (the image default trusts loopback TCP)`);
-  for (const [k, v] of Object.entries(env)) {
-    if (k === URL_KEY) p(`${DB_SERVICE}: has ${URL_KEY}`);
-    else if (k === 'PGDATA') { if (v !== DB_PGDATA) p(`${DB_SERVICE}: PGDATA must be ${DB_PGDATA} (in the data volume beside its TLS key; fixed for every major)`); }
-    else if (forbiddenReason(k)) p(`${DB_SERVICE}: environment has ${k}`);
-    else if (isPgUrl(v)) p(`${DB_SERVICE}: ${k} holds a PostgreSQL URL`);
-  }
+  for (const msg of bundledDbEnvironmentProblems(db.environment ?? {}, { expectedPassword: SENTINEL_DB_PW })) p(msg);
   const cmd = (db.command ?? []).map(String);
+  if (!cmd.includes(`hba_file=${DB_HBA_FILE}`)) p(`${DB_SERVICE}: the server does not read the TLS-only pg_hba.conf the entrypoint writes (hba_file=${DB_HBA_FILE})`);
   if (!cmd.includes('ssl=on')) p(`${DB_SERVICE}: TLS is not on (verify-full clients need it)`);
   if (!cmd.includes('ssl_cert_file=/var/lib/postgresql/tls/server.crt') || !cmd.includes('ssl_key_file=/var/lib/postgresql/tls/server.key')) p(`${DB_SERVICE}: TLS does not use the certificate it makes itself (data volume tls/)`);
-  if (!('PGDATA' in env)) p(`${DB_SERVICE}: PGDATA is not set (the image default differs per major; ${DB_PGDATA} for all)`);
   const dbTmpfs = (db.tmpfs ?? []).map(String);
   if (!dbTmpfs.some((t) => /^\/var\/lib\/postgresql\/data:/.test(t) && /mode=0?555\b/.test(t))) p(`${DB_SERVICE}: /var/lib/postgresql/data (the 16/17 images' VOLUME) is not an empty read-only tmpfs`);
   // `docker compose config` keeps a literal $ escaped as $$ in its output.
   const entry = (db.entrypoint ?? []).map(String).join('\n').split('$$').join('$');
   if (!/openssl req -x509/.test(entry) || !/subjectAltName=DNS:db/.test(entry) || !/rm -f ca\.key/.test(entry) || !/exec docker-entrypoint\.sh "\$@"/.test(entry)) {
     p(`${DB_SERVICE}: the entrypoint does not create its own CA and server certificate (SAN db, CA key deleted) before the image's entrypoint (D1 a)`);
+  }
+  if (!entry.includes(DB_HBA_PRINTF) || /\bhost(nossl)?\s+all\b/.test(entry) || /\b(trust|peer|ident|md5)\b/.test(entry)) {
+    p(`${DB_SERVICE}: the entrypoint does not write exactly the TLS-only pg_hba.conf (local scram-sha-256; hostssl scram-sha-256 for every TCP login; no plain host, trust, peer, ident or md5)`);
   }
   if ((db.volumes ?? []).some((v) => String(v.target ?? '').startsWith('/docker-entrypoint-initdb.d'))) p(`${DB_SERVICE}: mounts an init script (the API creates crewflow_owner itself)`);
   if (JSON.stringify(Object.keys(db.networks ?? {})) !== JSON.stringify(['crewflow-db'])) p(`${DB_SERVICE}: must be on the internal crewflow-db network only`);
@@ -442,6 +438,37 @@ function bundledDbProblems(services, model, p) {
   for (const [name, svc] of Object.entries(services)) {
     if (name !== DB_SERVICE && (svc.volumes ?? []).some((v) => v.type === 'volume' && v.source === 'crewflow-db-data')) p(`${name}: mounts the bundled db's data volume (its cluster and TLS key)`);
   }
+}
+
+/**
+ * The bundled db's environment rules (PR #125 review, finding 6), shared by this gate (committed model) and
+ * staging/verify-image-compose.cjs (the deployed model). Pure; names and rules only, never a value. `expectedPassword`:
+ * the gate's sentinel (exact match); without it (a real deployment) the password must be present and URL-safe.
+ */
+function bundledDbEnvironmentProblems(env, { expectedPassword } = {}) {
+  const out = [];
+  const p = (m) => out.push(`${DB_SERVICE}: ${m}`);
+  for (const [k, v] of Object.entries(env)) {
+    if (k === URL_KEY) p(`has ${URL_KEY}`);
+    else if (k === 'POSTGRES_PASSWORD_FILE') p('POSTGRES_PASSWORD_FILE is set (one source: PG_DATABASE_PASSWORD)');
+    else if (k === 'POSTGRES_HOST_AUTH_METHOD') p('POSTGRES_HOST_AUTH_METHOD is set (the image switch that can add trust / md5 lines; the entrypoint writes the pg_hba.conf)');
+    else if (k !== 'PGDATA' && forbiddenReason(k)) p(`environment has ${k}`);
+    else if (!DB_ENV_KEYS.includes(k)) p(`environment has ${k} (only ${DB_ENV_KEYS.join(', ')})`);
+    if (isPgUrl(v)) p(`${k} holds a PostgreSQL URL`);
+  }
+  const superuser = String(env.POSTGRES_USER ?? '');
+  if (superuser === OWNER_LOGIN) p('the superuser is the app login (crewflow_owner must never be a superuser)');
+  else if (superuser !== 'postgres') p('POSTGRES_USER must be postgres (the default admin URL logs in as postgres)');
+  if (String(env.POSTGRES_DB ?? '') !== 'crewflow') p('POSTGRES_DB must be crewflow');
+  const password = String(env.POSTGRES_PASSWORD ?? '');
+  if (expectedPassword !== undefined) {
+    if (password !== expectedPassword) p(`POSTGRES_PASSWORD must be exactly \${${DB_PASSWORD_KEY}:?...} (T-2), nothing else`);
+  } else if (!DB_PASSWORD_SHAPE.test(password)) p('POSTGRES_PASSWORD is missing or not 32+ URL-safe characters (PG_DATABASE_PASSWORD)');
+  if (String(env.POSTGRES_INITDB_ARGS ?? '') !== DB_INITDB_ARGS) p(`POSTGRES_INITDB_ARGS must be exactly "${DB_INITDB_ARGS}" (SCRAM only: no trust, peer or md5)`);
+  if (!('PGDATA' in env)) p(`PGDATA is not set (the image default differs per major; ${DB_PGDATA} for all)`);
+  else if (env.PGDATA !== DB_PGDATA) p(`PGDATA must be ${DB_PGDATA} (in the data volume beside its TLS key; fixed for every major)`);
+  if (String(env.HOME ?? '') !== '/tmp') p('HOME must be /tmp (the private tmpfs, never a volume)');
+  return out;
 }
 
 /** Problems with one rendered FULL-mode combination (an entry of COMBOS). Pure: never prints a value. */
@@ -892,7 +919,7 @@ function main(argv) {
 if (require.main === module) process.exitCode = main(process.argv.slice(2));
 
 module.exports = {
-  FILES, TEMPLATES, COMBOS, STATIC_COMBO, DB_SERVICE, DB_PASSWORD_KEY, SENTINEL_DB_PW, BUNDLED_URL, NOT_THE_APP_LOGIN, NOTIFICATION_DELIVERY, PHASE_D_SWITCHES, PHASE_D_UNCHANGED, STATEMENT_DISPATCH, FEATURE_SWEEPS, SWITCH_VALUES, featureSweepProblems, composeEnvValue, AUDIT_SINK_MODES, AUDIT_SINK_PRODUCTION_MODES, AUDIT_SINK_FAILURES,
+  FILES, TEMPLATES, COMBOS, STATIC_COMBO, DB_SERVICE, bundledDbEnvironmentProblems, DB_INITDB_ARGS, DB_ENV_KEYS, DB_PASSWORD_KEY, SENTINEL_DB_PW, BUNDLED_URL, NOT_THE_APP_LOGIN, NOTIFICATION_DELIVERY, PHASE_D_SWITCHES, PHASE_D_UNCHANGED, STATEMENT_DISPATCH, FEATURE_SWEEPS, SWITCH_VALUES, featureSweepProblems, composeEnvValue, AUDIT_SINK_MODES, AUDIT_SINK_PRODUCTION_MODES, AUDIT_SINK_FAILURES,
   AUDIT_SINK_PRODUCTION_FAILURES, SENTINEL_URL, SENTINEL_OWNER_PW, SENTINEL_APP_SECRET,
   SENTINEL_REDIS_PW, SENTINEL_LEGACY_PW, forbiddenReason, durationSeconds, checkModel, checkStaticModel, parseEnvText,
   lintEnvText, lintComposeText, renderModels, staticProblems, main,

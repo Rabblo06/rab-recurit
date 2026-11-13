@@ -39,6 +39,8 @@ const os = require('node:os');
 const path = require('node:path');
 
 const REPO = path.resolve(__dirname, '../../..');
+// The bundled db's environment rules, one definition for the committed and the deployed model (PR #125 review, finding 6).
+const { bundledDbEnvironmentProblems } = require('../scripts/compose-owner-login.cjs');
 const VARIANT = path.join(REPO, 'packages/rab-docker/docker-compose.image.yml');
 const PRODUCTION = path.join(REPO, 'packages/rab-docker/docker-compose.production.yml');
 
@@ -521,6 +523,9 @@ function checkDeployment(merged, production, envFileKeys = {}) {
   if (!ddb) fail(`${DB_SERVICE}: missing in the deployed model`);
   else if (pdb) {
     for (const key of DB_KEYS.filter((k) => k !== 'environment' && k !== 'image')) if (stable(ddb[key]) !== stable(pdb[key])) fail(`${DB_SERVICE}.${key} is overridden in the deployed model`);
+    // PR #125 review, finding 6: the deployed db's environment holds the real password, so it is not compared with the
+    // reference render; it is checked against the same rules as the committed one (names and rules only, never a value).
+    for (const msg of bundledDbEnvironmentProblems(ddb.environment ?? {})) fail(`${msg} in the deployed model`);
     if ((ddb.ports ?? []).length) fail(`${DB_SERVICE}: publishes a port in the deployed model`);
   }
   for (const pr of pid1Problems(services, ' in the deployed model')) fail(pr);

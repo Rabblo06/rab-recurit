@@ -69,6 +69,7 @@ export const OWNER_BOOTSTRAP_Q3_PROBE = `SELECT 1`;
 export const OWNER_BOOTSTRAP_BEGIN = `BEGIN;`;
 
 /** Q4a: one bootstrap at a time (two API replicas starting together). */
+// sql-injection-reviewed: OWNER_BOOTSTRAP_LOCK_KEY is the module's own numeric string constant (7165901520526864244), never input.
 export const OWNER_BOOTSTRAP_Q4A_LOCK = `SELECT pg_catalog.pg_advisory_xact_lock(${OWNER_BOOTSTRAP_LOCK_KEY});`;
 
 /**

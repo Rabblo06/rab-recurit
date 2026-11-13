@@ -502,7 +502,7 @@ async function blockBundled() {
     const cases = [
       ['rab-worker', 'S10A-worker-main', ['packages/rab-worker/dist/main.js']],
       ['rab-api', 'S10A-api-main', ['packages/rab-server/dist/main.js']],
-      ['rab-api', 'S10A-migrate-child', ['packages/rab-server/dist/database/typeorm/scripts/migrate/twenty/twenty-migrate.js']],
+      ['rab-api', 'S10A-migrate-child', ['packages/rab-server/dist/database/typeorm/scripts/migrate/twenty/twenty-migrate.js']], // gitleaks:allow (a case label and a file path, not a credential)
     ];
     // The image's tini as PID 1 (the Worker refuses to be PID 1 itself), then node directly: no cleaning script runs.
     for (const [svc, label, cmd] of cases) {

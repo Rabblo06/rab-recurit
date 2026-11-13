@@ -17,6 +17,8 @@ services:
       - -c
       - ssl_min_protocol_version=TLSv1.2
       - -c
+      - hba_file=/var/lib/postgresql/tls/pg_hba.conf
+      - -c
       - password_encryption=scram-sha-256
       - -c
       - log_statement=all
