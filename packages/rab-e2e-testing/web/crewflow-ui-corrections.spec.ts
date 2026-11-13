@@ -89,9 +89,14 @@ test('Operations + : categories, search, each category, duplicate refusal, link 
   await expect(pop.locator('.add-menu-row')).toHaveText([/Object/, /View/, /Record/, /Folder/, /Link/]);
   await page.screenshot({ path: path.join(OUT, '5a-add-menu.png'), clip: { x: 0, y: 250, width: 560, height: 520 } });
 
-  // Object → Shifts → confirm → added
+  // Object → Shifts → confirm → added. The filtered list appears only after the step transition's frames have run, so
+  // it is waited for on virtual time too (see the Record step below for why).
+  await freezeTime(page);
   await pop.getByRole('button', { name: /^Object/ }).click();
   await pop.getByRole('textbox', { name: /Search/ }).fill('shif');
+  const rowTexts = () => pop.locator('.add-menu-row').allInnerTexts();
+  await advanceUntil(page, async () => JSON.stringify(await rowTexts()) === JSON.stringify(['Shifts']));
+  await releaseTime(page);
   await expect(pop.locator('.add-menu-row')).toHaveText(['Shifts']);
   await page.screenshot({ path: path.join(OUT, '5b-object.png'), clip: { x: 0, y: 250, width: 560, height: 520 } });
   await pop.locator('.add-menu-row', { hasText: 'Shifts' }).click();
