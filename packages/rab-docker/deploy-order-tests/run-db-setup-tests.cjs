@@ -3,7 +3,8 @@
  * DB-SETUP REAL-CONTAINER TESTS ("database setup like Twenty", owner's prompt 2026-11-12; DB-SETUP-PLAN.md §10 B1-B9).
  * TEST-ONLY. One PostgreSQL major per run (16, 17 or 18), the production file docker-compose.image.yml UNCHANGED (its
  * bundled `db`, the one-shot `db-setup` with the bootstrap child, rab-api with api-prestart.sh, rab-worker with
- * worker-start.sh; PR #125 option A: only db-setup receives the admin URL) plus the test-only overlays of this folder,
+ * worker-start.sh; PR #125 option 2: PG_DATABASE_URL, the ONE database setting, reaches db-setup only; rab-api / rab-worker
+ * pin it to "" and refuse any non-empty value) plus the test-only overlays of this folder,
  * deployed with THE documented command `docker compose pull && docker compose up -d`.
  *
  *   DOT_REPOSITORY=127.0.0.1:<port>/adolphus     a LOCAL registry (never Docker Hub)
@@ -13,7 +14,7 @@
  *   [DOT_R256_DIGEST=sha256:…]                   R256 (0e0a6edd) in the same registry: enables block r256 (owner's test 7)
  *   [DOT_PG15_IMAGE=postgres@sha256:…]           a Debian postgres:15 image: enables block pg15 (owner's test 10, PG15)
  *   [DOT_PROJECT_PREFIX=dbs]                     project names <prefix>-pg<major>-<block>; never shared between runs
- *     node packages/rab-docker/deploy-order-tests/run-db-setup-tests.cjs <16|17|18> <out-dir> [--blocks=a,race,ext,r256,pg15] [--keep]
+ *     node packages/rab-docker/deploy-order-tests/run-db-setup-tests.cjs <16|17|18> <out-dir> [--blocks=a,race,ext,pt,ptx,r256,pg15] [--only=S1,P1,...] [--keep]
  *
  * Blocks (each its own disposable project, run one after another, `down --volumes` after each):
  *   a     the bundled database, Twenty's default. S1 fresh install with ONLY PG_DATABASE_PASSWORD (compose.env) + APP_SECRET
@@ -21,6 +22,8 @@
  *         attributes and grant, migrations applied, API and Worker healthy (owner 1). S6 no admin credential in ANY
  *         process of rab-api / rab-worker (/proc/<pid>/environ, PID 1 included), in a `docker exec` process (a health
  *         check's environment), in the health-check processes caught while they run, or in their container definitions;
+ *         option 2: PG_DATABASE_URL is present and EMPTY in both container definitions (docker inspect and the rendered
+ *         compose config), in a `docker exec` process and in every health-check process caught while it runs;
  *         every runtime session is crewflow_owner; no admin backend other than db-setup's bootstrap child (owner 6). S2 `docker compose restart`, then `down` + the
  *         documented command: nothing recreated, the password unchanged (owner 2). S5 APP_SECRET rotation: the next start
  *         resets the password once, the Worker reconnects (owner 5). S10A a runtime process started WITHOUT the shell swap
@@ -30,21 +33,34 @@
  *   race  S9 two db-setup runs at the same moment on a fresh bundled database: the bootstrap creates crewflow_owner once;
  *         then two API starts at the same moment (the migration lock held until both wait): one migrate child applies
  *         every migration, the other finds CURRENT; no duplicate ledger row (owner 9).
- *   ext   S4 an existing crewflow_owner with SUPERUSER, then BYPASSRLS: refused, the role untouched (owner 4). S10B the
- *         same roles through the PASS-THROUGH URL: the runtime guards refuse them, nothing created (owner 10). S3 an
+ *   ext   S4 an existing crewflow_owner with SUPERUSER, then BYPASSRLS: refused, the role untouched (owner 4). S3 an
  *         EXTERNAL admin URL (a non-superuser login): without CREATEROLE -> refused; CREATEROLE but cannot grant on the
  *         database -> refused; CREATEROLE + owns the database -> works (fresh, restart, rotation); a second admin without
  *         ADMIN OPTION on crewflow_owner -> refused when a reset is needed; logs: the admin and derived passwords never, the
  *         verifier only as the documented non-superuser residual (owner 3, 8).
+ *   pt    PR #125 option 2, PG_DATABASE_URL = an existing (hand-made) crewflow_owner URL. P1 its password is NOT the derived
+ *         one: the first db-setup sets crewflow_owner's own password to the derived one ONCE (step b: one `DO $owner_self$`
+ *         in the db log), API and Worker start; a second db-setup takes step a (no new `DO $owner_self$`, "pass-through,
+ *         unchanged", same verifier); both app container definitions still hold PG_DATABASE_URL="" although compose.env
+ *         holds the URL. P5 a non-empty PG_DATABASE_URL (the crewflow_owner URL with the WORKING derived password, the admin
+ *         URL, a non-URL value) forced into rab-api / rab-worker: the entrypoints exit 64 before any database connection.
+ *         S10B a crewflow_owner made privileged AFTER db-setup: the runtime guards still refuse it (owner 10).
+ *   ptx   P3 the crewflow_owner URL of a SUPERUSER, then of a BYPASSRLS crewflow_owner: db-setup exits 64, the role is
+ *         untouched, no extension or object created, rab-api / rab-worker never start (the documented command fails).
+ *         P4 the test seam CREWFLOW_TEST_OWNER_SETUP_ABORT (NODE_ENV=test only; refused otherwise): killed before the COMMIT
+ *         -> nothing changed, the re-run takes step b and succeeds; killed after the COMMIT -> the derived password is in
+ *         place, the re-run (the documented command) recovers through step a, API and Worker healthy. P2 the URL already
+ *         carries the derived password: step a, no `DO $owner_self$`, same verifier.
  *   r256  S7 an R256 database (R256's API + Worker on the hand-made crewflow_owner, seeded): the NEW image with the
- *         unchanged crewflow_owner URL (pass-through: nothing about the role changes) and then with the bundled admin URL
- *         (the password is reset ONCE, then unchanged); data, money, FKs, tenant ownership and RLS identical (owner 7). It
+ *         unchanged crewflow_owner URL (option 2: db-setup gives crewflow_owner the derived password ONCE, attributes and
+ *         grant unchanged) and then with the bundled admin URL (nothing left to reset: unchanged); data, money, FKs,
+ *         tenant ownership and RLS identical (owner 7). It
  *         also records what a rollback to R256 with THIS release's compose files alone does to rab-worker.
  *   pg15  S10C PostgreSQL 15 as the bundled db: the bootstrap child refuses ("PostgreSQL 16 or later is required."), exit
  *         64, nothing created (owner 10).
  *
  * Limits: at most six running containers of this run (db, rab-redis, rab-api, rab-worker + the registry, + the one-shot
- * db-setup while it re-runs beside a running stack on a redeploy, PR #125 option A; block race: two one-off db-setup, then
+ * db-setup while it re-runs beside a running stack on a redeploy, PR #125 options A and 2; block race: two one-off db-setup, then
  * two one-off API containers instead of rab-api/rab-worker; refusal runs: one one-off container). Secrets are generated per run
  * under <out>/secrets-<project> (outside the repository), reach the containers only through env files, and every
  * captured output is redacted before it is written or printed; secret checks only COUNT matches. Results:
@@ -60,12 +76,14 @@ const MAJOR = argv[0];
 // Git Bash hands over /c/... paths; on Windows node would resolve them to C:\c\..., so map the drive prefix.
 const OUT = argv[1] ? path.resolve(process.platform === 'win32' ? argv[1].replace(/^\/([a-z])\//i, '$1:/') : argv[1]) : '';
 const KEEP = argv.includes('--keep');
-const BLOCKS = (argv.find((a) => a.startsWith('--blocks=')) ?? '--blocks=a,race,ext,r256,pg15').slice(9).split(',').filter(Boolean);
+const BLOCKS = (argv.find((a) => a.startsWith('--blocks=')) ?? '--blocks=a,race,ext,pt,ptx,r256,pg15').slice(9).split(',').filter(Boolean);
+/** --only=<ids>: run only these cases (the others of a selected block are skipped and not reported). */
+const ONLY = (argv.find((a) => a.startsWith('--only=')) ?? '').slice(7).split(',').filter(Boolean);
 function fail(msg) {
   console.error(msg);
   process.exit(2);
 }
-if (!['16', '17', '18'].includes(MAJOR) || !OUT) fail('usage: run-db-setup-tests.cjs <16|17|18> <out-dir> [--blocks=a,race,ext,r256,pg15] [--keep]');
+if (!['16', '17', '18'].includes(MAJOR) || !OUT) fail('usage: run-db-setup-tests.cjs <16|17|18> <out-dir> [--blocks=a,race,ext,pt,ptx,r256,pg15] [--only=S1,P1,...] [--keep]');
 const DIGEST = /^sha256:[0-9a-f]{64}$/;
 const REF = /^[a-z0-9./_:-]+@sha256:[0-9a-f]{64}$/;
 if (!DIGEST.test(process.env.DOT_NEW_DIGEST ?? '')) fail('DOT_NEW_DIGEST must be sha256:<64 hex>');
@@ -85,18 +103,25 @@ const R256 = process.env.DOT_R256_DIGEST || null;
 const PG_IMAGE = process.env.DOT_PG_IMAGE;
 const PG15_IMAGE = process.env.DOT_PG15_IMAGE || null;
 const REGISTRY_CONTAINER = process.env.DOT_REGISTRY_CONTAINER || 'deploy-order-registry';
-const MAX_CONTAINERS = 6; // + the one-shot db-setup re-running beside a running stack (PR #125 option A)
+const MAX_CONTAINERS = 6; // + the one-shot db-setup re-running beside a running stack (PR #125 options A and 2)
 const LOGGING_OVERLAY = 'deploy-order-tests/docker-compose.db-setup-logging.yml';
 const BOOTSTRAP_APP = 'crewflow-owner-bootstrap';
 const MSG = {
   // owner-bootstrap.ts OWNER_BOOTSTRAP_MESSAGES (fixed text; compared exactly).
-  passThrough: 'PG_DATABASE_URL is the crewflow_owner login: the database setup step is skipped.',
+  // PR #125 option 2: a crewflow_owner URL is checked and given the derived password (owner-bootstrap.ts).
+  passThrough: 'PG_DATABASE_URL is the crewflow_owner login: checking it, and giving it the password derived from APP_SECRET if it does not have it yet.',
+  testAbort: (point) => `TEST SEAM: stopping hard ${point} (NODE_ENV=test only).`,
+  seamRefused: 'CREWFLOW_TEST_OWNER_SETUP_ABORT is a test seam: it is allowed only with NODE_ENV=test',
   pgTooOld: 'PostgreSQL 16 or later is required.',
   privileged: (attrs) => `crewflow_owner exists with ${attrs}; Crewflow never runs as a privileged login.`,
   cannotCreateRoles: "The PG_DATABASE_URL login cannot create roles (needs CREATEROLE, or use the provider's admin login).",
   cannotGrantDb: 'The PG_DATABASE_URL login cannot grant CONNECT, CREATE, TEMPORARY on this database',
   noAdminOption: "crewflow_owner's password must be reset but the PG_DATABASE_URL login has no ADMIN OPTION on it",
   ready: (what) => `[owner-bootstrap] crewflow_owner is ready (${what}).`,
+  readyStepB: '[owner-bootstrap] crewflow_owner is ready (pass-through, its own password set to the derived one).',
+  readyStepA: '[owner-bootstrap] crewflow_owner is ready (pass-through, unchanged).',
+  // api-prestart.sh / worker-start.sh (option 2): any non-empty PG_DATABASE_URL, any login.
+  entrypointRefusal: /PG_DATABASE_URL must never be set on the (api|worker) service/,
   // runtime-db-config.ts checkRuntimeLogin
   runtimeLogin: 'PG_DATABASE_URL does not log in as crewflow_owner.',
   runtimeLoginTail: 'Refusing to start before connecting.',
@@ -142,6 +167,7 @@ function writeResults() {
 
 /** One case. A throw or a failed check fails it; the block continues with its next case unless `fatal`. */
 async function step(id, owner, title, fn, p) {
+  if (ONLY.length && !ONLY.includes(id)) return true;
   const r = { id, owner, title, status: 'NOT RUN', checks: [], notes: [] };
   results.push(r);
   note(`=== ${id} (owner ${owner}) ${title}`);
@@ -277,7 +303,10 @@ const ENVIRON_SCRIPT = [
   '  echo "$p|$h|$u|$w|$c"',
   'done',
   // The probe itself (a `docker exec`): it carries the container DEFINITION's environment, the accepted risk of plan §5.3.
-  'e=$(tr "\\0" "\\n" < /proc/$$/environ); h=0; for s in "$S1" "$S2" "$S3"; do case "$e" in *"$s"*) h=1;; esac; done; echo "probe|$h"',
+  'e=$(tr "\\0" "\\n" < /proc/$$/environ); h=0; for s in "$S1" "$S2" "$S3"; do case "$e" in *"$s"*) h=1;; esac; done',
+  // Option 2: the definition pins PG_DATABASE_URL to "": present and EMPTY in a docker exec process.
+  'z=unset; printf "%s\\n" "$e" | grep -q "^PG_DATABASE_URL=" && z=set; printf "%s\\n" "$e" | grep -qx "PG_DATABASE_URL=" && z=empty',
+  'echo "probe|$h|$z"',
 ].join('\n');
 
 /**
@@ -291,16 +320,29 @@ function environScan(p, service, sentinels) {
   if (r.code !== 0) throw new Error(`environ scan of ${service} failed (${r.code}): ${L.redact(r.out).slice(0, 300)}`);
   const rows = [];
   let probe = null;
+  let probeUrl = '?';
   for (const line of r.stdout.split('\n').filter(Boolean)) {
     const f = line.split('|');
-    if (f[0] === 'probe') probe = f[1] === '1';
+    if (f[0] === 'probe') {
+      probe = f[1] === '1';
+      probeUrl = f[2] ?? '?';
+    }
     else if (f[1] !== 'gone') rows.push({ pid: f[0], hit: f[1] === '1', empty: f[1] === 'empty', urlUser: f[2] ?? '', pwVar: Number(f[3] || 0), cmd: (f[4] ?? '').trim() });
   }
-  return { rows, probe };
+  return { rows, probe, probeUrl };
+}
+
+/** The rendered compose config (never written or printed): each app service's PG_DATABASE_URL, and whether db-setup has one. */
+function renderedUrls(p) {
+  const r = p.compose(['config', '--format', 'json'], { timeout: 120_000 });
+  if (r.code !== 0) throw new Error(`compose config failed (${r.code})`);
+  const cfg = JSON.parse(r.stdout);
+  const env = (svc) => (cfg.services && cfg.services[svc] && cfg.services[svc].environment) || {};
+  return { api: env('rab-api').PG_DATABASE_URL, worker: env('rab-worker').PG_DATABASE_URL, setupSet: Boolean(env('db-setup').PG_DATABASE_URL) };
 }
 function checkEnviron(p, check, n, label, sentinels, { services = ['rab-api', 'rab-worker'] } = {}) {
   for (const svc of services) {
-    const { rows, probe } = environScan(p, svc, sentinels);
+    const { rows, probe, probeUrl } = environScan(p, svc, sentinels);
     const desc = rows.map((x) => `pid ${x.pid} [${x.cmd.slice(0, 60)}] ${x.empty ? 'empty' : `${x.hit ? 'ADMIN-CREDENTIAL' : 'clean'} url-user=${x.urlUser || '-'}${x.pwVar ? ' PG_DATABASE_PASSWORD' : ''}`}`).join('; ');
     evidence(`${p.name}-${label}-${svc}-environ.txt`, desc.split('; ').join('\n'));
     const pid1 = rows.find((x) => x.pid === '1');
@@ -313,10 +355,13 @@ function checkEnviron(p, check, n, label, sentinels, { services = ['rab-api', 'r
     // Option A: a `docker exec` process (and a health check, which Docker runs the same way) gets the container
     // DEFINITION's environment, which no longer holds any database credential.
     check(probe === false, `${label}: a \`docker exec\` process in ${svc} (the environment a health check gets) holds no admin credential`);
+    check(probeUrl === 'empty', `${label}: a \`docker exec\` process in ${svc} has PG_DATABASE_URL present and EMPTY (option 2: pinned ""; state ${probeUrl})`);
     const def = L.run('docker', ['inspect', '-f', '{{range .Config.Env}}{{println .}}{{end}}', p.container(svc)], { timeout: 30_000 }).stdout;
     const defUrl = (def.match(/^PG_DATABASE_URL=(.*)$/m) || [null, null])[1];
-    check(!sentinels.some((x) => def.includes(x)) && !/^PG_DATABASE_PASSWORD=/m.test(def) && defUrl === '' && !/postgres(ql)?:\/\//.test(def), `${label}: ${svc}'s container definition (docker inspect Config.Env) holds no admin credential, no PG_DATABASE_PASSWORD and no database URL (PG_DATABASE_URL empty: not pass-through)`);
+    check(!sentinels.some((x) => def.includes(x)) && !/^PG_DATABASE_PASSWORD=/m.test(def) && defUrl === '' && !/postgres(ql)?:\/\//.test(def), `${label}: ${svc}'s container definition (docker inspect Config.Env) holds no admin credential, no PG_DATABASE_PASSWORD and no database URL (PG_DATABASE_URL present and EMPTY, option 2)`);
   }
+  const ru = renderedUrls(p);
+  check(ru.api === '' && ru.worker === '' && ru.setupSet, `${label}: the rendered compose config gives rab-api and rab-worker PG_DATABASE_URL="" (whatever compose.env holds) and db-setup a URL (api ${ru.api === '' ? 'empty' : ru.api === undefined ? 'absent' : 'SET'}, worker ${ru.worker === '' ? 'empty' : ru.worker === undefined ? 'absent' : 'SET'})`);
 }
 
 /**
@@ -337,7 +382,8 @@ const HEALTH_SCAN = [
   '    [ -n "$e" ] || continue',
   '    h=0; for s in "$S1" "$S2" "$S3"; do case "$e" in *"$s"*) h=1;; esac; done',
   '    u=$(printf "%s\\n" "$e" | grep -c "^PG_DATABASE_URL=..*")',
-  '    seen="$seen $p"; echo "$p|$h|$u|$(printf "%s" "$c" | cut -c1-80)"',
+  '    z=$(printf "%s\\n" "$e" | grep -cx "PG_DATABASE_URL=")',
+  '    seen="$seen $p"; echo "$p|$h|$u|$(printf "%s" "$c" | cut -c1-80)|$z"',
   '  done',
   'done',
 ].join('\n');
@@ -345,10 +391,11 @@ function healthScan(p, check, n, label, sentinels, seconds = 40) {
   for (const [svc, pat] of [['rab-api', 'wget -qO- http://localhost:3000/healthz'], ['rab-worker', 'worker-bundle-health.cjs']]) {
     const pad = [...sentinels, L.hex(24), L.hex(24), L.hex(24)].slice(0, 3);
     const r = L.run('docker', ['exec', '-i', '-e', 'DOT_HEALTH_SCAN=1', p.container(svc), 'sh', '-c', HEALTH_SCAN], { input: `${pad.join('\n')}\n${pat}\n${seconds}\n`, timeout: (seconds + 60) * 1000 });
-    const rows = r.stdout.split('\n').filter(Boolean).map((l) => { const f = l.split('|'); return { pid: f[0], hit: f[1] === '1', url: f[2] !== '0', cmd: f[3] ?? '' }; });
+    const rows = r.stdout.split('\n').filter(Boolean).map((l) => { const f = l.split('|'); return { pid: f[0], hit: f[1] === '1', url: f[2] !== '0', cmd: f[3] ?? '', empty: f[4] === '1' }; });
     evidence(`${p.name}-${label}-${svc}-healthcheck-environ.txt`, rows.map((x) => `pid ${x.pid} [${x.cmd}] ${x.hit ? 'ADMIN-CREDENTIAL' : 'clean'}${x.url ? ' PG_DATABASE_URL-set' : ''}`).join('\n'));
     n(`${svc}: ${rows.length} health-check process(es) caught while running in ${seconds} s (${rows.map((x) => `pid ${x.pid} ${x.hit ? 'ADMIN' : 'clean'}`).join(', ') || 'none caught'})`);
     check(r.code === 0 && rows.every((x) => !x.hit && !x.url), `${label}: every ${svc} health-check process caught while running holds no admin credential and no database URL (${rows.length} caught)`);
+    check(rows.every((x) => x.empty), `${label}: every ${svc} health-check process caught has PG_DATABASE_URL present and EMPTY (option 2: pinned ""; ${rows.filter((x) => x.empty).length}/${rows.length})`);
     if (svc === 'rab-worker') check(rows.length >= 1, `${label}: at least one rab-worker health check was caught while running (a node process, ${seconds} s window, interval 30 s)`);
   }
 }
@@ -449,7 +496,7 @@ async function blockBundled() {
     n(`bootstrap (db-setup): ${bootstrapLines(sl).join(' / ')}`);
     check(setupExit(p) === 'exited|0', `db-setup ran once and exited 0 (${setupExit(p)})`);
     check(sl.includes(MSG.ready('created')) && /db-setup: done/.test(sl), 'db-setup\'s bootstrap child created crewflow_owner ("crewflow_owner is ready (created).") and wrote the target file');
-    check(!al.includes('[owner-bootstrap]'), 'rab-api ran no bootstrap child (option A: it never receives the admin URL)');
+    check(!al.includes('[owner-bootstrap]'), 'rab-api ran no bootstrap child (options A and 2: it never receives PG_DATABASE_URL)');
     const tgt = L.run('docker', ['exec', p.container('rab-api'), 'cat', '/run/crewflow/db-target/target.json'], { timeout: 30_000 }).stdout;
     check(/"v":\s*1/.test(tgt) && !tgt.includes('@') && !tgt.includes(s.dbPassword) && !tgt.includes(d1) && !tgt.includes(app1), 'the target file rab-api reads holds no login, no password and no APP_SECRET (credential-free; value not printed)');
     const r = role(p);
@@ -565,10 +612,10 @@ async function blockBundled() {
     check(stop.code === 0, 'rab-api and rab-worker stopped (cap: one one-off container at a time)');
     const before = adminConnections(p, ['postgres']);
     // Option A: the compose files give rab-api / rab-worker no URL; an operator who passes the admin URL anyway.
-    const ADMIN = { PG_DATABASE_URL: `postgresql://postgres:${s.dbPassword}@db:5432/crewflow?sslmode=verify-full` };
+    const ADMIN = { PG_DATABASE_URL: L.dbUrl('postgres', s.dbPassword) };
     for (const [svc, label] of [['rab-api', 'S10A-api-prestart'], ['rab-worker', 'S10A-worker-start']]) {
       const r = oneOff(p, svc, label, { env: ADMIN, timeout: 180_000 });
-      check(r.code === 64 && /must be the crewflow_owner login/.test(r.out), `${label.slice(5)} (the production entrypoint with an admin PG_DATABASE_URL): exit ${r.code}, refused by derive --owner-only`);
+      check(r.code === 64 && MSG.entrypointRefusal.test(r.out), `${label.slice(5)} (the production entrypoint with an admin PG_DATABASE_URL): exit ${r.code}, refused (option 2: no PG_DATABASE_URL of any login on the app services)`);
     }
     const cases = [
       ['rab-worker', 'S10A-worker-main', ['packages/rab-worker/dist/main.js']],
@@ -641,7 +688,7 @@ async function blockRace() {
     await L.waitFor('both migrate results', () => names.every((c) => migrateResults(logsOf(c)).length >= 1), 600_000, 3000);
     const logs = names.map(logsOf);
     logs.forEach((l, i) => evidence(`S9-api-${i + 1}.log`, l));
-    check(logs.every((l) => !l.includes('[owner-bootstrap]')), 'neither API start ran a bootstrap child (option A)');
+    check(logs.every((l) => !l.includes('[owner-bootstrap]')), 'neither API start ran a bootstrap child (options A and 2)');
     const res = logs.map((l) => migrateResults(l).pop() || {});
     n(`migrate 1: state ${res[0].state} applied ${(res[0].applied || []).length} exit ${res[0].exitCode}; migrate 2: state ${res[1].state} applied ${(res[1].applied || []).length} exit ${res[1].exitCode}`);
     const ledger = p.psql(`SELECT count(*) || '|' || count(DISTINCT name) FROM core.migrations`);
@@ -669,7 +716,7 @@ async function blockExternal() {
   const d2 = L.derivedOwnerPassword(app2);
   L.writeSecrets(p.secretsDir, { caPath: null, appSecret: app1 });
   use(p, { databaseUrl: null });
-  const url = (user, password) => `postgresql://${user}:${password}@db:5432/crewflow?sslmode=verify-full`;
+  const url = (user, password) => L.dbUrl(user, password);
   const noCore = () => p.psql(`SELECT count(*) FROM pg_namespace WHERE nspname = 'core'`) === '0';
   /** Objects crewflow_owner owns in this database (pg_shdepend 'o'), described, never values. */
   const owned = () => p.psql(`SELECT coalesce(string_agg(pg_describe_object(classid, objid, objsubid), ', ' ORDER BY 1), '') FROM pg_shdepend WHERE deptype = 'o' AND refobjid = (SELECT oid FROM pg_roles WHERE rolname = 'crewflow_owner') AND dbid = (SELECT oid FROM pg_database WHERE datname = current_database())`);
@@ -701,26 +748,9 @@ async function blockExternal() {
     }
   }, p);
 
-  await step('S10B', '10', 'the same privileged crewflow_owner through the PASS-THROUGH URL: the runtime guards refuse BYPASSRLS and SUPERUSER, nothing created', async (check, n) => {
-    use(p, { databaseUrl: url('crewflow_owner', pw.owner4) });
-    for (const [label, alter, re] of [
-      ['BYPASSRLS', null, /bypassrls|BYPASSRLS|bypass/],
-      ['SUPERUSER', 'ALTER ROLE crewflow_owner SUPERUSER NOBYPASSRLS', /superuser|SUPERUSER/],
-    ]) {
-      if (alter) p.psql(alter);
-      const su = start(`S10B-${label}-setup`);
-      check(su.code === 0 && su.out.includes(MSG.passThrough), `${label}: db-setup passes the crewflow_owner URL through (the bootstrap child is skipped; exit ${su.code})`);
-      const r = oneOff(p, 'rab-api', `S10B-${label}`, { timeout: 300_000 });
-      const refusal = r.out.split('\n').filter((l) => re.test(l)).map((l) => l.trim()).slice(0, 2);
-      n(`${label}: API exit ${r.code}; refusal: ${refusal.join(' | ').slice(0, 300)}`);
-      check(r.code !== 0 && refusal.length > 0, `${label}: the API start (from db-setup's pass-through target) is refused by the runtime guard (exit ${r.code})`);
-      check(noCore(), `${label}: no core schema created`);
-      const o = owned();
-      n(`${label}: objects the refused crewflow_owner owns after the refused start: ${o || 'none'}`);
-    }
-    p.psql('DROP OWNED BY crewflow_owner; DROP ROLE crewflow_owner;');
-    use(p, { databaseUrl: null });
-  }, p);
+  // PR #125 option 2: the privileged crewflow_owner through ITS OWN URL is refused by db-setup now (block ptx, P3); the
+  // runtime guards against a role made privileged after db-setup are block pt's S10B.
+  p.psql('DROP OWNED BY crewflow_owner; DROP ROLE crewflow_owner;');
 
   const ok3 = await step('S3', '3', 'an EXTERNAL admin URL with a non-superuser login: refused without CREATEROLE, refused without the right to grant on the database, works with CREATEROLE + database owner (fresh, restart, rotation); no ADMIN OPTION -> refused when a reset is needed', async (check, n) => {
     p.psql(`CREATE ROLE ext_norole LOGIN NOCREATEROLE PASSWORD '${pw.norole}'; ALTER DATABASE crewflow OWNER TO ext_norole;`);
@@ -793,7 +823,7 @@ async function blockExternal() {
       'ext_admin2 password': pw.admin2,
       'ext_norole password': pw.norole,
       'ext_nogrant password': pw.nogrant,
-      'hand-made crewflow_owner password (S4/S10B)': pw.owner4,
+      'hand-made crewflow_owner password (S4)': pw.owner4,
       'derived password 1': d1,
       'derived password 2': d2,
       'APP_SECRET 1': app1,
@@ -812,13 +842,228 @@ async function blockExternal() {
   teardown(p);
 }
 
+// ---------------------------------------------------------------------------------------------------- blocks pt / ptx
+/** `DO $owner_self$` statements in the db log (log_statement=all): each one is crewflow_owner's own ALTER ROLE ... PASSWORD. */
+const ownerSelfDoCount = (p) => (p.logs(L.DB_SERVICE).match(/statement: DO \$owner_self\$/g) || []).length;
+/** Client connections in the db log other than the test's own psql and the db's pg_isready (log_connections=on). */
+function appConnections(p) {
+  return adminConnections(p, []).all.filter((x) => x.app !== L.TEST_APP_NAME && x.app !== 'pg_isready').reduce((t, x) => t + x.n, 0);
+}
+/** Extensions and objects crewflow_owner owns in this database (described, never values). */
+function extensions(p) {
+  return p.psql(`SELECT coalesce(string_agg(extname || ' ' || extowner::regrole::text, ', ' ORDER BY extname), '') FROM pg_extension`);
+}
+function ownedByOwner(p) {
+  return p.psql(`SELECT coalesce(string_agg(pg_describe_object(classid, objid, objsubid), ', ' ORDER BY 1), '') FROM pg_shdepend WHERE deptype = 'o' AND refobjid = (SELECT oid FROM pg_roles WHERE rolname = 'crewflow_owner') AND dbid = (SELECT oid FROM pg_database WHERE datname = current_database())`);
+}
+const coreCount = (p) => p.psql(`SELECT count(*) FROM pg_namespace WHERE nspname = 'core'`);
+
+async function blockPassThrough() {
+  const p = project('pt', { ownerInit: true });
+  const s = L.secrets;
+  const d1 = L.derivedOwnerPassword(s.appSecret);
+  L.writeSecrets(p.secretsDir, { caPath: null });
+  use(p, { databaseUrl: L.ownerUrl(s.owner) });
+
+  const ok1 = await step('P1', 'opt2', 'pass-through with a crewflow_owner whose password is NOT the derived one: the first db-setup sets it once (step b), API and Worker start; a second db-setup takes step a (no ALTER)', async (check, n) => {
+    const d = deploy(p, 'P1-deploy');
+    check(d.code === 0, `compose.env PG_DATABASE_URL = the hand-made crewflow_owner URL, the documented command: exit ${d.code} after ${Math.round(d.ms / 1000)} s`);
+    await waitApp(p);
+    check(true, 'rab-api healthy, then rab-worker healthy');
+    const sl = setupLog(p);
+    evidence('P1-db-setup.log', sl);
+    evidence('P1-api.log', p.logs('rab-api'));
+    n(`bootstrap (db-setup): ${bootstrapLines(sl).join(' / ')}`);
+    check(setupExit(p) === 'exited|0' && /db-setup: done/.test(sl), `db-setup exited 0 and wrote the target file (${setupExit(p)})`);
+    check(sl.includes(MSG.passThrough) && sl.includes(MSG.readyStepB), 'step b: "crewflow_owner is ready (pass-through, its own password set to the derived one)."');
+    const r = role(p);
+    check(exactly01(r), `crewflow_owner keeps exactly the 01 attributes (${roleShape(r)})`);
+    check(p.ownerLoginWorks(d1) && !p.ownerLoginWorks(s.owner), 'the derived password logs in; the URL\'s own (hand-made) password no longer does');
+    const dos1 = ownerSelfDoCount(p);
+    check(dos1 === 1, `the db log holds exactly ONE \`DO $owner_self$\` (crewflow_owner's own password change): ${dos1}`);
+    checkSessions(p, check, 'P1');
+    checkEnviron(p, check, n, 'P1', [s.owner, s.dbPassword]); // the URL's own password and the admin's: never in an app process (the derived one is the runtime's own login)
+    const al = p.logs('rab-api');
+    check(!al.includes('[owner-bootstrap]'), 'rab-api ran no bootstrap child');
+    // the second db-setup: the documented command again
+    const verifier = r.verifierSha;
+    const d2 = deploy(p, 'P1-redeploy');
+    check(d2.code === 0, `the documented command again: exit ${d2.code}`);
+    await waitApp(p);
+    const sl2 = setupLog(p);
+    evidence('P1-db-setup-2.log', sl2);
+    n(`bootstrap (db-setup, second run): ${bootstrapLines(sl2).join(' / ')}`);
+    check(lastReady(sl2) === MSG.readyStepA || lastReady(sl2).endsWith(MSG.readyStepA), `the second db-setup took step a: "${lastReady(sl2).replace(/^.*?\[owner-bootstrap\]/, '[owner-bootstrap]')}"`);
+    check(ownerSelfDoCount(p) === dos1, `no new \`DO $owner_self$\` in the db log (still ${ownerSelfDoCount(p)}): no ALTER on step a`);
+    const r2 = role(p);
+    check(r2 && r2.oid === r.oid && r2.verifierSha === verifier && exactly01(r2), 'same role oid, byte-identical verifier (sha256 compared), same attributes');
+    checkSessions(p, check, 'P1 after the second db-setup');
+    // logs: no password, no APP_SECRET, no URL; the verifier only as the documented non-superuser residual in the db log
+    const texts = logTexts(p);
+    for (const [k, v] of Object.entries(texts)) evidence(`P1-${k.replace(/\W+/g, '-')}.txt`, v);
+    const found = scanSecrets(texts, { 'admin password (PG_DATABASE_PASSWORD)': s.dbPassword, 'hand-made crewflow_owner password': s.owner, 'derived password': d1, APP_SECRET: s.appSecret });
+    check(found.length === 0, `no secret in any log or compose output${found.length ? `: FOUND ${found.join('; ')}` : ''}`);
+    const urls = Object.entries(texts).filter(([, v]) => /postgres(ql)?:\/\/[^\s'"]*@/.test(v)).map(([k]) => k);
+    check(urls.length === 0, `no database URL with credentials in any log${urls.length ? `: FOUND in ${urls.join(', ')}` : ''}`);
+    const appVer = Object.entries(texts).filter(([k]) => k !== 'db log').reduce((a, [, v]) => a + (v.match(VERIFIER_RE) || []).length, 0);
+    check(appVer === 0, 'no SCRAM verifier in an application log or compose output');
+    n(`RESIDUAL (plan §3.6): with log_statement=all the db log holds ${(texts['db log'].match(VERIFIER_RE) || []).length} SCRAM verifier occurrence(s) of step b (crewflow_owner is not a superuser and cannot turn statement logging off), never a password`);
+  }, p);
+
+  await step('P5', 'opt2', 'a non-empty PG_DATABASE_URL forced into rab-api / rab-worker (a WORKING crewflow_owner URL, the admin URL, a non-URL value): the entrypoints exit 64 before any database connection', async (check, n) => {
+    if (!ok1) n('P1 did not pass: running anyway on what it left');
+    const stop = p.compose(['stop', 'rab-worker', 'rab-api'], { timeout: 300_000 });
+    check(stop.code === 0, 'rab-api and rab-worker stopped (cap: one one-off container at a time)');
+    const before = appConnections(p);
+    const values = [
+      ['owner', L.ownerUrl(d1)],
+      ['admin', L.dbUrl('postgres', s.dbPassword)],
+      ['junk', 'x'],
+    ];
+    for (const [svc, short] of [['rab-api', 'api'], ['rab-worker', 'worker']]) {
+      for (const [kind, value] of values) {
+        const r = oneOff(p, svc, `P5-${short}-${kind}`, { env: { PG_DATABASE_URL: value }, timeout: 180_000 });
+        const line = (r.out.match(/.*PG_DATABASE_URL must never be set.*/) || [''])[0];
+        check(r.code === 64 && MSG.entrypointRefusal.test(r.out), `${svc} with a forced ${kind} PG_DATABASE_URL: exit ${r.code} "${line.trim().slice(0, 110)}"`);
+        check(!/password|postgres(ql)?:\/\//i.test(L.redact(line).replace(/<redacted>/g, '')), `${svc} (${kind}): the refusal names no credential or URL`);
+      }
+    }
+    const after = appConnections(p);
+    check(after === before, `no database connection was opened by any of the six refused starts (application connections in the db log: ${before} -> ${after})`);
+    const up = p.compose(['up', '-d'], { timeout: 600_000 });
+    keep(p, 'P5-up', up.out);
+    await waitApp(p);
+    check(up.code === 0, `the stack comes back with the documented compose files (up -d exit ${up.code})`);
+  }, p);
+
+  await step('S10B', '10', 'a crewflow_owner made privileged AFTER db-setup (BYPASSRLS, then SUPERUSER): the runtime guards still refuse it before serving', async (check, n) => {
+    const stop = p.compose(['stop', 'rab-worker', 'rab-api'], { timeout: 300_000 });
+    check(stop.code === 0, 'rab-api and rab-worker stopped');
+    for (const [label, alter, re] of [
+      ['BYPASSRLS', 'ALTER ROLE crewflow_owner BYPASSRLS', /bypassrls|BYPASSRLS|bypass/],
+      ['SUPERUSER', 'ALTER ROLE crewflow_owner NOBYPASSRLS SUPERUSER', /superuser|SUPERUSER/],
+    ]) {
+      p.psql(alter);
+      const r = oneOff(p, 'rab-api', `S10B-${label}`, { timeout: 300_000 });
+      const refusal = r.out.split('\n').filter((l) => re.test(l)).map((l) => l.trim()).slice(0, 2);
+      n(`${label}: API exit ${r.code}; refusal: ${refusal.join(' | ').slice(0, 300)}`);
+      check(r.code !== 0 && refusal.length > 0, `${label}: an API start on db-setup's (earlier) target is refused by the runtime guard (exit ${r.code})`);
+    }
+    p.psql('ALTER ROLE crewflow_owner NOSUPERUSER NOBYPASSRLS');
+    check(exactly01(role(p)), 'crewflow_owner restored to the 01 attributes');
+  }, p);
+  teardown(p);
+}
+
+async function blockPassThroughRefusals() {
+  const p = project('ptx', { ownerInit: true });
+  const s = L.secrets;
+  const d1 = L.derivedOwnerPassword(s.appSecret);
+  L.writeSecrets(p.secretsDir, { caPath: null });
+  use(p, { databaseUrl: L.ownerUrl(s.owner) });
+  const up = p.compose(['up', '-d', '--wait', L.DB_SERVICE], { timeout: 300_000 });
+  keep(p, 'ptx-db-up', up.out);
+  if (up.code !== 0) throw new Error(`block ptx: db did not come up (exit ${up.code})`);
+
+  await step('P3', 'opt2', 'pass-through with a SUPERUSER crewflow_owner, then a BYPASSRLS one: db-setup exits 64, no role change, no extension or object created, rab-api / rab-worker never start', async (check, n) => {
+    const ext0 = extensions(p);
+    const own0 = ownedByOwner(p);
+    n(`before: extensions [${ext0}]; objects crewflow_owner owns [${own0 || 'none'}]`);
+    for (const [label, alter, attr] of [
+      ['SUPERUSER', 'ALTER ROLE crewflow_owner SUPERUSER', 'SUPERUSER'],
+      ['BYPASSRLS', 'ALTER ROLE crewflow_owner NOSUPERUSER BYPASSRLS', 'BYPASSRLS'],
+    ]) {
+      p.psql(alter);
+      const before = role(p);
+      const dos = ownerSelfDoCount(p);
+      const d = deploy(p, `P3-${label}`);
+      const sl = setupLog(p);
+      evidence(`P3-${label}-db-setup.log`, sl);
+      n(`${label}: ${bootstrapLines(sl).join(' / ')}`);
+      check(d.code !== 0, `${label}: the documented command FAILS (exit ${d.code}): rab-api waits for db-setup to complete successfully`);
+      check(setupExit(p) === 'exited|64', `${label}: db-setup exited 64 (${setupExit(p)})`);
+      check(sl.includes(MSG.passThrough) && sl.includes(MSG.privileged(attr)), `${label}: the fixed refusal "${MSG.privileged(attr).slice(0, 80)}…"`);
+      check(!/\n\s+at .*\(.*\.js:\d+:\d+\)/.test(sl), `${label}: no stack trace`);
+      check(JSON.stringify(role(p)) === JSON.stringify(before), `${label}: the role is untouched (attributes and verifier compared: ${roleShape(role(p))})`);
+      check(ownerSelfDoCount(p) === dos, `${label}: no \`DO $owner_self$\` ran (no password change attempted)`);
+      check(p.ownerLoginWorks(s.owner) && !p.ownerLoginWorks(d1), `${label}: the hand-made password still logs in, the derived one does not`);
+      check(extensions(p) === ext0 && ownedByOwner(p) === own0 && coreCount(p) === '0', `${label}: no extension, no object and no core schema created (extensions [${extensions(p)}])`);
+      check(p.neverStarted('rab-api') && p.neverStarted('rab-worker'), `${label}: rab-api and rab-worker never started`);
+    }
+    p.psql('ALTER ROLE crewflow_owner NOBYPASSRLS');
+    check(exactly01(role(p)), 'crewflow_owner back to the 01 attributes for P4');
+  }, p);
+
+  await step('P4', 'opt2', 'interrupted step b (test seam, NODE_ENV=test only): killed before the COMMIT -> nothing changed, the re-run takes step b; killed after the COMMIT -> the re-run (the documented command) recovers through step a', async (check, n) => {
+    const seam = (point, nodeEnv = 'test') => ({ NODE_ENV: nodeEnv, CREWFLOW_TEST_OWNER_SETUP_ABORT: point });
+    // the seam outside NODE_ENV=test is refused before anything connects
+    const c0 = appConnections(p);
+    const refused = oneOff(p, 'db-setup', 'P4-seam-production', { env: seam('after-commit', 'production') });
+    check(refused.code === 64 && refused.out.includes(MSG.seamRefused), `the seam with NODE_ENV=production: db-setup exit ${refused.code}, refused`);
+    check(appConnections(p) === c0, 'the refused seam opened no database connection');
+    // before-commit
+    const r0 = role(p);
+    const dos0 = ownerSelfDoCount(p);
+    const b = oneOff(p, 'db-setup', 'P4-before-commit', { env: seam('before-commit') });
+    n(`before-commit: exit ${b.code}; ${bootstrapLines(b.out).join(' / ')}`);
+    check(b.out.includes(MSG.testAbort('before-commit')) && b.code !== 0 && b.code !== 64 && !b.out.includes('crewflow_owner is ready'), `killed hard before the COMMIT: db-setup exit ${b.code}, no "ready" line`);
+    await L.waitFor('the killed bootstrap session to end', () => p.psql(`SELECT count(*) FROM pg_stat_activity WHERE application_name LIKE 'crewflow-owner-bootstrap%'`) === '0', 60_000, 1000);
+    const rb = role(p);
+    check(JSON.stringify(rb) === JSON.stringify(r0), 'before-commit: the role is unchanged (verifier sha256 identical): the transaction rolled back');
+    check(p.ownerLoginWorks(s.owner) && !p.ownerLoginWorks(d1), 'before-commit: the hand-made password still logs in, the derived one does not');
+    n(`before-commit: \`DO $owner_self$\` statements ${dos0} -> ${ownerSelfDoCount(p)} (executed, then rolled back by the server when the client died)`);
+    const b2 = oneOff(p, 'db-setup', 'P4-before-commit-rerun');
+    n(`re-run: exit ${b2.code}; ${bootstrapLines(b2.out).join(' / ')}`);
+    check(b2.code === 0 && b2.out.includes(MSG.readyStepB), `the re-run takes step b and succeeds (exit ${b2.code})`);
+    const rb2 = role(p);
+    check(rb2.verifierSha !== r0.verifierSha && rb2.oid === r0.oid && exactly01(rb2) && p.ownerLoginWorks(d1) && !p.ownerLoginWorks(s.owner), 'after the re-run: same role and attributes, new verifier; the derived password logs in, the hand-made one does not');
+    // after-commit: give the role its hand-made password back first (as the superuser; statement logging off)
+    p.psql(`ALTER ROLE crewflow_owner PASSWORD '${s.owner}'`);
+    check(p.ownerLoginWorks(s.owner) && !p.ownerLoginWorks(d1), 'reset by hand: the hand-made password logs in again');
+    const r1 = role(p);
+    const a = oneOff(p, 'db-setup', 'P4-after-commit', { env: seam('after-commit') });
+    n(`after-commit: exit ${a.code}; ${bootstrapLines(a.out).join(' / ')}`);
+    check(a.out.includes(MSG.testAbort('after-commit')) && a.code !== 0 && a.code !== 64 && !a.out.includes('crewflow_owner is ready'), `killed hard after the COMMIT: db-setup exit ${a.code}, no "ready" line, no target file`);
+    const ra = role(p);
+    check(ra.verifierSha !== r1.verifierSha && p.ownerLoginWorks(d1) && !p.ownerLoginWorks(s.owner), 'after-commit: the derived password is already in place (committed)');
+    const dosA = ownerSelfDoCount(p);
+    const d = deploy(p, 'P4-recover');
+    check(d.code === 0, `the documented command recovers: exit ${d.code}`);
+    await waitApp(p);
+    const sl = setupLog(p);
+    evidence('P4-recover-db-setup.log', sl);
+    check(lastReady(sl).endsWith(MSG.readyStepA) && ownerSelfDoCount(p) === dosA, 'the recovering db-setup took step a ("pass-through, unchanged"), no new `DO $owner_self$`');
+    const rr = role(p);
+    check(rr.verifierSha === ra.verifierSha && exactly01(rr), 'same verifier as the one the interrupted run committed; attributes unchanged');
+    checkSessions(p, check, 'P4 recovered');
+  }, p);
+
+  await step('P2', 'opt2', 'pass-through whose URL already carries the derived password: step a, no ALTER, same verifier; only db-setup reads the changed compose.env', async (check, n) => {
+    const before = role(p);
+    const dos = ownerSelfDoCount(p);
+    use(p, { databaseUrl: L.ownerUrl(d1) });
+    const d = deploy(p, 'P2-deploy');
+    check(d.code === 0, `compose.env PG_DATABASE_URL = the crewflow_owner URL with the derived password, the documented command: exit ${d.code}`);
+    await waitApp(p);
+    const sl = setupLog(p);
+    evidence('P2-db-setup.log', sl);
+    n(`bootstrap (db-setup): ${bootstrapLines(sl).join(' / ')}`);
+    check(sl.includes(MSG.passThrough) && lastReady(sl).endsWith(MSG.readyStepA) && setupExit(p) === 'exited|0', 'db-setup took step a: "pass-through, unchanged", exit 0');
+    check(ownerSelfDoCount(p) === dos, `no new \`DO $owner_self$\` in the db log (${dos} -> ${ownerSelfDoCount(p)})`);
+    const after = role(p);
+    check(JSON.stringify(after) === JSON.stringify(before), 'crewflow_owner unchanged (oid, attributes, verifier)');
+    checkEnviron(p, check, n, 'P2', [s.owner, s.dbPassword]);
+  }, p);
+  teardown(p);
+}
+
 // --------------------------------------------------------------------------------------------------------- block r256
 async function blockR256() {
   const p = project('r256', { ownerInit: true, logging: false });
   const s = L.secrets;
   const d1 = L.derivedOwnerPassword(s.appSecret);
   L.writeSecrets(p.secretsDir); // PG_SSL_CA_CERT_PATH spelled out: R256 has no bundled-db CA rule
-  await step('S7', '7', 'an R256 database upgrades unchanged with its crewflow_owner URL (pass-through), then with the admin URL (the password is reset once)', async (check, n) => {
+  await step('S7', '7', 'an R256 database upgrades with its crewflow_owner URL (option 2: db-setup gives crewflow_owner the derived password once, nothing else changes), then with the admin URL (nothing left to reset)', async (check, n) => {
     // R256 on THIS release's compose files alone: what a rollback across DB-SETUP without the old files does.
     p.setPrev(false);
     use(p, { digest: R256, databaseUrl: L.ownerUrl() });
@@ -838,6 +1083,7 @@ async function blockR256() {
     check(p.psql(`SELECT count(*) FROM core.organisation WHERE slug::text LIKE 'dot-seed-%'`) === '2', 'seeded 2 synthetic organisations');
     const before = L.facts(p);
     const r0 = role(p);
+    const state7 = { acl: dbAcl(p) };
     n(`R256 crewflow_owner: ${roleShape(r0)}`);
     // (a) pass-through
     p.setPrev(false);
@@ -849,9 +1095,14 @@ async function blockR256() {
     const sla = setupLog(p);
     evidence('S7-new-pass-through-api.log', ala);
     evidence('S7-new-pass-through-db-setup.log', sla);
-    check(sla.includes(MSG.passThrough) && !sla.includes('[owner-bootstrap] crewflow_owner is ready'), `pass-through: db-setup says "${MSG.passThrough}", the bootstrap child never connected`);
+    n(`bootstrap (db-setup): ${bootstrapLines(sla).join(' / ')}`);
+    check(sla.includes(MSG.passThrough) && sla.includes(MSG.readyStepB), 'pass-through (option 2): db-setup checked the crewflow_owner URL and set crewflow_owner\'s OWN password to the derived one (step b)');
     const ra = role(p);
-    check(JSON.stringify(ra) === JSON.stringify(r0), 'pass-through: crewflow_owner unchanged (oid, attributes, verifier)');
+    const sameButVerifier = (a, b) => ATTRS.filter((k) => k !== 'verifierSha').every((k) => a[k] === b[k]);
+    check(ra && sameButVerifier(ra, r0) && ra.verifierSha !== r0.verifierSha, `pass-through: same crewflow_owner (oid, attributes, valid-until), only the verifier changed (${roleShape(ra)})`);
+    check(dbAcl(p) === state7.acl, 'pass-through: the database ACL is unchanged (no GRANT on this path)');
+    check(p.ownerLoginWorks(d1) && !p.ownerLoginWorks(s.owner), 'pass-through: the derived password logs in; the hand-made one no longer does');
+    p.ownerPassword = d1;
     const mra = migrateResults(ala).pop() || {};
     n(`pass-through migrate result: state ${mra.state}, applied ${(mra.applied || []).length}`);
     check(mra.exitCode === 0 && p.psql(`SELECT count(*) || '|' || count(DISTINCT name) FROM core.migrations`).split('|').every((x, i, a) => x === a[0]), 'the upgrade completed, no duplicate ledger rows');
@@ -867,11 +1118,10 @@ async function blockR256() {
     evidence('S7-new-admin-url-api.log', p.logs('rab-api'));
     evidence('S7-new-admin-url-db-setup.log', alb);
     n(`bootstrap (db-setup): ${bootstrapLines(alb).join(' / ')}`);
-    check(alb.includes(MSG.ready('password set')), 'admin URL: db-setup resets the existing crewflow_owner\'s password to the derived one ("ready (password set)")');
+    check(alb.includes(MSG.ready('unchanged')), 'admin URL after the pass-through start: crewflow_owner already has the derived password, db-setup changes nothing ("ready (unchanged)")');
     const rb = role(p);
-    check(rb.oid === r0.oid && rb.verifierSha !== r0.verifierSha && exactly01(rb), `same role, new verifier, attributes unchanged (${roleShape(rb)})`);
-    check(p.ownerLoginWorks(d1) && !p.ownerLoginWorks(s.owner), 'the derived password logs in; the hand-made one no longer does');
-    p.ownerPassword = d1;
+    check(rb.oid === r0.oid && rb.verifierSha === ra.verifierSha && exactly01(rb), `same role, same verifier as after the pass-through start, attributes unchanged (${roleShape(rb)})`);
+    check(p.ownerLoginWorks(d1) && !p.ownerLoginWorks(s.owner), 'the derived password logs in; the hand-made one does not');
     L.compareFacts(check, before, L.facts(p), 'admin-URL start');
     L.rlsCheck(p, check, 'admin-URL start');
     checkSessions(p, check, 'S7 admin URL');
@@ -882,7 +1132,7 @@ async function blockR256() {
     const dc = deploy(p, 'S7-redeploy');
     await waitApp(p);
     const rc2 = role(p);
-    check(rc.verifierSha === rb.verifierSha && dc.code === 0 && rc2.verifierSha === rb.verifierSha && lastReady(setupLog(p)).includes('(unchanged)'), 'the next starts change nothing (an API restart, then db-setup again: "ready (unchanged)"): the password was reset ONCE');
+    check(rc.verifierSha === rb.verifierSha && dc.code === 0 && rc2.verifierSha === rb.verifierSha && lastReady(setupLog(p)).includes('(unchanged)'), 'the next starts change nothing (an API restart, then db-setup again: "ready (unchanged)"): the password was set ONCE, by the first NEW db-setup');
   }, p);
   teardown(p);
 }
@@ -913,6 +1163,8 @@ async function main() {
   if (BLOCKS.includes('a')) await blockBundled();
   if (BLOCKS.includes('race')) await blockRace();
   if (BLOCKS.includes('ext')) await blockExternal();
+  if (BLOCKS.includes('pt')) await blockPassThrough();
+  if (BLOCKS.includes('ptx')) await blockPassThroughRefusals();
   // R256 supports PostgreSQL 16 and 18 only (its fingerprint majors; it refuses 17 at boot): no R256 database exists on 17.
   if (BLOCKS.includes('r256') && R256 && MAJOR === '17') {
     note('block r256 not run on PostgreSQL 17: R256 refuses 17 at boot (SUPPORTED_FINGERPRINT_MAJORS = [16, 18]), so no R256 database on 17 exists to upgrade');

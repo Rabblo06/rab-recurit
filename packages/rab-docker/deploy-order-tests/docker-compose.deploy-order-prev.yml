@@ -2,17 +2,19 @@
 # such an image has no worker-start.sh and an api-prestart.sh that is not meant to be the entrypoint, so its deploys use
 # the previous release's OWN start-up, exactly as that release's docker-compose.image.yml declared it
 # (`git show 0e0a6edd:packages/rab-docker/docker-compose.image.yml`): the image's ENTRYPOINT (tini -s), rab-api command
-# ./api-prestart.sh, rab-worker command `node packages/rab-worker/dist/main.js` under compose's init. The drivers add this
-# file only while CREWFLOW_IMAGE_TAG is such a digest, and always with the pass-through crewflow_owner URL (those images
-# read PG_DATABASE_URL as their runtime login and cannot use an admin URL).
+# ./api-prestart.sh, rab-worker command `node packages/rab-worker/dist/main.js` under compose's init, and the
+# PG_DATABASE_URL interpolation value on both (that release's runtime login). The drivers add this file only while
+# CREWFLOW_IMAGE_TAG is such a digest, and always with a crewflow_owner URL (those images read PG_DATABASE_URL as their
+# runtime login and cannot use an admin URL). After a DB-SETUP image has run, that URL carries the password derived from
+# APP_SECRET (PR #125 option 2: db-setup gave crewflow_owner that password; DB-SETUP-PLAN §7.2 rollback).
 #
 # Consequence measured by run-db-setup-tests.cjs S7: rolling back to a pre-DB-SETUP digest with THIS release's compose files
 # alone leaves rab-worker unable to start (./worker-start.sh is not in the old image): a rollback across DB-SETUP uses the
 # previous release's compose files.
-
 #
-# PR #125 option A: such an image has no db-setup.sh either, so db-setup does nothing here (exit 0, rab-api's depends_on is
-# satisfied); rab-api / rab-worker get the pass-through crewflow_owner URL from compose.env's PG_DATABASE_URL, as before.
+# PR #125 options A and 2: such an image has no db-setup.sh either, so db-setup does nothing here (exit 0, rab-api's
+# depends_on is satisfied). Option 2 pins `PG_DATABASE_URL: ""` on rab-api / rab-worker in this release's files; this
+# overlay restores the previous release's `${PG_DATABASE_URL:-}` for the old image only.
 
 services:
   db-setup:
@@ -21,8 +23,12 @@ services:
   rab-api:
     entrypoint: ["/sbin/tini", "-s", "--"]
     command: ["./api-prestart.sh"]
+    environment:
+      PG_DATABASE_URL: ${PG_DATABASE_URL:-}
 
   rab-worker:
     entrypoint: ["/sbin/tini", "-s", "--"]
     command: ["node", "packages/rab-worker/dist/main.js"]
     init: true
+    environment:
+      PG_DATABASE_URL: ${PG_DATABASE_URL:-}

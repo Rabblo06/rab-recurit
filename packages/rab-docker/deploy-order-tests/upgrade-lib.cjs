@@ -10,10 +10,14 @@
  * DB-SETUP (docker-compose.local-db.yml retired, D3): the database is the production file's own `db` service. The
  * pass-through scenarios (an existing crewflow_owner, as every R254/R256 deployment has) add OWNER_OVERLAY, which runs the
  * shipped hand-made fallback 01-crewflow-owner.sql at the db's first start, and give the crewflow_owner URL as the compose
- * interpolation value PG_DATABASE_URL (image.yml commits `PG_DATABASE_URL: ${PG_DATABASE_URL:-}` on rab-api / rab-worker,
- * and db-setup, which then does nothing; PR #125 option A: an admin URL goes in PG_DATABASE_ADMIN_URL and reaches only the
- * one-shot db-setup; a database.env URL would be overridden). An image older than DB-SETUP has no worker-start.sh: its
- * deploys add PREV_OVERLAY, the previous release's own rab-worker command.
+ * interpolation value PG_DATABASE_URL. PR #125 option 2 (owner decision 2026-11-13): PG_DATABASE_URL is the ONE database
+ * setting (an admin URL, an existing crewflow_owner URL, or unset = the bundled db) and is interpolated into the one-shot
+ * db-setup ONLY; rab-api / rab-worker pin `PG_DATABASE_URL: ""` and always build the crewflow_owner URL from db-setup's
+ * target file + HKDF(APP_SECRET). A crewflow_owner URL therefore gets the DERIVED password on the first NEW db-setup (step
+ * b), after which the hand-made password no longer logs in: Project.ownerPasswordNow() finds the password that works, and
+ * a deploy of an image older than DB-SETUP (a rollback) is given the crewflow_owner URL with THAT password (DB-SETUP-PLAN
+ * §7.2). Such an image has no worker-start.sh: its deploys add PREV_OVERLAY, the previous release's own start-up, which
+ * also gives its rab-api / rab-worker the PG_DATABASE_URL interpolation value back, as that release's compose files did.
  *
  * (run-deploy-order-tests.cjs, the PR #90 T1-T4 driver, keeps its own copy of the same helpers.)
  */
@@ -137,8 +141,8 @@ class Project {
   compose(args, opts = {}) {
     return run('docker', ['compose', ...args], { ...opts, env: { ...this.composeEnv(), ...(opts.env ?? {}) } });
   }
-  composeAsync(args) {
-    return runAsync('docker', ['compose', ...args], { env: this.composeEnv() });
+  composeAsync(args, env = {}) {
+    return runAsync('docker', ['compose', ...args], { env: { ...this.composeEnv(), ...env } });
   }
   /** THE documented deploy, exactly. */
   deploy(timeoutMs = 1_500_000) {
@@ -189,7 +193,7 @@ class Project {
    * psql as crewflow_owner over TLS (verify-full against the db's own CA), from inside the db container but to its NETWORK
    * address (the service name `db`), the path the app containers take.
    */
-  psqlOwner(sql, password = this.ownerPassword ?? secrets.owner) {
+  psqlOwner(sql, password = this.ownerPasswordNow()) {
     const r = run(
       'docker',
       ['exec', '-i', '-e', 'PGPASSWORD', '-e', `PGAPPNAME=${TEST_APP_NAME}`, this.container(DB_SERVICE), 'psql', '-X', '-q', '-At', '-v', 'ON_ERROR_STOP=1', 'host=db sslmode=verify-full sslrootcert=/var/tmp/ca.crt dbname=crewflow user=crewflow_owner'],
@@ -207,6 +211,17 @@ class Project {
       this.lastOwnerLoginError = redact(e && e.message ? e.message : String(e)).slice(0, 300);
       return false;
     }
+  }
+  /**
+   * The crewflow_owner password that logs in NOW (option 2: a NEW db-setup gives a hand-made crewflow_owner the password
+   * derived from APP_SECRET). Tried in order: the one the test last set, the derived one, the hand-made one. With the db
+   * not running (a fresh deploy): the one the test last set, else the hand-made one. Never printed.
+   */
+  ownerPasswordNow() {
+    if (this.inspect(DB_SERVICE, '{{.State.Running}}') !== 'true') return this.ownerPassword ?? secrets.owner;
+    const candidates = [...new Set([this.ownerPassword, derivedOwnerPassword(this.appSecret ?? secrets.appSecret), secrets.owner].filter(Boolean))];
+    for (const c of candidates) if (this.ownerLoginWorks(c)) return c;
+    return this.ownerPassword ?? secrets.owner;
   }
   /** An idle superuser transaction holding `lockSql` until release() (stdin kept open; no statement keeps a snapshot). */
   async holdLock(lockSql) {
@@ -304,16 +319,21 @@ function writeSecrets(dir, { expectedDatabase, appSecret = secrets.appSecret, ca
   }
 }
 
+/** A URL of the bundled db for `user` (verify-full). Built here only, so no caller spells a credential into a URL literal. */
+function dbUrl(user, password) {
+  return `postgresql://${user}:${encodeURIComponent(password)}@db:5432/crewflow?sslmode=verify-full`;
+}
+
 /** The pass-through URL: the hand-made crewflow_owner at the bundled db, verify-full (as every R254/R256 deployment has). */
 function ownerUrl(password = secrets.owner) {
-  return `postgresql://crewflow_owner:${password}@db:5432/crewflow?sslmode=verify-full`;
+  return dbUrl('crewflow_owner', password);
 }
 
 /**
  * compose.env. `databaseUrl`: the database URL of the case (default: the pass-through crewflow_owner URL); `null` leaves it
- * out, i.e. the production default, the bundled db's admin URL built from PG_DATABASE_PASSWORD. PR #125 option A: a
- * crewflow_owner URL is written as PG_DATABASE_URL (rab-api / rab-worker receive it: pass-through), any other login as
- * PG_DATABASE_ADMIN_URL (interpolated into the one-shot db-setup only).
+ * out, i.e. the production default, the bundled db's admin URL built from PG_DATABASE_PASSWORD. PR #125 option 2: whatever
+ * the login (an admin, crewflow_owner), it is written as PG_DATABASE_URL, the ONE database setting, which the compose
+ * files interpolate into the one-shot db-setup only (PG_DATABASE_ADMIN_URL no longer exists).
  */
 function writeComposeEnv(project, { repository, digest, pgImage, redisImage, databaseUrl = ownerUrl() }) {
   const S = project.secretsDir.replace(/\\/g, '/');
@@ -324,7 +344,7 @@ function writeComposeEnv(project, { repository, digest, pgImage, redisImage, dat
     CREWFLOW_POSTGRES_IMAGE: pgImage,
     CREWFLOW_SECRETS_DIR: S,
     PG_DATABASE_PASSWORD: secrets.dbPassword,
-    ...(databaseUrl ? { [/^postgres(ql)?:\/\/crewflow_owner[:@]/.test(databaseUrl) ? 'PG_DATABASE_URL' : 'PG_DATABASE_ADMIN_URL']: databaseUrl } : {}),
+    ...(databaseUrl ? { PG_DATABASE_URL: databaseUrl } : {}),
     CREWFLOW_API_MEM_LIMIT: '1024m',
     CREWFLOW_API_CPUS: '2',
     CREWFLOW_WORKER_MEM_LIMIT: '1536m',
@@ -404,6 +424,7 @@ module.exports = {
   TEST_APP_NAME,
   b64,
   compareFacts,
+  dbUrl,
   derivedOwnerPassword,
   facts,
   fmtEvents,
