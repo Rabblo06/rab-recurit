@@ -184,6 +184,9 @@ jobs:
           docker compose version || { echo "::error::docker compose is required to verify the image compose variant"; exit 1; }
           node --test packages/rab-docker/staging/verify-image-compose.test.cjs
           node packages/rab-docker/staging/verify-image-compose.cjs
+      # X1.9 (S10 / DEAD-08): the check needs the declared root devDependency `yaml`; without it, it fails (exit 1), never skips.
+      - name: Compose credential isolation fails closed without its YAML parser (X1.9)
+        run: node --test packages/rab-docker/scripts/compose-credential-isolation.test.cjs
       - name: Compose credential isolation (docker compose config)
         run: node packages/rab-docker/scripts/compose-credential-isolation.cjs
       # rab-ops removal (PR 2): the gate's refusals of the retired operations container and its environment.
