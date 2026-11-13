@@ -92,6 +92,52 @@ function runAsync(cmd, args, opts = {}) {
   return { child, done, output: () => out };
 }
 
+/** Container events of a project, parsed and sorted (oldest first). */
+function parseEvents(text) {
+  return String(text)
+    .split('\n')
+    .filter((l) => l.trim().startsWith('{'))
+    .map((l) => JSON.parse(l))
+    .map((e) => ({ t: BigInt(e.timeNano), action: e.Action, service: e.Actor?.Attributes?.['com.docker.compose.service'], id: String(e.Actor?.ID ?? e.id ?? '').slice(0, 12), image: e.Actor?.Attributes?.image }))
+    .sort((a, b) => (a.t < b.t ? -1 : a.t > b.t ? 1 : 0));
+}
+/**
+ * A LIVE stream of a project's container events, started before a deploy. `docker events --since` only replays the daemon's
+ * small in-memory buffer, which other projects' health-check exec events overflow on a busy host; a stream sees every event.
+ * Pass it to Project.events(watcher) to stop it and get the events.
+ */
+const liveWatchers = new Set();
+process.on('exit', () => {
+  for (const c of liveWatchers) {
+    try {
+      c.kill();
+    } catch {
+      /* already gone */
+    }
+  }
+});
+function watchEvents(projectName) {
+  const child = spawn('docker', ['events', '--filter', `label=com.docker.compose.project=${projectName}`, '--filter', 'type=container', '--format', '{{json .}}'], { env: { ...process.env, MSYS_NO_PATHCONV: '1' }, stdio: ['ignore', 'pipe', 'ignore'] });
+  let buf = '';
+  child.stdout.on('data', (b) => (buf += b.toString('utf8')));
+  // Never keeps the run alive or outlives it: unref'd, and killed at exit if a failed case never stopped it.
+  child.unref();
+  child.stdout.unref();
+  liveWatchers.add(child);
+  child.on('exit', () => liveWatchers.delete(child));
+  return {
+    watcher: true,
+    stop() {
+      try {
+        child.kill();
+      } catch {
+        /* already gone */
+      }
+      return parseEvents(buf);
+    },
+  };
+}
+
 async function waitFor(label, fn, timeoutMs, everyMs = 3000) {
   const t0 = Date.now();
   for (;;) {
@@ -293,6 +339,7 @@ class Project {
     return run('docker', ['logs', this.container(service)], { timeout: 120_000 }).out;
   }
   events(since, until) {
+    if (since && since.watcher) return since.stop();
     const r = run('docker', ['events', '--since', String(since), '--until', String(until), '--filter', `label=com.docker.compose.project=${this.name}`, '--filter', 'type=container', '--format', '{{json .}}']);
     return r.stdout
       .split('\n')
@@ -524,6 +571,7 @@ module.exports = {
   newSecrets,
   nowS,
   ownerUrl,
+  parseEvents,
   redact,
   rlsCheck,
   run,
@@ -531,6 +579,7 @@ module.exports = {
   secrets,
   sleep,
   waitFor,
+  watchEvents,
   writeComposeEnv,
   writeSecrets,
 };

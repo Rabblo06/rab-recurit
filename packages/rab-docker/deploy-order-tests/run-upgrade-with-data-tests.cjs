@@ -274,7 +274,7 @@ async function main() {
     if (IMG.control) {
       u1.setShortHealth(true);
       use(u1, IMG.control);
-      const since = L.nowS() - 1;
+      const since = L.watchEvents(u1.name); // live stream: the daemon's replay buffer overflows on a busy host
       const d = u1.deploy(900_000);
       evidence('U1-control-deploy.log', d.out);
       check(d.code !== 0, `RED CONTROL (N1 image ${IMG.control.slice(0, 19)}…): the deploy FAILS on the seeded R254 database (exit ${d.code})`);
@@ -287,7 +287,7 @@ async function main() {
       u1.setShortHealth(false);
     } else n('red control skipped (DOT_CONTROL_DIGEST not set)');
     use(u1, IMG.next);
-    const since = L.nowS() - 1;
+    const since = L.watchEvents(u1.name); // live stream: the daemon's replay buffer overflows on a busy host
     const d = u1.deploy();
     evidence('U1-new-deploy.log', d.out);
     check(d.code === 0, `deploy of NEW on the seeded R254 database: exit ${d.code} after ${Math.round(d.ms / 1000)} s`);

@@ -193,6 +193,7 @@ class Project {
   }
   /** Container events of this project between two unix-second marks, oldest first. */
   events(since, until) {
+    if (since && since.watcher) return since.stop();
     const r = run('docker', ['events', '--since', String(since), '--until', String(until), '--filter', `label=com.docker.compose.project=${this.name}`, '--filter', 'type=container', '--format', '{{json .}}']);
     return r.stdout
       .split('\n')
@@ -337,7 +338,7 @@ async function main() {
   // ------------------------------------------------------------------------------------------------------------ T1
   await step('T1', 'fresh deploy (previous digest) with the one command: rab-api healthy BEFORE rab-worker starts', async (check, n) => {
     writeComposeEnv(main, PREV);
-    const since = nowS() - 1;
+    const since = L.watchEvents(main.name); // live stream: the daemon's replay buffer overflows on a busy host
     const d = main.deploy();
     evidence('T1-deploy.log', d.out);
     check(d.code === 0, `\`docker compose pull && docker compose up -d\` exit ${d.code} after ${Math.round(d.ms / 1000)} s`);
@@ -379,7 +380,7 @@ async function main() {
   await step('T2', 'deploy the NEW digest with the same command: both recreated on the same new digest; the old Worker stops before the new API starts; the new Worker runs the new code', async (check, n) => {
     const before = appState(main);
     writeComposeEnv(main, NEW);
-    const since = nowS() - 1;
+    const since = L.watchEvents(main.name); // live stream: the daemon's replay buffer overflows on a busy host
     const d = main.deploy();
     evidence('T2-deploy.log', d.out);
     check(d.code === 0, `\`docker compose pull && docker compose up -d\` exit ${d.code} after ${Math.round(d.ms / 1000)} s`);
@@ -437,7 +438,7 @@ async function main() {
     check(q && !pr.stderr.includes(q.password) && L.run('docker', ['inspect', pr.name], { timeout: 30_000 }).code !== 0, 'nothing but the fixed status line on stderr; the container is gone (--rm, --log-driver none)');
     writeComposeEnv(main, PREV, q ? pr.url : null);
     n('the rollback compose.env holds the URL the documented print command produced');
-    const since = nowS() - 1;
+    const since = L.watchEvents(main.name); // live stream: the daemon's replay buffer overflows on a busy host
     const d = main.deploy();
     evidence('T3-deploy.log', d.out);
     check(d.code === 0, `\`docker compose pull && docker compose up -d\` exit ${d.code} after ${Math.round(d.ms / 1000)} s`);
@@ -476,7 +477,7 @@ async function main() {
     writeSecrets(t4.secretsDir, { expectedDatabase: 'crewflow_wrong_on_purpose' });
     writeComposeEnv(t4, NEW);
     n('the T4 database.env names PG_EXPECTED_DATABASE_NAME=crewflow_wrong_on_purpose (the API refuses to start on it); the T4 overlay shortens the API health window only');
-    const since = nowS() - 1;
+    const since = L.watchEvents(t4.name); // live stream: the daemon's replay buffer overflows on a busy host
     const d = t4.deploy(900_000);
     evidence('T4-deploy.log', d.out);
     check(d.code !== 0, `\`docker compose pull && docker compose up -d\` FAILED as it must (exit ${d.code}) after ${Math.round(d.ms / 1000)} s`);
