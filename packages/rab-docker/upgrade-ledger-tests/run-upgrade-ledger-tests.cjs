@@ -14,7 +14,7 @@
  *   ULT_PROBE_FAIL_DIGEST=sha256:…  NEW + DotProbeFail1786799990001 (deploy-order-tests/probe/build-probe-images.cjs, unchanged)
  *   ULT_PG_IMAGE=postgres@sha256:…  ULT_REDIS_IMAGE=redis@sha256:…  [ULT_PG15_IMAGE=postgres@sha256:… for L10b]
  *     node packages/rab-docker/upgrade-ledger-tests/run-upgrade-ledger-tests.cjs <16|17|18> <out-dir> [--only=L1,L3] [--keep]
- *   [ULT_PROJECT_PREFIX=cf-b2t]  project names <prefix>-pg<major>-<case>; <out-dir> OUTSIDE the repository (per-run secrets).
+ *   [ULT_PROJECT_PREFIX=cf-b2tests]  project names <prefix>-pg<major>-<case>; <out-dir> OUTSIDE the repository (per-run secrets).
  *
  * Cases (each its own disposable project, one after another, `down` after each):
  *   L1  adopt R254: seeded R254 -> NEW: exactly one instance is_initial row `0.4.0_TypeOrmMigrations` (0.4.0); the 0.6.0
@@ -68,8 +68,10 @@ if (!/^127\.0\.0\.1:\d+\/[a-z0-9._/-]+$/.test(process.env.ULT_REPOSITORY ?? ''))
 const REPO_ROOT = path.resolve(__dirname, '..', '..', '..');
 const rel = path.relative(REPO_ROOT.toLowerCase(), OUT.toLowerCase());
 if (rel === '' || (!rel.startsWith('..') && !path.isAbsolute(rel))) fail('the output directory must be OUTSIDE the repository (it holds per-run secrets)');
-const PREFIX = process.env.ULT_PROJECT_PREFIX || 'cf-b2t';
-if (!/^[a-z][a-z0-9-]{0,15}$/.test(PREFIX)) fail('ULT_PROJECT_PREFIX must match ^[a-z][a-z0-9-]{0,15}$');
+const PREFIX = process.env.ULT_PROJECT_PREFIX || 'cf-b2tests';
+// Lead rule (2026-11-13): every compose project of this suite is cf-b2tests-*, named EXPLICITLY with -p (both production
+// compose files default to `name: rab-production`; an env-only project name is one mistake away from that default).
+if (!/^cf-b2tests[a-z0-9-]{0,6}$/.test(PREFIX)) fail('ULT_PROJECT_PREFIX must start with cf-b2tests (^cf-b2tests[a-z0-9-]{0,6}$)');
 
 const REPO = process.env.ULT_REPOSITORY;
 const IMG = { r254: process.env.ULT_R254_DIGEST, r256: process.env.ULT_R256_DIGEST, next: process.env.ULT_NEW_DIGEST, probeFail: process.env.ULT_PROBE_FAIL_DIGEST };
@@ -100,8 +102,34 @@ const writeResults = () => {
   );
 };
 
+/**
+ * upgrade-lib's Project (A2's, read-only) names the project through COMPOSE_PROJECT_NAME. This subclass ALSO passes
+ * `-p <name>` on every compose invocation and refuses any name outside cf-b2tests-*, so no command of this suite can ever
+ * fall back to the files' `name: rab-production`.
+ */
+class NamedProject extends L.Project {
+  constructor(name, out, opts) {
+    if (!/^cf-b2tests[a-z0-9-]*$/.test(name)) throw new Error(`refusing compose project name ${name}: not cf-b2tests-*`);
+    super(name, out, opts);
+  }
+  compose(args, opts = {}) {
+    return super.compose(['-p', this.name, ...args], opts);
+  }
+  composeAsync(args) {
+    return super.composeAsync(['-p', this.name, ...args]);
+  }
+  deploy(timeoutMs = 1_500_000) {
+    const t0 = Date.now();
+    const r = L.run('bash', ['-c', `docker compose -p ${this.name} pull && docker compose -p ${this.name} up -d`], { env: this.composeEnv(), timeout: timeoutMs });
+    return { ...r, ms: Date.now() - t0 };
+  }
+  deployAsync() {
+    return L.runAsync('bash', ['-c', `docker compose -p ${this.name} pull && docker compose -p ${this.name} up -d`], { env: this.composeEnv() });
+  }
+}
+
 function project(kind, opts) {
-  const p = new L.Project(`${PREFIX}-pg${MAJOR}-${kind}`, OUT, opts);
+  const p = new NamedProject(`${PREFIX}-pg${MAJOR}-${kind}`, OUT, opts);
   L.writeSecrets(p.secretsDir);
   return p;
 }
