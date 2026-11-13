@@ -176,6 +176,24 @@ export interface LockedMigrationOptions {
     /** The guarded target of this run (target, database, host). */
     guarded?: GuardedTarget;
   }) => Promise<void>;
+  /**
+   * OWNER-DB-ULTIMATE Part B (owner login, apply mode): the upgrade logbook's previous-version check. Runs with the lock held
+   * after every other gate and before anything is applied (bootstrap included); a throw refuses the run with nothing
+   * applied (UpgradeVersionTooOldError → exit 65). The session is outside any transaction.
+   */
+  beforeApply?: (ctx: {
+    query: Query;
+    classification: Classification;
+    proof: FreshInstallProof;
+    pendingBefore: readonly string[];
+    code: readonly string[];
+    guarded: GuardedTarget;
+  }) => Promise<void>;
+  /**
+   * OWNER-DB-ULTIMATE Part B: a migration (step 4) or the still-pending check (step 5) failed. Runs with the lock held,
+   * before the error propagates, so the failure can be recorded in the logbook. Must not throw (a throw is ignored).
+   */
+  onApplyFailure?: (ctx: { query: Query; error: unknown }) => Promise<void>;
   /** Called with the migration session's backend pid before the lock is taken (the child's SIGTERM self-cancel). */
   onSession?: (pid: number) => void;
   /**
@@ -491,27 +509,42 @@ export async function runLockedMigrations(options: LockedMigrationOptions): Prom
       }
     }
     log(`gates passed after the lock: target=${guarded.target} role=${facts.currentUser} pending=${pendingBefore.length}`);
+    if (mode === 'apply' && ownerLogin && ownerState && options.beforeApply) {
+      await options.beforeApply({
+        query,
+        classification: ownerState.classification,
+        proof: ownerState.proof,
+        pendingBefore,
+        code: dataSource.migrations.map((m) => m.name || m.constructor.name),
+        guarded,
+      });
+    }
 
     // 4. Apply on the locked session.
     let applied: string[] = [];
     let bootstrap: BootstrapResult | null = null;
-    if (ownerLogin && ownerState) {
-      const state = ownerState.classification.state;
-      if (mode === 'apply' && (state === 'EMPTY' || state === 'BOOTSTRAP-PARTIAL')) bootstrap = await runOwnerLoginBootstrap(query, { log });
-      if (mode === 'apply' && pendingBefore.length > 0) {
-        applied = (await runOwnerLoginChain({ dataSource, session, log, freshInstall: ownerState.proof.fresh, rowCopyOverride: options.rowCopyOverride, testFailAt: options.testFailAt }))
-          .applied;
+    try {
+      if (ownerLogin && ownerState) {
+        const state = ownerState.classification.state;
+        if (mode === 'apply' && (state === 'EMPTY' || state === 'BOOTSTRAP-PARTIAL')) bootstrap = await runOwnerLoginBootstrap(query, { log });
+        if (mode === 'apply' && pendingBefore.length > 0) {
+          applied = (await runOwnerLoginChain({ dataSource, session, log, freshInstall: ownerState.proof.fresh, rowCopyOverride: options.rowCopyOverride, testFailAt: options.testFailAt }))
+            .applied;
+        }
+      } else if (mode === 'apply' && pendingBefore.length > 0) {
+        const executor = new MigrationExecutor(dataSource, session);
+        executor.transaction = dataSource.options.migrationsTransactionMode ?? 'all';
+        applied = (await executor.executePendingMigrations()).map((m) => m.name);
       }
-    } else if (mode === 'apply' && pendingBefore.length > 0) {
-      const executor = new MigrationExecutor(dataSource, session);
-      executor.transaction = dataSource.options.migrationsTransactionMode ?? 'all';
-      applied = (await executor.executePendingMigrations()).map((m) => m.name);
-    }
 
-    // 5. Post-run, lock still held.
-    if (mode === 'apply') {
-      const still = await pendingMigrationNames(query, dataSource);
-      if (still.length) throw new MigrationsStillPendingError(still);
+      // 5. Post-run, lock still held.
+      if (mode === 'apply') {
+        const still = await pendingMigrationNames(query, dataSource);
+        if (still.length) throw new MigrationsStillPendingError(still);
+      }
+    } catch (error) {
+      if (mode === 'apply' && options.onApplyFailure) await options.onApplyFailure({ query, error }).catch(() => undefined);
+      throw error;
     }
     // BC-17 (owner decision 2026-11-05): an owner-login install ends with the legacy logins crewflow / crewflow_app NOLOGIN
     // PASSWORD NULL (crewflow_owner created them, so it holds ADMIN). Run on every fresh install AND after any run that

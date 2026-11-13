@@ -16,7 +16,12 @@ export function upgradeFailed(env: Record<string, string | undefined> = process.
   return value !== undefined && value !== '';
 }
 
-/** The /healthz indicator. Always `up`: informational only; a boolean, never the migration name. */
-export function upgradeStatusIndicator(env: Record<string, string | undefined> = process.env): HealthIndicatorResult {
-  return { upgrade: { status: 'up', upgradeFailed: upgradeFailed(env) } };
+/**
+ * The /healthz indicator. Always `up`: informational only; never a migration or step name, never an error message.
+ * OWNER-DB-ULTIMATE Part B3: `upgrade` carries the logbook state (upgrade-status.service.ts) when it is known, and
+ * `upgradeFailed` (kept for compatibility) is also true when the logbook says the code version's upgrade failed.
+ */
+export function upgradeStatusIndicator(env: Record<string, string | undefined> = process.env, ledgerState?: string): HealthIndicatorResult {
+  const failed = upgradeFailed(env) || ledgerState === 'failed';
+  return { upgrade: { status: 'up', upgradeFailed: failed, ...(ledgerState ? { upgrade: ledgerState } : {}) } };
 }

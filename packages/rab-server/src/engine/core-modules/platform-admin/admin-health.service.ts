@@ -11,12 +11,13 @@ import { AUDIT_PREAUTH_BACKLOG_LIMIT } from '../../worker-shared/audit-event.con
 import { PROVISIONER_HEARTBEAT_KEY, WORKER_HEARTBEAT_KEY, WORKER_HEARTBEAT_TTL_SECONDS } from '../../worker-shared/heartbeat.constants';
 import { assertActivePlatformAdmin, withTimeout } from './admin-actor';
 import { PlatformAdminService } from './platform-admin.service';
+import { UpgradeStatus, UpgradeStatusService } from '../upgrade/upgrade-status.service';
 
 /** The panel's status model (mockup v2): healthy / warning / degraded / unavailable. */
 export type AdminHealthStatus = 'healthy' | 'warning' | 'degraded' | 'unavailable';
 
 export interface AdminHealthCard {
-  key: 'database' | 'redis' | 'worker' | 'provisioner' | 'email' | 'storage' | 'auditEvents';
+  key: 'database' | 'redis' | 'worker' | 'provisioner' | 'email' | 'storage' | 'auditEvents' | 'upgrade';
   status: AdminHealthStatus;
   /** Fixed, operator-facing text built here — never a raw error message, host name, URL or credential. */
   detail: string;
@@ -28,6 +29,8 @@ export interface AdminHealthReport {
   cards: AdminHealthCard[];
   /** Cards that are not `healthy` (the tab badge). */
   attention: number;
+  /** OWNER-DB-ULTIMATE Part B3: the upgrade banner's fields (never an error message). Absent when the read failed. */
+  upgrade?: UpgradeStatus;
 }
 
 export const ADMIN_HEALTH_CACHE_KEY = 'rab:admin-panel:health:v1';
@@ -56,6 +59,8 @@ export class AdminHealthService {
     private readonly platformAdmin: PlatformAdminService,
     // X1.1: the security audit event shipper (global via AuditModule); optional so a graph without it still builds.
     @Optional() private readonly auditEvents?: AuditEventQueueService,
+    // OWNER-DB-ULTIMATE Part B3 (global UpgradeModule); optional so a graph without it still builds.
+    @Optional() private readonly upgrades?: UpgradeStatusService,
   ) {}
 
   async report(actor: Pick<AuthContext, 'userId'>): Promise<AdminHealthReport> {
@@ -78,7 +83,14 @@ export class AdminHealthService {
       this.probe('storage', () => this.storage()),
       this.probe('auditEvents', () => this.auditEventsCard()),
     ]);
-    const report: AdminHealthReport = { checkedAt: new Date().toISOString(), cards, attention: cards.filter((c) => c.status !== 'healthy').length };
+    const upgrade = this.upgrades ? await withTimeout(this.upgrades.status(), ADMIN_HEALTH_PROBE_TIMEOUT_MS).catch(() => undefined) : undefined;
+    if (upgrade) cards.push(upgradeCard(upgrade));
+    const report: AdminHealthReport = {
+      checkedAt: new Date().toISOString(),
+      cards,
+      attention: cards.filter((c) => c.status !== 'healthy').length,
+      ...(upgrade ? { upgrade } : {}),
+    };
     try {
       await withTimeout(this.redis.client.set(ADMIN_HEALTH_CACHE_KEY, JSON.stringify(report), 'EX', ADMIN_HEALTH_CACHE_SECONDS), 500);
     } catch {
@@ -207,4 +219,26 @@ export function auditEventsHealthCard(report: { enabled: boolean; total: number 
     detail: `Failed-login events over the ${limit} backlog: ${total} · ${report.sinceProcessStart} by this API process${backlog}`,
     latencyMs: null,
   };
+}
+
+/**
+ * OWNER-DB-ULTIMATE Part B3: the upgrade card (the admin banner). Fixed text built from the logbook's fields only: the step
+ * name, versions and attempt, never error_message.
+ */
+export function upgradeCard(u: UpgradeStatus): AdminHealthCard {
+  const where = u.step ? ` · last step ${u.step} (attempt ${u.attempt ?? '?'}${u.forced ? ', forced' : ''})` : '';
+  switch (u.state) {
+    case 'ok':
+      return { key: 'upgrade', status: 'healthy', detail: `Version ${u.appVersion} · upgrade complete${where}`, latencyMs: null };
+    case 'failed':
+      return { key: 'upgrade', status: 'degraded', detail: `Upgrade failed · version ${u.appVersion}${where}. The API serves; fix the step and restart.`, latencyMs: null };
+    case 'behind':
+      return { key: 'upgrade', status: 'warning', detail: `Version ${u.appVersion} · upgrade not complete${where}`, latencyMs: null };
+    case 'ahead':
+      return { key: 'upgrade', status: 'warning', detail: `Version ${u.appVersion} runs on a database upgraded by a newer version (rollback)${where}`, latencyMs: null };
+    case 'none':
+      return { key: 'upgrade', status: 'warning', detail: `Version ${u.appVersion ?? 'unknown'} · no upgrade recorded yet`, latencyMs: null };
+    default:
+      return { key: 'upgrade', status: 'unavailable', detail: 'Upgrade status not readable.', latencyMs: null };
+  }
 }
