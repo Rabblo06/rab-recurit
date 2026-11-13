@@ -2,7 +2,7 @@ import {
   resolveVerifiedRoleDatabaseUrl,
   verifiedRestrictedRuntimeUrl,
 } from './helpers/verified-role-database';
-import { integrationTestDatabaseReady } from '@rab/server/database/typeorm/core/integration-test-database-gate';
+import { integrationTestDatabase, integrationTestDatabaseReady } from '@rab/server/database/typeorm/core/integration-test-database-gate';
 
 /**
  * The verified-role helper is what keeps worker tests on the isolated test database. Every refusal path is asserted here,
@@ -31,7 +31,7 @@ describeIfDb('verified test-database role helper (fail closed)', () => {
   });
 
   it('refuses a superuser login presented as the restricted role', async () => {
-    process.env[PROBE] = process.env.TEST_DATABASE_URL_UNPOOLED;
+    process.env[PROBE] = integrationTestDatabase().adminUrl;
     await expect(
       resolveVerifiedRoleDatabaseUrl(PROBE, 'crewflow_app'),
     ).rejects.toThrow(/without SUPERUSER or BYPASSRLS \(got a superuser\)/);

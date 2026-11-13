@@ -9,7 +9,7 @@ import {
   DISPATCH_NOTIFY_SESSION_SQL,
   DISPATCH_NOTIFY_STORED_SQL,
 } from './database-boot-gate-rules';
-import { integrationTestDatabaseReady } from '../typeorm/core/integration-test-database-gate';
+import { integrationTestDatabase, integrationTestDatabaseReady } from '../typeorm/core/integration-test-database-gate';
 
 /**
  * Phase D wave 3 gate 1c ("dispatch-notify") against the real PostgreSQL catalog of the disposable test database (C1 schema;
@@ -21,7 +21,7 @@ import { integrationTestDatabaseReady } from '../typeorm/core/integration-test-d
  * nothing survives the test (asserted at the end from a fresh crewflow_app connection).
  */
 const appUrl = process.env.TEST_DATABASE_URL;
-const adminUrl = process.env.TEST_DATABASE_URL_UNPOOLED;
+const adminUrl = integrationTestDatabase().adminUrl;
 const describeDb = integrationTestDatabaseReady() ? describe : describe.skip;
 
 const resolved = (processRole: 'api' | 'worker' | 'cli', mode?: string) =>

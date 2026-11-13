@@ -34,7 +34,7 @@ import { integrationTestDatabase } from '../../../core/integration-test-database
 jest.setTimeout(900_000);
 
 const OWNER_URL = process.env.TEST_DATABASE_URL?.trim() ?? '';
-const ADMIN_URL = process.env.TEST_DATABASE_URL_UNPOOLED?.trim() ?? '';
+const ADMIN_URL = integrationTestDatabase().adminUrl;
 const REDIS_URL = (process.env.TEST_REDIS_URL ?? process.env.REDIS_URL ?? '').trim();
 // DEAD-07: the validated TEST pair decides (throws on an invalid pair); the opt-in is the owner login.
 const RUN = integrationTestDatabase().app.login === 'crewflow_owner';

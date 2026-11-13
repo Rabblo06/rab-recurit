@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { Client } from 'pg';
-import { integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
+import { integrationTestDatabase, integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
 
 /**
  * Phase D (D1) — EXPLAIN (ANALYZE, BUFFERS) of the global claim on ≥ 500,000 synthetic pointers: the pending path, the
@@ -35,7 +35,7 @@ describeIfApproved('Phase D claim plans on 500k pointers (EXPLAIN ANALYZE; needs
   };
 
   beforeAll(async () => {
-    admin = new Client({ connectionString: process.env.TEST_DATABASE_URL_UNPOOLED! });
+    admin = new Client({ connectionString: integrationTestDatabase().adminUrl });
     await admin.connect();
     await admin.query('BEGIN');
     const tag = randomUUID().slice(0, 8);

@@ -3,7 +3,7 @@ import { Client } from 'pg';
 
 import { describeDatabaseUrl } from '../../database/typeorm/core/test-database-guard';
 import { sqlstateOf } from './helpers/workspace-fixtures';
-import { integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
+import { integrationTestDatabase, integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
 
 /**
  * Phase D / D8 — F-1 regression at the database layer: the account-invite cleanup works on the RUNTIME side (the Worker's
@@ -55,7 +55,7 @@ describeIfApproved('Phase D F-1: account-invite cleanup definers (integration; n
   const statusOf = async (userId: string) => (await admin.query(`SELECT status FROM core."user" WHERE id = $1`, [userId])).rows[0]?.status as string | undefined;
 
   beforeAll(async () => {
-    const adminUrl = process.env.TEST_DATABASE_URL_UNPOOLED!;
+    const adminUrl = integrationTestDatabase().adminUrl;
     const t = describeDatabaseUrl(adminUrl, 'TEST_DATABASE_URL_UNPOOLED');
     const w = describeDatabaseUrl(WORKER_URL!, 'TEST_DATABASE_WORKER_URL');
     if (w.database !== t.database || w.host !== t.host || w.port !== t.port) throw new Error('TEST_DATABASE_WORKER_URL names another database. Refusing.');
