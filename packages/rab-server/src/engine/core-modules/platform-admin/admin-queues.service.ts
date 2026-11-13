@@ -17,6 +17,7 @@ import {
   WORKER_STATS_KEY,
 } from '../../worker-shared/heartbeat.constants';
 import { CONSUMER_QUEUES, LEGACY_BULL_PREFIX, SCAN_QUEUE_NAMES, WORKER_METRICS_MAX_DATA_POINTS } from '../../worker-shared/queue-registry';
+import { ProducerRedisConnection } from '../../worker-shared/queue-producer-connection';
 import { assertActivePlatformAdmin, isUuid, refuseInspection, requireReason, withTimeout } from './admin-actor';
 import { ADMIN_PANEL_AUDIT_ACTION, recordAdminPanelAudit } from './admin-panel-audit-actions';
 import { ADMIN_METRICS_RANGES, AdminJobState, AdminMetricsRange, JOB_ID_PATTERN } from './dto/admin-panel.dto';
@@ -239,7 +240,8 @@ export class AdminQueuesService implements OnModuleDestroy {
     if (!queue) {
       this.connection ??= new Redis(this.env.get('REDIS_URL'), { maxRetriesPerRequest: null, connectTimeout: 1_000, lazyConnect: true });
       this.connection.on('error', () => undefined);
-      queue = new Queue(def.name, { connection: this.connection, prefix: def.prefix });
+      // ProducerRedisConnection: closing this queue while its lazy client is still connecting never leaks an unhandled 'error'.
+      queue = new Queue(def.name, { connection: this.connection, prefix: def.prefix }, ProducerRedisConnection);
       this.queues.set(key, queue);
     }
     return queue;

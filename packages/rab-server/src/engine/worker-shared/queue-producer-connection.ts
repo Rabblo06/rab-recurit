@@ -1,3 +1,4 @@
+import { RedisConnection } from 'bullmq';
 import Redis, { RedisOptions } from 'ioredis';
 
 /**
@@ -40,6 +41,30 @@ export function createQueueProducerConnection(url: string): Redis {
   // Without a listener a connection error is an unhandled 'error' event. Publish failures are reported by the caller.
   connection.on('error', () => undefined);
   return connection;
+}
+
+/**
+ * The BullMQ connection wrapper for every producer Queue built on `createQueueProducerConnection` — pass it as the Queue's
+ * third constructor argument (`new Queue(name, { connection }, ProducerRedisConnection)`, BullMQ's public extension point).
+ *
+ * Why (CI crash 2026-11-13, timer-trigger-queue.service.spec.ts "Redis down", and the same leak failing a sibling test):
+ * BullMQ wraps the client in a RedisConnection whose readiness wait (`init()`) is still pending while Redis is down, and
+ * whose rejection handler re-emits the failure as an 'error' EVENT on the wrapper. `Queue.close()` on a shared client
+ * removes every listener from the wrapper but cannot cancel that wait; when `closeQueueProducer` then disconnects the
+ * client while a connect attempt is in flight, ioredis emits 'end', the wait rejects with the last ECONNREFUSED, and the
+ * wrapper emits 'error' with NO listener — Node throws it as an uncaught exception: the process crashes (or, under Jest,
+ * whichever test is running at that moment fails with `connect ECONNREFUSED`). Timing-dependent: a disconnect between
+ * attempts ('reconnecting') never emits 'end' and nothing happens, which is why it was flaky.
+ *
+ * An 'error' with nobody left to hear it is dropped here; while the Queue is open its own forwarder is attached and
+ * errors still reach the Queue's listener. Nothing is lost: a producer's publish failures are reported by
+ * `boundedPublish` to its caller, and the client's own 'error' events were already absorbed (createQueueProducerConnection).
+ */
+export class ProducerRedisConnection extends RedisConnection {
+  override emit(event: string | symbol, ...args: unknown[]): boolean {
+    if (event === 'error' && this.listenerCount('error') === 0) return false;
+    return super.emit(event, ...args);
+  }
 }
 
 /** ioredis states in which a command can only fail (a first connection in progress is waited for, bounded). */
