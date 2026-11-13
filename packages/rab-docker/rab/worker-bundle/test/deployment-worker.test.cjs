@@ -76,12 +76,15 @@ const WORKER_COMMAND = ['node', 'packages/rab-worker/dist/main.js'];
  * DB-SETUP (database setup like Twenty, T-5; PID 1 lead decision 2026-11-12): the two DEPLOY files make worker-start.sh the
  * Worker's ENTRYPOINT (PID 1, no command, no compose init). It derives the crewflow_owner URL from the admin PG_DATABASE_URL,
  * unsets the admin credential and only then execs `/sbin/tini -s --` + WORKER_COMMAND, so tini is PID 1 (the watchdog SIGKILL
- * works) with a clean environment. The dev, QA and test files keep WORKER_COMMAND under compose's init (they hand the
- * Worker its own URL directly).
+ * works) with a clean environment. Part F2 (X2.3): the dev and QA files run Part A's setup too (bundled db + db-setup), so
+ * their Worker has the same entrypoint (WORKER_START_FILES). The test harnesses keep WORKER_COMMAND under compose's init
+ * (they hand the Worker its own URL directly).
  */
 const DEPLOY_WORKER_ENTRYPOINT = ['./worker-start.sh'];
 const TINI = ['/sbin/tini', '-s', '--'];
 const DEPLOY_FILES = ['packages/rab-docker/docker-compose.production.yml', 'packages/rab-docker/docker-compose.image.yml'];
+/** Every file whose Worker starts through worker-start.sh (PID 1, no command, no compose init): the deploy files, dev and QA. */
+const WORKER_START_FILES = [...DEPLOY_FILES, 'packages/rab-docker/docker-compose.yml', 'packages/rab-docker/docker-compose.qa.yml'];
 /** DB-SETUP (D1 a): the one mount the deploy app services may have, the bundled db's CA volume, read-only. */
 const DB_CA_MOUNT = 'crewflow-db-ca:/run/crewflow/db-ca:ro';
 /** PR #125 option A: db-setup's target file, read-only (the crewflow_owner URL is built from it). */
@@ -144,7 +147,7 @@ for (const [rel, services] of Object.entries(WORKER_DEFINITIONS)) {
       const { env, svc } = serviceEnv(rel, service);
       const text = JSON.stringify(svc);
       for (const retired of RETIRED) assert.ok(!text.includes(retired), `${service}: still references ${retired}`);
-      if (DEPLOY_FILES.includes(rel)) {
+      if (WORKER_START_FILES.includes(rel)) {
         // DB-SETUP PID 1: the script is PID 1 and execs tini itself; docker-init would keep the admin URL at PID 1.
         assert.deepEqual(svc.entrypoint, DEPLOY_WORKER_ENTRYPOINT);
         assert.equal(svc.command, undefined, `${service}: no command (worker-start.sh takes none)`);

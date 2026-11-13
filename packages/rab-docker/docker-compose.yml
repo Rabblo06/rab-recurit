@@ -1,54 +1,173 @@
 name: rab
 
+# LOCAL DEVELOPMENT STACK on production's database setup (OWNER-DB-ULTIMATE.md Part F2, X2.3; Part A = PR #125, the Twenty
+# Helm model, twentyhq/twenty@eedb0a73 packages/twenty-docker/helm/twenty/templates/deployment-server.yaml:81-130,
+# secret-db-url.yaml:3-30, deployment-worker.yaml:76-90). The same services and lifecycle as docker-compose.production.yml,
+# built from source, with development settings:
+#   db        the bundled PostgreSQL, a VERBATIM copy of docker-compose.production.yml's `db` (TLS with its own CA,
+#             TLS-only SCRAM logins, non-root, internal network only). compose-credential-isolation.cjs fails if the two
+#             renders ever differ. Never published (see "Ports" below).
+#   db-setup  the one-shot setup (./db-setup.sh, the same image as server/worker). The ONLY service with a database URL:
+#             the bundled db's superuser, PINNED here (dev never takes an external PG_DATABASE_URL, so a stray shell variable
+#             can never point it at another database). First start: creates crewflow_owner with a RANDOM password it stores
+#             in the crewflow-db-target volume (0400, 1000:1000); every later start reuses that file and changes nothing.
+#             It also writes the credential-free target.json. It never receives APP_SECRET (no env_file).
+#   server    rab-api: ./api-prestart.sh (PID 1) builds the crewflow_owner URL from target.json + the password file (both
+#             read-only), migrates on start under the migration lock (approval mode none), registers the BullMQ job
+#             schedulers, then serves. Its PG_DATABASE_URL is pinned EMPTY (the script refuses any value).
+#   worker    rab-worker: ./worker-start.sh (PID 1) builds the same URL; never migrates, only consumes the schedulers, starts
+#             after a healthy server.
+#   redis     AOF + noeviction (the consume-only Worker cannot recreate lost schedulers; the next server start does).
+#   front     Vite with hot reload (unchanged).
+# One login, crewflow_owner (never superuser or BYPASSRLS); FORCE RLS, both RESET ROLEs, the migration lock and every
+# refusal are the image's own and unchanged.
+#
+# SECRETS (never committed):
+#   packages/rab-docker/.env (git-ignored): PG_DATABASE_PASSWORD=<openssl rand -hex 32>, the bundled db's superuser password
+#     (letters and digits only; it is interpolated into db-setup's admin URL). Read by `db` only on its volume's first start.
+#     Only `db` and `db-setup` receive it.
+#   packages/rab-server/.env (git-ignored; template .env.example): APP_SECRET and the other application settings, read by
+#     server and worker. Its database settings (PG_DATABASE_URL, DB_TARGET, the CA path, ...) are for a host-native
+#     `yarn start` and are overridden below: the containers' database comes ONLY from db-setup's files.
+#
+# FIRST RUN (fresh volumes; the server applies the whole migration chain on its first start, health start_period 600 s):
+#   docker compose -f packages/rab-docker/docker-compose.yml up -d --build
+# First platform admin, once the server is healthy (a one-off of the server image; api-prestart.sh builds the same URL):
+#   docker compose -f packages/rab-docker/docker-compose.yml run --rm --no-deps -e DB_TARGET=local \
+#     -e BOOTSTRAP_ADMIN_EMAIL=you@example.test server node packages/rab-server/dist/command/main.js bootstrap-admin
+# psql (inside the db container; every login needs the password, PGPASSWORD = PG_DATABASE_PASSWORD):
+#   docker compose -f packages/rab-docker/docker-compose.yml exec -e PGPASSWORD db psql -U postgres -d crewflow
+# Reset everything (deletes this stack's database): `down -v`. The setup volume goes with it; db-setup makes a new
+# password on the next start.
+#
+# PORTS (loopback only): server 3000 (the browser, mobile, curl), front 5173; minio 9000/9001 (profile s3) and adminer 8080
+# (profile tools). The database is NOT published: nothing in this stack needs it from the host, and its certificate names
+# `db`, so a host connection could not verify it. Redis is not published.
+#
+# VOLUMES: all new and project-scoped (rab_crewflow-db-data, rab_crewflow-db-ca, rab_crewflow-db-target,
+# rab_crewflow-dev-redis-data, rab_crewflow-dev-local-storage, rab_crewflow-dev-minio-data). This file no longer names
+# rab_devdb_data, rab_rab-redis-data or rab_rab-local-storage, and nothing here reads, attaches or changes them.
+# CUT-OVER from the previous dev stack (devdb + migrate, separated logins): an owner decision. `up` with this file under the
+# same project leaves the old `rab-devdb` container running as an orphan with its data untouched (never pass
+# --remove-orphans unless you mean to stop it); the new stack starts empty.
+
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: 10m
+    max-file: '5'
+
 services:
-  # The ONE local development PostgreSQL server (default stack: devdb, redis, server, worker [jobs + provisioner], front). Exactly one server
-  # per volume — two servers on one data directory corrupt it (2026-10-15 incident):
-  #  - `container_name` makes `--scale devdb=2` (or a second copy of this service) fail instead of starting a twin;
-  #  - the volume is `external`, so `docker compose down -v` can never delete it, and no other service in this file (or in
-  #    docker-compose.qa.yml / docker-compose.production.yml) mounts it.
-  # Fresh machine: `docker volume create rab_devdb_data`, put the generated development secrets in
-  # packages/rab-docker/.env (git-ignored; see DOCKER_FACTORY_RESET_AND_CLEAN_INSTALL_REPORT.md), start devdb, then
-  # initialise the schema ONLY through the explicit `migrate` job below (rab_owner phase, then bootstrap phase).
-  devdb:
-    image: postgres:16-alpine
-    container_name: rab-devdb
+  # ---------------------------------------------------------------------------
+  # db — VERBATIM copy of docker-compose.production.yml's `db` (the comments there explain every line). Change it there
+  # first, then copy it here and to docker-compose.qa.yml: compose-credential-isolation.cjs compares the rendered services.
+  # ---------------------------------------------------------------------------
+  db:
+    image: ${CREWFLOW_POSTGRES_IMAGE:-postgres@sha256:f9a7b9ebf6f56201f949db745e47bc423c0f0f8294bafe991cc10bf74b029657}
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        set -eu
+        # The data volume root arrives world-writable (copied from the image): only postgres may write it.
+        chmod 0755 /var/lib/postgresql
+        cd /var/lib/postgresql
+        if ! { [ -s tls/server.key ] && [ -s tls/server.crt ] && [ -s /var/tmp/ca.crt ] &&
+          openssl verify -CAfile /var/tmp/ca.crt tls/server.crt >/dev/null 2>&1 &&
+          openssl x509 -checkend 2592000 -noout -in tls/server.crt >/dev/null 2>&1; }; then
+          echo 'crewflow-db: creating the bundled database CA and server certificate (CN/SAN db)'
+          rm -rf /var/lib/postgresql/tls.new
+          ( umask 077; mkdir /var/lib/postgresql/tls.new )
+          cd /var/lib/postgresql/tls.new
+          openssl req -x509 -new -nodes -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -keyout ca.key -out ca.crt -days 3650 -subj '/CN=crewflow bundled db CA' -addext 'basicConstraints=critical,CA:TRUE' -addext 'keyUsage=critical,keyCertSign,cRLSign' 2>/dev/null
+          openssl req -new -nodes -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -keyout server.key -out server.csr -subj '/CN=db' 2>/dev/null
+          printf 'subjectAltName=DNS:db\nbasicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature\nextendedKeyUsage=serverAuth\n' > server.ext
+          openssl x509 -req -in server.csr -CA ca.crt -CAkey ca.key -CAcreateserial -out server.crt -days 3649 -extfile server.ext 2>/dev/null
+          rm -f ca.key ca.srl server.csr server.ext
+          chmod 0600 server.key
+          chmod 0644 server.crt ca.crt
+          if [ "$(id -u)" = 0 ]; then chown -R postgres:postgres /var/lib/postgresql/tls.new; fi
+          cd /var/lib/postgresql
+          rm -rf /var/lib/postgresql/tls
+          mv tls.new tls
+          cp tls/ca.crt /var/tmp/ca.crt.new
+          chmod 0644 /var/tmp/ca.crt.new
+          mv /var/tmp/ca.crt.new /var/tmp/ca.crt
+        fi
+        # TLS-only network logins (PR #125 review, finding 5), written on every start so an existing volume gets it too:
+        # SCRAM over the socket; every TCP login must be TLS (hostssl) and SCRAM; there is no plain `host` line at all.
+        printf 'local all all scram-sha-256\nhostssl all all 0.0.0.0/0 scram-sha-256\nhostssl all all ::/0 scram-sha-256\n' > /var/lib/postgresql/tls/pg_hba.conf.new
+        chmod 0600 /var/lib/postgresql/tls/pg_hba.conf.new
+        if [ "$(id -u)" = 0 ]; then chown postgres:postgres /var/lib/postgresql/tls/pg_hba.conf.new; fi
+        mv /var/lib/postgresql/tls/pg_hba.conf.new /var/lib/postgresql/tls/pg_hba.conf
+        exec docker-entrypoint.sh "$@"
+      - crewflow-db
+    command:
+      - postgres
+      - -c
+      - ssl=on
+      - -c
+      - ssl_cert_file=/var/lib/postgresql/tls/server.crt
+      - -c
+      - ssl_key_file=/var/lib/postgresql/tls/server.key
+      - -c
+      - ssl_min_protocol_version=TLSv1.2
+      - -c
+      - hba_file=/var/lib/postgresql/tls/pg_hba.conf
+      - -c
+      - password_encryption=scram-sha-256
     environment:
-      POSTGRES_USER: rab
-      # Bootstrap superuser: migrations phase B and DBA tasks only — never the application's connection.
-      POSTGRES_PASSWORD: ${DEVDB_SUPERUSER_PASSWORD:?set DEVDB_SUPERUSER_PASSWORD in packages/rab-docker/.env}
-      POSTGRES_DB: rab
-      # Page checksums, so on-disk corruption is detected on read instead of silently returned (initdb-time only).
-      POSTGRES_INITDB_ARGS: --data-checksums
-    ports:
-      # Loopback only. 15432, not 5432/5433 — this dev machine also has native Windows PostgreSQL services
-      # (postgresql-x64-17/18) that own host ports 5432 AND 5433, silently shadowing a container for anything connecting
-      # via `localhost` from the host. Host-side tools (packages/rab-server/.env, packages/rab-worker/.env.provisioner,
-      # psql from a host shell) use localhost:15432; containers use devdb:5432 on the compose network.
-      - '127.0.0.1:15432:5432'
+      POSTGRES_USER: postgres
+      POSTGRES_DB: crewflow
+      # T-2 (owner decision D4): an environment variable, like Twenty (OpenShip has no secret files).
+      POSTGRES_PASSWORD: ${PG_DATABASE_PASSWORD:?PG_DATABASE_PASSWORD is required for the bundled database (openssl rand -hex 32), also with your own database}
+      # SCRAM for socket and TCP logins alike: no trust (the image default for loopback TCP) and no peer.
+      POSTGRES_INITDB_ARGS: --auth-local=scram-sha-256 --auth-host=scram-sha-256 --data-checksums
+      # The cluster lives in a subdirectory of the data volume, beside the server's TLS key (tls/); fixed for every major.
+      PGDATA: /var/lib/postgresql/pgdata
+      # psql history and the like go to the private tmpfs, never to a volume.
+      HOME: /tmp
     volumes:
-      - rab-devdb-data:/var/lib/postgresql/data
-      - ./postgres-init:/docker-entrypoint-initdb.d:ro
+      - crewflow-db-data:/var/lib/postgresql
+      # Holds only ca.crt: mounted read-only by rab-api and rab-worker.
+      - crewflow-db-ca:/var/tmp
+    networks: [crewflow-db]
     healthcheck:
-      test: ['CMD-SHELL', 'pg_isready -U rab -d rab']
+      # TCP, not the socket: the image's first-start init runs a socket-only temporary server, which must not count.
+      test: ["CMD-SHELL", "pg_isready -q -h localhost -p 5432 -U postgres -d crewflow"]
       interval: 5s
       timeout: 5s
-      retries: 10
-    # Lane A (2026-10-24): devdb and redis were left DOWN after a Docker Desktop restart while server/worker/front came
-    # back (they had unless-stopped, these did not), so the app restart-looped against missing dependencies. Same policy
-    # as the services that depend on them; `docker compose stop` still stops them.
+      retries: 30
+      start_period: 60s
     restart: unless-stopped
+    # SIGINT = PostgreSQL fast shutdown (checkpoint, then exit); give it time before SIGKILL.
+    stop_signal: SIGINT
+    stop_grace_period: 90s
+    logging: *logging
+    # The image's own postgres user (999:999 in the Debian image): it initialises the cluster as that user, no capability.
+    user: '999:999'
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    tmpfs:
+      - /var/run/postgresql:uid=999,gid=999,mode=2775
+      - /tmp:uid=999,gid=999,mode=0700
+      # The 16/17 images' default data directory (their VOLUME): empty and read-only, never an anonymous volume.
+      - /var/lib/postgresql/data:uid=999,gid=999,mode=0555,size=64k
+    shm_size: 256m
+    pids_limit: 256
+    mem_limit: ${CREWFLOW_POSTGRES_MEM_LIMIT:-1024m}
+    cpus: ${CREWFLOW_POSTGRES_CPUS:-2}
 
   redis:
     image: redis:7-alpine
     # No host port: only server/worker reach it, as redis:6379 on the compose network (this machine also runs a native
-    # redis-server on host port 6379).
-    # maxmemory-policy noeviction stated explicitly (it is Redis 7's default): WORKER_SCHEDULER=bullmq keeps its job
-    # schedulers here and refuses to boot under an evicting policy. No AOF in dev: a restart can lose the schedulers;
-    # the worker's periodic reconcile recreates them.
-    command: ['redis-server', '--maxmemory-policy', 'noeviction']
+    # redis-server on host port 6379). AOF + noeviction, as in production: BullMQ keeps its job schedulers here (the Worker
+    # refuses to boot under an evicting policy), and the consume-only Worker never recreates a lost scheduler.
+    command: ['redis-server', '--appendonly', 'yes', '--maxmemory-policy', 'noeviction']
     restart: unless-stopped
     volumes:
-      - rab-redis-data:/data
+      - crewflow-dev-redis-data:/data
     healthcheck:
       test: ['CMD', 'redis-cli', 'ping']
       interval: 5s
@@ -76,7 +195,7 @@ services:
       - '127.0.0.1:9000:9000'
       - '127.0.0.1:9001:9001'
     volumes:
-      - rab-minio-data:/data
+      - crewflow-dev-minio-data:/data
     healthcheck:
       test: ['CMD', 'mc', 'ready', 'local']
       interval: 5s
@@ -98,48 +217,94 @@ services:
       mc encrypt set sse-s3 local/rab-dev &&
       echo bucket-ready"
 
+  # ---------------------------------------------------------------------------
+  # db-setup — the one-shot database setup (Part A), as docker-compose.production.yml's `db-setup`, built from source. The
+  # ONLY service with a database URL. Development differences: the URL is PINNED to the bundled db (no PG_DATABASE_URL
+  # interpolation: dev has no external-database mode), NODE_ENV=development. Runs on every `up` (it removes the old target
+  # file first, never the password file), then exits; server starts only after it completed successfully.
+  # ---------------------------------------------------------------------------
+  db-setup:
+    build:
+      context: ../..
+      dockerfile: packages/rab-docker/rab/Dockerfile
+      target: rab
+    entrypoint: ['./db-setup.sh']
+    environment:
+      PG_DATABASE_URL: postgresql://postgres:${PG_DATABASE_PASSWORD:?set PG_DATABASE_PASSWORD in packages/rab-docker/.env (openssl rand -hex 32)}@db:5432/crewflow?sslmode=verify-full
+      NODE_ENV: development
+      RAB_RUNTIME_ENV: development
+    networks: [default, crewflow-db]
+    volumes:
+      - crewflow-db-ca:/run/crewflow/db-ca:ro
+      # The target file and the crewflow_owner password file (written here; read-only in server and worker).
+      - crewflow-db-target:/run/crewflow/db-target
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: 'no'
+    logging: *logging
+    user: '1000:1000'
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ['no-new-privileges:true']
+    pids_limit: 64
+    mem_limit: 256m
+    stop_grace_period: 40s
+
+  # rab-api equivalent, built from source: migrates on start, registers the job schedulers, then serves (O3).
   server:
     build:
       context: ../..
       dockerfile: packages/rab-docker/rab/Dockerfile
       target: rab
+    # api-prestart.sh is PID 1 (production's entrypoint; no command, no compose init): the refusals, the crewflow_owner URL
+    # from db-setup's files, the migrate child, the scheduler registration, then `exec /sbin/tini -s -- node .../main.js`.
+    entrypoint: ['./api-prestart.sh']
     env_file:
       - ../rab-server/.env
     environment:
-      # THE API NEVER MIGRATES (Phase B P7). This service runs `main.js` directly; schema changes go only through the
-      # `migrate` service below, which compose runs to completion first (depends_on: service_completed_successfully).
-      #
-      # Runtime credential only: PG_DATABASE_URL is the restricted runtime role `crewflow_app` (no ownership, no DDL;
-      # assert-runtime-db-role.ts refuses anything else), supplied by the operator as
-      #   DEVDB_URL=postgres://crewflow_app:<password>@devdb:5432/rab
-      # Unset → empty → the API refuses to boot (fail closed). The deprecated names are blanked so ../rab-server/.env's own
-      # URLs never reach this process (PG_DATABASE_URL next to a DATABASE_URL naming another target refuses to start).
-      # DB_TARGET is command authority (database-target.ts: migrations and CLI commands only). The API refuses to start
-      # with it (security review L-4, never-in-runtime-env.ts), so it is blanked here in case ../rab-server/.env sets it;
-      # run a CLI command in this container with `-e DB_TARGET=local` (the `devdb` service is a local docker hostname).
       NODE_ENV: development
       RAB_RUNTIME_ENV: development
-      DB_TARGET: ''
-      PG_DATABASE_URL: ${DEVDB_URL:-}
+      # DATABASE: only from db-setup's files (target.json + owner-password, mounted read-only below). PINNED EMPTY: the
+      # host-native database settings of ../rab-server/.env never reach this container (api-prestart.sh refuses any
+      # non-empty PG_DATABASE_URL, and a second database URL).
+      PG_DATABASE_URL: ''
       DATABASE_URL: ''
       DATABASE_URL_UNPOOLED: ''
+      DATABASE_DIRECT_URL: ''
+      # DB_TARGET is command authority (database-target.ts: migrations and CLI commands only); api-prestart.sh and the API
+      # refuse it (security review L-4, never-in-runtime-env.ts). A one-off passes it with `run -e DB_TARGET=local`.
+      DB_TARGET: ''
+      # TLS to the bundled db: api-prestart.sh points PG_SSL_CA_CERT_PATH at the db's own CA (host `db`) when it is empty;
+      # self-signed acceptance stays off (verify-full).
+      PG_SSL_CA_CERT_PATH: ''
+      PG_SSL_ALLOW_SELF_SIGNED: 'false'
+      PG_EXPECTED_DATABASE_NAME: crewflow
+      # Deployment identity (BC-11): not used in dev; blanked so a host-native value in ../rab-server/.env never applies.
+      CREWFLOW_DEPLOYMENT_ENVIRONMENT: ''
+      CREWFLOW_DEPLOYMENT_ID: ''
+      # O3 C1 (production's lifecycle): migrate on start under the migration lock, approval mode none (production's default).
+      CREWFLOW_MIGRATE_ON_START: 'true'
+      CREWFLOW_MIGRATION_APPROVAL_MODE: none
+      # O3 C2 (production's scheduler mode): this service registers the BullMQ job schedulers; the worker only consumes
+      # them. The same WORKER_SCHEDULER and BULLMQ_PREFIX on both (unset prefix = crewflow:development:bull).
+      WORKER_SCHEDULER: bullmq
+      BULLMQ_PREFIX: ${BULLMQ_PREFIX:-}
       # Phase D (E-1): the same WORKER_DISPATCH_MODE as the worker — event makes this API's sessions carry
       # crewflow.dispatch_notify=on (its outbox writes wake the Worker); poll (default) = no NOTIFY. The API never claims.
       WORKER_DISPATCH_MODE: ${WORKER_DISPATCH_MODE:-poll}
       # The env validator refuses event without global, so the API takes the same pair (its claim mode is otherwise unused).
       WORKER_CLAIM_MODE: ${WORKER_CLAIM_MODE:-per_scope}
-      DATABASE_DIRECT_URL: ''
       REDIS_URL: redis://redis:6379
-      # HWS runtime routing ON — DEVELOPMENT ONLY (owner decision 2026-10-22, rab-devdb TEST database): workspace-scoped
-      # requests resolve to the caller's physical workspace schema. Replaces the temporary scratchpad override
-      # (hws-on.override.yml) the stack was started with. Production (docker-compose.production.yml), QA and render.yaml
-      # keep it OFF until the production rehearsal. Rollback: set 'false' here and recreate server + worker.
+      # HWS runtime routing ON — DEVELOPMENT ONLY (owner decision 2026-10-22): workspace-scoped requests resolve to the
+      # caller's physical workspace schema. Production keeps it OFF until the cutover (OWNER-DB-ULTIMATE.md Part C).
+      # Rollback: set 'false' here and recreate server + worker.
       HWS_RUNTIME_ENABLED: 'true'
       # Workspace host routing + registry-backed origin trust — DEVELOPMENT ONLY (waves 2+3 integration, owner-approved dev
       # rollout 2026-10-23; WAVE3_LANE_H_REPORT.md §6). Open http://<label>.localhost:5173 (Chrome/Edge resolve *.localhost
       # to loopback); the front proxies /rest same-origin (VITE_API_PROXY_TARGET below), so the API sees that Host. Origin
-      # trust requires host routing (boot refused otherwise) and the worker needs the same pair. Production, QA and
-      # render.yaml keep both OFF. Rollback: set both flags 'false' here (server AND worker) and recreate both containers.
+      # trust requires host routing (boot refused otherwise) and the worker needs the same pair. Production and QA keep
+      # both OFF. Rollback: set both flags 'false' here (server AND worker) and recreate both containers.
       WORKSPACE_BASE_DOMAIN: localhost:5173
       WORKSPACE_HOST_ROUTING_ENABLED: 'true'
       WORKSPACE_SUBDOMAIN_ORIGIN_TRUST_ENABLED: 'true'
@@ -148,89 +313,99 @@ services:
       # workspace host through a <=30 s single-use token. Boot is refused unless host routing + origin trust are on (above).
       # Every other wave 4+5 flag stays at its safe default here: MFA enrolment available but enforced for nobody
       # (AUTH_MFA_ENFORCE_* false), mobile exempt, legacy step-up password-only, outbox retention OFF (report mode when
-      # enabled), L1 metadata cache OFF, login-handoff cleanup ON. Production, QA and render.yaml keep the handoff OFF.
+      # enabled), L1 metadata cache OFF, login-handoff cleanup ON. Production and QA keep the handoff OFF.
       # Rollback: set 'false' here (server AND worker) and recreate both containers.
       AUTH_LOGIN_HANDOFF_ENABLED: 'true'
-      # Same reasoning as PG_DATABASE_URL above: ../rab-server/.env may carry a
-      # real SMTP driver setting for occasional non-Docker use (confirmed:
-      # EMAIL_DRIVER=SMTP with no SMTP_HOST set at all — an unverified,
-      # ambiguous state, not a confirmed-safe one). The local stack forces
-      # LOGGER unconditionally so no local run can ever attempt a real send,
-      # regardless of what's in the on-disk .env at the time.
+      # ../rab-server/.env may carry a real SMTP driver setting for occasional non-Docker use. The local stack forces
+      # LOGGER unconditionally so no local run can ever attempt a real send.
       EMAIL_DRIVER: LOGGER
-      # Local audit environment only — the browser reaches the frontend at
-      # both http://localhost:5173 and http://127.0.0.1:5173 depending on
-      # which one Docker's port-forwarding is currently honoring on this
-      # machine (see F002/F003 in .audit/overnight-audit/FINDINGS.md); CORS
-      # rejects a same-machine-but-different-origin request otherwise. The
-      # application's own `CORS_ORIGINS` default (env.validation.ts) stays
-      # exactly as it was; this only adds a second allowed local origin.
+      # The browser reaches the frontend at both http://localhost:5173 and http://127.0.0.1:5173; CORS rejects a
+      # same-machine-but-different-origin request otherwise. The application's own CORS_ORIGINS default is unchanged.
       CORS_ORIGINS: http://localhost:5173,http://127.0.0.1:5173
       # Links in activation/invitation/reset emails open the console on the SAME loopback alias as the API
       # (`front`'s VITE_API_URL is 127.0.0.1): `localhost` and `127.0.0.1` are different sites to a browser, and a
       # cross-site page never stores the SameSite=Lax session cookie, so reload would sign the user out.
       APP_URL: http://127.0.0.1:5173
       ACCOUNTS_URL: http://127.0.0.1:5173
-      # LOCAL storage on the shared `rab-local-storage` volume (mounted below, same volume as the worker): the
-      # server must read report PDFs the worker writes, and files must survive image rebuilds. Without the shared
-      # volume each container kept its own disk and every rebuild erased stored PDFs/avatars (2026-10-17 finding).
-      # The `s3` profile (MinIO) remains available for exercising the S3 driver.
+      # LOCAL storage on the shared crewflow-dev-local-storage volume (mounted below, same volume as the worker): the
+      # server must read report PDFs the worker writes, and files must survive image rebuilds. The `s3` profile (MinIO)
+      # remains available for exercising the S3 driver.
       STORAGE_DRIVER: LOCAL
       STORAGE_KEY_PREFIX: dev
     volumes:
-      - rab-local-storage:/app/storage
-    command: node packages/rab-server/dist/main.js
+      - crewflow-dev-local-storage:/app/storage
+      # The bundled db's CA and db-setup's target + password files, read-only (the crewflow_owner URL is built from them).
+      - crewflow-db-ca:/run/crewflow/db-ca:ro
+      - crewflow-db-target:/run/crewflow/db-target:ro
+    networks: [default, crewflow-db]
     ports:
       - '127.0.0.1:3000:3000'
     # W6-E2E-05: a crash (or a dependency outage that ends a process) must not leave the dev stack down until someone
-    # notices. Same policy production (rab-api/rab-worker) and QA already use; `docker compose stop` still stops it.
+    # notices. `docker compose stop` still stops it.
     restart: unless-stopped
     depends_on:
-      devdb:
-        condition: service_healthy
       redis:
         condition: service_healthy
-      # Phase B P7: never started onto a schema the migration step did not check (exit 0) — see `migrate` below.
-      migrate:
+      db:
+        condition: service_healthy
+      # db-setup has created crewflow_owner and written the target and password files (api-prestart.sh also waits for
+      # them, bounded at 120 s).
+      db-setup:
         condition: service_completed_successfully
     healthcheck:
       test: ['CMD', 'wget', '-qO-', 'http://localhost:3000/healthz']
       interval: 5s
       timeout: 5s
       retries: 15
-      start_period: 20s
+      # A fresh install applies the whole chain before main.js listens.
+      start_period: 600s
+    # Production's rab-api isolation (H6), so api-prestart.sh's isolation report matches what production declares.
+    user: '1000:1000'
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ['no-new-privileges:true']
+    pids_limit: 256
+    mem_limit: 1024m
+    stop_grace_period: 40s
 
-  # Worker SERVICE (O1, one image): the SAME image as `server` (rab/Dockerfile), a different command:
-  # `node packages/rab-worker/dist/main.js`, ONE process as uid/gid 1000 under compose's init, with workspace provisioning
-  # in-process (owner-login architecture). The retired root launcher, its provisioner child (uid 10001) and the
-  # CREWFLOW_PROVISIONER_DATABASE_URL hand-off are gone; the runtime guard refuses that variable in this process.
-  # KNOWN GAP (pre-existing since #72, not changed here): this dev stack's database settings are still the separated ones
-  # (DEVDB_URL = crewflow_app); the runtime now requires the owner login (crewflow_owner), so point DEVDB_URL /
-  # DEVDB_WORKER_URL at it. Rebuilding the dev stack for the owner login is a separate change.
+  # rab-worker equivalent (O1, one image): the SAME image as `server` (rab/Dockerfile), ONE process as uid/gid 1000 with
+  # in-process workspace provisioning. worker-start.sh is PID 1 (production's entrypoint; no command, no compose init): it
+  # builds the crewflow_owner URL from db-setup's files, then execs `/sbin/tini -s -- node packages/rab-worker/dist/main.js`
+  # (tini is PID 1, so the watchdog's SIGKILL of a stalled loop works). Never migrates, only consumes the job schedulers the
+  # server registered; starts after a healthy server.
   worker:
     build:
       context: ../..
       dockerfile: packages/rab-docker/rab/Dockerfile
+    entrypoint: ['./worker-start.sh']
     env_file:
       - ../rab-server/.env
     environment:
       NODE_ENV: development
       RAB_RUNTIME_ENV: development
-      # Explicitly overridden so ../rab-server/.env's own URLs (possibly a real remote database) can never leak through.
-      # Phase D: the jobs child may instead log in as the operator-created Worker-only crewflow_worker login — set
-      # DEVDB_WORKER_URL to it (same container name PG_DATABASE_URL; the server keeps DEVDB_URL = crewflow_app and refuses
-      # crewflow_worker). Unset = DEVDB_URL, exactly as before.
-      PG_DATABASE_URL: ${DEVDB_WORKER_URL:-${DEVDB_URL:-}}
-      # Command authority: the runtime guard refuses it in a long-running process (security review L-4); blanked in case
-      # ../rab-server/.env sets it.
-      DB_TARGET: ''
-      # Phase B (B5): the Worker runtime pool size (connection-budget.ts DEFAULT_WORKER_POOL_MAX).
-      PG_POOL_MAX_CONNECTIONS: '12'
+      # DATABASE: only from db-setup's files, as on the server (worker-start.sh refuses any non-empty PG_DATABASE_URL).
+      PG_DATABASE_URL: ''
       DATABASE_URL: ''
       DATABASE_DIRECT_URL: ''
       DATABASE_URL_UNPOOLED: ''
       # O1: no provisioner credential (provisioning runs in-process); blanked in case ../rab-server/.env sets it.
       CREWFLOW_PROVISIONER_DATABASE_URL: ''
+      # Command authority: the runtime guard refuses it in a long-running process (security review L-4); blanked in case
+      # ../rab-server/.env sets it.
+      DB_TARGET: ''
+      PG_SSL_CA_CERT_PATH: ''
+      PG_SSL_ALLOW_SELF_SIGNED: 'false'
+      PG_EXPECTED_DATABASE_NAME: crewflow
+      CREWFLOW_DEPLOYMENT_ENVIRONMENT: ''
+      CREWFLOW_DEPLOYMENT_ID: ''
+      # Phase B (B5): the Worker runtime pool size (connection-budget.ts DEFAULT_WORKER_POOL_MAX).
+      PG_POOL_MAX_CONNECTIONS: '12'
+      # O3 C1/C2: never migrates, only consumes the schedulers the server registered, does not wait for the schema itself.
+      DISABLE_DB_MIGRATIONS: 'true'
+      DISABLE_CRON_JOBS_REGISTRATION: 'true'
+      CREWFLOW_WORKER_SCHEMA_WAIT_SECONDS: '0'
+      WORKER_SCHEDULER: bullmq
+      BULLMQ_PREFIX: ${BULLMQ_PREFIX:-}
       REDIS_URL: redis://redis:6379
       # HWS runtime routing ON — DEVELOPMENT ONLY, same decision as the server (see its comment).
       HWS_RUNTIME_ENABLED: 'true'
@@ -244,17 +419,11 @@ services:
       AUTH_LOGIN_HANDOFF_ENABLED: 'true'
       # The worker is the process that actually dispatches queued email — force LOGGER so no local run can send for real.
       EMAIL_DRIVER: LOGGER
-      # Lane A (BullMQ migration): scan scheduler mode for the jobs child — interval (default) unless the shell running
-      # `docker compose up` sets WORKER_SCHEDULER=bullmq for a deliberate trial. Rollback: unset it and recreate `worker`
-      # (optionally then remove the inert schedulers: packages/rab-worker/dist/tools/remove-crewflow-schedulers.js).
-      WORKER_SCHEDULER: ${WORKER_SCHEDULER:-interval}
-      BULLMQ_PREFIX: ${BULLMQ_PREFIX:-}
-      # Phase D (D1/D2): dispatch claims and wake-ups for a deliberate local trial; unset = the code defaults (per_scope /
-      # poll; backstop 30 s, reconciliation 900 s, batch 100). global needs DEVDB_WORKER_URL (crewflow_worker); event needs
-      # global. The Worker refuses any other combination.
+      # Phase D (D1/D2): unset = the code defaults (per_scope / poll), as in production. event needs global. The Worker
+      # refuses any other combination.
       WORKER_CLAIM_MODE: ${WORKER_CLAIM_MODE:-per_scope}
       WORKER_DISPATCH_MODE: ${WORKER_DISPATCH_MODE:-poll}
-      # Same shared `rab-local-storage` volume as the server (see its comment): the worker writes report PDFs the API serves.
+      # Same shared storage volume as the server (see its comment): the worker writes report PDFs the API serves.
       STORAGE_DRIVER: LOCAL
       STORAGE_KEY_PREFIX: dev
       # What the retired launcher gave its jobs child (H1-M1): HOME a path the process can neither write nor create, temp
@@ -264,12 +433,9 @@ services:
       XDG_CONFIG_HOME: /tmp/crewflow-jobs/.config
       XDG_CACHE_HOME: /tmp/crewflow-jobs/.cache
       CREWFLOW_INSTANCE_HEALTH_FILE: /run/crewflow-health/jobs/heartbeat.json
-    command: ['node', 'packages/rab-worker/dist/main.js']
     # W6-E2E-05: a crash (or a dependency outage that ends a process) must not leave the dev stack down until someone
-    # notices. Same policy production (rab-api/rab-worker) and QA already use; `docker compose stop` still stops it.
+    # notices. `docker compose stop` still stops it.
     restart: unless-stopped
-    # Docker's init as PID 1: the Worker's watchdog SIGKILLs a stalled event loop, which the kernel ignores for PID 1.
-    init: true
     user: '1000:1000'
     read_only: true
     cap_drop: [ALL]
@@ -279,7 +445,10 @@ services:
       - /run/crewflow-health/jobs:uid=1000,gid=1000,mode=0755
     stop_grace_period: 45s
     volumes:
-      - rab-local-storage:/app/storage
+      - crewflow-dev-local-storage:/app/storage
+      - crewflow-db-ca:/run/crewflow/db-ca:ro
+      - crewflow-db-target:/run/crewflow/db-target:ro
+    networks: [default, crewflow-db]
     healthcheck:
       # Jobs-only per-instance health (the provisioner role is off for this check only).
       test: ['CMD', 'env', 'CREWFLOW_PROVISIONER_ENABLED=false', 'node', '/opt/crewflow-bundle/worker-bundle-health.cjs']
@@ -288,67 +457,12 @@ services:
       retries: 3
       start_period: 60s
     depends_on:
-      devdb:
-        condition: service_healthy
       redis:
         condition: service_healthy
-      migrate:
-        condition: service_completed_successfully
+      # API first, Worker after (like Twenty). restart: true makes Compose stop this Worker before it replaces the server.
       server:
         condition: service_healthy
-
-  # Database migrations (Phase B P7): the one-off release step, `deploy-prepare.js`. Compose runs it to completion BEFORE
-  # `server` and `worker` (they depend on it with service_completed_successfully); restart 'no'. Without
-  # CREWFLOW_MIGRATION_APPROVED it only checks: exit 0 when nothing is pending (the stack starts), exit 3 when something
-  # is (the stack does not start until an approved run; the log lists the pending migrations and prints the approval
-  # token for exactly that set), exit 1 on any refusal. It applies ONLY with CREWFLOW_MIGRATION_APPROVED=<that token>,
-  # recomputed after the migration lock (final review F5: a stale token, one for another set, or the retired
-  # `apply-pending-migrations` is refused, nothing applied). The migration login comes ONLY from
-  # packages/rab-docker/.env.migrate (git-ignored; template .env.migrate.example, DB_TARGET=local values) as
-  # PG_DATABASE_URL, or for one run from the shell as
-  #   CREWFLOW_MIGRATION_DATABASE_URL=postgres://<migration role>@devdb:5432/rab docker compose run --rm migrate   (exit 3)
-  #   CREWFLOW_MIGRATION_APPROVED=pending-<count>-<sha256> \
-  #   CREWFLOW_MIGRATION_DATABASE_URL=postgres://<migration role>@devdb:5432/rab docker compose run --rm migrate
-  # DEV IMPACT: `docker compose up` now needs that migration login (it checks the schema before starting the API). The
-  # runner enforces the identity itself (DB_TARGET guard, deployment identity marker, CF-41). Back up first, rebuild the
-  # image first if migrations changed, and never pass the migration URL to `server` or `worker`.
-  migrate:
-    build:
-      context: ../..
-      dockerfile: packages/rab-docker/rab/Dockerfile
-      target: rab
-    image: rab-server
-    # Only this service reads it; `required: false` so a checkout without it still renders (the step then refuses).
-    env_file:
-      - path: .env.migrate
-        required: false
-    environment:
-      NODE_ENV: development
-      DB_TARGET: local
-      CREWFLOW_MIGRATION_APPROVED: ${CREWFLOW_MIGRATION_APPROVED:-}
-      CREWFLOW_MIGRATION_DATABASE_URL: ${CREWFLOW_MIGRATION_DATABASE_URL:-}
-      # Read only by the two role-creating migrations (1786682000000 `crewflow`, 1786687000000 `crewflow_app`) on a fresh
-      # database; ignored afterwards. Values live in the git-ignored packages/rab-docker/.env.
-      CREWFLOW_BOOTSTRAP_PASSWORD: ${CREWFLOW_BOOTSTRAP_PASSWORD:-}
-      CREWFLOW_APP_BOOTSTRAP_PASSWORD: ${CREWFLOW_APP_BOOTSTRAP_PASSWORD:-}
-    restart: 'no'
-    depends_on:
-      devdb:
-        condition: service_healthy
-    command:
-      - sh
-      - -c
-      - |
-        set -eu
-        # Phase B P7: the migration login reaches deploy-prepare ONLY as its PG_DATABASE_URL: from .env.migrate, or (legacy
-        # operator habit) from CREWFLOW_MIGRATION_DATABASE_URL in the shell. The legacy name is removed before exec.
-        url="$${PG_DATABASE_URL:-$${CREWFLOW_MIGRATION_DATABASE_URL:-}}"
-        unset CREWFLOW_MIGRATION_DATABASE_URL || true
-        if [ -z "$$url" ]; then
-          echo "migrate: REFUSED - no migration connection. Put PG_DATABASE_URL in packages/rab-docker/.env.migrate (see .env.migrate.example) or set CREWFLOW_MIGRATION_DATABASE_URL for this run." >&2; exit 64
-        fi
-        if [ "$${CREWFLOW_MIGRATION_PHASE:-}" = "A" ]; then unset CREWFLOW_BOOTSTRAP_PASSWORD CREWFLOW_APP_BOOTSTRAP_PASSWORD || true; fi
-        exec env PG_DATABASE_URL="$$url" node packages/rab-server/dist/database/typeorm/scripts/deploy-prepare.js
+        restart: true
 
   # Dev-only convenience service — no custom Dockerfile, unlike server/worker's
   # production rab-target image. Bind-mounts the repo for Vite hot reload;
@@ -381,7 +495,7 @@ services:
       VITE_WATCH_POLLING: "true"
     command: sh -c "corepack enable && yarn install --immutable && cd packages/rab-front && npx vite --port 5173 --host 0.0.0.0"
     # W6-E2E-05: a crash (or a dependency outage that ends a process) must not leave the dev stack down until someone
-    # notices. Same policy production (rab-api/rab-worker) and QA already use; `docker compose stop` still stops it.
+    # notices. `docker compose stop` still stops it.
     restart: unless-stopped
     ports:
       - '127.0.0.1:5173:5173'
@@ -398,26 +512,33 @@ services:
       retries: 15
       start_period: 30s
 
-  # Optional database UI — not part of the default stack: `docker compose --profile tools up -d adminer`.
+  # Optional database UI — not part of the default stack: `docker compose --profile tools up -d adminer`. Server `db`,
+  # user `postgres`, password = PG_DATABASE_PASSWORD (or crewflow_owner with the password in the setup volume).
   adminer:
     image: adminer:latest
     profiles: ['tools']
     ports:
       - '127.0.0.1:8080:8080'
     environment:
-      ADMINER_DEFAULT_SERVER: devdb
+      ADMINER_DEFAULT_SERVER: db
+    networks: [default, crewflow-db]
     depends_on:
-      devdb:
+      db:
         condition: service_healthy
 
+networks:
+  # The bundled db's network, as in production: internal (no route out), never published.
+  crewflow-db:
+    internal: true
+
 volumes:
-  # External: created once by hand (see the `devdb` service), never created or removed by compose. The retired
-  # `rab_rab-postgres-data` volume is deliberately absent from this file.
-  rab-devdb-data:
-    name: rab_devdb_data
-    external: true
-  rab-redis-data:
-  rab-minio-data:
+  # The bundled db: its cluster and server TLS key; its CA certificate (read-only in db-setup, server and worker); and
+  # db-setup's target file + crewflow_owner password file (read-only in server and worker). Same keys as production.
+  crewflow-db-data:
+  crewflow-db-ca:
+  crewflow-db-target:
+  crewflow-dev-redis-data:
+  crewflow-dev-minio-data:
   # Shared LOCAL file storage for server + worker (report PDFs, avatars); persists across image rebuilds.
-  rab-local-storage:
+  crewflow-dev-local-storage:
   rab-front-node-modules:

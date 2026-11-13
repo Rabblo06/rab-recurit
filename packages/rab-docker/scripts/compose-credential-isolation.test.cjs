@@ -80,14 +80,103 @@ test('with the real parser, the env_file names are read from the committed compo
     }
     assert.ok(Object.values(raw).every((files) => !names(files, MIGRATE)), `${rel}: nothing names .env.migrate (O3)`);
   }
+  // Part F2 (X2.3): dev and QA are on Part A's setup (bundled db + db-setup, the API migrates on start): no migrate service.
   for (const rel of ['packages/rab-docker/docker-compose.yml', 'packages/rab-docker/docker-compose.qa.yml']) {
     const raw = isolation.rawEnvFiles(rel, YAML);
-    assert.ok(names(raw.migrate, MIGRATE), `${rel}: migrate names .env.migrate`);
-    for (const runtime of ['server', 'worker']) {
-      assert.ok(runtime in raw, `${rel}: ${runtime} is parsed`);
-      assert.ok(!names(raw[runtime], MIGRATE), `${rel}: ${runtime} does not name .env.migrate`);
+    assert.ok(!('migrate' in raw), `${rel}: has no migrate service`);
+    for (const svc of ['db', 'db-setup']) assert.ok(svc in raw, `${rel}: ${svc} is parsed`);
+    assert.ok(Object.values(raw).every((files) => !names(files, MIGRATE) && !names(files, OPS)), `${rel}: nothing names .env.migrate or .env.ops`);
+    for (const runtime of ['server', 'worker']) assert.ok(runtime in raw, `${rel}: ${runtime} is parsed`);
+  }
+});
+
+// ---- Part F2 (X2.3): the Part A contract (dbSetupContractChecks) and the bundled-db parity (bundledDbParityChecks).
+const failedLabels = (checks) => checks.filter(([ok]) => !ok).map(([, label]) => label);
+const refusedBy = (checks, re) => {
+  const f = failedLabels(checks);
+  assert.ok(f.some((l) => re.test(l)), `expected a failed check matching ${re}; failed: ${JSON.stringify(f)}`);
+};
+const vol = (source, target, readOnly) => ({ type: 'volume', source, target, ...(readOnly ? { read_only: true } : {}) });
+const partA = () => ({
+  db: { image: 'postgres@sha256:x', environment: { POSTGRES_PASSWORD: 'p' } },
+  'db-setup': {
+    entrypoint: ['./db-setup.sh'],
+    restart: 'no',
+    user: '1000:1000',
+    read_only: true,
+    environment: { PG_DATABASE_URL: 'postgresql://postgres:p@db:5432/crewflow?sslmode=verify-full', NODE_ENV: 'development' },
+    volumes: [vol('crewflow-db-ca', '/run/crewflow/db-ca', true), vol('crewflow-db-target', '/run/crewflow/db-target', false)],
+    depends_on: { db: { condition: 'service_healthy' } },
+  },
+  server: {
+    entrypoint: ['./api-prestart.sh'],
+    environment: { PG_DATABASE_URL: '', NODE_ENV: 'development' },
+    volumes: [vol('crewflow-db-ca', '/run/crewflow/db-ca', true), vol('crewflow-db-target', '/run/crewflow/db-target', true)],
+    depends_on: { 'db-setup': { condition: 'service_completed_successfully' } },
+  },
+  worker: {
+    entrypoint: ['./worker-start.sh'],
+    environment: { PG_DATABASE_URL: '' },
+    volumes: [vol('crewflow-db-target', '/run/crewflow/db-target', true)],
+  },
+});
+const RUNTIME = ['server', 'worker'];
+
+test('Part F2: the Part A contract shape passes every dbSetupContractChecks check', () => {
+  assert.deepEqual(failedLabels(isolation.dbSetupContractChecks('f.yml', partA(), RUNTIME)), []);
+});
+
+test('DENIAL (Part F2): a missing db-setup, or one that is not the one-shot ./db-setup.sh shape, fails', () => {
+  const none = partA();
+  delete none['db-setup'];
+  refusedBy(isolation.dbSetupContractChecks('f.yml', none, RUNTIME), /has the one-shot db-setup service/);
+  const cases = [
+    [(s) => { s['db-setup'].entrypoint = ['node', 'x.js']; }, /db-setup runs exactly \.\/db-setup\.sh/],
+    [(s) => { s['db-setup'].command = ['sh']; }, /db-setup runs exactly \.\/db-setup\.sh/],
+    [(s) => { s['db-setup'].restart = 'unless-stopped'; }, /db-setup restart is "no"/],
+    [(s) => { s['db-setup'].ports = [{ target: 5432 }]; }, /db-setup publishes no port/],
+    [(s) => { delete s['db-setup'].depends_on; }, /db-setup starts after a healthy db/],
+    [(s) => { s['db-setup'].volumes[1].read_only = true; }, /db-setup mounts the target volume writable/],
+    [(s) => { s['db-setup'].volumes[0].read_only = false; }, /db-setup mounts the db CA read-only/],
+    [(s) => { s['db-setup'].environment.APP_SECRET = ''; }, /db-setup has no APP_SECRET/],
+    [(s) => { s['db-setup'].user = '0:0'; }, /db-setup runs as 1000:1000/],
+  ];
+  for (const [edit, re] of cases) {
+    const s = partA();
+    edit(s);
+    refusedBy(isolation.dbSetupContractChecks('f.yml', s, RUNTIME), re);
+  }
+});
+
+test('DENIAL (Part F2): an app service with a database URL, the wrong PID 1, compose init or a writable target fails', () => {
+  for (const name of RUNTIME) {
+    for (const [edit, re] of [
+      [(s) => { s[name].environment.PG_DATABASE_URL = 'postgres://crewflow_owner:x@db:5432/crewflow'; }, new RegExp(`${name} has no PG_DATABASE_URL value`)],
+      [(s) => { s[name].environment.SOME_URL = 'postgresql://u:p@db/x'; }, new RegExp(`${name} carries no database URL in any variable \\(found in SOME_URL\\)`)],
+      [(s) => { s[name].entrypoint = ['/sbin/tini', '--']; s[name].command = ['node', 'main.js']; }, new RegExp(`${name} runs \\./(api-prestart|worker-start)\\.sh as PID 1`)],
+      [(s) => { s[name].init = true; }, new RegExp(`${name} has no compose init`)],
+      [(s) => { s[name].volumes = s[name].volumes.map((v) => (v.target === '/run/crewflow/db-target' ? { ...v, read_only: false } : v)); }, new RegExp(`${name} mounts db-setup's target volume read-only`)],
+    ]) {
+      const s = partA();
+      edit(s);
+      const checks = isolation.dbSetupContractChecks('f.yml', s, RUNTIME);
+      refusedBy(checks, re);
+      assert.ok(!JSON.stringify(failedLabels(checks)).includes('crewflow_owner:x'), 'a failed-check label never prints a value');
     }
   }
+  const s = partA();
+  delete s.server.depends_on;
+  refusedBy(isolation.dbSetupContractChecks('f.yml', s, RUNTIME), /server starts only after db-setup completed successfully/);
+});
+
+test('DENIAL (Part F2): a dev/QA db that renders differently from production (or is missing) fails the parity check', () => {
+  const prod = { image: 'postgres@sha256:x', command: ['postgres', '-c', 'ssl=on'], user: '999:999', read_only: true };
+  assert.deepEqual(failedLabels(isolation.bundledDbParityChecks('dev.yml', { db: structuredClone(prod) }, prod)), []);
+  refusedBy(isolation.bundledDbParityChecks('dev.yml', { db: { ...prod, command: ['postgres'] } }, prod), /differs in command/);
+  refusedBy(isolation.bundledDbParityChecks('dev.yml', { db: { ...prod, ports: [{ target: 5432 }] } }, prod), /differs in ports/);
+  refusedBy(isolation.bundledDbParityChecks('dev.yml', { db: { ...prod, read_only: false } }, prod), /differs in read_only/);
+  refusedBy(isolation.bundledDbParityChecks('dev.yml', {}, prod), /has a bundled db rendered like/);
+  refusedBy(isolation.bundledDbParityChecks('dev.yml', { db: prod }, null), /has a bundled db rendered like/);
 });
 
 test('a compose file the parser cannot read is a FAILED check, not a skip', (t) => {
