@@ -139,6 +139,9 @@ export class TokenCleanupRotationOrder1786721460000 implements MigrationInterfac
     const [before] = (await queryRunner.query(STATE_SQL)) as Array<{ state: string; execute_grantees: string }>;
     if (before?.state !== EXPECTED_STATE) throw new Error(`${this.name}: unexpected state of ${SIGNATURE} before the change: ${before?.state ?? 'absent'}`);
     await queryRunner.query(sql);
+    // P3 (migration-object-ownership.spec.ts): every migration states the owner of each core object it (re)creates. CREATE OR
+    // REPLACE already kept rab_secure_owner, so this changes nothing (same owner); it makes the ownership explicit here.
+    await queryRunner.query(`ALTER FUNCTION core.worker_cleanup_auth_tokens(integer) OWNER TO rab_secure_owner`);
     const [after] = (await queryRunner.query(STATE_SQL)) as Array<{ state: string; execute_grantees: string }>;
     if (after?.state !== EXPECTED_STATE || after.execute_grantees !== before.execute_grantees) {
       throw new Error(`${this.name}: ${SIGNATURE} changed owner, definer, search_path or grants (rolled back): ${after?.state} / ${after?.execute_grantees}`);
