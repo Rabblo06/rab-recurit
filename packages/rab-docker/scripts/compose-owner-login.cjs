@@ -380,6 +380,62 @@ function durationSeconds(value) {
 
 // ------------------------------------------------------------------------------------------------- rendered-model checks
 
+/** Docker's own volume store on the host (rootful and rootless): a bind into it reaches any named volume's files. */
+const DOCKER_VOLUME_STORE = /(^|\/)(var\/lib\/docker|\.local\/share\/docker)(\/|$)/;
+const CREWFLOW_RUN_DIR = '/run/crewflow';
+const underDir = (target, dir) => target === dir || target.startsWith(`${dir}/`);
+/** A container path as the engine resolves it: relative to `base`, `..` and `//` collapsed. */
+const containerPath = (target, base) => path.posix.resolve(base, String(target ?? '').replace(/\\/g, '/'));
+
+/**
+ * Security review L3 (one definition for both gates; verify-image-compose.cjs imports it): every way a service other than
+ * db-setup / rab-api / rab-worker could reach the crewflow_owner password file on db-setup's volume, or shadow
+ * /run/crewflow/db-target in one of those three, besides a plain `volumes:` entry (checked where the mounts are):
+ *   - `volumes_from` on ANY service (it copies another service's mounts, db-setup's volume included);
+ *   - a `secrets` / `configs` entry whose target resolves under /run/crewflow (it would shadow or plant a file there);
+ *   - a bind whose host source is inside Docker's volume store (/var/lib/docker/volumes/..., rootless ~/.local/share/docker):
+ *     it reaches the named volume's files directly;
+ *   - a `tmpfs` entry, or any mount, whose target resolves under /run/crewflow/db-target other than db-setup's own volume on
+ *     the three services (`..` and `//` collapsed first);
+ *   - rab-redis not running as uid 999 (`user: 999:<gid>`): never uid 1000, the owner of the password file.
+ * `redisUser: false` skips the last rule (the OpenShip reference file's rab-redis has no `user:`; it mounts no such volume).
+ * Pure: never prints a value.
+ */
+function credentialMountProblems(services, where = '', { redisUser = true } = {}) {
+  const out = [];
+  const owners = ['rab-api', 'rab-worker', DB_SETUP_SERVICE];
+  for (const [name, s] of Object.entries(services ?? {})) {
+    if (!s || typeof s !== 'object') continue;
+    if (s.volumes_from !== undefined && !(Array.isArray(s.volumes_from) && s.volumes_from.length === 0)) {
+      out.push(`${name}: has volumes_from${where} (it copies another service's mounts, db-setup's password volume included)`);
+    }
+    for (const [kind, base] of [['secrets', '/run/secrets'], ['configs', '/']]) {
+      for (const e of Array.isArray(s[kind]) ? s[kind] : []) {
+        const raw = typeof e === 'string' ? e : e?.target ?? e?.source ?? '';
+        if (underDir(containerPath(raw, base), CREWFLOW_RUN_DIR)) out.push(`${name}: a ${kind} entry targets ${CREWFLOW_RUN_DIR}${where} (never a file under the database setup's directories)`);
+      }
+    }
+    for (const v of Array.isArray(s.volumes) ? s.volumes : []) {
+      const source = String(v?.source ?? '').replace(/\\/g, '/');
+      if (v?.type === 'bind' && DOCKER_VOLUME_STORE.test(source)) out.push(`${name}: binds a path inside Docker's volume store${where} (it reaches named volumes' files, the crewflow_owner password file included)`);
+      const t = containerPath(v?.target, '/');
+      if (underDir(t, DB_TARGET_DIR) && !(v?.type === 'volume' && v?.source === DB_TARGET_VOLUME && t === DB_TARGET_DIR && owners.includes(name))) {
+        out.push(`${name}: mounts something at ${t}${where} (only ${DB_TARGET_VOLUME}, on db-setup / rab-api / rab-worker)`);
+      }
+    }
+    const tmpfs = s.tmpfs === undefined || s.tmpfs === null ? [] : Array.isArray(s.tmpfs) ? s.tmpfs : [s.tmpfs];
+    for (const entry of tmpfs) {
+      const t = containerPath(String(entry).split(':')[0], '/');
+      if (underDir(t, DB_TARGET_DIR)) out.push(`${name}: a tmpfs at ${t}${where} (it would hide db-setup's volume and its password file)`);
+    }
+  }
+  const redis = services?.['rab-redis'];
+  if (redisUser && redis && !/^999:\d+$/.test(String(redis.user ?? ''))) {
+    out.push(`rab-redis: user is "${redis.user ?? ''}"${where}, expected 999:<gid> (never uid 1000, the owner of the crewflow_owner password file)`);
+  }
+  return out;
+}
+
 /** Generic H1-H6 hardening of one service. */
 function hardeningProblems(name, s, p, { longRunning }) {
   if ('build' in s) p(`${name}: has a build section (images by digest only; a host must never rebuild a release)`);
@@ -613,6 +669,7 @@ function checkModel(model, combo) {
   // exact shape.
   appCredentialProblems(services, p);
   dbSetupProblems(services, p, setupUrl);
+  for (const msg of credentialMountProblems(services)) p(msg);
   // DB-SETUP: the bundled db's password reaches only db (POSTGRES_PASSWORD) and, inside the default admin URL, db-setup's
   // PG_DATABASE_URL. Never under another key, never another service, never by its own name.
   for (const name of names) {
@@ -1027,7 +1084,7 @@ function main(argv) {
 if (require.main === module) process.exitCode = main(process.argv.slice(2));
 
 module.exports = {
-  FILES, TEMPLATES, COMBOS, STATIC_COMBO, DB_SERVICE, DB_SETUP_SERVICE, DB_TARGET_VOLUME, DB_TARGET_DIR, SENTINEL_ADMIN_PW, SENTINEL_ADMIN_URL, dbSetupProblems, appCredentialProblems, bundledDbEnvironmentProblems, DB_INITDB_ARGS, DB_ENV_KEYS, DB_PASSWORD_KEY, SENTINEL_DB_PW, BUNDLED_URL, NOT_THE_APP_LOGIN, NOTIFICATION_DELIVERY, PHASE_D_SWITCHES, PHASE_D_UNCHANGED, STATEMENT_DISPATCH, FEATURE_SWEEPS, SWITCH_VALUES, featureSweepProblems, composeEnvValue, AUDIT_SINK_MODES, AUDIT_SINK_PRODUCTION_MODES, AUDIT_SINK_FAILURES,
+  FILES, TEMPLATES, COMBOS, STATIC_COMBO, DB_SERVICE, DB_SETUP_SERVICE, DB_TARGET_VOLUME, DB_TARGET_DIR, SENTINEL_ADMIN_PW, SENTINEL_ADMIN_URL, dbSetupProblems, appCredentialProblems, credentialMountProblems, bundledDbEnvironmentProblems, DB_INITDB_ARGS, DB_ENV_KEYS, DB_PASSWORD_KEY, SENTINEL_DB_PW, BUNDLED_URL, NOT_THE_APP_LOGIN, NOTIFICATION_DELIVERY, PHASE_D_SWITCHES, PHASE_D_UNCHANGED, STATEMENT_DISPATCH, FEATURE_SWEEPS, SWITCH_VALUES, featureSweepProblems, composeEnvValue, AUDIT_SINK_MODES, AUDIT_SINK_PRODUCTION_MODES, AUDIT_SINK_FAILURES,
   AUDIT_SINK_PRODUCTION_FAILURES, SENTINEL_URL, SENTINEL_OWNER_PW, SENTINEL_APP_SECRET,
   SENTINEL_REDIS_PW, SENTINEL_LEGACY_PW, forbiddenReason, durationSeconds, checkModel, checkStaticModel, parseEnvText,
   lintEnvText, lintComposeText, renderModels, staticProblems, main,

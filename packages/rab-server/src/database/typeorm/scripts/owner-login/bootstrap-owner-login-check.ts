@@ -32,21 +32,25 @@ import { type DbTarget } from '../../../owner-login/db-target';
 import { readDbTargetFile, writeDbTargetFile } from '../../../owner-login/db-target-file';
 
 import { buildRuntimeDatabaseUrl, scramSha256Verifier } from '../../../owner-login/owner-credential';
-import { ownerPasswordFilePath, readOwnerPasswordFile, writeOwnerPasswordFile } from '../../../owner-login/owner-password-file';
-import { createPgClientForUrl } from '../../../postgres';
+import { ownerPasswordFilePath, ownerPasswordNextFilePath, readOwnerPasswordFile, writeOwnerPasswordFile } from '../../../owner-login/owner-password-file';
+import { Client } from 'pg';
+
+import { createPgClientForUrl, resolvePgEnvironment } from '../../../postgres';
 import { DERIVE_EXIT, runDeriveRuntimeUrl } from './derive-runtime-url';
-import { OWNER_BOOTSTRAP_MESSAGES, OWNER_BOOTSTRAP_RESULT_PREFIX, OwnerBootstrapResult } from './owner-bootstrap';
+import { bootstrapDriverConfigs, OWNER_BOOTSTRAP_MESSAGES, OWNER_BOOTSTRAP_RESULT_PREFIX, OwnerBootstrapResult } from './owner-bootstrap';
 import { OWNER_BOOTSTRAP_Q4B_SET_INPUTS, OWNER_BOOTSTRAP_Q4C_DO } from './owner-bootstrap-sql';
 
 /**
  * Option A (PR #125): every child writes the credential-free target here (CREWFLOW_DB_TARGET_FILE). reset() seeds a STALE
- * target before each scenario, so a refusal must remove it and a success must replace it (option 2: the crewflow_owner
+ * target before each scenario, so a refusal must remove it and a success must replace it (the owner-URL mode: the crewflow_owner
  * pass-through URL included).
  */
 const TARGET_DIR = mkdtempSync(join(tmpdir(), 'obc-target-'));
 const TARGET_FILE = join(TARGET_DIR, 'target.json');
 /** db-setup's crewflow_owner password file, beside the target (the child derives the same path). */
 const PASSWORD_FILE = ownerPasswordFilePath(TARGET_FILE);
+/** The pending NEW password (security review L1): never left behind by a run that succeeded. */
+const NEXT_FILE = ownerPasswordNextFilePath(PASSWORD_FILE);
 const STALE_TARGET: DbTarget = { v: 1, host: 'stale.invalid', port: 1, database: 'stale', params: {} };
 
 class Refusal extends Error {}
@@ -177,7 +181,7 @@ async function ownerState(admin: Admin): Promise<OwnerState> {
   };
 }
 
-/** The extensions of one database (option 2: a refused crewflow_owner URL must not create any; FINDING B). */
+/** The extensions of one database (the owner-URL mode: a refused crewflow_owner URL must not create any; FINDING B). */
 async function extensions(ctx: Ctx, db: string): Promise<string> {
   const rows = await sql(ctx.admin, db, `SELECT coalesce(string_agg(extname || ':' || extowner::regrole::text, ',' ORDER BY extname), '') AS e FROM pg_catalog.pg_extension`);
   return String(rows[0]?.e ?? '');
@@ -317,6 +321,7 @@ async function createAdminRole(ctx: Ctx, tag: string, attrs: string): Promise<{ 
 async function reset(ctx: Ctx): Promise<void> {
   writeDbTargetFile(TARGET_FILE, STALE_TARGET);
   rmSync(PASSWORD_FILE, { force: true }); // each scenario starts with no stored password (a fresh setup volume)
+  rmSync(NEXT_FILE, { force: true });
   for (const db of ctx.dbs.splice(0)) await sql(ctx.admin, 'postgres', `DROP DATABASE IF EXISTS ${ident(db)} WITH (FORCE)`);
   await sql(ctx.admin, 'postgres', `DROP ROLE IF EXISTS crewflow_owner`);
   for (const role of ctx.roles.splice(0).reverse()) await sql(ctx.admin, 'postgres', `DROP ROLE IF EXISTS ${ident(role)}`);
@@ -367,6 +372,7 @@ async function assertFreshCreated(ctx: Ctx, db: string, adminUrl: string, label:
   const facts = await dbFacts(ctx.admin, db);
   expect(facts.grant, `${label}: CONNECT/CREATE/TEMPORARY WITH GRANT OPTION missing`);
   const pw = storedPassword(label);
+  expect(!existsSync(NEXT_FILE), `${label}: the pending password file was left behind`);
   expect(/^[0-9a-f]{64}$/.test(pw), `${label}: the stored password is not 64 hex characters (32 random bytes)`);
   expectPasswordFileMode(label);
   const login = await canLogin(ctx.admin, OWNER, pw, db);
@@ -407,6 +413,7 @@ async function assertLostFileReset(ctx: Ctx, db: string, adminUrl: string, befor
   expect(after.passwordHash !== before.state.passwordHash, `${label}: rolpassword did not change`);
   expect((await dbFacts(ctx.admin, db)).acl === before.acl, `${label}: database ACL changed (a second grant?)`);
   const pw = storedPassword(label);
+  expect(!existsSync(NEXT_FILE), `${label}: the pending password file was left behind`);
   expect(pw !== before.password, `${label}: the new stored password equals the lost one`);
   expect((await canLogin(ctx.admin, OWNER, pw, db)).ok, `${label}: the new stored password does not log in`);
   const old = await canLogin(ctx.admin, OWNER, before.password, db);
@@ -479,6 +486,114 @@ const SCENARIOS: Scenario[] = [
       expectResult(fixed, 0, 'updated', 'after deleting the file');
       expect((await canLogin(ctx.admin, OWNER, storedPassword('after deleting the file'), db)).ok, 'after deleting the file: the new password does not log in');
       return ['refused 64 with "delete the password file and start again with the admin address", untouched; after deleting the file: reset once'];
+    },
+  },
+  {
+    id: 'l1-pending-not-committed',
+    covers: 'security review L1: a pending owner-password.next whose run never committed (it does not log in) is deleted; owner-password stays; nothing changes',
+    async run(ctx) {
+      const db = await createDb(ctx, 'pendno');
+      const url = suUrl(ctx, db);
+      const fresh = await assertFreshCreated(ctx, db, url, 'fresh');
+      writeOwnerPasswordFile(NEXT_FILE, remember(secret()), { exclusive: true });
+      const run = await runChild(url);
+      assertCleanOutput(run);
+      expectResult(run, 0, 'unchanged', 'pending, not committed');
+      expectLine(run, OWNER_BOOTSTRAP_MESSAGES.pendingDiscarded, 'pending, not committed');
+      expect(!existsSync(NEXT_FILE), 'pending, not committed: the pending file was not deleted');
+      expect(storedPassword('pending, not committed') === fresh.password, 'pending, not committed: owner-password changed');
+      expect((await ownerState(ctx.admin)).passwordHash === fresh.state.passwordHash, 'pending, not committed: rolpassword changed');
+      return ['the uncommitted pending password (28P01) was deleted; owner-password and the role unchanged'];
+    },
+  },
+  {
+    id: 'l1-pending-committed',
+    covers: 'security review L1: a crash between COMMIT and the promotion (the role already has the pending password) -> the next start promotes owner-password.next',
+    async run(ctx) {
+      const db = await createDb(ctx, 'pendyes');
+      const url = suUrl(ctx, db);
+      const fresh = await assertFreshCreated(ctx, db, url, 'fresh');
+      const pending = remember(secret());
+      await setOwnerPassword(ctx.admin, pending); // what the committed transaction did
+      writeOwnerPasswordFile(NEXT_FILE, pending, { exclusive: true });
+      const run = await runChild(url);
+      assertCleanOutput(run);
+      expectResult(run, 0, 'unchanged', 'pending, committed');
+      expectLine(run, OWNER_BOOTSTRAP_MESSAGES.pendingPromoted, 'pending, committed');
+      expect(!existsSync(NEXT_FILE), 'pending, committed: the pending file was not promoted');
+      const stored = storedPassword('pending, committed');
+      expect(stored === pending && stored !== fresh.password, 'pending, committed: owner-password is not the pending password');
+      expectPasswordFileMode('pending, committed');
+      expect((await canLogin(ctx.admin, OWNER, stored, db)).ok, 'pending, committed: the promoted password does not log in');
+      await assertDeriveFromTargetLogsIn(ctx, db, 'pending, committed');
+      return ['the committed pending password logs in and was promoted to owner-password; the apps derive a working URL'];
+    },
+  },
+  {
+    id: 'l4-second-deployment-refused',
+    covers: 'security review L4 (owner-approved, read-only): two databases on one cluster; db-setup on A, then a FRESH volume on B -> B refuses 64 (one deployment per cluster); A untouched, its password still logs in',
+    async run(ctx) {
+      const dbA = await createDb(ctx, 'l4a');
+      const a = await assertFreshCreated(ctx, dbA, suUrl(ctx, dbA), 'A fresh');
+      // B: a second deployment with its own (fresh, empty) setup volume on the same cluster.
+      rmSync(PASSWORD_FILE, { force: true });
+      rmSync(NEXT_FILE, { force: true });
+      const dbB = await createDb(ctx, 'l4b');
+      const run = await runChild(suUrl(ctx, dbB));
+      assertCleanOutput(run);
+      expectResult(run, 64, 'refused', 'B');
+      expectLine(run, OWNER_BOOTSTRAP_MESSAGES.ownerInOtherDatabase, 'B');
+      expect(!existsSync(PASSWORD_FILE) && !existsSync(NEXT_FILE), 'B: a refused run stored a password file');
+      const after = await ownerState(ctx.admin);
+      expect(after.passwordHash === a.state.passwordHash && after.oid === a.state.oid, 'B: crewflow_owner was changed (password reset or recreated)');
+      expect(!(await dbFacts(ctx.admin, dbB)).grant, 'B: the grant was added');
+      expect((await canLogin(ctx.admin, OWNER, a.password, dbA)).ok, "A's stored password no longer logs in");
+      return ["B refused 64 before any write (Q2b: crewflow_owner holds a grant on A); A's role, grant and password unchanged"];
+    },
+  },
+  {
+    id: 'i1-owner-url-session-read-only',
+    covers: 'security review I1 (owner-approved): the owner-URL mode opens its crewflow_owner session with default_transaction_read_only=on; a write on it fails 25006; the admin session stays read-write',
+    async run(ctx) {
+      const db = await createDb(ctx, 'i1ro');
+      const fresh = await assertFreshCreated(ctx, db, suUrl(ctx, db), 'fresh');
+      const ownerUrl = urlFor(ctx.admin, OWNER, fresh.password, db);
+      const pass = await runChild(ownerUrl);
+      assertCleanOutput(pass);
+      expectResult(pass, 0, 'pass-through', 'owner URL');
+      const configs = bootstrapDriverConfigs(
+        resolvePgEnvironment({ PG_DATABASE_URL: ownerUrl, NODE_ENV: 'test' }, { processRole: 'migrate' }),
+        remember(buildRuntimeDatabaseUrl(ownerUrl, fresh.password)),
+      );
+      const ro = new Client(configs.ownerUrl);
+      ro.on('error', () => undefined);
+      await ro.connect();
+      let code: string | null = null;
+      let setting = '';
+      try {
+        setting = String((await ro.query<{ v: string }>('SELECT pg_catalog.current_setting($1) AS v', ['default_transaction_read_only'])).rows[0]?.v);
+        try {
+          await ro.query('CREATE TABLE public.cf_i1_write_probe (x integer)');
+        } catch (error) {
+          code = String((error as { code?: unknown }).code ?? '');
+        }
+      } finally {
+        await ro.end().catch(() => undefined);
+      }
+      expect(setting === 'on', 'the owner-URL session is not read-only');
+      expect(code === '25006', `a write on the owner-URL session did not fail with 25006 (got ${code ?? 'no error'})`);
+      expect((await sql(ctx.admin, db, `SELECT pg_catalog.to_regclass('public.cf_i1_write_probe') IS NULL AS gone`))[0]?.gone === true, 'the probe table exists');
+      const rw = new Client(configs.admin);
+      rw.on('error', () => undefined);
+      await rw.connect();
+      let adminSetting = '';
+      try {
+        adminSetting = String((await rw.query<{ v: string }>('SELECT pg_catalog.current_setting($1) AS v', ['default_transaction_read_only'])).rows[0]?.v);
+      } finally {
+        await rw.end().catch(() => undefined);
+      }
+      expect(adminSetting === 'off', 'the admin-mode config is not read-write');
+      return ['owner-URL session: default_transaction_read_only=on, CREATE TABLE -> 25006, nothing created; admin config: off'];
     },
   },
   {
@@ -959,7 +1074,7 @@ function scanServerLog(container: string, nonSuperuserVerifierAllowed: boolean):
   const r = spawnSync('docker', ['logs', container], { encoding: 'utf8', maxBuffer: 256 * 1024 * 1024 });
   if (r.status !== 0) throw new Failed('docker logs failed');
   const lines = `${r.stdout}\n${r.stderr}`.split('\n');
-  for (const s of SECRETS) if (s && s.length >= 12 && lines.some((l) => l.includes(s))) throw new Failed('a password, URL or derived password appeared in the server log (not shown)');
+  for (const s of SECRETS) if (s && s.length >= 12 && lines.some((l) => l.includes(s))) throw new Failed('a password, URL or stored password appeared in the server log (not shown)');
   const verifierLines = lines.filter((l) => l.includes('SCRAM-SHA-256$'));
   // PG16 writes 'parameters:', PG17+ 'Parameters:'.
   for (const l of verifierLines) if (!/parameters: \$1 = /i.test(l)) throw new Failed('a verifier appeared in the server log outside a bind-parameter line');

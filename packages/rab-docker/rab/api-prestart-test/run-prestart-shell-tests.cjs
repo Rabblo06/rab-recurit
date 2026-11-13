@@ -101,7 +101,8 @@ fs.chmodSync(path.join(stubs, 'tini.sh'), 0o755);
 //                                       crewflow_owner URL) on fd 4;
 //   PG_DATABASE_URL alone            -> /ctl/derive-url, or PG_DATABASE_URL unchanged (the no-target mode), on fd 4;
 //   neither                          -> 64.
-// /ctl/derive (or /ctl/derive-seq, one code per run) forces an exit code first; /ctl/derive-empty writes an empty value.
+// /ctl/derive (or /ctl/derive-seq, one code per run) forces an exit code first; /ctl/derive-empty writes an empty value;
+// /ctl/derive-hang never exits (security review I2: the scripts bound each derive run with `timeout 10`).
 const DERIVE = `${SCRIPTS_DIR}/owner-login/derive-runtime-url.js`;
 fs.writeFileSync(path.join(stubs, 'derive.js'), `
 const fs = require('fs');
@@ -119,6 +120,7 @@ const tf = process.env.CREWFLOW_DB_TARGET_FILE || '';
 const mode = url ? 'url' : tf ? 'target' : 'none';
 const admin = read('/proc/self/environ', '').includes('ADMINSENTINEL') ? 'present' : 'absent';
 console.log('STUB derive mode=' + mode + ' both=' + (url && tf ? 'yes' : 'no') + ' pid=' + process.pid + ' t=' + process.hrtime.bigint() + ' admin=' + admin + ' ca=' + (process.env.PG_SSL_CA_CERT_PATH || '-'));
+if (read('/ctl/derive-hang', null) !== null) { setInterval(() => undefined, 1 << 30); return; }
 if (code !== 0) process.exit(code);
 const out = (d) => (read('/ctl/derive-empty', null) !== null ? '' : read('/ctl/derive-url', d));
 if (url && tf) { console.error('derive-runtime-url: REFUSED: CREWFLOW_DB_TARGET_FILE and PG_DATABASE_URL are both set'); process.exit(64); }
@@ -464,6 +466,14 @@ check('11f the target file never appears -> waits with a fixed message, then ref
   /waiting for db-setup: the database target file is not there yet/.test(r.out) && /did not appear within 4s/.test(r.out) && !line(r.out, 'twentymigrate') && !line(r.out, 'main') && !line(r.out, 'bootstrap'), r.out);
 r = run('dbsetup-seam-prod', { ...NOURL, CREWFLOW_TEST_DB_SETUP_WAIT_SECONDS: '4' }, { ctl: DERIVED });
 check('11g the wait-bound test seam outside NODE_ENV=test -> refused (64), nothing ran', r.code === 64 && /CREWFLOW_TEST_DB_SETUP_WAIT_SECONDS is a test seam/.test(r.out) && !line(r.out, 'derive') && !line(r.out, 'main'), r.out);
+r = run('dbsetup-attempts', { ...NOURL, ...SEAM(4) }, { ctl: DERIVED, target: 'absent' });
+check('11m security review I2: the wait is bounded by a COUNT of derive attempts (4 s -> exactly 2), never by the clock', r.code === 75 && (r.out.match(/^STUB derive /gm) || []).length === 2 && /attempt 1 of 2/.test(r.out), r.out);
+{
+  const t0 = Date.now();
+  r = run('dbsetup-derive-hang', NOURL, { ctl: { ...DERIVED, 'derive-hang': '1' } });
+  const ms = Date.now() - t0;
+  check('11n security review I2: a derive run that hangs is ended by `timeout 10` -> refused (70) with a fixed line; the API never starts', r.code === 70 && /the derive step did not finish within 10s/.test(r.out) && !line(r.out, 'main') && !line(r.out, 'twentymigrate') && ms < 40_000, `${ms} ms\n${r.out}`);
+}
 r = run('dbsetup-target-late', NOURL, { ctl: { ...DERIVED, 'derive-seq': '75,75,0' } });
 check('11h the target file appears late (75, 75, then 0) -> two waits, then the normal start', r.code === 0 && (r.out.match(/the database target file is not there yet/g) || []).length >= 2 && field(line(r.out, 'main'), 'url') === hash(RUNTIME_URL), r.out);
 for (const code of [64, 70]) {
@@ -520,6 +530,10 @@ r = run('worker-derive-empty', W, { entry: 'worker-start.sh', ctl: { 'derive-emp
 check('12f an empty runtime URL -> refused (70), the Worker never starts', r.code === 70 && !line(r.out, 'workermain'), r.out);
 r = run('worker-no-target', { ...W, ...SEAM(4) }, { entry: 'worker-start.sh', ctl: { 'derive-url': RUNTIME_URL }, target: 'absent' });
 check('12g the target file never appears -> waits with a fixed message, then refuses (75) at the bound; the Worker never starts', r.code === 75 && /waiting for db-setup/.test(r.out) && /did not appear within 4s/.test(r.out) && !line(r.out, 'workermain') && !line(r.out, 'bootstrap'), r.out);
+r = run('worker-attempts', { ...W, ...SEAM(4) }, { entry: 'worker-start.sh', ctl: { 'derive-url': RUNTIME_URL }, target: 'absent' });
+check('12p security review I2: the Worker wait is bounded by a COUNT of derive attempts (4 s -> exactly 2)', r.code === 75 && (r.out.match(/^STUB derive /gm) || []).length === 2 && /attempt 1 of 2/.test(r.out), r.out);
+r = run('worker-derive-hang', W, { entry: 'worker-start.sh', ctl: { 'derive-url': RUNTIME_URL, 'derive-hang': '1' } });
+check('12q security review I2: a derive run that hangs is ended by `timeout 10` -> refused (70); the Worker never starts', r.code === 70 && /the derive step did not finish within 10s/.test(r.out) && !line(r.out, 'workermain') && !/STUB tini/.test(r.out), r.out);
 r = run('worker-target-late', W, { entry: 'worker-start.sh', ctl: { 'derive-url': RUNTIME_URL, 'derive-seq': '75,0' } });
 check('12h the target file appears late (75, then 0) -> one wait, then the Worker starts', r.code === 0 && /not there yet/.test(r.out) && field(line(r.out, 'workermain'), 'url') === hash(RUNTIME_URL), r.out);
 r = run('worker-seam-prod', { ...W, CREWFLOW_TEST_DB_SETUP_WAIT_SECONDS: '4' }, { entry: 'worker-start.sh', ctl: { 'derive-url': RUNTIME_URL } });
@@ -624,6 +638,18 @@ for (const [label, url, extra, want] of [
   r = run(`setup-ca-${label.replace(/[^a-z]+/g, '-')}`, { ...S, PG_DATABASE_URL: url, ...extra }, { entry: 'db-setup.sh', target: 'rw', targetDir: sd });
   check(`14g db-setup.sh CA: ${label} (the bootstrap child gets it)`, r.code === 0 && field(line(r.out, 'bootstrap'), 'ca') === want, r.out);
 }
+{
+  const temps = ['.owner-password.12.abcdef.tmp', '.owner-password.next.13.abcdef.tmp', '.target.json.14.abcdef.tmp'];
+  for (const [label, ctl, want] of [['success', {}, 0], ['failure', { bootstrap: 70 }, 70]]) {
+    sd = setupDir(`temps-${label}`, true);
+    for (const t of temps) fs.writeFileSync(path.join(sd, t), 'partial');
+    fs.writeFileSync(path.join(sd, 'owner-password.next'), 'pendingpassword1');
+    r = run(`setup-temps-${label}`, S, { entry: 'db-setup.sh', ctl, target: 'rw', targetDir: sd });
+    const left = fs.readdirSync(sd);
+    check(`14k security review L2 (${label}): db-setup removes the temp files a killed run left (.owner-password.*.tmp, .target.json.*.tmp) and keeps the pending owner-password.next (the child settles it)`,
+      r.code === want && temps.every((t) => !left.includes(t)) && left.includes('owner-password.next'), `${left.join(',')}\n${r.out}`);
+  }
+}
 sd = setupDir('readonly', false);
 r = run('setup-readonly', S, { entry: 'db-setup.sh', target: 'rw', targetDir: sd, dockerArgs: ['--read-only', '--user', '1000:1000'] });
 check('14h read-only root, uid 1000 (as shipped), only the target volume writable: the setup completes', r.code === 0 && targetText(sd) !== null, r.out);
@@ -640,6 +666,9 @@ const workerSource = fs.readFileSync(WORKER_START, 'utf8');
 const setupSource = fs.readFileSync(DB_SETUP, 'utf8');
 check('12l worker-start.sh writes no file, never traces (set -x) and never runs the bootstrap child', !/mktemp|\/tmp\//.test(workerSource) && !/set -[a-z]*x/.test(workerSource) && !/bootstrap-owner-login/.test(workerSource), 'worker-start.sh writes a file, traces, or runs the bootstrap child');
 check('12n option 2: api-prestart.sh never runs the bootstrap child and never traces (set -x)', !/bootstrap-owner-login/.test(prestartSource) && !/set -[a-z]*x/.test(prestartSource), 'api-prestart.sh runs the bootstrap child or enables tracing');
+check('12r security review I2: neither start script bounds its wait by the clock (no `date +%s`); both bound each derive run with `timeout`',
+  ![prestartSource, workerSource].some((t) => /date \+%s/.test(t)) && [prestartSource, workerSource].every((t) => /timeout "\$DERIVE_TIMEOUT_SECONDS" node "\$DERIVE_RUNTIME_URL"/.test(t)), 'a start script still uses the clock or runs derive without a timeout');
+check('14l security review L2: db-setup.sh no longer names the never-used $TARGET.tmp', !/\$TARGET\.tmp/.test(setupSource), 'db-setup.sh still names $TARGET.tmp');
 check('14i db-setup.sh never traces (set -x) and starts no runtime process (main.js, the Worker, a migration, tini)', !/set -[a-z]*x/.test(setupSource) && !/dist\/main\.js|twenty-migrate|\/sbin\/tini|register-schedulers/.test(setupSource), 'db-setup.sh traces or starts a runtime process');
 
 fs.rmSync(work, { recursive: true, force: true });

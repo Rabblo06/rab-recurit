@@ -7059,7 +7059,7 @@ Phase X Part 2 finding XA-08 (`docs/plans/PHASE-X-STAGE0-PART2.md` §2.6). Front
     CREATEROLE and ADMIN OPTION on `crewflow_owner` (or superuser), else db-setup refuses (64) and names the fix. db-setup
     logs `crewflow_owner is ready (password reset because the password file was missing (Crewflow addition))`.
 - **Refusals (exit 64, fixed message, nothing written).**
-  - The password file exists but no longer logs in (the password was changed in the database): `"The stored crewflow_owner password no longer logs in (it was changed in the database). Delete the password file and start again with the admin address in PG_DATABASE_URL. Refusing."`. No
+  - The password file exists but does not log in (for example the password was changed in the database): `"The stored crewflow_owner password does not log in. Delete the password file and start again with the admin address in PG_DATABASE_URL. Refusing."` (security review L1: neutral wording). No
     automatic reset (as Twenty: the existing user is skipped).
   - An admin URL names a database that does not exist: `"The database named in PG_DATABASE_URL does not exist (SQLSTATE 3D000). db-setup never creates a database: create it at your provider (the bundled db creates its own), then start again. Refusing."`. db-setup never creates a database (the bundled one
     is created by the postgres image, `POSTGRES_DB`).
@@ -7099,18 +7099,34 @@ Phase X Part 2 finding XA-08 (`docs/plans/PHASE-X-STAGE0-PART2.md` §2.6). Front
   rab-api and rab-worker mount the volume read-only. It is never logged or printed, never in an env file, a compose
   variable or the image: the gates refuse a variable carrying the `crewflow_owner` password and any mount at the
   password-file path other than db-setup's volume (db-setup read-write, the apps read-only), and the image gate fails on
-  any file under `/run/crewflow/db-target` in the image. A lost file is replaced only with an exclusive create (a
-  concurrent db-setup that stored one first wins; this one fails, exit 70, and changes nothing). The password is random (32 bytes), not derived from anything, so an
-  APP_SECRET leak gives no database login. The bundled db is reachable only from the app network; an external database
+  any file under `/run/crewflow/db-target` in the image. Security review L3: the gates also refuse `volumes_from` on any
+  service, a `secrets` / `configs` target under `/run/crewflow`, a bind whose host source is inside Docker's volume store
+  (`/var/lib/docker/volumes/...`, rootless `~/.local/share/docker`), a `tmpfs` at or under `/run/crewflow/db-target`, and a
+  rab-redis that is not `user: 999:<gid>`. Reading is strict (security review L2): opened `O_RDONLY|O_NOFOLLOW|O_NONBLOCK`,
+  then `fstat` on that descriptor must show a regular file of at most 4096 bytes owned by the reading uid with no
+  group/other bit; an empty file, a symlink, a FIFO or a wrong owner/mode is refused (exit 64), never read as "missing".
+  Writing loops until every byte is written, sets the mode on the descriptor (never a path-based chmod) and fsyncs the
+  file and the directory. A lost file is replaced only through the pending file below, created exclusively (a concurrent
+  db-setup that stored one first wins; this one fails, exit 70, and changes nothing). The password is random (32 bytes),
+  not derived from anything, so an APP_SECRET leak gives no database login. The bundled db is reachable only from the app network; an external database
   only through the provider's allow-list; verify-full TLS.
 - **Residual.** Volume backups and snapshots contain the password: protect and encrypt them like the database. The file
   is plaintext at rest (T-9). Changing it on purpose: stop rab-api and rab-worker, remove the file with a one-off db-setup
   run, `up -d` (the A4 reset; runbook section 7; not yet run live). Running apps do not pick up a new password on their own:
   their new connections fail with 28P01 until they are recreated, hence the stop.
-- **Crash during an A4 reset.** db-setup stores the NEW password before its transaction. A crash after that store and before
-  COMMIT leaves a file whose password the database does not have: the next start refuses with the stale-file message
-  (`passwordFileStale`, exit 64). Fail-closed; the fix is one operator step (delete the file, start again with the admin
-  URL or the bundled db).
+- **Crash or failure during an A4 reset (security review L1, fixed).** db-setup stores the NEW password exclusively as the
+  pending file `owner-password.next` before its transaction, and renames it over `owner-password` only after the COMMIT
+  and a successful login with it. A run that fails in between (a crash, a Q4c error such as 22023, a lost connection)
+  leaves `owner-password` untouched. The next start settles the pending file first: it logs in (the transaction had
+  committed) -> promoted; 28P01 (nothing committed) -> deleted, and the normal path runs (A4 again when `owner-password`
+  is missing); any other error -> exit 70 with the pending file kept. The apps read only `owner-password`. The stale-file
+  refusal (`passwordFileStale`, exit 64) is now reached only when the stored password really does not log in.
+- **One Crewflow deployment per PostgreSQL cluster when using an admin URL (security review L4, owner-approved).** Roles
+  are cluster-wide: two deployments on one cluster share the one `crewflow_owner`, and an A4 reset by one (its password
+  file lost) would change the password the other uses. Before an A4 reset the admin session runs one read-only SELECT
+  (Q2b: `pg_shdepend` rows of `crewflow_owner` in another database, or its ownership of / ACL entry on another database)
+  and refuses (exit 64, `ownerInOtherDatabase`) before anything is stored or written. Live: a second database with a
+  fresh setup volume is refused and the first deployment's password keeps working.
 
 ### TM-DB-3 (accepted; changed by the Helm model) — a bootstrap runs with admin rights on every `up` (db-setup)
 - **Actor → action → consequence.** A bug in, or an attacker-controlled input to, the bootstrap child could misuse admin
@@ -7125,7 +7141,8 @@ Phase X Part 2 finding XA-08 (`docs/plans/PHASE-X-STAGE0-PART2.md` §2.6). Front
   times (at most 3 attempts), re-verifies the result and re-probes the login after commit. It prints fixed text and
   SQLSTATE classes only, never a URL, password, verifier, host or database name. The plaintext password never reaches the
   server (a pre-hashed SCRAM verifier is sent); a superuser admin turns statement and parameter logging off for its session.
-  The `crewflow_owner` URL path runs read-only statements only.
+  The `crewflow_owner` URL path runs read-only statements only, on a session opened with
+  `default_transaction_read_only=on` (security review I1, owner-approved: a write there fails with 25006).
 - **Session pinning (security review H1, CVE-2018-1058 class).** A `crewflow_owner` that owns the database (directly or
   through an inherited role) could set a database-level `search_path` and plant an operator that the admin session's
   unqualified `=` would then run with admin rights. Every bootstrap connection is opened with the startup options
