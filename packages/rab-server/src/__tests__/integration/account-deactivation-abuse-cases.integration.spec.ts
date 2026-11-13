@@ -1,7 +1,7 @@
 import { insertMembership } from './helpers/test-identities';
 import 'reflect-metadata';
 import { PermissionFlag, UserStatus } from '@rab/shared';
-import { INestApplication, ValidationPipe } from '@nestjs/common';
+import { INestApplication } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
 import { randomUUID } from 'node:crypto';
 import request from 'supertest';
@@ -14,6 +14,7 @@ import { PasswordHashingService } from '../../engine/core-modules/auth/services/
 import { TenantContextService } from '../../engine/core-modules/tenant/tenant-context.service';
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { generateFixturePassword } from './helpers/fixture-password';
+import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-pipe';
 
 const FIXTURE_PASSWORD = generateFixturePassword();
 
@@ -178,8 +179,7 @@ describeIfDb('account deactivation abuse cases (integration)', () => {
 
   beforeAll(async () => {
     const moduleRef = await Test.createTestingModule({ imports: [AppModule] }).compile();
-    app = moduleRef.createNestApplication();
-    app.useGlobalPipes(new ValidationPipe({ whitelist: true, forbidNonWhitelisted: true, transform: true }));
+    app = applyGlobalValidationPipe(moduleRef.createNestApplication());
     await app.init();
 
     dataSource = moduleRef.get(DataSource);

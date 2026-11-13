@@ -1,6 +1,6 @@
 import 'reflect-metadata';
 import { ManagerType } from '@rab/shared';
-import { INestApplication, ValidationPipe } from '@nestjs/common';
+import { INestApplication } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
 import request from 'supertest';
 import { DataSource } from 'typeorm';
@@ -14,6 +14,7 @@ import { ManagerService } from '../../modules/manager/services/manager.service';
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { clearThrottleState } from './helpers/throttle-state';
 import { TestIdentityFactory } from './helpers/test-identities';
+import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-pipe';
 
 /**
  * P2.9B — organisation onboarding by the Platform Super Admin. Real Postgres, RLS on, no mocks.
@@ -85,8 +86,7 @@ describeIfDb('organisation onboarding — CEO invitation (integration)', () => {
 
   beforeAll(async () => {
     const moduleRef = await Test.createTestingModule({ imports: [AppModule] }).compile();
-    app = moduleRef.createNestApplication();
-    app.useGlobalPipes(new ValidationPipe({ whitelist: true, forbidNonWhitelisted: true, transform: true }));
+    app = applyGlobalValidationPipe(moduleRef.createNestApplication());
     await app.init();
 
     dataSource = moduleRef.get(DataSource);

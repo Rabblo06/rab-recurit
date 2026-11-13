@@ -1,6 +1,6 @@
 import 'reflect-metadata';
 import { PermissionFlag } from '@rab/shared';
-import { INestApplication, ValidationPipe } from '@nestjs/common';
+import { INestApplication } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
 import request from 'supertest';
 import { DataSource, EntityManager } from 'typeorm';
@@ -11,6 +11,7 @@ import { TenantContextService } from '../../engine/core-modules/tenant/tenant-co
 import { Organisation } from '../../modules/identity/entities';
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { TestIdentityFactory } from './helpers/test-identities';
+import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-pipe';
 
 /**
  * P1C (FULL-ARCHITECTURE-UPGRADE-PLAN.md — P1 program): `AuthSecuritySnapshotService` — the ONE
@@ -48,8 +49,7 @@ describeIfDb('AuthSecuritySnapshotService — consolidated security snapshot cor
 
   beforeAll(async () => {
     const moduleRef = await Test.createTestingModule({ imports: [AppModule] }).compile();
-    app = moduleRef.createNestApplication();
-    app.useGlobalPipes(new ValidationPipe({ whitelist: true, forbidNonWhitelisted: true, transform: true }));
+    app = applyGlobalValidationPipe(moduleRef.createNestApplication());
     await app.init();
     dataSource = moduleRef.get(DataSource);
     tenantContext = moduleRef.get(TenantContextService);

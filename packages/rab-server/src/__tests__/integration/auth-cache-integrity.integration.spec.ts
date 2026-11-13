@@ -1,5 +1,5 @@
 import 'reflect-metadata';
-import { INestApplication, ValidationPipe } from '@nestjs/common';
+import { INestApplication } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
 import Redis from 'ioredis';
 import { createHash, randomBytes } from 'node:crypto';
@@ -8,6 +8,7 @@ import { DataSource } from 'typeorm';
 
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
+import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-pipe';
 
 /**
  * F-06 (SECURITY_FINDINGS.md): "Redis is inside the authentication trust boundary". Both auth caches ON, real Redis (an isolated
@@ -41,8 +42,7 @@ describeIfDb('auth cache integrity with Redis caches enabled (F-06)', () => {
     redis = new Redis(process.env.REDIS_URL!);
     const { AppModule } = await import('../../app.module');
     const moduleRef = await Test.createTestingModule({ imports: [AppModule] }).compile();
-    app = moduleRef.createNestApplication();
-    app.useGlobalPipes(new ValidationPipe({ whitelist: true, forbidNonWhitelisted: true, transform: true }));
+    app = applyGlobalValidationPipe(moduleRef.createNestApplication());
     await app.init();
     owner = createAdminDataSource();
     await owner.initialize();

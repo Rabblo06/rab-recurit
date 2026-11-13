@@ -1,5 +1,5 @@
 import 'reflect-metadata';
-import { INestApplication, ValidationPipe } from '@nestjs/common';
+import { INestApplication } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
 import request from 'supertest';
 import { DataSource } from 'typeorm';
@@ -9,6 +9,7 @@ import { PasswordHashingService } from '../../engine/core-modules/auth/services/
 import { TenantContextService } from '../../engine/core-modules/tenant/tenant-context.service';
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
+import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-pipe';
 
 /**
  * Settings → Profile → Devices (2026-10-15). Real PostgreSQL with RLS; runs unchanged with both auth caches enabled.
@@ -57,8 +58,7 @@ describeIfDb('profile devices and active sessions (integration)', () => {
 
   beforeAll(async () => {
     const moduleRef = await Test.createTestingModule({ imports: [AppModule] }).compile();
-    app = moduleRef.createNestApplication();
-    app.useGlobalPipes(new ValidationPipe({ whitelist: true, forbidNonWhitelisted: true, transform: true }));
+    app = applyGlobalValidationPipe(moduleRef.createNestApplication());
     await app.init();
     owner = createAdminDataSource();
     await owner.initialize();
@@ -233,8 +233,7 @@ describeIfDb('profile devices and active sessions (integration)', () => {
     await owner.query(`UPDATE core.user_session SET idle_expires_at = now() - interval '1 minute' WHERE id = $1`, [idle.sid]);
     await http().delete(`/rest/v1/profile/sessions/${revoked.sid}`).set(asCookie(current.session));
     const restarted = await Test.createTestingModule({ imports: [AppModule] }).compile();
-    const app2 = restarted.createNestApplication();
-    app2.useGlobalPipes(new ValidationPipe({ whitelist: true, forbidNonWhitelisted: true, transform: true }));
+    const app2 = applyGlobalValidationPipe(restarted.createNestApplication());
     await app2.init();
     try {
       const res = await request(app2.getHttpServer()).get('/rest/v1/profile/sessions').set(asCookie(current.session));

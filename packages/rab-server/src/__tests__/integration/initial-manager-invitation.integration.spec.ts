@@ -1,6 +1,6 @@
 import 'reflect-metadata';
 import { ManagerType } from '@rab/shared';
-import { INestApplication, ValidationPipe } from '@nestjs/common';
+import { INestApplication } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
 import request from 'supertest';
 import { DataSource } from 'typeorm';
@@ -14,6 +14,7 @@ import { WORKER_HEARTBEAT_KEY } from '../../engine/worker-shared/heartbeat.const
 import { OrganisationOnboardingService } from '../../modules/manager/services/organisation-onboarding.service';
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { TestIdentityFactory } from './helpers/test-identities';
+import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-pipe';
 
 /**
  * P2.9C, reversed by the universal-self-service-onboarding checkpoint (docs/HANDOFF.md): the
@@ -66,8 +67,7 @@ describeIfDb('initial manager invitation (integration)', () => {
 
   beforeAll(async () => {
     const moduleRef = await Test.createTestingModule({ imports: [AppModule] }).compile();
-    app = moduleRef.createNestApplication();
-    app.useGlobalPipes(new ValidationPipe({ whitelist: true, forbidNonWhitelisted: true, transform: true }));
+    app = applyGlobalValidationPipe(moduleRef.createNestApplication());
     await app.init();
 
     dataSource = moduleRef.get(DataSource);

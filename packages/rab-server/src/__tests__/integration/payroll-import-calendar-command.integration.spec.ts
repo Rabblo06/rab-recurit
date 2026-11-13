@@ -5,6 +5,7 @@ import { Test } from '@nestjs/testing';
 import { DataSource } from 'typeorm';
 
 import { AppModule } from '../../app.module';
+import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-pipe';
 import { executeCalendarImport } from '../../command/payroll-import-calendar.command';
 import { PasswordHashingService } from '../../engine/core-modules/auth/services/password-hashing.service';
 import { TenantContextService } from '../../engine/core-modules/tenant/tenant-context.service';
@@ -35,7 +36,7 @@ describeIfDb('payroll:import-calendar command on the runtime role (integration)'
 
   beforeAll(async () => {
     const moduleRef = await Test.createTestingModule({ imports: [AppModule] }).compile();
-    app = moduleRef.createNestApplication();
+    app = applyGlobalValidationPipe(moduleRef.createNestApplication());
     await app.init();
     dataSource = moduleRef.get(DataSource);
     const tenantContext = moduleRef.get(TenantContextService);

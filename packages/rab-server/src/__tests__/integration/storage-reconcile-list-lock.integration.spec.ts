@@ -1,6 +1,6 @@
 import './helpers/use-s3-env'; // FIRST: env is frozen when AppModule is imported
 import 'reflect-metadata';
-import { INestApplication, ValidationPipe } from '@nestjs/common';
+import { INestApplication } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
 import { ListObjectsV2Command, S3Client } from '@aws-sdk/client-s3';
 import { ChildProcess, spawn } from 'node:child_process';
@@ -24,6 +24,7 @@ import { Organisation } from '../../modules/identity/entities';
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { S3_TEST } from './helpers/s3-env';
 import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
+import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-pipe';
 
 /**
  * Phase A (storage) — `storage:reconcile` cost and leader-lock behaviour against REAL PostgreSQL (FORCE RLS, restricted
@@ -61,8 +62,7 @@ describeIf('storage:reconcile — LIST comparison and cluster-wide lock (Postgre
 
   beforeAll(async () => {
     const moduleRef = await Test.createTestingModule({ imports: [AppModule] }).compile();
-    app = moduleRef.createNestApplication();
-    app.useGlobalPipes(new ValidationPipe({ whitelist: true, forbidNonWhitelisted: true, transform: true }));
+    app = applyGlobalValidationPipe(moduleRef.createNestApplication());
     await app.init();
     dataSource = moduleRef.get(DataSource);
     tenantContext = moduleRef.get(TenantContextService);

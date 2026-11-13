@@ -1,6 +1,6 @@
 import 'reflect-metadata';
 import { ManagerType, VenueType } from '@rab/shared';
-import { INestApplication, ValidationPipe } from '@nestjs/common';
+import { INestApplication } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
 import request from 'supertest';
 import { DataSource } from 'typeorm';
@@ -13,6 +13,7 @@ import { WORKER_HEARTBEAT_KEY } from '../../engine/worker-shared/heartbeat.const
 import { OrganisationOnboardingService } from '../../modules/manager/services/organisation-onboarding.service';
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
+import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-pipe';
 
 /**
  * Organisation isolation for Initial Manager onboarding (owner policy, 2026-10-15). Supersedes P2.9C's "a Platform Admin may
@@ -66,8 +67,7 @@ describeIfDb('organisation isolation: Initial Manager onboarding, login and tena
 
   beforeAll(async () => {
     const moduleRef = await Test.createTestingModule({ imports: [AppModule] }).compile();
-    app = moduleRef.createNestApplication();
-    app.useGlobalPipes(new ValidationPipe({ whitelist: true, forbidNonWhitelisted: true, transform: true }));
+    app = applyGlobalValidationPipe(moduleRef.createNestApplication());
     await app.init();
     dataSource = moduleRef.get(DataSource);
     tenantContext = moduleRef.get(TenantContextService);

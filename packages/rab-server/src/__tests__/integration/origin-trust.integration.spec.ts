@@ -9,7 +9,7 @@ const ORIGINAL = { WORKSPACE_BASE_DOMAIN: process.env.WORKSPACE_BASE_DOMAIN, COR
 process.env.WORKSPACE_BASE_DOMAIN = 'rab.test';
 process.env.CORS_ORIGINS = 'http://localhost:5173';
 
-import { INestApplication, ValidationPipe } from '@nestjs/common';
+import { INestApplication } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
 import cookieParser from 'cookie-parser';
 import request from 'supertest';
@@ -25,6 +25,7 @@ import { buildCorsOptionsDelegate, WorkspaceOriginTrustService } from '../../eng
 import { WorkspaceHostResolverService } from '../../engine/core-modules/workspace-host/workspace-host-resolver.service';
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
+import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-pipe';
 
 const RUN = Boolean(process.env.DATABASE_URL);
 const describeIfDb = RUN ? describe : describe.skip;
@@ -51,8 +52,7 @@ describeIfDb('wave 1 lane A — credentialed origin trust: CORS, cookie CSRF, lo
           : { kind: 'unknown' as const },
     };
     const moduleRef = await Test.createTestingModule({ imports: [AppModule] }).overrideProvider(WorkspaceHostLookupService).useValue(lookup).compile();
-    app = moduleRef.createNestApplication();
-    app.useGlobalPipes(new ValidationPipe({ whitelist: true, forbidNonWhitelisted: true, transform: true }));
+    app = applyGlobalValidationPipe(moduleRef.createNestApplication());
     env = moduleRef.get(EnvironmentService);
     const realGet = env.get.bind(env);
     jest.spyOn(env, 'get').mockImplementation(((key: keyof EnvironmentVariables) =>

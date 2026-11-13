@@ -1,5 +1,5 @@
 import 'reflect-metadata';
-import { INestApplication, ValidationPipe } from '@nestjs/common';
+import { INestApplication } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
 import { randomUUID } from 'node:crypto';
 import { DataSource } from 'typeorm';
@@ -10,6 +10,7 @@ import { PasswordHashingService } from '../../engine/core-modules/auth/services/
 import { TenantContextService } from '../../engine/core-modules/tenant/tenant-context.service';
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { TestIdentityFactory } from './helpers/test-identities';
+import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-pipe';
 
 /**
  * `AuditLogImmutableHistoricalIdentifiers1786692000000` removed the live FK that used to back
@@ -33,8 +34,7 @@ describeIfDb('AuditService.record() — insertion-time identity validation (inte
 
   beforeAll(async () => {
     const moduleRef = await Test.createTestingModule({ imports: [AppModule] }).compile();
-    app = moduleRef.createNestApplication();
-    app.useGlobalPipes(new ValidationPipe({ whitelist: true, forbidNonWhitelisted: true, transform: true }));
+    app = applyGlobalValidationPipe(moduleRef.createNestApplication());
     await app.init();
 
     dataSource = moduleRef.get(DataSource);

@@ -5,7 +5,7 @@ import 'reflect-metadata';
 const ORIGINAL_CORS = process.env.CORS_ORIGINS;
 process.env.CORS_ORIGINS = 'http://localhost:5173';
 
-import { INestApplication, ValidationPipe } from '@nestjs/common';
+import { INestApplication } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
 import { randomBytes } from 'node:crypto';
 import jwt from 'jsonwebtoken';
@@ -19,6 +19,7 @@ import { EnvironmentVariables } from '../../engine/core-modules/environment/envi
 import { TenantContextService } from '../../engine/core-modules/tenant/tenant-context.service';
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
+import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-pipe';
 
 const RUN = Boolean(process.env.DATABASE_URL);
 const describeIfDb = RUN ? describe : describe.skip;
@@ -61,8 +62,7 @@ describeIfDb('wave 2 lane A2 — purpose-separated JWT keys and __Host- auth coo
 
   beforeAll(async () => {
     const moduleRef = await Test.createTestingModule({ imports: [AppModule] }).compile();
-    app = moduleRef.createNestApplication();
-    app.useGlobalPipes(new ValidationPipe({ whitelist: true, forbidNonWhitelisted: true, transform: true }));
+    app = applyGlobalValidationPipe(moduleRef.createNestApplication());
     const env = moduleRef.get(EnvironmentService);
     const realGet = env.get.bind(env);
     jest.spyOn(env, 'get').mockImplementation(((key: keyof EnvironmentVariables) => {

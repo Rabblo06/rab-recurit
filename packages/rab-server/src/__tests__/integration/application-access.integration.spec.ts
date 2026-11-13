@@ -2,7 +2,7 @@ import { PasswordResetTokenService } from '../../engine/core-modules/auth/token/
 import { PasswordResetTokenPurpose } from '@rab/shared';
 import 'reflect-metadata';
 import { MAX_PASSWORD_LENGTH, PermissionFlag, UserStatus } from '@rab/shared';
-import { INestApplication, ValidationPipe } from '@nestjs/common';
+import { INestApplication } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
 import { randomUUID } from 'node:crypto';
 import request from 'supertest';
@@ -24,6 +24,7 @@ import { TenantContextService } from '../../engine/core-modules/tenant/tenant-co
 import { ThrottlerRedisClientProvider } from '../../engine/core-modules/throttler/throttler-redis-client.provider';
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { clearLoginLimiterState, clearThrottleState } from './helpers/throttle-state';
+import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-pipe';
 
 /**
  * Integration tests (rab-workforce-architecture.md §1.2 abuse-case suite):
@@ -110,8 +111,7 @@ describeIfDb('application-bound authentication (integration)', () => {
 
   beforeAll(async () => {
     const moduleRef = await Test.createTestingModule({ imports: [AppModule] }).compile();
-    app = moduleRef.createNestApplication();
-    app.useGlobalPipes(new ValidationPipe({ whitelist: true, forbidNonWhitelisted: true, transform: true }));
+    app = applyGlobalValidationPipe(moduleRef.createNestApplication());
     await app.init();
 
     dataSource = moduleRef.get(DataSource);

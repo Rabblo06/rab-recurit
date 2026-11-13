@@ -2,7 +2,6 @@ import { releaseEarlyBootSignalGuard } from './engine/utils/early-boot-signal-gu
 import 'dotenv/config';
 import './instrument';
 
-import { ValidationPipe } from '@nestjs/common';
 import { NestFactory } from '@nestjs/core';
 import helmet from 'helmet';
 import { DataSource } from 'typeorm';
@@ -10,6 +9,7 @@ import { DataSource } from 'typeorm';
 import { AppModule } from './app.module';
 import { EnvironmentService } from './engine/core-modules/environment/environment.service';
 import { assertRuntimeDbRole } from './engine/utils/assert-runtime-db-role';
+import { applyGlobalValidationPipe } from './engine/utils/global-validation-pipe';
 import { buildTrustProxyPredicate } from './engine/utils/trusted-proxy.util';
 import { buildCorsOptionsDelegate, WorkspaceOriginTrustService } from './engine/core-modules/workspace-host/workspace-origin-trust.service';
 import { WorkspaceHostResolverService } from './engine/core-modules/workspace-host/workspace-host-resolver.service';
@@ -85,9 +85,8 @@ async function bootstrap(): Promise<void> {
     .getInstance()
     .set('trust proxy', buildTrustProxyPredicate(environmentService.trustedProxyCidrs));
 
-  app.useGlobalPipes(
-    new ValidationPipe({ whitelist: true, forbidNonWhitelisted: true, transform: true }),
-  );
+  // The one shared configuration (whitelist + forbidNonWhitelisted + transform); every test bootstrap applies the same.
+  applyGlobalValidationPipe(app);
 
   // cookie-parser is registered in AppModule.configure(), not here — see
   // that comment for why (test bootstraps never run this function at all).

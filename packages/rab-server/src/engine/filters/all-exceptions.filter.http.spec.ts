@@ -10,6 +10,7 @@ import { Test } from '@nestjs/testing';
 import request from 'supertest';
 
 import { ExceptionHandlerService } from '../core-modules/exception-handler/exception-handler.service';
+import { applyGlobalValidationPipe } from '../utils/global-validation-pipe';
 import { AllExceptionsFilter } from './all-exceptions.filter';
 
 @Controller('probe')
@@ -40,7 +41,7 @@ describe('AllExceptionsFilter over real HTTP: body-parser client errors (X3.2 F2
         { provide: APP_FILTER, useClass: AllExceptionsFilter },
       ],
     }).compile();
-    app = moduleRef.createNestApplication({ logger: false });
+    app = applyGlobalValidationPipe(moduleRef.createNestApplication({ logger: false }));
     await app.init();
   });
 

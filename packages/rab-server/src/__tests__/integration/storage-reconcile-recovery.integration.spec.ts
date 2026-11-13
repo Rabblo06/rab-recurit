@@ -1,6 +1,6 @@
 import './helpers/use-s3-env'; // FIRST: env is frozen when AppModule is imported
 import 'reflect-metadata';
-import { INestApplication, ValidationPipe } from '@nestjs/common';
+import { INestApplication } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
 import { DeleteObjectCommand, ListObjectsV2Command, PutObjectCommand, S3Client } from '@aws-sdk/client-s3';
 import { createHash, randomUUID } from 'node:crypto';
@@ -18,6 +18,7 @@ import { Organisation } from '../../modules/identity/entities';
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { S3_TEST } from './helpers/s3-env';
 import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
+import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-pipe';
 
 /**
  * Phase A (storage) review — discovery reliability and recovery of `storage:reconcile` in LIST mode, against REAL
@@ -64,8 +65,7 @@ describeIf('storage:reconcile — LIST discovery reliability and recovery (Postg
 
   beforeAll(async () => {
     const moduleRef = await Test.createTestingModule({ imports: [AppModule] }).compile();
-    app = moduleRef.createNestApplication();
-    app.useGlobalPipes(new ValidationPipe({ whitelist: true, forbidNonWhitelisted: true, transform: true }));
+    app = applyGlobalValidationPipe(moduleRef.createNestApplication());
     await app.init();
     dataSource = moduleRef.get(DataSource);
     tenantContext = moduleRef.get(TenantContextService);

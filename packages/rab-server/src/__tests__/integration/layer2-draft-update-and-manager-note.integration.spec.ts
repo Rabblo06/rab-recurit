@@ -1,6 +1,6 @@
 import 'reflect-metadata';
 import { PermissionFlag, PermissionFlagType, ShiftStatus } from '@rab/shared';
-import { BadRequestException, ConflictException, ForbiddenException, INestApplication, NotFoundException, ValidationPipe } from '@nestjs/common';
+import { BadRequestException, ConflictException, ForbiddenException, INestApplication, NotFoundException } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
 import { randomUUID } from 'node:crypto';
 import request from 'supertest';
@@ -18,6 +18,7 @@ import { StaffService } from '../../modules/staff/services/staff.service';
 import { VenueService } from '../../modules/venue/services/venue.service';
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
+import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-pipe';
 
 /**
  * Phase 5a domain regressions, in the layer-2 hardening style (LAYER2_HARDENING_2026-10-25): every call goes to the
@@ -80,8 +81,7 @@ describeIfDb('Phase 5a domain: updateDraft, Tx extractions and ManagerService.ad
 
   beforeAll(async () => {
     const moduleRef = await Test.createTestingModule({ imports: [AppModule] }).compile();
-    app = moduleRef.createNestApplication();
-    app.useGlobalPipes(new ValidationPipe({ whitelist: true, forbidNonWhitelisted: true, transform: true }));
+    app = applyGlobalValidationPipe(moduleRef.createNestApplication());
     await app.init();
     admin = createAdminDataSource();
     await admin.initialize();

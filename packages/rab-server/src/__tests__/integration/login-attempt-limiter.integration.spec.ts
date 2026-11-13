@@ -20,7 +20,7 @@ process.env.AUTH_LOGIN_EMAIL_IP_DAILY_LIMIT = '6';
 process.env.AUTH_LOGIN_ACCOUNT_BURST = '6';
 process.env.AUTH_LOGIN_ACCOUNT_WINDOW_SECONDS = '600';
 
-import { HttpException, INestApplication, ValidationPipe } from '@nestjs/common';
+import { HttpException, INestApplication } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
 import { randomUUID } from 'node:crypto';
 import request from 'supertest';
@@ -35,6 +35,7 @@ import { ThrottlerRedisClientProvider } from '../../engine/core-modules/throttle
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { clearLoginLimiterState, clearThrottleState } from './helpers/throttle-state';
 import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
+import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-pipe';
 
 const RUN = Boolean(process.env.DATABASE_URL);
 const describeIfDb = RUN ? describe : describe.skip;
@@ -71,8 +72,7 @@ describeIfDb('wave 1 lane A — password sign-in limiter, per (email, IP) with a
 
   beforeAll(async () => {
     const moduleRef = await Test.createTestingModule({ imports: [AppModule] }).compile();
-    app = moduleRef.createNestApplication();
-    app.useGlobalPipes(new ValidationPipe({ whitelist: true, forbidNonWhitelisted: true, transform: true }));
+    app = applyGlobalValidationPipe(moduleRef.createNestApplication());
     await app.init();
     owner = createAdminDataSource();
     await owner.initialize();

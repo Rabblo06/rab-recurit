@@ -1,7 +1,7 @@
 import 'reflect-metadata';
 import './helpers/use-local-storage-env'; // MUST be imported before AppModule — see that file's own doc comment
 
-import { INestApplication, ValidationPipe } from '@nestjs/common';
+import { INestApplication } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
 import { readdirSync, statSync } from 'node:fs';
 import http from 'node:http';
@@ -14,6 +14,7 @@ import { TenantContextService } from '../../engine/core-modules/tenant/tenant-co
 import { Organisation } from '../../modules/identity/entities';
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
+import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-pipe';
 
 /**
  * PHASE 11 / DEP-01 — proves the installed Multer version (2.4.0, outside
@@ -76,8 +77,7 @@ describeIfDb('multipart upload security (Phase 11 / DEP-01)', () => {
 
   beforeAll(async () => {
     const moduleRef = await Test.createTestingModule({ imports: [AppModule] }).compile();
-    app = moduleRef.createNestApplication();
-    app.useGlobalPipes(new ValidationPipe({ whitelist: true, forbidNonWhitelisted: true, transform: true }));
+    app = applyGlobalValidationPipe(moduleRef.createNestApplication());
     await app.init();
     // Listening on a real ephemeral port (not just `app.init()`) so the
     // abort test below can drive a raw `http.request` and genuinely sever

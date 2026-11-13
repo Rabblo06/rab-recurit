@@ -1,5 +1,5 @@
 import 'reflect-metadata';
-import { INestApplication, ValidationPipe } from '@nestjs/common';
+import { INestApplication } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
 import Redis from 'ioredis';
 import { randomUUID } from 'node:crypto';
@@ -9,6 +9,7 @@ import { DataSource } from 'typeorm';
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { MockAccount, MockOidcProvider, Tamper } from './helpers/mock-oidc-provider';
 import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
+import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-pipe';
 
 /**
  * Google (and Microsoft) sign-in through the REAL HTTP routes and the REAL openid-client validation, against a local
@@ -125,8 +126,7 @@ describeIfDb('Google / Microsoft sign-in with one-time handoff (integration, moc
       .overrideProvider(LoginSecondFactorPolicyService)
       .useValue({ requirementFor: (...args: unknown[]) => secondFactor(...args) })
       .compile();
-    app = moduleRef.createNestApplication();
-    app.useGlobalPipes(new ValidationPipe({ whitelist: true, forbidNonWhitelisted: true, transform: true }));
+    app = applyGlobalValidationPipe(moduleRef.createNestApplication());
     await app.init();
     owner = createAdminDataSource();
     await owner.initialize();
