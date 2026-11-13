@@ -14,6 +14,10 @@
  *     admin) makes crewflow_owner use it, and every runtime process gets `buildRuntimeDatabaseUrl(adminUrl, password)`:
  *     the admin URL's host, port, database and validated query, with the userinfo replaced by crewflow_owner.
  *
+ * PR #125 option 2: in a deployment ONLY the one-shot db-setup step receives PG_DATABASE_URL; it uses `planDbSetup` (below),
+ * where a crewflow_owner URL is no longer passed through unchanged but gets the derived password too. `planOwnerLogin`'s
+ * pass-through stays for the derive step's no-target mode (development, the documented rollback command).
+ *
  * Consumers: the bootstrap child (`scripts/owner-login/bootstrap-owner-login.ts`), the derive step
  * (`scripts/owner-login/derive-runtime-url.ts`, used by api-prestart.sh and worker-start.sh so both build byte-identical
  * URLs), runtime-db-config (`OWNER_LOGIN`), and twenty-mode-check (`scramSha256Verifier`).
@@ -197,6 +201,18 @@ export function buildRuntimeDatabaseUrl(
     );
   const admin = parseTarget(adminUrl, URL_LABEL);
   if (admin.user === OWNER_LOGIN) return adminUrl;
+  return rebuildWithOwnerLogin(adminUrl, admin, ownerPassword);
+}
+
+/**
+ * The rebuild of buildRuntimeDatabaseUrl, WITHOUT its crewflow_owner short-circuit: also used for a crewflow_owner URL in
+ * the db-setup step (option 2, planDbSetup), where the URL's own password is replaced by the derived one.
+ */
+function rebuildWithOwnerLogin(
+  adminUrl: string,
+  admin: PgTarget,
+  ownerPassword: string,
+): string {
   if (admin.transactionPooler !== null)
     throw new OwnerCredentialError(OWNER_CREDENTIAL_MESSAGES.transactionPooler);
   if (
@@ -316,6 +332,60 @@ export function planOwnerLogin(inputs: OwnerLoginInputs): OwnerLoginPlan {
     adminTarget: parsed,
     runtimeTarget: parseTarget(runtimeUrl, URL_LABEL),
   } as Extract<OwnerLoginPlan, { mode: 'bootstrap' }>;
+  hide(plan, 'runtimeUrl', runtimeUrl);
+  hide(plan, 'ownerPassword', ownerPassword);
+  return plan;
+}
+
+/**
+ * PR #125 option 2 (owner decision 2026-11-13): what the one-shot db-setup step (the bootstrap child, the ONLY process that
+ * receives PG_DATABASE_URL in a deployment) does with the one database setting. Both modes need APP_SECRET and give the
+ * SAME crewflow_owner runtime URL (the URL's host, port, database and kept parameters; user crewflow_owner; the DERIVED
+ * password), from which the credential-free target file is written:
+ *   - `bootstrap`: the URL's login is NOT crewflow_owner (the database admin): create crewflow_owner / set its password
+ *     (DB-SETUP-PLAN §3, unchanged);
+ *   - `owner-url`: the URL's login IS crewflow_owner (an existing crewflow_owner, e.g. made by hand with
+ *     01-crewflow-owner.sql): log in with the derived password if it already works (no change), else with the URL's own
+ *     password, and set crewflow_owner's OWN password to the derived one (owner-bootstrap.ts).
+ * Unlike planOwnerLogin, a crewflow_owner URL is NOT passed through unchanged (the apps never receive it) and a
+ * transaction pooler is refused in both modes (the setup needs one real session). Pure; throws OwnerCredentialError.
+ */
+export type DbSetupPlan =
+  | Extract<OwnerLoginPlan, { mode: 'bootstrap' }>
+  | {
+      mode: 'owner-url';
+      /** The validated crewflow_owner target of the URL, with the URL's OWN password (non-enumerable). */
+      readonly urlTarget: PgTarget;
+      /** Same host/port/database/TLS, user crewflow_owner, the DERIVED password. */
+      readonly runtimeTarget: PgTarget;
+      /** The crewflow_owner runtime URL with the derived password. SECRET. */
+      readonly runtimeUrl: string;
+      /** The derived crewflow_owner password (64 hex). SECRET. Feed it to scramSha256Verifier, never to SQL text. */
+      readonly ownerPassword: string;
+    };
+
+export function planDbSetup(inputs: OwnerLoginInputs): DbSetupPlan {
+  const databaseUrl = inputs.databaseUrl;
+  if (typeof databaseUrl !== 'string' || databaseUrl.trim() === '')
+    throw new OwnerCredentialError(
+      OWNER_CREDENTIAL_MESSAGES.databaseUrlMissing,
+    );
+  const parsed = parseTarget(databaseUrl, URL_LABEL);
+  if (parsed.user !== OWNER_LOGIN) {
+    const plan = planOwnerLogin(inputs);
+    if (plan.mode !== 'bootstrap')
+      throw new OwnerCredentialError(OWNER_CREDENTIAL_MESSAGES.roundTrip);
+    return plan;
+  }
+  if (parsed.transactionPooler !== null)
+    throw new OwnerCredentialError(OWNER_CREDENTIAL_MESSAGES.transactionPooler);
+  const ownerPassword = deriveOwnerPassword(inputs.appSecret);
+  const runtimeUrl = rebuildWithOwnerLogin(databaseUrl, parsed, ownerPassword);
+  const plan = {
+    mode: 'owner-url' as const,
+    urlTarget: parsed,
+    runtimeTarget: parseTarget(runtimeUrl, URL_LABEL),
+  } as Extract<DbSetupPlan, { mode: 'owner-url' }>;
   hide(plan, 'runtimeUrl', runtimeUrl);
   hide(plan, 'ownerPassword', ownerPassword);
   return plan;

@@ -13,9 +13,11 @@ import {
   OWNER_LOGIN,
   OWNER_PASSWORD_HKDF_INFO,
   OwnerCredentialError,
+  planDbSetup,
   planOwnerLogin,
   scramSha256Verifier,
 } from './owner-credential';
+import { dbTargetFromPlan, runtimeUrlFromDbTarget } from './db-target';
 
 /**
  * DB-SETUP-PLAN §4, §5.1, §10 B10. Every secret below is a generated test value; no assertion message prints one.
@@ -621,5 +623,46 @@ describe('planOwnerLogin', () => {
     );
     expect(source).not.toMatch(/from 'pg'|require\('pg'\)/);
     expect(source).not.toMatch(/console\.|process\.(stdout|stderr)/);
+  });
+});
+
+describe('planDbSetup (PR #125 option 2: the one setting, only in db-setup)', () => {
+  const OWN = `postgres://crewflow_owner:${ADMIN_PASSWORD}@db.example.internal:5432/crewflow?sslmode=verify-full`;
+  const ADM = `postgres://dbadmin:${ADMIN_PASSWORD}@db.example.internal:5432/crewflow?sslmode=verify-full`;
+
+  it('a crewflow_owner URL is NOT passed through: owner-url mode, the DERIVED password, same host/port/db/params', () => {
+    const plan = planDbSetup({ databaseUrl: OWN, appSecret: APP_SECRET });
+    expect(plan.mode).toBe('owner-url');
+    if (plan.mode !== 'owner-url') return;
+    expect(plan.ownerPassword).toBe(DERIVED);
+    expect(plan.runtimeUrl).not.toContain(ADMIN_PASSWORD);
+    const rt = parsePgUrl(plan.runtimeUrl, 'rt');
+    expect([rt.user, rt.password, rt.host, rt.port, rt.database, rt.sslmode]).toEqual([OWNER_LOGIN, DERIVED, 'db.example.internal', 5432, 'crewflow', 'verify-full']);
+    expect(plan.urlTarget.password).toBe(ADMIN_PASSWORD);
+    // Secrets are non-enumerable: a stray JSON.stringify never prints them.
+    expect(JSON.stringify(plan)).not.toContain(DERIVED);
+    expect(JSON.stringify(plan)).not.toContain(ADMIN_PASSWORD);
+  });
+
+  it('both modes give the SAME runtime URL and the same credential-free target for the same host and APP_SECRET', () => {
+    const a = planDbSetup({ databaseUrl: OWN, appSecret: APP_SECRET });
+    const b = planDbSetup({ databaseUrl: ADM, appSecret: APP_SECRET });
+    expect(a.runtimeUrl).toBe(b.runtimeUrl);
+    expect(dbTargetFromPlan(a)).toEqual(dbTargetFromPlan(b));
+    expect(runtimeUrlFromDbTarget(dbTargetFromPlan(a), DERIVED)).toBe(a.runtimeUrl);
+    expect(b.mode).toBe('bootstrap');
+  });
+
+  it('owner-url mode needs APP_SECRET and refuses a pooler shape (the setup needs a session)', () => {
+    expect(refusal(() => planDbSetup({ databaseUrl: OWN, appSecret: undefined }))).toBe(OWNER_CREDENTIAL_MESSAGES.appSecretMissing);
+    expect(refusal(() => planDbSetup({ databaseUrl: OWN, appSecret: 'short' }))).toBe(OWNER_CREDENTIAL_MESSAGES.appSecretShort);
+    expect(
+      refusal(() => planDbSetup({ databaseUrl: `postgres://crewflow_owner:${ADMIN_PASSWORD}@ep-abc-pooler.eu-west-2.aws.neon.tech/neondb?sslmode=require`, appSecret: APP_SECRET })),
+    ).toBe(OWNER_CREDENTIAL_MESSAGES.transactionPooler);
+    expect(refusal(() => planDbSetup({ databaseUrl: '', appSecret: APP_SECRET }))).toBe(OWNER_CREDENTIAL_MESSAGES.databaseUrlMissing);
+  });
+
+  it('planOwnerLogin keeps its pass-through for the derive step (no-target mode) unchanged', () => {
+    expect(planOwnerLogin({ databaseUrl: OWN, appSecret: undefined }).runtimeUrl).toBe(OWN);
   });
 });

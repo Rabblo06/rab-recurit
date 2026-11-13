@@ -520,7 +520,7 @@ test('DENIAL DB-SETUP environment mode: PG_DATABASE_URL never from an env file, 
   assertRefused(run({ 'rab-api': { ...ok, names: [...ok.names, 'PG_DATABASE_URL'] }, 'rab-worker': ok }), /rab-api: PG_DATABASE_URL is set in an env file/);
   assertRefused(run({ 'rab-api': ok, 'rab-worker': { ...ok, names: [...ok.names, 'PG_DATABASE_PASSWORD'] } }), /rab-worker: PG_DATABASE_PASSWORD reaches the container/);
   assertRefused(run({ 'rab-api': ok, 'rab-worker': ok }, (v) => { v.services['rab-api'].environment.PG_DATABASE_PASSWORD = 'x'; }), /rab-api: PG_DATABASE_PASSWORD reaches the container/);
-  // PR #125 option A: db-setup alone carries the URL. T-1: a provider admin login is accepted there; a former separated
+  // PR #125 option 2: db-setup alone carries the URL. T-1: a provider admin login is accepted there; a former separated
   // login, or TLS below verify-full, is not; an env-file value or the password is refused there too.
   const setSetupUrl = (url) => (v) => { v.services['db-setup'].environment.PG_DATABASE_URL = url; };
   assert.deepEqual(run({ 'rab-api': ok, 'rab-worker': ok }, setSetupUrl('postgresql://doadmin:x@db-direct.example:5432/d?sslmode=verify-full')), []);
@@ -531,20 +531,21 @@ test('DENIAL DB-SETUP environment mode: PG_DATABASE_URL never from an env file, 
   assertRefused(run({ 'rab-api': ok, 'rab-worker': ok }, (v) => { delete v.services['db-setup'].environment.PG_DATABASE_URL; }), /db-setup: PG_DATABASE_URL is missing/);
   assertRefused(run({ 'rab-api': ok, 'rab-worker': ok, 'db-setup': { ...ok, names: [...ok.names, 'PG_DATABASE_URL'] } }), /db-setup: PG_DATABASE_URL is set in an env file/);
   assertRefused(run({ 'rab-api': ok, 'rab-worker': ok, 'db-setup': { ...ok, names: [...ok.names, 'PG_DATABASE_PASSWORD'] } }), /db-setup: PG_DATABASE_PASSWORD reaches the container/);
-  // DENIAL option A: an override that hands rab-api / rab-worker a database URL (admin, crewflow_owner, anything), drops the
-  // committed ${PG_DATABASE_URL:-}, smuggles a postgres:// value into a health check, or weakens db-setup: refused.
+  // DENIAL option 2: an override that hands rab-api / rab-worker ANY database URL (admin, crewflow_owner, anything), drops
+  // the committed empty pin, smuggles a postgres:// value into a health check, or weakens db-setup: refused.
   for (const svc of ['rab-api', 'rab-worker']) {
-    for (const url of ['postgresql://postgres:x@db:5432/crewflow?sslmode=verify-full', 'postgresql://doadmin:x@db-direct.example:5432/d?sslmode=verify-full']) {
-      assertRefused(run({ 'rab-api': ok, 'rab-worker': ok }, (v) => { v.services[svc].environment.PG_DATABASE_URL = url; }), new RegExp(`${svc}: PG_DATABASE_URL is neither empty nor the crewflow_owner login in the deployed model`));
+    for (const url of ['postgresql://postgres:x@db:5432/crewflow?sslmode=verify-full', 'postgresql://doadmin:x@db-direct.example:5432/d?sslmode=verify-full', 'postgresql://crewflow_owner:x@db:5432/crewflow?sslmode=verify-full', 'x']) {
+      assertRefused(run({ 'rab-api': ok, 'rab-worker': ok }, (v) => { v.services[svc].environment.PG_DATABASE_URL = url; }), new RegExp(`${svc}: PG_DATABASE_URL is not empty in the deployed model`));
     }
-    assertRefused(run({ 'rab-api': ok, 'rab-worker': ok }, (v) => { delete v.services[svc].environment.PG_DATABASE_URL; }), new RegExp(`${svc}: PG_DATABASE_URL is not committed`));
-    assertRefused(run({ 'rab-api': ok, 'rab-worker': ok }, (v) => { v.services[svc].environment.PG_DATABASE_URL = 'postgresql://crewflow_owner:x@db:5432/crewflow?sslmode=require'; }), new RegExp(`${svc}: PG_DATABASE_URL is not sslmode=verify-full`));
+    assertRefused(run({ 'rab-api': ok, 'rab-worker': ok }, (v) => { delete v.services[svc].environment.PG_DATABASE_URL; }), new RegExp(`${svc}: PG_DATABASE_URL is not pinned to ""`));
     assertRefused(run({ 'rab-api': ok, 'rab-worker': ok }, (v) => { v.services[svc].healthcheck.test = ['CMD', 'psql', 'postgresql://postgres:x@db/crewflow']; }), new RegExp(`${svc}: holds a postgres:// value somewhere in its definition in the deployed model`));
     assertRefused(run({ 'rab-api': ok, 'rab-worker': ok }, (v) => { v.services[svc].volumes = v.services[svc].volumes.filter((x) => x.source !== 'crewflow-db-target'); }), new RegExp(`${svc}: does not mount db-setup's target volume read-only in the deployed model`));
   }
-  // Pass-through (DB-SETUP-PLAN §7.1): the same crewflow_owner URL on both app services passes; different ones do not.
+  // Pass-through (DB-SETUP-PLAN §7.1), option 2: a crewflow_owner URL is accepted on db-setup ONLY; on both app services it
+  // is refused.
   const owner = 'postgresql://crewflow_owner:x@db-direct.example:5432/d?sslmode=verify-full';
-  assert.deepEqual(run({ 'rab-api': ok, 'rab-worker': ok }, (v) => { for (const n of ['rab-api', 'rab-worker', 'db-setup']) v.services[n].environment.PG_DATABASE_URL = owner; }), []);
+  assert.deepEqual(run({ 'rab-api': ok, 'rab-worker': ok }, setSetupUrl(owner)), []);
+  assertRefused(run({ 'rab-api': ok, 'rab-worker': ok }, (v) => { for (const n of ['rab-api', 'rab-worker', 'db-setup']) v.services[n].environment.PG_DATABASE_URL = owner; }), /rab-api: PG_DATABASE_URL is not empty in the deployed model/);
   assertRefused(run({ 'rab-api': ok, 'rab-worker': ok }, (v) => { v.services['rab-api'].environment.PG_DATABASE_URL = owner; }), /PG_DATABASE_URL differs between rab-api and rab-worker/);
   assertRefused(run({ 'rab-api': ok, 'rab-worker': ok }, (v) => { delete v.services['db-setup']; }), /db-setup: missing in the deployed model/);
   assertRefused(run({ 'rab-api': ok, 'rab-worker': ok }, (v) => { v.services['db-setup'].restart = 'unless-stopped'; }), /db-setup: restart is not "no" in the deployed model/);

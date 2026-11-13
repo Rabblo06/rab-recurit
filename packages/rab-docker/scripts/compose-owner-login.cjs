@@ -12,19 +12,19 @@
  * FULL mode renders, with every profile enabled (`docker compose --env-file <throw-away> --project-directory <throw-away>
  *   --profile '*' config --format json`; a profile-gated service is rendered and refused, review of PR #124),
  *   docker-compose.image.yml                                   (bundled db: compose.env sets only PG_DATABASE_PASSWORD)
- *   docker-compose.image.yml                                   (external: compose.env also sets PG_DATABASE_ADMIN_URL)
+ *   docker-compose.image.yml                                   (external: compose.env also sets PG_DATABASE_URL = an admin URL)
  *   docker-compose.image.yml                                   (pass-through: compose.env sets PG_DATABASE_URL = crewflow_owner)
  *   docker-compose.image.yml + staging/docker-compose.staging.yml
  * from sentinel env files only (no real .env, compose.env or secret of this machine is read; CREWFLOW_* / COMPOSE_* /
  * PG_DATABASE_* are removed from the child environment because they would win over --env-file), and asserts on each
  * rendered model:
- *   - DB-SETUP, like Twenty; PR #125 option A: the database ADMIN URL reaches ONLY the one-shot db-setup service, as the
- *     committed `${PG_DATABASE_URL:-${PG_DATABASE_ADMIN_URL:-<the bundled db's admin URL>}}` (interpolation values of
- *     compose.env, never an env file). rab-api and rab-worker carry `${PG_DATABASE_URL:-}`: empty, or (pass-through,
- *     DB-SETUP-PLAN §7.1) the crewflow_owner URL of compose.env and nothing else; no other database credential anywhere in
- *     their definition (environment, health check, command, labels: the bundled db's password, an admin password, any
- *     other postgres:// value); they mount db-setup's target volume read-only. compose.env's PG_DATABASE_URL must be a
- *     crewflow_owner login, PG_DATABASE_ADMIN_URL must not be, and only one of the two may be set. db-setup has
+ *   - DB-SETUP, like Twenty; PR #125 option 2: the ONE database setting, PG_DATABASE_URL (compose.env: an admin URL, an
+ *     existing crewflow_owner URL, or unset = the bundled db), reaches ONLY the one-shot db-setup service, as the committed
+ *     `${PG_DATABASE_URL:-<the bundled db's admin URL>}` (an interpolation value of compose.env, never an env file).
+ *     rab-api and rab-worker have NO PG_DATABASE_URL key and no other database credential anywhere in their definition
+ *     (environment, health check, command, labels: the bundled db's password, an admin password, a crewflow_owner password,
+ *     any postgres:// value); they mount db-setup's target volume read-only. compose.env's PG_DATABASE_URL may be any login
+ *     but a former separated one, verify-full, a direct host, with a password. db-setup has
  *     exactly its shape (same image, entrypoint ./db-setup.sh, restart "no", no port, no profile, the H1-H6 hardening,
  *     depends_on a healthy db only, the CA read-only and the target volume writable) and rab-api waits for it
  *     (service_completed_successfully). No service carries any other database URL — no migrator, provisioner,
@@ -90,10 +90,11 @@ const TEMPLATES = Object.freeze({
 // O3: one lifecycle (the API migrates on start); docker-compose.migrate-on-start.yml is folded into the image compose.
 // DB-SETUP (D3): docker-compose.local-db.yml is retired; the bundled `db` is part of the image compose itself. `external`
 // renders the same file with an admin PG_DATABASE_URL set in compose.env (the operator's own database); `pass-through` with a
-// crewflow_owner URL there (DB-SETUP-PLAN §7.1: an existing deployment). `external` names what compose.env's URL is.
+// crewflow_owner URL there (DB-SETUP-PLAN §7.1: an existing deployment). `external` names what compose.env's URL is
+// (PR #125 option 2: in both cases it reaches db-setup only).
 const COMBOS = Object.freeze([
   { name: 'default', files: ['image'], external: false, staging: false },
-  { name: 'external', files: ['image'], external: 'admin', staging: false }, // compose.env: PG_DATABASE_ADMIN_URL
+  { name: 'external', files: ['image'], external: 'admin', staging: false }, // compose.env: PG_DATABASE_URL = an admin URL
   { name: 'pass-through', files: ['image'], external: 'owner', staging: false },
   { name: 'staging', files: ['image', 'staging'], external: false, staging: true },
 ]);
@@ -106,7 +107,7 @@ const DB_PASSWORD_KEY = 'PG_DATABASE_PASSWORD';
 /** Where the app services mount the bundled db's CA volume (read-only), and the db's own volume targets. */
 const DB_CA_VOLUME = 'crewflow-db-ca';
 const DB_CA_TARGET = '/run/crewflow/db-ca';
-/** PR #125 option A: the one-shot setup service (the ONLY app-image service with the admin URL) and its target volume. */
+/** PR #125 options A and 2: the one-shot setup service (the ONLY service with PG_DATABASE_URL) and its target volume. */
 const DB_SETUP_SERVICE = 'db-setup';
 const DB_TARGET_VOLUME = 'crewflow-db-target';
 const DB_TARGET_DIR = '/run/crewflow/db-target';
@@ -169,8 +170,6 @@ const FORBIDDEN_PATTERNS = Object.freeze([
   [/^AUTH_.*_ISSUER_URL$/, 'a test-only issuer override'],
 ]);
 const URL_KEY = 'PG_DATABASE_URL';
-/** PR #125 option A: the external database's admin URL, a compose.env interpolation value that reaches db-setup only. */
-const ADMIN_URL_KEY = 'PG_DATABASE_ADMIN_URL';
 /** Keys the compose files commit; an env file must not re-enter them. */
 const COMMITTED_KEYS = Object.freeze([
   'NODE_ENV', 'RAB_RUNTIME_ENV', 'CREWFLOW_MIGRATE_ON_START', 'DISABLE_DB_MIGRATIONS',
@@ -303,8 +302,8 @@ function featureSweepProblems(apiEnv = {}, workerEnv = {}) {
 const DATABASE_ALLOWED = Object.freeze([
   'PG_SSL_CA_CERT_PATH', 'PG_EXPECTED_DATABASE_NAME', 'CREWFLOW_DEPLOYMENT_ENVIRONMENT', 'CREWFLOW_DEPLOYMENT_ID',
 ]);
-/** DB-SETUP: the only non-CREWFLOW_* names compose.env may hold (the database admin URL and the bundled db's password). */
-const COMPOSE_DATABASE_KEYS = Object.freeze([URL_KEY, ADMIN_URL_KEY, DB_PASSWORD_KEY]);
+/** DB-SETUP: the only non-CREWFLOW_* names compose.env may hold (the one database setting and the bundled db's password). */
+const COMPOSE_DATABASE_KEYS = Object.freeze([URL_KEY, DB_PASSWORD_KEY]);
 /**
  * BC-11 opt-ins: database.env only (so rab-api and rab-worker see one value), never committed in compose. O3: the approval
  * mode is no longer one of them (below).
@@ -350,7 +349,6 @@ const DIGEST_REF = /^[^@\s]+@sha256:[0-9a-f]{64}$/;
 function forbiddenReason(name) {
   if (name === URL_KEY) return null;
   if (name === DB_PASSWORD_KEY) return 'an interpolation value of compose.env only (the bundled db and the default admin URL); never a container variable or an env file entry';
-  if (name === ADMIN_URL_KEY) return 'an interpolation value of compose.env only (the external admin URL, interpolated into db-setup\'s PG_DATABASE_URL); never a container variable or an env file entry';
   if (name === 'CREWFLOW_MIGRATION_APPROVED') return 'the approval token (O3: approval mode none; there is no token to pass)';
   if (name === 'CREWFLOW_UPGRADE_INCOMPLETE') return 'set only by api-prestart.sh after a failed upgrade (an inherited value is refused at start)';
   if (name === 'CREWFLOW_UPGRADE_FAILURE_POLICY') return 'deprecated (O3 C3): use CREWFLOW_UPGRADE_FAILURE=continue|refuse in runtime.env, or leave it unset (continue)';
@@ -472,13 +470,13 @@ function bundledDbProblems(services, model, p) {
 }
 
 /**
- * PR #125 option A: the one-shot db-setup service, the ONLY service of the app image that receives the database admin URL.
+ * PR #125 option 2: the one-shot db-setup service, the ONLY service that receives PG_DATABASE_URL (admin or crewflow_owner).
  * Pure. `wantUrl`: the PG_DATABASE_URL it must render (the bundled default, compose.env's admin URL, or a crewflow_owner
  * URL in pass-through).
  */
 function dbSetupProblems(services, p, wantUrl) {
   const s = services[DB_SETUP_SERVICE];
-  if (!s) { p(`${DB_SETUP_SERVICE}: missing (the one-shot database setup; option A)`); return; }
+  if (!s) { p(`${DB_SETUP_SERVICE}: missing (the one-shot database setup; option 2)`); return; }
   const api = services['rab-api'] ?? {};
   hardeningProblems(DB_SETUP_SERVICE, s, p, { longRunning: false });
   if (Array.isArray(s.profiles) && s.profiles.length) p(`${DB_SETUP_SERVICE}: has profiles (it would not run with the stack, and rab-api would wait for it in vain)`);
@@ -498,7 +496,7 @@ function dbSetupProblems(services, p, wantUrl) {
   const deps = s.depends_on ?? {};
   if (JSON.stringify(Object.keys(deps)) !== JSON.stringify([DB_SERVICE]) || deps[DB_SERVICE]?.condition !== 'service_healthy') p(`${DB_SETUP_SERVICE}: depends_on must be exactly a healthy ${DB_SERVICE}`);
   const env = s.environment ?? {};
-  if (env[URL_KEY] !== wantUrl) p(`${DB_SETUP_SERVICE}: ${URL_KEY} is not the committed \${PG_DATABASE_URL:-\${PG_DATABASE_ADMIN_URL:-<bundled db>}} (compose.env's value, or the bundled db's admin URL)`);
+  if (env[URL_KEY] !== wantUrl) p(`${DB_SETUP_SERVICE}: ${URL_KEY} is not the committed \${PG_DATABASE_URL:-<bundled db>} (compose.env's value, or the bundled db's admin URL)`);
   if (env.NODE_ENV !== 'production') p(`${DB_SETUP_SERVICE}: NODE_ENV is not production`);
   if (env.RAB_RUNTIME_ENV !== 'production') p(`${DB_SETUP_SERVICE}: RAB_RUNTIME_ENV is not production`);
   if (!String(env.APP_SECRET ?? '').includes(SENTINEL_APP_SECRET)) p(`${DB_SETUP_SERVICE}: does not read APP_SECRET (runtime.env; the derived password)`);
@@ -509,25 +507,22 @@ function dbSetupProblems(services, p, wantUrl) {
 }
 
 /**
- * PR #125 option A: rab-api and rab-worker never receive the admin credential. PG_DATABASE_URL is committed as
- * ${PG_DATABASE_URL:-} (so no env-file value reaches them): empty, or compose.env's crewflow_owner URL (pass-through), and
- * NOTHING else in their whole rendered definition (environment, health check,
- * entrypoint, command, labels, an overlay's additions) holds the bundled db's password, an admin password, the
- * crewflow_owner password or a postgres:// value. Pure.
+ * PR #125 option 2: rab-api and rab-worker never receive a PG_DATABASE_URL value, in ANY form: the key is pinned to the
+ * literal empty string (so an env-file value cannot reach them; never `${PG_DATABASE_URL...}`, checked on the raw text by
+ * lintComposeText), and NOTHING in their whole rendered definition (environment, health check, entrypoint, command, labels,
+ * an overlay's additions) holds the bundled db's password, an admin password, a crewflow_owner password or a postgres://
+ * value. They build the crewflow_owner URL from db-setup's target file. Pure.
  */
-function appCredentialProblems(services, p, wantAppUrl = '') {
+function appCredentialProblems(services, p) {
   for (const name of APP_SERVICES) {
     const s = services[name];
     if (!s) continue;
     const env = s.environment ?? {};
-    if (!(URL_KEY in env)) p(`${name}: ${URL_KEY} is not committed as \${PG_DATABASE_URL:-} (an env-file value would reach it; option A)`);
-    else if (env[URL_KEY] !== wantAppUrl) p(`${name}: ${URL_KEY} is not ${wantAppUrl ? 'compose.env\'s crewflow_owner URL (pass-through)' : 'empty'} (option A: never the admin URL; empty = the crewflow_owner URL from db-setup's target file)`);
-    // Everything but the one allowed value: no database credential, no other postgres:// value anywhere.
-    const rest = structuredClone(s);
-    if (rest.environment && rest.environment[URL_KEY] === wantAppUrl) delete rest.environment[URL_KEY];
-    const text = JSON.stringify(rest);
-    if (DB_CREDENTIAL_SENTINELS.some((v) => text.includes(v))) p(`${name}: carries a database credential somewhere in its definition (environment, health check, command or labels; option A: never)`);
-    if (isPgUrl(text)) p(`${name}: holds a postgres:// value somewhere in its definition (option A: only the pass-through crewflow_owner URL, in PG_DATABASE_URL)`);
+    if (!(URL_KEY in env)) p(`${name}: ${URL_KEY} is not pinned to "" (an env-file value would reach it; option 2)`);
+    else if (env[URL_KEY] !== '') p(`${name}: ${URL_KEY} is not empty (option 2: only db-setup receives a database URL, in any form; the entrypoint refuses it)`);
+    const text = JSON.stringify(s);
+    if (DB_CREDENTIAL_SENTINELS.some((v) => text.includes(v))) p(`${name}: carries a database credential somewhere in its definition (environment, health check, command or labels; option 2: never)`);
+    if (isPgUrl(text)) p(`${name}: holds a postgres:// value somewhere in its definition (option 2: never; the crewflow_owner URL is built from db-setup's target file)`);
   }
 }
 
@@ -587,18 +582,19 @@ function checkModel(model, combo) {
     }
     const values = Object.values(env).map(String);
     if (values.some((v) => v.includes(SENTINEL_LEGACY_PW))) p(`${name}: received a value from a separated-mode env file (.env.migrate / .env.ops / per-service staging files)`);
-    if (!appServices.includes(name) && name !== DB_SETUP_SERVICE && URL_KEY in env) p(`${name}: has ${URL_KEY} (only db-setup, and rab-api / rab-worker for the pass-through crewflow_owner URL)`);
+    if (name !== DB_SETUP_SERVICE && URL_KEY in env && !(appServices.includes(name) && env[URL_KEY] === '')) p(`${name}: has ${URL_KEY} (option 2: only db-setup; rab-api / rab-worker pin it empty)`);
     if (![...appServices, DB_SETUP_SERVICE].includes(name) && values.some((v) => v.includes(SENTINEL_APP_SECRET) || v.includes(SENTINEL_REDIS_PW))) {
       p(`${name}: received a runtime secret (only rab-api, rab-worker and db-setup read runtime.env)`);
     }
     // The crewflow_owner password: only db-setup, only in its PG_DATABASE_URL (pass-through), never another key.
     for (const [key, value] of Object.entries(env)) {
-      if (String(value ?? '').includes(SENTINEL_OWNER_PW) && !([DB_SETUP_SERVICE, ...appServices].includes(name) && key === URL_KEY && combo.external === 'owner')) p(`${name}: received the database credential (${key})`);
+      if (String(value ?? '').includes(SENTINEL_OWNER_PW) && !(name === DB_SETUP_SERVICE && key === URL_KEY && combo.external === 'owner')) p(`${name}: received the database credential (${key})`);
       if (String(value ?? '').includes(SENTINEL_ADMIN_PW) && !(name === DB_SETUP_SERVICE && key === URL_KEY && combo.external === 'admin')) p(`${name}: received the database admin credential (${key})`);
     }
   }
-  // Option A: no database credential anywhere in rab-api's or rab-worker's definition; db-setup's exact shape.
-  appCredentialProblems(services, p, combo.external === 'owner' ? SENTINEL_URL : '');
+  // Option 2: no PG_DATABASE_URL and no database credential anywhere in rab-api's or rab-worker's definition; db-setup's
+  // exact shape.
+  appCredentialProblems(services, p);
   dbSetupProblems(services, p, setupUrl);
   // DB-SETUP: the bundled db's password reaches only db (POSTGRES_PASSWORD) and, inside the default admin URL, db-setup's
   // PG_DATABASE_URL. Never under another key, never another service, never by its own name.
@@ -778,10 +774,10 @@ function lintEnvText(kind, text, { template = false } = {}) {
     if (key === null) { problems.push(`line ${line}: not a KEY=VALUE line`); continue; }
     if (seen.has(key)) problems.push(`${key}: set more than once (line ${line})`);
     seen.add(key);
-    const why = kind === 'compose' && (key === DB_PASSWORD_KEY || key === ADMIN_URL_KEY) ? null : forbiddenReason(key);
+    const why = kind === 'compose' && key === DB_PASSWORD_KEY ? null : forbiddenReason(key);
     if (why) problems.push(`${key}: ${why}`);
     if (COMMITTED_KEYS.includes(key)) problems.push(`${key}: committed in the compose files; never re-enter it in an env file`);
-    if (kind !== 'compose' && key === URL_KEY) problems.push(`${key}: set it in compose.env (the interpolation file): the committed \${PG_DATABASE_URL:-...} on db-setup, rab-api and rab-worker would silently override a value here`);
+    if (kind !== 'compose' && key === URL_KEY) problems.push(`${key}: set it in compose.env (the interpolation file): it belongs to db-setup only (its committed \${PG_DATABASE_URL:-...} would override a value here), and rab-api / rab-worker refuse it`);
     if (kind === 'database' && !why && key !== URL_KEY && !DATABASE_ALLOWED.includes(key)) problems.push(`${key}: does not belong in the shared database file (only ${DATABASE_ALLOWED.join(', ')})`);
     if (kind === 'runtime' && DATABASE_OPT_INS.includes(key)) problems.push(`${key}: belongs in database.env only (so rab-api and rab-worker see the same value)`);
     if (key === 'CREWFLOW_UPGRADE_FAILURE' && !UPGRADE_FAILURE_VALUES.includes(value)) problems.push(`${key}: must be exactly continue or refuse`);
@@ -828,19 +824,17 @@ function lintEnvText(kind, text, { template = false } = {}) {
       if (/^CREWFLOW_(API|WORKER|OPS)_IMAGE_(DIGEST|REPOSITORY|TAG)$/.test(key)) problems.push(`${key}: retired (O2: one image); set CREWFLOW_IMAGE_${key.endsWith('REPOSITORY') ? 'REPOSITORY' : 'TAG'} instead`);
       if (key === 'CREWFLOW_API_BIND' && ['0.0.0.0', '::', ''].includes(value)) problems.push(`${key}: binds every interface`);
     }
-    if (key !== URL_KEY && !(kind === 'compose' && key === ADMIN_URL_KEY) && isPgUrl(value)) problems.push(`${key}: holds a PostgreSQL URL (a second database identity)`);
+    if (key !== URL_KEY && isPgUrl(value)) problems.push(`${key}: holds a PostgreSQL URL (a second database identity)`);
   }
   if (kind === 'runtime' && !entries.some((e) => e.key === AUDIT_SINK_KEY)) {
     problems.push(`${AUDIT_SINK_KEY}: missing (BC-07: production refuses to start without an external audit sink; set stdout with an off-host append-only log shipper)`);
   }
-  // DB-SETUP + PR #125 option A (compose.env, both optional; unset = the bundled db): PG_DATABASE_ADMIN_URL is the external
-  // database's ADMIN URL (db-setup only; T-1 accepts a provider admin login); PG_DATABASE_URL is ONLY an existing
-  // crewflow_owner URL (pass-through, D5: rab-api / rab-worker receive it). Never both. A former separated login, TLS below
-  // verify-full, a transaction pooler and a URL without a password are refused in either.
+  // DB-SETUP + PR #125 option 2 (compose.env, optional; unset = the bundled db): PG_DATABASE_URL is the ONE database setting,
+  // your database's ADMIN URL (T-1 accepts a provider admin login) or an existing crewflow_owner URL (pass-through, D5);
+  // either way it reaches db-setup only. A former separated login, TLS below verify-full, a transaction pooler and a URL
+  // without a password are refused.
   if (kind === 'compose') {
-    const set = (k) => entries.some((e) => e.key === k && e.value !== '');
-    if (set(URL_KEY) && set(ADMIN_URL_KEY)) problems.push(`${URL_KEY} and ${ADMIN_URL_KEY} are both set: one way only (a crewflow_owner URL passed through, OR your database's admin URL)`);
-    for (const key of [URL_KEY, ADMIN_URL_KEY]) {
+    for (const key of [URL_KEY]) {
       const url = entries.find((e) => e.key === key)?.value;
       if (url === undefined || url === '' || (template && isPlaceholder(url))) continue;
       let u = null;
@@ -848,9 +842,7 @@ function lintEnvText(kind, text, { template = false } = {}) {
       if (!u) continue;
       const login = decodeURIComponent(u.username);
       if (!/^postgres(ql)?:$/.test(u.protocol)) problems.push(`${key}: not a postgres:// URL`);
-      if (NOT_THE_APP_LOGIN.includes(login)) problems.push(`${key}: logs in as a former separated login or schema role (use the database admin login in ${ADMIN_URL_KEY}, or ${OWNER_LOGIN} in ${URL_KEY})`);
-      if (key === URL_KEY && login !== OWNER_LOGIN && !NOT_THE_APP_LOGIN.includes(login)) problems.push(`${key}: must be the ${OWNER_LOGIN} login (it reaches rab-api and rab-worker); put your database's admin URL in ${ADMIN_URL_KEY} (option A: only db-setup receives it)`);
-      if (key === ADMIN_URL_KEY && login === OWNER_LOGIN) problems.push(`${key}: is the ${OWNER_LOGIN} login; an existing ${OWNER_LOGIN} URL goes in ${URL_KEY} (pass-through)`);
+      if (NOT_THE_APP_LOGIN.includes(login)) problems.push(`${key}: logs in as a former separated login or schema role (use the database admin login, or ${OWNER_LOGIN})`);
       if (login === '') problems.push(`${key}: has no login`);
       if (u.searchParams.get('sslmode') !== 'verify-full') problems.push(`${key}: sslmode is not verify-full`);
       for (const [re, label] of POOLER_HINTS) if (re.test(url)) problems.push(`${key}: points at a transaction pooler (${label}); use the DIRECT host`);
@@ -866,6 +858,11 @@ function lintComposeText(rel, text) {
   if (/^\s*build\s*:/m.test(text)) problems.push(`${rel}: has a build: key`);
   if (/^\s*-?\s*CREWFLOW_MIGRATION_APPROVED\s*[:=]/m.test(text)) problems.push(`${rel}: sets CREWFLOW_MIGRATION_APPROVED`);
   if (/^\s*-?\s*CREWFLOW_DB_MODE\s*[:=]/m.test(text)) problems.push(`${rel}: sets CREWFLOW_DB_MODE (there is no mode switch)`);
+  // PR #125 option 2: ${PG_DATABASE_URL...} is interpolated in exactly one place, db-setup's environment (never on rab-api /
+  // rab-worker, which pin the literal empty string). A second interpolation would hand the one database setting to another
+  // service.
+  const urlInterpolations = text.split('\n').filter((l) => !/^\s*#/.test(l) && l.includes('${PG_DATABASE_URL')).length;
+  if (urlInterpolations > 1) problems.push(`${rel}: interpolates \${PG_DATABASE_URL...} ${urlInterpolations} times (option 2: only db-setup's one line)`);
   if (/^\s*-?\s*CREWFLOW_(DEPLOYMENT_ENVIRONMENT|DEPLOYMENT_ID)\s*:/m.test(text)) problems.push(`${rel}: commits a BC-11 opt-in (the deployment identity belongs in database.env)`);
   if (/^\s*-?\s*CREWFLOW_AUDIT_SINK\w*\s*[:=]/m.test(text)) problems.push(`${rel}: commits the audit sink (BC-07: the operator sets CREWFLOW_AUDIT_SINK in runtime.env)`);
   // The approval mode may only be the compose.env interpolation (none by default), never a literal that pins it.
@@ -915,10 +912,10 @@ function renderModels(combos = COMBOS, extraComposeEnv = [], extraRuntimeEnv = [
       ...extraComposeEnv,
       '',
     ].join('\n'), { mode: 0o600 });
-    // The external combination: the operator's own database ADMIN URL in compose.env as well; pass-through: a
-    // crewflow_owner URL there (an existing deployment, DB-SETUP-PLAN §7.1).
+    // The external combination: the operator's own database ADMIN URL in compose.env's PG_DATABASE_URL; pass-through: a
+    // crewflow_owner URL there (an existing deployment, DB-SETUP-PLAN §7.1). Option 2: the same one variable.
     const envFor = { admin: path.join(tmp, 'compose.external.env'), owner: path.join(tmp, 'compose.pass-through.env') };
-    fs.writeFileSync(envFor.admin, `${fs.readFileSync(composeEnv, 'utf8')}${ADMIN_URL_KEY}=${SENTINEL_ADMIN_URL}\n`, { mode: 0o600 });
+    fs.writeFileSync(envFor.admin, `${fs.readFileSync(composeEnv, 'utf8')}${URL_KEY}=${SENTINEL_ADMIN_URL}\n`, { mode: 0o600 });
     fs.writeFileSync(envFor.owner, `${fs.readFileSync(composeEnv, 'utf8')}${URL_KEY}=${SENTINEL_URL}\n`, { mode: 0o600 });
     const childEnv = Object.fromEntries(Object.entries(process.env).filter(([k]) => !/^(CREWFLOW_|COMPOSE_|PG_DATABASE_)/i.test(k)));
     const models = {};
@@ -1013,7 +1010,7 @@ function main(argv) {
 if (require.main === module) process.exitCode = main(process.argv.slice(2));
 
 module.exports = {
-  FILES, TEMPLATES, COMBOS, STATIC_COMBO, DB_SERVICE, DB_SETUP_SERVICE, ADMIN_URL_KEY, DB_TARGET_VOLUME, DB_TARGET_DIR, SENTINEL_ADMIN_PW, SENTINEL_ADMIN_URL, dbSetupProblems, appCredentialProblems, bundledDbEnvironmentProblems, DB_INITDB_ARGS, DB_ENV_KEYS, DB_PASSWORD_KEY, SENTINEL_DB_PW, BUNDLED_URL, NOT_THE_APP_LOGIN, NOTIFICATION_DELIVERY, PHASE_D_SWITCHES, PHASE_D_UNCHANGED, STATEMENT_DISPATCH, FEATURE_SWEEPS, SWITCH_VALUES, featureSweepProblems, composeEnvValue, AUDIT_SINK_MODES, AUDIT_SINK_PRODUCTION_MODES, AUDIT_SINK_FAILURES,
+  FILES, TEMPLATES, COMBOS, STATIC_COMBO, DB_SERVICE, DB_SETUP_SERVICE, DB_TARGET_VOLUME, DB_TARGET_DIR, SENTINEL_ADMIN_PW, SENTINEL_ADMIN_URL, dbSetupProblems, appCredentialProblems, bundledDbEnvironmentProblems, DB_INITDB_ARGS, DB_ENV_KEYS, DB_PASSWORD_KEY, SENTINEL_DB_PW, BUNDLED_URL, NOT_THE_APP_LOGIN, NOTIFICATION_DELIVERY, PHASE_D_SWITCHES, PHASE_D_UNCHANGED, STATEMENT_DISPATCH, FEATURE_SWEEPS, SWITCH_VALUES, featureSweepProblems, composeEnvValue, AUDIT_SINK_MODES, AUDIT_SINK_PRODUCTION_MODES, AUDIT_SINK_FAILURES,
   AUDIT_SINK_PRODUCTION_FAILURES, SENTINEL_URL, SENTINEL_OWNER_PW, SENTINEL_APP_SECRET,
   SENTINEL_REDIS_PW, SENTINEL_LEGACY_PW, forbiddenReason, durationSeconds, checkModel, checkStaticModel, parseEnvText,
   lintEnvText, lintComposeText, renderModels, staticProblems, main,

@@ -121,44 +121,43 @@ test('database env: libpq variables, the mode switch, committed keys, duplicates
   assertRefused(lintEnvText('database', `${DATABASE_OK}\nCREWFLOW_WORKER_BOOTSTRAP_PASSWORD=x`), /role password/);
 });
 
-// DB-SETUP (T-1) + PR #125 option A: compose.env's PG_DATABASE_ADMIN_URL is the external admin URL (db-setup only);
-// PG_DATABASE_URL is only an existing crewflow_owner URL (pass-through: rab-api / rab-worker receive it).
+// DB-SETUP (T-1) + PR #125 option 2: compose.env's PG_DATABASE_URL is the ONE database setting: your database's admin URL
+// or an existing crewflow_owner URL (either way db-setup only); unset = the bundled db.
 const COMPOSE_OK = `CREWFLOW_IMAGE_TAG=sha256:${'a'.repeat(64)}\nCREWFLOW_REDIS_IMAGE=redis@sha256:${'b'.repeat(64)}\nCREWFLOW_SECRETS_DIR=/etc/crewflow/secrets\nPG_DATABASE_PASSWORD=${'c'.repeat(64)}`;
-test('DB-SETUP compose env: the bundled db needs only PG_DATABASE_PASSWORD; an admin URL in PG_DATABASE_ADMIN_URL (T-1) or a crewflow_owner URL in PG_DATABASE_URL is accepted', () => {
+test('DB-SETUP compose env (option 2): the bundled db needs only PG_DATABASE_PASSWORD; PG_DATABASE_URL may be an admin URL (T-1) or a crewflow_owner URL', () => {
   assert.deepEqual(lintEnvText('compose', COMPOSE_OK), []);
   assert.deepEqual(lintEnvText('compose', `${COMPOSE_OK}\nPG_DATABASE_URL=${URL_OK}`), []);
   for (const login of ['postgres', 'neondb_owner', 'doadmin', 'someone_admin']) {
-    assert.deepEqual(lintEnvText('compose', `${COMPOSE_OK}\nPG_DATABASE_ADMIN_URL=${URL_OK.replace('crewflow_owner', login)}`), [], login);
+    assert.deepEqual(lintEnvText('compose', `${COMPOSE_OK}\nPG_DATABASE_URL=${URL_OK.replace('crewflow_owner', login)}`), [], login);
   }
 });
 
-test('DENIAL option A compose env: an admin login in PG_DATABASE_URL (it reaches rab-api / rab-worker), crewflow_owner in PG_DATABASE_ADMIN_URL, or both set', () => {
-  for (const login of ['postgres', 'neondb_owner', 'doadmin']) {
-    assertRefused(lintEnvText('compose', `${COMPOSE_OK}\nPG_DATABASE_URL=${URL_OK.replace('crewflow_owner', login)}`), /PG_DATABASE_URL: must be the crewflow_owner login .*PG_DATABASE_ADMIN_URL/);
-  }
-  assertRefused(lintEnvText('compose', `${COMPOSE_OK}\nPG_DATABASE_ADMIN_URL=${URL_OK}`), /PG_DATABASE_ADMIN_URL: is the crewflow_owner login/);
-  assertRefused(lintEnvText('compose', `${COMPOSE_OK}\nPG_DATABASE_URL=${URL_OK}\nPG_DATABASE_ADMIN_URL=${URL_OK.replace('crewflow_owner', 'doadmin')}`), /both set/);
-  // Never an env file or a container variable.
-  assert.match(forbiddenReason('PG_DATABASE_ADMIN_URL'), /compose\.env only/);
+test('DENIAL option 2: the retired second variable PG_DATABASE_ADMIN_URL is refused everywhere (one setting only)', () => {
+  assertRefused(lintEnvText('compose', `${COMPOSE_OK}\nPG_DATABASE_ADMIN_URL=${URL_OK.replace('crewflow_owner', 'doadmin')}`), /PG_DATABASE_ADMIN_URL: compose\.env holds only CREWFLOW_\* interpolation values \(and PG_DATABASE_URL, PG_DATABASE_PASSWORD\)/);
+  assertRefused(lintEnvText('compose', `${COMPOSE_OK}\nPG_DATABASE_ADMIN_URL=${URL_OK.replace('crewflow_owner', 'doadmin')}`), /PG_DATABASE_ADMIN_URL: holds a PostgreSQL URL/);
   for (const kind of ['database', 'runtime']) {
-    assertRefused(lintEnvText(kind, `${kind === 'database' ? `${DATABASE_OK}\n` : 'CREWFLOW_AUDIT_SINK=stdout\n'}PG_DATABASE_ADMIN_URL=${URL_OK.replace('crewflow_owner', 'doadmin')}`), /PG_DATABASE_ADMIN_URL: an interpolation value of compose\.env only/);
+    assertRefused(lintEnvText(kind, `${kind === 'database' ? `${DATABASE_OK}\n` : 'CREWFLOW_AUDIT_SINK=stdout\n'}PG_DATABASE_ADMIN_URL=${URL_OK.replace('crewflow_owner', 'doadmin')}`), /PG_DATABASE_ADMIN_URL: (a second database URL|holds a PostgreSQL URL|does not belong)/);
+  }
+  // PG_DATABASE_URL in an env file: refused (it would reach rab-api / rab-worker, which refuse it).
+  for (const kind of ['database', 'runtime']) {
+    assertRefused(lintEnvText(kind, `${kind === 'database' ? `${DATABASE_OK}\n` : 'CREWFLOW_AUDIT_SINK=stdout\n'}PG_DATABASE_URL=${URL_OK}`), /PG_DATABASE_URL: set it in compose\.env/);
   }
 });
 
 test('DENIAL DB-SETUP compose env: the URL still needs verify-full, the direct host and a password; never a former separated login', () => {
-  for (const key of ['PG_DATABASE_URL', 'PG_DATABASE_ADMIN_URL']) {
-    for (const login of ['crewflow_app', 'crewflow_migrator', 'crewflow_worker', 'crewflow', 'rab_app', 'rab_secure_owner']) {
-      assertRefused(lintEnvText('compose', `${COMPOSE_OK}\n${key}=${URL_OK.replace('crewflow_owner', login)}`), /former separated login or schema role/);
-    }
+  for (const login of ['crewflow_app', 'crewflow_migrator', 'crewflow_worker', 'crewflow', 'rab_app', 'rab_secure_owner']) {
+    assertRefused(lintEnvText('compose', `${COMPOSE_OK}\nPG_DATABASE_URL=${URL_OK.replace('crewflow_owner', login)}`), /former separated login or schema role/);
   }
-  const withUrl = (url) => `${COMPOSE_OK}\nPG_DATABASE_ADMIN_URL=${url.replace('crewflow_owner', 'doadmin')}`;
-  assertRefused(lintEnvText('compose', withUrl(URL_OK.replace('verify-full', 'require'))), /sslmode is not verify-full/);
-  assertRefused(lintEnvText('compose', withUrl(URL_OK.replace('?sslmode=verify-full', ''))), /sslmode is not verify-full/);
-  assertRefused(lintEnvText('compose', withUrl(URL_OK.replace('db.internal.example', 'ep-x-pooler.eu.aws.neon.tech'))), /transaction pooler/);
-  assertRefused(lintEnvText('compose', withUrl(URL_OK.replace(':5432', ':6543'))), /transaction pooler/);
-  assertRefused(lintEnvText('compose', withUrl('postgresql://doadmin@db.internal.example:5432/crewflow?sslmode=verify-full')), /no password/);
-  assertRefused(lintEnvText('compose', withUrl('mysql://root:x@db.internal.example:3306/crewflow?sslmode=verify-full')), /not a postgres:\/\/ URL/);
-  assertRefused(lintEnvText('compose', withUrl('not a url')), /not a parseable URL/);
+  for (const login of ['doadmin', 'crewflow_owner']) {
+    const withUrl = (url) => `${COMPOSE_OK}\nPG_DATABASE_URL=${url.replace('crewflow_owner', login)}`;
+    assertRefused(lintEnvText('compose', withUrl(URL_OK.replace('verify-full', 'require'))), /sslmode is not verify-full/);
+    assertRefused(lintEnvText('compose', withUrl(URL_OK.replace('?sslmode=verify-full', ''))), /sslmode is not verify-full/);
+    assertRefused(lintEnvText('compose', withUrl(URL_OK.replace('db.internal.example', 'ep-x-pooler.eu.aws.neon.tech'))), /transaction pooler/);
+    assertRefused(lintEnvText('compose', withUrl(URL_OK.replace(':5432', ':6543'))), /transaction pooler/);
+    assertRefused(lintEnvText('compose', withUrl('postgresql://crewflow_owner@db.internal.example:5432/crewflow?sslmode=verify-full')), /no password/);
+    assertRefused(lintEnvText('compose', withUrl('mysql://root:x@db.internal.example:3306/crewflow?sslmode=verify-full')), /not a postgres:\/\/ URL/);
+    assertRefused(lintEnvText('compose', withUrl('not a url')), /not a parseable URL/);
+  }
 });
 
 test('DENIAL DB-SETUP: PG_DATABASE_PASSWORD is a compose.env value only, URL-safe and long; never an env file or container variable', () => {

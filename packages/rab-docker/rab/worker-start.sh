@@ -4,15 +4,13 @@
 # tini becomes PID 1 (signal forwarding, zombie reaping) and the Worker its child, so the Worker's watchdog SIGKILL (ignored
 # by the kernel for PID 1) still works without compose's `init: true`.
 #
-# PR #125 option A (owner decision 2026-11-13): this container never receives the database admin URL; only the one-shot
-# db-setup service does. This script:
-#   1. refuses arguments and PG_DATABASE_PASSWORD (exit 64);
+# PR #125 option 2 (owner decision 2026-11-13): this container NEVER receives PG_DATABASE_URL, in any form; only the
+# one-shot db-setup service does. This script:
+#   1. refuses arguments, PG_DATABASE_PASSWORD and a non-empty PG_DATABASE_URL (any login; exit 64);
 #   2. builds the crewflow_owner runtime URL with the same pure derive step as api-prestart.sh (never connects; the URL
-#      comes back on fd 4 through a command substitution: never a file, never argv, never the log): with PG_DATABASE_URL
-#      empty or unset (the deploy compose files' default), from db-setup's credential-free target file
-#      (CREWFLOW_DB_TARGET_FILE=/run/crewflow/db-target/target.json, mounted read-only) and HKDF(APP_SECRET), waiting for
-#      the file (derive exit 75) 2 s apart, at most 120 s; with PG_DATABASE_URL set (pass-through, DB-SETUP-PLAN §7.1), it
-#      MUST be the crewflow_owner login (any other login is refused here) and is passed through unchanged;
+#      comes back on fd 4 through a command substitution: never a file, never argv, never the log), from db-setup's
+#      credential-free target file (CREWFLOW_DB_TARGET_FILE=/run/crewflow/db-target/target.json, mounted read-only) and
+#      HKDF(APP_SECRET), waiting for the file (derive exit 75) 2 s apart, at most 120 s;
 #   3. sets PG_SSL_CA_CERT_PATH to the bundled db's CA when the runtime URL's host is exactly `db` and it is unset (the block
 #      below is identical in api-prestart.sh and db-setup.sh; run-prestart-shell-tests.cjs compares them);
 #   4. exports the runtime URL as PG_DATABASE_URL and execs tini. The Worker itself retries a 28P01 first login (its
@@ -58,20 +56,15 @@ if [ -n "${CREWFLOW_TEST_DB_SETUP_WAIT_SECONDS:-}" ]; then
 fi
 unset CREWFLOW_TEST_DB_SETUP_WAIT_SECONDS
 if [ -n "${PG_DATABASE_URL:-}" ]; then
-  case "$PG_DATABASE_URL" in
-    postgres://crewflow_owner[:@]*|postgresql://crewflow_owner[:@]*) ;;
-    *) refuse 'PG_DATABASE_URL on the worker service must be the crewflow_owner login (pass-through) or empty (the target file db-setup writes); the database admin URL belongs only to the db-setup service. Login not shown.' ;;
-  esac
-  unset CREWFLOW_DB_TARGET_FILE
-else
-  unset PG_DATABASE_URL
-  export CREWFLOW_DB_TARGET_FILE="$DB_TARGET_FILE"
+  refuse 'PG_DATABASE_URL must never be set on the worker service: it belongs only to the one-shot db-setup service (the admin URL, an existing crewflow_owner URL, or the bundled db). The Worker builds the crewflow_owner URL from the target file db-setup writes and APP_SECRET. Value not shown.'
 fi
+unset PG_DATABASE_URL
+export CREWFLOW_DB_TARGET_FILE="$DB_TARGET_FILE"
 STARTED="$(date +%s)"
 while :; do
   STATUS=0
   RUNTIME_URL="$(node "$DERIVE_RUNTIME_URL" 4>&1 1>&2)" || STATUS=$?
-  if [ "$STATUS" -ne 75 ] || [ -z "${CREWFLOW_DB_TARGET_FILE:-}" ]; then break; fi
+  if [ "$STATUS" -ne 75 ]; then break; fi
   RUNTIME_URL=""
   WAITED=$(( $(date +%s) - STARTED ))
   if [ "$WAITED" -ge "$WAIT_SECONDS" ]; then

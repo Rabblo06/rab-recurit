@@ -360,16 +360,17 @@ describe('derive-runtime-url from CREWFLOW_DB_TARGET_FILE', () => {
     }
   });
 
-  it('target file AND a crewflow_owner PG_DATABASE_URL: the unchanged pass-through', () => {
+  it('option 2: target file AND a crewflow_owner PG_DATABASE_URL is refused too (the apps never hold PG_DATABASE_URL)', () => {
+    writeDbTargetFile(file, TARGET);
     const c = capture();
     expect(
       runDeriveRuntimeUrl(
-        { CREWFLOW_DB_TARGET_FILE: file, PG_DATABASE_URL: OWNER_URL },
+        { CREWFLOW_DB_TARGET_FILE: file, PG_DATABASE_URL: OWNER_URL, APP_SECRET },
         c.io,
       ),
-    ).toBe(DERIVE_EXIT.ok);
-    expect(c.written).toEqual([OWNER_URL]);
-    expect(c.out).toEqual([DERIVE_MESSAGES.passThrough]);
+    ).toBe(DERIVE_EXIT.refused);
+    expect(c.written).toEqual([]);
+    expect(c.err).toEqual([DERIVE_MESSAGES.targetWithAdminUrl]);
   });
 
   it('ready target but a missing APP_SECRET: exit 64 with the credential message', () => {

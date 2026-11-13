@@ -49,14 +49,15 @@ test('every committed combination passes every check', { skip }, () => {
 const PT = 'pass-through';
 const SETUP = gate.DB_SETUP_SERVICE;
 
-test('DENIAL option A: rab-api / rab-worker with the admin URL, or anything but empty / the pass-through crewflow_owner URL, are refused', { skip }, () => {
+test('DENIAL option 2: rab-api / rab-worker with ANY database URL (admin, crewflow_owner, anything non-empty) are refused; the key stays pinned empty', { skip }, () => {
   for (const c of [REL, EXT, PT, 'staging']) {
     for (const svc of APP) {
-      // The admin URL (bundled or external), another crewflow_owner URL, or any other value: refused.
-      for (const url of [gate.BUNDLED_URL, gate.SENTINEL_ADMIN_URL, gate.SENTINEL_URL.replace('db-direct', 'db-other'), 'x', ...(c === PT ? [''] : [gate.SENTINEL_URL])]) {
-        assertRefused(problemsAfter(c, (s) => { s[svc].environment.PG_DATABASE_URL = url; }), new RegExp(`${svc}: PG_DATABASE_URL is not ${c === PT ? 'compose' : 'empty'}`));
+      // The admin URL (bundled or external), the crewflow_owner URL (pass-through included), or any other value: refused.
+      for (const url of [gate.BUNDLED_URL, gate.SENTINEL_ADMIN_URL, gate.SENTINEL_URL, gate.SENTINEL_URL.replace('db-direct', 'db-other'), 'x']) {
+        assertRefused(problemsAfter(c, (s) => { s[svc].environment.PG_DATABASE_URL = url; }), new RegExp(`${svc}: PG_DATABASE_URL is not empty`));
       }
-      assertRefused(problemsAfter(c, (s) => { delete s[svc].environment.PG_DATABASE_URL; }), new RegExp(`${svc}: PG_DATABASE_URL is not committed`));
+      // No key at all: an env-file value would reach it.
+      assertRefused(problemsAfter(c, (s) => { delete s[svc].environment.PG_DATABASE_URL; }), new RegExp(`${svc}: PG_DATABASE_URL is not pinned to ""`));
     }
   }
 });
@@ -74,12 +75,13 @@ test('DENIAL option A: a database credential anywhere in rab-api / rab-worker (h
   }
 });
 
-test('option A: db-setup alone receives the database URL: the bundled admin URL by default, compose.env\'s admin URL, or the crewflow_owner URL (pass-through)', { skip }, () => {
+test('option 2: db-setup alone receives the database URL: the bundled admin URL by default, compose.env\'s admin URL, or the crewflow_owner URL (pass-through)', { skip }, () => {
   assert.equal(fresh(REL).services[SETUP].environment.PG_DATABASE_URL, gate.BUNDLED_URL);
   assert.equal(fresh('staging').services[SETUP].environment.PG_DATABASE_URL, gate.BUNDLED_URL);
   assert.equal(fresh(EXT).services[SETUP].environment.PG_DATABASE_URL, gate.SENTINEL_ADMIN_URL);
   assert.equal(fresh(PT).services[SETUP].environment.PG_DATABASE_URL, gate.SENTINEL_URL);
-  for (const c of [REL, EXT, PT, 'staging']) for (const svc of APP) assert.equal(fresh(c).services[svc].environment.PG_DATABASE_URL, c === PT ? gate.SENTINEL_URL : '', `${c} ${svc}`);
+  // Option 2: rab-api / rab-worker render the literal empty pin in every combination, pass-through included.
+  for (const c of [REL, EXT, PT, 'staging']) for (const svc of APP) assert.equal(fresh(c).services[svc].environment.PG_DATABASE_URL, '', `${c} ${svc}`);
   // The bundled default with TLS below verify-full, another host, or a URL that is not the compose.env value: each refused.
   for (const url of [gate.BUNDLED_URL.replace('verify-full', 'disable'), gate.BUNDLED_URL.replace('@db:', '@db.evil.example:'), gate.BUNDLED_URL.replace('postgres:', 'crewflow_owner:')]) {
     assertRefused(problemsAfter(REL, (s) => { s[SETUP].environment.PG_DATABASE_URL = url; }), /db-setup: PG_DATABASE_URL is not the committed/);
@@ -135,6 +137,8 @@ test('DENIAL DB-SETUP: the bundled db password reaches no container except db (P
   }
   // External database: the app URL must not embed the bundled db's password at all.
   assertRefused(problemsAfter(EXT, (s) => { for (const svc of APP) s[svc].environment.PG_DATABASE_URL = gate.BUNDLED_URL; }), /PG_DATABASE_URL carries the bundled db's password/);
+  // Option 2, pass-through: the crewflow_owner password never reaches rab-api / rab-worker either.
+  for (const svc of APP) assertRefused(problemsAfter(PT, (s) => { s[svc].environment.PG_DATABASE_URL = gate.SENTINEL_URL; }), new RegExp(`${svc}: received the database credential \\(PG_DATABASE_URL\\)`));
 });
 
 test('DENIAL DB-SETUP T-5 / PID 1: rab-worker\'s entrypoint is exactly ./worker-start.sh, no command, no compose init', { skip }, () => {

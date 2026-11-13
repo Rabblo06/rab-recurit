@@ -123,6 +123,67 @@ export const OWNER_BOOTSTRAP_Q4D_REVERIFY = `SELECT rolcanlogin AND NOT rolsuper
 export const OWNER_BOOTSTRAP_COMMIT = `COMMIT;`;
 export const OWNER_BOOTSTRAP_ROLLBACK = `ROLLBACK;`;
 
+/*
+ * ----------------------------------------------------------------------------------------------------------------------
+ * PR #125 option 2 (owner decision 2026-11-13): PG_DATABASE_URL names crewflow_owner itself (an existing crewflow_owner,
+ * e.g. made by hand with 01-crewflow-owner.sql). The bootstrap child logs in as crewflow_owner: first with the DERIVED
+ * password (step a: read-only, OWNER_SELF_O1_SESSION + OWNER_BOOTSTRAP_Q2_FACTS, then the refusals), else with the URL's own
+ * password (step b: the same reads and refusals, then crewflow_owner sets its OWN password to the derived one with
+ * OWNER_SELF_O4C_DO, under the same advisory lock, inputs as the same bind parameters, re-verified with
+ * OWNER_BOOTSTRAP_Q4D_REVERIFY). Statements reused from §3 are referenced, not copied. These two are NEW deploy-time SQL:
+ * written out for the owner's SQL review in docs/plans/phase-x3/DB-SETUP-LEAD.md ("Option 2 — SQL for the owner's review").
+ * ----------------------------------------------------------------------------------------------------------------------
+ */
+
+/** O1 (option 2): which login this session is. Login names only (never a secret). Must be crewflow_owner and equal. */
+export const OWNER_SELF_O1_SESSION = `SELECT session_user::text AS session_login, current_user::text AS current_login;`;
+
+/**
+ * O4c (option 2): crewflow_owner sets its OWN password (an ordinary role may change its own password; no CREATEROLE, no
+ * ADMIN OPTION, no admin login needed). The verifier comes from the transaction-local setting OWNER_BOOTSTRAP_Q4B_SET_INPUTS
+ * set as a BIND PARAMETER ($1; $2 = 'true', unused here), reaches the EXECUTEd ALTER only through %L, and is never in any
+ * statement text. Re-checks, under the lock and inside the statement, that the session is crewflow_owner itself and the role
+ * has none of the refused attributes; the EXCEPTION handler re-raises with the SQLSTATE only (no CONTEXT quoting the verifier).
+ */
+export const OWNER_SELF_O4C_DO = `DO $owner_self$
+DECLARE
+  v_verifier text := pg_catalog.current_setting('crewflow_bootstrap.verifier');
+  r          record;
+BEGIN
+  BEGIN
+    IF session_user::text <> 'crewflow_owner' OR current_user::text <> session_user::text THEN
+      RAISE EXCEPTION 'not the crewflow_owner session' USING ERRCODE = '42501';
+    END IF;
+    SELECT rolsuper, rolbypassrls, rolreplication, rolcreatedb, rolcanlogin, rolinherit
+      INTO r FROM pg_catalog.pg_roles WHERE rolname = 'crewflow_owner';
+    IF NOT FOUND OR r.rolsuper OR r.rolbypassrls OR r.rolreplication OR r.rolcreatedb OR NOT r.rolcanlogin OR NOT r.rolinherit THEN
+      RAISE EXCEPTION 'crewflow_owner has privileged or wrong attributes' USING ERRCODE = '42501';
+    END IF;
+    IF v_verifier IS NULL OR NOT pg_catalog.starts_with(v_verifier, 'SCRAM-SHA-256$') THEN
+      RAISE EXCEPTION 'not a SCRAM-SHA-256 verifier' USING ERRCODE = '22023';
+    END IF;
+    EXECUTE pg_catalog.format('ALTER ROLE crewflow_owner PASSWORD %L', v_verifier);
+  EXCEPTION WHEN OTHERS THEN
+    -- Re-raise WITHOUT the inner statement: an error's CONTEXT would otherwise quote the EXECUTEd text (the verifier).
+    RAISE EXCEPTION 'crewflow_owner password reset failed (%)', SQLSTATE USING ERRCODE = SQLSTATE;
+  END;
+END
+$owner_self$;`;
+
+/** Every statement the crewflow_owner session of option 2 may send (steps a and b), for the same secret-free spec. */
+export const OWNER_SELF_STATEMENTS = [
+  OWNER_BOOTSTRAP_Q0_SESSION,
+  OWNER_SELF_O1_SESSION,
+  OWNER_BOOTSTRAP_Q2_FACTS,
+  OWNER_BOOTSTRAP_BEGIN,
+  OWNER_BOOTSTRAP_Q4A_LOCK,
+  OWNER_BOOTSTRAP_Q4B_SET_INPUTS,
+  OWNER_SELF_O4C_DO,
+  OWNER_BOOTSTRAP_Q4D_REVERIFY,
+  OWNER_BOOTSTRAP_COMMIT,
+  OWNER_BOOTSTRAP_ROLLBACK,
+] as const;
+
 /** Every statement the admin session may send, in order (the spec checks none of them can carry a secret). */
 export const OWNER_BOOTSTRAP_ADMIN_STATEMENTS = [
   OWNER_BOOTSTRAP_Q0_SESSION,

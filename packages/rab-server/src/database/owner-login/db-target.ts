@@ -14,7 +14,7 @@
  * `buildRuntimeDatabaseUrl` (same policy, same rebuild, same round-trip check as the admin-URL path), and the result is
  * re-parsed and must name exactly the host, port and database of the file.
  */
-import { buildRuntimeDatabaseUrl, OWNER_LOGIN, OwnerCredentialError, type OwnerLoginPlan } from './owner-credential';
+import { buildRuntimeDatabaseUrl, type DbSetupPlan, OWNER_LOGIN, OwnerCredentialError } from './owner-credential';
 import { parsePgUrl, PgConfigError } from '../postgres/pg-url-policy';
 
 export const DB_TARGET_FILE_VAR = 'CREWFLOW_DB_TARGET_FILE';
@@ -157,11 +157,11 @@ export function runtimeUrlFromDbTarget(target: DbTarget, ownerPassword: string):
 }
 
 /**
- * The writer side: the target of a bootstrap-mode plan, read from its (already policy-checked) runtime URL, so it holds
+ * The writer side: the target of a db-setup plan (either mode, option 2), read from its (already policy-checked) runtime URL, so it holds
  * exactly the host, port, database and kept parameters the runtime will use. Proves it is credential-free and that
  * rebuilding it with the same password gives the same connection. Throws DbTargetError.
  */
-export function dbTargetFromPlan(plan: Extract<OwnerLoginPlan, { mode: 'bootstrap' }>): DbTarget {
+export function dbTargetFromPlan(plan: DbSetupPlan): DbTarget {
   const runtime = plan.runtimeTarget;
   const params: Record<string, string> = {};
   for (const [k, v] of new URL(plan.runtimeUrl).searchParams) params[k] = v;
