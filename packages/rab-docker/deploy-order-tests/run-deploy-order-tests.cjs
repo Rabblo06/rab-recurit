@@ -429,7 +429,7 @@ async function main() {
     // The documented rollback command (OWNER-LOGIN-DEPLOYMENT.md, DB-SETUP-PLAN §7.2) prints the derived crewflow_owner
     // URL from db-setup's target file and APP_SECRET, with THIS release's compose files, before they are switched. Its
     // output (SENSITIVE: kept in memory only, never written or printed) becomes the rollback's compose.env URL.
-    const dr = main.compose(['run', '--rm', '--no-deps', '-T', '-e', 'CREWFLOW_DB_TARGET_FILE=/run/crewflow/db-target/target.json', '--entrypoint', '/sbin/tini', 'rab-api', '-s', '--', 'sh', '-c', 'node packages/rab-server/dist/database/typeorm/scripts/owner-login/derive-runtime-url.js 4>&1 1>/dev/null'], { timeout: 180_000 });
+    const dr = main.compose(['run', '--rm', '--no-deps', '-T', '-e', 'CREWFLOW_DB_TARGET_FILE=/run/crewflow/db-target/target.json', '--entrypoint', '/sbin/tini', 'rab-api', '-s', '--', 'sh', '-c', 'node packages/rab-server/dist/database/typeorm/scripts/owner-login/derive-runtime-url.js 4>&1 1>&2'], { timeout: 180_000 });
     const printed = dr.stdout.trim();
     let documentedUrl = null;
     try {

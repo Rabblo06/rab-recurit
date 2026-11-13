@@ -105,6 +105,8 @@ const PG15_IMAGE = process.env.DOT_PG15_IMAGE || null;
 const REGISTRY_CONTAINER = process.env.DOT_REGISTRY_CONTAINER || 'deploy-order-registry';
 const MAX_CONTAINERS = 6; // + the one-shot db-setup re-running beside a running stack (PR #125 options A and 2)
 const LOGGING_OVERLAY = 'deploy-order-tests/docker-compose.db-setup-logging.yml';
+/** The documented derive print (OWNER-LOGIN-DEPLOYMENT.md, SENSITIVE): the URL on stdout only (fd 4), messages on stderr. */
+const DERIVE_DOC_CMD = 'node packages/rab-server/dist/database/typeorm/scripts/owner-login/derive-runtime-url.js 4>&1 1>&2';
 const BOOTSTRAP_APP = 'crewflow-owner-bootstrap';
 const MSG = {
   // owner-bootstrap.ts OWNER_BOOTSTRAP_MESSAGES (fixed text; compared exactly).
@@ -468,7 +470,7 @@ async function blockBundled() {
   const d2 = L.derivedOwnerPassword(app2);
   L.writeSecrets(p.secretsDir, { caPath: null, appSecret: app1 });
   use(p, { databaseUrl: null });
-  const state = {};
+  const state = { d1 };
 
   const ok1 = await step('S1', '1', 'bundled database, fresh install with only PG_DATABASE_PASSWORD + APP_SECRET (+ dummy non-database settings): crewflow_owner created, migrations applied, API and Worker healthy', async (check, n) => {
     const envs = ['compose.env', 'database.env', 'runtime.env'].map((f) => fs.readFileSync(path.join(p.secretsDir, f), 'utf8'));
@@ -523,7 +525,7 @@ async function blockBundled() {
   }, p);
   if (!ok1 && !p.health('rab-api').startsWith('healthy|')) {
     note('S1 did not bring the stack up: the rest of block a is not run');
-    for (const id of ['S6', 'S2', 'S5', 'S10A', 'S8']) results.push({ id, owner: '-', title: 'not run (S1 failed)', status: 'NOT RUN', checks: [], notes: [] });
+    for (const id of ['S6', 'S2', 'D1', 'S5', 'S10A', 'S8']) results.push({ id, owner: '-', title: 'not run (S1 failed)', status: 'NOT RUN', checks: [], notes: [] });
     teardown(p);
     return;
   }
@@ -569,6 +571,35 @@ async function blockBundled() {
     const ledger = p.psql('SELECT count(*) FROM core.migrations');
     const mr = migrateResults(al2).pop() || {};
     check(mr.state === 'CURRENT' && Array.isArray(mr.applied) && mr.applied.length === 0, `the migrate child found the database CURRENT and applied nothing (ledger ${ledger})`);
+  }, p);
+
+  await step('D1', 'docs', 'the two documented derive commands (OWNER-LOGIN-DEPLOYMENT.md): (a) from rab-api with CREWFLOW_DB_TARGET_FILE after a normal db-setup; (b) from db-setup holding the admin URL: each prints ONE crewflow_owner URL (db host, crewflow database, the derived password) that logs in, and connects nowhere', async (check, n) => {
+    const cmds = [
+      ['a', 'rab-api', ['-e', 'CREWFLOW_DB_TARGET_FILE=/run/crewflow/db-target/target.json']],
+      ['b', 'db-setup', []],
+    ];
+    for (const [k, svc, extra] of cmds) {
+      const before = adminConnections(p, []).all.filter((x) => x.app !== L.TEST_APP_NAME && x.app !== 'pg_isready').reduce((t, x) => t + x.n, 0);
+      const r = p.compose(['run', '--rm', '--no-deps', '-T', ...extra, '--entrypoint', '/sbin/tini', svc, '-s', '--', 'sh', '-c', DERIVE_DOC_CMD], { timeout: 180_000 });
+      const printed = r.stdout.trim();
+      const other = r.out.split(printed).join('');
+      let u = null;
+      try {
+        u = new URL(printed);
+      } catch {
+        u = null;
+      }
+      const user = u ? decodeURIComponent(u.username) : '';
+      const pw = u ? decodeURIComponent(u.password) : '';
+      evidence(`D1-${k}-${svc}.log`, `exit ${r.code}; stdout lines ${printed ? printed.split('\n').length : 0}; other output:\n${L.redact(other)}`);
+      check(r.code === 0 && printed !== '' && printed.split('\n').length === 1, `(${k}) ${svc}: exit ${r.code}, stdout is exactly one line (value not shown)`);
+      check(Boolean(u) && /^postgres(ql)?:$/.test(u.protocol) && user === 'crewflow_owner' && u.hostname === 'db' && (u.port || '5432') === '5432' && u.pathname === '/crewflow', `(${k}) ${svc}: the line is a crewflow_owner URL for host db, port 5432, database crewflow (${u ? `${u.protocol}//crewflow_owner@${u.hostname}:${u.port || '5432'}${u.pathname} params ${[...u.searchParams.keys()].join(',') || '-'}` : 'not a URL'})`);
+      check(pw === state.d1, `(${k}) ${svc}: its password is hex(HKDF(APP_SECRET)) as the test computes it (compared, never printed)`);
+      check(pw !== '' && p.ownerLoginWorks(pw), `(${k}) ${svc}: a login with that password as crewflow_owner (verify-full) succeeds`);
+      check(!other.includes(pw) && !/postgres(ql)?:\/\//.test(other), `(${k}) ${svc}: nothing but stdout carries the URL (stderr / compose output hold no URL or password)`);
+      const after = adminConnections(p, []).all.filter((x) => x.app !== L.TEST_APP_NAME && x.app !== 'pg_isready').reduce((t, x) => t + x.n, 0);
+      check(after === before, `(${k}) ${svc}: derive connected nowhere (application connections in the db log ${before} -> ${after})`);
+    }
   }, p);
 
   await step('S5', '5', 'APP_SECRET rotation: the next start resets the crewflow_owner password once; the Worker reconnects', async (check, n) => {
