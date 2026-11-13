@@ -47,8 +47,8 @@ export type TimerTriggerAction = (payload: TimerTriggerJobData) => Promise<boole
 export interface TimerTriggerHandlerDeps {
   mode: TimerTriggerMode;
   enabled: (kind: TimerTriggerKind) => boolean;
-  /** runScopedForOrg(tenantContext, organisationId, workspaceId, fn). */
-  runScoped: <T>(organisationId: string, workspaceId: string, fn: (manager: EntityManager) => Promise<T>) => Promise<T>;
+  /** runScopedForOrg(tenantContext, organisationId, workspaceId, fn, options). `readOnly` must reach the tenant context. */
+  runScoped: <T>(organisationId: string, workspaceId: string, fn: (manager: EntityManager) => Promise<T>, options?: { readOnly?: boolean }) => Promise<T>;
   actions: Readonly<Record<TimerTriggerKind, TimerTriggerAction>>;
   lateClockInGraceMinutes: number;
   recordOutcome: (kind: TimerTriggerKind, outcome: TimerTriggerOutcome) => void;
@@ -71,14 +71,16 @@ const epoch = (value: Date | string | null | undefined): number | null => {
   return Number.isFinite(ms) ? ms : null;
 };
 
-/** READ ONLY decision for one subject under the bound tenant context. Exported for unit tests. */
+/**
+ * The decision for one subject under the bound tenant context: reads only. The caller runs it in a READ ONLY transaction
+ * (`handleTimerTrigger` passes `{ readOnly: true }`, folded into the binding SELECT, T-1 / ST-02). Exported for unit tests.
+ */
 export async function decideTimerTrigger(
   manager: EntityManager,
   kind: TimerTriggerKind,
   payload: TimerTriggerJobData,
   settings: { lateClockInGraceMinutes: number },
 ): Promise<TimerTriggerDecision> {
-  await manager.query('SET TRANSACTION READ ONLY');
   let dueAt: number | null;
   let dbNow: number | null;
   if (kind === 'offer-expiry') {
@@ -155,10 +157,11 @@ export async function handleTimerTrigger(job: TimerTriggerJobLike, token: string
   // A leftover job after a rollback to off (or a kind not enabled here): acknowledged with no database access.
   if (deps.mode === 'off' || !deps.enabled(kind)) return done('disabled');
 
-  const decision = await deps.runScoped(payload.organisationId, payload.workspaceId, (manager) =>
-    decideTimerTrigger(manager, kind, payload, {
-      lateClockInGraceMinutes: deps.lateClockInGraceMinutes,
-    }),
+  const decision = await deps.runScoped(
+    payload.organisationId,
+    payload.workspaceId,
+    (manager) => decideTimerTrigger(manager, kind, payload, { lateClockInGraceMinutes: deps.lateClockInGraceMinutes }),
+    { readOnly: true },
   );
 
   if (decision.outcome === 'early') {

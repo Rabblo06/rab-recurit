@@ -370,3 +370,39 @@ test('J2-1: the committed compose rendered with a commented runtime.env switch: 
   // A compose value outside true/false is refused too (it would be read as off).
   assertRefused(problemsAfter(DEF, (s) => { for (const svc of APP) s[svc].environment.PUSH_ENABLED = 'yes'; }), /rab-api: PUSH_ENABLED must be exactly true or false/);
 });
+
+// Security review of PR #124 (MEDIUM): a re-added operations container under ANOTHER name and profile (`rab-maint`,
+// `profiles: ["maint"]`, reading .env.ops) passed every gate. The FULL render now enables every profile, so the exact service
+// list, the "has profiles" check and the separated-mode env-file sentinel all see it. This gate renders
+// docker-compose.image.yml (+ its overrides) only; docker-compose.production.yml is covered by compose-one-image.cjs,
+// compose-credential-isolation.cjs and staging/verify-image-compose.cjs, each with its own rendered "maint" test.
+test('DENIAL (rendered): docker-compose.image.yml with a "maint"-profile service reading .env.ops fails', { skip }, () => {
+  const fs = require('node:fs');
+  const os = require('node:os');
+  const path = require('node:path');
+  const src = fs.readFileSync(gate.FILES.image, 'utf8');
+  const weakened = src.replace(/\nvolumes:\n/, [
+    '',
+    '  rab-maint:',
+    '    image: ${CREWFLOW_IMAGE_REPOSITORY:-adhin007/adolphus}@${CREWFLOW_IMAGE_TAG:?digest}',
+    '    profiles: ["maint"]',
+    '    env_file:',
+    '      - .env.ops',
+    '',
+    'volumes:',
+    '',
+  ].join('\n'));
+  assert.notEqual(weakened, src, 'the fixture edit did not apply');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'owner-login-maint-'));
+  try {
+    const copy = path.join(dir, 'docker-compose.image.yml');
+    fs.writeFileSync(copy, weakened);
+    const c = { name: 'maint', files: [copy], localDb: false, staging: false };
+    const problems = checkModel(renderModels([c])[c.name], c);
+    assertRefused(problems, /services are \[.*rab-maint.*\], expected \[rab-api, rab-redis, rab-worker\]/);
+    assertRefused(problems, /rab-maint: has profiles/);
+    assertRefused(problems, /rab-maint: received a value from a separated-mode env file/);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});

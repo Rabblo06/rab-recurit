@@ -14,7 +14,8 @@ packages/rab-mobile
 packages/rab-docs
 
 # Never send local secrets to the build context (nested packages too). Phase B: this includes .env.migrate (the one-off
-# rab-migrate credential) and .env.ops (the one-off rab-ops environment), which must never reach an image layer.
+# rab-migrate credential) and .env.ops (the retired rab-ops environment; a leftover file may still hold old credentials),
+# which must never reach an image layer.
 .env*
 **/.env
 **/.env.*

@@ -1,6 +1,7 @@
 import { DataSource, EntityManager } from 'typeorm';
 
 import { SUPPORTED_WORKSPACE_SCHEMA_VERSIONS, workspaceSchemaName } from '@rab/server/engine/core-modules/tenant/schema-resolver.service';
+import { shipAuditRowAfterCommit } from '@rab/server/engine/core-modules/audit-events/audit-event-shipping';
 
 
 const BATCH_SIZE = 50;
@@ -547,9 +548,15 @@ async function writeAuditRow(
   // audit_log is FORCEd; this connection is the table owner with no ambient
   // tenant context — bind just enough for WITH CHECK to pass.
   await bindOrgContext(manager, organisationId);
-  await manager.query(
+  const inserted = await manager.query<Array<{ id?: string }> | undefined>(
     `INSERT INTO core.audit_log (organisation_id, actor_user_id, target_user_id, action, metadata)
-     VALUES ($1, NULL, $2, $3, $4::jsonb)`,
+     VALUES ($1, NULL, $2, $3, $4::jsonb)
+     RETURNING id`,
     [organisationId, targetUserId, action, JSON.stringify(metadata)],
   );
+  // X1.1: the same off-host path as AuditService.record — queued after this transaction commits (`user.invite_cleaned_up`
+  // is an account deletion), never awaited. A row undone by the per-candidate ROLLBACK TO SAVEPOINT is not found by the
+  // Worker's re-read, so nothing is shipped for it.
+  const auditLogId = Array.isArray(inserted) ? inserted[0]?.id : undefined;
+  if (typeof auditLogId === 'string') shipAuditRowAfterCommit(manager, { organisationId, auditLogId, action });
 }

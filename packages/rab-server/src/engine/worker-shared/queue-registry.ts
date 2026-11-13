@@ -4,6 +4,7 @@ import { SHIFT_STATEMENT_JOB_NAME, SHIFT_STATEMENT_QUEUE_NAME } from './shift-st
 import { AI_TITLE_JOB_NAME } from './ai-jobs.contract';
 import { AI_QUEUE_NAME, AI_TURN_JOB_NAME } from './ai-queue.constants';
 import { TIMER_TRIGGER_JOB_NAMES, TIMER_TRIGGER_KINDS, TIMER_TRIGGER_PAYLOAD_KEYS, TIMER_TRIGGER_QUEUE_NAME } from './timer-trigger.contract';
+import { AUDIT_EVENT_JOB_NAME, AUDIT_EVENT_PAYLOAD_KEYS, AUDIT_EVENT_QUEUE_NAME, AUDIT_PREAUTH_JOB_NAME, AUDIT_PREAUTH_PAYLOAD_KEYS } from './audit-event.contract';
 
 /**
  * CANONICAL queue registry (Admin Panel plan §3; Phase D-Q1 "queue registry"). The worker (consumers, scan scheduler) and
@@ -16,7 +17,8 @@ import { TIMER_TRIGGER_JOB_NAMES, TIMER_TRIGGER_KINDS, TIMER_TRIGGER_PAYLOAD_KEY
  * accepts, its tenant scope and its payload keys. Completeness is a COMPILE-TIME property (`satisfies` a mapped type over
  * `QueueName` whose fields are all required): a queue without settings, or settings with a missing option, does not
  * compile. The values are EXACTLY the effective values before D-Q1, including BullMQ's own defaults that were implicit
- * until now (`BULLMQ_WORKER_DEFAULTS`, read from the installed bullmq) — `queue-registry.spec.ts` pins every one.
+ * until now (`BULLMQ_WORKER_DEFAULTS`, read from the installed bullmq) — `queue-registry.spec.ts` pins every one. The one
+ * deliberate change since: Phase X3.4 gives every queue Twenty's retention (`QUEUE_RETENTION` below).
  *
  * PREFIX COMPATIBILITY (owner decision D2): the consumer queues keep BullMQ's default `bull` prefix — the API process
  * publishes to `rab-email` / `rab-push` / `rab-ai` with no prefix, and moving the consumer alone would strand every API
@@ -43,7 +45,7 @@ export const BULLMQ_WORKER_DEFAULTS = Object.freeze({ lockDurationMs: 30_000, ma
 /** The job option D-Q1 records as "none": bullmq 5.x has no per-job timeout (a handler bounds its own run time). */
 export const NO_JOB_TIMEOUT = null;
 
-export type ConsumerQueueKey = 'email' | 'push' | 'shiftStatements' | 'ai' | 'timerTriggers';
+export type ConsumerQueueKey = 'email' | 'push' | 'shiftStatements' | 'ai' | 'timerTriggers' | 'auditEvents';
 
 /** The scan queues (bullmq scheduler mode only), grouped by the existing `queues/rab-<domain>` folders. */
 export const SCAN_QUEUES = Object.freeze({
@@ -62,7 +64,8 @@ export type ConsumerQueueName =
   | typeof PUSH_QUEUE_NAME
   | typeof SHIFT_STATEMENT_QUEUE_NAME
   | typeof AI_QUEUE_NAME
-  | typeof TIMER_TRIGGER_QUEUE_NAME;
+  | typeof TIMER_TRIGGER_QUEUE_NAME
+  | typeof AUDIT_EVENT_QUEUE_NAME;
 export type QueueName = ConsumerQueueName | ScanQueueName;
 
 /** Whose job a queue carries: `organisation` = one tenant's row (the payload carries its organisationId); `system` = none. */
@@ -103,15 +106,57 @@ export interface QueueSettings {
   readonly tenantScope: QueueTenantScopeKind;
   /** The ONLY top-level payload keys a job may carry (identifiers and small scalars — never content). */
   readonly payloadKeys: readonly string[];
+  /**
+   * X1.1 (owner decision 2026-11-12): job names of an organisation-scoped consumer queue that carry NO tenant (a
+   * `{ kind: 'system' }` scope) and their own payload keys — today only the audit queue's pre-auth failed-login event.
+   * Such a payload must not name an organisation; every other job name of the queue keeps the queue's scope and keys.
+   */
+  readonly systemScopedJobs?: Readonly<Record<string, readonly string[]>>;
   readonly worker: QueueWorkerSettings;
   readonly job: QueueJobSettings;
 }
 
-const DAY = 24 * 60 * 60;
-/** email / push / statements: 7 days completed, 30 days failed (unchanged since the queues were created). */
-const OUTBOX_RETENTION = Object.freeze({
-  removeOnComplete: Object.freeze({ age: 7 * DAY, count: null }),
-  removeOnFail: Object.freeze({ age: 30 * DAY, count: null }),
+const HOUR = 60 * 60;
+const DAY = 24 * HOUR;
+
+/**
+ * Phase X3.4 (owner decision 2026-11-12, "the Twenty way"): ONE BullMQ retention for EVERY queue — consumers and scan queues,
+ * completed and failed alike — with Twenty's values (twenty-server `message-queue/constants/queue-retention.constants.ts`,
+ * which its `bullmq.driver.ts` puts on every job and every cron template): a completed job is kept 4 h and at most 1,000 per
+ * queue, a failed job 7 days and at most 1,000 per queue; whichever limit is reached first removes the oldest. Before X3.4:
+ * email / push / statements 7 d completed and 30 d failed with no count cap; rab-ai and timer triggers 1 h / 1000 completed and
+ * 7 d / 5000 failed; scan queues 1 h / 1000 completed and 7 d failed with no count cap.
+ *
+ * A retained BullMQ job is a short operational window (the admin panel's job list, a manual retry of a failed job), never the
+ * record. The durable PostgreSQL rows stay the long-term record: `email_outbox`, `push_delivery`, `payroll_record.statement_*`,
+ * `ai_message`, `worker_event` and `audit_log`, each with its own retention (outbox-retention).
+ *
+ * Correctness never depends on how long a finished job is retained (checked queue by queue for X3.4):
+ *  - a SHORTER window can only let a re-add of the same jobId create a new job instead of being dropped as a duplicate. Every
+ *    consumer re-reads its row under RLS and claims it with a compare-and-set before any side effect: email (PENDING / QUEUED /
+ *    RETRY → PROCESSING, below the attempt cap; SENT / CANCELLED skip), push (PENDING / RETRY → PROCESSING, below the cap;
+ *    ACCEPTED / CANCELLED skip), statements (same `statement_dispatch_generation`, still queued/processing, no file yet — and
+ *    every dispatcher claim bumps the generation, so each publish has a new jobId anyway), AI turns (`queued` → `running`),
+ *    timer triggers (the scan's own per-candidate compare-and-set, same worker_event key). A delivered row is never sent again.
+ *  - a LONGER window (rab-ai, timer triggers and scan queues: completed 1 h → 4 h) can only drop more re-adds of the same jobId.
+ *    No producer relies on re-adding a finished id: AI turn / resume ids are per new turn row, a deferral's id grows with the
+ *    seconds waited (never repeats), a promotion and the title are at most once by design; a timer trigger's id carries its due
+ *    time and the unchanged backstop scan handles any dropped trigger; scan jobs get a fresh BullMQ id per scheduler tick (and
+ *    a wake adds no fixed id).
+ *  - email / push recovery never re-adds an id an earlier attempt used: a stale row is republished under a bumped
+ *    `dispatch_generation` (`…attempt.<generation>`), whatever BullMQ still retains.
+ */
+export const QUEUE_RETENTION = Object.freeze({
+  completedMaxAgeSeconds: 4 * HOUR,
+  completedMaxCount: 1000,
+  failedMaxAgeSeconds: 7 * DAY,
+  failedMaxCount: 1000,
+});
+
+/** The retention every queue's job settings carry (`queue-registry.spec.ts` asserts no queue differs). */
+const RETENTION = Object.freeze({
+  removeOnComplete: Object.freeze({ age: QUEUE_RETENTION.completedMaxAgeSeconds, count: QUEUE_RETENTION.completedMaxCount }),
+  removeOnFail: Object.freeze({ age: QUEUE_RETENTION.failedMaxAgeSeconds, count: QUEUE_RETENTION.failedMaxCount }),
 });
 /** D5: 5 attempts, exponential from 5 s, jitter 0.5 (each retry waits a random 50–100 % of its exponential step). */
 const OUTBOX_RETRY = Object.freeze({ attempts: 5, backoff: Object.freeze({ type: 'exponential' as const, delayMs: 5_000, jitter: 0.5 }) });
@@ -122,12 +167,11 @@ const DEFAULT_STALL = Object.freeze({
   stalledIntervalMs: BULLMQ_WORKER_DEFAULTS.stalledIntervalMs,
 });
 
-/** Scan jobs: one attempt (the next tick is the retry), 1 h / 1000 completed, 7 days failed. */
+/** Scan jobs: one attempt (the next tick is the retry), the shared X3.4 retention. */
 const SCAN_JOB = Object.freeze({
   attempts: 1,
   backoff: null,
-  removeOnComplete: Object.freeze({ age: 3600, count: 1000 }),
-  removeOnFail: Object.freeze({ age: 7 * DAY, count: null }),
+  ...RETENTION,
   timeoutMs: NO_JOB_TIMEOUT,
 });
 
@@ -158,7 +202,7 @@ export const QUEUE_SETTINGS = Object.freeze({
     tenantScope: 'organisation' as const,
     payloadKeys: Object.freeze(['emailOutboxId', 'organisationId']),
     worker: Object.freeze({ concurrency: 5, ...DEFAULT_STALL }),
-    job: Object.freeze({ ...OUTBOX_RETRY, ...OUTBOX_RETENTION, timeoutMs: NO_JOB_TIMEOUT }),
+    job: Object.freeze({ ...OUTBOX_RETRY, ...RETENTION, timeoutMs: NO_JOB_TIMEOUT }),
   }),
   /** Push delivery (outbox `core.push_delivery`). Producer: PushQueueService (Worker push dispatcher). */
   [PUSH_QUEUE_NAME]: Object.freeze({
@@ -168,7 +212,7 @@ export const QUEUE_SETTINGS = Object.freeze({
     tenantScope: 'organisation' as const,
     payloadKeys: Object.freeze(['pushDeliveryId', 'organisationId']),
     worker: Object.freeze({ concurrency: 10, ...DEFAULT_STALL }),
-    job: Object.freeze({ ...OUTBOX_RETRY, ...OUTBOX_RETENTION, timeoutMs: NO_JOB_TIMEOUT }),
+    job: Object.freeze({ ...OUTBOX_RETRY, ...RETENTION, timeoutMs: NO_JOB_TIMEOUT }),
   }),
   /**
    * Approved shift statements (outbox `payroll_record.statement_status`). Producer: the Worker's shift-statement
@@ -181,7 +225,7 @@ export const QUEUE_SETTINGS = Object.freeze({
     tenantScope: 'organisation' as const,
     payloadKeys: Object.freeze(['payrollRecordId', 'organisationId', 'workspaceId', 'generation']),
     worker: Object.freeze({ concurrency: 2, ...DEFAULT_STALL }),
-    job: Object.freeze({ attempts: 1, backoff: null, ...OUTBOX_RETENTION, timeoutMs: NO_JOB_TIMEOUT }),
+    job: Object.freeze({ attempts: 1, backoff: null, ...RETENTION, timeoutMs: NO_JOB_TIMEOUT }),
   }),
   /**
    * AI Phase 1/2: one assistant turn (`ai-turn`, kinds turn / resume) or a conversation title (`ai-title`) per job, IDs
@@ -200,8 +244,7 @@ export const QUEUE_SETTINGS = Object.freeze({
     job: Object.freeze({
       attempts: 1,
       backoff: null,
-      removeOnComplete: Object.freeze({ age: 3600, count: 1000 }),
-      removeOnFail: Object.freeze({ age: 7 * DAY, count: 5000 }),
+      ...RETENTION,
       timeoutMs: NO_JOB_TIMEOUT,
     }),
   }),
@@ -212,8 +255,8 @@ export const QUEUE_SETTINGS = Object.freeze({
    * {organisationId, workspaceId, subjectId, dueAtEpochMs}; jobId `<kind>.<subjectId>.<dueAtEpochMs>`. The consumer is
    * created only when WORKER_TIMER_TRIGGERS is shadow or on. Concurrency 2 (plan §4: the consumers already total 21 against
    * a runtime pool of 12 — a new consumer starts low and is measured before anything is raised). attempts 3, exponential
-   * from 5 s (a database blip; every attempt is the same idempotent compare-and-set); 1 h / 1000 completed, 7 d / 5000
-   * failed (the AI queue's retention: a trigger is a short-lived hint, not a record).
+   * from 5 s (a database blip; every attempt is the same idempotent compare-and-set); the shared X3.4 retention (a trigger is
+   * a short-lived hint, not a record).
    */
   [TIMER_TRIGGER_QUEUE_NAME]: Object.freeze({
     kind: 'consumer' as const,
@@ -225,8 +268,33 @@ export const QUEUE_SETTINGS = Object.freeze({
     job: Object.freeze({
       attempts: 3,
       backoff: Object.freeze({ type: 'exponential' as const, delayMs: 5_000, jitter: 0.5 }),
-      removeOnComplete: Object.freeze({ age: 3600, count: 1000 }),
-      removeOnFail: Object.freeze({ age: 7 * DAY, count: 5000 }),
+      ...RETENTION,
+      timeoutMs: NO_JOB_TIMEOUT,
+    }),
+  }),
+  /**
+   * Phase X Part 2, X1.1 (owner decision 2026-11-12): the off-host copy of security audit events
+   * (engine/worker-shared/audit-event.contract.ts). Ids-only payload {organisationId, auditLogId}; jobId
+   * `audit-event.<auditLogId>`; the consumer re-reads the committed row under FORCE RLS and writes it to the configured
+   * sink. Produced only when CREWFLOW_AUDIT_SINK is not `none`. Concurrency 2 (a new consumer starts low, as D-Q4b's did).
+   * attempts 10, exponential from 5 s with jitter: a sink outage of up to ~40 minutes is retried before a job is failed
+   * (best effort: the row in core.audit_log stays the record). Retention: Twenty's queue-retention values
+   * (completed 4 h / 1,000, failed 7 days / 1,000; X3.4).
+   */
+  [AUDIT_EVENT_QUEUE_NAME]: Object.freeze({
+    kind: 'consumer' as const,
+    prefix: 'legacy-bull' as const,
+    jobNames: Object.freeze([AUDIT_EVENT_JOB_NAME, AUDIT_PREAUTH_JOB_NAME] as const),
+    tenantScope: 'organisation' as const,
+    payloadKeys: Object.freeze([...AUDIT_EVENT_PAYLOAD_KEYS]),
+    // Owner decision 2026-11-12 (b): the pre-auth failed login has no organisation — a system-scoped job of this queue.
+    systemScopedJobs: Object.freeze({ [AUDIT_PREAUTH_JOB_NAME]: Object.freeze([...AUDIT_PREAUTH_PAYLOAD_KEYS]) }),
+    worker: Object.freeze({ concurrency: 2, ...DEFAULT_STALL }),
+    job: Object.freeze({
+      attempts: 10,
+      backoff: Object.freeze({ type: 'exponential' as const, delayMs: 5_000, jitter: 0.5 }),
+      removeOnComplete: Object.freeze({ age: 4 * 3600, count: 1000 }),
+      removeOnFail: Object.freeze({ age: 7 * DAY, count: 1000 }),
       timeoutMs: NO_JOB_TIMEOUT,
     }),
   }),
@@ -328,6 +396,9 @@ export function acceptsJobName(name: QueueName, jobName: string): boolean {
  * system-scoped, every scan queue present. The Worker runs it before any consumer, scheduler or loop exists; `registry`
  * is a parameter only so a spec can feed it a broken one.
  */
+/** Keys a system-scoped job payload may never declare: a tenant or user identity has no place in a job without a tenant. */
+const SYSTEM_JOB_FORBIDDEN_KEYS: readonly string[] = Object.freeze(['organisationId', 'organisation_id', 'orgId', 'tenantId', 'userId']);
+
 export function assertQueueRegistryValid(registry: Readonly<Record<string, QueueSettings>> = QUEUE_SETTINGS): void {
   const problems: string[] = [];
   const posInt = (v: unknown) => typeof v === 'number' && Number.isInteger(v) && v > 0;
@@ -352,6 +423,11 @@ export function assertQueueRegistryValid(registry: Readonly<Record<string, Queue
       }
     }
     if (!s.payloadKeys.length || new Set(s.payloadKeys).size !== s.payloadKeys.length) p('payload keys must be non-empty and unique');
+    for (const [jobName, keys] of Object.entries(s.systemScopedJobs ?? {})) {
+      if (s.kind !== 'consumer' || !s.jobNames.includes(jobName)) p(`system-scoped job ${jobName} is not a job of this consumer queue`);
+      const tenantKey = keys.find((k) => SYSTEM_JOB_FORBIDDEN_KEYS.includes(k));
+      if (!keys.length || new Set(keys).size !== keys.length || tenantKey) p(`system-scoped job ${jobName}: payload keys must be non-empty, unique and never a tenant or user id (${tenantKey ?? 'duplicate or empty'})`);
+    }
     if (!posInt(s.worker.concurrency)) p('worker.concurrency must be a positive integer');
     if (!posInt(s.worker.lockDurationMs)) p('worker.lockDurationMs must be a positive integer');
     if (!nonNegInt(s.worker.maxStalledCount)) p('worker.maxStalledCount must be an integer >= 0');
@@ -406,6 +482,8 @@ export const CONSUMER_QUEUES: Readonly<Record<ConsumerQueueKey, ConsumerQueueDef
   ai: consumer('ai', AI_QUEUE_NAME, AI_TURN_JOB_NAME, 'ai turn'),
   // D-Q4b: one handler receives all four trigger job names (it dispatches on job.name); created only when the flag is not off.
   timerTriggers: consumer('timerTriggers', TIMER_TRIGGER_QUEUE_NAME, TIMER_TRIGGER_JOB_NAMES['offer-expiry'], 'timer trigger'),
+  // X1.1: the security audit event shipper (created in every Worker; with no sink configured nothing is ever produced).
+  auditEvents: consumer('auditEvents', AUDIT_EVENT_QUEUE_NAME, AUDIT_EVENT_JOB_NAME, 'audit event'),
 });
 
 export const SCAN_QUEUE_NAMES: readonly ScanQueueName[] = Object.freeze(Object.values(SCAN_QUEUES));
@@ -433,7 +511,7 @@ export function resolveScanPrefix(nodeEnv: string, configured: string | undefine
  */
 export const WORKER_METRICS_MAX_DATA_POINTS = 10_080;
 
-/** BullMQ scan job options (scan queues only — never applied to email/push/PDF consumer jobs). Derived; values unchanged. */
+/** BullMQ scan job options (scan queues only — never applied to email/push/PDF consumer jobs). Derived from the registry. */
 export const SCAN_JOB_OPTIONS = Object.freeze(bullmqJobOptionsOf(SCAN_QUEUES.email));
 
 /** Template payload of every scheduled scan job: metadata only (no ids, tokens, bodies or tenant data). */

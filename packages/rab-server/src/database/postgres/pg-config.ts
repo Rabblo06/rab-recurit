@@ -18,8 +18,7 @@
  *     - PG_DATABASE_URL and DATABASE_URL both set and naming a different target (user, host, port or database; the
  *       password is not compared) → refused. The same rule applies to DATABASE_DIRECT_URL;
  *     - without PG_DATABASE_URL, a legacy DATABASE_DIRECT_URL still names the session-lock connection (deprecated);
- *     - a legacy DATABASE_URL_UNPOOLED still names the elevated connection that migrations and the three owner CLI
- *       commands use (deprecated);
+ *     - a legacy DATABASE_URL_UNPOOLED still names the elevated connection that migrations use (deprecated);
  *     - DB_POOL_MAX is accepted for PG_POOL_MAX_CONNECTIONS (deprecated, now strictly validated); both set and
  *       different → refused.
  *   Every number is validated strictly (digits only, bounded); a bad value refuses to start instead of falling back
@@ -35,7 +34,7 @@ import { parsePgUrl, PgConfigError, PgTarget, sameTarget } from './pg-url-policy
 
 export { PgConfigError } from './pg-url-policy';
 
-export type PgProcessRole = 'api' | 'worker' | 'provisioner' | 'cli' | 'migrate' | 'ops';
+export type PgProcessRole = 'api' | 'worker' | 'provisioner' | 'cli' | 'migrate';
 
 /** Which configured connection a caller wants. */
 export type PgEndpointName = 'primary' | 'lock' | 'elevated';
@@ -98,51 +97,36 @@ export const PG_ENV_NAMES = [
 ] as const;
 
 /**
- * Phase B (ops): the one-off OPERATIONS container (the three owner CLI commands: containment, hws:backfill,
- * user-session:backfill). Same pattern as rab-migrate: a short-lived container with its own environment, never the API,
- * the Worker, the provisioner or the migrate step. In it:
- *   - CREWFLOW_OPS_RUN=one-off declares the ops process (exactly that value; anything else refuses);
- *   - PG_OPS_APP_DATABASE_URL is the ordinary restricted runtime login (crewflow_app) and becomes the PRIMARY endpoint (the
- *     injected DataSource, the boot gates, every tenant-context write). It is the normal runtime credential, not a new
- *     privileged one;
- *   - PG_DATABASE_URL, when present, is the migration identity (crewflow_migrator) and becomes the ELEVATED endpoint, used
- *     only by command/ops/elevated-ops-session.ts (SET LOCAL ROLE to a narrow owner role, verified, frozen statements).
- *     Commands and modes that need no elevated session refuse its presence (minimum privilege: do not hand it over);
- *   - CREWFLOW_OPS_ACTOR_SOURCE / CREWFLOW_OPS_ACTOR_ID / CREWFLOW_OPS_CHANGE_REF: the operational audit label (required by
- *     every ops command, command/ops/ops-run.ts).
- * Every other process refuses ALL of these names (non-empty): the ops credential and label never reach a runtime container.
- * The legacy names and the read replica are refused in the ops process in every environment (no legacy path exists for it).
+ * The retired separated-mode operations container (`rab-ops`, removed in the rab-ops clean-up, PR 2 of X2.2) read these
+ * names: CREWFLOW_OPS_RUN declared the ops process, PG_OPS_APP_DATABASE_URL was its restricted runtime login, and the
+ * three CREWFLOW_OPS_ACTOR_* / CHANGE_REF values were its operator label. No process reads them any more. The three ops
+ * commands run as one-off CLI commands of the API image under the owner login crewflow_owner, with the label from their
+ * own flags (command/ops/ops-run.ts). A leftover value is never ignored: EVERY process refuses any of these names when
+ * non-empty (assertNoRetiredOpsEnv), the CLI included, so an old rab-ops invocation fails closed instead of silently
+ * running as something else.
  */
-export const OPS_RUN_VAR = 'CREWFLOW_OPS_RUN';
-export const OPS_RUN_VALUE = 'one-off';
-export const OPS_APP_DATABASE_URL_VAR = 'PG_OPS_APP_DATABASE_URL';
-export const OPS_ACTOR_ENV_NAMES = ['CREWFLOW_OPS_ACTOR_SOURCE', 'CREWFLOW_OPS_ACTOR_ID', 'CREWFLOW_OPS_CHANGE_REF'] as const;
-/** Names only the one-off operations container may hold (refused, when non-empty, by every other process). */
-export const OPS_ONLY_ENV_NAMES = [OPS_RUN_VAR, OPS_APP_DATABASE_URL_VAR, ...OPS_ACTOR_ENV_NAMES] as const;
+export const RETIRED_OPS_ENV_NAMES = [
+  'CREWFLOW_OPS_RUN',
+  'PG_OPS_APP_DATABASE_URL',
+  'CREWFLOW_OPS_ACTOR_SOURCE',
+  'CREWFLOW_OPS_ACTOR_ID',
+  'CREWFLOW_OPS_CHANGE_REF',
+] as const;
+
+/** Where the replacement is documented (named in every refusal so an operator knows what to run instead). */
+export const OPS_COMMANDS_RUNBOOK = 'packages/rab-docker/docs/release/OWNER-LOGIN-DEPLOYMENT.md, section 7 "Operations commands"';
 
 /**
- * True when THIS resolution is the ops process: the declared role is `ops`, or a `cli` resolution with CREWFLOW_OPS_RUN set
- * (the CLI boot gates and the command target guard resolve as `cli`; inside the ops container that IS the ops process).
- * Throws for a malformed CREWFLOW_OPS_RUN, for `ops` without it, and for any ops-only name in every other process.
+ * Refuses any non-empty retired operations-container variable, in every process role (api, worker, provisioner, cli,
+ * migrate). Throws PgConfigError; the message names variables only, never values.
  */
-export function resolveOpsMode(env: Env, processRole: PgProcessRole): boolean {
-  const run = present(env, OPS_RUN_VAR);
-  if (run !== undefined && run !== OPS_RUN_VALUE) {
-    throw new PgConfigError(`${OPS_RUN_VAR} must be unset or exactly "${OPS_RUN_VALUE}". Refusing to start.`);
-  }
-  if (processRole === 'ops' || (processRole === 'cli' && run !== undefined)) {
-    if (run === undefined) {
-      throw new PgConfigError(`the ops process requires ${OPS_RUN_VAR}=${OPS_RUN_VALUE} (the one-off operations container only). Refusing to start.`);
-    }
-    return true;
-  }
-  const held = OPS_ONLY_ENV_NAMES.filter((name) => present(env, name) !== undefined);
+export function assertNoRetiredOpsEnv(env: Env, processRole: PgProcessRole): void {
+  const held = RETIRED_OPS_ENV_NAMES.filter((name) => present(env, name) !== undefined);
   if (held.length > 0) {
     throw new PgConfigError(
-      `the ${processRole} process refuses the operations-container variable(s) ${held.join(', ')}: they belong to the one-off ops container only (never the API, the Worker, the provisioner, the migrate step or an ordinary CLI run). Remove them. Refusing to start.`,
+      `the ${processRole} process refuses the retired operations-container variable(s) ${held.join(', ')}: the rab-ops container was removed and no process reads them. The ops commands run as one-off CLI commands under the owner login crewflow_owner (${OPS_COMMANDS_RUNBOOK}). Remove them. Refusing to start.`,
     );
   }
-  return false;
 }
 
 /** Processes that hold session advisory locks: a transaction pooler is refused for them. */
@@ -164,13 +148,8 @@ export interface ResolvedPgEnvironment {
   primary: PgEndpoint;
   /** Session advisory locks (Worker direct pool, scan lock, storage lock). The primary unless a legacy DIRECT URL is set. */
   lock: PgEndpoint;
-  /**
-   * The ops process: PG_DATABASE_URL (the migration identity, used only by the verified elevated ops session,
-   * command/ops/elevated-ops-session.ts). Every other process: the legacy DATABASE_URL_UNPOOLED (non-production only), or null.
-   */
+  /** The legacy DATABASE_URL_UNPOOLED (non-production only), or null. */
   elevated: PgEndpoint | null;
-  /** True for the one-off operations container (resolveOpsMode); `processRole` is then 'ops'. */
-  ops: boolean;
   /**
    * Optional read replica (PG_DATABASE_REPLICA_URL), validated by the same URL policy and TLS rules as the primary (verify-full
    * in production) and refused when it names the primary's target. Null when unset. The replica DataSource itself lives in
@@ -194,7 +173,7 @@ export interface ResolvedPgEnvironment {
    * Phase D (SQL review E-1): every writable API / Worker session carries `-c crewflow.dispatch_notify=on` when
    * WORKER_DISPATCH_MODE=event, so the dispatch-pointer triggers' pg_notify fires only then (default poll ⇒ the setting is
    * absent ⇒ zero NOTIFY). Set by the factory as a startup option — every pooled/direct (re)connection gets it; nothing a
-   * request sends can choose it. Other process roles (provisioner, CLI, migrate, ops) never set it.
+   * request sends can choose it. Other process roles (provisioner, CLI, migrate) never set it.
    */
   dispatchNotify: boolean;
   /** Deprecation and pooler warnings. Names only, never values. */
@@ -281,27 +260,13 @@ export function readReplicaDatabaseUrl(env: Env = process.env): { name: 'PG_DATA
 /** Pure resolution. Throws PgConfigError (credential-free message) on any refused configuration. */
 export function resolvePgEnvironment(env: Env = process.env, options: ResolvePgOptions = {}): ResolvedPgEnvironment {
   const production = isPgProductionEnvironment(env);
-  const declaredRole = options.processRole ?? currentPgProcessRole();
-  const ops = resolveOpsMode(env, declaredRole);
-  const processRole: PgProcessRole = ops ? 'ops' : declaredRole;
+  const processRole = options.processRole ?? currentPgProcessRole();
+  assertNoRetiredOpsEnv(env, processRole);
   const enforceProcessPolicy = options.enforceProcessPolicy !== false;
   const warnings: string[] = [];
 
   const pgUrl = present(env, 'PG_DATABASE_URL');
   const legacy = Object.fromEntries(LEGACY_PG_ENV_NAMES.map((name) => [name, present(env, name)])) as Record<(typeof LEGACY_PG_ENV_NAMES)[number], string | undefined>;
-
-  if (ops) {
-    const setLegacy = LEGACY_PG_ENV_NAMES.filter((name) => legacy[name] !== undefined);
-    if (setLegacy.length > 0) {
-      throw new PgConfigError(`the ops process refuses the legacy database variable(s) ${setLegacy.join(', ')} in every environment. Refusing to start.`);
-    }
-    if (present(env, 'PG_DATABASE_REPLICA_URL') !== undefined) {
-      throw new PgConfigError('the ops process refuses PG_DATABASE_REPLICA_URL (it has no replica path). Refusing to start.');
-    }
-    if (present(env, OPS_APP_DATABASE_URL_VAR) === undefined) {
-      throw new PgConfigError(`the ops process requires ${OPS_APP_DATABASE_URL_VAR} (the restricted runtime login). Refusing to start.`);
-    }
-  }
 
   if (production) {
     const setLegacy = LEGACY_PG_ENV_NAMES.filter((name) => legacy[name] !== undefined);
@@ -316,7 +281,7 @@ export function resolvePgEnvironment(env: Env = process.env, options: ResolvePgO
         `production refuses libpq environment variable(s) ${setLibpq.join(', ')}: node-postgres reads some of them as silent fallbacks. Put everything in PG_DATABASE_URL. Refusing to start.`,
       );
     }
-    if (!pgUrl && !ops) throw new PgConfigError('PG_DATABASE_URL is required in production. Refusing to start.');
+    if (!pgUrl) throw new PgConfigError('PG_DATABASE_URL is required in production. Refusing to start.');
   }
 
   const caPath = present(env, 'PG_SSL_CA_CERT_PATH') ?? null;
@@ -333,30 +298,7 @@ export function resolvePgEnvironment(env: Env = process.env, options: ResolvePgO
   };
 
   let primary: PgEndpoint;
-  let opsElevated: PgEndpoint | null = null;
-  if (ops) {
-    primary = endpoint(present(env, OPS_APP_DATABASE_URL_VAR)!, OPS_APP_DATABASE_URL_VAR, false);
-    if (pgUrl) {
-      opsElevated = endpoint(pgUrl, 'PG_DATABASE_URL', false);
-      const a = primary.target;
-      const b = opsElevated.target;
-      if (a.host.toLowerCase() !== b.host.toLowerCase() || a.port !== b.port || a.database !== b.database) {
-        throw new PgConfigError(
-          `${OPS_APP_DATABASE_URL_VAR} and PG_DATABASE_URL name different databases (host, port or database): the ops command would split its connections. Refusing to start.`,
-        );
-      }
-      if (a.user === b.user) {
-        throw new PgConfigError(
-          `${OPS_APP_DATABASE_URL_VAR} and PG_DATABASE_URL name the same login. PG_DATABASE_URL is the migration identity; ${OPS_APP_DATABASE_URL_VAR} is the restricted runtime login. Refusing to start.`,
-        );
-      }
-      if (b.transactionPooler) {
-        throw new PgConfigError(
-          `PG_DATABASE_URL has a documented transaction-pooler shape (${b.transactionPooler.reason}); the ops elevated session needs a direct connection. Refusing to start.`,
-        );
-      }
-    }
-  } else if (pgUrl) {
+  if (pgUrl) {
     primary = endpoint(pgUrl, 'PG_DATABASE_URL', false);
     if (legacy.DATABASE_URL) {
       const other = parsePgUrl(legacy.DATABASE_URL, 'DATABASE_URL', { allowSessionRole });
@@ -393,8 +335,8 @@ export function resolvePgEnvironment(env: Env = process.env, options: ResolvePgO
     }
   }
 
-  let elevated: PgEndpoint | null = opsElevated;
-  if (!ops && legacy.DATABASE_URL_UNPOOLED) {
+  let elevated: PgEndpoint | null = null;
+  if (legacy.DATABASE_URL_UNPOOLED) {
     elevated = endpoint(legacy.DATABASE_URL_UNPOOLED, 'DATABASE_URL_UNPOOLED', true);
     warnings.push('DATABASE_URL_UNPOOLED is deprecated (non-production only); the migration step uses its own PG_DATABASE_URL.');
   }
@@ -455,7 +397,6 @@ export function resolvePgEnvironment(env: Env = process.env, options: ResolvePgO
     primary,
     lock,
     elevated,
-    ops,
     replica,
     replicaQueryTimeoutMs,
     replicaMaxLagMs,
@@ -514,7 +455,7 @@ export function emitPgWarnings(resolved: ResolvedPgEnvironment, env: Env = proce
   }
 }
 
-const RELEVANT_ENV_NAMES = [...PG_ENV_NAMES, ...LEGACY_PG_ENV_NAMES, ...LIBPQ_ENV_NAMES, ...OPS_ONLY_ENV_NAMES, 'NODE_ENV', 'RAB_RUNTIME_ENV', 'DB_TARGET', 'WORKER_DISPATCH_MODE'];
+const RELEVANT_ENV_NAMES = [...PG_ENV_NAMES, ...LEGACY_PG_ENV_NAMES, ...LIBPQ_ENV_NAMES, ...RETIRED_OPS_ENV_NAMES, 'NODE_ENV', 'RAB_RUNTIME_ENV', 'DB_TARGET', 'WORKER_DISPATCH_MODE'];
 const cache = new Map<string, ResolvedPgEnvironment>();
 
 /**
