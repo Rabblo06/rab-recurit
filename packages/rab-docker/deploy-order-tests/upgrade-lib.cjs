@@ -416,7 +416,8 @@ function printOwnerUrl(project, imageRef) {
   const r = spawnSync(
     'docker',
     [
-      'run', '--rm', '--name', name, '--log-driver', 'none', '--network', 'none', '--read-only', '--user', '1000:1000',
+      'run', '--rm', '--pull', 'never', '--name', name, '--log-driver', 'none', '--network', 'none', '--read-only',
+      '--cap-drop', 'ALL', '--security-opt', 'no-new-privileges', '--user', '1000:1000',
       '-v', `${project.name}_crewflow-db-target:${TARGET_DIR}:ro`,
       '-e', `CREWFLOW_DB_TARGET_FILE=${TARGET_FILE}`,
       '--entrypoint', 'sh', imageRef,
@@ -432,23 +433,24 @@ function printOwnerUrl(project, imageRef) {
   } catch {
     parsed = null;
   }
-  return { code: r.status ?? -1, url, lines: url ? url.split('\n').length : 0, stderr: r.stderr || '', parsed, name, command: `docker run --rm --name ${name} --log-driver none --network none --read-only --user 1000:1000 -v ${project.name}_crewflow-db-target:${TARGET_DIR}:ro -e CREWFLOW_DB_TARGET_FILE=${TARGET_FILE} --entrypoint sh <IMAGE> -c 'node packages/rab-server/dist/database/typeorm/scripts/owner-login/derive-runtime-url.js 4>&1 1>&2' 2>/dev/null` };
+  return { code: r.status ?? -1, url, lines: url ? url.split('\n').length : 0, stderr: r.stderr || '', parsed, name, command: `docker run --rm --pull never --name ${name} --log-driver none --network none --read-only --cap-drop ALL --security-opt no-new-privileges --user 1000:1000 -v ${project.name}_crewflow-db-target:${TARGET_DIR}:ro -e CREWFLOW_DB_TARGET_FILE=${TARGET_FILE} --entrypoint sh <IMAGE> -c 'node packages/rab-server/dist/database/typeorm/scripts/owner-login/derive-runtime-url.js 4>&1 1>&2' 2>/dev/null` };
 }
 
 /**
  * The documented "change the password on purpose" removal (DB-SETUP-LEAD.md, Helm model, operator command 2; env-free):
- * `docker run --rm --network none --log-driver none --user 1000:1000 -v <project>_crewflow-db-target:/v <IMAGE> rm -f
- * /v/owner-password`, plus `--name`. `script` replaces the rm (test-only file states, e.g. an empty file). No env, no
+ * `docker run --rm --pull never --network none --log-driver none --read-only --cap-drop ALL --security-opt no-new-privileges
+ * --user 1000:1000 -v <project>_crewflow-db-target:/v <IMAGE> rm -f /v/owner-password /v/owner-password.next`, plus `--name`. `script` replaces the rm (test-only file states, e.g. an empty file). No env, no
  * database connection, no secret in the command.
  */
 function onSetupVolume(project, imageRef, args, label = 'setup-volume') {
   const name = `${project.name}-${label}`;
-  const cmd = ['run', '--rm', '--name', name, '--network', 'none', '--log-driver', 'none', '--user', '1000:1000', '-v', `${project.name}_crewflow-db-target:/v`, imageRef, ...args];
+  const cmd = ['run', '--rm', '--pull', 'never', '--name', name, '--network', 'none', '--log-driver', 'none', '--read-only', '--cap-drop', 'ALL', '--security-opt', 'no-new-privileges', '--user', '1000:1000', '-v', `${project.name}_crewflow-db-target:/v`, imageRef, ...args];
   const r = run('docker', cmd, { timeout: 180_000 });
   return { ...r, command: `docker ${cmd.join(' ').replace(imageRef, '<IMAGE>')}` };
 }
 function removePasswordFile(project, imageRef) {
-  return onSetupVolume(project, imageRef, ['rm', '-f', `/v/${path.posix.basename(OWNER_PASSWORD_FILE)}`], 'rm-password-file');
+  const base = path.posix.basename(OWNER_PASSWORD_FILE);
+  return onSetupVolume(project, imageRef, ['rm', '-f', `/v/${base}`, `/v/${base}.next`], 'rm-password-file');
 }
 
 /** A URL of the bundled db for `user` (verify-full). Built here only, so no caller spells a credential into a URL literal. */
