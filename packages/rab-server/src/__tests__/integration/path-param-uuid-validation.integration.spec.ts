@@ -11,13 +11,14 @@ import { TenantContextService } from '../../engine/core-modules/tenant/tenant-co
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { TestIdentityFactory } from './helpers/test-identities';
 import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-pipe';
+import { integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
 
 /**
  * Hyper Workspace Phase 3, Part 4 regression. A malformed record identifier must never reach a uuid column: it is
  * refused as "not found" at the HTTP boundary (UuidPathParamsInterceptor). Previously `GET /rest/v1/staff/undefined`
  * returned 500 with `invalid input syntax for type uuid: "undefined"`.
  */
-const RUN = Boolean(process.env.DATABASE_URL);
+const RUN = integrationTestDatabaseReady();
 (RUN ? describe : describe.skip)('path parameter UUID validation (integration)', () => {
   let app: INestApplication;
   let owner: DataSource;

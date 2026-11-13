@@ -23,13 +23,14 @@ import {
   withRevoked,
 } from './helpers/ai-proposal-fixtures';
 import { AiKit, aiOrganisation, bearer, bootAiKit, manager, setOrgAi } from './helpers/ai-test-kit';
+import { integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
 
 /**
  * AI Phase 5a — human approval of AI write proposals (PHASE5_TWENTY_PLAN §2.4, security rules 6.1–6.6, §15 "Proposals").
  * Real AppModule, real PostgreSQL on crewflow_app (RLS on), real Redis; no model is called (proposals are created through
  * the server side of `propose_action`, exactly as 5b's tool will call it). Abuse cases T5-A1 … T5-A12, T5-C3, T5-M1.
  */
-const RUN = Boolean(process.env.DATABASE_URL);
+const RUN = integrationTestDatabaseReady();
 const describeIfDb = RUN ? describe : describe.skip;
 
 describeIfDb('AI write proposals: approve / reject / execute (integration)', () => {

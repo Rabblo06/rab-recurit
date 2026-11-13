@@ -21,6 +21,7 @@ import { Venue } from '../../modules/venue/entities/venue.entity';
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { TestIdentityFactory } from './helpers/test-identities';
 import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-pipe';
+import { integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
 
 /**
  * Redis checkpoint — Core Entity Cache. `CORE_ENTITY_CACHE_ENABLED`/`WORKSPACE_METADATA_CACHE_ENABLED`
@@ -28,7 +29,7 @@ import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-
  * code-level default is `false` (see `EnvironmentVariables`'s own doc comment for why) — every
  * OTHER integration suite in this codebase runs with caching off and is unaffected.
  */
-const RUN = Boolean(process.env.DATABASE_URL);
+const RUN = integrationTestDatabaseReady();
 const describeIfDb = RUN ? describe : describe.skip;
 jest.setTimeout(60_000);
 

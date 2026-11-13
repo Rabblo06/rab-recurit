@@ -12,6 +12,7 @@ import { LOGIN_HANDOFF_CLEANUP_LOCK, runLoginHandoffCleanupCycle } from '../../q
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { sqlStateAsSchemaRole } from './helpers/schema-role';
 import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
+import { integrationTestDatabaseReady } from '@rab/server/database/typeorm/core/integration-test-database-gate';
 
 /**
  * Wave 4/5 (MFA-lane request) — scheduled purge of cross-host login handoffs through DB5's `core.login_handoff_cleanup`
@@ -19,7 +20,7 @@ import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
  * direct privilege on the table; disabled flag = nothing; one replica per cycle (session advisory lock).
  */
 jest.setTimeout(120_000);
-const RUN = Boolean(process.env.DATABASE_URL);
+const RUN = integrationTestDatabaseReady();
 const describeIfDb = RUN ? describe : describe.skip;
 
 describeIfDb('login handoff cleanup job (integration)', () => {

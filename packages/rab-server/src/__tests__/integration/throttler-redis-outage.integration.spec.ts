@@ -13,6 +13,7 @@ import { ThrottlerRedisClientProvider } from '../../engine/core-modules/throttle
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
 import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-pipe';
+import { integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
 
 /**
  * CF-17 (owner decision 2026-10-15): when the throttler's Redis is unavailable, credential-issuing and credential-recovery
@@ -20,7 +21,7 @@ import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-
  * authorised requests keep working (they are authenticated against PostgreSQL on every call). Before: the throttler's
  * client queued commands forever, so EVERY request hung during an outage.
  */
-const RUN = Boolean(process.env.DATABASE_URL);
+const RUN = integrationTestDatabaseReady();
 const describeIfDb = RUN ? describe : describe.skip;
 const BOUND_MS = 3_000;
 

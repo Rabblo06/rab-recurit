@@ -45,6 +45,7 @@ import { createAdminDataSource } from './helpers/admin-datasource';
 import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
 import { withServerProvisioningDeferred } from '../../modules/manager-workspace/services/workspace-provisioning-test-seam';
 import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-pipe';
+import { integrationTestDatabase } from '../../database/typeorm/core/integration-test-database-gate';
 
 const { appUrl } = resolveIntegrationTestDatabase(process.env);
 
@@ -136,7 +137,7 @@ describe('Phase B P8 provisioning guards + counts-only health (migrations 178672
     // login (crewflow_owner on the owner-login CI database; crewflow_app only on a separated fixture) and never as the admin
     // superuser that seeds fixtures.
     expect(who).toBe(new URL(process.env.TEST_DATABASE_URL!).username);
-    expect(who).not.toBe(new URL(process.env.TEST_DATABASE_URL_UNPOOLED!).username);
+    expect(who).not.toBe(integrationTestDatabase().admin.login);
     // D4: the approved body embeds the expected fingerprint of the server's major (PG16 and PG18 differ), so the table is
     // selected exactly as the runner selects it, before approvedProvisionBody() reads it in a test.
     await selectWorkspaceFingerprintsForServer((sql) => admin.query(sql));

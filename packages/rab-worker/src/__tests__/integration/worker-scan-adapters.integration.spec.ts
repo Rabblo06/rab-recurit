@@ -31,6 +31,7 @@ import { resolveIntervalMs, SCAN_JOBS, schedulerIdOf } from '../../core/schedule
 import { WorkerDependencies } from '../../core/scheduler/worker-dependencies';
 import { WorkerModule } from '../../worker.module';
 import { EXPECTED_HANDLERS, EXPECTED_SCAN_SCHEDULER_IDS, SEPARATE_MODE_SCAN_IDS } from './helpers/expected-scan-jobs';
+import { integrationTestDatabaseReady } from '@rab/server/database/typeorm/core/integration-test-database-gate';
 
 /**
  * Lane A M3/M7: the REAL WorkerModule graph discovers all scan handlers + 5 consumer handlers (D-Q4b: + crewflow-timer-triggers) (no duplicates, no
@@ -38,7 +39,7 @@ import { EXPECTED_HANDLERS, EXPECTED_SCAN_SCHEDULER_IDS, SEPARATE_MODE_SCAN_IDS 
  * once through the bullmq-mode path (runtime.runOnce + the per-scan advisory lock) as the restricted crewflow_app role, against the disposable test database. Interval mode uses the same
  * adapters, so this also proves the interval path's handlers resolve.
  */
-const RUN = Boolean(process.env.DATABASE_URL);
+const RUN = integrationTestDatabaseReady();
 const describeIfDb = RUN ? describe : describe.skip;
 jest.setTimeout(180_000);
 

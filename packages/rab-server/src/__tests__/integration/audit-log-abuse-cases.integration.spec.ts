@@ -15,6 +15,7 @@ import { createAdminDataSource, createCrewflowOwnerProbeDataSource } from './hel
 import { TestIdentityFactory } from './helpers/test-identities';
 import { generateFixturePassword } from './helpers/fixture-password';
 import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-pipe';
+import { integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
 
 const FIXTURE_PASSWORD = generateFixturePassword();
 
@@ -27,7 +28,7 @@ const FIXTURE_PASSWORD = generateFixturePassword();
  * elsewhere (resource-ownership-abuse-cases.integration.spec.ts). Real
  * Postgres, RLS on, no mocks — same conventions as that file.
  */
-const RUN = Boolean(process.env.DATABASE_URL);
+const RUN = integrationTestDatabaseReady();
 const describeIfDb = RUN ? describe : describe.skip;
 
 describeIfDb('audit log abuse cases (integration)', () => {

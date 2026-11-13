@@ -12,6 +12,7 @@ import { TenantContextService } from '../../engine/core-modules/tenant/tenant-co
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { TestIdentityFactory } from './helpers/test-identities';
 import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-pipe';
+import { integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
 
 /**
  * Manager-initiated Staff avatar upload/replace/remove — a genuinely new
@@ -22,7 +23,7 @@ import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-
  * creator-private `assertOwned` gate every other Staff mutation already
  * uses. Real Postgres, RLS on, no mocks.
  */
-const RUN = Boolean(process.env.DATABASE_URL);
+const RUN = integrationTestDatabaseReady();
 const describeIfDb = RUN ? describe : describe.skip;
 
 jest.setTimeout(60_000);

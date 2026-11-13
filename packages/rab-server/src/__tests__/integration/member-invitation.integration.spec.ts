@@ -16,6 +16,7 @@ import { Organisation } from '../../modules/identity/entities';
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
 import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-pipe';
+import { integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
 
 /**
  * Settings → Members with exact role and access rules (owner-approved design 2026-10-14) — real PostgreSQL with
@@ -29,7 +30,7 @@ import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-
  *  - Members read their workspace owner's records through creator-based ownership, nothing else.
  *  - Add (leadership onboarding) is never reachable by an Initial Manager.
  */
-const RUN = Boolean(process.env.DATABASE_URL);
+const RUN = integrationTestDatabaseReady();
 const describeIfDb = RUN ? describe : describe.skip;
 const GENERIC = 'This invitation link is invalid or has expired.';
 const STRONG = 'Correct-Horse-42-battery';

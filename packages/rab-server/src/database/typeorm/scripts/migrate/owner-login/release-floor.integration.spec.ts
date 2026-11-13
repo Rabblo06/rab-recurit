@@ -29,20 +29,15 @@ import { Client } from 'pg';
 import { GuardedTarget, LockedMigrationOptions, runLockedMigrations } from '../locked-migration-runner';
 import { runMigrateOnStart } from './migrate-on-start';
 import { RELEASE_MANIFESTS } from './release-floor';
+import { integrationTestDatabase } from '../../../core/integration-test-database-gate';
 
 jest.setTimeout(900_000);
 
 const OWNER_URL = process.env.TEST_DATABASE_URL?.trim() ?? '';
-const ADMIN_URL = process.env.TEST_DATABASE_URL_UNPOOLED?.trim() ?? '';
+const ADMIN_URL = integrationTestDatabase().adminUrl;
 const REDIS_URL = (process.env.TEST_REDIS_URL ?? process.env.REDIS_URL ?? '').trim();
-const loginOf = (url: string) => {
-  try {
-    return decodeURIComponent(new URL(url).username);
-  } catch {
-    return '';
-  }
-};
-const RUN = OWNER_URL !== '' && ADMIN_URL !== '' && loginOf(OWNER_URL) === 'crewflow_owner';
+// DEAD-07: the validated TEST pair decides (throws on an invalid pair); the opt-in is the owner login.
+const RUN = integrationTestDatabase().app.login === 'crewflow_owner';
 const describeIfOwnerCluster = RUN ? describe : describe.skip;
 
 const MIGRATIONS_DIR = join(__dirname, '..', '..', '..', 'core', 'migrations');

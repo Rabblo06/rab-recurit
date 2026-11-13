@@ -12,6 +12,7 @@ import { AuthContext } from '../../engine/core-modules/tenant/auth-context.inter
 import { StaffService } from '../../modules/staff/services/staff.service';
 import { createAdminDataSource, createCrewflowOwnerProbeDataSource } from './helpers/admin-datasource';
 import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
+import { integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
 
 /**
  * Staff / Venue Manager RLS redesign: adversarial suite. The database answers "which rows may this caller address?"
@@ -24,7 +25,7 @@ import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
  *
  * Every probe runs as rab_app under an explicit tenant context, which is how production code reaches the database.
  */
-const RUN = Boolean(process.env.DATABASE_URL);
+const RUN = integrationTestDatabaseReady();
 (RUN ? describe : describe.skip)('staff profile and venue staff RLS: adversarial abuse cases', () => {
   let app: INestApplication;
   let owner: DataSource;

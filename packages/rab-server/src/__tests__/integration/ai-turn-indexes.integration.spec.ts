@@ -6,6 +6,7 @@ import { TenantContextService } from '../../engine/core-modules/tenant/tenant-co
 import { AI_P2_MIGRATION_QUEUED_TURN_CHECKPOINT, AI_P2_MIGRATION_USAGE_TITLE_CALLS } from '../../modules/ai/constants/ai.constants';
 import { AiKit, aiOrganisation, ask, bootAiKit, newConversation } from './helpers/ai-test-kit';
 import { sqlStateAsSchemaRole } from './helpers/schema-role';
+import { integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
 
 /**
  * AI Phase 2 M1 / M2 on the REAL runtime role crewflow_app (T2-5): the database itself allows at most ONE running and ONE
@@ -13,7 +14,7 @@ import { sqlStateAsSchemaRole } from './helpers/schema-role';
  * a tenant context and to a foreign organisation; the runtime role may update exactly the new columns, never a tenant
  * or owner column; the CHECKs hold.
  */
-const RUN = Boolean(process.env.DATABASE_URL);
+const RUN = integrationTestDatabaseReady();
 const describeIfDb = RUN ? describe : describe.skip;
 const pgCode = (e: unknown) => (e as { driverError?: { code?: string }; code?: string })?.driverError?.code ?? (e as { code?: string })?.code;
 

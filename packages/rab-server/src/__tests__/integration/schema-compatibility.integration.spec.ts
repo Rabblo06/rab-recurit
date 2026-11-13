@@ -15,6 +15,7 @@ import { SchemaResolverService, WorkspaceRoutingError } from '../../engine/core-
 import { AllExceptionsFilter } from '../../engine/filters/all-exceptions.filter';
 import { assertNoPendingMigrations } from '../../engine/utils/assert-no-pending-migrations';
 import { provisionServerPath, SeededWorkspace, seedWorkspace } from './helpers/workspace-fixtures';
+import { integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
 
 /**
  * Phase B, "the API and Worker must refuse incompatible schema versions" (proposal 03), on the real disposable test
@@ -34,7 +35,7 @@ import { provisionServerPath, SeededWorkspace, seedWorkspace } from './helpers/w
  */
 jest.setTimeout(180_000);
 
-const RUN = Boolean(process.env.DATABASE_URL);
+const RUN = integrationTestDatabaseReady();
 const describeIfDb = RUN ? describe : describe.skip;
 const CREWFLOW_URL = process.env.TEST_DATABASE_CREWFLOW_URL?.trim();
 const itIfCrewflow = CREWFLOW_URL ? it : it.skip;

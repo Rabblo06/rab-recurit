@@ -33,13 +33,14 @@ import { rowsOf } from './helpers/response-shapes';
 import { TestIdentityFactory } from './helpers/test-identities';
 import { generateFixturePassword } from './helpers/fixture-password';
 import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-pipe';
+import { integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
 
 /**
  * Scheduling + offer abuse-case suite (rab-workforce-architecture.md §1.2,
  * §8.4, §11.1). Real Postgres, RLS on, no mocks. Needs DATABASE_URL —
  * skipped locally if unset, same convention as auth-abuse-cases.spec.ts.
  */
-const RUN = Boolean(process.env.DATABASE_URL);
+const RUN = integrationTestDatabaseReady();
 const describeIfDb = RUN ? describe : describe.skip;
 
 describeIfDb('scheduling + offer abuse cases (integration)', () => {

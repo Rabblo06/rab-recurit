@@ -11,6 +11,7 @@ import { TenantContextService } from '../../engine/core-modules/tenant/tenant-co
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { TestIdentityFactory } from './helpers/test-identities';
 import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-pipe';
+import { integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
 
 /**
  * Hyper Workspace Phase 3, Part 9. Measures whether POST /auth/forgot-password is distinguishable by timing for an existing
@@ -18,7 +19,7 @@ import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-
  * Measurements are printed for the report; the assertion checks only the response, never a wall-clock threshold, because
  * timing on a shared test machine is not a reliable pass/fail signal.
  */
-const RUN = Boolean(process.env.DATABASE_URL);
+const RUN = integrationTestDatabaseReady();
 (RUN ? describe : describe.skip)('forgot-password timing and response uniformity (integration)', () => {
   let app: INestApplication;
   let owner: DataSource;

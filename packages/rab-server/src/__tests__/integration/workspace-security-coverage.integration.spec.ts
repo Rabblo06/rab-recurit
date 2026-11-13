@@ -6,6 +6,7 @@ import { Client } from 'pg';
 
 import { resolveIntegrationTestDatabase } from '../../database/typeorm/core/test-database-guard';
 import { compareWithGolden } from '../../database/typeorm/core/security-posture';
+import { integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
 
 /**
  * F4 (Wave 1 lane S): `tools/check-rls-coverage.ts` and the security-posture golden snapshot now cover every physical
@@ -17,7 +18,7 @@ import { compareWithGolden } from '../../database/typeorm/core/security-posture'
  * The tools scan the whole database, so assertions are about the disposable schema's own lines; other schemas on a shared
  * test database are not this test's business.
  */
-const RUN = Boolean(process.env.DATABASE_URL);
+const RUN = integrationTestDatabaseReady();
 const describeIfDb = RUN ? describe : describe.skip;
 
 jest.setTimeout(180_000);

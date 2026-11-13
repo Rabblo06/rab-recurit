@@ -25,6 +25,7 @@ import { resolveResponsibleManager } from '../../core/domain/resolve-responsible
 import { runLateClockInCycle } from '../../queues/rab-shifts/late-clock-in.job';
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { generateFixturePassword } from './helpers/fixture-password';
+import { integrationTestDatabaseReady } from '@rab/server/database/typeorm/core/integration-test-database-gate';
 
 const FIXTURE_PASSWORD = generateFixturePassword();
 
@@ -37,7 +38,7 @@ const FIXTURE_PASSWORD = generateFixturePassword();
  * cancellation/assignment-change races, and the Phase 2 ledger's continued
  * preference-independent idempotency under this new logic.
  */
-const RUN = Boolean(process.env.DATABASE_URL);
+const RUN = integrationTestDatabaseReady();
 const describeIfDb = RUN ? describe : describe.skip;
 // 60s was enough when this file was written; the shared dev database's organisation catalog
 // (which runLateClockInCycle's discoverInWorkspaces/organisationIds scans in full, every cycle)

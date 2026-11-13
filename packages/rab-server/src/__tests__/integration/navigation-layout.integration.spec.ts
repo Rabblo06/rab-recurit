@@ -20,13 +20,14 @@ import { RealtimeEventService } from '../../engine/core-modules/realtime/realtim
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
 import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-pipe';
+import { integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
 
 /**
  * Personal navigation layout (draft/Save/Cancel editor, 2026-10-20) on real PostgreSQL with RLS: save semantics
  * (revision, replay, conflict, rollback), validation, re-checking referenced records, isolation between users /
  * workspaces / organisations, raw RLS under the runtime role, and the web-only / inspect / CSRF restrictions.
  */
-const RUN = Boolean(process.env.DATABASE_URL);
+const RUN = integrationTestDatabaseReady();
 const describeIfDb = RUN ? describe : describe.skip;
 const ORIGIN = 'http://localhost:5173';
 

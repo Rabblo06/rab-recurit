@@ -42,6 +42,7 @@ import { runLateClockInCycle } from '../../queues/rab-shifts/late-clock-in.job';
 import { runShiftMonitorCycle } from '../../queues/rab-shifts/shift-monitor.job';
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
+import { integrationTestDatabaseReady } from '@rab/server/database/typeorm/core/integration-test-database-gate';
 
 /**
  * Owner rule 2026-11-06 — NO automatic confirmation; an unconfirmed STAFF_ACCEPTED offer is withdrawn at its approval
@@ -53,7 +54,7 @@ import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
  * a controlled offset from the database clock, and re-aims the pointer exactly as a future period-editing feature must.
  * No production code has a test bypass.
  */
-const RUN = Boolean(process.env.DATABASE_URL);
+const RUN = integrationTestDatabaseReady();
 const describeIfDb = RUN ? describe : describe.skip;
 jest.setTimeout(120_000);
 

@@ -22,6 +22,7 @@ import { createEmailSendProcessor } from '../../queues/rab-email/email-send.proc
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { cancelLeftoverClaimableEmails } from './helpers/email-leftovers';
 import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
+import { integrationTestDatabaseReady } from '@rab/server/database/typeorm/core/integration-test-database-gate';
 
 /**
  * Soak review defect (a): account and auth emails fast-published their outbox row from INSIDE the transaction that wrote
@@ -38,7 +39,7 @@ import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
  *  P4 abuse (account discovery): forgot password for a nonexistent email → same (empty) response, no row, no job.
  */
 jest.setTimeout(90_000);
-const RUN = Boolean(process.env.DATABASE_URL);
+const RUN = integrationTestDatabaseReady();
 const describeIfDb = RUN ? describe : describe.skip;
 const HOLD_MS = 1_500;
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));

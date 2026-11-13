@@ -15,6 +15,7 @@ import { createAdminDataSource } from './helpers/admin-datasource';
 import { BootstrapTimer } from './helpers/bootstrap-trace';
 import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
 import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-pipe';
+import { integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
 
 /**
  * Hyper Workspace Phase 3, Part 1 and 2 (decision C). Two Venue Manager creation flows, kept strictly separate:
@@ -22,7 +23,7 @@ import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-
  *   - CEO / admin:     POST /rest/v1/org-admin/venue-managers (MANAGER_MANAGE, explicit target workspace validated)
  * Real Postgres, RLS on, real HTTP. Every denial is asserted on its specific control.
  */
-const RUN = Boolean(process.env.DATABASE_URL);
+const RUN = integrationTestDatabaseReady();
 const describeIfDb = RUN ? describe : describe.skip;
 
 describeIfDb('Venue Manager creation: normal Manager flow and CEO/admin flow (integration)', () => {

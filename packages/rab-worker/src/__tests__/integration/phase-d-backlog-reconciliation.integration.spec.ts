@@ -10,6 +10,7 @@ import { DispatchCoordinator, DispatchCoordinatorOptions } from '../../core/wake
 import { dispatchEmailScope, runEmailDispatchCycle } from '../../queues/rab-email/email-dispatch.job';
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { TestIdentityFactory } from './helpers/test-identities';
+import { integrationTestDatabaseReady } from '@rab/server/database/typeorm/core/integration-test-database-gate';
 
 /**
  * #24 — bounded, fair follow-up reconciliation against the REAL per_scope email cycle (batch 50 per organisation), on a
@@ -28,7 +29,7 @@ import { TestIdentityFactory } from './helpers/test-identities';
  * pointers (rab_secure_owner table, FORCE RLS). It removes ONLY the pointers of this suite's own rows.
  */
 const WORKER_URL = process.env.TEST_DATABASE_WORKER_URL;
-const RUN = process.env.PHASE_D_SQL_APPROVED === 'true' && Boolean(WORKER_URL && process.env.DATABASE_URL);
+const RUN = process.env.PHASE_D_SQL_APPROVED === 'true' && Boolean(WORKER_URL) && integrationTestDatabaseReady();
 const describeIfApproved = RUN ? describe : describe.skip;
 jest.setTimeout(300_000);
 

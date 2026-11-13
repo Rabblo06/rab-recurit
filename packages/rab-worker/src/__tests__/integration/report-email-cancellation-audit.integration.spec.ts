@@ -31,6 +31,7 @@ import { runShiftReportSchedulerCycle } from '../../queues/rab-reports/shift-rep
 import { inspectPdf } from '../helpers/pdf-inspect';
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
+import { integrationTestDatabaseReady } from '@rab/server/database/typeorm/core/integration-test-database-gate';
 
 /**
  * REPORT EMAIL CANCELLATION — owner decisions S-6 and S-10, plus the measurements behind N-1 and N-2 (Phase 0).
@@ -46,7 +47,7 @@ import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
  *
  * Real jobs, real send processor, real database (FORCE RLS), real Playwright renderer; only the email PROVIDER is a mock.
  */
-const RUN = Boolean(process.env.DATABASE_URL);
+const RUN = integrationTestDatabaseReady();
 const describeIfDb = RUN ? describe : describe.skip;
 jest.setTimeout(300_000);
 

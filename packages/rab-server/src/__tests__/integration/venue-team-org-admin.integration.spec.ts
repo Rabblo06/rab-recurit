@@ -14,6 +14,7 @@ import { VenueManagerService } from '../../modules/manager/services/venue-manage
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
 import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-pipe';
+import { integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
 
 /**
  * Owner decision 2026-10-28: the EXISTING Assigned Staff feature (venue_manager_staff) extended to organisation
@@ -24,7 +25,7 @@ import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-
  * Abuse cases first: every cross-organisation / cross-workspace / unauthorised attempt must be refused and write nothing;
  * a revoke override must win at the route, in the service AND in the database; Admin Inspect stays read-only.
  */
-const RUN = Boolean(process.env.DATABASE_URL);
+const RUN = integrationTestDatabaseReady();
 const describeIfDb = RUN ? describe : describe.skip;
 const ADMIN_BASE = '/rest/v1/org-admin/venue-managers';
 

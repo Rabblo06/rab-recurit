@@ -42,8 +42,9 @@ import { createPushSendProcessor } from '../../queues/rab-push/push-send.process
 import { RealtimeScanProcessor } from '../../queues/rab-realtime/realtime.processors';
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { createTestIdentityFactory, TestIdentity, TestIdentityFactory } from './helpers/test-identities';
+import { integrationTestDatabaseReady } from '@rab/server/database/typeorm/core/integration-test-database-gate';
 
-const RUN = Boolean(process.env.DATABASE_URL);
+const RUN = integrationTestDatabaseReady();
 const describeIfDb = RUN ? describe : describe.skip;
 jest.setTimeout(300_000);
 

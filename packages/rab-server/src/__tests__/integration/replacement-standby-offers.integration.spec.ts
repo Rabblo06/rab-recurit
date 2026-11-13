@@ -13,6 +13,7 @@ import { TenantContextService } from '../../engine/core-modules/tenant/tenant-co
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
 import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-pipe';
+import { integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
 
 /**
  * Replacement & standby offers on the ORIGINAL shift (2026-10-21). Real Postgres, RLS on (runtime role), no mocks; every
@@ -23,7 +24,7 @@ import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-
  * manager → manager approves → booked on the original shift. A PROVISIONAL (worker-flagged) no-show frees nothing:
  * offers sent then are standby, which can be accepted but never approved without a real vacancy.
  */
-const RUN = Boolean(process.env.DATABASE_URL);
+const RUN = integrationTestDatabaseReady();
 const describeIfDb = RUN ? describe : describe.skip;
 jest.setTimeout(180_000);
 

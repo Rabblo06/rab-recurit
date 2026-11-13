@@ -12,6 +12,7 @@ import { Organisation } from '../../modules/identity/entities';
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
 import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-pipe';
+import { integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
 
 /**
  * P0 finalization (FULL-ARCHITECTURE-UPGRADE-PLAN.md §8.3, item 2 — refresh reuse retention).
@@ -30,7 +31,7 @@ import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-
  * `RefreshTokenService.rotate()` reuse-detection path (exercised end-to-end through the actual
  * `/rest/v1/auth/refresh` HTTP endpoint, not a unit mock) run against that backdated state.
  */
-const RUN = Boolean(process.env.DATABASE_URL);
+const RUN = integrationTestDatabaseReady();
 const describeIfDb = RUN ? describe : describe.skip;
 jest.setTimeout(60_000);
 

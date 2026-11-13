@@ -10,6 +10,7 @@ import { TEST_MOCK_MODEL_ID, TEST_SMART_MODEL_ID } from '../support/ai/test-cata
 import { AiKit, aiOrganisation, bearer, bootAiKit, manager } from './helpers/ai-test-kit';
 import { TestIdentity } from './helpers/test-identities';
 import { sqlStateAsSchemaRole } from './helpers/schema-role';
+import { integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
 
 /**
  * T-S1 / T-S2 (docs/ai/PHASE1_TWENTY_PLAN.md §7, D6/D7): Settings → AI "AI models" on the real AppModule, PostgreSQL
@@ -17,7 +18,7 @@ import { sqlStateAsSchemaRole } from './helpers/schema-role';
  * switches, Inspect refusal, step-up + reason) → org-scoped query → RLS (organisation) → RLS writer predicate
  * `core.ai_settings_writer()` (CEO only). Pins are lookup keys: only an AVAILABLE model of the tier can be written.
  */
-const RUN = Boolean(process.env.DATABASE_URL);
+const RUN = integrationTestDatabaseReady();
 const describeIfDb = RUN ? describe : describe.skip;
 const ORIGIN = 'http://localhost:5173';
 const sha256 = (v: string) => createHash('sha256').update(v).digest('hex');

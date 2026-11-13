@@ -15,6 +15,7 @@ import { OrganisationOnboardingService } from '../../modules/manager/services/or
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { TestIdentityFactory } from './helpers/test-identities';
 import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-pipe';
+import { integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
 
 /**
  * P2.9C, reversed by the universal-self-service-onboarding checkpoint (docs/HANDOFF.md): the
@@ -27,7 +28,7 @@ import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-
  * `/managers/initial-manager-invite*`; the former `/admin/organisations/:id/initial-manager-invite*` routes are removed and their
  * tests now assert that denial (full matrix: `organisation-isolation.integration.spec.ts`).
  */
-const RUN = Boolean(process.env.DATABASE_URL);
+const RUN = integrationTestDatabaseReady();
 const describeIfDb = RUN ? describe : describe.skip;
 
 describeIfDb('initial manager invitation (integration)', () => {

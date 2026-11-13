@@ -12,6 +12,7 @@ import { TenantContextService } from '../../engine/core-modules/tenant/tenant-co
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
 import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-pipe';
+import { integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
 
 /**
  * Wave 5 lane DATA — ranked full-text + trigram search (GET /rest/v1/search). Real PostgreSQL with RLS on
@@ -19,7 +20,7 @@ import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-
  * archived exclusion, the email field permission, cross-workspace / cross-organisation zero results and that
  * injection-shaped input is inert (200, never a 500, never extra rows).
  */
-const RUN = Boolean(process.env.DATABASE_URL);
+const RUN = integrationTestDatabaseReady();
 const describeIfDb = RUN ? describe : describe.skip;
 const STRONG = 'Correct-Horse-42-battery';
 

@@ -10,6 +10,7 @@ import { buildSystemPrompt } from '../../modules/ai/prompt/system-prompt';
 import { AiAccessService } from '../../modules/ai/services/ai-access.service';
 import { AiToolRegistry } from '../../modules/ai/tools/ai-tool-registry.service';
 import { AiKit, aiOrganisation, bootAiKit } from './helpers/ai-test-kit';
+import { integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
 
 /**
  * T-P2 (docs/ai/PHASE1_TWENTY_PLAN.md §8/§10.1): the payload the live smoke test will send. The REAL
@@ -20,7 +21,7 @@ import { AiKit, aiOrganisation, bootAiKit } from './helpers/ai-test-kit';
  * provider requests — is proven with a fetch spy in ai-real-provider-gateway.spec.ts; on this test-marked database the
  * real-provider path stops even earlier, at the synthetic re-verification.)
  */
-const RUN = Boolean(process.env.DATABASE_URL);
+const RUN = integrationTestDatabaseReady();
 const describeIfDb = RUN ? describe : describe.skip;
 const sidOf = (token: string): string => (JSON.parse(Buffer.from(token.split('.')[1]!, 'base64url').toString('utf8')) as { sid: string }).sid;
 const H = 3_600_000;

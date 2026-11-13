@@ -6,6 +6,7 @@ import { venueAndRole } from './helpers/ai-proposal-fixtures';
 import { execCall, scriptedModel, textParts } from './helpers/ai-models';
 import { AiKit, aiOrganisation, ask, bearer, bootAiKit, jobFor, newConversation, readSse, turnRow } from './helpers/ai-test-kit';
 import { TestIdentity } from './helpers/test-identities';
+import { integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
 
 /**
  * Batch 3 S2 — record references on the real AppModule + Worker step loop (crewflow_app, FORCE RLS, Redis), scripted
@@ -17,7 +18,7 @@ import { TestIdentity } from './helpers/test-identities';
  *   - an id seen only in an EARLIER turn → removed;
  *   - the label is never stored: the token is an id only.
  */
-const RUN = Boolean(process.env.DATABASE_URL);
+const RUN = integrationTestDatabaseReady();
 const describeIfDb = RUN ? describe : describe.skip;
 
 describeIfDb('AI S2: validated record references (integration)', () => {

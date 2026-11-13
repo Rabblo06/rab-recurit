@@ -12,6 +12,7 @@ import { discoverInWorkspaces } from '../../core/database/workspace-discovery';
 import { runRealtimeOutboxPublishCycle, RealtimePublishFn } from '../../queues/rab-realtime/publish-outbox.job';
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { createTestIdentityFactory, TestIdentityFactory } from './helpers/test-identities';
+import { integrationTestDatabaseReady } from '@rab/server/database/typeorm/core/integration-test-database-gate';
 
 /**
  * W6-E2E-07 regression (LOW, worker): with HWS routing on, a workspace that is listed by `core.worker_list_workspaces`
@@ -23,7 +24,7 @@ import { createTestIdentityFactory, TestIdentityFactory } from './helpers/test-i
  * difference from the app's instance; the test DB's app config runs HWS off). The factory's workspaces have no registry
  * row, i.e. exactly the "just created, not provisioned yet" state.
  */
-const RUN = Boolean(process.env.DATABASE_URL);
+const RUN = integrationTestDatabaseReady();
 const describeIfDb = RUN ? describe : describe.skip;
 jest.setTimeout(90_000);
 

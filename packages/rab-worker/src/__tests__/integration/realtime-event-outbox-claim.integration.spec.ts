@@ -9,6 +9,7 @@ import { TenantContextService } from '@rab/server/engine/core-modules/tenant/ten
 import { claimRealtimeEvents, completeRealtimeEvent, markRealtimeEventRetry, cancelRealtimeEvent } from '../../core/database/realtime-event';
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { createTestIdentityFactory, TestIdentity, TestIdentityFactory } from './helpers/test-identities';
+import { integrationTestDatabaseReady } from '@rab/server/database/typeorm/core/integration-test-database-gate';
 
 /**
  * Worker-side claim/complete/retry/cancel for `core.realtime_event`
@@ -22,7 +23,7 @@ import { createTestIdentityFactory, TestIdentity, TestIdentityFactory } from './
  * a consumer on top of it, same reasoning as `worker-event-idempotency.
  * integration.spec.ts` for `core.worker_event`'s own claim helpers.
  */
-const RUN = Boolean(process.env.DATABASE_URL);
+const RUN = integrationTestDatabaseReady();
 const describeIfDb = RUN ? describe : describe.skip;
 jest.setTimeout(60_000);
 

@@ -9,13 +9,14 @@ import { createAdminDataSource } from './helpers/admin-datasource';
 import { MockOidcProvider } from './helpers/mock-oidc-provider';
 import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
 import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-pipe';
+import { integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
 
 /**
  * Cutover safety: with AUTH_OAUTH_HANDOFF_ENABLED unset (the default), the ORIGINAL direct-cookie callback keeps
  * working exactly as before — plus the protections that apply in both modes (browser binding, failure handling).
  * Invitation acceptance with Google exists only in handoff mode and is refused here.
  */
-const RUN = Boolean(process.env.DATABASE_URL);
+const RUN = integrationTestDatabaseReady();
 const describeIfDb = RUN ? describe : describe.skip;
 
 describeIfDb('Google sign-in, legacy direct-cookie mode (cutover default)', () => {

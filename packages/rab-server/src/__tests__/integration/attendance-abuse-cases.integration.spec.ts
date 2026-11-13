@@ -24,6 +24,7 @@ import { withPoolTrace } from './helpers/pool-probe';
 import { clearThrottleState } from './helpers/throttle-state';
 import { generateFixturePassword } from './helpers/fixture-password';
 import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-pipe';
+import { integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
 
 const FIXTURE_PASSWORD = generateFixturePassword();
 
@@ -33,7 +34,7 @@ const FIXTURE_PASSWORD = generateFixturePassword();
  * resolved from the caller's own verified JWT, never a client-supplied id —
  * see `AttendanceService`'s own class doc comment.
  */
-const RUN = Boolean(process.env.DATABASE_URL);
+const RUN = integrationTestDatabaseReady();
 const describeIfDb = RUN ? describe : describe.skip;
 
 describeIfDb('attendance abuse cases (integration)', () => {

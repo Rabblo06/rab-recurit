@@ -13,12 +13,13 @@ import { Shift } from '../../modules/scheduling/entities/shift.entity';
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
 import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-pipe';
+import { integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
 
 /**
  * Check In → Clock In → Clock Out, the geofence on all three, Venue Manager on-behalf punches and the pipeline stages
  * (owner brief 2026-10-21). Real Postgres (disposable test DB), RLS on, real HTTP stack, production roles; no mocks.
  */
-const RUN = Boolean(process.env.DATABASE_URL);
+const RUN = integrationTestDatabaseReady();
 const describeIfDb = RUN ? describe : describe.skip;
 jest.setTimeout(180_000);
 

@@ -13,6 +13,7 @@ import { Organisation } from '../../modules/identity/entities';
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
 import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-pipe';
+import { integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
 
 /**
  * PHASE 10 — session & authentication correctness. Real Postgres, real RLS,
@@ -27,7 +28,7 @@ import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-
  *   reset — the `SessionValidityService` check `JwtAuthGuard` now runs on
  *   every request, not just at the token's own (up to 15-minute) expiry.
  */
-const RUN = Boolean(process.env.DATABASE_URL);
+const RUN = integrationTestDatabaseReady();
 const describeIfDb = RUN ? describe : describe.skip;
 jest.setTimeout(60_000);
 

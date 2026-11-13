@@ -11,6 +11,7 @@ import { TenantContextService } from '../../engine/core-modules/tenant/tenant-co
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
 import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-pipe';
+import { integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
 
 /**
  * CF-05 (login CSRF): a page on another site must not be able to sign the victim's browser into an account of the
@@ -18,7 +19,7 @@ import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-
  * present-but-untrusted Origin, before any credential work, so no cookie is ever set for a forged request. The native
  * app (no Origin, JSON) and the real web console (trusted Origin, JSON) are unaffected.
  */
-const RUN = Boolean(process.env.DATABASE_URL);
+const RUN = integrationTestDatabaseReady();
 const describeIfDb = RUN ? describe : describe.skip;
 
 describeIfDb('CF-05 login CSRF (integration)', () => {

@@ -13,6 +13,7 @@ import { TenantContextService } from '../../engine/core-modules/tenant/tenant-co
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
 import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-pipe';
+import { integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
 
 /**
  * Phase C1b (D5, owner conditions) — push registrations end with the session that made them, server-side, inside the
@@ -26,7 +27,7 @@ import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-
  *      deactivate every affected registration;
  *  (d) the same phone re-registering under a new installation id supersedes the old row (no double delivery).
  */
-const RUN = Boolean(process.env.DATABASE_URL);
+const RUN = integrationTestDatabaseReady();
 const describeIfDb = RUN ? describe : describe.skip;
 
 describeIfDb('C1b push device deactivation on logout / revocation / suspension (integration)', () => {

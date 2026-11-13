@@ -12,6 +12,7 @@ import { ctxOf, venueAndRole, windowFromNow } from './helpers/ai-proposal-fixtur
 import { parallelToolCallParts, scriptedModel, textParts, toolCallParts } from './helpers/ai-models';
 import { AiKit, aiOrganisation, ask, bearer, bootAiKit, jobFor, manager, newConversation, readSse, turnRow } from './helpers/ai-test-kit';
 import { sqlStateAsSchemaRole } from './helpers/schema-role';
+import { integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
 
 /**
  * Batch 3 S7 — Phase 5c questions and forms (`ask_question` / `request_form`) on the real AppModule + Worker step loop
@@ -28,7 +29,7 @@ import { sqlStateAsSchemaRole } from './helpers/schema-role';
  *   - database: no tenant context → 0 rows; another user → 0 rows; column grants and the transition trigger hold; the
  *     migration's down() refuses while requests exist.
  */
-const RUN = Boolean(process.env.DATABASE_URL);
+const RUN = integrationTestDatabaseReady();
 const describeIfDb = RUN ? describe : describe.skip;
 const pgCode = (e: unknown) => (e as { driverError?: { code?: string }; code?: string })?.driverError?.code ?? (e as { code?: string })?.code;
 
