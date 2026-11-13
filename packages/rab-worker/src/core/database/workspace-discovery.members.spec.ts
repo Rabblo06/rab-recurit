@@ -15,6 +15,7 @@ const ws = (n: number) => `00000000-0000-4000-8000-0000000001${String(n).padStar
 function harness(pages: Array<Array<{ workspace_id: string; organisation_id: string }>>, opts: { contextError?: (workspaceId: string) => unknown; pageError?: unknown } = {}) {
   const statements: string[] = [];
   const contexts: unknown[] = [];
+  const options: unknown[] = [];
   let pageIndex = 0;
   const pageParams: unknown[][] = [];
   const catalogue = {
@@ -30,15 +31,16 @@ function harness(pages: Array<Array<{ workspace_id: string; organisation_id: str
   };
   const runtime = { transaction: async <T>(fn: (m: unknown) => Promise<T>) => fn(catalogue) };
   const tenant = {
-    runInTenantContext: async <T>(ctx: { workspaceId: string }, fn: (m: unknown) => Promise<T>) => {
+    runInTenantContext: async <T>(ctx: { workspaceId: string }, fn: (m: unknown) => Promise<T>, txOptions?: unknown) => {
       contexts.push(ctx);
+      options.push(txOptions);
       const err = opts.contextError?.(ctx.workspaceId);
       if (err) throw err;
       const manager = { workspaceId: ctx.workspaceId, query: async (sql: string) => void statements.push(`${ctx.workspaceId.slice(-2)}: ${sql}`) };
       return fn(manager);
     },
   };
-  return { statements, contexts, pageParams, run: (members: WalkMember[]) => discoverMembersInWorkspaces(runtime as never, tenant as never, members) };
+  return { statements, contexts, options, pageParams, run: (members: WalkMember[]) => discoverMembersInWorkspaces(runtime as never, tenant as never, members) };
 }
 
 const member = (key: string, behaviour: (workspaceId: string) => unknown[] | Error): WalkMember => ({
@@ -60,7 +62,6 @@ describe('discoverMembersInWorkspaces (D-Q4a shared walk)', () => {
     expect(result.members.get('a')).toEqual({ ok: true, rows: ['a@01', 'a@02'] });
     expect(result.members.get('b')).toEqual({ ok: true, rows: ['b@01', 'b@02'] });
     expect(h.statements.filter((s) => s.startsWith('01:'))).toEqual([
-      '01: SET TRANSACTION READ ONLY',
       '01: SAVEPOINT crewflow_combined_member',
       '01: a discovery',
       '01: RELEASE SAVEPOINT crewflow_combined_member',
@@ -68,6 +69,9 @@ describe('discoverMembersInWorkspaces (D-Q4a shared walk)', () => {
       '01: b discovery',
       '01: RELEASE SAVEPOINT crewflow_combined_member',
     ]);
+    // T-1 / ST-02: each workspace transaction is READ ONLY through the tenant-context option (folded into the binding
+    // SELECT, 25006 on any write: tenant-context-framing.integration.spec.ts), not a separate SET TRANSACTION READ ONLY.
+    expect(h.options).toEqual([{ readOnly: true }, { readOnly: true }]);
     // The same trusted, server-derived worker context discoverInWorkspaces binds (no user, no role).
     expect(h.contexts).toEqual([
       { organisationId: ORG_A, workspaceId: ws(1), userId: '', role: '', actorType: 'worker' },

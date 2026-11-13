@@ -58,6 +58,29 @@ test('forbidden names: every second database identity, role password, authority 
   assert.match(forbiddenReason('CREWFLOW_DB_MODE'), /no mode switch/);
 });
 
+// rab-ops removal (PR 2, plan §2.6): the separated operations container is gone, but every one of its variables stays
+// refused, by exact name and as a whole family, in a rendered service and in every env file.
+const RETIRED_OPS_NAMES = Object.freeze([
+  'CREWFLOW_OPS_RUN', 'PG_OPS_APP_DATABASE_URL', 'CREWFLOW_OPS_ACTOR_SOURCE', 'CREWFLOW_OPS_ACTOR_ID', 'CREWFLOW_OPS_CHANGE_REF',
+]);
+
+test('DENIAL: every retired ops variable (PG_OPS_* / CREWFLOW_OPS_*) is still refused, including unknown family members', () => {
+  for (const name of RETIRED_OPS_NAMES) assert.ok(forbiddenReason(name), `${name} must be refused`);
+  // The family pattern catches every name, not only the five known ones.
+  for (const name of [...RETIRED_OPS_NAMES.filter((n) => n.startsWith('CREWFLOW_OPS_')), 'CREWFLOW_OPS_ANYTHING_NEW', 'PG_OPS_SOMETHING']) {
+    assert.match(forbiddenReason(name), /retired separated-mode operations variable/, name);
+  }
+});
+
+test('DENIAL: an env file carrying any retired ops variable fails the env-file lint (database, runtime and compose)', () => {
+  for (const name of RETIRED_OPS_NAMES) {
+    const value = name.endsWith('_URL') ? URL_OK : 'one-off';
+    assertRefused(lintEnvText('database', `${DATABASE_OK}\n${name}=${value}`), new RegExp(`^${name}: `));
+    assertRefused(lintEnvText('runtime', `${name}=${value}`), new RegExp(`^${name}: `));
+    assertRefused(lintEnvText('compose', `${name}=${value}`), new RegExp(`^${name}: `));
+  }
+});
+
 // ------------------------------------------------------------------------------------------------ env-file lint
 
 test('the committed templates and compose text pass the static checks', () => {
