@@ -1,48 +1,38 @@
 /**
- * Database setup like Twenty (DB-SETUP-PLAN §2.1, §5.1, §5.3): the derive step.
+ * Database setup the Twenty Helm way (OWNER-DB-FINAL.md Part A): the apps' derive step.
  *
- * PR #125 option 2 (owner decision 2026-11-13): in a deployment the API and the Worker get CREWFLOW_DB_TARGET_FILE and
- * NEVER PG_DATABASE_URL. The one-shot db-setup service (the only holder of PG_DATABASE_URL: an admin URL, an existing
- * crewflow_owner URL, or the bundled db's) runs the bootstrap child, which publishes the credential-free target there; this
- * step builds the crewflow_owner URL from it plus HKDF(APP_SECRET). Exit 75 while the file is missing or empty (not ready
- * yet), 64 for a malformed one, and 64 when ANY PG_DATABASE_URL is also set. Without CREWFLOW_DB_TARGET_FILE (development,
- * the documented rollback command) it still reads PG_DATABASE_URL: an admin URL gives the derived crewflow_owner URL, a
- * crewflow_owner URL is written back unchanged.
- * PURE: it NEVER connects and never imports
- * `pg` (a spec fails if it does). It reads `PG_DATABASE_URL` + `APP_SECRET` and writes the crewflow_owner runtime URL to
- * file descriptor 4, the existing command-substitution pattern of api-prestart.sh (rab-api is read_only with no tmpfs,
- * so never a file, never argv, never stdout):
+ * In a deployment the API and the Worker get CREWFLOW_DB_TARGET_FILE and NEVER PG_DATABASE_URL. The one-shot db-setup
+ * service (the only holder of PG_DATABASE_URL) writes two files on its volume, which the apps mount read-only:
+ *   - the credential-free target (host, port, database, TLS parameters; db-target.ts), and
+ *   - the crewflow_owner password file beside it (owner-password-file.ts).
+ * This step builds the crewflow_owner URL from the two (Twenty: the server and the worker receive only the app user's URL,
+ * twentyhq/twenty@eedb0a73 `packages/twenty-docker/helm/twenty/templates/deployment-server.yaml:142-156`,
+ * `deployment-worker.yaml:76-90`). APP_SECRET plays no part.
+ *
+ * PURE: it NEVER connects and never imports `pg` (a spec fails if it does). It writes the runtime URL to file descriptor 4,
+ * the command-substitution pattern of api-prestart.sh / worker-start.sh (never a file, never argv, never stdout):
  *
  *   RUNTIME_URL="$(node packages/rab-server/dist/database/typeorm/scripts/owner-login/derive-runtime-url.js 4>&1 1>&2)"
  *
- * api-prestart.sh (after the bootstrap child) and worker-start.sh both run it, so both build byte-identical URLs.
- * Pass-through (§7.1): a crewflow_owner `PG_DATABASE_URL` is written back unchanged (byte for byte once surrounding
- * whitespace is trimmed, as every reader of the variable trims it), and APP_SECRET is not
- * read. Exit codes: 0 written, 64 refusal (fixed message on stderr), 70 unexpected. Output is fixed text only: never the
- * URL, a password, a host or a database name. No trailing newline on fd 4 (the value is exactly the URL).
+ * Exit codes: 0 written; 75 (EX_TEMPFAIL) the target or the password file is not there yet (db-setup has not finished; the
+ * scripts wait, bounded); 64 refusal (a malformed file, any PG_DATABASE_URL beside the target file, no target file and no
+ * crewflow_owner PG_DATABASE_URL); 70 unexpected. Output is fixed text only: never the URL, a password, a host or a
+ * database name. No trailing newline on fd 4 (the value is exactly the URL).
+ *
+ * Without CREWFLOW_DB_TARGET_FILE (development only): a crewflow_owner PG_DATABASE_URL is written back unchanged; any other
+ * login is refused (there is nothing to build a crewflow_owner password from).
  */
 import { writeSync } from 'node:fs';
 
 import { readPrimaryDatabaseUrl } from '../../../postgres/pg-config';
-import {
-  DB_TARGET_FILE_VAR,
-  DbTargetError,
-  runtimeUrlFromDbTarget,
-} from '../../../owner-login/db-target';
-import {
-  dbTargetFilePath,
-  readDbTargetFile,
-} from '../../../owner-login/db-target-file';
-import {
-  deriveOwnerPassword,
-  OwnerCredentialError,
-  type OwnerLoginPlan,
-  planOwnerLogin,
-} from '../../../owner-login/owner-credential';
+import { DB_TARGET_FILE_VAR, DbTargetError, runtimeUrlFromDbTarget } from '../../../owner-login/db-target';
+import { dbTargetFilePath, readDbTargetFile } from '../../../owner-login/db-target-file';
+import { isOwnerLoginUrl, OwnerCredentialError } from '../../../owner-login/owner-credential';
+import { OwnerPasswordFileError, ownerPasswordFilePath, readOwnerPasswordFile } from '../../../owner-login/owner-password-file';
 
 /** The descriptor the runtime URL is written to. */
 export const RUNTIME_URL_FD = 4;
-/** 75 (EX_TEMPFAIL): the db-setup step has not published the database target yet; the restart policy retries. */
+/** 75 (EX_TEMPFAIL): the db-setup step has not published the target / password file yet; the scripts wait. */
 export const DERIVE_EXIT = {
   ok: 0,
   refused: 64,
@@ -52,11 +42,12 @@ export const DERIVE_EXIT = {
 const PREFIX = 'derive-runtime-url:';
 
 export const DERIVE_MESSAGES = {
-  passThrough: `${PREFIX} PG_DATABASE_URL is the crewflow_owner login; the runtime URL is PG_DATABASE_URL unchanged.`,
-  bootstrap: `${PREFIX} the crewflow_owner runtime URL was built from the admin PG_DATABASE_URL and APP_SECRET.`,
-  fromTarget: `${PREFIX} the crewflow_owner runtime URL was built from the database target and APP_SECRET.`,
-  targetNotReady: `${PREFIX} db target not ready: the db-setup step has not published ${DB_TARGET_FILE_VAR} yet (the restart policy retries).`,
+  passThrough: `${PREFIX} PG_DATABASE_URL is the crewflow_owner login (development, no target file); the runtime URL is PG_DATABASE_URL unchanged.`,
+  fromTarget: `${PREFIX} the crewflow_owner runtime URL was built from the database target and the crewflow_owner password file.`,
+  targetNotReady: `${PREFIX} db target not ready: the db-setup step has not published ${DB_TARGET_FILE_VAR} yet (the start script waits).`,
+  passwordNotReady: `${PREFIX} the crewflow_owner password file is not there yet: the db-setup step has not finished (the start script waits).`,
   targetWithAdminUrl: `${PREFIX} ${DB_TARGET_FILE_VAR} and PG_DATABASE_URL are both set. The API and the Worker never hold PG_DATABASE_URL (any login): only the db-setup service does. Remove PG_DATABASE_URL from this service. Refusing.`,
+  noTargetNoOwnerUrl: `${PREFIX} no ${DB_TARGET_FILE_VAR} and no crewflow_owner PG_DATABASE_URL: there is no crewflow_owner credential to use. Refusing.`,
   fdNotOpen: `${PREFIX} file descriptor ${RUNTIME_URL_FD} is not open. Run it as: RUNTIME_URL="$(node derive-runtime-url.js ${RUNTIME_URL_FD}>&1 1>&2)".`,
   unexpected: `${PREFIX} FAILED: unexpected error (details not shown).`,
 } as const;
@@ -77,30 +68,22 @@ const processIo: DeriveIo = {
   error: (line) => process.stderr.write(`${line}\n`),
 };
 
-/**
- * The whole step, testable: returns the exit code. Reads ONLY PG_DATABASE_URL (through readPrimaryDatabaseUrl, so the value
- * is trimmed), CREWFLOW_DB_TARGET_FILE and APP_SECRET from `env`.
- */
-export function runDeriveRuntimeUrl(
-  env: Record<string, string | undefined>,
-  io: DeriveIo = processIo,
-): number {
-  // Option A (PR #125): the apps get CREWFLOW_DB_TARGET_FILE (written by the db-setup service) instead of the admin URL.
+/** The whole step, testable: returns the exit code. Reads ONLY PG_DATABASE_URL and CREWFLOW_DB_TARGET_FILE from `env`. */
+export function runDeriveRuntimeUrl(env: Record<string, string | undefined>, io: DeriveIo = processIo): number {
   const primary = readPrimaryDatabaseUrl(env);
-  const databaseUrl =
-    primary?.name === 'PG_DATABASE_URL' ? primary.value : undefined;
+  const databaseUrl = primary?.name === 'PG_DATABASE_URL' ? primary.value : undefined;
   if (env[DB_TARGET_FILE_VAR]?.trim()) {
-    // PR #125 option 2: the apps NEVER hold PG_DATABASE_URL (any login, crewflow_owner included): only db-setup does.
-    if (databaseUrl === undefined) return deriveFromTarget(env, io);
-    io.error(DERIVE_MESSAGES.targetWithAdminUrl);
-    return DERIVE_EXIT.refused;
+    // The apps NEVER hold PG_DATABASE_URL (any login, crewflow_owner included): only db-setup does.
+    if (databaseUrl !== undefined) {
+      io.error(DERIVE_MESSAGES.targetWithAdminUrl);
+      return DERIVE_EXIT.refused;
+    }
+    return deriveFromFiles(env, io);
   }
-
-  let plan: OwnerLoginPlan;
+  // Development only: a crewflow_owner URL passes through unchanged.
+  let owner = false;
   try {
-    // The shared reader (pure: pg-config imports no driver). Only PG_DATABASE_URL counts here: the legacy DATABASE_URL
-    // fallback it offers outside production is not a deployment variable, and the shell exports PG_DATABASE_URL only.
-    plan = planOwnerLogin({ databaseUrl, appSecret: env.APP_SECRET });
+    owner = databaseUrl !== undefined && isOwnerLoginUrl(databaseUrl);
   } catch (error) {
     if (error instanceof OwnerCredentialError) {
       io.error(`${PREFIX} ${error.message}`);
@@ -109,13 +92,13 @@ export function runDeriveRuntimeUrl(
     io.error(DERIVE_MESSAGES.unexpected);
     return DERIVE_EXIT.unexpected;
   }
-  const failed = writeUrl(plan.runtimeUrl, io);
+  if (!owner || databaseUrl === undefined) {
+    io.error(DERIVE_MESSAGES.noTargetNoOwnerUrl);
+    return DERIVE_EXIT.refused;
+  }
+  const failed = writeUrl(databaseUrl, io);
   if (failed !== null) return failed;
-  io.log(
-    plan.mode === 'pass-through'
-      ? DERIVE_MESSAGES.passThrough
-      : DERIVE_MESSAGES.bootstrap,
-  );
+  io.log(DERIVE_MESSAGES.passThrough);
   return DERIVE_EXIT.ok;
 }
 
@@ -125,35 +108,33 @@ function writeUrl(url: string, io: DeriveIo): number | null {
     return null;
   } catch (error) {
     const code = (error as NodeJS.ErrnoException | null)?.code;
-    io.error(
-      code === 'EBADF' ? DERIVE_MESSAGES.fdNotOpen : DERIVE_MESSAGES.unexpected,
-    );
+    io.error(code === 'EBADF' ? DERIVE_MESSAGES.fdNotOpen : DERIVE_MESSAGES.unexpected);
     return code === 'EBADF' ? DERIVE_EXIT.refused : DERIVE_EXIT.unexpected;
   }
 }
 
 /**
- * Option A: the runtime URL from the credential-free target file plus HKDF(APP_SECRET). Missing or empty file: 75 (not
- * ready). Malformed file, a refused connection shape, a bad APP_SECRET: 64. The URL is built by runtimeUrlFromDbTarget,
- * i.e. buildRuntimeDatabaseUrl's policy, rebuild and round-trip check.
+ * The runtime URL from the credential-free target file plus the crewflow_owner password file (both written by db-setup).
+ * Either missing or empty: 75 (not ready). Malformed: 64. The URL is built by runtimeUrlFromDbTarget, i.e.
+ * buildRuntimeDatabaseUrl's policy, rebuild and round-trip check.
  */
-function deriveFromTarget(
-  env: Record<string, string | undefined>,
-  io: DeriveIo,
-): number {
+function deriveFromFiles(env: Record<string, string | undefined>, io: DeriveIo): number {
   let url: string;
   try {
-    const read = readDbTargetFile(dbTargetFilePath(env));
-    if (read.state === 'missing') {
+    const targetPath = dbTargetFilePath(env);
+    const target = readDbTargetFile(targetPath);
+    if (target.state === 'missing') {
       io.error(DERIVE_MESSAGES.targetNotReady);
       return DERIVE_EXIT.notReady;
     }
-    url = runtimeUrlFromDbTarget(read.target, deriveOwnerPassword(env.APP_SECRET));
+    const password = readOwnerPasswordFile(ownerPasswordFilePath(targetPath));
+    if (password.state === 'missing') {
+      io.error(DERIVE_MESSAGES.passwordNotReady);
+      return DERIVE_EXIT.notReady;
+    }
+    url = runtimeUrlFromDbTarget(target.target, password.password);
   } catch (error) {
-    if (
-      error instanceof DbTargetError ||
-      error instanceof OwnerCredentialError
-    ) {
+    if (error instanceof DbTargetError || error instanceof OwnerCredentialError || error instanceof OwnerPasswordFileError) {
       io.error(`${PREFIX} ${error.message}`);
       return DERIVE_EXIT.refused;
     }

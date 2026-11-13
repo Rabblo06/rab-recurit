@@ -9,8 +9,9 @@
 #   1. refuses arguments, PG_DATABASE_PASSWORD and a non-empty PG_DATABASE_URL (any login; exit 64);
 #   2. builds the crewflow_owner runtime URL with the same pure derive step as api-prestart.sh (never connects; the URL
 #      comes back on fd 4 through a command substitution: never a file, never argv, never the log), from db-setup's
-#      credential-free target file (CREWFLOW_DB_TARGET_FILE=/run/crewflow/db-target/target.json, mounted read-only) and
-#      HKDF(APP_SECRET), waiting for the file (derive exit 75) 2 s apart, at most 120 s;
+#      credential-free target file (CREWFLOW_DB_TARGET_FILE=/run/crewflow/db-target/target.json) and the crewflow_owner
+#      password file beside it (both mounted read-only; Twenty: the worker receives only the app user's URL,
+#      helm/twenty/templates/deployment-worker.yaml:76-90), waiting for both (derive exit 75) 2 s apart, at most 120 s;
 #   3. sets PG_SSL_CA_CERT_PATH to the bundled db's CA when the runtime URL's host is exactly `db` and it is unset (the block
 #      below is identical in api-prestart.sh and db-setup.sh; run-prestart-shell-tests.cjs compares them);
 #   4. exports the runtime URL as PG_DATABASE_URL and execs tini. The Worker itself retries a 28P01 first login (its
@@ -56,7 +57,7 @@ if [ -n "${CREWFLOW_TEST_DB_SETUP_WAIT_SECONDS:-}" ]; then
 fi
 unset CREWFLOW_TEST_DB_SETUP_WAIT_SECONDS
 if [ -n "${PG_DATABASE_URL:-}" ]; then
-  refuse 'PG_DATABASE_URL must never be set on the worker service: it belongs only to the one-shot db-setup service (the admin URL, an existing crewflow_owner URL, or the bundled db). The Worker builds the crewflow_owner URL from the target file db-setup writes and APP_SECRET. Value not shown.'
+  refuse 'PG_DATABASE_URL must never be set on the worker service: it belongs only to the one-shot db-setup service (the admin URL, an existing crewflow_owner URL, or the bundled db). The Worker builds the crewflow_owner URL from the target and password files db-setup writes. Value not shown.'
 fi
 unset PG_DATABASE_URL
 export CREWFLOW_DB_TARGET_FILE="$DB_TARGET_FILE"

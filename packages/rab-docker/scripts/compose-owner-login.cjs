@@ -167,6 +167,9 @@ const FORBIDDEN_PATTERNS = Object.freeze([
   // Security review L1: the start scripts' and the bootstrap child's test seams (NODE_ENV=test only) never belong in a
   // compose or env file (CREWFLOW_TEST_DB_SETUP_WAIT_SECONDS, CREWFLOW_TEST_OWNER_SETUP_ABORT, ...).
   [/^CREWFLOW_TEST_/, 'a test seam (NODE_ENV=test only; never in a compose or env file)'],
+  // Twenty Helm model (OWNER-DB-FINAL.md Part A): the crewflow_owner password lives ONLY in db-setup's password file
+  // (/run/crewflow/db-target/owner-password); never a variable in any compose or env file.
+  [/OWNER_PASSWORD|DB_PASSWORD_FILE|OWNER_PW/, 'the crewflow_owner password (it lives only in db-setup\'s password file on its volume, never in a variable)'],
   // Security re-review N4: the migration-harness seams (CREWFLOW_MIGRATION_TEST_*) likewise.
   [/^CREWFLOW_MIGRATION_TEST_/, 'a migration test seam (test harnesses only; never in a compose or env file)'],
   [/^(CREWFLOW_OPS_|PG_OPS_)/, 'a retired separated-mode operations variable (rab-ops was removed; never valid)'],
@@ -407,6 +410,12 @@ function hardeningProblems(name, s, p, { longRunning }) {
       p(`${name}: unexpected named volume at ${v.target}`);
     }
     if (v.type === 'volume' && dbCaMount && v.read_only !== true) p(`${name}: the bundled db's CA volume must be mounted read-only`);
+    // Twenty Helm model: db-setup's volume holds the crewflow_owner password file. Nothing but that named volume may be
+    // mounted at (or under) its path, and only on db-setup (read-write) and rab-api / rab-worker (read-only).
+    const mountTarget = String(v.target ?? '');
+    if ((mountTarget === DB_TARGET_DIR || mountTarget.startsWith(`${DB_TARGET_DIR}/`)) && !(v.type === 'volume' && targetMount)) {
+      p(`${name}: mounts something at ${mountTarget} (db-setup's volume holds the crewflow_owner password file: only the ${DB_TARGET_VOLUME} named volume, on db-setup read-write and rab-api / rab-worker read-only)`);
+    }
     // Option A: only db-setup writes the target file; rab-api and rab-worker read it.
     if (v.type === 'volume' && targetMount && name !== DB_SETUP_SERVICE && v.read_only !== true) p(`${name}: db-setup's target volume must be mounted read-only`);
     if (v.type === 'volume' && targetMount && name === DB_SETUP_SERVICE && v.read_only === true) p(`${name}: the target volume must be writable here (db-setup writes the target file)`);
@@ -504,7 +513,10 @@ function dbSetupProblems(services, p, wantUrl) {
   if (env[URL_KEY] !== wantUrl) p(`${DB_SETUP_SERVICE}: ${URL_KEY} is not the committed \${PG_DATABASE_URL:-<bundled db>} (compose.env's value, or the bundled db's admin URL)`);
   if (env.NODE_ENV !== 'production') p(`${DB_SETUP_SERVICE}: NODE_ENV is not production`);
   if (env.RAB_RUNTIME_ENV !== 'production') p(`${DB_SETUP_SERVICE}: RAB_RUNTIME_ENV is not production`);
-  if (!String(env.APP_SECRET ?? '').includes(SENTINEL_APP_SECRET)) p(`${DB_SETUP_SERVICE}: does not read APP_SECRET (runtime.env; the derived password)`);
+  // Twenty Helm model: APP_SECRET is never part of a database credential; db-setup does not receive it (db-setup.sh refuses it).
+  if ('APP_SECRET' in env) p(`${DB_SETUP_SERVICE}: has APP_SECRET (never part of a database credential; db-setup must not receive it)`);
+  const setupFiles = (s.env_file ?? []).map((e) => String(typeof e === 'string' ? e : e.path ?? ''));
+  if (setupFiles.some((f) => /(^|\/)runtime\.env$/.test(f))) p(`${DB_SETUP_SERVICE}: reads runtime.env (it needs only database.env: no runtime secret reaches db-setup)`);
   if (api.depends_on?.[DB_SETUP_SERVICE]?.condition !== 'service_completed_successfully') p(`rab-api: does not wait for ${DB_SETUP_SERVICE} (depends_on: condition: service_completed_successfully)`);
   for (const [name, svc] of Object.entries(services)) {
     if (name !== 'rab-api' && name !== 'rab-worker' && name !== DB_SETUP_SERVICE && (svc.volumes ?? []).some((v) => v.source === DB_TARGET_VOLUME)) p(`${name}: mounts db-setup's target volume`);
@@ -588,8 +600,8 @@ function checkModel(model, combo) {
     const values = Object.values(env).map(String);
     if (values.some((v) => v.includes(SENTINEL_LEGACY_PW))) p(`${name}: received a value from a separated-mode env file (.env.migrate / .env.ops / per-service staging files)`);
     if (name !== DB_SETUP_SERVICE && URL_KEY in env && !(appServices.includes(name) && env[URL_KEY] === '')) p(`${name}: has ${URL_KEY} (option 2: only db-setup; rab-api / rab-worker pin it empty)`);
-    if (![...appServices, DB_SETUP_SERVICE].includes(name) && values.some((v) => v.includes(SENTINEL_APP_SECRET) || v.includes(SENTINEL_REDIS_PW))) {
-      p(`${name}: received a runtime secret (only rab-api, rab-worker and db-setup read runtime.env)`);
+    if (!appServices.includes(name) && values.some((v) => v.includes(SENTINEL_APP_SECRET) || v.includes(SENTINEL_REDIS_PW))) {
+      p(`${name}: received a runtime secret (only rab-api and rab-worker read runtime.env; db-setup never)`);
     }
     // The crewflow_owner password: only db-setup, only in its PG_DATABASE_URL (pass-through), never another key.
     for (const [key, value] of Object.entries(env)) {

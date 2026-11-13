@@ -141,6 +141,15 @@ test('DENIAL L1: a CREWFLOW_TEST_* seam is refused in every env file and as a co
   }
 });
 
+test('DENIAL Twenty Helm model: a variable carrying the crewflow_owner password is refused in every env file', () => {
+  for (const name of ['CREWFLOW_OWNER_PASSWORD', 'CREWFLOW_DB_OWNER_PASSWORD', 'CREWFLOW_DB_PASSWORD_FILE', 'PG_OWNER_PW']) {
+    assert.match(forbiddenReason(name), /crewflow_owner password/);
+    assertRefused(lintEnvText('runtime', `CREWFLOW_AUDIT_SINK=stdout\n${name}=1`), new RegExp(`${name}: `));
+    assertRefused(lintEnvText('database', `${DATABASE_OK}\n${name}=1`), new RegExp(`${name}: `));
+    assertRefused(lintEnvText('compose', `${COMPOSE_OK}\n${name}=1`), new RegExp(`${name}: `));
+  }
+});
+
 test('DENIAL N4: a CREWFLOW_MIGRATION_TEST_* seam is refused in every env file and as a container variable', () => {
   for (const name of ['CREWFLOW_MIGRATION_TEST_FAIL_AT', 'CREWFLOW_MIGRATION_TEST_ANYTHING']) {
     assert.match(forbiddenReason(name), /a migration test seam/);

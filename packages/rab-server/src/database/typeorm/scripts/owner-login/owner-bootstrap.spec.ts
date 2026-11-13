@@ -6,7 +6,8 @@
 import * as fs from 'fs';
 import * as path from 'path';
 
-import { deriveOwnerPassword, OWNER_CREDENTIAL_MESSAGES } from '../../../owner-login/owner-credential';
+import { OWNER_CREDENTIAL_MESSAGES } from '../../../owner-login/owner-credential';
+import { type OwnerPasswordRead } from '../../../owner-login/owner-password-file';
 import {
   bootstrapDriverConfigs,
   bootstrapOwnerWithIo,
@@ -40,11 +41,10 @@ import {
   OWNER_BOOTSTRAP_COMMIT,
   OWNER_BOOTSTRAP_Q0_SESSION,
   OWNER_SELF_O1_SESSION,
-  OWNER_SELF_O4C_DO,
   OWNER_SELF_STATEMENTS,
   BOOTSTRAP_SESSION_STARTUP_OPTIONS,
 } from './owner-bootstrap-sql';
-import { planDbSetup, scramSha256Verifier } from '../../../owner-login/owner-credential';
+import { buildRuntimeDatabaseUrl, scramSha256Verifier } from '../../../owner-login/owner-credential';
 import { resolvePgEnvironment } from '../../../postgres';
 
 const SECRET = 'a'.repeat(16) + 'B'.repeat(16) + 'unit-test-only-secret';
@@ -135,30 +135,37 @@ describe('owner bootstrap: §3.3 decisions', () => {
   });
 });
 
-describe('owner bootstrap: §3.4 probe and the write plan', () => {
-  it('creates a missing role with its password and grant', () => {
-    expect(planWrite(base, null)).toEqual({ write: true, create: true, needPassword: true, needGrant: true });
+describe('owner bootstrap: §3.4 probe and the write plan (Twenty Helm model)', () => {
+  it('creates a missing role with this run\'s password and the grant (stored or new password alike)', () => {
+    expect(planWrite(base, null, 'file')).toEqual({ write: true, create: true, needPassword: true, needGrant: true });
+    expect(planWrite(base, null, 'new')).toEqual({ write: true, create: true, needPassword: true, needGrant: true });
   });
-  it('changes nothing when the probe succeeds and the grant exists (idempotent restart)', () => {
-    expect(planWrite(existing, { ok: true })).toEqual({ write: false, create: false, needPassword: false, needGrant: false });
+  it('stored password logs in + grant present: changes nothing (Twenty: an existing user is skipped)', () => {
+    expect(planWrite(existing, { ok: true }, 'file')).toEqual({ write: false, create: false, needPassword: false, needGrant: false });
   });
-  it('adds only the grant when the password is right', () => {
-    expect(planWrite({ ...existing, oHasDbGrant: false }, { ok: true })).toEqual({ write: true, create: false, needPassword: false, needGrant: true });
+  it('adds only the grant when the stored password is right', () => {
+    expect(planWrite({ ...existing, oHasDbGrant: false }, { ok: true }, 'file')).toEqual({ write: true, create: false, needPassword: false, needGrant: true });
   });
-  it('resets the password on 28P01, and on 42501 while CONNECT is not granted yet', () => {
-    expect(planWrite(existing, { ok: false, code: '28P01' })).toMatchObject({ write: true, needPassword: true, needGrant: false });
-    expect(planWrite({ ...existing, oHasDbGrant: false }, { ok: false, code: '42501' })).toMatchObject({ needPassword: true, needGrant: true });
+  it('A3.1: the stored password no longer logs in (28P01) -> REFUSED with the fix message, never an automatic reset', () => {
+    expect(refusalOf(() => planWrite(existing, { ok: false, code: '28P01' }, 'file'))).toBe(OWNER_BOOTSTRAP_MESSAGES.passwordFileStale);
+    expect(OWNER_BOOTSTRAP_MESSAGES.passwordFileStale).toContain('Delete the password file and start again with the admin address');
   });
-  it('refuses a reset without ADMIN OPTION, or without CREATEROLE', () => {
-    expect(refusalOf(() => planWrite({ ...existing, adminHasAdminOption: false }, { ok: false, code: '28P01' }))).toBe(OWNER_BOOTSTRAP_MESSAGES.adminNoAdminOption);
-    expect(refusalOf(() => planWrite({ ...existing, adminCreateRole: false }, { ok: false, code: '28P01' }))).toBe(OWNER_BOOTSTRAP_MESSAGES.adminCannotResetPassword);
-    // Without a reset, no ADMIN OPTION is needed (a role created by another login, password already right).
-    expect(planWrite({ ...existing, adminHasAdminOption: false }, { ok: true }).write).toBe(false);
+  it('42501 while CONNECT is not granted yet: only the grant (the post-commit probe decides)', () => {
+    expect(planWrite({ ...existing, oHasDbGrant: false }, { ok: false, code: '42501' }, 'file')).toEqual({ write: true, create: false, needPassword: false, needGrant: true });
+  });
+  it('A4 (Crewflow addition): the file was lost and the role exists -> reset to the new password (no probe needed)', () => {
+    expect(planWrite(existing, null, 'new')).toEqual({ write: true, create: false, needPassword: true, needGrant: false });
+  });
+  it('A4 refuses a reset without ADMIN OPTION, or without CREATEROLE', () => {
+    expect(refusalOf(() => planWrite({ ...existing, adminHasAdminOption: false }, null, 'new'))).toBe(OWNER_BOOTSTRAP_MESSAGES.adminNoAdminOption);
+    expect(refusalOf(() => planWrite({ ...existing, adminCreateRole: false }, null, 'new'))).toBe(OWNER_BOOTSTRAP_MESSAGES.adminCannotResetPassword);
+    // Without a reset, no ADMIN OPTION is needed (a role created by another login, stored password right).
+    expect(planWrite({ ...existing, adminHasAdminOption: false }, { ok: true }, 'file').write).toBe(false);
   });
   it('refuses any other probe failure with the SQLSTATE class only', () => {
-    expect(refusalOf(() => planWrite(existing, { ok: false, code: '28000' }))).toBe(OWNER_BOOTSTRAP_MESSAGES.probeFailed('28'));
-    expect(refusalOf(() => planWrite(existing, { ok: false, code: '42501' }))).toBe(OWNER_BOOTSTRAP_MESSAGES.probeFailed('42'));
-    expect(refusalOf(() => planWrite(existing, { ok: false, code: 'ECONNRESET' }))).toBe(OWNER_BOOTSTRAP_MESSAGES.probeFailed('??'));
+    expect(refusalOf(() => planWrite(existing, { ok: false, code: '28000' }, 'file'))).toBe(OWNER_BOOTSTRAP_MESSAGES.probeFailed('28'));
+    expect(refusalOf(() => planWrite(existing, { ok: false, code: '42501' }, 'file'))).toBe(OWNER_BOOTSTRAP_MESSAGES.probeFailed('42'));
+    expect(refusalOf(() => planWrite(existing, { ok: false, code: 'ECONNRESET' }, 'file'))).toBe(OWNER_BOOTSTRAP_MESSAGES.probeFailed('??'));
   });
 });
 
@@ -262,19 +269,52 @@ describe('owner bootstrap: the admin session', () => {
     expect(sent.map((s) => s.text)).toContain(OWNER_BOOTSTRAP_Q4C_DO);
   });
 
-  it('re-plans under the lock: a concurrent first start that created the role first makes this one report the password reset, not "created"', async () => {
-    // Pre-lock read: no crewflow_owner (plan: create). Post-lock read: another start created it meanwhile, with a password
-    // this start's probe rejects (28P01), so the post-lock plan is "set the password". Post-commit read: exact.
-    const { io, sent, lines } = fakeIo([base, existing, existing], [{ ok: false, code: '28P01' }, { ok: true }]);
-    const result = await bootstrapOwnerWithIo(io);
-    expect(result).toEqual({ outcome: 'updated', exitCode: 0, created: false, passwordSet: true, grantAdded: false, code: null });
+  it('re-plans under the lock: with the stored password, a role another start created meanwhile that it cannot log in to is the stale-file refusal (rolled back)', async () => {
+    const { io, sent } = fakeIo([base, existing], [{ ok: false, code: '28P01' }]);
+    await expect(bootstrapOwnerWithIo(io)).rejects.toThrow(OWNER_BOOTSTRAP_MESSAGES.passwordFileStale);
     const texts = sent.map((s) => s.text);
-    // The second facts read happens AFTER the advisory lock, inside the transaction.
     const lockAt = texts.indexOf(OWNER_BOOTSTRAP_Q4A_LOCK);
     expect(lockAt).toBeGreaterThan(texts.indexOf(OWNER_BOOTSTRAP_BEGIN));
     expect(texts.indexOf(OWNER_BOOTSTRAP_Q2_FACTS, lockAt)).toBeGreaterThan(lockAt);
-    expect(sent.find((s) => s.text === OWNER_BOOTSTRAP_Q4B_SET_INPUTS)?.values?.[1]).toBe('true');
-    expect(lines).toEqual([]); // no "created" claim, no D2 note twice
+    expect(texts).not.toContain(OWNER_BOOTSTRAP_Q4C_DO);
+    expect(texts[texts.length - 1]).toBe(OWNER_BOOTSTRAP_ROLLBACK);
+  });
+
+  it('a NEW password (file lost) is stored BEFORE the transaction, once; a role found under the lock is reset to it (A4), "updated"', async () => {
+    const order: string[] = [];
+    const { io, sent } = fakeIo([base, existing, existing], [{ ok: true }]);
+    io.passwordSource = 'new';
+    io.persistPassword = () => void order.push(`persist@${sent.length}`);
+    const result = await bootstrapOwnerWithIo(io);
+    expect(result).toEqual({ outcome: 'updated', exitCode: 0, created: false, passwordSet: true, grantAdded: false, code: null });
+    expect(order).toHaveLength(1);
+    const persistAt = Number(order[0]!.split('@')[1]);
+    expect(persistAt).toBeLessThanOrEqual(sent.findIndex((q) => q.text === OWNER_BOOTSTRAP_BEGIN));
+    expect(sent.find((q) => q.text === OWNER_BOOTSTRAP_Q4B_SET_INPUTS)?.values?.[1]).toBe('true');
+  });
+
+  it('a NEW password that cannot be stored (another run stored one first, EEXIST) stops the run before any database write', async () => {
+    const { io, sent } = fakeIo([base], [{ ok: true }]);
+    io.passwordSource = 'new';
+    io.persistPassword = () => {
+      throw Object.assign(new Error('exists'), { code: 'EEXIST' });
+    };
+    await expect(bootstrapOwnerWithIo(io)).rejects.toThrow(OWNER_BOOTSTRAP_MESSAGES.passwordFileRace);
+    expect(sent.map((q) => q.text)).not.toContain(OWNER_BOOTSTRAP_BEGIN);
+  });
+
+  it('a refused run never stores a NEW password (refusals first)', async () => {
+    const stored: string[] = [];
+    const { io } = fakeIo([{ ...base, adminCreateRole: false, adminSuper: false }], [{ ok: true }]);
+    io.passwordSource = 'new';
+    io.persistPassword = () => void stored.push('x');
+    await expect(bootstrapOwnerWithIo(io)).rejects.toThrow(OWNER_BOOTSTRAP_MESSAGES.adminCannotCreateRoles);
+    expect(stored).toEqual([]);
+  });
+
+  it('grant only, then the post-commit probe is 28P01: the stale-file refusal (64), not a silent success', async () => {
+    const { io } = fakeIo([{ ...existing, oHasDbGrant: false }, { ...existing, oHasDbGrant: false }], [{ ok: false, code: '42501' }, { ok: false, code: '42501' }, { ok: false, code: '28P01' }]);
+    await expect(bootstrapOwnerWithIo(io)).rejects.toThrow(OWNER_BOOTSTRAP_MESSAGES.passwordFileStale);
   });
 
   it('re-plans under the lock: when the other start already did everything, this one writes nothing and reports "unchanged"', async () => {
@@ -352,52 +392,70 @@ describe('owner bootstrap: the admin session', () => {
   });
 });
 
+const missingFile = (): OwnerPasswordRead => ({ state: 'missing' });
 describe('owner bootstrap: the whole step without a database', () => {
-  const run = async (env: Record<string, string | undefined>) => {
+  const run = async (env: Record<string, string | undefined>, written: string[] = []) => {
     const lines: string[] = [];
-    const result = await runOwnerBootstrap(env, { log: (l) => lines.push(l), retryWindowMs: 0 });
+    const result = await runOwnerBootstrap(env, {
+      log: (l) => lines.push(l),
+      retryWindowMs: 0,
+      readPasswordFile: missingFile,
+      writePasswordFile: (pw) => void written.push(pw),
+    });
     return { result, text: [...lines, resultLine(result)].join('\n') };
   };
   const assertClean = (text: string) => {
-    for (const forbidden of [ADMIN_PW, 'db.internal.example', 'crewflow_unit', 'dbadmin', SECRET, deriveOwnerPassword(SECRET), 'SCRAM-SHA-256$']) {
+    for (const forbidden of [ADMIN_PW, 'db.internal.example', 'crewflow_unit', 'dbadmin', SECRET, 'SCRAM-SHA-256$']) {
       expect(text).not.toContain(forbidden);
     }
     expect(text).not.toMatch(/postgres(ql)?:\/\/[^\s)]*@/i); // a URL with userinfo (the fixed text "a postgres:// URL" is fine)
   };
 
-  it('option 2: a crewflow_owner URL needs APP_SECRET too (refused before connecting, no echo)', async () => {
-    for (const secret of [undefined, 'short']) {
-      const { result, text } = await run({ PG_DATABASE_URL: 'postgres://crewflow_owner:ownerpw0123456789@127.0.0.1:1/crewflow_unit', APP_SECRET: secret });
-      expect(result).toMatchObject({ outcome: 'refused', exitCode: 64 });
-      expect(text).not.toContain('ownerpw0123456789');
+  it('APP_SECRET plays no part: the same refusal / failure with or without it (db-setup does not receive it)', async () => {
+    for (const env of [{}, { APP_SECRET: SECRET }, { APP_SECRET: 'short' }]) {
+      const { result, text } = await run({ PG_DATABASE_URL: 'postgres://dbadmin:adminpw0123456789@127.0.0.1:1/crewflow_unit', ...env });
+      expect(result).toMatchObject({ outcome: 'failed', exitCode: 70, code: 'ECONNREFUSED' });
       assertClean(text);
     }
   });
 
-  it('option 2: a crewflow_owner URL is no longer skipped: it connects (unreachable port -> exit 70, fixed text)', async () => {
-    const { result, text } = await run({ PG_DATABASE_URL: 'postgres://crewflow_owner:ownerpw0123456789@127.0.0.1:1/crewflow_unit', APP_SECRET: SECRET });
+  it('a crewflow_owner URL connects (unreachable port -> exit 70, fixed text); nothing is stored when it fails', async () => {
+    const written: string[] = [];
+    const { result, text } = await run({ PG_DATABASE_URL: 'postgres://crewflow_owner:ownerpw0123456789@127.0.0.1:1/crewflow_unit' }, written);
     expect(result).toMatchObject({ outcome: 'failed', exitCode: 70, code: 'ECONNREFUSED' });
     expect(text).toContain(OWNER_BOOTSTRAP_MESSAGES.passThrough);
     expect(text).not.toContain('ownerpw0123456789');
+    expect(written).toEqual([]);
     assertClean(text);
   });
 
-  it('option 2: a pooler-shaped crewflow_owner URL is refused (the setup needs one real session)', async () => {
-    const { result, text } = await run({ PG_DATABASE_URL: 'postgres://crewflow_owner:ownerpw0123456789@ep-abc-pooler.eu-west-2.aws.neon.tech/crewflow_unit', APP_SECRET: SECRET });
-    expect(result).toMatchObject({ outcome: 'refused', exitCode: 64 });
-    expect(text).toContain(OWNER_CREDENTIAL_MESSAGES.transactionPooler);
+  it('a pooler-shaped URL (either login) is refused before connecting', async () => {
+    for (const login of ['crewflow_owner', 'dbadmin']) {
+      const { result, text } = await run({ PG_DATABASE_URL: `postgres://${login}:ownerpw0123456789@ep-abc-pooler.eu-west-2.aws.neon.tech/crewflow_unit` });
+      expect(result).toMatchObject({ outcome: 'refused', exitCode: 64 });
+      expect(text).toContain(OWNER_CREDENTIAL_MESSAGES.transactionPooler);
+    }
   });
 
-  it('refuses a missing or short APP_SECRET before connecting', async () => {
-    for (const [secret, message] of [
-      [undefined, OWNER_CREDENTIAL_MESSAGES.appSecretMissing],
-      ['short', OWNER_CREDENTIAL_MESSAGES.appSecretShort],
-    ] as const) {
-      const { result, text } = await run({ PG_DATABASE_URL: ADMIN_URL, APP_SECRET: secret });
-      expect(result).toMatchObject({ outcome: 'refused', exitCode: 64 });
-      expect(text).toContain(message);
-      assertClean(text);
-    }
+  it('a refused or failed admin run never stores a new password (the file is written only before a real database write)', async () => {
+    const written: string[] = [];
+    await run({ PG_DATABASE_URL: 'postgres://dbadmin:adminpw0123456789@127.0.0.1:1/crewflow_unit' }, written);
+    await run({ PG_DATABASE_URL: `${ADMIN_URL}?sslrootcert=/etc/x.pem` }, written);
+    expect(written).toEqual([]);
+  });
+
+  it('without the password-file I/O the step fails closed (70)', async () => {
+    const result = await runOwnerBootstrap({ PG_DATABASE_URL: ADMIN_URL }, { retryWindowMs: 0 });
+    expect(result).toMatchObject({ outcome: 'failed', exitCode: 70 });
+  });
+
+  it('an unreadable / invalid password file is a refusal (64) before connecting', async () => {
+    const { OwnerPasswordFileError: E } = await import('../../../owner-login/owner-password-file');
+    const result = await runOwnerBootstrap(
+      { PG_DATABASE_URL: 'postgres://dbadmin:adminpw0123456789@127.0.0.1:1/crewflow_unit' },
+      { retryWindowMs: 0, readPasswordFile: () => { throw new E('bad'); }, writePasswordFile: () => undefined },
+    );
+    expect(result).toMatchObject({ outcome: 'refused', exitCode: 64 });
   });
 
   it('refuses a URL the policy refuses (sslrootcert, ?host=, pooler) without echoing it', async () => {
@@ -407,25 +465,25 @@ describe('owner bootstrap: the whole step without a database', () => {
       `postgres://dbadmin:${ADMIN_PW}@ep-abc-pooler.eu-west-2.aws.neon.tech/crewflow_unit`,
       'not a url with dbadmin and adminpw0123456789',
     ]) {
-      const { result, text } = await run({ PG_DATABASE_URL: url, APP_SECRET: SECRET });
+      const { result, text } = await run({ PG_DATABASE_URL: url });
       expect(result).toMatchObject({ outcome: 'refused', exitCode: 64 });
       assertClean(text);
     }
   });
 
   it('refuses when only the legacy DATABASE_URL is set (the step takes PG_DATABASE_URL only)', async () => {
-    const { result } = await run({ DATABASE_URL: ADMIN_URL, APP_SECRET: SECRET });
+    const { result } = await run({ DATABASE_URL: ADMIN_URL });
     expect(result).toMatchObject({ outcome: 'refused', exitCode: 64 });
   });
 
   it('production refuses a non-verify-full admin URL before connecting', async () => {
-    const { result, text } = await run({ PG_DATABASE_URL: `${ADMIN_URL}?sslmode=disable`, APP_SECRET: SECRET, NODE_ENV: 'production' });
+    const { result, text } = await run({ PG_DATABASE_URL: `${ADMIN_URL}?sslmode=disable`, NODE_ENV: 'production' });
     expect(result).toMatchObject({ outcome: 'refused', exitCode: 64 });
     assertClean(text);
   });
 
   it('an unreachable admin target is exit 70 with fixed text', async () => {
-    const { result, text } = await run({ PG_DATABASE_URL: 'postgres://dbadmin:adminpw0123456789@127.0.0.1:1/crewflow_unit', APP_SECRET: SECRET });
+    const { result, text } = await run({ PG_DATABASE_URL: 'postgres://dbadmin:adminpw0123456789@127.0.0.1:1/crewflow_unit' });
     expect(result).toMatchObject({ outcome: 'failed', exitCode: 70, code: 'ECONNREFUSED' });
     assertClean(text);
   });
@@ -483,29 +541,31 @@ describe('owner bootstrap: option A target hooks (publish only after success, wi
       calls,
       options: {
         retryWindowMs: 0,
+        readPasswordFile: missingFile,
+        writePasswordFile: () => void calls.push('write-password'),
         publishTarget: () => void calls.push('publish'),
         withdrawTarget: () => void calls.push('withdraw'),
       },
     };
   };
 
-  it('option 2: a crewflow_owner URL that fails withdraws the stale target and never publishes', async () => {
+  it('a crewflow_owner URL that fails withdraws the stale target, never publishes, never stores a password', async () => {
     const h = hooks();
-    const result = await runOwnerBootstrap({ PG_DATABASE_URL: 'postgres://crewflow_owner:x@127.0.0.1:1/crewflow_unit', APP_SECRET: SECRET }, h.options);
+    const result = await runOwnerBootstrap({ PG_DATABASE_URL: 'postgres://crewflow_owner:x@127.0.0.1:1/crewflow_unit' }, h.options);
     expect(result.exitCode).toBe(70);
     expect(h.calls).toEqual(['withdraw']);
   });
 
-  it('a refusal (short APP_SECRET) withdraws the stale target and never publishes', async () => {
+  it('a refusal (a policy-refused URL) withdraws the stale target and never publishes', async () => {
     const h = hooks();
-    const result = await runOwnerBootstrap({ PG_DATABASE_URL: ADMIN_URL, APP_SECRET: 'short' }, h.options);
+    const result = await runOwnerBootstrap({ PG_DATABASE_URL: `${ADMIN_URL}?sslrootcert=/x` }, h.options);
     expect(result.exitCode).toBe(64);
     expect(h.calls).toEqual(['withdraw']);
   });
 
   it('a failure (unreachable database) withdraws and never publishes', async () => {
     const h = hooks();
-    const result = await runOwnerBootstrap({ PG_DATABASE_URL: 'postgres://dbadmin:adminpw0123456789@127.0.0.1:1/crewflow_unit', APP_SECRET: SECRET }, h.options);
+    const result = await runOwnerBootstrap({ PG_DATABASE_URL: 'postgres://dbadmin:adminpw0123456789@127.0.0.1:1/crewflow_unit' }, h.options);
     expect(result.exitCode).toBe(70);
     expect(h.calls).toEqual(['withdraw']);
   });
@@ -513,9 +573,11 @@ describe('owner bootstrap: option A target hooks (publish only after success, wi
   it('a withdraw that fails is reported with a fixed line; the exit code is unchanged', async () => {
     const lines: string[] = [];
     const result = await runOwnerBootstrap(
-      { PG_DATABASE_URL: ADMIN_URL, APP_SECRET: 'short' },
+      { PG_DATABASE_URL: `${ADMIN_URL}?sslrootcert=/x` },
       {
         log: (l) => lines.push(l),
+        readPasswordFile: missingFile,
+        writePasswordFile: () => undefined,
         withdrawTarget: () => {
           throw Object.assign(new Error('/run/crewflow/db-target/target.json busy'), { code: 'EBUSY' });
         },
@@ -527,35 +589,23 @@ describe('owner bootstrap: option A target hooks (publish only after success, wi
   });
 });
 
-describe('owner bootstrap, option 2: PG_DATABASE_URL is crewflow_owner itself (steps a and b)', () => {
+describe('owner bootstrap: an existing crewflow_owner URL (read-only; Twenty: no setup step for an external database)', () => {
   const ownerFacts: OwnerFacts = { ...existing, adminSuper: false, adminCreateRole: true, adminHasAdminOption: false };
   const me = { session_login: 'crewflow_owner', current_login: 'crewflow_owner' };
-  const VERIFIER = 'SCRAM-SHA-256$4096:c2FsdA==$stored:server';
-
   type Who = { session_login: string; current_login: string };
-  function ownerIo(o: {
-    derivedErrors?: string[]; // one per openDerived() call; '' = connects
-    urlError?: string;
-    facts?: OwnerFacts[];
-    who?: Who;
-    probes?: Array<{ ok: true } | { ok: false; code: string }>;
-    failOn?: string;
-    failCode?: string;
-    onCommit?: OwnerUrlIo['onCommit'];
-  }) {
-    const sent: Array<{ via: 'derived' | 'url'; text: string; values?: unknown[] }> = [];
+
+  function ownerIo(o: { urlErrors?: string[]; facts?: OwnerFacts; who?: Who } = {}) {
+    const sent: string[] = [];
     const lines: string[] = [];
-    const facts = [...(o.facts ?? [ownerFacts])];
-    const derivedErrors = [...(o.derivedErrors ?? [''])];
-    const probes = [...(o.probes ?? [{ ok: false, code: '28P01' } as const])];
+    const urlErrors = [...(o.urlErrors ?? [])];
     let clock = 0;
-    const session = (via: 'derived' | 'url'): SqlSession => ({
-      async query(text, values) {
-        sent.push({ via, text, values });
-        if (o.failOn && text === o.failOn) throw Object.assign(new Error('driver text with verifier SCRAM-SHA-256$4096:x'), { code: o.failCode });
+    const session: SqlSession = {
+      async query(text) {
+        sent.push(text);
+        if (text === OWNER_BOOTSTRAP_Q0_SESSION) return { rows: [] };
         if (text === OWNER_SELF_O1_SESSION) return { rows: [o.who ?? me] };
         if (text === OWNER_BOOTSTRAP_Q2_FACTS) {
-          const f = facts.length > 1 ? facts.shift()! : facts[0]!;
+          const f = o.facts ?? ownerFacts;
           return {
             rows: [
               {
@@ -581,44 +631,31 @@ describe('owner bootstrap, option 2: PG_DATABASE_URL is crewflow_owner itself (s
             ],
           };
         }
-        if (text === OWNER_BOOTSTRAP_Q4D_REVERIFY) return { rows: [{ ok: true }] };
-        return { rows: [] };
+        throw new Error(`unexpected statement in the read-only mode: ${text.slice(0, 30)}`);
       },
       async end() {
         /* closed */
       },
-    });
+    };
     const io: OwnerUrlIo = {
-      async openDerived() {
-        const code = derivedErrors.length > 1 ? derivedErrors.shift()! : derivedErrors[0]!;
-        if (code) throw Object.assign(new Error('password authentication failed for user "crewflow_owner"'), { code });
-        return session('derived');
-      },
       async openUrl() {
-        if (o.urlError) throw Object.assign(new Error('connect failed'), { code: o.urlError });
-        return session('url');
+        const code = urlErrors.shift();
+        if (code) throw Object.assign(new Error('connect failed'), { code });
+        return session;
       },
-      async probeOwner() {
-        return probes.length > 1 ? probes.shift()! : probes[0]!;
-      },
-      verifier: () => VERIFIER,
       log: (l) => lines.push(l),
       sleep: async (ms) => {
         clock += ms;
       },
       now: () => clock,
-      onCommit: o.onCommit,
     };
-    const writes = () => sent.filter((q) => [OWNER_BOOTSTRAP_BEGIN, OWNER_BOOTSTRAP_Q4A_LOCK, OWNER_BOOTSTRAP_Q4B_SET_INPUTS, OWNER_SELF_O4C_DO, OWNER_BOOTSTRAP_COMMIT].includes(q.text as never));
-    return { io, sent, lines, writes };
+    return { io, sent, lines };
   }
 
-  it('step a: the derived password already works -> read-only, unchanged, nothing written', async () => {
-    const f = ownerIo({ derivedErrors: [''] });
-    const result = await setupOwnerUrlWithIo(f.io, 0);
-    expect(result).toEqual({ outcome: 'pass-through', exitCode: 0, created: false, passwordSet: false, grantAdded: false, code: null });
-    expect(f.sent.map((q) => q.text)).toEqual([OWNER_BOOTSTRAP_Q0_SESSION, OWNER_SELF_O1_SESSION, OWNER_BOOTSTRAP_Q2_FACTS]);
-    expect(f.sent.every((q) => q.via === 'derived')).toBe(true);
+  it('sends only Q0, O1, Q2 (read-only) and reports pass-through, nothing written', async () => {
+    const f = ownerIo();
+    expect(await setupOwnerUrlWithIo(f.io, 0)).toEqual({ outcome: 'pass-through', exitCode: 0, created: false, passwordSet: false, grantAdded: false, code: null });
+    expect(f.sent).toEqual([OWNER_BOOTSTRAP_Q0_SESSION, OWNER_SELF_O1_SESSION, OWNER_BOOTSTRAP_Q2_FACTS]);
   });
 
   it.each<[string, Partial<OwnerFacts>]>([
@@ -626,168 +663,49 @@ describe('owner bootstrap, option 2: PG_DATABASE_URL is crewflow_owner itself (s
     ['BYPASSRLS', { oBypassRls: true }],
     ['REPLICATION', { oReplication: true }],
     ['CREATEDB', { oCreateDb: true }],
-  ])('step a: a %s crewflow_owner with the derived password is refused, nothing written', async (_label, patch) => {
-    const f = ownerIo({ derivedErrors: [''], facts: [{ ...ownerFacts, ...patch }] });
-    await expect(setupOwnerUrlWithIo(f.io, 0)).rejects.toBeInstanceOf(OwnerBootstrapRefusal);
-    expect(f.writes()).toEqual([]);
-  });
-
-  it('step b: the derived password fails (28P01) -> URL password, every refusal BEFORE the write, then the self ALTER under the lock', async () => {
-    const f = ownerIo({ derivedErrors: ['28P01', ''], probes: [{ ok: false, code: '28P01' }] });
-    const result = await setupOwnerUrlWithIo(f.io, 0);
-    expect(result).toEqual({ outcome: 'pass-through', exitCode: 0, created: false, passwordSet: true, grantAdded: false, code: null });
-    const url = f.sent.filter((q) => q.via === 'url').map((q) => q.text);
-    expect(url).toEqual([
-      OWNER_BOOTSTRAP_Q0_SESSION,
-      OWNER_SELF_O1_SESSION,
-      OWNER_BOOTSTRAP_Q2_FACTS,
-      OWNER_BOOTSTRAP_BEGIN,
-      OWNER_BOOTSTRAP_Q4A_LOCK,
-      OWNER_SELF_O1_SESSION,
-      OWNER_BOOTSTRAP_Q2_FACTS,
-      OWNER_BOOTSTRAP_Q4B_SET_INPUTS,
-      OWNER_SELF_O4C_DO,
-      OWNER_BOOTSTRAP_Q4D_REVERIFY,
-      OWNER_BOOTSTRAP_COMMIT,
-    ]);
-    // The verifier travels only as bind parameter $1; never the plaintext; never in a statement text.
-    const inputs = f.sent.find((q) => q.text === OWNER_BOOTSTRAP_Q4B_SET_INPUTS)!;
-    expect(inputs.values).toEqual([VERIFIER, 'true']);
-    // Then the re-verify on a NEW session with the derived password.
-    expect(f.sent.filter((q) => q.via === 'derived').map((q) => q.text)).toEqual([OWNER_BOOTSTRAP_Q0_SESSION, OWNER_SELF_O1_SESSION, OWNER_BOOTSTRAP_Q2_FACTS]);
-  });
-
-  it.each<[string, Partial<OwnerFacts>]>([
-    ['SUPERUSER', { oSuper: true }],
-    ['BYPASSRLS', { oBypassRls: true }],
     ['a privileged membership', { oPrivilegedMemberships: 1 }],
     ['an expired VALID UNTIL', { oExpired: true }],
     ['no database grant', { oHasDbGrant: false }],
     ['PostgreSQL 15', { serverVersionNum: 150008 }],
-  ])('step b: %s is refused before ANY write (no BEGIN, no lock, no ALTER)', async (_label, patch) => {
-    const f = ownerIo({ derivedErrors: ['28P01'], facts: [{ ...ownerFacts, ...patch }] });
+  ])('%s is refused (64)', async (_label, patch) => {
+    const f = ownerIo({ facts: { ...ownerFacts, ...patch } });
     await expect(setupOwnerUrlWithIo(f.io, 0)).rejects.toBeInstanceOf(OwnerBootstrapRefusal);
-    expect(f.writes()).toEqual([]);
   });
 
-  it('step b: a session that is not crewflow_owner itself (SET ROLE / a different session user) is refused before any write', async () => {
+  it('a session that is not crewflow_owner itself is refused', async () => {
     for (const who of [
       { session_login: 'crewflow_owner', current_login: 'postgres' },
       { session_login: 'postgres', current_login: 'crewflow_owner' },
     ]) {
-      const f = ownerIo({ derivedErrors: ['28P01'], who });
-      await expect(setupOwnerUrlWithIo(f.io, 0)).rejects.toThrow(OWNER_BOOTSTRAP_MESSAGES.ownerNotSelf);
-      expect(f.writes()).toEqual([]);
+      await expect(setupOwnerUrlWithIo(ownerIo({ who }).io, 0)).rejects.toThrow(OWNER_BOOTSTRAP_MESSAGES.ownerNotSelf);
     }
   });
 
-  it('step b: neither password works -> the fixed "matches neither" refusal (64), nothing written', async () => {
-    const f = ownerIo({ derivedErrors: ['28P01'], urlError: '28P01' });
-    await expect(setupOwnerUrlWithIo(f.io, 0)).rejects.toThrow(OWNER_BOOTSTRAP_MESSAGES.ownerNoPassword);
-    expect(f.sent).toEqual([]);
+  it('a wrong URL password (28P01) is the login refusal (64); a missing database is the 3D000 refusal', async () => {
+    await expect(setupOwnerUrlWithIo(ownerIo({ urlErrors: ['28P01'] }).io, 0)).rejects.toThrow(OWNER_BOOTSTRAP_MESSAGES.adminAuth('28P01'));
+    await expect(setupOwnerUrlWithIo(ownerIo({ urlErrors: ['3D000'] }).io, 0)).rejects.toThrow(OWNER_BOOTSTRAP_MESSAGES.adminNoDatabase);
   });
 
-  it('step a: a non-password failure (pg_hba 28000, TLS, missing database) is NOT retried with the URL password', async () => {
-    for (const code of ['28000', '3D000', 'DEPTH_ZERO_SELF_SIGNED_CERT']) {
-      const f = ownerIo({ derivedErrors: [code] });
-      await expect(setupOwnerUrlWithIo(f.io, 0)).rejects.toBeInstanceOf(OwnerBootstrapRefusal);
-      expect(f.sent).toEqual([]);
-    }
+  it('retries connection-refused within the window', async () => {
+    expect((await setupOwnerUrlWithIo(ownerIo({ urlErrors: ['ECONNREFUSED', '57P03'] }).io, 10_000)).outcome).toBe('pass-through');
   });
 
-  it('step b: a concurrent db-setup set the derived password first -> under the lock the probe succeeds, ROLLBACK, no ALTER', async () => {
-    const f = ownerIo({ derivedErrors: ['28P01', ''], probes: [{ ok: true }] });
-    const result = await setupOwnerUrlWithIo(f.io, 0);
-    expect(result.passwordSet).toBe(false);
-    expect(f.sent.map((q) => q.text)).toContain(OWNER_BOOTSTRAP_ROLLBACK);
-    expect(f.sent.map((q) => q.text)).not.toContain(OWNER_SELF_O4C_DO);
-  });
-
-  it('step b: under the lock the role turned privileged -> refused, ROLLBACK, no ALTER', async () => {
-    const f = ownerIo({ derivedErrors: ['28P01'], facts: [ownerFacts, { ...ownerFacts, oBypassRls: true }] });
-    await expect(setupOwnerUrlWithIo(f.io, 0)).rejects.toBeInstanceOf(OwnerBootstrapRefusal);
-    expect(f.sent.map((q) => q.text)).not.toContain(OWNER_SELF_O4C_DO);
-    expect(f.sent.map((q) => q.text)).toContain(OWNER_BOOTSTRAP_ROLLBACK);
-  });
-
-  it('step b: a race SQLSTATE (XX000) is retried, bounded', async () => {
-    const f = ownerIo({ derivedErrors: ['28P01'], failOn: OWNER_SELF_O4C_DO, failCode: 'XX000' });
-    await expect(setupOwnerUrlWithIo(f.io, 0)).rejects.toThrow(OWNER_BOOTSTRAP_MESSAGES.raceExhausted);
-    expect(f.sent.filter((q) => q.text === OWNER_SELF_O4C_DO)).toHaveLength(3);
-  });
-
-  it('step b: the database refusing the ALTER (42501 / 22023) is the option-2 refusal, never the driver text', async () => {
-    for (const code of ['42501', '22023']) {
-      const f = ownerIo({ derivedErrors: ['28P01'], failOn: OWNER_SELF_O4C_DO, failCode: code });
-      const error = await setupOwnerUrlWithIo(f.io, 0).catch((e: unknown) => e);
-      expect(error).toBeInstanceOf(OwnerBootstrapRefusal);
-      expect((error as Error).message).toBe(OWNER_BOOTSTRAP_MESSAGES.ownerWriteRefused(code));
-      expect((error as Error).message).not.toContain('SCRAM');
-    }
-  });
-
-  it('step b: the post-COMMIT login with the derived password fails -> exit 70 (re-verify), never a silent success', async () => {
-    const f = ownerIo({ derivedErrors: ['28P01', '28P01'] });
-    const error = await setupOwnerUrlWithIo(f.io, 0).catch((e: unknown) => e);
-    expect(error).toBeInstanceOf(OwnerBootstrapFailure);
-    expect((error as Error).message).toBe(OWNER_BOOTSTRAP_MESSAGES.reverifyFailed);
-  });
-
-  it('interrupted BEFORE the COMMIT: nothing committed; the next run takes step b again', async () => {
-    const points: string[] = [];
-    const f = ownerIo({
-      derivedErrors: ['28P01'],
-      onCommit: (p) => {
-        points.push(p);
-        if (p === 'before-commit') throw new Error('killed');
-      },
-    });
-    await expect(setupOwnerUrlWithIo(f.io, 0)).rejects.toBeDefined();
-    expect(f.sent.map((q) => q.text)).not.toContain(OWNER_BOOTSTRAP_COMMIT);
-    expect(f.sent.map((q) => q.text)).toContain(OWNER_BOOTSTRAP_ROLLBACK);
-    const next = ownerIo({ derivedErrors: ['28P01', ''] });
-    expect((await setupOwnerUrlWithIo(next.io, 0)).passwordSet).toBe(true);
-  });
-
-  it('interrupted AFTER the COMMIT: the next run takes step a (the derived password works), unchanged', async () => {
-    const f = ownerIo({
-      derivedErrors: ['28P01'],
-      onCommit: (p) => {
-        if (p === 'after-commit') throw new Error('killed');
-      },
-    });
-    await expect(setupOwnerUrlWithIo(f.io, 0)).rejects.toBeDefined();
-    expect(f.sent.map((q) => q.text)).toContain(OWNER_BOOTSTRAP_COMMIT);
-    const next = ownerIo({ derivedErrors: [''] });
-    const result = await setupOwnerUrlWithIo(next.io, 0);
-    expect(result.passwordSet).toBe(false);
-    expect(next.writes()).toEqual([]);
-  });
-
-  it('decideOwnerSelf: the NOCREATEROLE (hardened) owner is accepted with the D2 note', () => {
+  it('the NOCREATEROLE (hardened) owner is accepted with the D2 note', async () => {
+    const f = ownerIo({ facts: { ...ownerFacts, oCreateRole: false } });
+    await setupOwnerUrlWithIo(f.io, 0);
+    expect(f.lines).toEqual([OWNER_BOOTSTRAP_MESSAGES.noCreateRoleHardened]);
     expect(decideOwnerSelf({ sessionLogin: 'crewflow_owner', currentLogin: 'crewflow_owner' }, { ...ownerFacts, oCreateRole: false })).toEqual([
       OWNER_BOOTSTRAP_MESSAGES.noCreateRoleHardened,
     ]);
   });
-
-  it('the option-2 statements carry no value; the self ALTER only through %L of the bind-parameter setting; CONTEXT stripped', () => {
-    // No value, and not even the verifier prefix (the server-log scans search for it).
-    for (const text of OWNER_SELF_STATEMENTS) expect(text).not.toMatch(/postgres:\/\/|\$4096:|SCRAM-SHA-256\$/);
-    expect(OWNER_SELF_O4C_DO).toContain("pg_catalog.current_setting('crewflow_bootstrap.verifier')");
-    expect(OWNER_SELF_O4C_DO).toContain("EXECUTE pg_catalog.format('ALTER ROLE crewflow_owner PASSWORD %L', v_verifier);");
-    expect(OWNER_SELF_O4C_DO).toContain("RAISE EXCEPTION 'crewflow_owner password reset failed (%)', SQLSTATE USING ERRCODE = SQLSTATE;");
-    expect(OWNER_SELF_O4C_DO).toContain("session_user::text <> 'crewflow_owner' OR current_user::text <> session_user::text");
-    // Never anything but the password: no CREATE ROLE, no GRANT, no attribute, no extension.
-    expect(OWNER_SELF_O4C_DO).not.toMatch(/CREATE |GRANT |EXTENSION|SUPERUSER |BYPASSRLS |VALID UNTIL/);
-  });
 });
 
 describe('owner bootstrap: security review H1 / L2 / M2 / I1 / I2', () => {
-  it('H1/L2: every bootstrap driver config (admin, probe, derived) carries search_path=pg_catalog,pg_temp and default_transaction_read_only=off', () => {
+  it('H1/L2: every bootstrap driver config (admin / URL login, probe) carries search_path=pg_catalog,pg_temp and default_transaction_read_only=off', () => {
     for (const url of [ADMIN_URL, 'postgres://crewflow_owner:ownerpw0123456789@db.internal.example:5432/crewflow_unit']) {
-      const env = { PG_DATABASE_URL: url, APP_SECRET: SECRET, NODE_ENV: 'test' };
-      const plan = planDbSetup({ databaseUrl: url, appSecret: SECRET });
-      const configs = bootstrapDriverConfigs(resolvePgEnvironment(env, { processRole: 'migrate' }), plan.runtimeUrl);
+      const env = { PG_DATABASE_URL: url, NODE_ENV: 'test' };
+      const configs = bootstrapDriverConfigs(resolvePgEnvironment(env, { processRole: 'migrate' }), buildRuntimeDatabaseUrl(url, 'f'.repeat(64)));
+      expect(Object.keys(configs).sort()).toEqual(['admin', 'probe']);
       for (const [name, config] of Object.entries(configs)) {
         const options = String(config.options ?? '');
         expect({ name, pinned: options.includes('-c search_path=pg_catalog,pg_temp') }).toEqual({ name, pinned: true });
@@ -813,14 +731,14 @@ describe('owner bootstrap: security review H1 / L2 / M2 / I1 / I2', () => {
   });
 
   it('M2: the pre-hashed refusals say the configuration is not supported and offer no workaround', () => {
-    for (const message of [OWNER_BOOTSTRAP_MESSAGES.writeRefused('42501'), OWNER_BOOTSTRAP_MESSAGES.ownerWriteRefused('42501')]) {
+    for (const message of [OWNER_BOOTSTRAP_MESSAGES.writeRefused('42501')]) {
       expect(message).toContain('If this provider refuses pre-hashed passwords, this configuration is not supported.');
       expect(message).not.toMatch(/by hand|ALTER ROLE|01-crewflow-owner|derive command/);
     }
   });
 
-  it('I1: the O4c shape check accepts a real verifier and rejects malformed values (the 22023 branch)', () => {
-    const match = /OPERATOR\(pg_catalog\.~\) '([^']+)'/.exec(OWNER_SELF_O4C_DO);
+  it('I1 / N3: the Q4c shape check accepts a real verifier and rejects malformed values (the 22023 branch)', () => {
+    const match = /OPERATOR\(pg_catalog\.~\) '([^']+)'/.exec(OWNER_BOOTSTRAP_Q4C_DO);
     expect(match).not.toBeNull();
     const pattern = new RegExp(match![1]!);
     expect(pattern.test(scramSha256Verifier('a'.repeat(64)))).toBe(true);
@@ -836,18 +754,17 @@ describe('owner bootstrap: security review H1 / L2 / M2 / I1 / I2', () => {
       expect({ bad, ok: pattern.test(bad) }).toEqual({ bad, ok: false });
     }
     expect(pattern.test(`SCRAM-SHA-256$4096:c2FsdA==$${key}:${key}`)).toBe(true);
-    expect(OWNER_SELF_O4C_DO).toContain("RAISE EXCEPTION 'not a pre-hashed verifier' USING ERRCODE = '22023';");
-    // N3: the admin path's Q4c carries the SAME pattern, before CREATE / ALTER ROLE.
-    expect(OWNER_BOOTSTRAP_Q4C_DO).toContain(`OPERATOR(pg_catalog.~) '${match![1]}'`);
+    expect(OWNER_BOOTSTRAP_Q4C_DO).toContain("RAISE EXCEPTION 'not a pre-hashed verifier' USING ERRCODE = '22023';");
     expect(OWNER_BOOTSTRAP_Q4C_DO.indexOf('not a pre-hashed verifier')).toBeLessThan(OWNER_BOOTSTRAP_Q4C_DO.indexOf('CREATE ROLE crewflow_owner'));
   });
 
-  it('I2: O4c re-checks the recursive privileged membership inside the statement, before the ALTER', () => {
-    const at = (needle: string) => OWNER_SELF_O4C_DO.indexOf(needle);
-    expect(at('WITH RECURSIVE up(oid)')).toBeGreaterThan(0);
-    expect(at("RAISE EXCEPTION 'crewflow_owner is a member of a privileged role'")).toBeGreaterThan(0);
-    expect(at('WITH RECURSIVE up(oid)')).toBeLessThan(at('ALTER ROLE crewflow_owner PASSWORD'));
-    for (const role of ['pg_read_all_data', 'pg_write_all_data', 'pg_execute_server_program', 'pg_maintain']) expect(OWNER_SELF_O4C_DO).toContain(`'${role}'`);
+  it('Part A: O4c (crewflow_owner changing its own password) and step b are deleted; the owner-URL statements are read-only', () => {
+    const sql = fs.readFileSync(path.join(__dirname, 'owner-bootstrap-sql.ts'), 'utf8');
+    expect(sql).not.toMatch(/export const OWNER_SELF_O4C_DO/);
+    expect(OWNER_SELF_STATEMENTS).toEqual([OWNER_BOOTSTRAP_Q0_SESSION, OWNER_SELF_O1_SESSION, OWNER_BOOTSTRAP_Q2_FACTS]);
+    for (const text of OWNER_SELF_STATEMENTS) {
+      for (const statement of text.split(';')) expect(statement).not.toMatch(/^\s*(ALTER|CREATE|GRANT|REVOKE|INSERT|UPDATE|DELETE|DO|DROP)/i);
+    }
   });
 });
 

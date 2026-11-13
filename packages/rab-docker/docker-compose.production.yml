@@ -31,11 +31,12 @@
 # ONE DATABASE URL, LIKE TWENTY (DB-SETUP, owner decisions D1 a / D3 / D4 / D5). Enter only PG_DATABASE_PASSWORD (and
 # APP_SECRET): the one database setting, PG_DATABASE_URL, then defaults to the bundled `db` service's superuser,
 # sslmode=verify-full (db makes its own CA; the app mounts it read-only). Your own database instead: set PG_DATABASE_URL to
-# its ADMIN URL (DIRECT host, sslmode=verify-full), or to an existing crewflow_owner URL (D5, DB-SETUP-PLAN §7.1: checked,
-# and the first time given the password derived from APP_SECRET); `db` then runs idle. PR #125 option 2: PG_DATABASE_URL is
+# its ADMIN URL (DIRECT host, sslmode=verify-full), or to an existing crewflow_owner URL (D5, DB-SETUP-PLAN §7.1: checked
+# read-only, used unchanged); `db` then runs idle. PR #125 option 2: PG_DATABASE_URL is
 # interpolated ONLY into the one-shot `db-setup` service, which runs the bootstrap child (the ONLY connection with it),
 # writes a credential-free target file to the crewflow-db-target volume and exits. rab-api and rab-worker never receive
-# PG_DATABASE_URL in any form: they build the crewflow_owner URL from that file and APP_SECRET (accepted risk TM-DB-1: the
+# PG_DATABASE_URL in any form: they build the crewflow_owner URL from that file and the crewflow_owner password file (a
+# random password db-setup stores and reuses, Twenty Helm model; APP_SECRET is never part of it; accepted risk TM-DB-1: the
 # URL is in db-setup's service definition, T-1). No manual SQL step. There is no migrator, provisioner, worker, ops or replica
 # URL and no .env.migrate.
 #
@@ -94,7 +95,7 @@ x-logging: &logging
 x-crewflow-required-env: &required-env
   # PR #125 option 2: NEVER a database URL on rab-api / rab-worker. PINNED EMPTY (a literal, never interpolated; do not
   # enter a value here: the entrypoints refuse any non-empty value, exit 64). They build the crewflow_owner URL from
-  # db-setup's target file and APP_SECRET. The one database setting, PG_DATABASE_URL (your own database's admin URL or an
+  # db-setup's target file and crewflow_owner password file. The one database setting, PG_DATABASE_URL (your own database's admin URL or an
   # existing crewflow_owner URL; unset = the bundled db built from PG_DATABASE_PASSWORD, REQUIRED, `openssl rand -hex 32`),
   # is an interpolation value that reaches only the db-setup service below.
   PG_DATABASE_URL: ""
@@ -313,7 +314,7 @@ services:
   # ---------------------------------------------------------------------------
   # db — the BUNDLED PostgreSQL (DB-SETUP, owner decisions D1 a / D3 / D4; like Twenty's `db`). The default database: the
   # client sets only PG_DATABASE_PASSWORD (its superuser password, `openssl rand -hex 32`: letters and digits only, it is
-  # interpolated into the default admin URL) and APP_SECRET. Never published, on the internal crewflow-db network only.
+  # interpolated into the default admin URL). Never published, on the internal crewflow-db network only.
   # TLS (D1 a): on the first start (and whenever the certificate is missing, invalid or within 30 days of expiry) the
   # entrypoint below creates its OWN CA and a server certificate for the name `db` (EC P-256, 10 years) with the image's
   # openssl; the CA's private key is deleted right after signing, so nothing can issue another certificate for `db`. The
@@ -452,16 +453,19 @@ services:
     logging: *logging
 
   # ---------------------------------------------------------------------------
-  # db-setup — the ONE-SHOT database setup (PR #125 option 2, owner decision 2026-11-13). The SAME image as rab-api and
-  # rab-worker; its entrypoint db-setup.sh runs only the bootstrap child, then exits. It is the ONLY service that receives
-  # PG_DATABASE_URL, the one database setting: the bundled db's superuser by default; your own database's ADMIN URL (the
-  # child creates crewflow_owner, or resets its password to the one derived from APP_SECRET); or an existing crewflow_owner
-  # URL (pass-through: the child checks it and, once, sets crewflow_owner's own password to the derived one). Plus
-  # APP_SECRET and the TLS CA. In every mode it writes the credential-free target file /run/crewflow/db-target/target.json on
-  # the crewflow-db-target volume. rab-api and rab-worker never receive PG_DATABASE_URL in any form: they mount the target
-  # volume read-only and build the crewflow_owner URL from it and APP_SECRET. It runs again on every `docker compose up` (it
-  # removes the old target first), then rab-api starts (depends_on: service_completed_successfully). No port, no health
-  # check (it exits), never restarted.
+  # db-setup — the ONE-SHOT database setup, the Twenty Helm way (OWNER-DB-FINAL.md Part A). Twenty: the
+  # `ensure-database-exists` init container alone holds the superuser secret (twentyhq/twenty@eedb0a73
+  # packages/twenty-docker/helm/twenty/templates/deployment-server.yaml:81-130). The SAME image as rab-api and rab-worker;
+  # its entrypoint db-setup.sh runs only the bootstrap child, then exits. It is the ONLY service that receives
+  # PG_DATABASE_URL, the one database setting: the bundled db's superuser by default, or your own database's ADMIN URL
+  # (crewflow_owner is created if missing, with a RANDOM password kept in /run/crewflow/db-target/owner-password and reused
+  # on every start; Twenty: secret-db-url.yaml:3-8), or an existing crewflow_owner URL (read-only checks; its password is
+  # copied into that file; the database is never written to). Plus the TLS CA; NOT APP_SECRET (never part of a database
+  # credential; db-setup.sh refuses it). In every mode it writes the credential-free target file
+  # /run/crewflow/db-target/target.json. rab-api and rab-worker never receive PG_DATABASE_URL in any form: they mount the
+  # volume read-only and build the crewflow_owner URL from the two files. It runs again on every `docker compose up` (it
+  # removes the old target first, never the password file), then rab-api starts (depends_on:
+  # service_completed_successfully). No port, no health check (it exits), never restarted.
   # ---------------------------------------------------------------------------
   db-setup:
     image: ${CREWFLOW_IMAGE_REPOSITORY:-adhin007/adolphus}@${CREWFLOW_IMAGE_TAG:-sha256:b2bd3bc40131df1245f60afb435e3b3d7eb8391168620e31e779078695d4b980}
@@ -470,7 +474,6 @@ services:
       # The ONE database setting, this service only: PG_DATABASE_URL (your own database's admin URL, or an existing
       # crewflow_owner URL; DIRECT host, sslmode=verify-full), else the bundled db's superuser built from PG_DATABASE_PASSWORD.
       PG_DATABASE_URL: ${PG_DATABASE_URL:-postgresql://postgres:${PG_DATABASE_PASSWORD:?PG_DATABASE_PASSWORD is required (the bundled db), or set PG_DATABASE_URL}@db:5432/crewflow?sslmode=verify-full}
-      APP_SECRET: ${APP_SECRET:?APP_SECRET is required}
       # The same TLS settings as rab-api / rab-worker (the shared optional list above).
       PG_SSL_CA_CERT_PATH:
       PG_DATABASE_URL_IS_DIRECT:

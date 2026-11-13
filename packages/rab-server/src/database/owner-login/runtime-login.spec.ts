@@ -3,7 +3,7 @@ import * as path from 'path';
 
 import { OWNER_LOGIN_ROLE } from '../boot-checks/owner-login-posture';
 import { assertRuntimeDatabaseIdentity, resolveRuntimeDatabase, RuntimeDbError } from '../typeorm/core/runtime-database-guard';
-import { buildRuntimeDatabaseUrl, deriveOwnerPassword, OWNER_LOGIN } from './owner-credential';
+import { buildRuntimeDatabaseUrl, generateOwnerPassword, OWNER_LOGIN } from './owner-credential';
 import { checkRuntimeLogin, readRuntimeDbConfig, RuntimeDbConfigError, STARTUP_EXIT_CODES } from './runtime-db-config';
 
 /**
@@ -14,7 +14,6 @@ import { checkRuntimeLogin, readRuntimeDbConfig, RuntimeDbConfigError, STARTUP_E
  */
 const SECRET = 'S3cret-PW-do-not-print';
 const ADMIN_LOGIN = 'doadmin_sentinel';
-const APP_SECRET = 'app-secret-for-unit-tests-only-0123456789abcdef';
 const HOST = 'db-sentinel.example.internal';
 const ADMIN_URL = `postgres://${ADMIN_LOGIN}:${SECRET}@${HOST}:5432/crewflow?sslmode=verify-full`;
 const OWNER_URL = `postgres://crewflow_owner:${SECRET}@${HOST}:5432/crewflow?sslmode=verify-full`;
@@ -82,18 +81,16 @@ describe('runtime-login rule (DB-SETUP plan §2.2): production connects only as 
     }
   });
 
-  it('D5: a crewflow_owner URL passes in production, unchanged — including the byte-identical pass-through of buildRuntimeDatabaseUrl', () => {
-    const passThrough = buildRuntimeDatabaseUrl(OWNER_URL, deriveOwnerPassword(APP_SECRET));
-    expect(passThrough).toBe(OWNER_URL);
+  it('D5: a crewflow_owner URL passes in production and is never rewritten', () => {
     for (const processName of PROCESSES) {
-      const env = { ...PROD, PG_DATABASE_URL: passThrough };
+      const env = { ...PROD, PG_DATABASE_URL: OWNER_URL };
       expect(checkRuntimeLogin(env, processName)).toEqual({ warning: null });
       expect(env.PG_DATABASE_URL).toBe(OWNER_URL); // never rewritten
     }
   });
 
-  it('the runtime URL derived from an admin URL (area 1 buildRuntimeDatabaseUrl) passes in production', () => {
-    const runtimeUrl = buildRuntimeDatabaseUrl(ADMIN_URL, deriveOwnerPassword(APP_SECRET));
+  it('the runtime URL built from an admin URL and the stored password (buildRuntimeDatabaseUrl) passes in production', () => {
+    const runtimeUrl = buildRuntimeDatabaseUrl(ADMIN_URL, generateOwnerPassword());
     for (const processName of PROCESSES) {
       expect(checkRuntimeLogin({ ...PROD, PG_DATABASE_URL: runtimeUrl }, processName)).toEqual({ warning: null });
     }

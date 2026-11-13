@@ -1,28 +1,25 @@
 /**
- * DB setup like Twenty (DB-SETUP-PLAN §2.1 / §3, area 2): the process entry of the bootstrap child.
+ * Database setup the Twenty Helm way (OWNER-DB-FINAL.md Part A): the process entry of the bootstrap child.
  *   node packages/rab-server/dist/database/typeorm/scripts/owner-login/bootstrap-owner-login.js
- * with PG_DATABASE_URL (the database ADMIN URL, or a crewflow_owner URL = pass-through) and APP_SECRET. It is the only
- * process that ever connects as the admin. Core: owner-bootstrap.ts.
+ * Run ONLY by the one-shot `db-setup` service (db-setup.sh), the only holder of PG_DATABASE_URL (the bundled db's superuser,
+ * a client's admin URL, or an existing crewflow_owner URL). It does NOT read APP_SECRET (Twenty: APP_SECRET is never part
+ * of any database credential). Core: owner-bootstrap.ts.
  *
- * Option A (PR #125): run by the one-shot `db-setup` service, the ONLY holder of the admin URL. On success it writes the
- * credential-free database target (owner-login/db-target.ts) to CREWFLOW_DB_TARGET_FILE (default
- * /run/crewflow/db-target/target.json; atomic rename, mode 0644); after a refusal or failure it removes any stale one, so
- * the apps' derive step keeps waiting (exit 75). PR #125 option 2: a crewflow_owner URL (pass-through) is checked too, gets
- * the derived password if it does not have it yet, and the target is written as in the admin mode; the apps never receive
- * PG_DATABASE_URL in any mode.
+ * Files, on db-setup's volume (rab-api and rab-worker mount it read-only):
+ *   - CREWFLOW_DB_TARGET_FILE (default /run/crewflow/db-target/target.json): the credential-free target, written on
+ *     success (atomic rename, 0644) and removed after a refusal or failure, so the apps keep waiting (exit 75);
+ *   - `owner-password` beside it: the crewflow_owner password (owner-password-file.ts; atomic rename, 0400). Twenty's
+ *     equivalent is the app user's own secret (twentyhq/twenty@eedb0a73 helm/twenty/templates/secret-db-url.yaml:3-8). It is
+ *     written before any database change and NEVER removed by this process.
  *
- * Test seam (NODE_ENV=test ONLY; refused with exit 64 otherwise): CREWFLOW_TEST_OWNER_SETUP_ABORT=before-commit|after-commit
- * kills this process hard (SIGKILL) at that point of crewflow_owner's own password change (option 2, step b), so the
- * live harnesses can prove the next run recovers.
- *
- * Exit: 0 ok (crewflow_owner ready, or pass-through), 64 refusal, 70 unexpected. Prints fixed `[owner-bootstrap] ...` lines
- * and exactly one `OWNER_BOOTSTRAP_RESULT {...}` line (enums, booleans, a SQLSTATE). Never a URL, a password, a verifier,
- * a host, a database, a login name or the target file's path. Deliberately does NOT import dotenv: the deployment
- * environment is the only source.
+ * Exit: 0 ok, 64 refusal, 70 unexpected. Prints fixed `[owner-bootstrap] ...` lines and exactly one `OWNER_BOOTSTRAP_RESULT
+ * {...}` line (enums, booleans, a SQLSTATE). Never a URL, a password, a verifier, a host, a database, a login name or a
+ * file path. Deliberately does NOT import dotenv: the deployment environment is the only source.
  */
 import { DbTargetError } from '../../../owner-login/db-target';
 import { dbTargetFilePath, removeDbTargetFile, writeDbTargetFile } from '../../../owner-login/db-target-file';
-import { failureResult, OWNER_BOOTSTRAP_LOG_PREFIX, OWNER_BOOTSTRAP_MESSAGES, OwnerBootstrapRefusal, resultLine, runOwnerBootstrap } from './owner-bootstrap';
+import { ownerPasswordFilePath, readOwnerPasswordFile, writeOwnerPasswordFile } from '../../../owner-login/owner-password-file';
+import { failureResult, OWNER_BOOTSTRAP_LOG_PREFIX, OwnerBootstrapRefusal, resultLine, runOwnerBootstrap } from './owner-bootstrap';
 
 async function main(): Promise<number> {
   const log = (line: string) => process.stdout.write(`${OWNER_BOOTSTRAP_LOG_PREFIX} ${line}\n`);
@@ -36,24 +33,11 @@ async function main(): Promise<number> {
     process.stdout.write(`${resultLine(refused)}\n`);
     return refused.exitCode;
   }
-  const abortAt = process.env.CREWFLOW_TEST_OWNER_SETUP_ABORT;
-  if (abortAt !== undefined && abortAt !== '') {
-    if (process.env.NODE_ENV !== 'test' || (abortAt !== 'before-commit' && abortAt !== 'after-commit')) {
-      log('CREWFLOW_TEST_OWNER_SETUP_ABORT is a test seam: it is allowed only with NODE_ENV=test and the value before-commit or after-commit. Refusing.');
-      const refused = failureResult(new OwnerBootstrapRefusal('test seam refused'));
-      process.stdout.write(`${resultLine(refused)}\n`);
-      return refused.exitCode;
-    }
-  }
+  const passwordFile = ownerPasswordFilePath(targetFile);
   const result = await runOwnerBootstrap(process.env, {
-    onOwnerPasswordCommit: abortAt
-      ? (point) => {
-          if (point !== abortAt) return;
-          log(OWNER_BOOTSTRAP_MESSAGES.testAbort(point));
-          process.kill(process.pid, 'SIGKILL');
-        }
-      : undefined,
     log,
+    readPasswordFile: () => readOwnerPasswordFile(passwordFile),
+    writePasswordFile: (password, exclusive) => writeOwnerPasswordFile(passwordFile, password, { exclusive }),
     publishTarget: (target) => writeDbTargetFile(targetFile, target),
     withdrawTarget: () => removeDbTargetFile(targetFile),
   });

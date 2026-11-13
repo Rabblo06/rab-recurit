@@ -192,9 +192,9 @@ COPY --from=build /app/packages/rab-emails/package.json ./packages/rab-emails/pa
 COPY --from=build /app/packages/rab-emails/dist ./packages/rab-emails/dist
 # Entry scripts are read+execute only (0555) and set in the COPY itself (no separate chmod layer). The API's command is
 # api-prestart.sh; start.sh is kept only as a forwarder to it. DB-SETUP: the deploy compose files make api-prestart.sh and
-# worker-start.sh the ENTRYPOINT of rab-api / rab-worker (PID 1), then `/sbin/tini -s -- node ...`. PR #125 option A: those
-# two services never receive the admin URL; each builds the crewflow_owner runtime URL from the one-shot db-setup service's
-# target file (/run/crewflow/db-target, a named volume they mount read-only) and APP_SECRET.
+# worker-start.sh the ENTRYPOINT of rab-api / rab-worker (PID 1), then `/sbin/tini -s -- node ...`. Those two services never
+# receive PG_DATABASE_URL; each builds the crewflow_owner runtime URL from the one-shot db-setup service's target file and
+# crewflow_owner password file (/run/crewflow/db-target, a named volume they mount read-only; never part of this image).
 COPY --chmod=0555 packages/rab-docker/rab/api-prestart.sh ./api-prestart.sh
 COPY --chmod=0555 packages/rab-docker/rab/worker-start.sh ./worker-start.sh
 # PR #125 option A: the one-shot db-setup service's entrypoint (the only app-image service with the database admin URL).

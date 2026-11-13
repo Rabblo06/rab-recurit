@@ -1,8 +1,9 @@
 /**
- * DB setup, option A (owner decision on PR #125): the API and the Worker never receive the database ADMIN credential.
- * A one-shot `db-setup` service runs the bootstrap child with the admin URL; on success the child publishes a
- * CREDENTIAL-FREE description of the database (this file's `DbTarget`) at CREWFLOW_DB_TARGET_FILE. The apps' derive step
- * reads it and builds the crewflow_owner URL from it plus HKDF(APP_SECRET) (owner-credential.ts).
+ * DB setup the Twenty Helm way (OWNER-DB-FINAL.md Part A): the API and the Worker never receive PG_DATABASE_URL. The one-shot
+ * `db-setup` service runs the bootstrap child; on success the child publishes a CREDENTIAL-FREE description of the database
+ * (this file's `DbTarget`) at CREWFLOW_DB_TARGET_FILE, beside the crewflow_owner password file (owner-password-file.ts). The
+ * apps' derive step reads both (read-only) and builds the crewflow_owner URL. Twenty: the server and worker receive only the
+ * app user's URL (deployment-server.yaml:142-156, deployment-worker.yaml:76-90).
  *
  *   {"v":1,"host":"db","port":5432,"database":"crewflow","params":{"sslmode":"verify-full"}}
  *
@@ -14,7 +15,7 @@
  * `buildRuntimeDatabaseUrl` (same policy, same rebuild, same round-trip check as the admin-URL path), and the result is
  * re-parsed and must name exactly the host, port and database of the file.
  */
-import { buildRuntimeDatabaseUrl, type DbSetupPlan, OWNER_LOGIN, OwnerCredentialError } from './owner-credential';
+import { buildRuntimeDatabaseUrl, OWNER_LOGIN, OwnerCredentialError } from './owner-credential';
 import { parsePgUrl, PgConfigError } from '../postgres/pg-url-policy';
 
 export const DB_TARGET_FILE_VAR = 'CREWFLOW_DB_TARGET_FILE';
@@ -157,23 +158,24 @@ export function runtimeUrlFromDbTarget(target: DbTarget, ownerPassword: string):
 }
 
 /**
- * The writer side: the target of a db-setup plan (either mode, option 2), read from its (already policy-checked) runtime URL, so it holds
+ * The writer side: the target of the crewflow_owner runtime URL the bootstrap child built, read from its (already policy-checked) runtime URL, so it holds
  * exactly the host, port, database and kept parameters the runtime will use. Proves it is credential-free and that
  * rebuilding it with the same password gives the same connection. Throws DbTargetError.
  */
-export function dbTargetFromPlan(plan: DbSetupPlan): DbTarget {
-  const runtime = plan.runtimeTarget;
+export function dbTargetFromRuntimeUrl(runtimeUrl: string, ownerPassword: string): DbTarget {
+  const runtime = parsePgUrl(runtimeUrl, 'the crewflow_owner runtime URL');
+  if (runtime.user !== OWNER_LOGIN) throw new DbTargetError(DB_TARGET_MESSAGES.roundTrip);
   const params: Record<string, string> = {};
-  for (const [k, v] of new URL(plan.runtimeUrl).searchParams) params[k] = v;
+  for (const [k, v] of new URL(runtimeUrl).searchParams) params[k] = v;
   const target = validateDbTarget({ v: 1, host: runtime.host, port: runtime.port, database: runtime.database, params });
   const text = serializeDbTarget(target);
-  if (text.includes(plan.ownerPassword) || /"(user|password|username)"/.test(text) || text.includes('@')) {
+  if (text.includes(ownerPassword) || text.includes(encodeURIComponent(ownerPassword)) || /"(user|password|username)"/.test(text) || text.includes('@')) {
     throw new DbTargetError(DB_TARGET_MESSAGES.credential);
   }
-  const rebuilt = parsePgUrl(runtimeUrlFromDbTarget(target, plan.ownerPassword), 'the rebuilt crewflow_owner URL');
+  const rebuilt = parsePgUrl(runtimeUrlFromDbTarget(target, ownerPassword), 'the rebuilt crewflow_owner URL');
   if (
     rebuilt.canonicalKey !== runtime.canonicalKey ||
-    rebuilt.password !== plan.ownerPassword ||
+    rebuilt.password !== ownerPassword ||
     rebuilt.sslmode !== runtime.sslmode ||
     rebuilt.channelBinding !== runtime.channelBinding ||
     rebuilt.providerOptions !== runtime.providerOptions
