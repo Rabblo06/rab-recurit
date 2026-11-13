@@ -333,7 +333,7 @@ function ownerUrl(password = secrets.owner) {
  * compose.env. `databaseUrl`: the database URL of the case (default: the pass-through crewflow_owner URL); `null` leaves it
  * out, i.e. the production default, the bundled db's admin URL built from PG_DATABASE_PASSWORD. PR #125 option 2: whatever
  * the login (an admin, crewflow_owner), it is written as PG_DATABASE_URL, the ONE database setting, which the compose
- * files interpolate into the one-shot db-setup only (PG_DATABASE_ADMIN_URL no longer exists).
+ * files interpolate into the one-shot db-setup only (there is no second, admin-only variable any more).
  */
 function writeComposeEnv(project, { repository, digest, pgImage, redisImage, databaseUrl = ownerUrl() }) {
   const S = project.secretsDir.replace(/\\/g, '/');
