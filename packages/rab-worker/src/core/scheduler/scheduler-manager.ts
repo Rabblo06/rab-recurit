@@ -2,6 +2,7 @@ import { Queue } from 'bullmq';
 import type Redis from 'ioredis';
 
 import { scanJobTemplate } from '@rab/server/engine/worker-shared/queue-enqueue';
+import { ProducerRedisConnection } from '@rab/server/engine/worker-shared/queue-producer-connection';
 import { JobNameOf, SCAN_JOB_DATA, ScanQueueName } from './queue-registry';
 import { crewflowSchedulerPrefixOf, ScanJobDefinition, schedulerIdOf } from './scan-jobs';
 
@@ -76,7 +77,8 @@ export class CrewflowSchedulerManager {
     };
     for (const def of options.jobs) {
       if (this.queues.has(def.queue)) continue;
-      const queue = new Queue(def.queue, { connection: options.connection, prefix: options.prefix });
+      // ProducerRedisConnection: a scheduler queue closed during a Redis outage never leaks an unhandled 'error'.
+      const queue = new Queue(def.queue, { connection: options.connection, prefix: options.prefix }, ProducerRedisConnection);
       queue.on('error', onError);
       this.queues.set(def.queue, queue);
     }
@@ -248,7 +250,7 @@ async function removePendingJobsOf(queue: Queue, schedulerId: string): Promise<v
 export async function removeCrewflowSchedulers(connection: Redis, prefix: string, queues: readonly ScanQueueName[]): Promise<string[]> {
   const removed: string[] = [];
   for (const name of queues) {
-    const queue = new Queue(name, { connection, prefix });
+    const queue = new Queue(name, { connection, prefix }, ProducerRedisConnection);
     try {
       for (const existing of await queue.getJobSchedulers(0, -1, true)) {
         if (existing.key.startsWith(crewflowSchedulerPrefixOf(name))) {
