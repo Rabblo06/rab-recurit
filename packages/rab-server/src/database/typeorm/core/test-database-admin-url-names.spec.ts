@@ -29,8 +29,9 @@ describe('X3.5-S7 the test admin URL names in strip lists and CI helpers', () =>
     expect(TEST_DATABASE_ADMIN_URL_NAMES).toEqual([TEST_DATABASE_ADMIN_URL, TEST_DATABASE_URL_UNPOOLED]);
   });
 
-  it.each(ADMIN_NAME_LISTS)('%s: every line naming the deprecated name names the new name too', (file) => {
-    const lines = fs.readFileSync(path.join(REPO, file), 'utf8').split('\n');
+  it.each(ADMIN_NAME_LISTS)('%s: every code line naming the deprecated name names the new name too', (file) => {
+    // Comment lines (#, //, *) are prose, often wrapped; only code lines are lists, loops or emitted exports.
+    const lines = fs.readFileSync(path.join(REPO, file), 'utf8').split('\n').filter((line) => !/^\s*(#|\/\/|\*|\/\*)/.test(line));
     const naming = lines.filter((line) => line.includes(TEST_DATABASE_URL_UNPOOLED));
     expect(naming.length).toBeGreaterThan(0);
     const missing = naming.map((line) => line.trim().slice(0, 80)).filter((_l, i) => !naming[i].includes(TEST_DATABASE_ADMIN_URL));
