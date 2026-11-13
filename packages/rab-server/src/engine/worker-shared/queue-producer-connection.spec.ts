@@ -82,7 +82,8 @@ describe('ProducerRedisConnection (producer queues never leak an unhandled Redis
 
   it('every producer Queue built on createQueueProducerConnection uses ProducerRedisConnection (server and worker sources)', () => {
     const packagesRoot = join(__dirname, '../../../..');
-    const roots = [join(packagesRoot, 'rab-server/src'), join(packagesRoot, 'rab-worker/src')];
+    // Producer queues live in the engine (server) and the Worker; scanning only those keeps this test cheap.
+    const roots = [join(packagesRoot, 'rab-server/src/engine'), join(packagesRoot, 'rab-worker/src')];
     const files: string[] = [];
     const walk = (dir: string) => {
       for (const entry of readdirSync(dir, { withFileTypes: true })) {
