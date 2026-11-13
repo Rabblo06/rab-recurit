@@ -75,7 +75,9 @@ describe('upgrade logbook SQL (OWNER-DB-ULTIMATE Part B, UpgradeMigrationLedger1
     const offenders = files(SRC)
       .filter((f) => readFileSync(f, 'utf8').includes(UPGRADE_SCOPE_SETTING))
       .map((f) => relative(SRC, f).replace(/\\/g, '/'))
-      .filter((f) => !allowed.includes(f) && !f.startsWith('engine/core-modules/upgrade/'));
+      .filter((f) => !allowed.includes(f) && !f.startsWith('engine/core-modules/upgrade/'))
+      // Tests may name it (they exercise the policies); production code outside the list may not.
+      .filter((f) => !f.startsWith('__tests__/') && !f.endsWith('.spec.ts'));
     expect(offenders).toEqual([]);
   });
 });
