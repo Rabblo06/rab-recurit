@@ -1,8 +1,9 @@
-import { Controller, Get } from '@nestjs/common';
+import { Controller, Get, Optional } from '@nestjs/common';
 import { HealthCheck, HealthCheckError, HealthCheckService, HealthIndicatorResult, TypeOrmHealthIndicator } from '@nestjs/terminus';
 
 import { securityReady } from './security-readiness';
 import { upgradeStatusIndicator } from './upgrade-status';
+import { UpgradeStatusService } from '../upgrade/upgrade-status.service';
 
 /** Render's healthCheckPath (render.yaml) points here. */
 @Controller('healthz')
@@ -10,6 +11,7 @@ export class HealthController {
   constructor(
     private readonly health: HealthCheckService,
     private readonly db: TypeOrmHealthIndicator,
+    @Optional() private readonly upgrades?: UpgradeStatusService,
   ) {}
 
   @Get()
@@ -29,7 +31,8 @@ export class HealthController {
     return this.health.check([
       () => this.db.pingCheck('database', { timeout: 5_000 }),
       () => this.securityPosture(),
-      () => upgradeStatusIndicator(),
+      // OWNER-DB-ULTIMATE Part B3: plus the logbook's state (ok / failed / behind / ahead / none / unknown), never a name.
+      async () => upgradeStatusIndicator(process.env, this.upgrades ? (await this.upgrades.status()).state : undefined),
     ]);
   }
 

@@ -65,12 +65,17 @@ import { resolveMigrationConnection } from '../migration-database-url';
 import { Classification, classifyDatabaseState, FreshInstallProof, readFreshInstallProof } from './fresh-install';
 import { assessUpgradeFailure, UpgradeCheck, UpgradeFailurePolicy } from './upgrade-failure-policy';
 import { runCacheFlush } from '../../cache-flush';
+import { UpgradeRun, UpgradeRunReport } from '../../../../../engine/core-modules/upgrade/upgrade-runner';
+import { readAppVersion } from '../../../../../engine/core-modules/upgrade/upgrade-version';
+import { attributeLedger } from './release-floor';
 
 export const RESULT_LINE_PREFIX = 'TWENTY_MIGRATE_RESULT';
 
 /** Test seams (Agent 5's harness). Honoured only with NODE_ENV=test on a disposable test database outside production. */
 export const TEST_FAIL_AT_VAR = 'CREWFLOW_MIGRATION_TEST_FAIL_AT';
 export const TEST_STOP_BEFORE_VAR = 'CREWFLOW_MIGRATION_TEST_STOP_BEFORE';
+/** OWNER-DB-ULTIMATE Part B test seam: this upgrade command (class-like name) fails. Same gate as the other seams. */
+export const TEST_FAIL_COMMAND_VAR = 'CREWFLOW_UPGRADE_TEST_FAIL_COMMAND';
 
 export class TestSeamRefusal extends Error {
   constructor(message: string) {
@@ -133,6 +138,8 @@ export interface MigrateOnStartResult {
   policy: UpgradeFailurePolicy;
   reason: string;
   checks: UpgradeCheck[];
+  /** OWNER-DB-ULTIMATE Part B: the upgrade logbook's view of this run (null when the run stopped before the check). */
+  upgrade?: UpgradeRunReport | null;
 }
 
 export class PostCheckFailure extends Error {
@@ -145,7 +152,7 @@ export class PostCheckFailure extends Error {
 /** Error → outcome, by error name (the classes live in many modules; a name never carries a value). Unknown = migration failure. */
 export function outcomeOf(error: unknown): StartupOutcome {
   const name = error instanceof Error ? error.name : '';
-  if (['RuntimeDbConfigError', 'UnsupportedPostgresVersionError', 'MigrationDatabaseUrlError', 'PgConfigError', 'TestSeamRefusal'].includes(name)) return 'config';
+  if (['RuntimeDbConfigError', 'UnsupportedPostgresVersionError', 'MigrationDatabaseUrlError', 'PgConfigError', 'TestSeamRefusal', 'AppVersionError'].includes(name)) return 'config';
   if (name === 'MigrationLockError') return 'lockTimeout';
   if (
     ['MigrationIdentityError', 'OwnerLoginIdentityError', 'DbTargetError', 'DeploymentIdentityError', 'BindIdentityError', 'DatabaseStateError', 'BootstrapRefusal'].includes(name)
@@ -153,7 +160,7 @@ export function outcomeOf(error: unknown): StartupOutcome {
     return 'identity';
   }
   if (name === 'MigrationSessionDatabaseError') return 'identity';
-  if (['UnapprovedProductionMigrationError', 'MigrationApprovalError', 'UnsupportedUpgradeStartError'].includes(name)) return 'behind';
+  if (['UnapprovedProductionMigrationError', 'MigrationApprovalError', 'UnsupportedUpgradeStartError', 'UpgradeVersionTooOldError'].includes(name)) return 'behind';
   if (error instanceof Error && /needs the per-release approval|not a proven fresh install|APPROVAL_MODE=token needs/.test(error.message)) return 'behind';
   if (['PostCheckFailure', 'MigrationsStillPendingError'].includes(name)) return 'postCheck';
   return 'migrationFailed';
@@ -237,6 +244,12 @@ export interface MigrateOnStartDeps {
   onSession?: (pid: number) => void;
   /** Test seam: the allow-listed entity-cache epoch bump (default: cache-flush.ts runCacheFlush). */
   cacheFlush?: (namespace: string, env: Record<string, string | undefined>) => Promise<void>;
+  /**
+   * OWNER-DB-ULTIMATE Part B3: set ONLY by the manual `upgrade --force` command (command/upgrade.command.ts). The automatic
+   * start path (twenty-migrate.ts) never passes it, and no environment variable maps to it. Skips only the previous-version
+   * check; every logbook row of the run records forced = true.
+   */
+  upgradeForce?: true;
 }
 
 /** How long the warning-only epoch bump may hold up the start (the migration lock is still held). */
@@ -358,6 +371,7 @@ export async function runMigrateOnStart(config: MigrateOnStartConfig, deps: Migr
   let applied: string[] = [];
   let production = false;
   let guardEnvUsed: Record<string, string | undefined> = env;
+  let upgradeRun: UpgradeRun | null = null;
   const result = (outcome: StartupOutcome, extra: Partial<MigrateOnStartResult> = {}): MigrateOnStartResult => ({
     state: classification?.state ?? 'UNKNOWN',
     applied,
@@ -368,6 +382,7 @@ export async function runMigrateOnStart(config: MigrateOnStartConfig, deps: Migr
     policy: config.upgradeFailurePolicy,
     reason: outcome === 'ok' ? 'schema current' : outcome,
     checks: [],
+    upgrade: upgradeRun?.report ?? null,
     ...extra,
   });
 
@@ -379,8 +394,11 @@ export async function runMigrateOnStart(config: MigrateOnStartConfig, deps: Migr
     const approval = config.migrationApprovalMode === 'token' ? readMigrationApproval(env) : null;
     const seams = readTestSeams(env, { production, disposableTestDatabase: pre.disposableTestDatabase });
     if (seams.failAt || seams.stopBefore) log(`TEST SEAMS ACTIVE: failAt=${seams.failAt ?? '-'} stopBefore=${seams.stopBefore ?? '-'}`);
+    const testFailCommand = readTestFailCommand(env, { production, disposableTestDatabase: pre.disposableTestDatabase });
+    const run = new UpgradeRun({ codeVersion: readAppVersion(env), force: deps.upgradeForce === true, log, testFailCommand });
+    upgradeRun = run;
 
-    const run = await runner({
+    const locked = await runner({
       label: 'migrate-on-start',
       env: first.guardEnv,
       log,
@@ -402,6 +420,16 @@ export async function runMigrateOnStart(config: MigrateOnStartConfig, deps: Migr
         proof = p;
       },
       approvePending: approval === null ? undefined : (pending) => assertMigrationApproval(approval, pending),
+      // OWNER-DB-ULTIMATE Part B: the upgrade logbook (engine/core-modules/upgrade/upgrade-runner.ts), hook calls only.
+      beforeApply: async ({ query, classification: c, proof: p, code, guarded }) => {
+        const fresh = c.state === 'EMPTY' || c.state === 'BOOTSTRAP-PARTIAL' || p.fresh;
+        await run.beforeApply(query, {
+          fresh,
+          attribution: fresh ? null : attributeLedger(c.applied, code),
+          unrestrictedTarget: guarded.target === 'local' || guarded.target === 'test',
+        });
+      },
+      onApplyFailure: ({ query, error }) => run.onApplyFailure(query, error),
       afterMigrations: async ({ queryRunner, applied: done, guarded }) => {
         applied = done;
         const query: Query = (sql, parameters) => queryRunner.query(sql, parameters) as Promise<unknown[]>;
@@ -409,13 +437,23 @@ export async function runMigrateOnStart(config: MigrateOnStartConfig, deps: Migr
         const problems = await deployPostCheckProblems(query);
         const { blocking, warnings } = blockingPostCheckProblems(classification?.state ?? 'UNKNOWN', problems);
         for (const w of warnings) log(`WARNING (ledger ahead, C-1): ${w}`);
-        if (blocking.length) throw new PostCheckFailure(blocking);
+        if (blocking.length) {
+          const failure = new PostCheckFailure(blocking);
+          await run.onApplyFailure(query, failure);
+          throw failure;
+        }
         log(`post-checks passed (${done.length} applied)`);
+        await run.afterApply(query);
         await bumpEntityCacheAfterUpgrade({ applied: done, env, log, flush: deps.cacheFlush });
       },
     });
-    applied = run.applied;
+    applied = locked.applied;
     const state = (classification as Classification | null)?.state ?? 'UNKNOWN';
+    if (run.report.commandFailure) {
+      // OWNER-DB-ULTIMATE Part B3: only an upgrade COMMAND failed; every migration applied and the post-checks passed (the
+      // schema matches this code), so the API serves with upgrade:"failed" (exit 70, internal). The next start retries it.
+      return result('degradedContinue', { serve: true, reason: `upgrade command ${run.report.commandFailure.name} failed (${run.report.commandFailure.errorName}); schema current` });
+    }
     if (state === 'AHEAD') log('WARNING: the ledger is AHEAD of this image (rollback). Nothing applied; serving with the newer schema (expand-only releases only).');
     return result('ok', { reason: state === 'AHEAD' ? 'ledger ahead of the code (image rollback): warned, not refused (C-1)' : `schema current (${applied.length} applied)` });
   } catch (error) {
@@ -491,6 +529,20 @@ export async function runMigrateOnStart(config: MigrateOnStartConfig, deps: Migr
     }
     return result(outcome, { pending, failedMigration, serve: false, reason: `${message.slice(0, 200)} | ${verdict.reason}`, checks: verdict.checks });
   }
+}
+
+/**
+ * OWNER-DB-ULTIMATE Part B test seam: the upgrade command that fails, gated exactly like readTestSeams (NODE_ENV=test, a
+ * disposable test database, never production); a bad value or a seam outside that gate is a configuration refusal (64).
+ */
+export function readTestFailCommand(env: Record<string, string | undefined>, ctx: { production: boolean; disposableTestDatabase: boolean }): string | null {
+  const value = env[TEST_FAIL_COMMAND_VAR]?.trim() || null;
+  if (value === null) return null;
+  if (env.NODE_ENV !== 'test' || ctx.production || !ctx.disposableTestDatabase) {
+    throw new TestSeamRefusal(`${TEST_FAIL_COMMAND_VAR} is a test seam: only NODE_ENV=test on a disposable test database, never production. Refusing.`);
+  }
+  if (!/^[A-Za-z][A-Za-z0-9]{0,150}$/.test(value)) throw new TestSeamRefusal(`${TEST_FAIL_COMMAND_VAR} must be an upgrade command name. Refusing.`);
+  return value;
 }
 
 /**
