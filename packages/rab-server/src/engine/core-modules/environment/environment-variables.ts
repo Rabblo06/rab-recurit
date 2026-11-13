@@ -2001,11 +2001,4 @@ export class EnvironmentVariables {
   @IsOptional()
   @IsIn(['true', 'false'], { message: 'DISABLE_DB_MIGRATIONS must be exactly true or false' })
   DISABLE_DB_MIGRATIONS?: 'true' | 'false';
-
-  /**
-   * Retired (OWNER-DB-ULTIMATE Part B3): nothing sets it; api-prestart.sh refuses an inherited value.
-   */
-  @IsOptional()
-  @Matches(/^[A-Za-z0-9_.-]{1,200}$/, { message: 'CREWFLOW_UPGRADE_INCOMPLETE must be a migration name (letters, digits, _ - .) or unknown' })
-  CREWFLOW_UPGRADE_INCOMPLETE?: string;
 }
