@@ -7050,4 +7050,3 @@ Phase X Part 2 finding XA-08 (`docs/plans/PHASE-X-STAGE0-PART2.md` §2.6). Front
 - **Residual:** `rab-worker/.../helpers/email-process-child.cjs:33` (a forked fixture child) still reads the legacy
   `DATABASE_URL_UNPOOLED` the Jest guard writes; it moves with S6 (the parent passes the admin URL explicitly).
 - **Release 2 (S8):** the old name is refused; the strip lists keep both names permanently.
-```
