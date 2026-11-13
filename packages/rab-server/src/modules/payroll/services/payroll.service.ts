@@ -7,7 +7,7 @@ import {
   PayrollRecordStatusType,
   PermissionFlag,
 } from '@rab/shared';
-import { BadRequestException, ConflictException, ForbiddenException, Inject, Injectable, NotFoundException } from '@nestjs/common';
+import { BadRequestException, ConflictException, ForbiddenException, Inject, Injectable, NotFoundException, Optional } from '@nestjs/common';
 import { FieldPolicyService } from '../../identity/member-access/field-policy.service';
 import { EntityManager } from 'typeorm';
 
@@ -17,6 +17,7 @@ import { ResourceScopeService } from '../../../engine/core-modules/resource-scop
 import { AuthContext } from '../../../engine/core-modules/tenant/auth-context.interface';
 import { TenantContextService } from '../../../engine/core-modules/tenant/tenant-context.service';
 import { RealtimeEventService, RealtimeEventType } from '../../../engine/core-modules/realtime/realtime-event.service';
+import { ShiftStatementWakeService } from '../../../engine/core-modules/statement-wake/shift-statement-wake.service';
 import { payrollAudience, RealtimeRecipient } from '../../../engine/core-modules/realtime/realtime-recipients';
 import { PaginationDto, paginationSkipTake } from '../../../engine/dto/pagination.dto';
 import { assignmentTimeSql } from '../../scheduling/utils/assignment-time';
@@ -298,6 +299,15 @@ export class PayrollService {
   @Inject(FieldPolicyService)
   private readonly fieldPolicy!: FieldPolicyService;
 
+  /**
+   * Phase X J1b: after the approving (or retrying) transaction COMMITS, wake the Worker's statement dispatcher. A hint only:
+   * it writes nothing, a rollback discards it, and a lost wake leaves the committed `pending` row to the statement sweep.
+   * Optional and property-injected: absent in the Worker process and in unit tests (then the sweep alone delivers).
+   */
+  @Optional()
+  @Inject(ShiftStatementWakeService)
+  private readonly statementWake?: ShiftStatementWakeService;
+
   constructor(
     private readonly tenantContext: TenantContextService,
     private readonly permissions: PermissionsService,
@@ -559,6 +569,8 @@ export class PayrollService {
       [ids, ctx.workspaceId, PayrollRecordStatus.APPROVED, ctx.userId, PayrollRecordStatus.PENDING_APPROVAL],
     )) as [unknown, number];
     if (updated !== ids.length) throw new ConflictException('Payroll changed while you were approving it. Refresh and try again.');
+    // J1b: registered now, published only after the outermost commit (never on rollback); one per transaction.
+    this.statementWake?.afterCommit(manager);
     // C1b realtime (review F8): the payroll audience is the same for every record of this workspace — resolved at most
     // ONCE per approval (lazily, so still zero SQL while REALTIME_ENABLED is false), one event per record from it.
     let audienceOnce: Promise<RealtimeRecipient[]> | undefined;
@@ -590,6 +602,7 @@ export class PayrollService {
       if (record.statement_status !== 'failed') throw new ConflictException('Only a failed Approved Shift Statement can be retried.');
       await manager.query(
         `UPDATE payroll_record SET statement_status = 'pending', statement_attempts = 0, statement_error = NULL, updated_at = now() WHERE id = $1 AND statement_status = 'failed'`, [id]);
+      this.statementWake?.afterCommit(manager); // J1b: after commit only, as for an approval.
       await this.auditService.record(manager, ctx, AuditAction.SHIFT_STATEMENT_RETRY_REQUESTED, {
         entityType: 'payroll_record', entityId: id, metadata: { previousAttempts: Number(record.statement_attempts) },
       });
