@@ -128,9 +128,12 @@ describeIfDb('core.upgrade_migration (integration, OWNER-DB-ULTIMATE Part B)', (
   });
 
   it("'workspace_init' writes is_initial rows only for a workspace of the bound organisation", async () => {
+    // As markAsWorkspaceInitial does: the organisation bound by the tenant context, and rab.workspace_id bound to the new
+    // workspace (core.manager_workspace's own RLS decides what the policy's organisation check can see).
     const init = (w: SeededWorkspace, org: string, isInitial = true) =>
       tx(app, async () => {
         await tenant(app, org);
+        await app.query(`SELECT pg_catalog.set_config('rab.workspace_id', $1, true)`, [w.id]);
         await scope(app, 'workspace_init');
         await app.query(
           `INSERT INTO core.upgrade_migration (name, status, attempt, executed_by_version, is_initial, workspace_id) VALUES ($1, 'completed', 1, '0.6.0', $2, $3)`,
@@ -157,14 +160,20 @@ describeIfDb('core.upgrade_migration (integration, OWNER-DB-ULTIMATE Part B)', (
     for (const s of ['', 'upgrade', 'status', 'workspace_init']) {
       const direct = await tx(app, async () => {
         await scope(app, s);
-        if (s === 'workspace_init') await tenant(app, ws.org);
+        if (s === 'workspace_init') {
+          await tenant(app, ws.org);
+          await app.query(`SELECT pg_catalog.set_config('rab.workspace_id', $1, true)`, [ws.id]);
+        }
         return app.query('DELETE FROM core.upgrade_migration');
       });
       expect(direct.rowCount).toBe(0);
       const asOwner = await tx(app, async () => {
         await app.query('SET LOCAL ROLE rab_secure_owner');
         await scope(app, s);
-        if (s === 'workspace_init') await tenant(app, ws.org);
+        if (s === 'workspace_init') {
+          await tenant(app, ws.org);
+          await app.query(`SELECT pg_catalog.set_config('rab.workspace_id', $1, true)`, [ws.id]);
+        }
         return app.query('DELETE FROM core.upgrade_migration');
       });
       expect(asOwner.rowCount).toBe(0);
