@@ -130,7 +130,14 @@ export interface B1Interface {
   isVersionComplete(query: Query, version: string): Promise<boolean>;
   /** The start path (the migrate-on-start child twenty-migrate.ts) as a CHILD PROCESS; `killOnStep` SIGKILLs it on the step's start event. */
   start(db: string, opts?: { env?: Record<string, string>; killOnMigration?: string; asSuperuser?: boolean }): Promise<StartOutcome & { killed: boolean }>;
-  /** `command/main upgrade --force`, as a child process. */
+  /**
+   * The start path IN PROCESS with the target guard seamed to PRODUCTION (the release-floor spec's pattern): the history
+   * checks that a local / test target deliberately skips (decideUpgradeStart `unchecked`) apply as in production.
+   */
+  startProduction(db: string, opts?: { env?: Record<string, string> }): Promise<StartOutcome>;
+  /** The manual command's entry (command/upgrade.command.ts runUpgradeCommand) with `args`, in process. */
+  upgradeCommand(db: string, args: string[], opts?: { env?: Record<string, string> }): Promise<StartOutcome>;
+  /** `upgrade --force`. */
   forceUpgrade(db: string, opts?: { env?: Record<string, string> }): Promise<StartOutcome>;
   /** UPGRADE_COMMANDS[<major>-<minor>] of the current version. */
   upgradeCommands(): { name: string; timestamp: number }[];
@@ -237,6 +244,41 @@ function outcome(r: { code: number | null; lines: string[]; result: Record<strin
   };
 }
 
+interface MigrateOnStartModule {
+  runMigrateOnStart(config: Record<string, unknown>, deps: Record<string, unknown>): Promise<Record<string, unknown>>;
+}
+interface LockedRunnerModule {
+  runLockedMigrations(options: Record<string, unknown>): Promise<unknown>;
+}
+const STARTUP_EXIT: Record<string, number> = { ok: 0, config: 64, behind: 65, migrationFailed: 66, identity: 67, postCheck: 68, lockTimeout: 69, degradedContinue: 70 };
+
+function inProcessOutcome(r: Record<string, unknown>, lines: string[]): StartOutcome {
+  const exitCode = STARTUP_EXIT[String(r.outcome)] ?? null;
+  return outcome({ code: exitCode, lines, result: { ...r, exitCode } });
+}
+
+/** command/upgrade.command.ts runUpgradeCommand, in process; its stdout lines captured (and redacted), not printed. */
+async function runCommandEntry(db: string, args: string[], extra: Record<string, string> = {}): Promise<StartOutcome> {
+  const mod = require(join(SERVER_SRC, 'command', 'upgrade.command')) as { runUpgradeCommand(args: string[], env: NodeJS.ProcessEnv): Promise<number> };
+  const lines: string[] = [];
+  const original = console.log; // eslint-disable-line no-console
+  console.log = (...a: unknown[]) => void lines.push(redact(a.map(String).join(' '))); // eslint-disable-line no-console
+  let code: number;
+  try {
+    code = await mod.runUpgradeCommand(args, { NODE_ENV: 'test', PG_DATABASE_URL: withDatabase(urls.owner, db), ...extra } as NodeJS.ProcessEnv);
+  } finally {
+    console.log = original; // eslint-disable-line no-console
+  }
+  const res = lines.map((l) => /TWENTY_MIGRATE_RESULT (\{.*\})\s*$/.exec(l)).filter(Boolean).pop();
+  let result: Record<string, unknown> | null = null;
+  try {
+    result = res ? JSON.parse(res[1]!) : null;
+  } catch {
+    result = null;
+  }
+  return outcome({ code, lines, result });
+}
+
 /** B1's code, when it is on the branch under test; null otherwise. */
 export function b1(): B1Interface | null {
   const version = load<{ readAppVersion(env: NodeJS.ProcessEnv): string; majorMinorKey(v: string): string }>('upgrade-version');
@@ -245,13 +287,15 @@ export function b1(): B1Interface | null {
   if (!version || !sequence || !service || !LEDGER_MIGRATION_ON_BRANCH) return null;
   const registry = load<{ UPGRADE_COMMANDS: Record<string, { name: string; timestamp: number }[]> }>(join('upgrade-commands', 'registry'));
   const migrateEntry = join(SERVER_SRC, 'database', 'typeorm', 'scripts', 'migrate', 'twenty', 'twenty-migrate.ts');
-  const commandEntry = join(SERVER_SRC, 'command', 'main.ts');
   const currentVersion = version.readAppVersion(process.env);
   const stepsOf = (v: string) => sequence.stepsForVersion(v).map((s) => (typeof s === 'string' ? s : s.name));
   return {
     currentVersion,
     stepsOf,
     isVersionComplete: async (query, v) => {
+      // The caller holds an open transaction; the `status` scope (read only) is what the upgrade code reads under.
+      // (B1's withUpgradeScope opens and COMMITs its own transaction, which would commit a spec's rolled-back fixture.)
+      await query('SELECT pg_catalog.set_config($1, $2, true)', [UPGRADE_SCOPE_SETTING, 'status']);
       const steps = stepsOf(v);
       return service.isLastAttemptCompleted(query, { name: steps[steps.length - 1]!, workspaceId: null });
     },
@@ -260,16 +304,41 @@ export function b1(): B1Interface | null {
       const r = await child(migrateEntry, [], childEnv(url, opts.env), opts.killOnMigration);
       return { ...outcome(r), killed: r.killed };
     },
-    forceUpgrade: async (db, opts = {}) => {
-      // The manual command (interface §3). It needs the runtime environment the command module validates; the spec's
-      // own process environment (the test env) is passed through, with the database pointed at `db`.
-      const env = { ...process.env, ...childEnv(withDatabase(urls.owner, db), opts.env) } as NodeJS.ProcessEnv;
-      delete env.CREWFLOW_MIGRATE_ON_START;
-      return outcome(await child(commandEntry, ['upgrade', '--force'], env));
+    startProduction: async (db, opts = {}) => {
+      const mos = require(join(SERVER_SRC, 'database', 'typeorm', 'scripts', 'migrate', 'owner-login', 'migrate-on-start')) as MigrateOnStartModule;
+      const runnerMod = require(join(SERVER_SRC, 'database', 'typeorm', 'scripts', 'migrate', 'locked-migration-runner')) as LockedRunnerModule;
+      const lines: string[] = [];
+      const r = await mos.runMigrateOnStart(
+        { migrationApprovalMode: 'none', upgradeFailurePolicy: 'continue' },
+        {
+          env: { NODE_ENV: 'test', PG_DATABASE_URL: withDatabase(urls.owner, db), ...(opts.env ?? {}) },
+          log: (l: string) => lines.push(redact(l)),
+          runner: (o: Record<string, unknown>) =>
+            runnerMod.runLockedMigrations({ ...o, assertTarget: async () => ({ target: 'production', app: { database: db, host: '127.0.0.1' } }), dotenvValues: {} }),
+        },
+      );
+      return inProcessOutcome(r, lines);
     },
+    upgradeCommand: (db, args, opts = {}) => runCommandEntry(db, args, opts.env),
+    forceUpgrade: (db, opts = {}) => runCommandEntry(db, ['--force'], opts.env),
     upgradeCommands: () => registry?.UPGRADE_COMMANDS[version.majorMinorKey(currentVersion)] ?? [],
-    runCommand: async () => {
-      throw new InterfaceGap('no documented way to run ONE upgrade command alone (needed for the run-twice idempotence test, Part B3)');
+    runCommand: async (db, name) => {
+      const cmd = (registry?.UPGRADE_COMMANDS[version.majorMinorKey(currentVersion)] ?? []).find((c) => c.name === name) as
+        | { run(ctx: { query: Query; log: (l: string) => void }): Promise<void> }
+        | undefined;
+      if (!cmd) throw new InterfaceGap(`upgrade command ${name} is not in UPGRADE_COMMANDS`);
+      // As the runner does: the owner login, the migration lock held on the session, autocommit.
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const { Client: PgClient } = require('pg') as typeof import('pg');
+      const c = new PgClient({ connectionString: withDatabase(urls.owner, db), application_name: 'b2-ledger-run-command' });
+      await c.connect();
+      try {
+        await c.query(`SELECT pg_advisory_lock(${MIGRATION_LOCK_KEY_SQL})`);
+        await cmd.run({ query: async (sql, params) => (await c.query(sql, params as unknown[])).rows, log: () => undefined });
+      } finally {
+        await c.query(`SELECT pg_advisory_unlock(${MIGRATION_LOCK_KEY_SQL})`).catch(() => undefined);
+        await c.end();
+      }
     },
     seams: {
       failMigrationEnv: (migrationClass) => ({ CREWFLOW_MIGRATION_TEST_FAIL_AT: migrationClass }),

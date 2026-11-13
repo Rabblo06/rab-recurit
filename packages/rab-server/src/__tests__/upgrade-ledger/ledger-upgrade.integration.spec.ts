@@ -126,7 +126,8 @@ describeIfB1("the upgrade logbook on real databases (Part B3, B1's start path an
     const names = await cl.migrationNames(db);
     await cl.admin(db, 'DELETE FROM core.migrations WHERE name = ANY ($1::text[])', [names.slice(-4)]);
     const before = { names: await cl.migrationNames(db), facts: await cl.facts(db) };
-    const out = await B1.start(db);
+    // A production target: a local / test target deliberately leaves an unattributable history unchecked (B1 `unchecked`).
+    const out = await B1.startProduction(db);
     expect([out.exitCode, out.serve]).toEqual([EXIT.behind, false]);
     expect(await cl.migrationNames(db)).toEqual(before.names);
     expect(await cl.ledgerExists(db)).toBe(false);
@@ -138,7 +139,8 @@ describeIfB1("the upgrade logbook on real databases (Part B3, B1's start path an
     await cl.createDatabase(db, TPL254);
     await cl.admin(db, "INSERT INTO core.migrations (timestamp, name) VALUES (1786721450000, 'RefreshTokenReplacedByIndex1786721450000')");
     const before = await cl.migrationNames(db);
-    const out = await B1.start(db);
+    // A production target: a local / test target deliberately leaves an unattributable history unchecked (B1 `unchecked`).
+    const out = await B1.startProduction(db);
     expect([out.exitCode, out.serve]).toEqual([EXIT.behind, false]);
     expect(await cl.migrationNames(db)).toEqual(before);
     expect(await cl.ledgerExists(db)).toBe(false);
@@ -276,6 +278,13 @@ describeIfB1("the upgrade logbook on real databases (Part B3, B1's start path an
         // The previous-version refusal (65) or env validation refusing an unknown variable (64): never applied, never served.
         expect([value, [EXIT.behind, EXIT.config].includes(out.exitCode as 64 | 65), out.serve]).toEqual([value, true, false]);
       }
+      // The manual command itself takes `--force` / `-f` only: look-alikes are a usage refusal (64), never a forced run.
+      for (const args of [['--force=true'], ['--forced'], ['force'], ['--FORCE'], ['--force', 'extra']]) {
+        const out = await B1.upgradeCommand(db, args);
+        expect([args.join(' '), out.exitCode]).toEqual([args.join(' '), EXIT.config]);
+      }
+      // And the command WITHOUT --force refuses like the start path.
+      expect((await B1.upgradeCommand(db, [])).exitCode).toBe(EXIT.behind);
       expect(ids(await cl.ledger(db))).toEqual(before);
     });
 
