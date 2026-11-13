@@ -16,6 +16,7 @@ import { verifiedCrewflowUrl } from './helpers/verified-role-database';
 import { runtimeChildBaseEnv } from './helpers/runtime-child-env';
 import { expectedWorkspacePolicyCount } from '@rab/server/database/typeorm/workspace-schema/v1/server-path-template-venue-team-admin';
 import { LATEST_WORKSPACE_MODULE_VERSION } from '@rab/server/database/typeorm/workspace-schema/workspace-schema-modules';
+import { integrationTestDatabaseReady } from '@rab/server/database/typeorm/core/integration-test-database-gate';
 
 /**
  * Worker credential isolation checkpoint, item 1 of the "finish" mandate: the existing
@@ -33,7 +34,7 @@ import { LATEST_WORKSPACE_MODULE_VERSION } from '@rab/server/database/typeorm/wo
  * process reads to reach PostgreSQL or Redis is passed explicitly, so `dotenv` (which never overrides a set variable) cannot
  * substitute a value from the developer's `.env` or `.env.provisioner`.
  */
-const RUN = Boolean(process.env.DATABASE_URL);
+const RUN = integrationTestDatabaseReady();
 /**
  * L-class (owner-login architecture): this suite exercises the SUPERSEDED separate workspace-provisioner process, which
  * needs a `crewflow` login (TEST_DATABASE_CREWFLOW_URL) that does not exist under the owner login. Provisioning now runs

@@ -25,8 +25,9 @@ import { WorkspaceHostLookupService } from '../../engine/core-modules/workspace-
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
 import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-pipe';
+import { integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
 
-const RUN = Boolean(process.env.DATABASE_URL) && process.env.HOST_LABEL_CONTRACT_DB === '1';
+const RUN = integrationTestDatabaseReady() && process.env.HOST_LABEL_CONTRACT_DB === '1';
 const describeContract = RUN ? describe : describe.skip;
 const ORIGIN = 'http://localhost:5173';
 

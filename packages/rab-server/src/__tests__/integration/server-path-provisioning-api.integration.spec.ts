@@ -16,6 +16,7 @@ import { createAdminDataSource } from './helpers/admin-datasource';
 import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
 import { withServerProvisioningDeferred } from '../../modules/manager-workspace/services/workspace-provisioning-test-seam';
 import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-pipe';
+import { integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
 
 /**
  * Server-path workspace provisioning — SERVER layer (owner's brief §13). The real HTTP route `POST
@@ -24,7 +25,7 @@ import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-
  * database's superuser connection. No mocks of the provisioning path.
  */
 // Needs core.provision_workspace (migration 1786719500000), which every database migrated from the chain now has.
-const RUN = Boolean(process.env.DATABASE_URL);
+const RUN = integrationTestDatabaseReady();
 const describeIfDb = RUN ? describe : describe.skip;
 
 describeIfDb('server-path workspace provisioning — API layer (two replicas, crewflow_app)', () => {

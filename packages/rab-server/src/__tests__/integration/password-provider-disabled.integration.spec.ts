@@ -12,6 +12,7 @@ import { PasswordResetTokenPurpose } from '@rab/shared';
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
 import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-pipe';
+import { integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
 
 /**
  * CF-06 (owner decision 2026-10-15): an organisation that turns password sign-in off gets it enforced by the backend for
@@ -19,7 +20,7 @@ import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-
  * exclusively staff and/or venue_manager, signing in to their own mobile app) keeps password sign-in and recovery. A
  * spoofed mobile header never lets a manager-tier account bypass the setting. Before: no check anywhere.
  */
-const RUN = Boolean(process.env.DATABASE_URL);
+const RUN = integrationTestDatabaseReady();
 const describeIfDb = RUN ? describe : describe.skip;
 const NEW_PASSWORD = 'Correct-Horse-42-battery-staple'; // gitleaks:allow (test-only fixture password)
 

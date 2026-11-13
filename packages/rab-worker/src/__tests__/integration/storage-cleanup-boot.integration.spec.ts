@@ -17,6 +17,7 @@ import { resolveIntervalMs, SCAN_JOBS } from '../../core/scheduler/scan-jobs';
 import { WorkerDependencies } from '../../core/scheduler/worker-dependencies';
 import { MaintenanceScanProcessor } from '../../queues/rab-maintenance/maintenance.processors';
 import { WorkerModule } from '../../worker.module';
+import { integrationTestDatabaseReady } from '@rab/server/database/typeorm/core/integration-test-database-gate';
 
 /**
  * Phase A (storage) — the Worker's storage-cleanup scan on the REAL WorkerModule (real DI: ModuleRef + the bounded Redis
@@ -26,7 +27,7 @@ import { WorkerModule } from '../../worker.module';
  *  - a stale / absent stamp still runs it (the 24 h cadence is kept), and the success is stamped;
  *  - two replicas at once: exactly one reconciles, the other skips on the lock and is not stamped.
  */
-const RUN = Boolean(process.env.DATABASE_URL && process.env.REDIS_URL);
+const RUN = integrationTestDatabaseReady() && Boolean(process.env.REDIS_URL);
 const describeIfDb = RUN ? describe : describe.skip;
 jest.setTimeout(180_000);
 

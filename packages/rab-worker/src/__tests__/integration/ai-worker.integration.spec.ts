@@ -23,8 +23,9 @@ import { ProcessorExplorer, validateHandlerRegistry } from '../../core/scheduler
 import { CONSUMER_QUEUES } from '../../core/scheduler/queue-registry';
 import { AiTurnConsumer } from '../../queues/rab-ai/ai.processors';
 import { WorkerModule } from '../../worker.module';
+import { integrationTestDatabaseReady } from '@rab/server/database/typeorm/core/integration-test-database-gate';
 
-const RUN = Boolean(process.env.DATABASE_URL);
+const RUN = integrationTestDatabaseReady();
 const describeIfDb = RUN ? describe : describe.skip;
 
 /**

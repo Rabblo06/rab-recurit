@@ -9,8 +9,9 @@ import { AuditService } from '../../engine/core-modules/audit/audit.service';
 import { TenantContextService } from '../../engine/core-modules/tenant/tenant-context.service';
 import { Test, TestingModule } from '@nestjs/testing';
 import { createAdminDataSource } from './helpers/admin-datasource';
+import { integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
 
-const describeIfDb = process.env.DATABASE_URL ? describe : describe.skip;
+const describeIfDb = integrationTestDatabaseReady() ? describe : describe.skip;
 
 /**
  * P2.9A — Super Admin bootstrap is now email-only (no `BOOTSTRAP_ADMIN_PASSWORD`): a brand-new

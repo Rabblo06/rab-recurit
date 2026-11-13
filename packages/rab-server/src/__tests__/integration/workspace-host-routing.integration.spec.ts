@@ -30,8 +30,9 @@ import { buildCorsOptionsDelegate, WorkspaceOriginTrustService } from '../../eng
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
 import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-pipe';
+import { integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
 
-const RUN = Boolean(process.env.DATABASE_URL);
+const RUN = integrationTestDatabaseReady();
 const describeIfDb = RUN ? describe : describe.skip;
 const DEFAULT_ORIGIN = 'http://localhost:5173';
 

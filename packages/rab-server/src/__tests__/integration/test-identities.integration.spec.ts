@@ -14,6 +14,7 @@ import { createAdminDataSource } from './helpers/admin-datasource';
 import { TestIdentityFactory, TestSetupError } from './helpers/test-identities';
 import { generateFixturePassword } from './helpers/fixture-password';
 import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-pipe';
+import { integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
 
 const TEST_PASSWORD = generateFixturePassword();
 
@@ -25,7 +26,7 @@ const TEST_PASSWORD = generateFixturePassword();
  * model allows, and a synthetic role key (`owner-<uuid>`, `manager-<uuid>`,
  * `everything`) is still denied with APPLICATION_ACCESS_DENIED.
  */
-const RUN = Boolean(process.env.DATABASE_URL);
+const RUN = integrationTestDatabaseReady();
 const describeIfDb = RUN ? describe : describe.skip;
 
 describeIfDb('shared test identity factory + application access (integration)', () => {

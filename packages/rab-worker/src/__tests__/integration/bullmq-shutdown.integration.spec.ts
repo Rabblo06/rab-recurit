@@ -8,6 +8,7 @@ import { BullmqScheduler, closeWorkersBounded, startBullmqScheduler } from '../.
 import { buildHandlerRegistry } from '../../core/scheduler/processor-explorer';
 import { SCAN_JOBS, schedulerIdOf } from '../../core/scheduler/scan-jobs';
 import { WorkerRuntime } from '../../core/runtime/worker-runtime';
+import { integrationTestDatabaseReady } from '@rab/server/database/typeorm/core/integration-test-database-gate';
 
 /**
  * Lane A M6/M7 — shutdown with work in flight, against the real disposable Redis + PostgreSQL:
@@ -20,7 +21,7 @@ import { WorkerRuntime } from '../../core/runtime/worker-runtime';
 jest.setTimeout(180_000);
 const REDIS_URL = process.env.REDIS_URL;
 const DB_URL = process.env.DATABASE_URL;
-const describeIf = REDIS_URL && DB_URL ? describe : describe.skip;
+const describeIf = REDIS_URL && integrationTestDatabaseReady() ? describe : describe.skip;
 const quiet = { log: () => undefined, warn: () => undefined, error: () => undefined } as unknown as Logger;
 // A long scan in real life. Phase D (D3) gave storage cleanup firstRunAfterInterval (a new scheduler's first job is then
 // due one interval later); this suite needs the first job to run at once, so it opts out.

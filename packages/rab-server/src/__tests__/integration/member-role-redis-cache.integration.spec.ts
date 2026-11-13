@@ -9,6 +9,7 @@ import { DataSource } from 'typeorm';
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
 import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-pipe';
+import { integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
 
 /**
  * Release gate J — member roles with BOTH auth caches ENABLED (USER_SESSION_CACHE_ENABLED, AUTH_CONTEXT_CACHE_ENABLED)
@@ -18,7 +19,7 @@ import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-
  * change, a Team role change, a suspension or a logout; a Redis flush or disconnect never grants or keeps access;
  * caches are keyed per organisation / session / workspace so another workspace's entries can never be served.
  */
-const RUN = Boolean(process.env.DATABASE_URL);
+const RUN = integrationTestDatabaseReady();
 const describeIfDb = RUN ? describe : describe.skip;
 const STRONG = 'Correct-Horse-42-battery';
 const ORIGIN = 'http://localhost:5173';

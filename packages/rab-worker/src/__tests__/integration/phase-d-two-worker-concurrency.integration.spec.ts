@@ -46,6 +46,7 @@ import type { ReportDocument } from '../../queues/rab-reports/render-pdf.util';
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { bookBeforeDeadline } from './helpers/book-before-deadline';
 import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
+import { integrationTestDatabaseReady } from '@rab/server/database/typeorm/core/integration-test-database-gate';
 
 /**
  * Phase D wave 4 — two-Worker concurrency and failure tests (owner §10), against the REAL Phase D SQL on rab_c1e and the
@@ -68,7 +69,7 @@ import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
  */
 const WORKER_URL = process.env.TEST_DATABASE_WORKER_URL;
 const APP_URL = process.env.TEST_DATABASE_URL;
-const RUN = process.env.PHASE_D_SQL_APPROVED === 'true' && Boolean(WORKER_URL && APP_URL && process.env.DATABASE_URL);
+const RUN = process.env.PHASE_D_SQL_APPROVED === 'true' && Boolean(WORKER_URL && APP_URL) && integrationTestDatabaseReady();
 const REDIS_CONTAINER = process.env.PHASE_D_REDIS_CONTAINER;
 const describeIfApproved = RUN ? describe : describe.skip;
 const TEST_ENV = 'inttest';

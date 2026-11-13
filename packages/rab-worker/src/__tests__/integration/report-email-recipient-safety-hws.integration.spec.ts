@@ -30,6 +30,7 @@ import { runFinalTimesheetCycle } from '../../queues/rab-reports/final-timesheet
 import { runShiftReportSchedulerCycle } from '../../queues/rab-reports/shift-report-scheduler.job';
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
+import { integrationTestDatabaseReady } from '@rab/server/database/typeorm/core/integration-test-database-gate';
 
 /**
  * REPORT EMAIL SAFETY under HWS routing (security review S-2). With `HWS_RUNTIME_ENABLED=true` the workspace business
@@ -47,7 +48,7 @@ import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
  * from the app's instance — the test database's app config runs HWS off), real jobs and Playwright; only the email
  * provider is a mock.
  */
-const RUN = Boolean(process.env.DATABASE_URL);
+const RUN = integrationTestDatabaseReady();
 const describeIfDb = RUN ? describe : describe.skip;
 
 interface OutboxRow {

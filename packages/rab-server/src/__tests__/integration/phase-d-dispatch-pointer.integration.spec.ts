@@ -18,6 +18,7 @@ import {
 } from '../../database/typeorm/core/worker-dispatch-pointer-sql';
 import { describeDatabaseUrl } from '../../database/typeorm/core/test-database-guard';
 import { provisionServerPath, provisionTypeScript, seedWorkspace, sqlstateOf, SeededWorkspace } from './helpers/workspace-fixtures';
+import { integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
 
 /**
  * Phase D (D1/D2) — security and behaviour of core.worker_dispatch_pointer, its claim / release definers and the pointer
@@ -46,7 +47,7 @@ import { provisionServerPath, provisionTypeScript, seedWorkspace, sqlstateOf, Se
  *   - NOTIFY crewflow_worker_wake only when the session enabled crewflow.dispatch_notify (E-1), label only, after commit.
  */
 const WORKER_URL = process.env.TEST_DATABASE_WORKER_URL;
-const RUN = process.env.PHASE_D_SQL_APPROVED === 'true' && Boolean(process.env.TEST_DATABASE_URL && process.env.TEST_DATABASE_URL_UNPOOLED && WORKER_URL);
+const RUN = process.env.PHASE_D_SQL_APPROVED === 'true' && Boolean(WORKER_URL) && integrationTestDatabaseReady();
 const describeIfApproved = RUN ? describe : describe.skip;
 
 describeIfApproved('Phase D dispatch pointer (integration; needs the approved Phase D migrations)', () => {

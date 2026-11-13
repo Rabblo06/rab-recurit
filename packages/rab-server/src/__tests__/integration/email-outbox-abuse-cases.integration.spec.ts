@@ -22,6 +22,7 @@ import { createAdminDataSource } from './helpers/admin-datasource';
 import { TestIdentityFactory } from './helpers/test-identities';
 import { generateFixturePassword } from './helpers/fixture-password';
 import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-pipe';
+import { integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
 
 const FIXTURE_PASSWORD = generateFixturePassword();
 
@@ -35,7 +36,7 @@ const FIXTURE_PASSWORD = generateFixturePassword();
  * now lives in `@rab/worker`, which `rab-server` must not depend on (the
  * dependency already runs the other way). Real Postgres, RLS on, no mocks.
  */
-const RUN = Boolean(process.env.DATABASE_URL);
+const RUN = integrationTestDatabaseReady();
 const describeIfDb = RUN ? describe : describe.skip;
 
 describeIfDb('email outbox abuse cases (integration)', () => {

@@ -14,13 +14,14 @@ import { loadSystemRoleDefaultPermissions } from '../../modules/identity/service
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
 import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-pipe';
+import { integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
 
 /**
  * Recurring 403 on the Users page (2026-10-15, RECURRING_403_AUTHORIZATION_ROOT_CAUSE_REPORT.md). The permission catalogue
  * was never created by migrations, so on a clean rebuild a Platform-Admin CEO held 4 of its 33 permissions and
  * /job-roles, /staff and /managers answered 403. Runs against a test database built by the migration chain alone.
  */
-const RUN = Boolean(process.env.DATABASE_URL);
+const RUN = integrationTestDatabaseReady();
 const describeIfDb = RUN ? describe : describe.skip;
 
 describeIfDb('permission catalogue and operational access (integration)', () => {

@@ -22,6 +22,7 @@ import { TenantContextService } from '../../engine/core-modules/tenant/tenant-co
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { TestIdentityFactory } from './helpers/test-identities';
 import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-pipe';
+import { integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
 
 /**
  * Wave 5 lane OPS — "the L1 never delays a revocation". With EVERY cache on (auth context, user session, core entity,
@@ -30,7 +31,7 @@ import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-
  * L1 (only the static catalogue / routing metadata do) and the per-request authorisation path stays PostgreSQL-
  * authoritative (security version vector).
  */
-const RUN = Boolean(process.env.DATABASE_URL && process.env.REDIS_URL);
+const RUN = integrationTestDatabaseReady() && Boolean(process.env.REDIS_URL);
 const describeIfDb = RUN ? describe : describe.skip;
 jest.setTimeout(120_000);
 

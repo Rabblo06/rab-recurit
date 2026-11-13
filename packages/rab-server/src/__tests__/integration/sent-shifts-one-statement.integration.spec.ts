@@ -19,6 +19,7 @@ import { TenantContextService } from '../../engine/core-modules/tenant/tenant-co
 import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-pipe';
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
+import { integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
 
 /**
  * XP-05 (Phase X Part 2, X4): `GET /shifts/sent` now runs ONE statement for the page rows and the tab counts
@@ -31,7 +32,7 @@ import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
  *  - another venue manager's scope; a second organisation's requests (one carrying this manager's user id) never appear;
  * Then through the service and HTTP: one classified statement per call (was two), totals/counts/ids as the legacy pair.
  */
-const RUN = Boolean(process.env.DATABASE_URL);
+const RUN = integrationTestDatabaseReady();
 const describeIfDb = RUN ? describe : describe.skip;
 jest.setTimeout(300_000);
 

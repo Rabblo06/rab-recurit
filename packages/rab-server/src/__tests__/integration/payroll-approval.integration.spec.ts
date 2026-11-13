@@ -18,6 +18,7 @@ import { createAdminDataSource } from './helpers/admin-datasource';
 import { bookBeforeDeadline } from './helpers/book-before-deadline';
 import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
 import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-pipe';
+import { integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
 
 /**
  * Payroll approval (PayrollRecord1786718800000, owner rule 2026-10-20): Clock out -> report finalised (attendance
@@ -25,7 +26,7 @@ import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-
  * the staff member's History projection carries payrollStatus approved + payrollApprovedPence. Real HTTP, real
  * PostgreSQL with RLS on (crewflow_app), no mocks. The scenarios below share one world and run in order.
  */
-const RUN = Boolean(process.env.DATABASE_URL);
+const RUN = integrationTestDatabaseReady();
 const describeIfDb = RUN ? describe : describe.skip;
 
 jest.setTimeout(240_000);

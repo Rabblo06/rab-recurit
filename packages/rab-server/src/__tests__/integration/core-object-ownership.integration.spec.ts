@@ -2,8 +2,9 @@ import { DataSource } from 'typeorm';
 
 import { ReconcileSuperuserOwnedCoreObjects1786719600000 } from '../../database/typeorm/core/migrations/1786719600000-ReconcileSuperuserOwnedCoreObjects';
 import { createAdminDataSource } from './helpers/admin-datasource';
+import { integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
 
-const describeIfDb = process.env.DATABASE_URL ? describe : describe.skip;
+const describeIfDb = integrationTestDatabaseReady() ? describe : describe.skip;
 
 /**
  * Foundation fix P3 (2026-10-22): no `core` object may be owned by a superuser, and `core.navigation_layout` is owned by

@@ -10,6 +10,7 @@ import {
   splitGolden,
 } from '../../database/typeorm/core/security-posture';
 import { resolveIntegrationTestDatabase } from '../../database/typeorm/core/test-database-guard';
+import { integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
 
 /**
  * Phase D wave 3 (owner-approved OD-2 follow-up): a PERSISTENT database- or role-level `crewflow.dispatch_notify` would
@@ -20,7 +21,7 @@ import { resolveIntegrationTestDatabase } from '../../database/typeorm/core/test
  * Runs on the disposable test database as it is (no Phase D SQL needed). Every ALTER ROLE / ALTER DATABASE … SET is made
  * by the bootstrap superuser inside a transaction that is ALWAYS rolled back (pg_db_role_setting is transactional).
  */
-const RUN = Boolean(process.env.TEST_DATABASE_URL && process.env.TEST_DATABASE_URL_UNPOOLED);
+const RUN = integrationTestDatabaseReady();
 const describeIfDb = RUN ? describe : describe.skip;
 jest.setTimeout(120_000);
 

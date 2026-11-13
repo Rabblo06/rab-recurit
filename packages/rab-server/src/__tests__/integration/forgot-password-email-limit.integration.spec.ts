@@ -31,8 +31,9 @@ import { buildTrustProxyPredicate } from '../../engine/utils/trusted-proxy.util'
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { clearThrottleState } from './helpers/throttle-state';
 import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
+import { integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
 
-const RUN = Boolean(process.env.DATABASE_URL);
+const RUN = integrationTestDatabaseReady();
 const describeIfDb = RUN ? describe : describe.skip;
 
 describeIfDb('X1.4 forgot-password limit per address (REAL limiter, integration)', () => {

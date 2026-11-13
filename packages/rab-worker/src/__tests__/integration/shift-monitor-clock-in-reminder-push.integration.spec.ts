@@ -39,10 +39,11 @@ import { Venue } from '@rab/server/modules/venue/entities/venue.entity';
 import { runShiftMonitorCycle } from '../../queues/rab-shifts/shift-monitor.job';
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { generateFixturePassword } from './helpers/fixture-password';
+import { integrationTestDatabaseReady } from '@rab/server/database/typeorm/core/integration-test-database-gate';
 
 const FIXTURE_PASSWORD = generateFixturePassword();
 
-const RUN = Boolean(process.env.DATABASE_URL);
+const RUN = integrationTestDatabaseReady();
 const describeIfDb = RUN ? describe : describe.skip;
 jest.setTimeout(120_000);
 

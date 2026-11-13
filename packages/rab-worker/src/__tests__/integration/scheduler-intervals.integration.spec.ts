@@ -12,6 +12,7 @@ import { isScanJobEnabled, resolveIntervalMs, SCAN_JOBS, ScanJobDefinition, sche
 import { WorkerRuntime } from '../../core/runtime/worker-runtime';
 import { defaultIntervalEnv } from './helpers/default-interval-env';
 import { COMBINED_SHIFT_SCAN_ID, EXPECTED_SCAN_SCHEDULER_IDS, SEPARATE_MODE_SCAN_IDS } from './helpers/expected-scan-jobs';
+import { integrationTestDatabaseReady } from '@rab/server/database/typeorm/core/integration-test-database-gate';
 
 /**
  * Phase A pa-intervals — configurable intervals + the push/realtime enable predicate against a REAL Redis (the disposable
@@ -21,7 +22,7 @@ import { COMBINED_SHIFT_SCAN_ID, EXPECTED_SCAN_SCHEDULER_IDS, SEPARATE_MODE_SCAN
 jest.setTimeout(120_000);
 const REDIS_URL = process.env.REDIS_URL;
 const DB_URL = process.env.DATABASE_URL;
-const describeIf = REDIS_URL && DB_URL ? describe : describe.skip;
+const describeIf = REDIS_URL && integrationTestDatabaseReady() ? describe : describe.skip;
 
 const quietLogger = { log: () => undefined, warn: () => undefined, error: () => undefined } as unknown as Logger;
 const freshPrefix = () => `crewflow:it-pa-${randomBytes(4).toString('hex')}:bull`;

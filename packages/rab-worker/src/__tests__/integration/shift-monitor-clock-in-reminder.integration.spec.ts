@@ -23,6 +23,7 @@ import { Attendance } from '@rab/server/modules/attendance/entities/attendance.e
 import { runShiftMonitorCycle } from '../../queues/rab-shifts/shift-monitor.job';
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { generateFixturePassword } from './helpers/fixture-password';
+import { integrationTestDatabaseReady } from '@rab/server/database/typeorm/core/integration-test-database-gate';
 
 const FIXTURE_PASSWORD = generateFixturePassword();
 
@@ -38,7 +39,7 @@ const FIXTURE_PASSWORD = generateFixturePassword();
  * `process.env` mid-run never reaches an already-compiled instance, so the
  * two cases need two separate app instances, not one file toggling a flag).
  */
-const RUN = Boolean(process.env.DATABASE_URL);
+const RUN = integrationTestDatabaseReady();
 const describeIfDb = RUN ? describe : describe.skip;
 jest.setTimeout(120_000);
 

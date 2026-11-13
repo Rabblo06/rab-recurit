@@ -35,9 +35,10 @@ import { runPushDispatchCycle } from '../../queues/rab-push/push-dispatch.job';
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { cancelLeftoverClaimableEmails } from './helpers/email-leftovers';
 import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
+import { integrationTestDatabaseReady } from '@rab/server/database/typeorm/core/integration-test-database-gate';
 
 jest.setTimeout(90_000);
-const RUN = Boolean(process.env.DATABASE_URL);
+const RUN = integrationTestDatabaseReady();
 const describeIfDb = RUN ? describe : describe.skip;
 
 describeIfDb('D-Q3 notify() after-commit fast publish (integration)', () => {

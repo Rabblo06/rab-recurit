@@ -3,6 +3,7 @@ import { Client } from 'pg';
 
 import { describeDatabaseUrl } from '../../database/typeorm/core/test-database-guard';
 import { sqlstateOf } from './helpers/workspace-fixtures';
+import { integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
 
 /**
  * Phase D / D8 — F-1 regression at the database layer: the account-invite cleanup works on the RUNTIME side (the Worker's
@@ -19,7 +20,7 @@ import { sqlstateOf } from './helpers/workspace-fixtures';
  * users and 38 invites — exactly what the cycle sees today.
  */
 const WORKER_URL = process.env.TEST_DATABASE_WORKER_URL;
-const RUN = process.env.PHASE_D_SQL_APPROVED === 'true' && Boolean(process.env.TEST_DATABASE_URL && process.env.TEST_DATABASE_URL_UNPOOLED && WORKER_URL);
+const RUN = process.env.PHASE_D_SQL_APPROVED === 'true' && Boolean(WORKER_URL) && integrationTestDatabaseReady();
 const describeIfApproved = RUN ? describe : describe.skip;
 
 describeIfApproved('Phase D F-1: account-invite cleanup definers (integration; needs the approved migration)', () => {

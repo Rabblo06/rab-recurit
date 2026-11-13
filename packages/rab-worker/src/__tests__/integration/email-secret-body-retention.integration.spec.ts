@@ -26,6 +26,7 @@ import { createEmailSendProcessor } from '../../queues/rab-email/email-send.proc
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { cancelLeftoverClaimableEmails } from './helpers/email-leftovers';
 import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
+import { integrationTestDatabaseReady } from '@rab/server/database/typeorm/core/integration-test-database-gate';
 
 /**
  * F1 (Wave 1 lane S, migration EmailOutboxSecretBodyScrub1786719710000): a rendered email body that carries a bearer link
@@ -40,7 +41,7 @@ import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
  */
 jest.setTimeout(60_000);
 
-const RUN = Boolean(process.env.DATABASE_URL);
+const RUN = integrationTestDatabaseReady();
 const describeIfDb = RUN ? describe : describe.skip;
 
 describeIfDb('F1: token-bearing email bodies are not retained after a terminal state', () => {

@@ -4,6 +4,7 @@ import { Client } from 'pg';
 import { describeDatabaseUrl } from '../../database/typeorm/core/test-database-guard';
 import { DUE_CONSTANTS, F2_CUTOVER_SWEEP_SQL } from '../../database/typeorm/core/worker-dispatch-pointer-sql';
 import { provisionTypeScript, seedWorkspace, sqlstateOf, SeededWorkspace } from './helpers/workspace-fixtures';
+import { integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
 
 /**
  * Phase D, finding F2 (owner-approved 2026-11-01, option C; migration StatementPointerPhysicalIdentity1786721350000).
@@ -19,7 +20,7 @@ import { provisionTypeScript, seedWorkspace, sqlstateOf, SeededWorkspace } from 
  * committed email_outbox rows of its own organisation.
  */
 const WORKER_URL = process.env.TEST_DATABASE_WORKER_URL;
-const RUN = process.env.PHASE_D_SQL_APPROVED === 'true' && Boolean(WORKER_URL && process.env.DATABASE_URL);
+const RUN = process.env.PHASE_D_SQL_APPROVED === 'true' && Boolean(WORKER_URL) && integrationTestDatabaseReady();
 const describeIfApproved = RUN ? describe : describe.skip;
 jest.setTimeout(120_000);
 

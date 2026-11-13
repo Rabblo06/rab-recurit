@@ -16,6 +16,7 @@ import { createAdminDataSource } from './helpers/admin-datasource';
 import { TestIdentityFactory } from './helpers/test-identities';
 import { sqlStateAsSchemaRole } from './helpers/schema-role';
 import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-pipe';
+import { integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
 
 /**
  * P2.9 gap review, item 2 (owner-approved, corrected, non-destructive design) — the Initial
@@ -28,7 +29,7 @@ import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-
  * (`/admin/organisations/:id/initial-manager-invite*`) are removed; the tests that relied on them now assert the denial and the
  * uniform replacement cap (see `organisation-isolation.integration.spec.ts` for the full cross-organisation matrix).
  */
-const RUN = Boolean(process.env.DATABASE_URL);
+const RUN = integrationTestDatabaseReady();
 const describeIfDb = RUN ? describe : describe.skip;
 
 describeIfDb('initial manager replacement (integration)', () => {

@@ -14,6 +14,7 @@ import { Organisation } from '../../modules/identity/entities';
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
 import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-pipe';
+import { integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
 
 /**
  * P1B — `UserSessionBackfillService`, proven against the real local database. Simulates
@@ -21,7 +22,7 @@ import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-
  * so no `user_session` row exists for them — exactly what every family logged in before this
  * phase shipped looks like) and backfills them.
  */
-const RUN = Boolean(process.env.DATABASE_URL);
+const RUN = integrationTestDatabaseReady();
 const describeIfDb = RUN ? describe : describe.skip;
 jest.setTimeout(60_000);
 

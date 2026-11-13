@@ -16,13 +16,14 @@ import { Organisation } from '../../modules/identity/entities';
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
 import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-pipe';
+import { integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
 
 /**
  * Wave 5 lane OPS — platform-admin outbox surface: failed-row listing (no bodies/recipients/tokens), audited
  * exactly-once email replay, BullMQ/heartbeat observability. Abuse cases first: a non-admin gets 403 at the guard AND
  * at the service (layer 2, the path the `outbox:replay` CLI takes); a client-sent organisationId / unknown field is 400.
  */
-const RUN = Boolean(process.env.DATABASE_URL && process.env.REDIS_URL);
+const RUN = integrationTestDatabaseReady() && Boolean(process.env.REDIS_URL);
 const describeIfDb = RUN ? describe : describe.skip;
 jest.setTimeout(120_000);
 

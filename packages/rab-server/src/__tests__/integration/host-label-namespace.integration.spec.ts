@@ -4,6 +4,7 @@ import { Client } from 'pg';
 import { HOST_LABEL_RESERVED_SEED } from '../../database/typeorm/core/host-label-reserved-list';
 import { resolveIntegrationTestDatabase } from '../../database/typeorm/core/test-database-guard';
 import { dropWorkspaceSchema, provisionServerPath, refusalOf, SeededWorkspace, seedWorkspace, sqlstateOf } from './helpers/workspace-fixtures';
+import { integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
 
 /**
  * Wave 3 schema (lane S2 → lane H contract, docs/evidence/wave2-lane-s2/CONTRACT.md): one routing namespace, reserved
@@ -14,7 +15,7 @@ import { dropWorkspaceSchema, provisionServerPath, refusalOf, SeededWorkspace, s
  *  - the pre-auth resolver discloses nothing for unknown, reserved, non-READY or suspended workspaces (identical empty);
  *  - the runtime role has no privilege on the three tables; quarantine rows cannot be deleted by anyone.
  */
-const RUN = Boolean(process.env.DATABASE_URL);
+const RUN = integrationTestDatabaseReady();
 const describeIfDb = RUN ? describe : describe.skip;
 jest.setTimeout(180_000);
 

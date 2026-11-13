@@ -16,6 +16,7 @@ import { ManagerProfile } from '../../modules/manager/entities/manager-profile.e
 import { ManagerWorkspace } from '../../modules/manager-workspace/entities/manager-workspace.entity';
 import { generateFixturePassword } from './helpers/fixture-password';
 import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-pipe';
+import { integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
 
 const FIXTURE_PASSWORD = generateFixturePassword();
 
@@ -26,7 +27,7 @@ const FIXTURE_PASSWORD = generateFixturePassword();
  * `offer.service.ts`) — this is the IDOR-through-aggregate/IDOR-through-search
  * test matrix for both, real Postgres, RLS on, no mocks.
  */
-const RUN = Boolean(process.env.DATABASE_URL);
+const RUN = integrationTestDatabaseReady();
 const describeIfDb = RUN ? describe : describe.skip;
 
 // LEGACY-ONLY FIXTURE. The 'pre-onboarding' case below plants a staff_profile with workspace_id NULL. Product code cannot

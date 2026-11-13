@@ -25,6 +25,7 @@ import { User } from '../../modules/identity/entities';
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { generateFixturePassword } from './helpers/fixture-password';
 import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
+import { integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
 
 /**
  * Incident 2026-10-05 containment, proven on a DISPOSABLE database (a fresh migration chain). Targets and expectations are read
@@ -33,7 +34,7 @@ import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
  * Covers: read-only verification, dry-run writes nothing, refusals before any write, execution through the existing primitives,
  * sessions made unusable, login refused, audit written, history preserved, and stop on an unexpected state change.
  */
-const RUN = Boolean(process.env.DATABASE_URL);
+const RUN = integrationTestDatabaseReady();
 // Test 4 (execute) suspends real accounts through the existing primitives — status transition,
 // workspace membership suspend, refresh-token revocation, audit write, all per-user, over a real
 // login/argon2id round trip to set up — comfortably past Jest's 5s default. Found live via a real

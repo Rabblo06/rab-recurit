@@ -2,12 +2,13 @@ import { DataSource } from 'typeorm';
 
 import { resolveIntegrationTestDatabase } from '../../database/typeorm/core/test-database-guard';
 import { assertRuntimeDbRole } from '../../engine/utils/assert-runtime-db-role';
+import { integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
 
 /**
  * CF-43 (October 15 audit): the runtime role check used to read `current_user` only, so a superuser login that ran
  * `SET ROLE crewflow_app` (or any role switched into it) passed. Now the LOGIN identity must be crewflow_app itself.
  */
-const RUN = Boolean(process.env.DATABASE_URL);
+const RUN = integrationTestDatabaseReady();
 const describeIfDb = RUN ? describe : describe.skip;
 
 describeIfDb('CF-43 runtime database role assertion (integration)', () => {

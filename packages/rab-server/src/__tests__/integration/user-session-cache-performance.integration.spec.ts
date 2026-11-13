@@ -15,6 +15,7 @@ import { Organisation } from '../../modules/identity/entities';
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
 import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-pipe';
+import { integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
 
 /**
  * Redis checkpoint, Step 4 — cache OFF vs. ON benchmark for the cookie-authenticated path, same
@@ -27,7 +28,7 @@ import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-
  * two builds genuinely produces one real cache-off app and one real cache-on app, not a toggle
  * racing a single shared instance.
  */
-const RUN = Boolean(process.env.DATABASE_URL) && process.env.RUN_PERF_BASELINE === 'true';
+const RUN = integrationTestDatabaseReady() && process.env.RUN_PERF_BASELINE === 'true';
 const describeIfEnabled = RUN ? describe : describe.skip;
 jest.setTimeout(180_000);
 

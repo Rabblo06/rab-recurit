@@ -28,8 +28,9 @@ import { RATE_LIMIT_REQUIRED } from '../../engine/core-modules/throttler/rab-thr
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
 import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-pipe';
+import { integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
 
-const RUN = Boolean(process.env.DATABASE_URL);
+const RUN = integrationTestDatabaseReady();
 const describeIfDb = RUN ? describe : describe.skip;
 const DEFAULT_ORIGIN = 'http://localhost:5173';
 const sha256 = (value: string) => createHash('sha256').update(value).digest('hex');

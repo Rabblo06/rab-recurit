@@ -15,6 +15,7 @@ import { createAdminDataSource } from './helpers/admin-datasource';
 import { codeAt, secretFromOtpauth } from './helpers/mfa-test-kit';
 import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
 import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-pipe';
+import { integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
 
 /**
  * Lane D (owner decision M10-1): the mobile second-factor exemption covers ONLY the staff / venue-manager workforce.
@@ -24,7 +25,7 @@ import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-
  *
  * Requires a database with DB5's MFA migrations (fails loudly otherwise).
  */
-const RUN = Boolean(process.env.DATABASE_URL);
+const RUN = integrationTestDatabaseReady();
 const describeIfDb = RUN ? describe : describe.skip;
 const ORIGIN = 'http://localhost:5173';
 

@@ -29,6 +29,7 @@ import { PasswordHashingService } from '../../engine/core-modules/auth/services/
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { TestIdentityFactory, TestIdentity } from './helpers/test-identities';
 import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-pipe';
+import { integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
 
 /**
  * Real-time outbox (Stage 1) — `core.realtime_event`
@@ -48,7 +49,7 @@ import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-
  *    scope and a safe payload, as part of the same transaction a real
  *    caller already gets today.
  */
-const RUN = Boolean(process.env.DATABASE_URL);
+const RUN = integrationTestDatabaseReady();
 const describeIfDb = RUN ? describe : describe.skip;
 
 describeIfDb('realtime event outbox — core.realtime_event (integration)', () => {

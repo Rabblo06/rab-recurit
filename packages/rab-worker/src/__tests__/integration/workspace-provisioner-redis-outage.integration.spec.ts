@@ -32,6 +32,7 @@ import { generateFixturePassword } from './helpers/fixture-password';
 import { verifiedCrewflowUrl } from './helpers/verified-role-database';
 import { withApplicationName } from './helpers/application-name-url';
 import { runtimeChildBaseEnv } from './helpers/runtime-child-env';
+import { integrationTestDatabaseReady } from '@rab/server/database/typeorm/core/integration-test-database-gate';
 
 /**
  * Phase A verification (pa-prov2) — the workspace provisioner and a Redis outage. The provisioner uses Redis ONLY for its
@@ -51,7 +52,7 @@ import { runtimeChildBaseEnv } from './helpers/runtime-child-env';
 const CONTAINER = process.env.PA_REDIS_OUTAGE_CONTAINER?.trim() ?? '';
 const OUTAGE_URL = process.env.PA_REDIS_OUTAGE_URL?.trim() ?? '';
 const RUN =
-  Boolean(process.env.DATABASE_URL) &&
+  integrationTestDatabaseReady() &&
   /^crewflow-pa-[a-z0-9-]+$/.test(CONTAINER) &&
   /^redis:\/\/127\.0\.0\.1:\d+$/.test(OUTAGE_URL);
 const describeIfEnabled = RUN ? describe : describe.skip;

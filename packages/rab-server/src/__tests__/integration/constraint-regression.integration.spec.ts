@@ -4,6 +4,7 @@ import { Client } from 'pg';
 
 import { resolveIntegrationTestDatabase } from '../../database/typeorm/core/test-database-guard';
 import { dropWorkspaceSchema, provisionServerPath, provisionTypeScript, SeededWorkspace, seedWorkspace, sqlstateOf } from './helpers/workspace-fixtures';
+import { integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
 
 /**
  * Wave 2 lane S2 (C1 constraints, C2 enum/state parity, CREWFLOW_TWENTY_FULL_ENGINE_PARITY_REPORT.md §3.10–3.12).
@@ -18,7 +19,7 @@ import { dropWorkspaceSchema, provisionServerPath, provisionTypeScript, SeededWo
  *         the workspace binding CHECK (workspace schemas only)
  * C2: every state-transition table in @rab/shared equals the DB CHECK list of its column, in core and every workspace.
  */
-const RUN = Boolean(process.env.DATABASE_URL);
+const RUN = integrationTestDatabaseReady();
 const describeIfDb = RUN ? describe : describe.skip;
 jest.setTimeout(180_000);
 

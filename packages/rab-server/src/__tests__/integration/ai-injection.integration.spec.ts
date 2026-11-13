@@ -13,6 +13,7 @@ import { AiToolRegistry } from '../../modules/ai/tools/ai-tool-registry.service'
 import { INJECTION_TEXT, seedStaffing } from './helpers/ai-fixtures';
 import { scriptedModel, textParts, toolCallParts } from './helpers/ai-models';
 import { AiKit, aiOrganisation, ask, bootAiKit, jobFor, newConversation, turnRow } from './helpers/ai-test-kit';
+import { integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
 
 /**
  * AI Phase 1 — prompt injection (brief §15 "Injection and model safety") with SYNTHETIC malicious records (a venue name,
@@ -28,7 +29,7 @@ async function skillLinesFor(kit: AiKit, who: { organisationId: string; workspac
   return kit.moduleRef.get(AiSkillService).catalogueFor({ organisationId: who.organisationId, workspaceId: who.workspaceId!, userId: who.userId, sessionId: sid } as never);
 }
 
-const RUN = Boolean(process.env.DATABASE_URL);
+const RUN = integrationTestDatabaseReady();
 const describeIfDb = RUN ? describe : describe.skip;
 
 const MUTABLE = ['job_offer', 'shift_assignment', 'shift', 'attendance', 'payroll_record', 'payroll_run', 'organisation_ai_setting', 'user_role', 'user_permission_override'];

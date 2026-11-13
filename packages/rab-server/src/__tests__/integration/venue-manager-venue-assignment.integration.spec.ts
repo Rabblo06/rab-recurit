@@ -14,6 +14,7 @@ import { VenueManagerService } from '../../modules/manager/services/venue-manage
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
 import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-pipe';
+import { integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
 
 /**
  * Workspace-scoped Venue Manager → Venue assignment (POST /rest/v1/venue-managers/:id/venues). The normal Manager's
@@ -21,7 +22,7 @@ import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-
  * Venue of their OWN workspace. Real Postgres, RLS on, real HTTP. Every cross-workspace attempt must be a 404 that
  * writes nothing.
  */
-const RUN = Boolean(process.env.DATABASE_URL);
+const RUN = integrationTestDatabaseReady();
 const describeIfDb = RUN ? describe : describe.skip;
 
 describeIfDb('Venue Manager venue assignment inside the Manager\'s own workspace (integration)', () => {
