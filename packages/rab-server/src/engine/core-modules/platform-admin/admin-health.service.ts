@@ -1,13 +1,15 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, Optional } from '@nestjs/common';
 import nodemailer from 'nodemailer';
 import { DataSource } from 'typeorm';
 
 import { AuditAction, AuditService } from '../audit/audit.service';
+import { AuditEventQueueService } from '../audit-events/audit-event-queue.service';
 import { EnvironmentService } from '../environment/environment.service';
 import { FileService } from '../storage/file.service';
 import { AuthContext } from '../tenant/auth-context.interface';
 import { TenantContextService } from '../tenant/tenant-context.service';
 import { ThrottlerRedisClientProvider } from '../throttler/throttler-redis-client.provider';
+import { AUDIT_PREAUTH_BACKLOG_LIMIT } from '../../worker-shared/audit-event.contract';
 import { PROVISIONER_HEARTBEAT_KEY, WORKER_HEARTBEAT_KEY, WORKER_HEARTBEAT_TTL_SECONDS, WORKER_SCHEDULER_STATUS_KEY } from '../../worker-shared/heartbeat.constants';
 import { CONSUMER_QUEUES, LEGACY_BULL_PREFIX, SCAN_QUEUE_NAMES, resolveScanPrefix } from '../../worker-shared/queue-registry';
 import { assertActivePlatformAdmin, withTimeout } from './admin-actor';
@@ -22,7 +24,7 @@ import { PlatformAdminService } from './platform-admin.service';
 export type AdminHealthStatus = 'healthy' | 'warning' | 'degraded' | 'unavailable';
 
 export interface AdminHealthCard {
-  key: 'api' | 'database' | 'redis' | 'worker' | 'scheduler' | 'provisioner' | 'email' | 'storage';
+  key: 'api' | 'database' | 'redis' | 'worker' | 'scheduler' | 'provisioner' | 'email' | 'storage' | 'auditEvents';
   status: AdminHealthStatus;
   /** Fixed, operator-facing text built here — never a raw error message, host name, URL or credential. */
   detail: string;
@@ -98,6 +100,8 @@ export class AdminHealthService {
     private readonly audit: AuditService,
     private readonly tenantContext: TenantContextService,
     private readonly platformAdmin: PlatformAdminService,
+    // X1.1: the security audit event shipper (global via AuditModule); optional so a graph without it still builds.
+    @Optional() private readonly auditEvents?: AuditEventQueueService,
   ) {}
 
   private cache: { at: number; report: AdminHealthReport } | null = null;
@@ -130,6 +134,7 @@ export class AdminHealthService {
       this.probe('provisioner', () => this.heartbeat('provisioner', PROVISIONER_HEARTBEAT_KEY, 'Provisioner')),
       this.probe('email', () => this.email()),
       this.probe('storage', () => this.storage()),
+      this.probe('auditEvents', () => this.auditEventsCard()),
     ]);
     const report: AdminHealthReport = { checkedAt: new Date().toISOString(), cards, attention: cards.filter((c) => c.status !== 'healthy').length };
     this.cache = { at: Date.now(), report };
@@ -241,6 +246,15 @@ export class AdminHealthService {
     return { key: 'email', status: 'unavailable', detail: 'Driver not recognised.', latencyMs: null };
   }
 
+  /**
+   * X1.1 owner guard (2026-11-12): failed-login audit events dropped because the audit queue's backlog was over
+   * AUDIT_PREAUTH_BACKLOG_LIMIT. Total = the durable Redis counter across every process; "this API process" = the local one.
+   */
+  private async auditEventsCard(): Promise<AdminHealthCard> {
+    if (!this.auditEvents) return auditEventsHealthCard(null);
+    return auditEventsHealthCard(await this.auditEvents.preAuthDropReport());
+  }
+
   private async storage(): Promise<AdminHealthCard> {
     const started = Date.now();
     await this.fileService.healthProbe();
@@ -257,4 +271,20 @@ function mark(map: Map<string, number>, who: string, now: number, windowMs: numb
     if (map.size >= AUDIT_DEDUPE_MAX_ENTRIES) map.clear();
   }
   map.set(who, now);
+}
+
+/** The Health tab card for the security audit event shipper (pure; exported for its unit test). Fixed strings only. */
+export function auditEventsHealthCard(report: { enabled: boolean; total: number | null; sinceProcessStart: number; lastBacklog: number | null } | null): AdminHealthCard {
+  const limit = AUDIT_PREAUTH_BACKLOG_LIMIT.toLocaleString('en-GB');
+  if (!report || !report.enabled) // Production refuses to start without a sink (BC-07), so this is development / test only: not an attention item.
+    return { key: 'auditEvents', status: 'healthy', detail: 'Off-host audit copy is off (no audit sink configured; development only).', latencyMs: null };
+  const total = report.total === null ? 'total unknown (Redis did not answer)' : `${report.total} dropped in total`;
+  const backlog = report.lastBacklog === null ? '' : ` · queue backlog ${report.lastBacklog}`;
+  const dropped = (report.total ?? 0) > 0 || report.sinceProcessStart > 0;
+  return {
+    key: 'auditEvents',
+    status: report.total === null ? 'warning' : dropped ? 'warning' : 'healthy',
+    detail: `Failed-login events over the ${limit} backlog: ${total} · ${report.sinceProcessStart} by this API process${backlog}`,
+    latencyMs: null,
+  };
 }

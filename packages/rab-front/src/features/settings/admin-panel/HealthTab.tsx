@@ -11,7 +11,7 @@ const QueueMetricsChart = lazy(() => import('./QueueMetricsChart'));
 
 export const HEALTH_REFETCH_MS = 15_000;
 
-const CARD_LABEL: Record<HealthCard['key'], string> = { database: 'Database', redis: 'Redis', worker: 'Worker', provisioner: 'Provisioner', email: 'Email', storage: 'File storage', api: 'API', scheduler: 'BullMQ schedulers' };
+const CARD_LABEL: Record<HealthCard['key'], string> = { database: 'Database', redis: 'Redis', worker: 'Worker', provisioner: 'Provisioner', email: 'Email', storage: 'File storage', api: 'API', scheduler: 'BullMQ schedulers', auditEvents: 'Security audit events' };
 const STATUS_PILL: Record<HealthStatus, [string, string]> = {
   healthy: ['ap-ok', 'Healthy'],
   warning: ['ap-warn', 'Warning'],

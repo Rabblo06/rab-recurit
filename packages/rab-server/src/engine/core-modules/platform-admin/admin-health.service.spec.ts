@@ -67,10 +67,11 @@ describe('AdminHealthService (X2.4)', () => {
   });
   afterEach(() => jest.restoreAllMocks());
 
-  it('every indicator is in the report, in order: api, database, redis, worker, scheduler, provisioner, email, storage', async () => {
+  it('every indicator is in the report, in order: api, database, redis, worker, scheduler, provisioner, email, storage, auditEvents (X1.1 card kept)', async () => {
     const { service } = setup();
     const report = await service.report(actor);
-    expect(report.cards.map((c) => c.key)).toEqual(['api', 'database', 'redis', 'worker', 'scheduler', 'provisioner', 'email', 'storage']);
+    expect(report.cards.map((c) => c.key)).toEqual(['api', 'database', 'redis', 'worker', 'scheduler', 'provisioner', 'email', 'storage', 'auditEvents']);
+    expect(card(report, 'auditEvents')).toMatchObject({ status: 'healthy', detail: expect.stringContaining('off') });
     expect(card(report, 'database').detail).toContain('5 of 97 usable connections (5%)');
     expect(card(report, 'redis').detail).toContain('Redis 7.2.4');
   });

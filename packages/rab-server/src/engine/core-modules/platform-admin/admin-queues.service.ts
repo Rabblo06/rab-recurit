@@ -212,6 +212,18 @@ export class AdminQueuesService implements OnModuleDestroy {
         idKeys: ['organisationId'],
         lockedReason: 'Timer triggers are read-only here: the backstop scan handles any failed or lost trigger.',
       },
+      {
+        // Phase X Part 2, X1.1: listed for health (counts, metrics, failed job ids — a failed job is an event the sink did not
+        // take after every retry) but READ-ONLY: no D7 action is extended to a new queue without an owner decision. The row
+        // stays in core.audit_log either way.
+        name: CONSUMER_QUEUES.auditEvents.name,
+        kind: 'consumer',
+        prefix: LEGACY_BULL_PREFIX,
+        retryStates: [],
+        deleteStates: [],
+        idKeys: ['auditLogId', 'organisationId'],
+        lockedReason: 'Security audit events are read-only here: the event stays in the audit log, and the off-host copy is best effort.',
+      },
     ];
     if (scheduler) {
       for (const name of SCAN_QUEUE_NAMES) {

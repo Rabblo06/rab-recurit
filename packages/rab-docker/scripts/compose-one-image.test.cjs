@@ -7,7 +7,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const test = require('node:test');
-const { checkModel } = require('./compose-one-image.cjs');
+const { checkModel, checkRedisPrivate, render, DEPLOY_COMBOS, REDIS_ONLY_COMBOS } = require('./compose-one-image.cjs');
 
 const IMG = '${CREWFLOW_IMAGE_REPOSITORY:-adhin007/adolphus}@${CREWFLOW_IMAGE_TAG:?CREWFLOW_IMAGE_TAG must be a digest}';
 
@@ -29,7 +29,6 @@ function good() {
           'rab-api': { condition: 'service_healthy', restart: true },
         },
       },
-      'rab-ops': { image: IMG, profiles: ['ops'] },
     },
   };
 }
@@ -58,7 +57,7 @@ test('DENIAL: a separate API tag variable (an API-only deploy path)', () => {
 
 test('DENIAL: a plain tag instead of a digest', () => {
   const m = good();
-  for (const n of ['rab-api', 'rab-worker', 'rab-ops']) m.services[n].image = 'adhin007/adolphus:${CREWFLOW_IMAGE_TAG}';
+  for (const n of ['rab-api', 'rab-worker']) m.services[n].image = 'adhin007/adolphus:${CREWFLOW_IMAGE_TAG}';
   refused(m, /rab-api: image must be/);
 });
 
@@ -68,10 +67,21 @@ test('DENIAL: a hard-coded image (no variable) on one service', () => {
   refused(m, /rab-worker: image must be/);
 });
 
-test('DENIAL: rab-ops on a different image', () => {
+test('DENIAL: a rab-ops service is present (removed in rab-ops removal PR 2; it must not come back)', () => {
+  // Even on the identical image and with no profile, the service itself is refused.
   const m = good();
-  m.services['rab-ops'].image = 'adhin007/adolphus@${CREWFLOW_OPS_IMAGE_TAG}';
-  refused(m, /rab-ops: image differs from rab-api/);
+  m.services['rab-ops'] = { image: IMG };
+  refused(m, /rab-ops: service must not exist/);
+  // ...and the old shape (the ops profile) is refused on both counts.
+  m.services['rab-ops'] = { image: IMG, profiles: ['ops'] };
+  refused(m, /rab-ops: service must not exist/);
+  refused(m, /rab-ops: an "ops" profile service must not exist/);
+});
+
+test('DENIAL: any service under an "ops" profile, whatever its name', () => {
+  const m = good();
+  m.services['operations'] = { image: IMG, profiles: ['ops'] };
+  refused(m, /operations: an "ops" profile service must not exist/);
 });
 
 test('DENIAL: a build section on a deploy service', () => {
@@ -126,6 +136,154 @@ test('DENIAL: the API stop window below 40 s', () => {
   refused(m, /stop_grace_period below 40s/);
 });
 
+// X1.6 (owner decision 2026-11-12): Redis is protected by the private Compose network only, as in Twenty's
+// packages/twenty-docker/docker-compose.yml (its `redis` service has no ports and no password). No deploy file may make it
+// reachable from the host, in either port syntax, and a loopback bind is no exception.
+const SHORT_PORTS = ['6379:6379', '127.0.0.1:6379:6379', '6379', '${CREWFLOW_REDIS_BIND:-127.0.0.1}:6379:6379', '0.0.0.0:16379:6379/tcp'];
+const LONG_PORTS = [
+  { mode: 'ingress', protocol: 'tcp', target: 6379, published: '6379' },
+  { mode: 'ingress', protocol: 'tcp', target: 6379, published: '6379', host_ip: '127.0.0.1' },
+  { mode: 'ingress', protocol: 'tcp', target: 6379 }, // no published port: Docker picks a random host port
+];
+const escapeRe = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+test('X1.6: an empty ports list (e.g. `ports: !reset []`) on rab-redis passes', () => {
+  const m = good();
+  m.services['rab-redis'].ports = [];
+  assert.deepEqual(checkModel(m, 'fixture'), []);
+});
+
+for (const entry of SHORT_PORTS) {
+  test(`DENIAL (X1.6): rab-redis publishes a port, short syntax "${entry}"`, () => {
+    const m = good();
+    m.services['rab-redis'].ports = [entry];
+    refused(m, new RegExp(`rab-redis: publishes a port \\(short syntax "${escapeRe(entry)}"\\)`));
+  });
+}
+
+for (const entry of LONG_PORTS) {
+  test(`DENIAL (X1.6): rab-redis publishes a port, long syntax ${JSON.stringify(entry)}`, () => {
+    const m = good();
+    m.services['rab-redis'].ports = [entry];
+    refused(m, /rab-redis: publishes a port \(long syntax target 6379 -> /);
+  });
+}
+
+test('DENIAL (X1.6): every published Redis port is reported, not only the first', () => {
+  const m = good();
+  m.services['rab-redis'].ports = ['6379:6379', LONG_PORTS[0]];
+  const problems = checkModel(m, 'fixture').filter((p) => /rab-redis: publishes a port/.test(p));
+  assert.equal(problems.length, 2, JSON.stringify(problems));
+});
+
+test('DENIAL (X1.6): rab-redis declares expose', () => {
+  const m = good();
+  m.services['rab-redis'].expose = ['6379'];
+  refused(m, /rab-redis: declares expose \(6379\)/);
+});
+
+test('DENIAL (X1.6): rab-redis on the host network, or in another container\'s namespace', () => {
+  for (const mode of ['host', 'service:rab-api', 'container:other']) {
+    const m = good();
+    m.services['rab-redis'].network_mode = mode;
+    refused(m, new RegExp(`rab-redis: sets network_mode "${escapeRe(mode)}"`));
+  }
+});
+
+test('DENIAL (X1.6): a renamed or second Redis gets the same rule (matched by name or image)', () => {
+  const byImage = good();
+  byImage.services.cache = { image: 'redis:7-alpine', ports: ['6380:6379'] };
+  refused(byImage, /cache: publishes a port/);
+  const byVariable = good();
+  byVariable.services.cache = { image: '${CREWFLOW_REDIS_IMAGE:?pinned}', ports: [{ target: 6379, published: '6380' }] };
+  refused(byVariable, /cache: publishes a port/);
+  const byName = good();
+  byName.services['redis-sessions'] = { image: 'valkey/valkey:8', expose: ['6379'] };
+  refused(byName, /redis-sessions: declares expose/);
+});
+
+test('X1.6: the rule leaves rab-api\'s loopback port alone (only Redis is in scope)', () => {
+  const m = good();
+  m.services['rab-api'].ports = ['127.0.0.1:3000:3000'];
+  assert.deepEqual(checkModel(m, 'fixture'), []);
+});
+
+test('DENIAL (X1.6): rab-redis missing (the rule must have something to check)', () => {
+  const m = good();
+  delete m.services['rab-redis'];
+  refused(m, /rab-redis is missing/);
+  assert.ok(checkRedisPrivate({ services: {} }, 'local-build').some((p) => /rab-redis is missing/.test(p)));
+});
+
+test('X1.6: checkRedisPrivate (the Redis-only rule for docker-compose.local-build.yml) refuses ports and ignores build sections', () => {
+  const model = { services: { 'rab-redis': { image: 'redis:7-alpine', ports: ['6379:6379'] }, 'rab-api': { build: { context: '.' } } } };
+  const problems = checkRedisPrivate(model, 'local-build');
+  assert.equal(problems.length, 1, JSON.stringify(problems));
+  assert.match(problems[0], /^local-build: rab-redis: publishes a port \(short syntax "6379:6379"\)/);
+});
+
+test('DENIAL (X1.6): host networking through `networks:` (list or map form), resolved in the top-level networks', () => {
+  const byName = good();
+  byName.services['rab-redis'].networks = ['hostnet'];
+  byName.networks = { hostnet: { external: true, name: 'host' } };
+  refused(byName, /rab-redis: joins network "hostnet", which is the host network/);
+  const bareHost = good();
+  bareHost.services['rab-redis'].networks = { host: null };
+  refused(bareHost, /rab-redis: joins network "host", which is the host network/);
+  for (const driver of ['host', 'macvlan', 'ipvlan']) {
+    const m = good();
+    m.services['rab-redis'].networks = { default: null, lan: null };
+    m.networks = { default: { name: 'p_default' }, lan: { driver, name: 'p_lan' } };
+    refused(m, new RegExp(`rab-redis: joins network "lan" with driver ${driver}`));
+  }
+});
+
+test('X1.6: a private bridge network (the default, or a named bridge / overlay) passes', () => {
+  const m = good();
+  m.services['rab-redis'].networks = { default: null, backend: null, swarm: null };
+  m.networks = { default: { name: 'p_default' }, backend: { driver: 'bridge', name: 'p_backend', internal: true }, swarm: { driver: 'overlay' } };
+  assert.deepEqual(checkModel(m, 'fixture'), []);
+});
+
+test('DENIAL (X1.6): a Redis without "redis" in its name or image is found by command, entrypoint, health check or REDIS_URL', () => {
+  const byCommand = good();
+  byCommand.services['kv-cache'] = { image: `registry.example.com/team/kv@sha256:${'0'.repeat(64)}`, command: ['redis-server', '--port', '6379'], ports: ['6380:6379'] };
+  refused(byCommand, /kv-cache: publishes a port/);
+  const byEntrypoint = good();
+  byEntrypoint.services.kv = { image: '${CACHE_IMAGE:?}', entrypoint: 'redis-server /etc/kv.conf', expose: ['6379'] };
+  refused(byEntrypoint, /kv: declares expose/);
+  const byHealthcheck = good();
+  byHealthcheck.services.kv = { image: '${CACHE_IMAGE:?}', healthcheck: { test: ['CMD', 'redis-cli', 'ping'] }, network_mode: 'host' };
+  refused(byHealthcheck, /kv: sets network_mode "host"/);
+  for (const url of ['redis://cache:6379', 'rediss://cache:6380/0']) {
+    const byUrl = good();
+    byUrl.services['rab-worker'].environment = { ...byUrl.services['rab-worker'].environment, REDIS_URL: url };
+    byUrl.services.cache = { image: '${CACHE_IMAGE:?}', ports: [{ target: 6379, published: '6380' }] };
+    refused(byUrl, /cache: publishes a port/);
+  }
+  // Array-form environment is read too.
+  const byArrayEnv = good();
+  byArrayEnv.services['rab-api'].environment = ['CREWFLOW_MIGRATE_ON_START=true', 'REDIS_URL=redis://cache:6379'];
+  byArrayEnv.services.cache = { image: '${CACHE_IMAGE:?}', ports: ['6380:6379'] };
+  refused(byArrayEnv, /cache: publishes a port/);
+});
+
+test('X1.6: an uncommitted or unparsable REDIS_URL names no service (no false positive on the app itself)', () => {
+  const m = good();
+  m.services['rab-api'].environment = { ...m.services['rab-api'].environment, REDIS_URL: '${REDIS_URL:?}' };
+  m.services['rab-api'].ports = ['127.0.0.1:3000:3000'];
+  assert.deepEqual(checkModel(m, 'fixture'), []);
+});
+
+test('DENIAL (X1.6): another service in a Redis network namespace (network_mode service:<redis>)', () => {
+  const m = good();
+  m.services.sidecar = { image: 'alpine', network_mode: 'service:rab-redis', ports: ['6379:6379'] };
+  refused(m, /sidecar: sets network_mode "service:rab-redis"/);
+  const other = good();
+  other.services.sidecar = { image: 'alpine', network_mode: 'service:rab-api' };
+  assert.deepEqual(checkModel(other, 'fixture'), []);
+});
+
 function dockerCompose() {
   try {
     execFileSync('docker', ['compose', 'version'], { stdio: 'ignore' });
@@ -156,3 +314,234 @@ test('DENIAL (rendered): a real compose file with two image variables fails the 
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });
+
+// X1.6, rendered: an overlay on the REAL committed files, in both port syntaxes, through the same `docker compose config
+// --no-interpolate` the CLI runs. Proves the gate refuses a real edit that publishes Redis, for
+// docker-compose.production.yml (whose Redis has no password) and docker-compose.image.yml. A single file keeps a short
+// entry as a string; merging files (Compose v5) normalises it to the long mapping, so the short overlay may render either way.
+const OVERLAYS = {
+  short: { lines: ['services:', '  rab-redis:', '    ports:', '      - "127.0.0.1:6379:6379"'], want: /rab-redis: publishes a port \((short syntax "127\.0\.0\.1:6379:6379"|long syntax target 6379 -> host 127\.0\.0\.1:6379)\)/, what: 'a short-syntax port' },
+  long: { lines: ['services:', '  rab-redis:', '    ports:', '      - target: 6379', '        published: "6379"', '        host_ip: 127.0.0.1'], want: /rab-redis: publishes a port \(long syntax target 6379 -> host 127\.0\.0\.1:6379\)/, what: 'a long-syntax port' },
+  expose: { lines: ['services:', '  rab-redis:', '    expose:', '      - "6379"'], want: /rab-redis: declares expose/, what: 'expose' },
+  host: { lines: ['services:', '  rab-redis:', '    network_mode: host'], want: /rab-redis: sets network_mode "host"/, what: 'network_mode: host' },
+  // Host networking through `networks:` (review finding on #111): an external network named `host`, or a macvlan / ipvlan
+  // network, puts Redis on the host or the LAN without any `ports:` or `network_mode`.
+  hostnet: { lines: ['services:', '  rab-redis:', '    networks: [hostnet]', 'networks:', '  hostnet:', '    external: true', '    name: host'], want: /rab-redis: joins network "hostnet", which is the host network/, what: 'an external network named host' },
+  macvlan: { lines: ['services:', '  rab-redis:', '    networks: [default, lan]', 'networks:', '  lan:', '    driver: macvlan', '    driver_opts: { parent: eth0 }'], want: /rab-redis: joins network "lan" with driver macvlan/, what: 'a macvlan network' },
+  ipvlan: { lines: ['services:', '  rab-redis:', '    networks: [default, lan]', 'networks:', '  lan:', '    driver: ipvlan', '    driver_opts: { parent: eth0 }'], want: /rab-redis: joins network "lan" with driver ipvlan/, what: 'an ipvlan network' },
+  // A Redis that does not say "redis" in its name or image: found by its command, or as the app's REDIS_URL host.
+  private: { lines: ['services:', '  kv-cache:', `    image: registry.example.com/team/kv@sha256:${'0'.repeat(64)}`, '    command: ["redis-server"]', '    ports: ["6380:6379"]'], want: /kv-cache: publishes a port/, what: 'a private-registry Redis (found by its command) with a port', service: 'kv-cache' },
+  urlhost: { lines: ['services:', '  rab-api:', '    environment: { REDIS_URL: "redis://cache:6379" }', '  rab-worker:', '    environment: { REDIS_URL: "redis://cache:6379" }', '  cache:', '    image: ${CACHE_IMAGE:?}', '    ports: ["6380:6379"]'], want: /cache: publishes a port/, what: 'a ${CACHE_IMAGE} service named by REDIS_URL with a port', service: 'cache' },
+  sidecar: { lines: ['services:', '  sidecar:', '    image: alpine', '    network_mode: "service:rab-redis"', '    ports: ["6379:6379"]'], want: /sidecar: sets network_mode "service:rab-redis"/, what: 'a sidecar in its network namespace' },
+};
+function withOverlay(kind, fn) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'one-image-redis-'));
+  try {
+    const overlay = path.join(dir, `redis-${kind}.yml`);
+    fs.writeFileSync(overlay, `${OVERLAYS[kind].lines.join('\n')}\n`);
+    return fn(overlay);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+}
+const noCompose = !dockerCompose() && 'docker compose not available';
+
+for (const base of ['docker-compose.production.yml', 'docker-compose.image.yml']) {
+  test(`X1.6 (rendered): the committed ${base} passes the Redis rule`, { skip: noCompose }, () => {
+    assert.deepEqual(checkRedisPrivate(render([base]), base), []);
+  });
+  for (const kind of Object.keys(OVERLAYS)) {
+    test(`DENIAL (X1.6, rendered): ${base} + an overlay giving rab-redis ${OVERLAYS[kind].what}`, { skip: noCompose }, () => {
+      withOverlay(kind, (overlay) => refused(render([base, overlay]), OVERLAYS[kind].want));
+    });
+  }
+}
+
+test('X1.6 (rendered): every committed deploy combination and local-build.yml still pass the Redis rule, with no network finding', { skip: noCompose }, () => {
+  for (const combo of [...DEPLOY_COMBOS, ...REDIS_ONLY_COMBOS]) {
+    const model = render(combo);
+    assert.deepEqual(checkRedisPrivate(model, combo.join(' + ')), [], combo.join(' + '));
+    assert.ok(model.services['rab-redis'], `${combo.join(' + ')}: rab-redis rendered`);
+  }
+});
+
+test('DENIAL (X1.6, rendered): a single compose file keeps short-syntax Redis ports as strings, and each is refused', { skip: noCompose }, () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'one-image-redis-'));
+  try {
+    const file = path.join(dir, 'c.yml');
+    fs.writeFileSync(file, ['services:', '  rab-redis:', '    image: redis:7-alpine', '    ports:', '      - "6379:6379"', '      - "${CREWFLOW_REDIS_BIND:-127.0.0.1}:6380:6379"', '      - "6379"', '      - target: 6379', '        published: "6381"', ''].join('\n'));
+    const model = JSON.parse(execFileSync('docker', ['compose', '--project-directory', dir, '-f', file, 'config', '--no-interpolate', '--no-env-resolution', '--format', 'json'], { encoding: 'utf8' }));
+    const problems = checkRedisPrivate(model, 'single');
+    for (const re of [/short syntax "6379:6379"/, /short syntax "\$\{CREWFLOW_REDIS_BIND:-127\.0\.0\.1\}:6380:6379"/, /short syntax "6379"\)/, /long syntax target 6379 -> host 6381/]) {
+      assert.ok(problems.some((p) => re.test(p)), `${re} not in ${JSON.stringify(problems)}`);
+    }
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('DENIAL (rendered): a profile-gated rab-ops is rendered by the CLI (--profile *) and refused', { skip: !dockerCompose() && 'docker compose not available' }, () => {
+  const { render } = require('./compose-one-image.cjs');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'one-image-ops-'));
+  try {
+    const file = path.join(dir, 'c.yml');
+    const img = 'r@${CREWFLOW_IMAGE_TAG:?digest}';
+    fs.writeFileSync(file, [
+      'services:',
+      '  rab-redis: { image: redis }',
+      `  rab-api: { image: "${img}", stop_grace_period: 40s, environment: { CREWFLOW_MIGRATE_ON_START: "true" } }`,
+      '  rab-worker:',
+      `    image: "${img}"`,
+      '    environment: { DISABLE_DB_MIGRATIONS: "true", DISABLE_CRON_JOBS_REGISTRATION: "true" }',
+      '    depends_on: { rab-api: { condition: service_healthy, restart: true }, rab-redis: { condition: service_healthy } }',
+      '  rab-ops:',
+      `    image: "${img}"`,
+      '    profiles: ["ops"]',
+      '',
+    ].join('\n'));
+    // render() joins each file onto packages/rab-docker, so it is given the temp file's path relative to that directory.
+    const rel = path.relative(path.resolve(__dirname, '..'), file);
+    refused(render([rel]), /rab-ops: service must not exist/);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('DENIAL (X1.6, rendered): docker-compose.local-build.yml + a published Redis port fails the Redis-only rule', { skip: noCompose }, () => {
+  assert.deepEqual(checkRedisPrivate(render(['docker-compose.local-build.yml']), 'local-build'), []);
+  withOverlay('short', (overlay) => {
+    const problems = checkRedisPrivate(render(['docker-compose.local-build.yml', overlay]), 'local-build');
+    assert.ok(problems.some((p) => OVERLAYS.short.want.test(p)), JSON.stringify(problems));
+  });
+});
+
+// ---- Owner decision 2026-11-12: docker-compose.production.yml pins the release digest as the image default, so OpenShip
+// deploys without anyone typing CREWFLOW_IMAGE_TAG. Only a full sha256 digest; every other deploy file keeps no default.
+const { allowsDefaultDigest, PINNED_DIGEST_IMAGE_REF } = require('./compose-one-image.cjs'); // DEPLOY_COMBOS: imported at the top
+const DIGEST = `sha256:${'d7'.repeat(32)}`;
+const withDefault = (value) => `\${CREWFLOW_IMAGE_REPOSITORY:-adhin007/adolphus}@\${CREWFLOW_IMAGE_TAG:-${value}}`;
+const allImages = (m, image) => {
+  for (const n of ['rab-api', 'rab-worker']) m.services[n].image = image;
+  return m;
+};
+const PROD = { allowDefaultDigest: true };
+
+test('production.yml: a full sha256 release digest as the default passes', () => {
+  assert.deepEqual(checkModel(allImages(good(), withDefault(DIGEST)), 'fixture', PROD), []);
+  // The strict form (no default) is still accepted there too.
+  assert.deepEqual(checkModel(good(), 'fixture', PROD), []);
+});
+
+test('DENIAL: any default on a file that must stay strict (docker-compose.image.yml and its overlays)', () => {
+  refused(allImages(good(), withDefault(DIGEST)), /image must be .*no default/);
+});
+
+for (const [label, value] of [
+  ['latest', 'latest'],
+  ['a tag', 'v1.2.3'],
+  ['a short digest', `sha256:${'d7'.repeat(16)}`],
+  ['63 hex characters', `sha256:${'a'.repeat(63)}`],
+  ['65 hex characters', `sha256:${'a'.repeat(65)}`],
+  ['upper-case hex', `sha256:${'D7'.repeat(32)}`],
+  ['another algorithm', `sha512:${'a'.repeat(128)}`],
+  ['a bare hex string', 'a'.repeat(64)],
+  ['an empty default', ''],
+  ['a nested variable', '${OTHER_TAG}'],
+]) {
+  test(`DENIAL: production.yml default that is ${label}`, () => {
+    const problems = checkModel(allImages(good(), withDefault(value)), "fixture", PROD);
+    assert.ok(problems.some((p) => /rab-api: .*never a tag or latest/.test(p)), JSON.stringify(problems));
+    // ...and with allowDefaultDigest off as well.
+    refused(allImages(good(), withDefault(value)), /image must be/);
+  });
+}
+
+test('DENIAL: production.yml default without the colon (`-`) or with `:+` / `?`', () => {
+  for (const op of ['-', ':+', '?']) {
+    const image = `\${CREWFLOW_IMAGE_REPOSITORY:-adhin007/adolphus}@\${CREWFLOW_IMAGE_TAG${op}${DIGEST}}`;
+    const problems = checkModel(allImages(good(), image), 'fixture', PROD);
+    assert.ok(problems.some((p) => /never a tag or latest/.test(p)), `${op}: ${JSON.stringify(problems)}`);
+  }
+});
+
+test('DENIAL: rab-api and rab-worker with different default digests (one expression for both)', () => {
+  const m = allImages(good(), withDefault(DIGEST));
+  m.services['rab-worker'].image = withDefault(`sha256:${'e8'.repeat(32)}`);
+  const problems = checkModel(m, 'fixture', PROD);
+  assert.ok(problems.some((p) => /rab-worker: image differs from rab-api/.test(p)), JSON.stringify(problems));
+});
+
+test('DENIAL: one service with the default, another without (one expression for both)', () => {
+  const m = good();
+  m.services['rab-api'].image = withDefault(DIGEST);
+  const problems = checkModel(m, 'fixture', PROD);
+  assert.ok(problems.some((p) => /rab-worker: image differs from rab-api/.test(p)), JSON.stringify(problems));
+});
+
+test('only the production.yml combination may carry a default', () => {
+  const allowed = DEPLOY_COMBOS.filter(allowsDefaultDigest).map((c) => c.join(' + '));
+  assert.deepEqual(allowed, ['docker-compose.production.yml']);
+  assert.equal(allowsDefaultDigest(['docker-compose.production.yml', 'docker-compose.local-db.yml']), false);
+  assert.ok(PINNED_DIGEST_IMAGE_REF.test(withDefault(DIGEST)));
+});
+
+test('committed files: production.yml pins one full digest on every app service; image.yml has no default', () => {
+  const read = (f) => fs.readFileSync(path.join(__dirname, '..', f), 'utf8');
+  const imageLines = (text) => [...text.matchAll(/^\s+image:\s*(\S+@\$\{CREWFLOW_IMAGE_TAG[^}]*\})\s*$/gm)].map((m) => m[1]);
+  const prod = imageLines(read('docker-compose.production.yml'));
+  assert.equal(prod.length, 2, 'rab-api and rab-worker (rab-ops was removed)');
+  assert.equal(new Set(prod).size, 1, 'the same expression on every app service');
+  assert.ok(PINNED_DIGEST_IMAGE_REF.test(prod[0]), prod[0]);
+  const image = imageLines(read('docker-compose.image.yml'));
+  assert.ok(image.length >= 2, 'the image compose app services');
+  for (const line of image) {
+    assert.ok(!/CREWFLOW_IMAGE_TAG:?-/.test(line), `docker-compose.image.yml must keep no default: ${line}`);
+    assert.ok(/CREWFLOW_IMAGE_TAG:\?/.test(line), `docker-compose.image.yml must require the digest: ${line}`);
+  }
+});
+
+// ---- Security review of PR #124 (MEDIUM): a re-added operations container under ANOTHER name and profile (`rab-maint`,
+// `profiles: ["maint"]`, reading .env.ops) passed every gate. Any profile-gated service in a deploy file is now refused.
+test('DENIAL: a service with any non-empty profiles, whatever its name or profile', () => {
+  for (const profiles of [['maint'], ['db'], ['ops', 'maint']]) {
+    const m = good();
+    m.services['rab-maint'] = { image: 'redis@sha256:x', profiles };
+    refused(m, /rab-maint: has profiles/);
+  }
+  const m = good();
+  m.services['rab-db'] = { image: 'postgres@sha256:x' }; // an always-on service is not refused by the profile rule
+  assert.ok(!checkModel(m, 'fixture').some((p) => /has profiles/.test(p)));
+});
+
+/** A copy of a committed deploy file with `rab-maint` (profile "maint", reading .env.ops) added before `volumes:`. */
+function withMaintService(file) {
+  const src = fs.readFileSync(path.join(__dirname, '..', file), 'utf8');
+  const weakened = src.replace(/\nvolumes:\n/, [
+    '',
+    '  rab-maint:',
+    '    image: ${CREWFLOW_IMAGE_REPOSITORY:-adhin007/adolphus}@${CREWFLOW_IMAGE_TAG:?digest}',
+    '    profiles: ["maint"]',
+    '    env_file:',
+    '      - .env.ops',
+    '',
+    'volumes:',
+    '',
+  ].join('\n'));
+  assert.notEqual(weakened, src, `${file}: the fixture edit did not apply`);
+  return weakened;
+}
+
+for (const file of ['docker-compose.production.yml', 'docker-compose.image.yml']) {
+  test(`DENIAL (rendered): ${file} with a "maint"-profile service reading .env.ops fails the CLI render`, { skip: !dockerCompose() && 'docker compose not available' }, () => {
+    const { render } = require('./compose-one-image.cjs');
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'one-image-maint-'));
+    try {
+      const copy = path.join(dir, file);
+      fs.writeFileSync(copy, withMaintService(file));
+      const problems = checkModel(render([path.relative(path.resolve(__dirname, '..'), copy)]), file, { allowDefaultDigest: file === 'docker-compose.production.yml' });
+      assert.ok(problems.some((p) => /rab-maint: has profiles \["maint"\]/.test(p)), JSON.stringify(problems));
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+}

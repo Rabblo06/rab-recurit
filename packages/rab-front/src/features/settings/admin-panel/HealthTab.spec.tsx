@@ -69,6 +69,20 @@ it('health cards come from the server report (status pill + fixed detail text)',
   expect(screen.getByText('Warning')).toBeTruthy();
 });
 
+it('X1.1: the security audit events card shows failed-login drops over the 10,000 backlog', async () => {
+  routeGet(get, {
+    '/admin/health/report': {
+      checkedAt: new Date().toISOString(),
+      attention: 1,
+      cards: [{ key: 'auditEvents', status: 'warning', detail: 'Failed-login events over the 10,000 backlog: 42 dropped in total · 3 by this API process', latencyMs: null }],
+    },
+    '/admin/queues': queues,
+  });
+  renderWithQuery(<HealthTab />);
+  expect(await screen.findByText('Failed-login events over the 10,000 backlog: 42 dropped in total · 3 by this API process')).toBeTruthy();
+  expect(screen.getByText('Security audit events')).toBeTruthy();
+});
+
 it('no recorded data point → "Metrics unavailable" (never numbers made up from counts); the ranges ask the server for that range', async () => {
   renderWithQuery(<HealthTab />);
   expect(await screen.findByRole('img', { name: 'Metrics unavailable' })).toBeTruthy();

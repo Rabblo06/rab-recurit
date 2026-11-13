@@ -37,6 +37,7 @@ import { ReportScanProcessor, ShiftStatementConsumer } from './queues/rab-report
 import { ShiftScanProcessor } from './queues/rab-shifts/shift.processors';
 import { AiMaintenanceProcessor, AiTurnConsumer } from './queues/rab-ai/ai.processors';
 import { TimerTriggerConsumer } from './queues/rab-timer-triggers/timer-trigger.processors';
+import { AuditEventConsumer } from './queues/rab-audit-events/audit-event.processors';
 
 /**
  * BullMQ migration (Lane A M2/M3): the `@Processor` adapters for the 20 scans and the 4 consumers (AI Phase 1 added the
@@ -60,6 +61,8 @@ export const WORKER_PROCESSORS = [
   AiMaintenanceProcessor,
   // Phase D-Q4b: the crewflow-timer-triggers consumer (its BullMQ Worker exists only when WORKER_TIMER_TRIGGERS is not off).
   TimerTriggerConsumer,
+  // Phase X Part 2, X1.1: the crewflow-audit-events consumer (its BullMQ Worker exists only when this process has a sink).
+  AuditEventConsumer,
 ];
 
 /**

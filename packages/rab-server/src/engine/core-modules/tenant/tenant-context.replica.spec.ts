@@ -54,7 +54,7 @@ describe('TenantContextService useReplica (B4)', () => {
     expect(primary.calls).not.toContain('SET TRANSACTION READ ONLY');
   });
 
-  it('routes an opted-in read to the replica: READ ONLY first, then the same transaction-local GUC bind and search_path', async () => {
+  it('routes an opted-in read to the replica: READ ONLY first, then the same transaction-local GUC bind with search_path folded in (T-1)', async () => {
     const primary = side('primary');
     const rep = side('replica');
     const service = new TenantContextService(primary.dataSource, resolver(), env(false), replicaStub({ dataSource: rep.dataSource }));
@@ -67,7 +67,12 @@ describe('TenantContextService useReplica (B4)', () => {
     expect(rep.calls[0]).toBe('SET TRANSACTION READ ONLY');
     expect(rep.calls[1]).toBe('RESET ROLE'); // pool safety (G-09), allowed inside a READ ONLY transaction
     expect(rep.calls[2]).toMatch(/set_config\('rab.organisation_id', \$1, true\).*set_config\('rab.admin_scope', '', true\)/);
-    expect(rep.calls[3]).toBe(`SELECT set_config('search_path', $1, true)`);
+    // T-1 / ST-01: the known schema ('core') is bound in the same SELECT ($6), not a fourth statement. CF-02-style
+    // first-statement READ ONLY is unchanged on this path (ST-02 leaves the replica path as it was).
+    expect(rep.calls[2]).toContain(`set_config('search_path', $6, true)`);
+    expect(rep.calls[2]).not.toContain('transaction_read_only');
+    expect((rep.manager.query as jest.Mock).mock.calls[2][1][5]).toBe('core');
+    expect(rep.calls).toHaveLength(3);
     expect(rep.calls.join()).not.toMatch(/\bSET (SESSION|ROLE)\b|set_config\([^)]*false\)/); // nothing session-scoped
     expect(databaseMetrics.snapshot().replica.reads).toBe(1);
   });
@@ -80,8 +85,13 @@ describe('TenantContextService useReplica (B4)', () => {
     await service.runInWorkspaceContext(CTX, async () => undefined, { useReplica: true });
     expect((schemaResolver.resolve as jest.Mock).mock.calls[0][0]).toBe(primary.manager);
     expect(primary.calls[0]).toBe('SET TRANSACTION READ ONLY');
-    expect(rep.calls).toContain(`SELECT set_config('search_path', $1, true)`);
-    expect((rep.manager.query as jest.Mock).mock.calls.find((c) => c[0].includes('search_path'))[1]).toEqual(['workspace_abc']);
+    // The primary resolution binds no search_path at all; the replica binds the already-validated schema in its one
+    // binding SELECT (T-1 / ST-01: known before the bind, so folded in as the bound $6).
+    expect(primary.calls.join()).not.toContain('search_path');
+    const bind = (rep.manager.query as jest.Mock).mock.calls.find((c) => c[0].includes('search_path'));
+    expect(bind[0]).toMatch(/^SELECT set_config\('rab.organisation_id'.*set_config\('search_path', \$6, true\)/);
+    expect(bind[1][5]).toBe('workspace_abc');
+    expect(rep.calls).not.toContain(`SELECT set_config('search_path', $1, true)`);
   });
 
   it.each(['not-configured', 'not-validated', 'unavailable', 'stale', 'refused'] as const)(

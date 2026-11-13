@@ -90,7 +90,7 @@ export interface AdminMigrations {
 
 export type HealthStatus = 'healthy' | 'warning' | 'degraded' | 'unavailable';
 export interface HealthCard {
-  key: 'api' | 'database' | 'redis' | 'worker' | 'scheduler' | 'provisioner' | 'email' | 'storage';
+  key: 'api' | 'database' | 'redis' | 'worker' | 'scheduler' | 'provisioner' | 'email' | 'storage' | 'auditEvents';
   status: HealthStatus;
   detail: string;
   latencyMs: number | null;
