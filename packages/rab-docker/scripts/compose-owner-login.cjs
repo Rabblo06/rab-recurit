@@ -164,6 +164,9 @@ const FORBIDDEN_PATTERNS = Object.freeze([
   [/REPLICA/, 'a read-replica setting (there is exactly one database URL)'],
   [/DATABASE_URL$/, 'a second database URL (there is exactly one: PG_DATABASE_URL)'],
   [/^TEST_/, 'a test-only variable'],
+  // Security review L1: the start scripts' and the bootstrap child's test seams (NODE_ENV=test only) never belong in a
+  // compose or env file (CREWFLOW_TEST_DB_SETUP_WAIT_SECONDS, CREWFLOW_TEST_OWNER_SETUP_ABORT, ...).
+  [/^CREWFLOW_TEST_/, 'a test seam (NODE_ENV=test only; never in a compose or env file)'],
   [/^(CREWFLOW_OPS_|PG_OPS_)/, 'a retired separated-mode operations variable (rab-ops was removed; never valid)'],
   [/^CREWFLOW_.*BOOTSTRAP_PASSWORD$/, 'a role password (role passwords never belong in app config)'],
   [/^BOOTSTRAP_ADMIN_/, 'bootstrap-admin input (a one-off operator command, never a runtime variable)'],

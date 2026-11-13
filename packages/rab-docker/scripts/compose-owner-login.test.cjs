@@ -132,6 +132,15 @@ test('DB-SETUP compose env (option 2): the bundled db needs only PG_DATABASE_PAS
   }
 });
 
+test('DENIAL L1: a CREWFLOW_TEST_* seam is refused in every env file and as a container variable', () => {
+  for (const name of ['CREWFLOW_TEST_DB_SETUP_WAIT_SECONDS', 'CREWFLOW_TEST_OWNER_SETUP_ABORT', 'CREWFLOW_TEST_ANYTHING']) {
+    assert.match(forbiddenReason(name), /a test seam/);
+    assertRefused(lintEnvText('runtime', `CREWFLOW_AUDIT_SINK=stdout\n${name}=1`), new RegExp(`${name}: a test seam`));
+    assertRefused(lintEnvText('database', `${DATABASE_OK}\n${name}=1`), new RegExp(`${name}: a test seam`));
+    assertRefused(lintEnvText('compose', `${COMPOSE_OK}\n${name}=1`), new RegExp(`${name}: a test seam`));
+  }
+});
+
 test('DENIAL option 2: the retired second variable PG_DATABASE_ADMIN_URL is refused everywhere (one setting only)', () => {
   assertRefused(lintEnvText('compose', `${COMPOSE_OK}\nPG_DATABASE_ADMIN_URL=${URL_OK.replace('crewflow_owner', 'doadmin')}`), /PG_DATABASE_ADMIN_URL: compose\.env holds only CREWFLOW_\* interpolation values \(and PG_DATABASE_URL, PG_DATABASE_PASSWORD\)/);
   assertRefused(lintEnvText('compose', `${COMPOSE_OK}\nPG_DATABASE_ADMIN_URL=${URL_OK.replace('crewflow_owner', 'doadmin')}`), /PG_DATABASE_ADMIN_URL: holds a PostgreSQL URL/);
