@@ -38,11 +38,11 @@ jest.setTimeout(600_000);
 const RUN = integrationTestDatabaseReady();
 const describeIfDb = RUN ? describe : describe.skip;
 const SFX = Math.random().toString(36).replace(/[^a-z]/g, '').slice(0, 6) || 'x';
-/** The literal of the SQL provisioner this code's migrations installed (the real structure level L). */
-const FROZEN_LITERAL = 'db:provision_workspace@WorkspaceStaffMemberSelect1786721480000';
 const L = codeWorkspaceStructureLevel();
 const P = L + 1;
 const REAL_CMDS = WORKSPACE_UPGRADE_COMMANDS['0-6'] ?? [];
+/** The literal of the SQL provisioner this code's migrations installed: the newest structural command's (structure level L). */
+const FROZEN_LITERAL = [...REAL_CMDS].reverse().find((c) => c.structure?.provisionFunctionLiteral)!.structure!.provisionFunctionLiteral!;
 const REAL = REAL_CMDS.map((c) => `0.6.0_${c.name}_${c.timestamp}`);
 const PROBE_LITERAL = 'db:provision_workspace@DrunnerProbeLevel1799999999991';
 const T0 = 1786900000000;
