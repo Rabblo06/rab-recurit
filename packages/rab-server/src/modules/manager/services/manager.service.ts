@@ -1016,12 +1016,16 @@ export class ManagerService {
    * `core` copy with HWS off), never in whatever schema the caller's session happens to route to — a workspace-less CEO used
    * to read the stale `core` copy, and a caller in another workspace read its own schema and got `[]`.
    *   - Layer 2: MANAGER_MANAGE re-checked here (403), not only by the route guard.
-   *   - The profile is looked up in the caller's organisation; not found → 404.
-   *   - A caller bound to a workspace may read only a manager of that same workspace: another workspace → 404 (no existence
-   *     oracle). A workspace-less organisation administrator reads the manager's workspace after
-   *     `core.admin_workspace_in_org` confirms it is an active workspace of the caller's organisation (404 otherwise), the
-   *     same re-binding VenueManagerService's org-admin flow uses.
-   *   - A profile with no workspace has no venue link (manager_venue requires one): `[]`.
+   *   - The profile is looked up in the caller's organisation; not found → 404 (another organisation included).
+   *   - Owner decision 0d (2026-11-14): an ORGANISATION-WIDE holder of `manager.manage` (an organisation-level role or a
+   *     per-user grant, not revoked — the same scope delete / assign use) reads a manager of ANY active workspace of the
+   *     organisation, bound to a workspace of their own or not: the target's workspace is confirmed by
+   *     `core.admin_workspace_in_org` (404 otherwise) and read in that workspace's context, the re-binding
+   *     VenueManagerService's org-admin flow uses. A caller whose `manager.manage` comes ONLY from a custom role of their
+   *     own workspace keeps the strict rule: a manager of another workspace → 404 (no existence oracle).
+   *   - A profile with no workspace has no venue link (manager_venue requires one): `[]` for a workspace-less
+   *     organisation administrator; 404 for a workspace-bound caller (owner decision 0d: it is not a manager of the
+   *     caller's workspace).
    */
   async listVenues(ctx: AuthContext, managerId: string): Promise<Venue[]> {
     if (!ctx.organisationId) throw new NotFoundException('Manager not found.');
@@ -1031,10 +1035,13 @@ export class ManagerService {
       }
       const profile = await manager.findOne(ManagerProfile, { where: { id: managerId, organisationId: ctx.organisationId! } });
       if (!profile) throw new NotFoundException('Manager not found.');
-      if (!profile.workspaceId) return null;
-      if (ctx.workspaceId) {
-        if (profile.workspaceId !== ctx.workspaceId) throw new NotFoundException('Manager not found.');
-        return profile.workspaceId;
+      if (!profile.workspaceId) {
+        if (ctx.workspaceId) throw new NotFoundException('Manager not found.');
+        return null;
+      }
+      if (profile.workspaceId === ctx.workspaceId) return profile.workspaceId;
+      if (ctx.workspaceId && !(await this.holdsOrganisationWideManagerManage(manager, ctx))) {
+        throw new NotFoundException('Manager not found.');
       }
       const [{ ok }] = await manager.query<Array<{ ok: boolean }>>('SELECT core.admin_workspace_in_org($1, $2) AS ok', [
         profile.workspaceId,
@@ -1051,6 +1058,33 @@ export class ManagerService {
         .where('mv.manager_profile_id = :managerId', { managerId })
         .getMany(),
     );
+  }
+
+  /**
+   * True when the caller's `manager.manage` is ORGANISATION-WIDE: a per-user `grant` override of the bound organisation, or
+   * (with no `revoke` override) a role with no workspace — a system / organisation role, never a custom workspace-member
+   * role (`core.role.workspace_id`, WorkspaceMemberRoles1786714500000). The same override precedence as
+   * PermissionsService.userHasPermissionTx, pinned to the caller's organisation.
+   */
+  private async holdsOrganisationWideManagerManage(manager: EntityManager, ctx: AuthContext): Promise<boolean> {
+    const [row] = await manager.query<Array<{ org_wide: boolean }>>(
+      `WITH o AS (
+         SELECT upo.effect FROM core.user_permission_override upo JOIN core.permission p ON p.id = upo.permission_id
+          WHERE upo.user_id = $1 AND upo.organisation_id = $2 AND p.key = $3
+       )
+       SELECT CASE
+                WHEN EXISTS (SELECT 1 FROM o WHERE effect = 'grant') THEN true
+                WHEN EXISTS (SELECT 1 FROM o WHERE effect = 'revoke') THEN false
+                ELSE EXISTS (
+                  SELECT 1 FROM core.user_role ur
+                    JOIN core.role r ON r.id = ur.role_id
+                    JOIN core.role_permission rp ON rp.role_id = ur.role_id
+                    JOIN core.permission p ON p.id = rp.permission_id
+                   WHERE ur.user_id = $1 AND ur.organisation_id = $2 AND r.workspace_id IS NULL AND p.key = $3)
+              END AS org_wide`,
+      [ctx.userId, ctx.organisationId, PermissionFlag.MANAGER_MANAGE],
+    );
+    return row?.org_wide === true;
   }
 
   /** General "change email" — active or pending, one mutation either way. See `StaffService.changeEmail`'s identical doc comment. */
