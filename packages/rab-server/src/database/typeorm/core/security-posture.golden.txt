@@ -302,6 +302,22 @@ execute|host_label_sync_organisation()|crewflow|false
 execute|host_label_sync_workspace()|PUBLIC|false
 execute|host_label_sync_workspace()|crewflow_app|false
 execute|host_label_sync_workspace()|crewflow|false
+execute|hws_cutover_copy_batch(uuid,text,text,integer)|PUBLIC|false
+execute|hws_cutover_copy_batch(uuid,text,text,integer)|crewflow_app|false
+execute|hws_cutover_copy_batch(uuid,text,text,integer)|crewflow|true
+execute|hws_cutover_probe(uuid)|PUBLIC|false
+execute|hws_cutover_probe(uuid)|crewflow_app|false
+execute|hws_cutover_probe(uuid)|crewflow|true
+execute|hws_cutover_reconcile_statement_pointers(uuid,boolean)|PUBLIC|false
+execute|hws_cutover_reconcile_statement_pointers(uuid,boolean)|crewflow_app|false
+execute|hws_cutover_reconcile_statement_pointers(uuid,boolean)|crewflow|true
+execute|hws_cutover_schema(uuid)|crewflow_app|false
+execute|hws_cutover_schema(uuid)|crewflow|true
+execute|hws_cutover_source_sql(text)|crewflow_app|false
+execute|hws_cutover_source_sql(text)|crewflow|true
+execute|hws_cutover_verify_range(uuid,text,text,integer)|PUBLIC|false
+execute|hws_cutover_verify_range(uuid,text,text,integer)|crewflow_app|false
+execute|hws_cutover_verify_range(uuid,text,text,integer)|crewflow|true
 execute|immutable_unaccent(text)|crewflow_app|true
 execute|immutable_unaccent(text)|crewflow|true
 execute|is_active_platform_admin(uuid)|PUBLIC|false
@@ -600,6 +616,12 @@ owner|function|host_label_shape_ok(text)|rab_secure_owner|definer=false
 owner|function|host_label_status(text,uuid)|rab_secure_owner|definer=true|search_path=pg_catalog, pg_temp
 owner|function|host_label_sync_organisation()|rab_secure_owner|definer=true|search_path=pg_catalog, pg_temp
 owner|function|host_label_sync_workspace()|rab_secure_owner|definer=true|search_path=pg_catalog, pg_temp
+owner|function|hws_cutover_copy_batch(uuid,text,text,integer)|crewflow|definer=true|search_path=pg_catalog, pg_temp
+owner|function|hws_cutover_probe(uuid)|crewflow|definer=true|search_path=pg_catalog, pg_temp
+owner|function|hws_cutover_reconcile_statement_pointers(uuid,boolean)|rab_secure_owner|definer=true|search_path=pg_catalog, pg_temp
+owner|function|hws_cutover_schema(uuid)|crewflow|definer=false
+owner|function|hws_cutover_source_sql(text)|crewflow|definer=false
+owner|function|hws_cutover_verify_range(uuid,text,text,integer)|crewflow|definer=true|search_path=pg_catalog, pg_temp
 owner|function|immutable_unaccent(text)|rab_secure_owner|definer=false
 owner|function|is_active_platform_admin(uuid)|rab_secure_owner|definer=true|search_path=pg_catalog, core, pg_temp
 owner|function|list_organisations_for_admin()|rab_secure_owner|definer=true|search_path=pg_catalog, pg_temp

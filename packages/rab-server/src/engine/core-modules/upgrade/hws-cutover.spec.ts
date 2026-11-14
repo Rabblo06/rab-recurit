@@ -1,0 +1,112 @@
+import { createHash } from 'node:crypto';
+
+import { HWS_CUTOVER_EXPECTED_STATE, HWS_CUTOVER_FUNCTIONS, HWS_CUTOVER_TABLES, hwsCutoverStateProblems } from '../../../database/typeorm/core/hws-cutover-sql';
+import { WORKSPACE_TABLE_COPY_ORDER } from '../../../database/typeorm/workspace-schema/backfill/fk-graph';
+import { WORKSPACE_TABLES } from '../../../database/typeorm/workspace-schema/provision-workspace-schema';
+import { CUTOVER_BACKUP_MARKER_ENV, parseCutoverBackupMarker, verifyCutoverBackup } from './upgrade-commands/0-7/hws-cutover-backup';
+import { createHwsCutoverCommand, HWS_CUTOVER_BLOCK_PREFIX, HWS_CUTOVER_NAME, hwsCutoverBlockMarker } from './upgrade-commands/0-7/hws-cutover';
+import { HWS_CUTOVER_COPY_ORDER, HWS_CUTOVER_TABLE_LIST } from './upgrade-commands/0-7/hws-cutover-tables';
+import { UPGRADE_COMMANDS_0_7 } from './upgrade-commands/0-7';
+import { UPGRADE_COMMANDS } from './upgrade-commands/registry';
+import type { UpgradeCommandHost } from './upgrade-commands/upgrade-command';
+import { commandStepName } from './upgrade-sequence';
+import { isUpgradeBlocked, parseUpgradeBlock, upgradeBlockMarker } from './workspace-upgrade-block';
+
+/** OWNER-DB-ULTIMATE Part C3 (option A′, pending owner choice): the pure parts of the HWS cutover command. */
+describe('C3 HWS cutover: frozen lists stay equal to their sources', () => {
+  it('the command table list, the SQL closed list and WORKSPACE_TABLES are the same 21 tables', () => {
+    expect([...HWS_CUTOVER_TABLE_LIST]).toEqual([...WORKSPACE_TABLES]);
+    expect([...HWS_CUTOVER_TABLES]).toEqual([...WORKSPACE_TABLES]);
+    expect(new Set(HWS_CUTOVER_TABLE_LIST).size).toBe(21);
+  });
+
+  it('the copy order is the reviewed FK order (backfill/fk-graph.ts)', () => {
+    expect([...HWS_CUTOVER_COPY_ORDER]).toEqual([...WORKSPACE_TABLE_COPY_ORDER]);
+    expect([...HWS_CUTOVER_COPY_ORDER].sort()).toEqual([...HWS_CUTOVER_TABLE_LIST].sort());
+  });
+
+  it('the block marker has the Part D format, so the resolver refuses the workspace (503 "being upgraded")', () => {
+    for (const cls of ['HWS_CUTOVER_PENDING', 'HWS_CUTOVER_MISMATCH', 'SQLSTATE_23505']) {
+      expect(hwsCutoverBlockMarker(cls)).toBe(upgradeBlockMarker(HWS_CUTOVER_NAME, cls));
+      expect(isUpgradeBlocked(hwsCutoverBlockMarker(cls))).toBe(true);
+      expect(parseUpgradeBlock(hwsCutoverBlockMarker(cls))).toEqual({ step: HWS_CUTOVER_NAME, errorClass: cls });
+      expect(hwsCutoverBlockMarker(cls).startsWith(HWS_CUTOVER_BLOCK_PREFIX)).toBe(true);
+    }
+    expect(hwsCutoverBlockMarker('bad class; DROP')).toBe(upgradeBlockMarker(HWS_CUTOVER_NAME, 'badclassDROP'));
+  });
+
+  it('is provisional: in the 0-7 folder, NOT in the active registry (activation is a release decision)', () => {
+    expect(UPGRADE_COMMANDS_0_7.map((c) => c.name)).toEqual([HWS_CUTOVER_NAME]);
+    expect(Object.keys(UPGRADE_COMMANDS)).not.toContain('0-7');
+    expect(commandStepName('0.7.0', createHwsCutoverCommand())).toBe('0.7.0_HwsCutover_1786721510100');
+  });
+
+  it('the migration self-check accepts exactly the reviewed functions', () => {
+    const rows = Object.entries(HWS_CUTOVER_EXPECTED_STATE).map(([fn, state]) => ({ fn, state }));
+    expect(Object.keys(HWS_CUTOVER_EXPECTED_STATE).sort()).toEqual([...HWS_CUTOVER_FUNCTIONS].sort());
+    expect(hwsCutoverStateProblems(rows, true)).toEqual([]);
+    expect(hwsCutoverStateProblems(rows.map((r) => (r.fn.includes('copy_batch') ? { ...r, state: r.state + 'crewflow_app' } : r)), true)).toHaveLength(1);
+    expect(hwsCutoverStateProblems(rows.slice(1), true)).toHaveLength(1);
+    expect(hwsCutoverStateProblems([...rows, { fn: 'core.hws_cutover_extra()', state: 'x' }], true)).toHaveLength(1);
+    expect(hwsCutoverStateProblems([], false)).toEqual([]);
+    expect(hwsCutoverStateProblems(rows, false)).toHaveLength(rows.length);
+  });
+});
+
+describe('C3 HWS cutover: the backup marker (owner rule: no cutover without a verified backup)', () => {
+  const DB = 'crewflow_test';
+  const NOW = new Date('2026-11-14T12:00:00Z');
+  const dump = Buffer.concat([Buffer.from('PGDMP'), Buffer.from('synthetic archive body for the spec')]);
+  const sha = createHash('sha256').update(dump).digest('hex');
+  const good = { kind: 'crewflow-hws-cutover-backup', version: 1, database: DB, takenAt: '2026-11-14T10:00:00Z', format: 'pg_dump-custom', dumpFile: 'pre-cutover.dump', sha256: sha, sizeBytes: dump.length, restoreVerified: true };
+
+  function host(opts: { marker?: unknown; env?: Record<string, string | undefined>; dump?: Buffer | null; markerRaw?: string | null } = {}): UpgradeCommandHost {
+    const markerText = opts.markerRaw !== undefined ? opts.markerRaw : JSON.stringify(opts.marker ?? good);
+    const file = opts.dump === undefined ? dump : opts.dump;
+    return {
+      env: opts.env ?? { [CUTOVER_BACKUP_MARKER_ENV]: '/backups/marker.json' },
+      hwsRuntimeEnabled: true,
+      isAbsolutePath: (p) => p.startsWith('/'),
+      siblingPath: (p, f) => `${p.slice(0, p.lastIndexOf('/'))}/${f}`,
+      readSmallFile: async (p) => (p === '/backups/marker.json' ? markerText : null),
+      fileDigest: async (p) =>
+        p === '/backups/pre-cutover.dump' && file ? { sha256: createHash('sha256').update(file).digest('hex'), size: file.length, head: file.subarray(0, 8).toString('latin1') } : null,
+    };
+  }
+  const check = (h: UpgradeCommandHost | undefined) => verifyCutoverBackup(h, { database: DB, dbNow: NOW });
+
+  it('a fresh, complete marker with a matching dump passes', async () => {
+    await expect(check(host())).resolves.toEqual({ ok: true, marker: good });
+  });
+
+  it.each([
+    ['no host', undefined, /no host facts/],
+    ['the variable unset', host({ env: {} }), /is not set/],
+    ['a relative path', host({ env: { [CUTOVER_BACKUP_MARKER_ENV]: 'marker.json' } }), /absolute path/],
+    ['no marker file', host({ markerRaw: null }), /does not exist/],
+    ['not JSON', host({ markerRaw: '{nope' }), /not valid JSON/],
+    ['an extra field', host({ marker: { ...good, extra: 1 } }), /exactly the fields/],
+    ['a missing field', host({ marker: { ...good, restoreVerified: undefined } }), /exactly the fields/],
+    ['restore not attested', host({ marker: { ...good, restoreVerified: false } }), /restoreVerified/],
+    ['another database', host({ marker: { ...good, database: 'other' } }), /another database/],
+    ['older than 24 h', host({ marker: { ...good, takenAt: '2026-11-13T11:59:00Z' } }), /older than 24 hours/],
+    ['from the future', host({ marker: { ...good, takenAt: '2026-11-14T12:30:00Z' } }), /in the future/],
+    ['a path in dumpFile', host({ marker: { ...good, dumpFile: '../etc/passwd' } }), /bare file name/],
+    ['the dump missing', host({ dump: null }), /not next to it/],
+    ['a truncated dump', host({ dump: dump.subarray(0, dump.length - 1) }), /size differs/],
+    ['not a custom archive', host({ dump: Buffer.concat([Buffer.from('XXXXX'), dump.subarray(5)]) }), /not a pg_dump custom-format/],
+    ['a swapped dump of the same size', host({ dump: Buffer.concat([Buffer.from('PGDMP'), Buffer.alloc(dump.length - 5, 1)]) }), /sha256 differs/],
+    ['a plain-format dump declared', host({ marker: { ...good, format: 'plain' } }), /custom-format/],
+    ['an upper-case sha', host({ marker: { ...good, sha256: sha.toUpperCase() } }), /64 lower-case hex/],
+  ])('refuses: %s', async (_label, h, reason) => {
+    const r = await check(h);
+    expect(r.ok).toBe(false);
+    expect((r as { reason: string }).reason).toMatch(reason);
+  });
+
+  it('the refusal reason never echoes the marker path or its content', async () => {
+    const r = await check(host({ marker: { ...good, database: 'secret-db-name' } }));
+    expect(JSON.stringify(r)).not.toMatch(/secret-db-name|\/backups\//);
+    expect('reason' in parseCutoverBackupMarker('[]')).toBe(true);
+  });
+});
