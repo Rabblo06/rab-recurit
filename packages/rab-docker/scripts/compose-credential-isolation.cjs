@@ -246,6 +246,15 @@ function dbSetupContractChecks(rel, services, [apiName, workerName]) {
   return out;
 }
 
+/**
+ * Owner decision 2026-11-14 (#136 b): the dev database survives `docker compose down -v`. ONLY the dev file's db DATA volume
+ * is external, with this exact dev-only name (never rab_devdb_data, the previous dev database). QA (throwaway) and the
+ * production files keep project-scoped volumes; the CA and setup volumes stay project-scoped everywhere (a lost CA or
+ * password file is recovered by the next `up`).
+ */
+const DEV_DB_DATA_VOLUME = 'crewflow_dev_db_data';
+const EXTERNAL_DB_VOLUMES = Object.freeze({ 'packages/rab-docker/docker-compose.yml': Object.freeze({ 'crewflow-db-data': DEV_DB_DATA_VOLUME }) });
+
 /** The throw-away Compose project every file is rendered under (render()). */
 const RENDER_PROJECT = 'compose-isolation-check';
 /** The bundled db's top-level resources, compared with production's (security review of F2, L2-1). */
@@ -263,9 +272,11 @@ const unprefixed = (resource) => {
  * Part F2 (X2.3): the dev and QA `db` services are verbatim copies of production's. Pure: [ok, label] pairs comparing the
  * two rendered models (same throw-away project, dummy values and password sentinel, so identical text renders
  * identically): the `db` service; the crewflow-db network (internal, no custom name); and the three db volumes (never
- * external, no custom name). Names the differing keys only, never a value.
+ * external, no custom name), EXCEPT the volumes `externalVolumes` names ({key: exact external name}): those must be
+ * external with exactly that name (owner decision 2026-11-14: the dev data volume, DEV_EXTERNAL_DB_VOLUMES). Names the
+ * differing keys only, never a value.
  */
-function bundledDbParityChecks(rel, model, productionModel) {
+function bundledDbParityChecks(rel, model, productionModel, externalVolumes = {}) {
   const db = model?.services?.db;
   const productionDb = productionModel?.services?.db;
   if (!db || !productionDb) return [[false, `${rel}: has a bundled db rendered like ${PRODUCTION_FILE}'s (missing: ${!db ? rel : PRODUCTION_FILE})`]];
@@ -280,6 +291,15 @@ function bundledDbParityChecks(rel, model, productionModel) {
   ]);
   for (const key of DB_VOLUME_KEYS) {
     const vol = unprefixed(model.volumes?.[key]);
+    const externalName = externalVolumes[key];
+    if (externalName) {
+      const keys = Object.keys(vol ?? {}).sort();
+      out.push([
+        Boolean(vol) && vol.external === true && vol.name === externalName && JSON.stringify(keys) === JSON.stringify(['external', 'name']),
+        `${rel}: the ${key} volume is external with exactly the name ${externalName} (survives \`down -v\`; owner decision 2026-11-14)`,
+      ]);
+      continue;
+    }
     out.push([
       Boolean(vol) && !vol.external && vol.name === key && JSON.stringify(vol) === JSON.stringify(unprefixed(productionModel.volumes?.[key])),
       `${rel}: the ${key} volume is production's (project-scoped, not external, no custom name)`,
@@ -442,8 +462,10 @@ function main(options = {}) {
       if (rel === PRODUCTION_FILE) {
         productionModel = model;
         productionText = text;
+        // Against itself: production's own network is internal and its db volumes are project-scoped (never external).
+        for (const [ok, label] of bundledDbParityChecks(rel, model, model)) check(ok, label);
       } else {
-        for (const [ok, label] of bundledDbParityChecks(rel, model, productionModel)) check(ok, label);
+        for (const [ok, label] of bundledDbParityChecks(rel, model, productionModel, EXTERNAL_DB_VOLUMES[rel] ?? {})) check(ok, label);
         for (const [ok, label] of rawDbTextParityChecks(rel, text, productionText ?? '')) check(ok, label);
         for (const [ok, label] of nonProductionDbSetupChecks(rel, services, YAML.parse(text, { merge: true }))) check(ok, label);
       }
@@ -514,6 +536,8 @@ module.exports = {
   dbPasswordChecks,
   dbSetupContractChecks,
   bundledDbParityChecks,
+  DEV_DB_DATA_VOLUME,
+  EXTERNAL_DB_VOLUMES,
   rawDbServiceText,
   rawDbTextParityChecks,
   dbVolumeMountChecks,

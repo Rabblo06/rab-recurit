@@ -274,6 +274,59 @@ test('DENIAL (security review M1): a db entrypoint without the one-server lock, 
   refusedBy(isolation.dbServerLockChecks('f.yml', {}), /one-server lock/);
 });
 
+// ---- Owner decision 2026-11-14 (#136 b): the dev db DATA volume is external (survives `down -v`), nothing else is.
+const DEV_EXT = { 'crewflow-db-data': 'crewflow_dev_db_data' };
+const devModel = () => {
+  const m = dbModel();
+  m.volumes['crewflow-db-data'] = { name: 'crewflow_dev_db_data', external: true };
+  return m;
+};
+
+test('#136 b: the dev data volume, external with exactly crewflow_dev_db_data, passes; the gate names exactly that', () => {
+  assert.equal(isolation.DEV_DB_DATA_VOLUME, 'crewflow_dev_db_data');
+  assert.deepEqual(isolation.EXTERNAL_DB_VOLUMES, { 'packages/rab-docker/docker-compose.yml': DEV_EXT });
+  assert.deepEqual(failedLabels(isolation.bundledDbParityChecks('dev.yml', devModel(), dbModel(), DEV_EXT)), []);
+});
+
+test('DENIAL (#136 b): the dev data volume project-scoped, external under another name (rab_devdb_data included), or with extra keys', () => {
+  const re = /crewflow-db-data volume is external with exactly the name crewflow_dev_db_data/;
+  for (const edit of [
+    (m) => { m.volumes['crewflow-db-data'] = { name: `${P}_crewflow-db-data` }; },
+    (m) => { m.volumes['crewflow-db-data'] = { name: 'rab_devdb_data', external: true }; },
+    (m) => { m.volumes['crewflow-db-data'] = { name: 'crewflow_dev_db_data' }; },
+    (m) => { m.volumes['crewflow-db-data'] = { name: 'crewflow_dev_db_data', external: true, driver: 'local' }; },
+    (m) => { delete m.volumes['crewflow-db-data']; },
+  ]) {
+    const m = devModel();
+    edit(m);
+    refusedBy(isolation.bundledDbParityChecks('dev.yml', m, dbModel(), DEV_EXT), re);
+  }
+});
+
+test('DENIAL (#136 b): any OTHER db volume external in dev, or the data volume external in QA or production', () => {
+  for (const key of ['crewflow-db-ca', 'crewflow-db-target']) {
+    const m = devModel();
+    m.volumes[key] = { name: `shared_${key}`, external: true };
+    refusedBy(isolation.bundledDbParityChecks('dev.yml', m, dbModel(), DEV_EXT), new RegExp(`${key} volume is production's`));
+  }
+  // QA (no external volumes allowed) with the dev-style external data volume.
+  refusedBy(isolation.bundledDbParityChecks('qa.yml', devModel(), dbModel()), /crewflow-db-data volume is production's/);
+  // Production checked against itself: an external data volume fails.
+  refusedBy(isolation.bundledDbParityChecks('production.yml', devModel(), devModel()), /crewflow-db-data volume is production's/);
+});
+
+test('#136 b (static): the committed dev file declares exactly the external crewflow_dev_db_data; QA and production keep project volumes', () => {
+  const fs = require('node:fs');
+  const YAML = isolation.loadYamlParser();
+  const vols = (rel) => YAML.parse(fs.readFileSync(path.join(REPO, rel), 'utf8'), { merge: true }).volumes ?? {};
+  assert.deepEqual(vols('packages/rab-docker/docker-compose.yml')['crewflow-db-data'], { name: 'crewflow_dev_db_data', external: true });
+  for (const rel of ['packages/rab-docker/docker-compose.qa.yml', isolation.PRODUCTION_FILE]) {
+    for (const key of ['crewflow-db-data', 'crewflow-db-ca', 'crewflow-db-target']) assert.equal(vols(rel)[key], null, `${rel}: ${key} is a plain project volume`);
+  }
+  for (const key of ['crewflow-db-ca', 'crewflow-db-target']) assert.equal(vols('packages/rab-docker/docker-compose.yml')[key], null, `dev: ${key} stays project-scoped`);
+  assert.ok(!fs.readFileSync(path.join(REPO, 'packages/rab-docker/docker-compose.yml'), 'utf8').match(/^\s+name:\s*rab_devdb_data/m), 'dev never names rab_devdb_data as a volume');
+});
+
 test('DENIAL (security review I6): db-setup, the API and the Worker must run one image', () => {
   const s = partA();
   s.worker.image = 'other@sha256:2';

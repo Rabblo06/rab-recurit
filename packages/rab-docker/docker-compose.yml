@@ -31,26 +31,39 @@ name: rab
 #     server and worker. Its database settings (PG_DATABASE_URL, DB_TARGET, the CA path, ...) are for a host-native
 #     `yarn start` and are overridden below: the containers' database comes ONLY from db-setup's files.
 #
-# FIRST RUN (fresh volumes; the server applies the whole migration chain on its first start, health start_period 600 s):
+# FIRST RUN (the server applies the whole migration chain on its first start, health start_period 600 s). Create the
+# database volume ONCE (it is external, see VOLUMES), then start:
+#   docker volume create crewflow_dev_db_data
 #   docker compose -f packages/rab-docker/docker-compose.yml up -d --build
 # First platform admin, once the server is healthy (a one-off of the server image; api-prestart.sh builds the same URL):
 #   docker compose -f packages/rab-docker/docker-compose.yml run --rm --no-deps -e DB_TARGET=local \
 #     -e BOOTSTRAP_ADMIN_EMAIL=you@example.test server node packages/rab-server/dist/command/main.js bootstrap-admin
 # psql (inside the db container; every login needs the password, PGPASSWORD = CREWFLOW_DEV_DB_PASSWORD):
 #   docker compose -f packages/rab-docker/docker-compose.yml exec -e PGPASSWORD db psql -U postgres -d crewflow
-# Reset everything (deletes this stack's database): `down -v`. The setup volume goes with it; db-setup makes a new
-# password on the next start.
+# `down -v` KEEPS the database (owner decision 2026-11-14): it removes the project-scoped volumes only. To really start
+# over, deliberately: `down -v`, then `docker volume rm crewflow_dev_db_data`, then create it again.
 #
 # PORTS (loopback only): server 3000 (the browser, mobile, curl), front 5173; minio 9000/9001 (profile s3) and adminer 8080
 # (profile tools). The database is NOT published: nothing in this stack needs it from the host, and its certificate names
 # `db`, so a host connection could not verify it. Redis is not published.
 #
-# VOLUMES: all new and project-scoped (rab_crewflow-db-data, rab_crewflow-db-ca, rab_crewflow-db-target,
-# rab_crewflow-dev-redis-data, rab_crewflow-dev-local-storage, rab_crewflow-dev-minio-data). This file no longer names
-# rab_devdb_data, rab_rab-redis-data or rab_rab-local-storage, and nothing here reads, attaches or changes them.
+# VOLUMES (owner decision 2026-11-14: the dev database survives `docker compose down -v`):
+#   crewflow_dev_db_data  the db's DATA volume (cluster + server TLS key): EXTERNAL, this fixed dev-only name, created once
+#                         by hand (above). Compose never creates or removes it; `up` without it fails (fail closed).
+#                         The name is the same whatever the project name: a second stack on it is refused by the db's
+#                         one-server lock. It is never rab_devdb_data (the previous dev database, untouched).
+#   everything else       project-scoped, removed by `down -v`: rab_crewflow-db-ca (the db's CA certificate),
+#                         rab_crewflow-db-target (db-setup's target + crewflow_owner password file), redis, local storage,
+#                         minio. Losing the CA or the password file is recovered on the next `up`, automatically and
+#                         safely: the db entrypoint makes a new CA + server certificate when ca.crt is missing, and db-setup,
+#                         finding no password file but the bundled superuser URL, stores a new random password first and
+#                         resets crewflow_owner to it (Part A's lost-file path, Crewflow addition A4) before server and
+#                         worker start (they read it). Nothing else in the database changes.
+# This file no longer names rab_devdb_data, rab_rab-redis-data or rab_rab-local-storage, and nothing here reads, attaches
+# or changes them.
 # CUT-OVER from the previous dev stack (devdb + migrate, separated logins): an owner decision. `up` with this file under the
 # same project leaves the old `rab-devdb` container running as an orphan with its data untouched (never pass
-# --remove-orphans unless you mean to stop it); the new stack starts empty.
+# --remove-orphans unless you mean to stop it); the new stack starts empty (owner decision 2026-11-14: a fresh database).
 
 x-logging: &logging
   driver: json-file
@@ -551,7 +564,11 @@ networks:
 volumes:
   # The bundled db: its cluster and server TLS key; its CA certificate (read-only in db-setup, server and worker); and
   # db-setup's target file + crewflow_owner password file (read-only in server and worker). Same keys as production.
+  # DEV ONLY: the data volume is EXTERNAL with a fixed name, so `down -v` never deletes the dev database (see VOLUMES in
+  # the header; compose-credential-isolation.cjs requires exactly this, and project volumes everywhere else).
   crewflow-db-data:
+    name: crewflow_dev_db_data
+    external: true
   crewflow-db-ca:
   crewflow-db-target:
   crewflow-dev-redis-data:
