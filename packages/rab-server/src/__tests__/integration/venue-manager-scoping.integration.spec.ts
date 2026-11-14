@@ -296,8 +296,8 @@ describeIfDb('venue manager scoping (integration)', () => {
     await tenantContext.runInTenantContext(
       { organisationId: organisation.id, workspaceId, userId: managerUserId, role: '' },
       async (m) => {
-        await m.query(`UPDATE core."user" SET status = 'active' WHERE id = (SELECT user_id FROM core.staff_profile WHERE id = $1)`, [staffProfileId]);
-        await m.query(`UPDATE core.staff_profile SET employment_status = 'active' WHERE id = $1`, [staffProfileId]);
+        await m.query(`UPDATE core."user" SET status = 'active' WHERE id = (SELECT user_id FROM staff_profile WHERE id = $1)`, [staffProfileId]);
+        await m.query(`UPDATE staff_profile SET employment_status = 'active' WHERE id = $1`, [staffProfileId]);
       },
     );
   }
@@ -527,7 +527,7 @@ describeIfDb('venue manager scoping (integration)', () => {
       { organisationId: organisation.id, workspaceId, userId: manager.userId, role: '' },
       async (m) => {
         for (const id of [activeStaff, suspendedStaff, unassigned]) {
-          await m.query(`UPDATE core."user" SET status = 'active' WHERE id = (SELECT user_id FROM core.staff_profile WHERE id = $1)`, [id]);
+          await m.query(`UPDATE core."user" SET status = 'active' WHERE id = (SELECT user_id FROM staff_profile WHERE id = $1)`, [id]);
         }
       },
     );
@@ -661,9 +661,9 @@ describeIfDb('venue manager scoping (integration)', () => {
     await expect(tenantContext.runInTenantContext(ctx, m => assertVenueTeamSelection(m, ctx, [unadded], a.venue1.workspaceId))).rejects.toThrow('team');
     await tenantContext.runInTenantContext(ctx, async m => {
       await assertVenueTeamSelection(m, ctx, [own], a.venue1.workspaceId);
-      const rows = await m.query('SELECT * FROM core.venue_manager_staff');
+      const rows = await m.query('SELECT * FROM venue_manager_staff');
       expect(rows).toHaveLength(1);
-      expect((await m.query('SELECT * FROM core.shift_assignment'))).toHaveLength(0);
+      expect((await m.query('SELECT * FROM shift_assignment'))).toHaveLength(0);
     });
     await expect(tenantContext.runInTenantContext(ctx, m => m.query(
       'INSERT INTO core.venue_manager_staff (organisation_id,workspace_id,manager_profile_id,staff_profile_id) VALUES ($1,$2,$3,$4)',
@@ -738,19 +738,19 @@ describeIfDb('venue manager scoping (integration)', () => {
       expect(result.results.every((r: any) => r.ok)).toBe(true);
       const [{ id: workspaceId }] = await adminDataSource.manager.query('SELECT id FROM core.manager_workspace WHERE owner_user_id=$1', [seed.manager.userId]);
       const ctx = { organisationId: seed.organisation.id, workspaceId, userId: seed.manager.userId, role: 'manager' };
-      const rows = await tenantContext.runInTenantContext(ctx, m => m.query('SELECT lower(period) AS start, upper(period) AS finish, break_minutes FROM core.shift_assignment WHERE shift_id=$1 AND staff_profile_id=$2', [seed.shiftId, seed.staffA]));
+      const rows = await tenantContext.runInTenantContext(ctx, m => m.query('SELECT lower(period) AS start, upper(period) AS finish, break_minutes FROM shift_assignment WHERE shift_id=$1 AND staff_profile_id=$2', [seed.shiftId, seed.staffA]));
       expect(rows[0].break_minutes).toBe(60);
       expect(rows[0].start.toISOString()).toBe(new Date(row.startsAt).toISOString());
       expect(rows[0].finish.toISOString()).toBe(new Date(row.endsAt).toISOString());
-      const [user] = await tenantContext.runInTenantContext(ctx,m=>m.query('SELECT user_id FROM core.staff_profile WHERE id=$1',[seed.staffA]));
+      const [user] = await tenantContext.runInTenantContext(ctx,m=>m.query('SELECT user_id FROM staff_profile WHERE id=$1',[seed.staffA]));
       const mine = await app.get(OfferService).listMine({...ctx,userId:user.user_id,role:'staff'},{});
       const offer = mine.find(o=>o.shiftId===seed.shiftId)!;
       expect(offer.startsAt.toISOString()).toBe(new Date(row.startsAt).toISOString());
       expect(offer.endsAt.toISOString()).toBe(new Date(row.endsAt).toISOString());
       await tenantContext.runInTenantContext(ctx, async m => {
-        const [shift] = await m.query('SELECT pay_rate_pence,break_minutes,ends_at,default_ends_at FROM core.shift WHERE id=$1',[seed.shiftId]);
+        const [shift] = await m.query('SELECT pay_rate_pence,break_minutes,ends_at,default_ends_at FROM shift WHERE id=$1',[seed.shiftId]);
         expect(offer.estimatedPayPence).toBe(payForMinutes(Number(shift.pay_rate_pence),540-60));
-        await m.query("UPDATE core.shift_assignment SET status='confirmed' WHERE shift_id=$1 AND staff_profile_id=$2",[seed.shiftId,seed.staffA]);
+        await m.query("UPDATE shift_assignment SET status='confirmed' WHERE shift_id=$1 AND staff_profile_id=$2",[seed.shiftId,seed.staffA]);
         expect(new Date(shift.default_ends_at).getUTCHours()).toBe(5);
         expect(new Date(shift.ends_at).getUTCHours()).toBe(9);
         const midnight = new Date(row.startsAt).getTime();
@@ -794,7 +794,7 @@ describeIfDb('venue manager scoping (integration)', () => {
       return (await request(app.getHttpServer()).get(seed.url).set('Authorization',`Bearer ${seed.managerToken}`).expect(200)).body;
     }
     async function acceptPipeline(seed: Awaited<ReturnType<typeof pipelineSeed>>, offerId: string, staffId: string) {
-      const [user] = await tenantContext.runInTenantContext(seed.ctx,m=>m.query('SELECT user_id FROM core.staff_profile WHERE id=$1',[staffId]));
+      const [user] = await tenantContext.runInTenantContext(seed.ctx,m=>m.query('SELECT user_id FROM staff_profile WHERE id=$1',[staffId]));
       await app.get(OfferService).staffAccept({...seed.ctx,userId:user.user_id,role:'staff'},offerId);
     }
     /** Owner rule 2026-11-06: accepting never confirms (not even on a VM request) — the approving Internal Manager confirms. */
@@ -854,7 +854,7 @@ describeIfDb('venue manager scoping (integration)', () => {
       expect(board.staff).toHaveLength(5);
       expect(board.staff.map((o:any)=>o.offerId).sort()).toEqual(offers.map((o:any)=>o.offerId).sort());
       for(let i=0;i<offers.length;i++) {
-        const [staff] = await tenantContext.runInTenantContext(seed.ctx,m=>m.query('SELECT user_id FROM core.staff_profile WHERE id=$1',[offers[i].staffProfileId]));
+        const [staff] = await tenantContext.runInTenantContext(seed.ctx,m=>m.query('SELECT user_id FROM staff_profile WHERE id=$1',[offers[i].staffProfileId]));
         const mine = await app.get(OfferService).listMine({...seed.ctx,userId:staff.user_id,role:'staff'},{});
         const own = mine.filter(o=>o.shiftId===seed.shiftId);
         expect(own).toHaveLength(1); expect(own[0].id).toBe(offers[i].offerId);
@@ -883,7 +883,7 @@ describeIfDb('venue manager scoping (integration)', () => {
     }, 60_000); // Five staff through approval, responses and full confirmation: measured over the 5 s default on the shared validation DB.
     it('Sent Shifts retains declined responses and denies foreign IDs, even another manager of the same venue', async()=>{
       const seed=await pipelineSeed(); const offers=await approvePipeline(seed);
-      const [user] = await tenantContext.runInTenantContext(seed.ctx,m=>m.query('SELECT user_id FROM core.staff_profile WHERE id=$1',[seed.staffA]));
+      const [user] = await tenantContext.runInTenantContext(seed.ctx,m=>m.query('SELECT user_id FROM staff_profile WHERE id=$1',[seed.staffA]));
       const offer = offers.find((o:any)=>o.staffProfileId===seed.staffA);
       await app.get(OfferService).decline({...seed.ctx,userId:user.user_id,role:'staff'},offer.offerId,{reason:'Unavailable'});
       const url=`/rest/v1/shifts/sent/${seed.shiftId}`;
@@ -940,24 +940,24 @@ describeIfDb('venue manager scoping (integration)', () => {
     it('pipeline follows real staff acceptance, decline, late and attendance facts, including verified geofence clock-out',async()=>{
       const seed=await pipelineSeed();const offers=await approvePipeline(seed);const a=offers.find((o:any)=>o.staffProfileId===seed.staffA),b=offers.find((o:any)=>o.staffProfileId===seed.staffB);
       await acceptAndConfirmPipeline(seed,a.offerId,seed.staffA);
-      const [staffB]=await tenantContext.runInTenantContext(seed.ctx,m=>m.query('SELECT user_id FROM core.staff_profile WHERE id=$1',[seed.staffB]));
+      const [staffB]=await tenantContext.runInTenantContext(seed.ctx,m=>m.query('SELECT user_id FROM staff_profile WHERE id=$1',[seed.staffB]));
       await app.get(OfferService).decline({...seed.ctx,userId:staffB.user_id,role:'staff'},b.offerId,{reason:'Unavailable'});
       // Accepted and then confirmed by the Internal Manager (no auto-confirm on accept since 2026-11-06): shown as Confirmed.
       let board=await readPipeline(seed);expect(board.staff.find((r:any)=>r.offerId===a.offerId)).toMatchObject({stage:'confirmed',assignmentStatus:'confirmed'});expect(board.staff.find((r:any)=>r.offerId===b.offerId)).toMatchObject({stage:'rejected',terminalSource:'Declined by staff',declineReason:'Unavailable'});expect(board.tableStatus).toBe('1 staff rejected');expectReconciled(board);
-      await tenantContext.runInTenantContext(seed.ctx,m=>m.query("UPDATE core.shift SET starts_at=now()-interval '20 minutes',ends_at=now()+interval '2 hours' WHERE id=$1",[seed.shiftId]));
-      await tenantContext.runInTenantContext(seed.ctx,m=>m.query("UPDATE core.shift_assignment SET period=tstzrange(now()-interval '20 minutes',now()+interval '2 hours','[)') WHERE shift_id=$1",[seed.shiftId]));
+      await tenantContext.runInTenantContext(seed.ctx,m=>m.query("UPDATE shift SET starts_at=now()-interval '20 minutes',ends_at=now()+interval '2 hours' WHERE id=$1",[seed.shiftId]));
+      await tenantContext.runInTenantContext(seed.ctx,m=>m.query("UPDATE shift_assignment SET period=tstzrange(now()-interval '20 minutes',now()+interval '2 hours','[)') WHERE shift_id=$1",[seed.shiftId]));
       board=await readPipeline(seed);expect(board.staff.find((r:any)=>r.offerId===a.offerId).stage).toBe('late');
       await tenantContext.runInTenantContext(seed.ctx,async m=>{
-        const [sa]=await m.query('SELECT id FROM core.shift_assignment WHERE shift_id=$1 AND staff_profile_id=$2',[seed.shiftId,seed.staffA]);
-        await m.query(`INSERT INTO core.attendance (organisation_id,workspace_id,shift_id,shift_assignment_id,staff_profile_id,status,clock_in_at) VALUES ($1,$2,$3,$4,$5,'clocked_in',now()-interval '10 minutes')`,[seed.ctx.organisationId,seed.ctx.workspaceId,seed.shiftId,sa.id,seed.staffA]);
+        const [sa]=await m.query('SELECT id FROM shift_assignment WHERE shift_id=$1 AND staff_profile_id=$2',[seed.shiftId,seed.staffA]);
+        await m.query(`INSERT INTO attendance (organisation_id,workspace_id,shift_id,shift_assignment_id,staff_profile_id,status,clock_in_at) VALUES ($1,$2,$3,$4,$5,'clocked_in',now()-interval '10 minutes')`,[seed.ctx.organisationId,seed.ctx.workspaceId,seed.shiftId,sa.id,seed.staffA]);
       });
       board=await readPipeline(seed);expect(board.staff.find((r:any)=>r.offerId===a.offerId).stage).toBe('clocked_in');expect(board.report.ready).toBe(false);
       expect(board.summary).toMatchObject({clockedIn:1,pendingReview:0});expectReconciled(board);
       // Forgotten clock-out flagged by the monitor: one lane only (Pending Review), never also counted as Clocked In.
-      await tenantContext.runInTenantContext(seed.ctx,m=>m.query("UPDATE core.attendance SET status='missing_clock_out' WHERE shift_id=$1",[seed.shiftId]));
+      await tenantContext.runInTenantContext(seed.ctx,m=>m.query("UPDATE attendance SET status='missing_clock_out' WHERE shift_id=$1",[seed.shiftId]));
       board=await readPipeline(seed);expect(board.staff.find((r:any)=>r.offerId===a.offerId).stage).toBe('pending_review');
       expect(board.summary).toMatchObject({clockedIn:0,pendingReview:1});expectReconciled(board);
-      await tenantContext.runInTenantContext(seed.ctx,m=>m.query("UPDATE core.attendance SET status='clocked_out',clock_out_at=now(),clock_out_method='auto_geofence',break_minutes=0,worked_minutes=10,earned_pence=200 WHERE shift_id=$1",[seed.shiftId]));
+      await tenantContext.runInTenantContext(seed.ctx,m=>m.query("UPDATE attendance SET status='clocked_out',clock_out_at=now(),clock_out_method='auto_geofence',break_minutes=0,worked_minutes=10,earned_pence=200 WHERE shift_id=$1",[seed.shiftId]));
       board=await readPipeline(seed);expect(board.staff.find((r:any)=>r.offerId===a.offerId)).toMatchObject({stage:'clocked_out',clockOutMethod:'auto_geofence',workedMinutes:10,attendanceReviewed:false});expect(board.report.ready).toBe(true);
       expect(board.summary).toMatchObject({clockedIn:0,pendingReview:0,clockedOut:1});expectReconciled(board);
       await request(app.getHttpServer()).post('/rest/v1/files/previews').set('Authorization',`Bearer ${seed.managerToken}`).send({fileIds:[randomUUID()]}).expect(201).expect(({body})=>expect(body.previews).toEqual({}));
@@ -970,10 +970,10 @@ describeIfDb('venue manager scoping (integration)', () => {
       const board=await readPipeline(seed);const card=board.staff.find((r:any)=>r.offerId===id);expect(card.stage).toBe('deleted');expect(card.terminalSource).toBe('Cancelled by Internal Manager');expect(card.withdrawnReason).toBe('Venue requested replacement');
       await tenantContext.runInTenantContext(seed.ctx,async m=>{
         const audit=await m.query("SELECT id FROM core.audit_log WHERE entity_id=$1 AND action='offer.withdrawn'",[id]);expect(audit).toHaveLength(1);
-        const notes=await m.query("SELECT body FROM core.user_note WHERE organisation_id=$1 AND body LIKE '%Venue requested replacement%'",[seed.organisation.id]);expect(notes).toHaveLength(1);
+        const notes=await m.query("SELECT body FROM user_note WHERE organisation_id=$1 AND body LIKE '%Venue requested replacement%'",[seed.organisation.id]);expect(notes).toHaveLength(1);
       });
       await request(app.getHttpServer()).post(`${seed.url}/offers/${offers[1].offerId}/cancel`).set('Authorization',`Bearer ${seed.managerToken}`).send({}).expect(201);
-      await tenantContext.runInTenantContext(seed.ctx,async m=>expect(await m.query('SELECT id FROM core.user_note WHERE organisation_id=$1',[seed.organisation.id])).toHaveLength(1));
+      await tenantContext.runInTenantContext(seed.ctx,async m=>expect(await m.query('SELECT id FROM user_note WHERE organisation_id=$1',[seed.organisation.id])).toHaveLength(1));
     });
     it('pipeline cancellation releases confirmed seat and replacement uses canonical send; active mobile projection is cancelled',async()=>{
       const seed=await pipelineSeed();const offers=await approvePipeline(seed);const offer=offers.find((o:any)=>o.staffProfileId===seed.staffA);
@@ -981,7 +981,7 @@ describeIfDb('venue manager scoping (integration)', () => {
       await request(app.getHttpServer()).post(`${seed.url}/offers/${offer.offerId}/cancel`).set('Authorization',`Bearer ${seed.managerToken}`).send({}).expect(201);
       const board=await readPipeline(seed);expect(board.summary.filled).toBe(0);expect(board.replacementPlaces).toBe(1);
       expect(board.staff.find((r:any)=>r.offerId===offer.offerId).stage).toBe('cancelled');expect(board.summary.cancelled).toBe(1);expectReconciled(board);
-      const [user]=await tenantContext.runInTenantContext(seed.ctx,m=>m.query('SELECT user_id FROM core.staff_profile WHERE id=$1',[seed.staffA]));
+      const [user]=await tenantContext.runInTenantContext(seed.ctx,m=>m.query('SELECT user_id FROM staff_profile WHERE id=$1',[seed.staffA]));
       const mine=await app.get(OfferService).listMine({...seed.ctx,userId:user.user_id,role:'staff'},{});expect(mine.find(o=>o.id===offer.offerId)?.presentation.state).toBe('cancelled');
       const replacement=await createStaff(seed.managerToken,'Replacement');await activateStaff(seed.organisation,seed.manager.userId,replacement);
       const picker=await request(app.getHttpServer()).get(`/rest/v1/shifts/${seed.shiftId}/selectable-staff`).set('Authorization',`Bearer ${seed.managerToken}`).expect(200);expect(picker.body.data.map((r:any)=>r.id)).toEqual([replacement]);
@@ -1003,18 +1003,18 @@ describeIfDb('venue manager scoping (integration)', () => {
     it('pipeline server cancellation cutoff blocks at T-15m and closed shifts; client scope fields are rejected',async()=>{
       const seed=await pipelineSeed();const offers=await approvePipeline(seed);
       await request(app.getHttpServer()).post(`${seed.url}/offers/${offers[0].offerId}/cancel`).set('Authorization',`Bearer ${seed.managerToken}`).send({workspaceId:randomUUID()}).expect(400);
-      await tenantContext.runInTenantContext(seed.ctx,m=>m.query("UPDATE core.shift SET starts_at=clock_timestamp()+interval '15 minutes', ends_at=clock_timestamp()+interval '4 hours' WHERE id=$1",[seed.shiftId]));
+      await tenantContext.runInTenantContext(seed.ctx,m=>m.query("UPDATE shift SET starts_at=clock_timestamp()+interval '15 minutes', ends_at=clock_timestamp()+interval '4 hours' WHERE id=$1",[seed.shiftId]));
       await request(app.getHttpServer()).post(`${seed.url}/offers/${offers[0].offerId}/cancel`).set('Authorization',`Bearer ${seed.managerToken}`).send({}).expect(409);
       expect((await readPipeline(seed)).staff.every((r:any)=>!r.canManagerCancel)).toBe(true);
-      await tenantContext.runInTenantContext(seed.ctx,m=>m.query("UPDATE core.shift SET starts_at=clock_timestamp()+interval '1 day', ends_at=clock_timestamp()+interval '2 days', status='cancelled' WHERE id=$1",[seed.shiftId]));
+      await tenantContext.runInTenantContext(seed.ctx,m=>m.query("UPDATE shift SET starts_at=clock_timestamp()+interval '1 day', ends_at=clock_timestamp()+interval '2 days', status='cancelled' WHERE id=$1",[seed.shiftId]));
       await request(app.getHttpServer()).post(`${seed.url}/offers/${offers[0].offerId}/cancel`).set('Authorization',`Bearer ${seed.managerToken}`).send({}).expect(409);
     });
 
     async function mutateStaff(seed: Awaited<ReturnType<typeof seedPendingRequest>>, staffId: string, account: string, employment = 'active', owner?: string) {
       const [{ id: workspaceId }] = await adminDataSource.manager.query('SELECT id FROM core.manager_workspace WHERE owner_user_id = $1', [seed.manager.userId]);
       await tenantContext.runInTenantContext({ organisationId: seed.organisation.id, workspaceId, userId: seed.manager.userId, role: 'manager' }, async (m) => {
-        await m.query('UPDATE core."user" SET status = $1 WHERE id = (SELECT user_id FROM core.staff_profile WHERE id = $2)', [account, staffId]);
-        await m.query('UPDATE core.staff_profile SET employment_status = $1, created_by = COALESCE($3::uuid, created_by) WHERE id = $2', [employment, staffId, owner ?? null]);
+        await m.query('UPDATE core."user" SET status = $1 WHERE id = (SELECT user_id FROM staff_profile WHERE id = $2)', [account, staffId]);
+        await m.query('UPDATE staff_profile SET employment_status = $1, created_by = COALESCE($3::uuid, created_by) WHERE id = $2', [employment, staffId, owner ?? null]);
       });
     }
     it('atomic selection Confirm persists final staff without offers; Approve sends only that persisted list', async () => {
@@ -1689,14 +1689,14 @@ describeIfDb('venue manager scoping (integration)', () => {
       expect(await dataSource.query(`SELECT id FROM core.shift_staff_review`)).toHaveLength(0);
       const [{ id: workspaceId }] = await adminDataSource.query(`SELECT workspace_id AS id FROM core.shift WHERE id = $1`, [s.shift1]);
       const stranger = await tenantContext.runInTenantContext({ organisationId: s.organisation.id, workspaceId, userId: randomUUID(), role: '' },
-        (m) => m.query(`SELECT id FROM core.shift_staff_review WHERE shift_id = $1`, [s.shift1]));
+        (m) => m.query(`SELECT id FROM shift_staff_review WHERE shift_id = $1`, [s.shift1]));
       expect(stranger).toHaveLength(0);
       const ownVm = await tenantContext.runInTenantContext({ organisationId: s.organisation.id, workspaceId, userId: s.venueManager.userId, role: '' },
-        (m) => m.query(`SELECT id FROM core.shift_staff_review WHERE shift_id = $1`, [s.shift1]));
+        (m) => m.query(`SELECT id FROM shift_staff_review WHERE shift_id = $1`, [s.shift1]));
       expect(ownVm).toHaveLength(1);
       // RLS WITH CHECK pins the reviewer to the caller even if a service bug tried otherwise.
       await expect(tenantContext.runInTenantContext({ organisationId: s.organisation.id, workspaceId, userId: s.venueManager.userId, role: '' },
-        (m) => m.query(`UPDATE core.shift_staff_review SET reviewer_user_id = $2 WHERE shift_id = $1`, [s.shift1, s.manager.userId]))).rejects.toThrow(/row-level security/);
+        (m) => m.query(`UPDATE shift_staff_review SET reviewer_user_id = $2 WHERE shift_id = $1`, [s.shift1, s.manager.userId]))).rejects.toThrow(/row-level security/);
     });
 
     it('typed sign-off is recorded with the server signer/time, is all-or-nothing, and locks reviews', async () => {
