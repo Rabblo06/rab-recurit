@@ -296,7 +296,7 @@ describeIfDb('user soft delete — owner 0g (integration)', () => {
       expect(hard.outcome).toBe('hard_deleted');
       const lockedSchemas = new Set(hard.locks.filter((l) => l.nspname.startsWith('workspace_')).map((l) => l.nspname));
       expect(lockedSchemas.size).toBeGreaterThanOrEqual(W);
-    });
+    }, 120_000 + W * 5_000); // each fixture workspace is one core.provision_workspace (seconds on a loaded host)
   });
 
   describe('gates and tenancy at the service layer (layer 2)', () => {
