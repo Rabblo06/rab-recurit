@@ -72,7 +72,9 @@ export interface UpgradeMigrationRow {
   createdAt: Date;
 }
 
-const SET_SCOPE = `SELECT pg_catalog.set_config('${UPGRADE_SCOPE_SETTING}', $1, true)`;
+/** The setting NAME is a bind parameter too (no interpolation in any statement): $1 = UPGRADE_SCOPE_SETTING, $2 = the scope. */
+const SET_SCOPE = 'SELECT pg_catalog.set_config($1, $2, true)';
+const setScope = (query: Query, value: string) => query(SET_SCOPE, [UPGRADE_SCOPE_SETTING, value]);
 
 /**
  * Runs `fn` in ONE transaction with `rab.upgrade_scope` set for that transaction only, on a DEDICATED session (security
@@ -88,18 +90,20 @@ export async function withUpgradeScope<T>(session: UpgradeSession, scope: Exclud
   const [pre] = (await query(
     `SELECT pg_catalog.txid_current_if_assigned() IS NULL AS free,
             pg_catalog.transaction_timestamp() = pg_catalog.statement_timestamp() AS fresh,
-            COALESCE(pg_catalog.current_setting('${UPGRADE_SCOPE_SETTING}', true), '') AS scope,
+            COALESCE(pg_catalog.current_setting($1, true), '') AS scope,
             pg_catalog.pg_backend_pid() AS pid`,
+    [UPGRADE_SCOPE_SETTING],
   )) as Array<{ free: boolean; fresh: boolean; scope: string; pid: number }>;
   if (!pre || pre.free !== true || pre.fresh !== true || pre.scope !== '') {
     throw new UpgradeSessionError('withUpgradeScope needs a dedicated session outside any transaction and with no upgrade scope set. Refusing.');
   }
   await query('BEGIN');
   try {
-    await query(SET_SCOPE, [scope]);
+    await setScope(query, scope);
     const result = await fn(query);
     const [post] = (await query(
-      `SELECT pg_catalog.pg_backend_pid() AS pid, COALESCE(pg_catalog.current_setting('${UPGRADE_SCOPE_SETTING}', true), '') AS scope`,
+      `SELECT pg_catalog.pg_backend_pid() AS pid, COALESCE(pg_catalog.current_setting($1, true), '') AS scope`,
+      [UPGRADE_SCOPE_SETTING],
     )) as Array<{ pid: number; scope: string }>;
     if (!post || Number(post.pid) !== Number(pre.pid) || post.scope !== scope) {
       throw new UpgradeSessionError('the upgrade scope transaction did not stay on one backend (a pooled connection?). Rolled back; refusing.');
@@ -195,7 +199,7 @@ async function markAsWorkspaceInitial(
   input: { workspaceId: string; name: string; status: UpgradeMigrationStatus; executedByVersion: string },
 ): Promise<boolean> {
   const [prior] = (await query(`SELECT pg_catalog.current_setting('rab.workspace_id', true) AS v`)) as Array<{ v: string | null }>;
-  await query(SET_SCOPE, ['workspace_init']);
+  await setScope(query, 'workspace_init');
   await query(`SELECT pg_catalog.set_config('rab.workspace_id', $1, true)`, [input.workspaceId]);
   // Security review L3: restore only after SUCCESS. After a failed statement the transaction is aborted: running the restore
   // there would replace the original error with 25P02, and the caller rolls the transaction back anyway (the settings are
@@ -219,7 +223,7 @@ async function markAsWorkspaceInitial(
     return true;
   } finally {
     if (succeeded) {
-      await query(SET_SCOPE, ['']);
+      await setScope(query, '');
       await query(`SELECT pg_catalog.set_config('rab.workspace_id', $1, true)`, [prior?.v ?? '']);
     }
   }

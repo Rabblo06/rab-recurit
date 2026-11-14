@@ -50,7 +50,7 @@ describe('withUpgradeScope needs ONE dedicated session (security review L4)', ()
       return [];
     });
     await expect(withUpgradeScope(upgradeSessionOf(conn), 'upgrade', async () => 42)).resolves.toBe(42);
-    const order = calls.map((c) => (c.sql.startsWith('SELECT pg_catalog.set_config') ? `scope=${String(c.params?.[0])}` : c.sql.split(/\s/)[0]));
+    const order = calls.map((c) => (c.sql.startsWith('SELECT pg_catalog.set_config') ? `scope=${String(c.params?.at(-1))}` : c.sql.split(/\s/)[0]));
     expect(order).toEqual(['SELECT', 'BEGIN', 'scope=upgrade', 'SELECT', 'COMMIT']);
   });
 
@@ -89,7 +89,7 @@ describe('markNewWorkspaceInitial (security review L3)', () => {
       return [];
     });
     await expect(markNewWorkspaceInitial(conn.query as never, ws)).resolves.toBe(true);
-    const sets = calls.filter((c) => c.sql.includes('set_config')).map((c) => c.params?.[0]);
+    const sets = calls.filter((c) => c.sql.includes('set_config')).map((c) => c.params?.at(-1));
     expect(sets).toEqual(['workspace_init', ws.id, '', 'prior-ws']);
   });
 
