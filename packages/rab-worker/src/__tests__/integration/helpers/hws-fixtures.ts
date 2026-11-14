@@ -19,7 +19,7 @@ const BUSINESS_TABLES = new Set([
 
 /** The effective mode of THIS test process, by the same rule as the environment class (unset = on outside production). */
 export function hwsRuntimeOn(env: NodeJS.ProcessEnv = process.env): boolean {
-  return resolveHwsRuntimeEnabled(env.HWS_RUNTIME_ENABLED, env.NODE_ENV ?? 'test') === true;
+  return resolveHwsRuntimeEnabled(env.HWS_RUNTIME_ENABLED, { ...env, NODE_ENV: env.NODE_ENV ?? 'test' }) === true;
 }
 
 /** The schema that holds `workspaceId`'s business rows in this mode: `workspace_<32 hex>` (HWS on) or `core` (HWS off). */

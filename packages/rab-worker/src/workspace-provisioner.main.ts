@@ -106,7 +106,7 @@ async function bootstrap(): Promise<void> {
   if (!config.provision) {
     // eslint-disable-next-line no-console
     console.log(
-      '[workspace-provisioner] provisioning is not enabled (CREWFLOW_PROVISIONER_ENABLED is not "true", and HWS_RUNTIME_ENABLED is not "true" with the switch unset) — nothing to do. Exiting cleanly before opening any database or Redis connection.',
+      '[workspace-provisioner] provisioning is not enabled (CREWFLOW_PROVISIONER_ENABLED is "false", or it is unset and HWS runtime routing resolves off: HWS_RUNTIME_ENABLED="false", or unset in production) — nothing to do. Exiting cleanly before opening any database or Redis connection.',
     );
     process.exit(0);
   }

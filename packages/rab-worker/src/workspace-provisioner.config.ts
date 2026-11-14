@@ -83,7 +83,7 @@ export function resolveProvisionerConfig(env: NodeJS.ProcessEnv): ProvisionerCon
   const explicit = parseSwitch(env);
   const hws = env.HWS_RUNTIME_ENABLED ?? null;
   // Part C1: the effective routing mode, by the one shared rule (unset = on outside production, off in production).
-  const hwsOn = resolveHwsRuntimeEnabled(hws ?? undefined, env.NODE_ENV) === true;
+  const hwsOn = resolveHwsRuntimeEnabled(hws ?? undefined, env) === true;
   // Integration hardening: a standalone provisioner enabled by the legacy HWS gate keeps the old 5 s cadence unless the
   // interval is set; only the explicit switch gets the Phase A 60 s default.
   const legacyGate = explicit === null && hwsOn;

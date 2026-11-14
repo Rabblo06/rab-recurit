@@ -70,12 +70,40 @@ describe('HWS_RUNTIME_ENABLED default (Part C1)', () => {
   });
 
   it('the shared rule: unset → on only for development / test / NODE_ENV unset; every other NODE_ENV → off', () => {
-    for (const nodeEnv of [undefined, '', 'development', 'test']) expect(hwsRuntimeDefault(nodeEnv)).toBe(true);
-    for (const nodeEnv of ['production', 'staging', 'Production', 'prod']) expect(hwsRuntimeDefault(nodeEnv)).toBe(false);
-    expect(resolveHwsRuntimeEnabled(undefined, 'production')).toBe(false);
-    expect(resolveHwsRuntimeEnabled('', 'test')).toBe(true);
-    expect(resolveHwsRuntimeEnabled('true', 'production')).toBe(true);
-    expect(resolveHwsRuntimeEnabled('false', 'development')).toBe(false);
-    expect(resolveHwsRuntimeEnabled('yes', 'development')).toBe('yes'); // left raw: @IsBoolean refuses it
+    for (const NODE_ENV of [undefined, '', 'development', 'test']) expect(hwsRuntimeDefault({ NODE_ENV })).toBe(true);
+    for (const NODE_ENV of ['production', 'staging', 'Production', 'prod', ' production ']) expect(hwsRuntimeDefault({ NODE_ENV })).toBe(false);
+    expect(hwsRuntimeDefault(undefined)).toBe(true);
+    expect(resolveHwsRuntimeEnabled(undefined, { NODE_ENV: 'production' })).toBe(false);
+    expect(resolveHwsRuntimeEnabled('', { NODE_ENV: 'test' })).toBe(true);
+    expect(resolveHwsRuntimeEnabled('true', { NODE_ENV: 'production' })).toBe(true);
+    expect(resolveHwsRuntimeEnabled('false', { NODE_ENV: 'development' })).toBe(false);
+    expect(resolveHwsRuntimeEnabled('yes', { NODE_ENV: 'development' })).toBe('yes'); // left raw: @IsBoolean refuses it
+  });
+
+  describe('ANY production signal turns the unset default OFF (NODE_ENV, RAB_RUNTIME_ENV or DB_TARGET; trimmed, any case)', () => {
+    it.each([
+      [{ DB_TARGET: 'production' }],
+      [{ RAB_RUNTIME_ENV: ' Production ' }],
+      [{ NODE_ENV: 'development', DB_TARGET: 'production' }],
+      [{ NODE_ENV: 'test', RAB_RUNTIME_ENV: 'PRODUCTION' }],
+      [{ NODE_ENV: ' production' }],
+    ])('unset HWS_RUNTIME_ENABLED + %p → off', (signals) => {
+      expect(hwsRuntimeDefault(signals)).toBe(false);
+      expect(resolveHwsRuntimeEnabled(undefined, signals)).toBe(false);
+      expect(classLayer({ ...base, ...signals })).toEqual({ value: false, errors: [] });
+    });
+
+    it('a non-string production signal is not trusted: off', () => {
+      expect(hwsRuntimeDefault({ NODE_ENV: 'test', DB_TARGET: 42 })).toBe(false);
+    });
+
+    it('an explicit value still wins over the signals', () => {
+      expect(classLayer({ ...base, NODE_ENV: 'development', DB_TARGET: 'production', HWS_RUNTIME_ENABLED: 'true' })).toEqual({ value: true, errors: [] });
+      expect(resolveHwsRuntimeEnabled('false', { NODE_ENV: 'test' })).toBe(false);
+    });
+
+    it('non-production values of the signals keep the default on', () => {
+      expect(hwsRuntimeDefault({ NODE_ENV: 'test', DB_TARGET: 'local', RAB_RUNTIME_ENV: 'development' })).toBe(true);
+    });
   });
 });

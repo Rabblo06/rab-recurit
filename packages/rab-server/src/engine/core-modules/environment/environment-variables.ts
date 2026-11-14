@@ -352,7 +352,8 @@ export class EnvironmentVariables {
    * everywhere except production. The rule lives in ONE place, `resolveHwsRuntimeEnabled` (./hws-runtime-default.ts),
    * shared with the standalone workspace provisioner:
    *   - "true" / "false": exactly that;
-   *   - unset or empty: true in development and test (NODE_ENV unset = development), FALSE in production (fail safe:
+   *   - unset or empty: true in development and test (NODE_ENV unset = development), FALSE in production (any of NODE_ENV,
+   *     RAB_RUNTIME_ENV, DB_TARGET says production, trimmed, any case; fail safe:
    *     production must not route to the workspace schemas before the C3 cutover has copied and verified the data; the
    *     production compose files also pin "false" explicitly);
    *   - anything else ("yes", "1", "TRUE", ...): refused, the process does not boot.
@@ -368,7 +369,7 @@ export class EnvironmentVariables {
    */
   @Expose()
   @Type(() => String)
-  @Transform(({ value, obj }) => resolveHwsRuntimeEnabled(value, (obj as Record<string, unknown>)?.NODE_ENV))
+  @Transform(({ value, obj }) => resolveHwsRuntimeEnabled(value, obj as Record<string, unknown>))
   @IsBoolean({ message: 'HWS_RUNTIME_ENABLED must be exactly true or false (unset = on outside production, off in production)' })
   HWS_RUNTIME_ENABLED: boolean = false;
 

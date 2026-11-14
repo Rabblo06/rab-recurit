@@ -49,6 +49,16 @@ describe('resolveProvisionerConfig (Phase A)', () => {
     }
   });
 
+  it('Part C1: ANY production signal (NODE_ENV, RAB_RUNTIME_ENV, DB_TARGET; trimmed, any case) keeps an unset HWS gate off', () => {
+    for (const signals of [{ DB_TARGET: 'production' }, { RAB_RUNTIME_ENV: ' Production ' }, { NODE_ENV: 'development', DB_TARGET: 'production' }]) {
+      for (const hws of [undefined, '']) {
+        expect(resolveProvisionerConfig({ HWS_RUNTIME_ENABLED: hws, ...signals })).toMatchObject({ provision: false, enabledBy: null, intervalSeconds: 60 });
+      }
+      // The explicit opt-in is the production path and still works.
+      expect(resolveProvisionerConfig({ CREWFLOW_PROVISIONER_ENABLED: 'true', ...signals })).toMatchObject({ provision: true, enabledBy: 'CREWFLOW_PROVISIONER_ENABLED' });
+    }
+  });
+
   it('an invalid switch value refuses to start (fail closed) and never echoes the value', () => {
     for (const v of ['TRUE', 'True', '1', 'yes', 'on', 'ture']) {
       let error: unknown;
