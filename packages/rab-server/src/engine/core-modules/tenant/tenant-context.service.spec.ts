@@ -4,6 +4,9 @@ import { SchemaResolverService, WorkspaceRoutingError } from './schema-resolver.
 import { bindGucsSql, TenantContextService, TenantSessionRoleError } from './tenant-context.service';
 import { EnvironmentService } from '../environment/environment.service';
 
+/** C2-0: a canonical workspace id; the HWS-on schema below (workspace_deadbeef…) is its registry name, as businessTables requires. */
+const WS_ID = 'deadbeef-dead-beef-dead-beefdeadbeef';
+
 // C2-1: these fakes have no QueryRunner, so the schema binding is replaced by a recorder that returns a tagged wrapper; the
 // real binding is covered by schema-bound-entity-manager.spec.ts and the C2-1 integration suite.
 jest.mock('./schema-bound-entity-manager', () => ({
@@ -58,7 +61,7 @@ describe('TenantContextService', () => {
     const service = new TenantContextService(dataSource, buildSchemaResolver(), buildEnvironment(false));
 
     await service.runInTenantContext(
-      { organisationId: 'org-1', workspaceId: 'ws-1', userId: 'user-1', role: 'MANAGER' },
+      { organisationId: 'org-1', workspaceId: WS_ID, userId: 'user-1', role: 'MANAGER' },
       async () => 'result',
     );
 
@@ -67,7 +70,7 @@ describe('TenantContextService', () => {
     expect(manager.query).toHaveBeenNthCalledWith(
       2,
       BIND_WITH_PATH_SQL,
-      ['org-1', 'ws-1', 'user-1', 'MANAGER', '', 'core'],
+      ['org-1', WS_ID, 'user-1', 'MANAGER', '', 'core'],
     );
     expect(manager.query).toHaveBeenCalledTimes(2);
   });
@@ -94,7 +97,7 @@ describe('TenantContextService', () => {
     const service = new TenantContextService(buildDataSource(manager), buildSchemaResolver(), buildEnvironment(false));
 
     await service.runInTenantContext(
-      { organisationId: 'org-1', workspaceId: 'ws-1', userId: '', role: '', actorType: 'worker' },
+      { organisationId: 'org-1', workspaceId: WS_ID, userId: '', role: '', actorType: 'worker' },
       async () => undefined,
     );
 
@@ -102,7 +105,7 @@ describe('TenantContextService', () => {
     expect(manager.query).toHaveBeenNthCalledWith(
       2,
       BIND_WITH_PATH_SQL,
-      ['org-1', 'ws-1', '', '', 'worker', 'core'],
+      ['org-1', WS_ID, '', '', 'worker', 'core'],
     );
   });
 
@@ -110,7 +113,7 @@ describe('TenantContextService', () => {
     const manager = buildManager();
     const service = new TenantContextService(buildDataSource(manager), buildSchemaResolver(), buildEnvironment(false));
 
-    await service.runInTenantContext({ organisationId: 'org-1', workspaceId: 'ws-1', userId: 'user-1', role: 'STAFF' }, async () => undefined);
+    await service.runInTenantContext({ organisationId: 'org-1', workspaceId: WS_ID, userId: 'user-1', role: 'STAFF' }, async () => undefined);
 
     const [sql, params] = (manager.query as jest.Mock).mock.calls[1] as [string, unknown[]];
     expect(sql).toContain(`set_config('rab.team_shift_id', '', true)`);
@@ -118,7 +121,7 @@ describe('TenantContextService', () => {
     // T-1: $1-$5 are the five client-derived values; $6 is the server constant 'core' (search_path), nothing beyond it.
     expect(sql).not.toMatch(/\$7/);
     expect(params).toHaveLength(6);
-    expect(params.slice(0, 5)).toEqual(['org-1', 'ws-1', 'user-1', 'STAFF', '']);
+    expect(params.slice(0, 5)).toEqual(['org-1', WS_ID, 'user-1', 'STAFF', '']);
     expect(params[5]).toBe('core');
   });
 
@@ -144,10 +147,10 @@ describe('TenantContextService', () => {
       const schemaResolver = buildSchemaResolver();
       const service = new TenantContextService(buildDataSource(manager), schemaResolver, buildEnvironment(false));
 
-      await service.runInTenantContext({ organisationId: 'org-1', workspaceId: 'ws-1', userId: 'user-1', role: 'MANAGER' }, async () => undefined);
+      await service.runInTenantContext({ organisationId: 'org-1', workspaceId: WS_ID, userId: 'user-1', role: 'MANAGER' }, async () => undefined);
 
       expect(schemaResolver.resolve).not.toHaveBeenCalled();
-      expect(manager.query).toHaveBeenNthCalledWith(2, BIND_WITH_PATH_SQL, ['org-1', 'ws-1', 'user-1', 'MANAGER', '', 'core']);
+      expect(manager.query).toHaveBeenNthCalledWith(2, BIND_WITH_PATH_SQL, ['org-1', WS_ID, 'user-1', 'MANAGER', '', 'core']);
       expect(manager.query).toHaveBeenCalledTimes(2);
     });
 
@@ -168,11 +171,11 @@ describe('TenantContextService', () => {
       const schemaResolver = buildSchemaResolver('workspace_deadbeefdeadbeefdeadbeefdeadbeef');
       const service = new TenantContextService(buildDataSource(manager), schemaResolver, buildEnvironment(true));
 
-      await service.runInTenantContext({ organisationId: 'org-1', workspaceId: 'ws-1', userId: 'user-1', role: 'MANAGER' }, async () => undefined);
+      await service.runInTenantContext({ organisationId: 'org-1', workspaceId: WS_ID, userId: 'user-1', role: 'MANAGER' }, async () => undefined);
 
-      expect(schemaResolver.resolve).toHaveBeenCalledWith(manager, 'ws-1');
+      expect(schemaResolver.resolve).toHaveBeenCalledWith(manager, WS_ID);
       // The registry is FORCE RLS: the GUCs are bound first (no path), then the separate search_path after resolve().
-      expect(manager.query).toHaveBeenNthCalledWith(2, BIND_GUCS_SQL, ['org-1', 'ws-1', 'user-1', 'MANAGER', '']);
+      expect(manager.query).toHaveBeenNthCalledWith(2, BIND_GUCS_SQL, ['org-1', WS_ID, 'user-1', 'MANAGER', '']);
       expect(manager.query).toHaveBeenNthCalledWith(3, SEARCH_PATH_SQL, ['workspace_deadbeefdeadbeefdeadbeefdeadbeef']);
     });
 
@@ -184,7 +187,7 @@ describe('TenantContextService', () => {
       const callback = jest.fn();
 
       await expect(
-        service.runInTenantContext({ organisationId: 'org-1', workspaceId: 'ws-1', userId: 'user-1', role: 'MANAGER' }, callback),
+        service.runInTenantContext({ organisationId: 'org-1', workspaceId: WS_ID, userId: 'user-1', role: 'MANAGER' }, callback),
       ).rejects.toThrow(WorkspaceRoutingError);
 
       expect(callback).not.toHaveBeenCalled();
@@ -252,12 +255,12 @@ describe('TenantContextService', () => {
       const service = new TenantContextService(buildDataSource(manager), schemaResolver, buildEnvironment(false));
 
       const result = await service.runInWorkspaceContext(
-        { organisationId: 'org-1', workspaceId: 'ws-1', userId: 'user-1', role: 'MANAGER' },
+        { organisationId: 'org-1', workspaceId: WS_ID, userId: 'user-1', role: 'MANAGER' },
         async (_manager, schema) => schema,
       );
 
       expect(schemaResolver.resolve).not.toHaveBeenCalled();
-      expect(manager.query).toHaveBeenNthCalledWith(2, BIND_WITH_PATH_SQL, ['org-1', 'ws-1', 'user-1', 'MANAGER', '', 'core']);
+      expect(manager.query).toHaveBeenNthCalledWith(2, BIND_WITH_PATH_SQL, ['org-1', WS_ID, 'user-1', 'MANAGER', '', 'core']);
       expect(manager.query).toHaveBeenCalledTimes(2);
       expect(result).toBe('core');
     });
@@ -268,12 +271,12 @@ describe('TenantContextService', () => {
       const service = new TenantContextService(buildDataSource(manager), schemaResolver, buildEnvironment(true));
 
       const result = await service.runInWorkspaceContext(
-        { organisationId: 'org-1', workspaceId: 'ws-1', userId: 'user-1', role: 'MANAGER' },
+        { organisationId: 'org-1', workspaceId: WS_ID, userId: 'user-1', role: 'MANAGER' },
         async (_manager, schema) => schema,
       );
 
-      expect(schemaResolver.resolve).toHaveBeenCalledWith(manager, 'ws-1');
-      expect(manager.query).toHaveBeenNthCalledWith(2, BIND_GUCS_SQL, ['org-1', 'ws-1', 'user-1', 'MANAGER', '']);
+      expect(schemaResolver.resolve).toHaveBeenCalledWith(manager, WS_ID);
+      expect(manager.query).toHaveBeenNthCalledWith(2, BIND_GUCS_SQL, ['org-1', WS_ID, 'user-1', 'MANAGER', '']);
       expect(manager.query).toHaveBeenNthCalledWith(3, SEARCH_PATH_SQL, ['workspace_deadbeefdeadbeefdeadbeefdeadbeef']);
       expect(result).toBe('workspace_deadbeefdeadbeefdeadbeefdeadbeef');
     });
@@ -285,7 +288,7 @@ describe('TenantContextService', () => {
       const callback = jest.fn();
 
       await expect(
-        service.runInWorkspaceContext({ organisationId: 'org-1', workspaceId: 'ws-1', userId: 'user-1', role: 'MANAGER' }, callback),
+        service.runInWorkspaceContext({ organisationId: 'org-1', workspaceId: WS_ID, userId: 'user-1', role: 'MANAGER' }, callback),
       ).rejects.toThrow(WorkspaceRoutingError);
 
       expect(callback).not.toHaveBeenCalled();
@@ -296,7 +299,7 @@ describe('TenantContextService', () => {
   // the schema is only known after the registry lookup. The pool-checkout RESET ROLE (layer 1) is not issued through the
   // manager, so it does not appear here: it is covered by owner-login-guards.integration.spec.ts.
   describe('T-1: exact statement sequence', () => {
-    const CTX = { organisationId: 'org-1', workspaceId: 'ws-1', userId: 'user-1', role: 'MANAGER' };
+    const CTX = { organisationId: 'org-1', workspaceId: WS_ID, userId: 'user-1', role: 'MANAGER' };
     const WS_SCHEMA = 'workspace_deadbeefdeadbeefdeadbeefdeadbeef';
     const calls = (manager: EntityManager) => (manager.query as jest.Mock).mock.calls as Array<[string, unknown[]?]>;
 
@@ -304,7 +307,7 @@ describe('TenantContextService', () => {
       const manager = buildManager();
       const service = new TenantContextService(buildDataSource(manager), buildSchemaResolver(), buildEnvironment(false));
       await service.runInTenantContext(CTX, async () => undefined);
-      expect(calls(manager)).toEqual([['RESET ROLE'], [BIND_WITH_PATH_SQL, ['org-1', 'ws-1', 'user-1', 'MANAGER', '', 'core']]]);
+      expect(calls(manager)).toEqual([['RESET ROLE'], [BIND_WITH_PATH_SQL, ['org-1', WS_ID, 'user-1', 'MANAGER', '', 'core']]]);
     });
 
     it('HWS on with a workspace: RESET ROLE, the bind (no path), resolve, then the separate search_path', async () => {
@@ -332,7 +335,7 @@ describe('TenantContextService', () => {
         const service = new TenantContextService(buildDataSource(manager), buildSchemaResolver(), buildEnvironment(false));
         if (run === 'tenant') await service.runInTenantContext(CTX, async () => undefined, { readOnly: true });
         else await service.runInWorkspaceContext(CTX, async () => undefined, { readOnly: true });
-        expect(calls(manager)).toEqual([['RESET ROLE'], [BIND_WITH_PATH_READ_ONLY_SQL, ['org-1', 'ws-1', 'user-1', 'MANAGER', '', 'core']]]);
+        expect(calls(manager)).toEqual([['RESET ROLE'], [BIND_WITH_PATH_READ_ONLY_SQL, ['org-1', WS_ID, 'user-1', 'MANAGER', '', 'core']]]);
       }
     });
 
@@ -340,7 +343,7 @@ describe('TenantContextService', () => {
       const manager = buildManager();
       const service = new TenantContextService(buildDataSource(manager), buildSchemaResolver(WS_SCHEMA), buildEnvironment(true));
       await service.runInTenantContext(CTX, async () => undefined, { readOnly: true });
-      expect(calls(manager)).toEqual([['RESET ROLE'], [BIND_READ_ONLY_SQL, ['org-1', 'ws-1', 'user-1', 'MANAGER', '']], [SEARCH_PATH_SQL, [WS_SCHEMA]]]);
+      expect(calls(manager)).toEqual([['RESET ROLE'], [BIND_READ_ONLY_SQL, ['org-1', WS_ID, 'user-1', 'MANAGER', '']], [SEARCH_PATH_SQL, [WS_SCHEMA]]]);
     });
 
     it('Admin Inspect (CF-02) is unchanged: its own SET TRANSACTION READ ONLY stays the first statement', async () => {
@@ -350,7 +353,7 @@ describe('TenantContextService', () => {
       expect(calls(manager)).toEqual([
         ['SET TRANSACTION READ ONLY'],
         ['RESET ROLE'],
-        [BIND_WITH_PATH_SQL, ['org-1', 'ws-1', 'user-1', 'MANAGER', '', 'core']],
+        [BIND_WITH_PATH_SQL, ['org-1', WS_ID, 'user-1', 'MANAGER', '', 'core']],
       ]);
     });
 
@@ -412,7 +415,7 @@ describe('TenantContextService', () => {
       };
       return { dataSource, framing, enter, leave };
     }
-    const CTX = { organisationId: 'org-1', workspaceId: 'ws-1', userId: 'user-1', role: 'MANAGER' };
+    const CTX = { organisationId: 'org-1', workspaceId: WS_ID, userId: 'user-1', role: 'MANAGER' };
 
     it.each([
       ['API runInTenantContext, HWS off', 'tenant', undefined],
@@ -457,7 +460,7 @@ describe('TenantContextService', () => {
   });
 
   describe('C2-1: the callback receives the manager schema-bound to the search_path just bound', () => {
-    const CTX = { organisationId: 'org-1', workspaceId: 'ws-1', userId: 'user-1', role: 'MANAGER' };
+    const CTX = { organisationId: 'org-1', workspaceId: WS_ID, userId: 'user-1', role: 'MANAGER' };
     const WS = 'workspace_deadbeefdeadbeefdeadbeefdeadbeef';
 
     it.each([

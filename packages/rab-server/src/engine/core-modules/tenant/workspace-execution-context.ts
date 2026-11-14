@@ -2,6 +2,7 @@ import { Injectable } from '@nestjs/common';
 import { DataSource, EntityManager } from 'typeorm';
 
 import { AuthContext } from './auth-context.interface';
+import { businessSearchPath, withBusinessSchema } from './business-tables';
 import { SchemaResolverService, WorkspaceRoutingError } from './schema-resolver.service';
 import { bindEntityManagerToSchema } from './schema-bound-entity-manager';
 
@@ -39,9 +40,11 @@ export class WorkspaceExecutionContext {
       // Organisation context is bound above, so the registry's FORCE RLS can show the row to this organisation only.
       const schema = await this.schemaResolver.resolve(manager, ctx.workspaceId);
       // Exactly one schema. No core, no public, no pg_catalog listed here: catalog objects are always searched by Postgres.
-      await manager.query(`SELECT set_config('search_path', $1, true)`, [schema]);
-      // C2-1: entity metadata bound to the same schema (schema-bound-entity-manager.ts).
-      return fn(await bindEntityManagerToSchema(manager, schema), schema);
+      // C2-0: '' instead under the test-only search_path trap; businessTables(manager) is bound to the schema either way.
+      await manager.query(`SELECT set_config('search_path', $1, true)`, [businessSearchPath(schema)]);
+      // C2-1: entity metadata bound to the real schema (schema-bound-entity-manager.ts); businessTables() keys on that manager.
+      const bound = await bindEntityManagerToSchema(manager, schema);
+      return withBusinessSchema(bound, schema, ctx.workspaceId, () => fn(bound, schema));
     });
   }
 }

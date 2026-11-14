@@ -6,6 +6,7 @@ import { EmailOutbox, User } from '../../../modules/identity/entities';
 import { AuditAction, AuditService } from '../audit/audit.service';
 import { PlatformAdminService } from '../platform-admin/platform-admin.service';
 import { AuthContext } from '../tenant/auth-context.interface';
+import { bindBusinessSchema, businessSearchPath, CORE_BUSINESS_SCHEMA, restoreBusinessSchema, snapshotBusinessSchema } from '../tenant/business-tables';
 import { RefreshTokenService } from '../auth/token/services/refresh-token.service';
 import { SchemaResolverService, WorkspaceRoutingError, workspaceSchemaName } from '../tenant/schema-resolver.service';
 
@@ -155,10 +156,13 @@ export class UserDeletionService {
     const [entry] = await manager.query<Array<{ ws: string | null; sp: string }>>(
       `SELECT current_setting('rab.workspace_id', true) AS ws, current_setting('search_path') AS sp`,
     );
+    // C2-0: the businessTables(manager) binding follows every search_path switch below and is restored with it.
+    const entryBinding = snapshotBusinessSchema(manager);
 
     let found: T | null = null;
     for (const workspaceId of workspaceIds) {
-      await manager.query(`SELECT set_config('rab.workspace_id', $1, true), set_config('search_path', 'core', true)`, [workspaceId]);
+      await manager.query(`SELECT set_config('rab.workspace_id', $1, true), set_config('search_path', $2, true)`, [workspaceId, businessSearchPath(CORE_BUSINESS_SCHEMA)]);
+      bindBusinessSchema(manager, CORE_BUSINESS_SCHEMA, workspaceId);
       found = await visit({ label: `core:${workspaceId}` });
       if (found !== null) break;
       const schema = await this.checkableWorkspaceSchema(manager, workspaceId);
@@ -170,12 +174,17 @@ export class UserDeletionService {
         );
       }
       if (schema) {
-        await manager.query(`SELECT set_config('search_path', $1, true)`, [schema]);
+        await manager.query(`SELECT set_config('search_path', $1, true)`, [businessSearchPath(schema)]);
+        bindBusinessSchema(manager, schema, workspaceId);
         found = await visit({ label: schema });
         if (found !== null) break;
       }
     }
-    await manager.query(`SELECT set_config('rab.workspace_id', $1, true), set_config('search_path', $2, true)`, [entry?.ws ?? '', entry?.sp ?? 'core']);
+    // Restored from the binding when there was one (the same value the binder set; under the test-only trap the entry
+    // search_path is '' and cannot be re-set from its quoted text form), else from the entry setting, as before.
+    const restorePath = entryBinding.schema !== undefined ? businessSearchPath(entryBinding.schema) : entry?.sp ?? 'core';
+    await manager.query(`SELECT set_config('rab.workspace_id', $1, true), set_config('search_path', $2, true)`, [entry?.ws ?? '', restorePath]);
+    restoreBusinessSchema(manager, entryBinding);
     return found;
   }
 

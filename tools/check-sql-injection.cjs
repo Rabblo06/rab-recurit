@@ -17,6 +17,10 @@
  * A site passes only with a REVIEWED allow-comment on the same line or the line directly above the template / expression:
  *     // sql-injection-reviewed: <why every interpolated value is a code constant, a validated identifier or a $n placeholder>
  * The reason must be at least 20 characters. The tool prints file:line, the rule and the first interpolation.
+ * Part C2-0: an interpolation that is EXACTLY `${t.<table>}` or `${tables.<table>}`, where <table> is one of WORKSPACE_TABLES
+ * (database/typeorm/workspace-schema/workspace-tables.ts), is the businessTables(manager) primitive — a quoted, validated
+ * schema + table name (engine/core-modules/tenant/business-tables.ts) — and needs no comment. A template whose only
+ * interpolations are such references is not a site; any other interpolation in it still needs the reviewed comment.
  *
  *   node tools/check-sql-injection.cjs            # exit 1 when an unreviewed site exists
  *   node tools/check-sql-injection.cjs --list     # print every site, reviewed or not (for review)
@@ -48,6 +52,22 @@ const MESSAGE_CALL = /(Error|refuse|log|warn|error|info|debug|push|reject|descri
 
 const SQL_TEXT = /\b(SELECT|INSERT\s+INTO|UPDATE\s+[\w."]+\s+SET|DELETE\s+FROM|WHERE|JOIN|ORDER\s+BY|GROUP\s+BY|LIMIT|OFFSET|RETURNING|VALUES|set_config|current_setting|ON\s+CONFLICT)\b/;
 const DDL_TEXT = /\b(CREATE|ALTER|DROP|GRANT|REVOKE|TRUNCATE|COMMENT\s+ON|SET\s+ROLE|SET\s+LOCAL|LOCK\s+TABLE|ANALYZE|REINDEX|VACUUM|SECURITY\s+DEFINER)\b/;
+const TABLES_FILE = 'packages/rab-server/src/database/typeorm/workspace-schema/workspace-tables.ts';
+/** WORKSPACE_TABLES from the leaf module's text (fails loudly if its shape changes, so the exemption can never widen). */
+function workspaceTables(root = ROOT) {
+  const src = fs.readFileSync(path.join(root, TABLES_FILE), 'utf8');
+  const m = src.match(/export const WORKSPACE_TABLES = \[([\s\S]*?)\] as const;/);
+  const tables = m ? [...m[1].matchAll(/'([a-z_]+)'/g)].map((x) => x[1]) : [];
+  if (tables.length === 0) throw new Error(`${TABLES_FILE}: WORKSPACE_TABLES array literal not found`);
+  return tables;
+}
+let businessTableRef = null;
+/** True only for the exact primitive form: `t.<WORKSPACE_TABLE>` / `tables.<WORKSPACE_TABLE>` (the trimmed `${…}` text). */
+function isBusinessTableRef(expr) {
+  businessTableRef ??= new RegExp(`^(?:t|tables)\\.(?:${workspaceTables().join('|')})$`);
+  return businessTableRef.test(expr);
+}
+
 const WHERE_BUILDER = /(['"`]\s*(AND|OR)\s*['"`]\s*\)|\.join\(\s*['"`]\s*(AND|OR)\s*['"`]\s*\)|['"`][^'"`\n]*\bWHERE\s*['"`]\s*\+|\+\s*['"`]\s*(AND|OR|WHERE|ORDER\s+BY)\b)/;
 
 function walk(dir, out) {
@@ -139,11 +159,13 @@ function scan() {
     const fileReviewed = FILE_ALLOW_SCOPE.test(rel) && ALLOW_FILE.test(src.slice(0, 4000));
     const all = templates(src);
     for (const t of all) {
-      if (t.exprs.length === 0) continue;
+      // C2-0: `${t.<table>}` from businessTables(manager) is a validated, quoted identifier, not a dynamic value.
+      const exprs = t.exprs.filter((e) => !isBusinessTableRef(e));
+      if (exprs.length === 0) continue;
       if (MESSAGE_CALL.test(src.slice(Math.max(0, t.start - 40), t.start))) continue;
       const rule = DDL_TEXT.test(t.text) ? 'ddl-identifier' : SQL_TEXT.test(t.text) ? 'sql-template' : null;
       if (!rule) continue;
-      sites.push({ file: rel, line: t.line, anchor: t.anchor, rule, expr: t.exprs[0].slice(0, 60), reviewed: fileReviewed || reviewed(lines, t.anchor) });
+      sites.push({ file: rel, line: t.line, anchor: t.anchor, rule, expr: exprs[0].slice(0, 60), reviewed: fileReviewed || reviewed(lines, t.anchor) });
     }
     lines.forEach((l, idx) => {
       const lineNo = idx + 1;
@@ -169,4 +191,4 @@ if (require.main === module) {
   process.exit(open.length ? 1 : 0);
 }
 
-module.exports = { scan, templates };
+module.exports = { scan, templates, isBusinessTableRef };

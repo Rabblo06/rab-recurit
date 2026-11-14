@@ -3,6 +3,7 @@ import { DataSource, EntityManager } from 'typeorm';
 import { SUPPORTED_WORKSPACE_SCHEMA_VERSIONS, workspaceSchemaName } from '@rab/server/engine/core-modules/tenant/schema-resolver.service';
 import { shipAuditRowAfterCommit } from '@rab/server/engine/core-modules/audit-events/audit-event-shipping';
 import { isUpgradeBlocked } from '@rab/server/engine/core-modules/upgrade/workspace-upgrade-block';
+import { bindBusinessSchema, businessSearchPath, CORE_BUSINESS_SCHEMA } from '@rab/server/engine/core-modules/tenant/business-tables';
 
 const WORKSPACE_UPGRADING = Symbol('workspace-upgrading');
 
@@ -503,8 +504,10 @@ async function findBlockingDependency(
     // Include the original org context for org-wide references, even with no workspace (definer path: the scopes above
     // already start with the candidate's organisation-wide scope).
     for (const scope of definerScopes ? scopes : [{ id: previous.workspace ?? '', organisation_id: previous.org ?? '' }, ...scopes]) {
-      await manager.query(`SELECT set_config('rab.organisation_id',$1,true), set_config('rab.workspace_id',$2,true), set_config('search_path','core',true)`,
-        [scope.organisation_id, scope.id]);
+      // C2-0: the businessTables(manager) binding follows every search_path switch in this loop ('' under the test-only trap).
+      await manager.query(`SELECT set_config('rab.organisation_id',$1,true), set_config('rab.workspace_id',$2,true), set_config('search_path',$3,true)`,
+        [scope.organisation_id, scope.id, businessSearchPath(CORE_BUSINESS_SCHEMA)]);
+      bindBusinessSchema(manager, CORE_BUSINESS_SCHEMA, null);
       for (const [reason, sql] of WORKSPACE_TABLE_DEPENDENCY_CHECKS) {
         if ((await manager.query(sql, [userId])).length > 0) return reason;
       }
@@ -516,16 +519,19 @@ async function findBlockingDependency(
       const physicalSchema = await resolveReadyPhysicalSchema(manager, scope.id);
       if (physicalSchema === WORKSPACE_UPGRADING) return 'workspace_upgrading';
       if (!physicalSchema) continue;
-      await manager.query(`SELECT set_config('search_path',$1,true)`, [physicalSchema]);
+      await manager.query(`SELECT set_config('search_path',$1,true)`, [businessSearchPath(physicalSchema)]);
+      bindBusinessSchema(manager, physicalSchema, scope.id);
       for (const [reason, sql] of WORKSPACE_TABLE_DEPENDENCY_CHECKS) {
         if ((await manager.query(sql, [userId])).length > 0) return `${reason}_physical`;
       }
-      await manager.query(`SELECT set_config('search_path','core',true)`);
+      await manager.query(`SELECT set_config('search_path',$1,true)`, [businessSearchPath(CORE_BUSINESS_SCHEMA)]);
+      bindBusinessSchema(manager, CORE_BUSINESS_SCHEMA, null);
     }
     return null;
   } finally {
-    await manager.query(`SELECT set_config('rab.organisation_id',$1,true), set_config('rab.workspace_id',$2,true), set_config('search_path','core',true)`,
-      [previous.org ?? '', previous.workspace ?? '']);
+    await manager.query(`SELECT set_config('rab.organisation_id',$1,true), set_config('rab.workspace_id',$2,true), set_config('search_path',$3,true)`,
+      [previous.org ?? '', previous.workspace ?? '', businessSearchPath(CORE_BUSINESS_SCHEMA)]);
+    bindBusinessSchema(manager, CORE_BUSINESS_SCHEMA, null);
   }
 }
 

@@ -1,6 +1,7 @@
 // sql-injection-reviewed-file: SQL definition / check module (database layer). Every interpolation is a code constant of this repository (table, function, role and policy names, numeric limits) or a validated identifier; no request or row data reaches these templates. Reviewed 2026-11-04 (owner-login SQL-injection lint).
 import { Client } from 'pg';
 
+import { WORKSPACE_TABLES } from './workspace-tables';
 import { LATEST_WORKSPACE_MODULE_VERSION, WORKSPACE_SCHEMA_MODULES } from './workspace-schema-modules';
 import { expectedWorkspaceIndexCount, KNOWN_WORKSPACE_INDEX_COUNTS } from './v1/server-path-template-archive-search';
 import { expectedWorkspacePolicyCount, KNOWN_WORKSPACE_POLICY_COUNTS } from './v1/server-path-template-venue-team-admin';
@@ -56,12 +57,8 @@ export const V1_EXPECTED = {
   policies: 39,
 } as const;
 
-/** The 21 business tables. Every one carries workspace_id (checked against the template). */
-export const WORKSPACE_TABLES = [
-  'staff_profile', 'user_note', 'venue', 'venue_manager_staff', 'job_role', 'venue_role_rate', 'manager_venue', 'shift',
-  'shift_request_staff', 'shift_assignment', 'job_offer', 'replacement_request', 'attendance', 'attendance_correction', 'shift_report', 'shift_staff_review',
-  'payroll_record', 'payroll_run', 'payroll_run_line', 'payslip', 'payslip_document',
-] as const;
+/** The 21 business tables (defined in the dependency-free ./workspace-tables leaf; re-exported here for existing callers). */
+export { WORKSPACE_TABLES };
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
