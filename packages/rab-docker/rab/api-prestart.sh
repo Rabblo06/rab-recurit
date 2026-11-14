@@ -28,7 +28,7 @@
 #   3. CREWFLOW_MIGRATE_ON_START=true (and DISABLE_DB_MIGRATIONS not true): runs the short-lived migrate child (Agent 1:
 #      migration lock, fresh-install classifier, post-checks, the upgrade logbook). Exit 0 = current / applied / ledger
 #      ahead; 70 = every migration applied but an upgrade COMMAND failed (OWNER-DB-ULTIMATE Part B3: serve, loud WARNING,
-#      /healthz upgrade:"failed"); 66 = a migration failed (never serves; the next start retries it);
+#      /healthz upgradeFailed:true); 66 = a migration failed (never serves; the next start retries it);
 #      69 = migration lock timeout (retried with bounded backoff); anything else = no start.
 #      Otherwise (CREWFLOW_MIGRATE_ON_START=false, or DISABLE_DB_MIGRATIONS=true): the read-only pending-migration check
 #      (exit 65 when the schema is behind);
@@ -80,10 +80,10 @@ crewflow_runtime_db_config() {
     refuse "There is no database mode switch any more: the API, the Worker and migrations all use the one PG_DATABASE_URL owner login. Remove CREWFLOW_DB_MODE. Refusing to start."
   fi
   if [ -n "${CREWFLOW_UPGRADE_FAILURE:-}" ]; then
-    refuse "CREWFLOW_UPGRADE_FAILURE was removed (OWNER-DB-ULTIMATE Part B3): a failed migration always refuses to start and is retried on the next start; only a failed upgrade command serves, with upgrade:\"failed\" on /healthz. Remove it from the environment. Refusing to start."
+    refuse "CREWFLOW_UPGRADE_FAILURE was removed (OWNER-DB-ULTIMATE Part B3): a failed migration always refuses to start and is retried on the next start; only a failed upgrade command serves, with upgradeFailed:true on /healthz. Remove it from the environment. Refusing to start."
   fi
   if [ -n "${CREWFLOW_UPGRADE_FAILURE_POLICY:-}" ]; then
-    refuse "CREWFLOW_UPGRADE_FAILURE_POLICY was removed (OWNER-DB-ULTIMATE Part B3): a failed migration always refuses to start and is retried on the next start; only a failed upgrade command serves, with upgrade:\"failed\" on /healthz. Remove it from the environment. Refusing to start."
+    refuse "CREWFLOW_UPGRADE_FAILURE_POLICY was removed (OWNER-DB-ULTIMATE Part B3): a failed migration always refuses to start and is retried on the next start; only a failed upgrade command serves, with upgradeFailed:true on /healthz. Remove it from the environment. Refusing to start."
   fi
   if [ -n "${CREWFLOW_UPGRADE_INCOMPLETE:-}" ]; then
     refuse "CREWFLOW_UPGRADE_INCOMPLETE was retired (OWNER-DB-ULTIMATE Part B3): nothing sets it, and no gate accepts a pending migration any more. Remove it from the environment. Refusing to start."
@@ -360,7 +360,7 @@ function field(name,   m) {
     command = ""
     if (match($0, /"commandFailure":\{"name":"[A-Za-z0-9_.]+"/)) { command = substr($0, RSTART, RLENGTH); sub(/^"commandFailure":\{"name":"/, "", command); sub(/"$/, "", command) }
     if (length(command) > 200) command = ""
-    printf "api-prestart: WARNING - an upgrade COMMAND FAILED (%s); every migration applied, so the API serves with upgrade:\"failed\" on /healthz. The next start retries it. reason=%s state=%s\n", (command == "" ? "unknown" : command), field("reason"), field("state") > "/dev/stderr"
+    printf "api-prestart: WARNING - an upgrade COMMAND FAILED (%s); every migration applied, so the API serves with upgradeFailed:true on /healthz. The next start retries it. reason=%s state=%s\n", (command == "" ? "unknown" : command), field("reason"), field("state") > "/dev/stderr"
     fflush("/dev/stderr")
     if ($0 !~ /"serve":true/ || $0 ~ /"state":"(EMPTY|BOOTSTRAP-PARTIAL)"/ || $0 !~ /"failedMigration":null[,}]/ || command == "") veto = 1
   }
@@ -411,7 +411,7 @@ if [ "$MIGRATE_ON_START" = true ]; then
     0) echo "api-prestart: the schema is current for this code" ;;
     70)
       # OWNER-DB-ULTIMATE Part B3: verified by the relay (a failed upgrade COMMAND, no failed migration, not a fresh install).
-      echo "api-prestart: WARNING - an upgrade command failed; every migration is applied, so the API serves with upgrade:\"failed\" on /healthz and the admin banner. Fix the command and restart (it is retried; see the WARNING and TWENTY_MIGRATE_RESULT lines above)." >&2
+      echo "api-prestart: WARNING - an upgrade command failed; every migration is applied, so the API serves with upgradeFailed:true on /healthz and the admin banner. Fix the command and restart (it is retried; see the WARNING and TWENTY_MIGRATE_RESULT lines above)." >&2
       ;;
     64) fail_after_delay 64 "the migrate child refused its configuration" ;;
     65) fail_after_delay 65 "the schema is behind this code" ;;

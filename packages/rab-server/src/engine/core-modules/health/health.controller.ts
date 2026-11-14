@@ -25,13 +25,13 @@ export class HealthController {
     // moment without false-flagging.
     // Owner-login architecture: also unready once the semantic posture monitor saw the database's security objects change
     // since boot (security-readiness.ts). It stays unready until a restart passes the boot check again.
-    // O3 C3: an informational `upgrade: { status: 'up', upgradeFailed: true|false }` entry says whether this start follows a
-    // failed upgrade served under CREWFLOW_UPGRADE_FAILURE=continue (upgrade-status.ts). Never the migration's name (that
-    // stays in the start-up logs); always `up`, so the status stays 200 by the owner's decision.
+    // OWNER-DB-ULTIMATE Part B (owner decision 2026-11-14): an informational `upgrade: { status: 'up', upgradeFailed: true|false }`
+    // entry says only whether the code version's upgrade failed (upgrade-status.ts): no version, step, state or error text
+    // publicly (the detail is on the platform-admin health report). Always `up`, so the status stays 200.
     return this.health.check([
       () => this.db.pingCheck('database', { timeout: 5_000 }),
       () => this.securityPosture(),
-      // OWNER-DB-ULTIMATE Part B3: plus the logbook's state (ok / failed / behind / ahead / none / unknown), never a name.
+      // OWNER-DB-ULTIMATE Part B: a boolean only, derived from the upgrade logbook (upgrade-status.service.ts).
       async () => upgradeStatusIndicator(this.upgrades ? (await this.upgrades.status()).state : undefined),
     ]);
   }

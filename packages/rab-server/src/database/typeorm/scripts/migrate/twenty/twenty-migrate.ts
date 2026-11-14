@@ -3,7 +3,7 @@
  * the path keeps the name agreed with api-prestart.sh and Agent 5 before the owner-login rename). api-prestart.sh runs
  *   node packages/rab-server/dist/database/typeorm/scripts/migrate/twenty/twenty-migrate.js
  * only when CREWFLOW_MIGRATE_ON_START=true, and execs main.js only on exit 0 (ok) or 70 (OWNER-DB-ULTIMATE Part B3: only an
- * upgrade COMMAND failed, the schema matches the code; the API serves with upgrade:"failed"). Settings come from Agent 2's runtime-db-config.ts (one source of truth); exit codes are its
+ * upgrade COMMAND failed, the schema matches the code; the API serves with upgradeFailed:true). Settings come from Agent 2's runtime-db-config.ts (one source of truth); exit codes are its
  * STARTUP_EXIT_CODES. Prints exactly one TWENTY_MIGRATE_RESULT line. Deliberately does NOT import dotenv.
  */
 import { checkRuntimeLogin, readRuntimeDbConfig, RuntimeDbConfigError, STARTUP_EXIT_CODES } from '../../../../owner-login/runtime-db-config';

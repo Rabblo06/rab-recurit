@@ -331,7 +331,7 @@ check('7e warn (explicit) + a missing control -> starts and warns, naming it', r
 const MIGRATE_ON = { ...BASE, CREWFLOW_MIGRATE_ON_START: 'true', CREWFLOW_MIGRATION_APPROVAL_MODE: 'none' };
 const migrated = (out) => line(out, 'twentymigrate');
 const RESULT = (o) => JSON.stringify({ state: 'CHAIN-PARTIAL', applied: [], pending: ['1786730000000-Broken'], ...o });
-// OWNER-DB-ULTIMATE Part B3: exit 70 = every migration applied, only an upgrade COMMAND failed (serve with upgrade:"failed").
+// OWNER-DB-ULTIMATE Part B3: exit 70 = every migration applied, only an upgrade COMMAND failed (serve with upgradeFailed:true).
 const DEGRADED = JSON.stringify({ state: 'CURRENT', applied: [], pending: [], failedMigration: null, outcome: 'degradedContinue', serve: true, reason: 'upgrade command 0.6.0_FixThing_1786799990000 failed (CommandFailure); schema current', checks: [], upgrade: { codeVersion: '0.6.0', forced: false, decision: 'continue', adoptedFrom: null, recorded: [{ name: '0.6.0_FixThing_1786799990000', status: 'failed', attempt: 1 }], commandFailure: { name: '0.6.0_FixThing_1786799990000', errorName: 'CommandFailure' } }, exitCode: 70 });
 const upgradeOf = (out) => ((line(out, 'main').match(/ upgrade=([^ ]*) /) || [])[1] || '');
 const before = (out, a, b) => out.indexOf(a) >= 0 && out.indexOf(b) > out.indexOf(a);
@@ -360,7 +360,7 @@ check('8d migrate-on-start, child exit 0 -> main starts under tini (PID 1); the 
 r = run('migrate-70', MIGRATE_ON, { ctl: { 'migrate-seq': '70', 'migrate-result': DEGRADED } });
 check('8e exit 70 + a verified upgrade-COMMAND failure (Part B3) -> main starts WITHOUT CREWFLOW_UPGRADE_INCOMPLETE, with a loud WARNING naming the command', r.code === 0 && line(r.out, 'main') &&
   upgradeOf(r.out) === '-' &&
-  /WARNING - an upgrade COMMAND FAILED \(0\.6\.0_FixThing_1786799990000\); every migration applied, so the API serves with upgrade:"failed"/.test(r.out) &&
+  /WARNING - an upgrade COMMAND FAILED \(0\.6\.0_FixThing_1786799990000\); every migration applied, so the API serves with upgradeFailed:true/.test(r.out) &&
   /WARNING - an upgrade command failed; every migration is applied, so the API serves/.test(r.out), r.out);
 r = run('migrate-70-failedmigration', MIGRATE_ON, { ctl: { 'migrate-seq': '70', 'migrate-result': DEGRADED.replace('"failedMigration":null', '"failedMigration":"Broken1786730000000"') } });
 check('8f a 70 result naming a failed MIGRATION is vetoed -> 66: a failed migration never serves (Part B3)', r.code === 66 && /not a verified upgrade-command failure/.test(r.out) && !line(r.out, 'main'), r.out);
