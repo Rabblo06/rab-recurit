@@ -195,13 +195,13 @@ describeIfDb('Part D workspace command runner (integration)', () => {
     expect(second.outcomes.find((o) => o.workspaceId === a.id)!.status).toBe('up-to-date');
   });
 
-  it('a structure mismatch refuses: a data command that changes the structure is rolled back and recorded failed', async () => {
+  it('a data command that changes the structure is refused (D6: DDL_IN_DATA_STEP), rolled back and recorded failed', async () => {
     const [a, b] = [await make('sm-a'), await make('sm-b')];
     await adopt([a.id, b.id]);
     const before = await fingerprint(a);
     const sneaky = cmd('SneakyDdl', 2, { sql: (s) => `ALTER TABLE ${s}.venue ADD COLUMN sneaky text` });
     const out = await runner({ workspaceRegistry: { '0-7': [sneaky] }, workspaceIds: [a.id, b.id] });
-    expect(out.failures.map((f) => f.errorClass)).toEqual(['FINGERPRINT_MISMATCH', 'FINGERPRINT_MISMATCH']);
+    expect(out.failures.map((f) => f.errorClass)).toEqual(['DDL_IN_DATA_STEP', 'DDL_IN_DATA_STEP']);
     expect(await hasColumn(a, 'venue', 'sneaky')).toBe(false);
     expect(await fingerprint(a)).toBe(before);
     expect((await registryOf(admin, a.id)).module_version).toBe(20);
@@ -226,13 +226,15 @@ describeIfDb('Part D workspace command runner (integration)', () => {
       await admin.query(`INSERT INTO ${y.schema}.job_role (organisation_id, name, workspace_id) VALUES ($1, 'y-role', $2)`, [y.org, y.id]);
     });
     const evil = async (name: string, i: number, body: (ctx: { query: (s: string, p?: unknown[]) => Promise<unknown[]> }) => Promise<void>) => {
-      const yBefore = await fingerprint(y);
+      const probe = (q: (s: string) => Promise<unknown[]>, schema: string) => q(`ALTER TABLE ${schema}.venue ADD COLUMN IF NOT EXISTS d_probe text`);
       const yRoles = (await admin.query(`SELECT name FROM ${y.schema}.job_role ORDER BY name`)).rows;
       const out = await runner({
-        workspaceRegistry: { '0-7': [cmd(name, i, { run: async (ctx) => (ctx.workspaceId === x.id ? body(ctx) : undefined) })] },
+        workspaceRegistry: {
+          '0-7': [cmd(name, i, { run: async (ctx) => { if (ctx.workspaceId === x.id) await body(ctx); await probe(ctx.query, ctx.schemaName); }, structure: { level: 21, fingerprints: {} } })],
+        },
         workspaceIds: [x.id, y.id],
       });
-      expect(await fingerprint(y)).toBe(yBefore);
+      expect(await fingerprint(y)).toBe(level21);
       expect((await admin.query(`SELECT name FROM ${y.schema}.job_role ORDER BY name`)).rows).toEqual(yRoles);
       // y's own run of the same step is unaffected (a failed workspace does not mark the others).
       expect(out.outcomes.find((o) => o.workspaceId === y.id)!.completed).toEqual([`0.7.0_${name}_${T0 + i}`]);
@@ -286,6 +288,7 @@ describeIfDb('Part D workspace command runner (integration)', () => {
           if (workspaceId !== x.id) return;
           await query(`ALTER TABLE ${schemaName}.venue ADD COLUMN fk_probe uuid REFERENCES core."user"(id)`);
         },
+        structure: { level: 21, fingerprints: {} },
       });
       const out = await runner({ workspaceRegistry: { '0-7': [fk] }, workspaceIds: [x.id] });
       // The isolation layer passes (no OUTSIDE_SCHEMA); the structure check then refuses the undeclared DDL (the verify
@@ -307,7 +310,17 @@ describeIfDb('Part D workspace command runner (integration)', () => {
     });
     const step = async (name: string, i: number, body: (q: (s: string, p?: unknown[]) => Promise<unknown[]>) => Promise<void>) => {
       const out = await runner({
-        workspaceRegistry: { '0-7': [cmd(name, i, { run: async (ctx) => (ctx.workspaceId === x.id ? body(ctx.query) : undefined) })] },
+        workspaceRegistry: {
+          '0-7': [
+            cmd(name, i, {
+              run: async (ctx) => {
+                if (ctx.workspaceId === x.id) await body(ctx.query);
+                await ctx.query(`ALTER TABLE ${ctx.schemaName}.venue ADD COLUMN IF NOT EXISTS d_probe text`);
+              },
+              structure: { level: 21, fingerprints: {} },
+            }),
+          ],
+        },
         workspaceIds: [x.id, y.id],
       });
       expect(out.outcomes.find((o) => o.workspaceId === y.id)!.completed).toEqual([`0.7.0_${name}_${T0 + i}`]);
@@ -411,12 +424,12 @@ describeIfDb('Part D workspace command runner (integration)', () => {
     it('a data command doing CREATE RULE, or creating an UNLOGGED table, is refused (STRUCTURE_EXTRA), rolled back, recorded failed', async () => {
       const [a, b] = [await make('m2-a'), await make('m2-b')];
       await adopt([a.id, b.id]);
-      const rule = cmd('AddRule', 40, { sql: (s) => `CREATE RULE d_rule AS ON INSERT TO ${s}.job_role DO INSTEAD NOTHING` });
+      const rule = cmd('AddRule', 40, { sql: (s) => `CREATE RULE d_rule AS ON INSERT TO ${s}.job_role DO INSTEAD NOTHING`, structure: { level: 21, fingerprints: {} } });
       const out = await runner({ workspaceRegistry: { '0-7': [rule] }, workspaceIds: [a.id] });
       expect(out.failures.map((f) => f.errorClass)).toEqual(['STRUCTURE_EXTRA']);
       expect(Number((await admin.query(`SELECT count(*)::int AS n FROM pg_rewrite WHERE rulename = 'd_rule'`)).rows[0].n)).toBe(0);
       expect((await rows(a)).slice(-1)[0]).toMatchObject({ name: `0.7.0_AddRule_${T0 + 40}`, status: 'failed', attempt: 1 });
-      const unlogged = cmd('AddUnlogged', 41, { sql: (s) => `CREATE UNLOGGED TABLE ${s}.d_scratch (x int)` });
+      const unlogged = cmd('AddUnlogged', 41, { sql: (s) => `CREATE UNLOGGED TABLE ${s}.d_scratch (x int)`, structure: { level: 21, fingerprints: {} } });
       const out2 = await runner({ workspaceRegistry: { '0-7': [unlogged] }, workspaceIds: [b.id] });
       expect(out2.failures.map((f) => f.errorClass)).toEqual(['STRUCTURE_EXTRA']);
       expect(Number((await admin.query(`SELECT count(*)::int AS n FROM pg_class WHERE relname = 'd_scratch' AND relnamespace = $1::regnamespace`, [b.schema])).rows[0].n)).toBe(0);

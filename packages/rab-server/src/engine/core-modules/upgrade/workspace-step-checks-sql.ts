@@ -99,14 +99,32 @@ SELECT what FROM w LIMIT 10`;
  * re-bind + write of another workspace's or a core table's rows + restore; RESET ROLE + GRANT / CREATE ROLE / ALTER ROLE …
  * SET + SET ROLE back; a forged core.upgrade_migration row). Proven per major by the integration spec.
  */
-export const OUTSIDE_WRITE_COUNTERS_SQL = `SELECT s.relid::text AS relid, s.schemaname || '.' || s.relname AS what,
-       (s.n_tup_ins + s.n_tup_upd + s.n_tup_del)::text AS n
-  FROM pg_catalog.pg_stat_xact_user_tables s WHERE s.schemaname <> $1 AND (s.n_tup_ins + s.n_tup_upd + s.n_tup_del) > 0
-UNION ALL
-SELECT s.relid::text, 'pg_catalog.' || s.relname, (s.n_tup_ins + s.n_tup_upd + s.n_tup_del)::text
-  FROM pg_catalog.pg_stat_xact_sys_tables s
- WHERE s.relname IN ('pg_authid', 'pg_auth_members', 'pg_db_role_setting', 'pg_database', 'pg_largeobject_metadata', 'pg_publication', 'pg_publication_rel')
-   AND (s.n_tup_ins + s.n_tup_upd + s.n_tup_del) > 0`;
+// D6 (measured at 1,000 workspaces): the pg_stat_xact_user_tables view also aggregates index scans over pg_index for every
+// table (~720 ms per read); the counters are read with the per-relation functions directly, tables only (a TOAST write
+// always comes with a write of its table), ~10x cheaper.
+export const OUTSIDE_WRITE_COUNTERS_SQL = `WITH c AS (
+  SELECT c.oid, n.nspname || '.' || c.relname AS what,
+         pg_catalog.pg_stat_get_xact_tuples_inserted(c.oid) + pg_catalog.pg_stat_get_xact_tuples_updated(c.oid)
+           + pg_catalog.pg_stat_get_xact_tuples_deleted(c.oid) AS n
+    FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+   WHERE (c.relkind IN ('r', 'p', 'm') AND n.nspname <> $1 AND n.nspname NOT IN ('pg_catalog', 'information_schema')
+          AND n.nspname !~ '^pg_(toast|temp_|toast_temp_)')
+      OR (n.nspname = 'pg_catalog' AND c.relname IN ('pg_authid', 'pg_auth_members', 'pg_db_role_setting', 'pg_database',
+                                                     'pg_largeobject_metadata', 'pg_publication', 'pg_publication_rel')))
+SELECT c.oid::text AS relid, c.what, c.n::text AS n FROM c WHERE c.n > 0`;
+
+/**
+ * D6 gate: the write counters of the catalogs every DDL / GRANT / DROP writes. When none of them moved during the step, the
+ * step did no DDL at all, so the catalog xmin scan and the outside object counts (the expensive layer-4 checks, ~1.3 s per
+ * workspace at 1,000 workspaces) cannot find anything and are skipped. Every catalog row write is counted (heap insert /
+ * update / delete count for catalogs too, shared ones included: proven by the integration spec), and track_counts = on is
+ * enforced per run (N1). Compared as a delta, like the user-table counters.
+ */
+export const CATALOG_WRITE_COUNTERS_SQL = `SELECT pg_catalog.sum(pg_catalog.pg_stat_get_xact_tuples_inserted(c.oid) + pg_catalog.pg_stat_get_xact_tuples_updated(c.oid)
+         + pg_catalog.pg_stat_get_xact_tuples_deleted(c.oid))::text AS n
+  FROM pg_catalog.pg_class c
+ WHERE c.relnamespace = 'pg_catalog'::pg_catalog.regnamespace AND c.relkind = 'r'
+   AND c.relname NOT IN ('pg_statistic', 'pg_statistic_ext_data')`;
 
 /**
  * Layer 4b, xmin: the readable shared catalogs written by THIS transaction (age <= 0 under REPEATABLE READ); pg_authid is not

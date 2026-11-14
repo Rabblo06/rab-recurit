@@ -13,7 +13,7 @@ import { Client } from 'pg';
 
 import { resolveIntegrationTestDatabase } from '../../database/typeorm/core/test-database-guard';
 import { MIGRATION_LOCK_KEY } from '../../database/typeorm/scripts/migrate/migration-lock';
-import { selectWorkspaceFingerprintsForServer } from '../../database/typeorm/workspace-schema/v1/expected-fingerprints';
+import { EXPECTED_WORKSPACE_FINGERPRINTS, selectWorkspaceFingerprintsForServer } from '../../database/typeorm/workspace-schema/v1/expected-fingerprints';
 import { provisionWorkspaceSchema } from '../../database/typeorm/workspace-schema/provision-workspace-schema';
 import type { WorkspaceUpgradeCommand } from '../../engine/core-modules/upgrade/upgrade-commands/workspace-upgrade-command';
 import { upgradeSessionOf, UpgradeSession } from '../../engine/core-modules/upgrade/upgrade-migration.service';
@@ -24,24 +24,45 @@ const PHASE = process.env.PERF_PHASE ?? 'all';
 const PREFIX = 'perf-ws';
 const out = (line: string) => process.stdout.write(`[d6] ${line}\n`);
 
+const CONCURRENCY = Math.max(1, Math.min(4, Number.parseInt(process.env.PERF_SEED_CONCURRENCY ?? '3', 10)));
+
 async function seed(adminUrl: string): Promise<void> {
-  let admin = new Client({ connectionString: adminUrl });
-  await admin.connect();
-  const have = Number((await admin.query(`SELECT count(*)::int AS n FROM core.organisation WHERE slug LIKE $1`, [`${PREFIX}-%`])).rows[0].n);
-  out(`seed: ${have} already present, target ${N}`);
+  const probe = new Client({ connectionString: adminUrl });
+  await probe.connect();
+  const have = Number((await probe.query(`SELECT count(*)::int AS n FROM core.organisation WHERE slug LIKE $1`, [`${PREFIX}-%`])).rows[0].n);
+  await probe.end();
+  out(`seed: ${have} already present, target ${N}, ${CONCURRENCY} parallel seeder(s)`);
   const t0 = Date.now();
+  let next = have;
+  let done = have;
+  await Promise.all(Array.from({ length: CONCURRENCY }, () => seedWorker(adminUrl, () => (next < N ? next++ : null), () => {
+    done += 1;
+    if (done % 100 === 0) out(`seed: ${done}/${N} (${Math.round((Date.now() - t0) / 1000)} s)`);
+  })));
+  const admin = new Client({ connectionString: adminUrl });
+  await admin.connect();
+  const stats = (await admin.query(`SELECT (SELECT count(*) FROM pg_class)::int AS classes, (SELECT count(*) FROM pg_attribute)::int AS attributes,
+                                           pg_size_pretty(pg_database_size(current_database())) AS size`)).rows[0];
+  out(`seed done in ${Math.round((Date.now() - t0) / 1000)} s: pg_class ${stats.classes}, pg_attribute ${stats.attributes}, database ${stats.size}`);
+  await admin.end();
+}
+
+async function seedWorker(adminUrl: string, take: () => number | null, tick: () => void): Promise<void> {
+  let admin: Client | null = null;
   let crewflow: Client | null = null;
-  for (let i = have; i < N; i += 1) {
-    if (!crewflow || i % 50 === 0) {
+  let k = 0;
+  for (let i = take(); i !== null; i = take()) {
+    if (!crewflow || !admin || k % 50 === 0) {
       // A fresh backend every 50 workspaces bounds the per-backend catalog caches (the host is a 4 GB VM).
       await crewflow?.end();
+      await admin?.end();
       crewflow = new Client({ connectionString: adminUrl });
       await crewflow.connect();
       await crewflow.query('SET ROLE crewflow');
-      await admin.end();
       admin = new Client({ connectionString: adminUrl });
       await admin.connect();
     }
+    k += 1;
     const label = `${PREFIX}-${String(i).padStart(5, '0')}`;
     const r = await admin.query(
       `WITH o AS (INSERT INTO core.organisation(name, slug) VALUES ($1::text, $1::text) RETURNING id),
@@ -52,13 +73,10 @@ async function seed(adminUrl: string): Promise<void> {
       [label],
     );
     await provisionWorkspaceSchema(crewflow, r.rows[0].id);
-    if ((i + 1) % 100 === 0) out(`seed: ${i + 1}/${N} (${Math.round((Date.now() - t0) / 1000)} s)`);
+    tick();
   }
   await crewflow?.end();
-  const stats = (await admin.query(`SELECT (SELECT count(*) FROM pg_class)::int AS classes, (SELECT count(*) FROM pg_attribute)::int AS attributes,
-                                           pg_size_pretty(pg_database_size(current_database())) AS size`)).rows[0];
-  out(`seed done in ${Math.round((Date.now() - t0) / 1000)} s: pg_class ${stats.classes}, pg_attribute ${stats.attributes}, database ${stats.size}`);
-  await admin.end();
+  await admin?.end();
 }
 
 /** Wraps the session: time per statement kind (the first 48 characters, collapsed). */
@@ -117,6 +135,20 @@ async function measure(appUrl: string, adminUrl: string): Promise<void> {
   await run('adoption (0.6.0)', { codeVersion: '0.6.0', versions: ['0.4.0', '0.5.0'], adopt: true });
   const noop: WorkspaceUpgradeCommand = { kind: 'workspace', name: 'PerfNoop', timestamp: 1786990000000, run: async () => undefined };
   await run('no-op data step (0.7.0)', { workspaceRegistry: { '0-7': [noop] } });
+  // A structural step (one ADD COLUMN IF NOT EXISTS, level 21): the full catalog checks run.
+  const ref = new Client({ connectionString: adminUrl });
+  await ref.connect();
+  const ddl = (s: string) => `ALTER TABLE ${s}.venue ADD COLUMN IF NOT EXISTS d_perf text`;
+  await ref.query('BEGIN');
+  await ref.query(ddl('workspace_' + ids[0]!.replace(/-/g, '')));
+  const level21 = (await ref.query('SELECT core.workspace_schema_fingerprint($1) AS f', [ids[0]])).rows[0].f as string;
+  await ref.query('ROLLBACK');
+  await ref.end();
+  const structural: WorkspaceUpgradeCommand = { kind: 'workspace', name: 'PerfColumn', timestamp: 1786990000001, sql: ddl, structure: { level: 21, fingerprints: {} } };
+  await run('structural step (0.7.0, ADD COLUMN)', {
+    workspaceRegistry: { '0-7': [noop, structural] },
+    expectedFingerprint: (level) => (level === 21 ? level21 : EXPECTED_WORKSPACE_FINGERPRINTS[level]),
+  });
   await app.end();
 }
 

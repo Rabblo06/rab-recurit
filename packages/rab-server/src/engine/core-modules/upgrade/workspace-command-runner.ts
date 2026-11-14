@@ -42,6 +42,7 @@ import {
   OUTSIDE_DATA_WRITES_SQL,
   OUTSIDE_WRITE_COUNTERS_SQL,
   OUTSIDE_WRITES_SQL,
+  CATALOG_WRITE_COUNTERS_SQL,
   RELEASE_EXTRA_ADVISORY_SQL,
   SESSION_CLEAN_SQL,
   SESSION_RESET_SQL,
@@ -466,7 +467,10 @@ export class WorkspaceCommandRunner {
       await this.enterWorkspace(q, ws);
       const level = await this.lockRegistry(q, ws);
       const before = await this.invariants(q);
-      const [countsBefore] = (await q(OUTSIDE_COUNTS_SQL, [ws.schemaName])) as Array<{ counts: string }>;
+      const [catalogBefore] = (await q(CATALOG_WRITE_COUNTERS_SQL)) as Array<{ n: string | null }>;
+      // D6: the outside object counts (a full catalog read) are taken only for a STRUCTURAL step; a data step may not write
+      // any catalog at all (refused below), so it needs neither the counts nor the catalog scans.
+      const countsBefore = command.structure ? ((await q(OUTSIDE_COUNTS_SQL, [ws.schemaName])) as Array<{ counts: string }>)[0] : undefined;
       const writesBefore = (await q(OUTSIDE_WRITE_COUNTERS_SQL, [ws.schemaName])) as Array<{ relid: string; what: string; n: string }>;
 
       let target = level;
@@ -497,10 +501,17 @@ export class WorkspaceCommandRunner {
 
       // Layer 4: nothing outside this workspace schema was written or dropped by this transaction: catalog rows (xmin), object
       // counts, and (M1) data rows of any other table and the role / database / publication catalogs (per-transaction counters).
-      const outside = (await q(OUTSIDE_WRITES_SQL, [ws.schemaName])) as Array<{ what: string }>;
-      if (outside.length) throw new WorkspaceStepRefused('OUTSIDE_SCHEMA', `${name} changed objects outside ${ws.schemaName}: ${outside.map((o) => o.what).join('; ')}`);
-      const [countsAfter] = (await q(OUTSIDE_COUNTS_SQL, [ws.schemaName])) as Array<{ counts: string }>;
-      if (countsBefore?.counts !== countsAfter?.counts) throw new WorkspaceStepRefused('OUTSIDE_SCHEMA', `${name} added or dropped objects outside ${ws.schemaName}`);
+      // D6 gate: no catalog row written by the step = no DDL = the catalog scans cannot find anything. A DATA step that wrote a
+      // catalog (DDL, GRANT, TRUNCATE, a temporary table, ALTER ROLE …) is refused outright: data steps never change structure.
+      const [catalogAfter] = (await q(CATALOG_WRITE_COUNTERS_SQL)) as Array<{ n: string | null }>;
+      const ddl = BigInt(catalogAfter?.n ?? '0') !== BigInt(catalogBefore?.n ?? '0');
+      if (ddl && !command.structure) throw new WorkspaceStepRefused('DDL_IN_DATA_STEP', `${name} is a data step but wrote the system catalogs (DDL); only a structural step may`);
+      if (ddl) {
+        const outside = (await q(OUTSIDE_WRITES_SQL, [ws.schemaName])) as Array<{ what: string }>;
+        if (outside.length) throw new WorkspaceStepRefused('OUTSIDE_SCHEMA', `${name} changed objects outside ${ws.schemaName}: ${outside.map((o) => o.what).join('; ')}`);
+        const [countsAfter] = (await q(OUTSIDE_COUNTS_SQL, [ws.schemaName])) as Array<{ counts: string }>;
+        if (countsBefore?.counts !== countsAfter?.counts) throw new WorkspaceStepRefused('OUTSIDE_SCHEMA', `${name} added or dropped objects outside ${ws.schemaName}`);
+      }
       const writesAfter = (await q(OUTSIDE_WRITE_COUNTERS_SQL, [ws.schemaName])) as Array<{ relid: string; what: string; n: string }>;
       const data = [...increasedCounters(writesBefore, writesAfter), ...((await q(OUTSIDE_DATA_WRITES_SQL, [ws.schemaName])) as Array<{ what: string }>).map((o) => o.what)];
       if (data.length) throw new WorkspaceStepRefused('OUTSIDE_SCHEMA', `${name} wrote outside ${ws.schemaName}: ${data.join('; ')}`);
