@@ -7409,9 +7409,17 @@ image that runs the apps' own derive step on the read-only volume (`--pull never
     but is not READY refuses with `USER_DELETION_UNVERIFIABLE` (workspace id logged server-side only); `user_note.subject_user_id`
     counts as history; `deleteUser` records visible staff history in every workspace scope before the delete and refuses (409,
     whole transaction rolled back) if any of it disappears; FK refusals (23503) are a 409, not a 500.
+- **Other tenant-binding changes.** `storage:reconcile` binds the tenant identity without routing to a workspace schema (every
+  query there is on `core.stored_file`, same RLS), so one non-READY workspace no longer stops it for every tenant; a `rab-ai` job
+  for a workspace that is not yet routable is skipped (the Worker's `isNotYetRoutableWorkspace` rule), not failed; `seed-qa`
+  provisions the workspace schema through `core.provision_workspace`.
 - **Residual (owner review pending).** The per-workspace check runs under the caller's RLS, so "no rows" can mean "hidden". The
-  post-delete re-check closes the cascade case that tests cover; the complete control is a SECURITY DEFINER boolean
-  `core.user_has_protected_history` (draft in docs/plans/phase-x3/C1-STATUS.md, FOR OWNER REVIEW, not run anywhere).
+  post-delete re-check compares only `shift_assignment`, `job_offer` and `attendance`, and a narrow window remains: a staff
+  profile the caller cannot see that gets its first history row from a concurrent transaction just before the delete is not in
+  the snapshot. Rows in `shift_request_staff`, `venue_manager_staff` (cascade) and `replacement_request.selected_staff_profile_id`
+  (set NULL) are not compared. A delete refused by a foreign key (23503) is reported as the same 409 (constraint/table names
+  logged server-side). The complete control is a SECURITY DEFINER boolean `core.user_has_protected_history` covering all of
+  these (draft in docs/plans/phase-x3/C1-STATUS.md, FOR OWNER REVIEW, not run anywhere).
 - **Scale finding (owner decision pending).** Deleting a `core` row referenced from every workspace schema locks every referencing
   table (~31 per workspace for `core."user"`); from about 300 workspaces this fails with "out of shared memory" at the default
   `max_locks_per_transaction`. Applies to production today (schemas are provisioned with HWS off). CI's disposable database runs
