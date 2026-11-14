@@ -119,6 +119,11 @@ export class UpgradeRun {
     return out;
   }
 
+  /** Twenty checks the PREVIOUS version's workspace segment only: the code version's own workspace steps are this run's job. */
+  private previousOnly(versions: readonly string[]): string[] {
+    return versions.filter((v) => v !== this.options.codeVersion);
+  }
+
   /** Step 1. Throws UpgradeVersionTooOldError (65) or AppVersionError (64) before anything is applied. */
   async beforeApply(session: UpgradeSession, input: { fresh: boolean; attribution: LedgerAttribution | null; unrestrictedTarget: boolean }): Promise<UpgradeStartDecision> {
     const { codeVersion, force, log } = this.options;
@@ -133,7 +138,7 @@ export class UpgradeRun {
         })
       : { instance: false, complete: {} as Record<string, boolean>, newer: [] as string[] };
     if (ledgerExists) {
-      const ws = await this.workspacesComplete(session, versionsToCheck(codeVersion, this.previousVersions));
+      const ws = await this.workspacesComplete(session, this.previousOnly(versionsToCheck(codeVersion, this.previousVersions)));
       for (const [v, done] of Object.entries(ws)) facts.complete[v] = facts.complete[v] === true && done;
     }
     const decision = decideUpgradeStart({

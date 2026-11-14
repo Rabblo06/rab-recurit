@@ -363,21 +363,37 @@ describeIfDb('Part D workspace command runner (integration)', () => {
       expect((await admin.query(`SELECT last_name FROM core."user" WHERE id = $1`, [x.owner])).rows[0].last_name).not.toBe('changed-by-step');
     });
 
-    it("the per-transaction counters really reflect this transaction's writes (user table and shared catalog), and nothing else", async () => {
+    it("the write counters move with THIS transaction's writes (user table and the shared pg_authid); earlier transactions' writes stay as a constant offset, which is why the runner compares a delta", async () => {
       const c = new Client({ connectionString: adminUrl });
       await c.connect();
+      const counter = async (sql: string, p: unknown[]) => Number((await c.query(sql, p)).rows[0]?.n ?? 0);
+      const userSql = `SELECT (n_tup_ins + n_tup_upd + n_tup_del)::int AS n FROM pg_stat_xact_user_tables WHERE schemaname = $1 AND relname = 'job_role'`;
+      const authSql = `SELECT (n_tup_ins + n_tup_upd + n_tup_del)::int AS n FROM pg_stat_xact_sys_tables WHERE relname = $1`;
       try {
+        // An earlier, committed transaction of this backend writes job_role.
+        await c.query(`UPDATE ${y.schema}.job_role SET name = name`);
         await c.query('BEGIN');
+        const u0 = await counter(userSql, [y.schema]);
+        const a0 = await counter(authSql, ['pg_authid']);
         await c.query(`UPDATE ${y.schema}.job_role SET name = name`);
         await c.query(`CREATE ROLE drunner_stats_probe_${SFX} NOLOGIN`);
-        const u = (await c.query(`SELECT n_tup_upd::int AS n FROM pg_stat_xact_user_tables WHERE schemaname = $1 AND relname = 'job_role'`, [y.schema])).rows[0];
-        const a = (await c.query(`SELECT n_tup_ins::int AS n FROM pg_stat_xact_sys_tables WHERE relname = 'pg_authid'`)).rows[0];
-        expect(u?.n).toBe(1);
-        expect(a?.n).toBeGreaterThanOrEqual(1);
+        const u1 = await counter(userSql, [y.schema]);
+        const a1 = await counter(authSql, ['pg_authid']);
         await c.query('ROLLBACK');
+        // eslint-disable-next-line no-console
+        console.log(`[drunner-m1] counters: job_role ${u0} -> ${u1}, pg_authid ${a0} -> ${a1} (offset ${u0} = earlier transactions not yet flushed)`);
+        expect(u1 - u0).toBe(1);
+        expect(a1 - a0).toBeGreaterThanOrEqual(1);
+        // A transaction that writes nothing outside: the delta is zero (the runner's increasedCounters).
         await c.query('BEGIN');
-        const fresh = (await c.query(`SELECT count(*)::int AS n FROM pg_stat_xact_user_tables WHERE n_tup_ins + n_tup_upd + n_tup_del > 0`)).rows[0];
-        expect(fresh.n).toBe(0);
+        const { OUTSIDE_WRITE_COUNTERS_SQL, increasedCounters } = await import('../../engine/core-modules/upgrade/workspace-command-runner');
+        const before = (await c.query(OUTSIDE_WRITE_COUNTERS_SQL, [x.schema])).rows;
+        await c.query(`UPDATE ${x.schema}.job_role SET name = name`);
+        const after = (await c.query(OUTSIDE_WRITE_COUNTERS_SQL, [x.schema])).rows;
+        expect(increasedCounters(before, after)).toEqual([]);
+        await c.query(`UPDATE ${y.schema}.job_role SET name = name`);
+        const after2 = (await c.query(OUTSIDE_WRITE_COUNTERS_SQL, [x.schema])).rows;
+        expect(increasedCounters(before, after2)).toEqual([`${y.schema}.job_role`]);
         await c.query('ROLLBACK');
       } finally {
         await c.end();

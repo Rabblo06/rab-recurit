@@ -59,21 +59,29 @@ w AS (
 SELECT what FROM w LIMIT 10`;
 
 /**
- * Layer 4b (security review M1): DATA written by this transaction outside the target schema, and writes to the role /
- * database / publication catalogs. pg_stat_xact_* are this backend's counters for the CURRENT transaction (not yet flushed),
- * so a step that re-bound the tenant, wrote another workspace's or a core table's rows and restored the binding is still
- * seen; so is RESET ROLE + GRANT / CREATE ROLE / ALTER ROLE … SET + SET ROLE back, and a forged core.upgrade_migration row.
- * The readable shared catalogs are also scanned by xmin (age <= 0 = this transaction under REPEATABLE READ); pg_authid is
- * not readable by the runtime login, so it is covered by the counters only.
+ * Layer 4b (security review M1), counters: this backend's write counters (pg_stat_xact_*) for every table outside the target
+ * schema and for the role / database / publication catalogs. They are NOT per transaction on PostgreSQL 15+: writes of
+ * earlier transactions stay in them until the backend flushes its statistics, which never happens inside a transaction block.
+ * So the runner reads them at the start of the step transaction and again after the command, and refuses any INCREASE (a
+ * re-bind + write of another workspace's or a core table's rows + restore; RESET ROLE + GRANT / CREATE ROLE / ALTER ROLE …
+ * SET + SET ROLE back; a forged core.upgrade_migration row). Proven per major by the integration spec.
+ */
+export const OUTSIDE_WRITE_COUNTERS_SQL = `SELECT s.relid::text AS relid, s.schemaname || '.' || s.relname AS what,
+       (s.n_tup_ins + s.n_tup_upd + s.n_tup_del)::text AS n
+  FROM pg_catalog.pg_stat_xact_user_tables s WHERE s.schemaname <> $1 AND (s.n_tup_ins + s.n_tup_upd + s.n_tup_del) > 0
+UNION ALL
+SELECT s.relid::text, 'pg_catalog.' || s.relname, (s.n_tup_ins + s.n_tup_upd + s.n_tup_del)::text
+  FROM pg_catalog.pg_stat_xact_sys_tables s
+ WHERE s.relname IN ('pg_authid', 'pg_auth_members', 'pg_db_role_setting', 'pg_database', 'pg_largeobject_metadata', 'pg_publication', 'pg_publication_rel')
+   AND (s.n_tup_ins + s.n_tup_upd + s.n_tup_del) > 0`;
+
+/**
+ * Layer 4b, xmin: the readable shared catalogs written by THIS transaction (age <= 0 under REPEATABLE READ); pg_authid is not
+ * readable by the runtime login, so it is covered by the counters only. Plus pg_sequence of a sequence outside the target.
  */
 export const OUTSIDE_DATA_WRITES_SQL = `WITH t AS (SELECT n.oid FROM pg_catalog.pg_namespace n WHERE n.nspname = $1),
 w AS (
-  SELECT 'table ' || s.schemaname || '.' || s.relname AS what FROM pg_catalog.pg_stat_xact_user_tables s
-   WHERE s.schemaname <> $1 AND (s.n_tup_ins + s.n_tup_upd + s.n_tup_del) > 0
-  UNION ALL SELECT 'catalog ' || s.relname FROM pg_catalog.pg_stat_xact_sys_tables s
-   WHERE s.relname IN ('pg_authid', 'pg_auth_members', 'pg_db_role_setting', 'pg_database', 'pg_largeobject_metadata', 'pg_publication', 'pg_publication_rel')
-     AND (s.n_tup_ins + s.n_tup_upd + s.n_tup_del) > 0
-  UNION ALL SELECT 'catalog pg_auth_members' FROM pg_catalog.pg_auth_members m WHERE pg_catalog.age(m.xmin) <= 0
+  SELECT 'catalog pg_auth_members' AS what FROM pg_catalog.pg_auth_members m WHERE pg_catalog.age(m.xmin) <= 0
   UNION ALL SELECT 'catalog pg_db_role_setting' FROM pg_catalog.pg_db_role_setting d WHERE pg_catalog.age(d.xmin) <= 0
   UNION ALL SELECT 'catalog pg_database' FROM pg_catalog.pg_database d WHERE pg_catalog.age(d.xmin) <= 0
   UNION ALL SELECT 'catalog pg_largeobject_metadata' FROM pg_catalog.pg_largeobject_metadata l WHERE pg_catalog.age(l.xmin) <= 0

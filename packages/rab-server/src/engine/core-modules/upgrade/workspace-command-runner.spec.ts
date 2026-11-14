@@ -10,7 +10,7 @@ import {
   stepsForVersion,
 } from './upgrade-sequence';
 import { upgradeStateOf } from './upgrade-status.service';
-import { assertOnlyTargetSchema, cursorHasCompleted, pendingWorkspaceSteps, structureLevels, WorkspaceStepRefused, workspaceSchemaOf } from './workspace-command-runner';
+import { assertOnlyTargetSchema, cursorHasCompleted, increasedCounters, pendingWorkspaceSteps, structureLevels, WorkspaceStepRefused, workspaceSchemaOf } from './workspace-command-runner';
 import { LATEST_WORKSPACE_MODULE_VERSION, WORKSPACE_SCHEMA_MODULES } from '../../../database/typeorm/workspace-schema/workspace-schema-modules';
 import { parseProvisionFunctionSource } from '../../../database/typeorm/workspace-schema/provision-function-versions';
 import { assessSchemaCompatibility } from '../../../database/boot-checks/schema-compatibility';
@@ -203,5 +203,14 @@ describe('Part D (review Info): source guard on upgrade-commands/**', () => {
       if (/(DataSource|createQueryRunner|new Client\(|require\()/.test(src)) offenders.push(`${f}: names a connection API`);
     }
     expect(offenders).toEqual([]);
+  });
+});
+
+describe('Part D (review M1): write counters are compared as a delta', () => {
+  it('only an increase counts (earlier, unflushed transactions are a constant offset)', () => {
+    const before = [{ relid: '1', what: 'core.a', n: '5' }];
+    expect(increasedCounters(before, [{ relid: '1', what: 'core.a', n: '5' }])).toEqual([]);
+    expect(increasedCounters(before, [{ relid: '1', what: 'core.a', n: '6' }])).toEqual(['core.a']);
+    expect(increasedCounters(before, [{ relid: '1', what: 'core.a', n: '5' }, { relid: '2', what: 'core.b', n: '1' }])).toEqual(['core.b']);
   });
 });

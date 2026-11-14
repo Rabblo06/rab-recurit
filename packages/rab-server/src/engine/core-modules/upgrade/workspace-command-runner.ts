@@ -40,6 +40,7 @@ import {
   INVARIANTS_SQL,
   OUTSIDE_COUNTS_SQL,
   OUTSIDE_DATA_WRITES_SQL,
+  OUTSIDE_WRITE_COUNTERS_SQL,
   OUTSIDE_WRITES_SQL,
   SESSION_CLEAN_SQL,
   SESSION_RESET_SQL,
@@ -53,7 +54,13 @@ import {
 } from '../../../database/typeorm/workspace-schema/v1/expected-fingerprints';
 import { LATEST_WORKSPACE_MODULE_VERSION } from '../../../database/typeorm/workspace-schema/workspace-schema-modules';
 
-export { OUTSIDE_COUNTS_SQL, OUTSIDE_WRITES_SQL, OUTSIDE_DATA_WRITES_SQL, TARGET_EXTRA_STRUCTURE_SQL };
+export { OUTSIDE_COUNTS_SQL, OUTSIDE_WRITES_SQL, OUTSIDE_DATA_WRITES_SQL, OUTSIDE_WRITE_COUNTERS_SQL, TARGET_EXTRA_STRUCTURE_SQL };
+
+/** Pure (review M1): the relations whose write counter increased between two OUTSIDE_WRITE_COUNTERS_SQL reads. */
+export function increasedCounters(before: ReadonlyArray<{ relid: string; what: string; n: string }>, after: ReadonlyArray<{ relid: string; what: string; n: string }>): string[] {
+  const was = new Map(before.map((r) => [r.relid, BigInt(r.n)]));
+  return after.filter((r) => BigInt(r.n) > (was.get(r.relid) ?? 0n)).map((r) => r.what);
+}
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const WORKSPACE_SCHEMA_RE = /workspace_[0-9a-f]{32}/gi;
@@ -409,6 +416,7 @@ export class WorkspaceCommandRunner {
       const level = await this.lockRegistry(q, ws);
       const before = await this.invariants(q);
       const [countsBefore] = (await q(OUTSIDE_COUNTS_SQL, [ws.schemaName])) as Array<{ counts: string }>;
+      const writesBefore = (await q(OUTSIDE_WRITE_COUNTERS_SQL, [ws.schemaName])) as Array<{ relid: string; what: string; n: string }>;
 
       let target = level;
       if (command.structure) {
@@ -442,8 +450,9 @@ export class WorkspaceCommandRunner {
       if (outside.length) throw new WorkspaceStepRefused('OUTSIDE_SCHEMA', `${name} changed objects outside ${ws.schemaName}: ${outside.map((o) => o.what).join('; ')}`);
       const [countsAfter] = (await q(OUTSIDE_COUNTS_SQL, [ws.schemaName])) as Array<{ counts: string }>;
       if (countsBefore?.counts !== countsAfter?.counts) throw new WorkspaceStepRefused('OUTSIDE_SCHEMA', `${name} added or dropped objects outside ${ws.schemaName}`);
-      const data = (await q(OUTSIDE_DATA_WRITES_SQL, [ws.schemaName])) as Array<{ what: string }>;
-      if (data.length) throw new WorkspaceStepRefused('OUTSIDE_SCHEMA', `${name} wrote outside ${ws.schemaName}: ${data.map((o) => o.what).join('; ')}`);
+      const writesAfter = (await q(OUTSIDE_WRITE_COUNTERS_SQL, [ws.schemaName])) as Array<{ relid: string; what: string; n: string }>;
+      const data = [...increasedCounters(writesBefore, writesAfter), ...((await q(OUTSIDE_DATA_WRITES_SQL, [ws.schemaName])) as Array<{ what: string }>).map((o) => o.what)];
+      if (data.length) throw new WorkspaceStepRefused('OUTSIDE_SCHEMA', `${name} wrote outside ${ws.schemaName}: ${data.join('; ')}`);
 
       // Layer 5: what the v1 fingerprint does not hash (M2), then the level (bumped BEFORE the verify function, M3: it may read
       // module_version), then verify + fingerprint == the expected one of that level.
