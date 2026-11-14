@@ -12,6 +12,7 @@ import { StaffProfile } from '../../../modules/staff/entities';
 import { Venue } from '../../../modules/venue/entities';
 import { AfterCommitPublisher } from '../after-commit/after-commit-publisher';
 import { memoRunnerFor } from '../permissions/tx-permission-memo';
+import { businessTables, withBusinessSchema } from './business-tables';
 import {
   assertBindableSchema,
   bindEntityManagerToSchema,
@@ -43,7 +44,8 @@ async function baseDataSource(): Promise<DataSource> {
 function recordingManager(base: DataSource): { manager: EntityManager; runner: QueryRunner; log: string[] } {
   const log: string[] = [];
   const runner = base.driver.createQueryRunner('master');
-  Object.assign(runner, { isTransactionActive: true });
+  // An open outer transaction (depth 1), as the binders' dataSource.transaction leaves it: a nested one is a SAVEPOINT.
+  Object.assign(runner, { isTransactionActive: true, transactionDepth: 1 });
   (runner as unknown as { query: unknown }).query = async (sql: string, _params: unknown[], structured?: boolean) => {
     log.push(sql);
     const rows: Record<string, unknown>[] = /^INSERT/i.test(sql) ? [{ id: ID, created_at: new Date(), updated_at: new Date(), default_rate_pence: '0' }] : [];
@@ -186,5 +188,16 @@ describe('schema-bound EntityManager (C2-1)', () => {
     expect(boundSchemaOf(m)).toBe(WS);
     expect(m.connection.entityMetadatas).toHaveLength(0);
     await expect(m.findOne(Shift, { where: { id: ID } })).rejects.toThrow(/No metadata/);
+  });
+
+  it('C2-0 interplay: businessTables() bound on the schema-bound manager answers there and inside a nested transaction', async () => {
+    const { manager } = recordingManager(base);
+    const m = await bindEntityManagerToSchema(manager, WS);
+    const workspaceId = '01234567-89ab-cdef-0123-456789abcdef'; // WS is its registry name
+    const seen = await withBusinessSchema(m, WS, workspaceId, async () => {
+      const nested = await m.transaction(async (n) => (n === m ? businessTables(n).shift : 'different manager'));
+      return [businessTables(m).venue, nested, m.connection.getMetadata(Venue).tablePath];
+    });
+    expect(seen).toEqual([`"${WS}"."venue"`, `"${WS}"."shift"`, `${WS}.venue`]);
   });
 });

@@ -8,6 +8,7 @@ import { DataSource, EntityManager, QueryRunner } from 'typeorm';
 import { AppModule } from '../../app.module';
 import { integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
 import { PasswordHashingService } from '../../engine/core-modules/auth/services/password-hashing.service';
+import { businessTables } from '../../engine/core-modules/tenant/business-tables';
 import { boundSchemaOf } from '../../engine/core-modules/tenant/schema-bound-entity-manager';
 import { TenantContextService } from '../../engine/core-modules/tenant/tenant-context.service';
 import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-pipe';
@@ -103,6 +104,8 @@ describeIfDb('C2-1 schema-bound EntityManager: the 14 workspace entities issue s
     const value = await tenantContext.runInWorkspaceContext(ctxOf(ws), async (m, schema) => {
       expect(schema).toBe(ws.schema);
       expect(boundSchemaOf(m)).toBe(ws.schema);
+      // C2-0's raw-SQL primitive is bound on the same (schema-bound) manager and agrees with the entity metadata.
+      expect(businessTables(m).venue).toBe(`"${ws.schema}"."venue"`);
       runner = m.queryRunner;
       await m.query(TRAP_SQL);
       from = logged.length;
