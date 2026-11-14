@@ -1,4 +1,5 @@
 import 'reflect-metadata';
+import { selectWorkspaceFingerprintsForServer } from '../../database/typeorm/workspace-schema/v1/expected-fingerprints';
 import { Client } from 'pg';
 
 import { resolveIntegrationTestDatabase } from '../../database/typeorm/core/test-database-guard';
@@ -163,6 +164,9 @@ describeIfDb('server-path workspace provisioning — database layer (crewflow_ap
     await admin.connect();
     const [{ rolsuper }] = (await admin.query(`SELECT rolsuper FROM pg_roles WHERE rolname = current_user`)).rows;
     if (!rolsuper) throw new Error('this suite needs the disposable database bootstrap superuser as TEST_DATABASE_URL_UNPOOLED');
+    // The TypeScript provisioner compares against the fingerprints of THIS server's major (it read the PostgreSQL 16 table
+    // before, so §12.15 failed on 17 / 18: D-RUNNER.md §12.1 note).
+    await selectWorkspaceFingerprintsForServer(async (sql) => (await admin.query(sql)).rows);
   });
 
   afterAll(async () => {
