@@ -6,13 +6,14 @@ import request from 'supertest';
 import { DataSource } from 'typeorm';
 
 import { AppModule } from '../../app.module';
-import { integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
+import { integrationTestDatabase, integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
 import { PasswordHashingService } from '../../engine/core-modules/auth/services/password-hashing.service';
 import { EnvironmentService } from '../../engine/core-modules/environment/environment.service';
 import { TenantContextService } from '../../engine/core-modules/tenant/tenant-context.service';
 import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-pipe';
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
+import { provisionTypeScript } from './helpers/workspace-fixtures';
 
 /**
  * Security review F4 (0b branch): RoleService.assertRelationsInScopeTx validates the venue / job-role ids of a member role's
@@ -29,6 +30,7 @@ const describeIfDb = RUN ? describe : describe.skip;
 jest.setTimeout(240_000);
 
 describeIfDb('member role record filters: relation ids are checked in the routed workspace table (F4)', () => {
+  const { adminUrl } = RUN ? integrationTestDatabase() : ({} as never);
   let app: INestApplication;
   let owner: DataSource;
   let factory: TestIdentityFactory;
@@ -97,9 +99,14 @@ describeIfDb('member role record filters: relation ids are checked in the routed
     it(`HWS ${mode ? 'on' : 'off'}: own-workspace ids accepted; another workspace's refused${mode ? '; a legacy core-only id refused' : ''}`, async () => {
       hwsOn = mode;
       if (mode) {
-        // HWS on routes the caller's requests to its READY workspace schema; a workspace without one cannot be served at all.
-        const [{ status }] = await owner.query(`SELECT status FROM core.workspace_schema_registry WHERE workspace_id = $1`, [managerA.workspaceId]);
-        expect(status).toBe('READY');
+        // HWS on routes the caller's requests to its READY workspace schema. With HWS off (main) the fixtures never built one:
+        // build it the Worker's way (TypeScript provisioner, idempotent: ALREADY_READY when C1's fixtures did).
+        for (const m of [managerA, managerB]) {
+          const ws = { id: m.workspaceId!, org: m.organisationId, owner: m.userId, schema: `workspace_${m.workspaceId!.replace(/-/g, '')}`, label: 'f4' };
+          expect(['READY', 'ALREADY_READY']).toContain(await provisionTypeScript(adminUrl, ws));
+          const [{ status }] = await owner.query(`SELECT status FROM core.workspace_schema_registry WHERE workspace_id = $1`, [m.workspaceId]);
+          expect(status).toBe('READY');
+        }
       }
       const [vA, vB, jA, jB] = [await venue(tokenA), await venue(tokenB), await jobRole(tokenA), await jobRole(tokenB)];
       // (a) the caller's own workspace
