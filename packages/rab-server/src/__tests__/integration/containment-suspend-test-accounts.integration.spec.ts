@@ -25,6 +25,7 @@ import { User } from '../../modules/identity/entities';
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { generateFixturePassword } from './helpers/fixture-password';
 import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
+import { otherActiveClientBackends } from './helpers/concurrent-backend-guard';
 import { integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
 
 /**
@@ -139,10 +140,8 @@ jest.setTimeout(30_000);
     //      one's SIGNATURE (another backend with real, non-idle queries in flight against this database
     //      right now) and refuses to truncate if it sees one, rather than truncating blindly underneath
     //      a run that might still need its own data.
-    const [{ other_active_backends: otherActiveBackends }] = await owner.query<[{ other_active_backends: number }]>(
-      `SELECT count(*)::int AS other_active_backends FROM pg_stat_activity
-        WHERE datname = current_database() AND pid != pg_backend_pid() AND state = 'active'`,
-    );
+    // Client sessions only: an autovacuum / background worker of this database is not a second test process (C1b.9).
+    const otherActiveBackends = await otherActiveClientBackends(owner);
     if (otherActiveBackends > 0) {
       throw new Error(
         `Refusing to TRUNCATE core.organisation: ${otherActiveBackends} other backend(s) have an active query against this ` +
