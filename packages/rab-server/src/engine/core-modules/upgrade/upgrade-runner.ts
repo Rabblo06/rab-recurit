@@ -36,6 +36,7 @@ import {
   recordUpgradeMigration,
   UpgradeSession,
   upgradeLedgerExists,
+  versionStartedUnforced,
   withUpgradeScope,
 } from './upgrade-migration.service';
 import { commandsForVersion, commandStepName, lastInstanceStepOfVersion, lastWorkspaceStepOfVersion, migrationsStepName, sequenceForVersions } from './upgrade-sequence';
@@ -143,9 +144,10 @@ export class UpgradeRun {
           const complete: Record<string, boolean> = {};
           for (const v of versionsToCheck(codeVersion, this.previousVersions)) complete[v] = await isLastAttemptCompleted(q, { name: lastInstanceStepOfVersion(v, this.registry), workspaceId: null });
           const newer = (await instanceVersions(q)).filter((v) => compareVersions(v, codeVersion) > 0);
-          return { instance, complete, newer };
+          const started = await versionStartedUnforced(q, codeVersion);
+          return { instance, complete, newer, started };
         })
-      : { instance: false, complete: {} as Record<string, boolean>, newer: [] as string[] };
+      : { instance: false, complete: {} as Record<string, boolean>, newer: [] as string[], started: false };
     if (ledgerExists) {
       const ws = await this.workspacesComplete(session, this.previousOnly(versionsToCheck(codeVersion, this.previousVersions)));
       for (const [v, done] of Object.entries(ws)) facts.complete[v] = facts.complete[v] === true && done;
@@ -157,6 +159,7 @@ export class UpgradeRun {
       force,
       ledgerExists,
       hasInstanceRows: facts.instance,
+      codeVersionStarted: facts.started,
       complete: facts.complete,
       newerVersions: facts.newer,
       attribution: input.attribution,

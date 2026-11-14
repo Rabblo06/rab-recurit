@@ -9,7 +9,12 @@
  *     R254 / R256 history (B3): one is_initial row at 0.4.0 / 0.5.0, then the upgrade in the same start; only 0.6.0 adopts;
  *   - otherwise "version X is complete" (the last step of X has a completed latest attempt) must hold for an accepted
  *     previous version, or for the code's own version (a resumed or repeated start), else refuse (:154-167): exit 65,
- *     nothing applied.
+ *     nothing applied;
+ *   - Twenty's gate asks whether the instance is AT OR PAST the previous version's last step (:154-158,
+ *     areAllWorkspacesAtCommand) and never looks at the current version's failed attempts. So an instance an earlier
+ *     UNFORCED start already moved on to the code's version (a step row of that version, completed or failed) is past the
+ *     gate: a migration or post-check failure inside the version is retried, never refused 65 (CI POST-1: a fresh 0.6.0
+ *     install whose later start failed its post-check). Forced rows do not count.
  * Pure: the caller reads the facts on the locked session first.
  */
 import type { LedgerAttribution } from '../../../database/typeorm/scripts/migrate/owner-login/release-floor';
@@ -34,6 +39,8 @@ export interface UpgradeStartFacts {
   ledgerExists: boolean;
   /** Whether it holds any instance row. */
   hasInstanceRows: boolean;
+  /** An earlier unforced start recorded a step row of the code version (it passed this check then). */
+  codeVersionStarted?: boolean;
   /** version → "the last step of that version has a completed latest attempt", for every version asked about. */
   complete: Readonly<Record<string, boolean>>;
   /** Versions on instance rows that are newer than the code (an image rollback). */
@@ -75,6 +82,7 @@ export function decideUpgradeStart(f: UpgradeStartFacts): UpgradeStartDecision {
   if (f.ledgerExists && f.hasInstanceRows) {
     const done = [...from, f.codeVersion].find((v) => f.complete[v] === true);
     if (done) return { kind: 'continue', from: done, reason: done === f.codeVersion ? `${done} is already complete` : `previous version ${done} is complete` };
+    if (f.codeVersionStarted) return { kind: 'continue', from: f.codeVersion, reason: `${f.codeVersion} was already started by an unforced run (past the previous-version check); retrying it` };
     if (f.force) return { kind: 'forced', reason: `--force: the previous-version check is skipped (none of ${from.join(', ')} is complete)` };
     throw new UpgradeVersionTooOldError(
       `the database has not completed ${from.join(' or ')} (needed before ${f.codeVersion}). Upgrade through the missing release first, or run the manual command \`upgrade --force\` (not recommended). Nothing was applied.`,

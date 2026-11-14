@@ -123,6 +123,9 @@ describe('the upgrade logbook: static guarantees (Part B2/B3)', () => {
       /^packages\/rab-server\/src\/engine\/core-modules\/health\//,
       /^packages\/rab-server\/src\/modules\/manager-workspace\/services\/manager-workspace\.service\.ts$/,
       /^packages\/rab-server\/src\/command\//,
+      // The CI-only restricted-migrator harness: REVIEWED_MIGRATION_DRIFT pins the logbook's five policies as text (their
+      // expressions name rab.upgrade_scope). It compares catalog lines and never sets the scope.
+      /^packages\/rab-server\/src\/database\/typeorm\/scripts\/migration-security-check\.ts$/,
     ];
     const FORBIDDEN_KIND = /(\.controller|\.resolver|\.dto|[\/]dto[\/]|tenant-context)/;
     const offenders: string[] = [];
