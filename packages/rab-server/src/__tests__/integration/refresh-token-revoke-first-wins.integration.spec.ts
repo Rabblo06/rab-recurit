@@ -6,6 +6,7 @@ import request from 'supertest';
 import { DataSource } from 'typeorm';
 
 import { AppModule } from '../../app.module';
+import { integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
 import { PasswordHashingService } from '../../engine/core-modules/auth/services/password-hashing.service';
 import { RefreshTokenService } from '../../engine/core-modules/auth/token/services/refresh-token.service';
 import { TenantContextService } from '../../engine/core-modules/tenant/tenant-context.service';
@@ -24,7 +25,7 @@ import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
  * Abuse case: revoke, then revoke again later → `revoked_at` unchanged, for both methods, through the real service on the
  * runtime login (RLS bound by TenantContextService) and through the real reuse-detection HTTP path.
  */
-const RUN = Boolean(process.env.DATABASE_URL);
+const RUN = integrationTestDatabaseReady();
 const describeIfDb = RUN ? describe : describe.skip;
 jest.setTimeout(60_000);
 
