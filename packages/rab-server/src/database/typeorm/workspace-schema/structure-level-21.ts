@@ -83,6 +83,14 @@ GRANT EXECUTE ON FUNCTION core.workspace_schema_fingerprint_v2_lines(uuid) TO cr
 GRANT EXECUTE ON FUNCTION core.workspace_schema_fingerprint_v2(uuid) TO crewflow;
 `;
 
+/**
+ * Security review F1: the workspace schemas that still carry the level-21 policy (catalog only). down() refuses while any
+ * remains, so a rollback can never leave level-21 workspaces behind a verify body that expects 41 policies.
+ */
+export const LEVEL_21_WORKSPACES_SQL = `SELECT pg_catalog.count(*)::int AS n
+  FROM pg_catalog.pg_policy p JOIN pg_catalog.pg_class c ON c.oid = p.polrelid JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+ WHERE p.polname = 'staff_profile_member_select' AND n.nspname ~ '^workspace_[0-9a-f]{32}$'`;
+
 export const DROP_WORKSPACE_FINGERPRINT_V2_FUNCTIONS_SQL = `
 DROP FUNCTION IF EXISTS core.workspace_schema_fingerprint_v2(uuid);
 DROP FUNCTION IF EXISTS core.workspace_schema_fingerprint_v2_lines(uuid);

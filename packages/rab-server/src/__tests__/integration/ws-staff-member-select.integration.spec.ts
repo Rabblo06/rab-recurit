@@ -12,6 +12,7 @@ import { MIGRATION_LOCK_KEY } from '../../database/typeorm/scripts/migrate/migra
 import { selectWorkspaceFingerprintsForServer, workspaceFingerprintMajor } from '../../database/typeorm/workspace-schema/v1/expected-fingerprints';
 import { PasswordHashingService } from '../../engine/core-modules/auth/services/password-hashing.service';
 import { TenantContextService } from '../../engine/core-modules/tenant/tenant-context.service';
+import { WorkspaceStaffMemberSelect1786721480000 } from '../../database/typeorm/core/migrations/1786721480000-WorkspaceStaffMemberSelect';
 import { STAFF_PROFILE_MEMBER_SELECT } from '../../engine/core-modules/upgrade/upgrade-commands/0-6/staff-profile-member-select';
 import { upgradeSessionOf, UpgradeSession } from '../../engine/core-modules/upgrade/upgrade-migration.service';
 import { WorkspaceCommandRunner, WorkspaceRunOptions } from '../../engine/core-modules/upgrade/workspace-command-runner';
@@ -213,6 +214,50 @@ describeIfDb('Part D 0b: staff_profile_member_select as a workspace upgrade comm
     }
     const out = await runner({ workspaceIds: [ts.id, sql.id] });
     expect(out.outcomes.map((o) => o.status)).toEqual(['up-to-date', 'up-to-date']);
+  });
+
+  it('security review F1: down() refuses while any workspace carries the level-21 policy (nothing changed); after the per-workspace cleanup it restores level 20', async () => {
+    const w = await make('f1');
+    await runner({ workspaceIds: [w.id] });
+    expect(await hasPolicy(w)).toBe(true);
+    const bodies = async () =>
+      (
+        await admin.query(
+          `SELECT p.oid::regprocedure::text AS f, pg_catalog.md5(p.prosrc) AS h FROM pg_catalog.pg_proc p
+            WHERE p.oid IN ('core.provision_workspace(uuid)'::regprocedure, 'core.verify_workspace_schema_v1(uuid)'::regprocedure)
+               OR p.proname IN ('workspace_schema_fingerprint_v2', 'workspace_schema_fingerprint_v2_lines') ORDER BY 1`,
+        )
+      ).rows as Array<{ f: string; h: string }>;
+    const before = await bodies();
+    expect(before).toHaveLength(4);
+    // The migration runs inside the caller's transaction (outer), which this test always rolls back.
+    const runnerOf = (c: Client) => ({ isTransactionActive: true, query: async (sql: string, params?: unknown[]) => (await c.query(sql, params as unknown[])).rows }) as never;
+    const migration = new WorkspaceStaffMemberSelect1786721480000();
+    await admin.query('BEGIN');
+    try {
+      await expect(migration.down(runnerOf(admin))).rejects.toThrow(/down\(\) refused: \d+ workspace schema\(s\) still carry staff_profile_member_select/);
+    } finally {
+      await admin.query('ROLLBACK');
+    }
+    expect(await bodies()).toEqual(before);
+
+    // The documented cleanup (policy dropped in every workspace schema) inside one transaction, then down() succeeds; rolled back.
+    await admin.query('BEGIN');
+    try {
+      const { rows } = await admin.query(
+        `SELECT n.nspname AS s FROM pg_catalog.pg_policy p JOIN pg_catalog.pg_class c ON c.oid = p.polrelid JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+          WHERE p.polname = 'staff_profile_member_select' AND n.nspname ~ '^workspace_[0-9a-f]{32}$'`,
+      );
+      for (const r of rows as Array<{ s: string }>) await admin.query(`DROP POLICY staff_profile_member_select ON ${r.s}.staff_profile`);
+      await migration.down(runnerOf(admin));
+      const after = await bodies();
+      expect(after.map((b) => b.f)).toEqual(['core.provision_workspace(uuid)', 'core.verify_workspace_schema_v1(uuid)']);
+      const [{ src }] = (await admin.query(`SELECT p.prosrc AS src FROM pg_catalog.pg_proc p WHERE p.oid = 'core.provision_workspace(uuid)'::regprocedure`)).rows;
+      expect(src).toContain('db:provision_workspace@WorkspaceGrantParityGuards1786721430000');
+    } finally {
+      await admin.query('ROLLBACK');
+    }
+    expect(await bodies()).toEqual(before);
   });
 
   describe('RLS: who reads a workspace\'s staff through staff_profile_member_select (runtime login, FORCE RLS)', () => {

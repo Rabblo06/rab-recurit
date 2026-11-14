@@ -9,6 +9,7 @@ import { VERIFY_WORKSPACE_SCHEMA_V1_POLICY_AWARE_SQL } from '../../workspace-sch
 import {
   composeServerPathTemplateLevel21,
   DROP_WORKSPACE_FINGERPRINT_V2_FUNCTIONS_SQL,
+  LEVEL_21_WORKSPACES_SQL,
   provisionWorkspaceFunctionLevelSql,
   VERIFY_WORKSPACE_SCHEMA_V1_LEVEL_21_SQL,
   WORKSPACE_FINGERPRINT_V2_FUNCTIONS_SQL,
@@ -34,9 +35,9 @@ const PREVIOUS_APP_VERSION = 'db:provision_workspace@WorkspaceGrantParityGuards1
  *  4. privilege shape, body literal and the secure-owner invariants re-verified.
  * No workspace schema is touched here (the runner does that, one transaction per workspace, with its post-step checks).
  * Refuses while the level-21 v2 fingerprint of this major is not declared on the command.
- * down(): restores the 1786721430000 provision_workspace body (module 20) and the VenueTeamOrgAdmin1786721090000 verify body,
- * drops the v2 functions. Workspaces already at level 21 keep their policy and are then reported by verify (policy count):
- * a rollback below this migration needs the policy dropped per workspace first (owner-run, not automated).
+ * down(): REFUSES (nothing changed) while any workspace schema still carries staff_profile_member_select (security review F1);
+ * otherwise restores the 1786721430000 provision_workspace body (module 20) and the VenueTeamOrgAdmin1786721090000 verify body
+ * and drops the v2 functions. The per-workspace cleanup before a rollback is owner-run, not automated.
  */
 export class WorkspaceStaffMemberSelect1786721480000 implements MigrationInterface {
   name = 'WorkspaceStaffMemberSelect1786721480000';
@@ -72,6 +73,16 @@ export class WorkspaceStaffMemberSelect1786721480000 implements MigrationInterfa
     try {
       await pinSearchPath(queryRunner);
       await this.preflight(queryRunner);
+      // Security review F1: never leave level-21 workspaces behind a level-20 verify body (it expects 41 policies; they would
+      // all fail verification). Refuse BEFORE restoring anything while any workspace still carries the level-21 policy.
+      const [{ n }] = (await queryRunner.query(LEVEL_21_WORKSPACES_SQL)) as Array<{ n: number }>;
+      if (Number(n) > 0) {
+        throw new Error(
+          `${this.name}: down() refused: ${Number(n)} workspace schema(s) still carry staff_profile_member_select (structure level 21). ` +
+            'Nothing was changed. To roll back, first (owner-run, per workspace) DROP POLICY staff_profile_member_select ON workspace_<32 hex>.staff_profile ' +
+            'and set core.workspace_schema_registry.module_version back to 20 for it, then run down() again.',
+        );
+      }
       const previous = EXPECTED_WORKSPACE_FINGERPRINTS[20];
       if (!previous) throw new Error(`${this.name}: no expected fingerprint for module version 20`);
       const modules = modulesThrough(20).map((m) => ({ id: m.id, version: m.version, checksum: moduleChecksum(m) }));
