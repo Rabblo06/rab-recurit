@@ -29,6 +29,7 @@ import { createAdminDataSource } from './helpers/admin-datasource';
 import { bookBeforeDeadline } from './helpers/book-before-deadline';
 import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
 import { integrationTestDatabaseReady } from '@rab/server/database/typeorm/core/integration-test-database-gate';
+import { businessTableOf, siblingTable } from './helpers/hws-fixtures';
 
 /**
  * Phase X J1b: the pay-statement dispatcher WAKE, end to end. Real HTTP approval, real PostgreSQL (RLS on), real Redis and
@@ -166,11 +167,11 @@ describeIf('J1b pay-statement dispatcher wake (integration)', () => {
       .send({ field: 'clockInAt', newValue: new Date(clockOutAt - 247 * 60_000).toISOString(), reason: 'Statement wake test worked time' })).status).toBe(201);
     expect((await http().post(`/rest/v1/attendance/report/shift/${shiftId}/staff/${s.profileId}/attendance-review`).set(auth(tokens.a))).status).toBe(200);
     expect((await http().patch(`/rest/v1/attendance/report/shift/${shiftId}/finalise`).set(auth(tokens.a))).status).toBe(200);
-    const [rec] = await adminDataSource.query(`SELECT id FROM core.payroll_record WHERE attendance_id = $1`, [out.body.id]);
+    const [rec] = await adminDataSource.query(`SELECT id FROM ${siblingTable(await businessTableOf(adminDataSource, 'attendance', out.body.id), 'payroll_record')} WHERE attendance_id = $1`, [out.body.id]);
     return rec.id as string;
   }
 
-  const recordRow = async (id: string) => (await adminDataSource.query(`SELECT * FROM core.payroll_record WHERE id = $1`, [id]))[0];
+  const recordRow = async (id: string) => (await adminDataSource.query(`SELECT * FROM ${await businessTableOf(adminDataSource, 'payroll_record', id)} WHERE id = $1`, [id]))[0];
   const wakeJobs = async () =>
     (await reports.getJobs(['wait', 'delayed', 'prioritized', 'paused', 'active', 'completed', 'failed'])).filter((j): j is Job => Boolean(j) && j!.name === STATEMENT_WAKE_JOB_NAME);
   async function eventually<T>(read: () => Promise<T>, ok: (v: T) => boolean, ms = 8_000): Promise<T> {

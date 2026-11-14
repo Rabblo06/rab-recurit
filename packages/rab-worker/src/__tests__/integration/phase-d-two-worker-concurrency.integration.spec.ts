@@ -47,6 +47,7 @@ import { createAdminDataSource } from './helpers/admin-datasource';
 import { bookBeforeDeadline } from './helpers/book-before-deadline';
 import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
 import { integrationTestDatabaseReady } from '@rab/server/database/typeorm/core/integration-test-database-gate';
+import { businessTableOf, siblingTable } from './helpers/hws-fixtures';
 
 /**
  * Phase D wave 4 — two-Worker concurrency and failure tests (owner §10), against the REAL Phase D SQL on rab_c1e and the
@@ -638,7 +639,7 @@ describeIfApproved('Phase D two-Worker concurrency and failure (integration — 
     expect(await processShiftStatementJob(jobs[0]!, deps(async () => { throw new Error('renderer crashed'); }))).toBe('failed');
     expect(await row('payroll_record', recordId)).toMatchObject({ statement_status: 'failed', statement_attempts: 1 });
     // The 1-min retry backoff (time-shifted) — the trigger re-times the pointer from the row, the Worker re-claims it.
-    await admin.query(`UPDATE core.payroll_record SET updated_at = now() - interval '2 minutes' WHERE id = $1`, [recordId]);
+    await admin.query(`UPDATE ${await businessTableOf(admin, 'payroll_record', recordId)} SET updated_at = now() - interval '2 minutes' WHERE id = $1`, [recordId]);
     const [c2] = await claimOurs(workerB, 'statement', [recordId]);
     expect(c2).toBeDefined();
     await dispatchStatementScope(tenantContext, m.organisationId, m.workspaceId!, [recordId], async (d) => void jobs.push(d));
@@ -656,7 +657,7 @@ describeIfApproved('Phase D two-Worker concurrency and failure (integration — 
   /** shift-statement.integration.spec.ts `approvedRecordFor`, compacted (the same as the first-cutover spec). */
   async function approvedRecord(org: { id: string }, manager: TestIdentity): Promise<string> {
     const staff = await factory.createStaff(org, { owner: manager, label: 'w4-staff' });
-    await admin.query(`UPDATE core.staff_profile SET employment_status = 'active' WHERE id = $1`, [staff.profileId]);
+    await admin.query(`UPDATE ${await businessTableOf(admin, 'staff_profile', staff.profileId)} SET employment_status = 'active' WHERE id = $1`, [staff.profileId]);
     const tokenM = await factory.login(manager);
     const tokenS = await factory.login(staff);
     const venueId = (await http().post('/rest/v1/venues').set(auth(tokenM)).send({ name: `W4 Venue ${randomUUID().slice(0, 6)}`, type: 'hotel' })).body.id as string;
@@ -685,7 +686,7 @@ describeIfApproved('Phase D two-Worker concurrency and failure (integration — 
       .send({ field: 'clockInAt', newValue: new Date(clockOutAt - 247 * 60_000).toISOString(), reason: 'W4 test worked time' })).status).toBe(201);
     expect((await http().post(`/rest/v1/attendance/report/shift/${shiftId}/staff/${staff.profileId}/attendance-review`).set(auth(tokenM))).status).toBe(200);
     expect((await http().patch(`/rest/v1/attendance/report/shift/${shiftId}/finalise`).set(auth(tokenM))).status).toBe(200);
-    const [rec] = await admin.query<[{ id: string }]>(`SELECT id FROM core.payroll_record WHERE attendance_id = $1`, [out.body.id]);
+    const [rec] = await admin.query<[{ id: string }]>(`SELECT id FROM ${siblingTable(await businessTableOf(admin, 'attendance', out.body.id), 'payroll_record')} WHERE attendance_id = $1`, [out.body.id]);
     expect((await http().post(`/rest/v1/payroll/records/${rec.id}/approve`).set(auth(tokenM))).status).toBe(200);
     return rec.id;
   }
