@@ -194,14 +194,17 @@ RUN rm -rf /usr/local/lib/node_modules/npm /usr/local/bin/npm /usr/local/bin/npx
 COPY --from=runtime-modules /app/node_modules ./node_modules
 COPY --from=worker-modules /worker-delta/node_modules/ ./node_modules/
 COPY --from=build --chmod=0644 /app/package.json ./package.json
-COPY --from=build --chmod=0644 /app/packages/rab-server/package.json ./packages/rab-server/package.json
+# Each package's dist is copied BEFORE its package.json: a COPY with --chmod gives the directories it creates implicitly
+# the same mode (0644, no search bit), which made /app/packages/* untraversable for the `node` user ("Cannot find
+# module"). The dist COPYs create those directories 0755; test_image_gate.py refuses a --chmod COPY into a new directory.
 COPY --from=build /app/packages/rab-server/dist ./packages/rab-server/dist
-COPY --from=build --chmod=0644 /app/packages/rab-worker/package.json ./packages/rab-worker/package.json
+COPY --from=build --chmod=0644 /app/packages/rab-server/package.json ./packages/rab-server/package.json
 COPY --from=build /app/packages/rab-worker/dist ./packages/rab-worker/dist
-COPY --from=build --chmod=0644 /app/packages/rab-shared/package.json ./packages/rab-shared/package.json
+COPY --from=build --chmod=0644 /app/packages/rab-worker/package.json ./packages/rab-worker/package.json
 COPY --from=build /app/packages/rab-shared/dist-cjs ./packages/rab-shared/dist-cjs
-COPY --from=build --chmod=0644 /app/packages/rab-emails/package.json ./packages/rab-emails/package.json
+COPY --from=build --chmod=0644 /app/packages/rab-shared/package.json ./packages/rab-shared/package.json
 COPY --from=build /app/packages/rab-emails/dist ./packages/rab-emails/dist
+COPY --from=build --chmod=0644 /app/packages/rab-emails/package.json ./packages/rab-emails/package.json
 # Entry scripts are read+execute only (0555) and set in the COPY itself (no separate chmod layer). The API's command is
 # api-prestart.sh; start.sh is kept only as a forwarder to it. DB-SETUP: the deploy compose files make api-prestart.sh and
 # worker-start.sh the ENTRYPOINT of rab-api / rab-worker (PID 1), then `/sbin/tini -s -- node ...`. Those two services never

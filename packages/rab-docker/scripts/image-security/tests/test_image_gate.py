@@ -3,6 +3,7 @@ import contextlib
 import io
 import json
 import os
+import posixpath
 import re
 import sys
 import tempfile
@@ -374,7 +375,8 @@ class FinalStageCopyModes(unittest.TestCase):
     NORMALISED = {
         'runtime-modules': ['/app/node_modules'],
         'worker-modules': ['/worker-delta/node_modules/'],
-        'build': ['/app/packages/*/dist', '/app/packages/*/dist-cjs'],
+        'build': ['/app/packages/rab-server/dist', '/app/packages/rab-worker/dist', '/app/packages/rab-shared/dist-cjs',
+                  '/app/packages/rab-emails/dist'],
     }
 
     @staticmethod
@@ -391,19 +393,36 @@ class FinalStageCopyModes(unittest.TestCase):
         return stages
 
     @staticmethod
+    def ancestors(path):
+        out = set()
+        while path not in ('/', ''):
+            out.add(path)
+            path = posixpath.dirname(path)
+        return out
+
+    @staticmethod
     def copy_problems(stages, final):
         import fnmatch
-        problems = []
+        problems, created = [], {'/app'}  # WORKDIR /app
         for ins in stages[final]:
             parts = ins.split()
             if parts[0].upper() not in ('COPY', 'ADD'):
                 continue
             flags = {k: v for k, _, v in (p[2:].partition('=') for p in parts[1:] if p.startswith('--'))}
             sources = [p for p in parts[1:] if not p.startswith('--')][:-1]
+            dest = posixpath.normpath(posixpath.join('/app', parts[-1]))
             if 'chmod' in flags:
                 if not re.fullmatch(r'0?[0-7]{3}', flags['chmod']) or int(flags['chmod'], 8) & 0o022:
                     problems.append(f'{ins}: --chmod must be octal without a group/other write bit')
+                # BuildKit gives the parent directories a --chmod COPY to a FILE destination creates implicitly the same
+                # mode: 0644 left /app/packages/* without the search bit, untraversable for the non-root runtime user
+                # (measured 2026-11-14). A directory destination (trailing '/', e.g. /opt/crewflow-bundle/) is created
+                # 0755 (measured), so only file destinations must land in a directory an earlier COPY created.
+                if not parts[-1].endswith('/') and posixpath.dirname(dest) not in created:
+                    problems.append(f'{ins}: --chmod COPY into {posixpath.dirname(dest)}, a directory no earlier COPY '
+                                    'created')
                 continue
+            created.update(FinalStageCopyModes.ancestors(dest))
             allowed = FinalStageCopyModes.NORMALISED.get(flags.get('from') or '', [])
             for src in sources:
                 if not any(fnmatch.fnmatchcase(src, pat) for pat in allowed):
@@ -420,6 +439,22 @@ class FinalStageCopyModes(unittest.TestCase):
         stages = self.stages(self.DOCKERFILE)
         for stage in self.NORMALISED:
             self.assertRegex('\n'.join(stages[stage]), r'-perm /022 -exec chmod go-w', stage)
+        dists = re.search(r'dists="([^"]+)"', '\n'.join(stages['build']))
+        self.assertIsNotNone(dists)
+        self.assertEqual(sorted('/app/' + d for d in dists[1].split()), sorted(self.NORMALISED['build']))
+
+    def test_the_rule_refuses_a_chmod_copy_that_creates_its_directory(self):
+        d = tempfile.mkdtemp()
+        path = os.path.join(d, 'Dockerfile')
+        with open(path, 'w', encoding='utf-8') as f:
+            f.write('FROM a AS build\nRUN true\nFROM a AS rab\n'
+                    'COPY --from=build --chmod=0644 /app/package.json ./package.json\n'
+                    'COPY --from=build --chmod=0644 /app/packages/rab-worker/package.json ./packages/rab-worker/package.json\n'
+                    'COPY --from=build /app/packages/rab-server/dist ./packages/rab-server/dist\n'
+                    'COPY --from=build --chmod=0644 /app/packages/rab-server/package.json ./packages/rab-server/package.json\n')
+        problems = self.copy_problems(self.stages(path), 'rab')
+        self.assertEqual(len(problems), 1, problems)
+        self.assertIn('into /app/packages/rab-worker, a directory no earlier COPY created', problems[0])
 
     def test_the_final_gate_itself_is_unchanged_and_strict(self):
         text = '\n'.join(self.stages(self.DOCKERFILE)['rab'])
