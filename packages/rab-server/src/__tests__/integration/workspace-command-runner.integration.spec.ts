@@ -161,7 +161,11 @@ describeIfDb('Part D workspace command runner (integration)', () => {
       },
     });
     const registry = { '0-7': [probeColumn, countVenues] };
+    const t0 = Date.now();
     const first = await runner({ workspaceRegistry: registry, workspaceIds: [a.id, b.id, c.id] });
+    const pgClass = Number((await admin.query('SELECT count(*)::int AS n FROM pg_class')).rows[0].n);
+    // eslint-disable-next-line no-console
+    console.log(`[drunner-timing] 3 workspaces x 2 steps (incl. listing, cursors, rows): ${Date.now() - t0} ms; pg_class rows: ${pgClass}`);
     expect(first.failures.map((f) => [f.workspaceId, f.step, f.attempt])).toEqual([[b.id, `0.7.0_CountVenues_${T0 + 1}`, 1]]);
     for (const ws of [a, c]) {
       expect((await rows(ws)).slice(1).map((r) => [r.name, r.status, r.attempt])).toEqual([
