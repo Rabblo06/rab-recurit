@@ -34,6 +34,7 @@ import { TestIdentityFactory } from './helpers/test-identities';
 import { generateFixturePassword } from './helpers/fixture-password';
 import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-pipe';
 import { integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
+import { businessTable, businessTableOf, siblingTable } from './helpers/hws-fixtures';
 
 /**
  * Scheduling + offer abuse-case suite (rab-workforce-architecture.md §1.2,
@@ -1467,12 +1468,13 @@ describeIfDb('scheduling + offer abuse cases (integration)', () => {
     }
 
     async function setAvailability(staffProfileId: string, days: string[] | null) {
-      await adminDataSource.manager.query(`UPDATE core.staff_profile SET available_days = $2 WHERE id = $1`, [staffProfileId, days]);
+      await adminDataSource.manager.query(`UPDATE ${await businessTableOf(adminDataSource.manager, 'staff_profile', staffProfileId)} SET available_days = $2 WHERE id = $1`, [staffProfileId, days]);
     }
 
     async function offerCount(shiftId: string): Promise<number> {
+      const shift = await businessTableOf(adminDataSource.manager, 'shift', shiftId);
       const [row] = await adminDataSource.manager.query(
-        `SELECT count(*)::int AS n FROM core.job_offer o JOIN core.shift_assignment sa ON sa.id = o.shift_assignment_id WHERE sa.shift_id = $1`,
+        `SELECT count(*)::int AS n FROM ${siblingTable(shift, 'job_offer')} o JOIN ${siblingTable(shift, 'shift_assignment')} sa ON sa.id = o.shift_assignment_id WHERE sa.shift_id = $1`,
         [shiftId],
       );
       return row.n;
@@ -1613,11 +1615,11 @@ describeIfDb('scheduling + offer abuse cases (integration)', () => {
       const monday = nextWeekday('Monday');
       const jobRole = await request(app.getHttpServer()).post('/rest/v1/job-roles').set('Authorization', `Bearer ${adminToken}`).send({ name: `Role-${randomUUID()}`, defaultRatePence: 1200 });
       const body = { venueId: venue.id, jobRoleId: jobRole.body.id, startsAt: monday.startsAt.toISOString(), endsAt: monday.endsAt.toISOString(), staffProfileIds: [staff.staffProfileId] };
-      const before = await adminDataSource.manager.query(`SELECT count(*)::int AS n FROM core.shift WHERE venue_id = $1`, [venue.id]);
+      const before = await adminDataSource.manager.query(`SELECT count(*)::int AS n FROM ${businessTable(venue.workspaceId!, 'shift')} WHERE venue_id = $1`, [venue.id]);
       const blocked = await request(app.getHttpServer()).post('/rest/v1/shifts/with-offers').set('Authorization', `Bearer ${adminToken}`).send(body);
       expect(blocked.status).toBe(409);
       expect(blocked.body.code).toBe('STAFF_AVAILABILITY_CONFLICT');
-      const after = await adminDataSource.manager.query(`SELECT count(*)::int AS n FROM core.shift WHERE venue_id = $1`, [venue.id]);
+      const after = await adminDataSource.manager.query(`SELECT count(*)::int AS n FROM ${businessTable(venue.workspaceId!, 'shift')} WHERE venue_id = $1`, [venue.id]);
       expect(after[0].n).toBe(before[0].n);
       const sent = await request(app.getHttpServer()).post('/rest/v1/shifts/with-offers').set('Authorization', `Bearer ${adminToken}`)
         .send({ ...body, acknowledgedAvailabilityConflicts: [{ staffProfileId: staff.staffProfileId, dates: [monday.date] }] });

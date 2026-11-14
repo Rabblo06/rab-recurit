@@ -14,6 +14,7 @@ import { createAdminDataSource } from './helpers/admin-datasource';
 import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
 import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-pipe';
 import { integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
+import { businessTable } from './helpers/hws-fixtures';
 
 /**
  * Phase C1 (contract §1-§3, decisions D1/D2): bounded default pages, the two legacy unpaged staff endpoints, and opaque
@@ -71,7 +72,7 @@ describeIfDb('C1 paging: bounded defaults, legacy staff endpoints and keyset cur
       (m) => m.save(Venue, { organisationId: org.id, name: `Venue ${label}`, workspaceId: manager.workspaceId!, createdBy: manager.userId }),
     );
     const [role] = await sql<{ id: string }>(
-      `INSERT INTO core.job_role (organisation_id, name, default_rate_pence, created_by, workspace_id) VALUES ($1, $2, 1500, $3, $4) RETURNING id`,
+      `INSERT INTO ${businessTable(manager.workspaceId!, 'job_role')} (organisation_id, name, default_rate_pence, created_by, workspace_id) VALUES ($1, $2, 1500, $3, $4) RETURNING id`,
       [org.id, `Role-${randomUUID().slice(0, 8)}`, manager.userId, manager.workspaceId],
     );
     return { org, manager, managerToken, venueId: venue.id, jobRoleId: role!.id };
@@ -86,12 +87,12 @@ describeIfDb('C1 paging: bounded defaults, legacy staff endpoints and keyset cur
   async function seedOffer(fx: Fixture, staffProfileId: string, o: { sentAt: Date | string; start: Date; end: Date }): Promise<string> {
     const [row] = await sql<{ id: string }>(
       `WITH s AS (
-         INSERT INTO core.shift (organisation_id, venue_id, job_role_id, starts_at, ends_at, required_count, pay_rate_pence, created_by, workspace_id, status)
+         INSERT INTO ${businessTable(fx.manager.workspaceId!, 'shift')} (organisation_id, venue_id, job_role_id, starts_at, ends_at, required_count, pay_rate_pence, created_by, workspace_id, status)
          VALUES ($1, $2, $3, $4, $5, 1, 1500, $6, $7, 'offered') RETURNING id),
        a AS (
-         INSERT INTO core.shift_assignment (organisation_id, shift_id, staff_profile_id, status, pay_rate_snapshot_pence, period, workspace_id)
+         INSERT INTO ${businessTable(fx.manager.workspaceId!, 'shift_assignment')} (organisation_id, shift_id, staff_profile_id, status, pay_rate_snapshot_pence, period, workspace_id)
          SELECT $1, s.id, $8, 'offered', 1500, tstzrange($4, $5, '[)'), $7 FROM s RETURNING id)
-       INSERT INTO core.job_offer (organisation_id, shift_assignment_id, staff_profile_id, status, sent_at, expires_at, estimated_pay_pence, created_by, workspace_id)
+       INSERT INTO ${businessTable(fx.manager.workspaceId!, 'job_offer')} (organisation_id, shift_assignment_id, staff_profile_id, status, sent_at, expires_at, estimated_pay_pence, created_by, workspace_id)
        SELECT $1, a.id, $8, 'pending', $9::timestamptz, $9::timestamptz + interval '1 day', 12000, $6, $7 FROM a RETURNING id`,
       [fx.org.id, fx.venueId, fx.jobRoleId, o.start, o.end, fx.manager.userId, fx.manager.workspaceId, staffProfileId, o.sentAt],
     );
@@ -106,13 +107,13 @@ describeIfDb('C1 paging: bounded defaults, legacy staff endpoints and keyset cur
   async function seedAttendance(fx: Fixture, staffProfileId: string, clockInAt: Date | string): Promise<string> {
     const [row] = await sql<{ id: string }>(
       `WITH s AS (
-         INSERT INTO core.shift (organisation_id, venue_id, job_role_id, starts_at, ends_at, required_count, filled_count, pay_rate_pence, created_by, workspace_id, status)
+         INSERT INTO ${businessTable(fx.manager.workspaceId!, 'shift')} (organisation_id, venue_id, job_role_id, starts_at, ends_at, required_count, filled_count, pay_rate_pence, created_by, workspace_id, status)
          VALUES ($1, $2, $3, now() - make_interval(days => 400 + $8::int), now() - make_interval(days => 400 + $8::int) + interval '4 hours', 1, 1, 1500, $5, $6, 'completed')
          RETURNING id, starts_at, ends_at),
        a AS (
-         INSERT INTO core.shift_assignment (organisation_id, shift_id, staff_profile_id, status, pay_rate_snapshot_pence, period, workspace_id)
+         INSERT INTO ${businessTable(fx.manager.workspaceId!, 'shift_assignment')} (organisation_id, shift_id, staff_profile_id, status, pay_rate_snapshot_pence, period, workspace_id)
          SELECT $1, s.id, $7, 'completed', 1500, tstzrange(s.starts_at, s.ends_at, '[)'), $6 FROM s RETURNING id, shift_id)
-       INSERT INTO core.attendance (organisation_id, shift_assignment_id, shift_id, staff_profile_id, clock_in_at, clock_out_at, status, worked_minutes, earned_pence, workspace_id)
+       INSERT INTO ${businessTable(fx.manager.workspaceId!, 'attendance')} (organisation_id, shift_assignment_id, shift_id, staff_profile_id, clock_in_at, clock_out_at, status, worked_minutes, earned_pence, workspace_id)
        SELECT $1, a.id, a.shift_id, $7, $4::timestamptz, $4::timestamptz + interval '4 hours', 'clocked_out', 240, 6000, $6 FROM a RETURNING id`,
       [fx.org.id, fx.venueId, fx.jobRoleId, clockInAt, fx.manager.userId, fx.manager.workspaceId, staffProfileId, seatSlot++],
     );
@@ -341,7 +342,7 @@ describeIfDb('C1 paging: bounded defaults, legacy staff endpoints and keyset cur
   /** `count` Venue-Manager requests at the fixture venue, all created at the SAME instant (`createdAt`). */
   async function seedRequests(fx: Fixture, vmUserId: string, count: number, createdAt: string, status = 'pending_manager_approval'): Promise<string[]> {
     const rows = await sql<{ id: string }>(
-      `INSERT INTO core.shift (organisation_id, venue_id, job_role_id, starts_at, ends_at, required_count, pay_rate_pence, created_by, workspace_id, status, requested_by, created_at)
+      `INSERT INTO ${businessTable(fx.manager.workspaceId!, 'shift')} (organisation_id, venue_id, job_role_id, starts_at, ends_at, required_count, pay_rate_pence, created_by, workspace_id, status, requested_by, created_at)
        SELECT $1, $2, $3, now() + (g || ' days')::interval, now() + (g || ' days')::interval + interval '4 hours', 1, 1500, $4, $5, $7, $6, $8::timestamptz
          FROM generate_series(1, $9::int) g RETURNING id`,
       [fx.org.id, fx.venueId, fx.jobRoleId, fx.manager.userId, fx.manager.workspaceId, vmUserId, status, createdAt, count],
@@ -412,7 +413,7 @@ describeIfDb('C1 paging: bounded defaults, legacy staff endpoints and keyset cur
     const shiftIds: string[] = [];
     for (let i = 0; i < 7; i++) {
       const [s] = await sql<{ id: string }>(
-        `INSERT INTO core.shift (organisation_id, venue_id, job_role_id, starts_at, ends_at, required_count, pay_rate_pence, created_by, workspace_id, status)
+        `INSERT INTO ${businessTable(fx.manager.workspaceId!, 'shift')} (organisation_id, venue_id, job_role_id, starts_at, ends_at, required_count, pay_rate_pence, created_by, workspace_id, status)
          VALUES ($1, $2, $3, $4::timestamptz, $4::timestamptz + interval '4 hours', 1, 1500, $5, $6, 'offered') RETURNING id`,
         [fx.org.id, fx.venueId, fx.jobRoleId, tie, fx.manager.userId, fx.manager.workspaceId],
       );
@@ -467,12 +468,12 @@ describeIfDb('C1 paging: bounded defaults, legacy staff endpoints and keyset cur
     const [shiftId] = await seedRequests(fx, vm.userId, 1, new Date().toISOString(), 'offered');
     const staff = await staffOf(fx, 'c1pipe');
     const [{ id: assignmentId }] = await sql<{ id: string }>(
-      `INSERT INTO core.shift_assignment (organisation_id, shift_id, staff_profile_id, status, pay_rate_snapshot_pence, period, workspace_id)
-       SELECT organisation_id, id, $2, 'withdrawn', 1500, tstzrange(starts_at, ends_at, '[)'), workspace_id FROM core.shift WHERE id = $1 RETURNING id`,
+      `INSERT INTO ${businessTable(fx.manager.workspaceId!, 'shift_assignment')} (organisation_id, shift_id, staff_profile_id, status, pay_rate_snapshot_pence, period, workspace_id)
+       SELECT organisation_id, id, $2, 'withdrawn', 1500, tstzrange(starts_at, ends_at, '[)'), workspace_id FROM ${businessTable(fx.manager.workspaceId!, 'shift')} WHERE id = $1 RETURNING id`,
       [shiftId, staff.profileId],
     );
     const [{ id: offerId }] = await sql<{ id: string }>(
-      `INSERT INTO core.job_offer (organisation_id, shift_assignment_id, staff_profile_id, status, sent_at, expires_at, estimated_pay_pence, created_by, workspace_id)
+      `INSERT INTO ${businessTable(fx.manager.workspaceId!, 'job_offer')} (organisation_id, shift_assignment_id, staff_profile_id, status, sent_at, expires_at, estimated_pay_pence, created_by, workspace_id)
        VALUES ($1, $2, $3, 'withdrawn', now(), now() + interval '1 day', 6000, $4, $5) RETURNING id`,
       [fx.org.id, assignmentId, staff.profileId, fx.manager.userId, fx.manager.workspaceId],
     );
