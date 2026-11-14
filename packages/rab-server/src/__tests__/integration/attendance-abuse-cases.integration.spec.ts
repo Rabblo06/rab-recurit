@@ -922,6 +922,19 @@ describeIfDb('attendance abuse cases (integration)', () => {
         expect(row).toMatchObject({ status: 'clocked_in', clock_out_at: null });
       });
 
+      it('own end earlier than the shift end: refused after the staff member OWN end + grace while the shift still runs', async () => {
+        const b = await clockedInAtVenue();
+        // The shift runs for another hour; this staff member's own seat ended 121 minutes ago.
+        await adminDataSource.query(`UPDATE core.shift SET starts_at = now() - interval '9 hours', ends_at = now() + interval '1 hour' WHERE id = $1`, [b.shiftId]);
+        await adminDataSource.query(
+          `UPDATE core.shift_assignment SET period = tstzrange(now() - interval '9 hours', now() - interval '121 minutes', '[)') WHERE shift_id = $1`, [b.shiftId]);
+        const res = await b.exit();
+        expect(res.status).toBe(409);
+        expect(res.body.code).toBe('CLOCK_WINDOW_CLOSED');
+        const [row] = await adminDataSource.query(`SELECT status, clock_out_at FROM core.attendance WHERE shift_id = $1`, [b.shiftId]);
+        expect(row).toMatchObject({ status: 'clocked_in', clock_out_at: null });
+      });
+
       it('control: own end + 100 min still auto-clocks-out', async () => {
         const b = await clockedInAtVenue();
         await moveShift(b.shiftId, '-9 hours -40 minutes', '-100 minutes');

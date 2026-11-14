@@ -7616,12 +7616,16 @@ image that runs the apps' own derive step on the read-only volume (`--pull never
     (the QR is shown in the Venue Manager mobile apps, not the web console).
   - *Report rendered across a rotation (review M1).* The pre-shift scheduler locks the shift row before the report row,
     discards a render whose shift `qr_version` or `updated_at` changed while it rendered (no stored file, no email; the
-    next tick rebuilds), and stamps the report with the database clock; rotation writes `updated_at = clock_timestamp()`,
-    so a rotation that waited on that lock always lands after the stamp and triggers regeneration.
+    next tick rebuilds), and stamps the report with the database clock (`now()` of its write transaction). Rotation takes
+    the shift row FOR UPDATE and then writes `updated_at = clock_timestamp()` (`rotate-shift-qr.sql.ts`), so a rotation
+    that waited on the report's FOR SHARE lock writes a time after that commit, later than the stamp, and the next tick
+    regenerates with the new QR. Pinned by a lock-wait regression test (fails with `now()`) and a source pin.
   - *Geofence-exit clock-out (review M3).* The automatic geofence-exit clock-out is a staff self clock-out too: refused
     `CLOCK_WINDOW_CLOSED` after the staff member's own end + grace, like the manual and on-behalf clock-outs.
   - *Settings (review L2).* `QR_POST_SHIFT_GRACE_MINUTES` is 0..1440, `QR_MAX_AGE_DAYS` 1..90 whole days, and the API and
-    Worker refuse to boot when `REPORT_AVAILABLE_BEFORE_MINUTES >= QR_MAX_AGE_DAYS x 1440` (a report would carry a dead QR).
+    Worker refuse to boot when `REPORT_AVAILABLE_BEFORE_MINUTES >= QR_MAX_AGE_DAYS x 1440`. That guarantees only that a
+    printed QR is still inside the age ceiling when the shift starts, not through its end + grace (shift length is not
+    bounded by any setting).
   - *Held for owner decisions (not implemented):* rotating after the shift has ended strands staff still clocked in
     (the report is not regenerated after `ends_at`) — review M2; `correct()` does not bound a recovered `clockOutAt` —
     review L4.

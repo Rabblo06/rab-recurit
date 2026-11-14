@@ -109,24 +109,29 @@ describeIfDb('shift QR rotation — scope and concurrency (integration)', () => 
     expect(await qrVersionOf(inside.shiftId)).toBe(2);
   });
 
-  it('two overlapping rotations: exactly one 201 and one 409, qr_version +1 exactly', async () => {
+  it('two overlapping rotations (both read version 1, then queue on the row lock): exactly one 201 and one 409, qr_version +1 exactly', async () => {
     const org = await factory.createOrganisation('rotrace');
     const owner = await factory.createInternalManager(org, { label: 'owner' });
     const { shiftId } = await venueWithShift(org, owner, 'Race');
     const token = await factory.login(owner);
 
-    // Hold the row so both requests read qr_version = 1 and then queue on the UPDATE: a deterministic overlap.
+    // Hold the row so both requests read qr_version = 1 and then queue on rotateShiftQr's FOR UPDATE row lock: a
+    // deterministic overlap. Waiters are counted only in THIS database and only when blocked by THIS holder (which locks
+    // nothing but this shift's row), never another suite's activity.
     const holder = adminDataSource.createQueryRunner();
     await holder.connect();
     await holder.startTransaction();
     let both: Promise<request.Response[]>;
     try {
       await holder.query(`SELECT id FROM core.shift WHERE id = $1 FOR UPDATE`, [shiftId]);
+      const [{ pid: holderPid }] = await holder.query(`SELECT pg_backend_pid() AS pid`);
       both = Promise.all([rotate(token, shiftId), rotate(token, shiftId)]);
       const deadline = Date.now() + 20_000;
       for (;;) {
         const [{ n }] = await adminDataSource.query(
-          `SELECT count(*)::int AS n FROM pg_stat_activity WHERE wait_event_type = 'Lock' AND query LIKE '%qr_version = qr_version + 1%'`,
+          `SELECT count(*)::int AS n FROM pg_stat_activity
+            WHERE datname = current_database() AND wait_event_type = 'Lock' AND $1::int = ANY(pg_blocking_pids(pid))`,
+          [holderPid],
         );
         if (n >= 2) break;
         if (Date.now() > deadline) throw new Error(`only ${n} rotation(s) reached the row lock`);

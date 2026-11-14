@@ -292,12 +292,13 @@ export class AttendanceService {
   private assertClockWindow(shift: ScheduledWindow, kind: 'clock' | 'check_in' = 'clock'): void {
     const now = Date.now();
     const { opensAt, closesAt } = this.attendanceWindow(shift);
-    if (now < opensAt.getTime()) {
+    // Fail closed (QR review): written as "not inside", so an unreadable window (NaN) refuses instead of comparing false.
+    if (!(now >= opensAt.getTime())) {
       throw kind === 'check_in'
         ? new CheckInTooEarlyException(shift.startsAt.toISOString(), opensAt.toISOString())
         : new ClockInTooEarlyException(shift.startsAt.toISOString(), opensAt.toISOString());
     }
-    if (now > closesAt.getTime()) {
+    if (!(now <= closesAt.getTime())) {
       throw kind === 'check_in' ? new CheckInWindowClosedException() : new ClockWindowClosedException();
     }
   }
@@ -642,7 +643,7 @@ export class AttendanceService {
       // QR review M3 (owner rule 2026-11-14): a staff member's own clock-out — manual, QR or this automatic one — closes
       // at their own end + QR_POST_SHIFT_GRACE_MINUTES, the same upper bound clockOutOnBehalf applies. Past it the
       // clock-out is the manager's recovery, never an uncapped, paid self clock-out.
-      if (Date.now() > this.attendanceWindow(effectiveAssignmentTime(assignment, shift)).closesAt.getTime()) {
+      if (!(Date.now() <= this.attendanceWindow(effectiveAssignmentTime(assignment, shift)).closesAt.getTime())) {
         throw new ClockWindowClosedException();
       }
 
@@ -883,7 +884,7 @@ export class AttendanceService {
       const venue = await manager.findOneByOrFail(Venue, { id: shift.venueId });
       if (venue.enforceGeofence) throw new PresenceEvidenceRequiredException();
       const assignment = await manager.findOneByOrFail(ShiftAssignment, { id: seat.id });
-      if (Date.now() > this.attendanceWindow(effectiveAssignmentTime(assignment, shift)).closesAt.getTime()) {
+      if (!(Date.now() <= this.attendanceWindow(effectiveAssignmentTime(assignment, shift)).closesAt.getTime())) {
         throw new ClockWindowClosedException();
       }
       await this.performClockOut(manager, ctx, attendance, {}, false, 'manager_on_behalf', { by: ctx.userId, reason });

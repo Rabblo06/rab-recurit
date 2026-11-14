@@ -240,8 +240,8 @@ async function generatePreShiftReport(
     { organisationId: candidate.organisation_id, workspaceId: candidate.workspace_id, userId: '', role: '', actorType: 'worker' },
     async (manager) => {
       // Row-locked re-check inside the writing transaction: the emails below are enqueued at most once per generation.
-      // The shift row is locked FIRST (FOR SHARE; lock order shift -> report): a concurrent rotateShiftQr or any other shift
-      // write waits for this commit, so what is checked here is what gets stamped.
+      // The shift row is locked FIRST (FOR SHARE; lock order shift -> report): a concurrent rotateShiftQr (which takes the
+      // row FOR UPDATE before writing) waits for this commit, so the QR version checked here is the one that gets stamped.
       const current = await manager.findOne(Shift, { where: { id: candidate.shift_id }, lock: { mode: 'pessimistic_read' } });
       let report = await manager.findOne(ShiftReport, { where: { shiftId: candidate.shift_id }, lock: { mode: 'pessimistic_write' } });
       if (!current || !reportNeedsGeneration(report, current)) {

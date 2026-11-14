@@ -60,11 +60,12 @@ export function validate(config: Record<string, unknown>): EnvironmentVariables 
   }
 
   // QR review L2: the pre-shift report signs its Shift QR up to REPORT_AVAILABLE_BEFORE_MINUTES before the start; a QR
-  // older than QR_MAX_AGE_DAYS is refused. A report window at or beyond the ceiling would print QR codes that are already
-  // dead (or die before the shift starts). Refused in every environment.
+  // older than QR_MAX_AGE_DAYS is refused. This cross-check guarantees only that a printed QR is still within the ceiling
+  // when the shift STARTS, not through the shift's end + grace (shift length is not bounded here, so no setting-only check
+  // could guarantee that). Refused in every environment.
   if (validated.REPORT_AVAILABLE_BEFORE_MINUTES >= validated.QR_MAX_AGE_DAYS * 1440) {
     throw new Error(
-      'Invalid environment configuration:\nREPORT_AVAILABLE_BEFORE_MINUTES must be less than QR_MAX_AGE_DAYS x 1440 minutes (a pre-shift report would carry an expired QR).',
+      'Invalid environment configuration:\nREPORT_AVAILABLE_BEFORE_MINUTES must be less than QR_MAX_AGE_DAYS x 1440 minutes (otherwise a pre-shift report QR could already be past the age ceiling when the shift starts).',
     );
   }
 
