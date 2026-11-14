@@ -192,7 +192,8 @@ function assertLiveTransaction(manager: EntityManager): void {
  *
  * Read at call time (a suite can switch it per test). Set to anything but exactly 'true', or set without NODE_ENV=test, it
  * REFUSES (throws) instead of being ignored: a mis-set trap must never silently change routing in a real deployment.
- * Not yet in TEST_SEAM_VARS (start-up refusal): that list, env validation and api-prestart.sh are lead-owned (C2-STATUS.md).
+ * Also refused at start-up outside NODE_ENV=test: TEST_SEAM_VARS (database/owner-login/runtime-db-config.ts: env validation and
+ * the runtime guard), api-prestart.sh and worker-start.sh.
  */
 export const SEARCH_PATH_TRAP_VAR = 'CREWFLOW_TEST_SEARCH_PATH_TRAP';
 
