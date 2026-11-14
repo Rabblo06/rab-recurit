@@ -32,6 +32,10 @@ const BASELINE: Record<string, { hits: number; why: string }> = {
   'packages/rab-server/src/database/typeorm/core/test-database-guard.ts': { hits: 4, why: 'Jest routing writes DATABASE_URL*, probe Client; X1.8 worker-login switch writes DATABASE_URL' },
   // Constructs the TypeORM migration DataSource class around the factory's options (the options ARE from the factory).
   'packages/rab-server/src/database/typeorm/core/core.datasource.ts': { hits: 1, why: 'GuardedMigrationDataSource built from factory options' },
+  // Part C2-1: the schema-bound METADATA-ONLY DataSource (base options + `schema`, own connection fields not copied). It is
+  // never initialise()d — no driver connection, no pool, no URL read; any query through it fails "Driver not Connected"
+  // (schema-bound-entity-manager.spec.ts asserts that). Statements run on the binder's own transactional QueryRunner.
+  'packages/rab-server/src/engine/core-modules/tenant/schema-bound-entity-manager.ts': { hits: 1, why: 'C2-1 metadata-only DataSource, never initialised (no connection, no pool)' },
   // Worker call sites that take a config/string the factory now produces (pgClientConfig / pgConnectionString).
   'packages/rab-worker/src/core/database/reconnecting-pg-client.ts': { hits: 1, why: 'wrapper: new Client(config); callers pass a factory config' },
   'packages/rab-worker/src/queues/rab-maintenance/workspace-schema-drift.job.ts': { hits: 1, why: 'drift Client from a factory pgClientConfig' },
