@@ -12,6 +12,7 @@ import { ROLE_DEFS } from '../../../modules/manager/services/manager.service';
 import { ManagerWorkspace } from '../../../modules/manager-workspace/entities/manager-workspace.entity';
 import { STAFF_ROLE_KEY, STAFF_ROLE_PERMISSIONS } from '../../../modules/staff/services/staff.service';
 import { generateFixturePassword } from './fixture-password';
+import { trackFixtureOrganisation, trackFixtureWorkspace } from './fixture-workspace-tracker';
 
 /**
  * THE shared production-style identity factory for integration/security
@@ -78,6 +79,7 @@ export async function provisionFixtureWorkspace(m: EntityManager, workspaceId: s
   await m.query(`UPDATE core.manager_workspace SET schema_status = 'CREATING' WHERE id = $1 AND schema_status IS NULL`, [workspaceId]);
   const [{ outcome }] = await m.query<Array<{ outcome: string }>>('SELECT core.provision_workspace($1) AS outcome', [workspaceId]);
   if (outcome !== 'READY' && outcome !== 'ALREADY_READY') throw new TestSetupError(`fixture workspace provisioning returned ${outcome}`);
+  trackFixtureWorkspace(workspaceId); // dropped when this test file is done (fixture-schema-cleanup-environment.ts)
 }
 
 export class TestSetupError extends Error {
@@ -147,6 +149,7 @@ export class TestIdentityFactory {
   async createOrganisation(label = 'test'): Promise<Organisation> {
     const slug = `${label}-${randomUUID()}`;
     const result = await this.infra.adminDataSource.manager.insert(Organisation, { name: slug, slug });
+    trackFixtureOrganisation(result.identifiers[0]!.id as string); // its workspaces' schemas are dropped when the file is done
     return this.infra.adminDataSource.manager.findOneByOrFail(Organisation, { id: result.identifiers[0]!.id as string });
   }
 
