@@ -446,13 +446,12 @@ describe('runtime database identity guard (API, worker and provisioner boot)', (
       expectRefused('api', { NODE_ENV: 'development', PG_DATABASE_URL: LOCAL, CREWFLOW_PROVISIONER_ENABLED: 'false' }, /^CREWFLOW_PROVISIONER_ENABLED is present in the api process's environment\. Workspace provisioning runs inside the Worker/);
     });
 
-    it('24. a malformed CREWFLOW_MIGRATE_ON_START / APPROVAL_MODE / UPGRADE_FAILURE_POLICY is refused in-process too (a start that skips api-prestart.sh)', () => {
+    it('24. a malformed CREWFLOW_MIGRATE_ON_START / APPROVAL_MODE, or a removed CREWFLOW_UPGRADE_FAILURE(_POLICY), is refused in-process too (a start that skips api-prestart.sh)', () => {
       expectRefused('api', { NODE_ENV: 'development', PG_DATABASE_URL: LOCAL, CREWFLOW_MIGRATE_ON_START: 'yes' }, /The api process: CREWFLOW_MIGRATE_ON_START must be exactly one of: true, false/);
       expectRefused('worker', { NODE_ENV: 'development', PG_DATABASE_URL: LOCAL, CREWFLOW_MIGRATION_APPROVAL_MODE: 'allowlist' }, /CREWFLOW_MIGRATION_APPROVAL_MODE must be exactly one of: none, token/);
-      // Owner decision C3 (2026-11-05): `continue` is a value of the NEW name only; under the deprecated alias it still refuses,
-      // now with the alias message (assertion change: the message text, not the refusal).
-      expectRefused('api', { NODE_ENV: 'development', PG_DATABASE_URL: LOCAL, CREWFLOW_UPGRADE_FAILURE_POLICY: 'continue' }, /CREWFLOW_UPGRADE_FAILURE_POLICY is deprecated and must be exactly one of: refuse, continue-if-compatible/);
-      expectRefused('api', { NODE_ENV: 'development', PG_DATABASE_URL: LOCAL, CREWFLOW_UPGRADE_FAILURE: 'continue-if-compatible' }, /CREWFLOW_UPGRADE_FAILURE must be exactly one of: continue, refuse/);
+      // OWNER-DB-ULTIMATE Part B3: the C3 choices are removed; any value of either name refuses.
+      expectRefused('api', { NODE_ENV: 'development', PG_DATABASE_URL: LOCAL, CREWFLOW_UPGRADE_FAILURE_POLICY: 'continue-if-compatible' }, /CREWFLOW_UPGRADE_FAILURE_POLICY was removed \(OWNER-DB-ULTIMATE Part B3\)/);
+      expectRefused('worker', { NODE_ENV: 'development', PG_DATABASE_URL: LOCAL, CREWFLOW_UPGRADE_FAILURE: 'continue' }, /CREWFLOW_UPGRADE_FAILURE was removed \(OWNER-DB-ULTIMATE Part B3\)/);
       expectRefused('worker', { NODE_ENV: 'development', PG_DATABASE_URL: LOCAL, DISABLE_DB_MIGRATIONS: 'yes' }, /DISABLE_DB_MIGRATIONS must be exactly one of: true, false/);
       // Owner decision C1: DISABLE_DB_MIGRATIONS=true is accepted on both processes (the Worker never migrates either way).
       expect(resolve('worker', { NODE_ENV: 'development', PG_DATABASE_URL: LOCAL, DISABLE_DB_MIGRATIONS: 'true' }).classification).toBe('LOCAL');
@@ -463,7 +462,7 @@ describe('runtime database identity guard (API, worker and provisioner boot)', (
       // Not required in-process (only the API image entrypoint requires it); valid values pass.
       expect(resolve('worker', { NODE_ENV: 'development', PG_DATABASE_URL: LOCAL }).classification).toBe('LOCAL');
       expect(
-        resolve('api', PROD_ENV({ CREWFLOW_MIGRATE_ON_START: 'true', CREWFLOW_MIGRATION_APPROVAL_MODE: 'token', CREWFLOW_UPGRADE_FAILURE_POLICY: 'continue-if-compatible' })).classification,
+        resolve('api', PROD_ENV({ CREWFLOW_MIGRATE_ON_START: 'true', CREWFLOW_MIGRATION_APPROVAL_MODE: 'token' })).classification,
       ).toBe('PRODUCTION');
     });
   });

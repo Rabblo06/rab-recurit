@@ -16,8 +16,9 @@ import { createHash } from 'node:crypto';
  *             strictness, leakproof, proconfig (search_path), md5 of the body — a trojaned definer changes the hash;
  *   trigger   every non-internal core trigger: table, name, enabled state (O/D/R/A), function — DISABLE TRIGGER shows;
  *   rls       ENABLE / FORCE per core table;
- *   acl       the full raw ACL of core.audit_log (table and columns, grantee:privilege:grantable) — a re-grant of
- *             UPDATE/DELETE/TRUNCATE shows;
+ *   acl       the full raw ACL of every append-only core table in ACL_WATCHED_TABLES — core.audit_log and (OWNER-DB-ULTIMATE
+ *             Part B, security review L6) core.upgrade_migration — table and columns, grantee:privilege:grantable: a
+ *             re-grant of UPDATE/DELETE/TRUNCATE shows;
  *   owner     owner of every core relation and of the core schema;
  *   ws        the same policy / trigger / rls / owner facts for every workspace schema, canonicalised (schema name →
  *             workspace_*), compared per schema;
@@ -44,6 +45,10 @@ const WS = `'^workspace_[0-9a-f]{32}$'`;
  * process on a marked database is refused by assertDeploymentIdentity, so excluding it here hides nothing.
  */
 export const POSTURE_EXCLUDED_SETTING = 'crewflow.disposable_test_database';
+
+/** The append-only core tables whose full raw ACL is part of the posture (the `acl|` section). Code constants only. */
+export const ACL_WATCHED_TABLES: readonly string[] = Object.freeze(['audit_log', 'upgrade_migration']);
+const ACL_WATCHED_SQL_LIST = ACL_WATCHED_TABLES.map((t) => `'${t}'`).join(', ');
 
 /** Object section: compared with the committed golden. Rows: (schema, line); schema = 'core' or a workspace schema. */
 export const SEMANTIC_OBJECT_SQL = `
@@ -82,15 +87,16 @@ SELECT schema, line FROM (
   SELECT s.nspname, 'owner|schema|' || s.nspname || '|' || pg_catalog.pg_get_userbyid(n.nspowner)
     FROM sch s JOIN pg_catalog.pg_namespace n ON n.oid = s.oid
   UNION ALL
-  SELECT 'core', 'acl|audit_log|' || CASE WHEN a.grantee = 0 THEN 'PUBLIC' ELSE pg_catalog.pg_get_userbyid(a.grantee)::text END
+  SELECT 'core', 'acl|' || c.relname || '|' || CASE WHEN a.grantee = 0 THEN 'PUBLIC' ELSE pg_catalog.pg_get_userbyid(a.grantee)::text END
          || ':' || a.privilege_type || ':' || a.is_grantable
     FROM pg_catalog.pg_class c CROSS JOIN LATERAL pg_catalog.aclexplode(coalesce(c.relacl, pg_catalog.acldefault('r', c.relowner))) a
-   WHERE c.oid = 'core.audit_log'::regclass
+   WHERE c.relnamespace = 'core'::regnamespace AND c.relkind = 'r' AND c.relname IN (${ACL_WATCHED_SQL_LIST})
   UNION ALL
-  SELECT 'core', 'acl|audit_log.' || at.attname || '|' || CASE WHEN a.grantee = 0 THEN 'PUBLIC' ELSE pg_catalog.pg_get_userbyid(a.grantee)::text END
+  SELECT 'core', 'acl|' || c.relname || '.' || at.attname || '|' || CASE WHEN a.grantee = 0 THEN 'PUBLIC' ELSE pg_catalog.pg_get_userbyid(a.grantee)::text END
          || ':' || a.privilege_type
-    FROM pg_catalog.pg_attribute at CROSS JOIN LATERAL pg_catalog.aclexplode(at.attacl) a
-   WHERE at.attrelid = 'core.audit_log'::regclass AND at.attacl IS NOT NULL
+    FROM pg_catalog.pg_class c JOIN pg_catalog.pg_attribute at ON at.attrelid = c.oid
+         CROSS JOIN LATERAL pg_catalog.aclexplode(at.attacl) a
+   WHERE c.relnamespace = 'core'::regnamespace AND c.relkind = 'r' AND c.relname IN (${ACL_WATCHED_SQL_LIST}) AND at.attacl IS NOT NULL
   UNION ALL
   SELECT 'core', 'setting|' || CASE WHEN s.setrole = 0 THEN '*' ELSE coalesce(pg_catalog.pg_get_userbyid(s.setrole)::text, '?') END
          || '|' || CASE WHEN s.setdatabase = 0 THEN '*' ELSE 'this' END || '|' || c.cfg

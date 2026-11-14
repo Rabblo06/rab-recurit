@@ -754,6 +754,7 @@ owner|table|shift_staff_review|crewflow
 owner|table|shift|crewflow
 owner|table|staff_profile|crewflow
 owner|table|stored_file|crewflow
+owner|table|upgrade_migration|rab_secure_owner
 owner|table|user_auth_identity|rab_secure_owner
 owner|table|user_mfa_recovery_code|rab_secure_owner
 owner|table|user_note|crewflow
@@ -842,6 +843,7 @@ rls|shift_staff_review|enable=true|force=true
 rls|shift|enable=true|force=true
 rls|staff_profile|enable=true|force=true
 rls|stored_file|enable=true|force=true
+rls|upgrade_migration|enable=true|force=true
 rls|user_auth_identity|enable=true|force=true
 rls|user_mfa_recovery_code|enable=true|force=true
 rls|user_note|enable=true|force=true
@@ -1009,6 +1011,8 @@ table|staff_profile|crewflow_app|S,I,U,D
 table|staff_profile|crewflow|S,I,U,D,T,R,G
 table|stored_file|crewflow_app|S,I,U
 table|stored_file|crewflow|S,I,U,D,T,R,G
+table|upgrade_migration|crewflow_app|
+table|upgrade_migration|crewflow|
 table|user_auth_identity|crewflow_app|S
 table|user_auth_identity|crewflow|S
 table|user_mfa_recovery_code|crewflow_app|

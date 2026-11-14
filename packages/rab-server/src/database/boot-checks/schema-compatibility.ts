@@ -156,73 +156,19 @@ export interface SchemaCompatibilityFacts {
   provisionFunction?: ProvisionFunctionState;
   /** READY workspaces only. undefined: not checked by this caller. */
   workspaces?: readonly WorkspaceModuleLevel[];
-  /**
-   * C3: true only when Agent 1's classifier says CHAIN-PARTIAL and its physical fresh-install proof says NOT fresh (an
-   * upgrade that stopped). Absent or false — EMPTY, BOOTSTRAP-PARTIAL, an interrupted first install, FOREIGN, unknown —
-   * no C3 relaxation applies (API or Worker): a failed first install never serves and never starts the Worker.
-   */
-  upgradeEvidence?: boolean;
 }
 
 export interface AssessOptions {
   production: boolean;
   retired?: readonly string[];
   latestModuleVersion?: number;
-  /**
-   * C3 (owner decision 2026-11-05, "EXACTLY LIKE TWENTY"): the migration api-prestart reported as the failed upgrade step
-   * (CREWFLOW_UPGRADE_INCOMPLETE). Honoured for the API only. See UPGRADE_INCOMPLETE_VAR.
-   */
-  upgradeIncomplete?: string;
 }
 
 /**
- * C3 (owner decision 2026-11-05, like Twenty): api-prestart sets CREWFLOW_UPGRADE_INCOMPLETE=<migration> on the API's
- * environment ONLY after the migrate child exits 70 with "policy":"continue" on a database that is NOT a first install, and
- * strips any inherited value otherwise. With it, and only for the API, and only when the FIRST pending migration is exactly
- * that named one, gate 7 downgrades two findings to warnings:
- *   - `pending` (the ledger is behind the code because that upgrade step failed);
- *   - `provision-function-behind` (the failed step may be the one that rewrites core.provision_workspace).
- * Everything else keeps its verdict: interleaved / unknown ledger names, an unknown provision function in production, a
- * ledger ahead for the provisioner, every CLI / provisioner verdict, and every case where the first pending migration is not
- * the named one. Unset: nothing changes for the API.
- *
- * The WORKER (owner decision changed 2026-11-05: "the Worker starts too, like Twenty") cannot see that variable (another
- * container): it decides from the database alone. When the pending set is a contiguous, in-order TAIL of this code's chain
- * (isInOrderPendingTail: no unknown / foreign / interleaved / ahead / retired name), `pending` and
- * `provision-function-behind` are loud warnings naming the first pending migration; anything else refuses as before.
- *
- * In both relaxed cases the semantic-posture golden comparison is skipped with a WARNING (the boot snapshot is still the
- * runtime baseline): database-boot-gates.ts reads `upgradeIncomplete` from the assessment.
+ * OWNER-DB-ULTIMATE Part B3 retired the C3 relaxation: a pending migration is never served (the API's gate 7 refuses it, and
+ * the Worker refuses it too; only a failed upgrade COMMAND serves, and it leaves nothing pending). The former
+ * CREWFLOW_UPGRADE_INCOMPLETE signal is a removed name (runtime-db-config.ts REMOVED_DB_CONFIG_VARS).
  */
-export const UPGRADE_INCOMPLETE_VAR = 'CREWFLOW_UPGRADE_INCOMPLETE';
-
-/**
- * C3, Worker: the ledger is exactly a PREFIX of this code's chain and everything pending is the contiguous rest of it.
- * Every applied name is a code migration (no unknown / foreign / interleaved / ahead / retired name), and every pending
- * migration sorts after the last applied one in chain order (timestamp, then name). Anything else is not a failed upgrade
- * of this release and keeps its refusal.
- */
-export function isInOrderPendingTail(
-  expected: readonly string[],
-  ledger: Pick<ReturnType<typeof compareLedger>, 'pending' | 'unknownNewer' | 'unknownInterleaved' | 'retiredPresent'>,
-): boolean {
-  if (ledger.pending.length === 0) return false;
-  // An empty ledger (nothing of this chain applied) is a first install, never an upgrade tail.
-  if (ledger.pending.length >= new Set(expected).size) return false;
-  if (ledger.unknownNewer.length || ledger.unknownInterleaved.length || ledger.retiredPresent.length) return false;
-  const chain = [...expected].sort(chainOrder);
-  const pending = new Set(ledger.pending);
-  const firstPendingIndex = chain.findIndex((name) => pending.has(name));
-  return chain.slice(firstPendingIndex).every((name) => pending.has(name));
-}
-
-const chainOrder = (a: string, b: string) => (migrationTimestamp(a) ?? 0) - (migrationTimestamp(b) ?? 0) || a.localeCompare(b);
-
-/** The first pending migration in chain order (timestamp, then name), or undefined. */
-export function firstPendingMigration(pending: readonly string[]): string | undefined {
-  return [...pending].sort((a, b) => (migrationTimestamp(a) ?? 0) - (migrationTimestamp(b) ?? 0) || a.localeCompare(b))[0];
-}
-
 export interface SchemaCompatibilityAssessment {
   process: CompatibilityProcess;
   pending: string[];
@@ -232,8 +178,6 @@ export interface SchemaCompatibilityAssessment {
   retiredPresent: string[];
   refusals: Array<{ finding: CompatibilityFinding; message: string }>;
   warnings: string[];
-  /** C3: the named failed migration when the relaxation applied (API, first pending == named), else null. */
-  upgradeIncomplete: string | null;
 }
 
 /** The 13-digit millisecond suffix of a migration name, or null (no suffix: counted as interleaved, fail closed). */
@@ -270,28 +214,8 @@ export function assessSchemaCompatibility(process: CompatibilityProcess, facts: 
   const policy = POLICIES[process];
   const latest = options.latestModuleVersion ?? LATEST_WORKSPACE_MODULE_VERSION;
   const ledger = compareLedger(facts.expected, facts.applied, options.retired ?? RETIRED_MIGRATIONS);
-  // C3, API: only when the first pending migration is exactly the one api-prestart named as the failed step.
-  const named = options.upgradeIncomplete?.trim();
-  const apiRelaxed = process === 'api' && !!named && facts.upgradeEvidence === true && isInOrderPendingTail(facts.expected, ledger) && firstPendingMigration(ledger.pending) === named;
-  // C3, Worker ("the Worker starts too, like Twenty", owner 2026-11-05): decided from the database alone (it cannot see the
-  // API's CREWFLOW_UPGRADE_INCOMPLETE). Only a contiguous, in-order pending TAIL of this code's chain qualifies.
-  // A first install (no upgrade evidence) never qualifies: the Worker does not start on a failed first install.
-  const workerRelaxed = process === 'worker' && facts.upgradeEvidence === true && isInOrderPendingTail(facts.expected, ledger);
-  const relaxed = apiRelaxed || workerRelaxed;
-  const first = firstPendingMigration(ledger.pending);
-  const result: SchemaCompatibilityAssessment = {
-    process,
-    ...ledger,
-    refusals: [],
-    warnings: [],
-    upgradeIncomplete: apiRelaxed ? named! : workerRelaxed ? first! : null,
-  };
-  const c3 = (verdict: Verdict): Verdict => (relaxed && verdict !== 'ignore' ? 'warn' : verdict);
-  const pendingMessage = apiRelaxed
-    ? `UPGRADE INCOMPLETE (owner decision C3, 2026-11-05): the upgrade failed at ${named}; ${ledger.pending.length} migration(s) are not applied: ${show(ledger.pending)}. Serving on the previous schema; deploy the fix.`
-    : workerRelaxed
-      ? `UPGRADE INCOMPLETE (owner decision C3, 2026-11-05): running on a partly-upgraded schema: ${first} and ${ledger.pending.length - 1} more not applied. Every job runs on it, payroll timers included; deploy the fix.`
-      : `${ledger.pending.length} migration(s) are not applied: ${show(ledger.pending)}.`;
+  const result: SchemaCompatibilityAssessment = { process, ...ledger, refusals: [], warnings: [] };
+  const pendingMessage = `${ledger.pending.length} migration(s) are not applied: ${show(ledger.pending)}.`;
 
   const apply = (verdict: Verdict, finding: CompatibilityFinding, message: string) => {
     if (verdict === 'ignore') return;
@@ -300,7 +224,7 @@ export function assessSchemaCompatibility(process: CompatibilityProcess, facts: 
   };
 
   if (ledger.pending.length > 0) {
-    apply(c3(policy.pending), 'pending', pendingMessage);
+    apply(policy.pending, 'pending', pendingMessage);
   }
   if (ledger.unknownInterleaved.length > 0) {
     apply(
@@ -325,7 +249,7 @@ export function assessSchemaCompatibility(process: CompatibilityProcess, facts: 
     if (fn.state === 'missing' || fn.state === 'unknown') {
       apply(policy.functionUnknown, 'provision-function-unknown', `${described}; this code cannot tell which workspace modules it provisions.`);
     } else if (fn.state === 'legacy' || fn.moduleVersion < latest) {
-      apply(c3(policy.functionBehind), 'provision-function-behind', `${described}, below this code's workspace module ${latest}.${relaxed ? ` UPGRADE INCOMPLETE (C3): first not applied ${result.upgradeIncomplete}.` : ''}`);
+      apply(policy.functionBehind, 'provision-function-behind', `${described}, below this code's workspace module ${latest}.`);
     } else if (fn.moduleVersion > latest) {
       apply(policy.functionAhead, 'provision-function-ahead', `${described}, above this code's workspace module ${latest} (an image rollback).`);
     }
@@ -426,14 +350,6 @@ export interface CheckSchemaCompatibilityOptions {
   /** Skip the ledger comparison (deploy post-checks: the runner already compared it). */
   ledger?: boolean;
   retired?: readonly string[];
-  /** C3: see UPGRADE_INCOMPLETE_VAR (honoured for the API only). */
-  upgradeIncomplete?: string;
-  /**
-   * C3: reads Agent 1's classification + physical fresh-install proof and answers "an upgrade stopped here" (CHAIN-PARTIAL and
-   * not fresh). Called only when a relaxation could apply (the API with CREWFLOW_UPGRADE_INCOMPLETE, the Worker) and the
-   * ledger is an in-order pending tail. Absent: no evidence, nothing is relaxed.
-   */
-  readUpgradeEvidence?: () => Promise<boolean>;
 }
 
 /** Reads what the policy needs on the caller's session, assesses, throws on refusal, returns the assessment (warnings). */
@@ -447,16 +363,7 @@ export async function checkSchemaCompatibility(query: CompatibilityQuery, option
   const applied = checkLedger ? await readLedgerNames(query, options.label) : [...expected];
   // Pending migrations refuse before anything else is read: the function and the workspaces of a database behind the code
   // are expected to be behind too.
-  let upgradeEvidence: boolean | undefined;
-  const mayRelax = options.process === 'worker' || (options.process === 'api' && !!options.upgradeIncomplete?.trim());
-  if (mayRelax && options.readUpgradeEvidence && isInOrderPendingTail(expected, compareLedger(expected, applied, options.retired ?? RETIRED_MIGRATIONS))) {
-    upgradeEvidence = await options.readUpgradeEvidence();
-  }
-  const ledgerOnly = assessSchemaCompatibility(
-    options.process,
-    { expected, applied, upgradeEvidence },
-    { production: options.production, retired: options.retired, upgradeIncomplete: options.upgradeIncomplete },
-  );
+  const ledgerOnly = assessSchemaCompatibility(options.process, { expected, applied }, { production: options.production, retired: options.retired });
   assertSchemaCompatible(ledgerOnly, options.label);
 
   const functionMatters = [policy.functionUnknown, policy.functionBehind, policy.functionAhead].some((v) => v !== 'ignore');
@@ -464,8 +371,8 @@ export async function checkSchemaCompatibility(query: CompatibilityQuery, option
   const workspaces = options.workspaces ? await readReadyWorkspaceModuleLevels(query) : undefined;
   const assessment = assessSchemaCompatibility(
     options.process,
-    { expected, applied, provisionFunction, workspaces, upgradeEvidence },
-    { production: options.production, retired: options.retired, upgradeIncomplete: options.upgradeIncomplete },
+    { expected, applied, provisionFunction, workspaces },
+    { production: options.production, retired: options.retired },
   );
   assertSchemaCompatible(assessment, options.label);
   return assessment;

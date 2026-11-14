@@ -42,6 +42,10 @@ COPY . .
 # needed here (verified: rab-worker's package.json declares the dependency,
 # Nx infers the build-order edge from it).
 RUN npx nx run-many -t build -p rab-server,rab-worker,rab-shared,rab-ui
+# OWNER-DB-ULTIMATE Part B3: the release version (root package.json, MAJOR.MINOR.PATCH) is baked into the image as
+# CREWFLOW_APP_VERSION. A build argument that differs from package.json fails the build (one source of truth).
+ARG CREWFLOW_APP_VERSION
+RUN node -e "const v=require('./package.json').version,a=process.env.CREWFLOW_APP_VERSION||'';if(!/^(0|[1-9][0-9]{0,3})[.](0|[1-9][0-9]{0,3})[.](0|[1-9][0-9]{0,3})$/.test(v)){console.error('FATAL: the root package.json version is not MAJOR.MINOR.PATCH');process.exit(1)}if(a&&a!==v){console.error('FATAL: CREWFLOW_APP_VERSION '+a+' differs from the root package.json version '+v);process.exit(1)}"
 # BUILD-01 regression guard: a silently-incomplete `rab-worker` build (e.g.
 # the project dropping out of the Nx/Yarn workspace graph, as happened when
 # it was untracked) must fail the image build loudly, here, rather than
@@ -139,6 +143,9 @@ ARG MIN_NODE_VERSION
 ARG MIN_LIBEXPAT_VERSION
 WORKDIR /app
 ENV NODE_ENV=production
+# OWNER-DB-ULTIMATE Part B3: the baked release version (empty → the code reads /app/package.json, copied below).
+ARG CREWFLOW_APP_VERSION
+ENV CREWFLOW_APP_VERSION=${CREWFLOW_APP_VERSION}
 # Alpine security updates, resolved from the base image's own stable v3.24 main/community repositories at build time
 # (no edge repository is ever added; the floors gate below refuses any other repository line), plus tini, the image's
 # ENTRYPOINT (reaps orphans and forwards signals for every command), then fail the build if the toolchain is somehow

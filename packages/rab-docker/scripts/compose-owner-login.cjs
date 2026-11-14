@@ -32,15 +32,15 @@
  *     value under another key; no CREWFLOW_DB_MODE (there is no mode switch); nothing from a separated-mode env file
  *     (.env.migrate, the retired .env.ops, per-service staging files) reaches any service;
  *   - CREWFLOW_MIGRATION_APPROVED is never set by a compose or env file (a one-run `run -e` only), and no role password or
- *     command/ops authority reaches any service; CREWFLOW_UPGRADE_INCOMPLETE (api-prestart.sh's own flag) is never set;
+ *     command/ops authority reaches any service; the retired CREWFLOW_UPGRADE_INCOMPLETE and the removed
+ *     CREWFLOW_UPGRADE_FAILURE / CREWFLOW_UPGRADE_FAILURE_POLICY (OWNER-DB-ULTIMATE Part B3) are never set;
  *   - the H1-H6 hardening on every service: image by digest and no `build:`, non-root numeric user, read_only, cap_drop ALL
  *     and no cap_add, no-new-privileges, pids/memory/CPU limits, health checks, a stop window, bounded logs, no privileged /
  *     host namespaces / Docker socket, read-only binds, only rab-api publishes and only on loopback;
  *   - the lifecycle (O3): NO rab-migrate; the API migrates on start (CREWFLOW_MIGRATE_ON_START=true, approval mode
  *     ${CREWFLOW_MIGRATION_APPROVAL_MODE:-none} from compose.env, rendering only as none or token (BC-11/C4), a
  *     fresh-install start_period, registers the job schedulers), exactly ONE instance and never a
- *     start-first update (C5: stop-then-start); the deprecated CREWFLOW_UPGRADE_FAILURE_POLICY is not committed (C3:
- *     continue by default). The deployment identity stays an OPT-IN of database.env, never committed. The Worker never
+ *     start-first update (C5: stop-then-start). The deployment identity stays an OPT-IN of database.env, never committed. The Worker never
  *     migrates (DISABLE_DB_MIGRATIONS=true), only consumes the schedulers (DISABLE_CRON_JOBS_REGISTRATION=true), does not
  *     wait for the schema itself (CREWFLOW_WORKER_SCHEMA_WAIT_SECONDS=0), starts after a healthy API and Redis, runs
  *     main.js as 1000:1000 with tmpfs and a jobs-only health check, stop grace >= 45 s; WORKER_SCHEDULER is never
@@ -156,7 +156,7 @@ const FORBIDDEN_NAMES = Object.freeze([
   'CREWFLOW_DEPLOYMENT_IDENTITY_BOOTSTRAP', 'ALLOW_PRODUCTION_DB_COMMANDS', 'DB_TARGET', 'ALLOW_REMOTE_TEST_DATABASE',
   'NODE_OPTIONS', 'CREWFLOW_PROVISIONER_ENABLED', 'WORKER_CLAIM_MODE', 'WORKER_DISPATCH_MODE',
   'WORKER_INVITE_AUTO_DELETE_ENABLED', 'WORKSPACE_SUBDOMAIN_ORIGIN_TRUST_ENABLED', 'PGCONNECT_TIMEOUT',
-  'CREWFLOW_UPGRADE_INCOMPLETE', 'CREWFLOW_UPGRADE_FAILURE_POLICY',
+  'CREWFLOW_UPGRADE_INCOMPLETE', 'CREWFLOW_UPGRADE_FAILURE_POLICY', 'CREWFLOW_UPGRADE_FAILURE',
 ]);
 /** [pattern, reason] for whole families of forbidden names. */
 const FORBIDDEN_PATTERNS = Object.freeze([
@@ -337,8 +337,6 @@ const AUDIT_SINK_MODES = Object.freeze(['none', 'stdout', 'file']);
 const AUDIT_SINK_PRODUCTION_MODES = Object.freeze(['stdout']);
 const AUDIT_SINK_FAILURES = Object.freeze(['refuse', 'log']);
 const AUDIT_SINK_PRODUCTION_FAILURES = Object.freeze(['refuse']);
-/** O3 C3: what runtime.env may set for the upgrade-failure policy (unset = continue). */
-const UPGRADE_FAILURE_VALUES = Object.freeze(['continue', 'refuse']);
 /**
  * The former separated runtime logins and schema roles: never the PG_DATABASE_URL login (they are NOLOGIN schema roles or
  * cannot create roles, so they are neither crewflow_owner nor an admin). DB-SETUP T-1 relaxes ONLY the provider admin
@@ -358,8 +356,8 @@ function forbiddenReason(name) {
   if (name === URL_KEY) return null;
   if (name === DB_PASSWORD_KEY) return 'an interpolation value of compose.env only (the bundled db and the default admin URL); never a container variable or an env file entry';
   if (name === 'CREWFLOW_MIGRATION_APPROVED') return 'the approval token (O3: approval mode none; there is no token to pass)';
-  if (name === 'CREWFLOW_UPGRADE_INCOMPLETE') return 'set only by api-prestart.sh after a failed upgrade (an inherited value is refused at start)';
-  if (name === 'CREWFLOW_UPGRADE_FAILURE_POLICY') return 'deprecated (O3 C3): use CREWFLOW_UPGRADE_FAILURE=continue|refuse in runtime.env, or leave it unset (continue)';
+  if (name === 'CREWFLOW_UPGRADE_INCOMPLETE') return 'retired with the C3 continue path (OWNER-DB-ULTIMATE Part B3; api-prestart.sh refuses an inherited value)';
+  if (name === 'CREWFLOW_UPGRADE_FAILURE' || name === 'CREWFLOW_UPGRADE_FAILURE_POLICY') return 'removed (OWNER-DB-ULTIMATE Part B3): a failed migration always refuses to start and is retried on the next start; there is nothing to choose';
   if (name === 'CREWFLOW_DB_MODE') return 'there is no mode switch (the owner login is the only architecture)';
   if (FORBIDDEN_NAMES.includes(name)) return 'forbidden (migration/bootstrap/ops/command authority, a second database identity, or an unapproved switch)';
   for (const [pattern, why] of FORBIDDEN_PATTERNS) if (pattern.test(name)) return why;
@@ -755,8 +753,6 @@ function checkModel(model, combo) {
     const e = envOf(services[name]);
     const want = { NODE_ENV: 'production' };
     for (const [k, v] of Object.entries(want)) if (e[k] !== v) p(`${name}: ${k} is "${e[k] ?? ''}", expected "${v}"`);
-    // O3 C3: the upgrade-failure policy is not committed (unset = continue); runtime.env may opt into refuse.
-    if ('CREWFLOW_UPGRADE_FAILURE' in e && !UPGRADE_FAILURE_VALUES.includes(String(e.CREWFLOW_UPGRADE_FAILURE))) p(`${name}: CREWFLOW_UPGRADE_FAILURE must be continue or refuse`);
     // O3 C2: the scheduler mode is never committed (production defaults to bullmq; interval is refused there).
     if ('WORKER_SCHEDULER' in e) p(`${name}: commits WORKER_SCHEDULER (leave it unset: production runs bullmq; interval is refused)`);
   }
@@ -912,7 +908,6 @@ function lintEnvText(kind, text, { template = false } = {}) {
     if (kind !== 'compose' && key === URL_KEY) problems.push(`${key}: set it in compose.env (the interpolation file): it belongs to db-setup only (its committed \${PG_DATABASE_URL:-...} would override a value here), and rab-api / rab-worker refuse it`);
     if (kind === 'database' && !why && key !== URL_KEY && !DATABASE_ALLOWED.includes(key)) problems.push(`${key}: does not belong in the shared database file (only ${DATABASE_ALLOWED.join(', ')})`);
     if (kind === 'runtime' && DATABASE_OPT_INS.includes(key)) problems.push(`${key}: belongs in database.env only (so rab-api and rab-worker see the same value)`);
-    if (key === 'CREWFLOW_UPGRADE_FAILURE' && !UPGRADE_FAILURE_VALUES.includes(value)) problems.push(`${key}: must be exactly continue or refuse`);
     // Review J2-1 (fail closed): a feature switch is exactly true or false once read the way Compose reads it.
     if (Object.hasOwn(FEATURE_SWEEPS, key) && !SWITCH_VALUES.includes(value)) problems.push(`${key}: must be exactly true or false (quotes and an inline # comment are read as Compose reads them)`);
     for (const [flag, rule] of Object.entries(FEATURE_SWEEPS)) {
@@ -931,7 +926,6 @@ function lintEnvText(kind, text, { template = false } = {}) {
     if (kind === 'runtime' && key === 'CREWFLOW_AUDIT_SINK_FILE') problems.push(`${key}: the file sink is development-only (production refuses CREWFLOW_AUDIT_SINK=file)`);
     if (key === APPROVAL_MODE_KEY && kind !== 'compose') problems.push(`${key}: set it in compose.env (the interpolation file): rab-api's committed ${APPROVAL_MODE_EXPR} would silently override a value here`);
     if (key === APPROVAL_MODE_KEY && kind === 'compose' && !APPROVAL_MODES.includes(value)) problems.push(`${key}: must be exactly none or token`);
-    if (kind !== 'runtime' && key === 'CREWFLOW_UPGRADE_FAILURE') problems.push(`${key}: belongs in runtime.env (the API reads it)`);
     if (kind === 'compose') {
       // DB-SETUP (T-1 / T-2): the two database values are the only secrets compose.env holds; everything else stays
       // CREWFLOW_* and secret-free.
