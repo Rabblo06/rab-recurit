@@ -28,6 +28,7 @@ import { runReplacementStaffCycle } from '../../queues/rab-offers/replacement-st
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
 import { integrationTestDatabaseReady } from '@rab/server/database/typeorm/core/integration-test-database-gate';
+import { businessTable } from './helpers/hws-fixtures';
 
 /**
  * Phase 6 — staff response / offer expiry correctness. Real Postgres, RLS
@@ -242,7 +243,8 @@ describeIfDb('offer lifecycle correctness (integration)', () => {
 
       await expect(
         adminDataSource.manager.query(
-          `INSERT INTO core.job_offer (organisation_id, shift_assignment_id, staff_profile_id, status, sent_at, expires_at, estimated_pay_pence, workspace_id)
+          // Part C1: the attack targets the schema the assignment really lives in (A's workspace schema with HWS on).
+          `INSERT INTO ${businessTable(fxA.managerA.workspaceId!, 'job_offer')} (organisation_id, shift_assignment_id, staff_profile_id, status, sent_at, expires_at, estimated_pay_pence, workspace_id)
              VALUES ($1, $2, $3, 'pending', now(), now() + interval '1 day', 1000, $4)`,
           [fxA.organisation.id, assignmentA.id, staffA.profileId, fxB.managerB.workspaceId],
         ),
@@ -487,7 +489,7 @@ describeIfDb('offer lifecycle correctness (integration)', () => {
       expect(confirmedCount).toBe(1);
       // The 4 losing confirms rolled back entirely: those acceptances are still awaiting the manager, never stranded.
       const awaiting = await withContext(ctxOf(fx.managerA), (m) =>
-        m.query<Array<{ count: string }>>(`SELECT count(*) FROM core.job_offer o JOIN core.shift_assignment sa ON sa.id = o.shift_assignment_id WHERE sa.shift_id = $1 AND o.status = 'staff_accepted' AND sa.status = 'staff_accepted'`, [shift.id]),
+        m.query<Array<{ count: string }>>(`SELECT count(*) FROM job_offer o JOIN shift_assignment sa ON sa.id = o.shift_assignment_id WHERE sa.shift_id = $1 AND o.status = 'staff_accepted' AND sa.status = 'staff_accepted'`, [shift.id]),
       );
       expect(Number(awaiting[0]!.count)).toBe(4);
     });
@@ -655,7 +657,7 @@ describeIfDb('offer lifecycle correctness (integration)', () => {
       // `manager.query()` returns `[rows, rowCount]` for an UPDATE ... RETURNING —
       // destructure the rows out before asserting on how many were affected.
       const [wrongWorkspaceRows] = await withContext({ organisationId: fx.organisation.id, workspaceId: fx.managerB.workspaceId, userId: fx.managerB.userId }, (m) =>
-        m.query<[Array<{ id: string }>, number]>(`UPDATE core.job_offer SET status = 'withdrawn' WHERE id = $1 RETURNING id`, [offer.id]),
+        m.query<[Array<{ id: string }>, number]>(`UPDATE job_offer SET status = 'withdrawn' WHERE id = $1 RETURNING id`, [offer.id]),
       );
       expect(wrongWorkspaceRows).toHaveLength(0);
 
@@ -663,7 +665,7 @@ describeIfDb('offer lifecycle correctness (integration)', () => {
         await m.query(`SELECT set_config('rab.organisation_id', '', true)`);
         await m.query(`SELECT set_config('rab.workspace_id', '', true)`);
         await m.query(`SELECT set_config('rab.user_id', '', true)`);
-        return m.query<[Array<{ id: string }>, number]>(`UPDATE core.job_offer SET status = 'withdrawn' WHERE id = $1 RETURNING id`, [offer.id]);
+        return m.query<[Array<{ id: string }>, number]>(`UPDATE job_offer SET status = 'withdrawn' WHERE id = $1 RETURNING id`, [offer.id]);
       });
       expect(noContextRows).toHaveLength(0);
 
@@ -680,7 +682,7 @@ describeIfDb('offer lifecycle correctness (integration)', () => {
         // BC-02 (owner-login architecture): the one runtime login is crewflow_owner; crewflow_app / crewflow_worker are schema roles.
         expect(role.name).toBe('crewflow_owner');
         const explain = await manager.query(`EXPLAIN (FORMAT JSON)
-          SELECT id AS offer_id, organisation_id, workspace_id FROM core.job_offer
+          SELECT id AS offer_id, organisation_id, workspace_id FROM job_offer
           WHERE status='pending' AND expires_at < now() ORDER BY expires_at ASC LIMIT 500`);
         return explain[0]['QUERY PLAN'][0].Plan;
       });

@@ -33,6 +33,7 @@ import { runLateClockInCycle } from '../../queues/rab-shifts/late-clock-in.job';
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
 import { integrationTestDatabaseReady } from '@rab/server/database/typeorm/core/integration-test-database-gate';
+import { businessTableOf } from './helpers/hws-fixtures';
 
 /**
  * Phase 5.5 — same-organisation manager isolation. Real Postgres, RLS on,
@@ -121,7 +122,7 @@ describeIfDb('same-organisation manager isolation (integration)', () => {
 
   /** `TestIdentityFactory.createStaff` never sets `employment_status` (the column defaults to `PENDING_COMPLIANCE`) — `ReplacementRequestService.assertStillEligible` requires ACTIVE, unlike the plain offer-send path (which only checks the User's own status, already ACTIVE by the factory's own default). Only needed for staff used as replacement candidates. */
   async function activateStaff(profileId: string): Promise<void> {
-    await adminDataSource.manager.query(`UPDATE core.staff_profile SET employment_status = $1 WHERE id = $2`, [EmploymentStatus.ACTIVE, profileId]);
+    await adminDataSource.manager.query(`UPDATE ${await businessTableOf(adminDataSource.manager, 'staff_profile', profileId)} SET employment_status = $1 WHERE id = $2`, [EmploymentStatus.ACTIVE, profileId]);
   }
 
   async function seedOpenShift(fx: Fixture, venueId: string, jobRoleId: string, opts?: { startsAt?: Date; endsAt?: Date }): Promise<Shift> {
@@ -204,8 +205,8 @@ describeIfDb('same-organisation manager isolation (integration)', () => {
       const bSignedIn = { ...ctxOf(fx.managerB), sessionId: (await factory.signedInContext(fx.managerB)).sessionId };
       await expect(staffService.deactivate(bSignedIn, staffA.profileId!)).rejects.toBeInstanceOf(NotFoundException);
       await expect(staffService.deactivate(bSignedIn, missingId)).rejects.toBeInstanceOf(NotFoundException);
-      const [{ employment_status: statusAfter }] = await adminDataSource.manager.query(`SELECT employment_status FROM core.staff_profile WHERE id = $1`, [staffA.profileId]);
-      const [{ employment_status: statusBefore }] = await adminDataSource.manager.query(`SELECT employment_status FROM core.staff_profile WHERE id = $1`, [staffB.profileId]);
+      const [{ employment_status: statusAfter }] = await adminDataSource.manager.query(`SELECT employment_status FROM ${await businessTableOf(adminDataSource.manager, 'staff_profile', staffA.profileId!)} WHERE id = $1`, [staffA.profileId]);
+      const [{ employment_status: statusBefore }] = await adminDataSource.manager.query(`SELECT employment_status FROM ${await businessTableOf(adminDataSource.manager, 'staff_profile', staffB.profileId!)} WHERE id = $1`, [staffB.profileId]);
       expect(statusAfter).toBe(statusBefore); // A's staff member untouched (same untouched default as B's, whom nobody deactivated)
       expect(statusAfter).not.toBe(EmploymentStatus.INACTIVE);
 
@@ -364,7 +365,7 @@ describeIfDb('same-organisation manager isolation (integration)', () => {
       // The row must be completely untouched by Manager B's attempts — still AWAITING_APPROVAL, no offer created.
       const untouched = await withContext(ctxOf(fx.managerA), (m) => m.findOneByOrFail(ReplacementRequest, { id: request.id }));
       expect(untouched.status).toBe(ReplacementRequestStatus.AWAITING_APPROVAL);
-      const offerCount = await withContext(ctxOf(fx.managerA), (m) => m.query<Array<{ count: string }>>(`SELECT count(*) FROM core.job_offer WHERE staff_profile_id = $1`, [candidate.profileId]));
+      const offerCount = await withContext(ctxOf(fx.managerA), (m) => m.query<Array<{ count: string }>>(`SELECT count(*) FROM job_offer WHERE staff_profile_id = $1`, [candidate.profileId]));
       expect(Number(offerCount[0]!.count)).toBe(0);
 
       // Positive control: Manager A can still approve their own request.
@@ -563,7 +564,7 @@ describeIfDb('same-organisation manager isolation (integration)', () => {
       await expect(replacementRequestService.approve(ctxOf(fx.managerB), request.id, { staffProfileId: candidate.profileId! })).rejects.toBeInstanceOf(NotFoundException);
       await expect(replacementRequestService.reject(ctxOf(fx.managerB), request.id)).rejects.toBeInstanceOf(NotFoundException);
 
-      const offerCount = await withContext(ctxOf(fx.managerA), (m) => m.query<Array<{ count: string }>>(`SELECT count(*) FROM core.job_offer WHERE staff_profile_id = $1`, [candidate.profileId]));
+      const offerCount = await withContext(ctxOf(fx.managerA), (m) => m.query<Array<{ count: string }>>(`SELECT count(*) FROM job_offer WHERE staff_profile_id = $1`, [candidate.profileId]));
       expect(Number(offerCount[0]!.count)).toBe(0);
     });
   });

@@ -242,7 +242,7 @@ describeIfDb('worker operations abuse cases (integration)', () => {
       'DB boundary %s seconds', async (seconds, count, complete, expired) => {
         const {ctx,id} = await fixture();
         await withContext(ctx, async m => {
-          await m.query("UPDATE core.attendance SET clock_out_at=now()-make_interval(secs=>$2) WHERE id=$1",[id,seconds]);
+          await m.query("UPDATE attendance SET clock_out_at=now()-make_interval(secs=>$2) WHERE id=$1",[id,seconds]);
           expect((await PostShiftLifecycleService.discover(m)).some(row => row.id === id)).toBe(Number(seconds) >= 3600);
           const service = new PostShiftLifecycleService(auditService);
           expect(await service.advance(m,id)).toBe(count);
@@ -256,14 +256,14 @@ describeIfDb('worker operations abuse cases (integration)', () => {
       });
     it('concurrent workers and a restarted worker emit one event per milestone; tenant denial and corrections remain safe', async () => {
       const {ctx,id} = await fixture();
-      await withContext(ctx,m=>m.query("UPDATE core.attendance SET clock_out_at=now()-interval '3 hours' WHERE id=$1",[id]));
+      await withContext(ctx,m=>m.query("UPDATE attendance SET clock_out_at=now()-interval '3 hours' WHERE id=$1",[id]));
       const run = () => withContext(ctx,m=>new PostShiftLifecycleService(auditService).advance(m,id));
       expect((await Promise.all([run(),run()])).reduce((a,b)=>a+b,0)).toBe(2);
       expect(await run()).toBe(0);
       await withContext(ctx,async m=>{
         const [audit] = await m.query("SELECT count(*)::int AS count FROM core.audit_log WHERE entity_id=$1 AND action IN ('attendance.post_shift_completed','attendance.post_shift_expired')",[id]);
         expect(audit.count).toBe(2);
-        await m.query("UPDATE core.attendance SET clock_out_at=now() WHERE id=$1",[id]);
+        await m.query("UPDATE attendance SET clock_out_at=now() WHERE id=$1",[id]);
         const row=await m.findOneByOrFail(Attendance,{id});
         expect(row.postShiftCompletedAt).toBeNull(); expect(row.postShiftExpiredAt).toBeNull();
       });
@@ -274,7 +274,7 @@ describeIfDb('worker operations abuse cases (integration)', () => {
       await withContext(ctx,async m=>{
         const service=new PostShiftLifecycleService(auditService);
         expect(await service.advance(m,id)).toBe(0);
-        await m.query("UPDATE core.attendance SET clock_out_at=now()-interval '3 hours', status='clocked_in' WHERE id=$1",[id]);
+        await m.query("UPDATE attendance SET clock_out_at=now()-interval '3 hours', status='clocked_in' WHERE id=$1",[id]);
         expect(await service.advance(m,id)).toBe(0);
       });
     });

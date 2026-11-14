@@ -683,7 +683,7 @@ describeIfDb('replacement-staff workflow (integration)', () => {
       const final = await getRequest(fx, requestId);
       expect(final!.status).toBe(ReplacementRequestStatus.OFFER_SENT);
       const offerCount = await withContext({ organisationId: fx.organisationId, workspaceId: fx.workspaceId, userId: fx.managerUserId }, (m) =>
-        m.query<Array<{ count: string }>>(`SELECT count(*) FROM core.job_offer WHERE staff_profile_id = ANY($1::uuid[])`, [candidates.map((c) => c.staffProfileId)]),
+        m.query<Array<{ count: string }>>(`SELECT count(*) FROM job_offer WHERE staff_profile_id = ANY($1::uuid[])`, [candidates.map((c) => c.staffProfileId)]),
       );
       expect(Number(offerCount[0]!.count)).toBe(1);
     });
@@ -719,7 +719,7 @@ describeIfDb('replacement-staff workflow (integration)', () => {
 
       const final = await getRequest(fx, requestId);
       const offerCount = await withContext({ organisationId: fx.organisationId, workspaceId: fx.workspaceId, userId: fx.managerUserId }, (m) =>
-        m.query<Array<{ count: string }>>(`SELECT count(*) FROM core.job_offer WHERE staff_profile_id = $1`, [candidate.staffProfileId]),
+        m.query<Array<{ count: string }>>(`SELECT count(*) FROM job_offer WHERE staff_profile_id = $1`, [candidate.staffProfileId]),
       );
       const offersSent = Number(offerCount[0]!.count);
       if (final!.status === ReplacementRequestStatus.OFFER_SENT) {
@@ -742,7 +742,7 @@ describeIfDb('replacement-staff workflow (integration)', () => {
       const final = await getRequest(fx, requestId);
       expect(final!.status).toBe(ReplacementRequestStatus.CANCELLED);
       const offerCount = await withContext({ organisationId: fx.organisationId, workspaceId: fx.workspaceId, userId: fx.managerUserId }, (m) =>
-        m.query<Array<{ count: string }>>(`SELECT count(*) FROM core.job_offer WHERE staff_profile_id = $1`, [candidate.staffProfileId]),
+        m.query<Array<{ count: string }>>(`SELECT count(*) FROM job_offer WHERE staff_profile_id = $1`, [candidate.staffProfileId]),
       );
       expect(Number(offerCount[0]!.count)).toBe(0);
     });
@@ -803,7 +803,7 @@ describeIfDb('replacement-staff workflow (integration)', () => {
 
       await expect(replacementRequestService.approve(authCtx(fx), requestId, { staffProfileId: second.staffProfileId })).rejects.toBeInstanceOf(ConflictException);
       const offerCount = await withContext({ organisationId: fx.organisationId, workspaceId: fx.workspaceId, userId: fx.managerUserId }, (m) =>
-        m.query<Array<{ count: string }>>(`SELECT count(*) FROM core.job_offer WHERE staff_profile_id = ANY($1::uuid[])`, [[candidate.staffProfileId, second.staffProfileId]]),
+        m.query<Array<{ count: string }>>(`SELECT count(*) FROM job_offer WHERE staff_profile_id = ANY($1::uuid[])`, [[candidate.staffProfileId, second.staffProfileId]]),
       );
       expect(Number(offerCount[0]!.count)).toBe(1);
     });
@@ -909,7 +909,7 @@ describeIfDb('replacement-staff workflow (integration)', () => {
         await m.query(`SELECT set_config('rab.organisation_id', '', true)`);
         await m.query(`SELECT set_config('rab.workspace_id', '', true)`);
         await m.query(`SELECT set_config('rab.user_id', '', true)`);
-        return m.query<Array<{ id: string }>>(`SELECT id FROM core.replacement_request WHERE id = $1`, [requestId]);
+        return m.query<Array<{ id: string }>>(`SELECT id FROM replacement_request WHERE id = $1`, [requestId]);
       });
       expect(seenWithNoContext).toHaveLength(0);
     });
