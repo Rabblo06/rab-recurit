@@ -44,9 +44,9 @@ export interface FixtureQueryable {
  * fixture usually just created it); `core.<table>` when no schema has it (a pre-cutover-only row). The schema name comes from
  * the registry and must match the derived `workspace_<32 hex>` form.
  */
-export async function businessTableOf(admin: FixtureQueryable, table: string, id: string): Promise<string> {
+export async function businessTableOf(admin: FixtureQueryable, table: string, id: string | null | undefined): Promise<string> {
   if (!BUSINESS_TABLES.has(table)) throw new Error(`businessTableOf: "${table}" is not a workspace business table`);
-  if (!hwsRuntimeOn()) return `"core"."${table}"`;
+  if (!hwsRuntimeOn() || !id) return `"core"."${table}"`;
   const schemas = (await admin.query(
     `SELECT schema_name FROM core.workspace_schema_registry WHERE status = 'READY' ORDER BY created_at DESC`,
   )) as Array<{ schema_name: string }>;
