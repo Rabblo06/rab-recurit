@@ -1,7 +1,7 @@
 import 'reflect-metadata';
 import { Client } from 'pg';
 
-import { resolveIntegrationTestDatabase } from '../../database/typeorm/core/test-database-guard';
+import { integrationTestDatabase, integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
 import { runMigrateOnStart } from '../../database/typeorm/scripts/migrate/owner-login/migrate-on-start';
 import { deployPostCheckProblems } from '../../database/typeorm/scripts/migrate/deploy-post-checks';
 import { STARTUP_EXIT_CODES } from '../../database/owner-login/runtime-db-config';
@@ -31,7 +31,7 @@ import { dropWorkspaceSchema, provisionTypeScript, registryOf, SeededWorkspace, 
  */
 jest.setTimeout(600_000);
 
-const RUN = Boolean(process.env.TEST_DATABASE_URL && process.env.TEST_DATABASE_URL_UNPOOLED);
+const RUN = integrationTestDatabaseReady();
 const describeIfDb = RUN ? describe : describe.skip;
 const SFX = Math.random().toString(36).replace(/[^a-z]/g, '').slice(0, 6) || 'x';
 const FROZEN_LITERAL = 'db:provision_workspace@WorkspaceGrantParityGuards1786721430000';
@@ -39,7 +39,7 @@ const PROBE_LITERAL = 'db:provision_workspace@DrunnerProbeLevel1799999999991';
 const T0 = 1786900000000;
 
 describeIfDb('Part D through the locked start (runMigrateOnStart)', () => {
-  const { adminUrl } = RUN ? resolveIntegrationTestDatabase(process.env) : ({} as never);
+  const { adminUrl, appUrl } = RUN ? integrationTestDatabase() : ({} as never);
   let admin: Client;
   let originalDef: string | null = null;
   const created: SeededWorkspace[] = [];
@@ -56,10 +56,18 @@ describeIfDb('Part D through the locked start (runMigrateOnStart)', () => {
   const rows = async (ws: SeededWorkspace) =>
     (await admin.query(`SELECT name, status, attempt, is_initial FROM core.upgrade_migration WHERE workspace_id = $1 ORDER BY created_at, attempt`, [ws.id])).rows;
   const fingerprint = async (ws: SeededWorkspace) => (await admin.query('SELECT core.workspace_schema_fingerprint($1) AS f', [ws.id])).rows[0].f as string;
-  const start = (registry: Record<string, readonly WorkspaceUpgradeCommand[]>, ids: string[]) => {
-    const env: NodeJS.ProcessEnv = { PATH: process.env.PATH, NODE_ENV: 'test', PG_DATABASE_URL: process.env.TEST_DATABASE_URL, CREWFLOW_MIGRATE_ON_START: 'true' };
+  const start = (
+    registry: Record<string, readonly WorkspaceUpgradeCommand[]>,
+    ids: string[],
+    cache: { redis?: boolean; flush?: (ns: string) => Promise<void> } = {},
+  ) => {
+    const env: NodeJS.ProcessEnv = { PATH: process.env.PATH, NODE_ENV: 'test', PG_DATABASE_URL: appUrl, CREWFLOW_MIGRATE_ON_START: 'true' };
+    if (cache.redis) env.REDIS_URL = 'redis://127.0.0.1:1';
     if (process.platform === 'win32' && process.env.SystemRoot) env.SystemRoot = process.env.SystemRoot;
-    return runMigrateOnStart({ migrationApprovalMode: 'none' }, { env, log: (l) => lines.push(l), cacheFlush: async () => undefined, testWorkspace: { registry, workspaceIds: ids } });
+    return runMigrateOnStart(
+      { migrationApprovalMode: 'none' },
+      { env, log: (l) => lines.push(l), cacheFlush: cache.flush ?? (async () => undefined), testWorkspace: { registry, workspaceIds: ids } },
+    );
   };
   const exitOf = (r: { outcome: keyof typeof STARTUP_EXIT_CODES }) => STARTUP_EXIT_CODES[r.outcome];
 
@@ -153,7 +161,7 @@ describeIfDb('Part D through the locked start (runMigrateOnStart)', () => {
     expect((await registryOf(admin, ok.id)).migration_error).toBeNull();
     expect(r.upgrade?.workspaces?.blocked).toEqual([drift.id]);
 
-    const c = new Client({ connectionString: process.env.TEST_DATABASE_URL });
+    const c = new Client({ connectionString: appUrl });
     await c.connect();
     try {
       expect((await readUpgradeStatus(upgradeSessionOf(c), '0.6.0')).state).toBe('failed');
@@ -164,7 +172,7 @@ describeIfDb('Part D through the locked start (runMigrateOnStart)', () => {
   it('review N2: the post-check outside the locked start (deploy-prepare, lifecycle) is strict: a workspace at 20 under a level-21 code is behind', async () => {
     const w = await make('n2');
     expect(await provisionTypeScript(adminUrl, w)).toBe('READY');
-    const c = new Client({ connectionString: process.env.TEST_DATABASE_URL });
+    const c = new Client({ connectionString: appUrl });
     await c.connect();
     try {
       const q = async (sql: string, p?: unknown[]) => (await c.query(sql, p as unknown[])).rows;
@@ -182,5 +190,13 @@ describeIfDb('Part D through the locked start (runMigrateOnStart)', () => {
     expect(readFileSync(join(scripts, 'deploy-prepare.ts'), 'utf8')).not.toMatch(/behindFloor/);
     expect(readFileSync(join(scripts, 'migrate', 'owner-login', 'owner-login-lifecycle-check.ts'), 'utf8')).not.toMatch(/behindFloor/);
     expect(readFileSync(join(scripts, 'migrate', 'owner-login', 'migrate-on-start.ts'), 'utf8')).toMatch(/behindFloor: LATEST_WORKSPACE_MODULE_VERSION/);
+  });
+  it('review P2: a workspace block changed but the cache epoch bump failed: the start refuses (66) instead of serving stale routing', async () => {
+    const w = await make('p2-drift');
+    expect(await provisionTypeScript(adminUrl, w)).toBe('READY');
+    await admin.query(`DROP POLICY job_role_tenant ON ${w.schema}.job_role`);
+    const r = await start({ '0-6': [] }, [w.id], { redis: true, flush: async () => { throw new Error('redis unreachable'); } });
+    expect({ outcome: r.outcome, exit: exitOf(r), serve: r.serve }).toEqual({ outcome: 'migrationFailed', exit: 66, serve: false });
+    expect((await registryOf(admin, w.id)).migration_error).toMatch(/^upgrade-blocked: /);
   });
 });

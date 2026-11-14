@@ -49,7 +49,7 @@ import {
   TARGET_EXTRA_STRUCTURE_SQL,
   TRACK_COUNTS_SQL,
 } from './workspace-step-checks-sql';
-import { declaredFingerprint } from './workspace-structure-level';
+import { codeWorkspaceStructureLevel, declaredFingerprint } from './workspace-structure-level';
 import { isUpgradeBlocked, upgradeBlockMarker } from './workspace-upgrade-block';
 import {
   EXPECTED_WORKSPACE_FINGERPRINTS,
@@ -269,6 +269,10 @@ interface SessionState {
 
 export class WorkspaceCommandRunner {
   private major: FingerprintMajor | null = null;
+  /** Review P1: the structure level this code needs (20 + the structural commands it knows). */
+  private get codeLevel(): number {
+    return codeWorkspaceStructureLevel(this.options.workspaceRegistry);
+  }
   private baselineSearchPath: string | null = null;
   /** N4: the session-level advisory locks held when the run started (the migration lock); anything else after a step leaked. */
   private baselineAdvisory = '';
@@ -334,6 +338,13 @@ export class WorkspaceCommandRunner {
         outcome.needsBlock = !['WORKSPACE_GONE', 'NOT_READY'].includes(outcome.errorClass ?? '');
       }
       if (outcome.status === 'failed' && !report.failures.includes(outcome)) report.failures.push(outcome);
+      // Review P1: a READY workspace still below this code's structure level (a data step failed before a pending structural
+      // step, or any other reason the structural steps did not all complete) is never served by this code: blocked.
+      if (!outcome.needsBlock && outcome.status !== 'ahead' && outcome.status !== 'refused' && ws.moduleVersion < this.codeLevel) {
+        outcome.needsBlock = true;
+        if (outcome.status !== 'failed') Object.assign(outcome, { status: 'refused', step: outcome.step ?? `${codeVersion}_WorkspaceStructure`, errorClass: 'STRUCTURE_BEHIND' });
+        if (!report.failures.includes(outcome)) report.failures.push(outcome);
+      }
       // D2/D3: block, or lift a block once the workspace's structure matches this code again.
       if (outcome.needsBlock) {
         await this.block(session, ws, outcome.step ?? `${codeVersion}_WorkspaceRun`, outcome.errorClass ?? 'UNKNOWN');
@@ -530,6 +541,7 @@ export class WorkspaceCommandRunner {
       if (target !== level) {
         await q(`UPDATE core.workspace_schema_registry SET module_version = $2, last_migrated_at = now() WHERE workspace_id = $1`, [ws.workspaceId, target]);
       }
+      const bumpedTo = target;
       const problem = await this.structureProblem(q, ws, target);
       if (problem) throw new WorkspaceStepRefused(problem, `${name}: the workspace structure after the step is not structure level ${target}`);
       if (target !== level) {
@@ -543,6 +555,7 @@ export class WorkspaceCommandRunner {
         );
       }
       await q('COMMIT');
+      ws.moduleVersion = bumpedTo;
     } catch (error) {
       await q('ROLLBACK').catch(() => undefined);
       throw error;
@@ -587,7 +600,8 @@ export class WorkspaceCommandRunner {
       await q('BEGIN');
       await this.enterWorkspace(q, ws);
       const level = await this.lockRegistry(q, ws);
-      const problem = (await this.extraStructureProblem(q, ws)) ?? (await this.structureProblem(q, ws, level));
+      // Review P1: matching an OLDER level is not enough: the code needs its own structure level.
+      const problem = level !== this.codeLevel ? 'STRUCTURE_BEHIND' : ((await this.extraStructureProblem(q, ws)) ?? (await this.structureProblem(q, ws, level)));
       await q('COMMIT');
       return problem === null;
     } catch {
@@ -617,7 +631,7 @@ export class WorkspaceCommandRunner {
       await q('BEGIN');
       await this.enterWorkspace(q, ws);
       const level = await this.lockRegistry(q, ws);
-      const problem = (await this.extraStructureProblem(q, ws)) ?? (await this.structureProblem(q, ws, level));
+      const problem = level !== this.codeLevel ? 'STRUCTURE_BEHIND' : ((await this.extraStructureProblem(q, ws)) ?? (await this.structureProblem(q, ws, level)));
       if (!problem) {
         await q(`UPDATE core.workspace_schema_registry SET migration_error = NULL WHERE workspace_id = $1 AND migration_error LIKE 'upgrade-blocked: %'`, [ws.workspaceId]);
       }

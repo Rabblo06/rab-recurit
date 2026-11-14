@@ -11,7 +11,7 @@
 import 'reflect-metadata';
 import { Client } from 'pg';
 
-import { resolveIntegrationTestDatabase } from '../../database/typeorm/core/test-database-guard';
+import { integrationTestDatabase } from '../../database/typeorm/core/integration-test-database-gate';
 import { MIGRATION_LOCK_KEY } from '../../database/typeorm/scripts/migrate/migration-lock';
 import { EXPECTED_WORKSPACE_FINGERPRINTS, selectWorkspaceFingerprintsForServer } from '../../database/typeorm/workspace-schema/v1/expected-fingerprints';
 import { provisionWorkspaceSchema } from '../../database/typeorm/workspace-schema/provision-workspace-schema';
@@ -154,7 +154,7 @@ async function measure(appUrl: string, adminUrl: string): Promise<void> {
 }
 
 async function main(): Promise<void> {
-  const { adminUrl, appUrl } = resolveIntegrationTestDatabase(process.env);
+  const { adminUrl, appUrl } = integrationTestDatabase();
   if (PHASE === 'seed' || PHASE === 'all') await seed(adminUrl);
   if (PHASE === 'measure' || PHASE === 'all') await measure(appUrl, adminUrl);
 }

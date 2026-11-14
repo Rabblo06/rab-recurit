@@ -1,7 +1,7 @@
 import 'reflect-metadata';
 import { Client } from 'pg';
 
-import { resolveIntegrationTestDatabase } from '../../database/typeorm/core/test-database-guard';
+import { integrationTestDatabase, integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
 import { MIGRATION_LOCK_KEY } from '../../database/typeorm/scripts/migrate/migration-lock';
 import { EXPECTED_WORKSPACE_FINGERPRINTS, selectWorkspaceFingerprintsForServer } from '../../database/typeorm/workspace-schema/v1/expected-fingerprints';
 import { LATEST_WORKSPACE_MODULE_VERSION } from '../../database/typeorm/workspace-schema/workspace-schema-modules';
@@ -31,14 +31,14 @@ import { dropWorkspaceSchema, provisionLegacyV14, provisionTypeScript, registryO
  */
 jest.setTimeout(300_000);
 
-const RUN = Boolean(process.env.TEST_DATABASE_URL && process.env.TEST_DATABASE_URL_UNPOOLED);
+const RUN = integrationTestDatabaseReady();
 const describeIfDb = RUN ? describe : describe.skip;
 const SFX = Math.random().toString(36).replace(/[^a-z]/g, '').slice(0, 6) || 'x';
 const LOCK = MIGRATION_LOCK_KEY.toString();
 const T0 = 1786800000000;
 
 describeIfDb('Part D workspace command runner (integration)', () => {
-  const { adminUrl } = RUN ? resolveIntegrationTestDatabase(process.env) : ({} as never);
+  const { adminUrl, appUrl } = RUN ? integrationTestDatabase() : ({} as never);
   let admin: Client;
   let app: Client;
   let session: UpgradeSession;
@@ -93,7 +93,7 @@ describeIfDb('Part D workspace command runner (integration)', () => {
 
   beforeAll(async () => {
     admin = new Client({ connectionString: adminUrl });
-    app = new Client({ connectionString: process.env.TEST_DATABASE_URL });
+    app = new Client({ connectionString: appUrl });
     await admin.connect();
     await app.connect();
     await selectWorkspaceFingerprintsForServer(async (sql) => (await admin.query(sql)).rows);
@@ -543,7 +543,7 @@ describeIfDb('Part D workspace command runner (integration)', () => {
   describe('owner D2/D3: a workspace whose step failed with a non-matching structure is BLOCKED until the step succeeds', () => {
     /** The real resolver, as an authenticated member of `org` (its organisation bound on the runtime login), no cache. */
     const resolveAs = async (org: string, workspaceId: string): Promise<string> => {
-      const c = new Client({ connectionString: process.env.TEST_DATABASE_URL });
+      const c = new Client({ connectionString: appUrl });
       await c.connect();
       try {
         await c.query('BEGIN');
@@ -559,7 +559,7 @@ describeIfDb('Part D workspace command runner (integration)', () => {
       }
     };
     const statusIssues = async () => {
-      const c = new Client({ connectionString: process.env.TEST_DATABASE_URL });
+      const c = new Client({ connectionString: appUrl });
       await c.connect();
       try {
         return (await readUpgradeStatus(upgradeSessionOf(c), '0.6.0')).workspaces ?? [];
@@ -624,6 +624,30 @@ describeIfDb('Part D workspace command runner (integration)', () => {
       fail = false;
       await runner({ workspaceRegistry: reg, workspaceIds: [w.id] });
       expect((await rows(w)).slice(-1)[0]).toMatchObject({ name: `0.7.0_DataOnly_${T0 + 102}`, status: 'completed', attempt: 2 });
+    });
+
+    it('(P1) a data step fails BEFORE a pending structural step: blocked at level 20 (503), stays blocked when the data step fails again, unblocked once both pass', async () => {
+      const [w, v] = [await make('p1-w'), await make('p1-v')];
+      await adopt([w.id, v.id]);
+      let failW = true;
+      const d1 = cmd('D1First', 120, { run: async ({ workspaceId }) => { if (failW && workspaceId === w.id) throw new Error('d1 fails for w'); } });
+      const s21 = cmd('S21Second', 121, { sql: (x) => `ALTER TABLE ${x}.venue ADD COLUMN IF NOT EXISTS d_probe text`, structure: { level: 21, fingerprints: {} } });
+      const reg = { '0-7': [d1, s21] };
+      const first = await runner({ workspaceRegistry: reg, workspaceIds: [w.id, v.id] });
+      expect(first.failures.map((f) => [f.workspaceId, f.blocked])).toEqual([[w.id, true]]);
+      expect((await registryOf(admin, w.id)).module_version).toBe(20);
+      expect((await registryOf(admin, v.id)).module_version).toBe(21);
+      expect(await resolveAs(w.org, w.id)).toBe('upgrading');
+      expect(await resolveAs(v.org, v.id)).toBe('resolved');
+      // The data step fails again with a structure that matches level 20: still blocked (the code needs 21).
+      const second = await runner({ workspaceRegistry: reg, workspaceIds: [w.id] });
+      expect(second.failures.map((f) => f.blocked)).toEqual([true]);
+      expect(await resolveAs(w.org, w.id)).toBe('upgrading');
+      failW = false;
+      const third = await runner({ workspaceRegistry: reg, workspaceIds: [w.id] });
+      expect(third.failures).toEqual([]);
+      expect((await registryOf(admin, w.id)).module_version).toBe(21);
+      expect(await resolveAs(w.org, w.id)).toBe('resolved');
     });
 
     it('(3) a refused adoption (drifted, unadopted) is blocked; a migrator message without the prefix never blocks', async () => {

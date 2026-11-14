@@ -475,8 +475,14 @@ export async function runMigrateOnStart(config: MigrateOnStartConfig, deps: Migr
         log(`post-checks passed (${done.length} applied)`);
         await run.afterApply(upgradeSessionOf(queryRunner));
         // D2/D3: a workspace blocked or unblocked by this run must not be served from a cached resolution: bump the epoch.
-        const cacheReasons = run.report.workspaces?.blockChanged ? [...done, 'workspace-upgrade-block'] : done;
-        await bumpEntityCacheAfterUpgrade({ applied: cacheReasons, env, log, flush: deps.cacheFlush });
+        // Review P2: while a workspace is blocked, or when a block changed, a failed bump is FATAL (66): a cached resolution
+        // could otherwise route a blocked workspace for up to the cache TTL. No Redis configured = no cache = nothing to bump.
+        const blockSensitive = run.report.workspaces?.blockChanged === true || (run.report.workspaces?.blocked.length ?? 0) > 0;
+        const cacheReasons = blockSensitive ? [...done, 'workspace-upgrade-block'] : done;
+        const bump = await bumpEntityCacheAfterUpgrade({ applied: cacheReasons, env, log, flush: deps.cacheFlush });
+        if (blockSensitive && bump === 'warning') {
+          throw new Error('the entity-cache epoch could not be bumped while a workspace upgrade block changed or is in force; refusing to serve possibly stale workspace routing (retry when Redis is reachable)');
+        }
       },
     });
     applied = locked.applied;
