@@ -67,7 +67,15 @@ Migrations live in `packages/rab-server/src/database/typeorm/core/migrations/` (
 - Run migrations only with the migration identity, as that process's own `PG_DATABASE_URL` (the one-off `rab-migrate` step reads it from `packages/rab-docker/.env.migrate`); the runtime role cannot run DDL, and the API and the Worker never migrate.
 - `yarn check-rls` fails CI if a tenant table lacks RLS.
 
-In Docker (O3, owner decisions C1-C5, like Twenty), the API migrates on start: `api-prestart.sh` runs the migration child under the migration lock (approval mode `none`, no token), registers the job schedulers, then starts `main.js`. A failed first install never serves; a failed upgrade serves degraded with `/healthz` `upgradeFailed: true` unless `CREWFLOW_UPGRADE_FAILURE=refuse`. The Worker never migrates (`DISABLE_DB_MIGRATIONS=true`). There is no `rab-migrate` release step; take the backup before every upgrade (`packages/rab-docker/docs/release/OWNER-LOGIN-DEPLOYMENT.md` section 3).
+In Docker (O3, owner decisions C1-C5, like Twenty), the API migrates on start: `api-prestart.sh` runs the migration child under the migration lock (approval mode `none`, no token), registers the job schedulers, then starts `main.js`. A failed migration never serves (exit 66; the next start retries it). Only a failed upgrade command, with every migration applied, serves, and `/healthz` then says `upgradeFailed: true` and nothing more; the step, versions and attempt are on the platform-admin health report. `CREWFLOW_UPGRADE_FAILURE` was removed and is refused. The Worker never migrates (`DISABLE_DB_MIGRATIONS=true`). There is no `rab-migrate` release step; take the backup before every upgrade (`packages/rab-docker/docs/release/OWNER-LOGIN-DEPLOYMENT.md` section 3).
+
+<Warning>
+**Back up the database before deploying 0.6.0.** Going back to an image older than 0.6.0 (for example R256) is only possible by restoring that backup. 0.6.0 adds the upgrade logbook (`core.upgrade_migration`, its row-level security policies and grants). An older image's start-up security check compares the database with what that older code expects, sees the logbook as unexpected security objects, and refuses to start. Putting the previous image digest back is therefore not a rollback path across 0.6.0.
+</Warning>
+
+### Upgrade logbook
+
+From 0.6.0 every start records each upgrade step in `core.upgrade_migration`, like Twenty's upgrade log: `<version>_TypeOrmMigrations` for the migrations of a version, then one row per upgrade command, each `completed` or `failed` with its attempt number. A database older than the supported floor (R254 / R256) is refused with exit 65 and nothing is applied. `node packages/rab-server/dist/command upgrade --force` (a one-off `docker compose run --rm --no-deps rab-api ...`) skips only that version refusal, and every row it writes is marked `forced`. The application login adds steps only inside the locked upgrade run, and a new workspace's first row when the workspace is created; it can never change or delete a row.
 
 ### Schema-version compatibility
 
