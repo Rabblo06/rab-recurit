@@ -359,7 +359,9 @@ export class SchedulingService {
         throw new ConflictException({ code: 'SHIFT_CLOSED', message: 'This shift is closed, so its QR code can no longer be replaced.' });
       }
       const [claimed] = (await manager.query(
-        `UPDATE shift SET qr_version = qr_version + 1, updated_at = now()
+        // clock_timestamp(), not now(): if this waited on the pre-shift report's lock, updated_at must land after that
+        // report's generation stamp, so the report is regenerated with the new QR (shift-report-scheduler.job.ts, M1).
+        `UPDATE shift SET qr_version = qr_version + 1, updated_at = clock_timestamp()
           WHERE id = $1 AND qr_version = $2 AND status = $3 RETURNING qr_version`,
         [id, shift.qrVersion, shift.status],
       )) as [Array<{ qr_version: number }>, number];

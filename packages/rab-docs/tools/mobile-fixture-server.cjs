@@ -776,7 +776,7 @@ function tick() {
       const att = attendanceFor(a.id);
       // shift-monitor.job.ts: confirmed seat, no attendance, 30 minutes after its start -> no_show.
       if (a.status === 'confirmed' && !att && now >= addMin(t.startsAt, NO_SHOW_GRACE_MINUTES)) a.status = 'no_show';
-      // attendance monitor: still open 30 minutes after the seat's scheduled end -> missing_clock_out.
+      // attendance monitor: still open QR_POST_SHIFT_GRACE_MINUTES (120) after the seat's own scheduled end -> missing_clock_out.
       if (att && ['clocked_in', 'on_break'].includes(att.status) && now > addMin(t.endsAt, MISSING_CLOCK_OUT_GRACE_MINUTES)) att.status = 'missing_clock_out';
     }
     const r = state.reports[sh.id];

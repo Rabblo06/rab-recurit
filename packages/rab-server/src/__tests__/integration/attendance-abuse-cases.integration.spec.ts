@@ -894,6 +894,43 @@ describeIfDb('attendance abuse cases (integration)', () => {
       expect(rows[0].clock_out_method).toBe('auto_geofence');
     });
 
+    // QR review M3 (owner rule 2026-11-14): the automatic geofence-exit clock-out is a staff self clock-out, so it closes
+    // at the staff member's own end + QR_POST_SHIFT_GRACE_MINUTES (120) like the manual and on-behalf ones.
+    describe('geofence-exit clock-out respects the staff member own clock-out window', () => {
+      async function clockedInAtVenue() {
+        const { organisation, managerEmail, managerUserId, venue } = await seedOrg();
+        await enableGeofence(organisation, venue, 100);
+        const managerToken = await login(managerEmail);
+        const staff = await seedStaff(organisation, managerUserId);
+        const staffToken = await login(staff.email, true);
+        const shiftId = await makeAndPublishShift(organisation, venue, managerToken);
+        await confirmShiftForStaff(managerToken, staffToken, staff.staffProfileId, shiftId);
+        expect((await clockIn(staffToken, organisation, venue, managerUserId, shiftId, { lat: VENUE_LAT, lng: VENUE_LNG, accuracyM: 10 })).status).toBe(201);
+        const exit = () =>
+          request(app.getHttpServer()).post('/rest/v1/attendance/geofence-exit').set('Authorization', `Bearer ${staffToken}`)
+            .send({ lat: VENUE_LAT + 0.01, lng: VENUE_LNG, accuracyM: 10 });
+        return { shiftId, exit };
+      }
+
+      it('own end + 121 min: refused 409 CLOCK_WINDOW_CLOSED and the row stays clocked_in', async () => {
+        const b = await clockedInAtVenue();
+        await moveShift(b.shiftId, '-9 hours -1 minute', '-121 minutes');
+        const res = await b.exit();
+        expect(res.status).toBe(409);
+        expect(res.body.code).toBe('CLOCK_WINDOW_CLOSED');
+        const [row] = await adminDataSource.query(`SELECT status, clock_out_at FROM core.attendance WHERE shift_id = $1`, [b.shiftId]);
+        expect(row).toMatchObject({ status: 'clocked_in', clock_out_at: null });
+      });
+
+      it('control: own end + 100 min still auto-clocks-out', async () => {
+        const b = await clockedInAtVenue();
+        await moveShift(b.shiftId, '-9 hours -40 minutes', '-100 minutes');
+        const res = await b.exit();
+        expect(res.status).toBe(201);
+        expect(res.body.status).toBe('clocked_out');
+      });
+    });
+
     it('a geofence-exit report claiming "outside" while server-recomputed position is still inside is rejected — no state change', async () => {
       const { organisation, managerEmail, managerUserId, venue } = await seedOrg();
       await enableGeofence(organisation, venue, 100);

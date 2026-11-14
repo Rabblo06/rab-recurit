@@ -59,6 +59,15 @@ export function validate(config: Record<string, unknown>): EnvironmentVariables 
     throw new Error(`Invalid environment configuration:\n${message}`);
   }
 
+  // QR review L2: the pre-shift report signs its Shift QR up to REPORT_AVAILABLE_BEFORE_MINUTES before the start; a QR
+  // older than QR_MAX_AGE_DAYS is refused. A report window at or beyond the ceiling would print QR codes that are already
+  // dead (or die before the shift starts). Refused in every environment.
+  if (validated.REPORT_AVAILABLE_BEFORE_MINUTES >= validated.QR_MAX_AGE_DAYS * 1440) {
+    throw new Error(
+      'Invalid environment configuration:\nREPORT_AVAILABLE_BEFORE_MINUTES must be less than QR_MAX_AGE_DAYS x 1440 minutes (a pre-shift report would carry an expired QR).',
+    );
+  }
+
   // O3 C2 (owner decision 2026-11-05, "exactly like Twenty"): WORKER_SCHEDULER unset → bullmq in production (the API
   // registers the job schedulers at start-up, the Worker consumes), interval elsewhere (development and test keep the
   // process-local timers: `yarn start` has no api-prestart.sh to register anything). An explicit `interval` in production is

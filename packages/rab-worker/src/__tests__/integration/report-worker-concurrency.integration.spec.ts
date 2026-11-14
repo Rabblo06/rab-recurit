@@ -27,6 +27,7 @@ import { runShiftReportSchedulerCycle } from '../../queues/rab-reports/shift-rep
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
 import { integrationTestDatabaseReady } from '@rab/server/database/typeorm/core/integration-test-database-gate';
+import { extractPdf } from '../pdf-equality/extract';
 
 /**
  * MULTI-WORKER SAFETY of the two report jobs. Two worker instances discover
@@ -401,6 +402,54 @@ describeIfDb('report worker multi-instance concurrency (integration)', () => {
     }
     for (const table of [...protectedTables,'stored_file']) expect(await dataSource.query(`SELECT id FROM core.${table}`)).toEqual([]);
   },180_000);
+
+  // QR review M1: a manager rotating the Shift QR while the pre-shift PDF renders must never ship (or store) the revoked QR.
+  it('PRE-SHIFT M1: a QR rotation during the render discards that render (no email, file not replaced); the next tick ships the new QR', async () => {
+    const f = await seedFixture();
+    const shiftId = f.shiftIds[0];
+    const ctx = { organisationId: f.organisation.id, workspaceId: f.workspaceId, userId: f.owner.userId, role: '' };
+    const reportRow = () => tenantContext.runInTenantContext(ctx, async (m) => (await m.query(`SELECT pre_shift_file_id FROM core.shift_report WHERE shift_id = $1`, [shiftId]))[0]);
+    const qrVerOf = (pdf: Buffer): number => {
+      const payloads = extractPdf(pdf).qrPayloads;
+      expect(payloads).toHaveLength(1);
+      return JSON.parse(Buffer.from(payloads[0]!.split('.')[1]!, 'base64url').toString('utf8')).ver as number;
+    };
+
+    // Tick 1: an ordinary generation with QR version 1.
+    expect((await runScheduler(f.organisation.id)).generated).toBe(1);
+    const first = await reportRow();
+    expect(await outboxRows(f.organisation.id, f.workspaceId, f.owner.userId)).toHaveLength(1);
+    expect(qrVerOf(await readStoredFile(f, first.pre_shift_file_id))).toBe(1);
+
+    // An ordinary shift edit makes the report stale; tick 2 re-renders, and the QR is rotated WHILE it renders.
+    await adminDataSource.query(`UPDATE core.shift SET updated_at = clock_timestamp() WHERE id = $1`, [shiftId]);
+    const original = storage.putObject.bind(storage);
+    const spy = jest.spyOn(storage, 'putObject').mockImplementation(async (params) => {
+      const uploaded = await original(params);
+      await adminDataSource.query(`UPDATE core.shift SET qr_version = qr_version + 1, updated_at = clock_timestamp() WHERE id = $1`, [shiftId]);
+      return uploaded;
+    });
+    let second;
+    try {
+      second = await runScheduler(f.organisation.id);
+    } finally {
+      spy.mockRestore();
+    }
+    expect(second).toMatchObject({ generated: 0, failed: 0 });
+    expect(await outboxRows(f.organisation.id, f.workspaceId, f.owner.userId)).toHaveLength(1); // no email with the revoked QR
+    expect((await reportRow()).pre_shift_file_id).toBe(first.pre_shift_file_id); // the stored file was not replaced
+
+    // Tick 3: the report is still stale, so it is rebuilt from the current row: the shipped QR is version 2.
+    expect((await runScheduler(f.organisation.id)).generated).toBe(1);
+    const rows = await outboxRows(f.organisation.id, f.workspaceId, f.owner.userId);
+    expect(rows).toHaveLength(2);
+    const third = await reportRow();
+    expect(third.pre_shift_file_id).not.toBe(first.pre_shift_file_id);
+    expect(qrVerOf(await readStoredFile(f, third.pre_shift_file_id))).toBe(2);
+    expect(qrVerOf(await readStoredFile(f, rows[1].attachment_file_id))).toBe(2);
+    // And it is now fresh: another tick does nothing.
+    expect((await runScheduler(f.organisation.id)).generated).toBe(0);
+  }, 180_000);
 
   it('PRE-01: readiness lost while rendering discards the original and leaves no file/event publication', async () => {
     const f=await seedFixture(); const shiftId=f.shiftIds[0];

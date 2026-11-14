@@ -7609,8 +7609,22 @@ image that runs the apps' own derive step on the read-only volume (`--pull never
     declined) → workspace RLS → compare-and-set on (qr_version, status) → audit `shift.qr_rotated` (shipped off-host as
     `security_configuration` / warning, like `venue.geofence_updated`). No client field is written. The bumped
     `updated_at` makes the pre-shift report scheduler regenerate and re-send the roster with the new QR, but only while
-    the shift has not ended (its scan requires `ends_at > now()`). Venue Managers do not hold `schedule.create`, so they
-    cannot rotate; API only for now (the QR is shown in the Venue Manager mobile apps, not the web console).
+    the shift has not ended (its scan requires `ends_at > now()`). The DEFAULT Venue Manager role does not hold
+    `schedule.create`, so it cannot rotate. A Venue Manager role granted `schedule.create` still cannot reach the route:
+    it is manager-web only (`@ManagerApplication`) and the `venue_manager` role may only sign in to the Venue Manager app;
+    the service itself applies the venue scope (404 outside the role's venues) for any other caller. API only for now
+    (the QR is shown in the Venue Manager mobile apps, not the web console).
+  - *Report rendered across a rotation (review M1).* The pre-shift scheduler locks the shift row before the report row,
+    discards a render whose shift `qr_version` or `updated_at` changed while it rendered (no stored file, no email; the
+    next tick rebuilds), and stamps the report with the database clock; rotation writes `updated_at = clock_timestamp()`,
+    so a rotation that waited on that lock always lands after the stamp and triggers regeneration.
+  - *Geofence-exit clock-out (review M3).* The automatic geofence-exit clock-out is a staff self clock-out too: refused
+    `CLOCK_WINDOW_CLOSED` after the staff member's own end + grace, like the manual and on-behalf clock-outs.
+  - *Settings (review L2).* `QR_POST_SHIFT_GRACE_MINUTES` is 0..1440, `QR_MAX_AGE_DAYS` 1..90 whole days, and the API and
+    Worker refuse to boot when `REPORT_AVAILABLE_BEFORE_MINUTES >= QR_MAX_AGE_DAYS x 1440` (a report would carry a dead QR).
+  - *Held for owner decisions (not implemented):* rotating after the shift has ended strands staff still clocked in
+    (the report is not regenerated after `ends_at`) — review M2; `correct()` does not bound a recovered `clockOutAt` —
+    review L4.
   - *Per-staff grace, end to end.* One grace, `QR_POST_SHIFT_GRACE_MINUTES` (120), always from the staff member's OWN end
     (`effectiveAssignmentTime`): the QR is accepted until own end + grace (`validUntil` takes the seat; `validateQr`
     requires it), the staff self clock-out now has the same `assertClockWindow` check the on-behalf clock-out has, and the
@@ -7640,7 +7654,10 @@ Reversal:   A shorter QR_MAX_AGE_DAYS, or rotating QRs automatically on schedule
   refused 1 s after own end + grace; extended and shortened shifts; per-seat grace with two seats; 14-day ceiling at
   T+14d-1s / T+14d+1s and via the setting; no-iat; rotation `revoked` vs `venue_mismatch`; foreign shift; tampered /
   forged-key / malformed; wrong issuer / audience / HS512 / alg:none; legacy `exp`; fail-closed settings),
-  `qr-token-verify.arch.spec.ts`, `attendance-abuse-cases` (clock-out with a QR printed 3 h early, CLOCK_WINDOW_CLOSED past
+  `qr-token-verify.arch.spec.ts`, `env.validation.qr.spec.ts`, `shift-qr-rotation-scope` (other manager 404, venue-scoped
+  role 403 over HTTP / 404 outside / rotates inside, overlapping rotations one 201 + one 409), `report-worker-concurrency`
+  (rotation mid-render: discarded, no email; next tick's PDF QR decodes to ver 2), `attendance-abuse-cases` (geofence-exit
+  CLOCK_WINDOW_CLOSED at own end + 121 min, control at + 100; clock-out with a QR printed 3 h early, CLOCK_WINDOW_CLOSED past
   own end + grace, rotateShiftQr: revoked / accepted, 403 guard and service, 404 other tenant, 409 cancelled / completed;
   the staff-vs-manager race just after the grace), rab-worker `worker-operations-abuse-cases` › clock-out grace end to end
   (monitor at own end + 100 min leaves the row open and the staff clock-out works; own end + 121 min refused then flagged;

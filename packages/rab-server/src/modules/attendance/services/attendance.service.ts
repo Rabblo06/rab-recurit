@@ -639,6 +639,12 @@ export class AttendanceService {
       if (distance <= venue.geofenceRadiusM) {
         throw new ConflictException('You are still within the venue geofence.');
       }
+      // QR review M3 (owner rule 2026-11-14): a staff member's own clock-out — manual, QR or this automatic one — closes
+      // at their own end + QR_POST_SHIFT_GRACE_MINUTES, the same upper bound clockOutOnBehalf applies. Past it the
+      // clock-out is the manager's recovery, never an uncapped, paid self clock-out.
+      if (Date.now() > this.attendanceWindow(effectiveAssignmentTime(assignment, shift)).closesAt.getTime()) {
+        throw new ClockWindowClosedException();
+      }
 
       return this.performClockOut(manager, ctx, attendance, dto, true, 'auto_geofence');
     });

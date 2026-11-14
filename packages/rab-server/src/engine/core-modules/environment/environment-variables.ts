@@ -1765,6 +1765,7 @@ export class EnvironmentVariables {
   @Type(() => Number)
   @IsInt()
   @Min(0)
+  @Max(1440)
   QR_POST_SHIFT_GRACE_MINUTES: number = 120;
 
   /**
