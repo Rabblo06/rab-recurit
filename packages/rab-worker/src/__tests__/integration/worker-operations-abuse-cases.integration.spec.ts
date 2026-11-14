@@ -271,9 +271,22 @@ describeIfDb('worker operations abuse cases (integration)', () => {
         expect(row.postShiftCompletedAt).toBeNull(); expect(row.postShiftExpiredAt).toBeNull();
       });
       // A foreign (unknown) organisation + workspace advances nothing. Part C1: with HWS on there is no schema for an unknown
-      // workspace, so the attempt is refused outright (the relation cannot even be resolved); with HWS off it sees 0 rows.
+      // workspace, so the attempt is refused outright (the relation cannot even be resolved: SQLSTATE 42P01 / 3F000, matched
+      // by code, not message); with HWS off it sees 0 rows.
       const foreign = () => withContext({...ctx,organisationId:randomUUID(),workspaceId:randomUUID()},m=>new PostShiftLifecycleService(auditService).advance(m,id));
-      if (hwsRuntimeOn()) await expect(foreign()).rejects.toThrow(/does not exist/); else expect(await foreign()).toBe(0);
+      if (hwsRuntimeOn()) await expect(foreign()).rejects.toMatchObject({ driverError: expect.objectContaining({ code: expect.stringMatching(/^(42P01|3F000)$/) }) });
+      else expect(await foreign()).toBe(0);
+      // The real attack (review L3): the row's OWN workspace schema (search_path) bound with another organisation's GUCs. The
+      // row is due again (clock-out reset to 3 h ago), so a non-zero result would be a real cross-tenant write; RLS must hide it.
+      await withContext(ctx,m=>m.query("UPDATE attendance SET clock_out_at=now()-interval '3 hours' WHERE id=$1",[id]));
+      const wrongOrg = () => withContext({...ctx,organisationId:randomUUID()},m=>new PostShiftLifecycleService(auditService).advance(m,id));
+      expect(await wrongOrg()).toBe(0);
+      await withContext(ctx,async m=>{
+        const row=await m.findOneByOrFail(Attendance,{id});
+        expect(row.postShiftCompletedAt).toBeNull(); expect(row.postShiftExpiredAt).toBeNull();
+      });
+      // Control: the right organisation advances the same row (so the 0 above was RLS, not a row that was not due).
+      expect(await run()).toBe(2);
     });
     it('missing clock-out and wrong status are ignored', async () => {
       const {ctx,id}=await fixture();

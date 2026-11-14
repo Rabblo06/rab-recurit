@@ -11,7 +11,7 @@ import { TenantContextService } from '@rab/server/engine/core-modules/tenant/ten
 import { runTokenCleanupCycle } from '../../queues/rab-maintenance/token-cleanup.job';
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
-import { hwsRuntimeOn } from './helpers/hws-fixtures';
+import { businessSchema, hwsRuntimeOn } from './helpers/hws-fixtures';
 
 /**
  * Twenty-style worker runtime cutover (see HYPER-WORKSPACE-PHASE3-FOUNDATION.md). The worker runs as rab_app. These tests check the
@@ -153,6 +153,22 @@ describe('worker runtime cutover (integration)', () => {
       // so the transaction is refused before any query (fail closed, 404). With HWS off the core copy shows zero rows.
       if (hwsRuntimeOn()) await expect(attempt()).rejects.toMatchObject({ name: 'WorkspaceRoutingError' });
       else expect(await attempt()).toHaveLength(0);
+    });
+
+    it('ABUSE (review L3): workspace A\'s real schema bound with organisation B\'s GUCs (routing bypassed) sees zero Staff rows', async () => {
+      const bound = (organisationId: string) =>
+        runtime.transaction(async (m) => {
+          await m.query(
+            `SELECT set_config('search_path', $1, true), set_config('rab.organisation_id', $2, true), set_config('rab.workspace_id', $3, true),
+                    set_config('rab.user_id', '', true), set_config('rab.role', '', true), set_config('rab.actor_type', 'worker', true)`,
+            [businessSchema(managerA.workspaceId!), organisationId, managerA.workspaceId],
+          );
+          return m.query<Array<{ id: string }>>(`SELECT id FROM staff_profile`);
+        });
+      expect(await bound(orgB.id)).toHaveLength(0);
+      expect(await bound(randomUUID())).toHaveLength(0);
+      // Control: the same binding with A's own organisation sees A's Staff (so the zero rows above are RLS, not a wrong schema).
+      expect((await bound(orgA.id)).map((r) => r.id)).toContain(staffA.profileId);
     });
 
     it('a worker context with no workspace bound fails closed: zero Staff rows', async () => {
