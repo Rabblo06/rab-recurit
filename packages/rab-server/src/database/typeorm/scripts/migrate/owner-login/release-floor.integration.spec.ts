@@ -249,14 +249,15 @@ describeIfOwnerCluster('the upgrade floor on real databases (production target s
     expect((await tenantRows(db)).named).toBe(1);
   });
 
-  it('older than the floor: 65 behind (UnsupportedUpgradeStartError), serve=false under continue, ledger and rows unchanged', async () => {
+  it('older than the floor: 65 behind (UnsupportedUpgradeStartError), serve=false (Part B: there is no failure policy), ledger and rows unchanged', async () => {
     const db = dbName('older');
     await createDatabase(db, TPL);
     await adminQuery(db, `DELETE FROM core.migrations WHERE name = ANY($1::text[])`, [R254.slice(-4)]);
     const ledgerBefore = await ledger(db);
     const rowsBefore = await tenantRows(db);
     const { result } = await migrateOnStart(db);
-    expect(result).toMatchObject({ outcome: 'behind', serve: false, policy: 'continue', applied: [] });
+    expect(result).toMatchObject({ outcome: 'behind', serve: false, applied: [] });
+    expect(result).not.toHaveProperty('policy'); // CREWFLOW_UPGRADE_FAILURE and its policy were removed (Part B3)
     expect(result.reason).toMatch(/UnsupportedUpgradeStartError: .*older than every supported release.*Nothing was applied/);
     expect(await ledger(db)).toEqual(ledgerBefore);
     expect(await tenantRows(db)).toEqual(rowsBefore);
