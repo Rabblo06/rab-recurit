@@ -49,7 +49,6 @@ export default class FixtureSchemaCleanupEnvironment extends NodeEnvironment {
     const workspaces = [...(g.__crewflowFixtureWorkspaces ?? [])];
     const organisations = [...(g.__crewflowFixtureOrganisations ?? [])];
     if (workspaces.length === 0 && organisations.length === 0) return;
-    if (!process.env.TEST_DATABASE_URL) return;
 
     const { adminUrl } = resolveIntegrationTestDatabase(process.env);
     const client = new Client({ connectionString: adminUrl, connectionTimeoutMillis: 10_000, statement_timeout: 120_000 });
