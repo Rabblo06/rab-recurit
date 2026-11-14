@@ -388,8 +388,10 @@ describeIfDb('report worker multi-instance concurrency (integration)', () => {
       const other = f === a ? b : a;
       await tenantContext.runInTenantContext({ organisationId:f.organisation.id, workspaceId:f.workspaceId,userId:f.owner.userId,role:'' },async manager=>{
         for (const table of [...protectedTables,'stored_file']) {
-          expect((await manager.query(`SELECT id FROM core.${table} WHERE organisation_id=$1`,[f.organisation.id])).length).toBeGreaterThan(0);
-          expect(await manager.query(`SELECT id FROM core.${table} WHERE organisation_id=$1`,[other.organisation.id])).toEqual([]);
+          // Part C1: business tables through the routed (workspace) name; stored_file is a core table.
+          // sql-injection-reviewed: table comes from this test's own literal list
+          expect((await manager.query(`SELECT id FROM ${table === 'stored_file' ? 'core.stored_file' : table} WHERE organisation_id=$1`,[f.organisation.id])).length).toBeGreaterThan(0);
+          expect(await manager.query(`SELECT id FROM ${table === 'stored_file' ? 'core.stored_file' : table} WHERE organisation_id=$1`,[other.organisation.id])).toEqual([]);
           const [rows] = await manager.query(`UPDATE core.${table} SET id=id WHERE organisation_id=$1 RETURNING id`,[other.organisation.id]);
           expect(rows).toEqual([]);
         }

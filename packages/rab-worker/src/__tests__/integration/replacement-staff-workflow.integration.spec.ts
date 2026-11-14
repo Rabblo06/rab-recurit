@@ -39,7 +39,7 @@ import { createAdminDataSource } from './helpers/admin-datasource';
 import { generateFixturePassword } from './helpers/fixture-password';
 import { integrationTestDatabaseReady } from '@rab/server/database/typeorm/core/integration-test-database-gate';
 import { provisionFixtureWorkspace } from './helpers/test-identities';
-import { businessSchema } from './helpers/hws-fixtures';
+import { businessSchema, businessTable } from './helpers/hws-fixtures';
 
 const FIXTURE_PASSWORD = generateFixturePassword();
 
@@ -912,7 +912,8 @@ describeIfDb('replacement-staff workflow (integration)', () => {
         await m.query(`SELECT set_config('rab.organisation_id', '', true)`);
         await m.query(`SELECT set_config('rab.workspace_id', '', true)`);
         await m.query(`SELECT set_config('rab.user_id', '', true)`);
-        return m.query<Array<{ id: string }>>(`SELECT id FROM replacement_request WHERE id = $1`, [requestId]);
+        // Part C1: aimed at the workspace schema that holds the request, with no tenant context bound.
+        return m.query<Array<{ id: string }>>(`SELECT id FROM ${businessTable(fx.workspaceId, 'replacement_request')} WHERE id = $1`, [requestId]);
       });
       expect(seenWithNoContext).toHaveLength(0);
     });
