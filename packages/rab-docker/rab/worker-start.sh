@@ -49,6 +49,12 @@ crewflow_bundled_db_ca() {
 }
 # END crewflow bundled-db CA
 
+# Part C2 test seam (the search_path trap, engine/core-modules/tenant/business-tables.ts): refused outside NODE_ENV=test, as
+# in api-prestart.sh and runtime-db-config.ts TEST_SEAM_VARS.
+if [ "${NODE_ENV:-}" != test ] && [ -n "${CREWFLOW_TEST_SEARCH_PATH_TRAP:-}" ]; then
+  refuse 'CREWFLOW_TEST_SEARCH_PATH_TRAP is a test seam: it is allowed only with NODE_ENV=test. Remove it.'
+fi
+
 DERIVE_RUNTIME_URL=packages/rab-server/dist/database/typeorm/scripts/owner-login/derive-runtime-url.js
 DB_TARGET_FILE=/run/crewflow/db-target/target.json
 WAIT_SECONDS=120

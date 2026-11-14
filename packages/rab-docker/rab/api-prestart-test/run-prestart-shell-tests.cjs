@@ -410,7 +410,7 @@ r = run('token-no-migrate', { ...BASE, CREWFLOW_MIGRATION_APPROVAL_MODE: 'token'
 check('8o an approval with CREWFLOW_MIGRATE_ON_START=false -> refused (64)', r.code === 64 && !line(r.out, 'main'), r.out);
 r = run('pending-no-migrate', { ...BASE }, { ctl: { check: 1 } });
 check('8p CREWFLOW_MIGRATE_ON_START=false and the schema behind -> 65, the child never ran', r.code === 65 && line(r.out, 'check') && !migrated(r.out), r.out);
-for (const seam of ['CREWFLOW_MIGRATION_TEST_STOP_BEFORE', 'CREWFLOW_MIGRATION_TEST_FAIL_AT', 'CREWFLOW_TEST_UPGRADE_COMMANDS', 'CREWFLOW_TEST_UPGRADE_FAIL_COMMAND', 'CREWFLOW_TEST_DEFER_SERVER_PROVISIONING']) {
+for (const seam of ['CREWFLOW_MIGRATION_TEST_STOP_BEFORE', 'CREWFLOW_MIGRATION_TEST_FAIL_AT', 'CREWFLOW_TEST_UPGRADE_COMMANDS', 'CREWFLOW_TEST_UPGRADE_FAIL_COMMAND', 'CREWFLOW_TEST_DEFER_SERVER_PROVISIONING', 'CREWFLOW_TEST_SEARCH_PATH_TRAP']) {
   r = run(`seam-prod-${seam}`, { ...MIGRATE_ON, [seam]: '1786700000000' }, { ctl: { 'migrate-seq': '0' } });
   check(`8q ${seam} outside NODE_ENV=test -> refused (64), the migrate child never ran`, r.code === 64 && r.out.includes(`${seam} is a test seam`) && !migrated(r.out) && !line(r.out, 'main'), r.out);
 }
@@ -576,6 +576,8 @@ r = run('worker-target-late', W, { entry: 'worker-start.sh', ctl: { 'derive-url'
 check('12h the target file appears late (75, then 0) -> one wait, then the Worker starts', r.code === 0 && /not there yet/.test(r.out) && field(line(r.out, 'workermain'), 'url') === hash(RUNTIME_URL), r.out);
 r = run('worker-seam-prod', { ...W, CREWFLOW_TEST_DB_SETUP_WAIT_SECONDS: '4' }, { entry: 'worker-start.sh', ctl: { 'derive-url': RUNTIME_URL } });
 check('12i the wait-bound test seam outside NODE_ENV=test -> refused (64)', r.code === 64 && /test seam/.test(r.out) && !line(r.out, 'workermain'), r.out);
+r = run('worker-trap-prod', { ...W, CREWFLOW_TEST_SEARCH_PATH_TRAP: 'true' }, { entry: 'worker-start.sh', ctl: { 'derive-url': RUNTIME_URL } });
+check('12r Part C2: the search_path trap seam outside NODE_ENV=test -> refused (64), nothing ran', r.code === 64 && /CREWFLOW_TEST_SEARCH_PATH_TRAP is a test seam/.test(r.out) && !line(r.out, 'derive') && !line(r.out, 'workermain') && !/STUB tini/.test(r.out), r.out);
 for (const [label, url] of [['an admin', 'postgresql://doadmin:ADMINSENTINEL2@db-direct.example:25060/d?sslmode=verify-full'], ['a crewflow_owner (option 2: no pass-through on the apps)', 'postgresql://crewflow_owner:ADMINSENTINEL5@db:5432/crewflow?sslmode=verify-full']]) {
   r = run(`worker-url-${label.replace(/[^a-z]+/g, '-')}`, { ...W, PG_DATABASE_URL: url }, { entry: 'worker-start.sh', ctl: { 'derive-url': RUNTIME_URL } });
   check(`12k DENIAL: ${label} PG_DATABASE_URL on rab-worker -> refused (64) before the derive step; the Worker never starts; the value is never printed`, r.code === 64 && /PG_DATABASE_URL must never be set on the worker service/.test(r.out) && !line(r.out, 'derive') && !line(r.out, 'workermain') && !/STUB tini/.test(r.out) && !r.out.includes('ADMINSENTINEL'), r.out);

@@ -100,6 +100,9 @@ const CASES: Array<[string, Env]> = [
   ['upgrade seams under NODE_ENV=test (allowed)', { CREWFLOW_MIGRATE_ON_START: 'true', NODE_ENV: 'test', CREWFLOW_TEST_UPGRADE_COMMANDS: 'Probe', CREWFLOW_TEST_UPGRADE_FAIL_COMMAND: 'Probe' }],
   ['provisioning deferral seam in production', { CREWFLOW_MIGRATE_ON_START: 'false', NODE_ENV: 'production', CREWFLOW_TEST_DEFER_SERVER_PROVISIONING: 'true' }],
   ['provisioning deferral seam under NODE_ENV=test (allowed)', { CREWFLOW_MIGRATE_ON_START: 'false', NODE_ENV: 'test', CREWFLOW_TEST_DEFER_SERVER_PROVISIONING: 'true' }],
+  // Part C2: the search_path trap (engine/core-modules/tenant/business-tables.ts).
+  ['search_path trap seam in production', { CREWFLOW_MIGRATE_ON_START: 'false', NODE_ENV: 'production', CREWFLOW_TEST_SEARCH_PATH_TRAP: 'true' }],
+  ['search_path trap seam under NODE_ENV=test (allowed)', { CREWFLOW_MIGRATE_ON_START: 'false', NODE_ENV: 'test', CREWFLOW_TEST_SEARCH_PATH_TRAP: 'true' }],
   ['test seams under NODE_ENV=test (allowed)', { CREWFLOW_MIGRATE_ON_START: 'true', NODE_ENV: 'test', CREWFLOW_MIGRATION_TEST_STOP_BEFORE: 'a', CREWFLOW_MIGRATION_TEST_FAIL_AT: 'b' }],
   // DB-SETUP (plan §2.2): the prestart shell holds the database ADMIN URL until the swap, so neither copy applies the
   // runtime-login rule (checkRuntimeLogin; runtime-login.spec.ts) — both accept it here.
@@ -139,7 +142,7 @@ describe('runtime-db-config (owner-login architecture)', () => {
   });
 
   it('migration test seams: allowed only under NODE_ENV=test; refused in production and everywhere else with an actionable message', () => {
-    for (const name of ['CREWFLOW_MIGRATION_TEST_STOP_BEFORE', 'CREWFLOW_MIGRATION_TEST_FAIL_AT', 'CREWFLOW_TEST_UPGRADE_COMMANDS', 'CREWFLOW_TEST_UPGRADE_FAIL_COMMAND', 'CREWFLOW_TEST_DEFER_SERVER_PROVISIONING']) {
+    for (const name of ['CREWFLOW_MIGRATION_TEST_STOP_BEFORE', 'CREWFLOW_MIGRATION_TEST_FAIL_AT', 'CREWFLOW_TEST_UPGRADE_COMMANDS', 'CREWFLOW_TEST_UPGRADE_FAIL_COMMAND', 'CREWFLOW_TEST_DEFER_SERVER_PROVISIONING', 'CREWFLOW_TEST_SEARCH_PATH_TRAP']) {
       expect(runtimeDbConfigProblems({ NODE_ENV: 'test', [name]: '1786700000000' })).toEqual([]);
       for (const NODE_ENV of ['production', 'development', undefined]) {
         expect(runtimeDbConfigProblems({ NODE_ENV, [name]: '1786700000000' })).toEqual([
