@@ -73,6 +73,9 @@ describe('upgrade logbook SQL (OWNER-DB-ULTIMATE Part B, UpgradeMigrationLedger1
       'database/typeorm/core/migrations/1786721470000-UpgradeMigrationLedger.ts',
       // Security review L2(b): every tenant binding CLEARS the scope (never sets it), like rab.admin_scope.
       'engine/core-modules/tenant/tenant-context.service.ts',
+      // The CI-only restricted-migrator harness: REVIEWED_MIGRATION_DRIFT pins the logbook's five policies as text (their
+      // expressions name rab.upgrade_scope). It compares catalog lines and never sets the scope.
+      'database/typeorm/scripts/migration-security-check.ts',
     ];
     const offenders = files(SRC)
       .filter((f) => readFileSync(f, 'utf8').includes(UPGRADE_SCOPE_SETTING))
