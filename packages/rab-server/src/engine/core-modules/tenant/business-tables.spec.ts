@@ -9,9 +9,11 @@ import {
   businessSearchPath,
   businessTables,
   peekBusinessSchema,
+  restoreBusinessSchema,
   SEARCH_PATH_TRAP_VAR,
   SearchPathTrapRefused,
   searchPathTrapEnabled,
+  snapshotBusinessSchema,
   unbindBusinessSchema,
   withBusinessSchema,
 } from './business-tables';
@@ -59,8 +61,14 @@ const environment = (hws: boolean) => ({ get: jest.fn((key: string) => (key === 
 const resolverFor = (schema: string) => ({ resolve: jest.fn().mockResolvedValue(schema) }) as unknown as SchemaResolverService;
 const CTX = { organisationId: '22222222-3333-4444-8555-666666666666', workspaceId: WS, userId: '33333333-4444-4555-8666-777777777777', role: 'manager' };
 
-afterEach(() => {
+// Restore (never just delete) whatever the run started with: the C2 trap CI job sets it for the whole run.
+const TRAP_AT_START = process.env[SEARCH_PATH_TRAP_VAR];
+beforeEach(() => {
   delete process.env[SEARCH_PATH_TRAP_VAR];
+});
+afterEach(() => {
+  if (TRAP_AT_START === undefined) delete process.env[SEARCH_PATH_TRAP_VAR];
+  else process.env[SEARCH_PATH_TRAP_VAR] = TRAP_AT_START;
 });
 
 describe('businessTables(manager): the primitive', () => {
@@ -156,6 +164,25 @@ describe('businessTables(manager): the primitive', () => {
     const kept = businessTables(unbound);
     unbindBusinessSchema(unbound);
     expect(() => kept.venue).toThrow(expect.objectContaining({ code: 'unbound' }));
+  });
+
+  it('snapshot/restore puts the entry binding (or its absence) back, only on the manager it was taken from', () => {
+    const m = liveManager();
+    bindBusinessSchema(m, SCHEMA, WS);
+    const snap = snapshotBusinessSchema(m);
+    bindBusinessSchema(m, 'core', OTHER_WS); // a switch inside the transaction (UserDeletionService)
+    bindBusinessSchema(m, OTHER_SCHEMA, OTHER_WS);
+    restoreBusinessSchema(m, snap);
+    expect(businessTables(m).shift).toBe(`"${SCHEMA}"."shift"`);
+
+    const fresh = liveManager();
+    const none = snapshotBusinessSchema(fresh);
+    bindBusinessSchema(fresh, 'core', null);
+    restoreBusinessSchema(fresh, none);
+    expect(peekBusinessSchema(fresh)).toBeUndefined();
+
+    expect(() => restoreBusinessSchema(liveManager(), snap)).toThrow(expect.objectContaining({ code: 'invalid-schema' }));
+    expect(() => restoreBusinessSchema(m, { schema: 'public' })).toThrow(expect.objectContaining({ code: 'invalid-schema' })); // forged
   });
 
   it('withBusinessSchema binds for exactly the callback, and unbinds even when it throws', async () => {

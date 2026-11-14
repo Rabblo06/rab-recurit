@@ -4,7 +4,6 @@
     "that are not yet schema-qualified through businessTables(manager). This file may only SHRINK: a module PR that qualifies",
     "sites lowers or deletes its rows in the same PR. Never raise a count; qualify the new reference instead. C2-7: empty."
   ],
-  "total": 535,
   "files": {
     "packages/rab-server/src/command/seed-ai-demo.command.ts": {
       "unqualified": 11

@@ -300,14 +300,12 @@ function readBaseline(file = BASELINE_FILE) {
 }
 
 function baselineDocument(counts) {
-  const total = Object.values(counts).reduce((n, rules) => n + Object.values(rules).reduce((a, b) => a + b, 0), 0);
   return {
     _comment: [
       'Part C2 ratchet (tools/check-workspace-table-qualified.cjs). Per file and rule: the number of workspace-table references',
       'that are not yet schema-qualified through businessTables(manager). This file may only SHRINK: a module PR that qualifies',
       'sites lowers or deletes its rows in the same PR. Never raise a count; qualify the new reference instead. C2-7: empty.',
     ],
-    total,
     files: counts,
   };
 }

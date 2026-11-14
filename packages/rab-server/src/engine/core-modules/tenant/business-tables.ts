@@ -91,9 +91,32 @@ export async function withBusinessSchema<T>(
   }
 }
 
-/** The bound schema, or undefined when none is (no throw). For binders that switch and later restore the binding. */
+/** The bound schema, or undefined when none is (no throw). */
 export function peekBusinessSchema(manager: EntityManager): string | undefined {
   return manager && typeof manager === 'object' ? bindings.get(manager) : undefined;
+}
+
+/** An opaque record of one manager's binding (or of none), restorable only onto that same manager. */
+export interface BusinessSchemaSnapshot {
+  readonly schema: string | undefined;
+}
+const snapshots = new WeakMap<BusinessSchemaSnapshot, EntityManager>();
+
+/**
+ * Binder-only, for a site that switches search_path inside a transaction and must put the entry state back (UserDeletionService):
+ * the value was validated when it was bound, so restoring it needs no workspace id. Only a snapshot taken by this function,
+ * for this manager, is accepted.
+ */
+export function snapshotBusinessSchema(manager: EntityManager): BusinessSchemaSnapshot {
+  const snapshot = Object.freeze({ schema: peekBusinessSchema(manager) });
+  snapshots.set(snapshot, manager);
+  return snapshot;
+}
+
+export function restoreBusinessSchema(manager: EntityManager, snapshot: BusinessSchemaSnapshot): void {
+  if (snapshots.get(snapshot) !== manager) throw new BusinessTablesError('invalid-schema');
+  if (snapshot.schema === undefined) bindings.delete(manager);
+  else bindings.set(manager, snapshot.schema);
 }
 
 /** The bound schema of a live transaction. Throws when unbound or when the transaction has ended. */

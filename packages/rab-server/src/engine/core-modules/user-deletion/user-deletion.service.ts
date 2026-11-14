@@ -6,7 +6,7 @@ import { EmailOutbox, User } from '../../../modules/identity/entities';
 import { AuditAction, AuditService } from '../audit/audit.service';
 import { PlatformAdminService } from '../platform-admin/platform-admin.service';
 import { AuthContext } from '../tenant/auth-context.interface';
-import { bindBusinessSchema, businessSearchPath, CORE_BUSINESS_SCHEMA, peekBusinessSchema, unbindBusinessSchema } from '../tenant/business-tables';
+import { bindBusinessSchema, businessSearchPath, CORE_BUSINESS_SCHEMA, restoreBusinessSchema, snapshotBusinessSchema } from '../tenant/business-tables';
 import { RefreshTokenService } from '../auth/token/services/refresh-token.service';
 import { SchemaResolverService, WorkspaceRoutingError, workspaceSchemaName } from '../tenant/schema-resolver.service';
 
@@ -157,7 +157,7 @@ export class UserDeletionService {
       `SELECT current_setting('rab.workspace_id', true) AS ws, current_setting('search_path') AS sp`,
     );
     // C2-0: the businessTables(manager) binding follows every search_path switch below and is restored with it.
-    const entrySchema = peekBusinessSchema(manager);
+    const entryBinding = snapshotBusinessSchema(manager);
 
     let found: T | null = null;
     for (const workspaceId of workspaceIds) {
@@ -182,10 +182,9 @@ export class UserDeletionService {
     }
     // Restored from the binding when there was one (the same value the binder set; under the test-only trap the entry
     // search_path is '' and cannot be re-set from its quoted text form), else from the entry setting, as before.
-    const restorePath = entrySchema !== undefined ? businessSearchPath(entrySchema) : entry?.sp ?? 'core';
+    const restorePath = entryBinding.schema !== undefined ? businessSearchPath(entryBinding.schema) : entry?.sp ?? 'core';
     await manager.query(`SELECT set_config('rab.workspace_id', $1, true), set_config('search_path', $2, true)`, [entry?.ws ?? '', restorePath]);
-    if (entrySchema !== undefined) bindBusinessSchema(manager, entrySchema, entry?.ws || null);
-    else unbindBusinessSchema(manager);
+    restoreBusinessSchema(manager, entryBinding);
     return found;
   }
 

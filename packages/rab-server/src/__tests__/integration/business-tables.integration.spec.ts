@@ -26,6 +26,14 @@ import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
 const RUN = integrationTestDatabaseReady();
 const describeIfDb = RUN ? describe : describe.skip;
 
+// The trap may also be on for the whole run (the non-required C2 trap CI job): this file restores whatever it found, never
+// deletes it, because --runInBand suites share one process.env.
+const TRAP_AT_START = process.env[SEARCH_PATH_TRAP_VAR];
+const restoreTrap = () => {
+  if (TRAP_AT_START === undefined) delete process.env[SEARCH_PATH_TRAP_VAR];
+  else process.env[SEARCH_PATH_TRAP_VAR] = TRAP_AT_START;
+};
+
 const codeOf = async (p: Promise<unknown>): Promise<string> =>
   p.then(
     () => 'ACCEPTED',
@@ -56,17 +64,16 @@ describeIfDb('C2-0 businessTables(manager) and the search_path trap (integration
     mgr = await factory.createInternalManager(org, { label: 'c2-0-bt' });
   });
 
-  afterEach(() => {
-    delete process.env[SEARCH_PATH_TRAP_VAR];
-  });
+  afterEach(restoreTrap);
 
   afterAll(async () => {
-    delete process.env[SEARCH_PATH_TRAP_VAR];
+    restoreTrap();
     await app?.close();
     await adminDataSource?.destroy();
   });
 
   it('names the routed schema; a ${t.venue} write is read back by the unqualified (search_path) query, and vice versa', async () => {
+    delete process.env[SEARCH_PATH_TRAP_VAR]; // trap off for this case (restored after each test)
     const schema = businessSchema(mgr.workspaceId!);
     const result = await tenantContext.runInWorkspaceContext(ctx(), async (m, bound) => {
       const t = businessTables(m);
@@ -81,7 +88,7 @@ describeIfDb('C2-0 businessTables(manager) and the search_path trap (integration
     });
     expect(result.bound).toBe(schema);
     expect(result.venue).toBe(`"${schema}"."venue"`);
-    expect(result.schemas).toEqual([schema]); // search_path still bound to exactly that schema
+    expect(result.schemas).toEqual([schema]); // search_path still bound to exactly that schema (trap off)
     expect(result.viaPath).toBe(1);
     expect(result.viaQualified).toBe(1);
     // The row is physically in that schema (superuser fixture connection, no routing involved).
@@ -128,7 +135,8 @@ describeIfDb('C2-0 businessTables(manager) and the search_path trap (integration
     expect(await codeOf(tenantContext.runInTenantContext({ ...ctx(), workspaceId: null }, (m) => m.query(`SELECT 1 FROM shift LIMIT 1`)))).toBe('42P01');
   });
 
-  it('trap off again: the unqualified form resolves through search_path exactly as before', async () => {
+  it('trap off: the unqualified form resolves through search_path exactly as before', async () => {
+    delete process.env[SEARCH_PATH_TRAP_VAR];
     expect(await codeOf(tenantContext.runInWorkspaceContext(ctx(), (m) => m.query(`SELECT 1 FROM venue LIMIT 1`)))).toBe('ACCEPTED');
   });
 });
