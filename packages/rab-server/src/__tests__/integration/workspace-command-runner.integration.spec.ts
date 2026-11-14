@@ -348,10 +348,14 @@ describeIfDb('Part D workspace command runner (integration)', () => {
 
     it('a forged logbook row (scope set, tenant unbound, then restored) is refused; no row is left', async () => {
       const forged = `0.7.0_Forged_${T0 + 99}`;
+      // As crewflow the INSERT is refused by privileges (42501); a real forge first drops back to the login (crewflow_owner,
+      // which reaches the logbook through rab_secure_owner) and the session's migration lock, then restores everything.
       const f = await step('ForgeRow', 33, async (q) => {
+        await q('RESET ROLE');
         await q(`SELECT pg_catalog.set_config('rab.upgrade_scope', 'upgrade', true), pg_catalog.set_config('rab.organisation_id', '', true)`);
         await q(`INSERT INTO core.upgrade_migration (name, status, attempt, executed_by_version, workspace_id) VALUES ($1, 'completed', 1, '0.7.0', $2)`, [forged, y.id]);
         await q(`SELECT pg_catalog.set_config('rab.upgrade_scope', '', true), pg_catalog.set_config('rab.organisation_id', $1, true)`, [x.org]);
+        await q(`SELECT pg_catalog.set_config('role', 'crewflow', true)`);
       });
       expect(f.map((o) => o.errorClass)).toEqual(['OUTSIDE_SCHEMA']);
       expect(Number((await admin.query('SELECT count(*)::int AS n FROM core.upgrade_migration WHERE name = $1', [forged])).rows[0].n)).toBe(0);
