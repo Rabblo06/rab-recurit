@@ -251,6 +251,7 @@ export class SeedAiDemoCommand extends CommandRunner {
     // 5. Shifts: upcoming (partly filled, full, open, draft) and past (completed, with attendance and payroll).
     const now = Date.now();
     const shift = async (venue: number, role: number, startMs: number, required: number, filled: number, status: string): Promise<string> => {
+      const t = businessTables(m);
       const [row] = await m.query<Array<{ id: string }>>(
         `INSERT INTO ${t.shift} (organisation_id, venue_id, job_role_id, starts_at, ends_at, break_minutes, required_count, filled_count, pay_rate_pence, status, created_by, workspace_id)
          VALUES ($1, $2, $3, $4, $5, 30, $6, $7, $8, $9, $10, $11) RETURNING id`,
@@ -259,6 +260,7 @@ export class SeedAiDemoCommand extends CommandRunner {
       return row!.id;
     };
     const assignment = async (shiftId: string, staffId: string, status: string, startMs: number, role: number): Promise<string> => {
+      const t = businessTables(m);
       const [row] = await m.query<Array<{ id: string }>>(
         `INSERT INTO ${t.shift_assignment} (organisation_id, shift_id, staff_profile_id, status, pay_rate_snapshot_pence, assigned_by, confirmed_at, period, workspace_id)
          VALUES ($1, $2, $3, $4, $5, $6, CASE WHEN $4 IN ('confirmed', 'completed') THEN now() END, tstzrange($7, $8), $9) RETURNING id`,
@@ -269,6 +271,7 @@ export class SeedAiDemoCommand extends CommandRunner {
     let offers = 0;
     const offer = async (assignmentId: string, staffId: string, status: string, role: number) => {
       offers += 1;
+      const t = businessTables(m);
       await m.query(
         `INSERT INTO ${t.job_offer} (organisation_id, shift_assignment_id, staff_profile_id, status, sent_at, expires_at, estimated_pay_pence, created_by, workspace_id)
          VALUES ($1, $2, $3, $4, now(), now() + interval '1 day', $5, $6, $7)`,
