@@ -30,8 +30,8 @@ Runtime guards refuse to boot the API or Worker when:
 | File | Where | Topology |
 | --- | --- | --- |
 | `packages/rab-docker/docker-compose.production.yml` | Production: OpenShip on an Oracle VPS (arm64). The database is a managed PostgreSQL provider, the web console is on Vercel. | `rab-api`, `rab-worker` (bundle), `rab-redis`, plus the one-off `rab-migrate` release step they wait for. HWS runtime routing is off until the production rehearsal. |
-| `packages/rab-docker/docker-compose.qa.yml` | Local, isolated manual QA | Mirrors the production topology (restricted logins, Worker bundle, S3 storage through MinIO, HWS off, explicit migrations), with a local database and loopback-only ports. |
-| `packages/rab-docker/docker-compose.yml` | Local development | Same services. HWS is on, for development only. |
+| `packages/rab-docker/docker-compose.qa.yml` | Local, isolated manual QA | Production's database setup and lifecycle, built from source: the bundled `db` (a verbatim copy of production's), the one-shot `db-setup` that creates `crewflow_owner` with a random password kept in a volume, an API that migrates on start and registers the job schedulers, a consume-only Worker, S3 storage through MinIO, HWS off. Loopback-only ports; the database is not published. |
+| `packages/rab-docker/docker-compose.yml` | Local development | The same database setup and lifecycle as QA, with local file storage, hot-reload front, and HWS, workspace host routing and the login handoff on, for development only. Fresh, project-scoped volumes; it does not use the previous `rab_devdb_data` volume. |
 
 Workspace provisioning in production runs in the Worker's provisioner process. Server-path provisioning, where the API calls `core.provision_workspace` (migration `1786719500000`), is not yet approved for production. Until it is, a new workspace is built by the provisioner.
 

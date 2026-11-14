@@ -161,7 +161,7 @@ test('DENIAL: in a production file, a service with any profile (rab-maint, profi
   const s = clean();
   s['rab-maint'] = { profiles: ['maint'], environment: {} };
   refused(opsRefusalChecks(REL, s, cleanRaw(), { production: true }), /rab-maint has no profile/);
-  // The dev / QA files keep their own profiles (s3, tools, migrate): the any-profile rule is for the production files only.
+  // The dev file keeps its own profiles (s3, tools): the any-profile rule is for the production files only.
   assert.deepEqual(failed(opsRefusalChecks(REL, s, cleanRaw())), []);
 });
 

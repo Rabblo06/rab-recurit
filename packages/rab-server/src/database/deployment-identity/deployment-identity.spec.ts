@@ -303,6 +303,10 @@ describe('deployment identity: the marker decision (pure)', () => {
       // The alternatives are disjoint (a `$` starts `${...}` only; any other character is not `$`): linear, no backtracking.
       for (const m of text.matchAll(/postgres(?:ql)?:\/\/(?:\$\{[^}]*\}|\$(?!\{)|[^@\s$])*@([A-Za-z0-9_.-]+)[:/]/g)) if (isSingleLabelHost(m[1])) used.add(m[1].toLowerCase());
     }
+    // OWNER-DB-ULTIMATE.md Part F2 (X2.3): docker-compose.yml now runs the bundled `db` (Part A), so no committed file names
+    // `devdb` any more. It stays on the list (and here) only while the previous dev stack's running `rab-devdb` container is
+    // in use; remove it from LOCAL_DATABASE_SERVICE_HOSTS and from this line after the owner's dev cut-over (D7).
+    used.add('devdb');
     expect([...used].sort()).toEqual([...LOCAL_DATABASE_SERVICE_HOSTS].sort());
   });
 
