@@ -40,6 +40,9 @@ const RUN = integrationTestDatabaseReady();
 // login/argon2id round trip to set up — comfortably past Jest's 5s default. Found live via a real
 // timeout, not a hang: the other four tests in this file (dry-run, refusals) stay well under this.
 jest.setTimeout(30_000);
+// beforeAll boots the whole AppModule. On a loaded CI runner that alone took over 30s (PR #132,
+// run 43512176869), so the hook gets the same budget as the other AppModule-booting specs.
+const BOOT_TIMEOUT_MS = 180_000;
 (RUN ? describe : describe.skip)('incident containment: suspend test accounts', () => {
   let app: INestApplication;
   let owner: DataSource;
@@ -167,7 +170,7 @@ jest.setTimeout(30_000);
       status: UserStatus.ACTIVE,
     });
     a = { organisationId: org.organisation.id, manager, staff, rawUserId: inserted.identifiers[0]!.id as string };
-  });
+  }, BOOT_TIMEOUT_MS);
 
   afterAll(async () => {
     await app?.close();
