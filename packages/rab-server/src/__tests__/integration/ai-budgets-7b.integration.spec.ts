@@ -8,6 +8,7 @@ import { utcDay } from '../../modules/ai/services/ai-quota.service';
 import { AiRetentionService } from '../../modules/ai/services/ai-retention.service';
 import { titleLedgerId } from '../../modules/ai/services/ai-title.service';
 import { AiKit, aiOrganisation, ask, bearer, bootAiKit, jobFor, manager, newConversation, turnRow } from './helpers/ai-test-kit';
+import { integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
 
 /**
  * AI Phase 7b — budgets and limits LIVE, end to end on rab_int with a PRICED in-process test model (no network):
@@ -20,7 +21,7 @@ import { AiKit, aiOrganisation, ask, bearer, bootAiKit, jobFor, manager, newConv
  *   - availability: the owner's limits and the caller's own cost figures;
  *   - retention: the usage ledger's own 400-day purge, purge mode only, audited with `usageRows`.
  */
-const RUN = Boolean(process.env.DATABASE_URL);
+const RUN = integrationTestDatabaseReady();
 const describeIfDb = RUN ? describe : describe.skip;
 
 const PRICED_ID = 'crewflow-mock-priced-1';

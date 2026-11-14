@@ -6,8 +6,9 @@ import { FieldPolicyService } from '@rab/server/modules/identity/member-access/f
 import { PayrollService } from '@rab/server/modules/payroll/services/payroll.service';
 import { ShiftReportService } from '@rab/server/modules/attendance/services/shift-report.service';
 import { WorkerModule } from '../../worker.module';
+import { integrationTestDatabaseReady } from '@rab/server/database/typeorm/core/integration-test-database-gate';
 
-const RUN = Boolean(process.env.DATABASE_URL);
+const RUN = integrationTestDatabaseReady();
 const describeIfDb = RUN ? describe : describe.skip;
 
 /**

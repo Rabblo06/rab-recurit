@@ -17,7 +17,7 @@ import { resolveIntegrationTestDatabase } from '@rab/server/database/typeorm/cor
  * for everything that actually exercises RLS/auth, while this connection
  * covers the "owner/migration-style" setup a real seed script would do.
  *
- * The URL comes ONLY from TEST_DATABASE_URL_UNPOOLED, validated by the shared
+ * The URL comes ONLY from TEST_DATABASE_ADMIN_URL (or its deprecated name TEST_DATABASE_URL_UNPOOLED, X3.5-S7), validated by the shared
  * guard (same logical database and endpoint as the application connection; no
  * remote host without ALLOW_REMOTE_TEST_DATABASE=true). Never DATABASE_URL_UNPOOLED,
  * which the developer's .env can point at a remote database.

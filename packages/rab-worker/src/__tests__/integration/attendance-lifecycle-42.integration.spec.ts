@@ -31,6 +31,7 @@ import { runShiftReportSchedulerCycle } from '../../queues/rab-reports/shift-rep
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { SmtpSink } from './helpers/smtp-sink';
 import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
+import { integrationTestDatabaseReady } from '@rab/server/database/typeorm/core/integration-test-database-gate';
 
 /**
  * THE 42-STEP ATTENDANCE LIFECYCLE — one ordered, end-to-end flow, executed for
@@ -54,7 +55,7 @@ import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
  */
 jest.setTimeout(90_000);
 
-const RUN = Boolean(process.env.DATABASE_URL);
+const RUN = integrationTestDatabaseReady();
 const describeIfDb = RUN ? describe : describe.skip;
 
 const VENUE_LAT = 51.508;

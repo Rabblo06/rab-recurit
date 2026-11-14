@@ -5,7 +5,7 @@ import { installSessionRoleResetOnAcquire } from '../../database/postgres/sessio
 import { readSemanticPosture, semanticDriftFromSnapshot } from '../../database/posture-drift/semantic-posture';
 import { GRANT_PARITY_ORDER_SQL, GRANT_PARITY_TARGETS } from '../../database/typeorm/core/grant-parity-guard-sql';
 import { PREAUTH_FORCE_TABLES } from '../../database/typeorm/core/preauth-force-sql';
-import { resolveIntegrationTestDatabase } from '../../database/typeorm/core/test-database-guard';
+import { integrationTestDatabase } from '../../database/typeorm/core/integration-test-database-gate';
 
 /**
  * Owner-login guards on REAL PostgreSQL (disposable PG16 / PG18 built with the owner-login bootstrap), as crewflow_owner:
@@ -20,21 +20,9 @@ import { resolveIntegrationTestDatabase } from '../../database/typeorm/core/test
  * Every planted change is inside a transaction that is ROLLED BACK. Skipped (NOT a pass) unless TEST_DATABASE_URL is the
  * owner login.
  */
-const env = (() => {
-  try {
-    return resolveIntegrationTestDatabase(process.env);
-  } catch {
-    return null;
-  }
-})();
-const appUser = (() => {
-  try {
-    return decodeURIComponent(new URL(process.env.TEST_DATABASE_URL ?? '').username);
-  } catch {
-    return '';
-  }
-})();
-const OWNER = appUser === 'crewflow_owner' && env !== null;
+// DEAD-07: the validated TEST pair (throws on an invalid pair, never a silent skip); the opt-in is the app login itself.
+const env = integrationTestDatabase();
+const OWNER = env.app.login === 'crewflow_owner';
 const suite = OWNER ? describe : describe.skip;
 if (!OWNER) console.warn('[owner-login guards] SKIPPED: TEST_DATABASE_URL is not the owner login crewflow_owner (NOT a pass).'); // eslint-disable-line no-console
 

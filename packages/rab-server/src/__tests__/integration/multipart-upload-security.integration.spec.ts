@@ -15,6 +15,7 @@ import { Organisation } from '../../modules/identity/entities';
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
 import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-pipe';
+import { integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
 
 /**
  * PHASE 11 / DEP-01 — proves the installed Multer version (2.4.0, outside
@@ -36,7 +37,7 @@ import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-
  * unaffected by that defect and are what this suite actually needs to prove
  * multipart parsing behaves correctly.
  */
-const RUN = Boolean(process.env.DATABASE_URL);
+const RUN = integrationTestDatabaseReady();
 const describeIfDb = RUN ? describe : describe.skip;
 jest.setTimeout(30_000);
 

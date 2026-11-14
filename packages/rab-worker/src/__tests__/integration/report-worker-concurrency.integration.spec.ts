@@ -26,6 +26,7 @@ import { runFinalTimesheetCycle } from '../../queues/rab-reports/final-timesheet
 import { runShiftReportSchedulerCycle } from '../../queues/rab-reports/shift-report-scheduler.job';
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
+import { integrationTestDatabaseReady } from '@rab/server/database/typeorm/core/integration-test-database-gate';
 
 /**
  * MULTI-WORKER SAFETY of the two report jobs. Two worker instances discover
@@ -39,7 +40,7 @@ import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
  * `organisationId` narrowing) so the assertion is deterministic even though
  * the shared dev database holds thousands of unrelated test shifts.
  */
-const RUN = Boolean(process.env.DATABASE_URL);
+const RUN = integrationTestDatabaseReady();
 const describeIfDb = RUN ? describe : describe.skip;
 
 describeIfDb('report worker multi-instance concurrency (integration)', () => {

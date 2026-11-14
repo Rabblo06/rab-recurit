@@ -4,7 +4,7 @@ import { DataSource, EntityManager } from 'typeorm';
 import { EnvironmentService } from '../../engine/core-modules/environment/environment.service';
 import { SchemaResolverService } from '../../engine/core-modules/tenant/schema-resolver.service';
 import { TenantContextService } from '../../engine/core-modules/tenant/tenant-context.service';
-import { resolveIntegrationTestDatabase } from '../../database/typeorm/core/test-database-guard';
+import { integrationTestDatabase } from '../../database/typeorm/core/integration-test-database-gate';
 
 /**
  * T-1 (ST-01 / ST-02) on REAL PostgreSQL (disposable PG16 / PG18 built the owner-login way), as crewflow_owner, through
@@ -19,21 +19,9 @@ import { resolveIntegrationTestDatabase } from '../../database/typeorm/core/test
  *     session-scoped changes, the session stays the login.
  * Skipped (NOT a pass) unless TEST_DATABASE_URL is the owner login.
  */
-const env = (() => {
-  try {
-    return resolveIntegrationTestDatabase(process.env);
-  } catch {
-    return null;
-  }
-})();
-const appUser = (() => {
-  try {
-    return decodeURIComponent(new URL(process.env.TEST_DATABASE_URL ?? '').username);
-  } catch {
-    return '';
-  }
-})();
-const OWNER = appUser === 'crewflow_owner' && env !== null;
+// DEAD-07: the validated TEST pair (throws on an invalid pair, never a silent skip); the opt-in is the app login itself.
+const env = integrationTestDatabase();
+const OWNER = env.app.login === 'crewflow_owner';
 const suite = OWNER ? describe : describe.skip;
 if (!OWNER) console.warn('[tenant-context framing] SKIPPED: TEST_DATABASE_URL is not the owner login crewflow_owner (NOT a pass).'); // eslint-disable-line no-console
 

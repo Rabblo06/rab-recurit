@@ -10,6 +10,7 @@ import { TEST_MOCK_MODEL_ID } from '../support/ai/test-catalogue';
 import { scriptedModel, textParts, usage } from './helpers/ai-models';
 import { AiKit, aiOrganisation, ask, bearer, bootAiKit, jobFor, manager, newConversation } from './helpers/ai-test-kit';
 import { TestIdentity } from './helpers/test-identities';
+import { integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
 
 /**
  * Batch 3 S1 — `usage` + `modelId` per assistant message and `usageTotals` on `GET /ai/conversations/:id`, read from the
@@ -21,7 +22,7 @@ import { TestIdentity } from './helpers/test-identities';
  *     wrote under one of the CEO's turn ids is NOT shown to the CEO (the explicit owner predicate, even though the CEO's
  *     RLS could read it); the API never reads the ledger without a tenant context (zero rows).
  */
-const RUN = Boolean(process.env.DATABASE_URL);
+const RUN = integrationTestDatabaseReady();
 const describeIfDb = RUN ? describe : describe.skip;
 
 type Who = Pick<TestIdentity, 'organisationId' | 'workspaceId' | 'userId'>;

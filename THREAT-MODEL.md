@@ -5709,7 +5709,18 @@ writes a warning instead.
           unhealthy;
         - production Redis runs AOF with `noeviction`;
         - the API's registration step is idempotent, so any API start restores every scheduler.
-      - Recommended follow-up: alert on Worker unhealthy.
+      - Follow-up, partly done (X2.4, Twenty's model: shown in the admin panel, no external alerting). The STATE is
+        now shown, and there is still NO ALERTING.
+        - The Admin Panel Health tab shows the Worker heartbeat with per-queue failed/waiting counts.
+        - A BullMQ schedulers indicator reads `ZCARD <prefix>:<scan queue>:repeat` against the Worker's last reconcile
+          report. It turns degraded when schedulers are missing or none are left in Redis.
+        - The indicators are read-only, platform-admin only (PlatformAdminGuard + service check, 403), and audited as
+          `admin.health_viewed`.
+        - Nothing pages anyone: a lost scheduler is seen only when an operator opens the tab (or reads the Worker's
+          ERROR log).
+        - Only `/healthz` (API + database) is meant for an external uptime monitor (runbook 3.5a), and it does not
+          cover the Worker or the schedulers.
+        - Accepted as Twenty's model, 2026-11-12. "Alert on Worker unhealthy" itself stays open.
       - `/healthz` exposes only `upgradeFailed: true|false` for C3, never the failed migration's name (coordinator
         decision 2026-11-05, stricter than the original proposal). The name is in the ERROR log only.
 
@@ -7021,6 +7032,73 @@ Phase X Part 2 finding XA-08 (`docs/plans/PHASE-X-STAGE0-PART2.md` §2.6). Front
   are not reported (owner text: the 500 branch only). Exception events carry the scrubbed request URL path (path
   segments are kept, as in P0-sentry). No user or organisation is attached to these events.
 
+## /healthz databaseLogin — the health check notices a refused runtime login (branch fix/api-health-db-login, 2026-11-13, PR #133)
+- **Asset:** availability signal of the API; the runtime login `crewflow_owner`.
+- **Before:** /healthz only pinged through the pool (`SELECT 1` on an existing connection), so a changed or revoked login stayed
+  invisible until the pool needed a new connection (observed live in the #125 deliberate-password-change test).
+- **Control:** a new indicator opens ONE fresh runtime-login connection through the connection factory (same target, login,
+  TLS and startup options as the runtime pool; read-only session; `application_name` ending `-health`), runs `SELECT 1`,
+  closes it. Single flight; result (up or down) cached 5 s on a monotonic clock; connect 2.5 s / query 1.5 s / whole probe 3 s.
+  Response: `status` plus the fixed text "database login failed" only (no URL, login, SQLSTATE or driver message); one log
+  line per state change with the SQLSTATE only. The connection budget counts one probe connection per API instance.
+- **Accepted signal:** /healthz is public and unauthenticated, so a caller can now tell "database reachable but the runtime
+  login is refused" from "database down" (owner decision: notice lost logins). It reveals when credentials are rotated or
+  revoked, nothing more.
+- **Residual:** under severe CPU starvation the 3 s deadline can briefly report the login down (compose marks the container
+  unhealthy only after 15 consecutive failures; `restart: unless-stopped` does not restart unhealthy containers). Behind a
+  transaction pooler with its own auth file, client auth can succeed on a stale password; only the primary endpoint is probed.
+- **Tests:** `database-login.health.spec.ts` (up; 28P01 with no leak; query failure; factory refusal fails closed; deadline;
+  single flight under 25 concurrent; cache up/down; clock jump backwards re-probes), connection-budget spec (probe slots),
+  `healthz-database-login.integration.spec.ts` (password changed → 503 while the pooled ping is up; NOLOGIN; burst of 50
+  opens one login; read-only `-health` session).
+
+## X3.5-S7 / DEAD-07 — the test admin URL is renamed, and no integration suite can skip silently (branches cleanup/x35-s7-test-admin-url, cleanup/x35-dead07-helper, 2026-11-13, PRs #126 and #127)
+- **Asset:** the disposable test cluster's bootstrap SUPERUSER URL (fixtures, identity probes, in-Jest migrations), and
+  the guarantee that the RLS / tenant / payroll integration suites actually run.
+- **S7 (release 1):** the admin URL is `TEST_DATABASE_ADMIN_URL`. The old name `TEST_DATABASE_URL_UNPOOLED` is still
+  accepted.
+  - Two different values are refused, compared as written, names only.
+  - Every X1.8 / X1.9 rule applies to whichever name supplied it.
+  - setupFiles writes the validated value under both names, so a later dotenv load cannot add a second value.
+  - The Worker-login switch refuses the admin login under either name.
+  - Every committed child-process strip list removes both names. A static spec checks this, and both CI helpers emit both
+    names with one value.
+  - Abuse cases: `test-database-guard.spec.ts` (X3.5-S7 block), `test-database-admin-url-names.spec.ts`,
+    `run-ai-e2e-env.test.cjs` (the new name and an alias of its value reach the AI e2e seed only).
+- **DEAD-07:** ~280 specs used to skip when the legacy primary URL was absent. Under Jest that branch was dead, but a
+  routing change (S6 / S8) would have turned every RLS, tenant and payroll suite into a silent skip.
+  - They now gate on `integrationTestDatabaseReady()`, which throws (never returns false) unless NODE_ENV=test and the
+    validated TEST pair are present.
+  - An AST scan fails CI if any spec skip-conditional depends on a routing connection name again
+    (`integration-test-database-gate.spec.ts`).
+- **Spec-spawned runtime children** (`runtimeChildBaseEnv`, provisioner / Worker / API spawned by worker specs) no longer
+  inherit either admin name, any `TEST_DATABASE_*` URL, `DATABASE_URL_UNPOOLED`, `MIGRATION_SECURITY_ADMIN_URL`, the role
+  bootstrap / owner / migrator passwords, or any variable holding an admin URL's password; a spec re-adds the one URL a child
+  needs after the base (`runtime-child-env.spec.ts`).
+- **Specs take the admin URL from the validated pair** (`integrationTestDatabase().adminUrl`), never from the environment;
+  a scan fails CI on any spec or test helper reading `TEST_DATABASE_URL_UNPOOLED`, `TEST_DATABASE_ADMIN_URL` or
+  `DATABASE_URL_UNPOOLED` from `process.env` (aliases, destructuring and computed keys included).
+- **Residual:** `rab-worker/.../helpers/email-process-child.cjs:33` (a forked fixture child) still reads the legacy
+  `DATABASE_URL_UNPOOLED` the Jest guard writes; it moves with S6 (the parent passes the admin URL explicitly).
+- **Release 2 (S8):** the old name is refused; the strip lists keep both names permanently.
+
+- **X2.4 Admin Panel health indicators (2026-11-12).** Actor: a signed-in non-platform-admin → `GET
+  /rest/v1/admin/health/report` → 403 (PlatformAdminGuard, then `assertActivePlatformAdmin` in the service for direct
+  callers); no audit row and no probe. A platform admin sees: API version/commit/Node/uptime, database connections vs
+  max_connections (from `pg_stat_database`, cluster-wide), Redis version and memory (`INFO server` / `INFO memory`),
+  per-queue BullMQ counts, scheduler counts. No tenant data, no host names, no URLs, no raw error text (fixed strings;
+  a failing probe says "Not reachable."). Every Redis call is a read command (tested against `COMMAND INFO` flags);
+  the report cache moved from Redis `SET EX` to process memory. Access audited as `admin.health_viewed` in the admin's
+  organisation: at most once per admin per API process every 5 minutes, plus every manual Refresh (owner assumption,
+  see the PR; at most one refresh row per admin per 5 s). A process restart resets the dedupe. The audit write is
+  bounded at 2 s and fails closed (best-effort is an open owner decision). `?refresh=1` re-probes only a report at
+  least 5 s old, through one shared in-flight probe set, so refreshes cannot multiply probes. The
+  `admin.health_viewed` rows are NOT visible in the Admin Panel Audit tab until a later migration adds the action to
+  the timeline function's allowlist (`ADMIN_AUDIT_ACTIONS_*`); until then they are in `core.audit_log` only.
+  The X1.1 "Security audit events" card (dropped failed-login audit events: durable total, this API process's count,
+  last backlog reading; a warning when anything was dropped or the total cannot be read) is kept on the reworked page
+  as one more read-only indicator (`auditEvents`, a single Redis `GET` of the drop counter, bounded like every probe).
+
 ## XP-09 Q2/Q3 — Worker auth cleanup steps are isolated and drain the backlog in bounded batches (branch fix/worker-auth-cleanup-loop, 2026-11-13, PR #131)
 - **Threat:** a failure in the refresh-token cleanup (e.g. the XP-09 23503) stopped the whole cycle, so the OAuth sign-in
   state cleanup after it never ran and rows holding provider e-mails were kept past their retention; and at most one batch
@@ -7300,6 +7378,90 @@ image that runs the apps' own derive step on the read-only volume (`--pull never
   interpolated `PG_DATABASE_URL` on rab-api / rab-worker, `PG_DATABASE_ADMIN_URL`); the image gate (any file under
   `/run/crewflow/db-target` in the image fails it); area 6's `deploy-order-tests/run-db-setup-tests.cjs` on postgres 16,
   17 and 18, NOT yet re-run on the Helm model.
+
+## XP-09 Q6 — refresh-token revocation keeps the first revocation time (branch fix/refresh-token-revoke-first-wins, 2026-11-13, PR #132)
+- **Threat:** an attacker or user replays an old, rotated refresh token, or several revocations happen (logout, password
+  change, reuse detection). Each one rewrote `core.refresh_token.revoked_at` on every row of the family or user, including
+  rows already revoked. That erased when a token actually stopped being valid (reuse-investigation evidence) and restarted
+  the 181-day retention clock of `core.worker_cleanup_auth_tokens`, so repeated replays could keep dead token rows forever.
+- **Control:** `RefreshTokenService.revokeFamily`, `revokeAllForUser` and `revokeAllForUserExcept` ("log out of other
+  devices" and the MFA-change path, profile.service.ts / mfa-management.service.ts) stamp only rows
+  `WHERE revoked_at IS NULL` — the same rule as `revokeAllForOrganisation` and the `user_session` CAS. Live rows are still revoked; revoked rows keep their
+  first time. No row can become un-revoked.
+- **Tests:** `refresh-token-revoke-first-wins.integration.spec.ts` (revoke, then revoke again later → revoked_at unchanged,
+  for all three methods, incl. revokeAllForUserExcept keeping the excepted family live and backdated times unchanged; replaying a rotated token twice keeps its rotation time; fails 3/3 on the previous code) and unit tests
+  in `refresh-token.service.spec.ts`.
+
+## OWNER-DB-ULTIMATE Part B — upgrade logbook `core.upgrade_migration`, like Twenty's upgradeMigration (branch deploy/upgrade-ledger; SQL owner-approved: REVISED, REVISED 2 and the PG18 self-check, 2026-11-13/14)
+
+- **What.** Every start records each upgrade step in `core.upgrade_migration` (migration
+  `UpgradeMigrationLedger1786721470000`): `<version>_TypeOrmMigrations`, then one row per upgrade command, `completed`
+  or `failed`, attempt N, `executed_by_version`, `forced`, `is_initial` (one-time adoption of an R254 / R256 history as
+  0.4.0 / 0.5.0; a new workspace's first row). Behaviour re-implemented from twentyhq/twenty @ eedb0a73 (the
+  upgrade-migration service, upgrade command runner, workspace.service.ts:813), not copied.
+- **Threats.** (1) A request handler, the legacy runtime role or another tenant reads or forges upgrade history (a fake
+  completed step skips a needed upgrade, or a failure is hidden). (2) Rows are rewritten or deleted to hide a failed or
+  forced upgrade. (3) An old or unknown database is upgraded across a skipped release. (4) A test-only seam (a fake or
+  failing upgrade command) reaches a real deployment. (5) Public `/healthz` tells an unauthenticated caller the version,
+  step or error text. (6) An operator rolls an image back across 0.6.0 and the service does not come up.
+- **Controls.**
+  - **Table + RLS in the same migration.** Owner `rab_secure_owner` (NOLOGIN); `REVOKE ALL` from PUBLIC, crewflow and
+    crewflow_app; the owner role holds SELECT, INSERT and DELETE only. ENABLE + FORCE RLS. No UPDATE or TRUNCATE
+    privilege for anyone. CHECKs: name pattern, status `completed|failed`, attempt ≥ 1, strict version, a message only on
+    failed rows and ≤ 4000 chars, `is_initial` ⇒ attempt 1 and not forced. FK `workspace_id` → `core.manager_workspace`
+    ON DELETE CASCADE. Twenty's four indexes (two partial unique).
+  - **Scope setting.** Every policy is keyed on the transaction-local `rab.upgrade_scope`, set only by the upgrade code
+    (`withUpgradeScope`; the value is a bound parameter):
+    - `upgrade`: read and insert, only with no tenant bound and only while THIS backend holds the migration advisory
+      lock (pg_locks, classid/objid of `0x637265776d696772`);
+    - `status`: read only, no tenant bound;
+    - `workspace_init`: insert of an `is_initial` row for a workspace of the bound organisation only;
+    - unset (every request handler): 0 rows, insert 42501. A RESTRICTIVE `USING (false) WITH CHECK (false)` policy
+      covers crewflow_app.
+    `withUpgradeScope` refuses to open a scope in a transaction that already wrote, in a multi-statement transaction, or
+    over a non-empty scope (a simple-protocol pre-check), and checks the same backend afterwards. `TenantContextService`
+    clears the setting in every tenant transaction.
+  - **Owner DELETE, for the cascade only (REVISED 2).** PostgreSQL runs an ON DELETE CASCADE as the referencing table's
+    owner and checks that owner's DELETE privilege, so the owner keeps DELETE. There is no DELETE policy: any direct
+    DELETE (the owner login included) removes 0 rows under FORCE RLS. Rows leave only with their workspace.
+  - **Test seams refused outside tests.** `CREWFLOW_TEST_UPGRADE_COMMANDS` / `CREWFLOW_TEST_UPGRADE_FAIL_COMMAND` exit 64
+    unless NODE_ENV=test on a database marked `crewflow.disposable_test_database`, outside production
+    (runtime-db-config.ts, migrate-on-start.ts), and `api-prestart.sh` refuses them with the other migration seams.
+  - **Version refusal.** Before any write, `decideUpgradeStart` refuses a database that has not completed the previous
+    version, has an unknown / unadoptable history, or skips a release: exit 65, nothing applied (supported floor R254 =
+    0.4.0, R256 = 0.5.0). `upgrade --force` (a one-off `docker compose run --rm --no-deps rab-api node
+    packages/rab-server/dist/command upgrade --force`) skips only that refusal and marks every row it writes
+    `forced = true`; no environment variable can set it. A `CREWFLOW_APP_VERSION` that disagrees with package.json, or is
+    set without one, exits 64.
+  - **Failure semantics.** A failed migration never serves (exit 66, retried on the next start). Only a verified failed
+    upgrade COMMAND with every migration applied serves (exit 70). `CREWFLOW_UPGRADE_FAILURE`, `_POLICY` and
+    `CREWFLOW_UPGRADE_INCOMPLETE` were removed and are refused (64).
+  - **`/healthz` is a boolean (owner decision 2026-11-14).** Public: exactly
+    `upgrade: { status: 'up', upgradeFailed: true|false }`. No version, step, state word or error text in any state;
+    always `up` (200). The state, step, versions, attempt and forced flag are on the platform-admin health report only,
+    and `error_message` is never shown there either.
+  - **Rollback is a restore.** Going back from 0.6.0 to an older image (R256, R254) is only possible by restoring the
+    pre-0.6.0 backup: the older image's semantic-posture boot gate refuses the logbook objects (finding L7). Runbook 3.3
+    and 3.6 and the rab-docs deployment page say so; the backup is mandatory before 0.6.0.
+- **Residual risks (accepted).**
+  - **R1 (Info, accepted 2026-11-13):** `markNewWorkspaceInitial` takes a structural `{ id, organisationId }`, not proof
+    that the workspace was just created. A caller on the creating code path could write an `is_initial` row for another
+    existing workspace of the SAME organisation. This is bounded by the import allowlist (`upgrade-imports.spec.ts`), the
+    same-organisation policy and the bound-organisation check; no xmin-based proof was added in SQL.
+  - `error_message` is stored as-is (length-capped) and may contain what the failing step printed. Only the upgrade and
+    status scopes can read it; request handlers and /healthz cannot.
+  - The semantic goldens grew (+7 lines on PG16/17/18; the `acl|` section is generalized to `ACL_WATCHED_TABLES`), so any
+    older image refuses a 0.6.0 database (rollback is a restore, above).
+- **Tests.**
+  - `upgrade-migration-ledger.integration.spec.ts` (11 tests): scopes, the lock, cross-org 42501, an owner DELETE that
+    removes 0 rows, the cascade, UPDATE / TRUNCATE 42501, the CHECKs, the real node-pg driver for the simple-protocol
+    pre-check, and a read-only transaction refused (R2).
+  - The upgrade-version / -sequence / -version-check / -runner / -status / upgrade-imports specs.
+  - `upgrade-status.spec.ts`: no version, step, state or error text in /healthz in any state; the admin card keeps the
+    detail.
+  - runtime-db-config and the prestart shell tests: the removed names, the seams, the exit 66/70 veto.
+  - The semantic-posture acl spec; the security-posture golden (+4) and the semantic goldens (pg16/17/18).
+  - B2's suites (`upgrade-ledger-tests/`, the S-layer specs) on PG16/17/18.
 
 ## X2.3 / Part F2 — dev and QA on Part A's database setup; one postgres server per data volume (branch build/dev-qa-helm-setup, 2026-11-13; supersedes the #120 draft)
 - **Change:** docker-compose.yml (dev) and docker-compose.qa.yml (QA) run Part A's setup: the bundled `db` (production's text

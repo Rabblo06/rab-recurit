@@ -9,13 +9,14 @@ import { LOGIN_HANDOFF_CLEANUP_LOCK } from '../../queues/rab-maintenance/login-h
 import { EXPECTED_SCAN_SCHEDULER_IDS } from './helpers/expected-scan-jobs';
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { TEST_DATABASE_CREWFLOW_URL, verifiedCrewflowUrl } from './helpers/verified-role-database';
+import { integrationTestDatabaseReady } from '@rab/server/database/typeorm/core/integration-test-database-gate';
 
 /**
  * Lane A M3/M7 — the per-scan cluster lock on a REAL PostgreSQL (disposable test database), as crewflow_app.
  */
 jest.setTimeout(120_000);
 const APP_URL = process.env.DATABASE_URL;
-const describeIfDb = APP_URL ? describe : describe.skip;
+const describeIfDb = integrationTestDatabaseReady() ? describe : describe.skip;
 const logger = { log: jest.fn(), warn: jest.fn() };
 const ID = 'crewflow:crewflow-scan-shifts:shift-monitor';
 

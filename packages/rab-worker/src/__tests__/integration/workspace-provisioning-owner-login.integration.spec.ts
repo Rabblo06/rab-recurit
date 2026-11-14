@@ -20,6 +20,7 @@ import {
 } from '../../queues/rab-maintenance/workspace-provisioning.loops';
 import { PROVISIONING_LOCK_WAIT_MS } from '../../queues/rab-maintenance/workspace-provisioning.job';
 import { createAdminDataSource } from './helpers/admin-datasource';
+import { integrationTestDatabaseReady } from '@rab/server/database/typeorm/core/integration-test-database-gate';
 
 /**
  * Owner-login architecture, T4: workspace provisioning IN-PROCESS in the Worker on the one schema-owning login, real
@@ -37,7 +38,7 @@ import { createAdminDataSource } from './helpers/admin-datasource';
  *     provisioner-strict check skips the cycle and nothing is provisioned; with the matching code it provisions;
  *  7. permission failures: a login that cannot SET crewflow, and crewflow_app, are refused before any cycle.
  */
-const RUN = Boolean(process.env.DATABASE_URL);
+const RUN = integrationTestDatabaseReady();
 const describeIfDb = RUN ? describe : describe.skip;
 jest.setTimeout(240_000);
 

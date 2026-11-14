@@ -188,7 +188,7 @@ function resolveRuntimeDatabaseUnchecked(input: RuntimeDbInput): ResolvedRuntime
   }
 
   // Owner-login architecture: the remaining database start-up settings (CREWFLOW_MIGRATE_ON_START,
-  // CREWFLOW_MIGRATION_APPROVAL_MODE, CREWFLOW_UPGRADE_FAILURE_POLICY) are validated here as well, so a process started
+  // CREWFLOW_MIGRATION_APPROVAL_MODE; the removed CREWFLOW_DB_MODE / CREWFLOW_UPGRADE_FAILURE(_POLICY)) are validated here as well, so a process started
   // without api-prestart.sh never runs with a malformed value. Names and allowed values only, never the value.
   const [configProblem] = runtimeDbConfigProblems(env);
   if (configProblem) throw new RuntimeDbError(`The ${processName} process: ${configProblem}`);

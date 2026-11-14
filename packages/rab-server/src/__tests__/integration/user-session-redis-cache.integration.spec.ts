@@ -17,6 +17,7 @@ import { TenantContextService } from '../../engine/core-modules/tenant/tenant-co
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { TestIdentityFactory } from './helpers/test-identities';
 import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-pipe';
+import { integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
 
 /**
  * Redis checkpoint — the Twenty-style UserSession cache, exercised with `USER_SESSION_CACHE_ENABLED=true`
@@ -28,7 +29,7 @@ import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-
  * request regardless of cache state, so a revoked/expired session must be denied exactly as
  * reliably whether the identity lookup that preceded it was a cache hit or a cache miss.
  */
-const RUN = Boolean(process.env.DATABASE_URL);
+const RUN = integrationTestDatabaseReady();
 const describeIfDb = RUN ? describe : describe.skip;
 jest.setTimeout(60_000);
 

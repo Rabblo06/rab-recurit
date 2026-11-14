@@ -62,6 +62,7 @@ import {
 } from '../core/migration-source-rules';
 import { PREAUTH_DEFINER_EXPRESSION, PREAUTH_FORCE_TABLES, preauthDefinerPolicyName } from '../core/preauth-force-sql';
 import { compareWithGolden, readSecurityPostureGoldens } from '../core/security-posture';
+import { TEST_DATABASE_ADMIN_URL_NAMES } from '../core/test-database-guard';
 import { WORKER_ROLE_FACTS_SQL, WorkerRoleFacts, workerRoleProblems } from '../core/worker-dispatch-pointer-sql';
 import { PENDING_FINGERPRINT_VERSIONS } from '../workspace-schema/v1/expected-fingerprints';
 
@@ -189,6 +190,20 @@ export const REVIEWED_MIGRATION_DRIFT: Readonly<Record<string, readonly string[]
     "+ policy|platform_admin|platform_admin_select|r|permissive=true|roles=public|using= CASE WHEN (CURRENT_USER = 'rab_secure_owner'::name) THEN false ELSE ((user_id = core.current_uid()) OR core.is_active_platform_admin()) END|check=",
     "+ policy|platform_admin|platform_admin_update|w|permissive=true|roles=public|using= CASE WHEN (CURRENT_USER = 'rab_secure_owner'::name) THEN false ELSE core.is_active_platform_admin() END|check= CASE WHEN (CURRENT_USER = 'rab_secure_owner'::name) THEN false ELSE core.is_active_platform_admin() END",
     "+ policy|platform_admin|platform_admin_write|a|permissive=true|roles=public|using=|check= CASE WHEN (CURRENT_USER = 'rab_secure_owner'::name) THEN false ELSE core.is_active_platform_admin() END",
+  ],
+  // OWNER-DB-ULTIMATE Part B (SQL owner-approved: REVISED, REVISED 2 and the PG18 self-check, 2026-11-13/14; THREAT-MODEL
+  // "OWNER-DB-ULTIMATE Part B"): the five RLS policies of core.upgrade_migration, added only: read / insert keyed on the
+  // transaction-local rab.upgrade_scope ('upgrade' needs no tenant and THIS backend holding the migration advisory lock;
+  // 'workspace_init' only an is_initial row of the bound organisation's workspace) and the RESTRICTIVE deny-all for
+  // crewflow_app. Its table ACL (rab_secure_owner SELECT, INSERT, DELETE only) and ENABLE + FORCE RLS are pinned by the
+  // golden posture snapshot and the migration's own post-condition; no runtime login gains a table privilege. Lines as
+  // measured on PostgreSQL 16 (fresh as the restricted migrator and upgrade as the bootstrap superuser: identical).
+  '1786721470000-UpgradeMigrationLedger': [
+    "+ policy|upgrade_migration|upgrade_migration_legacy_deny|*|permissive=false|roles=crewflow_app|using=false|check=false",
+    "+ policy|upgrade_migration|upgrade_migration_upgrade_insert|a|permissive=true|roles=public|using=|check=((current_setting('rab.upgrade_scope'::text, true) = 'upgrade'::text) AND (core.current_org() IS NULL) AND (EXISTS ( SELECT 1 FROM pg_locks l WHERE ((l.locktype = 'advisory'::text) AND l.granted AND (l.pid = pg_backend_pid()) AND (l.database = ( SELECT d.oid FROM pg_database d WHERE (d.datname = current_database()))) AND (l.classid = (1668441463)::oid) AND (l.objid = (1835624306)::oid) AND (l.objsubid = 1)))))",
+    "+ policy|upgrade_migration|upgrade_migration_upgrade_select|r|permissive=true|roles=public|using=((current_setting('rab.upgrade_scope'::text, true) = ANY (ARRAY['upgrade'::text, 'status'::text])) AND (core.current_org() IS NULL))|check=",
+    "+ policy|upgrade_migration|upgrade_migration_workspace_insert|a|permissive=true|roles=public|using=|check=((current_setting('rab.upgrade_scope'::text, true) = 'workspace_init'::text) AND is_initial AND (workspace_id IS NOT NULL) AND (EXISTS ( SELECT 1 FROM core.manager_workspace w WHERE ((w.id = upgrade_migration.workspace_id) AND (w.organisation_id = core.current_org())))))",
+    "+ policy|upgrade_migration|upgrade_migration_workspace_select|r|permissive=true|roles=public|using=((current_setting('rab.upgrade_scope'::text, true) = 'workspace_init'::text) AND (workspace_id IS NOT NULL) AND (EXISTS ( SELECT 1 FROM core.manager_workspace w WHERE ((w.id = upgrade_migration.workspace_id) AND (w.organisation_id = core.current_org())))))|check=",
   ],
 };
 
@@ -546,7 +561,8 @@ async function finalChecks(db: string, scenario: 'fresh' | 'upgrade'): Promise<v
   // The child gets the crewflow_app URL it needs and none of the bootstrap secrets.
   const childEnv: NodeJS.ProcessEnv = { ...process.env, DATABASE_URL: url(db, 'crewflow_app') };
   for (const k of ['MIGRATION_SECURITY_ADMIN_URL', 'CREWFLOW_BOOTSTRAP_PASSWORD', 'CREWFLOW_APP_BOOTSTRAP_PASSWORD', 'DATABASE_URL_UNPOOLED',
-    'TEST_DATABASE_URL', 'TEST_DATABASE_URL_UNPOOLED', 'TEST_DATABASE_CREWFLOW_URL', 'APP_SECRET',
+    // X3.5-S7: the test admin URL under every name it can carry (the shared list, so a rename cannot be missed here).
+    'TEST_DATABASE_URL', ...TEST_DATABASE_ADMIN_URL_NAMES, 'TEST_DATABASE_CREWFLOW_URL', 'APP_SECRET',
     // E5: CI now exports the worker's bootstrap password (disposable-postgres); the RLS-gate child needs neither it nor the URL.
     'CREWFLOW_WORKER_BOOTSTRAP_PASSWORD', 'TEST_DATABASE_WORKER_URL']) delete childEnv[k];
   // Permanent owner login (owner decision, PERMANENT-OWNER-LOGIN-ADDENDUM): the RLS coverage gate connects ONLY as

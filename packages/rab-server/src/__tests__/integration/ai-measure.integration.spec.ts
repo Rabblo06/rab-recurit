@@ -2,6 +2,7 @@ import './helpers/ai-env';
 
 import { seedStaffing } from './helpers/ai-fixtures';
 import { AiKit, aiOrganisation, ask, bootAiKit, jobFor, newConversation, readSse, turnRow } from './helpers/ai-test-kit';
+import { integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
 
 /**
  * AI Phase 1 — MEASUREMENTS on the local test stack (deterministic mock model, so model latency here is NOT a provider
@@ -9,7 +10,7 @@ import { AiKit, aiOrganisation, ask, bootAiKit, jobFor, newConversation, readSse
  * Measured: per-stage latency, database transactions per turn (pg_stat_database delta — this suite runs alone on its
  * database), peak crewflow_app connections, Redis keys left per turn, heap growth over 20 turns, mock token use.
  */
-const RUN = Boolean(process.env.DATABASE_URL);
+const RUN = integrationTestDatabaseReady();
 const describeIfDb = RUN ? describe : describe.skip;
 
 describeIfDb('AI measurements (integration)', () => {

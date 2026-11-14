@@ -25,6 +25,7 @@ import { dispatchStatementScope, runShiftStatementDispatchCycle } from '../../qu
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { bookBeforeDeadline } from './helpers/book-before-deadline';
 import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
+import { integrationTestDatabaseReady } from '@rab/server/database/typeorm/core/integration-test-database-gate';
 
 /**
  * Phase D wave 2 — FIRST CUTOVER (owner prompt §9). The pointer table starts EMPTY: work written before the pointer
@@ -53,7 +54,7 @@ import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
  * .spec.ts); production's Worker has one tenant context with HWS on for every organisation.
  */
 const WORKER_URL = process.env.TEST_DATABASE_WORKER_URL;
-const RUN = process.env.PHASE_D_SQL_APPROVED === 'true' && Boolean(WORKER_URL && process.env.DATABASE_URL);
+const RUN = process.env.PHASE_D_SQL_APPROVED === 'true' && Boolean(WORKER_URL) && integrationTestDatabaseReady();
 const describeIfApproved = RUN ? describe : describe.skip;
 const TEST_ENV = 'inttest';
 jest.setTimeout(300_000);

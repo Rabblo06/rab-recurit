@@ -23,6 +23,7 @@ import { createEmailSendProcessor } from '../../queues/rab-email/email-send.proc
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { cancelLeftoverClaimableEmails } from './helpers/email-leftovers';
 import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
+import { integrationTestDatabaseReady } from '@rab/server/database/typeorm/core/integration-test-database-gate';
 
 /**
  * Worker-side guarantees for email-first member invitations, against real PostgreSQL (RLS on) and the real send
@@ -33,7 +34,7 @@ import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
  *  - retries never deliver twice.
  */
 jest.setTimeout(60_000);
-const RUN = Boolean(process.env.DATABASE_URL);
+const RUN = integrationTestDatabaseReady();
 const describeIfDb = RUN ? describe : describe.skip;
 
 describeIfDb('member invitation delivery (worker revalidation)', () => {

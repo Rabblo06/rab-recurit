@@ -33,9 +33,16 @@ describe('security readiness (posture monitor → /healthz)', () => {
       },
     };
     const db = { pingCheck: async () => ({ database: { status: 'up' } }) };
-    const controller = new HealthController(health as never, db as never);
+    const databaseLogin = { isHealthy: async () => ({ databaseLogin: { status: 'up' } }) };
+    const controller = new HealthController(health as never, db as never, databaseLogin as never);
     // O3 C3: plus the informational upgrade entry (a boolean; this process did not start after a failed upgrade).
-    await expect(controller.check()).resolves.toEqual([{ database: { status: 'up' } }, { security: { status: 'up' } }, { upgrade: { status: 'up', upgradeFailed: false } }]);
+    // 2026-11-13: plus `databaseLogin` (a NEW connection can be opened; database-login.health.ts).
+    await expect(controller.check()).resolves.toEqual([
+      { database: { status: 'up' } },
+      { databaseLogin: { status: 'up' } },
+      { security: { status: 'up' } },
+      { upgrade: { status: 'up', upgradeFailed: false } },
+    ]);
     registerSecurityReadiness(() => false);
     let thrown: unknown;
     try {

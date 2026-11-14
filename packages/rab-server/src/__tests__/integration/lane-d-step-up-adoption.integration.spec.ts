@@ -19,6 +19,7 @@ import { createAdminDataSource } from './helpers/admin-datasource';
 import { codeAt, secretFromOtpauth } from './helpers/mfa-test-kit';
 import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
 import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-pipe';
+import { integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
 
 /**
  * Lane D (owner decision M10-2): `StepUpReauthService.assertRecentStepUp` had ZERO callers, so every "sensitive" action
@@ -30,7 +31,7 @@ import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-
  * allowed after POST /auth/step-up. MFA-enrolled actors must include the code. Admin Inspect is refused. Service-direct
  * calls (no controller / guard) are refused the same way. The legacy password sites now honour the session's grant.
  */
-const RUN = Boolean(process.env.DATABASE_URL);
+const RUN = integrationTestDatabaseReady();
 const describeIfDb = RUN ? describe : describe.skip;
 const ORIGIN = 'http://localhost:5173';
 const sha256 = (v: string) => createHash('sha256').update(v).digest('hex');

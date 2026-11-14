@@ -40,8 +40,9 @@ import { Venue } from '@rab/server/modules/venue/entities/venue.entity';
 import { runRealtimeOutboxPublishCycle } from './publish-outbox.job';
 import { createAdminDataSource } from '../../__tests__/integration/helpers/admin-datasource';
 import { createTestIdentityFactory } from '../../__tests__/integration/helpers/test-identities';
+import { integrationTestDatabaseReady } from '@rab/server/database/typeorm/core/integration-test-database-gate';
 
-const RUN = Boolean(process.env.DATABASE_URL) && process.env.RAB_REALTIME_MEASURE === '1';
+const RUN = integrationTestDatabaseReady() && process.env.RAB_REALTIME_MEASURE === '1';
 const describeIfMeasure = RUN ? describe : describe.skip;
 jest.setTimeout(15 * 60_000);
 

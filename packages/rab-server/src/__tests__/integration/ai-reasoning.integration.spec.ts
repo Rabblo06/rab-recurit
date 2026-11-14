@@ -6,13 +6,14 @@ import { Logger } from '@nestjs/common';
 import { AiStreamService } from '../../modules/ai/services/ai-stream.service';
 import { scriptedModel, usage } from './helpers/ai-models';
 import { AiKit, aiOrganisation, ask, bootAiKit, jobFor, newConversation, readSse } from './helpers/ai-test-kit';
+import { integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
 
 /**
  * C1 CD-7 / TW-D7 — REASONING-CANARY: the Worker discards every reasoning delta and every provider signature and
  * publishes only `{type:'reasoning', phase, durationMs}` (server clock). The canary text and signature must be absent
  * from the Redis stream, the SSE, every database row of the conversation, the audit log and the logs.
  */
-const RUN = Boolean(process.env.DATABASE_URL);
+const RUN = integrationTestDatabaseReady();
 const describeIfDb = RUN ? describe : describe.skip;
 const CANARY = 'REASONING-CANARY-9d2e41-private-chain-of-thought';
 const SIGNATURE = 'REASONING-SIGNATURE-CANARY-c0ffee';

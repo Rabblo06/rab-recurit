@@ -9,8 +9,9 @@ import { AiTitleService } from '../../modules/ai/services/ai-title.service';
 import { titleJobData } from '../../modules/ai/services/ai-turn-queue.service';
 import { scriptedModel, textParts, toolCallParts } from './helpers/ai-models';
 import { AiKit, aiOrganisation, bearer, bootAiKit, jobFor, turnRow } from './helpers/ai-test-kit';
+import { integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
 
-const RUN = Boolean(process.env.DATABASE_URL);
+const RUN = integrationTestDatabaseReady();
 const describeIfDb = RUN ? describe : describe.skip;
 
 describeIfDb('AI platform kill switch OFF (integration)', () => {

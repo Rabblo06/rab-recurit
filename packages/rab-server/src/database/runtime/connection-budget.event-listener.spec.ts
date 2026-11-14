@@ -12,8 +12,8 @@ describe('connection budget — Phase D event-mode listener row', () => {
     for (const env of [SHAPE_2_2, { ...SHAPE_2_2, WORKER_DISPATCH_MODE: 'poll' }]) {
       const plan = planConnectionBudget(readDeploymentShape(env).shape!);
       expect(plan.rows.map((r) => r.item)).not.toContain('Worker dispatch listener (event mode)');
-      // 2×10 + 2×(12+6+2+2) + 3 + 3 = 70
-      expect(plan.total).toBe(70);
+      // 2×(10+1 health login probe) + 2×(12+6+2+2) + 3 + 3 = 72
+      expect(plan.total).toBe(72);
     }
   });
 
@@ -21,7 +21,7 @@ describe('connection budget — Phase D event-mode listener row', () => {
     const plan = planConnectionBudget(readDeploymentShape({ ...SHAPE_2_2, WORKER_DISPATCH_MODE: 'event' }).shape!);
     const row = plan.rows.find((r) => r.item === 'Worker dispatch listener (event mode)');
     expect(row).toEqual({ item: 'Worker dispatch listener (event mode)', each: 1, count: 2, total: 2, runtimeRole: true, workerLogin: true });
-    expect(plan.total).toBe(72);
+    expect(plan.total).toBe(74);
     // Worker login rows: 2 × (12 + 6 + 2 + 1) = 42
     expect(plan.workerRoleTotal).toBe(42);
   });
@@ -31,12 +31,12 @@ describe('connection budget — Phase D event-mode listener row', () => {
   });
 
   it('the listener can be what pushes a tight deployment over capacity', async () => {
-    const query = jest.fn(async (sql: string) => (sql === SERVER_CAPACITY_SQL ? [capacityRow({ max_connections: 74 })] : []));
-    // usable 71: poll (70) fits, event (72) is refused
+    const query = jest.fn(async (sql: string) => (sql === SERVER_CAPACITY_SQL ? [capacityRow({ max_connections: 76 })] : []));
+    // usable 73: poll (72) fits, event (74) is refused
     await expect(assertConnectionBudget({ processRole: 'worker', ownPoolMax: 12, env: SHAPE_2_2, query, log: () => undefined })).resolves.toMatchObject({ checked: true });
     await expect(
       assertConnectionBudget({ processRole: 'worker', ownPoolMax: 12, env: { ...SHAPE_2_2, WORKER_DISPATCH_MODE: 'event' }, query, log: () => undefined }),
-    ).rejects.toThrow(/up to 72 connections but the database allows 71/);
+    ).rejects.toThrow(/up to 74 connections but the database allows 73/);
   });
 
   it('rolconnlimit: crewflow_worker is compared with the Worker rows, crewflow_app (or an unknown login) with every runtime row', () => {
@@ -44,9 +44,9 @@ describe('connection budget — Phase D event-mode listener row', () => {
     const cap = (login: string | undefined, roleLimit: number) => ({ maxConnections: 500, superuserReserved: 3, reserved: 0, providerSettingReserved: 0, roleLimit, databaseLimit: null, login });
     expect(evaluateConnectionBudget(plan, cap('crewflow_worker', 42), 0).ok).toBe(true);
     expect(evaluateConnectionBudget(plan, cap('crewflow_worker', 41), 0).problems.join()).toMatch(/up to 42 connections but its connection limit is 41/);
-    // runtime rows: API 20 + Worker 42 = 62
-    expect(evaluateConnectionBudget(plan, cap('crewflow_app', 61), 0).problems.join()).toMatch(/up to 62 connections/);
-    expect(evaluateConnectionBudget(plan, cap(undefined, 61), 0).ok).toBe(false);
+    // runtime rows: API 20 + API health login probes 2 + Worker 42 = 64
+    expect(evaluateConnectionBudget(plan, cap('crewflow_app', 63), 0).problems.join()).toMatch(/up to 64 connections/);
+    expect(evaluateConnectionBudget(plan, cap(undefined, 63), 0).ok).toBe(false);
   });
 
   it('the capacity query reports the checking login', () => {

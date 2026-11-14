@@ -24,6 +24,7 @@ import { countingDeterministicModel } from './helpers/ai-models';
 import { AiKit, aiOrganisation, ask, bearer, bootAiKit, jobFor, manager, newConversation, turnRow } from './helpers/ai-test-kit';
 import { insertMembership } from './helpers/test-identities';
 import { sqlStateAsSchemaRole } from './helpers/schema-role';
+import { integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
 
 /**
  * AI Part A (docs/ai/PART_A_PLAN.md) + Phase 1 "real models only" on the REAL database (crewflow_app, FORCE RLS) and the
@@ -32,7 +33,7 @@ import { sqlStateAsSchemaRole } from './helpers/schema-role';
  * real provider" it replaces only the PLATFORM half of availability (env + runtime guard, `availabilityContext`) with the
  * development answer and the PRODUCTION catalogue (no test models); every per-organisation and database check stays real.
  */
-const RUN = Boolean(process.env.DATABASE_URL);
+const RUN = integrationTestDatabaseReady();
 const describeIfDb = RUN ? describe : describe.skip;
 const DEV_DB = { runtimeEnvironment: 'development', classification: 'LOCAL' };
 const devContext = (env: Partial<AiAvailabilityContext['env']> = {}): AiAvailabilityContext => ({

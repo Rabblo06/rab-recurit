@@ -17,6 +17,7 @@ import { idsOf, rowsOf } from './helpers/response-shapes';
 import { TestIdentityFactory } from './helpers/test-identities';
 import { generateFixturePassword } from './helpers/fixture-password';
 import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-pipe';
+import { integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
 
 const FIXTURE_PASSWORD = generateFixturePassword();
 
@@ -29,7 +30,7 @@ const FIXTURE_PASSWORD = generateFixturePassword();
  * rejects every non-GET request while a session is active, regardless of
  * the admin's own permissions. Real Postgres, RLS on, no mocks.
  */
-const RUN = Boolean(process.env.DATABASE_URL);
+const RUN = integrationTestDatabaseReady();
 const describeIfDb = RUN ? describe : describe.skip;
 
 describeIfDb('admin inspect abuse cases (integration)', () => {

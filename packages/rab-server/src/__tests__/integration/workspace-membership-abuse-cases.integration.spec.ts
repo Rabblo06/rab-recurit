@@ -16,6 +16,7 @@ import { BootstrapTimer } from './helpers/bootstrap-trace';
 import { withPoolTrace } from './helpers/pool-probe';
 import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
 import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-pipe';
+import { integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
 
 /**
  * Hyper Workspace Phase 3, items 5–7 (membership cutover). USER → WORKSPACE, enforced by the database and by the
@@ -27,7 +28,7 @@ import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-
  * membership functions themselves are owned by the narrow NOLOGIN `rab_secure_owner`, never
  * `crewflow` directly.
  */
-const RUN = Boolean(process.env.DATABASE_URL);
+const RUN = integrationTestDatabaseReady();
 const describeIfDb = RUN ? describe : describe.skip;
 
 const RESOLVER_FUNCTIONS = [

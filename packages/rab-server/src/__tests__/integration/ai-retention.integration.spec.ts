@@ -2,6 +2,7 @@ import './helpers/ai-env';
 
 import { AiRetentionService } from '../../modules/ai/services/ai-retention.service';
 import { AiKit, aiOrganisation, ask, bootAiKit, newConversation } from './helpers/ai-test-kit';
+import { integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
 
 /**
  * AI Phase 1 — retention and erasure (brief §4 "Data retention", §15 "Conversation retention"): the purge runs only
@@ -9,7 +10,7 @@ import { AiKit, aiOrganisation, ask, bootAiKit, newConversation } from './helper
  * nothing; `purge` deletes only conversations idle > AI_RETENTION_DAYS (90) of the bound organisation, never one with
  * a queued/running turn; audit history survives; deleting a user erases their AI rows (cascade).
  */
-const RUN = Boolean(process.env.DATABASE_URL);
+const RUN = integrationTestDatabaseReady();
 const describeIfDb = RUN ? describe : describe.skip;
 
 describeIfDb('AI retention and erasure (integration)', () => {

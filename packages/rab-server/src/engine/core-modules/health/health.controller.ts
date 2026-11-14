@@ -1,8 +1,10 @@
-import { Controller, Get } from '@nestjs/common';
+import { Controller, Get, Optional } from '@nestjs/common';
 import { HealthCheck, HealthCheckError, HealthCheckService, HealthIndicatorResult, TypeOrmHealthIndicator } from '@nestjs/terminus';
 
+import { DatabaseLoginHealthIndicator } from './database-login.health';
 import { securityReady } from './security-readiness';
 import { upgradeStatusIndicator } from './upgrade-status';
+import { UpgradeStatusService } from '../upgrade/upgrade-status.service';
 
 /** Render's healthCheckPath (render.yaml) points here. */
 @Controller('healthz')
@@ -10,6 +12,8 @@ export class HealthController {
   constructor(
     private readonly health: HealthCheckService,
     private readonly db: TypeOrmHealthIndicator,
+    private readonly databaseLogin: DatabaseLoginHealthIndicator,
+    @Optional() private readonly upgrades?: UpgradeStatusService,
   ) {}
 
   @Get()
@@ -23,13 +27,18 @@ export class HealthController {
     // moment without false-flagging.
     // Owner-login architecture: also unready once the semantic posture monitor saw the database's security objects change
     // since boot (security-readiness.ts). It stays unready until a restart passes the boot check again.
-    // O3 C3: an informational `upgrade: { status: 'up', upgradeFailed: true|false }` entry says whether this start follows a
-    // failed upgrade served under CREWFLOW_UPGRADE_FAILURE=continue (upgrade-status.ts). Never the migration's name (that
-    // stays in the start-up logs); always `up`, so the status stays 200 by the owner's decision.
+    // OWNER-DB-ULTIMATE Part B (owner decision 2026-11-14): an informational `upgrade: { status: 'up', upgradeFailed: true|false }`
+    // entry says only whether the code version's upgrade failed (upgrade-status.ts): no version, step, state or error text
+    // publicly (the detail is on the platform-admin health report). Always `up`, so the status stays 200.
+    // `databaseLogin` (owner decision 2026-11-13): down when a NEW database connection cannot be opened (a changed or
+    // revoked runtime login), which the pooled `database` ping cannot see. Cached 5 s, single flight, 3 s deadline, fixed
+    // text only (database-login.health.ts).
     return this.health.check([
       () => this.db.pingCheck('database', { timeout: 5_000 }),
+      () => this.databaseLogin.isHealthy(),
       () => this.securityPosture(),
-      () => upgradeStatusIndicator(),
+      // OWNER-DB-ULTIMATE Part B: a boolean only, derived from the upgrade logbook (upgrade-status.service.ts).
+      async () => upgradeStatusIndicator(this.upgrades ? (await this.upgrades.status()).state : undefined),
     ]);
   }
 

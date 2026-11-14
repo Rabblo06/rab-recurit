@@ -20,8 +20,9 @@ import { ProcessorExplorer } from '../../core/scheduler/processor-explorer';
 import { WorkerModule } from '../../worker.module';
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
+import { integrationTestDatabaseReady } from '@rab/server/database/typeorm/core/integration-test-database-gate';
 
-const RUN = Boolean(process.env.DATABASE_URL);
+const RUN = integrationTestDatabaseReady();
 const describeIfDb = RUN ? describe : describe.skip;
 const MIN = 60_000;
 

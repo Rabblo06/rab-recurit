@@ -10,6 +10,7 @@ import { codeAt, earlyInStep, secretFromOtpauth } from './helpers/mfa-test-kit';
 import { MockAccount, MockOidcProvider } from './helpers/mock-oidc-provider';
 import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
 import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-pipe';
+import { integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
 
 /**
  * Account security step 1 — Google / Microsoft: (#7) an enrolled account signing in with a provider is verified, and
@@ -21,7 +22,7 @@ import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-
  * attempts, a different session (or none) at the callback, Google (cannot guarantee auth_time) refused, missing/evil
  * Origin, and "re-auth never signs anyone in". #16 for SSO-only accounts: turning 2FA off needs a fresh re-auth + code.
  */
-const RUN = Boolean(process.env.DATABASE_URL);
+const RUN = integrationTestDatabaseReady();
 const describeIfDb = RUN ? describe : describe.skip;
 
 const GOOGLE_CLIENT = 'google-test-client';

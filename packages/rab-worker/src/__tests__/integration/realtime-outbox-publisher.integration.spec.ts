@@ -15,6 +15,7 @@ import { claimRealtimeEvents, completeRealtimeEvent } from '../../core/database/
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { verifiedRestrictedRuntimeUrl } from './helpers/verified-role-database';
 import { createTestIdentityFactory, TestIdentity, TestIdentityFactory } from './helpers/test-identities';
+import { integrationTestDatabaseReady } from '@rab/server/database/typeorm/core/integration-test-database-gate';
 
 /**
  * Stage 2 — the Redis Pub/Sub publisher for `core.realtime_event`. Real
@@ -26,7 +27,7 @@ import { createTestIdentityFactory, TestIdentity, TestIdentityFactory } from './
  * channel-name computation directly, never relying on ambient env.
  */
 const TEST_ENV = 'inttest';
-const RUN = Boolean(process.env.DATABASE_URL);
+const RUN = integrationTestDatabaseReady();
 const describeIfDb = RUN ? describe : describe.skip;
 jest.setTimeout(60_000);
 

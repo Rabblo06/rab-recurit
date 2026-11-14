@@ -11,13 +11,14 @@ import { AiTitleService } from '../../modules/ai/services/ai-title.service';
 import { titleJobData } from '../../modules/ai/services/ai-turn-queue.service';
 import { scriptedModel, textParts } from './helpers/ai-models';
 import { AiKit, aiOrganisation, ask, bearer, bootAiKit, newConversation, setOrgAi } from './helpers/ai-test-kit';
+import { integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
 
 /**
  * AI Phase 2 — thread titles in the Worker (docs/ai/PHASE2_TWENTY_PLAN.md §2.5, P2-C9; T2-11): generated once, from the
  * first message only, through the gateway, billed (`title_calls`, tokens, `turns` unchanged), sanitised, never over a
  * user title, refused (no model call) when the budget is spent or access is gone, IDs-only job. Scripted models only.
  */
-const RUN = Boolean(process.env.DATABASE_URL);
+const RUN = integrationTestDatabaseReady();
 const describeIfDb = RUN ? describe : describe.skip;
 
 describeIfDb('AI thread titles (integration)', () => {

@@ -21,9 +21,10 @@
 import { appendFileSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { Client } from 'pg';
+import { integrationTestDatabase } from '../../../database/typeorm/core/integration-test-database-gate';
 
 export const OWNER_URL = process.env.TEST_DATABASE_TWENTY_OWNER_URL;
-export const ADMIN_URL = process.env.TEST_DATABASE_URL_UNPOOLED;
+export const ADMIN_URL = integrationTestDatabase().adminUrl;
 /** Only on a database built by the separated M2 harness (pre-T2 fixture): the restricted runtime login, for negative controls. */
 export const SEPARATED_APP_URL = process.env.TEST_DATABASE_SEPARATED_APP_URL;
 export const TWENTY_RUN = process.env.TWENTY_MODE_TESTS === 'true' && Boolean(OWNER_URL && ADMIN_URL);

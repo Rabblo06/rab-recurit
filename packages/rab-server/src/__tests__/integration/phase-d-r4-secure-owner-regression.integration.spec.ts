@@ -8,6 +8,7 @@ import {
   secureOwnerInvariantViolations,
 } from '../../database/typeorm/core/secure-owner-invariants';
 import { resolveIntegrationTestDatabase } from '../../database/typeorm/core/test-database-guard';
+import { integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
 
 /**
  * Phase D wave 2 — owner condition on Phase 0b R4 ("only the four exact trigger-function/table pairs are exempt; a
@@ -29,7 +30,7 @@ import { resolveIntegrationTestDatabase } from '../../database/typeorm/core/test
  *       of the one reviewed dynamic-SQL definer;
  * and that the exemption is exactly the four pairs, never table-wide.
  */
-const RUN = Boolean(process.env.TEST_DATABASE_URL && process.env.TEST_DATABASE_URL_UNPOOLED);
+const RUN = integrationTestDatabaseReady();
 const describeIfDb = RUN ? describe : describe.skip;
 jest.setTimeout(120_000);
 

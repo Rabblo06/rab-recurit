@@ -23,11 +23,12 @@ const queryReturning = (row: Record<string, unknown>) => jest.fn(async (sql: str
 const SHAPE_2_1 = { PG_EXPECTED_API_INSTANCES: '2', PG_EXPECTED_WORKER_INSTANCES: '1' };
 
 describe('connection budget (B5)', () => {
-  it('plans the deployment: 2 API x 10 + 1 Worker (12 + 6 + 2 + 2) + migrate 3 + probes 3 = 48', () => {
+  it('plans the deployment: 2 API x (10 + 1 health login probe) + 1 Worker (12 + 6 + 2 + 2) + migrate 3 + probes 3 = 50', () => {
     const { shape } = readDeploymentShape(SHAPE_2_1);
     const plan = planConnectionBudget(shape!);
     expect(plan.rows.map((r) => [r.item, r.total])).toEqual([
       ['API runtime pool', 20],
+      ['API health login probe', 2],
       ['Worker runtime pool', 12],
       ['Worker direct/lock pool', 6],
       ['Worker scan-lock + storage-lock clients', 2],
@@ -35,19 +36,34 @@ describe('connection budget (B5)', () => {
       ['rab-migrate', 3],
       ['boot probes + operator session', 3],
     ]);
-    expect(plan.total).toBe(48);
-    expect(plan.runtimeRoleTotal).toBe(40);
+    expect(plan.total).toBe(50);
+    // The runtime login: API pools 20 + one /healthz login probe per API instance 2 + Worker 12 + 6 + 2.
+    expect(plan.runtimeRoleTotal).toBe(42);
   });
 
-  it('a 47-connection database (max_connections 50, 3 superuser-reserved): the defaults (48) are refused, API pool 9 (46) fits', async () => {
+  it('the /healthz login probe slot is budgeted: a capacity that fits everything except one probe per API instance is refused', async () => {
+    // usable = 51 - 3 = 48: the pools, Worker, migrate and boot probes (48) fit, the two API probe slots (50) do not.
+    await expect(
+      assertConnectionBudget({ processRole: 'api', ownPoolMax: 10, env: SHAPE_2_1, query: queryReturning(capacityRow({ max_connections: 51 })), log: () => undefined }),
+    ).rejects.toThrow(/up to 50 connections but the database allows 48/);
+    await expect(
+      assertConnectionBudget({ processRole: 'api', ownPoolMax: 10, env: SHAPE_2_1, query: queryReturning(capacityRow({ max_connections: 53 })), log: () => undefined }),
+    ).resolves.toMatchObject({ checked: true, usable: 50 });
+    // A runtime login limited to the pools alone (40) is refused: the probe connects as that login too.
+    const plan = planConnectionBudget(readDeploymentShape(SHAPE_2_1).shape!);
+    const limited = evaluateConnectionBudget(plan, { maxConnections: 200, superuserReserved: 3, reserved: 0, providerSettingReserved: 0, roleLimit: 40, databaseLimit: null }, 0);
+    expect(limited.problems.join()).toMatch(/runtime login can open up to 42 connections but its connection limit is 40/);
+  });
+
+  it('a 47-connection database (max_connections 50, 3 superuser-reserved): the defaults (50) are refused, API pool 8 (46) fits', async () => {
     await expect(
       assertConnectionBudget({ processRole: 'api', ownPoolMax: 10, env: SHAPE_2_1, query: queryReturning(capacityRow()), log: () => undefined }),
-    ).rejects.toThrow(/up to 48 connections but the database allows 47/);
+    ).rejects.toThrow(/up to 50 connections but the database allows 47/);
 
     const ok = await assertConnectionBudget({
       processRole: 'api',
-      ownPoolMax: 9,
-      env: { ...SHAPE_2_1, PG_EXPECTED_API_POOL_MAX: '9' },
+      ownPoolMax: 8,
+      env: { ...SHAPE_2_1, PG_EXPECTED_API_POOL_MAX: '8' },
       query: queryReturning(capacityRow()),
       log: () => undefined,
     });
@@ -80,7 +96,7 @@ describe('connection budget (B5)', () => {
       0,
     );
     expect(result.ok).toBe(false);
-    expect(result.problems.join()).toMatch(/runtime login can open up to 40 connections but its connection limit is 30/);
+    expect(result.problems.join()).toMatch(/runtime login can open up to 42 connections but its connection limit is 30/);
   });
 
   it('warns (does not refuse, does not query) when the instance counts are not declared', async () => {

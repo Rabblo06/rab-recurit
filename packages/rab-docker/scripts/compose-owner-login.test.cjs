@@ -270,13 +270,12 @@ test('BC-07: the gate\'s audit-sink values are exactly the code\'s (security-aud
   assert.deepEqual([...gate.AUDIT_SINK_PRODUCTION_FAILURES], gate.AUDIT_SINK_FAILURES.filter((f) => f !== 'log'));
 });
 
-test('O3: the upgrade-failure policy, the scheduler keys and the start-up flag', () => {
-  for (const v of ['continue', 'refuse']) assert.deepEqual(lintEnvText('runtime', `CREWFLOW_AUDIT_SINK=stdout
-CREWFLOW_UPGRADE_FAILURE=${v}`), []);
-  assertRefused(lintEnvText('runtime', 'CREWFLOW_UPGRADE_FAILURE=maybe'), /must be exactly continue or refuse/);
-  assertRefused(lintEnvText('database', `${DATABASE_OK}\nCREWFLOW_UPGRADE_FAILURE=refuse`), /belongs in runtime.env/);
-  assertRefused(lintEnvText('runtime', 'CREWFLOW_UPGRADE_FAILURE_POLICY=refuse'), /deprecated \(O3 C3\)/);
-  assertRefused(lintEnvText('runtime', 'CREWFLOW_UPGRADE_INCOMPLETE=Beta1'), /set only by api-prestart\.sh/);
+test('O3 / Part B3: the removed upgrade-failure choices, the scheduler keys and the start-up flag', () => {
+  for (const v of ['continue', 'refuse']) {
+    for (const kind of ['runtime', 'database']) assertRefused(lintEnvText(kind, `${kind === 'database' ? `${DATABASE_OK}\n` : ''}CREWFLOW_UPGRADE_FAILURE=${v}`), /removed \(OWNER-DB-ULTIMATE Part B3\)/);
+  }
+  assertRefused(lintEnvText('runtime', 'CREWFLOW_UPGRADE_FAILURE_POLICY=refuse'), /removed \(OWNER-DB-ULTIMATE Part B3\)/);
+  assertRefused(lintEnvText('runtime', 'CREWFLOW_UPGRADE_INCOMPLETE=Beta1'), /retired with the C3 continue path/);
   for (const key of ['DISABLE_DB_MIGRATIONS', 'DISABLE_CRON_JOBS_REGISTRATION', 'CREWFLOW_WORKER_SCHEMA_WAIT_SECONDS', 'WORKER_SCHEDULER']) {
     assertRefused(lintEnvText('runtime', `${key}=x`), new RegExp(`${key}: committed in the compose files`));
   }

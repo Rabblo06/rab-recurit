@@ -29,6 +29,7 @@ import { createAdminDataSource } from './helpers/admin-datasource';
 import { simulateWorkerHeartbeat } from './helpers/worker-heartbeat';
 import { generateFixturePassword } from './helpers/fixture-password';
 import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-pipe';
+import { integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
 
 const FIXTURE_PASSWORD = generateFixturePassword();
 
@@ -41,7 +42,7 @@ const FIXTURE_PASSWORD = generateFixturePassword();
  * provider is configured. See
  * auth-abuse-cases.integration.spec.ts for the base auth suite this extends.
  */
-const RUN = Boolean(process.env.DATABASE_URL);
+const RUN = integrationTestDatabaseReady();
 const describeIfDb = RUN ? describe : describe.skip;
 
 const NEW_PASSWORD = 'a totally different S3cret!';

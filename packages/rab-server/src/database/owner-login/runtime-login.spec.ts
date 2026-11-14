@@ -127,7 +127,6 @@ describe('runtime-login rule (DB-SETUP plan §2.2): production connects only as 
       disableDbMigrations: false,
       migrateOnStart: true,
       migrationApprovalMode: 'none',
-      upgradeFailurePolicy: 'continue',
     });
   });
 });

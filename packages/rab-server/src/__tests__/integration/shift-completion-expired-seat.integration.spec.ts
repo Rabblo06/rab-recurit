@@ -22,6 +22,7 @@ import { Venue } from '../../modules/venue/entities/venue.entity';
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
 import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-pipe';
+import { integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
 
 /**
  * Owner decisions 2026-11-06 on fix/shift-completion-after-withdrawal (branch fix/shift-completion-expired-seat):
@@ -33,7 +34,7 @@ import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-
  * Real Postgres, RLS on, the real HTTP stack for clock-in / clock-out / accept; the expiry runs the real `claimExpiredOffer`
  * in a Worker-shaped tenant context, exactly as `offer-expiry.job.ts` does. Fixture SQL only places offers / shifts in time.
  */
-const RUN = Boolean(process.env.DATABASE_URL);
+const RUN = integrationTestDatabaseReady();
 const describeIfDb = RUN ? describe : describe.skip;
 jest.setTimeout(180_000);
 

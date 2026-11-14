@@ -14,6 +14,7 @@ import { OrganisationOnboardingService } from '../../modules/manager/services/or
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
 import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-pipe';
+import { integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
 
 /**
  * Organisation isolation for Initial Manager onboarding (owner policy, 2026-10-15). Supersedes P2.9C's "a Platform Admin may
@@ -23,7 +24,7 @@ import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-
  * Real PostgreSQL with RLS, no mocks. Runs unchanged with `USER_SESSION_CACHE_ENABLED=true AUTH_CONTEXT_CACHE_ENABLED=true`
  * (warm Redis caches must not change any outcome below).
  */
-const RUN = Boolean(process.env.DATABASE_URL);
+const RUN = integrationTestDatabaseReady();
 const describeIfDb = RUN ? describe : describe.skip;
 
 describeIfDb('organisation isolation: Initial Manager onboarding, login and tenant scope (integration)', () => {

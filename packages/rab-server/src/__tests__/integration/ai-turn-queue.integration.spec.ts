@@ -12,13 +12,14 @@ import { AiStreamService, cancelPayload } from '../../modules/ai/services/ai-str
 import { AiTurnQueueService } from '../../modules/ai/services/ai-turn-queue.service';
 import { countingDeterministicModel, hangingModel, scriptedModel, textParts } from './helpers/ai-models';
 import { AiKit, aiOrganisation, ask, bearer, bootAiKit, jobFor, newConversation, turnRow } from './helpers/ai-test-kit';
+import { integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
 
 /**
  * AI Phase 2 — queued second message, deferring claim, promotion, 2 s checkpoints and the cancel channel
  * (docs/ai/PHASE2_TWENTY_PLAN.md §2.1–§2.3; tests T2-1, T2-2, T2-3, T2-6, T2-10, T2-16). Real PostgreSQL (crewflow_app,
  * FORCE RLS) and real Redis; scripted / hanging models only.
  */
-const RUN = Boolean(process.env.DATABASE_URL);
+const RUN = integrationTestDatabaseReady();
 const describeIfDb = RUN ? describe : describe.skip;
 const CANARY = 'CANARY-P2-7f3c1e-question-text';
 

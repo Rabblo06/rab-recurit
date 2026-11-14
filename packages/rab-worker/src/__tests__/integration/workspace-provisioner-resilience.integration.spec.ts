@@ -32,6 +32,7 @@ import { withApplicationName } from './helpers/application-name-url';
 import { runtimeChildBaseEnv } from './helpers/runtime-child-env';
 import { expectedWorkspacePolicyCount } from '@rab/server/database/typeorm/workspace-schema/v1/server-path-template-venue-team-admin';
 import { LATEST_WORKSPACE_MODULE_VERSION } from '@rab/server/database/typeorm/workspace-schema/workspace-schema-modules';
+import { integrationTestDatabaseReady } from '@rab/server/database/typeorm/core/integration-test-database-gate';
 
 /**
  * Phase A verification (pa-prov2) — the provisioner's durability, concurrency and lock-boundedness, against the disposable
@@ -52,7 +53,7 @@ import { LATEST_WORKSPACE_MODULE_VERSION } from '@rab/server/database/typeorm/wo
  *  R5  the bounded wait: shutdown aborts it at once (real lock holder), and a holder whose session dies releases the lock
  *      so a waiting cycle provisions within its bound.
  */
-const RUN = Boolean(process.env.DATABASE_URL);
+const RUN = integrationTestDatabaseReady();
 /**
  * L-class (owner-login architecture): this suite exercises the SUPERSEDED separate workspace-provisioner process, which
  * needs a `crewflow` login (TEST_DATABASE_CREWFLOW_URL) that does not exist under the owner login. Provisioning now runs

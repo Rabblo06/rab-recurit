@@ -11,6 +11,7 @@ import {
 } from '../../database/typeorm/core/secure-owner-invariants';
 import { resolveIntegrationTestDatabase } from '../../database/typeorm/core/test-database-guard';
 import { createAdminDataSource } from './helpers/admin-datasource';
+import { integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
 
 /**
  * Phase 0b (E1: R1, R2, R5, R6) on a database built from migrations. Read-only assertions, and rolled-back transactions
@@ -21,7 +22,7 @@ import { createAdminDataSource } from './helpers/admin-datasource';
  * NON-superuser migration identity; the scoped CREATE window for later migrations works there, and the plain ownership
  * hand-over without it fails. E1 is PARTIALLY mitigated: R4 is asserted as frozen, not as fixed.
  */
-const RUN = Boolean(process.env.DATABASE_URL);
+const RUN = integrationTestDatabaseReady();
 const describeIfDb = RUN ? describe : describe.skip;
 jest.setTimeout(180_000);
 

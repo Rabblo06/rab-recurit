@@ -92,7 +92,7 @@ export interface BindExtras {
  */
 export function bindGucsSql(extras: BindExtras = {}): string {
   return (
-    `SELECT set_config('rab.organisation_id', $1, true), set_config('rab.workspace_id', $2, true), set_config('rab.user_id', $3, true), set_config('rab.role', $4, true), set_config('rab.actor_type', $5, true), set_config('rab.team_shift_id', '', true), set_config('rab.team_staff_id', '', true), set_config('rab.admin_scope', '', true), ` +
+    `SELECT set_config('rab.organisation_id', $1, true), set_config('rab.workspace_id', $2, true), set_config('rab.user_id', $3, true), set_config('rab.role', $4, true), set_config('rab.actor_type', $5, true), set_config('rab.team_shift_id', '', true), set_config('rab.team_staff_id', '', true), set_config('rab.admin_scope', '', true), set_config('rab.upgrade_scope', '', true), ` +
     (extras.searchPath !== undefined ? `set_config('search_path', $6, true), ` : '') +
     (extras.readOnly ? `set_config('transaction_read_only', 'on', true), ` : '') +
     `current_user::text AS cu, session_user::text AS su`
