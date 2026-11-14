@@ -88,7 +88,14 @@ export async function checkWorkspaceCoreOrphans(client: Client, only?: readonly 
       const schema = `workspace_${ws.workspace_id.replace(/-/g, '')}`;
       try {
         await client.query('BEGIN READ ONLY');
-        await client.query(`SELECT pg_catalog.set_config('rab.organisation_id', $1, true), pg_catalog.set_config('rab.workspace_id', $2, true)`, [ws.organisation_id, ws.workspace_id]);
+        // The Worker's per-workspace scan identity: FORCE RLS shows crewflow only the rows a policy branch admits, and the
+        // `rab.actor_type = 'worker'` branches exist on staff_profile, payroll_record, payroll_run, payroll_run_line and
+        // shift_staff_review only. DRAFT LIMIT (owner decision 0a-Q5): the other 16 tables are not covered until a reviewed
+        // read path exists (worker read branches, or a narrow definer); their rows are invisible here, never "clean".
+        await client.query(
+          `SELECT pg_catalog.set_config('rab.organisation_id', $1, true), pg_catalog.set_config('rab.workspace_id', $2, true), pg_catalog.set_config('rab.actor_type', 'worker', true)`,
+          [ws.organisation_id, ws.workspace_id],
+        );
         const reg = await client.query<{ status: string }>('SELECT status FROM core.workspace_schema_registry WHERE workspace_id = $1', [ws.workspace_id]);
         if (reg.rows[0]?.status !== 'READY') {
           await client.query('ROLLBACK');
