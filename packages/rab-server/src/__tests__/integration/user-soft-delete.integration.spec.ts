@@ -1,6 +1,6 @@
 import 'reflect-metadata';
 import { PermissionFlag, UserStatus } from '@rab/shared';
-import { INestApplication } from '@nestjs/common';
+import { INestApplication, Logger } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
 import { randomUUID } from 'node:crypto';
 import request from 'supertest';
@@ -20,7 +20,7 @@ import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-
 import { integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { bookBeforeDeadline } from './helpers/book-before-deadline';
-import { businessTable } from './helpers/hws-fixtures';
+import { businessTable, dropFixtureWorkspaceSchema } from './helpers/hws-fixtures';
 import { provisionFixtureWorkspace, TestIdentity, TestIdentityFactory } from './helpers/test-identities';
 
 /**
@@ -270,8 +270,10 @@ describeIfDb('user soft delete — owner 0g (integration)', () => {
 
     it(`soft delete with ${W}+ workspace schemas: no relation lock in any workspace schema (control: an invite's hard delete takes them)`, async () => {
       const lockOrg = await factory.createOrganisation('udel-locks');
+      const lockWorkspaces: string[] = [];
       for (let i = 0; i < W; i += 1) {
         const owner = await factory.createInternalManager(lockOrg, { label: `udel-lock-${i}`, provision: false });
+        lockWorkspaces.push(owner.workspaceId!);
         // Fixture only: core.provision_workspace (the server path, unchanged) on the superuser fixture connection with a
         // statement timeout raised for THIS statement — with hundreds of schemas the catalogue grows and one provisioning
         // can exceed the runtime's 30 s on a loaded host. The assertion below is untouched.
@@ -304,13 +306,26 @@ describeIfDb('user soft delete — owner 0g (integration)', () => {
       const invite = await http().post('/rest/v1/managers').set(auth(tokenA)).send({ email: `udel-lock-inv-${randomUUID()}@example.test`, firstName: 'Lock', lastName: 'Invite', type: 'internal' });
       expect(invite.status).toBe(201);
       const [{ user_id: inviteUserId }] = await adminDataSource.query(`SELECT user_id FROM core.manager_profile WHERE id = $1`, [invite.body.id]);
-      const hard = await tenantContext.runInTenantContext(ctxOf(a), async (m) => {
-        const outcome = await userDeletion.deleteUser(m, ctxOf(a), inviteUserId);
-        return { outcome, locks: await relationLocks(m) };
-      });
-      expect(hard.outcome).toBe('hard_deleted');
-      const lockedSchemas = new Set(hard.locks.filter((l) => l.nspname.startsWith('workspace_')).map((l) => l.nspname));
-      expect(lockedSchemas.size).toBeGreaterThanOrEqual(W);
+      const fallbackLog = jest.spyOn(Logger.prototype, 'log');
+      try {
+        const hard = await tenantContext.runInTenantContext(ctxOf(a), async (m) => {
+          const outcome = await userDeletion.deleteUser(m, ctxOf(a), inviteUserId);
+          return { outcome, locks: await relationLocks(m) };
+        });
+        if (hard.outcome === 'hard_deleted') {
+          const lockedSchemas = new Set(hard.locks.filter((l) => l.nspname.startsWith('workspace_')).map((l) => l.nspname));
+          expect(lockedSchemas.size).toBeGreaterThanOrEqual(W);
+        } else {
+          // With hundreds of schemas the hard delete's RI checks exhaust the lock table (53200, measured on ibox3 at 300) or
+          // hit a lock timeout: that IS the per-schema lock fan-out, and the savepoint fell back to a soft delete.
+          expect(hard.outcome).toBe('soft_deleted');
+          expect(fallbackLog.mock.calls.map((c) => String(c[0]))).toContainEqual(expect.stringMatching(/^user hard delete not safe \(locks:(53200|55P03)\)/));
+        }
+      } finally {
+        fallbackLog.mockRestore();
+        // Drop the extra schemas now, so the rest of this file runs at the normal size (the hard-delete tests below).
+        for (const ws of lockWorkspaces) await dropFixtureWorkspaceSchema(adminDataSource, ws);
+      }
     }, 120_000 + W * 10_000); // each fixture workspace is one core.provision_workspace (seconds on a loaded host)
   });
 
