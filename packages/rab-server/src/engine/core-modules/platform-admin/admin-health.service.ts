@@ -226,7 +226,17 @@ export function auditEventsHealthCard(report: { enabled: boolean; total: number 
  * name, versions and attempt, never error_message.
  */
 export function upgradeCard(u: UpgradeStatus): AdminHealthCard {
-  const where = u.step ? ` · last step ${u.step} (attempt ${u.attempt ?? '?'}${u.forced ? ', forced' : ''})` : '';
+  const blocked = (u.workspaces ?? []).filter((w) => w.blocked);
+  const failedServed = (u.workspaces ?? []).filter((w) => !w.blocked);
+  // Owner D2/D3: which workspace and why (workspace id, step, error class; never a message).
+  const ws =
+    (blocked.length
+      ? ` · ${blocked.length} workspace(s) BLOCKED (503, jobs paused): ` + blocked.slice(0, 5).map((w) => `${w.workspaceId} ${w.step ?? '-'} (${w.errorClass})`).join(', ')
+      : '') +
+    (failedServed.length
+      ? ` · ${failedServed.length} workspace(s) failed a data step but serve normally: ` + failedServed.slice(0, 5).map((w) => `${w.workspaceId} ${w.step ?? '-'} (${w.errorClass})`).join(', ')
+      : '');
+  const where = (u.step ? ` · last step ${u.step} (attempt ${u.attempt ?? '?'}${u.forced ? ', forced' : ''})` : '') + ws;
   switch (u.state) {
     case 'ok':
       return { key: 'upgrade', status: 'healthy', detail: `Version ${u.appVersion} · upgrade complete${where}`, latencyMs: null };

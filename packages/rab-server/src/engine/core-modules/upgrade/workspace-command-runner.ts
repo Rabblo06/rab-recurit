@@ -49,6 +49,7 @@ import {
   TRACK_COUNTS_SQL,
 } from './workspace-step-checks-sql';
 import { declaredFingerprint } from './workspace-structure-level';
+import { isUpgradeBlocked, upgradeBlockMarker } from './workspace-upgrade-block';
 import {
   EXPECTED_WORKSPACE_FINGERPRINTS,
   FingerprintMajor,
@@ -104,6 +105,8 @@ export interface ReadyWorkspace {
   organisationId: string;
   schemaName: string;
   moduleVersion: number;
+  /** D2/D3: the workspace carried an upgrade block when the run started. */
+  blocked?: boolean;
 }
 
 export type WorkspaceOutcomeStatus = 'up-to-date' | 'upgraded' | 'adopted' | 'failed' | 'refused' | 'ahead';
@@ -117,12 +120,18 @@ export interface WorkspaceOutcome {
   attempt?: number;
   /** Steps completed for this workspace in this run. */
   completed: string[];
+  /** D2/D3: blocked (503, Worker paused) after this run. */
+  blocked?: boolean;
+  /** Internal: whether the failure requires the block (a structural step, a structure mismatch, a refused / unknown cursor). */
+  needsBlock?: boolean;
 }
 
 export interface WorkspaceRunReport {
   outcomes: WorkspaceOutcome[];
   /** Failed or refused workspaces (a failed step, a refused adoption, an unknown cursor, a vanished workspace). */
   failures: WorkspaceOutcome[];
+  /** D2/D3: whether any workspace was blocked or unblocked by this run (the resolver cache must be refreshed). */
+  blockChanged: boolean;
 }
 
 export interface WorkspaceRunOptions {
@@ -165,17 +174,18 @@ export async function scanReadyWorkspaces(query: Query, only?: readonly string[]
       await query('BEGIN');
       try {
         await query(`SELECT pg_catalog.set_config('rab.organisation_id', $1, true)`, [ws.organisation_id]);
-        const rows = (await query('SELECT status, schema_name, module_version FROM core.workspace_schema_registry WHERE workspace_id = $1', [ws.workspace_id])) as Array<{
+        const rows = (await query('SELECT status, schema_name, module_version, migration_error FROM core.workspace_schema_registry WHERE workspace_id = $1', [ws.workspace_id])) as Array<{
           status: string;
           schema_name: string;
           module_version: number;
+          migration_error: string | null;
         }>;
         await query('COMMIT');
         const r = rows[0];
         if (r?.status === 'READY') {
           const schemaName = workspaceSchemaOf(ws.workspace_id);
           if (r.schema_name !== schemaName) out.mismatched.push(ws.workspace_id);
-          else out.ready.push({ workspaceId: ws.workspace_id, organisationId: ws.organisation_id, schemaName, moduleVersion: Number(r.module_version) });
+          else out.ready.push({ workspaceId: ws.workspace_id, organisationId: ws.organisation_id, schemaName, moduleVersion: Number(r.module_version), blocked: isUpgradeBlocked(r.migration_error) });
         }
       } catch (error) {
         await query('ROLLBACK').catch(() => undefined);
@@ -288,7 +298,7 @@ export class WorkspaceCommandRunner {
     // Adopted workspaces are at the frozen template (structure 20): their cursor is the code version's last INSTANCE step, so
     // every workspace step of the adoption release still runs for them.
     const adoptedName = lastInstanceStepOfVersion(codeVersion, registry);
-    const report: WorkspaceRunReport = { outcomes: [], failures: [] };
+    const report: WorkspaceRunReport = { outcomes: [], failures: [], blockChanged: false };
     const total = workspaces.length;
     log(`workspace upgrade (${codeVersion}${force ? ', --force' : ''}): ${total} READY workspace(s)`);
 
@@ -318,8 +328,25 @@ export class WorkspaceCommandRunner {
         report.failures.push(outcome);
         log(`ERROR: workspace ${ws.workspaceId}: ${outcome.errorClass} outside a step; refused, the next start retries it`);
         await this.assertSessionClean(session.query);
+        // D3: a refused adoption / no or unknown cursor leaves the structure unverified for this code: blocked. A vanished or
+        // no-longer-READY workspace is not routed anyway (nothing to write).
+        outcome.needsBlock = !['WORKSPACE_GONE', 'NOT_READY'].includes(outcome.errorClass ?? '');
       }
       if (outcome.status === 'failed' && !report.failures.includes(outcome)) report.failures.push(outcome);
+      // D2/D3: block, or lift a block once the workspace's structure matches this code again.
+      if (outcome.needsBlock) {
+        await this.block(session, ws, outcome.step ?? `${codeVersion}_WorkspaceRun`, outcome.errorClass ?? 'UNKNOWN');
+        outcome.blocked = true;
+        if (!ws.blocked) report.blockChanged = true;
+        log(`workspace ${ws.workspaceId} BLOCKED (${outcome.errorClass}): its requests get 503 and its Worker jobs pause until the step succeeds`);
+      } else if (ws.blocked && outcome.status !== 'refused') {
+        outcome.blocked = !(await this.unblock(session, ws));
+        if (!outcome.blocked) {
+          report.blockChanged = true;
+          log(`workspace ${ws.workspaceId} unblocked: its structure matches this code`);
+        }
+      }
+      delete outcome.needsBlock;
     }
     log(`workspace upgrade: ${report.outcomes.length - report.failures.length} ok, ${report.failures.length} failed or refused`);
     return report;
@@ -389,6 +416,9 @@ export class WorkspaceCommandRunner {
           errorClass: stepError instanceof WorkspaceStepRefused ? stepError.errorClass : errorClassOf(stepError),
           attempt,
         });
+        // D2: a structural step always blocks (the code expects the new structure); a data step blocks only when the
+        // workspace's structure no longer matches its level (verify + fingerprint + extra checks), else it is served.
+        outcome.needsBlock = command.structure !== undefined || !(await this.structureMatches(session, ws));
         log(`ERROR: workspace ${ws.workspaceId} (${position}): ${step.name} FAILED (attempt ${attempt}, ${outcome.errorClass}); its later steps skipped, the next start retries it`);
         return;
       }
@@ -529,6 +559,55 @@ export class WorkspaceCommandRunner {
     const again = await read().catch(() => null);
     if (!again || describe(again)) throw new WorkspaceRunFault(`the migration session could not be reset after a workspace step (${problem}). Refusing to continue.`);
     return problem;
+  }
+
+  /** D2: whether the workspace's structure is exactly its recorded level (read-only). Any error = false (fail closed). */
+  private async structureMatches(session: UpgradeSession, ws: ReadyWorkspace): Promise<boolean> {
+    const q = session.query;
+    try {
+      await q('BEGIN');
+      await this.enterWorkspace(q, ws);
+      const level = await this.lockRegistry(q, ws);
+      const problem = (await this.extraStructureProblem(q, ws)) ?? (await this.structureProblem(q, ws, level));
+      await q('COMMIT');
+      return problem === null;
+    } catch {
+      await q('ROLLBACK').catch(() => undefined);
+      return false;
+    }
+  }
+
+  /** D2/D3: write the block marker. A block that cannot be written stops the whole start (never serve a mismatched workspace). */
+  private async block(session: UpgradeSession, ws: ReadyWorkspace, step: string, errorClass: string): Promise<void> {
+    const q = session.query;
+    try {
+      await q('BEGIN');
+      await this.enterWorkspace(q, ws);
+      await q('UPDATE core.workspace_schema_registry SET migration_error = $2 WHERE workspace_id = $1', [ws.workspaceId, upgradeBlockMarker(step, errorClass)]);
+      await q('COMMIT');
+    } catch (error) {
+      await q('ROLLBACK').catch(() => undefined);
+      throw new WorkspaceRunFault(`workspace ${ws.workspaceId} must be blocked but the block could not be written (${errorClassOf(error)}). Refusing to serve.`);
+    }
+  }
+
+  /** D2/D3: lift the block only when the structure matches the workspace's level. Returns whether it was lifted. */
+  private async unblock(session: UpgradeSession, ws: ReadyWorkspace): Promise<boolean> {
+    const q = session.query;
+    try {
+      await q('BEGIN');
+      await this.enterWorkspace(q, ws);
+      const level = await this.lockRegistry(q, ws);
+      const problem = (await this.extraStructureProblem(q, ws)) ?? (await this.structureProblem(q, ws, level));
+      if (!problem) {
+        await q(`UPDATE core.workspace_schema_registry SET migration_error = NULL WHERE workspace_id = $1 AND migration_error LIKE 'upgrade-blocked: %'`, [ws.workspaceId]);
+      }
+      await q('COMMIT');
+      return problem === null;
+    } catch {
+      await q('ROLLBACK').catch(() => undefined);
+      return false;
+    }
   }
 
   /**

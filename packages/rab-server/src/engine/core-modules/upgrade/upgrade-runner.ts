@@ -58,7 +58,16 @@ export interface UpgradeRunReport {
   /** Set when an upgrade COMMAND (instance, or a workspace step / adoption) failed after every migration applied (warn and serve). */
   commandFailure: { name: string; errorName: string; workspaceId?: string } | null;
   /** Part D: the workspace pass (null when it did not run). Workspace ids and step names only, never a message. */
-  workspaces: { total: number; adopted: number; upgraded: number; failures: Array<Pick<WorkspaceOutcome, 'workspaceId' | 'status' | 'step' | 'errorClass' | 'attempt'>> } | null;
+  workspaces: {
+    total: number;
+    adopted: number;
+    upgraded: number;
+    failures: Array<Pick<WorkspaceOutcome, 'workspaceId' | 'status' | 'step' | 'errorClass' | 'attempt' | 'blocked'>>;
+    /** D2/D3: workspaces blocked after this run (503, Worker paused). */
+    blocked: string[];
+    /** D2/D3: a block was written or lifted (the resolver cache epoch must be bumped). */
+    blockChanged: boolean;
+  } | null;
 }
 
 export interface UpgradeRunOptions {
@@ -215,7 +224,9 @@ export class UpgradeRun {
       total: result.outcomes.length,
       adopted: result.outcomes.filter((o) => o.status === 'adopted').length,
       upgraded: result.outcomes.filter((o) => o.completed.length > 0).length,
-      failures: result.failures.map(({ workspaceId, status, step, errorClass, attempt }) => ({ workspaceId, status, step, errorClass, attempt })),
+      failures: result.failures.map(({ workspaceId, status, step, errorClass, attempt, blocked }) => ({ workspaceId, status, step, errorClass, attempt, blocked: blocked === true })),
+      blocked: result.outcomes.filter((o) => o.blocked).map((o) => o.workspaceId),
+      blockChanged: result.blockChanged,
     };
     const first = result.failures[0];
     if (first) {

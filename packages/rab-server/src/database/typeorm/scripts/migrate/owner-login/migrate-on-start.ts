@@ -394,6 +394,11 @@ export async function runMigrateOnStart(config: MigrateOnStartConfig, deps: Migr
   });
 
   try {
+    // Part D test hook (review): `testWorkspace` is reachable only from code (no environment variable maps to it) AND only
+    // under NODE_ENV=test; a production build / process refuses it before anything connects (exit 64).
+    if (deps.testWorkspace && env.NODE_ENV !== 'test') {
+      throw new TestSeamRefusal('the testWorkspace hook is a test seam: only NODE_ENV=test. Refusing.');
+    }
     const pre = await readMarkerState(env);
     const first = synthesiseGuardEnv(env, pre.marker, pre.database, generatedId);
     guardEnvUsed = first.guardEnv;
@@ -469,7 +474,9 @@ export async function runMigrateOnStart(config: MigrateOnStartConfig, deps: Migr
         }
         log(`post-checks passed (${done.length} applied)`);
         await run.afterApply(upgradeSessionOf(queryRunner));
-        await bumpEntityCacheAfterUpgrade({ applied: done, env, log, flush: deps.cacheFlush });
+        // D2/D3: a workspace blocked or unblocked by this run must not be served from a cached resolution: bump the epoch.
+        const cacheReasons = run.report.workspaces?.blockChanged ? [...done, 'workspace-upgrade-block'] : done;
+        await bumpEntityCacheAfterUpgrade({ applied: cacheReasons, env, log, flush: deps.cacheFlush });
       },
     });
     applied = locked.applied;

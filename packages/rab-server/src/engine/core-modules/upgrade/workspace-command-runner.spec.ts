@@ -275,3 +275,48 @@ describe('Part D (review M1): write counters are compared as a delta', () => {
     expect(increasedCounters(before, [{ relid: '1', what: 'core.a', n: '5' }, { relid: '2', what: 'core.b', n: '1' }])).toEqual(['core.b']);
   });
 });
+
+describe('Part D test hooks cannot be enabled in a production build (review)', () => {
+  it('runMigrateOnStart refuses deps.testWorkspace unless NODE_ENV=test (exit 64, before any connection)', async () => {
+    const { runMigrateOnStart } = await import('../../../database/typeorm/scripts/migrate/owner-login/migrate-on-start');
+    const lines: string[] = [];
+    const result = await runMigrateOnStart(
+      { migrationApprovalMode: 'none' },
+      { env: { NODE_ENV: 'production' }, log: (l) => lines.push(l), testWorkspace: { registry: {}, workspaceIds: [] } },
+    );
+    expect(result.outcome).toBe('config');
+    expect(lines.join('\n')).toMatch(/testWorkspace hook is a test seam/);
+  });
+
+  it('the TypeScript provisioner refuses options.workspaceRegistry unless NODE_ENV=test, before touching the database', async () => {
+    const { provisionWorkspaceSchema, WorkspaceSchemaProvisioningError } = await import('../../../database/typeorm/workspace-schema/provision-workspace-schema');
+    const before = process.env.NODE_ENV;
+    const client = { query: jest.fn() };
+    process.env.NODE_ENV = 'production';
+    try {
+      await expect(provisionWorkspaceSchema(client as never, '11111111-1111-4111-8111-111111111111', { workspaceRegistry: {} })).rejects.toBeInstanceOf(WorkspaceSchemaProvisioningError);
+    } finally {
+      process.env.NODE_ENV = before;
+    }
+    expect(client.query).not.toHaveBeenCalled();
+  });
+
+  it('no environment / configuration path reaches either hook: only specs pass them', () => {
+    const SRC = join(__dirname, '..', '..', '..');
+    const all = (dir: string): string[] =>
+      readdirSync(dir).flatMap((n) => {
+        const p = join(dir, n);
+        if (statSync(p).isDirectory()) return n === 'node_modules' || n === 'dist' ? [] : all(p);
+        return /\.ts$/.test(n) && !/\.spec\.ts$/.test(n) && !p.includes('__tests__') ? [p] : [];
+      });
+    const offenders: string[] = [];
+    for (const f of all(SRC)) {
+      const src = readFileSync(f, 'utf8');
+      const rel = f.split(String.fromCharCode(92)).join('/');
+      if (/testWorkspace/.test(src) && !rel.endsWith('migrate/owner-login/migrate-on-start.ts')) offenders.push(`${rel}: testWorkspace`);
+      if (/workspaceRegistry\s*:/.test(src) && /provisionWorkspaceSchema\(/.test(src) && !rel.endsWith('workspace-schema/provision-workspace-schema.ts')) offenders.push(`${rel}: workspaceRegistry`);
+      if (/process\.env\.[A-Z_]*(TEST_WORKSPACE|WORKSPACE_REGISTRY)/.test(src)) offenders.push(`${rel}: env`);
+    }
+    expect(offenders).toEqual([]);
+  });
+});

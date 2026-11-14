@@ -13,6 +13,7 @@ import { DataSource } from 'typeorm';
 
 import {
   countFailedWorkspaceCursors,
+  failedWorkspaceCursors,
   workspacesWithoutRows,
   getLastAttemptedInstanceStep,
   instanceVersions,
@@ -25,6 +26,7 @@ import {
 import { instanceStepsForVersion, lastInstanceStepOfVersion } from './upgrade-sequence';
 import { compareVersions, readAppVersion } from './upgrade-version';
 import { listReadyWorkspaces } from './workspace-command-runner';
+import { parseUpgradeBlock } from './workspace-upgrade-block';
 
 export type UpgradeState = 'ok' | 'failed' | 'behind' | 'ahead' | 'none' | 'unknown';
 
@@ -37,6 +39,26 @@ export interface UpgradeStatus {
   attempt: number | null;
   forced: boolean | null;
   at: string | null;
+  /**
+   * Owner D2/D3: the workspaces that failed a step or were refused (admin health only; /healthz uses `state` alone). Workspace
+   * id, step name, an error CLASS label and whether it is blocked (503, Worker paused); never a message. At most 50.
+   */
+  workspaces?: WorkspaceUpgradeIssue[];
+}
+
+export interface WorkspaceUpgradeIssue {
+  workspaceId: string;
+  step: string | null;
+  errorClass: string;
+  blocked: boolean;
+}
+
+/** Pure: a class label from the start of a stored message (`WorkspaceStepRefused: CLASS: …` or `<ErrorName>: …`), nothing else. */
+export function errorClassLabel(stored: string): string {
+  const refused = /^WorkspaceStepRefused: ([A-Z][A-Z0-9_]{1,40}):/.exec(stored);
+  if (refused) return refused[1]!;
+  const named = /^([A-Za-z][A-Za-z0-9]{0,60}):/.exec(stored);
+  return named ? named[1]! : 'Error';
 }
 
 /**
@@ -57,18 +79,20 @@ export async function readUpgradeStatus(session: UpgradeSession, appVersion: str
   if (!(await upgradeLedgerExists(session.query))) return empty;
   // L3: workspaces with no logbook row at all (cheap in steady state: after adoption every workspace has one); only those are
   // then checked for READY, each with its organisation bound in its own short transaction, outside the status scope.
-  const candidates = await withUpgradeScope(session, 'status', async (q) => {
-    const ids: string[] = [];
+  const scan = await withUpgradeScope(session, 'status', async (q) => {
+    const orgs = new Map<string, string>();
     let after: string | null = null;
     for (;;) {
-      const page = (await q('SELECT workspace_id::text AS id FROM core.worker_list_workspaces($1, 100)', [after])) as Array<{ id: string }>;
-      ids.push(...page.map((p) => p.id));
+      const page = (await q('SELECT workspace_id::text AS id, organisation_id::text AS org FROM core.worker_list_workspaces($1, 100)', [after])) as Array<{ id: string; org: string }>;
+      for (const p of page) orgs.set(p.id, p.org);
       if (page.length < 100) break;
       after = page[page.length - 1]!.id;
     }
-    return workspacesWithoutRows(q, ids);
+    return { orgs, withoutRows: await workspacesWithoutRows(q, [...orgs.keys()]), failed: await failedWorkspaceCursors(q) };
   });
-  const readyWithoutCursor = candidates.length ? (await listReadyWorkspaces(session.query, candidates)).length : 0;
+  const readyWithoutRows = scan.withoutRows.length ? await listReadyWorkspaces(session.query, scan.withoutRows) : [];
+  const readyWithoutCursor = readyWithoutRows.length;
+  const workspaces = await readWorkspaceIssues(session, scan.orgs, scan.failed, readyWithoutRows.map((w) => w.workspaceId));
   return withUpgradeScope(session, 'status', async (q) => {
     const last = await getLastAttemptedInstanceStep(q);
     const versions = await instanceVersions(q);
@@ -95,8 +119,40 @@ export async function readUpgradeStatus(session: UpgradeSession, appVersion: str
       attempt: last?.attempt ?? null,
       forced: last?.forced ?? null,
       at: last ? last.createdAt.toISOString() : null,
+      ...(workspaces.length ? { workspaces } : {}),
     };
   });
+}
+
+/**
+ * Owner D2/D3: one entry per failed / refused workspace. The block marker (registry, read with the workspace's organisation
+ * bound, each in its own short transaction) gives `blocked` and its class; otherwise the class label of the stored message.
+ */
+async function readWorkspaceIssues(
+  session: UpgradeSession,
+  orgs: ReadonlyMap<string, string>,
+  failed: ReadonlyArray<{ workspaceId: string; name: string; label: string }>,
+  withoutRows: readonly string[],
+): Promise<WorkspaceUpgradeIssue[]> {
+  const entries = new Map<string, WorkspaceUpgradeIssue>();
+  for (const f of failed) entries.set(f.workspaceId, { workspaceId: f.workspaceId, step: f.name, errorClass: errorClassLabel(f.label), blocked: false });
+  for (const id of withoutRows) if (!entries.has(id)) entries.set(id, { workspaceId: id, step: null, errorClass: 'NO_CURSOR', blocked: false });
+  const q = session.query;
+  for (const e of [...entries.values()].slice(0, 50)) {
+    const org = orgs.get(e.workspaceId);
+    if (!org) continue;
+    await q('BEGIN');
+    try {
+      await q(`SELECT pg_catalog.set_config('rab.organisation_id', $1, true)`, [org]);
+      const [r] = (await q('SELECT migration_error FROM core.workspace_schema_registry WHERE workspace_id = $1', [e.workspaceId])) as Array<{ migration_error: string | null }>;
+      await q('COMMIT');
+      const block = parseUpgradeBlock(r?.migration_error);
+      if (block) Object.assign(e, { blocked: true, errorClass: block.errorClass, step: block.step || e.step });
+    } catch {
+      await q('ROLLBACK').catch(() => undefined);
+    }
+  }
+  return [...entries.values()].slice(0, 50);
 }
 
 @Injectable()

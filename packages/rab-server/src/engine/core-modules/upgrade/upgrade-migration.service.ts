@@ -274,6 +274,22 @@ export async function markNewWorkspaceInitial(query: Query, workspace: SavedWork
   return markAsWorkspaceInitial(query, { workspaceId: workspace.id, name: lastStepOfVersion(version), status: 'completed', executedByVersion: version });
 }
 
+/**
+ * Owner D2/D3 (admin health): the workspaces whose cursor is a FAILED row, with the step name and only the leading label of the
+ * stored message (the caller keeps a class token, never the text). Scope 'upgrade' or 'status'.
+ */
+export async function failedWorkspaceCursors(query: Query, limit = 50): Promise<Array<{ workspaceId: string; name: string; label: string }>> {
+  const rows = (await query(
+    `SELECT c.workspace_id::text AS "workspaceId", c.name, pg_catalog.left(COALESCE(c.error_message, ''), 120) AS label FROM (
+       SELECT DISTINCT ON (m.workspace_id) m.workspace_id, m.name, m.status, m.error_message
+         FROM core.upgrade_migration m WHERE m.workspace_id IS NOT NULL
+        ORDER BY m.workspace_id, m.created_at DESC, m.attempt DESC) c
+      WHERE c.status = 'failed' ORDER BY c.workspace_id LIMIT $1`,
+    [limit],
+  )) as Array<{ workspaceId: string; name: string; label: string }>;
+  return rows;
+}
+
 /** Of these workspace ids, the ones with no logbook row at all (scope 'upgrade' or 'status'). */
 export async function workspacesWithoutRows(query: Query, workspaceIds: readonly string[]): Promise<string[]> {
   if (!workspaceIds.length) return [];

@@ -107,6 +107,10 @@ export async function provisionWorkspaceSchema(
   options: ProvisionOptions = {},
 ): Promise<ProvisionResult> {
   const schemaName = workspaceSchemaName(workspaceId);
+  // Part D test hook (review): a custom workspace registry only under NODE_ENV=test (production refuses it before any write).
+  if (options.workspaceRegistry && process.env.NODE_ENV !== 'test') {
+    throw new WorkspaceSchemaProvisioningError('the workspaceRegistry option is a test seam: only NODE_ENV=test', 'input');
+  }
 
   // core.worker_resolve_workspace_organisation (WorkerResolveWorkspaceOrganisation1786695000000):
   // a raw `SELECT ... FROM core.manager_workspace` here is unsatisfiable by `crewflow` with no

@@ -8,6 +8,8 @@ import { LATEST_WORKSPACE_MODULE_VERSION } from '../../database/typeorm/workspac
 import type { WorkspaceUpgradeCommand } from '../../engine/core-modules/upgrade/upgrade-commands/workspace-upgrade-command';
 import { countFailedWorkspaceCursors, upgradeSessionOf, UpgradeSession, withUpgradeScope } from '../../engine/core-modules/upgrade/upgrade-migration.service';
 import { TARGET_EXTRA_STRUCTURE_SQL } from '../../engine/core-modules/upgrade/workspace-step-checks-sql';
+import { SchemaResolverService } from '../../engine/core-modules/tenant/schema-resolver.service';
+import { readUpgradeStatus } from '../../engine/core-modules/upgrade/upgrade-status.service';
 import { UpgradeRun } from '../../engine/core-modules/upgrade/upgrade-runner';
 import { UpgradeVersionTooOldError } from '../../engine/core-modules/upgrade/upgrade-version-check';
 import { WorkspaceCommandRunner, WorkspaceRunOptions } from '../../engine/core-modules/upgrade/workspace-command-runner';
@@ -523,6 +525,104 @@ describeIfDb('Part D workspace command runner (integration)', () => {
     expect(out.failures.map((f) => f.errorClass)).toEqual(['SESSION_LEAK']);
     expect(await advisory()).toEqual(before);
     expect(before.length).toBeGreaterThanOrEqual(1);
+  });
+
+  describe('owner D2/D3: a workspace whose step failed with a non-matching structure is BLOCKED until the step succeeds', () => {
+    /** The real resolver, as an authenticated member of `org` (its organisation bound on the runtime login), no cache. */
+    const resolveAs = async (org: string, workspaceId: string): Promise<string> => {
+      const c = new Client({ connectionString: process.env.TEST_DATABASE_URL });
+      await c.connect();
+      try {
+        await c.query('BEGIN');
+        await c.query(`SELECT pg_catalog.set_config('rab.organisation_id', $1, true)`, [org]);
+        const resolver = new SchemaResolverService({ resolveSchema: async (_id: string, fetch: () => Promise<unknown>) => fetch(), invalidate: async () => undefined } as never);
+        await resolver.resolve({ query: async (sql: string, p?: unknown[]) => (await c.query(sql, p as unknown[])).rows } as never, workspaceId);
+        return 'resolved';
+      } catch (e) {
+        return (e as { code?: string }).code ?? 'error';
+      } finally {
+        await c.query('ROLLBACK').catch(() => undefined);
+        await c.end();
+      }
+    };
+    const statusIssues = async () => {
+      const c = new Client({ connectionString: process.env.TEST_DATABASE_URL });
+      await c.connect();
+      try {
+        return (await readUpgradeStatus(upgradeSessionOf(c), '0.6.0')).workspaces ?? [];
+      } finally {
+        await c.end();
+      }
+    };
+    const marker = async (ws: SeededWorkspace) => (await registryOf(admin, ws.id)).migration_error as string | null;
+
+    it('(1) a structural step failed: that workspace 503 (upgrading), the other serves, admin health names it; the next run retries and unblocks', async () => {
+      const [a, b] = [await make('d2-a'), await make('d2-b')];
+      await adopt([a.id, b.id]);
+      let failA = true;
+      const structural = cmd('BlockProbe', 100, {
+        run: async ({ query, schemaName, workspaceId }) => {
+          await query(`ALTER TABLE ${schemaName}.venue ADD COLUMN IF NOT EXISTS d_probe text`);
+          if (failA && workspaceId === a.id) throw new Error('structural step failed for a');
+        },
+        structure: { level: 21, fingerprints: {} },
+      });
+      const reg = { '0-7': [structural] };
+      const first = await runner({ workspaceRegistry: reg, workspaceIds: [a.id, b.id] });
+      expect(first.failures.map((f) => [f.workspaceId, f.blocked])).toEqual([[a.id, true]]);
+      expect(first.blockChanged).toBe(true);
+      expect(await marker(a)).toBe(`upgrade-blocked: 0.7.0_BlockProbe_${T0 + 100} (Error)`);
+      expect(await marker(b)).toBeNull();
+      expect(await resolveAs(a.org, a.id)).toBe('upgrading');
+      expect(await resolveAs(b.org, b.id)).toBe('resolved');
+      // Another tenant's member never sees the 503 for a workspace it does not belong to: not found (404), as usual.
+      expect(await resolveAs(b.org, a.id)).toBe('registry-missing');
+      expect((await statusIssues()).find((w) => w.workspaceId === a.id)).toEqual({ workspaceId: a.id, step: `0.7.0_BlockProbe_${T0 + 100}`, errorClass: 'Error', blocked: true });
+
+      failA = false;
+      const second = await runner({ workspaceRegistry: reg, workspaceIds: [a.id, b.id] });
+      expect(second.failures).toEqual([]);
+      expect(second.blockChanged).toBe(true);
+      expect(await marker(a)).toBeNull();
+      expect(await resolveAs(a.org, a.id)).toBe('resolved');
+      expect((await rows(a)).slice(-1)[0]).toMatchObject({ name: `0.7.0_BlockProbe_${T0 + 100}`, status: 'completed', attempt: 2 });
+      expect((await statusIssues()).find((w) => w.workspaceId === a.id)).toBeUndefined();
+    });
+
+    it('(1b) a data step failed AND the structure no longer matches (drift): blocked too', async () => {
+      const w = await make('d2-drift');
+      await adopt([w.id]);
+      await admin.query(`DROP POLICY job_role_tenant ON ${w.schema}.job_role`);
+      const out = await runner({ workspaceRegistry: { '0-7': [cmd('DataFails', 101, { run: async () => { throw new Error('data step failed'); } })] }, workspaceIds: [w.id] });
+      expect(out.failures.map((f) => f.blocked)).toEqual([true]);
+      expect(await resolveAs(w.org, w.id)).toBe('upgrading');
+    });
+
+    it('(2) a data-only step failed with a matching structure: served normally, still reported failed (admin health) and retried', async () => {
+      const w = await make('d2-data');
+      await adopt([w.id]);
+      let fail = true;
+      const reg = { '0-7': [cmd('DataOnly', 102, { run: async () => { if (fail) throw new Error('data only'); } })] };
+      const first = await runner({ workspaceRegistry: reg, workspaceIds: [w.id] });
+      expect(first.failures.map((f) => [f.errorClass, f.blocked])).toEqual([['Error', false]]);
+      expect(await marker(w)).toBeNull();
+      expect(await resolveAs(w.org, w.id)).toBe('resolved');
+      expect((await statusIssues()).find((x) => x.workspaceId === w.id)).toEqual({ workspaceId: w.id, step: `0.7.0_DataOnly_${T0 + 102}`, errorClass: 'Error', blocked: false });
+      fail = false;
+      await runner({ workspaceRegistry: reg, workspaceIds: [w.id] });
+      expect((await rows(w)).slice(-1)[0]).toMatchObject({ name: `0.7.0_DataOnly_${T0 + 102}`, status: 'completed', attempt: 2 });
+    });
+
+    it('(3) a refused adoption (drifted, unadopted) is blocked; a migrator message without the prefix never blocks', async () => {
+      const w = await make('d3-adopt');
+      await admin.query(`DROP POLICY job_role_tenant ON ${w.schema}.job_role`);
+      const out = await adopt([w.id]);
+      expect(out.failures.map((f) => [f.step, f.blocked])).toEqual([['0.6.0_WorkspaceAdoption', true]]);
+      expect(await resolveAs(w.org, w.id)).toBe('upgrading');
+      const ok = await make('d3-old-msg');
+      await admin.query(`UPDATE core.workspace_schema_registry SET migration_error = 'module v1.020-grant-parity-guards failed (SQLSTATE_55P03)' WHERE workspace_id = $1`, [ok.id]);
+      expect(await resolveAs(ok.org, ok.id)).toBe('resolved');
+    });
   });
 
   it('idempotent after a crash between COMMIT and the logbook row: the step re-runs and completes', async () => {

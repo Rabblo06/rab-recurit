@@ -4,7 +4,7 @@ import { isNotYetRoutableWorkspace } from './workspace-routing';
 
 /** W6-E2E-07: only "still provisioning" refusals are skippable; integrity refusals keep failing the cycle. */
 describe('isNotYetRoutableWorkspace', () => {
-  it.each(['registry-missing', 'not-ready'] as const)('skips %s (workspace still being provisioned)', (code) => {
+  it.each(['registry-missing', 'not-ready', 'upgrading'] as const)('skips %s (not routable yet: provisioning, or Part D: blocked by a failed upgrade step, paused)', (code) => {
     expect(isNotYetRoutableWorkspace(new WorkspaceRoutingError(code))).toBe(true);
   });
 

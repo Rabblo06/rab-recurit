@@ -148,6 +148,10 @@ describeIfDb('Part D through the locked start (runMigrateOnStart)', () => {
     expect(r.upgrade?.commandFailure).toMatchObject({ name: '0.6.0_WorkspaceAdoption', workspaceId: drift.id });
     expect(await rows(drift)).toEqual([]);
     expect((await rows(ok)).length).toBe(1);
+    // Owner D3: the drifted workspace is blocked (registry marker → 503); the adopted one is not.
+    expect((await registryOf(admin, drift.id)).migration_error).toMatch(/^upgrade-blocked: 0\.6\.0_WorkspaceAdoption \(/);
+    expect((await registryOf(admin, ok.id)).migration_error).toBeNull();
+    expect(r.upgrade?.workspaces?.blocked).toEqual([drift.id]);
 
     const c = new Client({ connectionString: process.env.TEST_DATABASE_URL });
     await c.connect();
