@@ -116,7 +116,7 @@ describeIfDb('pending approvals pagination (PERF-01, integration)', () => {
         // always stamps `now()` on insert regardless of a supplied value.
         if (opts.sameCreatedAt && ids.length > 1) {
           const fixedInstant = new Date();
-          await m.query(`UPDATE core.shift SET created_at = $1 WHERE id = ANY($2::uuid[])`, [fixedInstant, ids]);
+          await m.query(`UPDATE shift SET created_at = $1 WHERE id = ANY($2::uuid[])`, [fixedInstant, ids]);
         }
       },
     );
