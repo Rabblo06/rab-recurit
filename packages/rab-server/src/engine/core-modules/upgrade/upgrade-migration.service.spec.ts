@@ -1,6 +1,6 @@
 import { DataSource } from 'typeorm';
 
-import { markNewWorkspaceInitial, upgradeSessionOf, UpgradeSessionError, withUpgradeScope } from './upgrade-migration.service';
+import { markNewWorkspaceInitial, UPGRADE_SCOPE_SETTING, upgradeSessionOf, UpgradeSessionError, withUpgradeScope } from './upgrade-migration.service';
 import { UpgradeStatusService } from './upgrade-status.service';
 
 type Call = { sql: string; params?: unknown[] };
@@ -52,6 +52,20 @@ describe('withUpgradeScope needs ONE dedicated session (security review L4)', ()
     await expect(withUpgradeScope(upgradeSessionOf(conn), 'upgrade', async () => 42)).resolves.toBe(42);
     const order = calls.map((c) => (c.sql.startsWith('SELECT pg_catalog.set_config') ? `scope=${String(c.params?.at(-1))}` : c.sql.split(/\s/)[0]));
     expect(order).toEqual(['SELECT', 'BEGIN', 'scope=upgrade', 'SELECT', 'COMMIT']);
+  });
+
+  it('the pre-check is a SIMPLE-protocol statement: no bind parameter, the setting name as a literal equal to the constant', async () => {
+    // A bound parameter puts node-pg on the extended protocol, where transaction_timestamp() <> statement_timestamp() even in
+    // a fresh autocommit session, so every call was refused (regression after ef7f56c0, caught by the live ci-db).
+    const { conn, calls } = scripted((sql) => {
+      if (sql.includes('txid_current_if_assigned')) return [{ free: true, fresh: true, scope: '', pid: 9 }];
+      if (sql.includes('pg_backend_pid() AS pid')) return [{ pid: 9, scope: 'status' }];
+      return [];
+    });
+    await withUpgradeScope(upgradeSessionOf(conn), 'status', async () => undefined);
+    const pre = calls.find((c) => c.sql.includes('txid_current_if_assigned'))!;
+    expect(pre.params === undefined || pre.params.length === 0).toBe(true);
+    expect(pre.sql).toContain(`pg_catalog.current_setting('${UPGRADE_SCOPE_SETTING}', true)`);
   });
 
   it('accepts a pg client result shape ({ rows })', async () => {

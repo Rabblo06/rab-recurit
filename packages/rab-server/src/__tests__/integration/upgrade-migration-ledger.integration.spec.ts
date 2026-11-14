@@ -1,4 +1,5 @@
 import { Client } from 'pg';
+import { DataSource } from 'typeorm';
 
 import { MIGRATION_LOCK_KEY } from '../../database/typeorm/scripts/migrate/migration-lock';
 import { resolveIntegrationTestDatabase } from '../../database/typeorm/core/test-database-guard';
@@ -182,6 +183,28 @@ describeIfDb('core.upgrade_migration (integration, OWNER-DB-ULTIMATE Part B)', (
       await markNewWorkspaceInitial(q, { id: other.id, organisationId: ws.org });
     }));
     expect(err).toBe('42501');
+  });
+
+  it('withUpgradeScope accepts a FRESH autocommit session through the real drivers (node-pg Client and a TypeORM QueryRunner)', async () => {
+    // Regression guard (ef7f56c0): a parameterised pre-check ran on the extended protocol and refused every real session.
+    const viaClient = await withUpgradeScope(upgradeSessionOf(app), 'status', async (q) => (await q('SELECT 1 AS one')) as Array<{ one: number }>);
+    expect(viaClient[0]?.one).toBe(1);
+    const ds = new DataSource({ type: 'postgres', url: process.env.TEST_DATABASE_URL, entities: [], migrations: [], synchronize: false });
+    await ds.initialize();
+    const runner = ds.createQueryRunner();
+    await runner.connect();
+    try {
+      const viaRunner = await withUpgradeScope(upgradeSessionOf(runner), 'status', async (q) => (await q('SELECT 2 AS two')) as Array<{ two: number }>);
+      expect(viaRunner[0]?.two).toBe(2);
+      // ... and the same QueryRunner inside BEGIN; SELECT 1 is refused.
+      await runner.query('BEGIN');
+      await runner.query('SELECT 1');
+      await expect(withUpgradeScope(upgradeSessionOf(runner), 'status', async () => 'read')).rejects.toBeInstanceOf(UpgradeSessionError);
+      await runner.query('ROLLBACK');
+    } finally {
+      await runner.release();
+      await ds.destroy();
+    }
   });
 
   it('R2: withUpgradeScope refuses a session inside an open read-only transaction, and leaves that transaction alone', async () => {
