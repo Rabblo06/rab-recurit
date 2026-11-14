@@ -178,4 +178,13 @@ describe('schema-bound EntityManager (C2-1)', () => {
     expect(base.subscribers.length).toBeGreaterThan(0);
     expect(m.connection.subscribers).toHaveLength(0);
   });
+
+  it('an entity-less DataSource (raw-SQL harness) binds an empty metadata source; entity calls still fail as before', async () => {
+    const bare = new DataSource({ type: 'postgres', entities: [] });
+    const { manager } = recordingManager(bare);
+    const m = await bindEntityManagerToSchema(manager, WS);
+    expect(boundSchemaOf(m)).toBe(WS);
+    expect(m.connection.entityMetadatas).toHaveLength(0);
+    await expect(m.findOne(Shift, { where: { id: ID } })).rejects.toThrow(/No metadata/);
+  });
 });

@@ -139,10 +139,10 @@ export async function metadataSourceFor(base: DataSource, schema: string): Promi
 }
 
 async function buildMetadataSource(base: DataSource, schema: string): Promise<DataSource> {
-  const entities = base.options.entities;
-  if (!Array.isArray(entities) || entities.length === 0) {
-    throw new SchemaBoundEntityManagerError('the base DataSource lists no entity classes');
-  }
+  const entities = base.options.entities ?? [];
+  // An entity-less DataSource (raw-SQL-only harnesses) gets an empty metadata source: every entity call keeps failing with
+  // EntityMetadataNotFoundError exactly as on the base, and boundSchemaOf() still answers.
+  if (!Array.isArray(entities)) throw new SchemaBoundEntityManagerError('entities must be an explicit list of classes');
   for (const entity of entities) {
     // Glob strings / EntitySchema objects are not used here and would bypass the checks below.
     if (typeof entity !== 'function') throw new SchemaBoundEntityManagerError('entities must be explicit classes');
