@@ -6,7 +6,8 @@ import { MIGRATION_LOCK_KEY } from '../../database/typeorm/scripts/migrate/migra
 import { EXPECTED_WORKSPACE_FINGERPRINTS, selectWorkspaceFingerprintsForServer } from '../../database/typeorm/workspace-schema/v1/expected-fingerprints';
 import { LATEST_WORKSPACE_MODULE_VERSION } from '../../database/typeorm/workspace-schema/workspace-schema-modules';
 import type { WorkspaceUpgradeCommand } from '../../engine/core-modules/upgrade/upgrade-commands/workspace-upgrade-command';
-import { upgradeSessionOf, UpgradeSession } from '../../engine/core-modules/upgrade/upgrade-migration.service';
+import { countFailedWorkspaceCursors, upgradeSessionOf, UpgradeSession, withUpgradeScope } from '../../engine/core-modules/upgrade/upgrade-migration.service';
+import { TARGET_EXTRA_STRUCTURE_SQL } from '../../engine/core-modules/upgrade/workspace-step-checks-sql';
 import { UpgradeRun } from '../../engine/core-modules/upgrade/upgrade-runner';
 import { UpgradeVersionTooOldError } from '../../engine/core-modules/upgrade/upgrade-version-check';
 import { WorkspaceCommandRunner, WorkspaceRunOptions } from '../../engine/core-modules/upgrade/workspace-command-runner';
@@ -291,6 +292,180 @@ describeIfDb('Part D workspace command runner (integration)', () => {
       expect(['VERIFY_FAILED', 'FINGERPRINT_MISMATCH']).toContain(out.failures[0]!.errorClass);
       expect(await hasColumn(x, 'venue', 'fk_probe')).toBe(false);
     });
+  });
+
+  describe('review M1: data and role-catalog writes outside the schema (layer 4b)', () => {
+    let x: SeededWorkspace;
+    let y: SeededWorkspace;
+    beforeEach(async () => {
+      x = await make('m1-x');
+      y = await make('m1-y');
+      await adopt([x.id, y.id]);
+      await admin.query(`INSERT INTO ${y.schema}.job_role (organisation_id, name, workspace_id) VALUES ($1, 'y-role', $2)`, [y.org, y.id]);
+    });
+    const step = async (name: string, i: number, body: (q: (s: string, p?: unknown[]) => Promise<unknown[]>) => Promise<void>) => {
+      const out = await runner({
+        workspaceRegistry: { '0-7': [cmd(name, i, { run: async (ctx) => (ctx.workspaceId === x.id ? body(ctx.query) : undefined) })] },
+        workspaceIds: [x.id, y.id],
+      });
+      expect(out.outcomes.find((o) => o.workspaceId === y.id)!.completed).toEqual([`0.7.0_${name}_${T0 + i}`]);
+      expect((await app.query(`SELECT pg_catalog.current_setting('role') AS r, current_user = session_user AS same`)).rows[0]).toEqual({ r: 'none', same: true });
+      return out.failures.filter((f) => f.workspaceId === x.id);
+    };
+    const members = async () =>
+      Number((await admin.query(`SELECT count(*)::int AS n FROM pg_auth_members WHERE roleid = 'crewflow'::regrole AND member = 'crewflow_app'::regrole`)).rows[0].n);
+
+    it('re-binding to the other workspace, updating its rows and restoring the binding is refused; its rows are unchanged', async () => {
+      const f = await step('RebindWrite', 30, async (q) => {
+        await q(`SELECT pg_catalog.set_config('rab.organisation_id', $1, true), pg_catalog.set_config('rab.workspace_id', $2, true)`, [y.org, y.id]);
+        await q(`DO $$ BEGIN EXECUTE format('UPDATE %I.job_role SET name = ''hacked''', ${hidden(y)}); END $$`);
+        await q(`SELECT pg_catalog.set_config('rab.organisation_id', $1, true), pg_catalog.set_config('rab.workspace_id', $2, true)`, [x.org, x.id]);
+      });
+      expect(f.map((o) => o.errorClass)).toEqual(['OUTSIDE_SCHEMA']);
+      expect((await admin.query(`SELECT name FROM ${y.schema}.job_role`)).rows).toEqual([{ name: 'y-role' }]);
+    });
+
+    it('RESET ROLE; GRANT crewflow TO crewflow_app; SET ROLE crewflow is refused; pg_auth_members unchanged', async () => {
+      const before = await members();
+      const f = await step('RoleGrant', 31, async (q) => {
+        await q('RESET ROLE');
+        await q('GRANT crewflow TO crewflow_app');
+        await q('SET ROLE crewflow');
+      });
+      expect(f).toHaveLength(1);
+      // OUTSIDE_SCHEMA when the GRANT went through (then rolled back), SQLSTATE_42501 when the login may not grant it.
+      expect(['OUTSIDE_SCHEMA', 'SQLSTATE_42501']).toContain(f[0]!.errorClass);
+      // eslint-disable-next-line no-console
+      console.log(`[drunner-m1] RESET ROLE + GRANT outcome: ${f[0]!.errorClass}`);
+      expect(await members()).toBe(before);
+    });
+
+    it('ALTER ROLE CURRENT_USER SET (pg_db_role_setting) is refused and rolled back', async () => {
+      const f = await step('RoleSetting', 32, async (q) => void (await q(`ALTER ROLE CURRENT_USER SET work_mem = '7MB'`)));
+      expect(f.map((o) => o.errorClass)).toEqual(['OUTSIDE_SCHEMA']);
+      expect(Number((await admin.query(`SELECT count(*)::int AS n FROM pg_db_role_setting WHERE 'work_mem=7MB' = ANY(setconfig)`)).rows[0].n)).toBe(0);
+    });
+
+    it('a forged logbook row (scope set, tenant unbound, then restored) is refused; no row is left', async () => {
+      const forged = `0.7.0_Forged_${T0 + 99}`;
+      const f = await step('ForgeRow', 33, async (q) => {
+        await q(`SELECT pg_catalog.set_config('rab.upgrade_scope', 'upgrade', true), pg_catalog.set_config('rab.organisation_id', '', true)`);
+        await q(`INSERT INTO core.upgrade_migration (name, status, attempt, executed_by_version, workspace_id) VALUES ($1, 'completed', 1, '0.7.0', $2)`, [forged, y.id]);
+        await q(`SELECT pg_catalog.set_config('rab.upgrade_scope', '', true), pg_catalog.set_config('rab.organisation_id', $1, true)`, [x.org]);
+      });
+      expect(f.map((o) => o.errorClass)).toEqual(['OUTSIDE_SCHEMA']);
+      expect(Number((await admin.query('SELECT count(*)::int AS n FROM core.upgrade_migration WHERE name = $1', [forged])).rows[0].n)).toBe(0);
+    });
+
+    it('updating a core table row of its own organisation is refused and rolled back', async () => {
+      const f = await step('CoreWrite', 34, async (q) => void (await q(`UPDATE core."user" SET last_name = 'changed-by-step' WHERE id = $1`, [x.owner])));
+      expect(f.map((o) => o.errorClass)).toEqual(['OUTSIDE_SCHEMA']);
+      expect((await admin.query(`SELECT last_name FROM core."user" WHERE id = $1`, [x.owner])).rows[0].last_name).not.toBe('changed-by-step');
+    });
+
+    it("the per-transaction counters really reflect this transaction's writes (user table and shared catalog), and nothing else", async () => {
+      const c = new Client({ connectionString: adminUrl });
+      await c.connect();
+      try {
+        await c.query('BEGIN');
+        await c.query(`UPDATE ${y.schema}.job_role SET name = name`);
+        await c.query(`CREATE ROLE drunner_stats_probe_${SFX} NOLOGIN`);
+        const u = (await c.query(`SELECT n_tup_upd::int AS n FROM pg_stat_xact_user_tables WHERE schemaname = $1 AND relname = 'job_role'`, [y.schema])).rows[0];
+        const a = (await c.query(`SELECT n_tup_ins::int AS n FROM pg_stat_xact_sys_tables WHERE relname = 'pg_authid'`)).rows[0];
+        expect(u?.n).toBe(1);
+        expect(a?.n).toBeGreaterThanOrEqual(1);
+        await c.query('ROLLBACK');
+        await c.query('BEGIN');
+        const fresh = (await c.query(`SELECT count(*)::int AS n FROM pg_stat_xact_user_tables WHERE n_tup_ins + n_tup_upd + n_tup_del > 0`)).rows[0];
+        expect(fresh.n).toBe(0);
+        await c.query('ROLLBACK');
+      } finally {
+        await c.end();
+      }
+    });
+  });
+
+  describe('review M2: structure the v1 fingerprint cannot see', () => {
+    it('a data command doing CREATE RULE, or creating an UNLOGGED table, is refused (STRUCTURE_EXTRA), rolled back, recorded failed', async () => {
+      const [a, b] = [await make('m2-a'), await make('m2-b')];
+      await adopt([a.id, b.id]);
+      const rule = cmd('AddRule', 40, { sql: (s) => `CREATE RULE d_rule AS ON INSERT TO ${s}.job_role DO INSTEAD NOTHING` });
+      const out = await runner({ workspaceRegistry: { '0-7': [rule] }, workspaceIds: [a.id] });
+      expect(out.failures.map((f) => f.errorClass)).toEqual(['STRUCTURE_EXTRA']);
+      expect(Number((await admin.query(`SELECT count(*)::int AS n FROM pg_rewrite WHERE rulename = 'd_rule'`)).rows[0].n)).toBe(0);
+      expect((await rows(a)).slice(-1)[0]).toMatchObject({ name: `0.7.0_AddRule_${T0 + 40}`, status: 'failed', attempt: 1 });
+      const unlogged = cmd('AddUnlogged', 41, { sql: (s) => `CREATE UNLOGGED TABLE ${s}.d_scratch (x int)` });
+      const out2 = await runner({ workspaceRegistry: { '0-7': [unlogged] }, workspaceIds: [b.id] });
+      expect(out2.failures.map((f) => f.errorClass)).toEqual(['STRUCTURE_EXTRA']);
+      expect(Number((await admin.query(`SELECT count(*)::int AS n FROM pg_class WHERE relname = 'd_scratch' AND relnamespace = $1::regnamespace`, [b.schema])).rows[0].n)).toBe(0);
+    });
+
+    it('a freshly provisioned workspace has none of it (no rule, all permanent, no inheritance, no foreign type or operator)', async () => {
+      const w = await make('m2-fresh');
+      expect((await admin.query(TARGET_EXTRA_STRUCTURE_SQL, [w.schema])).rows).toEqual([]);
+    });
+  });
+
+  it('review M4: after --force skipped a failed 0.7.0 step, 0.8.0 runs that step first; the cursor never jumps; status says failed', async () => {
+    const [a, b] = [await make('m4-a'), await make('m4-b')];
+    await adopt([a.id, b.id]);
+    let failB = true;
+    const registry = {
+      '0-7': [
+        cmd('Step07', 50, {
+          run: async ({ workspaceId }) => {
+            if (failB && workspaceId === b.id) throw new Error('b fails 0.7.0');
+          },
+        }),
+      ],
+      '0-8': [cmd('Step08', 60, { run: async () => undefined })],
+    };
+    await runner({ workspaceRegistry: registry, workspaceIds: [a.id, b.id] });
+    const at08 = (force: boolean) => runner({ codeVersion: '0.8.0', versions: ['0.4.0', '0.5.0', '0.6.0', '0.7.0'], force, workspaceRegistry: registry, workspaceIds: [a.id, b.id] });
+    const forced = await at08(true);
+    expect(forced.failures.map((f) => [f.workspaceId, f.step])).toEqual([[b.id, `0.7.0_Step07_${T0 + 50}`]]);
+    expect((await rows(b)).map((r) => r.name)).not.toContain(`0.8.0_Step08_${T0 + 60}`);
+    expect((await rows(a)).slice(-1)[0]).toMatchObject({ name: `0.8.0_Step08_${T0 + 60}`, status: 'completed', forced: true });
+    expect(await withUpgradeScope(session, 'status', (q) => countFailedWorkspaceCursors(q))).toBeGreaterThanOrEqual(1);
+    failB = false;
+    await at08(false);
+    expect((await rows(b)).slice(-2).map((r) => [r.name, r.status])).toEqual([
+      [`0.7.0_Step07_${T0 + 50}`, 'completed'],
+      [`0.8.0_Step08_${T0 + 60}`, 'completed'],
+    ]);
+  });
+
+  it('review L1: a workspace deleted between listing and its step is refused (WORKSPACE_GONE); the others complete', async () => {
+    const [a, b, c] = [await make('l1-a'), await make('l1-b'), await make('l1-c')];
+    await adopt([a.id, b.id, c.id]);
+    const out = await runner({
+      workspaceRegistry: { '0-7': [cmd('AfterDelete', 70, { run: async () => undefined })] },
+      workspaceIds: [a.id, b.id, c.id],
+      onBeforeWorkspace: async (id) => {
+        if (id !== b.id) return;
+        // The workspace row and its logbook rows disappear while its schema and registry row remain. The superuser skips the RI
+        // triggers (replica role) only to delete it out from under the run.
+        const d = new Client({ connectionString: adminUrl });
+        await d.connect();
+        try {
+          await d.query('SET session_replication_role = replica');
+          await d.query('DELETE FROM core.upgrade_migration WHERE workspace_id = $1', [b.id]);
+          await d.query('DELETE FROM core.manager_workspace WHERE id = $1', [b.id]);
+        } finally {
+          await d.end();
+        }
+      },
+    });
+    expect(out.failures.map((f) => [f.workspaceId, f.errorClass])).toEqual([[b.id, 'WORKSPACE_GONE']]);
+    for (const w of [a, c]) expect(out.outcomes.find((o) => o.workspaceId === w.id)!.completed).toEqual([`0.7.0_AfterDelete_${T0 + 70}`]);
+  });
+
+  it('review L2: a command that leaves a session-level SET ROLE behind is refused (SESSION_LEAK) and the session is reset', async () => {
+    const w = await make('l2');
+    await adopt([w.id]);
+    const out = await runner({ workspaceRegistry: { '0-7': [cmd('LeakRole', 80, { run: async ({ query }) => void (await query('SET ROLE crewflow')) })] }, workspaceIds: [w.id] });
+    expect(out.failures.map((f) => f.errorClass)).toEqual(['SESSION_LEAK']);
+    expect((await app.query(`SELECT pg_catalog.current_setting('role') AS r`)).rows[0].r).toBe('none');
   });
 
   it('idempotent after a crash between COMMIT and the logbook row: the step re-runs and completes', async () => {
