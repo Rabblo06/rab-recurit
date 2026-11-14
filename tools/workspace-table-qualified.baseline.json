@@ -17,12 +17,6 @@
     "packages/rab-server/src/engine/core-modules/user-deletion/user-deletion.service.ts": {
       "unqualified": 18
     },
-    "packages/rab-server/src/modules/ai/actions/ai-proposal.service.ts": {
-      "unqualified": 4
-    },
-    "packages/rab-server/src/modules/ai/actions/ai-write-tools.ts": {
-      "unqualified": 6
-    },
     "packages/rab-server/src/modules/attendance/services/attendance.service.ts": {
       "unqualified": 31
     },
@@ -43,9 +37,6 @@
     },
     "packages/rab-server/src/modules/attendance/templates/document-context.ts": {
       "unqualified": 2
-    },
-    "packages/rab-server/src/modules/dashboard/services/dashboard.service.ts": {
-      "unqualified": 10
     },
     "packages/rab-server/src/modules/identity/services/user-note.service.ts": {
       "unqualified": 2
@@ -83,24 +74,6 @@
     "packages/rab-server/src/modules/offer/services/withdraw-unconfirmed-offer.ts": {
       "unqualified": 8
     },
-    "packages/rab-server/src/modules/payroll/files/payslip-file.policy.ts": {
-      "unqualified": 3
-    },
-    "packages/rab-server/src/modules/payroll/files/shift-statement-file.policy.ts": {
-      "unqualified": 2
-    },
-    "packages/rab-server/src/modules/payroll/services/payroll-allocation.ts": {
-      "unqualified": 3
-    },
-    "packages/rab-server/src/modules/payroll/services/payroll-assistant.service.ts": {
-      "unqualified": 10
-    },
-    "packages/rab-server/src/modules/payroll/services/payroll-run.service.ts": {
-      "unqualified": 42
-    },
-    "packages/rab-server/src/modules/payroll/services/payroll.service.ts": {
-      "unqualified": 33
-    },
     "packages/rab-server/src/modules/scheduling/services/availability.service.ts": {
       "unqualified": 1
     },
@@ -121,9 +94,6 @@
     },
     "packages/rab-server/src/modules/scheduling/utils/shift-action-window.ts": {
       "unqualified": 1
-    },
-    "packages/rab-server/src/modules/search/services/search.service.ts": {
-      "unqualified": 19
     },
     "packages/rab-server/src/modules/staff/services/staff-availability.ts": {
       "unqualified": 1

@@ -6,6 +6,7 @@ import { AuthContext } from '../../../engine/core-modules/tenant/auth-context.in
 import { PermissionsService } from '../../../engine/core-modules/permissions/permissions.service';
 import { ResourceScopeService, ResourceScope } from '../../../engine/core-modules/resource-scope/resource-scope.service';
 import { MemberAccessPolicyService, ObjectAccessPolicy } from '../../identity/member-access/member-access-policy.service';
+import { businessTables } from '../../../engine/core-modules/tenant/business-tables';
 import { TenantContextService } from '../../../engine/core-modules/tenant/tenant-context.service';
 import { SearchDto } from '../dto/search.dto';
 import { buildSearchQuery, SearchQuery } from './search-query';
@@ -153,6 +154,7 @@ export class SearchService {
     limit: number,
     policy: ObjectAccessPolicy,
   ): Promise<SearchResult[]> {
+    const t = businessTables(manager);
     const p = new Params(q);
     const ws = p.push(ctx.workspaceId);
     let extra = '';
@@ -165,15 +167,15 @@ export class SearchService {
     const emailBranch =
       q.emailPrefix && this.memberAccess.isFieldVisible(policy, 'email')
         // sql-injection-reviewed: dynamic WHERE assembled only from literal fragments and $n / :named placeholders (values pushed to params); identifiers come from allow-lists. Reviewed 2026-11-04.
-        ? `UNION SELECT sp.id FROM core."user" u JOIN staff_profile sp ON sp.user_id = u.id WHERE u.email::text ILIKE ${p.push(q.emailPrefix)}`
+        ? `UNION SELECT sp.id FROM core."user" u JOIN ${t.staff_profile} sp ON sp.user_id = u.id WHERE u.email::text ILIKE ${p.push(q.emailPrefix)}`
         : '';
     const lim = p.push(limit);
     const rows = await manager.query(
       // sql-injection-reviewed: code-constant SQL fragment from a helper called with literal aliases; values are bound $n parameters.
       `WITH cand AS (
-         SELECT sp.id FROM core."user" u JOIN staff_profile sp ON sp.user_id = u.id WHERE ${this.userMatch(q, 'u')}
+         SELECT sp.id FROM core."user" u JOIN ${t.staff_profile} sp ON sp.user_id = u.id WHERE ${this.userMatch(q, 'u')}
          UNION
-         SELECT sp.id FROM staff_profile sp WHERE ${q.useInfix ? `(sp.search_vector @@ ${TSQ} OR lower(sp.staff_ref) LIKE lower($3))` : `sp.search_vector @@ ${TSQ}`}
+         SELECT sp.id FROM ${t.staff_profile} sp WHERE ${q.useInfix ? `(sp.search_vector @@ ${TSQ} OR lower(sp.staff_ref) LIKE lower($3))` : `sp.search_vector @@ ${TSQ}`}
          ${emailBranch}
        )
        SELECT sp.id, u.first_name, u.last_name,
@@ -181,7 +183,7 @@ export class SearchService {
               ts_rank_cd(u.search_vector, ${TSQ}) + ts_rank_cd(sp.search_vector, ${TSQ}) AS rank,
               public.similarity(n.full_name, ${NORM_TEXT}) AS sim, ${PARAMS_ANCHOR}
          FROM cand
-         JOIN staff_profile sp ON sp.id = cand.id
+         JOIN ${t.staff_profile} sp ON sp.id = cand.id
          JOIN core."user" u ON u.id = sp.user_id
          CROSS JOIN LATERAL (SELECT ${userName('u')} AS full_name) n
         WHERE sp.workspace_id = ${ws} AND sp.archived_at IS NULL${extra}
@@ -236,6 +238,7 @@ export class SearchService {
     const venueIds = this.scopeVenueIds(scope);
     if (venueIds && venueIds.length === 0) return [];
 
+    const t = businessTables(manager);
     const p = new Params(q);
     let where = `${this.venueMatch(q, 'v', this.memberAccess.isFieldVisible(policy, 'clientName'))}`;
     where += ` AND v.status <> ${p.push(VenueStatus.ARCHIVED)} AND v.archived_at IS NULL`;
@@ -258,7 +261,7 @@ export class SearchService {
               (${venueName('v')} = ${NORM_TEXT}) AS exact,
               ts_rank_cd(v.search_vector, ${TSQ}) AS rank,
               public.similarity(${venueName('v')}, ${NORM_TEXT}) AS sim, ${PARAMS_ANCHOR}
-         FROM venue v
+         FROM ${t.venue} v
         WHERE ${where}
         ORDER BY exact DESC, rank DESC, sim DESC, v.name ASC, v.id
         LIMIT ${lim}`,
@@ -285,6 +288,7 @@ export class SearchService {
     const venueIds = this.scopeVenueIds(scope);
     if (venueIds && venueIds.length === 0) return [];
 
+    const t = businessTables(manager);
     const p = new Params(q);
     // A shift's own vector (address + notes) is NOT a global-search target: under RLS its GIN index is unusable for the
     // runtime role (`@@` is not LEAKPROOF) and the full scan cost 250–500 ms per keystroke at 50k shifts (benchmark).
@@ -310,12 +314,12 @@ export class SearchService {
       // sql-injection-reviewed: code-constant SQL fragment from a helper called with literal aliases; values are bound $n parameters.
       `WITH mv AS (
          SELECT v.id, (${venueName('v')} = ${NORM_TEXT}) AS exact, ts_rank_cd(v.search_vector, ${TSQ}) AS rank
-           FROM venue v WHERE ${this.venueMatch(q, 'v', clientNameVisible)}
+           FROM ${t.venue} v WHERE ${this.venueMatch(q, 'v', clientNameVisible)}
        )
        SELECT s.id, v.name AS venue_name, s.starts_at, mv.exact, mv.rank, ${PARAMS_ANCHOR}
          FROM mv
-         JOIN shift s ON s.venue_id = mv.id
-         JOIN venue v ON v.id = s.venue_id
+         JOIN ${t.shift} s ON s.venue_id = mv.id
+         JOIN ${t.venue} v ON v.id = s.venue_id
         WHERE ${where}
         ORDER BY s.starts_at DESC, s.id
         LIMIT ${lim}`,
@@ -340,6 +344,7 @@ export class SearchService {
     const venueIds = this.scopeVenueIds(scope);
     if (venueIds && venueIds.length === 0) return [];
 
+    const t = businessTables(manager);
     const p = new Params(q);
     let where = 'TRUE';
     if (scope.kind === 'venue' && venueIds) {
@@ -352,26 +357,26 @@ export class SearchService {
     const rows = await manager.query(
       // sql-injection-reviewed: code-constant SQL fragment from a helper called with literal aliases; values are bound $n parameters.
       `WITH cand AS (
-         SELECT o.id FROM job_offer o
-           JOIN staff_profile sp ON sp.id = o.staff_profile_id
+         SELECT o.id FROM ${t.job_offer} o
+           JOIN ${t.staff_profile} sp ON sp.id = o.staff_profile_id
            JOIN core."user" u ON u.id = sp.user_id
           WHERE ${this.userMatch(q, 'u')}
          UNION
-         SELECT o.id FROM job_offer o
-           JOIN shift_assignment sa ON sa.id = o.shift_assignment_id
-           JOIN shift s ON s.id = sa.shift_id
-           JOIN venue v ON v.id = s.venue_id
+         SELECT o.id FROM ${t.job_offer} o
+           JOIN ${t.shift_assignment} sa ON sa.id = o.shift_assignment_id
+           JOIN ${t.shift} s ON s.id = sa.shift_id
+           JOIN ${t.venue} v ON v.id = s.venue_id
           WHERE ${this.venueMatch(q, 'v', true)}
        )
        SELECT o.id, v.name AS venue_name, u.first_name, u.last_name,
               (${userName('u')} = ${NORM_TEXT} OR ${venueName('v')} = ${NORM_TEXT}) AS exact,
               ts_rank_cd(u.search_vector, ${TSQ}) + ts_rank_cd(v.search_vector, ${TSQ}) AS rank, ${PARAMS_ANCHOR}
          FROM cand
-         JOIN job_offer o ON o.id = cand.id
-         JOIN shift_assignment sa ON sa.id = o.shift_assignment_id
-         JOIN shift s ON s.id = sa.shift_id
-         JOIN venue v ON v.id = s.venue_id
-         JOIN staff_profile sp ON sp.id = o.staff_profile_id
+         JOIN ${t.job_offer} o ON o.id = cand.id
+         JOIN ${t.shift_assignment} sa ON sa.id = o.shift_assignment_id
+         JOIN ${t.shift} s ON s.id = sa.shift_id
+         JOIN ${t.venue} v ON v.id = s.venue_id
+         JOIN ${t.staff_profile} sp ON sp.id = o.staff_profile_id
          JOIN core."user" u ON u.id = sp.user_id
         WHERE ${where}
         ORDER BY exact DESC, rank DESC, o.sent_at DESC, o.id
