@@ -7543,14 +7543,16 @@ image that runs the apps' own derive step on the read-only volume (`--pull never
     code is BLOCKED until its step succeeds. That covers a structural step, a mismatched structure, a level below the
     code's, a refused adoption, and no / unknown cursor.
     - Marker: `upgrade-blocked: <step> (<CLASS>)` in the existing registry column `migration_error`.
-    - `SchemaResolverService` answers 503 "Workspace is being upgraded." only to an authenticated member of that
-      workspace; another tenant gets 404 as usual.
+    - `SchemaResolverService` answers 503 "Workspace is being upgraded." only to a caller whose session is bound to that
+      workspace's organisation and who reaches the resolver (workspace membership is enforced earlier by the guards);
+      another organisation's caller gets 404 as usual.
     - The Worker's walks skip it and per-job paths defer it (no attempt counted).
     - The admin health page names it: workspace id, step, error class, never a message.
     - The step retries every start.
     - A data-only failure with a matching structure is served (still reported failed).
     - A block that cannot be written stops the start. A cache-epoch bump that fails while a block changed or is in force
-      stops the start (66).
+      stops the start (`WorkspaceBlockCacheError`, outcome postCheck, exit 68: every migration applied, a post-migration
+      gate refused).
   - **Test hooks:** `runMigrateOnStart`'s `testWorkspace` and the provisioner's `workspaceRegistry` are code-only and refused
     outside NODE_ENV=test, before any connection; a guard spec proves no non-spec file passes them.
   - **Long upgrades:** each (workspace, step) commits and is recorded on its own, so a kill loses at most the workspace in
@@ -7561,7 +7563,12 @@ image that runs the apps' own derive step on the read-only volume (`--pull never
     workspace schema) on the session that set the binding and role, so it can re-bind, RESET ROLE (`crewflow_owner` holds
     CREATEROLE) or set `rab.upgrade_scope`. The checks detect and roll back what that changes; they cannot stop a command
     that COMMITs mid-way (it is then refused). Not detected: `NOTIFY` (delivered at COMMIT), `nextval` on a sequence outside
-    the schema, large-object payload writes. Commands are reviewed code, never input-driven.
+    the schema, large-object payload writes in a STRUCTURAL step (in a data step a large-object write is a catalog write
+    and is refused, DDL_IN_DATA_STEP). Commands are reviewed code, never input-driven.
+  - **Redis needed at start while a block is in force:** every start that changes a block, or runs while any workspace is
+    blocked, must bump the entity-cache epoch; if Redis is down the API start refuses (68), so a lasting block plus a Redis
+    outage keeps the API from starting. A Worker already running is not stopped by that refusal; its discovery and claim
+    walks re-check the registry and skip a blocked workspace.
   - **D-T2:** steps run under REPEATABLE READ; a concurrent writer can fail a data step with 40001 (recorded failed,
     retried).
   - **HWS off (open owner question):** the block is enforced where workspaces are routed to their schemas

@@ -312,7 +312,7 @@ describe('QR: decoded from the PDF and verified (P0 plan §5.2 4(e))', () => {
     const { iat, exp } = new JwtService().decode<{ iat: number; exp: number }>(payload);
     // The token lives exactly as long as the shift's attendance window (FIXTURE_ENV: 15 min early + 120 min grace).
     expect(exp - iat).toBe((shift.endsAt.getTime() - shift.startsAt.getTime()) / 1000 + (15 + 120) * 60);
-    jest.useFakeTimers({ now: (exp - 1) * 1000 });
+    jest.useFakeTimers({ now: (exp - 1) * 1000, doNotFake: ['nextTick', 'queueMicrotask', 'setImmediate'] });
     try {
       // Control: one second before `exp` the same PDF QR is accepted for its shift, so the refusal below is the expiry.
       await expect(fixtureAttendanceQr.validateQr(manager, shift.id, payload)).resolves.toBeUndefined();
