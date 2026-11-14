@@ -49,12 +49,12 @@ $member_select$`;
  * equal it.
  *   16: generated 2026-11-14 on a throwaway postgres:16 owner-login ci-db (two frozen-template workspaces + this command, both
  *       equal; then reproduced by the runner, the TypeScript provisioner and core.provision_workspace).
- *   17 / 18: PENDING (generation moved to the InstaBox test workers). Until declared, WorkspaceStaffMemberSelect1786721480000
- *       REFUSES on that major (exit 66, nothing applied) and the TypeScript provisioner refuses a level-21 workspace: fail closed,
- *       never a guessed value.
+ *   17 / 18: generated 2026-11-14 the same way on throwaway postgres:17-alpine / postgres:18-alpine clusters (InstaBox worker).
  */
 export const STAFF_PROFILE_MEMBER_SELECT_FINGERPRINTS_V2: Readonly<Partial<Record<16 | 17 | 18, string>>> = Object.freeze({
   16: 'c08328e05b67e7b36511c80583ae97f1d3ff61a34017d9bc4574119d729e23e5',
+  17: '32186b1cae783c4af34401a5b1937fcfb9bcea6d5d4b2c0a282853328c8e8a21',
+  18: 'd52951bc8ef20f4aaec8d29052181e3fe2ad211e1454d8e5a368914461e35e31',
 });
 
 export const STAFF_PROFILE_MEMBER_SELECT_PROVISION_LITERAL = 'db:provision_workspace@WorkspaceStaffMemberSelect1786721480000';

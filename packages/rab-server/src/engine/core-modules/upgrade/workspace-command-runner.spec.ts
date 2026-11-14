@@ -53,10 +53,9 @@ describe('Part D: workspace upgrade commands in the sequence (Twenty upgrade-seq
     expect(lastInstanceStepOfVersion('0.6.0')).toBe('0.6.0_TypeOrmMigrations');
   });
 
-  it('the level-21 command declares v2 fingerprints for the reviewed majors only (17 / 18 PENDING: the migration refuses there)', () => {
+  it('the level-21 command declares a v2 fingerprint for every supported PostgreSQL major (16, 17, 18)', () => {
     const fps = WORKSPACE_UPGRADE_COMMANDS['0-6'][0]!.structure!.fingerprints;
-    // Update together with STAFF_PROFILE_MEMBER_SELECT_FINGERPRINTS_V2 once PostgreSQL 17 and 18 are generated (WS-COMMANDS.md).
-    expect(Object.keys(fps).sort()).toEqual(['16']);
+    expect(Object.keys(fps).sort()).toEqual(['16', '17', '18']);
     for (const v of Object.values(fps)) expect(v).toMatch(/^[0-9a-f]{64}$/);
   });
 
