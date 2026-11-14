@@ -4,6 +4,7 @@ import {
   AuditAction,
   AuditService,
 } from '../../../engine/core-modules/audit/audit.service';
+import { businessTables } from '../../../engine/core-modules/tenant/business-tables';
 
 /** Called inside a trusted tenant transaction. Never changes payroll status or pay. */
 export class PostShiftLifecycleService {
@@ -21,6 +22,7 @@ export class PostShiftLifecycleService {
    * doc comment for why it can't be unified further.
    */
   static discover(manager: EntityManager) {
+    const t = businessTables(manager);
     return manager.query<
       Array<{
         id: string;
@@ -29,7 +31,7 @@ export class PostShiftLifecycleService {
       }>
     >(
       `
-        SELECT id, organisation_id, workspace_id FROM attendance
+        SELECT id, organisation_id, workspace_id FROM ${t.attendance}
         WHERE workspace_id IS NOT NULL AND clock_out_at IS NOT NULL AND status IN ('clocked_out','under_review','approved','disputed')
           AND ((post_shift_completed_at IS NULL AND clock_out_at <= now() - make_interval(hours => $1))
             OR (post_shift_expired_at IS NULL AND clock_out_at <= now() - make_interval(hours => $2)))
@@ -40,12 +42,13 @@ export class PostShiftLifecycleService {
   }
 
   async advance(manager: EntityManager, attendanceId: string): Promise<number> {
+    const t = businessTables(manager);
     const [row] = await manager.query(
       `SELECT id, organisation_id, clock_out_at,
       post_shift_completed_at, post_shift_expired_at, now() AS server_now,
       clock_out_at <= now() - make_interval(hours => $2) AS complete_due,
       clock_out_at <= now() - make_interval(hours => $3) AS expired_due
-      FROM attendance WHERE id=$1 AND organisation_id=core.current_org() AND workspace_id=core.current_workspace() AND clock_out_at IS NOT NULL
+      FROM ${t.attendance} WHERE id=$1 AND organisation_id=core.current_org() AND workspace_id=core.current_workspace() AND clock_out_at IS NOT NULL
         AND status IN ('clocked_out','under_review','approved','disputed')
       FOR UPDATE`,
       [attendanceId, POST_SHIFT_COMPLETE_HOURS, POST_SHIFT_EXPIRED_HOURS],
@@ -75,7 +78,7 @@ export class PostShiftLifecycleService {
       const effectiveAt = new Date(clockOut + milestone.hours * 3600000);
       await manager.query(
         // sql-injection-reviewed: milestone.column comes from the module-constant MILESTONES table (fixed column names); values are bound.
-        `UPDATE attendance SET ${milestone.column}=clock_out_at + make_interval(hours => $2), updated_at=now() WHERE id=$1`,
+        `UPDATE ${t.attendance} SET ${milestone.column}=clock_out_at + make_interval(hours => $2), updated_at=now() WHERE id=$1`,
         [row.id, milestone.hours],
       );
       await this.audit.record(
