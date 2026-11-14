@@ -362,6 +362,35 @@ describeIfDb('attendance abuse cases (integration)', () => {
     );
   }
 
+  /**
+   * The QR as the pre-shift report job prints it: the real `AttendanceQrService.sign`, with the clock pinned to
+   * `printedAt` for that one synchronous call (jsonwebtoken reads `Date.now` for `iat`; a signing-relative `exp` would be
+   * computed from it too). Nothing else runs while the pin is in place.
+   */
+  async function signQrPrintedAt(organisation: Organisation, workspaceId: string | null, managerUserId: string, shiftId: string, printedAt: Date): Promise<string> {
+    const shift = await tenantContext.runInTenantContext(
+      { organisationId: organisation.id, workspaceId, userId: managerUserId, role: '' },
+      (manager) => manager.findOneByOrFail(Shift, { id: shiftId }),
+    );
+    const clock = jest.spyOn(Date, 'now').mockReturnValue(printedAt.getTime());
+    try {
+      return attendanceQr.sign(shift);
+    } finally {
+      clock.mockRestore();
+    }
+  }
+
+  /** Moves the shift (and the booked seat) to [now + startOffset, now + endOffset), as a manager's edit would; DB clock. */
+  async function moveShift(shiftId: string, startOffset: string, endOffset: string): Promise<{ startsAt: Date; endsAt: Date }> {
+    // TypeORM's postgres driver returns [rows, affectedCount] for UPDATE ... RETURNING.
+    const [[row]] = await adminDataSource.query(
+      `UPDATE core.shift SET starts_at = now() + $2::interval, ends_at = now() + $3::interval WHERE id = $1 RETURNING starts_at, ends_at`,
+      [shiftId, startOffset, endOffset],
+    );
+    await adminDataSource.query(`UPDATE core.shift_assignment SET period = tstzrange($2::timestamptz, $3::timestamptz, '[)') WHERE shift_id = $1`, [shiftId, row.starts_at, row.ends_at]);
+    return { startsAt: row.starts_at, endsAt: row.ends_at };
+  }
+
   /** `clock-in`, auto-signing a real QR for `shiftId` unless the caller supplies its own `qrToken` override (e.g. to test a bad/cross-shift one). */
   async function clockIn(
     staffToken: string,
@@ -598,6 +627,87 @@ describeIfDb('attendance abuse cases (integration)', () => {
       const res = await clockIn(staffAToken, organisation, venue, managerUserId, shiftId, { qrToken: validQr });
       expect(res.status).toBe(409);
       expect(res.body.code).not.toBe('INVALID_QR'); // rejected for the shift being closed, not the QR itself
+    });
+  });
+
+  // Owner decision 0i (2026-11-14): a QR is accepted until the shift's CURRENT end + QR_POST_SHIFT_GRACE_MINUTES (120),
+  // decided at scan time — never from when it was signed. The pre-shift report prints its QR up to 3 h before the start.
+  // SCOPE: these tests pin the QR decision on the clock-out path, nothing more. The attendance monitor is NOT running
+  // here: in production it marks a still-clocked-in row MISSING_CLOCK_OUT 30 min after the staff member's OWN end, after
+  // which clock-out 404s, so these tests do not prove a 120-min clock-out grace end to end (owner decision pending).
+  // Every shift move below updates the seat's period with it, so the staff member's own end equals the shift's end.
+  describe('QR expiry on clock-out follows the shift’s current end + grace (QR decision only; monitor not running)', () => {
+    const HOUR = 3600_000;
+
+    /** A confirmed, clocked-in booking (fresh QR at clock-in), ready for a clock-out with the printed QR. */
+    async function clockedInBooking() {
+      const { organisation, managerEmail, managerUserId, venue } = await seedOrg();
+      const managerToken = await login(managerEmail);
+      const staff = await seedStaff(organisation, managerUserId);
+      const staffToken = await login(staff.email, true);
+      const shiftId = await makeAndPublishShift(organisation, venue, managerToken);
+      await confirmShiftForStaff(managerToken, staffToken, staff.staffProfileId, shiftId);
+      expect((await clockIn(staffToken, organisation, venue, managerUserId, shiftId)).status).toBe(201);
+      const printQr = (printedAt: Date) => signQrPrintedAt(organisation, venue.workspaceId ?? null, managerUserId, shiftId, printedAt);
+      const clockOutWith = (qrToken: string) => clockOut(staffToken, organisation, venue, managerUserId, shiftId, { qrToken });
+      return { shiftId, printQr, clockOutWith };
+    }
+
+    it('a QR printed 3 h before the shift passes QR validation at clock-out in the shift’s last minutes', async () => {
+      const b = await clockedInBooking();
+      // An 8 h shift ending in 3 minutes. A signing-relative exp (shift length + 15 + 120 min from printing) lapsed ~45 min ago.
+      const { startsAt } = await moveShift(b.shiftId, '-7 hours -57 minutes', '3 minutes');
+      const printed = await b.printQr(new Date(startsAt.getTime() - 3 * HOUR));
+      const res = await b.clockOutWith(printed);
+      expect(res.status).toBe(201);
+      expect(res.body.status).toBe('clocked_out');
+    });
+
+    it('a QR printed 3 h before the shift passes QR validation at clock-out 100 min after the end (inside the QR grace; no monitor has run)', async () => {
+      const b = await clockedInBooking();
+      const { startsAt } = await moveShift(b.shiftId, '-9 hours -40 minutes', '-100 minutes'); // ended 100 min ago, inside the 120 min grace
+      const printed = await b.printQr(new Date(startsAt.getTime() - 3 * HOUR));
+      // Precondition stated, not hidden: the row is still clocked_in only because no monitor ran (in production it would be
+      // MISSING_CLOCK_OUT by now, 30 min after this staff member's own end, and clock-out would 404 before the QR is read).
+      const [before] = await adminDataSource.query(`SELECT status FROM core.attendance WHERE shift_id = $1`, [b.shiftId]);
+      expect(before.status).toBe('clocked_in');
+      const res = await b.clockOutWith(printed);
+      expect(res.status).toBe(201);
+      expect(res.body.status).toBe('clocked_out');
+    });
+
+    it('after the shift end moves later, the printed QR passes QR validation again (refused as expired before the move)', async () => {
+      const b = await clockedInBooking();
+      const { startsAt } = await moveShift(b.shiftId, '-9 hours -1 minute', '-121 minutes'); // end + grace passed a minute ago
+      const printed = await b.printQr(new Date(startsAt.getTime() - 3 * HOUR));
+      const before = await b.clockOutWith(printed);
+      expect(before.status).toBe(409);
+      expect(before.body).toMatchObject({ code: 'INVALID_QR', reason: 'expired' });
+
+      await moveShift(b.shiftId, '-9 hours -1 minute', '30 minutes'); // the manager extends the shift; the scan re-reads it
+      const after = await b.clockOutWith(printed);
+      expect(after.status).toBe(201);
+      expect(after.body.status).toBe('clocked_out');
+    });
+
+    it('after the shift end moves earlier, the printed QR is refused as expired once the NEW end + grace has passed; the attendance stays open', async () => {
+      const b = await clockedInBooking();
+      const printed = await b.printQr(new Date(Date.now() - 3 * HOUR)); // printed for the original 8 h shift
+      await moveShift(b.shiftId, '-4 hours', '-121 minutes'); // shortened: its new end + grace passed a minute ago
+      const res = await b.clockOutWith(printed);
+      expect(res.status).toBe(409);
+      expect(res.body).toMatchObject({ code: 'INVALID_QR', reason: 'expired' });
+      const [row] = await adminDataSource.query(`SELECT status, clock_out_at FROM core.attendance WHERE shift_id = $1`, [b.shiftId]);
+      expect(row).toMatchObject({ status: 'clocked_in', clock_out_at: null });
+    });
+
+    it('a QR printed for another shift is refused at clock-out (shift_mismatch), inside its own validity', async () => {
+      const b = await clockedInBooking();
+      const other = await clockedInBooking();
+      const foreign = await other.printQr(new Date(Date.now() - 3 * HOUR));
+      const res = await b.clockOutWith(foreign);
+      expect(res.status).toBe(409);
+      expect(res.body).toMatchObject({ code: 'INVALID_QR', reason: 'shift_mismatch' });
     });
   });
 
