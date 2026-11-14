@@ -262,6 +262,36 @@ describe('storage cleanup/reconcile correctness (LOCAL driver, no cloud infra)',
       expect(await objectExists(row.object_key)).toBe(false);
     });
 
+    it('1b (C1b): a workspace with no READY schema yet neither aborts the run nor hides its own rows; tenants stay isolated', async () => {
+      // A workspace mid-creation: the row exists, the schema does not (registry-missing with HWS on).
+      const otherOrg = await factory.createOrganisation('sc-unrouted');
+      const unrouted = await factory.createInternalManager(otherOrg, { provision: false, label: 'sc-unrouted' });
+      expect(await adminDataSource.query(`SELECT 1 FROM core.workspace_schema_registry WHERE workspace_id = $1`, [unrouted.workspaceId])).toEqual([]);
+      const objectKey = files.buildObjectKey({ organisationId: otherOrg.id, workspaceId: unrouted.workspaceId!, kind: FileKind.PROFILE_IMAGE as never, resourceId: randomUUID(), ext: 'png' });
+      await drivers.getDriver().put(objectKey, PNG, { contentType: 'image/png' });
+      const [foreign] = await adminDataSource.query<Array<{ id: string }>>(
+        `INSERT INTO core.stored_file (organisation_id, workspace_id, kind, resource_type, resource_id, storage_driver, bucket, object_key,
+           original_filename, mime_type, size_bytes, status, created_by, expires_at)
+         VALUES ($1, $2, $3, 'user', $4, 'LOCAL', NULL, $5, 'a.png', 'image/png', $6, 'PENDING', $7, now() - interval '1 minute') RETURNING id`,
+        [otherOrg.id, unrouted.workspaceId, FileKind.PROFILE_IMAGE, randomUUID(), objectKey, PNG.length, unrouted.userId],
+      );
+      const mine = await tenantContext.runInTenantContext(ctx, (m) => seedRow(m, { expiresAtSql: "now() - interval '1 minute'" }));
+
+      const report = await runReconcile({ failStalePending: true });
+      expect(report.actions).toContain(`failed stale pending ${mine.id}`);
+      expect(report.actions).toContain(`failed stale pending ${foreign!.id}`);
+      expect((await rowOf(mine.id)).status).toBe('FAILED');
+      const [after] = await adminDataSource.query<Array<{ status: string; organisation_id: string; workspace_id: string }>>(
+        `SELECT status, organisation_id, workspace_id FROM core.stored_file WHERE id = $1`,
+        [foreign!.id],
+      );
+      // Claimed under ITS OWN tenant binding: the row keeps its organisation and workspace, nothing crossed over.
+      expect(after).toEqual({ status: 'FAILED', organisation_id: otherOrg.id, workspace_id: unrouted.workspaceId });
+      expect(await objectExists(objectKey)).toBe(false);
+      // The first tenant's context still cannot see the other organisation's row (RLS on core.stored_file, unchanged).
+      expect(await tenantContext.runInTenantContext(ctx, (m) => m.query(`SELECT id FROM core.stored_file WHERE id = $1`, [foreign!.id]))).toEqual([]);
+    });
+
     it('2: a non-expired PENDING row is left completely untouched', async () => {
       const row = await tenantContext.runInTenantContext(ctx, (m) =>
         seedRow(m, { expiresAtSql: "now() + interval '1 hour'" }),
@@ -828,7 +858,7 @@ describe('storage cleanup/reconcile correctness (LOCAL driver, no cloud infra)',
       await expect(
         tenantContext.runInTenantContext(ctx, (m) =>
           m.query(
-            `INSERT INTO core.shift_report (organisation_id, workspace_id, shift_id, status) VALUES ($1, $2, $3, 'pending')`,
+            `INSERT INTO shift_report (organisation_id, workspace_id, shift_id, status) VALUES ($1, $2, $3, 'pending')`,
             [org.id, otherWorkspaceId, shiftId],
           ),
         ),
@@ -837,7 +867,7 @@ describe('storage cleanup/reconcile correctness (LOCAL driver, no cloud infra)',
       await expect(
         tenantContext.runInTenantContext(ctx, (m) =>
           m.query(
-            `INSERT INTO core.shift_report (organisation_id, workspace_id, shift_id, status) VALUES ($1, $2, $3, 'pending')`,
+            `INSERT INTO shift_report (organisation_id, workspace_id, shift_id, status) VALUES ($1, $2, $3, 'pending')`,
             [org.id, owner.workspaceId, shiftId],
           ),
         ),
@@ -848,7 +878,7 @@ describe('storage cleanup/reconcile correctness (LOCAL driver, no cloud infra)',
       await expect(
         tenantContext.runInTenantContext(ctx, (m) =>
           m.query(
-            `INSERT INTO core.replacement_request (organisation_id, workspace_id, shift_id, declined_shift_assignment_id) VALUES ($1, $2, $3, $4)`,
+            `INSERT INTO replacement_request (organisation_id, workspace_id, shift_id, declined_shift_assignment_id) VALUES ($1, $2, $3, $4)`,
             [org.id, otherWorkspaceId, shiftId, assignmentId],
           ),
         ),
