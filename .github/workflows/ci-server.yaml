@@ -93,3 +93,49 @@ jobs:
       - name: Stop PostgreSQL
         if: always()
         run: docker rm -f disposable-postgres > /dev/null 2>&1 || true
+
+  # Part C1 (OWNER-DB-ULTIMATE.md Part C): HWS runtime routing is ON by default outside production, so the job above runs
+  # it on. This job keeps the legacy OFF mode (business rows in the core copies, production's mode until C3) covered until
+  # C4 deletes the off path. Same database build; only HWS_RUNTIME_ENABLED differs.
+  test-hws-off:
+    needs: changed
+    if: needs.changed.outputs.server == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    services:
+      redis:
+        image: redis:7-alpine
+        ports: ['6379:6379']
+        options: >-
+          --health-cmd "redis-cli ping" --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      NODE_ENV: test
+      DB_TARGET: local
+      REDIS_URL: redis://localhost:6379
+      HWS_RUNTIME_ENABLED: 'false'
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/yarn-install
+      - uses: ./.github/actions/restore-cache
+      - name: Build the workspace libraries
+        run: npx nx run-many -t build -p rab-shared,rab-emails
+      - uses: ./.github/actions/disposable-postgres
+      - name: Build the test database the owner-login way (provider SQL, migrate child, head-state checks)
+        run: |
+          npx ts-node --transpile-only -P packages/rab-server/tsconfig.app.json packages/rab-server/src/database/typeorm/scripts/twenty-mode-check.ts ci-db
+        env:
+          TWENTY_PG_CONTAINER: disposable-postgres
+          TWENTY_CI_DB_FILE: ${{ runner.temp }}/test-database.env
+      - name: Server integration tests, HWS OFF
+        run: |
+          set -euo pipefail
+          set -a; source "${RUNNER_TEMP}/test-database.env"; set +a
+          test_env="$(node packages/rab-server/src/database/typeorm/scripts/twenty-test-env.cjs "$OWNER_DB" --source bootstrap)"
+          eval "$test_env"
+          unset TWENTY_MODE_TESTS CREWFLOW_OWNER_BOOTSTRAP_PASSWORD CREWFLOW_WORKER_BOOTSTRAP_PASSWORD CREWFLOW_APP_BOOTSTRAP_PASSWORD CREWFLOW_BOOTSTRAP_PASSWORD
+          npx nx run-many -t test -p rab-server --skip-nx-cache --runInBand --testTimeout=180000 --output-style=stream
+      - name: Stop PostgreSQL
+        if: always()
+        run: docker rm -f disposable-postgres > /dev/null 2>&1 || true
