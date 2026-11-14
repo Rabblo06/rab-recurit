@@ -15,6 +15,7 @@ import { TenantContextService } from '../../engine/core-modules/tenant/tenant-co
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
 import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-pipe';
+import { integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
 
 /**
  * Wave 1 lane A — organisation "password sign-in disabled" (CF-06 / finding D-A2). Complements
@@ -27,7 +28,7 @@ import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-
  *    Google sessions, the exempt mobile workforce and other organisations are untouched; a failed revocation rolls the
  *    setting change back.
  */
-const RUN = Boolean(process.env.DATABASE_URL);
+const RUN = integrationTestDatabaseReady();
 const describeIfDb = RUN ? describe : describe.skip;
 
 describeIfDb('wave 1 lane A — password sign-in disabled: enforcement, cross-organisation, revocation hook (integration)', () => {

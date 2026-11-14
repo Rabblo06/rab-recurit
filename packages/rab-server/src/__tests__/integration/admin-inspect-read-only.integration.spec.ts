@@ -13,6 +13,7 @@ import { TenantContextService } from '../../engine/core-modules/tenant/tenant-co
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
 import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-pipe';
+import { integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
 
 /**
  * CF-02 (October 15 audit): Admin Inspect is read-only on EVERY route, honoured only while the caller is a platform admin
@@ -20,7 +21,7 @@ import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-
  * avatar, preferences, push devices, set-password, files, notifications, manager workspace) executed AS the inspected
  * user, and a demoted admin kept inspecting. Real PostgreSQL with RLS, real HTTP, no mocks.
  */
-const RUN = Boolean(process.env.DATABASE_URL);
+const RUN = integrationTestDatabaseReady();
 const describeIfDb = RUN ? describe : describe.skip;
 
 describeIfDb('CF-02 Admin Inspect read-only, current authority and expiry (integration)', () => {

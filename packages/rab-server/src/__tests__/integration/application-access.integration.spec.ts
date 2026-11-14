@@ -25,6 +25,7 @@ import { ThrottlerRedisClientProvider } from '../../engine/core-modules/throttle
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { clearLoginLimiterState, clearThrottleState } from './helpers/throttle-state';
 import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-pipe';
+import { integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
 
 /**
  * Integration tests (rab-workforce-architecture.md §1.2 abuse-case suite):
@@ -34,7 +35,7 @@ import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-
  * unset rather than failing a plain `yarn test` for a dev without Postgres
  * running.
  */
-const RUN = Boolean(process.env.DATABASE_URL);
+const RUN = integrationTestDatabaseReady();
 const describeIfDb = RUN ? describe : describe.skip;
 
 describeIfDb('application-bound authentication (integration)', () => {

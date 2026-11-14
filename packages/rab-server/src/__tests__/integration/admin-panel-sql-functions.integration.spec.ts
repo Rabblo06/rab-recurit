@@ -15,6 +15,7 @@ import { PasswordHashingService } from '../../engine/core-modules/auth/services/
 import { TenantContextService } from '../../engine/core-modules/tenant/tenant-context.service';
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
+import { integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
 
 /**
  * Crewflow Platform Admin Panel — the five admin-gated SECURITY DEFINER read functions (AdminPanelReadFunctions
@@ -26,7 +27,7 @@ import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
  *  - the audit function never returns an action outside the admin allowlist and refuses a filter outside it;
  *  - no FORCE flag or BYPASSRLS changed (the five tables still FORCE; runtime role still rolbypassrls = false).
  */
-const RUN = Boolean(process.env.DATABASE_URL);
+const RUN = integrationTestDatabaseReady();
 const describeIfDb = RUN ? describe : describe.skip;
 jest.setTimeout(180_000);
 

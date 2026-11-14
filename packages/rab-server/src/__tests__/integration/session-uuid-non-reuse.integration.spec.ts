@@ -11,6 +11,7 @@ import { Organisation } from '../../modules/identity/entities';
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
 import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-pipe';
+import { integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
 
 /**
  * P0 finalization (FULL-ARCHITECTURE-UPGRADE-PLAN.md §16B, item 4 — session UUID non-reuse proof).
@@ -25,7 +26,7 @@ import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-
  * repeated enough times, across both a same-identity cycle and an A→C identity transition, that a
  * hypothetical small reusable slot pool (e.g. "the next free id out of N") would be caught.
  */
-const RUN = Boolean(process.env.DATABASE_URL);
+const RUN = integrationTestDatabaseReady();
 const describeIfDb = RUN ? describe : describe.skip;
 jest.setTimeout(60_000);
 

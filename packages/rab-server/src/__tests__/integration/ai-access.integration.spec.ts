@@ -4,6 +4,7 @@ import { randomUUID } from 'node:crypto';
 
 import { AiConversationService } from '../../modules/ai/services/ai-conversation.service';
 import { AiKit, aiOrganisation, ask, bearer, bootAiKit, jobFor, manager, newConversation, setOrgAi, turnRow } from './helpers/ai-test-kit';
+import { integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
 
 /**
  * AI Phase 1 — access refusals (brief §15 "Authentication and access"): organisation switch, ai.use, eligibility (CEO /
@@ -11,7 +12,7 @@ import { AiKit, aiOrganisation, ask, bearer, bootAiKit, jobFor, manager, newConv
  * from PostgreSQL when the authority changed AFTER the question was queued (suspended user / organisation, revoked
  * permission, ended session, switch turned off). Kill switch OFF: ai-kill-switch.integration.spec.ts.
  */
-const RUN = Boolean(process.env.DATABASE_URL);
+const RUN = integrationTestDatabaseReady();
 const describeIfDb = RUN ? describe : describe.skip;
 
 const sidOf = (token: string): string => (JSON.parse(Buffer.from(token.split('.')[1]!, 'base64url').toString('utf8')) as { sid: string }).sid;

@@ -13,6 +13,7 @@ import { TenantContextService } from '../../engine/core-modules/tenant/tenant-co
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
 import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-pipe';
+import { integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
 
 /**
  * Wave 1 lane A — finding D-A3. The existing second-factor gate (`LoginSecondFactorPolicyService`) was consulted only by
@@ -21,7 +22,7 @@ import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-
  * 'none' (inert); here the policy is replaced by a controllable stub to prove the WIRING: whenever it demands a factor,
  * no provider can obtain a session, and nothing (session, success login_history row, provider link) is written.
  */
-const RUN = Boolean(process.env.DATABASE_URL);
+const RUN = integrationTestDatabaseReady();
 const describeIfDb = RUN ? describe : describe.skip;
 
 describeIfDb('wave 1 lane A — second-factor gate on every sign-in path (integration)', () => {

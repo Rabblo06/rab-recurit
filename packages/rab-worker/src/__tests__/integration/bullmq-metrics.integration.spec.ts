@@ -8,6 +8,7 @@ import { BullmqScheduler, closeWorkersBounded, startBullmqScheduler } from '../.
 import { buildHandlerRegistry } from '../../core/scheduler/processor-explorer';
 import { SCAN_JOBS } from '../../core/scheduler/scan-jobs';
 import { WorkerRuntime } from '../../core/runtime/worker-runtime';
+import { integrationTestDatabaseReady } from '@rab/server/database/typeorm/core/integration-test-database-gate';
 
 /**
  * Admin panel follow-up: the scan Workers record BullMQ metrics (completed AND failed, one-minute points, a week kept),
@@ -17,7 +18,7 @@ import { WorkerRuntime } from '../../core/runtime/worker-runtime';
 jest.setTimeout(120_000);
 const REDIS_URL = process.env.REDIS_URL;
 const DB_URL = process.env.DATABASE_URL;
-const describeIf = REDIS_URL && DB_URL ? describe : describe.skip;
+const describeIf = REDIS_URL && integrationTestDatabaseReady() ? describe : describe.skip;
 const quietLogger = { log: () => undefined, warn: () => undefined, error: () => undefined } as unknown as Logger;
 
 describeIf('BullMQ Worker metrics (integration, real Redis)', () => {

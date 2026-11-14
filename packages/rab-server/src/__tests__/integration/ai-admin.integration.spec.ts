@@ -9,13 +9,14 @@ import { AuthCacheRedisClientProvider } from '../../engine/core-modules/auth/ser
 import { AiAdminService } from '../../modules/ai/services/ai-admin.service';
 import { utcDay } from '../../modules/ai/services/ai-quota.service';
 import { AiKit, aiOrganisation, ask, bearer, bootAiKit, jobFor, newConversation } from './helpers/ai-test-kit';
+import { integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
 
 /**
  * AI Phase 1 — platform administration (brief §13, §14): the per-organisation switch is platform-admin only, step-up
  * gated and audited in the TARGET organisation; usage is METADATA only (`core.ai_admin_usage_summary`); a platform
  * administrator has no route — and no RLS branch — to read anyone's transcript.
  */
-const RUN = Boolean(process.env.DATABASE_URL);
+const RUN = integrationTestDatabaseReady();
 const describeIfDb = RUN ? describe : describe.skip;
 // 7b: + the M7-1 estimated cost and cache counters and today's budget-alert flags (metadata only, still no content).
 const USAGE_KEYS = ['aiEnabled', 'budgetAlerts', 'cacheWriteTokens', 'cachedInputTokens', 'cancelledTurns', 'costUsdMicros', 'failedTurns', 'inputTokens', 'organisationId', 'organisationName', 'outputTokens', 'toolCalls', 'turns'];

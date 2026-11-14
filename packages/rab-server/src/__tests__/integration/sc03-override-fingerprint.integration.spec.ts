@@ -18,6 +18,7 @@ import { TenantContextService } from '../../engine/core-modules/tenant/tenant-co
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
 import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-pipe';
+import { integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
 
 /**
  * SC-03 (Phase X Stage 0, S0-C-caches.md): with AUTH_CONTEXT_CACHE_ENABLED on, the cached request snapshot (effective
@@ -27,7 +28,7 @@ import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-
  * request computes a NEW key and rebuilds from PostgreSQL. Proven here against real PostgreSQL (FORCE RLS), real Redis
  * and real HTTP: with the cache warm, and with the cache's Redis unreachable.
  */
-const RUN = Boolean(process.env.DATABASE_URL);
+const RUN = integrationTestDatabaseReady();
 const describeIfDb = RUN ? describe : describe.skip;
 
 describeIfDb('SC-03 a permission override takes effect on the next request with the auth-context cache ON', () => {

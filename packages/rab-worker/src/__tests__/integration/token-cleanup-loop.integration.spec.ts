@@ -4,6 +4,7 @@ import { Client } from 'pg';
 import { DataSource } from 'typeorm';
 
 import { reportTokenCleanupResult, runTokenCleanupCycle, TOKEN_CLEANUP_MAX_BATCHES, TokenCleanupResult } from '../../queues/rab-maintenance/token-cleanup.job';
+import { integrationTestDatabase, integrationTestDatabaseReady } from '@rab/server/database/typeorm/core/integration-test-database-gate';
 
 /**
  * XP-09 owner decisions Q2 + Q3 on a real database, through the runtime login (TEST_DATABASE_URL = crewflow_owner, the one
@@ -20,7 +21,7 @@ import { reportTokenCleanupResult, runTokenCleanupCycle, TOKEN_CLEANUP_MAX_BATCH
  * by branch fix/xp09-token-cleanup. Fixtures are written by the cluster superuser (TEST_DATABASE_URL_UNPOOLED), like the
  * other integration suites; the code under test only ever uses the runtime login.
  */
-const RUN = Boolean(process.env.DATABASE_URL && process.env.TEST_DATABASE_URL_UNPOOLED);
+const RUN = integrationTestDatabaseReady();
 const describeIfDb = RUN ? describe : describe.skip;
 jest.setTimeout(300_000);
 
@@ -79,7 +80,7 @@ describeIfDb('token cleanup: batch loop within the run cap and step isolation (X
   }
 
   beforeAll(async () => {
-    admin = new Client({ connectionString: process.env.TEST_DATABASE_URL_UNPOOLED! });
+    admin = new Client({ connectionString: integrationTestDatabase().adminUrl });
     await admin.connect();
     runtime = new DataSource({ type: 'postgres', url: process.env.DATABASE_URL!, entities: [], name: `token-cleanup-loop-${randomUUID()}` });
     await runtime.initialize();
@@ -155,7 +156,7 @@ describeIfDb('token cleanup: batch loop within the run cap and step isolation (X
     // Another session holds core.refresh_token; the runtime session gives up after 300 ms instead of waiting.
     const impatient = new DataSource({ type: 'postgres', url: process.env.DATABASE_URL!, entities: [], name: `token-cleanup-iso-${randomUUID()}`, extra: { options: '-c lock_timeout=300' } });
     await impatient.initialize();
-    const holder = new Client({ connectionString: process.env.TEST_DATABASE_URL_UNPOOLED! });
+    const holder = new Client({ connectionString: integrationTestDatabase().adminUrl });
     await holder.connect();
     let result: TokenCleanupResult;
     try {

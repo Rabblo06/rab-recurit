@@ -3,6 +3,7 @@ import { DataSource } from 'typeorm';
 import { createPgClient, createPgDataSource, resolvePgEnvironment } from '../../database/postgres';
 import { assertConnectionBudget, readServerCapacity } from '../../database/runtime/connection-budget';
 import { DatabaseMetrics, registerDataSourcePoolMetrics } from '../../database/runtime/database-metrics';
+import { integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
 
 /**
  * Phase B (B5), against the disposable test database as the runtime role:
@@ -12,7 +13,7 @@ import { DatabaseMetrics, registerDataSourcePoolMetrics } from '../../database/r
  *   - the metrics snapshot carries no credential, host or tenant data;
  *   - the budget check reads the real server limits.
  */
-const describeIfDb = process.env.DATABASE_URL ? describe : describe.skip;
+const describeIfDb = integrationTestDatabaseReady() ? describe : describe.skip;
 
 describeIfDb('database pools and sessions (B5, live)', () => {
   const resolved = () => resolvePgEnvironment(process.env, { processRole: 'api' });

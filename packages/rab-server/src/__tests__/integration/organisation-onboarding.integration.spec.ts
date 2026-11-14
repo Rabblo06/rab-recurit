@@ -15,6 +15,7 @@ import { createAdminDataSource } from './helpers/admin-datasource';
 import { clearThrottleState } from './helpers/throttle-state';
 import { TestIdentityFactory } from './helpers/test-identities';
 import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-pipe';
+import { integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
 
 /**
  * P2.9B — organisation onboarding by the Platform Super Admin. Real Postgres, RLS on, no mocks.
@@ -25,7 +26,7 @@ import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-
  * read/manage surface (list, detail, resend/revoke of a CEO account invitation of an organisation created before the
  * correction, suspension) and exercises it on organisations made both ways.
  */
-const RUN = Boolean(process.env.DATABASE_URL);
+const RUN = integrationTestDatabaseReady();
 const describeIfDb = RUN ? describe : describe.skip;
 
 describeIfDb('organisation onboarding — CEO invitation (integration)', () => {

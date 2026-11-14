@@ -58,8 +58,9 @@ import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { provisionTypeScript, seedWorkspace } from './helpers/workspace-fixtures';
 import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
+import { integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
 
-const RUN = Boolean(process.env.DATABASE_URL);
+const RUN = integrationTestDatabaseReady();
 jest.setTimeout(180_000);
 
 const OWNER_LOGIN = 'crewflow_owner';

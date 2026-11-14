@@ -2,13 +2,14 @@ import { Client } from 'pg';
 
 import { resolveIntegrationTestDatabase } from '../../database/typeorm/core/test-database-guard';
 import { compareWithGolden, readSecurityPostureGoldens } from '../../database/typeorm/core/security-posture';
+import { integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
 
 /**
  * G-03 / CF-09 / CF-41 / CF-48: the test database must have exactly the ownership and grant model a database built from
  * migrations alone produces (the committed golden snapshot). A hand-applied grant on a long-lived test database once hid a
  * fresh-install outage (every cookie request 503). Any drift, in either direction, fails here with the exact lines.
  */
-const RUN = Boolean(process.env.DATABASE_URL);
+const RUN = integrationTestDatabaseReady();
 const describeIfDb = RUN ? describe : describe.skip;
 
 describeIfDb('database security posture (integration)', () => {

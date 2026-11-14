@@ -19,6 +19,7 @@ import { toTstzRange } from '../../modules/scheduling/utils/tstzrange';
 import { PasswordHashingService } from '../../engine/core-modules/auth/services/password-hashing.service';
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { generateFixturePassword } from './helpers/fixture-password';
+import { integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
 
 const FIXTURE_PASSWORD = generateFixturePassword();
 
@@ -42,7 +43,7 @@ const FIXTURE_PASSWORD = generateFixturePassword();
  * `adminDataSource` (`rab_owner`, via `DATABASE_URL_UNPOOLED`) — every
  * actual attack-proof query below uses `dataSource` (`rab_app`).
  */
-const RUN = Boolean(process.env.DATABASE_URL);
+const RUN = integrationTestDatabaseReady();
 const describeIfDb = RUN ? describe : describe.skip;
 
 describeIfDb('workspace cross-tenant RLS attack (integration)', () => {

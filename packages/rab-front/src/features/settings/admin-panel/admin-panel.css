@@ -205,6 +205,10 @@
 .ap-root .ap-indicator { display: grid; grid-template-columns: 1fr auto; gap: 4px 12px; align-items: center; }
 .ap-root .ap-indicator b { font-weight: 500; }
 .ap-root .ap-indicator p { grid-column: 1 / -1; margin: 0; color: var(--font-secondary); font: var(--text-small); }
+.ap-root .ap-facts { grid-column: 1 / -1; margin: 4px 0 0; display: grid; gap: 2px; font: var(--text-small); }
+.ap-root .ap-facts div { display: flex; justify-content: space-between; gap: 12px; min-width: 0; }
+.ap-root .ap-facts dt { color: var(--font-secondary); overflow-wrap: anywhere; }
+.ap-root .ap-facts dd { margin: 0; text-align: right; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
 
 .ap-root .ap-pills { display: flex; gap: 6px; flex-wrap: wrap; }
 .ap-root .ap-pills button { border: 1px solid var(--border-medium); background: var(--bg-primary); color: var(--font-primary); border-radius: 999px; padding: 3px 10px; cursor: pointer; display: inline-flex; gap: 6px; align-items: center; font: inherit; }

@@ -11,6 +11,7 @@ import { TenantContextService } from '../../engine/core-modules/tenant/tenant-co
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
 import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-pipe';
+import { integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
 
 /**
  * Wave 5 lane DATA — named archive / restore actions (venue, job role, staff leaver, manager profile, draft shift).
@@ -19,7 +20,7 @@ import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-
  * (`assertTransition`), preconditions refuse, archived rows leave the default lists but stay readable in history reads,
  * and every action leaves an audit row in the same transaction.
  */
-const RUN = Boolean(process.env.DATABASE_URL);
+const RUN = integrationTestDatabaseReady();
 const describeIfDb = RUN ? describe : describe.skip;
 
 describeIfDb('wave 5: archive / restore (integration)', () => {

@@ -10,13 +10,14 @@ import { TenantContextService } from '../../engine/core-modules/tenant/tenant-co
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
 import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-pipe';
+import { integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
 
 /**
  * CF-20 (October 15 audit): an abandoned tab's automatic polling must not keep a session alive. A request marked
  * `X-Crewflow-Background: 1` is authenticated in full (a revoked or idle-expired session is still refused) but never
  * extends the idle window; an ordinary request still does.
  */
-const RUN = Boolean(process.env.DATABASE_URL);
+const RUN = integrationTestDatabaseReady();
 const describeIfDb = RUN ? describe : describe.skip;
 
 describeIfDb('CF-20 background requests do not extend the idle window (integration)', () => {

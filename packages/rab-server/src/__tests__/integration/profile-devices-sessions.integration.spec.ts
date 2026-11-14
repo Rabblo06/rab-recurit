@@ -10,6 +10,7 @@ import { TenantContextService } from '../../engine/core-modules/tenant/tenant-co
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
 import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-pipe';
+import { integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
 
 /**
  * Settings → Profile → Devices (2026-10-15). Real PostgreSQL with RLS; runs unchanged with both auth caches enabled.
@@ -23,7 +24,7 @@ import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-
  * metadata never decides anything, that the issued lifetimes are the documented ones, and that "Sign out everywhere" (now
  * removed from the Profile UI) still exists server-side for security workflows.
  */
-const RUN = Boolean(process.env.DATABASE_URL);
+const RUN = integrationTestDatabaseReady();
 const describeIfDb = RUN ? describe : describe.skip;
 const ORIGIN = 'http://localhost:5173';
 

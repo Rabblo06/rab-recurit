@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 /**
- * M2 CI helper: prints `export TEST_DATABASE_URL=...` / `export TEST_DATABASE_URL_UNPOOLED=...` for one harness database, for
+ * M2 CI helper: prints `export TEST_DATABASE_URL=...` / `export TEST_DATABASE_ADMIN_URL=...` (X3.5-S7 release 1: also the
+ * deprecated `TEST_DATABASE_URL_UNPOOLED`, same value) for one harness database, for
  * `eval` in the same shell step, preceded by GitHub `::add-mask::` lines so neither URL can reach the job log.
  *
  *   eval "$(node migration-security-test-env.cjs <database>)"
@@ -71,7 +72,7 @@ process.stderr.write(
   `::add-mask::${admin}\n::add-mask::${app}\n${crewflow ? `::add-mask::${crewflow}\n` : ''}${worker ? `::add-mask::${worker}\n` : ''}`,
 );
 process.stdout.write(
-  `export TEST_DATABASE_URL_UNPOOLED=${q(admin)}\nexport TEST_DATABASE_URL=${q(app)}\n` +
+  `export TEST_DATABASE_ADMIN_URL=${q(admin)}\nexport TEST_DATABASE_URL_UNPOOLED=${q(admin)}\nexport TEST_DATABASE_URL=${q(app)}\n` +
     (crewflow ? `export TEST_DATABASE_CREWFLOW_URL=${q(crewflow)}\n` : '') +
     (worker ? `export TEST_DATABASE_WORKER_URL=${q(worker)}\n` : ''),
 );

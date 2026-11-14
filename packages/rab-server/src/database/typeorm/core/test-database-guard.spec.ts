@@ -1,9 +1,12 @@
 import {
   ALLOW_REMOTE_TEST_DATABASE,
+  TEST_DATABASE_ADMIN_URL,
+  TEST_DATABASE_ADMIN_URL_NAMES,
   TEST_DATABASE_URL,
   TEST_DATABASE_URL_UNPOOLED,
   TEST_DATABASE_WORKER_URL,
   TestDatabaseConfigError,
+  WORKER_LOGIN_FORBIDDEN_LOGIN_SOURCES,
   applyIntegrationTestDatabaseEnv,
   applyWorkerLoginTestDatabaseEnv,
   assertWorkerLoginNotPrivilegedAtRuntime,
@@ -11,6 +14,8 @@ import {
   laterDotenvValues,
   resolveForJestGlobalSetup,
   resolveIntegrationTestDatabase,
+  resolveTestDatabaseAdminUrl,
+  testDatabaseAdminNameNotice,
 } from './test-database-guard';
 
 // Obviously fake credentials. The abuse tests assert these never appear in any error message.
@@ -39,8 +44,8 @@ describe('integration test database guard', () => {
     expectRefused({ [TEST_DATABASE_URL_UNPOOLED]: LOCAL_ADMIN }, /TEST_DATABASE_URL is required/);
   });
 
-  it('2. refuses when TEST_DATABASE_URL_UNPOOLED is missing, and names the variable', () => {
-    expectRefused({ [TEST_DATABASE_URL]: LOCAL_APP }, /TEST_DATABASE_URL_UNPOOLED is required/);
+  it('2. refuses when the admin URL is missing under both names, and names the variables', () => {
+    expectRefused({ [TEST_DATABASE_URL]: LOCAL_APP }, /TEST_DATABASE_ADMIN_URL is required .*deprecated name TEST_DATABASE_URL_UNPOOLED/);
   });
 
   it('3. refuses a local application URL paired with a Neon admin URL, before any fixture setup', () => {
@@ -83,7 +88,7 @@ describe('integration test database guard', () => {
   });
 
   it('6c. does not treat the override as enough when the explicit TEST pair is missing', () => {
-    expectRefused({ [ALLOW_REMOTE_TEST_DATABASE]: 'true', [TEST_DATABASE_URL]: NEON_POOLED }, /TEST_DATABASE_URL_UNPOOLED is required/);
+    expectRefused({ [ALLOW_REMOTE_TEST_DATABASE]: 'true', [TEST_DATABASE_URL]: NEON_POOLED }, /TEST_DATABASE_ADMIN_URL is required/);
   });
 
   it('7. production-looking normal .env values are never consumed by Jest', () => {
@@ -494,6 +499,123 @@ describe('integration test database guard', () => {
         expectWorkerRefused(workerEnv({ PGHOST: 'elsewhere' }), /libpq variable\(s\) PGHOST are set/);
         expectWorkerRefused(workerEnv({ DATABASE_DIRECT_URL: LOCAL_ADMIN }), /DATABASE_DIRECT_URL is set/);
       });
+    });
+  });
+
+  // ---- X3.5-S7 (audit DBT-08), release 1: TEST_DATABASE_URL_UNPOOLED -> TEST_DATABASE_ADMIN_URL, both names accepted, two
+  // different values refused, every existing check applied to whichever name supplied the admin URL.
+  describe('X3.5-S7 TEST_DATABASE_ADMIN_URL rename (release 1, dual name)', () => {
+    const OTHER_PASSWORD_ADMIN = `postgres://rab_owner:${SECRET}-2@127.0.0.1:55462/rab_test_a`;
+    const s7Env = (over: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv => ({ NODE_ENV: 'test', JEST_WORKER_ID: '1', [TEST_DATABASE_URL]: LOCAL_APP, ...over });
+    function expectNoValue(message: string): void {
+      expect(message).not.toContain(SECRET);
+      expect(message).not.toMatch(/postgres(ql)?:\/\//);
+      expect(message).not.toContain('rab_owner');
+    }
+
+    it('the new name alone works, labels the admin identity with it, and prints no deprecation notice', () => {
+      const resolved = resolveIntegrationTestDatabase({ [TEST_DATABASE_URL]: LOCAL_APP, [TEST_DATABASE_ADMIN_URL]: LOCAL_ADMIN });
+      expect(resolved.adminUrl).toBe(LOCAL_ADMIN);
+      expect(resolved.admin.label).toBe(TEST_DATABASE_ADMIN_URL);
+      expect(resolved.adminFromDeprecatedName).toBe(false);
+      expect(testDatabaseAdminNameNotice(resolved)).toBeNull();
+    });
+
+    it('the old name alone still works, is labelled with the old name, and gives one name-only deprecation notice', () => {
+      const resolved = resolveIntegrationTestDatabase({ [TEST_DATABASE_URL]: LOCAL_APP, [TEST_DATABASE_URL_UNPOOLED]: LOCAL_ADMIN });
+      expect(resolved.adminUrl).toBe(LOCAL_ADMIN);
+      expect(resolved.admin.label).toBe(TEST_DATABASE_URL_UNPOOLED);
+      expect(resolved.adminFromDeprecatedName).toBe(true);
+      const notice = testDatabaseAdminNameNotice(resolved) as string;
+      expect(notice).toMatch(/TEST_DATABASE_URL_UNPOOLED is deprecated: rename it to TEST_DATABASE_ADMIN_URL/);
+      expectNoValue(notice);
+    });
+
+    it('both names with the same value (after trimming) work, under the new name, without a notice', () => {
+      const resolved = resolveIntegrationTestDatabase({
+        [TEST_DATABASE_URL]: LOCAL_APP,
+        [TEST_DATABASE_ADMIN_URL]: ` ${LOCAL_ADMIN} `,
+        [TEST_DATABASE_URL_UNPOOLED]: LOCAL_ADMIN,
+      });
+      expect(resolved.adminUrl).toBe(LOCAL_ADMIN);
+      expect(resolved.admin.label).toBe(TEST_DATABASE_ADMIN_URL);
+      expect(testDatabaseAdminNameNotice(resolved)).toBeNull();
+    });
+
+    it.each<[string, string]>([
+      ['another database', LOCAL_OTHER_DB_ADMIN],
+      ['the same target with another password (compared as written, never by target only)', OTHER_PASSWORD_ADMIN],
+      ['another host', NEON_DIRECT],
+    ])('both names set to different values (%s) are refused, naming both variables and no value', (_name, other) => {
+      const message = expectRefused(
+        { [TEST_DATABASE_URL]: LOCAL_APP, [TEST_DATABASE_ADMIN_URL]: LOCAL_ADMIN, [TEST_DATABASE_URL_UNPOOLED]: other },
+        /TEST_DATABASE_ADMIN_URL and its deprecated name TEST_DATABASE_URL_UNPOOLED are both set, to different values/,
+      );
+      expectNoValue(message);
+      expect(() => resolveTestDatabaseAdminUrl({ [TEST_DATABASE_ADMIN_URL]: other, [TEST_DATABASE_URL_UNPOOLED]: LOCAL_ADMIN })).toThrow(TestDatabaseConfigError);
+    });
+
+    it('an empty or blank value counts as unset under either name (never as a second value)', () => {
+      expect(resolveIntegrationTestDatabase({ [TEST_DATABASE_URL]: LOCAL_APP, [TEST_DATABASE_ADMIN_URL]: '  ', [TEST_DATABASE_URL_UNPOOLED]: LOCAL_ADMIN }).admin.label).toBe(
+        TEST_DATABASE_URL_UNPOOLED,
+      );
+      expect(resolveIntegrationTestDatabase({ [TEST_DATABASE_URL]: LOCAL_APP, [TEST_DATABASE_ADMIN_URL]: LOCAL_ADMIN, [TEST_DATABASE_URL_UNPOOLED]: '' }).admin.label).toBe(
+        TEST_DATABASE_ADMIN_URL,
+      );
+      expectRefused({ [TEST_DATABASE_URL]: LOCAL_APP, [TEST_DATABASE_ADMIN_URL]: ' ', [TEST_DATABASE_URL_UNPOOLED]: '' }, /TEST_DATABASE_ADMIN_URL is required/);
+    });
+
+    it('every existing check applies to the new name, and the messages name it', () => {
+      expectRefused({ [TEST_DATABASE_URL]: LOCAL_APP, [TEST_DATABASE_ADMIN_URL]: LOCAL_OTHER_DB_ADMIN }, /different databases \("rab_test_a" vs "rab_test_b"\)/);
+      expectRefused({ [TEST_DATABASE_URL]: NEON_POOLED, [TEST_DATABASE_ADMIN_URL]: NEON_DIRECT }, /Remote test database/);
+      expectRefused({ [TEST_DATABASE_URL]: LOCAL_APP, [TEST_DATABASE_ADMIN_URL]: 'postgres://127.0.0.1:55462/rab_test_a' }, /TEST_DATABASE_ADMIN_URL must name its login/);
+      expectRefused({ [TEST_DATABASE_URL]: LOCAL_APP, [TEST_DATABASE_ADMIN_URL]: `not a url ${SECRET}` }, /TEST_DATABASE_ADMIN_URL is not a parseable postgres URL/);
+      expectRefused(
+        { [TEST_DATABASE_URL]: LOCAL_APP, [TEST_DATABASE_ADMIN_URL]: `postgres://rab_owner:${SECRET}@127.0.0.1:55462/rab_test_a?host=elsewhere` },
+        /TEST_DATABASE_ADMIN_URL sets "host" as a query parameter/,
+      );
+      expectRefused(
+        {
+          [TEST_DATABASE_URL]: `postgres://crewflow_app:${SECRET}@127.0.0.1:15432/rab`,
+          [TEST_DATABASE_ADMIN_URL]: `postgres://rab:${SECRET}@127.0.0.1:15432/rab`,
+        },
+        /development database \(rab-devdb\)/,
+      );
+    });
+
+    it('setupFiles routing writes the validated admin URL under BOTH names (so a later .env cannot add another under either)', () => {
+      const fromNew = s7Env({ [TEST_DATABASE_ADMIN_URL]: LOCAL_ADMIN });
+      expect(applyIntegrationTestDatabaseEnv(fromNew)?.admin.label).toBe(TEST_DATABASE_ADMIN_URL);
+      expect(fromNew[TEST_DATABASE_ADMIN_URL]).toBe(LOCAL_ADMIN);
+      expect(fromNew[TEST_DATABASE_URL_UNPOOLED]).toBe(LOCAL_ADMIN);
+      expect(fromNew.DATABASE_URL_UNPOOLED).toBe(LOCAL_ADMIN);
+      const fromOld = s7Env({ [TEST_DATABASE_URL_UNPOOLED]: ` ${LOCAL_ADMIN}` });
+      expect(applyIntegrationTestDatabaseEnv(fromOld)?.admin.label).toBe(TEST_DATABASE_URL_UNPOOLED);
+      expect(fromOld[TEST_DATABASE_ADMIN_URL]).toBe(LOCAL_ADMIN);
+      expect(fromOld[TEST_DATABASE_URL_UNPOOLED]).toBe(LOCAL_ADMIN);
+    });
+
+    it('a refused pair changes nothing (no name routed half-way), in setupFiles and in globalSetup', () => {
+      const env = s7Env({ [TEST_DATABASE_ADMIN_URL]: LOCAL_ADMIN, [TEST_DATABASE_URL_UNPOOLED]: LOCAL_OTHER_DB_ADMIN, DATABASE_URL: 'untouched' });
+      const before = { ...env };
+      expect(() => applyIntegrationTestDatabaseEnv(env)).toThrow(/both set, to different values/);
+      expect(env).toEqual(before);
+      expect(() => resolveForJestGlobalSetup({ ...before, JEST_WORKER_ID: undefined })).toThrow(/both set, to different values/);
+    });
+
+    it('the Worker-login switch refuses the admin login under either name', () => {
+      expect(WORKER_LOGIN_FORBIDDEN_LOGIN_SOURCES).toEqual(expect.arrayContaining([...TEST_DATABASE_ADMIN_URL_NAMES]));
+      const worker = (over: NodeJS.ProcessEnv): NodeJS.ProcessEnv => ({ PHASE_D_SQL_APPROVED: 'true', [TEST_DATABASE_URL]: LOCAL_APP, [TEST_DATABASE_WORKER_URL]: LOCAL_ADMIN, ...over });
+      expect(() => applyWorkerLoginTestDatabaseEnv(worker({ [TEST_DATABASE_ADMIN_URL]: LOCAL_ADMIN }))).toThrow(/same login as TEST_DATABASE_ADMIN_URL/);
+      expect(() => applyWorkerLoginTestDatabaseEnv(worker({ [TEST_DATABASE_URL_UNPOOLED]: LOCAL_ADMIN }))).toThrow(/same login as TEST_DATABASE_URL_UNPOOLED/);
+      expect(() => applyWorkerLoginTestDatabaseEnv(worker({ [TEST_DATABASE_ADMIN_URL]: LOCAL_ADMIN, [TEST_DATABASE_URL_UNPOOLED]: OTHER_PASSWORD_ADMIN }))).toThrow(
+        /both set, to different values/,
+      );
+    });
+
+    it('this Jest process was routed: both admin names hold the same validated value', () => {
+      expect(process.env[TEST_DATABASE_ADMIN_URL]).toBeTruthy();
+      expect(process.env[TEST_DATABASE_ADMIN_URL]).toBe(process.env[TEST_DATABASE_URL_UNPOOLED]);
     });
   });
 

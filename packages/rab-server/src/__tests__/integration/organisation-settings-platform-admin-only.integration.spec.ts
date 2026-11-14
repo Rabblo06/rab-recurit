@@ -14,6 +14,7 @@ import { OrganisationSettingsAdminService } from '../../modules/identity/service
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
 import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-pipe';
+import { integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
 
 /**
  * W6-E2E-04 + owner decision 2026-10-23: "Changing organisation settings (incl. turning off password sign-in) =
@@ -28,7 +29,7 @@ import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-
  *  - a platform administrator changes ANOTHER organisation's settings, it is audited in that organisation, attributed to
  *    the administrator, and the wave-1 "log them out" revocation still happens; an unknown or malformed organisation is 404.
  */
-const RUN = Boolean(process.env.DATABASE_URL);
+const RUN = integrationTestDatabaseReady();
 const describeIfDb = RUN ? describe : describe.skip;
 
 describeIfDb('W6-E2E-04 organisation settings are platform-admin only (integration, abuse cases)', () => {

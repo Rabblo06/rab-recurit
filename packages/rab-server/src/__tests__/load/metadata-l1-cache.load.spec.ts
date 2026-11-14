@@ -29,6 +29,7 @@ import { TenantContextService } from '../../engine/core-modules/tenant/tenant-co
 import { createAdminDataSource } from '../integration/helpers/admin-datasource';
 import { TestIdentityFactory } from '../integration/helpers/test-identities';
 import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-pipe';
+import { integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
 
 /**
  * WAVE 5 LANE OPS — L1 metadata cache load test (opt-in; excluded from the default suite):
@@ -39,7 +40,7 @@ import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-
  * not measure the throttler. Same-machine numbers (generator, API, PostgreSQL and Redis share one Windows laptop): a
  * relative comparison between profiles, not production latencies. Results: docs/evidence/w5-ops/load/<profile>.json.
  */
-const RUN = process.env.RAB_LOAD_TEST === '1' && Boolean(process.env.DATABASE_URL);
+const RUN = process.env.RAB_LOAD_TEST === '1' && integrationTestDatabaseReady();
 const describeIf = RUN ? describe : describe.skip;
 jest.setTimeout(20 * 60_000);
 

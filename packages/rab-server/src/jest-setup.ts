@@ -56,7 +56,8 @@ process.env.AUTH_MICROSOFT_CLIENT_SECRET ??= 'jest-test-microsoft-client-secret'
 process.env.AUTH_MICROSOFT_CALLBACK_URL ??= 'http://localhost:3000/rest/v1/auth/microsoft/callback';
 
 // Test database routing. NODE_ENV must be test (any other value under Jest is refused: X1.2 / DBT-01, a developer .env loaded
-// by Nx can set it). This REQUIRES TEST_DATABASE_URL and TEST_DATABASE_URL_UNPOOLED (no fallback to the developer's .env
+// by Nx can set it). This REQUIRES TEST_DATABASE_URL and TEST_DATABASE_ADMIN_URL (or its deprecated name
+// TEST_DATABASE_URL_UNPOOLED, X3.5-S7 release 1; both set and different is refused) (no fallback to the developer's .env
 // DATABASE_URL names, which can point at a remote database), validates that both target the same logical database, refuses
 // an inherited PG_DATABASE_URL (or other database URL) that would redirect a connection, and points DATABASE_URL names at
 // that validated pair. Runs before any module reads them. See

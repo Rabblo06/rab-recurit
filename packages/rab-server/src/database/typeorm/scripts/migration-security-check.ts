@@ -62,6 +62,7 @@ import {
 } from '../core/migration-source-rules';
 import { PREAUTH_DEFINER_EXPRESSION, PREAUTH_FORCE_TABLES, preauthDefinerPolicyName } from '../core/preauth-force-sql';
 import { compareWithGolden, readSecurityPostureGoldens } from '../core/security-posture';
+import { TEST_DATABASE_ADMIN_URL_NAMES } from '../core/test-database-guard';
 import { WORKER_ROLE_FACTS_SQL, WorkerRoleFacts, workerRoleProblems } from '../core/worker-dispatch-pointer-sql';
 import { PENDING_FINGERPRINT_VERSIONS } from '../workspace-schema/v1/expected-fingerprints';
 
@@ -546,7 +547,8 @@ async function finalChecks(db: string, scenario: 'fresh' | 'upgrade'): Promise<v
   // The child gets the crewflow_app URL it needs and none of the bootstrap secrets.
   const childEnv: NodeJS.ProcessEnv = { ...process.env, DATABASE_URL: url(db, 'crewflow_app') };
   for (const k of ['MIGRATION_SECURITY_ADMIN_URL', 'CREWFLOW_BOOTSTRAP_PASSWORD', 'CREWFLOW_APP_BOOTSTRAP_PASSWORD', 'DATABASE_URL_UNPOOLED',
-    'TEST_DATABASE_URL', 'TEST_DATABASE_URL_UNPOOLED', 'TEST_DATABASE_CREWFLOW_URL', 'APP_SECRET',
+    // X3.5-S7: the test admin URL under every name it can carry (the shared list, so a rename cannot be missed here).
+    'TEST_DATABASE_URL', ...TEST_DATABASE_ADMIN_URL_NAMES, 'TEST_DATABASE_CREWFLOW_URL', 'APP_SECRET',
     // E5: CI now exports the worker's bootstrap password (disposable-postgres); the RLS-gate child needs neither it nor the URL.
     'CREWFLOW_WORKER_BOOTSTRAP_PASSWORD', 'TEST_DATABASE_WORKER_URL']) delete childEnv[k];
   // Permanent owner login (owner decision, PERMANENT-OWNER-LOGIN-ADDENDUM): the RLS coverage gate connects ONLY as

@@ -16,6 +16,7 @@ import { createAdminDataSource } from './helpers/admin-datasource';
 import { BootstrapTimer } from './helpers/bootstrap-trace';
 import { generateFixturePassword } from './helpers/fixture-password';
 import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-pipe';
+import { integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
 
 const FIXTURE_PASSWORD = generateFixturePassword();
 
@@ -26,7 +27,7 @@ const FIXTURE_PASSWORD = generateFixturePassword();
  * `created_by = ctx.userId` mechanism Staff/Shift/Offer already use — real
  * Postgres, RLS on, no mocks, matching this repo's standing pattern.
  */
-const RUN = Boolean(process.env.DATABASE_URL);
+const RUN = integrationTestDatabaseReady();
 const describeIfDb = RUN ? describe : describe.skip;
 
 describeIfDb('venue/job-role ownership abuse cases (integration)', () => {

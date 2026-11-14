@@ -4,6 +4,7 @@ import { DataSource } from 'typeorm';
 
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { sqlStateAsSchemaRole } from './helpers/schema-role';
+import { integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
 
 /**
  * P0 finalization (FULL-ARCHITECTURE-UPGRADE-PLAN.md §8A.9, Check A — the workspace-lifecycle
@@ -25,7 +26,7 @@ import { sqlStateAsSchemaRole } from './helpers/schema-role';
  * `workspace-provisioning.integration.spec.ts`'s job, re-run (unmodified) as part of this same
  * finalization pass specifically because this migration touches the functions it depends on.
  */
-const RUN = Boolean(process.env.DATABASE_URL);
+const RUN = integrationTestDatabaseReady();
 const describeIfDb = RUN ? describe : describe.skip;
 
 const LIFECYCLE_MUTATORS = [

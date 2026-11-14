@@ -13,6 +13,7 @@ import { AiConfigService } from '../../modules/ai/services/ai-config.service';
 import { AiCostBudgetExhaustedError, AiCostMeterService } from '../../modules/ai/services/ai-cost-meter.service';
 import { utcDay } from '../../modules/ai/services/ai-quota.service';
 import { AiKit, aiOrganisation, bootAiKit } from './helpers/ai-test-kit';
+import { integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
 
 /**
  * Phase 7a meter v2 on the REAL Redis (+ PostgreSQL for the alert's audit row). Mock models only; no provider is called.
@@ -25,7 +26,7 @@ import { AiKit, aiOrganisation, bootAiKit } from './helpers/ai-test-kit';
  *   T7-R1 (prep for 7b, script level only — no rate code changes in 7a) the owner's three buckets 10 / 60 / 100 in one
  *          atomic TOKEN_BUCKET_SCRIPT call: all checked before any is consumed, with Retry-After.
  */
-const RUN = Boolean(process.env.DATABASE_URL);
+const RUN = integrationTestDatabaseReady();
 const describeIfDb = RUN ? describe : describe.skip;
 
 describeIfDb('AI meter v2 (integration)', () => {

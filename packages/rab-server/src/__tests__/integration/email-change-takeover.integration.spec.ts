@@ -13,6 +13,7 @@ import { TenantContextService } from '../../engine/core-modules/tenant/tenant-co
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
 import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-pipe';
+import { integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
 
 /**
  * CF-04 (October 15 audit): changing another user's sign-in email followed by a password reset was an account takeover:
@@ -20,7 +21,7 @@ import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-
  * owner was never told. Now an ACTIVE account's change is a verified, step-up-protected pending change. Real PostgreSQL
  * with RLS, real HTTP; the confirmation token is read from the outbox exactly as the mail driver would deliver it.
  */
-const RUN = Boolean(process.env.DATABASE_URL);
+const RUN = integrationTestDatabaseReady();
 const describeIfDb = RUN ? describe : describe.skip;
 
 describeIfDb('CF-04 email change cannot take over an account (integration)', () => {

@@ -12,6 +12,7 @@ import { PasswordHashingService } from '../../engine/core-modules/auth/services/
 import { TenantContextService } from '../../engine/core-modules/tenant/tenant-context.service';
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
+import { integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
 
 /**
  * F-08: the custom-role object-rule backfill must work under the real production-style migration role `crewflow`
@@ -25,7 +26,7 @@ import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
  * 1786717600000 backfills exactly the flagged objects for legacy roles in every organisation and workspace; (3) editor-made
  * rules, field rules, system roles and roles without view flags are preserved untouched; (4) a second run changes nothing.
  */
-const RUN = Boolean(process.env.DATABASE_URL);
+const RUN = integrationTestDatabaseReady();
 const describeIfDb = RUN ? describe : describe.skip;
 
 type Rule = {

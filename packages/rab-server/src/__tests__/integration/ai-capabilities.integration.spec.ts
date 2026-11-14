@@ -8,6 +8,7 @@ import { AiCapabilitiesService } from '../../modules/ai/services/ai-capabilities
 import { AiConfigService } from '../../modules/ai/services/ai-config.service';
 import { AiToolRegistry } from '../../modules/ai/tools/ai-tool-registry.service';
 import { AiKit, aiOrganisation, bearer, bootAiKit, manager, setOrgAi } from './helpers/ai-test-kit';
+import { integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
 
 /**
  * Batch 3 S4 — `GET /rest/v1/ai/capabilities` (C1 CD-8) on the real AppModule (crewflow_app, FORCE RLS):
@@ -17,7 +18,7 @@ import { AiKit, aiOrganisation, bearer, bootAiKit, manager, setOrgAi } from './h
  *     at once; a switched-off skill is not listed;
  *   - abuse: AI off, the kill switch, a user without ai.use / not eligible, Admin Inspect → the uniform 404.
  */
-const RUN = Boolean(process.env.DATABASE_URL);
+const RUN = integrationTestDatabaseReady();
 const describeIfDb = RUN ? describe : describe.skip;
 const CAPS = '/rest/v1/ai/capabilities';
 

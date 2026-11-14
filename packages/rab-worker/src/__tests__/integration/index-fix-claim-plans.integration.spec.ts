@@ -2,6 +2,7 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 import { Client } from 'pg';
+import { integrationTestDatabase, integrationTestDatabaseReady } from '@rab/server/database/typeorm/core/integration-test-database-gate';
 
 /**
  * Index fix (owner-approved 2026-11-06; OutboxClaimIndexes1786721440000, RefreshTokenReplacedByIndex1786721450000): EXPLAIN
@@ -24,7 +25,7 @@ import { Client } from 'pg';
  * The claim SQL below is a COPY of the Worker's per-scope claim predicates; the first test proves the copies still occur
  * verbatim (whitespace-normalised) in the Worker source, so a claim edit that is not mirrored here fails loudly.
  */
-const RUN = Boolean(process.env.DATABASE_URL && process.env.TEST_DATABASE_URL_UNPOOLED);
+const RUN = integrationTestDatabaseReady();
 const describeIfDb = RUN ? describe : describe.skip;
 jest.setTimeout(300_000);
 
@@ -88,7 +89,7 @@ describeIfDb('index fix: claim and token-cleanup plans as the runtime login (EXP
   };
 
   beforeAll(async () => {
-    admin = new Client({ connectionString: process.env.TEST_DATABASE_URL_UNPOOLED! });
+    admin = new Client({ connectionString: integrationTestDatabase().adminUrl });
     await admin.connect();
     await admin.query('BEGIN');
     // Synthetic rows only, never committed. Replica mode skips the FK / trigger checks of the synthetic parents (superuser).

@@ -2,6 +2,7 @@ import { Client } from 'pg';
 
 import { readSemanticPosture } from '../../database/posture-drift/semantic-posture';
 import { resolveIntegrationTestDatabase } from '../../database/typeorm/core/test-database-guard';
+import { integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
 
 /**
  * Hotfix fix/posture-test-marker (2026-11-05): the semantic posture reads the same on a database with and without the
@@ -9,7 +10,7 @@ import { resolveIntegrationTestDatabase } from '../../database/typeorm/core/test
  * disposable test database; the marker is toggled by the bootstrap superuser inside a transaction that is ALWAYS rolled
  * back (pg_db_role_setting is transactional).
  */
-const RUN = Boolean(process.env.TEST_DATABASE_URL && process.env.TEST_DATABASE_URL_UNPOOLED);
+const RUN = integrationTestDatabaseReady();
 const describeIfDb = RUN ? describe : describe.skip;
 jest.setTimeout(120_000);
 

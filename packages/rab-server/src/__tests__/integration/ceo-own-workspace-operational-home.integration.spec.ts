@@ -12,6 +12,7 @@ import { TenantContextService } from '../../engine/core-modules/tenant/tenant-co
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { TestIdentityFactory } from './helpers/test-identities';
 import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-pipe';
+import { integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
 
 /**
  * Owner decision 2026-10-13: a self-service CEO (incl. a Platform Super Admin's CEO identity) with no
@@ -19,7 +20,7 @@ import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-
  * existing assignment is never overridden, nobody gains another workspace, invite-time creation for
  * someone else never binds the actor. Real Postgres, RLS on, no mocks.
  */
-const RUN = Boolean(process.env.DATABASE_URL);
+const RUN = integrationTestDatabaseReady();
 const describeIfDb = RUN ? describe : describe.skip;
 
 describeIfDb('CEO own workspace as operational home (integration)', () => {

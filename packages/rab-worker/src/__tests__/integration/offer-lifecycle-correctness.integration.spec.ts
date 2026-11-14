@@ -27,6 +27,7 @@ import { runOfferExpiryCycle } from '../../queues/rab-offers/offer-expiry.job';
 import { runReplacementStaffCycle } from '../../queues/rab-offers/replacement-staff.job';
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
+import { integrationTestDatabaseReady } from '@rab/server/database/typeorm/core/integration-test-database-gate';
 
 /**
  * Phase 6 — staff response / offer expiry correctness. Real Postgres, RLS
@@ -39,7 +40,7 @@ import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
  * Manager-B isolation, the Phase 5.5 same-workspace defence-in-depth
  * fixture, staff IDOR, and cancellation/replacement integration.
  */
-const RUN = Boolean(process.env.DATABASE_URL);
+const RUN = integrationTestDatabaseReady();
 const describeIfDb = RUN ? describe : describe.skip;
 jest.setTimeout(90_000);
 
