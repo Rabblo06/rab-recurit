@@ -16,6 +16,7 @@ import { EntityManager } from 'typeorm';
 
 import { AuditAction, AuditService } from '../../../engine/core-modules/audit/audit.service';
 import { AuthContext } from '../../../engine/core-modules/tenant/auth-context.interface';
+import { businessTables } from '../../../engine/core-modules/tenant/business-tables';
 import { RealtimeEventService, RealtimeEventType } from '../../../engine/core-modules/realtime/realtime-event.service';
 import { NotificationService } from '../../notification/services/notification.service';
 import { Shift } from '../../scheduling/entities/shift.entity';
@@ -111,11 +112,12 @@ export async function applyOfferConfirmation(
   // The deadline authority: claim the offer row only while still staff_accepted, in this organisation, and strictly
   // before its deadline by the database clock. (A replacement/standby's deadline is its window end, so this also
   // replaces the earlier separate "window has ended" read.)
+  const t = businessTables(manager);
   const deadline = confirmationDeadlineSql('o', 'sa', 's');
   const [confirmedRows] = (await manager.query(
     // sql-injection-reviewed: code-constant SQL fragment from a helper called with literal aliases; values are bound $n parameters.
-    `UPDATE job_offer o SET status = 'manager_confirmed', manager_confirmed_at = clock_timestamp(), confirmed_by = $1
-       FROM shift_assignment sa JOIN shift s ON s.id = sa.shift_id
+    `UPDATE ${t.job_offer} o SET status = 'manager_confirmed', manager_confirmed_at = clock_timestamp(), confirmed_by = $1
+       FROM ${t.shift_assignment} sa JOIN ${t.shift} s ON s.id = sa.shift_id
       WHERE o.id = $2 AND o.organisation_id = $3 AND o.status = 'staff_accepted'
         AND sa.id = o.shift_assignment_id
         AND clock_timestamp() < ${deadline}
@@ -129,7 +131,7 @@ export async function applyOfferConfirmation(
       // sql-injection-reviewed: code-constant SQL fragment from a helper called with literal aliases; values are bound $n parameters.
       `SELECT o.status, clock_timestamp() >= ${deadline} AS past,
               (o.status = 'manager_rejected' AND o.rejected_by IS NULL AND o.rejection_reason = $2) AS withdrawn_at_deadline
-         FROM job_offer o JOIN shift_assignment sa ON sa.id = o.shift_assignment_id JOIN shift s ON s.id = sa.shift_id
+         FROM ${t.job_offer} o JOIN ${t.shift_assignment} sa ON sa.id = o.shift_assignment_id JOIN ${t.shift} s ON s.id = sa.shift_id
         WHERE o.id = $1`,
       [offer.id, OFFER_CLOSED_REASON.CONFIRMATION_DEADLINE_PASSED],
     );
@@ -155,10 +157,10 @@ export async function applyOfferConfirmation(
   // re-written as effectiveFilled + 1 (≤ required_count by the WHERE, so `shift_capacity_bound` holds).
   const [claimedRows] = (await manager.query(
     // sql-injection-reviewed: code-constant SQL fragment from a helper called with literal aliases; values are bound $n parameters.
-    `UPDATE shift s SET filled_count = GREATEST(seats.occupied, s.filled_count - seats.confirmed_no_shows) + 1, updated_at = now()
+    `UPDATE ${t.shift} s SET filled_count = GREATEST(seats.occupied, s.filled_count - seats.confirmed_no_shows) + 1, updated_at = now()
        FROM (SELECT count(*) FILTER (WHERE ${occupiedSeatSql('sa')})::int AS occupied,
                     count(*) FILTER (WHERE sa.status = 'no_show' AND sa.attendance_reviewed_at IS NOT NULL)::int AS confirmed_no_shows
-               FROM shift_assignment sa WHERE sa.shift_id = $1) seats
+               FROM ${t.shift_assignment} sa WHERE sa.shift_id = $1) seats
       WHERE s.id = $1 AND s.organisation_id = $2
         AND GREATEST(seats.occupied, s.filled_count - seats.confirmed_no_shows) < s.required_count
       RETURNING s.filled_count, s.required_count, s.pay_rate_pence, s.status`,
@@ -194,7 +196,7 @@ export async function applyOfferConfirmation(
     // Attendance for a replacement starts at THEIR real clock-in; the booked window starts no earlier than this approval,
     // so the no-show / late-clock-in monitors never count time before the person was even booked (FLAGGED rule).
     await manager.query(
-      `UPDATE shift_assignment SET period = tstzrange(now(), upper(period), '[)') WHERE id = $1 AND lower(period) < now() AND upper(period) > now()`,
+      `UPDATE ${t.shift_assignment} SET period = tstzrange(now(), upper(period), '[)') WHERE id = $1 AND lower(period) < now() AND upper(period) > now()`,
       [assignment.id],
     );
   }

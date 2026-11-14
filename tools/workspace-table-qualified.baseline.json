@@ -56,33 +56,6 @@
     "packages/rab-server/src/modules/manager/services/venue-manager.service.ts": {
       "unqualified": 8
     },
-    "packages/rab-server/src/modules/offer/services/apply-offer-confirmation.ts": {
-      "unqualified": 9
-    },
-    "packages/rab-server/src/modules/offer/services/assert-staff-eligible-for-offer.ts": {
-      "unqualified": 1
-    },
-    "packages/rab-server/src/modules/offer/services/claim-expired-offer.ts": {
-      "unqualified": 3
-    },
-    "packages/rab-server/src/modules/offer/services/offer-assistant.service.ts": {
-      "unqualified": 6
-    },
-    "packages/rab-server/src/modules/offer/services/offer.service.ts": {
-      "unqualified": 36
-    },
-    "packages/rab-server/src/modules/offer/services/replacement-request.service.ts": {
-      "unqualified": 2
-    },
-    "packages/rab-server/src/modules/offer/services/shift-vacancy.ts": {
-      "unqualified": 2
-    },
-    "packages/rab-server/src/modules/offer/services/venue-offer-pipeline.service.ts": {
-      "unqualified": 8
-    },
-    "packages/rab-server/src/modules/offer/services/withdraw-unconfirmed-offer.ts": {
-      "unqualified": 8
-    },
     "packages/rab-server/src/modules/payroll/files/payslip-file.policy.ts": {
       "unqualified": 3
     },
@@ -133,9 +106,6 @@
     },
     "packages/rab-server/src/modules/staff/services/venue-team-scope.ts": {
       "unqualified": 2
-    },
-    "packages/rab-server/src/modules/timeline/services/timeline.service.ts": {
-      "unqualified": 24
     },
     "packages/rab-server/src/modules/venue/files/venue-photo-file.policy.ts": {
       "unqualified": 6
