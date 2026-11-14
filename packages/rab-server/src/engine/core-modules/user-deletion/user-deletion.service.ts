@@ -268,8 +268,9 @@ export class UserDeletionService {
    */
   async deleteUser(manager: EntityManager, ctx: AuthContext, targetUserId: string, targetEmail: string): Promise<void> {
     // Part C1 review L1: a staff profile the caller cannot see (another workspace's schema, staff_profile_select) would
-    // cascade away with its history. Record, in every scope, which staff profiles have visible operational history BEFORE
-    // the delete, and re-check after it (historyLost). The history tables themselves are tenant-wide under RLS.
+    // cascade away with its history. Record, in every scope, which INVISIBLE staff profiles have operational history BEFORE
+    // the delete, and re-check after it (historyLost). The history tables themselves are tenant-wide under RLS; the profiles
+    // the caller can see were already checked by assertCanDelete (re-review N3: snapshot only what it could not check).
     const workspaces = await this.candidateWorkspaces(manager, ctx, targetUserId);
     const historyBefore = new Map<string, string[]>();
     await this.inEveryScope(manager, ctx, workspaces, async (scope) => {
@@ -316,7 +317,13 @@ export class UserDeletionService {
       // A no-ON-DELETE / RESTRICT reference the checks could not see (shift.approved_by, payroll rows visible only to a
       // payroll manager, ...): the database refused, which is the right outcome — reported as the structured 409, never a
       // raw FK 500. The transaction is aborted either way; the callers must not catch and continue.
-      if (error instanceof QueryFailedError && (error.driverError as { code?: string } | undefined)?.code === '23503') {
+      const driverError = error instanceof QueryFailedError ? (error.driverError as { code?: string; constraint?: string; table?: string } | undefined) : undefined;
+      if (driverError?.code === '23503') {
+        // Re-review N4: a refusal here also means a check is missing for that reference — name it (identifiers only, never
+        // row data) so a future foreign key without a matching check is visible in the logs instead of hidden behind the 409.
+        this.logger.warn(
+          `user deletion refused by the database: foreign key ${driverError.constraint ?? 'unknown'} on ${driverError.table ?? 'unknown'} (no matching pre-delete check)`,
+        );
         throw new UserDeletionBlockedException('USER_HAS_PROTECTED_HISTORY', PROTECTED_HISTORY_MESSAGE);
       }
       throw error;
@@ -329,12 +336,18 @@ export class UserDeletionService {
     }
   }
 
-  /** Staff profile ids with operational history visible in the current scope. */
+  /**
+   * Staff profile ids that have operational history in the current scope but no staff_profile row the caller can see —
+   * exactly the profiles assertCanDelete could not check (a visible profile of the target was checked there; a visible
+   * profile of anyone else is not touched by deleting the target). A manager of the scope sees every profile, so the set
+   * is empty and the post-delete pass costs nothing.
+   */
   private async staffWithHistory(manager: EntityManager): Promise<string[]> {
     const [row] = await manager.query<Array<{ ids: string[] | null }>>(
-      `SELECT array_agg(staff_profile_id) AS ids FROM (
+      `SELECT array_agg(h.staff_profile_id) AS ids FROM (
          SELECT staff_profile_id FROM shift_assignment UNION SELECT staff_profile_id FROM job_offer UNION SELECT staff_profile_id FROM attendance
-       ) h`,
+       ) h
+       WHERE NOT EXISTS (SELECT 1 FROM staff_profile sp WHERE sp.id = h.staff_profile_id)`,
     );
     return row?.ids ?? [];
   }

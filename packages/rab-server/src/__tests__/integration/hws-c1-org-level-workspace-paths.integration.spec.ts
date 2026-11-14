@@ -1,6 +1,6 @@
 import 'reflect-metadata';
 import { PermissionFlag } from '@rab/shared';
-import { INestApplication } from '@nestjs/common';
+import { INestApplication, Logger } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
 import { randomUUID } from 'node:crypto';
 import request from 'supertest';
@@ -331,6 +331,47 @@ describeIfDb('HWS C1: org-level paths over workspace tables (integration)', () =
           const [after] = await read();
           expect(after).toEqual(before);
         });
+      }
+    });
+
+    it('ABUSE (re-review N4): a reference with no ON DELETE that no pre-delete check reads (shift.approved_by) → 409, and the constraint is logged by name', async () => {
+      const target = await factory.createVenueManager({ id: orgId }, { owner: mgrB, label: 'c1-del-approved-by' });
+      await tenantContext.runInTenantContext({ organisationId: orgId, workspaceId: mgrB.workspaceId, userId: mgrB.userId, role: '' }, async (m) => {
+        const jobRole = await m.save(JobRole, { organisationId: orgId, name: `C1 N4 Role ${randomUUID().slice(0, 6)}`, defaultRatePence: 1500, createdBy: mgrB.userId, workspaceId: mgrB.workspaceId! });
+        const startsAt = new Date(Date.now() + 96 * 3600 * 1000);
+        await m.save(Shift, {
+          organisationId: orgId, venueId: venueB, jobRoleId: jobRole.id, startsAt, endsAt: new Date(startsAt.getTime() + 4 * 3600 * 1000), breakMinutes: 0,
+          requiredCount: 1, payRatePence: 1500, status: 'open', createdBy: mgrB.userId, approvedBy: target.userId, workspaceId: mgrB.workspaceId!,
+        });
+      });
+      const warn = jest.spyOn(Logger.prototype, 'warn');
+      try {
+        const res = await deleteManager(ceo, target.profileId!);
+        expect(res.status).toBe(409);
+        expect(res.body.code).toBe('USER_HAS_PROTECTED_HISTORY');
+        expect(JSON.stringify(res.body)).not.toMatch(/foreign key|violates|approved_by/i);
+        expect(await userExists(target.userId)).toBe(true);
+        const lines = warn.mock.calls.map((c) => String(c[0]));
+        expect(lines).toContainEqual(expect.stringMatching(/^user deletion refused by the database: foreign key shift_approved_by_fkey on shift /));
+        expect(lines.join('\n')).not.toContain(target.userId); // identifiers of the schema only, never row data
+      } finally {
+        warn.mockRestore();
+      }
+    });
+
+    it('deleteUser restores rab.workspace_id and search_path to their values on entry (review L4)', async () => {
+      for (const caller of [ceo, mgrB]) {
+        const target = await factory.createVenueManager({ id: orgId }, { owner: mgrB, label: 'c1-del-gucs-delete' });
+        const ctx = { organisationId: orgId, workspaceId: caller.workspaceId, userId: caller.userId, role: '' };
+        await tenantContext.runInTenantContext(ctx, async (m) => {
+          const read = () => m.query<Array<{ ws: string | null; sp: string }>>(`SELECT current_setting('rab.workspace_id', true) AS ws, current_setting('search_path') AS sp`);
+          const [before] = await read();
+          await userDeletion.assertCanDelete(m, ctx, target.userId);
+          await userDeletion.deleteUser(m, ctx, target.userId, target.email);
+          const [after] = await read();
+          expect(after).toEqual(before);
+        });
+        expect(await userExists(target.userId)).toBe(false);
       }
     });
 
