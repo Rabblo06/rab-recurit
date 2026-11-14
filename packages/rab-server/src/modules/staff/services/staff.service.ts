@@ -1,4 +1,5 @@
 import { loadSystemRoleDefaultPermissions } from '../../identity/services/system-role-permissions';
+import { lockLiveUser } from '../../identity/services/live-user-lock';
 import {
   ARCHIVE_TRANSITIONS,
   ArchiveState,
@@ -836,6 +837,7 @@ export class StaffService {
     const summary = await this.tenantContext.runInWorkspaceContext(ctx, async (manager) => {
       const profile = await manager.findOne(StaffProfile, { where: { id }, relations: { user: true } });
       if (!profile?.user) throw new NotFoundException('Staff member not found.');
+      await lockLiveUser(manager, profile.userId, 'Staff member not found.');
       this.assertOwned(ctx, profile);
 
       if (dto.jobRoleId) {
@@ -917,6 +919,7 @@ export class StaffService {
     return this.tenantContext.runInWorkspaceContext(ctx, async (manager) => {
       const profile = await manager.findOne(StaffProfile, { where: { id }, relations: { user: true } });
       if (!profile?.user) throw new NotFoundException('Staff member not found.');
+      await lockLiveUser(manager, profile.userId, 'Staff member not found.');
       this.assertOwned(ctx, profile);
       if (profile.user!.status === UserStatus.INVITED || profile.user!.status === UserStatus.INVITE_EXPIRED) {
         throw new ConflictException('This account has not been activated yet — use Cancel Invitation or Resend Invitation instead.');
@@ -989,6 +992,7 @@ export class StaffService {
       }
       const profile = await manager.findOne(StaffProfile, { where: { id }, relations: { user: true } });
       if (!profile?.user) throw new NotFoundException('Staff member not found.');
+      await lockLiveUser(manager, profile.userId, 'Staff member not found.');
       this.assertOwned(ctx, profile);
       assertTransition(ARCHIVE_TRANSITIONS, archiveStateOf(profile.archivedAt), ArchiveState.ARCHIVED);
       if (profile.employmentStatus !== EmploymentStatus.INACTIVE) {
@@ -1023,6 +1027,7 @@ export class StaffService {
       }
       const profile = await manager.findOne(StaffProfile, { where: { id }, relations: { user: true } });
       if (!profile?.user) throw new NotFoundException('Staff member not found.');
+      await lockLiveUser(manager, profile.userId, 'Staff member not found.');
       this.assertOwned(ctx, profile);
       assertTransition(ARCHIVE_TRANSITIONS, archiveStateOf(profile.archivedAt), ArchiveState.ACTIVE);
       await manager.update(StaffProfile, id, { archivedAt: null, archivedBy: null });
@@ -1044,6 +1049,7 @@ export class StaffService {
     return this.tenantContext.runInWorkspaceContext(ctx, async (manager) => {
       const profile = await manager.findOne(StaffProfile, { where: { id }, relations: { user: true } });
       if (!profile?.user) throw new NotFoundException('Staff member not found.');
+      await lockLiveUser(manager, profile.userId, 'Staff member not found.');
       this.assertOwned(ctx, profile);
       if (profile.user!.status === UserStatus.INVITED || profile.user!.status === UserStatus.INVITE_EXPIRED) {
         throw new ConflictException('This account has not been activated yet — use Resend Invitation instead.');
@@ -1062,6 +1068,7 @@ export class StaffService {
   private async findPendingProfileOrFail(manager: EntityManager, ctx: AuthContext, id: string): Promise<StaffProfile> {
     const profile = await manager.findOne(StaffProfile, { where: { id }, relations: { user: true } });
     if (!profile?.user) throw new NotFoundException('Staff member not found.');
+    await lockLiveUser(manager, profile.userId, 'Staff member not found.');
     this.assertOwned(ctx, profile);
     if (profile.user!.status !== UserStatus.INVITED && profile.user!.status !== UserStatus.INVITE_EXPIRED) {
       throw new ConflictException('This account is not a pending invitation.');
@@ -1185,6 +1192,7 @@ export class StaffService {
     const outcome = await this.tenantContext.runInWorkspaceContext(ctx, async (manager) => {
       const profile = await manager.findOne(StaffProfile, { where: { id }, relations: { user: true } });
       if (!profile?.user) throw new NotFoundException('Staff member not found.');
+      await lockLiveUser(manager, profile.userId, 'Staff member not found.');
       this.assertOwned(ctx, profile);
 
       const newEmail = normalizeEmail(dto.email);
@@ -1323,6 +1331,11 @@ export class StaffService {
     await this.stepUpReauth.assertCurrentPassword(ctx, currentPassword);
     let deletedUserId: string | null = null;
     await this.tenantContext.runInWorkspaceContext(ctx, async (manager) => {
+      // Layer 2 (security review M1): the route's PermissionGuard(STAFF_DEACTIVATE) is re-checked here, so a direct
+      // service call (job, command, another service) gets the same 403.
+      if (!(await this.directoryPermissions.userHasPermissionTx(manager, ctx, PermissionFlag.STAFF_DEACTIVATE))) {
+        throw new ForbiddenException('Deleting staff is not permitted.');
+      }
       const profile = await manager.findOne(StaffProfile, { where: { id }, relations: { user: true } });
       if (!profile?.user) throw new NotFoundException('Staff member not found.');
       this.assertOwned(ctx, profile);
@@ -1383,6 +1396,7 @@ export class StaffService {
     const result = await this.tenantContext.runInWorkspaceContext(ctx, async (manager) => {
       const profile = await manager.findOne(StaffProfile, { where: { id }, relations: { user: true } });
       if (!profile?.user) throw new NotFoundException('Staff member not found.');
+      await lockLiveUser(manager, profile.userId, 'Staff member not found.');
       this.assertOwned(ctx, profile);
 
       const before = profile.user!.avatarFileId;
@@ -1415,6 +1429,7 @@ export class StaffService {
     const result = await this.tenantContext.runInWorkspaceContext(ctx, async (manager) => {
       const profile = await manager.findOne(StaffProfile, { where: { id }, relations: { user: true } });
       if (!profile?.user) throw new NotFoundException('Staff member not found.');
+      await lockLiveUser(manager, profile.userId, 'Staff member not found.');
       this.assertOwned(ctx, profile);
 
       const before = profile.user!.avatarFileId;

@@ -314,6 +314,30 @@ describeIfDb('HWS C1: org-level paths over workspace tables (integration)', () =
       expect(assignments).toHaveLength(1);
     });
 
+    it('ABUSE (security review L1): a hidden staff profile whose ONLY history is a shift-request row (cascades with it) → soft delete, both stay', async () => {
+      const target = await invitedVenueManager('c1-del-hidden-request');
+      const hiddenProfile = await tenantContext.runInTenantContext({ organisationId: orgId, workspaceId: mgrB.workspaceId, userId: mgrB.userId, role: '' }, async (m) => {
+        const [profile] = await m.query<Array<{ id: string }>>(
+          `INSERT INTO staff_profile (organisation_id, user_id, staff_ref, created_by, workspace_id) VALUES ($1, $2, $3, $4, $5) RETURNING id`,
+          [orgId, target.userId, `STF-${randomUUID().slice(0, 8)}`, mgrB.userId, mgrB.workspaceId],
+        );
+        const jobRole = await m.save(JobRole, { organisationId: orgId, name: `C1 L1 Role ${randomUUID().slice(0, 6)}`, defaultRatePence: 1500, createdBy: mgrB.userId, workspaceId: mgrB.workspaceId! });
+        const startsAt = new Date(Date.now() + 120 * 3600 * 1000);
+        const shift = await m.save(Shift, {
+          organisationId: orgId, venueId: venueB, jobRoleId: jobRole.id, startsAt, endsAt: new Date(startsAt.getTime() + 4 * 3600 * 1000), breakMinutes: 0,
+          requiredCount: 1, payRatePence: 1500, status: 'open', createdBy: mgrB.userId, workspaceId: mgrB.workspaceId!,
+        });
+        await m.query(`INSERT INTO shift_request_staff (organisation_id, workspace_id, shift_id, staff_profile_id) VALUES ($1, $2, $3, $4)`, [orgId, mgrB.workspaceId, shift.id, profile!.id]);
+        return profile!.id;
+      });
+
+      const res = await deleteManager(ceo, target.profileId!);
+      expect(res.status).toBe(204);
+      expect(await userSoftDeleted(target.userId)).toBe(true);
+      expect(await staffProfileExists(mgrB.workspaceId!, hiddenProfile)).toBe(true);
+      expect(await adminDataSource.query(`SELECT 1 FROM "${businessSchema(mgrB.workspaceId!)}".shift_request_staff WHERE staff_profile_id = $1`, [hiddenProfile])).toHaveLength(1);
+    });
+
     it('ABUSE (review L1): a note ABOUT the target (user_note.subject_user_id cascades) is history → soft delete, the note stays', async () => {
       const target = await invitedVenueManager('c1-del-note');
       await tenantContext.runInTenantContext({ organisationId: orgId, workspaceId: mgrB.workspaceId, userId: mgrB.userId, role: '' }, async (m) => {

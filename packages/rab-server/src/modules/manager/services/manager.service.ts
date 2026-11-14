@@ -1,4 +1,5 @@
 import { loadSystemRoleDefaultPermissions } from '../../identity/services/system-role-permissions';
+import { lockLiveUser } from '../../identity/services/live-user-lock';
 import { ARCHIVE_TRANSITIONS, ArchiveState, archiveStateOf, assertTransition, EmailOutboxJobType, EmailOutboxStatusType, ManagerType, ManagerTypeType, normalizeEmail, PermissionFlag, PermissionFlagType, USER_STATUS_TRANSITIONS, UserStatus } from '@rab/shared';
 import { BadRequestException, ConflictException, ForbiddenException, Inject, Injectable, NotFoundException } from '@nestjs/common';
 import { PermissionsService } from '../../../engine/core-modules/permissions/permissions.service';
@@ -668,6 +669,7 @@ export class ManagerService {
     const summary = await this.tenantContext.runInTenantContext(ctx, async (manager) => {
       const profile = await manager.findOne(ManagerProfile, { where: { id }, relations: { user: true } });
       if (!profile?.user) throw new NotFoundException('Manager not found.');
+      await lockLiveUser(manager, profile.userId, 'Manager not found.');
       await this.assertCeoMutationAllowed(manager, ctx, profile);
 
       const { firstName, lastName, phone, jobTitle } = dto;
@@ -711,6 +713,7 @@ export class ManagerService {
     return this.tenantContext.runInTenantContext(ctx, async (manager) => {
       const profile = await manager.findOne(ManagerProfile, { where: { id }, relations: { user: true } });
       if (!profile?.user) throw new NotFoundException('Manager not found.');
+      await lockLiveUser(manager, profile.userId, 'Manager not found.');
       await this.assertCeoMutationAllowed(manager, ctx, profile);
       if (profile.user!.status === UserStatus.INVITED || profile.user!.status === UserStatus.INVITE_EXPIRED) {
         throw new ConflictException('This account has not been activated yet — use Resend Invitation or Re-invite instead.');
@@ -750,6 +753,7 @@ export class ManagerService {
       await this.assertCanManageManagersTx(manager, ctx);
       const profile = await manager.findOne(ManagerProfile, { where: { id, organisationId: ctx.organisationId! }, relations: { user: true } });
       if (!profile?.user) throw new NotFoundException('Manager not found.');
+      await lockLiveUser(manager, profile.userId, 'Manager not found.');
       await this.assertCeoMutationAllowed(manager, ctx, profile);
       assertTransition(ARCHIVE_TRANSITIONS, archiveStateOf(profile.archivedAt), ArchiveState.ARCHIVED);
       if (profile.userId === ctx.userId || profile.userId === ctx.inspectedBy) {
@@ -776,6 +780,7 @@ export class ManagerService {
       await this.assertCanManageManagersTx(manager, ctx);
       const profile = await manager.findOne(ManagerProfile, { where: { id, organisationId: ctx.organisationId! }, relations: { user: true } });
       if (!profile?.user) throw new NotFoundException('Manager not found.');
+      await lockLiveUser(manager, profile.userId, 'Manager not found.');
       await this.assertCeoMutationAllowed(manager, ctx, profile);
       assertTransition(ARCHIVE_TRANSITIONS, archiveStateOf(profile.archivedAt), ArchiveState.ACTIVE);
       await manager.update(ManagerProfile, id, { archivedAt: null, archivedBy: null });
@@ -799,6 +804,7 @@ export class ManagerService {
     return this.tenantContext.runInTenantContext(ctx, async (manager) => {
       const profile = await manager.findOne(ManagerProfile, { where: { id }, relations: { user: true } });
       if (!profile?.user) throw new NotFoundException('Manager not found.');
+      await lockLiveUser(manager, profile.userId, 'Manager not found.');
       await this.assertCeoMutationAllowed(manager, ctx, profile);
       if (profile.user!.status === UserStatus.INVITED || profile.user!.status === UserStatus.INVITE_EXPIRED) {
         throw new ConflictException('This account has not been activated yet — use Resend Invitation instead.');
@@ -817,6 +823,7 @@ export class ManagerService {
   private async findPendingProfileOrFail(manager: EntityManager, ctx: AuthContext, id: string): Promise<ManagerProfile> {
     const profile = await manager.findOne(ManagerProfile, { where: { id }, relations: { user: true } });
     if (!profile?.user) throw new NotFoundException('Manager not found.');
+    await lockLiveUser(manager, profile.userId, 'Manager not found.');
     await this.assertCeoMutationAllowed(manager, ctx, profile);
     if (profile.user!.status !== UserStatus.INVITED && profile.user!.status !== UserStatus.INVITE_EXPIRED) {
       throw new ConflictException('This account is not a pending invitation.');
@@ -1065,6 +1072,7 @@ export class ManagerService {
     const outcome = await this.tenantContext.runInTenantContext(ctx, async (manager) => {
       const profile = await manager.findOne(ManagerProfile, { where: { id, organisationId: ctx.organisationId! }, relations: { user: true } });
       if (!profile?.user) throw new NotFoundException('Manager not found.');
+      await lockLiveUser(manager, profile.userId, 'Manager not found.');
       await this.assertCeoMutationAllowed(manager, ctx, profile);
 
       const newEmail = normalizeEmail(dto.email);
@@ -1186,18 +1194,46 @@ export class ManagerService {
    */
   async deleteUser(ctx: AuthContext, id: string, currentPassword: string): Promise<void> {
     await this.stepUpReauth.assertCurrentPassword(ctx, currentPassword);
-    let deletedUserId: string | null = null;
-    await this.tenantContext.runInTenantContext(ctx, async (manager) => {
-      const profile = await manager.findOne(ManagerProfile, { where: { id } });
-      if (!profile) throw new NotFoundException('Manager not found.');
-      await this.assertCeoMutationAllowed(manager, ctx, profile);
-      // A profile whose account is already soft-deleted is gone for every caller (404), like Twenty's removed member.
-      const live = await manager.findOne(User, { where: { id: profile.userId } });
-      if (!live) throw new NotFoundException('Manager not found.');
-      await this.userDeletion.deleteUser(manager, ctx, profile.userId);
-      deletedUserId = profile.userId;
+    const deletedUserId = await this.tenantContext.runInTenantContext(ctx, async (manager) => {
+      // Layer 2 (security review M1): the /managers route's class guard MANAGER_MANAGE, re-checked in the service.
+      await this.assertCanManageManagersTx(manager, ctx);
+      return this.deleteUserWithin(manager, ctx, id);
     });
     await this.invalidateUserDisplay(deletedUserId);
+  }
+
+  /**
+   * The Venue Manager route's delete: VenueManagerService has already run its own layer-2 check (VENUE_MANAGER_CREATE +
+   * the target is a Venue Manager of the caller's own workspace) — a workspace owner may lack MANAGER_MANAGE, so this
+   * variant does not require it. Step-up reauth first, like `deleteUser`.
+   */
+  async deleteVenueManagerUser(ctx: AuthContext, id: string, currentPassword: string): Promise<void> {
+    await this.stepUpReauth.assertCurrentPassword(ctx, currentPassword);
+    // The own-workspace Venue Manager scope is re-checked inside this transaction (the caller's check ran in its own).
+    const deletedUserId = await this.tenantContext.runInTenantContext(ctx, (manager) =>
+      this.deleteUserWithin(manager, ctx, id, { workspaceId: ctx.workspaceId ?? null, type: ManagerType.VENUE }),
+    );
+    await this.invalidateUserDisplay(deletedUserId);
+  }
+
+  /** Shared body; never reachable without one of the two permission checks above. */
+  private async deleteUserWithin(
+    manager: EntityManager,
+    ctx: AuthContext,
+    id: string,
+    venueScope?: { workspaceId: string | null; type: typeof ManagerType.VENUE },
+  ): Promise<string> {
+    const profile = await manager.findOne(ManagerProfile, { where: { id } });
+    if (!profile) throw new NotFoundException('Manager not found.');
+    if (venueScope && (!venueScope.workspaceId || profile.workspaceId !== venueScope.workspaceId || profile.type !== venueScope.type)) {
+      throw new NotFoundException('Venue Manager not found.');
+    }
+    await this.assertCeoMutationAllowed(manager, ctx, profile);
+    // A profile whose account is already soft-deleted is gone for every caller (404), like Twenty's removed member.
+    const live = await manager.findOne(User, { where: { id: profile.userId } });
+    if (!live) throw new NotFoundException('Manager not found.');
+    await this.userDeletion.deleteUser(manager, ctx, profile.userId);
+    return profile.userId;
   }
 
   /**

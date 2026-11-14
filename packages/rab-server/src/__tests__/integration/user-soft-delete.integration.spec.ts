@@ -13,14 +13,15 @@ import { AuthContext } from '../../engine/core-modules/tenant/auth-context.inter
 import { TenantContextService } from '../../engine/core-modules/tenant/tenant-context.service';
 import { erasedEmailFor, UserDeletionService } from '../../engine/core-modules/user-deletion/user-deletion.service';
 import { AttendanceQrService } from '../../modules/attendance/services/attendance-qr.service';
-import { ROLE_DEFS } from '../../modules/manager/services/manager.service';
+import { ManagerService, ROLE_DEFS } from '../../modules/manager/services/manager.service';
+import { StaffService } from '../../modules/staff/services/staff.service';
 import { Shift } from '../../modules/scheduling/entities/shift.entity';
 import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-pipe';
 import { integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { bookBeforeDeadline } from './helpers/book-before-deadline';
 import { businessTable } from './helpers/hws-fixtures';
-import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
+import { provisionFixtureWorkspace, TestIdentity, TestIdentityFactory } from './helpers/test-identities';
 
 /**
  * Owner decision 0g (2026-11-14): user deletion the Twenty way (twentyhq/twenty @ eedb0a73 user.service.ts:259-283 —
@@ -47,6 +48,8 @@ describeIfDb('user soft delete — owner 0g (integration)', () => {
   let tenantContext: TenantContextService;
   let factory: TestIdentityFactory;
   let userDeletion: UserDeletionService;
+  let staffService: StaffService;
+  let managerService: ManagerService;
   let authService: AuthService;
   let attendanceQr: AttendanceQrService;
 
@@ -130,6 +133,8 @@ describeIfDb('user soft delete — owner 0g (integration)', () => {
     dataSource = moduleRef.get(DataSource);
     tenantContext = moduleRef.get(TenantContextService);
     userDeletion = moduleRef.get(UserDeletionService);
+    staffService = moduleRef.get(StaffService);
+    managerService = moduleRef.get(ManagerService);
     authService = moduleRef.get(AuthService);
     attendanceQr = moduleRef.get(AttendanceQrService);
     adminDataSource = createAdminDataSource();
@@ -265,7 +270,17 @@ describeIfDb('user soft delete — owner 0g (integration)', () => {
 
     it(`soft delete with ${W}+ workspace schemas: no relation lock in any workspace schema (control: an invite's hard delete takes them)`, async () => {
       const lockOrg = await factory.createOrganisation('udel-locks');
-      for (let i = 0; i < W; i += 1) await factory.createInternalManager(lockOrg, { label: `udel-lock-${i}` });
+      for (let i = 0; i < W; i += 1) {
+        const owner = await factory.createInternalManager(lockOrg, { label: `udel-lock-${i}`, provision: false });
+        // Fixture only: core.provision_workspace (the server path, unchanged) on the superuser fixture connection with a
+        // statement timeout raised for THIS statement — with hundreds of schemas the catalogue grows and one provisioning
+        // can exceed the runtime's 30 s on a loaded host. The assertion below is untouched.
+        await adminDataSource.transaction(async (m) => {
+          await m.query(`SET LOCAL statement_timeout = '600s'`);
+          await m.query(`SELECT set_config('rab.organisation_id', $1, true), set_config('rab.user_id', $2, true)`, [lockOrg.id, owner.userId]);
+          await provisionFixtureWorkspace(m, owner.workspaceId!);
+        });
+      }
       const [{ n }] = await adminDataSource.query(`SELECT count(*)::int AS n FROM pg_catalog.pg_namespace WHERE nspname LIKE 'workspace\\_%'`);
       expect(n).toBeGreaterThanOrEqual(W);
 
@@ -296,7 +311,7 @@ describeIfDb('user soft delete — owner 0g (integration)', () => {
       expect(hard.outcome).toBe('hard_deleted');
       const lockedSchemas = new Set(hard.locks.filter((l) => l.nspname.startsWith('workspace_')).map((l) => l.nspname));
       expect(lockedSchemas.size).toBeGreaterThanOrEqual(W);
-    }, 120_000 + W * 5_000); // each fixture workspace is one core.provision_workspace (seconds on a loaded host)
+    }, 120_000 + W * 10_000); // each fixture workspace is one core.provision_workspace (seconds on a loaded host)
   });
 
   describe('gates and tenancy at the service layer (layer 2)', () => {
@@ -428,6 +443,153 @@ describeIfDb('user soft delete — owner 0g (integration)', () => {
       const search = await http().get('/rest/v1/search').set(auth(tokenA)).query({ q: pd.last });
       expect(search.status).toBe(200);
       expect(JSON.stringify(search.body)).not.toContain(s.profileId!);
+    });
+  });
+  describe('security review fixes (M1, M2, L3, erasure gaps, fallbacks)', () => {
+    /** A permission revoked for one user by override, with the security version bumped so no cached permission set survives. */
+    async function revoke(userId: string, flag: string): Promise<void> {
+      await adminDataSource.query(
+        `INSERT INTO core.user_permission_override (user_id, permission_id, organisation_id, effect)
+         SELECT $1, p.id, u.organisation_id, 'revoke' FROM core.permission p, core."user" u WHERE p.key = $2 AND u.id = $1`,
+        [userId, flag],
+      );
+      await adminDataSource.query(`UPDATE core."user" SET security_version = security_version + 1 WHERE id = $1`, [userId]);
+    }
+
+    async function until(probe: () => Promise<boolean>, what: string, ms = 20_000): Promise<void> {
+      const deadline = Date.now() + ms;
+      while (Date.now() < deadline) {
+        if (await probe()) return;
+        await new Promise((r) => setTimeout(r, 100));
+      }
+      throw new Error(`timed out waiting for ${what}`);
+    }
+
+    it('ABUSE (M1): StaffService.deleteUser without STAFF_DEACTIVATE (revoked by override) → 403 at the service layer, user untouched', async () => {
+      const c = await factory.createInternalManager({ id: orgId }, { permissions: PERMS, label: 'udel-m1-staff' });
+      const s = await factory.createStaff({ id: orgId }, { owner: c, label: 'udel-m1-staff-target' });
+      await revoke(c.userId, PermissionFlag.STAFF_DEACTIVATE);
+      await expect(staffService.deleteUser(ctxOf(c), s.profileId!, c.password)).rejects.toMatchObject({ status: 403 });
+      expect((await userRow(s.userId))!.is_deleted).toBe(false);
+    });
+
+    it('ABUSE (M1): ManagerService.deleteUser without MANAGER_MANAGE → 403; the own-workspace Venue Manager route still works for that owner', async () => {
+      const c = await factory.createInternalManager({ id: orgId }, { permissions: PERMS, label: 'udel-m1-mgr' });
+      const vm = await factory.createVenueManager({ id: orgId }, { owner: c, label: 'udel-m1-vm' });
+      await revoke(c.userId, PermissionFlag.MANAGER_MANAGE);
+      await expect(managerService.deleteUser(ctxOf(c), vm.profileId!, c.password)).rejects.toMatchObject({ status: 403 });
+      expect((await userRow(vm.userId))!.is_deleted).toBe(false);
+      // VENUE_MANAGER_CREATE + own workspace is that route's own rule (a workspace owner may lack MANAGER_MANAGE).
+      const token = await factory.login(c);
+      const viaVmRoute = await http().delete(`/rest/v1/venue-managers/${vm.profileId}`).set(auth(token)).send({ currentPassword: c.password });
+      expect(viaVmRoute.status).toBeLessThan(300);
+      expect((await userRow(vm.userId))!.is_deleted).toBe(true);
+      // Another workspace's Venue Manager through that route → 404.
+      const other = await factory.createVenueManager({ id: orgId }, { owner: a, label: 'udel-m1-vm-other' });
+      expect((await http().delete(`/rest/v1/venue-managers/${other.profileId}`).set(auth(token)).send({ currentPassword: c.password })).status).toBe(404);
+      expect((await userRow(other.userId))!.is_deleted).toBe(false);
+    });
+
+    it('ABUSE (M2): a team row committed by another transaction DURING an invite hard delete is never cascaded away (soft delete instead)', async () => {
+      const invitee = await factory.createStaff({ id: orgId }, { owner: a, label: 'udel-m2-invitee', status: 'invited' });
+      const vm = await factory.createVenueManager({ id: orgId }, { owner: a, label: 'udel-m2-vm' });
+      const conn1 = adminDataSource.createQueryRunner();
+      await conn1.connect();
+      await conn1.startTransaction();
+      let deleting: Promise<string> | undefined;
+      try {
+        // Uncommitted: holds FOR KEY SHARE on the invitee's staff profile (the FK check).
+        await conn1.query(
+          `INSERT INTO ${businessTable(a.workspaceId!, 'venue_manager_staff')} (organisation_id, workspace_id, manager_profile_id, staff_profile_id) VALUES ($1, $2, $3, $4)`,
+          [orgId, a.workspaceId, vm.profileId, invitee.profileId],
+        );
+        deleting = tenantContext.runInTenantContext(ctxOf(a), (m) => userDeletion.deleteUser(m, ctxOf(a), invitee.userId));
+        deleting.catch(() => undefined);
+        await until(
+          async () => (await adminDataSource.query(`SELECT count(*)::int AS n FROM pg_stat_activity WHERE datname = current_database() AND wait_event_type = 'Lock'`))[0].n > 0,
+          'the delete to wait on the staff profile lock',
+        );
+        await conn1.commitTransaction();
+        expect(await deleting).toBe('soft_deleted');
+      } finally {
+        if (conn1.isTransactionActive) await conn1.rollbackTransaction();
+        await conn1.release();
+      }
+      expect(await adminDataSource.query(`SELECT 1 FROM ${businessTable(a.workspaceId!, 'venue_manager_staff')} WHERE staff_profile_id = $1`, [invitee.profileId])).toHaveLength(1);
+      expect((await userRow(invitee.userId))!.is_deleted).toBe(true);
+    });
+
+    it('a lock timeout on a referencing table during an invite hard delete falls back to a soft delete (55P03)', async () => {
+      const invitee = await factory.createStaff({ id: orgId }, { owner: a, label: 'udel-locktimeout', status: 'invited' });
+      const conn1 = adminDataSource.createQueryRunner();
+      await conn1.connect();
+      await conn1.startTransaction();
+      try {
+        // core.navigation_layout references core."user" ON DELETE CASCADE; nothing on the soft path touches it.
+        await conn1.query(`LOCK TABLE core.navigation_layout IN ACCESS EXCLUSIVE MODE`);
+        const outcome = await tenantContext.runInTenantContext(ctxOf(a), async (m) => {
+          await m.query(`SET LOCAL lock_timeout = '2s'`);
+          return userDeletion.deleteUser(m, ctxOf(a), invitee.userId);
+        });
+        expect(outcome).toBe('soft_deleted');
+      } finally {
+        await conn1.rollbackTransaction();
+        await conn1.release();
+      }
+      expect((await userRow(invitee.userId))!.is_deleted).toBe(true);
+    });
+
+    it('ABUSE (L3): reactivating a deleted Staff member → 404, the account stays deleted and deactivated', async () => {
+      const s = await newStaff('udel-l3');
+      await factory.loginTokens(s);
+      expect((await deleteStaff(a, tokenA, s.profileId!)).status).toBe(204);
+      const freshToken = await factory.login(a); // a fresh sign-in carries the step-up grant reactivate needs
+      expect((await http().post(`/rest/v1/staff/${s.profileId}/reactivate`).set(auth(freshToken))).status).toBe(404);
+      expect((await userRow(s.userId))!).toMatchObject({ is_deleted: true, status: UserStatus.DEACTIVATED });
+    });
+
+    it('erasure of a deleted Manager through the route (happy path); a CEO target by a non-platform-admin → 403', async () => {
+      const vm = await factory.createVenueManager({ id: orgId }, { owner: a, label: 'udel-erase-mgr' });
+      await distinctivePersonalData(vm.userId);
+      expect((await deleteManager(a, tokenA, vm.profileId!)).status).toBe(204);
+      const erase = await http().post(`/rest/v1/managers/${vm.profileId}/erase-personal-data`).set(auth(tokenA)).send({ currentPassword: a.password });
+      expect(erase.status).toBe(204);
+      expect((await userRow(vm.userId))!).toMatchObject({ first_name: 'Deleted', last_name: 'user', email: erasedEmailFor(vm.userId), phone: null });
+
+      const ceo = await factory.createInternalManager({ id: orgId }, { type: 'ceo', workspace: false, label: 'udel-erase-ceo' });
+      await adminDataSource.query(`UPDATE core."user" SET deleted_at = now(), status = 'deactivated' WHERE id = $1`, [ceo.userId]);
+      const refused = await http().post(`/rest/v1/managers/${ceo.profileId}/erase-personal-data`).set(auth(tokenA)).send({ currentPassword: a.password });
+      expect(refused.status).toBe(403);
+      expect((await userRow(ceo.userId))!.email).toBe(ceo.email);
+    });
+
+    it('ABUSE: erasure at the service layer — without STAFF_DEACTIVATE → 403; under Admin Inspect → 403 (delete too); nothing changed', async () => {
+      const c = await factory.createInternalManager({ id: orgId }, { permissions: PERMS, label: 'udel-erase-403' });
+      const s = await factory.createStaff({ id: orgId }, { owner: c, label: 'udel-erase-403-target' });
+      await factory.loginTokens(s);
+      await tenantContext.runInTenantContext(ctxOf(c), (m) => userDeletion.deleteUser(m, ctxOf(c), s.userId));
+      await revoke(c.userId, PermissionFlag.STAFF_DEACTIVATE);
+      await expect(staffService.erasePersonalData(ctxOf(c), s.profileId!, c.password)).rejects.toMatchObject({ status: 403 });
+
+      const inspecting = { ...ctxOf(a), inspectedBy: randomUUID() } as AuthContext;
+      await expect(tenantContext.runInTenantContext(ctxOf(a), (m) => userDeletion.erasePersonalData(m, inspecting, s.userId))).rejects.toMatchObject({
+        status: 403,
+        response: { code: 'INSPECT_READ_ONLY' },
+      });
+      const live = await factory.createVenueManager({ id: orgId }, { owner: a, label: 'udel-inspect-del' });
+      await expect(tenantContext.runInTenantContext(ctxOf(a), (m) => userDeletion.deleteUser(m, inspecting, live.userId))).rejects.toMatchObject({ status: 403 });
+      expect((await userRow(s.userId))!.email).toBe(s.email);
+      expect((await userRow(live.userId))!.is_deleted).toBe(false);
+    });
+
+    it('the hard-delete audit row carries the id only, never the e-mail (review L4)', async () => {
+      const invite = await http().post('/rest/v1/managers').set(auth(tokenA)).send({ email: `udel-l4-${randomUUID()}@example.test`, firstName: 'L', lastName: 'Four', type: 'internal' });
+      expect(invite.status).toBe(201);
+      const [{ user_id: userId }] = await adminDataSource.query(`SELECT user_id FROM core.manager_profile WHERE id = $1`, [invite.body.id]);
+      expect((await deleteManager(a, tokenA, invite.body.id)).status).toBe(204);
+      expect(await userRow(userId)).toBeUndefined();
+      const [audit] = await adminDataSource.query(`SELECT metadata FROM core.audit_log WHERE action = 'user.deleted' AND metadata->>'deletedUserId' = $1`, [userId]);
+      expect(audit.metadata).toEqual({ deletion: 'hard', deletedUserId: userId });
     });
   });
 });

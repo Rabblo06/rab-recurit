@@ -1,5 +1,5 @@
 import { assertTransition, EmailOutboxStatus, USER_STATUS_TRANSITIONS, UserStatus, UserStatusType } from '@rab/shared';
-import { ConflictException, Injectable, Logger, NotFoundException } from '@nestjs/common';
+import { ConflictException, ForbiddenException, Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { EntityManager, QueryFailedError } from 'typeorm';
 
 import { EmailOutbox, User } from '../../../modules/identity/entities';
@@ -129,6 +129,7 @@ export class UserDeletionService {
    * already-deleted account → 404.
    */
   async deleteUser(manager: EntityManager, ctx: AuthContext, targetUserId: string): Promise<UserDeletionOutcome> {
+    assertNotInspecting(ctx);
     const target = await this.lockTarget(manager, ctx, targetUserId);
     if (!target || target.deleted) throw new NotFoundException('User not found.');
     await this.assertCanDelete(manager, ctx, target.id);
@@ -147,6 +148,7 @@ export class UserDeletionService {
    * the owner in USER-DELETION.md and are not touched here. Idempotent: an erased row is left as it is.
    */
   async erasePersonalData(manager: EntityManager, ctx: AuthContext, targetUserId: string): Promise<void> {
+    assertNotInspecting(ctx);
     const target = await this.lockTarget(manager, ctx, targetUserId);
     if (!target) throw new NotFoundException('User not found.');
     if (!target.deleted) {
@@ -255,7 +257,16 @@ export class UserDeletionService {
     await manager.query('SAVEPOINT user_hard_delete');
     try {
       const workspaces = await this.candidateWorkspaces(manager, ctx, target.id);
-      const blocking = await this.inEveryScope(manager, ctx, workspaces, () => this.findProtectedHistory(manager, target.id));
+      // Security review M2: lock the target's staff profiles in every scope BEFORE reading their history. A concurrent
+      // insert of an offer / assignment / request / team row holds FOR KEY SHARE on its profile until it commits; FOR UPDATE
+      // waits for it, and the history read that follows (a new READ COMMITTED snapshot) then sees the committed row and the
+      // delete falls back to soft. Without the lock the row would commit after the check and be cascaded away. Residual
+      // (USER-DELETION.md §3.9): a profile the caller cannot see or update under RLS cannot be locked here; the post-delete
+      // historyLost check still covers history that existed when its snapshot was taken.
+      const blocking = await this.inEveryScope(manager, ctx, workspaces, async () => {
+        await manager.query(`SELECT id FROM staff_profile WHERE user_id = $1 FOR UPDATE`, [target.id]);
+        return this.findProtectedHistory(manager, target.id);
+      });
       if (blocking) throw new HardDeleteNotSafe(`history:${blocking}`);
 
       // The profiles the caller cannot see were not checked above: snapshot their visible history, re-check after the delete.
@@ -267,10 +278,11 @@ export class UserDeletionService {
 
       await this.refreshTokenService.revokeAllForUser(manager, target.id, 'account_deleted');
       await this.cancelOpenEmail(manager, target.id);
-      // Before the delete and without targetUserId (the row is about to disappear): id and e-mail survive in the metadata,
-      // the same idiom as the Worker's `user.invite_cleaned_up` (pre-0g behaviour, unchanged; flagged in USER-DELETION.md).
+      // Before the delete and without targetUserId (the row is about to disappear): the id survives in the metadata, the same
+      // idiom as the Worker's `user.invite_cleaned_up`. No e-mail (security review L4: audit_log is insert-only and shipped
+      // off-host, so a copy there could never be erased).
       await this.auditService.record(manager, ctx, AuditAction.USER_DELETED, {
-        metadata: { deletion: 'hard', deletedUserId: target.id, deletedUserEmail: target.email },
+        metadata: { deletion: 'hard', deletedUserId: target.id },
       });
       await manager.delete(User, { id: target.id });
 
@@ -399,6 +411,8 @@ export class UserDeletionService {
     const [row] = await manager.query<Array<{ ids: string[] | null }>>(
       `SELECT array_agg(h.staff_profile_id) AS ids FROM (
          SELECT staff_profile_id FROM shift_assignment UNION SELECT staff_profile_id FROM job_offer UNION SELECT staff_profile_id FROM attendance
+         UNION SELECT staff_profile_id FROM shift_request_staff UNION SELECT staff_profile_id FROM venue_manager_staff
+         UNION SELECT selected_staff_profile_id FROM replacement_request WHERE selected_staff_profile_id IS NOT NULL
        ) h
        WHERE NOT EXISTS (SELECT 1 FROM staff_profile sp WHERE sp.id = h.staff_profile_id)`,
     );
@@ -413,6 +427,9 @@ export class UserDeletionService {
         WHERE NOT EXISTS (SELECT 1 FROM shift_assignment WHERE staff_profile_id = p.id)
           AND NOT EXISTS (SELECT 1 FROM job_offer WHERE staff_profile_id = p.id)
           AND NOT EXISTS (SELECT 1 FROM attendance WHERE staff_profile_id = p.id)
+          AND NOT EXISTS (SELECT 1 FROM shift_request_staff WHERE staff_profile_id = p.id)
+          AND NOT EXISTS (SELECT 1 FROM venue_manager_staff WHERE staff_profile_id = p.id)
+          AND NOT EXISTS (SELECT 1 FROM replacement_request WHERE selected_staff_profile_id = p.id)
         LIMIT 1`,
       [before],
     );
@@ -427,8 +444,18 @@ class UnverifiableWorkspace extends Error {
   }
 }
 
+/**
+ * Admin Inspect is read-only. JwtAuthGuard already refuses every state-changing request under inspect (INSPECT_READ_ONLY);
+ * this is the same refusal at the service layer, for a caller that reaches the service with an inspect context.
+ */
+function assertNotInspecting(ctx: AuthContext): void {
+  if (ctx.inspectedBy) {
+    throw new ForbiddenException({ code: 'INSPECT_READ_ONLY', message: 'Admin Inspect is read-only. End the inspect session to make changes.' });
+  }
+}
+
 /** Why a failed hard-delete attempt may fall back to a soft delete; null = a genuine error that must abort the transaction. */
-function hardDeleteFallbackReason(error: unknown): string | null {
+export function hardDeleteFallbackReason(error: unknown): string | null {
   if (error instanceof HardDeleteNotSafe) return error.reason;
   if (error instanceof UnverifiableWorkspace) return 'unverifiable_workspace';
   if (error instanceof QueryFailedError) {

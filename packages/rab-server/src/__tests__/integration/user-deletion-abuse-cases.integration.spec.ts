@@ -524,7 +524,7 @@ describeIfDb('user deletion abuse cases (integration)', () => {
      * going to NULL, and this test asserts that actual, working behaviour instead of the
      * never-functioning one.
      */
-    it('deletion is audited (user.deleted, actor = the deleting manager, target id/email preserved only in metadata) and the user\'s prior audit history survives with its original target_user_id intact, not erased or nulled', async () => {
+    it('deletion is audited (user.deleted, actor = the deleting manager, target id preserved only in metadata, no e-mail) and the user\'s prior audit history survives with its original target_user_id intact, not erased or nulled', async () => {
       const { organisation, email, userId: managerUserId } = await seedOrgWithManager('audit-a');
       const token = (await login(email)).accessToken;
 
@@ -552,7 +552,8 @@ describeIfDb('user deletion abuse cases (integration)', () => {
       );
       expect(deletionAudit.length).toBe(1);
       expect(deletionAudit[0]!.actor_user_id).toBe(managerUserId);
-      expect(deletionAudit[0]!.metadata.deletedUserEmail).toBe(create.body.email);
+      // Security review L4: the id only — never the e-mail (audit_log is insert-only and shipped off-host).
+      expect(deletionAudit[0]!.metadata.deletedUserEmail).toBeUndefined();
 
       // The user.created row must still exist, AND still carry the real, now-deleted user's id —
       // never deleted, never rewritten, never nulled. This is the new, intended guarantee.
