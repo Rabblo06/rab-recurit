@@ -1755,7 +1755,7 @@ export class EnvironmentVariables {
   @Min(0)
   CLOCK_IN_EARLY_MINUTES: number = 15;
 
-  /** The Shift QR (and the clock-out window) stays valid this many minutes past `shift.endsAt`. */
+  /** The Shift QR (and the clock-out window) stays valid this many minutes past the shift's CURRENT `endsAt`, decided at scan time (`AttendanceQrService.validUntil`). */
   @IsOptional()
   @Type(() => Number)
   @IsInt()

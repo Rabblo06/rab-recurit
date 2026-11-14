@@ -25,13 +25,14 @@ const iso = (ms) => new Date(ms).toISOString();
 const startOfDay = (ms) => { const d = new Date(ms); d.setUTCHours(0, 0, 0, 0); return d.getTime(); };
 const startOfWeek = (ms) => { const d = new Date(startOfDay(ms)); const dow = (d.getUTCDay() + 6) % 7; return d.getTime() - dow * DAY; };
 
-function signQr(shiftId, venueId, ver, startsAt, endsAt) {
+// Signed like QrTokenService.sign: HS256, iss rab-attendance, aud rab-qr, and no exp (the server decides expiry at scan
+// time from the shift's current end + QR_POST_SHIFT_GRACE_MINUTES).
+function signQr(shiftId, venueId, ver) {
   const secret = Buffer.from(crypto.hkdfSync('sha256', Buffer.from(secrets.APP_SECRET, 'utf8'), Buffer.alloc(0), 'rab-qr-token-v1', 32)).toString('hex');
   const b64 = (o) => Buffer.from(JSON.stringify(o)).toString('base64url');
   const now = Math.floor(Date.now() / 1000);
-  const exp = Math.ceil((new Date(endsAt).getTime() + 120 * 60_000) / 1000);
   const h = b64({ alg: 'HS256', typ: 'JWT' });
-  const p = b64({ shiftId, venueId, ver, iat: now, exp, iss: 'rab-attendance', aud: 'rab-qr' });
+  const p = b64({ shiftId, venueId, ver, iat: now, iss: 'rab-attendance', aud: 'rab-qr' });
   const sig = crypto.createHmac('sha256', secret).update(`${h}.${p}`).digest('base64url');
   return `${h}.${p}.${sig}`;
 }
@@ -141,10 +142,10 @@ function signQr(shiftId, venueId, ver, startsAt, endsAt) {
          a as (insert into core.shift_assignment (organisation_id, shift_id, staff_profile_id, status, pay_rate_snapshot_pence, confirmed_at, period, workspace_id)
                select sp.organisation_id, s.id, sp.id, 'confirmed', 1200, now(), tstzrange(s.starts_at, s.ends_at), sp.workspace_id from sp, s returning id)
     select s.id||','||s.venue_id||','||s.qr_version||','||s.starts_at||','||s.ends_at||','||v.lat||','||v.lng from s, v, a`).split(',');
-  const [shiftId, venueId, ver, sAt, eAt, lat, lng] = row;
+  const [shiftId, venueId, ver, , , lat, lng] = row; // starts_at, ends_at unused: the QR carries no exp
   const clockAuth = await loginMobile(cl.email);
   const loc = () => ({ lat: Number(lat), lng: Number(lng), accuracyM: 8, capturedAt: new Date().toISOString().replace('Z', '+00:00') });
-  const qrToken = signQr(shiftId, venueId, Number(ver), sAt, eAt);
+  const qrToken = signQr(shiftId, venueId, Number(ver));
   samples['POST /attendance/check-in (mobile)'] = [await call(clockAuth, 'POST', '/rest/v1/attendance/check-in', { shiftId, qrToken, ...loc() })];
   samples['POST /attendance/clock-in (mobile)'] = [await call(clockAuth, 'POST', '/rest/v1/attendance/clock-in', { shiftId, qrToken, ...loc() })];
 
