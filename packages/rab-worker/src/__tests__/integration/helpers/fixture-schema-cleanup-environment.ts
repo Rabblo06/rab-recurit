@@ -25,6 +25,36 @@ function workspaceSchemaName(workspaceId: string): string {
   return `workspace_${workspaceId.replace(/-/g, '').toLowerCase()}`;
 }
 
+/**
+ * Dropping 121-relation schemas leaves thousands of dead catalogue rows (pg_class, pg_attribute, pg_depend, ...), which
+ * makes PostgreSQL start autovacuum workers on THIS database a moment later. An autovacuum worker shows in
+ * pg_stat_activity as an `active` backend of the database, so the next file's "no other active backend" guards
+ * (ops-owner-login, containment-suspend-test-accounts: they refuse to TRUNCATE core.organisation then) saw "1 other
+ * backend" in CI. So the file that churned the catalogue cleans it up itself, before the next file starts: VACUUM the
+ * catalogue tables the drops touched and ANALYZE the database (synchronously; nothing left for autovacuum to pick up), then
+ * wait (bounded) for any autovacuum worker already running on this database to finish. Only autovacuum workers are waited for — never another
+ * client backend (a parallel Jest worker's query must not hold this file's teardown up).
+ */
+const CHURNED_CATALOGUE = [
+  'pg_class', 'pg_attribute', 'pg_depend', 'pg_index', 'pg_type', 'pg_constraint', 'pg_attrdef', 'pg_trigger', 'pg_policy',
+  'pg_namespace', 'pg_description', 'pg_shdepend', 'pg_init_privs', 'pg_sequence', 'pg_rewrite', 'pg_statistic',
+] as const;
+
+async function settleCatalogue(client: Client): Promise<void> {
+  // VACUUM ANALYZE the churned catalogue, then ANALYZE the whole (small, disposable) database: the file's own inserts and
+  // deletes on core tables also cross autovacuum's ANALYZE thresholds, and its launcher wakes once a minute per database.
+  await client.query(`VACUUM (ANALYZE) ${CHURNED_CATALOGUE.map((t) => `pg_catalog.${t}`).join(', ')}`);
+  await client.query('ANALYZE');
+  const deadline = Date.now() + 60_000;
+  while (Date.now() < deadline) {
+    const { rows } = await client.query<{ n: number }>(
+      `SELECT count(*)::int AS n FROM pg_stat_activity WHERE datname = current_database() AND backend_type = 'autovacuum worker'`,
+    );
+    if (!rows[0] || rows[0].n === 0) return;
+    await new Promise((resolve) => setTimeout(resolve, 250));
+  }
+}
+
 interface TrackerGlobal {
   __crewflowFixtureWorkspaces?: Set<string>;
   __crewflowFixtureOrganisations?: Set<string>;
@@ -72,6 +102,7 @@ export default class FixtureSchemaCleanupEnvironment extends NodeEnvironment {
         await client.query(`DROP SCHEMA IF EXISTS "${schema}" CASCADE`);
         await client.query(`DELETE FROM core.workspace_schema_registry WHERE workspace_id = $1`, [id]);
       }
+      if (ids.size > 0) await settleCatalogue(client);
     } finally {
       await client.end().catch(() => undefined);
     }
