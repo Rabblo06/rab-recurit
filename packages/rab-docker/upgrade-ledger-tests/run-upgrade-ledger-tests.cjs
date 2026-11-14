@@ -28,13 +28,17 @@
  *       lock free; `up -d` resumes: `0.6.0_TypeOrmMigrations` completed attempt 1.
  *   L5  a failed migration (probe image, same version): 66, never serves, the Worker not started; each restart adds the next
  *       attempt (contiguous, all `failed`, error_message set); back to NEW: completed attempt n+1, serves.
- *   L6  only an upgrade COMMAND fails: 70, serves, /healthz upgrade.upgrade = "failed", the Worker starts. NOT RUNNABLE on
+ *   /healthz (owner decision 2026-11-14): the public upgrade entry is exactly { status: "up", upgradeFailed: <bool> } in
+ *       every case (no version, step, state word or message); the state is on the admin health report only.
+ *   L6  only an upgrade COMMAND fails: 70, serves, /healthz upgradeFailed = true, the Worker starts. NOT RUNNABLE on
  *       0.6.0 (UPGRADE_COMMANDS['0-6'] is empty and the command-failure seam needs NODE_ENV=test): reported, not faked.
- *   L7  rollback to R256 after NEW: serves with a warning (AHEAD); then a loosened known object (FORCE RLS removed from
- *       core.payroll_record): refused. (PG16 2026-11-14: R256's own semantic-posture boot gate refuses the 0.6.0 database,
- *       because the logbook's policies are not in R256's golden, so R256 never serves; reported to the lead, not changed.)
+ *   L7  rollback to R256 after NEW: R256 does NOT serve. Its own semantic-posture boot gate reads the 0.6.0 logbook's
+ *       objects as drift and refuses (finding L7, PG16/PG18 2026-11-14). Owner decision 2026-11-14: going back from 0.6.0
+ *       to R256 is only possible by restoring the pre-0.6.0 backup (runbook 3.3 / 3.6). The case asserts that refusal and
+ *       that R256 wrote nothing to the logbook.
  *   L7b rollback within the ledger lineage: NEW on a database a newer release upgraded (a future migration + a 9.9.0
- *       completed row): serves with a WARNING, /healthz upgrade "ahead", nothing written; NO FORCE then refuses.
+ *       completed row): serves with a WARNING, /healthz upgradeFailed false (boolean only), nothing written; NO FORCE then
+ *       refuses.
  *   L8  a skipped release (the logbook says only 0.3.0): NEW refuses 65 and applies nothing; every candidate "force"
  *       variable in runtime.env changes nothing; the documented manual command
  *       `docker compose run --rm --no-deps rab-api node dist/command upgrade --force` applies, its rows have forced = true;
@@ -269,6 +273,27 @@ function deployRefused(p, check, digest, label, pgImage) {
   return { results: migrateResults(al), log: al };
 }
 
+/**
+ * Public /healthz (owner decision 2026-11-14): the upgrade entry is exactly { status: 'up', upgradeFailed: <bool> }. No
+ * version, step name, state word or message in the body; the state is on the platform-admin health report only.
+ */
+// ("ok" is not listed: Terminus's own top-level status is "ok"; the exact-keys check covers the upgrade entry.)
+const HEALTHZ_FORBIDDEN = /TypeOrmMigrations|"(failed|behind|ahead|none|unknown)"|\d+\.\d+\.\d+|error_message|executedByVersion|appVersion/;
+function checkHealthzUpgrade(check, hz, expectedFailed) {
+  let body = {};
+  try {
+    body = JSON.parse(hz.body);
+  } catch {
+    /* checked below */
+  }
+  const up = (body.info || body.details || {}).upgrade;
+  check(
+    !!up && JSON.stringify(Object.keys(up).sort()) === '["status","upgradeFailed"]' && up.status === 'up' && up.upgradeFailed === expectedFailed,
+    `/healthz upgrade is exactly { status: up, upgradeFailed: ${expectedFailed} }: ${JSON.stringify(up)}`,
+  );
+  check(!HEALTHZ_FORBIDDEN.test(String(hz.body)), '/healthz carries no version, step, state word or message');
+}
+
 // --------------------------------------------------------------------------------------------------------------- main
 async function main() {
   L.newSecrets();
@@ -300,15 +325,7 @@ async function main() {
       check(r.code === 0, `restart (up -d --force-recreate rab-api): exit ${r.code}`);
       await p.waitHealthy('rab-api', 300_000);
       check(ledgerIds(p) === ids, 'the restart added no logbook row (no second is_initial, no step re-recorded)');
-      const hz = p.healthz();
-      let body = {};
-      try {
-        body = JSON.parse(hz.body);
-      } catch {
-        /* checked below */
-      }
-      const up = (body.info || body.details || {}).upgrade || {};
-      check(up.upgrade === 'ok' && up.upgradeFailed === false, `/healthz upgrade: ${JSON.stringify(up)}`);
+      checkHealthzUpgrade(check, p.healthz(), false);
     }, p);
   }
 
@@ -372,29 +389,24 @@ async function main() {
     compareFacts(check, before, facts(l5), 'after the failed migration', n);
   }, l5);
 
-  await step('L6', 'only an upgrade command fails: 70, serves, healthz upgrade "failed", Worker starts', async (check, n) => {
+  await step('L6', 'only an upgrade command fails: 70, serves, healthz upgradeFailed true, Worker starts', async (check, n) => {
     n('NOT RUNNABLE on 0.6.0: UPGRADE_COMMANDS[0-6] is empty (UPGRADE-LEDGER-INTERFACE.md §2) and the probe seams CREWFLOW_TEST_UPGRADE_COMMANDS / CREWFLOW_TEST_UPGRADE_FAIL_COMMAND (§4) are refused (64) unless NODE_ENV=test on a disposable test database, which a production image never runs. Proven at server level with those seams (ledger-upgrade LU-4/LU-10, ledger-http LH-2).');
     return 'NOT RUNNABLE';
   });
 
   const l7 = project('l7');
-  await step('L7', 'rollback to R256 after NEW: serves with a warning; a loosened known object (payroll_record NO FORCE) refuses', async (check) => {
+  // Owner decision 2026-11-14: 0.6.0 -> R256 is a restore, not an image swap. R256's semantic-posture boot gate refuses the
+  // 0.6.0 logbook objects (finding L7), so the case asserts the refusal and that R256 wrote nothing to the logbook.
+  await step('L7', 'rollback to R256 after NEW: R256 refuses (semantic-posture) and writes nothing; the way back is a restore', async (check) => {
     await freshSeeded(l7, check, IMG.r256, 256);
     await deployNew(l7, check, 'NEW');
     const ids = ledgerIds(l7);
-    use(l7, IMG.r256);
-    const d = l7.deploy();
-    evidence('L7-rollback-deploy.log', d.out);
-    check(d.code === 0, `rollback deploy (R256 image on the 0.6.0 database): exit ${d.code}`);
-    await l7.waitHealthy('rab-api', 300_000);
-    const al = l7.logs('rab-api');
-    evidence('L7-rollback-api.log', al);
-    check(/AHEAD|newer|rollback/i.test(al) && /WARN/i.test(al), 'the old image logs a warning (database AHEAD) and serves');
-    check(ledgerIds(l7) === ids, 'the old image wrote nothing to the logbook');
-    l7.psql('ALTER TABLE core.payroll_record NO FORCE ROW LEVEL SECURITY');
-    const { log } = deployRefused(l7, check, IMG.r256, 'rollback-loosened');
-    check(!/"serve":true/.test(log.split('\n').slice(-50).join('\n')), 'with FORCE RLS removed from a known table the old image does not serve');
-    l7.psql('ALTER TABLE core.payroll_record FORCE ROW LEVEL SECURITY');
+    const { log } = deployRefused(l7, check, IMG.r256, 'rollback-r256');
+    evidence('L7-rollback-api.log', log);
+    // deployRefused already asserts the deploy fails and the Worker never starts. R256's migrate child may still print
+    // serve:true (it classifies the ledger AHEAD) before its own API boot gate refuses, so the gate line is the evidence.
+    check(/boot gate "semantic-posture" refused/.test(log), 'R256 refuses the 0.6.0 database at its semantic-posture boot gate (does not serve)');
+    check(ledgerIds(l7) === ids, 'R256 wrote nothing to the logbook');
   }, l7);
 
   const l7b = project('l7b');
@@ -411,14 +423,7 @@ async function main() {
     evidence('L7b-api.log', al);
     check(/WARN/i.test(al) && /AHEAD|rollback|newer/i.test(al), 'NEW logs a rollback (AHEAD) warning and serves');
     check(ledgerIds(l7b) === ids, 'NEW wrote nothing to the logbook');
-    let up = {};
-    try {
-      const body = JSON.parse(l7b.healthz().body);
-      up = (body.info || body.details || {}).upgrade || {};
-    } catch {
-      /* checked below */
-    }
-    check(up.upgrade === 'ahead' && up.upgradeFailed === false, `/healthz upgrade: ${JSON.stringify(up)}`);
+    checkHealthzUpgrade(check, l7b.healthz(), false);
     l7b.psql('ALTER TABLE core.payroll_record NO FORCE ROW LEVEL SECURITY');
     const { log } = deployRefused(l7b, check, IMG.next, 'ahead-loosened');
     check(/boot gate "(force-rls|semantic-posture)" refused/.test(log), 'with FORCE RLS removed from a known table NEW refuses at its boot gate');

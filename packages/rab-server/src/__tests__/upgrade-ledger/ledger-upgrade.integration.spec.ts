@@ -15,7 +15,7 @@
  *   LU-7   every upgrade command run twice is idempotent.
  *   LU-8   previous version incomplete (a skipped release) -> 65, nothing applied; `upgrade --force` applies with forced = true.
  *   LU-9   --force is unreachable from the environment.
- *   LU-10  a failed MIGRATION -> 66, refused, retried next start; a failed COMMAND only -> 70, serves (healthz `failed`).
+ *   LU-10  a failed MIGRATION -> 66, refused, retried next start; a failed COMMAND only -> 70, serves (healthz upgradeFailed true).
  *   LU-11  rollback (a newer version completed in the ledger) -> serves with a WARNING (child 0, API boot gates pass); a
  *          loosened known object (NO FORCE) -> refused at the API boot gate (`force-rls`).
  *   LU-12  security refusals stay fatal, also under --force: the superuser login, BYPASSRLS, RLS disabled (post-check 68),

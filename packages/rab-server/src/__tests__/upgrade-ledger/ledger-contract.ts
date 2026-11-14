@@ -108,7 +108,7 @@ export type Query = (sql: string, params?: unknown[]) => Promise<Record<string, 
 export interface StartOutcome {
   exitCode: number | null;
   serve: boolean;
-  /** From the result line: `failed` when a step failed and the API serves (healthz upgrade:"failed"). */
+  /** From the result line: `failed` when a step failed and the API serves (healthz upgradeFailed:true). */
   upgradeStatus: 'ok' | 'failed' | 'unknown';
   /** The result line's `upgrade` object (interface §3). */
   upgrade: { codeVersion?: string; decision?: string; adoptedFrom?: string | null; forced?: boolean; recorded?: { name: string; status: string; attempt: number }[] } | null;

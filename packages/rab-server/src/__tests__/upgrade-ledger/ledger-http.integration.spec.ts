@@ -9,8 +9,8 @@
  *   LW-3  the scope cannot come from the API: a body carrying upgrade_scope / upgradeScope / rab.upgrade_scope is a 400
  *         (forbidNonWhitelisted) and changes nothing; a header of the same name changes nothing either.
  *   LW-4  deleting the workspace removes its ledger row (the FK cascade).
- *   LH-1  /healthz: `upgrade.upgradeFailed` (boolean) and `upgrade.upgrade` in ok | failed | behind | ahead | none | unknown; never a step
- *         name or an error message.
+ *   LH-1  /healthz (owner decision 2026-11-14): the upgrade entry is exactly { status: 'up', upgradeFailed: <bool> }; no
+ *         version, step name, state word or error message anywhere in the body (the state is on the admin report, LH-2).
  *   LH-2  GET /rest/v1/admin/health/report (platform admin): `upgrade` = { appVersion, state, step, executedByVersion,
  *         attempt, forced, at }, never error_message; a failed latest attempt shows state `failed` (the admin banner);
  *         a non-admin gets no report.
@@ -33,6 +33,9 @@ import { TestIdentity, TestIdentityFactory } from '../integration/helpers/test-i
 import { b1, LEDGER_SELECT_SQL, LedgerRow } from './ledger-contract';
 
 jest.setTimeout(300_000);
+
+/** Nothing about the upgrade beyond the boolean may reach public /healthz ("ok" is Terminus's own top-level status). */
+const HEALTHZ_FORBIDDEN = /TypeOrmMigrations|_[0-9]{13}|\d+\.\d+\.\d+|"(failed|behind|ahead|none|unknown)"|error_message|errorMessage|executedByVersion|appVersion|"step"|"state"/;
 
 const RUN = Boolean(process.env.DATABASE_URL) && b1() !== null;
 const describeIfB1 = RUN ? describe : describe.skip;
@@ -175,15 +178,13 @@ describeIfB1('the logbook through the real application (new workspace, /healthz,
     expect(added.map((r) => [r.workspace_id, r.is_initial])).toEqual([[res.body.id, true]]);
   });
 
-  it('LH-1 /healthz reports the upgrade state without a step name or a message', async () => {
+  it('LH-1 /healthz says only whether the upgrade failed: a boolean, no version, step, state word or message', async () => {
     const res = await http().get('/healthz');
     expect(res.status).toBe(200);
     const upgrade = res.body?.info?.upgrade ?? res.body?.details?.upgrade;
-    expect(typeof upgrade?.upgradeFailed).toBe('boolean');
-    expect(['ok', 'failed', 'behind', 'ahead', 'none', 'unknown']).toContain(upgrade?.upgrade);
-    // A fresh owner-login install at the code's version: the logbook says ok.
-    expect(upgrade?.upgrade).toBe('ok');
-    expect(JSON.stringify(res.body)).not.toMatch(/TypeOrmMigrations|_[0-9]{13}|error_message|errorMessage/);
+    // Owner decision 2026-11-14: exactly { status: 'up', upgradeFailed }. A fresh install at the code's version: false.
+    expect(upgrade).toEqual({ status: 'up', upgradeFailed: false });
+    expect(JSON.stringify(res.body)).not.toMatch(HEALTHZ_FORBIDDEN);
   });
 
   it('LH-2 the admin health report carries the upgrade state (the banner), never error_message; a failed latest attempt shows failed', async () => {
@@ -211,13 +212,14 @@ describeIfB1('the logbook through the real application (new workspace, /healthz,
       expect(card?.status).toBe('degraded');
       expect(card?.detail).toContain(last);
       expect(JSON.stringify(res.body)).not.toMatch(/planted/);
-      // /healthz follows the logbook too: upgradeFailed true, upgrade "failed", still 200, still no name or message.
+      // /healthz follows the logbook too: upgradeFailed true and nothing else, still 200, no step, version or message.
       forgetStatus();
       const hz = await http().get('/healthz');
       expect(hz.status).toBe(200);
       const up = hz.body?.info?.upgrade ?? hz.body?.details?.upgrade;
-      expect({ upgrade: up?.upgrade, upgradeFailed: up?.upgradeFailed }).toEqual({ upgrade: 'failed', upgradeFailed: true });
-      expect(JSON.stringify(hz.body)).not.toMatch(/planted|TypeOrmMigrations/);
+      expect(up).toEqual({ status: 'up', upgradeFailed: true });
+      expect(JSON.stringify(hz.body)).not.toMatch(/planted/);
+      expect(JSON.stringify(hz.body)).not.toMatch(HEALTHZ_FORBIDDEN);
     } finally {
       await admin.query('DELETE FROM core.upgrade_migration WHERE id = $1', [id]);
       await throttlerRedis.client.del(ADMIN_HEALTH_CACHE_KEY);
