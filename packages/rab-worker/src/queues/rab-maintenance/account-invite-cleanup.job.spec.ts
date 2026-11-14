@@ -183,7 +183,9 @@ describe('account invite cleanup — F-1 definer path (WORKER_INVITE_AUTO_DELETE
     await runAccountInviteCleanupCycle(h.dataSource as never, ON);
     expect(boundAtThrow).toEqual([workspaceSchemaName(WS)]); // the physical schema was bound when the query failed
     expect(peekBusinessSchema(manager as never)).toBeUndefined(); // entry state (this owner transaction was never bound)
-    expect(h.audits()).toEqual([['user.invite_cleanup_failed', U(30), { reason: 'TypeError' }]]);
+    // The dependency check's finally runs its restoring set_config in the aborted transaction, so that error (not the
+    // TypeError) reaches the catch, exactly as PostgreSQL behaves; the savepoint rollback then cleans up.
+    expect(h.audits()).toEqual([['user.invite_cleanup_failed', U(30), { reason: 'Error' }]]);
   });
 });
 
