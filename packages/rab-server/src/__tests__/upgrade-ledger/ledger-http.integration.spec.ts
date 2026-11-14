@@ -196,7 +196,19 @@ describeIfB1('the logbook through the real application (new workspace, /healthz,
     forgetAdminReport();
     let res = await http().get('/rest/v1/admin/health/report').set('Authorization', `Bearer ${adminToken}`);
     expect(res.status).toBe(200);
-    expect(Object.keys(res.body.upgrade ?? {}).sort()).toEqual(['appVersion', 'at', 'attempt', 'executedByVersion', 'forced', 'state', 'step']);
+    // Part D (owner D2/D3) adds `workspaces`: the failed / blocked workspaces, each exactly { workspaceId, step, errorClass, blocked }.
+    // readUpgradeStatus omits `workspaces` when that list is empty (non-empty means some workspace failed), so its presence
+    // depends on what the shared test database holds: assert the allowed shape, never the presence.
+    const alwaysPresent = ['appVersion', 'at', 'attempt', 'executedByVersion', 'forced', 'state', 'step'];
+    const keys = Object.keys(res.body.upgrade ?? {});
+    expect(keys.filter((k) => ![...alwaysPresent, 'workspaces'].includes(k))).toEqual([]);
+    expect(alwaysPresent.filter((k) => !keys.includes(k))).toEqual([]);
+    if (keys.includes('workspaces')) {
+      expect(Array.isArray(res.body.upgrade.workspaces)).toBe(true);
+      for (const w of res.body.upgrade.workspaces as Array<Record<string, unknown>>) {
+        expect(Object.keys(w).sort()).toEqual(['blocked', 'errorClass', 'step', 'workspaceId']);
+      }
+    }
     expect(JSON.stringify(res.body)).not.toMatch(/error_message|errorMessage/);
 
     // A failed newer attempt of the current version's last step (superuser fixture), then removed again.

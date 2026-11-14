@@ -2,7 +2,9 @@ import { DataSource, EntityManager } from 'typeorm';
 
 import { SUPPORTED_WORKSPACE_SCHEMA_VERSIONS, workspaceSchemaName } from '@rab/server/engine/core-modules/tenant/schema-resolver.service';
 import { shipAuditRowAfterCommit } from '@rab/server/engine/core-modules/audit-events/audit-event-shipping';
+import { isUpgradeBlocked } from '@rab/server/engine/core-modules/upgrade/workspace-upgrade-block';
 
+const WORKSPACE_UPGRADING = Symbol('workspace-upgrading');
 
 const BATCH_SIZE = 50;
 // WORK-01 — hard ceiling on how many cleanup candidates one tick will ever
@@ -447,14 +449,17 @@ const GLOBAL_TABLE_DEPENDENCY_CHECKS: Array<[string, string]> = [
  * name — the same fail-closed posture `SchemaResolverService.resolve()` uses, just inlined here since this plain
  * function has no DI container to inject that service from.
  */
-async function resolveReadyPhysicalSchema(manager: EntityManager, workspaceId: string): Promise<string | null> {
-  const rows: Array<{ schema_name: string; status: string; schema_version: number }> = await manager.query(
-    `SELECT schema_name, status, schema_version FROM core.workspace_schema_registry WHERE workspace_id = $1`,
+async function resolveReadyPhysicalSchema(manager: EntityManager, workspaceId: string): Promise<string | null | typeof WORKSPACE_UPGRADING> {
+  const rows: Array<{ schema_name: string; status: string; schema_version: number; migration_error: string | null }> = await manager.query(
+    `SELECT schema_name, status, schema_version, migration_error FROM core.workspace_schema_registry WHERE workspace_id = $1`,
     [workspaceId],
   );
   if (rows.length !== 1) return null;
   const row = rows[0]!;
   if (row.status !== 'READY') return null;
+  // Part D (owner D2/D3, review Info): a workspace blocked by a failed upgrade step still HOLDS data; its dependency check is
+  // not skipped (that could delete a referenced user) but the deletion is deferred until it is unblocked (fail closed).
+  if (isUpgradeBlocked(row.migration_error)) return WORKSPACE_UPGRADING;
   if (!SUPPORTED_WORKSPACE_SCHEMA_VERSIONS.has(Number(row.schema_version))) return null;
   let expected: string;
   try {
@@ -509,6 +514,7 @@ async function findBlockingDependency(
       // unqualified table names above resolve to the physical tables here and to core immediately above.
       if (!scope.id) continue;
       const physicalSchema = await resolveReadyPhysicalSchema(manager, scope.id);
+      if (physicalSchema === WORKSPACE_UPGRADING) return 'workspace_upgrading';
       if (!physicalSchema) continue;
       await manager.query(`SELECT set_config('search_path',$1,true)`, [physicalSchema]);
       for (const [reason, sql] of WORKSPACE_TABLE_DEPENDENCY_CHECKS) {

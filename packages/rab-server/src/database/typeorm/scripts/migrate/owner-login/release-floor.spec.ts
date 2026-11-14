@@ -8,7 +8,7 @@ import { join } from 'node:path';
 
 import { STARTUP_EXIT_CODES } from '../../../../owner-login/runtime-db-config';
 import { MigrationSessionDatabaseError, MigrationsStillPendingError } from '../locked-migration-runner';
-import { bumpEntityCacheAfterUpgrade, codeMigrationNames, outcomeOf } from './migrate-on-start';
+import { assertWorkspaceBlockCacheBumped, bumpEntityCacheAfterUpgrade, codeMigrationNames, outcomeOf, WorkspaceBlockCacheError } from './migrate-on-start';
 import {
   assertSupportedUpgradeStart,
   attributeLedger,
@@ -255,6 +255,24 @@ describe('the entity-cache epoch bump after an applying run (SU-04, warning only
     expect(lines.join('\n')).not.toMatch(/secret/);
     const hanging = () => new Promise<void>(() => undefined);
     expect(await bumpEntityCacheAfterUpgrade({ applied: ['A1786000000000'], env, log: (l) => lines.push(l), flush: hanging, timeoutMs: 20 })).toBe('warning');
+  });
+
+  it('Part D review P2: a failed bump while a workspace block changed or is in force refuses with WorkspaceBlockCacheError (postCheck, 68)', () => {
+    let thrown: unknown;
+    try {
+      assertWorkspaceBlockCacheBumped(true, 'warning');
+    } catch (error) {
+      thrown = error;
+    }
+    expect(thrown).toBeInstanceOf(WorkspaceBlockCacheError);
+    expect((thrown as Error).name).toBe('WorkspaceBlockCacheError');
+    expect((thrown as Error).message).toMatch(/^every migration applied, but the entity-cache epoch could not be bumped while a workspace upgrade block changed or is in force/);
+    // An accurate outcome: a post-migration gate refused (fail closed, never served), not "a migration failed".
+    expect(outcomeOf(thrown)).toBe('postCheck');
+    expect(STARTUP_EXIT_CODES[outcomeOf(thrown)]).toBe(68);
+    // Not block-sensitive, or the bump did not fail: no refusal (the SU-04 warning-only rule stands).
+    for (const bump of ['bumped', 'skipped-no-redis', 'skipped-nothing-applied'] as const) expect(() => assertWorkspaceBlockCacheBumped(true, bump)).not.toThrow();
+    expect(() => assertWorkspaceBlockCacheBumped(false, 'warning')).not.toThrow();
   });
 
   it('the real flush is allow-listed: any other namespace is refused before Redis is touched', async () => {

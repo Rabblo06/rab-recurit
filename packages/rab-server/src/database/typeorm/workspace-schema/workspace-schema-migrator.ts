@@ -251,7 +251,14 @@ export class WorkspaceSchemaMigrator {
    * modules, binding CHECKs and verification: one APPLIED ledger row per module, module_version and the fingerprint.
    * The caller has already bound rab.organisation_id to the workspace's organisation.
    */
-  async recordProvisioned(workspaceId: string, organisationId: string, throughVersion: number, startedAt: string, appVersion?: string): Promise<void> {
+  async recordProvisioned(
+    workspaceId: string,
+    organisationId: string,
+    throughVersion: number,
+    startedAt: string,
+    appVersion?: string,
+    structure?: { level: number; expectedFingerprint: string | undefined },
+  ): Promise<void> {
     const schemaName = workspaceSchemaNameOf(workspaceId);
     const version = resolveAppVersion(appVersion);
     // Inside the caller's provisioning transaction: elevate to crewflow only for these writes (M-T2), then restore.
@@ -261,8 +268,12 @@ export class WorkspaceSchemaMigrator {
       for (const module of modulesThrough(throughVersion)) {
         await this.insertLedger(workspaceId, organisationId, schemaName, module, 0, throughVersion, 'APPLIED', startedAt, null, version);
       }
-      await this.db.query('UPDATE core.workspace_schema_registry SET module_version = $2 WHERE workspace_id = $1', [workspaceId, throughVersion]);
-      await this.verifyAndRecordFingerprint(workspaceId, throughVersion, true, 'provisioned');
+      // Part D (security review M3): a template above the frozen 20 modules (structural workspace upgrade commands applied by
+      // the provisioner) records its structure level, verified against the level's DECLARED fingerprint (missing = refused).
+      const level = structure?.level ?? throughVersion;
+      await this.db.query('UPDATE core.workspace_schema_registry SET module_version = $2 WHERE workspace_id = $1', [workspaceId, level]);
+      if (level > LATEST_WORKSPACE_MODULE_VERSION) await this.verifyAndRecordDeclared(workspaceId, structure?.expectedFingerprint);
+      else await this.verifyAndRecordFingerprint(workspaceId, throughVersion, true, 'provisioned');
     } finally {
       await this.restoreRole(previousRole);
     }
@@ -362,6 +373,23 @@ export class WorkspaceSchemaMigrator {
     const known = new Set(WORKSPACE_SCHEMA_MODULES.map((m) => m.id));
     const unknown = rows.find((r) => !known.has(r.module_id));
     if (unknown) throw new WorkspaceMigrationRefused('UNKNOWN_MODULE', unknown.module_id.slice(0, 64));
+  }
+
+  /** Part D: a structure level above 20: verify function clean, fingerprint equal to the declared one (none = refused). */
+  private async verifyAndRecordDeclared(workspaceId: string, expected: string | undefined): Promise<void> {
+    const mod = WORKSPACE_SCHEMA_MODULES[WORKSPACE_SCHEMA_MODULES.length - 1]!.id;
+    const problem: Array<{ p: string | null }> = await this.db.query('SELECT core.verify_workspace_schema_v1($1) AS p', [workspaceId]);
+    if (problem[0]?.p) throw new WorkspaceMigrationRefused('VERIFY_FAILED', mod);
+    const fp: Array<{ f: string | null }> = await this.db.query('SELECT core.workspace_schema_fingerprint($1) AS f', [workspaceId]);
+    const fingerprint = fp[0]?.f ?? null;
+    if (!expected || !fingerprint || fingerprint !== expected) throw new WorkspaceMigrationRefused('PROVISIONED_FINGERPRINT_MISMATCH', mod);
+    await this.db.query(
+      `UPDATE core.workspace_schema_registry
+          SET expected_fingerprint = $2, observed_fingerprint = $2, fingerprint_checked_at = now(), drift_status = 'OK',
+              drift_detail = NULL, migration_error = NULL
+        WHERE workspace_id = $1`,
+      [workspaceId, fingerprint],
+    );
   }
 
   private async verifyAndRecordFingerprint(workspaceId: string, version: number, requireExpected: boolean, phase: string): Promise<void> {

@@ -122,6 +122,25 @@ describe('SchemaResolverService: workspace module version (Phase B schema compat
     expect(await codeOf(setup(v).service.resolve(setup(v).manager, WS))).toBe('incompatible-module');
   });
 
+  it('Part D (owner D2/D3): a workspace carrying the upgrade block is refused with upgrading (503), never cached; another marker text is not a block', async () => {
+    const blockedManager = {
+      query: async () => [{ schema_name: SCHEMA, status: 'READY', schema_version: 1, module_version: 20, migration_error: 'upgrade-blocked: 0.7.0_X_1786800000000 (FINGERPRINT_MISMATCH)' }],
+    } as unknown as EntityManager;
+    const cached: string[] = [];
+    const service = new SchemaResolverService({
+      resolveSchema: async (_id: string, fetch: () => Promise<unknown>) => {
+        const v = await fetch();
+        cached.push(String(v));
+        return v;
+      },
+      invalidate: async () => undefined,
+    } as never);
+    expect(await codeOf(service.resolve(blockedManager, WS))).toBe('upgrading');
+    expect(cached).toEqual([]);
+    const oldMessage = { query: async () => [{ schema_name: SCHEMA, status: 'READY', schema_version: 1, module_version: 20, migration_error: 'module v1.020 failed (SQLSTATE_55P03)' }] } as unknown as EntityManager;
+    expect(await codeOf(service.resolve(oldMessage, WS))).toBe('resolved');
+  });
+
   it('a workspace ahead of the code (image rollback) routes, with ONE warning per workspace', async () => {
     const warn = jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
     try {

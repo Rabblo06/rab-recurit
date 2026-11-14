@@ -20,6 +20,7 @@ import { errorCodeSuffix, renderReportPdf } from './render-pdf.util';
 import { discoverInWorkspaces } from '../../core/database/workspace-discovery';
 import { renderRosterEmail } from './report-email-content';
 import { REPORT_EMAIL_REASON_ORGANISATION_SUSPENDED, selectReportRecipients } from './report-recipients';
+import { isNotYetRoutableWorkspace } from '../../core/database/workspace-routing';
 
 const logger = new Logger('ShiftReportSchedulerJob');
 
@@ -133,6 +134,8 @@ export async function processShiftReportCandidates(
       if (!outcome.acquired) skippedLocked += 1;
       else if (outcome.value) generated += 1;
     } catch (error) {
+      // Part D review P3: a workspace blocked by a failed upgrade step pauses (picked up again once unblocked), never a failure.
+      if (isNotYetRoutableWorkspace(error)) continue;
       failed += 1;
       logger.warn(`pre-shift report for shift ${candidate.shift_id} failed, will retry next tick: ${(error as Error).message}${errorCodeSuffix(error)}`);
     }
