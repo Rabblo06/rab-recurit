@@ -45,6 +45,19 @@ jobs:
         with:
           persist-credentials: false
           ref: ${{ inputs.ref || github.ref }}
+      # The PREV / CONTROL images live in the private Docker Hub repository adhin007/adolphus. Owner decision 2026-11-14: a
+      # pull-only (read-only) access token stored as the Actions secret DOCKERHUB_PULL_TOKEN, never a password. The token is
+      # passed on stdin (never on the command line or in the log); the job refuses clearly if the secret is missing.
+      - name: Log in to Docker Hub (pull-only token)
+        env:
+          DOCKERHUB_PULL_TOKEN: ${{ secrets.DOCKERHUB_PULL_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -z "${DOCKERHUB_PULL_TOKEN:-}" ]; then
+            echo '::error::secret DOCKERHUB_PULL_TOKEN is not set: the private PREV/CONTROL images cannot be pulled'
+            exit 1
+          fi
+          printf '%s' "$DOCKERHUB_PULL_TOKEN" | docker login docker.io --username adhin007 --password-stdin
       - name: Local registry (127.0.0.1 only, tmpfs)
         run: docker run -d --name deploy-order-registry -p 127.0.0.1:5055:5000 --tmpfs /var/lib/registry "$REGISTRY_IMAGE"
       - name: Build NEW from this commit (local only, never pushed to a public registry)
@@ -116,3 +129,4 @@ jobs:
           for c in u1 u2 u3 u4 u6 u7; do docker compose -p "$DOT_PROJECT_PREFIX-pg${{ matrix.pg }}-$c" down --timeout 30 --remove-orphans --volumes >/dev/null 2>&1 || true; done
           for c in a race ext r256 pg15; do docker compose -p "dbs-pg${{ matrix.pg }}-$c" down --timeout 30 --remove-orphans --volumes >/dev/null 2>&1 || true; done
           docker rm -f deploy-order-registry >/dev/null 2>&1 || true
+          docker logout docker.io >/dev/null 2>&1 || true
