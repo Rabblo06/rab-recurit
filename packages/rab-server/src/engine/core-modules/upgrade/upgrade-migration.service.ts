@@ -77,6 +77,19 @@ const SET_SCOPE = 'SELECT pg_catalog.set_config($1, $2, true)';
 const setScope = (query: Query, value: string) => query(SET_SCOPE, [UPGRADE_SCOPE_SETTING, value]);
 
 /**
+ * A statement that MUST go over the simple query protocol: node-pg (and TypeORM's QueryRunner.query(sql), which passes no
+ * values) uses it only when there are no bind values. withUpgradeScope's pre-check compares transaction_timestamp() with
+ * statement_timestamp(), which is exact only there (the extended protocol starts the implicit transaction at Parse; review
+ * of ef7f56c0). Refuses any bind value instead of silently switching protocol.
+ */
+export function simpleProtocolQuery(query: Query, sql: string, values?: readonly unknown[]): Promise<unknown[]> {
+  if (values !== undefined && values.length > 0) {
+    throw new UpgradeSessionError('simpleProtocolQuery takes no bind values (they switch the driver to the extended protocol). Refusing.');
+  }
+  return query(sql);
+}
+
+/**
  * Runs `fn` in ONE transaction with `rab.upgrade_scope` set for that transaction only, on a DEDICATED session (security
  * review L4): before BEGIN the session must be outside any transaction that holds a transaction id
  * (txid_current_if_assigned() IS NULL), not inside an open transaction at all (transaction_timestamp() =
@@ -90,7 +103,7 @@ export async function withUpgradeScope<T>(session: UpgradeSession, scope: Exclud
   // Part D fix: this pre-check must be a SIMPLE-protocol query (no bind parameter). With a parameter the driver uses the
   // extended protocol, whose implicit transaction starts at Parse while statement_timestamp() moves at Execute, so `fresh` was
   // false on every call (found by the PG16 ci-db fresh install after ef7f56c0). The setting name is a literal constant.
-  const [pre] = (await query(
+  const [pre] = (await simpleProtocolQuery(query,
     `SELECT pg_catalog.txid_current_if_assigned() IS NULL AS free,
             pg_catalog.transaction_timestamp() = pg_catalog.statement_timestamp() AS fresh,
             COALESCE(pg_catalog.current_setting('rab.upgrade_scope', true), '') AS scope,

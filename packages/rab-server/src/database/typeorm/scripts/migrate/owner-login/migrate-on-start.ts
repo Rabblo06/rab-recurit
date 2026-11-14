@@ -26,7 +26,7 @@
  *   - on failure: refuse (OWNER-DB-ULTIMATE Part B3; the C3 CREWFLOW_UPGRADE_FAILURE choices are removed): a failed
  *     migration exits 66 and the next start retries it (the upgrade logbook records attempt N); configuration (64), the
  *     version check / approval (65), identity (67), post-check (68) and lock timeout (69) likewise never serve. Only a failed
- *     upgrade COMMAND, with every migration applied and the post-checks passed, serves (exit 70, upgrade:"failed").
+ *     upgrade COMMAND, with every migration applied and the post-checks passed, serves (exit 70, upgradeFailed:true).
  *
  * One machine-readable line on stdout at the end, never a secret:
  *   TWENTY_MIGRATE_RESULT {"state","applied","pending","failedMigration","exitCode","serve","reason","checks","upgrade"}
@@ -483,7 +483,7 @@ export async function runMigrateOnStart(config: MigrateOnStartConfig, deps: Migr
     const state = (classification as Classification | null)?.state ?? 'UNKNOWN';
     if (run.report.commandFailure) {
       // OWNER-DB-ULTIMATE Part B3: only an upgrade COMMAND failed; every migration applied and the post-checks passed (the
-      // schema matches this code), so the API serves with upgrade:"failed" (exit 70, internal). The next start retries it.
+      // schema matches this code), so the API serves with upgradeFailed:true (exit 70, internal). The next start retries it.
       return result('degradedContinue', { serve: true, reason: `upgrade command ${run.report.commandFailure.name} failed (${run.report.commandFailure.errorName}); schema current` });
     }
     if (state === 'AHEAD') log('WARNING: the ledger is AHEAD of this image (rollback). Nothing applied; serving with the newer schema (expand-only releases only).');

@@ -37,6 +37,14 @@ Workspace provisioning in production runs in the Worker's provisioner process. S
 
 The operational procedure (per-service environment variable names, migration phases, rollback) is in the production release runbook. Values are never committed.
 
+### Upgrading to 0.6.0
+
+1. **Back up the database before deploying 0.6.0.** Going back to an image older than 0.6.0 (for example R256) is only possible by restoring that backup. Take it as the runbook's mandatory pre-upgrade backup describes (`packages/rab-docker/docs/release/OWNER-LOGIN-DEPLOYMENT.md`, section 3.3) and record where it is.
+2. Deploy as usual: `docker compose pull && docker compose up -d`.
+3. Check that `/healthz` returns 200 with `upgradeFailed: false`.
+
+Why restoring is the only way back: 0.6.0 adds the upgrade logbook (`core.upgrade_migration`, with its row-level security policies and grants). An older image's start-up security check compares the database with what that older code expects. It sees the logbook as unexpected security objects and refuses to start. This was measured with R256 on a 0.6.0 database. To go back, restore the backup from step 1, then start the previous release with its own compose files.
+
 **Render is retired.** `render.yaml` was removed on 2026-10-23: it described the pre-cutover database roles and migrated at start, which the current guards refuse. Removing the file does not stop any Render service that still exists. Suspend or delete those services in the Render dashboard.
 
 ## Environment

@@ -1,6 +1,6 @@
 import { DataSource } from 'typeorm';
 
-import { markNewWorkspaceInitial, UPGRADE_SCOPE_SETTING, upgradeSessionOf, UpgradeSessionError, withUpgradeScope } from './upgrade-migration.service';
+import { markNewWorkspaceInitial, simpleProtocolQuery, UPGRADE_SCOPE_SETTING, upgradeSessionOf, UpgradeSessionError, withUpgradeScope } from './upgrade-migration.service';
 import { UpgradeStatusService } from './upgrade-status.service';
 
 type Call = { sql: string; params?: unknown[] };
@@ -66,6 +66,18 @@ describe('withUpgradeScope needs ONE dedicated session (security review L4)', ()
     const pre = calls.find((c) => c.sql.includes('txid_current_if_assigned'))!;
     expect(pre.params === undefined || pre.params.length === 0).toBe(true);
     expect(pre.sql).toContain(`pg_catalog.current_setting('${UPGRADE_SCOPE_SETTING}', true)`);
+  });
+
+  it('simpleProtocolQuery refuses bind values and calls the driver with the SQL text alone', async () => {
+    const seen: unknown[][] = [];
+    const q = async (...args: unknown[]) => {
+      seen.push(args);
+      return [];
+    };
+    expect(() => simpleProtocolQuery(q as never, 'SELECT 1', ['x'])).toThrow(UpgradeSessionError);
+    await simpleProtocolQuery(q as never, 'SELECT 1', []);
+    await simpleProtocolQuery(q as never, 'SELECT 1');
+    expect(seen).toEqual([['SELECT 1'], ['SELECT 1']]);
   });
 
   it('accepts a pg client result shape ({ rows })', async () => {

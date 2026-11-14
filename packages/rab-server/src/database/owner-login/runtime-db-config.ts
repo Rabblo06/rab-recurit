@@ -48,7 +48,7 @@ export const DISABLE_DB_MIGRATIONS_VAR = 'DISABLE_DB_MIGRATIONS';
 export const MIGRATION_APPROVAL_MODE_VAR = 'CREWFLOW_MIGRATION_APPROVAL_MODE';
 /** Names that no longer exist; refused (see the header). */
 const UPGRADE_FAILURE_REMOVED =
-  'was removed (OWNER-DB-ULTIMATE Part B3): a failed migration always refuses to start and is retried on the next start; only a failed upgrade command serves, with upgrade:"failed" on /healthz. Remove it from the environment.';
+  'was removed (OWNER-DB-ULTIMATE Part B3): a failed migration always refuses to start and is retried on the next start; only a failed upgrade command serves, with upgradeFailed:true on /healthz. Remove it from the environment.';
 export const REMOVED_DB_CONFIG_VARS: Readonly<Record<string, string>> = Object.freeze({
   CREWFLOW_DB_MODE: 'There is no database mode switch any more: the API, the Worker and migrations all use the one PG_DATABASE_URL owner login. Remove CREWFLOW_DB_MODE.',
   CREWFLOW_UPGRADE_FAILURE: `CREWFLOW_UPGRADE_FAILURE ${UPGRADE_FAILURE_REMOVED}`,
@@ -93,7 +93,7 @@ export const STARTUP_EXIT_CODES = Object.freeze({
   lockTimeout: 69,
   /**
    * OWNER-DB-ULTIMATE Part B3: only an upgrade COMMAND failed; every migration applied and the post-checks passed (the schema
-   * matches the code), so the API starts and /healthz reports upgrade:"failed". Internal: api-prestart.sh serves on it.
+   * matches the code), so the API starts and /healthz reports upgradeFailed:true. Internal: api-prestart.sh serves on it.
    */
   degradedContinue: 70,
 } as const);
