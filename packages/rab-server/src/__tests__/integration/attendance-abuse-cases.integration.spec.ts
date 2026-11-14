@@ -727,8 +727,8 @@ describeIfDb('attendance abuse cases (integration)', () => {
       expect(after.qr_version).toBe(before.qr_version + 1);
       expect(after.updated_at.getTime()).toBeGreaterThan(before.updated_at.getTime()); // the pre-shift report regenerates
       const [audit] = await adminDataSource.query(
-        `SELECT user_id, metadata FROM core.audit_log WHERE action = 'shift.qr_rotated' AND entity_id = $1`, [shiftId]);
-      expect(audit).toMatchObject({ user_id: managerUserId, metadata: { previousQrVersion: before.qr_version, qrVersion: before.qr_version + 1 } });
+        `SELECT actor_user_id, metadata FROM core.audit_log WHERE action = 'shift.qr_rotated' AND entity_id = $1`, [shiftId]);
+      expect(audit).toMatchObject({ actor_user_id: managerUserId, metadata: { previousQrVersion: before.qr_version, qrVersion: before.qr_version + 1 } });
 
       const refused = await clockIn(staffToken, organisation, venue, managerUserId, shiftId, { qrToken: oldQr });
       expect(refused.status).toBe(409);
