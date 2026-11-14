@@ -9,6 +9,7 @@ import { AuditAction, AuditService } from '../engine/core-modules/audit/audit.se
 import { AccountLifecycleService } from '../engine/core-modules/auth/services/account-lifecycle.service';
 import { EnvironmentService } from '../engine/core-modules/environment/environment.service';
 import { AuthContext } from '../engine/core-modules/tenant/auth-context.interface';
+import { bindBusinessSchema, businessSearchPath } from '../engine/core-modules/tenant/business-tables';
 import { TenantContextService } from '../engine/core-modules/tenant/tenant-context.service';
 import { loadSystemRoleDefaultPermissions } from '../modules/identity/services/system-role-permissions';
 import { ROLE_DEFS } from '../modules/manager/services/manager.service';
@@ -372,7 +373,10 @@ export class SeedAiDemoCommand extends CommandRunner {
 
   private async bind(m: EntityManager, ctx: AuthContext, schema: string): Promise<void> {
     await this.tenantContext.bindCoreIdentityGucs(m, ctx);
-    await m.query(`SELECT set_config('search_path', $1, true)`, [schema]);
+    // C2-0: '' under the test-only search_path trap; businessTables(m) follows the schema (refused unless it is 'core' or
+    // exactly the bound workspace's registry name).
+    await m.query(`SELECT set_config('search_path', $1, true)`, [businessSearchPath(schema)]);
+    bindBusinessSchema(m, schema, ctx.workspaceId);
   }
 
   private async workspaceSchema(m: EntityManager, workspaceId: string): Promise<string> {

@@ -103,9 +103,13 @@ describe('account invite cleanup — F-1 definer path (WORKER_INVITE_AUTO_DELETE
     // The definer reported the global blocks: the Worker no longer reads core.platform_admin / manager_workspace / refresh_token.
     expect(h.statements.some((s) => /core\.platform_admin|core\.refresh_token|FROM core\.manager_workspace/.test(s.sql))).toBe(false);
     // Workspace history checks ran bound to the candidate's own organisation and workspace (only ORG's workspace).
-    const binds = h.statements.filter((s) => s.sql.startsWith(`SELECT set_config('rab.organisation_id',$1,true), set_config('rab.workspace_id',$2,true)`)).map((s) => s.params);
-    expect(binds).toContainEqual([ORG, WS]);
-    expect(binds).not.toContainEqual([OTHER_ORG, OTHER_WS]);
+    // C2-0: the search_path is now the bound $3 ('core'; '' only under the test-only trap), not a literal in the SQL text.
+    const binds = h.statements
+      .filter((s) => s.sql.startsWith(`SELECT set_config('rab.organisation_id',$1,true), set_config('rab.workspace_id',$2,true)`))
+      .map((s) => s.params);
+    expect(binds.every((params) => params[2] === 'core')).toBe(true);
+    expect(binds.map((params) => params.slice(0, 2))).toContainEqual([ORG, WS]);
+    expect(binds.map((params) => params.slice(0, 2))).not.toContainEqual([OTHER_ORG, OTHER_WS]);
     // Deletes only through the definer, never for a blocked candidate.
     const deletes = h.statements.filter((s) => s.sql.includes('core.worker_delete_expired_invited_user($1')).map((s) => s.params[0]);
     expect(deletes).toEqual([U(11), U(12)]);

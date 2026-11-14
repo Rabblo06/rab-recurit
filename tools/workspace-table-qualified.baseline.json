@@ -1,0 +1,187 @@
+{
+  "_comment": [
+    "Part C2 ratchet (tools/check-workspace-table-qualified.cjs). Per file and rule: the number of workspace-table references",
+    "that are not yet schema-qualified through businessTables(manager). This file may only SHRINK: a module PR that qualifies",
+    "sites lowers or deletes its rows in the same PR. Never raise a count; qualify the new reference instead. C2-7: empty."
+  ],
+  "total": 535,
+  "files": {
+    "packages/rab-server/src/command/seed-ai-demo.command.ts": {
+      "unqualified": 11
+    },
+    "packages/rab-server/src/command/seed-qa.command.ts": {
+      "unqualified": 4
+    },
+    "packages/rab-server/src/engine/core-modules/realtime/realtime-recipients.ts": {
+      "unqualified": 9
+    },
+    "packages/rab-server/src/engine/core-modules/user-deletion/user-deletion.service.ts": {
+      "unqualified": 18
+    },
+    "packages/rab-server/src/modules/ai/actions/ai-proposal.service.ts": {
+      "unqualified": 4
+    },
+    "packages/rab-server/src/modules/ai/actions/ai-write-tools.ts": {
+      "unqualified": 6
+    },
+    "packages/rab-server/src/modules/attendance/services/attendance.service.ts": {
+      "unqualified": 31
+    },
+    "packages/rab-server/src/modules/attendance/services/post-shift-lifecycle.service.ts": {
+      "unqualified": 3
+    },
+    "packages/rab-server/src/modules/attendance/services/shift-report.service.ts": {
+      "unqualified": 29
+    },
+    "packages/rab-server/src/modules/attendance/services/shift-review.service.ts": {
+      "unqualified": 4
+    },
+    "packages/rab-server/src/modules/attendance/services/shift-team.service.ts": {
+      "unqualified": 4
+    },
+    "packages/rab-server/src/modules/attendance/services/staff-review-insights.service.ts": {
+      "unqualified": 8
+    },
+    "packages/rab-server/src/modules/attendance/templates/document-context.ts": {
+      "unqualified": 2
+    },
+    "packages/rab-server/src/modules/dashboard/services/dashboard.service.ts": {
+      "unqualified": 10
+    },
+    "packages/rab-server/src/modules/identity/services/user-note.service.ts": {
+      "unqualified": 2
+    },
+    "packages/rab-server/src/modules/manager/services/manager.service.ts": {
+      "unqualified": 4
+    },
+    "packages/rab-server/src/modules/manager/services/venue-manager.service.ts": {
+      "unqualified": 8
+    },
+    "packages/rab-server/src/modules/offer/services/apply-offer-confirmation.ts": {
+      "unqualified": 9
+    },
+    "packages/rab-server/src/modules/offer/services/assert-staff-eligible-for-offer.ts": {
+      "unqualified": 1
+    },
+    "packages/rab-server/src/modules/offer/services/claim-expired-offer.ts": {
+      "unqualified": 3
+    },
+    "packages/rab-server/src/modules/offer/services/offer-assistant.service.ts": {
+      "unqualified": 6
+    },
+    "packages/rab-server/src/modules/offer/services/offer.service.ts": {
+      "unqualified": 36
+    },
+    "packages/rab-server/src/modules/offer/services/replacement-request.service.ts": {
+      "unqualified": 2
+    },
+    "packages/rab-server/src/modules/offer/services/shift-vacancy.ts": {
+      "unqualified": 2
+    },
+    "packages/rab-server/src/modules/offer/services/venue-offer-pipeline.service.ts": {
+      "unqualified": 8
+    },
+    "packages/rab-server/src/modules/offer/services/withdraw-unconfirmed-offer.ts": {
+      "unqualified": 8
+    },
+    "packages/rab-server/src/modules/payroll/files/payslip-file.policy.ts": {
+      "unqualified": 3
+    },
+    "packages/rab-server/src/modules/payroll/files/shift-statement-file.policy.ts": {
+      "unqualified": 2
+    },
+    "packages/rab-server/src/modules/payroll/services/payroll-allocation.ts": {
+      "unqualified": 3
+    },
+    "packages/rab-server/src/modules/payroll/services/payroll-assistant.service.ts": {
+      "unqualified": 10
+    },
+    "packages/rab-server/src/modules/payroll/services/payroll-run.service.ts": {
+      "unqualified": 42
+    },
+    "packages/rab-server/src/modules/payroll/services/payroll.service.ts": {
+      "unqualified": 33
+    },
+    "packages/rab-server/src/modules/scheduling/services/availability.service.ts": {
+      "unqualified": 1
+    },
+    "packages/rab-server/src/modules/scheduling/services/scheduling-assistant.service.ts": {
+      "unqualified": 4
+    },
+    "packages/rab-server/src/modules/scheduling/services/scheduling.service.ts": {
+      "unqualified": 14
+    },
+    "packages/rab-server/src/modules/scheduling/services/sent-shifts-sql.ts": {
+      "unqualified": 5
+    },
+    "packages/rab-server/src/modules/scheduling/services/shift-completion-repair.ts": {
+      "unqualified": 6
+    },
+    "packages/rab-server/src/modules/scheduling/utils/complete-shift-if-settled.ts": {
+      "unqualified": 5
+    },
+    "packages/rab-server/src/modules/scheduling/utils/shift-action-window.ts": {
+      "unqualified": 1
+    },
+    "packages/rab-server/src/modules/search/services/search.service.ts": {
+      "unqualified": 19
+    },
+    "packages/rab-server/src/modules/staff/services/staff-availability.ts": {
+      "unqualified": 1
+    },
+    "packages/rab-server/src/modules/staff/services/staff.service.ts": {
+      "unqualified": 10
+    },
+    "packages/rab-server/src/modules/staff/services/venue-team-scope.ts": {
+      "unqualified": 2
+    },
+    "packages/rab-server/src/modules/timeline/services/timeline.service.ts": {
+      "unqualified": 24
+    },
+    "packages/rab-server/src/modules/venue/files/venue-photo-file.policy.ts": {
+      "unqualified": 6
+    },
+    "packages/rab-worker/src/queues/rab-maintenance/account-invite-cleanup.job.ts": {
+      "unqualified": 6
+    },
+    "packages/rab-worker/src/queues/rab-offers/offer-expiry.job.ts": {
+      "unqualified": 7
+    },
+    "packages/rab-worker/src/queues/rab-offers/replacement-staff.job.ts": {
+      "unqualified": 16
+    },
+    "packages/rab-worker/src/queues/rab-reports/final-timesheet.job.ts": {
+      "unqualified": 16
+    },
+    "packages/rab-worker/src/queues/rab-reports/payroll-period-attention.job.ts": {
+      "unqualified": 7
+    },
+    "packages/rab-worker/src/queues/rab-reports/report-recipients.ts": {
+      "unqualified": 1
+    },
+    "packages/rab-worker/src/queues/rab-reports/shift-report-scheduler.job.ts": {
+      "unqualified": 4
+    },
+    "packages/rab-worker/src/queues/rab-reports/shift-statement.job.ts": {
+      "unqualified": 16
+    },
+    "packages/rab-worker/src/queues/rab-shifts/attendance-monitor.job.ts": {
+      "unqualified": 5
+    },
+    "packages/rab-worker/src/queues/rab-shifts/late-clock-in.job.ts": {
+      "unqualified": 7
+    },
+    "packages/rab-worker/src/queues/rab-shifts/shift-cancellation-followup.job.ts": {
+      "unqualified": 8
+    },
+    "packages/rab-worker/src/queues/rab-shifts/shift-monitor.job.ts": {
+      "unqualified": 11
+    },
+    "packages/rab-worker/src/queues/rab-timer-triggers/timer-trigger.handler.ts": {
+      "unqualified": 7
+    },
+    "packages/rab-worker/src/queues/rab-timer-triggers/timer-trigger.processors.ts": {
+      "unqualified": 1
+    }
+  }
+}
