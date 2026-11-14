@@ -347,6 +347,7 @@ export class WorkspaceCommandRunner {
         }
       }
       delete outcome.needsBlock;
+      outcome.blocked = outcome.blocked === true || (ws.blocked === true && outcome.status === 'refused');
     }
     log(`workspace upgrade: ${report.outcomes.length - report.failures.length} ok, ${report.failures.length} failed or refused`);
     return report;
