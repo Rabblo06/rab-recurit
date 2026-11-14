@@ -100,12 +100,14 @@ describeIfDb('member role record filters: relation ids are checked in the routed
       hwsOn = mode;
       if (mode) {
         // HWS on routes the caller's requests to its READY workspace schema. With HWS off (main) the fixtures never built one:
-        // build it the Worker's way (TypeScript provisioner, idempotent: ALREADY_READY when C1's fixtures did).
+        // build it the Worker's way (TypeScript provisioner) unless the fixtures already did (C1: READY at creation).
+        const statusOf = async (id: string) => ((await owner.query(`SELECT status FROM core.workspace_schema_registry WHERE workspace_id = $1`, [id])) as Array<{ status: string }>)[0]?.status;
         for (const m of [managerA, managerB]) {
-          const ws = { id: m.workspaceId!, org: m.organisationId, owner: m.userId, schema: `workspace_${m.workspaceId!.replace(/-/g, '')}`, label: 'f4' };
-          expect(['READY', 'ALREADY_READY']).toContain(await provisionTypeScript(adminUrl, ws));
-          const [{ status }] = await owner.query(`SELECT status FROM core.workspace_schema_registry WHERE workspace_id = $1`, [m.workspaceId]);
-          expect(status).toBe('READY');
+          if ((await statusOf(m.workspaceId!)) !== 'READY') {
+            const ws = { id: m.workspaceId!, org: m.organisationId, owner: m.userId, schema: `workspace_${m.workspaceId!.replace(/-/g, '')}`, label: 'f4' };
+            expect(await provisionTypeScript(adminUrl, ws)).toBe('READY');
+          }
+          expect(await statusOf(m.workspaceId!)).toBe('READY');
         }
       }
       const [vA, vB, jA, jB] = [await venue(tokenA), await venue(tokenB), await jobRole(tokenA), await jobRole(tokenB)];
