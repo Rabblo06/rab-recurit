@@ -203,12 +203,12 @@ describeIfDb('Part D through the locked start (runMigrateOnStart)', () => {
     expect(readFileSync(join(scripts, 'migrate', 'owner-login', 'owner-login-lifecycle-check.ts'), 'utf8')).not.toMatch(/behindFloor/);
     expect(readFileSync(join(scripts, 'migrate', 'owner-login', 'migrate-on-start.ts'), 'utf8')).toMatch(/behindFloor: LATEST_WORKSPACE_MODULE_VERSION/);
   });
-  it('review P2: a workspace block changed but the cache epoch bump failed: the start refuses (66) instead of serving stale routing', async () => {
+  it('review P2: a workspace block changed but the cache epoch bump failed: the start refuses (WorkspaceBlockCacheError, postCheck, 68) instead of serving stale routing', async () => {
     const w = await make('p2-drift');
     expect(await frozen(w)).toBe('READY');
     await admin.query(`DROP POLICY job_role_tenant ON ${w.schema}.job_role`);
     const r = await start({ '0-6': REAL_CMDS }, [w.id], { redis: true, flush: async () => { throw new Error('redis unreachable'); } });
-    expect({ outcome: r.outcome, exit: exitOf(r), serve: r.serve }).toEqual({ outcome: 'migrationFailed', exit: 66, serve: false });
+    expect({ outcome: r.outcome, exit: exitOf(r), serve: r.serve }).toEqual({ outcome: 'postCheck', exit: 68, serve: false });
     expect((await registryOf(admin, w.id)).migration_error).toMatch(/^upgrade-blocked: /);
   });
 });

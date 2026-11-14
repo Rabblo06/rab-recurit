@@ -22,7 +22,8 @@
  *     post-checks passed, with the lock still held, the allow-listed `entitycache` epoch bump (cache-flush.ts /
  *     entity-cache-flush.ts: one INCR per cached entity, deletes nothing, touches no other key family: never bull:*,
  *     throttler keys or rab:* heartbeats). WARNING ONLY: a missing REDIS_URL, an unreachable Redis or a failed bump is
- *     logged and the start continues (cached entries then expire on their own TTL, at most 300 s).
+ *     logged and the start continues (cached entries then expire on their own TTL, at most 300 s). Exception (Part D review
+ *     P2): while a workspace upgrade block changed or is in force, a failed bump refuses (WorkspaceBlockCacheError, 68).
  *   - on failure: refuse (OWNER-DB-ULTIMATE Part B3; the C3 CREWFLOW_UPGRADE_FAILURE choices are removed): a failed
  *     migration exits 66 and the next start retries it (the upgrade logbook records attempt N); configuration (64), the
  *     version check / approval (65), identity (67), post-check (68) and lock timeout (69) likewise never serve. Only a failed
@@ -154,6 +155,26 @@ export class PostCheckFailure extends Error {
   }
 }
 
+/**
+ * Review P2 / L2: every migration applied and the post-checks passed, but the entity-cache epoch could not be bumped while a
+ * workspace upgrade block changed or is in force, so a cached resolution could route a blocked workspace (or keep refusing an
+ * unblocked one) for up to the cache TTL. Named so outcomeOf maps it to `postCheck` (exit 68: a post-migration gate refused,
+ * fail closed, never served) instead of the "migration failed at an unknown migration" message a plain Error produced.
+ */
+export class WorkspaceBlockCacheError extends Error {
+  constructor() {
+    super(
+      'every migration applied, but the entity-cache epoch could not be bumped while a workspace upgrade block changed or is in force; refusing to serve possibly stale workspace routing (retry when Redis is reachable)',
+    );
+    this.name = 'WorkspaceBlockCacheError';
+  }
+}
+
+/** Pure: Review P2: a failed bump is fatal only while a workspace block changed or is in force (otherwise a warning). */
+export function assertWorkspaceBlockCacheBumped(blockSensitive: boolean, bump: Awaited<ReturnType<typeof bumpEntityCacheAfterUpgrade>>): void {
+  if (blockSensitive && bump === 'warning') throw new WorkspaceBlockCacheError();
+}
+
 /** Error → outcome, by error name (the classes live in many modules; a name never carries a value). Unknown = migration failure. */
 export function outcomeOf(error: unknown): StartupOutcome {
   const name = error instanceof Error ? error.name : '';
@@ -167,7 +188,7 @@ export function outcomeOf(error: unknown): StartupOutcome {
   if (name === 'MigrationSessionDatabaseError') return 'identity';
   if (['UnapprovedProductionMigrationError', 'MigrationApprovalError', 'UnsupportedUpgradeStartError', 'UpgradeVersionTooOldError'].includes(name)) return 'behind';
   if (error instanceof Error && /needs the per-release approval|not a proven fresh install|APPROVAL_MODE=token needs/.test(error.message)) return 'behind';
-  if (['PostCheckFailure', 'MigrationsStillPendingError'].includes(name)) return 'postCheck';
+  if (['PostCheckFailure', 'MigrationsStillPendingError', 'WorkspaceBlockCacheError'].includes(name)) return 'postCheck';
   return 'migrationFailed';
 }
 
@@ -475,14 +496,13 @@ export async function runMigrateOnStart(config: MigrateOnStartConfig, deps: Migr
         log(`post-checks passed (${done.length} applied)`);
         await run.afterApply(upgradeSessionOf(queryRunner));
         // D2/D3: a workspace blocked or unblocked by this run must not be served from a cached resolution: bump the epoch.
-        // Review P2: while a workspace is blocked, or when a block changed, a failed bump is FATAL (66): a cached resolution
-        // could otherwise route a blocked workspace for up to the cache TTL. No Redis configured = no cache = nothing to bump.
+        // Review P2: while a workspace is blocked, or when a block changed, a failed bump is FATAL (WorkspaceBlockCacheError,
+        // exit 68): a cached resolution could otherwise route a blocked workspace for up to the cache TTL. No Redis configured =
+        // no cache = nothing to bump.
         const blockSensitive = run.report.workspaces?.blockChanged === true || (run.report.workspaces?.blocked.length ?? 0) > 0;
         const cacheReasons = blockSensitive ? [...done, 'workspace-upgrade-block'] : done;
         const bump = await bumpEntityCacheAfterUpgrade({ applied: cacheReasons, env, log, flush: deps.cacheFlush });
-        if (blockSensitive && bump === 'warning') {
-          throw new Error('the entity-cache epoch could not be bumped while a workspace upgrade block changed or is in force; refusing to serve possibly stale workspace routing (retry when Redis is reachable)');
-        }
+        assertWorkspaceBlockCacheBumped(blockSensitive, bump);
       },
     });
     applied = locked.applied;
