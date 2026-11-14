@@ -7580,3 +7580,45 @@ image that runs the apps' own derive step on the read-only volume (`--pull never
   track_counts, rab.* list, hook refusal. Integration on PG16/17/18: adoption, per-workspace runs, every abuse case above, the
   D2/D3 blocks, the P1 code-level block, the locked start with a level-21 probe, the P2 refusal. Worker unit tests for the
   pauses.
+
+## OWNER-DB-ULTIMATE Part D: the first structural workspace command, `staff_profile_member_select` (structure level 21) and fingerprint v2 (branch feat/ws-staff-member-select)
+
+- **What:**
+  - The owner-approved SELECT policy `staff_profile_member_select` on every workspace schema's `staff_profile`, shipped as
+    workspace upgrade command `0.6.0_StaffProfileMemberSelect_1786721480000`. The runner applies it per existing workspace; new
+    workspaces get it from the re-created `core.provision_workspace`.
+  - Fingerprint v2 (`core.workspace_schema_fingerprint_v2[_lines]`, rab_secure_owner-owned, SECURITY INVOKER, EXECUTE crewflow).
+  - `verify_workspace_schema_v1` at 42 policies.
+- **Threats:**
+  1. A custom-role member reads staff of another workspace or organisation, or without staff.view.
+  2. A member reads money (pay rates).
+  3. A system role (Venue Manager, Staff) gains staff access through the policy.
+  4. A tampered or pre-existing policy of the same name is silently accepted.
+  5. A workspace stays at level 20 and is served by code that expects 21.
+  6. The new fingerprint functions widen what the runtime can run.
+- **Controls:**
+  - (1) RLS binding: `organisation_id = core.current_org() AND workspace_id = core.current_workspace()`.
+  - (1) The SECURITY INVOKER helper requires an ACTIVE membership of THIS workspace and a non-system role of THIS workspace holding
+    staff.view. Tested: no staff.view → 0 rows; another workspace → 0; suspended or removed membership → 0; a role of another
+    workspace → 0; a system role → 0; another organisation → 0; no tenant context → 0; the policy is SELECT only.
+  - (2) Money is hidden in the service layer, not by RLS (RLS is row-level). MemberAccessPolicyService projection
+    (`payRate` hidden by default, `sensitiveAuthority: payroll.view`); role writes and assignments refuse revealing a field whose
+    authority the editor lacks (403 ROLE_ESCALATION); members can never hold payroll.view.
+  - (3) `r.is_system = false`.
+  - (4) The command creates the policy only when absent; the post-step v2 fingerprint check refuses anything else and the workspace
+    is blocked (tested).
+  - (5) The runner blocks a workspace below the code level (503 to its members, the Worker pauses); routing floor 20; the deploy
+    post-check floor is unchanged.
+  - (6) EXECUTE is granted to crewflow only; crewflow_app has none (tested). Not SECURITY DEFINER.
+- **Accepted / open:**
+  - A workspace owner who holds payroll.view can delegate visibility of the staff default pay rate to a member role (existing
+    behaviour, owner question in WS-COMMANDS.md §0b.2).
+  - Level-21 v2 fingerprints are declared for PostgreSQL 16, 17 and 18 (generated on throwaway clusters, identical across two frozen-template workspaces per major).
+  - Fingerprint v2 known limits (v3 candidates, D-RUNNER §9.1): schema-local collations by name only, pg_default_acl, opclass/opfamily/text-search/extended statistics, relam/relreplident; the periodic drift job still compares v1 for level 21+.
+  - down() refuses while any workspace still carries the policy (operator cleanup first), so a rollback can't leave level-21 workspaces failing verification.
+- **Also fixed:** `RoleService.assertRelationsInScopeTx` read `core.venue` / `core.job_role` explicitly, so with HWS on every venue or job-role record filter on a member role was refused; it now reads through the tenant's bound search_path (core with HWS off, the validated workspace schema with HWS on).
+- **Tests:**
+  - `ws-staff-member-select.integration.spec.ts`;
+  - the runner specs (probes at code level + 1);
+  - the `server-path-provisioning-db` tamper cases;
+  - unit guards: reviewed structure level 21 with floor 20, pending majors.
