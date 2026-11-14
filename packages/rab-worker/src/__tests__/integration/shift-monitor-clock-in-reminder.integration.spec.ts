@@ -114,6 +114,7 @@ describeIfDb('shift monitor — clock-in window open reminder (integration)', ()
         status: 'active',
       });
       await provisionFixtureWorkspace(manager, workspace.id); // Part C1: READY schema, as the product builds it
+      await manager.query(`SELECT set_config('search_path', $1, true)`, [businessSchema(workspace.id)]); // later fixture writes in this transaction land in the workspace's schema
       workspaceId = workspace.id;
       // rab.workspace_id must be bound before this insert — same ordering as every other fixture
       // in this suite (worker-operations-abuse-cases.integration.spec.ts's own comment).

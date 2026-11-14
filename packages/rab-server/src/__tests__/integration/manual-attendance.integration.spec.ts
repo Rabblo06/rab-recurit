@@ -19,7 +19,7 @@ import { BootstrapTimer } from './helpers/bootstrap-trace';
 import { generateFixturePassword } from './helpers/fixture-password';
 import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-pipe';
 import { integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
-import { businessTable, businessTableOf, siblingTable } from './helpers/hws-fixtures';
+import { businessSchema, businessTable, businessTableOf, siblingTable } from './helpers/hws-fixtures';
 
 const FIXTURE_PASSWORD = generateFixturePassword();
 
@@ -104,6 +104,7 @@ describeIfDb('manual attendance recording and confirmed no-show (integration)', 
         organisationId: organisation.id, ownerUserId: manager.userId, name: `WS ${manager.userId}`, subdomain: `ma-${manager.userId.slice(0, 8)}`, status: 'active',
       });
       await provisionFixtureWorkspace(m, workspace.id); // Part C1: READY schema, as the product builds it
+      await m.query(`SELECT set_config('search_path', $1, true)`, [businessSchema(workspace.id)]); // later fixture writes in this transaction land in the workspace's schema
       await insertMembership(m, organisation.id, manager.userId, workspace.id);
       await m.query(`INSERT INTO core.manager_profile (organisation_id, user_id, type, workspace_id) VALUES ($1, $2, $3, $4)`, [organisation.id, manager.userId, ManagerType.INTERNAL, workspace.id]);
       venueManager = await user(vmRoleId, 'VenueMgr');

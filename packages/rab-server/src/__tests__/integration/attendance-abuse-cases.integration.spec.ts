@@ -25,7 +25,7 @@ import { clearThrottleState } from './helpers/throttle-state';
 import { generateFixturePassword } from './helpers/fixture-password';
 import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-pipe';
 import { integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
-import { businessTable, businessTableOf, siblingTable } from './helpers/hws-fixtures';
+import { businessSchema, businessTable, businessTableOf, siblingTable } from './helpers/hws-fixtures';
 
 const FIXTURE_PASSWORD = generateFixturePassword();
 
@@ -113,6 +113,7 @@ describeIfDb('attendance abuse cases (integration)', () => {
         status: 'active',
       });
       await provisionFixtureWorkspace(manager, workspace.id); // Part C1: READY schema, as the product builds it
+      await manager.query(`SELECT set_config('search_path', $1, true)`, [businessSchema(workspace.id)]); // later fixture writes in this transaction land in the workspace's schema
       await insertMembership(manager, organisation.id, managerUserId, workspace.id);
       // A real manager always has a manager_profile in its workspace; staff_profile_insert requires one (non-venue) for the creator.
       // manager_profile WITH CHECK: bind the workspace the profile is written into, as the server does on first onboarding.
@@ -191,6 +192,7 @@ describeIfDb('attendance abuse cases (integration)', () => {
         status: 'active',
       });
       await provisionFixtureWorkspace(manager, workspace.id); // Part C1: READY schema, as the product builds it
+      await manager.query(`SELECT set_config('search_path', $1, true)`, [businessSchema(workspace.id)]); // later fixture writes in this transaction land in the workspace's schema
       await insertMembership(manager, organisation.id, userId, workspace.id);
       await manager.query(`SELECT set_config('rab.workspace_id', $1, true)`, [workspace.id]);
       await manager.query(`INSERT INTO core.manager_profile (organisation_id, user_id, type, workspace_id) VALUES ($1, $2, $3, $4)`, [

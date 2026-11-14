@@ -153,6 +153,7 @@ describeIfDb('replacement-staff workflow (integration)', () => {
         status: 'active',
       });
       await provisionFixtureWorkspace(manager, workspace.id); // Part C1: READY schema, as the product builds it
+      await manager.query(`SELECT set_config('search_path', $1, true)`, [businessSchema(workspace.id)]); // later fixture writes in this transaction land in the workspace's schema
       workspaceId = workspace.id;
       // rab.workspace_id must be bound before this insert — same ordering bug already fixed in
       // worker-event-idempotency.integration.spec.ts (P2.2).
@@ -944,6 +945,7 @@ describeIfDb('replacement-staff workflow (integration)', () => {
         await manager.query(`SELECT set_config('rab.user_id', $1, true)`, [userId]);
         const workspace = await manager.save(ManagerWorkspace, { organisationId: fx.organisationId, ownerUserId: userId, name: `Other Workspace ${userId}`, subdomain: `otherws-${userId.slice(0, 8)}`, status: 'active' });
         await provisionFixtureWorkspace(manager, workspace.id); // Part C1: READY schema, as the product builds it
+        await manager.query(`SELECT set_config('search_path', $1, true)`, [businessSchema(workspace.id)]); // later fixture writes in this transaction land in the workspace's schema
         // rab.workspace_id was bound to '' (outer withContext called with workspaceId: null) — rebind
         // to this newly-created workspace before the insert (P2.2 fix, same pattern as elsewhere).
         await manager.query(`SELECT set_config('rab.workspace_id', $1, true)`, [workspace.id]);

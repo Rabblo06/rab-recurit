@@ -16,6 +16,7 @@ import { createAdminDataSource } from './helpers/admin-datasource';
 import { generateFixturePassword } from './helpers/fixture-password';
 import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-pipe';
 import { integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
+import { businessSchema } from './helpers/hws-fixtures';
 
 const FIXTURE_PASSWORD = generateFixturePassword();
 
@@ -85,7 +86,7 @@ describeIfDb('account deactivation abuse cases (integration)', () => {
         subdomain: `test-${managerUserId.slice(0, 8)}`,
         status: 'active',
       });
-      const [{ id: wsId }] = await manager.query(`SELECT id FROM core.manager_workspace WHERE owner_user_id = $1`, [managerUserId]); await provisionFixtureWorkspace(manager, wsId); /* Part C1: READY schema */ await insertMembership(manager, organisation.id, managerUserId, wsId);
+      const [{ id: wsId }] = await manager.query(`SELECT id FROM core.manager_workspace WHERE owner_user_id = $1`, [managerUserId]); await provisionFixtureWorkspace(manager, wsId); await manager.query(`SELECT set_config('search_path', $1, true)`, [businessSchema(wsId)]); /* Part C1: READY schema; later writes go to it */ await insertMembership(manager, organisation.id, managerUserId, wsId);
       // staff_profile_insert's WITH CHECK requires a manager_profile row for current_uid() whose
       // own workspace_id matches the workspace being written into — this manager has a
       // ManagerWorkspace and a membership row, but no manager_profile, which is what seedStaff()

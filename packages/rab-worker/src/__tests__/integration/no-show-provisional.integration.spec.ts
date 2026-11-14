@@ -72,6 +72,7 @@ describeIfDb('provisional no-show (shift monitor) never overrides a manager (int
       await m.query(`SELECT set_config('rab.user_id', $1, true)`, [out.managerUserId]);
       const ws = await m.save(ManagerWorkspace, { organisationId, ownerUserId: out.managerUserId, name: `${label} WS ${out.managerUserId}`, subdomain: `${label}-${out.managerUserId.slice(0, 8)}`, status: 'active' });
       await provisionFixtureWorkspace(m, ws.id); // Part C1: READY schema, as the product builds it
+      await m.query(`SELECT set_config('search_path', $1, true)`, [businessSchema(ws.id)]); // later fixture writes in this transaction land in the workspace's schema
       out.workspaceId = ws.id;
       await m.query(`SELECT set_config('rab.workspace_id', $1, true)`, [ws.id]);
       await m.insert(ManagerProfile, { organisationId, userId: out.managerUserId, type: ManagerType.INTERNAL, workspaceId: ws.id });

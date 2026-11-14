@@ -25,6 +25,7 @@ import { provisionFixtureWorkspace, TestIdentityFactory } from './helpers/test-i
 import { generateFixturePassword } from './helpers/fixture-password';
 import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-pipe';
 import { integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
+import { businessSchema } from './helpers/hws-fixtures';
 
 const FIXTURE_PASSWORD = generateFixturePassword();
 
@@ -137,6 +138,7 @@ describeIfDb('user deletion abuse cases (integration)', () => {
       workspaceId = workspace.id;
       // Part C1: READY schema (server path) so workspace-routed fixture writes and reads work with HWS on.
       await provisionFixtureWorkspace(manager, workspaceId);
+      await manager.query(`SELECT set_config('search_path', $1, true)`, [businessSchema(workspaceId)]); // later fixture writes in this transaction land in the workspace's schema
       // Must bind rab.workspace_id to the real workspace before this insert — manager_profile_tenant's
       // WITH CHECK needs workspace_id = current_workspace() (or a manager.manage permission this
       // brand-new user doesn't have yet); withTenant() only ever binds organisationId, leaving
