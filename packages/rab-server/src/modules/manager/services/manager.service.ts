@@ -1021,8 +1021,9 @@ export class ManagerService {
    *     per-user grant, not revoked — the same scope delete / assign use) reads a manager of ANY active workspace of the
    *     organisation, bound to a workspace of their own or not: the target's workspace is confirmed by
    *     `core.admin_workspace_in_org` (404 otherwise) and read in that workspace's context, the re-binding
-   *     VenueManagerService's org-admin flow uses. A caller whose `manager.manage` comes ONLY from a custom role of their
-   *     own workspace keeps the strict rule: a manager of another workspace → 404 (no existence oracle).
+   *     VenueManagerService's org-admin flow uses. A caller whose `manager.manage` came ONLY from a custom role of their
+   *     own workspace would keep the strict rule (another workspace → 404); the database refuses manager.manage on a
+   *     workspace-member role today, so that branch is defence in depth. A caller without manager.manage → 403 above.
    *   - A profile with no workspace has no venue link (manager_venue requires one): `[]` for a workspace-less
    *     organisation administrator; 404 for a workspace-bound caller (owner decision 0d: it is not a manager of the
    *     caller's workspace).
