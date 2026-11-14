@@ -4,15 +4,22 @@ import { INestApplication } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
 import { randomUUID } from 'node:crypto';
 import request from 'supertest';
-import { DataSource } from 'typeorm';
+import { DataSource, EntityManager } from 'typeorm';
 
 import { AppModule } from '../../app.module';
+import { JobRole } from '../../modules/scheduling/entities/job-role.entity';
+import { Shift } from '../../modules/scheduling/entities/shift.entity';
+import { ShiftAssignment } from '../../modules/scheduling/entities/shift-assignment.entity';
+import { toTstzRange } from '../../modules/scheduling/utils/tstzrange';
+import { ManagerService } from '../../modules/manager/services/manager.service';
+import { UserDeletionService } from '../../engine/core-modules/user-deletion/user-deletion.service';
 import { PasswordHashingService } from '../../engine/core-modules/auth/services/password-hashing.service';
 import { EnvironmentService } from '../../engine/core-modules/environment/environment.service';
 import { TenantContextService } from '../../engine/core-modules/tenant/tenant-context.service';
 import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-pipe';
 import { integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
 import { createAdminDataSource } from './helpers/admin-datasource';
+import { businessSchema } from './helpers/hws-fixtures';
 import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
 
 /**
@@ -35,6 +42,8 @@ describeIfDb('HWS C1: org-level paths over workspace tables (integration)', () =
   let tenantContext: TenantContextService;
   let factory: TestIdentityFactory;
   let hwsOn: boolean;
+  let managerService: ManagerService;
+  let userDeletion: UserDeletionService;
 
   // One organisation: a workspace-less CEO, two Internal Managers with their own workspaces (A, B), Venue Managers in B.
   let orgId: string;
@@ -46,7 +55,7 @@ describeIfDb('HWS C1: org-level paths over workspace tables (integration)', () =
   let staleCoreVenue: string;
   let otherOrgMgr: TestIdentity;
 
-  const MANAGER_PERMS = [PermissionFlag.MANAGER_MANAGE, PermissionFlag.STAFF_VIEW, PermissionFlag.STAFF_CREATE];
+  const MANAGER_PERMS = [PermissionFlag.MANAGER_MANAGE, PermissionFlag.STAFF_VIEW, PermissionFlag.STAFF_CREATE, PermissionFlag.STAFF_DEACTIVATE];
 
   /** A venue in `owner`'s workspace, written through the tenant context (its schema with HWS on, the core copy with it off). */
   async function venueInWorkspace(owner: TestIdentity, createdBy: string, name: string): Promise<string> {
@@ -68,6 +77,38 @@ describeIfDb('HWS C1: org-level paths over workspace tables (integration)', () =
     return row!.id;
   }
 
+  /** A staff profile for `userId` in `owner`'s workspace with a confirmed shift assignment (operational history). */
+  async function staffHistoryInWorkspace(owner: TestIdentity, userId: string, venueId: string): Promise<string> {
+    return tenantContext.runInTenantContext({ organisationId: orgId, workspaceId: owner.workspaceId, userId: owner.userId, role: '' }, async (m) => {
+      const [profile] = await m.query<Array<{ id: string }>>(
+        `INSERT INTO staff_profile (organisation_id, user_id, staff_ref, created_by, workspace_id) VALUES ($1, $2, $3, $4, $5) RETURNING id`,
+        [orgId, userId, `STF-${randomUUID().slice(0, 8)}`, owner.userId, owner.workspaceId],
+      );
+      await assignShift(m, owner, venueId, profile!.id);
+      return profile!.id;
+    });
+  }
+
+  /** A confirmed shift assignment for `staffProfileId` in `owner`'s workspace (through the caller's tenant transaction). */
+  async function assignShift(m: EntityManager, owner: TestIdentity, venueId: string, staffProfileId: string): Promise<void> {
+    const workspaceId = owner.workspaceId!;
+    const jobRole = await m.save(JobRole, { organisationId: orgId, name: `C1 Role ${randomUUID().slice(0, 6)}`, defaultRatePence: 1500, createdBy: owner.userId, workspaceId });
+    const startsAt = new Date(Date.now() + 48 * 3600 * 1000);
+    const endsAt = new Date(startsAt.getTime() + 8 * 3600 * 1000);
+    const shift = await m.save(Shift, {
+      organisationId: orgId, venueId, jobRoleId: jobRole.id, startsAt, endsAt, breakMinutes: 0, requiredCount: 1, payRatePence: 1500,
+      status: 'open', createdBy: owner.userId, workspaceId,
+    });
+    await m.save(ShiftAssignment, {
+      organisationId: orgId, shiftId: shift.id, staffProfileId, status: 'confirmed', payRateSnapshotPence: 1500,
+      assignedBy: owner.userId, confirmedAt: new Date(), period: toTstzRange(startsAt, endsAt), workspaceId,
+    });
+  }
+
+  /** The row as the superuser fixture connection sees it, wherever this mode keeps it (workspace schema with HWS on). */
+  const staffProfileExists = async (workspaceId: string, profileId: string) =>
+    ((await adminDataSource.query(`SELECT 1 FROM "${businessSchema(workspaceId)}".staff_profile WHERE id = $1`, [profileId])) as unknown[]).length === 1;
+
   const userExists = async (userId: string) =>
     ((await adminDataSource.query(`SELECT 1 FROM core."user" WHERE id = $1`, [userId])) as unknown[]).length === 1;
 
@@ -77,6 +118,8 @@ describeIfDb('HWS C1: org-level paths over workspace tables (integration)', () =
     await app.init();
     dataSource = moduleRef.get(DataSource);
     tenantContext = moduleRef.get(TenantContextService);
+    managerService = moduleRef.get(ManagerService);
+    userDeletion = moduleRef.get(UserDeletionService);
     hwsOn = moduleRef.get(EnvironmentService).get('HWS_RUNTIME_ENABLED') === true;
     adminDataSource = createAdminDataSource();
     await adminDataSource.initialize();
@@ -139,6 +182,53 @@ describeIfDb('HWS C1: org-level paths over workspace tables (integration)', () =
       const res = await venuesOf(ceo, randomUUID());
       expect(res.status).toBe(404);
     });
+
+    it('ABUSE (layer 2, review L4): the SERVICE refuses a caller without manager.manage (403), no guard involved', async () => {
+      // Another organisation, so its canonical "manager" role can carry a different permission set.
+      const noPermOrg = await factory.createOrganisation('hws-c1-noperm');
+      const noPerm = await factory.createInternalManager(noPermOrg, { permissions: [PermissionFlag.STAFF_VIEW], label: 'c1-noperm' });
+      await expect(
+        managerService.listVenues({ organisationId: noPermOrg.id, workspaceId: noPerm.workspaceId, userId: noPerm.userId, role: '' }, vmB.profileId!),
+      ).rejects.toMatchObject({ status: 403 });
+      // Control: the same direct call with manager.manage succeeds.
+      const venues = await managerService.listVenues({ organisationId: orgId, workspaceId: mgrB.workspaceId, userId: mgrB.userId, role: '' }, vmB.profileId!);
+      expect(venues.map((v) => v.id)).toContain(venueB);
+    });
+  });
+
+  describe('StaffService.deleteUser with HWS routing (review L4)', () => {
+    const deleteStaff = async (caller: TestIdentity, profileId: string) =>
+      request(app.getHttpServer())
+        .delete(`/rest/v1/staff/${profileId}`)
+        .set('Authorization', `Bearer ${await factory.login(caller)}`)
+        .send({ currentPassword: caller.password });
+
+    it('the creator deletes a Staff member with no history (204); the profile is gone from the workspace schema', async () => {
+      const staff = await factory.createStaff({ id: orgId }, { owner: mgrB, label: 'c1-staff-clean' });
+      const res = await deleteStaff(mgrB, staff.profileId!);
+      expect(res.status).toBe(204);
+      expect(await userExists(staff.userId)).toBe(false);
+      expect(await staffProfileExists(mgrB.workspaceId!, staff.profileId!)).toBe(false);
+    });
+
+    it('ABUSE: a Staff member with a shift assignment in the workspace schema → 409, nothing deleted', async () => {
+      const staff = await factory.createStaff({ id: orgId }, { owner: mgrB, label: 'c1-staff-history' });
+      await tenantContext.runInTenantContext({ organisationId: orgId, workspaceId: mgrB.workspaceId, userId: mgrB.userId, role: '' }, (m) =>
+        assignShift(m, mgrB, venueB, staff.profileId!),
+      );
+      const res = await deleteStaff(mgrB, staff.profileId!);
+      expect(res.status).toBe(409);
+      expect(res.body.code).toBe('USER_HAS_PROTECTED_HISTORY');
+      expect(await userExists(staff.userId)).toBe(true);
+      expect(await staffProfileExists(mgrB.workspaceId!, staff.profileId!)).toBe(true);
+    });
+
+    it('ABUSE: a manager of ANOTHER workspace cannot delete B’s Staff (404: the profile is not in its scope)', async () => {
+      const staff = await factory.createStaff({ id: orgId }, { owner: mgrB, label: 'c1-staff-other' });
+      const res = await deleteStaff(mgrA, staff.profileId!);
+      expect(res.status).toBe(404);
+      expect(await userExists(staff.userId)).toBe(true);
+    });
   });
 
   describe('4.6 DELETE /rest/v1/managers/:id refuses while protected history exists in ANY schema', () => {
@@ -174,9 +264,9 @@ describeIfDb('HWS C1: org-level paths over workspace tables (integration)', () =
       await venueInWorkspace(mgrB, target.userId, 'C1 venue (A caller)');
 
       const res = await deleteManager(mgrA, target.profileId!);
-      // 409 when A can see the profile (organisation-wide manager.manage), 404 when RLS hides it: never a deletion.
-      expect([404, 409]).toContain(res.status);
-      if (res.status === 409) expect(res.body.code).toBe('USER_HAS_PROTECTED_HISTORY');
+      // A holds organisation-wide manager.manage, so it sees the profile; the history in B's schema is found → 409.
+      expect(res.status).toBe(409);
+      expect(res.body.code).toBe('USER_HAS_PROTECTED_HISTORY');
       expect(await userExists(target.userId)).toBe(true);
     });
 
@@ -191,10 +281,56 @@ describeIfDb('HWS C1: org-level paths over workspace tables (integration)', () =
       try {
         const res = await deleteManager(ceo, target.profileId!);
         expect(res.status).toBe(409);
-        expect(res.body.code).toBe('USER_HAS_PROTECTED_HISTORY');
+        // Review L2: its own code (an operator problem), not the misleading USER_HAS_PROTECTED_HISTORY; no workspace id leaks.
+        expect(res.body.code).toBe('USER_DELETION_UNVERIFIABLE');
+        expect(JSON.stringify(res.body)).not.toContain(mgrC.workspaceId!);
         expect(await userExists(target.userId)).toBe(true);
       } finally {
         await adminDataSource.query(`UPDATE core.workspace_schema_registry SET status = $2 WHERE workspace_id = $1`, [mgrC.workspaceId, before]);
+      }
+    });
+
+    it('ABUSE (review L1): the CEO cannot see a staff profile in workspace B; its shift assignment would cascade away → 409, profile and history stay', async () => {
+      const target = await factory.createVenueManager({ id: orgId }, { owner: mgrB, label: 'c1-del-hidden-staff' });
+      const hiddenProfile = await staffHistoryInWorkspace(mgrB, target.userId, venueB);
+
+      const res = await deleteManager(ceo, target.profileId!);
+      expect(res.status).toBe(409);
+      expect(res.body.code).toBe('USER_HAS_PROTECTED_HISTORY');
+      expect(JSON.stringify(res.body)).not.toMatch(/foreign key|violates|shift_assignment/i);
+      expect(await userExists(target.userId)).toBe(true);
+      expect(await staffProfileExists(mgrB.workspaceId!, hiddenProfile)).toBe(true);
+      const assignments = await adminDataSource.query(`SELECT 1 FROM "${businessSchema(mgrB.workspaceId!)}".shift_assignment WHERE staff_profile_id = $1`, [hiddenProfile]);
+      expect(assignments).toHaveLength(1);
+    });
+
+    it('ABUSE (review L1): a note ABOUT the target (user_note.subject_user_id cascades) is protected history → 409', async () => {
+      const target = await factory.createVenueManager({ id: orgId }, { owner: mgrB, label: 'c1-del-note' });
+      await tenantContext.runInTenantContext({ organisationId: orgId, workspaceId: mgrB.workspaceId, userId: mgrB.userId, role: '' }, async (m) => {
+        if (hwsOn) {
+          await m.query(`INSERT INTO user_note (organisation_id, subject_user_id, author_user_id, body, workspace_id) VALUES ($1, $2, $3, 'C1 note', $4)`, [orgId, target.userId, mgrB.userId, mgrB.workspaceId]);
+        } else {
+          await m.query(`INSERT INTO user_note (organisation_id, subject_user_id, author_user_id, body) VALUES ($1, $2, $3, 'C1 note')`, [orgId, target.userId, mgrB.userId]);
+        }
+      });
+
+      const res = await deleteManager(ceo, target.profileId!);
+      expect(res.status).toBe(409);
+      expect(res.body.code).toBe('USER_HAS_PROTECTED_HISTORY');
+      expect(await userExists(target.userId)).toBe(true);
+    });
+
+    it('assertCanDelete restores rab.workspace_id and search_path to their values on entry (review L4)', async () => {
+      const target = await factory.createVenueManager({ id: orgId }, { owner: mgrB, label: 'c1-del-gucs' });
+      for (const caller of [ceo, mgrB]) {
+        const ctx = { organisationId: orgId, workspaceId: caller.workspaceId, userId: caller.userId, role: '' };
+        await tenantContext.runInTenantContext(ctx, async (m) => {
+          const read = () => m.query<Array<{ ws: string | null; sp: string }>>(`SELECT current_setting('rab.workspace_id', true) AS ws, current_setting('search_path') AS sp`);
+          const [before] = await read();
+          await userDeletion.assertCanDelete(m, ctx, target.userId);
+          const [after] = await read();
+          expect(after).toEqual(before);
+        });
       }
     });
 
