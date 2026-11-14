@@ -217,7 +217,7 @@ describeIfDb('report worker multi-instance concurrency (integration)', () => {
   it('PRE-SHIFT: a shift that has already ENDED is never given a "pre-shift" report', async () => {
     const f = await seedFixture();
     await tenantContext.runInTenantContext({ organisationId: f.organisation.id, workspaceId: f.workspaceId, userId: f.owner.userId, role: '' }, async (m) => {
-      await m.query(`UPDATE core.shift SET starts_at = now() - interval '10 hours', ends_at = now() - interval '2 hours' WHERE id = $1`, [f.shiftIds[0]]);
+      await m.query(`UPDATE shift SET starts_at = now() - interval '10 hours', ends_at = now() - interval '2 hours' WHERE id = $1`, [f.shiftIds[0]]);
     });
     const result = await runScheduler(f.organisation.id);
     expect(result.generated).toBe(0);
@@ -244,13 +244,13 @@ describeIfDb('report worker multi-instance concurrency (integration)', () => {
     expect((await reports.getReport(ctx,shiftId)).ready).toBe(false);
     // finalise() refuses before the start (2026-10-18), so put the shift in progress first, like the real flow.
     await tenantContext.runInTenantContext(ctx,async m=>{
-      await m.query(`UPDATE core.shift SET starts_at=now()-interval '3 hours', ends_at=now()-interval '5 minutes' WHERE id=$1`,[shiftId]);
-      await m.query(`UPDATE core.shift_assignment SET period=tstzrange(now()-interval '3 hours', now()-interval '5 minutes','[)') WHERE shift_id=$1`,[shiftId]);
+      await m.query(`UPDATE shift SET starts_at=now()-interval '3 hours', ends_at=now()-interval '5 minutes' WHERE id=$1`,[shiftId]);
+      await m.query(`UPDATE shift_assignment SET period=tstzrange(now()-interval '3 hours', now()-interval '5 minutes','[)') WHERE shift_id=$1`,[shiftId]);
     });
     await expect(reports.finalise(ctx,shiftId)).rejects.toThrow(/clock out/);
     await tenantContext.runInTenantContext(ctx,async m=>{
-      const [sa]=await m.query('SELECT * FROM core.shift_assignment WHERE shift_id=$1',[shiftId]);
-      await m.query(`INSERT INTO core.attendance (organisation_id,workspace_id,shift_id,shift_assignment_id,staff_profile_id,status,clock_in_at,clock_out_at,break_minutes,worked_minutes,earned_pence,clock_out_method)
+      const [sa]=await m.query('SELECT * FROM shift_assignment WHERE shift_id=$1',[shiftId]);
+      await m.query(`INSERT INTO attendance (organisation_id,workspace_id,shift_id,shift_assignment_id,staff_profile_id,status,clock_in_at,clock_out_at,break_minutes,worked_minutes,earned_pence,clock_out_method)
         VALUES ($1,$2,$3,$4,$5,'clocked_out',now()-interval '2 hours',now(),15,105,2625,'auto_geofence')`,[f.organisation.id,f.workspaceId,shiftId,sa.id,sa.staff_profile_id]);
     });
     const ready=await reports.getReport(ctx,shiftId);expect(ready.ready).toBe(true);expect(ready.staff[0]).toMatchObject({workedMinutes:105,breakMinutes:15,clockOutMethod:'auto_geofence',avatarFileId:null});
@@ -366,8 +366,8 @@ describeIfDb('report worker multi-instance concurrency (integration)', () => {
   it('PRE-01: discovery spans tenants but scans are read-only rab_app and no scoped or unscoped business access leaks', async () => {
     const a = await seedFixture(); const b = await seedFixture();
     for (const f of [a,b]) await tenantContext.runInTenantContext({organisationId:f.organisation.id,workspaceId:f.workspaceId,userId:f.owner.userId,role:''},async manager=>{
-      const [assignment]=await manager.query('SELECT id,staff_profile_id FROM core.shift_assignment WHERE shift_id=$1',[f.shiftIds[0]]);
-      await manager.query(`INSERT INTO core.attendance (organisation_id,workspace_id,shift_id,shift_assignment_id,staff_profile_id,status,clock_in_at,clock_out_at,break_minutes,worked_minutes,earned_pence)
+      const [assignment]=await manager.query('SELECT id,staff_profile_id FROM shift_assignment WHERE shift_id=$1',[f.shiftIds[0]]);
+      await manager.query(`INSERT INTO attendance (organisation_id,workspace_id,shift_id,shift_assignment_id,staff_profile_id,status,clock_in_at,clock_out_at,break_minutes,worked_minutes,earned_pence)
         VALUES ($1,$2,$3,$4,$5,'clocked_out',now()-interval '2 hours',now(),15,105,2625)`,
         [f.organisation.id,f.workspaceId,f.shiftIds[0],assignment.id,assignment.staff_profile_id]);
     });
@@ -377,11 +377,11 @@ describeIfDb('report worker multi-instance concurrency (integration)', () => {
       const [role] = await manager.query('SELECT current_user AS name');
       // BC-02 (owner-login architecture): the one runtime login is crewflow_owner; crewflow_app / crewflow_worker are schema roles.
       expect(role.name).toBe('crewflow_owner');
-      return manager.query('SELECT id, organisation_id, workspace_id FROM core.shift WHERE id=ANY($1::uuid[])', [ids]);
+      return manager.query('SELECT id, organisation_id, workspace_id FROM shift WHERE id=ANY($1::uuid[])', [ids]);
     });
     expect(candidates.map((r: any) => r.id).sort()).toEqual(ids.sort());
     await expect(discoverInWorkspaces(adminDataSource, tenantContext, async manager => {
-      await manager.query('UPDATE core.shift SET updated_at=updated_at WHERE false'); return [];
+      await manager.query('UPDATE shift SET updated_at=updated_at WHERE false'); return [];
     }, a.organisation.id)).rejects.toThrow(/read-only/);
     await Promise.all([runFinal(a.organisation.id), runFinal(b.organisation.id)]);
     for (const f of [a,b]) {
@@ -406,17 +406,17 @@ describeIfDb('report worker multi-instance concurrency (integration)', () => {
     const f=await seedFixture(); const shiftId=f.shiftIds[0];
     const ctx={organisationId:f.organisation.id,workspaceId:f.workspaceId,userId:f.owner.userId,role:''};
     await tenantContext.runInTenantContext(ctx,async manager=>{
-      await manager.query(`UPDATE core.shift_assignment SET status='no_show' WHERE shift_id=$1`,[shiftId]);
+      await manager.query(`UPDATE shift_assignment SET status='no_show' WHERE shift_id=$1`,[shiftId]);
     });
     const original=storage.putObject.bind(storage);
     const spy=jest.spyOn(storage,'putObject').mockImplementation(async params=>{
       const uploaded=await original(params);
-      await tenantContext.runInTenantContext(ctx,manager=>manager.query(`UPDATE core.shift SET status='cancelled' WHERE id=$1`,[shiftId]));
+      await tenantContext.runInTenantContext(ctx,manager=>manager.query(`UPDATE shift SET status='cancelled' WHERE id=$1`,[shiftId]));
       return uploaded;
     });
     try { expect((await runFinal(f.organisation.id)).failed).toBe(0); } finally { spy.mockRestore(); }
     await tenantContext.runInTenantContext(ctx,async manager=>{
-      const [report]=await manager.query('SELECT original_file_id FROM core.shift_report WHERE shift_id=$1',[shiftId]);
+      const [report]=await manager.query('SELECT original_file_id FROM shift_report WHERE shift_id=$1',[shiftId]);
       expect(report.original_file_id).toBeNull();
       expect(await manager.query('SELECT id FROM core.stored_file')).toEqual([]);
       expect(await manager.query('SELECT id FROM core.worker_event')).toEqual([]);

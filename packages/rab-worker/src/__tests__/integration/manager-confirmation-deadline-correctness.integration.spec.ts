@@ -43,6 +43,7 @@ import { runShiftMonitorCycle } from '../../queues/rab-shifts/shift-monitor.job'
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
 import { integrationTestDatabaseReady } from '@rab/server/database/typeorm/core/integration-test-database-gate';
+import { businessTable } from './helpers/hws-fixtures';
 
 /**
  * Owner rule 2026-11-06 — NO automatic confirmation; an unconfirmed STAFF_ACCEPTED offer is withdrawn at its approval
@@ -166,18 +167,18 @@ describeIfDb('manager confirmation deadline correctness (integration)', () => {
   }
 
   async function placeWindow(fx: Fixture, offer: JobOffer, start: Date, end: Date): Promise<Date> {
-    await asA(fx, `UPDATE core.shift_assignment SET period = tstzrange($1, $2, '[)') WHERE id = $3`, [start, end, offer.shiftAssignmentId]);
+    await asA(fx, `UPDATE shift_assignment SET period = tstzrange($1, $2, '[)') WHERE id = $3`, [start, end, offer.shiftAssignmentId]);
     await asA(
       fx,
-      `UPDATE core.shift s SET starts_at = $1, ends_at = $2, default_starts_at = $1, default_ends_at = $2
-         FROM core.shift_assignment sa WHERE sa.id = $3 AND s.id = sa.shift_id`,
+      `UPDATE shift s SET starts_at = $1, ends_at = $2, default_starts_at = $1, default_ends_at = $2
+         FROM shift_assignment sa WHERE sa.id = $3 AND s.id = sa.shift_id`,
       [start, end, offer.shiftAssignmentId],
     );
     const [{ deadline_at }] = await asA<{ deadline_at: Date }>(
       fx,
       // sql-injection-reviewed: code-constant SQL fragment from a helper called with literal aliases; values are bound $n parameters.
-      `SELECT ${confirmationDeadlineSql('o', 'sa', 's')} AS deadline_at FROM core.job_offer o
-         JOIN core.shift_assignment sa ON sa.id = o.shift_assignment_id JOIN core.shift s ON s.id = sa.shift_id WHERE o.id = $1`,
+      `SELECT ${confirmationDeadlineSql('o', 'sa', 's')} AS deadline_at FROM job_offer o
+         JOIN shift_assignment sa ON sa.id = o.shift_assignment_id JOIN shift s ON s.id = sa.shift_id WHERE o.id = $1`,
       [offer.id],
     );
     await adminDataSource.manager.query(
@@ -272,7 +273,7 @@ describeIfDb('manager confirmation deadline correctness (integration)', () => {
         const shift = await seedOpenShift(fx);
         const offer = await sendAndAccept(fx, shift, staff);
         // FIXTURE: give it the kind (a real replacement send needs a vacancy-freeing no-show; the kind is what the rule reads).
-        await asA(fx, `UPDATE core.job_offer SET offer_kind = $1 WHERE id = $2`, [kind, offer.id]);
+        await asA(fx, `UPDATE job_offer SET offer_kind = $1 WHERE id = $2`, [kind, offer.id]);
         const now = await dbNow();
         await placeWindow(fx, offer, new Date(now.getTime() - 4 * HOUR), new Date(now.getTime() - 60_000)); // window ended 1 min ago
         await runDeadlineCycle();
@@ -481,7 +482,7 @@ describeIfDb('manager confirmation deadline correctness (integration)', () => {
       );
       const bulk = await offerService.sendBulk(ctxOf(fx.managerA), shift.id, { staffProfileIds: [staff.profileId!] } as never);
       expect(bulk.results).toEqual([{ staffProfileId: staff.profileId, ok: false, message: CONFIRMATION_DEADLINE_MESSAGES.SEND }]);
-      const offers = await asA(fx, `SELECT o.id FROM core.job_offer o JOIN core.shift_assignment sa ON sa.id = o.shift_assignment_id WHERE sa.shift_id = $1`, [shift.id]);
+      const offers = await asA(fx, `SELECT o.id FROM job_offer o JOIN shift_assignment sa ON sa.id = o.shift_assignment_id WHERE sa.shift_id = $1`, [shift.id]);
       expect(offers).toHaveLength(0);
     });
 
@@ -705,7 +706,7 @@ describeIfDb('manager confirmation deadline correctness (integration)', () => {
       const fx = await seedFixture('dlReplNotify');
       const staff = await factory.createStaff(fx.organisation, { owner: fx.managerA });
       const offer = await sendAndAccept(fx, await seedOpenShift(fx), staff);
-      await asA(fx, `UPDATE core.job_offer SET offer_kind = 'replacement' WHERE id = $1`, [offer.id]);
+      await asA(fx, `UPDATE job_offer SET offer_kind = 'replacement' WHERE id = $1`, [offer.id]);
       const now = await dbNow();
       await placeWindow(fx, offer, new Date(now.getTime() - 3 * HOUR), new Date(now.getTime() - 2 * 60_000));
       await runDeadlineCycle();
@@ -740,9 +741,9 @@ describeIfDb('manager confirmation deadline correctness (integration)', () => {
       );
       expect(reminders).toHaveLength(0);
       await expect(attendanceService.checkIn(staffCtxOf(fx, staff), { shiftId: shift.id } as never)).rejects.toBeInstanceOf(ConflictException);
-      const attendance = await asA(fx, `SELECT id FROM core.attendance WHERE shift_assignment_id = $1`, [offer.shiftAssignmentId]);
+      const attendance = await asA(fx, `SELECT id FROM attendance WHERE shift_assignment_id = $1`, [offer.shiftAssignmentId]);
       expect(attendance).toHaveLength(0);
-      const payroll = await asA(fx, `SELECT pr.id FROM core.payroll_record pr JOIN core.attendance a ON a.id = pr.attendance_id WHERE a.shift_assignment_id = $1`, [offer.shiftAssignmentId]);
+      const payroll = await asA(fx, `SELECT pr.id FROM payroll_record pr JOIN attendance a ON a.id = pr.attendance_id WHERE a.shift_assignment_id = $1`, [offer.shiftAssignmentId]);
       expect(payroll).toHaveLength(0);
     });
 
@@ -865,11 +866,15 @@ describeIfDb('manager confirmation deadline correctness (integration)', () => {
   // ===================================================================
   it('Z1 (T-Z1): zero manager_confirmed offers without a human confirmed_by in every organisation this suite created', async () => {
     for (const organisationId of organisations) {
-      const [{ n }] = await adminDataSource.manager.query(
-        `SELECT count(*)::int AS n FROM core.job_offer WHERE organisation_id = $1 AND status = 'manager_confirmed' AND (confirmed_by IS NULL) AND manager_confirmed_at >= $2`,
-        [organisationId, suiteStart],
-      );
-      expect(n).toBe(0);
+      // Part C1: every schema that can hold this organisation's offers — each of its workspaces' (HWS on) or the core copy.
+      const workspaces = await adminDataSource.manager.query<Array<{ id: string }>>(`SELECT id FROM core.manager_workspace WHERE organisation_id = $1`, [organisationId]);
+      for (const { id } of workspaces) {
+        const [{ n }] = await adminDataSource.manager.query(
+          `SELECT count(*)::int AS n FROM ${businessTable(id, 'job_offer')} WHERE organisation_id = $1 AND status = 'manager_confirmed' AND (confirmed_by IS NULL) AND manager_confirmed_at >= $2`,
+          [organisationId, suiteStart],
+        );
+        expect(n).toBe(0);
+      }
     }
   });
 });
