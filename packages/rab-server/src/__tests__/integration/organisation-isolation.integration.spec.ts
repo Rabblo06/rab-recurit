@@ -15,6 +15,7 @@ import { createAdminDataSource } from './helpers/admin-datasource';
 import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
 import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-pipe';
 import { integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
+import { businessTableOf, siblingTable } from './helpers/hws-fixtures';
 
 /**
  * Organisation isolation for Initial Manager onboarding (owner policy, 2026-10-15). Supersedes P2.9C's "a Platform Admin may
@@ -186,7 +187,7 @@ describeIfDb('organisation isolation: Initial Manager onboarding, login and tena
       }
       const after = await adminDataSource.manager.query(`SELECT first_name FROM core."user" WHERE id = $1`, [manager2.userId]);
       expect(after).toEqual(before);
-      const [venue] = await adminDataSource.manager.query(`SELECT name FROM core.venue WHERE id = $1`, [venue2Id]);
+      const [venue] = await adminDataSource.manager.query(`SELECT name FROM ${await businessTableOf(adminDataSource.manager, 'venue', venue2Id)} WHERE id = $1`, [venue2Id]);
       expect(venue.name).not.toBe('Hijacked');
     });
 

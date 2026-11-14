@@ -20,6 +20,7 @@ import { createAdminDataSource } from './helpers/admin-datasource';
 import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
 import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-pipe';
 import { integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
+import { businessTableOf, siblingTable } from './helpers/hws-fixtures';
 
 /**
  * Phase 5a domain regressions, in the layer-2 hardening style (LAYER2_HARDENING_2026-10-25): every call goes to the
@@ -74,7 +75,7 @@ describeIfDb('Phase 5a domain: updateDraft, Tx extractions and ManagerService.ad
     return { startsAt: start.toISOString(), endsAt: new Date(start.getTime() + hours * 3_600_000).toISOString() };
   };
   const shiftRow = async (id: string) =>
-    (await admin.query(`SELECT status, required_count, notes, break_minutes, pay_rate_pence, charge_rate_pence, starts_at, ends_at FROM core.shift WHERE id = $1`, [id]))[0];
+    (await admin.query(`SELECT status, required_count, notes, break_minutes, pay_rate_pence, charge_rate_pence, starts_at, ends_at FROM ${await businessTableOf(admin, 'shift', id)} WHERE id = $1`, [id]))[0];
   const audit = (action: string, entityId: string) =>
     admin.query(`SELECT actor_user_id, target_user_id, entity_type, metadata FROM core.audit_log WHERE organisation_id = $1 AND action = $2 AND entity_id = $3`, [orgId, action, entityId]) as Promise<
       Array<{ actor_user_id: string; target_user_id: string | null; entity_type: string; metadata: Record<string, unknown> }>
