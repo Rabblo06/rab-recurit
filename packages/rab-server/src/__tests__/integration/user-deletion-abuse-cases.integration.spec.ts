@@ -21,7 +21,7 @@ import { TenantContextService } from '../../engine/core-modules/tenant/tenant-co
 import { ThrottlerRedisClientProvider } from '../../engine/core-modules/throttler/throttler-redis-client.provider';
 import { WORKER_HEARTBEAT_KEY } from '../../engine/worker-shared/heartbeat.constants';
 import { createAdminDataSource } from './helpers/admin-datasource';
-import { TestIdentityFactory } from './helpers/test-identities';
+import { provisionFixtureWorkspace, TestIdentityFactory } from './helpers/test-identities';
 import { generateFixturePassword } from './helpers/fixture-password';
 import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-pipe';
 import { integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
@@ -135,6 +135,8 @@ describeIfDb('user deletion abuse cases (integration)', () => {
         status: 'active',
       });
       workspaceId = workspace.id;
+      // Part C1: READY schema (server path) so workspace-routed fixture writes and reads work with HWS on.
+      await provisionFixtureWorkspace(manager, workspaceId);
       // Must bind rab.workspace_id to the real workspace before this insert — manager_profile_tenant's
       // WITH CHECK needs workspace_id = current_workspace() (or a manager.manage permission this
       // brand-new user doesn't have yet); withTenant() only ever binds organisationId, leaving

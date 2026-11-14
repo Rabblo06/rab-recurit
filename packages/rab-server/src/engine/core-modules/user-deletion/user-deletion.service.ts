@@ -7,6 +7,7 @@ import { AuditAction, AuditService } from '../audit/audit.service';
 import { PlatformAdminService } from '../platform-admin/platform-admin.service';
 import { AuthContext } from '../tenant/auth-context.interface';
 import { RefreshTokenService } from '../auth/token/services/refresh-token.service';
+import { SchemaResolverService, WorkspaceRoutingError, workspaceSchemaName } from '../tenant/schema-resolver.service';
 
 /**
  * Codes the frontend maps to a specific, safe message — never the raw FK
@@ -52,6 +53,7 @@ export class UserDeletionService {
     private readonly auditService: AuditService,
     private readonly refreshTokenService: RefreshTokenService,
     private readonly platformAdmin: PlatformAdminService,
+    private readonly schemaResolver: SchemaResolverService,
   ) {}
 
   /**
@@ -86,12 +88,93 @@ export class UserDeletionService {
       throw new UserDeletionBlockedException('MANAGER_OWNS_WORKSPACE', 'This manager owns a private Workspace and cannot be deleted. Suspend the account instead.');
     }
 
-    const blockingReason = await this.findProtectedHistory(manager, targetUserId);
+    const blockingReason = await this.findProtectedHistoryInEverySchema(manager, ctx, targetUserId);
     if (blockingReason) {
       throw new UserDeletionBlockedException(
         'USER_HAS_PROTECTED_HISTORY',
         'This account has historical workforce records and cannot be permanently deleted. Suspend the account instead.',
       );
+    }
+  }
+
+  /**
+   * Part C1 (HWS-AUDIT.md §0.1, BROKEN 4.6): the protected-history check in EVERY schema the target can have rows in, not
+   * only the one the caller's transaction happens to be bound to. With one schema per workspace, a workspace-less CEO's
+   * transaction reads the `core` copies and a workspace-bound caller reads only its own schema, so history in another
+   * workspace's schema was invisible — and the deletion then cascaded (`staff_profile.user_id` ON DELETE CASCADE and
+   * everything hanging off it), set attribution to NULL (`job_offer.created_by` ON DELETE SET NULL) or failed on a raw FK
+   * error instead of the structured 409.
+   *
+   * Order, all inside the caller's own transaction (one snapshot per statement, no second connection, never nested):
+   *   1. the scope the transaction is already bound to (unchanged behaviour);
+   *   2. for every candidate workspace W of the caller's organisation (below): rab.workspace_id bound to W so the
+   *      workspace-tenant RLS predicates (`workspace_id = core.current_workspace()`) can match, then
+   *        a. the `core` copies (search_path 'core': the authoritative data with HWS off, the pre-cutover copies with it on —
+   *           a hard delete would cascade into those too), and
+   *        b. W's own schema when its registry row resolves READY (search_path = the resolved, validated name;
+   *           SchemaResolverService is the only source of that name). No registry row → no schema, nothing to check. A
+   *           registry row that is not READY (or any other routing refusal) while the schema exists in the catalogue → the
+   *           delete is refused ('workspace_schema_unverifiable'): data in a schema that cannot be checked is never deleted
+   *           blind (fail closed).
+   *   3. rab.workspace_id and search_path restored to their values on entry (only on the success path; any throw aborts
+   *      the transaction anyway).
+   * Candidate workspaces: every workspace of the organisation the caller can see under RLS (an organisation-wide
+   * `manager.manage` holder — the ManagerService.deleteUser route — sees all of them), plus the target's own workspace(s)
+   * from `manager_profile` and `workspace_membership`, plus the caller's bound workspace. Same-organisation is guaranteed:
+   * the lookup is pinned to ctx.organisationId and every row carries a composite same-organisation key.
+   * RESIDUAL (not changed here, see C1-STATUS.md): RLS still decides what a check can see inside a schema — a caller who is
+   * not a manager of W cannot see W's `staff_profile` rows, and `payroll_record` is visible only to a payroll manager; the
+   * no-ON-DELETE foreign keys still refuse those deletes at the database layer, a staff profile's CASCADE does not.
+   */
+  private async findProtectedHistoryInEverySchema(manager: EntityManager, ctx: AuthContext, userId: string): Promise<string | null> {
+    const here = await this.findProtectedHistory(manager, userId);
+    if (here) return here;
+    if (!ctx.organisationId) return null;
+
+    const [entry] = await manager.query<Array<{ ws: string | null; sp: string }>>(
+      `SELECT current_setting('rab.workspace_id', true) AS ws, current_setting('search_path') AS sp`,
+    );
+    const candidates = await manager.query<Array<{ workspace_id: string }>>(
+      `SELECT id AS workspace_id FROM core.manager_workspace WHERE organisation_id = $1
+       UNION SELECT workspace_id FROM core.manager_profile WHERE organisation_id = $1 AND user_id = $2 AND workspace_id IS NOT NULL
+       UNION SELECT workspace_id FROM core.workspace_membership WHERE organisation_id = $1 AND user_id = $2 AND workspace_id IS NOT NULL
+       ORDER BY 1`,
+      [ctx.organisationId, userId],
+    );
+    const workspaceIds = new Set(candidates.map((row) => row.workspace_id));
+    if (ctx.workspaceId) workspaceIds.add(ctx.workspaceId);
+
+    let found: string | null = null;
+    for (const workspaceId of workspaceIds) {
+      await manager.query(`SELECT set_config('rab.workspace_id', $1, true), set_config('search_path', 'core', true)`, [workspaceId]);
+      found = await this.findProtectedHistory(manager, userId);
+      if (found) break;
+      const schema = await this.checkableWorkspaceSchema(manager, workspaceId);
+      if (schema === 'unverifiable') {
+        found = 'workspace_schema_unverifiable';
+        break;
+      }
+      if (schema) {
+        await manager.query(`SELECT set_config('search_path', $1, true)`, [schema]);
+        found = await this.findProtectedHistory(manager, userId);
+        if (found) break;
+      }
+    }
+    await manager.query(`SELECT set_config('rab.workspace_id', $1, true), set_config('search_path', $2, true)`, [entry?.ws ?? '', entry?.sp ?? 'core']);
+    return found;
+  }
+
+  /** W's READY schema name (validated by SchemaResolverService), null when W has no schema, 'unverifiable' otherwise. */
+  private async checkableWorkspaceSchema(manager: EntityManager, workspaceId: string): Promise<string | null | 'unverifiable'> {
+    try {
+      return await this.schemaResolver.resolve(manager, workspaceId);
+    } catch (error) {
+      if (!(error instanceof WorkspaceRoutingError)) throw error;
+      const [{ present }] = await manager.query<Array<{ present: boolean }>>(
+        `SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_namespace WHERE nspname = $1) AS present`,
+        [workspaceSchemaName(workspaceId)],
+      );
+      return present ? 'unverifiable' : null;
     }
   }
 

@@ -1010,8 +1010,41 @@ export class ManagerService {
     });
   }
 
+  /**
+   * `GET /rest/v1/managers/:id/venues`. Part C1 (HWS-AUDIT.md §0.1, BROKEN 4.5): `venue` and `manager_venue` are workspace
+   * tables, so they are read in the TARGET manager's own workspace (`runInWorkspaceContext`: its schema with HWS on, the
+   * `core` copy with HWS off), never in whatever schema the caller's session happens to route to — a workspace-less CEO used
+   * to read the stale `core` copy, and a caller in another workspace read its own schema and got `[]`.
+   *   - Layer 2: MANAGER_MANAGE re-checked here (403), not only by the route guard.
+   *   - The profile is looked up in the caller's organisation; not found → 404.
+   *   - A caller bound to a workspace may read only a manager of that same workspace: another workspace → 404 (no existence
+   *     oracle). A workspace-less organisation administrator reads the manager's workspace after
+   *     `core.admin_workspace_in_org` confirms it is an active workspace of the caller's organisation (404 otherwise), the
+   *     same re-binding VenueManagerService's org-admin flow uses.
+   *   - A profile with no workspace has no venue link (manager_venue requires one): `[]`.
+   */
   async listVenues(ctx: AuthContext, managerId: string): Promise<Venue[]> {
-    return this.tenantContext.runInTenantContext(ctx, (manager) =>
+    if (!ctx.organisationId) throw new NotFoundException('Manager not found.');
+    const targetWorkspaceId = await this.tenantContext.runInTenantContext(ctx, async (manager) => {
+      if (!(await this.permissions.userHasPermissionTx(manager, ctx, PermissionFlag.MANAGER_MANAGE))) {
+        throw new ForbiddenException('Managing Manager accounts is not permitted.');
+      }
+      const profile = await manager.findOne(ManagerProfile, { where: { id: managerId, organisationId: ctx.organisationId! } });
+      if (!profile) throw new NotFoundException('Manager not found.');
+      if (!profile.workspaceId) return null;
+      if (ctx.workspaceId) {
+        if (profile.workspaceId !== ctx.workspaceId) throw new NotFoundException('Manager not found.');
+        return profile.workspaceId;
+      }
+      const [{ ok }] = await manager.query<Array<{ ok: boolean }>>('SELECT core.admin_workspace_in_org($1, $2) AS ok', [
+        profile.workspaceId,
+        ctx.organisationId,
+      ]);
+      if (!ok) throw new NotFoundException('Manager not found.');
+      return profile.workspaceId;
+    });
+    if (!targetWorkspaceId) return [];
+    return this.tenantContext.runInWorkspaceContext({ ...ctx, workspaceId: targetWorkspaceId }, (manager) =>
       manager
         .createQueryBuilder(Venue, 'v')
         .innerJoin(ManagerVenue, 'mv', 'mv.venue_id = v.id')
