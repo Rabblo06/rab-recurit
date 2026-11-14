@@ -58,8 +58,15 @@ export function coreReferences(): CoreReference[] {
  */
 export function referencedIdsSql(schema: string, refs: readonly CoreReference[] = coreReferences()): string {
   if (!SCHEMA.test(schema)) throw new Error('invalid workspace schema name');
-  return refs
-    .map((r, i) => `SELECT ${i} AS i, t.${r.column}::text AS id, pg_catalog.count(*)::int AS n FROM ${schema}.${r.table} t WHERE t.${r.column} IS NOT NULL GROUP BY t.${r.column}`)
+  // ONE branch per TABLE (its FORCE RLS policies are expanded once per table, not once per column: planning 72 branches over
+  // the policy-heavy tables cost seconds per workspace), every reference column of that table unpivoted with VALUES.
+  const byTable = new Map<string, Array<{ i: number; column: string }>>();
+  refs.forEach((r, i) => byTable.set(r.table, [...(byTable.get(r.table) ?? []), { i, column: r.column }]));
+  return [...byTable]
+    .map(
+      ([table, cols]) =>
+        `SELECT v.i, v.id, pg_catalog.count(*)::int AS n FROM ${schema}.${table} t CROSS JOIN LATERAL (VALUES ${cols.map((c) => `(${c.i}, t.${c.column}::text)`).join(', ')}) AS v(i, id) WHERE v.id IS NOT NULL GROUP BY v.i, v.id`,
+    )
     .join('\nUNION ALL\n');
 }
 
@@ -70,13 +77,14 @@ export const EXISTING_IDS_SQL: Readonly<Record<CoreReference['target'], string>>
   'core.manager_workspace': 'SELECT w.id::text AS id FROM core.manager_workspace w WHERE w.id = ANY ($1::uuid[]) AND w.organisation_id = $2',
 });
 
-export async function checkWorkspaceCoreOrphans(client: Client): Promise<WorkspaceOrphanCycleResult> {
+export async function checkWorkspaceCoreOrphans(client: Client, only?: readonly string[]): Promise<WorkspaceOrphanCycleResult> {
   const refs = coreReferences();
   const result: WorkspaceOrphanCycleResult = { checked: 0, findings: [], errors: [] };
   let after: string | null = null;
   for (;;) {
     const page: { rows: Array<{ workspace_id: string; organisation_id: string }> } = await client.query('SELECT workspace_id, organisation_id FROM core.worker_list_workspaces($1, $2)', [after, PAGE]);
     for (const ws of page.rows) {
+      if (only && !only.includes(ws.workspace_id)) continue;
       const schema = `workspace_${ws.workspace_id.replace(/-/g, '')}`;
       try {
         await client.query('BEGIN READ ONLY');

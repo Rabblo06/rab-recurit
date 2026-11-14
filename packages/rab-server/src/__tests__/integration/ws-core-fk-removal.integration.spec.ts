@@ -190,7 +190,7 @@ describeIfDb('Part D 0a: workspace → core foreign keys removed (integration, t
     await c.connect();
     try {
       await c.query('SET ROLE crewflow');
-      const r = await checkWorkspaceCoreOrphans(c);
+      const r = await checkWorkspaceCoreOrphans(c, [w.id, clean.id]);
       expect(r.errors.filter((e) => [w.id, clean.id].includes(e.workspaceId))).toEqual([]);
       const mine = r.findings.filter((f) => f.workspaceId === w.id).map((f) => [f.table, f.column, f.target, f.rows]).sort();
       expect(mine).toEqual([

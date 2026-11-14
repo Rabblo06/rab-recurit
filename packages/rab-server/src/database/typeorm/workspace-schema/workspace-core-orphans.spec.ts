@@ -18,8 +18,9 @@ describe('Part D 0a: workspace → core references (static)', () => {
   it('the orphan probe: phase 1 reads only the workspace tables (one branch per reference), phase 2 is primary-key lookups; the schema name is validated', () => {
     const s = 'workspace_0123456789abcdef0123456789abcdef';
     const sql = referencedIdsSql(s);
-    expect(sql.split('UNION ALL')).toHaveLength(72);
-    expect(sql).toContain(`SELECT 0 AS i, t.clock_in_by::text AS id, pg_catalog.count(*)::int AS n FROM ${s}.attendance t WHERE t.clock_in_by IS NOT NULL GROUP BY t.clock_in_by`);
+    expect(sql.split('UNION ALL')).toHaveLength(21);
+    expect(sql.match(/\(\d+, t\.\w+::text\)/g)).toHaveLength(72);
+    expect(sql).toContain(`FROM ${s}.attendance t CROSS JOIN LATERAL (VALUES (0, t.clock_in_by::text), (1, t.clock_out_by::text), (2, t.organisation_id::text), (3, t.workspace_id::text)) AS v(i, id) WHERE v.id IS NOT NULL GROUP BY v.i, v.id`);
     expect(sql).not.toMatch(/core\./);
     expect(sql).not.toMatch(/(INSERT|UPDATE|DELETE|DROP|ALTER)/);
     expect(EXISTING_IDS_SQL['core."user"']).toMatch(/u\.id = ANY \(\$1::uuid\[\]\) AND u\.organisation_id = \$2/);
