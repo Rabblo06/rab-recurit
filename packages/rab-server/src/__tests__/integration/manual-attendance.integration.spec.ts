@@ -19,6 +19,7 @@ import { BootstrapTimer } from './helpers/bootstrap-trace';
 import { generateFixturePassword } from './helpers/fixture-password';
 import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-pipe';
 import { integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
+import { businessTable, businessTableOf, siblingTable } from './helpers/hws-fixtures';
 
 const FIXTURE_PASSWORD = generateFixturePassword();
 
@@ -158,26 +159,26 @@ describeIfDb('manual attendance recording and confirmed no-show (integration)', 
       .send({ email: `staff-ma-${randomUUID()}@example.test`, firstName: 'Ava', lastName: 'Staff' });
     expect(staffRes.status).toBe(201);
     const staff = staffRes.body.id as string;
-    await adminDataSource.query(`UPDATE core."user" SET status = 'active' WHERE id = (SELECT user_id FROM core.staff_profile WHERE id = $1)`, [staff]);
-    await adminDataSource.query(`UPDATE core.staff_profile SET employment_status = 'active' WHERE id = $1`, [staff]);
+    await adminDataSource.query(`UPDATE core."user" SET status = 'active' WHERE id = (SELECT user_id FROM ${businessTable(seed.workspaceId, 'staff_profile')} WHERE id = $1)`, [staff]);
+    await adminDataSource.query(`UPDATE ${businessTable(seed.workspaceId, 'staff_profile')} SET employment_status = 'active' WHERE id = $1`, [staff]);
     expect((await http().post(`/rest/v1/shifts/${shiftId}/offers`).set('Authorization', `Bearer ${managerToken}`).send({ staffProfileId: staff })).status).toBe(201);
-    await adminDataSource.query(`UPDATE core.shift_assignment SET status = 'confirmed', confirmed_at = now() WHERE shift_id = $1`, [shiftId]);
-    await adminDataSource.query(`UPDATE core.shift SET starts_at = $2, ends_at = $3, break_minutes = $4 WHERE id = $1`, [shiftId, opts.startsAt, opts.endsAt, opts.breakMinutes ?? 30]);
-    await adminDataSource.query(`UPDATE core.shift_assignment SET period = tstzrange($2, $3, '[)'), break_minutes = NULL WHERE shift_id = $1`, [shiftId, opts.startsAt, opts.endsAt]);
-    if (opts.assignment === 'no_show') await adminDataSource.query(`UPDATE core.shift_assignment SET status = 'no_show' WHERE shift_id = $1`, [shiftId]);
+    await adminDataSource.query(`UPDATE ${businessTable(seed.workspaceId, 'shift_assignment')} SET status = 'confirmed', confirmed_at = now() WHERE shift_id = $1`, [shiftId]);
+    await adminDataSource.query(`UPDATE ${businessTable(seed.workspaceId, 'shift')} SET starts_at = $2, ends_at = $3, break_minutes = $4 WHERE id = $1`, [shiftId, opts.startsAt, opts.endsAt, opts.breakMinutes ?? 30]);
+    await adminDataSource.query(`UPDATE ${businessTable(seed.workspaceId, 'shift_assignment')} SET period = tstzrange($2, $3, '[)'), break_minutes = NULL WHERE shift_id = $1`, [shiftId, opts.startsAt, opts.endsAt]);
+    if (opts.assignment === 'no_show') await adminDataSource.query(`UPDATE ${businessTable(seed.workspaceId, 'shift_assignment')} SET status = 'no_show' WHERE shift_id = $1`, [shiftId]);
     let attendanceId: string | null = null;
     if (opts.attendance) {
       const [row] = await adminDataSource.query(
-        `INSERT INTO core.attendance (organisation_id, workspace_id, shift_assignment_id, shift_id, staff_profile_id, clock_in_at, clock_out_at, status, break_minutes)
+        `INSERT INTO ${businessTable(seed.workspaceId, 'attendance')} (organisation_id, workspace_id, shift_assignment_id, shift_id, staff_profile_id, clock_in_at, clock_out_at, status, break_minutes)
          SELECT sa.organisation_id, sa.workspace_id, sa.id, sa.shift_id, sa.staff_profile_id, s.starts_at + interval '15 minutes',
                 CASE WHEN $2 THEN s.ends_at ELSE NULL END, $3, 30
-           FROM core.shift_assignment sa JOIN core.shift s ON s.id = sa.shift_id WHERE sa.shift_id = $1 RETURNING id`,
+           FROM ${businessTable(seed.workspaceId, 'shift_assignment')} sa JOIN ${businessTable(seed.workspaceId, 'shift')} s ON s.id = sa.shift_id WHERE sa.shift_id = $1 RETURNING id`,
         [shiftId, !!opts.clockOut, opts.attendance],
       );
       attendanceId = row.id;
-      if (opts.clockOut) await adminDataSource.query(`UPDATE core.shift_assignment SET status = 'completed' WHERE shift_id = $1`, [shiftId]);
+      if (opts.clockOut) await adminDataSource.query(`UPDATE ${businessTable(seed.workspaceId, 'shift_assignment')} SET status = 'completed' WHERE shift_id = $1`, [shiftId]);
     }
-    const [{ pay_rate_snapshot_pence: rate, id: assignmentId }] = await adminDataSource.query(`SELECT id, pay_rate_snapshot_pence FROM core.shift_assignment WHERE shift_id = $1`, [shiftId]);
+    const [{ pay_rate_snapshot_pence: rate, id: assignmentId }] = await adminDataSource.query(`SELECT id, pay_rate_snapshot_pence FROM ${businessTable(seed.workspaceId, 'shift_assignment')} WHERE shift_id = $1`, [shiftId]);
     return { ...seed, managerToken, vmToken, shiftId, staff, attendanceId, assignmentId: assignmentId as string, rate: Number(rate) };
   }
 
@@ -196,10 +197,10 @@ describeIfDb('manual attendance recording and confirmed no-show (integration)', 
   const finalise = (token: string, shiftId: string) =>
     http().patch(`/rest/v1/attendance/report/shift/${shiftId}/finalise`).set('Authorization', `Bearer ${token}`).send({ signedOffName: 'Venue Mgr', breakConfirmed: true });
   const reportOf = async (token: string, shiftId: string) => (await http().get(`/rest/v1/attendance/report/shift/${shiftId}`).set('Authorization', `Bearer ${token}`)).body;
-  const attendanceRows = (shiftId: string) => adminDataSource.query(`SELECT * FROM core.attendance WHERE shift_id = $1`, [shiftId]);
-  const corrections = (shiftId: string) =>
-    adminDataSource.query(`SELECT ac.* FROM core.attendance_correction ac JOIN core.attendance a ON a.id = ac.attendance_id WHERE a.shift_id = $1 ORDER BY ac.field`, [shiftId]);
-  const assignmentOf = async (shiftId: string) => (await adminDataSource.query(`SELECT status, attendance_reviewed_at, attendance_reviewed_by FROM core.shift_assignment WHERE shift_id = $1`, [shiftId]))[0];
+  const attendanceRows = async (shiftId: string) => adminDataSource.query(`SELECT * FROM ${siblingTable(await businessTableOf(adminDataSource, 'shift', shiftId), 'attendance')} WHERE shift_id = $1`, [shiftId]);
+  const corrections = async (shiftId: string) =>
+    adminDataSource.query(`SELECT ac.* FROM ${siblingTable(await businessTableOf(adminDataSource, 'shift', shiftId), 'attendance_correction')} ac JOIN ${siblingTable(await businessTableOf(adminDataSource, 'shift', shiftId), 'attendance')} a ON a.id = ac.attendance_id WHERE a.shift_id = $1 ORDER BY ac.field`, [shiftId]);
+  const assignmentOf = async (shiftId: string) => (await adminDataSource.query(`SELECT status, attendance_reviewed_at, attendance_reviewed_by FROM ${siblingTable(await businessTableOf(adminDataSource, 'shift', shiftId), 'shift_assignment')} WHERE shift_id = $1`, [shiftId]))[0];
   const auditCount = async (orgId: string, action: string) =>
     (await adminDataSource.query(`SELECT count(*)::int AS n FROM core.audit_log WHERE organisation_id = $1 AND action = $2`, [orgId, action]))[0].n as number;
 
@@ -459,19 +460,19 @@ describeIfDb('manual attendance recording and confirmed no-show (integration)', 
       .send({ email: `staff-repl-${randomUUID()}@example.test`, firstName: 'Rae', lastName: 'Replacement' });
     expect(repl.status).toBe(201);
     const [replacement] = await adminDataSource.query(
-      `INSERT INTO core.shift_assignment (organisation_id, workspace_id, shift_id, staff_profile_id, status, pay_rate_snapshot_pence, confirmed_at, period)
-       SELECT organisation_id, workspace_id, shift_id, $2, 'confirmed', pay_rate_snapshot_pence, now(), period FROM core.shift_assignment WHERE id = $1 RETURNING id`,
+      `INSERT INTO ${siblingTable(await businessTableOf(adminDataSource, 'shift_assignment', s.assignmentId), 'shift_assignment')} (organisation_id, workspace_id, shift_id, staff_profile_id, status, pay_rate_snapshot_pence, confirmed_at, period)
+       SELECT organisation_id, workspace_id, shift_id, $2, 'confirmed', pay_rate_snapshot_pence, now(), period FROM ${siblingTable(await businessTableOf(adminDataSource, 'shift_assignment', s.assignmentId), 'shift_assignment')} WHERE id = $1 RETURNING id`,
       [s.assignmentId, repl.body.id],
     );
     const why = 'Staff arrived late; the bar manager confirmed it.';
     const blocked = await reopenNoShow(s.vmToken, s.shiftId, s.staff, why);
     expect({ status: blocked.status, code: blocked.body.code }).toEqual({ status: 409, code: 'SEAT_TAKEN_BY_REPLACEMENT' });
-    const [original] = await adminDataSource.query(`SELECT status, attendance_reviewed_at FROM core.shift_assignment WHERE id = $1`, [s.assignmentId]);
+    const [original] = await adminDataSource.query(`SELECT status, attendance_reviewed_at FROM ${siblingTable(await businessTableOf(adminDataSource, 'shift_assignment', s.assignmentId), 'shift_assignment')} WHERE id = $1`, [s.assignmentId]);
     expect(original.status).toBe('no_show');
     expect(original.attendance_reviewed_at).not.toBeNull();
     expect(await auditCount(s.organisation.id, 'attendance.no_show_reopened')).toBe(0);
     // The replacement booking is cancelled: the seat is free again, so the reopen is allowed.
-    await adminDataSource.query(`UPDATE core.shift_assignment SET status = 'cancelled' WHERE id = $1`, [replacement.id]);
+    await adminDataSource.query(`UPDATE ${await businessTableOf(adminDataSource, 'shift_assignment', replacement.id)} SET status = 'cancelled' WHERE id = $1`, [replacement.id]);
     expect((await reopenNoShow(s.vmToken, s.shiftId, s.staff, why)).status).toBe(200);
   });
 
@@ -500,8 +501,8 @@ describeIfDb('manual attendance recording and confirmed no-show (integration)', 
     expect((await record(s.vmToken, s.shiftId, randomUUID(), body)).status).toBe(404);
 
     // Staff: their own app is refused by the route (application + permission), never reaching the service.
-    await adminDataSource.query(`UPDATE core."user" SET password_hash = $2 WHERE id = (SELECT user_id FROM core.staff_profile WHERE id = $1)`, [s.staff, await passwordHashing.hash(password)]);
-    const [{ email: staffEmail }] = await adminDataSource.query(`SELECT u.email FROM core."user" u JOIN core.staff_profile sp ON sp.user_id = u.id WHERE sp.id = $1`, [s.staff]);
+    await adminDataSource.query(`UPDATE core."user" SET password_hash = $2 WHERE id = (SELECT user_id FROM ${await businessTableOf(adminDataSource, 'staff_profile', s.staff)} WHERE id = $1)`, [s.staff, await passwordHashing.hash(password)]);
+    const [{ email: staffEmail }] = await adminDataSource.query(`SELECT u.email FROM core."user" u JOIN ${await businessTableOf(adminDataSource, 'staff_profile', s.staff)} sp ON sp.user_id = u.id WHERE sp.id = $1`, [s.staff]);
     const staffLogin = await http().post('/rest/v1/auth/login').send({ email: staffEmail, password, applicationTarget: 'staff_app' });
     expect(staffLogin.status).toBe(200);
     const staffToken = staffLogin.body.accessToken as string;
@@ -525,12 +526,12 @@ describeIfDb('manual attendance recording and confirmed no-show (integration)', 
     expect(blocked.status).toBe(409);
     expect(blocked.body.message).toContain('1 attendance review remaining');
     const [{ id: attendanceId }] = await attendanceRows(s.shiftId);
-    expect(await adminDataSource.query(`SELECT 1 FROM core.payroll_record WHERE attendance_id = $1`, [attendanceId])).toHaveLength(0);
+    expect(await adminDataSource.query(`SELECT 1 FROM ${siblingTable(await businessTableOf(adminDataSource, 'attendance', attendanceId), 'payroll_record')} WHERE attendance_id = $1`, [attendanceId])).toHaveLength(0);
 
     const reviewed = await reviewSeat(s.vmToken, s.shiftId, s.staff);
     expect(reviewed.body).toMatchObject({ finalisable: true, reviewsRemaining: 0 });
     expect((await finalise(s.vmToken, s.shiftId)).status).toBe(200);
-    const [payroll] = await adminDataSource.query(`SELECT status, worked_minutes, amount_pence FROM core.payroll_record WHERE attendance_id = $1`, [attendanceId]);
+    const [payroll] = await adminDataSource.query(`SELECT status, worked_minutes, amount_pence FROM ${siblingTable(await businessTableOf(adminDataSource, 'attendance', attendanceId), 'payroll_record')} WHERE attendance_id = $1`, [attendanceId]);
     expect(payroll).toMatchObject({ status: 'pending_approval', worked_minutes: 7 * 60 - 30 });
     expect(Number(payroll.amount_pence)).toBe(payForMinutes(s.rate, 7 * 60 - 30));
 
@@ -546,7 +547,7 @@ describeIfDb('manual attendance recording and confirmed no-show (integration)', 
     const ns = await seedSeat({ ...w, assignment: 'no_show' });
     expect((await confirmNoShow(ns.vmToken, ns.shiftId, ns.staff)).status).toBe(200);
     expect((await finalise(ns.vmToken, ns.shiftId)).status).toBe(200);
-    expect(await adminDataSource.query(`SELECT 1 FROM core.payroll_record WHERE shift_id = $1`, [ns.shiftId])).toHaveLength(0);
+    expect(await adminDataSource.query(`SELECT 1 FROM ${siblingTable(await businessTableOf(adminDataSource, 'shift', ns.shiftId), 'payroll_record')} WHERE shift_id = $1`, [ns.shiftId])).toHaveLength(0);
     expect((await reopenNoShow(ns.vmToken, ns.shiftId, ns.staff, 'Trying to reopen after finalisation')).status).toBe(409);
   });
 });
