@@ -152,11 +152,14 @@ export function workspaceCoreFkRemovalSql(schemaName: string): string {
 }
 
 /**
- * Expected `core.workspace_schema_fingerprint_v2` of a level-22 workspace per PostgreSQL major. ALL PENDING: generated only after
- * the owner approves the SQL, on throwaway clusters (InstaBox test workers). Until declared, WorkspaceCoreForeignKeyRemoval
- * 1786721490000 refuses on every major (exit 66, nothing applied) and no provisioner builds level 22: fail closed.
+ * Expected `core.workspace_schema_fingerprint_v2` of a level-22 workspace per PostgreSQL major. DRAFT: 16 was measured on a
+ * throwaway postgres:16 owner-login ci-db (two level-21 workspaces + this command, identical) only so the draft can be tested on
+ * throwaway databases; 17 / 18 are generated after the owner approves the SQL. Until declared, WorkspaceCoreForeignKeyRemoval
+ * 1786721490000 refuses on that major (exit 66, nothing applied): fail closed.
  */
-export const WORKSPACE_CORE_FK_REMOVAL_FINGERPRINTS_V2: Readonly<Partial<Record<16 | 17 | 18, string>>> = Object.freeze({});
+export const WORKSPACE_CORE_FK_REMOVAL_FINGERPRINTS_V2: Readonly<Partial<Record<16 | 17 | 18, string>>> = Object.freeze({
+  16: 'a75b598e3c29bb33797022cfa90dadd0fad3ae2f230b13462169680ccc1a8389',
+});
 
 export const WORKSPACE_CORE_FK_REMOVAL_PROVISION_LITERAL = 'db:provision_workspace@WorkspaceCoreForeignKeyRemoval1786721490000';
 
