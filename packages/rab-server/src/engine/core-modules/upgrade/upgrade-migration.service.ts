@@ -87,12 +87,14 @@ const setScope = (query: Query, value: string) => query(SET_SCOPE, [UPGRADE_SCOP
  */
 export async function withUpgradeScope<T>(session: UpgradeSession, scope: Exclude<UpgradeScope, 'workspace_init'>, fn: (q: Query) => Promise<T>): Promise<T> {
   const query = session.query;
+  // Part D fix: this pre-check must be a SIMPLE-protocol query (no bind parameter). With a parameter the driver uses the
+  // extended protocol, whose implicit transaction starts at Parse while statement_timestamp() moves at Execute, so `fresh` was
+  // false on every call (found by the PG16 ci-db fresh install after ef7f56c0). The setting name is a literal constant.
   const [pre] = (await query(
     `SELECT pg_catalog.txid_current_if_assigned() IS NULL AS free,
             pg_catalog.transaction_timestamp() = pg_catalog.statement_timestamp() AS fresh,
-            COALESCE(pg_catalog.current_setting($1, true), '') AS scope,
+            COALESCE(pg_catalog.current_setting('rab.upgrade_scope', true), '') AS scope,
             pg_catalog.pg_backend_pid() AS pid`,
-    [UPGRADE_SCOPE_SETTING],
   )) as Array<{ free: boolean; fresh: boolean; scope: string; pid: number }>;
   if (!pre || pre.free !== true || pre.fresh !== true || pre.scope !== '') {
     throw new UpgradeSessionError('withUpgradeScope needs a dedicated session outside any transaction and with no upgrade scope set. Refusing.');
