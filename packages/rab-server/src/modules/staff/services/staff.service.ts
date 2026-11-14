@@ -482,7 +482,7 @@ export class StaffService {
       const visible = (field: string) => this.memberAccess.isFieldVisible(policy, field);
       const qb = manager
         .createQueryBuilder(StaffProfile, 'sp')
-        .leftJoinAndSelect('sp.user', 'user')
+        .innerJoinAndSelect('sp.user', 'user') // owner 0g: a soft-deleted account (deleted_at, filtered in the join) is not listed
         .where('sp.organisationId = :orgId', { orgId: ctx.organisationId! })
         .andWhere('sp.createdBy = :createdBy', { createdBy: ownerUserId });
       const recordFilter = this.memberAccess.qbWhere(policy, 'sp');
@@ -577,7 +577,7 @@ export class StaffService {
   async get(ctx: AuthContext, id: string): Promise<StaffSummary> {
     return this.tenantContext.runInWorkspaceContext(ctx, async (manager) => {
       const profile = await manager.findOne(StaffProfile, { where: { id }, relations: { user: true } });
-      if (!profile) throw new NotFoundException('Staff member not found.');
+      if (!profile?.user) throw new NotFoundException('Staff member not found.');
       // Read-only: a custom workspace-member may also read staff their workspace OWNER created (creator-based
       // ownership unchanged). Every write path keeps the strict `assertOwned` (the caller's own created_by).
       const scope = await this.resourceScope.resolveTx(manager, ctx);
@@ -835,7 +835,7 @@ export class StaffService {
     let displayChangedFor: string | null = null;
     const summary = await this.tenantContext.runInWorkspaceContext(ctx, async (manager) => {
       const profile = await manager.findOne(StaffProfile, { where: { id }, relations: { user: true } });
-      if (!profile) throw new NotFoundException('Staff member not found.');
+      if (!profile?.user) throw new NotFoundException('Staff member not found.');
       this.assertOwned(ctx, profile);
 
       if (dto.jobRoleId) {
@@ -916,7 +916,7 @@ export class StaffService {
   ): Promise<StaffSummary> {
     return this.tenantContext.runInWorkspaceContext(ctx, async (manager) => {
       const profile = await manager.findOne(StaffProfile, { where: { id }, relations: { user: true } });
-      if (!profile) throw new NotFoundException('Staff member not found.');
+      if (!profile?.user) throw new NotFoundException('Staff member not found.');
       this.assertOwned(ctx, profile);
       if (profile.user!.status === UserStatus.INVITED || profile.user!.status === UserStatus.INVITE_EXPIRED) {
         throw new ConflictException('This account has not been activated yet — use Cancel Invitation or Resend Invitation instead.');
@@ -988,7 +988,7 @@ export class StaffService {
         throw new ForbiddenException('Archiving staff is not permitted.');
       }
       const profile = await manager.findOne(StaffProfile, { where: { id }, relations: { user: true } });
-      if (!profile) throw new NotFoundException('Staff member not found.');
+      if (!profile?.user) throw new NotFoundException('Staff member not found.');
       this.assertOwned(ctx, profile);
       assertTransition(ARCHIVE_TRANSITIONS, archiveStateOf(profile.archivedAt), ArchiveState.ARCHIVED);
       if (profile.employmentStatus !== EmploymentStatus.INACTIVE) {
@@ -1022,7 +1022,7 @@ export class StaffService {
         throw new ForbiddenException('Restoring staff is not permitted.');
       }
       const profile = await manager.findOne(StaffProfile, { where: { id }, relations: { user: true } });
-      if (!profile) throw new NotFoundException('Staff member not found.');
+      if (!profile?.user) throw new NotFoundException('Staff member not found.');
       this.assertOwned(ctx, profile);
       assertTransition(ARCHIVE_TRANSITIONS, archiveStateOf(profile.archivedAt), ArchiveState.ACTIVE);
       await manager.update(StaffProfile, id, { archivedAt: null, archivedBy: null });
@@ -1043,7 +1043,7 @@ export class StaffService {
     await this.stepUpReauth.assertRecentStepUp(ctx, 'user.password_reset');
     return this.tenantContext.runInWorkspaceContext(ctx, async (manager) => {
       const profile = await manager.findOne(StaffProfile, { where: { id }, relations: { user: true } });
-      if (!profile) throw new NotFoundException('Staff member not found.');
+      if (!profile?.user) throw new NotFoundException('Staff member not found.');
       this.assertOwned(ctx, profile);
       if (profile.user!.status === UserStatus.INVITED || profile.user!.status === UserStatus.INVITE_EXPIRED) {
         throw new ConflictException('This account has not been activated yet — use Resend Invitation instead.');
@@ -1061,7 +1061,7 @@ export class StaffService {
 
   private async findPendingProfileOrFail(manager: EntityManager, ctx: AuthContext, id: string): Promise<StaffProfile> {
     const profile = await manager.findOne(StaffProfile, { where: { id }, relations: { user: true } });
-    if (!profile) throw new NotFoundException('Staff member not found.');
+    if (!profile?.user) throw new NotFoundException('Staff member not found.');
     this.assertOwned(ctx, profile);
     if (profile.user!.status !== UserStatus.INVITED && profile.user!.status !== UserStatus.INVITE_EXPIRED) {
       throw new ConflictException('This account is not a pending invitation.');
@@ -1184,7 +1184,7 @@ export class StaffService {
     await this.stepUpReauth.assertRecentStepUp(ctx, 'user.email.change');
     const outcome = await this.tenantContext.runInWorkspaceContext(ctx, async (manager) => {
       const profile = await manager.findOne(StaffProfile, { where: { id }, relations: { user: true } });
-      if (!profile) throw new NotFoundException('Staff member not found.');
+      if (!profile?.user) throw new NotFoundException('Staff member not found.');
       this.assertOwned(ctx, profile);
 
       const newEmail = normalizeEmail(dto.email);
@@ -1308,30 +1308,56 @@ export class StaffService {
   }
 
   /**
-   * Permanent removal — additional to Suspend/Reactivate, never a
-   * replacement (B1). Same creator-private authorization every other Staff
-   * mutation here already uses (`assertOwned`) — Manager A can never delete
-   * Manager B's staff by guessing an id, matching how they already can't
-   * view/edit/deactivate them. `UserDeletionService.assertCanDelete` is the
-   * actual safety gate (self-delete, platform admin, owned workspace,
-   * protected operational history — shift assignments, offers, attendance).
+   * Delete user (owner decision 0g, the Twenty way: UserDeletionService). Additional to Suspend/Reactivate, never a
+   * replacement (B1). Same creator-private authorization every other Staff mutation here already uses (`assertOwned`):
+   * Manager A can never delete Manager B's staff by guessing an id. `UserDeletionService.deleteUser` re-runs the
+   * account-level gates and decides soft vs hard: a member with any history (or who ever signed in) is SOFT deleted — the
+   * account row and the staff profile stay, so shifts, offers, attendance and payroll keep their references — and the
+   * profile's employment is set to inactive in the same transaction, so the scheduling and offer paths (which check
+   * employment status) can no longer pick them. Only a never-activated invite with no history is removed (with its profile).
    *
-   * P2.8 — step-up reauth checked FIRST, before even loading the target:
-   * a hijacked-but-live session alone can never delete a user.
+   * P2.8 — step-up reauth checked FIRST, before even loading the target: a hijacked-but-live session alone can never
+   * delete a user.
    */
   async deleteUser(ctx: AuthContext, id: string, currentPassword: string): Promise<void> {
     await this.stepUpReauth.assertCurrentPassword(ctx, currentPassword);
     let deletedUserId: string | null = null;
     await this.tenantContext.runInWorkspaceContext(ctx, async (manager) => {
       const profile = await manager.findOne(StaffProfile, { where: { id }, relations: { user: true } });
-      if (!profile) throw new NotFoundException('Staff member not found.');
+      if (!profile?.user) throw new NotFoundException('Staff member not found.');
       this.assertOwned(ctx, profile);
 
-      await this.userDeletion.assertCanDelete(manager, ctx, profile.userId);
-      await this.userDeletion.deleteUser(manager, ctx, profile.userId, profile.user!.email);
+      const outcome = await this.userDeletion.deleteUser(manager, ctx, profile.userId);
+      if (outcome === 'soft_deleted' && profile.employmentStatus !== EmploymentStatus.INACTIVE) {
+        assertTransition(EMPLOYMENT_STATUS_TRANSITIONS, profile.employmentStatus, EmploymentStatus.INACTIVE);
+        await manager.update(StaffProfile, profile.id, { employmentStatus: EmploymentStatus.INACTIVE });
+      }
       deletedUserId = profile.userId;
     });
     await this.invalidateUserDisplay(deletedUserId);
+  }
+
+  /**
+   * GDPR erasure of an already deleted Staff account (owner 0g; who may run it is FLAGGED for the owner in
+   * USER-DELETION.md: today the same people who may delete it — STAFF_DEACTIVATE, creator-private — with step-up reauth).
+   * The profile is found with its deleted account (`withDeleted`); `UserDeletionService.erasePersonalData` refuses
+   * (409 USER_NOT_DELETED) an account that was not deleted first. Only core."user" is anonymised; the staff profile's own
+   * personal fields are listed for the owner (payroll / right-to-work retention), not changed.
+   */
+  async erasePersonalData(ctx: AuthContext, id: string, currentPassword: string): Promise<void> {
+    await this.stepUpReauth.assertCurrentPassword(ctx, currentPassword);
+    let erasedUserId: string | null = null;
+    await this.tenantContext.runInWorkspaceContext(ctx, async (manager) => {
+      if (!(await this.directoryPermissions.userHasPermissionTx(manager, ctx, PermissionFlag.STAFF_DEACTIVATE))) {
+        throw new ForbiddenException('Erasing staff personal data is not permitted.');
+      }
+      const profile = await manager.findOne(StaffProfile, { where: { id } });
+      if (!profile) throw new NotFoundException('Staff member not found.');
+      this.assertOwned(ctx, profile);
+      await this.userDeletion.erasePersonalData(manager, ctx, profile.userId);
+      erasedUserId = profile.userId;
+    });
+    await this.invalidateUserDisplay(erasedUserId);
   }
 
   /** Tombstones the replaced avatar (row kept as `DELETED`); its object is purged later by `storage:reconcile` — mirrors `ProfileService`'s own identical private helper for the self-service case. */
@@ -1356,7 +1382,7 @@ export class StaffService {
     let avatarChangedFor: string | null = null;
     const result = await this.tenantContext.runInWorkspaceContext(ctx, async (manager) => {
       const profile = await manager.findOne(StaffProfile, { where: { id }, relations: { user: true } });
-      if (!profile) throw new NotFoundException('Staff member not found.');
+      if (!profile?.user) throw new NotFoundException('Staff member not found.');
       this.assertOwned(ctx, profile);
 
       const before = profile.user!.avatarFileId;
@@ -1388,7 +1414,7 @@ export class StaffService {
     let avatarChangedFor: string | null = null;
     const result = await this.tenantContext.runInWorkspaceContext(ctx, async (manager) => {
       const profile = await manager.findOne(StaffProfile, { where: { id }, relations: { user: true } });
-      if (!profile) throw new NotFoundException('Staff member not found.');
+      if (!profile?.user) throw new NotFoundException('Staff member not found.');
       this.assertOwned(ctx, profile);
 
       const before = profile.user!.avatarFileId;

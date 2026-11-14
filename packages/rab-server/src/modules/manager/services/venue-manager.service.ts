@@ -246,7 +246,7 @@ export class VenueManagerService {
             sp.employment_status AS "employmentStatus", jr.name AS "jobRoleName", t.created_at AS "assignedAt"
          FROM venue_manager_staff t
          JOIN staff_profile sp ON sp.id = t.staff_profile_id AND sp.workspace_id = t.workspace_id
-         JOIN core."user" u ON u.id = sp.user_id
+         JOIN core."user" u ON u.id = sp.user_id AND u.deleted_at IS NULL
          LEFT JOIN job_role jr ON jr.id = sp.job_role_id
          WHERE t.manager_profile_id = $1 AND t.organisation_id = $2 AND t.workspace_id = $3
          ORDER BY u.first_name, u.last_name, sp.id`,
@@ -386,7 +386,7 @@ export class VenueManagerService {
     let avatarChangedFor: string | null = null;
     const result = await this.tenantContext.runInWorkspaceContext(ctx, async (manager) => {
       const profile = await manager.findOne(ManagerProfile, { where: { id, workspaceId: ctx.workspaceId!, type: ManagerType.VENUE }, relations: { user: true } });
-      if (!profile) throw new NotFoundException('Venue Manager not found.');
+      if (!profile?.user) throw new NotFoundException('Venue Manager not found.');
       const before = profile.user!.avatarFileId;
       const file = await this.fileService.store(manager, {
         kind: FileKind.PROFILE_IMAGE,
@@ -413,7 +413,7 @@ export class VenueManagerService {
     let avatarChangedFor: string | null = null;
     const result = await this.tenantContext.runInWorkspaceContext(ctx, async (manager) => {
       const profile = await manager.findOne(ManagerProfile, { where: { id, workspaceId: ctx.workspaceId!, type: ManagerType.VENUE }, relations: { user: true } });
-      if (!profile) throw new NotFoundException('Venue Manager not found.');
+      if (!profile?.user) throw new NotFoundException('Venue Manager not found.');
       const before = profile.user!.avatarFileId;
       await manager.update(User, profile.userId, { avatarFileId: null });
       avatarChangedFor = profile.userId;

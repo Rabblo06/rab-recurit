@@ -336,6 +336,29 @@ describeIfDb('email delivery reliability (Phase 9)', () => {
       expect(after.providerCallStartedAt).toBeFalsy();
     });
 
+    it('B2b (owner 0g): a SOFT-deleted target (row kept, deleted_at set) is cancelled by revalidation, never sent', async () => {
+      const softRow = await tenantContext.runInTenantContext(ctx, async (m) => {
+        const goneStaff = await factory.createStaff(org, { owner });
+        const r = await outboxService().enqueue(m, {
+          organisationId: org.id,
+          jobType: EmailOutboxJobType.NOTIFICATION,
+          recipientEmail: 'soft-deleted@example.test',
+          targetUserId: goneStaff.userId,
+          rendered: { subject: 'x', text: 'x' },
+        });
+        await m.query(`UPDATE core."user" SET deleted_at = now(), status = 'deactivated' WHERE id = $1`, [goneStaff.userId]);
+        return r;
+      });
+      const neverCalled = fakeEmailService(async () => {
+        throw new Error('must never be called: the target account is soft-deleted');
+      });
+      const processor = createEmailSendProcessor({ tenantContext, emailService: neverCalled, auditService });
+      await processor(fakeJob(softRow.id));
+      const after = await rowOf(softRow.id);
+      expect(after.status).toBe(EmailOutboxStatus.CANCELLED);
+      expect(after.providerCallStartedAt).toBeFalsy();
+    });
+
     it('B3: a stale worker whose fencing token was superseded mid-send does NOT overwrite the newer claim with SENT', async () => {
       const row = await seedRow();
       const fake = fakeEmailService(async (options) => {

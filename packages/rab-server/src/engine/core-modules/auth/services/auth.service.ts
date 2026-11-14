@@ -773,6 +773,9 @@ export class AuthService {
     const ctx: AuthContext = { organisationId: org.organisationId, workspaceId, userId: org.userId, role: '' };
 
     await this.tenantContext.runInTenantContext(ctx, async manager => {
+      // Owner 0g (defence in depth; the soft delete already revoked every refresh token): a deleted account never refreshes.
+      const [live] = await manager.query('SELECT 1 FROM core."user" WHERE id = $1 AND deleted_at IS NULL', [org.userId]);
+      if (!live) throw new UnauthorizedException('Please sign in again.');
       const [session] = await manager.query('SELECT application_target FROM core.refresh_token WHERE token_hash = $1', [tokenHash]);
       const rows = await manager.query('SELECT r.key FROM core.user_role ur JOIN core.role r ON r.id = ur.role_id WHERE ur.user_id = $1', [org.userId]);
       const target = session?.application_target as ApplicationTarget | undefined;

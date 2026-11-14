@@ -362,7 +362,7 @@ export class ManagerService {
   async get(ctx: AuthContext, id: string): Promise<ManagerSummary> {
     return this.tenantContext.runInTenantContext(ctx, async (manager) => {
       const profile = await manager.findOne(ManagerProfile, { where: { id, organisationId: ctx.organisationId! }, relations: { user: true } });
-      if (!profile) throw new NotFoundException('Manager not found.');
+      if (!profile?.user) throw new NotFoundException('Manager not found.');
       return this.toSummaryWithInvite(manager, profile);
     });
   }
@@ -371,7 +371,7 @@ export class ManagerService {
     return this.tenantContext.runInTenantContext(ctx, async (manager) => {
       const qb = manager
         .createQueryBuilder(ManagerProfile, 'mp')
-        .leftJoinAndSelect('mp.user', 'user')
+        .innerJoinAndSelect('mp.user', 'user') // owner 0g: a soft-deleted account (deleted_at, filtered in the join) is not listed
         .where('mp.organisationId = :orgId', { orgId: ctx.organisationId! });
 
       if (dto.q) {
@@ -416,7 +416,7 @@ export class ManagerService {
     return this.tenantContext.runInTenantContext(ctx, async (manager) => {
       const qb = manager
         .createQueryBuilder(ManagerProfile, 'mp')
-        .leftJoinAndSelect('mp.user', 'user')
+        .innerJoinAndSelect('mp.user', 'user') // owner 0g: a soft-deleted account (deleted_at, filtered in the join) is not listed
         .where('mp.organisationId = :orgId', { orgId: ctx.organisationId! })
         .andWhere('mp.workspaceId = :workspaceId', { workspaceId })
         .andWhere('mp.type = :type', { type: ManagerType.VENUE });
@@ -667,7 +667,7 @@ export class ManagerService {
     let displayChangedFor: string | null = null;
     const summary = await this.tenantContext.runInTenantContext(ctx, async (manager) => {
       const profile = await manager.findOne(ManagerProfile, { where: { id }, relations: { user: true } });
-      if (!profile) throw new NotFoundException('Manager not found.');
+      if (!profile?.user) throw new NotFoundException('Manager not found.');
       await this.assertCeoMutationAllowed(manager, ctx, profile);
 
       const { firstName, lastName, phone, jobTitle } = dto;
@@ -710,7 +710,7 @@ export class ManagerService {
     await this.stepUpReauth.assertRecentStepUp(ctx, active ? 'user.reactivate' : 'user.deactivate');
     return this.tenantContext.runInTenantContext(ctx, async (manager) => {
       const profile = await manager.findOne(ManagerProfile, { where: { id }, relations: { user: true } });
-      if (!profile) throw new NotFoundException('Manager not found.');
+      if (!profile?.user) throw new NotFoundException('Manager not found.');
       await this.assertCeoMutationAllowed(manager, ctx, profile);
       if (profile.user!.status === UserStatus.INVITED || profile.user!.status === UserStatus.INVITE_EXPIRED) {
         throw new ConflictException('This account has not been activated yet — use Resend Invitation or Re-invite instead.');
@@ -749,7 +749,7 @@ export class ManagerService {
     return this.tenantContext.runInTenantContext(ctx, async (manager) => {
       await this.assertCanManageManagersTx(manager, ctx);
       const profile = await manager.findOne(ManagerProfile, { where: { id, organisationId: ctx.organisationId! }, relations: { user: true } });
-      if (!profile) throw new NotFoundException('Manager not found.');
+      if (!profile?.user) throw new NotFoundException('Manager not found.');
       await this.assertCeoMutationAllowed(manager, ctx, profile);
       assertTransition(ARCHIVE_TRANSITIONS, archiveStateOf(profile.archivedAt), ArchiveState.ARCHIVED);
       if (profile.userId === ctx.userId || profile.userId === ctx.inspectedBy) {
@@ -775,7 +775,7 @@ export class ManagerService {
     return this.tenantContext.runInTenantContext(ctx, async (manager) => {
       await this.assertCanManageManagersTx(manager, ctx);
       const profile = await manager.findOne(ManagerProfile, { where: { id, organisationId: ctx.organisationId! }, relations: { user: true } });
-      if (!profile) throw new NotFoundException('Manager not found.');
+      if (!profile?.user) throw new NotFoundException('Manager not found.');
       await this.assertCeoMutationAllowed(manager, ctx, profile);
       assertTransition(ARCHIVE_TRANSITIONS, archiveStateOf(profile.archivedAt), ArchiveState.ACTIVE);
       await manager.update(ManagerProfile, id, { archivedAt: null, archivedBy: null });
@@ -798,7 +798,7 @@ export class ManagerService {
     await this.stepUpReauth.assertRecentStepUp(ctx, 'user.password_reset');
     return this.tenantContext.runInTenantContext(ctx, async (manager) => {
       const profile = await manager.findOne(ManagerProfile, { where: { id }, relations: { user: true } });
-      if (!profile) throw new NotFoundException('Manager not found.');
+      if (!profile?.user) throw new NotFoundException('Manager not found.');
       await this.assertCeoMutationAllowed(manager, ctx, profile);
       if (profile.user!.status === UserStatus.INVITED || profile.user!.status === UserStatus.INVITE_EXPIRED) {
         throw new ConflictException('This account has not been activated yet — use Resend Invitation instead.');
@@ -816,7 +816,7 @@ export class ManagerService {
 
   private async findPendingProfileOrFail(manager: EntityManager, ctx: AuthContext, id: string): Promise<ManagerProfile> {
     const profile = await manager.findOne(ManagerProfile, { where: { id }, relations: { user: true } });
-    if (!profile) throw new NotFoundException('Manager not found.');
+    if (!profile?.user) throw new NotFoundException('Manager not found.');
     await this.assertCeoMutationAllowed(manager, ctx, profile);
     if (profile.user!.status !== UserStatus.INVITED && profile.user!.status !== UserStatus.INVITE_EXPIRED) {
       throw new ConflictException('This account is not a pending invitation.');
@@ -1064,7 +1064,7 @@ export class ManagerService {
     await this.stepUpReauth.assertRecentStepUp(ctx, 'user.email.change');
     const outcome = await this.tenantContext.runInTenantContext(ctx, async (manager) => {
       const profile = await manager.findOne(ManagerProfile, { where: { id, organisationId: ctx.organisationId! }, relations: { user: true } });
-      if (!profile) throw new NotFoundException('Manager not found.');
+      if (!profile?.user) throw new NotFoundException('Manager not found.');
       await this.assertCeoMutationAllowed(manager, ctx, profile);
 
       const newEmail = normalizeEmail(dto.email);
@@ -1174,18 +1174,15 @@ export class ManagerService {
   }
 
   /**
-   * Permanent removal — additional to Suspend/Reactivate, never a
-   * replacement (B1). Same authorization shape every other Manager
-   * mutation here already uses (org-wide for a MANAGER_MANAGE holder,
-   * `assertCeoMutationAllowed` for a CEO target) — deliberately NOT a new,
-   * stricter creator-private rule invented just for delete, which would
-   * make it behave inconsistently with Suspend/Reactivate/Reset-password
-   * on the exact same entity. `UserDeletionService.assertCanDelete` is the
-   * actual safety gate (self-delete, platform admin, owned workspace,
-   * protected operational history).
+   * Delete user (owner decision 0g, the Twenty way: UserDeletionService). Additional to Suspend/Reactivate, never a
+   * replacement (B1). Same authorization shape every other Manager mutation here already uses (org-wide for a
+   * MANAGER_MANAGE holder, `assertCeoMutationAllowed` for a CEO target) — deliberately NOT a stricter creator-private rule
+   * invented just for delete. `UserDeletionService.deleteUser` re-runs the account-level gates (self, platform admin, the
+   * workspace owner = last admin) and decides soft vs hard: an account with any history is SOFT deleted (row kept,
+   * `deleted_at` set, every session and membership revoked); only a never-activated invite with no history is removed.
    *
-   * P2.8 — step-up reauth checked FIRST, before even loading the target:
-   * a hijacked-but-live session alone can never delete a user.
+   * P2.8 — step-up reauth checked FIRST, before even loading the target: a hijacked-but-live session alone can never
+   * delete a user.
    */
   async deleteUser(ctx: AuthContext, id: string, currentPassword: string): Promise<void> {
     await this.stepUpReauth.assertCurrentPassword(ctx, currentPassword);
@@ -1194,20 +1191,33 @@ export class ManagerService {
       const profile = await manager.findOne(ManagerProfile, { where: { id } });
       if (!profile) throw new NotFoundException('Manager not found.');
       await this.assertCeoMutationAllowed(manager, ctx, profile);
-
-      // Gap-review finding (universal self-service onboarding checkpoint): deleting a never-
-      // activated Initial Manager profile with no workspace is now a real, reachable path (it used
-      // to always 409 on MANAGER_OWNS_WORKSPACE first) — surfaced that the eager `relations: {
-      // user: true }` join above returned a null `user` for this case, a pre-existing relation-
-      // loading issue unrelated to this checkpoint's own change. Fetched explicitly instead, the
-      // same proven pattern `cancelInviteWithin`/`replaceInitialManager` already use elsewhere in
-      // this codebase for the identical "need the User row, not just the profile" need.
-      const user = await manager.findOneOrFail(User, { where: { id: profile.userId } });
-
-      await this.userDeletion.assertCanDelete(manager, ctx, profile.userId);
-      await this.userDeletion.deleteUser(manager, ctx, profile.userId, user.email);
+      // A profile whose account is already soft-deleted is gone for every caller (404), like Twenty's removed member.
+      const live = await manager.findOne(User, { where: { id: profile.userId } });
+      if (!live) throw new NotFoundException('Manager not found.');
+      await this.userDeletion.deleteUser(manager, ctx, profile.userId);
       deletedUserId = profile.userId;
     });
     await this.invalidateUserDisplay(deletedUserId);
+  }
+
+  /**
+   * GDPR erasure of an already deleted Manager / Venue Manager account (owner 0g; who may run it is FLAGGED for the owner
+   * in USER-DELETION.md: today the same people who may delete it — org-wide MANAGER_MANAGE, a CEO target only by the
+   * platform administrator — with step-up reauth). `UserDeletionService.erasePersonalData` refuses (409 USER_NOT_DELETED)
+   * an account that was not deleted first. Found by the manager PROFILE id, deleted account included (the profile row
+   * stays after a soft delete).
+   */
+  async erasePersonalData(ctx: AuthContext, id: string, currentPassword: string): Promise<void> {
+    await this.stepUpReauth.assertCurrentPassword(ctx, currentPassword);
+    let erasedUserId: string | null = null;
+    await this.tenantContext.runInTenantContext(ctx, async (manager) => {
+      await this.assertCanManageManagersTx(manager, ctx);
+      const profile = await manager.findOne(ManagerProfile, { where: { id, organisationId: ctx.organisationId! } });
+      if (!profile) throw new NotFoundException('Manager not found.');
+      await this.assertCeoMutationAllowed(manager, ctx, profile);
+      await this.userDeletion.erasePersonalData(manager, ctx, profile.userId);
+      erasedUserId = profile.userId;
+    });
+    await this.invalidateUserDisplay(erasedUserId);
   }
 }

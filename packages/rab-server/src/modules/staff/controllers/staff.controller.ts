@@ -192,4 +192,15 @@ export class StaffController {
   deleteUser(@AuthUser() ctx: AuthContext, @Param('id') id: string, @Body() dto: StepUpReauthDto) {
     return this.staffService.deleteUser(ctx, id, dto.currentPassword);
   }
+
+  /**
+   * Owner 0g: GDPR erasure of an already deleted Staff account (anonymises the account row, keeps it for history). Step-up
+   * reauth: `currentPassword` is required and verified before anything else runs; the service re-checks STAFF_DEACTIVATE.
+   */
+  @Post(':id/erase-personal-data')
+  @HttpCode(HttpStatus.NO_CONTENT)
+  @UseGuards(PermissionGuard(PermissionFlag.STAFF_DEACTIVATE))
+  erasePersonalData(@AuthUser() ctx: AuthContext, @Param('id', ParseUUIDPipe) id: string, @Body() dto: StepUpReauthDto) {
+    return this.staffService.erasePersonalData(ctx, id, dto.currentPassword);
+  }
 }

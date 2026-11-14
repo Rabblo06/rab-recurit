@@ -32,12 +32,15 @@ const FIXTURE_PASSWORD = generateFixturePassword();
 /**
  * Part B (Safe Delete User) abuse cases — real Postgres, RLS on, no mocks,
  * real HTTP through the actual `DELETE /rest/v1/managers/:id` and
- * `DELETE /rest/v1/staff/:id` routes wherever the scenario is authorization-
+ * `DELETE /rest/v1/staff/:id` routes (owner decision 0g: an account with
+ * history is soft-deleted, only a never-activated invite is hard-deleted —
+ * see user-soft-delete.integration.spec.ts for the sign-in, history, lock
+ * and erasure cases) wherever the scenario is authorization-
  * shaped, with direct-entity seeding (matching this folder's established
  * `composite-workspace-fk-attack` fixture idiom) for the protected-history/
  * ownership fixtures that would otherwise need a full shift-publish/offer/
- * attendance flow to set up. `UserDeletionService` is the single place a
- * hard `DELETE FROM core."user"` is ever issued — these tests exercise it
+ * attendance flow to set up. `UserDeletionService` is the single place an
+ * API path deletes a user (soft, or hard for a never-activated invite) — these tests exercise it
  * exclusively through the two real controller routes, never by calling it
  * directly, so a gap in either route's own authorization check would show
  * up here too.
@@ -298,8 +301,8 @@ describeIfDb('user deletion abuse cases (integration)', () => {
     });
   });
 
-  describe('the actual safety gate — UserDeletionService.assertCanDelete', () => {
-    it('an active Staff member with real operational history (a ShiftAssignment) is blocked with USER_HAS_PROTECTED_HISTORY, and Suspend still works instead', async () => {
+  describe('the actual safety gate — UserDeletionService (owner 0g: history means a soft delete, never a refusal)', () => {
+    it('an active Staff member with real operational history (a ShiftAssignment) is SOFT deleted: 204, account row, profile and assignment kept, profile inactive, gone from the Staff routes', async () => {
       const { organisation, email, userId: managerUserId, workspaceId } = await seedOrgWithManager('ph-a');
       const token = (await login(email)).accessToken;
 
@@ -355,13 +358,23 @@ describeIfDb('user deletion abuse cases (integration)', () => {
       }, managerUserId);
 
       const del = await request(app.getHttpServer()).delete(`/rest/v1/staff/${staffProfileId}`).set('Authorization', `Bearer ${token}`).send({ currentPassword: passwordFor(email) });
-      expect(del.status).toBe(409);
-      expect(del.body.code).toBe('USER_HAS_PROTECTED_HISTORY');
-      expect(del.body.message).not.toMatch(/shift_assignment|foreign key|violates/i);
+      expect(del.status).toBe(204);
 
-      // Suspend must still work as the alternative — never removed.
+      // Soft: nothing of the history is gone, the account row stays (deleted_at set, status deactivated).
+      const [userAfter] = await adminDataSource.query<Array<{ deleted: boolean; status: string }>>(
+        `SELECT u.deleted_at IS NOT NULL AS deleted, u.status FROM core."user" u JOIN "${businessSchema(workspaceId)}".staff_profile sp ON sp.user_id = u.id WHERE sp.id = $1`,
+        [staffProfileId],
+      );
+      expect(userAfter).toEqual({ deleted: true, status: UserStatus.DEACTIVATED });
+      const [profileAfter] = await adminDataSource.query(`SELECT employment_status FROM "${businessSchema(workspaceId)}".staff_profile WHERE id = $1`, [staffProfileId]);
+      expect(profileAfter.employment_status).toBe('inactive');
+      expect(await adminDataSource.query(`SELECT 1 FROM "${businessSchema(workspaceId)}".shift_assignment WHERE staff_profile_id = $1`, [staffProfileId])).toHaveLength(1);
+
+      // The deleted member is gone from the Staff routes (404, the Twenty "member removed" behaviour): no suspend, no second delete.
       const suspend = await request(app.getHttpServer()).post(`/rest/v1/staff/${staffProfileId}/deactivate`).set('Authorization', `Bearer ${token}`);
-      expect(suspend.status).toBe(201);
+      expect(suspend.status).toBe(404);
+      const again = await request(app.getHttpServer()).delete(`/rest/v1/staff/${staffProfileId}`).set('Authorization', `Bearer ${token}`).send({ currentPassword: passwordFor(email) });
+      expect(again.status).toBe(404);
     });
 
     it('a Manager who owns a private Workspace is blocked with MANAGER_OWNS_WORKSPACE, not silently orphaning it', async () => {

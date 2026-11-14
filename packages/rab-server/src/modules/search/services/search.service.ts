@@ -182,7 +182,7 @@ export class SearchService {
               public.similarity(n.full_name, ${NORM_TEXT}) AS sim, ${PARAMS_ANCHOR}
          FROM cand
          JOIN staff_profile sp ON sp.id = cand.id
-         JOIN core."user" u ON u.id = sp.user_id
+         JOIN core."user" u ON u.id = sp.user_id AND u.deleted_at IS NULL
          CROSS JOIN LATERAL (SELECT ${userName('u')} AS full_name) n
         WHERE sp.workspace_id = ${ws} AND sp.archived_at IS NULL${extra}
         ORDER BY exact DESC, rank DESC, sim DESC, u.first_name ASC, u.last_name ASC, sp.id
@@ -210,7 +210,7 @@ export class SearchService {
               ts_rank_cd(u.search_vector, ${TSQ}) AS rank,
               public.similarity(${userName('u')}, ${NORM_TEXT}) AS sim, ${PARAMS_ANCHOR}
          FROM core.manager_profile mp
-         JOIN core."user" u ON u.id = mp.user_id
+         JOIN core."user" u ON u.id = mp.user_id AND u.deleted_at IS NULL
         WHERE (${this.userMatch(q, 'u')} ${emailBranch}) AND mp.archived_at IS NULL
         ORDER BY exact DESC, rank DESC, sim DESC, u.first_name ASC, u.last_name ASC, mp.id
         LIMIT ${lim}`,
