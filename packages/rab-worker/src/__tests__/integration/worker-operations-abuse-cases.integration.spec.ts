@@ -31,6 +31,7 @@ import { runOfferExpiryCycle } from '../../queues/rab-offers/offer-expiry.job';
 import { runTokenCleanupCycle } from '../../queues/rab-maintenance/token-cleanup.job';
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { generateFixturePassword } from './helpers/fixture-password';
+import { integrationTestDatabaseReady } from '@rab/server/database/typeorm/core/integration-test-database-gate';
 
 const FIXTURE_PASSWORD = generateFixturePassword();
 
@@ -45,7 +46,7 @@ const FIXTURE_PASSWORD = generateFixturePassword();
  * proving the WORKER side (idempotency, revalidation, cross-org isolation,
  * never-mutate-what-you're-told-not-to) works correctly against real state.
  */
-const RUN = Boolean(process.env.DATABASE_URL);
+const RUN = integrationTestDatabaseReady();
 const describeIfDb = RUN ? describe : describe.skip;
 // The periodic-scan jobs under test here are deliberately cross-org — in
 // this shared dev/test database, that means every OTHER integration test

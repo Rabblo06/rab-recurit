@@ -8,7 +8,7 @@
 #   the retired AI_PROVIDER / AI_MODEL are not set. Synthetic organisations only.
 # Never the owner's docker `rab` stack, rab-devdb (127.0.0.1:15432), Neon or production.
 #
-# Usage: AI_E2E_ENV=<file with TEST_DATABASE_URL, TEST_DATABASE_URL_UNPOOLED, REDIS_URL, APP_SECRET> \
+# Usage: AI_E2E_ENV=<file with TEST_DATABASE_URL, TEST_DATABASE_ADMIN_URL (or the deprecated TEST_DATABASE_URL_UNPOOLED), REDIS_URL, APP_SECRET> \
 #        AI_E2E_WORK=<scratch dir for logs, identities, evidence> packages/rab-e2e-testing/ai/run-ai-e2e.sh
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/../../.." && pwd)"

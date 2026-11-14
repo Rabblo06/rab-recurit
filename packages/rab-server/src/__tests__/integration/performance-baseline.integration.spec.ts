@@ -14,6 +14,7 @@ import { Organisation } from '../../modules/identity/entities';
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
 import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-pipe';
+import { integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
 
 /**
  * P1A (FULL-ARCHITECTURE-UPGRADE-PLAN.md — P1 program, checkpoint A, item A4): the fresh,
@@ -39,7 +40,7 @@ import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-
  * status, duration, counts, stage-name->ms maps. Never a token, cookie, password, email, or any
  * other PII/secret; see that file's own doc comment for the structural guarantee.
  */
-const RUN = Boolean(process.env.DATABASE_URL) && process.env.RUN_PERF_BASELINE === 'true';
+const RUN = integrationTestDatabaseReady() && process.env.RUN_PERF_BASELINE === 'true';
 const describeIfEnabled = RUN ? describe : describe.skip;
 jest.setTimeout(180_000);
 

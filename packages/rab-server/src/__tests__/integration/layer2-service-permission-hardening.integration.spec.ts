@@ -17,6 +17,7 @@ import { VenueService } from '../../modules/venue/services/venue.service';
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
 import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-pipe';
+import { integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
 
 /**
  * LAYER2_HARDENING_2026-10-25 (docs/security/) — abuse cases for the layer-2 (service) permission checks added to
@@ -29,7 +30,7 @@ import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-
  * row `PermissionsService.userHasPermissionTx` already honours): same workspace, same records, only the flag
  * differs, so a refusal can only come from the new check. Real PostgreSQL with RLS on (crewflow_app), no mocks.
  */
-const RUN = Boolean(process.env.DATABASE_URL);
+const RUN = integrationTestDatabaseReady();
 const describeIfDb = RUN ? describe : describe.skip;
 
 describeIfDb('layer-2 service permission hardening (integration)', () => {

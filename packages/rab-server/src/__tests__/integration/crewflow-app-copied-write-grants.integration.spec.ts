@@ -6,6 +6,7 @@ import { Client, Pool } from 'pg';
 import { resolveIntegrationTestDatabase } from '../../database/typeorm/core/test-database-guard';
 import { CREWFLOW_APP_COPIED_WRITE_REVOKES_1786720020000 } from '../../database/typeorm/core/migrations/1786720020000-CrewflowAppCopiedWriteGrantRevoke';
 import { dropWorkspaceSchema, provisionServerPath, provisionTypeScript, registryOf, SeededWorkspace, seedWorkspace, sqlstateOf } from './helpers/workspace-fixtures';
+import { integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
 
 /**
  * M10 lane C — CrewflowAppCopiedWriteGrantRevoke1786720020000. Disposable database only (bootstrap superuser as
@@ -22,7 +23,7 @@ import { dropWorkspaceSchema, provisionServerPath, provisionTypeScript, registry
  * TS provisioner as crewflow, core.mark_workspace_schema_superseded as crewflow_app (DEFINER), membership
  * suspend/reinstate (DEFINER), the hws:backfill checkpoint upsert and the stored_file tombstone UPDATE as crewflow_app.
  */
-const RUN = Boolean(process.env.DATABASE_URL);
+const RUN = integrationTestDatabaseReady();
 const describeIfDb = RUN ? describe : describe.skip;
 jest.setTimeout(240_000);
 

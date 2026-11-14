@@ -15,6 +15,7 @@ import { WORKER_HEARTBEAT_KEY } from '../../engine/worker-shared/heartbeat.const
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
 import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-pipe';
+import { integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
 
 /**
  * Owner policy (2026-10-15): a NEW account (or an email change) may not use an email address that belongs to a live account in
@@ -22,7 +23,7 @@ import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-
  * generic 409 that never names the other organisation, its role, status or workspace. Existing duplicates are never touched.
  * Real PostgreSQL with RLS; runs unchanged with both auth caches enabled.
  */
-const RUN = Boolean(process.env.DATABASE_URL);
+const RUN = integrationTestDatabaseReady();
 const describeIfDb = RUN ? describe : describe.skip;
 const STRONG = 'Correct-Horse-42-battery';
 const GENERIC = { statusCode: 409, code: 'EMAIL_UNAVAILABLE', message: 'This email address can’t be used for a new Crewflow account. Use a different email address.' };

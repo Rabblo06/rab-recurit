@@ -11,13 +11,14 @@ import { PasswordHashingService } from '../../engine/core-modules/auth/services/
 import { TenantContextService } from '../../engine/core-modules/tenant/tenant-context.service';
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
+import { integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
 
 /**
  * CF-13 / CF-30 / CF-12 (October 15 audit), at the database layer, as the real runtime role `crewflow_app` with SQL an
  * application bug or an injection could run. SECURITY DEFINER functions bypass RLS as their owner, so each must authorise
  * the caller itself. Every case binds a tenant context exactly the way TenantContextService does.
  */
-const RUN = Boolean(process.env.DATABASE_URL);
+const RUN = integrationTestDatabaseReady();
 const describeIfDb = RUN ? describe : describe.skip;
 
 describeIfDb('CF-13 SECURITY DEFINER in-function authorisation (integration)', () => {

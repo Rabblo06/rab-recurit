@@ -20,6 +20,7 @@ import { createAdminDataSource } from './helpers/admin-datasource';
 import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
 import { generateFixturePassword } from './helpers/fixture-password';
 import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-pipe';
+import { integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
 
 const FIXTURE_PASSWORD = generateFixturePassword();
 
@@ -37,7 +38,7 @@ const FIXTURE_PASSWORD = generateFixturePassword();
  * matrix for logout and suspension specifically exercised THROUGH the cache (not just the version
  * bump in isolation), and explicit cross-user namespacing. That is this file's whole job.
  */
-const RUN = Boolean(process.env.DATABASE_URL);
+const RUN = integrationTestDatabaseReady();
 const describeIfDb = RUN ? describe : describe.skip;
 
 describeIfDb('P1F authorization cache boundary (integration)', () => {

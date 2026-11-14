@@ -12,6 +12,7 @@ import { dispatchEmailScope } from '../../queues/rab-email/email-dispatch.job';
 import { publishRealtimeScope, RealtimePublishFn } from '../../queues/rab-realtime/publish-outbox.job';
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { createTestIdentityFactory, TestIdentity, TestIdentityFactory } from './helpers/test-identities';
+import { integrationTestDatabaseReady } from '@rab/server/database/typeorm/core/integration-test-database-gate';
 
 /**
  * Phase D (D1) — the Worker's global claim against the REAL pointer table, triggers and SECURITY DEFINER functions.
@@ -34,7 +35,7 @@ import { createTestIdentityFactory, TestIdentity, TestIdentityFactory } from './
  *     coordinator run — before the fix a run stopped at the first short batch and drained 10 rows per tick / NOTIFY.
  */
 const WORKER_URL = process.env.TEST_DATABASE_WORKER_URL;
-const RUN = process.env.PHASE_D_SQL_APPROVED === 'true' && Boolean(WORKER_URL && process.env.DATABASE_URL);
+const RUN = process.env.PHASE_D_SQL_APPROVED === 'true' && Boolean(WORKER_URL) && integrationTestDatabaseReady();
 const describeIfApproved = RUN ? describe : describe.skip;
 const TEST_ENV = 'inttest';
 jest.setTimeout(120_000);

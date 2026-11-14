@@ -5709,7 +5709,18 @@ writes a warning instead.
           unhealthy;
         - production Redis runs AOF with `noeviction`;
         - the API's registration step is idempotent, so any API start restores every scheduler.
-      - Recommended follow-up: alert on Worker unhealthy.
+      - Follow-up, partly done (X2.4, Twenty's model: shown in the admin panel, no external alerting). The STATE is
+        now shown, and there is still NO ALERTING.
+        - The Admin Panel Health tab shows the Worker heartbeat with per-queue failed/waiting counts.
+        - A BullMQ schedulers indicator reads `ZCARD <prefix>:<scan queue>:repeat` against the Worker's last reconcile
+          report. It turns degraded when schedulers are missing or none are left in Redis.
+        - The indicators are read-only, platform-admin only (PlatformAdminGuard + service check, 403), and audited as
+          `admin.health_viewed`.
+        - Nothing pages anyone: a lost scheduler is seen only when an operator opens the tab (or reads the Worker's
+          ERROR log).
+        - Only `/healthz` (API + database) is meant for an external uptime monitor (runbook 3.5a), and it does not
+          cover the Worker or the schedulers.
+        - Accepted as Twenty's model, 2026-11-12. "Alert on Worker unhealthy" itself stays open.
       - `/healthz` exposes only `upgradeFailed: true|false` for C3, never the failed migration's name (coordinator
         decision 2026-11-05, stricter than the original proposal). The name is in the ERROR log only.
 
@@ -7020,3 +7031,363 @@ Phase X Part 2 finding XA-08 (`docs/plans/PHASE-X-STAGE0-PART2.md` §2.6). Front
   personal value in the path would send it (review F4, not fixed in this PR). Thrown `HttpException`s with status >= 500
   are not reported (owner text: the 500 branch only). Exception events carry the scrubbed request URL path (path
   segments are kept, as in P0-sentry). No user or organisation is attached to these events.
+
+## /healthz databaseLogin — the health check notices a refused runtime login (branch fix/api-health-db-login, 2026-11-13, PR #133)
+- **Asset:** availability signal of the API; the runtime login `crewflow_owner`.
+- **Before:** /healthz only pinged through the pool (`SELECT 1` on an existing connection), so a changed or revoked login stayed
+  invisible until the pool needed a new connection (observed live in the #125 deliberate-password-change test).
+- **Control:** a new indicator opens ONE fresh runtime-login connection through the connection factory (same target, login,
+  TLS and startup options as the runtime pool; read-only session; `application_name` ending `-health`), runs `SELECT 1`,
+  closes it. Single flight; result (up or down) cached 5 s on a monotonic clock; connect 2.5 s / query 1.5 s / whole probe 3 s.
+  Response: `status` plus the fixed text "database login failed" only (no URL, login, SQLSTATE or driver message); one log
+  line per state change with the SQLSTATE only. The connection budget counts one probe connection per API instance.
+- **Accepted signal:** /healthz is public and unauthenticated, so a caller can now tell "database reachable but the runtime
+  login is refused" from "database down" (owner decision: notice lost logins). It reveals when credentials are rotated or
+  revoked, nothing more.
+- **Residual:** under severe CPU starvation the 3 s deadline can briefly report the login down (compose marks the container
+  unhealthy only after 15 consecutive failures; `restart: unless-stopped` does not restart unhealthy containers). Behind a
+  transaction pooler with its own auth file, client auth can succeed on a stale password; only the primary endpoint is probed.
+- **Tests:** `database-login.health.spec.ts` (up; 28P01 with no leak; query failure; factory refusal fails closed; deadline;
+  single flight under 25 concurrent; cache up/down; clock jump backwards re-probes), connection-budget spec (probe slots),
+  `healthz-database-login.integration.spec.ts` (password changed → 503 while the pooled ping is up; NOLOGIN; burst of 50
+  opens one login; read-only `-health` session).
+
+## X3.5-S7 / DEAD-07 — the test admin URL is renamed, and no integration suite can skip silently (branches cleanup/x35-s7-test-admin-url, cleanup/x35-dead07-helper, 2026-11-13, PRs #126 and #127)
+- **Asset:** the disposable test cluster's bootstrap SUPERUSER URL (fixtures, identity probes, in-Jest migrations), and
+  the guarantee that the RLS / tenant / payroll integration suites actually run.
+- **S7 (release 1):** the admin URL is `TEST_DATABASE_ADMIN_URL`. The old name `TEST_DATABASE_URL_UNPOOLED` is still
+  accepted.
+  - Two different values are refused, compared as written, names only.
+  - Every X1.8 / X1.9 rule applies to whichever name supplied it.
+  - setupFiles writes the validated value under both names, so a later dotenv load cannot add a second value.
+  - The Worker-login switch refuses the admin login under either name.
+  - Every committed child-process strip list removes both names. A static spec checks this, and both CI helpers emit both
+    names with one value.
+  - Abuse cases: `test-database-guard.spec.ts` (X3.5-S7 block), `test-database-admin-url-names.spec.ts`,
+    `run-ai-e2e-env.test.cjs` (the new name and an alias of its value reach the AI e2e seed only).
+- **DEAD-07:** ~280 specs used to skip when the legacy primary URL was absent. Under Jest that branch was dead, but a
+  routing change (S6 / S8) would have turned every RLS, tenant and payroll suite into a silent skip.
+  - They now gate on `integrationTestDatabaseReady()`, which throws (never returns false) unless NODE_ENV=test and the
+    validated TEST pair are present.
+  - An AST scan fails CI if any spec skip-conditional depends on a routing connection name again
+    (`integration-test-database-gate.spec.ts`).
+- **Spec-spawned runtime children** (`runtimeChildBaseEnv`, provisioner / Worker / API spawned by worker specs) no longer
+  inherit either admin name, any `TEST_DATABASE_*` URL, `DATABASE_URL_UNPOOLED`, `MIGRATION_SECURITY_ADMIN_URL`, the role
+  bootstrap / owner / migrator passwords, or any variable holding an admin URL's password; a spec re-adds the one URL a child
+  needs after the base (`runtime-child-env.spec.ts`).
+- **Specs take the admin URL from the validated pair** (`integrationTestDatabase().adminUrl`), never from the environment;
+  a scan fails CI on any spec or test helper reading `TEST_DATABASE_URL_UNPOOLED`, `TEST_DATABASE_ADMIN_URL` or
+  `DATABASE_URL_UNPOOLED` from `process.env` (aliases, destructuring and computed keys included).
+- **Residual:** `rab-worker/.../helpers/email-process-child.cjs:33` (a forked fixture child) still reads the legacy
+  `DATABASE_URL_UNPOOLED` the Jest guard writes; it moves with S6 (the parent passes the admin URL explicitly).
+- **Release 2 (S8):** the old name is refused; the strip lists keep both names permanently.
+
+- **X2.4 Admin Panel health indicators (2026-11-12).** Actor: a signed-in non-platform-admin → `GET
+  /rest/v1/admin/health/report` → 403 (PlatformAdminGuard, then `assertActivePlatformAdmin` in the service for direct
+  callers); no audit row and no probe. A platform admin sees: API version/commit/Node/uptime, database connections vs
+  max_connections (from `pg_stat_database`, cluster-wide), Redis version and memory (`INFO server` / `INFO memory`),
+  per-queue BullMQ counts, scheduler counts. No tenant data, no host names, no URLs, no raw error text (fixed strings;
+  a failing probe says "Not reachable."). Every Redis call is a read command (tested against `COMMAND INFO` flags);
+  the report cache moved from Redis `SET EX` to process memory. Access audited as `admin.health_viewed` in the admin's
+  organisation: at most once per admin per API process every 5 minutes, plus every manual Refresh (owner assumption,
+  see the PR; at most one refresh row per admin per 5 s). A process restart resets the dedupe. The audit write is
+  bounded at 2 s and fails closed (best-effort is an open owner decision). `?refresh=1` re-probes only a report at
+  least 5 s old, through one shared in-flight probe set, so refreshes cannot multiply probes. The
+  `admin.health_viewed` rows are NOT visible in the Admin Panel Audit tab until a later migration adds the action to
+  the timeline function's allowlist (`ADMIN_AUDIT_ACTIONS_*`); until then they are in `core.audit_log` only.
+  The X1.1 "Security audit events" card (dropped failed-login audit events: durable total, this API process's count,
+  last backlog reading; a warning when anything was dropped or the total cannot be read) is kept on the reworked page
+  as one more read-only indicator (`auditEvents`, a single Redis `GET` of the drop counter, bounded like every probe).
+
+## XP-09 Q2/Q3 — Worker auth cleanup steps are isolated and drain the backlog in bounded batches (branch fix/worker-auth-cleanup-loop, 2026-11-13, PR #131)
+- **Threat:** a failure in the refresh-token cleanup (e.g. the XP-09 23503) stopped the whole cycle, so the OAuth sign-in
+  state cleanup after it never ran and rows holding provider e-mails were kept past their retention; and at most one batch
+  of 1,000 rows per day meant a busy deployment never caught up.
+- **Control:** the two steps (`auth-tokens` = core.worker_cleanup_auth_tokens, `oauth-transaction-state`) run isolated: a
+  failing step is recorded with its step name and a SQLSTATE only (nothing else from the error), the other step still runs,
+  then each failure is logged with a fixed message and reported through the existing failure path (no error text, no
+  e-mails). Each step calls its function again until a batch comes back short; every call is its own autocommit
+  transaction; the whole run is capped at 20 batches or 60 s, with one batch reserved for every later step so the OAuth
+  cleanup always gets to run.
+- **Residual:** refresh and password-reset tokens are deleted by one SQL function and cannot be isolated from each other
+  without an SQL change. A run can outlast the 30 s Worker shutdown drain; only the in-flight batch rolls back.
+- **Tests:** `token-cleanup.job.spec.ts` (isolation, fixed-text reporting, loop and caps on a fake clock),
+  `token-cleanup-loop.integration.spec.ts` (5,000-row backlog drained in one run; a backlog above the cap stops at 20
+  batches and finishes next run; a locked token table fails that step with 55P03 while OAuth rows are still deleted).
+
+## DB-SETUP — database setup the Twenty Helm way: one database setting, crewflow_owner created by db-setup, a random password in a file (branch deploy/db-setup-like-twenty; owner-approved design 2026-11-13)
+
+- **History.** 2026-11-12: one admin URL; a bootstrap child created `crewflow_owner` with a password derived from
+  APP_SECRET (HKDF). 2026-11-13 option A, then option 2: the bootstrap moved into the one-shot `db-setup` service, and
+  `PG_DATABASE_URL` became the one setting, given to db-setup only. Option 2 still derived the password from APP_SECRET
+  and changed an existing `crewflow_owner`'s password. All of that is replaced by the Helm model below
+  (`docs/plans/phase-x3/OWNER-DB-FINAL.md` Part A, `DB-SETUP-HELM-PLAN.md`): the HKDF derivation, the APP_SECRET rotation
+  procedure, the derive/print commands, the owner-path password change and the strict-provider text are gone.
+- **Install.** Bundled database: set `PG_DATABASE_PASSWORD` and `APP_SECRET`, then `docker compose up`. Your own
+  database: put its admin URL, or an existing `crewflow_owner` URL, in `PG_DATABASE_URL` (compose.env). Nothing else: no
+  SQL, no `psql`, no setup command, no second variable.
+- **Change (Helm model).** `PG_DATABASE_URL` reaches the one-shot `db-setup` service only; rab-api and rab-worker pin it
+  to `""` and refuse any value (exit 64). db-setup no longer receives APP_SECRET.
+  - Bundled db or an admin URL, first start: db-setup generates a random 32-byte password and writes it atomically to the
+    password file `/run/crewflow/db-target/owner-password` on the setup volume (0400, owner 1000:1000) BEFORE its transaction; then creates
+    `crewflow_owner` only if it is missing (the `01-crewflow-owner.sql` attributes and grants). Later starts: the file
+    exists and logs in, nothing changes.
+  - An existing `crewflow_owner` URL: O1 and the read-only refusals only; the URL's password is copied into the file. The
+    database is never written to and the password is never changed.
+  - rab-api and rab-worker mount the setup volume read-only and build the `crewflow_owner` URL from `target.json`
+    (host, port, database, TLS; no credential) and the password file. They wait (bounded, 120 s) for both, then exit 75.
+  - A crash leaves either nothing in the database (the next start reuses the file) or a matching role: the file is written
+    before the transaction.
+- **Like Twenty** (`twentyhq/twenty` `main` @ `eedb0a73`, Helm chart). Only the setup step holds the admin credential, and
+  only for the bundled database (`packages/twenty-docker/helm/twenty/templates/deployment-server.yaml:81-130`); it creates the user if missing and
+  never changes an existing user's password (`:99-116`); the app password is random, kept apart and reused on upgrades
+  (`.../templates/secret-db-url.yaml:3-8`); the server and worker receive only the app user's URL
+  (`deployment-server.yaml:142-156`, `deployment-worker.yaml:76-90`); an external database is used as given
+  (`secret-db-url.yaml:24-30`, `_helpers.tpl:56-83`). APP_SECRET is never part of a database credential, in Twenty or here.
+- **Crewflow additions (not in Twenty; labelled per OWNER-DB-FINAL A4).**
+  - **A client's admin URL → db-setup creates `crewflow_owner`.** Twenty would run the app as that login (superuser by
+    default). Crewflow's tenant isolation needs RLS, which a superuser or BYPASSRLS login skips, so the app must run as
+    `crewflow_owner`.
+  - **Password file lost + admin URL → db-setup sets a new password** (new random password → file → `ALTER ROLE
+    crewflow_owner PASSWORD`, Q4c). With Twenty, a lost secret leaves the app unable to log in. The admin login needs
+    CREATEROLE and ADMIN OPTION on `crewflow_owner` (or superuser), else db-setup refuses (64) and names the fix. db-setup
+    logs `crewflow_owner is ready (password reset because the password file was missing (Crewflow addition))`.
+- **Refusals (exit 64, fixed message, nothing written).**
+  - The password file exists but does not log in (for example the password was changed in the database): `"The stored crewflow_owner password does not log in. Delete the password file and start again with the admin address in PG_DATABASE_URL. Refusing."` (security review L1: neutral wording). No
+    automatic reset (as Twenty: the existing user is skipped).
+  - An admin URL names a database that does not exist: `"The database named in PG_DATABASE_URL does not exist (SQLSTATE 3D000). db-setup never creates a database: create it at your provider (the bundled db creates its own), then start again. Refusing."`. db-setup never creates a database (the bundled one
+    is created by the postgres image, `POSTGRES_DB`).
+  - Kept from option 2 (Crewflow has RLS, Twenty has not; OWNER-DB-FINAL A5): a `crewflow_owner` that is SUPERUSER,
+    BYPASSRLS, REPLICATION or CREATEDB, has privileged memberships or lacks the required grants; PostgreSQL below 16; an
+    admin that cannot create roles or grant; the H1 / N1 / N2 ownership and `search_path` refusals (TM-DB-3).
+- **APP_SECRET never touches the database.** Changing it changes no database password and needs no database step.
+- **Owner acceptance.** TM-DB-1, TM-DB-3, TM-DB-4 and T-1 to T-5 were accepted on 2026-11-12; the Helm model was approved
+  by the owner on 2026-11-13 (OWNER-DB-FINAL Part A). TM-DB-2 below is new with it.
+
+### TM-DB-1 (accepted risk) — the database URL sits in db-setup's definition
+- **Actor → action → consequence.** Anyone who can read the compose project / OpenShip service definition (compose.env,
+  `docker compose config`), or run `docker inspect` on the `db-setup` container, reads `PG_DATABASE_URL` → with an admin
+  URL, full control of the database (superuser on the bundled db, bypassing RLS, COPY ... PROGRAM inside the db
+  container; owner / CREATEROLE on a managed one); with a `crewflow_owner` URL, the schema owner login.
+- **Controls.** `PG_DATABASE_URL` is interpolated ONLY into db-setup (and `PG_DATABASE_PASSWORD` only into db-setup's
+  default URL and the bundled db's `POSTGRES_PASSWORD`). rab-api and rab-worker pin it to `""`: it is not in their PID 1,
+  a runtime process, a `docker exec` process or a health check. db-setup runs only the bootstrap child and exits; it holds
+  no port and the same hardening as rab-api. The entrypoints refuse a non-empty `PG_DATABASE_URL` (64); in production the
+  API, the Worker and the migrate child refuse a non-`crewflow_owner` login before connecting (`runtime-db-config.ts`
+  `checkRuntimeLogin`). The gates (compose-owner-login, verify-image-compose static and `--environment`) refuse a non-empty
+  or interpolated `PG_DATABASE_URL` on rab-api / rab-worker, a compose file that interpolates `${PG_DATABASE_URL...}` more
+  than once, any database credential or postgres:// value anywhere in their definition, and require db-setup's exact
+  shape. The compose.env lint refuses a former separated login, TLS below verify-full, a transaction pooler, a URL without
+  a password, and `PG_DATABASE_ADMIN_URL`; `PG_DATABASE_URL` in database.env / runtime.env is refused. The bundled db is
+  never published and sits on an internal network.
+- **Measured.** Option A and option 2 (PostgreSQL 16, live stacks): no admin credential in any rab-api / rab-worker
+  process, `docker exec` process, health check or container definition. The Helm model: NOT re-measured on a live stack in this docs change (the CODE agent updated the live harness scenarios for OWNER-DB-FINAL A6 in d43696f8).
+- **Residual.** As Twenty: the deployment configuration (compose.env, db-setup's definition) must be protected like the
+  database itself; who can read it is outside Crewflow.
+
+### TM-DB-2 (new, Helm model) — the crewflow_owner password file on the setup volume
+- **Actor → action → consequence.** Anyone who can read the setup volume (root on the host, `docker run -v` on it, a copy
+  of a volume backup) reads the `crewflow_owner` password → the schema owner login (RLS is FORCED, but the owner can alter
+  policies).
+- **Controls.** The file is written atomically (temp file + rename), mode 0400, owner 1000:1000, by db-setup only;
+  rab-api and rab-worker mount the volume read-only. It is never logged or printed, never in an env file, a compose
+  variable or the image: the gates refuse a variable carrying the `crewflow_owner` password and any mount at the
+  password-file path other than db-setup's volume (db-setup read-write, the apps read-only), and the image gate fails on
+  any file under `/run/crewflow/db-target` in the image. Security review L3: the gates also refuse `volumes_from` on any
+  service, a `secrets` / `configs` target under `/run/crewflow`, a bind whose host source is inside Docker's volume store
+  (`/var/lib/docker/volumes/...`, rootless `~/.local/share/docker`), a `tmpfs` at or under `/run/crewflow/db-target`, and a
+  rab-redis that is not `user: 999:<gid>`. Reading is strict (security review L2): opened `O_RDONLY|O_NOFOLLOW|O_NONBLOCK`,
+  then `fstat` on that descriptor must show a regular file of at most 4096 bytes owned by the reading uid with no
+  group/other bit; an empty file, a symlink, a FIFO or a wrong owner/mode is refused (exit 64), never read as "missing".
+  Writing loops until every byte is written, sets the mode on the descriptor (never a path-based chmod) and fsyncs the
+  file and the directory. A lost file is replaced only through the pending file below. Runs never overlap on one volume
+  (security re-review F1, R1/R2): db-setup.sh first takes the KERNEL lock `flock -n` on fd 9 (`.db-setup.flock` in the
+  volume; a second run stops with exit 70 before it reads, deletes or writes any file; the kernel releases it however the
+  holder dies, so nothing is guessed about staleness), and the child also takes a lock directory (`.db-setup.lock`, mkdir);
+  under the kernel lock a leftover directory is taken over through a tombstone checked by inode, without it never. A
+  pending file is promoted only when it still holds this run's password (constant-time byte compare; otherwise exit 70 and
+  nothing is renamed). Before the lock, two runs on one volume could leave the apps' file on one password and the role on
+  another. The gates also refuse every other path to the volume from an added service (security re-review F2): a second
+  top-level name for it (`external` alias), a `driver_opts` bind, `pid`/`ipc`/`network_mode` sharing with db-setup,
+  rab-api or rab-worker (or any `container:`), a bind of the Docker root or its ancestors, and an added service running as
+  uid 0 or 1000. Re-check R3/R4/I4: uids are parsed as canonical decimals (`01000`, `00` refused); binds of Docker's
+  actual root (`docker info` DockerRootDir), its ancestors and descendants, of anything under `/run` or `/var/run` and of any
+  `*.sock` are refused; an added service must drop all capabilities, set no-new-privileges, use no host namespace, map no
+  device, add no group and run with no group 0; no volume of the deployed model has driver options or a non-local driver;
+  the password volume's Docker name is exactly `<project>_crewflow-db-target`. The password is random (32 bytes),
+  not derived from anything, so an APP_SECRET leak gives no database login. The bundled db is reachable only from the app network; an external database
+  only through the provider's allow-list; verify-full TLS.
+- **Residual.** Volume backups and snapshots contain the password: protect and encrypt them like the database. The file
+  is plaintext at rest (T-9). Changing it on purpose: stop rab-api and rab-worker, remove `owner-password` and any pending
+  `owner-password.next` with a one-off, environment-free `docker run` of the current image on the volume, `up -d` (the A4 reset; runbook section 7; not yet run live). Running apps do not pick up a new password on their own:
+  their new connections fail with 28P01 until they are recreated, hence the stop.
+- **Crash or failure during an A4 reset (security review L1, fixed).** db-setup stores the NEW password exclusively as the
+  pending file `owner-password.next` before its transaction, and renames it over `owner-password` only after the COMMIT
+  and a successful login with it. A run that fails in between (a crash, a Q4c error such as 22023, a lost connection)
+  leaves `owner-password` untouched. The next start settles the pending file first: it logs in (the transaction had
+  committed) -> promoted; 28P01 (nothing committed) -> deleted, and the normal path runs (A4 again when `owner-password`
+  is missing); any other error -> exit 70 with the pending file kept. The apps read only `owner-password`. The stale-file
+  refusal (`passwordFileStale`, exit 64) is now reached only when the stored password really does not log in.
+- **Residuals after the third re-check (accepted, recorded).**
+  - The apps' start wait is bounded by a COUNT (60 derive attempts, 2 s apart), so its real worst case is
+    60 x (a cold `node` start + 2 s): about 2.5 min on an idle host, up to about 12 min if a cold start takes 10 s under load.
+    The derive step itself has no external timer (busybox `timeout` held the fd-4 pipe for its whole bound); a FIFO, a
+    symlink or a directory in place of a file is refused at once (O_NONBLOCK|O_NOFOLLOW + fstat), but a filesystem that
+    hangs below `open` is not bounded (optional I1, an in-process watchdog with async reads, not done).
+  - The derive step writes the URL only to an fd 4 its caller declared (`CREWFLOW_RUNTIME_URL_FD=4`, set only by
+    api-prestart.sh / worker-start.sh and the documented operator command) and that is a pipe or a socket.
+  - A run started WITHOUT db-setup.sh (development, the live harness) has no kernel lock; if it is killed it leaves
+    `.db-setup.lock`, which is never taken over automatically (the message says to remove it when no db-setup runs).
+  - `db` is in LOCAL_DATABASE_SERVICE_HOSTS (the bundled database's service name, as `devdb`/`postgres`/`pg`): non-production
+    processes and DB_TARGET=local|test commands treat an UNMARKED database on host `db` as local (no remote-unmarked
+    refusal). The identity marker does not protect it either: it is optional in production (BC-11) and its migration is not
+    approved for production, so a production bundled database is usually unmarked. What protects the production bundled
+    `db` is reachability: it publishes no port and sits only on the internal `crewflow-db` network (gate-enforced), where
+    only db-setup, rab-api and rab-worker are attached; a non-production process or command elsewhere cannot resolve or
+    reach that `db`. Only an override that attaches another service to `crewflow-db` could, and the gates refuse that (the
+    committed files' service list; in a deployed model an added service on `crewflow-db` is refused).
+- **One Crewflow deployment per PostgreSQL cluster when using an admin URL (security review L4, owner-approved).** Roles
+  are cluster-wide: two deployments on one cluster share the one `crewflow_owner`, and an A4 reset by one (its password
+  file lost) would change the password the other uses. Before an A4 reset the admin session runs one read-only SELECT
+  (Q2b: `pg_shdepend` rows of `crewflow_owner` in another database, or its ownership of / ACL entry on another database)
+  and refuses (exit 64, `ownerInOtherDatabase`) before anything is stored or written. Live: a second database with a
+  fresh setup volume is refused and the first deployment's password keeps working.
+
+### TM-DB-3 (accepted; changed by the Helm model) — a bootstrap runs with admin rights on every `up` (db-setup)
+- **Actor → action → consequence.** A bug in, or an attacker-controlled input to, the bootstrap child could misuse admin
+  rights.
+- **Controls.** Fixed SQL only; the only interpolated values are the database name (`%I`) and the SCRAM verifier (`%L`
+  inside a DO block, delivered as a bind parameter and a transaction-local setting, never in statement text). It never
+  changes an existing role's attributes. It writes only when `crewflow_owner` is missing (CREATE ROLE and the narrow
+  grants, not `GRANT ALL`) or on the A4 reset (ALTER ROLE ... PASSWORD). It refuses (exit 64, fixed message) an existing
+  `crewflow_owner` that is SUPERUSER, BYPASSRLS, REPLICATION, CREATEDB, NOLOGIN, NOINHERIT, expired, or a member of a
+  privileged role; an admin that cannot create roles or grant on the database; and a server below PostgreSQL 16. It takes a
+  transaction advisory lock (key 7165901520526864244), re-reads the facts under it, retries a lost race a bounded number of
+  times (at most 3 attempts), re-verifies the result and re-probes the login after commit. It prints fixed text and
+  SQLSTATE classes only, never a URL, password, verifier, host or database name. The plaintext password never reaches the
+  server (a pre-hashed SCRAM verifier is sent); a superuser admin turns statement and parameter logging off for its session.
+  The `crewflow_owner` URL path runs read-only statements only, on a session opened with
+  `default_transaction_read_only=on` (security review I1, owner-approved: a write there fails with 25006).
+- **Session pinning (security review H1, CVE-2018-1058 class).** A `crewflow_owner` that owns the database (directly or
+  through an inherited role) could set a database-level `search_path` and plant an operator that the admin session's
+  unqualified `=` would then run with admin rights. Every bootstrap connection is opened with the startup options
+  `-c search_path=pg_catalog,pg_temp -c default_transaction_read_only=off` (they override role and database defaults), and
+  the first statement of every session sets the same search_path again. The admin path refuses (64) before any write when
+  `crewflow_owner` owns the database (directly or through ANY role membership, inherited or SET-only:
+  `pg_has_role(..., 'MEMBER')`, re-review N2), or when a database-wide or `crewflow_owner`-level `search_path` default
+  exists. Residual (re-review N1): every database that went through `transition-from-separated.sql` is owned by
+  `rab_owner`, of which `crewflow_owner` is a member, so it must use the `crewflow_owner` URL, never the admin URL
+  (runbook 5.4). Changing the database owner to make the admin URL work is not a supported fix.
+- **Residual.** With a NON-superuser admin whose provider logs statements with bind parameters (`log_statement=all`,
+  pgaudit with parameters), the SCRAM verifier, never the password, lands in the provider's log. A verifier does not allow
+  a login; offline guessing of a random 256-bit password is infeasible. A provider that refuses pre-hashed passwords is
+  refused (64): there is no plaintext path (owner decision D6).
+- **Evidence.** The H1 / N1 / N2 scenarios ran live on PostgreSQL 16 and 18 before the Helm model (option 2 harness). The Helm-model
+  harness scenarios (d43696f8: fresh, restart, lost file, stale file, missing database, crewflow_owner URL unchanged,
+  refusals, H1, N1, N2) are listed under Tests; their live results are not recorded here.
+
+### TM-DB-4 (accepted) — the bundled database password in the environment
+- **Change.** `PG_DATABASE_PASSWORD` is the bundled db's superuser password, read by compose only: the db's
+  `POSTGRES_PASSWORD` and the default admin URL. It reaches no rab-api / rab-worker variable (the gates refuse it on every
+  service but db, and in database.env / runtime.env; api-prestart.sh, worker-start.sh and db-setup.sh refuse it if present).
+- **Controls on the bundled db.** Digest-pinned official postgres image (Debian 16; 17 and 18 work with the same layout);
+  999:999, read-only root, `cap_drop ALL`, no-new-privileges, no port, internal network. It makes its own CA and a server
+  certificate for `db` on first start; the CA private key is deleted right after signing; the server key stays in the data
+  volume (0600); the app mounts only the CA certificate, read-only. On every start its entrypoint writes the `pg_hba.conf`
+  the server reads (`hba_file`): `local all all scram-sha-256` and `hostssl all all ... scram-sha-256` only, so every TCP
+  login must use TLS and a password (a plain-TCP connection is refused), and even a process inside the db container needs
+  the password. The gates refuse any other `pg_hba` content, a `POSTGRES_HOST_AUTH_METHOD`, initdb arguments other than
+  SCRAM-only, and any db environment key outside an exact allow-list, in the committed AND the deployed model.
+- **Residual.** The superuser can log in over the internal network (needed by db-setup's bootstrap child; T-3).
+
+### Trade-offs applied (SECURITY TRADE-OFF blocks; T-1 to T-5 owner-accepted 2026-11-12; T-9 follows the owner's Helm-model decision 2026-11-13)
+- **T-1 — privileged URL in a container definition, db-setup's only.** The compose.env lint accepts a provider-admin login
+  in `PG_DATABASE_URL`, which reaches db-setup only; it still refuses the former separated logins and schema roles, TLS
+  below verify-full, a transaction pooler and a URL without a password. rab-api / rab-worker carry `""` only. Residual:
+  TM-DB-1.
+- **T-2 — `POSTGRES_PASSWORD` from an environment variable** on the bundled db, in both compose files (decision D4;
+  OpenShip has no secret files). Residual: visible in the compose config / `docker inspect db`.
+- **T-3 — the superuser may log in over the internal network** on the bundled db, only from db-setup's bootstrap child
+  in practice (no other service holds its password), and only over TLS with SCRAM (`hostssl`). Still: no port, an
+  internal network. Not narrowed to db-setup's address: pg_hba cannot name a compose service reliably.
+- **T-4 — not applied** (D1 = a: verify-full kept for the bundled db; no plaintext exception).
+- **T-5 — retired.** rab-api / rab-worker never receive any database URL; the entrypoints build the `crewflow_owner` URL
+  from the target file and the password file and refuse any non-empty `PG_DATABASE_URL`; a runtime started any other way
+  still refuses a non-`crewflow_owner` login in production before connecting.
+- **T-6 — closed by the Helm model.** db-setup reads `database.env` only, never `runtime.env`, so it receives no APP_SECRET
+  and no runtime secret; `db-setup.sh` refuses APP_SECRET (exit 64) and the gates refuse it on db-setup.**
+- **T-7 — the API's wait is on the files only.** api-prestart.sh waits (120 s) for db-setup's target file and password
+  file, not for a successful login; db-setup writes the target only after the role is ready. A start that finds a file but
+  cannot log in is refused and restarted by Docker; it never takes an admin path.
+- **T-9 (Helm model; follows the owner's decision OWNER-DB-FINAL Part A) — the `crewflow_owner` password at rest in
+  plaintext in the setup volume file.**
+  - Control relaxed: the password is stored unencrypted in `/run/crewflow/db-target/owner-password` (0400, uid 1000).
+  - Who can read it: root on the host or anyone with Docker access (the volume, `docker cp`, a backup), and a process inside
+    rab-api, rab-worker or db-setup (`docker exec`), which run as uid 1000.
+  - Why: the owner chose the Twenty Helm model; this is the same class as Twenty's Kubernetes secret
+    (`secret-db-url.yaml:3-8`), which is also readable by whoever controls the cluster.
+  - What still holds: never in an env file, a compose variable, the image or a log; the apps mount it read-only; the gates
+    refuse other mounts at that path and a variable carrying it (TM-DB-2).
+  - Veto options: an encrypted file (needs a second secret to decrypt it, which then has the same exposure), or Docker
+    secrets (OpenShip has no secret files).
+- **OpenShip.** OpenShip discards `depends_on` conditions: `service_completed_successfully` is NOT VERIFIED there. The API
+  does not rely on it: it waits, bounded, for the files and refuses (exit 75) without them.
+- **Deployment identity (lead decision 2026-11-12): `db` joins `LOCAL_DATABASE_SERVICE_HOSTS`.** Outside production, an
+  unmarked database at the single-label host `db` is treated as local (warn and continue). Production is unaffected.
+  Residual: a non-production process whose `db` resolves through a DNS search domain to a remote database is not refused
+  for a missing marker.
+- **Owner CLI one-off authority.** With arguments, `api-prestart.sh` takes `DB_TARGET` / `ALLOW_PRODUCTION_DB_COMMANDS`
+  out of its environment before its refusal loops and hands them back only to the one-off command; an API start without
+  arguments still refuses both.
+
+### Open follow-up (pre-existing, NOT fixed here) — finding B (area 6, Low)
+A migrate child started with a `crewflow_owner` that is SUPERUSER is refused (exit 67, "the login is SUPERUSER"), but
+before the refusal its DataSource has already created the `uuid-ossp` and `citext` extensions (owned by that login).
+Root cause: the identity gate runs after the TypeORM DataSource initialise. In the deploy compose files db-setup refuses
+such a role before any write and rab-api never starts, so this is reachable only by a migrate child started some other
+way. A separate follow-up (fail-closed ordering in the migrate child) is for the owner.
+
+### Upgrade hazard (PR #125 review, finding 3) — a `database.env` URL is silently overridden
+`docker-compose.image.yml` commits `PG_DATABASE_URL: ""` on rab-api / rab-worker and `${PG_DATABASE_URL:-<bundled db>}` on
+db-setup (which also reads database.env), and a compose `environment:` value wins over `env_file`: an existing deployment
+that upgrades with `PG_DATABASE_URL` still in `database.env` connects to the new, empty bundled `db` and fresh-installs
+there (its real database is untouched; the service runs empty, and a declared deployment identity is auto-bound to the new
+database, which the plan's fresh-install rule allows). Not refused in code: the container only ever sees the winning
+value, and refusing a fresh install on the bundled `db` would need a new rule that also blocks a legitimate first install.
+Controls: the runbook's explicit upgrade step (3.2 step 0: move the line to `compose.env` before `pull`);
+`compose-owner-login.cjs --lint-env-file database` and the `verify-image-compose.cjs --environment` preflight both refuse a
+`database.env` that holds `PG_DATABASE_URL`; a `PG_EXPECTED_DATABASE_NAME` other than `crewflow` (the bundled db's name)
+makes every process refuse the bundled database. Residual: an operator who skips the lint and the preflight, with no
+`PG_EXPECTED_DATABASE_NAME` or one equal to `crewflow`.
+
+### Rollback
+A rollback across this release needs the previous release's compose files (its image has no `worker-start.sh`,
+`db-setup.sh` or bootstrap child: under this release's files db-setup fails and rab-api never starts) and a
+`crewflow_owner` URL in `PG_DATABASE_URL`. With a `crewflow_owner` URL in compose.env it is that same URL (db-setup never
+changed its password). With an admin URL or the bundled db, the URL is printed by a one-off `docker run` of the current
+image that runs the apps' own derive step on the read-only volume (`--pull never --log-driver none --network none --read-only --cap-drop ALL --user
+1000:1000`; runbook 3.6; SENSITIVE output; not yet run live), or a new password is set with `01-crewflow-owner.sql`.
+
+- **Tests.** owner-credential / owner-password-file / derive-runtime-url / owner-bootstrap / db-target / runtime-login /
+  runtime-db-config / never-in-runtime-env / deployment-identity specs; the Worker's `owner-password-wait` spec; the
+  bootstrap harness `bootstrap-owner-login-check.ts` (OWNER-DB-FINAL A6: fresh, restart, lost file, stale file, missing
+  database, crewflow_owner URL unchanged, refusals, H1, N1, N2); the prestart shell tests (target and password files, any
+  non-empty `PG_DATABASE_URL` refused, APP_SECRET refused by db-setup.sh, the bounded wait, PID 1, one-off); the compose
+  gates and their tests (a variable carrying the crewflow_owner password, a mount at the password-file path other than
+  db-setup's volume (db-setup read-write, rab-api / rab-worker read-only), APP_SECRET on db-setup, a non-empty or
+  interpolated `PG_DATABASE_URL` on rab-api / rab-worker, `PG_DATABASE_ADMIN_URL`); the image gate (any file under
+  `/run/crewflow/db-target` in the image fails it); area 6's `deploy-order-tests/run-db-setup-tests.cjs` on postgres 16,
+  17 and 18, NOT yet re-run on the Helm model.
+
+## XP-09 Q6 — refresh-token revocation keeps the first revocation time (branch fix/refresh-token-revoke-first-wins, 2026-11-13, PR #132)
+- **Threat:** an attacker or user replays an old, rotated refresh token, or several revocations happen (logout, password
+  change, reuse detection). Each one rewrote `core.refresh_token.revoked_at` on every row of the family or user, including
+  rows already revoked. That erased when a token actually stopped being valid (reuse-investigation evidence) and restarted
+  the 181-day retention clock of `core.worker_cleanup_auth_tokens`, so repeated replays could keep dead token rows forever.
+- **Control:** `RefreshTokenService.revokeFamily`, `revokeAllForUser` and `revokeAllForUserExcept` ("log out of other
+  devices" and the MFA-change path, profile.service.ts / mfa-management.service.ts) stamp only rows
+  `WHERE revoked_at IS NULL` — the same rule as `revokeAllForOrganisation` and the `user_session` CAS. Live rows are still revoked; revoked rows keep their
+  first time. No row can become un-revoked.
+- **Tests:** `refresh-token-revoke-first-wins.integration.spec.ts` (revoke, then revoke again later → revoked_at unchanged,
+  for all three methods, incl. revokeAllForUserExcept keeping the excepted family live and backdated times unchanged; replaying a rotated token twice keeps its rotation time; fails 3/3 on the previous code) and unit tests
+  in `refresh-token.service.spec.ts`.

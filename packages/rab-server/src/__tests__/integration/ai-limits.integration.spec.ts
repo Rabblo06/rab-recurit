@@ -5,6 +5,7 @@ import { randomUUID } from 'node:crypto';
 import { AiConfigService } from '../../modules/ai/services/ai-config.service';
 import { AiQuotaService, utcDay } from '../../modules/ai/services/ai-quota.service';
 import { AiKit, aiOrganisation, ask, bearer, bootAiKit, jobFor, manager, newConversation, turnRow } from './helpers/ai-test-kit';
+import { integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
 
 /**
  * AI Phase 1 — limits and fail-closed behaviour (brief §15 "Limits and reliability"): per-user 429, per-organisation
@@ -12,7 +13,7 @@ import { AiKit, aiOrganisation, ask, bearer, bootAiKit, jobFor, manager, newConv
  * ATOMIC concurrent reservations, input bound, conversation bound, and a Redis outage refusing new AI work (API 503,
  * Worker AI_SERVICE_UNAVAILABLE) instead of running without limits.
  */
-const RUN = Boolean(process.env.DATABASE_URL);
+const RUN = integrationTestDatabaseReady();
 const describeIfDb = RUN ? describe : describe.skip;
 
 describeIfDb('AI limits (integration)', () => {

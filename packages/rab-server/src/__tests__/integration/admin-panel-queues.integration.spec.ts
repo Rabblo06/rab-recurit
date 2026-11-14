@@ -15,6 +15,7 @@ import { TenantContextService } from '../../engine/core-modules/tenant/tenant-co
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
 import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-pipe';
+import { integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
 
 /**
  * Crewflow Platform Admin Panel — queue jobs against REAL Redis/BullMQ (D7, plan §6):
@@ -26,7 +27,7 @@ import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-
  * The queues run under an ISOLATED per-run prefix (the service's real D7 definitions, only the prefix swapped) so this
  * suite never touches the jobs other suites publish to the shared test Redis.
  */
-const RUN = Boolean(process.env.DATABASE_URL && process.env.REDIS_URL);
+const RUN = integrationTestDatabaseReady() && Boolean(process.env.REDIS_URL);
 const describeIfDb = RUN ? describe : describe.skip;
 const sha256 = (v: string) => createHash('sha256').update(v).digest('hex');
 jest.setTimeout(180_000);

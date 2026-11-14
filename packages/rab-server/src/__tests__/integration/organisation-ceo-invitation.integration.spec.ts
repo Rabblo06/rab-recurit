@@ -13,6 +13,7 @@ import { OrganisationOnboardingService } from '../../modules/manager/services/or
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
 import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-pipe';
+import { integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
 
 /**
  * Owner correction 2026-10-23 — organisation creation through Settings → Members → Add: the platform administrator
@@ -22,7 +23,7 @@ import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-
  *
  * Covers the brief's tests 4–9, 15–18 at the API level (UI and workspace onboarding: E2E spec 01).
  */
-const RUN = Boolean(process.env.DATABASE_URL);
+const RUN = integrationTestDatabaseReady();
 const describeIfDb = RUN ? describe : describe.skip;
 const PASSWORD = 'Ceo-Invite-Passw0rd!';
 

@@ -3,6 +3,7 @@ import { Client } from 'pg';
 
 import { resolveIntegrationTestDatabase } from '../../database/typeorm/core/test-database-guard';
 import { provisionWorkspaceSchema, WORKSPACE_TABLES } from '../../database/typeorm/workspace-schema/provision-workspace-schema';
+import { integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
 
 /**
  * Server-path workspace provisioning — DATABASE layer (migration ServerPathWorkspaceProvisioning1786719500000).
@@ -16,7 +17,7 @@ import { provisionWorkspaceSchema, WORKSPACE_TABLES } from '../../database/typeo
  * fixed function and nothing else (no DDL, no RLS toggling, no role switching, no lifecycle mutators, no template control).
  */
 // Needs core.provision_workspace (migration 1786719500000), which every database migrated from the chain now has.
-const RUN = Boolean(process.env.DATABASE_URL);
+const RUN = integrationTestDatabaseReady();
 const describeIfDb = RUN ? describe : describe.skip;
 
 interface Ws {

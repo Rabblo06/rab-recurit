@@ -1,6 +1,6 @@
 name: Disposable PostgreSQL
 description: >-
-  Starts a throwaway PostgreSQL 16 container on 127.0.0.1:5432 AFTER checkout (no volume mount from the workspace, which
+  Starts a throwaway PostgreSQL container (input postgres-major, default 16) on 127.0.0.1:5432 AFTER checkout (no volume mount from the workspace, which
   broke checkout with EACCES when it was a service volume), marked crewflow.disposable_cluster=on for the M2 harness.
   Writes MIGRATION_SECURITY_ADMIN_URL, CREWFLOW_BOOTSTRAP_PASSWORD, CREWFLOW_APP_BOOTSTRAP_PASSWORD,
   CREWFLOW_WORKER_BOOTSTRAP_PASSWORD, CREWFLOW_OWNER_BOOTSTRAP_PASSWORD and APP_SECRET to $GITHUB_ENV, every value random
@@ -9,10 +9,16 @@ description: >-
   login. CREWFLOW_WORKER_BOOTSTRAP_PASSWORD (E5) is the password the legacy M2 harness gives crewflow_worker when it creates
   that role; only the legacy restricted-migrator build still uses it (until PR #9).
 
+inputs:
+  postgres-major:
+    description: PostgreSQL major for the disposable cluster
+    required: false
+    default: '16'
+
 runs:
   using: composite
   steps:
-    - name: Start disposable PostgreSQL 16
+    - name: Start disposable PostgreSQL ${{ inputs.postgres-major }}
       shell: bash
       run: |
         set -euo pipefail
@@ -35,7 +41,7 @@ runs:
         docker run -d --name disposable-postgres -p 127.0.0.1:5432:5432 \
           -v "${RUNNER_TEMP}/disposable-pg/su_pass:/run/disposable/su_pass:ro" \
           -e POSTGRES_USER=ci_bootstrap -e POSTGRES_PASSWORD_FILE=/run/disposable/su_pass -e POSTGRES_DB=postgres \
-          postgres:16-alpine -c crewflow.disposable_cluster=on > /dev/null
+          "postgres:${{ inputs.postgres-major }}-alpine" -c crewflow.disposable_cluster=on > /dev/null
         # Over TCP, not the socket: the image's temporary init server answers on the socket only, then restarts.
         for i in $(seq 1 90); do
           docker exec disposable-postgres pg_isready -h 127.0.0.1 -U ci_bootstrap -d postgres > /dev/null 2>&1 && break

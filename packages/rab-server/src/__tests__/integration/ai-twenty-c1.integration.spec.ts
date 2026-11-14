@@ -9,13 +9,14 @@ import { AiAssistantService } from '../../modules/ai/services/ai-assistant.servi
 import { TEST_MOCK_MODEL_ID } from '../support/ai/test-catalogue';
 import { AiKit, aiOrganisation, bearer, bootAiKit, manager } from './helpers/ai-test-kit';
 import { TestIdentity } from './helpers/test-identities';
+import { integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
 
 /**
  * C1 backend (docs/ai/TWENTY_UI_CONTRACT_DELTAS.md CD-1 / CD-2 / CD-3 / CD-4 / CD-5) on the real AppModule, PostgreSQL
  * (crewflow_app, FORCE RLS) and Redis. Abuse cases first: RLS floor, foreign organisation, non-CEO holding `ai.settings`,
  * mass assignment, hidden-Unicode / markup names, Inspect, both switches; then the behaviour.
  */
-const RUN = Boolean(process.env.DATABASE_URL);
+const RUN = integrationTestDatabaseReady();
 const describeIfDb = RUN ? describe : describe.skip;
 const ORIGIN = 'http://localhost:5173';
 const sha256 = (v: string) => createHash('sha256').update(v).digest('hex');

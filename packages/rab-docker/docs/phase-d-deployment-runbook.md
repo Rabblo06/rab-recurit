@@ -5,7 +5,9 @@
 > docker compose up -d`. The API starts first and migrates; the Worker starts when the API is healthy. Never update the
 > API alone while an older Worker keeps running. Take a provider snapshot/restore point before each production deploy.**
 > Rollback: `CREWFLOW_IMAGE_TAG=<previous digest>`, then the same command. Any step below that deploys or restarts the
-> API or the Worker on its own is superseded; follow `release/OWNER-LOGIN-DEPLOYMENT.md` section 3.
+> API or the Worker on its own is superseded; follow `release/OWNER-LOGIN-DEPLOYMENT.md` section 3. The `psql` role steps
+> below are historical and not part of any install: since DB-SETUP (PR #125) the one-shot `db-setup` service
+> creates the only login, `crewflow_owner`, from the one `PG_DATABASE_URL` setting.
 
 Status: prepared 2026-11-01. Nothing in this document has been run against staging or production. All evidence quoted
 below comes from disposable rehearsal databases and stacks (2026-11-01); the detailed evidence lives in internal reports

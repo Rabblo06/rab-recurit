@@ -11,6 +11,7 @@ import { TenantContextService } from '../../engine/core-modules/tenant/tenant-co
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
 import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-pipe';
+import { integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
 
 /**
  * CF-07 (October 15 audit): a promotion to platform admin must not let a dormant, long-lived, lower-privilege session
@@ -18,7 +19,7 @@ import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-
  * the target's sessions in the grant transaction, in the target's own organisation, and the next sign-in is of the
  * platform-admin class (24 h absolute).
  */
-const RUN = Boolean(process.env.DATABASE_URL);
+const RUN = integrationTestDatabaseReady();
 const describeIfDb = RUN ? describe : describe.skip;
 const DAY_MS = 24 * 60 * 60 * 1000;
 

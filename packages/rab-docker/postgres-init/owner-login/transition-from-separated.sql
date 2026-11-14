@@ -13,7 +13,7 @@
 -- the DIRECT host, by SQL only, never a console:
 --   psql "<admin URL of the database>" -v owner_password_file=/path/to/secret -f transition-from-separated.sql
 --   (default file: /run/secrets/crewflow-owner-password; at least 24 characters)
--- Tested by scripts/migrate/owner-login/owner-login-lifecycle-check.ts (scenario transition) on PostgreSQL 16 and 18.
+-- Tested by scripts/migrate/owner-login/owner-login-lifecycle-check.ts (scenario transition) on PostgreSQL 16, 17 and 18.
 \set ON_ERROR_STOP on
 SELECT pg_catalog.set_config('log_min_error_statement', 'panic', false), pg_catalog.set_config('log_statement', 'none', false)
  WHERE (SELECT rolsuper FROM pg_catalog.pg_roles WHERE rolname = current_user);

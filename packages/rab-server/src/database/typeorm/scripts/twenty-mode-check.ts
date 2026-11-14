@@ -31,14 +31,15 @@
  * the exit code alone. Output: database names, migration names, counts. Never a URL or password.
  */
 import { spawn, spawnSync } from 'node:child_process';
-import { createHash, createHmac, pbkdf2Sync, randomBytes, randomUUID } from 'node:crypto';
-import { existsSync, readdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
+import { createHash, randomBytes, randomUUID } from 'node:crypto';
+import { existsSync, readdirSync, unlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 
 import { Client } from 'pg';
 
-import { compareWithGolden } from '../core/security-posture';
+import { scramSha256Verifier } from '../../owner-login/owner-credential';
+import { compareWithGolden, readSecurityPostureGoldens } from '../core/security-posture';
 
 class Refusal extends Error {}
 
@@ -55,7 +56,8 @@ const DEPLOY_PREPARE = join(DIST, 'deploy-prepare.js');
 const OWNER_SQL = join(REPO_ROOT, 'packages', 'rab-docker', 'postgres-init', 'owner-login', '01-crewflow-owner.sql');
 const TRANSITION_SQL = join(REPO_ROOT, 'packages', 'rab-docker', 'postgres-init', 'owner-login', 'transition-from-separated.sql');
 const MIGRATIONS_DIR = join(__dirname, '..', 'core', 'migrations');
-const GOLDEN = readFileSync(join(__dirname, '..', 'core', 'security-posture.golden.txt'), 'utf8').split('\n').filter(Boolean);
+/** The committed goldens; compareWithGolden picks the one for the server's major (DB-SETUP section 6 follow-up). */
+const GOLDEN = readSecurityPostureGoldens();
 const RUN_ID = `${Date.now().toString(36)}${randomBytes(2).toString('hex')}`;
 
 /** Seam targets (reviewed by name in the report). */
@@ -91,17 +93,12 @@ export function qi(name: string): string {
 }
 
 /**
- * A SCRAM-SHA-256 verifier computed HERE, so no plaintext password is ever part of a statement (a failed statement can be
+ * A SCRAM-SHA-256 verifier computed in Node, so no plaintext password is ever part of a statement (a failed statement can be
  * written to the server log with its text). PostgreSQL stores a pre-hashed verifier as-is (CREATE ROLE … PASSWORD '<verifier>').
+ * The implementation moved to owner-login/owner-credential.ts (`scramSha256Verifier`, DB-SETUP-PLAN §2.1); this name stays.
  */
 export function scramVerifier(password: string): string {
-  const salt = randomBytes(16);
-  const iterations = 4096;
-  const salted = pbkdf2Sync(password, salt, iterations, 32, 'sha256');
-  const hmac = (key: Buffer, text: string) => createHmac('sha256', key).update(text).digest();
-  const storedKey = createHash('sha256').update(hmac(salted, 'Client Key')).digest();
-  const serverKey = hmac(salted, 'Server Key');
-  return `SCRAM-SHA-256$${iterations}:${salt.toString('base64')}$${storedKey.toString('base64')}:${serverKey.toString('base64')}`;
+  return scramSha256Verifier(password);
 }
 
 export function assertHarnessDatabaseName(db: string): void {

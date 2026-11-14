@@ -21,6 +21,7 @@ import { createAdminDataSource } from './helpers/admin-datasource';
 import { bookBeforeDeadline } from './helpers/book-before-deadline';
 import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
 import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-pipe';
+import { integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
 
 /**
  * Agency payment calendar, allocation, payroll runs and official payslips (PayrollCalendarRunsPayslips1786719200000).
@@ -32,7 +33,7 @@ import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-
  * lands in a known period of the official 2026 calendar whatever the machine date (default: Tue 20 Oct 2026 10:00 BST,
  * period 12 Oct – 25 Oct 2026, payday 4 Nov 2026).
  */
-const RUN = Boolean(process.env.DATABASE_URL);
+const RUN = integrationTestDatabaseReady();
 const describeIfDb = RUN ? describe : describe.skip;
 
 jest.setTimeout(300_000);

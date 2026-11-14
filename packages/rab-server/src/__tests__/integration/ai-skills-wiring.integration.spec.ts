@@ -9,6 +9,7 @@ import { AI_SKILL_CATALOGUE_HEADER, AI_SKILL_PROMPT_RULE, AI_SKILL_RESULT_NOTICE
 import { AiConfigService } from '../../modules/ai/services/ai-config.service';
 import { scriptedModel, textParts, toolCallParts, usage } from './helpers/ai-models';
 import { AiKit, aiOrganisation, bearer, bootAiKit, jobFor, newConversation, turnRow } from './helpers/ai-test-kit';
+import { integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
 
 /**
  * AI 4w — skills in the live turn (docs/ai/PHASE4_TWENTY_PLAN.md §2.3, DOC-DRAFTS §4), on the real AppModule, PostgreSQL
@@ -20,7 +21,7 @@ import { AiKit, aiOrganisation, bearer, bootAiKit, jobFor, newConversation, turn
  *         provisional rule) and ends with AI_TURN_TOKEN_LIMIT without it (an untagged turn whose model loads it; C5).
  * Then: the fixed skill rule and the catalogue are in the prompt; the preview shows the same.
  */
-const RUN = Boolean(process.env.DATABASE_URL);
+const RUN = integrationTestDatabaseReady();
 const describeIfDb = RUN ? describe : describe.skip;
 
 describeIfDb('AI 4w: skills in the live turn (integration)', () => {

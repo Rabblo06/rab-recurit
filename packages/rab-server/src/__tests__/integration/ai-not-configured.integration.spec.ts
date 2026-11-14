@@ -10,6 +10,7 @@ import { TEST_MODEL_CATALOGUE } from '../support/ai/test-catalogue';
 import { AiConversationService } from '../../modules/ai/services/ai-conversation.service';
 import { AiConfigService } from '../../modules/ai/services/ai-config.service';
 import { AiKit, aiOrganisation, bearer, bootAiKit, manager } from './helpers/ai-test-kit';
+import { integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
 
 /**
  * T-A1 / T-A2 (docs/ai/PHASE1_TWENTY_PLAN.md §6): "real models only" — with NO usable model the app does not fake an
@@ -19,7 +20,7 @@ import { AiKit, aiOrganisation, bearer, bootAiKit, manager } from './helpers/ai-
  * 403 AI_DEMO_DATA_ONLY only for an eligible user of an enabled organisation; /availability always 200; DELETE ungated.
  * Where a row needs a different PLATFORM state the test replaces only `availabilityContext` (env + catalogue).
  */
-const RUN = Boolean(process.env.DATABASE_URL);
+const RUN = integrationTestDatabaseReady();
 const describeIfDb = RUN ? describe : describe.skip;
 const PROVIDER_TEXT = "AI isn't set up yet. A platform admin needs to add a provider key";
 const MODEL_TEXT = 'Choose a model in Settings → AI';

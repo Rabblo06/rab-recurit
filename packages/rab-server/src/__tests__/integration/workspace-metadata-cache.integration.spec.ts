@@ -20,6 +20,7 @@ import { Organisation, Role, User, UserRole } from '../../modules/identity/entit
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { generateFixturePassword } from './helpers/fixture-password';
 import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-pipe';
+import { integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
 
 /**
  * Redis checkpoint — Workspace Metadata Cache, exercised directly through `SchemaResolverService`
@@ -27,7 +28,7 @@ import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-
  * itself doesn't gate on `HWS_RUNTIME_ENABLED` (only its callers do), so this can prove the cache's
  * own contract without needing that flag on too.
  */
-const RUN = Boolean(process.env.DATABASE_URL);
+const RUN = integrationTestDatabaseReady();
 const describeIfDb = RUN ? describe : describe.skip;
 jest.setTimeout(60_000);
 

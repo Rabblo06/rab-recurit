@@ -7,7 +7,7 @@
  * failure). Settings come from Agent 2's runtime-db-config.ts (one source of truth); exit codes are its
  * STARTUP_EXIT_CODES. Prints exactly one TWENTY_MIGRATE_RESULT line. Deliberately does NOT import dotenv.
  */
-import { readRuntimeDbConfig, RuntimeDbConfigError, STARTUP_EXIT_CODES } from '../../../../owner-login/runtime-db-config';
+import { checkRuntimeLogin, readRuntimeDbConfig, RuntimeDbConfigError, STARTUP_EXIT_CODES } from '../../../../owner-login/runtime-db-config';
 import { installSigtermSelfCancel, migrateChildConfigRefusal, RESULT_LINE_PREFIX, runMigrateOnStart } from '../owner-login/migrate-on-start';
 
 async function main(): Promise<number> {
@@ -15,6 +15,10 @@ async function main(): Promise<number> {
   let config: ReturnType<typeof readRuntimeDbConfig>;
   try {
     config = readRuntimeDbConfig(process.env);
+    // DB-SETUP (plan §2.2): in production the migrate child connects ONLY as crewflow_owner; any other PG_DATABASE_URL login
+    // (e.g. the admin URL, if api-prestart.sh did not swap it) is refused here, before anything connects (exit 64).
+    const { warning } = checkRuntimeLogin(process.env, 'migrate');
+    if (warning) log(`WARNING: ${warning}`);
   } catch (error) {
     if (error instanceof RuntimeDbConfigError) {
       log(`FAILED (config): ${error.message}`);

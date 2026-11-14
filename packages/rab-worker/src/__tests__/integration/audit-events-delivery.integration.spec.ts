@@ -23,6 +23,7 @@ import { CONSUMER_QUEUES } from '../../core/scheduler/queue-registry';
 import { AuditEventShipOutcome, readAuditRowForShipping, shipAuditEventJob, shipPreAuthEventJob } from '../../queues/rab-audit-events/audit-event.handler';
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
+import { integrationTestDatabaseReady } from '@rab/server/database/typeorm/core/integration-test-database-gate';
 
 /**
  * Phase X Part 2, X1.1 — security audit events, Twenty's event-log style (best effort, after commit, BullMQ → sink).
@@ -42,7 +43,7 @@ import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
  *  E6 ABUSE (real RLS): a forged organisationId / auditLogId pair ships nothing (both cross-tenant directions, unknown id).
  */
 jest.setTimeout(120_000);
-const RUN = Boolean(process.env.DATABASE_URL);
+const RUN = integrationTestDatabaseReady();
 const describeIfDb = RUN ? describe : describe.skip;
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 const PREFIX = 'CREWFLOW_SECURITY_AUDIT ';

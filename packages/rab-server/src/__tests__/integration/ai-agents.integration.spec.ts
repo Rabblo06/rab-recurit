@@ -15,6 +15,7 @@ import { AiAgentService } from '../../modules/ai/services/ai-agent.service';
 import { AiKit, aiOrganisation, bearer, bootAiKit, manager, setOrgAi } from './helpers/ai-test-kit';
 import { TestIdentity } from './helpers/test-identities';
 import { sqlStateAsSchemaRole } from './helpers/schema-role';
+import { integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
 
 /**
  * AI Phase 6a — agent DEFINITIONS AND STORAGE on the real AppModule, PostgreSQL (crewflow_app, FORCE RLS) and Redis
@@ -25,7 +26,7 @@ import { sqlStateAsSchemaRole } from './helpers/schema-role';
  * 'custom'`, `updated_by`, column grants, CHECK `ai_agent_trigger_ex3_gate`, the agent-role FKs and the unchanged
  * member-role backstop.
  */
-const RUN = Boolean(process.env.DATABASE_URL);
+const RUN = integrationTestDatabaseReady();
 const describeIfDb = RUN ? describe : describe.skip;
 const ORIGIN = 'http://localhost:5173';
 const BASE = '/rest/v1/ai/agents';

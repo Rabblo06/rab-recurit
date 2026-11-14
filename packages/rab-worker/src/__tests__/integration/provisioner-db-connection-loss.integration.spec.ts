@@ -15,6 +15,7 @@ import { generateFixturePassword } from './helpers/fixture-password';
 import { verifiedCrewflowUrl } from './helpers/verified-role-database';
 import { withApplicationName } from './helpers/application-name-url';
 import { runtimeChildBaseEnv } from './helpers/runtime-child-env';
+import { integrationTestDatabaseReady } from '@rab/server/database/typeorm/core/integration-test-database-gate';
 
 /**
  * W6-E2E-05 (HIGH, availability) regression. Wave 6 lane E2E restarted Postgres under a running worker bundle: the
@@ -32,7 +33,7 @@ import { runtimeChildBaseEnv } from './helpers/runtime-child-env';
  * drops the connection repeatedly, including while the database refuses the role, and checks the reconnect is bounded
  * (backoff) and still recovers.
  */
-const RUN = Boolean(process.env.DATABASE_URL);
+const RUN = integrationTestDatabaseReady();
 /**
  * L-class (owner-login architecture): this suite exercises the SUPERSEDED separate workspace-provisioner process, which
  * needs a `crewflow` login (TEST_DATABASE_CREWFLOW_URL) that does not exist under the owner login. Provisioning now runs

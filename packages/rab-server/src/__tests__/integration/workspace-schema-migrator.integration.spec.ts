@@ -17,6 +17,7 @@ import {
   seedWorkspace,
   sqlstateOf,
 } from './helpers/workspace-fixtures';
+import { integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
 
 /**
  * Wave 2 lane S2 (B3 per-workspace migrator + ledger, B4 version tracking + drift). Disposable database only.
@@ -31,7 +32,7 @@ import {
  *    the ledger is append-only for every role; zero ledger rows with no tenant context;
  *  - the drift detector flags a hand-dropped policy (alert-only: the workspace stays routable) and clears after repair.
  */
-const RUN = Boolean(process.env.DATABASE_URL);
+const RUN = integrationTestDatabaseReady();
 const describeIfDb = RUN ? describe : describe.skip;
 jest.setTimeout(240_000);
 

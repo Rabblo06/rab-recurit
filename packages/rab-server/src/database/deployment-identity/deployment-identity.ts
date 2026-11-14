@@ -226,13 +226,15 @@ export function isLoopbackHost(host: string): boolean {
  *   devdb     packages/rab-docker/docker-compose.yml (the development database)
  *   postgres  packages/rab-docker/docker-compose.qa.yml, packages/rab-e2e-testing/system/docker-compose.e2e.yml
  *   pg        packages/rab-docker/rab/worker-bundle/test/integration/docker-compose.bullmq-test.yml
+ *   db        packages/rab-docker/docker-compose.production.yml, docker-compose.image.yml (the bundled database, DB-SETUP;
+ *             the owner's Twenty-like service name, lead decision 2026-11-12)
  * (O1, one image: `pg-other`, the second cluster of the retired launcher's bundle-test harness, is no longer listed.)
  * CI reaches its disposable cluster on 127.0.0.1 (.github/actions/disposable-postgres). Any OTHER single-label name is
  * remote: outside a compose network it is resolved through a DNS search domain or a Kubernetes namespace and may reach a
  * database on another network. Code, not configuration: there is deliberately no environment variable that widens it.
  * Adding a compose database service with another name means adding the name here (deployment-identity.spec.ts F4).
  */
-export const LOCAL_DATABASE_SERVICE_HOSTS: ReadonlySet<string> = new Set(['devdb', 'postgres', 'pg']);
+export const LOCAL_DATABASE_SERVICE_HOSTS: ReadonlySet<string> = new Set(['db', 'devdb', 'postgres', 'pg']);
 
 /** A host name without a dot or a colon (not a dotted name, not an IP literal). Says nothing about where it resolves. */
 export function isSingleLabelHost(host: string): boolean {

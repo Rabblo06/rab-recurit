@@ -9,6 +9,7 @@ import { TenantContextService } from '@rab/server/engine/core-modules/tenant/ten
 import { runAccountInviteCleanupCycle } from '../../queues/rab-maintenance/account-invite-cleanup.job';
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { createTestIdentityFactory, TestIdentity, TestIdentityFactory } from './helpers/test-identities';
+import { integrationTestDatabaseReady } from '@rab/server/database/typeorm/core/integration-test-database-gate';
 
 /**
  * Phase D F-1 (owner condition D8) — the account-invite cleanup cycle on the RUNTIME data source (never the admin one,
@@ -30,7 +31,7 @@ import { createTestIdentityFactory, TestIdentity, TestIdentityFactory } from './
  *     path, which as the runtime login sees no row). Cases 1–3 run with the flag explicitly ON (non-production only).
  */
 const WORKER_URL = process.env.TEST_DATABASE_WORKER_URL;
-const RUN = process.env.PHASE_D_SQL_APPROVED === 'true' && Boolean(WORKER_URL && process.env.DATABASE_URL);
+const RUN = process.env.PHASE_D_SQL_APPROVED === 'true' && Boolean(WORKER_URL) && integrationTestDatabaseReady();
 const describeIfApproved = RUN ? describe : describe.skip;
 jest.setTimeout(120_000);
 

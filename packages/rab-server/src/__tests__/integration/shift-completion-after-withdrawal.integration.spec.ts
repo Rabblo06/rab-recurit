@@ -20,6 +20,7 @@ import { Venue } from '../../modules/venue/entities/venue.entity';
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
 import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-pipe';
+import { integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
 
 /**
  * Shift completion after an offer close (shadow-run finding 2026-11-06, `fix/shift-completion-after-withdrawal`).
@@ -34,7 +35,7 @@ import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-
  * `withdrawUnconfirmedOffer` the Worker runs, in a Worker-shaped tenant context (`actorType: 'worker'`, as runScopedForOrg).
  * Fixture SQL (the superuser connection) only places shifts and windows in time, as the neighbouring suites do.
  */
-const RUN = Boolean(process.env.DATABASE_URL);
+const RUN = integrationTestDatabaseReady();
 const describeIfDb = RUN ? describe : describe.skip;
 jest.setTimeout(180_000);
 

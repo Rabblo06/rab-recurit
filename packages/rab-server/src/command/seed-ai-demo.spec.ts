@@ -18,7 +18,7 @@ describe('seed-ai-demo target rules', () => {
     ['RAB_RUNTIME_ENV unset', { RAB_RUNTIME_ENV: undefined }, /RAB_RUNTIME_ENV must be development/],
     ['a remote host', { DATABASE_URL: 'postgres://crewflow:pw@ep-round-rain-aess0njf.eu.aws.neon.tech/neondb' }, /loopback or docker-service/],
     // Final review F4: an unlisted single-label host (DNS search domain / k8s namespace) and a non-loopback IPv6 literal.
-    ['an unlisted single-label host', { DATABASE_URL: 'postgres://crewflow:pw@db:5432/rab' }, /loopback or docker-service/],
+    ['an unlisted single-label host', { DATABASE_URL: 'postgres://crewflow:pw@prod-db:5432/rab' }, /loopback or docker-service/],
     ['a non-loopback IPv6 literal', { DATABASE_URL: 'postgres://crewflow:pw@[fd00::5]:5432/rab' }, /loopback or docker-service/],
     ['no URL', { DATABASE_URL: undefined }, /DATABASE_URL is required/],
   ])('refuses %s', (_label, extra, message) => {

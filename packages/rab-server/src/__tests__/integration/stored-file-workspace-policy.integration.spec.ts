@@ -10,13 +10,14 @@ import { TenantContextService } from '../../engine/core-modules/tenant/tenant-co
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
 import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-pipe';
+import { integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
 
 /**
  * Hyper Workspace Phase 3, Parts 5–7. stored_file's RLS is decoupled from every physical business table: the boundary is
  * the file's own organisation_id and workspace_id. Real Postgres. Reads go through rab_app with the caller's real context.
  * Seeding goes through the owner, bound to the file's own organisation and workspace.
  */
-const RUN = Boolean(process.env.DATABASE_URL);
+const RUN = integrationTestDatabaseReady();
 
 /** Plain stored_file insert, RETURNING id. Called inside a transaction that already binds the row's own organisation. */
 function insertFile(

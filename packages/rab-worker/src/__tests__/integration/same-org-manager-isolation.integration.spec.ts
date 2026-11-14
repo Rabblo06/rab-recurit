@@ -32,6 +32,7 @@ import { Venue } from '@rab/server/modules/venue/entities/venue.entity';
 import { runLateClockInCycle } from '../../queues/rab-shifts/late-clock-in.job';
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
+import { integrationTestDatabaseReady } from '@rab/server/database/typeorm/core/integration-test-database-gate';
 
 /**
  * Phase 5.5 — same-organisation manager isolation. Real Postgres, RLS on,
@@ -45,7 +46,7 @@ import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
  * mistaken for the reason a denial happens. If Manager B is denied under
  * THIS fixture, manager-level ownership is what actually did the work.
  */
-const RUN = Boolean(process.env.DATABASE_URL);
+const RUN = integrationTestDatabaseReady();
 const describeIfDb = RUN ? describe : describe.skip;
 jest.setTimeout(90_000);
 

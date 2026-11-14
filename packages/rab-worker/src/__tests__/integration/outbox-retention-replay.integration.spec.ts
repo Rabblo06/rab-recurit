@@ -28,6 +28,7 @@ import { createAdminDataSource } from './helpers/admin-datasource';
 import { sqlStateAsSchemaRole } from './helpers/schema-role';
 import { cancelLeftoverClaimableEmails } from './helpers/email-leftovers';
 import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
+import { integrationTestDatabaseReady } from '@rab/server/database/typeorm/core/integration-test-database-gate';
 
 /**
  * Wave 5 lane OPS (G6) — terminal outbox retention (DB5's core.purge_terminal_* functions, contract §5) and the audited
@@ -36,7 +37,7 @@ import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
  */
 jest.setTimeout(120_000);
 
-const RUN = Boolean(process.env.DATABASE_URL);
+const RUN = integrationTestDatabaseReady();
 const describeIfDb = RUN ? describe : describe.skip;
 
 const DAY = 24 * 60 * 60 * 1000;

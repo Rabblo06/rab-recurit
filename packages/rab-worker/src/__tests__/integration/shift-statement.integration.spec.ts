@@ -23,13 +23,14 @@ import { OFFICIAL_CALENDAR_2026 } from '@rab/server/modules/payroll/constants/of
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { bookBeforeDeadline } from './helpers/book-before-deadline';
 import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
+import { integrationTestDatabaseReady } from '@rab/server/database/typeorm/core/integration-test-database-gate';
 
 /**
  * Approved Shift Statement on payroll approval (PayStatement1786719000000 + ApprovedShiftStatement1786719100000).
  * Real HTTP + real Postgres/RLS + the real dispatcher/consumer functions and the renderer PDF_RENDERER selects. The BullMQ hop is
  * represented by the `publish` callback (the production one is `queue.add`), so "Redis down" is a publish that throws.
  */
-const RUN = Boolean(process.env.DATABASE_URL);
+const RUN = integrationTestDatabaseReady();
 const describeIfDb = RUN ? describe : describe.skip;
 
 jest.setTimeout(240_000);

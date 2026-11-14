@@ -31,6 +31,8 @@ const HARNESS = path.join(HERE, 'run-ai-e2e.sh');
 
 const RUNTIME_STRIPPED = [
   'TEST_DATABASE_URL',
+  // X3.5-S7: the admin URL's new name; the deprecated TEST_DATABASE_URL_UNPOOLED stays stripped (also after release 2).
+  'TEST_DATABASE_ADMIN_URL',
   'TEST_DATABASE_URL_UNPOOLED',
   'TEST_DATABASE_CREWFLOW_URL',
   'TEST_DATABASE_WORKER_URL',
@@ -104,7 +106,7 @@ test('runtime-env.sh strips exactly the names this test plants (no silent shrink
   };
   assert.deepEqual(list('AI_E2E_STRIPPED_NAMES'), [...RUNTIME_STRIPPED].sort());
   assert.deepEqual(list('AI_E2E_CLIENT_STRIPPED_NAMES'), [...CLIENT_ONLY_STRIPPED].sort());
-  assert.deepEqual(list('AI_E2E_STRIPPED_VALUE_SOURCES'), ['MIGRATION_SECURITY_ADMIN_URL', 'TEST_DATABASE_URL_UNPOOLED']);
+  assert.deepEqual(list('AI_E2E_STRIPPED_VALUE_SOURCES'), ['MIGRATION_SECURITY_ADMIN_URL', 'TEST_DATABASE_ADMIN_URL', 'TEST_DATABASE_URL_UNPOOLED']);
 });
 
 test('X1.8: a name the deny-list does not know, holding the superuser URL, is stripped by value from both launchers', () => {
@@ -276,6 +278,19 @@ function assertOnlySeedHoldsAdmin(run, needles) {
 
 test('X1.8: the real run-ai-e2e.sh spawns no child but the seed with the superuser URL (asserted on each spawned env)', () => {
   assertOnlySeedHoldsAdmin(runHarnessWithStubs({ envLines: [`X18_UNLISTED_SUPERUSER_URL=${ADMIN_SENTINEL}`] }));
+});
+
+test('X3.5-S7: an admin URL under the new name TEST_DATABASE_ADMIN_URL (and a copy of it under an unlisted name) reaches the seed only', () => {
+  const s7Pw = 'x35-sentinel-admin-pw';
+  const s7Admin = `postgres://x35_superuser:${s7Pw}@127.0.0.1:15436/x18_ai_e2e`;
+  const run = runHarnessWithStubs({ envLines: [`TEST_DATABASE_ADMIN_URL=${s7Admin}`, `X35_ALIAS_OF_NEW_ADMIN_NAME=${s7Admin}`] });
+  assertOnlySeedHoldsAdmin(run);
+  assert.equal(run.spawned.seed.TEST_DATABASE_ADMIN_URL, s7Admin, 'control: the seed keeps TEST_DATABASE_ADMIN_URL');
+  assert.ok('X35_ALIAS_OF_NEW_ADMIN_NAME' in run.spawned.seed, 'control: the seed sees the alias');
+  for (const role of Object.keys(run.spawned).filter((r) => r !== 'seed')) {
+    assert.deepEqual(holdingAdmin(run.spawned[role], [s7Pw]), [], `${role} child holds the TEST_DATABASE_ADMIN_URL credential (names only)`);
+    assert.ok(!('TEST_DATABASE_ADMIN_URL' in run.spawned[role]), `${role} child inherited TEST_DATABASE_ADMIN_URL`);
+  }
 });
 
 test('X1.8 review finding 2: other forms of the superuser credential (scheme, query, localhost, keywords, POSTGRES_*, PGPASSWORD) reach the seed only', () => {

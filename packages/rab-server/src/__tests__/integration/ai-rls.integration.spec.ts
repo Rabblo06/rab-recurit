@@ -7,6 +7,7 @@ import { TenantContextService } from '../../engine/core-modules/tenant/tenant-co
 import { proposeOk, runningTurn, venueAndRole, windowFromNow } from './helpers/ai-proposal-fixtures';
 import { AiKit, aiOrganisation, ask, bearer, bootAiKit, manager, newConversation } from './helpers/ai-test-kit';
 import { sqlStateAsSchemaRole } from './helpers/schema-role';
+import { integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
 
 /**
  * AI Phase 1 — PostgreSQL isolation (brief §15 "PostgreSQL/RLS"), proven on the REAL runtime role crewflow_app:
@@ -15,7 +16,7 @@ import { sqlStateAsSchemaRole } from './helpers/schema-role';
  * Phase 1, ACTIVE since AiActionProposalActivate1786720960000 (T5-D1: per-command policies, column grants, CHECKs, the
  * transition trigger, no DELETE / TRUNCATE, the refusing down()).
  */
-const RUN = Boolean(process.env.DATABASE_URL);
+const RUN = integrationTestDatabaseReady();
 const describeIfDb = RUN ? describe : describe.skip;
 const TABLES = ['ai_conversation', 'ai_message', 'ai_usage_daily', 'ai_action_proposal', 'organisation_ai_setting'];
 

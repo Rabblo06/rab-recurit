@@ -34,7 +34,7 @@ import { applyIntegrationTestDatabaseEnv, assertSameDatabaseAtRuntime } from '..
 
 // X1.2: null means "not a test run" (NODE_ENV is not test): refuse rather than seed through whatever DATABASE_URL is set.
 const resolvedTestDatabase = applyIntegrationTestDatabaseEnv(process.env);
-if (!resolvedTestDatabase) throw new Error('refusing to seed: NODE_ENV must be "test" with the TEST_DATABASE_URL / TEST_DATABASE_URL_UNPOOLED pair');
+if (!resolvedTestDatabase) throw new Error('refusing to seed: NODE_ENV must be "test" with the TEST_DATABASE_URL / TEST_DATABASE_ADMIN_URL pair (or the deprecated TEST_DATABASE_URL_UNPOOLED)');
 
 const H = 3600 * 1000;
 

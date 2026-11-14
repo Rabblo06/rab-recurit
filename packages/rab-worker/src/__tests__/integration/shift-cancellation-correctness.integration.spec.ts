@@ -52,6 +52,7 @@ import { runShiftCancellationFollowupCycle } from '../../queues/rab-shifts/shift
 import { runShiftMonitorCycle } from '../../queues/rab-shifts/shift-monitor.job';
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
+import { integrationTestDatabaseReady } from '@rab/server/database/typeorm/core/integration-test-database-gate';
 
 /**
  * Phase 5 — shift cancellation correctness. Real Postgres, RLS on, no
@@ -63,7 +64,7 @@ import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
  * suppression, the final-timesheet affected-row regression, and queued
  * pre-shift-roster email revalidation.
  */
-const RUN = Boolean(process.env.DATABASE_URL);
+const RUN = integrationTestDatabaseReady();
 const describeIfDb = RUN ? describe : describe.skip;
 jest.setTimeout(90_000);
 
