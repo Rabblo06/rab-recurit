@@ -277,7 +277,8 @@ export class AttendanceService {
 
   /**
    * Server-authoritative attendance window: `[startsAt - CLOCK_IN_EARLY_MINUTES, endsAt + QR_POST_SHIFT_GRACE_MINUTES]`
-   * (the same bounds the Shift QR is signed for). Check In uses the SAME window (FLAGGED owner decision 2026-10-21:
+   * (the Shift QR uses the same grace past the shift's current end — `AttendanceQrService.validUntil`, checked at scan
+   * time). Check In uses the SAME window (FLAGGED owner decision 2026-10-21:
    * opening reuses CLOCK_IN_EARLY_MINUTES, closing reuses the QR post-shift grace — never unlimited). Pure UTC delta
    * arithmetic against `timestamptz` columns: overnight shifts and DST need nothing special. Structured exceptions only.
    */

@@ -239,7 +239,7 @@ const ALTERATIONS: Alteration[] = [
     name: 'QR encodes a different (validly signed) token',
     fixture: 'one-row/pre-shift-report',
     alter: async (f) => {
-      const other = fixtureQrTokens.sign({ shiftId: '00000000-0000-4000-8000-000000000000', venueId: '00000000-0000-4000-8000-000000000001', ver: 2 }, 3600);
+      const other = fixtureQrTokens.sign({ shiftId: '00000000-0000-4000-8000-000000000000', venueId: '00000000-0000-4000-8000-000000000001', ver: 2 });
       const png = await new QrImageService().generatePng(other);
       return renderer.render(mutate(f.doc, (d) => d.kind === 'pre-shift-report' && (d.data.qrPngBase64 = png.toString('base64'))));
     },
@@ -298,27 +298,27 @@ describe('QR: decoded from the PDF and verified (P0 plan §5.2 4(e))', () => {
     expect(await verifyShiftQr(f.scenario, x.qrPayloads[0]!)).toEqual([]);
   });
 
-  // The QR's JWT `exp` is relative to WHEN it was signed (`AttendanceQrService.sign`: signing time + the length of the
-  // attendance window), and the fixture QR is signed with the real clock when the fixtures are built — not at the fixed
-  // shift dates in fixtures.ts. So "now" is pinned to instants derived from the token's own claims, never to the shift:
-  // pinning to "a day after the shift" only meant "expired" while the real clock was early enough (one-row's shift ends
-  // 2026-11-13T23:30Z; from 2026-11-14T14:45Z on, a QR signed "now" outlived that pinned instant and was accepted).
-  // jest's fake timers cover Date.now AND new Date, so no clock read inside validateQr can escape the pin.
-  it('an expired QR (decoded from the PDF) is refused', async () => {
+  // Expiry follows the shift, not the signing time (owner decision 0i, 2026-11-14): the token carries no `exp`, and
+  // `validateQr` refuses it once now is past the shift's CURRENT end + QR_POST_SHIFT_GRACE_MINUTES (FIXTURE_ENV: 120).
+  // The fixture QR is signed with the real clock when the fixtures are built, so pinning "now" to the shift's own
+  // dates is deterministic whatever day the suite runs. jest's fake timers cover Date.now AND new Date, so no clock
+  // read inside validateQr can escape the pin.
+  it('the QR decoded from the PDF is accepted until its shift end + grace and refused 1 s later', async () => {
     const f = fixtures.get('one-row/pre-shift-report')!;
     const payload = extractFixture(f, renders.get(f.id)![0]).qrPayloads[0]!;
     const shift = shiftEntity(scenarioSeeds().find((s) => s.id === f.scenario)!);
     const manager = { findOneByOrFail: async () => shift } as never;
-    const { iat, exp } = new JwtService().decode<{ iat: number; exp: number }>(payload);
-    // The token lives exactly as long as the shift's attendance window (FIXTURE_ENV: 15 min early + 120 min grace).
-    expect(exp - iat).toBe((shift.endsAt.getTime() - shift.startsAt.getTime()) / 1000 + (15 + 120) * 60);
-    jest.useFakeTimers({ now: (exp - 1) * 1000 });
+    expect(new JwtService().decode<{ exp?: number }>(payload).exp).toBeUndefined();
+    const lastAccepted = shift.endsAt.getTime() + 120 * 60_000;
+    // Whenever it was signed (the fixtures sign with the real clock), it is accepted in the shift's last minute.
+    jest.useFakeTimers({ now: shift.endsAt.getTime() - 60_000 });
     try {
-      // Control: one second before `exp` the same PDF QR is accepted for its shift, so the refusal below is the expiry.
       await expect(fixtureAttendanceQr.validateQr(manager, shift.id, payload)).resolves.toBeUndefined();
-      jest.setSystemTime(exp * 1000);
+      jest.setSystemTime(lastAccepted); // control: the last accepted instant, so the refusal below is the expiry
+      await expect(fixtureAttendanceQr.validateQr(manager, shift.id, payload)).resolves.toBeUndefined();
+      jest.setSystemTime(lastAccepted + 1000);
       await expect(fixtureAttendanceQr.validateQr(manager, shift.id, payload)).rejects.toMatchObject({ response: { code: 'INVALID_QR', reason: 'expired' } });
-      jest.setSystemTime(exp * 1000 + 24 * 60 * 60_000); // and still a day later
+      jest.setSystemTime(lastAccepted + 24 * 60 * 60_000); // and still a day later
       await expect(fixtureAttendanceQr.validateQr(manager, shift.id, payload)).rejects.toMatchObject({ response: { code: 'INVALID_QR', reason: 'expired' } });
     } finally {
       jest.useRealTimers();

@@ -7573,3 +7573,25 @@ image that runs the apps' own derive step on the read-only volume (`--pull never
   track_counts, rab.* list, hook refusal. Integration on PG16/17/18: adoption, per-workspace runs, every abuse case above, the
   D2/D3 blocks, the P1 code-level block, the locked start with a level-21 probe, the P2 refusal. Worker unit tests for the
   pauses.
+
+## QR expiry from the shift's current end (owner decision 0i, 2026-11-14; branch fix/qr-expiry-from-shift)
+- **Threat / defect:** the Shift QR's JWT `exp` was signing time + (shift length + 15 + 120 min). The pre-shift report
+  signs its QR up to `REPORT_AVAILABLE_BEFORE_MINUTES` (180) before the start, so a printed QR expired ~45 min before the
+  shift ended: staff could not clock out with it, and a manager extending a shift could not extend the QR.
+- **Control:** `AttendanceQrService.validateQr` decides expiry at scan time from the freshly re-read shift: accepted while
+  server `now <= shift.endsAt + QR_POST_SHIFT_GRACE_MINUTES` (the same grace setting `assertClockWindow` closes with; one
+  definition, `AttendanceQrService.validUntil`), refused `INVALID_QR` / `expired` after. New tokens carry no `exp`.
+  Fail-closed reasoning: `QrTokenService.verify` still checks signature (HKDF-derived key, HS256 pinned), issuer and
+  audience, but is never an accept on its own; its only caller always loads the shift and applies the time bound after the
+  shift/venue/`ver` checks. An unreadable end time or a missing grace setting refuses. A token signed before this change
+  keeps its own `exp` (both bounds apply), so no already-printed QR gains validity. Unchanged: a QR for one shift is refused
+  for another (`shift_mismatch`), the confirmed-assignment re-check, check-in-first, `assertClockWindow`, the geofence.
+- **Residual (accepted by the owner's rule):** a QR's lifetime now follows the shift row, so moving a shift's end later
+  (or rescheduling the shift) extends an already-printed QR for that same shift and venue. Exposure is still one shift's
+  attendance window, and attendance is one clock-in per booking. `Shift.qrVersion` would be the revocation lever, but no
+  code path bumps it today (pre-existing, unchanged here).
+- **Tests:** `attendance-qr.service.spec.ts` (printed 3 h early: accepted in the last minutes and through the grace,
+  refused 1 s after end + grace; extended and shortened shifts; foreign shift; tampered / forged-key / malformed; legacy
+  `exp`; fail-closed config), `attendance-abuse-cases` › QR expiry follows the shift's current end + grace (real clock-out
+  over HTTP with a QR printed 3 h before the start), and the pdf-equality self-test (the QR decoded from the PDF is accepted
+  until its shift end + grace and refused 1 s later).
