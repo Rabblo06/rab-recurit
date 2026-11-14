@@ -18,6 +18,7 @@ import { AuthContext } from '../../engine/core-modules/tenant/auth-context.inter
 import { TenantContextService } from '../../engine/core-modules/tenant/tenant-context.service';
 import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-pipe';
 import { createAdminDataSource } from './helpers/admin-datasource';
+import { businessTable } from './helpers/hws-fixtures';
 import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
 import { integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
 
@@ -72,7 +73,7 @@ describeIfDb('XP-05 /shifts/sent: one statement for rows + tab counts, row-set e
   }): Promise<string> {
     const d = ++day;
     const [s] = await sql<{ id: string }>(
-      `INSERT INTO core.shift (organisation_id, venue_id, job_role_id, starts_at, ends_at, required_count, pay_rate_pence, created_by, workspace_id, status, requested_by, created_at)
+      `INSERT INTO ${businessTable(fx.manager.workspaceId!, 'shift')} (organisation_id, venue_id, job_role_id, starts_at, ends_at, required_count, pay_rate_pence, created_by, workspace_id, status, requested_by, created_at)
        VALUES ($1, $2, $3, now() + make_interval(days => $4::int), now() + make_interval(days => $4::int) + interval '4 hours', $5, 1500, $6, $7, $8, $9, $10::timestamptz)
        RETURNING id`,
       [fx.org.id, o.venueId, fx.jobRoleId, o.past ? -40 - d : d, o.required ?? 2, o.requestedBy ?? fx.manager.userId, fx.manager.workspaceId, o.status, o.requestedBy,
@@ -80,13 +81,13 @@ describeIfDb('XP-05 /shifts/sent: one statement for rows + tab counts, row-set e
     );
     for (const off of o.offers ?? []) {
       const [a] = await sql<{ id: string }>(
-        `INSERT INTO core.shift_assignment (organisation_id, shift_id, staff_profile_id, status, pay_rate_snapshot_pence, period, workspace_id)
-         SELECT $1, s.id, $2, $3, 1500, tstzrange(s.starts_at, s.ends_at, '[)'), $4 FROM core.shift s WHERE s.id = $5 RETURNING id`,
+        `INSERT INTO ${businessTable(fx.manager.workspaceId!, 'shift_assignment')} (organisation_id, shift_id, staff_profile_id, status, pay_rate_snapshot_pence, period, workspace_id)
+         SELECT $1, s.id, $2, $3, 1500, tstzrange(s.starts_at, s.ends_at, '[)'), $4 FROM ${businessTable(fx.manager.workspaceId!, 'shift')} s WHERE s.id = $5 RETURNING id`,
         [fx.org.id, fx.staff[off.staff], off.seat, fx.manager.workspaceId, s!.id],
       );
       const seat = a!.id;
       await sql(
-        `INSERT INTO core.job_offer (organisation_id, shift_assignment_id, staff_profile_id, status, sent_at, expires_at, estimated_pay_pence, created_by, workspace_id, rejection_reason)
+        `INSERT INTO ${businessTable(fx.manager.workspaceId!, 'job_offer')} (organisation_id, shift_assignment_id, staff_profile_id, status, sent_at, expires_at, estimated_pay_pence, created_by, workspace_id, rejection_reason)
          VALUES ($1, $2, $3, $4, $5::timestamptz, $5::timestamptz + interval '1 day', 6000, $6, $7, $8)`,
         [fx.org.id, seat, fx.staff[off.staff], off.offer, off.sentAt ?? new Date(Date.now() - d * 60_000).toISOString(), fx.manager.userId, fx.manager.workspaceId, off.rejection ?? null],
       );
@@ -112,7 +113,7 @@ describeIfDb('XP-05 /shifts/sent: one statement for rows + tab counts, row-set e
     const venueA = (await venue('XP05 Venue A')).id;
     const venueB = (await venue('XP05 Venue B')).id;
     const [role] = await sql<{ id: string }>(
-      `INSERT INTO core.job_role (organisation_id, name, default_rate_pence, created_by, workspace_id) VALUES ($1, $2, 1500, $3, $4) RETURNING id`,
+      `INSERT INTO ${businessTable(manager.workspaceId!, 'job_role')} (organisation_id, name, default_rate_pence, created_by, workspace_id) VALUES ($1, $2, 1500, $3, $4) RETURNING id`,
       [org.id, `Role-${randomUUID().slice(0, 8)}`, manager.userId, manager.workspaceId],
     );
     const withToken = async (who: TestIdentity) => ({ ...who, token: await factory.login(who) });
@@ -161,12 +162,12 @@ describeIfDb('XP-05 /shifts/sent: one statement for rows + tab counts, row-set e
       (m) => m.save(Venue, { organisationId: org2.id, name: 'XP05 Other Org Venue', workspaceId: manager2.workspaceId!, createdBy: manager2.userId }),
     );
     const [role2] = await sql<{ id: string }>(
-      `INSERT INTO core.job_role (organisation_id, name, default_rate_pence, created_by, workspace_id) VALUES ($1, $2, 1500, $3, $4) RETURNING id`,
+      `INSERT INTO ${businessTable(manager2.workspaceId!, 'job_role')} (organisation_id, name, default_rate_pence, created_by, workspace_id) VALUES ($1, $2, 1500, $3, $4) RETURNING id`,
       [org2.id, `Role-${randomUUID().slice(0, 8)}`, manager2.userId, manager2.workspaceId],
     );
     for (const requestedBy of [manager2.userId, V]) {
       const [s2] = await sql<{ id: string }>(
-        `INSERT INTO core.shift (organisation_id, venue_id, job_role_id, starts_at, ends_at, required_count, pay_rate_pence, created_by, workspace_id, status, requested_by)
+        `INSERT INTO ${businessTable(manager2.workspaceId!, 'shift')} (organisation_id, venue_id, job_role_id, starts_at, ends_at, required_count, pay_rate_pence, created_by, workspace_id, status, requested_by)
          VALUES ($1, $2, $3, now() + interval '3 days', now() + interval '3 days 4 hours', 1, 1500, $4, $5, 'pending_manager_approval', $6) RETURNING id`,
         [org2.id, venue2.id, role2!.id, manager2.userId, manager2.workspaceId, requestedBy],
       );

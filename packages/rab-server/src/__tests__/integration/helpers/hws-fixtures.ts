@@ -65,3 +65,17 @@ export function siblingTable(qualified: string, table: string): string {
   if (!m) throw new Error('siblingTable: not a qualified business table');
   return `"${m[1]}"."${table}"`;
 }
+
+/**
+ * Part C1 (C1b): tears down a fixture workspace's schema so the suite can delete the workspace (or its owner) afterwards, or
+ * free the catalogue at the end of a suite. The superuser fixture connection only (DROP SCHEMA ... CASCADE, then the
+ * registry row, whose RESTRICT foreign key otherwise refuses deleting `core.manager_workspace`). The append-only migration
+ * ledger keeps its rows (it has no foreign key to the workspace). The schema name is derived and validated, never input.
+ * Never product code: the product has no deprovisioning path yet (C4/C5).
+ */
+export async function dropFixtureWorkspaceSchema(admin: FixtureQueryable, workspaceId: string): Promise<void> {
+  const schema = workspaceSchemaName(workspaceId);
+  if (!/^workspace_[0-9a-f]{32}$/.test(schema)) throw new Error('dropFixtureWorkspaceSchema: not a workspace schema name');
+  await admin.query(`DROP SCHEMA IF EXISTS "${schema}" CASCADE`);
+  await admin.query(`DELETE FROM core.workspace_schema_registry WHERE workspace_id = $1`, [workspaceId]);
+}

@@ -14,7 +14,7 @@ import { createAdminDataSource } from './helpers/admin-datasource';
 import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
 import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-pipe';
 import { integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
-import { businessTable } from './helpers/hws-fixtures';
+import { businessTable, businessTableOf } from './helpers/hws-fixtures';
 
 /**
  * Phase C1 (contract §1-§3, decisions D1/D2): bounded default pages, the two legacy unpaged staff endpoints, and opaque
@@ -122,7 +122,7 @@ describeIfDb('C1 paging: bounded defaults, legacy staff endpoints and keyset cur
 
   /** Expected keyset order straight from the database: timestamp DESC, id DESC (ids compared as uuid, not as JS strings). */
   async function expectedOrder(table: 'job_offer' | 'attendance' | 'shift', tsColumn: string, ids: string[]): Promise<string[]> {
-    const rows = await sql<{ id: string }>(`SELECT id FROM core.${table} WHERE id = ANY($1::uuid[]) ORDER BY ${tsColumn} DESC, id DESC`, [ids]);
+    const rows = await sql<{ id: string }>(`SELECT id FROM ${await businessTableOf(adminDataSource, table, ids[0])} WHERE id = ANY($1::uuid[]) ORDER BY ${tsColumn} DESC, id DESC`, [ids]);
     return rows.map((r) => r.id);
   }
 
@@ -438,7 +438,7 @@ describeIfDb('C1 paging: bounded defaults, legacy staff endpoints and keyset cur
       return ids;
     };
     const idOrder = async (table: string, direction: 'ASC' | 'DESC', ids: string[]) =>
-      (await sql<{ id: string }>(`SELECT id FROM core.${table} WHERE id = ANY($1::uuid[]) ORDER BY id ${direction}`, [ids])).map((r) => r.id);
+      (await sql<{ id: string }>(`SELECT id FROM ${await businessTableOf(adminDataSource, table, ids[0])} WHERE id = ANY($1::uuid[]) ORDER BY id ${direction}`, [ids])).map((r) => r.id);
 
     // Default sorts: /shifts startsAt ASC, /offers sentAt DESC, /attendance clockInAt DESC; the 7 seeded rows tie on it.
     expect(await pages('/rest/v1/shifts', shiftIds)).toEqual(await idOrder('shift', 'ASC', shiftIds));

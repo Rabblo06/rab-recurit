@@ -6,6 +6,7 @@ import { venueAndRole } from './helpers/ai-proposal-fixtures';
 import { execCall, scriptedModel, textParts } from './helpers/ai-models';
 import { AiKit, aiOrganisation, ask, bearer, bootAiKit, jobFor, newConversation, readSse, turnRow } from './helpers/ai-test-kit';
 import { TestIdentity } from './helpers/test-identities';
+import { businessTable } from './helpers/hws-fixtures';
 import { integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
 
 /**
@@ -37,7 +38,7 @@ describeIfDb('AI S2: validated record references (integration)', () => {
   async function openShift(who: Pick<TestIdentity, 'organisationId' | 'workspaceId' | 'userId'>): Promise<{ shiftId: string; venueId: string }> {
     const { venueId, jobRoleId } = await venueAndRole(kit, who);
     const [row] = await kit.owner.query(
-      `INSERT INTO core.shift (organisation_id, venue_id, job_role_id, starts_at, ends_at, break_minutes, required_count, pay_rate_pence, status, created_by, workspace_id)
+      `INSERT INTO ${businessTable(who.workspaceId!, 'shift')} (organisation_id, venue_id, job_role_id, starts_at, ends_at, break_minutes, required_count, pay_rate_pence, status, created_by, workspace_id)
        VALUES ($1, $2, $3, now() + interval '30 hours', now() + interval '38 hours', 0, 2, 1500, 'open', $4, $5) RETURNING id`,
       [who.organisationId, venueId, jobRoleId, who.userId, who.workspaceId],
     );

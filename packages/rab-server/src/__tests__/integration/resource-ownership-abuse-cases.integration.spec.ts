@@ -15,6 +15,7 @@ import { TenantContextService } from '../../engine/core-modules/tenant/tenant-co
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { idsOf, rowsOf } from './helpers/response-shapes';
 import { TestIdentityFactory } from './helpers/test-identities';
+import { businessTable } from './helpers/hws-fixtures';
 import { generateFixturePassword } from './helpers/fixture-password';
 import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-pipe';
 import { integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
@@ -90,7 +91,7 @@ describeIfDb('resource ownership abuse cases (integration)', () => {
       const [{ ws }] = await m.query(`SELECT id AS ws FROM core.manager_workspace WHERE owner_user_id = $1`, [claims.sub]);
       // The creating manager is the caller: bind their user id too, as the product does (staff_profile reads need current_uid()).
       await m.query(`SELECT set_config('rab.organisation_id', $1, true), set_config('rab.workspace_id', $2, true), set_config('rab.user_id', $3, true)`, [claims.org, ws, claims.sub]);
-      await m.query(`UPDATE core."user" SET status = 'active' WHERE id = (SELECT user_id FROM core.staff_profile WHERE id = $1)`, [res.body.id]);
+      await m.query(`UPDATE core."user" SET status = 'active' WHERE id = (SELECT user_id FROM ${businessTable(ws, 'staff_profile')} WHERE id = $1)`, [res.body.id]);
     });
     return res.body.id as string;
   }

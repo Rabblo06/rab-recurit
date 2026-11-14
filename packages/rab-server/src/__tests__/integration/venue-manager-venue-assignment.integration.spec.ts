@@ -13,6 +13,7 @@ import { ROLE_DEFS } from '../../modules/manager/services/manager.service';
 import { VenueManagerService } from '../../modules/manager/services/venue-manager.service';
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
+import { businessTable } from './helpers/hws-fixtures';
 import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-pipe';
 import { integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
 
@@ -54,7 +55,7 @@ describeIfDb('Venue Manager venue assignment inside the Manager\'s own workspace
   async function linksOf(profileId: string, workspaceId: string): Promise<Array<{ venue_id: string; workspace_id: string }>> {
     return owner.transaction(async (m) => {
       await m.query(`SELECT set_config('rab.organisation_id', $1, true), set_config('rab.workspace_id', $2, true)`, [org.id, workspaceId]);
-      return m.query(`SELECT venue_id, workspace_id FROM core.manager_venue WHERE manager_profile_id = $1 AND workspace_id = $2`, [profileId, workspaceId]);
+      return m.query(`SELECT venue_id, workspace_id FROM ${businessTable(workspaceId, 'manager_venue')} WHERE manager_profile_id = $1 AND workspace_id = $2`, [profileId, workspaceId]);
     });
   }
 

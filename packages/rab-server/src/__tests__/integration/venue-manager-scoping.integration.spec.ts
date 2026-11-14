@@ -318,7 +318,7 @@ describeIfDb('venue manager scoping (integration)', () => {
     await tenantContext.runInTenantContext(
       { organisationId: organisation.id, workspaceId, userId: managerUserId, role: '' },
       (m) => m.query(
-        `UPDATE core.shift_assignment SET status = 'confirmed', confirmed_at = now() WHERE shift_id = $1 AND staff_profile_id = $2`,
+        `UPDATE shift_assignment SET status = 'confirmed', confirmed_at = now() WHERE shift_id = $1 AND staff_profile_id = $2`,
         [shiftId, staffProfileId],
       ),
     );
@@ -668,7 +668,7 @@ describeIfDb('venue manager scoping (integration)', () => {
       expect((await m.query('SELECT * FROM shift_assignment'))).toHaveLength(0);
     });
     await expect(tenantContext.runInTenantContext(ctx, m => m.query(
-      'INSERT INTO core.venue_manager_staff (organisation_id,workspace_id,manager_profile_id,staff_profile_id) VALUES ($1,$2,$3,$4)',
+      'INSERT INTO venue_manager_staff (organisation_id,workspace_id,manager_profile_id,staff_profile_id) VALUES ($1,$2,$3,$4)',
       [a.organisation.id,b.venue1.workspaceId,a.venueManagerProfileId,foreign]))).rejects.toThrow();
   });
 
@@ -1170,8 +1170,9 @@ describeIfDb('venue manager scoping (integration)', () => {
 
       // The removed staff member never received an offer — server-derived
       // recipient list, never the client's original submission.
+      const shiftTable = await businessTableOf(adminDataSource.manager, 'shift', shiftId);
       const offersForRemoved = await adminDataSource.manager.query(
-        `SELECT jo.id FROM core.job_offer jo JOIN core.shift_assignment sa ON sa.id = jo.shift_assignment_id WHERE sa.shift_id = $1 AND jo.staff_profile_id = $2`,
+        `SELECT jo.id FROM ${siblingTable(shiftTable, 'job_offer')} jo JOIN ${siblingTable(shiftTable, 'shift_assignment')} sa ON sa.id = jo.shift_assignment_id WHERE sa.shift_id = $1 AND jo.staff_profile_id = $2`,
         [shiftId, staffA],
       );
       expect(offersForRemoved).toHaveLength(0);
@@ -1216,8 +1217,9 @@ describeIfDb('venue manager scoping (integration)', () => {
       expect(declineRes.status).toBe(201);
       expect(declineRes.body.status).toBe('declined');
       expect(declineRes.body.declinedReason).toBe('Venue cancelled the event');
+      const shiftTable = await businessTableOf(adminDataSource.manager, 'shift', shiftId);
       const offers = await adminDataSource.manager.query(
-        `SELECT jo.id FROM core.job_offer jo JOIN core.shift_assignment sa ON sa.id = jo.shift_assignment_id WHERE sa.shift_id = $1`,
+        `SELECT jo.id FROM ${siblingTable(shiftTable, 'job_offer')} jo JOIN ${siblingTable(shiftTable, 'shift_assignment')} sa ON sa.id = jo.shift_assignment_id WHERE sa.shift_id = $1`,
         [shiftId],
       );
       expect(offers).toHaveLength(0);
@@ -1460,7 +1462,7 @@ describeIfDb('venue manager scoping (integration)', () => {
     /** Moves a shift (and its assignments' own windows) so it ENDED `endedAgoMs` before DB now, 7h long. */
     async function endShiftAgo(shiftId: string, endedAgoMs: number) {
       await adminDataSource.query(
-        `UPDATE core.shift SET starts_at = now() - make_interval(secs => $2::double precision / 1000) - interval '7 hours',
+        `UPDATE ${await businessTableOf(adminDataSource, 'shift', shiftId)} SET starts_at = now() - make_interval(secs => $2::double precision / 1000) - interval '7 hours',
            ends_at = now() - make_interval(secs => $2::double precision / 1000) WHERE id = $1`,
         [shiftId, endedAgoMs],
       );
@@ -1520,7 +1522,7 @@ describeIfDb('venue manager scoping (integration)', () => {
       await endShiftAgo(s.shift1, 30 * HOUR);
       const [{ workspace_id: workspaceId }] = await adminDataSource.query(`SELECT workspace_id FROM ${await businessTableOf(adminDataSource, 'shift', s.shift1)} WHERE id = $1`, [s.shift1]);
       const [{ id: reportId }] = await adminDataSource.query(
-        `INSERT INTO core.shift_report (organisation_id, workspace_id, shift_id, status, finalised_at, final_pdf_sent_at)
+        `INSERT INTO ${siblingTable(await businessTableOf(adminDataSource, 'shift', s.shift1), 'shift_report')} (organisation_id, workspace_id, shift_id, status, finalised_at, final_pdf_sent_at)
            VALUES ($1, $2, $3, 'finalised', now() - interval '6 hours', now() - interval '6 hours') RETURNING id`,
         [s.organisation.id, workspaceId, s.shift1],
       );
@@ -1558,8 +1560,9 @@ describeIfDb('venue manager scoping (integration)', () => {
       const late = await createStaff(s.managerToken, 'Late');
       await activateStaff(s.organisation, s.manager.userId, late);
       const offerId = await sendOffer(s.managerToken, s.shift2, late);
+      const shift2Table = await businessTableOf(adminDataSource, 'shift', s.shift2);
       const [{ user_id: lateUserId, workspace_id: workspaceId }] = await adminDataSource.query(
-        `SELECT sp.user_id, s.workspace_id FROM core.staff_profile sp, core.shift s WHERE sp.id = $1 AND s.id = $2`, [late, s.shift2]);
+        `SELECT sp.user_id, s.workspace_id FROM ${siblingTable(shift2Table, 'staff_profile')} sp, ${shift2Table} s WHERE sp.id = $1 AND s.id = $2`, [late, s.shift2]);
       const staffCtx = { organisationId: s.organisation.id, workspaceId, userId: lateUserId, role: 'staff' };
       const offers = app.get(OfferService);
 
@@ -1576,7 +1579,8 @@ describeIfDb('venue manager scoping (integration)', () => {
 
       // Confirm: put the offer into staff_accepted directly (the accept itself is what was just refused) and try to confirm.
       await adminDataSource.query(`UPDATE ${await businessTableOf(adminDataSource, 'job_offer', offerId)} SET status = 'staff_accepted', staff_accepted_at = now() WHERE id = $1`, [offerId]);
-      await adminDataSource.query(`UPDATE core.shift_assignment SET status = 'staff_accepted' WHERE id = (SELECT shift_assignment_id FROM core.job_offer WHERE id = $1)`, [offerId]);
+      const offerTable = await businessTableOf(adminDataSource, 'job_offer', offerId);
+      await adminDataSource.query(`UPDATE ${siblingTable(offerTable, 'shift_assignment')} SET status = 'staff_accepted' WHERE id = (SELECT shift_assignment_id FROM ${offerTable} WHERE id = $1)`, [offerId]);
       const confirm = await request(app.getHttpServer()).post(`/rest/v1/offers/${offerId}/confirm`).set('Authorization', `Bearer ${s.managerToken}`);
       expect(confirm.status).toBe(409);
       expect(confirm.body.message).toContain('can no longer be confirmed');
@@ -1745,22 +1749,23 @@ describeIfDb('venue manager scoping (integration)', () => {
       await activateStaff(seed.organisation, seed.manager.userId, staff);
       await sendOffer(managerToken, shiftId, staff);
       await confirmAssignment(seed.organisation, seed.manager.userId, staff, shiftId);
+      const shiftTable = await businessTableOf(adminDataSource, 'shift', shiftId);
       await adminDataSource.query(
-        `UPDATE core.shift SET starts_at = now() - make_interval(secs => $2::double precision / 1000) - interval '7 hours',
+        `UPDATE ${shiftTable} SET starts_at = now() - make_interval(secs => $2::double precision / 1000) - interval '7 hours',
            ends_at = now() - make_interval(secs => $2::double precision / 1000) WHERE id = $1`,
         [shiftId, opts.endedAgoMs],
       );
       await adminDataSource.query(
-        `UPDATE core.shift_assignment SET period = tstzrange((SELECT starts_at FROM core.shift WHERE id = $1), (SELECT ends_at FROM core.shift WHERE id = $1)) WHERE shift_id = $1`,
+        `UPDATE ${siblingTable(shiftTable, 'shift_assignment')} SET period = tstzrange((SELECT starts_at FROM ${shiftTable} WHERE id = $1), (SELECT ends_at FROM ${shiftTable} WHERE id = $1)) WHERE shift_id = $1`,
         [shiftId],
       );
       let attendanceId: string | null = null;
       if (opts.status) {
         const [row] = await adminDataSource.query(
-          `INSERT INTO core.attendance (organisation_id, workspace_id, shift_assignment_id, shift_id, staff_profile_id, clock_in_at, clock_out_at, status, break_minutes)
+          `INSERT INTO ${siblingTable(shiftTable, 'attendance')} (organisation_id, workspace_id, shift_assignment_id, shift_id, staff_profile_id, clock_in_at, clock_out_at, status, break_minutes)
            SELECT sa.organisation_id, sa.workspace_id, sa.id, sa.shift_id, sa.staff_profile_id, s.starts_at + interval '15 minutes',
                   CASE WHEN $2 THEN s.ends_at ELSE NULL END, $3, 30
-             FROM core.shift_assignment sa JOIN core.shift s ON s.id = sa.shift_id WHERE sa.shift_id = $1 RETURNING id, clock_in_at`,
+             FROM ${siblingTable(shiftTable, 'shift_assignment')} sa JOIN ${shiftTable} s ON s.id = sa.shift_id WHERE sa.shift_id = $1 RETURNING id, clock_in_at`,
           [shiftId, !!opts.clockOut, opts.status],
         );
         attendanceId = row.id;

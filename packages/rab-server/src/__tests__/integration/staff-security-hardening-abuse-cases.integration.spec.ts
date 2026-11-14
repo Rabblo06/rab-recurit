@@ -14,6 +14,7 @@ import { TenantContextService } from '../../engine/core-modules/tenant/tenant-co
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { idsOf, rowsOf } from './helpers/response-shapes';
 import { TestIdentityFactory } from './helpers/test-identities';
+import { businessTable } from './helpers/hws-fixtures';
 import { generateFixturePassword } from './helpers/fixture-password';
 import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-pipe';
 import { integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
@@ -197,7 +198,7 @@ describeIfDb('staff security hardening abuse cases (integration)', () => {
     await adminDataSource.transaction(async (m) => {
       const [{ ws }] = await m.query(`SELECT id AS ws FROM core.manager_workspace WHERE owner_user_id = $1`, [managers[0]!.userId]);
       await m.query(`SELECT set_config('rab.organisation_id', $1, true), set_config('rab.workspace_id', $2, true), set_config('rab.user_id', $3, true)`, [organisation.id, ws, managers[0]!.userId]);
-      const updated = await m.query('UPDATE core.staff_profile SET staff_ref = $1 WHERE id = $2 RETURNING id', ['staff99', seed.body.id]);
+      const updated = await m.query(`UPDATE ${businessTable(ws, 'staff_profile')} SET staff_ref = $1 WHERE id = $2 RETURNING id`, ['staff99', seed.body.id]);
       expect(updated[0]).toHaveLength(1);
     });
 

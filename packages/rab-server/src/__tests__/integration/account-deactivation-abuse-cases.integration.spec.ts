@@ -159,7 +159,8 @@ describeIfDb('account deactivation abuse cases (integration)', () => {
       userId = userResult.identifiers[0]!.id as string;
       await manager.insert(UserRole, { userId, roleId: role.id, organisationId: organisation.id });
       await manager.query(
-        `INSERT INTO core.staff_profile (organisation_id, user_id, staff_ref, created_by, workspace_id) VALUES ($1, $2, $3, $4, $5)`,
+        // Part C1: unqualified (workspace table), routed by the tenant context like the product's own write.
+        `INSERT INTO staff_profile (organisation_id, user_id, staff_ref, created_by, workspace_id) VALUES ($1, $2, $3, $4, $5)`,
         [organisation.id, userId, `STF-${randomUUID().slice(0, 8)}`, createdByUserId, creatorWorkspaceId],
       );
       await insertMembership(manager, organisation.id, userId, creatorWorkspaceId);
@@ -212,7 +213,7 @@ describeIfDb('account deactivation abuse cases (integration)', () => {
     );
     const staffProfile = await tenantContext.runInTenantContext(
       { organisationId: organisation.id, workspaceId: managerWorkspaceId, userId: managerUserId, role: '' },
-      (manager) => manager.query(`SELECT id FROM core.staff_profile WHERE user_id = $1`, [staff.userId]),
+      (manager) => manager.query(`SELECT id FROM staff_profile WHERE user_id = $1`, [staff.userId]),
     );
     const staffProfileId = staffProfile[0].id as string;
 
