@@ -45,6 +45,16 @@ describe('decideUpgradeStart (Twenty run-instance-commands.command.ts:124-168)',
     expect(decideUpgradeStart(base({ complete: { '0.6.0': true } }))).toMatchObject({ kind: 'continue', from: '0.6.0' });
   });
 
+  it('CI POST-1: a version an earlier unforced start already moved on to is past the gate (a later failure is retried, never 65)', () => {
+    // A fresh 0.6.0 install (0.6.0 completed, no 0.4.0 / 0.5.0 rows), then a start whose post-check failed: the latest
+    // attempt of 0.6.0's last step is failed, nothing previous is complete, but 0.6.0 itself was started unforced.
+    expect(decideUpgradeStart(base({ complete: { '0.4.0': false, '0.5.0': false, '0.6.0': false }, codeVersionStarted: true }))).toMatchObject({ kind: 'continue', from: '0.6.0' });
+    // Strict from 0.7.0 too: a 0.7.0 that was started (passed the check) and then failed retries.
+    expect(decideUpgradeStart(base({ codeVersion: '0.7.0', previousVersions: ['0.4.0', '0.5.0', '0.6.0'], complete: { '0.6.0': false }, codeVersionStarted: true })).kind).toBe('continue');
+    // Not started (only forced rows, or none of this version): still refused.
+    expect(() => decideUpgradeStart(base({ complete: { '0.6.0': false }, codeVersionStarted: false }))).toThrow(UpgradeVersionTooOldError);
+  });
+
   it('strict from 0.7.0: a skipped release refuses (65) and --force skips only that', () => {
     const facts = base({ codeVersion: '0.7.0', previousVersions: ['0.4.0', '0.5.0', '0.6.0'], complete: { '0.5.0': true, '0.6.0': false } });
     expect(() => decideUpgradeStart(facts)).toThrow(UpgradeVersionTooOldError);

@@ -154,6 +154,23 @@ export async function hasInstanceRows(query: Query): Promise<boolean> {
   return rows.length > 0;
 }
 
+/**
+ * Whether an earlier UNFORCED start already passed the previous-version check for `version`: an instance step row (not
+ * is_initial, not forced, completed or failed) that this version recorded. Twenty's gate asks whether the instance is AT
+ * OR PAST the previous version's last step (run-instance-commands.command.ts:154-158, areAllWorkspacesAtCommand); a start
+ * that moved on to `version` is past it, so a later failure inside `version` must not send it back to that check.
+ * Forced rows do not count: a history only `--force` got into keeps needing `--force`.
+ */
+export async function versionStartedUnforced(query: Query, version: string): Promise<boolean> {
+  const rows = (await query(
+    `SELECT 1 FROM core.upgrade_migration m
+      WHERE m.workspace_id IS NULL AND NOT m.is_initial AND NOT m.forced AND m.executed_by_version = $1
+      LIMIT 1`,
+    [version],
+  )) as unknown[];
+  return rows.length > 0;
+}
+
 /** Every version that appears on an instance row (completed or not). */
 export async function instanceVersions(query: Query): Promise<string[]> {
   const rows = (await query(`SELECT DISTINCT m.executed_by_version AS v FROM core.upgrade_migration m WHERE m.workspace_id IS NULL`)) as Array<{ v: string }>;

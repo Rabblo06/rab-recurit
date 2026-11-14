@@ -29,6 +29,7 @@ import { randomBytes } from 'node:crypto';
 import { Client } from 'pg';
 
 import { resolveIntegrationTestDatabase } from '../../database/typeorm/core/test-database-guard';
+import { codeMigrationNames } from '../../database/typeorm/scripts/migrate/owner-login/migrate-on-start';
 import { ADOPTION, apiBootGateRefusal, b1, EXIT, LEDGER_MIGRATION_NAME, LedgerRow, loginOf, migrationsStep, Query, urls, withDatabase } from './ledger-contract';
 import { attemptProblems, Cluster, factDifferences, R254_LAST, R256_LAST } from './ledger-fixtures';
 
@@ -40,6 +41,17 @@ const describeIfB1 = RUN ? describe : describe.skip;
 
 const instanceInitial = (rows: LedgerRow[]) => rows.filter((r) => r.is_initial && r.workspace_id === null);
 const ids = (rows: LedgerRow[]) => rows.map((r) => r.id);
+/**
+ * What a start that stops AT `stopAt` (failed or killed there) leaves in core.migrations: the starting set plus every code
+ * migration ordered before `stopAt` (each commits on its own; e.g. XP-09's TokenCleanupRotationOrder1786721460000 sorts
+ * just before the logbook migration), and nothing at or after it. Derived from the code, never a literal list.
+ */
+const appliedBefore = (before: string[], stopAt: string): string[] => {
+  const ts = (n: string) => Number(n.slice(-13));
+  const names = new Set(before);
+  for (const n of codeMigrationNames()) if (ts(n) < ts(stopAt)) names.add(n);
+  return [...names].sort((a, b) => ts(a) - ts(b));
+};
 const of = (rows: LedgerRow[], name: string) => rows.filter((r) => r.name === name && r.workspace_id === null).map((r) => [r.status, r.attempt]);
 
 describeIfB1("the upgrade logbook on real databases (Part B3, B1's start path and upgrade --force)", () => {
@@ -161,7 +173,9 @@ describeIfB1("the upgrade logbook on real databases (Part B3, B1's start path an
     const before = await cl.migrationNames(db);
     const first = await B1.start(db, { env: B1.seams.failMigrationEnv(LEDGER_MIGRATION_NAME) });
     expect([first.exitCode, first.serve]).toEqual([EXIT.migrationFailed, false]);
-    expect(await cl.migrationNames(db)).toEqual(before);
+    // Everything before the failing migration applied and stays; the failing one and everything after it did not.
+    expect(await cl.migrationNames(db)).toEqual(appliedBefore(before, LEDGER_MIGRATION_NAME));
+    expect(await cl.migrationNames(db)).not.toContain(LEDGER_MIGRATION_NAME);
     // The ledger migration itself failed (rolled back), so no table and no row: "the failed row only if the table exists".
     expect(await cl.ledgerExists(db)).toBe(false);
     const retry = await B1.start(db);
@@ -193,6 +207,30 @@ describeIfB1("the upgrade logbook on real databases (Part B3, B1's start path an
     expect(await complete(db, V, PROBES)).toBe(true);
   });
 
+  // ----------------------------------------------------------------------------------------------------------- LU-13
+  it('LU-13 (CI POST-1) a version an unforced start already moved on to is retried after a post-check failure, never refused 65', async () => {
+    const db = await upgradedFrom(TPL256, 'postfail');
+    // The logbook a FRESH 0.6.0 install leaves: the current version's steps only, no previous-version row (superuser
+    // fixture: the adoption row removed). Nothing previous is complete, so the gate could only pass on this version.
+    await cl.admin(db, 'DELETE FROM core.upgrade_migration WHERE is_initial AND workspace_id IS NULL');
+    expect(of(await cl.ledger(db), migrationsStep(V))).toEqual([['completed', 1]]);
+    await cl.admin(db, 'ALTER TABLE core.audit_log DISABLE ROW LEVEL SECURITY');
+    let refused: Awaited<ReturnType<typeof B1.start>>;
+    try {
+      refused = await B1.start(db);
+    } finally {
+      await cl.admin(db, 'ALTER TABLE core.audit_log ENABLE ROW LEVEL SECURITY');
+    }
+    expect([refused.exitCode, refused.serve]).toEqual([EXIT.postCheck, false]);
+    expect(of(await cl.ledger(db), migrationsStep(V))).toEqual([['completed', 1], ['failed', 2]]);
+    // Repaired: the next start retries the version (attempt 3), it is not sent back to the previous-version check.
+    const retry = await B1.start(db);
+    expect([retry.exitCode, retry.serve]).toEqual([EXIT.ok, true]);
+    expect(of(await cl.ledger(db), migrationsStep(V))).toEqual([['completed', 1], ['failed', 2], ['completed', 3]]);
+    expect(attemptProblems(await cl.ledger(db))).toEqual([]);
+    expect(await complete(db)).toBe(true);
+  });
+
   // ------------------------------------------------------------------------------------------------------------ LU-5
   it('LU-5 a crash inside the migrations step leaves no row; the next start re-runs it as attempt 1', async () => {
     const db = cl.dbName('crash');
@@ -200,7 +238,8 @@ describeIfB1("the upgrade logbook on real databases (Part B3, B1's start path an
     const before = await cl.migrationNames(db);
     const crashed = await B1.start(db, { killOnMigration: LEDGER_MIGRATION_NAME });
     expect(crashed.killed).toBe(true);
-    expect(await cl.migrationNames(db)).toEqual(before);
+    expect(await cl.migrationNames(db)).toEqual(appliedBefore(before, LEDGER_MIGRATION_NAME));
+    expect(await cl.migrationNames(db)).not.toContain(LEDGER_MIGRATION_NAME);
     expect(await cl.ledger(db)).toEqual([]);
     // The session lock went with the process.
     expect(await cl.admin(db, "SELECT pid FROM pg_locks WHERE locktype = 'advisory' AND classid = 1668441463 AND objid = 1835624306 AND granted")).toEqual([]);
@@ -316,6 +355,11 @@ describeIfB1("the upgrade logbook on real databases (Part B3, B1's start path an
       const added = (await cl.ledger(db)).filter((r) => !before.includes(r.id));
       expect(added.filter((r) => r.status !== 'failed')).toEqual([]);
       expect(await apiBootGateRefusal(db)).toBe('force-rls');
+      // A FORCED run that failed does not open the previous-version check for normal starts (its rows are forced):
+      // repaired, a normal start is still refused 65 and needs --force again.
+      await cl.admin(db, 'ALTER TABLE core.payroll_record ENABLE ROW LEVEL SECURITY');
+      const normal = await B1.start(db);
+      expect([normal.exitCode, normal.serve]).toEqual([EXIT.behind, false]);
     });
 
     it('LU-12 posture drift the migrate child does not check (NO FORCE on a tenant table): --force or not, the API boot gate refuses', async () => {
