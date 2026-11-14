@@ -31,7 +31,10 @@
  *   L6  only an upgrade COMMAND fails: 70, serves, /healthz upgrade.upgrade = "failed", the Worker starts. NOT RUNNABLE on
  *       0.6.0 (UPGRADE_COMMANDS['0-6'] is empty and the command-failure seam needs NODE_ENV=test): reported, not faked.
  *   L7  rollback to R256 after NEW: serves with a warning (AHEAD); then a loosened known object (FORCE RLS removed from
- *       core.payroll_record): refused.
+ *       core.payroll_record): refused. (PG16 2026-11-14: R256's own semantic-posture boot gate refuses the 0.6.0 database,
+ *       because the logbook's policies are not in R256's golden, so R256 never serves; reported to the lead, not changed.)
+ *   L7b rollback within the ledger lineage: NEW on a database a newer release upgraded (a future migration + a 9.9.0
+ *       completed row): serves with a WARNING, /healthz upgrade "ahead", nothing written; NO FORCE then refuses.
  *   L8  a skipped release (the logbook says only 0.3.0): NEW refuses 65 and applies nothing; every candidate "force"
  *       variable in runtime.env changes nothing; the documented manual command
  *       `docker compose run --rm --no-deps rab-api node dist/command upgrade --force` applies, its rows have forced = true;
@@ -196,10 +199,16 @@ function facts(p) {
   const lines = p.psqlFile('data-facts.sql').split('\n').filter(Boolean);
   return new Map(lines.map((l) => [l.slice(0, l.lastIndexOf('|')), l.slice(l.lastIndexOf('|') + 1)]).filter(([k]) => k !== 'ledger|count'));
 }
-function compareFacts(check, before, after, label) {
-  const changed = [...before.keys()].filter((k) => !k.startsWith('fk|') && !k.startsWith('own|') && before.get(k) !== after.get(k));
+function compareFacts(check, before, after, label, n = () => undefined) {
+  // As deploy-order's upgrade-lib compareFacts (A2): the SEEDED tables' row sets, plus every content and money fact. Row
+  // sets of other tables are not seed data: audit_log is insert-only and grows while the API / Worker run (reported, not
+  // compared).
+  const compared = (k) => (k.startsWith('rows|') && SEEDED_TABLES.includes(k.split('|')[1])) || k.startsWith('content|') || k.startsWith('money|');
+  const changed = [...before.keys()].filter((k) => compared(k) && before.get(k) !== after.get(k));
   const seeded = [...before.keys()].filter((k) => k.startsWith('rows|') && SEEDED_TABLES.includes(k.split('|')[1]));
-  check(seeded.length === SEEDED_TABLES.length * 2 && changed.length === 0, `${label}: seeded rows, content and money identical (${before.size} facts)${changed.length ? `; changed: ${changed.join(', ')}` : ''}`);
+  check(seeded.length === SEEDED_TABLES.length * 2 && changed.length === 0, `${label}: seeded rows, content and money identical (${[...before.keys()].filter(compared).length} facts)${changed.length ? `; changed: ${changed.join(', ')}` : ''}`);
+  const other = [...before.keys()].filter((k) => !compared(k) && !k.startsWith('fk|') && !k.startsWith('own|') && before.get(k) !== after.get(k));
+  if (other.length) n(`${label}: not seed data, changed while the app ran: ${other.map((k) => `${k} ${before.get(k).split(':')[0]}->${(after.get(k) || '?').split(':')[0]}`).join(', ')}`);
   const bad = [...after].filter(([k, v]) => (k.startsWith('fk|') || k.startsWith('own|')) && v !== '0');
   check(bad.length === 0, `${label}: every core foreign key and every tenant-ownership reference holds${bad.length ? `; ${bad.map(([k, v]) => `${k}=${v}`).join(', ')}` : ''}`);
 }
@@ -239,8 +248,11 @@ async function deployNew(p, check, label, digest = IMG.next) {
   check(apiHealthy && workerStart && apiHealthy.t < workerStart.t, `${label}: the API was healthy before the Worker started`);
 }
 function rlsNoContext(p, check, label) {
-  const r = p.psqlOwner('SELECT (SELECT count(*) FROM core.upgrade_migration) || \',\' || (SELECT count(*) FROM core.payroll_record) || \',\' || (SELECT count(*) FROM core.shift);');
-  check(r === '0,0,0', `${label}: crewflow_owner with no tenant context and no upgrade scope reads 0 rows (logbook, payroll_record, shift): ${r}`);
+  // The logbook is read only where it exists (R254 / R256 have none; the base release is checked on its tenant tables).
+  const withLedger = hasLedger(p);
+  const r = p.psqlOwner(`SELECT ${withLedger ? "(SELECT count(*) FROM core.upgrade_migration) || ',' || " : ''}(SELECT count(*) FROM core.payroll_record) || ',' || (SELECT count(*) FROM core.shift);`);
+  const want = withLedger ? '0,0,0' : '0,0';
+  check(r === want, `${label}: crewflow_owner with no tenant context and no upgrade scope reads 0 rows (${withLedger ? 'logbook, ' : ''}payroll_record, shift): ${r}`);
 }
 /** A deploy that must FAIL (short health window): the API refuses; returns its migrate results. */
 function deployRefused(p, check, digest, label, pgImage) {
@@ -267,7 +279,7 @@ async function main() {
     ['L2', 'R256', IMG.r256, 256, '0.5.0'],
   ]) {
     const p = project(id.toLowerCase());
-    await step(id, `adopt ${release}: one is_initial row at ${version}, upgraded in the same start, data identical, a restart adds nothing`, async (check) => {
+    await step(id, `adopt ${release}: one is_initial row at ${version}, upgraded in the same start, data identical, a restart adds nothing`, async (check, n) => {
       await freshSeeded(p, check, digest, count);
       const before = facts(p);
       rlsNoContext(p, check, 'before');
@@ -281,7 +293,7 @@ async function main() {
       check(attemptProblems(rows).length === 0, 'attempts contiguous, no duplicate');
       const res = migrateResults(p.logs('rab-api')).pop() || {};
       check(res.upgrade && res.upgrade.adoptedFrom === version && res.upgrade.codeVersion === NEW_VERSION, `result line: adoptedFrom ${res.upgrade && res.upgrade.adoptedFrom}, codeVersion ${res.upgrade && res.upgrade.codeVersion}`);
-      compareFacts(check, before, facts(p), 'after the upgrade');
+      compareFacts(check, before, facts(p), 'after the upgrade', n);
       rlsNoContext(p, check, 'after');
       const ids = ledgerIds(p);
       const r = p.compose(['up', '-d', '--force-recreate', 'rab-api'], { timeout: 900_000 });
@@ -315,8 +327,11 @@ async function main() {
   await step('L4', 'crash inside the migrations step (SIGKILL while the ledger migration waits on a lock): no row; up -d resumes, attempt 1', async (check, n) => {
     await freshSeeded(l4, check, IMG.r256, 256);
     const before = facts(l4);
-    const holder = await l4.holdLock('LOCK TABLE core.manager_workspace IN ACCESS EXCLUSIVE MODE');
-    n(`lock holder pid ${holder.pid}: core.manager_workspace ACCESS EXCLUSIVE (the logbook's FK needs it)`);
+    // SHARE: reads of core.manager_workspace (the start path's classification) pass; the logbook's CREATE TABLE ... REFERENCES
+    // core.manager_workspace needs SHARE ROW EXCLUSIVE on it and waits. (ACCESS EXCLUSIVE blocked the classification read
+    // instead, before the migrations step: PG16 run 2026-11-14.)
+    const holder = await l4.holdLock('LOCK TABLE core.manager_workspace IN SHARE MODE');
+    n(`lock holder pid ${holder.pid}: core.manager_workspace SHARE (the logbook's FK needs SHARE ROW EXCLUSIVE)`);
     use(l4, IMG.next);
     const dep = l4.deployAsync();
     try {
@@ -334,11 +349,11 @@ async function main() {
     await deployNew(l4, check, 'resume');
     const rows = ledger(l4);
     check(instanceOf(rows, `${NEW_VERSION}_TypeOrmMigrations`).join(',') === 'completed:1', `resumed: ${NEW_VERSION}_TypeOrmMigrations completed, attempt 1 (${instanceOf(rows, `${NEW_VERSION}_TypeOrmMigrations`)})`);
-    compareFacts(check, before, facts(l4), 'after the crash and resume');
+    compareFacts(check, before, facts(l4), 'after the crash and resume', n);
   }, l4);
 
   const l5 = project('l5');
-  await step('L5', 'a failed migration: 66, never serves; each restart = the next attempt; back to NEW: completed n+1', async (check) => {
+  await step('L5', 'a failed migration: 66, never serves; each restart = the next attempt; back to NEW: completed n+1', async (check, n) => {
     await freshSeeded(l5, check, IMG.r256, 256);
     await deployNew(l5, check, 'NEW');
     const before = facts(l5);
@@ -354,7 +369,7 @@ async function main() {
     await deployNew(l5, check, 'NEW again');
     const final = instanceOf(ledger(l5), `${NEW_VERSION}_TypeOrmMigrations`);
     check(final[final.length - 1] === `completed:${final.length}`, `NEW again: completed attempt ${final.length}`);
-    compareFacts(check, before, facts(l5), 'after the failed migration');
+    compareFacts(check, before, facts(l5), 'after the failed migration', n);
   }, l5);
 
   await step('L6', 'only an upgrade command fails: 70, serves, healthz upgrade "failed", Worker starts', async (check, n) => {
@@ -381,6 +396,34 @@ async function main() {
     check(!/"serve":true/.test(log.split('\n').slice(-50).join('\n')), 'with FORCE RLS removed from a known table the old image does not serve');
     l7.psql('ALTER TABLE core.payroll_record FORCE ROW LEVEL SECURITY');
   }, l7);
+
+  const l7b = project('l7b');
+  await step('L7b', 'rollback within the ledger lineage: NEW on a database a newer release upgraded serves with a WARNING and writes nothing; NO FORCE then refuses', async (check) => {
+    await freshSeeded(l7b, check, IMG.r256, 256);
+    await deployNew(l7b, check, 'NEW');
+    // What a later release leaves behind (superuser fixture): one more applied migration and its completed logbook row.
+    l7b.psql("INSERT INTO core.migrations (timestamp, name) VALUES (1799999999999, 'FutureRelease1799999999999'); INSERT INTO core.upgrade_migration (name, status, attempt, executed_by_version, is_initial, workspace_id, forced) VALUES ('9.9.0_TypeOrmMigrations', 'completed', 1, '9.9.0', false, NULL, false)");
+    const ids = ledgerIds(l7b);
+    const r = l7b.compose(['up', '-d', '--force-recreate', 'rab-api'], { timeout: 900_000 });
+    check(r.code === 0, `restart NEW on the newer database: exit ${r.code}`);
+    await l7b.waitHealthy('rab-api', 300_000);
+    const al = l7b.logs('rab-api');
+    evidence('L7b-api.log', al);
+    check(/WARN/i.test(al) && /AHEAD|rollback|newer/i.test(al), 'NEW logs a rollback (AHEAD) warning and serves');
+    check(ledgerIds(l7b) === ids, 'NEW wrote nothing to the logbook');
+    let up = {};
+    try {
+      const body = JSON.parse(l7b.healthz().body);
+      up = (body.info || body.details || {}).upgrade || {};
+    } catch {
+      /* checked below */
+    }
+    check(up.upgrade === 'ahead' && up.upgradeFailed === false, `/healthz upgrade: ${JSON.stringify(up)}`);
+    l7b.psql('ALTER TABLE core.payroll_record NO FORCE ROW LEVEL SECURITY');
+    const { log } = deployRefused(l7b, check, IMG.next, 'ahead-loosened');
+    check(/boot gate "(force-rls|semantic-posture)" refused/.test(log), 'with FORCE RLS removed from a known table NEW refuses at its boot gate');
+    l7b.psql('ALTER TABLE core.payroll_record FORCE ROW LEVEL SECURITY');
+  }, l7b);
 
   const l8 = project('l8');
   await step('L8', 'skipped release: 65 and nothing applied; env "force" does nothing; the manual upgrade --force applies with forced = true', async (check, n) => {
@@ -419,8 +462,13 @@ async function main() {
     await freshSeeded(l9, check, IMG.r256, 256);
     l9.compose(['stop', 'rab-api', 'rab-worker'], { timeout: 300_000 });
     use(l9, IMG.next);
-    l9.compose(['pull', 'rab-api'], { timeout: 600_000 });
-    const runChild = () => l9.composeAsync(['run', '--rm', '--no-deps', '-e', 'CREWFLOW_MIGRATE_ON_START=true', 'rab-api', 'node', 'packages/rab-server/dist/database/typeorm/scripts/migrate/twenty/twenty-migrate.js']);
+    l9.compose(['pull', 'rab-api', 'db-setup'], { timeout: 600_000 });
+    // As deploy-order U7 (A2): NEW's rab-api builds the crewflow_owner URL from db-setup's target file, so NEW's db-setup
+    // runs once first (R256 has none); then the documented one-off form, twice at once.
+    const setup = l9.compose(['run', '--rm', '-T', '--no-deps', 'db-setup'], { timeout: 300_000 });
+    evidence('L9-db-setup.log', setup.out);
+    check(setup.code === 0, `NEW's db-setup (one-off): exit ${setup.code}`);
+    const runChild = () => l9.composeAsync(['run', '--rm', '-T', '--no-deps', 'rab-api', 'node', 'packages/rab-server/dist/database/typeorm/scripts/migrate/twenty/twenty-migrate.js']);
     const [a, b] = [runChild(), runChild()];
     const [ra, rb] = await Promise.all([a.done, b.done]);
     evidence('L9-a.log', ra.out);
@@ -460,7 +508,10 @@ async function main() {
   await step('L11', 'deleting a seeded workspace removes its logbook rows (FK cascade) and nothing else', async (check) => {
     await freshSeeded(l11, check, IMG.r256, 256);
     await deployNew(l11, check, 'NEW');
-    const ws = l11.psql("SELECT w.id FROM core.manager_workspace w JOIN core.organisation o ON o.id = w.organisation_id WHERE o.slug = 'dot-seed-a'");
+    // A seeded workspace cannot be deleted directly (staff_profile, manager_profile, ... reference it ON DELETE RESTRICT by
+    // design), so the cascade is exercised on a second workspace of the seeded organisation dot-seed-a (owned by another of
+    // its users: one workspace per owner, manager_workspace_owner_user_id_key).
+    const ws = l11.psql("INSERT INTO core.manager_workspace (organisation_id, owner_user_id, name, subdomain, status) SELECT o.id, u.id, 'B2 cascade workspace', 'dot-seed-a-cascade', 'active' FROM core.organisation o JOIN core.\"user\" u ON u.organisation_id = o.id WHERE o.slug = 'dot-seed-a' AND NOT EXISTS (SELECT 1 FROM core.manager_workspace w WHERE w.owner_user_id = u.id) ORDER BY u.id LIMIT 1 RETURNING id");
     const other = l11.psql("SELECT w.id FROM core.manager_workspace w JOIN core.organisation o ON o.id = w.organisation_id WHERE o.slug = 'dot-seed-b'");
     l11.psql(`INSERT INTO core.upgrade_migration (name, status, attempt, executed_by_version, is_initial, workspace_id, forced) VALUES ('${NEW_VERSION}_TypeOrmMigrations', 'completed', 1, '${NEW_VERSION}', true, '${ws}', false), ('${NEW_VERSION}_TypeOrmMigrations', 'completed', 1, '${NEW_VERSION}', true, '${other}', false)`);
     const instance = l11.psql("SELECT count(*) FROM core.upgrade_migration WHERE workspace_id IS NULL");
