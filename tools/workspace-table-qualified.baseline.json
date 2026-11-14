@@ -5,18 +5,6 @@
     "sites lowers or deletes its rows in the same PR. Never raise a count; qualify the new reference instead. C2-7: empty."
   ],
   "files": {
-    "packages/rab-server/src/command/seed-ai-demo.command.ts": {
-      "unqualified": 11
-    },
-    "packages/rab-server/src/command/seed-qa.command.ts": {
-      "unqualified": 4
-    },
-    "packages/rab-server/src/engine/core-modules/realtime/realtime-recipients.ts": {
-      "unqualified": 9
-    },
-    "packages/rab-server/src/engine/core-modules/user-deletion/user-deletion.service.ts": {
-      "unqualified": 18
-    },
     "packages/rab-server/src/modules/ai/actions/ai-proposal.service.ts": {
       "unqualified": 4
     },
