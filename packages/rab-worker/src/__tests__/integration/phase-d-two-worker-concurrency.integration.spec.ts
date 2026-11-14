@@ -174,7 +174,9 @@ describeIfApproved('Phase D two-Worker concurrency and failure (integration — 
       'SELECT claim_token, claim_count, due_at FROM core.worker_dispatch_pointer WHERE subject_id = $1',
       [subject],
     ))[0] ?? null;
-  const row = async (table: string, id: string) => (await admin.query(`SELECT * FROM core.${table} WHERE id = $1`, [id]))[0];
+  // Part C1: payroll_record is a workspace business table (its workspace schema with HWS on); the outbox tables are core.
+  const row = async (table: string, id: string) =>
+    (await admin.query(`SELECT * FROM ${table === 'payroll_record' ? await businessTableOf(admin, table, id) : `core.${table}`} WHERE id = $1`, [id]))[0];
 
   /**
    * Claims (as `worker`) until every wanted subject was seen or a claim call returns nothing. A SHORT batch does not stop
