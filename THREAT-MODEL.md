@@ -7491,3 +7491,85 @@ image that runs the apps' own derive step on the read-only volume (`--pull never
   compose-owner-login.cjs (lock in image.yml); live: dev bring-up + restart on PG16 (crewflow_owner NOSUPERUSER NOBYPASSRLS,
   password file unchanged across restart, no password in any log) and run-db-setup-tests.cjs block `lock` (PG16 PASS: the
   second db exits 1 with the refusal, the first stays healthy).
+
+## OWNER-DB-ULTIMATE Part D — per-workspace upgrade commands and the workspace command runner, like Twenty's (branch deploy/workspace-command-runner; no new SQL)
+
+- **What.** Workspace schema changes ship as WORKSPACE upgrade commands per release (`upgrade-commands/<major-minor>/`,
+  registry `WORKSPACE_UPGRADE_COMMANDS`; 0.6 has none). The workspace command runner runs them once per workspace, on the
+  locked migration session, after the release's instance commands. Each (command, workspace) is recorded in Part B's
+  `core.upgrade_migration` (workspace_id set, `completed` / `failed`, attempt + 1). The workspace-module list is frozen at
+  20 (the template); a structural command adds a structure level (21, 22, …). On 0.6.0 every READY workspace at module 20
+  with a matching structure is adopted with one `is_initial` row. Behaviour re-implemented from twentyhq/twenty @ eedb0a73
+  (workspace-command-runner.service.ts, workspace-iterator.service.ts, upgrade-sequence-reader / -runner,
+  run-instance-commands previous-version check), not copied. No DDL, function or grant was added: the runner uses Part B's
+  approved table, existing functions (`worker_list_workspaces`, `verify_workspace_schema_v1`, `workspace_schema_fingerprint`)
+  and existing registry columns.
+- **Threats.**
+  1. A workspace's command touches another workspace's schema or data, `core`, or the role catalogs (DDL, DML, GRANT,
+     CREATE / ALTER ROLE), or forges logbook rows.
+  2. A command leaves the session changed (role, tenant binding, `rab.*`, search_path, advisory locks) for the next workspace.
+  3. A workspace is served by code that expects a structure it does not have (a failed structural step, a data-step failure
+     before a pending structural step, drift, a refused adoption).
+  4. One workspace's failure stops or marks the others.
+  5. `--force` hides an earlier failed step.
+  6. A test hook reaches production.
+  7. A long upgrade is killed by the health check / restart loop and leaves partial state.
+- **Controls.**
+  - **One REPEATABLE READ transaction per (workspace, command):** `SET LOCAL ROLE crewflow` (refused when the session can
+    neither be nor SET crewflow), tenant bound to that workspace, `search_path = pg_catalog, pg_temp`, per-schema advisory
+    lock, registry row FOR UPDATE (READY, derived name).
+  - **Post-step checks before COMMIT (any failure rolls back):**
+    - a static refusal of SQL naming another `workspace_<hex>`;
+    - session invariants: same backend and transaction, role, every `rab.*` by name, search_path;
+    - a catalog-write gate: a DATA step that writes any catalog is refused `DDL_IN_DATA_STEP`;
+    - for structural steps, the catalog xmin scan (no catalog row outside the schema written by this transaction; the
+      schema's own TOAST and the internal RI triggers of its own FKs are allowed); for steps declaring `mayDrop`, also the
+      outside object counts (an undeclared drop is refused `UNDECLARED_DROP`);
+    - write counters compared as a delta within the transaction: no insert / update / delete on any table outside the
+      schema, nor on pg_authid, pg_auth_members, pg_db_role_setting, pg_database, pg_largeobject_metadata,
+      pg_publication(_rel); plus xmin scans of the readable shared catalogs. `track_counts = on` is required per run;
+    - extra structure: no rule, all relations permanent, no inheritance, no foreign type or operator;
+    - `verify_workspace_schema_v1` + fingerprint equal to the expected value of the workspace's structure level for this
+      PostgreSQL major.
+  - **After the transaction:** role none, current_user = session_user, every `rab.*` empty (checked by name: pg_settings does
+    not list placeholder settings, proven on PG16/17/18), search_path as at the start, no extra session advisory lock.
+    Otherwise the step is refused `SESSION_LEAK` and the session reset; a reset that fails stops the run.
+  - **Failure isolation:** a failed workspace gets its own `failed` row and stops only its own later steps. A per-workspace
+    fault outside a step (a vanished workspace, a logbook write) is recorded against that workspace; only a run-level fault
+    stops the run. Pending steps are every workspace step after the cursor up to the code version, so a step `--force`
+    skipped runs first. The previous-version check also needs every workspace to have completed the previous version's last
+    workspace step.
+  - **Blocked workspaces (owner decisions D2/D3):** a workspace whose step failed with a structure that does not match this
+    code is BLOCKED until its step succeeds. That covers a structural step, a mismatched structure, a level below the
+    code's, a refused adoption, and no / unknown cursor.
+    - Marker: `upgrade-blocked: <step> (<CLASS>)` in the existing registry column `migration_error`.
+    - `SchemaResolverService` answers 503 "Workspace is being upgraded." only to an authenticated member of that
+      workspace; another tenant gets 404 as usual.
+    - The Worker's walks skip it and per-job paths defer it (no attempt counted).
+    - The admin health page names it: workspace id, step, error class, never a message.
+    - The step retries every start.
+    - A data-only failure with a matching structure is served (still reported failed).
+    - A block that cannot be written stops the start. A cache-epoch bump that fails while a block changed or is in force
+      stops the start (66).
+  - **Test hooks:** `runMigrateOnStart`'s `testWorkspace` and the provisioner's `workspaceRegistry` are code-only and refused
+    outside NODE_ENV=test, before any connection; a guard spec proves no non-spec file passes them.
+  - **Long upgrades:** each (workspace, step) commits and is recorded on its own, so a kill loses at most the workspace in
+    flight and the next start resumes. Measured at 1,000 workspaces: data step ≈0.4–0.6 s, structural ADD COLUMN
+    ≈0.9–1.3 s per workspace.
+- **Accepted limits (owner-accepted 2026-11-14).**
+  - **D-T1:** the checks are a detector, not a privilege boundary. The command runs as `crewflow` (which owns every
+    workspace schema) on the session that set the binding and role, so it can re-bind, RESET ROLE (`crewflow_owner` holds
+    CREATEROLE) or set `rab.upgrade_scope`. The checks detect and roll back what that changes; they cannot stop a command
+    that COMMITs mid-way (it is then refused). Not detected: `NOTIFY` (delivered at COMMIT), `nextval` on a sequence outside
+    the schema, large-object payload writes. Commands are reviewed code, never input-driven.
+  - **D-T2:** steps run under REPEATABLE READ; a concurrent writer can fail a data step with 40001 (recorded failed,
+    retried).
+  - **HWS off (open owner question):** the block is enforced where workspaces are routed to their schemas
+    (`HWS_RUNTIME_ENABLED`). With HWS off, requests use `core` and nothing is blocked; the admin page still names the
+    workspace.
+  - **Rules for command authors:** data steps may not write any catalog (DDL, GRANT, TRUNCATE, temporary tables, ALTER ROLE);
+    structural steps that drop or recreate objects declare `mayDrop`; every command is idempotent.
+- **Tests.** Unit: sequence, pending, positions, isolation scan, freeze, source guard, structure level, delta counters,
+  track_counts, rab.* list, hook refusal. Integration on PG16/17/18: adoption, per-workspace runs, every abuse case above, the
+  D2/D3 blocks, the P1 code-level block, the locked start with a level-21 probe, the P2 refusal. Worker unit tests for the
+  pauses.
