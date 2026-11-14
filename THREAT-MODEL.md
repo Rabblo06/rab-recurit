@@ -7391,3 +7391,74 @@ image that runs the apps' own derive step on the read-only volume (`--pull never
 - **Tests:** `refresh-token-revoke-first-wins.integration.spec.ts` (revoke, then revoke again later → revoked_at unchanged,
   for all three methods, incl. revokeAllForUserExcept keeping the excepted family live and backdated times unchanged; replaying a rotated token twice keeps its rotation time; fails 3/3 on the previous code) and unit tests
   in `refresh-token.service.spec.ts`.
+
+## OWNER-DB-ULTIMATE Part B — upgrade logbook `core.upgrade_migration`, like Twenty's upgradeMigration (branch deploy/upgrade-ledger; SQL owner-approved: REVISED, REVISED 2 and the PG18 self-check, 2026-11-13/14)
+
+- **What.** Every start records each upgrade step in `core.upgrade_migration` (migration
+  `UpgradeMigrationLedger1786721470000`): `<version>_TypeOrmMigrations`, then one row per upgrade command, `completed`
+  or `failed`, attempt N, `executed_by_version`, `forced`, `is_initial` (one-time adoption of an R254 / R256 history as
+  0.4.0 / 0.5.0; a new workspace's first row). Behaviour re-implemented from twentyhq/twenty @ eedb0a73 (the
+  upgrade-migration service, upgrade command runner, workspace.service.ts:813), not copied.
+- **Threats.** (1) A request handler, the legacy runtime role or another tenant reads or forges upgrade history (a fake
+  completed step skips a needed upgrade, or a failure is hidden). (2) Rows are rewritten or deleted to hide a failed or
+  forced upgrade. (3) An old or unknown database is upgraded across a skipped release. (4) A test-only seam (a fake or
+  failing upgrade command) reaches a real deployment. (5) Public `/healthz` tells an unauthenticated caller the version,
+  step or error text. (6) An operator rolls an image back across 0.6.0 and the service does not come up.
+- **Controls.**
+  - **Table + RLS in the same migration.** Owner `rab_secure_owner` (NOLOGIN); `REVOKE ALL` from PUBLIC, crewflow and
+    crewflow_app; the owner role holds SELECT, INSERT and DELETE only. ENABLE + FORCE RLS. No UPDATE or TRUNCATE
+    privilege for anyone. CHECKs: name pattern, status `completed|failed`, attempt ≥ 1, strict version, a message only on
+    failed rows and ≤ 4000 chars, `is_initial` ⇒ attempt 1 and not forced. FK `workspace_id` → `core.manager_workspace`
+    ON DELETE CASCADE. Twenty's four indexes (two partial unique).
+  - **Scope setting.** Every policy is keyed on the transaction-local `rab.upgrade_scope`, set only by the upgrade code
+    (`withUpgradeScope`; the value is a bound parameter):
+    - `upgrade`: read and insert, only with no tenant bound and only while THIS backend holds the migration advisory
+      lock (pg_locks, classid/objid of `0x637265776d696772`);
+    - `status`: read only, no tenant bound;
+    - `workspace_init`: insert of an `is_initial` row for a workspace of the bound organisation only;
+    - unset (every request handler): 0 rows, insert 42501. A RESTRICTIVE `USING (false) WITH CHECK (false)` policy
+      covers crewflow_app.
+    `withUpgradeScope` refuses to open a scope in a transaction that already wrote, in a multi-statement transaction, or
+    over a non-empty scope (a simple-protocol pre-check), and checks the same backend afterwards. `TenantContextService`
+    clears the setting in every tenant transaction.
+  - **Owner DELETE, for the cascade only (REVISED 2).** PostgreSQL runs an ON DELETE CASCADE as the referencing table's
+    owner and checks that owner's DELETE privilege, so the owner keeps DELETE. There is no DELETE policy: any direct
+    DELETE (the owner login included) removes 0 rows under FORCE RLS. Rows leave only with their workspace.
+  - **Test seams refused outside tests.** `CREWFLOW_TEST_UPGRADE_COMMANDS` / `CREWFLOW_TEST_UPGRADE_FAIL_COMMAND` exit 64
+    unless NODE_ENV=test on a database marked `crewflow.disposable_test_database`, outside production
+    (runtime-db-config.ts, migrate-on-start.ts), and `api-prestart.sh` refuses them with the other migration seams.
+  - **Version refusal.** Before any write, `decideUpgradeStart` refuses a database that has not completed the previous
+    version, has an unknown / unadoptable history, or skips a release: exit 65, nothing applied (supported floor R254 =
+    0.4.0, R256 = 0.5.0). `upgrade --force` (a one-off `docker compose run --rm --no-deps rab-api node
+    packages/rab-server/dist/command upgrade --force`) skips only that refusal and marks every row it writes
+    `forced = true`; no environment variable can set it. A `CREWFLOW_APP_VERSION` that disagrees with package.json, or is
+    set without one, exits 64.
+  - **Failure semantics.** A failed migration never serves (exit 66, retried on the next start). Only a verified failed
+    upgrade COMMAND with every migration applied serves (exit 70). `CREWFLOW_UPGRADE_FAILURE`, `_POLICY` and
+    `CREWFLOW_UPGRADE_INCOMPLETE` were removed and are refused (64).
+  - **`/healthz` is a boolean (owner decision 2026-11-14).** Public: exactly
+    `upgrade: { status: 'up', upgradeFailed: true|false }`. No version, step, state word or error text in any state;
+    always `up` (200). The state, step, versions, attempt and forced flag are on the platform-admin health report only,
+    and `error_message` is never shown there either.
+  - **Rollback is a restore.** Going back from 0.6.0 to an older image (R256, R254) is only possible by restoring the
+    pre-0.6.0 backup: the older image's semantic-posture boot gate refuses the logbook objects (finding L7). Runbook 3.3
+    and 3.6 and the rab-docs deployment page say so; the backup is mandatory before 0.6.0.
+- **Residual risks (accepted).**
+  - **R1 (Info, accepted 2026-11-13):** `markNewWorkspaceInitial` takes a structural `{ id, organisationId }`, not proof
+    that the workspace was just created. A caller on the creating code path could write an `is_initial` row for another
+    existing workspace of the SAME organisation. This is bounded by the import allowlist (`upgrade-imports.spec.ts`), the
+    same-organisation policy and the bound-organisation check; no xmin-based proof was added in SQL.
+  - `error_message` is stored as-is (length-capped) and may contain what the failing step printed. Only the upgrade and
+    status scopes can read it; request handlers and /healthz cannot.
+  - The semantic goldens grew (+7 lines on PG16/17/18; the `acl|` section is generalized to `ACL_WATCHED_TABLES`), so any
+    older image refuses a 0.6.0 database (rollback is a restore, above).
+- **Tests.**
+  - `upgrade-migration-ledger.integration.spec.ts` (11 tests): scopes, the lock, cross-org 42501, an owner DELETE that
+    removes 0 rows, the cascade, UPDATE / TRUNCATE 42501, the CHECKs, the real node-pg driver for the simple-protocol
+    pre-check, and a read-only transaction refused (R2).
+  - The upgrade-version / -sequence / -version-check / -runner / -status / upgrade-imports specs.
+  - `upgrade-status.spec.ts`: no version, step, state or error text in /healthz in any state; the admin card keeps the
+    detail.
+  - runtime-db-config and the prestart shell tests: the removed names, the seams, the exit 66/70 veto.
+  - The semantic-posture acl spec; the security-posture golden (+4) and the semantic goldens (pg16/17/18).
+  - B2's suites (`upgrade-ledger-tests/`, the S-layer specs) on PG16/17/18.

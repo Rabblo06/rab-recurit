@@ -2001,28 +2001,4 @@ export class EnvironmentVariables {
   @IsOptional()
   @IsIn(['true', 'false'], { message: 'DISABLE_DB_MIGRATIONS must be exactly true or false' })
   DISABLE_DB_MIGRATIONS?: 'true' | 'false';
-
-  /**
-   * O3 C3 (owner decision 2026-11-05): continue (default) | refuse — what the API does when a schema UPGRADE migration fails.
-   * continue: the migrate child logs an ERROR and exits 70; api-prestart.sh starts main.js with CREWFLOW_UPGRADE_INCOMPLETE.
-   * A first install, the configuration, the identity, the lock, the approval and the post-checks stay fail-closed.
-   */
-  @IsOptional()
-  @IsIn(['continue', 'refuse'], { message: 'CREWFLOW_UPGRADE_FAILURE must be exactly continue or refuse' })
-  CREWFLOW_UPGRADE_FAILURE?: 'continue' | 'refuse';
-
-  /** DEPRECATED alias of CREWFLOW_UPGRADE_FAILURE: refuse -> refuse, continue-if-compatible -> continue (the two must agree). */
-  @IsOptional()
-  @IsIn(['refuse', 'continue-if-compatible'], { message: 'CREWFLOW_UPGRADE_FAILURE_POLICY must be exactly refuse or continue-if-compatible' })
-  CREWFLOW_UPGRADE_FAILURE_POLICY?: 'refuse' | 'continue-if-compatible';
-
-  /**
-   * O3 C3: set ONLY by api-prestart.sh, on main.js, after a verified exit 70 (an upgrade migration failed and
-   * CREWFLOW_UPGRADE_FAILURE=continue): the failing migration's name, or `unknown`. api-prestart.sh REFUSES (exit 64) an
-   * inherited value, so an operator cannot pre-set it. Read by /healthz (`upgradeFailed: true`, informational; never the name) and by the API's
-   * boot gate (Agent 3). A migration name only: letters, digits, `_`, `-`, `.`, at most 200 characters.
-   */
-  @IsOptional()
-  @Matches(/^[A-Za-z0-9_.-]{1,200}$/, { message: 'CREWFLOW_UPGRADE_INCOMPLETE must be a migration name (letters, digits, _ - .) or unknown' })
-  CREWFLOW_UPGRADE_INCOMPLETE?: string;
 }

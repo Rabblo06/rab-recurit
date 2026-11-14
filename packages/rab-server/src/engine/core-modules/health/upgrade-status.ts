@@ -1,22 +1,12 @@
 import type { HealthIndicatorResult } from '@nestjs/terminus';
 
 /**
- * O3 C3 (owner decision 2026-11-05, "exactly like Twenty"): after a FAILED schema upgrade under
- * CREWFLOW_UPGRADE_FAILURE=continue, api-prestart.sh starts main.js with CREWFLOW_UPGRADE_INCOMPLETE=<failed migration>
- * (it refuses an inherited value, so only the entrypoint sets it). /healthz reports ONLY whether that happened —
- * `upgrade: { status: 'up', upgradeFailed: true | false }` — and stays 200: the API serves on the previous schema by the
- * owner's decision. Coordinator decision (2026-11-05, the stricter option): the migration's NAME is never exposed on
- * /healthz; it appears only in the start-up ERROR/WARNING logs.
+ * The public /healthz upgrade indicator. Owner decision 2026-11-14 (OWNER-DB-ULTIMATE Part B): the public endpoint says ONLY
+ * whether the code version's upgrade failed — `upgrade: { status: 'up', upgradeFailed: true | false }` — never a version,
+ * a step name, a state word or error text. The detail (state, step, versions, attempt) is on the platform-admin health
+ * report only (platform-admin/admin-health.service.ts, upgradeCard). Always `up`: informational, so /healthz stays 200.
+ * The former CREWFLOW_UPGRADE_INCOMPLETE signal is retired (refused at start).
  */
-export const UPGRADE_INCOMPLETE_ENV = 'CREWFLOW_UPGRADE_INCOMPLETE';
-
-/** True when this API start follows a failed upgrade (CREWFLOW_UPGRADE_INCOMPLETE set by api-prestart.sh). */
-export function upgradeFailed(env: Record<string, string | undefined> = process.env): boolean {
-  const value = env[UPGRADE_INCOMPLETE_ENV];
-  return value !== undefined && value !== '';
-}
-
-/** The /healthz indicator. Always `up`: informational only; a boolean, never the migration name. */
-export function upgradeStatusIndicator(env: Record<string, string | undefined> = process.env): HealthIndicatorResult {
-  return { upgrade: { status: 'up', upgradeFailed: upgradeFailed(env) } };
+export function upgradeStatusIndicator(ledgerState?: string): HealthIndicatorResult {
+  return { upgrade: { status: 'up', upgradeFailed: ledgerState === 'failed' } };
 }

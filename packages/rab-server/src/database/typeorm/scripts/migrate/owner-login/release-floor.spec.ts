@@ -20,7 +20,7 @@ import {
   supportedListProblems,
   UnsupportedUpgradeStartError,
 } from './release-floor';
-import { NON_TRANSACTIONAL_MIGRATIONS } from './upgrade-failure-policy';
+import { NON_TRANSACTIONAL_MIGRATIONS } from './non-transactional-migrations';
 
 const MIGRATIONS_DIR = join(__dirname, '..', '..', '..', 'core', 'migrations');
 const CODE = codeMigrationNames();
@@ -137,7 +137,7 @@ describe('assertSupportedUpgradeStart: the decision table', () => {
     const d = assertSupportedUpgradeStart({ ...prod, state: 'CHAIN-PARTIAL', applied: R254 });
     expect(d).toMatchObject({ allowed: true, release: 'R254' });
     // Derived from the chain, not a literal: every migration added after R254 is one more to apply (the two R256 index
-    // migrations, then XP-09's TokenCleanupRotationOrder1786721460000, then whatever comes next).
+    // migrations, then XP-09's TokenCleanupRotationOrder1786721460000, the upgrade logbook, then whatever comes next).
     const remaining = CODE.length - R254.length;
     expect(remaining).toBeGreaterThanOrEqual(R256.length - R254.length);
     expect(d.reason).toContain(`contains R254; ${remaining} migration(s) to apply`);

@@ -1,33 +1,50 @@
-import { UPGRADE_INCOMPLETE_ENV, upgradeFailed, upgradeStatusIndicator } from './upgrade-status';
-import { UPGRADE_INCOMPLETE_VAR } from '../../../database/boot-checks/schema-compatibility';
+import { upgradeStatusIndicator } from './upgrade-status';
+import { upgradeCard } from '../platform-admin/admin-health.service';
+import type { UpgradeStatus } from '../upgrade/upgrade-status.service';
 
 /**
- * O3 C3: /healthz says WHETHER the last upgrade failed (informational, status stays up / 200) and never WHICH migration
- * (coordinator decision 2026-11-05: the name stays in the start-up logs only).
+ * Owner decision 2026-11-14 (OWNER-DB-ULTIMATE Part B): public /healthz carries ONLY `upgradeFailed: true | false`. No
+ * version, step name, state word or error text in any state; the detail stays on the platform-admin health report.
  */
-describe('upgrade status (/healthz upgradeFailed)', () => {
-  it('uses the same variable the API boot gate reads', () => {
-    expect(UPGRADE_INCOMPLETE_ENV).toBe(UPGRADE_INCOMPLETE_VAR);
+const STATES = ['ok', 'failed', 'behind', 'ahead', 'none', 'unknown'] as const;
+const DETAIL: Omit<UpgradeStatus, 'state'> = {
+  appVersion: '0.6.0',
+  step: '0.6.0_FixThing_1786799990000',
+  executedByVersion: '0.6.0',
+  attempt: 2,
+  forced: false,
+  at: '2026-11-14T00:00:00.000Z',
+};
+const FORBIDDEN = ['0.6.0', 'FixThing', 'TypeOrmMigrations', 'behind', 'ahead', 'none', 'unknown', 'ok"', 'error', 'Error', 'step', 'version', 'attempt'];
+
+describe('public /healthz upgrade indicator: a boolean only', () => {
+  it.each(STATES)('state %s: exactly { status: up, upgradeFailed } and nothing else', (state) => {
+    const body = upgradeStatusIndicator(state);
+    expect(body).toEqual({ upgrade: { status: 'up', upgradeFailed: state === 'failed' } });
+    const text = JSON.stringify(body);
+    for (const word of FORBIDDEN) expect(text).not.toContain(word);
   });
 
-  it('false when the upgrade did not fail (unset or blank); always up', () => {
-    expect(upgradeFailed({})).toBe(false);
-    expect(upgradeFailed({ CREWFLOW_UPGRADE_INCOMPLETE: '' })).toBe(false);
-    expect(upgradeStatusIndicator({})).toEqual({ upgrade: { status: 'up', upgradeFailed: false } });
+  it('no state known (the status service unavailable): upgradeFailed false, still up', () => {
+    expect(upgradeStatusIndicator()).toEqual({ upgrade: { status: 'up', upgradeFailed: false } });
   });
 
-  it('true after a failed upgrade, still up (informational only)', () => {
-    expect(upgradeStatusIndicator({ CREWFLOW_UPGRADE_INCOMPLETE: 'WorkspaceGrantParityGuards1786721430000' })).toEqual({
-      upgrade: { status: 'up', upgradeFailed: true },
-    });
-    expect(upgradeStatusIndicator({ CREWFLOW_UPGRADE_INCOMPLETE: 'unknown' })).toEqual({ upgrade: { status: 'up', upgradeFailed: true } });
-  });
-
-  it('never exposes the migration name or any other value', () => {
-    for (const value of ['WorkspaceGrantParityGuards1786721430000', '<script>alert(1)</script>', 'postgres://u:secret@h/db']) {
-      const payload = JSON.stringify(upgradeStatusIndicator({ CREWFLOW_UPGRADE_INCOMPLETE: value }));
-      expect(payload).toBe('{"upgrade":{"status":"up","upgradeFailed":true}}');
-      expect(payload).not.toContain(value);
+  it('the retired environment signal changes nothing', () => {
+    const before = process.env.CREWFLOW_UPGRADE_INCOMPLETE;
+    process.env.CREWFLOW_UPGRADE_INCOMPLETE = 'WorkspaceGrantParityGuards1786721430000';
+    try {
+      expect(upgradeStatusIndicator('ok')).toEqual({ upgrade: { status: 'up', upgradeFailed: false } });
+    } finally {
+      if (before === undefined) delete process.env.CREWFLOW_UPGRADE_INCOMPLETE;
+      else process.env.CREWFLOW_UPGRADE_INCOMPLETE = before;
     }
+  });
+
+  it.each(STATES)('the admin health report keeps the detail (state %s)', (state) => {
+    const card = upgradeCard({ ...DETAIL, state });
+    expect(card.key).toBe('upgrade');
+    if (state === 'unknown') expect(card.detail).toBe('Upgrade status not readable.');
+    else if (state === 'none') expect(card.detail).toContain('0.6.0');
+    else expect(card.detail).toContain('0.6.0_FixThing_1786799990000');
   });
 });

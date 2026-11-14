@@ -37,8 +37,7 @@ import {
   shimMigrationInstance,
   shimQueryRunner,
 } from './row-copy-shim';
-import { assessUpgradeFailure, parseUpgradeFailurePolicy } from './upgrade-failure-policy';
-import { STARTUP_EXIT_CODES } from '../../../../owner-login/runtime-db-config';
+import { readRuntimeDbConfig, RuntimeDbConfigError, STARTUP_EXIT_CODES } from '../../../../owner-login/runtime-db-config';
 import { assertDeploymentIdentity, MARKER_PRESENT_SQL, MARKER_READ_SQL } from '../../../../deployment-identity/deployment-identity';
 
 const spec = (name: string) => BOOTSTRAP_ROLES.find((r) => r.name === name)!;
@@ -356,54 +355,22 @@ describe('migrate-on-start child: guard environment, post-check tolerance, outco
   });
 });
 
-describe('upgrade-failure policy', () => {
-  const base = { failedMigration: null, expectedMigrations: CODE, production: true, query: async () => [] };
-  it('a first-install failure never serves; refuse never serves; neither runs a check', async () => {
-    const fresh = await assessUpgradeFailure({ ...base, policy: 'continue', freshInstall: true });
-    expect(fresh).toMatchObject({ serve: false, checks: [] });
-    const refuse = await assessUpgradeFailure({ ...base, policy: 'refuse', freshInstall: false });
-    expect(refuse).toMatchObject({ serve: false, checks: [] });
+describe('OWNER-DB-ULTIMATE Part B3: the CREWFLOW_UPGRADE_FAILURE choices are removed', () => {
+  it('a failed migration refuses: outcome migrationFailed (66), never a degraded continue', () => {
+    expect(outcomeOf(Object.assign(new Error('x'), { name: 'QueryFailedError' }))).toBe('migrationFailed');
+    expect(STARTUP_EXIT_CODES.migrationFailed).toBe(66);
   });
 
-  it('C3 continue: fails closed on identity (no identity hook, or the hook reports a problem); every check is still reported', async () => {
-    const v = await assessUpgradeFailure({ ...base, policy: 'continue', freshInstall: false, failedMigration: 'AiSkillSchema1786721000000' });
-    expect(v.serve).toBe(false);
-    expect(v.reason).toMatch(/deployment identity check failed .*fail closed on identity/);
-    expect(v.checks.map((c) => c.name)).toEqual(['ledger-compatible', 'no-partial-migration', 'post-checks', 'required-functions', 'deployment-identity', 'posture']);
-    const wrong = await assessUpgradeFailure({ ...base, policy: 'continue', freshInstall: false, failedMigration: 'AiSkillSchema1786721000000', deploymentIdentityCheck: async () => 'bound to production/x' });
-    expect(wrong.serve).toBe(false);
+  it('CREWFLOW_UPGRADE_FAILURE and its old alias are refused (exit 64) whatever their value, so an old env file fails loudly', () => {
+    for (const env of [{ CREWFLOW_UPGRADE_FAILURE: 'continue' }, { CREWFLOW_UPGRADE_FAILURE: 'refuse' }, { CREWFLOW_UPGRADE_FAILURE_POLICY: 'continue-if-compatible' }]) {
+      expect(() => readRuntimeDbConfig(env)).toThrow(RuntimeDbConfigError);
+      expect(() => readRuntimeDbConfig(env)).toThrow(/was removed \(OWNER-DB-ULTIMATE Part B3\)/);
+    }
   });
 
-  it('C3 continue (the default): an UPGRADE migration failure serves (exit 70) with the identity OK; the other checks are diagnostics only', async () => {
-    const v = await assessUpgradeFailure({
-      ...base,
-      policy: 'continue',
-      freshInstall: false,
-      failedMigration: 'StatementDispatchPointer1786721320000',
-      deploymentIdentityCheck: async () => null,
-    });
-    expect(v.serve).toBe(true);
-    const byName = Object.fromEntries(v.checks.map((c) => [c.name, c.ok]));
-    // A partial transaction=false migration and the unwired posture monitor are REPORTED, but no longer stop the start.
-    expect(byName).toMatchObject({ 'no-partial-migration': false, posture: false, 'deployment-identity': true });
-    expect(v.reason).toMatch(/^continue: the upgrade FAILED at StatementDispatchPointer1786721320000; continuing startup on the previous schema \(exit 70\); \d+ diagnostic check\(s\) failed/);
-  });
-
-  it('C3 refuse: unchanged (no check, never serves)', async () => {
-    const v = await assessUpgradeFailure({ ...base, policy: 'refuse', freshInstall: false, failedMigration: 'AiSkillSchema1786721000000', deploymentIdentityCheck: async () => null });
-    expect(v).toEqual({ serve: false, policy: 'refuse', reason: 'CREWFLOW_UPGRADE_FAILURE=refuse: the API stays unready', checks: [] });
-  });
-
-  it('C3 config: CREWFLOW_UPGRADE_FAILURE=continue|refuse (default continue); the deprecated CREWFLOW_UPGRADE_FAILURE_POLICY is an alias', () => {
-    expect(parseUpgradeFailurePolicy({})).toBe('continue');
-    expect(parseUpgradeFailurePolicy({ CREWFLOW_UPGRADE_FAILURE: 'refuse' })).toBe('refuse');
-    expect(parseUpgradeFailurePolicy({ CREWFLOW_UPGRADE_FAILURE: 'continue' })).toBe('continue');
-    expect(parseUpgradeFailurePolicy({ CREWFLOW_UPGRADE_FAILURE_POLICY: 'refuse' })).toBe('refuse');
-    expect(parseUpgradeFailurePolicy({ CREWFLOW_UPGRADE_FAILURE_POLICY: 'continue-if-compatible' })).toBe('continue');
-    expect(parseUpgradeFailurePolicy({ CREWFLOW_UPGRADE_FAILURE: 'refuse', CREWFLOW_UPGRADE_FAILURE_POLICY: 'refuse' })).toBe('refuse');
-    expect(() => parseUpgradeFailurePolicy({ CREWFLOW_UPGRADE_FAILURE: 'continue', CREWFLOW_UPGRADE_FAILURE_POLICY: 'refuse' })).toThrow(/disagree/);
-    expect(() => parseUpgradeFailurePolicy({ CREWFLOW_UPGRADE_FAILURE: 'continue-if-compatible' })).toThrow(/must be exactly one of: continue, refuse/);
-    expect(() => parseUpgradeFailurePolicy({ CREWFLOW_UPGRADE_FAILURE_POLICY: 'continue' })).toThrow(/deprecated .* use CREWFLOW_UPGRADE_FAILURE=continue\|refuse/);
+  it('the new outcomes: the version check refuses as behind (65), an unbumped version as config (64)', () => {
+    expect(outcomeOf(Object.assign(new Error('x'), { name: 'UpgradeVersionTooOldError' }))).toBe('behind');
+    expect(outcomeOf(Object.assign(new Error('x'), { name: 'AppVersionError' }))).toBe('config');
   });
 });
 
@@ -674,9 +641,4 @@ describe('O3 (Agent 2): the migrate child and DISABLE_DB_MIGRATIONS / the result
     expect(STARTUP_EXIT_CODES.config).toBe(64);
   });
 
-  it('the result line carries policy "continue" EXACTLY for the default and the deprecated alias (the prestart relay vetoes any other string)', () => {
-    for (const env of [{}, { CREWFLOW_UPGRADE_FAILURE: 'continue' }, { CREWFLOW_UPGRADE_FAILURE_POLICY: 'continue-if-compatible' }]) {
-      expect(parseUpgradeFailurePolicy(env)).toBe('continue');
-    }
-  });
 });

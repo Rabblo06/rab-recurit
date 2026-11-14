@@ -184,7 +184,6 @@ test('DB-SETUP: worker-start.sh execs exactly the Worker command (and nothing el
   const apiExecs = prestart.split(/\r?\n/).filter((l) => !/^\s*#/.test(l)).filter((l) => /\bexec \//.test(l) || /\bexec node\b/.test(l)).map((l) => l.trim());
   assert.deepEqual(apiExecs, [
     'exec /sbin/tini -s -- "$@"',
-    'CREWFLOW_UPGRADE_INCOMPLETE="$UPGRADE_INCOMPLETE" exec /sbin/tini -s -- node packages/rab-server/dist/main.js',
     'exec /sbin/tini -s -- node packages/rab-server/dist/main.js',
   ]);
   const dockerfile = fs.readFileSync(path.join(REPO, 'packages/rab-docker/rab/Dockerfile'), 'utf8');

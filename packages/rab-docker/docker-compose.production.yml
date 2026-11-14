@@ -72,7 +72,7 @@
 # ALLOW_PRODUCTION_DB_COMMANDS, DB_TARGET, CREWFLOW_DB_MODE, CREWFLOW_PROVISIONER_ENABLED, libpq PG* variables, NODE_OPTIONS,
 # BOOTSTRAP_ADMIN_*, TEST_*, ALLOW_REMOTE_TEST_DATABASE, AUTH_*_ISSUER_URL, WORKER_CLAIM_MODE, WORKER_DISPATCH_MODE,
 # WORKER_INVITE_AUTO_DELETE_ENABLED, WORKSPACE_SUBDOMAIN_ORIGIN_TRUST_ENABLED, CREWFLOW_MIGRATION_APPROVED,
-# CREWFLOW_UPGRADE_INCOMPLETE (set only by api-prestart.sh), WORKER_SCHEDULER=interval; and any override of the keys
+# CREWFLOW_UPGRADE_INCOMPLETE (retired), WORKER_SCHEDULER=interval; and any override of the keys
 # committed below.
 #
 # SECURITY POSTURE: PT-01 (runbook section 1, THREAT-MODEL.md). There is no operations service: the owner CLI commands run
@@ -523,8 +523,6 @@ services:
       PG_POOL_MAX_CONNECTIONS:
       # Seconds api-prestart.sh waits before exiting after a start-up failure (0-300).
       CREWFLOW_STARTUP_FAILURE_DELAY_SECONDS: ${CREWFLOW_STARTUP_FAILURE_DELAY_SECONDS:-15}
-      # continue (code default when unset) | refuse: whether the API starts after a failed schema UPGRADE (O3 C3).
-      CREWFLOW_UPGRADE_FAILURE:
       # PINNED (owner decisions; shown, not to be changed):
       NODE_ENV: production
       RAB_RUNTIME_ENV: production

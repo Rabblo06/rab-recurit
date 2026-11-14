@@ -23,15 +23,13 @@
  *     entity-cache-flush.ts: one INCR per cached entity, deletes nothing, touches no other key family: never bull:*,
  *     throttler keys or rab:* heartbeats). WARNING ONLY: a missing REDIS_URL, an unreachable Redis or a failed bump is
  *     logged and the start continues (cached entries then expire on their own TTL, at most 300 s).
- *   - on failure: upgrade-failure-policy.ts decides, on a fresh session of the same login, whether the API may start anyway.
- *     Owner decision C3 (2026-11-05, "exactly like Twenty"): CREWFLOW_UPGRADE_FAILURE=continue (the default) turns a failed
- *     UPGRADE MIGRATION into an ERROR line naming it and exit 70 (deployment identity still checked); configuration (64),
- *     approval / N1 / the upgrade floor (65), identity (67), post-check (68) and lock timeout (69) stay fail-closed, and a
- *     first-install
- *     failure never serves. refuse keeps the failure code.
+ *   - on failure: refuse (OWNER-DB-ULTIMATE Part B3; the C3 CREWFLOW_UPGRADE_FAILURE choices are removed): a failed
+ *     migration exits 66 and the next start retries it (the upgrade logbook records attempt N); configuration (64), the
+ *     version check / approval (65), identity (67), post-check (68) and lock timeout (69) likewise never serve. Only a failed
+ *     upgrade COMMAND, with every migration applied and the post-checks passed, serves (exit 70, upgradeFailed:true).
  *
  * One machine-readable line on stdout at the end, never a secret:
- *   TWENTY_MIGRATE_RESULT {"state","applied","pending","failedMigration","exitCode","serve","policy","reason","checks"}
+ *   TWENTY_MIGRATE_RESULT {"state","applied","pending","failedMigration","exitCode","serve","reason","checks","upgrade"}
  * (the prefix name is the interface agreed with Agent 2 before the owner-login rename; it is kept for compatibility.)
  *
  * This module has no side effects on import. The process entry is migrate-on-start.main.ts (it reads Agent 2's
@@ -47,7 +45,6 @@ import {
   canonicalConfirmHost,
 } from '../../../../deployment-identity/bind-deployment-identity';
 import {
-  assertDeploymentIdentity,
   DEPLOYMENT_ENVIRONMENT_VAR,
   DEPLOYMENT_ID_VAR,
   DeploymentEnvironment,
@@ -62,15 +59,27 @@ import { deployPostCheckProblems } from '../deploy-post-checks';
 import { GuardedTarget, Query, runLockedMigrations } from '../locked-migration-runner';
 import { assertMigrationApproval, readMigrationApproval } from '../migration-approval';
 import { resolveMigrationConnection } from '../migration-database-url';
-import { Classification, classifyDatabaseState, FreshInstallProof, readFreshInstallProof } from './fresh-install';
-import { assessUpgradeFailure, UpgradeCheck, UpgradeFailurePolicy } from './upgrade-failure-policy';
+import { Classification, classifyDatabaseState, FreshInstallProof } from './fresh-install';
 import { runCacheFlush } from '../../cache-flush';
+import { UpgradeRun, UpgradeRunReport } from '../../../../../engine/core-modules/upgrade/upgrade-runner';
+import { upgradeSessionOf } from '../../../../../engine/core-modules/upgrade/upgrade-migration.service';
+import { UPGRADE_COMMANDS } from '../../../../../engine/core-modules/upgrade/upgrade-commands/registry';
+import type { UpgradeCommand } from '../../../../../engine/core-modules/upgrade/upgrade-commands/upgrade-command';
+import { majorMinorKey, readAppVersion } from '../../../../../engine/core-modules/upgrade/upgrade-version';
+import { attributeLedger } from './release-floor';
 
 export const RESULT_LINE_PREFIX = 'TWENTY_MIGRATE_RESULT';
 
 /** Test seams (Agent 5's harness). Honoured only with NODE_ENV=test on a disposable test database outside production. */
 export const TEST_FAIL_AT_VAR = 'CREWFLOW_MIGRATION_TEST_FAIL_AT';
 export const TEST_STOP_BEFORE_VAR = 'CREWFLOW_MIGRATION_TEST_STOP_BEFORE';
+/**
+ * OWNER-DB-ULTIMATE Part B test seams (same gate as the other seams; the CREWFLOW_TEST_* prefix is also refused by the
+ * compose / env lint): extra no-op probe upgrade commands for the code version (comma-separated class-like names), and
+ * the one command that fails.
+ */
+export const TEST_UPGRADE_COMMANDS_VAR = 'CREWFLOW_TEST_UPGRADE_COMMANDS';
+export const TEST_FAIL_COMMAND_VAR = 'CREWFLOW_TEST_UPGRADE_FAIL_COMMAND';
 
 export class TestSeamRefusal extends Error {
   constructor(message: string) {
@@ -120,7 +129,6 @@ export type StartupOutcome = 'ok' | 'config' | 'behind' | 'migrationFailed' | 'i
 
 export interface MigrateOnStartConfig {
   migrationApprovalMode: 'none' | 'token';
-  upgradeFailurePolicy: UpgradeFailurePolicy;
 }
 
 export interface MigrateOnStartResult {
@@ -130,9 +138,11 @@ export interface MigrateOnStartResult {
   failedMigration: string | null;
   outcome: StartupOutcome;
   serve: boolean;
-  policy: UpgradeFailurePolicy;
   reason: string;
-  checks: UpgradeCheck[];
+  /** Kept for the result-line shape (always empty since the C3 assessment was removed). */
+  checks: Array<{ name: string; ok: boolean; detail: string }>;
+  /** OWNER-DB-ULTIMATE Part B: the upgrade logbook's view of this run (null when the run stopped before the check). */
+  upgrade?: UpgradeRunReport | null;
 }
 
 export class PostCheckFailure extends Error {
@@ -145,7 +155,7 @@ export class PostCheckFailure extends Error {
 /** Error → outcome, by error name (the classes live in many modules; a name never carries a value). Unknown = migration failure. */
 export function outcomeOf(error: unknown): StartupOutcome {
   const name = error instanceof Error ? error.name : '';
-  if (['RuntimeDbConfigError', 'UnsupportedPostgresVersionError', 'MigrationDatabaseUrlError', 'PgConfigError', 'TestSeamRefusal'].includes(name)) return 'config';
+  if (['RuntimeDbConfigError', 'UnsupportedPostgresVersionError', 'MigrationDatabaseUrlError', 'PgConfigError', 'TestSeamRefusal', 'AppVersionError'].includes(name)) return 'config';
   if (name === 'MigrationLockError') return 'lockTimeout';
   if (
     ['MigrationIdentityError', 'OwnerLoginIdentityError', 'DbTargetError', 'DeploymentIdentityError', 'BindIdentityError', 'DatabaseStateError', 'BootstrapRefusal'].includes(name)
@@ -153,7 +163,7 @@ export function outcomeOf(error: unknown): StartupOutcome {
     return 'identity';
   }
   if (name === 'MigrationSessionDatabaseError') return 'identity';
-  if (['UnapprovedProductionMigrationError', 'MigrationApprovalError', 'UnsupportedUpgradeStartError'].includes(name)) return 'behind';
+  if (['UnapprovedProductionMigrationError', 'MigrationApprovalError', 'UnsupportedUpgradeStartError', 'UpgradeVersionTooOldError'].includes(name)) return 'behind';
   if (error instanceof Error && /needs the per-release approval|not a proven fresh install|APPROVAL_MODE=token needs/.test(error.message)) return 'behind';
   if (['PostCheckFailure', 'MigrationsStillPendingError'].includes(name)) return 'postCheck';
   return 'migrationFailed';
@@ -231,12 +241,16 @@ export interface MigrateOnStartDeps {
   env?: NodeJS.ProcessEnv;
   log?: (line: string) => void;
   runner?: typeof runLockedMigrations;
-  /** Agent 3's posture / drift monitor, when it exists (upgrade-failure-policy.ts). */
-  postureCheck?: (query: Query) => Promise<string[]>;
   /** Receives the migration session pid (the main entry's SIGTERM self-cancel). */
   onSession?: (pid: number) => void;
   /** Test seam: the allow-listed entity-cache epoch bump (default: cache-flush.ts runCacheFlush). */
   cacheFlush?: (namespace: string, env: Record<string, string | undefined>) => Promise<void>;
+  /**
+   * OWNER-DB-ULTIMATE Part B3: set ONLY by the manual `upgrade --force` command (command/upgrade.command.ts). The automatic
+   * start path (twenty-migrate.ts) never passes it, and no environment variable maps to it. Skips only the previous-version
+   * check; every logbook row of the run records forced = true.
+   */
+  upgradeForce?: true;
 }
 
 /** How long the warning-only epoch bump may hold up the start (the migration lock is still held). */
@@ -358,6 +372,7 @@ export async function runMigrateOnStart(config: MigrateOnStartConfig, deps: Migr
   let applied: string[] = [];
   let production = false;
   let guardEnvUsed: Record<string, string | undefined> = env;
+  let upgradeRun: UpgradeRun | null = null;
   const result = (outcome: StartupOutcome, extra: Partial<MigrateOnStartResult> = {}): MigrateOnStartResult => ({
     state: classification?.state ?? 'UNKNOWN',
     applied,
@@ -365,9 +380,9 @@ export async function runMigrateOnStart(config: MigrateOnStartConfig, deps: Migr
     failedMigration: null,
     outcome,
     serve: outcome === 'ok',
-    policy: config.upgradeFailurePolicy,
     reason: outcome === 'ok' ? 'schema current' : outcome,
     checks: [],
+    upgrade: upgradeRun?.report ?? null,
     ...extra,
   });
 
@@ -379,8 +394,16 @@ export async function runMigrateOnStart(config: MigrateOnStartConfig, deps: Migr
     const approval = config.migrationApprovalMode === 'token' ? readMigrationApproval(env) : null;
     const seams = readTestSeams(env, { production, disposableTestDatabase: pre.disposableTestDatabase });
     if (seams.failAt || seams.stopBefore) log(`TEST SEAMS ACTIVE: failAt=${seams.failAt ?? '-'} stopBefore=${seams.stopBefore ?? '-'}`);
+    const seamCtx = { production, disposableTestDatabase: pre.disposableTestDatabase };
+    const testFailCommand = readTestFailCommand(env, seamCtx);
+    const codeVersion = readAppVersion(env);
+    const probes = readTestUpgradeCommands(env, seamCtx);
+    if (probes.length || testFailCommand) log(`TEST SEAMS ACTIVE: upgrade probe commands=${probes.map((c) => c.name).join(',') || '-'} failCommand=${testFailCommand ?? '-'}`);
+    const registry = probes.length ? withProbeCommands(UPGRADE_COMMANDS, codeVersion, probes) : undefined;
+    const run = new UpgradeRun({ codeVersion, force: deps.upgradeForce === true, log, testFailCommand, registry });
+    upgradeRun = run;
 
-    const run = await runner({
+    const locked = await runner({
       label: 'migrate-on-start',
       env: first.guardEnv,
       log,
@@ -402,6 +425,16 @@ export async function runMigrateOnStart(config: MigrateOnStartConfig, deps: Migr
         proof = p;
       },
       approvePending: approval === null ? undefined : (pending) => assertMigrationApproval(approval, pending),
+      // OWNER-DB-ULTIMATE Part B: the upgrade logbook (engine/core-modules/upgrade/upgrade-runner.ts), hook calls only.
+      beforeApply: async ({ queryRunner: locked, classification: c, proof: p, code, guarded }) => {
+        const fresh = c.state === 'EMPTY' || c.state === 'BOOTSTRAP-PARTIAL' || p.fresh;
+        await run.beforeApply(upgradeSessionOf(locked), {
+          fresh,
+          attribution: fresh ? null : attributeLedger(c.applied, code),
+          unrestrictedTarget: guarded.target === 'local' || guarded.target === 'test',
+        });
+      },
+      onApplyFailure: ({ queryRunner: locked, error }) => run.onApplyFailure(upgradeSessionOf(locked), error),
       afterMigrations: async ({ queryRunner, applied: done, guarded }) => {
         applied = done;
         const query: Query = (sql, parameters) => queryRunner.query(sql, parameters) as Promise<unknown[]>;
@@ -409,13 +442,23 @@ export async function runMigrateOnStart(config: MigrateOnStartConfig, deps: Migr
         const problems = await deployPostCheckProblems(query);
         const { blocking, warnings } = blockingPostCheckProblems(classification?.state ?? 'UNKNOWN', problems);
         for (const w of warnings) log(`WARNING (ledger ahead, C-1): ${w}`);
-        if (blocking.length) throw new PostCheckFailure(blocking);
+        if (blocking.length) {
+          const failure = new PostCheckFailure(blocking);
+          await run.onApplyFailure(upgradeSessionOf(queryRunner), failure);
+          throw failure;
+        }
         log(`post-checks passed (${done.length} applied)`);
+        await run.afterApply(upgradeSessionOf(queryRunner));
         await bumpEntityCacheAfterUpgrade({ applied: done, env, log, flush: deps.cacheFlush });
       },
     });
-    applied = run.applied;
+    applied = locked.applied;
     const state = (classification as Classification | null)?.state ?? 'UNKNOWN';
+    if (run.report.commandFailure) {
+      // OWNER-DB-ULTIMATE Part B3: only an upgrade COMMAND failed; every migration applied and the post-checks passed (the
+      // schema matches this code), so the API serves with upgradeFailed:true (exit 70, internal). The next start retries it.
+      return result('degradedContinue', { serve: true, reason: `upgrade command ${run.report.commandFailure.name} failed (${run.report.commandFailure.errorName}); schema current` });
+    }
     if (state === 'AHEAD') log('WARNING: the ledger is AHEAD of this image (rollback). Nothing applied; serving with the newer schema (expand-only releases only).');
     return result('ok', { reason: state === 'AHEAD' ? 'ledger ahead of the code (image rollback): warned, not refused (C-1)' : `schema current (${applied.length} applied)` });
   } catch (error) {
@@ -423,21 +466,18 @@ export async function runMigrateOnStart(config: MigrateOnStartConfig, deps: Migr
     const message = error instanceof Error ? `${error.name}: ${error.message}` : 'unknown error';
     log(`FAILED (${outcome}): ${message.replace(/postgres(ql)?:\/\/\S+/gi, '<url>')}`);
     let c = classification as Classification | null;
-    let p = proof as FreshInstallProof | null;
     const code = codeMigrationNames();
     if (c === null) {
       // The run failed before it classified (e.g. a lock timeout): classify now, read-only, on a fresh session. Unknown
-      // stays "first install" (never serves).
+      // stays unknown (never serves).
       try {
         await withLoginClient(env, async (query) => {
           c = await classifyDatabaseState(query, code);
-          p = await readFreshInstallProof(query, c.state);
         });
       } catch {
         c = null;
       }
     }
-    const freshInstall = c === null || c.state === 'EMPTY' || c.state === 'BOOTSTRAP-PARTIAL' || p?.fresh === true;
     if (c !== null) classification = c;
     let pending: string[] = [];
     let failedMigration: string | null = null;
@@ -451,46 +491,53 @@ export async function runMigrateOnStart(config: MigrateOnStartConfig, deps: Migr
     } catch {
       // Unreadable after the failure: keep the failure, report nothing as pending-known.
     }
-    if (outcome !== 'migrationFailed') {
-      // Owner decision C3 (2026-11-05): only a MIGRATION failure of an upgrade may continue. The configuration (64), the
-      // approval / N1 (65), the identity (67), a post-check (68) and the lock timeout (69) stay fail-closed under every policy.
-      return result(outcome, { pending, failedMigration, serve: false, reason: message.slice(0, 300) });
+    // OWNER-DB-ULTIMATE Part B3 ("version too old, or a migration fails: refuse; retry next start"): every failure of the
+    // migrations or the gates refuses (the C3 continue path and CREWFLOW_UPGRADE_FAILURE are removed: a failed
+    // migration never serves). The logbook already holds the failed row (UpgradeRun.onApplyFailure); the next start is
+    // attempt N+1. Only a failed upgrade COMMAND serves (exit 70), decided above in the success path.
+    if (outcome === 'migrationFailed') {
+      log(`ERROR: the schema upgrade FAILED at ${failedMigration ?? 'an unknown migration'}; refusing to start (exit 66). The next start retries it.`);
     }
-    const verdict = await withLoginClient(env, (query) =>
-      assessUpgradeFailure({
-        policy: config.upgradeFailurePolicy,
-        freshInstall,
-        failedMigration,
-        expectedMigrations: code,
-        query,
-        production,
-        deploymentIdentityCheck: async (q) => {
-          try {
-            const host = canonicalConfirmHost(resolveMigrationConnection(env).resolved.primary.target.host);
-            await assertDeploymentIdentity(q as never, { processLabel: 'api process', production, env, connectionHost: host });
-            return null;
-          } catch (e) {
-            return e instanceof Error ? `${e.name}: ${e.message}`.slice(0, 200) : 'deployment identity check failed';
-          }
-        },
-        postureCheck: deps.postureCheck,
-      }),
-    ).catch((e: unknown) => ({
-      serve: false,
-      policy: config.upgradeFailurePolicy,
-      reason: `the assessment could not run (${e instanceof Error ? e.name : 'error'}): fail closed`,
-      checks: [] as UpgradeCheck[],
-    }));
-    for (const check of verdict.checks) log(`  check ${check.ok ? 'PASS' : 'FAIL'} ${check.name}: ${check.detail}`);
-    if (verdict.serve) {
-      log(
-        `ERROR: the schema upgrade FAILED at ${failedMigration ?? 'an unknown migration'}: ${message.slice(0, 300)} ` +
-          `-- CREWFLOW_UPGRADE_FAILURE=continue: continuing startup on the previous schema (exit 70). This is NOT a success: fix the migration and redeploy.`,
-      );
-      return result('degradedContinue', { pending, failedMigration, serve: true, reason: verdict.reason, checks: verdict.checks });
-    }
-    return result(outcome, { pending, failedMigration, serve: false, reason: `${message.slice(0, 200)} | ${verdict.reason}`, checks: verdict.checks });
+    return result(outcome, { pending, failedMigration, serve: false, reason: message.slice(0, 300) });
   }
+}
+
+/**
+ * OWNER-DB-ULTIMATE Part B test seam: the upgrade command that fails, gated exactly like readTestSeams (NODE_ENV=test, a
+ * disposable test database, never production); a bad value or a seam outside that gate is a configuration refusal (64).
+ */
+export function readTestUpgradeCommands(env: Record<string, string | undefined>, ctx: { production: boolean; disposableTestDatabase: boolean }): UpgradeCommand[] {
+  const raw = env[TEST_UPGRADE_COMMANDS_VAR]?.trim() || null;
+  if (raw === null) return [];
+  if (env.NODE_ENV !== 'test' || ctx.production || !ctx.disposableTestDatabase) {
+    throw new TestSeamRefusal(`${TEST_UPGRADE_COMMANDS_VAR} is a test seam: only NODE_ENV=test on a disposable test database, never production. Refusing.`);
+  }
+  const names = raw.split(',').map((n) => n.trim());
+  if (names.length > 10 || names.some((n) => !/^[A-Za-z][A-Za-z0-9]{0,60}$/.test(n)) || new Set(names).size !== names.length) {
+    throw new TestSeamRefusal(`${TEST_UPGRADE_COMMANDS_VAR} must be 1 to 10 distinct command names. Refusing.`);
+  }
+  // Idempotent no-ops, ordered as listed, after every real command's timestamp range.
+  return names.map((name, i) => ({ name, timestamp: 1799999990000 + i, run: async ({ log }) => log(`test probe upgrade command ${name}: no-op`) }));
+}
+
+/** Pure: the registry with the probe commands appended to the code version's release. */
+export function withProbeCommands(
+  registry: Readonly<Record<string, readonly UpgradeCommand[]>>,
+  codeVersion: string,
+  probes: readonly UpgradeCommand[],
+): Record<string, readonly UpgradeCommand[]> {
+  const key = majorMinorKey(codeVersion);
+  return { ...registry, [key]: [...(registry[key] ?? []), ...probes] };
+}
+
+export function readTestFailCommand(env: Record<string, string | undefined>, ctx: { production: boolean; disposableTestDatabase: boolean }): string | null {
+  const value = env[TEST_FAIL_COMMAND_VAR]?.trim() || null;
+  if (value === null) return null;
+  if (env.NODE_ENV !== 'test' || ctx.production || !ctx.disposableTestDatabase) {
+    throw new TestSeamRefusal(`${TEST_FAIL_COMMAND_VAR} is a test seam: only NODE_ENV=test on a disposable test database, never production. Refusing.`);
+  }
+  if (!/^[A-Za-z][A-Za-z0-9]{0,150}$/.test(value)) throw new TestSeamRefusal(`${TEST_FAIL_COMMAND_VAR} must be an upgrade command name. Refusing.`);
+  return value;
 }
 
 /**

@@ -366,6 +366,13 @@ Redis problem there is only a WARNING.
   ```
   Use `0600` and keep a copy off the host, or snapshot the volume with the stack stopped. Test restores periodically.
 - Check that the backup is non-empty and record where it is. **No backup, no upgrade.**
+- **Upgrading to 0.6.0 (OWNER-DB-ULTIMATE Part B, owner decision 2026-11-14): back up the database before deploying
+  0.6.0. Going back to an image older than 0.6.0 (e.g. R256) is only possible by restoring that backup.** Why: 0.6.0
+  adds the upgrade logbook `core.upgrade_migration` (owner `rab_secure_owner`, five policies, ENABLE + FORCE RLS). An older
+  image's semantic-posture boot gate compares the database with ITS golden and reads those objects as drift: measured with
+  R256 (0e0a6edd, `database-boot-gates.ts:202` `assertSemanticPostureAtBoot`) on a 0.6.0 database, the API refuses with
+  `Database boot gate "semantic-posture" refused ... Do not serve` and never becomes healthy (B2 suite, finding L7). R256
+  is frozen, so no 0.6.0 change can make it serve. Path 3.6(a) does not apply across 0.6.0; use 3.6(b), restore.
 
 **3.4 Deploy: one command, like Twenty (C5: one API, never rolling or blue-green).**
 
@@ -385,7 +392,10 @@ What Compose does, in this order (proved in real containers on PostgreSQL 16 and
 Add `--wait --wait-timeout 1200` to the `up` to make the command itself return non-zero when a service does not become
 healthy; otherwise check with 3.5. Never `up -d rab-api` (or `--no-deps rab-api`) on its own: that would update the API
 alone while an older Worker keeps running.
-- Failure semantics: section 2 (a first-install failure never serves; a failed upgrade serves degraded with `upgradeFailed: true` unless `CREWFLOW_UPGRADE_FAILURE=refuse`).
+- Failure semantics (OWNER-DB-ULTIMATE Part B): a failed migration never serves (exit 66, the restart retries it). Only a
+  failed upgrade COMMAND, with every migration applied, serves (exit 70), and public `/healthz` then says
+  `upgradeFailed: true` and nothing else; the step, versions and attempt are on the platform-admin health report only.
+  `CREWFLOW_UPGRADE_FAILURE` / `_POLICY` were removed and are refused.
 - **Never** `up --scale rab-api=2`. **Never** start a second stack against the same database. Two versions race for the migration lock, a waiter can block for up to 600 s, and old processes would see intermediate schemas (M0-F S2).
 
 **3.5 Verify.**
@@ -416,6 +426,7 @@ provider's uptime monitor (or any external HTTP checker) at the API through the 
 
 **3.6 Rollback.** Restore-based rollback, the evidence, and why an old image on an upgraded database fails closed: [`OWNER-LOGIN-RECOVERY.md`](OWNER-LOGIN-RECOVERY.md).
 - **(a) Expand-only release, back to an O3 release** (only between owner-login releases reviewed as expand-only; never back across the transition): set `CREWFLOW_IMAGE_TAG=<previous digest>` in `compose.env` (it is in `compose.env.<old-sha>`; an old copy that still says `CREWFLOW_IMAGE_DIGEST=` needs the name changed), then the same one command, `docker compose pull && docker compose up -d`. The API and the Worker go back together. The old API's migration child classifies the ledger as AHEAD, warns and starts (the C-1 fix). **This is safe ONLY for expand-only releases.**
+  - **Never back across 0.6.0 this way** (to R256, R254 or any image older than 0.6.0): the older image's semantic-posture boot gate refuses the 0.6.0 upgrade logbook objects and does not serve (3.3, finding L7). Restore the pre-0.6.0 backup instead (3.6(b)). Within 0.6.0 and later the logbook tolerates a rollback (a newer version recorded: WARNING, nothing written).
   - Back to a release from before O3 (e.g. the two-image v0.4.0): use that release's own compose files ([`OWNER-LOGIN-RECOVERY.md`](OWNER-LOGIN-RECOVERY.md) §4.4).
   - **Back across DB-SETUP (to R256 or any release before it):** use THAT release's compose files, not this release's: its image has no `worker-start.sh` and no bootstrap child, so it cannot start under these files (measured: the Worker fails with `exec: "./worker-start.sh": no such file`). An earlier release reads `PG_DATABASE_URL` as the runtime login, so put back a `crewflow_owner` URL. With a `crewflow_owner` URL in `compose.env`, that is the same URL (`db-setup` never changed its password). With an admin URL or the bundled `db`, print that URL with the command below (it reads the password file), or set a new password with `01-crewflow-owner.sql`. On the bundled db, keep the `db` service and its volumes (an earlier release's files do not define them): run the earlier files with your own database URL pointing at it, or export the data first.
   - **Print the `crewflow_owner` URL (SENSITIVE output: the full URL with its password).** Run it on the host with the CURRENT release image (`<IMAGE>` = `adhin007/adolphus@sha256:<the digest in CREWFLOW_IMAGE_TAG>`, already pulled; only the current image ships this step), before you switch the compose files. The volume is `rab-production_crewflow-db-target` by default (both compose files set `name: rab-production`), or `<name>_crewflow-db-target` if you start compose with `-p <name>`. **Check that it exists first**: a typo in `-v` silently creates a new, EMPTY volume (the command then exits 75). Not yet run live.
@@ -436,7 +447,7 @@ provider's uptime monitor (or any external HTTP checker) at the API through the 
   3. Run the old digest as in (a).
 
   Never run an old image's migrations against a newer schema. Never `down -v` production.
-- **(c) A partial apply (`upgradeFailed: true`).** Migrations commit one by one. Under C3 the API is already serving the partly-upgraded schema. Either fix forward with a corrected image (its migration child resumes CHAIN-PARTIAL), after review, or do (b).
+- **(c) A partial apply.** Migrations commit one by one. A failed migration never serves (OWNER-DB-ULTIMATE Part B: exit 66, the API restarts and retries it; the logbook records `<version>_TypeOrmMigrations` failed with its attempt). A failed upgrade COMMAND, with every migration applied, serves with `upgradeFailed: true` and is retried on the next start. Either fix forward with a corrected image (its migration child resumes CHAIN-PARTIAL), after review, or do (b).
 
 **3.7 One API (C5).** Rolling and blue-green deploys are not supported, and the gate refuses more than one rab-api replica or a start-first update:
 - two versions race for the migration lock, and a waiter can block for up to 600 s;

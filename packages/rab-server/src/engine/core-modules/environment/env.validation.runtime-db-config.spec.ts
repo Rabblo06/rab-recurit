@@ -3,8 +3,8 @@ import { resolveRuntimeDatabase, RuntimeDbError } from '../../../database/typeor
 
 /**
  * Owner-login architecture: env.validation runs the shared runtime-db-config parser (database/owner-login/runtime-db-config.ts)
- * for DISABLE_DB_MIGRATIONS / CREWFLOW_MIGRATE_ON_START / CREWFLOW_MIGRATION_APPROVAL_MODE / CREWFLOW_UPGRADE_FAILURE (and
- * its deprecated alias CREWFLOW_UPGRADE_FAILURE_POLICY) and refuses the removed CREWFLOW_DB_MODE. The second-URL and role-password names are refused by the runtime guard
+ * for DISABLE_DB_MIGRATIONS / CREWFLOW_MIGRATE_ON_START / CREWFLOW_MIGRATION_APPROVAL_MODE and refuses the removed names
+ * CREWFLOW_DB_MODE, CREWFLOW_UPGRADE_FAILURE and CREWFLOW_UPGRADE_FAILURE_POLICY (OWNER-DB-ULTIMATE Part B3). The second-URL and role-password names are refused by the runtime guard
  * (never-in-runtime-env.ts), which the API and Worker run before boot.
  */
 const base = { REDIS_URL: 'redis://localhost:6379', APP_SECRET: 'a'.repeat(32), PG_DATABASE_URL: 'postgres://crewflow_owner:pg-secret@localhost:5432/rab' };
@@ -14,40 +14,29 @@ describe('env validation: owner-login database start-up settings', () => {
     expect(() => validate(base)).not.toThrow();
     for (const CREWFLOW_MIGRATE_ON_START of ['true', 'false']) {
       for (const CREWFLOW_MIGRATION_APPROVAL_MODE of ['none', 'token']) {
-        for (const CREWFLOW_UPGRADE_FAILURE_POLICY of ['refuse', 'continue-if-compatible']) {
-          const v = validate({ ...base, CREWFLOW_MIGRATE_ON_START, CREWFLOW_MIGRATION_APPROVAL_MODE, CREWFLOW_UPGRADE_FAILURE_POLICY });
-          expect([v.CREWFLOW_MIGRATE_ON_START, v.CREWFLOW_MIGRATION_APPROVAL_MODE, v.CREWFLOW_UPGRADE_FAILURE_POLICY]).toEqual([
-            CREWFLOW_MIGRATE_ON_START,
-            CREWFLOW_MIGRATION_APPROVAL_MODE,
-            CREWFLOW_UPGRADE_FAILURE_POLICY,
-          ]);
-        }
+        const v = validate({ ...base, CREWFLOW_MIGRATE_ON_START, CREWFLOW_MIGRATION_APPROVAL_MODE });
+        expect([v.CREWFLOW_MIGRATE_ON_START, v.CREWFLOW_MIGRATION_APPROVAL_MODE]).toEqual([CREWFLOW_MIGRATE_ON_START, CREWFLOW_MIGRATION_APPROVAL_MODE]);
       }
     }
     // A compose `KEY=` line (blank) is unset.
-    expect(() => validate({ ...base, CREWFLOW_MIGRATE_ON_START: '', CREWFLOW_UPGRADE_FAILURE_POLICY: '' })).not.toThrow();
-    // Owner decision C3: the new name, both values; and with the deprecated alias when the two agree.
-    for (const CREWFLOW_UPGRADE_FAILURE of ['continue', 'refuse'] as const) {
-      expect(validate({ ...base, CREWFLOW_UPGRADE_FAILURE }).CREWFLOW_UPGRADE_FAILURE).toBe(CREWFLOW_UPGRADE_FAILURE);
-    }
-    expect(() => validate({ ...base, CREWFLOW_UPGRADE_FAILURE: 'refuse', CREWFLOW_UPGRADE_FAILURE_POLICY: 'refuse' })).not.toThrow();
-    expect(() => validate({ ...base, CREWFLOW_UPGRADE_FAILURE: 'continue', CREWFLOW_UPGRADE_FAILURE_POLICY: 'continue-if-compatible' })).not.toThrow();
-    expect(() => validate({ ...base, CREWFLOW_UPGRADE_FAILURE: '' })).not.toThrow();
+    expect(() => validate({ ...base, CREWFLOW_MIGRATE_ON_START: '' })).not.toThrow();
+    // A blank removed name is unset, as for every other name.
+    expect(() => validate({ ...base, CREWFLOW_UPGRADE_FAILURE: '', CREWFLOW_UPGRADE_FAILURE_POLICY: '' })).not.toThrow();
   });
 
-  it('CREWFLOW_UPGRADE_FAILURE and its deprecated alias disagreeing refuses (owner decision C3)', () => {
-    expect(() => validate({ ...base, CREWFLOW_UPGRADE_FAILURE: 'continue', CREWFLOW_UPGRADE_FAILURE_POLICY: 'refuse' })).toThrow(
-      /CREWFLOW_UPGRADE_FAILURE and the deprecated CREWFLOW_UPGRADE_FAILURE_POLICY disagree/,
+  it('refuses the removed CREWFLOW_UPGRADE_FAILURE and CREWFLOW_UPGRADE_FAILURE_POLICY with any value (OWNER-DB-ULTIMATE Part B3)', () => {
+    expect(() => validate({ ...base, CREWFLOW_UPGRADE_FAILURE: 'continue' })).toThrow(/CREWFLOW_UPGRADE_FAILURE was removed \(OWNER-DB-ULTIMATE Part B3\)/);
+    expect(() => validate({ ...base, CREWFLOW_UPGRADE_FAILURE: 'refuse' })).toThrow(/CREWFLOW_UPGRADE_FAILURE was removed \(OWNER-DB-ULTIMATE Part B3\)/);
+    expect(() => validate({ ...base, CREWFLOW_UPGRADE_FAILURE_POLICY: 'refuse' })).toThrow(
+      /CREWFLOW_UPGRADE_FAILURE_POLICY was removed \(OWNER-DB-ULTIMATE Part B3\)/,
     );
   });
 
-  it('CREWFLOW_UPGRADE_INCOMPLETE (set only by api-prestart.sh after a verified exit 70) must be a migration name or unknown', () => {
-    for (const value of ['unknown', '1786730000000-Broken', 'StatementDispatchPointer1786721320000']) {
-      expect(validate({ ...base, CREWFLOW_UPGRADE_INCOMPLETE: value }).CREWFLOW_UPGRADE_INCOMPLETE).toBe(value);
+  it('CREWFLOW_UPGRADE_INCOMPLETE is retired (OWNER-DB-ULTIMATE Part B3): any value refuses; blank is unset', () => {
+    for (const value of ['unknown', 'StatementDispatchPointer1786721320000', 'a b']) {
+      expect(() => validate({ ...base, CREWFLOW_UPGRADE_INCOMPLETE: value })).toThrow(/CREWFLOW_UPGRADE_INCOMPLETE was retired \(OWNER-DB-ULTIMATE Part B3\)/);
     }
-    for (const value of ['a b', '<script>', 'x'.repeat(201), 'name;rm']) {
-      expect(() => validate({ ...base, CREWFLOW_UPGRADE_INCOMPLETE: value })).toThrow(/CREWFLOW_UPGRADE_INCOMPLETE must be a migration name/);
-    }
+    expect(() => validate({ ...base, CREWFLOW_UPGRADE_INCOMPLETE: '' })).not.toThrow();
   });
 
   it('refuses a value outside the allowed set, never echoing it', () => {
@@ -64,7 +53,8 @@ describe('env validation: owner-login database start-up settings', () => {
       } catch (error) {
         message = (error as Error).message;
       }
-      expect(message).toMatch(new RegExp(`${name} must be exactly`));
+      // Part B3: the two removed names are refused as removed (any value), the others for a value outside their set.
+      expect(message).toMatch(new RegExp(name.startsWith('CREWFLOW_UPGRADE_FAILURE') ? `${name} was removed \\(OWNER-DB-ULTIMATE Part B3\\)` : `${name} must be exactly`));
       expect(message).not.toContain('S3cret');
     }
   });
