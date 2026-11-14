@@ -161,9 +161,21 @@ export class SeedQaCommand extends CommandRunner {
           name: 'ADOLPHUS QA Workspace',
           subdomain: 'adolphus-qa',
           status: 'active',
+          // As ManagerWorkspaceService.create writes it: the schema is built next, on the server path.
+          schemaStatus: 'CREATING',
         });
       }
       workspaceId = workspace.id;
+      // Part C1: the workspace's schema, built the way the API builds it (core.provision_workspace, server path; the same
+      // definer seed-ai-demo calls), in this transaction with the organisation and the OWNER bound — the function's own
+      // predicate refuses anything else. Without a READY schema every workspace-routed write below is refused once HWS
+      // runtime routing is on (the default outside production). Idempotent: ALREADY_READY on a re-run.
+      if (workspace.schemaStatus !== 'READY') {
+        const [{ outcome }] = await m.query<Array<{ outcome: string }>>('SELECT core.provision_workspace($1) AS outcome', [workspaceId]);
+        if (outcome !== 'READY' && outcome !== 'ALREADY_READY') {
+          throw new Error(`seed-qa: workspace provisioning ended ${outcome}. Nothing was committed.`);
+        }
+      }
       await m.query(`SELECT set_config('rab.workspace_id', $1, true)`, [workspaceId]);
 
       const existingProfile = await m.query(`SELECT id FROM core.manager_profile WHERE user_id = $1`, [managerUserId]);
