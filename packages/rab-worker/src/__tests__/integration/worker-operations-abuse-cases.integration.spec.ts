@@ -33,7 +33,7 @@ import { createAdminDataSource } from './helpers/admin-datasource';
 import { generateFixturePassword } from './helpers/fixture-password';
 import { integrationTestDatabaseReady } from '@rab/server/database/typeorm/core/integration-test-database-gate';
 import { provisionFixtureWorkspace } from './helpers/test-identities';
-import { businessSchema } from './helpers/hws-fixtures';
+import { businessSchema, hwsRuntimeOn } from './helpers/hws-fixtures';
 
 const FIXTURE_PASSWORD = generateFixturePassword();
 
@@ -270,7 +270,10 @@ describeIfDb('worker operations abuse cases (integration)', () => {
         const row=await m.findOneByOrFail(Attendance,{id});
         expect(row.postShiftCompletedAt).toBeNull(); expect(row.postShiftExpiredAt).toBeNull();
       });
-      expect(await withContext({...ctx,organisationId:randomUUID(),workspaceId:randomUUID()},m=>new PostShiftLifecycleService(auditService).advance(m,id))).toBe(0);
+      // A foreign (unknown) organisation + workspace advances nothing. Part C1: with HWS on there is no schema for an unknown
+      // workspace, so the attempt is refused outright (the relation cannot even be resolved); with HWS off it sees 0 rows.
+      const foreign = () => withContext({...ctx,organisationId:randomUUID(),workspaceId:randomUUID()},m=>new PostShiftLifecycleService(auditService).advance(m,id));
+      if (hwsRuntimeOn()) await expect(foreign()).rejects.toThrow(/does not exist/); else expect(await foreign()).toBe(0);
     });
     it('missing clock-out and wrong status are ignored', async () => {
       const {ctx,id}=await fixture();

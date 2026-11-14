@@ -11,6 +11,7 @@ import { TenantContextService } from '@rab/server/engine/core-modules/tenant/ten
 import { runTokenCleanupCycle } from '../../queues/rab-maintenance/token-cleanup.job';
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
+import { hwsRuntimeOn } from './helpers/hws-fixtures';
 
 /**
  * Twenty-style worker runtime cutover (see HYPER-WORKSPACE-PHASE3-FOUNDATION.md). The worker runs as rab_app. These tests check the
@@ -144,10 +145,14 @@ describe('worker runtime cutover (integration)', () => {
     });
 
     it('a worker context with the wrong organisation sees zero Staff rows', async () => {
-      const rows = await tenantContext.runInTenantContext(workerCtx(orgB.id, managerA.workspaceId!), (m) =>
-        m.query<Array<{ id: string }>>(`SELECT id FROM core.staff_profile`),
-      );
-      expect(rows).toHaveLength(0);
+      const attempt = () =>
+        tenantContext.runInTenantContext(workerCtx(orgB.id, managerA.workspaceId!), (m) =>
+          m.query<Array<{ id: string }>>(`SELECT id FROM core.staff_profile`),
+        );
+      // Part C1: with HWS on, organisation B cannot even resolve workspace A's schema (the registry row is not visible to it),
+      // so the transaction is refused before any query (fail closed, 404). With HWS off the core copy shows zero rows.
+      if (hwsRuntimeOn()) await expect(attempt()).rejects.toMatchObject({ name: 'WorkspaceRoutingError' });
+      else expect(await attempt()).toHaveLength(0);
     });
 
     it('a worker context with no workspace bound fails closed: zero Staff rows', async () => {
