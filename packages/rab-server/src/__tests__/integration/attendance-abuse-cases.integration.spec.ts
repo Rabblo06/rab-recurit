@@ -627,7 +627,11 @@ describeIfDb('attendance abuse cases (integration)', () => {
 
   // Owner decision 0i (2026-11-14): a QR is accepted until the shift's CURRENT end + QR_POST_SHIFT_GRACE_MINUTES (120),
   // decided at scan time — never from when it was signed. The pre-shift report prints its QR up to 3 h before the start.
-  describe('QR expiry follows the shift’s current end + grace', () => {
+  // SCOPE: these tests pin the QR decision on the clock-out path, nothing more. The attendance monitor is NOT running
+  // here: in production it marks a still-clocked-in row MISSING_CLOCK_OUT 30 min after the staff member's OWN end, after
+  // which clock-out 404s, so these tests do not prove a 120-min clock-out grace end to end (owner decision pending).
+  // Every shift move below updates the seat's period with it, so the staff member's own end equals the shift's end.
+  describe('QR expiry on clock-out follows the shift’s current end + grace (QR decision only; monitor not running)', () => {
     const HOUR = 3600_000;
 
     /** A confirmed, clocked-in booking (fresh QR at clock-in), ready for a clock-out with the printed QR. */
@@ -644,7 +648,7 @@ describeIfDb('attendance abuse cases (integration)', () => {
       return { shiftId, printQr, clockOutWith };
     }
 
-    it('a QR printed 3 h before the shift is accepted at clock-out in the shift’s last minutes', async () => {
+    it('a QR printed 3 h before the shift passes QR validation at clock-out in the shift’s last minutes', async () => {
       const b = await clockedInBooking();
       // An 8 h shift ending in 3 minutes. A signing-relative exp (shift length + 15 + 120 min from printing) lapsed ~45 min ago.
       const { startsAt } = await moveShift(b.shiftId, '-7 hours -57 minutes', '3 minutes');
@@ -654,16 +658,20 @@ describeIfDb('attendance abuse cases (integration)', () => {
       expect(res.body.status).toBe('clocked_out');
     });
 
-    it('a QR printed 3 h before the shift is accepted at clock-out during the post-shift grace', async () => {
+    it('a QR printed 3 h before the shift passes QR validation at clock-out 100 min after the end (inside the QR grace; no monitor has run)', async () => {
       const b = await clockedInBooking();
       const { startsAt } = await moveShift(b.shiftId, '-9 hours -40 minutes', '-100 minutes'); // ended 100 min ago, inside the 120 min grace
       const printed = await b.printQr(new Date(startsAt.getTime() - 3 * HOUR));
+      // Precondition stated, not hidden: the row is still clocked_in only because no monitor ran (in production it would be
+      // MISSING_CLOCK_OUT by now, 30 min after this staff member's own end, and clock-out would 404 before the QR is read).
+      const [before] = await adminDataSource.query(`SELECT status FROM core.attendance WHERE shift_id = $1`, [b.shiftId]);
+      expect(before.status).toBe('clocked_in');
       const res = await b.clockOutWith(printed);
       expect(res.status).toBe(201);
       expect(res.body.status).toBe('clocked_out');
     });
 
-    it('an extended shift accepts the printed QR until the NEW end + grace (refused before the extension)', async () => {
+    it('after the shift end moves later, the printed QR passes QR validation again (refused as expired before the move)', async () => {
       const b = await clockedInBooking();
       const { startsAt } = await moveShift(b.shiftId, '-9 hours -1 minute', '-121 minutes'); // end + grace passed a minute ago
       const printed = await b.printQr(new Date(startsAt.getTime() - 3 * HOUR));
@@ -677,7 +685,7 @@ describeIfDb('attendance abuse cases (integration)', () => {
       expect(after.body.status).toBe('clocked_out');
     });
 
-    it('a shortened shift refuses the printed QR after the NEW end + grace, and the attendance stays open', async () => {
+    it('after the shift end moves earlier, the printed QR is refused as expired once the NEW end + grace has passed; the attendance stays open', async () => {
       const b = await clockedInBooking();
       const printed = await b.printQr(new Date(Date.now() - 3 * HOUR)); // printed for the original 8 h shift
       await moveShift(b.shiftId, '-4 hours', '-121 minutes'); // shortened: its new end + grace passed a minute ago
@@ -688,7 +696,7 @@ describeIfDb('attendance abuse cases (integration)', () => {
       expect(row).toMatchObject({ status: 'clocked_in', clock_out_at: null });
     });
 
-    it('a QR printed for another shift is still refused at clock-out, inside its own validity', async () => {
+    it('a QR printed for another shift is refused at clock-out (shift_mismatch), inside its own validity', async () => {
       const b = await clockedInBooking();
       const other = await clockedInBooking();
       const foreign = await other.printQr(new Date(Date.now() - 3 * HOUR));

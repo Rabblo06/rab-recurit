@@ -117,6 +117,24 @@ describe('AttendanceQrService — expiry from the shift’s current end + grace'
     await refused('not-a-jwt-at-all', 'invalid');
   });
 
+  it('a token signed with the derived key but the wrong issuer, the wrong audience or an unpinned algorithm is refused', async () => {
+    const key = Buffer.from(hkdfSync('sha256', Buffer.from(APP_SECRET, 'utf8'), Buffer.alloc(0), 'rab-qr-token-v1', 32)).toString('hex');
+    const claims = { shiftId: SHIFT_ID, venueId: VENUE_ID, ver: 1 };
+    const jwt = new JwtService();
+    at(ENDS_AT.getTime() - 5 * MIN);
+    // Control: the same key, issuer, audience and algorithm as production is accepted, so each refusal below is the one difference.
+    await accepted(jwt.sign(claims, { secret: key, algorithm: 'HS256', issuer: 'rab-attendance', audience: 'rab-qr' }));
+    await refused(jwt.sign(claims, { secret: key, algorithm: 'HS256', issuer: 'rab-auth', audience: 'rab-qr' }), 'invalid');
+    await refused(jwt.sign(claims, { secret: key, algorithm: 'HS256', issuer: 'rab-attendance', audience: 'rab-api' }), 'invalid');
+    await refused(jwt.sign(claims, { secret: key, algorithm: 'HS256', audience: 'rab-qr' }), 'invalid'); // no issuer
+    await refused(jwt.sign(claims, { secret: key, algorithm: 'HS256', issuer: 'rab-attendance' }), 'invalid'); // no audience
+    await refused(jwt.sign(claims, { secret: key, algorithm: 'HS512', issuer: 'rab-attendance', audience: 'rab-qr' }), 'invalid'); // HS256 is pinned
+    // alg:none — unsigned, hand-built (jsonwebtoken will not sign it): header.payload. with an empty signature.
+    const b64 = (o: object) => Buffer.from(JSON.stringify(o)).toString('base64url');
+    const unsigned = `${b64({ alg: 'none', typ: 'JWT' })}.${b64({ ...claims, iat: Math.floor(Date.now() / 1000), iss: 'rab-attendance', aud: 'rab-qr' })}.`;
+    await refused(unsigned, 'invalid');
+  });
+
   it('a venue reassignment or a bumped qrVersion after printing refuses the QR', async () => {
     const token = printQr();
     at(ENDS_AT.getTime() - 5 * MIN);
