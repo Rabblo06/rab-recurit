@@ -23,7 +23,7 @@
  *   [DOT_PROJECT_PREFIX=dbs]                     project names <prefix>-pg<major>-<block>; never shared between runs
  *   [DOT_OWNER_PASSWORD_FILE=/run/crewflow/db-target/…]  the password file's path inside the containers (upgrade-lib)
  *     node packages/rab-docker/deploy-order-tests/run-db-setup-tests.cjs <16|17|18> <out-dir>
- *          [--blocks=a,dep,race,ext,ref,pt,ptx,r256,pg15] [--only=S1,P1,...] [--keep]
+ *          [--blocks=a,dep,race,ext,ref,pt,ptx,r256,pg15,lock] [--only=S1,P1,...] [--keep]
  *
  * Blocks (each its own disposable project, run one after another, `down --volumes` after each):
  *   a     bundled db. S1 fresh with ONLY PG_DATABASE_PASSWORD + APP_SECRET (+ dummy non-database settings): crewflow_owner
@@ -63,6 +63,9 @@
  *   r256  S7 an R256 database (seeded) upgrades with its crewflow_owner URL (unchanged, password kept) and then with the
  *         bundled admin URL (the file logs in: unchanged); data, money, FKs, tenant ownership, RLS identical.
  *   pg15  S10C PostgreSQL 15: refused 64, nothing created.
+ *   lock  M1L (security review of F2, M1) one server per data volume: with db running, a second db container on the SAME
+ *         volumes (`docker compose run -d db`) exits non-zero with the refusal line before touching the volume; the first
+ *         stays healthy (same postmaster, still answers).
  *
  * Limits: at most six running containers of this run (db, rab-redis, rab-api, rab-worker + the registry, + db-setup or one
  * one-off). Secrets are generated per run under <out>/secrets-<project> (outside the repository), reach the containers only
@@ -79,14 +82,14 @@ const MAJOR = argv[0];
 // Git Bash hands over /c/... paths; on Windows node would resolve them to C:\c\..., so map the drive prefix.
 const OUT = argv[1] ? path.resolve(process.platform === 'win32' ? argv[1].replace(/^\/([a-z])\//i, '$1:/') : argv[1]) : '';
 const KEEP = argv.includes('--keep');
-const BLOCKS = (argv.find((a) => a.startsWith('--blocks=')) ?? '--blocks=a,dep,race,ext,ref,pt,ptx,r256,pg15').slice(9).split(',').filter(Boolean);
+const BLOCKS = (argv.find((a) => a.startsWith('--blocks=')) ?? '--blocks=a,dep,race,ext,ref,pt,ptx,r256,pg15,lock').slice(9).split(',').filter(Boolean);
 /** --only=<ids>: run only these cases (the others of a selected block are skipped and not reported). */
 const ONLY = (argv.find((a) => a.startsWith('--only=')) ?? '').slice(7).split(',').filter(Boolean);
 function fail(msg) {
   console.error(msg);
   process.exit(2);
 }
-if (!['16', '17', '18'].includes(MAJOR) || !OUT) fail('usage: run-db-setup-tests.cjs <16|17|18> <out-dir> [--blocks=a,dep,race,ext,ref,pt,ptx,r256,pg15] [--only=S1,P1,...] [--keep]');
+if (!['16', '17', '18'].includes(MAJOR) || !OUT) fail('usage: run-db-setup-tests.cjs <16|17|18> <out-dir> [--blocks=a,dep,race,ext,ref,pt,ptx,r256,pg15,lock] [--only=S1,P1,...] [--keep]');
 const DIGEST = /^sha256:[0-9a-f]{64}$/;
 const REF = /^[a-z0-9./_:-]+@sha256:[0-9a-f]{64}$/;
 if (!DIGEST.test(process.env.DOT_NEW_DIGEST ?? '')) fail('DOT_NEW_DIGEST must be sha256:<64 hex>');
@@ -1456,6 +1459,61 @@ async function blockPg15() {
   teardown(p);
 }
 
+// --------------------------------------------------------------------------------------------------------- block lock
+/**
+ * Security review of F2, M1: ONE server per data volume (the 2026-10-15 incident: two postgres servers on one data
+ * directory corrupt it). The db entrypoint takes a kernel lock (flock -n, fd 8) on /var/lib/postgresql/.crewflow-server.lock
+ * in the data volume before anything else. With the stack's db running, `docker compose run -d db` starts a second db
+ * container on the SAME named volumes: it must exit non-zero with the refusal line, before the TLS or pg_hba step, and the
+ * first server must stay healthy and keep serving.
+ */
+const LOCK_REFUSAL = 'crewflow-db: another server already holds this data volume - refusing';
+async function blockServerLock() {
+  const p = project('lock', { logging: false });
+  L.writeSecrets(p.secretsDir, { caPath: null });
+  use(p, { databaseUrl: null });
+  const second = `${p.name}-db-second`;
+  await step('M1L', 'F2-M1', 'one server per data volume: a second db container on the same volume refuses; the first stays healthy', async (check, n) => {
+    const up = p.compose(['up', '-d', '--wait', L.DB_SERVICE], { timeout: 300_000 });
+    keep(p, 'M1L-db-up', up.out);
+    check(up.code === 0, `db up and healthy (exit ${up.code})`);
+    const started = p.inspect(L.DB_SERVICE, '{{.State.StartedAt}}');
+    const postmaster = p.psql('SELECT pg_postmaster_start_time()');
+    check(postmaster !== '', 'the first server answers');
+    // The image ships flock (Debian util-linux, essential), and the lock file is on the data volume (same device as the
+    // cluster), owned by the db's uid 999.
+    const fl = L.run('docker', ['exec', p.container(L.DB_SERVICE), 'sh', '-c', 'command -v flock; stat -c "%u %d" /var/lib/postgresql/.crewflow-server.lock /var/lib/postgresql/pgdata']);
+    const [flockPath, lockStat, dataStat] = fl.stdout.trim().split('\n');
+    n(`flock: ${flockPath}; lock file uid/device ${lockStat}; pgdata uid/device ${dataStat}`);
+    check(fl.code === 0 && /\/flock$/.test(flockPath ?? ''), `the db image has flock (${flockPath ?? 'missing'})`);
+    check(Boolean(lockStat) && lockStat.split(' ')[0] === '999' && lockStat.split(' ')[1] === (dataStat ?? '').split(' ')[1], 'the lock file is on the data volume, owned by uid 999');
+    // The second server: the same service, so the same named volumes (data, CA); detached, named so it is removed exactly.
+    const run2 = p.compose(['run', '-d', '--no-deps', '--name', second, L.DB_SERVICE], { timeout: 120_000 });
+    keep(p, 'M1L-second-run', run2.out);
+    check(run2.code === 0, `the second db container was started (docker compose run -d, exit ${run2.code})`);
+    let state = '';
+    for (let i = 0; i < 60; i += 1) {
+      state = L.run('docker', ['inspect', '-f', '{{.State.Status}}|{{.State.ExitCode}}', second]).stdout.trim();
+      if (state.startsWith('exited|')) break;
+      await L.sleep(1000);
+    }
+    const logs2 = L.run('docker', ['logs', second], { timeout: 60_000 }).out;
+    evidence(`${p.name}-M1L-second.log`, L.redact(logs2));
+    n(`second container: ${state}`);
+    check(/^exited\|[1-9]\d*$/.test(state), `the second container exited non-zero (${state || 'no state'})`);
+    check(logs2.includes(LOCK_REFUSAL), `the second container printed "${LOCK_REFUSAL}"`);
+    check(!/creating the bundled database CA|database system is ready|PostgreSQL init process/i.test(logs2), 'the second container refused before the TLS step and never started postgres');
+    check(p.health(L.DB_SERVICE).startsWith('healthy|running|'), `the first db is still healthy (${p.health(L.DB_SERVICE)})`);
+    check(p.inspect(L.DB_SERVICE, '{{.State.StartedAt}}') === started, 'the first db container was not restarted');
+    check(p.psql('SELECT pg_postmaster_start_time()') === postmaster, 'the first server is the same postmaster and still answers');
+    const rm = L.run('docker', ['rm', '-f', second]);
+    check(rm.code === 0, `the second container removed by its exact name (exit ${rm.code})`);
+  }, p);
+  // Never leave the second container behind, whatever happened above (exact name only).
+  L.run('docker', ['rm', '-f', second]);
+  teardown(p);
+}
+
 // ------------------------------------------------------------------------------------------------------------- main
 async function main() {
   L.newSecrets();
@@ -1474,6 +1532,7 @@ async function main() {
     results.push({ id: 'S7', owner: '7', title: 'not applicable on 17: R256 never ran on PostgreSQL 17', status: 'N/A', checks: [], notes: [] });
   } else if (BLOCKS.includes('r256') && R256) await blockR256();
   if (BLOCKS.includes('pg15') && PG15_IMAGE) await blockPg15();
+  if (BLOCKS.includes('lock')) await blockServerLock();
   stopSampler();
   note(`peak of this run's running containers: ${peak.count} at ${peak.at} (${peak.names.join(', ')})`);
   writeResults();

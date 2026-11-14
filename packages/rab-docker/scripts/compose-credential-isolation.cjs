@@ -16,7 +16,8 @@
  *     CREWFLOW_MIGRATION_DATABASE_URL, ALLOW_PRODUCTION_DB_COMMANDS, DATABASE_URL_UNPOOLED with a value);
  *   - the production file (O3, owner decisions C1-C5: the API migrates on start): there is NO migration service, nothing
  *     names .env.migrate, nothing depends on a rab-migrate, and the runtime services carry no migration credential or
- *     authority and no legacy DATABASE_URL / DATABASE_DIRECT_URL key. The dev and QA files keep their one-off `migrate`.
+ *     authority and no legacy DATABASE_URL / DATABASE_DIRECT_URL key. Since OWNER-DB-ULTIMATE.md Part F2 (X2.3) the dev and
+ *     QA files follow the same lifecycle: no `migrate` service either.
  *
  * rab-ops removal (PR 2): the separated operations container `rab-ops` and its .env.ops are retired; operations run as
  * one-off owner-login commands of the API image. The refusals stay, so neither can come back unnoticed. A sentinel .env.ops
@@ -34,6 +35,20 @@
  * in every file: no service has a PG_DATABASE_PASSWORD key, and the sentinel appears only in the bundled `db` service's
  * POSTGRES_PASSWORD and, inside the default admin URL, in the one-shot `db-setup` service's PG_DATABASE_URL (PR #125 option
  * A: rab-api and rab-worker never carry it, nor any database URL). dbPasswordChecks() is the pure part.
+ *
+ * Part F2 (X2.3, dev and QA on Part A's setup): the files with a bundled `db` (production, dev, QA) are checked for the
+ * Part A contract itself (dbSetupContractChecks, pure): a one-shot db-setup (entrypoint ./db-setup.sh, restart "no", no
+ * port, the target volume writable and the CA read-only, after a healthy db, no APP_SECRET); the API and the Worker on
+ * ./api-prestart.sh / ./worker-start.sh (no compose init), with no database URL anywhere in their environment (an empty
+ * PG_DATABASE_URL only) and db-setup's target volume mounted read-only; the API waits for db-setup to complete. And the dev
+ * and QA `db` services must render EXACTLY as production's `db` (bundledDbParityChecks, pure): they are verbatim copies,
+ * so a drift in either direction (TLS, authentication, hardening, image) fails here. db-setup, the API and the Worker run
+ * one image.
+ * Security review of F2 (pure parts, each with denial tests): the crewflow-db network and the three db volumes match
+ * production's (internal; never external or custom-named); the committed db TEXT matches production's (rawDbTextParityChecks);
+ * only db mounts the data volume and only db-setup + the API/Worker the setup volume (dbVolumeMountChecks); in dev and QA
+ * db-setup's URL is pinned to host `db` and the file never names PG_DATABASE_PASSWORD (nonProductionDbSetupChecks); and the
+ * db entrypoint takes the one-server-per-volume kernel lock before anything else (dbServerLockChecks, M1).
  * Exit 0 = all checks passed, 1 = a check failed, 2 = docker compose is unavailable (CI must have it).
  * Prints service names, variable NAMES and check results only; never a value.
  *
@@ -59,24 +74,24 @@ const OPS_SENTINEL_APP_URL = `postgresql://crewflow_app:${OPS_SENTINEL_PASSWORD}
 const DB_SENTINEL_PASSWORD = 'SENTINELDBPW0b7e41c9d2a8f3561e'; // gitleaks:allow (synthetic marker, not a credential)
 const OPS_ONLY_NAMES = ['CREWFLOW_OPS_RUN', 'PG_OPS_APP_DATABASE_URL', 'CREWFLOW_OPS_ACTOR_SOURCE', 'CREWFLOW_OPS_ACTOR_ID', 'CREWFLOW_OPS_CHANGE_REF'];
 
-/** [compose file, migration service (null = none, O3), runtime services, production?] */
+const PRODUCTION_FILE = 'packages/rab-docker/docker-compose.production.yml';
+/**
+ * [compose file, migration service (null = none, O3), runtime services [api, worker], production?, bundled db + db-setup?]
+ * Part F2 (X2.3): dev and QA run Part A's setup (bundled db + db-setup, the API migrates on start), so neither has a
+ * migration service any more. The production file is listed first: its rendered `db` is the reference for the parity check.
+ */
 const FILES = [
-  ['packages/rab-docker/docker-compose.production.yml', null, ['rab-api', 'rab-worker'], true],
+  [PRODUCTION_FILE, null, ['rab-api', 'rab-worker'], true, true],
   // LOCAL/DEV ONLY build-from-source copy of the production contract (owner decision 2026-11-11): same credential rules.
-  ['packages/rab-docker/docker-compose.local-build.yml', null, ['rab-api', 'rab-worker'], true],
-  ['packages/rab-docker/docker-compose.yml', 'migrate', ['server', 'worker'], false],
-  ['packages/rab-docker/docker-compose.qa.yml', 'migrate', ['server', 'worker'], false],
+  // Not yet on Part A's setup (it still takes a crewflow_owner URL per service), so the db-setup contract is not checked.
+  ['packages/rab-docker/docker-compose.local-build.yml', null, ['rab-api', 'rab-worker'], true, false],
+  ['packages/rab-docker/docker-compose.yml', null, ['server', 'worker'], false, true],
+  ['packages/rab-docker/docker-compose.qa.yml', null, ['server', 'worker'], false, true],
 ];
 
 // Dummy values for every `${VAR:?}` the files require (never real secrets).
 const DUMMY_ENV = {
   CREWFLOW_IMAGE_TAG: `sha256:${'0'.repeat(64)}`,
-  DEVDB_SUPERUSER_PASSWORD: 'dummy',
-  DEVDB_URL: 'postgres://crewflow_app:dummy-app@devdb:5432/rab',
-  CREWFLOW_BOOTSTRAP_PASSWORD: 'dummy',
-  QA_POSTGRES_SUPERUSER_PASSWORD: 'dummy',
-  QA_CREWFLOW_PASSWORD: 'dummy',
-  QA_CREWFLOW_APP_PASSWORD: 'dummy',
   QA_APP_SECRET: 'dummy-dummy-dummy-dummy-dummy-dummy',
   // docker-compose.production.yml's REQUIRED list (x-crewflow-required-env, owner request 2026-11-12: OpenShip shows every
   // variable). PG_DATABASE_URL is deliberately NOT set: db-setup then renders the bundled default admin URL, built from
@@ -93,8 +108,11 @@ const DUMMY_ENV = {
   S3_ACCESS_KEY_ID: 'dummy',
   S3_SECRET_ACCESS_KEY: 'dummy',
   CREWFLOW_AUDIT_SINK: 'stdout',
-  // DB-SETUP: the bundled db's password (production.yml's db requires it); a sentinel so its spread is checked.
+  // DB-SETUP: the bundled db's password; a sentinel so its spread is checked. Production names it PG_DATABASE_PASSWORD; dev
+  // and QA have their own variables (security review L4), given the SAME sentinel so the db services render identically.
   PG_DATABASE_PASSWORD: DB_SENTINEL_PASSWORD,
+  CREWFLOW_DEV_DB_PASSWORD: DB_SENTINEL_PASSWORD,
+  CREWFLOW_QA_DB_PASSWORD: DB_SENTINEL_PASSWORD,
 };
 
 let failures = 0;
@@ -183,6 +201,189 @@ function dbPasswordChecks(rel, services) {
   return out;
 }
 
+const DB_SETUP_TARGET_DIR = '/run/crewflow/db-target';
+const DB_CA_DIR = '/run/crewflow/db-ca';
+const DB_URL_VALUE = /postgres(ql)?:\/\//i;
+const mountAt = (svc, target) => (svc?.volumes ?? []).find((v) => v && typeof v === 'object' && v.target === target);
+
+/**
+ * Part F2 (X2.3): Part A's database-setup contract in one rendered model (Twenty Helm model, twentyhq/twenty@eedb0a73
+ * helm/twenty/templates/deployment-server.yaml:81-130, deployment-worker.yaml:76-90). Pure: [ok, label] pairs.
+ * `runtimeNames` = [api, worker]. Labels name services and variables only, never a value.
+ */
+function dbSetupContractChecks(rel, services, [apiName, workerName]) {
+  const out = [];
+  const setup = services['db-setup'];
+  out.push([Boolean(setup), `${rel}: has the one-shot db-setup service`]);
+  if (setup) {
+    out.push([JSON.stringify(setup.entrypoint ?? null) === JSON.stringify(['./db-setup.sh']) && !setup.command, `${rel}: db-setup runs exactly ./db-setup.sh (entrypoint, no command)`]);
+    out.push([String(setup.restart ?? 'no') === 'no', `${rel}: db-setup restart is "no" (one-shot)`]);
+    out.push([!(setup.ports ?? []).length, `${rel}: db-setup publishes no port`]);
+    out.push([setup.depends_on?.db?.condition === 'service_healthy', `${rel}: db-setup starts after a healthy db`]);
+    const target = mountAt(setup, DB_SETUP_TARGET_DIR);
+    out.push([Boolean(target) && target.read_only !== true, `${rel}: db-setup mounts the target volume writable at ${DB_SETUP_TARGET_DIR}`]);
+    out.push([mountAt(setup, DB_CA_DIR)?.read_only === true, `${rel}: db-setup mounts the db CA read-only`]);
+    out.push([!Object.prototype.hasOwnProperty.call(setup.environment ?? {}, 'APP_SECRET'), `${rel}: db-setup has no APP_SECRET (never part of a database credential)`]);
+    out.push([String(setup.user ?? '') === '1000:1000' && setup.read_only === true, `${rel}: db-setup runs as 1000:1000 with a read-only root`]);
+  }
+  for (const [name, entrypoint] of [[apiName, './api-prestart.sh'], [workerName, './worker-start.sh']]) {
+    const svc = services[name];
+    if (!svc) continue; // reported by the "service exists" check
+    out.push([JSON.stringify(svc.entrypoint ?? null) === JSON.stringify([entrypoint]) && !svc.command, `${rel}: ${name} runs ${entrypoint} as PID 1 (entrypoint, no command)`]);
+    out.push([svc.init !== true, `${rel}: ${name} has no compose init (${entrypoint} execs tini itself)`]);
+    const env = envOf(svc);
+    out.push([String(env.PG_DATABASE_URL ?? '') === '', `${rel}: ${name} has no PG_DATABASE_URL value (it builds the crewflow_owner URL from db-setup's files)`]);
+    const urls = Object.entries(env).filter(([, v]) => DB_URL_VALUE.test(String(v ?? ''))).map(([k]) => k);
+    out.push([urls.length === 0, `${rel}: ${name} carries no database URL in any variable${urls.length ? ` (found in ${urls.join(', ')})` : ''}`]);
+    out.push([mountAt(svc, DB_SETUP_TARGET_DIR)?.read_only === true, `${rel}: ${name} mounts db-setup's target volume read-only`]);
+  }
+  if (services[apiName]) {
+    out.push([services[apiName].depends_on?.['db-setup']?.condition === 'service_completed_successfully', `${rel}: ${apiName} starts only after db-setup completed successfully`]);
+  }
+  // Security review I6: db-setup, the API and the Worker run ONE image (they cannot drift apart).
+  const images = [setup, services[apiName], services[workerName]].map((s) => String(s?.image ?? ''));
+  out.push([images[0] !== '' && images.every((i) => i === images[0]), `${rel}: db-setup, ${apiName} and ${workerName} run the same image`]);
+  return out;
+}
+
+/**
+ * Owner decision 2026-11-14 (#136 b): the dev database survives `docker compose down -v`. ONLY the dev file's db DATA volume
+ * is external, with this exact dev-only name (never rab_devdb_data, the previous dev database). QA (throwaway) and the
+ * production files keep project-scoped volumes; the CA and setup volumes stay project-scoped everywhere (a lost CA or
+ * password file is recovered by the next `up`).
+ */
+const DEV_DB_DATA_VOLUME = 'crewflow_dev_db_data';
+const EXTERNAL_DB_VOLUMES = Object.freeze({ 'packages/rab-docker/docker-compose.yml': Object.freeze({ 'crewflow-db-data': DEV_DB_DATA_VOLUME }) });
+
+/** The throw-away Compose project every file is rendered under (render()). */
+const RENDER_PROJECT = 'compose-isolation-check';
+/** The bundled db's top-level resources, compared with production's (security review of F2, L2-1). */
+const DB_NETWORK = 'crewflow-db';
+const DB_VOLUME_KEYS = Object.freeze(['crewflow-db-data', 'crewflow-db-ca', 'crewflow-db-target']);
+/** Strips the throw-away project prefix from a rendered resource name, so a custom `name:` stands out. */
+const unprefixed = (resource) => {
+  if (!resource || typeof resource !== 'object') return resource ?? null;
+  const out = { ...resource };
+  if (typeof out.name === 'string' && out.name.startsWith(`${RENDER_PROJECT}_`)) out.name = out.name.slice(RENDER_PROJECT.length + 1);
+  return out;
+};
+
+/**
+ * Part F2 (X2.3): the dev and QA `db` services are verbatim copies of production's. Pure: [ok, label] pairs comparing the
+ * two rendered models (same throw-away project, dummy values and password sentinel, so identical text renders
+ * identically): the `db` service; the crewflow-db network (internal, no custom name); and the three db volumes (never
+ * external, no custom name), EXCEPT the volumes `externalVolumes` names ({key: exact external name}): those must be
+ * external with exactly that name (owner decision 2026-11-14: the dev data volume, DEV_EXTERNAL_DB_VOLUMES). Names the
+ * differing keys only, never a value.
+ */
+function bundledDbParityChecks(rel, model, productionModel, externalVolumes = {}) {
+  const db = model?.services?.db;
+  const productionDb = productionModel?.services?.db;
+  if (!db || !productionDb) return [[false, `${rel}: has a bundled db rendered like ${PRODUCTION_FILE}'s (missing: ${!db ? rel : PRODUCTION_FILE})`]];
+  const out = [];
+  const keys = [...new Set([...Object.keys(db), ...Object.keys(productionDb)])].sort();
+  const differ = keys.filter((k) => JSON.stringify(db[k] ?? null) !== JSON.stringify(productionDb[k] ?? null));
+  out.push([differ.length === 0, `${rel}: db renders exactly as ${PRODUCTION_FILE}'s db${differ.length ? ` (differs in ${differ.join(', ')})` : ''}`]);
+  const net = unprefixed(model.networks?.[DB_NETWORK]);
+  out.push([
+    Boolean(net) && net.internal === true && !net.external && net.name === DB_NETWORK && JSON.stringify(net) === JSON.stringify(unprefixed(productionModel.networks?.[DB_NETWORK])),
+    `${rel}: the ${DB_NETWORK} network is production's (internal, not external, no custom name)`,
+  ]);
+  for (const key of DB_VOLUME_KEYS) {
+    const vol = unprefixed(model.volumes?.[key]);
+    const externalName = externalVolumes[key];
+    if (externalName) {
+      const keys = Object.keys(vol ?? {}).sort();
+      out.push([
+        Boolean(vol) && vol.external === true && vol.name === externalName && JSON.stringify(keys) === JSON.stringify(['external', 'name']),
+        `${rel}: the ${key} volume is external with exactly the name ${externalName} (survives \`down -v\`; owner decision 2026-11-14)`,
+      ]);
+      continue;
+    }
+    out.push([
+      Boolean(vol) && !vol.external && vol.name === key && JSON.stringify(vol) === JSON.stringify(unprefixed(productionModel.volumes?.[key])),
+      `${rel}: the ${key} volume is production's (project-scoped, not external, no custom name)`,
+    ]);
+  }
+  return out;
+}
+
+/**
+ * Part F2 security review, L2-4: the committed TEXT of a file's `db` service (from `  db:` to the next service or top-level
+ * key), normalised: `$$` -> `$`, and the POSTGRES_PASSWORD interpolation (dev and QA use their own variable name, L4)
+ * replaced by a placeholder. Returns null when the file has no `db` service.
+ */
+function rawDbServiceText(text) {
+  const lines = text.split(/\r?\n/);
+  const start = lines.indexOf('  db:');
+  if (start < 0) return null;
+  let end = start + 1;
+  while (end < lines.length && !/^( {2}\S|\S)/.test(lines[end])) end += 1;
+  while (end > start + 1 && lines[end - 1].trim() === '') end -= 1;
+  return lines
+    .slice(start, end)
+    .join('\n')
+    .split('$$')
+    .join('$')
+    .replace(/^(\s*POSTGRES_PASSWORD: )\$\{[A-Z0-9_]+:\?[^}\n]*\}$/m, '$1${PASSWORD}');
+}
+
+/** Pure: [ok, label] comparing two committed `db` texts (rawDbServiceText of each). */
+function rawDbTextParityChecks(rel, text, productionText) {
+  const mine = rawDbServiceText(text);
+  const theirs = rawDbServiceText(productionText);
+  return [[mine !== null && theirs !== null && mine === theirs, `${rel}: the committed db service text is ${PRODUCTION_FILE}'s, word for word (after $$ -> $ and the password variable)`]];
+}
+
+/**
+ * Part F2 security review, L2-2: only db mounts the data volume; only db-setup and the API/Worker mount the setup (target)
+ * volume. Pure: [ok, label] pairs over a rendered model's services.
+ */
+function dbVolumeMountChecks(rel, services, runtimeNames) {
+  const allowed = { 'crewflow-db-data': ['db'], 'crewflow-db-target': ['db-setup', ...runtimeNames] };
+  const violations = [];
+  for (const [name, svc] of Object.entries(services)) {
+    for (const [source, who] of Object.entries(allowed)) {
+      const mounts = (svc?.volumes ?? []).some((v) => v && typeof v === 'object' && v.source === source);
+      if (mounts && !who.includes(name)) violations.push(`${name} mounts ${source}`);
+    }
+  }
+  return [[violations.length === 0, `${rel}: only db mounts crewflow-db-data and only db-setup, ${runtimeNames.join(', ')} mount crewflow-db-target${violations.length ? ` (${violations.join('; ')})` : ''}`]];
+}
+
+/**
+ * Part F2 security review, L2-3 and L4: in a NON-production file db-setup's URL is pinned to the bundled db (never the
+ * `${PG_DATABASE_URL...}` interpolation production offers for an external database; rendered host exactly `db`), and the
+ * file never names PG_DATABASE_PASSWORD (dev and QA have their own hex-only variable). `rawDoc` is the parsed, uninterpolated
+ * YAML (comments are not part of it). Pure; labels never print a value.
+ */
+function nonProductionDbSetupChecks(rel, services, rawDoc) {
+  const out = [];
+  const rawUrl = String(rawDoc?.services?.['db-setup']?.environment?.PG_DATABASE_URL ?? '');
+  out.push([rawUrl !== '' && !rawUrl.includes('${PG_DATABASE_URL'), `${rel}: db-setup's PG_DATABASE_URL is pinned (no \${PG_DATABASE_URL} interpolation: no external-database mode)`]);
+  let host = null;
+  try {
+    host = new URL(String(services['db-setup']?.environment?.PG_DATABASE_URL ?? '')).hostname;
+  } catch {
+    host = null;
+  }
+  out.push([host === 'db', `${rel}: db-setup's rendered PG_DATABASE_URL host is exactly db (the bundled database)`]);
+  out.push([!JSON.stringify(rawDoc ?? {}).includes('PG_DATABASE_PASSWORD'), `${rel}: never names PG_DATABASE_PASSWORD (production's variable; this file has its own)`]);
+  return out;
+}
+
+/**
+ * Part F2 security review, M1: ONE server per data volume. The rendered db entrypoint takes a kernel lock on a file in the
+ * data volume (`flock -n` on fd 8) before it touches the volume or starts the image's entrypoint. Pure.
+ */
+function dbServerLockChecks(rel, services) {
+  const entry = (services.db?.entrypoint ?? []).map(String).join('\n');
+  const lockAt = entry.indexOf('exec 8>/var/lib/postgresql/.crewflow-server.lock');
+  const flockAt = entry.search(/flock -n 8 \|\| \{[^}]*exit 1; \}/);
+  const firstUse = Math.min(...['openssl', 'printf', 'exec docker-entrypoint.sh'].map((m) => (entry.indexOf(m) < 0 ? Infinity : entry.indexOf(m))));
+  return [[lockAt >= 0 && flockAt > lockAt && flockAt < firstUse, `${rel}: db takes the one-server lock (flock -n on the data volume) before it touches the volume or starts postgres`]];
+}
+
 /** The YAML parser (the root devDependency `yaml`), or null when it cannot be loaded. `requireFn` is the test seam. */
 function loadYamlParser(requireFn = require) {
   try {
@@ -228,7 +429,9 @@ function main(options = {}) {
     console.error('[compose-isolation] docker compose is not available');
     return 2;
   }
-  for (const [rel, migrateName, runtimeNames, production] of FILES) {
+  let productionModel = null;
+  let productionText = null;
+  for (const [rel, migrateName, runtimeNames, production, dbSetup] of FILES) {
     let model;
     try {
       model = render(rel, exec);
@@ -251,8 +454,24 @@ function main(options = {}) {
     // rab-ops removal (PR 2): no service (runtime, migrate, or the dev/QA files) carries anything of the ops environment.
     for (const [ok, label] of opsRefusalChecks(rel, services, raw, { production })) check(ok, label);
     for (const [ok, label] of dbPasswordChecks(rel, services)) check(ok, label);
+    if (dbSetup) {
+      for (const [ok, label] of dbSetupContractChecks(rel, services, runtimeNames)) check(ok, label);
+      for (const [ok, label] of dbVolumeMountChecks(rel, services, runtimeNames)) check(ok, label);
+      for (const [ok, label] of dbServerLockChecks(rel, services)) check(ok, label);
+      const text = fs.readFileSync(path.join(REPO, rel), 'utf8');
+      if (rel === PRODUCTION_FILE) {
+        productionModel = model;
+        productionText = text;
+        // Against itself: production's own network is internal and its db volumes are project-scoped (never external).
+        for (const [ok, label] of bundledDbParityChecks(rel, model, model)) check(ok, label);
+      } else {
+        for (const [ok, label] of bundledDbParityChecks(rel, model, productionModel, EXTERNAL_DB_VOLUMES[rel] ?? {})) check(ok, label);
+        for (const [ok, label] of rawDbTextParityChecks(rel, text, productionText ?? '')) check(ok, label);
+        for (const [ok, label] of nonProductionDbSetupChecks(rel, services, YAML.parse(text, { merge: true }))) check(ok, label);
+      }
+    }
     const migrate = migrateName ? services[migrateName] : undefined;
-    // The production file is on the owner login (single URL); the dev and QA files keep the separated contract.
+    // A migration service (none is committed today): on an owner-login file nothing may read .env.migrate.
     const ownerLogin = rel === 'packages/rab-docker/docker-compose.production.yml' || rel === 'packages/rab-docker/docker-compose.local-build.yml';
     if (migrateName) check(Boolean(migrate), `${rel}: service ${migrateName} exists`);
     else {
@@ -315,6 +534,16 @@ module.exports = {
   FILES,
   opsRefusalChecks,
   dbPasswordChecks,
+  dbSetupContractChecks,
+  bundledDbParityChecks,
+  DEV_DB_DATA_VOLUME,
+  EXTERNAL_DB_VOLUMES,
+  rawDbServiceText,
+  rawDbTextParityChecks,
+  dbVolumeMountChecks,
+  nonProductionDbSetupChecks,
+  dbServerLockChecks,
+  PRODUCTION_FILE,
   DB_SENTINEL_PASSWORD,
   render,
   OPS_ONLY_NAMES,

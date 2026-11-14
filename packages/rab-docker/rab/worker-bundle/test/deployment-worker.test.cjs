@@ -76,12 +76,15 @@ const WORKER_COMMAND = ['node', 'packages/rab-worker/dist/main.js'];
  * DB-SETUP (database setup like Twenty, T-5; PID 1 lead decision 2026-11-12): the two DEPLOY files make worker-start.sh the
  * Worker's ENTRYPOINT (PID 1, no command, no compose init). It derives the crewflow_owner URL from the admin PG_DATABASE_URL,
  * unsets the admin credential and only then execs `/sbin/tini -s --` + WORKER_COMMAND, so tini is PID 1 (the watchdog SIGKILL
- * works) with a clean environment. The dev, QA and test files keep WORKER_COMMAND under compose's init (they hand the
- * Worker its own URL directly).
+ * works) with a clean environment. Part F2 (X2.3): the dev and QA files run Part A's setup too (bundled db + db-setup), so
+ * their Worker has the same entrypoint (WORKER_START_FILES). The test harnesses keep WORKER_COMMAND under compose's init
+ * (they hand the Worker its own URL directly).
  */
 const DEPLOY_WORKER_ENTRYPOINT = ['./worker-start.sh'];
 const TINI = ['/sbin/tini', '-s', '--'];
 const DEPLOY_FILES = ['packages/rab-docker/docker-compose.production.yml', 'packages/rab-docker/docker-compose.image.yml'];
+/** Every file whose Worker starts through worker-start.sh (PID 1, no command, no compose init): the deploy files, dev and QA. */
+const WORKER_START_FILES = [...DEPLOY_FILES, 'packages/rab-docker/docker-compose.yml', 'packages/rab-docker/docker-compose.qa.yml'];
 /** DB-SETUP (D1 a): the one mount the deploy app services may have, the bundled db's CA volume, read-only. */
 const DB_CA_MOUNT = 'crewflow-db-ca:/run/crewflow/db-ca:ro';
 /** PR #125 option A: db-setup's target file, read-only (the crewflow_owner URL is built from it). */
@@ -144,11 +147,15 @@ for (const [rel, services] of Object.entries(WORKER_DEFINITIONS)) {
       const { env, svc } = serviceEnv(rel, service);
       const text = JSON.stringify(svc);
       for (const retired of RETIRED) assert.ok(!text.includes(retired), `${service}: still references ${retired}`);
-      if (DEPLOY_FILES.includes(rel)) {
+      if (WORKER_START_FILES.includes(rel)) {
         // DB-SETUP PID 1: the script is PID 1 and execs tini itself; docker-init would keep the admin URL at PID 1.
         assert.deepEqual(svc.entrypoint, DEPLOY_WORKER_ENTRYPOINT);
         assert.equal(svc.command, undefined, `${service}: no command (worker-start.sh takes none)`);
         assert.notEqual(svc.init, true, `${service}: no compose init (worker-start.sh execs tini as PID 1)`);
+        // Security review of F2, L3: production's rab-worker sizing in every file whose Worker runs like production's.
+        assert.ok(Number.isInteger(svc.pids_limit) && svc.pids_limit >= 768 && svc.pids_limit <= 4096, `${service}: pids_limit ${svc.pids_limit}`);
+        const mem = sizeMiB(interpolate(svc.mem_limit, {}));
+        assert.ok(mem >= 1024 && mem <= 8192, `${service}: mem_limit ${mem} MiB`);
       } else {
         assert.deepEqual(svc.command, WORKER_COMMAND);
         assert.equal(svc.init, true, 'the watchdog SIGKILL is ignored for PID 1: compose init must be PID 1');
@@ -188,6 +195,18 @@ test('DB-SETUP: worker-start.sh execs exactly the Worker command (and nothing el
   ]);
   const dockerfile = fs.readFileSync(path.join(REPO, 'packages/rab-docker/rab/Dockerfile'), 'utf8');
   assert.ok(/^COPY --chmod=0555 packages\/rab-docker\/rab\/worker-start\.sh \.\/worker-start\.sh$/m.test(dockerfile), 'the image ships worker-start.sh read+execute only');
+});
+
+test('Part F2 (security review L3): dev and QA size db-setup and the Worker exactly like production', { skip }, () => {
+  const prod = loadCompose('packages/rab-docker/docker-compose.production.yml').services;
+  for (const rel of ['packages/rab-docker/docker-compose.yml', 'packages/rab-docker/docker-compose.qa.yml']) {
+    const s = loadCompose(rel).services;
+    for (const key of ['pids_limit', 'mem_limit', 'cpus']) {
+      assert.equal(String(s['db-setup'][key]), String(prod['db-setup'][key]), `${rel}: db-setup ${key}`);
+    }
+    assert.equal(s.worker.pids_limit, prod['rab-worker'].pids_limit, `${rel}: worker pids_limit`);
+    assert.equal(sizeMiB(s.worker.mem_limit), sizeMiB(interpolate(prod['rab-worker'].mem_limit, {})), `${rel}: worker mem_limit`);
+  }
 });
 
 test('production and image compose: the Worker provisions in-process at the pinned 5 s', { skip }, () => {

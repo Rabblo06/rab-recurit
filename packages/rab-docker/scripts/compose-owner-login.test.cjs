@@ -503,6 +503,20 @@ test('DENIAL bundled db: password only from PG_DATABASE_PASSWORD (T-2), never tr
   assertRefused(problemsAfter((s) => { s.db.command = s.db.command.filter((t) => !t.startsWith('hba_file=')); }), /does not read the TLS-only pg_hba\.conf/);
   assertRefused(problemsAfter((s) => { s.db.entrypoint = s.db.entrypoint.map((t) => t.replace('hostssl all all 0.0.0.0/0', 'host all all 0.0.0.0/0')); }), /does not write exactly the TLS-only pg_hba\.conf/);
   assertRefused(problemsAfter((s) => { s.db.entrypoint = s.db.entrypoint.map((t) => t.replace('exec docker-entrypoint.sh', "echo 'host all all all trust' >> x\n        exec docker-entrypoint.sh")); }), /does not write exactly the TLS-only pg_hba\.conf/);
+  // Security review of F2, M1: the one-server-per-volume lock, present and taken first.
+  const noLock = /does not take the one-server lock/;
+  assertRefused(problemsAfter((s) => { s.db.entrypoint = s.db.entrypoint.map((t) => t.replace(/ *flock -n 8 [^\n]*\n/, '')); }), noLock);
+  assertRefused(problemsAfter((s) => { s.db.entrypoint = s.db.entrypoint.map((t) => t.replace('flock -n 8', 'flock 8')); }), noLock);
+  assertRefused(problemsAfter((s) => { s.db.entrypoint = s.db.entrypoint.map((t) => t.replace('/var/lib/postgresql/.crewflow-server.lock', '/tmp/x.lock')); }), noLock);
+  assertRefused(
+    problemsAfter((s) => {
+      s.db.entrypoint = s.db.entrypoint.map((t) => {
+        const m = t.match(/ *exec 8>[^\n]*\n *flock -n 8[^\n]*\n/);
+        return m ? t.replace(m[0], '').replace('exec docker-entrypoint.sh', `${m[0].trimStart()}exec docker-entrypoint.sh`) : t;
+      });
+    }),
+    noLock,
+  );
   assertRefused(problemsAfter((s) => { s.db.environment.POSTGRES_INITDB_ARGS = '--auth-host=trust'; }), /trust/);
   assertRefused(problemsAfter((s) => { s.db.environment.PG_DATABASE_URL = 'postgresql://postgres:x@db:5432/crewflow'; }), /db: has PG_DATABASE_URL/);
   assertRefused(problemsAfter((s) => { s.db.environment.PGPASSWORD = 'x'; }), /db: environment has PGPASSWORD/);

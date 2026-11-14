@@ -348,6 +348,11 @@ services:
         set -eu
         # The data volume root arrives world-writable (copied from the image): only postgres may write it.
         chmod 0755 /var/lib/postgresql
+        # ONE server per data volume (2026-10-15 incident: two postgres servers on one data directory corrupt it). A kernel
+        # lock on the volume itself, taken before anything here touches the volume, held by the server for its whole life (fd 8
+        # survives every exec and is inherited by every postgres process); any second container on this volume refuses.
+        exec 8>/var/lib/postgresql/.crewflow-server.lock
+        flock -n 8 || { echo 'crewflow-db: another server already holds this data volume - refusing' >&2; exit 1; }
         cd /var/lib/postgresql
         if ! { [ -s tls/server.key ] && [ -s tls/server.crt ] && [ -s /var/tmp/ca.crt ] &&
           openssl verify -CAfile /var/tmp/ca.crt tls/server.crt >/dev/null 2>&1 &&

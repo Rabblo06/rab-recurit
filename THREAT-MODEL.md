@@ -7463,6 +7463,35 @@ image that runs the apps' own derive step on the read-only volume (`--pull never
   - The semantic-posture acl spec; the security-posture golden (+4) and the semantic goldens (pg16/17/18).
   - B2's suites (`upgrade-ledger-tests/`, the S-layer specs) on PG16/17/18.
 
+## X2.3 / Part F2 — dev and QA on Part A's database setup; one postgres server per data volume (branch build/dev-qa-helm-setup, 2026-11-13; supersedes the #120 draft)
+- **Change:** docker-compose.yml (dev) and docker-compose.qa.yml (QA) run Part A's setup: the bundled `db` (production's text
+  word for word, gate-checked), a one-shot `db-setup` (the only service with a database URL, pinned to the bundled db — a
+  shell-exported `PG_DATABASE_URL` cannot redirect it), `server` on api-prestart.sh and `worker` on worker-start.sh building the
+  crewflow_owner URL from the setup volume mounted read-only; migrate on start; consume-only worker. The old `devdb`/`postgres`
+  and `migrate` services are gone. Dev/QA use their own password names (`CREWFLOW_DEV_DB_PASSWORD`, `CREWFLOW_QA_DB_PASSWORD`),
+  so a production `PG_DATABASE_PASSWORD` left in a shell never reaches dev.
+- **Threat (review M1):** two postgres servers started on one data volume (e.g. `docker compose run db`, `--scale db=2`) corrupt
+  it — the 2026-10-15 incident. The old dev stack prevented it only with `container_name: rab-devdb`; production's bundled db
+  had no guard. **Control:** every bundled db (docker-compose.production.yml, docker-compose.image.yml, dev, QA) takes a kernel
+  `flock -n` on `/var/lib/postgresql/.crewflow-server.lock` before touching the volume and holds it for the server's life; a
+  second container refuses (exit 1). The production compose file changed; nothing is deployed until the owner deploys.
+- **Risk accepted as in production:** PT-01/BC-08 (one schema-owning login) now also apply to dev and QA (loopback-only,
+  throwaway data). Dev server/worker still read packages/rab-server/.env for APP_SECRET etc.; every database key is pinned in
+  compose and the start scripts refuse the dangerous ones. Unchanged: FORCE RLS, both RESET ROLEs, current_user = session_user,
+  the refusals, the migration lock.
+- **Data:** `rab_devdb_data` / `rab-devdb` are no longer referenced and are left untouched (the dev cut-over is the owner's).
+  The dev database lives on the EXTERNAL volume `crewflow_dev_db_data` (owner decision 2026-11-14, #136 b), created once by
+  hand; `docker compose down -v` keeps it. The CA and setup (password file) volumes stay per project: after `down -v` the
+  next `up` makes a new CA and db-setup resets crewflow_owner to a new random password (Part A lost-file path) before the
+  apps start; verified live (same cluster and data, old password refused, new one works, no password in any log). QA and
+  production keep per-project volumes.
+- **Residual:** flock assumes a local volume driver (not an NFS-style network volume).
+- **Tests:** compose-credential-isolation.cjs (Part A contract, db/network/volume parity with production, mount rules, the lock,
+  no `PG_DATABASE_PASSWORD` in dev/QA) with denial tests; deployment-worker.test.cjs (worker-start.sh, limits);
+  compose-owner-login.cjs (lock in image.yml); live: dev bring-up + restart on PG16 (crewflow_owner NOSUPERUSER NOBYPASSRLS,
+  password file unchanged across restart, no password in any log) and run-db-setup-tests.cjs block `lock` (PG16 PASS: the
+  second db exits 1 with the refusal, the first stays healthy).
+
 ## Part C1 — HWS (one schema per workspace) on by default outside production; user deletion checks every workspace (branch hws/c1a-on-by-default, 2026-11-14)
 - **Change.** `HWS_RUNTIME_ENABLED` unset now means ON in development and test and OFF when ANY production signal is set
   (`NODE_ENV`, `RAB_RUNTIME_ENV` or `DB_TARGET` = production, trimmed, any case; the existing `isProductionRuntime`). An explicit
