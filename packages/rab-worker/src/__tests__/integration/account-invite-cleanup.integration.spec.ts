@@ -19,6 +19,7 @@ import { AccountInviteCleanupResult, runAccountInviteCleanupCycle } from '../../
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { generateFixturePassword } from './helpers/fixture-password';
 import { integrationTestDatabaseReady } from '@rab/server/database/typeorm/core/integration-test-database-gate';
+import { provisionFixtureWorkspace } from './helpers/test-identities';
 
 const FIXTURE_PASSWORD = generateFixturePassword();
 
@@ -111,6 +112,7 @@ describeIfDb('account invite cleanup job (integration)', () => {
         subdomain: `test-${ownerUserId.slice(0, 8)}`,
         status: 'active',
       });
+      await provisionFixtureWorkspace(manager, workspace.id); // Part C1: READY schema, as the product builds it
       await manager.insert(ManagerProfile, { organisationId: organisation.id, userId: ownerUserId, type: ManagerType.INTERNAL, workspaceId: workspace.id });
       // Production writes this membership when a Manager gets a workspace. Without it the owner's session resolves no workspace, POST /staff
       // is refused (RequireWorkspaceGuard → 403), and the test then reads a user by an undefined email, which matches the org's first user.

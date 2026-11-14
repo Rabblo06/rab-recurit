@@ -26,6 +26,7 @@ import { runLateClockInCycle } from '../../queues/rab-shifts/late-clock-in.job';
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { generateFixturePassword } from './helpers/fixture-password';
 import { integrationTestDatabaseReady } from '@rab/server/database/typeorm/core/integration-test-database-gate';
+import { provisionFixtureWorkspace } from './helpers/test-identities';
 
 const FIXTURE_PASSWORD = generateFixturePassword();
 
@@ -144,6 +145,7 @@ describeIfDb('late clock-in correctness (integration)', () => {
         subdomain: `${label}-${ownerManagerUserId.slice(0, 8)}`,
         status: 'active',
       });
+      await provisionFixtureWorkspace(manager, workspace.id); // Part C1: READY schema, as the product builds it
       workspaceId = workspace.id;
       // rab.workspace_id must be bound before this insert — same ordering bug already fixed in
       // worker-event-idempotency.integration.spec.ts (P2.2).
@@ -375,6 +377,7 @@ describeIfDb('late clock-in correctness (integration)', () => {
           subdomain: `otherws-${userId.slice(0, 8)}`,
           status: 'active',
         });
+        await provisionFixtureWorkspace(manager, workspace.id); // Part C1: READY schema, as the product builds it
         // rab.workspace_id is still bound to the OUTER withContext's workspace at this point, not
         // this newly-created one — rebind before the insert (P2.2 fix, same pattern as elsewhere).
         await manager.query(`SELECT set_config('rab.workspace_id', $1, true)`, [workspace.id]);

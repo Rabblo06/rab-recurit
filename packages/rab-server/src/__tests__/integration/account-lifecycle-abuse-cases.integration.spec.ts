@@ -1,4 +1,4 @@
-import { insertMembership } from './helpers/test-identities';
+import { insertMembership, provisionFixtureWorkspace } from './helpers/test-identities';
 import 'reflect-metadata';
 import { EmailOutboxJobType, ManagerType, PasswordResetTokenPurpose, PermissionFlag, UserStatus } from '@rab/shared';
 import { INestApplication } from '@nestjs/common';
@@ -134,6 +134,7 @@ describeIfDb('account lifecycle abuse cases (integration)', () => {
           subdomain: `test-${userId.slice(0, 8)}`,
           status: 'active',
         });
+        await provisionFixtureWorkspace(manager, workspace.id); // Part C1: READY schema, as the product builds it
         await insertMembership(manager, organisation.id, userId, workspace.id);
         await manager.insert(ManagerProfile, {
           organisationId: organisation.id,

@@ -1,4 +1,4 @@
-import { insertMembership } from './helpers/test-identities';
+import { insertMembership, provisionFixtureWorkspace } from './helpers/test-identities';
 import 'reflect-metadata';
 import { UserStatus, PermissionFlag } from '@rab/shared';
 import { INestApplication } from '@nestjs/common';
@@ -95,7 +95,7 @@ describeIfDb('venue/job-role ownership abuse cases (integration)', () => {
           subdomain: `test-${userId.slice(0, 8)}`,
           status: 'active',
         });
-        const [{ id: wsId }] = await manager.query(`SELECT id FROM core.manager_workspace WHERE owner_user_id = $1`, [userId]); await insertMembership(manager, organisation.id, userId, wsId);
+        const [{ id: wsId }] = await manager.query(`SELECT id FROM core.manager_workspace WHERE owner_user_id = $1`, [userId]); await provisionFixtureWorkspace(manager, wsId); /* Part C1: READY schema */ await insertMembership(manager, organisation.id, userId, wsId);
         managers.push({ email, userId });
       }
     });

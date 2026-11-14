@@ -28,6 +28,7 @@ import { runShiftMonitorCycle } from '../../queues/rab-shifts/shift-monitor.job'
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { generateFixturePassword } from './helpers/fixture-password';
 import { integrationTestDatabaseReady } from '@rab/server/database/typeorm/core/integration-test-database-gate';
+import { provisionFixtureWorkspace } from './helpers/test-identities';
 
 const FIXTURE_PASSWORD = generateFixturePassword();
 
@@ -119,6 +120,7 @@ describeIfDb('worker event idempotency (integration)', () => {
         subdomain: `${label}-${managerUserId.slice(0, 8)}`,
         status: 'active',
       });
+      await provisionFixtureWorkspace(manager, workspace.id); // Part C1: READY schema, as the product builds it
       workspaceId = workspace.id;
       // rab.workspace_id must be bound to the REAL workspace before this insert — manager_profile's
       // own WITH CHECK requires workspace_id = current_workspace() (or an existing manage

@@ -16,6 +16,7 @@ import { PasswordHashingService } from '../../engine/core-modules/auth/services/
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { generateFixturePassword } from './helpers/fixture-password';
 import { integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
+import { provisionFixtureWorkspace } from './helpers/test-identities';
 
 const FIXTURE_PASSWORD = generateFixturePassword();
 
@@ -95,6 +96,7 @@ describeIfDb('composite workspace FK attack (integration)', () => {
         subdomain: `${label}-${managerUserId.slice(0, 8)}`,
         status: 'active',
       });
+      await provisionFixtureWorkspace(manager, workspace.id); // Part C1: READY schema, as the product builds it
       workspaceId = workspace.id;
       // Must bind rab.workspace_id to the REAL workspace BEFORE this insert, not after: manager_profile's own
       // WITH CHECK requires workspace_id = current_workspace() (or a manager.manage permission this throwaway

@@ -32,3 +32,36 @@ export function businessTable(workspaceId: string, table: string): string {
   if (!BUSINESS_TABLES.has(table)) throw new Error(`businessTable: "${table}" is not a workspace business table`);
   return `"${businessSchema(workspaceId)}"."${table}"`;
 }
+
+/** The minimal query surface of the superuser fixture connection (a TypeORM DataSource or EntityManager: rows as an array). */
+export interface FixtureQueryable {
+  query(sql: string, params?: unknown[]): Promise<unknown>;
+}
+
+/**
+ * For a superuser fixture statement that knows only a row id (not its workspace): the qualified table that holds the row in
+ * this mode. HWS off → `core.<table>`. HWS on → the READY workspace schema that contains the id, newest workspace first (the
+ * fixture usually just created it); `core.<table>` when no schema has it (a pre-cutover-only row). The schema name comes from
+ * the registry and must match the derived `workspace_<32 hex>` form.
+ */
+export async function businessTableOf(admin: FixtureQueryable, table: string, id: string): Promise<string> {
+  if (!BUSINESS_TABLES.has(table)) throw new Error(`businessTableOf: "${table}" is not a workspace business table`);
+  if (!hwsRuntimeOn()) return `"core"."${table}"`;
+  const schemas = (await admin.query(
+    `SELECT schema_name FROM core.workspace_schema_registry WHERE status = 'READY' ORDER BY created_at DESC`,
+  )) as Array<{ schema_name: string }>;
+  for (const { schema_name: schema } of schemas) {
+    if (!/^workspace_[0-9a-f]{32}$/.test(schema)) continue;
+    const hit = (await admin.query(`SELECT 1 FROM "${schema}"."${table}" WHERE id = $1`, [id])) as unknown[];
+    if (hit.length) return `"${schema}"."${table}"`;
+  }
+  return `"core"."${table}"`;
+}
+
+/** The schema part of a `"<schema>"."<table>"` returned above, re-quoted (for a sibling table in the same workspace). */
+export function siblingTable(qualified: string, table: string): string {
+  if (!BUSINESS_TABLES.has(table)) throw new Error(`siblingTable: "${table}" is not a workspace business table`);
+  const m = /^"(core|workspace_[0-9a-f]{32})"\."[a-z_]+"$/.exec(qualified);
+  if (!m) throw new Error('siblingTable: not a qualified business table');
+  return `"${m[1]}"."${table}"`;
+}

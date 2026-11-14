@@ -20,6 +20,7 @@ import { PasswordHashingService } from '../../engine/core-modules/auth/services/
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { generateFixturePassword } from './helpers/fixture-password';
 import { integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
+import { provisionFixtureWorkspace } from './helpers/test-identities';
 
 const FIXTURE_PASSWORD = generateFixturePassword();
 
@@ -129,6 +130,7 @@ describeIfDb('workspace cross-tenant RLS attack (integration)', () => {
         subdomain: `${label}-${managerUserId.slice(0, 8)}`,
         status: 'active',
       });
+      await provisionFixtureWorkspace(manager, workspace.id); // Part C1: READY schema, as the product builds it
       workspaceId = workspace.id;
       // manager_profile WITH CHECK: a profile in a workspace is written only with that workspace bound to the session (the server
       // binds it the same way in ManagerWorkspaceService.create).

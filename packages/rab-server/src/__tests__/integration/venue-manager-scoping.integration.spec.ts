@@ -1,4 +1,4 @@
-import { insertMembership } from './helpers/test-identities';
+import { insertMembership, provisionFixtureWorkspace } from './helpers/test-identities';
 import { AvailabilityService } from '../../modules/scheduling/services/availability.service';
 import { ShiftReportService } from '../../modules/attendance/services/shift-report.service';
 import { OfferService } from '../../modules/offer/services/offer.service';
@@ -152,6 +152,7 @@ describeIfDb('venue manager scoping (integration)', () => {
           subdomain: `test-${manager.userId.slice(0, 8)}`,
           status: 'active',
         });
+        await provisionFixtureWorkspace(m, workspace.id); // Part C1: READY schema, as the product builds it
         await insertMembership(m, organisation.id, manager.userId, workspace.id);
         await m.query(`INSERT INTO core.manager_profile (organisation_id, user_id, type, workspace_id) VALUES ($1, $2, $3, $4)`, [
           organisation.id,

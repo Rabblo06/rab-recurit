@@ -1,4 +1,4 @@
-import { insertMembership } from './helpers/test-identities';
+import { insertMembership, provisionFixtureWorkspace } from './helpers/test-identities';
 import 'reflect-metadata';
 import { EmailOutboxJobType, ManagerType, PermissionFlag, UserStatus, UserStatusType } from '@rab/shared';
 import { INestApplication } from '@nestjs/common';
@@ -94,6 +94,7 @@ describeIfDb('account invitation abuse cases (integration)', () => {
         subdomain: `test-${ownerUserId.slice(0, 8)}`,
         status: 'active',
       });
+      await provisionFixtureWorkspace(manager, workspace.id); // Part C1: READY schema, as the product builds it
       await insertMembership(manager, organisation.id, ownerUserId, workspace.id);
       await manager.insert(ManagerProfile, { organisationId: organisation.id, userId: ownerUserId, type: ManagerType.INTERNAL, workspaceId: workspace.id });
     });

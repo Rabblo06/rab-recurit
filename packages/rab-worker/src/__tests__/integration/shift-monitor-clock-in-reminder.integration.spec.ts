@@ -24,6 +24,7 @@ import { runShiftMonitorCycle } from '../../queues/rab-shifts/shift-monitor.job'
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { generateFixturePassword } from './helpers/fixture-password';
 import { integrationTestDatabaseReady } from '@rab/server/database/typeorm/core/integration-test-database-gate';
+import { provisionFixtureWorkspace } from './helpers/test-identities';
 
 const FIXTURE_PASSWORD = generateFixturePassword();
 
@@ -110,6 +111,7 @@ describeIfDb('shift monitor — clock-in window open reminder (integration)', ()
         subdomain: `${label}-${managerUserId.slice(0, 8)}`,
         status: 'active',
       });
+      await provisionFixtureWorkspace(manager, workspace.id); // Part C1: READY schema, as the product builds it
       workspaceId = workspace.id;
       // rab.workspace_id must be bound before this insert — same ordering as every other fixture
       // in this suite (worker-operations-abuse-cases.integration.spec.ts's own comment).

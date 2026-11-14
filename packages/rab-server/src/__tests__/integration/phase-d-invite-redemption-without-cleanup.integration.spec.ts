@@ -1,4 +1,4 @@
-import { insertMembership } from './helpers/test-identities';
+import { insertMembership, provisionFixtureWorkspace } from './helpers/test-identities';
 import 'reflect-metadata';
 import { ManagerType, PermissionFlag, UserStatus } from '@rab/shared';
 import { INestApplication } from '@nestjs/common';
@@ -107,6 +107,7 @@ describeIfDb('Phase D F-1: dead account-invite links are refused at redemption e
         subdomain: `test-${ownerUserId.slice(0, 8)}`,
         status: 'active',
       });
+      await provisionFixtureWorkspace(manager, workspace.id); // Part C1: READY schema, as the product builds it
       await insertMembership(manager, organisationId, ownerUserId, workspace.id);
       await manager.insert(ManagerProfile, { organisationId, userId: ownerUserId, type: ManagerType.INTERNAL, workspaceId: workspace.id });
     });
