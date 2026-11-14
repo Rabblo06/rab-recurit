@@ -18,6 +18,7 @@ import { PermissionsService } from '../../../engine/core-modules/permissions/per
 import { ResourceScopeService } from '../../../engine/core-modules/resource-scope/resource-scope.service';
 import { AuthContext } from '../../../engine/core-modules/tenant/auth-context.interface';
 import { TenantContextService } from '../../../engine/core-modules/tenant/tenant-context.service';
+import { BusinessTables, businessTables } from '../../../engine/core-modules/tenant/business-tables';
 import { Attendance } from '../entities/attendance.entity';
 import { AttendanceCorrection } from '../entities/attendance-correction.entity';
 import { ShiftReport } from '../entities/shift-report.entity';
@@ -150,11 +151,11 @@ export interface ShiftReportSummary {
   lifecycle: ReportLifecycle;
 }
 
-const REPORT_SUMMARY_SELECT = `
+const REPORT_SUMMARY_SELECT = (t: BusinessTables) => `
   SELECT s.id, s.starts_at, s.ends_at, v.name AS venue_name, jr.name AS role_name, v.enforce_geofence
-  FROM shift s
-  JOIN venue v ON v.id = s.venue_id
-  JOIN job_role jr ON jr.id = s.job_role_id
+  FROM ${t.shift} s
+  JOIN ${t.venue} v ON v.id = s.venue_id
+  JOIN ${t.job_role} jr ON jr.id = s.job_role_id
   WHERE s.id = $1
 `;
 
@@ -221,8 +222,9 @@ export class ShiftReportService {
       params.push(take, skip);
       const bucketSql = dto.bucket === 'history' ? REPORT_IN_HISTORY_SQL : `(NOT ${REPORT_IN_HISTORY_SQL} OR ${REPORT_NEEDS_ATTENTION_SQL})`;
       const order = dto.bucket === 'history' ? 'r.ends_at DESC, r.shift_id' : `${REPORT_NEEDS_ATTENTION_SQL} DESC, r.starts_at ASC, r.shift_id`;
+      const t = businessTables(manager);
       // sql-injection-reviewed: interpolates a module-level SQL constant / constant fragment; every request value is a bound $n parameter.
-      const rows = await manager.query(`${REPORT_ROWS_SQL(scopeSql)}
+      const rows = await manager.query(`${REPORT_ROWS_SQL(t, scopeSql)}
         SELECT r.*, now() AS db_now, count(*) OVER () AS total FROM rows r
         WHERE ${bucketSql}
         ORDER BY ${order}
@@ -245,16 +247,17 @@ export class ShiftReportService {
     const shift = await manager.findOne(Shift, { where: { id: shiftId } });
     if (!shift || shift.organisationId !== ctx.organisationId) throw new NotFoundException('Shift not found.');
     await this.assertShiftOwned(manager, ctx, shift);
-    const [summary] = await manager.query(REPORT_SUMMARY_SELECT, [shiftId]);
+    const t = businessTables(manager);
+    const [summary] = await manager.query(REPORT_SUMMARY_SELECT(t), [shiftId]);
     const report = await manager.findOne(ShiftReport, { where: { shiftId } });
     // sql-injection-reviewed: code-constant SQL fragment from a helper called with literal aliases; values are bound $n parameters.
     const rows = await manager.query(`SELECT sp.id AS "staffProfileId", u.first_name || ' ' || u.last_name AS "staffName", u.avatar_file_id AS "avatarFileId",
       ${assignmentTimeSql().start} AS "scheduledStart", ${assignmentTimeSql().end} AS "scheduledEnd", sa.status AS "assignmentStatus", a.id AS "attendanceId", a.status AS "attendanceStatus", a.clock_in_at AS "clockInAt", a.clock_out_at AS "clockOutAt",
       sa.break_minutes AS "assignmentBreakMinutes", a.break_minutes AS "breakMinutes", a.worked_minutes AS "workedMinutes", a.earned_pence AS "earnedPence", a.location_verified AS "locationVerified", a.clock_out_method AS "clockOutMethod",
-      EXISTS (SELECT 1 FROM attendance_correction ac WHERE ac.attendance_id=a.id) AS corrected,
-      EXISTS (SELECT 1 FROM attendance_correction ac WHERE ac.attendance_id=a.id AND ac.field='clockInAt' AND ac.old_value='') AS "manuallyEntered",
+      EXISTS (SELECT 1 FROM ${t.attendance_correction} ac WHERE ac.attendance_id=a.id) AS corrected,
+      EXISTS (SELECT 1 FROM ${t.attendance_correction} ac WHERE ac.attendance_id=a.id AND ac.field='clockInAt' AND ac.old_value='') AS "manuallyEntered",
       CASE WHEN a.id IS NULL THEN NULL ELSE ${ATTENDANCE_VERSION_SQL('a')} END AS "attendanceVersion",
-      EXISTS (SELECT 1 FROM shift_staff_review rv WHERE rv.shift_id=sa.shift_id AND rv.staff_profile_id=sa.staff_profile_id) AS "performanceReviewed",
+      EXISTS (SELECT 1 FROM ${t.shift_staff_review} rv WHERE rv.shift_id=sa.shift_id AND rv.staff_profile_id=sa.staff_profile_id) AS "performanceReviewed",
       sa.attendance_reviewed_at AS "attendanceReviewedAt",
       (SELECT ru.first_name || ' ' || ru.last_name FROM core."user" ru WHERE ru.id = sa.attendance_reviewed_by) AS "attendanceReviewedByName",
       sa.check_in_required AS "checkInRequired", sa.checked_in_at AS "checkedInAt", sa.check_in_source AS "checkInSource",
@@ -262,8 +265,8 @@ export class ShiftReportService {
       a.clock_in_reason AS "clockInReason", a.clock_out_reason AS "clockOutReason",
       (SELECT cu.first_name || ' ' || cu.last_name FROM core."user" cu WHERE cu.id = a.clock_in_by) AS "clockInByName",
       (SELECT ou.first_name || ' ' || ou.last_name FROM core."user" ou WHERE ou.id = a.clock_out_by) AS "clockOutByName"
-      FROM shift_assignment sa JOIN shift s ON s.id=sa.shift_id JOIN staff_profile sp ON sp.id=sa.staff_profile_id JOIN core."user" u ON u.id=sp.user_id
-      LEFT JOIN attendance a ON a.shift_assignment_id=sa.id
+      FROM ${t.shift_assignment} sa JOIN ${t.shift} s ON s.id=sa.shift_id JOIN ${t.staff_profile} sp ON sp.id=sa.staff_profile_id JOIN core."user" u ON u.id=sp.user_id
+      LEFT JOIN ${t.attendance} a ON a.shift_assignment_id=sa.id
       WHERE sa.shift_id=$1 AND sa.status IN ('confirmed','completed','no_show') ORDER BY u.first_name,u.last_name,sa.id`, [shiftId]);
     const seatFields = await this.fieldPolicy.resolveTx(manager, ctx, 'attendance');
     const staff: ShiftReportStaffRow[] = rows.map((r: any) => this.fieldPolicy.omit(seatFields, { ...r, roleName: summary.role_name, scheduledBreakMinutes: effectiveAssignmentBreakMinutes({ breakMinutes: r.assignmentBreakMinutes }, shift),
@@ -283,7 +286,7 @@ export class ShiftReportService {
     const dbNow = new Date(dbNowRaw);
     const delivery = await this.deliveryCounts(manager, report?.finalFileId ?? null);
     const files = await this.fileRefs(manager, [report?.preShiftFileId ?? null, report?.finalFileId ?? null]);
-    const [signOffRow] = report ? await manager.query(`SELECT signed_off_name, break_confirmed FROM shift_report WHERE id = $1`, [report.id]) : [];
+    const [signOffRow] = report ? await manager.query(`SELECT signed_off_name, break_confirmed FROM ${t.shift_report} WHERE id = $1`, [report.id]) : [];
     const lifecycle = reportLifecycle({
       now: dbNow, shiftStatus: shift.status, startsAt: new Date(summary.starts_at), endsAt: new Date(summary.ends_at),
       staffCount: staff.length,
@@ -329,17 +332,18 @@ export class ShiftReportService {
     if (!shift || shift.organisationId !== ctx.organisationId) throw new NotFoundException('Shift not found.');
     await this.assertShiftOwned(manager, ctx, shift);
     await manager.query(`SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`, [`finalise:${shiftId}`]);
-    const [report] = await manager.query(`SELECT status FROM shift_report WHERE shift_id = $1`, [shiftId]);
+    const t = businessTables(manager);
+    const [report] = await manager.query(`SELECT status FROM ${t.shift_report} WHERE shift_id = $1`, [shiftId]);
     if (report?.status === 'finalised') throw new ConflictException(finalisedMessage);
     // Seat-capacity decisions take the shift row lock BEFORE the seat lock — the same parent-first order as clock-in,
     // Record attendance and the replacement approval claim (`applyOfferConfirmation`), so they serialise, never deadlock.
-    if (lockShift) await manager.query(`SELECT 1 FROM shift WHERE id = $1 FOR UPDATE`, [shiftId]);
+    if (lockShift) await manager.query(`SELECT 1 FROM ${t.shift} WHERE id = $1 FOR UPDATE`, [shiftId]);
     const [seat] = await manager.query(
       // sql-injection-reviewed: code-constant SQL fragment from a helper called with literal aliases; values are bound $n parameters.
       `SELECT sa.id, sa.status AS assignment_status, sa.attendance_reviewed_at, a.id AS attendance_id, a.status AS attendance_status, a.clock_out_at,
               now() >= s.starts_at AS shift_started,
               now() >= ${assignmentTimeSql().start} + make_interval(mins => $3) AS no_show_due
-         FROM shift_assignment sa JOIN shift s ON s.id = sa.shift_id LEFT JOIN attendance a ON a.shift_assignment_id = sa.id
+         FROM ${t.shift_assignment} sa JOIN ${t.shift} s ON s.id = sa.shift_id LEFT JOIN ${t.attendance} a ON a.shift_assignment_id = sa.id
         WHERE sa.shift_id = $1 AND sa.staff_profile_id = $2 AND sa.status IN ('confirmed','completed','no_show')
         FOR UPDATE OF sa`,
       [shiftId, staffProfileId, NO_SHOW_GRACE_MINUTES],
@@ -370,7 +374,8 @@ export class ShiftReportService {
             ? 'The clock-out time is missing. Add it as a correction before marking attendance as reviewed.'
             : 'No attendance has been recorded yet. Record the attendance, or confirm the no-show.');
         }
-        await manager.query(`UPDATE shift_assignment SET attendance_reviewed_at = now(), attendance_reviewed_by = $2 WHERE id = $1`, [seat.id, ctx.userId]);
+        const t = businessTables(manager);
+        await manager.query(`UPDATE ${t.shift_assignment} SET attendance_reviewed_at = now(), attendance_reviewed_by = $2 WHERE id = $1`, [seat.id, ctx.userId]);
         await this.auditService.record(manager, ctx, AuditAction.ATTENDANCE_REVIEWED, {
           entityType: 'shift_assignment',
           entityId: seat.id,
@@ -392,6 +397,7 @@ export class ShiftReportService {
   async confirmNoShow(ctx: AuthContext, shiftId: string, staffProfileId: string): Promise<ShiftReportDetail> {
     return this.tenantContext.runInWorkspaceContext(ctx, async (manager) => {
       const seat = await this.lockSeat(manager, ctx, shiftId, staffProfileId, 'This shift report has been finalised; attendance can no longer be changed.');
+      const t = businessTables(manager);
       if (seat.attendance_id) {
         throw new ConflictException('Attendance has been recorded for this staff member, so they cannot be confirmed as a no-show. Review the recorded attendance instead.');
       }
@@ -401,11 +407,11 @@ export class ShiftReportService {
           throw new ConflictException(`A no-show can be confirmed ${NO_SHOW_GRACE_MINUTES} minutes after the scheduled start.`);
         }
         assertTransition(SHIFT_ASSIGNMENT_TRANSITIONS, ShiftAssignmentStatus.CONFIRMED, ShiftAssignmentStatus.NO_SHOW);
-        await manager.query(`UPDATE shift_assignment SET status = 'no_show' WHERE id = $1 AND status = 'confirmed'`, [seat.id]);
+        await manager.query(`UPDATE ${t.shift_assignment} SET status = 'no_show' WHERE id = $1 AND status = 'confirmed'`, [seat.id]);
       } else if (seat.assignment_status !== 'no_show') {
         throw new ConflictException('This staff member cannot be confirmed as a no-show in their current booking state.');
       }
-      await manager.query(`UPDATE shift_assignment SET attendance_reviewed_at = now(), attendance_reviewed_by = $2 WHERE id = $1`, [seat.id, ctx.userId]);
+      await manager.query(`UPDATE ${t.shift_assignment} SET attendance_reviewed_at = now(), attendance_reviewed_by = $2 WHERE id = $1`, [seat.id, ctx.userId]);
       await this.auditService.record(manager, ctx, AuditAction.ATTENDANCE_NO_SHOW_CONFIRMED, {
         entityType: 'shift_assignment',
         entityId: seat.id,
@@ -438,7 +444,8 @@ export class ShiftReportService {
           message: "A replacement already holds this staff member's seat, so the no-show can no longer be reopened.",
         });
       }
-      await manager.query(`UPDATE shift_assignment SET attendance_reviewed_at = NULL, attendance_reviewed_by = NULL WHERE id = $1`, [seat.id]);
+      const t = businessTables(manager);
+      await manager.query(`UPDATE ${t.shift_assignment} SET attendance_reviewed_at = NULL, attendance_reviewed_by = NULL WHERE id = $1`, [seat.id]);
       await this.auditService.record(manager, ctx, AuditAction.ATTENDANCE_NO_SHOW_REOPENED, {
         entityType: 'shift_assignment',
         entityId: seat.id,
@@ -486,7 +493,8 @@ export class ShiftReportService {
       // can't). Distinct name from the worker's `shift_report:<id>` session locks — same lock space, so it must not collide.
       await manager.query(`SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`, [`finalise:${shiftId}`]);
 
-      const [{ started }] = await manager.query(`SELECT now() >= starts_at AS started FROM shift WHERE id = $1`, [shiftId]);
+      const t = businessTables(manager);
+      const [{ started }] = await manager.query(`SELECT now() >= starts_at AS started FROM ${t.shift} WHERE id = $1`, [shiftId]);
       if (!started) throw new ConflictException('This shift has not started yet, so its report cannot be finalised.');
 
       const assignments = await manager.find(ShiftAssignment, {
@@ -513,7 +521,7 @@ export class ShiftReportService {
       // Every seat's attendance must have been explicitly reviewed (owner brief 2026-10-18) — server authority, under
       // the same lock, so a correction that clears a review cannot slip past a concurrent finalise.
       const [{ remaining }] = await manager.query(
-        `SELECT count(*)::int AS remaining FROM shift_assignment
+        `SELECT count(*)::int AS remaining FROM ${t.shift_assignment}
           WHERE shift_id = $1 AND status IN ('confirmed','completed','no_show') AND attendance_reviewed_at IS NULL`,
         [shiftId],
       );
@@ -543,7 +551,7 @@ export class ShiftReportService {
       report.finalisedBy = ctx.userId;
       await manager.save(ShiftReport, report);
       if (signedOffName) {
-        await manager.query(`UPDATE shift_report SET signed_off_name = $2, break_confirmed = true WHERE id = $1`, [report.id, signedOffName]);
+        await manager.query(`UPDATE ${t.shift_report} SET signed_off_name = $2, break_confirmed = true WHERE id = $1`, [report.id, signedOffName]);
       }
 
       // Same transaction: every approved attendance gets its pending_approval payroll record, or the finalisation rolls
@@ -564,7 +572,7 @@ const DELIVERY_AGG_SQL = `count(*) FILTER (WHERE eo.status IN ('PENDING','QUEUED
 
 /** Per-shift report rows for the lists (`rows` CTE). One attendance row per assignment (unique shift_assignment_id). */
 // sql-injection-reviewed: dynamic WHERE assembled only from literal fragments and $n / :named placeholders (values pushed to params); identifiers come from allow-lists. Reviewed 2026-11-04.
-const REPORT_ROWS_SQL = (scopeSql: string) => `WITH base AS (
+const REPORT_ROWS_SQL = (t: BusinessTables, scopeSql: string) => `WITH base AS (
   SELECT s.id AS shift_id, s.status AS shift_status, s.starts_at, s.ends_at, s.required_count, s.filled_count,
     v.name AS venue_name, jr.name AS role_name,
     COALESCE(sr.status, 'pending') AS report_status, sr.final_pdf_sent_at AS final_queued_at, sr.final_file_id,
@@ -575,12 +583,12 @@ const REPORT_ROWS_SQL = (scopeSql: string) => `WITH base AS (
     count(a.id) FILTER (WHERE a.clock_out_at IS NOT NULL) AS clocked_out,
     count(sa.id) FILTER (WHERE sa.status <> 'no_show' AND a.clock_out_at IS NULL) AS unresolved,
     count(sa.id) FILTER (WHERE sa.attendance_reviewed_at IS NULL) AS unreviewed
-  FROM shift s
-  JOIN venue v ON v.id = s.venue_id
-  JOIN job_role jr ON jr.id = s.job_role_id
-  LEFT JOIN shift_assignment sa ON sa.shift_id = s.id AND sa.status IN ('confirmed','completed','no_show')
-  LEFT JOIN attendance a ON a.shift_assignment_id = sa.id
-  LEFT JOIN shift_report sr ON sr.shift_id = s.id
+  FROM ${t.shift} s
+  JOIN ${t.venue} v ON v.id = s.venue_id
+  JOIN ${t.job_role} jr ON jr.id = s.job_role_id
+  LEFT JOIN ${t.shift_assignment} sa ON sa.shift_id = s.id AND sa.status IN ('confirmed','completed','no_show')
+  LEFT JOIN ${t.attendance} a ON a.shift_assignment_id = sa.id
+  LEFT JOIN ${t.shift_report} sr ON sr.shift_id = s.id
   WHERE s.organisation_id = $1 AND ${scopeSql}
     AND s.status NOT IN ('draft','pending_manager_approval','declined')
   GROUP BY s.id, v.name, jr.name, sr.id
