@@ -29,8 +29,9 @@ import { codeAt, secretFromOtpauth } from './helpers/mfa-test-kit';
 import { clearLoginLimiterState, clearThrottleState } from './helpers/throttle-state';
 import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
 import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-pipe';
+import { integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
 
-const RUN = Boolean(process.env.DATABASE_URL);
+const RUN = integrationTestDatabaseReady();
 const describeIfDb = RUN ? describe : describe.skip;
 
 describeIfDb('wave 4 lane MFA — per-user second-factor attempt limit (REAL limiter)', () => {

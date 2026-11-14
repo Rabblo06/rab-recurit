@@ -10,6 +10,7 @@ import { AiToolRegistry } from '../../modules/ai/tools/ai-tool-registry.service'
 import { seedStaffing } from './helpers/ai-fixtures';
 import { countingDeterministicModel, failingModel, hangingModel, scriptedModel, textParts, toolCallParts, usage } from './helpers/ai-models';
 import { AiKit, aiOrganisation, ask, bearer, bootAiKit, jobFor, newConversation, readSse, turnRow } from './helpers/ai-test-kit';
+import { integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
 
 /**
  * AI Phase 1 — the full turn: API → `rab-ai` BullMQ queue (real Redis) → Worker step loop → tool (real data under RLS)
@@ -17,7 +18,7 @@ import { AiKit, aiOrganisation, ask, bearer, bootAiKit, jobFor, newConversation,
  * restart (lease expiry), cancellation (queued and running), timeout, provider outage, per-turn token ceiling, step
  * limit, SSE reconnect without re-running the model, idempotent persistence and usage/budget reconciliation.
  */
-const RUN = Boolean(process.env.DATABASE_URL);
+const RUN = integrationTestDatabaseReady();
 const describeIfDb = RUN ? describe : describe.skip;
 
 describeIfDb('AI turn: queue → worker → tools → model → SSE (integration)', () => {

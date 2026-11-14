@@ -16,6 +16,7 @@ import { LoadSkillsTool } from '../../modules/ai/skills/load-skills.tool';
 import { AiKit, aiOrganisation, bearer, bootAiKit, manager } from './helpers/ai-test-kit';
 import { TestIdentity } from './helpers/test-identities';
 import { sqlStateAsSchemaRole } from './helpers/schema-role';
+import { integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
 
 /**
  * AI Phase 4 — organisation skills on the real AppModule, PostgreSQL (crewflow_app, FORCE RLS) and Redis
@@ -32,7 +33,7 @@ import { sqlStateAsSchemaRole } from './helpers/schema-role';
  *   mass assignment 400 · T4-A3 audit hash + length, never content · T4-L1…L4 the load_skills handler (not registered
  *   until 4w) · reader (catalogue, tag check, counts) · skills grant nothing (permissions and offered names unchanged).
  */
-const RUN = Boolean(process.env.DATABASE_URL);
+const RUN = integrationTestDatabaseReady();
 const describeIfDb = RUN ? describe : describe.skip;
 const ORIGIN = 'http://localhost:5173';
 const sha256 = (v: string) => createHash('sha256').update(v, 'utf8').digest('hex');

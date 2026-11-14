@@ -16,6 +16,7 @@ import { withPoolTrace } from './helpers/pool-probe';
 import { TestIdentityFactory } from './helpers/test-identities';
 import { generateFixturePassword } from './helpers/fixture-password';
 import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-pipe';
+import { integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
 
 const FIXTURE_PASSWORD = generateFixturePassword();
 
@@ -42,7 +43,7 @@ const FIXTURE_PASSWORD = generateFixturePassword();
  * returning a bare boolean, never a row. See the "no enumeration" describe
  * block below for the direct, raw-SQL `rab_app` proof of all of this.
  */
-const RUN = Boolean(process.env.DATABASE_URL);
+const RUN = integrationTestDatabaseReady();
 const describeIfDb = RUN ? describe : describe.skip;
 
 describeIfDb('manager workspace abuse cases (integration)', () => {

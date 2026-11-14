@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { Client } from 'pg';
+import { integrationTestDatabase, integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
 
 /**
  * Phase D (D1) — EXPLAIN (ANALYZE, BUFFERS) of the global claim on ≥ 500,000 synthetic pointers: the pending path, the
@@ -16,7 +17,7 @@ import { Client } from 'pg';
  * QUEUED leases), 100,000 pending (due now, no token), 30,000 retry (due, claim_count 1..4, no token), 20,000 expired
  * leases (due in the past, token set). One organisation holds 40 % of every class (skew, the fairness case).
  */
-const RUN = process.env.PHASE_D_SQL_APPROVED === 'true' && process.env.PHASE_D_EXPLAIN === 'true' && Boolean(process.env.TEST_DATABASE_URL_UNPOOLED);
+const RUN = process.env.PHASE_D_SQL_APPROVED === 'true' && process.env.PHASE_D_EXPLAIN === 'true' && integrationTestDatabaseReady();
 const describeIfApproved = RUN ? describe : describe.skip;
 
 jest.setTimeout(30 * 60 * 1000);
@@ -34,7 +35,7 @@ describeIfApproved('Phase D claim plans on 500k pointers (EXPLAIN ANALYZE; needs
   };
 
   beforeAll(async () => {
-    admin = new Client({ connectionString: process.env.TEST_DATABASE_URL_UNPOOLED! });
+    admin = new Client({ connectionString: integrationTestDatabase().adminUrl });
     await admin.connect();
     await admin.query('BEGIN');
     const tag = randomUUID().slice(0, 8);

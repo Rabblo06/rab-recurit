@@ -24,6 +24,7 @@ import { AuthContext } from '../../engine/core-modules/tenant/auth-context.inter
 import { WorkspaceMetadataCacheService } from '../../engine/core-modules/entity-cache/workspace-metadata-cache.service';
 import { SchemaResolverService, WorkspaceRoutingError, workspaceSchemaName } from '../../engine/core-modules/tenant/schema-resolver.service';
 import { WorkspaceExecutionContext } from '../../engine/core-modules/tenant/workspace-execution-context';
+import { integrationTestDatabase } from '../../database/typeorm/core/integration-test-database-gate';
 
 // Always a miss: this file exercises SchemaResolverService's real, uncached Postgres path exactly
 // as before the Workspace Metadata Cache existed — caching itself is covered separately in
@@ -98,7 +99,7 @@ describe('Workspace registry, SchemaResolver and WorkspaceExecutionContext (inte
   let execCtx: WorkspaceExecutionContext;
 
   beforeAll(async () => {
-    owner = new DataSource({ type: 'postgres', url: process.env.DATABASE_URL_UNPOOLED, synchronize: false, entities: [], extra: { max: 1 } });
+    owner = new DataSource({ type: 'postgres', url: integrationTestDatabase().adminUrl, synchronize: false, entities: [], extra: { max: 1 } });
     await owner.initialize();
     app = appSource(1);
     await app.initialize();

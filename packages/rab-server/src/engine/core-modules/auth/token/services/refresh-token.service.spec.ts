@@ -1,5 +1,5 @@
 import { UnauthorizedException } from '@nestjs/common';
-import { EntityManager } from 'typeorm';
+import { EntityManager, IsNull } from 'typeorm';
 
 import { RefreshToken } from '../../../../../modules/identity/entities';
 import { absoluteSessionTtlMsFor } from '../../session-policy';
@@ -320,7 +320,22 @@ describe('RefreshTokenService', () => {
       const update = jest.fn().mockResolvedValue(undefined);
       const manager = buildManager({ update });
       await service.revokeFamily(manager, 'fam-1');
-      expect(update).toHaveBeenCalledWith(RefreshToken, { familyId: 'fam-1' }, { revokedAt: expect.any(Date) });
+      expect(update).toHaveBeenCalledWith(RefreshToken, { familyId: 'fam-1', revokedAt: IsNull() }, { revokedAt: expect.any(Date) });
+    });
+
+    it('XP-09 Q6: stamps only rows not yet revoked (first revocation wins; an existing revoked_at is never rewritten)', async () => {
+      const update = jest.fn().mockResolvedValue(undefined);
+      await service.revokeFamily(buildManager({ update }), 'fam-1');
+      const [, where] = update.mock.calls[0];
+      expect(where).toEqual({ familyId: 'fam-1', revokedAt: IsNull() });
+    });
+  });
+
+  describe('revokeAllForUser', () => {
+    it('XP-09 Q6: revokes every token of the user that is not yet revoked, never rewriting an existing revoked_at', async () => {
+      const update = jest.fn().mockResolvedValue(undefined);
+      await service.revokeAllForUser(buildManager({ update }), 'user-1', 'password_changed');
+      expect(update).toHaveBeenCalledWith(RefreshToken, { userId: 'user-1', revokedAt: IsNull() }, { revokedAt: expect.any(Date) });
     });
   });
 
@@ -336,7 +351,7 @@ describe('RefreshTokenService', () => {
       const outcome = await service.revokeByToken(manager, 'a-own-token', 'user-a');
 
       expect(outcome).toBe('revoked');
-      expect(update).toHaveBeenCalledWith(RefreshToken, { familyId: 'fam-1' }, { revokedAt: expect.any(Date) });
+      expect(update).toHaveBeenCalledWith(RefreshToken, { familyId: 'fam-1', revokedAt: IsNull() }, { revokedAt: expect.any(Date) });
     });
 
     it("the EXACT exploit this closes: an authenticated caller presenting a DIFFERENT user's refresh token at logout must NOT revoke it", async () => {

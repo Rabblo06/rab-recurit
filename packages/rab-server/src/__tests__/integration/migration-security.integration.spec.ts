@@ -7,6 +7,7 @@ import { postMigrationPrivilegeProblems, privilegeDriftSnapshot } from '../../da
 import { migrationSourceViolations } from '../../database/typeorm/core/migration-source-rules';
 import { NavigationLayoutCrewflowOwner1786721110000 } from '../../database/typeorm/core/migrations/1786721110000-NavigationLayoutCrewflowOwner';
 import { createAdminDataSource } from './helpers/admin-datasource';
+import { integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
 
 /**
  * M2: the catalog drift check (migration-privilege-drift.ts) against fixture migrations, on a database built from migrations
@@ -18,7 +19,7 @@ import { createAdminDataSource } from './helpers/admin-datasource';
  * checker must catch the change whoever made it. The dynamic-SQL fixture shows why the source scan is only an early
  * warning: it passes the scan and is still caught here.
  */
-const RUN = Boolean(process.env.DATABASE_URL);
+const RUN = integrationTestDatabaseReady();
 const describeIfDb = RUN ? describe : describe.skip;
 jest.setTimeout(600_000); // two invariant runs per test, ~30 s each on a database past the M2-F4 plan cliff
 

@@ -12,6 +12,7 @@ import { TenantContextService } from '../../engine/core-modules/tenant/tenant-co
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
 import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-pipe';
+import { integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
 
 /**
  * Settings → Members → Roles: object-, field- and record-level permissions for custom workspace-member roles
@@ -19,7 +20,7 @@ import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-
  * asserted on its DENIAL path: hidden fields are absent from list, detail and search; record filters narrow list,
  * detail (404), counts and search; invalid or tampered filters deny; changes apply on the very next request.
  */
-const RUN = Boolean(process.env.DATABASE_URL);
+const RUN = integrationTestDatabaseReady();
 const describeIfDb = RUN ? describe : describe.skip;
 const STRONG = 'Correct-Horse-42-battery';
 

@@ -12,6 +12,7 @@ import { TenantContextService } from '../../engine/core-modules/tenant/tenant-co
 import { PayrollCalendarService } from '../../modules/payroll/services/payroll-calendar.service';
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
+import { integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
 
 /**
  * `payroll:import-calendar` on the RUNTIME role. Regression for the dev finding (2026-10-21): the command looked up the
@@ -19,7 +20,7 @@ import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
  * correctly returned zero rows ("No such manager in that organisation."). The command logic now runs entirely through
  * pre-auth routing + tenant contexts; this suite drives it with the application DataSource (crewflow_app, RLS forced).
  */
-const RUN = Boolean(process.env.DATABASE_URL);
+const RUN = integrationTestDatabaseReady();
 const describeIfDb = RUN ? describe : describe.skip;
 
 jest.setTimeout(240_000);

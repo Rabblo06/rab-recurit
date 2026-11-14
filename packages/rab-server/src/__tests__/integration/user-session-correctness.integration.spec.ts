@@ -14,13 +14,14 @@ import { createAdminDataSource } from './helpers/admin-datasource';
 import { sqlStateAsSchemaRole } from './helpers/schema-role';
 import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
 import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-pipe';
+import { integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
 
 /**
  * P1B (FULL-ARCHITECTURE-UPGRADE-PLAN.md — P1 program, checkpoint B): `core.user_session`, the
  * first-class session aggregate. Real Postgres, real RLS, real HTTP through the actual
  * AuthController/ProfileController — no mocks. Proves exactly the P1B exit-gate items.
  */
-const RUN = Boolean(process.env.DATABASE_URL);
+const RUN = integrationTestDatabaseReady();
 const describeIfDb = RUN ? describe : describe.skip;
 jest.setTimeout(60_000);
 

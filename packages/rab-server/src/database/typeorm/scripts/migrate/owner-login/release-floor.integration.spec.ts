@@ -5,9 +5,9 @@
  * tenant rows), not only the outcome.
  *
  *   fresh             an EMPTY database                                   ok, the whole chain (floor not consulted)
- *   R254              a v0.4.0 / cd7c7e32 / 4c38aa1a ledger + tenant rows  ok, exactly the 2 newer migrations, rows intact,
+ *   R254              a v0.4.0 / cd7c7e32 / 4c38aa1a ledger + tenant rows  ok, exactly the newer migrations, rows intact,
  *                                                                          entity-cache epoch bumped once, nothing else in Redis
- *   resume            R254 + 1786721440000 + tenant rows                   ok, exactly 1786721450000
+ *   resume            R254 + 1786721440000 + tenant rows                   ok, exactly the rest (1786721450000 onwards)
  *   R256 (CURRENT)    the upgraded database again                          ok, nothing applied, no bump
  *   AHEAD             R256 + a newer unknown name                          ok, nothing applied
  *   older             R254 minus its last four ledger rows + tenant rows   65 behind (UnsupportedUpgradeStartError),
@@ -27,27 +27,27 @@ import Redis from 'ioredis';
 import { Client } from 'pg';
 
 import { GuardedTarget, LockedMigrationOptions, runLockedMigrations } from '../locked-migration-runner';
-import { runMigrateOnStart } from './migrate-on-start';
+import { codeMigrationNames, runMigrateOnStart } from './migrate-on-start';
 import { RELEASE_MANIFESTS } from './release-floor';
+import { integrationTestDatabase } from '../../../core/integration-test-database-gate';
 
 jest.setTimeout(900_000);
 
 const OWNER_URL = process.env.TEST_DATABASE_URL?.trim() ?? '';
-const ADMIN_URL = process.env.TEST_DATABASE_URL_UNPOOLED?.trim() ?? '';
+const ADMIN_URL = integrationTestDatabase().adminUrl;
 const REDIS_URL = (process.env.TEST_REDIS_URL ?? process.env.REDIS_URL ?? '').trim();
-const loginOf = (url: string) => {
-  try {
-    return decodeURIComponent(new URL(url).username);
-  } catch {
-    return '';
-  }
-};
-const RUN = OWNER_URL !== '' && ADMIN_URL !== '' && loginOf(OWNER_URL) === 'crewflow_owner';
+// DEAD-07: the validated TEST pair decides (throws on an invalid pair); the opt-in is the owner login.
+const RUN = integrationTestDatabase().app.login === 'crewflow_owner';
 const describeIfOwnerCluster = RUN ? describe : describe.skip;
 
 const MIGRATIONS_DIR = join(__dirname, '..', '..', '..', 'core', 'migrations');
 const R254 = RELEASE_MANIFESTS.find((m) => m.id === 'R254')!.names;
-const NEWER = ['OutboxClaimIndexes1786721440000', 'RefreshTokenReplacedByIndex1786721450000'];
+// Every migration after R254, read from the chain itself (R256's two index migrations first, then whatever came later, e.g.
+// TokenCleanupRotationOrder1786721460000), so a new migration does not need this spec edited.
+const NEWER = codeMigrationNames(MIGRATIONS_DIR).filter((n) => !R254.includes(n));
+if (NEWER[0] !== 'OutboxClaimIndexes1786721440000' || NEWER[1] !== 'RefreshTokenReplacedByIndex1786721450000') {
+  throw new Error('the first two migrations after R254 must be the R256 index migrations (the resume and hole cases name them)');
+}
 const filesThrough = (lastTimestamp: number) =>
   readdirSync(MIGRATIONS_DIR)
     .filter((f) => /^\d{13}-[^.]+\.(ts|js)$/.test(f) && Number(f.slice(0, 13)) <= lastTimestamp)
@@ -185,19 +185,19 @@ describeIfOwnerCluster('the upgrade floor on real databases (production target s
       }
     });
 
-    it('R254: applies exactly the two newer migrations, keeps the tenant rows, bumps the entity-cache epoch only', async () => {
+    it('R254: applies exactly the newer migrations, keeps the tenant rows, bumps the entity-cache epoch only', async () => {
       const before = await tenantRows(db);
       expect(before.named).toBe(1);
       const env: Record<string, string> = REDIS_URL ? { REDIS_URL, NODE_ENV: ns } : {};
       const { result, lines } = await migrateOnStart(db, env);
       expect(result).toMatchObject({ outcome: 'ok', serve: true, state: 'CHAIN-PARTIAL' });
       expect(result.applied).toEqual(NEWER);
-      expect(lines.join('\n')).toMatch(/upgrade floor: upgrade floor passed: the ledger contains R254; 2 migration\(s\) to apply/);
+      expect(lines.join('\n')).toContain(`upgrade floor: upgrade floor passed: the ledger contains R254; ${NEWER.length} migration(s) to apply`);
       expect(lines.join('\n')).toMatch(/fresh install not proven/);
       expect(await ledger(db)).toEqual([...R254, ...NEWER]);
       expect(await tenantRows(db)).toEqual(before);
       if (redis) {
-        expect(lines.join('\n')).toMatch(/entity-cache epoch bumped after 2 applied migration/);
+        expect(lines.join('\n')).toContain(`entity-cache epoch bumped after ${NEWER.length} applied migration`);
         expect(await redis.get(k('entitycache:user:u1:epoch'))).toBe('4');
         expect(await redis.get(k('entitycache:user:u1:v3'))).toBe('{"cached":true}');
         expect(await redis.get(`bull:${ns}:queue:1`)).toBe('job');
@@ -244,7 +244,7 @@ describeIfOwnerCluster('the upgrade floor on real databases (production target s
     });
     expect(await ledger(db)).toEqual([...R254, NEWER[0]]);
     const { result, lines } = await migrateOnStart(db);
-    expect(result).toMatchObject({ outcome: 'ok', serve: true, applied: [NEWER[1]] });
+    expect(result).toMatchObject({ outcome: 'ok', serve: true, applied: NEWER.slice(1) });
     expect(lines.join('\n')).toMatch(/plus 1 later migration\(s\) \(resuming a partial upgrade\)/);
     expect((await tenantRows(db)).named).toBe(1);
   });

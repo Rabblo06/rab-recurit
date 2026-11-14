@@ -11,8 +11,9 @@ import { TenantContextService } from '../../engine/core-modules/tenant/tenant-co
 import { coreDataSourceOptions } from '../../database/typeorm/core/core.datasource';
 import { resolveIntegrationTestDatabase } from '../../database/typeorm/core/test-database-guard';
 import { createAdminDataSource, createCrewflowOwnerProbeDataSource } from './helpers/admin-datasource';
+import { integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
 
-const describeIfDb = process.env.DATABASE_URL ? describe : describe.skip;
+const describeIfDb = integrationTestDatabaseReady() ? describe : describe.skip;
 
 /**
  * Foundation fix P2 (2026-10-22): the first Platform Admin is created by the `crewflow` operator identity through the

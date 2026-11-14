@@ -10,6 +10,7 @@ import { TenantContextService } from '../../engine/core-modules/tenant/tenant-co
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
 import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-pipe';
+import { integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
 
 /**
  * Lane D (M10-4, verification only — no behaviour change): the session-policy properties the read-only survey found
@@ -21,7 +22,7 @@ import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-
  *     token (existing tests only checked refresh; one comment claimed the access token survives).
  *  3. `/auth/refresh` never extends `idle_expires_at` or the absolute deadline (only real activity slides idle).
  */
-const RUN = Boolean(process.env.DATABASE_URL);
+const RUN = integrationTestDatabaseReady();
 const describeIfDb = RUN ? describe : describe.skip;
 const ORIGIN = 'http://localhost:5173';
 const STRONG = 'Lane-D-Reset-Pass-42!';

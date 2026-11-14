@@ -14,6 +14,7 @@ import { AiUsageSettingsService, usageDailyDays, usagePeriodRange, zeroFilledDai
 import { TEST_MOCK_MODEL_ID } from '../support/ai/test-catalogue';
 import { AiKit, aiOrganisation, ask, bearer, bootAiKit, manager, newConversation } from './helpers/ai-test-kit';
 import { TestIdentity } from './helpers/test-identities';
+import { integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
 
 /**
  * T7-U3 (PHASE7_TWENTY_PLAN §5): `GET /rest/v1/ai/settings/usage?period=today|month` on the real AppModule — five layers:
@@ -21,7 +22,7 @@ import { TestIdentity } from './helpers/test-identities';
  * RLS → own-or-CEO predicate. Without the flag the uniform 404; the flag without being CEO 404; Inspect refused; `organisationId` in
  * the query 400; exactly the `AiUsageView` keys and no content anywhere.
  */
-const RUN = Boolean(process.env.DATABASE_URL);
+const RUN = integrationTestDatabaseReady();
 const describeIfDb = RUN ? describe : describe.skip;
 const USAGE = '/rest/v1/ai/settings/usage';
 const QUESTION = 'USAGE-CONTENT-CANARY how many offers are awaiting replies?';

@@ -20,6 +20,7 @@ import { Venue } from '@rab/server/modules/venue/entities/venue.entity';
 import { runConfirmationDeadlineBackstopScan, runManagerConfirmationDeadlineCycle } from '../../queues/rab-offers/offer-expiry.job';
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
+import { integrationTestDatabaseReady } from '@rab/server/database/typeorm/core/integration-test-database-gate';
 
 /**
  * Replacement & standby offers (2026-10-21) vs the manager-confirmation DEADLINE worker (owner rule 2026-11-06, Q1b).
@@ -29,7 +30,7 @@ import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
  *    confirmed by the manager during a running shift (after start − 30 min), and are withdrawn only at window end.
  *  - Re-running the cycle (retry / second replica) never duplicates anything.
  */
-const RUN = Boolean(process.env.DATABASE_URL);
+const RUN = integrationTestDatabaseReady();
 const describeIfDb = RUN ? describe : describe.skip;
 jest.setTimeout(120_000);
 

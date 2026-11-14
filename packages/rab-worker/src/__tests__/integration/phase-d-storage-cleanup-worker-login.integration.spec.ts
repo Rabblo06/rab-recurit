@@ -11,6 +11,7 @@ import { WorkerDependencies } from '../../core/scheduler/worker-dependencies';
 import { runStorageCleanupCycle } from '../../queues/rab-maintenance/storage-cleanup.job';
 import { WorkerModule } from '../../worker.module';
 import { assertRoleGate, BootGateFacts } from '@rab/server/database/boot-checks/database-boot-gate-rules';
+import { integrationTestDatabaseReady } from '@rab/server/database/typeorm/core/integration-test-database-gate';
 
 /**
  * Phase D (independent security review F1): the Worker's scheduled storage cleanup on the Worker-only login. Global claim
@@ -19,7 +20,7 @@ import { assertRoleGate, BootGateFacts } from '@rab/server/database/boot-checks/
  * silently. The Worker now asserts them as the Worker identity; the CLI keeps refusing the Worker's credential.
  * Opt-in like the other Phase D Worker specs: PHASE_D_SQL_APPROVED=true and TEST_DATABASE_WORKER_URL.
  */
-const describeIfWorkerLogin = WORKER_LOGIN_ACTIVE && process.env.DATABASE_URL ? describe : describe.skip;
+const describeIfWorkerLogin = WORKER_LOGIN_ACTIVE && integrationTestDatabaseReady() ? describe : describe.skip;
 jest.setTimeout(120_000);
 
 describeIfWorkerLogin('Phase D: storage cleanup on the crewflow_worker login, global claim mode (integration)', () => {

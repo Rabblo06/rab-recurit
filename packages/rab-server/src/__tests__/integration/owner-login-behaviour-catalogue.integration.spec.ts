@@ -3,7 +3,7 @@ import { Client } from 'pg';
 
 import { ownerLoginRolePostureProblems } from '../../database/boot-checks/owner-login-posture';
 import { OWNER_LOGIN_BEHAVIOUR_CATALOGUE } from '../../database/boot-checks/owner-login-behaviour-catalogue';
-import { resolveIntegrationTestDatabase } from '../../database/typeorm/core/test-database-guard';
+import { integrationTestDatabase } from '../../database/typeorm/core/integration-test-database-gate';
 
 /**
  * The behaviour-change catalogue, REPRODUCED on a real database built with the owner-login bootstrap
@@ -16,21 +16,9 @@ import { resolveIntegrationTestDatabase } from '../../database/typeorm/core/test
  * twenty-test-env / the twa-sec disposable replay). On the legacy crewflow_app harness the suite is skipped with a
  * warning — it is NOT a pass there (recorded in the report as NOT RUN until CI uses the owner-login database).
  */
-const env = (() => {
-  try {
-    return resolveIntegrationTestDatabase(process.env);
-  } catch {
-    return null;
-  }
-})();
-const appUser = (() => {
-  try {
-    return decodeURIComponent(new URL(process.env.TEST_DATABASE_URL ?? '').username);
-  } catch {
-    return '';
-  }
-})();
-const OWNER = appUser === 'crewflow_owner' && env !== null;
+// DEAD-07: the validated TEST pair (throws on an invalid pair, never a silent skip); the opt-in is the app login itself.
+const env = integrationTestDatabase();
+const OWNER = env.app.login === 'crewflow_owner';
 const suite = OWNER ? describe : describe.skip;
 if (!OWNER) console.warn('[owner-login catalogue] SKIPPED: TEST_DATABASE_URL is not the owner login crewflow_owner (NOT a pass).'); // eslint-disable-line no-console
 

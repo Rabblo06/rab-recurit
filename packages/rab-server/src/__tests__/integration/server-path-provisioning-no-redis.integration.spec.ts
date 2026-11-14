@@ -14,6 +14,7 @@ import { TenantContextService } from '../../engine/core-modules/tenant/tenant-co
 import { ManagerWorkspaceService } from '../../modules/manager-workspace/services/manager-workspace.service';
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { TestIdentityFactory } from './helpers/test-identities';
+import { integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
 
 /**
  * Server-path provisioning does not depend on Redis for correctness (brief §10/§13 "no Redis"). This file boots the API
@@ -24,7 +25,7 @@ import { TestIdentityFactory } from './helpers/test-identities';
  * The environment is set by the first import (helpers/redis-unavailable-env), before AppModule is loaded.
  */
 // Needs core.provision_workspace (migration 1786719500000), which every database migrated from the chain now has.
-const RUN = Boolean(process.env.DATABASE_URL);
+const RUN = integrationTestDatabaseReady();
 const describeIfDb = RUN ? describe : describe.skip;
 
 describeIfDb('server-path workspace provisioning with Redis unavailable (integration)', () => {

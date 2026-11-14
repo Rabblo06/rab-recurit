@@ -28,6 +28,7 @@ import { runFinalTimesheetCycle } from '../../queues/rab-reports/final-timesheet
 import { runShiftReportSchedulerCycle } from '../../queues/rab-reports/shift-report-scheduler.job';
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
+import { integrationTestDatabaseReady } from '@rab/server/database/typeorm/core/integration-test-database-gate';
 
 /**
  * REPORT EMAIL SAFETY (Phase 0 "Report emails"). The pre-shift roster PDF carries a signed Shift QR clock-in token and
@@ -41,7 +42,7 @@ import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
  * only, organisation suspended only — at enqueue time, and (for the ones that change after enqueue) at send time.
  * Runs with HWS routing OFF (the test database's configuration); report-email-recipient-safety-hws covers HWS ON.
  */
-const RUN = Boolean(process.env.DATABASE_URL);
+const RUN = integrationTestDatabaseReady();
 const describeIfDb = RUN ? describe : describe.skip;
 
 const HOSTILE_VENUE = 'Bar <script>alert("x")</script> & <img src=x onerror=alert(1)>\r\nBcc: attacker@example.test\r\n\r\n<b>bold</b>';

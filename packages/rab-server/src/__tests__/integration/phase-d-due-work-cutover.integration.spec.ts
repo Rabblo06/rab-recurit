@@ -1,6 +1,7 @@
 import { Client } from 'pg';
 
 import { sqlstateOf } from './helpers/workspace-fixtures';
+import { integrationTestDatabase, integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
 
 /**
  * Phase D / D5 — the cutover gate of WorkerDueWorkClaimsToWorkerRole1786721330000 (gated migration, written, NOT applied).
@@ -17,7 +18,7 @@ import { sqlstateOf } from './helpers/workspace-fixtures';
  */
 const MODE = process.env.PHASE_D_D5;
 const WORKER_URL = process.env.TEST_DATABASE_WORKER_URL;
-const RUN = process.env.PHASE_D_SQL_APPROVED === 'true' && (MODE === 'before' || MODE === 'after') && Boolean(process.env.TEST_DATABASE_URL && WORKER_URL);
+const RUN = process.env.PHASE_D_SQL_APPROVED === 'true' && (MODE === 'before' || MODE === 'after') && Boolean(WORKER_URL) && integrationTestDatabaseReady();
 const describeIfApproved = RUN ? describe : describe.skip;
 
 /**
@@ -33,7 +34,7 @@ describeIfApproved(`Phase D D5 due-work EXECUTE cutover under one login (${MODE 
 
   beforeAll(async () => {
     runtime = new Client({ connectionString: WORKER_URL! });
-    admin = new Client({ connectionString: process.env.TEST_DATABASE_URL_UNPOOLED! });
+    admin = new Client({ connectionString: integrationTestDatabase().adminUrl });
     await runtime.connect();
     await admin.connect();
   });

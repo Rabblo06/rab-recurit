@@ -17,6 +17,7 @@ import { resolveIntervalMs, SCAN_JOBS } from '../../core/scheduler/scan-jobs';
 import { WorkerDependencies } from '../../core/scheduler/worker-dependencies';
 import { MaintenanceScanProcessor } from '../../queues/rab-maintenance/maintenance.processors';
 import { WorkerModule } from '../../worker.module';
+import { integrationTestDatabaseReady } from '@rab/server/database/typeorm/core/integration-test-database-gate';
 
 /**
  * Phase A (storage) review — recovery after a FAILED or INTERRUPTED storage-cleanup scan, on the REAL WorkerModule (real
@@ -35,7 +36,7 @@ import { WorkerModule } from '../../worker.module';
  *  4. interval mode writes the WHOLE stats object: a replica holding an OLDER success in memory can roll the shared stamp
  *     back. The spacing check then fails toward running (an extra scan), never toward skipping.
  */
-const RUN = Boolean(process.env.DATABASE_URL && process.env.REDIS_URL);
+const RUN = integrationTestDatabaseReady() && Boolean(process.env.REDIS_URL);
 const describeIfDb = RUN ? describe : describe.skip;
 jest.setTimeout(180_000);
 

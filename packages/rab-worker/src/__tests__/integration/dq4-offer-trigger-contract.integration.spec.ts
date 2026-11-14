@@ -20,6 +20,7 @@ import { runScopedForOrg } from '../../core/database/scoped-job';
 import { runOfferExpiryCycle } from '../../queues/rab-offers/offer-expiry.job';
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { createTestIdentityFactory, TestIdentity, TestIdentityFactory } from './helpers/test-identities';
+import { integrationTestDatabaseReady } from '@rab/server/database/typeorm/core/integration-test-database-gate';
 
 /**
  * D-Q4b test preparation (docs/PHASE_DQ4_DQ5_PLAN_2026-11-03.md §D-Q4b). CHARACTERISATION of the database contract a
@@ -37,7 +38,7 @@ import { createTestIdentityFactory, TestIdentity, TestIdentityFactory } from './
  * Existing coverage this builds on (not duplicated here): offer-lifecycle-correctness.integration.spec.ts F29/F30/F34
  * (accept/decline/5-way worker expiry races) and L57/L58 (wrong workspace / no tenant context cannot mutate).
  */
-const RUN = Boolean(process.env.DATABASE_URL);
+const RUN = integrationTestDatabaseReady();
 const describeIfDb = RUN ? describe : describe.skip;
 jest.setTimeout(180_000);
 

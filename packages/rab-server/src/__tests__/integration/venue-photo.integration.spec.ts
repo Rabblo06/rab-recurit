@@ -13,6 +13,7 @@ import { TenantContextService } from '../../engine/core-modules/tenant/tenant-co
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
 import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-pipe';
+import { integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
 
 /**
  * Venue profile photo (VenuePhoto1786718700000): POST/DELETE /rest/v1/venues/:id/photo and the VENUE_PHOTO read
@@ -22,7 +23,7 @@ import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-
  * Manager (upload, remove and read = 404), organisationId smuggled in the multipart body (400), Staff with no work at
  * the venue (404), a withdrawn offer no longer grants read (404), a replaced or removed photo is tombstoned and unreadable.
  */
-const RUN = Boolean(process.env.DATABASE_URL);
+const RUN = integrationTestDatabaseReady();
 const describeIfDb = RUN ? describe : describe.skip;
 
 jest.setTimeout(120_000);

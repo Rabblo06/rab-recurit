@@ -13,6 +13,7 @@ import { createAdminDataSource } from './helpers/admin-datasource';
 import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
 import { sqlStateAsSchemaRole } from './helpers/schema-role';
 import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-pipe';
+import { integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
 
 /**
  * Foundation fix P1 (2026-10-22) — an audit entry may only name users of ITS OWN organisation, except when the actor is an
@@ -25,7 +26,7 @@ import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-
  *   - API: a manager addressing another organisation's staff gets a 404 and no audit row; the legitimate
  *     platform-admin cross-organisation actions (grant/revoke, organisation suspension/reactivation) still audit.
  */
-const RUN = Boolean(process.env.DATABASE_URL);
+const RUN = integrationTestDatabaseReady();
 const describeIfDb = RUN ? describe : describe.skip;
 
 describeIfDb('audit_log cross-organisation identity references (integration, P1)', () => {

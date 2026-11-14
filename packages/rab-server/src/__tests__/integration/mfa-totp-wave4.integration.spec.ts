@@ -16,6 +16,7 @@ import { createAdminDataSource } from './helpers/admin-datasource';
 import { challengeRedisKey, codeAt, earlyInStep, secretFromOtpauth } from './helpers/mfa-test-kit';
 import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
 import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-pipe';
+import { integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
 
 /**
  * Wave 4 lane MFA — TOTP second factor end to end on the REAL database functions of lane DB5
@@ -26,7 +27,7 @@ import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-
  *
  * Requires a database with DB5's migrations applied (fails loudly otherwise — never reported as passed).
  */
-const RUN = Boolean(process.env.DATABASE_URL);
+const RUN = integrationTestDatabaseReady();
 const describeIfDb = RUN ? describe : describe.skip;
 const ORIGIN = 'http://localhost:5173';
 

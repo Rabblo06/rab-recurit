@@ -13,6 +13,7 @@ import { resolveIntervalMs, SCAN_JOBS, ScanJobDefinition, schedulerIdOf } from '
 import { WorkerRuntime } from '../../core/runtime/worker-runtime';
 import { EXPECTED_SCAN_SCHEDULER_IDS } from './helpers/expected-scan-jobs';
 import { defaultIntervalEnv } from './helpers/default-interval-env';
+import { integrationTestDatabaseReady } from '@rab/server/database/typeorm/core/integration-test-database-gate';
 
 /**
  * Lane A M4/M7 — the Crewflow job-scheduler lifecycle against a REAL Redis (REDIS_URL = the disposable test Redis) and,
@@ -22,7 +23,7 @@ import { defaultIntervalEnv } from './helpers/default-interval-env';
 jest.setTimeout(120_000);
 const REDIS_URL = process.env.REDIS_URL;
 const DB_URL = process.env.DATABASE_URL; // crewflow_app (jest-setup points it at TEST_DATABASE_URL)
-const describeIf = REDIS_URL && DB_URL ? describe : describe.skip;
+const describeIf = REDIS_URL && integrationTestDatabaseReady() ? describe : describe.skip;
 
 // Every scan interval at its real default: the three minutes keys (15 / 60 / 60) and, since Phase A pa-intervals, the 17
 // WORKER_<JOB>_INTERVAL_SECONDS keys (defaults = the historical constants).

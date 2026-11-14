@@ -17,7 +17,7 @@ import { resolveIntegrationTestDatabase } from '../../../database/typeorm/core/t
  * for everything that actually exercises RLS/auth, while this connection
  * covers the "owner/migration-style" setup a real seed script would do.
  *
- * The URL comes ONLY from TEST_DATABASE_URL_UNPOOLED, validated by the same
+ * The URL comes ONLY from TEST_DATABASE_ADMIN_URL (or its deprecated name TEST_DATABASE_URL_UNPOOLED, X3.5-S7), validated by the same
  * guard as the application connection (same logical database, same endpoint,
  * no remote host without ALLOW_REMOTE_TEST_DATABASE=true). It never falls back
  * to DATABASE_URL_UNPOOLED: that name is read from the developer's .env, which
@@ -55,7 +55,7 @@ export function createAdminDataSource(): DataSource {
  * P2.1 — a SEPARATE connection from `createAdminDataSource()` above, for exactly one narrow purpose: proving
  * "FORCE ROW LEVEL SECURITY binds even the table owner" (e.g. `staff_profile`/`manager_profile`/`audit_log`, all
  * owned by `crewflow` post-P1C.2, none on the NOT_FORCED_ALLOWLIST). `createAdminDataSource()`'s connection
- * (`TEST_DATABASE_URL_UNPOOLED`) is the Postgres superuser bootstrap identity locally — superusers bypass RLS
+ * (`TEST_DATABASE_ADMIN_URL`) is the Postgres superuser bootstrap identity locally — superusers bypass RLS
  * unconditionally, for a completely different reason than table ownership, so a "the owner sees zero rows" assertion
  * run over THAT connection is vacuously true-or-false depending on bypass, never actually exercising FORCE. Found
  * live, reproducibly, in two separate suites (`staff-profile-rls-abuse-cases`, `audit-log-abuse-cases`): both

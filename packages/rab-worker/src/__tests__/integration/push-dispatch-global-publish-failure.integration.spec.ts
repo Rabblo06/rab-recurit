@@ -20,6 +20,7 @@ import {
 } from '../../queues/rab-push/push-dispatch.job';
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
+import { integrationTestDatabaseReady } from '@rab/server/database/typeorm/core/integration-test-database-gate';
 
 /**
  * D-Q3 independent review R1. In WORKER_CLAIM_MODE=global a push publish error must keep its pre-D-Q3 outcome: the
@@ -34,7 +35,7 @@ jest.setTimeout(120_000);
 const WORKER_URL = process.env.TEST_DATABASE_WORKER_URL;
 const RUN =
   process.env.PHASE_D_SQL_APPROVED === 'true' &&
-  Boolean(WORKER_URL && process.env.DATABASE_URL);
+  Boolean(WORKER_URL) && integrationTestDatabaseReady();
 const describeIfApproved = RUN ? describe : describe.skip;
 
 describeIfApproved(

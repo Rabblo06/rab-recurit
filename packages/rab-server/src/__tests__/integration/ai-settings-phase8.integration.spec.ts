@@ -17,6 +17,7 @@ import { AI_SETTINGS_FEATURES, AiSettingsOverviewService } from '../../modules/a
 import { localToday } from '../../modules/ai/services/ai-turn-runner.service';
 import { AiToolRegistry } from '../../modules/ai/tools/ai-tool-registry.service';
 import { AiKit, aiOrganisation, ask, bearer, bootAiKit, jobFor, manager, newConversation, setOrgAi } from './helpers/ai-test-kit';
+import { integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
 
 /**
  * T8-P1 / T8-P2 / T8-P3 (docs/ai/PHASE8_TWENTY_PLAN.md §5, brief 8a): the three Phase 8 Settings → AI read endpoints on
@@ -27,7 +28,7 @@ import { AiKit, aiOrganisation, ask, bearer, bootAiKit, jobFor, manager, newConv
  * Five layers: PermissionGuard(ai.settings) → service (flag re-read, Inspect refused, CEO, both switches) → org-bound
  * query → RLS. Abuse cases: no flag = the uniform 404; a non-CEO granted the flag = the uniform 404; AI off = 404; Inspect = 404.
  */
-const RUN = Boolean(process.env.DATABASE_URL);
+const RUN = integrationTestDatabaseReady();
 const describeIfDb = RUN ? describe : describe.skip;
 const CANARY = 'sk-ant-p8canary-'.padEnd(48, 'Q');
 const ROUTES = ['/rest/v1/ai/settings', '/rest/v1/ai/settings/tools', '/rest/v1/ai/settings/prompt-preview'];

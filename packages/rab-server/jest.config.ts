@@ -5,7 +5,8 @@ export default {
     '^.+\\.[tj]s$': ['ts-jest', { tsconfig: '<rootDir>/tsconfig.spec.json' }],
   },
   moduleFileExtensions: ['ts', 'js', 'html'],
-  // Fails the whole run before any fixture is written unless TEST_DATABASE_URL / TEST_DATABASE_URL_UNPOOLED are set and agree
+  // Fails the whole run before any fixture is written unless TEST_DATABASE_URL / TEST_DATABASE_ADMIN_URL (or its deprecated
+  // name TEST_DATABASE_URL_UNPOOLED) are set and agree
   // (see src/jest-global-setup.ts and src/database/typeorm/core/test-database-guard.ts).
   globalSetup: '<rootDir>/src/jest-global-setup.ts',
   setupFiles: ['<rootDir>/src/jest-setup.ts'],

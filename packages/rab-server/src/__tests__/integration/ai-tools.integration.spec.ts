@@ -19,6 +19,7 @@ import { StaffAssistantService } from '../../modules/staff/services/staff-assist
 import { INJECTION_TEXT, seedPayrollRuns, seedStaffing, StaffingFixture } from './helpers/ai-fixtures';
 import { AiKit, aiOrganisation, bootAiKit, manager, setOrgAi } from './helpers/ai-test-kit';
 import { TestIdentity } from './helpers/test-identities';
+import { integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
 
 /**
  * AI read tools against real data under RLS (Phase 1 brief §15 "AI tools"; Phase 3 docs/ai/PHASE3_TWENTY_PLAN.md §7):
@@ -30,7 +31,7 @@ import { TestIdentity } from './helpers/test-identities';
  *  - T-I4 the 2 s fingerprint recheck (override insert, role permission revoke + version bump, org switch off, failures);
  *  - T-I5 the per-turn cap; T-I7 payroll integer pence, aggregate SQL only, venue manager refused; T-I8 the 5 s timeout.
  */
-const RUN = Boolean(process.env.DATABASE_URL);
+const RUN = integrationTestDatabaseReady();
 const describeIfDb = RUN ? describe : describe.skip;
 
 const sidOf = (token: string): string => (JSON.parse(Buffer.from(token.split('.')[1]!, 'base64url').toString('utf8')) as { sid: string }).sid;

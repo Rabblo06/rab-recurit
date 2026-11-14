@@ -7,6 +7,7 @@ import { AI_MODEL_LEVEL_KEYS } from '@rab/shared';
 import { AiConfigService } from '../../modules/ai/services/ai-config.service';
 import { TEST_MOCK_MODEL_ID, TEST_MODEL_CATALOGUE } from '../support/ai/test-catalogue';
 import { AiKit, aiOrganisation, bearer, bootAiKit, jobFor, manager, newConversation, setOrgAi } from './helpers/ai-test-kit';
+import { integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
 
 /**
  * C1 / CD-1 runner wiring: a level named on submit, end to end on the real AppModule, PostgreSQL (crewflow_app, FORCE
@@ -15,7 +16,7 @@ import { AiKit, aiOrganisation, bearer, bootAiKit, jobFor, manager, newConversat
  * level stops being allowed is refused at Worker start (no model call). Then the behaviour: the level and effort a turn
  * ran at are stamped, the level's cap bounds the reservation, and the composer's availability signal is on.
  */
-const RUN = Boolean(process.env.DATABASE_URL);
+const RUN = integrationTestDatabaseReady();
 const describeIfDb = RUN ? describe : describe.skip;
 
 describeIfDb('C1 / CD-1: submit with a level, Worker wiring (integration)', () => {

@@ -12,6 +12,7 @@ import { TenantContextService } from '../../engine/core-modules/tenant/tenant-co
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
 import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-pipe';
+import { integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
 
 /**
  * M-T1 platform_admin recursion guard (HIGH, found on PR #72, fixed in place in PreAuthTablesForceOwnerOnly1786721400000;
@@ -28,7 +29,7 @@ import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-
  *   - a normal user sees only their own platform_admin row;
  *   - every login / lookup test has a 5-second timeout, so a recursion or a hang fails fast.
  */
-const RUN = Boolean(process.env.DATABASE_URL);
+const RUN = integrationTestDatabaseReady();
 const describeIfDb = RUN ? describe : describe.skip;
 const FAST = 5_000;
 

@@ -5,6 +5,7 @@ import { PayrollEvidenceRestrict1786719700000 } from '../../database/typeorm/cor
 import { resolveIntegrationTestDatabase } from '../../database/typeorm/core/test-database-guard';
 import { provisionWorkspaceSchema } from '../../database/typeorm/workspace-schema/provision-workspace-schema';
 import { PAYROLL_EVIDENCE_FKS } from '../../database/typeorm/workspace-schema/v1/payroll-evidence-restrict';
+import { integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
 
 /**
  * F3 (Wave 1 lane S, migration PayrollEvidenceRestrict1786719700000): approved payroll evidence can no longer be deleted by
@@ -17,7 +18,7 @@ import { PAYROLL_EVIDENCE_FKS } from '../../database/typeorm/workspace-schema/v1
  * bookings/attendance cascade), and the migration's down()/up() round trip restores CASCADE and the 1786719500000 function
  * body byte for byte (inside a rolled-back transaction).
  */
-const RUN = Boolean(process.env.DATABASE_URL);
+const RUN = integrationTestDatabaseReady();
 const describeIfDb = RUN ? describe : describe.skip;
 
 jest.setTimeout(120_000);

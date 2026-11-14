@@ -28,6 +28,7 @@ import { renderReportPdf, ReportDocument } from '../../queues/rab-reports/render
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { bookBeforeDeadline } from './helpers/book-before-deadline';
 import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
+import { integrationTestDatabaseReady } from '@rab/server/database/typeorm/core/integration-test-database-gate';
 
 /**
  * Phase X J1b: the pay-statement dispatcher WAKE, end to end. Real HTTP approval, real PostgreSQL (RLS on), real Redis and
@@ -40,7 +41,7 @@ import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
  * The wake's dispatcher is scoped to this suite's organisation (as the existing statement suite does), so it never claims
  * another suite's rows in the shared test database; production's sweep is the same function without the scope.
  */
-const RUN = Boolean(process.env.DATABASE_URL && process.env.REDIS_URL);
+const RUN = integrationTestDatabaseReady() && Boolean(process.env.REDIS_URL);
 const describeIf = RUN ? describe : describe.skip;
 
 jest.setTimeout(240_000);

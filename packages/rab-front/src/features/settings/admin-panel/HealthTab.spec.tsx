@@ -194,3 +194,42 @@ describe('feedback follow-up (FEEDBACK_REPORT §6, Admin panel items 3-4)', () =
     get.mockImplementation(fast);
   });
 });
+
+describe('X2.4 health indicators (Twenty admin-panel/indicators)', () => {
+  const indicatorReport = {
+    checkedAt: new Date().toISOString(),
+    attention: 1,
+    cards: [
+      { key: 'api', status: 'healthy', detail: 'Version 2.4.0 · Node v24.1.0 · up 3 h 2 min', latencyMs: null, facts: [{ label: 'Process uptime', value: '3 h 2 min' }] },
+      { key: 'database', status: 'healthy', detail: 'PostgreSQL 16 · 4 ms · 12 of 100 connections (12%)', latencyMs: 4, facts: [{ label: 'Connections', value: '12 of 100 (12%)' }] },
+      { key: 'redis', status: 'healthy', detail: 'Redis 7.2.4 · 1.0 MB of 64.0 MB (2%) · 1 ms', latencyMs: 1, facts: [{ label: 'Eviction policy', value: 'noeviction' }] },
+      { key: 'worker', status: 'healthy', detail: 'Heartbeat 4 s ago · 2 failed · 3 waiting across 5 queues', latencyMs: null, facts: [{ label: 'rab-email', value: '2 failed · 3 waiting · 0 active · 0 delayed' }] },
+      { key: 'scheduler', status: 'degraded', detail: 'No BullMQ schedulers in Redis: scans are not being triggered.', latencyMs: null, facts: [{ label: 'Schedulers in Redis', value: '0' }] },
+    ],
+  };
+
+  it('renders every indicator: label, status, detail and its numbers', async () => {
+    routeGet(get, { '/admin/health/report': indicatorReport, '/admin/queues': queues });
+    renderWithQuery(<HealthTab />);
+    expect(await screen.findByText('Version 2.4.0 · Node v24.1.0 · up 3 h 2 min')).toBeTruthy();
+    for (const label of ['API', 'Database', 'Redis', 'Worker', 'BullMQ schedulers']) expect(screen.getByText(label, { selector: 'b' })).toBeTruthy();
+    expect(screen.getByText('PostgreSQL 16 · 4 ms · 12 of 100 connections (12%)')).toBeTruthy();
+    expect(screen.getByText('Redis 7.2.4 · 1.0 MB of 64.0 MB (2%) · 1 ms')).toBeTruthy();
+    expect(screen.getByText('No BullMQ schedulers in Redis: scans are not being triggered.')).toBeTruthy();
+    expect(screen.getByText('Degraded')).toBeTruthy();
+    const worker = screen.getByLabelText('Worker details');
+    expect(within(worker).getByText('rab-email')).toBeTruthy();
+    expect(within(worker).getByText('2 failed · 3 waiting · 0 active · 0 delayed')).toBeTruthy();
+    expect(within(screen.getByLabelText('Database details')).getByText('12 of 100 (12%)')).toBeTruthy();
+    expect(within(screen.getByLabelText('Redis details')).getByText('noeviction')).toBeTruthy();
+  });
+
+  it('Refresh asks for a live, audited check (?refresh=1); polling never sends it', async () => {
+    routeGet(get, { '/admin/health/report': indicatorReport, '/admin/queues': queues });
+    renderWithQuery(<HealthTab />);
+    await screen.findByText('Version 2.4.0 · Node v24.1.0 · up 3 h 2 min');
+    expect(get.mock.calls.filter(([u]: [string]) => u === '/admin/health/report').every(([, cfg]: [string, unknown]) => cfg === undefined)).toBe(true);
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh' }));
+    await waitFor(() => expect(get).toHaveBeenCalledWith('/admin/health/report', { params: { refresh: '1' } }));
+  });
+});

@@ -37,6 +37,7 @@ import { isLockUnavailable } from '../helpers/legacy-discovery-lock';
 import { runReplacementStaffCycle } from '../../queues/rab-offers/replacement-staff.job';
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { generateFixturePassword } from './helpers/fixture-password';
+import { integrationTestDatabaseReady } from '@rab/server/database/typeorm/core/integration-test-database-gate';
 
 const FIXTURE_PASSWORD = generateFixturePassword();
 
@@ -50,7 +51,7 @@ const FIXTURE_PASSWORD = generateFixturePassword();
  * isolation, audit-exactly-once under concurrency, and the `shift_
  * assignment.period` SQL regression.
  */
-const RUN = Boolean(process.env.DATABASE_URL);
+const RUN = integrationTestDatabaseReady();
 const describeIfDb = RUN ? describe : describe.skip;
 jest.setTimeout(60_000);
 

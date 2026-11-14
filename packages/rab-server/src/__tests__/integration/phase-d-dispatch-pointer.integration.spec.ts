@@ -18,6 +18,7 @@ import {
 } from '../../database/typeorm/core/worker-dispatch-pointer-sql';
 import { describeDatabaseUrl } from '../../database/typeorm/core/test-database-guard';
 import { provisionServerPath, provisionTypeScript, seedWorkspace, sqlstateOf, SeededWorkspace } from './helpers/workspace-fixtures';
+import { integrationTestDatabase, integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
 
 /**
  * Phase D (D1/D2) — security and behaviour of core.worker_dispatch_pointer, its claim / release definers and the pointer
@@ -46,7 +47,7 @@ import { provisionServerPath, provisionTypeScript, seedWorkspace, sqlstateOf, Se
  *   - NOTIFY crewflow_worker_wake only when the session enabled crewflow.dispatch_notify (E-1), label only, after commit.
  */
 const WORKER_URL = process.env.TEST_DATABASE_WORKER_URL;
-const RUN = process.env.PHASE_D_SQL_APPROVED === 'true' && Boolean(process.env.TEST_DATABASE_URL && process.env.TEST_DATABASE_URL_UNPOOLED && WORKER_URL);
+const RUN = process.env.PHASE_D_SQL_APPROVED === 'true' && Boolean(WORKER_URL) && integrationTestDatabaseReady();
 const describeIfApproved = RUN ? describe : describe.skip;
 
 describeIfApproved('Phase D dispatch pointer (integration; needs the approved Phase D migrations)', () => {
@@ -164,7 +165,7 @@ describeIfApproved('Phase D dispatch pointer (integration; needs the approved Ph
 
   beforeAll(async () => {
     const appUrl = process.env.TEST_DATABASE_URL!;
-    const adminUrl = process.env.TEST_DATABASE_URL_UNPOOLED!;
+    const adminUrl = integrationTestDatabase().adminUrl;
     // Same database as the application and admin URLs (never another one).
     const target = describeDatabaseUrl(adminUrl, 'TEST_DATABASE_URL_UNPOOLED');
     const w = describeDatabaseUrl(WORKER_URL!, 'TEST_DATABASE_WORKER_URL');
@@ -415,7 +416,7 @@ describeIfApproved('Phase D dispatch pointer (integration; needs the approved Ph
     it('both provisioning paths (crewflow) attach the four statement triggers, enabled, to the new workspace payroll table', async () => {
       for (const [label, provision] of [
         ['server', (ws: SeededWorkspace) => provisionServerPath(process.env.TEST_DATABASE_URL!, ws)],
-        ['typescript', (ws: SeededWorkspace) => provisionTypeScript(process.env.TEST_DATABASE_URL_UNPOOLED!, ws)],
+        ['typescript', (ws: SeededWorkspace) => provisionTypeScript(integrationTestDatabase().adminUrl, ws)],
       ] as const) {
         const ws = await seedWorkspace(admin, `pd-prov-${label}-${run}`);
         expect(await provision(ws)).toBe('READY');
@@ -462,7 +463,7 @@ describeIfApproved('Phase D dispatch pointer (integration; needs the approved Ph
 
     it('in a workspace\'s own payroll table it mirrors DUE_SQL into a pointer bound to that workspace (FK triggers off, rolled back)', async () => {
       const ws = await seedWorkspace(admin, `pd-stmt-${run}`);
-      expect(await provisionTypeScript(process.env.TEST_DATABASE_URL_UNPOOLED!, ws)).toBe('READY');
+      expect(await provisionTypeScript(integrationTestDatabase().adminUrl, ws)).toBe('READY');
       const t = `${ws.schema}.payroll_record`;
       await admin.query('BEGIN');
       try {
@@ -778,7 +779,7 @@ describeIfApproved('Phase D dispatch pointer (integration; needs the approved Ph
   describe('wave 2 / 1786721310000: producer transaction, scope changes, DELETE / TRUNCATE consistency, normal writes', () => {
     it('the pointer is written INSIDE the producer transaction (visible to it, invisible to others before commit); ROLLBACK removes the row AND the pointer', async () => {
       const id = randomUUID();
-      const other = await connect(process.env.TEST_DATABASE_URL_UNPOOLED!);
+      const other = await connect(integrationTestDatabase().adminUrl);
       try {
         await admin.query('BEGIN');
         try {
@@ -905,7 +906,7 @@ describeIfApproved('Phase D dispatch pointer (integration; needs the approved Ph
 
     it('a workspace payroll table with a disabled statement trigger is reported for that schema', async () => {
       const ws = await seedWorkspace(admin, `pd-e5-${run}`);
-      expect(await provisionTypeScript(process.env.TEST_DATABASE_URL_UNPOOLED!, ws)).toBe('READY');
+      expect(await provisionTypeScript(integrationTestDatabase().adminUrl, ws)).toBe('READY');
       await rolledBack(async () => {
         await admin.query(`ALTER TABLE ${ws.schema}.payroll_record DISABLE TRIGGER payroll_record_statement_pointer_upd`);
         expect((await problems()).some((p) => p.startsWith(`${ws.schema}.payroll_record: dispatch pointer triggers are [`))).toBe(true);
@@ -951,7 +952,7 @@ describeIfApproved('Phase D dispatch pointer (integration; needs the approved Ph
 
     it('a workspace payroll table holding a row of ANOTHER workspace (binding CHECKs dropped) is refused (42501), no pointer', async () => {
       const ws = await seedWorkspace(admin, `pd-bind-${run}`);
-      expect(await provisionTypeScript(process.env.TEST_DATABASE_URL_UNPOOLED!, ws)).toBe('READY');
+      expect(await provisionTypeScript(integrationTestDatabase().adminUrl, ws)).toBe('READY');
       const t = `${ws.schema}.payroll_record`;
       const id = randomUUID();
       await rolledBack(async () => {
@@ -970,7 +971,7 @@ describeIfApproved('Phase D dispatch pointer (integration; needs the approved Ph
     it("a forged statement pointer (A's scope on B's record) causes no cross-tenant processing", async () => {
       const wa = await seedWorkspace(admin, `pd-fsa-${run}`);
       const wb = await seedWorkspace(admin, `pd-fsb-${run}`);
-      for (const w of [wa, wb]) expect(await provisionTypeScript(process.env.TEST_DATABASE_URL_UNPOOLED!, w)).toBe('READY');
+      for (const w of [wa, wb]) expect(await provisionTypeScript(integrationTestDatabase().adminUrl, w)).toBe('READY');
       const victim = randomUUID();
       const tb = `${wb.schema}.payroll_record`;
       // A committed synthetic record in B (only its FK / guard triggers are off for the insert; all re-enabled before commit).
