@@ -126,7 +126,8 @@ describeIfDb('report emails under HWS routing: enqueue + send-time re-check read
     // ---- organisation, owner workspace, provisioned to READY by the real provisioner
     const organisation = await factory.createOrganisation('rpthws');
     organisationId = organisation.id;
-    owner = await factory.createInternalManager(organisation);
+    // Part C1: provisioned below by the real (TypeScript) provisioner, as this suite requires — not by the fixture factory.
+    owner = await factory.createInternalManager(organisation, { provision: false });
     workspaceId = owner.workspaceId!;
     const provisioned = await provisionWorkspaceSchema(provisioner, workspaceId);
     expect(provisioned.outcome).toBe('READY');

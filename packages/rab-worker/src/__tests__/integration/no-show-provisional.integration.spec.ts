@@ -146,7 +146,7 @@ describeIfDb('provisional no-show (shift monitor) never overrides a manager (int
     await withContext(fx, async (m) => {
       expect(await m.query(`SELECT 1 FROM attendance WHERE shift_assignment_id = $1`, [assignmentId])).toHaveLength(0);
       expect(await m.query(`SELECT 1 FROM shift_report WHERE shift_id = $1 AND status = 'finalised'`, [shiftId])).toHaveLength(0);
-      const [n] = await m.query(`SELECT message FROM notification WHERE related_entity_id = $1 AND type = 'shift_assignment_no_show'`, [assignmentId]);
+      const [n] = await m.query(`SELECT message FROM core.notification WHERE related_entity_id = $1 AND type = 'shift_assignment_no_show'`, [assignmentId]);
       expect(n.message).toContain('Record their attendance or confirm the no-show');
     });
     await cycle();

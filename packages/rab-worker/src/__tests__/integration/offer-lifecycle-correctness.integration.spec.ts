@@ -666,7 +666,8 @@ describeIfDb('offer lifecycle correctness (integration)', () => {
         await m.query(`SELECT set_config('rab.organisation_id', '', true)`);
         await m.query(`SELECT set_config('rab.workspace_id', '', true)`);
         await m.query(`SELECT set_config('rab.user_id', '', true)`);
-        return m.query<[Array<{ id: string }>, number]>(`UPDATE job_offer SET status = 'withdrawn' WHERE id = $1 RETURNING id`, [offer.id]);
+        // Part C1: aimed at the table the offer really lives in (workspace A's schema with HWS on), with no tenant bound.
+        return m.query<[Array<{ id: string }>, number]>(`UPDATE ${businessTable(fx.managerA.workspaceId!, 'job_offer')} SET status = 'withdrawn' WHERE id = $1 RETURNING id`, [offer.id]);
       });
       expect(noContextRows).toHaveLength(0);
 

@@ -152,7 +152,7 @@ describeIfDb('replacement & standby offers vs manager-confirmation timeout (inte
     await runCycle();
     let offer = await withContext(fx.mctx, (m) => m.findOneByOrFail(JobOffer, { id: fx.replacementOfferId }));
     expect(offer.status).toBe(OfferStatus.STAFF_ACCEPTED);
-    expect(await read(fx, `SELECT 1 FROM audit_log WHERE action = 'offer.confirmed' AND entity_id = $1`, [fx.replacementOfferId])).toHaveLength(0);
+    expect(await read(fx, `SELECT 1 FROM core.audit_log WHERE action = 'offer.confirmed' AND entity_id = $1`, [fx.replacementOfferId])).toHaveLength(0);
     // At window end: withdrawn (never confirmed), the original booked seat untouched.
     await endWindow(fx, fx.replacementOfferId, 60_000);
     await runCycle();
@@ -176,13 +176,13 @@ describeIfDb('replacement & standby offers vs manager-confirmation timeout (inte
     await runCycle();
     offer = await withContext(fx.mctx, (m) => m.findOneByOrFail(JobOffer, { id: fx.replacementOfferId }));
     expect(offer.status).toBe(OfferStatus.MANAGER_CONFIRMED);
-    expect(await read(fx, `SELECT 1 FROM audit_log WHERE action = 'offer.confirmed' AND entity_id = $1`, [fx.replacementOfferId])).toHaveLength(1);
+    expect(await read(fx, `SELECT 1 FROM core.audit_log WHERE action = 'offer.confirmed' AND entity_id = $1`, [fx.replacementOfferId])).toHaveLength(1);
     const seats = await read(fx, `SELECT status, attendance_reviewed_at IS NOT NULL AS reviewed FROM shift_assignment WHERE shift_id = $1 ORDER BY created_at`, [fx.shift.id]);
     expect(seats).toEqual([{ status: 'no_show', reviewed: true }, { status: 'confirmed', reviewed: false }]);
     const [shift] = await read(fx, `SELECT filled_count, required_count FROM shift WHERE id = $1`, [fx.shift.id]);
     expect(Number(shift.filled_count)).toBe(1);
     expect(Number(shift.required_count)).toBe(1);
-    expect(await read(fx, `SELECT 1 FROM notification WHERE related_entity_id = $1 AND type = 'offer_confirmed'`, [fx.replacementOfferId])).toHaveLength(1);
+    expect(await read(fx, `SELECT 1 FROM core.notification WHERE related_entity_id = $1 AND type = 'offer_confirmed'`, [fx.replacementOfferId])).toHaveLength(1);
   });
 
   it('W3 (Q1b): a REPLACEMENT confirm after its window ended is the deadline 409 and the acceptance is withdrawn', async () => {
