@@ -10,6 +10,8 @@
  *
  * Reading the body is catalog-only (`pg_catalog.pg_proc` is world-readable; no grant, no new SQL object).
  */
+import { declaredProvisionLiterals } from '../../../engine/core-modules/upgrade/workspace-structure-level';
+
 export const PROVISION_FUNCTION_APP_VERSION_PREFIX = 'db:provision_workspace@';
 
 export const PROVISION_FUNCTION_MODULE_VERSIONS: Readonly<Record<string, number>> = Object.freeze({
@@ -39,21 +41,28 @@ export const PROVISION_FUNCTION_SOURCE_SQL = `SELECT p.prosrc AS "prosrc" FROM p
 
 const LITERAL_PATTERN = /'(db:provision_workspace@[A-Za-z0-9._:@+/-]{1,100})'/g;
 
-/** Pure: the state of a function body (null = the function does not exist). Two different literals are 'unknown'. */
-export function parseProvisionFunctionSource(prosrc: string | null | undefined): ProvisionFunctionState {
+/**
+ * Pure: the state of a function body (null = the function does not exist). Two different literals are 'unknown'.
+ * `extra` (Part D, security review M3): the literals declared by this code's structural workspace upgrade commands
+ * (workspace-structure-level.ts declaredProvisionLiterals), each mapped to its structure level.
+ */
+export function parseProvisionFunctionSource(prosrc: string | null | undefined, extra: Readonly<Record<string, number>> = {}): ProvisionFunctionState {
   if (prosrc === null || prosrc === undefined) return { state: 'missing' };
   const literals = [...new Set([...prosrc.matchAll(LITERAL_PATTERN)].map((m) => m[1]!))];
   if (literals.length === 0) return { state: 'legacy' };
   if (literals.length > 1) return { state: 'unknown', literal: literals.join(' + ') };
   const literal = literals[0]!;
-  const moduleVersion = PROVISION_FUNCTION_MODULE_VERSIONS[literal];
+  const moduleVersion = PROVISION_FUNCTION_MODULE_VERSIONS[literal] ?? extra[literal];
   return moduleVersion === undefined ? { state: 'unknown', literal } : { state: 'known', literal, moduleVersion };
 }
 
 /** Read-only catalog read on the caller's session. */
-export async function readProvisionFunctionState(query: (sql: string, params?: unknown[]) => Promise<unknown[]>): Promise<ProvisionFunctionState> {
+export async function readProvisionFunctionState(
+  query: (sql: string, params?: unknown[]) => Promise<unknown[]>,
+  extra: Readonly<Record<string, number>> = declaredProvisionLiterals(),
+): Promise<ProvisionFunctionState> {
   const rows = (await query(PROVISION_FUNCTION_SOURCE_SQL)) as Array<{ prosrc: string | null }>;
-  return parseProvisionFunctionSource(rows[0]?.prosrc ?? null);
+  return parseProvisionFunctionSource(rows[0]?.prosrc ?? null, extra);
 }
 
 export function describeProvisionFunctionState(s: ProvisionFunctionState): string {

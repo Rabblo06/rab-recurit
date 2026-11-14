@@ -12,6 +12,11 @@ import {
 import { upgradeStateOf } from './upgrade-status.service';
 import { assertOnlyTargetSchema, cursorHasCompleted, pendingWorkspaceSteps, structureLevels, WorkspaceStepRefused, workspaceSchemaOf } from './workspace-command-runner';
 import { LATEST_WORKSPACE_MODULE_VERSION, WORKSPACE_SCHEMA_MODULES } from '../../../database/typeorm/workspace-schema/workspace-schema-modules';
+import { parseProvisionFunctionSource } from '../../../database/typeorm/workspace-schema/provision-function-versions';
+import { assessSchemaCompatibility } from '../../../database/boot-checks/schema-compatibility';
+import { codeWorkspaceStructureLevel, declaredFingerprint, declaredProvisionLiterals, structuralCommandsThrough } from './workspace-structure-level';
+import { readdirSync, readFileSync, statSync } from 'node:fs';
+import { join } from 'node:path';
 
 /** OWNER-DB-ULTIMATE Part D: the pure parts of the workspace command runner and the sequence (no database). */
 const inst = (name: string, timestamp: number): UpgradeCommand => ({ name, timestamp, run: async () => undefined });
@@ -86,8 +91,17 @@ describe('Part D: pending commands from the cursor (Twenty getPendingWorkspaceCo
     expect(names(pendingWorkspaceSteps(seq, '0.7.0', { name: lastStepOfVersion('0.7.0', INSTANCE, WORKSPACE), status: 'completed' }))).toEqual([]);
   });
 
-  it('only the code version runs: 0.8.0 commands are not run by a 0.7.0 image', () => {
+  it('only up to the code version runs: 0.8.0 commands are not run by a 0.7.0 image', () => {
     expect(names(pendingWorkspaceSteps(seq, '0.7.0', { name: '0.5.0_TypeOrmMigrations', status: 'completed' }))).toEqual(['0.7.0_WsA_1786721490000', '0.7.0_WsB_1786721490100']);
+  });
+
+  it("M4: an earlier version's failed step (e.g. after --force) runs again first, before the code version's steps", () => {
+    expect(names(pendingWorkspaceSteps(seq, '0.8.0', { name: '0.7.0_WsA_1786721490000', status: 'failed' }))).toEqual([
+      '0.7.0_WsA_1786721490000',
+      '0.7.0_WsB_1786721490100',
+      '0.8.0_WsC_1786721590000',
+    ]);
+    expect(names(pendingWorkspaceSteps(seq, '0.8.0', { name: '0.7.0_WsB_1786721490100', status: 'completed' }))).toEqual(['0.8.0_WsC_1786721590000']);
   });
 
   it('a cursor this code does not know returns null (refused or rollback, decided by the runner)', () => {
@@ -131,5 +145,63 @@ describe('Part D: status (Twenty per-workspace upgrade status)', () => {
     expect(upgradeStateOf({ ...base, workspaceStepFailed: true })).toBe('failed');
     expect(upgradeStateOf({ ...base, appComplete: false })).toBe('behind');
     expect(upgradeStateOf({ ...base, newer: true, workspaceStepFailed: true })).toBe('ahead');
+  });
+});
+
+
+describe('Part D (review M3): the code structure level drives the gates', () => {
+  const probe = (level: number, extra: Partial<WorkspaceUpgradeCommand['structure']> = {}): WorkspaceUpgradeCommand =>
+    wsc(`Level${level}`, 1786721490000 + level, { sql: (x) => `SELECT '${x}'`, run: undefined, structure: { level, fingerprints: { 16: `fp${level}` }, ...extra } });
+
+  it('20 with no structural command; 21, 22 with probes; a gap is refused', () => {
+    expect(codeWorkspaceStructureLevel()).toBe(20);
+    const reg = { '0-7': [probe(21, { provisionFunctionLiteral: 'db:provision_workspace@Probe1799999999991' })], '0-8': [probe(22)] };
+    expect(codeWorkspaceStructureLevel(reg)).toBe(22);
+    expect(structuralCommandsThrough(21, reg).map((s) => s.structure.level)).toEqual([21]);
+    expect(declaredFingerprint(22, 16, reg)).toBe('fp22');
+    expect(declaredFingerprint(22, 18, reg)).toBeUndefined();
+    expect(declaredProvisionLiterals(reg)).toEqual({ 'db:provision_workspace@Probe1799999999991': 21 });
+    expect(() => codeWorkspaceStructureLevel({ '0-7': [probe(22)] })).toThrow(/expected 21/);
+  });
+
+  it('the provision literal of a structural command maps to its level; the frozen literals keep theirs', () => {
+    const extra = { 'db:provision_workspace@Probe1799999999991': 21 };
+    expect(parseProvisionFunctionSource(`x 'db:provision_workspace@Probe1799999999991' y`, extra)).toMatchObject({ state: 'known', moduleVersion: 21 });
+    expect(parseProvisionFunctionSource(`x 'db:provision_workspace@Probe1799999999991' y`)).toMatchObject({ state: 'unknown' });
+    expect(parseProvisionFunctionSource(`'db:provision_workspace@WorkspaceGrantParityGuards1786721430000'`, extra)).toMatchObject({ moduleVersion: 20 });
+  });
+
+  it('a fleet at the code level is neither behind nor ahead; the start floor lets the runner bring 20 up to the code level', () => {
+    const facts = { expected: [], applied: [], provisionFunction: { state: 'known' as const, literal: 'l', moduleVersion: 21 }, workspaces: [{ workspaceId: 'a', moduleVersion: 21 }] };
+    expect(assessSchemaCompatibility('migrate-apply', facts, { production: false, latestModuleVersion: 21 }).refusals).toEqual([]);
+    expect(assessSchemaCompatibility('migrate-apply', facts, { production: false, latestModuleVersion: 20 }).refusals.map((r) => r.finding)).toContain('workspace-ahead');
+    const behind = { ...facts, workspaces: [{ workspaceId: 'a', moduleVersion: 20 }] };
+    expect(assessSchemaCompatibility('migrate-apply', behind, { production: false, latestModuleVersion: 21 }).refusals.map((r) => r.finding)).toContain('workspace-behind');
+    expect(assessSchemaCompatibility('migrate-apply', behind, { production: false, latestModuleVersion: 21, floorModuleVersion: 20 }).refusals).toEqual([]);
+  });
+});
+
+describe('Part D (review Info): source guard on upgrade-commands/**', () => {
+  const root = join(__dirname, 'upgrade-commands');
+  const files = (dir: string): string[] =>
+    readdirSync(dir).flatMap((n) => {
+      const p = join(dir, n);
+      return statSync(p).isDirectory() ? files(p) : /\.ts$/.test(n) && !/\.spec\.ts$/.test(n) ? [p] : [];
+    });
+
+  it('command files import only types (or sibling command folders) and never reach a DataSource, pg or Nest', () => {
+    const offenders: string[] = [];
+    for (const f of files(root)) {
+      const src = readFileSync(f, 'utf8');
+      for (const m of src.matchAll(/^import\s+(type\s+)?[^;]*?from\s+['"]([^'"]+)['"]/gm)) {
+        const isType = Boolean(m[1]);
+        const spec = m[2]!;
+        const sibling = spec.startsWith('./');
+        if (!isType && !sibling) offenders.push(`${f}: value import of ${spec}`);
+        if (/^(pg|typeorm|@nestjs\/)/.test(spec)) offenders.push(`${f}: imports ${spec}`);
+      }
+      if (/(DataSource|createQueryRunner|new Client\(|require\()/.test(src)) offenders.push(`${f}: names a connection API`);
+    }
+    expect(offenders).toEqual([]);
   });
 });

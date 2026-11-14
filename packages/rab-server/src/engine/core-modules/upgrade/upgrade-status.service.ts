@@ -13,6 +13,7 @@ import { DataSource } from 'typeorm';
 
 import {
   countFailedWorkspaceCursors,
+  workspacesWithoutRows,
   getLastAttemptedInstanceStep,
   instanceVersions,
   isLastAttemptCompleted,
@@ -21,8 +22,9 @@ import {
   UpgradeSession,
   withUpgradeScope,
 } from './upgrade-migration.service';
-import { commandStepName, instanceStepsForVersion, lastInstanceStepOfVersion, workspaceCommandsForVersion } from './upgrade-sequence';
+import { instanceStepsForVersion, lastInstanceStepOfVersion } from './upgrade-sequence';
 import { compareVersions, readAppVersion } from './upgrade-version';
+import { listReadyWorkspaces } from './workspace-command-runner';
 
 export type UpgradeState = 'ok' | 'failed' | 'behind' | 'ahead' | 'none' | 'unknown';
 
@@ -39,7 +41,8 @@ export interface UpgradeStatus {
 
 /**
  * Pure: the state from the facts (exported for its spec). Part D: `workspaceStepFailed` = some workspace's cursor is a failed
- * workspace step of the app version (Twenty's per-workspace upgrade status); it turns an otherwise complete instance to 'failed'.
+ * step (any version), or a READY workspace has no logbook row at all (not adopted: the child exited 70); either turns an
+ * otherwise complete instance to 'failed' (Twenty's per-workspace upgrade status).
  */
 export function upgradeStateOf(f: { ledgerExists: boolean; appComplete: boolean; newer: boolean; appStepFailed: boolean; anyRow: boolean; workspaceStepFailed?: boolean }): UpgradeState {
   if (!f.ledgerExists || !f.anyRow) return 'none';
@@ -52,12 +55,25 @@ export function upgradeStateOf(f: { ledgerExists: boolean; appComplete: boolean;
 export async function readUpgradeStatus(session: UpgradeSession, appVersion: string): Promise<UpgradeStatus> {
   const empty: UpgradeStatus = { appVersion, state: 'none', step: null, executedByVersion: null, attempt: null, forced: null, at: null };
   if (!(await upgradeLedgerExists(session.query))) return empty;
+  // L3: workspaces with no logbook row at all (cheap in steady state: after adoption every workspace has one); only those are
+  // then checked for READY, each with its organisation bound in its own short transaction, outside the status scope.
+  const candidates = await withUpgradeScope(session, 'status', async (q) => {
+    const ids: string[] = [];
+    let after: string | null = null;
+    for (;;) {
+      const page = (await q('SELECT workspace_id::text AS id FROM core.worker_list_workspaces($1, 100)', [after])) as Array<{ id: string }>;
+      ids.push(...page.map((p) => p.id));
+      if (page.length < 100) break;
+      after = page[page.length - 1]!.id;
+    }
+    return workspacesWithoutRows(q, ids);
+  });
+  const readyWithoutCursor = candidates.length ? (await listReadyWorkspaces(session.query, candidates)).length : 0;
   return withUpgradeScope(session, 'status', async (q) => {
     const last = await getLastAttemptedInstanceStep(q);
     const versions = await instanceVersions(q);
     const appComplete = await isLastAttemptCompleted(q, { name: lastInstanceStepOfVersion(appVersion), workspaceId: null });
-    const workspaceSteps = workspaceCommandsForVersion(appVersion).map((c) => commandStepName(appVersion, c));
-    const workspaceStepFailed = (await countFailedWorkspaceCursors(q, workspaceSteps)) > 0;
+    const workspaceStepFailed = (await countFailedWorkspaceCursors(q)) > 0 || readyWithoutCursor > 0;
     let appStepFailed = false;
     for (const name of instanceStepsForVersion(appVersion)) {
       const rows = (await q(`SELECT m.status FROM core.upgrade_migration m WHERE m.name = $1 AND m.workspace_id IS NULL ORDER BY m.attempt DESC LIMIT 1`, [name])) as Array<{ status: string }>;

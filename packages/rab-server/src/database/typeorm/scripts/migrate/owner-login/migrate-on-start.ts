@@ -65,6 +65,7 @@ import { UpgradeRun, UpgradeRunReport } from '../../../../../engine/core-modules
 import { upgradeSessionOf } from '../../../../../engine/core-modules/upgrade/upgrade-migration.service';
 import { UPGRADE_COMMANDS } from '../../../../../engine/core-modules/upgrade/upgrade-commands/registry';
 import type { UpgradeCommand } from '../../../../../engine/core-modules/upgrade/upgrade-commands/upgrade-command';
+import type { WorkspaceUpgradeCommand } from '../../../../../engine/core-modules/upgrade/upgrade-commands/workspace-upgrade-command';
 import { majorMinorKey, readAppVersion } from '../../../../../engine/core-modules/upgrade/upgrade-version';
 import { attributeLedger } from './release-floor';
 
@@ -251,6 +252,11 @@ export interface MigrateOnStartDeps {
    * check; every logbook row of the run records forced = true.
    */
   upgradeForce?: true;
+  /**
+   * Part D test seam (the in-process start spec only; no environment variable maps to it): a workspace upgrade registry
+   * instead of WORKSPACE_UPGRADE_COMMANDS, and the workspaces the runner and the fleet post-check look at.
+   */
+  testWorkspace?: { registry: Readonly<Record<string, readonly WorkspaceUpgradeCommand[]>>; workspaceIds: readonly string[] };
 }
 
 /** How long the warning-only epoch bump may hold up the start (the migration lock is still held). */
@@ -400,7 +406,15 @@ export async function runMigrateOnStart(config: MigrateOnStartConfig, deps: Migr
     const probes = readTestUpgradeCommands(env, seamCtx);
     if (probes.length || testFailCommand) log(`TEST SEAMS ACTIVE: upgrade probe commands=${probes.map((c) => c.name).join(',') || '-'} failCommand=${testFailCommand ?? '-'}`);
     const registry = probes.length ? withProbeCommands(UPGRADE_COMMANDS, codeVersion, probes) : undefined;
-    const run = new UpgradeRun({ codeVersion, force: deps.upgradeForce === true, log, testFailCommand, registry });
+    const tw = deps.testWorkspace;
+    const run = new UpgradeRun({
+      codeVersion,
+      force: deps.upgradeForce === true,
+      log,
+      testFailCommand,
+      registry,
+      ...(tw ? { workspaceRegistry: tw.registry, workspaceRunner: { workspaceIds: tw.workspaceIds } } : {}),
+    });
     upgradeRun = run;
 
     const locked = await runner({
@@ -439,7 +453,7 @@ export async function runMigrateOnStart(config: MigrateOnStartConfig, deps: Migr
         applied = done;
         const query: Query = (sql, parameters) => queryRunner.query(sql, parameters) as Promise<unknown[]>;
         await autoBindFreshInstall({ query, env, guardEnv: guardEnvUsed, guarded, classification, proof, log });
-        const problems = await deployPostCheckProblems(query);
+        const problems = await deployPostCheckProblems(query, tw ? { workspaceRegistry: tw.registry, workspaceIds: tw.workspaceIds } : {});
         const { blocking, warnings } = blockingPostCheckProblems(classification?.state ?? 'UNKNOWN', problems);
         for (const w of warnings) log(`WARNING (ledger ahead, C-1): ${w}`);
         if (blocking.length) {

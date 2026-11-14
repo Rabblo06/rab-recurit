@@ -1,25 +1,25 @@
-// sql-injection-reviewed-file: every statement is a constant of this file with bound parameters ($n), except (a) the numeric,
-// clamped lock_timeout and (b) the frozen, owner-reviewed workspace command SQL rendered for a validated `workspace_<32 hex>`
-// schema name. No request or row data reaches any statement.
+// sql-injection-reviewed-file: every statement is a constant of this file or workspace-step-checks-sql.ts with bound
+// parameters ($n), except (a) the numeric, clamped lock_timeout and (b) the frozen, owner-reviewed workspace command SQL
+// rendered for a validated `workspace_<32 hex>` schema name. No request or row data reaches any statement.
 /**
- * OWNER-DB-ULTIMATE Part D: the workspace command runner. Runs the code version's WORKSPACE upgrade commands once per
- * workspace schema and records each (command, workspace) in core.upgrade_migration (Part B's logbook, workspace_id set).
+ * OWNER-DB-ULTIMATE Part D: the workspace command runner. Runs the pending WORKSPACE upgrade commands once per workspace
+ * schema and records each (command, workspace) in core.upgrade_migration (Part B's logbook, workspace_id set).
  *
  * Twenty (twentyhq/twenty @ eedb0a73), re-implemented, not copied:
  *   - `engine/core-modules/upgrade/services/workspace-command-runner.service.ts:32-84,106-153`: per workspace, the pending
  *     commands serially; ONE `completed` row after each, ONE `failed` row on error, then stop that workspace;
  *   - `database/commands/command-runners/workspace-iterator.service.ts:79-170`: one workspace at a time, a failed workspace
- *     does not stop the others;
- *   - `upgrade-sequence-reader.service.ts:155-173` (pending commands from the cursor), `upgrade-migration.service.ts:222-301`
- *     (the cursor = the newest row; a provisioned workspace without one is an error);
- *   - `upgrade-sequence-reader.service.ts:175-204` (the new-workspace / adopted cursor = the version's last step).
+ *     does not stop the others (:151-164 also survives a workspace deleted mid-run);
+ *   - `upgrade-sequence-reader.service.ts:155-173` + `upgrade-sequence-runner.service.ts:98-247` (pending = the workspace steps
+ *     after the cursor, walking the sequence from it), `upgrade-migration.service.ts:222-301` (cursor = the newest row; a
+ *     provisioned workspace without one is an error);
+ *   - `upgrade-sequence-reader.service.ts:175-204` (a new workspace's cursor = the version's last step).
  *
  * Crewflow additions (D-RUNNER.md §4): one REPEATABLE READ transaction per (workspace, command) with the tenant bound to that
  * workspace (FORCE RLS stays, §0.2), `SET LOCAL ROLE crewflow` like WorkspaceSchemaMigrator (M-T2), the per-schema advisory
- * lock and the registry row FOR UPDATE; then the post-step checks that replace the module fingerprints: session invariants,
- * catalog isolation (nothing outside this workspace schema written by the transaction) and the structure check
- * (core.verify_workspace_schema_v1 + core.workspace_schema_fingerprint == the expected fingerprint of the structure level).
- * Plus the one-time ADOPTION of the workspace-module history (D-RUNNER.md §5).
+ * lock and the registry row FOR UPDATE; then the post-step checks that replace the module fingerprints (session invariants,
+ * catalog isolation, data / role-catalog writes outside the schema, extra structure, the fingerprint), and after the
+ * transaction a clean-session check. Plus the one-time ADOPTION of the workspace-module history (D-RUNNER.md §5).
  *
  * Runs only on the LOCKED migration session (the migrate-on-start child, `upgrade --force`), never from a request path.
  */
@@ -30,17 +30,30 @@ import {
   Query,
   recordWorkspaceUpgradeMigration,
   UpgradeSession,
+  UpgradeSessionError,
   WorkspaceCursor,
   withUpgradeScope,
 } from './upgrade-migration.service';
-import { InstanceRegistry, lastStepOfVersion, SequenceStep, sequenceForVersions, versionOfStep, WorkspaceRegistry } from './upgrade-sequence';
+import { InstanceRegistry, lastInstanceStepOfVersion, SequenceStep, sequenceForVersions, versionOfStep, WorkspaceRegistry } from './upgrade-sequence';
 import { ADOPTION_RELEASE_VERSION, compareVersions } from './upgrade-version';
+import {
+  INVARIANTS_SQL,
+  OUTSIDE_COUNTS_SQL,
+  OUTSIDE_DATA_WRITES_SQL,
+  OUTSIDE_WRITES_SQL,
+  SESSION_CLEAN_SQL,
+  SESSION_RESET_SQL,
+  TARGET_EXTRA_STRUCTURE_SQL,
+} from './workspace-step-checks-sql';
+import { declaredFingerprint } from './workspace-structure-level';
 import {
   EXPECTED_WORKSPACE_FINGERPRINTS,
   FingerprintMajor,
   selectWorkspaceFingerprintsForServer,
 } from '../../../database/typeorm/workspace-schema/v1/expected-fingerprints';
 import { LATEST_WORKSPACE_MODULE_VERSION } from '../../../database/typeorm/workspace-schema/workspace-schema-modules';
+
+export { OUTSIDE_COUNTS_SQL, OUTSIDE_WRITES_SQL, OUTSIDE_DATA_WRITES_SQL, TARGET_EXTRA_STRUCTURE_SQL };
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const WORKSPACE_SCHEMA_RE = /workspace_[0-9a-f]{32}/gi;
@@ -59,6 +72,14 @@ export class WorkspaceStepRefused extends Error {
   ) {
     super(`${errorClass}: ${detail}`);
     this.name = 'WorkspaceStepRefused';
+  }
+}
+
+/** A run-level fault (the session itself is unusable): rethrown, never recorded against one workspace. */
+export class WorkspaceRunFault extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'WorkspaceRunFault';
   }
 }
 
@@ -81,7 +102,7 @@ export type WorkspaceOutcomeStatus = 'up-to-date' | 'upgraded' | 'adopted' | 'fa
 export interface WorkspaceOutcome {
   workspaceId: string;
   status: WorkspaceOutcomeStatus;
-  /** The step that failed or was refused (a step name) or the adoption label. */
+  /** The step that failed or was refused (a step name), or a `<v>_Workspace…` label. */
   step?: string;
   errorClass?: string;
   attempt?: number;
@@ -91,7 +112,7 @@ export interface WorkspaceOutcome {
 
 export interface WorkspaceRunReport {
   outcomes: WorkspaceOutcome[];
-  /** Failed or refused workspaces (a failed step, a refused adoption, an unknown cursor). */
+  /** Failed or refused workspaces (a failed step, a refused adoption, an unknown cursor, a vanished workspace). */
   failures: WorkspaceOutcome[];
 }
 
@@ -109,13 +130,21 @@ export interface WorkspaceRunOptions {
   lockTimeoutMs?: number;
   /** Restrict to these workspaces (tests). */
   workspaceIds?: readonly string[];
-  /** Test seam: the expected fingerprint of a structure level (default: the reviewed tables). */
+  /** Test seam: the expected fingerprint of a structure level (default: the reviewed tables + the declared levels). */
   expectedFingerprint?: (level: number, major: FingerprintMajor) => string | undefined;
+  /** Test seam (integration specs only, never from env): runs before each workspace's iteration. */
+  onBeforeWorkspace?: (workspaceId: string) => Promise<void>;
+}
+
+export interface ReadyWorkspaceScan {
+  ready: ReadyWorkspace[];
+  /** READY rows whose registry schema name differs from the derived one (refused per workspace, never routed). */
+  mismatched: string[];
 }
 
 /** READY workspaces in id order: core.worker_list_workspaces pages, each registry row read with its organisation bound. */
-export async function listReadyWorkspaces(query: Query, only?: readonly string[]): Promise<ReadyWorkspace[]> {
-  const out: ReadyWorkspace[] = [];
+export async function scanReadyWorkspaces(query: Query, only?: readonly string[]): Promise<ReadyWorkspaceScan> {
+  const out: ReadyWorkspaceScan = { ready: [], mismatched: [] };
   let after: string | null = null;
   for (;;) {
     const page = (await query('SELECT workspace_id, organisation_id FROM core.worker_list_workspaces($1, 100)', [after])) as Array<{
@@ -136,8 +165,8 @@ export async function listReadyWorkspaces(query: Query, only?: readonly string[]
         const r = rows[0];
         if (r?.status === 'READY') {
           const schemaName = workspaceSchemaOf(ws.workspace_id);
-          if (r.schema_name !== schemaName) throw new Error(`workspace ${ws.workspace_id}: registry schema name differs from the derived name. Refusing.`);
-          out.push({ workspaceId: ws.workspace_id, organisationId: ws.organisation_id, schemaName, moduleVersion: Number(r.module_version) });
+          if (r.schema_name !== schemaName) out.mismatched.push(ws.workspace_id);
+          else out.ready.push({ workspaceId: ws.workspace_id, organisationId: ws.organisation_id, schemaName, moduleVersion: Number(r.module_version) });
         }
       } catch (error) {
         await query('ROLLBACK').catch(() => undefined);
@@ -150,14 +179,22 @@ export async function listReadyWorkspaces(query: Query, only?: readonly string[]
   return out;
 }
 
+export async function listReadyWorkspaces(query: Query, only?: readonly string[]): Promise<ReadyWorkspace[]> {
+  return (await scanReadyWorkspaces(query, only)).ready;
+}
+
 /**
- * Pure (Twenty getPendingWorkspaceCommands, by sequence position): the code version's workspace steps that are after the
- * cursor, or from it when the cursor is `failed`. `null` = the cursor is not in this code's sequence.
+ * Pure (Twenty: the sequence is walked from the cursor, upgrade-sequence-runner.service.ts:98-247): every workspace step after
+ * the cursor up to and including the code version, in sequence order, or from the cursor when it is `failed`. So an earlier
+ * version's failed step (e.g. left behind by `upgrade --force`) runs again first, never skipped. `null` = the cursor is not in
+ * this code's sequence.
  */
 export function pendingWorkspaceSteps(sequence: readonly SequenceStep[], codeVersion: string, cursor: Pick<WorkspaceCursor, 'name' | 'status'>): SequenceStep[] | null {
   const at = sequence.findIndex((s) => s.name === cursor.name);
   if (at === -1) return null;
-  return sequence.filter((s, i) => s.kind === 'workspace' && s.version === codeVersion && (i > at || (i === at && cursor.status === 'failed')));
+  return sequence.filter(
+    (s, i) => s.kind === 'workspace' && compareVersions(s.version, codeVersion) <= 0 && (i > at || (i === at && cursor.status === 'failed')),
+  );
 }
 
 /**
@@ -190,63 +227,12 @@ export function structureLevels(sequence: readonly SequenceStep[]): Map<number, 
   return out;
 }
 
-const INVARIANTS_SQL = `SELECT pg_catalog.pg_backend_pid() AS pid, pg_catalog.transaction_timestamp()::text AS tx,
-  pg_catalog.current_setting('role') AS role, pg_catalog.current_setting('search_path') AS search_path,
-  COALESCE(pg_catalog.current_setting('rab.organisation_id', true), '') AS org,
-  COALESCE(pg_catalog.current_setting('rab.workspace_id', true), '') AS ws,
-  COALESCE(pg_catalog.current_setting('rab.upgrade_scope', true), '') AS scope`;
-
-/**
- * Layer 4, counts: objects OUTSIDE the target schema (TOAST and temporary namespaces excluded), so a DROP elsewhere is seen
- * (a dropped row leaves no xmin). Internal (constraint) triggers are excluded: a foreign key of the target table to a core
- * table adds them on the referenced table.
- */
-export const OUTSIDE_COUNTS_SQL = `WITH t AS (SELECT n.oid FROM pg_catalog.pg_namespace n WHERE n.nspname = $1),
-o AS (SELECT n.oid FROM pg_catalog.pg_namespace n WHERE n.nspname <> $1 AND n.nspname !~ '^pg_(toast|temp_|toast_temp_)')
-SELECT pg_catalog.concat_ws(',',
-  (SELECT pg_catalog.count(*) FROM pg_catalog.pg_namespace n WHERE n.oid NOT IN (SELECT oid FROM t) AND n.nspname !~ '^pg_(temp_|toast_temp_)'),
-  (SELECT pg_catalog.count(*) FROM pg_catalog.pg_class c WHERE c.relnamespace IN (SELECT oid FROM o)),
-  (SELECT pg_catalog.count(*) FROM pg_catalog.pg_constraint k WHERE k.connamespace IN (SELECT oid FROM o)),
-  (SELECT pg_catalog.count(*) FROM pg_catalog.pg_policy p JOIN pg_catalog.pg_class c ON c.oid = p.polrelid WHERE c.relnamespace IN (SELECT oid FROM o)),
-  (SELECT pg_catalog.count(*) FROM pg_catalog.pg_trigger g JOIN pg_catalog.pg_class c ON c.oid = g.tgrelid WHERE NOT g.tgisinternal AND c.relnamespace IN (SELECT oid FROM o)),
-  (SELECT pg_catalog.count(*) FROM pg_catalog.pg_proc f WHERE f.pronamespace IN (SELECT oid FROM o)),
-  (SELECT pg_catalog.count(*) FROM pg_catalog.pg_type y WHERE y.typnamespace IN (SELECT oid FROM o)),
-  (SELECT pg_catalog.count(*) FROM pg_catalog.pg_rewrite r JOIN pg_catalog.pg_class c ON c.oid = r.ev_class WHERE c.relnamespace IN (SELECT oid FROM o))
-) AS counts`;
-
-/**
- * Layer 4, writes: catalog rows written by THIS transaction (REPEATABLE READ: `age(xmin) <= 0` is this transaction or one of
- * its subtransactions; a concurrent commit is not in the snapshot) that belong to anything outside the target schema. The
- * target's own TOAST relations and the internal RI triggers of the target's own constraints are allowed.
- */
-export const OUTSIDE_WRITES_SQL = `WITH t AS (SELECT n.oid FROM pg_catalog.pg_namespace n WHERE n.nspname = $1),
-inside AS (
-  SELECT c.oid FROM pg_catalog.pg_class c WHERE c.relnamespace IN (SELECT oid FROM t)
-  UNION ALL SELECT c.reltoastrelid FROM pg_catalog.pg_class c WHERE c.relnamespace IN (SELECT oid FROM t) AND c.reltoastrelid <> 0
-  UNION ALL SELECT i.indexrelid FROM pg_catalog.pg_index i JOIN pg_catalog.pg_class c ON c.reltoastrelid = i.indrelid
-             WHERE c.relnamespace IN (SELECT oid FROM t) AND c.reltoastrelid <> 0),
-w AS (
-  SELECT 'schema ' || n.nspname AS what FROM pg_catalog.pg_namespace n WHERE pg_catalog.age(n.xmin) <= 0 AND n.oid NOT IN (SELECT oid FROM t)
-  UNION ALL SELECT 'relation ' || c.oid::pg_catalog.regclass::text FROM pg_catalog.pg_class c WHERE pg_catalog.age(c.xmin) <= 0 AND c.oid NOT IN (SELECT oid FROM inside)
-  UNION ALL SELECT 'column ' || a.attrelid::pg_catalog.regclass::text || '.' || a.attname FROM pg_catalog.pg_attribute a
-             WHERE pg_catalog.age(a.xmin) <= 0 AND a.attrelid NOT IN (SELECT oid FROM inside)
-  UNION ALL SELECT 'constraint ' || k.conname FROM pg_catalog.pg_constraint k WHERE pg_catalog.age(k.xmin) <= 0 AND k.connamespace NOT IN (SELECT oid FROM t)
-  UNION ALL SELECT 'trigger ' || g.tgname FROM pg_catalog.pg_trigger g WHERE pg_catalog.age(g.xmin) <= 0 AND g.tgrelid NOT IN (SELECT oid FROM inside)
-             AND NOT (g.tgisinternal AND EXISTS (SELECT 1 FROM pg_catalog.pg_constraint k WHERE k.oid = g.tgconstraint AND k.connamespace IN (SELECT oid FROM t)))
-  UNION ALL SELECT 'policy ' || p.polname FROM pg_catalog.pg_policy p WHERE pg_catalog.age(p.xmin) <= 0 AND p.polrelid NOT IN (SELECT oid FROM inside)
-  UNION ALL SELECT 'function ' || f.proname FROM pg_catalog.pg_proc f WHERE pg_catalog.age(f.xmin) <= 0 AND f.pronamespace NOT IN (SELECT oid FROM t)
-  UNION ALL SELECT 'type ' || y.typname FROM pg_catalog.pg_type y WHERE pg_catalog.age(y.xmin) <= 0 AND y.typnamespace NOT IN (SELECT oid FROM t)
-  UNION ALL SELECT 'index ' || x.indexrelid::pg_catalog.regclass::text FROM pg_catalog.pg_index x WHERE pg_catalog.age(x.xmin) <= 0 AND x.indrelid NOT IN (SELECT oid FROM inside)
-  UNION ALL SELECT 'default ' || d.adrelid::pg_catalog.regclass::text FROM pg_catalog.pg_attrdef d WHERE pg_catalog.age(d.xmin) <= 0 AND d.adrelid NOT IN (SELECT oid FROM inside)
-  UNION ALL SELECT 'rule ' || r.rulename FROM pg_catalog.pg_rewrite r WHERE pg_catalog.age(r.xmin) <= 0 AND r.ev_class NOT IN (SELECT oid FROM inside)
-  UNION ALL SELECT 'default privileges' FROM pg_catalog.pg_default_acl a WHERE pg_catalog.age(a.xmin) <= 0 AND a.defaclnamespace NOT IN (SELECT oid FROM t))
-SELECT what FROM w LIMIT 10`;
-
 interface Invariants {
   pid: number;
   tx: string;
   role: string;
   search_path: string;
+  who: string;
   org: string;
   ws: string;
   scope: string;
@@ -254,6 +240,7 @@ interface Invariants {
 
 export class WorkspaceCommandRunner {
   private major: FingerprintMajor | null = null;
+  private baselineSearchPath: string | null = null;
 
   constructor(private readonly options: WorkspaceRunOptions) {}
 
@@ -261,85 +248,132 @@ export class WorkspaceCommandRunner {
     return Math.max(100, Math.min(this.options.lockTimeoutMs ?? 5_000, 60_000));
   }
 
-  /** Runs every workspace; never throws for one workspace's failure (reported). Throws only for a run-level problem. */
+  /** Runs every workspace; never throws for one workspace's failure (reported). Throws only for a run-level fault. */
   async run(session: UpgradeSession): Promise<WorkspaceRunReport> {
     const { codeVersion, versions, log, registry, workspaceRegistry, force } = this.options;
     const sequence = sequenceForVersions([...versions, codeVersion], registry, workspaceRegistry);
     const levels = structureLevels(sequence);
-    const workspaces = await listReadyWorkspaces(session.query, this.options.workspaceIds);
+    const scan = await scanReadyWorkspaces(session.query, this.options.workspaceIds);
+    const workspaces = scan.ready;
     if (workspaces.length) this.major = await selectWorkspaceFingerprintsForServer(session.query as (sql: string) => Promise<Array<Record<string, unknown>>>);
+    this.baselineSearchPath = ((await session.query(SESSION_CLEAN_SQL)) as Array<{ search_path: string }>)[0]?.search_path ?? null;
     const cursors = await withUpgradeScope(session, 'upgrade', (q) => getWorkspaceCursors(q, workspaces.map((w) => w.workspaceId)));
-    const adoptedName = lastStepOfVersion(codeVersion, registry, workspaceRegistry);
+    // Adopted workspaces are at the frozen template (structure 20): their cursor is the code version's last INSTANCE step, so
+    // every workspace step of the adoption release still runs for them.
+    const adoptedName = lastInstanceStepOfVersion(codeVersion, registry);
     const report: WorkspaceRunReport = { outcomes: [], failures: [] };
     const total = workspaces.length;
     log(`workspace upgrade (${codeVersion}${force ? ', --force' : ''}): ${total} READY workspace(s)`);
 
+    for (const id of scan.mismatched) {
+      const outcome: WorkspaceOutcome = { workspaceId: id, status: 'refused', step: `${codeVersion}_WorkspaceRegistry`, errorClass: 'NAME_MISMATCH', completed: [] };
+      report.outcomes.push(outcome);
+      report.failures.push(outcome);
+      log(`ERROR: workspace ${id}: its registry schema name differs from the derived name; refused, nothing run`);
+    }
+
     for (const [index, ws] of workspaces.entries()) {
       const outcome: WorkspaceOutcome = { workspaceId: ws.workspaceId, status: 'up-to-date', completed: [] };
       report.outcomes.push(outcome);
-      let cursor: Pick<WorkspaceCursor, 'name' | 'status'> | undefined = cursors.get(ws.workspaceId);
-
-      if (!cursor) {
-        if (!this.options.adopt) {
-          Object.assign(outcome, { status: 'refused', step: `${codeVersion}_WorkspaceCursor`, errorClass: 'NO_CURSOR' });
-          report.failures.push(outcome);
-          log(`ERROR: workspace ${ws.workspaceId} (${index + 1}/${total}) has no upgrade logbook row (only ${ADOPTION_RELEASE_VERSION} adopts the workspace-module history); refused, nothing run`);
-          continue;
-        }
-        const refusal = await this.adopt(session, ws, adoptedName);
-        if (refusal) {
-          Object.assign(outcome, { status: 'refused', step: `${codeVersion}_WorkspaceAdoption`, errorClass: refusal });
-          report.failures.push(outcome);
-          log(`ERROR: workspace ${ws.workspaceId} (${index + 1}/${total}) not adopted (${refusal}); no row written, retried on the next start`);
-          continue;
-        }
-        outcome.status = 'adopted';
-        cursor = { name: adoptedName, status: 'completed' };
-        log(`workspace ${ws.workspaceId} (${index + 1}/${total}) adopted: is_initial row ${adoptedName}`);
+      try {
+        if (this.options.onBeforeWorkspace) await this.options.onBeforeWorkspace(ws.workspaceId);
+        await this.runWorkspace(session, ws, sequence, levels, cursors.get(ws.workspaceId), adoptedName, outcome, `${index + 1}/${total}`);
+      } catch (error) {
+        // L1: a per-workspace fault outside a step (a logbook write, adoption, a workspace deleted mid-run) is reported
+        // against that workspace; only a run-level fault (the session is unusable) stops the run.
+        if (error instanceof WorkspaceRunFault || error instanceof UpgradeSessionError) throw error;
+        const code = (error as { code?: unknown })?.code;
+        Object.assign(outcome, {
+          status: 'refused',
+          step: outcome.step ?? `${codeVersion}_WorkspaceRun`,
+          errorClass: code === '23503' ? 'WORKSPACE_GONE' : error instanceof WorkspaceStepRefused ? error.errorClass : errorClassOf(error),
+        });
+        report.failures.push(outcome);
+        log(`ERROR: workspace ${ws.workspaceId}: ${outcome.errorClass} outside a step; refused, the next start retries it`);
+        await this.assertSessionClean(session.query);
       }
-
-      const pending = pendingWorkspaceSteps(sequence, codeVersion, cursor);
-      if (pending === null) {
-        const v = versionOfStep(cursor.name);
-        if (v !== null && compareVersions(v, codeVersion) > 0) {
-          outcome.status = 'ahead';
-          log(`WARNING: workspace ${ws.workspaceId} is at ${cursor.name}, newer than this code (${codeVersion}): rollback, nothing run`);
-        } else {
-          Object.assign(outcome, { status: 'refused', step: `${codeVersion}_WorkspaceCursor`, errorClass: 'UNKNOWN_CURSOR' });
-          report.failures.push(outcome);
-          log(`ERROR: workspace ${ws.workspaceId}: its cursor is not a step this code knows; refused, nothing run`);
-        }
-        continue;
-      }
-
-      for (const step of pending) {
-        const command = step.command!;
-        try {
-          await this.runStep(session, ws, step.name, command, levels);
-        } catch (error) {
-          const attempt = await withUpgradeScope(session, 'upgrade', (q) =>
-            recordWorkspaceUpgradeMigration(q, { name: step.name, workspaceId: ws.workspaceId, status: 'failed', executedByVersion: codeVersion, forced: force, error }),
-          );
-          Object.assign(outcome, {
-            status: 'failed',
-            step: step.name,
-            errorClass: error instanceof WorkspaceStepRefused ? error.errorClass : errorClassOf(error),
-            attempt,
-          });
-          report.failures.push(outcome);
-          log(`ERROR: workspace ${ws.workspaceId} (${index + 1}/${total}): ${step.name} FAILED (attempt ${attempt}, ${outcome.errorClass}); rolled back, its later steps skipped, the next start retries it`);
-          break;
-        }
-        const attempt = await withUpgradeScope(session, 'upgrade', (q) =>
-          recordWorkspaceUpgradeMigration(q, { name: step.name, workspaceId: ws.workspaceId, status: 'completed', executedByVersion: codeVersion, forced: force }),
-        );
-        outcome.completed.push(step.name);
-        if (outcome.status === 'up-to-date') outcome.status = 'upgraded';
-        log(`workspace ${ws.workspaceId} (${index + 1}/${total}): ${step.name} completed (attempt ${attempt})`);
-      }
+      if (outcome.status === 'failed' && !report.failures.includes(outcome)) report.failures.push(outcome);
     }
     log(`workspace upgrade: ${report.outcomes.length - report.failures.length} ok, ${report.failures.length} failed or refused`);
     return report;
+  }
+
+  private async runWorkspace(
+    session: UpgradeSession,
+    ws: ReadyWorkspace,
+    sequence: readonly SequenceStep[],
+    levels: Map<number, WorkspaceStructureDeclaration>,
+    found: WorkspaceCursor | undefined,
+    adoptedName: string,
+    outcome: WorkspaceOutcome,
+    position: string,
+  ): Promise<void> {
+    const { codeVersion, log, force } = this.options;
+    let cursor: Pick<WorkspaceCursor, 'name' | 'status'> | undefined = found;
+    if (!cursor) {
+      if (!this.options.adopt) {
+        Object.assign(outcome, { status: 'refused', step: `${codeVersion}_WorkspaceCursor`, errorClass: 'NO_CURSOR' });
+        log(`ERROR: workspace ${ws.workspaceId} (${position}) has no upgrade logbook row (only ${ADOPTION_RELEASE_VERSION} adopts the workspace-module history); refused, nothing run`);
+        throw new WorkspaceStepRefused('NO_CURSOR', 'no cursor');
+      }
+      const refusal = await this.adopt(session, ws, adoptedName);
+      if (refusal) {
+        Object.assign(outcome, { status: 'refused', step: `${codeVersion}_WorkspaceAdoption`, errorClass: refusal });
+        log(`ERROR: workspace ${ws.workspaceId} (${position}) not adopted (${refusal}); no row written, retried on the next start`);
+        throw new WorkspaceStepRefused(refusal, 'adoption refused');
+      }
+      outcome.status = 'adopted';
+      cursor = { name: adoptedName, status: 'completed' };
+      log(`workspace ${ws.workspaceId} (${position}) adopted: is_initial row ${adoptedName}`);
+    }
+
+    const pending = pendingWorkspaceSteps(sequence, codeVersion, cursor);
+    if (pending === null) {
+      const v = versionOfStep(cursor.name);
+      if (v !== null && compareVersions(v, codeVersion) > 0) {
+        outcome.status = 'ahead';
+        log(`WARNING: workspace ${ws.workspaceId} is at ${cursor.name}, newer than this code (${codeVersion}): rollback, nothing run`);
+        return;
+      }
+      Object.assign(outcome, { status: 'refused', step: `${codeVersion}_WorkspaceCursor`, errorClass: 'UNKNOWN_CURSOR' });
+      log(`ERROR: workspace ${ws.workspaceId}: its cursor is not a step this code knows; refused, nothing run`);
+      throw new WorkspaceStepRefused('UNKNOWN_CURSOR', 'unknown cursor');
+    }
+
+    for (const step of pending) {
+      const command = step.command!;
+      let stepError: unknown = null;
+      try {
+        await this.runStep(session, ws, step.name, command, levels);
+      } catch (error) {
+        stepError = error;
+      }
+      // L2: whatever happened, the session must carry nothing into the next workspace (a session-level SET leaks past COMMIT).
+      const dirty = await this.assertSessionClean(session.query);
+      if (!stepError && dirty) stepError = new WorkspaceStepRefused('SESSION_LEAK', `${step.name} left session-level state behind (${dirty}); it was reset`);
+      if (stepError) {
+        if (stepError instanceof WorkspaceRunFault || stepError instanceof UpgradeSessionError) throw stepError;
+        outcome.step = step.name;
+        const attempt = await withUpgradeScope(session, 'upgrade', (q) =>
+          recordWorkspaceUpgradeMigration(q, { name: step.name, workspaceId: ws.workspaceId, status: 'failed', executedByVersion: codeVersion, forced: force, error: stepError }),
+        );
+        Object.assign(outcome, {
+          status: 'failed',
+          errorClass: stepError instanceof WorkspaceStepRefused ? stepError.errorClass : errorClassOf(stepError),
+          attempt,
+        });
+        log(`ERROR: workspace ${ws.workspaceId} (${position}): ${step.name} FAILED (attempt ${attempt}, ${outcome.errorClass}); its later steps skipped, the next start retries it`);
+        return;
+      }
+      outcome.step = step.name;
+      const attempt = await withUpgradeScope(session, 'upgrade', (q) =>
+        recordWorkspaceUpgradeMigration(q, { name: step.name, workspaceId: ws.workspaceId, status: 'completed', executedByVersion: codeVersion, forced: force }),
+      );
+      outcome.step = undefined;
+      outcome.completed.push(step.name);
+      if (outcome.status === 'up-to-date') outcome.status = 'upgraded';
+      log(`workspace ${ws.workspaceId} (${position}): ${step.name} completed (attempt ${attempt})`);
+    }
   }
 
   /** Adoption (D-RUNNER.md §5). Returns null when adopted, else the refusal class. */
@@ -352,7 +386,7 @@ export class WorkspaceCommandRunner {
       const level = await this.lockRegistry(q, ws);
       if (level < LATEST_WORKSPACE_MODULE_VERSION) refusal = 'BEHIND';
       else if (level > LATEST_WORKSPACE_MODULE_VERSION) refusal = 'AHEAD';
-      else refusal = await this.structureProblem(q, ws, level);
+      else refusal = (await this.extraStructureProblem(q, ws)) ?? (await this.structureProblem(q, ws, level));
       await q('COMMIT');
     } catch (error) {
       await q('ROLLBACK').catch(() => undefined);
@@ -402,23 +436,32 @@ export class WorkspaceCommandRunner {
       const changed = (Object.keys(before) as Array<keyof Invariants>).filter((k) => String(before[k]) !== String(after[k]));
       if (changed.length) throw new WorkspaceStepRefused('SESSION_CHANGED', `${name} changed ${changed.join(', ')} (it must not end the transaction, re-bind or change role)`);
 
-      // Layer 4: nothing outside this workspace schema was written or dropped by this transaction.
+      // Layer 4: nothing outside this workspace schema was written or dropped by this transaction: catalog rows (xmin), object
+      // counts, and (M1) data rows of any other table and the role / database / publication catalogs (per-transaction counters).
       const outside = (await q(OUTSIDE_WRITES_SQL, [ws.schemaName])) as Array<{ what: string }>;
       if (outside.length) throw new WorkspaceStepRefused('OUTSIDE_SCHEMA', `${name} changed objects outside ${ws.schemaName}: ${outside.map((o) => o.what).join('; ')}`);
       const [countsAfter] = (await q(OUTSIDE_COUNTS_SQL, [ws.schemaName])) as Array<{ counts: string }>;
       if (countsBefore?.counts !== countsAfter?.counts) throw new WorkspaceStepRefused('OUTSIDE_SCHEMA', `${name} added or dropped objects outside ${ws.schemaName}`);
+      const data = (await q(OUTSIDE_DATA_WRITES_SQL, [ws.schemaName])) as Array<{ what: string }>;
+      if (data.length) throw new WorkspaceStepRefused('OUTSIDE_SCHEMA', `${name} wrote outside ${ws.schemaName}: ${data.map((o) => o.what).join('; ')}`);
 
-      // Layer 5: the structure check (the fingerprint safety, kept inside the runner).
+      // Layer 5: what the v1 fingerprint does not hash (M2), then the level (bumped BEFORE the verify function, M3: it may read
+      // module_version), then verify + fingerprint == the expected one of that level.
+      const extra = await this.extraStructureProblem(q, ws);
+      if (extra) throw new WorkspaceStepRefused(extra, `${name}: the workspace has structure the template does not allow`);
+      if (target !== level) {
+        await q(`UPDATE core.workspace_schema_registry SET module_version = $2, last_migrated_at = now() WHERE workspace_id = $1`, [ws.workspaceId, target]);
+      }
       const problem = await this.structureProblem(q, ws, target);
       if (problem) throw new WorkspaceStepRefused(problem, `${name}: the workspace structure after the step is not structure level ${target}`);
       if (target !== level) {
         const [fp] = (await q('SELECT core.workspace_schema_fingerprint($1) AS f', [ws.workspaceId])) as Array<{ f: string }>;
         await q(
           `UPDATE core.workspace_schema_registry
-              SET module_version = $2, expected_fingerprint = $3, observed_fingerprint = $3, fingerprint_checked_at = now(),
-                  drift_status = 'OK', drift_detail = NULL, migration_error = NULL, last_migrated_at = now()
+              SET expected_fingerprint = $2, observed_fingerprint = $2, fingerprint_checked_at = now(),
+                  drift_status = 'OK', drift_detail = NULL, migration_error = NULL
             WHERE workspace_id = $1`,
-          [ws.workspaceId, target, fp!.f],
+          [ws.workspaceId, fp!.f],
         );
       }
       await q('COMMIT');
@@ -428,14 +471,46 @@ export class WorkspaceCommandRunner {
     }
   }
 
-  /** Role (M-T2, as WorkspaceSchemaMigrator.actAsMigrationRole), search_path, tenant binding, per-schema lock. Inside a transaction. */
+  /**
+   * L2: after COMMIT / ROLLBACK nothing may remain at session level. Returns null when clean; otherwise resets the session
+   * (role none, every rab.* empty) and returns what was found. Throws a run-level fault when it cannot be made clean.
+   */
+  private async assertSessionClean(q: Query): Promise<string | null> {
+    const read = async () => ((await q(SESSION_CLEAN_SQL)) as Array<{ role: string; same_user: boolean; search_path: string; rab: string }>)[0]!;
+    const found = await read().catch(() => null);
+    const describe = (s: { role: string; same_user: boolean; search_path: string; rab: string }) =>
+      [
+        s.role !== 'none' ? `role=${s.role}` : '',
+        s.same_user ? '' : 'current_user<>session_user',
+        this.baselineSearchPath !== null && s.search_path !== this.baselineSearchPath ? 'search_path' : '',
+        s.rab ? `settings=${s.rab}` : '',
+      ]
+        .filter(Boolean)
+        .join(', ');
+    const problem = found ? describe(found) : 'unreadable session';
+    if (!problem) return null;
+    await q('ROLLBACK').catch(() => undefined);
+    await q(SESSION_RESET_SQL).catch(() => undefined);
+    if (this.baselineSearchPath !== null) await q(`SELECT pg_catalog.set_config('search_path', $1, false)`, [this.baselineSearchPath]).catch(() => undefined);
+    const again = await read().catch(() => null);
+    if (!again || describe(again)) throw new WorkspaceRunFault(`the migration session could not be reset after a workspace step (${problem}). Refusing to continue.`);
+    return problem;
+  }
+
+  /**
+   * Role (M-T2, as WorkspaceSchemaMigrator.actAsMigrationRole), search_path, tenant binding, per-schema lock. Inside a
+   * transaction. L2: a session that is neither allowed nor able to SET ROLE crewflow is refused (never fail-open).
+   */
   private async enterWorkspace(q: Query, ws: ReadyWorkspace): Promise<void> {
     const [r] = (await q(
       `SELECT (current_user IN ('crewflow'::name, 'rab_secure_owner'::name)
                OR coalesce((SELECT x.rolsuper FROM pg_catalog.pg_roles x WHERE x.rolname = current_user), false)) AS allowed,
               EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = 'crewflow') AND pg_catalog.pg_has_role(current_user, 'crewflow', 'SET') AS can_set`,
     )) as Array<{ allowed: boolean; can_set: boolean }>;
-    if (!r?.allowed && r?.can_set) await q(`SELECT pg_catalog.set_config('role', 'crewflow', true)`);
+    if (!r?.allowed) {
+      if (!r?.can_set) throw new WorkspaceStepRefused('NO_MIGRATION_ROLE', 'this session is neither crewflow nor able to SET ROLE crewflow');
+      await q(`SELECT pg_catalog.set_config('role', 'crewflow', true)`);
+    }
     await q(`SELECT pg_catalog.set_config('search_path', 'pg_catalog, pg_temp', true)`);
     await q(`SELECT pg_catalog.set_config('rab.organisation_id', $1, true), pg_catalog.set_config('rab.workspace_id', $2, true)`, [ws.organisationId, ws.workspaceId]);
     await q('SELECT pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtext($1))', [ws.schemaName]);
@@ -458,6 +533,12 @@ export class WorkspaceCommandRunner {
     return row!;
   }
 
+  /** M2: null when the target has none of the structure the v1 fingerprint cannot see, else 'STRUCTURE_EXTRA'. */
+  private async extraStructureProblem(q: Query, ws: ReadyWorkspace): Promise<string | null> {
+    const rows = (await q(TARGET_EXTRA_STRUCTURE_SQL, [ws.schemaName])) as Array<{ what: string }>;
+    return rows.length ? 'STRUCTURE_EXTRA' : null;
+  }
+
   /** null when the schema is exactly structure level `level` (verify function clean, fingerprint equal), else the class. */
   private async structureProblem(q: Query, ws: ReadyWorkspace, level: number): Promise<string | null> {
     const expected = this.expectedFingerprint(level);
@@ -473,8 +554,7 @@ export class WorkspaceCommandRunner {
     const major = this.major ?? 16;
     if (this.options.expectedFingerprint) return this.options.expectedFingerprint(level, major);
     if (level <= LATEST_WORKSPACE_MODULE_VERSION) return EXPECTED_WORKSPACE_FINGERPRINTS[level];
-    const { registry, workspaceRegistry, versions, codeVersion } = this.options;
-    return structureLevels(sequenceForVersions([...versions, codeVersion], registry, workspaceRegistry)).get(level)?.fingerprints[major];
+    return declaredFingerprint(level, major, this.options.workspaceRegistry);
   }
 }
 
@@ -485,4 +565,3 @@ export function errorClassOf(error: unknown): string {
   if (typeof code === 'string' && /^[0-9A-Z]{5}$/.test(code)) return `SQLSTATE_${code}`;
   return error instanceof Error && /^[A-Za-z][A-Za-z0-9]{0,60}$/.test(error.name) ? error.name : 'INTERNAL';
 }
-

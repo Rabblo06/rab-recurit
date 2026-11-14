@@ -5,6 +5,9 @@ import { LATEST_WORKSPACE_MODULE_VERSION, WORKSPACE_SCHEMA_MODULES } from './wor
 import { expectedWorkspaceIndexCount, KNOWN_WORKSPACE_INDEX_COUNTS } from './v1/server-path-template-archive-search';
 import { expectedWorkspacePolicyCount, KNOWN_WORKSPACE_POLICY_COUNTS } from './v1/server-path-template-venue-team-admin';
 import { pgClientRunner, WorkspaceMigrationRefused, WorkspaceSchemaMigrator } from './workspace-schema-migrator';
+import { workspaceFingerprintMajor } from './v1/expected-fingerprints';
+import type { WorkspaceUpgradeCommand } from '../../../engine/core-modules/upgrade/upgrade-commands/workspace-upgrade-command';
+import { codeWorkspaceStructureLevel, declaredFingerprint, structuralCommandsThrough } from '../../../engine/core-modules/upgrade/workspace-structure-level';
 
 /**
  * Reusable provisioner for a physical workspace schema (Hyper Workspace, Workspace Schema Version 1).
@@ -78,6 +81,11 @@ export interface ProvisionOptions {
    * Throwing here must roll everything back. Production callers never pass it.
    */
   afterApply?: (schemaName: string) => Promise<void>;
+  /**
+   * Part D test seam (specs only): the workspace upgrade registry whose structural commands extend the template (default
+   * WORKSPACE_UPGRADE_COMMANDS). Production callers never pass it.
+   */
+  workspaceRegistry?: Readonly<Record<string, readonly WorkspaceUpgradeCommand[]>>;
 }
 
 export interface ProvisionResult {
@@ -147,7 +155,9 @@ export async function provisionWorkspaceSchema(
       // ITS recorded module version (a v15 schema awaiting the migrator must not be declared broken — and FAILED — by a
       // newer image).
       const recorded = Number(reg.rows[0]!.module_version ?? 0);
-      await verifyStructure(client, schemaName, workspaceId, recorded > 0 ? recorded : undefined);
+      // Part D: a level above the frozen 20 modules is verified by the workspace command runner's structure check (its
+      // fingerprint), not by the module-version counts this file knows.
+      if (recorded <= LATEST_WORKSPACE_MODULE_VERSION) await verifyStructure(client, schemaName, workspaceId, recorded > 0 ? recorded : undefined);
       await client.query('COMMIT');
       return { workspaceId, schemaName, outcome: 'ALREADY_READY', schemaVersion: WORKSPACE_SCHEMA_VERSION };
     }
@@ -166,6 +176,13 @@ export async function provisionWorkspaceSchema(
     await bindWorkspace(client, schemaName, workspaceId);
     if (options.afterApply) await options.afterApply(schemaName);
     await verifyStructure(client, schemaName, workspaceId, LATEST_WORKSPACE_MODULE_VERSION);
+    // Part D (security review M3): the current template = the 20 frozen modules + this code's structural workspace upgrade
+    // commands (in level order), so a new workspace starts at the code's structure level, like its is_initial cursor says.
+    const level = codeWorkspaceStructureLevel(options.workspaceRegistry);
+    for (const s of structuralCommandsThrough(level, options.workspaceRegistry)) {
+      if (!s.command.sql) throw new WorkspaceSchemaProvisioningError('a structural workspace command has no sql', 'apply');
+      await client.query(s.command.sql(schemaName));
+    }
 
     // One call moves the registry and manager_workspace to READY together.
     await client.query('SELECT core.mark_workspace_schema_ready($1, $2)', [workspaceId, WORKSPACE_SCHEMA_VERSION]);
@@ -177,6 +194,7 @@ export async function provisionWorkspaceSchema(
       LATEST_WORKSPACE_MODULE_VERSION,
       started.rows[0]!.t,
       process.env.CREWFLOW_APP_VERSION ?? 'provisioner:typescript',
+      level > LATEST_WORKSPACE_MODULE_VERSION ? { level, expectedFingerprint: declaredFingerprint(level, workspaceFingerprintMajor(), options.workspaceRegistry) } : undefined,
     );
     await client.query('COMMIT');
   } catch (error) {

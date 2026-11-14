@@ -1,10 +1,8 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { EntityManager } from 'typeorm';
 
-import {
-  LATEST_WORKSPACE_MODULE_VERSION,
-  MIN_COMPATIBLE_WORKSPACE_MODULE_VERSION,
-} from '../../../database/typeorm/workspace-schema/workspace-schema-modules';
+import { MIN_COMPATIBLE_WORKSPACE_MODULE_VERSION } from '../../../database/typeorm/workspace-schema/workspace-schema-modules';
+import { codeWorkspaceStructureLevel } from '../upgrade/workspace-structure-level';
 import { CachedResolvedSchema, WorkspaceMetadataCacheService } from '../entity-cache/workspace-metadata-cache.service';
 
 /**
@@ -120,11 +118,12 @@ export class SchemaResolverService {
       await this.workspaceMetadataCache.invalidate(workspaceId);
       resolved = await fetch();
     }
-    if ((resolved.moduleVersion ?? 0) > LATEST_WORKSPACE_MODULE_VERSION && !this.warnedAhead.has(workspaceId)) {
+    const codeLevel = codeWorkspaceStructureLevel();
+    if ((resolved.moduleVersion ?? 0) > codeLevel && !this.warnedAhead.has(workspaceId)) {
       // c2 (image rollback after a module migration): old code on a superset schema is allowed; report it once.
       this.warnedAhead.add(workspaceId);
       this.logger.warn(
-        `workspace ${workspaceId} schema is at module ${resolved.moduleVersion}, above this code's module ${LATEST_WORKSPACE_MODULE_VERSION} (an image rollback); routing continues`,
+        `workspace ${workspaceId} schema is at module ${resolved.moduleVersion}, above this code's module (structure level) ${codeLevel} (an image rollback); routing continues`,
       );
     }
     // Unreachable unless fetch() itself broke its contract (it throws 'name-mismatch'); fail closed regardless.

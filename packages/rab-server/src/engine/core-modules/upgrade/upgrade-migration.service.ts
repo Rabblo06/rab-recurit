@@ -272,6 +272,17 @@ export async function markNewWorkspaceInitial(query: Query, workspace: SavedWork
   return markAsWorkspaceInitial(query, { workspaceId: workspace.id, name: lastStepOfVersion(version), status: 'completed', executedByVersion: version });
 }
 
+/** Of these workspace ids, the ones with no logbook row at all (scope 'upgrade' or 'status'). */
+export async function workspacesWithoutRows(query: Query, workspaceIds: readonly string[]): Promise<string[]> {
+  if (!workspaceIds.length) return [];
+  const rows = (await query(
+    `SELECT w.id::text AS id FROM pg_catalog.unnest($1::uuid[]) AS w(id)
+      WHERE NOT EXISTS (SELECT 1 FROM core.upgrade_migration m WHERE m.workspace_id = w.id)`,
+    [workspaceIds],
+  )) as Array<{ id: string }>;
+  return rows.map((r) => r.id);
+}
+
 // ---------------------------------------------------------------------------------------------------------------------
 // OWNER-DB-ULTIMATE Part D: per-workspace rows (workspace_id set), read and written by the workspace command runner on the
 // LOCKED migration session under scope 'upgrade' (no tenant bound; the instance INSERT policy admits a workspace_id and the
@@ -342,19 +353,17 @@ export async function adoptWorkspaceInitial(query: Query, input: { workspaceId: 
 }
 
 /**
- * For the status read (scope 'status'): how many workspaces have a cursor that is a FAILED row among `names` (the workspace
- * steps of the app version). Never a workspace id or a message.
+ * For the status read (scope 'status'): how many workspaces have a FAILED cursor, whatever the step (security review M4: a
+ * failed step of an earlier version, e.g. left behind by --force, counts too). Never a workspace id or a message.
  */
-export async function countFailedWorkspaceCursors(query: Query, names: readonly string[]): Promise<number> {
-  if (!names.length) return 0;
+export async function countFailedWorkspaceCursors(query: Query): Promise<number> {
   const [row] = (await query(
     `SELECT pg_catalog.count(*)::int AS n FROM (
        SELECT DISTINCT ON (m.workspace_id) m.workspace_id, m.name, m.status
          FROM core.upgrade_migration m
         WHERE m.workspace_id IS NOT NULL
         ORDER BY m.workspace_id, m.created_at DESC, m.attempt DESC) c
-      WHERE c.status = 'failed' AND c.name = ANY($1::text[])`,
-    [names],
+      WHERE c.status = 'failed'`,
   )) as Array<{ n: number }>;
   return Number(row?.n ?? 0);
 }

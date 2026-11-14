@@ -19,6 +19,9 @@
  */
 import type { Query } from '../upgrade-migration.service';
 
+// Source guard (workspace-command-runner.spec.ts): files under upgrade-commands/ import only types and reach the database
+// only through ctx.query (no connection object, no driver, no Nest providers).
+
 export interface WorkspaceUpgradeCommandContext {
   /** The validated, derived schema `workspace_<32 hex>` of this workspace. */
   readonly schemaName: string;
@@ -34,6 +37,12 @@ export interface WorkspaceStructureDeclaration {
   readonly level: number;
   /** Expected `core.workspace_schema_fingerprint` after this command, per PostgreSQL major (16, 17, 18). */
   readonly fingerprints: Readonly<Partial<Record<16 | 17 | 18, string>>>;
+  /**
+   * The `db:provision_workspace@<Migration>` literal of the owner-reviewed core migration that re-creates
+   * core.provision_workspace over the template through this level (D-RUNNER.md §5.3). The compatibility gates map it to
+   * this level; without it the SQL provisioner is reported "behind" and the API / Worker refuse to start.
+   */
+  readonly provisionFunctionLiteral?: string;
 }
 
 export interface WorkspaceUpgradeCommand {

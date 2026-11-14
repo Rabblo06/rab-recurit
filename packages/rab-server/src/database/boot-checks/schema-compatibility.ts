@@ -26,7 +26,7 @@
  */
 import { RETIRED_MIGRATIONS } from '../typeorm/core/retired-migrations';
 import { describeProvisionFunctionState, ProvisionFunctionState, readProvisionFunctionState } from '../typeorm/workspace-schema/provision-function-versions';
-import { LATEST_WORKSPACE_MODULE_VERSION } from '../typeorm/workspace-schema/workspace-schema-modules';
+import { codeWorkspaceStructureLevel } from '../../engine/core-modules/upgrade/workspace-structure-level';
 
 export type CompatibilityProcess = 'api' | 'worker' | 'cli' | 'provisioner' | 'migrate-apply' | 'migrate-check';
 /** 'refuse-in-production': refuse when the process is production, warn otherwise. */
@@ -162,6 +162,12 @@ export interface AssessOptions {
   production: boolean;
   retired?: readonly string[];
   latestModuleVersion?: number;
+  /**
+   * Part D (security review M3): below this a READY workspace is "behind" (default: latestModuleVersion). The locked start's
+   * post-check passes the frozen template level (20): levels 20..code level are the workspace command runner's job, which runs
+   * right after the post-checks in the same locked run.
+   */
+  floorModuleVersion?: number;
 }
 
 /**
@@ -212,7 +218,8 @@ export function compareLedger(expected: readonly string[], applied: readonly str
 /** The whole decision. Pure: facts in, refusals and warnings out. */
 export function assessSchemaCompatibility(process: CompatibilityProcess, facts: SchemaCompatibilityFacts, options: AssessOptions): SchemaCompatibilityAssessment {
   const policy = POLICIES[process];
-  const latest = options.latestModuleVersion ?? LATEST_WORKSPACE_MODULE_VERSION;
+  // Part D (security review M3): the code's structure level (20 + its structural workspace commands), not the frozen module 20.
+  const latest = options.latestModuleVersion ?? codeWorkspaceStructureLevel();
   const ledger = compareLedger(facts.expected, facts.applied, options.retired ?? RETIRED_MIGRATIONS);
   const result: SchemaCompatibilityAssessment = { process, ...ledger, refusals: [], warnings: [] };
   const pendingMessage = `${ledger.pending.length} migration(s) are not applied: ${show(ledger.pending)}.`;
@@ -256,10 +263,11 @@ export function assessSchemaCompatibility(process: CompatibilityProcess, facts: 
   }
 
   if (facts.workspaces) {
-    const behind = facts.workspaces.filter((w) => w.moduleVersion < latest);
+    const floor = Math.min(options.floorModuleVersion ?? latest, latest);
+    const behind = facts.workspaces.filter((w) => w.moduleVersion < floor);
     const ahead = facts.workspaces.filter((w) => w.moduleVersion > latest);
     const list = (ws: readonly WorkspaceModuleLevel[]) => show(ws.map((w) => `${w.workspaceId}@${w.moduleVersion}`));
-    if (behind.length) apply(policy.workspaceBehind, 'workspace-behind', `${behind.length} READY workspace(s) are below module ${latest}: ${list(behind)}.`);
+    if (behind.length) apply(policy.workspaceBehind, 'workspace-behind', `${behind.length} READY workspace(s) are below module ${floor}: ${list(behind)}.`);
     if (ahead.length) apply(policy.workspaceAhead, 'workspace-ahead', `${ahead.length} READY workspace(s) are above this code's module ${latest}: ${list(ahead)}.`);
   }
   return result;
@@ -307,7 +315,7 @@ export async function readLedgerNames(query: CompatibilityQuery, label: string):
  * migration identity through it); each registry row is read with that workspace's organisation bound (the registry is
  * FORCE RLS), one short transaction per workspace — the same access path as the drift detector. Never the runtime role.
  */
-export async function readReadyWorkspaceModuleLevels(query: CompatibilityQuery, pageSize = 100): Promise<WorkspaceModuleLevel[]> {
+export async function readReadyWorkspaceModuleLevels(query: CompatibilityQuery, pageSize = 100, only?: readonly string[]): Promise<WorkspaceModuleLevel[]> {
   const out: WorkspaceModuleLevel[] = [];
   let after: string | null = null;
   for (;;) {
@@ -316,6 +324,7 @@ export async function readReadyWorkspaceModuleLevels(query: CompatibilityQuery, 
       organisation_id: string;
     }>;
     for (const ws of page) {
+      if (only && !only.includes(ws.workspace_id)) continue;
       await query('BEGIN');
       try {
         await query(`SELECT pg_catalog.set_config('rab.organisation_id', $1, true)`, [ws.organisation_id]);
