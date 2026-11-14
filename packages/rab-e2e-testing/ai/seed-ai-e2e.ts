@@ -67,6 +67,9 @@ async function main(): Promise<void> {
   const { TenantContextService } = await import('../../rab-server/src/engine/core-modules/tenant/tenant-context.service');
   const { createAdminDataSource } = await import('../../rab-server/src/__tests__/integration/helpers/admin-datasource');
   const { TestIdentityFactory } = await import('../../rab-server/src/__tests__/integration/helpers/test-identities');
+  // Part C1: HWS routing is on by default outside production; business rows go where the API reads them (the workspace's
+  // schema with HWS on, the core copy with it off).
+  const { businessTable } = await import('../../rab-server/src/__tests__/integration/helpers/hws-fixtures');
   type Identity = Awaited<ReturnType<InstanceType<typeof TestIdentityFactory>['createCeo']>>;
 
   const moduleRef = await Test.createTestingModule({ imports: [AppModule] }).compile();
@@ -95,10 +98,10 @@ async function main(): Promise<void> {
     const ws = ownerId.workspaceId!;
     const staff: Identity[] = [];
     for (let i = 0; i < 4; i++) staff.push(await factory.createStaff({ id: org }, { owner: ownerId, label: `e2estaff${i}` }) as Identity);
-    const [venue] = await q(`INSERT INTO core.venue (organisation_id, name, created_by, workspace_id) VALUES ($1, $2, $3, $4) RETURNING id`, [org, opts.venue, ownerId.userId, ws]);
+    const [venue] = await q(`INSERT INTO ${businessTable(ws, 'venue')} (organisation_id, name, created_by, workspace_id) VALUES ($1, $2, $3, $4) RETURNING id`, [org, opts.venue, ownerId.userId, ws]);
     const roles: string[] = [];
     for (const name of opts.roles) {
-      const [r] = await q(`INSERT INTO core.job_role (organisation_id, name, default_rate_pence, created_by, workspace_id) VALUES ($1, $2, 1500, $3, $4) RETURNING id`, [org, name, ownerId.userId, ws]);
+      const [r] = await q(`INSERT INTO ${businessTable(ws, 'job_role')} (organisation_id, name, default_rate_pence, created_by, workspace_id) VALUES ($1, $2, 1500, $3, $4) RETURNING id`, [org, name, ownerId.userId, ws]);
       roles.push(r.id);
     }
     const shifts: string[] = [];
@@ -106,14 +109,14 @@ async function main(): Promise<void> {
     for (const def of opts.shifts) {
       const start = weekendStart(def.hour);
       const [row] = await q(
-        `INSERT INTO core.shift (organisation_id, venue_id, job_role_id, starts_at, ends_at, break_minutes, required_count, filled_count, pay_rate_pence, status, created_by, workspace_id)
+        `INSERT INTO ${businessTable(ws, 'shift')} (organisation_id, venue_id, job_role_id, starts_at, ends_at, break_minutes, required_count, filled_count, pay_rate_pence, status, created_by, workspace_id)
          VALUES ($1, $2, $3, $4, $5, 0, $6, $7, 1500, $8, $9, $10) RETURNING id`,
         [org, venue.id, roles[def.role], start, new Date(start.getTime() + 6 * H), def.required, def.confirmed, def.status, ownerId.userId, ws],
       );
       shifts.push(row.id);
       for (let c = 0; c < def.confirmed; c++) {
         await q(
-          `INSERT INTO core.shift_assignment (organisation_id, shift_id, staff_profile_id, status, pay_rate_snapshot_pence, assigned_by, confirmed_at, period, workspace_id)
+          `INSERT INTO ${businessTable(ws, 'shift_assignment')} (organisation_id, shift_id, staff_profile_id, status, pay_rate_snapshot_pence, assigned_by, confirmed_at, period, workspace_id)
            VALUES ($1, $2, $3, 'confirmed', 1500, $4, now(), tstzrange($5, $6), $7)`,
           [org, row.id, staff[s++ % staff.length]!.profileId, ownerId.userId, start, new Date(start.getTime() + 6 * H), ws],
         );
@@ -139,17 +142,17 @@ async function main(): Promise<void> {
   async function pastWork(hoursAgo: number, lateMinutes: number, staffIndex: number) {
     const start = new Date(Date.now() - hoursAgo * H);
     const [shift] = await q(
-      `INSERT INTO core.shift (organisation_id, venue_id, job_role_id, starts_at, ends_at, break_minutes, required_count, filled_count, pay_rate_pence, status, created_by, workspace_id)
+      `INSERT INTO ${businessTable(ceoA.workspaceId!, 'shift')} (organisation_id, venue_id, job_role_id, starts_at, ends_at, break_minutes, required_count, filled_count, pay_rate_pence, status, created_by, workspace_id)
        VALUES ($1, $2, $3, $4, $5, 0, 1, 1, 1500, 'completed', $6, $7) RETURNING id`,
       [orgA.id, a.venueId, a.roles[0], start, new Date(start.getTime() + 8 * H), ceoA.userId, ceoA.workspaceId],
     );
     const [assignment] = await q(
-      `INSERT INTO core.shift_assignment (organisation_id, shift_id, staff_profile_id, status, pay_rate_snapshot_pence, assigned_by, confirmed_at, period, workspace_id)
+      `INSERT INTO ${businessTable(ceoA.workspaceId!, 'shift_assignment')} (organisation_id, shift_id, staff_profile_id, status, pay_rate_snapshot_pence, assigned_by, confirmed_at, period, workspace_id)
        VALUES ($1, $2, $3, 'completed', 1500, $4, now(), tstzrange($5, $6), $7) RETURNING id`,
       [orgA.id, shift.id, a.staff[staffIndex]!.profileId, ceoA.userId, start, new Date(start.getTime() + 8 * H), ceoA.workspaceId],
     );
     const [attendance] = await q(
-      `INSERT INTO core.attendance (organisation_id, shift_assignment_id, shift_id, staff_profile_id, workspace_id, clock_in_at, clock_out_at, status, worked_minutes, earned_pence)
+      `INSERT INTO ${businessTable(ceoA.workspaceId!, 'attendance')} (organisation_id, shift_assignment_id, shift_id, staff_profile_id, workspace_id, clock_in_at, clock_out_at, status, worked_minutes, earned_pence)
        VALUES ($1, $2, $3, $4, $5, $6, $7, 'approved', 480, 12000) RETURNING id`,
       [orgA.id, assignment.id, shift.id, a.staff[staffIndex]!.profileId, ceoA.workspaceId, new Date(start.getTime() + lateMinutes * 60_000), new Date(start.getTime() + 8 * H)],
     );
@@ -158,12 +161,12 @@ async function main(): Promise<void> {
   const work1 = await pastWork(30, 25, 3);
   const work2 = await pastWork(54, 2, 2);
   const [offerAssignment] = await q(
-    `INSERT INTO core.shift_assignment (organisation_id, shift_id, staff_profile_id, status, pay_rate_snapshot_pence, assigned_by, period, workspace_id)
+    `INSERT INTO ${businessTable(ceoA.workspaceId!, 'shift_assignment')} (organisation_id, shift_id, staff_profile_id, status, pay_rate_snapshot_pence, assigned_by, period, workspace_id)
      VALUES ($1, $2, $3, 'offered', 1500, $4, tstzrange($5, $6), $7) RETURNING id`,
     [orgA.id, a.shifts[0], a.staff[2]!.profileId, ceoA.userId, weekendStart(17), new Date(weekendStart(17).getTime() + 6 * H), ceoA.workspaceId],
   );
   await q(
-    `INSERT INTO core.job_offer (organisation_id, shift_assignment_id, staff_profile_id, status, sent_at, expires_at, estimated_pay_pence, created_by, workspace_id)
+    `INSERT INTO ${businessTable(ceoA.workspaceId!, 'job_offer')} (organisation_id, shift_assignment_id, staff_profile_id, status, sent_at, expires_at, estimated_pay_pence, created_by, workspace_id)
      VALUES ($1, $2, $3, 'pending', now(), now() + interval '1 day', 9000, $4, $5)`,
     [orgA.id, offerAssignment.id, a.staff[2]!.profileId, ceoA.userId, ceoA.workspaceId],
   );
@@ -173,17 +176,17 @@ async function main(): Promise<void> {
   const [p2] = await q(`INSERT INTO core.payroll_calendar_period (organisation_id, calendar_id, period_start, period_end, payday) VALUES ($1, $2, '2026-09-15', '2026-09-28', '2026-10-02') RETURNING id`, [orgA.id, cal.id]);
   const record = async (w: { shiftId: string; attendanceId: string; staffId: string }, amount: number) => {
     const [row] = await q(
-      `INSERT INTO core.payroll_record (organisation_id, workspace_id, attendance_id, shift_id, staff_profile_id, status, worked_minutes, pay_rate_pence, amount_pence, approved_at, approved_by)
+      `INSERT INTO ${businessTable(ceoA.workspaceId!, 'payroll_record')} (organisation_id, workspace_id, attendance_id, shift_id, staff_profile_id, status, worked_minutes, pay_rate_pence, amount_pence, approved_at, approved_by)
        VALUES ($1, $2, $3, $4, $5, 'approved', 480, 1500, $6, now(), $7) RETURNING id`,
       [orgA.id, ceoA.workspaceId, w.attendanceId, w.shiftId, w.staffId, amount, ceoA.userId],
     );
     return row.id as string;
   };
-  const [olderRun] = await q(`INSERT INTO core.payroll_run (organisation_id, workspace_id, period_id, prepared_by) VALUES ($1, $2, $3, $4) RETURNING id`, [orgA.id, ceoA.workspaceId, p1.id, ceoA.userId]);
-  const [newerRun] = await q(`INSERT INTO core.payroll_run (organisation_id, workspace_id, period_id, prepared_by) VALUES ($1, $2, $3, $4) RETURNING id`, [orgA.id, ceoA.workspaceId, p2.id, ceoA.userId]);
+  const [olderRun] = await q(`INSERT INTO ${businessTable(ceoA.workspaceId!, 'payroll_run')} (organisation_id, workspace_id, period_id, prepared_by) VALUES ($1, $2, $3, $4) RETURNING id`, [orgA.id, ceoA.workspaceId, p1.id, ceoA.userId]);
+  const [newerRun] = await q(`INSERT INTO ${businessTable(ceoA.workspaceId!, 'payroll_run')} (organisation_id, workspace_id, period_id, prepared_by) VALUES ($1, $2, $3, $4) RETURNING id`, [orgA.id, ceoA.workspaceId, p2.id, ceoA.userId]);
   const line = (runId: string, recordId: string, staffId: string, amount: number, day: string) =>
     q(
-      `INSERT INTO core.payroll_run_line (organisation_id, workspace_id, run_id, payroll_record_id, staff_profile_id, work_date, worked_minutes, pay_rate_pence, amount_pence)
+      `INSERT INTO ${businessTable(ceoA.workspaceId!, 'payroll_run_line')} (organisation_id, workspace_id, run_id, payroll_record_id, staff_profile_id, work_date, worked_minutes, pay_rate_pence, amount_pence)
        VALUES ($1, $2, $3, $4, $5, $6, 480, 1500, $7)`,
       [orgA.id, ceoA.workspaceId, runId, recordId, staffId, day, amount],
     );
