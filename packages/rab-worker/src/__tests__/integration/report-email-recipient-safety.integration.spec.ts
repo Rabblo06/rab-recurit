@@ -205,7 +205,7 @@ describeIfDb('report emails: escaping, recipient eligibility and send-time re-ch
   /** The same write ManagerService.unassignVenue makes. */
   const unassignOnly = (f: Base, vm: TestIdentity) =>
     tenantContext.runInTenantContext(ownerCtx(f), (m) =>
-      m.query(`DELETE FROM core.manager_venue WHERE manager_profile_id = $1 AND venue_id = $2`, [vm.profileId, f.venueId]),
+      m.query(`DELETE FROM manager_venue WHERE manager_profile_id = $1 AND venue_id = $2`, [vm.profileId, f.venueId]),
     );
   const softDeleteOnly = (f: Base, userId: string) =>
     tenantContext.runInTenantContext(ownerCtx(f), (m) => m.query(`UPDATE core."user" SET deleted_at = now() WHERE id = $1`, [userId]));
@@ -217,7 +217,7 @@ describeIfDb('report emails: escaping, recipient eligibility and send-time re-ch
 
   const finalise = (f: Fixture) =>
     tenantContext.runInTenantContext(ownerCtx(f), (m) =>
-      m.query(`UPDATE core.shift_report SET status = 'finalised', finalised_at = now(), finalised_by = $2 WHERE shift_id = $1`, [f.shiftId, f.owner.userId]),
+      m.query(`UPDATE shift_report SET status = 'finalised', finalised_at = now(), finalised_by = $2 WHERE shift_id = $1`, [f.shiftId, f.owner.userId]),
     );
 
   const runScheduler = (f: Fixture) =>
@@ -246,7 +246,7 @@ describeIfDb('report emails: escaping, recipient eligibility and send-time re-ch
   const storedReport = (f: Fixture) =>
     tenantContext
       .runInTenantContext(ownerCtx(f), (m) =>
-        m.query(`SELECT pre_shift_file_id, original_file_id, final_file_id, final_pdf_sent_at FROM core.shift_report WHERE shift_id = $1`, [f.shiftId]),
+        m.query(`SELECT pre_shift_file_id, original_file_id, final_file_id, final_pdf_sent_at FROM shift_report WHERE shift_id = $1`, [f.shiftId]),
       )
       .then((rows: Array<Record<string, unknown>>) => rows[0]);
 

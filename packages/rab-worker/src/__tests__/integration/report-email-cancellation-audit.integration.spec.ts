@@ -211,7 +211,7 @@ describeIfDb('report email cancellation: S-6 audit + no replay, S-10 eligibility
 
   const finalise = (f: Fixture) =>
     tenantContext.runInTenantContext(ownerCtx(f), (m) =>
-      m.query(`UPDATE core.shift_report SET status = 'finalised', finalised_at = now(), finalised_by = $2 WHERE shift_id = $1`, [f.shiftId, f.owner.userId]),
+      m.query(`UPDATE shift_report SET status = 'finalised', finalised_at = now(), finalised_by = $2 WHERE shift_id = $1`, [f.shiftId, f.owner.userId]),
     );
 
   const runScheduler = (f: Fixture) =>
@@ -253,7 +253,7 @@ describeIfDb('report email cancellation: S-6 audit + no replay, S-10 eligibility
   const reportRow = (f: Fixture) =>
     tenantContext
       .runInTenantContext(ownerCtx(f), (m) =>
-        m.query(`SELECT id, status, pre_shift_file_id, original_file_id, final_file_id, final_pdf_sent_at FROM core.shift_report WHERE shift_id = $1`, [f.shiftId]),
+        m.query(`SELECT id, status, pre_shift_file_id, original_file_id, final_file_id, final_pdf_sent_at FROM shift_report WHERE shift_id = $1`, [f.shiftId]),
       )
       .then((rows: Array<Record<string, unknown>>) => rows[0]!);
   const sha = (b: Buffer) => createHash('sha256').update(b).digest('hex');
