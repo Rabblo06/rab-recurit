@@ -2,7 +2,7 @@ import { Client } from 'pg';
 import { DataSource } from 'typeorm';
 
 import { MIGRATION_LOCK_KEY } from '../../database/typeorm/scripts/migrate/migration-lock';
-import { resolveIntegrationTestDatabase } from '../../database/typeorm/core/test-database-guard';
+import { integrationTestDatabase, integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
 import { SeededWorkspace, seedWorkspace } from './helpers/workspace-fixtures';
 import { markNewWorkspaceInitial, upgradeSessionOf, UpgradeSessionError, withUpgradeScope } from '../../engine/core-modules/upgrade/upgrade-migration.service';
 import { bindGucsSql } from '../../engine/core-modules/tenant/tenant-context.service';
@@ -22,14 +22,15 @@ import { bindGucsSql } from '../../engine/core-modules/tenant/tenant-context.ser
  */
 jest.setTimeout(120_000);
 
-const RUN = Boolean(process.env.TEST_DATABASE_URL && process.env.TEST_DATABASE_URL_UNPOOLED);
+// DEAD-07: the validated TEST pair decides (an invalid pair throws, never a silent skip).
+const RUN = integrationTestDatabaseReady();
 const describeIfDb = RUN ? describe : describe.skip;
 const SFX = Math.random().toString(36).replace(/[^a-z]/g, '').slice(0, 8) || 'x';
 const step = (n: string) => `0.6.0_Itest${n}${SFX}`;
 const LOCK = MIGRATION_LOCK_KEY.toString();
 
 describeIfDb('core.upgrade_migration (integration, OWNER-DB-ULTIMATE Part B)', () => {
-  const { adminUrl } = RUN ? resolveIntegrationTestDatabase(process.env) : ({} as never);
+  const { adminUrl, appUrl } = integrationTestDatabase();
   let admin: Client;
   let app: Client;
   let ws: SeededWorkspace;
@@ -70,7 +71,7 @@ describeIfDb('core.upgrade_migration (integration, OWNER-DB-ULTIMATE Part B)', (
 
   beforeAll(async () => {
     admin = new Client({ connectionString: adminUrl });
-    app = new Client({ connectionString: process.env.TEST_DATABASE_URL });
+    app = new Client({ connectionString: appUrl });
     await admin.connect();
     await app.connect();
     ws = await seedWorkspace(admin, `upgr-a-${SFX}`);
@@ -189,7 +190,7 @@ describeIfDb('core.upgrade_migration (integration, OWNER-DB-ULTIMATE Part B)', (
     // Regression guard (ef7f56c0): a parameterised pre-check ran on the extended protocol and refused every real session.
     const viaClient = await withUpgradeScope(upgradeSessionOf(app), 'status', async (q) => (await q('SELECT 1 AS one')) as Array<{ one: number }>);
     expect(viaClient[0]?.one).toBe(1);
-    const ds = new DataSource({ type: 'postgres', url: process.env.TEST_DATABASE_URL, entities: [], migrations: [], synchronize: false });
+    const ds = new DataSource({ type: 'postgres', url: appUrl, entities: [], migrations: [], synchronize: false });
     await ds.initialize();
     const runner = ds.createQueryRunner();
     await runner.connect();

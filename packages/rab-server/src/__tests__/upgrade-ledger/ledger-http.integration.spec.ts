@@ -26,6 +26,7 @@ import { AppModule } from '../../app.module';
 import { PasswordHashingService } from '../../engine/core-modules/auth/services/password-hashing.service';
 import { AdminHealthService } from '../../engine/core-modules/platform-admin/admin-health.service';
 import { TenantContextService } from '../../engine/core-modules/tenant/tenant-context.service';
+import { integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
 import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-pipe';
 import { createAdminDataSource } from '../integration/helpers/admin-datasource';
 import { TestIdentity, TestIdentityFactory } from '../integration/helpers/test-identities';
@@ -36,7 +37,8 @@ jest.setTimeout(300_000);
 /** Nothing about the upgrade beyond the boolean may reach public /healthz ("ok" is Terminus's own top-level status). */
 const HEALTHZ_FORBIDDEN = /TypeOrmMigrations|_[0-9]{13}|\d+\.\d+\.\d+|"(failed|behind|ahead|none|unknown)"|error_message|errorMessage|executedByVersion|appVersion|"step"|"state"/;
 
-const RUN = Boolean(process.env.DATABASE_URL) && b1() !== null;
+// DEAD-07: the validated TEST pair decides (an invalid pair throws, never a silent skip).
+const RUN = integrationTestDatabaseReady() && b1() !== null;
 const describeIfB1 = RUN ? describe : describe.skip;
 
 describeIfB1('the logbook through the real application (new workspace, /healthz, admin banner)', () => {

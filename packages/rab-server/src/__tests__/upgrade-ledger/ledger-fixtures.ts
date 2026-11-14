@@ -83,7 +83,7 @@ export class Cluster {
       'postgres',
       "SELECT current_setting('crewflow.disposable_cluster', true) AS marker, (SELECT rolsuper FROM pg_roles WHERE rolname = current_user) AS superuser",
     );
-    if (row?.marker !== 'on' || !row.superuser) throw new Error('refusing: TEST_DATABASE_URL_UNPOOLED is not the superuser of a disposable cluster');
+    if (row?.marker !== 'on' || !row.superuser) throw new Error('refusing: the test admin URL (TEST_DATABASE_ADMIN_URL, or the deprecated TEST_DATABASE_URL_UNPOOLED) is not the superuser of a disposable cluster');
   }
 
   async createDatabase(db: string, template?: string): Promise<void> {
