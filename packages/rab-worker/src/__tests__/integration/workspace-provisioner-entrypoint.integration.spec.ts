@@ -14,8 +14,7 @@ import { createAdminDataSource } from './helpers/admin-datasource';
 import { generateFixturePassword } from './helpers/fixture-password';
 import { verifiedCrewflowUrl } from './helpers/verified-role-database';
 import { runtimeChildBaseEnv } from './helpers/runtime-child-env';
-import { expectedWorkspacePolicyCount } from '@rab/server/database/typeorm/workspace-schema/v1/server-path-template-venue-team-admin';
-import { LATEST_WORKSPACE_MODULE_VERSION } from '@rab/server/database/typeorm/workspace-schema/workspace-schema-modules';
+import { expectedPolicyCountAtCodeLevel } from './helpers/structure-level-expectations';
 import { integrationTestDatabaseReady } from '@rab/server/database/typeorm/core/integration-test-database-gate';
 
 /**
@@ -290,8 +289,9 @@ describeIfDb('LEGACY, REMOVE IN PR #9 (skipped: separate provisioner, no crewflo
     );
     expect(tableNames.map((t) => t.relname).sort()).toEqual([...WORKSPACE_TABLES].sort());
     const policyCount: Array<{ n: number }> = await adminDataSource.query(`SELECT count(*)::int AS n FROM pg_policies WHERE schemaname = $1`, [expectedSchemaName]);
-    // A new workspace is provisioned at the latest module (v18 adds the 2 Assigned Staff policies: 39 → 41).
-    expect(policyCount[0]!.n).toBe(expectedWorkspacePolicyCount(LATEST_WORKSPACE_MODULE_VERSION));
+    // A new workspace is provisioned at the code's structure level (v18 adds the 2 Assigned Staff policies: 39 → 41; level 21
+    // adds staff_profile_member_select: 42).
+    expect(policyCount[0]!.n).toBe(expectedPolicyCountAtCodeLevel());
     const grantCount: Array<{ n: number }> = await adminDataSource.query(
       `SELECT count(*)::int AS n FROM information_schema.table_privileges WHERE table_schema = $1 AND grantee = 'crewflow_app'`,
       [expectedSchemaName],
