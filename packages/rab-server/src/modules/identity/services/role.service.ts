@@ -336,9 +336,9 @@ export class RoleService {
     for (const [table, ids] of Object.entries(relationIds)) {
       if (table !== 'venue' && table !== 'job_role') throw new RecordFilterError('Unsupported relation.');
       const rows = await manager.query<Array<{ id: string }>>(
-        // sql-injection-reviewed: table is checked against the literal allow-list 'venue' | 'job_role' on the line above; ids are bound.
         // Unqualified: the tenant transaction's search_path is the workspace schema with HWS on and `core` with it off (the
         // business rows live there); `core.` here read an empty core copy under HWS and refused every relation filter.
+        // sql-injection-reviewed: table is checked against the literal allow-list 'venue' | 'job_role' on the line above; ids are bound.
         `SELECT id FROM ${table} WHERE id = ANY($1::uuid[]) AND workspace_id = $2`,
         [ids, ctx.workspaceId],
       );
