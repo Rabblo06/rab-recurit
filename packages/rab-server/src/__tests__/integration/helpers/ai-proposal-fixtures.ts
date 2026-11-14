@@ -8,6 +8,7 @@ import { SchedulingService } from '../../../modules/scheduling/services/scheduli
 import { VenueService } from '../../../modules/venue/services/venue.service';
 import { AiKit } from './ai-test-kit';
 import { TestIdentity } from './test-identities';
+import { businessTableOf, siblingTable } from './hws-fixtures';
 
 /**
  * Phase 5a proposal fixtures (new helper file — the shared AI kit is not edited). Fixture rows are written as the
@@ -93,7 +94,7 @@ export async function auditFor(kit: AiKit, proposalId: string): Promise<Array<{ 
 }
 
 export const shiftCount = async (kit: AiKit, venueId: string): Promise<number> =>
-  (await kit.owner.query(`SELECT count(*)::int AS n FROM core.shift WHERE venue_id = $1`, [venueId]))[0].n as number;
+  (await kit.owner.query(`SELECT count(*)::int AS n FROM ${await businessTableOf(kit.owner, 'venue', venueId).then((t) => siblingTable(t, 'shift'))} WHERE venue_id = $1`, [venueId]))[0].n as number;
 
 /** Simulates an expired step-up window for this access token's session (deletes the session's grant, as its TTL does). */
 export async function expireStepUp(kit: AiKit, token: string): Promise<void> {
