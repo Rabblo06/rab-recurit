@@ -33,7 +33,9 @@ import { ShiftTeamService } from './services/shift-team.service';
   controllers: [AttendanceController, ShiftReportController, StaffReviewsController],
   providers: [AttendanceService, AttendanceQrService, QrTokenService, QrImageService, ShiftReportService, ShiftReviewService, StaffReviewInsightsService, ShiftTeamService, AttendancePerUserThrottleGuard],
   // AttendanceService: AI Phase 1's read-only `get_attendance_summary` tool (modules/ai).
-  exports: [AttendanceQrService, QrTokenService, QrImageService, ShiftReportService, AttendanceService],
+  // QrTokenService is deliberately NOT exported: its verify() is not a complete validity check (the shift-based expiry
+  // lives in AttendanceQrService.validateQr), so other modules get AttendanceQrService only. qr-token-verify.arch.spec.ts.
+  exports: [AttendanceQrService, QrImageService, ShiftReportService, AttendanceService],
 })
 export class AttendanceModule implements OnModuleInit {
   constructor(
