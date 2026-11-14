@@ -116,8 +116,9 @@ describeIfDb('shift QR rotation — scope and concurrency (integration)', () => 
     const token = await factory.login(owner);
 
     // Hold the row so both requests read qr_version = 1 and then queue on rotateShiftQr's FOR UPDATE row lock: a
-    // deterministic overlap. Waiters are counted only in THIS database and only when blocked by THIS holder (which locks
-    // nothing but this shift's row), never another suite's activity.
+    // deterministic overlap. Waiters are counted only in THIS database and only in THIS holder's wait chain (it locks
+    // nothing but this shift's row): the first rotation is blocked by the holder, the second by the first (Postgres queues
+    // row-lock waiters behind each other's tuple lock), never another suite's activity.
     const holder = adminDataSource.createQueryRunner();
     await holder.connect();
     await holder.startTransaction();
@@ -129,8 +130,12 @@ describeIfDb('shift QR rotation — scope and concurrency (integration)', () => 
       const deadline = Date.now() + 20_000;
       for (;;) {
         const [{ n }] = await adminDataSource.query(
-          `SELECT count(*)::int AS n FROM pg_stat_activity
-            WHERE datname = current_database() AND wait_event_type = 'Lock' AND $1::int = ANY(pg_blocking_pids(pid))`,
+          `SELECT count(*)::int AS n FROM pg_stat_activity a
+            WHERE a.datname = current_database() AND a.wait_event_type = 'Lock'
+              AND ($1::int = ANY(pg_blocking_pids(a.pid))
+                OR EXISTS (SELECT 1 FROM pg_stat_activity b
+                            WHERE b.datname = current_database() AND b.pid = ANY(pg_blocking_pids(a.pid))
+                              AND $1::int = ANY(pg_blocking_pids(b.pid))))`,
           [holderPid],
         );
         if (n >= 2) break;
