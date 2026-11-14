@@ -29,6 +29,7 @@ import { createAdminDataSource } from './helpers/admin-datasource';
 import { generateFixturePassword } from './helpers/fixture-password';
 import { integrationTestDatabaseReady } from '@rab/server/database/typeorm/core/integration-test-database-gate';
 import { provisionFixtureWorkspace } from './helpers/test-identities';
+import { businessSchema } from './helpers/hws-fixtures';
 
 const FIXTURE_PASSWORD = generateFixturePassword();
 
@@ -74,7 +75,8 @@ describeIfDb('worker event idempotency (integration)', () => {
       // search_path, which only TenantContextService's own runInTenantContext/runInWorkspaceContext
       // sets. This hand-rolled helper predates that migration and never picked up the bind, same gap
       // already found and fixed in rab-server's bulk-email-abuse-cases/scheduling-offer-abuse-cases.
-      await manager.query(`SELECT set_config('search_path', 'core', true)`);
+      // Part C1: the workspace's own schema with HWS on (the code default outside production), core with it off.
+      await manager.query(`SELECT set_config('search_path', $1, true)`, [ctx.workspaceId ? businessSchema(ctx.workspaceId) : 'core']);
       await manager.query(`SELECT set_config('rab.organisation_id', $1, true)`, [ctx.organisationId]);
       await manager.query(`SELECT set_config('rab.workspace_id', $1, true)`, [ctx.workspaceId ?? '']);
       await manager.query(`SELECT set_config('rab.user_id', $1, true)`, [ctx.userId]);

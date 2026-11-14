@@ -21,6 +21,7 @@ import { runConfirmationDeadlineBackstopScan, runManagerConfirmationDeadlineCycl
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
 import { integrationTestDatabaseReady } from '@rab/server/database/typeorm/core/integration-test-database-gate';
+import { businessSchema } from './helpers/hws-fixtures';
 
 /**
  * Replacement & standby offers (2026-10-21) vs the manager-confirmation DEADLINE worker (owner rule 2026-11-06, Q1b).
@@ -57,7 +58,8 @@ describeIfDb('replacement & standby offers vs manager-confirmation timeout (inte
 
   async function withContext<T>(ctx: { organisationId?: string | null; workspaceId?: string | null; userId: string }, fn: (m: DataSource['manager']) => Promise<T>): Promise<T> {
     return dataSource.transaction(async (m) => {
-      await m.query(`SELECT set_config('search_path', 'core', true)`);
+      // Part C1: the workspace's own schema with HWS on (the code default outside production), core with it off.
+      await m.query(`SELECT set_config('search_path', $1, true)`, [ctx.workspaceId ? businessSchema(ctx.workspaceId) : 'core']);
       await m.query(`SELECT set_config('rab.organisation_id', $1, true)`, [ctx.organisationId ?? '']);
       await m.query(`SELECT set_config('rab.workspace_id', $1, true)`, [ctx.workspaceId ?? '']);
       await m.query(`SELECT set_config('rab.user_id', $1, true)`, [ctx.userId]);

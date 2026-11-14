@@ -25,6 +25,7 @@ import { createAdminDataSource } from './helpers/admin-datasource';
 import { generateFixturePassword } from './helpers/fixture-password';
 import { integrationTestDatabaseReady } from '@rab/server/database/typeorm/core/integration-test-database-gate';
 import { provisionFixtureWorkspace } from './helpers/test-identities';
+import { businessSchema } from './helpers/hws-fixtures';
 
 const FIXTURE_PASSWORD = generateFixturePassword();
 
@@ -65,7 +66,8 @@ describeIfDb('shift monitor — clock-in window open reminder (integration)', ()
 
   async function withContext<T>(ctx: { organisationId: string; workspaceId: string | null; userId: string }, fn: (manager: DataSource['manager']) => Promise<T>): Promise<T> {
     return dataSource.transaction(async (manager) => {
-      await manager.query(`SELECT set_config('search_path', 'core', true)`);
+      // Part C1: the workspace's own schema with HWS on (the code default outside production), core with it off.
+      await manager.query(`SELECT set_config('search_path', $1, true)`, [ctx.workspaceId ? businessSchema(ctx.workspaceId) : 'core']);
       await manager.query(`SELECT set_config('rab.organisation_id', $1, true)`, [ctx.organisationId]);
       await manager.query(`SELECT set_config('rab.workspace_id', $1, true)`, [ctx.workspaceId ?? '']);
       await manager.query(`SELECT set_config('rab.user_id', $1, true)`, [ctx.userId]);

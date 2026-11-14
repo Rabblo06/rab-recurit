@@ -33,7 +33,7 @@ import { runLateClockInCycle } from '../../queues/rab-shifts/late-clock-in.job';
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
 import { integrationTestDatabaseReady } from '@rab/server/database/typeorm/core/integration-test-database-gate';
-import { businessTableOf } from './helpers/hws-fixtures';
+import { businessSchema, businessTableOf } from './helpers/hws-fixtures';
 
 /**
  * Phase 5.5 — same-organisation manager isolation. Real Postgres, RLS on,
@@ -84,7 +84,8 @@ describeIfDb('same-organisation manager isolation (integration)', () => {
       // migration (P2.2 fix — same systemic gap already found in rab-server's own
       // bulk-email-abuse-cases/scheduling-offer-abuse-cases, and in this package's own
       // worker-event-idempotency file).
-      await manager.query(`SELECT set_config('search_path', 'core', true)`);
+      // Part C1: the workspace's own schema with HWS on (the code default outside production), core with it off.
+      await manager.query(`SELECT set_config('search_path', $1, true)`, [ctx.workspaceId ? businessSchema(ctx.workspaceId) : 'core']);
       await manager.query(`SELECT set_config('rab.organisation_id', $1, true)`, [ctx.organisationId]);
       await manager.query(`SELECT set_config('rab.workspace_id', $1, true)`, [ctx.workspaceId ?? '']);
       await manager.query(`SELECT set_config('rab.user_id', $1, true)`, [ctx.userId]);
