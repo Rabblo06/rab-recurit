@@ -1,3 +1,6 @@
+import { peekBusinessSchema } from '@rab/server/engine/core-modules/tenant/business-tables';
+import { workspaceSchemaName } from '@rab/server/engine/core-modules/tenant/schema-resolver.service';
+
 import { InviteAutoDeleteConfigError, resolveInviteAutoDeleteEnabled, runAccountInviteCleanupCycle } from './account-invite-cleanup.job';
 import { MaintenanceScanProcessor } from './maintenance.processors';
 
@@ -145,6 +148,42 @@ describe('account invite cleanup — F-1 definer path (WORKER_INVITE_AUTO_DELETE
     expect(sql).toContain('ROLLBACK TO SAVEPOINT sp_invite_cleanup_candidate');
     expect(h.audits()).toEqual([['user.invite_cleanup_failed', U(20), { reason: 'TypeError' }]]);
     expect(result).toEqual({ expired: 0, deleted: 0, retained: 0 });
+  });
+
+  it('C2-0 review #4: a dependency query that throws after the physical-schema bind leaves the businessTables binding at its entry state', async () => {
+    const at = new Date('2026-10-01T00:00:00Z');
+    const h = harness({ usable: true, candidates: [{ user_id: U(30), organisation_id: ORG, cleanup_at: at, blocking_reason: null }] });
+    const original = h.dataSource.transaction;
+    let manager: { query: (sql: string, p?: unknown[]) => Promise<unknown> } | undefined;
+    const boundAtThrow: Array<string | undefined> = [];
+    h.dataSource.transaction = async <T>(fn: (m: unknown) => Promise<T>) =>
+      original(async (m: unknown) => {
+        const inner = m as { query: (sql: string, p?: unknown[]) => Promise<unknown> };
+        let physical = false;
+        let aborted = false;
+        manager = {
+          query: async (sql: string, p?: unknown[]) => {
+            if (sql === 'ROLLBACK TO SAVEPOINT sp_invite_cleanup_candidate') aborted = false;
+            else if (aborted) throw new Error('current transaction is aborted'); // 25P02, like PostgreSQL
+            if (sql.includes('workspace_schema_registry')) {
+              await inner.query(sql, p);
+              physical = true;
+              return [{ schema_name: workspaceSchemaName(WS), status: 'READY', schema_version: 1, migration_error: null }];
+            }
+            if (physical && sql === `SELECT 1 FROM shift WHERE created_by = $1 LIMIT 1`) {
+              boundAtThrow.push(peekBusinessSchema(manager as never));
+              aborted = true;
+              throw new TypeError('boom');
+            }
+            return inner.query(sql, p);
+          },
+        };
+        return fn(manager);
+      });
+    await runAccountInviteCleanupCycle(h.dataSource as never, ON);
+    expect(boundAtThrow).toEqual([workspaceSchemaName(WS)]); // the physical schema was bound when the query failed
+    expect(peekBusinessSchema(manager as never)).toBeUndefined(); // entry state (this owner transaction was never bound)
+    expect(h.audits()).toEqual([['user.invite_cleanup_failed', U(30), { reason: 'TypeError' }]]);
   });
 });
 
