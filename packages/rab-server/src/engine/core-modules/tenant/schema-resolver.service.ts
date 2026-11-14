@@ -1,10 +1,9 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { EntityManager } from 'typeorm';
 
-import {
-  LATEST_WORKSPACE_MODULE_VERSION,
-  MIN_COMPATIBLE_WORKSPACE_MODULE_VERSION,
-} from '../../../database/typeorm/workspace-schema/workspace-schema-modules';
+import { MIN_COMPATIBLE_WORKSPACE_MODULE_VERSION } from '../../../database/typeorm/workspace-schema/workspace-schema-modules';
+import { codeWorkspaceStructureLevel } from '../upgrade/workspace-structure-level';
+import { isUpgradeBlocked } from '../upgrade/workspace-upgrade-block';
 import { CachedResolvedSchema, WorkspaceMetadataCacheService } from '../entity-cache/workspace-metadata-cache.service';
 
 /**
@@ -46,7 +45,7 @@ export const SUPPORTED_WORKSPACE_SCHEMA_VERSIONS: ReadonlySet<number> = new Set(
  * availability fault, not authorisation: AllExceptionsFilter maps it to 503 (every other code stays 404).
  */
 export class WorkspaceRoutingError extends Error {
-  constructor(readonly code: 'missing-context' | 'registry-missing' | 'name-mismatch' | 'not-ready' | 'unsupported-version' | 'incompatible-module') {
+  constructor(readonly code: 'missing-context' | 'registry-missing' | 'name-mismatch' | 'not-ready' | 'unsupported-version' | 'incompatible-module' | 'upgrading') {
     super('Workspace routing refused.');
     this.name = 'WorkspaceRoutingError';
   }
@@ -93,8 +92,8 @@ export class SchemaResolverService {
     const expected = workspaceSchemaName(workspaceId);
 
     const fetch = async (): Promise<CachedResolvedSchema> => {
-      const rows: Array<{ schema_name: string; status: string; schema_version: number; module_version: number }> = await manager.query(
-        `SELECT schema_name, status, schema_version, module_version FROM core.workspace_schema_registry WHERE workspace_id = $1`,
+      const rows: Array<{ schema_name: string; status: string; schema_version: number; module_version: number; migration_error: string | null }> = await manager.query(
+        `SELECT schema_name, status, schema_version, module_version, migration_error FROM core.workspace_schema_registry WHERE workspace_id = $1`,
         [workspaceId],
       );
       if (rows.length !== 1) throw new WorkspaceRoutingError('registry-missing');
@@ -102,6 +101,10 @@ export class SchemaResolverService {
       if (row.schema_name !== expected) throw new WorkspaceRoutingError('name-mismatch');
       if (row.status !== 'READY') throw new WorkspaceRoutingError('not-ready');
       if (!SUPPORTED_WORKSPACE_SCHEMA_VERSIONS.has(Number(row.schema_version))) throw new WorkspaceRoutingError('unsupported-version');
+      // Part D, owner decisions D2/D3: an upgrade step failed with a structure that does not match this code: the workspace is
+      // blocked until the step succeeds (503 "being upgraded"; never cached). Raised only after the caller's organisation is
+      // bound and the row is visible to it, so another tenant still gets 'registry-missing' (404).
+      if (isUpgradeBlocked(row.migration_error)) throw new WorkspaceRoutingError('upgrading');
       const moduleVersion = Number(row.module_version);
       // Phase B: below the floor is refused here, so it is never cached.
       assertCompatibleModuleVersion(moduleVersion);
@@ -120,11 +123,12 @@ export class SchemaResolverService {
       await this.workspaceMetadataCache.invalidate(workspaceId);
       resolved = await fetch();
     }
-    if ((resolved.moduleVersion ?? 0) > LATEST_WORKSPACE_MODULE_VERSION && !this.warnedAhead.has(workspaceId)) {
+    const codeLevel = codeWorkspaceStructureLevel();
+    if ((resolved.moduleVersion ?? 0) > codeLevel && !this.warnedAhead.has(workspaceId)) {
       // c2 (image rollback after a module migration): old code on a superset schema is allowed; report it once.
       this.warnedAhead.add(workspaceId);
       this.logger.warn(
-        `workspace ${workspaceId} schema is at module ${resolved.moduleVersion}, above this code's module ${LATEST_WORKSPACE_MODULE_VERSION} (an image rollback); routing continues`,
+        `workspace ${workspaceId} schema is at module ${resolved.moduleVersion}, above this code's module (structure level) ${codeLevel} (an image rollback); routing continues`,
       );
     }
     // Unreachable unless fetch() itself broke its contract (it throws 'name-mismatch'); fail closed regardless.

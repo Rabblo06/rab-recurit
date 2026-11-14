@@ -46,6 +46,9 @@ const PERMANENT_CODES = new Set(['EMPTY_BODY', 'ECONFIG', 'ENOAUTH', 'EMAXRECIPI
 /** nodemailer validates these locally (command 'API', no server reply): retrying sends the same invalid input. */
 const LOCAL_VALIDATION_CODES = new Set(['EENVELOPE', 'EAUTH', 'EMESSAGE']);
 
+/** Part D: how long a job of a workspace blocked by a failed upgrade step waits before it looks again. */
+export const WORKSPACE_UPGRADE_DEFER_MS = 60_000;
+
 export interface EmailSendErrorClass {
   retryable: boolean;
   /** Provider-reported throttling (e.g. Resend 429 `retry-after`), in ms. */
@@ -251,6 +254,9 @@ export function createEmailSendProcessor(deps: EmailSendProcessorDeps) {
 
       if (row.status === EmailOutboxStatus.SENT) return { skip: true as const };
       if (row.status === EmailOutboxStatus.CANCELLED) return { skip: true as const };
+      // Part D (owner D2/D3): the row's workspace is blocked by a failed upgrade step: PAUSE (defer this job, nothing claimed,
+      // no attempt counted, nothing failed or dropped); it resumes once the step succeeds and the block is lifted.
+      if (row.workspaceId && (await deps.tenantContext.isWorkspaceUpgradeBlocked?.(manager, row.workspaceId))) return { skip: true as const, deferred: true as const };
 
       // Race-safe claim: only one worker (or one retry-in-flight) can move
       // a row into PROCESSING at a time, and it mints the ONE token every
@@ -281,7 +287,13 @@ export function createEmailSendProcessor(deps: EmailSendProcessorDeps) {
       return { skip: false as const, row, attempt };
     });
 
-    if (outcome.skip) return;
+    if (outcome.skip) {
+      if ('deferred' in outcome && outcome.deferred) {
+        await job.moveToDelayed(Date.now() + WORKSPACE_UPGRADE_DEFER_MS, job.token);
+        throw new DelayedError(`email outbox row ${emailOutboxId}: its workspace is being upgraded; deferred ${WORKSPACE_UPGRADE_DEFER_MS} ms`);
+      }
+      return;
+    }
     const row = outcome.row!;
     const attempt = outcome.attempt!;
 

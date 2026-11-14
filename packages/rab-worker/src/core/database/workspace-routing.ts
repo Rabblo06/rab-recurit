@@ -16,7 +16,14 @@
  *
  * Duck-typed on name + code (not `instanceof`) so it holds whichever compiled copy of `@rab/server` threw it.
  */
-const SKIPPABLE_ROUTING_CODES: ReadonlySet<string> = new Set(['registry-missing', 'not-ready']);
+// Part D (owner D2/D3): 'upgrading' = a workspace blocked by a failed upgrade step. Its jobs PAUSE: the walk skips it (nothing
+// claimed, nothing failed or dropped) and picks it up on the first cycle after the step succeeds and the block is lifted.
+const SKIPPABLE_ROUTING_CODES: ReadonlySet<string> = new Set(['registry-missing', 'not-ready', 'upgrading']);
+
+/** Part D review P3: the workspace is blocked by a failed upgrade step — per-job paths PAUSE (no failure recorded). */
+export function isWorkspaceUpgrading(error: unknown): boolean {
+  return error instanceof Error && error.name === 'WorkspaceRoutingError' && (error as { code?: unknown }).code === 'upgrading';
+}
 
 export function isNotYetRoutableWorkspace(error: unknown): boolean {
   if (!(error instanceof Error) || error.name !== 'WorkspaceRoutingError') return false;

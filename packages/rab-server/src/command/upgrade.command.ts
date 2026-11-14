@@ -64,7 +64,7 @@ export async function runUpgradeCommand(args: readonly string[], env: NodeJS.Pro
   const u = result.upgrade;
   log(
     u
-      ? `code ${u.codeVersion}: ${u.decision ?? 'not checked'}${u.adoptedFrom ? ` (adopted ${u.adoptedFrom})` : ''}; recorded ${u.recorded.map((r) => `${r.name}=${r.status}#${r.attempt}`).join(', ') || 'nothing'}${u.commandFailure ? `; command FAILED: ${u.commandFailure.name}` : ''}`
+      ? `code ${u.codeVersion}: ${u.decision ?? 'not checked'}${u.adoptedFrom ? ` (adopted ${u.adoptedFrom})` : ''}; recorded ${u.recorded.map((r) => `${r.name}=${r.status}#${r.attempt}`).join(', ') || 'nothing'}${u.commandFailure ? `; command FAILED: ${u.commandFailure.name}${u.commandFailure.workspaceId ? ` (workspace ${u.commandFailure.workspaceId})` : ''}` : ''}${u.workspaces ? `; workspaces: ${u.workspaces.total} READY, ${u.workspaces.adopted} adopted, ${u.workspaces.upgraded} upgraded, ${u.workspaces.failures.length} failed or refused` : ''}`
       : 'the upgrade check did not run',
   );
   return exitCode;

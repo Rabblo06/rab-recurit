@@ -20,6 +20,7 @@ import { discoverInWorkspaces } from '../../core/database/workspace-discovery';
 import { claimWorkerEvent, completeWorkerEvent } from '../../core/database/worker-event';
 import { noteLegacyBatchLimitReached } from '../../core/wake/legacy-batch-limit';
 import { renderReportPdf, ReportDocument } from './render-pdf.util';
+import { isWorkspaceUpgrading } from '../../core/database/workspace-routing';
 
 const logger = new Logger('ShiftStatementJob');
 
@@ -175,7 +176,7 @@ export interface ShiftStatementProcessorDeps {
   render?: (doc: ReportDocument) => Promise<Buffer>;
 }
 
-export type ShiftStatementOutcome = 'generated' | 'stale' | 'failed';
+export type ShiftStatementOutcome = 'generated' | 'stale' | 'failed' | 'deferred';
 
 /**
  * BullMQ CONSUMER: one job = one record at one dispatch generation. Steps: (1) row lock + generation check → mark
@@ -236,6 +237,9 @@ export async function processShiftStatementJob(data: ShiftStatementJobData, deps
     return 'generated';
   } catch (error) {
     if (uploaded) await deps.files.discardUnregistered(uploaded).catch(() => undefined);
+    // Part D review P3: the record's workspace is blocked by a failed upgrade step: PAUSE. No failure is recorded (no attempt
+    // counted); the record stays queued and the dispatcher hands it out again once the workspace is unblocked.
+    if (isWorkspaceUpgrading(error)) return 'deferred';
     logger.warn(`shift statement ${data.payrollRecordId} generation ${data.generation} failed: ${(error as Error).name}`);
     await recordFailure(data, deps, error).catch(() => undefined);
     return 'failed';

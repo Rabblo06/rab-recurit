@@ -196,7 +196,11 @@ describeIfB1('the logbook through the real application (new workspace, /healthz,
     forgetAdminReport();
     let res = await http().get('/rest/v1/admin/health/report').set('Authorization', `Bearer ${adminToken}`);
     expect(res.status).toBe(200);
-    expect(Object.keys(res.body.upgrade ?? {}).sort()).toEqual(['appVersion', 'at', 'attempt', 'executedByVersion', 'forced', 'state', 'step']);
+    // Part D (owner D2/D3) adds `workspaces`: the failed / blocked workspaces, each exactly { workspaceId, step, errorClass, blocked }.
+    expect(Object.keys(res.body.upgrade ?? {}).sort()).toEqual(['appVersion', 'at', 'attempt', 'executedByVersion', 'forced', 'state', 'step', 'workspaces']);
+    for (const w of res.body.upgrade.workspaces as Array<Record<string, unknown>>) {
+      expect(Object.keys(w).sort()).toEqual(['blocked', 'errorClass', 'step', 'workspaceId']);
+    }
     expect(JSON.stringify(res.body)).not.toMatch(/error_message|errorMessage/);
 
     // A failed newer attempt of the current version's last step (superuser fixture), then removed again.

@@ -10,7 +10,7 @@ const SRC = join(__dirname, '..', '..', '..');
 const WORKER_SRC = join(SRC, '..', '..', 'rab-worker', 'src');
 
 /** The logbook modules nothing else may import. */
-const PROTECTED = ['upgrade-migration.service', 'upgrade-status.service', 'upgrade-runner'];
+const PROTECTED = ['upgrade-migration.service', 'upgrade-status.service', 'upgrade-runner', 'workspace-command-runner'];
 
 /** Who may import them (path prefixes relative to rab-server/src). Specs and __tests__ are always allowed. */
 const ALLOWED_PREFIXES = [

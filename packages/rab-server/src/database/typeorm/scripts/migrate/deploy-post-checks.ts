@@ -19,10 +19,28 @@ import { assessSchemaCompatibility, readReadyWorkspaceModuleLevels } from '../..
 import { secureOwnerInvariantViolations } from '../../core/secure-owner-invariants';
 import { readProvisionFunctionState } from '../../workspace-schema/provision-function-versions';
 import type { Query } from './locked-migration-runner';
+import type { WorkspaceUpgradeCommand } from '../../../../engine/core-modules/upgrade/upgrade-commands/workspace-upgrade-command';
+import { codeWorkspaceStructureLevel, declaredProvisionLiterals } from '../../../../engine/core-modules/upgrade/workspace-structure-level';
+
+/**
+ * Part D (security review M3): the workspace upgrade registry the gates derive the code's structure level and the
+ * provision-function literals from. Production passes nothing (WORKSPACE_UPGRADE_COMMANDS); only the in-process start
+ * spec passes a probe registry and restricts the fleet scan to its own workspaces (no environment variable maps to either).
+ */
+export interface PostCheckOptions {
+  workspaceRegistry?: Readonly<Record<string, readonly WorkspaceUpgradeCommand[]>>;
+  workspaceIds?: readonly string[];
+  /**
+   * Review N2: below this a READY workspace is "behind". Default: the code's structure level (strict). ONLY the locked start
+   * (migrate-on-start) passes the frozen template level 20, because its workspace command runner brings 20 → code level right
+   * after these post-checks in the same locked run; deploy-prepare and the lifecycle checks run no workspace pass.
+   */
+  behindFloor?: number;
+}
 
 export const PHASE_0B_MIGRATION = 'SecureOwnerCoreSchemaAndHelpers1786721100000';
 
-export async function deployPostCheckProblems(query: Query): Promise<string[]> {
+export async function deployPostCheckProblems(query: Query, options: PostCheckOptions = {}): Promise<string[]> {
   const problems: string[] = [];
   const [{ hasLedger }] = (await query(`SELECT to_regclass('core.migrations') IS NOT NULL AS "hasLedger"`)) as Array<{ hasLedger: boolean }>;
   const phase0b = hasLedger && ((await query('SELECT 1 FROM core.migrations WHERE name = $1', [PHASE_0B_MIGRATION])) as unknown[]).length > 0;
@@ -57,21 +75,22 @@ export async function deployPostCheckProblems(query: Query): Promise<string[]> {
     for (const o of owned) problems.push(`owned-by-migration-identity ${o.name}`);
   }
 
-  problems.push(...(await schemaCompatibilityPostCheckProblems(query)));
+  problems.push(...(await schemaCompatibilityPostCheckProblems(query, options)));
   return problems;
 }
 
 /** Check 4 alone (exported for the integration spec). The ledger was already compared by the runner, before applying. */
-export async function schemaCompatibilityPostCheckProblems(query: Query): Promise<string[]> {
+export async function schemaCompatibilityPostCheckProblems(query: Query, options: PostCheckOptions = {}): Promise<string[]> {
   const assessment = assessSchemaCompatibility(
     'migrate-apply',
     {
       expected: [],
       applied: [],
-      provisionFunction: await readProvisionFunctionState(query),
-      workspaces: await readReadyWorkspaceModuleLevels(query),
+      provisionFunction: await readProvisionFunctionState(query, declaredProvisionLiterals(options.workspaceRegistry)),
+      workspaces: await readReadyWorkspaceModuleLevels(query, 100, options.workspaceIds),
     },
-    { production: false },
+    // Ahead = above the code's structure level; behind = below options.behindFloor (default: that level, strict).
+    { production: false, latestModuleVersion: codeWorkspaceStructureLevel(options.workspaceRegistry), floorModuleVersion: options.behindFloor },
   );
   return assessment.refusals.map((r) => `schema-compatibility ${r.finding}: ${r.message}`);
 }

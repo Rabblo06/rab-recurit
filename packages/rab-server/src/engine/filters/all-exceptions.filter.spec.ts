@@ -65,6 +65,12 @@ describe('AllExceptionsFilter', () => {
     expect(json).toHaveBeenCalledWith({ statusCode: HttpStatus.SERVICE_UNAVAILABLE, message: 'Workspace temporarily unavailable.' });
   });
 
+  it('Part D (owner D2/D3): WorkspaceRoutingError(upgrading) is 503 "Workspace is being upgraded." (fixed body, no detail)', () => {
+    const { status, json } = run(new WorkspaceRoutingError('upgrading'));
+    expect(status).toHaveBeenCalledWith(HttpStatus.SERVICE_UNAVAILABLE);
+    expect(json).toHaveBeenCalledWith({ statusCode: HttpStatus.SERVICE_UNAVAILABLE, message: 'Workspace is being upgraded.' });
+  });
+
   describe('Phase X3.2: the 500 branch reports to the exception handler (Sentry)', () => {
     it('a 500 calls the handler once with the exception and the route PATTERN (never the path or query string)', () => {
       const error = new Error('relation "core.shift" does not exist');

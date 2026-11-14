@@ -241,3 +241,22 @@ describe('D-Q5b §13 #3 (OD-5 Option B): a failed SENT write after a confirmed s
     expect(h.send.mock.calls[0]![0].idempotencyKey).toBe(deliveryKeyFor(ROW_ID));
   });
 });
+
+
+describe('Part D (owner D2/D3): a job of a workspace blocked by a failed upgrade step pauses (deferred, never claimed or failed)', () => {
+  it('blocked workspace: moveToDelayed + DelayedError, no claim, no attempt counted, nothing sent; unblocked: sent as usual', async () => {
+    const h = harness({ priorCount: 0 });
+    h.row.workspaceId = '33333333-3333-4333-8333-333333333333';
+    let blocked = true;
+    (h.deps.tenantContext as unknown as { isWorkspaceUpgradeBlocked: unknown }).isWorkspaceUpgradeBlocked = async () => blocked;
+    const moveToDelayed = jest.fn(async () => undefined);
+    await expect(createEmailSendProcessor(h.deps)(jobOf(0, 1, { moveToDelayed, token: 't' }))).rejects.toBeInstanceOf(DelayedError);
+    expect(moveToDelayed).toHaveBeenCalledTimes(1);
+    expect(h.writes).toEqual([]);
+    expect(h.row.infrastructureAttemptCount).toBe(0);
+    expect(h.send).not.toHaveBeenCalled();
+    blocked = false;
+    await createEmailSendProcessor(h.deps)(jobOf(0, 1, { moveToDelayed, token: 't' }));
+    expect(h.send).toHaveBeenCalledTimes(1);
+  });
+});

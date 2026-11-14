@@ -65,8 +65,10 @@ import { UpgradeRun, UpgradeRunReport } from '../../../../../engine/core-modules
 import { upgradeSessionOf } from '../../../../../engine/core-modules/upgrade/upgrade-migration.service';
 import { UPGRADE_COMMANDS } from '../../../../../engine/core-modules/upgrade/upgrade-commands/registry';
 import type { UpgradeCommand } from '../../../../../engine/core-modules/upgrade/upgrade-commands/upgrade-command';
+import type { WorkspaceUpgradeCommand } from '../../../../../engine/core-modules/upgrade/upgrade-commands/workspace-upgrade-command';
 import { majorMinorKey, readAppVersion } from '../../../../../engine/core-modules/upgrade/upgrade-version';
 import { attributeLedger } from './release-floor';
+import { LATEST_WORKSPACE_MODULE_VERSION } from '../../../workspace-schema/workspace-schema-modules';
 
 export const RESULT_LINE_PREFIX = 'TWENTY_MIGRATE_RESULT';
 
@@ -251,6 +253,11 @@ export interface MigrateOnStartDeps {
    * check; every logbook row of the run records forced = true.
    */
   upgradeForce?: true;
+  /**
+   * Part D test seam (the in-process start spec only; no environment variable maps to it): a workspace upgrade registry
+   * instead of WORKSPACE_UPGRADE_COMMANDS, and the workspaces the runner and the fleet post-check look at.
+   */
+  testWorkspace?: { registry: Readonly<Record<string, readonly WorkspaceUpgradeCommand[]>>; workspaceIds: readonly string[] };
 }
 
 /** How long the warning-only epoch bump may hold up the start (the migration lock is still held). */
@@ -387,6 +394,11 @@ export async function runMigrateOnStart(config: MigrateOnStartConfig, deps: Migr
   });
 
   try {
+    // Part D test hook (review): `testWorkspace` is reachable only from code (no environment variable maps to it) AND only
+    // under NODE_ENV=test; a production build / process refuses it before anything connects (exit 64).
+    if (deps.testWorkspace && env.NODE_ENV !== 'test') {
+      throw new TestSeamRefusal('the testWorkspace hook is a test seam: only NODE_ENV=test. Refusing.');
+    }
     const pre = await readMarkerState(env);
     const first = synthesiseGuardEnv(env, pre.marker, pre.database, generatedId);
     guardEnvUsed = first.guardEnv;
@@ -400,7 +412,15 @@ export async function runMigrateOnStart(config: MigrateOnStartConfig, deps: Migr
     const probes = readTestUpgradeCommands(env, seamCtx);
     if (probes.length || testFailCommand) log(`TEST SEAMS ACTIVE: upgrade probe commands=${probes.map((c) => c.name).join(',') || '-'} failCommand=${testFailCommand ?? '-'}`);
     const registry = probes.length ? withProbeCommands(UPGRADE_COMMANDS, codeVersion, probes) : undefined;
-    const run = new UpgradeRun({ codeVersion, force: deps.upgradeForce === true, log, testFailCommand, registry });
+    const tw = deps.testWorkspace;
+    const run = new UpgradeRun({
+      codeVersion,
+      force: deps.upgradeForce === true,
+      log,
+      testFailCommand,
+      registry,
+      ...(tw ? { workspaceRegistry: tw.registry, workspaceRunner: { workspaceIds: tw.workspaceIds } } : {}),
+    });
     upgradeRun = run;
 
     const locked = await runner({
@@ -439,7 +459,12 @@ export async function runMigrateOnStart(config: MigrateOnStartConfig, deps: Migr
         applied = done;
         const query: Query = (sql, parameters) => queryRunner.query(sql, parameters) as Promise<unknown[]>;
         await autoBindFreshInstall({ query, env, guardEnv: guardEnvUsed, guarded, classification, proof, log });
-        const problems = await deployPostCheckProblems(query);
+        // Part D (review N2): the start's own workspace pass follows, so workspaces between the frozen template (20) and the
+        // code's structure level are its job, not a refusal here.
+        const problems = await deployPostCheckProblems(query, {
+          behindFloor: LATEST_WORKSPACE_MODULE_VERSION,
+          ...(tw ? { workspaceRegistry: tw.registry, workspaceIds: tw.workspaceIds } : {}),
+        });
         const { blocking, warnings } = blockingPostCheckProblems(classification?.state ?? 'UNKNOWN', problems);
         for (const w of warnings) log(`WARNING (ledger ahead, C-1): ${w}`);
         if (blocking.length) {
@@ -449,7 +474,15 @@ export async function runMigrateOnStart(config: MigrateOnStartConfig, deps: Migr
         }
         log(`post-checks passed (${done.length} applied)`);
         await run.afterApply(upgradeSessionOf(queryRunner));
-        await bumpEntityCacheAfterUpgrade({ applied: done, env, log, flush: deps.cacheFlush });
+        // D2/D3: a workspace blocked or unblocked by this run must not be served from a cached resolution: bump the epoch.
+        // Review P2: while a workspace is blocked, or when a block changed, a failed bump is FATAL (66): a cached resolution
+        // could otherwise route a blocked workspace for up to the cache TTL. No Redis configured = no cache = nothing to bump.
+        const blockSensitive = run.report.workspaces?.blockChanged === true || (run.report.workspaces?.blocked.length ?? 0) > 0;
+        const cacheReasons = blockSensitive ? [...done, 'workspace-upgrade-block'] : done;
+        const bump = await bumpEntityCacheAfterUpgrade({ applied: cacheReasons, env, log, flush: deps.cacheFlush });
+        if (blockSensitive && bump === 'warning') {
+          throw new Error('the entity-cache epoch could not be bumped while a workspace upgrade block changed or is in force; refusing to serve possibly stale workspace routing (retry when Redis is reachable)');
+        }
       },
     });
     applied = locked.applied;
