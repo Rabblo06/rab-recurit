@@ -1,3 +1,4 @@
+import { asLiveTransactionManager } from '../../__tests__/helpers/business-tables-fakes';
 import { InviteAutoDeleteConfigError, resolveInviteAutoDeleteEnabled, runAccountInviteCleanupCycle } from './account-invite-cleanup.job';
 import { MaintenanceScanProcessor } from './maintenance.processors';
 
@@ -45,7 +46,7 @@ function harness(opts: {
       ];
     }
     if (sql.startsWith('SELECT current_setting')) return [{ org: null, workspace: null }];
-    if (sql === `SELECT 1 FROM shift WHERE created_by = $1 LIMIT 1`) return params[0] === opts.workspaceDependency ? [{ '?column?': 1 }] : [];
+    if (sql === `SELECT 1 FROM "core"."shift" WHERE created_by = $1 LIMIT 1`) return params[0] === opts.workspaceDependency ? [{ '?column?': 1 }] : [];
     if (sql.includes('workspace_schema_registry')) return [];
     return [];
   };
@@ -53,7 +54,8 @@ function harness(opts: {
   const dataSource = {
     transaction: async <T>(fn: (m: unknown) => Promise<T>) => {
       counters.transactions += 1;
-      return fn({ query });
+      // Part C2: a transaction's manager (live query runner); the job binds the business schema itself.
+      return fn(asLiveTransactionManager({ query }));
     },
     // A DataSource-level query (outside a transaction) would also be a database access: counted the same way.
     query: async (sql: string, params: unknown[] = []) => query(sql, params),
@@ -129,7 +131,7 @@ describe('account invite cleanup — F-1 definer path (WORKER_INVITE_AUTO_DELETE
     h.dataSource.transaction = async <T>(fn: (m: unknown) => Promise<T>) =>
       original(async (m: unknown) => {
         const inner = m as { query: (sql: string, p?: unknown[]) => Promise<unknown> };
-        return fn({
+        return fn(asLiveTransactionManager({
           query: async (sql: string, p?: unknown[]) => {
             if (sql.includes('core.worker_delete_expired_invited_user($1')) {
               await inner.query(sql, p);
@@ -137,7 +139,7 @@ describe('account invite cleanup — F-1 definer path (WORKER_INVITE_AUTO_DELETE
             }
             return inner.query(sql, p);
           },
-        });
+        }));
       });
     const result = await runAccountInviteCleanupCycle(h.dataSource as never, ON);
     const sql = h.statements.map((s) => s.sql);

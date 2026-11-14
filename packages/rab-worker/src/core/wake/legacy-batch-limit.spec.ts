@@ -1,3 +1,4 @@
+import { withoutCoreBusinessQualifier } from '../../__tests__/helpers/business-tables-fakes';
 import { catalogue, DQ5A_SQL_SHA256, fakeTenant, PRE_PHASE_D_SQL_SHA256, sha256 } from '../../__tests__/helpers/dispatch-fakes';
 import { dispatchEmailScope, runEmailDispatchCycle } from '../../queues/rab-email/email-dispatch.job';
 import { dispatchPushScope, runPushDispatchCycle } from '../../queues/rab-push/push-dispatch.job';
@@ -160,18 +161,19 @@ describe('statement per_scope discovery: one note per workspace whose 200-record
         served = true;
         return [{ workspace_id: WS, organisation_id: ORG_A }];
       }
-      if (sql.includes('FROM payroll_record WHERE')) return rows(n, (i) => ({ id: id(i), organisation_id: ORG_A, workspace_id: WS, statement_status: 'pending' }));
-      if (sql.startsWith('UPDATE payroll_record')) return [[], 0]; // CAS lost: nothing claimed
+      if (sql.includes('FROM "core"."payroll_record" WHERE')) return rows(n, (i) => ({ id: id(i), organisation_id: ORG_A, workspace_id: WS, statement_status: 'pending' }));
+      if (sql.startsWith('UPDATE "core"."payroll_record"')) return [[], 0]; // CAS lost: nothing claimed
       return [];
     });
     const sweep = await captureLegacyBatchLimit(() => runShiftStatementDispatchCycle(dataSource as never, tenant as never, jest.fn(async () => undefined)));
-    return { scopesAtLimit: sweep.scopesAtLimit, scans: statements.filter((s) => s.sql.includes('FROM payroll_record WHERE')) };
+    return { scopesAtLimit: sweep.scopesAtLimit, scans: statements.filter((s) => s.sql.includes('FROM "core"."payroll_record" WHERE')) };
   };
 
   it.each([[0, 0], [199, 0], [200, 1]])('%i discovered → %i; the discovery SQL is unchanged', async (n, expected) => {
     const { scopesAtLimit, scans } = await run(n);
     expect(scopesAtLimit).toBe(expected);
-    expect(sha256(scans[0]!.sql)).toBe(PRE_PHASE_D_SQL_SHA256.statementScan);
+    // Part C2: schema-qualified through businessTables (the fake binds 'core'); every other byte is the pin.
+    expect(sha256(withoutCoreBusinessQualifier(scans[0]!.sql))).toBe(PRE_PHASE_D_SQL_SHA256.statementScan);
   });
 });
 
