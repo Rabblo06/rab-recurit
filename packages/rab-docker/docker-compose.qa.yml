@@ -15,8 +15,10 @@ name: rab-qa
 #     (service_completed_successfully), as production rab-migrate. It applies only with
 #     CREWFLOW_MIGRATION_APPROVED=<the token its check run printed for the exact pending set> (final review F5);
 #     otherwise it checks (exit 0 nothing pending, 3 pending + the list and the token).
-#   - HWS runtime routing OFF (HWS_RUNTIME_ENABLED=false on api and jobs), as in production until gate G4. The dev
-#     stack runs HWS on; QA deliberately does not, so it tests what production will run.
+#   - HWS runtime routing ON (HWS_RUNTIME_ENABLED=true on api and worker), like dev, CI and the code default outside
+#     production (Part C1, OWNER-DB-ULTIMATE.md Part C). Production stays OFF (its compose pins "false") until the C3
+#     cutover; QA runs the post-cutover mode. Use fresh volumes: business rows a pre-C1 QA database wrote into the `core`
+#     copies are not visible with HWS on.
 #
 # KNOWN DIFFERENCES FROM PRODUCTION (unavoidable; see WAVE1_LANE_D_REPORT.md):
 #   - NODE_ENV/RAB_RUNTIME_ENV = development. NODE_ENV=production needs TLS verify-full and a database bound to the
@@ -146,8 +148,8 @@ services:
       WORKER_CLAIM_MODE: ${WORKER_CLAIM_MODE:-per_scope}
       REDIS_URL: redis://redis:6379
       APP_SECRET: ${QA_APP_SECRET:?set QA_APP_SECRET (see the header of docker-compose.qa.yml)}
-      # OFF until production gate G4 (see header). Explicit so a QA run can never silently differ from production.
-      HWS_RUNTIME_ENABLED: 'false'
+      # ON (Part C1, see header). Explicit so the QA mode never depends on NODE_ENV.
+      HWS_RUNTIME_ENABLED: 'true'
       EMAIL_DRIVER: LOGGER
       CORS_ORIGINS: http://127.0.0.1:5174,http://localhost:5174
       # Same loopback alias as the front's VITE_API_URL, so the SameSite session cookie survives a reload.
@@ -213,7 +215,7 @@ services:
       PG_POOL_MAX_CONNECTIONS: '12'
       REDIS_URL: redis://redis:6379
       APP_SECRET: ${QA_APP_SECRET:?set QA_APP_SECRET}
-      HWS_RUNTIME_ENABLED: 'false'
+      HWS_RUNTIME_ENABLED: 'true'
       # In-process provisioning, the same pinned 5 s as production (the code default is 60 s), so QA tests what production
       # runs.
       WORKSPACE_PROVISIONER_INTERVAL_SECONDS: '5'

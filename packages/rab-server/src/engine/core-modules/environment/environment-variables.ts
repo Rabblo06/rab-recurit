@@ -1,4 +1,4 @@
-import { Transform, Type } from 'class-transformer';
+import { Expose, Transform, Type } from 'class-transformer';
 import { IsBoolean, IsIn, IsInt, IsNumber, IsOptional, IsUrl, IsString, Matches, Max, MaxLength, Min, MinLength, IsNotEmpty, ValidateIf } from 'class-validator';
 
 // Phase A pa-intervals
@@ -6,6 +6,8 @@ import { WORKER_SCAN_INTERVAL_SETTINGS as SCAN_INTERVALS } from './worker-scan-i
 import { TIMER_TRIGGER_KINDS_PATTERN } from '../../worker-shared/timer-trigger.contract';
 // Phase B (B3): the deployment identity's accepted values, from their one definition.
 import { DEPLOYMENT_ENVIRONMENTS, IDENTITY_BOOTSTRAP_VALUE } from '../../../database/deployment-identity/deployment-identity';
+// Part C1: the HWS_RUNTIME_ENABLED default rule (on outside production), shared with the standalone provisioner.
+import { resolveHwsRuntimeEnabled } from './hws-runtime-default';
 
 /**
  * Wave 1 lane A: a security flag accepts exactly `true`/`false`. Anything else is left as the raw
@@ -346,7 +348,17 @@ export class EnvironmentVariables {
   EMAIL_DELIVERY_ENABLED: boolean = true;
 
   /**
-   * Hyper Workspace runtime cutover mode. Defaults to false (existing deployments and legacy-core behaviour unchanged).
+   * Hyper Workspace runtime routing (one schema per workspace). Part C1 (OWNER-DB-ULTIMATE.md Part C): ON by default
+   * everywhere except production. The rule lives in ONE place, `resolveHwsRuntimeEnabled` (./hws-runtime-default.ts),
+   * shared with the standalone workspace provisioner:
+   *   - "true" / "false": exactly that;
+   *   - unset or empty: true in development and test (NODE_ENV unset = development), FALSE in production (fail safe:
+   *     production must not route to the workspace schemas before the C3 cutover has copied and verified the data; the
+   *     production compose files also pin "false" explicitly);
+   *   - anything else ("yes", "1", "TRUE", ...): refused, the process does not boot.
+   * `@Expose()` makes the transform run for an UNSET key too (class-transformer otherwise skips absent keys and keeps the
+   * field initializer, which cannot see NODE_ENV); the initializer `false` is only the fail-safe value for an instance
+   * built without plainToInstance.
    * When true: every workspace-scoped business read/write (TenantContextService.runInTenantContext with a non-null
    * ctx.workspaceId) resolves the caller's physical workspace schema through the registry (fail closed if not READY)
    * and binds search_path to exactly that schema, transaction-local, before the business callback runs. There is no
@@ -354,10 +366,10 @@ export class EnvironmentVariables {
    * writing core.* business tables. Core entities (explicit schema:'core') and explicitly core-qualified raw SQL are
    * unaffected either way. See docs/HANDOFF.md §32e for the cutover's current status and remaining gaps.
    */
-  @IsOptional()
+  @Expose()
   @Type(() => String)
-  @Transform(({ value }) => value === 'true')
-  @IsBoolean()
+  @Transform(({ value, obj }) => resolveHwsRuntimeEnabled(value, (obj as Record<string, unknown>)?.NODE_ENV))
+  @IsBoolean({ message: 'HWS_RUNTIME_ENABLED must be exactly true or false (unset = on outside production, off in production)' })
   HWS_RUNTIME_ENABLED: boolean = false;
 
   /**

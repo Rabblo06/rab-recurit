@@ -6,8 +6,11 @@
  *   CREWFLOW_PROVISIONER_ENABLED  strict: "true" | "false" | unset/empty. Any other value refuses to start.
  *     "true"   provision. (The retired Worker bundle launcher set this on its provisioner child; O1 removed it.)
  *     "false"  never provision (an explicit opt-out wins over HWS_RUNTIME_ENABLED).
- *     unset    legacy standalone behaviour, unchanged: provision only when HWS_RUNTIME_ENABLED=true (the original gate; the
- *              nx `provision` target and the standalone integration specs rely on it).
+ *     unset    legacy standalone behaviour: provision only when HWS runtime routing is ON (the original gate; the nx
+ *              `provision` target and the standalone integration specs rely on it). Part C1: "on" is decided by the same
+ *              rule as the API and Worker (`resolveHwsRuntimeEnabled`, rab-server environment/hws-runtime-default.ts):
+ *              "true" → on, "false" → off, unset/empty → on outside production and OFF in production; any other value
+ *              is not "on" here (the API and Worker refuse to boot with it).
  *   Not provisioning = exit 0 BEFORE any database or Redis connection is opened (it used to probe the privileged database
  *   identity and ping Redis first).
  *
@@ -25,6 +28,8 @@
  *   enabled by the legacy HWS gate). Out of range or not a whole number refuses to start. Was a fixed 5 s.
  *   The maximum keeps a settled cycle inside the health check's 5-minute provisioner window.
  */
+
+import { resolveHwsRuntimeEnabled } from '@rab/server/engine/core-modules/environment/hws-runtime-default';
 
 export const PROVISIONER_INTERVAL_DEFAULT_SECONDS = 60;
 /** The pre-Phase-A fixed cadence: still the default when provisioning is enabled by the legacy HWS_RUNTIME_ENABLED gate. */
@@ -77,9 +82,11 @@ function parseInterval(env: NodeJS.ProcessEnv, defaultSeconds: number): number {
 export function resolveProvisionerConfig(env: NodeJS.ProcessEnv): ProvisionerConfig {
   const explicit = parseSwitch(env);
   const hws = env.HWS_RUNTIME_ENABLED ?? null;
+  // Part C1: the effective routing mode, by the one shared rule (unset = on outside production, off in production).
+  const hwsOn = resolveHwsRuntimeEnabled(hws ?? undefined, env.NODE_ENV) === true;
   // Integration hardening: a standalone provisioner enabled by the legacy HWS gate keeps the old 5 s cadence unless the
   // interval is set; only the explicit switch gets the Phase A 60 s default.
-  const legacyGate = explicit === null && hws === 'true';
+  const legacyGate = explicit === null && hwsOn;
   const intervalSeconds = parseInterval(env, legacyGate ? PROVISIONER_INTERVAL_LEGACY_DEFAULT_SECONDS : PROVISIONER_INTERVAL_DEFAULT_SECONDS);
   let provision: boolean;
   let enabledBy: ProvisionerConfig['enabledBy'];
@@ -90,7 +97,7 @@ export function resolveProvisionerConfig(env: NodeJS.ProcessEnv): ProvisionerCon
     provision = false;
     enabledBy = null;
   } else {
-    provision = hws === 'true';
+    provision = hwsOn;
     enabledBy = provision ? 'HWS_RUNTIME_ENABLED' : null;
   }
   return { provision, enabledBy, hwsRuntimeEnabled: hws, intervalSeconds, intervalMs: intervalSeconds * 1000 };
