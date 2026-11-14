@@ -13,6 +13,7 @@ import { createAdminDataSource } from './helpers/admin-datasource';
 import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
 import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-pipe';
 import { integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
+import { businessTable } from './helpers/hws-fixtures';
 
 /**
  * Wave 5 lane DATA — ranked full-text + trigram search (GET /rest/v1/search). Real PostgreSQL with RLS on
@@ -76,9 +77,9 @@ describeIfDb('wave 5: ranked search (integration)', () => {
     ids.bob = (await staff(a, `Bob${tag}`, `Zoeller${tag}`)).profileId!;
     const refStaff = await staff(a, `Ref${tag}`, 'Holder');
     ids.ref = refStaff.profileId!;
-    await admin.query(`UPDATE core.staff_profile SET staff_ref = $2 WHERE id = $1`, [ids.ref, `QX${tag}77`]);
+    await admin.query(`UPDATE ${businessTable(a.workspaceId!, 'staff_profile')} SET staff_ref = $2 WHERE id = $1`, [ids.ref, `QX${tag}77`]);
     ids.archivedStaff = (await staff(a, `Gone${tag}`, 'Leaver')).profileId!;
-    await admin.query(`UPDATE core.staff_profile SET employment_status = 'inactive', archived_at = now(), archived_by = $2 WHERE id = $1`, [ids.archivedStaff, a.userId]);
+    await admin.query(`UPDATE ${businessTable(a.workspaceId!, 'staff_profile')} SET employment_status = 'inactive', archived_at = now(), archived_by = $2 WHERE id = $1`, [ids.archivedStaff, a.userId]);
     ids.otherWs = (await staff(b, `Zoë${tag}`, `Otherws${tag}`)).profileId!;
     ids.otherOrg = (await staff(c, `Zoë${tag}`, `Otherorg${tag}`)).profileId!;
 
@@ -162,7 +163,7 @@ describeIfDb('wave 5: ranked search (integration)', () => {
   });
 
   it('R7 email: matched (prefix, never returned) for a caller who may see staff email; never for a member whose role hides it', async () => {
-    const [{ email }] = await admin.query(`SELECT u.email::text AS email FROM core.staff_profile sp JOIN core."user" u ON u.id = sp.user_id WHERE sp.id = $1`, [ids.bob]);
+    const [{ email }] = await admin.query(`SELECT u.email::text AS email FROM ${businessTable(a.workspaceId!, 'staff_profile')} sp JOIN core."user" u ON u.id = sp.user_id WHERE sp.id = $1`, [ids.bob]);
     const prefix = String(email).slice(0, String(email).indexOf('@') + 3);
     const owner = await search(tokenA, prefix);
     expect(owner.status).toBe(200);
