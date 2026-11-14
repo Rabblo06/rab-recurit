@@ -1,4 +1,4 @@
-import { coreReferences, orphanCountSql } from './workspace-core-orphans';
+import { coreReferences, EXISTING_IDS_SQL, referencedIdsSql } from './workspace-core-orphans';
 import { composeServerPathTemplateLevel22, VERIFY_WORKSPACE_SCHEMA_V1_LEVEL_22_SQL } from './structure-level-22';
 import { composeServerPathTemplateLevel21, VERIFY_WORKSPACE_SCHEMA_V1_LEVEL_21_SQL } from './structure-level-21';
 import { workspaceCoreFkRemovalSql } from '../../../engine/core-modules/upgrade/upgrade-commands/0-6/workspace-core-fk-removal';
@@ -15,14 +15,16 @@ describe('Part D 0a: workspace → core references (static)', () => {
     expect(refs.filter((r) => r.target === 'core.organisation').every((r) => r.column === 'organisation_id')).toBe(true);
   });
 
-  it('the orphan probe: one UNION ALL branch per reference, a user must be of the row\'s organisation, the schema name is validated', () => {
+  it('the orphan probe: phase 1 reads only the workspace tables (one branch per reference), phase 2 is primary-key lookups; the schema name is validated', () => {
     const s = 'workspace_0123456789abcdef0123456789abcdef';
-    const sql = orphanCountSql(s);
+    const sql = referencedIdsSql(s);
     expect(sql.split('UNION ALL')).toHaveLength(72);
-    expect(sql).toContain(`FROM ${s}.staff_profile t WHERE t.user_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM core."user" c WHERE c.id = t.user_id AND c.organisation_id = t.organisation_id)`);
-    expect(sql).not.toMatch(/\b(INSERT|UPDATE|DELETE|DROP|ALTER)\b/);
-    expect(() => orphanCountSql('core')).toThrow('invalid workspace schema name');
-    expect(() => orphanCountSql('workspace_x; DROP TABLE y')).toThrow('invalid workspace schema name');
+    expect(sql).toContain(`SELECT 0 AS i, t.clock_in_by::text AS id, pg_catalog.count(*)::int AS n FROM ${s}.attendance t WHERE t.clock_in_by IS NOT NULL GROUP BY t.clock_in_by`);
+    expect(sql).not.toMatch(/core\./);
+    expect(sql).not.toMatch(/(INSERT|UPDATE|DELETE|DROP|ALTER)/);
+    expect(EXISTING_IDS_SQL['core."user"']).toMatch(/u\.id = ANY \(\$1::uuid\[\]\) AND u\.organisation_id = \$2/);
+    expect(() => referencedIdsSql('core')).toThrow('invalid workspace schema name');
+    expect(() => referencedIdsSql('workspace_x; DROP TABLE y')).toThrow('invalid workspace schema name');
   });
 
   it('the command drops exactly the 72 constraints, each guarded, and nothing else', () => {

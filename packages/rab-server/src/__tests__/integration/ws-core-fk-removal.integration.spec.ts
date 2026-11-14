@@ -154,6 +154,11 @@ describeIfDb('Part D 0a: workspace → core foreign keys removed (integration, t
     const base = await make('lk-base', 'frozen');
     const old: SeededWorkspace[] = [];
     for (let i = 0; i < W; i += 1) old.push(await make(`lk21-${i}`, 'level21', base));
+    // Workspaces created while level 21 was the code's level carry that release's creation cursor (Part B is_initial).
+    const L21_STEP = `0.6.0_${(WORKSPACE_UPGRADE_COMMANDS['0-6'] ?? [])[0]!.name}_${(WORKSPACE_UPGRADE_COMMANDS['0-6'] ?? [])[0]!.timestamp}`;
+    for (const w of old) {
+      await admin.query(`INSERT INTO core.upgrade_migration (name, status, attempt, executed_by_version, is_initial, workspace_id) VALUES ($1, 'completed', 1, '0.6.0', true, $2)`, [L21_STEP, w.id]);
+    }
     const fresh: SeededWorkspace[] = [];
     for (let i = 0; i < W; i += 1) fresh.push(await make(`lk22-${i}`, 'ts', base));
     const victim = (await admin.query(`INSERT INTO core."user"(organisation_id, email, first_name, last_name, status) VALUES ($1, $2, 'V', 'Ictim', 'active') RETURNING id`, [base.org, `victim-${SFX}@ws0a.invalid`])).rows[0].id as string;

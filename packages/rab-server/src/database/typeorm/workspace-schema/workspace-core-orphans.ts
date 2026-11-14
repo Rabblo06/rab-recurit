@@ -52,18 +52,23 @@ export function coreReferences(): CoreReference[] {
   return out;
 }
 
-/** One count query per workspace: a UNION ALL of one probe per reference. */
-export function orphanCountSql(schema: string, refs: readonly CoreReference[] = coreReferences()): string {
+/**
+ * Phase 1, one query per workspace: every DISTINCT referenced id per reference, with its row count. Reading the workspace's own
+ * small tables only; no join into core (an anti-join against core."user" under its RLS was measured at seconds per workspace).
+ */
+export function referencedIdsSql(schema: string, refs: readonly CoreReference[] = coreReferences()): string {
   if (!SCHEMA.test(schema)) throw new Error('invalid workspace schema name');
   return refs
-    .map(
-      (r, i) =>
-        `SELECT ${i} AS i, pg_catalog.count(*)::int AS n FROM ${schema}.${r.table} t ` +
-        `WHERE t.${r.column} IS NOT NULL AND NOT EXISTS (SELECT 1 FROM ${r.target} c WHERE c.id = t.${r.column}` +
-        (r.target === 'core."user"' ? ` AND c.organisation_id = t.organisation_id)` : ')'),
-    )
+    .map((r, i) => `SELECT ${i} AS i, t.${r.column}::text AS id, pg_catalog.count(*)::int AS n FROM ${schema}.${r.table} t WHERE t.${r.column} IS NOT NULL GROUP BY t.${r.column}`)
     .join('\nUNION ALL\n');
 }
+
+/** Phase 2: which of the referenced ids exist (primary-key lookups; a user must also be of the workspace's organisation). */
+export const EXISTING_IDS_SQL: Readonly<Record<CoreReference['target'], string>> = Object.freeze({
+  'core."user"': 'SELECT u.id::text AS id FROM core."user" u WHERE u.id = ANY ($1::uuid[]) AND u.organisation_id = $2',
+  'core.organisation': 'SELECT o.id::text AS id FROM core.organisation o WHERE o.id = ANY ($1::uuid[]) AND $2::uuid IS NOT NULL',
+  'core.manager_workspace': 'SELECT w.id::text AS id FROM core.manager_workspace w WHERE w.id = ANY ($1::uuid[]) AND w.organisation_id = $2',
+});
 
 export async function checkWorkspaceCoreOrphans(client: Client): Promise<WorkspaceOrphanCycleResult> {
   const refs = coreReferences();
@@ -81,10 +86,21 @@ export async function checkWorkspaceCoreOrphans(client: Client): Promise<Workspa
           await client.query('ROLLBACK');
           continue;
         }
-        const { rows } = await client.query<{ i: number; n: number }>(orphanCountSql(schema, refs));
+        const { rows } = await client.query<{ i: number; id: string; n: number }>(referencedIdsSql(schema, refs));
+        const existing = new Map<CoreReference['target'], Set<string>>();
+        for (const target of ['core."user"', 'core.organisation', 'core.manager_workspace'] as const) {
+          const ids = [...new Set(rows.filter((r) => refs[Number(r.i)]!.target === target).map((r) => r.id))];
+          const found = ids.length ? (await client.query<{ id: string }>(EXISTING_IDS_SQL[target], [ids, ws.organisation_id])).rows.map((r) => r.id) : [];
+          existing.set(target, new Set(found));
+        }
         await client.query('COMMIT');
         result.checked += 1;
-        for (const r of rows) if (Number(r.n) > 0) result.findings.push({ workspaceId: ws.workspace_id, ...refs[Number(r.i)]!, rows: Number(r.n) });
+        const missing = new Map<number, number>();
+        for (const r of rows) {
+          const ref = refs[Number(r.i)]!;
+          if (!existing.get(ref.target)!.has(r.id)) missing.set(Number(r.i), (missing.get(Number(r.i)) ?? 0) + Number(r.n));
+        }
+        for (const [i, n] of [...missing].sort((x, y) => x[0] - y[0])) result.findings.push({ workspaceId: ws.workspace_id, ...refs[i]!, rows: n });
       } catch (error) {
         await client.query('ROLLBACK').catch(() => undefined);
         result.errors.push({ workspaceId: ws.workspace_id, detail: `orphan check failed (SQLSTATE ${(error as { code?: string }).code ?? 'none'})` });
