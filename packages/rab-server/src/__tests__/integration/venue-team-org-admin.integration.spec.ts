@@ -15,6 +15,7 @@ import { createAdminDataSource } from './helpers/admin-datasource';
 import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
 import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-pipe';
 import { integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
+import { businessTable, businessTableOf } from './helpers/hws-fixtures';
 
 /**
  * Owner decision 2026-10-28: the EXISTING Assigned Staff feature (venue_manager_staff) extended to organisation
@@ -58,7 +59,9 @@ describeIfDb('Assigned Staff for organisation administrators (CEO / platform adm
 
   /** venue_manager_staff rows of one Venue Manager, read as the bootstrap superuser (not narrowed by RLS). */
   async function teamRows(vmProfileId: string): Promise<string[]> {
-    const rows = await owner.query(`SELECT staff_profile_id FROM core.venue_manager_staff WHERE manager_profile_id = $1 ORDER BY 1`, [vmProfileId]);
+    // Part C1: the Venue Manager's own workspace schema with HWS on (the core copy with HWS off).
+    const [{ workspace_id: ws }] = await owner.query(`SELECT workspace_id FROM core.manager_profile WHERE id = $1`, [vmProfileId]);
+    const rows = await owner.query(`SELECT staff_profile_id FROM ${businessTable(ws, 'venue_manager_staff')} WHERE manager_profile_id = $1 ORDER BY 1`, [vmProfileId]);
     return rows.map((r: { staff_profile_id: string }) => r.staff_profile_id);
   }
 
@@ -142,7 +145,7 @@ describeIfDb('Assigned Staff for organisation administrators (CEO / platform adm
     expect((await admin.remove(vmA.profileId!, staffA.profileId!)).status).toBe(204);
     expect(await teamRows(vmA.profileId!)).toEqual([]);
     expect((await admin.remove(vmA.profileId!, staffA.profileId!)).status).toBe(404);
-    expect((await owner.query(`SELECT count(*)::int AS n FROM core.staff_profile WHERE id = $1`, [staffA.profileId]))[0].n).toBe(1);
+    expect((await owner.query(`SELECT count(*)::int AS n FROM ${await businessTableOf(owner, 'staff_profile', staffA.profileId!)} WHERE id = $1`, [staffA.profileId]))[0].n).toBe(1);
   });
 
   it('org-admin changes reuse the existing audit actions, with the CEO as actor and flow org_admin', async () => {
@@ -342,7 +345,7 @@ describeIfDb('Assigned Staff for organisation administrators (CEO / platform adm
 
   it('an archived Staff member is not assignable on either path (404, nothing written), as the picker already excludes them', async () => {
     const archived = await factory.createStaff(org, { owner: managerA, label: 'vtoaArch' });
-    await owner.query(`UPDATE core.staff_profile SET archived_at = now(), archived_by = $2 WHERE id = $1`, [archived.profileId, managerA.userId]);
+    await owner.query(`UPDATE ${businessTable(managerA.workspaceId!, 'staff_profile')} SET archived_at = now(), archived_by = $2 WHERE id = $1`, [archived.profileId, managerA.userId]);
     expect((await asAdmin(ceoToken).assignable(vmA.profileId!)).body.data.map((r: { id: string }) => r.id)).not.toContain(archived.profileId);
     const before = await teamRows(vmA.profileId!);
     expect((await asAdmin(ceoToken).assign(vmA.profileId!, { staffProfileIds: [archived.profileId] })).status).toBe(404);
