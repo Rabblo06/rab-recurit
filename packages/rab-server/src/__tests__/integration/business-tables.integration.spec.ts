@@ -77,7 +77,7 @@ describeIfDb('C2-0 businessTables(manager) and the search_path trap (integration
     const schema = businessSchema(mgr.workspaceId!);
     const result = await tenantContext.runInWorkspaceContext(ctx(), async (m, bound) => {
       const t = businessTables(m);
-      const [path] = await m.query<Array<{ schemas: string[] }>>(`SELECT current_schemas(false) AS schemas`);
+      const [path] = await m.query<Array<{ schemas: string }>>(`SELECT current_schemas(false)::text AS schemas`);
       const [row] = await m.query<Array<{ id: string }>>(
         `INSERT INTO ${t.venue} (organisation_id, name, created_by, workspace_id) VALUES ($1, $2, $3, $4) RETURNING id`,
         [orgId, 'C2-0 qualified venue', mgr.userId, mgr.workspaceId],
@@ -88,7 +88,7 @@ describeIfDb('C2-0 businessTables(manager) and the search_path trap (integration
     });
     expect(result.bound).toBe(schema);
     expect(result.venue).toBe(`"${schema}"."venue"`);
-    expect(result.schemas).toEqual([schema]); // search_path still bound to exactly that schema (trap off)
+    expect(result.schemas).toBe(`{${schema}}`); // search_path still bound to exactly that schema (trap off)
     expect(result.viaPath).toBe(1);
     expect(result.viaQualified).toBe(1);
     // The row is physically in that schema (superuser fixture connection, no routing involved).
@@ -120,13 +120,13 @@ describeIfDb('C2-0 businessTables(manager) and the search_path trap (integration
     const schema = businessSchema(mgr.workspaceId!);
     const inside = await tenantContext.runInWorkspaceContext(ctx(), async (m) => {
       const t = businessTables(m);
-      const [path] = await m.query<Array<{ schemas: string[] }>>(`SELECT current_schemas(false) AS schemas`);
+      const [path] = await m.query<Array<{ schemas: string }>>(`SELECT current_schemas(false)::text AS schemas`);
       const [count] = await m.query<Array<{ n: number }>>(`SELECT count(*)::int AS n FROM ${t.venue} WHERE organisation_id = $1`, [orgId]);
       const [builtin] = await m.query<Array<{ ok: boolean }>>(`SELECT length(md5('x')) = 32 AS ok`);
       return { venue: t.venue, schemas: path!.schemas, venues: count!.n, builtin: builtin!.ok };
     });
     expect(inside.venue).toBe(`"${schema}"."venue"`);
-    expect(inside.schemas).toEqual([]);
+    expect(inside.schemas).toBe('{}');
     expect(inside.venues).toBeGreaterThanOrEqual(1);
     expect(inside.builtin).toBe(true);
 
