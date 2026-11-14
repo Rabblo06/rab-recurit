@@ -135,7 +135,7 @@ const RESTORE_SQL = `FOREACH v_rel IN ARRAY v_rels LOOP
     EXECUTE pg_catalog.format('ALTER TABLE %s FORCE ROW LEVEL SECURITY', v_rel);
   END LOOP;
   SELECT pg_catalog.bool_and(c.relrowsecurity AND c.relforcerowsecurity) INTO v_ok
-    FROM pg_catalog.pg_class c WHERE c.oid = ANY (v_rels);
+    FROM pg_catalog.pg_class c WHERE c.oid = ANY (v_rels::pg_catalog.oid[]);
   IF v_ok IS NOT TRUE THEN
     RAISE EXCEPTION 'hws cutover: FORCE ROW LEVEL SECURITY not restored' USING ERRCODE = 'XX000';
   END IF`;
