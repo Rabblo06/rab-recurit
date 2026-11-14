@@ -362,6 +362,88 @@ class Dockerfiles(unittest.TestCase):
             self.assertTrue(c.fails, name)
 
 
+class FinalStageCopyModes(unittest.TestCase):
+    """The image's final gate refuses group/other-writable files under /app. A COPY keeps the source's mode, so a file that
+    comes (directly or through `COPY . .` in `build`) from the build context carries the host checkout's umask: 0664 on a
+    server with umask 0002, and the build fails there although nothing is wrong with the code. Every COPY of the final stage
+    must therefore either set its mode (--chmod without a group/other write bit) or copy a path that an earlier stage
+    normalised with `-perm /022 -exec chmod go-w` (the dist folders and the two node_modules trees)."""
+
+    DOCKERFILE = os.path.join(g.REPO, 'packages', 'rab-docker', 'rab', 'Dockerfile')
+    # stage -> source paths (fnmatch patterns) that stage itself strips of group/other write bits before they are copied
+    NORMALISED = {
+        'runtime-modules': ['/app/node_modules'],
+        'worker-modules': ['/worker-delta/node_modules/'],
+        'build': ['/app/packages/*/dist', '/app/packages/*/dist-cjs'],
+    }
+
+    @staticmethod
+    def stages(path):
+        stages, name = {}, None
+        for _, ins in g.dockerfile_instructions(path):
+            word = ins.split(None, 1)[0].upper()
+            if word == 'FROM':
+                m = re.search(r'\sAS\s+(\S+)\s*$', ins, re.I)
+                name = m[1] if m else f'stage{len(stages)}'
+                stages[name] = []
+            elif name is not None:
+                stages[name].append(ins)
+        return stages
+
+    @staticmethod
+    def copy_problems(stages, final):
+        import fnmatch
+        problems = []
+        for ins in stages[final]:
+            parts = ins.split()
+            if parts[0].upper() not in ('COPY', 'ADD'):
+                continue
+            flags = {k: v for k, _, v in (p[2:].partition('=') for p in parts[1:] if p.startswith('--'))}
+            sources = [p for p in parts[1:] if not p.startswith('--')][:-1]
+            if 'chmod' in flags:
+                if not re.fullmatch(r'0?[0-7]{3}', flags['chmod']) or int(flags['chmod'], 8) & 0o022:
+                    problems.append(f'{ins}: --chmod must be octal without a group/other write bit')
+                continue
+            allowed = FinalStageCopyModes.NORMALISED.get(flags.get('from') or '', [])
+            for src in sources:
+                if not any(fnmatch.fnmatchcase(src, pat) for pat in allowed):
+                    problems.append(f'{ins}: {src} keeps its source mode (host umask) and has no --chmod')
+        return problems
+
+    def test_every_final_stage_copy_has_a_umask_independent_mode(self):
+        stages = self.stages(self.DOCKERFILE)
+        final = list(stages)[-1]
+        self.assertEqual(final, 'rab')  # the image is the LAST stage (OpenShip/Render cannot pass --target)
+        self.assertEqual(self.copy_problems(stages, final), [])
+
+    def test_normalising_stages_still_clear_group_other_write_bits(self):
+        stages = self.stages(self.DOCKERFILE)
+        for stage in self.NORMALISED:
+            self.assertRegex('\n'.join(stages[stage]), r'-perm /022 -exec chmod go-w', stage)
+
+    def test_the_final_gate_itself_is_unchanged_and_strict(self):
+        text = '\n'.join(self.stages(self.DOCKERFILE)['rab'])
+        self.assertIn('bad="$(find /app -path /app/storage -prune -o ! -type l \\( ! -user 0 -o ! -group 0 -o -perm /022 \\) '
+                      '-print | head -n 20)"', text)
+        self.assertNotRegex(text, r'chmod -R')  # modes are set per COPY, never by rewriting the whole tree
+
+    def test_the_rule_refuses_a_host_file_copied_without_chmod(self):
+        d = tempfile.mkdtemp()
+        path = os.path.join(d, 'Dockerfile')
+        with open(path, 'w', encoding='utf-8') as f:
+            f.write('FROM a AS build\nRUN true\nFROM a AS rab\n'
+                    'COPY --from=build /app/package.json ./package.json\n'
+                    'COPY --from=build --chmod=0664 /app/x.json ./x.json\n'
+                    'COPY --chmod=0555 run.sh ./run.sh\n'
+                    'COPY --from=build /app/packages/rab-server/dist ./packages/rab-server/dist\n'
+                    'COPY host-file.txt ./host-file.txt\n')
+        problems = self.copy_problems(self.stages(path), 'rab')
+        self.assertEqual(len(problems), 3, problems)
+        self.assertIn('/app/package.json keeps its source mode', problems[0])
+        self.assertIn('--chmod must be octal without a group/other write bit', problems[1])
+        self.assertIn('host-file.txt keeps its source mode', problems[2])
+
+
 class Summary(unittest.TestCase):
     def test_missing_result_is_a_failure(self):
         d = tempfile.mkdtemp()
