@@ -7318,8 +7318,11 @@ image that runs the apps' own derive step on the read-only volume (`--pull never
   compose and the start scripts refuse the dangerous ones. Unchanged: FORCE RLS, both RESET ROLEs, current_user = session_user,
   the refusals, the migration lock.
 - **Data:** `rab_devdb_data` / `rab-devdb` are no longer referenced and are left untouched (the dev cut-over is the owner's).
-  New dev volumes are per project, so `docker compose down -v` deletes the dev database (owner decision pending on making it
-  external again).
+  The dev database lives on the EXTERNAL volume `crewflow_dev_db_data` (owner decision 2026-11-14, #136 b), created once by
+  hand; `docker compose down -v` keeps it. The CA and setup (password file) volumes stay per project: after `down -v` the
+  next `up` makes a new CA and db-setup resets crewflow_owner to a new random password (Part A lost-file path) before the
+  apps start; verified live (same cluster and data, old password refused, new one works, no password in any log). QA and
+  production keep per-project volumes.
 - **Residual:** flock assumes a local volume driver (not an NFS-style network volume).
 - **Tests:** compose-credential-isolation.cjs (Part A contract, db/network/volume parity with production, mount rules, the lock,
   no `PG_DATABASE_PASSWORD` in dev/QA) with denial tests; deployment-worker.test.cjs (worker-start.sh, limits);
