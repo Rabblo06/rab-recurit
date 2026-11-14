@@ -21,7 +21,6 @@ import { readProvisionFunctionState } from '../../workspace-schema/provision-fun
 import type { Query } from './locked-migration-runner';
 import type { WorkspaceUpgradeCommand } from '../../../../engine/core-modules/upgrade/upgrade-commands/workspace-upgrade-command';
 import { codeWorkspaceStructureLevel, declaredProvisionLiterals } from '../../../../engine/core-modules/upgrade/workspace-structure-level';
-import { LATEST_WORKSPACE_MODULE_VERSION } from '../../workspace-schema/workspace-schema-modules';
 
 /**
  * Part D (security review M3): the workspace upgrade registry the gates derive the code's structure level and the
@@ -31,6 +30,12 @@ import { LATEST_WORKSPACE_MODULE_VERSION } from '../../workspace-schema/workspac
 export interface PostCheckOptions {
   workspaceRegistry?: Readonly<Record<string, readonly WorkspaceUpgradeCommand[]>>;
   workspaceIds?: readonly string[];
+  /**
+   * Review N2: below this a READY workspace is "behind". Default: the code's structure level (strict). ONLY the locked start
+   * (migrate-on-start) passes the frozen template level 20, because its workspace command runner brings 20 → code level right
+   * after these post-checks in the same locked run; deploy-prepare and the lifecycle checks run no workspace pass.
+   */
+  behindFloor?: number;
 }
 
 export const PHASE_0B_MIGRATION = 'SecureOwnerCoreSchemaAndHelpers1786721100000';
@@ -84,9 +89,8 @@ export async function schemaCompatibilityPostCheckProblems(query: Query, options
       provisionFunction: await readProvisionFunctionState(query, declaredProvisionLiterals(options.workspaceRegistry)),
       workspaces: await readReadyWorkspaceModuleLevels(query, 100, options.workspaceIds),
     },
-    // Ahead = above the code's structure level; behind = below the frozen template (20): 20..code level is brought up by the
-    // workspace command runner right after these post-checks, in the same locked run (D-RUNNER.md §6).
-    { production: false, latestModuleVersion: codeWorkspaceStructureLevel(options.workspaceRegistry), floorModuleVersion: LATEST_WORKSPACE_MODULE_VERSION },
+    // Ahead = above the code's structure level; behind = below options.behindFloor (default: that level, strict).
+    { production: false, latestModuleVersion: codeWorkspaceStructureLevel(options.workspaceRegistry), floorModuleVersion: options.behindFloor },
   );
   return assessment.refusals.map((r) => `schema-compatibility ${r.finding}: ${r.message}`);
 }

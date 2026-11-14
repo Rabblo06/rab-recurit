@@ -10,8 +10,9 @@ import {
   stepsForVersion,
 } from './upgrade-sequence';
 import { upgradeStateOf } from './upgrade-status.service';
-import { assertOnlyTargetSchema, cursorHasCompleted, increasedCounters, pendingWorkspaceSteps, structureLevels, WorkspaceStepRefused, workspaceSchemaOf } from './workspace-command-runner';
-import { LATEST_WORKSPACE_MODULE_VERSION, WORKSPACE_SCHEMA_MODULES } from '../../../database/typeorm/workspace-schema/workspace-schema-modules';
+import { assertOnlyTargetSchema, cursorHasCompleted, increasedCounters, pendingWorkspaceSteps, WorkspaceCommandRunner, WorkspaceRunFault, structureLevels, WorkspaceStepRefused, workspaceSchemaOf } from './workspace-command-runner';
+import { LATEST_WORKSPACE_MODULE_VERSION, MIN_COMPATIBLE_WORKSPACE_MODULE_VERSION, WORKSPACE_SCHEMA_MODULES } from '../../../database/typeorm/workspace-schema/workspace-schema-modules';
+import { KNOWN_RAB_SETTINGS } from './workspace-step-checks-sql';
 import { parseProvisionFunctionSource } from '../../../database/typeorm/workspace-schema/provision-function-versions';
 import { assessSchemaCompatibility } from '../../../database/boot-checks/schema-compatibility';
 import { codeWorkspaceStructureLevel, declaredFingerprint, declaredProvisionLiterals, structuralCommandsThrough } from './workspace-structure-level';
@@ -181,7 +182,24 @@ describe('Part D (review M3): the code structure level drives the gates', () => 
   });
 });
 
-describe('Part D (review Info): source guard on upgrade-commands/**', () => {
+/** Review Info / N4: the source guard's scanner (pure; fixtures below). */
+function commandFileOffences(src: string): string[] {
+  const out: string[] = [];
+  for (const m of src.matchAll(/^\s*(import|export)\s+(type\s+)?[^;]*?\s+from\s+['"]([^'"]+)['"]/gm)) {
+    const isType = Boolean(m[2]);
+    const spec = m[3]!;
+    if (m[1] === 'export' && !isType) out.push(`re-export of ${spec}`);
+    else if (!isType && !spec.startsWith('./')) out.push(`value import of ${spec}`);
+    if (/^(pg|typeorm|@nestjs\/|node:|child_process|fs)/.test(spec)) out.push(`imports ${spec}`);
+  }
+  for (const m of src.matchAll(/^\s*import\s+['"]([^'"]+)['"]/gm)) out.push(`side-effect import of ${m[1]}`);
+  if (/\bimport\s*\(/.test(src)) out.push('dynamic import()');
+  if (/\brequire\s*\(/.test(src)) out.push('require()');
+  if (/\b(DataSource|createQueryRunner|QueryRunner|new\s+Client\b|new\s+Pool\b|getConnection)\b/.test(src)) out.push('names a connection API');
+  return out;
+}
+
+describe('Part D (review Info / N4): source guard on upgrade-commands/**', () => {
   const root = join(__dirname, 'upgrade-commands');
   const files = (dir: string): string[] =>
     readdirSync(dir).flatMap((n) => {
@@ -189,20 +207,63 @@ describe('Part D (review Info): source guard on upgrade-commands/**', () => {
       return statSync(p).isDirectory() ? files(p) : /\.ts$/.test(n) && !/\.spec\.ts$/.test(n) ? [p] : [];
     });
 
-  it('command files import only types (or sibling command folders) and never reach a DataSource, pg or Nest', () => {
-    const offenders: string[] = [];
-    for (const f of files(root)) {
-      const src = readFileSync(f, 'utf8');
-      for (const m of src.matchAll(/^import\s+(type\s+)?[^;]*?from\s+['"]([^'"]+)['"]/gm)) {
-        const isType = Boolean(m[1]);
-        const spec = m[2]!;
-        const sibling = spec.startsWith('./');
-        if (!isType && !sibling) offenders.push(`${f}: value import of ${spec}`);
-        if (/^(pg|typeorm|@nestjs\/)/.test(spec)) offenders.push(`${f}: imports ${spec}`);
-      }
-      if (/(DataSource|createQueryRunner|new Client\(|require\()/.test(src)) offenders.push(`${f}: names a connection API`);
-    }
+  it('the scanner fires on every fixture (static, re-export, side-effect, dynamic import, require, connection APIs)', () => {
+    expect(commandFileOffences(`import { Client } from 'pg';`)).toEqual(expect.arrayContaining(['value import of pg', 'imports pg']));
+    expect(commandFileOffences(`export { x } from '../somewhere';`)).toEqual(['re-export of ../somewhere']);
+    expect(commandFileOffences(`export * from 'typeorm';`)).toEqual(expect.arrayContaining(['re-export of typeorm', 'imports typeorm']));
+    expect(commandFileOffences(`import 'pg';`)).toEqual(['side-effect import of pg']);
+    expect(commandFileOffences(`const pg = await import('pg');`)).toEqual(['dynamic import()']);
+    expect(commandFileOffences(`const pg = require('pg');`)).toEqual(['require()']);
+    expect(commandFileOffences(`const r = ds.createQueryRunner();`)).toEqual(['names a connection API']);
+    expect(commandFileOffences(`import type { Query } from '../upgrade-migration.service';\nimport { A } from './0-6';`)).toEqual([]);
+  });
+
+  it('command files import only types (or sibling command folders) and never reach a connection, a driver or Nest', () => {
+    const offenders = files(root).flatMap((f) => commandFileOffences(readFileSync(f, 'utf8')).map((o) => `${f}: ${o}`));
     expect(offenders).toEqual([]);
+  });
+});
+
+describe('Part D (review N4): a structural command cannot land unreviewed', () => {
+  /** Raise ONLY together with a review of MIN_COMPATIBLE_WORKSPACE_MODULE_VERSION (D-RUNNER.md §5.3 step 4). */
+  const REVIEWED_STRUCTURE_LEVEL = 20;
+  it('the code structure level equals the reviewed level, and the routing floor is at most one level below it', () => {
+    expect(codeWorkspaceStructureLevel()).toBe(REVIEWED_STRUCTURE_LEVEL);
+    expect(MIN_COMPATIBLE_WORKSPACE_MODULE_VERSION).toBeLessThanOrEqual(REVIEWED_STRUCTURE_LEVEL);
+    expect(MIN_COMPATIBLE_WORKSPACE_MODULE_VERSION).toBeGreaterThanOrEqual(REVIEWED_STRUCTURE_LEVEL - 1);
+  });
+});
+
+describe('Part D (review N3): the session checks know every rab.* setting the code uses', () => {
+  const SRC = join(__dirname, '..', '..', '..');
+  const all = (dir: string): string[] =>
+    readdirSync(dir).flatMap((n) => {
+      const p = join(dir, n);
+      if (statSync(p).isDirectory()) return n === 'node_modules' || n === 'dist' ? [] : all(p);
+      return /\.ts$/.test(n) ? [p] : [];
+    });
+  it('every literal rab.<name> in packages/rab-server/src is in KNOWN_RAB_SETTINGS', () => {
+    const seen = new Set<string>();
+    for (const f of all(SRC)) for (const m of readFileSync(f, 'utf8').matchAll(/'(rab\.[a-z_]+)'/g)) seen.add(m[1]!);
+    const known = new Set<string>(KNOWN_RAB_SETTINGS);
+    // 'rab.com' is an e-mail / host name in fixtures, not a setting.
+    expect([...seen].filter((n) => !known.has(n) && n !== 'rab.com').sort()).toEqual([]);
+  });
+});
+
+describe('Part D (review N1): no write counters, no workspace steps', () => {
+  it('track_counts = off is a run-level fault before anything runs', async () => {
+    const seen: string[] = [];
+    const session = {
+      upgradeSession: true as const,
+      query: async (sql: string) => {
+        seen.push(sql);
+        return sql.includes('track_counts') ? [{ track_counts: 'off' }] : [];
+      },
+    };
+    const runner = new WorkspaceCommandRunner({ codeVersion: '0.6.0', versions: ['0.4.0', '0.5.0'], force: false, adopt: true, log: () => undefined });
+    await expect(runner.run(session)).rejects.toBeInstanceOf(WorkspaceRunFault);
+    expect(seen).toHaveLength(1);
   });
 });
 

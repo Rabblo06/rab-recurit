@@ -488,6 +488,43 @@ describeIfDb('Part D workspace command runner (integration)', () => {
     expect((await app.query(`SELECT pg_catalog.current_setting('role') AS r`)).rows[0].r).toBe('none');
   });
 
+  it('review N3: whether pg_settings lists a custom rab.* placeholder (recorded per major); the runner checks the names directly either way', async () => {
+    const c = new Client({ connectionString: adminUrl });
+    await c.connect();
+    try {
+      await c.query(`SET rab.organisation_id = '00000000-0000-4000-8000-000000000000'`);
+      const listed = Number((await c.query(`SELECT count(*)::int AS n FROM pg_settings WHERE name = 'rab.organisation_id'`)).rows[0].n);
+      const direct = (await c.query(`SELECT current_setting('rab.organisation_id', true) AS v`)).rows[0].v;
+      // eslint-disable-next-line no-console
+      console.log(`[drunner-n3] pg_settings lists a session-level rab.organisation_id: ${listed === 1 ? 'yes' : 'no'}; current_setting sees it: ${direct ? 'yes' : 'no'}`);
+      expect(direct).toBe('00000000-0000-4000-8000-000000000000');
+    } finally {
+      await c.end();
+    }
+  });
+
+  it('review N3: a session-level SET of rab.organisation_id to the SAME value is refused (SESSION_LEAK) and is empty afterwards', async () => {
+    const w = await make('n3');
+    await adopt([w.id]);
+    const leak = cmd('LeakOrg', 90, { run: async ({ query, organisationId }) => void (await query(`SELECT pg_catalog.set_config('rab.organisation_id', $1, false)`, [organisationId])) });
+    const out = await runner({ workspaceRegistry: { '0-7': [leak] }, workspaceIds: [w.id] });
+    expect(out.failures.map((f) => f.errorClass)).toEqual(['SESSION_LEAK']);
+    expect((await app.query(`SELECT COALESCE(pg_catalog.current_setting('rab.organisation_id', true), '') AS v`)).rows[0].v).toBe('');
+  });
+
+  it('review N4: a session-level advisory lock left behind by a step is refused (SESSION_LEAK) and released; the migration lock stays', async () => {
+    const w = await make('n4');
+    await adopt([w.id]);
+    const advisory = async () =>
+      (await app.query(`SELECT l.objid::text AS objid FROM pg_locks l WHERE l.locktype = 'advisory' AND l.pid = pg_backend_pid() AND l.granted ORDER BY 1`)).rows.map((r: { objid: string }) => r.objid);
+    const before = await advisory();
+    const lock = cmd('LeakLock', 91, { run: async ({ query }) => void (await query('SELECT pg_catalog.pg_advisory_lock(4242424242)')) });
+    const out = await runner({ workspaceRegistry: { '0-7': [lock] }, workspaceIds: [w.id] });
+    expect(out.failures.map((f) => f.errorClass)).toEqual(['SESSION_LEAK']);
+    expect(await advisory()).toEqual(before);
+    expect(before.length).toBeGreaterThanOrEqual(1);
+  });
+
   it('idempotent after a crash between COMMIT and the logbook row: the step re-runs and completes', async () => {
     const w = await make('crash');
     await adopt([w.id]);

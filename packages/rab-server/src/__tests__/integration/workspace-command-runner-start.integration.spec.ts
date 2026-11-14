@@ -3,6 +3,7 @@ import { Client } from 'pg';
 
 import { resolveIntegrationTestDatabase } from '../../database/typeorm/core/test-database-guard';
 import { runMigrateOnStart } from '../../database/typeorm/scripts/migrate/owner-login/migrate-on-start';
+import { deployPostCheckProblems } from '../../database/typeorm/scripts/migrate/deploy-post-checks';
 import { STARTUP_EXIT_CODES } from '../../database/owner-login/runtime-db-config';
 import { selectWorkspaceFingerprintsForServer, workspaceFingerprintMajor } from '../../database/typeorm/workspace-schema/v1/expected-fingerprints';
 import { provisionWorkspaceSchema } from '../../database/typeorm/workspace-schema/provision-workspace-schema';
@@ -155,5 +156,27 @@ describeIfDb('Part D through the locked start (runMigrateOnStart)', () => {
     } finally {
       await c.end();
     }
+  });
+  it('review N2: the post-check outside the locked start (deploy-prepare, lifecycle) is strict: a workspace at 20 under a level-21 code is behind', async () => {
+    const w = await make('n2');
+    expect(await provisionTypeScript(adminUrl, w)).toBe('READY');
+    const c = new Client({ connectionString: process.env.TEST_DATABASE_URL });
+    await c.connect();
+    try {
+      const q = async (sql: string, p?: unknown[]) => (await c.query(sql, p as unknown[])).rows;
+      const strict = await deployPostCheckProblems(q, { workspaceRegistry: { '0-6': [probe] }, workspaceIds: [w.id] });
+      expect(strict.some((p) => p.includes('workspace-behind'))).toBe(true);
+      const start = await deployPostCheckProblems(q, { workspaceRegistry: { '0-6': [probe] }, workspaceIds: [w.id], behindFloor: 20 });
+      expect(start.some((p) => p.includes('workspace-behind'))).toBe(false);
+    } finally {
+      await c.end();
+    }
+    // deploy-prepare and the lifecycle checks call it without behindFloor (strict); only migrate-on-start passes 20.
+    const { readFileSync } = await import('node:fs');
+    const { join } = await import('node:path');
+    const scripts = join(__dirname, '..', '..', 'database', 'typeorm', 'scripts');
+    expect(readFileSync(join(scripts, 'deploy-prepare.ts'), 'utf8')).not.toMatch(/behindFloor/);
+    expect(readFileSync(join(scripts, 'migrate', 'owner-login', 'owner-login-lifecycle-check.ts'), 'utf8')).not.toMatch(/behindFloor/);
+    expect(readFileSync(join(scripts, 'migrate', 'owner-login', 'migrate-on-start.ts'), 'utf8')).toMatch(/behindFloor: LATEST_WORKSPACE_MODULE_VERSION/);
   });
 });

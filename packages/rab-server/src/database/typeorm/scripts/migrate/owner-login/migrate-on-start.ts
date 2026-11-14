@@ -68,6 +68,7 @@ import type { UpgradeCommand } from '../../../../../engine/core-modules/upgrade/
 import type { WorkspaceUpgradeCommand } from '../../../../../engine/core-modules/upgrade/upgrade-commands/workspace-upgrade-command';
 import { majorMinorKey, readAppVersion } from '../../../../../engine/core-modules/upgrade/upgrade-version';
 import { attributeLedger } from './release-floor';
+import { LATEST_WORKSPACE_MODULE_VERSION } from '../../../workspace-schema/workspace-schema-modules';
 
 export const RESULT_LINE_PREFIX = 'TWENTY_MIGRATE_RESULT';
 
@@ -453,7 +454,12 @@ export async function runMigrateOnStart(config: MigrateOnStartConfig, deps: Migr
         applied = done;
         const query: Query = (sql, parameters) => queryRunner.query(sql, parameters) as Promise<unknown[]>;
         await autoBindFreshInstall({ query, env, guardEnv: guardEnvUsed, guarded, classification, proof, log });
-        const problems = await deployPostCheckProblems(query, tw ? { workspaceRegistry: tw.registry, workspaceIds: tw.workspaceIds } : {});
+        // Part D (review N2): the start's own workspace pass follows, so workspaces between the frozen template (20) and the
+        // code's structure level are its job, not a refusal here.
+        const problems = await deployPostCheckProblems(query, {
+          behindFloor: LATEST_WORKSPACE_MODULE_VERSION,
+          ...(tw ? { workspaceRegistry: tw.registry, workspaceIds: tw.workspaceIds } : {}),
+        });
         const { blocking, warnings } = blockingPostCheckProblems(classification?.state ?? 'UNKNOWN', problems);
         for (const w of warnings) log(`WARNING (ledger ahead, C-1): ${w}`);
         if (blocking.length) {

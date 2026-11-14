@@ -42,9 +42,11 @@ import {
   OUTSIDE_DATA_WRITES_SQL,
   OUTSIDE_WRITE_COUNTERS_SQL,
   OUTSIDE_WRITES_SQL,
+  RELEASE_EXTRA_ADVISORY_SQL,
   SESSION_CLEAN_SQL,
   SESSION_RESET_SQL,
   TARGET_EXTRA_STRUCTURE_SQL,
+  TRACK_COUNTS_SQL,
 } from './workspace-step-checks-sql';
 import { declaredFingerprint } from './workspace-structure-level';
 import {
@@ -243,11 +245,22 @@ interface Invariants {
   org: string;
   ws: string;
   scope: string;
+  rab: string;
+}
+
+interface SessionState {
+  role: string;
+  same_user: boolean;
+  search_path: string;
+  rab: string;
+  advisory: string;
 }
 
 export class WorkspaceCommandRunner {
   private major: FingerprintMajor | null = null;
   private baselineSearchPath: string | null = null;
+  /** N4: the session-level advisory locks held when the run started (the migration lock); anything else after a step leaked. */
+  private baselineAdvisory = '';
 
   constructor(private readonly options: WorkspaceRunOptions) {}
 
@@ -258,12 +271,19 @@ export class WorkspaceCommandRunner {
   /** Runs every workspace; never throws for one workspace's failure (reported). Throws only for a run-level fault. */
   async run(session: UpgradeSession): Promise<WorkspaceRunReport> {
     const { codeVersion, versions, log, registry, workspaceRegistry, force } = this.options;
+    // N1: the M1 write counters (layer 4b) read zero when statistics are off, so the check would pass silently. Refuse.
+    const [tc] = (await session.query(TRACK_COUNTS_SQL)) as Array<{ track_counts: string }>;
+    if (tc?.track_counts !== 'on') {
+      throw new WorkspaceRunFault(`track_counts is ${JSON.stringify(tc?.track_counts ?? null)}, not 'on': the workspace runner's write-counter check cannot work. Refusing to run workspace steps.`);
+    }
     const sequence = sequenceForVersions([...versions, codeVersion], registry, workspaceRegistry);
     const levels = structureLevels(sequence);
     const scan = await scanReadyWorkspaces(session.query, this.options.workspaceIds);
     const workspaces = scan.ready;
     if (workspaces.length) this.major = await selectWorkspaceFingerprintsForServer(session.query as (sql: string) => Promise<Array<Record<string, unknown>>>);
-    this.baselineSearchPath = ((await session.query(SESSION_CLEAN_SQL)) as Array<{ search_path: string }>)[0]?.search_path ?? null;
+    const [baseline] = (await session.query(SESSION_CLEAN_SQL)) as SessionState[];
+    this.baselineSearchPath = baseline?.search_path ?? null;
+    this.baselineAdvisory = baseline?.advisory ?? '';
     const cursors = await withUpgradeScope(session, 'upgrade', (q) => getWorkspaceCursors(q, workspaces.map((w) => w.workspaceId)));
     // Adopted workspaces are at the frozen template (structure 20): their cursor is the code version's last INSTANCE step, so
     // every workspace step of the adoption release still runs for them.
@@ -485,14 +505,15 @@ export class WorkspaceCommandRunner {
    * (role none, every rab.* empty) and returns what was found. Throws a run-level fault when it cannot be made clean.
    */
   private async assertSessionClean(q: Query): Promise<string | null> {
-    const read = async () => ((await q(SESSION_CLEAN_SQL)) as Array<{ role: string; same_user: boolean; search_path: string; rab: string }>)[0]!;
+    const read = async () => ((await q(SESSION_CLEAN_SQL)) as SessionState[])[0]!;
     const found = await read().catch(() => null);
-    const describe = (s: { role: string; same_user: boolean; search_path: string; rab: string }) =>
+    const describe = (s: SessionState) =>
       [
         s.role !== 'none' ? `role=${s.role}` : '',
         s.same_user ? '' : 'current_user<>session_user',
         this.baselineSearchPath !== null && s.search_path !== this.baselineSearchPath ? 'search_path' : '',
-        s.rab ? `settings=${s.rab}` : '',
+        s.rab ? `settings=${s.rab.replace(/=[^,]*/g, '')}` : '',
+        s.advisory !== this.baselineAdvisory ? 'advisory locks' : '',
       ]
         .filter(Boolean)
         .join(', ');
@@ -500,6 +521,10 @@ export class WorkspaceCommandRunner {
     if (!problem) return null;
     await q('ROLLBACK').catch(() => undefined);
     await q(SESSION_RESET_SQL).catch(() => undefined);
+    for (let i = 0; i < 10; i += 1) {
+      const [r] = (await q(RELEASE_EXTRA_ADVISORY_SQL, [this.baselineAdvisory]).catch(() => [{ released: 0 }])) as Array<{ released: number | string }>;
+      if (!Number(r?.released ?? 0)) break;
+    }
     if (this.baselineSearchPath !== null) await q(`SELECT pg_catalog.set_config('search_path', $1, false)`, [this.baselineSearchPath]).catch(() => undefined);
     const again = await read().catch(() => null);
     if (!again || describe(again)) throw new WorkspaceRunFault(`the migration session could not be reset after a workspace step (${problem}). Refusing to continue.`);

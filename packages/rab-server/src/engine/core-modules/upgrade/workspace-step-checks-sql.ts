@@ -4,13 +4,46 @@
  * always a bound parameter ($1). Nothing here writes.
  */
 
-/** Layer 3: the session facts that must be unchanged by the command (same backend, transaction, role, binding, path). */
+/**
+ * Every `rab.*` setting the policies, functions and services read (grep of `'rab.` over packages/rab-server/src, 2026-11-14).
+ * Checked by NAME with current_setting(name, true): custom placeholder settings may not be listed in pg_settings (review N3;
+ * the integration spec records what each major does). pg_settings is still scanned for any other `rab.*` name.
+ */
+export const KNOWN_RAB_SETTINGS = [
+  'rab.actor_type',
+  'rab.admin_scope',
+  'rab.ai_retention',
+  'rab.ai_synthetic_marker',
+  'rab.ai_usage_retention',
+  'rab.organisation_id',
+  'rab.role',
+  'rab.team_shift_id',
+  'rab.team_staff_id',
+  'rab.test',
+  'rab.upgrade_scope',
+  'rab.user_id',
+  'rab.workspace_id',
+] as const;
+
+const KNOWN_LIST = KNOWN_RAB_SETTINGS.map((n) => `('${n}')`).join(', ');
+
+/** The non-empty rab.* settings of this session: the known names by current_setting, plus any other name pg_settings lists. */
+// sql-injection-reviewed: KNOWN_LIST / RAB_SET_SQL are built only from the constant KNOWN_RAB_SETTINGS array of this file (plain rab.<snake> names); no runtime value is interpolated.
+const RAB_SET_SQL = `COALESCE((SELECT pg_catalog.string_agg(x.name || '=' || x.value, ',' ORDER BY x.name) FROM (
+    SELECT k.name, COALESCE(pg_catalog.current_setting(k.name, true), '') AS value FROM (VALUES ${KNOWN_LIST}) AS k(name)
+    UNION
+    SELECT s.name, COALESCE(s.setting, '') FROM pg_catalog.pg_settings s WHERE s.name LIKE 'rab.%') x
+   WHERE x.value <> ''), '')`;
+
+/** Layer 3: the session facts that must be unchanged by the command (same backend, transaction, role, every rab.*, path). */
+// sql-injection-reviewed: KNOWN_LIST / RAB_SET_SQL are built only from the constant KNOWN_RAB_SETTINGS array of this file (plain rab.<snake> names); no runtime value is interpolated.
 export const INVARIANTS_SQL = `SELECT pg_catalog.pg_backend_pid() AS pid, pg_catalog.transaction_timestamp()::text AS tx,
   pg_catalog.current_setting('role') AS role, pg_catalog.current_setting('search_path') AS search_path,
   current_user::text AS who,
   COALESCE(pg_catalog.current_setting('rab.organisation_id', true), '') AS org,
   COALESCE(pg_catalog.current_setting('rab.workspace_id', true), '') AS ws,
-  COALESCE(pg_catalog.current_setting('rab.upgrade_scope', true), '') AS scope`;
+  COALESCE(pg_catalog.current_setting('rab.upgrade_scope', true), '') AS scope,
+  ${RAB_SET_SQL} AS rab`;
 
 /**
  * Layer 4, counts: objects OUTSIDE the target schema (TOAST and temporary namespaces excluded), so a DROP elsewhere is seen
@@ -113,11 +146,34 @@ w AS (
 SELECT what FROM w LIMIT 10`;
 
 /** L2: after COMMIT / ROLLBACK the session must carry nothing: no role, current_user = session_user, every rab.* empty. */
+// sql-injection-reviewed: KNOWN_LIST / RAB_SET_SQL are built only from the constant KNOWN_RAB_SETTINGS array of this file (plain rab.<snake> names); no runtime value is interpolated.
 export const SESSION_CLEAN_SQL = `SELECT pg_catalog.current_setting('role') AS role, (current_user = session_user) AS same_user,
   pg_catalog.current_setting('search_path') AS search_path,
-  COALESCE((SELECT pg_catalog.string_agg(s.name, ',' ORDER BY s.name) FROM pg_catalog.pg_settings s
-             WHERE s.name LIKE 'rab.%' AND COALESCE(s.setting, '') <> ''), '') AS rab`;
+  ${RAB_SET_SQL} AS rab,
+  COALESCE((SELECT pg_catalog.string_agg(l.classid::text || '/' || l.objid::text || '/' || l.objsubid::text || '/' || l.mode, ',' ORDER BY 1)
+              FROM pg_catalog.pg_locks l WHERE l.locktype = 'advisory' AND l.pid = pg_catalog.pg_backend_pid() AND l.granted), '') AS advisory`;
 
 /** L2 recovery: clear what a command left at session level (role, every rab.*), after the step was refused. */
+// sql-injection-reviewed: KNOWN_LIST / RAB_SET_SQL are built only from the constant KNOWN_RAB_SETTINGS array of this file (plain rab.<snake> names); no runtime value is interpolated.
 export const SESSION_RESET_SQL = `SELECT pg_catalog.set_config('role', 'none', false),
-  (SELECT pg_catalog.count(pg_catalog.set_config(s.name, '', false)) FROM pg_catalog.pg_settings s WHERE s.name LIKE 'rab.%')`;
+  (SELECT pg_catalog.count(pg_catalog.set_config(x.name, '', false)) FROM (
+     SELECT k.name FROM (VALUES ${KNOWN_LIST}) AS k(name) UNION SELECT s.name FROM pg_catalog.pg_settings s WHERE s.name LIKE 'rab.%') x)`;
+
+/**
+ * N4: release ONE hold of every session-level advisory lock this backend holds that is not in the baseline (the comma list of
+ * classid/objid/objsubid/mode taken at the start of the run, $1). Run repeatedly by the runner until none is left (a lock taken
+ * twice needs two releases). objsubid 1 = a bigint key, 2 = an int4 pair.
+ */
+export const RELEASE_EXTRA_ADVISORY_SQL = `SELECT pg_catalog.count(CASE
+    WHEN l.objsubid = 1 AND l.mode = 'ShareLock' THEN pg_catalog.pg_advisory_unlock_shared((l.classid::bigint << 32) | l.objid::bigint)
+    WHEN l.objsubid = 1 THEN pg_catalog.pg_advisory_unlock((l.classid::bigint << 32) | l.objid::bigint)
+    WHEN l.mode = 'ShareLock' THEN pg_catalog.pg_advisory_unlock_shared(((l.classid::bigint + 2147483648) % 4294967296 - 2147483648)::int,
+                                                                       ((l.objid::bigint + 2147483648) % 4294967296 - 2147483648)::int)
+    ELSE pg_catalog.pg_advisory_unlock(((l.classid::bigint + 2147483648) % 4294967296 - 2147483648)::int,
+                                       ((l.objid::bigint + 2147483648) % 4294967296 - 2147483648)::int) END) AS released
+  FROM pg_catalog.pg_locks l
+ WHERE l.locktype = 'advisory' AND l.pid = pg_catalog.pg_backend_pid() AND l.granted
+   AND NOT (l.classid::text || '/' || l.objid::text || '/' || l.objsubid::text || '/' || l.mode) = ANY(pg_catalog.string_to_array($1, ','))`;
+
+/** N1: the M1 write counters exist only while statistics are collected. */
+export const TRACK_COUNTS_SQL = `SELECT pg_catalog.current_setting('track_counts') AS track_counts`;
