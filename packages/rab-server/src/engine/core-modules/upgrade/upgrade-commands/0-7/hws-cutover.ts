@@ -377,7 +377,11 @@ export async function runHwsCutover(ctx: UpgradeCommandContext, options: HwsCuto
   }
   const coreHas = (w: HwsCutoverWorkspace) => (probes.get(w.workspaceId) ?? []).some((r) => r.core_rows);
   const toCopy = pending.filter((w) => probes.has(w.workspaceId) && coreHas(w));
-  const resumed = new Set(toCopy.filter((w) => ours(w.migrationError)).map((w) => w.workspaceId));
+  const wsHas = (w: HwsCutoverWorkspace) => (probes.get(w.workspaceId) ?? []).some((r) => r.ws_rows);
+  // Resumed = an earlier start of ours blocked it before copying (its schema rows can only be our copies). A workspace found
+  // with rows on BOTH sides keeps that class until an operator resolves it: never "resumed", never merged.
+  const both = hwsCutoverBlockMarker('HWS_CUTOVER_BOTH_POPULATED');
+  const resumed = new Set(toCopy.filter((w) => ours(w.migrationError) && w.migrationError !== both).map((w) => w.workspaceId));
   report.unmappedNotes = Math.max(0, ...[...probes.values()].map((rows) => Number(rows.find((r) => r.table_name === 'user_note')?.unmapped_notes ?? 0)));
   if (report.unmappedNotes > 0) {
     log(`hws cutover: WARNING: ${report.unmappedNotes} note(s) in an organisation have a subject with no staff or manager profile; they belong to no workspace and stay only in core.user_note (owner decision before C5)`);
@@ -396,7 +400,9 @@ export async function runHwsCutover(ctx: UpgradeCommandContext, options: HwsCuto
   if (resumed.size) blockChanged();
   for (const w of toCopy) {
     if (ours(w.migrationError)) continue;
-    await setBlock(q, w, 'HWS_CUTOVER_PENDING');
+    // Rows already in W's schema before any attempt of ours: written by HWS-on serving. Marked as such right away, so a later
+    // start can never mistake them for a partial copy of ours.
+    await setBlock(q, w, wsHas(w) ? 'HWS_CUTOVER_BOTH_POPULATED' : 'HWS_CUTOVER_PENDING');
     blockChanged();
     log(`hws cutover: workspace ${w.workspaceId} BLOCKED until its copy is verified (503, Worker paused)`);
   }
@@ -437,7 +443,7 @@ export async function runHwsCutover(ctx: UpgradeCommandContext, options: HwsCuto
       blockChanged();
       log(`hws cutover: ERROR: workspace ${w.workspaceId} ${errorClass}; it stays BLOCKED: ${problems.slice(0, 10).join('; ')}`);
     };
-    if (rows.some((r) => r.ws_rows) && !resumed.has(w.workspaceId)) {
+    if (wsHas(w) && !resumed.has(w.workspaceId)) {
       // Rows on both sides and no earlier cutover attempt of ours: the schema was written by HWS-on serving while core still
       // holds rows. Copying would resurrect rows deleted there. Operator / owner decision; never merged automatically.
       await fail('HWS_CUTOVER_BOTH_POPULATED', rows.filter((r) => r.ws_rows && r.core_rows).map((r) => `${r.table_name}: rows in core and in the workspace schema`));

@@ -469,9 +469,14 @@ describeIfDb('C3 HWS cutover copy path (option A′)', () => {
       `INSERT INTO ${w4.schema}.job_role (organisation_id, name, default_rate_pence, created_by, workspace_id) VALUES ($1, 'Written with HWS on', 1700, $2, $3)`,
       [w4.org, w4.owner, w4.id],
     );
+    // First start without a backup: refused before any copy, but the workspace is already marked BOTH_POPULATED ...
+    await expect(cutover(app, [w4.id], host({ backup: false }))).rejects.toMatchObject({ errorClass: 'NO_BACKUP' });
+    expect(await migrationError(w4)).toBe('upgrade-blocked: HwsCutover (HWS_CUTOVER_BOTH_POPULATED)');
+    // ... so the next start (backup present) does not take it for a partial copy of its own: refused, nothing merged.
     await expect(cutover(app, [w4.id], host())).rejects.toMatchObject({ errorClass: 'HWS_CUTOVER_WORKSPACE_FAILED' });
     expect(await migrationError(w4)).toBe('upgrade-blocked: HwsCutover (HWS_CUTOVER_BOTH_POPULATED)');
     expect(await wsTotal(w4)).toBe(1);
+    expect(await verifiedRows(w4)).toBe(0);
   });
 
   it('through the Part B logbook (UpgradeRun): failed attempt 1 (no backup, blocks reported) → completed attempt 2', async () => {
