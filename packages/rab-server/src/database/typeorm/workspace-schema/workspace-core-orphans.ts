@@ -13,7 +13,7 @@ import { WORKSPACE_CORE_FOREIGN_KEYS } from '../../../engine/core-modules/upgrad
  * changes a row, never routes, and logs counts only (no ids, no values).
  *
  * Runs as the provisioner identity (`crewflow`), one short READ ONLY transaction per workspace with its organisation and workspace
- * bound (FORCE RLS on both sides: the workspace tables and core."user" / core.manager_workspace show only that tenant).
+ * bound, scanning as the Worker plus the workspace owner's read rights (see checkWorkspaceCoreOrphans).
  */
 export interface CoreReference {
   table: string;
@@ -88,14 +88,19 @@ export async function checkWorkspaceCoreOrphans(client: Client, only?: readonly 
       const schema = `workspace_${ws.workspace_id.replace(/-/g, '')}`;
       try {
         await client.query('BEGIN READ ONLY');
-        // The Worker's per-workspace scan identity: FORCE RLS shows crewflow only the rows a policy branch admits, and the
-        // `rab.actor_type = 'worker'` branches exist on staff_profile, payroll_record, payroll_run, payroll_run_line and
-        // shift_staff_review only. DRAFT LIMIT (owner decision 0a-Q5): the other 16 tables are not covered until a reviewed
-        // read path exists (worker read branches, or a narrow definer); their rows are invisible here, never "clean".
+        // Visibility under FORCE RLS (decision 0a-Q5, recommended choice, no new SQL): the Worker's scan identity
+        // (`rab.actor_type = 'worker'`: staff_profile, payroll_record, payroll_run, payroll_run_line, shift_staff_review) PLUS
+        // the workspace OWNER's read rights (`rab.user_id` = manager_workspace.owner_user_id: the manager branches of every
+        // other table). READ ONLY, counts only. SECURITY TRADE-OFF 0a-T2 (WS-COMMANDS.md): a maintenance job reads as the
+        // owner; it never writes, never returns a row, and a row neither identity may read stays invisible (not "clean").
         await client.query(
           `SELECT pg_catalog.set_config('rab.organisation_id', $1, true), pg_catalog.set_config('rab.workspace_id', $2, true), pg_catalog.set_config('rab.actor_type', 'worker', true)`,
           [ws.organisation_id, ws.workspace_id],
         );
+        const ownerRow = await client.query<{ owner: string | null }>('SELECT owner_user_id::text AS owner FROM core.manager_workspace WHERE id = $1', [ws.workspace_id]);
+        const ownerId = ownerRow.rows[0]?.owner ?? null;
+        if (ownerId) await client.query(`SELECT pg_catalog.set_config('rab.user_id', $1, true), pg_catalog.set_config('rab.role', 'manager', true)`, [ownerId]);
+        else result.errors.push({ workspaceId: ws.workspace_id, detail: 'workspace owner not visible: worker-scope coverage only' });
         const reg = await client.query<{ status: string }>('SELECT status FROM core.workspace_schema_registry WHERE workspace_id = $1', [ws.workspace_id]);
         if (reg.rows[0]?.status !== 'READY') {
           await client.query('ROLLBACK');

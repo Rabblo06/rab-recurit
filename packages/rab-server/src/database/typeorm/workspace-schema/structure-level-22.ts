@@ -25,3 +25,14 @@ export const VERIFY_WORKSPACE_SCHEMA_V1_LEVEL_22_SQL = (() => {
 export function composeServerPathTemplateLevel22(): string {
   return [composeServerPathTemplateLevel21(), workspaceCoreFkRemovalSql(SERVER_PATH_SENTINEL_SCHEMA)].join(';\n');
 }
+
+/**
+ * down() guard (same rule as 0b's F1): the workspace schemas already at level 22 — they have the workspace tables but no foreign
+ * key to core."user" left (catalog only). down() refuses while any remains: the level-21 verify body expects 128 foreign keys.
+ */
+export const LEVEL_22_WORKSPACES_SQL = `SELECT pg_catalog.count(*)::int AS n
+  FROM pg_catalog.pg_namespace n
+ WHERE n.nspname ~ '^workspace_[0-9a-f]{32}$'
+   AND EXISTS (SELECT 1 FROM pg_catalog.pg_class c WHERE c.relnamespace = n.oid AND c.relname = 'staff_profile' AND c.relkind = 'r')
+   AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_constraint k
+                    WHERE k.connamespace = n.oid AND k.contype = 'f' AND k.confrelid = 'core."user"'::pg_catalog.regclass)`;

@@ -7,6 +7,7 @@ import { AuditAction, AuditService } from '../audit/audit.service';
 import { PlatformAdminService } from '../platform-admin/platform-admin.service';
 import { AuthContext } from '../tenant/auth-context.interface';
 import { RefreshTokenService } from '../auth/token/services/refresh-token.service';
+import { candidateWorkspaces, cleanUpWorkspaceReferences, protectedWorkspaceReference, WorkspaceReferenceBlocked } from '../core-references/workspace-user-references';
 
 /**
  * Codes the frontend maps to a specific, safe message — never the raw FK
@@ -86,7 +87,9 @@ export class UserDeletionService {
       throw new UserDeletionBlockedException('MANAGER_OWNS_WORKSPACE', 'This manager owns a private Workspace and cannot be deleted. Suspend the account instead.');
     }
 
-    const blockingReason = await this.findProtectedHistory(manager, targetUserId);
+    // Part D 0a (structure level 22): the workspace schemas no longer RESTRICT the delete through foreign keys; every former
+    // no-ON-DELETE user column of the target's candidate workspaces is probed by the application instead (Q3).
+    const blockingReason = (await this.findProtectedHistory(manager, targetUserId)) ?? (await protectedWorkspaceReference(manager, ctx, targetUserId));
     if (blockingReason) {
       throw new UserDeletionBlockedException(
         'USER_HAS_PROTECTED_HISTORY',
@@ -185,6 +188,22 @@ export class UserDeletionService {
     // protected can still be attached by the time this runs, since
     // `assertCanDelete` already rejected anything that would make this
     // unsafe.
+    // Part D 0a: the candidate workspaces are read BEFORE the delete (the target's own memberships / profiles go with it).
+    const workspaces = await candidateWorkspaces(manager, ctx, targetUserId);
     await manager.delete(User, { id: targetUserId });
+    // Part D 0a (Q2): what the dropped workspace foreign keys did ON DELETE (CASCADE the target's own staff profile and the notes
+    // about them, SET NULL the attribution columns), in the same transaction. A workspace row that still needs the profile
+    // refuses the whole delete with the structured 409.
+    try {
+      await cleanUpWorkspaceReferences(manager, ctx, targetUserId, workspaces);
+    } catch (error) {
+      if (error instanceof WorkspaceReferenceBlocked) {
+        throw new UserDeletionBlockedException(
+          'USER_HAS_PROTECTED_HISTORY',
+          'This account has historical workforce records and cannot be permanently deleted. Suspend the account instead.',
+        );
+      }
+      throw error;
+    }
   }
 }

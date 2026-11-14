@@ -5,7 +5,7 @@ import { secureOwnerInvariantViolations } from '../secure-owner-invariants';
 import { BOOTSTRAP_IDENTITY_SQL, BootstrapIdentityFacts, bootstrapIdentityProblems } from '../worker-dispatch-pointer-sql';
 import { workspaceFingerprintMajor } from '../../workspace-schema/v1/expected-fingerprints';
 import { composeServerPathTemplateLevel21, provisionWorkspaceFunctionLevelSql, VERIFY_WORKSPACE_SCHEMA_V1_LEVEL_21_SQL } from '../../workspace-schema/structure-level-21';
-import { composeServerPathTemplateLevel22, VERIFY_WORKSPACE_SCHEMA_V1_LEVEL_22_SQL } from '../../workspace-schema/structure-level-22';
+import { composeServerPathTemplateLevel22, LEVEL_22_WORKSPACES_SQL, VERIFY_WORKSPACE_SCHEMA_V1_LEVEL_22_SQL } from '../../workspace-schema/structure-level-22';
 import { moduleChecksum, modulesThrough } from '../../workspace-schema/workspace-schema-modules';
 import { STAFF_PROFILE_MEMBER_SELECT } from '../../../../engine/core-modules/upgrade/upgrade-commands/0-6/staff-profile-member-select';
 import { WORKSPACE_CORE_FK_REMOVAL } from '../../../../engine/core-modules/upgrade/upgrade-commands/0-6/workspace-core-fk-removal';
@@ -13,7 +13,7 @@ import { WORKSPACE_CORE_FK_REMOVAL } from '../../../../engine/core-modules/upgra
 const LEVEL = 22;
 
 /**
- * DRAFT — OWNER-DB-ULTIMATE Part D, decision 0a option (b) (2026-11-14): owner SQL review FIRST (WS-COMMANDS.md "FOR OWNER REVIEW
+ * SQL PENDING OWNER OK — OWNER-DB-ULTIMATE Part D, decision 0a option (b) (2026-11-14): owner SQL review FIRST (WS-COMMANDS.md "FOR OWNER REVIEW
  * — 0a"); run only on throwaway databases until approved. The core half of workspace structure level 22; the workspace half is
  * `0.6.0_DropWorkspaceCoreForeignKeys_1786721490000` (upgrade-commands/0-6/workspace-core-fk-removal.ts), applied per existing
  * READY workspace by the workspace command runner after this migration, on the same locked start.
@@ -59,6 +59,15 @@ export class WorkspaceCoreForeignKeyRemoval1786721490000 implements MigrationInt
     try {
       await pinSearchPath(queryRunner);
       await this.preflight(queryRunner);
+      // Never leave level-22 workspaces behind a level-21 verify body (it expects 128 foreign keys; they would all fail).
+      const [{ n }] = (await queryRunner.query(LEVEL_22_WORKSPACES_SQL)) as Array<{ n: number }>;
+      if (Number(n) > 0) {
+        throw new Error(
+          `${this.name}: down() refused: ${Number(n)} workspace schema(s) are at structure level 22 (no foreign key to core."user"). ` +
+            'Nothing was changed. To roll back, first (owner-run, per workspace) re-add the 72 constraints listed in ' +
+            'upgrade-commands/0-6/workspace-core-fk-removal.ts and set core.workspace_schema_registry.module_version back to 21, then run down() again.',
+        );
+      }
       const s21 = STAFF_PROFILE_MEMBER_SELECT.structure!;
       const fp21 = s21.fingerprints[workspaceFingerprintMajor()];
       if (!fp21) throw new Error(`${this.name}: no level-21 fingerprint for this major`);
