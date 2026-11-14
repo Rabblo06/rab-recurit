@@ -6,6 +6,7 @@ import { AddressInfo } from 'node:net';
 import { AiSseService } from '../../modules/ai/services/ai-sse.service';
 import { hangingModel } from './helpers/ai-models';
 import { AiKit, aiOrganisation, ask, bearer, bootAiKit, jobFor, newConversation, turnRow } from './helpers/ai-test-kit';
+import { integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
 
 /**
  * AI Phase 1 — the AI SSE endpoint while a turn is RUNNING (brief §11, §15 "SSE disconnect / reconnect"): live deltas,
@@ -13,7 +14,7 @@ import { AiKit, aiOrganisation, ask, bearer, bootAiKit, jobFor, newConversation,
  * session revoked mid-stream ends the stream (AI_ACCESS_REVOKED) within one re-validation period. Reconnect/replay of a
  * finished turn: ai-turn.integration.spec.ts.
  */
-const RUN = Boolean(process.env.DATABASE_URL);
+const RUN = integrationTestDatabaseReady();
 const describeIfDb = RUN ? describe : describe.skip;
 /** Waits for `p` or `ms`, whichever is first, and clears the timer either way (a pending one kept Jest alive). */
 async function settleWithin(p: Promise<unknown>, ms: number): Promise<void> {

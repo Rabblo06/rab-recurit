@@ -14,6 +14,7 @@ import { Organisation } from '../../modules/identity/entities';
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
 import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-pipe';
+import { integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
 
 /**
  * P1C.1C-F — the cookie-authenticated counterpart to `performance-baseline.integration.spec.ts`
@@ -24,7 +25,7 @@ import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-
  * than against a possibly-stale historical number. Gated the same way:
  *   RUN_PERF_BASELINE=true npx jest p1c1c-cookie-performance.integration.spec.ts --runInBand
  */
-const RUN = Boolean(process.env.DATABASE_URL) && process.env.RUN_PERF_BASELINE === 'true';
+const RUN = integrationTestDatabaseReady() && process.env.RUN_PERF_BASELINE === 'true';
 const describeIfEnabled = RUN ? describe : describe.skip;
 jest.setTimeout(180_000);
 

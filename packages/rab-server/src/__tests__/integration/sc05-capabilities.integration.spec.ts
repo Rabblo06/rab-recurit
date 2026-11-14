@@ -14,6 +14,7 @@ import { RequestCompletePayload, subscribeToRequestMetrics } from '../../engine/
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
 import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-pipe';
+import { integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
 
 /**
  * SC-05 (Phase X Stage 0, S0-C-caches.md): `GET /auth/capabilities` ran one `userHasPermission` per flag, i.e. 18
@@ -26,7 +27,7 @@ import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-
  * admin, inspected target) the response equals one `userHasPermission` per flag, the old implementation's exact semantics,
  * and `effectivePermissionsTx` equals per-flag `userHasPermissionTx` for all 46 flags.
  */
-const RUN = Boolean(process.env.DATABASE_URL);
+const RUN = integrationTestDatabaseReady();
 const describeIfDb = RUN ? describe : describe.skip;
 
 const CAPABILITY_FLAGS: readonly PermissionFlagType[] = [

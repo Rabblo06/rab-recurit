@@ -34,6 +34,7 @@ import { runLateClockInCycle } from '../../queues/rab-shifts/late-clock-in.job';
 import { runShiftMonitorCycle } from '../../queues/rab-shifts/shift-monitor.job';
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { createTestIdentityFactory, TestIdentity, TestIdentityFactory } from './helpers/test-identities';
+import { integrationTestDatabaseReady } from '@rab/server/database/typeorm/core/integration-test-database-gate';
 
 /**
  * D-Q4a test preparation (docs/PHASE_DQ4_DQ5_PLAN_2026-11-03.md §D-Q4a). CHARACTERISATION of today's SEPARATE shift
@@ -53,7 +54,7 @@ import { createTestIdentityFactory, TestIdentity, TestIdentityFactory } from './
  * pick one documented order; Order A (late-clock-in before shift-monitor) reproduces the outcome of the most common
  * separate-mode case and is the plan's PROPOSED order — an owner-visible choice, flagged, not decided here.
  */
-const RUN = Boolean(process.env.DATABASE_URL);
+const RUN = integrationTestDatabaseReady();
 const describeIfDb = RUN ? describe : describe.skip;
 jest.setTimeout(240_000);
 

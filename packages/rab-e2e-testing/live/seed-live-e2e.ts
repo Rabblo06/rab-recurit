@@ -58,7 +58,7 @@ async function main(): Promise<void> {
   // connections must reach the same database, marked disposable in the CATALOG (pg_db_role_setting via ALTER DATABASE),
   // which a connection string's `options=-c ...` cannot fake.
   const resolved = applyIntegrationTestDatabaseEnv(process.env);
-  if (!resolved) throw new Error('refusing to seed: NODE_ENV must be "test" with the TEST_DATABASE_URL / TEST_DATABASE_URL_UNPOOLED pair');
+  if (!resolved) throw new Error('refusing to seed: NODE_ENV must be "test" with the TEST_DATABASE_URL / TEST_DATABASE_ADMIN_URL pair (or the deprecated TEST_DATABASE_URL_UNPOOLED)');
   await assertSameDatabaseAtRuntime(resolved);
 
   const { AppModule } = await import('../../rab-server/src/app.module');

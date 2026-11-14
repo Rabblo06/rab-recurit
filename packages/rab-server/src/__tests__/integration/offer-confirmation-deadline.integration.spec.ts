@@ -14,6 +14,7 @@ import { TenantContextService } from '../../engine/core-modules/tenant/tenant-co
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
 import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-pipe';
+import { integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
 
 /**
  * Owner rule 2026-11-06 — the manager-confirmation deadline through the REAL HTTP stack (guard → service → org-scoped CAS
@@ -29,7 +30,7 @@ import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-
  *  AC5 a staff accept after the deadline is a 409 and the offer stays pending; a STANDARD send after it is a 409;
  *  AC6 the projections are computed on the server clock (GET /offers, GET /offers/mine).
  */
-const RUN = Boolean(process.env.DATABASE_URL);
+const RUN = integrationTestDatabaseReady();
 const describeIfDb = RUN ? describe : describe.skip;
 jest.setTimeout(180_000);
 

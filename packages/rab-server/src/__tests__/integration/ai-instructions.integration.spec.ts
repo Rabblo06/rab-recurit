@@ -7,6 +7,7 @@ import { AuthCacheRedisClientProvider } from '../../engine/core-modules/auth/ser
 import { AiInstructionsService } from '../../modules/ai/services/ai-instructions.service';
 import { scriptedModel, textParts } from './helpers/ai-models';
 import { AiKit, aiOrganisation, bearer, bootAiKit, jobFor, manager, newConversation, setOrgAi } from './helpers/ai-test-kit';
+import { integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
 
 /**
  * C1 / CD-4 workspace instructions API (p4 merge) on the real AppModule, PostgreSQL (crewflow_app, FORCE RLS) and Redis.
@@ -16,7 +17,7 @@ import { AiKit, aiOrganisation, bearer, bootAiKit, jobFor, manager, newConversat
  * clear; the text reaches the turn's system prompt after the fixed rules, under the fixed header; the tool set and the
  * permissions are unchanged by it.
  */
-const RUN = Boolean(process.env.DATABASE_URL);
+const RUN = integrationTestDatabaseReady();
 const describeIfDb = RUN ? describe : describe.skip;
 const ORIGIN = 'http://localhost:5173';
 const PATH = '/rest/v1/ai/settings/instructions';

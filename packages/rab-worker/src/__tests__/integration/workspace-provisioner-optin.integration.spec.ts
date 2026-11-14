@@ -17,6 +17,7 @@ import { generateFixturePassword } from './helpers/fixture-password';
 import { verifiedCrewflowUrl } from './helpers/verified-role-database';
 import { withApplicationName } from './helpers/application-name-url';
 import { runtimeChildBaseEnv } from './helpers/runtime-child-env';
+import { integrationTestDatabaseReady } from '@rab/server/database/typeorm/core/integration-test-database-gate';
 
 /**
  * Phase A (pa-provisioner): opt-in provisioner, HWS pass-through, bounded lock — against the disposable test database with
@@ -30,7 +31,7 @@ import { runtimeChildBaseEnv } from './helpers/runtime-child-env';
  *     and, with real URLs, by the absence of any backend carrying its application_name).
  *  4. An invalid switch or interval refuses to start (exit 1) without opening a connection.
  */
-const RUN = Boolean(process.env.DATABASE_URL);
+const RUN = integrationTestDatabaseReady();
 /**
  * L-class (owner-login architecture): this suite exercises the SUPERSEDED separate workspace-provisioner process, which
  * needs a `crewflow` login (TEST_DATABASE_CREWFLOW_URL) that does not exist under the owner login. Provisioning now runs

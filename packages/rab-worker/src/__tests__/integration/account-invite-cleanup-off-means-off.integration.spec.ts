@@ -9,6 +9,7 @@ import { TenantContextService } from '@rab/server/engine/core-modules/tenant/ten
 import { resolveInviteAutoDeleteEnabled, runAccountInviteCleanupCycle } from '../../queues/rab-maintenance/account-invite-cleanup.job';
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { createTestIdentityFactory, TestIdentity, TestIdentityFactory } from './helpers/test-identities';
+import { integrationTestDatabaseReady } from '@rab/server/database/typeorm/core/integration-test-database-gate';
 
 /**
  * D-1 (Twenty Mode M0, HIGH; docs/TWENTY_MODE_M0_DECISION_2026-11-04.md §6.1): WORKER_INVITE_AUTO_DELETE_ENABLED=false
@@ -32,7 +33,7 @@ import { createTestIdentityFactory, TestIdentity, TestIdentityFactory } from './
  *  6. ON as the owner-member login (non-production only): the business conditions still decide — eligible accounts are
  *     expired / deleted, while awaiting, cancelled, session-holding and business-referenced accounts are kept.
  */
-const RUN = Boolean(process.env.DATABASE_URL);
+const RUN = integrationTestDatabaseReady();
 const describeIfDb = RUN ? describe : describe.skip;
 jest.setTimeout(180_000);
 

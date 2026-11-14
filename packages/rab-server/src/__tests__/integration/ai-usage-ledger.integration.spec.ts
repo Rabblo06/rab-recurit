@@ -14,6 +14,7 @@ import { TEST_MOCK_MODEL_ID } from '../support/ai/test-catalogue';
 import { AiKit, aiOrganisation, ask, bearer, bootAiKit, manager, newConversation } from './helpers/ai-test-kit';
 import { TestIdentity } from './helpers/test-identities';
 import { sqlStateAsSchemaRole } from './helpers/schema-role';
+import { integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
 
 /**
  * Phase 7a `core.ai_usage` ledger and M7-1 columns on the REAL database as crewflow_app (FORCE RLS) — mock models only.
@@ -24,7 +25,7 @@ import { sqlStateAsSchemaRole } from './helpers/schema-role';
  *   Plus: the purge definer (400-day floor, bound organisation, count only), the M7-1 turn columns / codes / grants, and
  *          the admin summary's new columns.
  */
-const RUN = Boolean(process.env.DATABASE_URL);
+const RUN = integrationTestDatabaseReady();
 const describeIfDb = RUN ? describe : describe.skip;
 const pgCode = (e: unknown) => (e as { driverError?: { code?: string }; code?: string })?.driverError?.code ?? (e as { code?: string })?.code;
 

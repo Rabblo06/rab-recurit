@@ -11,6 +11,7 @@ import {
   MigrationApprovalError,
   migrationApprovalToken,
 } from '../../database/typeorm/scripts/migrate/migration-approval';
+import { integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
 
 /**
  * Final review F5, on the real locked runner and the disposable test database: the approval gate runs on the pending set
@@ -24,7 +25,7 @@ import {
  */
 jest.setTimeout(180_000);
 
-const RUN = Boolean(process.env.DATABASE_URL);
+const RUN = integrationTestDatabaseReady();
 const describeIfDb = RUN ? describe : describe.skip;
 
 const PROBE = 'F5ApprovalProbe9999999999998';

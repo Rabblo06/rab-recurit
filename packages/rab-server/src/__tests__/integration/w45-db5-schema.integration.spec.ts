@@ -7,6 +7,7 @@ import { EXPECTED_WORKSPACE_FINGERPRINTS, selectWorkspaceFingerprintsForServer }
 import { LATEST_WORKSPACE_MODULE_VERSION } from '../../database/typeorm/workspace-schema/workspace-schema-modules';
 import { pgClientRunner, WorkspaceSchemaMigrator } from '../../database/typeorm/workspace-schema/workspace-schema-migrator';
 import { dropWorkspaceSchema, ledgerOf, provisionLegacyV14, provisionServerPath, registryOf, SeededWorkspace, seedWorkspace, sqlstateOf } from './helpers/workspace-fixtures';
+import { integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
 
 /**
  * Waves 4+5 lane DB5 (schema owner): abuse-case and no-context tests for every object in docs/evidence/w45-db5/CONTRACT.md,
@@ -22,7 +23,7 @@ import { dropWorkspaceSchema, ledgerOf, provisionLegacyV14, provisionServerPath,
  *  §5 Outbox: no direct DELETE, purge terminal-only + per tenant + floors, replay semantics + audit.
  *  §6 Timeline index, §7 envelope CHECKs, §8 field-permission object keys.
  */
-const RUN = Boolean(process.env.DATABASE_URL);
+const RUN = integrationTestDatabaseReady();
 const describeIfDb = RUN ? describe : describe.skip;
 jest.setTimeout(240_000);
 

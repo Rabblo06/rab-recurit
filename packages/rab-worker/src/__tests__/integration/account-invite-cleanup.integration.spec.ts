@@ -18,6 +18,7 @@ import { WORKER_HEARTBEAT_KEY } from '@rab/server/engine/worker-shared/heartbeat
 import { AccountInviteCleanupResult, runAccountInviteCleanupCycle } from '../../queues/rab-maintenance/account-invite-cleanup.job';
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { generateFixturePassword } from './helpers/fixture-password';
+import { integrationTestDatabaseReady } from '@rab/server/database/typeorm/core/integration-test-database-gate';
 
 const FIXTURE_PASSWORD = generateFixturePassword();
 
@@ -39,7 +40,7 @@ const FIXTURE_PASSWORD = generateFixturePassword();
  * test content the comment claimed, verified against the real diff of what
  * was removed, not reconstructed from memory.
  */
-const RUN = Boolean(process.env.DATABASE_URL);
+const RUN = integrationTestDatabaseReady();
 /**
  * D-1 (Twenty Mode M0): these cases test what the cycle does when it DOES run, so they pass the retention flag ON
  * explicitly (non-production only, as resolveInviteAutoDeleteEnabled allows). Before the D-1 fix they called the cycle with

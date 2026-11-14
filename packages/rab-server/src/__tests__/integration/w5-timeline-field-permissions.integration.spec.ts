@@ -14,6 +14,7 @@ import { createAdminDataSource } from './helpers/admin-datasource';
 import { bookBeforeDeadline } from './helpers/book-before-deadline';
 import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
 import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-pipe';
+import { integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
 
 /**
  * Wave 5 lane DATA — (1) field permissions on attendance read DTOs (money follows payroll.view: the Venue Manager never
@@ -22,7 +23,7 @@ import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-
  * shift created → published → offer sent → accepted → confirmed → check in → clock in → clock out → corrected →
  * reviewed → timesheet finalised → payroll approved. Real HTTP, real PostgreSQL with RLS on (crewflow_app).
  */
-const RUN = Boolean(process.env.DATABASE_URL);
+const RUN = integrationTestDatabaseReady();
 const describeIfDb = RUN ? describe : describe.skip;
 
 describeIfDb('wave 5: field permissions + activity timeline (integration)', () => {

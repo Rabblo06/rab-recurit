@@ -32,8 +32,9 @@ import { ThrottlerRedisClientProvider } from '../../engine/core-modules/throttle
 import { buildTrustProxyPredicate } from '../../engine/utils/trusted-proxy.util';
 import { clearThrottleState } from './helpers/throttle-state';
 import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-pipe';
+import { integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
 
-const RUN = Boolean(process.env.DATABASE_URL);
+const RUN = integrationTestDatabaseReady();
 const describeIfDb = RUN ? describe : describe.skip;
 
 describeIfDb('rate limiting (integration)', () => {

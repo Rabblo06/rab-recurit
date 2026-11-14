@@ -24,9 +24,9 @@ import { DataSource } from 'typeorm';
 
 import { AppModule } from '../../app.module';
 import { PasswordHashingService } from '../../engine/core-modules/auth/services/password-hashing.service';
-import { ADMIN_HEALTH_CACHE_KEY } from '../../engine/core-modules/platform-admin/admin-health.service';
+import { AdminHealthService } from '../../engine/core-modules/platform-admin/admin-health.service';
 import { TenantContextService } from '../../engine/core-modules/tenant/tenant-context.service';
-import { ThrottlerRedisClientProvider } from '../../engine/core-modules/throttler/throttler-redis-client.provider';
+import { integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
 import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-pipe';
 import { createAdminDataSource } from '../integration/helpers/admin-datasource';
 import { TestIdentity, TestIdentityFactory } from '../integration/helpers/test-identities';
@@ -37,7 +37,8 @@ jest.setTimeout(300_000);
 /** Nothing about the upgrade beyond the boolean may reach public /healthz ("ok" is Terminus's own top-level status). */
 const HEALTHZ_FORBIDDEN = /TypeOrmMigrations|_[0-9]{13}|\d+\.\d+\.\d+|"(failed|behind|ahead|none|unknown)"|error_message|errorMessage|executedByVersion|appVersion|"step"|"state"/;
 
-const RUN = Boolean(process.env.DATABASE_URL) && b1() !== null;
+// DEAD-07: the validated TEST pair decides (an invalid pair throws, never a silent skip).
+const RUN = integrationTestDatabaseReady() && b1() !== null;
 const describeIfB1 = RUN ? describe : describe.skip;
 
 describeIfB1('the logbook through the real application (new workspace, /healthz, admin banner)', () => {
@@ -45,7 +46,8 @@ describeIfB1('the logbook through the real application (new workspace, /healthz,
   let app: INestApplication;
   let admin: DataSource;
   let factory: TestIdentityFactory;
-  let throttlerRedis: ThrottlerRedisClientProvider;
+  /** X2.4 (main): the admin report is cached IN PROCESS for 10 s; a test that changes the logbook forgets it. */
+  let forgetAdminReport: () => void = () => undefined;
   let statusService: { cached: unknown } | null = null;
   /** UpgradeStatusService keeps its answer 30 s (B1); a test that changes the logbook forgets it. */
   const forgetStatus = () => {
@@ -63,7 +65,10 @@ describeIfB1('the logbook through the real application (new workspace, /healthz,
     await app.init();
     admin = createAdminDataSource();
     await admin.initialize();
-    throttlerRedis = moduleRef.get(ThrottlerRedisClientProvider);
+    const adminHealth = moduleRef.get(AdminHealthService, { strict: false }) as unknown as { cache: unknown };
+    forgetAdminReport = () => {
+      adminHealth.cache = null;
+    };
     // eslint-disable-next-line @typescript-eslint/no-require-imports
     const { UpgradeStatusService } = require('../../engine/core-modules/upgrade/upgrade-status.service');
     statusService = moduleRef.get(UpgradeStatusService, { strict: false }) as { cached: unknown };
@@ -188,7 +193,7 @@ describeIfB1('the logbook through the real application (new workspace, /healthz,
   });
 
   it('LH-2 the admin health report carries the upgrade state (the banner), never error_message; a failed latest attempt shows failed', async () => {
-    await throttlerRedis.client.del(ADMIN_HEALTH_CACHE_KEY);
+    forgetAdminReport();
     let res = await http().get('/rest/v1/admin/health/report').set('Authorization', `Bearer ${adminToken}`);
     expect(res.status).toBe(200);
     expect(Object.keys(res.body.upgrade ?? {}).sort()).toEqual(['appVersion', 'at', 'attempt', 'executedByVersion', 'forced', 'state', 'step']);
@@ -203,7 +208,7 @@ describeIfB1('the logbook through the real application (new workspace, /healthz,
       [last, next, B1.currentVersion],
     );
     try {
-      await throttlerRedis.client.del(ADMIN_HEALTH_CACHE_KEY);
+      forgetAdminReport();
       forgetStatus();
       res = await http().get('/rest/v1/admin/health/report').set('Authorization', `Bearer ${adminToken}`);
       expect(res.body.upgrade).toMatchObject({ state: 'failed', step: last, attempt: next });
@@ -222,7 +227,7 @@ describeIfB1('the logbook through the real application (new workspace, /healthz,
       expect(JSON.stringify(hz.body)).not.toMatch(HEALTHZ_FORBIDDEN);
     } finally {
       await admin.query('DELETE FROM core.upgrade_migration WHERE id = $1', [id]);
-      await throttlerRedis.client.del(ADMIN_HEALTH_CACHE_KEY);
+      forgetAdminReport();
       forgetStatus();
     }
     const nonAdmin = await ceoToken('b2-ledger-nonadmin');

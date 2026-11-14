@@ -7,6 +7,7 @@ import { AiRedisSubscriberProvider } from '../../modules/ai/services/ai-redis-su
 import { AiSseService } from '../../modules/ai/services/ai-sse.service';
 import { AiStreamService } from '../../modules/ai/services/ai-stream.service';
 import { AiKit, aiOrganisation, ask, bearer, bootAiKit, newConversation, setOrgAi } from './helpers/ai-test-kit';
+import { integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
 
 /**
  * AI Phase 2 — the SSE relay (docs/ai/PHASE2_TWENTY_PLAN.md §2.4; T2-7, T2-8, T2-9): wake-driven delivery, the poll
@@ -14,7 +15,7 @@ import { AiKit, aiOrganisation, ask, bearer, bootAiKit, newConversation, setOrgA
  * that ends the stream within one period when access goes. Turns are put in the `running` state directly and their
  * stream is written through AiStreamService, so the relay is measured on its own (no model, no Worker timing).
  */
-const RUN = Boolean(process.env.DATABASE_URL);
+const RUN = integrationTestDatabaseReady();
 const describeIfDb = RUN ? describe : describe.skip;
 /** Waits for `p` or `ms`, whichever is first, and clears the timer either way (a pending one kept Jest alive). */
 async function settleWithin(p: Promise<unknown>, ms: number): Promise<void> {

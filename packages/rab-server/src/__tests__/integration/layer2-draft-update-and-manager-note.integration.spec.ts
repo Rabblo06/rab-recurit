@@ -19,6 +19,7 @@ import { VenueService } from '../../modules/venue/services/venue.service';
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
 import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-pipe';
+import { integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
 
 /**
  * Phase 5a domain regressions, in the layer-2 hardening style (LAYER2_HARDENING_2026-10-25): every call goes to the
@@ -30,7 +31,7 @@ import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-
  *   - ManagerService.addNote (follow-up gap): each route's OWN flag (MANAGER_MANAGE for /managers, VENUE_MANAGER_CREATE
  *     for /venue-managers), 2,000-character cap, `manager.note_added` audit row with { noteId, length } only.
  */
-const RUN = Boolean(process.env.DATABASE_URL);
+const RUN = integrationTestDatabaseReady();
 const describeIfDb = RUN ? describe : describe.skip;
 
 describeIfDb('Phase 5a domain: updateDraft, Tx extractions and ManagerService.addNote (integration)', () => {

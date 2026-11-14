@@ -405,6 +405,25 @@ alone while an older Worker keeps running.
 - The API log shows the job schedulers registered.
 - The Worker log shows `bullmq scheduler (consume only, DISABLE_CRON_JOBS_REGISTRATION=true): all <n> enabled Crewflow schedulers present`. A MISSING scheduler is an ERROR: restart the API, which registers them again.
 
+**3.5a Uptime monitor on `/healthz` (X2.4).** Crewflow sends no alerts of its own (as in Twenty). Point the
+provider's uptime monitor (or any external HTTP checker) at the API through the edge:
+
+- URL: `https://<api host>/healthz`, method `GET`, no credentials, no token, no cookie. Never put a secret in the
+  monitor's URL or headers.
+- Interval 1 to 5 minutes; timeout 10 s; alert after 2 consecutive failures.
+- Alert on anything but HTTP 200 (a 503, a timeout or a connection error).
+  - 200 means the API answered, PostgreSQL answered a ping within 5 s, and the database's security objects have not
+    changed since boot.
+  - 503 means the database is unreachable, or the security posture drifted. Posture drift stays 503 until a restart
+    passes the boot check again.
+- Optional second rule: alert when the 200 body contains `"upgradeFailed":true`. That is a failed upgrade served
+  degraded (C3, section 2). The body never names the migration; the name is in the API's start-up ERROR log.
+- `/healthz` does NOT cover the Worker, Redis memory or the BullMQ schedulers. Check those in the Admin Panel → Health
+  tab (API, Database, Redis, Worker and BullMQ schedulers indicators, platform admins only). A Worker that is down, or
+  schedulers lost from Redis, shows there and in the Worker's own container health, not in `/healthz`.
+- Do not point a monitor at `/rest/v1/admin/health/report`: it needs a platform-admin session, and every manual
+  refresh writes an audit row.
+
 **3.6 Rollback.** Restore-based rollback, the evidence, and why an old image on an upgraded database fails closed: [`OWNER-LOGIN-RECOVERY.md`](OWNER-LOGIN-RECOVERY.md).
 - **(a) Expand-only release, back to an O3 release** (only between owner-login releases reviewed as expand-only; never back across the transition): set `CREWFLOW_IMAGE_TAG=<previous digest>` in `compose.env` (it is in `compose.env.<old-sha>`; an old copy that still says `CREWFLOW_IMAGE_DIGEST=` needs the name changed), then the same one command, `docker compose pull && docker compose up -d`. The API and the Worker go back together. The old API's migration child classifies the ledger as AHEAD, warns and starts (the C-1 fix). **This is safe ONLY for expand-only releases.**
   - **Never back across 0.6.0 this way** (to R256, R254 or any image older than 0.6.0): the older image's semantic-posture boot gate refuses the 0.6.0 upgrade logbook objects and does not serve (3.3, finding L7). Restore the pre-0.6.0 backup instead (3.6(b)). Within 0.6.0 and later the logbook tolerates a rollback (a newer version recorded: WARNING, nothing written).

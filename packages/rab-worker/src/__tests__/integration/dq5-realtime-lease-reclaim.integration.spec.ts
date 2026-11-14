@@ -10,6 +10,7 @@ import { claimRealtimeEvents, completeRealtimeEvent, markRealtimeEventRetry, ren
 import { publishRealtimeScope } from '../../queues/rab-realtime/publish-outbox.job';
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { createTestIdentityFactory, TestIdentity, TestIdentityFactory } from './helpers/test-identities';
+import { integrationTestDatabaseReady } from '@rab/server/database/typeorm/core/integration-test-database-gate';
 
 /**
  * D-Q5a (docs/PHASE_DQ4_DQ5_PLAN_2026-11-03.md §5.2; audit §13 #6, realtime half).
@@ -23,7 +24,7 @@ import { createTestIdentityFactory, TestIdentity, TestIdentityFactory } from './
  * Real PostgreSQL, RLS on (crewflow_app runtime login, tenant context bound), no mocks. The lease is expired by moving
  * `lease_expires_at` into the past. Copied from the test-prep branch (phase-d/dq45-test-prep) and extended.
  */
-const RUN = Boolean(process.env.DATABASE_URL);
+const RUN = integrationTestDatabaseReady();
 const describeIfDb = RUN ? describe : describe.skip;
 jest.setTimeout(90_000);
 

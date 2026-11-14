@@ -30,6 +30,7 @@ import {
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { cancelLeftoverClaimableEmails } from './helpers/email-leftovers';
 import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
+import { integrationTestDatabaseReady } from '@rab/server/database/typeorm/core/integration-test-database-gate';
 
 /**
  * PHASE 9 — email delivery reliability. Reproduces the confirmed defect
@@ -54,7 +55,7 @@ import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
  */
 jest.setTimeout(60_000);
 
-const RUN = Boolean(process.env.DATABASE_URL);
+const RUN = integrationTestDatabaseReady();
 const describeIfDb = RUN ? describe : describe.skip;
 
 describeIfDb('email delivery reliability (Phase 9)', () => {

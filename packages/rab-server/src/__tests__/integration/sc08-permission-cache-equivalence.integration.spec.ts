@@ -22,6 +22,7 @@ import { ManagerType } from '@rab/shared';
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
 import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-pipe';
+import { integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
 
 /**
  * SC-08 (Phase X Stage 0, S0-C-caches.md §C6): before any cache is switched on, prove that caching cannot change an
@@ -40,7 +41,7 @@ import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-
  * Real PostgreSQL (FORCE RLS, owner login) and real Redis. The cache switch is the service's own `isEnabled()` (spied per
  * mode), so one process compares all modes on the same rows.
  */
-const RUN = Boolean(process.env.DATABASE_URL);
+const RUN = integrationTestDatabaseReady();
 const describeIfDb = RUN ? describe : describe.skip;
 const ALL_FLAGS = Object.values(PermissionFlag) as PermissionFlagType[];
 type Answers = Record<string, boolean>;

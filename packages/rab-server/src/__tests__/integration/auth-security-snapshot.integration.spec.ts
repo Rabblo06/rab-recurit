@@ -12,6 +12,7 @@ import { Organisation } from '../../modules/identity/entities';
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { TestIdentityFactory } from './helpers/test-identities';
 import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-pipe';
+import { integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
 
 /**
  * P1C (FULL-ARCHITECTURE-UPGRADE-PLAN.md — P1 program): `AuthSecuritySnapshotService` — the ONE
@@ -33,7 +34,7 @@ import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-
  * guard against two identities silently drifting apart), so sharing is wrong here, not a bug to
  * route around.
  */
-const RUN = Boolean(process.env.DATABASE_URL);
+const RUN = integrationTestDatabaseReady();
 const describeIfDb = RUN ? describe : describe.skip;
 jest.setTimeout(60_000);
 

@@ -17,6 +17,7 @@ import { NotificationQueueMonitor, NotificationQueueSample } from '../../core/wa
 import { publishRealtimeScope } from '../../queues/rab-realtime/publish-outbox.job';
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
+import { integrationTestDatabase } from '@rab/server/database/typeorm/core/integration-test-database-gate';
 
 /**
  * Phase D wave 4 — PostgreSQL RESTART during a global-mode run (owner §10). Runs ONLY against the throwaway cluster
@@ -35,7 +36,9 @@ const WORKER_URL = process.env.TEST_DATABASE_WORKER_URL;
 const RUN =
   process.env.PHASE_D_SQL_APPROVED === 'true' &&
   CONTAINER === 'crewflow-d-pgrestart' &&
-  /127\.0\.0\.1:15499\//.test(process.env.TEST_DATABASE_URL ?? '') &&
+  // DEAD-07: the dedicated restart cluster, read from the validated TEST pair (throws on an invalid pair).
+  integrationTestDatabase().app.host === '127.0.0.1' &&
+  integrationTestDatabase().app.port === '15499' &&
   Boolean(WORKER_URL);
 const describeIfRestart = RUN ? describe : describe.skip;
 const TEST_ENV = 'inttest';

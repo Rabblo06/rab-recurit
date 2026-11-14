@@ -10,6 +10,7 @@ import { createAdminDataSource } from './helpers/admin-datasource';
 import { MockAccount, MockOidcProvider, Tamper } from './helpers/mock-oidc-provider';
 import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
 import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-pipe';
+import { integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
 
 /**
  * Google (and Microsoft) sign-in through the REAL HTTP routes and the REAL openid-client validation, against a local
@@ -20,7 +21,7 @@ import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-
  * account status, workspace membership re-validation, the one-time handoff (replay, concurrency, expiry, Origin),
  * Google invitation acceptance, session issuance and supersession, and the Microsoft verified-email rule (nOAuth).
  */
-const RUN = Boolean(process.env.DATABASE_URL);
+const RUN = integrationTestDatabaseReady();
 const describeIfDb = RUN ? describe : describe.skip;
 
 const GOOGLE_CLIENT = 'google-test-client';

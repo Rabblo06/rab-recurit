@@ -6,7 +6,8 @@
 # Needs in the environment (CI: .github/actions/disposable-postgres + the M2 harness fresh install +
 # migration-security-test-env.cjs; locally: the same harness on crewflow-test-db 127.0.0.1:15436):
 #   TEST_DATABASE_URL           crewflow_app (restricted runtime role, NOBYPASSRLS) — the ONLY URL the API processes get
-#   TEST_DATABASE_URL_UNPOOLED  the disposable cluster's bootstrap superuser — the seed's fixture connection only
+#   TEST_DATABASE_ADMIN_URL     the disposable cluster's bootstrap superuser — the seed's fixture connection only (X3.5-S7:
+#                               its deprecated name TEST_DATABASE_URL_UNPOOLED is still accepted; two different values are refused)
 #   REDIS_URL                   a disposable Redis (CI: a service container; locally crewflow-test-redis 127.0.0.1:16391)
 #   APP_SECRET                  random per run
 #   E2E_DB_CONTAINER / E2E_DB_USER / E2E_DB_NAME  where devices-sessions-live reads session counts (docker exec psql, read-only)
@@ -32,7 +33,15 @@ ROOT="$(cd "$E2E_DIR/../.." && pwd)"
 win() { if command -v cygpath > /dev/null 2>&1; then cygpath -m "$1"; else printf '%s' "$1"; fi; }
 
 : "${E2E_LIVE_WORK:?set E2E_LIVE_WORK to a scratch directory (logs, seeded identities)}"
-for v in TEST_DATABASE_URL TEST_DATABASE_URL_UNPOOLED REDIS_URL APP_SECRET; do
+# X3.5-S7 release 1: the admin URL comes from TEST_DATABASE_ADMIN_URL or its deprecated name TEST_DATABASE_URL_UNPOOLED, never two values.
+if [ -n "${TEST_DATABASE_ADMIN_URL:-}" ] && [ -n "${TEST_DATABASE_URL_UNPOOLED:-}" ] && [ "$TEST_DATABASE_ADMIN_URL" != "$TEST_DATABASE_URL_UNPOOLED" ]; then
+  echo "[e2e-live] refusing: TEST_DATABASE_ADMIN_URL and its deprecated name TEST_DATABASE_URL_UNPOOLED are set to different values"; exit 2
+fi
+if [ -z "${TEST_DATABASE_ADMIN_URL:-}" ] && [ -n "${TEST_DATABASE_URL_UNPOOLED:-}" ]; then
+  echo "[e2e-live] TEST_DATABASE_URL_UNPOOLED is deprecated: rename it to TEST_DATABASE_ADMIN_URL (same value)"
+  export TEST_DATABASE_ADMIN_URL="$TEST_DATABASE_URL_UNPOOLED"
+fi
+for v in TEST_DATABASE_URL TEST_DATABASE_ADMIN_URL REDIS_URL APP_SECRET; do
   [ -n "${!v:-}" ] || { echo "[e2e-live] $v is required"; exit 2; }
 done
 mkdir -p "$E2E_LIVE_WORK"
@@ -45,7 +54,7 @@ export E2E_QA_API_ORIGIN="http://127.0.0.1:${E2E_QA_API_PORT}" E2E_QA_WEB_ORIGIN
 COOLDOWN="${E2E_LIVE_COOLDOWN_SECONDS:-65}"
 
 # Loopback databases and Redis only: never a remote host.
-for v in TEST_DATABASE_URL TEST_DATABASE_URL_UNPOOLED REDIS_URL; do
+for v in TEST_DATABASE_URL TEST_DATABASE_ADMIN_URL REDIS_URL; do
   host="$(node -e 'try{process.stdout.write(new URL(process.env[process.argv[1]]).hostname)}catch{process.stdout.write("?")}' "$v")"
   case "$host" in 127.0.0.1|localhost) ;; *) echo "[e2e-live] refusing: $v is not a loopback host"; exit 2 ;; esac
 done
@@ -89,7 +98,7 @@ export QA_UI="$WORK/qa-ui.json" QA_IDENTITIES="$WORK/qa-identities.json"
 start_api() { # name port web_origin redis_db
   local name="$1" port="$2" web="$3" db="$4"
   mkdir -p "$WORK/$name-storage"
-  (cd "$WORK" && exec env -u DATABASE_URL -u DATABASE_DIRECT_URL -u DATABASE_URL_UNPOOLED -u TEST_DATABASE_URL_UNPOOLED -u TEST_DATABASE_URL -u TEST_DATABASE_CREWFLOW_URL -u CREWFLOW_BOOTSTRAP_PASSWORD -u CREWFLOW_APP_BOOTSTRAP_PASSWORD -u MIGRATION_SECURITY_ADMIN_URL -u DB_TARGET -u ALLOW_PRODUCTION_DB_COMMANDS \
+  (cd "$WORK" && exec env -u DATABASE_URL -u DATABASE_DIRECT_URL -u DATABASE_URL_UNPOOLED -u TEST_DATABASE_ADMIN_URL -u TEST_DATABASE_URL_UNPOOLED -u TEST_DATABASE_URL -u TEST_DATABASE_CREWFLOW_URL -u CREWFLOW_BOOTSTRAP_PASSWORD -u CREWFLOW_APP_BOOTSTRAP_PASSWORD -u MIGRATION_SECURITY_ADMIN_URL -u DB_TARGET -u ALLOW_PRODUCTION_DB_COMMANDS \
     NODE_ENV=development RAB_RUNTIME_ENV=development \
     PG_DATABASE_URL="$TEST_DATABASE_URL" REDIS_URL="$(redis_db "$db")" APP_SECRET="$APP_SECRET" PORT="$port" \
     APP_URL="$web" ACCOUNTS_URL="$web" CORS_ORIGINS="$web,${web/127.0.0.1/localhost}" \
@@ -99,7 +108,7 @@ start_api() { # name port web_origin redis_db
 }
 start_web() { # name port api_origin
   # Vite gets no database URL, bootstrap password or app secret either: only the public API origin it builds into the page.
-  (cd "$ROOT/packages/rab-front" && exec env -u PG_DATABASE_URL -u DATABASE_URL -u DATABASE_URL_UNPOOLED -u TEST_DATABASE_URL -u TEST_DATABASE_URL_UNPOOLED -u TEST_DATABASE_CREWFLOW_URL     -u CREWFLOW_BOOTSTRAP_PASSWORD -u CREWFLOW_APP_BOOTSTRAP_PASSWORD -u MIGRATION_SECURITY_ADMIN_URL -u APP_SECRET     VITE_API_URL="$3/rest/v1" node "$(win "$ROOT")/node_modules/vite/bin/vite.js" --port "$2" --strictPort --host 127.0.0.1) > "$WORK/web-$1.log" 2>&1 &
+  (cd "$ROOT/packages/rab-front" && exec env -u PG_DATABASE_URL -u DATABASE_URL -u DATABASE_URL_UNPOOLED -u TEST_DATABASE_URL -u TEST_DATABASE_ADMIN_URL -u TEST_DATABASE_URL_UNPOOLED -u TEST_DATABASE_CREWFLOW_URL     -u CREWFLOW_BOOTSTRAP_PASSWORD -u CREWFLOW_APP_BOOTSTRAP_PASSWORD -u MIGRATION_SECURITY_ADMIN_URL -u APP_SECRET     VITE_API_URL="$3/rest/v1" node "$(win "$ROOT")/node_modules/vite/bin/vite.js" --port "$2" --strictPort --host 127.0.0.1) > "$WORK/web-$1.log" 2>&1 &
   PIDS+=($!)
 }
 wait_for() { # url name
@@ -121,7 +130,7 @@ run_spec() { # spec
   # i.e. through the disposable container's local socket as that cluster's bootstrap SUPERUSER (CI: ci_bootstrap on the
   # throwaway disposable-postgres; locally: rab on crewflow-test-db), because the count must see past RLS. The query is
   # one SELECT inside BEGIN READ ONLY ... ROLLBACK and nothing else uses that access. --workers=1.
-  (cd "$E2E_DIR" && unset TEST_DATABASE_URL TEST_DATABASE_URL_UNPOOLED TEST_DATABASE_CREWFLOW_URL CREWFLOW_BOOTSTRAP_PASSWORD CREWFLOW_APP_BOOTSTRAP_PASSWORD MIGRATION_SECURITY_ADMIN_URL APP_SECRET     && E2E_LIVE_HTML_REPORT="$ROOT/test-results/e2e-live/report/$1" E2E_LIVE_OUTPUT_DIR="$ROOT/test-results/e2e-live/results/$1"     node "$ROOT/node_modules/@playwright/test/cli.js" test -c playwright.live.config.ts --workers=1 "web/$1.spec.ts")
+  (cd "$E2E_DIR" && unset TEST_DATABASE_URL TEST_DATABASE_ADMIN_URL TEST_DATABASE_URL_UNPOOLED TEST_DATABASE_CREWFLOW_URL CREWFLOW_BOOTSTRAP_PASSWORD CREWFLOW_APP_BOOTSTRAP_PASSWORD MIGRATION_SECURITY_ADMIN_URL APP_SECRET     && E2E_LIVE_HTML_REPORT="$ROOT/test-results/e2e-live/report/$1" E2E_LIVE_OUTPUT_DIR="$ROOT/test-results/e2e-live/results/$1"     node "$ROOT/node_modules/@playwright/test/cli.js" test -c playwright.live.config.ts --workers=1 "web/$1.spec.ts")
 }
 
 # performance-baseline is a measurement, gated off for ordinary local runs; the live job runs it (and keeps its JSON).

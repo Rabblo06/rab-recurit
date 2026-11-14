@@ -17,6 +17,7 @@ import { Permission, UserPermissionOverride } from '../../modules/identity/entit
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
 import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-pipe';
+import { integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
 
 /**
  * Phase X C5 (S0-C-caches.md §C5, XP-04): the layer-2 service checks of ONE transaction share a transaction-local
@@ -25,7 +26,7 @@ import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-
  * identity and tenant binding; cleared by in-transaction authority writes (ORM, raw SQL + version bump, a rolled-back
  * savepoint); and the query count before/after on a real endpoint.
  */
-const RUN = Boolean(process.env.DATABASE_URL);
+const RUN = integrationTestDatabaseReady();
 const describeIfDb = RUN ? describe : describe.skip;
 const ALL_FLAGS = Object.values(PermissionFlag) as PermissionFlagType[];
 

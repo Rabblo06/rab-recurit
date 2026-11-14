@@ -10,6 +10,7 @@ import { TenantContextService } from '../../engine/core-modules/tenant/tenant-co
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { BootstrapTimer } from './helpers/bootstrap-trace';
 import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
+import { integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
 
 /**
  * Structural tests for the venue_manager_staff composite foreign keys (Hyper Workspace Phase 3, GO closure).
@@ -20,7 +21,7 @@ import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
  *
  * SQLSTATE 23503 = foreign_key_violation. A probe that succeeds is reported as 'ok'.
  */
-const RUN = Boolean(process.env.DATABASE_URL);
+const RUN = integrationTestDatabaseReady();
 (RUN ? describe : describe.skip)('venue_manager_staff composite workspace FKs (structural, integration)', () => {
   let app: INestApplication;
   let owner: DataSource;

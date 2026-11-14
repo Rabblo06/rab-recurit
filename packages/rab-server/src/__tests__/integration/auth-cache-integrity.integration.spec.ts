@@ -9,6 +9,7 @@ import { DataSource } from 'typeorm';
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
 import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-pipe';
+import { integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
 
 /**
  * F-06 (SECURITY_FINDINGS.md): "Redis is inside the authentication trust boundary". Both auth caches ON, real Redis (an isolated
@@ -18,7 +19,7 @@ import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-
  *  - cache 2 (authctx): a forged snapshot under the current version key claiming platform admin → ignored (HMAC fails), the
  *    snapshot is rebuilt from PostgreSQL, and no privilege is granted.
  */
-const RUN = Boolean(process.env.DATABASE_URL);
+const RUN = integrationTestDatabaseReady();
 const describeIfDb = RUN ? describe : describe.skip;
 const ORIGIN = 'http://localhost:5173';
 

@@ -5,6 +5,7 @@ import { randomUUID } from 'node:crypto';
 import { SchedulingService } from '../../modules/scheduling/services/scheduling.service';
 import { ctxOf, proposeOk, runningTurn, venueAndRole, windowFromNow, withRevoked } from './helpers/ai-proposal-fixtures';
 import { AiKit, aiOrganisation, bearer, bootAiKit, manager } from './helpers/ai-test-kit';
+import { integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
 
 /**
  * Batch 3 S6 — `previousValue` on `AiProposalFieldView` (the card's before → after diff), on the real AppModule
@@ -16,7 +17,7 @@ import { AiKit, aiOrganisation, bearer, bootAiKit, manager } from './helpers/ai-
  *   - the viewer lost schedule.view (or the write flag) → no previousValue (never a value they cannot read);
  *   - another user of the organisation → the uniform 404 for the whole list.
  */
-const RUN = Boolean(process.env.DATABASE_URL);
+const RUN = integrationTestDatabaseReady();
 const describeIfDb = RUN ? describe : describe.skip;
 
 describeIfDb('AI S6: previousValue on proposal fields (integration)', () => {

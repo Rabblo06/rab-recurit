@@ -31,6 +31,7 @@ import { createAdminDataSource } from './helpers/admin-datasource';
 import { cancelLeftoverClaimableEmails } from './helpers/email-leftovers';
 import { SmtpSink } from './helpers/smtp-sink';
 import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
+import { integrationTestDatabaseReady } from '@rab/server/database/typeorm/core/integration-test-database-gate';
 
 /**
  * email-twenty (owner decision 2026-11-06: Twenty CRM-style SMTP delivery — at-least-once, NOT exactly-once). End to end on
@@ -46,7 +47,7 @@ import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
  */
 jest.setTimeout(180_000);
 
-const RUN = Boolean(process.env.DATABASE_URL);
+const RUN = integrationTestDatabaseReady();
 const describeIfDb = RUN ? describe : describe.skip;
 
 const TERMINAL_JOB_STATES = new Set(['completed', 'failed']);

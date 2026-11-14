@@ -21,7 +21,7 @@
  *   LD-2  nothing else updates / deletes / truncates: not even the `upgrade` scope holding the lock.
  *
  * Fixtures: two synthetic organisations, each with a CEO and a manager workspace, COMMITTED by the cluster superuser
- * (TEST_DATABASE_URL_UNPOOLED, fixtures only) with workspace-bound ledger rows, so the cascade cleans them up; instance rows
+ * (TEST_DATABASE_ADMIN_URL or the deprecated TEST_DATABASE_URL_UNPOOLED, fixtures only) with workspace-bound ledger rows, so the cascade cleans them up; instance rows
  * are only ever written inside rolled-back transactions. Owner checks run over the runtime login's own connection
  * (TEST_DATABASE_URL, crewflow_owner). No URL or password is ever printed.
  */

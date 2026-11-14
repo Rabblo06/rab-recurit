@@ -20,6 +20,7 @@ import { createAdminDataSource } from './helpers/admin-datasource';
 import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
 import { generateFixturePassword } from './helpers/fixture-password';
 import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-pipe';
+import { integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
 
 const FIXTURE_PASSWORD = generateFixturePassword();
 
@@ -32,7 +33,7 @@ const FIXTURE_PASSWORD = generateFixturePassword();
  * closes the owner's named races, not just that the code compiles: a stale entry is never read
  * after the version that would select it has moved on, and a Redis outage never fails a request.
  */
-const RUN = Boolean(process.env.DATABASE_URL);
+const RUN = integrationTestDatabaseReady();
 const describeIfDb = RUN ? describe : describe.skip;
 
 describeIfDb('P1E AuthContext cache (integration)', () => {

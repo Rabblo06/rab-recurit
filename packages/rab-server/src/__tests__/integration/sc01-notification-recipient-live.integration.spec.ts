@@ -20,6 +20,7 @@ import { NotificationService } from '../../modules/notification/services/notific
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
 import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-pipe';
+import { integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
 
 /**
  * SC-01 (Phase X Stage 0, S0-C-caches.md): `NotificationService.notify()` addressed its email from
@@ -33,7 +34,7 @@ import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-
  *  2. every service writer of a field in the `user` display projection (name, email, avatar) or of the row's existence
  *     clears the entry after its commit, so displayed names are fresh too. A failed write clears nothing.
  */
-const RUN = Boolean(process.env.DATABASE_URL);
+const RUN = integrationTestDatabaseReady();
 const describeIfDb = RUN ? describe : describe.skip;
 
 describeIfDb('SC-01 notification recipient is live; user display writers clear the entity cache (cache ON)', () => {

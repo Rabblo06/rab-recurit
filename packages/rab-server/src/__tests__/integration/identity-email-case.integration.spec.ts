@@ -11,13 +11,14 @@ import { TenantContextService } from '../../engine/core-modules/tenant/tenant-co
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
 import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-pipe';
+import { integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
 
 /**
  * Hyper Workspace Phase 3, Part 9. One email identity regardless of letter case: an account stored with upper-case
  * letters must sign in with any casing, and forgot-password must find it. Regression for the pre-auth lookup, which
  * compared case-sensitively under a pinned search_path (PreAuthEmailCitextLookup1786675300000).
  */
-const RUN = Boolean(process.env.DATABASE_URL);
+const RUN = integrationTestDatabaseReady();
 (RUN ? describe : describe.skip)('email identity is case-insensitive (integration)', () => {
   let app: INestApplication;
   let owner: DataSource;

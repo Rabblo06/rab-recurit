@@ -20,6 +20,7 @@ import { WORKER_HEARTBEAT_KEY } from '../../engine/worker-shared/heartbeat.const
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { generateFixturePassword } from './helpers/fixture-password';
 import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-pipe';
+import { integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
 
 const FIXTURE_PASSWORD = generateFixturePassword();
 
@@ -49,7 +50,7 @@ const FIXTURE_PASSWORD = generateFixturePassword();
  *
  * Runs at main's schema (no Phase D migration needed).
  */
-const RUN = Boolean(process.env.DATABASE_URL);
+const RUN = integrationTestDatabaseReady();
 const describeIfDb = RUN ? describe : describe.skip;
 
 describeIfDb('Phase D F-1: dead account-invite links are refused at redemption even when the cleanup never runs (integration)', () => {

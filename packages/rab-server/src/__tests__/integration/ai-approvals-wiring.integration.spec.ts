@@ -6,6 +6,7 @@ import { AiProposalExecutorService } from '../../modules/ai/actions/ai-proposal-
 import { ctxOf, proposalRow, shiftCount, venueAndRole, windowFromNow } from './helpers/ai-proposal-fixtures';
 import { scriptedModel, textParts, toolCallParts } from './helpers/ai-models';
 import { AiKit, aiOrganisation, ask, bearer, bootAiKit, jobFor, newConversation, turnRow } from './helpers/ai-test-kit';
+import { integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
 
 /**
  * AI 5b — approvals in the live turn (p5 DOC-DRAFTS §5), on the real AppModule, PostgreSQL (crewflow_app, FORCE RLS) and
@@ -17,7 +18,7 @@ import { AiKit, aiOrganisation, ask, bearer, bootAiKit, jobFor, newConversation,
  *     user and an already-decided proposal;
  *   - after approve / reject a CONTINUATION turn runs and sees only the server-written result (no note text, no argument).
  */
-const RUN = Boolean(process.env.DATABASE_URL);
+const RUN = integrationTestDatabaseReady();
 const describeIfDb = RUN ? describe : describe.skip;
 
 describeIfDb('AI 5b: approvals in the live turn (integration)', () => {

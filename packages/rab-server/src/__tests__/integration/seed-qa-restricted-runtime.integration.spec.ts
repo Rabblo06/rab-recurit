@@ -6,8 +6,9 @@ import { CommandModule } from '../../command/command.module';
 import { SeedQaCommand } from '../../command/seed-qa.command';
 import { AuditAction } from '../../engine/core-modules/audit/audit.service';
 import { createAdminDataSource } from './helpers/admin-datasource';
+import { integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
 
-const describeIfDb = process.env.DATABASE_URL ? describe : describe.skip;
+const describeIfDb = integrationTestDatabaseReady() ? describe : describe.skip;
 const QA_ORGANISATION_SLUG = 'adolphus-qa';
 
 /**

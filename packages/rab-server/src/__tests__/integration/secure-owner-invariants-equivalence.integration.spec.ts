@@ -5,6 +5,7 @@ import { PostgresConnectionOptions } from 'typeorm/driver/postgres/PostgresConne
 import { SECURE_OWNER_INVARIANT_VIOLATIONS_SQL } from '../../database/typeorm/core/secure-owner-invariants';
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { SECURE_OWNER_INVARIANT_VIOLATIONS_SQL as PHASE_0B_REFERENCE_SQL } from './helpers/secure-owner-invariants-phase0b-reference';
+import { integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
 
 /**
  * M2-F4: the optimised secure-owner invariant query must report EXACTLY what the Phase 0b query (frozen copy from 0d677bbf)
@@ -14,7 +15,7 @@ import { SECURE_OWNER_INVARIANT_VIOLATIONS_SQL as PHASE_0B_REFERENCE_SQL } from 
  * always rolled back. A case the Phase 0b query does NOT flag (other than the healthy baseline) fails too: the cases must
  * really exercise the checks.
  */
-const RUN = Boolean(process.env.DATABASE_URL);
+const RUN = integrationTestDatabaseReady();
 const describeIfDb = RUN ? describe : describe.skip;
 jest.setTimeout(900_000); // the Phase 0b reference query takes ~30 s per run on a database with 5+ workspace schemas
 

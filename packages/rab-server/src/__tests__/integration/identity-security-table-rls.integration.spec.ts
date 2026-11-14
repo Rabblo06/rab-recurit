@@ -15,6 +15,7 @@ import { sqlStateAsSchemaRole } from './helpers/schema-role';
 import { TestIdentityFactory } from './helpers/test-identities';
 import { generateFixturePassword } from './helpers/fixture-password';
 import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-pipe';
+import { integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
 
 const FIXTURE_PASSWORD = generateFixturePassword();
 
@@ -45,7 +46,7 @@ const FIXTURE_PASSWORD = generateFixturePassword();
  * SHA-256 digest of a 256-bit random value — org-visible as a row, but the
  * value itself is cryptographically inert if read, unlike a password.
  */
-const RUN = Boolean(process.env.DATABASE_URL);
+const RUN = integrationTestDatabaseReady();
 const describeIfDb = RUN ? describe : describe.skip;
 
 describeIfDb('identity/security table RLS (Stage 2A final verification)', () => {
