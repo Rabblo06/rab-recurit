@@ -58,7 +58,11 @@ describeIfB1('the version-complete rule (Part B3, Twenty isLastAttemptCompleted)
     expect(s[0]).toBe(migrationsStep(V));
     expect(new Set(s).size).toBe(s.length);
     for (const n of s) expect(n).toMatch(STEP_NAME_RE);
-    for (const n of s.slice(1)) expect(n).toMatch(new RegExp(`^${V.replace(/\./g, '\\.')}_[A-Za-z][A-Za-z0-9]*_[0-9]{13}$`));
+    // The version is compared as a literal prefix (no regex built from data; CodeQL js/incomplete-sanitization).
+    for (const n of s.slice(1)) {
+      expect(n.startsWith(`${V}_`)).toBe(true);
+      expect(n.slice(V.length + 1)).toMatch(/^[A-Za-z][A-Za-z0-9]*_[0-9]{13}$/);
+    }
   });
 
   it('LV-1 no rows -> not complete', async () => {
