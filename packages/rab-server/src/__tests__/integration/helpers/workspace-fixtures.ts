@@ -1,6 +1,6 @@
 import { Client } from 'pg';
 
-import { provisionWorkspaceSchema, WORKSPACE_TABLES } from '../../../database/typeorm/workspace-schema/provision-workspace-schema';
+import { ProvisionOptions, provisionWorkspaceSchema, WORKSPACE_TABLES } from '../../../database/typeorm/workspace-schema/provision-workspace-schema';
 import { modulesThrough } from '../../../database/typeorm/workspace-schema/workspace-schema-modules';
 
 /**
@@ -14,6 +14,9 @@ export interface SeededWorkspace {
   schema: string;
   label: string;
 }
+
+/** Part D: a workspace upgrade registry with no structural command: the provisioners build the frozen level-20 template. */
+export const FROZEN_TEMPLATE_REGISTRY: Readonly<Record<string, readonly never[]>> = Object.freeze({});
 
 /** Organisation + active owner user + a CREATING workspace whose subdomain (and org slug) is `label`. */
 export async function seedWorkspace(admin: Client, label: string, opts: { orgSlug?: string } = {}): Promise<SeededWorkspace> {
@@ -44,13 +47,17 @@ export async function provisionServerPath(appUrl: string, ws: SeededWorkspace): 
   }
 }
 
-/** TypeScript provisioner as crewflow (the Worker reconciler path). */
-export async function provisionTypeScript(adminUrl: string, ws: SeededWorkspace): Promise<string> {
+/**
+ * TypeScript provisioner as crewflow (the Worker reconciler path). Part D: `options.workspaceRegistry` (NODE_ENV=test only)
+ * picks the template; `FROZEN_TEMPLATE_REGISTRY` builds the frozen module-20 template (structure level 20), as every
+ * workspace was built before the first structural workspace command.
+ */
+export async function provisionTypeScript(adminUrl: string, ws: SeededWorkspace, options: ProvisionOptions = {}): Promise<string> {
   const c = new Client({ connectionString: adminUrl });
   await c.connect();
   try {
     await c.query('SET ROLE crewflow');
-    return (await provisionWorkspaceSchema(c, ws.id)).outcome;
+    return (await provisionWorkspaceSchema(c, ws.id, options)).outcome;
   } finally {
     await c.end();
   }

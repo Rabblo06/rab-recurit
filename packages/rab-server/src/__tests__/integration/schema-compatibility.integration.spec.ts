@@ -9,7 +9,10 @@ import { resolveIntegrationTestDatabase } from '../../database/typeorm/core/test
 import { schemaCompatibilityPostCheckProblems } from '../../database/typeorm/scripts/migrate/deploy-post-checks';
 import { runLockedMigrations } from '../../database/typeorm/scripts/migrate/locked-migration-runner';
 import { PROVISION_FUNCTION_MODULE_VERSIONS, readProvisionFunctionState } from '../../database/typeorm/workspace-schema/provision-function-versions';
-import { LATEST_WORKSPACE_MODULE_VERSION, MIN_COMPATIBLE_WORKSPACE_MODULE_VERSION } from '../../database/typeorm/workspace-schema/workspace-schema-modules';
+import { MIN_COMPATIBLE_WORKSPACE_MODULE_VERSION } from '../../database/typeorm/workspace-schema/workspace-schema-modules';
+import { codeWorkspaceStructureLevel, declaredProvisionLiterals } from '../../engine/core-modules/upgrade/workspace-structure-level';
+/** Part D: this code's structure level (21 since StaffProfileMemberSelect): what every gate compares against. */
+const CODE_LEVEL = codeWorkspaceStructureLevel();
 import type { ExceptionHandlerService } from '../../engine/core-modules/exception-handler/exception-handler.service';
 import { SchemaResolverService, WorkspaceRoutingError } from '../../engine/core-modules/tenant/schema-resolver.service';
 import { AllExceptionsFilter } from '../../engine/filters/all-exceptions.filter';
@@ -146,9 +149,10 @@ describeIfDb('schema-version compatibility gates (integration, disposable test d
     try {
       const fn = await readProvisionFunctionState(async (sql, params) => (await app.query(sql, params as unknown[])).rows);
       // The literal of the code's LATEST module (from the frozen map; not hard-coded, so a new module cannot strand it).
-      const latestLiterals = Object.entries(PROVISION_FUNCTION_MODULE_VERSIONS).filter(([, v]) => v === LATEST_WORKSPACE_MODULE_VERSION).map(([k]) => k);
+      // Part D: the newest body is the structural command's re-creation (its literal is declared on the command, not in the frozen map).
+      const latestLiterals = Object.entries({ ...PROVISION_FUNCTION_MODULE_VERSIONS, ...declaredProvisionLiterals() }).filter(([, v]) => v === CODE_LEVEL).map(([k]) => k);
       expect(latestLiterals).toHaveLength(1);
-      expect(fn).toEqual({ state: 'known', literal: latestLiterals[0], moduleVersion: LATEST_WORKSPACE_MODULE_VERSION });
+      expect(fn).toEqual({ state: 'known', literal: latestLiterals[0], moduleVersion: CODE_LEVEL });
     } finally {
       await app.end();
     }
@@ -259,7 +263,7 @@ describeIfDb('schema-version compatibility gates (integration, disposable test d
     const setModule = (ws: SeededWorkspace, v: number) => admin.query('UPDATE core.workspace_schema_registry SET module_version = $2 WHERE workspace_id = $1', [ws.id, v]);
     /**
      * The module version each fixture REALLY reached (read right after provisioning). Every forged value is restored to
-     * this, never to LATEST_WORKSPACE_MODULE_VERSION: the code's LATEST can be ahead of the database's provision function
+     * this, never to CODE_LEVEL: the code's LATEST can be ahead of the database's provision function
      * (a gated workspace module), and a registry row above its ledger is exactly what the real migrator refuses.
      */
     const provisioned = new Map<string, number>();
@@ -304,7 +308,7 @@ describeIfDb('schema-version compatibility gates (integration, disposable test d
         provisioned.set(ws.id, version);
       }
       // The cases below assume the database provisions at the code's LATEST module (c1: LATEST-1 is "behind").
-      expect([...provisioned.values()]).toEqual([LATEST_WORKSPACE_MODULE_VERSION, LATEST_WORKSPACE_MODULE_VERSION]);
+      expect([...provisioned.values()]).toEqual([CODE_LEVEL, CODE_LEVEL]);
     });
 
     afterAll(async () => {
@@ -343,7 +347,7 @@ describeIfDb('schema-version compatibility gates (integration, disposable test d
         // rab-migrate's post-check would not promote this release.
         const problems = await postCheck();
         const behindNow = finding(problems, 'workspace-behind');
-        expect(behindNow.text).toMatch(new RegExp(`^schema-compatibility workspace-behind: \\d+ READY workspace\\(s\\) are below module ${LATEST_WORKSPACE_MODULE_VERSION}: `));
+        expect(behindNow.text).toMatch(new RegExp(`^schema-compatibility workspace-behind: \\d+ READY workspace\\(s\\) are below module ${CODE_LEVEL}: `));
         expect(behindNow.count).toBe(finding(before, 'workspace-behind').count + 1);
         expectListed(behindNow, `${behind.id}@${INCOMPATIBLE}`);
         expect(behindNow.text).not.toContain(current.id);
@@ -355,14 +359,14 @@ describeIfDb('schema-version compatibility gates (integration, disposable test d
     });
 
     it('(c1b) a READY workspace at LATEST-1 but at/above the compatibility floor stays routable; the post-check still reports it behind', async () => {
-      if (MIN_COMPATIBLE_WORKSPACE_MODULE_VERSION >= LATEST_WORKSPACE_MODULE_VERSION) return; // floor = LATEST: (c1) covers LATEST-1
+      if (MIN_COMPATIBLE_WORKSPACE_MODULE_VERSION >= CODE_LEVEL) return; // floor = LATEST: (c1) covers LATEST-1
       const before = await postCheck();
-      await setModule(behind, LATEST_WORKSPACE_MODULE_VERSION - 1);
+      await setModule(behind, CODE_LEVEL - 1);
       try {
         await expect(resolveAsApp(behind)).resolves.toBe(behind.schema);
         const behindNow = finding(await postCheck(), 'workspace-behind');
         expect(behindNow.count).toBe(finding(before, 'workspace-behind').count + 1);
-        expectListed(behindNow, `${behind.id}@${LATEST_WORKSPACE_MODULE_VERSION - 1}`);
+        expectListed(behindNow, `${behind.id}@${CODE_LEVEL - 1}`);
       } finally {
         await restoreModule(behind);
       }
@@ -371,19 +375,19 @@ describeIfDb('schema-version compatibility gates (integration, disposable test d
 
     it('(c2) a READY workspace one module AHEAD: the API routes it (and does not scan the fleet at boot); the provisioner refuses to start', async () => {
       const before = await postCheck();
-      await setModule(current, LATEST_WORKSPACE_MODULE_VERSION + 1);
+      await setModule(current, CODE_LEVEL + 1);
       try {
         await expect(resolveAsApp(current)).resolves.toBe(current.schema);
         await expect(runDatabaseBootGates('api', gateOptions(appUrl))).resolves.toBeDefined();
         const problems = await postCheck();
         const aheadNow = finding(problems, 'workspace-ahead');
         expect(aheadNow.count).toBe(finding(before, 'workspace-ahead').count + 1);
-        expectListed(aheadNow, `${current.id}@${LATEST_WORKSPACE_MODULE_VERSION + 1}`);
+        expectListed(aheadNow, `${current.id}@${CODE_LEVEL + 1}`);
         expect(without(problems, 'workspace-ahead')).toEqual(without(before, 'workspace-ahead'));
         if (CREWFLOW_URL) {
           const error = await refusal(runDatabaseBootGates('provisioner', gateOptions(CREWFLOW_URL)));
           expect(error.gate).toBe('schema-compatibility');
-          expect(error.message).toMatch(new RegExp(`above this code's module ${LATEST_WORKSPACE_MODULE_VERSION}: ${current.id}@${LATEST_WORKSPACE_MODULE_VERSION + 1}`));
+          expect(error.message).toMatch(new RegExp(`above this code's module ${CODE_LEVEL}: ${current.id}@${CODE_LEVEL + 1}`));
         }
       } finally {
         await restoreModule(current);
