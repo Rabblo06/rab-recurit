@@ -109,7 +109,8 @@ const QR_POST_SHIFT_GRACE_MINUTES = 120;
 const REPORT_AVAILABLE_BEFORE_MINUTES = 180;
 const ACTION_WINDOW_HOURS = 5; // SHIFT_ACTION_WINDOW_HOURS
 const SENT_VISIBLE_HOURS = 5;
-const MISSING_CLOCK_OUT_GRACE_MINUTES = 30;
+// Mirrors the server: one grace for the staff clock-out window, the monitor flag and the manager recovery (2026-11-14).
+const MISSING_CLOCK_OUT_GRACE_MINUTES = QR_POST_SHIFT_GRACE_MINUTES;
 const NO_SHOW_GRACE_MINUTES = 30;
 const OFFER_EXPIRY_HOURS = 48;
 // @rab/shared constants/offer-confirmation.ts (frozen contract; mirrored, not imported).
@@ -776,7 +777,7 @@ function tick() {
       // shift-monitor.job.ts: confirmed seat, no attendance, 30 minutes after its start -> no_show.
       if (a.status === 'confirmed' && !att && now >= addMin(t.startsAt, NO_SHOW_GRACE_MINUTES)) a.status = 'no_show';
       // attendance monitor: still open 30 minutes after the seat's scheduled end -> missing_clock_out.
-      if (att && ['clocked_in', 'on_break'].includes(att.status) && now >= addMin(t.endsAt, MISSING_CLOCK_OUT_GRACE_MINUTES)) att.status = 'missing_clock_out';
+      if (att && ['clocked_in', 'on_break'].includes(att.status) && now > addMin(t.endsAt, MISSING_CLOCK_OUT_GRACE_MINUTES)) att.status = 'missing_clock_out';
     }
     const r = state.reports[sh.id];
     if (!r) continue;
@@ -1633,7 +1634,7 @@ function correctAttendance(attendanceId, body, now) {
   if (['clocked_out', 'approved'].includes(att.status)) status = 'under_review';
   else if (['under_review', 'disputed'].includes(att.status)) { /* stays in review */ } else if (['missing_clock_out', 'clocked_in', 'on_break'].includes(att.status)) {
     const flagAt = addMin(timeOf(a).endsAt, MISSING_CLOCK_OUT_GRACE_MINUTES);
-    if (att.status !== 'missing_clock_out' && now < flagAt) throw httpError(409, 'This staff member is still on shift. A missing clock-out can be recovered once the shift has ended.');
+    if (att.status !== 'missing_clock_out' && now <= flagAt) throw httpError(409, `This staff member is still on shift or can still clock out. A missing clock-out can be recovered once their clock-out window has closed (${MISSING_CLOCK_OUT_GRACE_MINUTES} minutes after their scheduled end).`);
     if (body.field !== 'clockOutAt') throw httpError(409, 'Add the missing clock-out time first.');
     status = 'under_review';
     recovered = true;

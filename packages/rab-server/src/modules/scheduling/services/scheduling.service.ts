@@ -338,6 +338,41 @@ export class SchedulingService {
     });
   }
 
+  /**
+   * Named action `rotateShiftQr` (owner decision 2026-11-14): revokes every Shift QR issued so far for this shift by
+   * bumping `shift.qr_version`; `AttendanceQrService.validateQr` then refuses an older token as `revoked`. `updated_at` is
+   * bumped in the same write so the pre-shift report scheduler regenerates (and re-sends) the roster with the new QR while
+   * the shift has not ended (`reportNeedsGeneration`). No client field is written: the version only ever increments here.
+   * Layers: PermissionGuard(SCHEDULE_CREATE) → re-checked here, first (403 for any id, before the row is loaded) →
+   * `assertShiftOwned` (404 out of scope) → refused for a shift the state machine has closed (no outgoing transition in
+   * SHIFT_TRANSITIONS: completed, cancelled, declined) → workspace RLS → a compare-and-set on (qr_version, status) so a
+   * concurrent rotation or status change is a clean 409, never a double bump → audit `shift.qr_rotated`.
+   */
+  async rotateShiftQr(ctx: AuthContext, id: string): Promise<Shift> {
+    return this.tenantContext.runInWorkspaceContext(ctx, async (manager) => {
+      await this.assertFlagTx(manager, ctx, PermissionFlag.SCHEDULE_CREATE, 'Managing shifts is not permitted.');
+      const shift = await manager.findOne(Shift, { where: { id } });
+      if (!shift) throw new NotFoundException('Shift not found.');
+      await this.assertShiftOwned(manager, ctx, shift);
+      // Fail closed: an unknown status (no row in the table) counts as closed.
+      if ((SHIFT_TRANSITIONS[shift.status as keyof typeof SHIFT_TRANSITIONS] ?? []).length === 0) {
+        throw new ConflictException({ code: 'SHIFT_CLOSED', message: 'This shift is closed, so its QR code can no longer be replaced.' });
+      }
+      const [claimed] = (await manager.query(
+        `UPDATE shift SET qr_version = qr_version + 1, updated_at = now()
+          WHERE id = $1 AND qr_version = $2 AND status = $3 RETURNING qr_version`,
+        [id, shift.qrVersion, shift.status],
+      )) as [Array<{ qr_version: number }>, number];
+      if (claimed.length === 0) throw new ConflictException('This shift changed while its QR code was being replaced — please refresh.');
+      await this.auditService.record(manager, ctx, AuditAction.SHIFT_QR_ROTATED, {
+        entityType: 'shift',
+        entityId: id,
+        metadata: { previousQrVersion: shift.qrVersion, qrVersion: claimed[0]!.qr_version, status: shift.status },
+      });
+      return manager.findOneByOrFail(Shift, { id });
+    });
+  }
+
   /** Named action `restoreShift` — back to an ordinary (unarchived) draft. */
   async restoreShift(ctx: AuthContext, id: string): Promise<Shift> {
     return this.tenantContext.runInWorkspaceContext(ctx, async (manager) => {

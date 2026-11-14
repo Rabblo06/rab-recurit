@@ -313,13 +313,13 @@ describe('QR: decoded from the PDF and verified (P0 plan §5.2 4(e))', () => {
     // Whenever it was signed (the fixtures sign with the real clock), it is accepted in the shift's last minute.
     jest.useFakeTimers({ now: shift.endsAt.getTime() - 60_000 });
     try {
-      await expect(fixtureAttendanceQr.validateQr(manager, shift.id, payload)).resolves.toBeUndefined();
+      await expect(fixtureAttendanceQr.validateQr(manager, shift.id, payload, { period: null })).resolves.toBeUndefined();
       jest.setSystemTime(lastAccepted); // control: the last accepted instant, so the refusal below is the expiry
-      await expect(fixtureAttendanceQr.validateQr(manager, shift.id, payload)).resolves.toBeUndefined();
+      await expect(fixtureAttendanceQr.validateQr(manager, shift.id, payload, { period: null })).resolves.toBeUndefined();
       jest.setSystemTime(lastAccepted + 1000);
-      await expect(fixtureAttendanceQr.validateQr(manager, shift.id, payload)).rejects.toMatchObject({ response: { code: 'INVALID_QR', reason: 'expired' } });
+      await expect(fixtureAttendanceQr.validateQr(manager, shift.id, payload, { period: null })).rejects.toMatchObject({ response: { code: 'INVALID_QR', reason: 'expired' } });
       jest.setSystemTime(lastAccepted + 24 * 60 * 60_000); // and still a day later
-      await expect(fixtureAttendanceQr.validateQr(manager, shift.id, payload)).rejects.toMatchObject({ response: { code: 'INVALID_QR', reason: 'expired' } });
+      await expect(fixtureAttendanceQr.validateQr(manager, shift.id, payload, { period: null })).rejects.toMatchObject({ response: { code: 'INVALID_QR', reason: 'expired' } });
     } finally {
       jest.useRealTimers();
     }

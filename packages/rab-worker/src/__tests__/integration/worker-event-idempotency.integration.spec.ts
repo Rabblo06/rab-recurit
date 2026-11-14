@@ -4,6 +4,7 @@ import { Test } from '@nestjs/testing';
 import { randomUUID } from 'node:crypto';
 import { DataSource } from 'typeorm';
 
+import { EnvironmentService } from '@rab/server/engine/core-modules/environment/environment.service';
 import { AppModule } from '@rab/server/app.module';
 import { Attendance } from '@rab/server/modules/attendance/entities/attendance.entity';
 import { AuditService } from '@rab/server/engine/core-modules/audit/audit.service';
@@ -701,15 +702,15 @@ describeIfDb('worker event idempotency (integration)', () => {
   describe('missing clock-out — same preference-independence guarantee', () => {
     it('flags an ended assignment while the parent still runs', async () => {
       const fx = await seedOrgFixture('individualEnd');
-      const start = new Date(Date.now()-3*3600_000);
-      const end = new Date(Date.now()-45*60_000);
+      const start = new Date(Date.now()-5*3600_000);
+      const end = new Date(Date.now()-150*60_000); // the seat's own end + 120-min clock-out grace has passed; the parent runs on
       const {shiftId, assignmentId} = await seedConfirmedAssignment(fx, start, end);
       const ctx = {organisationId:fx.organisationId,workspaceId:fx.workspaceId,userId:fx.managerUserId};
       const attendance = await withContext(ctx, async m => {
         await m.update(Shift,shiftId,{endsAt:new Date(Date.now()+3*3600_000)});
         return m.save(Attendance,{organisationId:fx.organisationId,workspaceId:fx.workspaceId,shiftId,shiftAssignmentId:assignmentId,staffProfileId:fx.staffProfileId,clockInAt:start,status:AttendanceStatus.CLOCKED_IN});
       });
-      await runAttendanceMonitorCycle(adminDataSource,tenantContext,notificationService,auditService);
+      await runAttendanceMonitorCycle(adminDataSource, tenantContext, notificationService, auditService, app.get(EnvironmentService).get('QR_POST_SHIFT_GRACE_MINUTES'));
       expect((await workerEventStatus(fx,`missing-clock-out:${attendance.id}`))?.status).toBe('completed');
       const result = await withContext(ctx,m=>m.findOneByOrFail(Attendance,{id:attendance.id}));
       expect(result.status).toBe(AttendanceStatus.MISSING_CLOCK_OUT);
@@ -725,7 +726,7 @@ describeIfDb('worker event idempotency (integration)', () => {
       const fx = await seedOrgFixture('mcoadversarial');
       const ownerManagerUserId = await createSecondManager(fx, 'mcoowner');
       const startsAt = new Date(Date.now() - 3 * 3600 * 1000);
-      const endsAt = new Date(Date.now() - 45 * 60 * 1000); // ended 45 minutes ago — past the 30-minute grace period
+      const endsAt = new Date(Date.now() - 150 * 60 * 1000); // ended 150 minutes ago — past the 120-minute clock-out grace (QR_POST_SHIFT_GRACE_MINUTES)
       const { shiftId, assignmentId, adversarialStaffProfileId, adversarialStaffUserId } = await seedAdversarialAssignment(fx, ownerManagerUserId, startsAt, endsAt);
       const ctx = { organisationId: fx.organisationId, workspaceId: fx.workspaceId, userId: fx.managerUserId };
       const attendance = await withContext(ctx, (m) =>
@@ -740,7 +741,7 @@ describeIfDb('worker event idempotency (integration)', () => {
         }),
       );
 
-      await runAttendanceMonitorCycle(adminDataSource, tenantContext, notificationService, auditService);
+      await runAttendanceMonitorCycle(adminDataSource, tenantContext, notificationService, auditService, app.get(EnvironmentService).get('QR_POST_SHIFT_GRACE_MINUTES'));
       expect((await workerEventStatus(fx, `missing-clock-out:${attendance.id}`))?.status).toBe('completed');
 
       const ownerNotifications = await withContext(ctx, (m) =>
@@ -769,7 +770,7 @@ describeIfDb('worker event idempotency (integration)', () => {
     it('completes its worker_event exactly once with both channels disabled, and is never reprocessed', async () => {
       const fx = await seedOrgFixture('mcobothoff');
       const startsAt = new Date(Date.now() - 3 * 3600 * 1000);
-      const endsAt = new Date(Date.now() - 45 * 60 * 1000); // ended 45 minutes ago — past the 30-minute grace period
+      const endsAt = new Date(Date.now() - 150 * 60 * 1000); // ended 150 minutes ago — past the 120-minute clock-out grace (QR_POST_SHIFT_GRACE_MINUTES)
       const { shiftId } = await seedConfirmedAssignment(fx, startsAt, endsAt);
       const attendanceId = await withContext({ organisationId: fx.organisationId, workspaceId: fx.workspaceId, userId: fx.managerUserId }, async (m) => {
         const a = await m.save(Attendance, {
@@ -785,11 +786,11 @@ describeIfDb('worker event idempotency (integration)', () => {
       });
       await setPreference(fx, fx.managerUserId, NotificationType.ATTENDANCE_MISSING_CLOCK_OUT, false, false);
 
-      const first = await runAttendanceMonitorCycle(adminDataSource, tenantContext, notificationService, auditService);
+      const first = await runAttendanceMonitorCycle(adminDataSource, tenantContext, notificationService, auditService, app.get(EnvironmentService).get('QR_POST_SHIFT_GRACE_MINUTES'));
       expect(first.flagged).toBeGreaterThanOrEqual(1);
       expect((await workerEventStatus(fx, `missing-clock-out:${attendanceId}`))?.status).toBe('completed');
 
-      await runAttendanceMonitorCycle(adminDataSource, tenantContext, notificationService, auditService);
+      await runAttendanceMonitorCycle(adminDataSource, tenantContext, notificationService, auditService, app.get(EnvironmentService).get('QR_POST_SHIFT_GRACE_MINUTES'));
       // The specific attendance row is no longer selectable (status moved off 'clocked_in'),
       // so it cannot contribute to a second flag — this assertion only concerns THIS row via the ledger.
       expect((await workerEventStatus(fx, `missing-clock-out:${attendanceId}`))?.status).toBe('completed');

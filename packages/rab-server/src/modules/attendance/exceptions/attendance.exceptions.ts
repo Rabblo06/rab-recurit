@@ -68,12 +68,14 @@ export class OutsideVenueException extends ConflictException {
 }
 
 export class InvalidQrException extends ConflictException {
-  constructor(reason: 'expired' | 'invalid' | 'shift_mismatch' | 'venue_mismatch') {
+  constructor(reason: 'expired' | 'invalid' | 'shift_mismatch' | 'venue_mismatch' | 'revoked') {
     const messages: Record<typeof reason, string> = {
       expired: 'This QR code has expired.',
       invalid: 'Invalid QR code.',
       shift_mismatch: 'This QR code is for a different shift.',
       venue_mismatch: 'This QR code is for a different venue.',
+      // A manager rotated the shift's QR (`SchedulingService.rotateShiftQr`): an older printed/photographed code is dead.
+      revoked: 'This QR code has been replaced. Scan the current QR code for this shift.',
     };
     super({ statusCode: 409, code: 'INVALID_QR', reason, message: messages[reason] });
   }
