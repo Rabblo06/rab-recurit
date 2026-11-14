@@ -8,6 +8,7 @@ import { EnvironmentService } from '../environment/environment.service';
 import { timeStage } from '../../observability/request-context';
 import { AuthContext } from './auth-context.interface';
 import { SchemaResolverService, WorkspaceRoutingError } from './schema-resolver.service';
+import { bindEntityManagerToSchema } from './schema-bound-entity-manager';
 import { isUpgradeBlocked } from '../upgrade/workspace-upgrade-block';
 
 /**
@@ -33,6 +34,11 @@ import { isUpgradeBlocked } from '../upgrade/workspace-upgrade-block';
  *      entity calls (ManagerProfile, ManagerWorkspace, ...) resolving exactly as before.
  *
  * Core entities (explicit `schema: 'core'`) and explicitly `core.`-qualified raw SQL are never affected by any of this.
+ *
+ * Part C2-1: the manager handed to the callback is SCHEMA-BOUND (schema-bound-entity-manager.ts): its entity metadata carries
+ * the same schema as the search_path just bound, so the 14 workspace entities issue `"<schema>"."<table>"` themselves instead
+ * of relying on search_path. Same connection, same transaction, same GUCs; only the entity SQL text changes. Raw SQL through
+ * `manager.query` still resolves bare table names through search_path until its own C2 PR.
  *
  * `runInTenantContext` is the general-purpose entry point (core/global services, and anything that may legitimately
  * run with no workspace bound). `runInWorkspaceContext` (below) is the stricter boundary for the 15 physical
@@ -138,19 +144,23 @@ export class TenantContextService {
     return this.observe('primary', () => this.dataSource.transaction(async (manager) => {
       // ST-05: this stage times the in-transaction binding only. The pool checkout (with its RESET ROLE) and TypeORM's
       // START TRANSACTION run before it, and COMMIT after the callback; none of them is inside it.
-      await timeStage('tenant_context_setup', async () => {
+      const bound = await timeStage('tenant_context_setup', async () => {
         await this.enforceInspectReadOnly(manager, ctx);
+        let schema = 'core';
         if (this.environment.get('HWS_RUNTIME_ENABLED') && ctx.workspaceId) {
           // HWS on with a workspace: the registry is FORCE RLS and needs the GUCs bound first, so search_path stays its own
           // statement after resolve().
           await this.bindGucs(manager, ctx, { readOnly });
-          await this.bindSearchPath(manager, await this.schemaResolver.resolve(manager, ctx.workspaceId));
+          schema = await this.schemaResolver.resolve(manager, ctx.workspaceId);
+          await this.bindSearchPath(manager, schema);
         } else {
           // ST-01: the schema is the constant 'core', bound in the same SELECT as the identity GUCs.
           await this.bindGucs(manager, ctx, { searchPath: 'core', readOnly });
         }
+        // C2-1: entity metadata bound to the same schema as search_path.
+        return bindEntityManagerToSchema(manager, schema);
       });
-      return fn(manager);
+      return fn(bound);
     }));
   }
 
@@ -182,20 +192,22 @@ export class TenantContextService {
     if (options?.useReplica) return this.runRoutedRead(ctx, fn);
     const readOnly = options?.readOnly === true;
     return this.observe('primary', () => this.dataSource.transaction(async (manager) => {
-      const schema = await timeStage('tenant_context_setup', async () => {
+      const [bound, schema] = await timeStage('tenant_context_setup', async () => {
         await this.enforceInspectReadOnly(manager, ctx);
+        let resolved = 'core';
         if (this.environment.get('HWS_RUNTIME_ENABLED')) {
           // HWS on: the registry is FORCE RLS and needs the GUCs bound first, so search_path stays its own statement.
           await this.bindGucs(manager, ctx, { readOnly });
-          const resolved = await this.schemaResolver.resolve(manager, ctx.workspaceId);
+          resolved = await this.schemaResolver.resolve(manager, ctx.workspaceId);
           await this.bindSearchPath(manager, resolved);
-          return resolved;
+        } else {
+          // ST-01: HWS off, the schema is the constant 'core', bound in the same SELECT as the identity GUCs.
+          await this.bindGucs(manager, ctx, { searchPath: 'core', readOnly });
         }
-        // ST-01: HWS off, the schema is the constant 'core', bound in the same SELECT as the identity GUCs.
-        await this.bindGucs(manager, ctx, { searchPath: 'core', readOnly });
-        return 'core';
+        // C2-1: entity metadata bound to the same schema as search_path.
+        return [await bindEntityManagerToSchema(manager, resolved), resolved] as const;
       });
-      return fn(manager, schema);
+      return fn(bound, schema);
     }));
   }
 
@@ -232,21 +244,24 @@ export class TenantContextService {
     fn: (manager: EntityManager, schema: string) => Promise<T>,
   ): Promise<T> {
     return dataSource.transaction(async (manager) => {
-      const bound = await timeStage('tenant_context_setup', async () => {
+      const [boundManager, bound] = await timeStage('tenant_context_setup', async () => {
         await manager.query('SET TRANSACTION READ ONLY');
         // ST-01: a schema known before the bind (resolved and validated on the primary already, or 'core') is folded into
         // the binding SELECT; one resolved here (HWS on with a workspace, on the primary) needs the GUCs first.
         const known = schema ?? (this.environment.get('HWS_RUNTIME_ENABLED') && ctx.workspaceId ? null : 'core');
+        let resolved: string;
         if (known !== null) {
           await this.bindGucs(manager, ctx, { searchPath: known });
-          return known;
+          resolved = known;
+        } else {
+          await this.bindGucs(manager, ctx);
+          resolved = await this.schemaResolver.resolve(manager, ctx.workspaceId);
+          await this.bindSearchPath(manager, resolved);
         }
-        await this.bindGucs(manager, ctx);
-        const resolved = await this.schemaResolver.resolve(manager, ctx.workspaceId);
-        await this.bindSearchPath(manager, resolved);
-        return resolved;
+        // C2-1: entity metadata bound to the same schema as search_path (replica or primary runner alike).
+        return [await bindEntityManagerToSchema(manager, resolved), resolved] as const;
       });
-      return fn(manager, bound);
+      return fn(boundManager, bound);
     });
   }
 

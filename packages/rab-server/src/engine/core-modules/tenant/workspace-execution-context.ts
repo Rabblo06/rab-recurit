@@ -3,6 +3,7 @@ import { DataSource, EntityManager } from 'typeorm';
 
 import { AuthContext } from './auth-context.interface';
 import { SchemaResolverService, WorkspaceRoutingError } from './schema-resolver.service';
+import { bindEntityManagerToSchema } from './schema-bound-entity-manager';
 
 /**
  * One transaction-routing mechanism for workspace-scoped work (Hyper Workspace Phase 3, step 4).
@@ -39,7 +40,8 @@ export class WorkspaceExecutionContext {
       const schema = await this.schemaResolver.resolve(manager, ctx.workspaceId);
       // Exactly one schema. No core, no public, no pg_catalog listed here: catalog objects are always searched by Postgres.
       await manager.query(`SELECT set_config('search_path', $1, true)`, [schema]);
-      return fn(manager, schema);
+      // C2-1: entity metadata bound to the same schema (schema-bound-entity-manager.ts).
+      return fn(await bindEntityManagerToSchema(manager, schema), schema);
     });
   }
 }
