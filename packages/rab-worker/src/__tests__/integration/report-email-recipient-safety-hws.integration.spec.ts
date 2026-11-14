@@ -31,6 +31,7 @@ import { runShiftReportSchedulerCycle } from '../../queues/rab-reports/shift-rep
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
 import { integrationTestDatabaseReady } from '@rab/server/database/typeorm/core/integration-test-database-gate';
+import { hwsRuntimeOn } from './helpers/hws-fixtures';
 
 /**
  * REPORT EMAIL SAFETY under HWS routing (security review S-2). With `HWS_RUNTIME_ENABLED=true` the workspace business
@@ -152,10 +153,14 @@ describeIfDb('report emails under HWS routing: enqueue + send-time re-check read
           workspaceId,
         ]);
       }
-      const [sp] = await m.query(
-        `INSERT INTO staff_profile (organisation_id, user_id, staff_ref, created_by, workspace_id, employment_status) VALUES ($1, $2, $3, $4, $5, 'active') RETURNING id`,
-        [organisationId, staff.userId, `STF-${randomUUID().slice(0, 8)}`, owner.userId, workspaceId],
-      );
+      // Part C1: with HWS on (the default) the fixture factory already wrote this Staff member's profile into the workspace
+      // schema; with HWS off it wrote it to core, and the workspace copy is created here as before.
+      const [sp] = hwsRuntimeOn()
+        ? await m.query(`UPDATE staff_profile SET employment_status = 'active' WHERE id = $1 RETURNING id`, [staff.profileId])
+        : await m.query(
+            `INSERT INTO staff_profile (organisation_id, user_id, staff_ref, created_by, workspace_id, employment_status) VALUES ($1, $2, $3, $4, $5, 'active') RETURNING id`,
+            [organisationId, staff.userId, `STF-${randomUUID().slice(0, 8)}`, owner.userId, workspaceId],
+          );
       const jobRole = await m.save(JobRole, { organisationId, name: `Role ${randomUUID().slice(0, 6)}`, defaultRatePence: 1500, createdBy: owner.userId, workspaceId });
       const shift = await m.save(Shift, {
         organisationId,
