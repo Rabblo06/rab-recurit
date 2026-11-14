@@ -1,5 +1,6 @@
 import { DataSource } from 'typeorm';
 
+import { integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
 import { TOKEN_CLEANUP_PREVIOUS_SQL } from '../../database/typeorm/core/migrations/1786721460000-TokenCleanupRotationOrder';
 import { createAdminDataSource } from './helpers/admin-datasource';
 
@@ -17,7 +18,7 @@ import { createAdminDataSource } from './helpers/admin-datasource';
  * Rows are tagged by token_hash prefix so other suites' rows on a shared test database are never asserted on; the cleanup is
  * table-wide by design (the Worker runs it that way), so every row it deletes is an eligible one.
  */
-const RUN = Boolean(process.env.DATABASE_URL);
+const RUN = integrationTestDatabaseReady();
 const describeIfDb = RUN ? describe : describe.skip;
 jest.setTimeout(180_000);
 
