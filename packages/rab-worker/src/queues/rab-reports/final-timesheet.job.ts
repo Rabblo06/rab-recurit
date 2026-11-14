@@ -19,6 +19,7 @@ import { discoverInWorkspaces } from '../../core/database/workspace-discovery';
 import { claimWorkerEvent, completeWorkerEvent } from '../../core/database/worker-event';
 import { renderFinalTimesheetEmail } from './report-email-content';
 import { REPORT_EMAIL_REASON_ORGANISATION_SUSPENDED, selectReportRecipients } from './report-recipients';
+import { isNotYetRoutableWorkspace } from '../../core/database/workspace-routing';
 
 const logger = new Logger('FinalTimesheetJob');
 
@@ -99,6 +100,8 @@ export async function processFinalTimesheetCandidates(
       if (!outcome.acquired) skippedLocked += 1;
       else if (outcome.value) sent += 1;
     } catch (error) {
+      // Part D review P3: a workspace blocked by a failed upgrade step pauses (picked up again once unblocked), never a failure.
+      if (isNotYetRoutableWorkspace(error)) continue;
       failed += 1;
       logger.warn(`final timesheet for report ${candidate.report_id} failed, will retry next tick: ${(error as Error).message}${errorCodeSuffix(error)}`);
     }

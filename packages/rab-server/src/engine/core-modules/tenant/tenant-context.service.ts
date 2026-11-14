@@ -8,6 +8,7 @@ import { EnvironmentService } from '../environment/environment.service';
 import { timeStage } from '../../observability/request-context';
 import { AuthContext } from './auth-context.interface';
 import { SchemaResolverService, WorkspaceRoutingError } from './schema-resolver.service';
+import { isUpgradeBlocked } from '../upgrade/workspace-upgrade-block';
 
 /**
  * Binds the request's tenant/actor identity into the Postgres session so
@@ -110,6 +111,21 @@ export class TenantContextService {
     // Owner login: RESET ROLE on every checkout of this DataSource's pool (database/postgres/session-role-reset.ts). The
     // per-transaction reset + assertion in bindGucs is the second layer; it also covers DataSources built elsewhere.
     if (this.dataSource.isInitialized) installSessionRoleResetOnDataSource(this.dataSource);
+  }
+
+  /**
+   * Part D (owner D2/D3): whether a workspace is blocked by a failed upgrade step, read inside the caller's tenant transaction
+   * (the registry row is visible only to its organisation). Same rule as SchemaResolverService: only where workspaces are
+   * routed to their schemas (HWS_RUNTIME_ENABLED); otherwise the workspace schema serves nothing and nothing is blocked.
+   * For Worker jobs that must DEFER (not fail) before they claim anything.
+   */
+  async isWorkspaceUpgradeBlocked(manager: EntityManager, workspaceId: string): Promise<boolean> {
+    if (!this.environment.get('HWS_RUNTIME_ENABLED')) return false;
+    const rows: Array<{ migration_error: string | null }> = await manager.query(
+      'SELECT migration_error FROM core.workspace_schema_registry WHERE workspace_id = $1',
+      [workspaceId],
+    );
+    return isUpgradeBlocked(rows[0]?.migration_error);
   }
 
   async runInTenantContext<T>(

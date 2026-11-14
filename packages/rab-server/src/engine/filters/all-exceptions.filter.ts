@@ -94,6 +94,12 @@ export class AllExceptionsFilter implements ExceptionFilter {
     // availability fault of THIS deployment, never an authorisation answer: 503 with a fixed body, so a caller retries
     // instead of concluding the record is gone. It is raised only after the caller's organisation is bound and the
     // registry row is visible to it, so it discloses nothing a 404 would hide.
+    // Part D (owner D2/D3): a workspace blocked by a failed upgrade step: 503 with a fixed body, for an authenticated member
+    // of that workspace only (raised after its organisation is bound; any other caller gets 'registry-missing' → 404).
+    if (exception instanceof WorkspaceRoutingError && exception.code === 'upgrading') {
+      response.status(HttpStatus.SERVICE_UNAVAILABLE).json({ statusCode: HttpStatus.SERVICE_UNAVAILABLE, message: 'Workspace is being upgraded.' });
+      return;
+    }
     if (exception instanceof WorkspaceRoutingError && exception.code === 'incompatible-module') {
       response.status(HttpStatus.SERVICE_UNAVAILABLE).json({ statusCode: HttpStatus.SERVICE_UNAVAILABLE, message: 'Workspace temporarily unavailable.' });
       return;

@@ -7,6 +7,7 @@ import { assignmentTimeSql } from '@rab/server/modules/scheduling/utils/assignme
 import { activePeriods, payrollDate, periodLabel } from '@rab/server/modules/payroll/services/payroll-allocation';
 import { discoverInWorkspaces } from '../../core/database/workspace-discovery';
 import { claimWorkerEvent, completeWorkerEvent } from '../../core/database/worker-event';
+import { isNotYetRoutableWorkspace } from '../../core/database/workspace-routing';
 
 /** Periods that ended within this many days are checked (older ones were already reported or are out of scope). */
 const LOOKBACK_DAYS = 14;
@@ -53,7 +54,9 @@ export async function runPayrollPeriodAttentionCycle(
 
   let notified = 0;
   for (const c of candidates) {
-    const done = await tenantContext.runInTenantContext(
+    let done: boolean;
+    try {
+    done = await tenantContext.runInTenantContext(
       { organisationId: c.organisation_id, workspaceId: c.workspace_id, userId: '', role: '', actorType: 'worker' },
       async (m) => {
         const eventId = await claimWorkerEvent(m, { organisationId: c.organisation_id, workspaceId: c.workspace_id,
@@ -68,6 +71,11 @@ export async function runPayrollPeriodAttentionCycle(
         await completeWorkerEvent(m, eventId);
         return true;
       });
+    } catch (error) {
+      // Part D review P3: a workspace blocked by a failed upgrade step pauses (the period is notified once it is unblocked).
+      if (isNotYetRoutableWorkspace(error)) continue;
+      throw error;
+    }
     if (done) notified += 1;
   }
   return { notified, candidates: candidates.length };
