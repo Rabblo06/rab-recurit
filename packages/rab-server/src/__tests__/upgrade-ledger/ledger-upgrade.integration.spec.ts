@@ -325,6 +325,25 @@ describeIfB1("the upgrade logbook on real databases (Part B3, B1's start path an
       expect((await cl.ledger(db)).length).toBe(before.ledger.length + added.length);
     });
 
+    it('LU-14 (review L1) a workspace is_initial row at the code version is not "version started": nothing previous complete -> still 65', async () => {
+      const db = await skippedRelease('wsinitial');
+      const [{ id: ws }] = await cl.admin<{ id: string }>(db, 'SELECT id::text AS id FROM core.manager_workspace ORDER BY id LIMIT 1');
+      // What workspace creation writes at the code version (markNewWorkspaceInitial), superuser fixture.
+      await cl.admin(
+        db,
+        "INSERT INTO core.upgrade_migration (name, status, attempt, executed_by_version, is_initial, workspace_id, forced) VALUES ($1, 'completed', 1, $2, true, $3::uuid, false)",
+        [migrationsStep(V), V, ws],
+      );
+      const rows = await cl.ledger(db);
+      expect(rows.filter((r) => r.executed_by_version === V && r.workspace_id === null)).toEqual([]);
+      expect(rows.some((r) => r.executed_by_version === V && r.is_initial && r.workspace_id === ws)).toBe(true);
+      const before = { names: await cl.migrationNames(db), ledger: ids(rows) };
+      const refused = await B1.start(db);
+      expect([refused.exitCode, refused.serve]).toEqual([EXIT.behind, false]);
+      expect(await cl.migrationNames(db)).toEqual(before.names);
+      expect(ids(await cl.ledger(db))).toEqual(before.ledger);
+    });
+
     it('LU-9 --force is unreachable from the environment: every candidate variable leaves the start path refusing', async () => {
       const db = await skippedRelease('forceenv');
       const before = ids(await cl.ledger(db));

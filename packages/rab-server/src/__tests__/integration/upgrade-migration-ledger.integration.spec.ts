@@ -4,7 +4,7 @@ import { DataSource } from 'typeorm';
 import { MIGRATION_LOCK_KEY } from '../../database/typeorm/scripts/migrate/migration-lock';
 import { integrationTestDatabase, integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
 import { SeededWorkspace, seedWorkspace } from './helpers/workspace-fixtures';
-import { markNewWorkspaceInitial, upgradeSessionOf, UpgradeSessionError, withUpgradeScope } from '../../engine/core-modules/upgrade/upgrade-migration.service';
+import { markNewWorkspaceInitial, upgradeSessionOf, UpgradeSessionError, versionStartedUnforced, withUpgradeScope } from '../../engine/core-modules/upgrade/upgrade-migration.service';
 import { bindGucsSql } from '../../engine/core-modules/tenant/tenant-context.service';
 
 /**
@@ -254,6 +254,40 @@ describeIfDb('core.upgrade_migration (integration, OWNER-DB-ULTIMATE Part B)', (
       expect(asOwner.rowCount).toBe(0);
     }
     expect(await count('name LIKE $1', [`0.6.0_Itest%${SFX}`])).toBe(before);
+  });
+
+  it('L1 review: versionStartedUnforced counts only an UNFORCED INSTANCE STEP row of the version (no workspace, is_initial or forced row)', async () => {
+    // A version of its own (older than the code, so no other suite reads it as a rollback), removed again in finally.
+    const v = `0.0.${100 + Math.floor(Math.random() * 800)}`;
+    const name = (kind: string) => `${v}_Itest${kind}${SFX}`;
+    const plant = (kind: string, row: { initial: boolean; workspace: string | null; forced: boolean; status?: string }) =>
+      admin.query(
+        `INSERT INTO core.upgrade_migration (name, status, attempt, executed_by_version, error_message, is_initial, workspace_id, forced)
+         VALUES ($1, $2, 1, $3, CASE WHEN $2 = 'failed' THEN 'Error: planted' END, $4, $5::uuid, $6)`,
+        [name(kind), row.status ?? 'completed', v, row.initial, row.workspace, row.forced],
+      );
+    const started = () => withUpgradeScope(upgradeSessionOf(app), 'status', (q) => versionStartedUnforced(q, v));
+    try {
+      expect(await started()).toBe(false);
+      // What workspace creation writes (markNewWorkspaceInitial): a workspace is_initial row at the version.
+      await plant('Wsinitial', { initial: true, workspace: other.id, forced: false });
+      expect(await started()).toBe(false);
+      await plant('Wsstep', { initial: false, workspace: other.id, forced: false });
+      expect(await started()).toBe(false);
+      // The one-time adoption row shape (instance is_initial).
+      await plant('Instinitial', { initial: true, workspace: null, forced: false });
+      expect(await started()).toBe(false);
+      // A step only --force recorded (completed and failed).
+      await plant('Forcedok', { initial: false, workspace: null, forced: true });
+      await plant('Forcedfail', { initial: false, workspace: null, forced: true, status: 'failed' });
+      expect(await started()).toBe(false);
+      // Only now: an unforced instance step row (a failed attempt counts: the run passed the check before failing).
+      await plant('Step', { initial: false, workspace: null, forced: false, status: 'failed' });
+      expect(await started()).toBe(true);
+    } finally {
+      await admin.query('DELETE FROM core.upgrade_migration WHERE executed_by_version = $1', [v]);
+    }
+    expect(await count('executed_by_version = $1', [v])).toBe(0);
   });
 
   it('OWNER TEST: deleting a workspace removes exactly its rows (FK cascade); the instance rows and other workspaces stay', async () => {
