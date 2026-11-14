@@ -30,8 +30,7 @@ import { generateFixturePassword } from './helpers/fixture-password';
 import { verifiedCrewflowUrl } from './helpers/verified-role-database';
 import { withApplicationName } from './helpers/application-name-url';
 import { runtimeChildBaseEnv } from './helpers/runtime-child-env';
-import { expectedWorkspacePolicyCount } from '@rab/server/database/typeorm/workspace-schema/v1/server-path-template-venue-team-admin';
-import { LATEST_WORKSPACE_MODULE_VERSION } from '@rab/server/database/typeorm/workspace-schema/workspace-schema-modules';
+import { expectedPolicyCountAtCodeLevel } from './helpers/structure-level-expectations';
 import { integrationTestDatabaseReady } from '@rab/server/database/typeorm/core/integration-test-database-gate';
 
 /**
@@ -318,8 +317,9 @@ describeIfDb(
         `SELECT count(*)::int AS n FROM pg_policies WHERE schemaname = $1`,
         [schema],
       );
-      // A new workspace is provisioned at the latest module (v18 adds the 2 Assigned Staff policies: 39 → 41).
-      expect(policies).toBe(expectedWorkspacePolicyCount(LATEST_WORKSPACE_MODULE_VERSION));
+      // A new workspace is provisioned at the code's structure level (v18 adds the 2 Assigned Staff policies: 39 → 41; level 21
+    // adds staff_profile_member_select: 42).
+      expect(policies).toBe(expectedPolicyCountAtCodeLevel());
       const reg: Array<{ n: number; err: string | null }> = await admin.query(
         `SELECT count(*)::int AS n, max(migration_error) AS err FROM core.workspace_schema_registry WHERE workspace_id = $1`,
         [workspaceId],
