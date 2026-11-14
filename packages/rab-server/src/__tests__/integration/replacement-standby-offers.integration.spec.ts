@@ -14,6 +14,7 @@ import { createAdminDataSource } from './helpers/admin-datasource';
 import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
 import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-pipe';
 import { integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
+import { businessTable, businessTableOf, siblingTable } from './helpers/hws-fixtures';
 
 /**
  * Replacement & standby offers on the ORIGINAL shift (2026-10-21). Real Postgres, RLS on (runtime role), no mocks; every
@@ -60,7 +61,7 @@ describeIfDb('replacement & standby offers on the original shift (integration)',
   type Staff = TestIdentity & { profileId: string };
   async function activeStaff(org: Organisation, owner: TestIdentity, label: string): Promise<Staff> {
     const staff = await factory.createStaff(org, { owner, label });
-    await adminDataSource.query(`UPDATE core.staff_profile SET employment_status = 'active' WHERE id = $1`, [staff.profileId]);
+    await adminDataSource.query(`UPDATE ${businessTable(owner.workspaceId!, 'staff_profile')} SET employment_status = 'active' WHERE id = $1`, [staff.profileId]);
     return { ...staff, profileId: staff.profileId! };
   }
 
@@ -103,20 +104,20 @@ describeIfDb('replacement & standby offers on the original shift (integration)',
     const shiftId = created.body.shiftId as string;
     const startsAt = new Date(Date.now() - (opts.startedAgoMin ?? 60) * MIN);
     const endsAt = new Date(startsAt.getTime() + (opts.durationH ?? 8) * HOUR);
-    await adminDataSource.query(`UPDATE core.job_offer SET status = 'manager_confirmed', staff_accepted_at = now(), manager_confirmed_at = now(), confirmed_by = $2
-      WHERE shift_assignment_id IN (SELECT id FROM core.shift_assignment WHERE shift_id = $1)`, [shiftId, ws.manager.userId]);
-    await adminDataSource.query(`UPDATE core.shift_assignment SET status = 'confirmed', confirmed_at = now(), period = tstzrange($2, $3, '[)') WHERE shift_id = $1`, [shiftId, startsAt, endsAt]);
+    await adminDataSource.query(`UPDATE ${businessTable(ws.manager.workspaceId!, 'job_offer')} SET status = 'manager_confirmed', staff_accepted_at = now(), manager_confirmed_at = now(), confirmed_by = $2
+      WHERE shift_assignment_id IN (SELECT id FROM ${businessTable(ws.manager.workspaceId!, 'shift_assignment')} WHERE shift_id = $1)`, [shiftId, ws.manager.userId]);
+    await adminDataSource.query(`UPDATE ${businessTable(ws.manager.workspaceId!, 'shift_assignment')} SET status = 'confirmed', confirmed_at = now(), period = tstzrange($2, $3, '[)') WHERE shift_id = $1`, [shiftId, startsAt, endsAt]);
     await adminDataSource.query(
-      `UPDATE core.shift SET starts_at = $2, ends_at = $3, default_starts_at = $2, default_ends_at = $3, filled_count = required_count, status = $4, requested_by = $5 WHERE id = $1`,
+      `UPDATE ${businessTable(ws.manager.workspaceId!, 'shift')} SET starts_at = $2, ends_at = $3, default_starts_at = $2, default_ends_at = $3, filled_count = required_count, status = $4, requested_by = $5 WHERE id = $1`,
       [shiftId, startsAt, endsAt, opts.status ?? 'fully_filled', opts.requestedBy ? ws.manager.userId : null],
     );
     const absent = booked[0]!;
-    const [{ id: absentAssignmentId }] = await adminDataSource.query(`SELECT id FROM core.shift_assignment WHERE shift_id = $1 AND staff_profile_id = $2`, [shiftId, absent.profileId]);
+    const [{ id: absentAssignmentId }] = await adminDataSource.query(`SELECT id FROM ${businessTable(ws.manager.workspaceId!, 'shift_assignment')} WHERE shift_id = $1 AND staff_profile_id = $2`, [shiftId, absent.profileId]);
     if (opts.noShow === 'provisional' || opts.noShow === 'confirmed') {
-      await adminDataSource.query(`UPDATE core.shift_assignment SET status = 'no_show' WHERE id = $1`, [absentAssignmentId]);
+      await adminDataSource.query(`UPDATE ${businessTable(ws.manager.workspaceId!, 'shift_assignment')} SET status = 'no_show' WHERE id = $1`, [absentAssignmentId]);
     }
     if (opts.noShow === 'confirmed') {
-      await adminDataSource.query(`UPDATE core.shift_assignment SET attendance_reviewed_at = now(), attendance_reviewed_by = $2 WHERE id = $1`, [absentAssignmentId, ws.manager.userId]);
+      await adminDataSource.query(`UPDATE ${businessTable(ws.manager.workspaceId!, 'shift_assignment')} SET attendance_reviewed_at = now(), attendance_reviewed_by = $2 WHERE id = $1`, [absentAssignmentId, ws.manager.userId]);
     }
     return { ...ws, shiftId, booked, absent, absentAssignmentId: absentAssignmentId as string, startsAt, endsAt };
   }
@@ -126,13 +127,20 @@ describeIfDb('replacement & standby offers on the original shift (integration)',
     http().post(`/rest/v1/shifts/${shiftId}/offers/bulk`).set(auth(token)).send({ staffProfileIds, mode: 'replacement' });
   const offerFor = async (shiftId: string, staffProfileId: string) =>
     (await adminDataSource.query(`SELECT o.*, sa.status AS assignment_status, sa.shift_id, lower(sa.period) AS period_start, upper(sa.period) AS period_end
-       FROM core.job_offer o JOIN core.shift_assignment sa ON sa.id = o.shift_assignment_id WHERE sa.shift_id = $1 AND o.staff_profile_id = $2`, [shiftId, staffProfileId]))[0];
-  const shiftRow = async (shiftId: string) => (await adminDataSource.query(`SELECT * FROM core.shift WHERE id = $1`, [shiftId]))[0];
-  const shiftCount = async (orgId: string) => Number((await adminDataSource.query(`SELECT count(*)::int AS n FROM core.shift WHERE organisation_id = $1`, [orgId]))[0].n);
+       FROM ${siblingTable(await businessTableOf(adminDataSource, 'shift', shiftId), 'job_offer')} o JOIN ${siblingTable(await businessTableOf(adminDataSource, 'shift', shiftId), 'shift_assignment')} sa ON sa.id = o.shift_assignment_id WHERE sa.shift_id = $1 AND o.staff_profile_id = $2`, [shiftId, staffProfileId]))[0];
+  const shiftRow = async (shiftId: string) => (await adminDataSource.query(`SELECT * FROM ${await businessTableOf(adminDataSource, 'shift', shiftId)} WHERE id = $1`, [shiftId]))[0];
+  // Part C1: an organisation's shifts live in its workspaces' schemas with HWS on (the core copy with HWS off).
+  const shiftCount = async (orgId: string) => {
+    let n = 0;
+    for (const { id } of (await adminDataSource.query(`SELECT id FROM core.manager_workspace WHERE organisation_id = $1`, [orgId])) as Array<{ id: string }>) {
+      n += Number((await adminDataSource.query(`SELECT count(*)::int AS n FROM ${businessTable(id, 'shift')} WHERE organisation_id = $1 AND workspace_id = $2`, [orgId, id]))[0].n);
+    }
+    return n;
+  };
   const accept = (token: string, offerId: string) => http().post(`/rest/v1/offers/${offerId}/accept`).set(auth(token));
   const confirm = (token: string, offerId: string) => http().post(`/rest/v1/offers/${offerId}/confirm`).set(auth(token));
   const occupied = async (shiftId: string) => Number((await adminDataSource.query(
-    `SELECT count(*)::int AS n FROM core.shift_assignment WHERE shift_id = $1 AND (status IN ('confirmed','completed') OR (status = 'no_show' AND attendance_reviewed_at IS NULL))`, [shiftId]))[0].n);
+    `SELECT count(*)::int AS n FROM ${siblingTable(await businessTableOf(adminDataSource, 'shift', shiftId), 'shift_assignment')} WHERE shift_id = $1 AND (status IN ('confirmed','completed') OR (status = 'no_show' AND attendance_reviewed_at IS NULL))`, [shiftId]))[0].n);
 
   describe('prefill and vacancy', () => {
     it('R1: the replacement form reads the ORIGINAL shift; a confirmed no-show frees exactly one seat', async () => {
@@ -208,7 +216,7 @@ describeIfDb('replacement & standby offers on the original shift (integration)',
         expect(new Date(offer.period_end).getTime()).toBe(fx.endsAt.getTime());
       }
       // The no-show seat's history is untouched.
-      const [absent] = await adminDataSource.query(`SELECT status, attendance_reviewed_at, attendance_reviewed_by FROM core.shift_assignment WHERE id = $1`, [fx.absentAssignmentId]);
+      const [absent] = await adminDataSource.query(`SELECT status, attendance_reviewed_at, attendance_reviewed_by FROM ${businessTable(fx.manager.workspaceId!, 'shift_assignment')} WHERE id = $1`, [fx.absentAssignmentId]);
       expect(absent.status).toBe('no_show');
       expect(absent.attendance_reviewed_by).toBe(fx.manager.userId);
       const audits = await adminDataSource.query(`SELECT metadata FROM core.audit_log WHERE organisation_id = $1 AND action = 'offer.sent' AND metadata->>'offerKind' = 'replacement'`, [fx.org.id]);
@@ -225,7 +233,7 @@ describeIfDb('replacement & standby offers on the original shift (integration)',
       expect([first.status, second.status]).toEqual([201, 201]);
       const oks = [...first.body.results, ...second.body.results].filter((r: { ok: boolean }) => r.ok);
       expect(oks).toHaveLength(1);
-      const rows = await adminDataSource.query(`SELECT o.id FROM core.job_offer o JOIN core.shift_assignment sa ON sa.id = o.shift_assignment_id WHERE sa.shift_id = $1 AND o.staff_profile_id = $2`, [fx.shiftId, c1.profileId]);
+      const rows = await adminDataSource.query(`SELECT o.id FROM ${businessTable(fx.manager.workspaceId!, 'job_offer')} o JOIN ${businessTable(fx.manager.workspaceId!, 'shift_assignment')} sa ON sa.id = o.shift_assignment_id WHERE sa.shift_id = $1 AND o.staff_profile_id = $2`, [fx.shiftId, c1.profileId]);
       expect(rows).toHaveLength(1);
       const notes = await adminDataSource.query(`SELECT 1 FROM core.notification WHERE user_id = $1 AND type = 'offer_sent'`, [c1.userId]);
       expect(notes).toHaveLength(1);
@@ -236,7 +244,7 @@ describeIfDb('replacement & standby offers on the original shift (integration)',
       const c1 = await activeStaff(fx.org, fx.manager, 'plain');
       const res = await http().post(`/rest/v1/shifts/${fx.shiftId}/offers/bulk`).set(auth(fx.managerToken)).send({ staffProfileIds: [c1.profileId] });
       expect(res.status).toBe(409);
-      const kinds = await adminDataSource.query(`SELECT DISTINCT o.offer_kind FROM core.job_offer o JOIN core.shift_assignment sa ON sa.id = o.shift_assignment_id WHERE sa.shift_id = $1`, [fx.shiftId]);
+      const kinds = await adminDataSource.query(`SELECT DISTINCT o.offer_kind FROM ${businessTable(fx.manager.workspaceId!, 'job_offer')} o JOIN ${businessTable(fx.manager.workspaceId!, 'shift_assignment')} sa ON sa.id = o.shift_assignment_id WHERE sa.shift_id = $1`, [fx.shiftId]);
       expect(kinds).toEqual([{ offer_kind: 'standard' }]);
       // Client-supplied kinds / unknown modes are rejected at the DTO (anti mass-assignment).
       const bad = await http().post(`/rest/v1/shifts/${fx.shiftId}/offers/bulk`).set(auth(fx.managerToken)).send({ staffProfileIds: [c1.profileId], mode: 'standby' });
@@ -277,11 +285,11 @@ describeIfDb('replacement & standby offers on the original shift (integration)',
       expect(booked.shift_id).toBe(fx.shiftId);
       // Booked window starts no earlier than the approval; no attendance until their real clock-in.
       expect(new Date(booked.period_start).getTime()).toBeGreaterThan(fx.startsAt.getTime());
-      expect(await adminDataSource.query(`SELECT 1 FROM core.attendance WHERE shift_assignment_id = $1`, [booked.shift_assignment_id])).toHaveLength(0);
+      expect(await adminDataSource.query(`SELECT 1 FROM ${businessTable(fx.manager.workspaceId!, 'attendance')} WHERE shift_assignment_id = $1`, [booked.shift_assignment_id])).toHaveLength(0);
       expect(await occupied(fx.shiftId)).toBe(2);
       const shift = await shiftRow(fx.shiftId);
       expect(Number(shift.filled_count)).toBe(2);
-      const [absent] = await adminDataSource.query(`SELECT status, attendance_reviewed_by FROM core.shift_assignment WHERE id = $1`, [fx.absentAssignmentId]);
+      const [absent] = await adminDataSource.query(`SELECT status, attendance_reviewed_by FROM ${businessTable(fx.manager.workspaceId!, 'shift_assignment')} WHERE id = $1`, [fx.absentAssignmentId]);
       expect(absent).toEqual({ status: 'no_show', attendance_reviewed_by: fx.manager.userId });
       const audit = await adminDataSource.query(`SELECT metadata FROM core.audit_log WHERE action = 'offer.confirmed' AND entity_id = $1`, [offer.id]);
       expect(audit[0].metadata).toMatchObject({ offerKind: 'replacement', shiftId: fx.shiftId });
@@ -301,7 +309,7 @@ describeIfDb('replacement & standby offers on the original shift (integration)',
       expect(await occupied(fx.shiftId)).toBe(3);
       expect(Number((await shiftRow(fx.shiftId)).filled_count)).toBe(3);
       const loser = results[0]!.status === 409 ? o1 : o2;
-      expect((await adminDataSource.query(`SELECT status FROM core.job_offer WHERE id = $1`, [loser.id]))[0].status).toBe('staff_accepted');
+      expect((await adminDataSource.query(`SELECT status FROM ${businessTable(fx.manager.workspaceId!, 'job_offer')} WHERE id = $1`, [loser.id]))[0].status).toBe('staff_accepted');
     });
 
     it('R9: standby — accepted while the original still holds the seat, approval refused (409 NO_VACANCY); allowed once the no-show is confirmed', async () => {
@@ -322,10 +330,10 @@ describeIfDb('replacement & standby offers on the original shift (integration)',
       // Owner rule 2026-11-06 (Q1b): a standby acceptance gets a manager-confirmation DEADLINE pointer at its window end —
       // the Worker withdraws it there if nobody confirmed it; it never confirms it.
       const [pointer] = await adminDataSource.query(`SELECT due_at FROM core.worker_due_work WHERE subject_id = $1`, [offer.id]);
-      const [win] = await adminDataSource.query(`SELECT upper(sa.period) AS ends FROM core.shift_assignment sa JOIN core.job_offer o ON o.shift_assignment_id = sa.id WHERE o.id = $1`, [offer.id]);
+      const [win] = await adminDataSource.query(`SELECT upper(sa.period) AS ends FROM ${businessTable(fx.manager.workspaceId!, 'shift_assignment')} sa JOIN ${businessTable(fx.manager.workspaceId!, 'job_offer')} o ON o.shift_assignment_id = sa.id WHERE o.id = $1`, [offer.id]);
       expect(new Date(pointer.due_at).getTime()).toBe(new Date(win.ends).getTime());
 
-      await adminDataSource.query(`UPDATE core.shift_assignment SET attendance_reviewed_at = now(), attendance_reviewed_by = $2 WHERE id = $1`, [fx.absentAssignmentId, fx.manager.userId]);
+      await adminDataSource.query(`UPDATE ${businessTable(fx.manager.workspaceId!, 'shift_assignment')} SET attendance_reviewed_at = now(), attendance_reviewed_by = $2 WHERE id = $1`, [fx.absentAssignmentId, fx.manager.userId]);
       expect((await confirm(fx.managerToken, offer.id)).status).toBe(201);
       expect(await occupied(fx.shiftId)).toBe(2);
     });
@@ -337,7 +345,7 @@ describeIfDb('replacement & standby offers on the original shift (integration)',
       expect((await sendReplacement(fx.managerToken, fx.shiftId, [c1.profileId, c2.profileId])).status).toBe(201);
       const o1 = await offerFor(fx.shiftId, c1.profileId);
       const o2 = await offerFor(fx.shiftId, c2.profileId);
-      await adminDataSource.query(`UPDATE core.job_offer SET expires_at = now() - interval '1 minute' WHERE id = $1`, [o1.id]);
+      await adminDataSource.query(`UPDATE ${businessTable(fx.manager.workspaceId!, 'job_offer')} SET expires_at = now() - interval '1 minute' WHERE id = $1`, [o1.id]);
       const expired = await accept(await factory.login(c1), o1.id);
       expect(expired.status).toBe(409);
       expect((await offerFor(fx.shiftId, c1.profileId)).status).toBe('expired');

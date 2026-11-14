@@ -12,6 +12,7 @@ import { PasswordHashingService } from '../../engine/core-modules/auth/services/
 import { TenantContextService } from '../../engine/core-modules/tenant/tenant-context.service';
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
+import { businessTableOf } from './helpers/hws-fixtures';
 import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-pipe';
 import { integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
 
@@ -176,8 +177,9 @@ describeIfDb('CF-04 email change cannot take over an account (integration)', () 
     const contested = freshEmail('contested');
     await changeStaffEmail(staff, contested, manager.password);
     const token = await tokenSentTo(contested);
-    await owner.query(`UPDATE core."user" SET email = $2 WHERE id = (SELECT user_id FROM core.staff_profile WHERE id = $1)`, [
-      (await newStaff('cf04g')).profileId,
+    const other = await newStaff('cf04g');
+    await owner.query(`UPDATE core."user" SET email = $2 WHERE id = (SELECT user_id FROM ${await businessTableOf(owner, 'staff_profile', other.profileId)} WHERE id = $1)`, [
+      other.profileId,
       contested,
     ]);
     expect((await confirm(token)).status).toBe(400);

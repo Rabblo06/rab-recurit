@@ -1,4 +1,4 @@
-import { insertMembership } from './helpers/test-identities';
+import { insertMembership, provisionFixtureWorkspace } from './helpers/test-identities';
 import 'reflect-metadata';
 import { UserStatus, PermissionFlag } from '@rab/shared';
 import { INestApplication } from '@nestjs/common';
@@ -17,6 +17,7 @@ import { BootstrapTimer } from './helpers/bootstrap-trace';
 import { generateFixturePassword } from './helpers/fixture-password';
 import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-pipe';
 import { integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
+import { businessSchema } from './helpers/hws-fixtures';
 
 const FIXTURE_PASSWORD = generateFixturePassword();
 
@@ -95,7 +96,7 @@ describeIfDb('venue/job-role ownership abuse cases (integration)', () => {
           subdomain: `test-${userId.slice(0, 8)}`,
           status: 'active',
         });
-        const [{ id: wsId }] = await manager.query(`SELECT id FROM core.manager_workspace WHERE owner_user_id = $1`, [userId]); await insertMembership(manager, organisation.id, userId, wsId);
+        const [{ id: wsId }] = await manager.query(`SELECT id FROM core.manager_workspace WHERE owner_user_id = $1`, [userId]); await provisionFixtureWorkspace(manager, wsId); await manager.query(`SELECT set_config('search_path', $1, true)`, [businessSchema(wsId)]); /* Part C1: READY schema; later writes go to it */ await insertMembership(manager, organisation.id, userId, wsId);
         managers.push({ email, userId });
       }
     });

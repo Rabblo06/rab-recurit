@@ -41,7 +41,7 @@ runs:
         docker run -d --name disposable-postgres -p 127.0.0.1:5432:5432 \
           -v "${RUNNER_TEMP}/disposable-pg/su_pass:/run/disposable/su_pass:ro" \
           -e POSTGRES_USER=ci_bootstrap -e POSTGRES_PASSWORD_FILE=/run/disposable/su_pass -e POSTGRES_DB=postgres \
-          "postgres:${{ inputs.postgres-major }}-alpine" -c crewflow.disposable_cluster=on > /dev/null
+          "postgres:${{ inputs.postgres-major }}-alpine" -c crewflow.disposable_cluster=on -c max_locks_per_transaction=2048 > /dev/null
         # Over TCP, not the socket: the image's temporary init server answers on the socket only, then restarts.
         for i in $(seq 1 90); do
           docker exec disposable-postgres pg_isready -h 127.0.0.1 -U ci_bootstrap -d postgres > /dev/null 2>&1 && break

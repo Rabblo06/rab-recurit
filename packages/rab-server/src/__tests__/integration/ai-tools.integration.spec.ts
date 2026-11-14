@@ -20,6 +20,7 @@ import { INJECTION_TEXT, seedPayrollRuns, seedStaffing, StaffingFixture } from '
 import { AiKit, aiOrganisation, bootAiKit, manager, setOrgAi } from './helpers/ai-test-kit';
 import { TestIdentity } from './helpers/test-identities';
 import { integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
+import { businessTable } from './helpers/hws-fixtures';
 
 /**
  * AI read tools against real data under RLS (Phase 1 brief §15 "AI tools"; Phase 3 docs/ai/PHASE3_TWENTY_PLAN.md §7):
@@ -101,14 +102,17 @@ describeIfDb('AI read tools (integration)', () => {
     fx = await seedStaffing(kit, ceo);
     await seedPayrollRuns(kit, ceo, fx);
     // Staff availability fixture: all four staff ACTIVE; staff 0 and 1 declare every weekday, 2 and 3 never declared.
-    await kit.owner.query(`UPDATE core.staff_profile SET employment_status = 'active' WHERE id = ANY($1::uuid[])`, [fx.staff.map((s) => s.profileId)]);
-    await kit.owner.query(`UPDATE core.staff_profile SET available_days = ARRAY['Monday','Tuesday','Wednesday','Thursday','Friday','Saturday','Sunday'] WHERE id = ANY($1::uuid[])`, [[fx.staff[0]!.profileId, fx.staff[1]!.profileId]]);
+    await kit.owner.query(`UPDATE ${businessTable(ceo.workspaceId!, 'staff_profile')} SET employment_status = 'active' WHERE id = ANY($1::uuid[])`, [fx.staff.map((s) => s.profileId)]);
+    await kit.owner.query(`UPDATE ${businessTable(ceo.workspaceId!, 'staff_profile')} SET available_days = ARRAY['Monday','Tuesday','Wednesday','Thursday','Friday','Saturday','Sunday'] WHERE id = ANY($1::uuid[])`, [[fx.staff[0]!.profileId, fx.staff[1]!.profileId]]);
     // Foreign scopes: another organisation, and another Internal Manager of the SAME organisation, each with their own data.
     other = await aiOrganisation(kit, 'ai-tools-other');
     otherFx = await seedStaffing(kit, other.ceo);
     const colleague = await manager(kit, org.orgId);
     colleagueFx = await seedStaffing(kit, colleague.id);
-    await kit.owner.query(`UPDATE core.staff_profile SET employment_status = 'active' WHERE id = ANY($1::uuid[])`, [[...otherFx.staff, ...colleagueFx.staff].map((s) => s.profileId)]);
+    // Part C1: each scope's staff live in its own workspace schema with HWS on.
+    for (const [owner, f] of [[other.ceo, otherFx], [colleague.id, colleagueFx]] as const) {
+      await kit.owner.query(`UPDATE ${businessTable(owner.workspaceId!, 'staff_profile')} SET employment_status = 'active' WHERE id = ANY($1::uuid[])`, [f.staff.map((s) => s.profileId)]);
+    }
     today = day(Date.now());
     inAWeek = day(Date.now() + 6 * 86_400_000);
     yesterday = day(Date.now() - 86_400_000 - 8 * 3600_000);
@@ -302,7 +306,7 @@ describeIfDb('AI read tools (integration)', () => {
     const org = await aiOrganisation(kit, 'ai-tools-queue');
     const f = await seedStaffing(kit, org.ceo);
     await kit.owner.query(
-      `INSERT INTO core.payroll_record (organisation_id, workspace_id, attendance_id, shift_id, staff_profile_id, status, worked_minutes, pay_rate_pence, amount_pence)
+      `INSERT INTO ${businessTable(org.ceo.workspaceId!, 'payroll_record')} (organisation_id, workspace_id, attendance_id, shift_id, staff_profile_id, status, worked_minutes, pay_rate_pence, amount_pence)
        VALUES ($1, $2, $3, $4, $5, 'pending_approval', 480, 1500, 12000)`,
       [org.orgId, org.ceo.workspaceId, f.attendance.onTime, f.shifts.e, f.staff[3]!.profileId],
     );
@@ -504,7 +508,7 @@ describeIfDb('AI read tools (integration)', () => {
     const f = await seedStaffing(kit, org.ceo);
     for (let i = 0; i < 30; i++) {
       await kit.owner.query(
-        `INSERT INTO core.shift (organisation_id, venue_id, job_role_id, starts_at, ends_at, break_minutes, required_count, pay_rate_pence, status, created_by, workspace_id)
+        `INSERT INTO ${businessTable(org.ceo.workspaceId!, 'shift')} (organisation_id, venue_id, job_role_id, starts_at, ends_at, break_minutes, required_count, pay_rate_pence, status, created_by, workspace_id)
          VALUES ($1, $2, $3, now() + interval '30 hours' + ($4 || ' minutes')::interval, now() + interval '38 hours', 0, 1, 1500, 'open', $5, $6)`,
         [org.orgId, f.venueId, f.jobRoleId, String(i), org.ceo.userId, org.ceo.workspaceId],
       );

@@ -22,6 +22,7 @@ import { bookBeforeDeadline } from './helpers/book-before-deadline';
 import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
 import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-pipe';
 import { integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
+import { businessTable } from './helpers/hws-fixtures';
 
 /**
  * Agency payment calendar, allocation, payroll runs and official payslips (PayrollCalendarRunsPayslips1786719200000).
@@ -78,7 +79,7 @@ describeIfDb('payroll calendar, runs and payslips (integration)', () => {
     await adminDataSource.query(`UPDATE core.manager_profile SET is_initial_manager = true WHERE user_id = $1`, [b.userId]);
     staff = [];
     for (let i = 0; i < 6; i++) staff.push(await factory.createStaff(seeded.organisation, { owner: a, label: `runs-s${i}` }));
-    await adminDataSource.query(`UPDATE core.staff_profile SET employment_status = 'active' WHERE id = ANY($1::uuid[])`, [staff.map((s) => s.profileId)]);
+    await adminDataSource.query(`UPDATE ${businessTable(a.workspaceId!, 'staff_profile')} SET employment_status = 'active' WHERE id = ANY($1::uuid[])`, [staff.map((s) => s.profileId)]);
     [tokenA, tokenB] = [await factory.login(a), await factory.login(b)];
     staffTokens = [];
     for (const s of staff) staffTokens.push(await factory.login(s));
@@ -106,9 +107,9 @@ describeIfDb('payroll calendar, runs and payslips (integration)', () => {
 
   /** Pins a shift's scheduled time (shift + its assignments) to start at `instant`, keeping its scheduled length. */
   async function scheduleAt(shiftId: string, instant: string): Promise<void> {
-    await adminDataSource.query(`UPDATE core.shift SET starts_at = $2::timestamptz, ends_at = $2::timestamptz + (ends_at - starts_at) WHERE id = $1`, [shiftId, instant]);
+    await adminDataSource.query(`UPDATE ${businessTable(a.workspaceId!, 'shift')} SET starts_at = $2::timestamptz, ends_at = $2::timestamptz + (ends_at - starts_at) WHERE id = $1`, [shiftId, instant]);
     await adminDataSource.query(
-      `UPDATE core.shift_assignment SET period = tstzrange($2::timestamptz, $2::timestamptz + (upper(period) - lower(period)), '[)') WHERE shift_id = $1 AND period IS NOT NULL`,
+      `UPDATE ${businessTable(a.workspaceId!, 'shift_assignment')} SET period = tstzrange($2::timestamptz, $2::timestamptz + (upper(period) - lower(period)), '[)') WHERE shift_id = $1 AND period IS NOT NULL`,
       [shiftId, instant],
     );
   }
@@ -136,7 +137,7 @@ describeIfDb('payroll calendar, runs and payslips (integration)', () => {
     expect((await http().post(`/rest/v1/attendance/report/shift/${shiftId}/staff/${s.profileId}/attendance-review`).set(auth(tokenA))).status).toBe(200);
     expect((await http().patch(`/rest/v1/attendance/report/shift/${shiftId}/finalise`).set(auth(tokenA))).status).toBe(200);
     await scheduleAt(shiftId, scheduledAt);
-    const [row] = await adminDataSource.query(`SELECT id FROM core.payroll_record WHERE attendance_id = $1`, [out.body.id]);
+    const [row] = await adminDataSource.query(`SELECT id FROM ${businessTable(a.workspaceId!, 'payroll_record')} WHERE attendance_id = $1`, [out.body.id]);
     if (approve) expect((await http().post(`/rest/v1/payroll/records/${row.id}/approve`).set(auth(tokenA))).status).toBe(200);
     rec[`s${i}`] = { recordId: row.id, attendanceId: out.body.id };
     return row.id as string;
@@ -281,7 +282,7 @@ describeIfDb('payroll calendar, runs and payslips (integration)', () => {
     expect(fin.status).toBe(200);
     expect(fin.body.status).toBe('finalised');
     expect(fin.body.staff.every((s: { payslip: { status: string } }) => s.payslip.status === 'processing')).toBe(true);
-    expect((await adminDataSource.query(`SELECT status FROM core.payroll_record WHERE id = $1`, [rec.s1!.recordId]))[0].status).toBe('processing');
+    expect((await adminDataSource.query(`SELECT status FROM ${businessTable(a.workspaceId!, 'payroll_record')} WHERE id = $1`, [rec.s1!.recordId]))[0].status).toBe('processing');
     const history = await http().get('/rest/v1/attendance/me/history').set(auth(staffTokens[1]!));
     expect(history.body.find((h: { id: string }) => h.id === rec.s1!.attendanceId)).toMatchObject({ payrollStatus: 'processing' });
     expect((await http().post(`/rest/v1/payroll/runs/${runId}/finalise`).set(auth(tokenA))).status).toBe(409);
@@ -296,7 +297,7 @@ describeIfDb('payroll calendar, runs and payslips (integration)', () => {
     expect(mine.body.data[0]).toMatchObject({ allocationStatus: 'carried_forward', payday: '2026-11-18', payrollPeriod: { start: '2026-10-26' } });
     const next = await http().post('/rest/v1/payroll/runs/prepare').set(auth(tokenA)).send({ periodId: nextPeriodId });
     expect(next.body.totals).toMatchObject({ records: 1, lateCount: 1 });
-    const [line] = await adminDataSource.query(`SELECT late_approval, original_period_id, work_date::text AS work_date FROM core.payroll_run_line WHERE payroll_record_id = $1`, [rec.s2!.recordId]);
+    const [line] = await adminDataSource.query(`SELECT late_approval, original_period_id, work_date::text AS work_date FROM ${businessTable(a.workspaceId!, 'payroll_run_line')} WHERE payroll_record_id = $1`, [rec.s2!.recordId]);
     expect(line).toMatchObject({ late_approval: true, original_period_id: periodId });
     const audits = await adminDataSource.query(`SELECT metadata FROM core.audit_log WHERE action = 'payroll_run.late_carried_forward' AND entity_id::text = $1`, [rec.s2!.recordId]);
     expect(audits).toHaveLength(1);
@@ -327,7 +328,7 @@ describeIfDb('payroll calendar, runs and payslips (integration)', () => {
     fileV2 = slip2.document.fileId;
     const notes = await adminDataSource.query(`SELECT title FROM core.notification WHERE user_id = $1 AND type = 'payslip_available' ORDER BY created_at`, [staff[1]!.userId]);
     expect(notes.map((n: { title: string }) => n.title)).toEqual(['Your payslip is available', 'Your payslip was updated']);
-    const docs = await adminDataSource.query(`SELECT d.version FROM core.payslip_document d JOIN core.payslip p ON p.id = d.payslip_id WHERE p.staff_profile_id = $1 ORDER BY d.version`, [staff[1]!.profileId]);
+    const docs = await adminDataSource.query(`SELECT d.version FROM ${businessTable(a.workspaceId!, 'payslip_document')} d JOIN ${businessTable(a.workspaceId!, 'payslip')} p ON p.id = d.payslip_id WHERE p.staff_profile_id = $1 ORDER BY d.version`, [staff[1]!.profileId]);
     expect(docs).toEqual([{ version: 1 }, { version: 2 }]);
     const audits = await adminDataSource.query(`SELECT count(*)::int AS n FROM core.audit_log WHERE action = 'payslip.uploaded' AND organisation_id = $1`, [orgId]);
     expect(audits[0].n).toBe(2);
@@ -364,7 +365,7 @@ describeIfDb('payroll calendar, runs and payslips (integration)', () => {
     expect(paid.status).toBe(200);
     mine = await http().get('/rest/v1/payroll/me/payslips').set(auth(staffTokens[1]!));
     expect(mine.body.data[0]).toMatchObject({ status: 'paid', paidAt: expect.any(String) });
-    expect((await adminDataSource.query(`SELECT status FROM core.payroll_record WHERE id = $1`, [rec.s1!.recordId]))[0].status).toBe('paid');
+    expect((await adminDataSource.query(`SELECT status FROM ${businessTable(a.workspaceId!, 'payroll_record')} WHERE id = $1`, [rec.s1!.recordId]))[0].status).toBe('paid');
     const history = await http().get('/rest/v1/attendance/me/history').set(auth(staffTokens[1]!));
     expect(history.body.find((h: { id: string }) => h.id === rec.s1!.attendanceId)).toMatchObject({ payrollStatus: 'paid' });
     expect((await http().post(`/rest/v1/payroll/runs/${runId}/payslips/${staff[1]!.profileId}/mark-paid`).set(auth(tokenA)).send({})).status).toBe(409);
@@ -389,17 +390,17 @@ describeIfDb('payroll calendar, runs and payslips (integration)', () => {
 
   it('failed statement retry: re-queued through the same durable path, audited; humans cannot forge statement state or skip the state machine', async () => {
     const id = rec.s0!.recordId;
-    await adminDataSource.query(`ALTER TABLE core.payroll_record DISABLE TRIGGER payroll_record_guard`);
+    await adminDataSource.query(`ALTER TABLE ${businessTable(a.workspaceId!, 'payroll_record')} DISABLE TRIGGER payroll_record_guard`);
     try {
-      await adminDataSource.query(`UPDATE core.payroll_record SET statement_status = 'failed', statement_attempts = 5, statement_error = 'generation_failed' WHERE id = $1`, [id]);
+      await adminDataSource.query(`UPDATE ${businessTable(a.workspaceId!, 'payroll_record')} SET statement_status = 'failed', statement_attempts = 5, statement_error = 'generation_failed' WHERE id = $1`, [id]);
     } finally {
-      await adminDataSource.query(`ALTER TABLE core.payroll_record ENABLE TRIGGER payroll_record_guard`);
+      await adminDataSource.query(`ALTER TABLE ${businessTable(a.workspaceId!, 'payroll_record')} ENABLE TRIGGER payroll_record_guard`);
     }
     expect((await http().post(`/rest/v1/payroll/records/${id}/statement/retry`).set(auth(tokenB))).status).toBe(404);
     const retry = await http().post(`/rest/v1/payroll/records/${id}/statement/retry`).set(auth(tokenA));
     expect(retry.status).toBe(200);
     expect(retry.body.statement.state).toBe('processing');
-    expect((await adminDataSource.query(`SELECT statement_status, statement_attempts, statement_error FROM core.payroll_record WHERE id = $1`, [id]))[0])
+    expect((await adminDataSource.query(`SELECT statement_status, statement_attempts, statement_error FROM ${businessTable(a.workspaceId!, 'payroll_record')} WHERE id = $1`, [id]))[0])
       .toEqual({ statement_status: 'pending', statement_attempts: 0, statement_error: null });
     expect((await http().post(`/rest/v1/payroll/records/${id}/statement/retry`).set(auth(tokenA))).status).toBe(409);
     const audits = await adminDataSource.query(`SELECT count(*)::int AS n FROM core.audit_log WHERE action = 'payroll_record.shift_statement_retry_requested' AND entity_id::text = $1`, [id]);
@@ -432,7 +433,7 @@ describeIfDb('payroll calendar, runs and payslips (integration)', () => {
     // Pinning the scheduled date never touches the pay calculation: same worked minutes, rate and amount as a record
     // made by the same flow in the default period.
     const pay = await adminDataSource.query(
-      `SELECT id, worked_minutes, pay_rate_pence::text AS rate, amount_pence::text AS amount FROM core.payroll_record WHERE id = ANY($1::uuid[])`,
+      `SELECT id, worked_minutes, pay_rate_pence::text AS rate, amount_pence::text AS amount FROM ${businessTable(a.workspaceId!, 'payroll_record')} WHERE id = ANY($1::uuid[])`,
       [[rec.s1!.recordId, lastOfPeriod, firstOfNext, afterAutumn]],
     );
     const reference = pay.find((p: { id: string }) => p.id === rec.s1!.recordId);

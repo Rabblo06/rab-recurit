@@ -91,7 +91,8 @@ services:
       CORS_ORIGINS: http://127.0.0.1:5173
       STORAGE_DRIVER: LOCAL
       STORAGE_KEY_PREFIX: bqbundle
-      HWS_RUNTIME_ENABLED: 'false'
+      # Part C1: on outside production (this bundle check only touches core outbox tables either way).
+      HWS_RUNTIME_ENABLED: 'true'
       WORKER_SCHEDULER: ${BQ_WORKER_SCHEDULER:-bullmq}
       WORKER_SCHEDULER_RECONCILE_SECONDS: '15'
     healthcheck:

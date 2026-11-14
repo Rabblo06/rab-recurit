@@ -66,6 +66,9 @@ async function main(): Promise<void> {
   const { TenantContextService } = await import('../../rab-server/src/engine/core-modules/tenant/tenant-context.service');
   const { createAdminDataSource } = await import('../../rab-server/src/__tests__/integration/helpers/admin-datasource');
   const { TestIdentityFactory } = await import('../../rab-server/src/__tests__/integration/helpers/test-identities');
+  // Part C1: HWS routing is on by default outside production; business rows go where the API reads them (the workspace's
+  // schema with HWS on, the core copy with it off).
+  const { businessTable } = await import('../../rab-server/src/__tests__/integration/helpers/hws-fixtures');
   type Identity = Awaited<ReturnType<InstanceType<typeof TestIdentityFactory>['createCeo']>>;
 
   const moduleRef = await Test.createTestingModule({ imports: [AppModule] }).compile();
@@ -108,10 +111,10 @@ async function main(): Promise<void> {
   const org = consoleOrg.id;
 
   const venue = async (name: string, type: string, client: string) =>
-    (await q(`INSERT INTO core.venue (organisation_id, name, client_name, type, created_by, workspace_id) VALUES ($1, $2, $3, $4, $5, $6) RETURNING id`, [org, name, client, type, admin.userId, ws]))[0].id as string;
+    (await q(`INSERT INTO ${businessTable(ws, 'venue')} (organisation_id, name, client_name, type, created_by, workspace_id) VALUES ($1, $2, $3, $4, $5, $6) RETURNING id`, [org, name, client, type, admin.userId, ws]))[0].id as string;
   const riverside = await venue('Riverside Kitchen', 'restaurant', 'Riverside Group (synthetic)');
   const harbour = await venue('Harbour Warehouse', 'warehouse', 'Harbour Logistics (synthetic)');
-  const [role] = await q(`INSERT INTO core.job_role (organisation_id, name, default_rate_pence, created_by, workspace_id) VALUES ($1, 'Bartender', 1500, $2, $3) RETURNING id`, [org, admin.userId, ws]);
+  const [role] = await q(`INSERT INTO ${businessTable(ws, 'job_role')} (organisation_id, name, default_rate_pence, created_by, workspace_id) VALUES ($1, 'Bartender', 1500, $2, $3) RETURNING id`, [org, admin.userId, ws]);
 
   // Active staff (factory: real staff role, profile, workspace membership), distinct created_at for the sort checks.
   const staffSpec: Array<[string, string, string, string, string]> = [
@@ -126,7 +129,7 @@ async function main(): Promise<void> {
     await profile(s, first, last);
     await q(`UPDATE core."user" SET phone = $2 WHERE id = $1`, [s.userId, phone]);
     await q(
-      `UPDATE core.staff_profile SET employment_type = $2, employment_status = $3, job_role_id = $4, created_at = now() - make_interval(days => $5) WHERE id = $1`,
+      `UPDATE ${businessTable(ws, 'staff_profile')} SET employment_type = $2, employment_status = $3, job_role_id = $4, created_at = now() - make_interval(days => $5) WHERE id = $1`,
       [s.profileId, type, status, role.id, 10 - i],
     );
     staff.push(s);
@@ -145,7 +148,7 @@ async function main(): Promise<void> {
   const shift = async (venueId: string, startsAt: Date, hours: number, status: string, createdBy: string, required = 2, filled = 0) =>
     (
       await q(
-        `INSERT INTO core.shift (organisation_id, venue_id, job_role_id, starts_at, ends_at, break_minutes, required_count, filled_count, pay_rate_pence, status, created_by, workspace_id)
+        `INSERT INTO ${businessTable(ws, 'shift')} (organisation_id, venue_id, job_role_id, starts_at, ends_at, break_minutes, required_count, filled_count, pay_rate_pence, status, created_by, workspace_id)
          VALUES ($1, $2, $3, $4, $5, 0, $6, $7, 1500, $8, $9, $10) RETURNING id`,
         [org, venueId, role.id, startsAt, new Date(startsAt.getTime() + hours * H), required, filled, status, createdBy, ws],
       )
@@ -166,7 +169,7 @@ async function main(): Promise<void> {
   const requestedStart = future(8, 17);
   const requested = await shift(riverside, requestedStart, 6, 'pending_manager_approval', vm.userId, 2, 0);
   for (const s of staff.slice(0, 2)) {
-    await q(`INSERT INTO core.shift_request_staff (organisation_id, workspace_id, shift_id, staff_profile_id) VALUES ($1, $2, $3, $4)`, [org, ws, requested, s.profileId]);
+    await q(`INSERT INTO ${businessTable(ws, 'shift_request_staff')} (organisation_id, workspace_id, shift_id, staff_profile_id) VALUES ($1, $2, $3, $4)`, [org, ws, requested, s.profileId]);
   }
 
   // Open shift with offers: one pending, one withdrawn (Offers tabs and sort).
@@ -177,12 +180,12 @@ async function main(): Promise<void> {
     [staff[2]!, 'withdrawn', 'withdrawn'],
   ] as const) {
     const [assignment] = await q(
-      `INSERT INTO core.shift_assignment (organisation_id, shift_id, staff_profile_id, status, pay_rate_snapshot_pence, assigned_by, period, workspace_id)
+      `INSERT INTO ${businessTable(ws, 'shift_assignment')} (organisation_id, shift_id, staff_profile_id, status, pay_rate_snapshot_pence, assigned_by, period, workspace_id)
        VALUES ($1, $2, $3, $4, 1500, $5, tstzrange($6, $7), $8) RETURNING id`,
       [org, open, s.profileId, assignmentStatus, admin.userId, openStart, new Date(openStart.getTime() + 6 * H), ws],
     );
     await q(
-      `INSERT INTO core.job_offer (organisation_id, shift_assignment_id, staff_profile_id, status, sent_at, expires_at, estimated_pay_pence, created_by, workspace_id)
+      `INSERT INTO ${businessTable(ws, 'job_offer')} (organisation_id, shift_assignment_id, staff_profile_id, status, sent_at, expires_at, estimated_pay_pence, created_by, workspace_id)
        VALUES ($1, $2, $3, $4, now(), now() + interval '1 day', 9000, $5, $6)`,
       [org, assignment.id, s.profileId, offerStatus, admin.userId, ws],
     );
@@ -200,18 +203,18 @@ async function main(): Promise<void> {
     const s = staff[i]!;
     const shiftId = await shift(venueId, start, (end.getTime() - start.getTime()) / H, 'completed', admin.userId, 1, 1);
     const [assignment] = await q(
-      `INSERT INTO core.shift_assignment (organisation_id, shift_id, staff_profile_id, status, pay_rate_snapshot_pence, assigned_by, confirmed_at, period, workspace_id)
+      `INSERT INTO ${businessTable(ws, 'shift_assignment')} (organisation_id, shift_id, staff_profile_id, status, pay_rate_snapshot_pence, assigned_by, confirmed_at, period, workspace_id)
        VALUES ($1, $2, $3, 'completed', 1500, $4, now(), tstzrange($5, $6), $7) RETURNING id`,
       [org, shiftId, s.profileId, admin.userId, start, end, ws],
     );
     const worked = Math.round((end.getTime() - start.getTime()) / 60_000);
     const [attendance] = await q(
-      `INSERT INTO core.attendance (organisation_id, shift_assignment_id, shift_id, staff_profile_id, workspace_id, clock_in_at, clock_out_at, status, worked_minutes, earned_pence)
+      `INSERT INTO ${businessTable(ws, 'attendance')} (organisation_id, shift_assignment_id, shift_id, staff_profile_id, workspace_id, clock_in_at, clock_out_at, status, worked_minutes, earned_pence)
        VALUES ($1, $2, $3, $4, $5, $6, $7, 'approved', $8, $9) RETURNING id`,
       [org, assignment.id, shiftId, s.profileId, ws, start, end, worked, amount],
     );
     await q(
-      `INSERT INTO core.payroll_record (organisation_id, workspace_id, attendance_id, shift_id, staff_profile_id, status, worked_minutes, pay_rate_pence, amount_pence, approved_at, approved_by)
+      `INSERT INTO ${businessTable(ws, 'payroll_record')} (organisation_id, workspace_id, attendance_id, shift_id, staff_profile_id, status, worked_minutes, pay_rate_pence, amount_pence, approved_at, approved_by)
        VALUES ($1, $2, $3, $4, $5, $6, $7, 1500, $8, $9, $10)`,
       [org, ws, attendance.id, shiftId, s.profileId, i === 0 ? 'approved' : 'pending_approval', worked, amount, i === 0 ? new Date() : null, i === 0 ? admin.userId : null],
     );
@@ -240,7 +243,7 @@ async function main(): Promise<void> {
   const uiStaff: Identity[] = [];
   for (let i = 0; i < 3; i++) {
     const s = (await factory.createStaff(uiOrg, { owner: uiOwner, label: `e2e-live-ui-staff${i}` })) as Identity;
-    await q(`UPDATE core.staff_profile SET employment_status = 'active' WHERE id = $1`, [s.profileId]);
+    await q(`UPDATE ${businessTable(ws, 'staff_profile')} SET employment_status = 'active' WHERE id = $1`, [s.profileId]);
     uiStaff.push(s);
   }
 

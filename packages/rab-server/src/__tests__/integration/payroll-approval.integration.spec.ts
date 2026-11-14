@@ -19,6 +19,7 @@ import { bookBeforeDeadline } from './helpers/book-before-deadline';
 import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
 import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-pipe';
 import { integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
+import { businessTable } from './helpers/hws-fixtures';
 
 /**
  * Payroll approval (PayrollRecord1786718800000, owner rule 2026-10-20): Clock out -> report finalised (attendance
@@ -82,7 +83,7 @@ describeIfDb('payroll approval (integration)', () => {
     staff = [];
     for (let i = 0; i < 6; i++) staff.push(await factory.createStaff(seeded.organisation, { owner: a, label: `payroll-s${i}` }));
     // Offerable staff (the factory default employment status is not ACTIVE).
-    await adminDataSource.query(`UPDATE core.staff_profile SET employment_status = 'active' WHERE id = ANY($1::uuid[])`, [staff.map((s) => s.profileId)]);
+    await adminDataSource.query(`UPDATE ${businessTable(a.workspaceId!, 'staff_profile')} SET employment_status = 'active' WHERE id = ANY($1::uuid[])`, [staff.map((s) => s.profileId)]);
     [tokenA, tokenB] = [await factory.login(a), await factory.login(b)];
     staffTokens = [];
     for (const s of staff) staffTokens.push(await factory.login(s));
@@ -153,7 +154,7 @@ describeIfDb('payroll approval (integration)', () => {
   }
 
   const recordFor = async (attendanceId: string) =>
-    (await adminDataSource.query(`SELECT * FROM core.payroll_record WHERE attendance_id = $1`, [attendanceId]))[0] as Record<string, any> | undefined;
+    (await adminDataSource.query(`SELECT * FROM ${businessTable(a.workspaceId!, 'payroll_record')} WHERE attendance_id = $1`, [attendanceId]))[0] as Record<string, any> | undefined;
 
   const historyRow = async (staffIndex: number, attendanceId: string) => {
     const res = await http().get('/rest/v1/attendance/me/history').set(auth(staffTokens[staffIndex]!));
@@ -200,7 +201,7 @@ describeIfDb('payroll approval (integration)', () => {
   it('(7) amounts are integer pence: rate snapshot x worked minutes, rounded once (payForMinutes), equal to the attendance figure', async () => {
     const rec = (await recordFor(worked.s0!.attendanceId))!;
     const [{ rate }] = await adminDataSource.query(
-      `SELECT sa.pay_rate_snapshot_pence AS rate FROM core.attendance a JOIN core.shift_assignment sa ON sa.id = a.shift_assignment_id WHERE a.id = $1`, [worked.s0!.attendanceId]);
+      `SELECT sa.pay_rate_snapshot_pence AS rate FROM ${businessTable(a.workspaceId!, 'attendance')} a JOIN ${businessTable(a.workspaceId!, 'shift_assignment')} sa ON sa.id = a.shift_assignment_id WHERE a.id = $1`, [worked.s0!.attendanceId]);
     expect(Number(rate)).toBe(RATE_PENCE);
     expect(Number(rec.pay_rate_pence)).toBe(RATE_PENCE);
     const minutes = Number(rec.worked_minutes);
@@ -467,7 +468,7 @@ describeIfDb('payroll approval (integration)', () => {
   it('finalise stays idempotent: a repeated finalise creates no second record', async () => {
     const fin = await http().patch(`/rest/v1/attendance/report/shift/${worked.s2!.shiftId}/finalise`).set(auth(tokenA));
     expect(fin.status).toBe(200);
-    const rows = await adminDataSource.query(`SELECT count(*)::int AS n FROM core.payroll_record WHERE shift_id = $1`, [worked.s2!.shiftId]);
+    const rows = await adminDataSource.query(`SELECT count(*)::int AS n FROM ${businessTable(a.workspaceId!, 'payroll_record')} WHERE shift_id = $1`, [worked.s2!.shiftId]);
     expect(rows[0].n).toBe(1);
   });
 });

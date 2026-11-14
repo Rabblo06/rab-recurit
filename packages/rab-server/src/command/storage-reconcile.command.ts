@@ -549,19 +549,26 @@ export class StorageReconcileCommand extends CommandRunner {
     if (integrityProblems > 0) process.exitCode = 1;
   }
 
+  /**
+   * One transaction bound to the row's tenant (organisation + workspace GUCs, the same RLS predicates on core.stored_file as
+   * before). Part C1 (C1b): the identity GUCs only, never a workspace-schema route. Every statement of this command is
+   * `core.stored_file`, schema-qualified; routing through `runInTenantContext` made HWS resolve the workspace's physical
+   * schema first, so ONE workspace whose schema is not READY yet (registry-missing / not-ready: a workspace mid-creation,
+   * a failed provisioning) refused the whole reconciliation for every tenant — and its file rows would never be checked.
+   */
   private scoped<T>(
     row: Pick<Row, 'organisation_id' | 'workspace_id'>,
     fn: (manager: import('typeorm').EntityManager) => Promise<T>,
   ): Promise<T> {
-    return this.tenantContext.runInTenantContext(
-      {
+    return this.dataSource.transaction(async (manager) => {
+      await this.tenantContext.bindCoreIdentityGucs(manager, {
         organisationId: row.organisation_id,
         workspaceId: row.workspace_id,
         userId: '',
         role: '',
-      },
-      fn,
-    );
+      });
+      return fn(manager);
+    });
   }
 
   private async readPage(

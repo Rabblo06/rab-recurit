@@ -13,6 +13,7 @@ import { createAdminDataSource } from './helpers/admin-datasource';
 import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
 import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-pipe';
 import { integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
+import { businessTableOf, siblingTable } from './helpers/hws-fixtures';
 
 /**
  * Settings → Members → Roles: object-, field- and record-level permissions for custom workspace-member roles
@@ -80,8 +81,8 @@ describeIfDb('Member roles: object, field and record-level permissions (integrat
     staffLondon = await factory.createStaff(seeded.organisation, { owner: managerA, label: 'london' });
     staffLeeds = await factory.createStaff(seeded.organisation, { owner: managerA, label: 'leeds' });
     staffOtherWs = await factory.createStaff(seeded.organisation, { owner: managerB, label: 'otherws' });
-    await owner.query(`UPDATE core.staff_profile SET city = 'London', default_pay_rate_pence = 1550, notes = 'secret note' WHERE id = $1`, [staffLondon.profileId]);
-    await owner.query(`UPDATE core.staff_profile SET city = 'Leeds', default_pay_rate_pence = 1400 WHERE id = $1`, [staffLeeds.profileId]);
+    await owner.query(`UPDATE ${await businessTableOf(owner, 'staff_profile', staffLondon.profileId)} SET city = 'London', default_pay_rate_pence = 1550, notes = 'secret note' WHERE id = $1`, [staffLondon.profileId]);
+    await owner.query(`UPDATE ${await businessTableOf(owner, 'staff_profile', staffLeeds.profileId)} SET city = 'Leeds', default_pay_rate_pence = 1400 WHERE id = $1`, [staffLeeds.profileId]);
     await owner.query(`UPDATE core."user" SET phone = '+447700900123' WHERE id = ANY($1::uuid[])`, [[staffLondon.userId, staffLeeds.userId]]);
 
     venue1 = (await http().post('/rest/v1/venues').set(bearer(tokenA)).send({ name: uniq('Venue One'), type: 'hotel' })).body.id;

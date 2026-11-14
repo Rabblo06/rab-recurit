@@ -49,6 +49,21 @@ describe('rab-ai processors (unit)', () => {
     expect(title).not.toHaveBeenCalled();
   });
 
+  it('Part C1: a not-yet-routable workspace (forged ids, or a workspace mid-creation) is skipped; an integrity refusal still fails', async () => {
+    const routing = (code: string) => Object.assign(new Error('Workspace routing refused.'), { name: 'WorkspaceRoutingError', code });
+    const { c, run, title } = consumer();
+    run.mockRejectedValueOnce(routing('registry-missing'));
+    await expect(c.turn(job('ai-turn', { v: 2, kind: 'turn', ...ids }))).resolves.toBe('skipped');
+    title.mockRejectedValueOnce(routing('not-ready'));
+    await expect(c.turn(job('ai-title', { v: 2, kind: 'title', ...ids }))).resolves.toBe('skipped');
+    for (const code of ['name-mismatch', 'unsupported-version', 'missing-context']) {
+      run.mockRejectedValueOnce(routing(code));
+      await expect(c.turn(job('ai-turn', { v: 2, kind: 'turn', ...ids }))).rejects.toMatchObject({ code });
+    }
+    run.mockRejectedValueOnce(new Error('database down'));
+    await expect(c.turn(job('ai-turn', { v: 2, kind: 'turn', ...ids }))).rejects.toThrow('database down');
+  });
+
   it('5b: a resume job on ai-turn runs the step loop; on any other job name it is skipped', async () => {
     const { c, run } = consumer();
     await c.turn(job('ai-turn', { v: 2, kind: 'resume', ...ids, pausedTurnId: 'p', cause: 'proposal_decided', refId: 'r' }));

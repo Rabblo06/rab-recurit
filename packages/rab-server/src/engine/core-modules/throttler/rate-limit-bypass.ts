@@ -34,9 +34,10 @@ type Env = Record<string, string | undefined>;
 
 /**
  * Production for this rule: any declaration says so (trimmed, case-insensitive), so a half-declared production counts. A
- * superset of pg-config's isPgProductionEnvironment, which is also consulted so the two can never disagree.
+ * superset of pg-config's isPgProductionEnvironment, which is also consulted so the two can never disagree. Also the
+ * production test of the HWS_RUNTIME_ENABLED default (environment/hws-runtime-default.ts): one predicate, not two.
  */
-function isProductionRuntime(env: Env): boolean {
+export function isProductionRuntime(env: Env): boolean {
   return (
     isPgProductionEnvironment(env) ||
     ['NODE_ENV', 'RAB_RUNTIME_ENV', 'DB_TARGET'].some((name) => env[name]?.trim().toLowerCase() === 'production')

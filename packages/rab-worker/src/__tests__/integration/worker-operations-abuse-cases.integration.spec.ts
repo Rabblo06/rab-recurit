@@ -32,6 +32,8 @@ import { runTokenCleanupCycle } from '../../queues/rab-maintenance/token-cleanup
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { generateFixturePassword } from './helpers/fixture-password';
 import { integrationTestDatabaseReady } from '@rab/server/database/typeorm/core/integration-test-database-gate';
+import { provisionFixtureWorkspace } from './helpers/test-identities';
+import { businessSchema, hwsRuntimeOn } from './helpers/hws-fixtures';
 
 const FIXTURE_PASSWORD = generateFixturePassword();
 
@@ -83,7 +85,8 @@ describeIfDb('worker operations abuse cases (integration)', () => {
       // migration (P2.2 fix — same systemic gap already found in rab-server's own
       // bulk-email-abuse-cases/scheduling-offer-abuse-cases, and in this package's own
       // worker-event-idempotency file).
-      await manager.query(`SELECT set_config('search_path', 'core', true)`);
+      // Part C1: the workspace's own schema with HWS on (the code default outside production), core with it off.
+      await manager.query(`SELECT set_config('search_path', $1, true)`, [ctx.workspaceId ? businessSchema(ctx.workspaceId) : 'core']);
       await manager.query(`SELECT set_config('rab.organisation_id', $1, true)`, [ctx.organisationId]);
       await manager.query(`SELECT set_config('rab.workspace_id', $1, true)`, [ctx.workspaceId ?? '']);
       await manager.query(`SELECT set_config('rab.user_id', $1, true)`, [ctx.userId]);
@@ -129,6 +132,8 @@ describeIfDb('worker operations abuse cases (integration)', () => {
         subdomain: `${label}-${managerUserId.slice(0, 8)}`,
         status: 'active',
       });
+      await provisionFixtureWorkspace(manager, workspace.id); // Part C1: READY schema, as the product builds it
+      await manager.query(`SELECT set_config('search_path', $1, true)`, [businessSchema(workspace.id)]); // later fixture writes in this transaction land in the workspace's schema
       workspaceId = workspace.id;
       // rab.workspace_id must be bound before this insert — same ordering bug already fixed in
       // worker-event-idempotency.integration.spec.ts (P2.2).
@@ -240,7 +245,7 @@ describeIfDb('worker operations abuse cases (integration)', () => {
       'DB boundary %s seconds', async (seconds, count, complete, expired) => {
         const {ctx,id} = await fixture();
         await withContext(ctx, async m => {
-          await m.query("UPDATE core.attendance SET clock_out_at=now()-make_interval(secs=>$2) WHERE id=$1",[id,seconds]);
+          await m.query("UPDATE attendance SET clock_out_at=now()-make_interval(secs=>$2) WHERE id=$1",[id,seconds]);
           expect((await PostShiftLifecycleService.discover(m)).some(row => row.id === id)).toBe(Number(seconds) >= 3600);
           const service = new PostShiftLifecycleService(auditService);
           expect(await service.advance(m,id)).toBe(count);
@@ -254,25 +259,41 @@ describeIfDb('worker operations abuse cases (integration)', () => {
       });
     it('concurrent workers and a restarted worker emit one event per milestone; tenant denial and corrections remain safe', async () => {
       const {ctx,id} = await fixture();
-      await withContext(ctx,m=>m.query("UPDATE core.attendance SET clock_out_at=now()-interval '3 hours' WHERE id=$1",[id]));
+      await withContext(ctx,m=>m.query("UPDATE attendance SET clock_out_at=now()-interval '3 hours' WHERE id=$1",[id]));
       const run = () => withContext(ctx,m=>new PostShiftLifecycleService(auditService).advance(m,id));
       expect((await Promise.all([run(),run()])).reduce((a,b)=>a+b,0)).toBe(2);
       expect(await run()).toBe(0);
       await withContext(ctx,async m=>{
         const [audit] = await m.query("SELECT count(*)::int AS count FROM core.audit_log WHERE entity_id=$1 AND action IN ('attendance.post_shift_completed','attendance.post_shift_expired')",[id]);
         expect(audit.count).toBe(2);
-        await m.query("UPDATE core.attendance SET clock_out_at=now() WHERE id=$1",[id]);
+        await m.query("UPDATE attendance SET clock_out_at=now() WHERE id=$1",[id]);
         const row=await m.findOneByOrFail(Attendance,{id});
         expect(row.postShiftCompletedAt).toBeNull(); expect(row.postShiftExpiredAt).toBeNull();
       });
-      expect(await withContext({...ctx,organisationId:randomUUID(),workspaceId:randomUUID()},m=>new PostShiftLifecycleService(auditService).advance(m,id))).toBe(0);
+      // A foreign (unknown) organisation + workspace advances nothing. Part C1: with HWS on there is no schema for an unknown
+      // workspace, so the attempt is refused outright (the relation cannot even be resolved: SQLSTATE 42P01 / 3F000, matched
+      // by code, not message); with HWS off it sees 0 rows.
+      const foreign = () => withContext({...ctx,organisationId:randomUUID(),workspaceId:randomUUID()},m=>new PostShiftLifecycleService(auditService).advance(m,id));
+      if (hwsRuntimeOn()) await expect(foreign()).rejects.toMatchObject({ driverError: expect.objectContaining({ code: expect.stringMatching(/^(42P01|3F000)$/) }) });
+      else expect(await foreign()).toBe(0);
+      // The real attack (review L3): the row's OWN workspace schema (search_path) bound with another organisation's GUCs. The
+      // row is due again (clock-out reset to 3 h ago), so a non-zero result would be a real cross-tenant write; RLS must hide it.
+      await withContext(ctx,m=>m.query("UPDATE attendance SET clock_out_at=now()-interval '3 hours' WHERE id=$1",[id]));
+      const wrongOrg = () => withContext({...ctx,organisationId:randomUUID()},m=>new PostShiftLifecycleService(auditService).advance(m,id));
+      expect(await wrongOrg()).toBe(0);
+      await withContext(ctx,async m=>{
+        const row=await m.findOneByOrFail(Attendance,{id});
+        expect(row.postShiftCompletedAt).toBeNull(); expect(row.postShiftExpiredAt).toBeNull();
+      });
+      // Control: the right organisation advances the same row (so the 0 above was RLS, not a row that was not due).
+      expect(await run()).toBe(2);
     });
     it('missing clock-out and wrong status are ignored', async () => {
       const {ctx,id}=await fixture();
       await withContext(ctx,async m=>{
         const service=new PostShiftLifecycleService(auditService);
         expect(await service.advance(m,id)).toBe(0);
-        await m.query("UPDATE core.attendance SET clock_out_at=now()-interval '3 hours', status='clocked_in' WHERE id=$1",[id]);
+        await m.query("UPDATE attendance SET clock_out_at=now()-interval '3 hours', status='clocked_in' WHERE id=$1",[id]);
         expect(await service.advance(m,id)).toBe(0);
       });
     });

@@ -1,4 +1,4 @@
-import { insertMembership } from './helpers/test-identities';
+import { insertMembership, provisionFixtureWorkspace } from './helpers/test-identities';
 import 'reflect-metadata';
 import { PermissionFlag, UserStatus } from '@rab/shared';
 import { INestApplication } from '@nestjs/common';
@@ -25,6 +25,7 @@ import { clearThrottleState } from './helpers/throttle-state';
 import { generateFixturePassword } from './helpers/fixture-password';
 import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-pipe';
 import { integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
+import { businessSchema, businessTable, businessTableOf, siblingTable } from './helpers/hws-fixtures';
 
 const FIXTURE_PASSWORD = generateFixturePassword();
 
@@ -111,6 +112,8 @@ describeIfDb('attendance abuse cases (integration)', () => {
         subdomain: `test-${managerUserId.slice(0, 8)}`,
         status: 'active',
       });
+      await provisionFixtureWorkspace(manager, workspace.id); // Part C1: READY schema, as the product builds it
+      await manager.query(`SELECT set_config('search_path', $1, true)`, [businessSchema(workspace.id)]); // later fixture writes in this transaction land in the workspace's schema
       await insertMembership(manager, organisation.id, managerUserId, workspace.id);
       // A real manager always has a manager_profile in its workspace; staff_profile_insert requires one (non-venue) for the creator.
       // manager_profile WITH CHECK: bind the workspace the profile is written into, as the server does on first onboarding.
@@ -188,6 +191,8 @@ describeIfDb('attendance abuse cases (integration)', () => {
         subdomain: `test-b-${userId.slice(0, 8)}`,
         status: 'active',
       });
+      await provisionFixtureWorkspace(manager, workspace.id); // Part C1: READY schema, as the product builds it
+      await manager.query(`SELECT set_config('search_path', $1, true)`, [businessSchema(workspace.id)]); // later fixture writes in this transaction land in the workspace's schema
       await insertMembership(manager, organisation.id, userId, workspace.id);
       await manager.query(`SELECT set_config('rab.workspace_id', $1, true)`, [workspace.id]);
       await manager.query(`INSERT INTO core.manager_profile (organisation_id, user_id, type, workspace_id) VALUES ($1, $2, $3, $4)`, [
@@ -235,7 +240,7 @@ describeIfDb('attendance abuse cases (integration)', () => {
       await manager.insert(UserRole, { userId, roleId: role.id, organisationId: organisation.id });
 
       const profile = await manager.query(
-        `INSERT INTO core.staff_profile (organisation_id, user_id, staff_ref, created_by, workspace_id, employment_status) VALUES ($1, $2, $3, $4, $5, 'active') RETURNING id`,
+        `INSERT INTO staff_profile (organisation_id, user_id, staff_ref, created_by, workspace_id, employment_status) VALUES ($1, $2, $3, $4, $5, 'active') RETURNING id`,
         [organisation.id, userId, `STF-${randomUUID().slice(0, 8)}`, createdByUserId, creatorWorkspaceId],
       );
       await insertMembership(manager, organisation.id, userId, creatorWorkspaceId);
@@ -308,7 +313,7 @@ describeIfDb('attendance abuse cases (integration)', () => {
     // This suite pins the Clock In contract of bookings made BEFORE Check In shipped (rollout rule, migration
     // 1786719450000: check_in_required = false keeps the old flow and the legacy geofence payload). The Check In
     // prerequisite and the strict geofence evidence are covered by attendance-check-in.integration.spec.ts.
-    await adminDataSource.query(`UPDATE core.shift_assignment SET check_in_required = false WHERE shift_id = $1 AND staff_profile_id = $2`, [shiftId, staffProfileId]);
+    await adminDataSource.query(`UPDATE ${siblingTable(await businessTableOf(adminDataSource, 'shift', shiftId), 'shift_assignment')} SET check_in_required = false WHERE shift_id = $1 AND staff_profile_id = $2`, [shiftId, staffProfileId]);
   }
 
   async function sendAcceptConfirm(managerToken: string, staffToken: string, staffProfileId: string, shiftId: string): Promise<void> {
@@ -455,7 +460,7 @@ describeIfDb('attendance abuse cases (integration)', () => {
       // verification query to see the row at all.
       const count = await tenantContext.runInTenantContext(
         { organisationId: organisation.id, workspaceId: venue.workspaceId!, userId: managerUserId, role: '' },
-        (manager) => manager.query(`SELECT count(*) FROM core.attendance WHERE staff_profile_id = $1`, [staffA.staffProfileId]),
+        (manager) => manager.query(`SELECT count(*) FROM attendance WHERE staff_profile_id = $1`, [staffA.staffProfileId]),
       );
       expect(Number(count[0].count)).toBe(1);
     });
@@ -481,7 +486,7 @@ describeIfDb('attendance abuse cases (integration)', () => {
 
     const rows = await tenantContext.runInTenantContext(
       { organisationId: organisation.id, workspaceId: venue.workspaceId!, userId: managerUserId, role: '' },
-      (manager) => manager.query(`SELECT status FROM core.attendance WHERE staff_profile_id = $1`, [staffA.staffProfileId]),
+      (manager) => manager.query(`SELECT status FROM attendance WHERE staff_profile_id = $1`, [staffA.staffProfileId]),
     );
     expect(rows).toHaveLength(1);
     expect(rows[0].status).toBe('clocked_in');
@@ -702,7 +707,7 @@ describeIfDb('attendance abuse cases (integration)', () => {
 
       const rows = await tenantContext.runInTenantContext(
         { organisationId: organisation.id, workspaceId: venue.workspaceId!, userId: managerUserId, role: '' },
-        (manager) => manager.query(`SELECT clock_out_method FROM core.attendance WHERE staff_profile_id = $1`, [staffA.staffProfileId]),
+        (manager) => manager.query(`SELECT clock_out_method FROM attendance WHERE staff_profile_id = $1`, [staffA.staffProfileId]),
       );
       expect(rows[0].clock_out_method).toBe('auto_geofence');
     });
@@ -738,7 +743,7 @@ describeIfDb('attendance abuse cases (integration)', () => {
       await confirmShiftForStaff(managerToken, staffToken, staff.staffProfileId, shiftId);
       const startsAt = new Date(Date.now() + 2 * 3600_000);
       await tenantContext.runInTenantContext({organisationId: organisation.id, workspaceId: venue.workspaceId ?? null, userId: managerUserId, role: 'manager'}, m =>
-        m.query("UPDATE core.shift_assignment sa SET period=tstzrange($2::timestamptz,upper(sa.period),'[)') WHERE shift_id=$1", [shiftId, startsAt]));
+        m.query("UPDATE shift_assignment sa SET period=tstzrange($2::timestamptz,upper(sa.period),'[)') WHERE shift_id=$1", [shiftId, startsAt]));
       const res = await clockIn(staffToken, organisation, venue, managerUserId, shiftId);
       expect(res.status).toBe(409);
       expect(res.body.code).toBe('CLOCK_IN_TOO_EARLY');
@@ -954,7 +959,7 @@ describeIfDb('attendance abuse cases (integration)', () => {
 
       const corrections = await tenantContext.runInTenantContext(
         { organisationId: organisation.id, workspaceId: venue.workspaceId!, userId: managerUserId, role: '' },
-        (manager) => manager.query(`SELECT field, old_value, new_value, reason FROM core.attendance_correction WHERE attendance_id = $1`, [clockOutRes.body.id]),
+        (manager) => manager.query(`SELECT field, old_value, new_value, reason FROM attendance_correction WHERE attendance_id = $1`, [clockOutRes.body.id]),
       );
       expect(corrections).toHaveLength(1);
       expect(corrections[0].field).toBe('breakMinutes');
@@ -1037,10 +1042,10 @@ describeIfDb('attendance abuse cases (integration)', () => {
       await confirmShiftForStaff(managerToken, staffAToken, staffA.staffProfileId, shiftId);
       expect((await clockIn(staffAToken, organisation, venue, managerUserId, shiftId)).status).toBe(201);
       // Move the shift into the overlap: ended 45 min ago — past the 30 min recovery threshold, inside the 120 min QR grace.
-      await adminDataSource.query(`UPDATE core.shift SET starts_at = now() - interval '7 hours 45 minutes', ends_at = now() - interval '45 minutes' WHERE id = $1`, [shiftId]);
-      await adminDataSource.query(`UPDATE core.shift_assignment SET period = tstzrange(now() - interval '7 hours 45 minutes', now() - interval '45 minutes', '[)') WHERE shift_id = $1`, [shiftId]);
-      await adminDataSource.query(`UPDATE core.attendance SET clock_in_at = now() - interval '7 hours 40 minutes' WHERE shift_id = $1`, [shiftId]);
-      const [{ id: attendanceId }] = await adminDataSource.query(`SELECT id FROM core.attendance WHERE shift_id = $1`, [shiftId]);
+      await adminDataSource.query(`UPDATE ${businessTable(venue.workspaceId!, 'shift')} SET starts_at = now() - interval '7 hours 45 minutes', ends_at = now() - interval '45 minutes' WHERE id = $1`, [shiftId]);
+      await adminDataSource.query(`UPDATE ${businessTable(venue.workspaceId!, 'shift_assignment')} SET period = tstzrange(now() - interval '7 hours 45 minutes', now() - interval '45 minutes', '[)') WHERE shift_id = $1`, [shiftId]);
+      await adminDataSource.query(`UPDATE ${businessTable(venue.workspaceId!, 'attendance')} SET clock_in_at = now() - interval '7 hours 40 minutes' WHERE shift_id = $1`, [shiftId]);
+      const [{ id: attendanceId }] = await adminDataSource.query(`SELECT id FROM ${businessTable(venue.workspaceId!, 'attendance')} WHERE shift_id = $1`, [shiftId]);
       const recovered = new Date(Date.now() - 45 * 60_000).toISOString();
 
       const [staffOut, managerFix] = await Promise.all([
@@ -1055,7 +1060,7 @@ describeIfDb('attendance abuse cases (integration)', () => {
       expect(managerFix.status).toBeLessThan(300);
       expect([200, 201, 404, 409]).toContain(staffOut.status);
       const rows = await adminDataSource.query(
-        `SELECT status, clock_in_at, clock_out_at, break_minutes, worked_minutes, clock_out_method FROM core.attendance WHERE shift_id = $1`, [shiftId]);
+        `SELECT status, clock_in_at, clock_out_at, break_minutes, worked_minutes, clock_out_method FROM ${businessTable(venue.workspaceId!, 'attendance')} WHERE shift_id = $1`, [shiftId]);
       expect(rows).toHaveLength(1);
       const [row] = rows;
       expect(row.status).toBe('under_review');
@@ -1064,7 +1069,7 @@ describeIfDb('attendance abuse cases (integration)', () => {
       const span = Math.round((row.clock_out_at.getTime() - row.clock_in_at.getTime()) / 60_000);
       expect(row.worked_minutes).toBeGreaterThan(0);
       expect(row.worked_minutes).toBeLessThanOrEqual(span);
-      const [{ n }] = await adminDataSource.query(`SELECT count(*)::int AS n FROM core.attendance_correction WHERE attendance_id = $1`, [attendanceId]);
+      const [{ n }] = await adminDataSource.query(`SELECT count(*)::int AS n FROM ${businessTable(venue.workspaceId!, 'attendance_correction')} WHERE attendance_id = $1`, [attendanceId]);
       expect(n).toBe(1);
     });
 
@@ -1084,7 +1089,7 @@ describeIfDb('attendance abuse cases (integration)', () => {
       const replies = await Promise.all(Array.from({ length: 5 }, () =>
         request(app.getHttpServer()).patch(`/rest/v1/attendance/report/shift/${shiftId}/finalise`).set('Authorization', `Bearer ${managerToken}`)));
       expect(replies.map((r) => r.status)).toEqual([200, 200, 200, 200, 200]);
-      const reports = await adminDataSource.query(`SELECT status, finalised_at, finalised_by, final_pdf_sent_at FROM core.shift_report WHERE shift_id = $1`, [shiftId]);
+      const reports = await adminDataSource.query(`SELECT status, finalised_at, finalised_by, final_pdf_sent_at FROM ${businessTable(venue.workspaceId!, 'shift_report')} WHERE shift_id = $1`, [shiftId]);
       expect(reports).toHaveLength(1);
       expect(reports[0]).toMatchObject({ status: 'finalised', finalised_by: managerUserId, final_pdf_sent_at: null });
       expect(new Set(replies.map((r) => r.body.finalisedAt)).size).toBe(1);

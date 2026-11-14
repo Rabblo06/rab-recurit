@@ -21,6 +21,7 @@ import { createAdminDataSource } from './helpers/admin-datasource';
 import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
 import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-pipe';
 import { integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
+import { businessTable, businessTableOf, siblingTable } from './helpers/hws-fixtures';
 
 /**
  * Shift completion after an offer close (shadow-run finding 2026-11-06, `fix/shift-completion-after-withdrawal`).
@@ -76,7 +77,7 @@ describeIfDb('shift completion after an offer close (integration)', () => {
   type Staff = TestIdentity & { profileId: string; token: string };
   async function activeStaff(org: Organisation, owner: TestIdentity, label: string): Promise<Staff> {
     const staff = await factory.createStaff(org, { owner, label });
-    await adminDataSource.query(`UPDATE core.staff_profile SET employment_status = 'active' WHERE id = $1`, [staff.profileId]);
+    await adminDataSource.query(`UPDATE ${businessTable(owner.workspaceId!, 'staff_profile')} SET employment_status = 'active' WHERE id = $1`, [staff.profileId]);
     return { ...staff, profileId: staff.profileId!, token: await factory.login(staff) };
   }
 
@@ -120,17 +121,17 @@ describeIfDb('shift completion after an offer close (integration)', () => {
     const startsAt = new Date(Date.now() - HOUR);
     const endsAt = new Date(startsAt.getTime() + 8 * HOUR);
     await adminDataSource.query(
-      `UPDATE core.shift SET starts_at = $2, ends_at = $3, default_starts_at = $2, default_ends_at = $3, filled_count = $4, status = $5 WHERE id = $1`,
+      `UPDATE ${businessTable(ws.manager.workspaceId!, 'shift')} SET starts_at = $2, ends_at = $3, default_starts_at = $2, default_ends_at = $3, filled_count = $4, status = $5 WHERE id = $1`,
       [shiftId, startsAt, endsAt, booked.length, booked.length >= opts.required ? 'fully_filled' : 'partially_filled'],
     );
     for (const s of booked) {
       await adminDataSource.query(
-        `UPDATE core.job_offer SET status = 'manager_confirmed', staff_accepted_at = now(), manager_confirmed_at = now(), confirmed_by = $3
-          WHERE shift_assignment_id IN (SELECT id FROM core.shift_assignment WHERE shift_id = $1 AND staff_profile_id = $2)`,
+        `UPDATE ${businessTable(ws.manager.workspaceId!, 'job_offer')} SET status = 'manager_confirmed', staff_accepted_at = now(), manager_confirmed_at = now(), confirmed_by = $3
+          WHERE shift_assignment_id IN (SELECT id FROM ${businessTable(ws.manager.workspaceId!, 'shift_assignment')} WHERE shift_id = $1 AND staff_profile_id = $2)`,
         [shiftId, s.profileId, ws.manager.userId],
       );
       await adminDataSource.query(
-        `UPDATE core.shift_assignment SET status = 'confirmed', confirmed_at = now(), check_in_required = false, period = tstzrange($3, $4, '[)')
+        `UPDATE ${businessTable(ws.manager.workspaceId!, 'shift_assignment')} SET status = 'confirmed', confirmed_at = now(), check_in_required = false, period = tstzrange($3, $4, '[)')
           WHERE shift_id = $1 AND staff_profile_id = $2`,
         [shiftId, s.profileId, startsAt, endsAt],
       );
@@ -138,12 +139,12 @@ describeIfDb('shift completion after an offer close (integration)', () => {
     const acceptedStart = new Date(Date.now() + (opts.acceptedStartsInMin ?? 120) * MIN);
     for (const s of accepted) {
       await adminDataSource.query(
-        `UPDATE core.job_offer SET status = 'staff_accepted', staff_accepted_at = now()
-          WHERE shift_assignment_id IN (SELECT id FROM core.shift_assignment WHERE shift_id = $1 AND staff_profile_id = $2)`,
+        `UPDATE ${businessTable(ws.manager.workspaceId!, 'job_offer')} SET status = 'staff_accepted', staff_accepted_at = now()
+          WHERE shift_assignment_id IN (SELECT id FROM ${businessTable(ws.manager.workspaceId!, 'shift_assignment')} WHERE shift_id = $1 AND staff_profile_id = $2)`,
         [shiftId, s.profileId],
       );
       await adminDataSource.query(
-        `UPDATE core.shift_assignment SET status = 'staff_accepted', check_in_required = false, period = tstzrange($3, $4, '[)')
+        `UPDATE ${businessTable(ws.manager.workspaceId!, 'shift_assignment')} SET status = 'staff_accepted', check_in_required = false, period = tstzrange($3, $4, '[)')
           WHERE shift_id = $1 AND staff_profile_id = $2`,
         [shiftId, s.profileId, acceptedStart, endsAt],
       );
@@ -174,23 +175,23 @@ describeIfDb('shift completion after an offer close (integration)', () => {
     expect(sent.body.offerKind).toBe(expectedKind);
     const offerId = sent.body.results[0].offerId as string;
     expect((await http().post(`/rest/v1/offers/${offerId}/accept`).set(auth(staff.token))).status).toBe(201);
-    await adminDataSource.query(`UPDATE core.shift_assignment sa SET check_in_required = false FROM core.job_offer o WHERE o.id = $1 AND sa.id = o.shift_assignment_id`, [offerId]);
+    await adminDataSource.query(`UPDATE ${businessTable(fx.manager.workspaceId!, 'shift_assignment')} sa SET check_in_required = false FROM ${businessTable(fx.manager.workspaceId!, 'job_offer')} o WHERE o.id = $1 AND sa.id = o.shift_assignment_id`, [offerId]);
     return offerId;
   }
 
   const offerIdOf = async (fx: Fx, staff: Staff): Promise<string> =>
-    (await adminDataSource.query(`SELECT o.id FROM core.job_offer o JOIN core.shift_assignment sa ON sa.id = o.shift_assignment_id WHERE sa.shift_id = $1 AND o.staff_profile_id = $2`, [fx.shiftId, staff.profileId]))[0].id;
+    (await adminDataSource.query(`SELECT o.id FROM ${businessTable(fx.manager.workspaceId!, 'job_offer')} o JOIN ${businessTable(fx.manager.workspaceId!, 'shift_assignment')} sa ON sa.id = o.shift_assignment_id WHERE sa.shift_id = $1 AND o.staff_profile_id = $2`, [fx.shiftId, staff.profileId]))[0].id;
 
   /** FIXTURE (time only): a replacement / standby window that already ended (its deadline is its window end). */
-  const endWindow = (offerId: string) =>
+  const endWindow = async (offerId: string) =>
     adminDataSource.query(
-      `UPDATE core.shift_assignment sa SET period = tstzrange(now() - interval '50 minutes', now() - interval '1 minute', '[)') FROM core.job_offer o WHERE o.id = $1 AND sa.id = o.shift_assignment_id`,
+      `UPDATE ${siblingTable(await businessTableOf(adminDataSource, 'job_offer', offerId), 'shift_assignment')} sa SET period = tstzrange(now() - interval '50 minutes', now() - interval '1 minute', '[)') FROM ${await businessTableOf(adminDataSource, 'job_offer', offerId)} o WHERE o.id = $1 AND sa.id = o.shift_assignment_id`,
       [offerId],
     );
   /** FIXTURE (time only): a STANDARD acceptance whose individual start is 20 min away (deadline = start − 30 min, passed). */
-  const passStandardDeadline = (offerId: string) =>
+  const passStandardDeadline = async (offerId: string) =>
     adminDataSource.query(
-      `UPDATE core.shift_assignment sa SET period = tstzrange(now() + interval '20 minutes', now() + interval '6 hours', '[)') FROM core.job_offer o WHERE o.id = $1 AND sa.id = o.shift_assignment_id`,
+      `UPDATE ${siblingTable(await businessTableOf(adminDataSource, 'job_offer', offerId), 'shift_assignment')} sa SET period = tstzrange(now() + interval '20 minutes', now() + interval '6 hours', '[)') FROM ${await businessTableOf(adminDataSource, 'job_offer', offerId)} o WHERE o.id = $1 AND sa.id = o.shift_assignment_id`,
       [offerId],
     );
 
@@ -199,12 +200,12 @@ describeIfDb('shift completion after an offer close (integration)', () => {
   const workerWithdraw = (fx: Fx, offerId: string, orgId = fx.org.id) =>
     tenantContext.runInTenantContext({ ...workerContext(fx), organisationId: orgId }, (m) => withdrawUnconfirmedOffer(m, deps, orgId, offerId, 'worker_scan'));
 
-  const shiftRow = async (shiftId: string) => (await adminDataSource.query(`SELECT status, updated_at, filled_count FROM core.shift WHERE id = $1`, [shiftId]))[0];
+  const shiftRow = async (shiftId: string) => (await adminDataSource.query(`SELECT status, updated_at, filled_count FROM ${await businessTableOf(adminDataSource, 'shift', shiftId)} WHERE id = $1`, [shiftId]))[0];
   const offerRow = async (offerId: string) =>
-    (await adminDataSource.query(`SELECT o.status, o.rejected_by, o.rejection_reason, sa.status AS assignment_status, sa.id AS assignment_id FROM core.job_offer o JOIN core.shift_assignment sa ON sa.id = o.shift_assignment_id WHERE o.id = $1`, [offerId]))[0];
-  const attendanceRows = (shiftId: string) =>
-    adminDataSource.query(`SELECT shift_assignment_id, status, clock_in_at, clock_out_at, worked_minutes, earned_pence FROM core.attendance WHERE shift_id = $1 ORDER BY id`, [shiftId]);
-  const payrollRows = (shiftId: string) => adminDataSource.query(`SELECT id FROM core.payroll_record WHERE shift_id = $1`, [shiftId]);
+    (await adminDataSource.query(`SELECT o.status, o.rejected_by, o.rejection_reason, sa.status AS assignment_status, sa.id AS assignment_id FROM ${await businessTableOf(adminDataSource, 'job_offer', offerId)} o JOIN ${siblingTable(await businessTableOf(adminDataSource, 'job_offer', offerId), 'shift_assignment')} sa ON sa.id = o.shift_assignment_id WHERE o.id = $1`, [offerId]))[0];
+  const attendanceRows = async (shiftId: string) =>
+    adminDataSource.query(`SELECT shift_assignment_id, status, clock_in_at, clock_out_at, worked_minutes, earned_pence FROM ${siblingTable(await businessTableOf(adminDataSource, 'shift', shiftId), 'attendance')} WHERE shift_id = $1 ORDER BY id`, [shiftId]);
+  const payrollRows = async (shiftId: string) => adminDataSource.query(`SELECT id FROM ${siblingTable(await businessTableOf(adminDataSource, 'shift', shiftId), 'payroll_record')} WHERE shift_id = $1`, [shiftId]);
 
   describe('the 12-shift soak scenario: confirmed staff clocked out, a standby still accepted, the standby withdrawn at its window end', () => {
     it('S1: the shift completes exactly once, at the withdrawal; the withdrawn standby gets no attendance, payroll or seat', async () => {
@@ -265,7 +266,7 @@ describeIfDb('shift completion after an offer close (integration)', () => {
       const fx = await seedRunningShift('fscP1', { required: 2, booked: 2 });
       const [absent, worker] = fx.booked;
       // The first booked seat is a manager-CONFIRMED no-show: one real vacancy, so the next offer is a replacement.
-      await adminDataSource.query(`UPDATE core.shift_assignment SET status = 'no_show', attendance_reviewed_at = now(), attendance_reviewed_by = $3 WHERE shift_id = $1 AND staff_profile_id = $2`, [fx.shiftId, absent!.profileId, fx.manager.userId]);
+      await adminDataSource.query(`UPDATE ${businessTable(fx.manager.workspaceId!, 'shift_assignment')} SET status = 'no_show', attendance_reviewed_at = now(), attendance_reviewed_by = $3 WHERE shift_id = $1 AND staff_profile_id = $2`, [fx.shiftId, absent!.profileId, fx.manager.userId]);
       const replacement = await activeStaff(fx.org, fx.manager, 'fscP1-repl');
       await clockIn(fx, worker!);
       const offerId = await acceptedReplacementOffer(fx, replacement, 'replacement');
@@ -414,7 +415,7 @@ describeIfDb('shift completion after an offer close (integration)', () => {
     it('A2: a shift that never started (no clock-in) is never completed by a withdrawal — that rule question stays with the owner', async () => {
       const fx = await seedRunningShift('fscA2', { required: 2, booked: 1, accepted: 1 });
       // The only booked staff member is a provisional no-show; nobody clocked in, so the shift is not in_progress.
-      await adminDataSource.query(`UPDATE core.shift_assignment SET status = 'no_show' WHERE shift_id = $1 AND staff_profile_id = $2`, [fx.shiftId, fx.booked[0]!.profileId]);
+      await adminDataSource.query(`UPDATE ${businessTable(fx.manager.workspaceId!, 'shift_assignment')} SET status = 'no_show' WHERE shift_id = $1 AND staff_profile_id = $2`, [fx.shiftId, fx.booked[0]!.profileId]);
       const offerId = await offerIdOf(fx, fx.accepted[0]!);
       await passStandardDeadline(offerId);
       expect(await workerWithdraw(fx, offerId)).toMatchObject({ shiftCompleted: false });
@@ -442,7 +443,7 @@ describeIfDb('shift completion after an offer close (integration)', () => {
       // Fail closed with no tenant context at all: the roll-up cannot even resolve the workspace table (no search_path, no
       // SET LOCAL) — it errors or reads nothing, and changes nothing, even for a shift that is settled (the standby closed
       // by fixture: the state the 12 soak shifts are left in today).
-      await adminDataSource.query(`UPDATE core.shift_assignment SET status = 'rejected' WHERE id = $1`, [(await offerRow(offerId)).assignment_id]);
+      await adminDataSource.query(`UPDATE ${siblingTable(await businessTableOf(adminDataSource, 'job_offer', offerId), 'shift_assignment')} SET status = 'rejected' WHERE id = $1`, [(await offerRow(offerId)).assignment_id]);
       const noContext = await dataSource.transaction((m) => completeShiftIfSettled(m, fx.org.id, fx.shiftId)).catch(() => 'refused');
       expect([false, 'refused']).toContain(noContext);
       expect((await shiftRow(fx.shiftId)).status).toBe('in_progress');

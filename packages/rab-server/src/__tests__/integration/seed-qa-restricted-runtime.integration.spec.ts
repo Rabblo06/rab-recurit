@@ -6,6 +6,7 @@ import { CommandModule } from '../../command/command.module';
 import { SeedQaCommand } from '../../command/seed-qa.command';
 import { AuditAction } from '../../engine/core-modules/audit/audit.service';
 import { createAdminDataSource } from './helpers/admin-datasource';
+import { businessTable } from './helpers/hws-fixtures';
 import { integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
 
 const describeIfDb = integrationTestDatabaseReady() ? describe : describe.skip;
@@ -133,6 +134,14 @@ describeIfDb('seed-qa under the restricted runtime role (integration)', () => {
       { type: 'internal' },
       { type: 'venue' },
     ]);
+    // Part C1: the workspace has its READY schema (server-path provisioning), and the business rows are where the product
+    // reads them in this mode (the workspace schema with HWS on, the core copy with it off).
+    const [workspace] = await admin.query(`SELECT id, schema_status FROM core.manager_workspace WHERE organisation_id = $1`, [organisationId]);
+    expect(workspace.schema_status).toBe('READY');
+    expect(await admin.query(`SELECT staff_ref FROM ${businessTable(workspace.id, 'staff_profile')} WHERE organisation_id = $1 ORDER BY staff_ref`, [organisationId])).toEqual(
+      [1, 2, 3, 4, 5].map((i) => ({ staff_ref: `QA-STF-0${i}` })),
+    );
+    expect(await admin.query(`SELECT name FROM ${businessTable(workspace.id, 'venue')} WHERE organisation_id = $1`, [organisationId])).toEqual([{ name: 'ADOLPHUS QA Venue' }]);
   });
 
   it('is idempotent: a second run finds the organisation (no second organisation, account or audit entry)', async () => {

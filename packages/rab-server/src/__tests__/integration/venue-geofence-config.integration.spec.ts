@@ -1,4 +1,4 @@
-import { insertMembership } from './helpers/test-identities';
+import { insertMembership, provisionFixtureWorkspace } from './helpers/test-identities';
 import 'reflect-metadata';
 import { PermissionFlag, UserStatus } from '@rab/shared';
 import { INestApplication } from '@nestjs/common';
@@ -16,6 +16,7 @@ import { createAdminDataSource } from './helpers/admin-datasource';
 import { generateFixturePassword } from './helpers/fixture-password';
 import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-pipe';
 import { integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
+import { businessSchema } from './helpers/hws-fixtures';
 
 const FIXTURE_PASSWORD = generateFixturePassword();
 
@@ -80,7 +81,7 @@ describeIfDb('venue geofence configuration (integration)', () => {
         subdomain: `test-${managerUserId.slice(0, 8)}`,
         status: 'active',
       });
-      const [{ id: wsId }] = await manager.query(`SELECT id FROM core.manager_workspace WHERE owner_user_id = $1`, [managerUserId]); await insertMembership(manager, organisation.id, managerUserId, wsId);
+      const [{ id: wsId }] = await manager.query(`SELECT id FROM core.manager_workspace WHERE owner_user_id = $1`, [managerUserId]); await provisionFixtureWorkspace(manager, wsId); await manager.query(`SELECT set_config('search_path', $1, true)`, [businessSchema(wsId)]); /* Part C1: READY schema; later writes go to it */ await insertMembership(manager, organisation.id, managerUserId, wsId);
     });
     await adminDataSource.manager.query(`INSERT INTO core.platform_admin (user_id) VALUES ($1) ON CONFLICT (user_id) DO NOTHING`, [managerUserId]);
     return { organisation, managerEmail, managerUserId };

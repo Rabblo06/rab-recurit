@@ -21,6 +21,12 @@ jobs:
     if: needs.changed.outputs.server == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 120
+    # C1b: HWS on makes the full in-band server suite exceed 120 min on one database; three shards, one database each
+    # (Jest --shard splits by test path, deterministically).
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3]
     services:
       redis:
         image: redis:7-alpine
@@ -77,19 +83,73 @@ jobs:
           # (behaviour-change catalogue / schema-role test / removed in PR #9) is made from these, not from truncated output.
           status=0
           mkdir -p "${RUNNER_TEMP}/jest-results"
-          npx nx run-many -t test -p rab-shared --runInBand --output-style=stream --json "--outputFile=${RUNNER_TEMP}/jest-results/rab-shared.json" || status=$?
-          npx nx run-many -t test -p rab-server --runInBand --testTimeout=180000 --output-style=stream --json "--outputFile=${RUNNER_TEMP}/jest-results/rab-server.json" || status=$?
+          if [ "${{ matrix.shard }}" = 1 ]; then
+            npx nx run-many -t test -p rab-shared --runInBand --output-style=stream --json "--outputFile=${RUNNER_TEMP}/jest-results/rab-shared.json" || status=$?
+          fi
+          # --skip-nx-cache: nx caches per task, not per --shard argument (a cached shard 1 must never be replayed as shard 2).
+          npx nx run-many -t test -p rab-server --skip-nx-cache --runInBand --testTimeout=180000 --output-style=stream "--shard=${{ matrix.shard }}/3" --json "--outputFile=${RUNNER_TEMP}/jest-results/rab-server-${{ matrix.shard }}.json" || status=$?
           node -e 'const fs=require("fs");for(const f of process.argv.slice(1)){if(!fs.existsSync(f)){console.log(`no jest result: ${f}`);continue}const r=JSON.parse(fs.readFileSync(f,"utf8"));for(const t of r.testResults){const n=s=>t.assertionResults.filter(a=>a.status===s).length;const name=t.name.split(/[\\/]/).slice(-2).join("/");if(t.status!=="passed"||n("failed"))console.log(`FAILED-FILE ${name} passed=${n("passed")} failed=${n("failed")}${t.testExecError||(!t.assertionResults.length&&t.failureMessage)?" (file failed to run)":""}`)}console.log(`jest ${f.split(/[\\/]/).pop()}: suites=${r.numTotalTestSuites} failedSuites=${r.numFailedTestSuites} tests=${r.numTotalTests} failed=${r.numFailedTests}`)}' "${RUNNER_TEMP}"/jest-results/*.json
           exit $status
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: always()
         with:
-          name: jest-results-server
+          name: jest-results-server-${{ matrix.shard }}
           path: ${{ runner.temp }}/jest-results/
           if-no-files-found: ignore
-      - run: npx nx run-many -t build -p rab-server,rab-shared,rab-ui
+      - if: matrix.shard == 1
+        run: npx nx run-many -t build -p rab-server,rab-shared,rab-ui
       - uses: ./.github/actions/save-cache
+        if: always() && matrix.shard == 1
+      - name: Stop PostgreSQL
         if: always()
+        run: docker rm -f disposable-postgres > /dev/null 2>&1 || true
+
+  # Part C1 (OWNER-DB-ULTIMATE.md Part C): HWS runtime routing is ON by default outside production, so the job above runs
+  # it on. This job keeps the legacy OFF mode (business rows in the core copies, production's mode until C3) covered until
+  # C4 deletes the off path. Same database build; only HWS_RUNTIME_ENABLED differs.
+  test-hws-off:
+    needs: changed
+    if: needs.changed.outputs.server == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2]
+    services:
+      redis:
+        image: redis:7-alpine
+        ports: ['6379:6379']
+        options: >-
+          --health-cmd "redis-cli ping" --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      NODE_ENV: test
+      DB_TARGET: local
+      REDIS_URL: redis://localhost:6379
+      HWS_RUNTIME_ENABLED: 'false'
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/yarn-install
+      - uses: ./.github/actions/restore-cache
+      - name: Build the workspace libraries
+        run: npx nx run-many -t build -p rab-shared,rab-emails
+      - uses: ./.github/actions/disposable-postgres
+      - name: Build the test database the owner-login way (provider SQL, migrate child, head-state checks)
+        run: |
+          npx ts-node --transpile-only -P packages/rab-server/tsconfig.app.json packages/rab-server/src/database/typeorm/scripts/twenty-mode-check.ts ci-db
+        env:
+          TWENTY_PG_CONTAINER: disposable-postgres
+          TWENTY_CI_DB_FILE: ${{ runner.temp }}/test-database.env
+      - name: Server integration tests, HWS OFF
+        run: |
+          set -euo pipefail
+          set -a; source "${RUNNER_TEMP}/test-database.env"; set +a
+          test_env="$(node packages/rab-server/src/database/typeorm/scripts/twenty-test-env.cjs "$OWNER_DB" --source bootstrap)"
+          eval "$test_env"
+          unset TWENTY_MODE_TESTS CREWFLOW_OWNER_BOOTSTRAP_PASSWORD CREWFLOW_WORKER_BOOTSTRAP_PASSWORD CREWFLOW_APP_BOOTSTRAP_PASSWORD CREWFLOW_BOOTSTRAP_PASSWORD
+          npx nx run-many -t test -p rab-server --skip-nx-cache --runInBand --testTimeout=180000 --output-style=stream "--shard=${{ matrix.shard }}/2"
       - name: Stop PostgreSQL
         if: always()
         run: docker rm -f disposable-postgres > /dev/null 2>&1 || true

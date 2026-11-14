@@ -2,6 +2,7 @@ import './helpers/ai-env';
 
 import { AiRetentionService } from '../../modules/ai/services/ai-retention.service';
 import { AiKit, aiOrganisation, ask, bootAiKit, newConversation } from './helpers/ai-test-kit';
+import { dropFixtureWorkspaceSchema } from './helpers/hws-fixtures';
 import { integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
 
 /**
@@ -79,6 +80,9 @@ describeIfDb('AI retention and erasure (integration)', () => {
     await ask(kit, org.token, keep, 'hello');
     await kit.owner.query(`DELETE FROM core.refresh_token WHERE user_id = $1`, [org.ceo.userId]);
     await kit.owner.query(`DELETE FROM core.user_session WHERE user_id = $1`, [org.ceo.userId]).catch(() => undefined);
+    // Part C1: the workspace has its schema (server-path provisioning); its registry row's RESTRICT foreign key would refuse
+    // the cascade from the user to the workspace. Tear the fixture schema down first (superuser fixture connection).
+    if (org.ceo.workspaceId) await dropFixtureWorkspaceSchema(kit.owner, org.ceo.workspaceId);
     await kit.owner.query(`DELETE FROM core.manager_workspace WHERE owner_user_id = $1`, [org.ceo.userId]).catch(() => undefined);
     await kit.owner.query(`DELETE FROM core."user" WHERE id = $1`, [org.ceo.userId]);
     for (const t of ['ai_conversation', 'ai_message']) {

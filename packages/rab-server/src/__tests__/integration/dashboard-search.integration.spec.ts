@@ -361,7 +361,7 @@ describeIfDb('dashboard summary + global search (integration)', () => {
       await tenantContext.runInTenantContext(
         { organisationId: organisation.id, workspaceId: workspaceB, userId: managerB!.userId, role: '' },
         (m) =>
-          m.query(`INSERT INTO core.venue (organisation_id, name, type, created_by, workspace_id) VALUES ($1, $2, 'other', $3, $4)`, [
+          m.query(`INSERT INTO venue (organisation_id, name, type, created_by, workspace_id) VALUES ($1, $2, 'other', $3, $4)`, [
             organisation.id,
             impostorName,
             managerA!.userId,
@@ -414,7 +414,7 @@ describeIfDb('dashboard summary + global search (integration)', () => {
       await tenantContext.runInTenantContext(
         { organisationId: organisation.id, workspaceId: workspaceA, userId: managerA!.userId, role: '' },
         (m) =>
-          m.query(`INSERT INTO core.venue (organisation_id, name, type, created_by, workspace_id) VALUES ($1, $2, 'other', $3, $4)`, [
+          m.query(`INSERT INTO venue (organisation_id, name, type, created_by, workspace_id) VALUES ($1, $2, 'other', $3, $4)`, [
             organisation.id,
             impostorName,
             managerB!.userId,

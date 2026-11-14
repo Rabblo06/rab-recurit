@@ -85,7 +85,8 @@ export async function tryAcquireProvisioningLock(client: Pick<Client, 'query'>, 
  *
  * Scheduled only by `workspace-provisioner.main.ts`, and only when that process is enabled (Phase A:
  * `CREWFLOW_PROVISIONER_ENABLED=true` — the Worker bundle starts the provisioner child only then — or, standalone with the
- * switch unset, the legacy `HWS_RUNTIME_ENABLED=true`; see workspace-provisioner.config.ts). When it is not enabled the
+ * switch unset, HWS runtime routing on — `HWS_RUNTIME_ENABLED=true`, or unset outside production (Part C1); see
+ * workspace-provisioner.config.ts). When it is not enabled the
  * process exits before opening the dedicated connection this needs, and new Workspaces stay `CREATING` unless the API's
  * server-path provisioning builds them.
  *

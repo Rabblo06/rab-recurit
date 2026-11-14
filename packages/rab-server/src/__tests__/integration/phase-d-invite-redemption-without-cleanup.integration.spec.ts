@@ -1,4 +1,4 @@
-import { insertMembership } from './helpers/test-identities';
+import { insertMembership, provisionFixtureWorkspace } from './helpers/test-identities';
 import 'reflect-metadata';
 import { ManagerType, PermissionFlag, UserStatus } from '@rab/shared';
 import { INestApplication } from '@nestjs/common';
@@ -21,6 +21,7 @@ import { createAdminDataSource } from './helpers/admin-datasource';
 import { generateFixturePassword } from './helpers/fixture-password';
 import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-pipe';
 import { integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
+import { businessSchema } from './helpers/hws-fixtures';
 
 const FIXTURE_PASSWORD = generateFixturePassword();
 
@@ -107,6 +108,8 @@ describeIfDb('Phase D F-1: dead account-invite links are refused at redemption e
         subdomain: `test-${ownerUserId.slice(0, 8)}`,
         status: 'active',
       });
+      await provisionFixtureWorkspace(manager, workspace.id); // Part C1: READY schema, as the product builds it
+      await manager.query(`SELECT set_config('search_path', $1, true)`, [businessSchema(workspace.id)]); // later fixture writes in this transaction land in the workspace's schema
       await insertMembership(manager, organisationId, ownerUserId, workspace.id);
       await manager.insert(ManagerProfile, { organisationId, userId: ownerUserId, type: ManagerType.INTERNAL, workspaceId: workspace.id });
     });

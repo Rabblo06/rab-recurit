@@ -12,6 +12,7 @@ import { ROLE_DEFS } from '../../../modules/manager/services/manager.service';
 import { ManagerWorkspace } from '../../../modules/manager-workspace/entities/manager-workspace.entity';
 import { STAFF_ROLE_KEY, STAFF_ROLE_PERMISSIONS } from '../../../modules/staff/services/staff.service';
 import { generateFixturePassword } from './fixture-password';
+import { trackFixtureOrganisation, trackFixtureWorkspace } from './fixture-workspace-tracker';
 
 /**
  * THE shared production-style identity factory for integration/security
@@ -65,6 +66,21 @@ export async function insertMembership(m: EntityManager, organisationId: string,
   );
 }
 
+
+/**
+ * Part C1 (HWS on by default outside production): builds a fixture workspace's READY schema the way the product does — the
+ * server path, `core.provision_workspace(uuid)` (ManagerWorkspaceService.create → WorkspaceProvisioningService). Call it in
+ * the transaction that created the workspace (or any later one) with `rab.organisation_id` = the workspace's organisation and
+ * `rab.user_id` = its OWNER bound: the function's own predicate refuses anything else. Without a READY schema every
+ * workspace-routed read or write refuses (WorkspaceRoutingError, 404) once HWS is on. Idempotent (ALREADY_READY).
+ */
+export async function provisionFixtureWorkspace(m: EntityManager, workspaceId: string): Promise<void> {
+  // ManagerWorkspaceService.create writes CREATING; a fixture that saved the entity without it left NULL (non-provisionable).
+  await m.query(`UPDATE core.manager_workspace SET schema_status = 'CREATING' WHERE id = $1 AND schema_status IS NULL`, [workspaceId]);
+  const [{ outcome }] = await m.query<Array<{ outcome: string }>>('SELECT core.provision_workspace($1) AS outcome', [workspaceId]);
+  if (outcome !== 'READY' && outcome !== 'ALREADY_READY') throw new TestSetupError(`fixture workspace provisioning returned ${outcome}`);
+  trackFixtureWorkspace(workspaceId); // dropped when this test file is done (fixture-schema-cleanup-environment.ts)
+}
 
 export class TestSetupError extends Error {
   constructor(message: string) {
@@ -133,6 +149,7 @@ export class TestIdentityFactory {
   async createOrganisation(label = 'test'): Promise<Organisation> {
     const slug = `${label}-${randomUUID()}`;
     const result = await this.infra.adminDataSource.manager.insert(Organisation, { name: slug, slug });
+    trackFixtureOrganisation(result.identifiers[0]!.id as string); // its workspaces' schemas are dropped when the file is done
     return this.infra.adminDataSource.manager.findOneByOrFail(Organisation, { id: result.identifiers[0]!.id as string });
   }
 
@@ -226,7 +243,7 @@ export class TestIdentityFactory {
    */
   async createInternalManager(
     org: OrgRef,
-    opts: { permissions?: PermissionSpec; platformAdmin?: boolean; label?: string; type?: ManagerTypeType; workspace?: boolean } = {},
+    opts: { permissions?: PermissionSpec; platformAdmin?: boolean; label?: string; type?: ManagerTypeType; workspace?: boolean; provision?: boolean } = {},
   ): Promise<TestIdentity> {
     const type = opts.type ?? ManagerType.INTERNAL;
     const def = ROLE_DEFS[type]!;
@@ -252,6 +269,11 @@ export class TestIdentityFactory {
           status: 'active',
         });
         workspaceId = workspace.id;
+        // Part C1: the workspace gets its READY schema the way the product builds it (the server path,
+        // core.provision_workspace, bound org + owner — same as ManagerWorkspaceService.create), so a suite runs on the same
+        // routing as production with HWS on (the code default outside production). `provision: false` keeps a CREATING
+        // workspace for suites about provisioning itself.
+        if (opts.provision !== false) await provisionFixtureWorkspace(m, workspaceId);
       }
       // manager_profile: INSERT ... RETURNING must also pass the SELECT policy, which lets a profile through for its own user (user_id =
       // current_uid()) or for the bound workspace. Bind the new manager's identity, and its workspace when it has one, as the real caller does.
@@ -382,7 +404,8 @@ export class TestIdentityFactory {
     await this.infra.tenantContext.runInTenantContext(
       { organisationId: org.id, workspaceId: owner.workspaceId, userId: owner.userId, role: '' },
       (m) =>
-        m.query(`INSERT INTO core.manager_venue (organisation_id, manager_profile_id, venue_id, workspace_id) VALUES ($1, $2, $3, $4)`, [
+        // Part C1: unqualified, so it lands in the owner's workspace (its schema with HWS on, the core copy with HWS off).
+        m.query(`INSERT INTO manager_venue (organisation_id, manager_profile_id, venue_id, workspace_id) VALUES ($1, $2, $3, $4)`, [
           org.id,
           managerProfileId,
           venueId,
@@ -408,7 +431,8 @@ export class TestIdentityFactory {
     // manager in the workspace (staff_profile_insert). The bootstrap context is not a manager and must not create Staff.
     await this.infra.tenantContext.runInTenantContext({ organisationId: org.id, workspaceId: opts.owner.workspaceId, userId: opts.owner.userId, role: '' }, async (m) => {
       const profile = await m.query(
-        `INSERT INTO core.staff_profile (organisation_id, user_id, staff_ref, created_by, workspace_id) VALUES ($1, $2, $3, $4, $5) RETURNING id`,
+        // Part C1: unqualified (workspace table), routed by the tenant context like the product's own write.
+        `INSERT INTO staff_profile (organisation_id, user_id, staff_ref, created_by, workspace_id) VALUES ($1, $2, $3, $4, $5) RETURNING id`,
         [org.id, userId, `STF-${randomUUID().slice(0, 8)}`, opts.owner.userId, opts.owner.workspaceId],
       );
       profileId = profile[0].id as string;

@@ -12,6 +12,7 @@ import { createAdminDataSource } from './helpers/admin-datasource';
 import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
 import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-pipe';
 import { integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
+import { businessTable } from './helpers/hws-fixtures';
 
 /**
  * Wave 5 lane DATA — named archive / restore actions (venue, job role, staff leaver, manager profile, draft shift).
@@ -107,7 +108,7 @@ describeIfDb('wave 5: archive / restore (integration)', () => {
     it('V2 another workspace (same org) and another organisation get 404, never 403, and the venue is unchanged', async () => {
       expect((await http().post(`/rest/v1/venues/${venueId}/archive`).set(auth(tokenB))).status).toBe(404);
       expect((await http().post(`/rest/v1/venues/${venueId}/archive`).set(auth(tokenC))).status).toBe(404);
-      const [row] = await admin.query(`SELECT status, archived_at FROM core.venue WHERE id = $1`, [venueId]);
+      const [row] = await admin.query(`SELECT status, archived_at FROM ${businessTable(a.workspaceId!, 'venue')} WHERE id = $1`, [venueId]);
       expect(row).toMatchObject({ status: 'active', archived_at: null });
     });
 
@@ -162,7 +163,7 @@ describeIfDb('wave 5: archive / restore (integration)', () => {
 
     it('V9 a venue archived before wave 5 (status only, archived_at NULL) is hidden and restorable', async () => {
       const legacy = await createVenue(tokenA);
-      await admin.query(`UPDATE core.venue SET status = 'archived' WHERE id = $1`, [legacy]);
+      await admin.query(`UPDATE ${businessTable(a.workspaceId!, 'venue')} SET status = 'archived' WHERE id = $1`, [legacy]);
       const list = await http().get('/rest/v1/venues').set(auth(tokenA));
       expect((list.body.data as Array<{ id: string }>).map((v) => v.id)).not.toContain(legacy);
       expect((await http().post(`/rest/v1/venues/${legacy}/restore`).set(auth(tokenA))).status).toBe(201);
@@ -248,7 +249,7 @@ describeIfDb('wave 5: archive / restore (integration)', () => {
     it('S3 an archived draft cannot be published (409) — restore first; the DB CHECK is the backstop for any other writer', async () => {
       const pub = await http().post(`/rest/v1/shifts/${draftId}/publish`).set(auth(tokenA));
       expect(pub.status).toBe(409);
-      await expect(admin.query(`UPDATE core.shift SET status = 'open' WHERE id = $1`, [draftId])).rejects.toMatchObject({ code: '23514' });
+      await expect(admin.query(`UPDATE ${businessTable(a.workspaceId!, 'shift')} SET status = 'open' WHERE id = $1`, [draftId])).rejects.toMatchObject({ code: '23514' });
     });
 
     it('S4 restore → publish works; a PUBLISHED shift can never be archived (409 SHIFT_NOT_DRAFT, cancel instead)', async () => {
@@ -273,7 +274,7 @@ describeIfDb('wave 5: archive / restore (integration)', () => {
     beforeAll(async () => {
       staff = await factory.createStaff({ id: orgId }, { owner: a, label: 'w5arch-leaver' });
       busy = await factory.createStaff({ id: orgId }, { owner: a, label: 'w5arch-busy' });
-      await admin.query(`UPDATE core.staff_profile SET employment_status = 'active' WHERE id = ANY($1::uuid[])`, [[staff.profileId, busy.profileId]]);
+      await admin.query(`UPDATE ${businessTable(a.workspaceId!, 'staff_profile')} SET employment_status = 'active' WHERE id = ANY($1::uuid[])`, [[staff.profileId, busy.profileId]]);
       venueId = await createVenue(tokenA, uniq('History Venue'));
       // A finished, worked shift for `staff` (history that must survive archiving).
       const shift = await createShift(tokenA, venueId);
@@ -281,12 +282,12 @@ describeIfDb('wave 5: archive / restore (integration)', () => {
       expect((await http().post(`/rest/v1/shifts/${pastShiftId}/publish`).set(auth(tokenA))).status).toBe(201);
       expect((await http().post(`/rest/v1/shifts/${pastShiftId}/offers`).set(auth(tokenA)).send({ staffProfileId: staff.profileId })).status).toBe(201);
       const past = { s: new Date(Date.now() - 30 * 3_600_000), e: new Date(Date.now() - 26 * 3_600_000) };
-      await admin.query(`UPDATE core.shift SET starts_at = $2, ends_at = $3 WHERE id = $1`, [pastShiftId, past.s, past.e]);
-      await admin.query(`UPDATE core.shift_assignment SET status = 'completed', confirmed_at = now(), period = tstzrange($2, $3, '[)') WHERE shift_id = $1`, [pastShiftId, past.s, past.e]);
+      await admin.query(`UPDATE ${businessTable(a.workspaceId!, 'shift')} SET starts_at = $2, ends_at = $3 WHERE id = $1`, [pastShiftId, past.s, past.e]);
+      await admin.query(`UPDATE ${businessTable(a.workspaceId!, 'shift_assignment')} SET status = 'completed', confirmed_at = now(), period = tstzrange($2, $3, '[)') WHERE shift_id = $1`, [pastShiftId, past.s, past.e]);
       await admin.query(
-        `INSERT INTO core.attendance (organisation_id, workspace_id, shift_assignment_id, shift_id, staff_profile_id, clock_in_at, clock_out_at, status, break_minutes, worked_minutes, earned_pence)
+        `INSERT INTO ${businessTable(a.workspaceId!, 'attendance')} (organisation_id, workspace_id, shift_assignment_id, shift_id, staff_profile_id, clock_in_at, clock_out_at, status, break_minutes, worked_minutes, earned_pence)
          SELECT sa.organisation_id, sa.workspace_id, sa.id, sa.shift_id, sa.staff_profile_id, $2, $3, 'approved', 0, 240, 4800
-           FROM core.shift_assignment sa WHERE sa.shift_id = $1`,
+           FROM ${businessTable(a.workspaceId!, 'shift_assignment')} sa WHERE sa.shift_id = $1`,
         [pastShiftId, past.s, past.e],
       );
       // An UPCOMING booking for `busy`.
@@ -354,7 +355,7 @@ describeIfDb('wave 5: archive / restore (integration)', () => {
     });
 
     it('L7 payroll, payslip, attendance and audit have NO archive/delete route', async () => {
-      const [att] = await admin.query(`SELECT id FROM core.attendance WHERE shift_id = $1`, [pastShiftId]);
+      const [att] = await admin.query(`SELECT id FROM ${businessTable(a.workspaceId!, 'attendance')} WHERE shift_id = $1`, [pastShiftId]);
       for (const path of [`/rest/v1/attendance/${att.id}/archive`, `/rest/v1/payroll/records/${randomUUID()}/archive`, `/rest/v1/audit-logs/${randomUUID()}/archive`]) {
         expect((await http().post(path).set(auth(tokenA))).status).toBe(404);
       }

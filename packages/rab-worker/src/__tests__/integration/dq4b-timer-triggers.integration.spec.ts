@@ -150,7 +150,7 @@ describeIfDb('D-Q4b delayed timer triggers (WORKER_TIMER_TRIGGERS=on, integratio
   const deadlineOf = async (fx: Fx, offerId: string): Promise<number> =>
     withManager(fx, async (m) => {
       const [row] = await m.query(
-        `SELECT lower(sa.period) - interval '30 minutes' AS d FROM core.job_offer o JOIN core.shift_assignment sa ON sa.id = o.shift_assignment_id WHERE o.id = $1`,
+        `SELECT lower(sa.period) - interval '30 minutes' AS d FROM job_offer o JOIN shift_assignment sa ON sa.id = o.shift_assignment_id WHERE o.id = $1`,
         [offerId],
       );
       return new Date(row.d).getTime();
@@ -160,7 +160,7 @@ describeIfDb('D-Q4b delayed timer triggers (WORKER_TIMER_TRIGGERS=on, integratio
     const start = new Date(Math.floor(Date.now() / 1000) * 1000 + 29 * 60_000);
     await withManager(fx, async (m) => {
       await m.query(
-        `UPDATE core.shift_assignment sa SET period = tstzrange($2, $3, '[)') FROM core.job_offer o WHERE o.id = $1 AND sa.id = o.shift_assignment_id`,
+        `UPDATE shift_assignment sa SET period = tstzrange($2, $3, '[)') FROM job_offer o WHERE o.id = $1 AND sa.id = o.shift_assignment_id`,
         [offerId, start, new Date(start.getTime() + 8 * 3600_000)],
       );
     });

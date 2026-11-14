@@ -14,6 +14,7 @@ import {
 import { AuditAction, AuditService } from '../engine/core-modules/audit/audit.service';
 import { EnvironmentService } from '../engine/core-modules/environment/environment.service';
 import { TenantContextService } from '../engine/core-modules/tenant/tenant-context.service';
+import { isProductionRuntime } from '../engine/core-modules/throttler/rate-limit-bypass';
 import { verifyOpsAppSession } from './ops/elevated-ops-session';
 import { assertHwsApplyAllowed } from './ops/hws-cutover-policy';
 import { OpsCommandRunner, opsLabelFlagsOf } from './ops/ops-command-runner';
@@ -141,7 +142,7 @@ export class HwsBackfillCommand extends OpsCommandRunner {
     // Layer 2: the CLI process, the owner login, the operator label (every mode runs on the one owner-login DataSource).
     const label = assertOpsRun('hws:backfill', options.resume ? 'resume' : mode, resolved, process.env, opsLabelFlagsOf(options));
     const hwsRuntimeEnabled = this.environment.get('HWS_RUNTIME_ENABLED') === true;
-    assertHwsApplyAllowed({ mode, hwsRuntimeEnabled, hwsCutover: options.hwsCutover === true, production: process.env.DB_TARGET?.trim() === 'production' });
+    assertHwsApplyAllowed({ mode, hwsRuntimeEnabled, hwsCutover: options.hwsCutover === true, production: isProductionRuntime(process.env) });
 
     if (!options.workspaceId && !options.all) throw new Error('One workspace selector is required: --workspace-id <uuid> or --all.');
     if (options.workspaceId && options.all) throw new Error('--workspace-id and --all are mutually exclusive.');

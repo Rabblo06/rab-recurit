@@ -24,6 +24,7 @@ import { createAdminDataSource } from './helpers/admin-datasource';
 import { bookBeforeDeadline } from './helpers/book-before-deadline';
 import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
 import { integrationTestDatabaseReady } from '@rab/server/database/typeorm/core/integration-test-database-gate';
+import { businessTable } from './helpers/hws-fixtures';
 
 /**
  * Approved Shift Statement on payroll approval (PayStatement1786719000000 + ApprovedShiftStatement1786719100000).
@@ -79,7 +80,7 @@ describeIfDb('approved shift statement pipeline (integration)', () => {
     await adminDataSource.query(`UPDATE core.manager_profile SET is_initial_manager = true WHERE user_id = $1`, [a.userId]);
     staff = [];
     for (let i = 0; i < 6; i++) staff.push(await factory.createStaff(seeded.organisation, { owner: a, label: `paystmt-s${i}` }));
-    await adminDataSource.query(`UPDATE core.staff_profile SET employment_status = 'active' WHERE id = ANY($1::uuid[])`, [staff.map((s) => s.profileId)]);
+    await adminDataSource.query(`UPDATE ${businessTable(a.workspaceId!, 'staff_profile')} SET employment_status = 'active' WHERE id = ANY($1::uuid[])`, [staff.map((s) => s.profileId)]);
     const tokenA = await factory.login(a);
     const venue = await http().post('/rest/v1/venues').set(auth(tokenA)).send({ name: `Statement Venue ${randomUUID().slice(0, 6)}`, type: 'hotel' });
     venueId = venue.body.id;
@@ -111,9 +112,9 @@ describeIfDb('approved shift statement pipeline (integration)', () => {
    * payroll-runs and manual-attendance in rab-server, so the result does not depend on the machine date.
    */
   async function scheduleAt(shiftId: string, instant: string): Promise<void> {
-    await adminDataSource.query(`UPDATE core.shift SET starts_at = $2::timestamptz, ends_at = $2::timestamptz + (ends_at - starts_at) WHERE id = $1`, [shiftId, instant]);
+    await adminDataSource.query(`UPDATE ${businessTable(a.workspaceId!, 'shift')} SET starts_at = $2::timestamptz, ends_at = $2::timestamptz + (ends_at - starts_at) WHERE id = $1`, [shiftId, instant]);
     await adminDataSource.query(
-      `UPDATE core.shift_assignment SET period = tstzrange($2::timestamptz, $2::timestamptz + (upper(period) - lower(period)), '[)') WHERE shift_id = $1 AND period IS NOT NULL`,
+      `UPDATE ${businessTable(a.workspaceId!, 'shift_assignment')} SET period = tstzrange($2::timestamptz, $2::timestamptz + (upper(period) - lower(period)), '[)') WHERE shift_id = $1 AND period IS NOT NULL`,
       [shiftId, instant],
     );
   }
@@ -144,7 +145,7 @@ describeIfDb('approved shift statement pipeline (integration)', () => {
     expect((await http().post(`/rest/v1/attendance/report/shift/${shiftId}/staff/${s.profileId}/attendance-review`).set(auth(tokens.a))).status).toBe(200);
     expect((await http().patch(`/rest/v1/attendance/report/shift/${shiftId}/finalise`).set(auth(tokens.a))).status).toBe(200);
     await scheduleAt(shiftId, scheduledAt);
-    const [rec] = await adminDataSource.query(`SELECT id FROM core.payroll_record WHERE attendance_id = $1`, [out.body.id]);
+    const [rec] = await adminDataSource.query(`SELECT id FROM ${businessTable(a.workspaceId!, 'payroll_record')} WHERE attendance_id = $1`, [out.body.id]);
     attendanceOf[rec.id] = out.body.id;
     if (!approve) return rec.id as string;
     const approved = await http().post(`/rest/v1/payroll/records/${rec.id}/approve`).set(auth(tokens.a));
@@ -153,7 +154,7 @@ describeIfDb('approved shift statement pipeline (integration)', () => {
     return rec.id as string;
   }
 
-  const recordRow = async (id: string) => (await adminDataSource.query(`SELECT * FROM core.payroll_record WHERE id = $1`, [id]))[0];
+  const recordRow = async (id: string) => (await adminDataSource.query(`SELECT * FROM ${businessTable(a.workspaceId!, 'payroll_record')} WHERE id = $1`, [id]))[0];
 
   let recordId: string;
   let fileId: string;
@@ -168,7 +169,7 @@ describeIfDb('approved shift statement pipeline (integration)', () => {
   const deps = (render?: (doc: ReportDocument) => Promise<Buffer>) => ({ tenantContext, files, notifications, audit,
     render: render ?? (async (doc: ReportDocument) => { lastHtml = reportHtmlFor(doc); return renderReportPdf(doc); }) });
   const expireLease = (id: string) => adminDataSource.query(
-    `UPDATE core.payroll_record SET statement_queued_at = now() - interval '11 minutes', statement_processing_at = NULL WHERE id = $1`, [id]);
+    `UPDATE ${businessTable(a.workspaceId!, 'payroll_record')} SET statement_queued_at = now() - interval '11 minutes', statement_processing_at = NULL WHERE id = $1`, [id]);
 
   it('approval commits the durable request only: pending, no file, no notification; History shows it as approved already', async () => {
     recordId = await approvedRecordFor(0);
@@ -260,13 +261,13 @@ describeIfDb('approved shift statement pipeline (integration)', () => {
     expect(await adminDataSource.query(`SELECT 1 FROM core.notification WHERE related_entity_id = $1`, [failing])).toEqual([]);
     expect((await dispatch()).claimed).toBe(0); // back-off
     for (let attempt = 2; attempt <= SHIFT_STATEMENT_MAX_ATTEMPTS; attempt++) {
-      await adminDataSource.query(`UPDATE core.payroll_record SET updated_at = now() - interval '1 hour' WHERE id = $1`, [failing]);
+      await adminDataSource.query(`UPDATE ${businessTable(a.workspaceId!, 'payroll_record')} SET updated_at = now() - interval '1 hour' WHERE id = $1`, [failing]);
       const again = await dispatch();
       expect(again).toMatchObject({ claimed: 1, requeued: 1 });
       expect(await processShiftStatementJob(jobs.at(-1)!, deps(boom))).toBe('failed');
     }
     expect((await recordRow(failing)).statement_attempts).toBe(SHIFT_STATEMENT_MAX_ATTEMPTS);
-    await adminDataSource.query(`UPDATE core.payroll_record SET updated_at = now() - interval '1 hour' WHERE id = $1`, [failing]);
+    await adminDataSource.query(`UPDATE ${businessTable(a.workspaceId!, 'payroll_record')} SET updated_at = now() - interval '1 hour' WHERE id = $1`, [failing]);
     expect((await dispatch()).claimed).toBe(0); // exhausted: no longer retried
     const mine = await http().get('/rest/v1/payroll/me/statements').set(auth(tokens.staff[2]!));
     expect(mine.body.data[0].statement).toMatchObject({ state: 'failed', fileId: null });
@@ -274,7 +275,7 @@ describeIfDb('approved shift statement pipeline (integration)', () => {
 
   it('reconciliation: an approved record that never had a statement requested is picked up', async () => {
     const orphan = await approvedRecordFor(3);
-    await adminDataSource.query(`UPDATE core.payroll_record SET statement_status = 'none' WHERE id = $1`, [orphan]); // e.g. approved before this pipeline
+    await adminDataSource.query(`UPDATE ${businessTable(a.workspaceId!, 'payroll_record')} SET statement_status = 'none' WHERE id = $1`, [orphan]); // e.g. approved before this pipeline
     const r = await dispatch();
     expect(r).toMatchObject({ claimed: 1, reconciledMissing: 1 });
     expect(await processShiftStatementJob(jobs.at(-1)!, deps())).toBe('generated');
@@ -324,7 +325,7 @@ describeIfDb('approved shift statement pipeline (integration)', () => {
     expect(again.notified).toBe(0);
     const notes = await adminDataSource.query(`SELECT user_id, title FROM core.notification WHERE type = 'payroll_period_attention' AND organisation_id = $1`, [orgId]);
     expect(notes).toEqual([{ user_id: a.userId, title: 'Payroll period ended with unfinished records' }]);
-    expect(await adminDataSource.query(`SELECT 1 FROM core.payroll_run WHERE organisation_id = $1`, [orgId])).toEqual([]);
+    expect(await adminDataSource.query(`SELECT 1 FROM ${businessTable(a.workspaceId!, 'payroll_run')} WHERE organisation_id = $1`, [orgId])).toEqual([]);
     // Before the period has ended nothing is sent.
     expect((await runPayrollPeriodAttentionCycle(adminDataSource, tenantContext, notifications, { organisationId: orgId, today: '2026-10-20' })).notified).toBe(0);
   });
