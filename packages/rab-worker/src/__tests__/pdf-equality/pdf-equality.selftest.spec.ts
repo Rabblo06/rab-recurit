@@ -311,7 +311,7 @@ describe('QR: decoded from the PDF and verified (P0 plan §5.2 4(e))', () => {
     expect(new JwtService().decode<{ exp?: number }>(payload).exp).toBeUndefined();
     const lastAccepted = shift.endsAt.getTime() + 120 * 60_000;
     // Whenever it was signed (the fixtures sign with the real clock), it is accepted in the shift's last minute.
-    jest.useFakeTimers({ now: shift.endsAt.getTime() - 60_000 });
+    jest.useFakeTimers({ now: shift.endsAt.getTime() - 60_000, doNotFake: ['nextTick', 'queueMicrotask', 'setImmediate'] });
     try {
       await expect(fixtureAttendanceQr.validateQr(manager, shift.id, payload, { period: null })).resolves.toBeUndefined();
       jest.setSystemTime(lastAccepted); // control: the last accepted instant, so the refusal below is the expiry
