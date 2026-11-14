@@ -7391,3 +7391,37 @@ image that runs the apps' own derive step on the read-only volume (`--pull never
 - **Tests:** `refresh-token-revoke-first-wins.integration.spec.ts` (revoke, then revoke again later → revoked_at unchanged,
   for all three methods, incl. revokeAllForUserExcept keeping the excepted family live and backdated times unchanged; replaying a rotated token twice keeps its rotation time; fails 3/3 on the previous code) and unit tests
   in `refresh-token.service.spec.ts`.
+
+## Part C1 — HWS (one schema per workspace) on by default outside production; user deletion checks every workspace (branch hws/c1a-on-by-default, 2026-11-14)
+- **Change.** `HWS_RUNTIME_ENABLED` unset now means ON in development and test and OFF when ANY production signal is set
+  (`NODE_ENV`, `RAB_RUNTIME_ENV` or `DB_TARGET` = production, trimmed, any case; the existing `isProductionRuntime`). An explicit
+  `true`/`false` wins everywhere; any other value refuses to boot. One rule (`hws-runtime-default.ts`) for the API, Worker and
+  standalone provisioner. Production compose files still pin `"false"` until the C3 cutover. QA and the bullmq test stack flip to on.
+- **Threats and controls.**
+  - *HWS turned on in production by accident* (e.g. a CLI command run with `DB_TARGET=production` and no `NODE_ENV`), splitting
+    writes between workspace schemas and `core` or letting `hws:backfill --apply` run outside the cutover: any production signal
+    forces OFF; tests for the env class, the provisioner and the backfill guard.
+  - *Manager venue list read another workspace* (`ManagerService.listVenues`, C0 audit BROKEN path): permission re-checked in the
+    service (403), a manager outside the org or workspace is 404, an org admin's read is gated by `core.admin_workspace_in_org`,
+    and the read runs in the target workspace's context.
+  - *User hard delete erased history in another workspace* (C0 audit BROKEN path; another person's data): `assertCanDelete`
+    checks the bound scope and every candidate workspace of the organisation (core copies and READY schema); a schema that exists
+    but is not READY refuses with `USER_DELETION_UNVERIFIABLE` (workspace id logged server-side only); `user_note.subject_user_id`
+    counts as history; `deleteUser` records visible staff history in every workspace scope before the delete and refuses (409,
+    whole transaction rolled back) if any of it disappears; FK refusals (23503) are a 409, not a 500.
+- **Residual (owner review pending).** The per-workspace check runs under the caller's RLS, so "no rows" can mean "hidden". The
+  post-delete re-check closes the cascade case that tests cover; the complete control is a SECURITY DEFINER boolean
+  `core.user_has_protected_history` (draft in docs/plans/phase-x3/C1-STATUS.md, FOR OWNER REVIEW, not run anywhere).
+- **Scale finding (owner decision pending).** Deleting a `core` row referenced from every workspace schema locks every referencing
+  table (~31 per workspace for `core."user"`); from about 300 workspaces this fails with "out of shared memory" at the default
+  `max_locks_per_transaction`. Applies to production today (schemas are provisioned with HWS off). CI's disposable database runs
+  with `max_locks_per_transaction=2048`.
+- **CI.** The server and Worker suites run HWS ON by default; one HWS-OFF job each keeps production's mode covered until C4
+  (`--skip-nx-cache` so ON and OFF results never mix). Test-only: fixture workspace schemas are dropped after each test file on
+  disposable databases (SECURITY TRADE-OFF in C1-STATUS: their core rows stay READY with no schema; routing refuses them, Worker
+  scans skip them).
+- **Tests.** env.validation.hws-runtime.spec.ts, workspace-provisioner.config.spec.ts, hws-c1-org-level-workspace-paths
+  integration (venues 404 across workspace/org; delete refused for history in another schema, in the core copy, or an
+  unverifiable schema; CEO cannot cascade another workspace's staff profile), the Worker isolation specs with a real
+  wrong-organisation binding, and the full suites with HWS on (server 2,846 pass / 10 fail = the member staff-visibility gap
+  awaiting owner SQL; Worker 741/741).
