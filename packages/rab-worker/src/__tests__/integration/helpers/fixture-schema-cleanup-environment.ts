@@ -31,8 +31,8 @@ function workspaceSchemaName(workspaceId: string): string {
  * pg_stat_activity as an `active` backend of the database, so the next file's "no other active backend" guards
  * (ops-owner-login, containment-suspend-test-accounts: they refuse to TRUNCATE core.organisation then) saw "1 other
  * backend" in CI. So the file that churned the catalogue cleans it up itself, before the next file starts: VACUUM the
- * catalogue tables the drops touched and ANALYZE the database (synchronously; nothing left for autovacuum to pick up), then
- * wait (bounded) for any autovacuum worker already running on this database to finish. Only autovacuum workers are waited for — never another
+ * catalogue tables the drops touched (synchronously; nothing left there for autovacuum to pick up), then wait (bounded) for
+ * any autovacuum worker already running on this database to finish. Only autovacuum workers are waited for — never another
  * client backend (a parallel Jest worker's query must not hold this file's teardown up).
  */
 const CHURNED_CATALOGUE = [
@@ -41,10 +41,10 @@ const CHURNED_CATALOGUE = [
 ] as const;
 
 async function settleCatalogue(client: Client): Promise<void> {
-  // VACUUM ANALYZE the churned catalogue, then ANALYZE the whole (small, disposable) database: the file's own inserts and
-  // deletes on core tables also cross autovacuum's ANALYZE thresholds, and its launcher wakes once a minute per database.
+  // The churned catalogue only. Never a database-wide ANALYZE: fresh statistics on tiny application tables change the plans
+  // the EXPLAIN regression suites assert (index-fix-claim-plans: login_history became a Seq Scan), and the TRUNCATE guards
+  // ignore autovacuum workers now (helpers/concurrent-backend-guard.ts), so nothing needs the core tables analysed here.
   await client.query(`VACUUM (ANALYZE) ${CHURNED_CATALOGUE.map((t) => `pg_catalog.${t}`).join(', ')}`);
-  await client.query('ANALYZE');
   const deadline = Date.now() + 60_000;
   while (Date.now() < deadline) {
     const { rows } = await client.query<{ n: number }>(
