@@ -267,3 +267,90 @@ export async function markNewWorkspaceInitial(query: Query, workspace: SavedWork
   const version = readAppVersion();
   return markAsWorkspaceInitial(query, { workspaceId: workspace.id, name: lastStepOfVersion(version), status: 'completed', executedByVersion: version });
 }
+
+// ---------------------------------------------------------------------------------------------------------------------
+// OWNER-DB-ULTIMATE Part D: per-workspace rows (workspace_id set), read and written by the workspace command runner on the
+// LOCKED migration session under scope 'upgrade' (no tenant bound; the instance INSERT policy admits a workspace_id and the
+// FK proves the workspace exists). Twenty `upgrade-migration.service.ts` @ eedb0a73.
+// ---------------------------------------------------------------------------------------------------------------------
+
+/** A workspace's cursor: its newest logbook row (Twenty :222-282 getWorkspaceLastAttemptedCommandName). */
+export interface WorkspaceCursor {
+  workspaceId: string;
+  name: string;
+  status: UpgradeMigrationStatus;
+  isInitial: boolean;
+  attempt: number;
+}
+
+/** Twenty :222-282: the newest row (created_at, then attempt) per workspace. Needs scope 'upgrade' or 'status'. */
+export async function getWorkspaceCursors(query: Query, workspaceIds: readonly string[]): Promise<Map<string, WorkspaceCursor>> {
+  const out = new Map<string, WorkspaceCursor>();
+  if (!workspaceIds.length) return out;
+  const rows = (await query(
+    `SELECT w.id AS "workspaceId", latest.name, latest.status, latest.is_initial AS "isInitial", latest.attempt
+       FROM pg_catalog.unnest($1::uuid[]) AS w(id)
+       CROSS JOIN LATERAL (
+         SELECT m.name, m.status, m.is_initial, m.attempt FROM core.upgrade_migration m
+          WHERE m.workspace_id = w.id
+          ORDER BY m.created_at DESC, m.attempt DESC
+          LIMIT 1) latest`,
+    [workspaceIds],
+  )) as Array<{ workspaceId: string; name: string; status: UpgradeMigrationStatus; isInitial: boolean; attempt: number }>;
+  for (const r of rows) out.set(r.workspaceId, { ...r, attempt: Number(r.attempt) });
+  return out;
+}
+
+/**
+ * Twenty :51-137 for one workspace (workspace-command-runner.service.ts:130-149): ONE row when a workspace step ends;
+ * attempt = previous rows of (name, workspace) + 1 in the same statement (every writer holds the migration lock). Needs scope
+ * 'upgrade'. Returns the attempt written.
+ */
+export async function recordWorkspaceUpgradeMigration(
+  query: Query,
+  input: { name: string; workspaceId: string; status: UpgradeMigrationStatus; executedByVersion: string; forced: boolean; error?: unknown },
+): Promise<number> {
+  const message = input.status === 'failed' ? errorMessageForStorage(input.error ?? 'failed') : null;
+  const [row] = (await query(
+    `INSERT INTO core.upgrade_migration (name, status, attempt, executed_by_version, error_message, is_initial, workspace_id, forced)
+     SELECT $1, $2, pg_catalog.count(*)::int + 1, $3, $4, false, $5::uuid, $6
+       FROM core.upgrade_migration m WHERE m.name = $1 AND m.workspace_id = $5::uuid
+     RETURNING attempt`,
+    [input.name, input.status, input.executedByVersion, message, input.workspaceId, input.forced],
+  )) as Array<{ attempt: number }>;
+  return Number(row!.attempt);
+}
+
+/**
+ * Part D adoption: the ONE is_initial row (attempt 1, completed, not forced) of an existing workspace that has NO logbook row
+ * at all, written in one statement (idempotent: nothing when any row of the workspace exists). Needs scope 'upgrade'.
+ * Returns whether a row was written.
+ */
+export async function adoptWorkspaceInitial(query: Query, input: { workspaceId: string; name: string; executedByVersion: string }): Promise<boolean> {
+  const rows = (await query(
+    `INSERT INTO core.upgrade_migration (name, status, attempt, executed_by_version, is_initial, workspace_id, forced)
+     SELECT $1, 'completed', 1, $2, true, $3::uuid, false
+      WHERE NOT EXISTS (SELECT 1 FROM core.upgrade_migration m WHERE m.workspace_id = $3::uuid)
+     RETURNING attempt`,
+    [input.name, input.executedByVersion, input.workspaceId],
+  )) as unknown[];
+  return rows.length === 1;
+}
+
+/**
+ * For the status read (scope 'status'): how many workspaces have a cursor that is a FAILED row among `names` (the workspace
+ * steps of the app version). Never a workspace id or a message.
+ */
+export async function countFailedWorkspaceCursors(query: Query, names: readonly string[]): Promise<number> {
+  if (!names.length) return 0;
+  const [row] = (await query(
+    `SELECT pg_catalog.count(*)::int AS n FROM (
+       SELECT DISTINCT ON (m.workspace_id) m.workspace_id, m.name, m.status
+         FROM core.upgrade_migration m
+        WHERE m.workspace_id IS NOT NULL
+        ORDER BY m.workspace_id, m.created_at DESC, m.attempt DESC) c
+      WHERE c.status = 'failed' AND c.name = ANY($1::text[])`,
+    [names],
+  )) as Array<{ n: number }>;
+  return Number(row?.n ?? 0);
+}

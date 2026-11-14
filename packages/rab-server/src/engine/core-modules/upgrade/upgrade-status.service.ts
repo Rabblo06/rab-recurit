@@ -12,6 +12,7 @@ import { Injectable, Logger } from '@nestjs/common';
 import { DataSource } from 'typeorm';
 
 import {
+  countFailedWorkspaceCursors,
   getLastAttemptedInstanceStep,
   instanceVersions,
   isLastAttemptCompleted,
@@ -20,7 +21,7 @@ import {
   UpgradeSession,
   withUpgradeScope,
 } from './upgrade-migration.service';
-import { lastStepOfVersion, stepsForVersion } from './upgrade-sequence';
+import { commandStepName, instanceStepsForVersion, lastInstanceStepOfVersion, workspaceCommandsForVersion } from './upgrade-sequence';
 import { compareVersions, readAppVersion } from './upgrade-version';
 
 export type UpgradeState = 'ok' | 'failed' | 'behind' | 'ahead' | 'none' | 'unknown';
@@ -36,12 +37,15 @@ export interface UpgradeStatus {
   at: string | null;
 }
 
-/** Pure: the state from the facts (exported for its spec). */
-export function upgradeStateOf(f: { ledgerExists: boolean; appComplete: boolean; newer: boolean; appStepFailed: boolean; anyRow: boolean }): UpgradeState {
+/**
+ * Pure: the state from the facts (exported for its spec). Part D: `workspaceStepFailed` = some workspace's cursor is a failed
+ * workspace step of the app version (Twenty's per-workspace upgrade status); it turns an otherwise complete instance to 'failed'.
+ */
+export function upgradeStateOf(f: { ledgerExists: boolean; appComplete: boolean; newer: boolean; appStepFailed: boolean; anyRow: boolean; workspaceStepFailed?: boolean }): UpgradeState {
   if (!f.ledgerExists || !f.anyRow) return 'none';
   if (f.newer) return 'ahead';
-  if (f.appComplete) return 'ok';
-  if (f.appStepFailed) return 'failed';
+  if (f.appComplete && !f.workspaceStepFailed) return 'ok';
+  if (f.appStepFailed || f.workspaceStepFailed) return 'failed';
   return 'behind';
 }
 
@@ -51,9 +55,11 @@ export async function readUpgradeStatus(session: UpgradeSession, appVersion: str
   return withUpgradeScope(session, 'status', async (q) => {
     const last = await getLastAttemptedInstanceStep(q);
     const versions = await instanceVersions(q);
-    const appComplete = await isLastAttemptCompleted(q, { name: lastStepOfVersion(appVersion), workspaceId: null });
+    const appComplete = await isLastAttemptCompleted(q, { name: lastInstanceStepOfVersion(appVersion), workspaceId: null });
+    const workspaceSteps = workspaceCommandsForVersion(appVersion).map((c) => commandStepName(appVersion, c));
+    const workspaceStepFailed = (await countFailedWorkspaceCursors(q, workspaceSteps)) > 0;
     let appStepFailed = false;
-    for (const name of stepsForVersion(appVersion)) {
+    for (const name of instanceStepsForVersion(appVersion)) {
       const rows = (await q(`SELECT m.status FROM core.upgrade_migration m WHERE m.name = $1 AND m.workspace_id IS NULL ORDER BY m.attempt DESC LIMIT 1`, [name])) as Array<{ status: string }>;
       if (rows[0]?.status === 'failed') appStepFailed = true;
     }
@@ -63,6 +69,7 @@ export async function readUpgradeStatus(session: UpgradeSession, appVersion: str
       newer: versions.some((v) => compareVersions(v, appVersion) > 0),
       appComplete,
       appStepFailed,
+      workspaceStepFailed,
     });
     return {
       appVersion,
