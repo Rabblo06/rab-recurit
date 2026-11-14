@@ -285,8 +285,11 @@ describeIfDb('Part D workspace command runner (integration)', () => {
         },
       });
       const out = await runner({ workspaceRegistry: { '0-7': [fk] }, workspaceIds: [x.id] });
-      // The isolation layer passes; the structure check then refuses (undeclared DDL), so it is rolled back either way.
-      expect(out.failures.map((f) => f.errorClass)).toEqual(['FINGERPRINT_MISMATCH']);
+      // The isolation layer passes (no OUTSIDE_SCHEMA); the structure check then refuses the undeclared DDL (the verify
+      // function's fixed FK count, or the fingerprint), so it is rolled back either way.
+      expect(out.failures).toHaveLength(1);
+      expect(['VERIFY_FAILED', 'FINGERPRINT_MISMATCH']).toContain(out.failures[0]!.errorClass);
+      expect(await hasColumn(x, 'venue', 'fk_probe')).toBe(false);
     });
   });
 
