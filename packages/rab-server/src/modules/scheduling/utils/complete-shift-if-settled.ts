@@ -1,6 +1,8 @@
 import { assertTransition, SHIFT_TRANSITIONS, ShiftAssignmentStatus, ShiftStatus } from '@rab/shared';
 import { EntityManager } from 'typeorm';
 
+import { businessTables, type BusinessTables } from '../../../engine/core-modules/tenant/business-tables';
+
 /**
  * The seat states that still hold a shift open: a seat that is offered, accepted (awaiting a manager) or confirmed (booked,
  * not yet clocked out) keeps the shift `in_progress`; every other state (completed, no_show, declined, rejected,
@@ -23,7 +25,8 @@ export const OPEN_SEAT_STATUSES: readonly string[] = [
  * Re-entrant: a transaction that already holds the lock gets it again at no cost.
  */
 export async function lockShiftRow(manager: EntityManager, organisationId: string, shiftId: string): Promise<string | null> {
-  const rows = await manager.query<Array<{ status: string }>>(`SELECT status FROM shift WHERE id = $1 AND organisation_id = $2 FOR UPDATE`, [
+  const t = businessTables(manager);
+  const rows = await manager.query<Array<{ status: string }>>(`SELECT status FROM ${t.shift} WHERE id = $1 AND organisation_id = $2 FOR UPDATE`, [
     shiftId,
     organisationId,
   ]);
@@ -32,25 +35,27 @@ export async function lockShiftRow(manager: EntityManager, organisationId: strin
 
 /**
  * The open-seat predicate on `shift_assignment sa` (the one definition; `countOpenSeats` and the one-off repair command
- * `shift:complete-settled` use it). `statusesParam` is the 1-based index of the bound `OPEN_SEAT_STATUSES` parameter (a
+ * `shift:complete-settled` use it). `t` is the caller transaction's `businessTables(manager)` (the job_offer sub-selects are
+ * schema-qualified through it). `statusesParam` is the 1-based index of the bound `OPEN_SEAT_STATUSES` parameter (a
  * code integer, never input). An `offered` seat counts as closed only when it has an offer and EVERY offer on it is
  * `expired` (a seat never carries a live offer and an expired one at once today; the "every" keeps a future re-offer on
  * the same seat open).
  */
-export function openSeatSql(statusesParam: number): string {
+export function openSeatSql(t: BusinessTables, statusesParam: number): string {
   if (!Number.isInteger(statusesParam) || statusesParam < 1) throw new Error('openSeatSql: invalid parameter index');
-  // sql-injection-reviewed: the only interpolation is a validated positive integer parameter index; no input reaches the text.
+  // sql-injection-reviewed: the interpolations are a validated positive integer parameter index and businessTables() names; no input reaches the text.
   return `(sa.status = ANY($${statusesParam}::text[])
     AND NOT (sa.status = 'offered'
-      AND EXISTS (SELECT 1 FROM job_offer eo WHERE eo.shift_assignment_id = sa.id AND eo.status = 'expired')
-      AND NOT EXISTS (SELECT 1 FROM job_offer lo WHERE lo.shift_assignment_id = sa.id AND lo.status <> 'expired')))`;
+      AND EXISTS (SELECT 1 FROM ${t.job_offer} eo WHERE eo.shift_assignment_id = sa.id AND eo.status = 'expired')
+      AND NOT EXISTS (SELECT 1 FROM ${t.job_offer} lo WHERE lo.shift_assignment_id = sa.id AND lo.status <> 'expired')))`;
 }
 
 /** Open seats of one shift ($1 shift id, $2 organisation id), by the shared predicate. Run it under the shift lock. */
 export async function countOpenSeats(manager: EntityManager, organisationId: string, shiftId: string): Promise<number> {
+  const t = businessTables(manager);
   const [{ open }] = await manager.query<Array<{ open: number }>>(
-    // sql-injection-reviewed: openSeatSql(3) is a code-constant fragment; every value is a bound $n parameter.
-    `SELECT count(*)::int AS open FROM shift_assignment sa WHERE sa.shift_id = $1 AND sa.organisation_id = $2 AND ${openSeatSql(3)}`,
+    // sql-injection-reviewed: openSeatSql(t, 3) is a code-constant fragment; every value is a bound $n parameter.
+    `SELECT count(*)::int AS open FROM ${t.shift_assignment} sa WHERE sa.shift_id = $1 AND sa.organisation_id = $2 AND ${openSeatSql(t, 3)}`,
     [shiftId, organisationId, OPEN_SEAT_STATUSES],
   );
   return open;
@@ -81,8 +86,9 @@ export async function completeShiftIfSettled(manager: EntityManager, organisatio
   if (status !== ShiftStatus.IN_PROGRESS) return false;
   if ((await countOpenSeats(manager, organisationId, shiftId)) > 0) return false;
   assertTransition(SHIFT_TRANSITIONS, status, ShiftStatus.COMPLETED);
+  const t = businessTables(manager);
   const [, completed] = (await manager.query(
-    `UPDATE shift SET status = $3, updated_at = now() WHERE id = $1 AND organisation_id = $2 AND status = $4`,
+    `UPDATE ${t.shift} SET status = $3, updated_at = now() WHERE id = $1 AND organisation_id = $2 AND status = $4`,
     [shiftId, organisationId, ShiftStatus.COMPLETED, ShiftStatus.IN_PROGRESS],
   )) as [unknown, number];
   return completed === 1;
