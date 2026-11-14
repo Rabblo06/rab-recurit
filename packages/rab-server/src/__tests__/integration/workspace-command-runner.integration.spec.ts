@@ -230,7 +230,7 @@ describeIfDb('Part D workspace command runner (integration)', () => {
       const yRoles = (await admin.query(`SELECT name FROM ${y.schema}.job_role ORDER BY name`)).rows;
       const out = await runner({
         workspaceRegistry: {
-          '0-7': [cmd(name, i, { run: async (ctx) => { if (ctx.workspaceId === x.id) await body(ctx); await probe(ctx.query, ctx.schemaName); }, structure: { level: 21, fingerprints: {} } })],
+          '0-7': [cmd(name, i, { run: async (ctx) => { if (ctx.workspaceId === x.id) await body(ctx); await probe(ctx.query, ctx.schemaName); }, structure: { level: 21, fingerprints: {}, mayDrop: true } })],
         },
         workspaceIds: [x.id, y.id],
       });
@@ -636,6 +636,24 @@ describeIfDb('Part D workspace command runner (integration)', () => {
       await admin.query(`UPDATE core.workspace_schema_registry SET migration_error = 'module v1.020-grant-parity-guards failed (SQLSTATE_55P03)' WHERE workspace_id = $1`, [ok.id]);
       expect(await resolveAs(ok.org, ok.id)).toBe('resolved');
     });
+  });
+
+  it('D6: a structural step that drops an object without declaring mayDrop is refused (UNDECLARED_DROP); declared, it passes', async () => {
+    const [a, b] = [await make('drop-a'), await make('drop-b')];
+    await adopt([a.id, b.id]);
+    const recreate = (s2: string) =>
+      `DROP POLICY job_role_tenant ON ${s2}.job_role; ` +
+      `CREATE POLICY job_role_tenant ON ${s2}.job_role AS PERMISSIVE FOR ALL TO PUBLIC ` +
+      `USING (((organisation_id = core.current_org()) AND (workspace_id = core.current_workspace()))) ` +
+      `WITH CHECK (((organisation_id = core.current_org()) AND (workspace_id = core.current_workspace()))); ` +
+      `ALTER TABLE ${s2}.venue ADD COLUMN IF NOT EXISTS d_probe text`;
+    const undeclared = cmd('DropUndeclared', 110, { sql: recreate, structure: { level: 21, fingerprints: {} } });
+    const out = await runner({ workspaceRegistry: { '0-7': [undeclared] }, workspaceIds: [a.id] });
+    expect(out.failures.map((f) => f.errorClass)).toEqual(['UNDECLARED_DROP']);
+    const declared = cmd('DropDeclared', 111, { sql: recreate, structure: { level: 21, fingerprints: {}, mayDrop: true } });
+    const out2 = await runner({ workspaceRegistry: { '0-7': [declared] }, workspaceIds: [b.id] });
+    expect(out2.failures).toEqual([]);
+    expect(await fingerprint(b)).toBe(level21);
   });
 
   it('idempotent after a crash between COMMIT and the logbook row: the step re-runs and completes', async () => {

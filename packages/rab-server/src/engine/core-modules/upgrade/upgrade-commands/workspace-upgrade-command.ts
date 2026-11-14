@@ -43,6 +43,13 @@ export interface WorkspaceStructureDeclaration {
    * this level; without it the SQL provisioner is reported "behind" and the API / Worker refuse to start.
    */
   readonly provisionFunctionLiteral?: string;
+  /**
+   * D6: the command DROPS (or drop-and-recreates) objects: a schema, relation, constraint, policy, trigger, function, type or
+   * rule. Only then does the runner take the full outside-object counts before the command (≈0.8 s per workspace at 1,000
+   * workspaces); an undeclared drop is refused (UNDECLARED_DROP). Additive commands (ADD COLUMN, CREATE INDEX, CREATE
+   * POLICY, ALTER …) leave it unset.
+   */
+  readonly mayDrop?: boolean;
 }
 
 export interface WorkspaceUpgradeCommand {

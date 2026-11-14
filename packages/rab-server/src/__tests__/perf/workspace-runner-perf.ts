@@ -24,7 +24,8 @@ const PHASE = process.env.PERF_PHASE ?? 'all';
 const PREFIX = 'perf-ws';
 const out = (line: string) => process.stdout.write(`[d6] ${line}\n`);
 
-const CONCURRENCY = Math.max(1, Math.min(4, Number.parseInt(process.env.PERF_SEED_CONCURRENCY ?? '3', 10)));
+// Default 1: parallel provisioning deadlocks in the provisioning functions (observed with 3 on PG16), so seeding is serial.
+const CONCURRENCY = Math.max(1, Math.min(4, Number.parseInt(process.env.PERF_SEED_CONCURRENCY ?? '1', 10)));
 
 async function seed(adminUrl: string): Promise<void> {
   const probe = new Client({ connectionString: adminUrl });

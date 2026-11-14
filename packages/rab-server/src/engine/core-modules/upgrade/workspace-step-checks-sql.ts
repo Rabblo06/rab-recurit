@@ -121,7 +121,9 @@ SELECT c.oid::text AS relid, c.what, c.n::text AS n FROM c WHERE c.n > 0`;
  * enforced per run (N1). Compared as a delta, like the user-table counters.
  */
 export const CATALOG_WRITE_COUNTERS_SQL = `SELECT pg_catalog.sum(pg_catalog.pg_stat_get_xact_tuples_inserted(c.oid) + pg_catalog.pg_stat_get_xact_tuples_updated(c.oid)
-         + pg_catalog.pg_stat_get_xact_tuples_deleted(c.oid))::text AS n
+         + pg_catalog.pg_stat_get_xact_tuples_deleted(c.oid))::text AS n,
+       pg_catalog.sum(CASE WHEN c.relname IN ('pg_namespace', 'pg_class', 'pg_constraint', 'pg_policy', 'pg_trigger', 'pg_proc', 'pg_type', 'pg_rewrite')
+                           THEN pg_catalog.pg_stat_get_xact_tuples_deleted(c.oid) ELSE 0 END)::text AS dropped
   FROM pg_catalog.pg_class c
  WHERE c.relnamespace = 'pg_catalog'::pg_catalog.regnamespace AND c.relkind = 'r'
    AND c.relname NOT IN ('pg_statistic', 'pg_statistic_ext_data')`;

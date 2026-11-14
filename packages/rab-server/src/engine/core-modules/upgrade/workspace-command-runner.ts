@@ -467,10 +467,11 @@ export class WorkspaceCommandRunner {
       await this.enterWorkspace(q, ws);
       const level = await this.lockRegistry(q, ws);
       const before = await this.invariants(q);
-      const [catalogBefore] = (await q(CATALOG_WRITE_COUNTERS_SQL)) as Array<{ n: string | null }>;
-      // D6: the outside object counts (a full catalog read) are taken only for a STRUCTURAL step; a data step may not write
-      // any catalog at all (refused below), so it needs neither the counts nor the catalog scans.
-      const countsBefore = command.structure ? ((await q(OUTSIDE_COUNTS_SQL, [ws.schemaName])) as Array<{ counts: string }>)[0] : undefined;
+      const [catalogBefore] = (await q(CATALOG_WRITE_COUNTERS_SQL)) as Array<{ n: string | null; dropped: string | null }>;
+      // D6: the outside object counts (a full catalog read) exist only to see DROPs (a deleted catalog row leaves no xmin). They
+      // are taken only for a structural step that declares mayDrop; a data step may not write any catalog at all, and any
+      // other step that deletes a counted catalog row is refused below (UNDECLARED_DROP).
+      const countsBefore = command.structure?.mayDrop ? ((await q(OUTSIDE_COUNTS_SQL, [ws.schemaName])) as Array<{ counts: string }>)[0] : undefined;
       const writesBefore = (await q(OUTSIDE_WRITE_COUNTERS_SQL, [ws.schemaName])) as Array<{ relid: string; what: string; n: string }>;
 
       let target = level;
@@ -503,14 +504,20 @@ export class WorkspaceCommandRunner {
       // counts, and (M1) data rows of any other table and the role / database / publication catalogs (per-transaction counters).
       // D6 gate: no catalog row written by the step = no DDL = the catalog scans cannot find anything. A DATA step that wrote a
       // catalog (DDL, GRANT, TRUNCATE, a temporary table, ALTER ROLE …) is refused outright: data steps never change structure.
-      const [catalogAfter] = (await q(CATALOG_WRITE_COUNTERS_SQL)) as Array<{ n: string | null }>;
+      const [catalogAfter] = (await q(CATALOG_WRITE_COUNTERS_SQL)) as Array<{ n: string | null; dropped: string | null }>;
       const ddl = BigInt(catalogAfter?.n ?? '0') !== BigInt(catalogBefore?.n ?? '0');
+      const dropped = BigInt(catalogAfter?.dropped ?? '0') !== BigInt(catalogBefore?.dropped ?? '0');
       if (ddl && !command.structure) throw new WorkspaceStepRefused('DDL_IN_DATA_STEP', `${name} is a data step but wrote the system catalogs (DDL); only a structural step may`);
+      if (dropped && !command.structure?.mayDrop) throw new WorkspaceStepRefused('UNDECLARED_DROP', `${name} dropped catalog objects but does not declare mayDrop`);
       if (ddl) {
+        // New or changed rows outside the schema: the xmin scan. Dropped rows outside: the counts (only with mayDrop; with no
+        // counted catalog row deleted, the counts cannot have changed).
         const outside = (await q(OUTSIDE_WRITES_SQL, [ws.schemaName])) as Array<{ what: string }>;
         if (outside.length) throw new WorkspaceStepRefused('OUTSIDE_SCHEMA', `${name} changed objects outside ${ws.schemaName}: ${outside.map((o) => o.what).join('; ')}`);
-        const [countsAfter] = (await q(OUTSIDE_COUNTS_SQL, [ws.schemaName])) as Array<{ counts: string }>;
-        if (countsBefore?.counts !== countsAfter?.counts) throw new WorkspaceStepRefused('OUTSIDE_SCHEMA', `${name} added or dropped objects outside ${ws.schemaName}`);
+        if (dropped) {
+          const [countsAfter] = (await q(OUTSIDE_COUNTS_SQL, [ws.schemaName])) as Array<{ counts: string }>;
+          if (countsBefore?.counts !== countsAfter?.counts) throw new WorkspaceStepRefused('OUTSIDE_SCHEMA', `${name} added or dropped objects outside ${ws.schemaName}`);
+        }
       }
       const writesAfter = (await q(OUTSIDE_WRITE_COUNTERS_SQL, [ws.schemaName])) as Array<{ relid: string; what: string; n: string }>;
       const data = [...increasedCounters(writesBefore, writesAfter), ...((await q(OUTSIDE_DATA_WRITES_SQL, [ws.schemaName])) as Array<{ what: string }>).map((o) => o.what)];
