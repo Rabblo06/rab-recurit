@@ -120,16 +120,38 @@ jobs:
 
   # Owner-login architecture: one injected statement runs with the schema owner's privileges (PT-01), so every dynamically
   # built SQL site needs a reviewed allow-comment (tools/check-sql-injection.cjs). A text scan, not a complete defence: the
-  # adversarial tests and code review remain required. No dependencies needed (Node built-ins only).
+  # adversarial tests and code review remain required. Part C2: the `${t.<table>}` businessTables exemption is decided on the
+  # TypeScript AST (tools/lib/business-table-ref.cjs), so the repo's `typescript` is installed; without it nothing is exempt.
   sql-injection-lint:
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
+      - uses: ./.github/actions/yarn-install
       - name: Dynamic SQL sites carry a reviewed allow-comment
         run: node tools/check-sql-injection.cjs
+
+  # Part C2 (HWS-AUDIT-C2-SIZING.md §7 layer 1): no NEW unqualified workspace business-table reference; the per-file
+  # baseline (tools/workspace-table-qualified.baseline.json) must match the tree exactly and may only shrink against the
+  # PR's base branch. Not in ci-security-gate's needs yet (making it required is a lead decision).
+  workspace-table-qualified:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+          fetch-depth: 0 # the --base step reads the base branch's baseline with git show
+      - uses: ./.github/actions/yarn-install
+      - name: The check's own tests
+        run: node --test tools/check-workspace-table-qualified.test.cjs
+      - name: Workspace business tables are schema-qualified (ratchet against the tree)
+        run: node tools/check-workspace-table-qualified.cjs
+      - name: The baseline only shrinks against the base branch
+        if: github.event_name == 'pull_request'
+        run: node tools/check-workspace-table-qualified.cjs --base "origin/${GITHUB_BASE_REF}"
 
   # Owner decision 2026-11-04 (BC-18, accepted like Twenty): the database no longer refuses the owner login's direct writes
   # to seven pre-auth tables, so the protection is app-level - every write must stay inside the reviewed owning code.
