@@ -672,6 +672,14 @@ async function clearLevel22WorkspaceReferences(manager: EntityManager, userId: s
     `SELECT current_setting('rab.organisation_id', true) AS org, current_setting('rab.workspace_id', true) AS workspace`,
   );
   for (const workspaceId of workspaceIds) {
+    // The registry rows are read under the workspace's own tenant binding (the production login sees nothing otherwise and
+    // would resolve no schema at all: N1 below would then retain every candidate).
+    bindBusinessSchema(manager, CORE_BUSINESS_SCHEMA, null);
+    await manager.query(`SELECT set_config('rab.organisation_id', $1, true), set_config('rab.workspace_id', $2, true), set_config('search_path', $3, true)`, [
+      organisationId,
+      workspaceId,
+      businessSearchPath(CORE_BUSINESS_SCHEMA),
+    ]);
     const physicalSchema = await resolveReadyPhysicalSchema(manager, workspaceId);
     if (physicalSchema === WORKSPACE_UPGRADING) throw new Level22Retain('workspace_upgrading');
     if (!physicalSchema) {
@@ -680,11 +688,7 @@ async function clearLevel22WorkspaceReferences(manager: EntityManager, userId: s
     }
     if (!(await isLevel22(manager, workspaceId))) continue;
     bindBusinessSchema(manager, physicalSchema, workspaceId);
-    await manager.query(`SELECT set_config('rab.organisation_id', $1, true), set_config('rab.workspace_id', $2, true), set_config('search_path', $3, true)`, [
-      organisationId,
-      workspaceId,
-      businessSearchPath(physicalSchema),
-    ]);
+    await manager.query(`SELECT set_config('search_path', $1, true)`, [businessSearchPath(physicalSchema)]);
     await withLevel22Visibility(manager, workspaceId, async () => {
       await clearWorkspaceUserReferences(manager, userId);
       const t = businessTables(manager);
