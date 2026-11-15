@@ -25,6 +25,9 @@
  *   MD-8   tools/check-rls-coverage.ts passes as crewflow_owner with the tables present.
  *   MD-9   owner batch 11 (Twenty syncable-entity alignment): every object / field row has a universal identifier, unique
  *          per workspace; custom rows get a generated version-4 UUID, built-in rows the sync's version-8 UUID.
+ *   MD-10  owner batch 11, condition 2: on the REAL request path (TenantContextService.runInTenantContext over a pooled
+ *          crewflow_owner DataSource) the bound workspace's rows are read / written, nothing without a binding, and nothing
+ *          of another workspace (read, update, delete or insert).
  */
 import { randomBytes, randomUUID } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
@@ -32,10 +35,14 @@ import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 
 import { Client } from 'pg';
-import { DataSource } from 'typeorm';
+import { DataSource, EntityManager } from 'typeorm';
 
 import { resolveIntegrationTestDatabase } from '../../database/typeorm/core/test-database-guard';
 import { METADATA_TABLES, TENANT_PREDICATE } from '../../database/typeorm/core/metadata-tables-sql';
+import { EnvironmentService } from '../../engine/core-modules/environment/environment.service';
+import { AuthContext } from '../../engine/core-modules/tenant/auth-context.interface';
+import { SchemaResolverService } from '../../engine/core-modules/tenant/schema-resolver.service';
+import { TenantContextService } from '../../engine/core-modules/tenant/tenant-context.service';
 import * as metadataEntities from '../../engine/metadata/entities';
 import { MetadataContextError, MetadataReadService } from '../../engine/metadata/services/metadata-read.service';
 
@@ -829,6 +836,202 @@ describeIfMetadata('metadata engine E1: the five metadata tables, FORCE RLS, the
       expect((await attempt(c, f2, pf2)).code).toBeNull();
       const [f3, pf3] = fieldInsert({ ...t, universal_identifier: UID.staffRef, object_metadata_id: A1.staff, type: 'TEXT', name: 'twinRef', label: 'X', physical_column: 'twin_ref', is_custom: false, is_locked: true });
       expect(await attempt(c, f3, pf3)).toMatchObject({ code: '23505', constraint: 'field_metadata_universal_identifier_uq' });
+    });
+  });
+
+  // ----------------------------------------------------------------------------------------------------------- MD-10
+  /**
+   * Owner batch 11, condition 2. The binding is TenantContextService.runInTenantContext itself (RESET ROLE, the folded
+   * set_config SELECT, search_path core, the current_user = session_user check), on a pooled DataSource of the runtime login,
+   * exactly as every request reaches the database. crewflow_owner reaches the metadata tables through its membership of the
+   * owner role crewflow (INHERIT, bootstrap.ts), never through crewflow_app (ADMIN only, no INHERIT / SET), so FORCE RLS, the
+   * one tenant policy and the guard are the whole boundary. Request-path writes are undone by throwing ROLLBACK.
+   */
+  describe('MD-10 owner condition 2: as crewflow_owner on the request path (TenantContextService)', () => {
+    let ds: DataSource;
+    let tenant: TenantContextService;
+    const ROLLBACK = new Error('md-10: roll back the request-path writes');
+    const hwsOff = { get: (key: string) => (key === 'HWS_RUNTIME_ENABLED' ? false : undefined) } as unknown as EnvironmentService;
+    const noResolver = { resolve: async () => Promise.reject(new Error('the schema resolver is never reached with HWS off')) } as unknown as SchemaResolverService;
+    const ctxOf = (org: string | null, workspace: string | null, user: string): AuthContext => ({ organisationId: org, workspaceId: workspace, userId: user, role: '' });
+    const pgError = (e: unknown) => {
+      const x = e as { code?: string; constraint?: string; driverError?: { code?: string; constraint?: string } };
+      return { code: x.driverError?.code ?? x.code ?? 'unknown', constraint: x.driverError?.constraint ?? x.constraint ?? null };
+    };
+    /** `sql` (a SELECT returning `n`) inside a savepoint of the request transaction. */
+    async function tryOn(m: EntityManager, sql: string, params: unknown[] = []): Promise<{ code: string | null; constraint: string | null; n: number }> {
+      await m.query('SAVEPOINT md_req');
+      try {
+        const rows = (await m.query(sql, params)) as Array<{ n: number }>;
+        await m.query('RELEASE SAVEPOINT md_req');
+        return { code: null, constraint: null, n: rows[0]!.n };
+      } catch (e) {
+        await m.query('ROLLBACK TO SAVEPOINT md_req');
+        return { ...pgError(e), n: 0 };
+      }
+    }
+    /** A data-modifying statement as a row count the request path can read (works the same for INSERT / UPDATE / DELETE). */
+    const counted = (dml: string) => `WITH w AS (${dml} RETURNING 1) SELECT count(*)::int AS n FROM w`;
+    /** Run fn on the request path and roll the transaction back (whatever fn wrote); returns fn's result. */
+    async function requestRolledBack<T>(ctx: AuthContext, fn: (m: EntityManager) => Promise<T>): Promise<T> {
+      let out: { value: T } | undefined;
+      await expect(
+        tenant.runInTenantContext(ctx, async (m) => {
+          out = { value: await fn(m) };
+          throw ROLLBACK;
+        }),
+      ).rejects.toBe(ROLLBACK);
+      return out!.value;
+    }
+    const visible = async (m: EntityManager, ws: Pick<Ws, 'org' | 'workspace'>) => {
+      const out: Record<string, { n: number; foreign: number }> = {};
+      for (const t of METADATA_TABLES) {
+        const r = ((await m.query(`SELECT count(*)::int AS n, count(*) FILTER (WHERE workspace_id <> $1 OR organisation_id <> $2)::int AS foreign FROM core.${t}`, [ws.workspace, ws.org])) as Array<{ n: number; foreign: number }>)[0]!;
+        out[t] = r;
+      }
+      return out;
+    };
+
+    beforeAll(async () => {
+      ds = new DataSource({ type: 'postgres', url: OWNER_URL, entities: [], synchronize: false, logging: false, extra: { max: 1, application_name: 'metadata-tables-spec-md10' } });
+      await ds.initialize();
+      tenant = new TenantContextService(ds, noResolver, hwsOff); // also installs the pool's RESET ROLE checkout hook
+    });
+    afterAll(async () => {
+      await ds?.destroy();
+    });
+
+    it('MD-10 the request identity: crewflow_owner, session = current user, the tenant bound, the tables reached through crewflow (not crewflow_app)', async () => {
+      const id = await tenant.runInTenantContext(ctxOf(A1.org, A1.workspace, A1.user), async (m) =>
+        ((await m.query(
+          `SELECT current_user::text AS cu, session_user::text AS su, core.current_org()::text AS org, core.current_workspace()::text AS ws,
+                  pg_has_role(current_user, 'crewflow', 'USAGE') AS via_owner,
+                  pg_has_role(current_user, 'crewflow_app', 'USAGE') AS via_app, (SELECT rolbypassrls FROM pg_roles WHERE rolname = current_user) AS bypass`,
+        )) as Array<Record<string, unknown>>)[0],
+      );
+      expect(id).toEqual({ cu: 'crewflow_owner', su: 'crewflow_owner', org: A1.org, ws: A1.workspace, via_owner: true, via_app: false, bypass: false });
+    });
+
+    it('MD-10 (1) reads and writes exactly the bound workspace’s metadata rows, on all five tables', async () => {
+      const expected = await countsOf(A1.workspace);
+      const custom = randomBytes(5).toString('hex');
+      const t = { organisation_id: A1.org, workspace_id: A1.workspace };
+      const out = await requestRolledBack(ctxOf(A1.org, A1.workspace, A1.user), async (m) => {
+        const before = await visible(m, A1);
+        const [oSql, oParams] = objectInsert({ ...t, name_singular: 'requestThing', name_plural: 'requestThings', label_singular: 'Thing', label_plural: 'Things', physical_table: `c_${custom}`, is_custom: true, allows_custom_fields: true });
+        const obj = ((await m.query(`${oSql} RETURNING id::text, universal_identifier::text AS uid`, oParams)) as Array<{ id: string; uid: string }>)[0]!;
+        const [fSql, fParams] = fieldInsert({ ...t, object_metadata_id: obj.id, type: 'SELECT', name: 'size', label: 'Size', physical_column: `cf_${custom}s`, is_custom: true });
+        const field = ((await m.query(`${fSql} RETURNING id::text, universal_identifier::text AS uid`, fParams)) as Array<{ id: string; uid: string }>)[0]!;
+        const writes = {
+          option: await tryOn(m, counted('INSERT INTO core.field_metadata_option (organisation_id, workspace_id, field_metadata_id, value, label) VALUES ($1, $2, $3, $4, $5)'), [A1.org, A1.workspace, field.id, 'small', 'Small']),
+          index: await tryOn(m, counted('INSERT INTO core.index_metadata (organisation_id, workspace_id, object_metadata_id, physical_name) VALUES ($1, $2, $3, $4)'), [A1.org, A1.workspace, obj.id, `ix_${custom}`]),
+          indexField: await tryOn(
+            m,
+            counted(`INSERT INTO core.index_field_metadata (organisation_id, workspace_id, index_metadata_id, object_metadata_id, field_metadata_id, position)
+                     SELECT $1, $2, i.id, i.object_metadata_id, $3, 0 FROM core.index_metadata i WHERE i.physical_name = $4`),
+            [A1.org, A1.workspace, field.id, `ix_${custom}`],
+          ),
+          objectUpdate: await tryOn(m, counted(`UPDATE core.object_metadata SET label_plural = 'Request things' WHERE id = $1`), [obj.id]),
+          fieldUpdate: await tryOn(m, counted(`UPDATE core.field_metadata SET label = 'Shoe size' WHERE id = $1`), [field.id]),
+          optionUpdate: await tryOn(m, counted(`UPDATE core.field_metadata_option SET label = 'S' WHERE field_metadata_id = $1`), [field.id]),
+          seededUpdate: await tryOn(m, counted(`UPDATE core.field_metadata SET label = 'Serial no.' WHERE id = $1`), [A1.equipmentSerial]),
+        };
+        const after = await visible(m, A1);
+        const deletes = {
+          option: await tryOn(m, counted('DELETE FROM core.field_metadata_option WHERE field_metadata_id = $1'), [field.id]),
+          object: await tryOn(m, counted('DELETE FROM core.object_metadata WHERE id = $1'), [obj.id]), // cascades its field, index, index field
+        };
+        return { before, after, writes, deletes, uids: [obj.uid[14], field.uid[14]], end: await visible(m, A1) };
+      });
+      const one = { code: null, constraint: null, n: 1 };
+      expect(out.writes).toEqual({ option: one, index: one, indexField: one, objectUpdate: one, fieldUpdate: one, optionUpdate: one, seededUpdate: one });
+      expect(out.deletes).toEqual({ option: one, object: one });
+      expect(out.uids).toEqual(['4', '4']);
+      for (const tbl of METADATA_TABLES) {
+        expect({ tbl, ...out.before[tbl] }).toEqual({ tbl, n: expected[tbl], foreign: 0 });
+        expect({ tbl, ...out.after[tbl] }).toEqual({ tbl, n: expected[tbl]! + 1, foreign: 0 });
+        expect({ tbl, ...out.end[tbl] }).toEqual({ tbl, n: expected[tbl], foreign: 0 });
+      }
+      expect(await countsOf(A1.workspace)).toEqual(expected); // rolled back
+      const serial = await asAdmin(async (c) => (await c.query<{ l: string }>('SELECT label AS l FROM core.field_metadata WHERE id = $1', [A1.equipmentSerial])).rows[0]!.l);
+      expect(serial).toBe('Serial number');
+    });
+
+    it('MD-10 (2) no binding: zero rows from every table and no write, on a bare pooled connection and through TenantContextService', async () => {
+      for (const tbl of METADATA_TABLES) {
+        const total = await asAdmin(async (c) => (await c.query<{ n: number }>(`SELECT count(*)::int AS n FROM core.${tbl}`)).rows[0]!.n);
+        expect({ tbl, nonZero: total > 0 }).toEqual({ tbl, nonZero: true });
+        const bare = ((await ds.query(`SELECT count(*)::int AS n FROM core.${tbl}`)) as Array<{ n: number }>)[0]!.n;
+        expect({ tbl, bare }).toEqual({ tbl, bare: 0 });
+      }
+      const zero = Object.fromEntries(METADATA_TABLES.map((tbl) => [tbl, { n: 0, foreign: 0 }]));
+      // no organisation and no workspace; and an organisation with no workspace (a manager mid-onboarding)
+      for (const ctx of [ctxOf(null, null, A1.user), ctxOf(A1.org, null, A1.user)]) {
+        const r = await requestRolledBack(ctx, async (m) => {
+          const [oSql, oParams] = objectInsert({ organisation_id: A1.org, workspace_id: A1.workspace, name_singular: 'unbound', name_plural: 'unbounds', label_singular: 'U', label_plural: 'U', physical_table: `c_${randomBytes(4).toString('hex')}`, is_custom: true, allows_custom_fields: true });
+          return {
+            seen: await visible(m, A1),
+            insert: (await tryOn(m, counted(oSql), oParams)).code,
+            update: await tryOn(m, counted(`UPDATE core.object_metadata SET label_plural = 'pwned' WHERE id = $1`), [A1.equipment]),
+            delete: await tryOn(m, counted('DELETE FROM core.field_metadata_option WHERE workspace_id = $1'), [A1.workspace]),
+          };
+        });
+        expect({ org: ctx.organisationId, ...r }).toEqual({ org: ctx.organisationId, seen: zero, insert: '42501', update: { code: null, constraint: null, n: 0 }, delete: { code: null, constraint: null, n: 0 } });
+      }
+    });
+
+    it('MD-10 (3) no access to another workspace: its rows are unreadable, untouchable and cannot be created (same and other organisation)', async () => {
+      const before = { a2: await countsOf(A2.workspace), b1: await countsOf(B1.workspace) };
+      const others = [A2, B1];
+      const ws = others.map((o) => o.workspace);
+      const r = await requestRolledBack(ctxOf(A1.org, A1.workspace, A1.user), async (m) => {
+        const reads: Record<string, number> = {};
+        for (const tbl of METADATA_TABLES) reads[tbl] = ((await m.query(`SELECT count(*)::int AS n FROM core.${tbl} WHERE workspace_id = ANY($1::uuid[])`, [ws])) as Array<{ n: number }>)[0]!.n;
+        reads.byId = ((await m.query('SELECT count(*)::int AS n FROM core.object_metadata WHERE id = ANY($1::uuid[])', [others.map((o) => o.equipment)])) as Array<{ n: number }>)[0]!.n;
+        const updates = {
+          object_metadata: await tryOn(m, counted(`UPDATE core.object_metadata SET label_plural = 'pwned' WHERE workspace_id = ANY($1::uuid[])`), [ws]),
+          field_metadata: await tryOn(m, counted(`UPDATE core.field_metadata SET label = 'pwned' WHERE workspace_id = ANY($1::uuid[])`), [ws]),
+          field_metadata_option: await tryOn(m, counted(`UPDATE core.field_metadata_option SET label = 'pwned' WHERE workspace_id = ANY($1::uuid[])`), [ws]),
+          index_metadata: await tryOn(m, counted('UPDATE core.index_metadata SET is_active = false WHERE workspace_id = ANY($1::uuid[])'), [ws]),
+          index_field_metadata: await tryOn(m, counted('UPDATE core.index_field_metadata SET position = 2 WHERE workspace_id = ANY($1::uuid[])'), [ws]),
+        };
+        const deletes: Record<string, unknown> = {};
+        for (const tbl of [...METADATA_TABLES].reverse()) deletes[tbl] = await tryOn(m, counted(`DELETE FROM core.${tbl} WHERE workspace_id = ANY($1::uuid[])`), [ws]);
+        const inserts: Record<string, string | null> = {};
+        for (const o of others) {
+          const t = { organisation_id: o.org, workspace_id: o.workspace };
+          const [oSql, oParams] = objectInsert({ ...t, name_singular: 'smuggled', name_plural: 'smuggleds', label_singular: 'S', label_plural: 'S', physical_table: `c_${randomBytes(4).toString('hex')}`, is_custom: true, allows_custom_fields: true });
+          const [fSql, fParams] = fieldInsert({ ...t, object_metadata_id: o.equipment, type: 'TEXT', name: 'smuggled', label: 'S', physical_column: 'cf_smuggled1', is_custom: true });
+          inserts[`${o.tag}.object`] = (await tryOn(m, counted(oSql), oParams)).code;
+          inserts[`${o.tag}.field`] = (await tryOn(m, counted(fSql), fParams)).code;
+          inserts[`${o.tag}.option`] = (await tryOn(m, counted('INSERT INTO core.field_metadata_option (organisation_id, workspace_id, field_metadata_id, value, label) VALUES ($1, $2, $3, $4, $5)'), [o.org, o.workspace, o.equipmentSerial, 'smuggled', 'S'])).code;
+          inserts[`${o.tag}.index`] = (await tryOn(m, counted('INSERT INTO core.index_metadata (organisation_id, workspace_id, object_metadata_id, physical_name) VALUES ($1, $2, $3, $4)'), [o.org, o.workspace, o.equipment, 'ix_smuggled1'])).code;
+          inserts[`${o.tag}.indexField`] = (await tryOn(m, counted('INSERT INTO core.index_field_metadata (organisation_id, workspace_id, index_metadata_id, object_metadata_id, field_metadata_id, position) VALUES ($1, $2, $3, $4, $5, 1)'), [o.org, o.workspace, o.equipmentIndex, o.equipment, o.equipmentName])).code;
+          // own tenant columns, the other workspace's parent: refused by the composite key / the guard's parent lookup
+          const [xSql, xParams] = fieldInsert({ organisation_id: A1.org, workspace_id: A1.workspace, object_metadata_id: o.equipment, type: 'TEXT', name: 'crossRef', label: 'X', physical_column: 'cf_crossref1', is_custom: true });
+          inserts[`${o.tag}.crossParent`] = (await tryOn(m, counted(xSql), xParams)).code;
+        }
+        // moving an own row into another workspace
+        const move = (await tryOn(m, counted('UPDATE core.object_metadata SET workspace_id = $2, organisation_id = $3 WHERE id = $1'), [A1.equipment, A2.workspace, A2.org])).code;
+        return { reads, updates, deletes, inserts, move };
+      });
+      const none = { code: null, constraint: null, n: 0 };
+      expect(r.reads).toEqual({ ...Object.fromEntries(METADATA_TABLES.map((tbl) => [tbl, 0])), byId: 0 });
+      expect(r.updates).toEqual(Object.fromEntries(METADATA_TABLES.map((tbl) => [tbl, none])));
+      expect(r.deletes).toEqual(Object.fromEntries(METADATA_TABLES.map((tbl) => [tbl, none])));
+      // An object row is refused by WITH CHECK (42501). A child row is refused before that by the guard's parent lookup or the
+      // composite key: the parent is invisible under RLS, so it reads exactly like a parent that does not exist (23503).
+      for (const o of others) {
+        expect(r.inserts[`${o.tag}.object`]).toBe('42501');
+        for (const k of ['field', 'option', 'index', 'indexField', 'crossParent']) expect({ k: `${o.tag}.${k}`, code: ['42501', '23503'].includes(String(r.inserts[`${o.tag}.${k}`])) }).toEqual({ k: `${o.tag}.${k}`, code: true });
+      }
+      expect(r.move).toBe('42501');
+      // a mismatched binding (organisation B, workspace A1) sees nothing either
+      const mismatched = await requestRolledBack(ctxOf(B1.org, A1.workspace, B1.user), (m) => visible(m, A1));
+      expect(mismatched).toEqual(Object.fromEntries(METADATA_TABLES.map((tbl) => [tbl, { n: 0, foreign: 0 }])));
+      expect({ a2: await countsOf(A2.workspace), b1: await countsOf(B1.workspace) }).toEqual(before);
+      const label = await asAdmin(async (c) => (await c.query<{ l: string }>('SELECT label_plural AS l FROM core.object_metadata WHERE id = $1', [A2.equipment])).rows[0]!.l);
+      expect(label).toBe('Equipment');
     });
   });
 
