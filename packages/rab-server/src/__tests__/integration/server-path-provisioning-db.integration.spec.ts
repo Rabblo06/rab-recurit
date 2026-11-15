@@ -1,4 +1,5 @@
 import 'reflect-metadata';
+import { selectWorkspaceFingerprintsForServer } from '../../database/typeorm/workspace-schema/v1/expected-fingerprints';
 import { Client } from 'pg';
 
 import { resolveIntegrationTestDatabase } from '../../database/typeorm/core/test-database-guard';
@@ -163,6 +164,9 @@ describeIfDb('server-path workspace provisioning — database layer (crewflow_ap
     await admin.connect();
     const [{ rolsuper }] = (await admin.query(`SELECT rolsuper FROM pg_roles WHERE rolname = current_user`)).rows;
     if (!rolsuper) throw new Error('this suite needs the disposable database bootstrap superuser as TEST_DATABASE_URL_UNPOOLED');
+    // The TypeScript provisioner compares against the fingerprints of THIS server's major (it read the PostgreSQL 16 table
+    // before, so §12.15 failed on 17 / 18: D-RUNNER.md §12.1 note).
+    await selectWorkspaceFingerprintsForServer(async (sql) => (await admin.query(sql)).rows);
   });
 
   afterAll(async () => {
@@ -530,7 +534,10 @@ describeIfDb('server-path workspace provisioning — database layer (crewflow_ap
   };
 
   it.each([
-    ['a missing RLS policy', (s: string) => `DROP POLICY staff_profile_shift_team_select ON ${s}.staff_profile`, 'verification failed: policy count'],
+    // Part D level 21 (42 policies): during provisioning no registry version is visible, so the verify function accepts every
+    // KNOWN policy count (39, 41, 42); ONE missing policy (41) is then caught by the level-21 v2 fingerprint instead, TWO by the count.
+    ['a missing RLS policy', (s: string) => `DROP POLICY staff_profile_shift_team_select ON ${s}.staff_profile`, /^verification failed: fingerprint [0-9a-f]{64} does not match the expected fingerprint \(v2\) for structure level 21$/],
+    ['two missing RLS policies', (s: string) => `DROP POLICY staff_profile_shift_team_select ON ${s}.staff_profile; DROP POLICY staff_profile_member_select ON ${s}.staff_profile`, 'verification failed: policy count'],
     ['an incomplete schema (a table missing)', (s: string) => `DROP TABLE ${s}.payslip_document`, 'verification failed: table count'],
     ['FORCE RLS removed from a table', (s: string) => `ALTER TABLE ${s}.shift NO FORCE ROW LEVEL SECURITY`, 'verification failed: FORCE RLS'],
   ])('in-transaction verification detects %s: nothing is marked READY, everything rolls back, FAILED records the fixed label', async (_label, sql, expected) => {
@@ -538,7 +545,7 @@ describeIfDb('server-path workspace provisioning — database layer (crewflow_ap
     await tamperAfterBind(ws, `EXECUTE ${"'"}${sql(ws.schema).replace(/'/g, "''")}${"'"}`, async () => {
       expect(await provision(ws)).toBe('FAILED');
     });
-    expect(await state(ws)).toMatchObject({ schema_status: 'FAILED', registry: 'FAILED', relations: 0, schema_last_error: expected });
+    expect(await state(ws)).toMatchObject({ schema_status: 'FAILED', registry: 'FAILED', relations: 0, schema_last_error: typeof expected === 'string' ? expected : expect.stringMatching(expected) });
     expect(await provision(ws)).toBe('READY');
   });
 
@@ -559,7 +566,12 @@ describeIfDb('server-path workspace provisioning — database layer (crewflow_ap
     await c.connect();
     try {
       await c.query('SET ROLE crewflow');
+      // As every caller runs it: with the workspace's organisation bound, so the registry's structure level is visible (the
+      // per-level counts apply; with nothing bound only the KNOWN counts are checked and the fingerprint decides).
+      await c.query('BEGIN');
+      await c.query(`SELECT set_config('rab.organisation_id', $1, true)`, [ws.org]);
       expect((await c.query('SELECT core.verify_workspace_schema_v1($1) AS v', [ws.id])).rows[0].v).toBe(label);
+      await c.query('ROLLBACK');
     } finally {
       await c.end();
       // Test hygiene (F4, Wave 1 lane S): this READY workspace was broken on purpose. Left behind, it is real drift that the

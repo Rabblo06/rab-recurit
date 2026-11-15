@@ -45,6 +45,7 @@ import { provisionWorkspaceSchema, WORKSPACE_TABLES } from '../workspace-schema/
 import { pgClientRunner, WorkspaceSchemaMigrator } from '../workspace-schema/workspace-schema-migrator';
 import { LATEST_WORKSPACE_MODULE_VERSION, modulesThrough } from '../workspace-schema/workspace-schema-modules';
 import { runMigrateOnStart } from './migrate/owner-login/migrate-on-start';
+import { codeWorkspaceStructureLevel, declaredFingerprint, structuralCommandsThrough } from '../../../engine/core-modules/upgrade/workspace-structure-level';
 import { scramSha256Verifier } from './setup/migrator-role';
 
 const log = (line: string) => console.log(`[fingerprints] ${line}`); // eslint-disable-line no-console
@@ -177,6 +178,28 @@ async function legacyV14(c: Client, ws: Ws): Promise<void> {
 
 const fingerprint = async (c: Client, id: string) => (await c.query('SELECT core.workspace_schema_fingerprint($1) AS f', [id])).rows[0].f as string;
 
+/** Fingerprint v2 (D-RUNNER.md §9.1): what every structure level above the frozen 20 is declared and compared with. */
+const fingerprintV2 = async (c: Client, id: string) => ((await c.query('SELECT core.workspace_schema_fingerprint_v2($1) AS f', [id])).rows[0]?.f ?? null) as string | null;
+
+/**
+ * Part D: bring a module-20 workspace to this code's structure level the way the runner's steps do (each structural command's
+ * frozen SQL, as crewflow, search_path pg_catalog) and return its v2 fingerprint. The runner's own checks are proven by its
+ * integration specs; this proves "upgraded" equals "provisioned".
+ */
+async function upgradeToCodeLevel(c: Client, ws: Ws): Promise<string | null> {
+  await c.query('BEGIN');
+  try {
+    await c.query('SET LOCAL ROLE crewflow');
+    await c.query(`SELECT pg_catalog.set_config('search_path', 'pg_catalog, pg_temp', true)`);
+    for (const st of structuralCommandsThrough(codeWorkspaceStructureLevel())) await c.query(st.command.sql!(ws.schema));
+    await c.query('COMMIT');
+  } catch (error) {
+    await c.query('ROLLBACK');
+    throw error;
+  }
+  return fingerprintV2(c, ws.id);
+}
+
 /**
  * Regenerates EVERY version 14..LATEST on one throwaway database. The build loads the committed values plus
  * placeholders for the missing ones (fingerprint-append.ts buildPlaceholders); right after the chain the table holds the
@@ -213,16 +236,19 @@ async function regenerate(major: number, committed: Readonly<Record<number, stri
       if (t[v] === undefined) t[v] = out[v];
     }
     await c.query('RESET ROLE');
-    // Cross-check: a fresh TypeScript-provisioned workspace at the latest module equals the forward-migrated one.
+    // Cross-check: a fresh TypeScript-provisioned workspace equals the forward-migrated one. Part D: the provisioner builds
+    // this code's STRUCTURE level, so above 20 the migrated workspace first gets the structural commands and v2 is compared.
     const fresh = await seedWorkspace(c, `fp-ts-${RUN}`);
     await c.query('SET ROLE crewflow');
     const res = await provisionWorkspaceSchema(c, fresh.id);
     await c.query('RESET ROLE');
-    const tsFp = await fingerprint(c, fresh.id);
-    if (res.outcome !== 'READY' || tsFp !== out[LATEST_WORKSPACE_MODULE_VERSION]) {
-      throw new Error(`cross-check failed: TypeScript provisioner ${res.outcome} ${tsFp} vs migrated ${out[LATEST_WORKSPACE_MODULE_VERSION]}`);
+    const level = codeWorkspaceStructureLevel();
+    const tsFp = level > L ? await fingerprintV2(c, fresh.id) : await fingerprint(c, fresh.id);
+    const migratedFp = level > L ? await upgradeToCodeLevel(c, ws) : out[L];
+    if (res.outcome !== 'READY' || tsFp !== migratedFp) {
+      throw new Error(`cross-check failed: TypeScript provisioner ${res.outcome} ${tsFp} vs migrated ${migratedFp} (structure level ${level})`);
     }
-    log(`cross-check: the TypeScript provisioner at module ${LATEST_WORKSPACE_MODULE_VERSION} equals the v14 workspace migrated forward`);
+    log(`cross-check: the TypeScript provisioner at structure level ${level} equals the v14 workspace migrated forward`);
   });
   return { db, out };
 }
@@ -285,12 +311,18 @@ async function verify(major: number): Promise<void> {
     const [o] = await new WorkspaceSchemaMigrator(pgClientRunner(c)).migrateAll({ workspaceIds: [legacy.id], appVersion: 'fingerprint-verify' });
     await c.query('RESET ROLE');
     results.push(`v14 -> ${L} ${o?.status} ${(await fingerprint(c, legacy.id)) === t[L] ? 'OK' : 'MISMATCH'}`);
+    // Part D: above module 20 every path is compared at this code's STRUCTURE level, with fingerprint v2 against the value
+    // declared on the structural command (none declared for this major = MISMATCH, never a pass).
+    const level = codeWorkspaceStructureLevel();
+    const want = level > L ? declaredFingerprint(level, major as 16 | 17 | 18) : t[L];
+    const atLevel = async (id: string) => (level > L ? fingerprintV2(c, id) : fingerprint(c, id));
+    if (level > L) results.push(`v${L} -> structure level ${level} ${want && (await upgradeToCodeLevel(c, legacy)) === want ? 'OK' : 'MISMATCH'}`);
 
     const ts = await seedWorkspace(c, `fpv-ts-${RUN}`);
     await c.query('SET ROLE crewflow');
     const tsRes = await provisionWorkspaceSchema(c, ts.id);
     await c.query('RESET ROLE');
-    results.push(`typescript ${tsRes.outcome} ${(await fingerprint(c, ts.id)) === t[L] ? 'OK' : 'MISMATCH'}`);
+    results.push(`typescript ${tsRes.outcome} ${want && (await atLevel(ts.id)) === want ? 'OK' : 'MISMATCH'}`);
 
     // The server path as the RUNTIME login, which is the owner login (owner-login architecture); no other role is unlocked.
     const srv = await seedWorkspace(c, `fpv-srv-${RUN}`);
@@ -301,10 +333,10 @@ async function verify(major: number): Promise<void> {
       await owner.query('COMMIT');
       return rows[0].o as string;
     });
-    results.push(`server path ${outcome} ${(await fingerprint(c, srv.id)) === t[L] ? 'OK' : 'MISMATCH'}`);
+    results.push(`server path ${outcome} ${want && (await atLevel(srv.id)) === want ? 'OK' : 'MISMATCH'}`);
     for (const r of results) log(`  ${r}`);
     if (results.some((r) => !/ OK$/.test(r) || /FAILED|REFUSED/.test(r))) throw new Error('verification FAILED');
-    log(`PostgreSQL ${major}: every provisioning path produces the committed fingerprints (v14 and v${L})`);
+    log(`PostgreSQL ${major}: every provisioning path produces the committed fingerprints (v14, v${L}${level > L ? ` and structure level ${level} (v2)` : ''})`);
   });
 }
 

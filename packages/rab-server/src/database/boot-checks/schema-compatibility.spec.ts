@@ -6,6 +6,10 @@ import {
   ProvisionFunctionState,
 } from '../typeorm/workspace-schema/provision-function-versions';
 import { LATEST_WORKSPACE_MODULE_VERSION } from '../typeorm/workspace-schema/workspace-schema-modules';
+import { codeWorkspaceStructureLevel } from '../../engine/core-modules/upgrade/workspace-structure-level';
+import { STAFF_PROFILE_MEMBER_SELECT_PROVISION_LITERAL } from '../../engine/core-modules/upgrade/upgrade-commands/0-6/staff-profile-member-select';
+/** Part D: the code's structure level (21 since StaffProfileMemberSelect); every gate compares against it. */
+const CODE_LEVEL = codeWorkspaceStructureLevel();
 import {
   assertSchemaCompatible,
   assessSchemaCompatibility,
@@ -29,9 +33,9 @@ const PROCESSES: CompatibilityProcess[] = ['api', 'worker', 'cli', 'provisioner'
 
 const CURRENT_FN: ProvisionFunctionState = {
   state: 'known',
-  // Owner-login PAY-1: module 20 (WorkspaceGrantParityGuards1786721430000) is the current body (v20 fingerprint pending).
-  literal: 'db:provision_workspace@WorkspaceGrantParityGuards1786721430000',
-  moduleVersion: LATEST_WORKSPACE_MODULE_VERSION,
+  // Part D: structure level 21 (WorkspaceStaffMemberSelect1786721480000, declared on its workspace command) is the current body.
+  literal: STAFF_PROFILE_MEMBER_SELECT_PROVISION_LITERAL,
+  moduleVersion: CODE_LEVEL,
 };
 
 type Outcome = 'refuse' | 'warn' | 'ok';
@@ -133,7 +137,7 @@ describe('compatibility matrix per process type', () => {
   });
 
   it('(d3) known body ahead of the code (image rollback): API/Worker warn; provisioner and migrate-apply refuse', () => {
-    const ahead: ProvisionFunctionState = { state: 'known', literal: 'db:provision_workspace@Next', moduleVersion: LATEST_WORKSPACE_MODULE_VERSION + 1 };
+    const ahead: ProvisionFunctionState = { state: 'known', literal: 'db:provision_workspace@Next', moduleVersion: CODE_LEVEL + 1 };
     table({ api: 'warn', worker: 'warn', cli: 'ok', provisioner: 'refuse', 'migrate-check': 'ok', 'migrate-apply': 'refuse' }, { provisionFunction: ahead });
     table({ api: 'warn', worker: 'warn', cli: 'ok', provisioner: 'refuse', 'migrate-check': 'ok', 'migrate-apply': 'refuse' }, { provisionFunction: ahead }, true);
     // Same through the frozen map with an older code level (what a rolled-back image sees).
@@ -143,13 +147,13 @@ describe('compatibility matrix per process type', () => {
   });
 
   it('(c1) a READY workspace below LATEST: rab-migrate apply refuses (post-check); the provisioner leaves it to the migrator', () => {
-    const behind = [{ workspaceId: 'w-behind', moduleVersion: LATEST_WORKSPACE_MODULE_VERSION - 1 }];
+    const behind = [{ workspaceId: 'w-behind', moduleVersion: CODE_LEVEL - 1 }];
     table({ api: 'ok', worker: 'ok', cli: 'ok', provisioner: 'ok', 'migrate-check': 'ok', 'migrate-apply': 'refuse' }, { workspaces: behind });
     expect(findings('migrate-apply', { workspaces: behind })).toEqual(['workspace-behind']);
   });
 
   it('(c2) a READY workspace above LATEST: the provisioner and migrate-apply refuse; the API/Worker check it per request instead', () => {
-    const ahead = [{ workspaceId: 'w-ahead', moduleVersion: LATEST_WORKSPACE_MODULE_VERSION + 1 }];
+    const ahead = [{ workspaceId: 'w-ahead', moduleVersion: CODE_LEVEL + 1 }];
     table({ api: 'ok', worker: 'ok', cli: 'ok', provisioner: 'refuse', 'migrate-check': 'ok', 'migrate-apply': 'refuse' }, { workspaces: ahead });
     expect(findings('provisioner', { workspaces: ahead })).toEqual(['workspace-ahead']);
   });
@@ -231,7 +235,7 @@ describe('checkSchemaCompatibility (reads over an injected query)', () => {
     return { query, seen };
   }
   // The current (module 20) body; older bodies are now "behind" for the API/Worker and refused for the provisioner.
-  const guards = `... 'db:provision_workspace@WorkspaceGrantParityGuards1786721430000' ...`;
+  const guards = `... '${STAFF_PROFILE_MEMBER_SELECT_PROVISION_LITERAL}' ...`;
 
   it('an unreadable ledger and an empty migration list refuse (gate pending-migrations), never pass', async () => {
     const err = Object.assign(new Error('permission denied'), { code: '42501' });
@@ -272,14 +276,14 @@ describe('checkSchemaCompatibility (reads over an injected query)', () => {
     const f = fakeQuery({
       prosrc: guards,
       workspaces: [
-        { id: 'w1', org: 'o1', status: 'READY', v: LATEST_WORKSPACE_MODULE_VERSION },
+        { id: 'w1', org: 'o1', status: 'READY', v: CODE_LEVEL },
         { id: 'w2', org: 'o2', status: 'CREATING', v: 0 },
-        { id: 'w3', org: 'o3', status: 'READY', v: LATEST_WORKSPACE_MODULE_VERSION + 1 },
+        { id: 'w3', org: 'o3', status: 'READY', v: CODE_LEVEL + 1 },
       ],
     });
     await expect(
       checkSchemaCompatibility(f.query, { process: 'provisioner', production: false, expected: CODE, label: 'provisioner process', workspaces: true }),
-    ).rejects.toMatchObject({ gate: 'schema-compatibility', findings: ['workspace-ahead'], message: expect.stringMatching(new RegExp(`w3@${LATEST_WORKSPACE_MODULE_VERSION + 1}`)) });
+    ).rejects.toMatchObject({ gate: 'schema-compatibility', findings: ['workspace-ahead'], message: expect.stringMatching(new RegExp(`w3@${CODE_LEVEL + 1}`)) });
     expect(f.seen.filter((s) => s === 'BEGIN')).toHaveLength(3);
     expect(f.seen.filter((s) => s === 'COMMIT')).toHaveLength(3);
   });
