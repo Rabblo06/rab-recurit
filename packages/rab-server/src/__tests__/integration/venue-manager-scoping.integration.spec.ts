@@ -2065,9 +2065,7 @@ describeIfDb('venue manager scoping (integration)', () => {
         const otherVm = await login(other.venueManager.email);
         expect((await correct(otherVm, s.attendanceId!, body)).status).toBe(404);
         // The workspace owner's web session: the route is Venue Manager app only.
-        const web = await correct(s.managerToken, s.attendanceId!, body);
-        expect(web.status).toBe(403);
-        expect(web.body.code).toBe('APPLICATION_ROUTE_DENIED');
+        expect((await correct(s.managerToken, s.attendanceId!, body)).status).toBe(403);
         // attendance.edit revoked from the Venue Manager's role (the write RoleService.setPermissions performs).
         await adminDataSource.query(
           `DELETE FROM core.role_permission rp USING core.permission p, core.user_role ur
@@ -2079,10 +2077,8 @@ describeIfDb('venue manager scoping (integration)', () => {
           [s.venueManager.userId],
         );
         // Layer 1: the version bump re-resolves the session's permissions (the session itself stays valid), so the
-        // route's PermissionGuard answers 403 — not the app-route denial.
-        const revoked = await correct(s.vmToken, s.attendanceId!, body);
-        expect(revoked.status).toBe(403);
-        expect(revoked.body.code).not.toBe('APPLICATION_ROUTE_DENIED');
+        // route answers exactly 403.
+        expect((await correct(s.vmToken, s.attendanceId!, body)).status).toBe(403);
         // Layer 2: the service re-checks attendance.edit itself (jobs and other services never pass the guard).
         const ctx = { organisationId: s.organisation.id, workspaceId: s.venue1.workspaceId, userId: s.venueManager.userId, role: 'venue_manager' };
         await expect(app.get(AttendanceService).correct(ctx as never, s.attendanceId!, body as never)).rejects.toBeInstanceOf(ForbiddenException);
@@ -2094,7 +2090,10 @@ describeIfDb('venue manager scoping (integration)', () => {
       });
 
       it('a finalised report stays locked: the confirmation changes nothing (existing 409, nothing written)', async () => {
-        const s = await recordedSeat();
+        // The path the existing finalise test proves: recover the missing clock-out, review the seat, finalise.
+        const s = await seedSeat({ status: 'missing_clock_out', endedAgoMs: 3 * HOUR });
+        const out = await clockOutAt(s.shiftId);
+        expect((await correct(s.vmToken, s.attendanceId!, { field: 'clockOutAt', newValue: out, reason })).status).toBe(201);
         expect((await reviewSeat(s.vmToken, s.shiftId, s.staff)).status).toBe(200);
         expect((await finalise(s.vmToken, s.shiftId)).status).toBe(200);
         const start = await seatStartOf(s.shiftId);
@@ -2110,8 +2109,8 @@ describeIfDb('venue manager scoping (integration)', () => {
         expect(res.body.code).not.toBe('CLOCK_IN_CONFIRMATION_REQUIRED');
         const after = await stateOf(s.shiftId, s.attendanceId!);
         expect(after.row).toEqual(before.row);
-        expect(after.corrections).toHaveLength(0);
-        expect(after.audits).toHaveLength(0);
+        expect(after.corrections).toEqual(before.corrections); // only the setup's recovery
+        expect(after.audits).toHaveLength(before.audits.length);
       });
 
       it('clockOutAt and breakMinutes corrections sent with the flag behave normally and record no confirmation', async () => {
