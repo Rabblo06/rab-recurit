@@ -111,7 +111,7 @@ export interface FixtureOptions {
 
 /** Obviously fake; the QR key is HKDF-derived from it exactly as in production. */
 export const FIXTURE_APP_SECRET = 'pdf-equality-fixture-app-secret-NOT-A-REAL-SECRET-0000000000';
-const FIXTURE_ENV: Record<string, unknown> = { APP_SECRET: FIXTURE_APP_SECRET, CLOCK_IN_EARLY_MINUTES: 15, QR_POST_SHIFT_GRACE_MINUTES: 120 };
+const FIXTURE_ENV: Record<string, unknown> = { APP_SECRET: FIXTURE_APP_SECRET, CLOCK_IN_EARLY_MINUTES: 15, QR_POST_SHIFT_GRACE_MINUTES: 120, QR_MAX_AGE_DAYS: 14 };
 const env = { get: (key: string) => FIXTURE_ENV[key] } as never;
 export const fixtureQrTokens = new QrTokenService(new JwtService(), env);
 export const fixtureAttendanceQr = new AttendanceQrService(fixtureQrTokens, env);

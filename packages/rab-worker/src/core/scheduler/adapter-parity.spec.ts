@@ -61,7 +61,7 @@ import { WorkerDependencies, WorkerJobDependencies } from './worker-dependencies
  */
 const tag = (name: string) => ({ __dep: name });
 const ENV: Record<string, unknown> = {
-  CLOCK_IN_EARLY_MINUTES: 31, LATE_CLOCK_IN_GRACE_MINUTES: 7, REPORT_AVAILABLE_BEFORE_MINUTES: 60,
+  CLOCK_IN_EARLY_MINUTES: 31, LATE_CLOCK_IN_GRACE_MINUTES: 7, REPORT_AVAILABLE_BEFORE_MINUTES: 60, QR_POST_SHIFT_GRACE_MINUTES: 121,
   LOGIN_HANDOFF_CLEANUP_ENABLED: false, STORAGE_CLEANUP_PURGE_DELETED_IMAGES_AFTER_DAYS: 9, NODE_ENV: 'test',
   OUTBOX_RETENTION_ENABLED: true, OUTBOX_RETENTION_MODE: 'report', OUTBOX_RETENTION_EMAIL_DAYS: 90, OUTBOX_RETENTION_PUSH_DAYS: 30,
   OUTBOX_RETENTION_REALTIME_DAYS: 7, OUTBOX_RETENTION_WORKER_EVENT_DAYS: 30, OUTBOX_RETENTION_BATCH_SIZE: 1000, OUTBOX_RETENTION_MAX_BATCHES_PER_SCOPE: 20,
@@ -122,7 +122,7 @@ describe('scan adapters call the existing cycles exactly as main.ts did', () => 
     await p.shiftCancellationFollowup();
     const base = [d.runtimeDataSource, d.tenantContext, d.notificationService, d.auditService];
     expect((shiftMonitor.runShiftMonitorCycle as jest.Mock).mock.calls[0]).toEqual([...base, 31]);
-    expect((attendance.runAttendanceMonitorCycle as jest.Mock).mock.calls[0]).toEqual(base);
+    expect((attendance.runAttendanceMonitorCycle as jest.Mock).mock.calls[0]).toEqual([...base, 121]); // QR_POST_SHIFT_GRACE_MINUTES
     expect((late.runLateClockInCycle as jest.Mock).mock.calls[0]).toEqual([...base, 7]);
     expect((cancel.runShiftCancellationFollowupCycle as jest.Mock).mock.calls[0]).toEqual(base);
   });

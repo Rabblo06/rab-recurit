@@ -35,7 +35,7 @@ import { runShiftReportSchedulerCycle } from '../../queues/rab-reports/shift-rep
 
 const runtimeDataSource = { name: 'runtime' };
 const directDataSource = { name: 'direct' };
-const env: Record<string, number> = { CLOCK_IN_EARLY_MINUTES: 15, LATE_CLOCK_IN_GRACE_MINUTES: 10, REPORT_AVAILABLE_BEFORE_MINUTES: 180 };
+const env: Record<string, number> = { CLOCK_IN_EARLY_MINUTES: 15, LATE_CLOCK_IN_GRACE_MINUTES: 10, REPORT_AVAILABLE_BEFORE_MINUTES: 180, QR_POST_SHIFT_GRACE_MINUTES: 120 };
 const deps = {
   get: () => ({
     runtimeDataSource,
