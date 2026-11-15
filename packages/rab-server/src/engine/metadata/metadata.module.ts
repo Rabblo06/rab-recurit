@@ -4,7 +4,7 @@ import { MetadataReadService } from './services/metadata-read.service';
 
 /**
  * Metadata engine (OWNER-METADATA-ENGINE.md; M0-BACKEND.md §2.1): platform machinery under engine/, so it never imports
- * modules/ (CLAUDE.md). M1 / E1 ships only the read service; M1-cache (E5) and M1-sync (E2) import this module.
+ * modules/ (CLAUDE.md). M1 / E1 ships only the read service; later phases import this module.
  */
 @Module({
   providers: [MetadataReadService],
