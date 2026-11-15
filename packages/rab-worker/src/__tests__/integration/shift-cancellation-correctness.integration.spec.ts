@@ -577,7 +577,7 @@ describeIfDb('shift cancellation correctness (integration)', () => {
       const fx = await seedOrgFixture('attE20');
       const staff = await factory.createStaff(fx.organisation, { owner: fx.owner });
       const startsAt = new Date(Date.now() - 3 * 3600 * 1000);
-      const endsAt = new Date(Date.now() - 40 * 60 * 1000); // ended 40 min ago, past the 30 min grace
+      const endsAt = new Date(Date.now() - 150 * 60 * 1000); // ended 150 min ago, past the 120 min clock-out grace
       const { assignmentId } = await withContext(ctxOf(fx.owner), async (m) => {
         const shift = await m.save(Shift, { organisationId: fx.organisation.id, venueId: fx.venueId, jobRoleId: fx.jobRoleId, startsAt, endsAt, breakMinutes: 0, requiredCount: 1, payRatePence: 1500, status: ShiftStatus.CANCELLED, createdBy: fx.owner.userId, workspaceId: fx.owner.workspaceId! });
         const assignment = await m.save(ShiftAssignment, { organisationId: fx.organisation.id, shiftId: shift.id, staffProfileId: staff.profileId!, status: ShiftAssignmentStatus.CANCELLED, payRateSnapshotPence: 1500, assignedBy: fx.owner.userId, period: toTstzRange(startsAt, endsAt), workspaceId: fx.owner.workspaceId! });
@@ -590,7 +590,7 @@ describeIfDb('shift cancellation correctness (integration)', () => {
       // running suite's own unrelated attendance row. The only assertion
       // that is actually about THIS fixture is that nothing was flagged for
       // THIS assignment specifically, checked below.
-      await runAttendanceMonitorCycle(adminDataSource, tenantContext, notificationService, auditService);
+      await runAttendanceMonitorCycle(adminDataSource, tenantContext, notificationService, auditService, app.get(EnvironmentService).get('QR_POST_SHIFT_GRACE_MINUTES'));
       expect(await countAudit(fx, 'shift_assignment.missing_clock_out_flagged', assignmentId)).toBe(0);
       const notifications = await withContext(ctxOf(fx.owner), (m) => m.query<Array<{ count: string }>>(`SELECT count(*) FROM core.notification WHERE related_entity_id = $1`, [assignmentId]));
       expect(Number(notifications[0]!.count)).toBe(0);
@@ -599,8 +599,8 @@ describeIfDb('shift cancellation correctness (integration)', () => {
     it('E21/E22: existing genuine attendance is preserved (never deleted, never touched) after cancellation, and the missing-clock-out FLAG (a label/notification only) is suppressed consistently with the discovery query\'s own exclusion', async () => {
       const fx = await seedOrgFixture('attE21');
       const staff = await factory.createStaff(fx.organisation, { owner: fx.owner });
-      const startsAt = new Date(Date.now() - 3 * 3600 * 1000);
-      const endsAt = new Date(Date.now() - 40 * 60 * 1000);
+      const startsAt = new Date(Date.now() - 5 * 3600 * 1000);
+      const endsAt = new Date(Date.now() - 150 * 60 * 1000); // past the 120-min clock-out grace: only the cancellation suppresses the flag
       const { shiftId, assignmentId, attendanceId, clockInAt } = await withContext(ctxOf(fx.owner), async (m) => {
         const shift = await m.save(Shift, { organisationId: fx.organisation.id, venueId: fx.venueId, jobRoleId: fx.jobRoleId, startsAt, endsAt, breakMinutes: 0, requiredCount: 1, payRatePence: 1500, status: ShiftStatus.CONFIRMED, createdBy: fx.owner.userId, workspaceId: fx.owner.workspaceId! });
         const assignment = await m.save(ShiftAssignment, { organisationId: fx.organisation.id, shiftId: shift.id, staffProfileId: staff.profileId!, status: ShiftAssignmentStatus.CONFIRMED, payRateSnapshotPence: 1500, assignedBy: fx.owner.userId, confirmedAt: new Date(), period: toTstzRange(startsAt, endsAt), workspaceId: fx.owner.workspaceId! });
@@ -611,7 +611,7 @@ describeIfDb('shift cancellation correctness (integration)', () => {
       // Cancel the shift AFTER real attendance already exists — the shift found real work, then got called off.
       await withContext(ctxOf(fx.owner), (m) => m.update(Shift, shiftId, { status: ShiftStatus.CANCELLED, cancelledAt: new Date() }));
 
-      await runAttendanceMonitorCycle(adminDataSource, tenantContext, notificationService, auditService);
+      await runAttendanceMonitorCycle(adminDataSource, tenantContext, notificationService, auditService, app.get(EnvironmentService).get('QR_POST_SHIFT_GRACE_MINUTES'));
       const attendance = await withContext(ctxOf(fx.owner), (m) => m.findOneByOrFail(Attendance, { id: attendanceId }));
       // The clock-in fact itself is never touched, regardless of what the monitor decided about flagging.
       expect(attendance.clockInAt!.getTime()).toBe(clockInAt.getTime());

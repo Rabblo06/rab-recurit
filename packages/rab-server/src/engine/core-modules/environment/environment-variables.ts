@@ -1768,12 +1768,29 @@ export class EnvironmentVariables {
   @Min(0)
   CLOCK_IN_EARLY_MINUTES: number = 15;
 
-  /** The Shift QR (and the clock-out window) stays valid this many minutes past the shift's CURRENT `endsAt`, decided at scan time (`AttendanceQrService.validUntil`). */
+  /**
+   * The one post-shift grace for attendance (owner decision 2026-11-14), always measured from the staff member's OWN
+   * scheduled end (`effectiveAssignmentTime`): the Shift QR is accepted (`AttendanceQrService.validUntil`), Check In /
+   * Clock In / Clock Out are allowed (`AttendanceService.assertClockWindow`), and only AFTER it does the attendance
+   * monitor flag a still-open attendance MISSING_CLOCK_OUT and the manager's forgotten-clock-out recovery open.
+   */
   @IsOptional()
   @Type(() => Number)
   @IsInt()
   @Min(0)
+  @Max(1440)
   QR_POST_SHIFT_GRACE_MINUTES: number = 120;
+
+  /**
+   * Hard ceiling on a Shift QR's age (owner decision 2026-11-14), on top of the shift-based expiry: a QR whose `iat` is
+   * older than this many days is refused whatever the shift's end (`QrTokenService.verify`, jsonwebtoken `maxAge`).
+   */
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  @Max(90)
+  QR_MAX_AGE_DAYS: number = 14;
 
   /** The pre-shift roster+QR report is generated/emailed this many minutes before `shift.startsAt`. */
   @IsOptional()
