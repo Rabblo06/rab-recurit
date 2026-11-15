@@ -1812,7 +1812,9 @@ describeIfDb('venue manager scoping (integration)', () => {
     });
 
     it('never force-closes a shift still running: an open attendance before the monitor threshold is refused', async () => {
-      const s = await seedSeat({ status: 'clocked_in', endedAgoMs: 10 * 60_000 }); // ended 10 min ago (< 30 min threshold)
+      // Ended 100 min ago: inside the staff member's own 120-min clock-out grace (one grace since 2026-11-14), so they can
+      // still clock out themselves and the recovery stays closed.
+      const s = await seedSeat({ status: 'clocked_in', endedAgoMs: 100 * 60_000 });
       const res = await correct(s.vmToken, s.attendanceId!, { field: 'clockOutAt', newValue: await clockOutAt(s.shiftId), reason: 'Trying to close it early, should fail.' });
       expect(res.status).toBe(409);
       expect(res.body.message).toContain('still on shift');

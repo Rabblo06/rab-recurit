@@ -155,6 +155,8 @@ export const SHIPPED_AUDIT_ACTIONS: Readonly<Record<string, SecurityAuditClassif
   'workspace.subdomain_changed': c('security_configuration', 'warning'),
   'manager_workspace.subdomain_changed': c('security_configuration', 'warning'),
   'venue.geofence_updated': c('security_configuration', 'warning'),
+  // Revoking an attendance credential (every printed Shift QR for one shift), same trust class as the venue geofence.
+  'shift.qr_rotated': c('security_configuration', 'warning'),
   'report.integrity_failed': c('security_configuration', 'critical'),
 });
 

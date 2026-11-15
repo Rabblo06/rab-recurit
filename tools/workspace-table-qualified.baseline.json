@@ -104,6 +104,9 @@
     "packages/rab-server/src/modules/scheduling/services/availability.service.ts": {
       "unqualified": 1
     },
+    "packages/rab-server/src/modules/scheduling/services/rotate-shift-qr.sql.ts": {
+      "unqualified": 2
+    },
     "packages/rab-server/src/modules/scheduling/services/scheduling-assistant.service.ts": {
       "unqualified": 4
     },

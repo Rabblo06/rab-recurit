@@ -39,7 +39,7 @@ Email job IDs are `email-outbox.{id}.attempt.N`, so a re-dispatched outbox row c
 | Replacement staff | 2 min | Create a `replacement_request` with up to five ranked candidates. Never sends offers. |
 | Late clock-in | 2 min | Notify after `LATE_CLOCK_IN_GRACE_MINUTES`. |
 | Shift monitor | 5 min | 24 h / 2 h / 30 min reminders, clock-in window open, no-show, post-shift milestones. |
-| Attendance monitor | 5 min | `clocked_in → missing_clock_out` 30 minutes after the end. |
+| Attendance monitor | 5 min | `clocked_in → missing_clock_out` once `QR_POST_SHIFT_GRACE_MINUTES` (120) after the staff member's own end has passed. |
 | Shift report scheduler | 5 min | Roster PDF `REPORT_AVAILABLE_BEFORE_MINUTES` before the start. |
 | Final timesheet | 5 min | Render and email the final timesheet after finalisation. |
 | Account invite clean-up | 15 min | Expire and remove stale invitations. |

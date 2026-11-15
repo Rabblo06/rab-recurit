@@ -47,7 +47,7 @@ import { integrationTestDatabaseReady } from '@rab/server/database/typeorm/core/
  *   S1 reminder   confirmed, starts in 20 min           → shift-reminder-24h / -2h / -30m (clock-in-window opens at 15 min: not yet)
  *   S2 late       confirmed, started 15 min ago          → late-clock-in (grace 10); too early for no-show (30)
  *   S3 no-show    confirmed, started 45 min ago, no clock-in → no-show (+ late-clock-in ONLY if late-clock-in runs first)
- *   S4 clock-out  clocked in, assignment ended 45 min ago → missing-clock-out (attendance → missing_clock_out)
+ *   S4 clock-out  clocked in, assignment ended 150 min ago (past the 120-min clock-out grace) → missing-clock-out (attendance → missing_clock_out)
  *   S5 org B      confirmed, started 15 min ago          → late-clock-in recorded under organisation B
  *
  * FINDING pinned here (plan §D-Q4a "member order"): S3's late-clock-in event depends on which scan processes it first.
@@ -152,7 +152,7 @@ describeIfDb('D-Q4a characterisation: separate shift scans (equivalence baseline
 
   const late = () => runLateClockInCycle(dataSource, tenantContext, notificationService, auditService, GRACE_MINUTES);
   const monitor = () => runShiftMonitorCycle(dataSource, tenantContext, notificationService, auditService, CLOCK_IN_EARLY_MINUTES);
-  const attendance = () => runAttendanceMonitorCycle(dataSource, tenantContext, notificationService, auditService);
+  const attendance = () => runAttendanceMonitorCycle(dataSource, tenantContext, notificationService, auditService, app.get(EnvironmentService).get('QR_POST_SHIFT_GRACE_MINUTES'));
 
   async function seedAll(label: string) {
     const a = await seedOrg(`${label}a`);
@@ -162,7 +162,7 @@ describeIfDb('D-Q4a characterisation: separate shift scans (equivalence baseline
       s1: await seedSubject(a, new Date(now + 20 * MIN), new Date(now + 260 * MIN)),
       s2: await seedSubject(a, new Date(now - 15 * MIN), new Date(now + 225 * MIN)),
       s3: await seedSubject(a, new Date(now - 45 * MIN), new Date(now + 195 * MIN)),
-      s4: await seedSubject(a, new Date(now - 285 * MIN), new Date(now - 45 * MIN), { clockedInAt: new Date(now - 284 * MIN) }),
+      s4: await seedSubject(a, new Date(now - 390 * MIN), new Date(now - 150 * MIN), { clockedInAt: new Date(now - 389 * MIN) }),
       s5: await seedSubject(b, new Date(now - 15 * MIN), new Date(now + 225 * MIN)),
     };
   }

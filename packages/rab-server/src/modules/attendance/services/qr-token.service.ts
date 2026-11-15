@@ -24,6 +24,9 @@ import { EnvironmentService } from '../../../engine/core-modules/environment/env
  * `AttendanceQrService.validateQr` refuses it once now is past that shift's
  * CURRENT `endsAt` + `QR_POST_SHIFT_GRACE_MINUTES`, read fresh on every scan.
  *
+ * A hard ceiling still applies: `verify()` refuses any token whose `iat` is older than `QR_MAX_AGE_DAYS` (default 14),
+ * whatever the shift's end (owner decision 2026-11-14).
+ *
  * Why no `exp` is still fail-closed: `verify()` below only establishes that
  * WE issued the token for a given shift/venue/ver — it is never, on its own,
  * an "accept" decision. The only consumer is `AttendanceQrService.validateQr`,
@@ -80,11 +83,23 @@ export class QrTokenService {
   }
 
   /**
-   * Signature/algorithm/issuer/audience (and a legacy token's own `exp`, if it has one) only. Throws (caught by the
+   * Signature/algorithm/issuer/audience, the `QR_MAX_AGE_DAYS` age ceiling (and a legacy token's own `exp`, if it has one) only. Throws (caught by the
    * caller, mapped to a 409 `InvalidQrException`) — never a 500. NOT a complete validity check: the shift-based expiry
    * lives in `AttendanceQrService.validateQr`, the only caller allowed to turn this into an accept.
    */
   verify(token: string): QrTokenPayload {
-    return this.jwt.verify<QrTokenPayload>(token, { secret: this.secret(), algorithms: [ALGORITHM], issuer: ISSUER, audience: AUDIENCE });
+    return this.jwt.verify<QrTokenPayload>(token, { secret: this.secret(), algorithms: [ALGORITHM], issuer: ISSUER, audience: AUDIENCE, maxAge: this.maxAge() });
+  }
+
+  /**
+   * Hard age ceiling (owner decision 2026-11-14): `QR_MAX_AGE_DAYS` (default 14) measured from `iat`, enforced by
+   * jsonwebtoken's `maxAge` on top of the shift-based expiry. A token older than that fails as TokenExpiredError (mapped to
+   * `expired`); a token with no `iat` fails outright ("iat required when maxAge is specified", mapped to `invalid`).
+   * Fail closed: a missing or non-positive setting throws here rather than verifying without a ceiling.
+   */
+  private maxAge(): string {
+    const days = this.env.get('QR_MAX_AGE_DAYS');
+    if (!Number.isInteger(days) || days < 1) throw new Error('QR_MAX_AGE_DAYS must be a positive integer.');
+    return `${days}d`;
   }
 }

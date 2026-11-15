@@ -1,5 +1,5 @@
 import { assignmentTimeSql, effectiveAssignmentTime } from '@rab/server/modules/scheduling/utils/assignment-time';
-import { MISSING_CLOCK_OUT_GRACE_MINUTES } from '@rab/server/modules/attendance/services/missing-clock-out-policy';
+import { isPastClockOutGrace } from '@rab/server/modules/attendance/services/missing-clock-out-policy';
 import { ShiftAssignment } from '@rab/server/modules/scheduling/entities/shift-assignment.entity';
 import { assertTransition, ATTENDANCE_TRANSITIONS, AttendanceStatus, NotificationType, ShiftStatus } from '@rab/shared';
 import { DataSource, EntityManager } from 'typeorm';
@@ -40,8 +40,9 @@ import { discoverInWorkspaces } from '../../core/database/workspace-discovery';
  * a THIRD scan from ever re-selecting this row at all (`WHERE a.status =
  * 'clocked_in'` below no longer matches it), kept for defense in depth.
  */
-// Single policy shared with the manager's forgotten clock-out recovery (AttendanceService.correct).
-const MISSING_CLOCK_OUT_GRACE_MS = MISSING_CLOCK_OUT_GRACE_MINUTES * 60 * 1000;
+// Single policy shared with the staff member's own clock-out window and the manager's forgotten clock-out recovery
+// (missing-clock-out-policy.ts): flag only strictly AFTER the staff member's own end + QR_POST_SHIFT_GRACE_MINUTES, the
+// value every caller passes in (`clockOutGraceMinutes`) from the validated environment.
 
 export interface AttendanceMonitorResult {
   flagged: number;
@@ -62,6 +63,8 @@ interface ScanCandidate {
 export interface AttendanceMonitorDeps {
   notificationService: NotificationService;
   auditService: AuditService;
+  /** `QR_POST_SHIFT_GRACE_MINUTES`: the staff member's clock-out window after their own end (owner decision 2026-11-14). */
+  clockOutGraceMinutes: number;
 }
 
 export type AttendanceMonitorScope = Omit<ScanCandidate, 'attendance_id'>;
@@ -85,9 +88,10 @@ export async function runAttendanceMonitorCycle(
   tenantContext: TenantContextService,
   notificationService: NotificationService,
   auditService: AuditService,
+  clockOutGraceMinutes: number,
 ): Promise<AttendanceMonitorResult> {
   const scopes = await discoverInWorkspaces(ownerDataSource, tenantContext, discoverAttendanceMonitorScopes);
-  return processAttendanceMonitorScopes(tenantContext, { notificationService, auditService }, scopes);
+  return processAttendanceMonitorScopes(tenantContext, { notificationService, auditService, clockOutGraceMinutes }, scopes);
 }
 
 /** Everything after discovery, unchanged: per scope the overdue candidates (LIMIT 500), then one transaction per candidate. */
@@ -99,6 +103,9 @@ export async function processAttendanceMonitorScopes(
   // Discover eligible assignment IDs with all assignment RLS policies active.
   // Filtering before the per-workspace limit prevents later-ending attendance
   // from hiding shorter assignments that are already overdue.
+  // SQL-injection lint (owner login): the grace is a bound integer parameter, never text spliced into the interval literal.
+  const grace = deps.clockOutGraceMinutes;
+  if (!Number.isInteger(grace) || grace < 0) throw new Error('clockOutGraceMinutes must be a non-negative integer.');
   const candidates: ScanCandidate[] = [];
   for (const scope of scopes) {
     const due = await runScopedForOrg(tenantContext, scope.organisation_id, scope.workspace_id, (manager) => {
@@ -111,9 +118,9 @@ export async function processAttendanceMonitorScopes(
         JOIN ${t.shift_assignment} sa ON sa.id=a.shift_assignment_id
         WHERE a.status='clocked_in' AND a.clock_out_at IS NULL
           AND s.status!='cancelled'
-          AND ${assignmentTimeSql().end} <= now() - interval '${MISSING_CLOCK_OUT_GRACE_MS / 60000} minutes'
+          AND ${assignmentTimeSql().end} < now() - make_interval(mins => $1::int)
         ORDER BY ${assignmentTimeSql().end}, a.id LIMIT 500
-      `);
+      `, [grace]);
     });
     candidates.push(...due);
   }
@@ -135,7 +142,7 @@ export async function flagMissingClockOutCandidate(manager: EntityManager, deps:
   if (!attendance || attendance.status !== AttendanceStatus.CLOCKED_IN || attendance.clockOutAt) return false;
   const shift = await manager.findOne(Shift, { where: { id: attendance.shiftId } });
   const assignment = await manager.findOne(ShiftAssignment, { where: { id: attendance.shiftAssignmentId } });
-  if (!shift || !assignment || effectiveAssignmentTime(assignment, shift).endsAt.getTime() > Date.now() - MISSING_CLOCK_OUT_GRACE_MS) return false;
+  if (!shift || !assignment || !isPastClockOutGrace(effectiveAssignmentTime(assignment, shift).endsAt, deps.clockOutGraceMinutes, new Date())) return false;
   // PHASE 5 (§9) — the discovery scan already excludes `s.status =
       // 'cancelled'`, but this per-candidate re-check never repeated that
   // exclusion, so a cancellation landing between the scan and this

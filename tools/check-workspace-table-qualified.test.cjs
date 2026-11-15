@@ -28,20 +28,58 @@ test('flags an unqualified business-table reference in a string, a template, a +
   assert.deepEqual(rules('m.query(`INSERT INTO "payroll_record" (id) VALUES ($1)`);'), ['unqualified']);
 });
 
+// The real primitive import, as module code (server relative path) and Worker code ('@rab/server/…') write it.
+const IMPORT = "import { businessTables } from '../../../engine/core-modules/tenant/business-tables';\n";
+const WORKER_IMPORT = "import { businessTables } from '@rab/server/engine/core-modules/tenant/business-tables';\n";
+const WORKER_FILE = 'packages/rab-worker/src/queues/rab-shifts/x.job.ts';
+
 test('accepts ${X.<table>} only when X is `const X = businessTables(…)` in an enclosing scope and not quoted (review #1)', () => {
-  assert.deepEqual(rules('const t = businessTables(m); m.query(`SELECT 1 FROM ${t.shift} s JOIN ${t.venue} v ON v.id = s.venue_id`);'), []);
-  assert.deepEqual(rules('async function f(m) { const tables = businessTables(m); return run(async () => m.query(`UPDATE ${tables.shift_assignment} SET status = $1`)); }'), []);
-  assert.deepEqual(rules("const t = businessTables(m); const sql = 'SELECT 1 FROM ' + t.venue + ' WHERE id = $1';"), []);
+  assert.deepEqual(rules(IMPORT + 'const t = businessTables(m); m.query(`SELECT 1 FROM ${t.shift} s JOIN ${t.venue} v ON v.id = s.venue_id`);'), []);
+  assert.deepEqual(rules(IMPORT + 'async function f(m) { const tables = businessTables(m); return run(async () => m.query(`UPDATE ${tables.shift_assignment} SET status = $1`)); }'), []);
+  assert.deepEqual(rules(IMPORT + "const t = businessTables(m); const sql = 'SELECT 1 FROM ' + t.venue + ' WHERE id = $1';"), []);
+  assert.deepEqual(rules(WORKER_IMPORT + 'const t = businessTables(m); m.query(`SELECT 1 FROM ${t.attendance}`);', WORKER_FILE), []);
+  assert.deepEqual(
+    rules("import { businessTables } from './business-tables';\nconst t = businessTables(m); m.query(`SELECT 1 FROM ${t.venue}`);", 'packages/rab-server/src/engine/core-modules/tenant/x.ts'),
+    [],
+  );
   // The name alone is not enough:
-  assert.deepEqual(rules('const t = body; m.query(`SELECT 1 FROM ${t.venue}`);'), ['other-qualified']);
-  assert.deepEqual(rules('m.query(`UPDATE ${tables.shift_assignment} SET status = $1`);'), ['other-qualified']);
-  assert.deepEqual(rules('let t = businessTables(m); m.query(`SELECT 1 FROM ${t.venue}`);'), ['other-qualified']);
-  assert.deepEqual(rules('const t = businessTables(m); function g(t) { return m.query(`SELECT 1 FROM ${t.venue}`); }'), ['other-qualified']);
-  assert.deepEqual(rules('const { venue } = businessTables(m); const t = { venue }; m.query(`SELECT 1 FROM ${t.venue}`);'), ['other-qualified']);
-  assert.deepEqual(rules("const t = body; const sql = 'SELECT 1 FROM ' + t.venue;"), ['other-qualified']);
+  assert.deepEqual(rules(IMPORT + 'const t = body; m.query(`SELECT 1 FROM ${t.venue}`);'), ['other-qualified']);
+  assert.deepEqual(rules(IMPORT + 'm.query(`UPDATE ${tables.shift_assignment} SET status = $1`);'), ['other-qualified']);
+  assert.deepEqual(rules(IMPORT + 'let t = businessTables(m); m.query(`SELECT 1 FROM ${t.venue}`);'), ['other-qualified']);
+  assert.deepEqual(rules(IMPORT + 'const t = businessTables(m); function g(t) { return m.query(`SELECT 1 FROM ${t.venue}`); }'), ['other-qualified']);
+  assert.deepEqual(rules(IMPORT + 'const { venue } = businessTables(m); const t = { venue }; m.query(`SELECT 1 FROM ${t.venue}`);'), ['other-qualified']);
+  assert.deepEqual(rules(IMPORT + "const t = body; const sql = 'SELECT 1 FROM ' + t.venue;"), ['other-qualified']);
   // Quoted, even when it is the primitive:
-  assert.deepEqual(rules("const t = businessTables(m); m.query(`SELECT 1 FROM shift_log WHERE name = '${t.venue}'`);"), ['other-qualified']);
-  assert.deepEqual(rules('const t = businessTables(m); m.query(`SELECT 1 FROM "${t.venue}"`);'), ['other-qualified']);
+  assert.deepEqual(rules(IMPORT + "const t = businessTables(m); m.query(`SELECT 1 FROM shift_log WHERE name = '${t.venue}'`);"), ['other-qualified']);
+  assert.deepEqual(rules(IMPORT + 'const t = businessTables(m); m.query(`SELECT 1 FROM "${t.venue}"`);'), ['other-qualified']);
+});
+
+test('re-review MEDIUM: the businessTables CALLEE must be the real non-aliased import; a hoisted var voids the const', () => {
+  const q = 'const t = businessTables(req.body); m.query(`SELECT 1 FROM ${t.shift}`);';
+  // Re-check Low: only THE primitive module path counts, not any path ending in tenant/business-tables.
+  assert.deepEqual(rules("import { businessTables } from './evil/tenant/business-tables';\n" + q), ['other-qualified']);
+  assert.deepEqual(rules("import { businessTables } from 'evil-pkg/tenant/business-tables';\n" + q), ['other-qualified']);
+  assert.deepEqual(rules("import { businessTables } from '../../tenant/business-tables';\n" + q, WORKER_FILE), ['other-qualified']); // a worker-side tenant/ dir
+  assert.deepEqual(rules("import { businessTables } from '@rab/server/engine/core-modules/tenant/business-tables.evil';\n" + q, WORKER_FILE), ['other-qualified']);
+  assert.deepEqual(rules("import { businessTables } from '../../../engine/core-modules/tenant/../tenant/business-tables';\n" + q), []); // resolves to it
+  assert.deepEqual(rules("import { businessTables } from '../tenant/business-tables';\n" + q, 'packages/rab-server/src/engine/core-modules/user-deletion/x.ts'), []);
+  assert.deepEqual(check.secondPrimitiveModules([
+    'packages/rab-server/src/engine/core-modules/tenant/business-tables.ts',
+    'packages/rab-server/src/modules/foo/tenant/business-tables.ts',
+    'packages/rab-worker/src/tenant/business-tables.ts',
+  ]).map((s) => [s.file, s.rule]), [
+    ['packages/rab-server/src/modules/foo/tenant/business-tables.ts', 'business-schema-bind'],
+    ['packages/rab-worker/src/tenant/business-tables.ts', 'business-schema-bind'],
+  ]);
+  assert.deepEqual(rules('const businessTables = (x) => x; ' + q), ['other-qualified']); // local fake callee
+  assert.deepEqual(rules("import { evil as businessTables } from '../../../engine/core-modules/tenant/business-tables';\n" + q), ['other-qualified']); // aliased import
+  assert.deepEqual(rules("import { businessTables } from './somewhere-else';\n" + q), ['other-qualified']); // wrong module
+  assert.deepEqual(rules("import { businessTables } from './business-tables';\n" + q), ['other-qualified']); // ./business-tables outside tenant/
+  assert.deepEqual(rules(q), ['other-qualified']); // missing import
+  assert.deepEqual(rules(IMPORT + 'function f(businessTables) { ' + q + ' }'), ['other-qualified']); // parameter shadows the import
+  assert.deepEqual(rules("import type { businessTables } from '../../../engine/core-modules/tenant/business-tables';\n" + q), ['other-qualified']); // type-only
+  assert.deepEqual(rules(IMPORT + 'function f(m) { const t = businessTables(m); if (x) { var t = body; } return m.query(`SELECT 1 FROM ${t.shift}`); }'), ['other-qualified']); // var hoist
+  assert.deepEqual(rules(IMPORT + 'function f(m) { const t = businessTables(m); return m.query(`SELECT 1 FROM ${t.shift}`); } function g() { var t = 1; }'), []); // var in another function
 });
 
 test('the binder-only functions are flagged outside the binders (review #3)', () => {
@@ -50,6 +88,10 @@ test('the binder-only functions are flagged outside the binders (review #3)', ()
   assert.deepEqual(rules("import { snapshotBusinessSchema as s } from '../tenant/business-tables'; restoreBusinessSchema(m, x);", mod), ['business-schema-bind', 'business-schema-bind']);
   assert.deepEqual(rules("import * as bt from '../tenant/business-tables';", mod), ['business-schema-bind']);
   assert.deepEqual(rules("import { businessTables, boundBusinessSchema, peekBusinessSchema } from '../tenant/business-tables';", mod), []);
+  // Re-review LOW: re-export, require() and import() cannot hide the name.
+  assert.deepEqual(rules("export { bindBusinessSchema as attach } from '../tenant/business-tables';", mod), ['business-schema-bind']);
+  assert.deepEqual(rules("const { bindBusinessSchema: b } = require('../tenant/business-tables');", mod), ['business-schema-bind']);
+  assert.deepEqual(rules("const bt = await import('../tenant/business-tables'); bt['bindBusinessSchema'](m, 'core', null);", mod), ['business-schema-bind']);
   const binder = 'packages/rab-server/src/engine/core-modules/tenant/tenant-context.service.ts';
   assert.ok(check.BUSINESS_SCHEMA_BINDERS.includes(binder));
   assert.deepEqual(rules("import { bindBusinessSchema } from './business-tables'; bindBusinessSchema(m, 'core', null);", binder), []);
@@ -85,6 +127,22 @@ test('flags core.<table>, any other qualifier, a QueryBuilder string table and a
   assert.deepEqual(rules("qb.leftJoin('core.venue', 'v', 'v.id = s.venue_id');"), ['qb-string-table']);
   assert.deepEqual(rules("m.query(`SELECT set_config('search_path', $1, true)`, [s]);"), ['search-path-switch']);
   assert.deepEqual(rules("m.query('SET LOCAL search_path TO core');"), ['search-path-switch']);
+  // Re-review LOW: the parameterised form (the setting name is not a literal), and 'search_path' as a query parameter.
+  assert.deepEqual(rules("m.query('SELECT set_config($1, $2, true)', [name, s]);"), ['search-path-switch']);
+  assert.deepEqual(rules("m.query('SELECT 1', ['search_path', s]);"), ['search-path-switch']);
+  assert.deepEqual(rules("m.query('SELECT set_config($1,$2,true)', ['search_path', s]);"), ['search-path-switch', 'search-path-switch']);
+  assert.deepEqual(rules("m.query(`SELECT set_config('rab.team_shift_id', $1, true)`, [id]);"), []); // a literal, non-search_path name
+  // Re-check Low: spelling variants and comments.
+  assert.deepEqual(rules(`m.query(\`SELECT "set_config"('search_path', $1, true)\`, [s]);`), ['search-path-switch']);
+  assert.deepEqual(rules("m.query(`SELECT pg_catalog.set_config ( 'search_path', $1, true)`, [s]);"), ['search-path-switch']);
+  assert.deepEqual(rules(`m.query(\`SELECT set_config('"search_path"', $1, true)\`, [s]);`), ['search-path-switch']);
+  assert.deepEqual(rules("m.query(`SELECT set_config(/* hidden */ 'search_path', $1, true)`, [s]);"), ['search-path-switch']);
+  assert.deepEqual(rules("m.query(`SELECT 1;\n-- note\nSET \"search_path\" TO core`);"), ['search-path-switch']);
+  assert.deepEqual(rules("m.query('RESET search_path');"), ['search-path-switch']);
+  assert.deepEqual(rules("m.query('RESET ALL');"), ['search-path-switch']);
+  assert.deepEqual(rules("m.query('DISCARD ALL');"), ['search-path-switch']);
+  assert.deepEqual(rules("m.query(`SELECT 1 -- set_config('search_path', 'x', true)\n`);"), []); // only inside a SQL comment
+  assert.deepEqual(rules("m.query('RESET ROLE');"), []);
 });
 
 test('the binders may switch search_path; DDL that pins a function\'s own search_path is not a switch', () => {
@@ -142,15 +200,24 @@ test('the committed baseline matches the tree exactly (no new site, no stale ent
 });
 
 test('check-sql-injection: ${X.<table>} needs no review comment only for X = businessTables(…), unquoted (review #1)', () => {
-  const sites = (lines) => sqlLint.scanSource('packages/rab-server/src/modules/x/services/x.service.ts', lines.join('\n')).map((s) => (s.reviewed ? 'reviewed' : 'UNREVIEWED'));
-  assert.deepEqual(sites(['const t = businessTables(m);', 'm.query(`SELECT 1 FROM ${t.venue} WHERE id = $1`);']), []);
-  assert.deepEqual(sites(['function f(m) {', '  const tables = businessTables(m);', '  return m.query(`DELETE FROM ${tables.shift} WHERE id = $1`);', '}']), []);
-  assert.deepEqual(sites(['const t = body;', 'm.query(`SELECT 1 FROM ${t.venue} WHERE id = $1`);']), ['UNREVIEWED']);
-  assert.deepEqual(sites(['m.query(`SELECT 1 FROM ${t.venue} WHERE id = $1`);']), ['UNREVIEWED']);
-  assert.deepEqual(sites(['const t = businessTables(m);', "m.query(`SELECT 1 FROM x WHERE name = '${t.venue}'`);"]), ['UNREVIEWED']);
-  assert.deepEqual(sites(['const t = businessTables(m);', 'm.query(`SELECT 1 FROM ${t.venue} WHERE x = ${other}`);']), ['UNREVIEWED']);
+  const imp = IMPORT.trimEnd();
+  const sites = (lines, file = 'packages/rab-server/src/modules/x/services/x.service.ts') =>
+    sqlLint.scanSource(file, lines.join('\n')).map((s) => (s.reviewed ? 'reviewed' : 'UNREVIEWED'));
+  assert.deepEqual(sites([imp, 'const t = businessTables(m);', 'm.query(`SELECT 1 FROM ${t.venue} WHERE id = $1`);']), []);
+  assert.deepEqual(sites([imp, 'function f(m) {', '  const tables = businessTables(m);', '  return m.query(`DELETE FROM ${tables.shift} WHERE id = $1`);', '}']), []);
+  assert.deepEqual(sites([WORKER_IMPORT.trimEnd(), 'const t = businessTables(m);', 'm.query(`SELECT 1 FROM ${t.attendance} WHERE id = $1`);'], WORKER_FILE), []);
+  assert.deepEqual(sites([imp, 'const t = body;', 'm.query(`SELECT 1 FROM ${t.venue} WHERE id = $1`);']), ['UNREVIEWED']);
+  assert.deepEqual(sites([imp, 'm.query(`SELECT 1 FROM ${t.venue} WHERE id = $1`);']), ['UNREVIEWED']);
+  assert.deepEqual(sites([imp, 'const t = businessTables(m);', "m.query(`SELECT 1 FROM x WHERE name = '${t.venue}'`);"]), ['UNREVIEWED']);
+  assert.deepEqual(sites([imp, 'const t = businessTables(m);', 'm.query(`SELECT 1 FROM ${t.venue} WHERE x = ${other}`);']), ['UNREVIEWED']);
   assert.deepEqual(
-    sites(['const t = businessTables(m);', '// sql-injection-reviewed: other is a code constant from the frozen list above', 'm.query(`SELECT 1 FROM ${t.venue} WHERE x = ${other}`);']),
+    sites([imp, 'const t = businessTables(m);', '// sql-injection-reviewed: other is a code constant from the frozen list above', 'm.query(`SELECT 1 FROM ${t.venue} WHERE x = ${other}`);']),
     ['reviewed'],
   );
+  // Re-review MEDIUM regressions: a fake/aliased/missing callee and a hoisted var are UNREVIEWED.
+  const q = ['const t = businessTables(req.body);', 'm.query(`SELECT 1 FROM ${t.shift} WHERE id = $1`);'];
+  assert.deepEqual(sites(['const businessTables = (x) => x;', ...q]), ['UNREVIEWED']);
+  assert.deepEqual(sites(["import { evil as businessTables } from '../../../engine/core-modules/tenant/business-tables';", ...q]), ['UNREVIEWED']);
+  assert.deepEqual(sites(q), ['UNREVIEWED']);
+  assert.deepEqual(sites([imp, 'function f(m) {', '  const t = businessTables(m);', '  if (x) { var t = body; }', '  return m.query(`SELECT 1 FROM ${t.shift} WHERE id = $1`);', '}']), ['UNREVIEWED']);
 });

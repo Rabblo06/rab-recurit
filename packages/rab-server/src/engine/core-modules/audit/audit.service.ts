@@ -136,6 +136,8 @@ export const AuditAction = {
   MANAGER_RESTORED: 'manager.restored',
   SHIFT_ARCHIVED: 'shift.archived',
   SHIFT_RESTORED: 'shift.restored',
+  /** A manager rotated the Shift QR (`SchedulingService.rotateShiftQr`): every older printed/photographed QR is refused `revoked`. */
+  SHIFT_QR_ROTATED: 'shift.qr_rotated',
   /** Wave 5: the shift lifecycle's first two steps, recorded by SchedulingService.create / publish (timeline read model). */
   SHIFT_CREATED: 'shift.created',
   SHIFT_PUBLISHED: 'shift.published',
