@@ -381,8 +381,8 @@ export class SeedAiDemoCommand extends CommandRunner {
     await this.tenantContext.bindCoreIdentityGucs(m, ctx);
     // C2-0: '' under the test-only search_path trap; businessTables(m) follows the schema (refused unless it is 'core' or
     // exactly the bound workspace's registry name).
-    await m.query(`SELECT set_config('search_path', $1, true)`, [businessSearchPath(schema)]);
     bindBusinessSchema(m, schema, ctx.workspaceId);
+    await m.query(`SELECT set_config('search_path', $1, true)`, [businessSearchPath(schema)]);
   }
 
   private async workspaceSchema(m: EntityManager, workspaceId: string): Promise<string> {

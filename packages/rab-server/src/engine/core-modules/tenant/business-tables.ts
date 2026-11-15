@@ -72,25 +72,6 @@ export function unbindBusinessSchema(manager: EntityManager): void {
   if (manager && typeof manager === 'object') bindings.delete(manager);
 }
 
-/**
- * C2-0: records `schema` for `businessTables(manager)` for exactly the duration of the binder's callback, and drops it when
- * the callback settles (the transaction ends right after). `workspaceId` is the workspace the schema was resolved for (a
- * non-core schema must be its canonical name). Shared by TenantContextService's binders and WorkspaceExecutionContext.
- */
-export async function withBusinessSchema<T>(
-  manager: EntityManager,
-  schema: string,
-  workspaceId: string | null | undefined,
-  run: () => Promise<T>,
-): Promise<T> {
-  bindBusinessSchema(manager, schema, workspaceId);
-  try {
-    return await run();
-  } finally {
-    unbindBusinessSchema(manager);
-  }
-}
-
 /** The bound schema, or undefined when none is (no throw). */
 export function peekBusinessSchema(manager: EntityManager): string | undefined {
   return manager && typeof manager === 'object' ? bindings.get(manager) : undefined;
@@ -103,9 +84,13 @@ export interface BusinessSchemaSnapshot {
 const snapshots = new WeakMap<BusinessSchemaSnapshot, EntityManager>();
 
 /**
- * Binder-only, for a site that switches search_path inside a transaction and must put the entry state back (UserDeletionService):
- * the value was validated when it was bound, so restoring it needs no workspace id. Only a snapshot taken by this function,
- * for this manager, is accepted.
+ * Binder-only, for a site that switches search_path inside a transaction and must put the entry state back: the value was
+ * validated when it was bound, so restoring it needs no workspace id. Only a snapshot taken by this function, for this
+ * manager, is accepted.
+ *
+ * SAVEPOINTS: `ROLLBACK TO SAVEPOINT` reverts a transaction-local search_path, but NOT this WeakMap. A binder that switches
+ * schemas inside a savepoint must take a snapshot BEFORE the SAVEPOINT and restore it right AFTER the ROLLBACK TO SAVEPOINT
+ * (account-invite-cleanup.job.ts does), so the binding again matches the search_path the rollback put back.
  */
 export function snapshotBusinessSchema(manager: EntityManager): BusinessSchemaSnapshot {
   const snapshot = Object.freeze({ schema: peekBusinessSchema(manager) });
@@ -117,6 +102,35 @@ export function restoreBusinessSchema(manager: EntityManager, snapshot: Business
   if (snapshots.get(snapshot) !== manager) throw new BusinessTablesError('invalid-schema');
   if (snapshot.schema === undefined) bindings.delete(manager);
   else bindings.set(manager, snapshot.schema);
+}
+
+/**
+ * Binder-only. Runs `run` and, however it settles, puts back the binding `manager` had on entry (none, for the fresh manager
+ * of a new transaction). The binder calls bindBusinessSchema INSIDE `run`, before its set_config (validate first, review #7).
+ */
+export async function withBusinessSchemaScope<T>(manager: EntityManager, run: () => Promise<T>): Promise<T> {
+  const entry = snapshotBusinessSchema(manager);
+  try {
+    return await run();
+  } finally {
+    restoreBusinessSchema(manager, entry);
+  }
+}
+
+/**
+ * Binder-only. bindBusinessSchema(manager, schema, workspaceId), then `run`, then the entry binding restored (not merely
+ * deleted, so a nested use on a manager that was already bound gets its own binding back).
+ */
+export function withBusinessSchema<T>(
+  manager: EntityManager,
+  schema: string,
+  workspaceId: string | null | undefined,
+  run: () => Promise<T>,
+): Promise<T> {
+  return withBusinessSchemaScope(manager, async () => {
+    bindBusinessSchema(manager, schema, workspaceId);
+    return run();
+  });
 }
 
 /** The bound schema of a live transaction. Throws when unbound or when the transaction has ended. */

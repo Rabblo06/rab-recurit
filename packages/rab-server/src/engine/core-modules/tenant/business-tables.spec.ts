@@ -16,6 +16,7 @@ import {
   snapshotBusinessSchema,
   unbindBusinessSchema,
   withBusinessSchema,
+  withBusinessSchemaScope,
 } from './business-tables';
 import { SchemaResolverService, workspaceSchemaName } from './schema-resolver.service';
 import { TenantContextService } from './tenant-context.service';
@@ -193,6 +194,15 @@ describe('businessTables(manager): the primitive', () => {
     expect(peekBusinessSchema(m)).toBeUndefined();
     await expect(withBusinessSchema(m, 'public', WS, async () => 'never')).rejects.toThrow(BusinessTablesError);
   });
+
+  it('withBusinessSchema / withBusinessSchemaScope restore the entry binding (not merely delete it)', async () => {
+    const m = liveManager();
+    bindBusinessSchema(m, 'core', null);
+    await withBusinessSchema(m, SCHEMA, WS, async () => expect(businessTables(m).shift).toBe(`"${SCHEMA}"."shift"`));
+    expect(peekBusinessSchema(m)).toBe('core');
+    await expect(withBusinessSchemaScope(m, async () => { bindBusinessSchema(m, OTHER_SCHEMA, OTHER_WS); throw new Error('boom'); })).rejects.toThrow('boom');
+    expect(peekBusinessSchema(m)).toBe('core');
+  });
 });
 
 describe('the binders bind it (and nothing leaks across transactions)', () => {
@@ -218,6 +228,18 @@ describe('the binders bind it (and nothing leaks across transactions)', () => {
   it('runInWorkspaceContext refuses a resolver answer that is not the workspace\'s canonical name (defence in depth)', async () => {
     const service = new TenantContextService(dataSourceOf([]), resolverFor(OTHER_SCHEMA), environment(true));
     await expect(service.runInWorkspaceContext(CTX, async () => 'never')).rejects.toThrow(BusinessTablesError);
+  });
+
+  it('review #7: a refused schema never reaches set_config (validated and recorded first)', async () => {
+    const managers: Array<ReturnType<typeof liveManager>> = [];
+    const service = new TenantContextService(dataSourceOf(managers), resolverFor(OTHER_SCHEMA), environment(true));
+    await expect(service.runInWorkspaceContext(CTX, async () => 'never')).rejects.toThrow(BusinessTablesError);
+    const calls = (managers[0]!.query as jest.Mock).mock.calls.map(([sql]) => String(sql));
+    expect(calls.some((sql) => sql.includes(`set_config('search_path'`))).toBe(false);
+    expect(peekBusinessSchema(managers[0]!)).toBeUndefined();
+    const exec = new WorkspaceExecutionContext(dataSourceOf(managers), resolverFor(OTHER_SCHEMA));
+    await expect(exec.run(CTX, async () => 'never')).rejects.toThrow(BusinessTablesError);
+    expect((managers[1]!.query as jest.Mock).mock.calls.some(([sql]) => String(sql).includes(`set_config('search_path'`))).toBe(false);
   });
 
   it('runInTenantContext: "core" with HWS off, and with HWS on but no workspace; the schema with HWS on and a workspace', async () => {
