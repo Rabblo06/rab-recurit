@@ -6968,6 +6968,110 @@ service: no `ports:`, no password, `--maxmemory-policy noeviction`).
   This closes the "Revisit: before production stage D" note of the Lane A trade-off (unauthenticated Redis is a
   warning, not a refusal, in bullmq mode).
 
+## X1.3 — `seed` / `seed-qa` have no in-command refusal of staging or production targets (accepted risk; cleanup audit XA-03 / NC-04, PR #29 closed)
+
+Owner decision 2026-11-12 (Phase X Part 2, "the Twenty way", §2): no code change. Running a fixture seed against
+production is an operator error, as in Twenty. PR #29 (`x1/seed-guards`, head `cced3aad`, titled "X1.5" under the cleanup
+audit's numbering) had the fix. It was closed unmerged on 2026-11-15. No code changes with this entry.
+
+- **Asset:** the integrity of a deployed database: who is a platform administrator, which organisations and accounts exist.
+- **Actor → action → consequence:** an operator (or anyone holding the owner login and production command authority)
+  runs `seed` or `seed-qa` against a production database by mistake → `seed` writes the permission catalogue
+  (idempotent), an organisation (`SEED_ORG_SLUG`, default `acme`), a `super_admin` role holding every permission, and an
+  ACTIVE user (`SEED_ADMIN_EMAIL`) with the operator-supplied password. It also writes a `core.platform_admin` row for that
+  user (`command/seed.command.ts:45`, `:123-128`), so a new platform administrator exists in the live database. `seed-qa`
+  writes QA fixture organisations and users that share one password. Severity LOW–MEDIUM (XA-03): it needs operator
+  authority, and it is an integrity and cleanup problem, not a disclosure.
+- **What is missing:** a refusal inside the two commands. `seed-ai-demo` has one (`seed-ai-demo.command.ts:42`, refuses
+  any `DB_TARGET` but `local`). `seed` writes as soon as `run()` starts. `seed-qa` checks only its password and its
+  `--admin-email` (`seed-qa.command.ts:99-108`). The only target check is the generic CLI gate (`command/main.ts:28`),
+  which allows production when production command authority is present.
+- **Why accepted:** anyone who can pass the production gates below already holds the `crewflow_owner` login, which can
+  write the same rows directly. The guard would stop mistakes, not attackers. Twenty has no such guard, and the owner
+  chose not to add a Crewflow-only mechanism.
+- **Compensating controls (all on `main`):**
+  - Production command authority is per-invocation only. `DB_TARGET=production`, `ALLOW_PRODUCTION_DB_COMMANDS=true`,
+    `CREWFLOW_DEPLOYMENT_ENVIRONMENT=production` and a `CREWFLOW_DEPLOYMENT_ID` matching the database's live deployment
+    marker are all required (`database/typeorm/core/database-target.ts:9-15`, `:181-216`). Authority found in any `.env`
+    file that Nx loads is refused. `runtime.env`, `database.env` and the production compose file refuse
+    `ALLOW_PRODUCTION_DB_COMMANDS` and `DB_TARGET`, and the API start refuses them (prestart shell test 13e). They can
+    reach a command only as `-e` on a one-off `docker compose run`.
+  - `DB_TARGET=staging` is refused for every command (`database-target.ts:225`). `local` and `test` refuse a dotted remote
+    host (`:229-232`) and a database whose live marker binds it to production.
+  - The CLI boot gates require the owner login `crewflow_owner` for every CLI command, before Nest boots
+    (`command/main.ts`, `runDatabaseBootGates('cli')`).
+  - Neither command has a default password. `seed` needs `SEED_ADMIN_PASSWORD` and `seed-qa` needs `SEED_QA_PASSWORD`, each
+    at least 12 characters. `seed-qa` also needs `--admin-email` naming an active platform administrator, and refuses
+    anything else before its first write (`seed-qa.command.ts:354`).
+  - No deploy, start, upgrade or migrate path runs either command. A `git grep` of `packages/rab-docker` finds only the
+    staging image rehearsal harness, which runs against its own disposable database.
+- **Residual:** an operator who supplies production authority and the matching deployment id for some other one-off
+  command, then types `seed` or `seed-qa`, gets fixture rows and a platform administrator in production. The cleanup is
+  manual: remove the platform-admin row, the user, the role and the organisation.
+- **Revisit when any of these happens:**
+  - a deploy, start, upgrade or CI step, or a runbook, runs `seed` / `seed-qa` against a deployed database;
+  - a staging command path is added (`DB_TARGET=staging` is no longer refused);
+  - production command authority becomes persistent in a service's environment, or someone other than the owner holds it;
+  - seed fixture rows are found in a deployed database;
+  - Twenty adds such a guard.
+
+  Re-opening PR #29 (`seed-target-guard.ts`) is the prepared fix. It must be re-tested under the single `crewflow_owner`
+  login.
+
+## X1.5 — SMTP STARTTLS on port 587 is opportunistic; production does not refuse `EMAIL_SMTP_NO_TLS=true` (accepted risk; XR-04)
+
+Owner decision 2026-11-12 (Phase X Part 2, "the Twenty way", §2): no change. STARTTLS on 587 stays opportunistic, as in
+Twenty, whose `email-driver.factory.ts` declares `requireTLS` in its options type and never sets it (it sets only
+`secure: false` and `ignoreTLS: true` when `EMAIL_SMTP_NO_TLS` is on; checked against `twentyhq/twenty` on 2026-11-15).
+The planned X1.5a proof test (a STARTTLS-less SMTP sink) and the X1.5b fix were not done. No code changes with this
+entry.
+
+- **Asset:** the SMTP relay credentials (`EMAIL_SMTP_USER` / `EMAIL_SMTP_PASSWORD`), and the password-reset, activation
+  and invitation links (bearer secrets until used or expired) in every message.
+- **Actor → action → consequence:** an on-path attacker between the host and the SMTP relay strips the relay's
+  `STARTTLS` capability from the EHLO reply → nodemailer, with no `requireTLS`, carries on in clear → the attacker reads
+  the AUTH exchange (relay credentials: send-as-us, reputation) and the message bodies (take over an account by using a
+  reset or invite link first). If an operator sets `EMAIL_SMTP_NO_TLS=true` in production, the same happens with no
+  attacker work, and nothing refuses it. The XR-04 audit marked this as suspected: nodemailer upgrades only when STARTTLS
+  is advertised, unless `requireTLS` is set, but the strip was never run against our transport.
+- **Where:** `engine/core-modules/email/email-driver.factory.ts:33-39` sets `secure = !noTls && port === 465` and
+  `ignoreTLS: noTls`, and never sets `requireTLS`. `email/drivers/smtp.driver.ts:124` passes these options to
+  `nodemailer.createTransport` (the Worker sends through the same `EmailService`). The SMTP health probes copy the same
+  options: `platform-admin/admin-panel.service.ts:300` and `admin-health.service.ts:241`, with no credentials. The Admin
+  Panel "Test Connection" (`admin-panel.service.ts:242`) has an admin-chosen `starttls` mode that is opportunistic in the
+  same way, and it can send the stored SMTP password. `productionConfigurationProblems` in `env.validation.ts` has no
+  `EMAIL_SMTP_NO_TLS` rule. The templates default to port 587 (`runtime.env.example:42`, staging `api.env.example` and
+  `worker.env.example`).
+- **Why accepted:** this matches Twenty. `requireTLS` would stop all mail on a relay that offers no STARTTLS, and the
+  production relay's STARTTLS support was never confirmed (the X1.5b precondition). Exploiting the strip needs an active
+  on-path position on the host-to-relay path, which on a hosted VM talking to a hosted relay is the provider's network.
+- **Compensating controls:**
+  - When STARTTLS is offered and not stripped, nodemailer upgrades, and Node verifies the relay certificate. No
+    `rejectUnauthorized: false` exists anywhere in the email code paths.
+  - `EMAIL_SMTP_NO_TLS` defaults to `false` (`environment-variables.ts:1541`, `.env.example:117`), and DEPLOY-PREP lists it
+    as "keep it false".
+  - Production refuses `EMAIL_DRIVER=LOGGER` (`env.validation.ts:298`), so links are never written to logs instead.
+  - Reset tokens are single-use and expire after 1 hour, and they are hashed at rest. A captured link is only worth
+    something until the real recipient uses it or it expires.
+  - **Operator rule:** to remove the strip entirely, use port 465 (implicit TLS: `secure` is set, and TLS is negotiated
+    before any SMTP command) or `EMAIL_DRIVER=RESEND` (HTTPS API). Never set `EMAIL_SMTP_NO_TLS=true` outside local
+    development.
+- **Residual:** on 587, an active on-path attacker can downgrade to cleartext and capture the relay credentials and
+  in-flight links. `EMAIL_SMTP_NO_TLS=true` in production sends everything in clear, and no gate refuses it.
+- **Revisit when any of these happens:**
+  - production moves to a network where the host-to-relay path is not trusted, such as a self-hosted relay across the
+    internet or a shared or on-premises network;
+  - the production relay is confirmed to offer STARTTLS (that removes the only objection to `requireTLS` for 587, so
+    X1.5b can ship);
+  - `EMAIL_SMTP_NO_TLS=true` turns up in any deployed environment;
+  - an SMTP credential leak or a reset-link takeover is suspected;
+  - Twenty starts setting `requireTLS`;
+  - the Admin Panel's stored SMTP configuration starts sending real mail (today only "Test Connection" uses it; all
+    mail goes through the environment-configured driver).
+
+  The prepared fix is the X1.5a sink test, then `requireTLS: true` when `!noTls && !secure`, plus a production refusal of
+  `EMAIL_SMTP_NO_TLS=true` (env-validation diff to the lead).
+
 ## XA-08 — the forgot-password address is handed over in router state, never the URL (branch phase-x2/x62-forgot-email-router-state, 2026-11-12, PR #112)
 
 Phase X Part 2 finding XA-08 (`docs/plans/PHASE-X-STAGE0-PART2.md` §2.6). Front only: no server, env or header change.
