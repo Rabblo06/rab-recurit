@@ -1,7 +1,7 @@
 import { insertMembership, provisionFixtureWorkspace } from './helpers/test-identities';
 import 'reflect-metadata';
 import { PermissionFlag, UserStatus } from '@rab/shared';
-import { INestApplication } from '@nestjs/common';
+import { ForbiddenException, INestApplication } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
 import { randomUUID } from 'node:crypto';
 import request from 'supertest';
@@ -11,6 +11,7 @@ import { AppModule } from '../../app.module';
 import { Organisation, Permission, Role, RolePermission, User, UserRole } from '../../modules/identity/entities';
 import { ManagerWorkspace } from '../../modules/manager-workspace/entities/manager-workspace.entity';
 import { AttendanceQrService } from '../../modules/attendance/services/attendance-qr.service';
+import { SchedulingService } from '../../modules/scheduling/services/scheduling.service';
 import { JobRole } from '../../modules/scheduling/entities/job-role.entity';
 import { Shift } from '../../modules/scheduling/entities/shift.entity';
 import { Venue } from '../../modules/venue/entities/venue.entity';
@@ -46,6 +47,7 @@ describeIfDb('attendance abuse cases (integration)', () => {
   let passwordHashing: PasswordHashingService;
   let tenantContext: TenantContextService;
   let attendanceQr: AttendanceQrService;
+  let schedulingService: SchedulingService;
 
   const password = FIXTURE_PASSWORD;
 
@@ -349,6 +351,7 @@ describeIfDb('attendance abuse cases (integration)', () => {
     passwordHashing = moduleRef.get(PasswordHashingService);
     tenantContext = moduleRef.get(TenantContextService);
     attendanceQr = moduleRef.get(AttendanceQrService);
+    schedulingService = moduleRef.get(SchedulingService);
     throttlerRedis = moduleRef.get(ThrottlerRedisClientProvider);
     adminDataSource = createAdminDataSource();
     await adminDataSource.initialize();
@@ -360,6 +363,35 @@ describeIfDb('attendance abuse cases (integration)', () => {
       { organisationId: organisation.id, workspaceId, userId: managerUserId, role: '' },
       async (manager) => attendanceQr.sign(await manager.findOneByOrFail(Shift, { id: shiftId })),
     );
+  }
+
+  /**
+   * The QR as the pre-shift report job prints it: the real `AttendanceQrService.sign`, with the clock pinned to
+   * `printedAt` for that one synchronous call (jsonwebtoken reads `Date.now` for `iat`; a signing-relative `exp` would be
+   * computed from it too). Nothing else runs while the pin is in place.
+   */
+  async function signQrPrintedAt(organisation: Organisation, workspaceId: string | null, managerUserId: string, shiftId: string, printedAt: Date): Promise<string> {
+    const shift = await tenantContext.runInTenantContext(
+      { organisationId: organisation.id, workspaceId, userId: managerUserId, role: '' },
+      (manager) => manager.findOneByOrFail(Shift, { id: shiftId }),
+    );
+    const clock = jest.spyOn(Date, 'now').mockReturnValue(printedAt.getTime());
+    try {
+      return attendanceQr.sign(shift);
+    } finally {
+      clock.mockRestore();
+    }
+  }
+
+  /** Moves the shift (and the booked seat) to [now + startOffset, now + endOffset), as a manager's edit would; DB clock. */
+  async function moveShift(shiftId: string, startOffset: string, endOffset: string): Promise<{ startsAt: Date; endsAt: Date }> {
+    // TypeORM's postgres driver returns [rows, affectedCount] for UPDATE ... RETURNING.
+    const [[row]] = await adminDataSource.query(
+      `UPDATE ${await businessTableOf(adminDataSource, 'shift', shiftId)} SET starts_at = now() + $2::interval, ends_at = now() + $3::interval WHERE id = $1 RETURNING starts_at, ends_at`,
+      [shiftId, startOffset, endOffset],
+    );
+    await adminDataSource.query(`UPDATE ${siblingTable(await businessTableOf(adminDataSource, 'shift', shiftId), 'shift_assignment')} SET period = tstzrange($2::timestamptz, $3::timestamptz, '[)') WHERE shift_id = $1`, [shiftId, row.starts_at, row.ends_at]);
+    return { startsAt: row.starts_at, endsAt: row.ends_at };
   }
 
   /** `clock-in`, auto-signing a real QR for `shiftId` unless the caller supplies its own `qrToken` override (e.g. to test a bad/cross-shift one). */
@@ -601,6 +633,161 @@ describeIfDb('attendance abuse cases (integration)', () => {
     });
   });
 
+  // Owner decisions 0i and the follow-ups (2026-11-14): a QR is accepted until the staff member's OWN end (their seat's
+  // period) + QR_POST_SHIFT_GRACE_MINUTES (120), decided at scan time (never from when it was signed), and the staff
+  // clock-out itself has the same window (assertClockWindow), so past it the refusal is CLOCK_WINDOW_CLOSED before the QR
+  // is read. The pre-shift report prints its QR up to 3 h before the start. Every shift move below updates the seat's
+  // period with it, so the staff member's own end equals the shift's end. The attendance monitor (now flagging only after
+  // the same 120 min) is exercised end to end in rab-worker worker-operations-abuse-cases (clock-out grace end to end).
+  describe('clock-out with a QR printed 3 h early follows the staff member own end + grace', () => {
+    const HOUR = 3600_000;
+
+    /** A confirmed, clocked-in booking (fresh QR at clock-in), ready for a clock-out with the printed QR. */
+    async function clockedInBooking() {
+      const { organisation, managerEmail, managerUserId, venue } = await seedOrg();
+      const managerToken = await login(managerEmail);
+      const staff = await seedStaff(organisation, managerUserId);
+      const staffToken = await login(staff.email, true);
+      const shiftId = await makeAndPublishShift(organisation, venue, managerToken);
+      await confirmShiftForStaff(managerToken, staffToken, staff.staffProfileId, shiftId);
+      expect((await clockIn(staffToken, organisation, venue, managerUserId, shiftId)).status).toBe(201);
+      const printQr = (printedAt: Date) => signQrPrintedAt(organisation, venue.workspaceId ?? null, managerUserId, shiftId, printedAt);
+      const clockOutWith = (qrToken: string) => clockOut(staffToken, organisation, venue, managerUserId, shiftId, { qrToken });
+      return { shiftId, printQr, clockOutWith };
+    }
+
+    it('accepted in the shift last minutes', async () => {
+      const b = await clockedInBooking();
+      // An 8 h shift ending in 3 minutes. A signing-relative exp (shift length + 15 + 120 min from printing) lapsed ~45 min ago.
+      const { startsAt } = await moveShift(b.shiftId, '-7 hours -57 minutes', '3 minutes');
+      const printed = await b.printQr(new Date(startsAt.getTime() - 3 * HOUR));
+      const res = await b.clockOutWith(printed);
+      expect(res.status).toBe(201);
+      expect(res.body.status).toBe('clocked_out');
+    });
+
+    it('accepted 100 min after the end (inside the 120-min grace)', async () => {
+      const b = await clockedInBooking();
+      const { startsAt } = await moveShift(b.shiftId, '-9 hours -40 minutes', '-100 minutes');
+      const printed = await b.printQr(new Date(startsAt.getTime() - 3 * HOUR));
+      const res = await b.clockOutWith(printed);
+      expect(res.status).toBe(201);
+      expect(res.body.status).toBe('clocked_out');
+    });
+
+    it('refused once the end + grace has passed (CLOCK_WINDOW_CLOSED); after the shift end moves later it is accepted again', async () => {
+      const b = await clockedInBooking();
+      const { startsAt } = await moveShift(b.shiftId, '-9 hours -1 minute', '-121 minutes'); // end + grace passed a minute ago
+      const printed = await b.printQr(new Date(startsAt.getTime() - 3 * HOUR));
+      const before = await b.clockOutWith(printed);
+      expect(before.status).toBe(409);
+      expect(before.body.code).toBe('CLOCK_WINDOW_CLOSED');
+
+      await moveShift(b.shiftId, '-9 hours -1 minute', '30 minutes'); // the end moves later; the scan re-reads it
+      const after = await b.clockOutWith(printed);
+      expect(after.status).toBe(201);
+      expect(after.body.status).toBe('clocked_out');
+    });
+
+    it('after the shift end moves earlier, refused once the NEW end + grace has passed; the attendance stays open', async () => {
+      const b = await clockedInBooking();
+      const printed = await b.printQr(new Date(Date.now() - 3 * HOUR)); // printed for the original 8 h shift
+      await moveShift(b.shiftId, '-4 hours', '-121 minutes');
+      const res = await b.clockOutWith(printed);
+      expect(res.status).toBe(409);
+      expect(res.body.code).toBe('CLOCK_WINDOW_CLOSED');
+      const [row] = await adminDataSource.query(`SELECT status, clock_out_at FROM ${siblingTable(await businessTableOf(adminDataSource, 'shift', b.shiftId), 'attendance')} WHERE shift_id = $1`, [b.shiftId]);
+      expect(row).toMatchObject({ status: 'clocked_in', clock_out_at: null });
+    });
+
+    it('a QR printed for another shift is refused at clock-out (shift_mismatch), inside its own validity', async () => {
+      const b = await clockedInBooking();
+      const other = await clockedInBooking();
+      const foreign = await other.printQr(new Date(Date.now() - 3 * HOUR));
+      const res = await b.clockOutWith(foreign);
+      expect(res.status).toBe(409);
+      expect(res.body).toMatchObject({ code: 'INVALID_QR', reason: 'shift_mismatch' });
+    });
+  });
+
+  // Owner decision 2026-11-14: POST /shifts/:id/rotate-qr revokes every issued QR for the shift (qr_version + 1).
+  describe('rotateShiftQr (named action, five layers)', () => {
+    const rotate = (token: string, shiftId: string) =>
+      request(app.getHttpServer()).post(`/rest/v1/shifts/${shiftId}/rotate-qr`).set('Authorization', `Bearer ${token}`).send();
+
+    it('rotate: the old QR is refused as revoked, the regenerated QR is accepted; version, updated_at and audit recorded', async () => {
+      const { organisation, managerEmail, managerUserId, venue } = await seedOrg();
+      const managerToken = await login(managerEmail);
+      const staff = await seedStaff(organisation, managerUserId);
+      const staffToken = await login(staff.email, true);
+      const shiftId = await makeAndPublishShift(organisation, venue, managerToken);
+      await confirmShiftForStaff(managerToken, staffToken, staff.staffProfileId, shiftId);
+      const oldQr = await signQr(organisation, venue.workspaceId ?? null, managerUserId, shiftId);
+      const [before] = await adminDataSource.query(`SELECT qr_version, updated_at FROM ${await businessTableOf(adminDataSource, 'shift', shiftId)} WHERE id = $1`, [shiftId]);
+
+      const res = await rotate(managerToken, shiftId);
+      expect(res.status).toBe(201);
+      expect(res.body.qrVersion).toBe(before.qr_version + 1);
+      const [after] = await adminDataSource.query(`SELECT qr_version, updated_at FROM ${await businessTableOf(adminDataSource, 'shift', shiftId)} WHERE id = $1`, [shiftId]);
+      expect(after.qr_version).toBe(before.qr_version + 1);
+      expect(after.updated_at.getTime()).toBeGreaterThan(before.updated_at.getTime()); // the pre-shift report regenerates
+      const [audit] = await adminDataSource.query(
+        `SELECT actor_user_id, metadata FROM core.audit_log WHERE action = 'shift.qr_rotated' AND entity_id = $1`, [shiftId]);
+      expect(audit).toMatchObject({ actor_user_id: managerUserId, metadata: { previousQrVersion: before.qr_version, qrVersion: before.qr_version + 1 } });
+
+      const refused = await clockIn(staffToken, organisation, venue, managerUserId, shiftId, { qrToken: oldQr });
+      expect(refused.status).toBe(409);
+      expect(refused.body).toMatchObject({ code: 'INVALID_QR', reason: 'revoked' });
+      const accepted = await clockIn(staffToken, organisation, venue, managerUserId, shiftId); // signs from the rotated row
+      expect(accepted.status).toBe(201);
+    });
+
+    it('without the shift-management permission: 403 at the guard, and 403 from the service itself (layer 2)', async () => {
+      const { organisation, managerEmail, managerUserId, venue } = await seedOrg();
+      const managerToken = await login(managerEmail);
+      const staff = await seedStaff(organisation, managerUserId);
+      const staffToken = await login(staff.email, true);
+      const shiftId = await makeAndPublishShift(organisation, venue, managerToken);
+      expect((await rotate(staffToken, shiftId)).status).toBe(403);
+      const staffUserId = (await adminDataSource.query(`SELECT user_id FROM ${await businessTableOf(adminDataSource, 'staff_profile', staff.staffProfileId)} WHERE id = $1`, [staff.staffProfileId]))[0].user_id;
+      await expect(
+        schedulingService.rotateShiftQr({ organisationId: organisation.id, workspaceId: venue.workspaceId ?? null, userId: staffUserId, role: '' }, shiftId),
+      ).rejects.toBeInstanceOf(ForbiddenException);
+      const [row] = await adminDataSource.query(`SELECT qr_version FROM ${await businessTableOf(adminDataSource, 'shift', shiftId)} WHERE id = $1`, [shiftId]);
+      expect(row.qr_version).toBe(1);
+    });
+
+    it('another tenant shift: 404 (never 403), nothing changes', async () => {
+      const a = await seedOrg();
+      const aToken = await login(a.managerEmail);
+      const shiftId = await makeAndPublishShift(a.organisation, a.venue, aToken);
+      const b = await seedOrg();
+      const bToken = await login(b.managerEmail);
+      expect((await rotate(bToken, shiftId)).status).toBe(404);
+      expect((await rotate(bToken, randomUUID())).status).toBe(404);
+      const [row] = await adminDataSource.query(`SELECT qr_version FROM ${await businessTableOf(adminDataSource, 'shift', shiftId)} WHERE id = $1`, [shiftId]);
+      expect(row.qr_version).toBe(1);
+    });
+
+    it('a cancelled or completed shift (no outgoing transition) is refused 409 SHIFT_CLOSED', async () => {
+      const { organisation, managerEmail, venue } = await seedOrg();
+      const managerToken = await login(managerEmail);
+      const cancelled = await makeAndPublishShift(organisation, venue, managerToken);
+      const cancelRes = await request(app.getHttpServer()).post(`/rest/v1/shifts/${cancelled}/cancel`).set('Authorization', `Bearer ${managerToken}`).send({ reason: 'no longer needed' });
+      expect(cancelRes.status).toBe(201);
+      const r1 = await rotate(managerToken, cancelled);
+      expect(r1.status).toBe(409);
+      expect(r1.body.code).toBe('SHIFT_CLOSED');
+      const completed = await makeAndPublishShift(organisation, venue, managerToken);
+      await adminDataSource.query(`UPDATE ${await businessTableOf(adminDataSource, 'shift', completed)} SET status = 'completed' WHERE id = $1`, [completed]); // fixture: the worker completes shifts
+      const r2 = await rotate(managerToken, completed);
+      expect(r2.status).toBe(409);
+      expect(r2.body.code).toBe('SHIFT_CLOSED');
+      const rows = await adminDataSource.query(`SELECT qr_version FROM ${await businessTableOf(adminDataSource, 'shift', cancelled)} WHERE id = ANY($1) ORDER BY qr_version`, [[cancelled, completed]]);
+      expect(rows.map((r: { qr_version: number }) => r.qr_version)).toEqual([1, 1]);
+    });
+  });
+
   describe('geofence enforcement', () => {
     it('a venue with enforceGeofence=false never requires location, even with none supplied', async () => {
       const { organisation, managerEmail, managerUserId, venue } = await seedOrg();
@@ -710,6 +897,56 @@ describeIfDb('attendance abuse cases (integration)', () => {
         (manager) => manager.query(`SELECT clock_out_method FROM attendance WHERE staff_profile_id = $1`, [staffA.staffProfileId]),
       );
       expect(rows[0].clock_out_method).toBe('auto_geofence');
+    });
+
+    // QR review M3 (owner rule 2026-11-14): the automatic geofence-exit clock-out is a staff self clock-out, so it closes
+    // at the staff member's own end + QR_POST_SHIFT_GRACE_MINUTES (120) like the manual and on-behalf ones.
+    describe('geofence-exit clock-out respects the staff member own clock-out window', () => {
+      async function clockedInAtVenue() {
+        const { organisation, managerEmail, managerUserId, venue } = await seedOrg();
+        await enableGeofence(organisation, venue, 100);
+        const managerToken = await login(managerEmail);
+        const staff = await seedStaff(organisation, managerUserId);
+        const staffToken = await login(staff.email, true);
+        const shiftId = await makeAndPublishShift(organisation, venue, managerToken);
+        await confirmShiftForStaff(managerToken, staffToken, staff.staffProfileId, shiftId);
+        expect((await clockIn(staffToken, organisation, venue, managerUserId, shiftId, { lat: VENUE_LAT, lng: VENUE_LNG, accuracyM: 10 })).status).toBe(201);
+        const exit = () =>
+          request(app.getHttpServer()).post('/rest/v1/attendance/geofence-exit').set('Authorization', `Bearer ${staffToken}`)
+            .send({ lat: VENUE_LAT + 0.01, lng: VENUE_LNG, accuracyM: 10 });
+        return { shiftId, exit };
+      }
+
+      it('own end + 121 min: refused 409 CLOCK_WINDOW_CLOSED and the row stays clocked_in', async () => {
+        const b = await clockedInAtVenue();
+        await moveShift(b.shiftId, '-9 hours -1 minute', '-121 minutes');
+        const res = await b.exit();
+        expect(res.status).toBe(409);
+        expect(res.body.code).toBe('CLOCK_WINDOW_CLOSED');
+        const [row] = await adminDataSource.query(`SELECT status, clock_out_at FROM ${siblingTable(await businessTableOf(adminDataSource, 'shift', b.shiftId), 'attendance')} WHERE shift_id = $1`, [b.shiftId]);
+        expect(row).toMatchObject({ status: 'clocked_in', clock_out_at: null });
+      });
+
+      it('own end earlier than the shift end: refused after the staff member OWN end + grace while the shift still runs', async () => {
+        const b = await clockedInAtVenue();
+        // The shift runs for another hour; this staff member's own seat ended 121 minutes ago.
+        await adminDataSource.query(`UPDATE ${await businessTableOf(adminDataSource, 'shift', b.shiftId)} SET starts_at = now() - interval '9 hours', ends_at = now() + interval '1 hour' WHERE id = $1`, [b.shiftId]);
+        await adminDataSource.query(
+          `UPDATE ${siblingTable(await businessTableOf(adminDataSource, 'shift', b.shiftId), 'shift_assignment')} SET period = tstzrange(now() - interval '9 hours', now() - interval '121 minutes', '[)') WHERE shift_id = $1`, [b.shiftId]);
+        const res = await b.exit();
+        expect(res.status).toBe(409);
+        expect(res.body.code).toBe('CLOCK_WINDOW_CLOSED');
+        const [row] = await adminDataSource.query(`SELECT status, clock_out_at FROM ${siblingTable(await businessTableOf(adminDataSource, 'shift', b.shiftId), 'attendance')} WHERE shift_id = $1`, [b.shiftId]);
+        expect(row).toMatchObject({ status: 'clocked_in', clock_out_at: null });
+      });
+
+      it('control: own end + 100 min still auto-clocks-out', async () => {
+        const b = await clockedInAtVenue();
+        await moveShift(b.shiftId, '-9 hours -40 minutes', '-100 minutes');
+        const res = await b.exit();
+        expect(res.status).toBe(201);
+        expect(res.body.status).toBe('clocked_out');
+      });
     });
 
     it('a geofence-exit report claiming "outside" while server-recomputed position is still inside is rejected — no state change', async () => {
@@ -1033,7 +1270,7 @@ describeIfDb('attendance abuse cases (integration)', () => {
       expect(res.body.staff[0].attendanceStatus).toBe('approved');
     });
 
-    it('race: a staff QR clock-out and a manager forgotten-clock-out recovery at the same moment leave ONE consistent attendance', async () => {
+    it('race: a staff QR clock-out and a manager forgotten-clock-out recovery sent together just after the grace leave ONE consistent attendance', async () => {
       const { organisation, managerEmail, managerUserId, venue } = await seedOrg();
       const managerToken = await login(managerEmail);
       const staffA = await seedStaff(organisation, managerUserId);
@@ -1041,12 +1278,14 @@ describeIfDb('attendance abuse cases (integration)', () => {
       const shiftId = await makeAndPublishShift(organisation, venue, managerToken);
       await confirmShiftForStaff(managerToken, staffAToken, staffA.staffProfileId, shiftId);
       expect((await clockIn(staffAToken, organisation, venue, managerUserId, shiftId)).status).toBe(201);
-      // Move the shift into the overlap: ended 45 min ago — past the 30 min recovery threshold, inside the 120 min QR grace.
-      await adminDataSource.query(`UPDATE ${businessTable(venue.workspaceId!, 'shift')} SET starts_at = now() - interval '7 hours 45 minutes', ends_at = now() - interval '45 minutes' WHERE id = $1`, [shiftId]);
-      await adminDataSource.query(`UPDATE ${businessTable(venue.workspaceId!, 'shift_assignment')} SET period = tstzrange(now() - interval '7 hours 45 minutes', now() - interval '45 minutes', '[)') WHERE shift_id = $1`, [shiftId]);
-      await adminDataSource.query(`UPDATE ${businessTable(venue.workspaceId!, 'attendance')} SET clock_in_at = now() - interval '7 hours 40 minutes' WHERE shift_id = $1`, [shiftId]);
+      // Since 2026-11-14 the staff clock-out window and the manager recovery share ONE grace (120 min after the staff
+      // member's own end; the recovery opens strictly after it), so they no longer overlap. Ended 121 min ago: the staff
+      // clock-out is refused (window closed) and the manager's recovery lands, both sent at the same moment.
+      await adminDataSource.query(`UPDATE ${businessTable(venue.workspaceId!, 'shift')} SET starts_at = now() - interval '9 hours 1 minute', ends_at = now() - interval '121 minutes' WHERE id = $1`, [shiftId]);
+      await adminDataSource.query(`UPDATE ${businessTable(venue.workspaceId!, 'shift_assignment')} SET period = tstzrange(now() - interval '9 hours 1 minute', now() - interval '121 minutes', '[)') WHERE shift_id = $1`, [shiftId]);
+      await adminDataSource.query(`UPDATE ${businessTable(venue.workspaceId!, 'attendance')} SET clock_in_at = now() - interval '8 hours 56 minutes' WHERE shift_id = $1`, [shiftId]);
       const [{ id: attendanceId }] = await adminDataSource.query(`SELECT id FROM ${businessTable(venue.workspaceId!, 'attendance')} WHERE shift_id = $1`, [shiftId]);
-      const recovered = new Date(Date.now() - 45 * 60_000).toISOString();
+      const recovered = new Date(Date.now() - 125 * 60_000).toISOString();
 
       const [staffOut, managerFix] = await Promise.all([
         clockOut(staffAToken, organisation, venue, managerUserId, shiftId),

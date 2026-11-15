@@ -1,3 +1,4 @@
+import { codeWorkspaceStructureLevel } from '../upgrade/workspace-structure-level';
 import { Logger } from '@nestjs/common';
 import { EntityManager } from 'typeorm';
 
@@ -98,15 +99,16 @@ describe('SchemaResolverService: workspace module version (Phase B schema compat
     }
   }
 
-  it('the floor never exceeds LATEST; the owner-login release keeps it at LATEST - 1 = 19', () => {
+  it('the floor never exceeds LATEST; Part D structure level 21 raised it to 20 (owner decision 0b, reviewed 2026-11-14)', () => {
     // Phase D kept the floor at 18 (module 19 only added the statement dispatch pointer triggers). The owner-login PAY-1
     // release (module 20, WorkspaceGrantParityGuards1786721430000) raised it to 19, reviewed as E-10 in
     // workspace-schema-modules.spec.ts: a READY v18 workspace returns 503 (incompatible-module) until migrated. The release
     // migrates every READY workspace to 20 inside that migration, before migrate-on-start lets the API serve (a failing
     // schema throws and the deploy refuses). Raising or lowering it is a deliberate release decision, which must update
-    // this assertion.
+    // this assertion. Part D (0b, structure level 21): 20 — the module list is frozen at 20 and level 21 adds one SELECT policy
+    // this code does not need to serve (D-RUNNER.md §5.3 step 4; workspace-schema-modules.ts).
     expect(MIN_COMPATIBLE_WORKSPACE_MODULE_VERSION).toBeLessThanOrEqual(LATEST_WORKSPACE_MODULE_VERSION);
-    expect(MIN_COMPATIBLE_WORKSPACE_MODULE_VERSION).toBe(19);
+    expect(MIN_COMPATIBLE_WORKSPACE_MODULE_VERSION).toBe(20);
     expect(() => assertCompatibleModuleVersion(MIN_COMPATIBLE_WORKSPACE_MODULE_VERSION)).not.toThrow();
     expect(() => assertCompatibleModuleVersion(LATEST_WORKSPACE_MODULE_VERSION)).not.toThrow();
     expect(() => assertCompatibleModuleVersion(Number.NaN)).toThrow(WorkspaceRoutingError);
@@ -122,10 +124,30 @@ describe('SchemaResolverService: workspace module version (Phase B schema compat
     expect(await codeOf(setup(v).service.resolve(setup(v).manager, WS))).toBe('incompatible-module');
   });
 
+  it('Part D (owner D2/D3): a workspace carrying the upgrade block is refused with upgrading (503), never cached; another marker text is not a block', async () => {
+    const blockedManager = {
+      query: async () => [{ schema_name: SCHEMA, status: 'READY', schema_version: 1, module_version: 20, migration_error: 'upgrade-blocked: 0.7.0_X_1786800000000 (FINGERPRINT_MISMATCH)' }],
+    } as unknown as EntityManager;
+    const cached: string[] = [];
+    const service = new SchemaResolverService({
+      resolveSchema: async (_id: string, fetch: () => Promise<unknown>) => {
+        const v = await fetch();
+        cached.push(String(v));
+        return v;
+      },
+      invalidate: async () => undefined,
+    } as never);
+    expect(await codeOf(service.resolve(blockedManager, WS))).toBe('upgrading');
+    expect(cached).toEqual([]);
+    const oldMessage = { query: async () => [{ schema_name: SCHEMA, status: 'READY', schema_version: 1, module_version: 20, migration_error: 'module v1.020 failed (SQLSTATE_55P03)' }] } as unknown as EntityManager;
+    expect(await codeOf(service.resolve(oldMessage, WS))).toBe('resolved');
+  });
+
   it('a workspace ahead of the code (image rollback) routes, with ONE warning per workspace', async () => {
     const warn = jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
     try {
-      const { service, manager } = setup(LATEST_WORKSPACE_MODULE_VERSION + 1);
+      // Part D: ahead of the code's STRUCTURE level (21 since StaffProfileMemberSelect), not of the frozen module list.
+      const { service, manager } = setup(codeWorkspaceStructureLevel() + 1);
       await expect(service.resolve(manager, WS)).resolves.toBe(SCHEMA);
       await expect(service.resolve(manager, WS)).resolves.toBe(SCHEMA);
       expect(warn).toHaveBeenCalledTimes(1);

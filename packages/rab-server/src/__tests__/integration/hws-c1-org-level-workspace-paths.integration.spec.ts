@@ -163,10 +163,37 @@ describeIfDb('HWS C1: org-level paths over workspace tables (integration)', () =
       expect(ids).toEqual(hwsOn ? [venueB] : [venueB, staleCoreVenue].sort());
     });
 
-    it('ABUSE: a manager bound to ANOTHER workspace of the same organisation gets 404, not [] and not the rows', async () => {
+    it('owner decision 0d: an ORGANISATION-WIDE manager.manage holder bound to ANOTHER workspace reads the target’s venues (its workspace)', async () => {
+      // mgrA holds manager.manage through the organisation-level `manager` role (MANAGER_PERMS): organisation-wide scope.
       const res = await venuesOf(mgrA, vmB.profileId!);
+      expect(res.status).toBe(200);
+      const ids = (res.body as Array<{ id: string }>).map((v) => v.id).sort();
+      expect(ids).toEqual(hwsOn ? [venueB] : [venueB, staleCoreVenue].sort());
+    });
+
+    it('ABUSE (0d): manager.manage cannot come from a workspace-only role, and a manager WITHOUT it in another workspace is refused (403), never shown the venues', async () => {
+      // The database refuses manager.manage on a custom workspace-member role, so every holder is organisation-wide; the
+      // service's strict same-workspace branch for a workspace-only holder stays as defence in depth (unit-tested).
+      const [role] = await adminDataSource.query<Array<{ id: string }>>(
+        `INSERT INTO core.role (organisation_id, key, name, is_system, workspace_id) VALUES ($1, $2, 'C1 custom manage', false, $3) RETURNING id`,
+        [orgId, `custom_c1b_${randomUUID().slice(0, 8)}`, mgrA.workspaceId],
+      );
+      await expect(
+        adminDataSource.query(
+          `INSERT INTO core.role_permission (role_id, permission_id, organisation_id) SELECT $1, id, $2 FROM core.permission WHERE key = $3`,
+          [role!.id, orgId, PermissionFlag.MANAGER_MANAGE],
+        ),
+      ).rejects.toThrow(/cannot be granted to a workspace-member role/);
+      // A Venue Manager of workspace A (its system role has no manager.manage) asking for workspace B's Venue Manager.
+      const vmA = await factory.createVenueManager({ id: orgId }, { owner: mgrA, label: 'c1-vm-a-plain' });
+      const ctxA = { organisationId: orgId, workspaceId: mgrA.workspaceId, userId: vmA.userId, role: '' };
+      await expect(managerService.listVenues(ctxA, vmB.profileId!)).rejects.toMatchObject({ status: 403 });
+    });
+
+    it('owner decision 0d: a workspace-bound caller asking for an in-organisation profile with NO workspace gets 404; a workspace-less CEO gets []', async () => {
+      const res = await venuesOf(mgrB, ceo.profileId!); // the CEO's own profile has no workspace
       expect(res.status).toBe(404);
-      expect(JSON.stringify(res.body)).not.toContain(venueB);
+      await expect(managerService.listVenues({ organisationId: orgId, workspaceId: null, userId: ceo.userId, role: '' }, ceo.profileId!)).resolves.toEqual([]);
     });
 
     it('a workspace-less CEO reads the target’s workspace (never the stale core copy with HWS on)', async () => {

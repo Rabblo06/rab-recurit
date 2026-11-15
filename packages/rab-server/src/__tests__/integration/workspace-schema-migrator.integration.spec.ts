@@ -2,7 +2,8 @@ import 'reflect-metadata';
 import { Client } from 'pg';
 
 import { resolveIntegrationTestDatabase } from '../../database/typeorm/core/test-database-guard';
-import { EXPECTED_WORKSPACE_FINGERPRINTS, selectWorkspaceFingerprintsForServer } from '../../database/typeorm/workspace-schema/v1/expected-fingerprints';
+import { codeWorkspaceStructureLevel, declaredFingerprint } from '../../engine/core-modules/upgrade/workspace-structure-level';
+import { EXPECTED_WORKSPACE_FINGERPRINTS, selectWorkspaceFingerprintsForServer, workspaceFingerprintMajor } from '../../database/typeorm/workspace-schema/v1/expected-fingerprints';
 import { checkWorkspaceSchemaDrift } from '../../database/typeorm/workspace-schema/workspace-schema-drift';
 import { pgClientRunner, WorkspaceSchemaMigrator } from '../../database/typeorm/workspace-schema/workspace-schema-migrator';
 import { LATEST_WORKSPACE_MODULE_VERSION, WORKSPACE_SCHEMA_MODULES } from '../../database/typeorm/workspace-schema/workspace-schema-modules';
@@ -90,15 +91,23 @@ describeIfDb('WorkspaceSchemaMigrator + ledger + drift (B3/B4)', () => {
     created.push(srv, ts);
     expect(await provisionServerPath(appUrl, srv)).toBe('READY');
     expect(await provisionTypeScript(adminUrl, ts)).toBe('READY');
+    // Part D: both build this code's structure level (21 = the 20 modules + StaffProfileMemberSelect), declared in fingerprint
+    // v2; the 20 module rows stay the template history (D5) and the registry keeps the workspace's v1 value.
+    const level = codeWorkspaceStructureLevel();
+    const v2 = declaredFingerprint(level, workspaceFingerprintMajor());
+    const v1s = new Set<string>();
     for (const ws of [srv, ts]) {
       const reg = await registryOf(admin, ws.id);
-      expect(reg).toMatchObject({ status: 'READY', schema_version: 1, module_version: LATEST_WORKSPACE_MODULE_VERSION, drift_status: 'OK' });
-      expect(reg.expected_fingerprint).toBe(latestFp);
-      expect(await fingerprint(ws.id)).toBe(latestFp);
+      expect(reg).toMatchObject({ status: 'READY', schema_version: 1, module_version: level, drift_status: 'OK' });
+      const fp = (await admin.query('SELECT core.workspace_schema_fingerprint($1) AS v1, core.workspace_schema_fingerprint_v2($1) AS v2', [ws.id])).rows[0];
+      expect(fp.v2).toBe(v2);
+      expect(reg.expected_fingerprint).toBe(fp.v1);
+      v1s.add(fp.v1);
       const ledger = await ledgerOf(admin, ws.id);
       expect(ledger.map((l) => [l.module_id, l.status, l.attempt])).toEqual(WORKSPACE_SCHEMA_MODULES.map((m) => [m.id, 'APPLIED', 1]));
       expect(await hasMoneyChecks(ws.schema)).toBe(2);
     }
+    expect(v1s.size).toBe(1);
   });
 
   it('a pre-ledger v14 workspace is BASELINED, then migrated to the latest module, ending identical to a fresh build', async () => {

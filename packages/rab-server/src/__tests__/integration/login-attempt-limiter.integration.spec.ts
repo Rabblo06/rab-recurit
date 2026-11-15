@@ -43,6 +43,19 @@ const describeIfDb = RUN ? describe : describe.skip;
 
 type Outcome = { status: number; body: Record<string, unknown> };
 
+/**
+ * The limiter shares `AuthCacheRedisClientProvider`'s client, whose production `commandTimeout` is 150 ms today (a cache read must
+ * never make a request wait). ioredis arms that timer when the command is WRITTEN, and Node runs expired timers before it
+ * reads the socket, so any event-loop stall longer than 150 ms between the write and the reply (a major GC of a Jest worker
+ * that has already run a whole shard of AppModule suites, a busy CI host) fails the command with "Command timed out" and
+ * the limiter correctly fails closed with 503 — on an attempt this file expects to be 401 or 429. Run alone the heap is
+ * small and it passes; in a full shard it flaked. This file tests the limiter's bucket arithmetic and its fail-closed
+ * behaviour when Redis is GONE, not the latency budget, so the timeout is raised for the timing-sensitive tests below and
+ * restored to the production value before the "Redis unavailable" test, which therefore still runs the exact production
+ * client configuration. Every assertion is unchanged.
+ */
+const TEST_COMMAND_TIMEOUT_MS = 5_000;
+
 describeIfDb('wave 1 lane A — password sign-in limiter, per (email, IP) with an account-wide ceiling (REAL limiter)', () => {
   jest.setTimeout(180_000);
 
@@ -53,6 +66,7 @@ describeIfDb('wave 1 lane A — password sign-in limiter, per (email, IP) with a
   let throttlerRedis: ThrottlerRedisClientProvider;
   let factory: TestIdentityFactory;
   let organisationId: string;
+  let productionCommandTimeout: number | undefined;
   const managers: TestIdentity[] = [];
   let next = 0;
   const freshManager = () => managers[next++]!;
@@ -80,6 +94,9 @@ describeIfDb('wave 1 lane A — password sign-in limiter, per (email, IP) with a
     auth = moduleRef.get(AuthService);
     authRedis = moduleRef.get(AuthCacheRedisClientProvider);
     throttlerRedis = moduleRef.get(ThrottlerRedisClientProvider);
+    productionCommandTimeout = authRedis.client.options.commandTimeout;
+    expect(productionCommandTimeout).toBeGreaterThan(0); // the production budget the last test restores
+    authRedis.client.options.commandTimeout = TEST_COMMAND_TIMEOUT_MS;
     await clearLoginLimiterState(authRedis.client);
     await clearThrottleState(throttlerRedis);
     factory = new TestIdentityFactory({
@@ -92,6 +109,14 @@ describeIfDb('wave 1 lane A — password sign-in limiter, per (email, IP) with a
     const seeded = await factory.createOrganisationWithManagers(10, { permissions: 'production', workspace: true, label: 'w1lim' });
     organisationId = seeded.organisation.id;
     managers.push(...seeded.managers);
+  });
+
+  // A client that dropped its connection between tests would refuse every command at once (no offline queue): wait for it
+  // to be connected again instead of reading that as a limiter decision. The last test disconnects it on purpose, after this.
+  beforeEach(async () => {
+    const deadline = Date.now() + 10_000;
+    while (authRedis.client.status !== 'ready' && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(authRedis.client.status).toBe('ready');
   });
 
   afterAll(async () => {
@@ -231,6 +256,7 @@ describeIfDb('wave 1 lane A — password sign-in limiter, per (email, IP) with a
   it('Redis unavailable: sign-in fails closed with 503 RATE_LIMIT_UNAVAILABLE within bounded time, for a real or unknown email, with no login_history row', async () => {
     await clearThrottleState(throttlerRedis);
     const user = freshManager();
+    authRedis.client.options.commandTimeout = productionCommandTimeout; // this test runs the exact production client settings
     authRedis.client.disconnect(); // manual disconnect: ioredis does not reconnect
     const countHistory = async (email: string) =>
       (await owner.query(`SELECT count(*)::int AS n FROM core.login_history WHERE email = $1`, [email]))[0].n as number;

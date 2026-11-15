@@ -31,6 +31,7 @@ import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-
 import { createAdminDataSource } from '../integration/helpers/admin-datasource';
 import { TestIdentity, TestIdentityFactory } from '../integration/helpers/test-identities';
 import { b1, LEDGER_SELECT_SQL, LedgerRow } from './ledger-contract';
+import { lastInstanceStepOfVersion, lastStepOfVersion } from '../../engine/core-modules/upgrade/upgrade-sequence';
 
 jest.setTimeout(300_000);
 
@@ -147,7 +148,13 @@ describeIfB1('the logbook through the real application (new workspace, /healthz,
     expect(added[0]).toMatchObject({ workspace_id: ws, is_initial: true, attempt: 1, forced: false, error_message: null, executed_by_version: B1.currentVersion });
     // Interface §3: name and status copied from the last attempted instance step (Twenty markAsWorkspaceInitial).
     const lastInstance = before.filter((r) => r.workspace_id === null && !r.is_initial).sort((a, b) => +new Date(a.created_at) - +new Date(b.created_at)).pop();
-    if (lastInstance) expect({ name: added[0]!.name, status: added[0]!.status }).toEqual({ name: lastInstance.name, status: lastInstance.status });
+    // Part D (D-RUNNER.md §5.2 / D7, Twenty getInitialCursorForNewWorkspace): when that instance step is the code version's
+    // last instance step and completed, the cursor is the version's LAST step (its workspace commands included): the new
+    // workspace is built from the current template, so it runs none of them.
+    const atVersionEnd = lastInstance?.status === 'completed' && lastInstance.name === lastInstanceStepOfVersion(B1.currentVersion);
+    if (lastInstance) {
+      expect({ name: added[0]!.name, status: added[0]!.status }).toEqual({ name: atVersionEnd ? lastStepOfVersion(B1.currentVersion) : lastInstance.name, status: lastInstance.status });
+    }
     await deleteWorkspace(ws);
     expect((await ledger()).filter((r) => r.workspace_id === ws)).toEqual([]);
     expect((await ledger()).map((r) => r.id).sort()).toEqual(before.map((r) => r.id).sort());
@@ -196,7 +203,19 @@ describeIfB1('the logbook through the real application (new workspace, /healthz,
     forgetAdminReport();
     let res = await http().get('/rest/v1/admin/health/report').set('Authorization', `Bearer ${adminToken}`);
     expect(res.status).toBe(200);
-    expect(Object.keys(res.body.upgrade ?? {}).sort()).toEqual(['appVersion', 'at', 'attempt', 'executedByVersion', 'forced', 'state', 'step']);
+    // Part D (owner D2/D3) adds `workspaces`: the failed / blocked workspaces, each exactly { workspaceId, step, errorClass, blocked }.
+    // readUpgradeStatus omits `workspaces` when that list is empty (non-empty means some workspace failed), so its presence
+    // depends on what the shared test database holds: assert the allowed shape, never the presence.
+    const alwaysPresent = ['appVersion', 'at', 'attempt', 'executedByVersion', 'forced', 'state', 'step'];
+    const keys = Object.keys(res.body.upgrade ?? {});
+    expect(keys.filter((k) => ![...alwaysPresent, 'workspaces'].includes(k))).toEqual([]);
+    expect(alwaysPresent.filter((k) => !keys.includes(k))).toEqual([]);
+    if (keys.includes('workspaces')) {
+      expect(Array.isArray(res.body.upgrade.workspaces)).toBe(true);
+      for (const w of res.body.upgrade.workspaces as Array<Record<string, unknown>>) {
+        expect(Object.keys(w).sort()).toEqual(['blocked', 'errorClass', 'step', 'workspaceId']);
+      }
+    }
     expect(JSON.stringify(res.body)).not.toMatch(/error_message|errorMessage/);
 
     // A failed newer attempt of the current version's last step (superuser fixture), then removed again.

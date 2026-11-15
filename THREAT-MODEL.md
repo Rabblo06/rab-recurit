@@ -7492,6 +7492,229 @@ image that runs the apps' own derive step on the read-only volume (`--pull never
   password file unchanged across restart, no password in any log) and run-db-setup-tests.cjs block `lock` (PG16 PASS: the
   second db exits 1 with the refusal, the first stays healthy).
 
+## OWNER-DB-ULTIMATE Part D — per-workspace upgrade commands and the workspace command runner, like Twenty's (branch deploy/workspace-command-runner; no new SQL)
+
+- **What.** Workspace schema changes ship as WORKSPACE upgrade commands per release (`upgrade-commands/<major-minor>/`,
+  registry `WORKSPACE_UPGRADE_COMMANDS`; 0.6 has none). The workspace command runner runs them once per workspace, on the
+  locked migration session, after the release's instance commands. Each (command, workspace) is recorded in Part B's
+  `core.upgrade_migration` (workspace_id set, `completed` / `failed`, attempt + 1). The workspace-module list is frozen at
+  20 (the template); a structural command adds a structure level (21, 22, …). On 0.6.0 every READY workspace at module 20
+  with a matching structure is adopted with one `is_initial` row. Behaviour re-implemented from twentyhq/twenty @ eedb0a73
+  (workspace-command-runner.service.ts, workspace-iterator.service.ts, upgrade-sequence-reader / -runner,
+  run-instance-commands previous-version check), not copied. No DDL, function or grant was added: the runner uses Part B's
+  approved table, existing functions (`worker_list_workspaces`, `verify_workspace_schema_v1`, `workspace_schema_fingerprint`)
+  and existing registry columns.
+- **Threats.**
+  1. A workspace's command touches another workspace's schema or data, `core`, or the role catalogs (DDL, DML, GRANT,
+     CREATE / ALTER ROLE), or forges logbook rows.
+  2. A command leaves the session changed (role, tenant binding, `rab.*`, search_path, advisory locks) for the next workspace.
+  3. A workspace is served by code that expects a structure it does not have (a failed structural step, a data-step failure
+     before a pending structural step, drift, a refused adoption).
+  4. One workspace's failure stops or marks the others.
+  5. `--force` hides an earlier failed step.
+  6. A test hook reaches production.
+  7. A long upgrade is killed by the health check / restart loop and leaves partial state.
+- **Controls.**
+  - **One REPEATABLE READ transaction per (workspace, command):** `SET LOCAL ROLE crewflow` (refused when the session can
+    neither be nor SET crewflow), tenant bound to that workspace, `search_path = pg_catalog, pg_temp`, per-schema advisory
+    lock, registry row FOR UPDATE (READY, derived name).
+  - **Post-step checks before COMMIT (any failure rolls back):**
+    - a static refusal of SQL naming another `workspace_<hex>`;
+    - session invariants: same backend and transaction, role, every `rab.*` by name, search_path;
+    - a catalog-write gate: a DATA step that writes any catalog is refused `DDL_IN_DATA_STEP`;
+    - for structural steps, the catalog xmin scan (no catalog row outside the schema written by this transaction; the
+      schema's own TOAST and the internal RI triggers of its own FKs are allowed); for steps declaring `mayDrop`, also the
+      outside object counts (an undeclared drop is refused `UNDECLARED_DROP`);
+    - write counters compared as a delta within the transaction: no insert / update / delete on any table outside the
+      schema, nor on pg_authid, pg_auth_members, pg_db_role_setting, pg_database, pg_largeobject_metadata,
+      pg_publication(_rel); plus xmin scans of the readable shared catalogs. `track_counts = on` is required per run;
+    - extra structure: no rule, all relations permanent, no inheritance, no foreign type or operator;
+    - `verify_workspace_schema_v1` + fingerprint equal to the expected value of the workspace's structure level for this
+      PostgreSQL major.
+  - **After the transaction:** role none, current_user = session_user, every `rab.*` empty (checked by name: pg_settings does
+    not list placeholder settings, proven on PG16/17/18), search_path as at the start, no extra session advisory lock.
+    Otherwise the step is refused `SESSION_LEAK` and the session reset; a reset that fails stops the run.
+  - **Failure isolation:** a failed workspace gets its own `failed` row and stops only its own later steps. A per-workspace
+    fault outside a step (a vanished workspace, a logbook write) is recorded against that workspace; only a run-level fault
+    stops the run. Pending steps are every workspace step after the cursor up to the code version, so a step `--force`
+    skipped runs first. The previous-version check also needs every workspace to have completed the previous version's last
+    workspace step.
+  - **Blocked workspaces (owner decisions D2/D3):** a workspace whose step failed with a structure that does not match this
+    code is BLOCKED until its step succeeds. That covers a structural step, a mismatched structure, a level below the
+    code's, a refused adoption, and no / unknown cursor.
+    - Marker: `upgrade-blocked: <step> (<CLASS>)` in the existing registry column `migration_error`.
+    - `SchemaResolverService` answers 503 "Workspace is being upgraded." only to a caller whose session is bound to that
+      workspace's organisation and who reaches the resolver (workspace membership is enforced earlier by the guards);
+      another organisation's caller gets 404 as usual.
+    - The Worker's walks skip it and per-job paths defer it (no attempt counted).
+    - The admin health page names it: workspace id, step, error class, never a message.
+    - The step retries every start.
+    - A data-only failure with a matching structure is served (still reported failed).
+    - A block that cannot be written stops the start. A cache-epoch bump that fails while a block changed or is in force
+      stops the start (`WorkspaceBlockCacheError`, outcome postCheck, exit 68: every migration applied, a post-migration
+      gate refused).
+  - **Test hooks:** `runMigrateOnStart`'s `testWorkspace` and the provisioner's `workspaceRegistry` are code-only and refused
+    outside NODE_ENV=test, before any connection; a guard spec proves no non-spec file passes them.
+  - **Long upgrades:** each (workspace, step) commits and is recorded on its own, so a kill loses at most the workspace in
+    flight and the next start resumes. Measured at 1,000 workspaces: data step ≈0.4–0.6 s, structural ADD COLUMN
+    ≈0.9–1.3 s per workspace.
+- **Accepted limits (owner-accepted 2026-11-14).**
+  - **D-T1:** the checks are a detector, not a privilege boundary. The command runs as `crewflow` (which owns every
+    workspace schema) on the session that set the binding and role, so it can re-bind, RESET ROLE (`crewflow_owner` holds
+    CREATEROLE) or set `rab.upgrade_scope`. The checks detect and roll back what that changes; they cannot stop a command
+    that COMMITs mid-way (it is then refused). Not detected: `NOTIFY` (delivered at COMMIT), `nextval` on a sequence outside
+    the schema, large-object payload writes in a STRUCTURAL step (in a data step a large-object write is a catalog write
+    and is refused, DDL_IN_DATA_STEP). Commands are reviewed code, never input-driven.
+  - **Redis needed at start while a block is in force:** every start that changes a block, or runs while any workspace is
+    blocked, must bump the entity-cache epoch; if Redis is down the API start refuses (68), so a lasting block plus a Redis
+    outage keeps the API from starting. A Worker already running is not stopped by that refusal; its discovery and claim
+    walks re-check the registry and skip a blocked workspace.
+  - **D-T2:** steps run under REPEATABLE READ; a concurrent writer can fail a data step with 40001 (recorded failed,
+    retried).
+  - **HWS off (open owner question):** the block is enforced where workspaces are routed to their schemas
+    (`HWS_RUNTIME_ENABLED`). With HWS off, requests use `core` and nothing is blocked; the admin page still names the
+    workspace.
+  - **Rules for command authors:** data steps may not write any catalog (DDL, GRANT, TRUNCATE, temporary tables, ALTER ROLE);
+    structural steps that drop or recreate objects declare `mayDrop`; every command is idempotent.
+- **Tests.** Unit: sequence, pending, positions, isolation scan, freeze, source guard, structure level, delta counters,
+  track_counts, rab.* list, hook refusal. Integration on PG16/17/18: adoption, per-workspace runs, every abuse case above, the
+  D2/D3 blocks, the P1 code-level block, the locked start with a level-21 probe, the P2 refusal. Worker unit tests for the
+  pauses.
+
+## QR expiry from the shift's current end (owner decision 0i, 2026-11-14; branch fix/qr-expiry-from-shift)
+- **Threat / defect:** the Shift QR's JWT `exp` was signing time + (shift length + 15 + 120 min). The pre-shift report
+  signs its QR up to `REPORT_AVAILABLE_BEFORE_MINUTES` (180) before the start, so a printed QR expired ~45 min before the
+  shift ended: staff could not clock out with it, and a manager extending a shift could not extend the QR.
+- **Control:** `AttendanceQrService.validateQr` decides expiry at scan time from the freshly re-read shift: accepted while
+  server `now <=` the staff member's own end (since the follow-ups below) `+ QR_POST_SHIFT_GRACE_MINUTES` (the same grace setting `assertClockWindow` closes with; one
+  definition, `AttendanceQrService.validUntil`), refused `INVALID_QR` / `expired` after. New tokens carry no `exp`.
+  Fail-closed reasoning: `QrTokenService.verify` still checks signature (HKDF-derived key, HS256 pinned), issuer and
+  audience, but is never an accept on its own; its only caller always loads the shift and applies the time bound after the
+  shift/venue/`ver` checks. An unreadable end time or a missing grace setting refuses. A token signed before this change
+  keeps its own `exp` (both bounds apply), so no already-printed QR gains validity. Unchanged: a QR for one shift is refused
+  for another (`shift_mismatch`), the confirmed-assignment re-check, check-in-first, `assertClockWindow`, the geofence.
+- **Not exported, one verifier:** `QrTokenService` is no longer exported from `AttendanceModule`; other modules get
+  `AttendanceQrService` only. `qr-token-verify.arch.spec.ts` fails if any production file in rab-server or rab-worker
+  other than `attendance-qr.service.ts` calls `QrTokenService.verify`, names the class outside the reviewed files, or
+  derives the QR key (`rab-qr-token-v1`) itself.
+- **Follow-ups approved by the owner (2026-11-14, branch fix/qr-followups).**
+  - *14-day ceiling.* `QrTokenService.verify` refuses any QR whose `iat` is older than `QR_MAX_AGE_DAYS` (default 14,
+    validated 1-90; jsonwebtoken `maxAge`), whatever the shift's end: `expired`. A token without `iat` is `invalid`; a
+    missing setting refuses instead of verifying without a ceiling.
+  - *Rotation (revocation).* `POST /rest/v1/shifts/:id/rotate-qr` (`SchedulingService.rotateShiftQr`) bumps
+    `shift.qr_version` and `updated_at`; every older token is then refused `revoked` (a venue change stays
+    `venue_mismatch`). Layers: `PermissionGuard(schedule.create)` (the shift-management flag cancel/archive use) → the
+    same flag re-checked in the service first (403 for any id) → `assertShiftOwned` (404 out of scope, never 403) →
+    refused 409 `SHIFT_CLOSED` for a status with no outgoing transition in `SHIFT_TRANSITIONS` (completed, cancelled,
+    declined) → workspace RLS → compare-and-set on (qr_version, status) → audit `shift.qr_rotated` (shipped off-host as
+    `security_configuration` / warning, like `venue.geofence_updated`). No client field is written. The bumped
+    `updated_at` makes the pre-shift report scheduler regenerate and re-send the roster with the new QR, but only while
+    the shift has not ended (its scan requires `ends_at > now()`). The DEFAULT Venue Manager role does not hold
+    `schedule.create`, so it cannot rotate. A Venue Manager role granted `schedule.create` still cannot reach the route:
+    it is manager-web only (`@ManagerApplication`) and the `venue_manager` role may only sign in to the Venue Manager app;
+    the service itself applies the venue scope (404 outside the role's venues) for any other caller. API only for now
+    (the QR is shown in the Venue Manager mobile apps, not the web console).
+  - *Report rendered across a rotation (review M1).* The pre-shift scheduler locks the shift row before the report row,
+    discards a render whose shift `qr_version` or `updated_at` changed while it rendered (no stored file, no email; the
+    next tick rebuilds), and stamps the report with the database clock (`now()` of its write transaction). Rotation takes
+    the shift row FOR UPDATE and then writes `updated_at = clock_timestamp()` (`rotate-shift-qr.sql.ts`), so a rotation
+    that waited on the report's FOR SHARE lock writes a time after that commit, later than the stamp, and the next tick
+    regenerates with the new QR. Pinned by a lock-wait regression test (fails with `now()`) and a source pin.
+  - *Geofence-exit clock-out (review M3).* The automatic geofence-exit clock-out is a staff self clock-out too: refused
+    `CLOCK_WINDOW_CLOSED` after the staff member's own end + grace, like the manual and on-behalf clock-outs.
+  - *Settings (review L2).* `QR_POST_SHIFT_GRACE_MINUTES` is 0..1440, `QR_MAX_AGE_DAYS` 1..90 whole days, and the API and
+    Worker refuse to boot when `REPORT_AVAILABLE_BEFORE_MINUTES >= QR_MAX_AGE_DAYS x 1440`. That guarantees only that a
+    printed QR is still inside the age ceiling when the shift starts, not through its end + grace (shift length is not
+    bounded by any setting).
+  - *Held for owner decisions (not implemented):* rotating after the shift has ended strands staff still clocked in
+    (the report is not regenerated after `ends_at`) — review M2; `correct()` does not bound a recovered `clockOutAt` —
+    review L4.
+  - *Per-staff grace, end to end.* One grace, `QR_POST_SHIFT_GRACE_MINUTES` (120), always from the staff member's OWN end
+    (`effectiveAssignmentTime`): the QR is accepted until own end + grace (`validUntil` takes the seat; `validateQr`
+    requires it), the staff self clock-out now has the same `assertClockWindow` check the on-behalf clock-out has, and the
+    attendance monitor flags MISSING_CLOCK_OUT and the manager recovery opens only strictly after it
+    (`missing-clock-out-policy.ts` `isPastClockOutGrace`; the old 30-minute constant is gone). The staff clock-out and
+    the manager recovery no longer overlap.
+- **How a printed QR's validity can still grow.** A published shift cannot be rescheduled, but its end can move later:
+  every offer with a per-staff time widens the shift envelope (`OfferService`, `GREATEST(ends_at, $3)`) with no ceiling in
+  `validateAssignmentTime`. Since the follow-ups the QR follows the scanning staff member's own seat end, and the 14-day
+  ceiling bounds any token's life absolutely.
+
+```
+SECURITY TRADE-OFF
+Decision:   New Shift QR tokens carry no exp; expiry is decided at scan time from the staff member's own end + 120 min,
+            under a hard 14-day age ceiling (QR_MAX_AGE_DAYS), with manager rotation to revoke.
+Reason:     The owner's rule (decision 0i) is that an extended shift extends the QR. An exp fixed at signing either
+            expires a QR printed 3 h early before the shift ends (the bug) or caps extensions arbitrarily.
+Risk:       A leaked or photographed QR stays usable for that shift until the staff member's own end + grace (at most 14
+            days from printing) unless a manager rotates it. The QR is only one factor: clock-in also needs the caller's
+            own JWT, a CONFIRMED booking re-read fresh, check-in first and the clock window; clock-out needs the caller's
+            own open attendance and the same window; at an enforcing venue both need a fresh geofence fix.
+Mitigation: Signature/HS256/issuer/audience pinned; 14-day maxAge; shift, venue and qr_version re-checked on every scan;
+            rotation (revoked); one verify caller (architecture test); unreadable end or missing settings refuse.
+Reversal:   A shorter QR_MAX_AGE_DAYS, or rotating QRs automatically on schedule changes.
+```
+- **Tests:** `attendance-qr.service.spec.ts` (printed 3 h early: accepted in the last minutes and through the grace,
+  refused 1 s after own end + grace; extended and shortened shifts; per-seat grace with two seats; 14-day ceiling at
+  T+14d-1s / T+14d+1s and via the setting; no-iat; rotation `revoked` vs `venue_mismatch`; foreign shift; tampered /
+  forged-key / malformed; wrong issuer / audience / HS512 / alg:none; legacy `exp`; fail-closed settings),
+  `qr-token-verify.arch.spec.ts`, `env.validation.qr.spec.ts`, `shift-qr-rotation-scope` (other manager 404, venue-scoped
+  role 403 over HTTP / 404 outside / rotates inside, overlapping rotations one 201 + one 409), `report-worker-concurrency`
+  (rotation mid-render: discarded, no email; next tick's PDF QR decodes to ver 2), `attendance-abuse-cases` (geofence-exit
+  CLOCK_WINDOW_CLOSED at own end + 121 min, control at + 100; clock-out with a QR printed 3 h early, CLOCK_WINDOW_CLOSED past
+  own end + grace, rotateShiftQr: revoked / accepted, 403 guard and service, 404 other tenant, 409 cancelled / completed;
+  the staff-vs-manager race just after the grace), rab-worker `worker-operations-abuse-cases` › clock-out grace end to end
+  (monitor at own end + 100 min leaves the row open and the staff clock-out works; own end + 121 min refused then flagged;
+  two seats: A flagged / refused after its own end + grace while B is accepted), and the pdf-equality self-test.
+
+  refused 1 s after end + grace; extended and shortened shifts; foreign shift; tampered / forged-key / malformed; legacy
+  `exp`; fail-closed config; wrong issuer / wrong audience / HS512 / alg:none refused), `qr-token-verify.arch.spec.ts`,
+  `attendance-abuse-cases` › QR expiry follows the shift's current end + grace (the QR decision over HTTP with a QR
+  printed 3 h before the start; the attendance monitor is not running there), and the pdf-equality self-test (the
+  QR decoded from the PDF is accepted until its shift end + grace and refused 1 s later).
+
+## OWNER-DB-ULTIMATE Part D: the first structural workspace command, `staff_profile_member_select` (structure level 21) and fingerprint v2 (branch feat/ws-staff-member-select)
+
+- **What:**
+  - The owner-approved SELECT policy `staff_profile_member_select` on every workspace schema's `staff_profile`, shipped as
+    workspace upgrade command `0.6.0_StaffProfileMemberSelect_1786721480000`. The runner applies it per existing workspace; new
+    workspaces get it from the re-created `core.provision_workspace`.
+  - Fingerprint v2 (`core.workspace_schema_fingerprint_v2[_lines]`, rab_secure_owner-owned, SECURITY INVOKER, EXECUTE crewflow).
+  - `verify_workspace_schema_v1` at 42 policies.
+- **Threats:**
+  1. A custom-role member reads staff of another workspace or organisation, or without staff.view.
+  2. A member reads money (pay rates).
+  3. A system role (Venue Manager, Staff) gains staff access through the policy.
+  4. A tampered or pre-existing policy of the same name is silently accepted.
+  5. A workspace stays at level 20 and is served by code that expects 21.
+  6. The new fingerprint functions widen what the runtime can run.
+- **Controls:**
+  - (1) RLS binding: `organisation_id = core.current_org() AND workspace_id = core.current_workspace()`.
+  - (1) The SECURITY INVOKER helper requires an ACTIVE membership of THIS workspace and a non-system role of THIS workspace holding
+    staff.view. Tested: no staff.view → 0 rows; another workspace → 0; suspended or removed membership → 0; a role of another
+    workspace → 0; a system role → 0; another organisation → 0; no tenant context → 0; the policy is SELECT only.
+  - (2) Money is hidden in the service layer, not by RLS (RLS is row-level). MemberAccessPolicyService projection
+    (`payRate` hidden by default, `sensitiveAuthority: payroll.view`); role writes and assignments refuse revealing a field whose
+    authority the editor lacks (403 ROLE_ESCALATION); members can never hold payroll.view.
+  - (3) `r.is_system = false`.
+  - (4) The command creates the policy only when absent; the post-step v2 fingerprint check refuses anything else and the workspace
+    is blocked (tested).
+  - (5) The runner blocks a workspace below the code level (503 to its members, the Worker pauses); routing floor 20; the deploy
+    post-check floor is unchanged.
+  - (6) EXECUTE is granted to crewflow only; crewflow_app has none (tested). Not SECURITY DEFINER.
+- **Accepted / open:**
+  - A workspace owner who holds payroll.view can delegate visibility of the staff default pay rate to a member role (existing
+    behaviour, owner question in WS-COMMANDS.md §0b.2).
+  - Level-21 v2 fingerprints are declared for PostgreSQL 16, 17 and 18 (generated on throwaway clusters, identical across two frozen-template workspaces per major).
+  - Fingerprint v2 known limits (v3 candidates, D-RUNNER §9.1): schema-local collations by name only, pg_default_acl, opclass/opfamily/text-search/extended statistics, relam/relreplident; the periodic drift job still compares v1 for level 21+.
+  - down() refuses while any workspace still carries the policy (operator cleanup first), so a rollback can't leave level-21 workspaces failing verification.
+- **Also fixed:** `RoleService.assertRelationsInScopeTx` read `core.venue` / `core.job_role` explicitly, so with HWS on every venue or job-role record filter on a member role was refused; it now reads through the tenant's bound search_path (core with HWS off, the validated workspace schema with HWS on).
+- **Tests:**
+  - `ws-staff-member-select.integration.spec.ts`;
+  - the runner specs (probes at code level + 1);
+  - the `server-path-provisioning-db` tamper cases;
+  - unit guards: reviewed structure level 21 with floor 20, pending majors.
+
 ## Part C1 — HWS (one schema per workspace) on by default outside production; user deletion checks every workspace (branch hws/c1a-on-by-default, 2026-11-14)
 - **Change.** `HWS_RUNTIME_ENABLED` unset now means ON in development and test and OFF when ANY production signal is set
   (`NODE_ENV`, `RAB_RUNTIME_ENV` or `DB_TARGET` = production, trimmed, any case; the existing `isProductionRuntime`). An explicit

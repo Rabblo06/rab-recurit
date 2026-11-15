@@ -297,7 +297,7 @@ Source: `modules/attendance/controllers/attendance.controller.ts`; `services/att
 | GET | `/attendance/me/shift/:shiftId/check-in` | Staff | attendance.clock | — | 200 `CheckInState` | 404 | read | **[TEST-DB]** |
 | POST | `/attendance/check-in` | Staff | attendance.clock, 10/min/user | `{shiftId (uuid, required), qrToken? (1..4096), lat?, lng?, accuracyM?, capturedAt?}`. Flutter sends location only when `geofenceEnforced != false`, and **no QR on Check In**. | **200** `CheckInState` | 404; 409 `ATTENDANCE_FLAGGED_MISSING`, `SHIFT_NOT_CONFIRMED`, `SHIFT_NOT_OPEN`, `ALREADY_CLOCKED_IN`, `CHECK_IN_TOO_EARLY`(+`shiftStart`,`availableAt`), `CHECK_IN_WINDOW_CLOSED`, `INVALID_QR`(+`reason`), `GEOFENCE_MISCONFIGURED`, `LOCATION_REQUIRED`, `LOCATION_ACCURACY_TOO_LOW`, `LOCATION_STALE`, `OUTSIDE_GEOFENCE`(+`venueName`); 409 plain CAS lost; 429 | **Idempotent:** a repeat returns 200 with the original state and `alreadyCheckedIn:true` | **[TEST-DB]** |
 | POST | `/attendance/clock-in` | Staff | attendance.clock, 10/min/user | `{shiftId, qrToken (required, the scanned QR text verbatim), lat?, lng?, accuracyM?, capturedAt?}` | **201** `AttendanceSummary` | 404; 409 `ATTENDANCE_FLAGGED_MISSING`; 409 **plain** "This shift is not confirmed for you." / "This shift is not open for attendance." (**no code** on clock-in); `ALREADY_CLOCKED_IN`; `CLOCK_IN_TOO_EARLY`(+`shiftStart`,`availableAt`); `CLOCK_WINDOW_CLOSED`; **`CHECK_IN_REQUIRED`** (checked before the QR; Flutter reloads the check-in state); `INVALID_QR`; location codes (strict only when `checkInRequired`; the fix must be newer than the check-in fix); 409 plain "You already have an active clock-in — clock out first."; 429 | **NOT replay-safe:** a repeat gives 409. Never auto-retry; on an uncertain result reload `/me/active`. | [DEV] (check-in coupling [TEST-DB]) |
-| POST | `/attendance/clock-out` | Staff | attendance.clock, 10/min/user | `{qrToken (required), lat?, lng?, accuracyM?, capturedAt?}`. **No `shiftId`.** | **201** `AttendanceSummary` (`clocked_out`, `manual`) | 404 "No active clock-in found."; 409 `INVALID_QR` (`reason:"expired"` after end + 120 min); location codes; 409 plain "This attendance was already clocked out." | **NOT replay-safe** | [DEV] |
+| POST | `/attendance/clock-out` | Staff | attendance.clock, 10/min/user | `{qrToken (required), lat?, lng?, accuracyM?, capturedAt?}`. **No `shiftId`.** | **201** `AttendanceSummary` (`clocked_out`, `manual`) | 404 "No active clock-in found." (also once the monitor flagged it missing, strictly after own end + 120 min); 409 `CLOCK_WINDOW_CLOSED` (past the staff member's own end + 120 min); 409 `INVALID_QR` (`revoked`, `expired`, …); location codes; 409 plain "This attendance was already clocked out." | **NOT replay-safe** | [DEV] |
 | POST | `/attendance/geofence-exit` | Staff | attendance.clock, 10/min/user | `{lat, lng (required), accuracyM?, capturedAt? (effectively required for check-in bookings)}`. No QR. Flutter does not start it for a venue known not to enforce. | **201** `AttendanceSummary` (`auto_geofence`) | 404; 409 plain "This venue has no geofence configured…"; **409 plain "You are still within the venue geofence."** (a safe no-op); `LOCATION_*`; 429 | inside-fence = no-op | [DEV] |
 
 - **QR token:** the venue QR encodes a raw HS256 JWT (`iss rab-attendance`, `aud rab-qr`, payload `{shiftId, venueId, ver}`). The app sends it verbatim; it never parses or validates it.
@@ -763,7 +763,7 @@ Notification `type` values are listed in `packages/rab-shared/src/types/notifica
 | code | HTTP | Extra fields | Thrown by |
 |---|---|---|---|
 | CLOCK_IN_TOO_EARLY | 409 | `shiftStart`, `availableAt` | clock-in, clock-in-on-behalf |
-| CLOCK_WINDOW_CLOSED | 409 | — | clock-in, on-behalf punches |
+| CLOCK_WINDOW_CLOSED | 409 | — | clock-in, clock-out (staff, since 2026-11-14: past own end + 120 min), on-behalf punches |
 | CHECK_IN_TOO_EARLY | 409 | `shiftStart`, `availableAt` | check-in |
 | CHECK_IN_WINDOW_CLOSED | 409 | — | check-in |
 | CHECK_IN_REQUIRED | 409 | — | clock-in |
@@ -772,7 +772,7 @@ Notification `type` values are listed in `packages/rab-shared/src/types/notifica
 | LOCATION_STALE | 409 | — | same |
 | OUTSIDE_GEOFENCE | 409 | `venueName` | check-in, clock-in, clock-out (was `OUTSIDE_VENUE`) |
 | GEOFENCE_MISCONFIGURED | 409 | — | strict punches, clock-in-on-behalf |
-| INVALID_QR | 409 | `reason: expired\|invalid\|shift_mismatch\|venue_mismatch` | check-in (when a QR is sent), clock-in, clock-out |
+| INVALID_QR | 409 | `reason: expired\|invalid\|shift_mismatch\|venue_mismatch\|revoked` (`revoked`: a manager replaced the shift's QR via `POST /shifts/:id/rotate-qr`; scan the current one. `expired`: past the staff member's own end + 120 min, or the QR is more than 14 days old) | check-in (when a QR is sent), clock-in, clock-out |
 | ATTENDANCE_FLAGGED_MISSING | 409 | — | check-in, clock-in, clock-in-on-behalf |
 | SHIFT_NOT_CONFIRMED / SHIFT_NOT_OPEN | 409 | — | **check-in and clock-in-on-behalf only** (clock-in sends the same text with no code) |
 | ALREADY_CLOCKED_IN | 409 | — | check-in, clock-in, clock-in-on-behalf |
