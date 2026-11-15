@@ -91,7 +91,7 @@ describeIfDb('C3 HWS cutover copy path (option A′)', () => {
     );
     const future = await one(
       `INSERT INTO core.shift (organisation_id, venue_id, job_role_id, starts_at, ends_at, break_minutes, required_count, filled_count, pay_rate_pence, status, created_by, workspace_id)
-       VALUES ($1, $2, $3, $4, $5, 30, 2, 0, 1500, 'published', $6, $7) RETURNING id`,
+       VALUES ($1, $2, $3, $4, $5, 30, 2, 0, 1500, 'open', $6, $7) RETURNING id`,
       [org, venue2.id, jr.id, at(24 * 400), at(24 * 400 + 8), owner, id],
     );
     await admin.query(`INSERT INTO core.shift_request_staff (organisation_id, workspace_id, shift_id, staff_profile_id) VALUES ($1, $2, $3, $4)`, [org, id, future.id, staff[2]!.sp]);
