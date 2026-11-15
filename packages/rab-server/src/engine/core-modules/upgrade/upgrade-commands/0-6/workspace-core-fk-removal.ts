@@ -172,6 +172,7 @@ export function withoutWorkspaceCoreForeignKeys(template: string): string {
     for (const [name, definition] of fks) {
       // The definition as pg_get_constraintdef printed it; any whitespace run of the template may stand for its single spaces.
       const def = escapeRegExp(definition).replace(/ /g, '\\s+');
+      // sql-injection-reviewed: a regular expression over the constant template, never SQL that runs; name / definition are constants of this file.
       const statement = new RegExp(`(?:^|\\n)ALTER TABLE [^;\\n]+ ADD CONSTRAINT "?${name}"?\\s+${def};[ \\t]*(?=\\n|$)`, 'g');
       const inline = new RegExp(`\\n[ \\t]*CONSTRAINT ${name}\\s+${def}(,?)(?=\\n)`, 'g');
       const statements = out.match(statement)?.length ?? 0;
