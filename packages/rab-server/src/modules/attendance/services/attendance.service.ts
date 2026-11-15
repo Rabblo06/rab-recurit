@@ -72,7 +72,7 @@ import {
 import { AttendanceQrService } from './attendance-qr.service';
 import { MISSING_CLOCK_OUT_GRACE_MINUTES } from './missing-clock-out-policy';
 import { ATTENDANCE_VERSION_SQL, ShiftReportDetail, ShiftReportService } from './shift-report.service';
-import { BusinessTables, businessTables } from '../../../engine/core-modules/tenant/business-tables';
+import { businessTables } from '../../../engine/core-modules/tenant/business-tables';
 
 /** Same allowlist-via-lookup-map pattern as `StaffService`'s `STAFF_SORT_COLUMNS` — see that file's comment. Raw SQL column expressions, never a client-supplied string. */
 /**
@@ -181,8 +181,10 @@ export interface AttendanceHistoryPage {
   nextCursor: string | null;
 }
 
-// sql-injection-reviewed: code-constant SQL fragment from a helper called with literal aliases; values are bound $n parameters.
-const ATTENDANCE_SUMMARY_SELECT = (t: BusinessTables) => `
+const ATTENDANCE_SUMMARY_SELECT = (manager: EntityManager) => {
+  const t = businessTables(manager);
+  // sql-injection-reviewed: code-constant SQL fragment from a helper called with literal aliases; values are bound $n parameters.
+  return `
   SELECT
     a.id, a.status, a.clock_in_at, a.clock_out_at, a.worked_minutes, a.earned_pence,
     a.break_minutes, a.location_verified, a.clock_out_method, a.clock_in_method,
@@ -201,6 +203,7 @@ const ATTENDANCE_SUMMARY_SELECT = (t: BusinessTables) => `
   JOIN core."user" u ON u.id = sp.user_id
   LEFT JOIN ${t.payroll_record} pr ON pr.attendance_id = a.id
 `;
+};
 
 function toAttendanceSummary(r: Record<string, unknown>): AttendanceSummary {
   return {
@@ -370,9 +373,8 @@ export class AttendanceService {
   }
 
   private async loadSummary(manager: EntityManager, attendanceId: string): Promise<AttendanceSummary> {
-    const t = businessTables(manager);
     // sql-injection-reviewed: interpolates a module-level SQL constant / constant fragment; every request value is a bound $n parameter.
-    const rows = await manager.query(`${ATTENDANCE_SUMMARY_SELECT(t)} WHERE a.id = $1`, [attendanceId]);
+    const rows = await manager.query(`${ATTENDANCE_SUMMARY_SELECT(manager)} WHERE a.id = $1`, [attendanceId]);
     return toAttendanceSummary(rows[0] as Record<string, unknown>);
   }
 
@@ -969,7 +971,7 @@ export class AttendanceService {
         ? await manager.query(
             // sql-injection-reviewed: interpolates a module-level SQL constant / constant fragment; every request value is a bound $n parameter.
             `SELECT x.* FROM unnest($1::uuid[]) AS k(id)
-               CROSS JOIN LATERAL (${ATTENDANCE_SUMMARY_SELECT(t)} WHERE a.id = k.id AND a.staff_profile_id = $2 OFFSET 0) x
+               CROSS JOIN LATERAL (${ATTENDANCE_SUMMARY_SELECT(manager)} WHERE a.id = k.id AND a.staff_profile_id = $2 OFFSET 0) x
               ORDER BY x.clock_in_at DESC, x.id DESC`,
             [page.data.map((k) => k.id), staffProfile.id],
           )
@@ -984,9 +986,8 @@ export class AttendanceService {
     return this.tenantContext.runInWorkspaceContext(ctx, async (manager) => {
       const staffProfile = await manager.findOne(StaffProfile, { where: { userId: ctx.userId } });
       if (!staffProfile) return null;
-      const t = businessTables(manager);
       // sql-injection-reviewed: interpolates a module-level SQL constant / constant fragment; every request value is a bound $n parameter.
-      const rows = await manager.query(`${ATTENDANCE_SUMMARY_SELECT(t)} WHERE a.staff_profile_id = $1 AND a.shift_id = $2`, [
+      const rows = await manager.query(`${ATTENDANCE_SUMMARY_SELECT(manager)} WHERE a.staff_profile_id = $1 AND a.shift_id = $2`, [
         staffProfile.id,
         shiftId,
       ]);
@@ -1066,7 +1067,7 @@ export class AttendanceService {
       const skipIdx = nextParam(skip);
       const rows = await manager.query(
         // sql-injection-reviewed: interpolates a module-level SQL constant / constant fragment; every request value is a bound $n parameter.
-        `${ATTENDANCE_SUMMARY_SELECT(t)} ${where} ORDER BY ${sortColumn} ${direction}, a.id ${direction} LIMIT ${takeIdx} OFFSET ${skipIdx}`,
+        `${ATTENDANCE_SUMMARY_SELECT(manager)} ${where} ORDER BY ${sortColumn} ${direction}, a.id ${direction} LIMIT ${takeIdx} OFFSET ${skipIdx}`,
         params,
       );
       return { data: rows.map((r: Record<string, unknown>) => this.fieldPolicy.omit(fields, toAttendanceSummary(r))), total: count };

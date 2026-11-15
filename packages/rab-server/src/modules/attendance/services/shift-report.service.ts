@@ -18,7 +18,7 @@ import { PermissionsService } from '../../../engine/core-modules/permissions/per
 import { ResourceScopeService } from '../../../engine/core-modules/resource-scope/resource-scope.service';
 import { AuthContext } from '../../../engine/core-modules/tenant/auth-context.interface';
 import { TenantContextService } from '../../../engine/core-modules/tenant/tenant-context.service';
-import { BusinessTables, businessTables } from '../../../engine/core-modules/tenant/business-tables';
+import { businessTables } from '../../../engine/core-modules/tenant/business-tables';
 import { Attendance } from '../entities/attendance.entity';
 import { AttendanceCorrection } from '../entities/attendance-correction.entity';
 import { ShiftReport } from '../entities/shift-report.entity';
@@ -153,13 +153,16 @@ export interface ShiftReportSummary {
   lifecycle: ReportLifecycle;
 }
 
-const REPORT_SUMMARY_SELECT = (t: BusinessTables) => `
+const REPORT_SUMMARY_SELECT = (manager: EntityManager) => {
+  const t = businessTables(manager);
+  return `
   SELECT s.id, s.starts_at, s.ends_at, v.name AS venue_name, jr.name AS role_name, v.enforce_geofence
   FROM ${t.shift} s
   JOIN ${t.venue} v ON v.id = s.venue_id
   JOIN ${t.job_role} jr ON jr.id = s.job_role_id
   WHERE s.id = $1
 `;
+};
 
 /**
  * Venue Manager attendance Report (Parts 38-51) — read (`getReport`) and
@@ -224,9 +227,8 @@ export class ShiftReportService {
       params.push(take, skip);
       const bucketSql = dto.bucket === 'history' ? REPORT_IN_HISTORY_SQL : `(NOT ${REPORT_IN_HISTORY_SQL} OR ${REPORT_NEEDS_ATTENTION_SQL})`;
       const order = dto.bucket === 'history' ? 'r.ends_at DESC, r.shift_id' : `${REPORT_NEEDS_ATTENTION_SQL} DESC, r.starts_at ASC, r.shift_id`;
-      const t = businessTables(manager);
       // sql-injection-reviewed: interpolates a module-level SQL constant / constant fragment; every request value is a bound $n parameter.
-      const rows = await manager.query(`${REPORT_ROWS_SQL(t, scopeSql)}
+      const rows = await manager.query(`${REPORT_ROWS_SQL(manager, scopeSql)}
         SELECT r.*, now() AS db_now, count(*) OVER () AS total FROM rows r
         WHERE ${bucketSql}
         ORDER BY ${order}
@@ -250,7 +252,7 @@ export class ShiftReportService {
     if (!shift || shift.organisationId !== ctx.organisationId) throw new NotFoundException('Shift not found.');
     await this.assertShiftOwned(manager, ctx, shift);
     const t = businessTables(manager);
-    const [summary] = await manager.query(REPORT_SUMMARY_SELECT(t), [shiftId]);
+    const [summary] = await manager.query(REPORT_SUMMARY_SELECT(manager), [shiftId]);
     const report = await manager.findOne(ShiftReport, { where: { shiftId } });
     // sql-injection-reviewed: code-constant SQL fragment from a helper called with literal aliases; values are bound $n parameters.
     const rows = await manager.query(`SELECT sp.id AS "staffProfileId", u.first_name || ' ' || u.last_name AS "staffName", u.avatar_file_id AS "avatarFileId",
@@ -573,8 +575,10 @@ const DELIVERY_AGG_SQL = `count(*) FILTER (WHERE eo.status IN ('PENDING','QUEUED
   count(*) FILTER (WHERE eo.status = 'SENT') AS d_sent, count(*) FILTER (WHERE eo.status = 'FAILED') AS d_failed, max(eo.sent_at) AS d_last_sent_at`;
 
 /** Per-shift report rows for the lists (`rows` CTE). One attendance row per assignment (unique shift_assignment_id). */
-// sql-injection-reviewed: dynamic WHERE assembled only from literal fragments and $n / :named placeholders (values pushed to params); identifiers come from allow-lists. Reviewed 2026-11-04.
-const REPORT_ROWS_SQL = (t: BusinessTables, scopeSql: string) => `WITH base AS (
+const REPORT_ROWS_SQL = (manager: EntityManager, scopeSql: string) => {
+  const t = businessTables(manager);
+  // sql-injection-reviewed: dynamic WHERE assembled only from literal fragments and $n / :named placeholders (values pushed to params); identifiers come from allow-lists. Reviewed 2026-11-04.
+  return `WITH base AS (
   SELECT s.id AS shift_id, s.status AS shift_status, s.starts_at, s.ends_at, s.required_count, s.filled_count,
     v.name AS venue_name, jr.name AS role_name,
     COALESCE(sr.status, 'pending') AS report_status, sr.final_pdf_sent_at AS final_queued_at, sr.final_file_id,
@@ -599,6 +603,7 @@ const REPORT_ROWS_SQL = (t: BusinessTables, scopeSql: string) => `WITH base AS (
   LEFT JOIN LATERAL (SELECT ${DELIVERY_AGG_SQL} FROM core.email_outbox eo
     WHERE b.final_file_id IS NOT NULL AND eo.attachment_file_id = b.final_file_id AND eo.status <> 'CANCELLED') d ON true
 )`;
+};
 
 function toSummary(r: Record<string, any>, now: Date): ShiftReportSummary {
   const delivery: DeliveryCounts = { pending: Number(r.d_pending), sent: Number(r.d_sent), failed: Number(r.d_failed), lastSentAt: r.d_last_sent_at ? new Date(r.d_last_sent_at) : null };
