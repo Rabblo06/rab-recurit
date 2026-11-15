@@ -58,6 +58,7 @@ import {
   CheckInRequiredException,
   CheckInTooEarlyException,
   CheckInWindowClosedException,
+  ClockInConfirmationRequiredException,
   ClockInTooEarlyException,
   ClockWindowClosedException,
   GeofenceMisconfiguredException,
@@ -1391,12 +1392,40 @@ export class AttendanceService {
       if (unchanged) return this.fieldPolicy.omit(await this.fieldPolicy.resolveTx(manager, ctx, 'attendance'), await this.loadSummary(manager, attendance.id));
 
       const { status, recovered } = this.resolveCorrectionStatus(attendance, assignment, shift, now, clockOutAt);
+
+      // Owner brief 2026-11-15 (compact attendance correction warning): a corrected clock-in earlier than the staff
+      // member's own scheduled start minus CLOCK_IN_EARLY_MINUTES (the opening of the same attendance window every
+      // clock-in path uses) is saved only with an explicit `confirmUnusualClockIn: true`; without it, 409
+      // CLOCK_IN_CONFIRMATION_REQUIRED and nothing is written. Checked after every validation and state rule above, so
+      // the warning is never shown for a correction that would be refused anyway. Written as "not inside the
+      // allowance", so an unreadable bound asks for the confirmation instead of skipping it. The shift's scheduled start
+      // is only read, never changed.
+      let unusualClockIn: { earliestAllowed: string } | null = null;
+      if (dto.field === 'clockInAt') {
+        const earliestAllowed = this.attendanceWindow(effectiveAssignmentTime(assignment, shift)).opensAt;
+        if (!(clockInAt.getTime() >= earliestAllowed.getTime())) {
+          if (dto.confirmUnusualClockIn !== true) {
+            throw new ClockInConfirmationRequiredException(earliestAllowed.toISOString(), clockInAt.toISOString());
+          }
+          unusualClockIn = { earliestAllowed: earliestAllowed.toISOString() };
+        }
+      }
+
       await this.persistManagerTimes(manager, ctx, attendance, assignment, shift, { clockInAt, clockOutAt, breakMinutes }, {
         status,
         recovered,
         corrections: [{ field: dto.field, oldValue, newValue: dto.newValue }],
         reason: dto.reason,
-        audit: { field: dto.field, oldValue, newValue: dto.newValue, reason: dto.reason, recoveredMissingClockOut: recovered },
+        audit: {
+          field: dto.field,
+          oldValue,
+          newValue: dto.newValue,
+          reason: dto.reason,
+          recoveredMissingClockOut: recovered,
+          // The same single audit row records that the manager confirmed an unusually early clock-in (actor + time are
+          // the audit row's own); no second audit entry and no second correction row.
+          ...(unusualClockIn ? { unusualClockInConfirmed: true, earliestAllowed: unusualClockIn.earliestAllowed } : {}),
+        },
       });
       return this.fieldPolicy.omit(await this.fieldPolicy.resolveTx(manager, ctx, 'attendance'), await this.loadSummary(manager, attendance.id));
     });

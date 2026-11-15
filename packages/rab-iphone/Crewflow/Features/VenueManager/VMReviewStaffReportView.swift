@@ -37,6 +37,8 @@ struct VMReviewStaffReportView: View {
     @State private var recordSheet: VMSheetItem<ShiftReportStaffRow>?
     @State private var confirmsNoShow = false
     @State private var reopenSheet = false
+    /// Set by the server's 409 CLOCK_IN_CONFIRMATION_REQUIRED; nothing was saved yet.
+    @State private var unusualClockIn: UnusualClockInWarning?
 
     private let staffProfileId: String
 
@@ -95,6 +97,18 @@ struct VMReviewStaffReportView: View {
             }
         } message: {
             Text("Confirm that this staff member did not attend the shift?")
+        }
+        // Same system alert as "Confirm no-show". Edit (cancel role, also a
+        // dismissal) leaves the correction form exactly as it was; only
+        // Confirm resends the same correction, explicitly confirmed.
+        .alert(UnusualClockInWarning.title, isPresented: Binding(
+            get: { unusualClockIn != nil },
+            set: { if !$0 { unusualClockIn = nil } }
+        ), presenting: unusualClockIn) { _ in
+            Button("Edit", role: .cancel) {}
+            Button("Confirm") { Task { await saveCorrection(confirmUnusualClockIn: true) } }
+        } message: { warning in
+            Text("\(UnusualClockInWarning.message)\n\n\(warning.summary)")
         }
         .accessibilityIdentifier("vm.reviewStaff")
     }
@@ -262,11 +276,11 @@ struct VMReviewStaffReportView: View {
     }
 
     @MainActor
-    private func saveCorrection() async {
+    private func saveCorrection(confirmUnusualClockIn: Bool = false) async {
         guard !busy, let attendanceId = row.attendanceId else { return }
         confirmation = nil
         let body: CorrectAttendanceBody
-        switch correction.build(row: row) {
+        switch correction.build(row: row, confirmUnusualClockIn: confirmUnusualClockIn) {
         case .invalid(let message):
             correctionError = message
             return
@@ -285,6 +299,12 @@ struct VMReviewStaffReportView: View {
         } catch {
             let api = error as? APIError
             if api == .cancelled || api == .sessionChanged { return }
+            // An unusually early clock-in: nothing saved, the draft is kept
+            // as typed, and the warning asks the manager to Edit or Confirm.
+            if let warning = UnusualClockInWarning.from(error) {
+                unusualClockIn = warning
+                return
+            }
             correctionError = userMessage(for: error)
             return
         }

@@ -151,7 +151,10 @@ struct CorrectionDraft: Equatable {
         case body(CorrectAttendanceBody)
     }
 
-    func build(row: ShiftReportStaffRow) -> Outcome {
+    /// `confirmUnusualClockIn` is true only for the resend after Confirm on
+    /// the "Unusual clock-in time" warning: the same draft, the same body,
+    /// plus the explicit confirmation (clock-in corrections only).
+    func build(row: ShiftReportStaffRow, confirmUnusualClockIn: Bool = false) -> Outcome {
         let reasonText = reason.trimmingCharacters(in: .whitespacesAndNewlines)
         guard reasonText.count >= 10 else { return .invalid("Please explain this change in at least 10 characters.") }
         switch field {
@@ -163,7 +166,8 @@ struct CorrectionDraft: Equatable {
         case .clockInAt, .clockOutAt:
             guard let value else { return .invalid("Pick a time.") }
             if let problem = orderProblem(row: row) { return .invalid(problem) }
-            return .body(CorrectAttendanceBody(field: field.rawValue, newValue: ISO8601.string(from: value), reason: reasonText))
+            return .body(CorrectAttendanceBody(field: field.rawValue, newValue: ISO8601.string(from: value), reason: reasonText,
+                                               confirmUnusualClockIn: confirmUnusualClockIn && field == .clockInAt ? true : nil))
         }
     }
 }

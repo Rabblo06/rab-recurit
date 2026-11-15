@@ -869,6 +869,10 @@ struct CorrectAttendanceBody: Encodable, Equatable {
     let field: String
     let newValue: String
     let reason: String
+    /// `true` only after the manager pressed Confirm on "Unusual clock-in
+    /// time" (server 409 `CLOCK_IN_CONFIRMATION_REQUIRED`); nil is omitted
+    /// from the JSON, so an ordinary correction's body is unchanged.
+    var confirmUnusualClockIn: Bool? = nil
 }
 
 struct StaffReviewBody: Encodable, Equatable {
@@ -878,6 +882,37 @@ struct StaffReviewBody: Encodable, Equatable {
     let attendance: Int
     let timeKeeping: Int
     let feedback: String?
+}
+
+// MARK: - Unusual clock-in (409 CLOCK_IN_CONFIRMATION_REQUIRED)
+
+/// `POST /attendance/:id/correct` refused a clock-in earlier than the staff
+/// member's own scheduled start minus CLOCK_IN_EARLY_MINUTES: nothing was
+/// saved. Sending the same correction again with `confirmUnusualClockIn:
+/// true` saves it (owner brief 2026-11-15).
+struct UnusualClockInWarning: Equatable {
+    static let title = "Unusual clock-in time"
+    static let message = "This time is earlier than the normal allowance. Please check before continuing."
+
+    let earliestAllowed: Date
+    let enteredTime: Date
+
+    /// Nil for any other error, or when either time is missing.
+    static func from(_ error: Error) -> UnusualClockInWarning? {
+        guard let api = error as? APIError, api.statusCode == 409, api.code == "CLOCK_IN_CONFIRMATION_REQUIRED",
+              let earliest = api.payload?.body?["earliestAllowed"]?.stringValue.flatMap(ISO8601.date(from:)),
+              let entered = api.payload?.body?["enteredTime"]?.stringValue.flatMap(ISO8601.date(from:))
+        else { return nil }
+        return UnusualClockInWarning(earliestAllowed: earliest, enteredTime: entered)
+    }
+
+    /// The only two values the warning shows. Times only ("08:45"); both get
+    /// the day when they fall on different days, where a bare time misleads.
+    var summary: String {
+        let sameDay = VMDate.calendar.isDate(earliestAllowed, inSameDayAs: enteredTime)
+        func at(_ date: Date) -> String { sameDay ? VMDate.hm(date) : VMDate.weekdayDayTime(date) }
+        return "Earliest allowed: \(at(earliestAllowed))\nEntered time: \(at(enteredTime))"
+    }
 }
 
 // MARK: - Availability conflict (409 STAFF_AVAILABILITY_CONFLICT)
