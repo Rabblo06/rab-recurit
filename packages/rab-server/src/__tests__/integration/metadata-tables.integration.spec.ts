@@ -23,6 +23,8 @@
  *   MD-6   deleting a workspace removes exactly its metadata (FK cascade through the delete guard).
  *   MD-7   MetadataReadService reads only the bound workspace and refuses without a binding.
  *   MD-8   tools/check-rls-coverage.ts passes as crewflow_owner with the tables present.
+ *   MD-9   owner batch 11 (Twenty syncable-entity alignment): every object / field row has a universal identifier, unique
+ *          per workspace; custom rows get a generated version-4 UUID, built-in rows the sync's version-8 UUID.
  */
 import { randomBytes, randomUUID } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
@@ -117,18 +119,18 @@ interface Ws {
   equipmentIndex: string;
 }
 
-/** Fixed universal identifiers: the same standard objects in every workspace, like the E2 sync. */
+/** Fixed universal identifiers: the same standard objects in every workspace, like the E2 sync (version 8, its namespace). */
 const UID = {
-  staff: '0b9a0c1e-0000-4000-8000-000000000001',
-  staffId: '0b9a0c1e-0000-4000-8000-000000000002',
-  staffRef: '0b9a0c1e-0000-4000-8000-000000000003',
-  staffStatus: '0b9a0c1e-0000-4000-8000-000000000004',
-  staffPay: '0b9a0c1e-0000-4000-8000-000000000005',
-  staffUser: '0b9a0c1e-0000-4000-8000-000000000006',
-  payroll: '0b9a0c1e-0000-4000-8000-000000000007',
-  payrollId: '0b9a0c1e-0000-4000-8000-000000000008',
-  member: '0b9a0c1e-0000-4000-8000-000000000009',
-  memberId: '0b9a0c1e-0000-4000-8000-00000000000a',
+  staff: '0b9a0c1e-0000-8000-8000-000000000001',
+  staffId: '0b9a0c1e-0000-8000-8000-000000000002',
+  staffRef: '0b9a0c1e-0000-8000-8000-000000000003',
+  staffStatus: '0b9a0c1e-0000-8000-8000-000000000004',
+  staffPay: '0b9a0c1e-0000-8000-8000-000000000005',
+  staffUser: '0b9a0c1e-0000-8000-8000-000000000006',
+  payroll: '0b9a0c1e-0000-8000-8000-000000000007',
+  payrollId: '0b9a0c1e-0000-8000-8000-000000000008',
+  member: '0b9a0c1e-0000-8000-8000-000000000009',
+  memberId: '0b9a0c1e-0000-8000-8000-00000000000a',
 };
 
 const OBJECT_COLUMNS = ['id', 'organisation_id', 'workspace_id', 'universal_identifier', 'storage', 'name_singular', 'name_plural', 'label_singular', 'label_plural', 'physical_table', 'is_custom', 'is_system', 'allows_custom_fields', 'label_identifier_field_id'] as const;
@@ -138,14 +140,24 @@ type FieldRow = Partial<Record<(typeof FIELD_COLUMNS)[number], unknown>>;
 
 const insertSql = (table: string, columns: readonly string[]) =>
   `INSERT INTO core.${table} (${columns.join(', ')}) VALUES (${columns.map((_, i) => `$${i + 1}`).join(', ')})`;
+/** universal_identifier absent from the row => absent from the INSERT, so the column DEFAULT (a version-4 UUID) applies. */
+const withoutAbsentUid = <K extends string>(columns: readonly K[], row: Partial<Record<K, unknown>>) =>
+  columns.filter((k) => k !== 'universal_identifier' || 'universal_identifier' in row);
 const objectInsert = (row: ObjectRow): [string, unknown[]] => {
-  const full: ObjectRow = { id: randomUUID(), storage: 'workspace', is_system: false, allows_custom_fields: false, universal_identifier: null, label_identifier_field_id: null, ...row };
-  return [insertSql('object_metadata', OBJECT_COLUMNS), OBJECT_COLUMNS.map((k) => full[k] ?? null)];
+  const full: ObjectRow = { id: randomUUID(), storage: 'workspace', is_system: false, allows_custom_fields: false, label_identifier_field_id: null, ...row };
+  const columns = withoutAbsentUid(OBJECT_COLUMNS, full);
+  return [insertSql('object_metadata', columns), columns.map((k) => full[k] ?? null)];
 };
 const fieldInsert = (row: FieldRow): [string, unknown[]] => {
   const full: FieldRow = { id: randomUUID(), settings: {}, is_system: false, is_locked: false, is_ui_read_only: false, is_money: false, is_sensitive: false, ...row };
   if (typeof full.settings === 'object') full.settings = JSON.stringify(full.settings);
-  return [insertSql('field_metadata', FIELD_COLUMNS), FIELD_COLUMNS.map((k) => full[k] ?? null)];
+  const columns = withoutAbsentUid(FIELD_COLUMNS, full);
+  return [insertSql('field_metadata', columns), columns.map((k) => full[k] ?? null)];
+};
+/** A version-8 UUID: the built-in namespace (the E2 sync derives its identifiers as version 8; custom rows are version 4). */
+const v8 = () => {
+  const u = randomUUID();
+  return `${u.slice(0, 14)}8${u.slice(15)}`;
 };
 
 describeIfMetadata('metadata engine E1: the five metadata tables, FORCE RLS, the guard (MetadataEngineTables1786721550000)', () => {
@@ -203,7 +215,7 @@ describeIfMetadata('metadata engine E1: the five metadata tables, FORCE RLS, the
       await run(fieldInsert({ ...builtin, id: ids.staffUser, object_metadata_id: ids.staff, universal_identifier: UID.staffUser, type: 'RELATION', name: 'user', label: 'User', physical_column: 'user_id', is_ui_read_only: true, relation_target_object_metadata_id: ids.member, settings: { relationType: 'MANY_TO_ONE', onDelete: 'CASCADE' } }));
       await run(fieldInsert({ ...builtin, id: ids.payrollId, object_metadata_id: ids.payroll, universal_identifier: UID.payrollId, type: 'UUID', name: 'id', label: 'Id', physical_column: 'id', is_system: true }));
       await run(fieldInsert({ ...builtin, id: ids.memberId, object_metadata_id: ids.member, universal_identifier: UID.memberId, type: 'UUID', name: 'id', label: 'Id', physical_column: 'id', is_system: true }));
-      await run(fieldInsert({ ...builtin, id: ids.equipmentId, object_metadata_id: ids.equipment, type: 'UUID', name: 'id', label: 'Id', physical_column: 'id', is_system: true }));
+      await run(fieldInsert({ ...builtin, id: ids.equipmentId, object_metadata_id: ids.equipment, universal_identifier: v8(), type: 'UUID', name: 'id', label: 'Id', physical_column: 'id', is_system: true }));
       await run(fieldInsert({ ...t, id: ids.equipmentName, object_metadata_id: ids.equipment, type: 'TEXT', name: 'name', label: 'Name', physical_column: `cf_${custom}a`, is_custom: true }));
       await run(fieldInsert({ ...t, id: ids.equipmentSerial, object_metadata_id: ids.equipment, type: 'TEXT', name: 'serialNumber', label: 'Serial number', physical_column: `cf_${custom}b`, is_custom: true }));
       for (const [value, pos] of [['active', 0], ['pending_compliance', 1]] as const) {
@@ -444,7 +456,7 @@ describeIfMetadata('metadata engine E1: the five metadata tables, FORCE RLS, the
   });
 
   it('review #165 M2: the request path cannot loosen built-in / locked metadata (42501); the sync identity (SET LOCAL ROLE crewflow) can', async () => {
-    const fresh = () => randomUUID();
+    const fresh = () => v8();
     const t = { organisation_id: A1.org, workspace_id: A1.workspace };
     const ops: Array<[string, () => [string, unknown[]]]> = [
       ['locked field is_sensitive', () => ['UPDATE core.field_metadata SET is_sensitive = true WHERE id = $1', [A1.staffRef]]],
@@ -563,7 +575,7 @@ describeIfMetadata('metadata engine E1: the five metadata tables, FORCE RLS, the
     await boundAsCrewflow(A1, async (c) => {
       const t = { organisation_id: A1.org, workspace_id: A1.workspace };
       for (const table of ['attendance', 'attendance_correction', 'payroll_record', 'payroll_run', 'payroll_run_line', 'payslip', 'payslip_document']) {
-        const [sql, params] = objectInsert({ ...t, universal_identifier: randomUUID(), name_singular: 'notPayroll', name_plural: 'notPayrolls', label_singular: 'X', label_plural: 'X', physical_table: table, is_custom: false, is_system: false });
+        const [sql, params] = objectInsert({ ...t, universal_identifier: v8(), name_singular: 'notPayroll', name_plural: 'notPayrolls', label_singular: 'X', label_plural: 'X', physical_table: table, is_custom: false, is_system: false });
         expect(await attempt(c, sql, params)).toMatchObject({ code: '23514', constraint: 'object_metadata_payroll_locked_ck' });
       }
       const r = await attempt(c, 'UPDATE core.object_metadata SET allows_custom_fields = true WHERE id = $1', [A1.payroll]);
@@ -574,7 +586,7 @@ describeIfMetadata('metadata engine E1: the five metadata tables, FORCE RLS, the
   it('review #165 I1 / I3: core references only for the four known core tables; no bidi / zero-width characters in labels (23514)', async () => {
     await boundAsCrewflow(A1, async (c) => {
       const t = { organisation_id: A1.org, workspace_id: A1.workspace };
-      const [o1, p1] = objectInsert({ ...t, storage: 'core_reference', universal_identifier: randomUUID(), name_singular: 'org', name_plural: 'orgs', label_singular: 'Org', label_plural: 'Orgs', physical_table: 'organisation', is_custom: false, is_system: true });
+      const [o1, p1] = objectInsert({ ...t, storage: 'core_reference', universal_identifier: v8(), name_singular: 'org', name_plural: 'orgs', label_singular: 'Org', label_plural: 'Orgs', physical_table: 'organisation', is_custom: false, is_system: true });
       expect(await attempt(c, o1, p1)).toMatchObject({ code: '23514', constraint: 'object_metadata_core_reference_tables_ck' });
       for (const bad of ['Pay\u202Erate', 'Pay\u200Brate', '\uFEFFPay', 'Pay\u2066rate']) {
         const label = JSON.parse(`"${bad}"`) as string;
@@ -639,30 +651,31 @@ describeIfMetadata('metadata engine E1: the five metadata tables, FORCE RLS, the
       const fieldCases: Array<[string, FieldRow, string | null]> = [
         ['MORPH_RELATION', { is_custom: true, object_metadata_id: A1.equipment, type: 'MORPH_RELATION', name: 'm', physical_column: 'cf_m1' }, '23514'],
         ['custom RANGE', { is_custom: true, object_metadata_id: A1.equipment, type: 'RANGE', name: 'r', physical_column: 'cf_r1' }, '23514'],
-        ['built-in system RANGE', { is_custom: false, is_locked: true, is_system: true, object_metadata_id: A1.staff, type: 'RANGE', name: 'period', physical_column: 'period' }, null],
+        ['built-in system RANGE', { is_custom: false, universal_identifier: v8(), is_locked: true, is_system: true, object_metadata_id: A1.staff, type: 'RANGE', name: 'period', physical_column: 'period' }, null],
         ['unknown type', { is_custom: true, object_metadata_id: A1.equipment, type: 'DROP TABLE', name: 'u', physical_column: 'cf_u1' }, '23514'],
         ['custom money', { is_custom: true, object_metadata_id: A1.equipment, type: 'NUMBER', name: 'pay', physical_column: 'cf_pay1', is_money: true, is_sensitive: true, is_ui_read_only: true }, '23514'],
-        ['built-in field not locked', { is_custom: false, object_metadata_id: A1.staff, type: 'TEXT', name: 'loose', physical_column: 'loose' }, '23514'],
+        ['built-in field not locked', { is_custom: false, universal_identifier: v8(), object_metadata_id: A1.staff, type: 'TEXT', name: 'loose', physical_column: 'loose' }, '23514'],
         ['custom field with a built-in column name', { is_custom: true, object_metadata_id: A1.equipment, type: 'TEXT', name: 'sneaky', physical_column: 'amount_pence' }, '23514'],
-        ['built-in field with a custom column name', { is_custom: false, is_locked: true, object_metadata_id: A1.staff, type: 'TEXT', name: 'sneaky', physical_column: 'cf_sneaky' }, '23514'],
+        ['built-in field with a custom column name', { is_custom: false, universal_identifier: v8(), is_locked: true, object_metadata_id: A1.staff, type: 'TEXT', name: 'sneaky', physical_column: 'cf_sneaky' }, '23514'],
         ['name with SQL', { is_custom: true, object_metadata_id: A1.equipment, type: 'TEXT', name: 'a"; drop table x; --', physical_column: 'cf_sql1' }, '23514'],
         ['column with SQL', { is_custom: true, object_metadata_id: A1.equipment, type: 'TEXT', name: 'colSql', physical_column: 'cf_x"; drop' }, '23514'],
         ['name of 64 characters', { is_custom: true, object_metadata_id: A1.equipment, type: 'TEXT', name: `a${'b'.repeat(63)}`, physical_column: 'cf_long1' }, '23514'],
         ['relation without relationType', { is_custom: true, object_metadata_id: A1.equipment, type: 'RELATION', name: 'rel', physical_column: 'cf_rel1', relation_target_object_metadata_id: A1.staff }, '23514'],
         ['ONE_TO_MANY with a column', { is_custom: true, object_metadata_id: A1.equipment, type: 'RELATION', name: 'rel2', physical_column: 'cf_rel2', relation_target_object_metadata_id: A1.staff, settings: { relationType: 'ONE_TO_MANY' } }, '23514'],
         ['non-relation without a column', { is_custom: true, object_metadata_id: A1.equipment, type: 'TEXT', name: 'nocol', physical_column: null }, '23514'],
-        ['custom field with a universal identifier (#166 F4)', { is_custom: true, object_metadata_id: A1.staff, type: 'TEXT', name: 'squat', physical_column: 'cf_squat1', universal_identifier: randomUUID() }, '23514'],
+        ['custom field with a built-in (v8) universal identifier (#166 F4 / owner batch 11)', { is_custom: true, object_metadata_id: A1.staff, type: 'TEXT', name: 'squat', physical_column: 'cf_squat1', universal_identifier: v8() }, '23514'],
+        ['custom field with its own generated (v4) universal identifier', { is_custom: true, object_metadata_id: A1.staff, type: 'TEXT', name: 'ownUid', physical_column: 'cf_ownuid1', universal_identifier: randomUUID() }, null],
       ];
       for (const [what, row, code] of fieldCases) {
         const [sql, params] = fieldInsert({ ...t, label: what.slice(0, 40), ...row });
         expect({ what, code: (await attempt(c, sql, params)).code }).toEqual({ what, code });
       }
       const objectCases: Array<[string, ObjectRow, string | null]> = [
-        ['core reference that allows custom fields', { storage: 'core_reference', universal_identifier: randomUUID(), is_custom: false, is_system: true, allows_custom_fields: true, physical_table: 'stored_file' }, '23514'],
-        ['custom object with a universal identifier', { is_custom: true, allows_custom_fields: true, universal_identifier: randomUUID(), physical_table: 'c_uid1' }, '23514'],
+        ['core reference that allows custom fields', { storage: 'core_reference', universal_identifier: v8(), is_custom: false, is_system: true, allows_custom_fields: true, physical_table: 'stored_file' }, '23514'],
+        ['custom object with a built-in (v8) universal identifier', { is_custom: true, allows_custom_fields: true, universal_identifier: v8(), physical_table: 'c_uid1' }, '23514'],
         ['custom object on a built-in table name', { is_custom: true, allows_custom_fields: true, physical_table: 'payroll_record' }, '23514'],
-        ['standard object on a c_ name', { is_custom: false, universal_identifier: randomUUID(), physical_table: 'c_std1' }, '23514'],
-        ['system object that allows custom fields', { is_custom: false, is_system: true, allows_custom_fields: true, universal_identifier: randomUUID(), physical_table: 'payslip' }, '23514'],
+        ['standard object on a c_ name', { is_custom: false, universal_identifier: v8(), physical_table: 'c_std1' }, '23514'],
+        ['system object that allows custom fields', { is_custom: false, is_system: true, allows_custom_fields: true, universal_identifier: v8(), physical_table: 'payslip' }, '23514'],
         ['label with a control character', { is_custom: true, allows_custom_fields: true, physical_table: 'c_ctl1', label_singular: 'a\u0007b' }, '23514'],
         ['a valid custom object', { is_custom: true, allows_custom_fields: true, physical_table: 'c_ok1' }, null],
       ];
@@ -766,6 +779,57 @@ describeIfMetadata('metadata engine E1: the five metadata tables, FORCE RLS, the
       throw new Error(`check-rls-coverage exited ${r.status}:\n${tail}`);
     }
     expect(r.stdout).toMatch(/RLS coverage OK/);
+  });
+
+  // ------------------------------------------------------------------------------------------------------------ MD-9
+  it('MD-9 owner batch 11: every object / field row carries a universal identifier; custom rows get a generated v4, built-in rows keep the v8', async () => {
+    const seeded = await asAdmin(
+      async (c) =>
+        (
+          await c.query<{ id: string; uid: string | null; is_custom: boolean }>(
+            `SELECT id::text, universal_identifier::text AS uid, is_custom FROM core.object_metadata WHERE workspace_id = $1
+             UNION ALL SELECT id::text, universal_identifier::text, is_custom FROM core.field_metadata WHERE workspace_id = $1`,
+            [A1.workspace],
+          )
+        ).rows,
+    );
+    expect(seeded.filter((r) => r.is_custom).length).toBeGreaterThanOrEqual(3); // equipment + its two custom fields (DEFAULT)
+    for (const r of seeded) expect({ id: r.id, version: r.uid?.[14] }).toEqual({ id: r.id, version: r.is_custom ? '4' : '8' });
+    // the same standard identifiers live in all three workspaces: unique per workspace, not globally
+    const sharing = await asAdmin(async (c) => (await c.query<{ n: number }>('SELECT count(DISTINCT workspace_id)::int AS n FROM core.object_metadata WHERE universal_identifier = $1', [UID.staff])).rows[0]!.n);
+    expect(sharing).toBeGreaterThanOrEqual(3);
+
+    const t = { organisation_id: A1.org, workspace_id: A1.workspace };
+    const custom = randomBytes(5).toString('hex');
+    await bound(A1, async (c) => {
+      // the request path: no identifier supplied → a generated version-4 one
+      const [oSql, oParams] = objectInsert({ ...t, name_singular: 'uidThing', name_plural: 'uidThings', label_singular: 'U', label_plural: 'U', physical_table: `c_${custom}`, is_custom: true, allows_custom_fields: true });
+      const obj = (await c.query<{ id: string; uid: string }>(`${oSql} RETURNING id::text, universal_identifier::text AS uid`, oParams)).rows[0]!;
+      expect(obj.uid[14]).toBe('4');
+      const [fSql, fParams] = fieldInsert({ ...t, object_metadata_id: obj.id, type: 'TEXT', name: 'tag', label: 'Tag', physical_column: `cf_${custom}t`, is_custom: true });
+      const field = (await c.query<{ id: string; uid: string }>(`${fSql} RETURNING id::text, universal_identifier::text AS uid`, fParams)).rows[0]!;
+      expect(field.uid[14]).toBe('4');
+      // unique per workspace, an explicit NULL is refused, and the identifier never changes
+      const [dupO, dupOp] = objectInsert({ ...t, universal_identifier: obj.uid, name_singular: 'uidTwin', name_plural: 'uidTwins', label_singular: 'U', label_plural: 'U', physical_table: `c_${custom}2`, is_custom: true, allows_custom_fields: true });
+      expect(await attempt(c, dupO, dupOp)).toMatchObject({ code: '23505', constraint: 'object_metadata_universal_identifier_uq' });
+      const [dupF, dupFp] = fieldInsert({ ...t, universal_identifier: field.uid, object_metadata_id: obj.id, type: 'TEXT', name: 'tagTwin', label: 'Tag', physical_column: `cf_${custom}u`, is_custom: true });
+      expect(await attempt(c, dupF, dupFp)).toMatchObject({ code: '23505', constraint: 'field_metadata_universal_identifier_uq' });
+      const [nulF, nulFp] = fieldInsert({ ...t, universal_identifier: null, object_metadata_id: obj.id, type: 'TEXT', name: 'tagNull', label: 'Tag', physical_column: `cf_${custom}n`, is_custom: true });
+      expect((await attempt(c, nulF, nulFp)).code).toBe('23502');
+      expect((await attempt(c, 'UPDATE core.field_metadata SET universal_identifier = $2 WHERE id = $1', [field.id, randomUUID()])).code).toBe('42501');
+      expect((await attempt(c, 'UPDATE core.object_metadata SET universal_identifier = $2 WHERE id = $1', [obj.id, randomUUID()])).code).toBe('42501');
+    });
+    await boundAsCrewflow(A1, async (c) => {
+      // a built-in INSERT that forgets its identifier gets the v4 DEFAULT and is refused (fails closed, as before)
+      const [o1, p1] = objectInsert({ ...t, name_singular: 'noUid', name_plural: 'noUids', label_singular: 'N', label_plural: 'N', physical_table: 'no_uid_table', is_custom: false });
+      expect(await attempt(c, o1, p1)).toMatchObject({ code: '23514', constraint: 'object_metadata_universal_identifier_kind_ck' });
+      const [f1, pf1] = fieldInsert({ ...t, universal_identifier: randomUUID(), object_metadata_id: A1.staff, type: 'TEXT', name: 'v4Builtin', label: 'X', physical_column: 'v4_builtin', is_custom: false, is_locked: true });
+      expect(await attempt(c, f1, pf1)).toMatchObject({ code: '23514', constraint: 'field_metadata_universal_identifier_kind_ck' });
+      const [f2, pf2] = fieldInsert({ ...t, universal_identifier: v8(), object_metadata_id: A1.staff, type: 'TEXT', name: 'v8Builtin', label: 'X', physical_column: 'v8_builtin', is_custom: false, is_locked: true });
+      expect((await attempt(c, f2, pf2)).code).toBeNull();
+      const [f3, pf3] = fieldInsert({ ...t, universal_identifier: UID.staffRef, object_metadata_id: A1.staff, type: 'TEXT', name: 'twinRef', label: 'X', physical_column: 'twin_ref', is_custom: false, is_locked: true });
+      expect(await attempt(c, f3, pf3)).toMatchObject({ code: '23505', constraint: 'field_metadata_universal_identifier_uq' });
+    });
   });
 
   // ------------------------------------------------------------------------------------------------------------ MD-6

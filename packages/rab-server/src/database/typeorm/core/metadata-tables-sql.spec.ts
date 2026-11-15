@@ -17,6 +17,7 @@ import {
   MetadataTableState,
   STORED_FIELD_TYPES,
   TENANT_PREDICATE,
+  UNIVERSAL_IDENTIFIER_KIND_PREDICATE,
 } from './metadata-tables-sql';
 import { migrationSourceViolations } from './migration-source-rules';
 import { MetadataEngineTables1786721550000 } from './migrations/1786721550000-MetadataEngineTables';
@@ -34,8 +35,25 @@ describe('metadata tables SQL (MetadataEngineTables1786721550000)', () => {
     expect([...STORED_FIELD_TYPES].sort()).toEqual([...FIELD_METADATA_TYPES, ...CREWFLOW_INTERNAL_FIELD_METADATA_TYPES].sort());
     for (const t of STORED_FIELD_TYPES) expect(createOf('field_metadata')).toContain(`'${t}'`);
     expect(createOf('field_metadata')).toContain("CHECK (type <> 'MORPH_RELATION')");
-    // #166 F4: a custom field can never squat a built-in field's universal identifier
-    expect(createOf('field_metadata')).toContain('CONSTRAINT field_metadata_custom_no_universal_identifier_ck CHECK (NOT is_custom OR universal_identifier IS NULL)');
+  });
+
+  it('owner batch 11 (Twenty syncable-entity alignment): every object / field row has a universal identifier, unique per workspace; custom = v4, built-in = v8', () => {
+    expect(UNIVERSAL_IDENTIFIER_KIND_PREDICATE).toBe("pg_catalog.substr(universal_identifier::text, 15, 1) = CASE WHEN is_custom THEN '4' ELSE '8' END");
+    for (const t of ['object_metadata', 'field_metadata']) {
+      const create = createOf(t);
+      expect(create).toContain('
+  universal_identifier uuid NOT NULL DEFAULT pg_catalog.gen_random_uuid(),
+');
+      expect(create).toContain(`CONSTRAINT ${t}_universal_identifier_kind_ck CHECK (${UNIVERSAL_IDENTIFIER_KIND_PREDICATE})`);
+      // one unique index per table, over every row (no partial predicate left, no duplicate index)
+      const uniques = METADATA_TABLES_UP_SQL.filter((s) => s.startsWith('CREATE UNIQUE INDEX') && s.includes(`ON core.${t} `) && s.includes('universal_identifier'));
+      expect(uniques).toEqual([`CREATE UNIQUE INDEX ${t}_universal_identifier_uq ON core.${t} (workspace_id, universal_identifier)`]);
+    }
+    // the replaced rules are gone: custom rows no longer refuse an identifier, built-in presence is the NOT NULL + v8 rule
+    expect(UP).not.toContain('field_metadata_custom_no_universal_identifier_ck');
+    expect(UP).not.toMatch(/universal_identifier IS (NOT )?NULL/);
+    // the other three tables are not synced by identifier and have no such column
+    for (const t of ['field_metadata_option', 'index_metadata', 'index_field_metadata']) expect(createOf(t)).not.toContain('universal_identifier');
   });
 
   it('relation CHECKs never pass on a missing relationType (NULL IN (...) is NULL, which a CHECK accepts)', () => {

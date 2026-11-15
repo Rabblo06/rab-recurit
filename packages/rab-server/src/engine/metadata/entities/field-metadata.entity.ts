@@ -25,8 +25,9 @@ export class FieldMetadata {
   @Column({ name: 'object_metadata_id', type: 'uuid' })
   objectMetadataId!: string;
 
-  @Column({ name: 'universal_identifier', type: 'uuid', nullable: true })
-  universalIdentifier!: string | null;
+  /** Always set, unique per workspace: custom rows get a random version-4 UUID (column DEFAULT), built-in rows the E2 sync's version-8 UUID. */
+  @Column({ name: 'universal_identifier', type: 'uuid' })
+  universalIdentifier!: string;
 
   @Column({ type: 'text' })
   type!: StoredFieldMetadataType;

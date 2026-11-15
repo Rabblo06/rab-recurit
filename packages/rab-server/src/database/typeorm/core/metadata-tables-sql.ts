@@ -35,6 +35,11 @@
  *     workspace table;
  *   - Crewflow-internal field type RANGE (tstzrange, M0-STANDARD-OBJECTS S8), built-in system fields only; MORPH_RELATION is
  *     in the vocabulary (Twenty's 25) but refused (out of scope, M0-BACKEND §0.1);
+ *   - universal_identifier (T:workspace-manager/types/syncable-entity.interface.ts: NOT NULL, unique per workspace) on the
+ *     two tables this codebase syncs by identifier (objects and fields: the E2 sync matches on it); custom rows get a
+ *     generated version-4 UUID, built-in rows the sync's version-8 UUID (UNIVERSAL_IDENTIFIER_KIND_PREDICATE). Options are
+ *     keyed by (field, value) and indexes by (workspace, physical_name), both immutable and not synced by identifier; index
+ *     fields are a junction table (not syncable in Twenty either);
  *   - no applicationId / isRemote / morph / standardOverrides columns; no metadata version here (E5, agent M1-cache);
  *   - TRUNCATE (which ignores RLS) follows the same identity rule: refused for the request path, allowed for the
  *     privileged identities (operators, test teardowns' TRUNCATE core.organisation CASCADE as the superuser);
@@ -109,6 +114,18 @@ const tenantFk = (t: string) =>
     REFERENCES core.manager_workspace (id, organisation_id) ON DELETE CASCADE`;
 
 export const TENANT_PREDICATE = 'organisation_id = core.current_org() AND workspace_id = core.current_workspace()';
+
+/**
+ * Owner decision batch 11 (Twenty alignment, syncable-entity.interface.ts: every syncable metadata row carries a
+ * universalIdentifier, unique per workspace): every object_metadata and field_metadata row carries one. The two namespaces
+ * never overlap, so a request-path custom row can never squat a standard identifier the E2 sync inserts later (#166 F4):
+ *   - custom rows: a random version-4 UUID (the column DEFAULT gen_random_uuid(), or one the caller generated);
+ *   - built-in rows: the deterministic version-8 UUID of the E2 sync (standard-universal-identifier.ts). A built-in INSERT
+ *     that forgets its identifier gets the version-4 DEFAULT and is refused, so a missing identifier still fails closed.
+ * Character 15 of the canonical text form is the version nibble (xxxxxxxx-xxxx-Vxxx-...).
+ */
+export const UNIVERSAL_IDENTIFIER_KIND_PREDICATE = `pg_catalog.substr(universal_identifier::text, 15, 1) = CASE WHEN is_custom THEN '4' ELSE '8' END`;
+const universalIdentifierKind = UNIVERSAL_IDENTIFIER_KIND_PREDICATE;
 
 export const METADATA_GUARD_FUNCTION_SQL = `CREATE FUNCTION core.metadata_guard()
 RETURNS trigger
@@ -351,7 +368,7 @@ export const METADATA_TABLES_UP_SQL: readonly string[] = [
   id uuid NOT NULL DEFAULT pg_catalog.gen_random_uuid(),
   organisation_id uuid NOT NULL,
   workspace_id uuid NOT NULL,
-  universal_identifier uuid,
+  universal_identifier uuid NOT NULL DEFAULT pg_catalog.gen_random_uuid(),
   storage text NOT NULL DEFAULT 'workspace',
   name_singular text NOT NULL,
   name_plural text NOT NULL,
@@ -384,9 +401,9 @@ export const METADATA_TABLES_UP_SQL: readonly string[] = [
   CONSTRAINT object_metadata_color_ck CHECK (color IS NULL OR color ~ '${COLOR_PATTERN}'),
   CONSTRAINT object_metadata_physical_table_ck CHECK (physical_table ~ '${CUSTOM_TABLE_PATTERN}' OR physical_table ~ '${BUILTIN_NAME_PATTERN}'),
   CONSTRAINT object_metadata_kind_ck CHECK (
-    (is_custom AND physical_table ~ '${CUSTOM_TABLE_PATTERN}' AND universal_identifier IS NULL AND NOT is_system
-       AND allows_custom_fields AND storage = 'workspace')
-    OR (NOT is_custom AND physical_table !~ '^c_' AND universal_identifier IS NOT NULL)),
+    (is_custom AND physical_table ~ '${CUSTOM_TABLE_PATTERN}' AND NOT is_system AND allows_custom_fields AND storage = 'workspace')
+    OR (NOT is_custom AND physical_table !~ '^c_')),
+  CONSTRAINT object_metadata_universal_identifier_kind_ck CHECK (${universalIdentifierKind}),
   CONSTRAINT object_metadata_system_no_custom_fields_ck CHECK (NOT (is_system AND allows_custom_fields)),
   CONSTRAINT object_metadata_core_reference_ck CHECK (storage = 'workspace' OR (NOT is_custom AND is_system AND NOT allows_custom_fields)),
   CONSTRAINT object_metadata_core_reference_tables_ck CHECK (storage = 'workspace' OR physical_table IN (${sqlList(CORE_REFERENCE_TABLES)})),
@@ -398,7 +415,7 @@ export const METADATA_TABLES_UP_SQL: readonly string[] = [
   'CREATE UNIQUE INDEX object_metadata_name_singular_uq ON core.object_metadata (workspace_id, pg_catalog.lower(name_singular))',
   'CREATE UNIQUE INDEX object_metadata_name_plural_uq ON core.object_metadata (workspace_id, pg_catalog.lower(name_plural))',
   'CREATE UNIQUE INDEX object_metadata_physical_table_uq ON core.object_metadata (workspace_id, storage, physical_table)',
-  'CREATE UNIQUE INDEX object_metadata_universal_identifier_uq ON core.object_metadata (workspace_id, universal_identifier) WHERE universal_identifier IS NOT NULL',
+  'CREATE UNIQUE INDEX object_metadata_universal_identifier_uq ON core.object_metadata (workspace_id, universal_identifier)',
   'CREATE INDEX object_metadata_organisation_workspace_idx ON core.object_metadata (organisation_id, workspace_id)',
 
   // ------------------------------------------------------------------------------------------------------------- fields
@@ -407,7 +424,7 @@ export const METADATA_TABLES_UP_SQL: readonly string[] = [
   organisation_id uuid NOT NULL,
   workspace_id uuid NOT NULL,
   object_metadata_id uuid NOT NULL,
-  universal_identifier uuid,
+  universal_identifier uuid NOT NULL DEFAULT pg_catalog.gen_random_uuid(),
   type text NOT NULL,
   name text NOT NULL,
   label text NOT NULL,
@@ -459,7 +476,7 @@ export const METADATA_TABLES_UP_SQL: readonly string[] = [
   CONSTRAINT field_metadata_settings_ck CHECK (
     pg_catalog.jsonb_typeof(settings) = 'object' AND pg_catalog.pg_column_size(settings) <= ${SETTINGS_MAX_BYTES}),
   CONSTRAINT field_metadata_builtin_locked_ck CHECK (is_custom OR is_locked),
-  CONSTRAINT field_metadata_custom_no_universal_identifier_ck CHECK (NOT is_custom OR universal_identifier IS NULL),
+  CONSTRAINT field_metadata_universal_identifier_kind_ck CHECK (${universalIdentifierKind}),
   CONSTRAINT field_metadata_money_ck CHECK (
     NOT is_money OR (type = 'NUMBER' AND NOT is_custom AND is_locked AND is_sensitive AND is_ui_read_only)),
   CONSTRAINT field_metadata_export_optin_ck CHECK (NOT is_exportable_when_sensitive OR is_sensitive),
@@ -473,7 +490,7 @@ export const METADATA_TABLES_UP_SQL: readonly string[] = [
 )`,
   'CREATE UNIQUE INDEX field_metadata_name_uq ON core.field_metadata (object_metadata_id, pg_catalog.lower(name))',
   'CREATE UNIQUE INDEX field_metadata_physical_column_uq ON core.field_metadata (object_metadata_id, physical_column) WHERE physical_column IS NOT NULL',
-  'CREATE UNIQUE INDEX field_metadata_universal_identifier_uq ON core.field_metadata (workspace_id, universal_identifier) WHERE universal_identifier IS NOT NULL',
+  'CREATE UNIQUE INDEX field_metadata_universal_identifier_uq ON core.field_metadata (workspace_id, universal_identifier)',
   'CREATE INDEX field_metadata_organisation_workspace_idx ON core.field_metadata (organisation_id, workspace_id)',
   'CREATE INDEX field_metadata_relation_target_object_idx ON core.field_metadata (relation_target_object_metadata_id) WHERE relation_target_object_metadata_id IS NOT NULL',
   'CREATE INDEX field_metadata_relation_target_field_idx ON core.field_metadata (relation_target_field_metadata_id) WHERE relation_target_field_metadata_id IS NOT NULL',
