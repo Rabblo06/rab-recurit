@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 
 import { AiKit } from './ai-test-kit';
+import { businessTable } from './hws-fixtures';
 import { TestIdentity } from './test-identities';
 
 /** Synthetic record text that tries to steer the model (prompt-injection fixtures). Never real data. */
@@ -31,13 +32,13 @@ export async function seedStaffing(kit: AiKit, owner: TestIdentity): Promise<Sta
   const ws = owner.workspaceId!;
   const staff: TestIdentity[] = [];
   for (let i = 0; i < 4; i++) staff.push(await kit.factory.createStaff({ id: org }, { owner, label: `aistaff${i}` }));
-  const [venue] = await q(`INSERT INTO core.venue (organisation_id, name, created_by, workspace_id) VALUES ($1, 'Grand Hotel', $2, $3) RETURNING id`, [org, owner.userId, ws]);
-  const [evil] = await q(`INSERT INTO core.venue (organisation_id, name, created_by, workspace_id, access_notes) VALUES ($1, $2, $3, $4, $5) RETURNING id`, [org, INJECTION_TEXT.slice(0, 120), owner.userId, ws, INJECTION_TEXT]);
-  const [role] = await q(`INSERT INTO core.job_role (organisation_id, name, default_rate_pence, created_by, workspace_id) VALUES ($1, $2, 1500, $3, $4) RETURNING id`, [org, `Bartender ${randomUUID().slice(0, 6)}`, owner.userId, ws]);
+  const [venue] = await q(`INSERT INTO ${businessTable(ws, 'venue')} (organisation_id, name, created_by, workspace_id) VALUES ($1, 'Grand Hotel', $2, $3) RETURNING id`, [org, owner.userId, ws]);
+  const [evil] = await q(`INSERT INTO ${businessTable(ws, 'venue')} (organisation_id, name, created_by, workspace_id, access_notes) VALUES ($1, $2, $3, $4, $5) RETURNING id`, [org, INJECTION_TEXT.slice(0, 120), owner.userId, ws, INJECTION_TEXT]);
+  const [role] = await q(`INSERT INTO ${businessTable(ws, 'job_role')} (organisation_id, name, default_rate_pence, created_by, workspace_id) VALUES ($1, $2, 1500, $3, $4) RETURNING id`, [org, `Bartender ${randomUUID().slice(0, 6)}`, owner.userId, ws]);
   const now = Date.now();
   const shift = async (venueId: string, startMs: number, required: number, status: string, filled: number, notes: string | null = null): Promise<string> => {
     const [row] = await q(
-      `INSERT INTO core.shift (organisation_id, venue_id, job_role_id, starts_at, ends_at, break_minutes, required_count, filled_count, pay_rate_pence, status, created_by, workspace_id, notes)
+      `INSERT INTO ${businessTable(ws, 'shift')} (organisation_id, venue_id, job_role_id, starts_at, ends_at, break_minutes, required_count, filled_count, pay_rate_pence, status, created_by, workspace_id, notes)
        VALUES ($1, $2, $3, $4, $5, 0, $6, $7, 1500, $8, $9, $10, $11) RETURNING id`,
       [org, venueId, role.id, new Date(startMs), new Date(startMs + 8 * H), required, filled, status, owner.userId, ws, notes],
     );
@@ -50,7 +51,7 @@ export async function seedStaffing(kit: AiKit, owner: TestIdentity): Promise<Sta
   const e = await shift(venue.id, now - 30 * H, 2, 'completed', 2);
   const assignment = async (shiftId: string, staffId: string, status: string, startMs: number): Promise<string> => {
     const [row] = await q(
-      `INSERT INTO core.shift_assignment (organisation_id, shift_id, staff_profile_id, status, pay_rate_snapshot_pence, assigned_by, confirmed_at, period, workspace_id)
+      `INSERT INTO ${businessTable(ws, 'shift_assignment')} (organisation_id, shift_id, staff_profile_id, status, pay_rate_snapshot_pence, assigned_by, confirmed_at, period, workspace_id)
        VALUES ($1, $2, $3, $4, 1500, $5, CASE WHEN $4 IN ('confirmed', 'completed') THEN now() END, tstzrange($6, $7), $8) RETURNING id`,
       [org, shiftId, staffId, status, owner.userId, new Date(startMs), new Date(startMs + 8 * H), ws],
     );
@@ -58,7 +59,7 @@ export async function seedStaffing(kit: AiKit, owner: TestIdentity): Promise<Sta
   };
   const offer = (assignmentId: string, staffId: string, status: string) =>
     q(
-      `INSERT INTO core.job_offer (organisation_id, shift_assignment_id, staff_profile_id, status, sent_at, expires_at, estimated_pay_pence, created_by, workspace_id)
+      `INSERT INTO ${businessTable(ws, 'job_offer')} (organisation_id, shift_assignment_id, staff_profile_id, status, sent_at, expires_at, estimated_pay_pence, created_by, workspace_id)
        VALUES ($1, $2, $3, $4, now(), now() + interval '1 day', 12000, $5, $6)`,
       [org, assignmentId, staffId, status, owner.userId, ws],
     );
@@ -72,7 +73,7 @@ export async function seedStaffing(kit: AiKit, owner: TestIdentity): Promise<Sta
   await assignment(e, staff[2]!.profileId!, 'no_show', now - 30 * H);
   const attendance = async (assignmentId: string, staffId: string, lateMinutes: number, status: string): Promise<string> => {
     const [row] = await q(
-      `INSERT INTO core.attendance (organisation_id, shift_assignment_id, shift_id, staff_profile_id, workspace_id, clock_in_at, clock_out_at, status, worked_minutes, earned_pence)
+      `INSERT INTO ${businessTable(ws, 'attendance')} (organisation_id, shift_assignment_id, shift_id, staff_profile_id, workspace_id, clock_in_at, clock_out_at, status, worked_minutes, earned_pence)
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 480, 12000) RETURNING id`,
       [org, assignmentId, e, staffId, ws, new Date(now - 30 * H + lateMinutes * 60_000), new Date(now - 22 * H), status],
     );
@@ -93,19 +94,19 @@ export async function seedPayrollRuns(kit: AiKit, owner: TestIdentity, fx: Staff
   const [p2] = await q(`INSERT INTO core.payroll_calendar_period (organisation_id, calendar_id, period_start, period_end, payday) VALUES ($1, $2, '2026-09-15', '2026-09-28', '2026-10-02') RETURNING id`, [org, cal.id]);
   const record = async (attendanceId: string, staffId: string, amount: number): Promise<string> => {
     const [row] = await q(
-      `INSERT INTO core.payroll_record (organisation_id, workspace_id, attendance_id, shift_id, staff_profile_id, status, worked_minutes, pay_rate_pence, amount_pence, approved_at, approved_by)
+      `INSERT INTO ${businessTable(ws, 'payroll_record')} (organisation_id, workspace_id, attendance_id, shift_id, staff_profile_id, status, worked_minutes, pay_rate_pence, amount_pence, approved_at, approved_by)
        VALUES ($1, $2, $3, $4, $5, 'approved', 480, 1500, $6, now(), $7) RETURNING id`,
       [org, ws, attendanceId, fx.shifts.e, staffId, amount, owner.userId],
     );
     return row.id;
   };
   const run = async (periodId: string): Promise<string> => {
-    const [row] = await q(`INSERT INTO core.payroll_run (organisation_id, workspace_id, period_id, prepared_by) VALUES ($1, $2, $3, $4) RETURNING id`, [org, ws, periodId, owner.userId]);
+    const [row] = await q(`INSERT INTO ${businessTable(ws, 'payroll_run')} (organisation_id, workspace_id, period_id, prepared_by) VALUES ($1, $2, $3, $4) RETURNING id`, [org, ws, periodId, owner.userId]);
     return row.id;
   };
   const line = (runId: string, recordId: string, staffId: string, amount: number, day: string) =>
     q(
-      `INSERT INTO core.payroll_run_line (organisation_id, workspace_id, run_id, payroll_record_id, staff_profile_id, work_date, worked_minutes, pay_rate_pence, amount_pence)
+      `INSERT INTO ${businessTable(ws, 'payroll_run_line')} (organisation_id, workspace_id, run_id, payroll_record_id, staff_profile_id, work_date, worked_minutes, pay_rate_pence, amount_pence)
        VALUES ($1, $2, $3, $4, $5, $6, 480, 1500, $7)`,
       [org, ws, runId, recordId, staffId, day, amount],
     );

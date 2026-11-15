@@ -7,6 +7,7 @@ import { EntityManager, In } from 'typeorm';
 
 import { AccountInvite, EmailOutbox, Organisation, OrganisationMember, Permission, Role, RolePermission, User, UserRole } from '../../identity/entities';
 import { AuthContext } from '../../../engine/core-modules/tenant/auth-context.interface';
+import { businessTables } from '../../../engine/core-modules/tenant/business-tables';
 import { TenantContextService } from '../../../engine/core-modules/tenant/tenant-context.service';
 import { WorkspaceMembershipService } from '../../../engine/core-modules/tenant/workspace-membership.service';
 import { AccountInviteService, InvitationLifecycleStatus } from '../../../engine/core-modules/auth/services/account-invite.service';
@@ -433,9 +434,10 @@ export class ManagerService {
       const [profiles, total] = await qb.getManyAndCount();
       const summaries = await this.toSummaries(manager, profiles);
       const ids = profiles.map((p) => p.id);
+      const t = businessTables(manager);
       const links: Array<{ manager_profile_id: string; id: string; name: string }> = ids.length
         ? await manager.query(
-            `SELECT mv.manager_profile_id, v.id, v.name FROM manager_venue mv JOIN venue v ON v.id = mv.venue_id
+            `SELECT mv.manager_profile_id, v.id, v.name FROM ${t.manager_venue} mv JOIN ${t.venue} v ON v.id = mv.venue_id
               WHERE mv.manager_profile_id = ANY($1) AND mv.organisation_id = $2 AND mv.workspace_id = $3 ORDER BY v.name`,
             [ids, ctx.organisationId, workspaceId],
           )
@@ -969,8 +971,9 @@ export class ManagerService {
       }
 
       // workspace_id stamped from the Venue, which now equals the profile's workspace by construction.
+      const t = businessTables(manager);
       await manager.query(
-        `INSERT INTO manager_venue (organisation_id, manager_profile_id, venue_id, workspace_id)
+        `INSERT INTO ${t.manager_venue} (organisation_id, manager_profile_id, venue_id, workspace_id)
          VALUES ($1, $2, $3, $4) ON CONFLICT (manager_profile_id, venue_id) DO NOTHING`,
         [ctx.organisationId, managerId, venueId, venue.workspaceId],
       );
@@ -1001,7 +1004,8 @@ export class ManagerService {
 
   async unassignVenue(ctx: AuthContext, managerId: string, venueId: string): Promise<void> {
     return this.tenantContext.runInTenantContext(ctx, async (manager) => {
-      await manager.query(`DELETE FROM manager_venue WHERE manager_profile_id = $1 AND venue_id = $2`, [managerId, venueId]);
+      const t = businessTables(manager);
+      await manager.query(`DELETE FROM ${t.manager_venue} WHERE manager_profile_id = $1 AND venue_id = $2`, [managerId, venueId]);
       await this.auditService.record(manager, ctx, AuditAction.MANAGER_VENUE_UNASSIGNED, {
         entityType: 'manager',
         entityId: managerId,
@@ -1010,14 +1014,82 @@ export class ManagerService {
     });
   }
 
+  /**
+   * `GET /rest/v1/managers/:id/venues`. Part C1 (HWS-AUDIT.md §0.1, BROKEN 4.5): `venue` and `manager_venue` are workspace
+   * tables, so they are read in the TARGET manager's own workspace (`runInWorkspaceContext`: its schema with HWS on, the
+   * `core` copy with HWS off), never in whatever schema the caller's session happens to route to — a workspace-less CEO used
+   * to read the stale `core` copy, and a caller in another workspace read its own schema and got `[]`.
+   *   - Layer 2: MANAGER_MANAGE re-checked here (403), not only by the route guard.
+   *   - The profile is looked up in the caller's organisation; not found → 404 (another organisation included).
+   *   - Owner decision 0d (2026-11-14): an ORGANISATION-WIDE holder of `manager.manage` (an organisation-level role or a
+   *     per-user grant, not revoked — the same scope delete / assign use) reads a manager of ANY active workspace of the
+   *     organisation, bound to a workspace of their own or not: the target's workspace is confirmed by
+   *     `core.admin_workspace_in_org` (404 otherwise) and read in that workspace's context, the re-binding
+   *     VenueManagerService's org-admin flow uses. A caller whose `manager.manage` came ONLY from a custom role of their
+   *     own workspace would keep the strict rule (another workspace → 404); the database refuses manager.manage on a
+   *     workspace-member role today, so that branch is defence in depth. A caller without manager.manage → 403 above.
+   *   - A profile with no workspace has no venue link (manager_venue requires one): `[]` for a workspace-less
+   *     organisation administrator; 404 for a workspace-bound caller (owner decision 0d: it is not a manager of the
+   *     caller's workspace).
+   */
   async listVenues(ctx: AuthContext, managerId: string): Promise<Venue[]> {
-    return this.tenantContext.runInTenantContext(ctx, (manager) =>
+    if (!ctx.organisationId) throw new NotFoundException('Manager not found.');
+    const targetWorkspaceId = await this.tenantContext.runInTenantContext(ctx, async (manager) => {
+      if (!(await this.permissions.userHasPermissionTx(manager, ctx, PermissionFlag.MANAGER_MANAGE))) {
+        throw new ForbiddenException('Managing Manager accounts is not permitted.');
+      }
+      const profile = await manager.findOne(ManagerProfile, { where: { id: managerId, organisationId: ctx.organisationId! } });
+      if (!profile) throw new NotFoundException('Manager not found.');
+      if (!profile.workspaceId) {
+        if (ctx.workspaceId) throw new NotFoundException('Manager not found.');
+        return null;
+      }
+      if (profile.workspaceId === ctx.workspaceId) return profile.workspaceId;
+      if (ctx.workspaceId && !(await this.holdsOrganisationWideManagerManage(manager, ctx))) {
+        throw new NotFoundException('Manager not found.');
+      }
+      const [{ ok }] = await manager.query<Array<{ ok: boolean }>>('SELECT core.admin_workspace_in_org($1, $2) AS ok', [
+        profile.workspaceId,
+        ctx.organisationId,
+      ]);
+      if (!ok) throw new NotFoundException('Manager not found.');
+      return profile.workspaceId;
+    });
+    if (!targetWorkspaceId) return [];
+    return this.tenantContext.runInWorkspaceContext({ ...ctx, workspaceId: targetWorkspaceId }, (manager) =>
       manager
         .createQueryBuilder(Venue, 'v')
         .innerJoin(ManagerVenue, 'mv', 'mv.venue_id = v.id')
         .where('mv.manager_profile_id = :managerId', { managerId })
         .getMany(),
     );
+  }
+
+  /**
+   * True when the caller's `manager.manage` is ORGANISATION-WIDE: a per-user `grant` override of the bound organisation, or
+   * (with no `revoke` override) a role with no workspace — a system / organisation role, never a custom workspace-member
+   * role (`core.role.workspace_id`, WorkspaceMemberRoles1786714500000). The same override precedence as
+   * PermissionsService.userHasPermissionTx, pinned to the caller's organisation.
+   */
+  private async holdsOrganisationWideManagerManage(manager: EntityManager, ctx: AuthContext): Promise<boolean> {
+    const [row] = await manager.query<Array<{ org_wide: boolean }>>(
+      `WITH o AS (
+         SELECT upo.effect FROM core.user_permission_override upo JOIN core.permission p ON p.id = upo.permission_id
+          WHERE upo.user_id = $1 AND upo.organisation_id = $2 AND p.key = $3
+       )
+       SELECT CASE
+                WHEN EXISTS (SELECT 1 FROM o WHERE effect = 'grant') THEN true
+                WHEN EXISTS (SELECT 1 FROM o WHERE effect = 'revoke') THEN false
+                ELSE EXISTS (
+                  SELECT 1 FROM core.user_role ur
+                    JOIN core.role r ON r.id = ur.role_id
+                    JOIN core.role_permission rp ON rp.role_id = ur.role_id
+                    JOIN core.permission p ON p.id = rp.permission_id
+                   WHERE ur.user_id = $1 AND ur.organisation_id = $2 AND r.workspace_id IS NULL AND p.key = $3)
+              END AS org_wide`,
+      [ctx.userId, ctx.organisationId, PermissionFlag.MANAGER_MANAGE],
+    );
+    return row?.org_wide === true;
   }
 
   /** General "change email" — active or pending, one mutation either way. See `StaffService.changeEmail`'s identical doc comment. */

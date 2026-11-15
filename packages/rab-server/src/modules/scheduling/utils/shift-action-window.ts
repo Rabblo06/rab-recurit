@@ -1,6 +1,8 @@
 import { ConflictException } from '@nestjs/common';
 import { EntityManager } from 'typeorm';
 
+import { businessTables } from '../../../engine/core-modules/tenant/business-tables';
+
 /**
  * Owner decision 2026-10-17: a shift's offer actions close five hours after its scheduled end. Enforced here, at the
  * service layer every offer path calls (send, staff accept, manager confirm), against DATABASE time — never the
@@ -17,8 +19,9 @@ const MESSAGES = {
 
 /** 409 when the shift's action window has closed. Call with the shift row already locked by the caller where it writes. */
 export async function assertShiftActionWindowOpen(manager: EntityManager, shiftId: string, action: keyof typeof MESSAGES): Promise<void> {
+  const t = businessTables(manager);
   const [row] = await manager.query(
-    `SELECT now() >= ends_at + make_interval(hours => $2) AS closed FROM shift WHERE id = $1`,
+    `SELECT now() >= ends_at + make_interval(hours => $2) AS closed FROM ${t.shift} WHERE id = $1`,
     [shiftId, SHIFT_ACTION_WINDOW_HOURS],
   );
   if (row?.closed) throw new ConflictException(MESSAGES[action]);

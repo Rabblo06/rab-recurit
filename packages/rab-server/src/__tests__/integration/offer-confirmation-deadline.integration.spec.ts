@@ -15,6 +15,7 @@ import { createAdminDataSource } from './helpers/admin-datasource';
 import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
 import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-pipe';
 import { integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
+import { businessTableOf, siblingTable } from './helpers/hws-fixtures';
 
 /**
  * Owner rule 2026-11-06 — the manager-confirmation deadline through the REAL HTTP stack (guard → service → org-scoped CAS
@@ -66,7 +67,7 @@ describeIfDb('manager-confirmation deadline over HTTP (integration)', () => {
   type Staff = TestIdentity & { profileId: string };
   async function activeStaff(org: Organisation, owner: TestIdentity, label: string): Promise<Staff> {
     const staff = await factory.createStaff(org, { owner, label });
-    await adminDataSource.query(`UPDATE core.staff_profile SET employment_status = 'active' WHERE id = $1`, [staff.profileId]);
+    await adminDataSource.query(`UPDATE ${await businessTableOf(adminDataSource, 'staff_profile', staff.profileId!)} SET employment_status = 'active' WHERE id = $1`, [staff.profileId]);
     return { ...staff, profileId: staff.profileId! };
   }
 
@@ -104,12 +105,12 @@ describeIfDb('manager-confirmation deadline over HTTP (integration)', () => {
   /** FIXTURE (tests only): move the offer's assignment so its standard deadline is `offsetMin` from now. */
   async function moveDeadline(offerId: string, offsetMin: number) {
     await adminDataSource.query(
-      `UPDATE core.shift_assignment sa SET period = tstzrange(now() + make_interval(mins => $2 + 30), now() + make_interval(mins => $2 + 30 + 480), '[)')
-         FROM core.job_offer o WHERE o.id = $1 AND sa.id = o.shift_assignment_id`,
+      `UPDATE ${siblingTable(await businessTableOf(adminDataSource, 'job_offer', offerId), 'shift_assignment')} sa SET period = tstzrange(now() + make_interval(mins => $2 + 30), now() + make_interval(mins => $2 + 30 + 480), '[)')
+         FROM ${await businessTableOf(adminDataSource, 'job_offer', offerId)} o WHERE o.id = $1 AND sa.id = o.shift_assignment_id`,
       [offerId, offsetMin],
     );
   }
-  const offerRow = async (offerId: string) => (await adminDataSource.query(`SELECT o.*, sa.status AS assignment_status FROM core.job_offer o JOIN core.shift_assignment sa ON sa.id = o.shift_assignment_id WHERE o.id = $1`, [offerId]))[0];
+  const offerRow = async (offerId: string) => (await adminDataSource.query(`SELECT o.*, sa.status AS assignment_status FROM ${await businessTableOf(adminDataSource, 'job_offer', offerId)} o JOIN ${siblingTable(await businessTableOf(adminDataSource, 'job_offer', offerId), 'shift_assignment')} sa ON sa.id = o.shift_assignment_id WHERE o.id = $1`, [offerId]))[0];
   const accept = (fx: Fx, offerId: string) => http().post(`/rest/v1/offers/${offerId}/accept`).set(auth(fx.staffToken));
   const confirm = (token: string, offerId: string, body?: object) => http().post(`/rest/v1/offers/${offerId}/confirm`).set(auth(token)).send(body ?? {});
 
@@ -123,7 +124,7 @@ describeIfDb('manager-confirmation deadline over HTTP (integration)', () => {
     expect(res.body).toEqual({ statusCode: 409, code: 'CONFIRMATION_DEADLINE_PASSED', message: CONFIRMATION_DEADLINE_MESSAGES.CONFIRM });
     const row = await offerRow(offerId);
     expect(row).toMatchObject({ status: 'manager_rejected', rejected_by: null, rejection_reason: 'confirmation_deadline_passed', confirmed_by: null, assignment_status: 'rejected' });
-    expect((await adminDataSource.query(`SELECT filled_count FROM core.shift WHERE id = $1`, [shiftId]))[0].filled_count).toBe(0);
+    expect((await adminDataSource.query(`SELECT filled_count FROM ${await businessTableOf(adminDataSource, 'shift', shiftId)} WHERE id = $1`, [shiftId]))[0].filled_count).toBe(0);
     const audits = await adminDataSource.query(`SELECT actor_user_id FROM core.audit_log WHERE entity_id = $1 AND action = 'offer.rejected_by_worker'`, [offerId]);
     expect(audits).toEqual([{ actor_user_id: null }]);
     const notes = await adminDataSource.query(`SELECT title, message FROM core.notification WHERE user_id = $1 AND related_entity_id = $2 AND type = 'offer_rejected'`, [fx.staff.userId, offerId]);

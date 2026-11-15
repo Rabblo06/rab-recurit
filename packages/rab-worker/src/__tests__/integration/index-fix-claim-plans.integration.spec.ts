@@ -32,6 +32,7 @@ jest.setTimeout(300_000);
 const ORGS = 40;
 const ROWS = 60_000; // per outbox table: ~0.5 % claimable, the rest terminal
 const TOKENS = 60_000;
+const LOGINS = 60_000;
 
 const EMAIL_PREDICATE = `WHERE status = 'PENDING'
              OR (status = 'QUEUED' AND queued_at < now() - interval '2 minutes')
@@ -135,8 +136,18 @@ describeIfDb('index fix: claim and token-cleanup plans as the runtime login (EXP
               now() - interval '401 days', 'staff_app', now() + interval '1 day'
          FROM idx_tok t LEFT JOIN idx_tok n ON n.g = t.g + 1`,
     );
+    // Login history at production size too (2,000 users × 30 attempts), so the RI-probe plan below is the plan of a real table
+    // and does not depend on whatever statistics an earlier suite left on a near-empty one (an ANALYZE of a few dozen rows
+    // makes a Seq Scan cheapest; C1b).
+    await admin.query(
+      `INSERT INTO core.login_history (organisation_id, user_id, email, success, created_at)
+       SELECT ${orgOf}, ('1d000000-0000-4000-9000-' || lpad(to_hex(g % 2000), 12, '0'))::uuid, 'idx' || (g % 2000) || '@example.test',
+              g % 7 <> 0, ${ago}
+         FROM generate_series(1, $1) g`,
+      [LOGINS],
+    );
     await admin.query(`SET LOCAL session_replication_role = origin`);
-    for (const t of ['email_outbox', 'push_delivery', 'refresh_token']) await admin.query(`ANALYZE core.${t}`);
+    for (const t of ['email_outbox', 'push_delivery', 'refresh_token', 'login_history']) await admin.query(`ANALYZE core.${t}`);
   });
 
   afterAll(async () => {

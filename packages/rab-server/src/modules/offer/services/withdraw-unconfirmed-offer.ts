@@ -12,6 +12,7 @@ import {
 import { EntityManager } from 'typeorm';
 
 import { AuditAction, AuditService } from '../../../engine/core-modules/audit/audit.service';
+import { businessTables } from '../../../engine/core-modules/tenant/business-tables';
 import { RealtimeEventService, RealtimeEventType } from '../../../engine/core-modules/realtime/realtime-event.service';
 import { offerAudience, venueManagerUserIds } from '../../../engine/core-modules/realtime/realtime-recipients';
 import { NotificationService } from '../../notification/services/notification.service';
@@ -95,8 +96,9 @@ export async function withdrawUnconfirmedOffer(
 ): Promise<WithdrawnOffer | null> {
   // Shift row lock FIRST (lock order shift → offer → assignment, as confirm and accept). The shift of an offer never
   // changes, so this plain read of it is safe; a missing / foreign offer reads nothing and nothing is locked.
+  const t = businessTables(manager);
   const [target] = await manager.query<Array<{ shift_id: string }>>(
-    `SELECT sa.shift_id FROM job_offer o JOIN shift_assignment sa ON sa.id = o.shift_assignment_id WHERE o.id = $1 AND o.organisation_id = $2`,
+    `SELECT sa.shift_id FROM ${t.job_offer} o JOIN ${t.shift_assignment} sa ON sa.id = o.shift_assignment_id WHERE o.id = $1 AND o.organisation_id = $2`,
     [offerId, organisationId],
   );
   if (!target) return null;
@@ -106,9 +108,9 @@ export async function withdrawUnconfirmedOffer(
   const end = assignmentTimeSql('sa', 's').end;
   const [rows] = (await manager.query(
     // sql-injection-reviewed: code-constant SQL fragments from helpers called with literal aliases; values are bound $n parameters.
-    `UPDATE job_offer o
+    `UPDATE ${t.job_offer} o
         SET status = 'manager_rejected', manager_rejected_at = clock_timestamp(), rejected_by = NULL, rejection_reason = $3
-       FROM shift_assignment sa JOIN shift s ON s.id = sa.shift_id
+       FROM ${t.shift_assignment} sa JOIN ${t.shift} s ON s.id = sa.shift_id
       WHERE o.id = $1 AND o.organisation_id = $2 AND o.status = 'staff_accepted'
         AND sa.id = o.shift_assignment_id AND sa.status = 'staff_accepted'
         AND s.status <> 'cancelled'
@@ -125,7 +127,7 @@ export async function withdrawUnconfirmedOffer(
   // future edit to the transition tables must break this loudly rather than silently).
   assertTransition(OFFER_TRANSITIONS, OfferStatus.STAFF_ACCEPTED, OfferStatus.MANAGER_REJECTED);
   assertTransition(SHIFT_ASSIGNMENT_TRANSITIONS, ShiftAssignmentStatus.STAFF_ACCEPTED, ShiftAssignmentStatus.REJECTED);
-  await manager.query(`UPDATE shift_assignment SET status = 'rejected' WHERE id = $1 AND status = 'staff_accepted'`, [row.shift_assignment_id]);
+  await manager.query(`UPDATE ${t.shift_assignment} SET status = 'rejected' WHERE id = $1 AND status = 'staff_accepted'`, [row.shift_assignment_id]);
   // The same roll-up a clock-out runs: if this was the last open seat of a running shift, the shift completes now.
   const shiftCompleted = await completeShiftIfSettled(manager, organisationId, row.shift_id);
 
@@ -150,7 +152,7 @@ export async function withdrawUnconfirmedOffer(
     const assignment = await manager.findOne(ShiftAssignment, { where: { id: row.shift_assignment_id } });
     const shift = await manager.findOne(Shift, { where: { id: row.shift_id } });
     const [staff] = await manager.query<Array<{ user_id: string }>>(
-      `SELECT sp.user_id FROM job_offer o JOIN staff_profile sp ON sp.id = o.staff_profile_id WHERE o.id = $1`,
+      `SELECT sp.user_id FROM ${t.job_offer} o JOIN ${t.staff_profile} sp ON sp.id = o.staff_profile_id WHERE o.id = $1`,
       [row.id],
     );
     const notified = new Set<string>();

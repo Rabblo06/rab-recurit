@@ -12,6 +12,7 @@ import {
 import { AuditAction, AuditService } from '../engine/core-modules/audit/audit.service';
 import { PasswordHashingService } from '../engine/core-modules/auth/services/password-hashing.service';
 import { AuthContext } from '../engine/core-modules/tenant/auth-context.interface';
+import { businessTables } from '../engine/core-modules/tenant/business-tables';
 import { TenantContextService } from '../engine/core-modules/tenant/tenant-context.service';
 import { ManagerWorkspace } from '../modules/manager-workspace/entities/manager-workspace.entity';
 import { ROLE_DEFS } from '../modules/manager/services/manager.service';
@@ -161,9 +162,21 @@ export class SeedQaCommand extends CommandRunner {
           name: 'ADOLPHUS QA Workspace',
           subdomain: 'adolphus-qa',
           status: 'active',
+          // As ManagerWorkspaceService.create writes it: the schema is built next, on the server path.
+          schemaStatus: 'CREATING',
         });
       }
       workspaceId = workspace.id;
+      // Part C1: the workspace's schema, built the way the API builds it (core.provision_workspace, server path; the same
+      // definer seed-ai-demo calls), in this transaction with the organisation and the OWNER bound — the function's own
+      // predicate refuses anything else. Without a READY schema every workspace-routed write below is refused once HWS
+      // runtime routing is on (the default outside production). Idempotent: ALREADY_READY on a re-run.
+      if (workspace.schemaStatus !== 'READY') {
+        const [{ outcome }] = await m.query<Array<{ outcome: string }>>('SELECT core.provision_workspace($1) AS outcome', [workspaceId]);
+        if (outcome !== 'READY' && outcome !== 'ALREADY_READY') {
+          throw new Error(`seed-qa: workspace provisioning ended ${outcome}. Nothing was committed.`);
+        }
+      }
       await m.query(`SELECT set_config('rab.workspace_id', $1, true)`, [workspaceId]);
 
       const existingProfile = await m.query(`SELECT id FROM core.manager_profile WHERE user_id = $1`, [managerUserId]);
@@ -202,6 +215,7 @@ export class SeedQaCommand extends CommandRunner {
     // ---- Venue Manager ---------------------------------------------------
     let venueManagerUserId!: string;
     await this.tenantContext.runInTenantContext({ organisationId, workspaceId, userId: managerUserId, role: '' }, async (m) => {
+      const t = businessTables(m);
       const def = ROLE_DEFS[ManagerType.VENUE]!;
       let role = await m.findOne(Role, { where: { organisationId, key: def.key } });
       if (!role) {
@@ -240,12 +254,12 @@ export class SeedQaCommand extends CommandRunner {
       await insertQaMembership(m, organisationId, venueManagerUserId, workspaceId);
 
       const existingAssignment = await m.query(
-        `SELECT 1 FROM manager_venue WHERE manager_profile_id = $1 AND venue_id = $2`,
+        `SELECT 1 FROM ${t.manager_venue} WHERE manager_profile_id = $1 AND venue_id = $2`,
         [venueManagerProfileId, venueId],
       );
       if (existingAssignment.length === 0) {
         await m.query(
-          `INSERT INTO manager_venue (organisation_id, manager_profile_id, venue_id, workspace_id) VALUES ($1, $2, $3, $4)`,
+          `INSERT INTO ${t.manager_venue} (organisation_id, manager_profile_id, venue_id, workspace_id) VALUES ($1, $2, $3, $4)`,
           [organisationId, venueManagerProfileId, venueId, workspaceId],
         );
       }
@@ -253,6 +267,7 @@ export class SeedQaCommand extends CommandRunner {
 
     // ---- 5 Staff -----------------------------------------------------
     await this.tenantContext.runInTenantContext({ organisationId, workspaceId, userId: managerUserId, role: '' }, async (m) => {
+      const t = businessTables(m);
       let role = await m.findOne(Role, { where: { organisationId, key: STAFF_ROLE_KEY } });
       if (!role) {
         const permissions = await Promise.all(STAFF_ROLE_PERMISSIONS.map((k) => m.findOneByOrFail(Permission, { key: k })));
@@ -276,10 +291,10 @@ export class SeedQaCommand extends CommandRunner {
           user = await m.findOneByOrFail(User, { id: result.identifiers[0]!.id as string });
           await m.insert(UserRole, { userId: user.id, roleId: role!.id, organisationId });
         }
-        const existingProfile = await m.query(`SELECT id FROM staff_profile WHERE user_id = $1`, [user.id]);
+        const existingProfile = await m.query(`SELECT id FROM ${t.staff_profile} WHERE user_id = $1`, [user.id]);
         if (existingProfile.length === 0) {
           await m.query(
-            `INSERT INTO staff_profile (organisation_id, user_id, staff_ref, created_by, workspace_id, employment_status, job_role_id)
+            `INSERT INTO ${t.staff_profile} (organisation_id, user_id, staff_ref, created_by, workspace_id, employment_status, job_role_id)
              VALUES ($1, $2, $3, $4, $5, 'active', $6)`,
             [organisationId, user.id, `QA-STF-0${i}`, managerUserId, workspaceId, jobRoleId],
           );

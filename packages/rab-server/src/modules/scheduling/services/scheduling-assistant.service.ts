@@ -5,6 +5,7 @@ import { EntityManager } from 'typeorm';
 import { PermissionsService } from '../../../engine/core-modules/permissions/permissions.service';
 import { ResourceScope, ResourceScopeService } from '../../../engine/core-modules/resource-scope/resource-scope.service';
 import { AuthContext } from '../../../engine/core-modules/tenant/auth-context.interface';
+import { businessTables } from '../../../engine/core-modules/tenant/business-tables';
 import { TenantContextService } from '../../../engine/core-modules/tenant/tenant-context.service';
 import { beginAssistantRead } from '../../../engine/utils/assistant-read.util';
 import { MemberAccessPolicyService } from '../../identity/member-access/member-access-policy.service';
@@ -332,14 +333,15 @@ export class SchedulingAssistantService {
   /** Operational fields + seat counts of the given (already scoped) shift ids; never a staff, note, address or pay column. */
   private async seatRows(m: EntityManager, ids: string[]): Promise<SeatRow[]> {
     if (ids.length === 0) return [];
+    const t = businessTables(m);
     const rows: Array<Record<string, unknown>> = await m.query(
       // sql-injection-reviewed: code-constant SQL fragment from a helper called with literal aliases; values are bound $n parameters.
       `SELECT s.id, s.status, s.starts_at, s.ends_at, s.required_count, s.filled_count, s.venue_id, v.name AS venue_name, s.job_role_id, jr.name AS job_role_name,
               ${shiftSeatCountsSql('sa')}
-         FROM shift s
-         JOIN venue v ON v.id = s.venue_id
-         JOIN job_role jr ON jr.id = s.job_role_id
-         LEFT JOIN shift_assignment sa ON sa.shift_id = s.id
+         FROM ${t.shift} s
+         JOIN ${t.venue} v ON v.id = s.venue_id
+         JOIN ${t.job_role} jr ON jr.id = s.job_role_id
+         LEFT JOIN ${t.shift_assignment} sa ON sa.shift_id = s.id
         WHERE s.id = ANY($1::uuid[])
         GROUP BY s.id, v.name, jr.name
         ORDER BY s.starts_at, s.id`,

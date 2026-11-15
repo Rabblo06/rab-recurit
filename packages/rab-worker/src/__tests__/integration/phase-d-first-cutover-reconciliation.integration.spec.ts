@@ -2,13 +2,10 @@ import 'reflect-metadata';
 import { INestApplication, ValidationPipe } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
 import { randomUUID } from 'node:crypto';
-import { Client } from 'pg';
 import request from 'supertest';
 import { DataSource } from 'typeorm';
 
 import { AppModule } from '@rab/server/app.module';
-import { resolveIntegrationTestDatabase } from '@rab/server/database/typeorm/core/test-database-guard';
-import { provisionWorkspaceSchema } from '@rab/server/database/typeorm/workspace-schema/provision-workspace-schema';
 import { EnvironmentService } from '@rab/server/engine/core-modules/environment/environment.service';
 import { SchemaResolverService } from '@rab/server/engine/core-modules/tenant/schema-resolver.service';
 import { PasswordHashingService } from '@rab/server/engine/core-modules/auth/services/password-hashing.service';
@@ -24,6 +21,7 @@ import { publishRealtimeScope, runRealtimeOutboxPublishCycle } from '../../queue
 import { dispatchStatementScope, runShiftStatementDispatchCycle } from '../../queues/rab-reports/shift-statement.job';
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { bookBeforeDeadline } from './helpers/book-before-deadline';
+import { businessTable, hwsRuntimeOn } from './helpers/hws-fixtures';
 import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
 import { integrationTestDatabaseReady } from '@rab/server/database/typeorm/core/integration-test-database-gate';
 
@@ -77,7 +75,6 @@ describeIfApproved('Phase D first cutover: pre-trigger pending work is dispatche
   let orgA: TestIdentity;
   let orgB: TestIdentity;
   let hwsTenant: TenantContextService;
-  let provisioner: Client;
   /** Organisation B's physical workspace schema and the pre-trigger statement row written into it. */
   let wsSchema: string;
   let wsStatementId: string;
@@ -121,28 +118,40 @@ describeIfApproved('Phase D first cutover: pre-trigger pending work is dispatche
     const env = app.get(EnvironmentService);
     const hwsEnv = { get: (key: string) => (key === 'HWS_RUNTIME_ENABLED' ? true : env.get(key as never)) } as unknown as EnvironmentService;
     hwsTenant = new TenantContextService(runtime, app.get(SchemaResolverService), hwsEnv);
-    coreSourceOfWsStatement = await approvedRecord(seededB.organisation, orgB); // a real approved record (core) as the template
+    coreSourceOfWsStatement = await approvedRecord(seededB.organisation, orgB); // a real approved record as the template
+    // Part C1: the template lives where the app wrote it — organisation B's workspace schema with HWS on (the default outside
+    // production), the core copy with it off.
+    const sourceTable = businessTable(orgB.workspaceId!, 'payroll_record');
     orgOf.delete(coreSourceOfWsStatement);
-    const { adminUrl } = resolveIntegrationTestDatabase(process.env);
-    provisioner = new Client({ connectionString: adminUrl });
-    await provisioner.connect();
-    await provisioner.query('SET ROLE crewflow'); // the real provisioner identity
-    const provisioned = await provisionWorkspaceSchema(provisioner, orgB.workspaceId!);
-    expect(provisioned.outcome).toBe('READY');
-    wsSchema = provisioned.schemaName;
+    // Part C1: the identity factory already built B's schema on the server path (core.provision_workspace, as the API does;
+    // needed with HWS on), so the separate TypeScript provisioner has nothing to do (it refuses to re-register a READY
+    // workspace). The schema is the one the trusted registry reports READY for B.
+    const [registry] = await admin.query<[{ status: string; schema_name: string }]>(
+      `SELECT status, schema_name FROM core.workspace_schema_registry WHERE workspace_id = $1`,
+      [orgB.workspaceId],
+    );
+    expect(registry.status).toBe('READY');
+    wsSchema = registry.schema_name;
     expect(wsSchema).toMatch(/^workspace_[0-9a-f]{32}$/);
-    wsStatementId = randomUUID();
-    await admin.transaction(async (m) => {
-      await m.query('SET LOCAL session_replication_role = replica'); // no trigger fires: a "pre-trigger" row
-      await m.query(
-        `INSERT INTO "${wsSchema}".payroll_record
-           SELECT * FROM jsonb_populate_record(NULL::"${wsSchema}".payroll_record,
-             (SELECT to_jsonb(c) || jsonb_build_object('id', $2::uuid) FROM core.payroll_record c WHERE c.id = $1))`,
-        [coreSourceOfWsStatement, wsStatementId],
-      );
-      // The core template must not be due itself.
-      await m.query(`UPDATE core.payroll_record SET statement_status = 'failed', statement_attempts = $2 WHERE id = $1`, [coreSourceOfWsStatement, SHIFT_STATEMENT_MAX_ATTEMPTS]);
-    });
+    if (hwsRuntimeOn()) {
+      // Part C1: with HWS on the app already wrote B's approved record into B's physical schema (payroll_record is UNIQUE
+      // per attendance, so it cannot be copied beside itself). It IS the pending workspace-schema statement row; removing
+      // its pointer below (with every other subject's) makes it exactly a row written before the pointer triggers existed.
+      wsStatementId = coreSourceOfWsStatement;
+    } else {
+      wsStatementId = randomUUID();
+      await admin.transaction(async (m) => {
+        await m.query('SET LOCAL session_replication_role = replica'); // no trigger fires: a "pre-trigger" row
+        await m.query(
+          `INSERT INTO "${wsSchema}".payroll_record
+             SELECT * FROM jsonb_populate_record(NULL::"${wsSchema}".payroll_record,
+               (SELECT to_jsonb(c) || jsonb_build_object('id', $2::uuid) FROM ${sourceTable} c WHERE c.id = $1))`,
+          [coreSourceOfWsStatement, wsStatementId],
+        );
+        // The core template must not be due itself.
+        await m.query(`UPDATE ${sourceTable} SET statement_status = 'failed', statement_attempts = $2 WHERE id = $1`, [coreSourceOfWsStatement, SHIFT_STATEMENT_MAX_ATTEMPTS]);
+      });
+    }
     const [wsRow] = await admin.query<[{ statement_status: string; workspace_id: string }]>(
       `SELECT statement_status, workspace_id FROM "${wsSchema}".payroll_record WHERE id = $1`,
       [wsStatementId],
@@ -159,7 +168,6 @@ describeIfApproved('Phase D first cutover: pre-trigger pending work is dispatche
   });
 
   afterAll(async () => {
-    await provisioner?.end();
     await worker?.destroy();
     await app?.close();
     await admin?.destroy();
@@ -219,7 +227,7 @@ describeIfApproved('Phase D first cutover: pre-trigger pending work is dispatche
   /** The approval flow of shift-statement.integration.spec.ts (approvedRecordFor), compacted: returns a PENDING record id. */
   async function approvedRecord(org: { id: string }, manager: TestIdentity): Promise<string> {
     const staff = await factory.createStaff(org, { owner: manager, label: 'cut-staff' });
-    await admin.query(`UPDATE core.staff_profile SET employment_status = 'active' WHERE id = $1`, [staff.profileId]);
+    await admin.query(`UPDATE ${businessTable(manager.workspaceId!, 'staff_profile')} SET employment_status = 'active' WHERE id = $1`, [staff.profileId]);
     const tokenM = await factory.login(manager);
     const tokenS = await factory.login(staff);
     const venueId = (await http().post('/rest/v1/venues').set(auth(tokenM)).send({ name: `Cutover Venue ${randomUUID().slice(0, 6)}`, type: 'hotel' })).body.id as string;
@@ -247,9 +255,10 @@ describeIfApproved('Phase D first cutover: pre-trigger pending work is dispatche
       .send({ field: 'clockInAt', newValue: new Date(clockOutAt - 247 * 60_000).toISOString(), reason: 'Cutover test worked time' })).status).toBe(201);
     expect((await http().post(`/rest/v1/attendance/report/shift/${shiftId}/staff/${staff.profileId}/attendance-review`).set(auth(tokenM))).status).toBe(200);
     expect((await http().patch(`/rest/v1/attendance/report/shift/${shiftId}/finalise`).set(auth(tokenM))).status).toBe(200);
-    const [rec] = await admin.query<[{ id: string }]>(`SELECT id FROM core.payroll_record WHERE attendance_id = $1`, [out.body.id]);
+    const records = businessTable(manager.workspaceId!, 'payroll_record');
+    const [rec] = await admin.query<[{ id: string }]>(`SELECT id FROM ${records} WHERE attendance_id = $1`, [out.body.id]);
     expect((await http().post(`/rest/v1/payroll/records/${rec.id}/approve`).set(auth(tokenM))).status).toBe(200);
-    const [row] = await admin.query<[{ statement_status: string }]>(`SELECT statement_status FROM core.payroll_record WHERE id = $1`, [rec.id]);
+    const [row] = await admin.query<[{ statement_status: string }]>(`SELECT statement_status FROM ${records} WHERE id = $1`, [rec.id]);
     expect(row.statement_status).toBe('pending');
     orgOf.set(rec.id, org.id);
     return rec.id;
@@ -343,8 +352,11 @@ describeIfApproved('Phase D first cutover: pre-trigger pending work is dispatche
     expect(dispatched.find((d) => d.subjectId === wsStatementId)).toMatchObject({ organisationId: orgB.organisationId, workspaceId: orgB.workspaceId });
     const [wsAfter] = await admin.query<[{ statement_status: string }]>(`SELECT statement_status FROM "${wsSchema}".payroll_record WHERE id = $1`, [wsStatementId]);
     expect(wsAfter.statement_status).toBe('queued');
-    const [coreAfter] = await admin.query<[{ statement_status: string }]>(`SELECT statement_status FROM core.payroll_record WHERE id = $1`, [coreSourceOfWsStatement]);
-    expect(coreAfter.statement_status).toBe('failed');
+    if (!hwsRuntimeOn()) {
+      // HWS off only: the separate core template (with HWS on the template IS the workspace-schema row checked above).
+      const [coreAfter] = await admin.query<[{ statement_status: string }]>(`SELECT statement_status FROM core.payroll_record WHERE id = $1`, [coreSourceOfWsStatement]);
+      expect(coreAfter.statement_status).toBe('failed');
+    }
     // Both organisations really were processed (the per-scope sweep walked each scope separately).
     expect(new Set(dispatched.map((d) => d.organisationId))).toEqual(new Set([orgA.organisationId, orgB.organisationId]));
     // Any of our subjects that ALSO came through the global claim in this tick (its state change re-created a pointer)

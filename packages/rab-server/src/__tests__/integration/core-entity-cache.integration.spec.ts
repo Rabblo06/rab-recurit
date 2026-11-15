@@ -5,7 +5,7 @@ import 'reflect-metadata';
 import { INestApplication } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
 import { randomUUID } from 'node:crypto';
-import { DataSource } from 'typeorm';
+import { DataSource, EntityManager } from 'typeorm';
 
 import Redis from 'ioredis';
 
@@ -326,16 +326,21 @@ describeIfDb('Core Entity Cache (integration)', () => {
       // venue_tenant's RLS requires BOTH organisation_id AND workspace_id to match the bound
       // context — a venue with no workspace_id can never be seen under RLS regardless of context.
       const workspaceId = manager.workspaceId!;
-      const venueId = await adminDataSource.manager
-        .insert(Venue, { organisationId: org.id, workspaceId, name: 'Original Venue Name', createdBy: manager.userId })
-        .then((r) => r.identifiers[0]!.id as string);
+      // Part C1: written through the manager's tenant context (the workspace schema with HWS on, the core copy with it off),
+      // where the product reads it — the superuser fixture connection's search_path is core.
+      const asManager = <T>(fn: (m: EntityManager) => Promise<T>) =>
+        tenantContext.runInTenantContext({ organisationId: org.id, workspaceId, userId: manager.userId, role: '' }, fn);
+      const venueId = await asManager((m) =>
+        m.insert(Venue, { organisationId: org.id, workspaceId, name: 'Original Venue Name', createdBy: manager.userId }).then((r) => r.identifiers[0]!.id as string),
+      );
 
       const first = await tenantContext.runInTenantContext({ organisationId: org.id, workspaceId, userId: manager.userId, role: '' }, (m) =>
         entityCache.getVenueSummary(m, venueId),
       );
       expect(first?.name).toBe('Original Venue Name');
 
-      await adminDataSource.manager.update(Venue, venueId, { name: 'Renamed Venue' });
+      // Raw SQL, like the superuser update it replaces: no application-side cache invalidation runs.
+      await asManager((m) => m.query(`UPDATE venue SET name = 'Renamed Venue' WHERE id = $1`, [venueId]));
       const stale = await tenantContext.runInTenantContext({ organisationId: org.id, workspaceId, userId: manager.userId, role: '' }, (m) =>
         entityCache.getVenueSummary(m, venueId),
       );

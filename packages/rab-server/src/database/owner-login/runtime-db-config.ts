@@ -70,11 +70,16 @@ export const MIGRATION_TEST_SEAM_VARS = Object.freeze([
   'CREWFLOW_TEST_UPGRADE_FAIL_COMMAND',
 ] as const);
 /**
- * Every test seam refused outside NODE_ENV=test: Agent 1's migration seams, and the server-path provisioning deferral seam
+ * Every test seam refused outside NODE_ENV=test: Agent 1's migration seams, the server-path provisioning deferral seam
  * (modules/manager-workspace/services/workspace-provisioning-test-seam.ts; itself effective only with NODE_ENV=test AND a
- * database marked crewflow.disposable_test_database).
+ * database marked crewflow.disposable_test_database), and the Part C2 search_path trap
+ * (engine/core-modules/tenant/business-tables.ts; it also refuses itself at the first tenant transaction outside NODE_ENV=test).
  */
-export const TEST_SEAM_VARS = Object.freeze([...MIGRATION_TEST_SEAM_VARS, 'CREWFLOW_TEST_DEFER_SERVER_PROVISIONING'] as const);
+export const TEST_SEAM_VARS = Object.freeze([
+  ...MIGRATION_TEST_SEAM_VARS,
+  'CREWFLOW_TEST_DEFER_SERVER_PROVISIONING',
+  'CREWFLOW_TEST_SEARCH_PATH_TRAP',
+] as const);
 
 export const MIGRATION_APPROVAL_MODES: readonly MigrationApprovalMode[] = Object.freeze(['none', 'token'] as const);
 export const DEFAULT_MIGRATION_APPROVAL_MODE: MigrationApprovalMode = 'none';

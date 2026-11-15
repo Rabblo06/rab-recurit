@@ -7,6 +7,7 @@ import { AiRetentionService } from '@rab/server/modules/ai/services/ai-retention
 import { AiStaleTurnSweepService } from '@rab/server/modules/ai/services/ai-stale-turn-sweep.service';
 import { AiTitleService } from '@rab/server/modules/ai/services/ai-title.service';
 import { AiTurnRunnerService } from '@rab/server/modules/ai/services/ai-turn-runner.service';
+import { isNotYetRoutableWorkspace } from '../../core/database/workspace-routing';
 import { withAdvisoryLock } from '../../core/locking/advisory-lock';
 import { Process, Processor } from '../../core/scheduler/decorators';
 import { CONSUMER_QUEUES, SCAN_QUEUES } from '../../core/scheduler/queue-registry';
@@ -49,8 +50,18 @@ export class AiTurnConsumer {
     const kind = aiJobKind(job.data);
     if (job.name === AI_AGENT_RUN_JOB_NAME || kind === 'agent-run') return 'refused';
     if (!kind || AI_JOB_NAME_FOR_KIND[kind] !== job.name) return 'skipped';
-    if (job.name === AI_TURN_JOB_NAME) return this.runner.run(job.data as Parameters<AiTurnRunnerService['run']>[0]);
-    if (job.name === AI_TITLE_JOB_NAME) return this.titles.run(job.data);
+    try {
+      if (job.name === AI_TURN_JOB_NAME) return await this.runner.run(job.data as Parameters<AiTurnRunnerService['run']>[0]);
+      if (job.name === AI_TITLE_JOB_NAME) return await this.titles.run(job.data);
+    } catch (error) {
+      // Part C1 (HWS routing on by default outside production): a job naming a workspace with no READY schema — forged ids,
+      // or a workspace mid-creation — is refused by routing before anything is read (registry-missing / not-ready). That is
+      // the same outcome as a turn the RLS-bound claim cannot find with routing off: skipped, nothing read or written (a
+      // real queued turn is finalised by the stale-turn sweep). The integrity refusals (name-mismatch, unsupported-version,
+      // missing-context) still fail the job loudly (isNotYetRoutableWorkspace, the Worker's one policy for this).
+      if (isNotYetRoutableWorkspace(error)) return 'skipped';
+      throw error;
+    }
     return 'skipped';
   }
 }

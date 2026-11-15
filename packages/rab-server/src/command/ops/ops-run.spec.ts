@@ -1,4 +1,6 @@
 import { currentPgProcessRole, resolvePgEnvironment, RETIRED_OPS_ENV_NAMES, setPgProcessRole } from '../../database/postgres/pg-config';
+import { resolveHwsRuntimeEnabled } from '../../engine/core-modules/environment/hws-runtime-default';
+import { isProductionRuntime } from '../../engine/core-modules/throttler/rate-limit-bypass';
 import { assertHwsApplyAllowed } from './hws-cutover-policy';
 import {
   assertOpsPlacement,
@@ -276,6 +278,15 @@ describe('assertOpsRun (layer 2, every ops command body)', () => {
 });
 
 describe('hws:backfill --apply while HWS is off', () => {
+  it('DB_TARGET=production with NODE_ENV and HWS_RUNTIME_ENABLED unset: routing resolves OFF, so --apply without --hws-cutover is refused', () => {
+    const env = { DB_TARGET: 'production' };
+    const hwsRuntimeEnabled = resolveHwsRuntimeEnabled(undefined, env) === true;
+    expect(hwsRuntimeEnabled).toBe(false);
+    expect(() => assertHwsApplyAllowed({ mode: 'apply', hwsRuntimeEnabled, hwsCutover: false, production: isProductionRuntime(env) })).toThrow(
+      /HWS runtime routing is OFF \(HWS_RUNTIME_ENABLED=false\) in PRODUCTION/,
+    );
+  });
+
   it('refuses without --hws-cutover (production wording in production), accepts with it; the flag is apply-only', () => {
     expect(() => assertHwsApplyAllowed({ mode: 'apply', hwsRuntimeEnabled: false, hwsCutover: false, production: true })).toThrow(
       /HWS runtime routing is OFF \(HWS_RUNTIME_ENABLED=false\) in PRODUCTION.*do NOT run it in production while HWS is off/,

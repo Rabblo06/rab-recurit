@@ -9,6 +9,7 @@ import { AuditAction, AuditService } from '@rab/server/engine/core-modules/audit
 import { FileKind } from '@rab/server/engine/core-modules/storage/file-kinds';
 import { FileService } from '@rab/server/engine/core-modules/storage/file.service';
 import { PermissionsService } from '@rab/server/engine/core-modules/permissions/permissions.service';
+import { businessTables } from '@rab/server/engine/core-modules/tenant/business-tables';
 import { TenantContextService } from '@rab/server/engine/core-modules/tenant/tenant-context.service';
 import { ShiftReport } from '@rab/server/modules/attendance/entities/shift-report.entity';
 import { loadDocumentShiftInfo } from '@rab/server/modules/attendance/templates/document-context';
@@ -55,13 +56,14 @@ export interface FinalTimesheetResult {
 export type FinalTimesheetCandidate = ScanCandidate;
 
 export function discoverFinalTimesheetCandidates(manager: EntityManager): Promise<FinalTimesheetCandidate[]> {
+  const t = businessTables(manager);
   return manager.query<ScanCandidate[]>(`
     SELECT sr.id AS report_id, s.id AS shift_id, s.organisation_id, s.workspace_id
-    FROM shift s LEFT JOIN shift_report sr ON sr.shift_id = s.id
+    FROM ${t.shift} s LEFT JOIN ${t.shift_report} sr ON sr.shift_id = s.id
     WHERE (sr.status = 'finalised' AND sr.final_pdf_sent_at IS NULL)
       OR (s.status <> 'cancelled' AND sr.original_file_id IS NULL
-        AND EXISTS (SELECT 1 FROM shift_assignment sa WHERE sa.shift_id=s.id AND sa.status IN ('confirmed','completed','no_show'))
-        AND NOT EXISTS (SELECT 1 FROM shift_assignment sa LEFT JOIN attendance a ON a.shift_assignment_id=sa.id
+        AND EXISTS (SELECT 1 FROM ${t.shift_assignment} sa WHERE sa.shift_id=s.id AND sa.status IN ('confirmed','completed','no_show'))
+        AND NOT EXISTS (SELECT 1 FROM ${t.shift_assignment} sa LEFT JOIN ${t.attendance} a ON a.shift_assignment_id=sa.id
           WHERE sa.shift_id=s.id AND sa.status IN ('confirmed','completed','no_show')
           AND (a.status IN ('clocked_in','on_break') OR (sa.status <> 'no_show' AND a.clock_out_at IS NULL))))
     ORDER BY s.ends_at, s.id LIMIT 200
@@ -120,12 +122,13 @@ async function deliverFinalTimesheet(
   const prepared = await tenantContext.runInTenantContext(
     { organisationId: candidate.organisation_id, workspaceId: candidate.workspace_id, userId: '', role: '', actorType: 'worker' },
     async (manager) => {
+      const t = businessTables(manager);
       const shift = await manager.findOne(Shift, { where: { id: candidate.shift_id }, lock: { mode: 'pessimistic_write' } });
       if (!shift) return null;
       let report = await manager.findOne(ShiftReport, { where: { shiftId: shift.id }, lock: { mode: 'pessimistic_write' } });
       if (!report) {
         if (shift.status === 'cancelled' || !(await readyNow(manager, shift.id))) return null;
-        await manager.query(`INSERT INTO shift_report (organisation_id, workspace_id, shift_id, status)
+        await manager.query(`INSERT INTO ${t.shift_report} (organisation_id, workspace_id, shift_id, status)
           VALUES ($1,$2,$3,'ready') ON CONFLICT (shift_id) DO NOTHING`,
           [candidate.organisation_id, candidate.workspace_id, shift.id]);
         report = await manager.findOne(ShiftReport, { where: { shiftId: shift.id }, lock: { mode: 'pessimistic_write' } });
@@ -141,14 +144,14 @@ async function deliverFinalTimesheet(
 
       const rows = await manager.query(
         `SELECT sa.period, sa.break_minutes AS assignment_break_minutes, sa.status AS assignment_status, sp.staff_ref, u.first_name, u.last_name, a.clock_in_at, a.clock_out_at, a.break_minutes, a.worked_minutes, a.status,
-                EXISTS (SELECT 1 FROM attendance_correction ac WHERE ac.attendance_id = a.id) AS corrected,
+                EXISTS (SELECT 1 FROM ${t.attendance_correction} ac WHERE ac.attendance_id = a.id) AS corrected,
                 rv.grooming, rv.attitude, rv.skills, rv.attendance AS rv_attendance, rv.time_keeping
-           FROM shift_assignment sa
-           JOIN staff_profile sp ON sp.id = sa.staff_profile_id
+           FROM ${t.shift_assignment} sa
+           JOIN ${t.staff_profile} sp ON sp.id = sa.staff_profile_id
            JOIN core."user" u ON u.id = sp.user_id
-           LEFT JOIN attendance a ON a.shift_assignment_id = sa.id
+           LEFT JOIN ${t.attendance} a ON a.shift_assignment_id = sa.id
            -- Per-shift review, read under RLS (shift_staff_review_worker_scan); no review simply prints "Not reviewed".
-           LEFT JOIN shift_staff_review rv ON rv.shift_id = sa.shift_id AND rv.staff_profile_id = sa.staff_profile_id
+           LEFT JOIN ${t.shift_staff_review} rv ON rv.shift_id = sa.shift_id AND rv.staff_profile_id = sa.staff_profile_id
           WHERE sa.shift_id = $1 AND sa.status IN ('confirmed', 'completed', 'no_show')
           ORDER BY u.first_name, u.last_name, sa.id`,
         [shift.id],
@@ -161,7 +164,7 @@ async function deliverFinalTimesheet(
         const finaliser = await manager.query(`SELECT first_name, last_name FROM core."user" WHERE id = $1`, [report.finalisedBy]);
         if (finaliser[0]) finalisedByName = `${finaliser[0].first_name} ${finaliser[0].last_name}`;
       }
-      const [signOff] = await manager.query(`SELECT signed_off_name, break_confirmed FROM shift_report WHERE id = $1`, [report.id]);
+      const [signOff] = await manager.query(`SELECT signed_off_name, break_confirmed FROM ${t.shift_report} WHERE id = $1`, [report.id]);
 
       const template = {
         ...info,
@@ -271,6 +274,7 @@ async function deliverFinalTimesheet(
       // sending — but it is still the wrong read, and the one other caller
       // of this exact claim (a lock implementation change, a future second
       // caller) would have silently relied on dead code.
+      const t = businessTables(manager);
       const shift = await manager.findOne(Shift, { where: { id: candidate.shift_id }, lock: { mode: 'pessimistic_write' } });
       const report = await manager.findOne(ShiftReport, { where: { id: candidate.report_id! }, lock: { mode: 'pessimistic_write' } });
       if (!shift || !report || report.shiftId !== shift.id || report.status !== 'finalised' || report.finalPdfSentAt) {
@@ -280,7 +284,7 @@ async function deliverFinalTimesheet(
         eventKey: `final-timesheet:${report.id}`, eventType: 'final-timesheet', entityType: 'shift_report', entityId: report.id });
       if (!eventId) { await files.discardUnregistered(uploaded); return false; }
       const [claimedRows] = (await manager.query(
-        `UPDATE shift_report SET final_pdf_sent_at = now(), updated_at = now()
+        `UPDATE ${t.shift_report} SET final_pdf_sent_at = now(), updated_at = now()
           WHERE id = $1 AND status = 'finalised' AND final_pdf_sent_at IS NULL RETURNING id`,
         [candidate.report_id],
       )) as [Array<{ id: string }>, number];
@@ -290,7 +294,7 @@ async function deliverFinalTimesheet(
         return false;
       }
       const file = await files.registerAvailable(manager, { ...uploaded, resourceId: candidate.report_id! });
-      await manager.query(`UPDATE shift_report SET final_file_id = $1 WHERE id = $2`, [file.id, candidate.report_id]);
+      await manager.query(`UPDATE ${t.shift_report} SET final_file_id = $1 WHERE id = $2`, [file.id, candidate.report_id]);
       if (audit) {
         await audit.record(manager, { organisationId: candidate.organisation_id, userId: '', inspectedBy: undefined }, AuditAction.REPORT_STORED, {
           entityType: 'stored_file',
@@ -355,8 +359,9 @@ async function deliverFinalTimesheet(
 
 /** Recheck under the scoped shift lock; discovery never authorizes a write. */
 async function readyNow(manager: EntityManager, shiftId: string): Promise<boolean> {
+  const t = businessTables(manager);
   const rows = await manager.query(`SELECT sa.status AS assignment_status, a.clock_out_at, a.status
-    FROM shift_assignment sa LEFT JOIN attendance a ON a.shift_assignment_id=sa.id
+    FROM ${t.shift_assignment} sa LEFT JOIN ${t.attendance} a ON a.shift_assignment_id=sa.id
     WHERE sa.shift_id=$1 AND sa.status IN ('confirmed','completed','no_show')`, [shiftId]);
   return isReportReady(rows.map((r: { assignment_status: string; clock_out_at: Date | null; status: string | null }) =>
     ({ assignmentStatus: r.assignment_status, clockOutAt: r.clock_out_at, attendanceStatus: r.status })));

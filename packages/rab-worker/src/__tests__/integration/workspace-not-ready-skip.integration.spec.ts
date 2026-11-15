@@ -41,10 +41,13 @@ describeIfDb('W6-E2E-07 not-yet-routable workspaces are skipped, not fatal (inte
     app = moduleRef.createNestApplication();
     await app.init();
     dataSource = app.get(DataSource);
-    appTenant = app.get(TenantContextService);
     const env = app.get(EnvironmentService);
     const hwsEnv = { get: (key: string) => (key === 'HWS_RUNTIME_ENABLED' ? true : env.get(key as never)) } as unknown as EnvironmentService;
     hwsTenant = new TenantContextService(dataSource, app.get(SchemaResolverService), hwsEnv);
+    // Part C1: HWS is ON by default now, so the fixture side that seeds rows for a workspace that is deliberately NOT
+    // provisioned (`provision: false` below) uses an explicit OFF context — the legacy state this suite is about.
+    const offEnv = { get: (key: string) => (key === 'HWS_RUNTIME_ENABLED' ? false : env.get(key as never)) } as unknown as EnvironmentService;
+    appTenant = new TenantContextService(dataSource, app.get(SchemaResolverService), offEnv);
     adminDataSource = createAdminDataSource();
     await adminDataSource.initialize();
     factory = createTestIdentityFactory({ app, dataSource, adminDataSource, tenantContext: appTenant, passwordHashing: app.get(PasswordHashingService) });
@@ -56,14 +59,14 @@ describeIfDb('W6-E2E-07 not-yet-routable workspaces are skipped, not fatal (inte
   });
 
   it('precondition: the HWS tenant context really refuses the unprovisioned workspace', async () => {
-    const manager = await factory.createInternalManager(await factory.createOrganisation(), { label: 'w6e07pre' });
+    const manager = await factory.createInternalManager(await factory.createOrganisation(), { label: 'w6e07pre', provision: false });
     await expect(
       hwsTenant.runInTenantContext({ organisationId: manager.organisationId, workspaceId: manager.workspaceId, userId: '', role: '', actorType: 'worker' }, async () => 1),
     ).rejects.toMatchObject({ name: 'WorkspaceRoutingError', code: 'registry-missing' });
   });
 
   it('realtime outbox: a not-yet-READY workspace scope ahead of a deliverable event no longer fails the cycle', async () => {
-    const manager = await factory.createInternalManager(await factory.createOrganisation(), { label: 'w6e07rt' });
+    const manager = await factory.createInternalManager(await factory.createOrganisation(), { label: 'w6e07rt', provision: false });
     const staff = await factory.createStaff({ id: manager.organisationId }, { owner: manager, label: 'w6e07rt-staff' });
     // An organisation-wide event (workspace_id NULL) — deliverable without any workspace routing.
     const eventId = await appTenant.runInTenantContext({ organisationId: manager.organisationId, workspaceId: null, userId: manager.userId, role: '' }, async (m) => {
@@ -96,7 +99,7 @@ describeIfDb('W6-E2E-07 not-yet-routable workspaces are skipped, not fatal (inte
   });
 
   it('discoverInWorkspaces: an unprovisioned workspace is skipped and the walk completes', async () => {
-    const manager = await factory.createInternalManager(await factory.createOrganisation(), { label: 'w6e07disc' });
+    const manager = await factory.createInternalManager(await factory.createOrganisation(), { label: 'w6e07disc', provision: false });
     let scanned = 0;
     const found = await discoverInWorkspaces(
       dataSource,

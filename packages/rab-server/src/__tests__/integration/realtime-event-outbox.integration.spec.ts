@@ -28,6 +28,7 @@ import { NotificationService } from '../../modules/notification/services/notific
 import { PasswordHashingService } from '../../engine/core-modules/auth/services/password-hashing.service';
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { TestIdentityFactory, TestIdentity } from './helpers/test-identities';
+import { businessTable, hwsRuntimeOn } from './helpers/hws-fixtures';
 import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-pipe';
 import { integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
 
@@ -242,7 +243,8 @@ describeIfDb('realtime event outbox — core.realtime_event (integration)', () =
       ).rejects.toThrow('deliberate failure after both writes');
 
       expect(await countFor(key)).toBe(0); // the event never existed, from any other connection's point of view
-      const venueRows = await adminDataSource.manager.query(`SELECT 1 FROM venue WHERE name = $1`, [venueName]);
+      // Part C1: where the venue would have landed (the workspace schema with HWS on, the core copy with it off).
+      const venueRows = await adminDataSource.manager.query(`SELECT 1 FROM ${businessTable(manager.workspaceId!, 'venue')} WHERE name = $1`, [venueName]);
       expect(venueRows).toHaveLength(0); // the business mutation rolled back too — true atomicity, not independent commits
     });
 
@@ -258,7 +260,8 @@ describeIfDb('realtime event outbox — core.realtime_event (integration)', () =
         }),
       ).rejects.toThrow(/Unknown realtime event type/);
 
-      const venueRows = await adminDataSource.manager.query(`SELECT 1 FROM venue WHERE name = $1`, [venueName]);
+      // Part C1: where the venue would have landed (the workspace schema with HWS on, the core copy with it off).
+      const venueRows = await adminDataSource.manager.query(`SELECT 1 FROM ${businessTable(manager.workspaceId!, 'venue')} WHERE name = $1`, [venueName]);
       expect(venueRows).toHaveLength(0); // the mutation that was required to pair with a valid event never survives an invalid one
     });
   });
@@ -293,10 +296,20 @@ describeIfDb('realtime event outbox — core.realtime_event (integration)', () =
       await tenantContext.runInTenantContext({ organisationId: org.id, workspaceId: manager.workspaceId, userId: manager.userId, role: '' }, (m) =>
         realtimeEventService.record(m, { organisationId: org.id, workspaceId: manager.workspaceId, eventKey: key, eventType: RealtimeEventType.OFFER_SENT, entityType: 'offer', entityId: randomUUID() }),
       );
-      const seen = await tenantContext.runInTenantContext({ organisationId: org.id, workspaceId: randomUUID(), userId: manager.userId, role: '' }, (m) =>
+      // A REAL other workspace of the same organisation (its schema resolves, so the read runs): RLS hides the row.
+      const sibling = await factory.createInternalManager(org, { label: 'rt-wrongws-sibling' });
+      const seen = await tenantContext.runInTenantContext({ organisationId: org.id, workspaceId: sibling.workspaceId, userId: manager.userId, role: '' }, (m) =>
         m.query(`SELECT id FROM core.realtime_event WHERE event_key = $1`, [key]),
       );
       expect(seen).toHaveLength(0);
+      // An unknown workspace id: with HWS on there is no schema to route to, so the transaction is refused before any query
+      // (fail closed); with HWS off the core copy shows zero rows.
+      const unknown = () =>
+        tenantContext.runInTenantContext({ organisationId: org.id, workspaceId: randomUUID(), userId: manager.userId, role: '' }, (m) =>
+          m.query(`SELECT id FROM core.realtime_event WHERE event_key = $1`, [key]),
+        );
+      if (hwsRuntimeOn()) await expect(unknown()).rejects.toMatchObject({ name: 'WorkspaceRoutingError' });
+      else expect(await unknown()).toHaveLength(0);
     });
 
     it('the restricted runtime credential (crewflow_app, the one every real request uses) cannot alter the outbox schema or disable its RLS', async () => {

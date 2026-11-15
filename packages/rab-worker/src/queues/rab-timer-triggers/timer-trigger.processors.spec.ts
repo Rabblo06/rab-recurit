@@ -1,3 +1,4 @@
+import { asTenantBoundManager } from '../../__tests__/helpers/business-tables-fakes';
 import { TimerTriggerConsumer } from './timer-trigger.processors';
 
 /**
@@ -17,7 +18,7 @@ describe('TimerTriggerConsumer wiring', () => {
     const tenantContext = {
       runInTenantContext: async (ctx: unknown, fn: (m: unknown) => Promise<unknown>, options?: unknown) => {
         opened.push({ ctx, options });
-        return fn({ query: async () => [] }); // the subject is not visible: the decision is a no-op
+        return fn(asTenantBoundManager({ query: async () => [] })); // the subject is not visible: the decision is a no-op
       },
     };
     const deps = {

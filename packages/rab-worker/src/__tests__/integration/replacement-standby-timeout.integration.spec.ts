@@ -21,6 +21,7 @@ import { runConfirmationDeadlineBackstopScan, runManagerConfirmationDeadlineCycl
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
 import { integrationTestDatabaseReady } from '@rab/server/database/typeorm/core/integration-test-database-gate';
+import { businessSchema } from './helpers/hws-fixtures';
 
 /**
  * Replacement & standby offers (2026-10-21) vs the manager-confirmation DEADLINE worker (owner rule 2026-11-06, Q1b).
@@ -57,7 +58,8 @@ describeIfDb('replacement & standby offers vs manager-confirmation timeout (inte
 
   async function withContext<T>(ctx: { organisationId?: string | null; workspaceId?: string | null; userId: string }, fn: (m: DataSource['manager']) => Promise<T>): Promise<T> {
     return dataSource.transaction(async (m) => {
-      await m.query(`SELECT set_config('search_path', 'core', true)`);
+      // Part C1: the workspace's own schema with HWS on (the code default outside production), core with it off.
+      await m.query(`SELECT set_config('search_path', $1, true)`, [ctx.workspaceId ? businessSchema(ctx.workspaceId) : 'core']);
       await m.query(`SELECT set_config('rab.organisation_id', $1, true)`, [ctx.organisationId ?? '']);
       await m.query(`SELECT set_config('rab.workspace_id', $1, true)`, [ctx.workspaceId ?? '']);
       await m.query(`SELECT set_config('rab.user_id', $1, true)`, [ctx.userId]);
@@ -150,7 +152,7 @@ describeIfDb('replacement & standby offers vs manager-confirmation timeout (inte
     await runCycle();
     let offer = await withContext(fx.mctx, (m) => m.findOneByOrFail(JobOffer, { id: fx.replacementOfferId }));
     expect(offer.status).toBe(OfferStatus.STAFF_ACCEPTED);
-    expect(await read(fx, `SELECT 1 FROM audit_log WHERE action = 'offer.confirmed' AND entity_id = $1`, [fx.replacementOfferId])).toHaveLength(0);
+    expect(await read(fx, `SELECT 1 FROM core.audit_log WHERE action = 'offer.confirmed' AND entity_id = $1`, [fx.replacementOfferId])).toHaveLength(0);
     // At window end: withdrawn (never confirmed), the original booked seat untouched.
     await endWindow(fx, fx.replacementOfferId, 60_000);
     await runCycle();
@@ -174,13 +176,13 @@ describeIfDb('replacement & standby offers vs manager-confirmation timeout (inte
     await runCycle();
     offer = await withContext(fx.mctx, (m) => m.findOneByOrFail(JobOffer, { id: fx.replacementOfferId }));
     expect(offer.status).toBe(OfferStatus.MANAGER_CONFIRMED);
-    expect(await read(fx, `SELECT 1 FROM audit_log WHERE action = 'offer.confirmed' AND entity_id = $1`, [fx.replacementOfferId])).toHaveLength(1);
+    expect(await read(fx, `SELECT 1 FROM core.audit_log WHERE action = 'offer.confirmed' AND entity_id = $1`, [fx.replacementOfferId])).toHaveLength(1);
     const seats = await read(fx, `SELECT status, attendance_reviewed_at IS NOT NULL AS reviewed FROM shift_assignment WHERE shift_id = $1 ORDER BY created_at`, [fx.shift.id]);
     expect(seats).toEqual([{ status: 'no_show', reviewed: true }, { status: 'confirmed', reviewed: false }]);
     const [shift] = await read(fx, `SELECT filled_count, required_count FROM shift WHERE id = $1`, [fx.shift.id]);
     expect(Number(shift.filled_count)).toBe(1);
     expect(Number(shift.required_count)).toBe(1);
-    expect(await read(fx, `SELECT 1 FROM notification WHERE related_entity_id = $1 AND type = 'offer_confirmed'`, [fx.replacementOfferId])).toHaveLength(1);
+    expect(await read(fx, `SELECT 1 FROM core.notification WHERE related_entity_id = $1 AND type = 'offer_confirmed'`, [fx.replacementOfferId])).toHaveLength(1);
   });
 
   it('W3 (Q1b): a REPLACEMENT confirm after its window ended is the deadline 409 and the acceptance is withdrawn', async () => {
