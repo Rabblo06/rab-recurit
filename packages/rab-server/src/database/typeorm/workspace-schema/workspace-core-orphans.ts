@@ -6,7 +6,7 @@ import { Client } from 'pg';
 import { WORKSPACE_CORE_FOREIGN_KEYS } from '../../../engine/core-modules/upgrade/upgrade-commands/0-6/workspace-core-fk-removal';
 
 /**
- * OWNER-DB-ULTIMATE Part D, decision 0a (DRAFT, WS-COMMANDS.md "FOR OWNER REVIEW — 0a"): the periodic ORPHAN check that replaces
+ * OWNER-DB-ULTIMATE Part D, decision 0a (owner approved 2026-11-15, WS-COMMANDS.md "FOR OWNER REVIEW — 0a"): the periodic ORPHAN check that replaces
  * the database-enforced half of the dropped workspace → core foreign keys. REPORT-ONLY (owner decision pending on repair): it
  * counts, per READY workspace and per dropped reference, the rows whose value points at no row of the referenced core table (or,
  * for core."user", at a user of ANOTHER organisation, which the old FK did not catch either but the app never writes). It never

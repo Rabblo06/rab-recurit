@@ -1,9 +1,9 @@
 import type { WorkspaceUpgradeCommand } from '../workspace-upgrade-command';
 
 /**
- * Release 0.6.0, workspace structure level 22 (OWNER-DB-ULTIMATE Part D, owner decision 0a option (b), 2026-11-14): DRAFT for
- * owner SQL review (docs/plans/phase-x3/WS-COMMANDS.md "FOR OWNER REVIEW — 0a"); never run anywhere but throwaway databases until
- * approved. Drops every foreign key from a workspace schema's tables to core."user", core.organisation and core.manager_workspace
+ * Release 0.6.0, workspace structure level 22 (OWNER-DB-ULTIMATE Part D, owner decision 0a option (b), 2026-11-14): SQL approved by
+ * the owner 2026-11-15 (docs/plans/phase-x3/WS-COMMANDS.md "FOR OWNER REVIEW — 0a" and §R4/§R5), FROZEN.
+ * Drops every foreign key from a workspace schema's tables to core."user", core.organisation and core.manager_workspace
  * (72 per schema: 31 + 21 + 20). Twenty creates foreign keys only inside the same workspace schema
  * (twentyhq/twenty @ eedb0a73 workspace-schema-foreign-key-manager.service.ts:32); re-implemented, not copied.
  *
@@ -194,13 +194,15 @@ export function withoutWorkspaceCoreForeignKeys(template: string): string {
 }
 
 /**
- * Expected `core.workspace_schema_fingerprint_v2` of a level-22 workspace per PostgreSQL major. DRAFT: 16 was measured on a
- * throwaway postgres:16 owner-login ci-db (two level-21 workspaces + this command, identical) only so the draft can be tested on
- * throwaway databases; 17 / 18 are generated after the owner approves the SQL. Until declared, WorkspaceCoreForeignKeyRemoval
- * 1786721490000 refuses on that major (exit 66, nothing applied): fail closed.
+ * Expected `core.workspace_schema_fingerprint_v2` of a level-22 workspace per PostgreSQL major (owner approved the 0a SQL,
+ * 2026-11-15). Each was measured on a throwaway postgres:<major> owner-login ci-db: two level-21 workspaces + this command, and a
+ * server-path workspace built by the level-22 core.provision_workspace (the stripped template); all three agreed
+ * (WS-COMMANDS.md §R5). An undeclared major makes WorkspaceCoreForeignKeyRemoval1786721490000 refuse (exit 66): fail closed.
  */
 export const WORKSPACE_CORE_FK_REMOVAL_FINGERPRINTS_V2: Readonly<Partial<Record<16 | 17 | 18, string>>> = Object.freeze({
   16: 'a75b598e3c29bb33797022cfa90dadd0fad3ae2f230b13462169680ccc1a8389',
+  17: '844c81afa72877e95466583f1f6c2df3fb401fbbfe45bedc1296f85294330c09',
+  18: 'bbaef750306f5565333887e1562768fb63b68e89f1c1fc521445c68922737e04',
 });
 
 export const WORKSPACE_CORE_FK_REMOVAL_PROVISION_LITERAL = 'db:provision_workspace@WorkspaceCoreForeignKeyRemoval1786721490000';

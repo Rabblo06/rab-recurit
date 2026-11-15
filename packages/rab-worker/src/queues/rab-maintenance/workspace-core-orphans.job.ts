@@ -8,7 +8,7 @@ import {
 export type { WorkspaceOrphanCycleResult, WorkspaceOrphanFinding } from '@rab/server/database/typeorm/workspace-schema/workspace-core-orphans';
 
 /**
- * OWNER-DB-ULTIMATE Part D, decision 0a (SQL pending owner OK): the daily, REPORT-ONLY orphan check that replaces the
+ * OWNER-DB-ULTIMATE Part D, decision 0a (owner approved 2026-11-15): the daily, REPORT-ONLY orphan check that replaces the
  * database-enforced half of the dropped workspace → core."user" / core.organisation / core.manager_workspace foreign keys.
  * Logic and findings: `@rab/server/database/typeorm/workspace-schema/workspace-core-orphans.ts`. One short-lived connection per
  * cycle, built by the caller through the connection factory (`createPgClient`, Phase B: no connection is opened outside it),

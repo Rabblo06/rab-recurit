@@ -6,7 +6,7 @@ import { workspaceSchemaName } from '../tenant/schema-resolver.service';
 import { AuthContext } from '../tenant/auth-context.interface';
 
 /**
- * OWNER-DB-ULTIMATE Part D, decision 0a (structure level 22; SQL pending owner OK). With the workspace → core."user" foreign keys
+ * OWNER-DB-ULTIMATE Part D, decision 0a (structure level 22; owner approved 2026-11-15). With the workspace → core."user" foreign keys
  * gone, deleting a core user no longer CASCADEs, SETs NULL or RESTRICTs inside the workspace schemas. The user hard-delete path
  * (UserDeletionService) does it in the application, the Twenty way (twentyhq/twenty @ eedb0a73 keeps cross-schema references
  * application-enforced: workspace-schema-foreign-key-manager.service.ts:32), with the recommended choices of WS-COMMANDS.md §0a.5:

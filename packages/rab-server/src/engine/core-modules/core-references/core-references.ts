@@ -2,7 +2,7 @@ import { NotFoundException } from '@nestjs/common';
 import { EntityManager } from 'typeorm';
 
 /**
- * OWNER-DB-ULTIMATE Part D, decision 0a (DRAFT; WS-COMMANDS.md §0a): the SERVICE-LAYER replacement for the dropped workspace →
+ * OWNER-DB-ULTIMATE Part D, decision 0a (owner approved 2026-11-15; WS-COMMANDS.md §0a): the SERVICE-LAYER replacement for the dropped workspace →
  * core."user" foreign keys. Twenty enforces references that leave a workspace schema in the application (it creates foreign
  * keys only inside a workspace schema: twentyhq/twenty @ eedb0a73 workspace-schema-foreign-key-manager.service.ts:32);
  * re-implemented, not copied.

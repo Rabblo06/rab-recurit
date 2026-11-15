@@ -30,7 +30,7 @@ import { runWorkspaceSchemaDriftCycle } from './workspace-schema-drift.job';
  *     runWorkspaceProvisioningCycle / provisionWorkspaceSchema and are not touched.
  */
 export const WORKSPACE_SCHEMA_DRIFT_INTERVAL_MS = 24 * 60 * 60 * 1000;
-/** Part D 0a (DRAFT): the report-only orphan check of the dropped workspace → core references, daily like the drift check. */
+/** Part D 0a: the report-only orphan check of the dropped workspace → core references, daily like the drift check. */
 export const WORKSPACE_CORE_ORPHAN_INTERVAL_MS = 24 * 60 * 60 * 1000;
 export const PROVISIONING_ROLE = 'crewflow';
 

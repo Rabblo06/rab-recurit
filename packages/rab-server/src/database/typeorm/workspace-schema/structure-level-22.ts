@@ -3,8 +3,8 @@ import { composeServerPathTemplateLevel21, VERIFY_WORKSPACE_SCHEMA_V1_LEVEL_21_S
 import { withoutWorkspaceCoreForeignKeys } from '../../../engine/core-modules/upgrade/upgrade-commands/0-6/workspace-core-fk-removal';
 
 /**
- * DRAFT for owner SQL review (WS-COMMANDS.md "FOR OWNER REVIEW — 0a"; throwaway databases only until approved). Frozen with
- * migration WorkspaceCoreForeignKeyRemoval1786721490000 once approved. Structure level 22 (decision 0a option (b)):
+ * SQL approved by the owner 2026-11-15 (WS-COMMANDS.md "FOR OWNER REVIEW — 0a", §R4 template change). FROZEN with
+ * migration WorkspaceCoreForeignKeyRemoval1786721490000. Structure level 22 (decision 0a option (b)):
  *  1. `core.verify_workspace_schema_v1(uuid)`: the level-21 body (structure-level-21.ts) with ONE change: the foreign-key count
  *     is 56 at level 22+ (128 - the 72 workspace → core."user" / organisation / manager_workspace constraints), 128 below; with no
  *     visible registry version either count is accepted (the per-level fingerprint then proves the exact structure);

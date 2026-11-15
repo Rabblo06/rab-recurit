@@ -56,12 +56,13 @@ describe('Part D: workspace upgrade commands in the sequence (Twenty upgrade-seq
     expect(lastInstanceStepOfVersion('0.6.0')).toBe('0.6.0_TypeOrmMigrations');
   });
 
-  it('the level-21 command declares a v2 fingerprint for every supported PostgreSQL major (16, 17, 18)', () => {
-    const fps = WORKSPACE_UPGRADE_COMMANDS['0-6'][0]!.structure!.fingerprints;
-    expect(Object.keys(fps).sort()).toEqual(['16', '17', '18']);
-    for (const v of Object.values(fps)) expect(v).toMatch(/^[0-9a-f]{64}$/);
-    // Level 22 (0a, DRAFT): PostgreSQL 16 only (throwaway testing); 17 / 18 after the owner approves the SQL.
-    expect(Object.keys(WORKSPACE_UPGRADE_COMMANDS['0-6'][1]!.structure!.fingerprints)).toEqual(['16']);
+  it('the level-21 and level-22 commands declare a v2 fingerprint for every supported PostgreSQL major (16, 17, 18)', () => {
+    for (const command of WORKSPACE_UPGRADE_COMMANDS['0-6']) {
+      const fps = command.structure!.fingerprints;
+      expect(Object.keys(fps).sort()).toEqual(['16', '17', '18']);
+      for (const v of Object.values(fps)) expect(v).toMatch(/^[0-9a-f]{64}$/);
+      expect(new Set(Object.values(fps)).size).toBe(3);
+    }
   });
 
   it('every registered workspace command has a valid, unique name; no name collides with an instance command', () => {
