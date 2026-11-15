@@ -741,8 +741,12 @@ describeIfDb('C3 HWS cutover copy path (option A′)', () => {
       await admin.query(`SELECT n.subject_user_id AS u FROM core.user_note n JOIN core.staff_profile sp ON sp.user_id = n.subject_user_id WHERE sp.workspace_id = $1 LIMIT 1`, [b.id])
     ).rows[0].u;
     await admin.query(`INSERT INTO core.manager_profile (organisation_id, user_id, type, workspace_id) VALUES ($1, $2, 'venue', $3)`, [b.org, subject, b.id]);
+    const noteId = (await admin.query('SELECT id FROM core.user_note WHERE subject_user_id = $1', [subject])).rows[0].id as string;
     writeBackup();
     await expect(cutover(app, [a.id, b.id], host())).rejects.toMatchObject({ errorClass: 'HWS_CUTOVER_WORKSPACE_FAILED' });
+    // Owner decision Q2: the report names the note to assign by hand; nothing was dropped.
+    expect(lines.some((l) => l.includes(b.id) && l.includes('HWS_CUTOVER_USER_NOTE_AMBIGUOUS') && l.includes(noteId))).toBe(true);
+    expect(Number((await admin.query('SELECT count(*)::int AS n FROM core.user_note WHERE id = $1', [noteId])).rows[0].n)).toBe(1);
     expect(await stateOf(a)).toBe('verified');
     expect(await migrationError(a)).toBeNull();
     expect(await resolveAs(a)).toBe(a.schema);
@@ -886,5 +890,45 @@ describeIfDb('C3 HWS cutover copy path (option A′)', () => {
     } finally {
       await deactivate();
     }
+  });
+
+  it('owner decision Q2: a note of the organisation whose subject has no profile refuses its workspaces (UNMAPPED), naming the note; nothing is dropped', async () => {
+    const wn = await seedBusiness(await make('unmapped'));
+    const loose = (
+      await admin.query(`INSERT INTO core."user" (organisation_id, email, first_name, last_name, status) VALUES ($1, $2, 'C3', 'NoProfile', 'active') RETURNING id`, [
+        wn.org,
+        `noprofile-${wn.label}@c3.invalid`,
+      ])
+    ).rows[0].id;
+    const noteId = (
+      await admin.query(`INSERT INTO core.user_note (organisation_id, subject_user_id, author_user_id, body) VALUES ($1, $2, $3, 'about someone with no profile') RETURNING id`, [
+        wn.org,
+        loose,
+        wn.owner,
+      ])
+    ).rows[0].id;
+    writeBackup();
+    await expect(cutover(app, [wn.id], host())).rejects.toMatchObject({ errorClass: 'HWS_CUTOVER_WORKSPACE_FAILED' });
+    expect(await migrationError(wn)).toBe('upgrade-blocked: HwsCutover (HWS_CUTOVER_USER_NOTE_UNMAPPED)');
+    expect(lines.some((l) => l.includes(wn.id) && l.includes('HWS_CUTOVER_USER_NOTE_UNMAPPED') && l.includes(noteId))).toBe(true);
+    expect(await stateOf(wn)).toBeNull();
+    expect(Number((await admin.query('SELECT count(*)::int AS n FROM core.user_note WHERE id = $1', [noteId])).rows[0].n)).toBe(1);
+  });
+
+  it('owner decision Q6: the per-start time budget defers the remaining workspaces (blocked, resumed next start); every start makes progress', async () => {
+    const x = await seedBusiness(await make('budget-x'));
+    const y = await seedBusiness(await make('budget-y'));
+    writeBackup();
+    await expect(cutover(app, [x.id, y.id], host(), { timeBudgetMs: 0 })).rejects.toMatchObject({ errorClass: 'HWS_CUTOVER_TIME_BUDGET' });
+    const states = [await stateOf(x), await stateOf(y)];
+    expect(states.filter((st) => st === 'verified')).toHaveLength(1); // progress: one workspace per start at least
+    const deferredWs = states[0] === 'verified' ? y : x;
+    expect(await stateOf(deferredWs)).toBeNull();
+    expect(await migrationError(deferredWs)).toBe('upgrade-blocked: HwsCutover (HWS_CUTOVER_PENDING)');
+    expect(await resolveAs(deferredWs, true)).toBe('refused:upgrading');
+    const report = await cutover(app, [x.id, y.id], host());
+    expect(report.workspaces.map((o) => o.status).sort()).toEqual(['already-verified', 'verified']);
+    expect(await stateOf(x)).toBe('verified');
+    expect(await stateOf(y)).toBe('verified');
   });
 });

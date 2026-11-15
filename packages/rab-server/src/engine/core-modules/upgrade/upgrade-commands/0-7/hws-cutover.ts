@@ -52,6 +52,13 @@ export const HWS_CUTOVER_VERIFIED_ACTION = 'workspace.hws_cutover_verified';
 export const HWS_CUTOVER_BLOCK_PREFIX = 'upgrade-blocked: HwsCutover (';
 const ANY_BLOCK_PREFIX = 'upgrade-blocked: ';
 export const HWS_CUTOVER_DEFAULT_BATCH = 5000;
+/**
+ * Owner decision Q6 (2026-11-15): batched and resumable, with a per-start TIME BUDGET so an API start is not held up. Once a
+ * start has spent this long, it starts no further workspace (the one in progress finishes): the rest stay blocked (503) and the
+ * step is recorded failed (HWS_CUTOVER_TIME_BUDGET, warn and serve); the next start continues with them. Every start makes
+ * progress: at least one workspace is processed whatever the budget.
+ */
+export const HWS_CUTOVER_TIME_BUDGET_MS = 5 * 60 * 1000;
 const SCHEMA_RE = /^workspace_[0-9a-f]{32}$/;
 
 export function hwsCutoverBlockMarker(errorClass: string): string {
@@ -83,7 +90,7 @@ export interface HwsCutoverWorkspace {
 
 export interface WorkspaceCutoverOutcome {
   workspaceId: string;
-  status: 'verified' | 'already-verified' | 'nothing-to-copy' | 'failed';
+  status: 'verified' | 'already-verified' | 'nothing-to-copy' | 'failed' | 'deferred';
   errorClass?: string;
   problems?: string[];
   copied?: Record<string, number>;
@@ -104,6 +111,8 @@ export interface HwsCutoverOptions {
   afterBatch?: (info: { workspaceId: string; table: string; batch: number }) => Promise<void>;
   /** Test seam: after the copy, before the verification of a workspace (a planted mismatch is injected here). */
   beforeVerify?: (workspaceId: string) => Promise<void>;
+  /** Test seam: the per-start time budget (default HWS_CUTOVER_TIME_BUDGET_MS). */
+  timeBudgetMs?: number;
 }
 
 interface ProbeRow {
@@ -114,6 +123,8 @@ interface ProbeRow {
   unowned_rows: number;
   ambiguous_notes: number;
   unmapped_notes: number;
+  ambiguous_note_ids: string[] | null;
+  unmapped_note_ids: string[] | null;
 }
 
 interface VerifyRow {
@@ -416,6 +427,7 @@ export async function runHwsCutover(ctx: UpgradeCommandContext, options: HwsCuto
   const ready = (w: HwsCutoverWorkspace) => w.registryStatus === 'READY' && w.registrySchema === w.schemaName && SCHEMA_RE.test(w.schemaName);
   const eligible = pending.filter((w) => ready(w) && !blockedByOther(w.migrationError));
   const failures: WorkspaceCutoverOutcome[] = [];
+  const deferred: string[] = [];
   const failOutcome = (w: HwsCutoverWorkspace, errorClass: string, problems: string[]) => {
     const outcome: WorkspaceCutoverOutcome = { workspaceId: w.workspaceId, status: 'failed', errorClass, problems };
     report.workspaces.push(outcome);
@@ -453,7 +465,10 @@ export async function runHwsCutover(ctx: UpgradeCommandContext, options: HwsCuto
     const probes = new Map<string, ProbeRow[]>();
     for (const w of eligible) {
       const rows = (await inTenant(q, w.organisationId, w.workspaceId, () =>
-        q('SELECT table_name, core_rows, ws_rows, org_mismatch, unowned_rows, ambiguous_notes, unmapped_notes FROM core.hws_cutover_probe($1::uuid)', [w.workspaceId]),
+        q(
+          'SELECT table_name, core_rows, ws_rows, org_mismatch, unowned_rows, ambiguous_notes, unmapped_notes, ambiguous_note_ids::text[], unmapped_note_ids::text[] FROM core.hws_cutover_probe($1::uuid)',
+          [w.workspaceId],
+        ),
       )) as ProbeRow[];
       probes.set(w.workspaceId, rows);
     }
@@ -461,14 +476,17 @@ export async function runHwsCutover(ctx: UpgradeCommandContext, options: HwsCuto
     const orgMismatch = (w: HwsCutoverWorkspace) => probes.get(w.workspaceId)!.reduce((n, r) => n + Number(r.org_mismatch), 0);
     const ambiguous = (w: HwsCutoverWorkspace) => Number(note(w)?.ambiguous_notes ?? 0);
     const unowned = (w: HwsCutoverWorkspace) => probes.get(w.workspaceId)!.reduce((n, r) => n + Number(r.unowned_rows), 0);
+    const unmapped = (w: HwsCutoverWorkspace) => Number(note(w)?.unmapped_notes ?? 0);
+    const ids = (list: string[] | null | undefined, total: number) =>
+      `${(list ?? []).join(', ')}${total > (list ?? []).length ? ` (first ${(list ?? []).length} of ${total})` : ''}`;
     // Review L-1 / L-3, re-check Info-A: rows of W under another organisation, ambiguous notes and rows of W's organisation
     // with no workspace ARE core data that would not be copied (never "nothing to copy").
     const coreHas = (w: HwsCutoverWorkspace) =>
-      probes.get(w.workspaceId)!.some((r) => r.core_rows) || orgMismatch(w) > 0 || ambiguous(w) > 0 || unowned(w) > 0;
+      probes.get(w.workspaceId)!.some((r) => r.core_rows) || orgMismatch(w) > 0 || ambiguous(w) > 0 || unowned(w) > 0 || unmapped(w) > 0;
     const wsHas = (w: HwsCutoverWorkspace) => probes.get(w.workspaceId)!.some((r) => r.ws_rows);
     report.unmappedNotes = Math.max(0, ...eligible.map((w) => Number(note(w)?.unmapped_notes ?? 0)));
     if (report.unmappedNotes > 0) {
-      log(`hws cutover: WARNING: ${report.unmappedNotes} note(s) in an organisation have a subject with no staff or manager profile; they belong to no workspace and stay only in core.user_note (owner decision before C5)`);
+      log(`hws cutover: ${report.unmappedNotes} note(s) in an organisation have a subject with no staff or manager profile; that organisation's workspaces are refused until an operator assigns each note (owner decision Q2)`);
     }
     for (const w of eligible.filter((x) => !coreHas(x))) {
       await setState(q, w, 'verified');
@@ -491,8 +509,17 @@ export async function runHwsCutover(ctx: UpgradeCommandContext, options: HwsCuto
       log(`hws cutover: backup verified (taken ${backup.takenAt})`);
     }
 
-    // 4. Per workspace.
+    // 4. Per workspace, within the per-start time budget (owner decision Q6).
+    const budgetMs = options.timeBudgetMs ?? HWS_CUTOVER_TIME_BUDGET_MS;
+    const startedAt = Date.now();
+    let processed = 0;
     for (const w of toCopy) {
+      if (processed > 0 && Date.now() - startedAt >= budgetMs) {
+        deferred.push(w.workspaceId);
+        report.workspaces.push({ workspaceId: w.workspaceId, status: 'deferred' });
+        continue;
+      }
+      processed += 1;
       const fail = async (errorClass: string, problems: string[]) => {
         failOutcome(w, errorClass, problems);
         await setBlock(q, w, errorClass);
@@ -506,8 +533,17 @@ export async function runHwsCutover(ctx: UpgradeCommandContext, options: HwsCuto
         await fail('HWS_CUTOVER_UNOWNED_ROWS', probes.get(w.workspaceId)!.filter((r) => Number(r.unowned_rows) > 0).map((r) => `${r.table_name}: ${r.unowned_rows} core row(s) of this organisation belong to no workspace`));
         continue;
       }
+      // Owner decision Q2 (2026-11-15): never dropped, never guessed — the operator report names each note to assign by hand.
       if (ambiguous(w) > 0) {
-        await fail('HWS_CUTOVER_USER_NOTE_AMBIGUOUS', [`user_note: ${ambiguous(w)} note(s) whose subject has a profile here and another elsewhere`]);
+        await fail('HWS_CUTOVER_USER_NOTE_AMBIGUOUS', [
+          `user_note: ${ambiguous(w)} note(s) whose subject has a profile here and another elsewhere; assign each by hand: ${ids(note(w)?.ambiguous_note_ids, ambiguous(w))}`,
+        ]);
+        continue;
+      }
+      if (unmapped(w) > 0) {
+        await fail('HWS_CUTOVER_USER_NOTE_UNMAPPED', [
+          `user_note: ${unmapped(w)} note(s) of this organisation whose subject has no staff or manager profile; assign each by hand: ${ids(note(w)?.unmapped_note_ids, unmapped(w))}`,
+        ]);
         continue;
       }
       if (wsHas(w) && w.cutoverState !== 'started') {
@@ -545,7 +581,16 @@ export async function runHwsCutover(ctx: UpgradeCommandContext, options: HwsCuto
     throw error;
   }
 
-  if (failures.length) {
+  if (deferred.length) {
+    log(`hws cutover: time budget (${Math.round((options.timeBudgetMs ?? HWS_CUTOVER_TIME_BUDGET_MS) / 1000)} s) reached: ${deferred.length} workspace(s) stay blocked and continue on the next start`);
+  }
+  if (failures.length || deferred.length) {
+    if (!failures.length) {
+      throw new HwsCutoverRefused(
+        'HWS_CUTOVER_TIME_BUDGET',
+        `hws cutover: the per-start time budget was reached; ${deferred.length} workspace(s) stay blocked (503) and continue on the next start. Every verified workspace is served from its own schema.`,
+      );
+    }
     throw new HwsCutoverRefused(
       'HWS_CUTOVER_WORKSPACE_FAILED',
       `hws cutover: ${failures.length} workspace(s) failed (${failures.slice(0, 20).map((f) => `${f.workspaceId} ${f.errorClass}`).join(', ')}); they stay blocked (503) and the next start retries them. Every other workspace is served from its own schema.`,

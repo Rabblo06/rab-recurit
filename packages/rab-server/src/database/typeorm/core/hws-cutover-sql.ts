@@ -468,11 +468,13 @@ $fn$`;
  * Info-A: they belong to no schema and would never be copied; the command refuses W). On the user_note row: ambiguous_notes = notes of the organisation whose subject
  * has a profile in W AND another profile (they cannot be mapped to exactly one workspace: the copy skips them, the command
  * refuses W), unmapped_notes = notes of the organisation whose subject has no profile at all (they belong to no workspace;
- * reported, never copied). Lifts FORCE on all 43 relations at once (ACCESS EXCLUSIVE on each until the transaction ends).
+ * the command refuses every workspace of the organisation — owner decision Q2, 2026-11-15: an operator assigns each note by
+ * hand, nothing is discarded); *_note_ids = the first 100 such note ids, for that operator report. Lifts FORCE on all 43 relations at once (ACCESS EXCLUSIVE on each until the transaction ends).
  */
 export const HWS_CUTOVER_PROBE_SQL = `
 CREATE FUNCTION core.hws_cutover_probe(p_workspace_id uuid)
-RETURNS TABLE (table_name text, core_rows boolean, ws_rows boolean, org_mismatch integer, unowned_rows integer, ambiguous_notes integer, unmapped_notes integer)
+RETURNS TABLE (table_name text, core_rows boolean, ws_rows boolean, org_mismatch integer, unowned_rows integer, ambiguous_notes integer, unmapped_notes integer,
+               ambiguous_note_ids uuid[], unmapped_note_ids uuid[])
 LANGUAGE plpgsql
 VOLATILE
 SECURITY DEFINER
@@ -501,8 +503,11 @@ BEGIN
     unowned_rows := 0;
     ambiguous_notes := 0;
     unmapped_notes := 0;
+    ambiguous_note_ids := ARRAY[]::uuid[];
+    unmapped_note_ids := ARRAY[]::uuid[];
     IF v_table = 'user_note' THEN
-      SELECT pg_catalog.count(*)::integer INTO ambiguous_notes
+      SELECT pg_catalog.count(*)::integer, coalesce((pg_catalog.array_agg(c.id ORDER BY c.id))[1:100], ARRAY[]::uuid[])
+        INTO ambiguous_notes, ambiguous_note_ids
         FROM core.user_note c
        WHERE c.organisation_id = core.current_org()
          AND (EXISTS (SELECT 1 FROM core.staff_profile s WHERE s.user_id = c.subject_user_id AND s.workspace_id = p_workspace_id)
@@ -510,7 +515,8 @@ BEGIN
          AND (SELECT pg_catalog.count(*) FROM (SELECT 1 FROM core.staff_profile s WHERE s.user_id = c.subject_user_id
                                                 UNION ALL
                                                 SELECT 1 FROM core.manager_profile m WHERE m.user_id = c.subject_user_id) x) > 1;
-      SELECT pg_catalog.count(*)::integer INTO unmapped_notes
+      SELECT pg_catalog.count(*)::integer, coalesce((pg_catalog.array_agg(c.id ORDER BY c.id))[1:100], ARRAY[]::uuid[])
+        INTO unmapped_notes, unmapped_note_ids
         FROM core.user_note c
        WHERE c.organisation_id = core.current_org()
          AND NOT EXISTS (SELECT 1 FROM core.staff_profile s WHERE s.user_id = c.subject_user_id)
