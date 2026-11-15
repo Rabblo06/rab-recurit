@@ -240,10 +240,19 @@ async function generatePreShiftReport(
     { organisationId: candidate.organisation_id, workspaceId: candidate.workspace_id, userId: '', role: '', actorType: 'worker' },
     async (manager) => {
       // Row-locked re-check inside the writing transaction: the emails below are enqueued at most once per generation.
+      // The shift row is locked FIRST (FOR SHARE; lock order shift -> report): a concurrent rotateShiftQr (which takes the
+      // row FOR UPDATE before writing) waits for this commit, so the QR version checked here is the one that gets stamped.
+      const current = await manager.findOne(Shift, { where: { id: candidate.shift_id }, lock: { mode: 'pessimistic_read' } });
       let report = await manager.findOne(ShiftReport, { where: { shiftId: candidate.shift_id }, lock: { mode: 'pessimistic_write' } });
-      const current = await manager.findOne(Shift, { where: { id: candidate.shift_id } });
       if (!current || !reportNeedsGeneration(report, current)) {
         await files.discardUnregistered(uploaded); // someone regenerated first: this object is unreferenced
+        return false;
+      }
+      // QR review M1: the shift changed while the PDF was rendering (e.g. a manager rotated the QR: the rendered QR is
+      // already revoked). Never ship or store it: discard, and the next tick rebuilds from the current row (the report is
+      // still older than the shift's updated_at, so it still needs generation).
+      if (current.qrVersion !== prepared.shift.qrVersion || current.updatedAt.getTime() !== prepared.shift.updatedAt.getTime()) {
+        await files.discardUnregistered(uploaded);
         return false;
       }
       if (!report) {
@@ -254,7 +263,10 @@ async function generatePreShiftReport(
         });
       }
       report.status = 'ready';
-      report.preShiftPdfGeneratedAt = new Date();
+      // The database clock, not this process's: the freshness check compares it with shift.updated_at (also database
+      // time; rotateShiftQr writes clock_timestamp(), so a rotation that waited on the lock above lands strictly later).
+      const [{ now: generatedAt }] = (await manager.query('SELECT now() AS now')) as Array<{ now: Date }>;
+      report.preShiftPdfGeneratedAt = generatedAt;
       await manager.save(ShiftReport, report); // the report id exists from here on
       const file = await files.registerAvailable(manager, { ...uploaded, resourceId: report.id });
       report.preShiftFileId = file.id;

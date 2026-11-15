@@ -13,7 +13,7 @@ import { QrTokenService } from '../services/qr-token.service';
  */
 const APP_SECRET = 'attendance-qr-spec-app-secret-NOT-A-REAL-SECRET-000000000000';
 const GRACE_MINUTES = 120;
-const ENV: Record<string, unknown> = { APP_SECRET, CLOCK_IN_EARLY_MINUTES: 15, QR_POST_SHIFT_GRACE_MINUTES: GRACE_MINUTES };
+const ENV: Record<string, unknown> = { APP_SECRET, CLOCK_IN_EARLY_MINUTES: 15, QR_POST_SHIFT_GRACE_MINUTES: GRACE_MINUTES, QR_MAX_AGE_DAYS: 14 };
 const env = { get: (key: string) => ENV[key] } as never;
 
 const MIN = 60_000;
@@ -30,12 +30,14 @@ describe('AttendanceQrService — expiry from the shift’s current end + grace'
   const tokens = new QrTokenService(new JwtService(), env);
   const qr = new AttendanceQrService(tokens, env);
   let shift: Shift;
+  /** The scanning staff member's booking: no own period → the shift's times (effectiveAssignmentTime). */
+  let seat: { period: string | null };
   const manager = { findOneByOrFail: async (_entity: unknown, where: { id: string }) => (where.id === shift.id ? shift : Promise.reject(new Error('not found'))) } as never;
 
   const at = (instant: number | Date) => jest.setSystemTime(typeof instant === 'number' ? instant : instant.getTime());
-  const accepted = (token: string, shiftId = SHIFT_ID) => expect(qr.validateQr(manager, shiftId, token)).resolves.toBeUndefined();
+  const accepted = (token: string, shiftId = SHIFT_ID) => expect(qr.validateQr(manager, shiftId, token, seat)).resolves.toBeUndefined();
   const refused = (token: string, reason: string, shiftId = SHIFT_ID) =>
-    expect(qr.validateQr(manager, shiftId, token)).rejects.toMatchObject({ response: { code: 'INVALID_QR', reason } });
+    expect(qr.validateQr(manager, shiftId, token, seat)).rejects.toMatchObject({ response: { code: 'INVALID_QR', reason } });
 
   /** Signs as the pre-shift report job does, with the clock pinned to the print time. */
   function printQr(when: Date = PRINTED_AT): string {
@@ -46,10 +48,11 @@ describe('AttendanceQrService — expiry from the shift’s current end + grace'
   beforeEach(() => {
     jest.useFakeTimers({ now: PRINTED_AT });
     shift = { id: SHIFT_ID, venueId: VENUE_ID, startsAt: new Date(STARTS_AT), endsAt: new Date(ENDS_AT), qrVersion: 1 } as Shift;
+    seat = { period: null };
   });
   afterEach(() => jest.useRealTimers());
 
-  it('validUntil is the shift end + QR_POST_SHIFT_GRACE_MINUTES (the same grace assertClockWindow closes with)', () => {
+  it('validUntil is the given (seat) end + QR_POST_SHIFT_GRACE_MINUTES (the same grace assertClockWindow closes with)', () => {
     expect(qr.validUntil(shift).toISOString()).toBe(new Date(ENDS_AT.getTime() + GRACE_MINUTES * MIN).toISOString());
   });
 
@@ -135,14 +138,62 @@ describe('AttendanceQrService — expiry from the shift’s current end + grace'
     await refused(unsigned, 'invalid');
   });
 
-  it('a venue reassignment or a bumped qrVersion after printing refuses the QR', async () => {
+  it('a rotated QR (qrVersion bumped after printing) is refused as revoked; the new QR is accepted; a venue change is venue_mismatch', async () => {
     const token = printQr();
     at(ENDS_AT.getTime() - 5 * MIN);
-    shift.qrVersion = 2;
-    await refused(token, 'venue_mismatch');
+    shift.qrVersion = 2; // SchedulingService.rotateShiftQr
+    await refused(token, 'revoked');
+    await accepted(qr.sign(shift)); // the regenerated report's QR
     shift.qrVersion = 1;
     shift.venueId = '7c1e0b8a-2222-4a5b-9c8d-0000000000ff';
     await refused(token, 'venue_mismatch');
+  });
+
+  it('14-day ceiling: signed at T for a shift ending T+20d, refused at T+14d+1s (expired), accepted at T+14d-1s', async () => {
+    const T = PRINTED_AT.getTime();
+    shift.startsAt = new Date(T + 60 * MIN);
+    shift.endsAt = new Date(T + 20 * 24 * HOUR);
+    const token = printQr(new Date(T));
+    at(T + 14 * 24 * HOUR - 1000); // the shift is still open, the token is just under 14 days old
+    await accepted(token);
+    at(T + 14 * 24 * HOUR + 1000);
+    await refused(token, 'expired');
+    expect(Date.now()).toBeLessThan(qr.validUntil(shift).getTime()); // refused by the ceiling, not by the shift end
+  });
+
+  it('the ceiling follows QR_MAX_AGE_DAYS, and a token with no iat is refused when a ceiling applies', async () => {
+    const shortEnv = { get: (key: string) => (key === 'QR_MAX_AGE_DAYS' ? 2 : ENV[key]) } as never;
+    const shortQr = new AttendanceQrService(new QrTokenService(new JwtService(), shortEnv), shortEnv);
+    const token = printQr();
+    at(PRINTED_AT.getTime() + 2 * 24 * HOUR + 1000);
+    shift.endsAt = new Date(PRINTED_AT.getTime() + 10 * 24 * HOUR);
+    await expect(shortQr.validateQr(manager, SHIFT_ID, token, seat)).rejects.toMatchObject({ response: { reason: 'expired' } });
+    await accepted(token); // 14 days by default
+    const key = Buffer.from(hkdfSync('sha256', Buffer.from(APP_SECRET, 'utf8'), Buffer.alloc(0), 'rab-qr-token-v1', 32)).toString('hex');
+    const noIat = new JwtService().sign({ shiftId: SHIFT_ID, venueId: VENUE_ID, ver: 1 }, { secret: key, algorithm: 'HS256', issuer: 'rab-attendance', audience: 'rab-qr', noTimestamp: true });
+    await refused(noIat, 'invalid');
+  });
+
+  it('a missing ceiling setting refuses instead of verifying without one', async () => {
+    const noCeiling = { get: (key: string) => (key === 'QR_MAX_AGE_DAYS' ? undefined : ENV[key]) } as never;
+    const q = new AttendanceQrService(new QrTokenService(new JwtService(), noCeiling), noCeiling);
+    const token = printQr();
+    at(ENDS_AT.getTime() - 5 * MIN);
+    await expect(q.validateQr(manager, SHIFT_ID, token, seat)).rejects.toMatchObject({ response: { code: 'INVALID_QR', reason: 'invalid' } });
+  });
+
+  it('per-seat grace: a seat ending earlier than the shift closes at ITS end + grace, while a later seat is still accepted', async () => {
+    const token = printQr();
+    const seatAEnd = ENDS_AT.getTime() - 3 * HOUR;
+    const seatA = { period: `["${STARTS_AT.toISOString()}","${new Date(seatAEnd).toISOString()}")` };
+    const seatB = { period: `["${STARTS_AT.toISOString()}","${ENDS_AT.toISOString()}")` };
+    at(seatAEnd + GRACE_MINUTES * MIN);
+    await expect(qr.validateQr(manager, SHIFT_ID, token, seatA)).resolves.toBeUndefined();
+    at(seatAEnd + GRACE_MINUTES * MIN + 1000);
+    await expect(qr.validateQr(manager, SHIFT_ID, token, seatA)).rejects.toMatchObject({ response: { reason: 'expired' } });
+    await expect(qr.validateQr(manager, SHIFT_ID, token, seatB)).resolves.toBeUndefined();
+    at(ENDS_AT.getTime() + GRACE_MINUTES * MIN + 1000);
+    await expect(qr.validateQr(manager, SHIFT_ID, token, seatB)).rejects.toMatchObject({ response: { reason: 'expired' } });
   });
 
   it('a token signed before this change keeps its own exp: both bounds must pass (no printed QR gains validity)', async () => {
@@ -162,6 +213,6 @@ describe('AttendanceQrService — expiry from the shift’s current end + grace'
     await refused(token, 'expired');
     shift.endsAt = new Date(ENDS_AT);
     const noGrace = new AttendanceQrService(tokens, { get: (key: string) => (key === 'QR_POST_SHIFT_GRACE_MINUTES' ? undefined : ENV[key]) } as never);
-    await expect(noGrace.validateQr(manager, SHIFT_ID, token)).rejects.toMatchObject({ response: { code: 'INVALID_QR', reason: 'expired' } });
+    await expect(noGrace.validateQr(manager, SHIFT_ID, token, seat)).rejects.toMatchObject({ response: { code: 'INVALID_QR', reason: 'expired' } });
   });
 });

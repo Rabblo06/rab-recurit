@@ -7586,7 +7586,7 @@ image that runs the apps' own derive step on the read-only volume (`--pull never
   signs its QR up to `REPORT_AVAILABLE_BEFORE_MINUTES` (180) before the start, so a printed QR expired ~45 min before the
   shift ended: staff could not clock out with it, and a manager extending a shift could not extend the QR.
 - **Control:** `AttendanceQrService.validateQr` decides expiry at scan time from the freshly re-read shift: accepted while
-  server `now <= shift.endsAt + QR_POST_SHIFT_GRACE_MINUTES` (the same grace setting `assertClockWindow` closes with; one
+  server `now <=` the staff member's own end (since the follow-ups below) `+ QR_POST_SHIFT_GRACE_MINUTES` (the same grace setting `assertClockWindow` closes with; one
   definition, `AttendanceQrService.validUntil`), refused `INVALID_QR` / `expired` after. New tokens carry no `exp`.
   Fail-closed reasoning: `QrTokenService.verify` still checks signature (HKDF-derived key, HS256 pinned), issuer and
   audience, but is never an accept on its own; its only caller always loads the shift and applies the time bound after the
@@ -7597,37 +7597,72 @@ image that runs the apps' own derive step on the read-only volume (`--pull never
   `AttendanceQrService` only. `qr-token-verify.arch.spec.ts` fails if any production file in rab-server or rab-worker
   other than `attendance-qr.service.ts` calls `QrTokenService.verify`, names the class outside the reviewed files, or
   derives the QR key (`rab-qr-token-v1`) itself.
-- **How a printed QR's validity can grow.** A published shift cannot be rescheduled, but its end can move later: every
-  offer with a per-staff time widens the shift envelope (`OfferService`, `UPDATE shift SET … ends_at = GREATEST(ends_at,
-  $3)`), and `validateAssignmentTime` puts no ceiling on how far a proposed time may extend past the shift. The QR follows
-  the shift's current (envelope) end, so a printed or photographed QR stays valid as long as offers keep extending the
-  shift. "One shift's attendance window" therefore has no fixed length.
-- **Clock-out grace does not hold end to end (found in review, not changed here; owner decision pending).**
-  `validUntil` uses the shift's overall (envelope) end, not the staff member's own end. Separately, the attendance
-  monitor marks a still-`clocked_in` row `MISSING_CLOCK_OUT` 30 min after the staff member's OWN end
-  (`MISSING_CLOCK_OUT_GRACE_MINUTES`), after which `clockOut` finds no active attendance and returns 404. So a staff member
-  can actually clock out with the QR until min(own end + 30 min while the monitor runs, shift end + 120 min). The integration
-  tests cover the QR decision only (the monitor does not run in them).
+- **Follow-ups approved by the owner (2026-11-14, branch fix/qr-followups).**
+  - *14-day ceiling.* `QrTokenService.verify` refuses any QR whose `iat` is older than `QR_MAX_AGE_DAYS` (default 14,
+    validated 1-90; jsonwebtoken `maxAge`), whatever the shift's end: `expired`. A token without `iat` is `invalid`; a
+    missing setting refuses instead of verifying without a ceiling.
+  - *Rotation (revocation).* `POST /rest/v1/shifts/:id/rotate-qr` (`SchedulingService.rotateShiftQr`) bumps
+    `shift.qr_version` and `updated_at`; every older token is then refused `revoked` (a venue change stays
+    `venue_mismatch`). Layers: `PermissionGuard(schedule.create)` (the shift-management flag cancel/archive use) → the
+    same flag re-checked in the service first (403 for any id) → `assertShiftOwned` (404 out of scope, never 403) →
+    refused 409 `SHIFT_CLOSED` for a status with no outgoing transition in `SHIFT_TRANSITIONS` (completed, cancelled,
+    declined) → workspace RLS → compare-and-set on (qr_version, status) → audit `shift.qr_rotated` (shipped off-host as
+    `security_configuration` / warning, like `venue.geofence_updated`). No client field is written. The bumped
+    `updated_at` makes the pre-shift report scheduler regenerate and re-send the roster with the new QR, but only while
+    the shift has not ended (its scan requires `ends_at > now()`). The DEFAULT Venue Manager role does not hold
+    `schedule.create`, so it cannot rotate. A Venue Manager role granted `schedule.create` still cannot reach the route:
+    it is manager-web only (`@ManagerApplication`) and the `venue_manager` role may only sign in to the Venue Manager app;
+    the service itself applies the venue scope (404 outside the role's venues) for any other caller. API only for now
+    (the QR is shown in the Venue Manager mobile apps, not the web console).
+  - *Report rendered across a rotation (review M1).* The pre-shift scheduler locks the shift row before the report row,
+    discards a render whose shift `qr_version` or `updated_at` changed while it rendered (no stored file, no email; the
+    next tick rebuilds), and stamps the report with the database clock (`now()` of its write transaction). Rotation takes
+    the shift row FOR UPDATE and then writes `updated_at = clock_timestamp()` (`rotate-shift-qr.sql.ts`), so a rotation
+    that waited on the report's FOR SHARE lock writes a time after that commit, later than the stamp, and the next tick
+    regenerates with the new QR. Pinned by a lock-wait regression test (fails with `now()`) and a source pin.
+  - *Geofence-exit clock-out (review M3).* The automatic geofence-exit clock-out is a staff self clock-out too: refused
+    `CLOCK_WINDOW_CLOSED` after the staff member's own end + grace, like the manual and on-behalf clock-outs.
+  - *Settings (review L2).* `QR_POST_SHIFT_GRACE_MINUTES` is 0..1440, `QR_MAX_AGE_DAYS` 1..90 whole days, and the API and
+    Worker refuse to boot when `REPORT_AVAILABLE_BEFORE_MINUTES >= QR_MAX_AGE_DAYS x 1440`. That guarantees only that a
+    printed QR is still inside the age ceiling when the shift starts, not through its end + grace (shift length is not
+    bounded by any setting).
+  - *Held for owner decisions (not implemented):* rotating after the shift has ended strands staff still clocked in
+    (the report is not regenerated after `ends_at`) — review M2; `correct()` does not bound a recovered `clockOutAt` —
+    review L4.
+  - *Per-staff grace, end to end.* One grace, `QR_POST_SHIFT_GRACE_MINUTES` (120), always from the staff member's OWN end
+    (`effectiveAssignmentTime`): the QR is accepted until own end + grace (`validUntil` takes the seat; `validateQr`
+    requires it), the staff self clock-out now has the same `assertClockWindow` check the on-behalf clock-out has, and the
+    attendance monitor flags MISSING_CLOCK_OUT and the manager recovery opens only strictly after it
+    (`missing-clock-out-policy.ts` `isPastClockOutGrace`; the old 30-minute constant is gone). The staff clock-out and
+    the manager recovery no longer overlap.
+- **How a printed QR's validity can still grow.** A published shift cannot be rescheduled, but its end can move later:
+  every offer with a per-staff time widens the shift envelope (`OfferService`, `GREATEST(ends_at, $3)`) with no ceiling in
+  `validateAssignmentTime`. Since the follow-ups the QR follows the scanning staff member's own seat end, and the 14-day
+  ceiling bounds any token's life absolutely.
 
 ```
 SECURITY TRADE-OFF
-Decision:   New Shift QR tokens carry no exp; expiry is decided at scan time from the shift's current end + 120 min.
-Reason:     The owner's rule (decision 0i) is that an extended shift extends the QR. Any exp fixed at signing either
-            expires a QR printed 3 h early before the shift ends (the bug) or caps extensions at an invented limit.
-Risk:       A leaked or photographed QR has no lifetime of its own: it is valid until the shift's end + grace, and the
-            shift's end can keep growing through offer-envelope extensions with no ceiling. There is no way today to
-            revoke one printed QR (nothing bumps Shift.qrVersion). The QR is still only one factor: clock-in also
-            needs the caller's own JWT, a CONFIRMED booking re-read fresh, check-in first and the clock window;
-            clock-out needs the caller's own open attendance for that shift (it has no clock-window check of its own,
-            so for clock-out the QR's expiry is the time limit); at an enforcing venue both need a fresh geofence fix.
-Mitigation: Signature/HS256/issuer/audience pinned; shift, venue and ver re-checked on every scan; one verify caller
-            (architecture test); unreadable end or missing grace refuses; pre-change tokens keep their exp.
-Reversal:   Pending owner decisions: a hard token ceiling (e.g. a 14-day maxAge) and a rotateShiftQr action that bumps
-            qrVersion to revoke a leaked QR; whether validUntil should use the staff member's own end.
+Decision:   New Shift QR tokens carry no exp; expiry is decided at scan time from the staff member's own end + 120 min,
+            under a hard 14-day age ceiling (QR_MAX_AGE_DAYS), with manager rotation to revoke.
+Reason:     The owner's rule (decision 0i) is that an extended shift extends the QR. An exp fixed at signing either
+            expires a QR printed 3 h early before the shift ends (the bug) or caps extensions arbitrarily.
+Risk:       A leaked or photographed QR stays usable for that shift until the staff member's own end + grace (at most 14
+            days from printing) unless a manager rotates it. The QR is only one factor: clock-in also needs the caller's
+            own JWT, a CONFIRMED booking re-read fresh, check-in first and the clock window; clock-out needs the caller's
+            own open attendance and the same window; at an enforcing venue both need a fresh geofence fix.
+Mitigation: Signature/HS256/issuer/audience pinned; 14-day maxAge; shift, venue and qr_version re-checked on every scan;
+            rotation (revoked); one verify caller (architecture test); unreadable end or missing settings refuse.
+Reversal:   A shorter QR_MAX_AGE_DAYS, or rotating QRs automatically on schedule changes.
 ```
 - **Tests:** `attendance-qr.service.spec.ts` (printed 3 h early: accepted in the last minutes and through the grace,
-  refused 1 s after end + grace; extended and shortened shifts; foreign shift; tampered / forged-key / malformed; legacy
-  `exp`; fail-closed config; wrong issuer / wrong audience / HS512 / alg:none refused), `qr-token-verify.arch.spec.ts`,
-  `attendance-abuse-cases` › QR expiry follows the shift's current end + grace (the QR decision over HTTP with a QR
-  printed 3 h before the start; the attendance monitor is not running there), and the pdf-equality self-test (the
-  QR decoded from the PDF is accepted until its shift end + grace and refused 1 s later).
+  refused 1 s after own end + grace; extended and shortened shifts; per-seat grace with two seats; 14-day ceiling at
+  T+14d-1s / T+14d+1s and via the setting; no-iat; rotation `revoked` vs `venue_mismatch`; foreign shift; tampered /
+  forged-key / malformed; wrong issuer / audience / HS512 / alg:none; legacy `exp`; fail-closed settings),
+  `qr-token-verify.arch.spec.ts`, `env.validation.qr.spec.ts`, `shift-qr-rotation-scope` (other manager 404, venue-scoped
+  role 403 over HTTP / 404 outside / rotates inside, overlapping rotations one 201 + one 409), `report-worker-concurrency`
+  (rotation mid-render: discarded, no email; next tick's PDF QR decodes to ver 2), `attendance-abuse-cases` (geofence-exit
+  CLOCK_WINDOW_CLOSED at own end + 121 min, control at + 100; clock-out with a QR printed 3 h early, CLOCK_WINDOW_CLOSED past
+  own end + grace, rotateShiftQr: revoked / accepted, 403 guard and service, 404 other tenant, 409 cancelled / completed;
+  the staff-vs-manager race just after the grace), rab-worker `worker-operations-abuse-cases` › clock-out grace end to end
+  (monitor at own end + 100 min leaves the row open and the staff clock-out works; own end + 121 min refused then flagged;
+  two seats: A flagged / refused after its own end + grace while B is accepted), and the pdf-equality self-test.
