@@ -87,11 +87,29 @@ describe('X3.1 strict booleans: the fourteen formerly loose on/off switches', ()
     expect(error.message).not.toContain('secret-looking-typo');
   });
 
+  it.each([
+    ['AUTH_GOOGLE_ENABLED', /AUTH_GOOGLE_CLIENT_ID|AUTH_GOOGLE_CLIENT_SECRET|AUTH_GOOGLE_CALLBACK_URL/],
+    ['AUTH_MICROSOFT_ENABLED', /AUTH_MICROSOFT_CLIENT_ID|AUTH_MICROSOFT_CLIENT_SECRET|AUTH_MICROSOFT_CALLBACK_URL|AUTH_MICROSOFT_TENANT/],
+  ])('a typo in %s (no credentials set) is refused for the typo alone, never as a demand for that provider credentials', (flag, credentials) => {
+    for (const typo of ['False', 'TRUE', 'yes']) {
+      const error = (() => {
+        try {
+          validate({ ...base, [flag]: typo });
+        } catch (caught) {
+          return caught as Error;
+        }
+        throw new Error('expected a refusal');
+      })();
+      expect(error.message).toMatch(new RegExp(`${flag} must be exactly true or false`));
+      expect(error.message).not.toMatch(credentials);
+    }
+  });
+
   it('S3_FORCE_PATH_STYLE (already strict) now uses the same helper: true/false accepted, a typo refused', () => {
     expect(validate({ ...base, S3_FORCE_PATH_STYLE: 'true' }).S3_FORCE_PATH_STYLE).toBe(true);
     expect(validate({ ...base, S3_FORCE_PATH_STYLE: 'false' }).S3_FORCE_PATH_STYLE).toBe(false);
     expect(validate({ ...base }).S3_FORCE_PATH_STYLE).toBe(false);
-    expect(() => validate({ ...base, S3_FORCE_PATH_STYLE: 'TRUE' })).toThrow(/S3_FORCE_PATH_STYLE/);
+    expect(() => validate({ ...base, S3_FORCE_PATH_STYLE: 'TRUE' })).toThrow(/S3_FORCE_PATH_STYLE must be exactly true or false/);
   });
 
   it('AI_AGENTS_ENABLED stays loose on purpose: only exactly true turns it on, anything else is off, never a refusal', () => {

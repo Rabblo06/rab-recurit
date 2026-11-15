@@ -14,11 +14,14 @@ import { resolveHwsRuntimeEnabled } from './hws-runtime-default';
  * string, so `@IsBoolean()` rejects it and the process refuses to boot (fail closed on a typo such as
  * `APP_JWT_LEGACY_VERIFY_ENABLED=flase`, instead of silently picking either behaviour).
  *
- * Phase X3.1 (XR-05 / ENV-01): EVERY on/off switch in this file goes through this one helper, the fourteen that used to
- * read `value === 'true'` included (a typo such as `USER_SESSION_ENFORCEMENT_CUTOVER=True` used to mean false, silently).
+ * Phase X3.1 (XR-05 / ENV-01): every on/off switch in this file goes through this one helper, the fourteen that used to
+ * read `value === 'true'` included (a typo such as `USER_SESSION_ENFORCEMENT_CUTOVER=True` used to mean false, silently),
+ * with two exceptions: HWS_RUNTIME_ENABLED has its own strict resolver (`resolveHwsRuntimeEnabled`, because its unset
+ * default depends on NODE_ENV), and AI_AGENTS_ENABLED is loose on purpose (below).
  * Accepted: exactly `true` or `false`, lower case, no spaces. Unset or empty (`KEY=`) keeps the field's default, because
  * env.validation.ts drops empty values before this runs. Everything else (`True`, `TRUE`, `1`, `0`, `yes`, `on`,
- * ` true`, `flase`) refuses to boot. The one exception is AI_AGENTS_ENABLED, loose on purpose (see its comment).
+ * ` true`, `flase`) refuses to boot. AI_AGENTS_ENABLED: loose on purpose (see its comment). The compose gate
+ * (packages/rab-docker/scripts/compose-owner-login.cjs) reads this file to find every strict switch it lints.
  * `@Type(() => String)` must stay above every `@Transform(strictBoolean)`: without it enableImplicitConversion turns any
  * non-empty string into `true` before the transform sees it.
  */
@@ -1445,17 +1448,17 @@ export class EnvironmentVariables {
   @IsBoolean({ message: STRICT_BOOLEAN_MESSAGE })
   AUTH_GOOGLE_ENABLED: boolean = false;
 
-  @ValidateIf((env: EnvironmentVariables) => env.AUTH_GOOGLE_ENABLED)
+  @ValidateIf((env: EnvironmentVariables) => env.AUTH_GOOGLE_ENABLED === true)
   @IsNotEmpty()
   @IsString()
   AUTH_GOOGLE_CLIENT_ID?: string;
 
-  @ValidateIf((env: EnvironmentVariables) => env.AUTH_GOOGLE_ENABLED)
+  @ValidateIf((env: EnvironmentVariables) => env.AUTH_GOOGLE_ENABLED === true)
   @IsNotEmpty()
   @IsString()
   AUTH_GOOGLE_CLIENT_SECRET?: string;
 
-  @ValidateIf((env: EnvironmentVariables) => env.AUTH_GOOGLE_ENABLED)
+  @ValidateIf((env: EnvironmentVariables) => env.AUTH_GOOGLE_ENABLED === true)
   @IsUrl({ require_tld: false, require_protocol: true })
   AUTH_GOOGLE_CALLBACK_URL?: string;
 
@@ -1465,17 +1468,17 @@ export class EnvironmentVariables {
   @IsBoolean({ message: STRICT_BOOLEAN_MESSAGE })
   AUTH_MICROSOFT_ENABLED: boolean = false;
 
-  @ValidateIf((env: EnvironmentVariables) => env.AUTH_MICROSOFT_ENABLED)
+  @ValidateIf((env: EnvironmentVariables) => env.AUTH_MICROSOFT_ENABLED === true)
   @IsNotEmpty()
   @IsString()
   AUTH_MICROSOFT_CLIENT_ID?: string;
 
-  @ValidateIf((env: EnvironmentVariables) => env.AUTH_MICROSOFT_ENABLED)
+  @ValidateIf((env: EnvironmentVariables) => env.AUTH_MICROSOFT_ENABLED === true)
   @IsNotEmpty()
   @IsString()
   AUTH_MICROSOFT_CLIENT_SECRET?: string;
 
-  @ValidateIf((env: EnvironmentVariables) => env.AUTH_MICROSOFT_ENABLED)
+  @ValidateIf((env: EnvironmentVariables) => env.AUTH_MICROSOFT_ENABLED === true)
   @IsUrl({ require_tld: false, require_protocol: true })
   AUTH_MICROSOFT_CALLBACK_URL?: string;
 
@@ -1486,7 +1489,7 @@ export class EnvironmentVariables {
    * Exposed as a closed `@IsIn` set of one, rather than omitted entirely, specifically so an
    * operator cannot widen it to `'common'`/`'consumers'` without an actual code change.
    */
-  @ValidateIf((env: EnvironmentVariables) => env.AUTH_MICROSOFT_ENABLED)
+  @ValidateIf((env: EnvironmentVariables) => env.AUTH_MICROSOFT_ENABLED === true)
   @IsIn(['organizations'])
   AUTH_MICROSOFT_TENANT: string = 'organizations';
 
@@ -1720,7 +1723,7 @@ export class EnvironmentVariables {
   @IsOptional()
   @Type(() => String)
   @Transform(({ value }) => strictBoolean(value))
-  @IsBoolean()
+  @IsBoolean({ message: STRICT_BOOLEAN_MESSAGE })
   S3_FORCE_PATH_STYLE: boolean = false;
 
   /** Lifetime of a presigned URL. Short on purpose: a URL is a bearer token for one object. */

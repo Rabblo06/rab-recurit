@@ -53,7 +53,9 @@ refusal). See its comment in `environment-variables.ts`.
    exactly `true`, `false`, empty or absent.
 2. Run the env-file lint on the runtime env file:
    `node packages/rab-docker/scripts/compose-owner-login.cjs --lint-env-file runtime ${CREWFLOW_SECRETS_DIR}/runtime.env`
-   (it already refuses a non-boolean `PUSH_ENABLED` / `REALTIME_ENABLED`; the boot check covers the rest).
+   It refuses a value that is not exactly `true` or `false` for every variable above, and for every other strict switch
+   (`APP_JWT_LEGACY_VERIFY_ENABLED`, `AUTH_MFA_*`, `WORKSPACE_HOST_ROUTING_ENABLED`, `HWS_RUNTIME_ENABLED`, ...). The gate
+   reads that list from `environment-variables.ts`. `PUSH_ENABLED` and `REALTIME_ENABLED` must also be non-empty there.
 3. If a host refuses to boot after the upgrade, the log line names the variable. Fix its value to `true` or `false`
    (choose the one the old behaviour gave: any value other than exactly `true` used to mean `false`) and restart.
 

@@ -659,7 +659,8 @@ test('X3.1: lintEnvText refuses a strict on/off switch that is not exactly true 
   const app = ['EMAIL_DELIVERY_ENABLED', 'AUTH_CONTEXT_CACHE_ENABLED', 'USER_SESSION_CACHE_ENABLED', 'CORE_ENTITY_CACHE_ENABLED',
     'WORKSPACE_METADATA_CACHE_ENABLED', 'WORKER_FAST_PUBLISH_NOTIFY', 'USER_SESSION_ENFORCEMENT_CUTOVER', 'AUTH_PASSWORD_ENABLED',
     'AUTH_GOOGLE_ENABLED', 'AUTH_MICROSOFT_ENABLED', 'AUTH_OAUTH_HANDOFF_ENABLED', 'EMAIL_SMTP_NO_TLS', 'REALTIME_ENABLED', 'PUSH_ENABLED'];
-  assert.deepEqual([...gate.STRICT_SWITCHES].sort(), [...app].sort());
+  assert.deepEqual([...gate.X31_SWITCHES].sort(), [...app].sort());
+  for (const key of app) assert.ok(gate.STRICT_SWITCHES.includes(key), key);
   for (const key of gate.STRICT_SWITCHES.filter((k) => !Object.hasOwn(gate.FEATURE_SWEEPS, k))) {
     for (const value of ['True', 'TRUE', '1', '0', 'yes', 'on', 'flase', '"true', '"true" x']) {
       const problems = lintEnvText('runtime', `CREWFLOW_AUDIT_SINK=stdout\n${key}=${value}`);
@@ -683,6 +684,29 @@ test('X3.1: strictSwitchProblems checks what each service receives (names only, 
   assertRefused(problems, /rab-worker: WORKER_FAST_PUBLISH_NOTIFY must be exactly true or false/);
   // PUSH_ENABLED / REALTIME_ENABLED are featureSweepProblems' job (one message, not two).
   assert.deepEqual(gate.strictSwitchProblems('rab-api', { PUSH_ENABLED: 'yes' }), []);
+  // An already-strict switch from before X3.1 is checked too (the list is read from environment-variables.ts).
+  assertRefused(gate.strictSwitchProblems('rab-api', { AUTH_MFA_ENFORCE_PLATFORM_ADMIN: 'True' }), /rab-api: AUTH_MFA_ENFORCE_PLATFORM_ADMIN must be exactly true or false/);
+});
+
+// Review of #169: the switch list is read from environment-variables.ts, never retyped.
+test('X3.1: STRICT_SWITCHES equals an independent scan of environment-variables.ts (every strictBoolean property, plus HWS)', () => {
+  const source = fs.readFileSync(gate.ENVIRONMENT_VARIABLES_TS, 'utf8');
+  // A different method from the gate's: one multi-line regex over the whole file (decorators may sit between the
+  // transform and the property).
+  const re = /@Transform\(\(\{ value(?:, obj)? \}\) => (?:strictBoolean\(value\)|resolveHwsRuntimeEnabled\([^\n]*)\)[^\n]*\n(?:[ \t]*@[^\n]*\n)*[ \t]*([A-Z][A-Z0-9_]*)[?!]?\s*:/g;
+  const independent = [...source.matchAll(re)].map((m) => m[1]).sort();
+  assert.deepEqual([...gate.STRICT_SWITCHES], independent);
+  // The switches that were strict before X3.1 are linted now as well.
+  for (const key of ['APP_JWT_LEGACY_VERIFY_ENABLED', 'AUTH_MFA_ENROLMENT_ENABLED', 'AUTH_MFA_ENFORCE_PLATFORM_ADMIN', 'AUTH_MFA_ENFORCE_ORGANISATION_OWNER',
+    'AUTH_MFA_ENFORCE_INITIAL_MANAGER', 'AUTH_MFA_ENFORCE_OTHER_WEB_USERS', 'WORKSPACE_HOST_ROUTING_ENABLED', 'S3_FORCE_PATH_STYLE', 'HWS_RUNTIME_ENABLED']) {
+    assert.ok(gate.STRICT_SWITCHES.includes(key), key);
+  }
+  // AI_AGENTS_ENABLED stays loose on purpose (any value but true is off, never a boot refusal): never linted.
+  assert.ok(!gate.STRICT_SWITCHES.includes('AI_AGENTS_ENABLED'));
+  // Every strictBoolean transform in the file is accounted for (no property the scan could not attach to).
+  assert.equal(independent.length, (source.match(/@Transform\(\(\{ value \}\) => strictBoolean\(value\)\)/g) ?? []).length + 1);
+  // The scan is pure and attaches a transform to the next property only.
+  assert.deepEqual(gate.scanStrictSwitches("  @Type(() => String)\n  @Transform(({ value }) => strictBoolean(value))\n  @IsBoolean()\n  A_ON: boolean = false;\n  B_LOOSE?: string;\n"), ['A_ON']);
 });
 
 test('PR #125 finding 6: bundledDbEnvironmentProblems (shared with the deployed-model check) accepts the committed env and a real-shaped password', () => {

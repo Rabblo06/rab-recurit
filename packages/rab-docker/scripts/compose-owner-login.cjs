@@ -257,28 +257,50 @@ const switchedOn = (v) => String(v ?? '') === 'true';
 /** The only values a feature switch may carry (after Compose's own normalisation); anything else is refused (fail closed). */
 const SWITCH_VALUES = Object.freeze(['true', 'false']);
 /**
- * Phase X3.1 (XR-05 / ENV-01): the on/off switches rab-api and rab-worker now parse strictly (environment-variables.ts
- * strictBoolean): exactly true or false; unset or empty keeps the default; anything else REFUSES TO BOOT. The gate refuses
- * the same values first, so a typo in an env file fails the lint instead of crash-looping the release
- * (packages/rab-docker/docs/release/RELEASE-NOTE-X3.1-STRICT-BOOLEANS.md). PUSH_ENABLED and REALTIME_ENABLED keep their
- * stricter J2-1 rule above (empty refused too).
+ * Phase X3.1 (XR-05 / ENV-01): the on/off switches rab-api and rab-worker parse strictly (environment-variables.ts
+ * strictBoolean, and HWS_RUNTIME_ENABLED's own strict resolver): exactly true or false; unset or empty keeps the default;
+ * anything else REFUSES TO BOOT. The gate refuses the same values first, so a typo in an env file fails the lint instead of
+ * crash-looping the release (packages/rab-docker/docs/release/RELEASE-NOTE-X3.1-STRICT-BOOLEANS.md). PUSH_ENABLED and
+ * REALTIME_ENABLED keep their stricter J2-1 rule above (empty refused too).
+ *
+ * The list is READ from environment-variables.ts (review of #169), never retyped, so a switch made strict later is linted
+ * too. Fail closed: an unreadable file, or a scan that misses one of the X3.1 switches, stops the gate.
  */
-const STRICT_SWITCHES = Object.freeze([
-  'EMAIL_DELIVERY_ENABLED',
-  'AUTH_CONTEXT_CACHE_ENABLED',
-  'USER_SESSION_CACHE_ENABLED',
-  'CORE_ENTITY_CACHE_ENABLED',
-  'WORKSPACE_METADATA_CACHE_ENABLED',
-  'WORKER_FAST_PUBLISH_NOTIFY',
-  'USER_SESSION_ENFORCEMENT_CUTOVER',
-  'AUTH_PASSWORD_ENABLED',
-  'AUTH_GOOGLE_ENABLED',
-  'AUTH_MICROSOFT_ENABLED',
-  'AUTH_OAUTH_HANDOFF_ENABLED',
-  'EMAIL_SMTP_NO_TLS',
-  'REALTIME_ENABLED',
-  'PUSH_ENABLED',
+const ENVIRONMENT_VARIABLES_TS = path.resolve(__dirname, '../../rab-server/src/engine/core-modules/environment/environment-variables.ts');
+/** The fourteen switches X3.1 made strict: the scan must find every one (a guard against a scan that silently breaks). */
+const X31_SWITCHES = Object.freeze([
+  'EMAIL_DELIVERY_ENABLED', 'AUTH_CONTEXT_CACHE_ENABLED', 'USER_SESSION_CACHE_ENABLED', 'CORE_ENTITY_CACHE_ENABLED',
+  'WORKSPACE_METADATA_CACHE_ENABLED', 'WORKER_FAST_PUBLISH_NOTIFY', 'USER_SESSION_ENFORCEMENT_CUTOVER', 'AUTH_PASSWORD_ENABLED',
+  'AUTH_GOOGLE_ENABLED', 'AUTH_MICROSOFT_ENABLED', 'AUTH_OAUTH_HANDOFF_ENABLED', 'EMAIL_SMTP_NO_TLS', 'REALTIME_ENABLED', 'PUSH_ENABLED',
 ]);
+const STRICT_TRANSFORM = /^\s*@Transform\(\(\{ value(?:, obj)? \}\) => (?:strictBoolean\(value\)|resolveHwsRuntimeEnabled\()/;
+const PROPERTY = /^ {2}([A-Z][A-Z0-9_]*)[?!]?\s*:/;
+
+/** Every property of environment-variables.ts whose transform is strictBoolean (or the HWS resolver), sorted. Pure. */
+function scanStrictSwitches(source) {
+  const lines = String(source).split(/\r?\n/);
+  const found = new Set();
+  lines.forEach((line, i) => {
+    if (!STRICT_TRANSFORM.test(line)) return;
+    for (let j = i + 1; j < lines.length && j <= i + 6; j += 1) {
+      const m = PROPERTY.exec(lines[j]);
+      if (m) { found.add(m[1]); return; }
+    }
+  });
+  return [...found].sort();
+}
+
+function loadStrictSwitches() {
+  let source;
+  try { source = fs.readFileSync(ENVIRONMENT_VARIABLES_TS, 'utf8'); } catch {
+    throw new Error(`[owner-login] cannot read ${path.relative(path.resolve(__dirname, '../../..'), ENVIRONMENT_VARIABLES_TS)} (the strict switch list comes from it; run the gate from the repository)`);
+  }
+  const switches = scanStrictSwitches(source);
+  const missing = X31_SWITCHES.filter((key) => !switches.includes(key));
+  if (missing.length) throw new Error(`[owner-login] the strict switch scan of environment-variables.ts missed ${missing.join(', ')}: fix the scan`);
+  return Object.freeze(switches);
+}
+const STRICT_SWITCHES = loadStrictSwitches();
 const STRICT_SWITCH_MESSAGE = 'must be exactly true or false (X3.1: rab-api and rab-worker refuse anything else at boot; empty or unset keeps the default)';
 
 /** X3.1 problems of one service environment (pure; names only, never a value). */
@@ -1181,7 +1203,7 @@ function main(argv) {
 if (require.main === module) process.exitCode = main(process.argv.slice(2));
 
 module.exports = {
-  FILES, TEMPLATES, COMBOS, STATIC_COMBO, DB_SERVICE, DB_SETUP_SERVICE, DB_TARGET_VOLUME, DB_TARGET_DIR, SENTINEL_ADMIN_PW, SENTINEL_ADMIN_URL, dbSetupProblems, appCredentialProblems, credentialMountProblems, topLevelVolumeProblems, bundledDbEnvironmentProblems, DB_INITDB_ARGS, DB_ENV_KEYS, DB_PASSWORD_KEY, SENTINEL_DB_PW, BUNDLED_URL, NOT_THE_APP_LOGIN, NOTIFICATION_DELIVERY, PHASE_D_SWITCHES, PHASE_D_UNCHANGED, STATEMENT_DISPATCH, FEATURE_SWEEPS, SWITCH_VALUES, STRICT_SWITCHES, strictSwitchProblems, featureSweepProblems, composeEnvValue, AUDIT_SINK_MODES, AUDIT_SINK_PRODUCTION_MODES, AUDIT_SINK_FAILURES,
+  FILES, TEMPLATES, COMBOS, STATIC_COMBO, DB_SERVICE, DB_SETUP_SERVICE, DB_TARGET_VOLUME, DB_TARGET_DIR, SENTINEL_ADMIN_PW, SENTINEL_ADMIN_URL, dbSetupProblems, appCredentialProblems, credentialMountProblems, topLevelVolumeProblems, bundledDbEnvironmentProblems, DB_INITDB_ARGS, DB_ENV_KEYS, DB_PASSWORD_KEY, SENTINEL_DB_PW, BUNDLED_URL, NOT_THE_APP_LOGIN, NOTIFICATION_DELIVERY, PHASE_D_SWITCHES, PHASE_D_UNCHANGED, STATEMENT_DISPATCH, FEATURE_SWEEPS, SWITCH_VALUES, STRICT_SWITCHES, X31_SWITCHES, scanStrictSwitches, ENVIRONMENT_VARIABLES_TS, strictSwitchProblems, featureSweepProblems, composeEnvValue, AUDIT_SINK_MODES, AUDIT_SINK_PRODUCTION_MODES, AUDIT_SINK_FAILURES,
   AUDIT_SINK_PRODUCTION_FAILURES, SENTINEL_URL, SENTINEL_OWNER_PW, SENTINEL_APP_SECRET,
   SENTINEL_REDIS_PW, SENTINEL_LEGACY_PW, forbiddenReason, durationSeconds, checkModel, checkStaticModel, parseEnvText,
   lintEnvText, lintComposeText, renderModels, staticProblems, main,
