@@ -1,7 +1,7 @@
 import { assertTransition, SHIFT_TRANSITIONS, ShiftAssignmentStatus, ShiftStatus } from '@rab/shared';
 import { EntityManager } from 'typeorm';
 
-import { businessTables, type BusinessTables } from '../../../engine/core-modules/tenant/business-tables';
+import { businessTables } from '../../../engine/core-modules/tenant/business-tables';
 
 /**
  * The seat states that still hold a shift open: a seat that is offered, accepted (awaiting a manager) or confirmed (booked,
@@ -35,14 +35,15 @@ export async function lockShiftRow(manager: EntityManager, organisationId: strin
 
 /**
  * The open-seat predicate on `shift_assignment sa` (the one definition; `countOpenSeats` and the one-off repair command
- * `shift:complete-settled` use it). `t` is the caller transaction's `businessTables(manager)` (the job_offer sub-selects are
- * schema-qualified through it). `statusesParam` is the 1-based index of the bound `OPEN_SEAT_STATUSES` parameter (a
+ * `shift:complete-settled` use it). `manager` is the caller's bound transaction manager: the job_offer sub-selects are
+ * schema-qualified through its `businessTables(manager)`. `statusesParam` is the 1-based index of the bound `OPEN_SEAT_STATUSES` parameter (a
  * code integer, never input). An `offered` seat counts as closed only when it has an offer and EVERY offer on it is
  * `expired` (a seat never carries a live offer and an expired one at once today; the "every" keeps a future re-offer on
  * the same seat open).
  */
-export function openSeatSql(t: BusinessTables, statusesParam: number): string {
+export function openSeatSql(manager: EntityManager, statusesParam: number): string {
   if (!Number.isInteger(statusesParam) || statusesParam < 1) throw new Error('openSeatSql: invalid parameter index');
+  const t = businessTables(manager);
   // sql-injection-reviewed: the interpolations are a validated positive integer parameter index and businessTables() names; no input reaches the text.
   return `(sa.status = ANY($${statusesParam}::text[])
     AND NOT (sa.status = 'offered'
@@ -54,8 +55,8 @@ export function openSeatSql(t: BusinessTables, statusesParam: number): string {
 export async function countOpenSeats(manager: EntityManager, organisationId: string, shiftId: string): Promise<number> {
   const t = businessTables(manager);
   const [{ open }] = await manager.query<Array<{ open: number }>>(
-    // sql-injection-reviewed: openSeatSql(t, 3) is a code-constant fragment; every value is a bound $n parameter.
-    `SELECT count(*)::int AS open FROM ${t.shift_assignment} sa WHERE sa.shift_id = $1 AND sa.organisation_id = $2 AND ${openSeatSql(t, 3)}`,
+    // sql-injection-reviewed: openSeatSql(manager, 3) is a code-constant fragment; every value is a bound $n parameter.
+    `SELECT count(*)::int AS open FROM ${t.shift_assignment} sa WHERE sa.shift_id = $1 AND sa.organisation_id = $2 AND ${openSeatSql(manager, 3)}`,
     [shiftId, organisationId, OPEN_SEAT_STATUSES],
   );
   return open;

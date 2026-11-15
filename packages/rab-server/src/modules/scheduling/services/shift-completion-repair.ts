@@ -133,13 +133,13 @@ export class ShiftCompletionRepair {
       const rows = await this.readIn(scope, (m) => {
         const t = businessTables(m);
         return m.query<Array<{ id: string; venue_name: string; starts_at: Date; ends_at: Date; seats: Record<string, number> | null }>>(
-          // sql-injection-reviewed: openSeatSql(t, 2) is a code-constant fragment (integer parameter index, businessTables() names); values are bound $n parameters.
+          // sql-injection-reviewed: openSeatSql(m, 2) is a code-constant fragment (integer parameter index, businessTables() names); values are bound $n parameters.
           `SELECT s.id, v.name AS venue_name, s.starts_at, s.ends_at,
                   (SELECT jsonb_object_agg(b.status, b.n) FROM (SELECT sa2.status, count(*)::int AS n FROM ${t.shift_assignment} sa2
                      WHERE sa2.shift_id = s.id GROUP BY sa2.status) b) AS seats
              FROM ${t.shift} s JOIN ${t.venue} v ON v.id = s.venue_id
             WHERE s.status = 'in_progress' AND s.organisation_id = $1
-              AND NOT EXISTS (SELECT 1 FROM ${t.shift_assignment} sa WHERE sa.shift_id = s.id AND sa.organisation_id = $1 AND ${openSeatSql(t, 2)})
+              AND NOT EXISTS (SELECT 1 FROM ${t.shift_assignment} sa WHERE sa.shift_id = s.id AND sa.organisation_id = $1 AND ${openSeatSql(m, 2)})
             ORDER BY s.ends_at, s.id`,
           [scope.organisation_id, OPEN_SEAT_STATUSES],
         );

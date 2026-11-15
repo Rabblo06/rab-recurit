@@ -15,7 +15,6 @@ import { PasswordHashingService } from '../../engine/core-modules/auth/services/
 import { decodeOptionalKeysetCursor, keysetBeforeSql, keysetPage } from '../../engine/dto/keyset-cursor';
 import { ResourceScopeService } from '../../engine/core-modules/resource-scope/resource-scope.service';
 import { AuthContext } from '../../engine/core-modules/tenant/auth-context.interface';
-import { businessTables } from '../../engine/core-modules/tenant/business-tables';
 import { TenantContextService } from '../../engine/core-modules/tenant/tenant-context.service';
 import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-pipe';
 import { createAdminDataSource } from './helpers/admin-datasource';
@@ -193,19 +192,18 @@ describeIfDb('XP-05 /shifts/sent: one statement for rows + tab counts, row-set e
       const bound = after ? `WHERE ${keysetBeforeSql('"submittedAt"', 'id', '$7', '$8')}` : '';
       if (after) pageParams.push(after.t, after.i);
       const viewSql = q.id ? 'TRUE' : SENT_SHIFT_VIEW_SQL[q.view ?? 'all'];
-      const t = businessTables(m);
       // The two statements XP-05 replaced, verbatim.
       const legacyRows: Row[] = await m.query(
-        `${sentShiftRowsSql(t)} SELECT * FROM (SELECT *, count(*) OVER () AS view_total FROM classified WHERE ${viewSql}) v ${bound}
+        `${sentShiftRowsSql(m)} SELECT * FROM (SELECT *, count(*) OVER () AS view_total FROM classified WHERE ${viewSql}) v ${bound}
           ORDER BY "submittedAt" DESC, id DESC LIMIT $5 OFFSET $6`,
         pageParams,
       );
       const [legacyTabs] = await m.query(
-        `${sentShiftRowsSql(t)} SELECT ${Object.entries(SENT_SHIFT_VIEW_SQL).map(([k, w]) => `count(*) FILTER (WHERE ${w})::int AS "${k}"`).join(', ')},
+        `${sentShiftRowsSql(m)} SELECT ${Object.entries(SENT_SHIFT_VIEW_SQL).map(([k, w]) => `count(*) FILTER (WHERE ${w})::int AS "${k}"`).join(', ')},
           count(*)::int AS submitted FROM classified`,
         params,
       );
-      const result: Row[] = await m.query(sentShiftsPageAndCountsSql(t, viewSql, bound), pageParams);
+      const result: Row[] = await m.query(sentShiftsPageAndCountsSql(m, viewSql, bound), pageParams);
       return { legacyRows, legacyTabs: legacyTabs as Row, result };
     });
   }

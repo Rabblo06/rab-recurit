@@ -1,5 +1,7 @@
+import { EntityManager } from 'typeorm';
+
+import { businessTables } from '../../../engine/core-modules/tenant/business-tables';
 import { keysetTimestampSql } from '../../../engine/dto/keyset-cursor';
-import type { BusinessTables } from '../../../engine/core-modules/tenant/business-tables';
 import { SentShiftView } from '../dto/list-sent-shifts.dto';
 import { SHIFT_ACTION_WINDOW_HOURS } from '../utils/shift-action-window';
 
@@ -15,8 +17,9 @@ import { SHIFT_ACTION_WINDOW_HOURS } from '../utils/shift-action-window';
 // organisation joined back by shift id: same numbers, but bounded by the caller's own requests. Measured on synthetic
 // volume (EXPLAIN ANALYZE, 100k offers in one organisation): the organisation-wide CTE cost ~0.2 s per call, and restricting it by
 // a sub-select made the planner (blind to the RLS predicates' selectivity) re-aggregate it once per request (~18 s).
-// `t` is the caller transaction's businessTables(manager): every workspace table is schema-qualified through it.
-export function sentShiftRowsSql(t: BusinessTables): string {
+// `manager` is the caller's bound transaction manager: every workspace table is schema-qualified through businessTables(manager).
+export function sentShiftRowsSql(manager: EntityManager): string {
+  const t = businessTables(manager);
   // sql-injection-reviewed: code-constant SQL fragment from a helper called with literal aliases plus businessTables() names; values are bound $n parameters.
   return `WITH rows AS (
     SELECT s.id, s.status, s.required_count AS "requiredCount", s.filled_count AS "filledCount",
@@ -76,9 +79,9 @@ export const SENT_SHIFT_VIEW_SQL: Readonly<Record<SentShiftView, string>> = Obje
  * parameters and order as the two statements it replaced (rows, then `count(*) FILTER` per tab); both now read one snapshot.
  * `viewSql` is SENT_SHIFT_VIEW_SQL[view] or 'TRUE'; `bound` is '' or the keyset WHERE built from literal fragments.
  */
-export function sentShiftsPageAndCountsSql(t: BusinessTables, viewSql: string, bound: string): string {
+export function sentShiftsPageAndCountsSql(manager: EntityManager, viewSql: string, bound: string): string {
   // sql-injection-reviewed: composes code constants only (sentShiftRowsSql over businessTables() names, SENT_SHIFT_VIEW_SQL keys and predicates, the caller's literal viewSql/bound); every value is a bound $n parameter.
-  return `${sentShiftRowsSql(t)}, tabs AS (
+  return `${sentShiftRowsSql(manager)}, tabs AS (
       SELECT json_build_object(${Object.entries(SENT_SHIFT_VIEW_SQL).map(([k, w]) => `'${k}', count(*) FILTER (WHERE ${w})::int`).join(', ')},
         'submitted', count(*)::int) AS tab_counts FROM classified
     ), page AS (

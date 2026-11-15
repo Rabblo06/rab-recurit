@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { sentShiftPresentation } from './sent-shift-presentation';
-import { ROTATE_SHIFT_QR_LOCK_SQL, ROTATE_SHIFT_QR_UPDATE_SQL } from './rotate-shift-qr.sql';
+import { rotateShiftQrLockSql, rotateShiftQrUpdateSql } from './rotate-shift-qr.sql';
 import { SENT_SHIFT_VIEW_SQL, sentShiftsPageAndCountsSql } from './sent-shifts-sql';
 import { ListSentShiftsDto, SentShiftView } from '../dto/list-sent-shifts.dto';
 import { validateAssignmentTime, effectiveAssignmentBreakMinutes, assignmentEnvelope, defaultAssignmentTime } from '../utils/assignment-time';
@@ -365,8 +365,8 @@ export class SchedulingService {
       // Row lock first, then the compare-and-set on the values read above (rotate-shift-qr.sql.ts): a concurrent rotation
       // or status change is a clean 409, and a rotation that waited on the pre-shift report's lock writes its updated_at
       // after that report's generation stamp, so the report is regenerated with the new QR (QR review M1).
-      await manager.query(ROTATE_SHIFT_QR_LOCK_SQL, [id]);
-      const [claimed] = (await manager.query(ROTATE_SHIFT_QR_UPDATE_SQL, [id, shift.qrVersion, shift.status])) as [Array<{ qr_version: number }>, number];
+      await manager.query(rotateShiftQrLockSql(manager), [id]);
+      const [claimed] = (await manager.query(rotateShiftQrUpdateSql(manager), [id, shift.qrVersion, shift.status])) as [Array<{ qr_version: number }>, number];
       if (claimed.length === 0) throw new ConflictException('This shift changed while its QR code was being replaced — please refresh.');
       await this.auditService.record(manager, ctx, AuditAction.SHIFT_QR_ROTATED, {
         entityType: 'shift',
@@ -608,10 +608,9 @@ export class SchedulingService {
       const bound = after ? `WHERE ${keysetBeforeSql('"submittedAt"', 'id', '$7', '$8')}` : '';
       if (after) pageParams.push(after.t, after.i);
       // XP-05: one statement for the page rows and the tab counts (sent-shifts-sql.ts).
-      const t = businessTables(manager);
       const result: Array<Record<string, unknown>> = await manager.query(
         // sql-injection-reviewed: dynamic WHERE assembled only from literal fragments and $n / :named placeholders (values pushed to params); identifiers come from allow-lists. Reviewed 2026-11-04.
-        sentShiftsPageAndCountsSql(t, id ? 'TRUE' : SENT_SHIFT_VIEW_SQL[view], bound),
+        sentShiftsPageAndCountsSql(manager, id ? 'TRUE' : SENT_SHIFT_VIEW_SQL[view], bound),
         pageParams,
       );
       // Tab counts + the distinct number of submitted requests (one request = one, however many recipients).
