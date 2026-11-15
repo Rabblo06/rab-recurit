@@ -271,14 +271,16 @@ describeIfDb('C3 HWS cutover copy path (option A′)', () => {
       expect(await sqlstateOf(bound(noLock, a.org, a.id, copy, [a.id, 'venue', null, 10]))).toBe('42501');
       expect(await sqlstateOf(bound(noLock, a.org, a.id, verify, [a.id, 'venue', null, 10]))).toBe('42501');
       expect(await sqlstateOf(bound(noLock, a.org, a.id, 'SELECT * FROM core.hws_cutover_probe($1)', [a.id]))).toBe('42501');
-      expect(await sqlstateOf(bound(noLock, a.org, a.id, 'SELECT * FROM core.hws_cutover_reconcile_statement_pointers($1, false)', [a.id]))).toBe('42501');
+      expect(await sqlstateOf(bound(noLock, a.org, a.id, 'SELECT core.hws_cutover_drop_new_statement_pointers($1, ARRAY[$1]::uuid[])', [a.id]))).toBe('42501');
+      expect(await sqlstateOf(bound(noLock, a.org, a.id, 'SELECT core.hws_cutover_purge_core_statement_pointers($1)', [a.id]))).toBe('42501');
     } finally {
       await noLock.end();
     }
     // The lock holder, but the tenant bound to ANOTHER workspace (and another organisation).
     expect(await sqlstateOf(bound(app, b.org, b.id, copy, [a.id, 'venue', null, 10]))).toBe('42501');
     expect(await sqlstateOf(bound(app, a.org, b.id, copy, [a.id, 'venue', null, 10]))).toBe('42501');
-    expect(await sqlstateOf(bound(app, b.org, b.id, 'SELECT * FROM core.hws_cutover_reconcile_statement_pointers($1, true)', [a.id]))).toBe('42501');
+    expect(await sqlstateOf(bound(app, b.org, b.id, 'SELECT core.hws_cutover_purge_core_statement_pointers($1)', [a.id]))).toBe('42501');
+    expect(await sqlstateOf(bound(app, b.org, b.id, 'SELECT core.hws_cutover_drop_new_statement_pointers($1, ARRAY[$1]::uuid[])', [a.id]))).toBe('42501');
     // Closed table list, limits, keyset arity.
     for (const t of ['user', 'organisation', 'manager_workspace', 'audit_log', 'venue; DROP TABLE core.venue', null]) {
       expect(await sqlstateOf(bound(app, a.org, a.id, copy, [a.id, t, null, 10]))).toBe('22023');
@@ -301,7 +303,9 @@ describeIfDb('C3 HWS cutover copy path (option A′)', () => {
         'core.hws_cutover_probe(uuid)',
         'core.hws_cutover_schema(uuid)',
         'core.hws_cutover_source_sql(text)',
-        'core.hws_cutover_reconcile_statement_pointers(uuid,boolean)',
+        'core.hws_cutover_drop_new_statement_pointers(uuid,uuid[])',
+        'core.hws_cutover_purge_core_statement_pointers(uuid)',
+        'core.hws_cutover_core_fence()',
       ]) {
         expect((await admin.query(`SELECT has_function_privilege('crewflow_app', $1, 'EXECUTE') AS x`, [fn])).rows[0].x).toBe(false);
       }
@@ -685,13 +689,34 @@ describeIfDb('C3 HWS cutover copy path (option A′)', () => {
 
   it('review L-3: ambiguous notes are core data — a workspace whose only core data is one is refused, never "nothing to copy"', async () => {
     const l3 = await make('l3');
+    const elsewhere = await make('l3-elsewhere');
     await admin.query(`INSERT INTO core.manager_profile (organisation_id, user_id, type, workspace_id) VALUES ($1, $2, 'ceo', $3)`, [l3.org, l3.owner, l3.id]);
-    await admin.query(`INSERT INTO core.manager_profile (organisation_id, user_id, type, workspace_id) VALUES ($1, $2, 'venue', $3)`, [l3.org, l3.owner, l3.id]);
+    // The owner also holds a staff profile in another workspace (planted; throwaway database): the note's subject is ambiguous,
+    // and that staff profile is not a core row of l3, so l3's ONLY core data is the ambiguous note.
+    await admin.query('BEGIN');
+    await admin.query('SET LOCAL session_replication_role = replica');
+    const planted = (
+      await admin.query(`INSERT INTO core.staff_profile (organisation_id, user_id, staff_ref, created_by, workspace_id) VALUES ($1, $2, $3, $4, $5) RETURNING id`, [
+        elsewhere.org,
+        l3.owner,
+        `L3-${SFX}`,
+        elsewhere.owner,
+        elsewhere.id,
+      ])
+    ).rows[0].id;
+    await admin.query('COMMIT');
     await admin.query(`INSERT INTO core.user_note (organisation_id, subject_user_id, author_user_id, body) VALUES ($1, $2, $2, 'ambiguous subject')`, [l3.org, l3.owner]);
     writeBackup();
-    await expect(cutover(app, [l3.id], host())).rejects.toMatchObject({ errorClass: 'HWS_CUTOVER_WORKSPACE_FAILED' });
-    expect(await stateOf(l3)).toBeNull();
-    expect(await migrationError(l3)).toBe('upgrade-blocked: HwsCutover (HWS_CUTOVER_USER_NOTE_AMBIGUOUS)');
+    try {
+      await expect(cutover(app, [l3.id], host())).rejects.toMatchObject({ errorClass: 'HWS_CUTOVER_WORKSPACE_FAILED' });
+      expect(await stateOf(l3)).toBeNull();
+      expect(await migrationError(l3)).toBe('upgrade-blocked: HwsCutover (HWS_CUTOVER_USER_NOTE_AMBIGUOUS)');
+    } finally {
+      await admin.query('BEGIN');
+      await admin.query('SET LOCAL session_replication_role = replica');
+      await admin.query('DELETE FROM core.staff_profile WHERE id = $1', [planted]);
+      await admin.query('COMMIT');
+    }
   });
 
   it('review L-1: a core row of W carrying another organisation is never copied; W is refused (ORG_MISMATCH)', async () => {
