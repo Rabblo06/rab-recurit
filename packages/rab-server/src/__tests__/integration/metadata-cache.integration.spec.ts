@@ -140,8 +140,8 @@ describeIfDb('Metadata cache E5: versioned per-workspace cache, PostgreSQL autho
    */
   async function insertObject(m: EntityManager, w: Ws, name: string): Promise<void> {
     await m.query(
-      `INSERT INTO core.object_metadata (organisation_id, workspace_id, name_singular, name_plural, label_singular, label_plural, physical_table, is_custom)
-       VALUES ($1, $2, $3, $4, $3, $4, $5, true)`,
+      `INSERT INTO core.object_metadata (organisation_id, workspace_id, name_singular, name_plural, label_singular, label_plural, physical_table, is_custom, allows_custom_fields)
+       VALUES ($1, $2, $3, $4, $3, $4, $5, true, true)`,
       [w.org, w.ws, name, `${name}s`, `c_${randomUUID().replace(/-/g, '').slice(0, 20)}`],
     );
   }

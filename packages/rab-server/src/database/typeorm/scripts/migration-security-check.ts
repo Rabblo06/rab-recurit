@@ -214,6 +214,12 @@ export const REVIEWED_MIGRATION_DRIFT: Readonly<Record<string, readonly string[]
     (t) =>
       `+ policy|${t}|${t}_tenant|*|permissive=true|roles=public|using=((organisation_id = core.current_org()) AND (workspace_id = core.current_workspace()))|check=((organisation_id = core.current_org()) AND (workspace_id = core.current_workspace()))`,
   ),
+  // Metadata engine M1 / E5 (DRAFT, owner SQL review pending; docs/plans/phase-x4/M1-SQL-FOR-OWNER.md § M1-cache): the same
+  // plain tenant policy on the metadata version table core.workspace_metadata_state. Owner, FORCE RLS, grants (no DELETE)
+  // and triggers are pinned by the migration's own post-condition; no runtime login gains a privilege it did not have.
+  '1786721560000-MetadataVersionState': [
+    "+ policy|workspace_metadata_state|workspace_metadata_state_tenant|*|permissive=true|roles=public|using=((organisation_id = core.current_org()) AND (workspace_id = core.current_workspace()))|check=((organisation_id = core.current_org()) AND (workspace_id = core.current_workspace()))",
+  ],
 };
 
 type Identity = 'phaseA' | 'bootstrap' | 'restricted' | 'crewflow' | 'crewflow_app' | 'crewflow_worker';
