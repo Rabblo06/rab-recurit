@@ -4,6 +4,7 @@ import { EntityManager } from 'typeorm';
 import { FileKindPolicy } from '../../../engine/core-modules/storage/file-access.registry';
 import { StoredFile } from '../../../engine/core-modules/storage/entities/stored-file.entity';
 import { AuthContext } from '../../../engine/core-modules/tenant/auth-context.interface';
+import { businessTables } from '../../../engine/core-modules/tenant/business-tables';
 import { Venue } from '../entities/venue.entity';
 import { VenueService } from '../services/venue.service';
 
@@ -52,22 +53,23 @@ export class VenuePhotoFilePolicy implements FileKindPolicy {
   }
 
   private async staffHasLiveWorkAtVenue(manager: EntityManager, ctx: AuthContext, venueId: string): Promise<boolean> {
+    const t = businessTables(manager);
     const rows: unknown[] = await manager.query(
       `SELECT 1
-         FROM staff_profile sp
+         FROM ${t.staff_profile} sp
         WHERE sp.user_id = $1 AND sp.organisation_id = $2
           AND (
             EXISTS (
-              SELECT 1 FROM job_offer o
-                JOIN shift_assignment sa ON sa.id = o.shift_assignment_id
-                JOIN shift s ON s.id = sa.shift_id
+              SELECT 1 FROM ${t.job_offer} o
+                JOIN ${t.shift_assignment} sa ON sa.id = o.shift_assignment_id
+                JOIN ${t.shift} s ON s.id = sa.shift_id
                WHERE o.staff_profile_id = sp.id AND o.organisation_id = $2
                  AND s.venue_id = $3 AND s.status <> ALL($4::text[])
                  AND sa.status = ANY($5::text[])
                  AND ((o.status = $6 AND o.expires_at > now()) OR o.status = ANY($7::text[])))
             OR EXISTS (
-              SELECT 1 FROM shift_assignment sa
-                JOIN shift s ON s.id = sa.shift_id
+              SELECT 1 FROM ${t.shift_assignment} sa
+                JOIN ${t.shift} s ON s.id = sa.shift_id
                WHERE sa.staff_profile_id = sp.id AND sa.organisation_id = $2
                  AND s.venue_id = $3 AND s.status <> ALL($4::text[])
                  AND sa.status = ANY($8::text[]))

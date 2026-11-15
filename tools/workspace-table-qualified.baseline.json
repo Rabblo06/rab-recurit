@@ -47,15 +47,6 @@
     "packages/rab-server/src/modules/dashboard/services/dashboard.service.ts": {
       "unqualified": 10
     },
-    "packages/rab-server/src/modules/identity/services/user-note.service.ts": {
-      "unqualified": 2
-    },
-    "packages/rab-server/src/modules/manager/services/manager.service.ts": {
-      "unqualified": 4
-    },
-    "packages/rab-server/src/modules/manager/services/venue-manager.service.ts": {
-      "unqualified": 8
-    },
     "packages/rab-server/src/modules/offer/services/apply-offer-confirmation.ts": {
       "unqualified": 9
     },
@@ -101,47 +92,11 @@
     "packages/rab-server/src/modules/payroll/services/payroll.service.ts": {
       "unqualified": 33
     },
-    "packages/rab-server/src/modules/scheduling/services/availability.service.ts": {
-      "unqualified": 1
-    },
-    "packages/rab-server/src/modules/scheduling/services/rotate-shift-qr.sql.ts": {
-      "unqualified": 2
-    },
-    "packages/rab-server/src/modules/scheduling/services/scheduling-assistant.service.ts": {
-      "unqualified": 4
-    },
-    "packages/rab-server/src/modules/scheduling/services/scheduling.service.ts": {
-      "unqualified": 14
-    },
-    "packages/rab-server/src/modules/scheduling/services/sent-shifts-sql.ts": {
-      "unqualified": 5
-    },
-    "packages/rab-server/src/modules/scheduling/services/shift-completion-repair.ts": {
-      "unqualified": 6
-    },
-    "packages/rab-server/src/modules/scheduling/utils/complete-shift-if-settled.ts": {
-      "unqualified": 5
-    },
-    "packages/rab-server/src/modules/scheduling/utils/shift-action-window.ts": {
-      "unqualified": 1
-    },
     "packages/rab-server/src/modules/search/services/search.service.ts": {
       "unqualified": 19
     },
-    "packages/rab-server/src/modules/staff/services/staff-availability.ts": {
-      "unqualified": 1
-    },
-    "packages/rab-server/src/modules/staff/services/staff.service.ts": {
-      "unqualified": 10
-    },
-    "packages/rab-server/src/modules/staff/services/venue-team-scope.ts": {
-      "unqualified": 2
-    },
     "packages/rab-server/src/modules/timeline/services/timeline.service.ts": {
       "unqualified": 24
-    },
-    "packages/rab-server/src/modules/venue/files/venue-photo-file.policy.ts": {
-      "unqualified": 6
     },
     "packages/rab-worker/src/queues/rab-maintenance/account-invite-cleanup.job.ts": {
       "unqualified": 6
