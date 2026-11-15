@@ -15,6 +15,7 @@ import {
   isUuid,
   LOAD_SQL,
   LOCK_VERSION_SQL,
+  LOCK_WORKSPACE_METADATA_SQL,
   MetadataHead,
   NO_METADATA_VERSION,
   WorkspaceMetadataSnapshot,
@@ -64,6 +65,10 @@ import { SnapshotLruStats, WorkspaceSnapshotLru } from './workspace-snapshot-lru
  * Stale-read window after commit: none, for any transaction that starts after the commit. A transaction that is already
  * running sees the version of its own snapshot (READ COMMITTED: of the HEAD statement), which is correct for that snapshot.
  *
+ * OWN WRITES: a transaction that changed metadata sees its own uncommitted bump (HEAD/LOAD `own_bump`). Its view may still
+ * change before commit under the same (version, stamp) — the bump happens once per transaction — so such reads are read
+ * through and never stored (found by the independent review of this PR).
+ *
  * NOT IN HERE: permissions, role data, record data. Permissions stay per-request (`role.permission_version`), so a
  * revocation is never delayed by this cache (M0-THREAT-MODEL 8.4).
  */
@@ -80,6 +85,8 @@ export interface MetadataCacheOptions {
 }
 
 export const METADATA_CACHE_OPTIONS = Symbol('METADATA_CACHE_OPTIONS');
+
+const MAX_OVERSIZE_MARKERS = 1000;
 
 export const DEFAULT_METADATA_CACHE_OPTIONS: Readonly<MetadataCacheOptions> = Object.freeze({
   l1MaxEntries: 500,
@@ -109,6 +116,10 @@ export class MetadataCacheService {
   private readonly keyPrefix: string;
   private readonly l1: WorkspaceSnapshotLru<WorkspaceMetadataSnapshot>;
   private readonly inflight = new Map<string, Promise<WorkspaceMetadataSnapshot>>();
+  /** Snapshots read by a transaction that had bumped the version itself (uncommitted): never stored. */
+  private readonly ownBumpLoads = new WeakSet<WorkspaceMetadataSnapshot>();
+  /** Tokens whose snapshot exceeded maxEntryBytes: read through without re-encoding (bounded, insertion-ordered). */
+  private readonly oversize = new Map<string, true>();
   private readonly counters = {
     l1Hits: 0,
     redisHits: 0,
@@ -151,8 +162,9 @@ export class MetadataCacheService {
    */
   async get(manager: EntityManager): Promise<WorkspaceMetadataSnapshot> {
     const head = await this.readHead(manager);
-    if (!isCacheableVersion(head.version) || !isStamp(head.stamp)) {
-      // No version row: nothing has ever been written for this workspace. Read through, never cache.
+    if (head.ownBump || !isCacheableVersion(head.version) || !isStamp(head.stamp)) {
+      // No version row (nothing ever written for this workspace), or this transaction changed metadata and has not
+      // committed: its view may still change under the same (version, stamp) before commit. Read through, never cache.
       this.counters.uncacheableLoads += 1;
       return this.load(manager, head);
     }
@@ -166,6 +178,10 @@ export class MetadataCacheService {
     }
 
     const flightKey = `${wsKey}:${token}`;
+    if (this.oversize.has(flightKey)) {
+      this.counters.uncacheableLoads += 1;
+      return this.load(manager, head);
+    }
     const running = this.inflight.get(flightKey);
     if (running) {
       // Share a concurrent fill only when it produced exactly what we asked for; otherwise (it failed with its own
@@ -192,7 +208,13 @@ export class MetadataCacheService {
    */
   async readHead(manager: EntityManager): Promise<MetadataHead> {
     assertTenantTransaction(manager);
-    const rows = (await manager.query(HEAD_SQL)) as Array<{ organisation_id: unknown; workspace_id: unknown; metadata_version: unknown; metadata_stamp: unknown }>;
+    const rows = (await manager.query(HEAD_SQL)) as Array<{
+      organisation_id: unknown;
+      workspace_id: unknown;
+      metadata_version: unknown;
+      metadata_stamp: unknown;
+      own_bump: unknown;
+    }>;
     const row = rows?.[0];
     if (!row || !isUuid(row.organisation_id) || !isUuid(row.workspace_id)) {
       throw new MetadataCacheContextError('Metadata cache used without a bound organisation and workspace.');
@@ -207,6 +229,7 @@ export class MetadataCacheService {
       workspaceId: row.workspace_id,
       version: version as string | null,
       stamp: version === null ? null : (stamp as string),
+      ownBump: row.own_bump === true,
     };
   }
 
@@ -218,6 +241,7 @@ export class MetadataCacheService {
    */
   async lockExpectedVersion(manager: EntityManager, expectedVersion: string): Promise<void> {
     await this.readHead(manager); // tenant + transaction checks
+    await manager.query(LOCK_WORKSPACE_METADATA_SQL);
     const rows = (await manager.query(LOCK_VERSION_SQL)) as Array<{ metadata_version: string }>;
     // No version row yet = version '0' (nothing was ever written for this workspace).
     const current = rows?.[0]?.metadata_version ?? NO_METADATA_VERSION;
@@ -239,7 +263,7 @@ export class MetadataCacheService {
     const fromRedis = await this.readRedis(head.organisationId, head.workspaceId, version, stamp);
     if (fromRedis) return fromRedis;
     const snapshot = await this.load(manager, head);
-    if (isCacheableVersion(snapshot.version)) await this.store(snapshot);
+    if (isCacheableVersion(snapshot.version) && !this.ownBumpLoads.has(snapshot)) await this.store(snapshot);
     return snapshot;
   }
 
@@ -260,7 +284,7 @@ export class MetadataCacheService {
     if (!isRowArray(objects) || !isRowArray(fields) || !isRowArray(fieldOptions) || !isRowArray(indexes) || !isRowArray(indexFields)) {
       throw new Error('Metadata cache load returned an unexpected shape.');
     }
-    return deepFreeze({
+    const snapshot = deepFreeze({
       organisationId: head.organisationId,
       workspaceId: head.workspaceId,
       version: version as string,
@@ -271,6 +295,9 @@ export class MetadataCacheService {
       indexes,
       indexFields,
     });
+    // The LOAD statement saw this transaction's own uncommitted bump (a concurrent commit cannot produce it).
+    if (row.own_bump === true) this.ownBumpLoads.add(snapshot);
+    return snapshot;
   }
 
   private async store(snapshot: WorkspaceMetadataSnapshot): Promise<void> {
@@ -280,6 +307,8 @@ export class MetadataCacheService {
     const bytes = Buffer.byteLength(value, 'utf8');
     if (bytes > this.options.maxEntryBytes) {
       this.logger.warn(`Metadata snapshot of ${bytes} bytes exceeds the cache entry limit; served uncached.`);
+      this.oversize.set(`${snapshot.organisationId}:${snapshot.workspaceId}:${token}`, true);
+      while (this.oversize.size > MAX_OVERSIZE_MARKERS) this.oversize.delete(this.oversize.keys().next().value as string);
       return;
     }
     this.l1.set(`${snapshot.organisationId}:${snapshot.workspaceId}`, snapshot.version, token, snapshot, bytes);
@@ -305,6 +334,11 @@ export class MetadataCacheService {
       return null;
     }
     if (raw === null) return null;
+    if (raw.length > this.options.maxEntryBytes) {
+      // Never parse an oversized value (we never write one): treat as tampering, rebuild from PostgreSQL.
+      this.counters.redisRejected.malformed += 1;
+      return null;
+    }
     const decoded = decodeEnvelope(this.macKey, key, raw, { organisationId, workspaceId, version, stamp });
     if (!decoded.ok) {
       this.counters.redisRejected[decoded.reason] += 1;

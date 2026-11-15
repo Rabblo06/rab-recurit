@@ -4,7 +4,7 @@ import type { AuthCacheRedisClientProvider } from '../../core-modules/auth/servi
 import type { EnvironmentService } from '../../core-modules/environment/environment.service';
 import { MetadataCacheContextError, MetadataVersionConflictError } from './metadata-cache.errors';
 import { MetadataCacheService } from './metadata-cache.service';
-import { HEAD_SQL, LOAD_SQL, LOCK_VERSION_SQL } from './metadata-snapshot';
+import { HEAD_SQL, LOAD_SQL, LOCK_VERSION_SQL, LOCK_WORKSPACE_METADATA_SQL } from './metadata-snapshot';
 
 /**
  * Unit level: a fake PostgreSQL (one row of state per workspace, answering HEAD/LOAD/LOCK) and a fake Redis (a Map). The
@@ -27,6 +27,8 @@ interface FakeWorkspace {
 class FakeDb {
   workspaces = new Map<string, FakeWorkspace>();
   loads = 0;
+  /** Workspaces whose version was bumped by the (fake) current transaction, not yet committed. */
+  ownBump = new Set<string>();
   /** Runs right before a LOAD statement executes (to interleave a concurrent commit). */
   beforeLoad: (() => void) | null = null;
 
@@ -43,7 +45,15 @@ class FakeDb {
       query: async (sql: string) => {
         const w = ws ? this.workspaces.get(ws) : undefined;
         if (sql === HEAD_SQL) {
-          return [{ organisation_id: org, workspace_id: ws, metadata_version: w?.version ?? null, metadata_stamp: w?.version ? stampOf(w.version) : null }];
+          return [
+            {
+              organisation_id: org,
+              workspace_id: ws,
+              metadata_version: w?.version ?? null,
+              metadata_stamp: w?.version ? stampOf(w.version) : null,
+              own_bump: ws ? this.ownBump.has(ws) : false,
+            },
+          ];
         }
         if (sql === LOAD_SQL) {
           this.beforeLoad?.();
@@ -56,6 +66,7 @@ class FakeDb {
               workspace_id: ws,
               metadata_version: now?.version ?? null,
               metadata_stamp: now?.version ? stampOf(now.version) : null,
+              own_bump: ws ? this.ownBump.has(ws) : false,
               objects: now?.objects ?? [],
               fields: [],
               field_options: [],
@@ -64,6 +75,7 @@ class FakeDb {
             },
           ];
         }
+        if (sql === LOCK_WORKSPACE_METADATA_SQL) return [{}];
         if (sql === LOCK_VERSION_SQL) return w?.version ? [{ metadata_version: w.version }] : [];
         throw new Error(`unexpected SQL: ${sql}`);
       },
@@ -217,6 +229,55 @@ describe('MetadataCacheService (metadata engine E5, unit)', () => {
     const fresh = await a.get(manager);
     expect(old.objects.map((o) => o.name_singular)).toEqual(['rocket']);
     expect(fresh.objects.map((o) => o.name_singular)).toEqual(['other']);
+  });
+
+  it("a transaction reading its own uncommitted metadata change is read through and never cached", async () => {
+    const cache = instance(redis);
+    db.commitObject(WS_A, 'comet'); // the fake: this transaction's own write, version 2 not committed yet
+    db.ownBump.add(WS_A);
+    const mid = await cache.get(db.manager(ORG_A, WS_A));
+    expect(mid.version).toBe('2');
+    expect(redis.store.size).toBe(0);
+    await cache.get(db.manager(ORG_A, WS_A));
+    expect(db.loads).toBe(2); // nothing in memory either
+    expect(cache.stats().l1.entries).toBe(0);
+  });
+
+  it('a load that sees its own bump (head did not) is not stored either', async () => {
+    const cache = instance(redis);
+    db.beforeLoad = () => db.ownBump.add(WS_A);
+    await cache.get(db.manager(ORG_A, WS_A));
+    expect(redis.store.size).toBe(0);
+    expect(cache.stats().l1.entries).toBe(0);
+  });
+
+  it('an oversized Redis value is rejected before it is parsed', async () => {
+    const cache = new MetadataCacheService(env, { client: redis } as unknown as AuthCacheRedisClientProvider, { maxEntryBytes: 4096 });
+    redis.store.set(cache.redisKey(ORG_A, WS_A, token('1')), 'x'.repeat(5000));
+    const parse = jest.spyOn(JSON, 'parse');
+    try {
+      const snap = await cache.get(db.manager(ORG_A, WS_A));
+      expect(snap.objects).toHaveLength(1);
+      expect(parse.mock.calls.some(([arg]) => typeof arg === 'string' && arg.length === 5000)).toBe(false);
+    } finally {
+      parse.mockRestore();
+    }
+    expect(cache.stats().redisRejected.malformed).toBe(1);
+  });
+
+  it('an oversized snapshot is encoded once per version, then read through', async () => {
+    const cache = new MetadataCacheService(env, { client: redis } as unknown as AuthCacheRedisClientProvider, { maxEntryBytes: 10 });
+    const stringify = jest.spyOn(JSON, 'stringify');
+    try {
+      await cache.get(db.manager(ORG_A, WS_A));
+      const afterFirst = stringify.mock.calls.length;
+      await cache.get(db.manager(ORG_A, WS_A));
+      expect(stringify.mock.calls.length).toBe(afterFirst);
+    } finally {
+      stringify.mockRestore();
+    }
+    expect(redis.store.size).toBe(0);
+    expect(db.loads).toBe(2);
   });
 
   it('lockExpectedVersion refuses a stale expected version with 409', async () => {

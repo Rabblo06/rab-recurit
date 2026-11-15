@@ -10,8 +10,8 @@
  *      five E1 tables (`core.metadata_version_bump()`), so no code path (service, E2 sync, M2 executor, psql) can forget it;
  *   2. move at most ONCE per transaction and workspace (`last_bump_xact` = the top-level transaction id; savepoint-safe,
  *      and the E2 runner's per-table write counts rely on "each row at most once per transaction");
- *   3. never go backwards, and the row never be deleted directly while its workspace exists
- *      (`core.workspace_metadata_state_guard()`). The cache identity also carries the bump time (`updated_at`), so even a
+ *   3. never go backwards, and the row be written ONLY by that trigger (INSERT at 1, UPDATE by exactly +1) or removed only
+ *      by the workspace FK cascade (`core.workspace_metadata_state_guard()`, which refuses any direct statement). The cache identity also carries the bump time (`updated_at`), so even a
  *      row that is recreated (TRUNCATE by an operator or a test fixture, a restored backup) gets a new identity and can
  *      never make an old cached entry current again — which is why TRUNCATE is not trigger-guarded (an existing
  *      disposable-database fixture runs `TRUNCATE core.organisation CASCADE`).
@@ -24,8 +24,11 @@
  * ACCESS: table and functions owned by crewflow (handed over inside withCrewflowCoreCreate, like the E1 tables);
  * crewflow_app holds SELECT, INSERT, UPDATE (no DELETE: the workspace FK cascade runs as the table owner); nothing for
  * PUBLIC. ENABLE + FORCE RLS with the tenant policy, same predicate as the E1 tables. Both functions are SECURITY INVOKER:
- * the bump runs under the caller's tenant policy, so it can only ever touch the caller's own workspace row (the metadata
- * row it reacts to has already passed the same WITH CHECK). BC-01 (accepted): crewflow_owner can, through crewflow,
+ * the bump runs under the caller's tenant policy, so for a normal write it can only touch the caller's own workspace row
+ * (the metadata row it reacts to has already passed the same WITH CHECK). FK cascades run as the table owner without
+ * row security; the bump then only addresses OLD.workspace_id of the row being cascaded. A future rab_secure_owner
+ * SECURITY DEFINER writing E1 rows would get "permission denied" from the bump (no grant): fails closed, by design until
+ * such a definer is reviewed. BC-01 (accepted): crewflow_owner can, through crewflow,
  * DISABLE TRIGGER or DROP these; the triggers guard normal code paths, not injected SQL.
  */
 
@@ -109,18 +112,28 @@ LANGUAGE plpgsql
 SET search_path = pg_catalog, pg_temp
 AS $fn$
 BEGIN
+  -- Every legitimate write arrives from inside another trigger (depth >= 2): INSERT / UPDATE only from
+  -- core.metadata_version_bump(), DELETE only from the workspace FK cascade. A direct statement runs this guard at depth 1
+  -- and is refused, so a caller holding the table grants (crewflow_app, or crewflow_owner through crewflow) cannot suppress
+  -- a bump (pre-setting last_bump_xact), jump the version, or re-insert a pre-restore (version, stamp). Operator repair:
+  -- DISABLE TRIGGER as the owner (BC-01 class, visible in the posture goldens).
+  IF pg_catalog.pg_trigger_depth() < 2 THEN
+    RAISE EXCEPTION 'core.workspace_metadata_state is written only by the metadata version trigger' USING ERRCODE = '42501';
+  END IF;
   IF TG_OP = 'DELETE' THEN
-    -- A direct DELETE runs this trigger at depth 1; the workspace FK cascade arrives at depth 2 or more.
-    IF pg_catalog.pg_trigger_depth() = 1 THEN
-      RAISE EXCEPTION 'the metadata version row leaves only with its workspace' USING ERRCODE = '42501';
-    END IF;
     RETURN OLD;
+  END IF;
+  IF TG_OP = 'INSERT' THEN
+    IF NEW.metadata_version <> 1 THEN
+      RAISE EXCEPTION 'a metadata version row starts at 1' USING ERRCODE = '42501';
+    END IF;
+    RETURN NEW;
   END IF;
   IF NEW.workspace_id IS DISTINCT FROM OLD.workspace_id OR NEW.organisation_id IS DISTINCT FROM OLD.organisation_id THEN
     RAISE EXCEPTION 'workspace_metadata_state identity is immutable' USING ERRCODE = '42501';
   END IF;
-  IF NEW.metadata_version < OLD.metadata_version THEN
-    RAISE EXCEPTION 'metadata_version never decreases' USING ERRCODE = '42501';
+  IF NEW.metadata_version <> OLD.metadata_version + 1 THEN
+    RAISE EXCEPTION 'metadata_version moves by exactly one step' USING ERRCODE = '42501';
   END IF;
   RETURN NEW;
 END
@@ -131,7 +144,7 @@ export const METADATA_VERSION_UP_SQL: readonly string[] = [
   'CREATE INDEX workspace_metadata_state_organisation_workspace_idx ON core.workspace_metadata_state (organisation_id, workspace_id)',
   METADATA_STATE_GUARD_FUNCTION_SQL,
   `REVOKE ALL ON FUNCTION ${METADATA_STATE_GUARD_FUNCTION} FROM PUBLIC`,
-  `CREATE TRIGGER workspace_metadata_state_guard BEFORE UPDATE OR DELETE ON core.workspace_metadata_state FOR EACH ROW EXECUTE FUNCTION ${METADATA_STATE_GUARD_FUNCTION}`,
+  `CREATE TRIGGER workspace_metadata_state_guard BEFORE INSERT OR UPDATE OR DELETE ON core.workspace_metadata_state FOR EACH ROW EXECUTE FUNCTION ${METADATA_STATE_GUARD_FUNCTION}`,
   'ALTER TABLE core.workspace_metadata_state ENABLE ROW LEVEL SECURITY',
   'ALTER TABLE core.workspace_metadata_state FORCE ROW LEVEL SECURITY',
   `CREATE POLICY workspace_metadata_state_tenant ON core.workspace_metadata_state AS PERMISSIVE FOR ALL TO PUBLIC

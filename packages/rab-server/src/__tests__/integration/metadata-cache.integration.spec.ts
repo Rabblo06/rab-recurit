@@ -8,7 +8,7 @@ import { DataSource, EntityManager } from 'typeorm';
 import { AppModule } from '../../app.module';
 import { AuthCacheRedisClientProvider } from '../../engine/core-modules/auth/services/auth-cache-redis-client.provider';
 import { EnvironmentService } from '../../engine/core-modules/environment/environment.service';
-import { MetadataCacheContextError } from '../../engine/metadata/cache/metadata-cache.errors';
+import { MetadataCacheContextError, MetadataVersionConflictError } from '../../engine/metadata/cache/metadata-cache.errors';
 import { MetadataCacheModule } from '../../engine/metadata/cache/metadata-cache.module';
 import { MetadataCacheService } from '../../engine/metadata/cache/metadata-cache.service';
 import { WorkspaceMetadataSnapshot } from '../../engine/metadata/cache/metadata-snapshot';
@@ -360,6 +360,80 @@ describeIfDb('Metadata cache E5: versioned per-workspace cache, PostgreSQL autho
         expect(payload.objects.map((o) => o.name_singular).sort()).toEqual(expectedFor(payload.v));
       }
       expect(names(await inTenant(dsB, w, (m) => cold.get(m)))).toEqual(expectedFor(String(WRITES)));
+    });
+  });
+
+  // ------------------------------------------------------------------------------------------------ own writes (review #164)
+
+  describe("a transaction's own uncommitted metadata change is never cached", () => {
+    it('get() between two changes of one transaction caches nothing; after commit everyone sees both', async () => {
+      const w = await seedWorkspace();
+      await commitObject(dsA, w, 'alpha');
+      await inTenant(dsA, w, async (m) => {
+        await insertObject(m, w, 'beta');
+        const mid = await cacheA.get(m);
+        expect(names(mid)).toEqual(['alpha', 'beta']);
+        await insertObject(m, w, 'gamma');
+        // nothing for this workspace's new version was published while uncommitted
+        expect((await scanKeys(cacheA.redisKey(w.org, w.ws, '2.*'))).length).toBe(0);
+      });
+      expect(names(await inTenant(dsA, w, (m) => cacheA.get(m)))).toEqual(['alpha', 'beta', 'gamma']);
+      expect(names(await inTenant(dsB, w, (m) => cacheB.get(m)))).toEqual(['alpha', 'beta', 'gamma']);
+    });
+
+    it('a rolled-back savepoint read inside the transaction never reaches the cache', async () => {
+      const w = await seedWorkspace();
+      await commitObject(dsA, w, 'alpha');
+      await inTenant(dsA, w, async (m) => {
+        await m.query('SAVEPOINT s1');
+        await insertObject(m, w, 'beta');
+        expect(names(await cacheA.get(m))).toEqual(['alpha', 'beta']);
+        await m.query('ROLLBACK TO SAVEPOINT s1');
+        await insertObject(m, w, 'gamma');
+      });
+      expect(names(await inTenant(dsB, w, (m) => cacheB.get(m)))).toEqual(['alpha', 'gamma']);
+      expect(names(await inTenant(dsA, w, (m) => cacheA.get(m)))).toEqual(['alpha', 'gamma']);
+    });
+
+    it('the version row is written only by the trigger: direct UPDATE / INSERT are refused, normal changes still bump', async () => {
+      const w = await seedWorkspace();
+      await commitObject(dsA, w, 'alpha');
+      await expect(
+        inTenant(dsA, w, (m) => m.query(`UPDATE core.workspace_metadata_state SET last_bump_xact = pg_catalog.pg_current_xact_id()`)),
+      ).rejects.toMatchObject({ code: '42501' });
+      await expect(inTenant(dsA, w, (m) => m.query(`UPDATE core.workspace_metadata_state SET metadata_version = metadata_version + 5`))).rejects.toMatchObject({ code: '42501' });
+      const fresh = await seedWorkspace();
+      await expect(
+        inTenant(dsA, fresh, (m) =>
+          m.query(`INSERT INTO core.workspace_metadata_state (workspace_id, organisation_id) VALUES ($1::uuid, $2::uuid)`, [fresh.ws, fresh.org]),
+        ),
+      ).rejects.toMatchObject({ code: '42501' });
+      await commitObject(dsA, w, 'beta');
+      expect(await versionOf(w)).toBe('2');
+    });
+
+    it("lockExpectedVersion('0'): two concurrent first changes of a workspace — exactly one wins, the other gets 409", async () => {
+      const w = await seedWorkspace();
+      let releaseFirst!: () => void;
+      const firstHolds = new Promise<void>((r) => (releaseFirst = r));
+      let firstLocked!: () => void;
+      const locked = new Promise<void>((r) => (firstLocked = r));
+      const first = inTenant(dsA, w, async (m) => {
+        await cacheA.lockExpectedVersion(m, '0');
+        firstLocked();
+        await insertObject(m, w, 'first');
+        await firstHolds;
+      });
+      await locked;
+      const second = inTenant(dsB, w, async (m) => {
+        await cacheB.lockExpectedVersion(m, '0');
+        await insertObject(m, w, 'second');
+      });
+      await new Promise((r) => setTimeout(r, 300)); // the second is now waiting on the workspace lock
+      releaseFirst();
+      await first;
+      await expect(second).rejects.toBeInstanceOf(MetadataVersionConflictError);
+      expect(names(await inTenant(dsA, w, (m) => cacheA.get(m)))).toEqual(['first']);
     });
   });
 

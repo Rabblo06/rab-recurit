@@ -47,6 +47,11 @@ export interface MetadataHead {
   workspaceId: string;
   version: string | null;
   stamp: string | null;
+  /**
+   * True when THIS transaction bumped the version (it changed metadata and has not committed). Its view is uncommitted
+   * and may still change before commit under the same (version, stamp), so it is read through and never cached.
+   */
+  ownBump: boolean;
 }
 
 /** Version `'0'`: no version row exists, nothing is cacheable. */
@@ -59,7 +64,8 @@ export const NO_METADATA_VERSION = '0';
 export const HEAD_SQL = `SELECT core.current_org()::text AS organisation_id,
        core.current_workspace()::text AS workspace_id,
        s.metadata_version::text AS metadata_version,
-       (extract(epoch FROM s.updated_at) * 1000000)::bigint::text AS metadata_stamp
+       (extract(epoch FROM s.updated_at) * 1000000)::bigint::text AS metadata_stamp,
+       COALESCE(s.last_bump_xact = pg_catalog.pg_current_xact_id_if_assigned(), false) AS own_bump
   FROM (SELECT 1) one
   LEFT JOIN core.workspace_metadata_state s
     ON s.workspace_id = core.current_workspace() AND s.organisation_id = core.current_org()`;
@@ -68,6 +74,7 @@ export const LOAD_SQL = `SELECT core.current_org()::text AS organisation_id,
        core.current_workspace()::text AS workspace_id,
        s.metadata_version::text AS metadata_version,
        (extract(epoch FROM s.updated_at) * 1000000)::bigint::text AS metadata_stamp,
+       COALESCE(s.last_bump_xact = pg_catalog.pg_current_xact_id_if_assigned(), false) AS own_bump,
        (SELECT COALESCE(jsonb_agg(to_jsonb(t) ORDER BY t.id), '[]'::jsonb)
           FROM core.object_metadata t
          WHERE t.workspace_id = core.current_workspace() AND t.organisation_id = core.current_org()) AS objects,
@@ -88,9 +95,13 @@ export const LOAD_SQL = `SELECT core.current_org()::text AS organisation_id,
     ON s.workspace_id = core.current_workspace() AND s.organisation_id = core.current_org()`;
 
 /**
- * M2 (optimistic concurrency): lock the version row for the rest of the transaction and return its value. The row lock
- * serialises concurrent metadata changes of one workspace; the version trigger then bumps it once in this transaction.
+ * M2 (optimistic concurrency), step 1: a transaction-scoped advisory lock per workspace. It also serialises the very first
+ * change of a workspace, when no version row exists yet to lock. Must be its own statement: the version read after it
+ * needs a snapshot taken AFTER the lock was granted (READ COMMITTED).
  */
+export const LOCK_WORKSPACE_METADATA_SQL = `SELECT pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtextextended('crewflow:metadata:' || core.current_workspace()::text, 0))`;
+
+/** Step 2: lock the version row for the rest of the transaction and return its value. */
 export const LOCK_VERSION_SQL = `SELECT s.metadata_version::text AS metadata_version
   FROM core.workspace_metadata_state s
  WHERE s.workspace_id = core.current_workspace()
