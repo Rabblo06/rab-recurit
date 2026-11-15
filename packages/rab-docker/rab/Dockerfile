@@ -186,17 +186,25 @@ RUN rm -rf /usr/local/lib/node_modules/npm /usr/local/bin/npm /usr/local/bin/npx
 # O1: the API and the Worker share this one tree. The Worker-only packages (the native PDF renderer's closure) are the
 # worker-modules DELTA, copied on top of the API's production tree; they are present in the API's filesystem but never
 # imported by the API process (the import-graph checks of the image gate are the guard).
+# Host umask independence: the package.json files come from the build context (`COPY . .` keeps the checkout's modes, so
+# a checkout made with umask 0002 has them 0664) and are therefore copied with an explicit --chmod=0644. Everything else
+# copied here was already normalised in its own stage (`find ... -perm /022 -exec chmod go-w`: the dist folders in
+# `build`, node_modules in `runtime-modules` and `worker-modules`). The gate below stays unchanged and strict;
+# test_image_gate.py (FinalStageCopyModes) refuses a final-stage COPY that is neither --chmod'ed nor from a normalised path.
 COPY --from=runtime-modules /app/node_modules ./node_modules
 COPY --from=worker-modules /worker-delta/node_modules/ ./node_modules/
-COPY --from=build /app/package.json ./package.json
-COPY --from=build /app/packages/rab-server/package.json ./packages/rab-server/package.json
+COPY --from=build --chmod=0644 /app/package.json ./package.json
+# Each package's dist is copied BEFORE its package.json: a COPY with --chmod gives the directories it creates implicitly
+# the same mode (0644, no search bit), which made /app/packages/* untraversable for the `node` user ("Cannot find
+# module"). The dist COPYs create those directories 0755; test_image_gate.py refuses a --chmod COPY into a new directory.
 COPY --from=build /app/packages/rab-server/dist ./packages/rab-server/dist
-COPY --from=build /app/packages/rab-worker/package.json ./packages/rab-worker/package.json
+COPY --from=build --chmod=0644 /app/packages/rab-server/package.json ./packages/rab-server/package.json
 COPY --from=build /app/packages/rab-worker/dist ./packages/rab-worker/dist
-COPY --from=build /app/packages/rab-shared/package.json ./packages/rab-shared/package.json
+COPY --from=build --chmod=0644 /app/packages/rab-worker/package.json ./packages/rab-worker/package.json
 COPY --from=build /app/packages/rab-shared/dist-cjs ./packages/rab-shared/dist-cjs
-COPY --from=build /app/packages/rab-emails/package.json ./packages/rab-emails/package.json
+COPY --from=build --chmod=0644 /app/packages/rab-shared/package.json ./packages/rab-shared/package.json
 COPY --from=build /app/packages/rab-emails/dist ./packages/rab-emails/dist
+COPY --from=build --chmod=0644 /app/packages/rab-emails/package.json ./packages/rab-emails/package.json
 # Entry scripts are read+execute only (0555) and set in the COPY itself (no separate chmod layer). The API's command is
 # api-prestart.sh; start.sh is kept only as a forwarder to it. DB-SETUP: the deploy compose files make api-prestart.sh and
 # worker-start.sh the ENTRYPOINT of rab-api / rab-worker (PID 1), then `/sbin/tini -s -- node ...`. Those two services never
