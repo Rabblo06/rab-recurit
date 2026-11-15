@@ -121,6 +121,15 @@ describeIfApproved('Phase D F-1: account-invite cleanup definers (integration; n
     expect((await admin.query('SELECT count(*)::int AS n FROM core.account_invite WHERE user_id = $1', [s.user_id])).rows[0].n).toBe(0);
   });
 
+  it('owner 0g (InviteCleanupSkipsSoftDeleted1786721520000): a SOFT-deleted exhausted account is never listed and never deleted', async () => {
+    const kept = await seedExhaustedInvite({ expiredDaysAgo: 9, status: 'invite_expired', cleanupDaysAgo: 2 });
+    await admin.query(`UPDATE core."user" SET deleted_at = now() WHERE id = $1`, [kept.user_id]);
+    const { rows } = await worker.query('SELECT * FROM core.worker_account_invite_cleanup_candidates(50, NULL, NULL)');
+    expect(rows.some((r: { user_id: string }) => r.user_id === kept.user_id)).toBe(false);
+    expect((await worker.query('SELECT core.worker_delete_expired_invited_user($1) AS r', [kept.user_id])).rows[0].r).toBe('not_eligible');
+    expect(await statusOf(kept.user_id)).toBe('invite_expired'); // the row (and its history) stays
+  });
+
   it('delete refuses an ACTIVE, an invited (not expired) and an unknown account', async () => {
     const active = await seedExhaustedInvite({ expiredDaysAgo: 9, status: 'active', cleanupDaysAgo: 2 });
     const invited = await seedExhaustedInvite({ expiredDaysAgo: 9, status: 'invited', cleanupDaysAgo: 2 });
