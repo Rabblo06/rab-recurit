@@ -1,5 +1,6 @@
 import { Job } from 'bullmq';
 
+import { businessTables } from '@rab/server/engine/core-modules/tenant/business-tables';
 import { TimerTriggerQueueService } from '@rab/server/engine/core-modules/timer-trigger/timer-trigger-queue.service';
 import { TimerTriggerKind, TimerTriggerOutcome } from '@rab/server/engine/worker-shared/timer-trigger.contract';
 import { runScopedForOrg } from '../../core/database/scoped-job';
@@ -38,8 +39,9 @@ export function buildTimerTriggerActions(deps: WorkerJobDependencies): Readonly<
       // staff_accepted and due, so a deadline withdrawal now means the wake withdrew it; anything else → false.
       return scoped(p, async (manager) => {
         await manager.query('SET TRANSACTION READ ONLY');
+        const t = businessTables(manager);
         const [row] = await manager.query<Array<{ status: string; rejected_by: string | null; rejection_reason: string | null }>>(
-          `SELECT status, rejected_by, rejection_reason FROM job_offer WHERE id = $1`,
+          `SELECT status, rejected_by, rejection_reason FROM ${t.job_offer} WHERE id = $1`,
           [p.subjectId],
         );
         return row?.status === 'manager_rejected' && row.rejected_by === null && row.rejection_reason === OFFER_CLOSED_REASON.CONFIRMATION_DEADLINE_PASSED;

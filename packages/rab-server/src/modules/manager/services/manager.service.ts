@@ -1,4 +1,5 @@
 import { loadSystemRoleDefaultPermissions } from '../../identity/services/system-role-permissions';
+import { lockLiveUser } from '../../identity/services/live-user-lock';
 import { ARCHIVE_TRANSITIONS, ArchiveState, archiveStateOf, assertTransition, EmailOutboxJobType, EmailOutboxStatusType, ManagerType, ManagerTypeType, normalizeEmail, PermissionFlag, PermissionFlagType, USER_STATUS_TRANSITIONS, UserStatus } from '@rab/shared';
 import { BadRequestException, ConflictException, ForbiddenException, Inject, Injectable, NotFoundException } from '@nestjs/common';
 import { PermissionsService } from '../../../engine/core-modules/permissions/permissions.service';
@@ -7,6 +8,7 @@ import { EntityManager, In } from 'typeorm';
 
 import { AccountInvite, EmailOutbox, Organisation, OrganisationMember, Permission, Role, RolePermission, User, UserRole } from '../../identity/entities';
 import { AuthContext } from '../../../engine/core-modules/tenant/auth-context.interface';
+import { businessTables } from '../../../engine/core-modules/tenant/business-tables';
 import { TenantContextService } from '../../../engine/core-modules/tenant/tenant-context.service';
 import { WorkspaceMembershipService } from '../../../engine/core-modules/tenant/workspace-membership.service';
 import { AccountInviteService, InvitationLifecycleStatus } from '../../../engine/core-modules/auth/services/account-invite.service';
@@ -362,7 +364,7 @@ export class ManagerService {
   async get(ctx: AuthContext, id: string): Promise<ManagerSummary> {
     return this.tenantContext.runInTenantContext(ctx, async (manager) => {
       const profile = await manager.findOne(ManagerProfile, { where: { id, organisationId: ctx.organisationId! }, relations: { user: true } });
-      if (!profile) throw new NotFoundException('Manager not found.');
+      if (!profile?.user) throw new NotFoundException('Manager not found.');
       return this.toSummaryWithInvite(manager, profile);
     });
   }
@@ -371,7 +373,7 @@ export class ManagerService {
     return this.tenantContext.runInTenantContext(ctx, async (manager) => {
       const qb = manager
         .createQueryBuilder(ManagerProfile, 'mp')
-        .leftJoinAndSelect('mp.user', 'user')
+        .innerJoinAndSelect('mp.user', 'user') // owner 0g: a soft-deleted account (deleted_at, filtered in the join) is not listed
         .where('mp.organisationId = :orgId', { orgId: ctx.organisationId! });
 
       if (dto.q) {
@@ -416,7 +418,7 @@ export class ManagerService {
     return this.tenantContext.runInTenantContext(ctx, async (manager) => {
       const qb = manager
         .createQueryBuilder(ManagerProfile, 'mp')
-        .leftJoinAndSelect('mp.user', 'user')
+        .innerJoinAndSelect('mp.user', 'user') // owner 0g: a soft-deleted account (deleted_at, filtered in the join) is not listed
         .where('mp.organisationId = :orgId', { orgId: ctx.organisationId! })
         .andWhere('mp.workspaceId = :workspaceId', { workspaceId })
         .andWhere('mp.type = :type', { type: ManagerType.VENUE });
@@ -433,9 +435,10 @@ export class ManagerService {
       const [profiles, total] = await qb.getManyAndCount();
       const summaries = await this.toSummaries(manager, profiles);
       const ids = profiles.map((p) => p.id);
+      const t = businessTables(manager);
       const links: Array<{ manager_profile_id: string; id: string; name: string }> = ids.length
         ? await manager.query(
-            `SELECT mv.manager_profile_id, v.id, v.name FROM manager_venue mv JOIN venue v ON v.id = mv.venue_id
+            `SELECT mv.manager_profile_id, v.id, v.name FROM ${t.manager_venue} mv JOIN ${t.venue} v ON v.id = mv.venue_id
               WHERE mv.manager_profile_id = ANY($1) AND mv.organisation_id = $2 AND mv.workspace_id = $3 ORDER BY v.name`,
             [ids, ctx.organisationId, workspaceId],
           )
@@ -667,7 +670,8 @@ export class ManagerService {
     let displayChangedFor: string | null = null;
     const summary = await this.tenantContext.runInTenantContext(ctx, async (manager) => {
       const profile = await manager.findOne(ManagerProfile, { where: { id }, relations: { user: true } });
-      if (!profile) throw new NotFoundException('Manager not found.');
+      if (!profile?.user) throw new NotFoundException('Manager not found.');
+      await lockLiveUser(manager, profile.userId, 'Manager not found.');
       await this.assertCeoMutationAllowed(manager, ctx, profile);
 
       const { firstName, lastName, phone, jobTitle } = dto;
@@ -710,7 +714,8 @@ export class ManagerService {
     await this.stepUpReauth.assertRecentStepUp(ctx, active ? 'user.reactivate' : 'user.deactivate');
     return this.tenantContext.runInTenantContext(ctx, async (manager) => {
       const profile = await manager.findOne(ManagerProfile, { where: { id }, relations: { user: true } });
-      if (!profile) throw new NotFoundException('Manager not found.');
+      if (!profile?.user) throw new NotFoundException('Manager not found.');
+      await lockLiveUser(manager, profile.userId, 'Manager not found.');
       await this.assertCeoMutationAllowed(manager, ctx, profile);
       if (profile.user!.status === UserStatus.INVITED || profile.user!.status === UserStatus.INVITE_EXPIRED) {
         throw new ConflictException('This account has not been activated yet — use Resend Invitation or Re-invite instead.');
@@ -749,7 +754,8 @@ export class ManagerService {
     return this.tenantContext.runInTenantContext(ctx, async (manager) => {
       await this.assertCanManageManagersTx(manager, ctx);
       const profile = await manager.findOne(ManagerProfile, { where: { id, organisationId: ctx.organisationId! }, relations: { user: true } });
-      if (!profile) throw new NotFoundException('Manager not found.');
+      if (!profile?.user) throw new NotFoundException('Manager not found.');
+      await lockLiveUser(manager, profile.userId, 'Manager not found.');
       await this.assertCeoMutationAllowed(manager, ctx, profile);
       assertTransition(ARCHIVE_TRANSITIONS, archiveStateOf(profile.archivedAt), ArchiveState.ARCHIVED);
       if (profile.userId === ctx.userId || profile.userId === ctx.inspectedBy) {
@@ -775,7 +781,8 @@ export class ManagerService {
     return this.tenantContext.runInTenantContext(ctx, async (manager) => {
       await this.assertCanManageManagersTx(manager, ctx);
       const profile = await manager.findOne(ManagerProfile, { where: { id, organisationId: ctx.organisationId! }, relations: { user: true } });
-      if (!profile) throw new NotFoundException('Manager not found.');
+      if (!profile?.user) throw new NotFoundException('Manager not found.');
+      await lockLiveUser(manager, profile.userId, 'Manager not found.');
       await this.assertCeoMutationAllowed(manager, ctx, profile);
       assertTransition(ARCHIVE_TRANSITIONS, archiveStateOf(profile.archivedAt), ArchiveState.ACTIVE);
       await manager.update(ManagerProfile, id, { archivedAt: null, archivedBy: null });
@@ -798,7 +805,8 @@ export class ManagerService {
     await this.stepUpReauth.assertRecentStepUp(ctx, 'user.password_reset');
     return this.tenantContext.runInTenantContext(ctx, async (manager) => {
       const profile = await manager.findOne(ManagerProfile, { where: { id }, relations: { user: true } });
-      if (!profile) throw new NotFoundException('Manager not found.');
+      if (!profile?.user) throw new NotFoundException('Manager not found.');
+      await lockLiveUser(manager, profile.userId, 'Manager not found.');
       await this.assertCeoMutationAllowed(manager, ctx, profile);
       if (profile.user!.status === UserStatus.INVITED || profile.user!.status === UserStatus.INVITE_EXPIRED) {
         throw new ConflictException('This account has not been activated yet — use Resend Invitation instead.');
@@ -816,7 +824,8 @@ export class ManagerService {
 
   private async findPendingProfileOrFail(manager: EntityManager, ctx: AuthContext, id: string): Promise<ManagerProfile> {
     const profile = await manager.findOne(ManagerProfile, { where: { id }, relations: { user: true } });
-    if (!profile) throw new NotFoundException('Manager not found.');
+    if (!profile?.user) throw new NotFoundException('Manager not found.');
+    await lockLiveUser(manager, profile.userId, 'Manager not found.');
     await this.assertCeoMutationAllowed(manager, ctx, profile);
     if (profile.user!.status !== UserStatus.INVITED && profile.user!.status !== UserStatus.INVITE_EXPIRED) {
       throw new ConflictException('This account is not a pending invitation.');
@@ -969,8 +978,9 @@ export class ManagerService {
       }
 
       // workspace_id stamped from the Venue, which now equals the profile's workspace by construction.
+      const t = businessTables(manager);
       await manager.query(
-        `INSERT INTO manager_venue (organisation_id, manager_profile_id, venue_id, workspace_id)
+        `INSERT INTO ${t.manager_venue} (organisation_id, manager_profile_id, venue_id, workspace_id)
          VALUES ($1, $2, $3, $4) ON CONFLICT (manager_profile_id, venue_id) DO NOTHING`,
         [ctx.organisationId, managerId, venueId, venue.workspaceId],
       );
@@ -1001,7 +1011,8 @@ export class ManagerService {
 
   async unassignVenue(ctx: AuthContext, managerId: string, venueId: string): Promise<void> {
     return this.tenantContext.runInTenantContext(ctx, async (manager) => {
-      await manager.query(`DELETE FROM manager_venue WHERE manager_profile_id = $1 AND venue_id = $2`, [managerId, venueId]);
+      const t = businessTables(manager);
+      await manager.query(`DELETE FROM ${t.manager_venue} WHERE manager_profile_id = $1 AND venue_id = $2`, [managerId, venueId]);
       await this.auditService.record(manager, ctx, AuditAction.MANAGER_VENUE_UNASSIGNED, {
         entityType: 'manager',
         entityId: managerId,
@@ -1010,14 +1021,82 @@ export class ManagerService {
     });
   }
 
+  /**
+   * `GET /rest/v1/managers/:id/venues`. Part C1 (HWS-AUDIT.md §0.1, BROKEN 4.5): `venue` and `manager_venue` are workspace
+   * tables, so they are read in the TARGET manager's own workspace (`runInWorkspaceContext`: its schema with HWS on, the
+   * `core` copy with HWS off), never in whatever schema the caller's session happens to route to — a workspace-less CEO used
+   * to read the stale `core` copy, and a caller in another workspace read its own schema and got `[]`.
+   *   - Layer 2: MANAGER_MANAGE re-checked here (403), not only by the route guard.
+   *   - The profile is looked up in the caller's organisation; not found → 404 (another organisation included).
+   *   - Owner decision 0d (2026-11-14): an ORGANISATION-WIDE holder of `manager.manage` (an organisation-level role or a
+   *     per-user grant, not revoked — the same scope delete / assign use) reads a manager of ANY active workspace of the
+   *     organisation, bound to a workspace of their own or not: the target's workspace is confirmed by
+   *     `core.admin_workspace_in_org` (404 otherwise) and read in that workspace's context, the re-binding
+   *     VenueManagerService's org-admin flow uses. A caller whose `manager.manage` came ONLY from a custom role of their
+   *     own workspace would keep the strict rule (another workspace → 404); the database refuses manager.manage on a
+   *     workspace-member role today, so that branch is defence in depth. A caller without manager.manage → 403 above.
+   *   - A profile with no workspace has no venue link (manager_venue requires one): `[]` for a workspace-less
+   *     organisation administrator; 404 for a workspace-bound caller (owner decision 0d: it is not a manager of the
+   *     caller's workspace).
+   */
   async listVenues(ctx: AuthContext, managerId: string): Promise<Venue[]> {
-    return this.tenantContext.runInTenantContext(ctx, (manager) =>
+    if (!ctx.organisationId) throw new NotFoundException('Manager not found.');
+    const targetWorkspaceId = await this.tenantContext.runInTenantContext(ctx, async (manager) => {
+      if (!(await this.permissions.userHasPermissionTx(manager, ctx, PermissionFlag.MANAGER_MANAGE))) {
+        throw new ForbiddenException('Managing Manager accounts is not permitted.');
+      }
+      const profile = await manager.findOne(ManagerProfile, { where: { id: managerId, organisationId: ctx.organisationId! } });
+      if (!profile) throw new NotFoundException('Manager not found.');
+      if (!profile.workspaceId) {
+        if (ctx.workspaceId) throw new NotFoundException('Manager not found.');
+        return null;
+      }
+      if (profile.workspaceId === ctx.workspaceId) return profile.workspaceId;
+      if (ctx.workspaceId && !(await this.holdsOrganisationWideManagerManage(manager, ctx))) {
+        throw new NotFoundException('Manager not found.');
+      }
+      const [{ ok }] = await manager.query<Array<{ ok: boolean }>>('SELECT core.admin_workspace_in_org($1, $2) AS ok', [
+        profile.workspaceId,
+        ctx.organisationId,
+      ]);
+      if (!ok) throw new NotFoundException('Manager not found.');
+      return profile.workspaceId;
+    });
+    if (!targetWorkspaceId) return [];
+    return this.tenantContext.runInWorkspaceContext({ ...ctx, workspaceId: targetWorkspaceId }, (manager) =>
       manager
         .createQueryBuilder(Venue, 'v')
         .innerJoin(ManagerVenue, 'mv', 'mv.venue_id = v.id')
         .where('mv.manager_profile_id = :managerId', { managerId })
         .getMany(),
     );
+  }
+
+  /**
+   * True when the caller's `manager.manage` is ORGANISATION-WIDE: a per-user `grant` override of the bound organisation, or
+   * (with no `revoke` override) a role with no workspace — a system / organisation role, never a custom workspace-member
+   * role (`core.role.workspace_id`, WorkspaceMemberRoles1786714500000). The same override precedence as
+   * PermissionsService.userHasPermissionTx, pinned to the caller's organisation.
+   */
+  private async holdsOrganisationWideManagerManage(manager: EntityManager, ctx: AuthContext): Promise<boolean> {
+    const [row] = await manager.query<Array<{ org_wide: boolean }>>(
+      `WITH o AS (
+         SELECT upo.effect FROM core.user_permission_override upo JOIN core.permission p ON p.id = upo.permission_id
+          WHERE upo.user_id = $1 AND upo.organisation_id = $2 AND p.key = $3
+       )
+       SELECT CASE
+                WHEN EXISTS (SELECT 1 FROM o WHERE effect = 'grant') THEN true
+                WHEN EXISTS (SELECT 1 FROM o WHERE effect = 'revoke') THEN false
+                ELSE EXISTS (
+                  SELECT 1 FROM core.user_role ur
+                    JOIN core.role r ON r.id = ur.role_id
+                    JOIN core.role_permission rp ON rp.role_id = ur.role_id
+                    JOIN core.permission p ON p.id = rp.permission_id
+                   WHERE ur.user_id = $1 AND ur.organisation_id = $2 AND r.workspace_id IS NULL AND p.key = $3)
+              END AS org_wide`,
+      [ctx.userId, ctx.organisationId, PermissionFlag.MANAGER_MANAGE],
+    );
+    return row?.org_wide === true;
   }
 
   /** General "change email" — active or pending, one mutation either way. See `StaffService.changeEmail`'s identical doc comment. */
@@ -1031,7 +1110,8 @@ export class ManagerService {
     await this.stepUpReauth.assertRecentStepUp(ctx, 'user.email.change');
     const outcome = await this.tenantContext.runInTenantContext(ctx, async (manager) => {
       const profile = await manager.findOne(ManagerProfile, { where: { id, organisationId: ctx.organisationId! }, relations: { user: true } });
-      if (!profile) throw new NotFoundException('Manager not found.');
+      if (!profile?.user) throw new NotFoundException('Manager not found.');
+      await lockLiveUser(manager, profile.userId, 'Manager not found.');
       await this.assertCeoMutationAllowed(manager, ctx, profile);
 
       const newEmail = normalizeEmail(dto.email);
@@ -1141,40 +1221,78 @@ export class ManagerService {
   }
 
   /**
-   * Permanent removal — additional to Suspend/Reactivate, never a
-   * replacement (B1). Same authorization shape every other Manager
-   * mutation here already uses (org-wide for a MANAGER_MANAGE holder,
-   * `assertCeoMutationAllowed` for a CEO target) — deliberately NOT a new,
-   * stricter creator-private rule invented just for delete, which would
-   * make it behave inconsistently with Suspend/Reactivate/Reset-password
-   * on the exact same entity. `UserDeletionService.assertCanDelete` is the
-   * actual safety gate (self-delete, platform admin, owned workspace,
-   * protected operational history).
+   * Delete user (owner decision 0g, the Twenty way: UserDeletionService). Additional to Suspend/Reactivate, never a
+   * replacement (B1). Same authorization shape every other Manager mutation here already uses (org-wide for a
+   * MANAGER_MANAGE holder, `assertCeoMutationAllowed` for a CEO target) — deliberately NOT a stricter creator-private rule
+   * invented just for delete. `UserDeletionService.deleteUser` re-runs the account-level gates (self, platform admin, the
+   * workspace owner = last admin) and decides soft vs hard: an account with any history is SOFT deleted (row kept,
+   * `deleted_at` set, every session and membership revoked); only a never-activated invite with no history is removed.
    *
-   * P2.8 — step-up reauth checked FIRST, before even loading the target:
-   * a hijacked-but-live session alone can never delete a user.
+   * P2.8 — step-up reauth checked FIRST, before even loading the target: a hijacked-but-live session alone can never
+   * delete a user.
    */
   async deleteUser(ctx: AuthContext, id: string, currentPassword: string): Promise<void> {
     await this.stepUpReauth.assertCurrentPassword(ctx, currentPassword);
-    let deletedUserId: string | null = null;
-    await this.tenantContext.runInTenantContext(ctx, async (manager) => {
-      const profile = await manager.findOne(ManagerProfile, { where: { id } });
-      if (!profile) throw new NotFoundException('Manager not found.');
-      await this.assertCeoMutationAllowed(manager, ctx, profile);
-
-      // Gap-review finding (universal self-service onboarding checkpoint): deleting a never-
-      // activated Initial Manager profile with no workspace is now a real, reachable path (it used
-      // to always 409 on MANAGER_OWNS_WORKSPACE first) — surfaced that the eager `relations: {
-      // user: true }` join above returned a null `user` for this case, a pre-existing relation-
-      // loading issue unrelated to this checkpoint's own change. Fetched explicitly instead, the
-      // same proven pattern `cancelInviteWithin`/`replaceInitialManager` already use elsewhere in
-      // this codebase for the identical "need the User row, not just the profile" need.
-      const user = await manager.findOneOrFail(User, { where: { id: profile.userId } });
-
-      await this.userDeletion.assertCanDelete(manager, ctx, profile.userId);
-      await this.userDeletion.deleteUser(manager, ctx, profile.userId, user.email);
-      deletedUserId = profile.userId;
+    const deletedUserId = await this.tenantContext.runInTenantContext(ctx, async (manager) => {
+      // Layer 2 (security review M1): the /managers route's class guard MANAGER_MANAGE, re-checked in the service.
+      await this.assertCanManageManagersTx(manager, ctx);
+      return this.deleteUserWithin(manager, ctx, id);
     });
     await this.invalidateUserDisplay(deletedUserId);
+  }
+
+  /**
+   * The Venue Manager route's delete: VenueManagerService has already run its own layer-2 check (VENUE_MANAGER_CREATE +
+   * the target is a Venue Manager of the caller's own workspace) — a workspace owner may lack MANAGER_MANAGE, so this
+   * variant does not require it. Step-up reauth first, like `deleteUser`.
+   */
+  async deleteVenueManagerUser(ctx: AuthContext, id: string, currentPassword: string): Promise<void> {
+    await this.stepUpReauth.assertCurrentPassword(ctx, currentPassword);
+    // The own-workspace Venue Manager scope is re-checked inside this transaction (the caller's check ran in its own).
+    const deletedUserId = await this.tenantContext.runInTenantContext(ctx, (manager) =>
+      this.deleteUserWithin(manager, ctx, id, { workspaceId: ctx.workspaceId ?? null, type: ManagerType.VENUE }),
+    );
+    await this.invalidateUserDisplay(deletedUserId);
+  }
+
+  /** Shared body; never reachable without one of the two permission checks above. */
+  private async deleteUserWithin(
+    manager: EntityManager,
+    ctx: AuthContext,
+    id: string,
+    venueScope?: { workspaceId: string | null; type: typeof ManagerType.VENUE },
+  ): Promise<string> {
+    const profile = await manager.findOne(ManagerProfile, { where: { id } });
+    if (!profile) throw new NotFoundException('Manager not found.');
+    if (venueScope && (!venueScope.workspaceId || profile.workspaceId !== venueScope.workspaceId || profile.type !== venueScope.type)) {
+      throw new NotFoundException('Venue Manager not found.');
+    }
+    await this.assertCeoMutationAllowed(manager, ctx, profile);
+    // A profile whose account is already soft-deleted is gone for every caller (404), like Twenty's removed member.
+    const live = await manager.findOne(User, { where: { id: profile.userId } });
+    if (!live) throw new NotFoundException('Manager not found.');
+    await this.userDeletion.deleteUser(manager, ctx, profile.userId);
+    return profile.userId;
+  }
+
+  /**
+   * GDPR erasure of an already deleted Manager / Venue Manager account (owner 0g; who may run it is FLAGGED for the owner
+   * in USER-DELETION.md: today the same people who may delete it — org-wide MANAGER_MANAGE, a CEO target only by the
+   * platform administrator — with step-up reauth). `UserDeletionService.erasePersonalData` refuses (409 USER_NOT_DELETED)
+   * an account that was not deleted first. Found by the manager PROFILE id, deleted account included (the profile row
+   * stays after a soft delete).
+   */
+  async erasePersonalData(ctx: AuthContext, id: string, currentPassword: string): Promise<void> {
+    await this.stepUpReauth.assertCurrentPassword(ctx, currentPassword);
+    let erasedUserId: string | null = null;
+    await this.tenantContext.runInTenantContext(ctx, async (manager) => {
+      await this.assertCanManageManagersTx(manager, ctx);
+      const profile = await manager.findOne(ManagerProfile, { where: { id, organisationId: ctx.organisationId! } });
+      if (!profile) throw new NotFoundException('Manager not found.');
+      await this.assertCeoMutationAllowed(manager, ctx, profile);
+      await this.userDeletion.erasePersonalData(manager, ctx, profile.userId);
+      erasedUserId = profile.userId;
+    });
+    await this.invalidateUserDisplay(erasedUserId);
   }
 }

@@ -1,5 +1,5 @@
 import 'reflect-metadata';
-import { NotFoundException } from '@nestjs/common';
+import { Logger, NotFoundException } from '@nestjs/common';
 import { Test, TestingModule } from '@nestjs/testing';
 import { randomUUID } from 'node:crypto';
 import { Client } from 'pg';
@@ -10,23 +10,26 @@ import { WorkspaceCoreForeignKeyRemoval1786721490000 } from '../../database/type
 import { integrationTestDatabase, integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
 import { selectWorkspaceFingerprintsForServer } from '../../database/typeorm/workspace-schema/v1/expected-fingerprints';
 import { assertUsersOfOrganisationTx } from '../../engine/core-modules/core-references/core-references';
-import { protectedWorkspaceReference, userReferenceColumns } from '../../engine/core-modules/core-references/workspace-user-references';
+import { userReferenceColumns, workspaceRestrictReference } from '../../engine/core-modules/core-references/workspace-user-references';
 import { AuthContext } from '../../engine/core-modules/tenant/auth-context.interface';
-import { UserDeletionBlockedException, UserDeletionService } from '../../engine/core-modules/user-deletion/user-deletion.service';
+import { TenantContextService } from '../../engine/core-modules/tenant/tenant-context.service';
+import { UserDeletionService } from '../../engine/core-modules/user-deletion/user-deletion.service';
 import { dropWorkspaceSchema, provisionTypeScript, registryOf, SeededWorkspace, seedWorkspace } from './helpers/workspace-fixtures';
 
 /**
- * OWNER-DB-ULTIMATE Part D, decision 0a (structure level 22; SQL pending owner OK): every case a dropped workspace → core foreign
+ * OWNER-DB-ULTIMATE Part D, decision 0a (structure level 22; owner approved 2026-11-15): every case a dropped workspace → core foreign
  * key used to refuse is refused (or carried out) by the application instead. Real PostgreSQL, a level-22 workspace built by the
  * TypeScript provisioner, the application's own services on the runtime login with the tenant bound:
  *  - organisation_id / workspace_id: a row naming another organisation, another workspace or no existing organisation is refused
  *    by FORCE RLS / the per-table binding CHECK (no foreign key needed);
  *  - a user id from anything but the actor: assertUsersOfOrganisationTx → 404 for a missing user and for another organisation's
  *    user (stricter than the old FK, which accepted any organisation's user);
- *  - the former RESTRICT (Q3): a hard delete of a user still referenced by a no-ON-DELETE column of a workspace → 409;
- *  - the former CASCADE / SET NULL (Q2): the hard delete removes the user's own staff profile and the notes about them and clears
- *    the SET NULL columns, in the same transaction;
- *  - approved payroll evidence (F3): the delete of the staff member's user is refused (409) and nothing is removed;
+ *  - user deletion (owner 0g: soft by default; a never-activated invite with no history is hard-deleted in a savepoint):
+ *    - the former RESTRICT (Q3): a no-ON-DELETE workspace column naming the invite makes the hard delete unsafe → soft delete;
+ *    - the former CASCADE / SET NULL (Q2): the hard delete removes the invite's own staff profile and clears the SET NULL
+ *      columns, in the same savepoint;
+ *    - an in-schema row that still needs the profile (a payslip) → 23503 inside the savepoint → soft delete, nothing removed;
+ *    - approved payroll evidence (F3) → soft delete, every row stays;
  *  - the 0a migration's down() refuses while a level-22 workspace exists (nothing changed).
  */
 jest.setTimeout(300_000);
@@ -40,6 +43,7 @@ describeIfDb('Part D 0a: the application enforces what the workspace → core fo
   let moduleRef: TestingModule;
   let runtime: DataSource;
   let deletion: UserDeletionService;
+  let tenantContext: TenantContextService;
   let admin: Client;
   let w: SeededWorkspace;
   let other: SeededWorkspace;
@@ -67,6 +71,7 @@ describeIfDb('Part D 0a: the application enforces what the workspace → core fo
     moduleRef = await Test.createTestingModule({ imports: [AppModule] }).compile();
     runtime = moduleRef.get(DataSource);
     deletion = moduleRef.get(UserDeletionService);
+    tenantContext = moduleRef.get(TenantContextService);
     for (const n of ['w', 'other']) {
       const ws = await seedWorkspace(admin, `ws0a-app-${n}-${SFX}`);
       created.push(ws);
@@ -120,45 +125,85 @@ describeIfDb('Part D 0a: the application enforces what the workspace → core fo
     }
   });
 
-  it('the former RESTRICT: a user still referenced by a no-ON-DELETE workspace column cannot be hard-deleted (409)', async () => {
-    const target = await user(w.org, 'restrict');
-    await admin.query(`INSERT INTO ${w.schema}.venue (organisation_id, name, workspace_id, created_by) VALUES ($1, $2, $3, $4)`, [w.org, `fk-venue-${SFX}`, w.id, target]);
-    expect(await asOwner(w, (m) => protectedWorkspaceReference(m, ctxOf(w), target))).toBe('venue.created_by');
-    await expect(asOwner(w, (m) => deletion.assertCanDelete(m, ctxOf(w), target))).rejects.toBeInstanceOf(UserDeletionBlockedException);
-    expect((await admin.query(`SELECT count(*)::int AS n FROM core."user" WHERE id = $1`, [target])).rows[0].n).toBe(1);
+  // Owner decision 0g: a user is SOFT deleted (the row stays, every reference keeps resolving); only a never-activated invite
+  // with no history is hard-deleted, inside a savepoint that falls back to soft. These cases drive that hard-delete path.
+  const invited = async (label: string): Promise<string> =>
+    (await admin.query(`INSERT INTO core."user"(organisation_id, email, first_name, last_name, status) VALUES ($1, $2, 'F', 'K', 'invited') RETURNING id`, [w.org, `${label}-${randomUUID().slice(0, 8)}@ws0a.invalid`]))
+      .rows[0].id as string;
+  const userRow = async (id: string) => (await admin.query(`SELECT deleted_at IS NOT NULL AS deleted FROM core."user" WHERE id = $1`, [id])).rows[0] as { deleted: boolean } | undefined;
+  const countIn = async (table: string, id: string) => (await admin.query(`SELECT count(*)::int AS n FROM ${w.schema}.${table} WHERE id = $1`, [id])).rows[0].n as number;
+  const one = async (sql: string, params: unknown[]) => (await admin.query(sql, params)).rows[0].id as string;
+  const venueAndRole = async (label: string) => ({
+    venue: await one(`INSERT INTO ${w.schema}.venue(organisation_id, workspace_id, name) VALUES ($1, $2, $3) RETURNING id`, [w.org, w.id, `${label} venue ${SFX}`]),
+    role: await one(`INSERT INTO ${w.schema}.job_role(organisation_id, workspace_id, name) VALUES ($1, $2, $3) RETURNING id`, [w.org, w.id, `${label} role ${SFX}`]),
+  });
+  const deleteAsOwner = (target: string) => tenantContext.runInTenantContext(ctxOf(w), (m) => deletion.deleteUser(m, ctxOf(w), target));
+  const withLog = async <T>(run: () => Promise<T>): Promise<{ result: T; lines: string[] }> => {
+    const log = jest.spyOn(Logger.prototype, 'log');
+    try {
+      const result = await run();
+      return { result, lines: log.mock.calls.map((c) => String(c[0])) };
+    } finally {
+      log.mockRestore();
+    }
+  };
+
+  it('the former RESTRICT: a column no pre-delete history check reads (shift.approved_by) is probed; the invite is soft-deleted, nothing removed', async () => {
+    const target = await invited('restrict');
+    const { venue, role } = await venueAndRole('restrict');
+    const shift = await one(
+      `INSERT INTO ${w.schema}.shift(organisation_id, workspace_id, venue_id, job_role_id, starts_at, ends_at, required_count, pay_rate_pence, created_by, approved_by)
+       VALUES ($1, $2, $3, $4, now() + interval '2 days', now() + interval '2 days 4 hours', 1, 1200, $5, $6) RETURNING id`,
+      [w.org, w.id, venue, role, w.owner, target],
+    );
+    expect(await tenantContext.runInTenantContext(ctxOf(w), (m) => workspaceRestrictReference(m, target))).toBe('shift.approved_by');
+    const { result, lines } = await withLog(() => deleteAsOwner(target));
+    expect(result).toBe('soft_deleted');
+    expect(lines).toContainEqual(expect.stringMatching(/^user hard delete not safe \(history:shift\.approved_by\)/));
+    expect(await userRow(target)).toEqual({ deleted: true });
+    expect(await countIn('shift', shift)).toBe(1);
   });
 
-  it('the former CASCADE / SET NULL: the hard delete removes the user\'s own staff profile and the notes about them, and clears the attribution', async () => {
-    const target = await user(w.org, 'cascade');
-    const staff = (
-      await admin.query(`INSERT INTO ${w.schema}.staff_profile (organisation_id, user_id, staff_ref, workspace_id, created_by) VALUES ($1, $2, $3, $4, $5) RETURNING id`, [
-        w.org,
-        target,
-        `FK-${SFX}`,
-        w.id,
-        w.owner,
-      ])
-    ).rows[0].id;
-    await admin.query(`INSERT INTO ${w.schema}.user_note (organisation_id, subject_user_id, author_user_id, body, workspace_id) VALUES ($1, $2, $3, 'about', $4)`, [w.org, target, w.owner, w.id]);
-    const authored = (
-      await admin.query(`INSERT INTO ${w.schema}.user_note (organisation_id, subject_user_id, author_user_id, body, workspace_id) VALUES ($1, $2, $3, 'by', $4) RETURNING id`, [w.org, w.owner, target, w.id])
-    ).rows[0].id;
-    await asOwner(w, async (m) => {
-      await deletion.assertCanDelete(m, ctxOf(w), target);
-      await deletion.deleteUser(m, ctxOf(w), target, 'cascade@ws0a.invalid');
-    });
-    expect((await admin.query(`SELECT count(*)::int AS n FROM core."user" WHERE id = $1`, [target])).rows[0].n).toBe(0);
-    expect((await admin.query(`SELECT count(*)::int AS n FROM ${w.schema}.staff_profile WHERE id = $1`, [staff])).rows[0].n).toBe(0);
-    expect((await admin.query(`SELECT count(*)::int AS n FROM ${w.schema}.user_note WHERE subject_user_id = $1`, [target])).rows[0].n).toBe(0);
+  it('the former CASCADE / SET NULL: the hard delete removes the invite\'s own staff profile and clears the attribution columns', async () => {
+    const target = await invited('cascade');
+    const staff = await one(`INSERT INTO ${w.schema}.staff_profile (organisation_id, user_id, staff_ref, workspace_id, created_by) VALUES ($1, $2, $3, $4, $5) RETURNING id`, [
+      w.org,
+      target,
+      `FK-${SFX}`,
+      w.id,
+      w.owner,
+    ]);
+    const authored = await one(`INSERT INTO ${w.schema}.user_note (organisation_id, subject_user_id, author_user_id, body, workspace_id) VALUES ($1, $2, $3, 'by', $4) RETURNING id`, [
+      w.org,
+      w.owner,
+      target,
+      w.id,
+    ]);
+    expect(await deleteAsOwner(target)).toBe('hard_deleted');
+    expect(await userRow(target)).toBeUndefined();
+    expect(await countIn('staff_profile', staff)).toBe(0);
     expect((await admin.query(`SELECT author_user_id FROM ${w.schema}.user_note WHERE id = $1`, [authored])).rows[0].author_user_id).toBeNull();
   });
 
-  it('approved payroll evidence (F3): the hard delete of the staff member\'s user is refused (409), the user and every row stay', async () => {
-    const one = async (sql: string, params: unknown[]) => (await admin.query(sql, params)).rows[0].id as string;
+  it('an in-schema row still needs the profile (a payslip): the cleanup meets the in-schema foreign key, the savepoint rolls back, soft delete', async () => {
+    const target = await invited('payslip');
+    const sp = await one(`INSERT INTO ${w.schema}.staff_profile(organisation_id, workspace_id, user_id, staff_ref) VALUES ($1, $2, $3, $4) RETURNING id`, [w.org, w.id, target, `PS-${SFX}`]);
+    const cal = await one(`INSERT INTO core.payroll_calendar (organisation_id, year, version, source, created_by) VALUES ($1, 2026, 1, 'ws0a-test', $2) RETURNING id`, [w.org, w.owner]);
+    const period = await one(`INSERT INTO core.payroll_calendar_period (organisation_id, calendar_id, period_start, period_end, payday) VALUES ($1, $2, '2026-09-01', '2026-09-14', '2026-09-18') RETURNING id`, [w.org, cal]);
+    const run = await one(`INSERT INTO ${w.schema}.payroll_run (organisation_id, workspace_id, period_id, prepared_by) VALUES ($1, $2, $3, $4) RETURNING id`, [w.org, w.id, period, w.owner]);
+    const payslip = await one(`INSERT INTO ${w.schema}.payslip (organisation_id, workspace_id, run_id, staff_profile_id) VALUES ($1, $2, $3, $4) RETURNING id`, [w.org, w.id, run, sp]);
+    const { result, lines } = await withLog(() => deleteAsOwner(target));
+    expect(result).toBe('soft_deleted');
+    expect(lines).toContainEqual(expect.stringMatching(/^user hard delete not safe \(foreign_key:payslip_staff_id_fkey:payslip\)/));
+    expect(await userRow(target)).toEqual({ deleted: true });
+    expect(await countIn('staff_profile', sp)).toBe(1);
+    expect(await countIn('payslip', payslip)).toBe(1);
+  });
+
+  it('approved payroll evidence (F3): the invite with a paid shift is soft-deleted; the user row and every evidence row stay', async () => {
     const q = w.schema;
-    const target = await user(w.org, 'paid');
-    const venue = await one(`INSERT INTO ${q}.venue(organisation_id, workspace_id, name) VALUES ($1, $2, $3) RETURNING id`, [w.org, w.id, `paid venue ${SFX}`]);
-    const role = await one(`INSERT INTO ${q}.job_role(organisation_id, workspace_id, name) VALUES ($1, $2, $3) RETURNING id`, [w.org, w.id, `paid role ${SFX}`]);
+    const target = await invited('paid');
+    const { venue, role } = await venueAndRole('paid');
     const sp = await one(`INSERT INTO ${q}.staff_profile(organisation_id, workspace_id, user_id, staff_ref) VALUES ($1, $2, $3, $4) RETURNING id`, [w.org, w.id, target, `PAID-${SFX}`]);
     const shift = await one(
       `INSERT INTO ${q}.shift(organisation_id, workspace_id, venue_id, job_role_id, starts_at, ends_at, required_count, pay_rate_pence, created_by)
@@ -181,17 +226,10 @@ describeIfDb('Part D 0a: the application enforces what the workspace → core fo
        VALUES ($1, $2, $3, $4, $5, 240, 1200, 4800, 'approved', now(), $6) RETURNING id`,
       [w.org, w.id, att, shift, sp, w.owner],
     );
-    // The pre-delete probe sees no user column naming the target (the evidence points at the staff profile, not the user); the
-    // same-transaction cleanup's staff_profile delete then meets the in-schema RESTRICT and the whole delete is refused.
-    await expect(
-      asOwner(w, async (m) => {
-        await deletion.assertCanDelete(m, ctxOf(w), target);
-        await deletion.deleteUser(m, ctxOf(w), target, 'paid@ws0a.invalid');
-      }),
-    ).rejects.toBeInstanceOf(UserDeletionBlockedException);
-    expect((await admin.query(`SELECT count(*)::int AS n FROM core."user" WHERE id = $1`, [target])).rows[0].n).toBe(1);
+    expect(await deleteAsOwner(target)).toBe('soft_deleted');
+    expect(await userRow(target)).toEqual({ deleted: true });
     for (const [table, id] of [['staff_profile', sp], ['shift_assignment', sa], ['attendance', att], ['payroll_record', pr]] as const) {
-      expect((await admin.query(`SELECT count(*)::int AS n FROM ${q}.${table} WHERE id = $1`, [id])).rows[0].n).toBe(1);
+      expect(await countIn(table, id)).toBe(1);
     }
   });
 

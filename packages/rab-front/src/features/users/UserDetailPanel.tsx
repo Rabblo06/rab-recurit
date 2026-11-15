@@ -333,6 +333,7 @@ const AUDIT_ACTION_LABELS: Record<string, string> = {
   'user.suspended': 'Account suspended',
   'user.reactivated': 'Account reactivated',
   'user.deleted': 'Account deleted',
+  'user.personal_data_erased': 'Personal data erased',
   'password.admin_reset': 'Password reset by admin',
   'password.changed': 'Password changed',
   'profile.updated': 'Profile updated',
@@ -595,8 +596,8 @@ export default function UserDetailPanel() {
   });
 
   const DELETE_BLOCK_MESSAGES: Record<string, string> = {
-    USER_HAS_PROTECTED_HISTORY: 'This user has historical workforce records and cannot be permanently deleted. Suspend the account instead.',
-    MANAGER_OWNS_WORKSPACE: 'This manager owns a Workspace and cannot be deleted.',
+    // Owner 0g: deletion no longer refuses because of history (the account is soft-deleted and its history kept).
+    MANAGER_OWNS_WORKSPACE: 'This manager owns a Workspace (its only administrator) and cannot be deleted.',
     CANNOT_DELETE_SELF: 'You cannot delete your own account.',
     CANNOT_DELETE_PLATFORM_ADMIN: 'This account holds the platform administrator claim and cannot be deleted.',
   };
@@ -1237,7 +1238,7 @@ export default function UserDetailPanel() {
 
           {deleteConfirm && (
             <div className="drawer-discard-confirm">
-              <p>Delete {record.firstName} {record.lastName}? This permanently removes this account where deletion is permitted. This cannot be undone.</p>
+              <p>Delete {record.firstName} {record.lastName}? They lose access at once and are removed from your team. Their shifts, attendance and payroll history are kept. This cannot be undone.</p>
               <div className="field" style={{ marginBottom: 0 }}>
                 <label htmlFor="delete-user-confirm">Type DELETE to confirm</label>
                 <input id="delete-user-confirm" value={deleteConfirmText} onChange={(e) => setDeleteConfirmText(e.target.value)} placeholder="DELETE" autoFocus />

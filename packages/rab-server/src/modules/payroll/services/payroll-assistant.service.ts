@@ -5,6 +5,7 @@ import { EntityManager } from 'typeorm';
 import { PermissionsService } from '../../../engine/core-modules/permissions/permissions.service';
 import { ResourceScopeService } from '../../../engine/core-modules/resource-scope/resource-scope.service';
 import { AuthContext } from '../../../engine/core-modules/tenant/auth-context.interface';
+import { businessTables } from '../../../engine/core-modules/tenant/business-tables';
 import { TenantContextService } from '../../../engine/core-modules/tenant/tenant-context.service';
 import { beginAssistantRead } from '../../../engine/utils/assistant-read.util';
 import { attendanceReadScopeCondition } from '../../attendance/services/attendance.service';
@@ -82,10 +83,11 @@ export class PayrollAssistantService {
     return this.tenantContext.runInWorkspaceContext(ctx, async (m) => {
       await beginAssistantRead(m);
       await this.payroll.assertPayrollAccess(m, ctx, PermissionFlag.PAYROLL_VIEW);
+      const t = businessTables(m);
       const runs: Array<{ id: string; status: string; period_start: string; period_end: string; payday: string }> = await m.query(
         `SELECT r.id, r.status, to_char(p.period_start, 'YYYY-MM-DD') AS period_start, to_char(p.period_end, 'YYYY-MM-DD') AS period_end,
                 to_char(p.payday, 'YYYY-MM-DD') AS payday
-           FROM payroll_run r JOIN core.payroll_calendar_period p ON p.id = r.period_id
+           FROM ${t.payroll_run} r JOIN core.payroll_calendar_period p ON p.id = r.period_id
           WHERE r.organisation_id = $1 AND r.workspace_id = $2
           ORDER BY p.period_start, r.id`,
         [ctx.organisationId, ctx.workspaceId],
@@ -101,7 +103,7 @@ export class PayrollAssistantService {
         `SELECT l.run_id, count(*)::int AS records, count(DISTINCT l.staff_profile_id)::int AS staff,
                 COALESCE(sum(l.worked_minutes), 0)::bigint AS minutes, COALESCE(sum(l.amount_pence), 0)::bigint AS gross,
                 count(*) FILTER (WHERE l.late_approval)::int AS late
-           FROM payroll_run_line l
+           FROM ${t.payroll_run_line} l
           WHERE l.run_id = ANY($1::uuid[]) AND l.workspace_id = $2
           GROUP BY l.run_id`,
         [ids, ctx.workspaceId],
@@ -110,20 +112,20 @@ export class PayrollAssistantService {
       const showAmount = this.fieldPolicy.isVisible(policy, 'amount');
       const showTime = this.fieldPolicy.isVisible(policy, 'workedTime');
       const totalsOf = (run: (typeof runs)[number]): AssistantRunTotals => {
-        const t = totals.find((x) => x.run_id === run.id);
-        const gross = Number(t?.gross ?? 0);
+        const agg = totals.find((x) => x.run_id === run.id);
+        const gross = Number(agg?.gross ?? 0);
         if (!Number.isSafeInteger(gross)) throw new RangeError('payroll total out of range');
         return {
           periodStart: run.period_start,
           periodEnd: run.period_end,
           payday: run.payday,
           runStatus: run.status,
-          shiftRecords: Number(t?.records ?? 0),
-          staff: Number(t?.staff ?? 0),
-          hours: showTime ? hoursOf(Number(t?.minutes ?? 0)) : null,
+          shiftRecords: Number(agg?.records ?? 0),
+          staff: Number(agg?.staff ?? 0),
+          hours: showTime ? hoursOf(Number(agg?.minutes ?? 0)) : null,
           grossTotalPence: showAmount ? gross : null,
           grossTotalFormatted: showAmount ? formatPence(gross) : null,
-          lateApprovals: Number(t?.late ?? 0),
+          lateApprovals: Number(agg?.late ?? 0),
         };
       };
       const a = totalsOf(current);
@@ -155,6 +157,7 @@ export class PayrollAssistantService {
     return this.tenantContext.runInWorkspaceContext(ctx, async (m) => {
       await beginAssistantRead(m);
       await this.payroll.assertPayrollAccess(m, ctx, PermissionFlag.PAYROLL_VIEW);
+      const t = businessTables(m);
       const params: unknown[] = [ctx.organisationId, ctx.workspaceId, ctx.userId];
       let rangeSql = '';
       if (range) {
@@ -167,9 +170,9 @@ export class PayrollAssistantService {
                 count(*) FILTER (WHERE pr.status = 'rejected')::int AS rejected,
                 count(*) FILTER (WHERE pr.status = 'pending_approval' AND sp.user_id = $3)::int AS own,
                 min(s.starts_at) FILTER (WHERE pr.status = 'pending_approval') AS oldest
-           FROM payroll_record pr
-           JOIN shift s ON s.id = pr.shift_id
-           LEFT JOIN staff_profile sp ON sp.id = pr.staff_profile_id
+           FROM ${t.payroll_record} pr
+           JOIN ${t.shift} s ON s.id = pr.shift_id
+           LEFT JOIN ${t.staff_profile} sp ON sp.id = pr.staff_profile_id
           WHERE pr.organisation_id = $1 AND pr.workspace_id = $2${rangeSql}`,
         params,
       );
@@ -188,6 +191,7 @@ export class PayrollAssistantService {
   }
 
   private async attendanceStages(m: EntityManager, ctx: AuthContext, range: { from: Date; to: Date } | null): Promise<Pick<AssistantApprovalQueue, 'attendanceUnderReview' | 'attendanceDisputed' | 'reportsNotFinalised'>> {
+    const t = businessTables(m);
     const scope = await this.resourceScope.resolveTx(m, ctx);
     const params: unknown[] = [];
     const nextParam = (value: unknown) => {
@@ -199,9 +203,9 @@ export class PayrollAssistantService {
     const [att] = await m.query(
       // sql-injection-reviewed: dynamic WHERE assembled only from literal fragments and $n / :named placeholders (values pushed to params); identifiers come from allow-lists. Reviewed 2026-11-04.
       `SELECT count(*) FILTER (WHERE a.status = 'under_review')::int AS under_review, count(*) FILTER (WHERE a.status = 'disputed')::int AS disputed
-         FROM attendance a
-         JOIN shift s ON s.id = a.shift_id
-         JOIN staff_profile sp ON sp.id = a.staff_profile_id
+         FROM ${t.attendance} a
+         JOIN ${t.shift} s ON s.id = a.shift_id
+         JOIN ${t.staff_profile} sp ON sp.id = a.staff_profile_id
         WHERE ${scopeSql}${rangeSql}`,
       params,
     );
@@ -210,7 +214,7 @@ export class PayrollAssistantService {
     const reportRange = range ? (reportParams.push(range.from, range.to), ' AND s.starts_at >= $2 AND s.starts_at < $3') : '';
     const [rep] = await m.query(
       // sql-injection-reviewed: dynamic WHERE assembled only from literal fragments and $n / :named placeholders (values pushed to params); identifiers come from allow-lists. Reviewed 2026-11-04.
-      `SELECT count(*)::int AS open FROM shift_report sr JOIN shift s ON s.id = sr.shift_id
+      `SELECT count(*)::int AS open FROM ${t.shift_report} sr JOIN ${t.shift} s ON s.id = sr.shift_id
         WHERE s.created_by = $1 AND sr.status IN ('pending', 'ready')${reportRange}`,
       reportParams,
     );

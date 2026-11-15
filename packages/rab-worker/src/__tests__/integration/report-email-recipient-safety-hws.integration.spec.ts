@@ -31,6 +31,7 @@ import { runShiftReportSchedulerCycle } from '../../queues/rab-reports/shift-rep
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
 import { integrationTestDatabaseReady } from '@rab/server/database/typeorm/core/integration-test-database-gate';
+import { hwsRuntimeOn } from './helpers/hws-fixtures';
 
 /**
  * REPORT EMAIL SAFETY under HWS routing (security review S-2). With `HWS_RUNTIME_ENABLED=true` the workspace business
@@ -126,7 +127,8 @@ describeIfDb('report emails under HWS routing: enqueue + send-time re-check read
     // ---- organisation, owner workspace, provisioned to READY by the real provisioner
     const organisation = await factory.createOrganisation('rpthws');
     organisationId = organisation.id;
-    owner = await factory.createInternalManager(organisation);
+    // Part C1: provisioned below by the real (TypeScript) provisioner, as this suite requires — not by the fixture factory.
+    owner = await factory.createInternalManager(organisation, { provision: false });
     workspaceId = owner.workspaceId!;
     const provisioned = await provisionWorkspaceSchema(provisioner, workspaceId);
     expect(provisioned.outcome).toBe('READY');
@@ -151,10 +153,17 @@ describeIfDb('report emails under HWS routing: enqueue + send-time re-check read
           workspaceId,
         ]);
       }
-      const [sp] = await m.query(
-        `INSERT INTO staff_profile (organisation_id, user_id, staff_ref, created_by, workspace_id, employment_status) VALUES ($1, $2, $3, $4, $5, 'active') RETURNING id`,
-        [organisationId, staff.userId, `STF-${randomUUID().slice(0, 8)}`, owner.userId, workspaceId],
-      );
+      // Part C1: with HWS on (the default) the fixture factory already wrote this Staff member's profile into the workspace
+      // schema; with HWS off it wrote it to core, and the workspace copy is created here as before.
+      const [sp] = hwsRuntimeOn()
+        ? await (async () => {
+            await m.query(`UPDATE staff_profile SET employment_status = 'active' WHERE id = $1`, [staff.profileId]);
+            return m.query(`SELECT id FROM staff_profile WHERE id = $1`, [staff.profileId]);
+          })()
+        : await m.query(
+            `INSERT INTO staff_profile (organisation_id, user_id, staff_ref, created_by, workspace_id, employment_status) VALUES ($1, $2, $3, $4, $5, 'active') RETURNING id`,
+            [organisationId, staff.userId, `STF-${randomUUID().slice(0, 8)}`, owner.userId, workspaceId],
+          );
       const jobRole = await m.save(JobRole, { organisationId, name: `Role ${randomUUID().slice(0, 6)}`, defaultRatePence: 1500, createdBy: owner.userId, workspaceId });
       const shift = await m.save(Shift, {
         organisationId,
@@ -184,8 +193,10 @@ describeIfDb('report emails under HWS routing: enqueue + send-time re-check read
     }));
 
     // ---- a STALE legacy copy in core: the same venue, and a core.manager_venue row for `moved` ONLY (never for `keeper`)
-    await appTenant.runInTenantContext(ownerCtx(), (m) => m.save(Venue, { id: venueId, organisationId, name: 'HWS Venue', createdBy: owner.userId, workspaceId }));
-    await factory.assignVenue(organisation, owner, moved.profileId!, venueId);
+    // Part C1: written explicitly into the core copies (the superuser fixture connection) — with HWS on by default the app
+    // tenant context and the fixture factory route to the workspace schema, which is not where a STALE legacy copy lives.
+    await adminDataSource.query(`INSERT INTO core.venue (id, organisation_id, name, created_by, workspace_id) VALUES ($1, $2, 'HWS Venue', $3, $4)`, [venueId, organisationId, owner.userId, workspaceId]);
+    await adminDataSource.query(`INSERT INTO core.manager_venue (organisation_id, manager_profile_id, venue_id, workspace_id) VALUES ($1, $2, $3, $4)`, [organisationId, moved.profileId, venueId, workspaceId]);
 
     // ---- produce both reports through the real jobs, routed by the HWS tenant context
     const files = app.get(FileService);

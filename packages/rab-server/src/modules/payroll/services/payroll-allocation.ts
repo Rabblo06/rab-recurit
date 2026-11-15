@@ -1,5 +1,7 @@
 import { EntityManager } from 'typeorm';
 
+import { businessTables } from '../../../engine/core-modules/tenant/business-tables';
+
 /**
  * Payroll period allocation (owner decisions 2026-10-21). Plain functions (no Nest) so the API and the worker share one
  * implementation. Rules:
@@ -82,13 +84,14 @@ export async function allocateRecords(
 ): Promise<Map<string, Allocation>> {
   const out = new Map<string, Allocation>();
   if (!records.length) return out;
+  const t = businessTables(m);
   const periods = await activePeriods(m, scope.organisationId);
   const runs: Array<{ id: string; period_id: string; status: 'prepared' | 'finalised' }> = await m.query(
-    `SELECT id, period_id, status FROM payroll_run WHERE organisation_id = $1 AND workspace_id = $2`, [scope.organisationId, scope.workspaceId]);
+    `SELECT id, period_id, status FROM ${t.payroll_run} WHERE organisation_id = $1 AND workspace_id = $2`, [scope.organisationId, scope.workspaceId]);
   const runByPeriod = new Map(runs.map((r) => [r.period_id, r]));
   const lines: Array<{ payroll_record_id: string; run_id: string; late_approval: boolean; original_period_id: string | null; period_id: string; status: 'prepared' | 'finalised' }> = await m.query(
     `SELECT l.payroll_record_id, l.run_id, l.late_approval, l.original_period_id, r.period_id, r.status
-       FROM payroll_run_line l JOIN payroll_run r ON r.id = l.run_id
+       FROM ${t.payroll_run_line} l JOIN ${t.payroll_run} r ON r.id = l.run_id
       WHERE l.payroll_record_id = ANY($1::uuid[]) AND l.workspace_id = $2`, [records.map((r) => r.id), scope.workspaceId]);
   const lineByRecord = new Map(lines.map((l) => [l.payroll_record_id, l]));
   const extra = await periodsById(m, scope.organisationId, [...new Set(lines.flatMap((l) => [l.period_id, l.original_period_id ?? '']).filter(Boolean))]);

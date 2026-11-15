@@ -20,6 +20,9 @@ export default {
   // Fails the run before any fixture is written unless the TEST_* pair is valid and agrees (live identity proof included).
   globalSetup: '<rootDir>/src/jest-global-setup.ts',
   setupFiles: ['<rootDir>/src/jest-setup.ts'],
+  // Part C1 (C1b): node, plus dropping the workspace schemas a test file's fixtures created once the file is done (same as
+  // rab-server's jest.config.ts; CREWFLOW_TEST_KEEP_FIXTURE_SCHEMAS=true keeps them).
+  testEnvironment: '<rootDir>/src/__tests__/integration/helpers/fixture-schema-cleanup-environment.ts',
   // Same reasoning as rab-server's own jest.config.ts: @rab/shared/@rab/ui
   // resolve through a workspace symlink outside node_modules, so ts-jest
   // must not try to re-"compile" their already-built dist output; @rab/server

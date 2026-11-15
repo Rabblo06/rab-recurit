@@ -24,6 +24,7 @@ import {
 } from './helpers/ai-proposal-fixtures';
 import { AiKit, aiOrganisation, bearer, bootAiKit, manager, setOrgAi } from './helpers/ai-test-kit';
 import { integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
+import { businessTable, businessTableOf } from './helpers/hws-fixtures';
 
 /**
  * AI Phase 5a — human approval of AI write proposals (PHASE5_TWENTY_PLAN §2.4, security rules 6.1–6.6, §15 "Proposals").
@@ -118,7 +119,7 @@ describeIfDb('AI write proposals: approve / reject / execute (integration)', () 
     expect(res.body.continuationTurnId).toBeNull();
     expect(res.body.proposal).toMatchObject({ id, status: 'EXECUTED', result: { entityType: 'shift' }, requiresStepUp: false });
     const shiftId = res.body.proposal.result.entityId as string;
-    const [shift] = await kit.owner.query(`SELECT status, created_by, pay_rate_pence, charge_rate_pence, notes FROM core.shift WHERE id = $1`, [shiftId]);
+    const [shift] = await kit.owner.query(`SELECT status, created_by, pay_rate_pence, charge_rate_pence, notes FROM ${await businessTableOf(kit.owner, 'shift', shiftId)} WHERE id = $1`, [shiftId]);
     expect(shift).toEqual({ status: ShiftStatus.DRAFT, created_by: org.ceo.userId, pay_rate_pence: '1250', charge_rate_pence: '0', notes: 'Secret note text 1' });
     expect(await shiftCount(kit, venueId)).toBe(before + 1);
     const again = await approve(token, id);
@@ -259,7 +260,7 @@ describeIfDb('AI write proposals: approve / reject / execute (integration)', () 
     const turn = await freshTurn();
     const own = await venueAndRole(kit, org.ceo);
     const id = await proposeOk(kit, turn, 'create_draft_shift', { ...draftArgs(), venueId: own.venueId, jobRoleId: own.jobRoleId });
-    await kit.owner.query(`UPDATE core.venue SET archived_at = now(), archived_by = $2, status = 'archived', updated_at = now() WHERE id = $1`, [own.venueId, org.ceo.userId]);
+    await kit.owner.query(`UPDATE ${await businessTableOf(kit.owner, 'venue', own.venueId)} SET archived_at = now(), archived_by = $2, status = 'archived', updated_at = now() WHERE id = $1`, [own.venueId, org.ceo.userId]);
     const token = await freshToken();
     const res = await approve(token, id);
     expect([res.status, res.body.code]).toEqual([409, 'AI_PROPOSAL_STALE']);
@@ -271,7 +272,7 @@ describeIfDb('AI write proposals: approve / reject / execute (integration)', () 
     await kit.moduleRef.get(SchedulingService).updateDraft(ctxOf(org.ceo), draft.id, { notes: 'edited by a person meanwhile' });
     const res2 = await approve(token, upd);
     expect(res2.body.code).toBe('AI_PROPOSAL_STALE');
-    expect((await kit.owner.query(`SELECT required_count FROM core.shift WHERE id = $1`, [draft.id]))[0].required_count).toBe(1);
+    expect((await kit.owner.query(`SELECT required_count FROM ${await businessTableOf(kit.owner, 'shift', draft.id)} WHERE id = $1`, [draft.id]))[0].required_count).toBe(1);
   });
 
   it('T5-A8: edits only the proposed fields; a non-proposed field, an unknown key or organisationId in the body is a 400; an edit that raises impact needs step-up', async () => {
@@ -301,7 +302,7 @@ describeIfDb('AI write proposals: approve / reject / execute (integration)', () 
     expect(row).toMatchObject({ status: 'EXECUTED', affected_count: 3, impact: 'normal' });
     expect((row.final_arguments as Record<string, unknown>).requiredCount).toBe(3);
     expect((row.arguments as Record<string, unknown>).requiredCount).toBe(2);
-    const [shift] = await kit.owner.query(`SELECT required_count FROM core.shift WHERE id = $1`, [ok.body.proposal.result.entityId]);
+    const [shift] = await kit.owner.query(`SELECT required_count FROM ${await businessTableOf(kit.owner, 'shift', ok.body.proposal.result.entityId)} WHERE id = $1`, [ok.body.proposal.result.entityId]);
     expect(shift.required_count).toBe(3);
     expect((await auditFor(kit, id)).find((a) => a.action === 'ai.proposal_approved')!.metadata.editedFields).toEqual(['requiredCount']);
   });
@@ -325,7 +326,7 @@ describeIfDb('AI write proposals: approve / reject / execute (integration)', () 
     expect(await shiftCount(kit, venueId)).toBe(before);
     expect(await proposalRow(kit, id)).toMatchObject({ status: 'FAILED', error_code: 'conflict', final_arguments: null, decision_reason: null, executed_at: null });
     expect((await approve(await freshToken(), id)).body.code).toBe('AI_PROPOSAL_NOT_PENDING');
-    expect((await kit.owner.query(`SELECT count(*)::int AS n FROM core.audit_log WHERE action = 'shift.created' AND organisation_id = $1 AND created_at > now() - interval '1 minute' AND entity_id NOT IN (SELECT id FROM core.shift)`, [org.orgId]))[0].n).toBe(0);
+    expect((await kit.owner.query(`SELECT count(*)::int AS n FROM core.audit_log WHERE action = 'shift.created' AND organisation_id = $1 AND created_at > now() - interval '1 minute' AND entity_id NOT IN (SELECT id FROM ${businessTable(org.ceo.workspaceId!, 'shift')})`, [org.orgId]))[0].n).toBe(0);
   });
 
   it('T5-A11: an Admin Inspect context is refused (404) before anything is read or written', async () => {
@@ -363,7 +364,7 @@ describeIfDb('AI write proposals: approve / reject / execute (integration)', () 
     expect((await proposalRow(kit, id)).editable_fields).toEqual(['requiredCount', 'notes']);
     const token = await freshToken();
     expect((await approve(token, id)).status).toBe(200);
-    const [shift] = await kit.owner.query(`SELECT status, required_count, notes, pay_rate_pence FROM core.shift WHERE id = $1`, [draft.id]);
+    const [shift] = await kit.owner.query(`SELECT status, required_count, notes, pay_rate_pence FROM ${await businessTableOf(kit.owner, 'shift', draft.id)} WHERE id = $1`, [draft.id]);
     expect(shift).toEqual({ status: 'draft', required_count: 4, notes: 'Updated by AI', pay_rate_pence: '1999' });
 
     const staff = await kit.factory.createStaff({ id: org.orgId }, { owner: org.ceo, label: 'ai-note' });
@@ -376,7 +377,7 @@ describeIfDb('AI write proposals: approve / reject / execute (integration)', () 
     expect(card.target).toMatchObject({ type: 'staff_profile', id: staff.profileId, label: 'Staff Member' });
     const res = await approve(token, noteId);
     expect(res.status).toBe(200);
-    const [note] = await kit.owner.query(`SELECT body, author_user_id FROM core.user_note WHERE id = $1`, [res.body.proposal.result.entityId]);
+    const [note] = await kit.owner.query(`SELECT body, author_user_id FROM ${await businessTableOf(kit.owner, 'user_note', res.body.proposal.result.entityId)} WHERE id = $1`, [res.body.proposal.result.entityId]);
     expect(note).toEqual({ body, author_user_id: org.ceo.userId });
     const trail = await kit.owner.query(`SELECT action, metadata FROM core.audit_log WHERE organisation_id = $1 AND (entity_id = $2 OR entity_id = $3)`, [org.orgId, noteId, staff.profileId]);
     expect(trail.map((t: { action: string }) => t.action).sort()).toEqual(['ai.proposal_approved', 'ai.proposal_created', 'ai.proposal_executed', 'staff.note_added']);

@@ -10,6 +10,7 @@ import { createAdminDataSource } from './helpers/admin-datasource';
 import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
 import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-pipe';
 import { integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
+import { businessTableOf, siblingTable } from './helpers/hws-fixtures';
 
 /**
  * Release gate J — member roles with BOTH auth caches ENABLED (USER_SESSION_CACHE_ENABLED, AUTH_CONTEXT_CACHE_ENABLED)
@@ -106,7 +107,7 @@ describeIfDb('Member roles with Redis auth caches enabled (two API instances, re
     tokenA = await factory.login(managerA);
     tokenB = await factory.login(managerB);
     staffLondon = await factory.createStaff(seeded.organisation, { owner: managerA, label: 'cache-staff' });
-    await owner.query(`UPDATE core.staff_profile SET city = 'London' WHERE id = $1`, [staffLondon.profileId]);
+    await owner.query(`UPDATE ${await businessTableOf(owner, 'staff_profile', staffLondon.profileId)} SET city = 'London' WHERE id = $1`, [staffLondon.profileId]);
     await owner.query(`UPDATE core."user" SET phone = '+447700900111' WHERE id = $1`, [staffLondon.userId]);
   });
 

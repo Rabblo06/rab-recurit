@@ -6,6 +6,7 @@ import { AvailabilityAcknowledgement } from '../../staff/services/staff-availabi
 import { AuditAction, AuditService } from '../../../engine/core-modules/audit/audit.service';
 import { ResourceScopeService } from '../../../engine/core-modules/resource-scope/resource-scope.service';
 import { AuthContext } from '../../../engine/core-modules/tenant/auth-context.interface';
+import { businessTables } from '../../../engine/core-modules/tenant/business-tables';
 import { TenantContextService } from '../../../engine/core-modules/tenant/tenant-context.service';
 import { Shift } from '../../scheduling/entities/shift.entity';
 import { ApproveReplacementRequestDto } from '../dto/approve-replacement-request.dto';
@@ -156,8 +157,9 @@ export class ReplacementRequestService {
       // correct way to read this — the earlier `claim.length === 0` form was
       // dead code that let every concurrent caller believe it had won the
       // claim.
+      const t = businessTables(manager);
       const [claimedRows] = (await manager.query(
-        `UPDATE replacement_request
+        `UPDATE ${t.replacement_request}
            SET status = $2, updated_at = now()
            WHERE id = $1 AND status IN ($3, $4)
            RETURNING id`,
@@ -260,8 +262,9 @@ export class ReplacementRequestService {
 
       // See approve()'s own doc comment: manager.query() returns
       // [rows, rowCount] for UPDATE, not the rows array directly.
+      const t = businessTables(manager);
       const [claimedRows] = (await manager.query(
-        `UPDATE replacement_request
+        `UPDATE ${t.replacement_request}
            SET status = $2, rejected_by = $3, rejected_at = now(), updated_at = now()
            WHERE id = $1 AND status IN ($4, $5)
            RETURNING id`,

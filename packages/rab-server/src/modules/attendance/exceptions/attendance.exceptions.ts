@@ -1,4 +1,4 @@
-import { BadRequestException, ConflictException } from '@nestjs/common';
+import { BadRequestException, ConflictException, UnprocessableEntityException } from '@nestjs/common';
 import type { LocationEvidenceErrorCode } from '@rab/shared';
 
 /**
@@ -205,5 +205,15 @@ export class PresenceEvidenceRequiredException extends ConflictException {
 export class ReasonTooShortException extends BadRequestException {
   constructor(minWords: number) {
     super({ statusCode: 400, code: 'REASON_TOO_SHORT', message: `Add a reason of at least ${minWords} words.` });
+  }
+}
+
+/**
+ * QR review L4 (owner decision 2026-11-15): a manager-corrected / recovered clock-out time must lie inside
+ * [clockInAt, the staff member's own end + QR_POST_SHIFT_GRACE_MINUTES] and not in the future (database clock).
+ */
+export class InvalidClockOutTimeException extends UnprocessableEntityException {
+  constructor(reason: 'before_clock_in' | 'after_clock_out_window' | 'in_future', message: string) {
+    super({ statusCode: 422, code: 'INVALID_CLOCK_OUT_TIME', reason, message });
   }
 }

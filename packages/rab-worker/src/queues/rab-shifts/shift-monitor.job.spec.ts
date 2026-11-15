@@ -1,3 +1,4 @@
+import { asTenantBoundManager } from '../../__tests__/helpers/business-tables-fakes';
 import { runShiftMonitorCycle } from './shift-monitor.job';
 
 /**
@@ -35,7 +36,8 @@ function harness(opts: { startsInMs: number; claimed: string[]; period?: string 
     return [];
   };
   let pageServed = 0;
-  const manager = { query: async (sql: string, params?: unknown[]) => respond(sql, params), findOne };
+  // Part C2: one fake manager for every transaction, bound like TenantContextService with HWS off ('core').
+  const manager = asTenantBoundManager({ query: async (sql: string, params?: unknown[]) => respond(sql, params), findOne });
   const tenant = { runInTenantContext: async <T>(_ctx: unknown, fn: (m: unknown) => Promise<T>) => fn(manager) };
   const dataSource = { transaction: async <T>(fn: (m: unknown) => Promise<T>) => fn(manager) };
   const notifications = { notify: jest.fn() };

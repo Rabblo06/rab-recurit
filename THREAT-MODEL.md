@@ -7606,7 +7606,9 @@ image that runs the apps' own derive step on the read-only volume (`--pull never
     `venue_mismatch`). Layers: `PermissionGuard(schedule.create)` (the shift-management flag cancel/archive use) → the
     same flag re-checked in the service first (403 for any id) → `assertShiftOwned` (404 out of scope, never 403) →
     refused 409 `SHIFT_CLOSED` for a status with no outgoing transition in `SHIFT_TRANSITIONS` (completed, cancelled,
-    declined) → workspace RLS → compare-and-set on (qr_version, status) → audit `shift.qr_rotated` (shipped off-host as
+    declined) → refused 409 `SHIFT_ENDED` once the shift has ended (`ends_at > now()` read in the same `SELECT … FOR
+    UPDATE`, database clock; a missing row or null value also refuses — owner decision M2, 2026-11-15) → workspace RLS →
+    compare-and-set on (qr_version, status) → audit `shift.qr_rotated` (shipped off-host as
     `security_configuration` / warning, like `venue.geofence_updated`). No client field is written. The bumped
     `updated_at` makes the pre-shift report scheduler regenerate and re-send the roster with the new QR, but only while
     the shift has not ended (its scan requires `ends_at > now()`). The DEFAULT Venue Manager role does not hold
@@ -7626,9 +7628,18 @@ image that runs the apps' own derive step on the read-only volume (`--pull never
     Worker refuse to boot when `REPORT_AVAILABLE_BEFORE_MINUTES >= QR_MAX_AGE_DAYS x 1440`. That guarantees only that a
     printed QR is still inside the age ceiling when the shift starts, not through its end + grace (shift length is not
     bounded by any setting).
-  - *Held for owner decisions (not implemented):* rotating after the shift has ended strands staff still clocked in
-    (the report is not regenerated after `ends_at`) — review M2; `correct()` does not bound a recovered `clockOutAt` —
-    review L4.
+  - *No rotation after the shift has ended (review M2, owner decision 2026-11-15).* A rotation after `ends_at` would strand
+    staff still clocked in (the report is not regenerated after the end), so it is refused 409 `SHIFT_ENDED` in the
+    service, under the shift row lock, before the compare-and-set and the audit write. Fail closed: a missing row or a null
+    `not_ended` refuses (unit-tested with a mocked lock result); integration-tested over HTTP and from the service.
+  - *Bounded corrected / recovered clock-out (review L4, owner decision 2026-11-15).* `correct(clockOutAt)` refuses 422
+    `INVALID_CLOCK_OUT_TIME` when the value is in the future (database clock), before `clockInAt`, or after the staff
+    member's OWN end + `QR_POST_SHIFT_GRACE_MINUTES` (`attendanceWindow(effectiveAssignmentTime(...)).closesAt`, the same
+    bound as every other clock-out path). Every comparison is written "not inside", so an unreadable time refuses. Worked
+    minutes still come only from `@rab/shared` `computeWorkedMinutes`. Tested per bound, including a seat that ends before
+    the shift (own end, not shift end). Open (owner decision pending): `correct(clockInAt)` has no lower bound (only "not
+    in the future" and "not after clock-out"), so a manager with `attendance.edit` could move a clock-in earlier and
+    inflate paid minutes; `recordAttendance` already bounds it at shift start − `CLOCK_IN_EARLY_MINUTES`.
   - *Per-staff grace, end to end.* One grace, `QR_POST_SHIFT_GRACE_MINUTES` (120), always from the staff member's OWN end
     (`effectiveAssignmentTime`): the QR is accepted until own end + grace (`validUntil` takes the seat; `validateQr`
     requires it), the staff self clock-out now has the same `assertClockWindow` check the on-behalf clock-out has, and the
@@ -7714,3 +7725,45 @@ Reversal:   A shorter QR_MAX_AGE_DAYS, or rotating QRs automatically on schedule
   - the runner specs (probes at code level + 1);
   - the `server-path-provisioning-db` tamper cases;
   - unit guards: reviewed structure level 21 with floor 20, pending majors.
+
+## Part C1 — HWS (one schema per workspace) on by default outside production; user deletion checks every workspace (branch hws/c1a-on-by-default, 2026-11-14)
+- **Change.** `HWS_RUNTIME_ENABLED` unset now means ON in development and test and OFF when ANY production signal is set
+  (`NODE_ENV`, `RAB_RUNTIME_ENV` or `DB_TARGET` = production, trimmed, any case; the existing `isProductionRuntime`). An explicit
+  `true`/`false` wins everywhere; any other value refuses to boot. One rule (`hws-runtime-default.ts`) for the API, Worker and
+  standalone provisioner. Production compose files still pin `"false"` until the C3 cutover. QA and the bullmq test stack flip to on.
+- **Threats and controls.**
+  - *HWS turned on in production by accident* (e.g. a CLI command run with `DB_TARGET=production` and no `NODE_ENV`), splitting
+    writes between workspace schemas and `core` or letting `hws:backfill --apply` run outside the cutover: any production signal
+    forces OFF; tests for the env class, the provisioner and the backfill guard.
+  - *Manager venue list read another workspace* (`ManagerService.listVenues`, C0 audit BROKEN path): permission re-checked in the
+    service (403), a manager outside the org or workspace is 404, an org admin's read is gated by `core.admin_workspace_in_org`,
+    and the read runs in the target workspace's context.
+  - *User hard delete erased history in another workspace* (C0 audit BROKEN path; another person's data): `assertCanDelete`
+    checks the bound scope and every candidate workspace of the organisation (core copies and READY schema); a schema that exists
+    but is not READY refuses with `USER_DELETION_UNVERIFIABLE` (workspace id logged server-side only); `user_note.subject_user_id`
+    counts as history; `deleteUser` records visible staff history in every workspace scope before the delete and refuses (409,
+    whole transaction rolled back) if any of it disappears; FK refusals (23503) are a 409, not a 500.
+- **Other tenant-binding changes.** `storage:reconcile` binds the tenant identity without routing to a workspace schema (every
+  query there is on `core.stored_file`, same RLS), so one non-READY workspace no longer stops it for every tenant; a `rab-ai` job
+  for a workspace that is not yet routable is skipped (the Worker's `isNotYetRoutableWorkspace` rule), not failed; `seed-qa`
+  provisions the workspace schema through `core.provision_workspace`.
+- **Residual (owner review pending).** The per-workspace check runs under the caller's RLS, so "no rows" can mean "hidden". The
+  post-delete re-check compares only `shift_assignment`, `job_offer` and `attendance`, and a narrow window remains: a staff
+  profile the caller cannot see that gets its first history row from a concurrent transaction just before the delete is not in
+  the snapshot. Rows in `shift_request_staff`, `venue_manager_staff` (cascade) and `replacement_request.selected_staff_profile_id`
+  (set NULL) are not compared. A delete refused by a foreign key (23503) is reported as the same 409 (constraint/table names
+  logged server-side). The complete control is a SECURITY DEFINER boolean `core.user_has_protected_history` covering all of
+  these (draft in docs/plans/phase-x3/C1-STATUS.md, FOR OWNER REVIEW, not run anywhere).
+- **Scale finding (owner decision pending).** Deleting a `core` row referenced from every workspace schema locks every referencing
+  table (~31 per workspace for `core."user"`); from about 300 workspaces this fails with "out of shared memory" at the default
+  `max_locks_per_transaction`. Applies to production today (schemas are provisioned with HWS off). CI's disposable database runs
+  with `max_locks_per_transaction=2048`.
+- **CI.** The server and Worker suites run HWS ON by default; one HWS-OFF job each keeps production's mode covered until C4
+  (`--skip-nx-cache` so ON and OFF results never mix). Test-only: fixture workspace schemas are dropped after each test file on
+  disposable databases (SECURITY TRADE-OFF in C1-STATUS: their core rows stay READY with no schema; routing refuses them, Worker
+  scans skip them).
+- **Tests.** env.validation.hws-runtime.spec.ts, workspace-provisioner.config.spec.ts, hws-c1-org-level-workspace-paths
+  integration (venues 404 across workspace/org; delete refused for history in another schema, in the core copy, or an
+  unverifiable schema; CEO cannot cascade another workspace's staff profile), the Worker isolation specs with a real
+  wrong-organisation binding, and the full suites with HWS on (server 2,846 pass / 10 fail = the member staff-visibility gap
+  awaiting owner SQL; Worker 741/741).

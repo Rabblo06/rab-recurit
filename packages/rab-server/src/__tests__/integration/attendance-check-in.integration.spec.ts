@@ -14,6 +14,7 @@ import { createAdminDataSource } from './helpers/admin-datasource';
 import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
 import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-pipe';
 import { integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
+import { businessTable } from './helpers/hws-fixtures';
 
 /**
  * Check In → Clock In → Clock Out, the geofence on all three, Venue Manager on-behalf punches and the pipeline stages
@@ -76,7 +77,7 @@ describeIfDb('attendance check-in, geofence and on-behalf punches (integration)'
     tokenA = await factory.login(a);
     staff = [];
     for (let i = 0; i < 18; i++) staff.push(await factory.createStaff(seeded.organisation, { owner: a, label: `checkin-s${i}` }));
-    await adminDataSource.query(`UPDATE core.staff_profile SET employment_status = 'active' WHERE id = ANY($1::uuid[])`, [staff.map((s) => s.profileId)]);
+    await adminDataSource.query(`UPDATE ${businessTable(a.workspaceId!, 'staff_profile')} SET employment_status = 'active' WHERE id = ANY($1::uuid[])`, [staff.map((s) => s.profileId)]);
     staffTokens = [];
     for (const s of staff) staffTokens.push(await factory.login(s));
 
@@ -106,7 +107,7 @@ describeIfDb('attendance check-in, geofence and on-behalf punches (integration)'
 
   async function setGeofence(venueId: string, opts: { enforce: boolean; configured?: boolean }) {
     const configured = opts.configured ?? true;
-    await adminDataSource.query(`UPDATE core.venue SET enforce_geofence = $2, lat = $3, lng = $4, geofence_radius_m = $5 WHERE id = $1`, [
+    await adminDataSource.query(`UPDATE ${businessTable(a.workspaceId!, 'venue')} SET enforce_geofence = $2, lat = $3, lng = $4, geofence_radius_m = $5 WHERE id = $1`, [
       venueId, opts.enforce, configured ? VENUE.lat : null, configured ? VENUE.lng : null, VENUE.radius,
     ]);
   }
@@ -138,13 +139,13 @@ describeIfDb('attendance check-in, geofence and on-behalf punches (integration)'
       const confirmed = await http().post(`/rest/v1/offers/${offer.body.id}/confirm`).set(auth(tokenA));
       expect(confirmed.status).toBe(201); // nothing auto-confirms on accept any more: the manager's confirm always books
     }
-    await adminDataSource.query(`UPDATE core.shift SET requested_by = $2 WHERE id = $1`, [shiftId, vm.userId]);
+    await adminDataSource.query(`UPDATE ${businessTable(a.workspaceId!, 'shift')} SET requested_by = $2 WHERE id = $1`, [shiftId, vm.userId]);
     await adminDataSource.query(
-      `UPDATE core.shift SET starts_at = $2, ends_at = $3, default_starts_at = $2, default_ends_at = $3 WHERE id = $1`,
+      `UPDATE ${businessTable(a.workspaceId!, 'shift')} SET starts_at = $2, ends_at = $3, default_starts_at = $2, default_ends_at = $3 WHERE id = $1`,
       [shiftId, startsAt, endsAt],
     );
-    await adminDataSource.query(`UPDATE core.shift_assignment SET period = tstzrange($2, $3, '[)') WHERE shift_id = $1`, [shiftId, startsAt, endsAt]);
-    const seats = await adminDataSource.query(`SELECT status, check_in_required FROM core.shift_assignment WHERE shift_id = $1`, [shiftId]);
+    await adminDataSource.query(`UPDATE ${businessTable(a.workspaceId!, 'shift_assignment')} SET period = tstzrange($2, $3, '[)') WHERE shift_id = $1`, [shiftId, startsAt, endsAt]);
+    const seats = await adminDataSource.query(`SELECT status, check_in_required FROM ${businessTable(a.workspaceId!, 'shift_assignment')} WHERE shift_id = $1`, [shiftId]);
     expect(seats.every((r: any) => r.status === 'confirmed' && r.check_in_required === true)).toBe(true);
     return shiftId;
   }
@@ -157,9 +158,9 @@ describeIfDb('attendance check-in, geofence and on-behalf punches (integration)'
   const onBehalf = (token: string, kind: 'in' | 'out', shiftId: string, staffProfileId: string, reason: string) =>
     http().post(`/rest/v1/attendance/report/shift/${shiftId}/staff/${staffProfileId}/clock-${kind}-on-behalf`).set(auth(token)).send({ reason });
   const seat = async (shiftId: string, i: number) =>
-    (await adminDataSource.query(`SELECT * FROM core.shift_assignment WHERE shift_id = $1 AND staff_profile_id = $2`, [shiftId, staff[i]!.profileId]))[0];
+    (await adminDataSource.query(`SELECT * FROM ${businessTable(a.workspaceId!, 'shift_assignment')} WHERE shift_id = $1 AND staff_profile_id = $2`, [shiftId, staff[i]!.profileId]))[0];
   const attendanceOf = async (shiftId: string, i: number) =>
-    (await adminDataSource.query(`SELECT * FROM core.attendance WHERE shift_id = $1 AND staff_profile_id = $2`, [shiftId, staff[i]!.profileId]))[0];
+    (await adminDataSource.query(`SELECT * FROM ${businessTable(a.workspaceId!, 'attendance')} WHERE shift_id = $1 AND staff_profile_id = $2`, [shiftId, staff[i]!.profileId]))[0];
   const audits = (action: string, entityId: string) =>
     adminDataSource.query(`SELECT actor_user_id, metadata FROM core.audit_log WHERE organisation_id = $1 AND action = $2 AND entity_id = $3`, [orgId, action, entityId]);
   const pipeline = async (shiftId: string) => (await http().get(`/rest/v1/shifts/${shiftId}/pipeline`).set(auth(tokenA)).expect(200)).body;
@@ -266,10 +267,10 @@ describeIfDb('attendance check-in, geofence and on-behalf punches (integration)'
     const early = await checkIn(5, { shiftId: later });
     expect({ status: early.status, code: early.body.code }).toEqual({ status: 409, code: 'CHECK_IN_TOO_EARLY' });
 
-    await adminDataSource.query(`UPDATE core.shift_assignment SET status = 'cancelled' WHERE shift_id = $1`, [shiftId]);
+    await adminDataSource.query(`UPDATE ${businessTable(a.workspaceId!, 'shift_assignment')} SET status = 'cancelled' WHERE shift_id = $1`, [shiftId]);
     const cancelled = await checkIn(4, { shiftId });
     expect({ status: cancelled.status, code: cancelled.body.code }).toEqual({ status: 409, code: 'SHIFT_NOT_CONFIRMED' });
-    await adminDataSource.query(`UPDATE core.shift_assignment SET status = 'no_show' WHERE shift_id = $1`, [shiftId]);
+    await adminDataSource.query(`UPDATE ${businessTable(a.workspaceId!, 'shift_assignment')} SET status = 'no_show' WHERE shift_id = $1`, [shiftId]);
     const flagged = await checkIn(4, { shiftId });
     expect({ status: flagged.status, code: flagged.body.code }).toEqual({ status: 409, code: 'ATTENDANCE_FLAGGED_MISSING' });
   });
@@ -365,7 +366,7 @@ describeIfDb('attendance check-in, geofence and on-behalf punches (integration)'
     const statuses = [staffRes.status, vmRes.status].sort();
     expect(statuses.filter((s) => s === 201 || s === 200)).toHaveLength(1);
     expect(statuses.filter((s) => s === 409)).toHaveLength(1);
-    expect((await adminDataSource.query(`SELECT count(*)::int AS n FROM core.attendance WHERE shift_id = $1`, [shiftId]))[0].n).toBe(1);
+    expect((await adminDataSource.query(`SELECT count(*)::int AS n FROM ${businessTable(a.workspaceId!, 'attendance')} WHERE shift_id = $1`, [shiftId]))[0].n).toBe(1);
 
     // concurrent clock-out: staff + manager, exactly one wins
     const [o1, o2] = await Promise.all([
@@ -382,7 +383,7 @@ describeIfDb('attendance check-in, geofence and on-behalf punches (integration)'
   it('bookings made before Check In shipped keep the old flow: clock-in without check-in, legacy geofence payload, active attendance closes', async () => {
     await setGeofence(venue1, { enforce: false });
     const shiftId = await bookShift([12]);
-    await adminDataSource.query(`UPDATE core.shift_assignment SET check_in_required = false WHERE shift_id = $1`, [shiftId]);
+    await adminDataSource.query(`UPDATE ${businessTable(a.workspaceId!, 'shift_assignment')} SET check_in_required = false WHERE shift_id = $1`, [shiftId]);
     await setGeofence(venue1, { enforce: true });
     // the pre-Check-In mobile payload: lat/lng only, no accuracy/capturedAt
     const inRes = await clockIn(12, shiftId, { lat: INSIDE.lat, lng: INSIDE.lng });
@@ -414,11 +415,11 @@ describeIfDb('attendance check-in, geofence and on-behalf punches (integration)'
     expect(board.summary).toMatchObject({ checkedIn: 1, clockedIn: 2, filled: 5 });
 
     // worker's provisional mark → attendance_missing (still filled); manager-confirmed → no_show (seat freed)
-    await adminDataSource.query(`UPDATE core.shift_assignment SET status = 'no_show' WHERE shift_id = $1 AND staff_profile_id = $2`, [shiftId, staff[16]!.profileId]);
+    await adminDataSource.query(`UPDATE ${businessTable(a.workspaceId!, 'shift_assignment')} SET status = 'no_show' WHERE shift_id = $1 AND staff_profile_id = $2`, [shiftId, staff[16]!.profileId]);
     board = await pipeline(shiftId);
     expect(board.stageCounts).toMatchObject({ attendance_missing: 1, no_show: 0, confirmed: 1 });
     expect(board.summary).toMatchObject({ attendanceMissing: 1, confirmedNoShow: 0, filled: 5 });
-    await adminDataSource.query(`UPDATE core.shift_assignment SET attendance_reviewed_at = now(), attendance_reviewed_by = $3 WHERE shift_id = $1 AND staff_profile_id = $2`, [shiftId, staff[16]!.profileId, vm.userId]);
+    await adminDataSource.query(`UPDATE ${businessTable(a.workspaceId!, 'shift_assignment')} SET attendance_reviewed_at = now(), attendance_reviewed_by = $3 WHERE shift_id = $1 AND staff_profile_id = $2`, [shiftId, staff[16]!.profileId, vm.userId]);
     board = await pipeline(shiftId);
     expect(board.stageCounts).toMatchObject({ attendance_missing: 0, no_show: 1 });
     expect(board.summary).toMatchObject({ confirmedNoShow: 1, noShow: 1, filled: 4 });

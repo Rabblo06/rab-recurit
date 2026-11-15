@@ -14,6 +14,7 @@ import { TEST_MOCK_MODEL_ID } from '../support/ai/test-catalogue';
 import { AiKit, aiOrganisation, ask, bearer, bootAiKit, manager, newConversation } from './helpers/ai-test-kit';
 import { TestIdentity } from './helpers/test-identities';
 import { sqlStateAsSchemaRole } from './helpers/schema-role';
+import { businessSchema, dropFixtureWorkspaceSchema, hwsRuntimeOn } from './helpers/hws-fixtures';
 import { integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
 
 /**
@@ -167,7 +168,20 @@ describeIfDb('AI usage ledger + M7-1 columns (integration)', () => {
       expect(imRows.map((r) => r.user_id)).toEqual([im.id.userId, im.id.userId]);
       expect(await sqlAs(b.ceo, `SELECT 1 FROM core.ai_usage WHERE organisation_id = $1`, [a.orgId])).toEqual([]);
       // Forging A's organisation in B's session: B's user is no CEO of A and owns no row there.
-      expect(await sqlAs({ organisationId: a.orgId, workspaceId: b.ceo.workspaceId, userId: b.ceo.userId }, `SELECT 1 FROM core.ai_usage`)).toEqual([]);
+      const forged = () => sqlAs({ organisationId: a.orgId, workspaceId: b.ceo.workspaceId, userId: b.ceo.userId }, `SELECT 1 FROM core.ai_usage`);
+      // Part C1: with HWS on, organisation A cannot even resolve B's workspace schema (fail closed before any query).
+      if (hwsRuntimeOn()) await expect(forged()).rejects.toMatchObject({ name: 'WorkspaceRoutingError' });
+      else expect(await forged()).toEqual([]);
+      // The same forgery with the routing bypassed (GUCs bound by hand, B's own schema on the path): RLS still shows nothing.
+      const bypassed = await kit.runtime.transaction(async (m) => {
+        await m.query(
+          `SELECT set_config('search_path', $1, true), set_config('rab.organisation_id', $2, true), set_config('rab.workspace_id', $3, true),
+                  set_config('rab.user_id', $4, true), set_config('rab.role', '', true)`,
+          [b.ceo.workspaceId ? businessSchema(b.ceo.workspaceId) : 'core', a.orgId, b.ceo.workspaceId ?? '', b.ceo.userId],
+        );
+        return m.query(`SELECT 1 FROM core.ai_usage`);
+      });
+      expect(bypassed).toEqual([]);
     });
 
     // P-class (owner-login architecture): the schema role crewflow_app is refused UPDATE / DELETE / TRUNCATE (42501). The
@@ -220,6 +234,9 @@ describeIfDb('AI usage ledger + M7-1 columns (integration)', () => {
       await write(gone.id, row(gone.id));
       expect(await kit.owner.query(`SELECT count(*)::int AS n FROM core.ai_usage WHERE user_id = $1`, [gone.id.userId])).toEqual([{ n: 1 }]);
       await kit.owner.query(`DELETE FROM core.manager_profile WHERE user_id = $1`, [gone.id.userId]).catch(() => undefined);
+      // Part C1: the user's own workspace has its schema; its registry row's RESTRICT foreign key would refuse the cascade from
+      // the user to the workspace. Tear the fixture schema down first (superuser fixture connection).
+      if (gone.id.workspaceId) await dropFixtureWorkspaceSchema(kit.owner, gone.id.workspaceId);
       await kit.owner.query(`DELETE FROM core."user" WHERE id = $1`, [gone.id.userId]);
       expect(await kit.owner.query(`SELECT count(*)::int AS n FROM core.ai_usage WHERE user_id = $1`, [gone.id.userId])).toEqual([{ n: 0 }]);
       expect(await kit.owner.query(`SELECT count(*)::int AS n FROM core.ai_usage WHERE organisation_id = $1`, [a.orgId])).toEqual([{ n: 3 }]);

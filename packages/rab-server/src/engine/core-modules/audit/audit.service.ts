@@ -182,6 +182,8 @@ export const AuditAction = {
   ACCOUNT_SUSPENDED: 'user.suspended',
   ACCOUNT_REACTIVATED: 'user.reactivated',
   USER_DELETED: 'user.deleted',
+  /** Owner 0g: GDPR erasure of an already soft-deleted account (UserDeletionService.erasePersonalData). */
+  USER_PERSONAL_DATA_ERASED: 'user.personal_data_erased',
   ACCOUNT_INVITE_EXPIRED: 'user.invite_expired',
   ACCOUNT_INVITE_CLEANED_UP: 'user.invite_cleaned_up',
   ACCOUNT_INVITE_CLEANUP_SKIPPED: 'user.invite_cleanup_skipped',

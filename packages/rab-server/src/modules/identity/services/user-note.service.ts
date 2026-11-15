@@ -3,6 +3,7 @@ import { EntityManager } from 'typeorm';
 
 import { User, UserNote } from '../entities';
 import { AuthContext } from '../../../engine/core-modules/tenant/auth-context.interface';
+import { businessTables } from '../../../engine/core-modules/tenant/business-tables';
 import { EnvironmentService } from '../../../engine/core-modules/environment/environment.service';
 import { assertUsersOfOrganisationTx } from '../../../engine/core-modules/core-references/core-references';
 
@@ -75,16 +76,17 @@ export class UserNoteService {
     // for anything omitted — so `workspace_id` still appeared in the generated SQL even with the key left out of the
     // JS object above, still 500ing against the column-less legacy table (confirmed live, not assumed). Raw SQL is
     // the only way to genuinely vary which columns are referenced between the two physical shapes.
+    const t = businessTables(manager);
     const id: string = hwsRuntime
       ? (
           await manager.query<Array<{ id: string }>>(
-            `INSERT INTO user_note (organisation_id, workspace_id, subject_user_id, author_user_id, body) VALUES ($1,$2,$3,$4,$5) RETURNING id`,
+            `INSERT INTO ${t.user_note} (organisation_id, workspace_id, subject_user_id, author_user_id, body) VALUES ($1,$2,$3,$4,$5) RETURNING id`,
             [ctx.organisationId, ctx.workspaceId, subjectUserId, ctx.userId, body],
           )
         )[0]!.id
       : (
           await manager.query<Array<{ id: string }>>(
-            `INSERT INTO user_note (organisation_id, subject_user_id, author_user_id, body) VALUES ($1,$2,$3,$4) RETURNING id`,
+            `INSERT INTO ${t.user_note} (organisation_id, subject_user_id, author_user_id, body) VALUES ($1,$2,$3,$4) RETURNING id`,
             [ctx.organisationId, subjectUserId, ctx.userId, body],
           )
         )[0]!.id;

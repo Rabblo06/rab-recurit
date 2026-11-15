@@ -1,4 +1,4 @@
-import { insertMembership } from './helpers/test-identities';
+import { insertMembership, provisionFixtureWorkspace } from './helpers/test-identities';
 import 'reflect-metadata';
 import { PermissionFlag, UserStatus } from '@rab/shared';
 import { ForbiddenException, INestApplication } from '@nestjs/common';
@@ -26,6 +26,7 @@ import { clearThrottleState } from './helpers/throttle-state';
 import { generateFixturePassword } from './helpers/fixture-password';
 import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-pipe';
 import { integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
+import { businessSchema, businessTable, businessTableOf, siblingTable } from './helpers/hws-fixtures';
 
 const FIXTURE_PASSWORD = generateFixturePassword();
 
@@ -113,6 +114,8 @@ describeIfDb('attendance abuse cases (integration)', () => {
         subdomain: `test-${managerUserId.slice(0, 8)}`,
         status: 'active',
       });
+      await provisionFixtureWorkspace(manager, workspace.id); // Part C1: READY schema, as the product builds it
+      await manager.query(`SELECT set_config('search_path', $1, true)`, [businessSchema(workspace.id)]); // later fixture writes in this transaction land in the workspace's schema
       await insertMembership(manager, organisation.id, managerUserId, workspace.id);
       // A real manager always has a manager_profile in its workspace; staff_profile_insert requires one (non-venue) for the creator.
       // manager_profile WITH CHECK: bind the workspace the profile is written into, as the server does on first onboarding.
@@ -190,6 +193,8 @@ describeIfDb('attendance abuse cases (integration)', () => {
         subdomain: `test-b-${userId.slice(0, 8)}`,
         status: 'active',
       });
+      await provisionFixtureWorkspace(manager, workspace.id); // Part C1: READY schema, as the product builds it
+      await manager.query(`SELECT set_config('search_path', $1, true)`, [businessSchema(workspace.id)]); // later fixture writes in this transaction land in the workspace's schema
       await insertMembership(manager, organisation.id, userId, workspace.id);
       await manager.query(`SELECT set_config('rab.workspace_id', $1, true)`, [workspace.id]);
       await manager.query(`INSERT INTO core.manager_profile (organisation_id, user_id, type, workspace_id) VALUES ($1, $2, $3, $4)`, [
@@ -237,7 +242,7 @@ describeIfDb('attendance abuse cases (integration)', () => {
       await manager.insert(UserRole, { userId, roleId: role.id, organisationId: organisation.id });
 
       const profile = await manager.query(
-        `INSERT INTO core.staff_profile (organisation_id, user_id, staff_ref, created_by, workspace_id, employment_status) VALUES ($1, $2, $3, $4, $5, 'active') RETURNING id`,
+        `INSERT INTO staff_profile (organisation_id, user_id, staff_ref, created_by, workspace_id, employment_status) VALUES ($1, $2, $3, $4, $5, 'active') RETURNING id`,
         [organisation.id, userId, `STF-${randomUUID().slice(0, 8)}`, createdByUserId, creatorWorkspaceId],
       );
       await insertMembership(manager, organisation.id, userId, creatorWorkspaceId);
@@ -310,7 +315,7 @@ describeIfDb('attendance abuse cases (integration)', () => {
     // This suite pins the Clock In contract of bookings made BEFORE Check In shipped (rollout rule, migration
     // 1786719450000: check_in_required = false keeps the old flow and the legacy geofence payload). The Check In
     // prerequisite and the strict geofence evidence are covered by attendance-check-in.integration.spec.ts.
-    await adminDataSource.query(`UPDATE core.shift_assignment SET check_in_required = false WHERE shift_id = $1 AND staff_profile_id = $2`, [shiftId, staffProfileId]);
+    await adminDataSource.query(`UPDATE ${siblingTable(await businessTableOf(adminDataSource, 'shift', shiftId), 'shift_assignment')} SET check_in_required = false WHERE shift_id = $1 AND staff_profile_id = $2`, [shiftId, staffProfileId]);
   }
 
   async function sendAcceptConfirm(managerToken: string, staffToken: string, staffProfileId: string, shiftId: string): Promise<void> {
@@ -382,10 +387,10 @@ describeIfDb('attendance abuse cases (integration)', () => {
   async function moveShift(shiftId: string, startOffset: string, endOffset: string): Promise<{ startsAt: Date; endsAt: Date }> {
     // TypeORM's postgres driver returns [rows, affectedCount] for UPDATE ... RETURNING.
     const [[row]] = await adminDataSource.query(
-      `UPDATE core.shift SET starts_at = now() + $2::interval, ends_at = now() + $3::interval WHERE id = $1 RETURNING starts_at, ends_at`,
+      `UPDATE ${await businessTableOf(adminDataSource, 'shift', shiftId)} SET starts_at = now() + $2::interval, ends_at = now() + $3::interval WHERE id = $1 RETURNING starts_at, ends_at`,
       [shiftId, startOffset, endOffset],
     );
-    await adminDataSource.query(`UPDATE core.shift_assignment SET period = tstzrange($2::timestamptz, $3::timestamptz, '[)') WHERE shift_id = $1`, [shiftId, row.starts_at, row.ends_at]);
+    await adminDataSource.query(`UPDATE ${siblingTable(await businessTableOf(adminDataSource, 'shift', shiftId), 'shift_assignment')} SET period = tstzrange($2::timestamptz, $3::timestamptz, '[)') WHERE shift_id = $1`, [shiftId, row.starts_at, row.ends_at]);
     return { startsAt: row.starts_at, endsAt: row.ends_at };
   }
 
@@ -487,7 +492,7 @@ describeIfDb('attendance abuse cases (integration)', () => {
       // verification query to see the row at all.
       const count = await tenantContext.runInTenantContext(
         { organisationId: organisation.id, workspaceId: venue.workspaceId!, userId: managerUserId, role: '' },
-        (manager) => manager.query(`SELECT count(*) FROM core.attendance WHERE staff_profile_id = $1`, [staffA.staffProfileId]),
+        (manager) => manager.query(`SELECT count(*) FROM attendance WHERE staff_profile_id = $1`, [staffA.staffProfileId]),
       );
       expect(Number(count[0].count)).toBe(1);
     });
@@ -513,7 +518,7 @@ describeIfDb('attendance abuse cases (integration)', () => {
 
     const rows = await tenantContext.runInTenantContext(
       { organisationId: organisation.id, workspaceId: venue.workspaceId!, userId: managerUserId, role: '' },
-      (manager) => manager.query(`SELECT status FROM core.attendance WHERE staff_profile_id = $1`, [staffA.staffProfileId]),
+      (manager) => manager.query(`SELECT status FROM attendance WHERE staff_profile_id = $1`, [staffA.staffProfileId]),
     );
     expect(rows).toHaveLength(1);
     expect(rows[0].status).toBe('clocked_in');
@@ -691,7 +696,7 @@ describeIfDb('attendance abuse cases (integration)', () => {
       const res = await b.clockOutWith(printed);
       expect(res.status).toBe(409);
       expect(res.body.code).toBe('CLOCK_WINDOW_CLOSED');
-      const [row] = await adminDataSource.query(`SELECT status, clock_out_at FROM core.attendance WHERE shift_id = $1`, [b.shiftId]);
+      const [row] = await adminDataSource.query(`SELECT status, clock_out_at FROM ${siblingTable(await businessTableOf(adminDataSource, 'shift', b.shiftId), 'attendance')} WHERE shift_id = $1`, [b.shiftId]);
       expect(row).toMatchObject({ status: 'clocked_in', clock_out_at: null });
     });
 
@@ -718,12 +723,12 @@ describeIfDb('attendance abuse cases (integration)', () => {
       const shiftId = await makeAndPublishShift(organisation, venue, managerToken);
       await confirmShiftForStaff(managerToken, staffToken, staff.staffProfileId, shiftId);
       const oldQr = await signQr(organisation, venue.workspaceId ?? null, managerUserId, shiftId);
-      const [before] = await adminDataSource.query(`SELECT qr_version, updated_at FROM core.shift WHERE id = $1`, [shiftId]);
+      const [before] = await adminDataSource.query(`SELECT qr_version, updated_at FROM ${await businessTableOf(adminDataSource, 'shift', shiftId)} WHERE id = $1`, [shiftId]);
 
       const res = await rotate(managerToken, shiftId);
       expect(res.status).toBe(201);
       expect(res.body.qrVersion).toBe(before.qr_version + 1);
-      const [after] = await adminDataSource.query(`SELECT qr_version, updated_at FROM core.shift WHERE id = $1`, [shiftId]);
+      const [after] = await adminDataSource.query(`SELECT qr_version, updated_at FROM ${await businessTableOf(adminDataSource, 'shift', shiftId)} WHERE id = $1`, [shiftId]);
       expect(after.qr_version).toBe(before.qr_version + 1);
       expect(after.updated_at.getTime()).toBeGreaterThan(before.updated_at.getTime()); // the pre-shift report regenerates
       const [audit] = await adminDataSource.query(
@@ -744,11 +749,11 @@ describeIfDb('attendance abuse cases (integration)', () => {
       const staffToken = await login(staff.email, true);
       const shiftId = await makeAndPublishShift(organisation, venue, managerToken);
       expect((await rotate(staffToken, shiftId)).status).toBe(403);
-      const staffUserId = (await adminDataSource.query(`SELECT user_id FROM core.staff_profile WHERE id = $1`, [staff.staffProfileId]))[0].user_id;
+      const staffUserId = (await adminDataSource.query(`SELECT user_id FROM ${await businessTableOf(adminDataSource, 'staff_profile', staff.staffProfileId)} WHERE id = $1`, [staff.staffProfileId]))[0].user_id;
       await expect(
         schedulingService.rotateShiftQr({ organisationId: organisation.id, workspaceId: venue.workspaceId ?? null, userId: staffUserId, role: '' }, shiftId),
       ).rejects.toBeInstanceOf(ForbiddenException);
-      const [row] = await adminDataSource.query(`SELECT qr_version FROM core.shift WHERE id = $1`, [shiftId]);
+      const [row] = await adminDataSource.query(`SELECT qr_version FROM ${await businessTableOf(adminDataSource, 'shift', shiftId)} WHERE id = $1`, [shiftId]);
       expect(row.qr_version).toBe(1);
     });
 
@@ -760,8 +765,38 @@ describeIfDb('attendance abuse cases (integration)', () => {
       const bToken = await login(b.managerEmail);
       expect((await rotate(bToken, shiftId)).status).toBe(404);
       expect((await rotate(bToken, randomUUID())).status).toBe(404);
-      const [row] = await adminDataSource.query(`SELECT qr_version FROM core.shift WHERE id = $1`, [shiftId]);
+      const [row] = await adminDataSource.query(`SELECT qr_version FROM ${await businessTableOf(adminDataSource, 'shift', shiftId)} WHERE id = $1`, [shiftId]);
       expect(row.qr_version).toBe(1);
+    });
+
+    // Owner decision M2 (2026-11-15): never after the shift's end (database clock) — the pre-shift report is not
+    // regenerated after the end, so a rotation then would revoke the printed QR with no replacement.
+    it('after the shift has ended (still open by status): 409 SHIFT_ENDED, qr_version unchanged, no audit row — over HTTP and in the service', async () => {
+      const { organisation, managerEmail, managerUserId, venue } = await seedOrg();
+      const managerToken = await login(managerEmail);
+      const shiftId = await makeAndPublishShift(organisation, venue, managerToken);
+      await moveShift(shiftId, '-9 hours', '-1 minute'); // ended a minute ago; status stays non-terminal
+      const res = await rotate(managerToken, shiftId);
+      expect(res.status).toBe(409);
+      expect(res.body.code).toBe('SHIFT_ENDED');
+      await expect(
+        schedulingService.rotateShiftQr({ organisationId: organisation.id, workspaceId: venue.workspaceId ?? null, userId: managerUserId, role: '' }, shiftId),
+      ).rejects.toMatchObject({ response: { code: 'SHIFT_ENDED' } });
+      const [row] = await adminDataSource.query(`SELECT qr_version, status FROM ${await businessTableOf(adminDataSource, 'shift', shiftId)} WHERE id = $1`, [shiftId]);
+      expect(row.qr_version).toBe(1);
+      expect(['completed', 'cancelled']).not.toContain(row.status);
+      const [{ n }] = await adminDataSource.query(`SELECT count(*)::int AS n FROM core.audit_log WHERE action = 'shift.qr_rotated' AND entity_id = $1`, [shiftId]);
+      expect(n).toBe(0);
+    });
+
+    it('control: a running shift that ends in a few minutes can still be rotated', async () => {
+      const { organisation, managerEmail, venue } = await seedOrg();
+      const managerToken = await login(managerEmail);
+      const shiftId = await makeAndPublishShift(organisation, venue, managerToken);
+      await moveShift(shiftId, '-8 hours', '5 minutes');
+      const res = await rotate(managerToken, shiftId);
+      expect(res.status).toBe(201);
+      expect(res.body.qrVersion).toBe(2);
     });
 
     it('a cancelled or completed shift (no outgoing transition) is refused 409 SHIFT_CLOSED', async () => {
@@ -774,11 +809,11 @@ describeIfDb('attendance abuse cases (integration)', () => {
       expect(r1.status).toBe(409);
       expect(r1.body.code).toBe('SHIFT_CLOSED');
       const completed = await makeAndPublishShift(organisation, venue, managerToken);
-      await adminDataSource.query(`UPDATE core.shift SET status = 'completed' WHERE id = $1`, [completed]); // fixture: the worker completes shifts
+      await adminDataSource.query(`UPDATE ${await businessTableOf(adminDataSource, 'shift', completed)} SET status = 'completed' WHERE id = $1`, [completed]); // fixture: the worker completes shifts
       const r2 = await rotate(managerToken, completed);
       expect(r2.status).toBe(409);
       expect(r2.body.code).toBe('SHIFT_CLOSED');
-      const rows = await adminDataSource.query(`SELECT qr_version FROM core.shift WHERE id = ANY($1) ORDER BY qr_version`, [[cancelled, completed]]);
+      const rows = await adminDataSource.query(`SELECT qr_version FROM ${await businessTableOf(adminDataSource, 'shift', cancelled)} WHERE id = ANY($1) ORDER BY qr_version`, [[cancelled, completed]]);
       expect(rows.map((r: { qr_version: number }) => r.qr_version)).toEqual([1, 1]);
     });
   });
@@ -889,7 +924,7 @@ describeIfDb('attendance abuse cases (integration)', () => {
 
       const rows = await tenantContext.runInTenantContext(
         { organisationId: organisation.id, workspaceId: venue.workspaceId!, userId: managerUserId, role: '' },
-        (manager) => manager.query(`SELECT clock_out_method FROM core.attendance WHERE staff_profile_id = $1`, [staffA.staffProfileId]),
+        (manager) => manager.query(`SELECT clock_out_method FROM attendance WHERE staff_profile_id = $1`, [staffA.staffProfileId]),
       );
       expect(rows[0].clock_out_method).toBe('auto_geofence');
     });
@@ -918,20 +953,20 @@ describeIfDb('attendance abuse cases (integration)', () => {
         const res = await b.exit();
         expect(res.status).toBe(409);
         expect(res.body.code).toBe('CLOCK_WINDOW_CLOSED');
-        const [row] = await adminDataSource.query(`SELECT status, clock_out_at FROM core.attendance WHERE shift_id = $1`, [b.shiftId]);
+        const [row] = await adminDataSource.query(`SELECT status, clock_out_at FROM ${siblingTable(await businessTableOf(adminDataSource, 'shift', b.shiftId), 'attendance')} WHERE shift_id = $1`, [b.shiftId]);
         expect(row).toMatchObject({ status: 'clocked_in', clock_out_at: null });
       });
 
       it('own end earlier than the shift end: refused after the staff member OWN end + grace while the shift still runs', async () => {
         const b = await clockedInAtVenue();
         // The shift runs for another hour; this staff member's own seat ended 121 minutes ago.
-        await adminDataSource.query(`UPDATE core.shift SET starts_at = now() - interval '9 hours', ends_at = now() + interval '1 hour' WHERE id = $1`, [b.shiftId]);
+        await adminDataSource.query(`UPDATE ${await businessTableOf(adminDataSource, 'shift', b.shiftId)} SET starts_at = now() - interval '9 hours', ends_at = now() + interval '1 hour' WHERE id = $1`, [b.shiftId]);
         await adminDataSource.query(
-          `UPDATE core.shift_assignment SET period = tstzrange(now() - interval '9 hours', now() - interval '121 minutes', '[)') WHERE shift_id = $1`, [b.shiftId]);
+          `UPDATE ${siblingTable(await businessTableOf(adminDataSource, 'shift', b.shiftId), 'shift_assignment')} SET period = tstzrange(now() - interval '9 hours', now() - interval '121 minutes', '[)') WHERE shift_id = $1`, [b.shiftId]);
         const res = await b.exit();
         expect(res.status).toBe(409);
         expect(res.body.code).toBe('CLOCK_WINDOW_CLOSED');
-        const [row] = await adminDataSource.query(`SELECT status, clock_out_at FROM core.attendance WHERE shift_id = $1`, [b.shiftId]);
+        const [row] = await adminDataSource.query(`SELECT status, clock_out_at FROM ${siblingTable(await businessTableOf(adminDataSource, 'shift', b.shiftId), 'attendance')} WHERE shift_id = $1`, [b.shiftId]);
         expect(row).toMatchObject({ status: 'clocked_in', clock_out_at: null });
       });
 
@@ -975,7 +1010,7 @@ describeIfDb('attendance abuse cases (integration)', () => {
       await confirmShiftForStaff(managerToken, staffToken, staff.staffProfileId, shiftId);
       const startsAt = new Date(Date.now() + 2 * 3600_000);
       await tenantContext.runInTenantContext({organisationId: organisation.id, workspaceId: venue.workspaceId ?? null, userId: managerUserId, role: 'manager'}, m =>
-        m.query("UPDATE core.shift_assignment sa SET period=tstzrange($2::timestamptz,upper(sa.period),'[)') WHERE shift_id=$1", [shiftId, startsAt]));
+        m.query("UPDATE shift_assignment sa SET period=tstzrange($2::timestamptz,upper(sa.period),'[)') WHERE shift_id=$1", [shiftId, startsAt]));
       const res = await clockIn(staffToken, organisation, venue, managerUserId, shiftId);
       expect(res.status).toBe(409);
       expect(res.body.code).toBe('CLOCK_IN_TOO_EARLY');
@@ -1191,7 +1226,7 @@ describeIfDb('attendance abuse cases (integration)', () => {
 
       const corrections = await tenantContext.runInTenantContext(
         { organisationId: organisation.id, workspaceId: venue.workspaceId!, userId: managerUserId, role: '' },
-        (manager) => manager.query(`SELECT field, old_value, new_value, reason FROM core.attendance_correction WHERE attendance_id = $1`, [clockOutRes.body.id]),
+        (manager) => manager.query(`SELECT field, old_value, new_value, reason FROM attendance_correction WHERE attendance_id = $1`, [clockOutRes.body.id]),
       );
       expect(corrections).toHaveLength(1);
       expect(corrections[0].field).toBe('breakMinutes');
@@ -1276,10 +1311,10 @@ describeIfDb('attendance abuse cases (integration)', () => {
       // Since 2026-11-14 the staff clock-out window and the manager recovery share ONE grace (120 min after the staff
       // member's own end; the recovery opens strictly after it), so they no longer overlap. Ended 121 min ago: the staff
       // clock-out is refused (window closed) and the manager's recovery lands, both sent at the same moment.
-      await adminDataSource.query(`UPDATE core.shift SET starts_at = now() - interval '9 hours 1 minute', ends_at = now() - interval '121 minutes' WHERE id = $1`, [shiftId]);
-      await adminDataSource.query(`UPDATE core.shift_assignment SET period = tstzrange(now() - interval '9 hours 1 minute', now() - interval '121 minutes', '[)') WHERE shift_id = $1`, [shiftId]);
-      await adminDataSource.query(`UPDATE core.attendance SET clock_in_at = now() - interval '8 hours 56 minutes' WHERE shift_id = $1`, [shiftId]);
-      const [{ id: attendanceId }] = await adminDataSource.query(`SELECT id FROM core.attendance WHERE shift_id = $1`, [shiftId]);
+      await adminDataSource.query(`UPDATE ${businessTable(venue.workspaceId!, 'shift')} SET starts_at = now() - interval '9 hours 1 minute', ends_at = now() - interval '121 minutes' WHERE id = $1`, [shiftId]);
+      await adminDataSource.query(`UPDATE ${businessTable(venue.workspaceId!, 'shift_assignment')} SET period = tstzrange(now() - interval '9 hours 1 minute', now() - interval '121 minutes', '[)') WHERE shift_id = $1`, [shiftId]);
+      await adminDataSource.query(`UPDATE ${businessTable(venue.workspaceId!, 'attendance')} SET clock_in_at = now() - interval '8 hours 56 minutes' WHERE shift_id = $1`, [shiftId]);
+      const [{ id: attendanceId }] = await adminDataSource.query(`SELECT id FROM ${businessTable(venue.workspaceId!, 'attendance')} WHERE shift_id = $1`, [shiftId]);
       const recovered = new Date(Date.now() - 125 * 60_000).toISOString();
 
       const [staffOut, managerFix] = await Promise.all([
@@ -1294,7 +1329,7 @@ describeIfDb('attendance abuse cases (integration)', () => {
       expect(managerFix.status).toBeLessThan(300);
       expect([200, 201, 404, 409]).toContain(staffOut.status);
       const rows = await adminDataSource.query(
-        `SELECT status, clock_in_at, clock_out_at, break_minutes, worked_minutes, clock_out_method FROM core.attendance WHERE shift_id = $1`, [shiftId]);
+        `SELECT status, clock_in_at, clock_out_at, break_minutes, worked_minutes, clock_out_method FROM ${businessTable(venue.workspaceId!, 'attendance')} WHERE shift_id = $1`, [shiftId]);
       expect(rows).toHaveLength(1);
       const [row] = rows;
       expect(row.status).toBe('under_review');
@@ -1303,7 +1338,7 @@ describeIfDb('attendance abuse cases (integration)', () => {
       const span = Math.round((row.clock_out_at.getTime() - row.clock_in_at.getTime()) / 60_000);
       expect(row.worked_minutes).toBeGreaterThan(0);
       expect(row.worked_minutes).toBeLessThanOrEqual(span);
-      const [{ n }] = await adminDataSource.query(`SELECT count(*)::int AS n FROM core.attendance_correction WHERE attendance_id = $1`, [attendanceId]);
+      const [{ n }] = await adminDataSource.query(`SELECT count(*)::int AS n FROM ${businessTable(venue.workspaceId!, 'attendance_correction')} WHERE attendance_id = $1`, [attendanceId]);
       expect(n).toBe(1);
     });
 
@@ -1323,7 +1358,7 @@ describeIfDb('attendance abuse cases (integration)', () => {
       const replies = await Promise.all(Array.from({ length: 5 }, () =>
         request(app.getHttpServer()).patch(`/rest/v1/attendance/report/shift/${shiftId}/finalise`).set('Authorization', `Bearer ${managerToken}`)));
       expect(replies.map((r) => r.status)).toEqual([200, 200, 200, 200, 200]);
-      const reports = await adminDataSource.query(`SELECT status, finalised_at, finalised_by, final_pdf_sent_at FROM core.shift_report WHERE shift_id = $1`, [shiftId]);
+      const reports = await adminDataSource.query(`SELECT status, finalised_at, finalised_by, final_pdf_sent_at FROM ${businessTable(venue.workspaceId!, 'shift_report')} WHERE shift_id = $1`, [shiftId]);
       expect(reports).toHaveLength(1);
       expect(reports[0]).toMatchObject({ status: 'finalised', finalised_by: managerUserId, final_pdf_sent_at: null });
       expect(new Set(replies.map((r) => r.body.finalisedAt)).size).toBe(1);
