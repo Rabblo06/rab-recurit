@@ -257,7 +257,7 @@ describeIfMetadata('metadata engine E1: the five metadata tables, FORCE RLS, the
         (
           await c.query(
             `SELECT c.relname::text AS t, c.relrowsecurity AS rls, c.relforcerowsecurity AS force, pg_get_userbyid(c.relowner)::text AS owner,
-                    (SELECT string_agg(p.polname || ':' || p.polcmd || ':' || p.polpermissive || ':' || p.polroles::text, ';' ORDER BY p.polname) FROM pg_policy p WHERE p.polrelid = c.oid) AS policies,
+                    (SELECT string_agg(p.polname || ':' || p.polcmd::text || ':' || p.polpermissive::text || ':' || p.polroles::text, ';' ORDER BY p.polname) FROM pg_policy p WHERE p.polrelid = c.oid) AS policies,
                     (SELECT bool_and(pg_get_expr(p.polqual, p.polrelid) = pg_get_expr(p.polwithcheck, p.polrelid)) FROM pg_policy p WHERE p.polrelid = c.oid) AS same_check,
                     (SELECT string_agg(DISTINCT pg_get_expr(p.polqual, p.polrelid), ';') FROM pg_policy p WHERE p.polrelid = c.oid) AS qual,
                     concat_ws(',', CASE WHEN has_table_privilege('crewflow_app', c.oid, 'SELECT') THEN 'S' END, CASE WHEN has_table_privilege('crewflow_app', c.oid, 'INSERT') THEN 'I' END,
@@ -293,7 +293,7 @@ describeIfMetadata('metadata engine E1: the five metadata tables, FORCE RLS, the
       async (c) =>
         (
           await c.query<{ line: string }>(
-            `SELECT c.relname || ':' || t.tgname || ':' || t.tgenabled || ':' || t.tgfoid::regprocedure::text AS line
+            `SELECT c.relname || ':' || t.tgname || ':' || t.tgenabled::text || ':' || t.tgfoid::regprocedure::text AS line
                FROM pg_trigger t JOIN pg_class c ON c.oid = t.tgrelid
               WHERE c.relnamespace = 'core'::regnamespace AND NOT t.tgisinternal AND t.tgfoid = 'core.metadata_guard()'::regprocedure ORDER BY 1`,
           )
