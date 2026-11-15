@@ -23,6 +23,7 @@ import { createAdminDataSource } from './helpers/admin-datasource';
 import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
 import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-pipe';
 import { integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
+import { businessTable, businessTableOf, siblingTable } from './helpers/hws-fixtures';
 
 /**
  * Owner decisions 2026-11-06 on fix/shift-completion-after-withdrawal (branch fix/shift-completion-expired-seat):
@@ -75,7 +76,7 @@ describeIfDb('shift completion: an expired offer closes its seat; the one-off re
   type Staff = TestIdentity & { profileId: string; token: string };
   async function activeStaff(org: Organisation, owner: TestIdentity, label: string): Promise<Staff> {
     const staff = await factory.createStaff(org, { owner, label });
-    await adminDataSource.query(`UPDATE core.staff_profile SET employment_status = 'active' WHERE id = $1`, [staff.profileId]);
+    await adminDataSource.query(`UPDATE ${businessTable(owner.workspaceId!, 'staff_profile')} SET employment_status = 'active' WHERE id = $1`, [staff.profileId]);
     return { ...staff, profileId: staff.profileId!, token: await factory.login(staff) };
   }
 
@@ -118,17 +119,17 @@ describeIfDb('shift completion: an expired offer closes its seat; the one-off re
     const endsAt = new Date(startsAt.getTime() + 8 * HOUR);
     const status = booked.length === 0 ? 'offered' : booked.length >= opts.required ? 'fully_filled' : 'partially_filled';
     await adminDataSource.query(
-      `UPDATE core.shift SET starts_at = $2, ends_at = $3, default_starts_at = $2, default_ends_at = $3, filled_count = $4, status = $5 WHERE id = $1`,
+      `UPDATE ${businessTable(ws.manager.workspaceId!, 'shift')} SET starts_at = $2, ends_at = $3, default_starts_at = $2, default_ends_at = $3, filled_count = $4, status = $5 WHERE id = $1`,
       [shiftId, startsAt, endsAt, booked.length, status],
     );
-    await adminDataSource.query(`UPDATE core.shift_assignment SET period = tstzrange($2, $3, '[)'), check_in_required = false WHERE shift_id = $1`, [shiftId, startsAt, endsAt]);
+    await adminDataSource.query(`UPDATE ${businessTable(ws.manager.workspaceId!, 'shift_assignment')} SET period = tstzrange($2, $3, '[)'), check_in_required = false WHERE shift_id = $1`, [shiftId, startsAt, endsAt]);
     for (const s of booked) {
       await adminDataSource.query(
-        `UPDATE core.job_offer SET status = 'manager_confirmed', staff_accepted_at = now(), manager_confirmed_at = now(), confirmed_by = $3
-          WHERE shift_assignment_id IN (SELECT id FROM core.shift_assignment WHERE shift_id = $1 AND staff_profile_id = $2)`,
+        `UPDATE ${businessTable(ws.manager.workspaceId!, 'job_offer')} SET status = 'manager_confirmed', staff_accepted_at = now(), manager_confirmed_at = now(), confirmed_by = $3
+          WHERE shift_assignment_id IN (SELECT id FROM ${businessTable(ws.manager.workspaceId!, 'shift_assignment')} WHERE shift_id = $1 AND staff_profile_id = $2)`,
         [shiftId, s.profileId, ws.manager.userId],
       );
-      await adminDataSource.query(`UPDATE core.shift_assignment SET status = 'confirmed', confirmed_at = now() WHERE shift_id = $1 AND staff_profile_id = $2`, [shiftId, s.profileId]);
+      await adminDataSource.query(`UPDATE ${businessTable(ws.manager.workspaceId!, 'shift_assignment')} SET status = 'confirmed', confirmed_at = now() WHERE shift_id = $1 AND staff_profile_id = $2`, [shiftId, s.profileId]);
     }
     return { ...ws, shiftId, booked, pending };
   }
@@ -148,14 +149,14 @@ describeIfDb('shift completion: an expired offer closes its seat; the one-off re
   const clockOut = async (fx: Fx, staff: Staff) => (await startClockOut(fx, staff)).response;
 
   const offerIdOf = async (fx: Fx, staff: Staff): Promise<string> =>
-    (await adminDataSource.query(`SELECT o.id FROM core.job_offer o JOIN core.shift_assignment sa ON sa.id = o.shift_assignment_id WHERE sa.shift_id = $1 AND o.staff_profile_id = $2`, [fx.shiftId, staff.profileId]))[0].id;
+    (await adminDataSource.query(`SELECT o.id FROM ${businessTable(fx.manager.workspaceId!, 'job_offer')} o JOIN ${businessTable(fx.manager.workspaceId!, 'shift_assignment')} sa ON sa.id = o.shift_assignment_id WHERE sa.shift_id = $1 AND o.staff_profile_id = $2`, [fx.shiftId, staff.profileId]))[0].id;
   /** FIXTURE (time only): the offer's expiry is in the past (the Worker has not swept it yet). */
-  const lapse = (offerId: string) => adminDataSource.query(`UPDATE core.job_offer SET expires_at = now() - interval '1 minute' WHERE id = $1`, [offerId]);
+  const lapse = async (offerId: string) => adminDataSource.query(`UPDATE ${await businessTableOf(adminDataSource, 'job_offer', offerId)} SET expires_at = now() - interval '1 minute' WHERE id = $1`, [offerId]);
   const workerContext = (fx: Fx) => ({ organisationId: fx.org.id, workspaceId: fx.manager.workspaceId, userId: '', role: '', actorType: 'worker' as const });
   /** The Worker's expiry (offer-expiry.job.ts expireOfferCandidate → claimExpiredOffer) in a Worker-shaped context. */
   const workerExpire = (fx: Fx, offerId: string) => tenantContext.runInTenantContext(workerContext(fx), (m) => claimExpiredOffer(m, offerId));
-  const shiftStatus = async (shiftId: string): Promise<string> => (await adminDataSource.query(`SELECT status FROM core.shift WHERE id = $1`, [shiftId]))[0].status;
-  const seatOf = async (offerId: string) => (await adminDataSource.query(`SELECT o.status, sa.status AS assignment_status FROM core.job_offer o JOIN core.shift_assignment sa ON sa.id = o.shift_assignment_id WHERE o.id = $1`, [offerId]))[0];
+  const shiftStatus = async (shiftId: string): Promise<string> => (await adminDataSource.query(`SELECT status FROM ${await businessTableOf(adminDataSource, 'shift', shiftId)} WHERE id = $1`, [shiftId]))[0].status;
+  const seatOf = async (offerId: string) => (await adminDataSource.query(`SELECT o.status, sa.status AS assignment_status FROM ${await businessTableOf(adminDataSource, 'job_offer', offerId)} o JOIN ${siblingTable(await businessTableOf(adminDataSource, 'job_offer', offerId), 'shift_assignment')} sa ON sa.id = o.shift_assignment_id WHERE o.id = $1`, [offerId]))[0];
 
   describe('Q1: an expired offer closes its seat for completion', () => {
     it('E1 (the soak’s 24 rows): a shift with only expired offers that never started is NOT completed; the seats stay offered', async () => {
@@ -267,20 +268,30 @@ describeIfDb('shift completion: an expired offer closes its seat; the one-off re
       await clockIn(fx, fx.booked[0]!);
       // FIXTURE: the clock-out as it was written before the fix (attendance closed, seat completed, shift left running).
       await adminDataSource.query(
-        `UPDATE core.attendance SET status = 'clocked_out', clock_out_at = now(), worked_minutes = 60, earned_pence = 1500 WHERE shift_id = $1`,
+        `UPDATE ${businessTable(fx.manager.workspaceId!, 'attendance')} SET status = 'clocked_out', clock_out_at = now(), worked_minutes = 60, earned_pence = 1500 WHERE shift_id = $1`,
         [fx.shiftId],
       );
-      await adminDataSource.query(`UPDATE core.shift_assignment SET status = 'completed' WHERE shift_id = $1`, [fx.shiftId]);
+      await adminDataSource.query(`UPDATE ${businessTable(fx.manager.workspaceId!, 'shift_assignment')} SET status = 'completed' WHERE shift_id = $1`, [fx.shiftId]);
       expect(await shiftStatus(fx.shiftId)).toBe('in_progress');
       return fx;
     }
-    const snapshot = async (orgIds: string[]) =>
-      adminDataSource.query(
-        `SELECT (SELECT jsonb_agg(jsonb_build_array(id, status, updated_at) ORDER BY id) FROM core.shift WHERE organisation_id = ANY($1::uuid[])) AS shifts,
-                (SELECT count(*)::int FROM core.audit_log WHERE organisation_id = ANY($1::uuid[])) AS audits,
-                (SELECT jsonb_agg(jsonb_build_array(id, status) ORDER BY id) FROM core.shift_assignment WHERE organisation_id = ANY($1::uuid[])) AS seats`,
-        [orgIds],
-      );
+    // Part C1: the shifts and seats of these organisations live in their workspaces' schemas with HWS on (and the core
+    // copies with HWS off): one snapshot per schema that holds them, all compared together.
+    const snapshot = async (orgIds: string[]) => {
+      const workspaces = (await adminDataSource.query(`SELECT id FROM core.manager_workspace WHERE organisation_id = ANY($1::uuid[]) ORDER BY id`, [orgIds])) as Array<{ id: string }>;
+      const perSchema = [];
+      for (const { id } of workspaces) {
+        perSchema.push(
+          ...(await adminDataSource.query(
+            `SELECT (SELECT jsonb_agg(jsonb_build_array(id, status, updated_at) ORDER BY id) FROM ${businessTable(id, 'shift')} WHERE organisation_id = ANY($1::uuid[]) AND workspace_id = $2) AS shifts,
+                    (SELECT jsonb_agg(jsonb_build_array(id, status) ORDER BY id) FROM ${businessTable(id, 'shift_assignment')} WHERE organisation_id = ANY($1::uuid[]) AND workspace_id = $2) AS seats`,
+            [orgIds, id],
+          )),
+        );
+      }
+      const [{ audits }] = await adminDataSource.query(`SELECT count(*)::int AS audits FROM core.audit_log WHERE organisation_id = ANY($1::uuid[])`, [orgIds]);
+      return { perSchema, audits };
+    };
     const idsFile = (ids: string[]) => {
       const dir = mkdtempSync(join(tmpdir(), 'fse-ids-'));
       const file = join(dir, 'ids.txt');

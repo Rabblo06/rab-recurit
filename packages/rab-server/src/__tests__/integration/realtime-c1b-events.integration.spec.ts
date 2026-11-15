@@ -37,6 +37,7 @@ import { createAdminDataSource } from './helpers/admin-datasource';
 import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
 import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-pipe';
 import { integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
+import { businessTable } from './helpers/hws-fixtures';
 
 const RUN = integrationTestDatabaseReady();
 const describeIfDb = RUN ? describe : describe.skip;
@@ -195,7 +196,7 @@ describeIfDb('C1b realtime event catalogue — outbox rows, recipients, privacy 
   it('offer.expired — the staff member’s accept arrives after expiry: the claimed expiry commits its event (409 to the caller)', async () => {
     const shiftId = await seedShift('open');
     const offer = await offers.send(ctxOf(owner), shiftId, { staffProfileId: staff1.profileId! });
-    await admin.query(`UPDATE core.job_offer SET expires_at = now() - interval '1 minute' WHERE id = $1`, [offer.id]);
+    await admin.query(`UPDATE ${businessTable(owner.workspaceId!, 'job_offer')} SET expires_at = now() - interval '1 minute' WHERE id = $1`, [offer.id]);
     await expect(offers.staffAccept(staffCtx(staff1), offer.id)).rejects.toThrow(/expired/i);
     expect(await recipients(offer.id, 'offer.expired')).toEqual(ids(staff1, owner, vm, vm2));
   });
@@ -211,7 +212,7 @@ describeIfDb('C1b realtime event catalogue — outbox rows, recipients, privacy 
       }),
     ).rejects.toThrow('roll back after the emit');
     expect(await rows(offer.id, 'offer.withdrawn')).toHaveLength(0);
-    const [state] = await admin.query(`SELECT status FROM core.job_offer WHERE id = $1`, [offer.id]);
+    const [state] = await admin.query(`SELECT status FROM ${businessTable(owner.workspaceId!, 'job_offer')} WHERE id = $1`, [offer.id]);
     expect(state.status).toBe('pending');
   });
 
@@ -240,7 +241,7 @@ describeIfDb('C1b realtime event catalogue — outbox rows, recipients, privacy 
   // what the acting transaction can see: approvers in THIS workspace (an Internal Manager of another workspace sees neither
   // the request nor its notification today — see `listVenueOffers`' PERF-01 note). The event never widens that.
   it('shift_request.created → visible approvers (workspace NULL) and the venue’s managers; declined → the same audience; never another workspace', async () => {
-    await admin.query(`INSERT INTO core.venue_manager_staff (manager_profile_id, staff_profile_id, organisation_id, workspace_id) VALUES ($1, $2, $3, $4)`, [vm.profileId, staff1.profileId, org.id, owner.workspaceId]);
+    await admin.query(`INSERT INTO ${businessTable(owner.workspaceId!, 'venue_manager_staff')} (manager_profile_id, staff_profile_id, organisation_id, workspace_id) VALUES ($1, $2, $3, $4)`, [vm.profileId, staff1.profileId, org.id, owner.workspaceId]);
     const startsAt = new Date(Date.now() + 60 * 24 * 3600 * 1000);
     const endsAt = new Date(startsAt.getTime() + 5 * 3600 * 1000);
     const shift = await scheduling.submitRequest(ctxOf(vm), { venueId, jobRoleId, startsAt: startsAt.toISOString(), endsAt: endsAt.toISOString(), staffRequired: 1, staffProfileIds: [staff1.profileId!] } as never);
@@ -262,7 +263,7 @@ describeIfDb('C1b realtime event catalogue — outbox rows, recipients, privacy 
   it('shift_request.approved → requester, new owner (the approver) and the venue managers', async () => {
     const shiftId = await seedShift('pending_manager_approval', { requestedBy: vm.userId, createdBy: vm.userId });
     await admin.query(
-      `INSERT INTO core.shift_request_staff (organisation_id, workspace_id, shift_id, staff_profile_id, starts_at, ends_at) SELECT organisation_id, workspace_id, id, $2, starts_at, ends_at FROM core.shift WHERE id = $1`,
+      `INSERT INTO ${businessTable(owner.workspaceId!, 'shift_request_staff')} (organisation_id, workspace_id, shift_id, staff_profile_id, starts_at, ends_at) SELECT organisation_id, workspace_id, id, $2, starts_at, ends_at FROM ${businessTable(owner.workspaceId!, 'shift')} WHERE id = $1`,
       [shiftId, staff2.profileId],
     );
     await offers.approveShiftRequest(ctxOf(owner), shiftId, {} as never);
@@ -276,9 +277,9 @@ describeIfDb('C1b realtime event catalogue — outbox rows, recipients, privacy 
     const offer = await offers.send(ctxOf(owner), shiftId, { staffProfileId: staff2.profileId! });
     await offers.staffAccept(staffCtx(staff2), offer.id);
     await offers.managerConfirm(ctxOf(owner), offer.id);
-    const [assignment] = await admin.query(`SELECT id FROM core.shift_assignment WHERE shift_id = $1 AND staff_profile_id = $2`, [shiftId, staff2.profileId]);
+    const [assignment] = await admin.query(`SELECT id FROM ${businessTable(owner.workspaceId!, 'shift_assignment')} WHERE shift_id = $1 AND staff_profile_id = $2`, [shiftId, staff2.profileId]);
     const [att] = await admin.query(
-      `INSERT INTO core.attendance (organisation_id, workspace_id, shift_assignment_id, shift_id, staff_profile_id, clock_in_at, status, location_verified, clock_in_method)
+      `INSERT INTO ${businessTable(owner.workspaceId!, 'attendance')} (organisation_id, workspace_id, shift_assignment_id, shift_id, staff_profile_id, clock_in_at, status, location_verified, clock_in_method)
        VALUES ($1, $2, $3, $4, $5, now() - interval '2 hours', 'clocked_in', false, 'staff') RETURNING id`,
       [org.id, owner.workspaceId, assignment.id, shiftId, staff2.profileId],
     );
@@ -293,7 +294,7 @@ describeIfDb('C1b realtime event catalogue — outbox rows, recipients, privacy 
 
     // ------------------------------------------------------------------------------------ payroll
     const [record] = await admin.query(
-      `INSERT INTO core.payroll_record (organisation_id, workspace_id, attendance_id, shift_id, staff_profile_id, status, worked_minutes, pay_rate_pence, amount_pence)
+      `INSERT INTO ${businessTable(owner.workspaceId!, 'payroll_record')} (organisation_id, workspace_id, attendance_id, shift_id, staff_profile_id, status, worked_minutes, pay_rate_pence, amount_pence)
        VALUES ($1, $2, $3, $4, $5, 'pending_approval', 120, 1500, 3000) RETURNING id`,
       [org.id, owner.workspaceId, att.id, shiftId, staff2.profileId],
     );
@@ -352,14 +353,14 @@ describeIfDb('C1b realtime event catalogue — outbox rows, recipients, privacy 
       const offer = await offers.send(ctxOf(owner), shiftId, { staffProfileId: who.profileId! });
       await offers.staffAccept(staffCtx(who), offer.id);
       await offers.managerConfirm(ctxOf(owner), offer.id);
-      const [assignment] = await admin.query(`SELECT id FROM core.shift_assignment WHERE shift_id = $1 AND staff_profile_id = $2`, [shiftId, who.profileId]);
+      const [assignment] = await admin.query(`SELECT id FROM ${businessTable(owner.workspaceId!, 'shift_assignment')} WHERE shift_id = $1 AND staff_profile_id = $2`, [shiftId, who.profileId]);
       const [att] = await admin.query(
-        `INSERT INTO core.attendance (organisation_id, workspace_id, shift_assignment_id, shift_id, staff_profile_id, clock_in_at, clock_out_at, status, location_verified, clock_in_method, worked_minutes, earned_pence)
+        `INSERT INTO ${businessTable(owner.workspaceId!, 'attendance')} (organisation_id, workspace_id, shift_assignment_id, shift_id, staff_profile_id, clock_in_at, clock_out_at, status, location_verified, clock_in_method, worked_minutes, earned_pence)
          VALUES ($1, $2, $3, $4, $5, now() - interval '3 hours', now() - interval '1 hour', 'approved', false, 'staff', 120, 3000) RETURNING id`,
         [org.id, owner.workspaceId, assignment.id, shiftId, who.profileId],
       );
       const [record] = await admin.query(
-        `INSERT INTO core.payroll_record (organisation_id, workspace_id, attendance_id, shift_id, staff_profile_id, status, worked_minutes, pay_rate_pence, amount_pence)
+        `INSERT INTO ${businessTable(owner.workspaceId!, 'payroll_record')} (organisation_id, workspace_id, attendance_id, shift_id, staff_profile_id, status, worked_minutes, pay_rate_pence, amount_pence)
          VALUES ($1, $2, $3, $4, $5, 'pending_approval', 120, 1500, 3000) RETURNING id`,
         [org.id, owner.workspaceId, att.id, shiftId, who.profileId],
       );

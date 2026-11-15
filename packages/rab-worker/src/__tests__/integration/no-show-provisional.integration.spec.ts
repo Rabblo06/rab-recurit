@@ -22,6 +22,8 @@ import { runShiftMonitorCycle } from '../../queues/rab-shifts/shift-monitor.job'
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { generateFixturePassword } from './helpers/fixture-password';
 import { integrationTestDatabaseReady } from '@rab/server/database/typeorm/core/integration-test-database-gate';
+import { provisionFixtureWorkspace } from './helpers/test-identities';
+import { businessSchema } from './helpers/hws-fixtures';
 
 const FIXTURE_PASSWORD = generateFixturePassword();
 
@@ -49,7 +51,8 @@ describeIfDb('provisional no-show (shift monitor) never overrides a manager (int
 
   async function withContext<T>(fx: { organisationId: string; workspaceId: string | null; managerUserId: string }, fn: (m: DataSource['manager']) => Promise<T>): Promise<T> {
     return dataSource.transaction(async (m) => {
-      await m.query(`SELECT set_config('search_path', 'core', true)`);
+      // Part C1: the workspace's own schema with HWS on (the code default outside production), core with it off.
+      await m.query(`SELECT set_config('search_path', $1, true)`, [fx.workspaceId ? businessSchema(fx.workspaceId) : 'core']);
       await m.query(`SELECT set_config('rab.organisation_id', $1, true)`, [fx.organisationId]);
       await m.query(`SELECT set_config('rab.workspace_id', $1, true)`, [fx.workspaceId ?? '']);
       await m.query(`SELECT set_config('rab.user_id', $1, true)`, [fx.managerUserId]);
@@ -68,6 +71,8 @@ describeIfDb('provisional no-show (shift monitor) never overrides a manager (int
       await m.insert(UserRole, { userId: out.managerUserId, roleId, organisationId });
       await m.query(`SELECT set_config('rab.user_id', $1, true)`, [out.managerUserId]);
       const ws = await m.save(ManagerWorkspace, { organisationId, ownerUserId: out.managerUserId, name: `${label} WS ${out.managerUserId}`, subdomain: `${label}-${out.managerUserId.slice(0, 8)}`, status: 'active' });
+      await provisionFixtureWorkspace(m, ws.id); // Part C1: READY schema, as the product builds it
+      await m.query(`SELECT set_config('search_path', $1, true)`, [businessSchema(ws.id)]); // later fixture writes in this transaction land in the workspace's schema
       out.workspaceId = ws.id;
       await m.query(`SELECT set_config('rab.workspace_id', $1, true)`, [ws.id]);
       await m.insert(ManagerProfile, { organisationId, userId: out.managerUserId, type: ManagerType.INTERNAL, workspaceId: ws.id });
@@ -141,7 +146,7 @@ describeIfDb('provisional no-show (shift monitor) never overrides a manager (int
     await withContext(fx, async (m) => {
       expect(await m.query(`SELECT 1 FROM attendance WHERE shift_assignment_id = $1`, [assignmentId])).toHaveLength(0);
       expect(await m.query(`SELECT 1 FROM shift_report WHERE shift_id = $1 AND status = 'finalised'`, [shiftId])).toHaveLength(0);
-      const [n] = await m.query(`SELECT message FROM notification WHERE related_entity_id = $1 AND type = 'shift_assignment_no_show'`, [assignmentId]);
+      const [n] = await m.query(`SELECT message FROM core.notification WHERE related_entity_id = $1 AND type = 'shift_assignment_no_show'`, [assignmentId]);
       expect(n.message).toContain('Record their attendance or confirm the no-show');
     });
     await cycle();
@@ -182,7 +187,8 @@ describeIfDb('provisional no-show (shift monitor) never overrides a manager (int
     let workerDone = false;
     let cyclePromise: Promise<unknown> | null = null;
     try {
-      await runner.query(`SELECT set_config('search_path', 'core', true)`);
+      // Part C1: the workspace's own schema with HWS on (the code default outside production), core with it off.
+      await runner.query(`SELECT set_config('search_path', $1, true)`, [fx.workspaceId ? businessSchema(fx.workspaceId) : 'core']);
       await runner.query(`SELECT set_config('rab.organisation_id', $1, true)`, [fx.organisationId]);
       await runner.query(`SELECT set_config('rab.workspace_id', $1, true)`, [fx.workspaceId]);
       await runner.query(`SELECT set_config('rab.user_id', $1, true)`, [fx.managerUserId]);
@@ -237,7 +243,8 @@ describeIfDb('provisional no-show (shift monitor) never overrides a manager (int
     let workerDone = false;
     let cyclePromise: Promise<unknown> | null = null;
     try {
-      await runner.query(`SELECT set_config('search_path', 'core', true)`);
+      // Part C1: the workspace's own schema with HWS on (the code default outside production), core with it off.
+      await runner.query(`SELECT set_config('search_path', $1, true)`, [fx.workspaceId ? businessSchema(fx.workspaceId) : 'core']);
       await runner.query(`SELECT set_config('rab.organisation_id', $1, true)`, [fx.organisationId]);
       await runner.query(`SELECT set_config('rab.workspace_id', $1, true)`, [fx.workspaceId]);
       await runner.query(`SELECT set_config('rab.user_id', $1, true)`, [fx.managerUserId]);

@@ -11,6 +11,7 @@ import { AuthContext } from '../../engine/core-modules/tenant/auth-context.inter
 import { ShiftTeamService } from '../../modules/attendance/services/shift-team.service';
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
+import { businessTable } from './helpers/hws-fixtures';
 import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-pipe';
 
 describe('Staff same-shift Teams (real Postgres/RLS/HTTP)', () => {
@@ -123,7 +124,7 @@ describe('Staff same-shift Teams (real Postgres/RLS/HTTP)', () => {
     const runner = owner.createQueryRunner(); await runner.connect(); await runner.startTransaction();
     try {
       await runner.query(`SELECT set_config('rab.organisation_id',$1,true),set_config('rab.workspace_id',$2,true)`, [manager.organisationId, manager.workspaceId]);
-      await runner.query("UPDATE core.shift SET status='cancelled' WHERE id=$1", [shift]);
+      await runner.query(`UPDATE ${businessTable(manager.workspaceId!, 'shift')} SET status='cancelled' WHERE id=$1`, [shift]);
       const pending = roster(callerToken).then(r => r);
       await runner.commitTransaction();
       expect((await pending).status).toBe(404);

@@ -26,6 +26,8 @@ import { runLateClockInCycle } from '../../queues/rab-shifts/late-clock-in.job';
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { generateFixturePassword } from './helpers/fixture-password';
 import { integrationTestDatabaseReady } from '@rab/server/database/typeorm/core/integration-test-database-gate';
+import { provisionFixtureWorkspace } from './helpers/test-identities';
+import { businessSchema } from './helpers/hws-fixtures';
 
 const FIXTURE_PASSWORD = generateFixturePassword();
 
@@ -75,7 +77,8 @@ describeIfDb('late clock-in correctness (integration)', () => {
       // migration (P2.2 fix — same systemic gap already found in rab-server's own
       // bulk-email-abuse-cases/scheduling-offer-abuse-cases, and in this package's own
       // worker-event-idempotency file).
-      await manager.query(`SELECT set_config('search_path', 'core', true)`);
+      // Part C1: the workspace's own schema with HWS on (the code default outside production), core with it off.
+      await manager.query(`SELECT set_config('search_path', $1, true)`, [ctx.workspaceId ? businessSchema(ctx.workspaceId) : 'core']);
       await manager.query(`SELECT set_config('rab.organisation_id', $1, true)`, [ctx.organisationId]);
       await manager.query(`SELECT set_config('rab.workspace_id', $1, true)`, [ctx.workspaceId ?? '']);
       await manager.query(`SELECT set_config('rab.user_id', $1, true)`, [ctx.userId]);
@@ -144,6 +147,8 @@ describeIfDb('late clock-in correctness (integration)', () => {
         subdomain: `${label}-${ownerManagerUserId.slice(0, 8)}`,
         status: 'active',
       });
+      await provisionFixtureWorkspace(manager, workspace.id); // Part C1: READY schema, as the product builds it
+      await manager.query(`SELECT set_config('search_path', $1, true)`, [businessSchema(workspace.id)]); // later fixture writes in this transaction land in the workspace's schema
       workspaceId = workspace.id;
       // rab.workspace_id must be bound before this insert — same ordering bug already fixed in
       // worker-event-idempotency.integration.spec.ts (P2.2).
@@ -375,6 +380,8 @@ describeIfDb('late clock-in correctness (integration)', () => {
           subdomain: `otherws-${userId.slice(0, 8)}`,
           status: 'active',
         });
+        await provisionFixtureWorkspace(manager, workspace.id); // Part C1: READY schema, as the product builds it
+        await manager.query(`SELECT set_config('search_path', $1, true)`, [businessSchema(workspace.id)]); // later fixture writes in this transaction land in the workspace's schema
         // rab.workspace_id is still bound to the OUTER withContext's workspace at this point, not
         // this newly-created one — rebind before the insert (P2.2 fix, same pattern as elsewhere).
         await manager.query(`SELECT set_config('rab.workspace_id', $1, true)`, [workspace.id]);

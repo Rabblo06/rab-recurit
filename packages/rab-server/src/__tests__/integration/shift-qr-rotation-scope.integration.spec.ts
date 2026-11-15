@@ -14,6 +14,7 @@ import { Venue } from '../../modules/venue/entities/venue.entity';
 import { PasswordHashingService } from '../../engine/core-modules/auth/services/password-hashing.service';
 import { TenantContextService } from '../../engine/core-modules/tenant/tenant-context.service';
 import { createAdminDataSource } from './helpers/admin-datasource';
+import { businessTableOf } from './helpers/hws-fixtures';
 import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
 import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-pipe';
 import { integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
@@ -57,7 +58,7 @@ describeIfDb('shift QR rotation — scope and concurrency (integration)', () => 
   const ctxOf = (who: TestIdentity) => ({ organisationId: who.organisationId, workspaceId: who.workspaceId, userId: who.userId, role: '' });
   const rotate = (token: string, shiftId: string) =>
     request(app.getHttpServer()).post(`/rest/v1/shifts/${shiftId}/rotate-qr`).set('Authorization', `Bearer ${token}`).send();
-  const qrVersionOf = async (shiftId: string): Promise<number> => (await adminDataSource.query(`SELECT qr_version FROM core.shift WHERE id = $1`, [shiftId]))[0].qr_version;
+  const qrVersionOf = async (shiftId: string): Promise<number> => (await adminDataSource.query(`SELECT qr_version FROM ${await businessTableOf(adminDataSource, 'shift', shiftId)} WHERE id = $1`, [shiftId]))[0].qr_version;
 
   /** A venue and an open shift there, created by `owner` inside the owner's workspace. */
   async function venueWithShift(org: Organisation, owner: TestIdentity, label: string): Promise<{ venueId: string; shiftId: string }> {
@@ -124,7 +125,7 @@ describeIfDb('shift QR rotation — scope and concurrency (integration)', () => 
     await holder.startTransaction();
     let both: Promise<request.Response[]>;
     try {
-      await holder.query(`SELECT id FROM core.shift WHERE id = $1 FOR UPDATE`, [shiftId]);
+      await holder.query(`SELECT id FROM ${await businessTableOf(adminDataSource, 'shift', shiftId)} WHERE id = $1 FOR UPDATE`, [shiftId]);
       const [{ pid: holderPid }] = await holder.query(`SELECT pg_backend_pid() AS pid`);
       both = Promise.all([rotate(token, shiftId), rotate(token, shiftId)]);
       const deadline = Date.now() + 20_000;

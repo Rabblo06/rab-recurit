@@ -58,6 +58,7 @@ import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { provisionTypeScript, seedWorkspace } from './helpers/workspace-fixtures';
 import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
+import { otherActiveClientBackends } from './helpers/concurrent-backend-guard';
 import { integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
 
 const RUN = integrationTestDatabaseReady();
@@ -178,9 +179,8 @@ function userOf(url: string): string {
 
     // The containment run deactivates EVERY active user of the test-pattern organisations, so it needs the same clean slate
     // as containment-suspend-test-accounts.integration.spec.ts (same guard against a concurrent process on this database).
-    const [{ n }] = await admin.query<[{ n: number }]>(
-      `SELECT count(*)::int AS n FROM pg_stat_activity WHERE datname = current_database() AND pid != pg_backend_pid() AND state = 'active'`,
-    );
+    // Client sessions only: an autovacuum / background worker of this database is not a second test process (C1b.9).
+    const n = await otherActiveClientBackends(admin);
     if (n > 0) throw new Error(`Refusing to TRUNCATE core.organisation: ${n} other backend(s) are active on this database.`);
     await admin.query(`TRUNCATE core.organisation CASCADE`);
 

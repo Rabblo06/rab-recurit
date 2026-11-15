@@ -53,6 +53,7 @@ import { runShiftMonitorCycle } from '../../queues/rab-shifts/shift-monitor.job'
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
 import { integrationTestDatabaseReady } from '@rab/server/database/typeorm/core/integration-test-database-gate';
+import { businessSchema } from './helpers/hws-fixtures';
 
 /**
  * Phase 5 — shift cancellation correctness. Real Postgres, RLS on, no
@@ -103,7 +104,8 @@ describeIfDb('shift cancellation correctness (integration)', () => {
       // migration (P2.2 fix — same systemic gap already found in rab-server's own
       // bulk-email-abuse-cases/scheduling-offer-abuse-cases, and in this package's own
       // worker-event-idempotency file).
-      await manager.query(`SELECT set_config('search_path', 'core', true)`);
+      // Part C1: the workspace's own schema with HWS on (the code default outside production), core with it off.
+      await manager.query(`SELECT set_config('search_path', $1, true)`, [ctx.workspaceId ? businessSchema(ctx.workspaceId) : 'core']);
       await manager.query(`SELECT set_config('rab.organisation_id', $1, true)`, [ctx.organisationId]);
       await manager.query(`SELECT set_config('rab.workspace_id', $1, true)`, [ctx.workspaceId ?? '']);
       await manager.query(`SELECT set_config('rab.user_id', $1, true)`, [ctx.userId]);
@@ -421,12 +423,12 @@ describeIfDb('shift cancellation correctness (integration)', () => {
     async function pastDeadline(fx: { owner: TestIdentity }, offer: JobOffer): Promise<void> {
       await withContext(ctxOf(fx.owner), async (m) => {
         await m.query(
-          `UPDATE core.shift_assignment SET period = tstzrange(now() + interval '20 minutes', now() + interval '8 hours', '[)') WHERE id = $1`,
+          `UPDATE shift_assignment SET period = tstzrange(now() + interval '20 minutes', now() + interval '8 hours', '[)') WHERE id = $1`,
           [offer.shiftAssignmentId],
         );
         await m.query(
-          `UPDATE core.shift s SET starts_at = now() + interval '20 minutes', default_starts_at = now() + interval '20 minutes'
-             FROM core.shift_assignment sa WHERE sa.id = $1 AND s.id = sa.shift_id`,
+          `UPDATE shift s SET starts_at = now() + interval '20 minutes', default_starts_at = now() + interval '20 minutes'
+             FROM shift_assignment sa WHERE sa.id = $1 AND s.id = sa.shift_id`,
           [offer.shiftAssignmentId],
         );
       });
@@ -508,7 +510,7 @@ describeIfDb('shift cancellation correctness (integration)', () => {
     it('D18/D33: approval racing cancellation — exactly one valid outcome (Phase 4 regression)', async () => {
       const fx = await seedOrgFixture('replD18');
       const candidate = await factory.createStaff(fx.organisation, { owner: fx.owner, label: 'cand' });
-      await withContext(ctxOf(fx.owner), m => m.query("UPDATE core.staff_profile SET employment_status='active' WHERE id=$1", [candidate.profileId]));
+      await withContext(ctxOf(fx.owner), m => m.query("UPDATE staff_profile SET employment_status='active' WHERE id=$1", [candidate.profileId]));
       const declining = await factory.createStaff(fx.organisation, { owner: fx.owner, label: 'declining' });
       const shift = await seedOpenShift(fx);
       const declinedOffer = await offerService.send(ctxOf(fx.owner), shift.id, { staffProfileId: declining.profileId! });
@@ -531,7 +533,7 @@ describeIfDb('shift cancellation correctness (integration)', () => {
       ]);
 
       const finalRequest = await withContext(ctxOf(fx.owner), (m) => m.findOneByOrFail(ReplacementRequest, { id: request.id }));
-      const offerCount = await withContext(ctxOf(fx.owner), (m) => m.query<Array<{ count: string }>>(`SELECT count(*) FROM core.job_offer WHERE staff_profile_id = $1`, [candidate.profileId]));
+      const offerCount = await withContext(ctxOf(fx.owner), (m) => m.query<Array<{ count: string }>>(`SELECT count(*) FROM job_offer WHERE staff_profile_id = $1`, [candidate.profileId]));
       if (finalRequest.status === ReplacementRequestStatus.OFFER_SENT) {
         expect(Number(offerCount[0]!.count)).toBe(1);
       } else {
@@ -543,7 +545,7 @@ describeIfDb('shift cancellation correctness (integration)', () => {
     it('D19: a cancelled shift cannot produce a replacement offer once cancellation is already in effect', async () => {
       const fx = await seedOrgFixture('replD19');
       const candidate = await factory.createStaff(fx.organisation, { owner: fx.owner, label: 'cand' });
-      await withContext(ctxOf(fx.owner), m => m.query("UPDATE core.staff_profile SET employment_status='active' WHERE id=$1", [candidate.profileId]));
+      await withContext(ctxOf(fx.owner), m => m.query("UPDATE staff_profile SET employment_status='active' WHERE id=$1", [candidate.profileId]));
       const declining = await factory.createStaff(fx.organisation, { owner: fx.owner, label: 'declining' });
       const shift = await seedOpenShift(fx);
       const declinedOffer = await offerService.send(ctxOf(fx.owner), shift.id, { staffProfileId: declining.profileId! });
@@ -562,7 +564,7 @@ describeIfDb('shift cancellation correctness (integration)', () => {
       await schedulingService.cancel(ctxOf(fx.owner), shift.id);
 
       await expect(replacementRequestService.approve(ctxOf(fx.owner), request.id, { staffProfileId: candidate.profileId! })).rejects.toBeInstanceOf(ConflictException);
-      const offerCount = await withContext(ctxOf(fx.owner), (m) => m.query<Array<{ count: string }>>(`SELECT count(*) FROM core.job_offer WHERE staff_profile_id = $1`, [candidate.profileId]));
+      const offerCount = await withContext(ctxOf(fx.owner), (m) => m.query<Array<{ count: string }>>(`SELECT count(*) FROM job_offer WHERE staff_profile_id = $1`, [candidate.profileId]));
       expect(Number(offerCount[0]!.count)).toBe(0);
     });
   });

@@ -10,6 +10,7 @@ import { buildSystemPrompt } from '../../modules/ai/prompt/system-prompt';
 import { AiAccessService } from '../../modules/ai/services/ai-access.service';
 import { AiToolRegistry } from '../../modules/ai/tools/ai-tool-registry.service';
 import { AiKit, aiOrganisation, bootAiKit } from './helpers/ai-test-kit';
+import { businessTable } from './helpers/hws-fixtures';
 import { integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
 
 /**
@@ -42,14 +43,14 @@ describeIfDb('AI payload guard on real tool output (integration)', () => {
     const ws = org.ceo.workspaceId!;
     const q = (sql: string, params: unknown[]) => kit.owner.query(sql, params);
     const venues: string[] = [];
-    for (const name of venueNames) venues.push((await q(`INSERT INTO core.venue (organisation_id, name, created_by, workspace_id) VALUES ($1, $2, $3, $4) RETURNING id`, [org.orgId, name, org.ceo.userId, ws]))[0].id);
+    for (const name of venueNames) venues.push((await q(`INSERT INTO ${businessTable(ws, 'venue')} (organisation_id, name, created_by, workspace_id) VALUES ($1, $2, $3, $4) RETURNING id`, [org.orgId, name, org.ceo.userId, ws]))[0].id);
     const roles: string[] = [];
-    for (const [name, rate] of AI_DEMO_JOB_ROLES) roles.push((await q(`INSERT INTO core.job_role (organisation_id, name, default_rate_pence, created_by, workspace_id) VALUES ($1, $2, $3, $4, $5) RETURNING id`, [org.orgId, name, rate, org.ceo.userId, ws]))[0].id);
+    for (const [name, rate] of AI_DEMO_JOB_ROLES) roles.push((await q(`INSERT INTO ${businessTable(ws, 'job_role')} (organisation_id, name, default_rate_pence, created_by, workspace_id) VALUES ($1, $2, $3, $4, $5) RETURNING id`, [org.orgId, name, rate, org.ceo.userId, ws]))[0].id);
     const now = Date.now();
     for (let i = 0; i < 6; i += 1) {
       const start = now + (24 + i * 18) * H;
       await q(
-        `INSERT INTO core.shift (organisation_id, venue_id, job_role_id, starts_at, ends_at, break_minutes, required_count, filled_count, pay_rate_pence, status, created_by, workspace_id)
+        `INSERT INTO ${businessTable(ws, 'shift')} (organisation_id, venue_id, job_role_id, starts_at, ends_at, break_minutes, required_count, filled_count, pay_rate_pence, status, created_by, workspace_id)
          VALUES ($1, $2, $3, $4, $5, 30, $6, $7, $8, $9, $10, $11)`,
         [org.orgId, venues[i % venues.length], roles[i % roles.length], new Date(start), new Date(start + 8 * H), 3, i % 2, AI_DEMO_JOB_ROLES[i % roles.length]![1], i % 2 ? 'partially_filled' : 'open', org.ceo.userId, ws],
       );
