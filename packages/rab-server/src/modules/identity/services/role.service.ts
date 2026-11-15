@@ -337,14 +337,13 @@ export class RoleService {
     const t = businessTables(manager);
     for (const [table, ids] of Object.entries(relationIds)) {
       if (table !== 'venue' && table !== 'job_role') throw new RecordFilterError('Unsupported relation.');
-      // Part C2 (C2-7): the business rows live in the bound schema (the workspace schema with HWS on, `core` with it off);
-      // named through businessTables, never through search_path. (`core.` here read an empty core copy under HWS.)
-      const relationTable = table === 'venue' ? t.venue : t.job_role;
-      const rows = await manager.query<Array<{ id: string }>>(
-        // sql-injection-reviewed: relationTable is businessTables(manager).venue or .job_role, chosen by the literal allow-list above; ids are bound.
-        `SELECT id FROM ${relationTable} WHERE id = ANY($1::uuid[]) AND workspace_id = $2`,
-        [ids, ctx.workspaceId],
-      );
+      // Part C2 (C2-7): the business rows live in the bound schema (the workspace schema with HWS on, `core` with it off),
+      // named through businessTables, never through search_path (`core.` here read an empty core copy under HWS). Two literal
+      // statements, so the ratchet and the injection lint both see each table.
+      const rows =
+        table === 'venue'
+          ? await manager.query<Array<{ id: string }>>(`SELECT id FROM ${t.venue} WHERE id = ANY($1::uuid[]) AND workspace_id = $2`, [ids, ctx.workspaceId])
+          : await manager.query<Array<{ id: string }>>(`SELECT id FROM ${t.job_role} WHERE id = ANY($1::uuid[]) AND workspace_id = $2`, [ids, ctx.workspaceId]);
       if (rows.length !== ids.length) throw new RecordFilterError('One of the selected records no longer exists.');
     }
   }
