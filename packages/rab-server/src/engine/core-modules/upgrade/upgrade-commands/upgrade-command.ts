@@ -40,6 +40,12 @@ export interface UpgradeCommandContext {
    * the resolver cache epoch must be bumped after this run (migrate-on-start, review P2), even when the command failed.
    */
   markBlockChanged?: () => void;
+  /**
+   * Part C3 (security review L-4): bump the resolver cache epoch NOW (a cached READY resolution must not route a workspace
+   * the command just blocked). Throws when it cannot (Redis configured but unreachable): the command must then stop before
+   * it copies anything. Absent = no cache to bump (no Redis, or a test).
+   */
+  flushBlockCache?: () => Promise<void>;
 }
 
 export interface UpgradeCommand {

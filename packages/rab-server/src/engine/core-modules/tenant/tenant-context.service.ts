@@ -121,11 +121,13 @@ export class TenantContextService {
    */
   async isWorkspaceUpgradeBlocked(manager: EntityManager, workspaceId: string): Promise<boolean> {
     if (!this.environment.get('HWS_RUNTIME_ENABLED')) return false;
-    const rows: Array<{ migration_error: string | null }> = await manager.query(
-      'SELECT migration_error FROM core.workspace_schema_registry WHERE workspace_id = $1',
+    // Part C3 (review H-1b): a started, unverified cutover counts as blocked too (same rule as SchemaResolverService).
+    const rows: Array<{ migration_error: string | null; cutover_state: string | null }> = await manager.query(
+      `SELECT r.migration_error, (SELECT s.state FROM core.hws_cutover_state s WHERE s.workspace_id = r.workspace_id) AS cutover_state
+         FROM core.workspace_schema_registry r WHERE r.workspace_id = $1`,
       [workspaceId],
     );
-    return isUpgradeBlocked(rows[0]?.migration_error);
+    return isUpgradeBlocked(rows[0]?.migration_error) || rows[0]?.cutover_state === 'started';
   }
 
   async runInTenantContext<T>(

@@ -441,6 +441,11 @@ export async function runMigrateOnStart(config: MigrateOnStartConfig, deps: Migr
       testFailCommand,
       registry,
       ...(tw ? { workspaceRegistry: tw.registry, workspaceRunner: { workspaceIds: tw.workspaceIds } } : {}),
+      // Part C3 (review L-4): a command that just BLOCKED workspaces bumps the epoch before it goes on; failing is fatal for it.
+      flushBlockCache: async () => {
+        const bump = await bumpEntityCacheAfterUpgrade({ applied: ['workspace-upgrade-block'], env, log, flush: deps.cacheFlush });
+        assertWorkspaceBlockCacheBumped(true, bump);
+      },
     });
     upgradeRun = run;
 

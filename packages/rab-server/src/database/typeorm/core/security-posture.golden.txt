@@ -305,16 +305,24 @@ execute|host_label_sync_workspace()|crewflow|false
 execute|hws_cutover_copy_batch(uuid,text,text,integer)|PUBLIC|false
 execute|hws_cutover_copy_batch(uuid,text,text,integer)|crewflow_app|false
 execute|hws_cutover_copy_batch(uuid,text,text,integer)|crewflow|true
+execute|hws_cutover_core_fence()|crewflow_app|false
+execute|hws_cutover_core_fence()|crewflow|true
+execute|hws_cutover_drop_new_statement_pointers(uuid,uuid[])|PUBLIC|false
+execute|hws_cutover_drop_new_statement_pointers(uuid,uuid[])|crewflow_app|false
+execute|hws_cutover_drop_new_statement_pointers(uuid,uuid[])|crewflow|true
 execute|hws_cutover_probe(uuid)|PUBLIC|false
 execute|hws_cutover_probe(uuid)|crewflow_app|false
 execute|hws_cutover_probe(uuid)|crewflow|true
-execute|hws_cutover_reconcile_statement_pointers(uuid,boolean)|PUBLIC|false
-execute|hws_cutover_reconcile_statement_pointers(uuid,boolean)|crewflow_app|false
-execute|hws_cutover_reconcile_statement_pointers(uuid,boolean)|crewflow|true
+execute|hws_cutover_purge_core_statement_pointers(uuid)|PUBLIC|false
+execute|hws_cutover_purge_core_statement_pointers(uuid)|crewflow_app|false
+execute|hws_cutover_purge_core_statement_pointers(uuid)|crewflow|true
 execute|hws_cutover_schema(uuid)|crewflow_app|false
 execute|hws_cutover_schema(uuid)|crewflow|true
 execute|hws_cutover_source_sql(text)|crewflow_app|false
 execute|hws_cutover_source_sql(text)|crewflow|true
+execute|hws_cutover_started_any()|PUBLIC|false
+execute|hws_cutover_started_any()|crewflow_app|true
+execute|hws_cutover_started_any()|crewflow|true
 execute|hws_cutover_verify_range(uuid,text,text,integer)|PUBLIC|false
 execute|hws_cutover_verify_range(uuid,text,text,integer)|crewflow_app|false
 execute|hws_cutover_verify_range(uuid,text,text,integer)|crewflow|true
@@ -617,10 +625,13 @@ owner|function|host_label_status(text,uuid)|rab_secure_owner|definer=true|search
 owner|function|host_label_sync_organisation()|rab_secure_owner|definer=true|search_path=pg_catalog, pg_temp
 owner|function|host_label_sync_workspace()|rab_secure_owner|definer=true|search_path=pg_catalog, pg_temp
 owner|function|hws_cutover_copy_batch(uuid,text,text,integer)|crewflow|definer=true|search_path=pg_catalog, pg_temp
+owner|function|hws_cutover_core_fence()|crewflow|definer=false
+owner|function|hws_cutover_drop_new_statement_pointers(uuid,uuid[])|rab_secure_owner|definer=true|search_path=pg_catalog, pg_temp
 owner|function|hws_cutover_probe(uuid)|crewflow|definer=true|search_path=pg_catalog, pg_temp
-owner|function|hws_cutover_reconcile_statement_pointers(uuid,boolean)|rab_secure_owner|definer=true|search_path=pg_catalog, pg_temp
+owner|function|hws_cutover_purge_core_statement_pointers(uuid)|rab_secure_owner|definer=true|search_path=pg_catalog, pg_temp
 owner|function|hws_cutover_schema(uuid)|crewflow|definer=false
 owner|function|hws_cutover_source_sql(text)|crewflow|definer=false
+owner|function|hws_cutover_started_any()|crewflow|definer=true|search_path=pg_catalog, pg_temp
 owner|function|hws_cutover_verify_range(uuid,text,text,integer)|crewflow|definer=true|search_path=pg_catalog, pg_temp
 owner|function|immutable_unaccent(text)|rab_secure_owner|definer=false
 owner|function|is_active_platform_admin(uuid)|rab_secure_owner|definer=true|search_path=pg_catalog, core, pg_temp
@@ -725,6 +736,7 @@ owner|table|email_change_request|rab_secure_owner
 owner|table|email_outbox|crewflow
 owner|table|host_label_claim|crewflow
 owner|table|hws_backfill_checkpoint|crewflow
+owner|table|hws_cutover_state|crewflow
 owner|table|job_offer|crewflow
 owner|table|job_role|crewflow
 owner|table|login_handoff|rab_secure_owner
@@ -815,6 +827,7 @@ rls|email_change_request|enable=true|force=true
 rls|email_outbox|enable=true|force=true
 rls|host_label_claim|enable=true|force=true
 rls|hws_backfill_checkpoint|enable=true|force=true
+rls|hws_cutover_state|enable=true|force=true
 rls|job_offer|enable=true|force=true
 rls|job_role|enable=true|force=true
 rls|login_handoff|enable=true|force=true
@@ -931,6 +944,8 @@ table|host_label_claim|crewflow_app|
 table|host_label_claim|crewflow|S,I,U,D,T,R,G
 table|hws_backfill_checkpoint|crewflow_app|S,I,U
 table|hws_backfill_checkpoint|crewflow|S,I,U,D,T,R,G
+table|hws_cutover_state|crewflow_app|S
+table|hws_cutover_state|crewflow|S,I,U,D,T,R,G
 table|job_offer|crewflow_app|S,I,U,D
 table|job_offer|crewflow|S,I,U,D,T,R,G
 table|job_role|crewflow_app|S,I,U,D

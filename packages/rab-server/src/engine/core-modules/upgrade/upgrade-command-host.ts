@@ -3,8 +3,8 @@
  * Commands themselves import no fs / env / crypto (source guard); this is the one reviewed place they reach the host.
  */
 import { createHash } from 'node:crypto';
-import { createReadStream } from 'node:fs';
-import { lstat, open } from 'node:fs/promises';
+import { constants } from 'node:fs';
+import { FileHandle, open } from 'node:fs/promises';
 import { dirname, isAbsolute, join } from 'node:path';
 
 import { resolveHwsRuntimeEnabled } from '../environment/hws-runtime-default';
@@ -19,10 +19,11 @@ export function createUpgradeCommandHost(overrides: { env?: Readonly<Record<stri
     isAbsolutePath: (path) => isAbsolute(path),
     siblingPath: (path, fileName) => join(dirname(path), fileName),
     async readSmallFile(path, maxBytes) {
-      const st = await lstat(path).catch(() => null);
-      if (!st || !st.isFile() || st.size > maxBytes) return null;
-      const handle = await open(path, 'r');
+      const handle = await openRegularNoFollow(path);
+      if (!handle) return null;
       try {
+        const st = await handle.stat();
+        if (st.size > maxBytes) return null;
         const buffer = Buffer.alloc(st.size);
         const { bytesRead } = await handle.read(buffer, 0, st.size, 0);
         return buffer.subarray(0, bytesRead).toString('utf8');
@@ -31,23 +32,46 @@ export function createUpgradeCommandHost(overrides: { env?: Readonly<Record<stri
       }
     },
     async fileDigest(path) {
-      const st = await lstat(path).catch(() => null);
-      if (!st || !st.isFile()) return null;
-      const hash = createHash('sha256');
-      let head = Buffer.alloc(0);
-      let size = 0;
-      await new Promise<void>((resolve, reject) => {
-        const stream = createReadStream(path);
-        stream.on('data', (chunk: Buffer | string) => {
-          const b = typeof chunk === 'string' ? Buffer.from(chunk) : chunk;
+      const handle = await openRegularNoFollow(path);
+      if (!handle) return null;
+      try {
+        const hash = createHash('sha256');
+        let head = Buffer.alloc(0);
+        let size = 0;
+        const chunk = Buffer.alloc(1 << 20);
+        for (;;) {
+          const { bytesRead } = await handle.read(chunk, 0, chunk.length, null);
+          if (bytesRead === 0) break;
+          const b = chunk.subarray(0, bytesRead);
           if (head.length < 8) head = Buffer.concat([head, b.subarray(0, 8 - head.length)]);
-          size += b.length;
+          size += bytesRead;
           hash.update(b);
-        });
-        stream.on('error', reject);
-        stream.on('end', () => resolve());
-      });
-      return { sha256: hash.digest('hex'), size, head: head.toString('latin1') };
+        }
+        return { sha256: hash.digest('hex'), size, head: head.toString('latin1') };
+      } finally {
+        await handle.close();
+      }
     },
   };
+}
+
+/**
+ * Security review Info-2: open WITHOUT following a symlink (O_NOFOLLOW; the final path component may not be a link) and
+ * decide on the OPEN handle (fstat), so nothing can be swapped between a check and the open. null = absent, a symlink, or
+ * not a regular file. O_NONBLOCK so a FIFO planted at the path cannot hang the start (no effect on a regular file). (Both are
+ * undefined on Windows, where the upgrade never runs.)
+ */
+async function openRegularNoFollow(path: string): Promise<FileHandle | null> {
+  let handle: FileHandle;
+  try {
+    handle = await open(path, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0) | (constants.O_NONBLOCK ?? 0));
+  } catch {
+    return null;
+  }
+  const st = await handle.stat().catch(() => null);
+  if (!st || !st.isFile()) {
+    await handle.close();
+    return null;
+  }
+  return handle;
 }

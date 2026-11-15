@@ -5,11 +5,13 @@
  *   1. stop the API and the Worker (nothing may write between the backup and the cutover);
  *   2. `pg_dump --format=custom` of the database into a directory the upgrade container mounts read-only;
  *   3. restore that dump into a scratch database and check it (pg_restore exit 0, row counts of the 21 core tables);
- *   4. write the marker JSON next to the dump (fields below) and point CREWFLOW_HWS_CUTOVER_BACKUP_MARKER at it;
+ *   4. write the marker JSON next to the dump (fields below; `systemIdentifier` = `SELECT system_identifier::text FROM
+ *      pg_control_system()`, or null when the login may not call it) and point CREWFLOW_HWS_CUTOVER_BACKUP_MARKER at it;
  *   5. start the new release (the migrate-on-start child runs the cutover).
  *
  * What the command itself verifies (it cannot take or restore the backup): the marker is a small regular file with exactly
- * the reviewed fields; it names THIS database; it is at most 24 h old by the DATABASE clock and not from the future; the dump
+ * the reviewed fields; it names THIS database and THIS cluster (pg_control_system().system_identifier, review Info-2, whenever
+ * the login can read it; when it cannot, the marker must say null); it is at most 24 h old by the DATABASE clock and not from the future; the dump
  * it names sits next to it (a bare file name, no path), is a pg_dump custom archive ("PGDMP" header), and has exactly the
  * recorded size and sha256 (re-hashed here, so a truncated or swapped file refuses); the operator attested the restore test.
  * Any failure → refusal with an operator-facing reason (never a secret: no URL, no password, no file content).
@@ -25,6 +27,7 @@ export interface CutoverBackupMarker {
   kind: 'crewflow-hws-cutover-backup';
   version: 1;
   database: string;
+  systemIdentifier: string | null;
   takenAt: string;
   format: 'pg_dump-custom';
   dumpFile: string;
@@ -35,7 +38,7 @@ export interface CutoverBackupMarker {
 
 export type CutoverBackupCheck = { ok: true; marker: CutoverBackupMarker } | { ok: false; reason: string };
 
-const KEYS = ['database', 'dumpFile', 'format', 'kind', 'restoreVerified', 'sha256', 'sizeBytes', 'takenAt', 'version'];
+const KEYS = ['database', 'dumpFile', 'format', 'kind', 'restoreVerified', 'sha256', 'sizeBytes', 'systemIdentifier', 'takenAt', 'version'];
 const DUMP_FILE_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,199}$/;
 const ISO_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,6})?(Z|[+-]\d{2}:\d{2})$/;
 
@@ -54,6 +57,9 @@ export function parseCutoverBackupMarker(text: string): { marker: CutoverBackupM
   if (o.kind !== 'crewflow-hws-cutover-backup' || o.version !== 1) return { reason: 'the backup marker kind / version is not crewflow-hws-cutover-backup / 1' };
   if (o.format !== 'pg_dump-custom') return { reason: 'the backup must be a pg_dump custom-format archive (format "pg_dump-custom")' };
   if (typeof o.database !== 'string' || !o.database || o.database.length > 63) return { reason: 'the backup marker database name is missing or invalid' };
+  if (o.systemIdentifier !== null && (typeof o.systemIdentifier !== 'string' || !/^[0-9]{1,20}$/.test(o.systemIdentifier))) {
+    return { reason: 'the backup marker systemIdentifier must be the decimal pg_control_system().system_identifier, or null' };
+  }
   if (typeof o.takenAt !== 'string' || !ISO_RE.test(o.takenAt) || Number.isNaN(Date.parse(o.takenAt))) {
     return { reason: 'the backup marker takenAt is not an ISO-8601 timestamp with a zone' };
   }
@@ -65,7 +71,7 @@ export function parseCutoverBackupMarker(text: string): { marker: CutoverBackupM
 }
 
 /** The whole check: marker file, shape, database, age by the database clock, and the dump re-hashed. */
-export async function verifyCutoverBackup(host: UpgradeCommandHost | undefined, facts: { database: string; dbNow: Date }): Promise<CutoverBackupCheck> {
+export async function verifyCutoverBackup(host: UpgradeCommandHost | undefined, facts: { database: string; systemIdentifier: string | null; dbNow: Date }): Promise<CutoverBackupCheck> {
   if (!host) return { ok: false, reason: 'no host facts were passed to the upgrade command; the backup cannot be verified' };
   const path = host.env[CUTOVER_BACKUP_MARKER_ENV]?.trim();
   if (!path) return { ok: false, reason: `${CUTOVER_BACKUP_MARKER_ENV} is not set: take and verify a backup first (runbook), then point it at the marker file` };
@@ -76,6 +82,7 @@ export async function verifyCutoverBackup(host: UpgradeCommandHost | undefined, 
   if ('reason' in parsed) return { ok: false, reason: parsed.reason };
   const m = parsed.marker;
   if (m.database !== facts.database) return { ok: false, reason: 'the backup marker names another database than the one being upgraded' };
+  if (m.systemIdentifier !== facts.systemIdentifier) return { ok: false, reason: 'the backup marker names another cluster (system_identifier) than the one being upgraded' };
   const age = facts.dbNow.getTime() - Date.parse(m.takenAt);
   if (age < -CUTOVER_BACKUP_CLOCK_SKEW_MS) return { ok: false, reason: 'the backup marker takenAt is in the future by the database clock' };
   if (age > CUTOVER_BACKUP_MAX_AGE_MS) return { ok: false, reason: 'the backup is older than 24 hours by the database clock: take a fresh one' };

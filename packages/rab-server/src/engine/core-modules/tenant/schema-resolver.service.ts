@@ -92,10 +92,15 @@ export class SchemaResolverService {
     const expected = workspaceSchemaName(workspaceId);
 
     const fetch = async (): Promise<CachedResolvedSchema> => {
-      const rows: Array<{ schema_name: string; status: string; schema_version: number; module_version: number; migration_error: string | null }> = await manager.query(
-        `SELECT schema_name, status, schema_version, module_version, migration_error FROM core.workspace_schema_registry WHERE workspace_id = $1`,
-        [workspaceId],
-      );
+      // Part C3 (review H-1b): a workspace whose cutover copy has STARTED but not verified (core.hws_cutover_state) is
+      // refused like a blocked one, even if its block marker were lost: its schema may hold a partial copy.
+      const rows: Array<{ schema_name: string; status: string; schema_version: number; module_version: number; migration_error: string | null; cutover_state: string | null }> =
+        await manager.query(
+          `SELECT r.schema_name, r.status, r.schema_version, r.module_version, r.migration_error,
+                  (SELECT s.state FROM core.hws_cutover_state s WHERE s.workspace_id = r.workspace_id) AS cutover_state
+             FROM core.workspace_schema_registry r WHERE r.workspace_id = $1`,
+          [workspaceId],
+        );
       if (rows.length !== 1) throw new WorkspaceRoutingError('registry-missing');
       const row = rows[0];
       if (row.schema_name !== expected) throw new WorkspaceRoutingError('name-mismatch');
@@ -104,7 +109,7 @@ export class SchemaResolverService {
       // Part D, owner decisions D2/D3: an upgrade step failed with a structure that does not match this code: the workspace is
       // blocked until the step succeeds (503 "being upgraded"; never cached). Raised only after the caller's organisation is
       // bound and the row is visible to it, so another tenant still gets 'registry-missing' (404).
-      if (isUpgradeBlocked(row.migration_error)) throw new WorkspaceRoutingError('upgrading');
+      if (isUpgradeBlocked(row.migration_error) || row.cutover_state === 'started') throw new WorkspaceRoutingError('upgrading');
       const moduleVersion = Number(row.module_version);
       // Phase B: below the floor is refused here, so it is never cached.
       assertCompatibleModuleVersion(moduleVersion);

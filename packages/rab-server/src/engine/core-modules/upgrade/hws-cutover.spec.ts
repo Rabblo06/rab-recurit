@@ -58,7 +58,8 @@ describe('C3 HWS cutover: the backup marker (owner rule: no cutover without a ve
   const NOW = new Date('2026-11-14T12:00:00Z');
   const dump = Buffer.concat([Buffer.from('PGDMP'), Buffer.from('synthetic archive body for the spec')]);
   const sha = createHash('sha256').update(dump).digest('hex');
-  const good = { kind: 'crewflow-hws-cutover-backup', version: 1, database: DB, takenAt: '2026-11-14T10:00:00Z', format: 'pg_dump-custom', dumpFile: 'pre-cutover.dump', sha256: sha, sizeBytes: dump.length, restoreVerified: true };
+  const SID = '7300000000000000001';
+  const good = { kind: 'crewflow-hws-cutover-backup', version: 1, database: DB, systemIdentifier: SID, takenAt: '2026-11-14T10:00:00Z', format: 'pg_dump-custom', dumpFile: 'pre-cutover.dump', sha256: sha, sizeBytes: dump.length, restoreVerified: true };
 
   function host(opts: { marker?: unknown; env?: Record<string, string | undefined>; dump?: Buffer | null; markerRaw?: string | null } = {}): UpgradeCommandHost {
     const markerText = opts.markerRaw !== undefined ? opts.markerRaw : JSON.stringify(opts.marker ?? good);
@@ -73,7 +74,7 @@ describe('C3 HWS cutover: the backup marker (owner rule: no cutover without a ve
         p === '/backups/pre-cutover.dump' && file ? { sha256: createHash('sha256').update(file).digest('hex'), size: file.length, head: file.subarray(0, 8).toString('latin1') } : null,
     };
   }
-  const check = (h: UpgradeCommandHost | undefined) => verifyCutoverBackup(h, { database: DB, dbNow: NOW });
+  const check = (h: UpgradeCommandHost | undefined, sid: string | null = SID) => verifyCutoverBackup(h, { database: DB, systemIdentifier: sid, dbNow: NOW });
 
   it('a fresh, complete marker with a matching dump passes', async () => {
     await expect(check(host())).resolves.toEqual({ ok: true, marker: good });
@@ -89,6 +90,8 @@ describe('C3 HWS cutover: the backup marker (owner rule: no cutover without a ve
     ['a missing field', host({ marker: { ...good, restoreVerified: undefined } }), /exactly the fields/],
     ['restore not attested', host({ marker: { ...good, restoreVerified: false } }), /restoreVerified/],
     ['another database', host({ marker: { ...good, database: 'other' } }), /another database/],
+    ['another cluster', host({ marker: { ...good, systemIdentifier: '7300000000000000002' } }), /another cluster/],
+    ['a cluster id that is not a number', host({ marker: { ...good, systemIdentifier: 'abc' } }), /systemIdentifier/],
     ['older than 24 h', host({ marker: { ...good, takenAt: '2026-11-13T11:59:00Z' } }), /older than 24 hours/],
     ['from the future', host({ marker: { ...good, takenAt: '2026-11-14T12:30:00Z' } }), /in the future/],
     ['a path in dumpFile', host({ marker: { ...good, dumpFile: '../etc/passwd' } }), /bare file name/],
@@ -102,6 +105,12 @@ describe('C3 HWS cutover: the backup marker (owner rule: no cutover without a ve
     const r = await check(h);
     expect(r.ok).toBe(false);
     expect((r as { reason: string }).reason).toMatch(reason);
+  });
+
+  it('the cluster binding: null on both sides only when this login cannot read system_identifier', async () => {
+    await expect(check(host({ marker: { ...good, systemIdentifier: null } }), null)).resolves.toMatchObject({ ok: true });
+    await expect(check(host({ marker: { ...good, systemIdentifier: null } }), SID)).resolves.toMatchObject({ ok: false });
+    await expect(check(host(), null)).resolves.toMatchObject({ ok: false });
   });
 
   it('the refusal reason never echoes the marker path or its content', async () => {

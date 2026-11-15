@@ -89,6 +89,8 @@ export interface UpgradeRunOptions {
   testFailCommand?: string | null;
   /** Part C3: the host facts lent to instance commands (default: the real process, upgrade-command-host.ts). */
   host?: UpgradeCommandHost;
+  /** Part C3 (review L-4): bumps the resolver cache epoch on demand (migrate-on-start; throws when it cannot). */
+  flushBlockCache?: () => Promise<void>;
 }
 
 /** One upgrade run's state, shared by the runner hooks. */
@@ -206,6 +208,7 @@ export class UpgradeRun {
           markBlockChanged: () => {
             this.report.commandBlockChanged = true;
           },
+          flushBlockCache: this.options.flushBlockCache,
         });
       } catch (error) {
         const attempt = await withUpgradeScope(session, 'upgrade', (q) => recordUpgradeMigration(q, { name, status: 'failed', executedByVersion: codeVersion, forced: force, error }));

@@ -1,7 +1,7 @@
-// sql-injection-reviewed-file: SQL definition / check module (database layer). Every interpolation is a code constant of this repository (table, function, role and column names, the closed table list); no request or row data reaches these templates. Inside the function bodies every identifier goes through format('%I') / quote_ident / regclass output, and every value through EXECUTE ... USING. Reviewed 2026-11-14 (C3, FOR OWNER REVIEW).
+// sql-injection-reviewed-file: SQL definition / check module (database layer). Every interpolation is a code constant of this repository (table, function, role and column names, the closed table list); no request or row data reaches these templates. Inside the function bodies every identifier goes through format('%I') / quote_ident / regclass output, and every value through EXECUTE ... USING. Reviewed 2026-11-15 (C3, FOR OWNER REVIEW).
 /**
  * OWNER-DB-ULTIMATE Part C3 (HWS cutover), option A′ — PENDING OWNER CHOICE (A′ vs B′) AND SQL REVIEW
- * (docs/plans/phase-x3/SQL-DRAFTS.md §3 and "FOR OWNER REVIEW — C3"). Runs only on throwaway databases until approved.
+ * (docs/plans/phase-x3/SQL-DRAFTS.md §3 and §6 "FOR OWNER REVIEW — C3"). Runs only on throwaway databases until approved.
  *
  * The copy path for the 21 workspace-business tables from the `core` copies into each workspace's own schema, under the one
  * runtime login (`crewflow_owner`, never superuser / BYPASSRLS, §0.1) with FORCE ROW LEVEL SECURITY kept on everything (§0.2):
@@ -11,13 +11,19 @@
  *     a review written by someone else). Option A′ lifts FORCE on exactly the tables one call touches, INSIDE that call's
  *     transaction, under ACCESS EXCLUSIVE (no other session can read or write them meanwhile), restores FORCE and asserts it
  *     before returning. Any error aborts the transaction, so a NO FORCE state can never be committed.
- *   - Callable only on the locked migration session (the Part B migration lock held by THIS backend), with the tenant bound
- *     to exactly the named workspace, for a READY workspace whose registry schema is its derived name. Closed table list: no
- *     caller text reaches SQL except a table name that passed the list check.
+ *   - The migration-lock and tenant checks (core.hws_cutover_schema) are GUARDS AGAINST MISTAKES (a call from the wrong
+ *     session, with the wrong tenant bound, on a workspace that is not READY), NOT an authorization boundary: a session that
+ *     can act as crewflow can already ALTER these tables itself (BC-01 / G-02, owner-accepted). The authorization boundary is
+ *     EXECUTE: crewflow and its members only; PUBLIC and crewflow_app hold nothing.
  *   - CHECK constraints (money, `<table>_workspace_bound`), FKs and triggers stay on. `payroll_record_guard` is BEFORE UPDATE
- *     only; the statement-pointer INSERT trigger fires and is reconciled by hws_cutover_reconcile_statement_pointers (Q13).
+ *     only; the statement-pointer INSERT trigger fires, and the pointers it creates for the rows the SAME batch inserted are
+ *     reconciled by hws_cutover_drop_new_statement_pointers (Q13).
  *   - Copy = INSERT ... ON CONFLICT DO NOTHING: idempotent, resumable, never an UPDATE or DELETE of either copy
  *     (attendance_correction stays insert-only; the core copies are never written).
+ *   - core.hws_cutover_state (review L-2): the per-workspace cutover state (started → verified), crewflow-owned, tenant RLS
+ *     (ENABLE + FORCE), no DML for crewflow_app, runtime-login DML refused by the grant-parity guard. It drives the resolver
+ *     (a 'started' workspace is refused, 503), the core write fence (review M-3: once a workspace's cutover has started, its
+ *     core copy is read-only for the runtime login) and the HWS-off boot refusal.
  *
  * Twenty has no RLS and no cross-schema copy: this is a Crewflow addition (§0). Twenty's per-workspace command shape
  * (`workspace-command-runner.service.ts:106-153`, twentyhq/twenty @ eedb0a73) is followed by the C3 upgrade command.
@@ -39,14 +45,59 @@ export const HWS_CUTOVER_FUNCTIONS = [
   'core.hws_cutover_probe(uuid)',
   'core.hws_cutover_copy_batch(uuid,text,text,integer)',
   'core.hws_cutover_verify_range(uuid,text,text,integer)',
-  'core.hws_cutover_reconcile_statement_pointers(uuid,boolean)',
+  'core.hws_cutover_started_any()',
+  'core.hws_cutover_core_fence()',
+  'core.hws_cutover_drop_new_statement_pointers(uuid,uuid[])',
+  'core.hws_cutover_purge_core_statement_pointers(uuid)',
 ] as const;
+
+export const HWS_CUTOVER_FENCE_TRIGGER = 'hws_cutover_core_fence';
+export const HWS_CUTOVER_STATE_GUARD_TRIGGERS = ['insert', 'update', 'delete', 'truncate'].map((op) => `_hws_cutover_state_runtime_guard_${op}`);
+
+/**
+ * (T) The per-workspace cutover state. One row per workspace once its copy has started; 'verified' once every table matched.
+ * FK to the workspace (cascade: a deleted workspace takes its state). Tenant policy for every role; plus an owner-only SELECT
+ * policy for crewflow (the precedent idiom of core/preauth-force-sql.ts) so the boot check core.hws_cutover_started_any() —
+ * a crewflow definer, bound by FORCE — can see whether ANY workspace was cut over without a tenant. crewflow_app: SELECT only
+ * (the fence trigger reads it as the invoker); the owner login's DML is refused on normal paths by the grant-parity guard.
+ */
+export const HWS_CUTOVER_STATE_TABLE_SQL: readonly string[] = [
+  `CREATE TABLE core.hws_cutover_state (
+  workspace_id uuid NOT NULL,
+  organisation_id uuid NOT NULL,
+  state text NOT NULL,
+  started_at timestamptz NOT NULL DEFAULT pg_catalog.now(),
+  verified_at timestamptz,
+  CONSTRAINT hws_cutover_state_pkey PRIMARY KEY (workspace_id),
+  CONSTRAINT hws_cutover_state_state_check CHECK (state IN ('started', 'verified')),
+  CONSTRAINT hws_cutover_state_verified_check CHECK ((state = 'verified') = (verified_at IS NOT NULL)),
+  CONSTRAINT hws_cutover_state_workspace_org_fkey FOREIGN KEY (workspace_id, organisation_id)
+    REFERENCES core.manager_workspace(id, organisation_id) ON DELETE CASCADE
+)`,
+  'CREATE INDEX hws_cutover_state_organisation_idx ON core.hws_cutover_state (organisation_id)',
+];
+
+/** Run after the table is handed to crewflow (as the migration identity; the table owner may ALTER it). */
+export const HWS_CUTOVER_STATE_SECURITY_SQL: readonly string[] = [
+  'ALTER TABLE core.hws_cutover_state ENABLE ROW LEVEL SECURITY',
+  'ALTER TABLE core.hws_cutover_state FORCE ROW LEVEL SECURITY',
+  `CREATE POLICY hws_cutover_state_tenant ON core.hws_cutover_state AS PERMISSIVE FOR ALL TO PUBLIC
+  USING (organisation_id = core.current_org()) WITH CHECK (organisation_id = core.current_org())`,
+  `CREATE POLICY hws_cutover_state_owner_read ON core.hws_cutover_state AS PERMISSIVE FOR SELECT TO crewflow
+  USING (CURRENT_USER = 'crewflow'::name)`,
+  'REVOKE ALL ON TABLE core.hws_cutover_state FROM PUBLIC',
+  'GRANT SELECT ON TABLE core.hws_cutover_state TO crewflow_app',
+  ...['INSERT', 'UPDATE', 'DELETE', 'TRUNCATE'].map(
+    (op) => `CREATE TRIGGER _hws_cutover_state_runtime_guard_${op.toLowerCase()} BEFORE ${op} ON core.hws_cutover_state
+  FOR EACH STATEMENT EXECUTE FUNCTION core.owner_login_grant_parity_guard()`,
+  ),
+];
 
 /**
  * (0a) Guard shared by the crewflow definers (SECURITY INVOKER: it runs as the calling definer, i.e. crewflow). Returns the
  * workspace's schema name or raises: 42501 no migration lock on this backend / tenant not this workspace; 55000 not READY or
  * not the derived name. The lock key is the single-bigint 0x637265776d696772 ("crewmigr", migration-lock.ts), which pg_locks
- * spells classid 1668441463, objid 1835624306, objsubid 1.
+ * spells classid 1668441463, objid 1835624306, objsubid 1. A guard against mistakes, not an authorization boundary.
  */
 export const HWS_CUTOVER_SCHEMA_SQL = `
 CREATE FUNCTION core.hws_cutover_schema(p_workspace_id uuid)
@@ -82,7 +133,8 @@ $fn$`;
 /**
  * (0b) The core-side source rows of one table for workspace $1 (a uuid parameter), as a SELECT with alias-free columns
  * `c.*` plus `j` = the row as jsonb in the WORKSPACE table's shape. Pure text builder (IMMUTABLE, no table access).
- *   - 20 tables: `core.<t> WHERE workspace_id = $1`.
+ *   - 20 tables: `core.<t> WHERE workspace_id = $1 AND organisation_id = current_org()` (review L-1: a row of W carrying
+ *     another organisation is never copied; the probe reports it and the command refuses W).
  *   - user_note: core.user_note has no workspace_id (HWS backfill Part 15, user-note-mapping.ts). A note belongs to W when its
  *     subject has EXACTLY ONE profile (staff or manager) in the organisation and that profile is in W; `workspace_id` is merged
  *     into j. Notes whose subject has no profile or more than one are never copied and are reported by the probe.
@@ -109,7 +161,7 @@ BEGIN
                AND (EXISTS (SELECT 1 FROM core.staff_profile s WHERE s.user_id = c.subject_user_id AND s.workspace_id = $1::uuid)
                     OR EXISTS (SELECT 1 FROM core.manager_profile m WHERE m.user_id = c.subject_user_id AND m.workspace_id = $1::uuid))';
   END IF;
-  RETURN pg_catalog.format('SELECT c.*, pg_catalog.to_jsonb(c) AS j FROM core.%I c WHERE c.workspace_id = $1::uuid', p_table);
+  RETURN pg_catalog.format('SELECT c.*, pg_catalog.to_jsonb(c) AS j FROM core.%I c WHERE c.workspace_id = $1::uuid AND c.organisation_id = core.current_org()', p_table);
 END
 $fn$`;
 
@@ -158,21 +210,37 @@ const PREAMBLE_SQL = `IF p_table IS NULL OR NOT (p_table = ANY (${TABLE_ARRAY_SQ
   SELECT pg_catalog.string_agg('c.' || pg_catalog.quote_ident(u.k), ', ' ORDER BY u.o),
          pg_catalog.string_agg('w.' || pg_catalog.quote_ident(u.k), ', ' ORDER BY u.o),
          pg_catalog.string_agg('c.' || pg_catalog.quote_ident(u.k) || '::text', ', ' ORDER BY u.o),
+         pg_catalog.string_agg(pg_catalog.quote_ident(u.k) || '::text', ', ' ORDER BY u.o),
          pg_catalog.string_agg('$2[' || u.o || ']', ', ' ORDER BY u.o),
          pg_catalog.string_agg('$3[' || u.o || ']', ', ' ORDER BY u.o)
-    INTO v_ckeys, v_wkeys, v_ktext, v_after_ref, v_upto_ref
+    INTO v_ckeys, v_wkeys, v_ktext, v_rtext, v_after_ref, v_upto_ref
     FROM pg_catalog.unnest(v_keys) WITH ORDINALITY AS u(k, o);
   v_src := core.hws_cutover_source_sql(p_table)`;
 
+const PREAMBLE_DECLARE_SQL = `v_schema    text;
+  v_keys      text[];
+  v_after     uuid[];
+  v_ckeys     text;
+  v_wkeys     text;
+  v_ktext     text;
+  v_rtext     text;
+  v_after_ref text;
+  v_upto_ref  text;
+  v_src       text;
+  v_rels      pg_catalog.regclass[];
+  v_rel       pg_catalog.regclass;
+  v_ok        boolean;`;
+
 /**
  * (A) One keyset batch of one table, core → the workspace's own schema. Returns rows inserted (copied), source rows read in
- * this batch (read_rows; fewer than p_limit = the table is done) and the last key read (`k1` or `k1|k2`), to pass back as
- * p_after. Original ids and every value at full precision (jsonb_populate_record against the TARGET row type, the same
- * conversion hws:backfill uses); generated columns are recomputed by PostgreSQL.
+ * this batch (read_rows; fewer than p_limit = the table is done), the last key read (`k1` or `k1|k2`, to pass back as
+ * p_after) and the keys this batch INSERTED (inserted_keys; review M-1: only their statement pointers are reconciled).
+ * Original ids and every value at full precision (jsonb_populate_record against the TARGET row type, the same conversion
+ * hws:backfill uses); generated columns are recomputed by PostgreSQL.
  */
 export const HWS_CUTOVER_COPY_BATCH_SQL = `
 CREATE FUNCTION core.hws_cutover_copy_batch(p_workspace_id uuid, p_table text, p_after text, p_limit integer)
-RETURNS TABLE (copied integer, read_rows integer, last_key text)
+RETURNS TABLE (copied integer, read_rows integer, last_key text, inserted_keys text[])
 LANGUAGE plpgsql
 VOLATILE
 SECURITY DEFINER
@@ -180,20 +248,9 @@ SET search_path = pg_catalog, pg_temp
 SET lock_timeout = '10s'
 AS $fn$
 DECLARE
-  v_schema    text;
-  v_keys      text[];
-  v_after     uuid[];
-  v_ckeys     text;
-  v_wkeys     text;
-  v_ktext     text;
-  v_after_ref text;
-  v_upto_ref  text;
-  v_src       text;
+  ${PREAMBLE_DECLARE_SQL}
   v_cols      text;
   v_sel       text;
-  v_rels      pg_catalog.regclass[];
-  v_rel       pg_catalog.regclass;
-  v_ok        boolean;
 BEGIN
   ${PREAMBLE_SQL};
   SELECT pg_catalog.string_agg(pg_catalog.quote_ident(a.attname), ', ' ORDER BY a.attnum),
@@ -215,12 +272,13 @@ BEGIN
        INSERT INTO %5$I.%6$I (%7$s)
        SELECT %8$s FROM src, LATERAL pg_catalog.jsonb_populate_record(NULL::%5$I.%6$I, src.j) AS r
        ON CONFLICT DO NOTHING
-       RETURNING 1)
+       RETURNING pg_catalog.concat_ws(''|'', %9$s) AS k)
      SELECT (SELECT pg_catalog.count(*) FROM ins)::integer,
             (SELECT pg_catalog.count(*) FROM src)::integer,
-            (SELECT s.k FROM src s ORDER BY s.rn DESC LIMIT 1)',
-    v_ktext, v_ckeys, v_src, v_after_ref, v_schema, p_table, v_cols, v_sel)
-    INTO copied, read_rows, last_key
+            (SELECT s.k FROM src s ORDER BY s.rn DESC LIMIT 1),
+            (SELECT coalesce(pg_catalog.array_agg(i.k), ARRAY[]::text[]) FROM ins i)',
+    v_ktext, v_ckeys, v_src, v_after_ref, v_schema, p_table, v_cols, v_sel, v_rtext)
+    INTO copied, read_rows, last_key, inserted_keys
     USING p_workspace_id, v_after, p_limit;
   ${RESTORE_SQL};
   RETURN NEXT;
@@ -246,23 +304,12 @@ SET search_path = pg_catalog, pg_temp
 SET lock_timeout = '10s'
 AS $fn$
 DECLARE
-  v_schema    text;
-  v_keys      text[];
-  v_after     uuid[];
+  ${PREAMBLE_DECLARE_SQL}
   v_upto      uuid[];
-  v_ckeys     text;
-  v_wkeys     text;
-  v_ktext     text;
-  v_after_ref text;
-  v_upto_ref  text;
-  v_src       text;
   v_n         integer;
   v_upto_text text;
   v_pence     text;
   v_minutes   text;
-  v_rels      pg_catalog.regclass[];
-  v_rel       pg_catalog.regclass;
-  v_ok        boolean;
 BEGIN
   ${PREAMBLE_SQL};
   v_pence := CASE p_table WHEN 'payroll_record' THEN 'amount_pence' WHEN 'payroll_run_line' THEN 'amount_pence'
@@ -319,15 +366,16 @@ END
 $fn$`;
 
 /**
- * (C) Pre-check of one workspace, all 21 tables in one call: whether the core copy holds rows of W (core_rows) and whether
- * W's own table already holds rows (ws_rows). On the user_note row: ambiguous_notes = notes of the organisation whose subject
- * has a profile in W AND another profile (they cannot be mapped to exactly one workspace: the copy skips them, the C3 command
+ * (C) Pre-check of one workspace, all 21 tables in one call: whether the core copy holds rows of W (core_rows), whether W's
+ * own table already holds rows (ws_rows), and org_mismatch = core rows of W that carry ANOTHER organisation (review L-1;
+ * never copied, the command refuses W). On the user_note row: ambiguous_notes = notes of the organisation whose subject
+ * has a profile in W AND another profile (they cannot be mapped to exactly one workspace: the copy skips them, the command
  * refuses W), unmapped_notes = notes of the organisation whose subject has no profile at all (they belong to no workspace;
  * reported, never copied). Lifts FORCE on all 43 relations at once (ACCESS EXCLUSIVE on each until the transaction ends).
  */
 export const HWS_CUTOVER_PROBE_SQL = `
 CREATE FUNCTION core.hws_cutover_probe(p_workspace_id uuid)
-RETURNS TABLE (table_name text, core_rows boolean, ws_rows boolean, ambiguous_notes integer, unmapped_notes integer)
+RETURNS TABLE (table_name text, core_rows boolean, ws_rows boolean, org_mismatch integer, ambiguous_notes integer, unmapped_notes integer)
 LANGUAGE plpgsql
 VOLATILE
 SECURITY DEFINER
@@ -352,6 +400,7 @@ BEGIN
     table_name := v_table;
     EXECUTE pg_catalog.format('SELECT EXISTS (%s)', core.hws_cutover_source_sql(v_table)) INTO core_rows USING p_workspace_id;
     EXECUTE pg_catalog.format('SELECT EXISTS (SELECT 1 FROM %I.%I)', v_schema, v_table) INTO ws_rows;
+    org_mismatch := 0;
     ambiguous_notes := 0;
     unmapped_notes := 0;
     IF v_table = 'user_note' THEN
@@ -368,6 +417,9 @@ BEGIN
        WHERE c.organisation_id = core.current_org()
          AND NOT EXISTS (SELECT 1 FROM core.staff_profile s WHERE s.user_id = c.subject_user_id)
          AND NOT EXISTS (SELECT 1 FROM core.manager_profile m WHERE m.user_id = c.subject_user_id);
+    ELSE
+      EXECUTE pg_catalog.format('SELECT pg_catalog.count(*)::integer FROM core.%I c WHERE c.workspace_id = $1 AND c.organisation_id IS DISTINCT FROM core.current_org()', v_table)
+        INTO org_mismatch USING p_workspace_id;
     END IF;
     RETURN NEXT;
   END LOOP;
@@ -376,18 +428,94 @@ END
 $fn$`;
 
 /**
- * (D) Q13 / Q6: statement dispatch pointers. Since StatementPointerPhysicalIdentity1786721350000 a pointer's key is
- * (queue, subject_id, source_schema), so a copied approved payroll_record with no statement gets a NEW workspace-source
- * pointer, due now, from its INSERT trigger (worker-dispatch-pointer-sql.ts F2_STATEMENT_TRIGGER_FUNCTION_SQL). The copy must
- * create no new due work: a workspace-source pointer is kept only when its core twin had one. p_purge_core (only once the
- * whole cutover has verified, HWS on from then): the core-source pointers of W are dead (R2) and removed, the same rows
- * F2_CUTOVER_SWEEP_SQL names. Owned by rab_secure_owner (only it may touch the pointer table: owner-only definer policy); its
- * body names no crewflow-owned table and calls no crewflow-owned function (R4, secure-owner-invariants.ts), hence the inline
- * lock check and no registry read: the schema name is derived and must exist.
+ * (D) Boot check (review M-3): has ANY workspace's cutover started? A crewflow definer reading through the owner-only SELECT
+ * policy hws_cutover_state_owner_read (no tenant needed). Boolean only. An API or Worker with HWS off refuses to start when
+ * true (hws-startup-guard.ts): it would read and write the frozen core copies of a workspace served from its own schema.
  */
-export const HWS_CUTOVER_RECONCILE_SQL = `
-CREATE FUNCTION core.hws_cutover_reconcile_statement_pointers(p_workspace_id uuid, p_purge_core boolean)
-RETURNS TABLE (dropped_new integer, purged_core integer)
+export const HWS_CUTOVER_STARTED_ANY_SQL = `
+CREATE FUNCTION core.hws_cutover_started_any()
+RETURNS boolean
+LANGUAGE sql
+STABLE
+SECURITY DEFINER
+SET search_path = pg_catalog, pg_temp
+AS $fn$
+  SELECT EXISTS (SELECT 1 FROM core.hws_cutover_state)
+$fn$`;
+
+/**
+ * (E) Review M-3, the DB fence: once a workspace's cutover has STARTED (state row present), its rows in the 21 core copies are
+ * read-only for every role except the table owners and a superuser (FK cascades from core.organisation / core.manager_workspace
+ * run as the owner crewflow and still pass; the cutover itself never writes core). user_note has no workspace_id: fenced per
+ * organisation (any workspace of the organisation cut over). Row-level BEFORE INSERT / UPDATE / DELETE on each core copy;
+ * SECURITY INVOKER (it reads hws_cutover_state under the writer's own tenant binding: a write without a tenant is refused by
+ * the core RLS anyway). 42501, fixed message, no identifier in it. Rollback note: a previous image (HWS off) can then read but
+ * not write the core copy of a cut-over workspace — writes fail loudly instead of being silently lost.
+ */
+export const HWS_CUTOVER_FENCE_FUNCTION_SQL = `
+CREATE FUNCTION core.hws_cutover_core_fence()
+RETURNS trigger
+LANGUAGE plpgsql
+VOLATILE
+SECURITY INVOKER
+SET search_path = pg_catalog, pg_temp
+AS $fn$
+DECLARE
+  v_old uuid;
+  v_new uuid;
+  v_hit boolean;
+BEGIN
+  IF current_user IN ('crewflow'::name, 'rab_secure_owner'::name)
+     OR coalesce((SELECT r.rolsuper FROM pg_catalog.pg_roles r WHERE r.rolname = current_user), false) THEN
+    IF TG_OP = 'DELETE' THEN RETURN OLD; END IF;
+    RETURN NEW;
+  END IF;
+  IF TG_TABLE_NAME = 'user_note' THEN
+    IF TG_OP <> 'INSERT' THEN v_old := OLD.organisation_id; END IF;
+    IF TG_OP <> 'DELETE' THEN v_new := NEW.organisation_id; END IF;
+    SELECT EXISTS (SELECT 1 FROM core.hws_cutover_state s WHERE s.organisation_id IN (v_old, v_new)) INTO v_hit;
+  ELSE
+    IF TG_OP <> 'INSERT' THEN v_old := OLD.workspace_id; END IF;
+    IF TG_OP <> 'DELETE' THEN v_new := NEW.workspace_id; END IF;
+    SELECT EXISTS (SELECT 1 FROM core.hws_cutover_state s WHERE s.workspace_id IN (v_old, v_new)) INTO v_hit;
+  END IF;
+  IF v_hit THEN
+    RAISE EXCEPTION 'permission denied: this workspace is served from its own schema since the HWS cutover; its core copy is read-only'
+      USING ERRCODE = '42501';
+  END IF;
+  IF TG_OP = 'DELETE' THEN RETURN OLD; END IF;
+  RETURN NEW;
+END
+$fn$`;
+
+export const HWS_CUTOVER_FENCE_TRIGGERS_SQL: readonly string[] = HWS_CUTOVER_TABLES.map(
+  (t) => `CREATE TRIGGER ${HWS_CUTOVER_FENCE_TRIGGER} BEFORE INSERT OR UPDATE OR DELETE ON core.${t}
+  FOR EACH ROW EXECUTE FUNCTION core.hws_cutover_core_fence()`,
+);
+
+/** Same inline lock + tenant check in both rab_secure_owner definers (R4: they may call no crewflow-owned function). */
+const POINTER_GUARD_SQL = (label: string) => `IF NOT EXISTS (SELECT 1 FROM pg_catalog.pg_locks l
+                  WHERE l.locktype = 'advisory' AND l.pid = pg_catalog.pg_backend_pid() AND l.granted
+                    AND l.database = (SELECT d.oid FROM pg_catalog.pg_database d WHERE d.datname = pg_catalog.current_database())
+                    AND l.classid = 1668441463::oid AND l.objid = 1835624306::oid AND l.objsubid = 1) THEN
+    RAISE EXCEPTION 'hws cutover ${label}: the migration lock is not held by this session' USING ERRCODE = '42501';
+  END IF;
+  IF p_workspace_id IS NULL OR core.current_workspace() IS DISTINCT FROM p_workspace_id
+     OR pg_catalog.to_regnamespace(v_schema) IS NULL THEN
+    RAISE EXCEPTION 'hws cutover ${label}: tenant context is not this workspace, or no such schema' USING ERRCODE = '42501';
+  END IF`;
+
+/**
+ * (F) Q13 / review M-1: the copy's INSERT trigger gave a copied approved payroll_record with no statement a NEW
+ * workspace-source pointer, due now (key (queue, subject_id, source_schema) since StatementPointerPhysicalIdentity
+ * 1786721350000). Called in the SAME transaction as the copy batch, with exactly the ids that batch inserted: such a pointer
+ * is kept only when its core twin had one, so the copy creates no new due work — and no pointer of any other row (a live
+ * workspace that already serves from its schema) is ever touched. Owned by rab_secure_owner (only it may touch the pointer
+ * table: owner-only definer policy); its body names no crewflow-owned table and calls no crewflow-owned function (R4).
+ */
+export const HWS_CUTOVER_DROP_NEW_SQL = `
+CREATE FUNCTION core.hws_cutover_drop_new_statement_pointers(p_workspace_id uuid, p_subject_ids uuid[])
+RETURNS integer
 LANGUAGE plpgsql
 VOLATILE
 SECURITY DEFINER
@@ -395,44 +523,64 @@ SET search_path = pg_catalog, pg_temp
 AS $fn$
 DECLARE
   v_schema text := 'workspace_' || pg_catalog.replace(p_workspace_id::text, '-', '');
+  v_n integer;
 BEGIN
-  IF NOT EXISTS (SELECT 1 FROM pg_catalog.pg_locks l
-                  WHERE l.locktype = 'advisory' AND l.pid = pg_catalog.pg_backend_pid() AND l.granted
-                    AND l.database = (SELECT d.oid FROM pg_catalog.pg_database d WHERE d.datname = pg_catalog.current_database())
-                    AND l.classid = 1668441463::oid AND l.objid = 1835624306::oid AND l.objsubid = 1) THEN
-    RAISE EXCEPTION 'hws cutover pointers: the migration lock is not held by this session' USING ERRCODE = '42501';
-  END IF;
-  IF p_workspace_id IS NULL OR p_purge_core IS NULL OR core.current_workspace() IS DISTINCT FROM p_workspace_id
-     OR pg_catalog.to_regnamespace(v_schema) IS NULL THEN
-    RAISE EXCEPTION 'hws cutover pointers: tenant context is not this workspace, or no such schema' USING ERRCODE = '42501';
+  ${POINTER_GUARD_SQL('pointers')};
+  IF p_subject_ids IS NULL OR pg_catalog.cardinality(p_subject_ids) = 0 THEN
+    RETURN 0;
   END IF;
   WITH d AS (
     DELETE FROM core.worker_dispatch_pointer w
      WHERE w.queue = 'statement' AND w.workspace_id = p_workspace_id AND w.source_schema = v_schema
+       AND w.subject_id = ANY (p_subject_ids)
        AND NOT EXISTS (SELECT 1 FROM core.worker_dispatch_pointer c
                         WHERE c.queue = 'statement' AND c.subject_id = w.subject_id AND c.source_schema = 'core')
     RETURNING 1)
-  SELECT pg_catalog.count(*)::integer INTO dropped_new FROM d;
-  purged_core := 0;
-  IF p_purge_core THEN
-    WITH p AS (
-      DELETE FROM core.worker_dispatch_pointer c
-       WHERE c.queue = 'statement' AND c.workspace_id = p_workspace_id AND c.source_schema = 'core'
-      RETURNING 1)
-    SELECT pg_catalog.count(*)::integer INTO purged_core FROM p;
-  END IF;
-  RETURN NEXT;
+  SELECT pg_catalog.count(*)::integer INTO v_n FROM d;
+  RETURN v_n;
 END
 $fn$`;
 
-/** Creation order (the helpers before the definers that call them). */
+/**
+ * (G) Review M-1 / M-2: once ONE workspace has verified and is about to be served from its schema, its core-source statement
+ * pointers are dead (R2) and removed — the same rows F2_CUTOVER_SWEEP_SQL names. Called only for a workspace copied and
+ * verified in the same run, right before its block is lifted.
+ */
+export const HWS_CUTOVER_PURGE_CORE_SQL = `
+CREATE FUNCTION core.hws_cutover_purge_core_statement_pointers(p_workspace_id uuid)
+RETURNS integer
+LANGUAGE plpgsql
+VOLATILE
+SECURITY DEFINER
+SET search_path = pg_catalog, pg_temp
+AS $fn$
+DECLARE
+  v_schema text := 'workspace_' || pg_catalog.replace(p_workspace_id::text, '-', '');
+  v_n integer;
+BEGIN
+  ${POINTER_GUARD_SQL('pointers')};
+  WITH p AS (
+    DELETE FROM core.worker_dispatch_pointer c
+     WHERE c.queue = 'statement' AND c.workspace_id = p_workspace_id AND c.source_schema = 'core'
+    RETURNING 1)
+  SELECT pg_catalog.count(*)::integer INTO v_n FROM p;
+  RETURN v_n;
+END
+$fn$`;
+
+/** Creation order (the helpers before the definers that call them); all handed to crewflow. */
 export const HWS_CUTOVER_CREWFLOW_FUNCTIONS_SQL: readonly string[] = [
   HWS_CUTOVER_SCHEMA_SQL,
   HWS_CUTOVER_SOURCE_SQL,
   HWS_CUTOVER_PROBE_SQL,
   HWS_CUTOVER_COPY_BATCH_SQL,
   HWS_CUTOVER_VERIFY_RANGE_SQL,
+  HWS_CUTOVER_STARTED_ANY_SQL,
+  HWS_CUTOVER_FENCE_FUNCTION_SQL,
 ];
+
+/** Created as rab_secure_owner. */
+export const HWS_CUTOVER_SECURE_FUNCTIONS_SQL: readonly string[] = [HWS_CUTOVER_DROP_NEW_SQL, HWS_CUTOVER_PURGE_CORE_SQL];
 
 /** Post-condition: owner | definer | config | EXECUTE grantees (sorted, '+'-joined; the owner's implicit right is not listed). */
 export const HWS_CUTOVER_STATE_SQL = `
@@ -445,14 +593,19 @@ SELECT p.oid::pg_catalog.regprocedure::text AS fn,
  WHERE p.pronamespace = 'core'::pg_catalog.regnamespace AND p.proname LIKE 'hws\\_cutover\\_%'
  ORDER BY 1`;
 
+const PINNED = 'search_path=pg_catalog, pg_temp';
+const PINNED_LOCK = `${PINNED};lock_timeout=10s`;
 /** search_path as PostgreSQL prints it when the function is outside search_path (it is pinned to pg_catalog, pg_temp). */
 export const HWS_CUTOVER_EXPECTED_STATE: Readonly<Record<string, string>> = Object.freeze({
-  'core.hws_cutover_copy_batch(uuid,text,text,integer)': 'crewflow|true|search_path=pg_catalog, pg_temp;lock_timeout=10s|',
-  'core.hws_cutover_probe(uuid)': 'crewflow|true|search_path=pg_catalog, pg_temp;lock_timeout=10s|',
-  'core.hws_cutover_reconcile_statement_pointers(uuid,boolean)': 'rab_secure_owner|true|search_path=pg_catalog, pg_temp|crewflow',
-  'core.hws_cutover_schema(uuid)': 'crewflow|false|search_path=pg_catalog, pg_temp|',
-  'core.hws_cutover_source_sql(text)': 'crewflow|false|search_path=pg_catalog, pg_temp|',
-  'core.hws_cutover_verify_range(uuid,text,text,integer)': 'crewflow|true|search_path=pg_catalog, pg_temp;lock_timeout=10s|',
+  'core.hws_cutover_copy_batch(uuid,text,text,integer)': `crewflow|true|${PINNED_LOCK}|`,
+  'core.hws_cutover_core_fence()': `crewflow|false|${PINNED}|`,
+  'core.hws_cutover_drop_new_statement_pointers(uuid,uuid[])': `rab_secure_owner|true|${PINNED}|crewflow`,
+  'core.hws_cutover_probe(uuid)': `crewflow|true|${PINNED_LOCK}|`,
+  'core.hws_cutover_purge_core_statement_pointers(uuid)': `rab_secure_owner|true|${PINNED}|crewflow`,
+  'core.hws_cutover_schema(uuid)': `crewflow|false|${PINNED}|`,
+  'core.hws_cutover_source_sql(text)': `crewflow|false|${PINNED}|`,
+  'core.hws_cutover_started_any()': `crewflow|true|${PINNED}|crewflow_app`,
+  'core.hws_cutover_verify_range(uuid,text,text,integer)': `crewflow|true|${PINNED_LOCK}|`,
 });
 
 /** Pure: the differences between the observed state rows and the expectation (empty = as reviewed). */
@@ -470,4 +623,41 @@ export function hwsCutoverStateProblems(rows: ReadonlyArray<{ fn: string; state:
   }
   for (const fn of seen.keys()) if (!(fn in HWS_CUTOVER_EXPECTED_STATE)) out.push(`${fn} is not a reviewed C3 function`);
   return out;
+}
+
+/** Post-condition of the table: owner, RLS, policies, grants, guard and fence triggers (one row of facts). */
+export const HWS_CUTOVER_TABLE_FACTS_SQL = `
+SELECT pg_catalog.pg_get_userbyid(c.relowner)::text AS owner, c.relrowsecurity AS rls, c.relforcerowsecurity AS force,
+       (SELECT pg_catalog.string_agg(p.polname::text, ',' ORDER BY p.polname) FROM pg_catalog.pg_policy p WHERE p.polrelid = c.oid) AS policies,
+       pg_catalog.has_table_privilege('crewflow_app', c.oid, 'SELECT') AS app_select,
+       (pg_catalog.has_table_privilege('crewflow_app', c.oid, 'INSERT') OR pg_catalog.has_table_privilege('crewflow_app', c.oid, 'UPDATE')
+        OR pg_catalog.has_table_privilege('crewflow_app', c.oid, 'DELETE') OR pg_catalog.has_table_privilege('crewflow_app', c.oid, 'TRUNCATE')) AS app_dml,
+       (SELECT pg_catalog.count(*)::int FROM pg_catalog.pg_trigger t WHERE t.tgrelid = c.oid AND NOT t.tgisinternal AND t.tgenabled = 'O'
+          AND t.tgfoid = 'core.owner_login_grant_parity_guard()'::pg_catalog.regprocedure) AS guards,
+       (SELECT pg_catalog.count(*)::int FROM pg_catalog.pg_trigger t JOIN pg_catalog.pg_class x ON x.oid = t.tgrelid
+         WHERE x.relnamespace = 'core'::pg_catalog.regnamespace AND t.tgname = '${HWS_CUTOVER_FENCE_TRIGGER}' AND t.tgenabled = 'O'
+           AND t.tgfoid = 'core.hws_cutover_core_fence()'::pg_catalog.regprocedure) AS fences
+  FROM pg_catalog.pg_class c WHERE c.oid = 'core.hws_cutover_state'::pg_catalog.regclass`;
+
+export interface HwsCutoverTableFacts {
+  owner: string;
+  rls: boolean;
+  force: boolean;
+  policies: string;
+  app_select: boolean;
+  app_dml: boolean;
+  guards: number;
+  fences: number;
+}
+
+export function hwsCutoverTableProblems(f: HwsCutoverTableFacts | undefined): string[] {
+  if (!f) return ['core.hws_cutover_state is missing'];
+  const p: string[] = [];
+  if (f.owner !== 'crewflow') p.push(`owner is ${f.owner}`);
+  if (!f.rls || !f.force) p.push('RLS is not ENABLE + FORCE');
+  if (f.policies !== 'hws_cutover_state_owner_read,hws_cutover_state_tenant') p.push(`policies are ${f.policies}`);
+  if (!f.app_select || f.app_dml) p.push('crewflow_app must hold SELECT and no DML');
+  if (Number(f.guards) !== 4) p.push(`${f.guards} runtime guard trigger(s), expected 4`);
+  if (Number(f.fences) !== HWS_CUTOVER_TABLES.length) p.push(`${f.fences} fence trigger(s), expected ${HWS_CUTOVER_TABLES.length}`);
+  return p;
 }
