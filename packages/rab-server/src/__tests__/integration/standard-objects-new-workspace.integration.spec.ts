@@ -140,6 +140,50 @@ describeIfDb('M1 / E2: a new workspace gets its standard objects (integration)',
     for (const r of rows) expect(r).toEqual({ u: new URL(process.env.TEST_DATABASE_URL!).username, same: true, r: 'none' });
   });
 
+  it.each([
+    ['a JS error', async () => {
+      throw new Error('boom inside the elevated section');
+    }],
+    ['an aborting SQL error', async (q: (sql: string) => Promise<unknown[]>) => {
+      await q('SELECT 1 / 0');
+    }],
+  ])('owner condition 3a: after %s inside the elevated section, the SAME transaction is back to the request role and binding, and a crewflow-only action fails', async (_label, fail) => {
+    expect(made).toBeDefined();
+    const runtime = app.get(DataSource);
+    const code = (e: unknown) => (e as { driverError?: { code?: string } })?.driverError?.code ?? (e as { code?: string })?.code;
+    let insideRole: string | undefined;
+    const spy = jest.spyOn(standardSyncModule, 'syncStandardObjects').mockImplementation(async (q) => {
+      insideRole = ((await q(`SELECT current_user::text AS u`)) as Array<{ u: string }>)[0]?.u;
+      await fail(q as (sql: string) => Promise<unknown[]>);
+      throw new Error('unreachable');
+    });
+    try {
+      await runtime.transaction(async (m) => {
+        const q = (sql: string, p?: unknown[]) => m.query(sql, p) as Promise<unknown[]>;
+        // The request context as createFor has it: organisation and a workspace bound by the tenant layer.
+        await q(`SELECT set_config('rab.organisation_id', $1, true), set_config('rab.workspace_id', $2, true)`, [made!.org, made!.id]);
+        const STATE = `SELECT current_user::text AS u, session_user::text AS su, current_setting('role') AS r, current_setting('search_path') AS sp,
+                              COALESCE(current_setting('rab.organisation_id', true), '') AS org, COALESCE(current_setting('rab.workspace_id', true), '') AS ws,
+                              pg_has_role(current_user, 'crewflow', 'USAGE') AND current_user = 'crewflow' AS is_crewflow`;
+        const before = ((await q(STATE)) as Array<Record<string, unknown>>)[0];
+        await expect(syncStandardObjectsForNewWorkspace(q, { id: randomUUID(), organisationId: made!.org })).rejects.toBeDefined();
+        expect(insideRole).toBe('crewflow');
+        const after = ((await q(STATE)) as Array<Record<string, unknown>>)[0];
+        expect(after).toEqual(before);
+        expect(after).toMatchObject({ r: 'none', is_crewflow: false });
+        expect(after!.u).toBe(after!.su);
+        // A crewflow-only action right after: changing a locked field beyond its display columns (the guard admits only
+        // crewflow / rab_secure_owner / a superuser) is refused with 42501 in this same transaction.
+        await q('SAVEPOINT probe');
+        const err = await q(`UPDATE core.field_metadata SET is_sensitive = false WHERE workspace_id = $1 AND physical_column = 'earned_pence'`, [made!.id]).catch((e: unknown) => e);
+        expect(code(err)).toBe('42501');
+        await q('ROLLBACK TO SAVEPOINT probe');
+      });
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
   it('the runtime login with no tenant context bound sees no metadata rows (FORCE RLS, fail closed)', async () => {
     const runtime = app.get(DataSource);
     const rows = await runtime.transaction(async (m) => {

@@ -174,6 +174,25 @@ const UPDATE_OPTIONS_SQL = `UPDATE core.field_metadata_option o SET label = r.la
     FROM pg_catalog.jsonb_to_recordset($1::jsonb) AS r(id uuid, label text, position double precision)
    WHERE o.id = r.id AND o.workspace_id = $2::uuid`;
 
+/**
+ * Every statement the sync can issue (owner condition 3b): fixed text, no interpolation, every value a bound parameter. A
+ * spec pins that, while the createFor section runs as crewflow, nothing but these statements is sent.
+ */
+export const STANDARD_SYNC_SQL = Object.freeze({
+  CATALOG_SQL,
+  TABLES_SQL,
+  BINDING_SQL,
+  STORED_OBJECTS_SQL,
+  STORED_FIELDS_SQL,
+  STORED_OPTIONS_SQL,
+  INSERT_OBJECTS_SQL,
+  UPDATE_OBJECTS_SQL,
+  INSERT_FIELDS_SQL,
+  UPDATE_FIELDS_SQL,
+  INSERT_OPTIONS_SQL,
+  UPDATE_OPTIONS_SQL,
+});
+
 /** Reads what the workspace holds, plans, verifies, writes. Returns the counts written (all zero on a re-run). */
 export async function syncStandardObjects(query: MetadataQuery, definitions: StandardObjectDefinitions, options: StandardSyncOptions): Promise<StandardSyncReport> {
   const { workspaceId, organisationId, schemaName } = options;
