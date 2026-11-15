@@ -15,7 +15,8 @@
  *          standard / system rows are never deleted directly; the cascades still work.
  *   MD-4   §0.3 / §0.5 at INSERT: no custom field where not allowed; CURRENCY on custom objects only; MORPH_RELATION and
  *          a custom RANGE refused; money only on a locked, sensitive, read-only built-in NUMBER; identifier patterns.
- *   MD-5   TRUNCATE refused on all five tables (also through TRUNCATE core.manager_workspace CASCADE).
+ *   MD-5   TRUNCATE refused to the request path on all five tables (also through TRUNCATE core.manager_workspace
+ *          CASCADE); the superuser (test teardowns) may truncate.
  *   #165   security review: identity split (the request path cannot loosen built-in / locked metadata, options or index
  *          fields; SET LOCAL ROLE crewflow can), immutable index definitions, fail-closed parent lookups (L1), FOR SHARE
  *          (L2), payroll / attendance pinned to system (M1), core-reference allowlist (I1), no bidi / zero-width labels (I3).
@@ -682,7 +683,7 @@ describeIfMetadata('metadata engine E1: the five metadata tables, FORCE RLS, the
   });
 
   // ------------------------------------------------------------------------------------------------------------ MD-5
-  it('MD-5 TRUNCATE is refused on every metadata table, even through the owner membership (42501)', async () => {
+  it('MD-5 TRUNCATE is refused to the request path on every metadata table, even through the owner membership (42501)', async () => {
     await asOwner(async (c) => {
       for (const t of METADATA_TABLES) {
         const r = await rolledBack(c, () => attempt(c, `TRUNCATE core.${t} CASCADE`));
@@ -692,10 +693,28 @@ describeIfMetadata('metadata engine E1: the five metadata tables, FORCE RLS, the
     expect((await countsOf(B1.workspace)).object_metadata).toBe(4);
   });
 
-  it('review #165: TRUNCATE core.manager_workspace CASCADE (rolled back) is refused, and no metadata row is lost', async () => {
+  it('review #165: TRUNCATE core.manager_workspace CASCADE by the request path (rolled back) is refused, and no metadata row is lost', async () => {
     const before = await countsOf(B1.workspace);
-    const r = await asOwner((c) => rolledBack(c, () => attempt(c, 'TRUNCATE core.manager_workspace CASCADE')));
-    expect(r.code).not.toBeNull();
+    const r = await asOwner((c) =>
+      rolledBack(c, async () => {
+        expect((await c.query<{ u: string }>('SELECT current_user::text AS u')).rows[0]!.u).toBe('crewflow_owner');
+        return attempt(c, 'TRUNCATE core.manager_workspace CASCADE');
+      }),
+    );
+    expect(r.code).toBe('42501');
+    expect(await countsOf(B1.workspace)).toEqual(before);
+  });
+
+  it('review #165: the superuser (test teardowns) may TRUNCATE CASCADE through the metadata tables (rolled back)', async () => {
+    const before = await countsOf(B1.workspace);
+    const r = await asAdmin((c) =>
+      rolledBack(c, async () => {
+        const out = await attempt(c, 'TRUNCATE core.manager_workspace CASCADE');
+        const left = (await c.query<{ n: number }>('SELECT count(*)::int AS n FROM core.object_metadata')).rows[0]!.n;
+        return { ...out, left };
+      }),
+    );
+    expect(r).toMatchObject({ code: null, left: 0 });
     expect(await countsOf(B1.workspace)).toEqual(before);
   });
 

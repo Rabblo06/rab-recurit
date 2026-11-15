@@ -93,6 +93,8 @@ describe('metadata tables SQL (MetadataEngineTables1786721550000)', () => {
       expect(g).toContain(`USING ERRCODE = '23503', CONSTRAINT = '${c}'`);
     }
     expect(g).toContain("RAISE EXCEPTION 'metadata_guard: unexpected table'");
+    // TRUNCATE follows the identity rule: refused for the request path only (test teardowns truncate as the superuser).
+    expect(g).toContain("IF TG_OP = 'TRUNCATE' THEN\n    IF NOT v_privileged THEN");
     for (const t of METADATA_TABLES) expect(METADATA_TABLES_UP_SQL.some((x) => x.startsWith(`CREATE TRIGGER ${t}_guard BEFORE `))).toBe(true);
     const objects = createOf('object_metadata');
     expect(objects).toContain(`physical_table NOT IN ('attendance', 'attendance_correction', 'payroll_record', 'payroll_run', 'payroll_run_line', 'payslip', 'payslip_document')`);
