@@ -5,6 +5,7 @@ import { randomUUID } from 'node:crypto';
 import { DataSource, EntityManager } from 'typeorm';
 
 import { AppModule } from '@rab/server/app.module';
+import { BusinessTablesError } from '@rab/server/engine/core-modules/tenant/business-tables';
 import { coreDataSourceOptions } from '@rab/server/database/typeorm/core/core.datasource';
 import { EmailOutboxService } from '@rab/server/engine/core-modules/email/email-outbox.service';
 import { EnvironmentService } from '@rab/server/engine/core-modules/environment/environment.service';
@@ -448,10 +449,12 @@ describeIfDb('D-Q4a characterisation: separate shift scans (equivalence baseline
           // shift-monitor returns one discovery object per workspace: count the rows inside it.
           return rows.flatMap((r) => ('assignments' in (r as object) ? [...(r as { assignments: unknown[] }).assignments, ...(r as { lifecycleCandidates: unknown[] }).lifecycleCandidates] : [r])).length;
         })
-        // Only a refusal to resolve the workspace tables (no workspace schema routed: undefined_table) or a privilege
-        // refusal counts as fail-closed; any other error (broken query, lost connection) fails the test (review).
+        // Only a refusal to resolve the workspace tables (no workspace schema routed: undefined_table), a privilege
+        // refusal, or (Part C2) businessTables refusing an unbound manager before any SQL is sent counts as fail-closed;
+        // any other error (broken query, lost connection) fails the test (review).
         .catch((error: { code?: string }) => {
           if (error?.code === '42P01' || error?.code === '42501') return 'refused' as const;
+          if (error instanceof BusinessTablesError && error.code === 'unbound') return 'refused' as const;
           throw error;
         });
       expect({ key, outcome: [0, 'refused'].includes(outcome) ? 'none' : outcome }).toEqual({ key, outcome: 'none' });
