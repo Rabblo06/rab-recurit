@@ -459,6 +459,11 @@ describeIfDb('account invite cleanup job (integration)', () => {
     const fx = await expiredStaffInvite();
     const q = `"${businessSchema(fx.workspaceId)}"`;
     const one = async (sql: string, params: unknown[]) => ((await adminDataSource.manager.query(sql, params)) as Array<{ id: string }>)[0]!.id;
+    // The pre-cutover core copy of user_note has no workspace_id column (HWS off: the rows live there; core keeps its foreign keys).
+    const onCore = businessSchema(fx.workspaceId) === 'core';
+    const noteWs = onCore ? '' : 'workspace_id, ';
+    const noteWsArg = onCore ? '' : '$4, ';
+    const noteWsParam = onCore ? [] : [fx.workspaceId];
     // Another user of the same organisation, with everything the clean-up could reach if it were not scoped to the invitee.
     const other = await one(
       `INSERT INTO core."user" (organisation_id, email, first_name, last_name, status) VALUES ($1, $2, 'Other', 'Staff', 'active') RETURNING id`,
@@ -469,12 +474,12 @@ describeIfDb('account invite cleanup job (integration)', () => {
       [fx.organisationId, fx.workspaceId, other, `OTHER-${randomUUID().slice(0, 8)}`, other],
     );
     const noteAboutOther = await one(
-      `INSERT INTO ${q}.user_note (organisation_id, workspace_id, subject_user_id, author_user_id, body) VALUES ($1, $2, $3, $4, 'about other') RETURNING id`,
-      [fx.organisationId, fx.workspaceId, other, other],
+      `INSERT INTO ${q}.user_note (organisation_id, ${noteWs}subject_user_id, author_user_id, body) VALUES ($1, ${noteWsArg}$2, $3, 'about other') RETURNING id`,
+      [fx.organisationId, other, other, ...noteWsParam],
     );
     const noteByOwner = await one(
-      `INSERT INTO ${q}.user_note (organisation_id, workspace_id, subject_user_id, author_user_id, body) VALUES ($1, $2, $3, $4, 'by owner') RETURNING id`,
-      [fx.organisationId, fx.workspaceId, other, fx.ownerUserId],
+      `INSERT INTO ${q}.user_note (organisation_id, ${noteWs}subject_user_id, author_user_id, body) VALUES ($1, ${noteWsArg}$2, $3, 'by owner') RETURNING id`,
+      [fx.organisationId, other, fx.ownerUserId, ...noteWsParam],
     );
     const invitee = fx.userId;
     const inviteeProfiles = await adminDataSource.manager.query(`SELECT id FROM ${q}.staff_profile WHERE user_id = $1`, [invitee]);
