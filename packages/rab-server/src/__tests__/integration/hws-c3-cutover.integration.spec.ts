@@ -121,7 +121,7 @@ describeIfDb('C3 HWS cutover copy path (option A′)', () => {
       );
       await admin.query(
         `INSERT INTO core.attendance_correction (organisation_id, workspace_id, attendance_id, field, old_value, new_value, reason, corrected_by)
-         VALUES ($1, $2, $3, 'clock_out_at', $4, $5, 'C3 seed correction', $6)`,
+         VALUES ($1, $2, $3, 'clockOutAt', $4, $5, 'C3 seed correction', $6)`,
         [org, id, att.id, at(7), at(8), owner],
       );
       const rec = await one(
