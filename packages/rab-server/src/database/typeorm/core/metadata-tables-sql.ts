@@ -36,6 +36,8 @@
  *   - Crewflow-internal field type RANGE (tstzrange, M0-STANDARD-OBJECTS S8), built-in system fields only; MORPH_RELATION is
  *     in the vocabulary (Twenty's 25) but refused (out of scope, M0-BACKEND §0.1);
  *   - no applicationId / isRemote / morph / standardOverrides columns; no metadata version here (E5, agent M1-cache);
+ *   - TRUNCATE (which ignores RLS) follows the same identity rule: refused for the request path, allowed for the
+ *     privileged identities (operators, test teardowns' TRUNCATE core.organisation CASCADE as the superuser);
  *   - identity split (security review #165 M2): built-in / locked rows are written only by crewflow (SET LOCAL ROLE
  *     crewflow in the E2 sync; the M2 executor as a crewflow-owned definer), rab_secure_owner or a superuser (the M-T2
  *     allow-list, registry-guard-allowlist-sql.ts); the request path may change only their display columns;
@@ -126,9 +128,13 @@ DECLARE
   v_is_locked boolean;
   v_display text[];
 BEGIN
-  -- Metadata is never truncated: a workspace's rows leave only through the FK cascade.
+  -- TRUNCATE ignores RLS, so the request path never truncates metadata (a workspace's rows leave through the FK cascade).
+  -- The privileged identities may (operators; test teardowns that cascade from the organisation table as the superuser).
   IF TG_OP = 'TRUNCATE' THEN
-    RAISE EXCEPTION 'metadata tables are never truncated' USING ERRCODE = '42501';
+    IF NOT v_privileged THEN
+      RAISE EXCEPTION 'metadata tables are never truncated by the request path' USING ERRCODE = '42501';
+    END IF;
+    RETURN NULL;
   END IF;
 
   -- One branch per table: PL/pgSQL resolves every NEW / OLD field an expression names, whatever the other operands of
@@ -453,6 +459,7 @@ export const METADATA_TABLES_UP_SQL: readonly string[] = [
   CONSTRAINT field_metadata_settings_ck CHECK (
     pg_catalog.jsonb_typeof(settings) = 'object' AND pg_catalog.pg_column_size(settings) <= ${SETTINGS_MAX_BYTES}),
   CONSTRAINT field_metadata_builtin_locked_ck CHECK (is_custom OR is_locked),
+  CONSTRAINT field_metadata_custom_no_universal_identifier_ck CHECK (NOT is_custom OR universal_identifier IS NULL),
   CONSTRAINT field_metadata_money_ck CHECK (
     NOT is_money OR (type = 'NUMBER' AND NOT is_custom AND is_locked AND is_sensitive AND is_ui_read_only)),
   CONSTRAINT field_metadata_export_optin_ck CHECK (NOT is_exportable_when_sensitive OR is_sensitive),
