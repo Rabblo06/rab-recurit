@@ -62,6 +62,13 @@ export interface ShiftReportStaffRow {
    * as a manager correction from nothing (`attendance_correction` clockInAt with an empty old value).
    */
   manuallyEntered: boolean;
+  /**
+   * The current clock-in is earlier than the staff member's own start minus CLOCK_IN_EARLY_MINUTES and a manager
+   * explicitly confirmed exactly that time (owner decision 2026-11-15). Derived, no column: an `attendance.corrected` /
+   * `attendance.manager_recorded` audit row with `unusualClockInConfirmed` whose `confirmedClockInAt` equals the stored
+   * clock-in. A later change of the clock-in, or of the scheduled start, clears it.
+   */
+  unusualClockInConfirmed: boolean;
   /** Optimistic-concurrency token for "Record attendance" (`expectedVersion`); null when no attendance exists. */
   attendanceVersion: string | null;
   /**
@@ -261,6 +268,9 @@ export class ShiftReportService {
       sa.break_minutes AS "assignmentBreakMinutes", a.break_minutes AS "breakMinutes", a.worked_minutes AS "workedMinutes", a.earned_pence AS "earnedPence", a.location_verified AS "locationVerified", a.clock_out_method AS "clockOutMethod",
       EXISTS (SELECT 1 FROM ${t.attendance_correction} ac WHERE ac.attendance_id=a.id) AS corrected,
       EXISTS (SELECT 1 FROM ${t.attendance_correction} ac WHERE ac.attendance_id=a.id AND ac.field='clockInAt' AND ac.old_value='') AS "manuallyEntered",
+      EXISTS (SELECT 1 FROM core.audit_log al WHERE al.organisation_id=s.organisation_id AND al.entity_type='attendance' AND al.entity_id=a.id
+        AND al.action IN ('attendance.corrected','attendance.manager_recorded') AND al.metadata->>'unusualClockInConfirmed'='true'
+        AND (al.metadata->>'confirmedClockInAt')::timestamptz = a.clock_in_at) AS "unusualClockInConfirmed",
       CASE WHEN a.id IS NULL THEN NULL ELSE ${ATTENDANCE_VERSION_SQL('a')} END AS "attendanceVersion",
       EXISTS (SELECT 1 FROM ${t.shift_staff_review} rv WHERE rv.shift_id=sa.shift_id AND rv.staff_profile_id=sa.staff_profile_id) AS "performanceReviewed",
       sa.attendance_reviewed_at AS "attendanceReviewedAt",
@@ -279,6 +289,9 @@ export class ShiftReportService {
       earnedPence: r.earnedPence == null ? null : assertSafePence(Number(r.earnedPence), 'attendance.earned_pence'), locationVerified: !!r.locationVerified, performanceReviewed: !!r.performanceReviewed,
       attendanceReviewed: !!r.attendanceReviewedAt, attendanceReviewedAt: r.attendanceReviewedAt ? new Date(r.attendanceReviewedAt).toISOString() : null,
       manuallyEntered: !!r.manuallyEntered, attendanceVersion: r.attendanceVersion ?? null,
+      // Still unusual against the seat's CURRENT start (a moved shift can make a confirmed time ordinary again).
+      unusualClockInConfirmed: !!r.unusualClockInConfirmed && !!r.clockInAt &&
+        new Date(r.clockInAt).getTime() < new Date(r.scheduledStart).getTime() - this.env.get('CLOCK_IN_EARLY_MINUTES') * 60_000,
       noShowConfirmed: r.assignmentStatus === 'no_show' && !!r.attendanceReviewedAt,
       noShowConfirmableAt: new Date(new Date(r.scheduledStart).getTime() + NO_SHOW_GRACE_MINUTES * 60_000).toISOString(),
       checkInRequired: !!r.checkInRequired, checkedInAt: r.checkedInAt ? new Date(r.checkedInAt).toISOString() : null,

@@ -1937,6 +1937,7 @@ describeIfDb('venue manager scoping (integration)', () => {
         expect(after.row.clock_in_at.toISOString()).toBe(start.toISOString());
         expect(after.audits).toHaveLength(1);
         expect(after.audits[0].metadata).not.toHaveProperty('unusualClockInConfirmed');
+        expect((await reportOf(s.vmToken, s.shiftId)).staff[0].unusualClockInConfirmed).toBe(false);
       });
 
       it('a clock-in exactly at the earliest allowed time (start − 15 min) is saved with no confirmation', async () => {
@@ -2026,6 +2027,36 @@ describeIfDb('venue manager scoping (integration)', () => {
         const again = await stateOf(s.shiftId, s.attendanceId!);
         expect(again.corrections).toHaveLength(1);
         expect(again.audits).toHaveLength(1);
+
+        // The report row the reviewer and finaliser see shows it while that clock-in stands…
+        expect(after.audits[0].metadata).toMatchObject({ confirmedClockInAt: entered });
+        expect((await reportOf(s.vmToken, s.shiftId)).staff[0].unusualClockInConfirmed).toBe(true);
+        // …and a later ordinary clock-in correction clears it.
+        expect((await correct(s.vmToken, s.attendanceId!, { field: 'clockInAt', newValue: start.toISOString(), reason })).status).toBe(201);
+        expect((await reportOf(s.vmToken, s.shiftId)).staff[0].unusualClockInConfirmed).toBe(false);
+      });
+
+      it('12 h floor: start − 12 h needs (and accepts) the confirmation; one minute earlier is refused even with it (422), nothing written', async () => {
+        const s = await recordedSeat();
+        const start = await seatStartOf(s.shiftId);
+        const floor = new Date(start.getTime() - 12 * HOUR).toISOString();
+        const before = await stateOf(s.shiftId, s.attendanceId!);
+        const beyond = await correct(s.vmToken, s.attendanceId!, {
+          field: 'clockInAt', newValue: new Date(start.getTime() - 12 * HOUR - MIN).toISOString(), reason, confirmUnusualClockIn: true,
+        });
+        expect(beyond.status).toBe(422);
+        expect(beyond.body).toMatchObject({ code: 'CLOCK_IN_TOO_EARLY_ABSOLUTE', earliestPossible: floor });
+        expect(beyond.body.message).toBe('The clock-in time cannot be more than 12 hours before the scheduled start.');
+        const untouched = await stateOf(s.shiftId, s.attendanceId!);
+        expect(untouched.row).toEqual(before.row);
+        expect(untouched.corrections).toHaveLength(0);
+        expect(untouched.audits).toHaveLength(0);
+
+        const atFloor = { field: 'clockInAt', newValue: floor, reason };
+        expect((await correct(s.vmToken, s.attendanceId!, atFloor)).body.code).toBe('CLOCK_IN_CONFIRMATION_REQUIRED');
+        expect((await correct(s.vmToken, s.attendanceId!, { ...atFloor, confirmUnusualClockIn: true })).status).toBe(201);
+        expect((await stateOf(s.shiftId, s.attendanceId!)).row.clock_in_at.toISOString()).toBe(floor);
+        expect((await reportOf(s.vmToken, s.shiftId)).staff[0].unusualClockInConfirmed).toBe(true);
       });
 
       it('the future-time and clock-out rules still apply, even with the confirmation', async () => {

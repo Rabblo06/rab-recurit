@@ -1,5 +1,5 @@
 import { Type } from 'class-transformer';
-import { IsIn, IsInt, IsISO8601, IsOptional, IsString, Length, Matches, Max, MaxLength, Min } from 'class-validator';
+import { IsBoolean, IsIn, IsInt, IsISO8601, IsOptional, IsString, Length, Matches, Max, MaxLength, Min } from 'class-validator';
 
 /** An instant, never a wall-clock time: the offset (or Z) is mandatory so the server never guesses a timezone. */
 const WITH_OFFSET = /(Z|[+-]\d{2}:\d{2})$/;
@@ -55,6 +55,16 @@ export class RecordAttendanceDto {
   @IsString()
   @MaxLength(64)
   expectedVersion?: string | null;
+
+  /**
+   * Owner decision 2026-11-15, the same rule as `CorrectAttendanceDto.confirmUnusualClockIn`: an entered clock-in earlier
+   * than the staff member's own scheduled start minus CLOCK_IN_EARLY_MINUTES is refused with 409
+   * `CLOCK_IN_CONFIRMATION_REQUIRED` unless this is exactly `true` (sent only after Confirm on the warning). Below
+   * CLOCK_IN_CONFIRM_FLOOR_HOURS it is refused regardless (422 `CLOCK_IN_TOO_EARLY_ABSOLUTE`).
+   */
+  @IsOptional()
+  @IsBoolean()
+  confirmUnusualClockIn?: boolean;
 }
 
 /** Reopening a confirmed no-show is a deliberate, audited act: the reason is required. */

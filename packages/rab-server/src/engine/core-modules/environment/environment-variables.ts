@@ -1769,6 +1769,19 @@ export class EnvironmentVariables {
   CLOCK_IN_EARLY_MINUTES: number = 15;
 
   /**
+   * Hard floor for a manager-entered clock-in (owner decision 2026-11-15): `POST /attendance/:id/correct` and
+   * `record-attendance` always refuse (422 CLOCK_IN_TOO_EARLY_ABSOLUTE) a clock-in earlier than the staff member's own
+   * scheduled start minus this many hours, even with `confirmUnusualClockIn`. Between this floor and the normal
+   * CLOCK_IN_EARLY_MINUTES allowance a clock-in needs that explicit confirmation. Whole hours, 1-48.
+   */
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  @Max(48)
+  CLOCK_IN_CONFIRM_FLOOR_HOURS: number = 12;
+
+  /**
    * The one post-shift grace for attendance (owner decision 2026-11-14), always measured from the staff member's OWN
    * scheduled end (`effectiveAssignmentTime`): the Shift QR is accepted (`AttendanceQrService.validUntil`), Check In /
    * Clock In / Clock Out are allowed (`AttendanceService.assertClockWindow`), and only AFTER it does the attendance
