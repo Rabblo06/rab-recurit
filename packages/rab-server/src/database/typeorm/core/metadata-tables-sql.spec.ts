@@ -2,9 +2,11 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 import { CREWFLOW_INTERNAL_FIELD_METADATA_TYPES, FIELD_METADATA_TYPES } from '@rab/shared';
+import { QueryRunner } from 'typeorm';
 
 import {
   expectedTableState,
+  INVISIBLE_CHARACTERS_CLASS,
   METADATA_DOWN_UNFORCE_SQL,
   METADATA_GUARD_FUNCTION_SQL,
   METADATA_OWNERSHIP_SQL,
@@ -17,6 +19,7 @@ import {
   TENANT_PREDICATE,
 } from './metadata-tables-sql';
 import { migrationSourceViolations } from './migration-source-rules';
+import { MetadataEngineTables1786721550000 } from './migrations/1786721550000-MetadataEngineTables';
 
 /**
  * Static checks of MetadataEngineTables1786721550000's SQL (metadata engine M1 / E1). The database behaviour is proven by
@@ -77,6 +80,38 @@ describe('metadata tables SQL (MetadataEngineTables1786721550000)', () => {
     expect(METADATA_GUARD_FUNCTION_SQL).not.toMatch(/RAISE EXCEPTION '[^']*%/);
   });
 
+  it('review #165: identity split, fail-closed parent lookups FOR SHARE, payroll pinned to system, core-reference allowlist, invisible characters', () => {
+    const g = METADATA_GUARD_FUNCTION_SQL;
+    expect(g).toContain("v_privileged boolean := current_user IN ('crewflow'::name, 'rab_secure_owner'::name)");
+    expect(g.match(/AND NOT v_privileged THEN/g)?.length).toBeGreaterThanOrEqual(4);
+    expect(g.match(/FOR SHARE;/g)).toHaveLength(6);
+    expect(g).toContain('(NOT NEW.is_custom OR NEW.is_locked OR NEW.is_system) AND NOT v_privileged'); // N2
+    expect(g).toContain("USING ERRCODE = '23503', CONSTRAINT = 'index_metadata_object_fkey'"); // N1
+    expect(g).toContain('NEW.is_active IS DISTINCT FROM OLD.is_active AND NOT v_privileged'); // N1
+    expect(METADATA_TABLES_UP_SQL).toContain('CREATE TRIGGER index_metadata_guard BEFORE INSERT OR UPDATE OR DELETE ON core.index_metadata FOR EACH ROW EXECUTE FUNCTION core.metadata_guard()');
+    for (const c of ['field_metadata_object_fkey', 'field_metadata_option_field_fkey', 'index_field_metadata_field_fkey']) {
+      expect(g).toContain(`USING ERRCODE = '23503', CONSTRAINT = '${c}'`);
+    }
+    expect(g).toContain("RAISE EXCEPTION 'metadata_guard: unexpected table'");
+    for (const t of METADATA_TABLES) expect(METADATA_TABLES_UP_SQL.some((x) => x.startsWith(`CREATE TRIGGER ${t}_guard BEFORE `))).toBe(true);
+    const objects = createOf('object_metadata');
+    expect(objects).toContain(`physical_table NOT IN ('attendance', 'attendance_correction', 'payroll_record', 'payroll_run', 'payroll_run_line', 'payslip', 'payslip_document')`);
+    expect(objects).toContain("OR (is_system AND NOT allows_custom_fields))");
+    expect(objects).toContain("physical_table IN ('user', 'manager_profile', 'stored_file', 'payroll_calendar_period')");
+    for (const t of METADATA_TABLES.filter((x) => x !== 'index_metadata' && x !== 'index_field_metadata')) {
+      expect(createOf(t)).toContain(`!~ '${INVISIBLE_CHARACTERS_CLASS}'`);
+    }
+  });
+
+  it('L3: up() and down() refuse to run outside a transaction, before any statement', async () => {
+    const query = jest.fn();
+    const migration = new MetadataEngineTables1786721550000();
+    const runner = { isTransactionActive: false, query } as unknown as QueryRunner;
+    await expect(migration.up(runner)).rejects.toThrow(/outside a transaction/);
+    await expect(migration.down(runner)).rejects.toThrow(/outside a transaction/);
+    expect(query).not.toHaveBeenCalled();
+  });
+
   it('the migration and its SQL module pass the post-Phase-0b source rules', () => {
     const migration = readFileSync(join(__dirname, 'migrations', '1786721550000-MetadataEngineTables.ts'), 'utf8');
     const sqlModule = readFileSync(join(__dirname, 'metadata-tables-sql.ts'), 'utf8');
@@ -97,6 +132,6 @@ describe('metadata tables SQL (MetadataEngineTables1786721550000)', () => {
     ]);
     expect(metadataStateProblems(rows.slice(1), undefined)).toEqual(['core.object_metadata: missing','expected 5 metadata tables, found 4', 'core.metadata_guard(): missing']);
     expect(expectedTableState('object_metadata').triggers).toBe('object_metadata_guard:O:core.metadata_guard();object_metadata_truncate_guard:O:core.metadata_guard()');
-    expect(expectedTableState('index_metadata').triggers).toBe('index_metadata_truncate_guard:O:core.metadata_guard()');
+    expect(expectedTableState('index_metadata').triggers).toBe('index_metadata_guard:O:core.metadata_guard();index_metadata_truncate_guard:O:core.metadata_guard()');
   });
 });
