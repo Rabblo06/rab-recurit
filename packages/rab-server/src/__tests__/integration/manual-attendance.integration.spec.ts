@@ -631,6 +631,20 @@ describeIfDb('manual attendance recording and confirmed no-show (integration)', 
       expect(breakOnly.body.staff[0]).toMatchObject({ clockInAt: early, breakMinutes: 45, unusualClockInConfirmed: true });
     });
 
+    it('the confirmation never widens scope: another workspace and another organisation get 404 with it, nothing written', async () => {
+      const w = endedAgo(2 * HOUR);
+      const s = await seedSeat({ ...w, assignment: 'no_show' });
+      const body = { clockInAt: at(w.startsAt, -2 * HOUR), clockOutAt: at(w.endsAt, 0), reasonCode: 'forgot_clock_in', confirmUnusualClockIn: true };
+      const otherWs = await seedOrg(s.organisation);
+      const otherOrg = await seedOrg();
+      for (const token of [await login(otherWs.venueManager.email, 'venue_manager_app'), await login(otherOrg.venueManager.email, 'venue_manager_app')]) {
+        expect((await record(token, s.shiftId, s.staff, body)).status).toBe(404);
+      }
+      expect(await attendanceRows(s.shiftId)).toHaveLength(0);
+      expect(await auditCount(s.organisation.id, 'attendance.manager_recorded')).toBe(0);
+      expect((await assignmentOf(s.shiftId)).status).toBe('no_show');
+    });
+
     it('12 h floor: exactly start − 12 h is saved with the confirmation; one minute earlier is refused even with it (422), nothing written', async () => {
       const w = endedAgo(2 * HOUR);
       const s = await seedSeat({ ...w, assignment: 'no_show' });

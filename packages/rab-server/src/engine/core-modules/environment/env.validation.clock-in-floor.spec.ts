@@ -20,4 +20,12 @@ describe('CLOCK_IN_CONFIRM_FLOOR_HOURS', () => {
   it.each(['0', '49', '-1', '1.5', 'abc'])('refuses CLOCK_IN_CONFIRM_FLOOR_HOURS=%p', (value) => {
     expect(() => validate({ ...base, CLOCK_IN_CONFIRM_FLOOR_HOURS: value })).toThrow(/CLOCK_IN_CONFIRM_FLOOR_HOURS/);
   });
+
+  it('refuses a floor at or inside the normal clock-in allowance; one minute beyond it is fine', () => {
+    expect(() => validate({ ...base, CLOCK_IN_CONFIRM_FLOOR_HOURS: '1', CLOCK_IN_EARLY_MINUTES: '60' })).toThrow(
+      /CLOCK_IN_CONFIRM_FLOOR_HOURS x 60 must be greater than CLOCK_IN_EARLY_MINUTES/,
+    );
+    expect(() => validate({ ...base, CLOCK_IN_CONFIRM_FLOOR_HOURS: '2', CLOCK_IN_EARLY_MINUTES: '180' })).toThrow(/CLOCK_IN_CONFIRM_FLOOR_HOURS/);
+    expect(validate({ ...base, CLOCK_IN_CONFIRM_FLOOR_HOURS: '1', CLOCK_IN_EARLY_MINUTES: '59' }).CLOCK_IN_EARLY_MINUTES).toBe(59);
+  });
 });

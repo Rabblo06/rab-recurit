@@ -2059,6 +2059,31 @@ describeIfDb('venue manager scoping (integration)', () => {
         expect((await reportOf(s.vmToken, s.shiftId)).staff[0].unusualClockInConfirmed).toBe(true);
       });
 
+      it('re-sending the stored clock-in stays the idempotent 201 even after a schedule change put it beyond the floor; a new time there is 422', async () => {
+        const s = await recordedSeat();
+        const start = await seatStartOf(s.shiftId);
+        const stored = new Date(start.getTime() - 12 * HOUR).toISOString();
+        expect((await correct(s.vmToken, s.attendanceId!, { field: 'clockInAt', newValue: stored, reason, confirmUnusualClockIn: true })).status).toBe(201);
+        // The seat (and shift) start moves an hour later: the stored clock-in is now 13 h before it, beyond the floor.
+        const t = await tablesOf(s.shiftId);
+        await adminDataSource.query(`UPDATE ${t.shift} SET starts_at = starts_at + interval '1 hour' WHERE id = $1`, [s.shiftId]);
+        await adminDataSource.query(`UPDATE ${t.seat} SET period = tstzrange(lower(period) + interval '1 hour', upper(period), '[)') WHERE shift_id = $1`, [s.shiftId]);
+        const before = await stateOf(s.shiftId, s.attendanceId!);
+        for (const extra of [{}, { confirmUnusualClockIn: true }]) {
+          expect((await correct(s.vmToken, s.attendanceId!, { field: 'clockInAt', newValue: stored, reason, ...extra })).status).toBe(201);
+        }
+        const after = await stateOf(s.shiftId, s.attendanceId!);
+        expect(after.row).toEqual(before.row);
+        expect(after.corrections).toHaveLength(1);
+        expect(after.audits).toHaveLength(1);
+        // A different (new) time beyond the moved floor is still refused, confirmed or not.
+        const beyond = await correct(s.vmToken, s.attendanceId!, {
+          field: 'clockInAt', newValue: new Date(start.getTime() - 11 * HOUR - MIN).toISOString(), reason, confirmUnusualClockIn: true,
+        });
+        expect(beyond.status).toBe(422);
+        expect(beyond.body.code).toBe('CLOCK_IN_TOO_EARLY_ABSOLUTE');
+      });
+
       it('the future-time and clock-out rules still apply, even with the confirmation', async () => {
         const s = await recordedSeat();
         const before = await stateOf(s.shiftId, s.attendanceId!);

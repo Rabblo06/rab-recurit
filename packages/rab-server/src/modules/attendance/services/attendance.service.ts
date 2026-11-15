@@ -1374,7 +1374,6 @@ export class AttendanceService {
       const now = await this.dbNow(manager);
 
       let oldValue: string;
-      let unusualEarliest: Date | null = null;
       let clockInAt = attendance.clockInAt;
       let clockOutAt = attendance.clockOutAt ?? null;
       let breakMinutes = attendance.breakMinutes ?? null;
@@ -1384,7 +1383,6 @@ export class AttendanceService {
         const parsed = new Date(dto.newValue);
         if (Number.isNaN(parsed.getTime())) throw new BadRequestException('newValue must be a valid ISO-8601 timestamp for clockInAt.');
         if (parsed.getTime() > now.getTime()) throw new BadRequestException('A clock-in time cannot be in the future.');
-        unusualEarliest = this.checkEnteredClockIn(effectiveAssignmentTime(assignment, shift), parsed); // 422 below the floor
         clockInAt = parsed;
       } else if (dto.field === 'clockOutAt') {
         oldValue = attendance.clockOutAt?.toISOString() ?? '';
@@ -1424,6 +1422,11 @@ export class AttendanceService {
         (dto.field === 'clockOutAt' && !!attendance.clockOutAt && clockOutAt!.getTime() === attendance.clockOutAt.getTime()) ||
         (dto.field === 'breakMinutes' && attendance.breakMinutes != null && breakMinutes === attendance.breakMinutes);
       if (unchanged) return this.fieldPolicy.omit(await this.fieldPolicy.resolveTx(manager, ctx, 'attendance'), await this.loadSummary(manager, attendance.id));
+
+      // A NEW clock-in (an identical resubmission returned above, so re-sending an already-stored value stays the
+      // idempotent no-op even if a later schedule change put it beyond the floor): 422 below the hard floor, else the
+      // allowance it is earlier than (or null), confirmed below after the state rules.
+      const unusualEarliest = dto.field === 'clockInAt' ? this.checkEnteredClockIn(effectiveAssignmentTime(assignment, shift), clockInAt) : null;
 
       const { status, recovered } = this.resolveCorrectionStatus(attendance, assignment, shift, now, clockOutAt);
 
