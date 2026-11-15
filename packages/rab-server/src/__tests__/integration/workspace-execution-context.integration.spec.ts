@@ -21,6 +21,7 @@ import { DataSource } from 'typeorm';
 import { LATEST_WORKSPACE_MODULE_VERSION } from '../../database/typeorm/workspace-schema/workspace-schema-modules';
 
 import { AuthContext } from '../../engine/core-modules/tenant/auth-context.interface';
+import { SEARCH_PATH_TRAP_VAR } from '../../engine/core-modules/tenant/business-tables';
 import { WorkspaceMetadataCacheService } from '../../engine/core-modules/entity-cache/workspace-metadata-cache.service';
 import { SchemaResolverService, WorkspaceRoutingError, workspaceSchemaName } from '../../engine/core-modules/tenant/schema-resolver.service';
 import { WorkspaceExecutionContext } from '../../engine/core-modules/tenant/workspace-execution-context';
@@ -97,6 +98,18 @@ describe('Workspace registry, SchemaResolver and WorkspaceExecutionContext (inte
   let owner: DataSource;
   let app: DataSource;
   let execCtx: WorkspaceExecutionContext;
+
+  // C2-7: this suite proves the search_path ROUTING itself (an unqualified `probe` table that is not a workspace business table,
+  // so businessTables() cannot name it), so it runs with the test-only search_path trap OFF; the trap case below turns it on
+  // explicitly. `--runInBand` suites share one process.env: the value found is put back after every test, never dropped.
+  const trapFound = process.env[SEARCH_PATH_TRAP_VAR];
+  beforeEach(() => {
+    delete process.env[SEARCH_PATH_TRAP_VAR];
+  });
+  afterEach(() => {
+    if (trapFound === undefined) delete process.env[SEARCH_PATH_TRAP_VAR];
+    else process.env[SEARCH_PATH_TRAP_VAR] = trapFound;
+  });
 
   beforeAll(async () => {
     owner = new DataSource({ type: 'postgres', url: integrationTestDatabase().adminUrl, synchronize: false, entities: [], extra: { max: 1 } });
@@ -225,6 +238,18 @@ describe('Workspace registry, SchemaResolver and WorkspaceExecutionContext (inte
   it('search_path is EXACTLY the trusted workspace schema (no core, no public)', async () => {
     const [{ search_path }] = await execCtx.run(ctxOf(ORG_A, WS_A, USER_A), (m) => m.query(`SHOW search_path`));
     expect(search_path).toBe(SCHEMA_A);
+  });
+
+  it('C2-0 trap (test-only): search_path is empty, so the unqualified probe fails 42P01 while the explicitly qualified one answers', async () => {
+    process.env[SEARCH_PATH_TRAP_VAR] = 'true';
+    const [{ schemas }] = await execCtx.run(ctxOf(ORG_A, WS_A, USER_A), (m) => m.query(`SELECT current_schemas(false)::text AS schemas`));
+    expect(schemas).toBe('{}');
+    const unqualified = await execCtx.run(ctxOf(ORG_A, WS_A, USER_A), (m) => m.query('SELECT label FROM probe')).then(
+      () => 'ACCEPTED',
+      (e: { driverError?: { code?: string }; code?: string }) => e.driverError?.code ?? e.code,
+    );
+    expect(unqualified).toBe('42P01');
+    expect(await execCtx.run(ctxOf(ORG_A, WS_A, USER_A), (m) => m.query(`SELECT label FROM ${SCHEMA_A}.probe`))).toEqual([{ label: 'A-row' }]);
   });
 
   it('an explicit cross-schema query under A context returns no B rows (RLS holds with the schema bypassed)', async () => {

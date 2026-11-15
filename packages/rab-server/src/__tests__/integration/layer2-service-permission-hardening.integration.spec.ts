@@ -18,6 +18,7 @@ import { createAdminDataSource } from './helpers/admin-datasource';
 import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
 import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-pipe';
 import { integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
+import { businessTables } from '../../engine/core-modules/tenant/business-tables';
 
 /**
  * LAYER2_HARDENING_2026-10-25 (docs/security/) — abuse cases for the layer-2 (service) permission checks added to
@@ -191,7 +192,7 @@ describeIfDb('layer-2 service permission hardening (integration)', () => {
         await expect(scheduling.publish(ctxA, draft.id)).rejects.toBeInstanceOf(ForbiddenException);
         await expect(scheduling.publish(ctxA, randomUUID())).rejects.toBeInstanceOf(ForbiddenException);
       });
-      const [row] = (await tenantContext.runInWorkspaceContext(ctxA, (m) => m.query(`SELECT status, published_at FROM shift WHERE id = $1`, [draft.id]))) as Array<{ status: string; published_at: Date | null }>;
+      const [row] = (await tenantContext.runInWorkspaceContext(ctxA, (m) => m.query(`SELECT status, published_at FROM ${businessTables(m).shift} WHERE id = $1`, [draft.id]))) as Array<{ status: string; published_at: Date | null }>;
       expect(row).toEqual({ status: ShiftStatus.DRAFT, published_at: null });
       expect(await auditRows('shift.published', { entityId: draft.id })).toHaveLength(0);
     });

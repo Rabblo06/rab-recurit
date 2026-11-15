@@ -36,6 +36,7 @@ import { runShiftMonitorCycle } from '../../queues/rab-shifts/shift-monitor.job'
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { createTestIdentityFactory, TestIdentity, TestIdentityFactory } from './helpers/test-identities';
 import { integrationTestDatabaseReady } from '@rab/server/database/typeorm/core/integration-test-database-gate';
+import { businessTables } from '@rab/server/engine/core-modules/tenant/business-tables';
 
 /**
  * D-Q4a test preparation (docs/PHASE_DQ4_DQ5_PLAN_2026-11-03.md §D-Q4a). CHARACTERISATION of today's SEPARATE shift
@@ -139,8 +140,8 @@ describeIfDb('D-Q4a characterisation: separate shift scans (equivalence baseline
 
   async function statusOf(s: Subject): Promise<{ assignment: string; attendance: string | null }> {
     return withOrg(s.org, async (m) => ({
-      assignment: (await m.query(`SELECT status FROM shift_assignment WHERE id = $1`, [s.assignmentId]))[0].status,
-      attendance: s.attendanceId ? (await m.query(`SELECT status FROM attendance WHERE id = $1`, [s.attendanceId]))[0].status : null,
+      assignment: (await m.query(`SELECT status FROM ${businessTables(m).shift_assignment} WHERE id = $1`, [s.assignmentId]))[0].status,
+      attendance: s.attendanceId ? (await m.query(`SELECT status FROM ${businessTables(m).attendance} WHERE id = $1`, [s.attendanceId]))[0].status : null,
     }));
   }
 
@@ -431,7 +432,7 @@ describeIfDb('D-Q4a characterisation: separate shift scans (equivalence baseline
         spy.mockRestore();
       }
       const reportsOf = async (fx: typeof s) =>
-        (await Promise.all(Object.values(fx).map((x) => withOrg(x.org, (m) => m.query(`SELECT status FROM shift_report WHERE shift_id = $1`, [x.shiftId]))))).map((r) => r[0]?.status ?? null);
+        (await Promise.all(Object.values(fx).map((x) => withOrg(x.org, (m) => m.query(`SELECT status FROM ${businessTables(m).shift_report} WHERE shift_id = $1`, [x.shiftId]))))).map((r) => r[0]?.status ?? null);
       expect(await reportsOf(s)).toEqual(await reportsOf(separate));
     } finally {
       await direct.destroy();

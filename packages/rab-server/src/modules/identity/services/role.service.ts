@@ -8,6 +8,7 @@ import { StepUpReauthService } from '../../../engine/core-modules/auth/services/
 import { PermissionCatalogueCacheService } from '../../../engine/core-modules/entity-cache/permission-catalogue-cache.service';
 import { PermissionsService } from '../../../engine/core-modules/permissions/permissions.service';
 import { AuthContext } from '../../../engine/core-modules/tenant/auth-context.interface';
+import { businessTables } from '../../../engine/core-modules/tenant/business-tables';
 import { TenantContextService } from '../../../engine/core-modules/tenant/tenant-context.service';
 import { ROLE_ICONS, RoleDefinitionDto } from '../dto/role-definition.dto';
 import { Permission, Role, RolePermission } from '../entities';
@@ -333,13 +334,15 @@ export class RoleService {
 
   /** Relation ids used in filters must be records the actor can see in this workspace (no probing other workspaces). */
   private async assertRelationsInScopeTx(manager: EntityManager, ctx: AuthContext, relationIds: Record<string, string[]>): Promise<void> {
+    const t = businessTables(manager);
     for (const [table, ids] of Object.entries(relationIds)) {
       if (table !== 'venue' && table !== 'job_role') throw new RecordFilterError('Unsupported relation.');
+      // Part C2 (C2-7): the business rows live in the bound schema (the workspace schema with HWS on, `core` with it off);
+      // named through businessTables, never through search_path. (`core.` here read an empty core copy under HWS.)
+      const relationTable = table === 'venue' ? t.venue : t.job_role;
       const rows = await manager.query<Array<{ id: string }>>(
-        // Unqualified: the tenant transaction's search_path is the workspace schema with HWS on and `core` with it off (the
-        // business rows live there); `core.` here read an empty core copy under HWS and refused every relation filter.
-        // sql-injection-reviewed: table is checked against the literal allow-list 'venue' | 'job_role' on the line above; ids are bound.
-        `SELECT id FROM ${table} WHERE id = ANY($1::uuid[]) AND workspace_id = $2`,
+        // sql-injection-reviewed: relationTable is businessTables(manager).venue or .job_role, chosen by the literal allow-list above; ids are bound.
+        `SELECT id FROM ${relationTable} WHERE id = ANY($1::uuid[]) AND workspace_id = $2`,
         [ids, ctx.workspaceId],
       );
       if (rows.length !== ids.length) throw new RecordFilterError('One of the selected records no longer exists.');

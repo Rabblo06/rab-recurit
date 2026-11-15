@@ -14,6 +14,7 @@ import { createAdminDataSource, createCrewflowOwnerProbeDataSource } from './hel
 import { businessSchema, businessTable, hwsRuntimeOn } from './helpers/hws-fixtures';
 import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
 import { integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
+import { businessTables } from '../../engine/core-modules/tenant/business-tables';
 
 /**
  * Staff / Venue Manager RLS redesign: adversarial suite. The database answers "which rows may this caller address?"
@@ -112,10 +113,10 @@ const RUN = integrationTestDatabaseReady();
     venueB = randomUUID();
     // Venues are created through each manager's own tenant context, as the product does.
     await tenantContext.runInTenantContext(ctxOf(managerA), (m) =>
-      m.query(`INSERT INTO venue (id, organisation_id, name, workspace_id) VALUES ($1, $2, 'Venue A', $3)`, [venueA, org.id, managerA.workspaceId]),
+      m.query(`INSERT INTO ${businessTables(m).venue} (id, organisation_id, name, workspace_id) VALUES ($1, $2, 'Venue A', $3)`, [venueA, org.id, managerA.workspaceId]),
     );
     await tenantContext.runInTenantContext(ctxOf(managerB), (m) =>
-      m.query(`INSERT INTO venue (id, organisation_id, name, workspace_id) VALUES ($1, $2, 'Venue B', $3)`, [venueB, org.id, managerB.workspaceId]),
+      m.query(`INSERT INTO ${businessTables(m).venue} (id, organisation_id, name, workspace_id) VALUES ($1, $2, 'Venue B', $3)`, [venueB, org.id, managerB.workspaceId]),
     );
     vmA = await factory.createVenueManager(org, { owner: managerA, venueIds: [venueA], label: 'rls-vma' });
     vmB = await factory.createVenueManager(org, { owner: managerB, venueIds: [venueB], label: 'rls-vmb' });

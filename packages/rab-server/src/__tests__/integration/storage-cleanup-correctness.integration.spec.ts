@@ -28,6 +28,7 @@ import { Venue } from '../../modules/venue/entities/venue.entity';
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
 import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-pipe';
+import { businessTables } from '../../engine/core-modules/tenant/business-tables';
 
 /**
  * PHASE 8 — storage cleanup/reconcile race safety, against the LOCAL driver
@@ -858,7 +859,7 @@ describe('storage cleanup/reconcile correctness (LOCAL driver, no cloud infra)',
       await expect(
         tenantContext.runInTenantContext(ctx, (m) =>
           m.query(
-            `INSERT INTO shift_report (organisation_id, workspace_id, shift_id, status) VALUES ($1, $2, $3, 'pending')`,
+            `INSERT INTO ${businessTables(m).shift_report} (organisation_id, workspace_id, shift_id, status) VALUES ($1, $2, $3, 'pending')`,
             [org.id, otherWorkspaceId, shiftId],
           ),
         ),
@@ -867,7 +868,7 @@ describe('storage cleanup/reconcile correctness (LOCAL driver, no cloud infra)',
       await expect(
         tenantContext.runInTenantContext(ctx, (m) =>
           m.query(
-            `INSERT INTO shift_report (organisation_id, workspace_id, shift_id, status) VALUES ($1, $2, $3, 'pending')`,
+            `INSERT INTO ${businessTables(m).shift_report} (organisation_id, workspace_id, shift_id, status) VALUES ($1, $2, $3, 'pending')`,
             [org.id, owner.workspaceId, shiftId],
           ),
         ),
@@ -878,7 +879,7 @@ describe('storage cleanup/reconcile correctness (LOCAL driver, no cloud infra)',
       await expect(
         tenantContext.runInTenantContext(ctx, (m) =>
           m.query(
-            `INSERT INTO replacement_request (organisation_id, workspace_id, shift_id, declined_shift_assignment_id) VALUES ($1, $2, $3, $4)`,
+            `INSERT INTO ${businessTables(m).replacement_request} (organisation_id, workspace_id, shift_id, declined_shift_assignment_id) VALUES ($1, $2, $3, $4)`,
             [org.id, otherWorkspaceId, shiftId, assignmentId],
           ),
         ),
