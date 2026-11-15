@@ -85,6 +85,10 @@ const SEARCH_PATH_BINDERS = Object.freeze([
   // the operator-run owner bootstrap pins its own session to pg_catalog, pg_temp.
   'packages/rab-server/src/engine/core-modules/upgrade/workspace-command-runner.ts',
   'packages/rab-server/src/database/typeorm/scripts/owner-login/owner-bootstrap-sql.ts',
+  // Not business-table binders either: the upgrade engine's parameterised set_config of its own GUC
+  // (pg_catalog.set_config($1, $2, true) with the constant UPGRADE_SCOPE_SETTING) and its session reset of role / rab.*.
+  'packages/rab-server/src/engine/core-modules/upgrade/upgrade-migration.service.ts',
+  'packages/rab-server/src/engine/core-modules/upgrade/workspace-step-checks-sql.ts',
 ]);
 const RULES = Object.freeze(['unqualified', 'core-qualified', 'other-qualified', 'qb-string-table', 'search-path-switch', 'global-entity-access', 'business-schema-bind']);
 
@@ -110,12 +114,24 @@ function patterns(tables) {
 }
 
 const SQLISH = /\b(SELECT|INSERT|UPDATE|DELETE|WITH|FROM|JOIN|TRUNCATE|MERGE)\b/;
-// A runtime switch: set_config('search_path', …) or a statement that starts with SET [LOCAL|SESSION] search_path. Not the
-// `SET search_path = …` attribute of CREATE FUNCTION / ALTER DATABASE / ALTER ROLE (DDL that pins a function's own path).
-const SEARCH_PATH_SET_CONFIG = /set_config\(\s*'search_path'/i;
-const SEARCH_PATH_STATEMENT = /(?:^|;)\s*SET\s+(?:LOCAL\s+|SESSION\s+)?search_path\b/im;
+// A runtime switch: set_config('search_path', …) or a statement that starts with SET [LOCAL|SESSION] search_path, RESET
+// search_path, RESET ALL or DISCARD ALL. Not the `SET search_path = …` attribute of CREATE FUNCTION / ALTER DATABASE /
+// ALTER ROLE (DDL that pins a function's own path). Variants (re-check Low): a quoted function name (`"set_config"(`,
+// `pg_catalog.set_config (`), a quoted setting (`'"search_path"'`, `SET "search_path"`), and SQL comments anywhere
+// (stripped before matching, so `set_config(/* x */'search_path'` and `-- …` lines cannot hide or fake a match).
+const SET_CONFIG_CALL = 'set_config"?\\s*\\(\\s*';
+const SEARCH_PATH_SET_CONFIG = new RegExp(`${SET_CONFIG_CALL}'\\s*"?search_path"?\\s*'`, 'i');
+// Re-review LOW: set_config whose setting NAME is not a string literal (`set_config($1, …)`, `set_config(${x}, …)`,
+// `set_config(x.name, …)`) can set search_path through a parameter; outside the binders that is a switch too.
+const SET_CONFIG_DYNAMIC_NAME = new RegExp(`${SET_CONFIG_CALL}(?!')`, 'i');
+const SEARCH_PATH_STATEMENT = /(?:^|;)\s*(?:SET\s+(?:LOCAL\s+|SESSION\s+)?"?search_path"?(?![\w])|RESET\s+(?:"?search_path"?(?![\w])|ALL\b)|DISCARD\s+ALL\b)/im;
 const DDL_WITH_PATH_ATTRIBUTE = /\b(?:CREATE\s+(?:OR\s+REPLACE\s+)?(?:FUNCTION|PROCEDURE)|ALTER\s+(?:DATABASE|ROLE|USER|FUNCTION|PROCEDURE))\b/i;
-const isSearchPathSwitch = (text) => SEARCH_PATH_SET_CONFIG.test(text) || (SEARCH_PATH_STATEMENT.test(text) && !DDL_WITH_PATH_ATTRIBUTE.test(text));
+const stripSqlComments = (text) => text.replace(/\/\*[\s\S]*?\*\//g, ' ').replace(/--[^\n]*/g, ' ');
+const isSearchPathSwitch = (raw) => {
+  const text = stripSqlComments(raw);
+  return SEARCH_PATH_SET_CONFIG.test(text) || SET_CONFIG_DYNAMIC_NAME.test(text) || (SEARCH_PATH_STATEMENT.test(text) && !DDL_WITH_PATH_ATTRIBUTE.test(text));
+};
+const BUSINESS_TABLES_SPECIFIER = /(?:^|\/)business-tables(?:\.[cm]?[jt]s)?$/;
 const QB_METHODS = new Set(['from', 'into', 'update', 'delete', 'leftJoin', 'leftJoinAndSelect', 'innerJoin', 'innerJoinAndSelect',
   'leftJoinAndMapOne', 'leftJoinAndMapMany', 'innerJoinAndMapOne', 'innerJoinAndMapMany']);
 const MANAGER_METHODS = new Set(['find', 'findOne', 'findOneBy', 'findBy', 'findOneOrFail', 'findOneByOrFail', 'findAndCount', 'findAndCountBy',
@@ -259,7 +275,7 @@ function scanSource(rel, src, tables, entities) {
       }
     }
     // Review #3: the binder-only functions of business-tables.ts, outside the binders.
-    if (!schemaBinder && t.isImportDeclaration(n) && t.isStringLiteral(n.moduleSpecifier) && /(?:^|\/)business-tables(?:\.ts)?$/.test(n.moduleSpecifier.text)) {
+    if (!schemaBinder && t.isImportDeclaration(n) && t.isStringLiteral(n.moduleSpecifier) && BUSINESS_TABLES_SPECIFIER.test(n.moduleSpecifier.text)) {
       const named = n.importClause?.namedBindings;
       if (named && t.isNamedImports(named)) {
         for (const el of named.elements) {
@@ -268,9 +284,23 @@ function scanSource(rel, src, tables, entities) {
         }
       } else if (named && t.isNamespaceImport(named)) add(named, 'business-schema-bind', `import * as ${named.name.text} from business-tables (import only the module-safe names)`);
     }
+    // Re-review LOW: re-exports, and require() / import() of the module (destructuring or a computed member would hide
+    // the name): any of these outside the binders is flagged, whatever it takes.
+    if (!schemaBinder && t.isExportDeclaration(n) && n.moduleSpecifier && t.isStringLiteral(n.moduleSpecifier) && BUSINESS_TABLES_SPECIFIER.test(n.moduleSpecifier.text)) {
+      add(n, 'business-schema-bind', `export … from '${n.moduleSpecifier.text}' (re-export of business-tables outside the binders)`);
+    }
     if (!schemaBinder && t.isCallExpression(n)) {
       const callee = t.isIdentifier(n.expression) ? n.expression.text : t.isPropertyAccessExpression(n.expression) ? n.expression.name.text : null;
       if (callee && BIND_FUNCTIONS.includes(callee)) add(n, 'business-schema-bind', `${callee}(…) outside the binders`);
+      const dynamicLoad = n.expression.kind === t.SyntaxKind.ImportKeyword || (t.isIdentifier(n.expression) && n.expression.text === 'require');
+      const [spec] = n.arguments;
+      if (dynamicLoad && spec && (t.isStringLiteral(spec) || t.isNoSubstitutionTemplateLiteral(spec)) && BUSINESS_TABLES_SPECIFIER.test(spec.text)) {
+        add(n, 'business-schema-bind', `${n.expression.getText(sf)}('${spec.text}') outside the binders (use a static import of the module-safe names)`);
+      }
+    }
+    // Re-review LOW: 'search_path' passed as a query PARAMETER (set_config($1, $2, true) with ['search_path', s]).
+    if (!binder && t.isStringLiteral(n) && n.text.toLowerCase() === 'search_path' && t.isArrayLiteralExpression(n.parent)) {
+      add(n, 'search-path-switch', `'search_path' as a query parameter`);
     }
     if (t.isDecorator(n) && t.isCallExpression(n.expression) && n.expression.expression.getText(sf) === 'InjectRepository') {
       const [a0] = n.expression.arguments;
@@ -280,6 +310,18 @@ function scanSource(rel, src, tables, entities) {
   }
   visit(sf);
   return sites;
+}
+
+/**
+ * Re-check Low: a module named business-tables anywhere but the one primitive module
+ * (packages/rab-server/src/engine/core-modules/tenant/business-tables.ts) is a look-alike the exemption must never trust;
+ * the ratchet reports it (rule business-schema-bind) so it cannot land unnoticed.
+ */
+function secondPrimitiveModules(rels) {
+  const real = `${businessTableRef.PRIMITIVE_MODULE_PATH}.ts`;
+  return rels
+    .filter((rel) => /(?:^|\/)business-tables\.[cm]?[jt]s$/.test(rel) && rel !== real)
+    .map((rel) => ({ file: rel, line: 1, rule: 'business-schema-bind', detail: `a second business-tables module (only ${real} is the primitive)` }));
 }
 
 function listFiles(root = ROOT) {
@@ -304,6 +346,7 @@ function scan(root = ROOT) {
   const runtime = all.filter((f) => !isExcluded(f.rel));
   const sites = [];
   for (const f of runtime) sites.push(...scanSource(f.rel, f.src, tables, entities));
+  sites.push(...secondPrimitiveModules(runtime.map((f) => f.rel)));
   return { sites, tables, entities };
 }
 
@@ -448,4 +491,4 @@ function main(argv) {
 
 if (require.main === module) process.exit(main(process.argv.slice(2)));
 
-module.exports = { scan, scanSource, loadTables, workspaceEntities, countsOf, compare, compareToBase, baselineDocument, readBaseline, readBaselineAt, isExcluded, RULES, SEARCH_PATH_BINDERS, BUSINESS_SCHEMA_BINDERS };
+module.exports = { scan, scanSource, secondPrimitiveModules, loadTables, workspaceEntities, countsOf, compare, compareToBase, baselineDocument, readBaseline, readBaselineAt, isExcluded, RULES, SEARCH_PATH_BINDERS, BUSINESS_SCHEMA_BINDERS };
