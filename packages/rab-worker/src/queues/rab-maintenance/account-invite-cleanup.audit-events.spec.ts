@@ -1,3 +1,4 @@
+import { asLiveTransactionManager } from '../../__tests__/helpers/business-tables-fakes';
 import { AuditEventShipper, registerAuditEventShipper, unregisterAuditEventShipper } from '@rab/server/engine/core-modules/audit-events/audit-event-shipping';
 import { runAccountInviteCleanupCycle } from './account-invite-cleanup.job';
 
@@ -40,7 +41,7 @@ describe('account invite cleanup → audit events (X1.1)', () => {
         return [];
       },
     };
-    const dataSource = { transaction: async <T>(fn: (m: unknown) => Promise<T>) => fn(manager), query: manager.query };
+    const dataSource = { transaction: async <T>(fn: (m: unknown) => Promise<T>) => fn(asLiveTransactionManager(manager)), query: manager.query };
     const result = await runAccountInviteCleanupCycle(dataSource as never, { autoDeleteEnabled: true });
     expect(result.deleted).toBe(1);
     expect(calls.map((c) => c.row)).toEqual([{ organisationId: ORG, auditLogId: AUDIT_ID, action: 'user.invite_cleaned_up' }]);
@@ -62,7 +63,7 @@ describe('account invite cleanup → audit events (X1.1)', () => {
         return []; // includes the audit INSERT: no id returned
       },
     };
-    const dataSource = { transaction: async <T>(fn: (m: unknown) => Promise<T>) => fn(manager), query: manager.query };
+    const dataSource = { transaction: async <T>(fn: (m: unknown) => Promise<T>) => fn(asLiveTransactionManager(manager)), query: manager.query };
     await expect(runAccountInviteCleanupCycle(dataSource as never, { autoDeleteEnabled: true })).resolves.toMatchObject({ deleted: 1 });
     expect(calls).toEqual([]);
   });

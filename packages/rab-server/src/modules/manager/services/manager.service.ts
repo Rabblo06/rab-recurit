@@ -8,6 +8,7 @@ import { EntityManager, In } from 'typeorm';
 
 import { AccountInvite, EmailOutbox, Organisation, OrganisationMember, Permission, Role, RolePermission, User, UserRole } from '../../identity/entities';
 import { AuthContext } from '../../../engine/core-modules/tenant/auth-context.interface';
+import { businessTables } from '../../../engine/core-modules/tenant/business-tables';
 import { TenantContextService } from '../../../engine/core-modules/tenant/tenant-context.service';
 import { WorkspaceMembershipService } from '../../../engine/core-modules/tenant/workspace-membership.service';
 import { AccountInviteService, InvitationLifecycleStatus } from '../../../engine/core-modules/auth/services/account-invite.service';
@@ -434,9 +435,10 @@ export class ManagerService {
       const [profiles, total] = await qb.getManyAndCount();
       const summaries = await this.toSummaries(manager, profiles);
       const ids = profiles.map((p) => p.id);
+      const t = businessTables(manager);
       const links: Array<{ manager_profile_id: string; id: string; name: string }> = ids.length
         ? await manager.query(
-            `SELECT mv.manager_profile_id, v.id, v.name FROM manager_venue mv JOIN venue v ON v.id = mv.venue_id
+            `SELECT mv.manager_profile_id, v.id, v.name FROM ${t.manager_venue} mv JOIN ${t.venue} v ON v.id = mv.venue_id
               WHERE mv.manager_profile_id = ANY($1) AND mv.organisation_id = $2 AND mv.workspace_id = $3 ORDER BY v.name`,
             [ids, ctx.organisationId, workspaceId],
           )
@@ -976,8 +978,9 @@ export class ManagerService {
       }
 
       // workspace_id stamped from the Venue, which now equals the profile's workspace by construction.
+      const t = businessTables(manager);
       await manager.query(
-        `INSERT INTO manager_venue (organisation_id, manager_profile_id, venue_id, workspace_id)
+        `INSERT INTO ${t.manager_venue} (organisation_id, manager_profile_id, venue_id, workspace_id)
          VALUES ($1, $2, $3, $4) ON CONFLICT (manager_profile_id, venue_id) DO NOTHING`,
         [ctx.organisationId, managerId, venueId, venue.workspaceId],
       );
@@ -1008,7 +1011,8 @@ export class ManagerService {
 
   async unassignVenue(ctx: AuthContext, managerId: string, venueId: string): Promise<void> {
     return this.tenantContext.runInTenantContext(ctx, async (manager) => {
-      await manager.query(`DELETE FROM manager_venue WHERE manager_profile_id = $1 AND venue_id = $2`, [managerId, venueId]);
+      const t = businessTables(manager);
+      await manager.query(`DELETE FROM ${t.manager_venue} WHERE manager_profile_id = $1 AND venue_id = $2`, [managerId, venueId]);
       await this.auditService.record(manager, ctx, AuditAction.MANAGER_VENUE_UNASSIGNED, {
         entityType: 'manager',
         entityId: managerId,

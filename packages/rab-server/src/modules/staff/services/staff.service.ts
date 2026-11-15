@@ -21,6 +21,7 @@ import { EntityManager, In, QueryFailedError } from 'typeorm';
 
 import { AccountInvite, EmailOutbox, Organisation, OrganisationMember, Permission, Role, RolePermission, User, UserRole } from '../../identity/entities';
 import { AuthContext } from '../../../engine/core-modules/tenant/auth-context.interface';
+import { businessTables } from '../../../engine/core-modules/tenant/business-tables';
 import { TenantContextService } from '../../../engine/core-modules/tenant/tenant-context.service';
 import { WorkspaceMembershipService } from '../../../engine/core-modules/tenant/workspace-membership.service';
 import { AccountInviteService, InvitationLifecycleStatus } from '../../../engine/core-modules/auth/services/account-invite.service';
@@ -365,13 +366,14 @@ export class StaffService {
       const scope = await this.resourceScope.resolveTx(manager, ctx);
       if (scope.kind !== 'venue') throw new NotFoundException('Directory not found.');
       if (!scope.venueIds.length) return { data: [], total: 0 };
+      const t = businessTables(manager);
       const query = manager.createQueryBuilder(StaffProfile, 'sp')
         .innerJoin(User, 'u', 'u.id = sp.userId')
         .where('sp.organisationId = :organisationId', { organisationId: ctx.organisationId })
         .andWhere('u.status = :activeStatus', { activeStatus: UserStatus.ACTIVE })
-        .andWhere(`EXISTS (SELECT 1 FROM venue_manager_staff t
+        .andWhere(`EXISTS (SELECT 1 FROM ${t.venue_manager_staff} t
           JOIN core.manager_profile mp ON mp.id = t.manager_profile_id
-          JOIN venue v ON v.workspace_id = t.workspace_id
+          JOIN ${t.venue} v ON v.workspace_id = t.workspace_id
           WHERE t.staff_profile_id = sp.id AND mp.user_id = :teamUserId
             AND v.id IN (:...venueIds)
             AND (:tag::text IS NULL OR (:tag = 'favourite' AND t.is_favourite) OR (:tag = 'emergency' AND t.is_emergency)))`,
@@ -385,9 +387,9 @@ export class StaffService {
         .addSelect('u.firstName', 'firstName').addSelect('u.lastName', 'lastName')
         .addSelect('sp.employmentStatus', 'employmentStatus')
         .addSelect('jr.name', 'jobRoleName')
-        .addSelect(`COALESCE((SELECT t.is_favourite FROM venue_manager_staff t JOIN core.manager_profile mp ON mp.id = t.manager_profile_id
+        .addSelect(`COALESCE((SELECT t.is_favourite FROM ${t.venue_manager_staff} t JOIN core.manager_profile mp ON mp.id = t.manager_profile_id
           WHERE t.staff_profile_id = sp.id AND mp.user_id = :teamUserId LIMIT 1), false)`, 'isFavourite')
-        .addSelect(`COALESCE((SELECT t.is_emergency FROM venue_manager_staff t JOIN core.manager_profile mp ON mp.id = t.manager_profile_id
+        .addSelect(`COALESCE((SELECT t.is_emergency FROM ${t.venue_manager_staff} t JOIN core.manager_profile mp ON mp.id = t.manager_profile_id
           WHERE t.staff_profile_id = sp.id AND mp.user_id = :teamUserId LIMIT 1), false)`, 'isEmergency')
         .orderBy('u.firstName', 'ASC').addOrderBy('sp.id', 'ASC')
         .offset(skip).limit(take).getRawMany();
@@ -406,16 +408,17 @@ export class StaffService {
       throw new ForbiddenException('Staff viewing is not permitted.');
     }
     return this.tenantContext.runInWorkspaceContext(ctx, async (manager) => {
+      const t = businessTables(manager);
       const [row] = await manager.query(
         `SELECT sp.id, u.first_name AS "firstName", u.last_name AS "lastName", jr.name AS "jobRoleName",
             sp.employment_type AS "employmentType", sp.years_experience AS "yearsExperience", sp.other_skills AS "otherSkills",
             sp.available_days AS "availableDays", sp.preferred_shift_times AS "preferredShiftTimes",
             sp.max_hours_per_week AS "maxHoursPerWeek", t.is_favourite AS "isFavourite", t.is_emergency AS "isEmergency"
-         FROM venue_manager_staff t
+         FROM ${t.venue_manager_staff} t
          JOIN core.manager_profile mp ON mp.id = t.manager_profile_id AND mp.user_id = $2 AND mp.type = 'venue'
-         JOIN staff_profile sp ON sp.id = t.staff_profile_id AND sp.workspace_id = t.workspace_id
+         JOIN ${t.staff_profile} sp ON sp.id = t.staff_profile_id AND sp.workspace_id = t.workspace_id
          JOIN core."user" u ON u.id = sp.user_id AND u.status = 'active'
-         LEFT JOIN job_role jr ON jr.id = sp.job_role_id
+         LEFT JOIN ${t.job_role} jr ON jr.id = sp.job_role_id
          WHERE t.staff_profile_id = $1 AND t.organisation_id = $3 AND t.workspace_id = $4`,
         [staffId, ctx.userId, ctx.organisationId, ctx.workspaceId],
       );
@@ -433,8 +436,9 @@ export class StaffService {
       throw new ForbiddenException('Staff viewing is not permitted.');
     }
     return this.tenantContext.runInWorkspaceContext(ctx, async (manager) => {
+      const t = businessTables(manager);
       const rows: Array<{ isFavourite: boolean; isEmergency: boolean }> = await manager.query(
-        `UPDATE venue_manager_staff t SET
+        `UPDATE ${t.venue_manager_staff} t SET
             is_favourite = COALESCE($3::boolean, t.is_favourite), is_emergency = COALESCE($4::boolean, t.is_emergency)
          FROM core.manager_profile mp
          WHERE mp.id = t.manager_profile_id AND mp.user_id = $2 AND mp.type = 'venue'
@@ -998,8 +1002,9 @@ export class StaffService {
       if (profile.employmentStatus !== EmploymentStatus.INACTIVE) {
         throw new ConflictException({ code: 'STAFF_NOT_DEACTIVATED', message: 'Deactivate this staff member before archiving them.' });
       }
+      const t = businessTables(manager);
       const [{ upcoming }] = await manager.query<Array<{ upcoming: number }>>(
-        `SELECT count(*)::int AS upcoming FROM shift_assignment sa JOIN shift s ON s.id = sa.shift_id
+        `SELECT count(*)::int AS upcoming FROM ${t.shift_assignment} sa JOIN ${t.shift} s ON s.id = sa.shift_id
           WHERE sa.staff_profile_id = $1 AND sa.status IN ('offered', 'staff_accepted', 'confirmed')
             AND s.status NOT IN ('cancelled', 'completed', 'declined') AND s.ends_at > now()`,
         [profile.id],

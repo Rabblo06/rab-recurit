@@ -1,6 +1,7 @@
 import { findAvailabilityConflicts, WEEKDAY_NAMES } from '@rab/shared';
 import { EntityManager } from 'typeorm';
 
+import { businessTables } from '../../../engine/core-modules/tenant/business-tables';
 import { ScheduledWindow } from '../../scheduling/utils/assignment-time';
 import { AvailabilityAcknowledgementDto } from '../dto/availability-acknowledgement.dto';
 import {
@@ -33,9 +34,10 @@ export async function evaluateStaffAvailability(
 ): Promise<{ conflicts: StaffAvailabilityConflict[]; unknown: StaffAvailabilityUnknown[] }> {
   const ids = [...new Set(recipients.map((r) => r.staffProfileId))];
   if (ids.length === 0) return { conflicts: [], unknown: [] };
+  const t = businessTables(manager);
   const rows: AvailabilityRow[] = await manager.query(
     `SELECT sp.id, sp.available_days, u.first_name, u.last_name
-       FROM staff_profile sp LEFT JOIN core."user" u ON u.id = sp.user_id
+       FROM ${t.staff_profile} sp LEFT JOIN core."user" u ON u.id = sp.user_id
       WHERE sp.id = ANY($1::uuid[])`,
     [ids],
   );

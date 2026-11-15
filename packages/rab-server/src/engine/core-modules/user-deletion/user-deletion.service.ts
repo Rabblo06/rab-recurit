@@ -12,6 +12,7 @@ import { SecurityVersionService } from '../auth/services/security-version.servic
 import { FileService } from '../storage/file.service';
 import { StoredFile } from '../storage/entities/stored-file.entity';
 import { WorkspaceMembershipService } from '../tenant/workspace-membership.service';
+import { bindBusinessSchema, businessSearchPath, businessTables, CORE_BUSINESS_SCHEMA, restoreBusinessSchema, snapshotBusinessSchema } from '../tenant/business-tables';
 import { SchemaResolverService, WorkspaceRoutingError, workspaceSchemaName } from '../tenant/schema-resolver.service';
 
 /**
@@ -264,7 +265,8 @@ export class UserDeletionService {
       // (USER-DELETION.md §3.9): a profile the caller cannot see or update under RLS cannot be locked here; the post-delete
       // historyLost check still covers history that existed when its snapshot was taken.
       const blocking = await this.inEveryScope(manager, ctx, workspaces, async () => {
-        await manager.query(`SELECT id FROM staff_profile WHERE user_id = $1 FOR UPDATE`, [target.id]);
+        const t = businessTables(manager); // C2: the scope inEveryScope bound for this visit
+        await manager.query(`SELECT id FROM ${t.staff_profile} WHERE user_id = $1 FOR UPDATE`, [target.id]);
         return this.findProtectedHistory(manager, target.id);
       });
       if (blocking) throw new HardDeleteNotSafe(`history:${blocking}`);
@@ -321,24 +323,44 @@ export class UserDeletionService {
     const [entry] = await manager.query<Array<{ ws: string | null; sp: string }>>(
       `SELECT current_setting('rab.workspace_id', true) AS ws, current_setting('search_path') AS sp`,
     );
+    // C2-0: the businessTables(manager) binding follows every search_path switch below and is restored with it.
+    const entryBinding = snapshotBusinessSchema(manager);
 
+    // Restored from the binding when there was one (the same value the binder set; under the test-only trap the entry
+    // search_path is '' and cannot be re-set from its quoted text form), else from the entry setting, as before.
+    const restorePath = entryBinding.schema !== undefined ? businessSearchPath(entryBinding.schema) : entry?.sp ?? 'core';
+    const restoreSession = () =>
+      manager.query(`SELECT set_config('rab.workspace_id', $1, true), set_config('search_path', $2, true)`, [entry?.ws ?? '', restorePath]);
+    let restored = false;
     let found: T | null = null;
-    for (const workspaceId of workspaceIds) {
-      await manager.query(`SELECT set_config('rab.workspace_id', $1, true), set_config('search_path', 'core', true)`, [workspaceId]);
-      found = await visit({ label: `core:${workspaceId}` });
-      if (found !== null) break;
-      const schema = await this.checkableWorkspaceSchema(manager, workspaceId);
-      if (schema === 'unverifiable') {
-        this.logger.warn(`user hard delete: workspace ${workspaceId} has a schema that is not READY, so its rows cannot be checked`);
-        throw new UnverifiableWorkspace();
-      }
-      if (schema) {
-        await manager.query(`SELECT set_config('search_path', $1, true)`, [schema]);
-        found = await visit({ label: schema });
+    try {
+      for (const workspaceId of workspaceIds) {
+        bindBusinessSchema(manager, CORE_BUSINESS_SCHEMA, workspaceId); // validated and recorded before set_config
+        await manager.query(`SELECT set_config('rab.workspace_id', $1, true), set_config('search_path', $2, true)`, [workspaceId, businessSearchPath(CORE_BUSINESS_SCHEMA)]);
+        found = await visit({ label: `core:${workspaceId}` });
         if (found !== null) break;
+        const schema = await this.checkableWorkspaceSchema(manager, workspaceId);
+        if (schema === 'unverifiable') {
+          this.logger.warn(`user hard delete: workspace ${workspaceId} has a schema that is not READY, so its rows cannot be checked`);
+          throw new UnverifiableWorkspace();
+        }
+        if (schema) {
+          bindBusinessSchema(manager, schema, workspaceId);
+          await manager.query(`SELECT set_config('search_path', $1, true)`, [businessSearchPath(schema)]);
+          found = await visit({ label: schema });
+          if (found !== null) break;
+        }
       }
+      await restoreSession();
+      restored = true;
+    } finally {
+      // C2-0 review #4: the businessTables binding is put back however the loop ends (a throw included).
+      restoreBusinessSchema(manager, entryBinding);
+      // A JS-level throw (UnverifiableWorkspace / HardDeleteNotSafe) leaves the transaction usable, so search_path and
+      // rab.workspace_id are put back too (the hard-delete savepoint rollback would restore them anyway). Best effort: after
+      // a database error the transaction is aborted, this statement fails as well, and the ORIGINAL error propagates.
+      if (!restored) await restoreSession().catch(() => undefined);
     }
-    await manager.query(`SELECT set_config('rab.workspace_id', $1, true), set_config('search_path', $2, true)`, [entry?.ws ?? '', entry?.sp ?? 'core']);
     return found;
   }
 
@@ -376,25 +398,26 @@ export class UserDeletionService {
    * the C1b re-review additions (shift_request_staff, venue_manager_staff, replacement_request.selected_staff_profile_id).
    */
   private async findProtectedHistory(manager: EntityManager, userId: string): Promise<string | null> {
+    const t = businessTables(manager); // C2: the scope inEveryScope bound for this visit
     const checks: Array<[string, string]> = [
-      ['shift_created_by', `SELECT 1 FROM shift WHERE created_by = $1 LIMIT 1`],
-      ['job_role_created_by', `SELECT 1 FROM job_role WHERE created_by = $1 LIMIT 1`],
-      ['venue_created_by', `SELECT 1 FROM venue WHERE created_by = $1 LIMIT 1`],
-      ['payroll_decision_actor', `SELECT 1 FROM payroll_record WHERE approved_by = $1 OR rejected_by = $1 LIMIT 1`],
-      ['attendance_on_behalf_actor', `SELECT 1 FROM attendance WHERE clock_in_by = $1 OR clock_out_by = $1 LIMIT 1`],
-      ['job_offer_actor', `SELECT 1 FROM job_offer WHERE created_by = $1 OR confirmed_by = $1 OR rejected_by = $1 LIMIT 1`],
-      ['user_note_subject', `SELECT 1 FROM user_note WHERE subject_user_id = $1 LIMIT 1`],
+      ['shift_created_by', `SELECT 1 FROM ${t.shift} WHERE created_by = $1 LIMIT 1`],
+      ['job_role_created_by', `SELECT 1 FROM ${t.job_role} WHERE created_by = $1 LIMIT 1`],
+      ['venue_created_by', `SELECT 1 FROM ${t.venue} WHERE created_by = $1 LIMIT 1`],
+      ['payroll_decision_actor', `SELECT 1 FROM ${t.payroll_record} WHERE approved_by = $1 OR rejected_by = $1 LIMIT 1`],
+      ['attendance_on_behalf_actor', `SELECT 1 FROM ${t.attendance} WHERE clock_in_by = $1 OR clock_out_by = $1 LIMIT 1`],
+      ['job_offer_actor', `SELECT 1 FROM ${t.job_offer} WHERE created_by = $1 OR confirmed_by = $1 OR rejected_by = $1 LIMIT 1`],
+      ['user_note_subject', `SELECT 1 FROM ${t.user_note} WHERE subject_user_id = $1 LIMIT 1`],
       [
         'staff_operational_history',
-        `SELECT 1 FROM staff_profile sp
+        `SELECT 1 FROM ${t.staff_profile} sp
            WHERE sp.user_id = $1
              AND (
-               EXISTS (SELECT 1 FROM shift_assignment sa WHERE sa.staff_profile_id = sp.id)
-               OR EXISTS (SELECT 1 FROM job_offer jo WHERE jo.staff_profile_id = sp.id)
-               OR EXISTS (SELECT 1 FROM attendance at WHERE at.staff_profile_id = sp.id)
-               OR EXISTS (SELECT 1 FROM shift_request_staff rs WHERE rs.staff_profile_id = sp.id)
-               OR EXISTS (SELECT 1 FROM venue_manager_staff vs WHERE vs.staff_profile_id = sp.id)
-               OR EXISTS (SELECT 1 FROM replacement_request rr WHERE rr.selected_staff_profile_id = sp.id)
+               EXISTS (SELECT 1 FROM ${t.shift_assignment} sa WHERE sa.staff_profile_id = sp.id)
+               OR EXISTS (SELECT 1 FROM ${t.job_offer} jo WHERE jo.staff_profile_id = sp.id)
+               OR EXISTS (SELECT 1 FROM ${t.attendance} at WHERE at.staff_profile_id = sp.id)
+               OR EXISTS (SELECT 1 FROM ${t.shift_request_staff} rs WHERE rs.staff_profile_id = sp.id)
+               OR EXISTS (SELECT 1 FROM ${t.venue_manager_staff} vs WHERE vs.staff_profile_id = sp.id)
+               OR EXISTS (SELECT 1 FROM ${t.replacement_request} rr WHERE rr.selected_staff_profile_id = sp.id)
              )
            LIMIT 1`,
       ],
@@ -408,13 +431,14 @@ export class UserDeletionService {
 
   /** Staff profile ids with operational history in the current scope but no staff_profile row the caller can see. */
   private async staffWithHistory(manager: EntityManager): Promise<string[]> {
+    const t = businessTables(manager);
     const [row] = await manager.query<Array<{ ids: string[] | null }>>(
       `SELECT array_agg(h.staff_profile_id) AS ids FROM (
-         SELECT staff_profile_id FROM shift_assignment UNION SELECT staff_profile_id FROM job_offer UNION SELECT staff_profile_id FROM attendance
-         UNION SELECT staff_profile_id FROM shift_request_staff UNION SELECT staff_profile_id FROM venue_manager_staff
-         UNION SELECT selected_staff_profile_id FROM replacement_request WHERE selected_staff_profile_id IS NOT NULL
+         SELECT staff_profile_id FROM ${t.shift_assignment} UNION SELECT staff_profile_id FROM ${t.job_offer} UNION SELECT staff_profile_id FROM ${t.attendance}
+         UNION SELECT staff_profile_id FROM ${t.shift_request_staff} UNION SELECT staff_profile_id FROM ${t.venue_manager_staff}
+         UNION SELECT selected_staff_profile_id FROM ${t.replacement_request} WHERE selected_staff_profile_id IS NOT NULL
        ) h
-       WHERE NOT EXISTS (SELECT 1 FROM staff_profile sp WHERE sp.id = h.staff_profile_id)`,
+       WHERE NOT EXISTS (SELECT 1 FROM ${t.staff_profile} sp WHERE sp.id = h.staff_profile_id)`,
     );
     return row?.ids ?? [];
   }
@@ -422,14 +446,15 @@ export class UserDeletionService {
   /** The first of `before` whose visible history is entirely gone in the current scope (cascaded with its staff profile). */
   private async historyLost(manager: EntityManager, before: string[]): Promise<string | null> {
     if (before.length === 0) return null;
+    const t = businessTables(manager);
     const rows = await manager.query<Array<{ id: string }>>(
       `SELECT p.id FROM unnest($1::uuid[]) AS p(id)
-        WHERE NOT EXISTS (SELECT 1 FROM shift_assignment WHERE staff_profile_id = p.id)
-          AND NOT EXISTS (SELECT 1 FROM job_offer WHERE staff_profile_id = p.id)
-          AND NOT EXISTS (SELECT 1 FROM attendance WHERE staff_profile_id = p.id)
-          AND NOT EXISTS (SELECT 1 FROM shift_request_staff WHERE staff_profile_id = p.id)
-          AND NOT EXISTS (SELECT 1 FROM venue_manager_staff WHERE staff_profile_id = p.id)
-          AND NOT EXISTS (SELECT 1 FROM replacement_request WHERE selected_staff_profile_id = p.id)
+        WHERE NOT EXISTS (SELECT 1 FROM ${t.shift_assignment} WHERE staff_profile_id = p.id)
+          AND NOT EXISTS (SELECT 1 FROM ${t.job_offer} WHERE staff_profile_id = p.id)
+          AND NOT EXISTS (SELECT 1 FROM ${t.attendance} WHERE staff_profile_id = p.id)
+          AND NOT EXISTS (SELECT 1 FROM ${t.shift_request_staff} WHERE staff_profile_id = p.id)
+          AND NOT EXISTS (SELECT 1 FROM ${t.venue_manager_staff} WHERE staff_profile_id = p.id)
+          AND NOT EXISTS (SELECT 1 FROM ${t.replacement_request} WHERE selected_staff_profile_id = p.id)
         LIMIT 1`,
       [before],
     );

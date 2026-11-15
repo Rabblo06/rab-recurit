@@ -3,6 +3,14 @@ import { DataSource, EntityManager } from 'typeorm';
 import { SUPPORTED_WORKSPACE_SCHEMA_VERSIONS, workspaceSchemaName } from '@rab/server/engine/core-modules/tenant/schema-resolver.service';
 import { shipAuditRowAfterCommit } from '@rab/server/engine/core-modules/audit-events/audit-event-shipping';
 import { isUpgradeBlocked } from '@rab/server/engine/core-modules/upgrade/workspace-upgrade-block';
+import {
+  bindBusinessSchema,
+  businessSearchPath,
+  businessTables,
+  CORE_BUSINESS_SCHEMA,
+  restoreBusinessSchema,
+  snapshotBusinessSchema,
+} from '@rab/server/engine/core-modules/tenant/business-tables';
 
 const WORKSPACE_UPGRADING = Symbol('workspace-upgrading');
 
@@ -265,6 +273,8 @@ export async function runAccountInviteCleanupCycle(
         // successful delete/expire in this same transaction. Same per-row
         // SAVEPOINT isolation this codebase already uses for exactly this
         // reason (`OfferService.sendBulk`/`approveShiftRequest`).
+        // C2-0 (review #4): ROLLBACK TO SAVEPOINT reverts search_path but not the businessTables binding: snapshot it here.
+        const bindingAtSavepoint = snapshotBusinessSchema(manager);
         await manager.query('SAVEPOINT sp_invite_cleanup_candidate');
         try {
           const blockingReason = await findBlockingDependency(manager, candidate.id);
@@ -286,6 +296,7 @@ export async function runAccountInviteCleanupCycle(
           await writeAuditRow(manager, candidate.organisation_id, null, 'user.invite_cleaned_up', { deletedUserId: candidate.id });
         } catch (error) {
           await manager.query('ROLLBACK TO SAVEPOINT sp_invite_cleanup_candidate');
+          restoreBusinessSchema(manager, bindingAtSavepoint);
           // Safe identifiers only — never the raw error object into audit
           // metadata (could carry a query fragment or other internal detail).
           await writeAuditRow(manager, candidate.organisation_id, candidate.id, 'user.invite_cleanup_failed', {
@@ -362,6 +373,8 @@ async function runDefinerCleanup(manager: EntityManager): Promise<AccountInviteC
     if (candidates.length === 0) break;
 
     for (const candidate of candidates) {
+      // C2-0 (review #4): ROLLBACK TO SAVEPOINT reverts search_path but not the businessTables binding: snapshot it here.
+      const bindingAtSavepoint = snapshotBusinessSchema(manager);
       await manager.query('SAVEPOINT sp_invite_cleanup_candidate');
       try {
         // Any reason the DEFINER reports for a candidate it returns (today: manager_workspace / platform_admin; the N-4
@@ -388,6 +401,7 @@ async function runDefinerCleanup(manager: EntityManager): Promise<AccountInviteC
         }
       } catch (error) {
         await manager.query('ROLLBACK TO SAVEPOINT sp_invite_cleanup_candidate');
+        restoreBusinessSchema(manager, bindingAtSavepoint);
         await writeAuditRow(manager, candidate.organisation_id, candidate.user_id, 'user.invite_cleanup_failed', {
           reason: error instanceof Error ? error.constructor.name : 'unknown_error',
         });
@@ -427,27 +441,34 @@ async function loadWorkspaceCatalogue(manager: EntityManager): Promise<Map<strin
 // (Part 11). The other 4 (`manager_workspace`, `platform_admin`, `active_session`/refresh_token) are genuinely
 // global/core per CLAUDE.md's "Core global infrastructure" list and have no physical-schema counterpart — checked
 // once, against core, same as always.
-const WORKSPACE_TABLE_DEPENDENCY_CHECKS: Array<[string, string]> = [
-  ['shift', `SELECT 1 FROM shift WHERE created_by = $1 LIMIT 1`],
-  ['job_role', `SELECT 1 FROM job_role WHERE created_by = $1 LIMIT 1`],
-  ['venue', `SELECT 1 FROM venue WHERE created_by = $1 LIMIT 1`],
-  ['shift_assignment', `SELECT 1 FROM shift_assignment WHERE assigned_by = $1 LIMIT 1`],
-  ['job_offer', `SELECT 1 FROM job_offer WHERE created_by = $1 OR confirmed_by = $1 OR rejected_by = $1 LIMIT 1`],
-  ['staff_profile_created_by', `SELECT 1 FROM staff_profile WHERE created_by = $1 LIMIT 1`],
-  // Owner 0g security review L2: the same two checks UserDeletionService runs before an invite's hard delete. The invitee's
-  // own staff profile CASCADEs (and everything hanging off it); a note ABOUT the invitee (user_note.subject_user_id) too.
-  [
-    'staff_operational_history',
-    `SELECT 1 FROM staff_profile sp WHERE sp.user_id = $1 AND (
-       EXISTS (SELECT 1 FROM shift_assignment sa WHERE sa.staff_profile_id = sp.id)
-       OR EXISTS (SELECT 1 FROM job_offer jo WHERE jo.staff_profile_id = sp.id)
-       OR EXISTS (SELECT 1 FROM attendance a WHERE a.staff_profile_id = sp.id)
-       OR EXISTS (SELECT 1 FROM shift_request_staff rs WHERE rs.staff_profile_id = sp.id)
-       OR EXISTS (SELECT 1 FROM venue_manager_staff vs WHERE vs.staff_profile_id = sp.id)
-       OR EXISTS (SELECT 1 FROM replacement_request rr WHERE rr.selected_staff_profile_id = sp.id)) LIMIT 1`,
-  ],
-  ['user_note_subject', `SELECT 1 FROM user_note WHERE subject_user_id = $1 LIMIT 1`],
-];
+// Part C2 (dual-schema): the statements name their tables through `businessTables(manager)`, read again after every
+// binding switch in `findBlockingDependency` (this is called right after each one), so the same checks read
+// `"core".<table>` in the core pass and `"workspace_<hex>".<table>` in the physical pass — the schema comes only from
+// that binding (core, or the trusted registry row bound with its workspace id), never from search_path resolution.
+function workspaceTableDependencyChecks(manager: EntityManager): Array<[string, string]> {
+  const t = businessTables(manager);
+  return [
+    ['shift', `SELECT 1 FROM ${t.shift} WHERE created_by = $1 LIMIT 1`],
+    ['job_role', `SELECT 1 FROM ${t.job_role} WHERE created_by = $1 LIMIT 1`],
+    ['venue', `SELECT 1 FROM ${t.venue} WHERE created_by = $1 LIMIT 1`],
+    ['shift_assignment', `SELECT 1 FROM ${t.shift_assignment} WHERE assigned_by = $1 LIMIT 1`],
+    ['job_offer', `SELECT 1 FROM ${t.job_offer} WHERE created_by = $1 OR confirmed_by = $1 OR rejected_by = $1 LIMIT 1`],
+    ['staff_profile_created_by', `SELECT 1 FROM ${t.staff_profile} WHERE created_by = $1 LIMIT 1`],
+    // Owner 0g security review L2: the same two checks UserDeletionService runs before an invite's hard delete. The
+    // invitee's own staff profile CASCADEs (and everything hanging off it); a note ABOUT the invitee (user_note.subject_user_id) too.
+    [
+      'staff_operational_history',
+      `SELECT 1 FROM ${t.staff_profile} sp WHERE sp.user_id = $1 AND (
+         EXISTS (SELECT 1 FROM ${t.shift_assignment} sa WHERE sa.staff_profile_id = sp.id)
+         OR EXISTS (SELECT 1 FROM ${t.job_offer} jo WHERE jo.staff_profile_id = sp.id)
+         OR EXISTS (SELECT 1 FROM ${t.attendance} a WHERE a.staff_profile_id = sp.id)
+         OR EXISTS (SELECT 1 FROM ${t.shift_request_staff} rs WHERE rs.staff_profile_id = sp.id)
+         OR EXISTS (SELECT 1 FROM ${t.venue_manager_staff} vs WHERE vs.staff_profile_id = sp.id)
+         OR EXISTS (SELECT 1 FROM ${t.replacement_request} rr WHERE rr.selected_staff_profile_id = sp.id)) LIMIT 1`,
+    ],
+    ['user_note_subject', `SELECT 1 FROM ${t.user_note} WHERE subject_user_id = $1 LIMIT 1`],
+  ];
+}
 
 const GLOBAL_TABLE_DEPENDENCY_CHECKS: Array<[string, string]> = [
   ['manager_workspace', `SELECT 1 FROM core.manager_workspace WHERE owner_user_id = $1 LIMIT 1`],
@@ -506,6 +527,8 @@ async function findBlockingDependency(
       ]
     : await manager.query(`SELECT id, organisation_id FROM core.manager_workspace
     WHERE organisation_id = (SELECT organisation_id FROM core."user" WHERE id=$1) ORDER BY id`, [userId]);
+  // C2-0: the businessTables(manager) binding follows every search_path switch below and is put back on exit (review #4).
+  const entryBinding = snapshotBusinessSchema(manager);
   try {
     if (!definerScopes) {
       for (const [reason, sql] of GLOBAL_TABLE_DEPENDENCY_CHECKS) {
@@ -516,29 +539,37 @@ async function findBlockingDependency(
     // Include the original org context for org-wide references, even with no workspace (definer path: the scopes above
     // already start with the candidate's organisation-wide scope).
     for (const scope of definerScopes ? scopes : [{ id: previous.workspace ?? '', organisation_id: previous.org ?? '' }, ...scopes]) {
-      await manager.query(`SELECT set_config('rab.organisation_id',$1,true), set_config('rab.workspace_id',$2,true), set_config('search_path','core',true)`,
-        [scope.organisation_id, scope.id]);
-      for (const [reason, sql] of WORKSPACE_TABLE_DEPENDENCY_CHECKS) {
+      // C2-0: the binding is recorded (validated) before each search_path switch in this loop ('' under the test-only trap).
+      bindBusinessSchema(manager, CORE_BUSINESS_SCHEMA, null);
+      await manager.query(`SELECT set_config('rab.organisation_id',$1,true), set_config('rab.workspace_id',$2,true), set_config('search_path',$3,true)`,
+        [scope.organisation_id, scope.id, businessSearchPath(CORE_BUSINESS_SCHEMA)]);
+      for (const [reason, sql] of workspaceTableDependencyChecks(manager)) {
         if ((await manager.query(sql, [userId])).length > 0) return reason;
       }
 
       // Part 11: the same 5 checks again, against the physical schema, ONLY when the trusted registry reports this
-      // workspace READY. search_path is bound to EXACTLY that one schema — never 'workspace, core' — so the
-      // unqualified table names above resolve to the physical tables here and to core immediately above.
+      // workspace READY. search_path and the businessTables binding are switched to EXACTLY that one schema — never
+      // 'workspace, core' — so the same checks name the physical tables here and the core tables immediately above.
       if (!scope.id) continue;
       const physicalSchema = await resolveReadyPhysicalSchema(manager, scope.id);
       if (physicalSchema === WORKSPACE_UPGRADING) return 'workspace_upgrading';
       if (!physicalSchema) continue;
-      await manager.query(`SELECT set_config('search_path',$1,true)`, [physicalSchema]);
-      for (const [reason, sql] of WORKSPACE_TABLE_DEPENDENCY_CHECKS) {
+      bindBusinessSchema(manager, physicalSchema, scope.id);
+      await manager.query(`SELECT set_config('search_path',$1,true)`, [businessSearchPath(physicalSchema)]);
+      for (const [reason, sql] of workspaceTableDependencyChecks(manager)) {
         if ((await manager.query(sql, [userId])).length > 0) return `${reason}_physical`;
       }
-      await manager.query(`SELECT set_config('search_path','core',true)`);
+      bindBusinessSchema(manager, CORE_BUSINESS_SCHEMA, null);
+      await manager.query(`SELECT set_config('search_path',$1,true)`, [businessSearchPath(CORE_BUSINESS_SCHEMA)]);
     }
     return null;
   } finally {
-    await manager.query(`SELECT set_config('rab.organisation_id',$1,true), set_config('rab.workspace_id',$2,true), set_config('search_path','core',true)`,
-      [previous.org ?? '', previous.workspace ?? '']);
+    // The entry binding comes back (review #4: not 'core'), and search_path with it: the entry schema when one was bound,
+    // else 'core' exactly as before. The binding is restored first: if this statement fails (an aborted transaction), the
+    // caller's ROLLBACK TO SAVEPOINT reverts search_path and restores its own snapshot.
+    restoreBusinessSchema(manager, entryBinding);
+    await manager.query(`SELECT set_config('rab.organisation_id',$1,true), set_config('rab.workspace_id',$2,true), set_config('search_path',$3,true)`,
+      [previous.org ?? '', previous.workspace ?? '', businessSearchPath(entryBinding.schema ?? CORE_BUSINESS_SCHEMA)]);
   }
 }
 

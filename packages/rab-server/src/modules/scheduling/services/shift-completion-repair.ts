@@ -1,6 +1,7 @@
 import { DataSource, EntityManager } from 'typeorm';
 
 import { AuditAction, AuditService } from '../../../engine/core-modules/audit/audit.service';
+import { businessTables } from '../../../engine/core-modules/tenant/business-tables';
 import { TenantContextService } from '../../../engine/core-modules/tenant/tenant-context.service';
 import { completeShiftIfSettled, OPEN_SEAT_STATUSES, openSeatSql } from '../utils/complete-shift-if-settled';
 
@@ -129,19 +130,20 @@ export class ShiftCompletionRepair {
     this.skippedWorkspaces = 0;
     const out: SettledShiftRow[] = [];
     for await (const scope of this.scopes(opts.organisationId)) {
-      const rows = await this.readIn(scope, (m) =>
-        m.query<Array<{ id: string; venue_name: string; starts_at: Date; ends_at: Date; seats: Record<string, number> | null }>>(
-          // sql-injection-reviewed: openSeatSql(2) is a code-constant fragment (integer parameter index); values are bound $n parameters.
+      const rows = await this.readIn(scope, (m) => {
+        const t = businessTables(m);
+        return m.query<Array<{ id: string; venue_name: string; starts_at: Date; ends_at: Date; seats: Record<string, number> | null }>>(
+          // sql-injection-reviewed: openSeatSql(m, 2) is a code-constant fragment (integer parameter index, businessTables() names); values are bound $n parameters.
           `SELECT s.id, v.name AS venue_name, s.starts_at, s.ends_at,
-                  (SELECT jsonb_object_agg(b.status, b.n) FROM (SELECT sa2.status, count(*)::int AS n FROM shift_assignment sa2
+                  (SELECT jsonb_object_agg(b.status, b.n) FROM (SELECT sa2.status, count(*)::int AS n FROM ${t.shift_assignment} sa2
                      WHERE sa2.shift_id = s.id GROUP BY sa2.status) b) AS seats
-             FROM shift s JOIN venue v ON v.id = s.venue_id
+             FROM ${t.shift} s JOIN ${t.venue} v ON v.id = s.venue_id
             WHERE s.status = 'in_progress' AND s.organisation_id = $1
-              AND NOT EXISTS (SELECT 1 FROM shift_assignment sa WHERE sa.shift_id = s.id AND sa.organisation_id = $1 AND ${openSeatSql(2)})
+              AND NOT EXISTS (SELECT 1 FROM ${t.shift_assignment} sa WHERE sa.shift_id = s.id AND sa.organisation_id = $1 AND ${openSeatSql(m, 2)})
             ORDER BY s.ends_at, s.id`,
           [scope.organisation_id, OPEN_SEAT_STATUSES],
-        ),
-      );
+        );
+      });
       for (const r of rows ?? []) {
         out.push({
           organisationId: scope.organisation_id,
@@ -170,9 +172,10 @@ export class ShiftCompletionRepair {
     const results: RepairResult[] = [];
     for await (const scope of this.scopes(opts.organisationId)) {
       if (pending.size === 0) break;
-      const here = await this.readIn(scope, async (m) =>
-        (await m.query<Array<{ id: string }>>(`SELECT id FROM shift WHERE id = ANY($1::uuid[]) AND organisation_id = $2`, [[...pending], scope.organisation_id])).map((r) => r.id),
-      );
+      const here = await this.readIn(scope, async (m) => {
+        const t = businessTables(m);
+        return (await m.query<Array<{ id: string }>>(`SELECT id FROM ${t.shift} WHERE id = ANY($1::uuid[]) AND organisation_id = $2`, [[...pending], scope.organisation_id])).map((r) => r.id);
+      });
       for (const shiftId of here ?? []) {
         pending.delete(shiftId);
         const outcome = await this.tenantContext.runInTenantContext(this.context(scope, actor.userId), async (m: EntityManager): Promise<RepairOutcome> => {
@@ -185,7 +188,8 @@ export class ShiftCompletionRepair {
             });
             return 'completed';
           }
-          const [row] = await m.query<Array<{ status: string }>>(`SELECT status FROM shift WHERE id = $1 AND organisation_id = $2`, [shiftId, scope.organisation_id]);
+          const t = businessTables(m);
+          const [row] = await m.query<Array<{ status: string }>>(`SELECT status FROM ${t.shift} WHERE id = $1 AND organisation_id = $2`, [shiftId, scope.organisation_id]);
           return row?.status === 'completed' ? 'already_completed' : 'not_settled';
         });
         results.push({ shiftId, outcome, organisationId: scope.organisation_id, workspaceId: scope.workspace_id });

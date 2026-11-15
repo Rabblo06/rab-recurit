@@ -5,6 +5,7 @@ import { EntityManager, In } from 'typeorm';
 import { AuthContext } from '../../../engine/core-modules/tenant/auth-context.interface';
 import { PermissionsService } from '../../../engine/core-modules/permissions/permissions.service';
 import { ResourceScopeService, ResourceScope } from '../../../engine/core-modules/resource-scope/resource-scope.service';
+import { businessTables } from '../../../engine/core-modules/tenant/business-tables';
 import { TenantContextService } from '../../../engine/core-modules/tenant/tenant-context.service';
 import { MemberAccessPolicyService, ObjectAccessPolicy } from '../../identity/member-access/member-access-policy.service';
 import { ManagerProfile } from '../../manager/entities/manager-profile.entity';
@@ -125,15 +126,16 @@ export class DashboardService {
   }
 
   private async countStaff(manager: EntityManager, ctx: AuthContext, scope: ResourceScope, policy: ObjectAccessPolicy): Promise<{ total: number; active: number }> {
+    const t = businessTables(manager);
     const filter = this.memberAccess.rawWhere(policy, 'staff_profile', 3);
     const [{ total }] = await manager.query(
       // sql-injection-reviewed: interpolates a module-level SQL constant / constant fragment; every request value is a bound $n parameter.
-      `SELECT COUNT(*)::int AS total FROM staff_profile ${OWNER_WORKSPACE_PREDICATE} AND (${filter.sql})`,
+      `SELECT COUNT(*)::int AS total FROM ${t.staff_profile} ${OWNER_WORKSPACE_PREDICATE} AND (${filter.sql})`,
       [ctx.workspaceId, this.ownerOf(ctx, scope), ...filter.positional],
     );
     const [{ active }] = await manager.query(
       // sql-injection-reviewed: interpolates a module-level SQL constant / constant fragment; every request value is a bound $n parameter.
-      `SELECT COUNT(*)::int AS active FROM staff_profile ${OWNER_WORKSPACE_PREDICATE} AND employment_status = 'active' AND (${filter.sql})`,
+      `SELECT COUNT(*)::int AS active FROM ${t.staff_profile} ${OWNER_WORKSPACE_PREDICATE} AND employment_status = 'active' AND (${filter.sql})`,
       [ctx.workspaceId, this.ownerOf(ctx, scope), ...filter.positional],
     );
     return { total, active };
@@ -144,9 +146,10 @@ export class DashboardService {
       if (scope.venueIds.length === 0) return 0;
       return manager.count(Venue, { where: { id: In(scope.venueIds) } });
     }
+    const t = businessTables(manager);
     const filter = this.memberAccess.rawWhere(policy, 'venue', 3);
     // sql-injection-reviewed: interpolates a module-level SQL constant / constant fragment; every request value is a bound $n parameter.
-    const [{ count }] = await manager.query(`SELECT COUNT(*)::int AS count FROM venue ${OWNER_WORKSPACE_PREDICATE} AND (${filter.sql})`, [
+    const [{ count }] = await manager.query(`SELECT COUNT(*)::int AS count FROM ${t.venue} ${OWNER_WORKSPACE_PREDICATE} AND (${filter.sql})`, [
       ctx.workspaceId,
       this.ownerOf(ctx, scope),
       ...filter.positional,
@@ -155,13 +158,14 @@ export class DashboardService {
   }
 
   private async countActiveOffers(manager: EntityManager, ctx: AuthContext, scope: ResourceScope, policy: ObjectAccessPolicy): Promise<number> {
+    const t = businessTables(manager);
     if (scope.kind === 'venue') {
       if (scope.venueIds.length === 0) return 0;
       const [{ count }] = await manager.query(
         `SELECT COUNT(*)::int AS count
-           FROM job_offer o
-           JOIN shift_assignment sa ON sa.id = o.shift_assignment_id
-           JOIN shift s ON s.id = sa.shift_id
+           FROM ${t.job_offer} o
+           JOIN ${t.shift_assignment} sa ON sa.id = o.shift_assignment_id
+           JOIN ${t.shift} s ON s.id = sa.shift_id
           WHERE o.status = ANY($1) AND s.venue_id = ANY($2::uuid[])`,
         [ACTIVE_OFFER_STATUSES, scope.venueIds],
       );
@@ -173,9 +177,9 @@ export class DashboardService {
       const [{ count }] = await manager.query(
         // sql-injection-reviewed: dynamic WHERE assembled only from literal fragments and $n / :named placeholders (values pushed to params); identifiers come from allow-lists. Reviewed 2026-11-04.
         `SELECT COUNT(*)::int AS count
-           FROM job_offer o
-           JOIN shift_assignment sa ON sa.id = o.shift_assignment_id
-           JOIN shift s ON s.id = sa.shift_id
+           FROM ${t.job_offer} o
+           JOIN ${t.shift_assignment} sa ON sa.id = o.shift_assignment_id
+           JOIN ${t.shift} s ON s.id = sa.shift_id
           WHERE o.status = ANY($1) AND o.workspace_id = $2 AND o.created_by = $3 AND (${filter.sql})`,
         [ACTIVE_OFFER_STATUSES, ctx.workspaceId, this.ownerOf(ctx, scope), ...filter.positional],
       );
@@ -184,7 +188,7 @@ export class DashboardService {
     // PHASE 5.5 — `created_by`, not just `workspace_id`; see this file's
     // own `OWNER_WORKSPACE_PREDICATE` doc comment.
     const [{ count }] = await manager.query(
-      `SELECT COUNT(*)::int AS count FROM job_offer WHERE status = ANY($1) AND workspace_id = $2 AND created_by = $3`,
+      `SELECT COUNT(*)::int AS count FROM ${t.job_offer} WHERE status = ANY($1) AND workspace_id = $2 AND created_by = $3`,
       [ACTIVE_OFFER_STATUSES, ctx.workspaceId, this.ownerOf(ctx, scope)],
     );
     return count;

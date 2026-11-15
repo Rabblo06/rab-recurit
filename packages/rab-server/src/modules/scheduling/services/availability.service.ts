@@ -1,6 +1,8 @@
 import { Injectable } from '@nestjs/common';
 import { EntityManager } from 'typeorm';
 
+import { businessTables } from '../../../engine/core-modules/tenant/business-tables';
+
 /**
  * Single authoritative "is this Staff member busy?" calculation — reused by
  * every caller that needs it (the venue-facing staff directory/pool list,
@@ -42,9 +44,10 @@ export class AvailabilityService {
     excludeShiftId?: string,
   ): Promise<Set<string>> {
     if (staffProfileIds.length === 0) return new Set();
+    const t = businessTables(manager);
     const rows = await manager.query<{ staff_profile_id: string }[]>(
       `SELECT DISTINCT staff_profile_id
-         FROM shift_assignment
+         FROM ${t.shift_assignment}
         WHERE staff_profile_id = ANY($1::uuid[])
           AND status = 'confirmed'
           AND period && tstzrange($2, $3)

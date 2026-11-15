@@ -1,6 +1,7 @@
 import { DataSource, EntityManager, QueryRunner } from 'typeorm';
 
 import { AuthContext } from '../tenant/auth-context.interface';
+import { executingDataSourceOf } from '../tenant/schema-bound-entity-manager';
 
 /**
  * Phase X C5 (S0-C-caches.md §C5, XP-04): a TRANSACTION-LOCAL effective-permission set, so the layer-2 service checks in
@@ -51,7 +52,8 @@ export function memoRunnerFor(manager: EntityManager, primary: DataSource | unde
   const runner = manager.queryRunner;
   if (runner && (runner.isReleased || !runner.isTransactionActive)) memo.delete(runner); // its transaction is over
   if (!primary || !runner || runner.isReleased || !runner.isTransactionActive) return null;
-  if (manager.connection !== primary || runner.connection !== primary) return null;
+  // C2-1: a schema-bound manager's `connection` is a metadata-only source; compare the DataSource it executes on.
+  if (executingDataSourceOf(manager) !== primary || runner.connection !== primary) return null;
   return runner;
 }
 
