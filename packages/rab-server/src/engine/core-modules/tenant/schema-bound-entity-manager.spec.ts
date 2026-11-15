@@ -251,6 +251,46 @@ describe('schema-bound EntityManager (C2-1)', () => {
     expect(log.join('\n')).not.toContain(WS2);
   });
 
+  it('M1 (concurrent): two binds with different schemas racing on one runner — exactly one wins, and its save() stays in its schema', async () => {
+    const { manager, runner, log } = recordingManager(base);
+    const second = base.createEntityManager(runner); // another manager on the SAME runner (re-points runner.manager to it)
+    const own = await baseDataSource(); // cold cache: both builds really await
+    const [ra, rb] = await Promise.allSettled([
+      bindEntityManagerToSchema(Object.assign(manager, { connection: own }), WS),
+      bindEntityManagerToSchema(Object.assign(second, { connection: own }), WS2),
+    ]);
+    const outcomes = [ra.status, rb.status].sort();
+    expect(outcomes).toEqual(['fulfilled', 'rejected']);
+    const rejected = (ra.status === 'rejected' ? ra : rb) as PromiseRejectedResult;
+    expect(String(rejected.reason)).toMatch(/second schema on the same transaction/);
+    const winner = (ra.status === 'fulfilled' ? ra.value : (rb as PromiseFulfilledResult<EntityManager>).value) as EntityManager;
+    const winnerSchema = ra.status === 'fulfilled' ? WS : WS2;
+    const loserSchema = winnerSchema === WS ? WS2 : WS;
+    expect(runner.manager).toBe(winner);
+    log.length = 0;
+    await winner.save(winner.create(JobRole, { organisationId: ID, name: 'race', defaultRatePence: 0 }));
+    expect(log.some((sql) => sql.startsWith(`INSERT INTO "${winnerSchema}"."job_role"`))).toBe(true);
+    expect(log.join('\n')).not.toContain(loserSchema);
+  });
+
+  it('M1 (concurrent, same schema): two binds of the same schema on one runner share one manager', async () => {
+    const { manager, runner } = recordingManager(base);
+    const own = await baseDataSource();
+    Object.assign(manager, { connection: own });
+    const [x, y] = await Promise.all([bindEntityManagerToSchema(manager, WS), bindEntityManagerToSchema(manager, WS)]);
+    expect(x).toBe(y);
+    expect(runner.manager).toBe(x);
+  });
+
+  it('M1: a failed build releases the reservation, so the runner can still be bound afterwards', async () => {
+    const { manager } = recordingManager(base);
+    const bad = await builtBase({ entities: [C21Plain, C21Lookalike] });
+    Object.assign(manager, { connection: bad });
+    await expect(bindEntityManagerToSchema(manager, WS)).rejects.toThrow(/BaseEntity/);
+    Object.assign(manager, { connection: base });
+    await expect(bindEntityManagerToSchema(manager, WS2)).resolves.toBeDefined();
+  });
+
   it('M2: hits, builds and evictions are counted (no schema names in the counters)', async () => {
     const own = await baseDataSource();
     const before = schemaBoundMetadataStats();

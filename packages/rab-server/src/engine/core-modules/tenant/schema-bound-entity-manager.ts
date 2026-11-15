@@ -131,9 +131,26 @@ export async function bindEntityManagerToSchema(manager: EntityManager, schema: 
     throw new SchemaBoundEntityManagerError('refusing to bind a second schema on the same transaction');
   }
   if (currentInfo) return current; // already bound to this schema: persistence keeps using the same manager
+  // Reserve the runner's schema BEFORE the await, so a concurrent bind with another schema on the same runner is refused
+  // above instead of racing through the build (review re-check); released again if the build fails.
+  const reserved = recorded === undefined;
+  if (reserved) runnerSchemas.set(runner, schema);
   const existing = metadataSourceInfo.get(manager.connection);
-  const metadataSource = await metadataSourceFor(existing ? existing.base : manager.connection, schema);
-  runnerSchemas.set(runner, schema);
+  let metadataSource: DataSource;
+  try {
+    metadataSource = await metadataSourceFor(existing ? existing.base : manager.connection, schema);
+  } catch (error) {
+    if (reserved && runnerSchemas.get(runner) === schema) runnerSchemas.delete(runner);
+    throw error;
+  }
+  // Re-check after the await: a concurrent bind of the SAME schema may already have bound the runner; reuse its manager.
+  const now = runner.manager;
+  const nowInfo = now ? metadataSourceInfo.get(now.connection) : undefined;
+  if (nowInfo) {
+    if (nowInfo.schema !== schema) throw new SchemaBoundEntityManagerError('refusing to bind a second schema on the same transaction');
+    return now;
+  }
+  if (runnerSchemas.get(runner) !== schema) throw new SchemaBoundEntityManagerError('refusing to bind a second schema on the same transaction');
   // The EntityManager constructor assigns `runner.manager = this`: persistence and nested transactions use it from here on.
   const bound = new EntityManager(metadataSource, runner);
   if (runner.manager !== bound) throw new SchemaBoundEntityManagerError('the query runner was not re-pointed at the schema-bound manager');
