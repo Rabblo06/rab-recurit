@@ -13,6 +13,7 @@ import { PasswordHashingService } from '../../engine/core-modules/auth/services/
 import { TenantContextService } from '../../engine/core-modules/tenant/tenant-context.service';
 import { lastStepOfVersion } from '../../engine/core-modules/upgrade/upgrade-sequence';
 import { readAppVersion } from '../../engine/core-modules/upgrade/upgrade-version';
+import { syncStandardObjectsForNewWorkspace } from '../../engine/metadata/standard-objects/standard-objects-new-workspace';
 import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-pipe';
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { metadataCatalogDifferences } from './helpers/standard-metadata-equivalence';
@@ -34,6 +35,7 @@ describeIfDb('M1 / E2: a new workspace gets its standard objects (integration)',
   let adminDs: DataSource;
   let admin: Client;
   let factory: TestIdentityFactory;
+  let made: { id: string; org: string } | undefined;
 
   beforeAll(async () => {
     const moduleRef = await Test.createTestingModule({ imports: [AppModule] }).compile();
@@ -68,6 +70,7 @@ describeIfDb('M1 / E2: a new workspace gets its standard objects (integration)',
     const id = created.body.id as string;
     const [ws] = (await admin.query(`SELECT id::text, organisation_id::text AS org, schema_status FROM core.manager_workspace WHERE id = $1`, [id])).rows;
     expect(ws.schema_status).toBe('READY');
+    made = { id, org: ws.org };
 
     const counts = (await admin.query(
       `SELECT (SELECT count(*) FROM core.object_metadata WHERE workspace_id = $1)::int AS objects,
@@ -82,6 +85,30 @@ describeIfDb('M1 / E2: a new workspace gets its standard objects (integration)',
     const initial = (await admin.query(`SELECT name, status FROM core.upgrade_migration WHERE workspace_id = $1 AND is_initial`, [id])).rows;
     expect(initial).toEqual([{ name: lastStepOfVersion(readAppVersion()), status: 'completed' }]);
     expect(initial[0].name).toMatch(/^0\.6\.0_SyncStandardObjects_\d{13}$/);
+  });
+
+  it('the privileged section does not leak: after the sync the session is back to the runtime login, and a request-path write of built-in metadata is refused (42501)', async () => {
+    expect(made).toBeDefined();
+    const runtime = app.get(DataSource);
+    const code = (e: unknown) => (e as { code?: string; driverError?: { code?: string } })?.driverError?.code ?? (e as { code?: string })?.code;
+    await runtime.transaction(async (m) => {
+      const q = (sql: string, p?: unknown[]) => m.query(sql, p) as Promise<unknown[]>;
+      await q(`SELECT set_config('rab.organisation_id', $1, true)`, [made!.org]);
+      const before = (await q(`SELECT current_user::text AS u, current_setting('role') AS r`)) as Array<{ u: string; r: string }>;
+      // The same helper createFor calls (a no-op sync here: the workspace already holds its metadata).
+      const report = await syncStandardObjectsForNewWorkspace(q, { id: made!.id, organisationId: made!.org });
+      expect(Object.values(report).every((n) => n === 0)).toBe(true);
+      const after = (await q(`SELECT current_user::text AS u, current_setting('role') AS r, (current_user = session_user) AS same`)) as Array<{ u: string; r: string; same: boolean }>;
+      expect(after[0]).toEqual({ ...before[0], same: true });
+      expect(after[0]!.u).not.toBe('crewflow');
+      await q(`SELECT set_config('rab.workspace_id', $1, true)`, [made!.id]);
+      await q('SAVEPOINT probe');
+      const err = await q(`UPDATE core.field_metadata SET is_sensitive = false WHERE workspace_id = $1 AND physical_column = 'earned_pence'`, [made!.id]).catch((e: unknown) => e);
+      expect(code(err)).toBe('42501');
+      await q('ROLLBACK TO SAVEPOINT probe');
+    });
+    const still = (await admin.query(`SELECT count(*)::int AS n FROM core.field_metadata WHERE workspace_id = $1 AND physical_column = 'earned_pence' AND is_sensitive AND is_locked AND is_money`, [made!.id])).rows[0].n;
+    expect(still).toBe(1);
   });
 
   it('the runtime login with no tenant context bound sees no metadata rows (FORCE RLS, fail closed)', async () => {
