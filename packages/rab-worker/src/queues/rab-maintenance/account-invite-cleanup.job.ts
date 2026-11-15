@@ -3,6 +3,13 @@ import { DataSource, EntityManager } from 'typeorm';
 import { SUPPORTED_WORKSPACE_SCHEMA_VERSIONS, workspaceSchemaName } from '@rab/server/engine/core-modules/tenant/schema-resolver.service';
 import { shipAuditRowAfterCommit } from '@rab/server/engine/core-modules/audit-events/audit-event-shipping';
 import { isUpgradeBlocked } from '@rab/server/engine/core-modules/upgrade/workspace-upgrade-block';
+import {
+  bindBusinessSchema,
+  businessSearchPath,
+  CORE_BUSINESS_SCHEMA,
+  restoreBusinessSchema,
+  snapshotBusinessSchema,
+} from '@rab/server/engine/core-modules/tenant/business-tables';
 
 const WORKSPACE_UPGRADING = Symbol('workspace-upgrading');
 
@@ -265,6 +272,8 @@ export async function runAccountInviteCleanupCycle(
         // successful delete/expire in this same transaction. Same per-row
         // SAVEPOINT isolation this codebase already uses for exactly this
         // reason (`OfferService.sendBulk`/`approveShiftRequest`).
+        // C2-0 (review #4): ROLLBACK TO SAVEPOINT reverts search_path but not the businessTables binding: snapshot it here.
+        const bindingAtSavepoint = snapshotBusinessSchema(manager);
         await manager.query('SAVEPOINT sp_invite_cleanup_candidate');
         try {
           const blockingReason = await findBlockingDependency(manager, candidate.id);
@@ -286,6 +295,7 @@ export async function runAccountInviteCleanupCycle(
           await writeAuditRow(manager, candidate.organisation_id, null, 'user.invite_cleaned_up', { deletedUserId: candidate.id });
         } catch (error) {
           await manager.query('ROLLBACK TO SAVEPOINT sp_invite_cleanup_candidate');
+          restoreBusinessSchema(manager, bindingAtSavepoint);
           // Safe identifiers only — never the raw error object into audit
           // metadata (could carry a query fragment or other internal detail).
           await writeAuditRow(manager, candidate.organisation_id, candidate.id, 'user.invite_cleanup_failed', {
@@ -362,6 +372,8 @@ async function runDefinerCleanup(manager: EntityManager): Promise<AccountInviteC
     if (candidates.length === 0) break;
 
     for (const candidate of candidates) {
+      // C2-0 (review #4): ROLLBACK TO SAVEPOINT reverts search_path but not the businessTables binding: snapshot it here.
+      const bindingAtSavepoint = snapshotBusinessSchema(manager);
       await manager.query('SAVEPOINT sp_invite_cleanup_candidate');
       try {
         // Any reason the DEFINER reports for a candidate it returns (today: manager_workspace / platform_admin; the N-4
@@ -388,6 +400,7 @@ async function runDefinerCleanup(manager: EntityManager): Promise<AccountInviteC
         }
       } catch (error) {
         await manager.query('ROLLBACK TO SAVEPOINT sp_invite_cleanup_candidate');
+        restoreBusinessSchema(manager, bindingAtSavepoint);
         await writeAuditRow(manager, candidate.organisation_id, candidate.user_id, 'user.invite_cleanup_failed', {
           reason: error instanceof Error ? error.constructor.name : 'unknown_error',
         });
@@ -493,6 +506,8 @@ async function findBlockingDependency(
       ]
     : await manager.query(`SELECT id, organisation_id FROM core.manager_workspace
     WHERE organisation_id = (SELECT organisation_id FROM core."user" WHERE id=$1) ORDER BY id`, [userId]);
+  // C2-0: the businessTables(manager) binding follows every search_path switch below and is put back on exit (review #4).
+  const entryBinding = snapshotBusinessSchema(manager);
   try {
     if (!definerScopes) {
       for (const [reason, sql] of GLOBAL_TABLE_DEPENDENCY_CHECKS) {
@@ -503,8 +518,10 @@ async function findBlockingDependency(
     // Include the original org context for org-wide references, even with no workspace (definer path: the scopes above
     // already start with the candidate's organisation-wide scope).
     for (const scope of definerScopes ? scopes : [{ id: previous.workspace ?? '', organisation_id: previous.org ?? '' }, ...scopes]) {
-      await manager.query(`SELECT set_config('rab.organisation_id',$1,true), set_config('rab.workspace_id',$2,true), set_config('search_path','core',true)`,
-        [scope.organisation_id, scope.id]);
+      // C2-0: the binding is recorded (validated) before each search_path switch in this loop ('' under the test-only trap).
+      bindBusinessSchema(manager, CORE_BUSINESS_SCHEMA, null);
+      await manager.query(`SELECT set_config('rab.organisation_id',$1,true), set_config('rab.workspace_id',$2,true), set_config('search_path',$3,true)`,
+        [scope.organisation_id, scope.id, businessSearchPath(CORE_BUSINESS_SCHEMA)]);
       for (const [reason, sql] of WORKSPACE_TABLE_DEPENDENCY_CHECKS) {
         if ((await manager.query(sql, [userId])).length > 0) return reason;
       }
@@ -516,16 +533,22 @@ async function findBlockingDependency(
       const physicalSchema = await resolveReadyPhysicalSchema(manager, scope.id);
       if (physicalSchema === WORKSPACE_UPGRADING) return 'workspace_upgrading';
       if (!physicalSchema) continue;
-      await manager.query(`SELECT set_config('search_path',$1,true)`, [physicalSchema]);
+      bindBusinessSchema(manager, physicalSchema, scope.id);
+      await manager.query(`SELECT set_config('search_path',$1,true)`, [businessSearchPath(physicalSchema)]);
       for (const [reason, sql] of WORKSPACE_TABLE_DEPENDENCY_CHECKS) {
         if ((await manager.query(sql, [userId])).length > 0) return `${reason}_physical`;
       }
-      await manager.query(`SELECT set_config('search_path','core',true)`);
+      bindBusinessSchema(manager, CORE_BUSINESS_SCHEMA, null);
+      await manager.query(`SELECT set_config('search_path',$1,true)`, [businessSearchPath(CORE_BUSINESS_SCHEMA)]);
     }
     return null;
   } finally {
-    await manager.query(`SELECT set_config('rab.organisation_id',$1,true), set_config('rab.workspace_id',$2,true), set_config('search_path','core',true)`,
-      [previous.org ?? '', previous.workspace ?? '']);
+    // The entry binding comes back (review #4: not 'core'), and search_path with it: the entry schema when one was bound,
+    // else 'core' exactly as before. The binding is restored first: if this statement fails (an aborted transaction), the
+    // caller's ROLLBACK TO SAVEPOINT reverts search_path and restores its own snapshot.
+    restoreBusinessSchema(manager, entryBinding);
+    await manager.query(`SELECT set_config('rab.organisation_id',$1,true), set_config('rab.workspace_id',$2,true), set_config('search_path',$3,true)`,
+      [previous.org ?? '', previous.workspace ?? '', businessSearchPath(entryBinding.schema ?? CORE_BUSINESS_SCHEMA)]);
   }
 }
 

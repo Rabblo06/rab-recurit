@@ -1,3 +1,6 @@
+import { peekBusinessSchema } from '@rab/server/engine/core-modules/tenant/business-tables';
+import { workspaceSchemaName } from '@rab/server/engine/core-modules/tenant/schema-resolver.service';
+
 import { InviteAutoDeleteConfigError, resolveInviteAutoDeleteEnabled, runAccountInviteCleanupCycle } from './account-invite-cleanup.job';
 import { MaintenanceScanProcessor } from './maintenance.processors';
 
@@ -103,9 +106,13 @@ describe('account invite cleanup — F-1 definer path (WORKER_INVITE_AUTO_DELETE
     // The definer reported the global blocks: the Worker no longer reads core.platform_admin / manager_workspace / refresh_token.
     expect(h.statements.some((s) => /core\.platform_admin|core\.refresh_token|FROM core\.manager_workspace/.test(s.sql))).toBe(false);
     // Workspace history checks ran bound to the candidate's own organisation and workspace (only ORG's workspace).
-    const binds = h.statements.filter((s) => s.sql.startsWith(`SELECT set_config('rab.organisation_id',$1,true), set_config('rab.workspace_id',$2,true)`)).map((s) => s.params);
-    expect(binds).toContainEqual([ORG, WS]);
-    expect(binds).not.toContainEqual([OTHER_ORG, OTHER_WS]);
+    // C2-0: the search_path is now the bound $3 ('core'; '' only under the test-only trap), not a literal in the SQL text.
+    const binds = h.statements
+      .filter((s) => s.sql.startsWith(`SELECT set_config('rab.organisation_id',$1,true), set_config('rab.workspace_id',$2,true)`))
+      .map((s) => s.params);
+    expect(binds.every((params) => params[2] === 'core')).toBe(true);
+    expect(binds.map((params) => params.slice(0, 2))).toContainEqual([ORG, WS]);
+    expect(binds.map((params) => params.slice(0, 2))).not.toContainEqual([OTHER_ORG, OTHER_WS]);
     // Deletes only through the definer, never for a blocked candidate.
     const deletes = h.statements.filter((s) => s.sql.includes('core.worker_delete_expired_invited_user($1')).map((s) => s.params[0]);
     expect(deletes).toEqual([U(11), U(12)]);
@@ -141,6 +148,44 @@ describe('account invite cleanup — F-1 definer path (WORKER_INVITE_AUTO_DELETE
     expect(sql).toContain('ROLLBACK TO SAVEPOINT sp_invite_cleanup_candidate');
     expect(h.audits()).toEqual([['user.invite_cleanup_failed', U(20), { reason: 'TypeError' }]]);
     expect(result).toEqual({ expired: 0, deleted: 0, retained: 0 });
+  });
+
+  it('C2-0 review #4: a dependency query that throws after the physical-schema bind leaves the businessTables binding at its entry state', async () => {
+    const at = new Date('2026-10-01T00:00:00Z');
+    const h = harness({ usable: true, candidates: [{ user_id: U(30), organisation_id: ORG, cleanup_at: at, blocking_reason: null }] });
+    const original = h.dataSource.transaction;
+    let manager: { query: (sql: string, p?: unknown[]) => Promise<unknown> } | undefined;
+    const boundAtThrow: Array<string | undefined> = [];
+    h.dataSource.transaction = async <T>(fn: (m: unknown) => Promise<T>) =>
+      original(async (m: unknown) => {
+        const inner = m as { query: (sql: string, p?: unknown[]) => Promise<unknown> };
+        let physical = false;
+        let aborted = false;
+        manager = {
+          query: async (sql: string, p?: unknown[]) => {
+            if (sql === 'ROLLBACK TO SAVEPOINT sp_invite_cleanup_candidate') aborted = false;
+            else if (aborted) throw new Error('current transaction is aborted'); // 25P02, like PostgreSQL
+            if (sql.includes('workspace_schema_registry')) {
+              await inner.query(sql, p);
+              physical = true;
+              return [{ schema_name: workspaceSchemaName(WS), status: 'READY', schema_version: 1, migration_error: null }];
+            }
+            if (physical && sql === `SELECT 1 FROM shift WHERE created_by = $1 LIMIT 1`) {
+              boundAtThrow.push(peekBusinessSchema(manager as never));
+              aborted = true;
+              throw new TypeError('boom');
+            }
+            return inner.query(sql, p);
+          },
+        };
+        return fn(manager);
+      });
+    await runAccountInviteCleanupCycle(h.dataSource as never, ON);
+    expect(boundAtThrow).toEqual([workspaceSchemaName(WS)]); // the physical schema was bound when the query failed
+    expect(peekBusinessSchema(manager as never)).toBeUndefined(); // entry state (this owner transaction was never bound)
+    // The dependency check's finally runs its restoring set_config in the aborted transaction, so that error (not the
+    // TypeError) reaches the catch, exactly as PostgreSQL behaves; the savepoint rollback then cleans up.
+    expect(h.audits()).toEqual([['user.invite_cleanup_failed', U(30), { reason: 'Error' }]]);
   });
 });
 

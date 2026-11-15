@@ -36,9 +36,11 @@ function replicaStub(route: ReplicaRoute, retry = true) {
   } as unknown as PgReplicaService;
 }
 
+/** C2-0: a canonical workspace id; the HWS-on schema below (workspace_deadbeef…) is its registry name, as businessTables requires. */
+const WS_ID = 'deadbeef-dead-beef-dead-beefdeadbeef';
 const env = (hws: boolean) => ({ get: jest.fn().mockReturnValue(hws) }) as unknown as EnvironmentService;
-const resolver = () => ({ resolve: jest.fn().mockResolvedValue('workspace_abc') }) as unknown as SchemaResolverService;
-const CTX = { organisationId: 'org-1', workspaceId: 'ws-1', userId: 'user-1', role: 'MANAGER' };
+const resolver = () => ({ resolve: jest.fn().mockResolvedValue('workspace_deadbeefdeadbeefdeadbeefdeadbeef') }) as unknown as SchemaResolverService;
+const CTX = { organisationId: 'org-1', workspaceId: WS_ID, userId: 'user-1', role: 'MANAGER' };
 
 describe('TenantContextService useReplica (B4)', () => {
   beforeEach(() => databaseMetrics.reset());
@@ -90,7 +92,7 @@ describe('TenantContextService useReplica (B4)', () => {
     expect(primary.calls.join()).not.toContain('search_path');
     const bind = (rep.manager.query as jest.Mock).mock.calls.find((c) => c[0].includes('search_path'));
     expect(bind[0]).toMatch(/^SELECT set_config\('rab.organisation_id'.*set_config\('search_path', \$6, true\)/);
-    expect(bind[1][5]).toBe('workspace_abc');
+    expect(bind[1][5]).toBe('workspace_deadbeefdeadbeefdeadbeefdeadbeef');
     expect(rep.calls).not.toContain(`SELECT set_config('search_path', $1, true)`);
   });
 
