@@ -1840,6 +1840,20 @@ describeIfDb('venue manager scoping (integration)', () => {
         await untouched(s.attendanceId!);
       });
 
+      it('the bound is the staff member OWN end: seat ending 1 h before the shift, seatEnd + 121 min refused although inside shiftEnd + 120', async () => {
+        const s = await seedSeat({ status: 'missing_clock_out', endedAgoMs: 3 * HOUR });
+        await adminDataSource.query(
+          `UPDATE core.shift_assignment SET period = tstzrange(lower(period), upper(period) - interval '1 hour', '[)') WHERE shift_id = $1`, [s.shiftId]);
+        const [{ seat_end: seatEnd }] = await adminDataSource.query(`SELECT upper(period) AS seat_end FROM core.shift_assignment WHERE shift_id = $1`, [s.shiftId]);
+        const { endsAt } = await times(s.shiftId);
+        const out = new Date((seatEnd as Date).getTime() + 121 * MIN);
+        expect(out.getTime()).toBeLessThanOrEqual(endsAt.getTime() + 120 * MIN); // inside the SHIFT's window
+        const res = await correct(s.vmToken, s.attendanceId!, { field: 'clockOutAt', newValue: out.toISOString(), reason });
+        expect(res.status).toBe(422);
+        expect(res.body).toMatchObject({ code: 'INVALID_CLOCK_OUT_TIME', reason: 'after_clock_out_window' });
+        await untouched(s.attendanceId!);
+      });
+
       it('refuses a clock-out in the future (422 in_future)', async () => {
         const s = await seedSeat({ status: 'missing_clock_out', endedAgoMs: 3 * HOUR });
         const res = await correct(s.vmToken, s.attendanceId!, { field: 'clockOutAt', newValue: new Date(Date.now() + 10 * MIN).toISOString(), reason });

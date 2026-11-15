@@ -210,11 +210,10 @@ export class ReasonTooShortException extends BadRequestException {
 
 /**
  * QR review L4 (owner decision 2026-11-15): a manager-corrected / recovered clock-out time must lie inside
- * [clockInAt, the staff member's own end + QR_POST_SHIFT_GRACE_MINUTES] and not in the future (server clock).
+ * [clockInAt, the staff member's own end + QR_POST_SHIFT_GRACE_MINUTES] and not in the future (database clock).
  */
 export class InvalidClockOutTimeException extends UnprocessableEntityException {
   constructor(reason: 'before_clock_in' | 'after_clock_out_window' | 'in_future', message: string) {
     super({ statusCode: 422, code: 'INVALID_CLOCK_OUT_TIME', reason, message });
   }
 }
-

@@ -772,6 +772,7 @@ Notification `type` values are listed in `packages/rab-shared/src/types/notifica
 | LOCATION_STALE | 409 | — | same |
 | OUTSIDE_GEOFENCE | 409 | `venueName` | check-in, clock-in, clock-out (was `OUTSIDE_VENUE`) |
 | GEOFENCE_MISCONFIGURED | 409 | — | strict punches, clock-in-on-behalf |
+| SHIFT_ENDED | 409 | — | `POST /shifts/:id/rotate-qr` (manager web) once the shift's end has passed by the database clock; `qr_version` is unchanged |
 | INVALID_CLOCK_OUT_TIME | 422 | `reason: in_future\|before_clock_in\|after_clock_out_window` | attendance correct (`clockOutAt`) |
 | INVALID_QR | 409 | `reason: expired\|invalid\|shift_mismatch\|venue_mismatch\|revoked` (`revoked`: a manager replaced the shift's QR via `POST /shifts/:id/rotate-qr`; scan the current one. `expired`: past the staff member's own end + 120 min, or the QR is more than 14 days old) | check-in (when a QR is sent), clock-in, clock-out |
 | ATTENDANCE_FLAGGED_MISSING | 409 | — | check-in, clock-in, clock-in-on-behalf |

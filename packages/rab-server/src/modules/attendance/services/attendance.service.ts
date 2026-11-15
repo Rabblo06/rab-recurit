@@ -61,6 +61,7 @@ import {
   ClockInTooEarlyException,
   ClockWindowClosedException,
   GeofenceMisconfiguredException,
+  InvalidClockOutTimeException,
   LocationAccuracyTooLowException,
   locationEvidenceException,
   NotClockedInException,
@@ -68,7 +69,6 @@ import {
   PresenceNotVerifiedException,
   ReasonTooShortException,
   StaffNotCheckedInException,
-  InvalidClockOutTimeException,
 } from '../exceptions/attendance.exceptions';
 import { AttendanceQrService } from './attendance-qr.service';
 import { isPastClockOutGrace } from './missing-clock-out-policy';
