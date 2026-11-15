@@ -321,10 +321,28 @@ describeIfDb('C2-1 schema-bound EntityManager: the 14 workspace entities issue s
       await m.update(ReplacementRequest, { id: rr.id }, { notifiedUserId: ws.manager.userId });
       expect(await m.createQueryBuilder(ReplacementRequest, 'r').where('r.shiftId = :id', { id: ws.shiftId }).getCount()).toBe(1);
 
-      // UserNote: insert, delete (one kept for the landing check).
-      const note = await m.insert(UserNote, { organisationId: org, workspaceId, subjectUserId: ws.staff.userId, authorUserId: ws.manager.userId, body: 'c21 kept' });
-      const gone = await m.insert(UserNote, { organisationId: org, workspaceId, subjectUserId: ws.staff.userId, authorUserId: ws.manager.userId, body: 'c21 deleted' });
-      expect((await m.delete(UserNote, { id: gone.identifiers[0]!.id })).affected).toBe(1);
+      // UserNote: insert, query builder select, delete (one kept for the landing check). The insert has the product's shape
+      // (UserNoteService.add). With HWS on it is the entity insert. With HWS off the legacy core.user_note has NO workspace_id
+      // column, and an entity INSERT always lists every mapped column, so the product inserts with raw SQL there; this spec
+      // does the same through businessTables() (qualified, so it holds under the trap too). Select and delete are entity calls
+      // in both modes, as in the product.
+      const insertNote = async (body: string): Promise<string> => {
+        if (hwsRuntimeOn()) {
+          const r = await m.insert(UserNote, { organisationId: org, workspaceId, subjectUserId: ws.staff.userId, authorUserId: ws.manager.userId, body });
+          return r.identifiers[0]!.id as string;
+        }
+        const rows: Array<{ id: string }> = await m.query(
+          `INSERT INTO ${businessTables(m).user_note} (organisation_id, subject_user_id, author_user_id, body) VALUES ($1, $2, $3, $4) RETURNING id`,
+          [org, ws.staff.userId, ws.manager.userId, body],
+        );
+        return rows[0]!.id;
+      };
+      const noteId = await insertNote('c21 kept');
+      const goneId = await insertNote('c21 deleted');
+      expect(
+        await m.createQueryBuilder(UserNote, 'n').select(['n.id AS id']).where('n.subject_user_id = :s', { s: ws.staff.userId }).getRawMany(),
+      ).toHaveLength(2);
+      expect((await m.delete(UserNote, { id: goneId })).affected).toBe(1);
 
       // ManagerVenue: insert, query builder select with innerJoin (resource-scope's shape).
       await m.insert(ManagerVenue, { organisationId: org, managerProfileId: ws.manager.profileId!, venueId: ws.venueId, workspaceId });
@@ -342,7 +360,7 @@ describeIfDb('C2-1 schema-bound EntityManager: the 14 workspace entities issue s
       // Fail closed: nothing may open its own connection from the bound manager's metadata source.
       await expect(m.connection.manager.find(Shift)).rejects.toThrow(/not Connected/i);
 
-      return { venue2: venue2.id, role2: role2.id, rate: rate.id, attendanceId, correction: correction.id, report: report.id, rr: rr.id, note: note.identifiers[0]!.id as string };
+      return { venue2: venue2.id, role2: role2.id, rate: rate.id, attendanceId, correction: correction.id, report: report.id, rr: rr.id, note: noteId };
     });
 
     const seen = expectQualified(ids.statements, ws.schema);
