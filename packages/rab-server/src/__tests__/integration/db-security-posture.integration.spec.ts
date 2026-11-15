@@ -30,7 +30,7 @@ describeIfDb('database security posture (integration)', () => {
       const [who] = (await client.query(`SELECT current_user AS u, r.rolsuper AS s, r.rolbypassrls AS b FROM pg_roles r WHERE r.rolname = current_user`)).rows;
       // I-class (owner-login architecture, BC-02): the one runtime login is crewflow_owner; NOSUPERUSER / NOBYPASSRLS kept.
       // The only other runtime accepted here is crewflow_app on the LEGACY separated database that ci-migration-security's
-      // restricted-migrator job still builds (LEGACY, REMOVE IN PR #9): there the original separated-mode assertions run
+      // restricted-migrator job still builds (LEGACY, removed with the separated-mode retirement): there the original separated-mode assertions run
       // unchanged, the runtime login itself must be refused (42501).
       expect(['crewflow_owner', 'crewflow_app']).toContain(who.u);
       expect({ s: who.s, b: who.b }).toEqual({ s: false, b: false });
@@ -87,7 +87,7 @@ describeIfDb('database security posture (integration)', () => {
   // non-RLS reference tables core.permission and core.migrations are writable by the one runtime login (it inherits crewflow's
   // S,I,U,D,T). Reproduced on REAL rows inside a transaction that is always rolled back; the totals are checked afterwards.
   // The schema role crewflow_app is still refused (CF-09 above). On the LEGACY separated database the runtime login is
-  // crewflow_app and this reproduction does not apply (CF-09 asserts its 42501 there; REMOVE IN PR #9).
+  // crewflow_app and this reproduction does not apply (CF-09 asserts its 42501 there; removed with the separated-mode retirement).
   it('REF-1: the runtime login can rewrite core.permission and core.migrations rows (owner-accepted 2026-11-04; rolled back)', async () => {
     const client = new Client({ connectionString: appUrl });
     await client.connect();

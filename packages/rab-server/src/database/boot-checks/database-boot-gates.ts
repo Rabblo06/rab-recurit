@@ -5,8 +5,8 @@
  *   API        packages/rab-server/src/main.ts           runDatabaseBootGates('api')
  *   Worker     packages/rab-worker/src/main.ts (jobs)    runDatabaseBootGates('worker')
  *   CLI        packages/rab-server/src/command/main.ts   runDatabaseBootGates('cli', { cliCommand: <argv command> })
- *   Provisioner packages/rab-worker/src/workspace-provisioner.main.ts  runDatabaseBootGates('provisioner') — on its
- *              privileged provisioning connection (the elevated endpoint when one is configured), expecting `crewflow`
+ *   Provisioner runDatabaseBootGates('provisioner') — the role the separate provisioner process used (that process,
+ *              workspace-provisioner.main.ts, was removed in X5.1; the role and its guards stay until the legacy names go)
  *
  * Gates, in order (each refusal names the gate and an action, never a URL, user name or password):
  *   1. role      (owner-login architecture, owner's final decision 2026-11-04) current_user AND session_user are the owner

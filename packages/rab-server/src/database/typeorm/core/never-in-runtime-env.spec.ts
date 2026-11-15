@@ -119,7 +119,7 @@ describe('never-in-runtime-env (security review L-4): one list, two enforcers', 
         expect(runtimeEnvRefusal({ NODE_ENV: 'development', [name]: 'x' }, processName)?.name).toBe(name);
       }
     }
-    // The superseded separate provisioner process (unused; removed in the final clean-up PR) is left exactly as it was.
+    // The provisioner process role (the separate process was removed in X5.1; the role stays until X3.5-S8) is left exactly as it was.
     for (const name of OWNER_LOGIN_NAMES) expect(forbiddenRuntimeEnvNames('provisioner')).not.toContain(name);
     // Actionable messages: the legacy name says what to rename it to.
     expect(runtimeEnvRefusal({ DATABASE_URL: 'x' }, 'api')?.why).toMatch(/Rename it to PG_DATABASE_URL/);

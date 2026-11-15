@@ -162,7 +162,7 @@ interface Row {
  * both `worker_list_organisations` and, after this same checkpoint's fix, `worker_list_workspaces`
  * are already granted to `crewflow_app`). Removing the separate connection removes one of this
  * command's two reasons to ever see `DATABASE_URL_UNPOOLED` at all — the only remaining privileged
- * consumer in this whole package is the separate workspace-provisioner entrypoint.
+ * consumer was the separate workspace-provisioner entrypoint (removed in X5.1).
  *
  * Phase A (storage) — cost and concurrency, same report shape and same safety rules:
  *  - ONE reconciliation at a time, cluster-wide (CLI and every Worker replica): `STORAGE_RECONCILE_LOCK`, see above.

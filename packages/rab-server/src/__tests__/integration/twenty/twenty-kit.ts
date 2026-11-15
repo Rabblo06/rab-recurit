@@ -66,7 +66,7 @@ export const ACCEPTED = {
   persistence: 'OWNER-ACCEPTED (§2: persistence through roles or definers)',
   credentialExposure: 'OWNER-ACCEPTED (§2: credential-exposure impact)',
 } as const;
-/** NOT in §2: each needs explicit owner approval before the final removal PR (#9). */
+/** NOT in §2: each needs explicit owner approval before the separated-mode retirement (the final removal). */
 export const APPROVAL = {
   dba01: 'NEEDS OWNER APPROVAL (not in §2: loss of DBA-01 API/Worker separation)',
   deploymentIdentity: 'NEEDS OWNER APPROVAL (not in §2: deployment identity rebindable by the runtime)',

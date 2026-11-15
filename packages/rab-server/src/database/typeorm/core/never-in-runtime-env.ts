@@ -88,7 +88,8 @@ export const NEVER_IN_RUNTIME_ENV: readonly NeverInRuntimeEnvEntry[] = Object.fr
   // Owner-login architecture (PERMANENT-OWNER-LOGIN-ADDENDUM): one PG_DATABASE_URL. Legacy and second database URLs and role
   // passwords are refused in the API and Worker. (The removed CREWFLOW_DB_MODE is refused by runtime-db-config.ts, which the
   // runtime guard also runs, with its own actionable message.) `allowedIn: ['provisioner']` leaves the
-  // superseded separate provisioner process exactly as it was until the final clean-up PR removes it (it is unused).
+  // provisioner process role exactly as it was (the separate process was removed in X5.1; the role stays until the legacy
+  // names are refused everywhere, X3.5-S8).
   { name: 'DATABASE_URL', why: `It is the retired name of PG_DATABASE_URL. Rename it to PG_DATABASE_URL (the one owner-login URL).`, ...OWNER_LOGIN },
   { name: 'DATABASE_DIRECT_URL', why: ONE_URL, ...OWNER_LOGIN },
   { name: 'PG_DATABASE_REPLICA_URL', why: ONE_URL, ...OWNER_LOGIN },

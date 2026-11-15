@@ -46,9 +46,10 @@
  *     pre-0b CREATE window, phase B as crewflow_owner, the fresh-only ROW_COPY shim). With nothing pending, a ledger AHEAD of
  *     the code is a warning, never a refusal (C-1), so an image rollback stays healthy.
  *   - any other login (the CF-41 superuser of a disposable/local cluster, or a restricted migrator): the LEGACY path,
- *     unchanged, logged loudly. RETAINED ONLY UNTIL PR #9 (REMOVE AFTER VERIFIED REPLACEMENT): today's production and
- *     every existing CI / compose flow still build and migrate through it.
- * The approval gate: the upgrade floor (owner login, unless fresh) or N1 (legacy path, unchanged until the clean-up PR), then
+ *     unchanged, logged loudly. RETAINED ONLY UNTIL THE SEPARATED-MODE RETIREMENT (every separated database
+ *     transitioned, MIX-1; REMOVE AFTER VERIFIED REPLACEMENT): the restricted-migrator CI job, setup-db and the
+ *     recovery of a separated database still build and migrate through it.
+ * The approval gate: the upgrade floor (owner login, unless fresh) or N1 (legacy path, unchanged until the separated-mode retirement), then
  * F5 as before — approvePending when the
  * caller supplies it, required for a production apply run unless `approvalMode: 'none'` (the migrate-on-start child with
  * CREWFLOW_MIGRATION_APPROVAL_MODE=none; never deploy-prepare).
@@ -206,7 +207,7 @@ export interface LockedMigrationOptions {
   approvalMode?: 'none' | 'token';
   /**
    * The migrate-on-start child: refuse any login other than crewflow_owner (the legacy CF-41 path exists only for the
-   * retained deploy-prepare / setup-db flows until PR #9; a runtime child must never fall back to it).
+   * retained deploy-prepare / setup-db flows until the separated-mode retirement; a runtime child must never fall back to it).
    */
   requireOwnerLogin?: boolean;
   /** Server-side check for a vanished client, in seconds (the child sets 1; M0-C: a killed holder otherwise keeps the lock). */
@@ -243,14 +244,14 @@ export interface LockedMigrationResult {
   currentUser: string;
   /** PostgreSQL major of the server (read after the lock). */
   serverMajor?: number;
-  /** Which path ran: the owner-login lifecycle, or the legacy CF-41 path (until PR #9). */
+  /** Which path ran: the owner-login lifecycle, or the legacy CF-41 path (until the separated-mode retirement). */
   path?: 'owner-login' | 'legacy';
   ownerLogin?: { classification: Classification; proof: FreshInstallProof; bootstrap: BootstrapResult | null };
 }
 
 /**
  * D4: the workspace fingerprints of the server's major. The owner login refuses below 16 and any major without reviewed
- * fingerprints. The legacy path (until PR #9) selects 16 or 18 when it is one of them and otherwise keeps today's
+ * fingerprints. The legacy path (until the separated-mode retirement) selects 16 or 18 when it is one of them and otherwise keeps today's
  * behaviour (the PG16 table, so a mismatch fails closed at the fingerprint comparison), with a warning.
  */
 export function selectFingerprintsForRun(serverVersionNum: string, strict: boolean, log: (line: string) => void): number {
@@ -413,7 +414,7 @@ export async function runLockedMigrations(options: LockedMigrationOptions): Prom
     }
     if (!ownerLogin) {
       log(
-        '*** LEGACY migration identity (not crewflow_owner): the separated-layout CF-41 path is RETAINED ONLY UNTIL PR #9. ' +
+        '*** LEGACY migration identity (not crewflow_owner): the separated-layout CF-41 path is RETAINED ONLY UNTIL THE SEPARATED-MODE RETIREMENT (every separated database transitioned). ' +
           'Move this deployment to the owner login (packages/rab-docker/postgres-init/owner-login/). ***',
       );
     }

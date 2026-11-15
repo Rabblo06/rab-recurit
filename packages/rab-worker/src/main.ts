@@ -115,12 +115,11 @@ import { redisTimerTriggerOutcomeRecorder } from './queues/rab-timer-triggers/ti
  * enumeration also now run on `runtimeDataSource` — both were audited and found to need only
  * ordinary grants (never ownership or DDL), confirmed empirically before this move.
  *
- * Workspace schema provisioning (the one genuinely privileged, DDL-performing operation this
- * worker used to run) has been moved OUT of this process entirely, into the separate
- * `workspace-provisioner.main.ts` entrypoint — the only thing in this package that reads
- * `DATABASE_URL_UNPOOLED`. See that file's own doc comment for the full rationale. This process
- * never opens that connection, never imports `runWorkspaceProvisioningCycle`, and structurally
- * cannot run workspace DDL even if compromised.
+ * Workspace schema provisioning (the one DDL-performing operation): under the owner login (T4) it runs
+ * IN-PROCESS, on its own dedicated session that acts as `crewflow` (SET ROLE), from
+ * queues/rab-maintenance/workspace-provisioning.loops.ts. The separate provisioner process that used to
+ * own it (workspace-provisioner.main.ts) was superseded and removed in X5.1. This process never reads
+ * `DATABASE_URL_UNPOOLED`.
  *
  * Business mutations (an email send, a shift reminder, a no-show flag, an offer
  * expiry, a report, a replacement request, a cancellation follow-up) run

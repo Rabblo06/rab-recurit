@@ -6,7 +6,7 @@ import { PROVISIONING_LOCK_WAIT_MS, runWorkspaceProvisioningCycle, tryAcquirePro
  * Phase A (pa-provisioner): the provisioning session lock is acquired with a bounded, non-blocking try-lock loop instead of
  * an unbounded `pg_advisory_lock` wait, and is always released after a cycle that took it. Fake clients and a fake clock:
  * no database. The real-database behaviour (another session holding the lock) is in
- * __tests__/integration/workspace-provisioner-optin.integration.spec.ts.
+ * __tests__/integration/workspace-provisioning-owner-login.integration.spec.ts (the in-process loops).
  */
 type Query = { text: string; values?: unknown[] };
 

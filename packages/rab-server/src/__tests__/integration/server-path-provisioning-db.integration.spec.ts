@@ -50,7 +50,7 @@ describeIfDb('server-path workspace provisioning — database layer (crewflow_ap
   const restrictedAppUrl = !RUN
     ? undefined
     : process.env.TEST_DATABASE_SEPARATED_APP_URL?.trim() || (new URL(appUrl).username === 'crewflow_app' ? appUrl : undefined);
-  const RESTRICTED_SKIP_REASON = 'restricted-runtime-login property → behaviour-change catalogue (Agent 5) / retarget in PR #9';
+  const RESTRICTED_SKIP_REASON = 'restricted-runtime-login property → behaviour-change catalogue (Agent 5) / retarget in the separated-mode retirement';
   const itRestricted = (title: string, fn: () => Promise<void>) =>
     restrictedAppUrl ? it(title, fn) : it.skip(`${title} [SKIPPED on the owner login: ${RESTRICTED_SKIP_REASON}]`, fn);
   const restrictedApp = async (): Promise<Client> => {
