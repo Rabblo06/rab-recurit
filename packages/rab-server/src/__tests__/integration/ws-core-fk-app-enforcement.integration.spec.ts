@@ -10,7 +10,7 @@ import { WorkspaceCoreForeignKeyRemoval1786721530000 } from '../../database/type
 import { integrationTestDatabase, integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
 import { selectWorkspaceFingerprintsForServer } from '../../database/typeorm/workspace-schema/v1/expected-fingerprints';
 import { assertUsersOfOrganisationTx } from '../../engine/core-modules/core-references/core-references';
-import { userReferenceColumns, workspaceRestrictReference } from '../../engine/core-modules/core-references/workspace-user-references';
+import { userReferenceColumns } from '../../engine/core-modules/core-references/workspace-user-references';
 import { AuthContext } from '../../engine/core-modules/tenant/auth-context.interface';
 import { TenantContextService } from '../../engine/core-modules/tenant/tenant-context.service';
 import { UserDeletionService } from '../../engine/core-modules/user-deletion/user-deletion.service';
@@ -156,7 +156,7 @@ describeIfDb('Part D 0a: the application enforces what the workspace → core fo
        VALUES ($1, $2, $3, $4, now() + interval '2 days', now() + interval '2 days 4 hours', 1, 1200, $5, $6) RETURNING id`,
       [w.org, w.id, venue, role, w.owner, target],
     );
-    expect(await tenantContext.runInTenantContext(ctxOf(w), (m) => workspaceRestrictReference(m, target))).toBe('shift.approved_by');
+    // The probe runs in every scope the hard delete visits (UserDeletionService.inEveryScope binds each one, HWS on or off).
     const { result, lines } = await withLog(() => deleteAsOwner(target));
     expect(result).toBe('soft_deleted');
     expect(lines).toContainEqual(expect.stringMatching(/^user hard delete not safe \(history:shift\.approved_by\)/));

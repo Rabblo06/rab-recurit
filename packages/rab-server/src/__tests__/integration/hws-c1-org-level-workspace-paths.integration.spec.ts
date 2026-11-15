@@ -114,13 +114,15 @@ describeIfDb('HWS C1: org-level paths over workspace tables (integration)', () =
     ((await adminDataSource.query(`SELECT 1 FROM core."user" WHERE id = $1`, [userId])) as unknown[]).length === 1;
 
   /**
-   * Part D 0a (structure level 22; owner decision R-1): a staff profile the caller cannot see is no longer cascaded by a
+   * Part D 0a (structure level 22; owner decision R-1): a workspace-schema staff profile the caller cannot see is no longer cascaded by a
    * foreign key to core."user", so a hard delete no longer removes it and its history: both stay (an orphan the daily orphan
    * check reports), and the hard delete is not refused for it. Below level 22 the cascade would remove them, so the delete
    * falls back to soft. Either way the hidden profile and its history are never deleted blind.
    */
   const expectHiddenProfileOutcome = async (userId: string) => {
-    if (codeWorkspaceStructureLevel() >= 22) expect(await userExists(userId)).toBe(false);
+    // The hidden profile lives in workspace B's own schema with HWS on (level 22: no foreign key to core."user"), in the
+    // pre-cutover `core` copy with HWS off (core keeps its foreign keys, so the cascade and the soft fallback still apply).
+    if (codeWorkspaceStructureLevel() >= 22 && businessSchema(mgrB.workspaceId!) !== 'core') expect(await userExists(userId)).toBe(false);
     else expect(await userSoftDeleted(userId)).toBe(true);
   };
   const userSoftDeleted = async (userId: string) =>
