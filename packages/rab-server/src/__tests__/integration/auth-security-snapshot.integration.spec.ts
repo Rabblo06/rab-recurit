@@ -292,11 +292,17 @@ describeIfDb('AuthSecuritySnapshotService — consolidated security snapshot cor
       // FORCE RLS read below sees exactly what the real snapshot query would.
       let releaseGate!: () => void;
       const gate = new Promise<void>((resolve) => { releaseGate = resolve; });
+      // The revoke below must start only once the snapshot EXISTS: dataSource.transaction runs its callback asynchronously
+      // (pool checkout + START TRANSACTION first), so without this signal the revoke could commit before the snapshot's first
+      // statement and the snapshot would — correctly — see it (a race in the test, not in the guarantee; seen on CI).
+      let snapshotTaken!: () => void;
+      const taken = new Promise<void>((resolve) => { snapshotTaken = resolve; });
       const snapshotPromise = dataSource.transaction('REPEATABLE READ', async (manager2) => {
         await manager2.query(
           `SELECT set_config('rab.organisation_id', $1, true), set_config('rab.user_id', $2, true)`,
           [org.id, manager.userId],
         ); // opens the REPEATABLE READ snapshot with this transaction's first statement
+        snapshotTaken();
         await gate; // hold the snapshot open while the revoke below commits in a DIFFERENT transaction
         const row = await manager2.query<Array<{ exists: boolean }>>(
           `SELECT EXISTS (
@@ -310,6 +316,7 @@ describeIfDb('AuthSecuritySnapshotService — consolidated security snapshot cor
       });
 
       // Commits in a SEPARATE, already-finished transaction while the snapshot above is still open.
+      await taken;
       await withOrgUser(org.id, manager.userId, (m) =>
         m.query(
           `DELETE FROM core.role_permission rp USING core.user_role ur
