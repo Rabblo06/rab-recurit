@@ -143,6 +143,15 @@ test('flags core.<table>, any other qualifier, a QueryBuilder string table and a
   assert.deepEqual(rules("m.query('DISCARD ALL');"), ['search-path-switch']);
   assert.deepEqual(rules("m.query(`SELECT 1 -- set_config('search_path', 'x', true)\n`);"), []); // only inside a SQL comment
   assert.deepEqual(rules("m.query('RESET ROLE');"), []);
+  // Part D: versioned workspace upgrade commands name the schema themselves (other-qualified only, version dirs only);
+  // the fingerprint measurement script may pin search_path.
+  const cmd = 'packages/rab-server/src/engine/core-modules/upgrade/upgrade-commands/0-6/staff-profile-member-select.ts';
+  const ddl = 'export const sql = (schemaName) => `CREATE POLICY p ON ${schemaName}.staff_profile FOR SELECT USING (true)`;';
+  assert.deepEqual(rules(ddl, cmd), []);
+  assert.deepEqual(rules("m.query('SELECT 1 FROM shift');", cmd), ['unqualified']); // other rules still apply there
+  assert.deepEqual(rules(ddl, 'packages/rab-server/src/engine/core-modules/upgrade/upgrade-commands/registry.ts'), ['other-qualified']);
+  assert.deepEqual(rules(ddl), ['other-qualified']); // module code
+  assert.deepEqual(rules("c.query(`SELECT pg_catalog.set_config('search_path', 'pg_catalog, pg_temp', true)`);", 'packages/rab-server/src/database/typeorm/scripts/generate-workspace-fingerprints.ts'), []);
 });
 
 test('the binders may switch search_path; DDL that pins a function\'s own search_path is not a switch', () => {

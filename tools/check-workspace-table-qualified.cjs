@@ -89,7 +89,19 @@ const SEARCH_PATH_BINDERS = Object.freeze([
   // (pg_catalog.set_config($1, $2, true) with the constant UPGRADE_SCOPE_SETTING) and its session reset of role / rab.*.
   'packages/rab-server/src/engine/core-modules/upgrade/upgrade-migration.service.ts',
   'packages/rab-server/src/engine/core-modules/upgrade/workspace-step-checks-sql.ts',
+  // A measurement tool, not runtime: the operator/dev fingerprint generator runs each structural command on a throwaway
+  // database with search_path pinned to pg_catalog, pg_temp, exactly as the runner does (0b, #146).
+  'packages/rab-server/src/database/typeorm/scripts/generate-workspace-fingerprints.ts',
 ]);
+/**
+ * Part D workspace upgrade COMMANDS: versioned, frozen DDL (`upgrade-commands/<major>-<minor>/*.ts`) whose `sql(schemaName)`
+ * names each workspace's schema itself — the runner derives and regex-validates `workspace_<32 hex>` and binds no business
+ * schema (the same reason database/typeorm/workspace-schema/** is excluded). Only `other-qualified` is waived there, and
+ * only in the version directories: registry.ts / upgrade-command.ts / workspace-upgrade-command.ts stay fully scanned, and
+ * every other rule (unqualified, core-qualified, search-path-switch, business-schema-bind, …) still applies. Module code
+ * cannot use this: the pattern is anchored to the engine's upgrade tree, which modules/ never contains.
+ */
+const OTHER_QUALIFIED_EXEMPT = /^packages\/rab-server\/src\/engine\/core-modules\/upgrade\/upgrade-commands\/\d+-\d+\/[^/]+\.ts$/;
 const RULES = Object.freeze(['unqualified', 'core-qualified', 'other-qualified', 'qb-string-table', 'search-path-switch', 'global-entity-access', 'business-schema-bind']);
 
 function ts() {
@@ -243,7 +255,7 @@ function scanSource(rel, src, tables, entities) {
   }
   function classifyQualified(n, qualifier, table) {
     if (/^"?core"?$/.test(qualifier)) add(n, 'core-qualified', `${qualifier}.${table}`);
-    else add(n, 'other-qualified', `${qualifier}.${table}`);
+    else if (!OTHER_QUALIFIED_EXEMPT.test(rel)) add(n, 'other-qualified', `${qualifier}.${table}`);
   }
 
   function visit(n) {
