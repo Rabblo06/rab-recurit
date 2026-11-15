@@ -303,7 +303,8 @@ test('notification delivery: the committed values are valid for the code (bounds
   // The code defaults stay as they are (development and tests keep 2 s and false); production commits its own values.
   assert.equal(def, 2);
   const vars = fs.readFileSync(path.join(__dirname, '../../rab-server/src/engine/core-modules/environment/environment-variables.ts'), 'utf8');
-  assert.match(vars, /@Transform\(\(\{ value \}\) => value === 'true'\)\s*@IsBoolean\(\)\s*WORKER_FAST_PUBLISH_NOTIFY: boolean = false;/);
+  // X3.1: strict (exactly true / false; a typo refuses to boot), default still false.
+  assert.match(vars, /@Transform\(\(\{ value \}\) => strictBoolean\(value\)\)\s*@IsBoolean\(\{ message: STRICT_BOOLEAN_MESSAGE \}\)\s*WORKER_FAST_PUBLISH_NOTIFY: boolean = false;/);
 });
 
 const PHASE_D_KEYS = ['WORKER_TIMER_TRIGGERS', 'WORKER_TIMER_TRIGGER_KINDS', 'WORKER_OFFER_EXPIRY_INTERVAL_SECONDS', 'WORKER_MANAGER_CONFIRMATION_TIMEOUT_INTERVAL_SECONDS', 'WORKER_LATE_CLOCK_IN_INTERVAL_SECONDS'];
@@ -586,7 +587,8 @@ test('J2: 30 s lies within the push sweep bounds read from the TypeScript source
   assert.ok(30 >= min && 30 <= max);
   const vars = src('environment-variables.ts');
   for (const flag of ['PUSH_ENABLED', 'REALTIME_ENABLED']) {
-    assert.match(vars, new RegExp(`@Transform\\(\\(\\{ value \\}\\) => value === 'true'\\)\\s*@IsBoolean\\(\\)\\s*${flag}: boolean = false;`), flag);
+    // X3.1: strictBoolean (exactly true / false), the same values SWITCH_VALUES accepts.
+    assert.match(vars, new RegExp(`@Transform\\(\\(\\{ value \\}\\) => strictBoolean\\(value\\)\\)\\s*@IsBoolean\\(\\{ message: STRICT_BOOLEAN_MESSAGE \\}\\)\\s*${flag}: boolean = false;`), flag);
   }
 });
 
@@ -650,6 +652,37 @@ test('J2-1: lintEnvText refuses a switch that is not exactly true or false once 
   const [entry] = gate.parseEnvText('PUSH_ENABLED=true # on');
   assert.deepEqual([entry.key, entry.value, entry.unreadable], ['PUSH_ENABLED', 'true', false]);
   assert.equal(gate.parseEnvText('PUSH_ENABLED="true')[0].unreadable, true);
+});
+
+// Phase X3.1 (XR-05 / ENV-01): the app now refuses a non-boolean on/off switch at boot, so the gate refuses it first.
+test('X3.1: lintEnvText refuses a strict on/off switch that is not exactly true or false; empty keeps the default', () => {
+  const app = ['EMAIL_DELIVERY_ENABLED', 'AUTH_CONTEXT_CACHE_ENABLED', 'USER_SESSION_CACHE_ENABLED', 'CORE_ENTITY_CACHE_ENABLED',
+    'WORKSPACE_METADATA_CACHE_ENABLED', 'WORKER_FAST_PUBLISH_NOTIFY', 'USER_SESSION_ENFORCEMENT_CUTOVER', 'AUTH_PASSWORD_ENABLED',
+    'AUTH_GOOGLE_ENABLED', 'AUTH_MICROSOFT_ENABLED', 'AUTH_OAUTH_HANDOFF_ENABLED', 'EMAIL_SMTP_NO_TLS', 'REALTIME_ENABLED', 'PUSH_ENABLED'];
+  assert.deepEqual([...gate.STRICT_SWITCHES].sort(), [...app].sort());
+  for (const key of gate.STRICT_SWITCHES.filter((k) => !Object.hasOwn(gate.FEATURE_SWEEPS, k))) {
+    for (const value of ['True', 'TRUE', '1', '0', 'yes', 'on', 'flase', '"true', '"true" x']) {
+      const problems = lintEnvText('runtime', `CREWFLOW_AUDIT_SINK=stdout\n${key}=${value}`);
+      assertRefused(problems, new RegExp(`${key}: must be exactly true or false \\(X3\\.1`));
+      for (const msg of problems) assert.ok(!msg.includes('flase'), msg); // names only, never the value
+    }
+    for (const value of ['true', 'false', '', '"false"', 'true # on']) {
+      // (WORKER_FAST_PUBLISH_NOTIFY is also refused in an env file for being committed; that rule is not under test here.)
+      const problems = lintEnvText('runtime', `CREWFLOW_AUDIT_SINK=stdout\n${key}=${value}`);
+      assert.deepEqual(problems.filter((msg) => /X3\.1/.test(msg)), [], `${key}=${value}`);
+    }
+  }
+});
+
+test('X3.1: strictSwitchProblems checks what each service receives (names only, never a value)', () => {
+  assert.deepEqual(gate.strictSwitchProblems('rab-api', { EMAIL_DELIVERY_ENABLED: 'true', AUTH_GOOGLE_ENABLED: 'false', EMAIL_SMTP_NO_TLS: '' }), []);
+  assert.deepEqual(gate.strictSwitchProblems('rab-worker', undefined), []);
+  const problems = gate.strictSwitchProblems('rab-worker', { USER_SESSION_ENFORCEMENT_CUTOVER: 'True', WORKER_FAST_PUBLISH_NOTIFY: '1' });
+  assert.equal(problems.length, 2);
+  assertRefused(problems, /rab-worker: USER_SESSION_ENFORCEMENT_CUTOVER must be exactly true or false/);
+  assertRefused(problems, /rab-worker: WORKER_FAST_PUBLISH_NOTIFY must be exactly true or false/);
+  // PUSH_ENABLED / REALTIME_ENABLED are featureSweepProblems' job (one message, not two).
+  assert.deepEqual(gate.strictSwitchProblems('rab-api', { PUSH_ENABLED: 'yes' }), []);
 });
 
 test('PR #125 finding 6: bundledDbEnvironmentProblems (shared with the deployed-model check) accepts the committed env and a real-shaped password', () => {

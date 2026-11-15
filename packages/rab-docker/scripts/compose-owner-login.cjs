@@ -252,10 +252,45 @@ const FEATURE_SWEEPS = Object.freeze({
   PUSH_ENABLED: Object.freeze({ key: 'WORKER_PUSH_DISPATCH_INTERVAL_SECONDS', value: '30', decision: 'owner rule 2026-11-06' }),
   REALTIME_ENABLED: Object.freeze({ key: 'WORKER_REALTIME_OUTBOX_PUBLISH_INTERVAL_SECONDS', value: null, decision: 'value not yet decided by the owner' }),
 });
-/** The environment's own parse (`@Transform(({ value }) => value === 'true')`): only the exact string true switches it on. */
+/** The environment's own parse (strictBoolean since X3.1): only the exact string true switches it on. */
 const switchedOn = (v) => String(v ?? '') === 'true';
 /** The only values a feature switch may carry (after Compose's own normalisation); anything else is refused (fail closed). */
 const SWITCH_VALUES = Object.freeze(['true', 'false']);
+/**
+ * Phase X3.1 (XR-05 / ENV-01): the on/off switches rab-api and rab-worker now parse strictly (environment-variables.ts
+ * strictBoolean): exactly true or false; unset or empty keeps the default; anything else REFUSES TO BOOT. The gate refuses
+ * the same values first, so a typo in an env file fails the lint instead of crash-looping the release
+ * (packages/rab-docker/docs/release/RELEASE-NOTE-X3.1-STRICT-BOOLEANS.md). PUSH_ENABLED and REALTIME_ENABLED keep their
+ * stricter J2-1 rule above (empty refused too).
+ */
+const STRICT_SWITCHES = Object.freeze([
+  'EMAIL_DELIVERY_ENABLED',
+  'AUTH_CONTEXT_CACHE_ENABLED',
+  'USER_SESSION_CACHE_ENABLED',
+  'CORE_ENTITY_CACHE_ENABLED',
+  'WORKSPACE_METADATA_CACHE_ENABLED',
+  'WORKER_FAST_PUBLISH_NOTIFY',
+  'USER_SESSION_ENFORCEMENT_CUTOVER',
+  'AUTH_PASSWORD_ENABLED',
+  'AUTH_GOOGLE_ENABLED',
+  'AUTH_MICROSOFT_ENABLED',
+  'AUTH_OAUTH_HANDOFF_ENABLED',
+  'EMAIL_SMTP_NO_TLS',
+  'REALTIME_ENABLED',
+  'PUSH_ENABLED',
+]);
+const STRICT_SWITCH_MESSAGE = 'must be exactly true or false (X3.1: rab-api and rab-worker refuse anything else at boot; empty or unset keeps the default)';
+
+/** X3.1 problems of one service environment (pure; names only, never a value). */
+function strictSwitchProblems(name, env = {}) {
+  const problems = [];
+  for (const key of STRICT_SWITCHES) {
+    if (Object.hasOwn(FEATURE_SWEEPS, key)) continue; // featureSweepProblems checks these (stricter: empty refused too)
+    const v = env?.[key];
+    if (v !== undefined && v !== null && String(v) !== '' && !SWITCH_VALUES.includes(String(v))) problems.push(`${name}: ${key} ${STRICT_SWITCH_MESSAGE}`);
+  }
+  return problems;
+}
 
 /**
  * The value Docker Compose gives a service for one env-file value (the text after `KEY=`), so the gate reads what the app
@@ -795,6 +830,8 @@ function checkModel(model, combo) {
 
   // Phase X J2 (SJ-03): the push / realtime sweep rule once a feature is on.
   for (const msg of featureSweepProblems(envOf(api), envOf(worker))) p(msg);
+  // Phase X3.1: every strict on/off switch the services receive is exactly true or false (or empty).
+  for (const [name, svc] of [['rab-api', api], ['rab-worker', worker]]) if (svc) for (const msg of strictSwitchProblems(name, envOf(svc))) p(msg);
 
   // rab-api: the lifecycle.
   const apiEnv = envOf(api);
@@ -916,6 +953,8 @@ function lintEnvText(kind, text, { template = false } = {}) {
     if (kind === 'runtime' && DATABASE_OPT_INS.includes(key)) problems.push(`${key}: belongs in database.env only (so rab-api and rab-worker see the same value)`);
     // Review J2-1 (fail closed): a feature switch is exactly true or false once read the way Compose reads it.
     if (Object.hasOwn(FEATURE_SWEEPS, key) && !SWITCH_VALUES.includes(value)) problems.push(`${key}: must be exactly true or false (quotes and an inline # comment are read as Compose reads them)`);
+    // Phase X3.1: the strict on/off switches (FEATURE_SWEEPS keys already checked above, empty included).
+    else if (STRICT_SWITCHES.includes(key) && value !== '' && !SWITCH_VALUES.includes(value) && !(template && isPlaceholder(value))) problems.push(`${key}: ${STRICT_SWITCH_MESSAGE}`);
     for (const [flag, rule] of Object.entries(FEATURE_SWEEPS)) {
       if (key === rule.key) problems.push(`${key}: commit it in the compose files on rab-api and rab-worker, never in an env file (the API registers the ${flag === 'PUSH_ENABLED' ? 'push' : 'realtime'} scheduler with its own value)`);
     }
@@ -1142,7 +1181,7 @@ function main(argv) {
 if (require.main === module) process.exitCode = main(process.argv.slice(2));
 
 module.exports = {
-  FILES, TEMPLATES, COMBOS, STATIC_COMBO, DB_SERVICE, DB_SETUP_SERVICE, DB_TARGET_VOLUME, DB_TARGET_DIR, SENTINEL_ADMIN_PW, SENTINEL_ADMIN_URL, dbSetupProblems, appCredentialProblems, credentialMountProblems, topLevelVolumeProblems, bundledDbEnvironmentProblems, DB_INITDB_ARGS, DB_ENV_KEYS, DB_PASSWORD_KEY, SENTINEL_DB_PW, BUNDLED_URL, NOT_THE_APP_LOGIN, NOTIFICATION_DELIVERY, PHASE_D_SWITCHES, PHASE_D_UNCHANGED, STATEMENT_DISPATCH, FEATURE_SWEEPS, SWITCH_VALUES, featureSweepProblems, composeEnvValue, AUDIT_SINK_MODES, AUDIT_SINK_PRODUCTION_MODES, AUDIT_SINK_FAILURES,
+  FILES, TEMPLATES, COMBOS, STATIC_COMBO, DB_SERVICE, DB_SETUP_SERVICE, DB_TARGET_VOLUME, DB_TARGET_DIR, SENTINEL_ADMIN_PW, SENTINEL_ADMIN_URL, dbSetupProblems, appCredentialProblems, credentialMountProblems, topLevelVolumeProblems, bundledDbEnvironmentProblems, DB_INITDB_ARGS, DB_ENV_KEYS, DB_PASSWORD_KEY, SENTINEL_DB_PW, BUNDLED_URL, NOT_THE_APP_LOGIN, NOTIFICATION_DELIVERY, PHASE_D_SWITCHES, PHASE_D_UNCHANGED, STATEMENT_DISPATCH, FEATURE_SWEEPS, SWITCH_VALUES, STRICT_SWITCHES, strictSwitchProblems, featureSweepProblems, composeEnvValue, AUDIT_SINK_MODES, AUDIT_SINK_PRODUCTION_MODES, AUDIT_SINK_FAILURES,
   AUDIT_SINK_PRODUCTION_FAILURES, SENTINEL_URL, SENTINEL_OWNER_PW, SENTINEL_APP_SECRET,
   SENTINEL_REDIS_PW, SENTINEL_LEGACY_PW, forbiddenReason, durationSeconds, checkModel, checkStaticModel, parseEnvText,
   lintEnvText, lintComposeText, renderModels, staticProblems, main,
