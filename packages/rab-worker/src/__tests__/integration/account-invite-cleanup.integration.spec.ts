@@ -21,6 +21,9 @@ import { generateFixturePassword } from './helpers/fixture-password';
 import { integrationTestDatabaseReady } from '@rab/server/database/typeorm/core/integration-test-database-gate';
 import { provisionFixtureWorkspace } from './helpers/test-identities';
 import { businessSchema } from './helpers/hws-fixtures';
+import { Client } from 'pg';
+import { resolveIntegrationTestDatabase } from '@rab/server/database/typeorm/core/test-database-guard';
+import { checkWorkspaceCoreOrphans } from '@rab/server/database/typeorm/workspace-schema/workspace-core-orphans';
 
 const FIXTURE_PASSWORD = generateFixturePassword();
 
@@ -250,6 +253,41 @@ describeIfDb('account invite cleanup job (integration)', () => {
     return totals;
   }
 
+  /** Part D 0a (F1): the daily orphan check for one workspace, as the Worker runs it (crewflow, worker + owner read rights). */
+  async function orphansOf(workspaceId: string) {
+    const c = new Client({ connectionString: resolveIntegrationTestDatabase(process.env).adminUrl });
+    await c.connect();
+    try {
+      await c.query('SET ROLE crewflow');
+      return await checkWorkspaceCoreOrphans(c, [workspaceId]);
+    } finally {
+      await c.end();
+    }
+  }
+
+  /** An expired staff invite (POST /staff, two re-sends, the third link past its grace period): a cleanup candidate. */
+  async function expiredStaffInvite(): Promise<{ organisationId: string; workspaceId: string; ownerUserId: string; userId: string }> {
+    const { organisation, ownerEmail, ownerUserId } = await seedOrgWithOwner();
+    const ownerToken = await loginOwner(ownerEmail);
+    const create = await request(app.getHttpServer())
+      .post('/rest/v1/staff')
+      .set('Authorization', `Bearer ${ownerToken}`)
+      .send({ email: `staff-${randomUUID()}@example.test`, firstName: 'A', lastName: 'B' });
+    const userRow = await adminDataSource.manager.findOneByOrFail(User, { organisationId: organisation.id, email: create.body.email });
+    await markLatestOutboxSent(organisation.id, userRow.id);
+    await tenantContext.runInTenantContext({ organisationId: organisation.id, workspaceId: null, userId: userRow.id, role: '' }, async (manager) => {
+      await issueForTest(manager, organisation.id, userRow.id);
+      await issueForTest(manager, organisation.id, userRow.id);
+    });
+    await adminDataSource.manager.query(
+      `UPDATE core.account_invite SET expires_at = now() - interval '8 days', cleanup_at = now() - interval '1 minute'
+         WHERE user_id = $1 AND revoked_at IS NULL AND accepted_at IS NULL`,
+      [userRow.id],
+    );
+    const [{ id: workspaceId }] = await adminDataSource.manager.query<[{ id: string }]>(`SELECT id FROM core.manager_workspace WHERE organisation_id = $1 LIMIT 1`, [organisation.id]);
+    return { organisationId: organisation.id, workspaceId, ownerUserId, userId: userRow.id };
+  }
+
   beforeAll(async () => {
     const moduleRef = await Test.createTestingModule({ imports: [AppModule] }).compile();
     app = moduleRef.createNestApplication();
@@ -367,6 +405,127 @@ describeIfDb('account invite cleanup job (integration)', () => {
     expect(gone).toBeNull();
     const inviteRowsGone = await adminDataSource.manager.find(AccountInvite, { where: { userId: userRow.id } });
     expect(inviteRowsGone).toHaveLength(0); // cascaded
+    // Part D 0a (F1): the invitee's own staff profile is removed with it (a level-22 workspace schema has no foreign key to
+    // core."user": the Worker applies the former CASCADE), so no orphan is left.
+    const [{ id: workspaceId }] = await adminDataSource.manager.query<[{ id: string }]>(`SELECT id FROM core.manager_workspace WHERE organisation_id = $1 LIMIT 1`, [organisation.id]);
+    expect(await adminDataSource.manager.query(`SELECT 1 FROM "${businessSchema(workspaceId)}".staff_profile WHERE user_id = $1`, [userRow.id])).toHaveLength(0);
+    const orphans = await orphansOf(workspaceId);
+    expect(orphans.errors).toEqual([]);
+    expect(orphans.findings).toEqual([]);
+  });
+
+  it('Part D 0a (F1): an expired staff invitee with a paid shift in a level-22 workspace is retained, every evidence row stays, no orphan', async () => {
+    const fx = await expiredStaffInvite();
+    const q = `"${businessSchema(fx.workspaceId)}"`;
+    const one = async (sql: string, params: unknown[]) => ((await adminDataSource.manager.query(sql, params)) as Array<{ id: string }>)[0]!.id;
+    const sp = await one(`SELECT id FROM ${q}.staff_profile WHERE user_id = $1`, [fx.userId]);
+    const venue = await one(`INSERT INTO ${q}.venue (organisation_id, workspace_id, name) VALUES ($1, $2, 'F1 venue') RETURNING id`, [fx.organisationId, fx.workspaceId]);
+    const role = await one(`INSERT INTO ${q}.job_role (organisation_id, workspace_id, name) VALUES ($1, $2, 'F1 role') RETURNING id`, [fx.organisationId, fx.workspaceId]);
+    const shift = await one(
+      `INSERT INTO ${q}.shift (organisation_id, workspace_id, venue_id, job_role_id, starts_at, ends_at, required_count, pay_rate_pence, created_by)
+       VALUES ($1, $2, $3, $4, now() - interval '5 hours', now() - interval '1 hour', 1, 1200, $5) RETURNING id`,
+      [fx.organisationId, fx.workspaceId, venue, role, fx.ownerUserId],
+    );
+    const sa = await one(
+      `INSERT INTO ${q}.shift_assignment (organisation_id, workspace_id, shift_id, staff_profile_id, pay_rate_snapshot_pence, period)
+       VALUES ($1, $2, $3, $4, 1200, tstzrange(now() - interval '5 hours', now() - interval '1 hour')) RETURNING id`,
+      [fx.organisationId, fx.workspaceId, shift, sp],
+    );
+    const att = await one(
+      `INSERT INTO ${q}.attendance (organisation_id, workspace_id, shift_assignment_id, shift_id, staff_profile_id, clock_in_at, clock_out_at, status)
+       VALUES ($1, $2, $3, $4, $5, now() - interval '5 hours', now() - interval '1 hour', 'approved') RETURNING id`,
+      [fx.organisationId, fx.workspaceId, sa, shift, sp],
+    );
+    const pr = await one(
+      `INSERT INTO ${q}.payroll_record (organisation_id, workspace_id, attendance_id, shift_id, staff_profile_id, worked_minutes, pay_rate_pence,
+                                       amount_pence, status, approved_at, approved_by)
+       VALUES ($1, $2, $3, $4, $5, 240, 1200, 4800, 'approved', now(), $6) RETURNING id`,
+      [fx.organisationId, fx.workspaceId, att, shift, sp, fx.ownerUserId],
+    );
+
+    const result = await runCleanupCycleUntilExamined(fx.userId);
+    expect(result.retained).toBeGreaterThanOrEqual(1);
+    const kept = await adminDataSource.manager.findOneByOrFail(User, { id: fx.userId });
+    expect(kept.status).toBe('invite_expired');
+    for (const [table, id] of [['staff_profile', sp], ['shift_assignment', sa], ['attendance', att], ['payroll_record', pr]] as const) {
+      expect(await adminDataSource.manager.query(`SELECT 1 FROM ${q}.${table} WHERE id = $1`, [id])).toHaveLength(1);
+    }
+    const orphans = await orphansOf(fx.workspaceId);
+    expect(orphans.errors).toEqual([]);
+    expect(orphans.findings).toEqual([]);
+  });
+
+  it('Part D 0a (F1-T): the owner-id binding touches only the invitee\'s own references; another user\'s profile, notes and SET NULL columns stay', async () => {
+    const fx = await expiredStaffInvite();
+    const q = `"${businessSchema(fx.workspaceId)}"`;
+    const one = async (sql: string, params: unknown[]) => ((await adminDataSource.manager.query(sql, params)) as Array<{ id: string }>)[0]!.id;
+    // The pre-cutover core copy of user_note has no workspace_id column (HWS off: the rows live there; core keeps its foreign keys).
+    const onCore = businessSchema(fx.workspaceId) === 'core';
+    const noteWs = onCore ? '' : 'workspace_id, ';
+    const noteWsArg = onCore ? '' : '$4, ';
+    const noteWsParam = onCore ? [] : [fx.workspaceId];
+    // Another user of the same organisation, with everything the clean-up could reach if it were not scoped to the invitee.
+    const other = await one(
+      `INSERT INTO core."user" (organisation_id, email, first_name, last_name, status) VALUES ($1, $2, 'Other', 'Staff', 'active') RETURNING id`,
+      [fx.organisationId, `other-${randomUUID()}@example.test`],
+    );
+    const otherProfile = await one(
+      `INSERT INTO ${q}.staff_profile (organisation_id, workspace_id, user_id, staff_ref, created_by) VALUES ($1, $2, $3, $4, $5) RETURNING id`,
+      [fx.organisationId, fx.workspaceId, other, `OTHER-${randomUUID().slice(0, 8)}`, other],
+    );
+    const noteAboutOther = await one(
+      `INSERT INTO ${q}.user_note (organisation_id, ${noteWs}subject_user_id, author_user_id, body) VALUES ($1, ${noteWsArg}$2, $3, 'about other') RETURNING id`,
+      [fx.organisationId, other, other, ...noteWsParam],
+    );
+    const noteByOwner = await one(
+      `INSERT INTO ${q}.user_note (organisation_id, ${noteWs}subject_user_id, author_user_id, body) VALUES ($1, ${noteWsArg}$2, $3, 'by owner') RETURNING id`,
+      [fx.organisationId, other, fx.ownerUserId, ...noteWsParam],
+    );
+    const invitee = fx.userId;
+    const inviteeProfiles = await adminDataSource.manager.query(`SELECT id FROM ${q}.staff_profile WHERE user_id = $1`, [invitee]);
+    expect(inviteeProfiles).toHaveLength(1);
+
+    const result = await runCleanupCycleUntilGone([invitee]);
+    expect(result.deleted).toBeGreaterThanOrEqual(1);
+    expect(await adminDataSource.manager.findOne(User, { where: { id: invitee } })).toBeNull();
+    // The invitee's own profile went with it (the former CASCADE) ...
+    expect(await adminDataSource.manager.query(`SELECT 1 FROM ${q}.staff_profile WHERE user_id = $1`, [invitee])).toHaveLength(0);
+    // ... and nothing else: the other user's profile with its created_by, both notes with their subject and author.
+    expect(await adminDataSource.manager.query(`SELECT user_id, created_by FROM ${q}.staff_profile WHERE id = $1`, [otherProfile])).toEqual([{ user_id: other, created_by: other }]);
+    expect(await adminDataSource.manager.query(`SELECT subject_user_id, author_user_id FROM ${q}.user_note WHERE id = $1`, [noteAboutOther])).toEqual([
+      { subject_user_id: other, author_user_id: other },
+    ]);
+    expect(await adminDataSource.manager.query(`SELECT subject_user_id, author_user_id FROM ${q}.user_note WHERE id = $1`, [noteByOwner])).toEqual([
+      { subject_user_id: other, author_user_id: fx.ownerUserId },
+    ]);
+    expect(await adminDataSource.manager.findOneByOrFail(User, { id: other })).toMatchObject({ id: other });
+    const orphans = await orphansOf(fx.workspaceId);
+    expect(orphans.errors).toEqual([]);
+    expect(orphans.findings).toEqual([]);
+  });
+
+  it('Part D 0a (re-review N1): a workspace schema that exists but does not resolve (unsupported schema_version) retains the invitee, never skips it', async () => {
+    const fx = await expiredStaffInvite();
+    const [{ schema_version: version }] = await adminDataSource.manager.query<Array<{ schema_version: number }>>(
+      `SELECT schema_version FROM core.workspace_schema_registry WHERE workspace_id = $1`,
+      [fx.workspaceId],
+    );
+    await adminDataSource.manager.query(`UPDATE core.workspace_schema_registry SET schema_version = 999 WHERE workspace_id = $1`, [fx.workspaceId]);
+    try {
+      const result = await runCleanupCycleUntilExamined(fx.userId);
+      expect(result.retained).toBeGreaterThanOrEqual(1);
+    } finally {
+      await adminDataSource.manager.query(`UPDATE core.workspace_schema_registry SET schema_version = $2 WHERE workspace_id = $1`, [fx.workspaceId, version]);
+    }
+    const kept = await adminDataSource.manager.findOneByOrFail(User, { id: fx.userId });
+    expect(kept.status).toBe('invite_expired');
+    const reasons = await adminDataSource.manager.query<Array<{ reason: string }>>(
+      `SELECT metadata->>'reason' AS reason FROM core.audit_log WHERE action = 'user.invite_cleanup_skipped' AND target_user_id = $1`,
+      [fx.userId],
+    );
+    expect(reasons.map((r) => r.reason)).toContain('workspace_unverifiable');
+    // The profile in the unverifiable schema is untouched (never deleted blind, never orphaned).
+    expect(await adminDataSource.manager.query(`SELECT 1 FROM "${businessSchema(fx.workspaceId)}".staff_profile WHERE user_id = $1`, [fx.userId])).toHaveLength(1);
   });
 
   it('never hard-deletes an account that has created real business data (e.g. a Venue) — retains it instead', async () => {

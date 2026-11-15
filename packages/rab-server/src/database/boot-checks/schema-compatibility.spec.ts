@@ -6,10 +6,11 @@ import {
   ProvisionFunctionState,
 } from '../typeorm/workspace-schema/provision-function-versions';
 import { LATEST_WORKSPACE_MODULE_VERSION } from '../typeorm/workspace-schema/workspace-schema-modules';
-import { codeWorkspaceStructureLevel } from '../../engine/core-modules/upgrade/workspace-structure-level';
-import { STAFF_PROFILE_MEMBER_SELECT_PROVISION_LITERAL } from '../../engine/core-modules/upgrade/upgrade-commands/0-6/staff-profile-member-select';
-/** Part D: the code's structure level (21 since StaffProfileMemberSelect); every gate compares against it. */
+import { codeWorkspaceStructureLevel, structuralCommands } from '../../engine/core-modules/upgrade/workspace-structure-level';
+/** Part D: the code's structure level (21 since StaffProfileMemberSelect, 22 since DropWorkspaceCoreForeignKeys); every gate compares against it. */
 const CODE_LEVEL = codeWorkspaceStructureLevel();
+/** The current core.provision_workspace literal: the newest structural command's (it re-creates the function at its level). */
+const CODE_PROVISION_LITERAL = structuralCommands().slice(-1)[0]!.structure.provisionFunctionLiteral!;
 import {
   assertSchemaCompatible,
   assessSchemaCompatibility,
@@ -33,8 +34,8 @@ const PROCESSES: CompatibilityProcess[] = ['api', 'worker', 'cli', 'provisioner'
 
 const CURRENT_FN: ProvisionFunctionState = {
   state: 'known',
-  // Part D: structure level 21 (WorkspaceStaffMemberSelect1786721480000, declared on its workspace command) is the current body.
-  literal: STAFF_PROFILE_MEMBER_SELECT_PROVISION_LITERAL,
+  // Part D: the newest structural command's literal (declared on its workspace command) is the current body.
+  literal: CODE_PROVISION_LITERAL,
   moduleVersion: CODE_LEVEL,
 };
 
@@ -235,7 +236,7 @@ describe('checkSchemaCompatibility (reads over an injected query)', () => {
     return { query, seen };
   }
   // The current (module 20) body; older bodies are now "behind" for the API/Worker and refused for the provisioner.
-  const guards = `... '${STAFF_PROFILE_MEMBER_SELECT_PROVISION_LITERAL}' ...`;
+  const guards = `... '${CODE_PROVISION_LITERAL}' ...`;
 
   it('an unreadable ledger and an empty migration list refuse (gate pending-migrations), never pass', async () => {
     const err = Object.assign(new Error('permission denied'), { code: '42501' });
