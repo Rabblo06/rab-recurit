@@ -52,12 +52,12 @@
 export const METADATA_TABLES = ['object_metadata', 'field_metadata', 'field_metadata_option', 'index_metadata', 'index_field_metadata'] as const;
 export type MetadataTable = (typeof METADATA_TABLES)[number];
 
-/** Row-level guard triggers (BEFORE, FOR EACH ROW) on every table; index_metadata needs only the UPDATE branch. */
+/** Row-level guard triggers (BEFORE, FOR EACH ROW) on every table. */
 export const METADATA_ROW_TRIGGERS: Readonly<Record<MetadataTable, string>> = Object.freeze({
   object_metadata: 'BEFORE INSERT OR UPDATE OR DELETE',
   field_metadata: 'BEFORE INSERT OR UPDATE OR DELETE',
   field_metadata_option: 'BEFORE INSERT OR UPDATE OR DELETE',
-  index_metadata: 'BEFORE UPDATE',
+  index_metadata: 'BEFORE INSERT OR UPDATE OR DELETE',
   index_field_metadata: 'BEFORE INSERT OR UPDATE OR DELETE',
 });
 
@@ -184,7 +184,7 @@ BEGIN
         RAISE EXCEPTION 'the parent object does not exist in this workspace'
           USING ERRCODE = '23503', CONSTRAINT = 'field_metadata_object_fkey';
       END IF;
-      IF (NOT NEW.is_custom OR NEW.is_locked) AND NOT v_privileged THEN
+      IF (NOT NEW.is_custom OR NEW.is_locked OR NEW.is_system) AND NOT v_privileged THEN
         RAISE EXCEPTION 'built-in metadata is written by the sync identity only' USING ERRCODE = '42501';
       END IF;
       IF NEW.is_custom AND NOT v_allows_custom_fields THEN
@@ -263,7 +263,32 @@ BEGIN
     RETURN NEW;
 
   ELSIF TG_TABLE_NAME = 'index_metadata' THEN
-    -- UPDATE only: an index definition never changes (deactivate it, then add a new one).
+    IF TG_OP = 'INSERT' THEN
+      SELECT o.is_custom INTO v_is_custom FROM core.object_metadata o
+       WHERE o.id = NEW.object_metadata_id AND o.workspace_id = NEW.workspace_id
+         FOR SHARE;
+      IF NOT FOUND THEN
+        RAISE EXCEPTION 'the parent object does not exist in this workspace'
+          USING ERRCODE = '23503', CONSTRAINT = 'index_metadata_object_fkey';
+      END IF;
+      -- An index on a built-in object is created by the sync / executor identity only.
+      IF NOT v_is_custom AND NOT v_privileged THEN
+        RAISE EXCEPTION 'built-in metadata is written by the sync identity only' USING ERRCODE = '42501';
+      END IF;
+      RETURN NEW;
+    END IF;
+    IF TG_OP = 'DELETE' THEN
+      IF pg_trigger_depth() > 1 OR v_privileged THEN
+        RETURN OLD;
+      END IF;
+      IF EXISTS (SELECT 1 FROM core.index_field_metadata x
+                   JOIN core.field_metadata f ON f.id = x.field_metadata_id AND f.object_metadata_id = x.object_metadata_id
+                  WHERE x.index_metadata_id = OLD.id AND (NOT f.is_custom OR f.is_locked)) THEN
+        RAISE EXCEPTION 'built-in metadata is written by the sync identity only' USING ERRCODE = '42501';
+      END IF;
+      RETURN OLD;
+    END IF;
+    -- UPDATE: an index definition never changes (deactivate it, then add a new one).
     IF NEW.id IS DISTINCT FROM OLD.id
        OR NEW.organisation_id IS DISTINCT FROM OLD.organisation_id
        OR NEW.workspace_id IS DISTINCT FROM OLD.workspace_id
@@ -271,6 +296,13 @@ BEGIN
        OR NEW.physical_name IS DISTINCT FROM OLD.physical_name
        OR NEW.is_unique IS DISTINCT FROM OLD.is_unique THEN
       RAISE EXCEPTION 'metadata column is immutable' USING ERRCODE = '42501';
+    END IF;
+    -- Deactivating an index over a built-in or locked field is the sync / executor identity's decision only.
+    IF NEW.is_active IS DISTINCT FROM OLD.is_active AND NOT v_privileged
+       AND EXISTS (SELECT 1 FROM core.index_field_metadata x
+                     JOIN core.field_metadata f ON f.id = x.field_metadata_id AND f.object_metadata_id = x.object_metadata_id
+                    WHERE x.index_metadata_id = OLD.id AND (NOT f.is_custom OR f.is_locked)) THEN
+      RAISE EXCEPTION 'built-in metadata is written by the sync identity only' USING ERRCODE = '42501';
     END IF;
     RETURN NEW;
 

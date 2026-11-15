@@ -84,7 +84,11 @@ describe('metadata tables SQL (MetadataEngineTables1786721550000)', () => {
     const g = METADATA_GUARD_FUNCTION_SQL;
     expect(g).toContain("v_privileged boolean := current_user IN ('crewflow'::name, 'rab_secure_owner'::name)");
     expect(g.match(/AND NOT v_privileged THEN/g)?.length).toBeGreaterThanOrEqual(4);
-    expect(g.match(/FOR SHARE;/g)).toHaveLength(5);
+    expect(g.match(/FOR SHARE;/g)).toHaveLength(6);
+    expect(g).toContain('(NOT NEW.is_custom OR NEW.is_locked OR NEW.is_system) AND NOT v_privileged'); // N2
+    expect(g).toContain("USING ERRCODE = '23503', CONSTRAINT = 'index_metadata_object_fkey'"); // N1
+    expect(g).toContain('NEW.is_active IS DISTINCT FROM OLD.is_active AND NOT v_privileged'); // N1
+    expect(METADATA_TABLES_UP_SQL).toContain('CREATE TRIGGER index_metadata_guard BEFORE INSERT OR UPDATE OR DELETE ON core.index_metadata FOR EACH ROW EXECUTE FUNCTION core.metadata_guard()');
     for (const c of ['field_metadata_object_fkey', 'field_metadata_option_field_fkey', 'index_field_metadata_field_fkey']) {
       expect(g).toContain(`USING ERRCODE = '23503', CONSTRAINT = '${c}'`);
     }

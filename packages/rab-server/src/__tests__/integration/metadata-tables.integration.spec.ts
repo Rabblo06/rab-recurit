@@ -493,9 +493,40 @@ describeIfMetadata('metadata engine E1: the five metadata tables, FORCE RLS, the
         ] as Array<[string, unknown[]]>) {
           expect({ sql, code: (await attempt(c, sql, params)).code }).toEqual({ sql, code: '42501' });
         }
+        // equipmentIndex covers only a custom, unlocked field: either identity may deactivate it.
         expect((await attempt(c, 'UPDATE core.index_metadata SET is_active = false WHERE id = $1', [A1.equipmentIndex])).code).toBeNull();
       });
     }
+  });
+
+  it('review #165 N1 / N2: indexes over built-in or locked fields, indexes on built-in objects and system fields belong to the sync identity', async () => {
+    await bound(A1, async (c) => {
+      // Narrow privileged section, as the E2 sync must do it: SET LOCAL ROLE crewflow, write, RESET ROLE.
+      await c.query('SET LOCAL ROLE crewflow');
+      const lockedIx = randomUUID();
+      await c.query("INSERT INTO core.index_metadata (id, organisation_id, workspace_id, object_metadata_id, physical_name) VALUES ($1, $2, $3, $4, 'ix_lockedid1')", [lockedIx, A1.org, A1.workspace, A1.equipment]);
+      await c.query('INSERT INTO core.index_field_metadata (organisation_id, workspace_id, index_metadata_id, object_metadata_id, field_metadata_id, position) VALUES ($1, $2, $3, $4, $5, 0)', [A1.org, A1.workspace, lockedIx, A1.equipment, A1.equipmentId]);
+      await c.query('RESET ROLE');
+      expect((await c.query<{ u: string }>('SELECT current_user::text AS u')).rows[0]!.u).toBe('crewflow_owner');
+      const t = { organisation_id: A1.org, workspace_id: A1.workspace };
+      const [sysField, sysParams] = fieldInsert({ ...t, object_metadata_id: A1.equipment, type: 'TEXT', name: 'sysLike', label: 'Sys', physical_column: 'cf_sys1', is_custom: true, is_system: true });
+      const refused: Array<[string, string, unknown[]]> = [
+        ['deactivate an index on a locked field', 'UPDATE core.index_metadata SET is_active = false WHERE id = $1', [lockedIx]],
+        ['delete an index on a locked field', 'DELETE FROM core.index_metadata WHERE id = $1', [lockedIx]],
+        ['index on a built-in object', "INSERT INTO core.index_metadata (organisation_id, workspace_id, object_metadata_id, physical_name) VALUES ($1, $2, $3, 'ix_staff1')", [A1.org, A1.workspace, A1.staff]],
+        ['field INSERT with is_system', sysField, sysParams],
+      ];
+      for (const [what, sql, params] of refused) expect({ what, code: (await attempt(c, sql, params)).code }).toEqual({ what, code: '42501' });
+      // a custom-only index is still the request path's to deactivate and delete
+      expect(await attempt(c, 'UPDATE core.index_metadata SET is_active = false WHERE id = $1', [A1.equipmentIndex])).toEqual({ code: null, constraint: null, rowCount: 1 });
+      expect(await attempt(c, 'DELETE FROM core.index_metadata WHERE id = $1', [A1.equipmentIndex])).toEqual({ code: null, constraint: null, rowCount: 1 });
+      // the sync identity may do all of it
+      await c.query('SET LOCAL ROLE crewflow');
+      for (const [what, sql, params] of [refused[0]!, refused[2]!, refused[3]!, refused[1]!]) {
+        const r = await attempt(c, sql, params);
+        expect({ what, code: r.code, rows: r.rowCount }).toEqual({ what, code: null, rows: 1 });
+      }
+    });
   });
 
   it('review #165 L1: the guard fails closed when the parent row is missing or in another workspace (23503)', async () => {
