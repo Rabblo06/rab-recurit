@@ -33,8 +33,8 @@ describe('rotateShiftQr SQL (QR review M1)', () => {
     expect(update).toMatch(/WHERE id = \$1 AND qr_version = \$2 AND status = \$3/);
   });
 
-  it('the lock is a FOR UPDATE row lock on the (schema-qualified) shift', () => {
-    expect(lock).toBe(`SELECT id FROM ${SHIFT} WHERE id = $1 FOR UPDATE`);
+  it('the lock is a FOR UPDATE row lock on the (schema-qualified) shift and reads not_ended by the database clock (M2)', () => {
+    expect(lock).toBe(`SELECT id, (ends_at > now()) AS not_ended FROM ${SHIFT} WHERE id = $1 FOR UPDATE`);
     expect(update.startsWith(`UPDATE ${SHIFT} SET `)).toBe(true);
   });
 

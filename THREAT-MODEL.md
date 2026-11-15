@@ -7606,7 +7606,9 @@ image that runs the apps' own derive step on the read-only volume (`--pull never
     `venue_mismatch`). Layers: `PermissionGuard(schedule.create)` (the shift-management flag cancel/archive use) → the
     same flag re-checked in the service first (403 for any id) → `assertShiftOwned` (404 out of scope, never 403) →
     refused 409 `SHIFT_CLOSED` for a status with no outgoing transition in `SHIFT_TRANSITIONS` (completed, cancelled,
-    declined) → workspace RLS → compare-and-set on (qr_version, status) → audit `shift.qr_rotated` (shipped off-host as
+    declined) → refused 409 `SHIFT_ENDED` once the shift has ended (`ends_at > now()` read in the same `SELECT … FOR
+    UPDATE`, database clock; a missing row or null value also refuses — owner decision M2, 2026-11-15) → workspace RLS →
+    compare-and-set on (qr_version, status) → audit `shift.qr_rotated` (shipped off-host as
     `security_configuration` / warning, like `venue.geofence_updated`). No client field is written. The bumped
     `updated_at` makes the pre-shift report scheduler regenerate and re-send the roster with the new QR, but only while
     the shift has not ended (its scan requires `ends_at > now()`). The DEFAULT Venue Manager role does not hold
@@ -7626,9 +7628,18 @@ image that runs the apps' own derive step on the read-only volume (`--pull never
     Worker refuse to boot when `REPORT_AVAILABLE_BEFORE_MINUTES >= QR_MAX_AGE_DAYS x 1440`. That guarantees only that a
     printed QR is still inside the age ceiling when the shift starts, not through its end + grace (shift length is not
     bounded by any setting).
-  - *Held for owner decisions (not implemented):* rotating after the shift has ended strands staff still clocked in
-    (the report is not regenerated after `ends_at`) — review M2; `correct()` does not bound a recovered `clockOutAt` —
-    review L4.
+  - *No rotation after the shift has ended (review M2, owner decision 2026-11-15).* A rotation after `ends_at` would strand
+    staff still clocked in (the report is not regenerated after the end), so it is refused 409 `SHIFT_ENDED` in the
+    service, under the shift row lock, before the compare-and-set and the audit write. Fail closed: a missing row or a null
+    `not_ended` refuses (unit-tested with a mocked lock result); integration-tested over HTTP and from the service.
+  - *Bounded corrected / recovered clock-out (review L4, owner decision 2026-11-15).* `correct(clockOutAt)` refuses 422
+    `INVALID_CLOCK_OUT_TIME` when the value is in the future (database clock), before `clockInAt`, or after the staff
+    member's OWN end + `QR_POST_SHIFT_GRACE_MINUTES` (`attendanceWindow(effectiveAssignmentTime(...)).closesAt`, the same
+    bound as every other clock-out path). Every comparison is written "not inside", so an unreadable time refuses. Worked
+    minutes still come only from `@rab/shared` `computeWorkedMinutes`. Tested per bound, including a seat that ends before
+    the shift (own end, not shift end). Open (owner decision pending): `correct(clockInAt)` has no lower bound (only "not
+    in the future" and "not after clock-out"), so a manager with `attendance.edit` could move a clock-in earlier and
+    inflate paid minutes; `recordAttendance` already bounds it at shift start − `CLOCK_IN_EARLY_MINUTES`.
   - *Per-staff grace, end to end.* One grace, `QR_POST_SHIFT_GRACE_MINUTES` (120), always from the staff member's OWN end
     (`effectiveAssignmentTime`): the QR is accepted until own end + grace (`validUntil` takes the seat; `validateQr`
     requires it), the staff self clock-out now has the same `assertClockWindow` check the on-behalf clock-out has, and the

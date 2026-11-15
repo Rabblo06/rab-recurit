@@ -769,6 +769,36 @@ describeIfDb('attendance abuse cases (integration)', () => {
       expect(row.qr_version).toBe(1);
     });
 
+    // Owner decision M2 (2026-11-15): never after the shift's end (database clock) — the pre-shift report is not
+    // regenerated after the end, so a rotation then would revoke the printed QR with no replacement.
+    it('after the shift has ended (still open by status): 409 SHIFT_ENDED, qr_version unchanged, no audit row — over HTTP and in the service', async () => {
+      const { organisation, managerEmail, managerUserId, venue } = await seedOrg();
+      const managerToken = await login(managerEmail);
+      const shiftId = await makeAndPublishShift(organisation, venue, managerToken);
+      await moveShift(shiftId, '-9 hours', '-1 minute'); // ended a minute ago; status stays non-terminal
+      const res = await rotate(managerToken, shiftId);
+      expect(res.status).toBe(409);
+      expect(res.body.code).toBe('SHIFT_ENDED');
+      await expect(
+        schedulingService.rotateShiftQr({ organisationId: organisation.id, workspaceId: venue.workspaceId ?? null, userId: managerUserId, role: '' }, shiftId),
+      ).rejects.toMatchObject({ response: { code: 'SHIFT_ENDED' } });
+      const [row] = await adminDataSource.query(`SELECT qr_version, status FROM ${await businessTableOf(adminDataSource, 'shift', shiftId)} WHERE id = $1`, [shiftId]);
+      expect(row.qr_version).toBe(1);
+      expect(['completed', 'cancelled']).not.toContain(row.status);
+      const [{ n }] = await adminDataSource.query(`SELECT count(*)::int AS n FROM core.audit_log WHERE action = 'shift.qr_rotated' AND entity_id = $1`, [shiftId]);
+      expect(n).toBe(0);
+    });
+
+    it('control: a running shift that ends in a few minutes can still be rotated', async () => {
+      const { organisation, managerEmail, venue } = await seedOrg();
+      const managerToken = await login(managerEmail);
+      const shiftId = await makeAndPublishShift(organisation, venue, managerToken);
+      await moveShift(shiftId, '-8 hours', '5 minutes');
+      const res = await rotate(managerToken, shiftId);
+      expect(res.status).toBe(201);
+      expect(res.body.qrVersion).toBe(2);
+    });
+
     it('a cancelled or completed shift (no outgoing transition) is refused 409 SHIFT_CLOSED', async () => {
       const { organisation, managerEmail, venue } = await seedOrg();
       const managerToken = await login(managerEmail);

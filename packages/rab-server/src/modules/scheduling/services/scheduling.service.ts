@@ -348,7 +348,8 @@ export class SchedulingService {
    * the shift has not ended (`reportNeedsGeneration`). No client field is written: the version only ever increments here.
    * Layers: PermissionGuard(SCHEDULE_CREATE) → re-checked here, first (403 for any id, before the row is loaded) →
    * `assertShiftOwned` (404 out of scope) → refused for a shift the state machine has closed (no outgoing transition in
-   * SHIFT_TRANSITIONS: completed, cancelled, declined) → workspace RLS → a FOR UPDATE row lock, then a compare-and-set on
+   * SHIFT_TRANSITIONS: completed, cancelled, declined) → workspace RLS → a FOR UPDATE row lock, refused 409 SHIFT_ENDED
+   * once the shift's end has passed by the database clock (owner decision M2), then a compare-and-set on
    * the (qr_version, status) read before it, so a concurrent rotation or status change is a clean 409, never a double
    * bump (rotate-shift-qr.sql.ts) → audit `shift.qr_rotated`.
    */
@@ -365,7 +366,13 @@ export class SchedulingService {
       // Row lock first, then the compare-and-set on the values read above (rotate-shift-qr.sql.ts): a concurrent rotation
       // or status change is a clean 409, and a rotation that waited on the pre-shift report's lock writes its updated_at
       // after that report's generation stamp, so the report is regenerated with the new QR (QR review M1).
-      await manager.query(rotateShiftQrLockSql(manager), [id]);
+      const [locked] = (await manager.query(rotateShiftQrLockSql(manager), [id])) as Array<{ id: string; not_ended: boolean | null }>;
+      // Owner decision M2 (2026-11-15): never after the shift's end (database clock). The pre-shift report is only
+      // regenerated while the shift has not ended, so a rotation then would revoke the printed QR with no replacement
+      // for staff still inside their clock-out grace. Fail closed: a missing row or unreadable end refuses.
+      if (!locked || locked.not_ended !== true) {
+        throw new ConflictException({ code: 'SHIFT_ENDED', message: 'This shift has ended, so its QR code can no longer be replaced.' });
+      }
       const [claimed] = (await manager.query(rotateShiftQrUpdateSql(manager), [id, shift.qrVersion, shift.status])) as [Array<{ qr_version: number }>, number];
       if (claimed.length === 0) throw new ConflictException('This shift changed while its QR code was being replaced — please refresh.');
       await this.auditService.record(manager, ctx, AuditAction.SHIFT_QR_ROTATED, {
