@@ -375,14 +375,20 @@ export class WorkspaceSchemaMigrator {
     if (unknown) throw new WorkspaceMigrationRefused('UNKNOWN_MODULE', unknown.module_id.slice(0, 64));
   }
 
-  /** Part D: a structure level above 20: verify function clean, fingerprint equal to the declared one (none = refused). */
+  /**
+   * Part D: a structure level above 20: verify function clean, fingerprint v2 equal to the declared one (none = refused;
+   * D-RUNNER.md §9.1, WorkspaceStaffMemberSelect1786721480000). The registry records the v1 fingerprint, which
+   * core.record_workspace_schema_drift (unchanged) compares.
+   */
   private async verifyAndRecordDeclared(workspaceId: string, expected: string | undefined): Promise<void> {
     const mod = WORKSPACE_SCHEMA_MODULES[WORKSPACE_SCHEMA_MODULES.length - 1]!.id;
     const problem: Array<{ p: string | null }> = await this.db.query('SELECT core.verify_workspace_schema_v1($1) AS p', [workspaceId]);
     if (problem[0]?.p) throw new WorkspaceMigrationRefused('VERIFY_FAILED', mod);
+    const v2: Array<{ f: string | null }> = await this.db.query('SELECT core.workspace_schema_fingerprint_v2($1) AS f', [workspaceId]);
+    if (!expected || !v2[0]?.f || v2[0].f !== expected) throw new WorkspaceMigrationRefused('PROVISIONED_FINGERPRINT_MISMATCH', mod);
     const fp: Array<{ f: string | null }> = await this.db.query('SELECT core.workspace_schema_fingerprint($1) AS f', [workspaceId]);
     const fingerprint = fp[0]?.f ?? null;
-    if (!expected || !fingerprint || fingerprint !== expected) throw new WorkspaceMigrationRefused('PROVISIONED_FINGERPRINT_MISMATCH', mod);
+    if (!fingerprint) throw new WorkspaceMigrationRefused('PROVISIONED_FINGERPRINT_MISMATCH', mod);
     await this.db.query(
       `UPDATE core.workspace_schema_registry
           SET expected_fingerprint = $2, observed_fingerprint = $2, fingerprint_checked_at = now(), drift_status = 'OK',

@@ -1,3 +1,4 @@
+import { codeWorkspaceStructureLevel } from '../upgrade/workspace-structure-level';
 import { Logger } from '@nestjs/common';
 import { EntityManager } from 'typeorm';
 
@@ -98,15 +99,16 @@ describe('SchemaResolverService: workspace module version (Phase B schema compat
     }
   }
 
-  it('the floor never exceeds LATEST; the owner-login release keeps it at LATEST - 1 = 19', () => {
+  it('the floor never exceeds LATEST; Part D structure level 21 raised it to 20 (owner decision 0b, reviewed 2026-11-14)', () => {
     // Phase D kept the floor at 18 (module 19 only added the statement dispatch pointer triggers). The owner-login PAY-1
     // release (module 20, WorkspaceGrantParityGuards1786721430000) raised it to 19, reviewed as E-10 in
     // workspace-schema-modules.spec.ts: a READY v18 workspace returns 503 (incompatible-module) until migrated. The release
     // migrates every READY workspace to 20 inside that migration, before migrate-on-start lets the API serve (a failing
     // schema throws and the deploy refuses). Raising or lowering it is a deliberate release decision, which must update
-    // this assertion.
+    // this assertion. Part D (0b, structure level 21): 20 — the module list is frozen at 20 and level 21 adds one SELECT policy
+    // this code does not need to serve (D-RUNNER.md §5.3 step 4; workspace-schema-modules.ts).
     expect(MIN_COMPATIBLE_WORKSPACE_MODULE_VERSION).toBeLessThanOrEqual(LATEST_WORKSPACE_MODULE_VERSION);
-    expect(MIN_COMPATIBLE_WORKSPACE_MODULE_VERSION).toBe(19);
+    expect(MIN_COMPATIBLE_WORKSPACE_MODULE_VERSION).toBe(20);
     expect(() => assertCompatibleModuleVersion(MIN_COMPATIBLE_WORKSPACE_MODULE_VERSION)).not.toThrow();
     expect(() => assertCompatibleModuleVersion(LATEST_WORKSPACE_MODULE_VERSION)).not.toThrow();
     expect(() => assertCompatibleModuleVersion(Number.NaN)).toThrow(WorkspaceRoutingError);
@@ -144,7 +146,8 @@ describe('SchemaResolverService: workspace module version (Phase B schema compat
   it('a workspace ahead of the code (image rollback) routes, with ONE warning per workspace', async () => {
     const warn = jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
     try {
-      const { service, manager } = setup(LATEST_WORKSPACE_MODULE_VERSION + 1);
+      // Part D: ahead of the code's STRUCTURE level (21 since StaffProfileMemberSelect), not of the frozen module list.
+      const { service, manager } = setup(codeWorkspaceStructureLevel() + 1);
       await expect(service.resolve(manager, WS)).resolves.toBe(SCHEMA);
       await expect(service.resolve(manager, WS)).resolves.toBe(SCHEMA);
       expect(warn).toHaveBeenCalledTimes(1);

@@ -1,7 +1,7 @@
 import { Client } from 'pg';
 
 import { EXPECTED_WORKSPACE_FINGERPRINTS } from './v1/expected-fingerprints';
-import { LATEST_WORKSPACE_MODULE_VERSION } from './workspace-schema-modules';
+import { codeWorkspaceStructureLevel } from '../../../engine/core-modules/upgrade/workspace-structure-level';
 
 /**
  * Wave 2 lane S2 (B4): workspace-schema drift detector (shared by the worker job and the CLI
@@ -20,9 +20,9 @@ import { LATEST_WORKSPACE_MODULE_VERSION } from './workspace-schema-modules';
  *                fingerprint differs from the code's expected fingerprint for that module version;
  *  - MISSING   — the registry says READY but the schema does not exist;
  *  - UNVERIFIED — READY with no recorded fingerprint (created by an older image, not yet baselined by the migrator);
- *  - BEHIND    — module_version < the newest module this code knows (not drift; the migrator has not run yet).
- *  - AHEAD     — module_version > the newest module this code knows (Phase B: an image rollback after a module migration;
- *                this code has no expected fingerprint for it and must not count it OK).
+ *  - BEHIND    — module_version < this code's structure level (not drift; the migrator / runner has not run yet).
+ *  - AHEAD     — module_version > this code's structure level (Phase B: an image rollback after a module migration or a
+ *                structural workspace command; this code has no expected fingerprint for it and must not count it OK).
  */
 export interface WorkspaceDriftFinding {
   workspaceId: string;
@@ -83,10 +83,15 @@ async function checkOne(client: Client, workspaceId: string, organisationId: str
       return;
     }
     const version = Number(row.r_module_version);
-    if (row.r_status === 'OK' && version > LATEST_WORKSPACE_MODULE_VERSION) {
-      result.findings.push({ workspaceId, status: 'AHEAD', moduleVersion: version, detail: `module ${version} is above this code's ${LATEST_WORKSPACE_MODULE_VERSION}` });
+    // Part D: the code's structure level (20 frozen modules + the structural workspace commands this code knows), not the
+    // module ceiling 20: a level-21 workspace is current, not ahead.
+    const codeLevel = codeWorkspaceStructureLevel();
+    if (row.r_status === 'OK' && version > codeLevel) {
+      result.findings.push({ workspaceId, status: 'AHEAD', moduleVersion: version, detail: `module ${version} is above this code's ${codeLevel}` });
       return;
     }
+    // Second opinion from the v1 tables for levels 14..20 only; a level above 20 is declared in fingerprint v2 (checked by the
+    // runner and the provisioners), and the recorder above still compares the v1 value recorded when it reached that level.
     const expected = EXPECTED_WORKSPACE_FINGERPRINTS[version];
     if (row.r_status === 'OK' && expected !== undefined && row.r_fingerprint !== expected) {
       result.findings.push({
@@ -101,8 +106,8 @@ async function checkOne(client: Client, workspaceId: string, organisationId: str
       result.findings.push({ workspaceId, status: row.r_status as WorkspaceDriftFinding['status'], moduleVersion: version, detail: row.r_detail ?? '' });
       return;
     }
-    if (version < LATEST_WORKSPACE_MODULE_VERSION) {
-      result.findings.push({ workspaceId, status: 'BEHIND', moduleVersion: version, detail: `module ${version} of ${LATEST_WORKSPACE_MODULE_VERSION}` });
+    if (version < codeLevel) {
+      result.findings.push({ workspaceId, status: 'BEHIND', moduleVersion: version, detail: `module ${version} of ${codeLevel}` });
       return;
     }
     result.ok += 1;

@@ -1,3 +1,4 @@
+import { codeWorkspaceStructureLevel, declaredProvisionLiterals } from '../../../engine/core-modules/upgrade/workspace-structure-level';
 import { AttendanceMoneyChecks1786719810000 } from '../core/migrations/1786719810000-AttendanceMoneyChecks';
 import { WORKSPACE_TEMPLATE_STEPS } from './provision-workspace-schema';
 import { ArchiveAndSearchSchema1786719920000 } from '../core/migrations/1786719920000-ArchiveAndSearchSchema';
@@ -107,7 +108,7 @@ describe('workspace schema modules (B3 single source of truth)', () => {
     expect(expectedWorkspacePolicyCount(19)).toBe(41);
   });
 
-  it('every module through LATEST carries a generated sha256 fingerprint unless it is listed as PENDING (module 20 until Agent 1 appends it); the floor is 19', () => {
+  it('every module through LATEST carries a generated sha256 fingerprint unless it is listed as PENDING (module 20 until Agent 1 appends it); the floor is 20 (Part D level 21)', () => {
     // Module 20 (owner-login PAY-1) is pending until its fingerprint is generated on PG16 and PG18 (append mode). While it is
     // pending, WorkspaceGrantParityGuards1786721430000 refuses to run and the M2 harness refuses a release (E-10).
     expect(PENDING_FINGERPRINT_VERSIONS.every((v) => v === 20)).toBe(true);
@@ -115,7 +116,7 @@ describe('workspace schema modules (B3 single source of truth)', () => {
     for (let v = 14; v <= LATEST_WORKSPACE_MODULE_VERSION; v++) {
       if (!PENDING_FINGERPRINT_VERSIONS.includes(v)) expect(EXPECTED_WORKSPACE_FINGERPRINTS[v]).toMatch(/^[0-9a-f]{64}$/);
     }
-    expect(MIN_COMPATIBLE_WORKSPACE_MODULE_VERSION).toBe(19);
+    expect(MIN_COMPATIBLE_WORKSPACE_MODULE_VERSION).toBe(20);
   });
 
   it('modules 1..20 compose exactly the frozen 1786721430000 server-path template (owner-login grant parity)', () => {
@@ -138,9 +139,9 @@ describe('workspace schema modules (B3 single source of truth)', () => {
     expect(() => workspaceGrantParitySql('core')).toThrow('Invalid workspace schema');
   });
 
-  it('REMINDER (E-10): the floor is LATEST - 1 only while LATEST is 20 (reviewed 2026-11-04: module 20 adds triggers only); the next module must reset it', () => {
-    if (LATEST_WORKSPACE_MODULE_VERSION === 20) expect(MIN_COMPATIBLE_WORKSPACE_MODULE_VERSION).toBe(19);
-    else expect(MIN_COMPATIBLE_WORKSPACE_MODULE_VERSION).not.toBe(19);
+  it('REMINDER (E-10, Part D): the module list is frozen at 20 and the floor is 20 since structure level 21 (reviewed 2026-11-14, owner decision 0b)', () => {
+    expect(LATEST_WORKSPACE_MODULE_VERSION).toBe(20);
+    expect(MIN_COMPATIBLE_WORKSPACE_MODULE_VERSION).toBe(20);
   });
 
   it('modules 1..18 compose exactly the frozen 1786721090000 server-path template (org-admin Assigned Staff)', () => {
@@ -361,27 +362,30 @@ describe('Phase B: provision_workspace body → module version map (schema-versi
   const path = require('path') as typeof import('path');
   const MIGRATIONS_DIR = path.join(__dirname, '..', 'core', 'migrations');
 
-  it('every core migration that (re)creates core.provision_workspace has its app_version literal in the frozen map', () => {
+  it('every core migration that (re)creates core.provision_workspace has its app_version literal in the frozen map (modules) or declared on its structural command (Part D)', () => {
     const creators = fs
       .readdirSync(MIGRATIONS_DIR)
       .filter((f) => f.endsWith('.ts'))
       .filter((f) =>
-        /provisionWorkspaceFunctionV2Sql\(|provisionWorkspaceFunctionV3Sql\(|provisionWorkspaceGuardsUpSql\b/.test(fs.readFileSync(path.join(MIGRATIONS_DIR, f), 'utf8')),
+        /provisionWorkspaceFunctionV2Sql\(|provisionWorkspaceFunctionV3Sql\(|provisionWorkspaceGuardsUpSql\b|provisionWorkspaceFunctionLevelSql\(/.test(fs.readFileSync(path.join(MIGRATIONS_DIR, f), 'utf8')),
       )
       .map((f) => /^(\d{13})-(\w+)\.ts$/.exec(f)!)
       .map((m) => `${m[2]}${m[1]}`);
-    expect(creators.sort()).toEqual([
+    const frozen = [
       'ArchiveAndSearchSchema1786719920000',
       'AttendanceMoneyChecks1786719810000',
       'ProvisionWorkspaceGuards1786721210000',
       'StatementDispatchPointer1786721320000',
       'VenueTeamOrgAdmin1786721090000',
       'WorkspaceGrantParityGuards1786721430000',
-    ]);
-    for (const name of creators) expect(PROVISION_FUNCTION_MODULE_VERSIONS[`${PROVISION_FUNCTION_APP_VERSION_PREFIX}${name}`]).toBeDefined();
-    // The NEWEST creator is the body every fully migrated database carries: it must build exactly LATEST.
+    ];
+    const structural = Object.keys(declaredProvisionLiterals()).map((l) => l.slice(PROVISION_FUNCTION_APP_VERSION_PREFIX.length));
+    expect(creators.sort()).toEqual([...frozen, ...structural].sort());
+    for (const name of frozen) expect(PROVISION_FUNCTION_MODULE_VERSIONS[`${PROVISION_FUNCTION_APP_VERSION_PREFIX}${name}`]).toBeDefined();
+    // The NEWEST creator is the body every fully migrated database carries: it must build exactly this code's structure level.
     const newest = creators.sort((a, b) => Number(a.slice(-13)) - Number(b.slice(-13)))[creators.length - 1]!;
-    expect(PROVISION_FUNCTION_MODULE_VERSIONS[`${PROVISION_FUNCTION_APP_VERSION_PREFIX}${newest}`]).toBe(LATEST_WORKSPACE_MODULE_VERSION);
+    const literal = `${PROVISION_FUNCTION_APP_VERSION_PREFIX}${newest}`;
+    expect(PROVISION_FUNCTION_MODULE_VERSIONS[literal] ?? declaredProvisionLiterals()[literal]).toBe(codeWorkspaceStructureLevel());
     expect(MIN_COMPATIBLE_WORKSPACE_MODULE_VERSION).toBeLessThanOrEqual(LATEST_WORKSPACE_MODULE_VERSION);
   });
 
