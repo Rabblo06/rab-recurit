@@ -47,7 +47,7 @@ The live timer in the app always counts from the server's clock-in time, so chan
 
 - **Late:** not clocked in 10 minutes after the start — managers are notified.
 - **No-show:** not clocked in 30 minutes after the start — the place is marked no-show.
-- **Missing clock-out:** still clocked in 30 minutes after the end — flagged for review.
+- **Missing clock-out:** still clocked in 120 minutes (`QR_POST_SHIFT_GRACE_MINUTES`) after the staff member's own end — flagged for review.
 
 See [Late arrivals and missing clock-outs](/attendance/late-and-missing-clock-outs).
 
