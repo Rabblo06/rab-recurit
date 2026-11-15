@@ -64,27 +64,26 @@ export async function candidateWorkspaces(manager: EntityManager, ctx: AuthConte
   return [...ids].sort();
 }
 
-/** Runs `visit` in each candidate workspace's READY schema (rab.workspace_id + search_path moved), restoring both after. */
+/** Runs `visit` in each candidate workspace's READY schema (rab.workspace_id + search_path moved), restoring both after success. */
 async function inWorkspaceSchemas<T>(manager: EntityManager, workspaceIds: readonly string[], visit: (schema: string) => Promise<T | null>): Promise<T | null> {
   if (workspaceIds.length === 0) return null;
   const [entry] = await manager.query<Array<{ ws: string | null; sp: string }>>(`SELECT current_setting('rab.workspace_id', true) AS ws, current_setting('search_path') AS sp`);
   let found: T | null = null;
-  try {
-    for (const workspaceId of workspaceIds) {
-      await manager.query(`SELECT set_config('rab.workspace_id', $1, true)`, [workspaceId]);
-      const [reg] = await manager.query<Array<{ status: string; schema_name: string }>>(
-        `SELECT status, schema_name FROM core.workspace_schema_registry WHERE workspace_id = $1`,
-        [workspaceId],
-      );
-      const schema = workspaceSchemaName(workspaceId);
-      if (reg?.status !== 'READY' || reg.schema_name !== schema) continue;
-      await manager.query(`SELECT set_config('search_path', $1, true)`, [schema]);
-      found = await visit(schema);
-      if (found !== null) break;
-    }
-  } finally {
-    await manager.query(`SELECT set_config('rab.workspace_id', $1, true), set_config('search_path', $2, true)`, [entry?.ws ?? '', entry?.sp ?? 'core']);
+  for (const workspaceId of workspaceIds) {
+    await manager.query(`SELECT set_config('rab.workspace_id', $1, true)`, [workspaceId]);
+    const [reg] = await manager.query<Array<{ status: string; schema_name: string }>>(
+      `SELECT status, schema_name FROM core.workspace_schema_registry WHERE workspace_id = $1`,
+      [workspaceId],
+    );
+    const schema = workspaceSchemaName(workspaceId);
+    if (reg?.status !== 'READY' || reg.schema_name !== schema) continue;
+    await manager.query(`SELECT set_config('search_path', $1, true)`, [schema]);
+    // No restore on failure, on purpose: any error has aborted the transaction (a restore would only fail with 25P02 and hide
+    // the real error, e.g. WorkspaceReferenceBlocked), and the caller's rollback discards these SET LOCAL values anyway.
+    found = await visit(schema);
+    if (found !== null) break;
   }
+  await manager.query(`SELECT set_config('rab.workspace_id', $1, true), set_config('search_path', $2, true)`, [entry?.ws ?? '', entry?.sp ?? 'core']);
   return found;
 }
 
