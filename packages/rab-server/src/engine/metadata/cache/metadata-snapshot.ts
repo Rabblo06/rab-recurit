@@ -28,6 +28,12 @@ export interface WorkspaceMetadataSnapshot {
    * no version row yet (no metadata was ever written); such a snapshot is never cached.
    */
   readonly version: string;
+  /**
+   * The bump time of that version (`updated_at`, microseconds since the epoch, decimal string; `'0'` with version `'0'`).
+   * Part of the cache identity with the version: if a version number is ever reused — a database restored from a backup,
+   * the version row recreated — the new bump has another time, so no entry cached before can match it.
+   */
+  readonly stamp: string;
   readonly objects: readonly MetadataRow[];
   readonly fields: readonly MetadataRow[];
   readonly fieldOptions: readonly MetadataRow[];
@@ -40,36 +46,46 @@ export interface MetadataHead {
   organisationId: string;
   workspaceId: string;
   version: string | null;
+  stamp: string | null;
 }
 
 /** Version `'0'`: no version row exists, nothing is cacheable. */
 export const NO_METADATA_VERSION = '0';
 
+/**
+ * Always exactly one row (the LEFT JOIN keeps it when the workspace has no version row yet). `metadata_stamp` is the bump
+ * time in microseconds. Plain literals on purpose (no interpolation): nothing here is built at run time.
+ */
 export const HEAD_SQL = `SELECT core.current_org()::text AS organisation_id,
        core.current_workspace()::text AS workspace_id,
-       (SELECT s.metadata_version::text
-          FROM core.workspace_metadata_state s
-         WHERE s.workspace_id = core.current_workspace()
-           AND s.organisation_id = core.current_org()) AS metadata_version`;
-
-function rowsOf(table: string, orderBy: string): string {
-  return `(SELECT COALESCE(jsonb_agg(to_jsonb(t) ORDER BY ${orderBy}), '[]'::jsonb)
-            FROM core.${table} t
-           WHERE t.workspace_id = core.current_workspace()
-             AND t.organisation_id = core.current_org())`;
-}
+       s.metadata_version::text AS metadata_version,
+       (extract(epoch FROM s.updated_at) * 1000000)::bigint::text AS metadata_stamp
+  FROM (SELECT 1) one
+  LEFT JOIN core.workspace_metadata_state s
+    ON s.workspace_id = core.current_workspace() AND s.organisation_id = core.current_org()`;
 
 export const LOAD_SQL = `SELECT core.current_org()::text AS organisation_id,
        core.current_workspace()::text AS workspace_id,
-       (SELECT s.metadata_version::text
-          FROM core.workspace_metadata_state s
-         WHERE s.workspace_id = core.current_workspace()
-           AND s.organisation_id = core.current_org()) AS metadata_version,
-       ${rowsOf('object_metadata', 't.id')} AS objects,
-       ${rowsOf('field_metadata', 't.id')} AS fields,
-       ${rowsOf('field_metadata_option', 't.id')} AS field_options,
-       ${rowsOf('index_metadata', 't.id')} AS indexes,
-       ${rowsOf('index_field_metadata', 't.index_metadata_id, t.position')} AS index_fields`;
+       s.metadata_version::text AS metadata_version,
+       (extract(epoch FROM s.updated_at) * 1000000)::bigint::text AS metadata_stamp,
+       (SELECT COALESCE(jsonb_agg(to_jsonb(t) ORDER BY t.id), '[]'::jsonb)
+          FROM core.object_metadata t
+         WHERE t.workspace_id = core.current_workspace() AND t.organisation_id = core.current_org()) AS objects,
+       (SELECT COALESCE(jsonb_agg(to_jsonb(t) ORDER BY t.id), '[]'::jsonb)
+          FROM core.field_metadata t
+         WHERE t.workspace_id = core.current_workspace() AND t.organisation_id = core.current_org()) AS fields,
+       (SELECT COALESCE(jsonb_agg(to_jsonb(t) ORDER BY t.id), '[]'::jsonb)
+          FROM core.field_metadata_option t
+         WHERE t.workspace_id = core.current_workspace() AND t.organisation_id = core.current_org()) AS field_options,
+       (SELECT COALESCE(jsonb_agg(to_jsonb(t) ORDER BY t.id), '[]'::jsonb)
+          FROM core.index_metadata t
+         WHERE t.workspace_id = core.current_workspace() AND t.organisation_id = core.current_org()) AS indexes,
+       (SELECT COALESCE(jsonb_agg(to_jsonb(t) ORDER BY t.index_metadata_id, t.position), '[]'::jsonb)
+          FROM core.index_field_metadata t
+         WHERE t.workspace_id = core.current_workspace() AND t.organisation_id = core.current_org()) AS index_fields
+  FROM (SELECT 1) one
+  LEFT JOIN core.workspace_metadata_state s
+    ON s.workspace_id = core.current_workspace() AND s.organisation_id = core.current_org()`;
 
 /**
  * M2 (optimistic concurrency): lock the version row for the rest of the transaction and return its value. The row lock
@@ -83,6 +99,7 @@ export const LOCK_VERSION_SQL = `SELECT s.metadata_version::text AS metadata_ver
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const VERSION_RE = /^[1-9][0-9]{0,18}$/;
+const STAMP_RE = /^-?[0-9]{1,19}$/;
 
 export function isUuid(value: unknown): value is string {
   return typeof value === 'string' && UUID_RE.test(value);
@@ -90,6 +107,15 @@ export function isUuid(value: unknown): value is string {
 
 export function isCacheableVersion(value: unknown): value is string {
   return typeof value === 'string' && VERSION_RE.test(value);
+}
+
+export function isStamp(value: unknown): value is string {
+  return typeof value === 'string' && STAMP_RE.test(value);
+}
+
+/** The cache identity of one version: `<version>.<stamp>` (used in the Redis key and the in-process tier). */
+export function cacheToken(version: string, stamp: string): string {
+  return `${version}.${stamp}`;
 }
 
 /** Numeric order of two canonical version strings (no leading zeros), without floating point. */

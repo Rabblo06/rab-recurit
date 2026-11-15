@@ -210,6 +210,25 @@ describeIfDb('Metadata cache E5: versioned per-workspace cache, PostgreSQL autho
       expect(counts).toEqual([{ s: 0, o: 0 }]);
     });
 
+    it('a version number reused with a new bump time (restore / recreated row) never serves the old entry', async () => {
+      const w = await seedWorkspace();
+      await commitObject(dsA, w, 'alpha');
+      await inTenant(dsA, w, (m) => cacheA.get(m)); // v1 cached
+      // Simulate a restore to before v1 plus a different change: owner connection resets the row and the content.
+      await admin.query(`ALTER TABLE core.workspace_metadata_state DISABLE TRIGGER workspace_metadata_state_guard`);
+      try {
+        await admin.query(`DELETE FROM core.workspace_metadata_state WHERE workspace_id = $1`, [w.ws]);
+      } finally {
+        await admin.query(`ALTER TABLE core.workspace_metadata_state ENABLE TRIGGER workspace_metadata_state_guard`);
+      }
+      await commitObject(dsA, w, 'beta'); // recreates version 1 with a new bump time
+      expect(await versionOf(w)).toBe('1');
+      const snap = await inTenant(dsB, w, (m) => cacheB.get(m));
+      expect(names(snap)).toEqual(['alpha', 'beta']);
+      // A still holds the old "version 1" in memory; it must not serve it.
+      expect(names(await inTenant(dsA, w, (m) => cacheA.get(m)))).toEqual(['alpha', 'beta']);
+    });
+
     it('deleting the workspace still cascades its metadata and version row', async () => {
       const w = await seedWorkspace();
       await commitObject(dsA, w, 'alpha');
@@ -272,7 +291,9 @@ describeIfDb('Metadata cache E5: versioned per-workspace cache, PostgreSQL autho
       });
       expect(snap.version).toBe('2');
       expect(names(snap)).toEqual(['alpha', 'beta']);
-      expect(await scanKeys(cacheA.redisKey(w.org, w.ws, '*'))).toEqual([cacheA.redisKey(w.org, w.ws, '2')]);
+      const keys = await scanKeys(cacheA.redisKey(w.org, w.ws, '*'));
+      expect(keys).toHaveLength(1);
+      expect(keys[0]!.startsWith(cacheA.redisKey(w.org, w.ws, '2.'))).toBe(true);
       // and a fresh reader of v2 gets the same content
       cacheA.clearLocal();
       expect(names(await inTenant(dsA, w, (m) => cacheA.get(m)))).toEqual(['alpha', 'beta']);
@@ -333,8 +354,8 @@ describeIfDb('Metadata cache E5: versioned per-workspace cache, PostgreSQL autho
       expect(keys.length).toBeGreaterThan(0);
       for (const key of keys) {
         const raw = JSON.parse((await inspect.get(key))!) as { d: string };
-        const payload = JSON.parse(raw.d) as { v: string; objects: Array<{ name_singular: string }> };
-        expect(key.endsWith(`:${payload.v}`)).toBe(true);
+        const payload = JSON.parse(raw.d) as { v: string; s: string; objects: Array<{ name_singular: string }> };
+        expect(key).toBe(cacheA.redisKey(w.org, w.ws, `${payload.v}.${payload.s}`));
         expect(payload.objects.map((o) => o.name_singular).sort()).toEqual(expectedFor(payload.v));
       }
       expect(names(await inTenant(dsB, w, (m) => cold.get(m)))).toEqual(expectedFor(String(WRITES)));
@@ -364,9 +385,10 @@ describeIfDb('Metadata cache E5: versioned per-workspace cache, PostgreSQL autho
       await commitObject(dsA, w1, 'secretOfW1');
       await commitObject(dsA, w2, 'ownOfW2');
       await inTenant(dsA, w1, (m) => cacheA.get(m)); // W1 v1 in Redis
-      const k1 = cacheA.redisKey(w1.org, w1.ws, '1');
-      const k2 = cacheA.redisKey(w2.org, w2.ws, '1');
-      await inspect.set(k2, (await inspect.get(k1))!); // attacker with Redis write access
+      const [k1] = await scanKeys(cacheA.redisKey(w1.org, w1.ws, '*'));
+      const head2 = await inTenant(dsA, w2, (m) => cacheA.readHead(m));
+      const k2 = cacheA.redisKey(w2.org, w2.ws, `${head2.version}.${head2.stamp}`);
+      await inspect.set(k2, (await inspect.get(k1!))!); // attacker with Redis write access
       const cold = new MetadataCacheService(env, redisB);
       const snap = await inTenant(dsB, w2, (m) => cold.get(m));
       expect(snap.workspaceId).toBe(w2.ws);

@@ -5,9 +5,10 @@ import { compareVersions } from './metadata-snapshot';
  * process has seen. Entries are immutable (a version's content never changes), so nothing ever needs to be invalidated:
  * a lookup asks for an exact version (read from PostgreSQL by the caller) and anything else is a miss.
  *
- *  - `get(key, v)` hits only when the stored version equals `v`.
- *  - `set(key, v, …)` never replaces a newer stored version with an older one (a long transaction still reading an old
- *    version just misses and falls through to Redis / PostgreSQL).
+ *  - `get(key, token)` hits only when the stored cache token (`<version>.<stamp>`) equals `token`.
+ *  - `set(key, version, token, …)` never replaces a newer stored version with an older one (a long transaction still
+ *    reading an old version just misses and falls through to Redis / PostgreSQL). The same version with another stamp (a
+ *    reused version number after a restore) replaces the stored one: the caller only ever sets what PostgreSQL returned.
  *  - Bounded by entry count, total approximate bytes and a per-entry cap; idle entries expire (memory only — never a
  *    correctness input).
  *
@@ -34,6 +35,7 @@ export interface SnapshotLruStats {
 
 interface Entry<T> {
   version: string;
+  token: string;
   value: T;
   bytes: number;
   lastReadAt: number;
@@ -52,7 +54,7 @@ export class WorkspaceSnapshotLru<T> {
     this.now = options.now ?? Date.now;
   }
 
-  get(key: string, version: string): T | undefined {
+  get(key: string, token: string): T | undefined {
     const entry = this.entries.get(key);
     if (!entry) return undefined;
     const now = this.now();
@@ -61,7 +63,7 @@ export class WorkspaceSnapshotLru<T> {
       this.counters.expirations += 1;
       return undefined;
     }
-    if (entry.version !== version) return undefined;
+    if (entry.token !== token) return undefined;
     entry.lastReadAt = now;
     // Map iteration order is insertion order: re-insert to mark most recently used.
     this.entries.delete(key);
@@ -69,21 +71,22 @@ export class WorkspaceSnapshotLru<T> {
     return entry.value;
   }
 
-  /** Returns false when refused (too large, or an equal-or-newer version is already stored). */
-  set(key: string, version: string, value: T, bytes: number): boolean {
+  /** Returns false when refused (too large, the same token already stored, or a newer version stored). */
+  set(key: string, version: string, token: string, value: T, bytes: number): boolean {
     if (bytes > this.options.maxEntryBytes) {
       this.counters.setsRefusedTooLarge += 1;
       return false;
     }
     const existing = this.entries.get(key);
     if (existing) {
-      if (compareVersions(existing.version, version) >= 0) {
-        if (existing.version !== version) this.counters.setsRefusedOlder += 1;
+      if (existing.token === token) return false;
+      if (compareVersions(existing.version, version) > 0) {
+        this.counters.setsRefusedOlder += 1;
         return false;
       }
       this.remove(key, existing);
     }
-    this.entries.set(key, { version, value, bytes, lastReadAt: this.now() });
+    this.entries.set(key, { version, token, value, bytes, lastReadAt: this.now() });
     this.bytes += bytes;
     this.evict();
     return true;

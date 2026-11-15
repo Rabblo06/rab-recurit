@@ -17,7 +17,7 @@ export class MetadataCacheContextError extends Error {
  * metadata first). 409, per OWNER-METADATA-ENGINE / M0-BACKEND §2.4 step 3.1.
  */
 export class MetadataVersionConflictError extends ConflictException {
-  constructor(readonly expectedVersion: string, readonly currentVersion: string | null) {
+  constructor(readonly expectedVersion: string, readonly currentVersion: string) {
     super({ statusCode: 409, error: 'Conflict', message: 'The data model changed since it was loaded. Reload and try again.', code: 'METADATA_VERSION_CONFLICT' });
   }
 }

@@ -7,8 +7,10 @@ import { resolveAuthCacheMacKey } from '../../core-modules/secret-encryption/key
 import { decodeEnvelope, deriveMetadataMacKey, encodeEnvelope, MacKey } from './metadata-cache-envelope';
 import { MetadataCacheContextError, MetadataVersionConflictError } from './metadata-cache.errors';
 import {
+  cacheToken,
   HEAD_SQL,
   isCacheableVersion,
+  isStamp,
   isRowArray,
   isUuid,
   LOAD_SQL,
@@ -41,10 +43,12 @@ import { SnapshotLruStats, WorkspaceSnapshotLru } from './workspace-snapshot-lru
  * |                                                                                   |   exact identity + version match                                    |
  *
  * READ PATH (`get`), inside the caller's tenant transaction (runInTenantContext / runInWorkspaceContext):
- *  1. `HEAD_SQL`: the bound organisation + workspace (from the GUCs, never from an argument) and the current version.
+ *  1. `HEAD_SQL`: the bound organisation + workspace (from the GUCs, never from an argument), the current version and its
+ *     bump time (`stamp`; with the version it is the cache identity, so a reused version number — a restored backup, a
+ *     recreated row — can never match an entry cached before).
  *     No tenant bound or no transaction → MetadataCacheContextError (fail closed).
  *  2. In-process entry for exactly that version → return.
- *  3. Redis `crewflow:<env>:metadata:v1:<org>:<ws>:<version>` → verify MAC + identity + shape → return. Any Redis error,
+ *  3. Redis `crewflow:<env>:metadata:v1:<org>:<ws>:<version>.<stamp>` → verify MAC + identity + shape → return. Any Redis error,
  *     timeout, absence or failed check is a miss.
  *  4. `LOAD_SQL` in the same transaction: version and rows from ONE statement (one snapshot), stored under THAT version.
  *
@@ -132,9 +136,12 @@ export class MetadataCacheService {
     });
   }
 
-  /** The Redis key of one (organisation, workspace, version). Exposed for tests and operator tooling; carries no secret. */
-  redisKey(organisationId: string, workspaceId: string, version: string): string {
-    return `${this.keyPrefix}:${organisationId}:${workspaceId}:${version}`;
+  /**
+   * The Redis key of one (organisation, workspace, cache token `<version>.<stamp>`). Exposed for tests and operator tooling;
+   * carries no secret. `token` may be a glob (`*`) for a SCAN.
+   */
+  redisKey(organisationId: string, workspaceId: string, token: string): string {
+    return `${this.keyPrefix}:${organisationId}:${workspaceId}:${token}`;
   }
 
   /**
@@ -144,32 +151,33 @@ export class MetadataCacheService {
    */
   async get(manager: EntityManager): Promise<WorkspaceMetadataSnapshot> {
     const head = await this.readHead(manager);
-    if (!isCacheableVersion(head.version)) {
+    if (!isCacheableVersion(head.version) || !isStamp(head.stamp)) {
       // No version row: nothing has ever been written for this workspace. Read through, never cache.
       this.counters.uncacheableLoads += 1;
       return this.load(manager, head);
     }
     const version = head.version;
+    const token = cacheToken(version, head.stamp);
     const wsKey = `${head.organisationId}:${head.workspaceId}`;
-    const local = this.l1.get(wsKey, version);
+    const local = this.l1.get(wsKey, token);
     if (local) {
       this.counters.l1Hits += 1;
       return local;
     }
 
-    const flightKey = `${wsKey}:${version}`;
+    const flightKey = `${wsKey}:${token}`;
     const running = this.inflight.get(flightKey);
     if (running) {
       // Share a concurrent fill only when it produced exactly what we asked for; otherwise (it failed with its own
       // transaction, or read a newer version) do our own fill on our own transaction.
       const shared = await running.catch(() => null);
-      if (shared && shared.version === version && shared.organisationId === head.organisationId && shared.workspaceId === head.workspaceId) {
+      if (shared && cacheToken(shared.version, shared.stamp) === token && shared.organisationId === head.organisationId && shared.workspaceId === head.workspaceId) {
         this.counters.sharedFills += 1;
         return shared;
       }
-      return this.fill(manager, head, version);
+      return this.fill(manager, head, version, head.stamp);
     }
-    const fill = this.fill(manager, head, version);
+    const fill = this.fill(manager, head, version, head.stamp);
     this.inflight.set(flightKey, fill);
     const clear = () => {
       if (this.inflight.get(flightKey) === fill) this.inflight.delete(flightKey);
@@ -184,26 +192,35 @@ export class MetadataCacheService {
    */
   async readHead(manager: EntityManager): Promise<MetadataHead> {
     assertTenantTransaction(manager);
-    const rows = (await manager.query(HEAD_SQL)) as Array<{ organisation_id: unknown; workspace_id: unknown; metadata_version: unknown }>;
+    const rows = (await manager.query(HEAD_SQL)) as Array<{ organisation_id: unknown; workspace_id: unknown; metadata_version: unknown; metadata_stamp: unknown }>;
     const row = rows?.[0];
     if (!row || !isUuid(row.organisation_id) || !isUuid(row.workspace_id)) {
       throw new MetadataCacheContextError('Metadata cache used without a bound organisation and workspace.');
     }
     const version = row.metadata_version;
-    if (version !== null && !isCacheableVersion(version)) {
-      throw new Error('core.workspace_metadata_state.metadata_version is not a positive integer.');
+    const stamp = row.metadata_stamp;
+    if (version !== null && (!isCacheableVersion(version) || !isStamp(stamp))) {
+      throw new Error('core.workspace_metadata_state holds an invalid version row.');
     }
-    return { organisationId: row.organisation_id, workspaceId: row.workspace_id, version: version as string | null };
+    return {
+      organisationId: row.organisation_id,
+      workspaceId: row.workspace_id,
+      version: version as string | null,
+      stamp: version === null ? null : (stamp as string),
+    };
   }
 
   /**
    * For M2's change runner (optimistic concurrency): locks the bound workspace's version row until the transaction ends
-   * and refuses with 409 unless it equals `expectedVersion`. The database trigger then bumps it once in this transaction.
+   * and refuses with 409 unless it equals `expectedVersion` (`'0'` = the workspace has no metadata yet; the first change's
+   * concurrent creators then serialise on the version row's primary key inside the trigger). The database trigger bumps
+   * the version once in this transaction.
    */
   async lockExpectedVersion(manager: EntityManager, expectedVersion: string): Promise<void> {
     await this.readHead(manager); // tenant + transaction checks
     const rows = (await manager.query(LOCK_VERSION_SQL)) as Array<{ metadata_version: string }>;
-    const current = rows?.[0]?.metadata_version ?? null;
+    // No version row yet = version '0' (nothing was ever written for this workspace).
+    const current = rows?.[0]?.metadata_version ?? NO_METADATA_VERSION;
     if (current !== expectedVersion) throw new MetadataVersionConflictError(expectedVersion, current);
   }
 
@@ -218,8 +235,8 @@ export class MetadataCacheService {
 
   // ------------------------------------------------------------------------------------------------ internals
 
-  private async fill(manager: EntityManager, head: MetadataHead, version: string): Promise<WorkspaceMetadataSnapshot> {
-    const fromRedis = await this.readRedis(head.organisationId, head.workspaceId, version);
+  private async fill(manager: EntityManager, head: MetadataHead, version: string, stamp: string): Promise<WorkspaceMetadataSnapshot> {
+    const fromRedis = await this.readRedis(head.organisationId, head.workspaceId, version, stamp);
     if (fromRedis) return fromRedis;
     const snapshot = await this.load(manager, head);
     if (isCacheableVersion(snapshot.version)) await this.store(snapshot);
@@ -235,8 +252,9 @@ export class MetadataCacheService {
       throw new MetadataCacheContextError('The bound tenant changed while the metadata cache was reading.');
     }
     const version = row.metadata_version === null ? NO_METADATA_VERSION : row.metadata_version;
-    if (version !== NO_METADATA_VERSION && !isCacheableVersion(version)) {
-      throw new Error('core.workspace_metadata_state.metadata_version is not a positive integer.');
+    const stamp = row.metadata_version === null ? NO_METADATA_VERSION : row.metadata_stamp;
+    if (version !== NO_METADATA_VERSION && (!isCacheableVersion(version) || !isStamp(stamp))) {
+      throw new Error('core.workspace_metadata_state holds an invalid version row.');
     }
     const { objects, fields, field_options: fieldOptions, indexes, index_fields: indexFields } = row;
     if (!isRowArray(objects) || !isRowArray(fields) || !isRowArray(fieldOptions) || !isRowArray(indexes) || !isRowArray(indexFields)) {
@@ -246,6 +264,7 @@ export class MetadataCacheService {
       organisationId: head.organisationId,
       workspaceId: head.workspaceId,
       version: version as string,
+      stamp: stamp as string,
       objects,
       fields,
       fieldOptions,
@@ -255,14 +274,15 @@ export class MetadataCacheService {
   }
 
   private async store(snapshot: WorkspaceMetadataSnapshot): Promise<void> {
-    const key = this.redisKey(snapshot.organisationId, snapshot.workspaceId, snapshot.version);
+    const token = cacheToken(snapshot.version, snapshot.stamp);
+    const key = this.redisKey(snapshot.organisationId, snapshot.workspaceId, token);
     const value = encodeEnvelope(this.macKey, key, snapshot);
     const bytes = Buffer.byteLength(value, 'utf8');
     if (bytes > this.options.maxEntryBytes) {
       this.logger.warn(`Metadata snapshot of ${bytes} bytes exceeds the cache entry limit; served uncached.`);
       return;
     }
-    this.l1.set(`${snapshot.organisationId}:${snapshot.workspaceId}`, snapshot.version, snapshot, bytes);
+    this.l1.set(`${snapshot.organisationId}:${snapshot.workspaceId}`, snapshot.version, token, snapshot, bytes);
     try {
       // NX: content under a version is immutable, so the first writer's bytes are as good as ours.
       await this.redis.client.set(key, value, 'EX', this.options.redisTtlSeconds, 'NX');
@@ -273,8 +293,9 @@ export class MetadataCacheService {
     }
   }
 
-  private async readRedis(organisationId: string, workspaceId: string, version: string): Promise<WorkspaceMetadataSnapshot | null> {
-    const key = this.redisKey(organisationId, workspaceId, version);
+  private async readRedis(organisationId: string, workspaceId: string, version: string, stamp: string): Promise<WorkspaceMetadataSnapshot | null> {
+    const token = cacheToken(version, stamp);
+    const key = this.redisKey(organisationId, workspaceId, token);
     let raw: string | null;
     try {
       raw = await this.redis.client.get(key);
@@ -284,7 +305,7 @@ export class MetadataCacheService {
       return null;
     }
     if (raw === null) return null;
-    const decoded = decodeEnvelope(this.macKey, key, raw, { organisationId, workspaceId, version });
+    const decoded = decodeEnvelope(this.macKey, key, raw, { organisationId, workspaceId, version, stamp });
     if (!decoded.ok) {
       this.counters.redisRejected[decoded.reason] += 1;
       if (decoded.reason !== 'key-id') this.logger.warn(`metadata cache entry rejected (${decoded.reason}); rebuilding from PostgreSQL`);
@@ -292,7 +313,7 @@ export class MetadataCacheService {
     }
     this.counters.redisHits += 1;
     const snapshot = deepFreeze(decoded.snapshot);
-    this.l1.set(`${organisationId}:${workspaceId}`, version, snapshot, Buffer.byteLength(raw, 'utf8'));
+    this.l1.set(`${organisationId}:${workspaceId}`, version, token, snapshot, Buffer.byteLength(raw, 'utf8'));
     return snapshot;
   }
 }

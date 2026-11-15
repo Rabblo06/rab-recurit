@@ -15,6 +15,10 @@ const WS_A = '22222222-2222-4222-8222-222222222222';
 const ORG_B = '44444444-4444-4444-8444-444444444444';
 const WS_B = '33333333-3333-4333-8333-333333333333';
 
+/** The fake bump time of a version (the real one is updated_at in microseconds). */
+const stampOf = (version: string) => String(1_700_000_000_000_000 + Number(version));
+const token = (version: string) => `${version}.${stampOf(version)}`;
+
 interface FakeWorkspace {
   version: string | null;
   objects: Array<Record<string, unknown>>;
@@ -38,7 +42,9 @@ class FakeDb {
       queryRunner: { isTransactionActive: inTransaction },
       query: async (sql: string) => {
         const w = ws ? this.workspaces.get(ws) : undefined;
-        if (sql === HEAD_SQL) return [{ organisation_id: org, workspace_id: ws, metadata_version: w?.version ?? null }];
+        if (sql === HEAD_SQL) {
+          return [{ organisation_id: org, workspace_id: ws, metadata_version: w?.version ?? null, metadata_stamp: w?.version ? stampOf(w.version) : null }];
+        }
         if (sql === LOAD_SQL) {
           this.beforeLoad?.();
           this.beforeLoad = null;
@@ -49,6 +55,7 @@ class FakeDb {
               organisation_id: org,
               workspace_id: ws,
               metadata_version: now?.version ?? null,
+              metadata_stamp: now?.version ? stampOf(now.version) : null,
               objects: now?.objects ?? [],
               fields: [],
               field_options: [],
@@ -157,9 +164,9 @@ describe('MetadataCacheService (metadata engine E5, unit)', () => {
     const snap = await cache.get(db.manager(ORG_A, WS_A));
     expect(snap.version).toBe('2');
     expect(snap.objects).toHaveLength(2);
-    expect([...redis.store.keys()]).toEqual([cache.redisKey(ORG_A, WS_A, '2')]);
+    expect([...redis.store.keys()]).toEqual([cache.redisKey(ORG_A, WS_A, token('2'))]);
     // v1 was never written, so nobody can be served v2 content as "v1" or v1 content as "v2"
-    expect(redis.store.has(cache.redisKey(ORG_A, WS_A, '1'))).toBe(false);
+    expect(redis.store.has(cache.redisKey(ORG_A, WS_A, token('1')))).toBe(false);
   });
 
   it('Redis down: reads come from PostgreSQL, changes are still seen at once', async () => {
@@ -178,7 +185,7 @@ describe('MetadataCacheService (metadata engine E5, unit)', () => {
     const a = instance(redis);
     await a.get(db.manager(ORG_B, WS_B)); // B's v1 in Redis
     // Copy B's (valid) value under A's v1 key.
-    redis.store.set(a.redisKey(ORG_A, WS_A, '1'), redis.store.get(a.redisKey(ORG_B, WS_B, '1'))!);
+    redis.store.set(a.redisKey(ORG_A, WS_A, token('1')), redis.store.get(a.redisKey(ORG_B, WS_B, token('1')))!);
     const b = instance(redis);
     const snap = await b.get(db.manager(ORG_A, WS_A));
     expect(snap.workspaceId).toBe(WS_A);
@@ -193,6 +200,23 @@ describe('MetadataCacheService (metadata engine E5, unit)', () => {
     expect(y).toBe(z);
     expect(db.loads).toBe(1);
     expect(cache.stats().sharedFills).toBe(2);
+  });
+
+  it('a reused version number with another bump time never matches the old entry (restore / recreated row)', async () => {
+    const a = instance(redis);
+    const old = await a.get(db.manager(ORG_A, WS_A)); // v1 cached under 1.<stamp>
+    // Simulate a restore to an earlier point followed by a different change: version 1 again, new bump time, new content.
+    db.workspaces.set(WS_A, { version: '1', objects: [{ id: 'other', name_singular: 'other' }] });
+    const realStamp = stampOf;
+    const manager = db.manager(ORG_A, WS_A);
+    const query = manager.query.bind(manager);
+    (manager as { query: unknown }).query = async (sql: string) => {
+      const rows = (await query(sql)) as Array<Record<string, unknown>>;
+      return rows.map((r) => ('metadata_stamp' in r && r.metadata_version ? { ...r, metadata_stamp: String(Number(realStamp('1')) + 99) } : r));
+    };
+    const fresh = await a.get(manager);
+    expect(old.objects.map((o) => o.name_singular)).toEqual(['rocket']);
+    expect(fresh.objects.map((o) => o.name_singular)).toEqual(['other']);
   });
 
   it('lockExpectedVersion refuses a stale expected version with 409', async () => {

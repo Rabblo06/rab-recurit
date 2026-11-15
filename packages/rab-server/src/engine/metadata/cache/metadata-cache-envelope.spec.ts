@@ -11,6 +11,7 @@ const snapshot: WorkspaceMetadataSnapshot = {
   organisationId: ORG_A,
   workspaceId: WS_A,
   version: '7',
+  stamp: '1700000000000001',
   objects: [{ id: 'o1', name_singular: 'rocket' }],
   fields: [{ id: 'f1', name: 'colour' }],
   fieldOptions: [],
@@ -20,8 +21,8 @@ const snapshot: WorkspaceMetadataSnapshot = {
 
 describe('metadata cache envelope (MT-11: Redis outside the trust boundary)', () => {
   const key = deriveMetadataMacKey({ key: randomBytes(32), keyId: 'derived-v1' });
-  const redisKey = `crewflow:test:metadata:v1:${ORG_A}:${WS_A}:7`;
-  const expected = { organisationId: ORG_A, workspaceId: WS_A, version: '7' };
+  const redisKey = `crewflow:test:metadata:v1:${ORG_A}:${WS_A}:7.1700000000000001`;
+  const expected = { organisationId: ORG_A, workspaceId: WS_A, version: '7', stamp: '1700000000000001' };
 
   it('round-trips', () => {
     const decoded = decodeEnvelope(key, redisKey, encodeEnvelope(key, redisKey, snapshot), expected);
@@ -47,7 +48,7 @@ describe('metadata cache envelope (MT-11: Redis outside the trust boundary)', ()
   });
 
   it('rejects a valid value copied under another workspace key (MAC is bound to the key)', () => {
-    const otherKey = `crewflow:test:metadata:v1:${ORG_A}:${WS_B}:7`;
+    const otherKey = `crewflow:test:metadata:v1:${ORG_A}:${WS_B}:7.1700000000000001`;
     const copied = encodeEnvelope(key, redisKey, snapshot);
     expect(decodeEnvelope(key, otherKey, copied, { ...expected, workspaceId: WS_B })).toEqual({ ok: false, reason: 'mac' });
   });
@@ -56,6 +57,7 @@ describe('metadata cache envelope (MT-11: Redis outside the trust boundary)', ()
     const raw = encodeEnvelope(key, redisKey, snapshot);
     expect(decodeEnvelope(key, redisKey, raw, { ...expected, workspaceId: WS_B })).toEqual({ ok: false, reason: 'identity' });
     expect(decodeEnvelope(key, redisKey, raw, { ...expected, version: '8' })).toEqual({ ok: false, reason: 'identity' });
+    expect(decodeEnvelope(key, redisKey, raw, { ...expected, stamp: '1700000000000002' })).toEqual({ ok: false, reason: 'identity' });
   });
 
   it('treats another key id as a quiet miss, and garbage as malformed', () => {

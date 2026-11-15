@@ -7,7 +7,7 @@ import { isRowArray, isUuid, MetadataRow, WorkspaceMetadataSnapshot } from './me
  *
  *   { k: <MAC key id>, m: hex HMAC-SHA256(key, "<redis key>\n<payload>"), d: <payload JSON> }
  *
- * The MAC binds the payload to its full Redis key, and the payload repeats organisation, workspace and version, so:
+ * The MAC binds the payload to its full Redis key, and the payload repeats organisation, workspace, version and stamp, so:
  *   - a value written by anyone who can write Redis but does not hold the MAC key is a plain miss;
  *   - a valid value copied under another workspace's (or another version's) key fails the MAC, and would also fail the
  *     identity check below;
@@ -40,6 +40,7 @@ interface Payload {
   o: string;
   w: string;
   v: string;
+  s: string;
   objects: MetadataRow[];
   fields: MetadataRow[];
   fieldOptions: MetadataRow[];
@@ -52,6 +53,7 @@ export function encodeEnvelope(macKey: MacKey, redisKey: string, snapshot: Works
     o: snapshot.organisationId,
     w: snapshot.workspaceId,
     v: snapshot.version,
+    s: snapshot.stamp,
     objects: snapshot.objects as MetadataRow[],
     fields: snapshot.fields as MetadataRow[],
     fieldOptions: snapshot.fieldOptions as MetadataRow[],
@@ -68,13 +70,13 @@ export type DecodeOutcome =
 
 /**
  * Verifies and decodes. `expected` is the identity the caller read from PostgreSQL for THIS request; the decoded payload
- * must name exactly the same organisation, workspace and version.
+ * must name exactly the same organisation, workspace, version and stamp.
  */
 export function decodeEnvelope(
   macKey: MacKey,
   redisKey: string,
   raw: string,
-  expected: { organisationId: string; workspaceId: string; version: string },
+  expected: { organisationId: string; workspaceId: string; version: string; stamp: string },
 ): DecodeOutcome {
   let envelope: { k?: unknown; m?: unknown; d?: unknown };
   try {
@@ -96,7 +98,7 @@ export function decodeEnvelope(
   } catch {
     return { ok: false, reason: 'malformed' };
   }
-  if (!p || p.o !== expected.organisationId || p.w !== expected.workspaceId || p.v !== expected.version || !isUuid(p.o) || !isUuid(p.w)) {
+  if (!p || p.o !== expected.organisationId || p.w !== expected.workspaceId || p.v !== expected.version || p.s !== expected.stamp || !isUuid(p.o) || !isUuid(p.w)) {
     return { ok: false, reason: 'identity' };
   }
   if (!isRowArray(p.objects) || !isRowArray(p.fields) || !isRowArray(p.fieldOptions) || !isRowArray(p.indexes) || !isRowArray(p.indexFields)) {
@@ -108,6 +110,7 @@ export function decodeEnvelope(
       organisationId: p.o,
       workspaceId: p.w,
       version: p.v,
+      stamp: p.s,
       objects: p.objects,
       fields: p.fields,
       fieldOptions: p.fieldOptions,
