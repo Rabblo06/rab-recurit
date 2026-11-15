@@ -568,7 +568,12 @@ async function findBlockingDependency(
       if (!scope.id) continue;
       const physicalSchema = await resolveReadyPhysicalSchema(manager, scope.id);
       if (physicalSchema === WORKSPACE_UPGRADING) return 'workspace_upgrading';
-      if (!physicalSchema) continue;
+      if (!physicalSchema) {
+        // Security re-review N1: a workspace schema that exists but does not resolve (not READY, unsupported version, name
+        // mismatch) cannot be checked: retained, never skipped (UserDeletionService.checkableWorkspaceSchema, same rule).
+        await assertNoUnresolvedSchema(manager, scope.id);
+        continue;
+      }
       bindBusinessSchema(manager, physicalSchema, scope.id);
       await manager.query(`SELECT set_config('search_path',$1,true)`, [businessSearchPath(physicalSchema)]);
       for (const [reason, sql] of workspaceTableDependencyChecks(manager)) {
@@ -604,6 +609,22 @@ async function findBlockingDependency(
 async function isLevel22(manager: EntityManager, workspaceId: string): Promise<boolean> {
   const [row] = await manager.query<Array<{ module_version: number | null }>>(`SELECT module_version FROM core.workspace_schema_registry WHERE workspace_id = $1`, [workspaceId]);
   return Number(row?.module_version ?? 0) >= 22;
+}
+
+/**
+ * Security re-review N1: a catalogued workspace whose `workspace_<hex>` namespace EXISTS but did not resolve through the trusted
+ * registry (not READY, unsupported schema_version, name mismatch) may hold rows nobody checked: Level22Retain
+ * ('workspace_unverifiable'), the candidate is retained. No namespace at all: nothing to check (the workspace has no schema).
+ */
+async function assertNoUnresolvedSchema(manager: EntityManager, workspaceId: string): Promise<void> {
+  let name: string;
+  try {
+    name = workspaceSchemaName(workspaceId);
+  } catch {
+    throw new Level22Retain('workspace_unverifiable');
+  }
+  const [row] = await manager.query<Array<{ present: boolean }>>(`SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_namespace WHERE nspname = $1) AS present`, [name]);
+  if (row?.present) throw new Level22Retain('workspace_unverifiable');
 }
 
 class Level22Retain extends Error {
@@ -653,7 +674,11 @@ async function clearLevel22WorkspaceReferences(manager: EntityManager, userId: s
   for (const workspaceId of workspaceIds) {
     const physicalSchema = await resolveReadyPhysicalSchema(manager, workspaceId);
     if (physicalSchema === WORKSPACE_UPGRADING) throw new Level22Retain('workspace_upgrading');
-    if (!physicalSchema || !(await isLevel22(manager, workspaceId))) continue;
+    if (!physicalSchema) {
+      await assertNoUnresolvedSchema(manager, workspaceId); // N1: present but unresolvable → retained
+      continue;
+    }
+    if (!(await isLevel22(manager, workspaceId))) continue;
     bindBusinessSchema(manager, physicalSchema, workspaceId);
     await manager.query(`SELECT set_config('rab.organisation_id', $1, true), set_config('rab.workspace_id', $2, true), set_config('search_path', $3, true)`, [
       organisationId,

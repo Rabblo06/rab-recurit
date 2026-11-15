@@ -455,6 +455,30 @@ describeIfDb('account invite cleanup job (integration)', () => {
     expect(orphans.findings).toEqual([]);
   });
 
+  it('Part D 0a (re-review N1): a workspace schema that exists but does not resolve (unsupported schema_version) retains the invitee, never skips it', async () => {
+    const fx = await expiredStaffInvite();
+    const [{ schema_version: version }] = await adminDataSource.manager.query<Array<{ schema_version: number }>>(
+      `SELECT schema_version FROM core.workspace_schema_registry WHERE workspace_id = $1`,
+      [fx.workspaceId],
+    );
+    await adminDataSource.manager.query(`UPDATE core.workspace_schema_registry SET schema_version = 999 WHERE workspace_id = $1`, [fx.workspaceId]);
+    try {
+      const result = await runCleanupCycleUntilExamined(fx.userId);
+      expect(result.retained).toBeGreaterThanOrEqual(1);
+    } finally {
+      await adminDataSource.manager.query(`UPDATE core.workspace_schema_registry SET schema_version = $2 WHERE workspace_id = $1`, [fx.workspaceId, version]);
+    }
+    const kept = await adminDataSource.manager.findOneByOrFail(User, { id: fx.userId });
+    expect(kept.status).toBe('invite_expired');
+    const reasons = await adminDataSource.manager.query<Array<{ reason: string }>>(
+      `SELECT metadata->>'reason' AS reason FROM core.audit_log WHERE action = 'user.invite_cleanup_skipped' AND target_user_id = $1`,
+      [fx.userId],
+    );
+    expect(reasons.map((r) => r.reason)).toContain('workspace_unverifiable');
+    // The profile in the unverifiable schema is untouched (never deleted blind, never orphaned).
+    expect(await adminDataSource.manager.query(`SELECT 1 FROM "${businessSchema(fx.workspaceId)}".staff_profile WHERE user_id = $1`, [fx.userId])).toHaveLength(1);
+  });
+
   it('never hard-deletes an account that has created real business data (e.g. a Venue) — retains it instead', async () => {
     const { organisation, ownerEmail } = await seedOrgWithOwner();
     const ownerToken = await loginOwner(ownerEmail);
