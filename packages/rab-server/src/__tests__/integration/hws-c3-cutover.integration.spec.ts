@@ -59,7 +59,7 @@ describeIfDb('C3 HWS cutover copy path (option A′)', () => {
 
   const make = async (n: string): Promise<SeededWorkspace> => {
     seq += 1;
-    const ws = await seedWorkspace(admin, `c3-${n}-${SFX}-${String.fromCharCode(97 + seq)}`);
+    const ws = await seedWorkspace(admin, `c3-${n}-${SFX}-${seq.toString(36)}`);
     created.push(ws);
     await provisionTypeScript(adminUrl, ws);
     return ws;
