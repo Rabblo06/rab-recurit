@@ -1,4 +1,4 @@
-import { DataSource, EntityManager, QueryRunner } from 'typeorm';
+import { BaseEntity, Column, DataSource, Entity, EntityManager, ManyToOne, PrimaryGeneratedColumn, QueryRunner } from 'typeorm';
 import { QueryResult } from 'typeorm/query-runner/QueryResult';
 
 import { coreDataSourceOptions } from '../../../database/typeorm/core/core.datasource';
@@ -19,6 +19,7 @@ import {
   boundSchemaOf,
   executingDataSourceOf,
   metadataSourceFor,
+  schemaBoundMetadataStats,
   SCHEMA_BOUND_METADATA_CACHE_MAX,
   SchemaBoundEntityManagerError,
 } from './schema-bound-entity-manager';
@@ -31,6 +32,41 @@ import {
 const WS = 'workspace_0123456789abcdef0123456789abcdef';
 const WS2 = 'workspace_fedcba9876543210fedcba9876543210';
 const ID = '00000000-0000-4000-8000-000000000001';
+// Test-only entities for the build-time refusals (registered in this test file's own metadata storage only).
+@Entity({ name: 'c21_plain' })
+class C21Plain {
+  @PrimaryGeneratedColumn('uuid') id!: string;
+}
+@Entity({ name: 'c21_extra' })
+class C21Extra {
+  @PrimaryGeneratedColumn('uuid') id!: string;
+}
+@Entity({ name: 'c21_active_record' })
+class C21ActiveRecord extends BaseEntity {
+  @PrimaryGeneratedColumn('uuid') id!: string;
+}
+@Entity({ name: 'c21_lookalike' })
+class C21Lookalike {
+  static useDataSource(): void {}
+  @PrimaryGeneratedColumn('uuid') id!: string;
+}
+@Entity({ name: 'c21_lazy_target' })
+class C21LazyTarget {
+  @PrimaryGeneratedColumn('uuid') id!: string;
+}
+@Entity({ name: 'c21_lazy_owner' })
+class C21LazyOwner {
+  @PrimaryGeneratedColumn('uuid') id!: string;
+  @Column({ nullable: true }) targetId?: string;
+  @ManyToOne(() => C21LazyTarget, { lazy: true }) target!: Promise<C21LazyTarget>;
+}
+
+async function builtBase(options: Record<string, unknown>): Promise<DataSource> {
+  const ds = new DataSource({ type: 'postgres', ...options } as never);
+  await (ds as unknown as { buildMetadatas(): Promise<void> }).buildMetadatas();
+  return ds;
+}
+
 const ENTITIES = [Attendance, AttendanceCorrection, ShiftReport, UserNote, ManagerVenue, JobOffer, ReplacementRequest, JobRole, Shift, ShiftAssignment, ShiftRequestStaff, VenueRoleRate, StaffProfile, Venue];
 
 async function baseDataSource(): Promise<DataSource> {
@@ -142,7 +178,7 @@ describe('schema-bound EntityManager (C2-1)', () => {
     const m = await bindEntityManagerToSchema(manager, WS);
     await expect(m.connection.manager.find(Shift)).rejects.toThrow(/not Connected/i);
     expect(m.connection.isInitialized).toBe(false);
-    await expect(bindEntityManagerToSchema(m, WS2)).rejects.toThrow(/different schema/);
+    await expect(bindEntityManagerToSchema(m, WS2)).rejects.toThrow(/second schema on the same transaction/);
     expect(await bindEntityManagerToSchema(m, WS)).toBe(m);
     await expect(metadataSourceFor(m.connection, WS)).rejects.toThrow(/itself a schema-bound/);
   });
@@ -199,5 +235,81 @@ describe('schema-bound EntityManager (C2-1)', () => {
       return [businessTables(m).venue, nested, m.connection.getMetadata(Venue).tablePath];
     });
     expect(seen).toEqual([`"${WS}"."venue"`, `"${WS}"."shift"`, `${WS}.venue`]);
+  });
+
+  it('M1: one schema per transaction — a second bind on the same runner (any manager) throws, and the bound manager still persists into its schema', async () => {
+    const { manager, runner, log } = recordingManager(base);
+    const a = await bindEntityManagerToSchema(manager, WS);
+    // The binder's original (unbound) manager on the same runner asks for another schema: refused, runner.manager untouched.
+    await expect(bindEntityManagerToSchema(manager, WS2)).rejects.toThrow(/second schema on the same transaction/);
+    expect(runner.manager).toBe(a);
+    // Same schema again: the already bound manager is returned (no re-point).
+    expect(await bindEntityManagerToSchema(manager, WS)).toBe(a);
+    log.length = 0;
+    await a.save(a.create(JobRole, { organisationId: ID, name: 'm1', defaultRatePence: 0 }));
+    expect(log.some((sql) => sql.startsWith(`INSERT INTO "${WS}"."job_role"`))).toBe(true);
+    expect(log.join('\n')).not.toContain(WS2);
+  });
+
+  it('M2: hits, builds and evictions are counted (no schema names in the counters)', async () => {
+    const own = await baseDataSource();
+    const before = schemaBoundMetadataStats();
+    await metadataSourceFor(own, WS);
+    await metadataSourceFor(own, WS);
+    const after = schemaBoundMetadataStats();
+    expect(after.builds - before.builds).toBe(1);
+    expect(after.hits - before.hits).toBe(1);
+    expect(Object.keys(after).sort()).toEqual(['builds', 'evictions', 'hits']);
+  });
+
+  it('L3: the metadata source never connects (initialize/connect reject before any pool) and holds no connection fields', async () => {
+    const withSecrets = await builtBase({ entities: [C21Plain], host: 'db.invalid', port: 5432, username: 'u', password: 'secret-value', url: 'postgres://u:secret-value@db.invalid/x', extra: { max: 3 } });
+    const source = await metadataSourceFor(withSecrets, WS);
+    const createPool = jest.spyOn(source.driver as unknown as { createPool: () => unknown }, 'createPool');
+    await expect(source.initialize()).rejects.toThrow(/never connects/);
+    await expect(source.driver.connect()).rejects.toThrow(/never connects/);
+    expect(createPool).not.toHaveBeenCalled();
+    const options = source.options as unknown as Record<string, unknown>;
+    for (const field of ['url', 'host', 'port', 'username', 'password', 'database', 'ssl', 'extra', 'replication']) {
+      expect([field, Object.prototype.hasOwnProperty.call(options, field), options[field]]).toEqual([field, true, undefined]);
+    }
+    expect(JSON.stringify(source.driver.options)).not.toContain('secret-value');
+  });
+
+  describe('I1: every build-time refusal', () => {
+    it('glob strings / non-class entities', async () => {
+      const glob = new DataSource({ type: 'postgres', entities: ['src/**/*.entity.ts'] });
+      await expect(metadataSourceFor(glob, WS)).rejects.toThrow(/explicit classes/);
+    });
+
+    it('a BaseEntity subclass, and a lookalike with a static useDataSource', async () => {
+      await expect(metadataSourceFor(await builtBase({ entities: [C21Plain, C21ActiveRecord] }), WS)).rejects.toThrow(/C21ActiveRecord is a BaseEntity/);
+      await expect(metadataSourceFor(await builtBase({ entities: [C21Plain, C21Lookalike] }), WS)).rejects.toThrow(/C21Lookalike is a BaseEntity/);
+    });
+
+    it('a lazy relation, refused from the BASE metadata before anything is built', async () => {
+      const lazyBase = await builtBase({ entities: [C21LazyTarget, C21LazyOwner] });
+      const before = schemaBoundMetadataStats().builds;
+      const loaderBefore = Object.getOwnPropertyDescriptor(C21LazyOwner.prototype, 'target');
+      await expect(metadataSourceFor(lazyBase, WS)).rejects.toThrow(/C21LazyOwner.target is a lazy relation/);
+      expect(schemaBoundMetadataStats().builds - before).toBe(1); // counted as an attempt, but no DataSource was built
+      expect(Object.getOwnPropertyDescriptor(C21LazyOwner.prototype, 'target')).toEqual(loaderBefore); // prototype untouched
+    });
+
+    it('a schema-less entity that the base resolves to a DataSource-level default schema (core-schema mismatch)', async () => {
+      await expect(metadataSourceFor(await builtBase({ entities: [C21Plain], schema: 'public' }), WS)).rejects.toThrow(/C21Plain resolved to/);
+    });
+
+    it('an entity the base has no metadata for', async () => {
+      const partial = await builtBase({ entities: [C21Plain] });
+      (partial.options as unknown as { entities: unknown[] }).entities = [C21Plain, C21Extra];
+      await expect(metadataSourceFor(partial, WS)).rejects.toThrow(/C21Extra has no metadata on the base DataSource/);
+    });
+
+    it('a refused build is not cached: the next call builds (and refuses) again', async () => {
+      const bad = await builtBase({ entities: [C21Plain, C21Lookalike] });
+      await expect(metadataSourceFor(bad, WS)).rejects.toThrow(/BaseEntity/);
+      await expect(metadataSourceFor(bad, WS)).rejects.toThrow(/BaseEntity/);
+    });
   });
 });
