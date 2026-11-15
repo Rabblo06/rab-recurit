@@ -344,8 +344,8 @@ export class OrganisationOnboardingService {
     const ctx: AuthContext = { organisationId, workspaceId: null, userId: found.invitedBy, role: '' };
     await this.tenantContext.bindCoreIdentityGucs(manager, ctx);
     // C2-0: a binder ('core': the new organisation has no workspace yet); '' under the test-only search_path trap.
-    await manager.query(`SELECT set_config('search_path', $1, true)`, [businessSearchPath(CORE_BUSINESS_SCHEMA)]);
     bindBusinessSchema(manager, CORE_BUSINESS_SCHEMA, null);
+    await manager.query(`SELECT set_config('search_path', $1, true)`, [businessSearchPath(CORE_BUSINESS_SCHEMA)]);
     // One account per email across organisations (owner policy 2026-10-15): never a second identity.
     const [elsewhere] = await manager.query<Array<{ taken: boolean }>>(`SELECT core.email_registered_in_another_organisation($1) AS taken`, [found.email]);
     if (elsewhere?.taken) throw new BadRequestException(INVALID_ORGANISATION_INVITATION_MESSAGE);

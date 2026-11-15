@@ -42,6 +42,9 @@ export const RENDER_CONCURRENCY = Math.max(1, Number(process.env.PDF_EQUALITY_CO
  * whatever day the suite runs. Only `Date.now` is pinned (the clock validateQr and jsonwebtoken read), never timers,
  * and only for the two validations, so renders in flight elsewhere keep their real timers.
  */
+/** A seat with no own period: the QR is judged against the fixture shift's own times (`effectiveAssignmentTime`). */
+const SHIFT_TIMES_SEAT = { period: null };
+
 export async function verifyShiftQr(scenarioId: string, payload: string): Promise<string[]> {
   const seed = scenarioSeeds().find((s) => s.id === scenarioId);
   if (!seed) return [`no scenario ${scenarioId}`];
@@ -53,12 +56,12 @@ export async function verifyShiftQr(scenarioId: string, payload: string): Promis
   Date.now = () => shift.endsAt.getTime();
   try {
     try {
-      await fixtureAttendanceQr.validateQr(manager, shift.id, payload);
+      await fixtureAttendanceQr.validateQr(manager, shift.id, payload, SHIFT_TIMES_SEAT);
     } catch (error) {
       problems.push(`validateQr refused the payload for its own shift: ${(error as Error).message}`);
     }
     const other = '00000000-0000-4000-8000-0000000000ff';
-    const refused = await fixtureAttendanceQr.validateQr(manager, other, payload).then(
+    const refused = await fixtureAttendanceQr.validateQr(manager, other, payload, SHIFT_TIMES_SEAT).then(
       () => false,
       () => true,
     );

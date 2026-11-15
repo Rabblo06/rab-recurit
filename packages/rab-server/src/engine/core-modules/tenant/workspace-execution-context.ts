@@ -39,9 +39,11 @@ export class WorkspaceExecutionContext {
       // Organisation context is bound above, so the registry's FORCE RLS can show the row to this organisation only.
       const schema = await this.schemaResolver.resolve(manager, ctx.workspaceId);
       // Exactly one schema. No core, no public, no pg_catalog listed here: catalog objects are always searched by Postgres.
-      // C2-0: '' instead under the test-only search_path trap; businessTables(manager) is bound to the schema either way.
-      await manager.query(`SELECT set_config('search_path', $1, true)`, [businessSearchPath(schema)]);
-      return withBusinessSchema(manager, schema, ctx.workspaceId, () => fn(manager, schema));
+      // C2-0: recorded for businessTables(manager) (validated) BEFORE set_config; '' instead under the test-only trap.
+      return withBusinessSchema(manager, schema, ctx.workspaceId, async () => {
+        await manager.query(`SELECT set_config('search_path', $1, true)`, [businessSearchPath(schema)]);
+        return fn(manager, schema);
+      });
     });
   }
 }
