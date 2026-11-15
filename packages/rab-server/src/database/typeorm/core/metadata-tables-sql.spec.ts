@@ -34,6 +34,8 @@ describe('metadata tables SQL (MetadataEngineTables1786721550000)', () => {
     expect([...STORED_FIELD_TYPES].sort()).toEqual([...FIELD_METADATA_TYPES, ...CREWFLOW_INTERNAL_FIELD_METADATA_TYPES].sort());
     for (const t of STORED_FIELD_TYPES) expect(createOf('field_metadata')).toContain(`'${t}'`);
     expect(createOf('field_metadata')).toContain("CHECK (type <> 'MORPH_RELATION')");
+    // #166 F4: a custom field can never squat a built-in field's universal identifier
+    expect(createOf('field_metadata')).toContain('CONSTRAINT field_metadata_custom_no_universal_identifier_ck CHECK (NOT is_custom OR universal_identifier IS NULL)');
   });
 
   it('relation CHECKs never pass on a missing relationType (NULL IN (...) is NULL, which a CHECK accepts)', () => {

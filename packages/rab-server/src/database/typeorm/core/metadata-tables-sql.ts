@@ -129,7 +129,7 @@ DECLARE
   v_display text[];
 BEGIN
   -- TRUNCATE ignores RLS, so the request path never truncates metadata (a workspace's rows leave through the FK cascade).
-  -- The privileged identities may (operators; test teardowns' TRUNCATE core.organisation CASCADE as the superuser).
+  -- The privileged identities may (operators; test teardowns that cascade from the organisation table as the superuser).
   IF TG_OP = 'TRUNCATE' THEN
     IF NOT v_privileged THEN
       RAISE EXCEPTION 'metadata tables are never truncated by the request path' USING ERRCODE = '42501';
@@ -459,6 +459,7 @@ export const METADATA_TABLES_UP_SQL: readonly string[] = [
   CONSTRAINT field_metadata_settings_ck CHECK (
     pg_catalog.jsonb_typeof(settings) = 'object' AND pg_catalog.pg_column_size(settings) <= ${SETTINGS_MAX_BYTES}),
   CONSTRAINT field_metadata_builtin_locked_ck CHECK (is_custom OR is_locked),
+  CONSTRAINT field_metadata_custom_no_universal_identifier_ck CHECK (NOT is_custom OR universal_identifier IS NULL),
   CONSTRAINT field_metadata_money_ck CHECK (
     NOT is_money OR (type = 'NUMBER' AND NOT is_custom AND is_locked AND is_sensitive AND is_ui_read_only)),
   CONSTRAINT field_metadata_export_optin_ck CHECK (NOT is_exportable_when_sensitive OR is_sensitive),

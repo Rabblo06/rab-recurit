@@ -651,6 +651,7 @@ describeIfMetadata('metadata engine E1: the five metadata tables, FORCE RLS, the
         ['relation without relationType', { is_custom: true, object_metadata_id: A1.equipment, type: 'RELATION', name: 'rel', physical_column: 'cf_rel1', relation_target_object_metadata_id: A1.staff }, '23514'],
         ['ONE_TO_MANY with a column', { is_custom: true, object_metadata_id: A1.equipment, type: 'RELATION', name: 'rel2', physical_column: 'cf_rel2', relation_target_object_metadata_id: A1.staff, settings: { relationType: 'ONE_TO_MANY' } }, '23514'],
         ['non-relation without a column', { is_custom: true, object_metadata_id: A1.equipment, type: 'TEXT', name: 'nocol', physical_column: null }, '23514'],
+        ['custom field with a universal identifier (#166 F4)', { is_custom: true, object_metadata_id: A1.staff, type: 'TEXT', name: 'squat', physical_column: 'cf_squat1', universal_identifier: randomUUID() }, '23514'],
       ];
       for (const [what, row, code] of fieldCases) {
         const [sql, params] = fieldInsert({ ...t, label: what.slice(0, 40), ...row });
