@@ -1817,15 +1817,27 @@ describeIfDb('venue manager scoping (integration)', () => {
     // in the future. 422 INVALID_CLOCK_OUT_TIME with a reason; the row is untouched by every refusal.
     describe('recovered clockOutAt bounds (L4)', () => {
       const MIN = 60_000;
+      /** The seat's business tables, wherever the shift lives (core, or its workspace schema with HWS on). */
+      const tablesOf = async (shiftId: string) => {
+        const shift = await businessTableOf(adminDataSource, 'shift', shiftId);
+        return {
+          shift,
+          attendance: siblingTable(shift, 'attendance'),
+          seat: siblingTable(shift, 'shift_assignment'),
+          correction: siblingTable(shift, 'attendance_correction'),
+        };
+      };
       const times = async (shiftId: string) => {
+        const t = await tablesOf(shiftId);
         const [r] = await adminDataSource.query(
-          `SELECT s.ends_at, a.clock_in_at FROM core.shift s JOIN core.attendance a ON a.shift_id = s.id WHERE s.id = $1`, [shiftId]);
+          `SELECT s.ends_at, a.clock_in_at FROM ${t.shift} s JOIN ${t.attendance} a ON a.shift_id = s.id WHERE s.id = $1`, [shiftId]);
         return { endsAt: r.ends_at as Date, clockInAt: r.clock_in_at as Date };
       };
-      const untouched = async (attendanceId: string) => {
-        const [row] = await adminDataSource.query(`SELECT status, clock_out_at FROM core.attendance WHERE id = $1`, [attendanceId]);
+      const untouched = async (shiftId: string, attendanceId: string) => {
+        const t = await tablesOf(shiftId);
+        const [row] = await adminDataSource.query(`SELECT status, clock_out_at FROM ${t.attendance} WHERE id = $1`, [attendanceId]);
         expect(row).toMatchObject({ status: 'missing_clock_out', clock_out_at: null });
-        const [{ n }] = await adminDataSource.query(`SELECT count(*)::int AS n FROM core.attendance_correction WHERE attendance_id = $1`, [attendanceId]);
+        const [{ n }] = await adminDataSource.query(`SELECT count(*)::int AS n FROM ${t.correction} WHERE attendance_id = $1`, [attendanceId]);
         expect(n).toBe(0);
       };
       const reason = 'Staff forgot to clock out; departure confirmed by the manager.';
@@ -1836,7 +1848,7 @@ describeIfDb('venue manager scoping (integration)', () => {
         const res = await correct(s.vmToken, s.attendanceId!, { field: 'clockOutAt', newValue: new Date(clockInAt.getTime() - MIN).toISOString(), reason });
         expect(res.status).toBe(422);
         expect(res.body).toMatchObject({ code: 'INVALID_CLOCK_OUT_TIME', reason: 'before_clock_in' });
-        await untouched(s.attendanceId!);
+        await untouched(s.shiftId, s.attendanceId!);
       });
 
       it('refuses a clock-out after the staff member own end + 120 min (422 after_clock_out_window), even though it is in the past', async () => {
@@ -1845,21 +1857,22 @@ describeIfDb('venue manager scoping (integration)', () => {
         const res = await correct(s.vmToken, s.attendanceId!, { field: 'clockOutAt', newValue: new Date(endsAt.getTime() + 121 * MIN).toISOString(), reason });
         expect(res.status).toBe(422);
         expect(res.body).toMatchObject({ code: 'INVALID_CLOCK_OUT_TIME', reason: 'after_clock_out_window' });
-        await untouched(s.attendanceId!);
+        await untouched(s.shiftId, s.attendanceId!);
       });
 
       it('the bound is the staff member OWN end: seat ending 1 h before the shift, seatEnd + 121 min refused although inside shiftEnd + 120', async () => {
         const s = await seedSeat({ status: 'missing_clock_out', endedAgoMs: 3 * HOUR });
+        const t = await tablesOf(s.shiftId);
         await adminDataSource.query(
-          `UPDATE core.shift_assignment SET period = tstzrange(lower(period), upper(period) - interval '1 hour', '[)') WHERE shift_id = $1`, [s.shiftId]);
-        const [{ seat_end: seatEnd }] = await adminDataSource.query(`SELECT upper(period) AS seat_end FROM core.shift_assignment WHERE shift_id = $1`, [s.shiftId]);
+          `UPDATE ${t.seat} SET period = tstzrange(lower(period), upper(period) - interval '1 hour', '[)') WHERE shift_id = $1`, [s.shiftId]);
+        const [{ seat_end: seatEnd }] = await adminDataSource.query(`SELECT upper(period) AS seat_end FROM ${t.seat} WHERE shift_id = $1`, [s.shiftId]);
         const { endsAt } = await times(s.shiftId);
         const out = new Date((seatEnd as Date).getTime() + 121 * MIN);
         expect(out.getTime()).toBeLessThanOrEqual(endsAt.getTime() + 120 * MIN); // inside the SHIFT's window
         const res = await correct(s.vmToken, s.attendanceId!, { field: 'clockOutAt', newValue: out.toISOString(), reason });
         expect(res.status).toBe(422);
         expect(res.body).toMatchObject({ code: 'INVALID_CLOCK_OUT_TIME', reason: 'after_clock_out_window' });
-        await untouched(s.attendanceId!);
+        await untouched(s.shiftId, s.attendanceId!);
       });
 
       it('refuses a clock-out in the future (422 in_future)', async () => {
@@ -1867,7 +1880,7 @@ describeIfDb('venue manager scoping (integration)', () => {
         const res = await correct(s.vmToken, s.attendanceId!, { field: 'clockOutAt', newValue: new Date(Date.now() + 10 * MIN).toISOString(), reason });
         expect(res.status).toBe(422);
         expect(res.body).toMatchObject({ code: 'INVALID_CLOCK_OUT_TIME', reason: 'in_future' });
-        await untouched(s.attendanceId!);
+        await untouched(s.shiftId, s.attendanceId!);
       });
 
       it('accepts a clock-out inside the grace (own end + 119 min): recovered, worked minutes from the shared duration rules', async () => {
@@ -1876,7 +1889,7 @@ describeIfDb('venue manager scoping (integration)', () => {
         const out = new Date(endsAt.getTime() + 119 * MIN);
         const res = await correct(s.vmToken, s.attendanceId!, { field: 'clockOutAt', newValue: out.toISOString(), reason });
         expect(res.status).toBeLessThan(300);
-        const [row] = await adminDataSource.query(`SELECT status, clock_out_at, worked_minutes FROM core.attendance WHERE id = $1`, [s.attendanceId]);
+        const [row] = await adminDataSource.query(`SELECT status, clock_out_at, worked_minutes FROM ${(await tablesOf(s.shiftId)).attendance} WHERE id = $1`, [s.attendanceId]);
         expect(row.status).toBe('under_review');
         expect(row.clock_out_at.toISOString()).toBe(out.toISOString());
         // computeWorkedMinutes (@rab/shared duration.ts): span minus the scheduled 30-minute unpaid break.

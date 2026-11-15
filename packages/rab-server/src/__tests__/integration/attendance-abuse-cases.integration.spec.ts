@@ -782,7 +782,7 @@ describeIfDb('attendance abuse cases (integration)', () => {
       await expect(
         schedulingService.rotateShiftQr({ organisationId: organisation.id, workspaceId: venue.workspaceId ?? null, userId: managerUserId, role: '' }, shiftId),
       ).rejects.toMatchObject({ response: { code: 'SHIFT_ENDED' } });
-      const [row] = await adminDataSource.query(`SELECT qr_version, status FROM core.shift WHERE id = $1`, [shiftId]);
+      const [row] = await adminDataSource.query(`SELECT qr_version, status FROM ${await businessTableOf(adminDataSource, 'shift', shiftId)} WHERE id = $1`, [shiftId]);
       expect(row.qr_version).toBe(1);
       expect(['completed', 'cancelled']).not.toContain(row.status);
       const [{ n }] = await adminDataSource.query(`SELECT count(*)::int AS n FROM core.audit_log WHERE action = 'shift.qr_rotated' AND entity_id = $1`, [shiftId]);
