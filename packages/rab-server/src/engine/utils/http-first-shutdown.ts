@@ -77,7 +77,9 @@ function observeWriteHead(response: ServerResponse): void {
 export function trackInFlightResponses(server: Server): InFlightResponses {
   const inFlight = new Set<ServerResponse>();
   let closing = false;
-  server.on('request', (_request: IncomingMessage, response: ServerResponse) => {
+  // prependListener: the application's own request handler (Express, registered when the server was created) must not
+  // run first, or a response it answers synchronously would be written before it is tracked and observed.
+  server.prependListener('request', (_request: IncomingMessage, response: ServerResponse) => {
     inFlight.add(response);
     observeWriteHead(response);
     response.once('close', () => inFlight.delete(response));
