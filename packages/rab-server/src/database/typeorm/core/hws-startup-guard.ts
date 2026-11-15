@@ -118,7 +118,7 @@ export async function assertHwsStartupInvariants(dataSource: DataSource, hwsRunt
 
 /**
  * Part C3 (security review M-3): with HWS runtime routing OFF, this process would read and write the `core` copies. Once
- * ANY workspace's cutover has started (core.hws_cutover_state, migration HwsCutoverCopyFunctions1786721510000), its data is
+ * ANY workspace's cutover has started (core.hws_cutover_state, migration HwsCutoverCopyFunctions1786721540000), its data is
  * served from its own schema and its core copy is frozen, so an HWS-off API or Worker would show stale data and (where the
  * DB fence did not exist) silently lose writes. Refuse to start instead. `core.hws_cutover_started_any()` is a boolean
  * crewflow definer (no tenant needed); a database without it (before that migration) has no cutover state at all.

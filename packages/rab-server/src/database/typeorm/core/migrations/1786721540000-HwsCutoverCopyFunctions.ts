@@ -17,7 +17,7 @@ import {
   HwsCutoverTableFacts,
   hwsCutoverStateProblems,
   hwsCutoverTableProblems,
-} from '../hws-cutover-sql';
+} from '../../workspace-schema/backfill/hws-cutover-sql';
 import { secureOwnerInvariantViolations } from '../secure-owner-invariants';
 import { BOOTSTRAP_IDENTITY_SQL, BootstrapIdentityFacts, bootstrapIdentityProblems } from '../worker-dispatch-pointer-sql';
 
@@ -39,7 +39,7 @@ const TRUNCATE_GUARD_FUNCTION = 'hws_cutover_truncate_guard()';
  * §6 "FOR OWNER REVIEW — C3"). Until the owner approves, this migration runs ONLY on throwaway databases. Not merged
  * anywhere yet, so it is still edited in place (security review 2026-11-15: L-2 state table, M-3 fence, M-1 pointer split).
  *
- * Creates (SQL text and reasoning: ../hws-cutover-sql.ts):
+ * Creates (SQL text and reasoning: ../../workspace-schema/backfill/hws-cutover-sql.ts):
  *   - as rab_secure_owner: core.hws_cutover_state (per-workspace state, organisation_id, ENABLE + FORCE, tenant SELECT,
  *     owner-only SELECT / INSERT / UPDATE for crewflow and ALL for rab_secure_owner; crewflow_app SELECT only) and
  *     core.hws_cutover_activation (the one-way "cutover active" sentinel, no organisation_id, ENABLE + FORCE, public SELECT,
@@ -57,8 +57,8 @@ const TRUNCATE_GUARD_FUNCTION = 'hws_cutover_truncate_guard()';
  * owner, RLS, policies, grants, guard and fence triggers; secure-owner invariants. down(): drops all of it (the state table's
  * rows go with it).
  */
-export class HwsCutoverCopyFunctions1786721510000 implements MigrationInterface {
-  name = 'HwsCutoverCopyFunctions1786721510000';
+export class HwsCutoverCopyFunctions1786721540000 implements MigrationInterface {
+  name = 'HwsCutoverCopyFunctions1786721540000';
 
   public async up(queryRunner: QueryRunner): Promise<void> {
     await pinSearchPath(queryRunner);

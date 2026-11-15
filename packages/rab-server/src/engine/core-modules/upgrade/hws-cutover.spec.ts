@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 
-import { HWS_CUTOVER_EXPECTED_STATE, HWS_CUTOVER_FUNCTIONS, HWS_CUTOVER_TABLES, hwsCutoverStateProblems } from '../../../database/typeorm/core/hws-cutover-sql';
+import { HWS_CUTOVER_EXPECTED_STATE, HWS_CUTOVER_FUNCTIONS, HWS_CUTOVER_TABLES, hwsCutoverStateProblems } from '../../../database/typeorm/workspace-schema/backfill/hws-cutover-sql';
 import { WORKSPACE_TABLE_COPY_ORDER } from '../../../database/typeorm/workspace-schema/backfill/fk-graph';
 import { WORKSPACE_TABLES } from '../../../database/typeorm/workspace-schema/provision-workspace-schema';
 import { CUTOVER_BACKUP_MARKER_ENV, parseCutoverBackupMarker, verifyCutoverBackup } from './upgrade-commands/0-7/hws-cutover-backup';
@@ -41,7 +41,7 @@ describe('C3 HWS cutover: frozen lists stay equal to their sources', () => {
   it('is provisional: in the 0-7 folder, NOT in the active registry (activation is a release decision)', () => {
     expect(UPGRADE_COMMANDS_0_7.map((c) => c.name)).toEqual([HWS_CUTOVER_NAME]);
     expect(Object.keys(UPGRADE_COMMANDS)).not.toContain('0-7');
-    expect(commandStepName('0.7.0', createHwsCutoverCommand())).toBe('0.7.0_HwsCutover_1786721510100');
+    expect(commandStepName('0.7.0', createHwsCutoverCommand())).toBe('0.7.0_HwsCutover_1786721540100');
   });
 
   it('the migration self-check accepts exactly the reviewed functions', () => {

@@ -211,7 +211,7 @@ export const REVIEWED_MIGRATION_DRIFT: Readonly<Record<string, readonly string[]
   // trigger). core.hws_cutover_activation (the one-way sentinel): SELECT for everyone, INSERT for crewflow itself, no UPDATE /
   // DELETE. A member of crewflow (a runtime login) matches no write policy; crewflow_app holds SELECT only (golden posture +
   // the migration's own self-check pin grants, FORCE and triggers). Lines as measured by this harness in CI, whitespace collapsed.
-  '1786721510000-HwsCutoverCopyFunctions': [
+  '1786721540000-HwsCutoverCopyFunctions': [
     "+ policy|hws_cutover_activation|hws_cutover_activation_crewflow_insert|a|permissive=true|roles=crewflow|using=|check=(CURRENT_USER = 'crewflow'::name)",
     '+ policy|hws_cutover_activation|hws_cutover_activation_read|r|permissive=true|roles=public|using=true|check=',
     "+ policy|hws_cutover_state|hws_cutover_state_crewflow_insert|a|permissive=true|roles=crewflow|using=|check=((CURRENT_USER = 'crewflow'::name) AND (organisation_id = core.current_org()))",

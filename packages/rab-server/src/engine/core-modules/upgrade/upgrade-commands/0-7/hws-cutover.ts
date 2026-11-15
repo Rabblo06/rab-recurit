@@ -1,7 +1,7 @@
 /**
  * OWNER-DB-ULTIMATE Part C3: the HWS cutover, an INSTANCE upgrade command in Part B's logbook (one row when it ends:
  * completed, or failed with attempt + 1; a crash leaves no row and the next start runs it again). Option A′ — PENDING OWNER
- * CHOICE (A′ vs B′) AND SQL REVIEW: it calls the core.hws_cutover_* functions of HwsCutoverCopyFunctions1786721510000.
+ * CHOICE (A′ vs B′) AND SQL REVIEW: it calls the core.hws_cutover_* functions of HwsCutoverCopyFunctions1786721540000.
  *
  * Twenty (twentyhq/twenty @ eedb0a73) keeps each workspace's data only in its own schema and runs upgrades one workspace at
  * a time (`workspace-command-runner.service.ts:106-153`); it has no legacy shared tables to move, so the copy itself is a
@@ -45,7 +45,7 @@ import { CutoverBackupMarker, verifyCutoverBackup } from './hws-cutover-backup';
 import { HWS_CUTOVER_COPY_ORDER, HWS_CUTOVER_KNOWN_NOT_VALID, HWS_CUTOVER_TABLE_LIST } from './hws-cutover-tables';
 
 export const HWS_CUTOVER_NAME = 'HwsCutover';
-export const HWS_CUTOVER_TIMESTAMP = 1786721510100;
+export const HWS_CUTOVER_TIMESTAMP = 1786721540100;
 /** audit_log action of the human-readable record per verified workspace (never read back: the state table decides). */
 export const HWS_CUTOVER_VERIFIED_ACTION = 'workspace.hws_cutover_verified';
 /** Same format as workspace-upgrade-block.ts upgradeBlockMarker('HwsCutover', class) (hws-cutover.spec.ts proves it). */

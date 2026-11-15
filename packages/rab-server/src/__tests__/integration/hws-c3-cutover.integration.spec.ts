@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { Client } from 'pg';
 
 import { integrationTestDatabase, integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
-import { HWS_CUTOVER_TABLES } from '../../database/typeorm/core/hws-cutover-sql';
+import { HWS_CUTOVER_TABLES } from '../../database/typeorm/workspace-schema/backfill/hws-cutover-sql';
 import { MIGRATION_LOCK_KEY } from '../../database/typeorm/scripts/migrate/migration-lock';
 import { assertHwsStartupInvariants, HwsStartupError } from '../../database/typeorm/core/hws-startup-guard';
 import { SchemaResolverService, WorkspaceRoutingError } from '../../engine/core-modules/tenant/schema-resolver.service';
@@ -564,7 +564,7 @@ describeIfDb('C3 HWS cutover copy path (option A′)', () => {
   it('through the Part B logbook (UpgradeRun): failed attempt 1 (no backup, blocks reported) → completed attempt 2', async () => {
     const w3 = await seedBusiness(await make('ledger'));
     const command = createHwsCutoverCommand({ workspaceIds: [w3.id] });
-    const step = '0.7.0_HwsCutover_1786721510100';
+    const step = '0.7.0_HwsCutover_1786721540100';
     const session = upgradeSessionOf(app);
     const runOnce = async (h: UpgradeCommandHost) => {
       const run = new UpgradeRun({
