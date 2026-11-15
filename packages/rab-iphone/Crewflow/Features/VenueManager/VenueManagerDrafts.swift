@@ -80,7 +80,9 @@ struct RecordAttendanceDraft: Equatable {
     /// The request body, only for a draft that validates. `expectedVersion`
     /// is the row's `attendanceVersion` echoed unchanged (omitted when the
     /// row had none); the explanation is sent only for "Other".
-    func body(expectedVersion: String?, now: Date?) -> RecordAttendanceBody? {
+    /// `confirmUnusualClockIn` is true only for the resend after Confirm on
+    /// the "Unusual clock-in time" warning (same draft, same body + the flag).
+    func body(expectedVersion: String?, now: Date?, confirmUnusualClockIn: Bool = false) -> RecordAttendanceBody? {
         guard validate(now: now).isEmpty, let reason else { return nil }
         let trimmedNote = note.trimmingCharacters(in: .whitespacesAndNewlines)
         return RecordAttendanceBody(
@@ -89,7 +91,8 @@ struct RecordAttendanceDraft: Equatable {
             breakMinutes: breakValue,
             reasonCode: reason.rawValue,
             reasonNote: reason == .other && !trimmedNote.isEmpty ? trimmedNote : nil,
-            expectedVersion: expectedVersion
+            expectedVersion: expectedVersion,
+            confirmUnusualClockIn: confirmUnusualClockIn ? true : nil
         )
     }
 }

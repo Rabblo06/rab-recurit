@@ -1060,6 +1060,13 @@ class _RecordedAttendance extends StatelessWidget {
               'Entered by manager',
               key: Key('manager-entered'),
             ),
+          if (row.unusualClockInConfirmed)
+            const ReportField(
+              '',
+              'Unusual time confirmed',
+              key: Key('unusual-time-confirmed'),
+              valueColor: ReportTokens.muted,
+            ),
           if (row.attendanceReviewed && !row.noShowConfirmed)
             ReportField(
               'Reviewed by',

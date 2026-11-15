@@ -474,6 +474,10 @@ struct VMRecordedAttendanceCard: View {
                 ReportField("Break", "\(row.breakMinutes ?? row.scheduledBreakMinutes) min")
                 ReportField("Worked", vmWorkedLabel(row))
                 if row.manuallyEntered { ReportField("Source", "Entered by manager") }
+                if row.unusualClockInConfirmed {
+                    ReportField("", "Unusual time confirmed", valueColor: VMColor.reportMuted)
+                        .accessibilityIdentifier("vm.review.unusualTimeConfirmed")
+                }
                 if row.attendanceReviewed && !row.noShowConfirmed { ReportField("Reviewed by", row.attendanceReviewedByName ?? "Manager") }
                 if row.noShowConfirmed { ReportField("Confirmed by", row.attendanceReviewedByName ?? "Manager") }
             }
@@ -536,6 +540,8 @@ struct VMRecordAttendanceSheet: View {
     @State private var saving = false
     @State private var serverError: (title: String, message: String)?
     @State private var uncertain = false
+    /// Set by the server's 409 CLOCK_IN_CONFIRMATION_REQUIRED; nothing was saved yet.
+    @State private var unusualClockIn: UnusualClockInWarning?
     private let clock: VMServerClock?
 
     init(report: ShiftReportDetail, row: ShiftReportStaffRow, done: @escaping (ShiftReportDetail?) -> Void) {
@@ -640,14 +646,26 @@ struct VMRecordAttendanceSheet: View {
                     .disabled(saving)
             }
         }
+        // The same alert as the inline correction ("Confirm no-show" style): Edit keeps this form as it is; only
+        // Confirm sends the same entry again, explicitly confirmed.
+        .alert(UnusualClockInWarning.title, isPresented: Binding(
+            get: { unusualClockIn != nil },
+            set: { if !$0 { unusualClockIn = nil } }
+        ), presenting: unusualClockIn) { _ in
+            Button("Edit", role: .cancel) {}
+            Button("Confirm") { Task { await save(confirmUnusualClockIn: true) } }
+        } message: { warning in
+            Text("\(UnusualClockInWarning.message)\n\n\(warning.summary)")
+        }
     }
 
     @MainActor
-    private func save() async {
+    private func save(confirmUnusualClockIn: Bool = false) async {
         guard !saving, !uncertain else { return }
         let now = clock?.now()
         let validation = draft.validate(now: now)
-        guard validation.isEmpty, let body = draft.body(expectedVersion: row.attendanceVersion, now: now) else {
+        guard validation.isEmpty,
+              let body = draft.body(expectedVersion: row.attendanceVersion, now: now, confirmUnusualClockIn: confirmUnusualClockIn) else {
             errors = validation
             return
         }
@@ -664,7 +682,13 @@ struct VMRecordAttendanceSheet: View {
         } catch {
             let api = error as? APIError
             if api == .cancelled || api == .sessionChanged { return }
-            let invalid = api?.code == "INVALID_ATTENDANCE_TIMES" || api?.statusCode == 400
+            // An unusually early clock-in: nothing saved, the draft kept as typed; the warning asks Edit or Confirm.
+            if let warning = UnusualClockInWarning.from(error) {
+                unusualClockIn = warning
+                return
+            }
+            // CLOCK_IN_TOO_EARLY_ABSOLUTE (422, beyond the hard floor): the server's message as an error, never the warning.
+            let invalid = api?.code == "INVALID_ATTENDANCE_TIMES" || api?.code == "CLOCK_IN_TOO_EARLY_ABSOLUTE" || api?.statusCode == 400
             serverError = (title: invalid ? "Invalid attendance times" : "Attendance not saved",
                            message: invalid ? userMessage(for: error, fallback: "Check the clock-in, clock-out and break values.") : userMessage(for: error))
         }

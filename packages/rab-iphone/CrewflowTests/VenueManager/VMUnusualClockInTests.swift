@@ -91,4 +91,59 @@ final class VMUnusualClockInTests: XCTestCase {
         XCTAssertEqual(second["newValue"] as? String, first["newValue"] as? String)
         XCTAssertEqual(second["reason"] as? String, first["reason"] as? String)
     }
+
+    // MARK: Owner decisions 2026-11-15: Record attendance, the 12-hour floor, the report flag
+
+    func testRecordAttendanceBodyIsUnchangedUntilConfirmed() throws {
+        var draft = RecordAttendanceDraft(row: try VMFixture.row(VMFixture.provisionalNoShow))
+        draft.clockIn = vmDate("2026-10-21T13:00:00Z")
+        draft.clockOut = vmDate("2026-10-22T00:50:00Z")
+        draft.breakText = "30"
+        draft.reason = .forgotClockIn
+        let now = vmDate("2026-10-22T02:15:30.000Z")
+        let ordinary = try XCTUnwrap(draft.body(expectedVersion: nil, now: now))
+        XCTAssertNil(ordinary.confirmUnusualClockIn)
+        let confirmed = try XCTUnwrap(draft.body(expectedVersion: nil, now: now, confirmUnusualClockIn: true))
+        XCTAssertEqual(confirmed.confirmUnusualClockIn, true)
+        XCTAssertEqual(confirmed.clockInAt, ordinary.clockInAt)
+        XCTAssertEqual(confirmed.clockOutAt, ordinary.clockOutAt)
+        XCTAssertEqual(confirmed.reasonCode, ordinary.reasonCode)
+    }
+
+    func testRecordAttendanceOnTheWireRefusedThenConfirmed() async throws {
+        URLProtocolStub.server.reset()
+        let refusal = self.refusal
+        URLProtocolStub.server.setHandler { request in
+            request.jsonBody?["confirmUnusualClockIn"] as? Bool == true ? .fixture("vm_shift_report") : .json(409, refusal)
+        }
+        let body = RecordAttendanceBody(clockInAt: vmDate("2026-10-21T13:00:00Z"), clockOutAt: vmDate("2026-10-22T00:50:00Z"),
+                                        breakMinutes: 30, reasonCode: "forgot_clock_in", reasonNote: nil, expectedVersion: nil)
+        do {
+            _ = try await vmRepository().recordAttendance(shiftId: VMFixture.shiftId, staffProfileId: "b0000000-0000-4000-8000-00000000000a", body: body)
+            XCTFail("expected the confirmation refusal")
+        } catch {
+            XCTAssertNotNil(UnusualClockInWarning.from(error), "the record sheet shows the same warning")
+        }
+        var confirmed = body
+        confirmed.confirmUnusualClockIn = true
+        _ = try await vmRepository().recordAttendance(shiftId: VMFixture.shiftId, staffProfileId: "b0000000-0000-4000-8000-00000000000a", body: confirmed)
+        let sent = URLProtocolStub.server.requests(containing: "/record-attendance")
+        XCTAssertEqual(sent.count, 2)
+        XCTAssertEqual(Set(vmJSON(sent[0]).keys), ["clockInAt", "clockOutAt", "breakMinutes", "reasonCode"], "no confirmation key before Confirm")
+        XCTAssertEqual(vmJSON(sent[1])["confirmUnusualClockIn"] as? Bool, true)
+    }
+
+    func testBeyondTheHardFloorIsAnErrorMessageNeverTheWarning() {
+        let floor = #"{"statusCode":422,"code":"CLOCK_IN_TOO_EARLY_ABSOLUTE","message":"The clock-in time cannot be more than 12 hours before the scheduled start.","earliestPossible":"2026-10-21T04:45:00.000Z"}"#
+        let error = conflict(floor, status: 422)
+        XCTAssertNil(UnusualClockInWarning.from(error), "never the confirmation dialog")
+        XCTAssertEqual(error.code, "CLOCK_IN_TOO_EARLY_ABSOLUTE")
+        XCTAssertEqual(userMessage(for: error), "The clock-in time cannot be more than 12 hours before the scheduled start.")
+    }
+
+    func testReportRowCarriesTheServerFlag() throws {
+        XCTAssertTrue(try VMFixture.row(VMFixture.recorded, ["unusualClockInConfirmed": true]).unusualClockInConfirmed)
+        XCTAssertFalse(try VMFixture.row(VMFixture.recorded, ["unusualClockInConfirmed": false]).unusualClockInConfirmed)
+        XCTAssertFalse(try VMFixture.row(VMFixture.recorded).unusualClockInConfirmed, "an older server without the field: not flagged")
+    }
 }

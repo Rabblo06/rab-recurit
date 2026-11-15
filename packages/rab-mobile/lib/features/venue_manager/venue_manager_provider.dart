@@ -735,6 +735,7 @@ class VenueManagerProvider extends ChangeNotifier {
     required String reasonCode,
     String? reasonNote,
     String? expectedVersion,
+    bool confirmUnusualClockIn = false,
   }) async {
     final json = await api.post(
       '/attendance/report/shift/$shiftId/staff/$staffProfileId/record-attendance',
@@ -747,6 +748,8 @@ class VenueManagerProvider extends ChangeNotifier {
         if (reasonNote != null && reasonNote.trim().isNotEmpty)
           'reasonNote': reasonNote.trim(),
         'expectedVersion': ?expectedVersion,
+        // Only after Confirm on "Unusual clock-in time" (server 409 CLOCK_IN_CONFIRMATION_REQUIRED).
+        if (confirmUnusualClockIn) 'confirmUnusualClockIn': true,
       },
     );
     return ShiftReportDetail.fromJson(json as Map<String, dynamic>);

@@ -417,6 +417,10 @@ struct ShiftReportStaffRow: Decodable, Hashable, Identifiable {
     let attendanceReviewedByName: String?
     /// [NOT-REBUILT] manager-entered attendance.
     let manuallyEntered: Bool
+    /// The clock-in is earlier than the normal allowance and a manager
+    /// explicitly confirmed that time (server-derived; false from an older
+    /// server that does not send it).
+    let unusualClockInConfirmed: Bool
     /// [NOT-REBUILT] opaque optimistic-concurrency token; echo unchanged.
     let attendanceVersion: String?
     /// [NOT-REBUILT] manager-confirmed no-show. Older servers: a reviewed
@@ -440,7 +444,7 @@ struct ShiftReportStaffRow: Decodable, Hashable, Identifiable {
         case staffProfileId, staffName, roleName, scheduledStart, scheduledEnd, assignmentStatus
         case attendanceId, attendanceStatus, clockInAt, clockOutAt, breakMinutes, scheduledBreakMinutes
         case workedMinutes, earnedPence, locationVerified, clockOutMethod, corrected, performanceReviewed
-        case attendanceReviewed, attendanceReviewedAt, attendanceReviewedByName, manuallyEntered
+        case attendanceReviewed, attendanceReviewedAt, attendanceReviewedByName, manuallyEntered, unusualClockInConfirmed
         case attendanceVersion, noShowConfirmed, noShowConfirmableAt, checkInRequired, checkedInAt
         case checkInSource, checkInLocationVerified, clockInMethod, clockInByName, clockInReason
         case clockOutByName, clockOutReason
@@ -471,6 +475,7 @@ struct ShiftReportStaffRow: Decodable, Hashable, Identifiable {
         attendanceReviewedAt = c.vmDate(.attendanceReviewedAt)
         attendanceReviewedByName = c.vmString(.attendanceReviewedByName)
         manuallyEntered = c.vmBool(.manuallyEntered)
+        unusualClockInConfirmed = c.vmBool(.unusualClockInConfirmed)
         attendanceVersion = c.vmString(.attendanceVersion)
         let explicitNoShow = try? c.decodeIfPresent(Bool.self, forKey: .noShowConfirmed)
         noShowConfirmed = explicitNoShow ?? (assignmentStatus == "no_show" && attendanceReviewed)
@@ -854,6 +859,9 @@ struct RecordAttendanceBody: Encodable, Equatable {
     /// The `attendanceVersion` read with the row, echoed unchanged; omitted
     /// when the row had no attendance (exactly like Flutter).
     let expectedVersion: String?
+    /// `true` only after Confirm on "Unusual clock-in time" (server 409
+    /// `CLOCK_IN_CONFIRMATION_REQUIRED`); nil is omitted from the JSON.
+    var confirmUnusualClockIn: Bool? = nil
 }
 
 struct ReasonBody: Encodable, Equatable {
