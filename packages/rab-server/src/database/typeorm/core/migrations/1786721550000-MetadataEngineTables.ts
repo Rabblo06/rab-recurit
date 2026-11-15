@@ -33,6 +33,11 @@ import { secureOwnerInvariantViolations } from '../secure-owner-invariants';
  * kind flags and API names never change (OB-10); a lock never comes off; a standard / system object or a locked / system
  * field is never deleted directly (only the workspace / organisation / custom-object cascade removes it); no custom field
  * on an object that does not allow custom fields, and CURRENCY on custom objects only (§0.3 / §0.5); no TRUNCATE.
+ * Identity split (security review #165): built-in and locked metadata (objects, fields, their options, index fields on
+ * them) is written only as crewflow (the E2 sync takes SET LOCAL ROLE crewflow; the M2 executor is a crewflow-owned
+ * definer), a rab_secure_owner definer or a superuser — the M-T2 allow-list. The request path (crewflow_owner) may change
+ * only display columns of such rows. Index definitions and index fields never change. The seven payroll / attendance
+ * tables are pinned to system objects by a CHECK; core reference objects only for the four known core tables.
  *
  * Self-check before commit: the exact owner / RLS / ACL / policy / trigger state of every table and of the function, and
  * secureOwnerInvariantViolations() empty; anything else raises and rolls back. down() refuses while any metadata row exists.
@@ -41,6 +46,7 @@ export class MetadataEngineTables1786721550000 implements MigrationInterface {
   name = 'MetadataEngineTables1786721550000';
 
   public async up(queryRunner: QueryRunner): Promise<void> {
+    this.assertInTransaction(queryRunner, 'up');
     await this.pinSearchPath(queryRunner);
     await this.preflight(queryRunner, 'up');
     for (const sql of METADATA_TABLES_UP_SQL) await queryRunner.query(sql);
@@ -58,6 +64,7 @@ export class MetadataEngineTables1786721550000 implements MigrationInterface {
   }
 
   public async down(queryRunner: QueryRunner): Promise<void> {
+    this.assertInTransaction(queryRunner, 'down');
     await this.pinSearchPath(queryRunner);
     await this.preflight(queryRunner, 'down');
     // Retention: never drop recorded metadata. The count needs NO FORCE (a migration binds no tenant); a refusal rolls back.
@@ -69,6 +76,13 @@ export class MetadataEngineTables1786721550000 implements MigrationInterface {
     for (const sql of METADATA_TABLES_DOWN_SQL) await queryRunner.query(sql);
     const [row] = (await queryRunner.query(METADATA_GONE_SQL)) as Array<{ gone: boolean }>;
     if (row?.gone !== true) throw new Error(`${this.name}: metadata objects remain after down() (rolled back).`);
+  }
+
+  /** Every statement (the set_config(..., true) pins, NO FORCE in down(), the post-condition) relies on ONE transaction. */
+  private assertInTransaction(queryRunner: QueryRunner, direction: 'up' | 'down'): void {
+    if (!queryRunner.isTransactionActive) {
+      throw new Error(`${this.name}: refusing to run ${direction} outside a transaction (transaction = false is never allowed here).`);
+    }
   }
 
   /** Same as Phase 0b: this transaction resolves names in pg_catalog only; every object named here is schema-qualified. */

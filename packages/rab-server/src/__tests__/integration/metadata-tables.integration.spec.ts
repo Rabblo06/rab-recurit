@@ -15,7 +15,10 @@
  *          standard / system rows are never deleted directly; the cascades still work.
  *   MD-4   §0.3 / §0.5 at INSERT: no custom field where not allowed; CURRENCY on custom objects only; MORPH_RELATION and
  *          a custom RANGE refused; money only on a locked, sensitive, read-only built-in NUMBER; identifier patterns.
- *   MD-5   TRUNCATE refused on all five tables.
+ *   MD-5   TRUNCATE refused on all five tables (also through TRUNCATE core.manager_workspace CASCADE).
+ *   #165   security review: identity split (the request path cannot loosen built-in / locked metadata, options or index
+ *          fields; SET LOCAL ROLE crewflow can), immutable index definitions, fail-closed parent lookups (L1), FOR SHARE
+ *          (L2), payroll / attendance pinned to system (M1), core-reference allowlist (I1), no bidi / zero-width labels (I3).
  *   MD-6   deleting a workspace removes exactly its metadata (FK cascade through the delete guard).
  *   MD-7   MetadataReadService reads only the bound workspace and refuses without a binding.
  *   MD-8   tools/check-rls-coverage.ts passes as crewflow_owner with the tables present.
@@ -228,6 +231,13 @@ describeIfMetadata('metadata engine E1: the five metadata tables, FORCE RLS, the
       }),
     );
 
+  /** As the sync / executor identity: the runtime login, bound, then SET LOCAL ROLE crewflow (review #165 M2). */
+  const boundAsCrewflow = <T>(ws: Pick<Ws, 'org' | 'workspace' | 'user'>, fn: (c: Client) => Promise<T>) =>
+    bound(ws, async (c) => {
+      await c.query('SET LOCAL ROLE crewflow');
+      return fn(c);
+    });
+
   beforeAll(async () => {
     const exists = await asAdmin(async (c) => (await c.query<{ ok: boolean }>("SELECT to_regclass('core.object_metadata') IS NOT NULL AS ok")).rows[0]!.ok);
     if (!exists) throw new Error('core.object_metadata does not exist on the test database (MetadataEngineTables1786721550000 did not run)');
@@ -288,7 +298,7 @@ describeIfMetadata('metadata engine E1: the five metadata tables, FORCE RLS, the
     expect(TENANT_PREDICATE).toBe('organisation_id = core.current_org() AND workspace_id = core.current_workspace()');
   });
 
-  it('MD-1 the guard triggers are present and enabled (row guard on objects / fields, TRUNCATE guard on all five)', async () => {
+  it('MD-1 the guard triggers are present and enabled (a row guard and a TRUNCATE guard on all five)', async () => {
     const triggers = await asAdmin(
       async (c) =>
         (
@@ -302,8 +312,7 @@ describeIfMetadata('metadata engine E1: the five metadata tables, FORCE RLS, the
     expect(triggers).toEqual(
       [
         ...METADATA_TABLES.map((t) => `${t}:${t}_truncate_guard:O:core.metadata_guard()`),
-        'field_metadata:field_metadata_guard:O:core.metadata_guard()',
-        'object_metadata:object_metadata_guard:O:core.metadata_guard()',
+        ...METADATA_TABLES.map((t) => `${t}:${t}_guard:O:core.metadata_guard()`),
       ].sort(),
     );
   });
@@ -412,22 +421,138 @@ describeIfMetadata('metadata engine E1: the five metadata tables, FORCE RLS, the
       ['UPDATE core.field_metadata SET object_metadata_id = $2 WHERE id = $1', [A1.equipmentSerial, A1.staff]],
       ['UPDATE core.field_metadata SET relation_target_object_metadata_id = $2 WHERE id = $1', [A1.staffUser, A1.payroll]],
     ];
-    await bound(A1, async (c) => {
-      for (const [sql, params] of refused) expect({ sql, code: (await attempt(c, sql, params)).code }).toEqual({ sql, code: '42501' });
-    });
+    for (const as of [bound, boundAsCrewflow]) {
+      await as(A1, async (c) => {
+        for (const [sql, params] of refused) expect({ sql, code: (await attempt(c, sql, params)).code }).toEqual({ sql, code: '42501' });
+      });
+    }
   });
 
-  it('MT-26: what the E2 sync and later services may change still updates (labels, settings, flags, the inverse field, nav position)', async () => {
+  it('MT-26: the request path may change only display columns of built-in / locked rows; custom rows stay editable', async () => {
     const allowed: Array<[string, unknown[]]> = [
       [`UPDATE core.object_metadata SET label_singular = 'Team member', description = 'x', icon = 'IconUser', nav_position = 2, updated_at = now() WHERE id = $1`, [A1.staff]],
+      ['UPDATE core.object_metadata SET nav_position = 7 WHERE id = $1', [A1.payroll]],
       ['UPDATE core.object_metadata SET is_active = false, is_searchable = true WHERE id = $1', [A1.equipment]],
-      [`UPDATE core.field_metadata SET label = 'Reference', settings = '{"x": 1}', position = 3, is_sensitive = true, is_nullable = false WHERE id = $1`, [A1.staffRef]],
-      ['UPDATE core.field_metadata SET is_active = false WHERE id = $1', [A1.equipmentSerial]],
-      ['UPDATE core.field_metadata SET is_locked = true WHERE id = $1', [A1.equipmentSerial]],
-      [`UPDATE core.field_metadata_option SET label = 'Active', color = 'green' WHERE field_metadata_id = $1 AND value = 'active'`, [A1.staffStatus]],
+      [`UPDATE core.field_metadata SET label = 'Reference', description = 'd', icon = 'IconHash', position = 3 WHERE id = $1`, [A1.staffRef]],
+      ['UPDATE core.field_metadata SET position = 9 WHERE id = $1', [A1.payrollId]],
+      [`UPDATE core.field_metadata SET is_active = false, settings = '{"x": 1}', is_sensitive = true WHERE id = $1`, [A1.equipmentSerial]],
     ];
     await bound(A1, async (c) => {
       for (const [sql, params] of allowed) expect({ sql, r: await attempt(c, sql, params) }).toEqual({ sql, r: { code: null, constraint: null, rowCount: 1 } });
+    });
+  });
+
+  it('review #165 M2: the request path cannot loosen built-in / locked metadata (42501); the sync identity (SET LOCAL ROLE crewflow) can', async () => {
+    const fresh = () => randomUUID();
+    const t = { organisation_id: A1.org, workspace_id: A1.workspace };
+    const ops: Array<[string, () => [string, unknown[]]]> = [
+      ['locked field is_sensitive', () => ['UPDATE core.field_metadata SET is_sensitive = true WHERE id = $1', [A1.staffRef]]],
+      ['locked field is_ui_read_only off', () => ['UPDATE core.field_metadata SET is_ui_read_only = false WHERE id = $1', [A1.staffStatus]]],
+      ['locked field is_exportable_when_sensitive', () => ['UPDATE core.field_metadata SET is_exportable_when_sensitive = true WHERE id = $1', [A1.staffPay]]],
+      ['locked field is_nullable', () => ['UPDATE core.field_metadata SET is_nullable = false WHERE id = $1', [A1.staffRef]]],
+      ['locked field is_unique', () => ['UPDATE core.field_metadata SET is_unique = true WHERE id = $1', [A1.staffRef]]],
+      ['locked relation onDelete', () => [`UPDATE core.field_metadata SET settings = '{"relationType": "MANY_TO_ONE", "onDelete": "SET_NULL"}' WHERE id = $1`, [A1.staffUser]]],
+      ['locked relation inverse field', () => ['UPDATE core.field_metadata SET relation_target_field_metadata_id = $2 WHERE id = $1', [A1.staffUser, A1.memberId]]],
+      ['label of a field of a system object', () => [`UPDATE core.field_metadata SET label = 'Pay id' WHERE id = $1`, [A1.payrollId]]],
+      ['standard object allows_custom_fields', () => ['UPDATE core.object_metadata SET allows_custom_fields = false WHERE id = $1', [A1.staff]]],
+      ['standard object is_searchable', () => ['UPDATE core.object_metadata SET is_searchable = true WHERE id = $1', [A1.staff]]],
+      ['system object label', () => [`UPDATE core.object_metadata SET label_plural = 'Pay' WHERE id = $1`, [A1.payroll]]],
+      ['lock a custom field', () => ['UPDATE core.field_metadata SET is_locked = true WHERE id = $1', [A1.equipmentSerial]]],
+      ['option INSERT on a locked SELECT', () => ['INSERT INTO core.field_metadata_option (organisation_id, workspace_id, field_metadata_id, value, label) VALUES ($1, $2, $3, $4, $5)', [A1.org, A1.workspace, A1.staffStatus, 'smuggled', 'Smuggled']]],
+      ['option UPDATE on a locked SELECT', () => [`UPDATE core.field_metadata_option SET label = 'Active!' WHERE field_metadata_id = $1 AND value = 'active'`, [A1.staffStatus]]],
+      ['option DELETE on a locked SELECT', () => [`DELETE FROM core.field_metadata_option WHERE field_metadata_id = $1 AND value = 'pending_compliance'`, [A1.staffStatus]]],
+      ['standard object INSERT', () => objectInsert({ ...t, universal_identifier: fresh(), name_singular: 'shiftReport', name_plural: 'shiftReports', label_singular: 'Report', label_plural: 'Reports', physical_table: 'shift_report', is_custom: false })],
+      ['built-in field INSERT', () => fieldInsert({ ...t, object_metadata_id: A1.staff, universal_identifier: fresh(), type: 'TEXT', name: 'notes', label: 'Notes', physical_column: 'notes', is_custom: false, is_locked: true })],
+      ['custom field born locked', () => fieldInsert({ ...t, object_metadata_id: A1.equipment, type: 'TEXT', name: 'tag', label: 'Tag', physical_column: 'cf_tag1', is_custom: true, is_locked: true })],
+      ['index on a locked field', () => ['INSERT INTO core.index_field_metadata (organisation_id, workspace_id, index_metadata_id, object_metadata_id, field_metadata_id, position) VALUES ($1, $2, $3, $4, $5, 1)', [A1.org, A1.workspace, A1.equipmentIndex, A1.equipment, A1.equipmentId]]],
+    ];
+    await bound(A1, async (c) => {
+      for (const [what, op] of ops) {
+        const [sql, params] = op();
+        expect({ what, code: (await attempt(c, sql, params)).code }).toEqual({ what, code: '42501' });
+      }
+    });
+    await boundAsCrewflow(A1, async (c) => {
+      expect((await c.query<{ u: string; s: string }>('SELECT current_user::text AS u, session_user::text AS s')).rows[0]).toEqual({ u: 'crewflow', s: 'crewflow_owner' });
+      for (const [what, op] of ops) {
+        const [sql, params] = op();
+        const r = await attempt(c, sql, params);
+        expect({ what, code: r.code, rows: r.rowCount }).toEqual({ what, code: null, rows: 1 });
+      }
+    });
+  });
+
+  it('review #165: index definitions never change; index fields are immutable for every identity (42501)', async () => {
+    for (const as of [bound, boundAsCrewflow]) {
+      await as(A1, async (c) => {
+        for (const [sql, params] of [
+          ['UPDATE core.index_metadata SET physical_name = $2 WHERE id = $1', [A1.equipmentIndex, 'ix_other1']],
+          ['UPDATE core.index_metadata SET is_unique = false WHERE id = $1', [A1.equipmentIndex]],
+          ['UPDATE core.index_field_metadata SET position = 2 WHERE index_metadata_id = $1', [A1.equipmentIndex]],
+          [`UPDATE core.field_metadata_option SET value = 'ACTIVE' WHERE field_metadata_id = $1 AND value = 'active'`, [A1.staffStatus]],
+        ] as Array<[string, unknown[]]>) {
+          expect({ sql, code: (await attempt(c, sql, params)).code }).toEqual({ sql, code: '42501' });
+        }
+        expect((await attempt(c, 'UPDATE core.index_metadata SET is_active = false WHERE id = $1', [A1.equipmentIndex])).code).toBeNull();
+      });
+    }
+  });
+
+  it('review #165 L1: the guard fails closed when the parent row is missing or in another workspace (23503)', async () => {
+    await boundAsCrewflow(A1, async (c) => {
+      const t = { organisation_id: A1.org, workspace_id: A1.workspace };
+      const [f1, p1] = fieldInsert({ ...t, object_metadata_id: randomUUID(), type: 'TEXT', name: 'orphan', label: 'Orphan', physical_column: 'cf_orphan1', is_custom: true });
+      expect(await attempt(c, f1, p1)).toMatchObject({ code: '23503', constraint: 'field_metadata_object_fkey' });
+      const opt = await attempt(c, 'INSERT INTO core.field_metadata_option (organisation_id, workspace_id, field_metadata_id, value, label) VALUES ($1, $2, $3, $4, $5)', [A1.org, A1.workspace, A2.staffStatus, 'x', 'x']);
+      expect(opt).toMatchObject({ code: '23503', constraint: 'field_metadata_option_field_fkey' });
+      const ixf = await attempt(c, 'INSERT INTO core.index_field_metadata (organisation_id, workspace_id, index_metadata_id, object_metadata_id, field_metadata_id, position) VALUES ($1, $2, $3, $4, $5, 2)', [A1.org, A1.workspace, A1.equipmentIndex, A1.equipment, A1.staffRef]);
+      expect(ixf).toMatchObject({ code: '23503', constraint: 'index_field_metadata_field_fkey' });
+    });
+  });
+
+  it('review #165 L2: a custom-field INSERT holds its object FOR SHARE, so allows_custom_fields cannot flip under it (55P03)', async () => {
+    await asOwner(async (writer) => {
+      await writer.query('BEGIN');
+      try {
+        await writer.query(BIND_SQL, [A1.org, A1.workspace, A1.user]);
+        const [sql, params] = fieldInsert({ organisation_id: A1.org, workspace_id: A1.workspace, object_metadata_id: A1.staff, type: 'TEXT', name: 'racer', label: 'Racer', physical_column: 'cf_racer1', is_custom: true });
+        await writer.query(sql, params);
+        await boundAsCrewflow(A1, async (sync) => {
+          await sync.query("SET LOCAL lock_timeout = '1s'");
+          expect((await attempt(sync, 'UPDATE core.object_metadata SET allows_custom_fields = false WHERE id = $1', [A1.staff])).code).toBe('55P03');
+        });
+      } finally {
+        await writer.query('ROLLBACK');
+      }
+    });
+  });
+
+  it('review #165 M1: the seven payroll / attendance tables are pinned to system objects without custom fields (23514)', async () => {
+    await boundAsCrewflow(A1, async (c) => {
+      const t = { organisation_id: A1.org, workspace_id: A1.workspace };
+      for (const table of ['attendance', 'attendance_correction', 'payroll_record', 'payroll_run', 'payroll_run_line', 'payslip', 'payslip_document']) {
+        const [sql, params] = objectInsert({ ...t, universal_identifier: randomUUID(), name_singular: 'notPayroll', name_plural: 'notPayrolls', label_singular: 'X', label_plural: 'X', physical_table: table, is_custom: false, is_system: false });
+        expect(await attempt(c, sql, params)).toMatchObject({ code: '23514', constraint: 'object_metadata_payroll_locked_ck' });
+      }
+      const r = await attempt(c, 'UPDATE core.object_metadata SET allows_custom_fields = true WHERE id = $1', [A1.payroll]);
+      expect(r.code).toBe('23514');
+    });
+  });
+
+  it('review #165 I1 / I3: core references only for the four known core tables; no bidi / zero-width characters in labels (23514)', async () => {
+    await boundAsCrewflow(A1, async (c) => {
+      const t = { organisation_id: A1.org, workspace_id: A1.workspace };
+      const [o1, p1] = objectInsert({ ...t, storage: 'core_reference', universal_identifier: randomUUID(), name_singular: 'org', name_plural: 'orgs', label_singular: 'Org', label_plural: 'Orgs', physical_table: 'organisation', is_custom: false, is_system: true });
+      expect(await attempt(c, o1, p1)).toMatchObject({ code: '23514', constraint: 'object_metadata_core_reference_tables_ck' });
+      for (const bad of ['Pay\u202Erate', 'Pay\u200Brate', '\uFEFFPay', 'Pay\u2066rate']) {
+        const label = JSON.parse(`"${bad}"`) as string;
+        const [o2, p2] = objectInsert({ ...t, name_singular: 'sneaky', name_plural: 'sneakies', label_singular: label, label_plural: 'Ok', physical_table: 'c_bidi1', is_custom: true, allows_custom_fields: true });
+        expect({ bad, code: (await attempt(c, o2, p2)).code }).toEqual({ bad, code: '23514' });
+        const [f2, pf2] = fieldInsert({ ...t, object_metadata_id: A1.equipment, type: 'TEXT', name: 'sneaky', label, physical_column: 'cf_bidi1', is_custom: true });
+        expect({ bad, field: (await attempt(c, f2, pf2)).code }).toEqual({ bad, field: '23514' });
+      }
+      const [ok, pok] = objectInsert({ ...t, name_singular: 'accented', name_plural: 'accenteds', label_singular: 'Équipe café', label_plural: 'Équipes', physical_table: 'c_acc1', is_custom: true, allows_custom_fields: true });
+      expect((await attempt(c, ok, pok)).code).toBeNull();
     });
   });
 
@@ -476,8 +601,8 @@ describeIfMetadata('metadata engine E1: the five metadata tables, FORCE RLS, the
     });
   });
 
-  it('MD-4 type and shape rules: MORPH_RELATION, custom RANGE, custom money, bad identifiers and core-reference shape refused (23514)', async () => {
-    await bound(A1, async (c) => {
+  it('MD-4 type and shape rules (as the sync identity): MORPH_RELATION, custom RANGE, custom money, bad identifiers and core-reference shape refused (23514)', async () => {
+    await boundAsCrewflow(A1, async (c) => {
       const t = { organisation_id: A1.org, workspace_id: A1.workspace };
       const fieldCases: Array<[string, FieldRow, string | null]> = [
         ['MORPH_RELATION', { is_custom: true, object_metadata_id: A1.equipment, type: 'MORPH_RELATION', name: 'm', physical_column: 'cf_m1' }, '23514'],
@@ -534,6 +659,13 @@ describeIfMetadata('metadata engine E1: the five metadata tables, FORCE RLS, the
       }
     });
     expect((await countsOf(B1.workspace)).object_metadata).toBe(4);
+  });
+
+  it('review #165: TRUNCATE core.manager_workspace CASCADE (rolled back) is refused, and no metadata row is lost', async () => {
+    const before = await countsOf(B1.workspace);
+    const r = await asOwner((c) => rolledBack(c, () => attempt(c, 'TRUNCATE core.manager_workspace CASCADE')));
+    expect(r.code).not.toBeNull();
+    expect(await countsOf(B1.workspace)).toEqual(before);
   });
 
   // ------------------------------------------------------------------------------------------------------------ MD-7

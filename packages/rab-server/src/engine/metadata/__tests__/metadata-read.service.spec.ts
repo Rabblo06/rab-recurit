@@ -4,9 +4,10 @@ import { FieldMetadata, FieldMetadataOption, IndexFieldMetadata, IndexMetadata, 
 import { MetadataContextError, MetadataReadService, nest } from '../services/metadata-read.service';
 
 /** A manager that answers the tenant probe with `bound` and records every other call. */
-function fakeManager(bound: { organisation_id: string | null; workspace_id: string | null }) {
+function fakeManager(bound: { organisation_id: string | null; workspace_id: string | null }, inTransaction = true) {
   const calls: string[] = [];
   const manager = {
+    queryRunner: inTransaction ? { isTransactionActive: true } : undefined,
     query: jest.fn(async (sql: string) => {
       calls.push(sql);
       return [bound];
@@ -40,6 +41,19 @@ describe('MetadataReadService (layer 2: refuses without a bound tenant; reads on
     await expect(service.findObjectById(manager, 'x')).rejects.toBeInstanceOf(MetadataContextError);
     await expect(service.findObjectByNamePlural(manager, 'x')).rejects.toBeInstanceOf(MetadataContextError);
     expect(calls.every((c) => c.startsWith('SELECT core.current_org()'))).toBe(true);
+  });
+
+  it('refuses a manager that is not inside a transaction (no queryRunner, or an inactive one) before any query', async () => {
+    for (const make of [() => fakeManager({ organisation_id: ORG, workspace_id: WS }, false), () => {
+      const f = fakeManager({ organisation_id: ORG, workspace_id: WS });
+      (f.manager as unknown as { queryRunner: { isTransactionActive: boolean } }).queryRunner = { isTransactionActive: false };
+      return f;
+    }]) {
+      const { manager, calls } = make();
+      await expect(service.readWorkspaceMetadata(manager)).rejects.toBeInstanceOf(MetadataContextError);
+      await expect(service.findObjectById(manager, 'x')).rejects.toBeInstanceOf(MetadataContextError);
+      expect(calls).toEqual([]);
+    }
   });
 
   it('filters every read on the organisation AND workspace taken from the transaction, never from an argument', async () => {
