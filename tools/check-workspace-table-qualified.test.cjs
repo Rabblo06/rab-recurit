@@ -28,9 +28,51 @@ test('flags an unqualified business-table reference in a string, a template, a +
   assert.deepEqual(rules('m.query(`INSERT INTO "payroll_record" (id) VALUES ($1)`);'), ['unqualified']);
 });
 
-test('accepts exactly the primitive form ${t.<table>} / ${tables.<table>}', () => {
+test('accepts ${X.<table>} only when X is `const X = businessTables(…)` in an enclosing scope and not quoted (review #1)', () => {
   assert.deepEqual(rules('const t = businessTables(m); m.query(`SELECT 1 FROM ${t.shift} s JOIN ${t.venue} v ON v.id = s.venue_id`);'), []);
-  assert.deepEqual(rules('m.query(`UPDATE ${tables.shift_assignment} SET status = $1`);'), []);
+  assert.deepEqual(rules('async function f(m) { const tables = businessTables(m); return run(async () => m.query(`UPDATE ${tables.shift_assignment} SET status = $1`)); }'), []);
+  assert.deepEqual(rules("const t = businessTables(m); const sql = 'SELECT 1 FROM ' + t.venue + ' WHERE id = $1';"), []);
+  // The name alone is not enough:
+  assert.deepEqual(rules('const t = body; m.query(`SELECT 1 FROM ${t.venue}`);'), ['other-qualified']);
+  assert.deepEqual(rules('m.query(`UPDATE ${tables.shift_assignment} SET status = $1`);'), ['other-qualified']);
+  assert.deepEqual(rules('let t = businessTables(m); m.query(`SELECT 1 FROM ${t.venue}`);'), ['other-qualified']);
+  assert.deepEqual(rules('const t = businessTables(m); function g(t) { return m.query(`SELECT 1 FROM ${t.venue}`); }'), ['other-qualified']);
+  assert.deepEqual(rules('const { venue } = businessTables(m); const t = { venue }; m.query(`SELECT 1 FROM ${t.venue}`);'), ['other-qualified']);
+  assert.deepEqual(rules("const t = body; const sql = 'SELECT 1 FROM ' + t.venue;"), ['other-qualified']);
+  // Quoted, even when it is the primitive:
+  assert.deepEqual(rules("const t = businessTables(m); m.query(`SELECT 1 FROM shift_log WHERE name = '${t.venue}'`);"), ['other-qualified']);
+  assert.deepEqual(rules('const t = businessTables(m); m.query(`SELECT 1 FROM "${t.venue}"`);'), ['other-qualified']);
+});
+
+test('the binder-only functions are flagged outside the binders (review #3)', () => {
+  const mod = 'packages/rab-server/src/modules/venue/services/venue.service.ts';
+  assert.deepEqual(rules("import { bindBusinessSchema, businessTables } from '../../../engine/core-modules/tenant/business-tables';", mod), ['business-schema-bind']);
+  assert.deepEqual(rules("import { snapshotBusinessSchema as s } from '../tenant/business-tables'; restoreBusinessSchema(m, x);", mod), ['business-schema-bind', 'business-schema-bind']);
+  assert.deepEqual(rules("import * as bt from '../tenant/business-tables';", mod), ['business-schema-bind']);
+  assert.deepEqual(rules("import { businessTables, boundBusinessSchema, peekBusinessSchema } from '../tenant/business-tables';", mod), []);
+  const binder = 'packages/rab-server/src/engine/core-modules/tenant/tenant-context.service.ts';
+  assert.ok(check.BUSINESS_SCHEMA_BINDERS.includes(binder));
+  assert.deepEqual(rules("import { bindBusinessSchema } from './business-tables'; bindBusinessSchema(m, 'core', null);", binder), []);
+});
+
+test('excludes are matched on the repo-relative path, not the absolute one (review #7)', () => {
+  assert.equal(check.isExcluded('packages/rab-server/src/modules/x/x.service.spec.ts'), true);
+  assert.equal(check.isExcluded('packages/rab-server/src/__tests__/integration/a.ts'), true);
+  assert.equal(check.isExcluded('packages/rab-server/src/database/typeorm/workspace-schema/provision-workspace-schema.ts'), true);
+  assert.equal(check.isExcluded('packages/rab-server/src/modules/x/services/x.service.ts'), false);
+});
+
+test('compareToBase: the committed baseline may only shrink against the base branch (review #2)', () => {
+  const base = { 'a.ts': { unqualified: 2 }, 'b.ts': { 'core-qualified': 1 } };
+  assert.deepEqual(check.compareToBase(base, base).grown, []);
+  assert.deepEqual(check.compareToBase(base, { 'a.ts': { unqualified: 1 } }).grown, []); // a decrease and a removed entry pass
+  const plusOne = check.compareToBase(base, { 'a.ts': { unqualified: 3 }, 'b.ts': { 'core-qualified': 1 } }).grown;
+  assert.deepEqual(plusOne.map((g) => `${g.file}:${g.rule}:${g.base}->${g.head}`), ['a.ts:unqualified:2->3']);
+  const newFile = check.compareToBase(base, { ...base, 'c.ts': { unqualified: 1 } }).grown;
+  assert.deepEqual(newFile.map((g) => [g.file, g.newKey]), [['c.ts', true]]);
+  const newRule = check.compareToBase(base, { ...base, 'a.ts': { unqualified: 2, 'other-qualified': 1 } }).grown;
+  assert.deepEqual(newRule.map((g) => [g.file, g.rule, g.newKey]), [['a.ts', 'other-qualified', true]]);
+  assert.throws(() => check.readBaselineAt('--output=x'), /not a plain git ref/);
 });
 
 test('flags core.<table>, any other qualifier, a QueryBuilder string table and a non-binder search_path switch', () => {
@@ -99,9 +141,16 @@ test('the committed baseline matches the tree exactly (no new site, no stale ent
   assert.deepEqual(result, { grown: [], stale: [], unknownRules: [] });
 });
 
-test('check-sql-injection: the exact ${t.<table>} form needs no review comment; anything else still does', () => {
-  for (const ok of ['t.shift', 'tables.payslip_document', 't.venue_manager_staff']) assert.equal(sqlLint.isBusinessTableRef(ok), true, ok);
-  for (const no of ['t.shifts', 'x.shift', 't.user', 't[k]', 'schema', 't.shift.x', '`${t.shift}`', 'tables.workspace_schema_registry']) {
-    assert.equal(sqlLint.isBusinessTableRef(no), false, no);
-  }
+test('check-sql-injection: ${X.<table>} needs no review comment only for X = businessTables(…), unquoted (review #1)', () => {
+  const sites = (lines) => sqlLint.scanSource('packages/rab-server/src/modules/x/services/x.service.ts', lines.join('\n')).map((s) => (s.reviewed ? 'reviewed' : 'UNREVIEWED'));
+  assert.deepEqual(sites(['const t = businessTables(m);', 'm.query(`SELECT 1 FROM ${t.venue} WHERE id = $1`);']), []);
+  assert.deepEqual(sites(['function f(m) {', '  const tables = businessTables(m);', '  return m.query(`DELETE FROM ${tables.shift} WHERE id = $1`);', '}']), []);
+  assert.deepEqual(sites(['const t = body;', 'm.query(`SELECT 1 FROM ${t.venue} WHERE id = $1`);']), ['UNREVIEWED']);
+  assert.deepEqual(sites(['m.query(`SELECT 1 FROM ${t.venue} WHERE id = $1`);']), ['UNREVIEWED']);
+  assert.deepEqual(sites(['const t = businessTables(m);', "m.query(`SELECT 1 FROM x WHERE name = '${t.venue}'`);"]), ['UNREVIEWED']);
+  assert.deepEqual(sites(['const t = businessTables(m);', 'm.query(`SELECT 1 FROM ${t.venue} WHERE x = ${other}`);']), ['UNREVIEWED']);
+  assert.deepEqual(
+    sites(['const t = businessTables(m);', '// sql-injection-reviewed: other is a code constant from the frozen list above', 'm.query(`SELECT 1 FROM ${t.venue} WHERE x = ${other}`);']),
+    ['reviewed'],
+  );
 });
