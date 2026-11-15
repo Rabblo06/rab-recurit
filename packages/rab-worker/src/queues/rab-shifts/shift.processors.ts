@@ -36,8 +36,8 @@ export class ShiftScanProcessor {
 
   @Process('attendance-monitor')
   async attendanceMonitor(): Promise<void> {
-    const { runtimeDataSource, tenantContext, notificationService, auditService, logger } = this.deps.get();
-    const result = await runAttendanceMonitorCycle(runtimeDataSource, tenantContext, notificationService, auditService);
+    const { runtimeDataSource, tenantContext, notificationService, auditService, environmentService, logger } = this.deps.get();
+    const result = await runAttendanceMonitorCycle(runtimeDataSource, tenantContext, notificationService, auditService, environmentService.get('QR_POST_SHIFT_GRACE_MINUTES'));
     if (result.flagged) logger.log(`attendance monitor: flagged=${result.flagged}`);
   }
 
