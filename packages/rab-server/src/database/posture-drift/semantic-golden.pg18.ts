@@ -92,7 +92,7 @@ export const SEMANTIC_GOLDEN_PG18: readonly string[] = Object.freeze([
   "function|hws_cutover_schema(p_workspace_id uuid)|owner=crewflow|definer=false|lang=plpgsql|vol=v|strict=false|leakproof=false|config=search_path=pg_catalog, pg_temp|body=0559ca4407fcb2020b9f69ca41d1d779",
   "function|hws_cutover_source_sql(p_table text)|owner=crewflow|definer=false|lang=plpgsql|vol=i|strict=false|leakproof=false|config=search_path=pg_catalog, pg_temp|body=9ce76c4387433e3ded87cd691c549f24",
   "function|hws_cutover_started_any()|owner=crewflow|definer=true|lang=sql|vol=s|strict=false|leakproof=false|config=search_path=pg_catalog, pg_temp|body=b0bae7587ab2b6e41e60fd3523a197e6",
-  "function|hws_cutover_truncate_guard()|owner=rab_secure_owner|definer=false|lang=plpgsql|vol=v|strict=false|leakproof=false|config=search_path=pg_catalog, pg_temp|body=e6b949697a7543258cd9d4df3e51b977",
+  "function|hws_cutover_truncate_guard()|owner=rab_secure_owner|definer=false|lang=plpgsql|vol=v|strict=false|leakproof=false|config=search_path=pg_catalog, pg_temp|body=a8f3aea0ee62aea3bfade8088f570527",
   "function|hws_cutover_verify_range(p_workspace_id uuid, p_table text, p_after text, p_limit integer)|owner=crewflow|definer=true|lang=plpgsql|vol=v|strict=false|leakproof=false|config=search_path=pg_catalog, pg_temp;lock_timeout=10s|body=64fa7edb10d72a124786a04cd690c46b",
   "function|immutable_unaccent(text)|owner=rab_secure_owner|definer=false|lang=sql|vol=i|strict=true|leakproof=false|config=-|body=559a5cb46e09e72c933ef142d6e2ba0f",
   "function|is_active_platform_admin(check_user_id uuid)|owner=rab_secure_owner|definer=true|lang=sql|vol=s|strict=false|leakproof=false|config=search_path=pg_catalog, core, pg_temp|body=c43b17acf2c0f5c072f130ce6e8b4696",

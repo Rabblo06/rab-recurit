@@ -181,7 +181,7 @@ BEGIN
   IF current_user = 'rab_secure_owner'::name OR coalesce((SELECT r.rolsuper FROM pg_catalog.pg_roles r WHERE r.rolname = current_user), false) THEN
     RETURN NULL;
   END IF;
-  RAISE EXCEPTION 'permission denied: TRUNCATE of the HWS cutover state is not permitted' USING ERRCODE = '42501';
+  RAISE EXCEPTION 'refused: TRUNCATE of the HWS cutover state is not allowed' USING ERRCODE = '42501';
 END
 $fn$`;
 
