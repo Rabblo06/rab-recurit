@@ -38,6 +38,7 @@ async function startHarness(handler?: Handler): Promise<Harness> {
     getHttpServer: () => server,
     // Nest's app.close(): onModuleDestroy quits the Redis clients, then dispose() closes HTTP (already closed: resolves).
     close: jest.fn(async () => {
+      events.push(server.listening ? 'app.close while the listener still accepted' : 'app.close after the listener closed');
       events.push('app.close: redis quit');
       redis = false;
       await new Promise<void>((resolve) => server.close(() => resolve()));
@@ -68,10 +69,13 @@ describe('HTTP-first API shutdown (XR-09)', () => {
     const { shutdown } = installHttpFirstShutdown(h.app, { listen: false, reraise, log: () => undefined, drainMs: 2_000 });
 
     const done = shutdown('SIGTERM'); // the listener is closed synchronously, before the first await
+    expect(h.server.listening).toBe(false);
+    expect(h.redisUp()).toBe(true); // nothing has quit Redis yet: the listener closes first
+    // The refusal comes from the closed listener (a connection refusal), never a 503 from a throttler without Redis.
     await expect(get(h.port, '/rest/v1/auth/login')).rejects.toMatchObject({ code: 'ECONNREFUSED' });
-    expect(h.redisUp()).toBe(true); // the refusal came from the closed listener, while Redis was still up
 
     await done;
+    expect(h.events.slice(0, 2)).toEqual(['app.close after the listener closed', 'app.close: redis quit']);
     expect(h.app.close).toHaveBeenCalledTimes(1);
     expect(reraise).toHaveBeenCalledWith('SIGTERM');
   });
@@ -100,7 +104,7 @@ describe('HTTP-first API shutdown (XR-09)', () => {
 
     await expect(inFlight).resolves.toEqual({ status: 204, body: '' });
     await done;
-    expect(h.events).toEqual(['request received', 'response sent', 'app.close: redis quit']);
+    expect(h.events).toEqual(['request received', 'response sent', 'app.close after the listener closed', 'app.close: redis quit']);
   });
 
   it('a request on a kept-alive connection during the drain is still answered normally (Redis is up), not 503', async () => {
@@ -185,6 +189,46 @@ describe('HTTP-first API shutdown (XR-09)', () => {
     expect(Date.now() - t0).toBeLessThan(2_000); // not the 10 s drain budget
     await streamClosed;
     expect(h.app.close).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    ['setHeader (an Express middleware already set a header)', (res: ServerResponse) => {
+      res.setHeader('x-powered-by', 'test');
+      res.writeHead(200, { 'content-type': 'text/event-stream' });
+    }],
+    ['setHeader content-type + flushHeaders', (res: ServerResponse) => {
+      res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
+      res.flushHeaders();
+    }],
+    ['writeHead with a flat header array', (res: ServerResponse) => {
+      res.writeHead(200, ['Content-Type', 'text/event-stream']);
+    }],
+    ['writeHead with a status message', (res: ServerResponse) => {
+      res.writeHead(200, 'OK', { 'Content-Type': 'text/event-stream' });
+    }],
+  ])('a stream is recognised however its headers were set: %s', async (_name, open) => {
+    const h = await startHarness((_path, res) => {
+      open(res);
+      res.write('data: hello
+
+');
+    });
+    const { shutdown } = installHttpFirstShutdown(h.app, { listen: false, reraise: noReraise, log: () => undefined, drainMs: 10_000 });
+    let streaming = false;
+    const streamClosed = new Promise<void>((resolve) => {
+      httpRequest({ host: '127.0.0.1', port: h.port, path: '/rest/v1/ai/conversations/c/stream' }, (res) => {
+        res.on('data', () => (streaming = true));
+        res.on('close', () => resolve());
+        res.on('error', () => resolve());
+      })
+        .on('error', () => resolve())
+        .end();
+    });
+    await waitFor(() => streaming);
+    const t0 = Date.now();
+    await shutdown('SIGTERM');
+    expect(Date.now() - t0).toBeLessThan(2_000);
+    await streamClosed;
   });
 
   it('a request still running at the drain deadline is cut, and the app still closes', async () => {

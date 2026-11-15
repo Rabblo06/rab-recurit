@@ -42,11 +42,44 @@ function askToClose(response: ServerResponse): void {
   if (!response.headersSent) response.setHeader('connection', 'close');
 }
 
+/** The `content-type` in a `writeHead` headers argument (an object, a flat `[k, v, k, v]` array or `[[k, v]]`), if any. */
+function contentTypeIn(headers: unknown): string | undefined {
+  if (Array.isArray(headers)) {
+    const pairs: unknown[][] = Array.isArray(headers[0]) ? (headers as unknown[][]) : [];
+    if (!pairs.length) for (let i = 0; i + 1 < headers.length; i += 2) pairs.push([headers[i], headers[i + 1]]);
+    const found = pairs.find(([name]) => String(name).toLowerCase() === 'content-type');
+    return found ? String(found[1]) : undefined;
+  }
+  if (headers && typeof headers === 'object') {
+    const found = Object.entries(headers).find(([name]) => name.toLowerCase() === 'content-type');
+    return found ? String(found[1]) : undefined;
+  }
+  return undefined;
+}
+
+const startsEventStream = (contentType: unknown): boolean => String(contentType ?? '').toLowerCase().startsWith('text/event-stream');
+
+/**
+ * Responses that declared `text/event-stream`. `getHeader()` alone misses a stream whose headers went only through
+ * `writeHead(status, headers)` (Nest's SseStream does exactly that): with no earlier `setHeader()` Node writes those
+ * headers straight to the socket without storing them. So `writeHead` is observed too.
+ */
+const eventStreams = new WeakSet<ServerResponse>();
+
+function observeWriteHead(response: ServerResponse): void {
+  const writeHead = response.writeHead;
+  response.writeHead = function observedWriteHead(this: ServerResponse, ...args: unknown[]) {
+    if (startsEventStream(contentTypeIn(typeof args[1] === 'string' ? args[2] : args[1]))) eventStreams.add(this);
+    return (writeHead as (...a: unknown[]) => ServerResponse).apply(this, args);
+  } as unknown as ServerResponse['writeHead'];
+}
+
 export function trackInFlightResponses(server: Server): InFlightResponses {
   const inFlight = new Set<ServerResponse>();
   let closing = false;
   server.on('request', (_request: IncomingMessage, response: ServerResponse) => {
     inFlight.add(response);
+    observeWriteHead(response);
     response.once('close', () => inFlight.delete(response));
     // A request that still arrives on a kept-alive connection during the drain is served (Redis is still up) and its
     // response closes that connection, so the client's next request opens a new one and meets the closed listener.
@@ -62,7 +95,7 @@ export function trackInFlightResponses(server: Server): InFlightResponses {
 }
 
 function isEventStream(response: ServerResponse): boolean {
-  return String(response.getHeader('content-type') ?? '').toLowerCase().startsWith('text/event-stream');
+  return eventStreams.has(response) || startsEventStream(response.getHeader('content-type'));
 }
 
 export interface HttpStopResult {
