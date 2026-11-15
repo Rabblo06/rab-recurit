@@ -1,11 +1,12 @@
 import { insertMembership, provisionFixtureWorkspace } from './helpers/test-identities';
 import { AvailabilityService } from '../../modules/scheduling/services/availability.service';
 import { ShiftReportService } from '../../modules/attendance/services/shift-report.service';
+import { AttendanceService } from '../../modules/attendance/services/attendance.service';
 import { OfferService } from '../../modules/offer/services/offer.service';
 import { assertVenueTeamSelection } from '../../modules/staff/services/venue-team-scope';
 import 'reflect-metadata';
 import { payForMinutes, ManagerType, PermissionFlag, UserStatus } from '@rab/shared';
-import { INestApplication } from '@nestjs/common';
+import { ForbiddenException, INestApplication } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
 import { randomUUID } from 'node:crypto';
 import request from 'supertest';
@@ -2064,7 +2065,9 @@ describeIfDb('venue manager scoping (integration)', () => {
         const otherVm = await login(other.venueManager.email);
         expect((await correct(otherVm, s.attendanceId!, body)).status).toBe(404);
         // The workspace owner's web session: the route is Venue Manager app only.
-        expect((await correct(s.managerToken, s.attendanceId!, body)).status).toBe(403);
+        const web = await correct(s.managerToken, s.attendanceId!, body);
+        expect(web.status).toBe(403);
+        expect(web.body.code).toBe('APPLICATION_ROUTE_DENIED');
         // attendance.edit revoked from the Venue Manager's role (the write RoleService.setPermissions performs).
         await adminDataSource.query(
           `DELETE FROM core.role_permission rp USING core.permission p, core.user_role ur
@@ -2075,8 +2078,67 @@ describeIfDb('venue manager scoping (integration)', () => {
           `UPDATE core.role SET permission_version = permission_version + 1 WHERE id IN (SELECT role_id FROM core.user_role WHERE user_id = $1)`,
           [s.venueManager.userId],
         );
-        expect([401, 403]).toContain((await correct(s.vmToken, s.attendanceId!, body)).status);
+        // Layer 1: the version bump re-resolves the session's permissions (the session itself stays valid), so the
+        // route's PermissionGuard answers 403 — not the app-route denial.
+        const revoked = await correct(s.vmToken, s.attendanceId!, body);
+        expect(revoked.status).toBe(403);
+        expect(revoked.body.code).not.toBe('APPLICATION_ROUTE_DENIED');
+        // Layer 2: the service re-checks attendance.edit itself (jobs and other services never pass the guard).
+        const ctx = { organisationId: s.organisation.id, workspaceId: s.venue1.workspaceId, userId: s.venueManager.userId, role: 'venue_manager' };
+        await expect(app.get(AttendanceService).correct(ctx as never, s.attendanceId!, body as never)).rejects.toBeInstanceOf(ForbiddenException);
 
+        const after = await stateOf(s.shiftId, s.attendanceId!);
+        expect(after.row).toEqual(before.row);
+        expect(after.corrections).toHaveLength(0);
+        expect(after.audits).toHaveLength(0);
+      });
+
+      it('a finalised report stays locked: the confirmation changes nothing (existing 409, nothing written)', async () => {
+        const s = await recordedSeat();
+        expect((await reviewSeat(s.vmToken, s.shiftId, s.staff)).status).toBe(200);
+        expect((await finalise(s.vmToken, s.shiftId)).status).toBe(200);
+        const start = await seatStartOf(s.shiftId);
+        const before = await stateOf(s.shiftId, s.attendanceId!);
+        const res = await correct(s.vmToken, s.attendanceId!, {
+          field: 'clockInAt',
+          newValue: new Date(start.getTime() - 4 * HOUR).toISOString(),
+          reason,
+          confirmUnusualClockIn: true,
+        });
+        expect(res.status).toBe(409);
+        expect(res.body.message).toBe('This shift report has been finalised and can no longer be corrected.');
+        expect(res.body.code).not.toBe('CLOCK_IN_CONFIRMATION_REQUIRED');
+        const after = await stateOf(s.shiftId, s.attendanceId!);
+        expect(after.row).toEqual(before.row);
+        expect(after.corrections).toHaveLength(0);
+        expect(after.audits).toHaveLength(0);
+      });
+
+      it('clockOutAt and breakMinutes corrections sent with the flag behave normally and record no confirmation', async () => {
+        const s = await recordedSeat();
+        const t = await tablesOf(s.shiftId);
+        const [{ ends_at: endsAt }] = await adminDataSource.query(`SELECT ends_at FROM ${t.shift} WHERE id = $1`, [s.shiftId]);
+        const out = new Date((endsAt as Date).getTime() - 30 * MIN).toISOString();
+        expect((await correct(s.vmToken, s.attendanceId!, { field: 'clockOutAt', newValue: out, reason, confirmUnusualClockIn: true })).status).toBe(201);
+        expect((await correct(s.vmToken, s.attendanceId!, { field: 'breakMinutes', newValue: '45', reason, confirmUnusualClockIn: true })).status).toBe(201);
+        const after = await stateOf(s.shiftId, s.attendanceId!);
+        expect(after.corrections.map((c: { field: string }) => c.field).sort()).toEqual(['breakMinutes', 'clockOutAt']);
+        expect(after.audits).toHaveLength(2);
+        for (const audit of after.audits) {
+          expect(audit.metadata).not.toHaveProperty('unusualClockInConfirmed');
+          expect(audit.metadata).not.toHaveProperty('earliestAllowed');
+        }
+      });
+
+      it('an open (clocked-in) row with an early clock-in and no flag gets the existing "still on shift" 409, not the confirmation', async () => {
+        // Ended 100 min ago: still inside the staff member's own clock-out grace, so the row cannot be corrected yet.
+        const s = await seedSeat({ status: 'clocked_in', endedAgoMs: 100 * MIN });
+        const start = await seatStartOf(s.shiftId);
+        const before = await stateOf(s.shiftId, s.attendanceId!);
+        const res = await correct(s.vmToken, s.attendanceId!, { field: 'clockInAt', newValue: new Date(start.getTime() - 4 * HOUR).toISOString(), reason });
+        expect(res.status).toBe(409);
+        expect(res.body.message).toContain('still on shift');
+        expect(res.body.code).not.toBe('CLOCK_IN_CONFIRMATION_REQUIRED');
         const after = await stateOf(s.shiftId, s.attendanceId!);
         expect(after.row).toEqual(before.row);
         expect(after.corrections).toHaveLength(0);

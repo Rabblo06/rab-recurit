@@ -1129,10 +1129,8 @@ void main() {
         expect(inDialog(find.text('15:30')), findsOneWidget);
         expect(inDialog(find.text('Entered time')), findsOneWidget);
         expect(inDialog(find.text('05:00')), findsOneWidget);
-        expect(
-          inDialog(find.byIcon(Icons.warning_amber_rounded)),
-          findsOneWidget,
-        );
+        // The same design as "Confirm no-show": no extra icon.
+        expect(inDialog(find.byType(Icon)), findsNothing);
         expect(inDialog(find.byType(TextButton)), findsOneWidget); // Edit
         expect(inDialog(find.byType(FilledButton)), findsOneWidget); // Confirm
         expect(inDialog(find.text('Edit')), findsOneWidget);
@@ -1254,15 +1252,40 @@ void main() {
       },
     );
 
-    for (final (label, size, ratio, scale, wide) in [
+    // Same day: times only. Different days: both values carry the day, the longest text the dialog shows, so it is
+    // checked at the largest text scales on the narrowest phone.
+    final sameDay = (DateTime(2026, 10, 16, 5, 0), '08:45', '05:00');
+    final otherDay = (
+      DateTime(2026, 10, 15, 23, 0),
+      'Fri 16 Oct, 08:45',
+      'Thu 15 Oct, 23:00',
+    );
+    for (final (label, size, ratio, scale, wide, (entered, early, typed)) in [
       (
         'small phone 320x640, text x1.3',
         const Size(640, 1280),
         2.0,
         1.3,
         false,
+        sameDay,
       ),
-      ('wide screen 1280x800', const Size(2560, 1600), 2.0, 1.0, true),
+      (
+        'small phone 320x640, text x1.3, different days',
+        const Size(640, 1280),
+        2.0,
+        1.3,
+        false,
+        otherDay,
+      ),
+      (
+        'small phone 320x640, text x2.0, different days',
+        const Size(640, 1280),
+        2.0,
+        2.0,
+        false,
+        otherDay,
+      ),
+      ('wide screen 1280x800', const Size(2560, 1600), 2.0, 1.0, true, sameDay),
     ]) {
       testWidgets('the warning lays out without overflow on a $label', (
         tester,
@@ -1276,10 +1299,7 @@ void main() {
               builder: (context) => TextButton(
                 onPressed: () async => result = await confirmUnusualClockIn(
                   context,
-                  UnusualClockInWarning(
-                    DateTime(2026, 10, 16, 8, 45),
-                    DateTime(2026, 10, 16, 5, 0),
-                  ),
+                  UnusualClockInWarning(DateTime(2026, 10, 16, 8, 45), entered),
                 ),
                 child: const Text('open'),
               ),
@@ -1293,8 +1313,8 @@ void main() {
         await tester.pumpAndSettle();
         expect(tester.takeException(), isNull);
         expect(dialog, findsOneWidget);
-        expect(find.text('08:45'), findsOneWidget);
-        expect(find.text('05:00'), findsOneWidget);
+        expect(find.text(early), findsOneWidget);
+        expect(find.text(typed), findsOneWidget);
         final screen =
             Offset.zero &
             (tester.view.physicalSize / tester.view.devicePixelRatio);

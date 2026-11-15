@@ -30,7 +30,7 @@ class UnusualClockInWarning {
 }
 
 /// Compact "Unusual clock-in time" confirmation, the same AlertDialog as "Confirm no-show" on the review screen
-/// (card-title heading, body text, TextButton + navy FilledButton) with the shared warning icon. Returns true only on
+/// (card-title heading, body text, TextButton + navy FilledButton; no icon, as there). Returns true only on
 /// an explicit Confirm; Edit, a tap outside or back returns false and leaves the correction form as it was.
 Future<bool> confirmUnusualClockIn(
   BuildContext context,
@@ -44,10 +44,13 @@ Future<bool> confirmUnusualClockIn(
   );
   String hm(DateTime d) =>
       DateFormat(sameDay ? 'HH:mm' : 'EEE d MMM, HH:mm').format(d.toLocal());
-  Widget line(String label, String value, Key key) => Row(
+  // Label above value: both wrap freely, so a long value ("Fri 16 Oct, 08:45") never overflows a narrow phone or
+  // large text.
+  Widget line(String label, String value, Key key) => Column(
     key: key,
+    crossAxisAlignment: CrossAxisAlignment.start,
     children: [
-      Expanded(child: Text(label, style: ScheduleType.secondary)),
+      Text(label, style: ScheduleType.secondary),
       Text(value, style: ScheduleType.bodyStrong),
     ],
   );
@@ -55,10 +58,6 @@ Future<bool> confirmUnusualClockIn(
     context: context,
     builder: (dialog) => AlertDialog(
       key: const Key('unusual-clock-in-dialog'),
-      icon: const Icon(
-        Icons.warning_amber_rounded,
-        color: ScheduleTokens.warningIcon,
-      ),
       title: Text('Unusual clock-in time', style: ScheduleType.cardTitle),
       // Scrolls only when it must (very large text on a small phone), like the screen's Reopen no-show dialog; the
       // width cap keeps it a compact dialog on a tablet or wide screen instead of one long line of text.
