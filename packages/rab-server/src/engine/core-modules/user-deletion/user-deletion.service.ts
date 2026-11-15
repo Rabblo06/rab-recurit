@@ -159,6 +159,12 @@ export class UserDeletionService {
     // C2-0: the businessTables(manager) binding follows every search_path switch below and is restored with it.
     const entryBinding = snapshotBusinessSchema(manager);
 
+    // Restored from the binding when there was one (the same value the binder set; under the test-only trap the entry
+    // search_path is '' and cannot be re-set from its quoted text form), else from the entry setting, as before.
+    const restorePath = entryBinding.schema !== undefined ? businessSearchPath(entryBinding.schema) : entry?.sp ?? 'core';
+    const restoreSession = () =>
+      manager.query(`SELECT set_config('rab.workspace_id', $1, true), set_config('search_path', $2, true)`, [entry?.ws ?? '', restorePath]);
+    let restored = false;
     let found: T | null = null;
     try {
       for (const workspaceId of workspaceIds) {
@@ -181,14 +187,15 @@ export class UserDeletionService {
           if (found !== null) break;
         }
       }
-      // Restored from the binding when there was one (the same value the binder set; under the test-only trap the entry
-      // search_path is '' and cannot be re-set from its quoted text form), else from the entry setting, as before. Success
-      // path only, as before: a throw aborts the transaction (the callers never catch and continue).
-      const restorePath = entryBinding.schema !== undefined ? businessSearchPath(entryBinding.schema) : entry?.sp ?? 'core';
-      await manager.query(`SELECT set_config('rab.workspace_id', $1, true), set_config('search_path', $2, true)`, [entry?.ws ?? '', restorePath]);
+      await restoreSession();
+      restored = true;
     } finally {
       // Review #4: the businessTables binding is put back however the loop ends (a throw included).
       restoreBusinessSchema(manager, entryBinding);
+      // Re-review INFO: a JS-level throw (USER_DELETION_UNVERIFIABLE) leaves the transaction usable, so search_path and
+      // rab.workspace_id are put back too. Best effort: after a database error the transaction is aborted, this statement
+      // fails as well, and the ORIGINAL error is the one that propagates (the callers roll back; none catches and continues).
+      if (!restored) await restoreSession().catch(() => undefined);
     }
     return found;
   }
