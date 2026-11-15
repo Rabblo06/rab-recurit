@@ -8,7 +8,11 @@
  *   - <table> is one of WORKSPACE_TABLES (read from database/typeorm/workspace-schema/workspace-tables.ts);
  *   - X is a plain identifier whose NEAREST declaration in an enclosing scope is `const X = businessTables(<expr>)`
  *     (parentheses, `as`/`satisfies`/non-null wrappers around the call allowed; nothing else: no `let`, no parameter, no
- *     destructuring, no import, no reassignable binding, no other initializer);
+ *     destructuring, no import, no reassignable binding, no other initializer; a hoisted `var X` anywhere in an enclosing
+ *     function voids it);
+ *   - that `businessTables` callee is itself resolved the same way: its nearest declaration must be the NON-aliased value
+ *     import `import { businessTables } from '<…>/tenant/business-tables'` (or `./business-tables` inside tenant/) — not a
+ *     local function, an aliased import, a parameter, or nothing (re-review MEDIUM: the callee name alone is not trusted);
  *   - the interpolation is not inside quotes in the surrounding SQL text ('${…}' / "${…}" — a quoted value is a string
  *     literal or a single identifier, never the qualified "schema"."table" pair the primitive returns).
  * Anything else is not exempt: check-sql-injection asks for a reviewed comment, the ratchet counts it.
@@ -95,21 +99,73 @@ function bindsName(ts, binding, name) {
   return false;
 }
 
-/** True when `ident`'s nearest enclosing declaration is `const <ident> = businessTables(…)`. */
-function resolvesToBusinessTables(ts, ident) {
+/**
+ * True when `body` declares `var <name>` anywhere (blocks included, nested functions excluded): a `var` is hoisted to the
+ * whole function, so it can shadow a `const` the block walk would otherwise find (re-review MEDIUM).
+ */
+function declaresVar(ts, body, name) {
+  let found = false;
+  const visit = (x) => {
+    if (found || (x !== body && ts.isFunctionLike(x))) return;
+    if (ts.isVariableDeclarationList(x) && (x.flags & (ts.NodeFlags.Let | ts.NodeFlags.Const)) === 0) {
+      if (x.declarations.some((d) => bindsName(ts, d.name, name))) { found = true; return; }
+    }
+    ts.forEachChild(x, visit);
+  };
+  visit(body);
+  return found;
+}
+
+/** Any enclosing function (or the file) of `node` has a hoisted `var <name>`. */
+function hoistedVarShadows(ts, node, name) {
+  for (let n = node.parent; n; n = n.parent) {
+    if (ts.isSourceFile(n) && declaresVar(ts, n, name)) return true;
+    if (ts.isFunctionLike(n) && n.body && declaresVar(ts, n.body, name)) return true;
+  }
+  return false;
+}
+
+/** The single nearest declaration of `ident` (block scopes, parameters, imports), or null when absent/ambiguous/var-hoisted. */
+function nearestDeclaration(ts, ident) {
   const name = ident.text;
+  if (hoistedVarShadows(ts, ident, name)) return null;
   for (let scope = ident.parent; scope; scope = scope.parent) {
     const decls = declarationsIn(ts, scope, name);
     if (decls.length === 0) continue;
-    if (decls.length !== 1) return false;
-    const d = decls[0];
-    if (!ts.isVariableDeclaration(d) || !ts.isIdentifier(d.name)) return false;
-    const list = d.parent;
-    if (!ts.isVariableDeclarationList(list) || (list.flags & ts.NodeFlags.Const) === 0) return false;
-    const init = unwrap(ts, d.initializer);
-    return Boolean(init && ts.isCallExpression(init) && ts.isIdentifier(init.expression) && init.expression.text === 'businessTables');
+    return decls.length === 1 ? decls[0] : null;
   }
-  return false;
+  return null;
+}
+
+/** The module that may export the primitive: `…/tenant/business-tables` (server relative path or '@rab/server/…'). */
+const BUSINESS_TABLES_MODULE = /(?:^|\/)tenant\/business-tables$/;
+const TENANT_DIR = /(?:^|\/)engine\/core-modules\/tenant\/[^/]+$/;
+
+/**
+ * The callee `businessTables` really is the primitive: its nearest declaration is a NON-aliased, value (not type-only)
+ * `import { businessTables } from '<…>/tenant/business-tables'` (or `./business-tables` from a file inside tenant/).
+ * A local function, an aliased import (`{ evil as businessTables }`), a parameter, a default/namespace import or no
+ * declaration at all is not.
+ */
+function calleeIsBusinessTables(ts, callee) {
+  if (!ts.isIdentifier(callee) || callee.text !== 'businessTables') return false;
+  const d = nearestDeclaration(ts, callee);
+  if (!d || !ts.isImportSpecifier(d) || d.propertyName !== undefined || d.isTypeOnly) return false;
+  const decl = d.parent?.parent?.parent; // ImportSpecifier → NamedImports → ImportClause → ImportDeclaration
+  if (!decl || !ts.isImportDeclaration(decl) || decl.importClause?.isTypeOnly || !ts.isStringLiteral(decl.moduleSpecifier)) return false;
+  const spec = decl.moduleSpecifier.text;
+  if (BUSINESS_TABLES_MODULE.test(spec)) return true;
+  return spec === './business-tables' && TENANT_DIR.test(callee.getSourceFile().fileName.replace(/\\/g, '/'));
+}
+
+/** True when `ident`'s nearest enclosing declaration is `const <ident> = businessTables(…)` with the real primitive. */
+function resolvesToBusinessTables(ts, ident) {
+  const d = nearestDeclaration(ts, ident);
+  if (!d || !ts.isVariableDeclaration(d) || !ts.isIdentifier(d.name)) return false;
+  const list = d.parent;
+  if (!ts.isVariableDeclarationList(list) || (list.flags & ts.NodeFlags.Const) === 0) return false;
+  const init = unwrap(ts, d.initializer);
+  return Boolean(init && ts.isCallExpression(init) && calleeIsBusinessTables(ts, init.expression));
 }
 
 /** `node` is `X.<table>` with X resolving to `const X = businessTables(…)`. Quote context is checked by the callers below. */
