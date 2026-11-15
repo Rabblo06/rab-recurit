@@ -41,9 +41,7 @@ describe('metadata tables SQL (MetadataEngineTables1786721550000)', () => {
     expect(UNIVERSAL_IDENTIFIER_KIND_PREDICATE).toBe("pg_catalog.substr(universal_identifier::text, 15, 1) = CASE WHEN is_custom THEN '4' ELSE '8' END");
     for (const t of ['object_metadata', 'field_metadata']) {
       const create = createOf(t);
-      expect(create).toContain('
-  universal_identifier uuid NOT NULL DEFAULT pg_catalog.gen_random_uuid(),
-');
+      expect(create).toContain('\n  universal_identifier uuid NOT NULL DEFAULT pg_catalog.gen_random_uuid(),\n');
       expect(create).toContain(`CONSTRAINT ${t}_universal_identifier_kind_ck CHECK (${UNIVERSAL_IDENTIFIER_KIND_PREDICATE})`);
       // one unique index per table, over every row (no partial predicate left, no duplicate index)
       const uniques = METADATA_TABLES_UP_SQL.filter((s) => s.startsWith('CREATE UNIQUE INDEX') && s.includes(`ON core.${t} `) && s.includes('universal_identifier'));
