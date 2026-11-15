@@ -10,6 +10,10 @@ The API validates its environment when it starts (`packages/rab-server/src/engin
   This page lists variable **names** only. Keep values in your deployment platform's secret store or an untracked `.env` file.
 </Warning>
 
+<Note>
+  **On/off switches are strict.** Every boolean variable (`…_ENABLED`, `EMAIL_SMTP_NO_TLS`, `WORKER_FAST_PUBLISH_NOTIFY`, …) accepts exactly `true` or `false`, lower case. Unset or empty keeps the default. Anything else (`True`, `1`, `yes`, a typo) stops the process at boot. `AI_AGENTS_ENABLED` is the one exception: any value other than `true` means off. See `packages/rab-docker/docs/release/RELEASE-NOTE-X3.1-STRICT-BOOLEANS.md`.
+</Note>
+
 ## Required
 
 | Variable | Purpose |
