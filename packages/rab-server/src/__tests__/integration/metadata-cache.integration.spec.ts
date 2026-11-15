@@ -165,6 +165,48 @@ describeIfDb('Metadata cache E5: versioned per-workspace cache, PostgreSQL autho
       expect(await versionOf(w)).toBe('2');
     });
 
+    // Owner condition 1 (M1 SQL approval): concurrent FIRST changes of a workspace that has no version row yet. Plain
+    // metadata writes take no advisory lock (only lockExpectedVersion does); the bump trigger's INSERT ... ON CONFLICT
+    // must make them safe on its own: no unique violation, and exactly one version step per committed transaction.
+    const objectCount = async (w: Ws) =>
+      ((await admin.query(`SELECT count(*)::int AS n FROM core.object_metadata WHERE workspace_id = $1`, [w.ws])) as Array<{ n: number }>)[0]!.n;
+
+    it('two concurrent FIRST changes (no version row yet) both commit: no unique violation, version 2, no lost increment', async () => {
+      const w = await seedWorkspace();
+      expect(await versionOf(w)).toBeNull();
+      let firstInserted!: () => void;
+      const firstHasInserted = new Promise<void>((r) => (firstInserted = r));
+      let releaseFirst!: () => void;
+      const firstMayCommit = new Promise<void>((r) => (releaseFirst = r));
+      const first = inTenant(dsA, w, async (m) => {
+        await insertObject(m, w, 'racea'); // creates the version row, uncommitted
+        firstInserted();
+        await firstMayCommit;
+      });
+      await firstHasInserted;
+      let secondDone = false;
+      // The second first-change starts while the first one's version row is uncommitted: its bump must wait on that row,
+      // then take the ON CONFLICT path once the first commits (never 23505, never a second "version 1").
+      const second = inTenant(dsB, w, (m) => insertObject(m, w, 'raceb')).then(() => {
+        secondDone = true;
+      });
+      await new Promise((r) => setTimeout(r, 500));
+      expect(secondDone).toBe(false);
+      releaseFirst();
+      await expect(Promise.all([first, second])).resolves.toBeDefined();
+      expect(await versionOf(w)).toBe('2');
+      expect(await objectCount(w)).toBe(2);
+    });
+
+    it('six uncoordinated concurrent first changes on two API instances: all commit, version = 6 (one step each)', async () => {
+      const w = await seedWorkspace();
+      expect(await versionOf(w)).toBeNull();
+      const results = await Promise.allSettled([0, 1, 2, 3, 4, 5].map((i) => commitObject(i % 2 ? dsB : dsA, w, `swarm${i}`)));
+      expect(results.filter((r) => r.status === 'rejected').map((r) => String((r as PromiseRejectedResult).reason))).toEqual([]);
+      expect(await versionOf(w)).toBe('6');
+      expect(await objectCount(w)).toBe(6);
+    });
+
     it('a rolled-back change leaves the version unchanged', async () => {
       const w = await seedWorkspace();
       await commitObject(dsA, w, 'alpha');
