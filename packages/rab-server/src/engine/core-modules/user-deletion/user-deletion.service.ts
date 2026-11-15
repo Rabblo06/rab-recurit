@@ -33,12 +33,6 @@ export class UserDeletionBlockedException extends ConflictException {
   }
 }
 
-/**
- * Drafts awaiting an owner decision, OFF until the owner decides (then the switch is removed: the code is kept as always-on,
- * or deleted). Security review F2: `hiddenWorkspaceHistoryFallback` (see tryHardDelete). Only tests flip it.
- */
-export const USER_DELETION_DRAFTS: { hiddenWorkspaceHistoryFallback: boolean } = { hiddenWorkspaceHistoryFallback: false };
-
 /** What `deleteUser` did: the row is kept (soft) or gone (only a never-activated invite with no history). */
 export type UserDeletionOutcome = 'soft_deleted' | 'hard_deleted';
 
@@ -289,14 +283,13 @@ export class UserDeletionService {
         if (hidden.length > 0 && boundBusinessSchema(manager) !== CORE_BUSINESS_SCHEMA) hiddenWorkspaceHistory = true;
         return null;
       });
-      // Security review F2 (DRAFT, NOT ENABLED: owner decision pending, WS-COMMANDS.md "FOR OWNER REVIEW — F2"). A workspace
-      // schema at structure level 22 has no foreign key to core."user", so a staff profile the caller cannot see is not
-      // cascaded with the user and historyLost below cannot tell whether it was the target's (owner decision R-1: it stays, an
-      // orphan the daily check reports). Enabled, the owner's 0g rule applies instead ("never hard-delete a user with
-      // history"): visible history of a profile the caller cannot see, in a workspace schema, makes the hard delete unsafe and
-      // the account is soft-deleted. Over-strict (another user's hidden history counts too); a precise per-user check needs a
-      // reviewed read path (the F2 definer draft).
-      if (hiddenWorkspaceHistory && USER_DELETION_DRAFTS.hiddenWorkspaceHistoryFallback) throw new HardDeleteNotSafe('hidden_workspace_history');
+      // Security review F2, owner decision (b), 2026-11-15. A workspace schema at structure level 22 has no foreign key to
+      // core."user", so a staff profile the caller cannot see is not cascaded with the user and historyLost below cannot tell
+      // whether it was the target's. The owner's 0g rule applies ("never hard-delete a user with history"): visible history of
+      // a profile the caller cannot see, in a workspace schema, makes the hard delete unsafe and the account is soft-deleted.
+      // Deliberately over-strict (another user's hidden history counts too). Residual: a hidden profile whose history is ALSO
+      // hidden from the caller is not seen here; it stays (never deleted) and the daily orphan check reports it.
+      if (hiddenWorkspaceHistory) throw new HardDeleteNotSafe('hidden_workspace_history');
 
       await this.refreshTokenService.revokeAllForUser(manager, target.id, 'account_deleted');
       await this.cancelOpenEmail(manager, target.id);

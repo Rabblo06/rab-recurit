@@ -455,6 +455,50 @@ describeIfDb('account invite cleanup job (integration)', () => {
     expect(orphans.findings).toEqual([]);
   });
 
+  it('Part D 0a (F1-T): the owner-id binding touches only the invitee\'s own references; another user\'s profile, notes and SET NULL columns stay', async () => {
+    const fx = await expiredStaffInvite();
+    const q = `"${businessSchema(fx.workspaceId)}"`;
+    const one = async (sql: string, params: unknown[]) => ((await adminDataSource.manager.query(sql, params)) as Array<{ id: string }>)[0]!.id;
+    // Another user of the same organisation, with everything the clean-up could reach if it were not scoped to the invitee.
+    const other = await one(
+      `INSERT INTO core."user" (organisation_id, email, first_name, last_name, status) VALUES ($1, $2, 'Other', 'Staff', 'active') RETURNING id`,
+      [fx.organisationId, `other-${randomUUID()}@example.test`],
+    );
+    const otherProfile = await one(
+      `INSERT INTO ${q}.staff_profile (organisation_id, workspace_id, user_id, staff_ref, created_by) VALUES ($1, $2, $3, $4, $5) RETURNING id`,
+      [fx.organisationId, fx.workspaceId, other, `OTHER-${randomUUID().slice(0, 8)}`, other],
+    );
+    const noteAboutOther = await one(
+      `INSERT INTO ${q}.user_note (organisation_id, workspace_id, subject_user_id, author_user_id, body) VALUES ($1, $2, $3, $4, 'about other') RETURNING id`,
+      [fx.organisationId, fx.workspaceId, other, other],
+    );
+    const noteByOwner = await one(
+      `INSERT INTO ${q}.user_note (organisation_id, workspace_id, subject_user_id, author_user_id, body) VALUES ($1, $2, $3, $4, 'by owner') RETURNING id`,
+      [fx.organisationId, fx.workspaceId, other, fx.ownerUserId],
+    );
+    const invitee = fx.userId;
+    const inviteeProfiles = await adminDataSource.manager.query(`SELECT id FROM ${q}.staff_profile WHERE user_id = $1`, [invitee]);
+    expect(inviteeProfiles).toHaveLength(1);
+
+    const result = await runCleanupCycleUntilGone([invitee]);
+    expect(result.deleted).toBeGreaterThanOrEqual(1);
+    expect(await adminDataSource.manager.findOne(User, { where: { id: invitee } })).toBeNull();
+    // The invitee's own profile went with it (the former CASCADE) ...
+    expect(await adminDataSource.manager.query(`SELECT 1 FROM ${q}.staff_profile WHERE user_id = $1`, [invitee])).toHaveLength(0);
+    // ... and nothing else: the other user's profile with its created_by, both notes with their subject and author.
+    expect(await adminDataSource.manager.query(`SELECT user_id, created_by FROM ${q}.staff_profile WHERE id = $1`, [otherProfile])).toEqual([{ user_id: other, created_by: other }]);
+    expect(await adminDataSource.manager.query(`SELECT subject_user_id, author_user_id FROM ${q}.user_note WHERE id = $1`, [noteAboutOther])).toEqual([
+      { subject_user_id: other, author_user_id: other },
+    ]);
+    expect(await adminDataSource.manager.query(`SELECT subject_user_id, author_user_id FROM ${q}.user_note WHERE id = $1`, [noteByOwner])).toEqual([
+      { subject_user_id: other, author_user_id: fx.ownerUserId },
+    ]);
+    expect(await adminDataSource.manager.findOneByOrFail(User, { id: other })).toMatchObject({ id: other });
+    const orphans = await orphansOf(fx.workspaceId);
+    expect(orphans.errors).toEqual([]);
+    expect(orphans.findings).toEqual([]);
+  });
+
   it('Part D 0a (re-review N1): a workspace schema that exists but does not resolve (unsupported schema_version) retains the invitee, never skips it', async () => {
     const fx = await expiredStaffInvite();
     const [{ schema_version: version }] = await adminDataSource.manager.query<Array<{ schema_version: number }>>(
