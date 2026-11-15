@@ -187,7 +187,7 @@ export function bindCombinedShiftScanMembers(deps: WorkerJobDependencies): Map<C
       {
         discover: discoverAttendanceMonitorScopes,
         process: async (found) => {
-          const result = await processAttendanceMonitorScopes(tenantContext, { notificationService, auditService }, found as AttendanceMonitorScope[]);
+          const result = await processAttendanceMonitorScopes(tenantContext, { notificationService, auditService, clockOutGraceMinutes: environmentService.get('QR_POST_SHIFT_GRACE_MINUTES') }, found as AttendanceMonitorScope[]);
           if (result.flagged) logger.log(`attendance monitor: flagged=${result.flagged}`);
         },
       },

@@ -11,7 +11,7 @@ Crewflow's background jobs watch every confirmed place. You do not need to check
 | --- | --- | --- |
 | **Late** | No clock-in 10 minutes after the start | Managers are notified. The person moves to **LATE STAFF** on the live staffing board. |
 | **No-show** | No clock-in 30 minutes after the start | The place is marked **no show** and managers are notified. The person moves to **NO SHOW** on the board. |
-| **Missing clock-out** | Still clocked in 30 minutes after the end | The attendance becomes **missing clock-out** and is flagged. The person moves to **PENDING REVIEW** on the board, with "Clock-out missing - in *time*". |
+| **Missing clock-out** | Still clocked in 120 minutes after the person's own scheduled end (`QR_POST_SHIFT_GRACE_MINUTES`) | The attendance becomes **missing clock-out** and is flagged. The person moves to **PENDING REVIEW** on the board, with "Clock-out missing - in *time*". |
 
 Checks run every few minutes, so a notification may arrive a little after the exact time.
 
@@ -36,7 +36,7 @@ The venue manager adds the correct clock-out time in the Crewflow app, during [t
   </Step>
 </Steps>
 
-The clock-out time must be after the clock-in time and cannot be in the future. A missing clock-out can be added once the person's shift has been over for 30 minutes — before then, Crewflow waits for the staff member to clock out themselves.
+The clock-out time must be after the clock-in time and cannot be in the future. A missing clock-out can be added once the person's own scheduled end is more than 120 minutes past (`QR_POST_SHIFT_GRACE_MINUTES`) — until then the staff member can still clock out themselves, so Crewflow waits for them.
 
 <Note>
   If a staff member never clocked in, there is no attendance to correct, and attendance cannot be created from the app. Crewflow records a no-show automatically 30 minutes after the start; the venue manager then taps **Confirm no-show** during review.

@@ -206,6 +206,14 @@ export class SchedulingController {
     return this.schedulingService.restoreShift(ctx, id);
   }
 
+  // Named action: revoke every issued Shift QR for this shift (qr_version + 1). No body; nothing is written from the client.
+  @Post('shifts/:id/rotate-qr')
+  @ManagerApplication()
+  @UseGuards(PermissionGuard(PermissionFlag.SCHEDULE_CREATE))
+  rotateShiftQr(@AuthUser() ctx: AuthContext, @Param('id', ParseUUIDPipe) id: string) {
+    return this.schedulingService.rotateShiftQr(ctx, id);
+  }
+
   @Post('shifts/:id/decline')
   @ManagerApplication()
   @UseGuards(PermissionGuard(PermissionFlag.STAFFING_REQUEST_APPROVE))
