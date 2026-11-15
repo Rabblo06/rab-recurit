@@ -7767,3 +7767,29 @@ Reversal:   A shorter QR_MAX_AGE_DAYS, or rotating QRs automatically on schedule
   unverifiable schema; CEO cannot cascade another workspace's staff profile), the Worker isolation specs with a real
   wrong-organisation binding, and the full suites with HWS on (server 2,846 pass / 10 fail = the member staff-visibility gap
   awaiting owner SQL; Worker 741/741).
+
+## X3.1 — on/off switches refuse a typo at boot (XR-05 / ENV-01) (branch phase-x/x31-strict-booleans, 2026-11-15, PR #169)
+- **Asset:** the deployment's security and routing posture as the operator configured it: session-enforcement cutover,
+  sign-in methods, SMTP TLS, the auth/session/entity caches, email, push and realtime delivery.
+- **Actor:** an operator (or a template, override or platform setting) entering a switch value that is not exactly `true`.
+- **Before:** fourteen switches (`EMAIL_DELIVERY_ENABLED`, `AUTH_CONTEXT_CACHE_ENABLED`, `USER_SESSION_CACHE_ENABLED`,
+  `CORE_ENTITY_CACHE_ENABLED`, `WORKSPACE_METADATA_CACHE_ENABLED`, `WORKER_FAST_PUBLISH_NOTIFY`,
+  `USER_SESSION_ENFORCEMENT_CUTOVER`, `AUTH_PASSWORD_ENABLED`, `AUTH_GOOGLE_ENABLED`, `AUTH_MICROSOFT_ENABLED`,
+  `AUTH_OAUTH_HANDOFF_ENABLED`, `EMAIL_SMTP_NO_TLS`, `REALTIME_ENABLED`, `PUSH_ENABLED`) read `value === 'true'`, so any
+  other value (`True`, `1`, `yes`, ` true`, a typo) silently meant false. For example `USER_SESSION_ENFORCEMENT_CUTOVER=True`
+  left the cutover off, and nothing reported the mismatch.
+- **Control:** all fourteen use the shared `strictBoolean` helper (`environment-variables.ts`). Exactly `true` or `false` is
+  accepted, unset or empty keeps the default, and anything else refuses to boot (fail closed) with
+  `<NAME> must be exactly true or false`. The message names the variable, never the value. The compose gate
+  (`scripts/compose-owner-login.cjs`, `STRICT_SWITCHES`) refuses the same values in env files, templates and rendered
+  services, so a typo fails the lint before it reaches a running host. `S3_FORCE_PATH_STYLE` uses the same helper (it was
+  already strict).
+- **Accepted exception:** `AI_AGENTS_ENABLED` stays loose on purpose: any value other than `true` is off. That is the safe
+  side, and the variable is never a boot refusal (2026-10-22 crash-loop lesson).
+- **Residual:** a typo now costs availability (a crash loop) instead of a silent posture change. Mitigated by the gate lint
+  and the release note `packages/rab-docker/docs/release/RELEASE-NOTE-X3.1-STRICT-BOOLEANS.md`. A value set outside the
+  committed compose files and env templates (a platform setting, a hand-edited server file) is checked only at boot.
+- **Tests:** `env.validation.strict-booleans.spec.ts` (per flag: unset and empty keep the default, `true` and `false` are
+  accepted, 15 typos each refuse to boot; no value echoed; S3 on the helper; `AI_AGENTS_ENABLED` stays loose);
+  `compose-owner-login.test.cjs` (X3.1 env-file lint and per-service check; the two pins of the old transform now pin
+  `strictBoolean`).
