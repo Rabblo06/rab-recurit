@@ -25,6 +25,7 @@ import { discoverInWorkspaces } from '../../core/database/workspace-discovery';
 import { runFinalTimesheetCycle } from '../../queues/rab-reports/final-timesheet.job';
 import { runShiftReportSchedulerCycle } from '../../queues/rab-reports/shift-report-scheduler.job';
 import { createAdminDataSource } from './helpers/admin-datasource';
+import { businessSchema, businessTable } from './helpers/hws-fixtures';
 import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
 import { integrationTestDatabaseReady } from '@rab/server/database/typeorm/core/integration-test-database-gate';
 import { extractPdf } from '../pdf-equality/extract';
@@ -411,7 +412,7 @@ describeIfDb('report worker multi-instance concurrency (integration)', () => {
     const f = await seedFixture();
     const shiftId = f.shiftIds[0];
     const ctx = { organisationId: f.organisation.id, workspaceId: f.workspaceId, userId: f.owner.userId, role: '' };
-    const reportRow = () => tenantContext.runInTenantContext(ctx, async (m) => (await m.query(`SELECT pre_shift_file_id FROM core.shift_report WHERE shift_id = $1`, [shiftId]))[0]);
+    const reportRow = () => tenantContext.runInTenantContext(ctx, async (m) => (await m.query(`SELECT pre_shift_file_id FROM ${businessTable(f.workspaceId, 'shift_report')} WHERE shift_id = $1`, [shiftId]))[0]);
     const qrVerOf = (pdf: Buffer): number => {
       const payloads = extractPdf(pdf).qrPayloads;
       expect(payloads).toHaveLength(1);
@@ -425,11 +426,11 @@ describeIfDb('report worker multi-instance concurrency (integration)', () => {
     expect(qrVerOf(await readStoredFile(f, first.pre_shift_file_id))).toBe(1);
 
     // An ordinary shift edit makes the report stale; tick 2 re-renders, and the QR is rotated WHILE it renders.
-    await adminDataSource.query(`UPDATE core.shift SET updated_at = clock_timestamp() WHERE id = $1`, [shiftId]);
+    await adminDataSource.query(`UPDATE ${businessTable(f.workspaceId, 'shift')} SET updated_at = clock_timestamp() WHERE id = $1`, [shiftId]);
     const original = storage.putObject.bind(storage);
     const spy = jest.spyOn(storage, 'putObject').mockImplementation(async (params) => {
       const uploaded = await original(params);
-      await adminDataSource.query(`UPDATE core.shift SET qr_version = qr_version + 1, updated_at = clock_timestamp() WHERE id = $1`, [shiftId]);
+      await adminDataSource.query(`UPDATE ${businessTable(f.workspaceId, 'shift')} SET qr_version = qr_version + 1, updated_at = clock_timestamp() WHERE id = $1`, [shiftId]);
       return uploaded;
     });
     let second;
@@ -463,7 +464,7 @@ describeIfDb('report worker multi-instance concurrency (integration)', () => {
     const shiftId = f.shiftIds[0];
     const ctx = { organisationId: f.organisation.id, workspaceId: f.workspaceId, userId: f.owner.userId, role: '' };
     const reportFileId = async (): Promise<string> =>
-      tenantContext.runInTenantContext(ctx, async (m) => (await m.query(`SELECT pre_shift_file_id FROM core.shift_report WHERE shift_id = $1`, [shiftId]))[0].pre_shift_file_id);
+      tenantContext.runInTenantContext(ctx, async (m) => (await m.query(`SELECT pre_shift_file_id FROM ${businessTable(f.workspaceId, 'shift_report')} WHERE shift_id = $1`, [shiftId]))[0].pre_shift_file_id);
     const qrVerOf = (pdf: Buffer): number => {
       const payloads = extractPdf(pdf).qrPayloads;
       expect(payloads).toHaveLength(1);
@@ -471,8 +472,8 @@ describeIfDb('report worker multi-instance concurrency (integration)', () => {
     };
 
     expect((await runScheduler(f.organisation.id)).generated).toBe(1); // version 1 shipped
-    await adminDataSource.query(`UPDATE core.shift SET updated_at = clock_timestamp() WHERE id = $1`, [shiftId]); // stale: tick 2 re-renders
-    const [{ status }] = await adminDataSource.query(`SELECT status FROM core.shift WHERE id = $1`, [shiftId]);
+    await adminDataSource.query(`UPDATE ${businessTable(f.workspaceId, 'shift')} SET updated_at = clock_timestamp() WHERE id = $1`, [shiftId]); // stale: tick 2 re-renders
+    const [{ status }] = await adminDataSource.query(`SELECT status FROM ${businessTable(f.workspaceId, 'shift')} WHERE id = $1`, [shiftId]);
 
     const rotation = adminDataSource.createQueryRunner();
     await rotation.connect();
@@ -484,7 +485,8 @@ describeIfDb('report worker multi-instance concurrency (integration)', () => {
       // 1. The rotation transaction starts NOW, before the scheduler's write transaction: its now() is the earlier one.
       await rotation.startTransaction();
       await rotation.query(`SELECT 1`);
-      await rotation.query(`SET LOCAL search_path TO core, public`);
+      // The shift lives in the workspace schema with HWS on (core with HWS off), as rotateShiftQr's bound search_path.
+      await rotation.query(`SET LOCAL search_path TO "${businessSchema(f.workspaceId)}", core, public`);
       return uploaded;
     });
     const originalEnqueue = emailOutbox.enqueue.bind(emailOutbox);
@@ -519,7 +521,7 @@ describeIfDb('report worker multi-instance concurrency (integration)', () => {
       if (rotation.isTransactionActive) await rotation.rollbackTransaction();
       await rotation.release();
     }
-    const [{ qr_version: version }] = await adminDataSource.query(`SELECT qr_version FROM core.shift WHERE id = $1`, [shiftId]);
+    const [{ qr_version: version }] = await adminDataSource.query(`SELECT qr_version FROM ${businessTable(f.workspaceId, 'shift')} WHERE id = $1`, [shiftId]);
     expect(version).toBe(2);
 
     // 5. The report is stale again (the rotation's updated_at is after its stamp): the next tick ships version 2.

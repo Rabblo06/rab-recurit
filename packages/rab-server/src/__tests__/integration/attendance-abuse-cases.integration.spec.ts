@@ -387,10 +387,10 @@ describeIfDb('attendance abuse cases (integration)', () => {
   async function moveShift(shiftId: string, startOffset: string, endOffset: string): Promise<{ startsAt: Date; endsAt: Date }> {
     // TypeORM's postgres driver returns [rows, affectedCount] for UPDATE ... RETURNING.
     const [[row]] = await adminDataSource.query(
-      `UPDATE core.shift SET starts_at = now() + $2::interval, ends_at = now() + $3::interval WHERE id = $1 RETURNING starts_at, ends_at`,
+      `UPDATE ${await businessTableOf(adminDataSource, 'shift', shiftId)} SET starts_at = now() + $2::interval, ends_at = now() + $3::interval WHERE id = $1 RETURNING starts_at, ends_at`,
       [shiftId, startOffset, endOffset],
     );
-    await adminDataSource.query(`UPDATE core.shift_assignment SET period = tstzrange($2::timestamptz, $3::timestamptz, '[)') WHERE shift_id = $1`, [shiftId, row.starts_at, row.ends_at]);
+    await adminDataSource.query(`UPDATE ${siblingTable(await businessTableOf(adminDataSource, 'shift', shiftId), 'shift_assignment')} SET period = tstzrange($2::timestamptz, $3::timestamptz, '[)') WHERE shift_id = $1`, [shiftId, row.starts_at, row.ends_at]);
     return { startsAt: row.starts_at, endsAt: row.ends_at };
   }
 
@@ -696,7 +696,7 @@ describeIfDb('attendance abuse cases (integration)', () => {
       const res = await b.clockOutWith(printed);
       expect(res.status).toBe(409);
       expect(res.body.code).toBe('CLOCK_WINDOW_CLOSED');
-      const [row] = await adminDataSource.query(`SELECT status, clock_out_at FROM core.attendance WHERE shift_id = $1`, [b.shiftId]);
+      const [row] = await adminDataSource.query(`SELECT status, clock_out_at FROM ${siblingTable(await businessTableOf(adminDataSource, 'shift', b.shiftId), 'attendance')} WHERE shift_id = $1`, [b.shiftId]);
       expect(row).toMatchObject({ status: 'clocked_in', clock_out_at: null });
     });
 
@@ -723,12 +723,12 @@ describeIfDb('attendance abuse cases (integration)', () => {
       const shiftId = await makeAndPublishShift(organisation, venue, managerToken);
       await confirmShiftForStaff(managerToken, staffToken, staff.staffProfileId, shiftId);
       const oldQr = await signQr(organisation, venue.workspaceId ?? null, managerUserId, shiftId);
-      const [before] = await adminDataSource.query(`SELECT qr_version, updated_at FROM core.shift WHERE id = $1`, [shiftId]);
+      const [before] = await adminDataSource.query(`SELECT qr_version, updated_at FROM ${await businessTableOf(adminDataSource, 'shift', shiftId)} WHERE id = $1`, [shiftId]);
 
       const res = await rotate(managerToken, shiftId);
       expect(res.status).toBe(201);
       expect(res.body.qrVersion).toBe(before.qr_version + 1);
-      const [after] = await adminDataSource.query(`SELECT qr_version, updated_at FROM core.shift WHERE id = $1`, [shiftId]);
+      const [after] = await adminDataSource.query(`SELECT qr_version, updated_at FROM ${await businessTableOf(adminDataSource, 'shift', shiftId)} WHERE id = $1`, [shiftId]);
       expect(after.qr_version).toBe(before.qr_version + 1);
       expect(after.updated_at.getTime()).toBeGreaterThan(before.updated_at.getTime()); // the pre-shift report regenerates
       const [audit] = await adminDataSource.query(
@@ -749,11 +749,11 @@ describeIfDb('attendance abuse cases (integration)', () => {
       const staffToken = await login(staff.email, true);
       const shiftId = await makeAndPublishShift(organisation, venue, managerToken);
       expect((await rotate(staffToken, shiftId)).status).toBe(403);
-      const staffUserId = (await adminDataSource.query(`SELECT user_id FROM core.staff_profile WHERE id = $1`, [staff.staffProfileId]))[0].user_id;
+      const staffUserId = (await adminDataSource.query(`SELECT user_id FROM ${await businessTableOf(adminDataSource, 'staff_profile', staff.staffProfileId)} WHERE id = $1`, [staff.staffProfileId]))[0].user_id;
       await expect(
         schedulingService.rotateShiftQr({ organisationId: organisation.id, workspaceId: venue.workspaceId ?? null, userId: staffUserId, role: '' }, shiftId),
       ).rejects.toBeInstanceOf(ForbiddenException);
-      const [row] = await adminDataSource.query(`SELECT qr_version FROM core.shift WHERE id = $1`, [shiftId]);
+      const [row] = await adminDataSource.query(`SELECT qr_version FROM ${await businessTableOf(adminDataSource, 'shift', shiftId)} WHERE id = $1`, [shiftId]);
       expect(row.qr_version).toBe(1);
     });
 
@@ -765,7 +765,7 @@ describeIfDb('attendance abuse cases (integration)', () => {
       const bToken = await login(b.managerEmail);
       expect((await rotate(bToken, shiftId)).status).toBe(404);
       expect((await rotate(bToken, randomUUID())).status).toBe(404);
-      const [row] = await adminDataSource.query(`SELECT qr_version FROM core.shift WHERE id = $1`, [shiftId]);
+      const [row] = await adminDataSource.query(`SELECT qr_version FROM ${await businessTableOf(adminDataSource, 'shift', shiftId)} WHERE id = $1`, [shiftId]);
       expect(row.qr_version).toBe(1);
     });
 
@@ -779,11 +779,11 @@ describeIfDb('attendance abuse cases (integration)', () => {
       expect(r1.status).toBe(409);
       expect(r1.body.code).toBe('SHIFT_CLOSED');
       const completed = await makeAndPublishShift(organisation, venue, managerToken);
-      await adminDataSource.query(`UPDATE core.shift SET status = 'completed' WHERE id = $1`, [completed]); // fixture: the worker completes shifts
+      await adminDataSource.query(`UPDATE ${await businessTableOf(adminDataSource, 'shift', completed)} SET status = 'completed' WHERE id = $1`, [completed]); // fixture: the worker completes shifts
       const r2 = await rotate(managerToken, completed);
       expect(r2.status).toBe(409);
       expect(r2.body.code).toBe('SHIFT_CLOSED');
-      const rows = await adminDataSource.query(`SELECT qr_version FROM core.shift WHERE id = ANY($1) ORDER BY qr_version`, [[cancelled, completed]]);
+      const rows = await adminDataSource.query(`SELECT qr_version FROM ${await businessTableOf(adminDataSource, 'shift', cancelled)} WHERE id = ANY($1) ORDER BY qr_version`, [[cancelled, completed]]);
       expect(rows.map((r: { qr_version: number }) => r.qr_version)).toEqual([1, 1]);
     });
   });
@@ -923,20 +923,20 @@ describeIfDb('attendance abuse cases (integration)', () => {
         const res = await b.exit();
         expect(res.status).toBe(409);
         expect(res.body.code).toBe('CLOCK_WINDOW_CLOSED');
-        const [row] = await adminDataSource.query(`SELECT status, clock_out_at FROM core.attendance WHERE shift_id = $1`, [b.shiftId]);
+        const [row] = await adminDataSource.query(`SELECT status, clock_out_at FROM ${siblingTable(await businessTableOf(adminDataSource, 'shift', b.shiftId), 'attendance')} WHERE shift_id = $1`, [b.shiftId]);
         expect(row).toMatchObject({ status: 'clocked_in', clock_out_at: null });
       });
 
       it('own end earlier than the shift end: refused after the staff member OWN end + grace while the shift still runs', async () => {
         const b = await clockedInAtVenue();
         // The shift runs for another hour; this staff member's own seat ended 121 minutes ago.
-        await adminDataSource.query(`UPDATE core.shift SET starts_at = now() - interval '9 hours', ends_at = now() + interval '1 hour' WHERE id = $1`, [b.shiftId]);
+        await adminDataSource.query(`UPDATE ${await businessTableOf(adminDataSource, 'shift', b.shiftId)} SET starts_at = now() - interval '9 hours', ends_at = now() + interval '1 hour' WHERE id = $1`, [b.shiftId]);
         await adminDataSource.query(
-          `UPDATE core.shift_assignment SET period = tstzrange(now() - interval '9 hours', now() - interval '121 minutes', '[)') WHERE shift_id = $1`, [b.shiftId]);
+          `UPDATE ${siblingTable(await businessTableOf(adminDataSource, 'shift', b.shiftId), 'shift_assignment')} SET period = tstzrange(now() - interval '9 hours', now() - interval '121 minutes', '[)') WHERE shift_id = $1`, [b.shiftId]);
         const res = await b.exit();
         expect(res.status).toBe(409);
         expect(res.body.code).toBe('CLOCK_WINDOW_CLOSED');
-        const [row] = await adminDataSource.query(`SELECT status, clock_out_at FROM core.attendance WHERE shift_id = $1`, [b.shiftId]);
+        const [row] = await adminDataSource.query(`SELECT status, clock_out_at FROM ${siblingTable(await businessTableOf(adminDataSource, 'shift', b.shiftId), 'attendance')} WHERE shift_id = $1`, [b.shiftId]);
         expect(row).toMatchObject({ status: 'clocked_in', clock_out_at: null });
       });
 
