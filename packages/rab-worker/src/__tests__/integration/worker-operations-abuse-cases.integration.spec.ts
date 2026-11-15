@@ -5,6 +5,7 @@ import { Test } from '@nestjs/testing';
 import { randomUUID } from 'node:crypto';
 import { DataSource } from 'typeorm';
 
+import { EnvironmentService } from '@rab/server/engine/core-modules/environment/environment.service';
 import { AppModule } from '@rab/server/app.module';
 import { AuditService } from '@rab/server/engine/core-modules/audit/audit.service';
 import { AUTH_TOKEN_CLEANUP_RETENTION_DAYS } from '@rab/server/engine/core-modules/auth/token/retention-policy';
@@ -25,6 +26,8 @@ import { toTstzRange } from '@rab/server/modules/scheduling/utils/tstzrange';
 import { StaffProfile } from '@rab/server/modules/staff/entities/staff-profile.entity';
 import { Venue } from '@rab/server/modules/venue/entities/venue.entity';
 import { Attendance } from '@rab/server/modules/attendance/entities/attendance.entity';
+import { AttendanceService } from '@rab/server/modules/attendance/services/attendance.service';
+import { AttendanceQrService } from '@rab/server/modules/attendance/services/attendance-qr.service';
 import { runShiftMonitorCycle } from '../../queues/rab-shifts/shift-monitor.job';
 import { runAttendanceMonitorCycle } from '../../queues/rab-shifts/attendance-monitor.job';
 import { runOfferExpiryCycle } from '../../queues/rab-offers/offer-expiry.job';
@@ -68,6 +71,8 @@ describeIfDb('worker operations abuse cases (integration)', () => {
   let tenantContext: TenantContextService;
   let auditService: AuditService;
   let notificationService: NotificationService;
+  let attendanceService: AttendanceService;
+  let attendanceQr: AttendanceQrService;
 
   interface OrgFixture {
     organisationId: string;
@@ -218,6 +223,8 @@ describeIfDb('worker operations abuse cases (integration)', () => {
     tenantContext = app.get(TenantContextService);
     auditService = app.get(AuditService);
     notificationService = app.get(NotificationService);
+    attendanceService = app.get(AttendanceService);
+    attendanceQr = app.get(AttendanceQrService);
     adminDataSource = createAdminDataSource();
     await adminDataSource.initialize();
   });
@@ -404,7 +411,7 @@ describeIfDb('worker operations abuse cases (integration)', () => {
         clockInAt: startsAt, status: AttendanceStatus.CLOCKED_IN });
       attendanceId = attendance.id;
     });
-    await runAttendanceMonitorCycle(adminDataSource, tenantContext, notificationService, auditService);
+    await runAttendanceMonitorCycle(adminDataSource, tenantContext, notificationService, auditService, app.get(EnvironmentService).get('QR_POST_SHIFT_GRACE_MINUTES'));
     await runShiftMonitorCycle(adminDataSource, tenantContext, notificationService, auditService, 0);
     await withContext(ctx, async m => {
       expect((await m.findOneByOrFail(Attendance, { id: attendanceId })).status).toBe(AttendanceStatus.CLOCKED_IN);
@@ -416,10 +423,10 @@ describeIfDb('worker operations abuse cases (integration)', () => {
   });
 
   describe('attendance monitor — missing clock-out (status label only, never auto-clocks-out)', () => {
-    it('an active attendance row whose shift ended 40 minutes ago is flagged (status -> missing_clock_out) and notified, but clockOutAt/workedMinutes/earnedPence are left completely untouched', async () => {
+    it('an active attendance row whose shift ended 150 minutes ago (past the 120-min clock-out grace) is flagged (status -> missing_clock_out) and notified, but clockOutAt/workedMinutes/earnedPence are left completely untouched', async () => {
       const fx = await seedOrgFixture('missclock');
       const startsAt = new Date(Date.now() - 9 * 3600 * 1000);
-      const endsAt = new Date(Date.now() - 40 * 60 * 1000);
+      const endsAt = new Date(Date.now() - 150 * 60 * 1000);
       const { shiftId, assignmentId } = await seedConfirmedAssignment(fx, startsAt, endsAt);
       let attendanceId!: string;
       await withContext({ organisationId: fx.organisationId, workspaceId: fx.workspaceId, userId: fx.managerUserId }, async (m) => {
@@ -435,7 +442,7 @@ describeIfDb('worker operations abuse cases (integration)', () => {
         attendanceId = attendance.id;
       });
 
-      await runAttendanceMonitorCycle(adminDataSource, tenantContext, notificationService, auditService);
+      await runAttendanceMonitorCycle(adminDataSource, tenantContext, notificationService, auditService, app.get(EnvironmentService).get('QR_POST_SHIFT_GRACE_MINUTES'));
 
       const attendanceAfter = await withContext({ organisationId: fx.organisationId, workspaceId: fx.workspaceId, userId: fx.managerUserId }, (m) =>
         m.findOneByOrFail(Attendance, { id: attendanceId }),
@@ -454,11 +461,123 @@ describeIfDb('worker operations abuse cases (integration)', () => {
       expect(notified).toHaveLength(1);
 
       // Re-run: must not duplicate the flag.
-      await runAttendanceMonitorCycle(adminDataSource, tenantContext, notificationService, auditService);
+      await runAttendanceMonitorCycle(adminDataSource, tenantContext, notificationService, auditService, app.get(EnvironmentService).get('QR_POST_SHIFT_GRACE_MINUTES'));
       const notifiedAgain = await withContext({ organisationId: fx.organisationId, workspaceId: fx.workspaceId, userId: fx.managerUserId }, (m) =>
         m.find(Notification, { where: { relatedEntityType: 'attendance', relatedEntityId: attendanceId, type: NotificationType.ATTENDANCE_MISSING_CLOCK_OUT } }),
       );
       expect(notifiedAgain).toHaveLength(1);
+    });
+  });
+
+  // Owner decision 2026-11-14: ONE clock-out grace (QR_POST_SHIFT_GRACE_MINUTES, 120) measured from the staff member's
+  // OWN end. The staff member can clock out (QR + window) until own end + grace inclusive; the monitor flags
+  // MISSING_CLOCK_OUT only strictly after it. Real AttendanceService.clockOut (service layer, RLS on) with a real QR,
+  // real monitor cycle. Server time is modelled by moving the seat's window (the server clock is never touched).
+  describe('clock-out grace end to end (monitor + staff clock-out share one 120-min grace)', () => {
+    const MIN = 60_000;
+    const grace = () => app.get(EnvironmentService).get('QR_POST_SHIFT_GRACE_MINUTES');
+    const monitor = () => runAttendanceMonitorCycle(adminDataSource, tenantContext, notificationService, auditService, grace());
+
+    /** Another staff member in the same organisation/workspace (a second seat cannot reuse the first staff profile). */
+    async function seedExtraStaff(fx: OrgFixture, label: string): Promise<{ staffProfileId: string; staffUserId: string }> {
+      return withContext({ organisationId: fx.organisationId, workspaceId: fx.workspaceId, userId: fx.managerUserId }, async (m) => {
+        const user = await m.insert(User, {
+          organisationId: fx.organisationId, email: `${label}-${randomUUID()}@example.test`, passwordHash: await passwordHashing.hash(FIXTURE_PASSWORD),
+          firstName: label, lastName: 'Staff', status: UserStatus.ACTIVE,
+        });
+        const staffUserId = user.identifiers[0]!.id as string;
+        const staffRole = await m.findOneByOrFail(Role, { organisationId: fx.organisationId, key: 'staff' });
+        await m.insert(UserRole, { userId: staffUserId, roleId: staffRole.id, organisationId: fx.organisationId });
+        const profile = await m.save(StaffProfile, { organisationId: fx.organisationId, userId: staffUserId, staffRef: `STF-${label}-${randomUUID().slice(0, 8)}`, createdBy: fx.managerUserId, workspaceId: fx.workspaceId });
+        return { staffProfileId: profile.id, staffUserId };
+      });
+    }
+
+    /** A clocked-in seat for `staffProfileId` on `shiftId` with its own period (check-in not required, legacy rollout flag). */
+    async function clockedInSeat(fx: OrgFixture, shiftId: string, staffProfileId: string, startsAt: Date, endsAt: Date): Promise<{ attendanceId: string }> {
+      return withContext({ organisationId: fx.organisationId, workspaceId: fx.workspaceId, userId: fx.managerUserId }, async (m) => {
+        const assignment = await m.save(ShiftAssignment, {
+          organisationId: fx.organisationId, shiftId, staffProfileId, status: ShiftAssignmentStatus.CONFIRMED, payRateSnapshotPence: 1500,
+          assignedBy: fx.managerUserId, confirmedAt: new Date(), period: toTstzRange(startsAt, endsAt), workspaceId: fx.workspaceId, checkInRequired: false,
+        });
+        const attendance = await m.save(Attendance, {
+          organisationId: fx.organisationId, workspaceId: fx.workspaceId, shiftId, shiftAssignmentId: assignment.id, staffProfileId,
+          clockInAt: new Date(startsAt.getTime() + 5 * MIN), status: AttendanceStatus.CLOCKED_IN,
+        });
+        return { attendanceId: attendance.id };
+      });
+    }
+
+    async function shiftRow(fx: OrgFixture, startsAt: Date, endsAt: Date): Promise<Shift> {
+      return withContext({ organisationId: fx.organisationId, workspaceId: fx.workspaceId, userId: fx.managerUserId }, (m) =>
+        m.save(Shift, {
+          organisationId: fx.organisationId, venueId: fx.venueId, jobRoleId: fx.jobRoleId, startsAt, endsAt, breakMinutes: 0, requiredCount: 2,
+          payRatePence: 1500, status: 'in_progress', createdBy: fx.managerUserId, workspaceId: fx.workspaceId,
+        }),
+      );
+    }
+
+    const staffCtx = (fx: OrgFixture, staffUserId: string) => ({ organisationId: fx.organisationId, workspaceId: fx.workspaceId, userId: staffUserId, role: 'staff' });
+    const statusOf = (fx: OrgFixture, attendanceId: string) =>
+      withContext({ organisationId: fx.organisationId, workspaceId: fx.workspaceId, userId: fx.managerUserId }, async (m) => (await m.findOneByOrFail(Attendance, { id: attendanceId })).status);
+
+    it('the monitor runs at own end + 100 min and leaves the row open; the staff clock-out with the shift QR then works', async () => {
+      const fx = await seedOrgFixture('grace100');
+      const endsAt = new Date(Date.now() - 100 * MIN);
+      const startsAt = new Date(endsAt.getTime() - 8 * 60 * MIN);
+      const shift = await shiftRow(fx, startsAt, endsAt);
+      const { attendanceId } = await clockedInSeat(fx, shift.id, fx.staffProfileId, startsAt, endsAt);
+      await monitor();
+      expect(await statusOf(fx, attendanceId)).toBe(AttendanceStatus.CLOCKED_IN); // not flagged inside the grace
+      const res = await attendanceService.clockOut(staffCtx(fx, fx.staffUserId), { qrToken: attendanceQr.sign(shift) } as never);
+      expect(res.status).toBe(AttendanceStatus.CLOCKED_OUT);
+    });
+
+    it('at own end + 121 min the staff clock-out is refused (CLOCK_WINDOW_CLOSED) and the monitor then flags MISSING_CLOCK_OUT', async () => {
+      const fx = await seedOrgFixture('grace121');
+      const endsAt = new Date(Date.now() - 121 * MIN);
+      const startsAt = new Date(endsAt.getTime() - 8 * 60 * MIN);
+      const shift = await shiftRow(fx, startsAt, endsAt);
+      const { attendanceId } = await clockedInSeat(fx, shift.id, fx.staffProfileId, startsAt, endsAt);
+      await expect(attendanceService.clockOut(staffCtx(fx, fx.staffUserId), { qrToken: attendanceQr.sign(shift) } as never))
+        .rejects.toMatchObject({ response: { code: 'CLOCK_WINDOW_CLOSED' } });
+      expect(await statusOf(fx, attendanceId)).toBe(AttendanceStatus.CLOCKED_IN);
+      await monitor();
+      expect(await statusOf(fx, attendanceId)).toBe(AttendanceStatus.MISSING_CLOCK_OUT);
+      // After the flag there is no open attendance for the staff member: the clock-out is the manager's recovery now.
+      await expect(attendanceService.clockOut(staffCtx(fx, fx.staffUserId), { qrToken: attendanceQr.sign(shift) } as never)).rejects.toMatchObject({ status: 404 });
+    });
+
+    it('two seats: seat A (ends earlier) is refused after A end + grace and flagged, while seat B on the same shift is still accepted', async () => {
+      const fx = await seedOrgFixture('graceseats');
+      const shiftEnd = new Date(Date.now() - 30 * MIN);
+      const shiftStart = new Date(shiftEnd.getTime() - 9 * 60 * MIN);
+      const seatAEnd = new Date(Date.now() - 125 * MIN); // A's own end + 120 min passed 5 min ago
+      const shift = await shiftRow(fx, shiftStart, shiftEnd);
+      const b = await seedExtraStaff(fx, 'seatb');
+      const seatA = await clockedInSeat(fx, shift.id, fx.staffProfileId, shiftStart, seatAEnd);
+      const seatB = await clockedInSeat(fx, shift.id, b.staffProfileId, shiftStart, shiftEnd);
+      const qrToken = attendanceQr.sign(shift);
+
+      await monitor();
+      expect(await statusOf(fx, seatA.attendanceId)).toBe(AttendanceStatus.MISSING_CLOCK_OUT); // flagged from A's own end
+      expect(await statusOf(fx, seatB.attendanceId)).toBe(AttendanceStatus.CLOCKED_IN);
+      await expect(attendanceService.clockOut(staffCtx(fx, fx.staffUserId), { qrToken } as never)).rejects.toMatchObject({ status: 404 });
+      const outB = await attendanceService.clockOut(staffCtx(fx, b.staffUserId), { qrToken } as never);
+      expect(outB.status).toBe(AttendanceStatus.CLOCKED_OUT);
+    });
+
+    it('two seats, no monitor yet: seat A clock-out is refused by its own window while seat B is accepted', async () => {
+      const fx = await seedOrgFixture('graceseatsnomon');
+      const shiftEnd = new Date(Date.now() - 30 * MIN);
+      const shiftStart = new Date(shiftEnd.getTime() - 9 * 60 * MIN);
+      const shift = await shiftRow(fx, shiftStart, shiftEnd);
+      const b = await seedExtraStaff(fx, 'seatb2');
+      await clockedInSeat(fx, shift.id, fx.staffProfileId, shiftStart, new Date(Date.now() - 121 * MIN));
+      await clockedInSeat(fx, shift.id, b.staffProfileId, shiftStart, shiftEnd);
+      const qrToken = attendanceQr.sign(shift);
+      await expect(attendanceService.clockOut(staffCtx(fx, fx.staffUserId), { qrToken } as never)).rejects.toMatchObject({ response: { code: 'CLOCK_WINDOW_CLOSED' } });
+      await expect(attendanceService.clockOut(staffCtx(fx, b.staffUserId), { qrToken } as never)).resolves.toMatchObject({ status: AttendanceStatus.CLOCKED_OUT });
     });
   });
 

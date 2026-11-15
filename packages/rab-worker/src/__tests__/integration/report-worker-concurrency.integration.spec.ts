@@ -27,6 +27,8 @@ import { runShiftReportSchedulerCycle } from '../../queues/rab-reports/shift-rep
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
 import { integrationTestDatabaseReady } from '@rab/server/database/typeorm/core/integration-test-database-gate';
+import { extractPdf } from '../pdf-equality/extract';
+import { ROTATE_SHIFT_QR_LOCK_SQL, ROTATE_SHIFT_QR_UPDATE_SQL } from '@rab/server/modules/scheduling/services/rotate-shift-qr.sql';
 
 /**
  * MULTI-WORKER SAFETY of the two report jobs. Two worker instances discover
@@ -403,6 +405,129 @@ describeIfDb('report worker multi-instance concurrency (integration)', () => {
     }
     for (const table of [...protectedTables,'stored_file']) expect(await dataSource.query(`SELECT id FROM core.${table}`)).toEqual([]);
   },180_000);
+
+  // QR review M1: a manager rotating the Shift QR while the pre-shift PDF renders must never ship (or store) the revoked QR.
+  it('PRE-SHIFT M1: a QR rotation during the render discards that render (no email, file not replaced); the next tick ships the new QR', async () => {
+    const f = await seedFixture();
+    const shiftId = f.shiftIds[0];
+    const ctx = { organisationId: f.organisation.id, workspaceId: f.workspaceId, userId: f.owner.userId, role: '' };
+    const reportRow = () => tenantContext.runInTenantContext(ctx, async (m) => (await m.query(`SELECT pre_shift_file_id FROM core.shift_report WHERE shift_id = $1`, [shiftId]))[0]);
+    const qrVerOf = (pdf: Buffer): number => {
+      const payloads = extractPdf(pdf).qrPayloads;
+      expect(payloads).toHaveLength(1);
+      return JSON.parse(Buffer.from(payloads[0]!.split('.')[1]!, 'base64url').toString('utf8')).ver as number;
+    };
+
+    // Tick 1: an ordinary generation with QR version 1.
+    expect((await runScheduler(f.organisation.id)).generated).toBe(1);
+    const first = await reportRow();
+    expect(await outboxRows(f.organisation.id, f.workspaceId, f.owner.userId)).toHaveLength(1);
+    expect(qrVerOf(await readStoredFile(f, first.pre_shift_file_id))).toBe(1);
+
+    // An ordinary shift edit makes the report stale; tick 2 re-renders, and the QR is rotated WHILE it renders.
+    await adminDataSource.query(`UPDATE core.shift SET updated_at = clock_timestamp() WHERE id = $1`, [shiftId]);
+    const original = storage.putObject.bind(storage);
+    const spy = jest.spyOn(storage, 'putObject').mockImplementation(async (params) => {
+      const uploaded = await original(params);
+      await adminDataSource.query(`UPDATE core.shift SET qr_version = qr_version + 1, updated_at = clock_timestamp() WHERE id = $1`, [shiftId]);
+      return uploaded;
+    });
+    let second;
+    try {
+      second = await runScheduler(f.organisation.id);
+    } finally {
+      spy.mockRestore();
+    }
+    expect(second).toMatchObject({ generated: 0, failed: 0 });
+    expect(await outboxRows(f.organisation.id, f.workspaceId, f.owner.userId)).toHaveLength(1); // no email with the revoked QR
+    expect((await reportRow()).pre_shift_file_id).toBe(first.pre_shift_file_id); // the stored file was not replaced
+
+    // Tick 3: the report is still stale, so it is rebuilt from the current row: the shipped QR is version 2.
+    expect((await runScheduler(f.organisation.id)).generated).toBe(1);
+    const rows = await outboxRows(f.organisation.id, f.workspaceId, f.owner.userId);
+    expect(rows).toHaveLength(2);
+    const third = await reportRow();
+    expect(third.pre_shift_file_id).not.toBe(first.pre_shift_file_id);
+    expect(qrVerOf(await readStoredFile(f, third.pre_shift_file_id))).toBe(2);
+    expect(qrVerOf(await readStoredFile(f, rows[1].attachment_file_id))).toBe(2);
+    // And it is now fresh: another tick does nothing.
+    expect((await runScheduler(f.organisation.id)).generated).toBe(0);
+  }, 180_000);
+
+  // QR review M1, the lock-wait case: a rotation whose transaction STARTED before the scheduler's write transaction but
+  // whose write waited on the scheduler's FOR SHARE lock must still make the report stale. It replays rotateShiftQr's own
+  // statements (rotate-shift-qr.sql.ts). With `updated_at = now()` (the rotation's transaction start, earlier than the
+  // report's stamp) the next tick would see the report as fresh and keep shipping the revoked QR: this test fails then.
+  it('PRE-SHIFT M1 lock-wait: a rotation that waited on the report write lock still triggers regeneration with the new QR', async () => {
+    const f = await seedFixture();
+    const shiftId = f.shiftIds[0];
+    const ctx = { organisationId: f.organisation.id, workspaceId: f.workspaceId, userId: f.owner.userId, role: '' };
+    const reportFileId = async (): Promise<string> =>
+      tenantContext.runInTenantContext(ctx, async (m) => (await m.query(`SELECT pre_shift_file_id FROM core.shift_report WHERE shift_id = $1`, [shiftId]))[0].pre_shift_file_id);
+    const qrVerOf = (pdf: Buffer): number => {
+      const payloads = extractPdf(pdf).qrPayloads;
+      expect(payloads).toHaveLength(1);
+      return JSON.parse(Buffer.from(payloads[0]!.split('.')[1]!, 'base64url').toString('utf8')).ver as number;
+    };
+
+    expect((await runScheduler(f.organisation.id)).generated).toBe(1); // version 1 shipped
+    await adminDataSource.query(`UPDATE core.shift SET updated_at = clock_timestamp() WHERE id = $1`, [shiftId]); // stale: tick 2 re-renders
+    const [{ status }] = await adminDataSource.query(`SELECT status FROM core.shift WHERE id = $1`, [shiftId]);
+
+    const rotation = adminDataSource.createQueryRunner();
+    await rotation.connect();
+    const [{ pid: rotationPid }] = await rotation.query(`SELECT pg_backend_pid() AS pid`);
+    let rotated: Promise<unknown> | null = null;
+    const originalPut = storage.putObject.bind(storage);
+    const putSpy = jest.spyOn(storage, 'putObject').mockImplementation(async (params) => {
+      const uploaded = await originalPut(params);
+      // 1. The rotation transaction starts NOW, before the scheduler's write transaction: its now() is the earlier one.
+      await rotation.startTransaction();
+      await rotation.query(`SELECT 1`);
+      await rotation.query(`SET LOCAL search_path TO core, public`);
+      return uploaded;
+    });
+    const originalEnqueue = emailOutbox.enqueue.bind(emailOutbox);
+    const enqueueSpy = jest.spyOn(emailOutbox, 'enqueue').mockImplementation(async (manager, params) => {
+      if (!rotated) {
+        // 2. Inside the scheduler's write transaction (it holds the shift FOR SHARE): fire the rotation, do not await it.
+        rotated = (async () => {
+          await rotation.query(ROTATE_SHIFT_QR_LOCK_SQL, [shiftId]);
+          return rotation.query(ROTATE_SHIFT_QR_UPDATE_SQL, [shiftId, 1, status]);
+        })();
+        // 3. Until it is really waiting on the row lock (this database, this backend only).
+        const deadline = Date.now() + 20_000;
+        for (;;) {
+          const rows = await adminDataSource.query(
+            `SELECT wait_event_type FROM pg_stat_activity WHERE datname = current_database() AND pid = $1`, [rotationPid]);
+          if (rows[0]?.wait_event_type === 'Lock') break;
+          if (Date.now() > deadline) throw new Error('the rotation never waited on the shift row lock');
+          await new Promise((r) => setTimeout(r, 50));
+        }
+      }
+      return originalEnqueue(manager, params);
+    });
+    try {
+      // 4. The scheduler commits (it checked version 1 before the rotation could write), then the rotation commits.
+      expect((await runScheduler(f.organisation.id)).generated).toBe(1);
+      expect(rotated).not.toBeNull();
+      await rotated;
+      await rotation.commitTransaction();
+    } finally {
+      putSpy.mockRestore();
+      enqueueSpy.mockRestore();
+      if (rotation.isTransactionActive) await rotation.rollbackTransaction();
+      await rotation.release();
+    }
+    const [{ qr_version: version }] = await adminDataSource.query(`SELECT qr_version FROM core.shift WHERE id = $1`, [shiftId]);
+    expect(version).toBe(2);
+
+    // 5. The report is stale again (the rotation's updated_at is after its stamp): the next tick ships version 2.
+    expect((await runScheduler(f.organisation.id)).generated).toBe(1);
+    expect(qrVerOf(await readStoredFile(f, await reportFileId()))).toBe(2);
+    const rows = await outboxRows(f.organisation.id, f.workspaceId, f.owner.userId);
+    expect(qrVerOf(await readStoredFile(f, rows[rows.length - 1].attachment_file_id))).toBe(2);
+  }, 180_000);
 
   it('PRE-01: readiness lost while rendering discards the original and leaves no file/event publication', async () => {
     const f=await seedFixture(); const shiftId=f.shiftIds[0];
