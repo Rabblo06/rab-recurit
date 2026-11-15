@@ -214,6 +214,11 @@ export function planConnectionBudget(shape: DeploymentShape): BudgetPlan {
       runtimeRole: true,
       workerLogin: true,
     },
+    // The migrate child runs in an API container BEFORE that container's main.js opens its pool (api-prestart.sh), so
+    // while it runs it uses slots its own instance's pool and /healthz probe do not. Counting it once on top of every
+    // pool is therefore enough ONLY while migrateConnections <= apiPoolMax + 1: then every API instance's child (several
+    // can start at once in a rolling deploy; one migrates under the lock, the others wait) fits inside its own
+    // instance's unused slots, and this row is headroom. Defaults: 5 <= 10 + 1; the runtime.env template: 5 <= 9 + 1.
     {
       item: 'API migrate-on-start child',
       each: shape.migrateConnections,

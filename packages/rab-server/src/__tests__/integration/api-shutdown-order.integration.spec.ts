@@ -97,11 +97,16 @@ describeIfDb('XR-09 API shutdown order: HTTP stops before the Redis clients quit
     expect(warm.status).toBe(204);
 
     // A request already in flight when SIGTERM arrives (forgot-password holds a 150 ms response floor).
-    const received = new Promise<void>((resolve) => server.once('request', () => resolve()));
-    const inFlight = postJson(port, '/rest/v1/auth/forgot-password', { email: 'xr09-in-flight@example.test' }).then((reply) => {
-      events.push(`in-flight response ${reply.status}`);
-      return reply;
-    });
+    // The order is recorded on the SERVER side, when the response is finished (handed to the socket): the drain waits for
+    // that response's 'close', which follows 'finish', so this event always precedes app.close(). The client's own 'end'
+    // could arrive after the Redis clients quit and would make the order racy.
+    const received = new Promise<void>((resolve) =>
+      server.once('request', (_req, res: import('node:http').ServerResponse) => {
+        res.once('finish', () => events.push(`in-flight response ${res.statusCode}`));
+        resolve();
+      }),
+    );
+    const inFlight = postJson(port, '/rest/v1/auth/forgot-password', { email: 'xr09-in-flight@example.test' });
     await received;
 
     const done = handle.shutdown('SIGTERM');

@@ -416,7 +416,7 @@ async function bootstrap(): Promise<void> {
   // value refuses to start.
   const shutdownTimeoutMs = (() => {
     try {
-      return parseWorkerShutdownTimeoutMs(environmentService.get('WORKER_SHUTDOWN_TIMEOUT_MS' as never));
+      return parseWorkerShutdownTimeoutMs(environmentService.get('WORKER_SHUTDOWN_TIMEOUT_MS'));
     } catch (error) {
       return refuseStartup(error);
     }

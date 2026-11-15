@@ -64,7 +64,7 @@ Boot fails if every provider is disabled, or if enabling a provider leaves its c
 
 ## Worker shutdown
 
-`WORKER_SHUTDOWN_TIMEOUT_MS` (default 30000) is how long the Worker waits, after SIGTERM, for its active jobs and in-flight cycles before it exits anyway. It must be a plain integer from 1000 to 34000: the drain plus the Worker's 10-second hard-exit margin has to end inside the Worker's `stop_grace_period: 45s`, or Docker kills a job mid-drain. Anything else, including a value with a unit such as `30s`, refuses to boot.
+`WORKER_SHUTDOWN_TIMEOUT_MS` (default 30000) is how long the Worker waits, after SIGTERM, for its active jobs and in-flight cycles before it exits anyway. It must be a plain integer from 1000 to 34000: the drain plus the Worker's 10-second hard-exit margin has to end inside the Worker's `stop_grace_period: 45s`, or Docker kills a job mid-drain. Anything else refuses to boot, including a value with a unit such as `30s` and a value with a trailing carriage return (`30000\r`, from an env file saved with Windows CRLF line endings).
 
 ## Feature flags (all default `false`)
 

@@ -14,19 +14,31 @@ import type { IncomingMessage, Server, ServerResponse } from 'node:http';
  *   1. `server.close()`: no new connection is accepted (a client gets a connection refusal and retries another replica);
  *      Node also closes idle keep-alive sockets at once, and every response still to be sent says `Connection: close`.
  *   2. Wait, at most `drainMs`, until every response still in flight has finished. Server-sent-event streams
- *      (`text/event-stream`, the realtime gateway and the AI stream) never finish on their own and are not waited for.
+ *      (`text/event-stream`) are not waited for: the realtime gateway's stream never ends on its own, and an AI answer
+ *      stream may outlast the drain; its client resumes from `Last-Event-ID` on another replica.
  *   3. `server.closeAllConnections()`: ends the streams (their clients reconnect elsewhere) and any request still running
  *      at the deadline.
  *   4. `app.close()`: Nest's own hooks, Redis/queue clients included, now that no request can reach them. Its HTTP close
  *      finds the server already closed and resolves at once.
  *   5. The signal is re-raised with no handler installed, exactly as Nest's shutdown hooks do, so the exit status is the
  *      same as before (128 + the signal number; tini is PID 1 in the image).
+ * A 35 s backstop (HTTP_SHUTDOWN_HARD_EXIT_MS) exits 1 if steps 1-4 hang, before Docker's SIGKILL at 40 s.
  *
  * Crewflow-only fix: Twenty's server keeps Nest's default order.
  */
 
 /** How long in-flight requests may take to finish after the listener stops: 15 s of the API's 40 s stop_grace_period. */
 export const HTTP_SHUTDOWN_DRAIN_MS = 15_000;
+
+/** `stop_grace_period` of the API service in every compose file: Docker sends SIGKILL after it. */
+export const API_STOP_GRACE_PERIOD_MS = 40_000;
+
+/**
+ * Backstop (review of #168): if the whole shutdown (drain + `app.close()`) has not finished 35 s after the signal, the API
+ * logs it and exits 1 on its own, so a hung `app.close()` ends with an explicit outcome 5 s before Docker's SIGKILL at 40 s.
+ * The timer is unref'd: it never keeps the process alive by itself.
+ */
+export const HTTP_SHUTDOWN_HARD_EXIT_MS = 35_000;
 
 const POLL_MS = 25;
 const SHUTDOWN_SIGNALS: readonly NodeJS.Signals[] = ['SIGTERM', 'SIGINT'];
@@ -129,6 +141,8 @@ export interface ShutdownApp {
 
 export interface HttpFirstShutdownOptions {
   drainMs?: number;
+  /** The backstop above. Tests shorten it. */
+  hardExitMs?: number;
   log?: (line: string) => void;
   /** Called with 1 when the shutdown itself fails. Defaults to `process.exit`. */
   exit?: (code: number) => void;
@@ -148,6 +162,7 @@ export interface HttpFirstShutdown {
  */
 export function installHttpFirstShutdown(app: ShutdownApp, options: HttpFirstShutdownOptions = {}): HttpFirstShutdown {
   const drainMs = options.drainMs ?? HTTP_SHUTDOWN_DRAIN_MS;
+  const hardExitMs = options.hardExitMs ?? HTTP_SHUTDOWN_HARD_EXIT_MS;
   // eslint-disable-next-line no-console
   const log = options.log ?? ((line: string) => console.log(line));
   const exit = options.exit ?? ((code: number) => process.exit(code));
@@ -169,6 +184,12 @@ export function installHttpFirstShutdown(app: ShutdownApp, options: HttpFirstShu
   function shutdown(signal: NodeJS.Signals): Promise<void> {
     // A second signal while the first shutdown runs is ignored, as Nest's own hooks do.
     started ??= (async () => {
+      const backstop = setTimeout(() => {
+        // eslint-disable-next-line no-console
+        console.error(`rab-server shutdown did not finish within ${hardExitMs} ms: exiting`);
+        exit(1);
+      }, hardExitMs);
+      backstop.unref();
       try {
         log(`rab-server received ${signal}: HTTP listener closed, draining in-flight requests (up to ${drainMs} ms)`);
         const { drained, closedOpen } = await stopHttpListener(server, inFlight, drainMs);
@@ -178,8 +199,10 @@ export function installHttpFirstShutdown(app: ShutdownApp, options: HttpFirstShu
             : `rab-server: ${closedOpen} request(s) still open after ${drainMs} ms, closed; closing Redis, queue and database clients`,
         );
         await app.close();
+        clearTimeout(backstop);
         reraise(signal);
       } catch (error) {
+        clearTimeout(backstop);
         // eslint-disable-next-line no-console
         console.error('rab-server shutdown failed:', error instanceof Error ? error.message : 'unknown error');
         exit(1);

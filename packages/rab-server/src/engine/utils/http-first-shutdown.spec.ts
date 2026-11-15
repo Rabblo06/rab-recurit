@@ -1,7 +1,16 @@
+import { readFileSync } from 'node:fs';
 import { createServer, request as httpRequest, Server, ServerResponse } from 'node:http';
 import type { AddressInfo } from 'node:net';
+import { join, resolve } from 'node:path';
 
-import { installHttpFirstShutdown, stopHttpListener, trackInFlightResponses } from './http-first-shutdown';
+import {
+  API_STOP_GRACE_PERIOD_MS,
+  HTTP_SHUTDOWN_DRAIN_MS,
+  HTTP_SHUTDOWN_HARD_EXIT_MS,
+  installHttpFirstShutdown,
+  stopHttpListener,
+  trackInFlightResponses,
+} from './http-first-shutdown';
 
 /**
  * XR-09: the API stops its HTTP listener and drains in-flight requests BEFORE the Nest application (and with it the
@@ -277,6 +286,60 @@ describe('HTTP-first API shutdown (XR-09)', () => {
     const added = signals.map((signal, i) => process.listeners(signal).filter((listener) => !before[i]!.includes(listener)));
     expect(added.map((list) => list.length)).toEqual([1, 1]);
     signals.forEach((signal, i) => added[i]!.forEach((listener) => process.removeListener(signal, listener as () => void)));
+  });
+
+  it('a hung app.close() ends in an explicit exit 1 from the backstop, never a re-raise', async () => {
+    const h = await startHarness();
+    let releaseClose!: () => void;
+    h.app.close.mockImplementationOnce(() => new Promise<void>((resolve) => (releaseClose = resolve)));
+    const reraise = jest.fn();
+    const exit = jest.fn();
+    const errorSpy = jest.spyOn(console, 'error').mockImplementation(() => undefined);
+    try {
+      void installHttpFirstShutdown(h.app, { listen: false, reraise, exit, log: () => undefined, drainMs: 50, hardExitMs: 200 }).shutdown('SIGTERM');
+      await waitFor(() => exit.mock.calls.length > 0, 2_000);
+      expect(exit).toHaveBeenCalledWith(1);
+      expect(errorSpy.mock.calls.flat().join(' ')).toMatch(/did not finish within 200 ms/);
+      expect(reraise).not.toHaveBeenCalled();
+    } finally {
+      releaseClose?.();
+      errorSpy.mockRestore();
+    }
+  });
+
+  it('a shutdown that finishes in time never fires the backstop', async () => {
+    const h = await startHarness();
+    const exit = jest.fn();
+    const reraise = jest.fn();
+    await installHttpFirstShutdown(h.app, { listen: false, reraise, exit, log: () => undefined, hardExitMs: 150 }).shutdown('SIGTERM');
+    await new Promise((resolve) => setTimeout(resolve, 250));
+    expect(exit).not.toHaveBeenCalled();
+    expect(reraise).toHaveBeenCalledWith('SIGTERM');
+  });
+
+  it('drain 15 s < backstop 35 s < the API stop_grace_period of 40 s in every committed compose file', () => {
+    expect(HTTP_SHUTDOWN_DRAIN_MS).toBe(15_000);
+    expect(HTTP_SHUTDOWN_DRAIN_MS).toBeLessThan(HTTP_SHUTDOWN_HARD_EXIT_MS);
+    expect(HTTP_SHUTDOWN_HARD_EXIT_MS).toBeLessThan(API_STOP_GRACE_PERIOD_MS);
+    const dockerDir = resolve(__dirname, '../../../../rab-docker');
+    const files: Array<[string, string]> = [
+      ['docker-compose.production.yml', 'rab-api'],
+      ['docker-compose.image.yml', 'rab-api'],
+      ['docker-compose.local-build.yml', 'rab-api'],
+      ['docker-compose.yml', 'server'],
+      ['docker-compose.qa.yml', 'server'],
+    ];
+    for (const [file, service] of files) {
+      const lines = readFileSync(join(dockerDir, file), 'utf8').split(/\r?\n/);
+      const start = lines.findIndex((line) => line === `  ${service}:`);
+      expect({ file, service, found: start >= 0 }).toEqual({ file, service, found: true });
+      const end = lines.findIndex((line, i) => i > start && /^ {0,2}\S/.test(line));
+      const grace = lines
+        .slice(start + 1, end < 0 ? undefined : end)
+        .map((line) => /^\s+stop_grace_period:\s*(\d+)s\s*$/.exec(line))
+        .find(Boolean);
+      expect({ file, service, graceMs: grace ? Number(grace[1]) * 1000 : null }).toEqual({ file, service, graceMs: API_STOP_GRACE_PERIOD_MS });
+    }
   });
 
   it('stopHttpListener on a server that is not listening resolves at once (nothing to drain)', async () => {
