@@ -151,6 +151,47 @@ export function workspaceCoreFkRemovalSql(schemaName: string): string {
     .join(';\n');
 }
 
+const escapeRegExp = (text: string) => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+/**
+ * The frozen workspace template WITHOUT the 72 workspace → core constraints, for `core.provision_workspace` at level 22+ (a new
+ * workspace never gets them). Creating and then dropping them in the provisioning transaction is not equivalent: DROP CONSTRAINT
+ * of a foreign key takes ACCESS EXCLUSIVE on the referenced table (core."user", core.organisation, core.manager_workspace) until
+ * commit, which blocks every request reading those tables while a workspace is created, and deadlocks concurrent creates (CI:
+ * server-path-provisioning-api, 40P01). Pure text transformation of the constant template, fail closed:
+ *   - an `ALTER TABLE <t> ADD CONSTRAINT <name> <definition>;` statement is removed whole;
+ *   - an inline `CONSTRAINT <name> <definition>` item of a CREATE TABLE is removed with its line (and, for the last item, the
+ *     comma of the item before it);
+ *   - every one of the 72 must be removed exactly once, and no reference to the three core tables may remain; otherwise it throws.
+ * `DROP CONSTRAINT IF EXISTS <name>` statements of later modules stay (no-ops). The result builds the same catalog as the 20
+ * modules + level 21 + this command's drops (the declared level-22 fingerprint proves it on every provision).
+ */
+export function withoutWorkspaceCoreForeignKeys(template: string): string {
+  let out = template;
+  for (const fks of Object.values(WORKSPACE_CORE_FOREIGN_KEYS)) {
+    for (const [name, definition] of fks) {
+      // The definition as pg_get_constraintdef printed it; any whitespace run of the template may stand for its single spaces.
+      const def = escapeRegExp(definition).replace(/ /g, '\\s+');
+      const statement = new RegExp(`(?:^|\\n)ALTER TABLE [^;\\n]+ ADD CONSTRAINT "?${name}"?\\s+${def};[ \\t]*(?=\\n|$)`, 'g');
+      const inline = new RegExp(`\\n[ \\t]*CONSTRAINT ${name}\\s+${def}(,?)(?=\\n)`, 'g');
+      const statements = out.match(statement)?.length ?? 0;
+      const inlines = out.match(inline)?.length ?? 0;
+      if (statements + inlines !== 1) throw new Error(`level-22 template: constraint ${name} found ${statements + inlines} times, expected exactly once`);
+      if (statements === 1) {
+        out = out.replace(statement, '');
+        continue;
+      }
+      const LAST = '\u0000';
+      out = out.replace(inline, (_match, comma: string) => (comma ? '' : LAST));
+      // It was the last item of its CREATE TABLE: the item before it loses its trailing comma.
+      out = out.replace(new RegExp(`,([ \\t]*)${LAST}`), '$1');
+      if (out.includes(LAST)) throw new Error(`level-22 template: constraint ${name} is the last item but no item precedes it`);
+    }
+  }
+  if (/REFERENCES\s+core\.("user"|organisation|manager_workspace)(?![a-z_])/.test(out)) throw new Error('level-22 template: a workspace -> core reference remains');
+  return out;
+}
+
 /**
  * Expected `core.workspace_schema_fingerprint_v2` of a level-22 workspace per PostgreSQL major. DRAFT: 16 was measured on a
  * throwaway postgres:16 owner-login ci-db (two level-21 workspaces + this command, identical) only so the draft can be tested on

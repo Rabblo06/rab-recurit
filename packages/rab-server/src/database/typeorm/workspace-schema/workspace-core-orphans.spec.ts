@@ -1,7 +1,7 @@
 import { coreReferences, EXISTING_IDS_SQL, referencedIdsSql } from './workspace-core-orphans';
 import { composeServerPathTemplateLevel22, VERIFY_WORKSPACE_SCHEMA_V1_LEVEL_22_SQL } from './structure-level-22';
 import { composeServerPathTemplateLevel21, VERIFY_WORKSPACE_SCHEMA_V1_LEVEL_21_SQL } from './structure-level-21';
-import { workspaceCoreFkRemovalSql } from '../../../engine/core-modules/upgrade/upgrade-commands/0-6/workspace-core-fk-removal';
+import { withoutWorkspaceCoreForeignKeys, workspaceCoreFkRemovalSql } from '../../../engine/core-modules/upgrade/upgrade-commands/0-6/workspace-core-fk-removal';
 
 /** Part D 0a (DRAFT SQL): the dropped references, the orphan probe and the level-22 SQL, statically. */
 describe('Part D 0a: workspace → core references (static)', () => {
@@ -35,13 +35,34 @@ describe('Part D 0a: workspace → core references (static)', () => {
     expect(sql).not.toMatch(/\b(CREATE|GRANT|REVOKE|POLICY|DROP TABLE|DROP INDEX|TRIGGER|CASCADE)\b/);
   });
 
-  it('level-22 verify differs from level 21 ONLY in the foreign-key count line; the template appends the drops to level 21', () => {
+  it('the level-22 template is the level-21 template with exactly the 72 constraint definitions removed (and nothing else)', () => {
+    const before = composeServerPathTemplateLevel21();
+    const after = composeServerPathTemplateLevel22();
+    const CORE_REF = /REFERENCES\s+core\.("user"|organisation|manager_workspace)(?![a-z_])/;
+    const count = (sql: string, re: RegExp) => (sql.match(new RegExp(re.source, 'g')) ?? []).length;
+    expect(count(before, CORE_REF)).toBe(72);
+    expect(count(after, CORE_REF)).toBe(0);
+    // Nothing else is removed: every other foreign key (in-schema, stored_file, manager_profile, payroll_calendar_period) stays.
+    const OTHER_REF = /REFERENCES\s+(?!core\.("user"|organisation|manager_workspace)(?![a-z_]))\S+/;
+    expect(count(after, OTHER_REF)).toBe(count(before, OTHER_REF));
+    // No DROP CONSTRAINT is added: a new workspace never creates, so never drops, the 72 (no ACCESS EXCLUSIVE on core tables).
+    expect(count(after, /DROP CONSTRAINT/)).toBe(count(before, /DROP CONSTRAINT/));
+    // Line-wise: only removed lines, plus the 4 CREATE TABLE items that lost their trailing comma (their last item went).
+    const kept = new Set(after.split('\n'));
+    const removed = before.split('\n').filter((l) => !kept.has(l));
+    const definitionLines = removed.filter((l) => CORE_REF.test(l) || / ADD CONSTRAINT shift_assignment_attendance_reviewed_by_fkey$/.test(l));
+    expect(definitionLines).toHaveLength(73);
+    expect(removed.filter((l) => !definitionLines.includes(l)).every((l) => kept.has(l.replace(/,\s*$/, '')))).toBe(true);
+    expect(removed.length - definitionLines.length).toBe(4);
+    expect(() => withoutWorkspaceCoreForeignKeys(after)).toThrow(/found 0 times, expected exactly once/);
+  });
+
+  it('level-22 verify differs from level 21 ONLY in the foreign-key count line', () => {
     const a = VERIFY_WORKSPACE_SCHEMA_V1_LEVEL_21_SQL.split('\n');
     const b = VERIFY_WORKSPACE_SCHEMA_V1_LEVEL_22_SQL.split('\n');
     expect(b).toHaveLength(a.length);
     const diff = a.map((l, i) => [l, b[i]]).filter(([x, y]) => x !== y);
     expect(diff).toHaveLength(1);
     expect(diff[0]![1]).toContain(`<> ALL (CASE WHEN coalesce(v_mv, 0) = 0 THEN ARRAY[128, 56] WHEN v_mv >= 22 THEN ARRAY[56] ELSE ARRAY[128] END) THEN RETURN 'foreign key count'`);
-    expect(composeServerPathTemplateLevel22().startsWith(composeServerPathTemplateLevel21() + ';\n')).toBe(true);
   });
 });

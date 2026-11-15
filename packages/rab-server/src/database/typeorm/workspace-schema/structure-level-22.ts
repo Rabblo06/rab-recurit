@@ -1,7 +1,6 @@
 // sql-injection-reviewed-file: SQL definition module (database layer). Every interpolation is a code constant of this repository (the frozen template, module ids / versions / checksums, a 64-hex fingerprint, a validated app_version literal and a structure level integer); no request or row data reaches these templates.
-import { SERVER_PATH_SENTINEL_SCHEMA } from './v1/server-path-template';
 import { composeServerPathTemplateLevel21, VERIFY_WORKSPACE_SCHEMA_V1_LEVEL_21_SQL } from './structure-level-21';
-import { workspaceCoreFkRemovalSql } from '../../../engine/core-modules/upgrade/upgrade-commands/0-6/workspace-core-fk-removal';
+import { withoutWorkspaceCoreForeignKeys } from '../../../engine/core-modules/upgrade/upgrade-commands/0-6/workspace-core-fk-removal';
 
 /**
  * DRAFT for owner SQL review (WS-COMMANDS.md "FOR OWNER REVIEW — 0a"; throwaway databases only until approved). Frozen with
@@ -9,8 +8,10 @@ import { workspaceCoreFkRemovalSql } from '../../../engine/core-modules/upgrade/
  *  1. `core.verify_workspace_schema_v1(uuid)`: the level-21 body (structure-level-21.ts) with ONE change: the foreign-key count
  *     is 56 at level 22+ (128 - the 72 workspace → core."user" / organisation / manager_workspace constraints), 128 below; with no
  *     visible registry version either count is accepted (the per-level fingerprint then proves the exact structure);
- *  2. `core.provision_workspace(uuid)`: the guarded v3 body over template(20) + level 21 + level 22 (the frozen module SQL still
- *     creates the 72 constraints; the level-22 statements drop them again in the same EXECUTE, before verification).
+ *  2. `core.provision_workspace(uuid)`: the guarded v3 body over template(20) + level 21 with the 72 constraints taken OUT of the
+ *     template text (withoutWorkspaceCoreForeignKeys): a new workspace never creates them. Creating and dropping them in the
+ *     provisioning transaction would hold ACCESS EXCLUSIVE on core."user", core.organisation and core.manager_workspace until
+ *     commit (blocking every request that reads them during a create); it deadlocked concurrent creates in CI (40P01).
  */
 
 const FK_LINE_OLD = `           WHERE ns.nspname = v_name AND k.contype = 'f') <> 128 THEN RETURN 'foreign key count'; END IF;`;
@@ -21,9 +22,9 @@ export const VERIFY_WORKSPACE_SCHEMA_V1_LEVEL_22_SQL = (() => {
   return VERIFY_WORKSPACE_SCHEMA_V1_LEVEL_21_SQL.replace(FK_LINE_OLD, FK_LINE_NEW);
 })();
 
-/** The composition core.provision_workspace embeds from this release on: template(20) + level 21 + level 22. */
+/** The composition core.provision_workspace embeds from this release on: template(20) + level 21, without the 72 constraints. */
 export function composeServerPathTemplateLevel22(): string {
-  return [composeServerPathTemplateLevel21(), workspaceCoreFkRemovalSql(SERVER_PATH_SENTINEL_SCHEMA)].join(';\n');
+  return withoutWorkspaceCoreForeignKeys(composeServerPathTemplateLevel21());
 }
 
 /**
