@@ -13,6 +13,7 @@ import { parseTimerTriggerKinds } from '../../worker-shared/timer-trigger.contra
 import { runtimeDbConfigProblems } from '../../../database/owner-login/runtime-db-config';
 import { rateLimitBypassProductionProblem } from '../throttler/rate-limit-bypass';
 import { assertPdfNativeMemoryFits, parsePdfNativeMemoryBudgetMb, PDF_NATIVE_CONCURRENCY_DEFAULT } from '../../worker-shared/pdf-native-memory.contract';
+import { parseWorkerShutdownTimeoutMs } from '../../worker-shared/worker-shutdown-timeout.contract';
 
 /**
  * Phase B (B1): the database configuration rules (pg-config.ts) as one boot problem, or null. The per-process pooler rule
@@ -135,6 +136,16 @@ ${(error as Error).message}`);
       validated.PDF_NATIVE_CONCURRENCY === undefined ? PDF_NATIVE_CONCURRENCY_DEFAULT : Number(validated.PDF_NATIVE_CONCURRENCY),
       parsePdfNativeMemoryBudgetMb(validated.PDF_NATIVE_MEMORY_BUDGET_MB),
     );
+  } catch (error) {
+    throw new Error(`Invalid environment configuration:
+${(error as Error).message}`);
+  }
+
+  // XR-10: the Worker's SIGTERM drain budget. The shared parser (the one the Worker re-checks at boot) is the rule: unset →
+  // 30000; 1000..34000 ms so the drain plus the hard-exit margin end inside the 45 s stop_grace_period; anything else
+  // (NaN included) refuses to boot, never on the first SIGTERM.
+  try {
+    parseWorkerShutdownTimeoutMs(validated.WORKER_SHUTDOWN_TIMEOUT_MS);
   } catch (error) {
     throw new Error(`Invalid environment configuration:
 ${(error as Error).message}`);
