@@ -6,7 +6,6 @@ import { isRemoteDatabaseHost } from '../database/deployment-identity/deployment
 import { readPrimaryDatabaseUrl } from '../database/postgres/pg-config';
 import { describeDatabaseUrl } from '../database/typeorm/core/test-database-guard';
 import { AuditAction, AuditService } from '../engine/core-modules/audit/audit.service';
-import { markNewWorkspaceCutoverVerified } from '../engine/core-modules/upgrade/hws-cutover-routing';
 import { AccountLifecycleService } from '../engine/core-modules/auth/services/account-lifecycle.service';
 import { EnvironmentService } from '../engine/core-modules/environment/environment.service';
 import { AuthContext } from '../engine/core-modules/tenant/auth-context.interface';
@@ -195,10 +194,6 @@ export class SeedAiDemoCommand extends CommandRunner {
       [organisationId, ceoUserId, 'AI Demo Workspace (synthetic)', AI_DEMO_SLUG],
     );
     const workspaceId = workspace!.id;
-    // Part C3 (fail-closed routing): the same creation hook as ManagerWorkspaceService.create (a no-op until the cutover is active).
-    await markNewWorkspaceCutoverVerified((sql, parameters) => m.query(sql, parameters) as Promise<unknown[]>, workspaceId, {
-      hwsRuntimeEnabled: this.env.get('HWS_RUNTIME_ENABLED') === true,
-    });
     await m.query(`SELECT set_config('rab.workspace_id', $1, true)`, [workspaceId]);
     await m.query(`INSERT INTO core.manager_profile (organisation_id, user_id, type, workspace_id) VALUES ($1, $2, $3, $4)`, [organisationId, ceoUserId, ManagerType.CEO, workspaceId]);
     await this.membership(m, organisationId, ceoUserId, workspaceId);

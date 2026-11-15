@@ -179,16 +179,22 @@ describeIfDb('C3 HWS cutover copy path (option A′)', () => {
     ).rows.map((r) => r.rel as string);
 
   /** The resolver every API / Worker workspace bind passes through (cache stubbed to "always ask Postgres"). */
-  const resolveAs = async (ws: SeededWorkspace, enforceCutover?: boolean): Promise<string> => {
+  /** `active`: the cutover sentinel exists — inserted inside this throwaway transaction only (never committed). */
+  const resolveAs = async (ws: SeededWorkspace, active?: boolean): Promise<string> => {
     const cache = { resolveSchema: (_id: string, fetch: () => Promise<unknown>) => fetch(), invalidate: async () => undefined } as unknown as WorkspaceMetadataCacheService;
     const c = new Client({ connectionString: appUrl });
     await c.connect();
     try {
       await c.query('BEGIN');
+      if (active) {
+        await c.query('SET LOCAL ROLE crewflow');
+        await c.query('INSERT INTO core.hws_cutover_activation DEFAULT VALUES ON CONFLICT DO NOTHING');
+        await c.query('RESET ROLE');
+      }
       await c.query(`SELECT set_config('rab.organisation_id', $1, true), set_config('rab.workspace_id', $2, true)`, [ws.org, ws.id]);
       const manager = { query: (sql: string, params?: unknown[]) => c.query(sql, params).then((r) => r.rows) } as never;
       try {
-        return await new SchemaResolverService(cache, enforceCutover).resolve(manager, ws.id);
+        return await new SchemaResolverService(cache).resolve(manager, ws.id);
       } catch (error) {
         return error instanceof WorkspaceRoutingError ? `refused:${error.code}` : `error:${(error as Error).name}`;
       }
@@ -218,8 +224,21 @@ describeIfDb('C3 HWS cutover copy path (option A′)', () => {
   };
   const host = (opts: { backup?: boolean; hws?: boolean } = {}): UpgradeCommandHost =>
     createUpgradeCommandHost({ env: opts.backup === false ? {} : { [CUTOVER_BACKUP_MARKER_ENV]: join(backupDir, 'marker.json') }, hwsRuntimeEnabled: opts.hws ?? true });
-  const cutover = (q: Client, ids: string[], h: UpgradeCommandHost, extra: HwsCutoverOptions = {}, ctx: { flushBlockCache?: () => Promise<void>; markBlockChanged?: () => void } = {}) =>
-    runHwsCutover({ query: (sql, params) => q.query(sql, params as unknown[]).then((r) => r.rows), log, host: h, ...ctx }, { workspaceIds: ids, ...extra });
+  /**
+   * The cutover writes the one-way activation sentinel. In production it is never removed; this database is SHARED with every
+   * other spec of the in-band run, so the cluster superuser removes it after each run (it would turn fail-closed routing on
+   * for every later fixture workspace).
+   */
+  const deactivate = () => admin.query('DELETE FROM core.hws_cutover_activation');
+  const activeNow = async () => Number((await admin.query('SELECT count(*)::int AS n FROM core.hws_cutover_activation')).rows[0].n) === 1;
+  const startedAny = async () => (await app.query('SELECT core.hws_cutover_started_any() AS s')).rows[0].s as boolean;
+  const cutover = async (q: Client, ids: string[], h: UpgradeCommandHost, extra: HwsCutoverOptions = {}, ctx: { flushBlockCache?: () => Promise<void>; markBlockChanged?: () => void } = {}) => {
+    try {
+      return await runHwsCutover({ query: (sql, params) => q.query(sql, params as unknown[]).then((r) => r.rows), log, host: h, ...ctx }, { workspaceIds: ids, ...extra });
+    } finally {
+      await deactivate();
+    }
+  };
 
   beforeAll(async () => {
     admin = new Client({ connectionString: adminUrl });
@@ -242,6 +261,7 @@ describeIfDb('C3 HWS cutover copy path (option A′)', () => {
       await admin.query(`DELETE FROM core.hws_cutover_state WHERE workspace_id = $1`, [ws.id]).catch(() => undefined);
     }
     await admin.query(`DELETE FROM core.upgrade_migration WHERE workspace_id IS NULL AND name LIKE '0.7.0_%' AND executed_by_version = '0.7.0'`).catch(() => undefined);
+    await admin.query('DELETE FROM core.hws_cutover_activation').catch(() => undefined);
     if (backupDir) rmSync(backupDir, { recursive: true, force: true });
     await app?.end();
     await admin?.end();
@@ -315,6 +335,46 @@ describeIfDb('C3 HWS cutover copy path (option A′)', () => {
       await admin.query('ROLLBACK');
     }
     expect(await forceOffAnywhere([a.schema, b.schema])).toEqual([]);
+  });
+
+  it('re-check N-1: crewflow_app and crewflow_worker cannot forge a verified state (no app-callable marker; the trigger is INSERT-only)', async () => {
+    const victim = await seedBusiness(await make('n1-victim'));
+    expect(await startedAny()).toBe(false);
+    // The 3-step forgery's first step (fake a new workspace's columns); errors swallowed so the attempt goes on either way.
+    const forge = [
+      `DO $f$ BEGIN UPDATE core.manager_workspace SET created_at = now(), schema_status = 'CREATING' WHERE id = '${victim.id}'; EXCEPTION WHEN OTHERS THEN NULL; END $f$`,
+    ];
+    for (const role of ['crewflow_app', 'crewflow_worker']) {
+      const setup = [`SET LOCAL ROLE ${role}`, tenant(victim, victim.owner), ...forge];
+      // The old app-callable marker is gone ...
+      expect((await refusalIn(admin, setup, 'SELECT core.hws_cutover_mark_new_workspace($1)', [victim.id])).code).toBe('42883');
+      // ... and the state table takes no write from them.
+      const direct = await refusalIn(admin, setup, `INSERT INTO core.hws_cutover_state (workspace_id, organisation_id, state, verified_at) VALUES ($1, $2, 'verified', now())`, [victim.id, victim.org]);
+      expect(direct.code).toBe('42501');
+      const sentinel = await refusalIn(admin, [`SET LOCAL ROLE ${role}`], 'INSERT INTO core.hws_cutover_activation DEFAULT VALUES', []);
+      expect(sentinel.code).toBe('42501');
+    }
+    // Even with the cutover active, the faked-new UPDATE fires no marking (the trigger is AFTER INSERT only).
+    await admin.query('SET ROLE crewflow');
+    await admin.query('INSERT INTO core.hws_cutover_activation DEFAULT VALUES ON CONFLICT DO NOTHING');
+    await admin.query('RESET ROLE');
+    try {
+      for (const role of ['crewflow_app', 'crewflow_worker']) {
+        await admin.query('BEGIN');
+        try {
+          await admin.query(`SET LOCAL ROLE ${role}`);
+          await admin.query(tenant(victim, victim.owner));
+          await admin.query(forge[0]!);
+        } finally {
+          await admin.query('COMMIT').catch(() => admin.query('ROLLBACK'));
+        }
+      }
+      expect(await stateOf(victim)).toBeNull();
+    } finally {
+      await deactivate();
+    }
+    expect(await stateOf(victim)).toBeNull();
+    expect(await startedAny()).toBe(false);
   });
 
   let w1: Seeded;
@@ -518,7 +578,11 @@ describeIfDb('C3 HWS cutover copy path (option A′)', () => {
         host: h,
       });
       await run.beforeApply(session, { fresh: false, attribution: null, unrestrictedTarget: true });
-      await run.afterApply(session);
+      try {
+        await run.afterApply(session);
+      } finally {
+        await deactivate();
+      }
       return run.report;
     };
     const rows = async () => (await admin.query(`SELECT status, attempt, forced FROM core.upgrade_migration WHERE workspace_id IS NULL AND name = $1 ORDER BY attempt`, [step])).rows;
@@ -765,29 +829,57 @@ describeIfDb('C3 HWS cutover copy path (option A′)', () => {
     expect(await resolveAs(fresh, true)).toBe('refused:upgrading'); // ... but routing still refuses it (no verified state)
   });
 
-  it('fail-closed routing (H-1b): a workspace created after the cutover is marked verified in its creating transaction and served at once', async () => {
-    const label = `c3-new-${SFX}`;
-    await admin.query('BEGIN');
-    let nw!: SeededWorkspace;
+  it('fail-closed routing (H-1b, N-1): once active, the database marks a new workspace verified at insertion; it is served at once', async () => {
+    // Before activation the trigger writes nothing (an HWS-off deployment's new workspace keeps its data in core).
+    const before = await make('pre-activation');
+    expect(await stateOf(before)).toBeNull();
+    await admin.query('SET ROLE crewflow');
+    await admin.query('INSERT INTO core.hws_cutover_activation DEFAULT VALUES ON CONFLICT DO NOTHING');
+    await admin.query('RESET ROLE');
     try {
-      nw = await seedWorkspace(admin, label);
-      await admin.query(`SELECT set_config('rab.organisation_id', $1, true), set_config('rab.user_id', $2, true)`, [nw.org, nw.owner]);
-      expect((await admin.query('SELECT core.hws_cutover_mark_new_workspace($1) AS m', [nw.id])).rows[0].m).toBe(true);
-      await admin.query('COMMIT');
-    } catch (error) {
-      await admin.query('ROLLBACK');
-      throw error;
+      expect(await activeNow()).toBe(true);
+      const nw = await make('post-activation'); // core.manager_workspace INSERT → AFTER INSERT trigger
+      expect(await stateOf(nw)).toBe('verified');
+      expect(await resolveAs(nw, true)).toBe(nw.schema);
+      expect(await stateOf(before)).toBeNull(); // existing workspaces are untouched: the cutover decides for them
+      expect(await resolveAs(before, true)).toBe('refused:upgrading');
+    } finally {
+      await deactivate();
     }
-    created.push(nw);
-    await provisionTypeScript(adminUrl, nw);
-    expect(await stateOf(nw)).toBe('verified');
-    expect(await resolveAs(nw, true)).toBe(nw.schema);
-    // Abuse: an EXISTING workspace (created in an earlier transaction) can never be marked new — its core data would be skipped.
-    const marked = await refusalIn(app, [tenant(w1, w1.owner)], 'SELECT core.hws_cutover_mark_new_workspace($1)', [w1.id]);
-    expect(marked.code).toBe('42501');
-    const old = await make('old-ws');
-    const oldMark = await refusalIn(app, [tenant(old, old.owner)], 'SELECT core.hws_cutover_mark_new_workspace($1)', [old.id]);
-    expect(oldMark.code).toBe('42501');
-    expect(await stateOf(old)).toBeNull();
+  });
+
+  it('re-check Info-A: core rows of the organisation with no workspace are refused (UNOWNED_ROWS), never silently left behind', async () => {
+    const wa = await seedBusiness(await make('unowned'));
+    writeBackup();
+    const planted = (
+      await admin.query(`INSERT INTO core.venue (organisation_id, name, created_by, workspace_id) VALUES ($1, 'No workspace', $2, NULL) RETURNING id`, [wa.org, wa.owner])
+    ).rows[0].id;
+    try {
+      await expect(cutover(app, [wa.id], host())).rejects.toMatchObject({ errorClass: 'HWS_CUTOVER_WORKSPACE_FAILED' });
+      expect(await migrationError(wa)).toBe('upgrade-blocked: HwsCutover (HWS_CUTOVER_UNOWNED_ROWS)');
+      expect(await stateOf(wa)).toBeNull();
+      expect(await wsTotal(wa)).toBe(0);
+    } finally {
+      await admin.query('DELETE FROM core.venue WHERE id = $1', [planted]);
+    }
+  });
+
+  it('re-check N-2: the cutover activation is one-way for every non-superuser role (no UPDATE / DELETE path)', async () => {
+    await admin.query('SET ROLE crewflow');
+    await admin.query('INSERT INTO core.hws_cutover_activation DEFAULT VALUES ON CONFLICT DO NOTHING');
+    await admin.query('RESET ROLE');
+    try {
+      for (const role of ['crewflow', 'crewflow_app', 'crewflow_worker']) {
+        await refusalIn(admin, [`SET LOCAL ROLE ${role}`], 'DELETE FROM core.hws_cutover_activation', []);
+        expect(await activeNow()).toBe(true);
+        await refusalIn(admin, [`SET LOCAL ROLE ${role}`], 'UPDATE core.hws_cutover_activation SET activated_at = now()', []);
+      }
+      await refusalIn(app, [], 'DELETE FROM core.hws_cutover_activation', []);
+      expect(await activeNow()).toBe(true);
+      expect((await refusalIn(app, [], 'TRUNCATE core.hws_cutover_activation', [])).code).toBe('42501');
+      expect(await activeNow()).toBe(true);
+    } finally {
+      await deactivate();
+    }
   });
 });

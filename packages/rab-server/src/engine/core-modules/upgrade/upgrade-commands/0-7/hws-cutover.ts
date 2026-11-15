@@ -15,7 +15,10 @@
  * to exactly one workspace, search_path pg_catalog). Per-workspace state lives in core.hws_cutover_state (started →
  * verified; crewflow-owned, no runtime DML — security review L-2), never in audit_log (written as a human-readable record):
  *   0. HWS runtime OFF and any workspace not yet verified → refuse (HWS_RUNTIME_OFF), nothing written: the core copies stay
- *      served; the first start with HWS on does the cutover.
+ *      served; the first start with HWS on does the cutover. HWS ON → first of all the one-way "cutover active" sentinel
+ *      (core.hws_cutover_activation; re-check N-1 / N-2) is written, also on a fresh install with no workspace: from then on
+ *      routing requires a verified state (fail closed), new workspaces are marked verified by the database at insertion, and
+ *      an HWS-off process refuses to boot.
  *   1. BLOCK FIRST (review H-1): every pending READY workspace not blocked by another step gets the Part D marker
  *      `upgrade-blocked: HwsCutover (HWS_CUTOVER_PENDING)` → 503 "workspace is being upgraded", Worker jobs paused; the
  *      resolver cache epoch is bumped right away (review L-4, fatal on failure). Any later error re-blocks the pending
@@ -108,6 +111,7 @@ interface ProbeRow {
   core_rows: boolean;
   ws_rows: boolean;
   org_mismatch: number;
+  unowned_rows: number;
   ambiguous_notes: number;
   unmapped_notes: number;
 }
@@ -388,15 +392,26 @@ export async function runHwsCutover(ctx: UpgradeCommandContext, options: HwsCuto
   const pending = all.filter((w) => w.cutoverState !== 'verified');
   for (const w of all.filter((x) => x.cutoverState === 'verified')) report.workspaces.push({ workspaceId: w.workspaceId, status: 'already-verified' });
   log(`hws cutover: ${all.length} workspace(s), ${pending.length} pending`);
-  if (!pending.length) return report;
 
-  // 0. HWS off: the core copies stay authoritative and served; nothing is written (no block, no state).
+  // 0. HWS off: the core copies stay authoritative and served; nothing is written (no block, no state, no sentinel).
   if (ctx.host?.hwsRuntimeEnabled !== true) {
+    if (!pending.length) return report;
     throw new HwsCutoverRefused(
       'HWS_RUNTIME_OFF',
       `hws cutover refused: HWS runtime routing is OFF in this deployment (HWS_RUNTIME_ENABLED) and ${pending.length} workspace(s) are not cut over. A copy made now would be a snapshot that later writes to core make stale. Start this release with HWS on. Nothing was written.`,
     );
   }
+  // HWS on: the cutover is active from now on (one-way). Role crewflow: the sentinel's only INSERT policy.
+  await q('BEGIN');
+  try {
+    await q(`SELECT pg_catalog.set_config('role', 'crewflow', true), pg_catalog.set_config('search_path', 'pg_catalog, pg_temp', true)`);
+    await q('INSERT INTO core.hws_cutover_activation DEFAULT VALUES ON CONFLICT DO NOTHING');
+    await q('COMMIT');
+  } catch (error) {
+    await q('ROLLBACK').catch(() => undefined);
+    throw error;
+  }
+  if (!pending.length) return report;
 
   const ready = (w: HwsCutoverWorkspace) => w.registryStatus === 'READY' && w.registrySchema === w.schemaName && SCHEMA_RE.test(w.schemaName);
   const eligible = pending.filter((w) => ready(w) && !blockedByOther(w.migrationError));
@@ -438,15 +453,18 @@ export async function runHwsCutover(ctx: UpgradeCommandContext, options: HwsCuto
     const probes = new Map<string, ProbeRow[]>();
     for (const w of eligible) {
       const rows = (await inTenant(q, w.organisationId, w.workspaceId, () =>
-        q('SELECT table_name, core_rows, ws_rows, org_mismatch, ambiguous_notes, unmapped_notes FROM core.hws_cutover_probe($1::uuid)', [w.workspaceId]),
+        q('SELECT table_name, core_rows, ws_rows, org_mismatch, unowned_rows, ambiguous_notes, unmapped_notes FROM core.hws_cutover_probe($1::uuid)', [w.workspaceId]),
       )) as ProbeRow[];
       probes.set(w.workspaceId, rows);
     }
     const note = (w: HwsCutoverWorkspace) => probes.get(w.workspaceId)!.find((r) => r.table_name === 'user_note');
     const orgMismatch = (w: HwsCutoverWorkspace) => probes.get(w.workspaceId)!.reduce((n, r) => n + Number(r.org_mismatch), 0);
     const ambiguous = (w: HwsCutoverWorkspace) => Number(note(w)?.ambiguous_notes ?? 0);
-    // Review L-1 / L-3: rows of W under another organisation and ambiguous notes ARE core data (never "nothing to copy").
-    const coreHas = (w: HwsCutoverWorkspace) => probes.get(w.workspaceId)!.some((r) => r.core_rows) || orgMismatch(w) > 0 || ambiguous(w) > 0;
+    const unowned = (w: HwsCutoverWorkspace) => probes.get(w.workspaceId)!.reduce((n, r) => n + Number(r.unowned_rows), 0);
+    // Review L-1 / L-3, re-check Info-A: rows of W under another organisation, ambiguous notes and rows of W's organisation
+    // with no workspace ARE core data that would not be copied (never "nothing to copy").
+    const coreHas = (w: HwsCutoverWorkspace) =>
+      probes.get(w.workspaceId)!.some((r) => r.core_rows) || orgMismatch(w) > 0 || ambiguous(w) > 0 || unowned(w) > 0;
     const wsHas = (w: HwsCutoverWorkspace) => probes.get(w.workspaceId)!.some((r) => r.ws_rows);
     report.unmappedNotes = Math.max(0, ...eligible.map((w) => Number(note(w)?.unmapped_notes ?? 0)));
     if (report.unmappedNotes > 0) {
@@ -482,6 +500,10 @@ export async function runHwsCutover(ctx: UpgradeCommandContext, options: HwsCuto
       };
       if (orgMismatch(w) > 0) {
         await fail('HWS_CUTOVER_ORG_MISMATCH', probes.get(w.workspaceId)!.filter((r) => Number(r.org_mismatch) > 0).map((r) => `${r.table_name}: ${r.org_mismatch} core row(s) of this workspace carry another organisation`));
+        continue;
+      }
+      if (unowned(w) > 0) {
+        await fail('HWS_CUTOVER_UNOWNED_ROWS', probes.get(w.workspaceId)!.filter((r) => Number(r.unowned_rows) > 0).map((r) => `${r.table_name}: ${r.unowned_rows} core row(s) of this organisation belong to no workspace`));
         continue;
       }
       if (ambiguous(w) > 0) {

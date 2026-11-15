@@ -11,14 +11,9 @@ import { UPGRADE_COMMANDS } from './upgrade-commands/registry';
 import type { UpgradeCommandHost } from './upgrade-commands/upgrade-command';
 import { commandStepName } from './upgrade-sequence';
 import { isUpgradeBlocked, parseUpgradeBlock, upgradeBlockMarker } from './workspace-upgrade-block';
-import {
-  cutoverStateRefused,
-  HWS_CUTOVER_COMMAND_NAME,
-  HWS_CUTOVER_ROUTING_ENFORCED,
-  hwsCutoverRegisteredIn,
-  HwsCutoverMarkError,
-  markNewWorkspaceCutoverVerified,
-} from './hws-cutover-routing';
+import { cutoverStateRefused } from './hws-cutover-routing';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 
 /** OWNER-DB-ULTIMATE Part C3 (option A′, pending owner choice): the pure parts of the HWS cutover command. */
 describe('C3 HWS cutover: frozen lists stay equal to their sources', () => {
@@ -128,11 +123,11 @@ describe('C3 HWS cutover: the backup marker (owner rule: no cutover without a ve
   });
 });
 
-describe('C3 fail-closed routing gate (security review H-1b)', () => {
-  it('refuses started always; once enforced, everything that is not verified (missing state included)', () => {
+describe('C3 fail-closed routing gate (security review H-1b, re-check N-2)', () => {
+  it('refuses started always; once active, everything that is not verified (missing state included)', () => {
     expect(cutoverStateRefused('started', false)).toBe(true);
     expect(cutoverStateRefused(null, false)).toBe(false);
-    expect(cutoverStateRefused(undefined, false)).toBe(false);
+    expect(cutoverStateRefused(undefined, undefined)).toBe(false);
     expect(cutoverStateRefused('verified', false)).toBe(false);
     expect(cutoverStateRefused('started', true)).toBe(true);
     expect(cutoverStateRefused(null, true)).toBe(true);
@@ -141,25 +136,24 @@ describe('C3 fail-closed routing gate (security review H-1b)', () => {
     expect(cutoverStateRefused('verified', true)).toBe(false);
   });
 
-  it('is gated on the command being registered (off today: development and CI route as before)', () => {
-    expect(HWS_CUTOVER_COMMAND_NAME).toBe(HWS_CUTOVER_NAME);
-    expect(HWS_CUTOVER_ROUTING_ENFORCED).toBe(false);
-    expect(hwsCutoverRegisteredIn({ '0-6': [] })).toBe(false);
-    expect(hwsCutoverRegisteredIn({ '0-6': [], '0-7': UPGRADE_COMMANDS_0_7 })).toBe(true);
+  it('N-2: the gate is the one-way database sentinel, never the code registry (pruning 0-7 from registry.ts cannot turn it off)', () => {
+    const files = [
+      join(__dirname, 'hws-cutover-routing.ts'),
+      join(__dirname, '..', 'tenant', 'schema-resolver.service.ts'),
+      join(__dirname, '..', 'tenant', 'tenant-context.service.ts'),
+    ];
+    for (const f of files) {
+      const src = readFileSync(f, 'utf8');
+      expect({ f, registry: /from\s+'[^']*upgrade-commands\/registry'|UPGRADE_COMMANDS/.test(src) }).toEqual({ f, registry: false });
+    }
+    expect(readFileSync(files[0]!, 'utf8')).toMatch(/EXISTS \(SELECT 1 FROM core\.hws_cutover_activation\) AS cutover_active/);
+    // A registry with a later release but without 0-7 changes nothing: the rule only takes DB facts.
+    expect(cutoverStateRefused(null, true)).toBe(true);
   });
 
-  it('the creation hook runs only with HWS on and the cutover active, and a refusal throws (the create rolls back)', async () => {
-    const calls: string[] = [];
-    const q = (marked: unknown) => async (sql: string) => {
-      calls.push(sql);
-      return [{ marked }];
-    };
-    await expect(markNewWorkspaceCutoverVerified(q(true), 'w', { hwsRuntimeEnabled: false, enforced: true })).resolves.toBe(false);
-    await expect(markNewWorkspaceCutoverVerified(q(true), 'w', { hwsRuntimeEnabled: true, enforced: false })).resolves.toBe(false);
-    await expect(markNewWorkspaceCutoverVerified(q(true), 'w', { hwsRuntimeEnabled: true })).resolves.toBe(false); // today: not enforced
-    expect(calls).toEqual([]);
-    await expect(markNewWorkspaceCutoverVerified(q(true), 'w', { hwsRuntimeEnabled: true, enforced: true })).resolves.toBe(true);
-    await expect(markNewWorkspaceCutoverVerified(q(false), 'w', { hwsRuntimeEnabled: true, enforced: true })).rejects.toBeInstanceOf(HwsCutoverMarkError);
-    expect(calls).toEqual(['SELECT core.hws_cutover_mark_new_workspace($1) AS marked', 'SELECT core.hws_cutover_mark_new_workspace($1) AS marked']);
+  it('N-1: no application code calls a function that writes the cutover state', () => {
+    for (const rel of ['../../../modules/manager-workspace/services/manager-workspace.service.ts', '../../../command/seed-ai-demo.command.ts']) {
+      expect(readFileSync(join(__dirname, rel), 'utf8')).not.toMatch(/hws_cutover_mark_new_workspace|markNewWorkspaceCutoverVerified|hws_cutover_state/);
+    }
   });
 });

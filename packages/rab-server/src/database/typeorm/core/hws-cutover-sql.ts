@@ -20,10 +20,13 @@
  *     reconciled by hws_cutover_drop_new_statement_pointers (Q13).
  *   - Copy = INSERT ... ON CONFLICT DO NOTHING: idempotent, resumable, never an UPDATE or DELETE of either copy
  *     (attendance_correction stays insert-only; the core copies are never written).
- *   - core.hws_cutover_state (review L-2): the per-workspace cutover state (started → verified), crewflow-owned, tenant RLS
- *     (ENABLE + FORCE), no DML for crewflow_app, runtime-login DML refused by the grant-parity guard. It drives the resolver
- *     (a 'started' workspace is refused, 503), the core write fence (review M-3: once a workspace's cutover has started, its
- *     core copy is read-only for the runtime login) and the HWS-off boot refusal.
+ *   - core.hws_cutover_state (review L-2): the per-workspace cutover state (started → verified); core.hws_cutover_activation
+ *     (re-check N-1 / N-2): the one-way, instance-wide "cutover active" sentinel the cutover writes on its first run with HWS
+ *     on. Both rab_secure_owner-owned, ENABLE + FORCE, written only through owner-only policies (CURRENT_USER = crewflow /
+ *     rab_secure_owner): the runtime logins and crewflow_app can read but never write them. Together they drive the
+ *     resolver (fail closed: started → 503; once active, anything not verified → 503), the core write fence (review M-3) and
+ *     the HWS-off boot refusal. New workspaces are marked verified by an AFTER INSERT trigger on core.manager_workspace,
+ *     only once the sentinel exists — never by an application call (re-check N-1).
  *
  * Twenty has no RLS and no cross-schema copy: this is a Crewflow addition (§0). Twenty's per-workspace command shape
  * (`workspace-command-runner.service.ts:106-153`, twentyhq/twenty @ eedb0a73) is followed by the C3 upgrade command.
@@ -46,21 +49,26 @@ export const HWS_CUTOVER_FUNCTIONS = [
   'core.hws_cutover_copy_batch(uuid,text,text,integer)',
   'core.hws_cutover_verify_range(uuid,text,text,integer)',
   'core.hws_cutover_started_any()',
-  'core.hws_cutover_mark_new_workspace(uuid)',
   'core.hws_cutover_core_fence()',
   'core.hws_cutover_drop_new_statement_pointers(uuid,uuid[])',
   'core.hws_cutover_purge_core_statement_pointers(uuid)',
+  'core.hws_cutover_new_workspace_trg()',
 ] as const;
 
 export const HWS_CUTOVER_FENCE_TRIGGER = 'hws_cutover_core_fence';
-export const HWS_CUTOVER_STATE_GUARD_TRIGGERS = ['insert', 'update', 'delete', 'truncate'].map((op) => `_hws_cutover_state_runtime_guard_${op}`);
+export const HWS_CUTOVER_NEW_WORKSPACE_TRIGGER = 'hws_cutover_new_workspace';
 
 /**
- * (T) The per-workspace cutover state. One row per workspace once its copy has started; 'verified' once every table matched.
- * FK to the workspace (cascade: a deleted workspace takes its state). Tenant policy for every role; plus an owner-only SELECT
- * policy for crewflow (the precedent idiom of core/preauth-force-sql.ts) so the boot check core.hws_cutover_started_any() —
- * a crewflow definer, bound by FORCE — can see whether ANY workspace was cut over without a tenant. crewflow_app: SELECT only
- * (the fence trigger reads it as the invoker); the owner login's DML is refused on normal paths by the grant-parity guard.
+ * (T1) The per-workspace cutover state. One row per workspace once its copy has started; 'verified' once every table matched,
+ * once the cutover found nothing of it in core, or — for a workspace created after activation — at its creation. FK to the
+ * workspace (cascade). OWNED BY rab_secure_owner (the new-workspace trigger on core.manager_workspace, a secure table, must be
+ * a rab_secure_owner function, and R4 forbids it to name a crewflow-owned table). ENABLE + FORCE; policies:
+ *   - tenant SELECT for everyone (`organisation_id = current_org()`): the resolver, the fence and the scan read it;
+ *   - owner-only SELECT for crewflow (no tenant): the boot-check definer core.hws_cutover_started_any();
+ *   - owner-only INSERT / UPDATE for crewflow, within the bound organisation: the cutover (SET LOCAL ROLE crewflow);
+ *   - owner-only ALL for rab_secure_owner: the new-workspace trigger function.
+ * The owner-only expressions (CURRENT_USER = …) mean a MEMBER of crewflow — the runtime login — is never admitted. Grants:
+ * SELECT to crewflow_app; SELECT, INSERT, UPDATE to crewflow; DELETE / TRUNCATE to nobody (owner only).
  */
 export const HWS_CUTOVER_STATE_TABLE_SQL: readonly string[] = [
   `CREATE TABLE core.hws_cutover_state (
@@ -76,23 +84,79 @@ export const HWS_CUTOVER_STATE_TABLE_SQL: readonly string[] = [
     REFERENCES core.manager_workspace(id, organisation_id) ON DELETE CASCADE
 )`,
   'CREATE INDEX hws_cutover_state_organisation_idx ON core.hws_cutover_state (organisation_id)',
-];
-
-/** Run after the table is handed to crewflow (as the migration identity; the table owner may ALTER it). */
-export const HWS_CUTOVER_STATE_SECURITY_SQL: readonly string[] = [
   'ALTER TABLE core.hws_cutover_state ENABLE ROW LEVEL SECURITY',
   'ALTER TABLE core.hws_cutover_state FORCE ROW LEVEL SECURITY',
-  `CREATE POLICY hws_cutover_state_tenant ON core.hws_cutover_state AS PERMISSIVE FOR ALL TO PUBLIC
-  USING (organisation_id = core.current_org()) WITH CHECK (organisation_id = core.current_org())`,
-  `CREATE POLICY hws_cutover_state_owner_read ON core.hws_cutover_state AS PERMISSIVE FOR SELECT TO crewflow
+  `CREATE POLICY hws_cutover_state_tenant_read ON core.hws_cutover_state AS PERMISSIVE FOR SELECT TO PUBLIC
+  USING (organisation_id = core.current_org())`,
+  `CREATE POLICY hws_cutover_state_crewflow_read ON core.hws_cutover_state AS PERMISSIVE FOR SELECT TO crewflow
   USING (CURRENT_USER = 'crewflow'::name)`,
+  `CREATE POLICY hws_cutover_state_crewflow_insert ON core.hws_cutover_state AS PERMISSIVE FOR INSERT TO crewflow
+  WITH CHECK (CURRENT_USER = 'crewflow'::name AND organisation_id = core.current_org())`,
+  `CREATE POLICY hws_cutover_state_crewflow_update ON core.hws_cutover_state AS PERMISSIVE FOR UPDATE TO crewflow
+  USING (CURRENT_USER = 'crewflow'::name AND organisation_id = core.current_org())
+  WITH CHECK (CURRENT_USER = 'crewflow'::name AND organisation_id = core.current_org())`,
+  `CREATE POLICY hws_cutover_state_secure_owner_definer ON core.hws_cutover_state AS PERMISSIVE FOR ALL TO rab_secure_owner
+  USING (CURRENT_USER = 'rab_secure_owner'::name) WITH CHECK (CURRENT_USER = 'rab_secure_owner'::name)`,
   'REVOKE ALL ON TABLE core.hws_cutover_state FROM PUBLIC',
   'GRANT SELECT ON TABLE core.hws_cutover_state TO crewflow_app',
-  ...['INSERT', 'UPDATE', 'DELETE', 'TRUNCATE'].map(
-    (op) => `CREATE TRIGGER _hws_cutover_state_runtime_guard_${op.toLowerCase()} BEFORE ${op} ON core.hws_cutover_state
-  FOR EACH STATEMENT EXECUTE FUNCTION core.owner_login_grant_parity_guard()`,
-  ),
+  'GRANT SELECT, INSERT, UPDATE ON TABLE core.hws_cutover_state TO crewflow',
 ];
+
+/**
+ * (T2) Re-check N-1 / N-2: the instance-wide, ONE-WAY "cutover active" sentinel (at most one row). Written by the cutover
+ * command on its first run with HWS on (also on a fresh install with no workspace); never removed (no UPDATE / DELETE
+ * policy: not even its owner can, short of ALTER). Once it exists: routing requires a verified state (fail closed), new
+ * workspaces are marked verified at insertion, and an HWS-off API / Worker refuses to boot. No organisation_id: an instance
+ * fact, not tenant data — ENABLE + FORCE anyway (tools/check-rls-coverage.ts FORCED_NON_TENANT_TABLES), readable by everyone,
+ * insertable only by crewflow itself. Owned by rab_secure_owner (read by the new-workspace trigger function, R4).
+ */
+export const HWS_CUTOVER_ACTIVATION_TABLE_SQL: readonly string[] = [
+  `CREATE TABLE core.hws_cutover_activation (
+  singleton boolean NOT NULL DEFAULT true,
+  activated_at timestamptz NOT NULL DEFAULT pg_catalog.now(),
+  CONSTRAINT hws_cutover_activation_pkey PRIMARY KEY (singleton),
+  CONSTRAINT hws_cutover_activation_singleton_check CHECK (singleton)
+)`,
+  'ALTER TABLE core.hws_cutover_activation ENABLE ROW LEVEL SECURITY',
+  'ALTER TABLE core.hws_cutover_activation FORCE ROW LEVEL SECURITY',
+  `CREATE POLICY hws_cutover_activation_read ON core.hws_cutover_activation AS PERMISSIVE FOR SELECT TO PUBLIC USING (true)`,
+  `CREATE POLICY hws_cutover_activation_crewflow_insert ON core.hws_cutover_activation AS PERMISSIVE FOR INSERT TO crewflow
+  WITH CHECK (CURRENT_USER = 'crewflow'::name)`,
+  'REVOKE ALL ON TABLE core.hws_cutover_activation FROM PUBLIC',
+  'GRANT SELECT ON TABLE core.hws_cutover_activation TO crewflow_app',
+  'GRANT SELECT, INSERT ON TABLE core.hws_cutover_activation TO crewflow',
+];
+
+/**
+ * (T3) Re-check N-1: the creation hook in the database. AFTER INSERT on core.manager_workspace (INSERT only — an UPDATE that
+ * fakes a new workspace's columns never fires it): once the cutover is active, the new workspace starts 'verified' (no core
+ * data by construction), in the creating transaction. Before activation it does nothing (an HWS-off deployment's new
+ * workspace keeps its data in core and is copied by the cutover later). rab_secure_owner definer bound to its one table.
+ */
+export const HWS_CUTOVER_NEW_WORKSPACE_TRG_SQL = `
+CREATE FUNCTION core.hws_cutover_new_workspace_trg()
+RETURNS trigger
+LANGUAGE plpgsql
+VOLATILE
+SECURITY DEFINER
+SET search_path = pg_catalog, pg_temp
+AS $fn$
+BEGIN
+  IF TG_TABLE_SCHEMA IS DISTINCT FROM 'core' OR TG_TABLE_NAME IS DISTINCT FROM 'manager_workspace'
+     OR TG_OP IS DISTINCT FROM 'INSERT' OR TG_WHEN IS DISTINCT FROM 'AFTER' OR TG_LEVEL IS DISTINCT FROM 'ROW' THEN
+    RAISE EXCEPTION 'hws cutover: core.hws_cutover_new_workspace_trg() is attached to the wrong table or event' USING ERRCODE = '42501';
+  END IF;
+  IF EXISTS (SELECT 1 FROM core.hws_cutover_activation) THEN
+    INSERT INTO core.hws_cutover_state (workspace_id, organisation_id, state, verified_at)
+    VALUES (NEW.id, NEW.organisation_id, 'verified', pg_catalog.now())
+    ON CONFLICT (workspace_id) DO NOTHING;
+  END IF;
+  RETURN NULL;
+END
+$fn$`;
+
+export const HWS_CUTOVER_NEW_WORKSPACE_TRIGGER_SQL = `CREATE TRIGGER hws_cutover_new_workspace AFTER INSERT ON core.manager_workspace
+  FOR EACH ROW EXECUTE FUNCTION core.hws_cutover_new_workspace_trg()`;
 
 /**
  * (0a) Guard shared by the crewflow definers (SECURITY INVOKER: it runs as the calling definer, i.e. crewflow). Returns the
@@ -369,14 +433,15 @@ $fn$`;
 /**
  * (C) Pre-check of one workspace, all 21 tables in one call: whether the core copy holds rows of W (core_rows), whether W's
  * own table already holds rows (ws_rows), and org_mismatch = core rows of W that carry ANOTHER organisation (review L-1;
- * never copied, the command refuses W). On the user_note row: ambiguous_notes = notes of the organisation whose subject
+ * never copied, the command refuses W) and unowned_rows = core rows of W's ORGANISATION with no workspace at all (re-check
+ * Info-A: they belong to no schema and would never be copied; the command refuses W). On the user_note row: ambiguous_notes = notes of the organisation whose subject
  * has a profile in W AND another profile (they cannot be mapped to exactly one workspace: the copy skips them, the command
  * refuses W), unmapped_notes = notes of the organisation whose subject has no profile at all (they belong to no workspace;
  * reported, never copied). Lifts FORCE on all 43 relations at once (ACCESS EXCLUSIVE on each until the transaction ends).
  */
 export const HWS_CUTOVER_PROBE_SQL = `
 CREATE FUNCTION core.hws_cutover_probe(p_workspace_id uuid)
-RETURNS TABLE (table_name text, core_rows boolean, ws_rows boolean, org_mismatch integer, ambiguous_notes integer, unmapped_notes integer)
+RETURNS TABLE (table_name text, core_rows boolean, ws_rows boolean, org_mismatch integer, unowned_rows integer, ambiguous_notes integer, unmapped_notes integer)
 LANGUAGE plpgsql
 VOLATILE
 SECURITY DEFINER
@@ -402,6 +467,7 @@ BEGIN
     EXECUTE pg_catalog.format('SELECT EXISTS (%s)', core.hws_cutover_source_sql(v_table)) INTO core_rows USING p_workspace_id;
     EXECUTE pg_catalog.format('SELECT EXISTS (SELECT 1 FROM %I.%I)', v_schema, v_table) INTO ws_rows;
     org_mismatch := 0;
+    unowned_rows := 0;
     ambiguous_notes := 0;
     unmapped_notes := 0;
     IF v_table = 'user_note' THEN
@@ -421,6 +487,8 @@ BEGIN
     ELSE
       EXECUTE pg_catalog.format('SELECT pg_catalog.count(*)::integer FROM core.%I c WHERE c.workspace_id = $1 AND c.organisation_id IS DISTINCT FROM core.current_org()', v_table)
         INTO org_mismatch USING p_workspace_id;
+      EXECUTE pg_catalog.format('SELECT pg_catalog.count(*)::integer FROM core.%I c WHERE c.workspace_id IS NULL AND c.organisation_id = core.current_org()', v_table)
+        INTO unowned_rows;
     END IF;
     RETURN NEXT;
   END LOOP;
@@ -429,8 +497,8 @@ END
 $fn$`;
 
 /**
- * (D) Boot check (review M-3): has ANY workspace's cutover started? A crewflow definer reading through the owner-only SELECT
- * policy hws_cutover_state_owner_read (no tenant needed). Boolean only. An API or Worker with HWS off refuses to start when
+ * (D) Boot check (review M-3): has the cutover been activated, or has ANY workspace's cutover started? A crewflow definer
+ * reading through the owner-only SELECT policy hws_cutover_state_crewflow_read (no tenant needed) and the public sentinel. Boolean only. An API or Worker with HWS off refuses to start when
  * true (hws-startup-guard.ts): it would read and write the frozen core copies of a workspace served from its own schema.
  */
 export const HWS_CUTOVER_STARTED_ANY_SQL = `
@@ -441,45 +509,7 @@ STABLE
 SECURITY DEFINER
 SET search_path = pg_catalog, pg_temp
 AS $fn$
-  SELECT EXISTS (SELECT 1 FROM core.hws_cutover_state)
-$fn$`;
-
-/**
- * (D2) Creation hook (security review H-1(b), fail-closed routing): marks a NEW workspace 'verified' — it has no core data by
- * construction, so it is served from its schema at once once routing requires a verified state. Callable only for a workspace
- * of the bound organisation created in THIS transaction (created_at = now(), the transaction's start; schema still CREATING),
- * so it can never mark an existing, not-yet-copied workspace (whose core data would then be skipped by the cutover). A
- * crewflow definer (the state table refuses the runtime login's own DML); EXECUTE to crewflow_app. Called by the application
- * only when it routes to the workspace schemas (HWS on) and the cutover is active (hws-cutover-routing.ts).
- */
-export const HWS_CUTOVER_MARK_NEW_SQL = `
-CREATE FUNCTION core.hws_cutover_mark_new_workspace(p_workspace_id uuid)
-RETURNS boolean
-LANGUAGE plpgsql
-VOLATILE
-SECURITY DEFINER
-SET search_path = pg_catalog, pg_temp
-AS $fn$
-DECLARE
-  v_org uuid;
-  v_n   integer;
-BEGIN
-  IF p_workspace_id IS NULL THEN
-    RAISE EXCEPTION 'hws cutover: a workspace id is required' USING ERRCODE = '22004';
-  END IF;
-  SELECT w.organisation_id INTO v_org
-    FROM core.manager_workspace w
-   WHERE w.id = p_workspace_id AND w.organisation_id = core.current_org()
-     AND w.created_at = pg_catalog.now() AND w.schema_status IS NOT DISTINCT FROM 'CREATING';
-  IF v_org IS NULL THEN
-    RAISE EXCEPTION 'hws cutover: only a workspace created in this transaction can be marked new' USING ERRCODE = '42501';
-  END IF;
-  INSERT INTO core.hws_cutover_state (workspace_id, organisation_id, state, verified_at)
-  VALUES (p_workspace_id, v_org, 'verified', pg_catalog.now())
-  ON CONFLICT (workspace_id) DO NOTHING;
-  GET DIAGNOSTICS v_n = ROW_COUNT;
-  RETURN v_n = 1;
-END
+  SELECT EXISTS (SELECT 1 FROM core.hws_cutover_state) OR EXISTS (SELECT 1 FROM core.hws_cutover_activation)
 $fn$`;
 
 /**
@@ -615,12 +645,11 @@ export const HWS_CUTOVER_CREWFLOW_FUNCTIONS_SQL: readonly string[] = [
   HWS_CUTOVER_COPY_BATCH_SQL,
   HWS_CUTOVER_VERIFY_RANGE_SQL,
   HWS_CUTOVER_STARTED_ANY_SQL,
-  HWS_CUTOVER_MARK_NEW_SQL,
   HWS_CUTOVER_FENCE_FUNCTION_SQL,
 ];
 
-/** Created as rab_secure_owner. */
-export const HWS_CUTOVER_SECURE_FUNCTIONS_SQL: readonly string[] = [HWS_CUTOVER_DROP_NEW_SQL, HWS_CUTOVER_PURGE_CORE_SQL];
+/** Created as rab_secure_owner (after the two tables). */
+export const HWS_CUTOVER_SECURE_FUNCTIONS_SQL: readonly string[] = [HWS_CUTOVER_DROP_NEW_SQL, HWS_CUTOVER_PURGE_CORE_SQL, HWS_CUTOVER_NEW_WORKSPACE_TRG_SQL];
 
 /** Post-condition: owner | definer | config | EXECUTE grantees (sorted, '+'-joined; the owner's implicit right is not listed). */
 export const HWS_CUTOVER_STATE_SQL = `
@@ -645,7 +674,7 @@ export const HWS_CUTOVER_EXPECTED_STATE: Readonly<Record<string, string>> = Obje
   'core.hws_cutover_schema(uuid)': `crewflow|false|${PINNED}|`,
   'core.hws_cutover_source_sql(text)': `crewflow|false|${PINNED}|`,
   'core.hws_cutover_started_any()': `crewflow|true|${PINNED}|crewflow_app`,
-  'core.hws_cutover_mark_new_workspace(uuid)': `crewflow|true|${PINNED}|crewflow_app`,
+  'core.hws_cutover_new_workspace_trg()': `rab_secure_owner|true|${PINNED}|`,
   'core.hws_cutover_verify_range(uuid,text,text,integer)': `crewflow|true|${PINNED_LOCK}|`,
 });
 
@@ -666,19 +695,28 @@ export function hwsCutoverStateProblems(rows: ReadonlyArray<{ fn: string; state:
   return out;
 }
 
-/** Post-condition of the table: owner, RLS, policies, grants, guard and fence triggers (one row of facts). */
+/** Post-condition of the two tables (owner, RLS, policies, grants) and the triggers (one row of facts). */
 export const HWS_CUTOVER_TABLE_FACTS_SQL = `
 SELECT pg_catalog.pg_get_userbyid(c.relowner)::text AS owner, c.relrowsecurity AS rls, c.relforcerowsecurity AS force,
        (SELECT pg_catalog.string_agg(p.polname::text, ',' ORDER BY p.polname) FROM pg_catalog.pg_policy p WHERE p.polrelid = c.oid) AS policies,
        pg_catalog.has_table_privilege('crewflow_app', c.oid, 'SELECT') AS app_select,
        (pg_catalog.has_table_privilege('crewflow_app', c.oid, 'INSERT') OR pg_catalog.has_table_privilege('crewflow_app', c.oid, 'UPDATE')
         OR pg_catalog.has_table_privilege('crewflow_app', c.oid, 'DELETE') OR pg_catalog.has_table_privilege('crewflow_app', c.oid, 'TRUNCATE')) AS app_dml,
-       (SELECT pg_catalog.count(*)::int FROM pg_catalog.pg_trigger t WHERE t.tgrelid = c.oid AND NOT t.tgisinternal AND t.tgenabled = 'O'
-          AND t.tgfoid = 'core.owner_login_grant_parity_guard()'::pg_catalog.regprocedure) AS guards,
+       (pg_catalog.has_table_privilege('crewflow', c.oid, 'DELETE') OR pg_catalog.has_table_privilege('crewflow', c.oid, 'TRUNCATE')) AS crewflow_delete,
+       pg_catalog.pg_get_userbyid(a.relowner)::text AS activation_owner, a.relrowsecurity AS activation_rls, a.relforcerowsecurity AS activation_force,
+       (SELECT pg_catalog.string_agg(p.polname::text, ',' ORDER BY p.polname) FROM pg_catalog.pg_policy p WHERE p.polrelid = a.oid) AS activation_policies,
+       (pg_catalog.has_table_privilege('crewflow_app', a.oid, 'INSERT') OR pg_catalog.has_table_privilege('crewflow_app', a.oid, 'UPDATE')
+        OR pg_catalog.has_table_privilege('crewflow_app', a.oid, 'DELETE') OR pg_catalog.has_table_privilege('crewflow_app', a.oid, 'TRUNCATE')
+        OR pg_catalog.has_table_privilege('crewflow', a.oid, 'UPDATE') OR pg_catalog.has_table_privilege('crewflow', a.oid, 'DELETE')
+        OR pg_catalog.has_table_privilege('crewflow', a.oid, 'TRUNCATE')) AS activation_extra_dml,
        (SELECT pg_catalog.count(*)::int FROM pg_catalog.pg_trigger t JOIN pg_catalog.pg_class x ON x.oid = t.tgrelid
          WHERE x.relnamespace = 'core'::pg_catalog.regnamespace AND t.tgname = '${HWS_CUTOVER_FENCE_TRIGGER}' AND t.tgenabled = 'O'
-           AND t.tgfoid = 'core.hws_cutover_core_fence()'::pg_catalog.regprocedure) AS fences
-  FROM pg_catalog.pg_class c WHERE c.oid = 'core.hws_cutover_state'::pg_catalog.regclass`;
+           AND t.tgfoid = 'core.hws_cutover_core_fence()'::pg_catalog.regprocedure) AS fences,
+       (SELECT pg_catalog.count(*)::int FROM pg_catalog.pg_trigger t
+         WHERE t.tgrelid = 'core.manager_workspace'::pg_catalog.regclass AND t.tgname = '${HWS_CUTOVER_NEW_WORKSPACE_TRIGGER}' AND t.tgenabled = 'O'
+           AND t.tgfoid = 'core.hws_cutover_new_workspace_trg()'::pg_catalog.regprocedure) AS new_workspace_triggers
+  FROM pg_catalog.pg_class c, pg_catalog.pg_class a
+ WHERE c.oid = 'core.hws_cutover_state'::pg_catalog.regclass AND a.oid = 'core.hws_cutover_activation'::pg_catalog.regclass`;
 
 export interface HwsCutoverTableFacts {
   owner: string;
@@ -687,18 +725,30 @@ export interface HwsCutoverTableFacts {
   policies: string;
   app_select: boolean;
   app_dml: boolean;
-  guards: number;
+  crewflow_delete: boolean;
+  activation_owner: string;
+  activation_rls: boolean;
+  activation_force: boolean;
+  activation_policies: string;
+  activation_extra_dml: boolean;
   fences: number;
+  new_workspace_triggers: number;
 }
 
 export function hwsCutoverTableProblems(f: HwsCutoverTableFacts | undefined): string[] {
-  if (!f) return ['core.hws_cutover_state is missing'];
+  if (!f) return ['core.hws_cutover_state / core.hws_cutover_activation missing'];
   const p: string[] = [];
-  if (f.owner !== 'crewflow') p.push(`owner is ${f.owner}`);
-  if (!f.rls || !f.force) p.push('RLS is not ENABLE + FORCE');
-  if (f.policies !== 'hws_cutover_state_owner_read,hws_cutover_state_tenant') p.push(`policies are ${f.policies}`);
-  if (!f.app_select || f.app_dml) p.push('crewflow_app must hold SELECT and no DML');
-  if (Number(f.guards) !== 4) p.push(`${f.guards} runtime guard trigger(s), expected 4`);
+  if (f.owner !== 'rab_secure_owner') p.push(`hws_cutover_state owner is ${f.owner}`);
+  if (!f.rls || !f.force) p.push('hws_cutover_state RLS is not ENABLE + FORCE');
+  const statePolicies = 'hws_cutover_state_crewflow_insert,hws_cutover_state_crewflow_read,hws_cutover_state_crewflow_update,hws_cutover_state_secure_owner_definer,hws_cutover_state_tenant_read';
+  if (f.policies !== statePolicies) p.push(`hws_cutover_state policies are ${f.policies}`);
+  if (!f.app_select || f.app_dml) p.push('crewflow_app must hold SELECT and no DML on hws_cutover_state');
+  if (f.crewflow_delete) p.push('crewflow must hold no DELETE / TRUNCATE on hws_cutover_state');
+  if (f.activation_owner !== 'rab_secure_owner') p.push(`hws_cutover_activation owner is ${f.activation_owner}`);
+  if (!f.activation_rls || !f.activation_force) p.push('hws_cutover_activation RLS is not ENABLE + FORCE');
+  if (f.activation_policies !== 'hws_cutover_activation_crewflow_insert,hws_cutover_activation_read') p.push(`hws_cutover_activation policies are ${f.activation_policies}`);
+  if (f.activation_extra_dml) p.push('hws_cutover_activation must be insert-only for crewflow and read-only for crewflow_app');
   if (Number(f.fences) !== HWS_CUTOVER_TABLES.length) p.push(`${f.fences} fence trigger(s), expected ${HWS_CUTOVER_TABLES.length}`);
+  if (Number(f.new_workspace_triggers) !== 1) p.push(`${f.new_workspace_triggers} new-workspace trigger(s), expected 1`);
   return p;
 }
