@@ -18,6 +18,7 @@ import { SLOW_QUERY_THRESHOLD_MS, SlowQueryLogger } from './slow-query-logger';
 import { PushDevice } from '../../../engine/core-modules/push/entities/push-device.entity';
 import { PushDelivery } from '../../../engine/core-modules/push/entities/push-delivery.entity';
 import { StoredFile } from '../../../engine/core-modules/storage/entities/stored-file.entity';
+import * as metadataEngineEntities from '../../../engine/metadata/entities';
 import * as attendanceEntities from '../../../modules/attendance/entities';
 import * as identityEntities from '../../../modules/identity/entities';
 import * as managerEntities from '../../../modules/manager/entities';
@@ -125,6 +126,7 @@ export const coreDataSourceOptions: DataSourceOptions = defineConnectionGetters(
       StoredFile,
       PushDevice,
       PushDelivery,
+      ...Object.values(metadataEngineEntities),
     ],
     migrations: [`${__dirname}/migrations/*.{ts,js}`],
     // Dotted and permanent now that the DataSource default schema is removed (HWS runtime cutover, Part 2). Measured on

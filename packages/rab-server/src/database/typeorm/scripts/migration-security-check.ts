@@ -53,6 +53,7 @@ import { DataSourceOptions } from 'typeorm';
 
 import { coreMigrationDataSourceOptions, GuardedMigrationDataSource } from '../core/core.datasource';
 import { MigrationIdentityError } from '../core/migration-identity';
+import { METADATA_TABLES } from '../core/metadata-tables-sql';
 import { postMigrationPrivilegeProblems, privilegeDrift, privilegeDriftSnapshot } from '../core/migration-privilege-drift';
 import {
   PHASE_0B_MIGRATION_TIMESTAMP,
@@ -205,6 +206,14 @@ export const REVIEWED_MIGRATION_DRIFT: Readonly<Record<string, readonly string[]
     "+ policy|upgrade_migration|upgrade_migration_workspace_insert|a|permissive=true|roles=public|using=|check=((current_setting('rab.upgrade_scope'::text, true) = 'workspace_init'::text) AND is_initial AND (workspace_id IS NOT NULL) AND (EXISTS ( SELECT 1 FROM core.manager_workspace w WHERE ((w.id = upgrade_migration.workspace_id) AND (w.organisation_id = core.current_org())))))",
     "+ policy|upgrade_migration|upgrade_migration_workspace_select|r|permissive=true|roles=public|using=((current_setting('rab.upgrade_scope'::text, true) = 'workspace_init'::text) AND (workspace_id IS NOT NULL) AND (EXISTS ( SELECT 1 FROM core.manager_workspace w WHERE ((w.id = upgrade_migration.workspace_id) AND (w.organisation_id = core.current_org())))))|check=",
   ],
+  // Metadata engine M1 / E1 (DRAFT, owner SQL review pending; docs/plans/phase-x4/M1-SQL-FOR-OWNER.md § M1-meta): the plain
+  // tenant policy of each of the five metadata tables, added only (FOR ALL TO PUBLIC, USING = WITH CHECK on the bound
+  // organisation AND workspace). Owner, FORCE RLS, grants and triggers are pinned by the golden posture snapshot and the
+  // migration's own post-condition; no runtime login gains a privilege it did not have.
+  '1786721550000-MetadataEngineTables': METADATA_TABLES.map(
+    (t) =>
+      `+ policy|${t}|${t}_tenant|*|permissive=true|roles=public|using=((organisation_id = core.current_org()) AND (workspace_id = core.current_workspace()))|check=((organisation_id = core.current_org()) AND (workspace_id = core.current_workspace()))`,
+  ),
 };
 
 type Identity = 'phaseA' | 'bootstrap' | 'restricted' | 'crewflow' | 'crewflow_app' | 'crewflow_worker';
