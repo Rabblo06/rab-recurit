@@ -23,23 +23,8 @@
     "packages/rab-server/src/modules/ai/actions/ai-write-tools.ts": {
       "unqualified": 6
     },
-    "packages/rab-server/src/modules/attendance/services/attendance.service.ts": {
-      "unqualified": 31
-    },
     "packages/rab-server/src/modules/attendance/services/post-shift-lifecycle.service.ts": {
       "unqualified": 3
-    },
-    "packages/rab-server/src/modules/attendance/services/shift-report.service.ts": {
-      "unqualified": 29
-    },
-    "packages/rab-server/src/modules/attendance/services/shift-review.service.ts": {
-      "unqualified": 4
-    },
-    "packages/rab-server/src/modules/attendance/services/shift-team.service.ts": {
-      "unqualified": 4
-    },
-    "packages/rab-server/src/modules/attendance/services/staff-review-insights.service.ts": {
-      "unqualified": 8
     },
     "packages/rab-server/src/modules/attendance/templates/document-context.ts": {
       "unqualified": 2
