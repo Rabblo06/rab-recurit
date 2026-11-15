@@ -1,5 +1,5 @@
 import 'reflect-metadata';
-import { INestApplication, ValidationPipe } from '@nestjs/common';
+import { INestApplication } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
 import { request as httpRequest, Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -8,6 +8,8 @@ import { AppModule } from '../../app.module';
 import { AuthCacheRedisClientProvider } from '../../engine/core-modules/auth/services/auth-cache-redis-client.provider';
 import { ThrottlerRedisClientProvider } from '../../engine/core-modules/throttler/throttler-redis-client.provider';
 import { HttpFirstShutdown, installHttpFirstShutdown } from '../../engine/utils/http-first-shutdown';
+import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-pipe';
+import { integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
 
 /**
  * XR-09 (Phase X2.5), the real application: on SIGTERM the HTTP listener stops and in-flight requests finish BEFORE the
@@ -17,7 +19,7 @@ import { HttpFirstShutdown, installHttpFirstShutdown } from '../../engine/utils/
  * The real throttler is enforced for this file (RAB_DISABLE_RATE_LIMIT=false), so every request below really goes through
  * the Redis-backed @RateLimitRequired guard.
  */
-const RUN = Boolean(process.env.DATABASE_URL);
+const RUN = integrationTestDatabaseReady();
 const describeIfDb = RUN ? describe : describe.skip;
 
 interface Reply {
@@ -64,8 +66,7 @@ describeIfDb('XR-09 API shutdown order: HTTP stops before the Redis clients quit
 
   beforeAll(async () => {
     const moduleRef = await Test.createTestingModule({ imports: [AppModule] }).compile();
-    app = moduleRef.createNestApplication();
-    app.useGlobalPipes(new ValidationPipe({ whitelist: true, forbidNonWhitelisted: true, transform: true }));
+    app = applyGlobalValidationPipe(moduleRef.createNestApplication());
     // Exactly as main.ts: installed before listen(), so the in-flight tracker sees every request.
     handle = installHttpFirstShutdown(app, { listen: false, reraise, exit, log: () => undefined, drainMs: 10_000 });
     await app.listen(0, '127.0.0.1');

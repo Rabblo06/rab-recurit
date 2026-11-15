@@ -209,9 +209,7 @@ describe('HTTP-first API shutdown (XR-09)', () => {
   ])('a stream is recognised however its headers were set: %s', async (_name, open) => {
     const h = await startHarness((_path, res) => {
       open(res);
-      res.write('data: hello
-
-');
+      res.write('data: hello\n\n');
     });
     const { shutdown } = installHttpFirstShutdown(h.app, { listen: false, reraise: noReraise, log: () => undefined, drainMs: 10_000 });
     let streaming = false;
