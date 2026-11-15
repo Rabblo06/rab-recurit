@@ -2,6 +2,7 @@ import { ConflictException, NotFoundException } from '@nestjs/common';
 import { EntityManager } from 'typeorm';
 
 import { EmploymentStatus, UserStatus } from '@rab/shared';
+import { businessTables } from '../../../engine/core-modules/tenant/business-tables';
 import { User } from '../../identity/entities';
 import { ScheduledWindow } from '../../scheduling/utils/assignment-time';
 import { ShiftAssignment } from '../../scheduling/entities/shift-assignment.entity';
@@ -64,8 +65,9 @@ export async function assertStaffEligibleForOffer(
   // enforces at INSERT time on confirm — checked here too so a conflicting
   // staff member gets a clear message at send time instead of only ever
   // discovering the conflict much later, at confirm time.
+  const t = businessTables(manager);
   const conflicting = await manager.query(
-    `SELECT 1 FROM shift_assignment
+    `SELECT 1 FROM ${t.shift_assignment}
        WHERE staff_profile_id = $1 AND status IN ('confirmed', 'completed')
          AND period && $2::tstzrange
        LIMIT 1`,

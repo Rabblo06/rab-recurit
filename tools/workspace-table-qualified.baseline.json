@@ -47,33 +47,6 @@
     "packages/rab-server/src/modules/dashboard/services/dashboard.service.ts": {
       "unqualified": 10
     },
-    "packages/rab-server/src/modules/offer/services/apply-offer-confirmation.ts": {
-      "unqualified": 9
-    },
-    "packages/rab-server/src/modules/offer/services/assert-staff-eligible-for-offer.ts": {
-      "unqualified": 1
-    },
-    "packages/rab-server/src/modules/offer/services/claim-expired-offer.ts": {
-      "unqualified": 3
-    },
-    "packages/rab-server/src/modules/offer/services/offer-assistant.service.ts": {
-      "unqualified": 6
-    },
-    "packages/rab-server/src/modules/offer/services/offer.service.ts": {
-      "unqualified": 36
-    },
-    "packages/rab-server/src/modules/offer/services/replacement-request.service.ts": {
-      "unqualified": 2
-    },
-    "packages/rab-server/src/modules/offer/services/shift-vacancy.ts": {
-      "unqualified": 2
-    },
-    "packages/rab-server/src/modules/offer/services/venue-offer-pipeline.service.ts": {
-      "unqualified": 8
-    },
-    "packages/rab-server/src/modules/offer/services/withdraw-unconfirmed-offer.ts": {
-      "unqualified": 8
-    },
     "packages/rab-server/src/modules/payroll/files/payslip-file.policy.ts": {
       "unqualified": 3
     },
@@ -94,9 +67,6 @@
     },
     "packages/rab-server/src/modules/search/services/search.service.ts": {
       "unqualified": 19
-    },
-    "packages/rab-server/src/modules/timeline/services/timeline.service.ts": {
-      "unqualified": 24
     },
     "packages/rab-worker/src/queues/rab-maintenance/account-invite-cleanup.job.ts": {
       "unqualified": 6
