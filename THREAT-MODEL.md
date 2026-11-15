@@ -7783,6 +7783,7 @@ Reversal:   A shorter QR_MAX_AGE_DAYS, or rotating QRs automatically on schedule
   4. only then does `app.close()` quit queues/Redis and then the database;
   5. the signal is re-raised (same exit status).
 
+  A 35 s backstop exits 1 if the shutdown hangs, before Docker's SIGKILL at the 40 s grace.
   No request can reach a guard after its Redis client has quit. The in-flight tracker is registered ahead of Express's
   handler and also reads `writeHead` headers, so an SSE stream never holds the drain open.
 - **XR-10, control:** `WORKER_SHUTDOWN_TIMEOUT_MS` is declared and parsed strictly
