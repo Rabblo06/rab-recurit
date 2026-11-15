@@ -32,8 +32,7 @@ import { LATEST_WORKSPACE_MODULE_VERSION } from '@rab/server/database/typeorm/wo
 import { runWorkspaceProvisioningCycle } from '../../queues/rab-maintenance/workspace-provisioning.job';
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { generateFixturePassword } from './helpers/fixture-password';
-import { expectedWorkspacePolicyCount } from '@rab/server/database/typeorm/workspace-schema/v1/server-path-template-venue-team-admin';
-import { LATEST_WORKSPACE_MODULE_VERSION } from '@rab/server/database/typeorm/workspace-schema/workspace-schema-modules';
+import { CODE_STRUCTURE_LEVEL, expectedPolicyCountAtCodeLevel } from './helpers/structure-level-expectations';
 import { integrationTestDatabaseReady } from '@rab/server/database/typeorm/core/integration-test-database-gate';
 
 const RUN = integrationTestDatabaseReady();
@@ -223,11 +222,13 @@ describeIfDb('workspace provisioning job (integration)', () => {
     // version, whose index count is versioned (90 at v15, 94 at v16, 100 at v17); tables/FKs/policies are unchanged.
     expect(indexCount[0]!.n).toBe(expectedWorkspaceIndexCount(LATEST_WORKSPACE_MODULE_VERSION));
     const [recorded] = await adminDataSource.query(`SELECT module_version FROM core.workspace_schema_registry WHERE workspace_id = $1`, [fx.workspaceId]);
-    expect(recorded.module_version).toBe(LATEST_WORKSPACE_MODULE_VERSION);
+    // Part D: the registry records the code's structure level (21 = the 20 frozen modules + StaffProfileMemberSelect).
+    expect(recorded.module_version).toBe(CODE_STRUCTURE_LEVEL);
 
     const policyCount: Array<{ n: number }> = await adminDataSource.query(`SELECT count(*)::int AS n FROM pg_policies WHERE schemaname = $1`, [expectedSchemaName]);
-    // A new workspace is provisioned at the latest module (v18 adds the 2 Assigned Staff policies: 39 → 41).
-    expect(policyCount[0]!.n).toBe(expectedWorkspacePolicyCount(LATEST_WORKSPACE_MODULE_VERSION));
+    // A new workspace is provisioned at the code's structure level (v18 adds the 2 Assigned Staff policies: 39 → 41; level 21
+    // adds staff_profile_member_select: 42).
+    expect(policyCount[0]!.n).toBe(expectedPolicyCountAtCodeLevel());
 
     const fkCount: Array<{ n: number }> = await adminDataSource.query(
       `SELECT count(*)::int AS n FROM pg_constraint k JOIN pg_namespace ns ON ns.oid = k.connamespace WHERE ns.nspname = $1 AND k.contype = 'f'`,

@@ -96,8 +96,16 @@ export const LATEST_WORKSPACE_MODULE_VERSION = WORKSPACE_SCHEMA_MODULES[WORKSPAC
  * Default: LATEST. Lower it in a release only when the newest module(s) are additive for this code, so a workspace the
  * migrator has not reached yet stays routable. Never above LATEST.
  */
-export const MIN_COMPATIBLE_WORKSPACE_MODULE_VERSION: number = 19;
+export const MIN_COMPATIBLE_WORKSPACE_MODULE_VERSION: number = 20;
 /*
+ * Part D, structure level 21 (owner decision 0b, 2026-11-14; reviewed with the code structure level, D-RUNNER.md §5.3 step
+ * 4): 20, one below the code level 21, and the module-list ceiling (the list is frozen at 20). Level 21 adds one SELECT
+ * policy (staff_profile_member_select); this code reads nothing it creates: on a level-20 workspace a custom-role member
+ * simply reads no staff (fail closed, the behaviour before this release). A workspace still at 20 after the start is BLOCKED
+ * by the workspace command runner anyway (review P1: below the code level), so this floor only matters for an image that
+ * serves before its own locked start has run. v19 is no longer routable: every READY workspace reached 20 with
+ * WorkspaceGrantParityGuards1786721430000, and the deploy post-checks refuse a start below 20.
+ *
  * Owner-login PAY-1 (2026-11-04, reviewed value, E-10): 19, not LATEST (20). Module 20 adds the grant-parity triggers only
  * (no table, column, policy or grant); this code reads nothing module 20 creates, so a READY v19 workspace the migrator has
  * not reached yet stays routable (it lacks only the normal-path guards, which WorkspaceGrantParityGuards1786721430000

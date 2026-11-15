@@ -509,10 +509,18 @@ describeIfDb('Members: custom workspace roles, email-first invitations, member a
 
     it('M3. RLS: the member branch on staff_profile needs a custom role of THAT workspace granting staff.view', async () => {
       const member = await onboardMember(tokenA, roleA.id);
+      // Mode-agnostic: the staff row lives in core with HWS off and in the workspace schema with HWS on (Part D level 21 gives
+      // the workspace copy the same staff_profile_member_select policy). Read the table that actually holds staffA.
+      const wsTable = (workspaceId: string) => `workspace_${workspaceId.replace(/-/g, '')}.staff_profile`;
+      const [{ inWs }] = await owner.query(
+        `SELECT to_regclass($1) IS NOT NULL AND EXISTS (SELECT 1 FROM core.staff_profile WHERE id = $2) = false AS "inWs"`,
+        [wsTable(managerA.workspaceId!), staffA.profileId],
+      );
+      const staffTable = (workspaceId: string) => (inWs ? wsTable(workspaceId) : 'core.staff_profile');
       const asUser = (userId: string, workspaceId: string) =>
         runtime.transaction(async (m) => {
           await m.query(`SELECT set_config('rab.organisation_id', $1, true), set_config('rab.workspace_id', $2, true), set_config('rab.user_id', $3, true)`, [org.id, workspaceId, userId]);
-          return m.query(`SELECT user_id FROM core.staff_profile`);
+          return m.query(`SELECT user_id FROM ${staffTable(workspaceId)}`);
         });
       expect((await asUser(member.userId, managerA.workspaceId!)).map((r: { user_id: string }) => r.user_id)).toContain(staffA.userId);
       expect(await asUser(member.userId, managerB.workspaceId!)).toEqual([]); // even if a GUC pointed elsewhere

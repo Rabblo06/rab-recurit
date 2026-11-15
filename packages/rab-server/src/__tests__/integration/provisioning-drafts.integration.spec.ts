@@ -27,7 +27,9 @@ import { AppModule } from '../../app.module';
 import { ProvisionWorkspaceGuards1786721210000 } from '../../database/typeorm/core/migrations/1786721210000-ProvisionWorkspaceGuards';
 import { ProvisioningHealth1786721220000 } from '../../database/typeorm/core/migrations/1786721220000-ProvisioningHealth';
 import { PROVISION_WORKSPACE_STATE_SQL, provisionWorkspaceFunctionV3Sql } from '../../database/typeorm/core/provision-workspace-guards-sql';
-import { EXPECTED_WORKSPACE_FINGERPRINTS, selectWorkspaceFingerprintsForServer } from '../../database/typeorm/workspace-schema/v1/expected-fingerprints';
+import { STAFF_PROFILE_MEMBER_SELECT } from '../../engine/core-modules/upgrade/upgrade-commands/0-6/staff-profile-member-select';
+import { composeServerPathTemplateLevel21, provisionWorkspaceFunctionLevelSql } from '../../database/typeorm/workspace-schema/structure-level-21';
+import { EXPECTED_WORKSPACE_FINGERPRINTS, selectWorkspaceFingerprintsForServer, workspaceFingerprintMajor } from '../../database/typeorm/workspace-schema/v1/expected-fingerprints';
 import { composeServerPathTemplateV1GrantParity } from '../../database/typeorm/workspace-schema/v1/server-path-template-grant-parity';
 import { composeServerPathTemplateV1StatementPointer } from '../../database/typeorm/workspace-schema/v1/server-path-template-statement-pointer';
 import { moduleChecksum, modulesThrough } from '../../database/typeorm/workspace-schema/workspace-schema-modules';
@@ -57,7 +59,17 @@ const { appUrl } = resolveIntegrationTestDatabase(process.env);
  *   v20: WorkspaceGrantParityGuards1786721430000 (owner-login PAY-1, re-frozen in place 2026-11-04 for PAY-1b): the v19
  *        body plus exactly the module-20 grant-parity statements (and its own literal, checksum and fingerprint).
  */
-function approvedProvisionBody(through: 19 | 20): string {
+function approvedProvisionBody(through: 19 | 20 | 21): string {
+  // Part D structure level 21 (WorkspaceStaffMemberSelect1786721480000): the same guarded v3 body over template(20) + level 21,
+  // derived exactly as that migration derives it (declared v2 fingerprint of this server's major).
+  if (through === 21) {
+    const structure = STAFF_PROFILE_MEMBER_SELECT.structure!;
+    const fp = structure.fingerprints[workspaceFingerprintMajor()];
+    if (!fp) throw new Error('no declared level-21 fingerprint for this PostgreSQL major');
+    const sql21 = provisionWorkspaceFunctionLevelSql(composeServerPathTemplateLevel21(), modulesThrough(20).map((m) => ({ id: m.id, version: m.version, checksum: moduleChecksum(m) })), 21, fp, structure.provisionFunctionLiteral!);
+    const open21 = 'AS $provision$';
+    return sql21.slice(sql21.indexOf(open21) + open21.length, sql21.lastIndexOf('$provision$'));
+  }
   const fingerprint = EXPECTED_WORKSPACE_FINGERPRINTS[through];
   if (!fingerprint) throw new Error(`no approved expected fingerprint for module ${through}`);
   const modules = modulesThrough(through).map((m) => ({ id: m.id, version: m.version, checksum: moduleChecksum(m) }));
@@ -161,8 +173,9 @@ describe('Phase B P8 provisioning guards + counts-only health (migrations 178672
       const v19 = await admin.query(`SELECT 1 FROM core.migrations WHERE name = 'StatementDispatchPointer1786721320000'`);
       expect(v19).toHaveLength(1);
       const v20 = await admin.query(`SELECT 1 FROM core.migrations WHERE name = 'WorkspaceGrantParityGuards1786721430000'`);
+      const l21 = await admin.query(`SELECT 1 FROM core.migrations WHERE name = 'WorkspaceStaffMemberSelect1786721480000'`);
       const [{ prosrc }] = await admin.query(`SELECT p.prosrc FROM pg_catalog.pg_proc p WHERE p.oid = 'core.provision_workspace(uuid)'::pg_catalog.regprocedure`);
-      expect(prosrc).toBe(approvedProvisionBody(v20.length === 1 ? 20 : 19));
+      expect(prosrc).toBe(approvedProvisionBody(l21.length === 1 ? 21 : v20.length === 1 ? 20 : 19));
     }
     expect(await admin.query(PROVISIONING_HEALTH_STATE_SQL)).toEqual([...PROVISIONING_HEALTH_EXPECTED_STATE]);
     const [{ n }] = await admin.query(`SELECT count(*)::int AS n FROM pg_proc WHERE pronamespace = 'core'::regnamespace AND proname = 'worker_record_workspace_schema_drift'`);

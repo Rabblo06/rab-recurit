@@ -3,9 +3,11 @@ import { Client } from 'pg';
 
 import { integrationTestDatabase, integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
 import { MIGRATION_LOCK_KEY } from '../../database/typeorm/scripts/migrate/migration-lock';
-import { EXPECTED_WORKSPACE_FINGERPRINTS, selectWorkspaceFingerprintsForServer } from '../../database/typeorm/workspace-schema/v1/expected-fingerprints';
+import { EXPECTED_WORKSPACE_FINGERPRINTS, selectWorkspaceFingerprintsForServer, workspaceFingerprintMajor } from '../../database/typeorm/workspace-schema/v1/expected-fingerprints';
 import { LATEST_WORKSPACE_MODULE_VERSION } from '../../database/typeorm/workspace-schema/workspace-schema-modules';
 import type { WorkspaceUpgradeCommand } from '../../engine/core-modules/upgrade/upgrade-commands/workspace-upgrade-command';
+import { WORKSPACE_UPGRADE_COMMANDS } from '../../engine/core-modules/upgrade/upgrade-commands/registry';
+import { codeWorkspaceStructureLevel, declaredFingerprint } from '../../engine/core-modules/upgrade/workspace-structure-level';
 import { countFailedWorkspaceCursors, upgradeSessionOf, UpgradeSession, withUpgradeScope } from '../../engine/core-modules/upgrade/upgrade-migration.service';
 import { TARGET_EXTRA_STRUCTURE_SQL } from '../../engine/core-modules/upgrade/workspace-step-checks-sql';
 import { SchemaResolverService } from '../../engine/core-modules/tenant/schema-resolver.service';
@@ -13,15 +15,18 @@ import { readUpgradeStatus } from '../../engine/core-modules/upgrade/upgrade-sta
 import { UpgradeRun } from '../../engine/core-modules/upgrade/upgrade-runner';
 import { UpgradeVersionTooOldError } from '../../engine/core-modules/upgrade/upgrade-version-check';
 import { WorkspaceCommandRunner, WorkspaceRunOptions } from '../../engine/core-modules/upgrade/workspace-command-runner';
-import { dropWorkspaceSchema, provisionLegacyV14, provisionTypeScript, registryOf, SeededWorkspace, seedWorkspace } from './helpers/workspace-fixtures';
+import { dropWorkspaceSchema, FROZEN_TEMPLATE_REGISTRY, provisionLegacyV14, provisionTypeScript, registryOf, SeededWorkspace, seedWorkspace } from './helpers/workspace-fixtures';
 
 /**
  * OWNER-DB-ULTIMATE Part D: the workspace command runner on a real (disposable) database, through the one runtime login
  * (TEST_DATABASE_URL = crewflow_owner) holding the migration lock, exactly as the migrate-on-start child does. Workspaces are
- * built by the TypeScript provisioner (module 20 = the frozen template). Proves:
+ * built by the TypeScript provisioner from the FROZEN module-20 template (structure level 20, as every workspace was before Part
+ * D's first structural command); adoption at 0.6.0 then runs this code's real 0.6.0 workspace commands (StaffProfileMemberSelect,
+ * level L = 21), and every probe below is a structural command at level P = L + 1 on top of them (the verify function's
+ * counts at 21+ apply to it; its expected fingerprint is v2). Proves:
  *  - adoption (0.6.0): every READY workspace at module 20 with a matching structure gets ONE is_initial row; a behind or
  *    drifted workspace gets none (refused); a re-run writes nothing;
- *  - a 0.7.0 run: per workspace, a structural command (level 21, expected fingerprint) and a data command, ONE row each;
+ *  - a 0.7.0 run: per workspace, a structural command (level P, expected v2 fingerprint) and a data command, ONE row each;
  *  - abuse: a failed workspace does not mark the others; a command cannot touch another workspace's schema (static name,
  *    dynamic DDL, dynamic DROP, dynamic DML, session re-bind, COMMIT); a structure mismatch refuses and rolls back;
  *  - idempotent after a crash between COMMIT and the logbook row; a workspace without a cursor is refused from 0.7.0;
@@ -36,6 +41,13 @@ const describeIfDb = RUN ? describe : describe.skip;
 const SFX = Math.random().toString(36).replace(/[^a-z]/g, '').slice(0, 6) || 'x';
 const LOCK = MIGRATION_LOCK_KEY.toString();
 const T0 = 1786800000000;
+/** Part D: this code's structure level (21 since StaffProfileMemberSelect) and the probes' level above it. */
+const L = codeWorkspaceStructureLevel();
+const P = L + 1;
+/** This code's real 0.6.0 workspace steps: an adopted workspace runs them right after its is_initial row. */
+const REAL = (WORKSPACE_UPGRADE_COMMANDS['0-6'] ?? []).map((c) => `0.6.0_${c.name}_${c.timestamp}`);
+/** A test registry ON TOP of this code's real one (the sequence must keep the real steps an adopted cursor points at). */
+const withReal = (extra: Readonly<Record<string, readonly WorkspaceUpgradeCommand[]>>): Record<string, readonly WorkspaceUpgradeCommand[]> => ({ ...WORKSPACE_UPGRADE_COMMANDS, ...extra });
 
 describeIfDb('Part D workspace command runner (integration)', () => {
   const { adminUrl, appUrl } = RUN ? integrationTestDatabase() : ({} as never);
@@ -44,14 +56,14 @@ describeIfDb('Part D workspace command runner (integration)', () => {
   let session: UpgradeSession;
   const created: SeededWorkspace[] = [];
   const lines: string[] = [];
-  let level21: string;
+  let level21: string; // the probe level P's expected v2 fingerprint (the name is from the first version, when P was 21)
 
   let seq = 0;
   const make = async (n: string, provision: 'ts' | 'v14' = 'ts'): Promise<SeededWorkspace> => {
     seq += 1;
     const ws = await seedWorkspace(admin, `dr-${n}-${SFX}-${String.fromCharCode(97 + Math.floor(seq / 26))}${String.fromCharCode(97 + (seq % 26))}`);
     created.push(ws);
-    if (provision === 'ts') expect(await provisionTypeScript(adminUrl, ws)).toBe('READY');
+    if (provision === 'ts') expect(await provisionTypeScript(adminUrl, ws, { workspaceRegistry: FROZEN_TEMPLATE_REGISTRY })).toBe('READY');
     else await provisionLegacyV14(adminUrl, ws);
     return ws;
   };
@@ -63,6 +75,8 @@ describeIfDb('Part D workspace command runner (integration)', () => {
       )
     ).rows as Array<{ name: string; status: string; attempt: number; is_initial: boolean; forced: boolean; executed_by_version: string }>;
   const fingerprint = async (ws: SeededWorkspace) => (await admin.query('SELECT core.workspace_schema_fingerprint($1) AS f', [ws.id])).rows[0].f as string;
+  /** Fingerprint v2: what every structure level above 20 is declared and compared with. */
+  const fingerprintV2 = async (ws: SeededWorkspace) => (await admin.query('SELECT core.workspace_schema_fingerprint_v2($1) AS f', [ws.id])).rows[0].f as string;
   const hasColumn = async (ws: SeededWorkspace, table: string, column: string) =>
     Number(
       (
@@ -79,14 +93,15 @@ describeIfDb('Part D workspace command runner (integration)', () => {
       force: false,
       adopt: false,
       log: (l) => lines.push(l),
-      expectedFingerprint: (level) => (level === 21 ? level21 : EXPECTED_WORKSPACE_FINGERPRINTS[level]),
+      expectedFingerprint: (level, major) => (level === P ? level21 : level > 20 ? declaredFingerprint(level, major) : EXPECTED_WORKSPACE_FINGERPRINTS[level]),
       ...o,
+      workspaceRegistry: o.workspaceRegistry ? withReal(o.workspaceRegistry) : undefined,
     }).run(session);
   const adopt = (ids: string[]) => runner({ codeVersion: '0.6.0', versions: ['0.4.0', '0.5.0'], adopt: true, workspaceIds: ids });
   const cmd = (name: string, i: number, body: Partial<WorkspaceUpgradeCommand>): WorkspaceUpgradeCommand => ({ kind: 'workspace', name, timestamp: T0 + i, ...body });
   const probeColumn: WorkspaceUpgradeCommand = cmd('AddProbeColumn', 0, {
     sql: (s) => `ALTER TABLE ${s}.venue ADD COLUMN IF NOT EXISTS d_probe text`,
-    structure: { level: 21, fingerprints: {} },
+    structure: { level: P, fingerprints: {} },
   });
   /** Hex digits of a schema name reversed, so the static scan cannot see the name (the dynamic-SQL abuse cases). */
   const hidden = (ws: SeededWorkspace) => `'workspace_' || reverse('${ws.schema.slice('workspace_'.length).split('').reverse().join('')}')`;
@@ -99,13 +114,16 @@ describeIfDb('Part D workspace command runner (integration)', () => {
     await selectWorkspaceFingerprintsForServer(async (sql) => (await admin.query(sql)).rows);
     await app.query('SELECT pg_advisory_lock($1::bigint)', [LOCK]);
     session = upgradeSessionOf(app);
-    // The expected structure level 21 = the frozen template + the probe column, measured on a reference workspace and rolled back.
+    // The expected structure level P = the frozen template + this code's real structural commands + the probe column (v2),
+    // measured on a reference workspace and rolled back.
     const ref = await make('ref');
     await admin.query('BEGIN');
+    for (const c of WORKSPACE_UPGRADE_COMMANDS['0-6'] ?? []) if (c.sql) await admin.query(c.sql(ref.schema));
     await admin.query(probeColumn.sql!(ref.schema));
-    level21 = await fingerprint(ref);
+    level21 = await fingerprintV2(ref);
     await admin.query('ROLLBACK');
-    expect(level21).not.toBe(EXPECTED_WORKSPACE_FINGERPRINTS[LATEST_WORKSPACE_MODULE_VERSION]);
+    expect(L).toBeGreaterThan(LATEST_WORKSPACE_MODULE_VERSION);
+    expect(level21).not.toBe(declaredFingerprint(L, workspaceFingerprintMajor()));
   });
 
   afterAll(async () => {
@@ -137,7 +155,12 @@ describeIfDb('Part D workspace command runner (integration)', () => {
     await run.beforeApply(session, { fresh: false, attribution: null, unrestrictedTarget: true });
     await run.afterApply(session);
     for (const ws of [a, b]) {
-      expect(await rows(ws)).toEqual([{ name: '0.6.0_TypeOrmMigrations', status: 'completed', attempt: 1, is_initial: true, forced: false, executed_by_version: '0.6.0' }]);
+      expect(await rows(ws)).toEqual([
+        { name: '0.6.0_TypeOrmMigrations', status: 'completed', attempt: 1, is_initial: true, forced: false, executed_by_version: '0.6.0' },
+        // Part D: the adopted cursor is the last INSTANCE step, so this code's real 0.6.0 workspace commands run right after.
+        ...REAL.map((name) => ({ name, status: 'completed', attempt: 1, is_initial: false, forced: false, executed_by_version: '0.6.0' })),
+      ]);
+      expect((await registryOf(admin, ws.id)).module_version).toBe(L);
     }
     expect(await rows(drift)).toEqual([]);
     expect(await rows(legacy)).toEqual([]);
@@ -149,11 +172,11 @@ describeIfDb('Part D workspace command runner (integration)', () => {
 
     const again = await adopt([a.id, b.id, drift.id]);
     expect(again.outcomes.find((o) => o.workspaceId === a.id)!.status).toBe('up-to-date');
-    expect((await rows(a)).length).toBe(1);
+    expect((await rows(a)).length).toBe(1 + REAL.length);
     expect(again.failures.map((f) => f.workspaceId)).toEqual([drift.id]);
   });
 
-  it('0.7.0: a structural and a data command run once per workspace, ONE row each, level 21; a failed workspace does not mark the others', async () => {
+  it('0.7.0: a structural and a data command run once per workspace, ONE row each, level P; a failed workspace does not mark the others', async () => {
     const [a, b, c] = [await make('r-a'), await make('r-b'), await make('r-c')];
     await adopt([a.id, b.id, c.id]);
     let failB = true;
@@ -171,15 +194,15 @@ describeIfDb('Part D workspace command runner (integration)', () => {
     console.log(`[drunner-timing] 3 workspaces x 2 steps (incl. listing, cursors, rows): ${Date.now() - t0} ms; pg_class rows: ${pgClass}`);
     expect(first.failures.map((f) => [f.workspaceId, f.step, f.attempt])).toEqual([[b.id, `0.7.0_CountVenues_${T0 + 1}`, 1]]);
     for (const ws of [a, c]) {
-      expect((await rows(ws)).slice(1).map((r) => [r.name, r.status, r.attempt])).toEqual([
+      expect((await rows(ws)).slice(1 + REAL.length).map((r) => [r.name, r.status, r.attempt])).toEqual([
         [`0.7.0_AddProbeColumn_${T0}`, 'completed', 1],
         [`0.7.0_CountVenues_${T0 + 1}`, 'completed', 1],
       ]);
       expect(await hasColumn(ws, 'venue', 'd_probe')).toBe(true);
-      expect((await registryOf(admin, ws.id)).module_version).toBe(21);
-      expect(await fingerprint(ws)).toBe(level21);
+      expect((await registryOf(admin, ws.id)).module_version).toBe(P);
+      expect(await fingerprintV2(ws)).toBe(level21);
     }
-    expect((await rows(b)).slice(1).map((r) => [r.name, r.status, r.attempt])).toEqual([
+    expect((await rows(b)).slice(1 + REAL.length).map((r) => [r.name, r.status, r.attempt])).toEqual([
       [`0.7.0_AddProbeColumn_${T0}`, 'completed', 1],
       [`0.7.0_CountVenues_${T0 + 1}`, 'failed', 1],
     ]);
@@ -191,7 +214,7 @@ describeIfDb('Part D workspace command runner (integration)', () => {
     const second = await runner({ workspaceRegistry: registry, workspaceIds: [a.id, b.id, c.id] });
     expect(second.failures).toEqual([]);
     expect((await rows(b)).slice(-1)[0]).toMatchObject({ name: `0.7.0_CountVenues_${T0 + 1}`, status: 'completed', attempt: 2 });
-    expect((await rows(a)).length).toBe(3);
+    expect((await rows(a)).length).toBe(3 + REAL.length);
     expect(second.outcomes.find((o) => o.workspaceId === a.id)!.status).toBe('up-to-date');
   });
 
@@ -204,15 +227,15 @@ describeIfDb('Part D workspace command runner (integration)', () => {
     expect(out.failures.map((f) => f.errorClass)).toEqual(['DDL_IN_DATA_STEP', 'DDL_IN_DATA_STEP']);
     expect(await hasColumn(a, 'venue', 'sneaky')).toBe(false);
     expect(await fingerprint(a)).toBe(before);
-    expect((await registryOf(admin, a.id)).module_version).toBe(20);
+    expect((await registryOf(admin, a.id)).module_version).toBe(L);
     // A structural command whose result is not its declared level is refused the same way.
     const c = await make('sm-c');
     await adopt([c.id]);
-    const wrong = cmd('WrongLevel', 3, { sql: (s) => `ALTER TABLE ${s}.venue ADD COLUMN IF NOT EXISTS other_col text`, structure: { level: 21, fingerprints: {} } });
+    const wrong = cmd('WrongLevel', 3, { sql: (s) => `ALTER TABLE ${s}.venue ADD COLUMN IF NOT EXISTS other_col text`, structure: { level: P, fingerprints: {} } });
     const out2 = await runner({ workspaceRegistry: { '0-7': [wrong] }, workspaceIds: [c.id] });
     expect(out2.failures.map((f) => f.errorClass)).toEqual(['FINGERPRINT_MISMATCH']);
     expect(await hasColumn(c, 'venue', 'other_col')).toBe(false);
-    expect((await registryOf(admin, c.id)).module_version).toBe(20);
+    expect((await registryOf(admin, c.id)).module_version).toBe(L);
   });
 
   describe("abuse: a workspace's command cannot touch another workspace's schema", () => {
@@ -230,11 +253,11 @@ describeIfDb('Part D workspace command runner (integration)', () => {
       const yRoles = (await admin.query(`SELECT name FROM ${y.schema}.job_role ORDER BY name`)).rows;
       const out = await runner({
         workspaceRegistry: {
-          '0-7': [cmd(name, i, { run: async (ctx) => { if (ctx.workspaceId === x.id) await body(ctx); await probe(ctx.query, ctx.schemaName); }, structure: { level: 21, fingerprints: {}, mayDrop: true } })],
+          '0-7': [cmd(name, i, { run: async (ctx) => { if (ctx.workspaceId === x.id) await body(ctx); await probe(ctx.query, ctx.schemaName); }, structure: { level: P, fingerprints: {}, mayDrop: true } })],
         },
         workspaceIds: [x.id, y.id],
       });
-      expect(await fingerprint(y)).toBe(level21);
+      expect(await fingerprintV2(y)).toBe(level21);
       expect((await admin.query(`SELECT name FROM ${y.schema}.job_role ORDER BY name`)).rows).toEqual(yRoles);
       // y's own run of the same step is unaffected (a failed workspace does not mark the others).
       expect(out.outcomes.find((o) => o.workspaceId === y.id)!.completed).toEqual([`0.7.0_${name}_${T0 + i}`]);
@@ -288,7 +311,7 @@ describeIfDb('Part D workspace command runner (integration)', () => {
           if (workspaceId !== x.id) return;
           await query(`ALTER TABLE ${schemaName}.venue ADD COLUMN fk_probe uuid REFERENCES core."user"(id)`);
         },
-        structure: { level: 21, fingerprints: {} },
+        structure: { level: P, fingerprints: {} },
       });
       const out = await runner({ workspaceRegistry: { '0-7': [fk] }, workspaceIds: [x.id] });
       // The isolation layer passes (no OUTSIDE_SCHEMA); the structure check then refuses the undeclared DDL (the verify
@@ -317,7 +340,7 @@ describeIfDb('Part D workspace command runner (integration)', () => {
                 if (ctx.workspaceId === x.id) await body(ctx.query);
                 await ctx.query(`ALTER TABLE ${ctx.schemaName}.venue ADD COLUMN IF NOT EXISTS d_probe text`);
               },
-              structure: { level: 21, fingerprints: {} },
+              structure: { level: P, fingerprints: {} },
             }),
           ],
         },
@@ -424,12 +447,12 @@ describeIfDb('Part D workspace command runner (integration)', () => {
     it('a data command doing CREATE RULE, or creating an UNLOGGED table, is refused (STRUCTURE_EXTRA), rolled back, recorded failed', async () => {
       const [a, b] = [await make('m2-a'), await make('m2-b')];
       await adopt([a.id, b.id]);
-      const rule = cmd('AddRule', 40, { sql: (s) => `CREATE RULE d_rule AS ON INSERT TO ${s}.job_role DO INSTEAD NOTHING`, structure: { level: 21, fingerprints: {} } });
+      const rule = cmd('AddRule', 40, { sql: (s) => `CREATE RULE d_rule AS ON INSERT TO ${s}.job_role DO INSTEAD NOTHING`, structure: { level: P, fingerprints: {} } });
       const out = await runner({ workspaceRegistry: { '0-7': [rule] }, workspaceIds: [a.id] });
       expect(out.failures.map((f) => f.errorClass)).toEqual(['STRUCTURE_EXTRA']);
       expect(Number((await admin.query(`SELECT count(*)::int AS n FROM pg_rewrite WHERE rulename = 'd_rule'`)).rows[0].n)).toBe(0);
       expect((await rows(a)).slice(-1)[0]).toMatchObject({ name: `0.7.0_AddRule_${T0 + 40}`, status: 'failed', attempt: 1 });
-      const unlogged = cmd('AddUnlogged', 41, { sql: (s) => `CREATE UNLOGGED TABLE ${s}.d_scratch (x int)`, structure: { level: 21, fingerprints: {} } });
+      const unlogged = cmd('AddUnlogged', 41, { sql: (s) => `CREATE UNLOGGED TABLE ${s}.d_scratch (x int)`, structure: { level: P, fingerprints: {} } });
       const out2 = await runner({ workspaceRegistry: { '0-7': [unlogged] }, workspaceIds: [b.id] });
       expect(out2.failures.map((f) => f.errorClass)).toEqual(['STRUCTURE_EXTRA']);
       expect(Number((await admin.query(`SELECT count(*)::int AS n FROM pg_class WHERE relname = 'd_scratch' AND relnamespace = $1::regnamespace`, [b.schema])).rows[0].n)).toBe(0);
@@ -578,7 +601,7 @@ describeIfDb('Part D workspace command runner (integration)', () => {
           await query(`ALTER TABLE ${schemaName}.venue ADD COLUMN IF NOT EXISTS d_probe text`);
           if (failA && workspaceId === a.id) throw new Error('structural step failed for a');
         },
-        structure: { level: 21, fingerprints: {} },
+        structure: { level: P, fingerprints: {} },
       });
       const reg = { '0-7': [structural] };
       const first = await runner({ workspaceRegistry: reg, workspaceIds: [a.id, b.id] });
@@ -626,27 +649,27 @@ describeIfDb('Part D workspace command runner (integration)', () => {
       expect((await rows(w)).slice(-1)[0]).toMatchObject({ name: `0.7.0_DataOnly_${T0 + 102}`, status: 'completed', attempt: 2 });
     });
 
-    it('(P1) a data step fails BEFORE a pending structural step: blocked at level 20 (503), stays blocked when the data step fails again, unblocked once both pass', async () => {
+    it('(P1) a data step fails BEFORE a pending structural step: blocked at level L (503), stays blocked when the data step fails again, unblocked once both pass', async () => {
       const [w, v] = [await make('p1-w'), await make('p1-v')];
       await adopt([w.id, v.id]);
       let failW = true;
       const d1 = cmd('D1First', 120, { run: async ({ workspaceId }) => { if (failW && workspaceId === w.id) throw new Error('d1 fails for w'); } });
-      const s21 = cmd('S21Second', 121, { sql: (x) => `ALTER TABLE ${x}.venue ADD COLUMN IF NOT EXISTS d_probe text`, structure: { level: 21, fingerprints: {} } });
+      const s21 = cmd('S21Second', 121, { sql: (x) => `ALTER TABLE ${x}.venue ADD COLUMN IF NOT EXISTS d_probe text`, structure: { level: P, fingerprints: {} } });
       const reg = { '0-7': [d1, s21] };
       const first = await runner({ workspaceRegistry: reg, workspaceIds: [w.id, v.id] });
       expect(first.failures.map((f) => [f.workspaceId, f.blocked])).toEqual([[w.id, true]]);
-      expect((await registryOf(admin, w.id)).module_version).toBe(20);
-      expect((await registryOf(admin, v.id)).module_version).toBe(21);
+      expect((await registryOf(admin, w.id)).module_version).toBe(L);
+      expect((await registryOf(admin, v.id)).module_version).toBe(P);
       expect(await resolveAs(w.org, w.id)).toBe('upgrading');
       expect(await resolveAs(v.org, v.id)).toBe('resolved');
-      // The data step fails again with a structure that matches level 20: still blocked (the code needs 21).
+      // The data step fails again with a structure that matches level L: still blocked (the code needs P).
       const second = await runner({ workspaceRegistry: reg, workspaceIds: [w.id] });
       expect(second.failures.map((f) => f.blocked)).toEqual([true]);
       expect(await resolveAs(w.org, w.id)).toBe('upgrading');
       failW = false;
       const third = await runner({ workspaceRegistry: reg, workspaceIds: [w.id] });
       expect(third.failures).toEqual([]);
-      expect((await registryOf(admin, w.id)).module_version).toBe(21);
+      expect((await registryOf(admin, w.id)).module_version).toBe(P);
       expect(await resolveAs(w.org, w.id)).toBe('resolved');
     });
 
@@ -671,27 +694,27 @@ describeIfDb('Part D workspace command runner (integration)', () => {
       `USING (((organisation_id = core.current_org()) AND (workspace_id = core.current_workspace()))) ` +
       `WITH CHECK (((organisation_id = core.current_org()) AND (workspace_id = core.current_workspace()))); ` +
       `ALTER TABLE ${s2}.venue ADD COLUMN IF NOT EXISTS d_probe text`;
-    const undeclared = cmd('DropUndeclared', 110, { sql: recreate, structure: { level: 21, fingerprints: {} } });
+    const undeclared = cmd('DropUndeclared', 110, { sql: recreate, structure: { level: P, fingerprints: {} } });
     const out = await runner({ workspaceRegistry: { '0-7': [undeclared] }, workspaceIds: [a.id] });
     expect(out.failures.map((f) => f.errorClass)).toEqual(['UNDECLARED_DROP']);
-    const declared = cmd('DropDeclared', 111, { sql: recreate, structure: { level: 21, fingerprints: {}, mayDrop: true } });
+    const declared = cmd('DropDeclared', 111, { sql: recreate, structure: { level: P, fingerprints: {}, mayDrop: true } });
     const out2 = await runner({ workspaceRegistry: { '0-7': [declared] }, workspaceIds: [b.id] });
     expect(out2.failures).toEqual([]);
-    expect(await fingerprint(b)).toBe(level21);
+    expect(await fingerprintV2(b)).toBe(level21);
   });
 
   it('idempotent after a crash between COMMIT and the logbook row: the step re-runs and completes', async () => {
     const w = await make('crash');
     await adopt([w.id]);
-    // Simulate: the command committed (column + level 21) but its row was never written.
+    // Simulate: the command committed (column + level P) but its row was never written.
     await admin.query('BEGIN');
     await admin.query(probeColumn.sql!(w.schema));
-    await admin.query(`UPDATE core.workspace_schema_registry SET module_version = 21 WHERE workspace_id = $1`, [w.id]);
+    await admin.query(`UPDATE core.workspace_schema_registry SET module_version = $2 WHERE workspace_id = $1`, [w.id, P]);
     await admin.query('COMMIT');
     const out = await runner({ workspaceRegistry: { '0-7': [probeColumn] }, workspaceIds: [w.id] });
     expect(out.failures).toEqual([]);
-    expect((await rows(w)).slice(1).map((r) => [r.name, r.status, r.attempt])).toEqual([[`0.7.0_AddProbeColumn_${T0}`, 'completed', 1]]);
-    expect(await fingerprint(w)).toBe(level21);
+    expect((await rows(w)).slice(1 + REAL.length).map((r) => [r.name, r.status, r.attempt])).toEqual([[`0.7.0_AddProbeColumn_${T0}`, 'completed', 1]]);
+    expect(await fingerprintV2(w)).toBe(level21);
   });
 
   it('from 0.7.0 a workspace without a cursor is refused (NO_CURSOR); --force marks every row forced', async () => {
@@ -704,14 +727,14 @@ describeIfDb('Part D workspace command runner (integration)', () => {
     const f = await make('forced');
     await adopt([f.id]);
     await runner({ workspaceRegistry: { '0-7': [probeColumn] }, workspaceIds: [f.id], force: true });
-    expect((await rows(f)).slice(1).map((r) => [r.name, r.forced])).toEqual([[`0.7.0_AddProbeColumn_${T0}`, true]]);
+    expect((await rows(f)).slice(1 + REAL.length).map((r) => [r.name, r.forced])).toEqual([[`0.7.0_AddProbeColumn_${T0}`, true]]);
   });
 
   it('previous-version check: 0.8.0 refuses (65) until every workspace completed 0.7.0\'s last workspace command; --force skips it', async () => {
     const [a, b] = [await make('pv-a'), await make('pv-b')];
     await adopt([a.id, b.id]);
     let fail = true;
-    const registry = { '0-7': [probeColumn, cmd('Last07', 1, { run: async ({ workspaceId }) => { if (fail && workspaceId === b.id) throw new Error('b not yet'); } })] };
+    const registry = withReal({ '0-7': [probeColumn, cmd('Last07', 1, { run: async ({ workspaceId }) => { if (fail && workspaceId === b.id) throw new Error('b not yet'); } })] });
     await runner({ workspaceRegistry: registry, workspaceIds: [a.id, b.id] });
     await admin.query(`INSERT INTO core.upgrade_migration (name, status, attempt, executed_by_version) VALUES ('0.7.0_TypeOrmMigrations', 'completed', 1, '0.7.0')`);
     const at = (force: boolean) =>

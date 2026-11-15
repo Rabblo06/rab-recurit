@@ -7,34 +7,43 @@ import { deployPostCheckProblems } from '../../database/typeorm/scripts/migrate/
 import { STARTUP_EXIT_CODES } from '../../database/owner-login/runtime-db-config';
 import { selectWorkspaceFingerprintsForServer, workspaceFingerprintMajor } from '../../database/typeorm/workspace-schema/v1/expected-fingerprints';
 import { provisionWorkspaceSchema } from '../../database/typeorm/workspace-schema/provision-workspace-schema';
-import { UPGRADE_COMMANDS } from '../../engine/core-modules/upgrade/upgrade-commands/registry';
+import { UPGRADE_COMMANDS, WORKSPACE_UPGRADE_COMMANDS } from '../../engine/core-modules/upgrade/upgrade-commands/registry';
+import { codeWorkspaceStructureLevel } from '../../engine/core-modules/upgrade/workspace-structure-level';
 import type { WorkspaceUpgradeCommand } from '../../engine/core-modules/upgrade/upgrade-commands/workspace-upgrade-command';
 import { readUpgradeStatus } from '../../engine/core-modules/upgrade/upgrade-status.service';
 import { upgradeSessionOf } from '../../engine/core-modules/upgrade/upgrade-migration.service';
 import { lastStepOfVersion } from '../../engine/core-modules/upgrade/upgrade-sequence';
-import { dropWorkspaceSchema, provisionTypeScript, registryOf, SeededWorkspace, seedWorkspace } from './helpers/workspace-fixtures';
+import { dropWorkspaceSchema, FROZEN_TEMPLATE_REGISTRY, provisionTypeScript, registryOf, SeededWorkspace, seedWorkspace } from './helpers/workspace-fixtures';
 
 /**
  * OWNER-DB-ULTIMATE Part D, security review M3 / L3: the workspace pass through the REAL locked start (runMigrateOnStart,
- * in-process, as the migrate child runs it), with a STRUCTURAL probe command (level 21) in a test registry (the deps seam
- * `testWorkspace`, unreachable from the environment). Proves:
- *  - first start: the pre-Part-D workspaces are adopted (is_initial at the last instance step), the probe brings them to
- *    level 21, the deploy post-checks (code level 21) pass, exit 0;
+ * in-process, as the migrate child runs it), with this code's real 0.6.0 workspace commands (StaffProfileMemberSelect, level
+ * L = 21) plus a STRUCTURAL probe command (level P = L + 1) in a test registry (the deps seam `testWorkspace`, unreachable
+ * from the environment). The workspaces are built from the FROZEN module-20 template, as every workspace was before Part D's
+ * first structural command. Proves:
+ *  - first start: the pre-Part-D workspaces are adopted (is_initial at the last instance step), the real command and the
+ *    probe bring them to level P, the deploy post-checks (code level P) pass, exit 0;
  *  - second start: nothing to do, exit 0;
- *  - a workspace provisioned AFTERWARDS by the TypeScript provisioner from the level-21 template starts at the probe's cursor and
+ *  - a workspace provisioned AFTERWARDS by the TypeScript provisioner from the level-P template starts at the probe's cursor and
  *    passes a later data step; exit 0;
  *  - a drifted, unadopted workspace: adoption refused, the start serves with exit 70, and the status says failed.
  *
- * The SQL provisioner's level-21 template cannot exist yet (re-creating core.provision_workspace is owner-reviewed SQL). It is
- * SIMULATED here by relabelling the throwaway database's function body: its app_version literal is replaced by the probe's
- * declared literal (the body still builds module 20; nothing in these cases provisions through it), and restored afterwards.
+ * The SQL provisioner's level-P template does not exist (re-creating core.provision_workspace is owner-reviewed SQL). It is
+ * SIMULATED here by relabelling the throwaway database's function body: its app_version literal (the real level-21 one) is
+ * replaced by the probe's declared literal (the body still builds level 21; nothing in these cases provisions through it), and
+ * restored afterwards.
  */
 jest.setTimeout(600_000);
 
 const RUN = integrationTestDatabaseReady();
 const describeIfDb = RUN ? describe : describe.skip;
 const SFX = Math.random().toString(36).replace(/[^a-z]/g, '').slice(0, 6) || 'x';
-const FROZEN_LITERAL = 'db:provision_workspace@WorkspaceGrantParityGuards1786721430000';
+const L = codeWorkspaceStructureLevel();
+const P = L + 1;
+const REAL_CMDS = WORKSPACE_UPGRADE_COMMANDS['0-6'] ?? [];
+/** The literal of the SQL provisioner this code's migrations installed: the newest structural command's (structure level L). */
+const FROZEN_LITERAL = [...REAL_CMDS].reverse().find((c) => c.structure?.provisionFunctionLiteral)!.structure!.provisionFunctionLiteral!;
+const REAL = REAL_CMDS.map((c) => `0.6.0_${c.name}_${c.timestamp}`);
 const PROBE_LITERAL = 'db:provision_workspace@DrunnerProbeLevel1799999999991';
 const T0 = 1786900000000;
 
@@ -55,7 +64,8 @@ describeIfDb('Part D through the locked start (runMigrateOnStart)', () => {
   };
   const rows = async (ws: SeededWorkspace) =>
     (await admin.query(`SELECT name, status, attempt, is_initial FROM core.upgrade_migration WHERE workspace_id = $1 ORDER BY created_at, attempt`, [ws.id])).rows;
-  const fingerprint = async (ws: SeededWorkspace) => (await admin.query('SELECT core.workspace_schema_fingerprint($1) AS f', [ws.id])).rows[0].f as string;
+  const fingerprint = async (ws: SeededWorkspace) => (await admin.query('SELECT core.workspace_schema_fingerprint_v2($1) AS f', [ws.id])).rows[0].f as string;
+  const frozen = (ws: SeededWorkspace) => provisionTypeScript(adminUrl, ws, { workspaceRegistry: FROZEN_TEMPLATE_REGISTRY });
   const start = (
     registry: Record<string, readonly WorkspaceUpgradeCommand[]>,
     ids: string[],
@@ -76,13 +86,14 @@ describeIfDb('Part D through the locked start (runMigrateOnStart)', () => {
     await admin.connect();
     await selectWorkspaceFingerprintsForServer(async (sql) => (await admin.query(sql)).rows);
     const ref = await make('ref');
-    expect(await provisionTypeScript(adminUrl, ref)).toBe('READY');
+    expect(await frozen(ref)).toBe('READY');
     const sql = (s: string) => `ALTER TABLE ${s}.venue ADD COLUMN IF NOT EXISTS d_start_probe text`;
     await admin.query('BEGIN');
+    for (const c of REAL_CMDS) if (c.sql) await admin.query(c.sql(ref.schema));
     await admin.query(sql(ref.schema));
-    const level21 = await fingerprint(ref);
+    const levelP = await fingerprint(ref);
     await admin.query('ROLLBACK');
-    probe = { kind: 'workspace', name: 'StartProbe', timestamp: T0, sql, structure: { level: 21, fingerprints: { [workspaceFingerprintMajor()]: level21 }, provisionFunctionLiteral: PROBE_LITERAL } };
+    probe = { kind: 'workspace', name: 'StartProbe', timestamp: T0, sql, structure: { level: P, fingerprints: { [workspaceFingerprintMajor()]: levelP }, provisionFunctionLiteral: PROBE_LITERAL } };
     originalDef = (await admin.query(`SELECT pg_catalog.pg_get_functiondef('core.provision_workspace(uuid)'::regprocedure) AS d`)).rows[0].d as string;
     expect(originalDef).toContain(FROZEN_LITERAL);
   });
@@ -99,10 +110,10 @@ describeIfDb('Part D through the locked start (runMigrateOnStart)', () => {
     await admin?.end();
   });
 
-  it('start 1 adopts and brings the fleet to level 21 (exit 0); start 2 does nothing (exit 0); a later-provisioned level-21 workspace passes a data step', async () => {
+  it('start 1 adopts and brings the fleet to level P (exit 0); start 2 does nothing (exit 0); a later-provisioned level-P workspace passes a data step', async () => {
     const [w1, w2] = [await make('w1'), await make('w2')];
-    for (const w of [w1, w2]) expect(await provisionTypeScript(adminUrl, w)).toBe('READY');
-    const r1 = { '0-6': [probe] };
+    for (const w of [w1, w2]) expect(await frozen(w)).toBe('READY');
+    const r1 = { '0-6': [...REAL_CMDS, probe] };
     await relabel(true);
     try {
 
@@ -110,18 +121,19 @@ describeIfDb('Part D through the locked start (runMigrateOnStart)', () => {
     expect({ outcome: first.outcome, exit: exitOf(first) }).toEqual({ outcome: 'ok', exit: 0 });
     expect(first.upgrade?.workspaces).toMatchObject({ total: 2, adopted: 2, upgraded: 2, failures: [] });
     for (const w of [w1, w2]) {
-      expect((await registryOf(admin, w.id)).module_version).toBe(21);
+      expect((await registryOf(admin, w.id)).module_version).toBe(P);
       expect((await rows(w)).map((r: { name: string; status: string; is_initial: boolean }) => [r.name, r.status, r.is_initial])).toEqual([
         ['0.6.0_TypeOrmMigrations', 'completed', true],
+        ...REAL.map((name) => [name, 'completed', false]),
         [`0.6.0_StartProbe_${T0}`, 'completed', false],
       ]);
     }
 
     const second = await start(r1, [w1.id, w2.id]);
     expect({ outcome: second.outcome, exit: exitOf(second) }).toEqual({ outcome: 'ok', exit: 0 });
-    expect((await rows(w1)).length).toBe(2);
+    expect((await rows(w1)).length).toBe(2 + REAL.length);
 
-    // A new workspace from the level-21 template (the TypeScript provisioner applies the structural commands after the 20
+    // A new workspace from the level-P template (the TypeScript provisioner applies the structural commands after the 20
     // modules) with its creation-time cursor: the code version's last step.
     const w3 = await make('w3');
     const c = new Client({ connectionString: adminUrl });
@@ -132,14 +144,14 @@ describeIfDb('Part D through the locked start (runMigrateOnStart)', () => {
     } finally {
       await c.end();
     }
-    expect((await registryOf(admin, w3.id)).module_version).toBe(21);
+    expect((await registryOf(admin, w3.id)).module_version).toBe(P);
     await admin.query(`INSERT INTO core.upgrade_migration (name, status, attempt, executed_by_version, is_initial, workspace_id) VALUES ($1, 'completed', 1, '0.6.0', true, $2)`, [
       lastStepOfVersion('0.6.0', UPGRADE_COMMANDS, r1),
       w3.id,
     ]);
 
     const data: WorkspaceUpgradeCommand = { kind: 'workspace', name: 'StartData', timestamp: T0 + 1, run: async ({ query, schemaName }) => void (await query(`SELECT count(*) FROM ${schemaName}.venue`)) };
-    const third = await start({ '0-6': [probe, data] }, [w1.id, w2.id, w3.id]);
+    const third = await start({ '0-6': [...REAL_CMDS, probe, data] }, [w1.id, w2.id, w3.id]);
     expect({ outcome: third.outcome, exit: exitOf(third) }).toEqual({ outcome: 'ok', exit: 0 });
     for (const w of [w1, w2, w3]) expect((await rows(w)).slice(-1)[0]).toMatchObject({ name: `0.6.0_StartData_${T0 + 1}`, status: 'completed' });
     } finally {
@@ -149,13 +161,13 @@ describeIfDb('Part D through the locked start (runMigrateOnStart)', () => {
 
   it('a drifted, unadopted workspace: adoption refused, the start serves with exit 70, and the status says failed (L3)', async () => {
     const [ok, drift] = [await make('a-ok'), await make('a-drift')];
-    for (const w of [ok, drift]) expect(await provisionTypeScript(adminUrl, w)).toBe('READY');
+    for (const w of [ok, drift]) expect(await frozen(w)).toBe('READY');
     await admin.query(`DROP POLICY job_role_tenant ON ${drift.schema}.job_role`);
-    const r = await start({ '0-6': [] }, [ok.id, drift.id]);
+    const r = await start({ '0-6': REAL_CMDS }, [ok.id, drift.id]);
     expect({ outcome: r.outcome, exit: exitOf(r), serve: r.serve }).toEqual({ outcome: 'degradedContinue', exit: 70, serve: true });
     expect(r.upgrade?.commandFailure).toMatchObject({ name: '0.6.0_WorkspaceAdoption', workspaceId: drift.id });
     expect(await rows(drift)).toEqual([]);
-    expect((await rows(ok)).length).toBe(1);
+    expect((await rows(ok)).length).toBe(1 + REAL.length);
     // Owner D3: the drifted workspace is blocked (registry marker → 503); the adopted one is not.
     expect((await registryOf(admin, drift.id)).migration_error).toMatch(/^upgrade-blocked: 0\.6\.0_WorkspaceAdoption \(/);
     expect((await registryOf(admin, ok.id)).migration_error).toBeNull();
@@ -169,16 +181,16 @@ describeIfDb('Part D through the locked start (runMigrateOnStart)', () => {
       await c.end();
     }
   });
-  it('review N2: the post-check outside the locked start (deploy-prepare, lifecycle) is strict: a workspace at 20 under a level-21 code is behind', async () => {
+  it('review N2: the post-check outside the locked start (deploy-prepare, lifecycle) is strict: a workspace at 20 under a higher code level is behind', async () => {
     const w = await make('n2');
-    expect(await provisionTypeScript(adminUrl, w)).toBe('READY');
+    expect(await frozen(w)).toBe('READY');
     const c = new Client({ connectionString: appUrl });
     await c.connect();
     try {
       const q = async (sql: string, p?: unknown[]) => (await c.query(sql, p as unknown[])).rows;
-      const strict = await deployPostCheckProblems(q, { workspaceRegistry: { '0-6': [probe] }, workspaceIds: [w.id] });
+      const strict = await deployPostCheckProblems(q, { workspaceRegistry: { '0-6': [...REAL_CMDS, probe] }, workspaceIds: [w.id] });
       expect(strict.some((p) => p.includes('workspace-behind'))).toBe(true);
-      const start = await deployPostCheckProblems(q, { workspaceRegistry: { '0-6': [probe] }, workspaceIds: [w.id], behindFloor: 20 });
+      const start = await deployPostCheckProblems(q, { workspaceRegistry: { '0-6': [...REAL_CMDS, probe] }, workspaceIds: [w.id], behindFloor: 20 });
       expect(start.some((p) => p.includes('workspace-behind'))).toBe(false);
     } finally {
       await c.end();
@@ -193,9 +205,9 @@ describeIfDb('Part D through the locked start (runMigrateOnStart)', () => {
   });
   it('review P2: a workspace block changed but the cache epoch bump failed: the start refuses (WorkspaceBlockCacheError, postCheck, 68) instead of serving stale routing', async () => {
     const w = await make('p2-drift');
-    expect(await provisionTypeScript(adminUrl, w)).toBe('READY');
+    expect(await frozen(w)).toBe('READY');
     await admin.query(`DROP POLICY job_role_tenant ON ${w.schema}.job_role`);
-    const r = await start({ '0-6': [] }, [w.id], { redis: true, flush: async () => { throw new Error('redis unreachable'); } });
+    const r = await start({ '0-6': REAL_CMDS }, [w.id], { redis: true, flush: async () => { throw new Error('redis unreachable'); } });
     expect({ outcome: r.outcome, exit: exitOf(r), serve: r.serve }).toEqual({ outcome: 'postCheck', exit: 68, serve: false });
     expect((await registryOf(admin, w.id)).migration_error).toMatch(/^upgrade-blocked: /);
   });
