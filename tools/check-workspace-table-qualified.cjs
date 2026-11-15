@@ -43,14 +43,33 @@
 const fs = require('node:fs');
 const path = require('node:path');
 
+const { execFileSync } = require('node:child_process');
+const businessTableRef = require('./lib/business-table-ref.cjs');
+
 const ROOT = path.resolve(__dirname, '..');
 const SCAN = ['packages/rab-server/src', 'packages/rab-worker/src'];
-const TABLES_FILE = 'packages/rab-server/src/database/typeorm/workspace-schema/workspace-tables.ts';
-const BASELINE_FILE = path.join(__dirname, 'workspace-table-qualified.baseline.json');
+const BASELINE_REL = 'tools/workspace-table-qualified.baseline.json';
+const BASELINE_FILE = path.join(ROOT, BASELINE_REL);
+/** Matched against the REPO-RELATIVE path (forward slashes), never the absolute one (review #7). */
 const EXCLUDE = [
-  /\.spec\.ts$/, /\.test\.ts$/, /\.e2e-spec\.ts$/, /\.d\.ts$/, /[\\/]__tests__[\\/]/, /[\\/]test[\\/]/, /[\\/]testing[\\/]/,
-  /[\\/]migrations[\\/]/, /[\\/]gated-migrations[\\/]/, /[\\/]database[\\/]typeorm[\\/]workspace-schema[\\/]/,
+  /\.spec\.ts$/, /\.test\.ts$/, /\.e2e-spec\.ts$/, /\.d\.ts$/, /(?:^|\/)__tests__\//, /(?:^|\/)test\//, /(?:^|\/)testing\//,
+  /(?:^|\/)migrations\//, /(?:^|\/)gated-migrations\//, /^packages\/rab-server\/src\/database\/typeorm\/workspace-schema\//,
 ];
+const isExcluded = (rel) => EXCLUDE.some((re) => re.test(rel));
+/**
+ * Review #3: the binder-only half of business-tables.ts. Only these files may import or call it; module code uses
+ * businessTables / boundBusinessSchema / peekBusinessSchema.
+ */
+const BIND_FUNCTIONS = Object.freeze(['bindBusinessSchema', 'unbindBusinessSchema', 'withBusinessSchema', 'withBusinessSchemaScope', 'snapshotBusinessSchema', 'restoreBusinessSchema']);
+const BUSINESS_SCHEMA_BINDERS = Object.freeze([
+  'packages/rab-server/src/engine/core-modules/tenant/business-tables.ts',
+  'packages/rab-server/src/engine/core-modules/tenant/tenant-context.service.ts',
+  'packages/rab-server/src/engine/core-modules/tenant/workspace-execution-context.ts',
+  'packages/rab-server/src/engine/core-modules/user-deletion/user-deletion.service.ts',
+  'packages/rab-server/src/command/seed-ai-demo.command.ts',
+  'packages/rab-worker/src/queues/rab-maintenance/account-invite-cleanup.job.ts',
+  'packages/rab-server/src/modules/manager/services/organisation-onboarding.service.ts',
+]);
 /**
  * The binders that set search_path themselves (§2.3) — each also records the schema for businessTables(manager) and honours
  * the trap. Adding a file here is a reviewed change: it must take the schema only from the registry or the constant 'core'.
@@ -66,24 +85,20 @@ const SEARCH_PATH_BINDERS = Object.freeze([
   // the operator-run owner bootstrap pins its own session to pg_catalog, pg_temp.
   'packages/rab-server/src/engine/core-modules/upgrade/workspace-command-runner.ts',
   'packages/rab-server/src/database/typeorm/scripts/owner-login/owner-bootstrap-sql.ts',
+  // Not business-table binders either: the upgrade engine's parameterised set_config of its own GUC
+  // (pg_catalog.set_config($1, $2, true) with the constant UPGRADE_SCOPE_SETTING) and its session reset of role / rab.*.
+  'packages/rab-server/src/engine/core-modules/upgrade/upgrade-migration.service.ts',
+  'packages/rab-server/src/engine/core-modules/upgrade/workspace-step-checks-sql.ts',
 ]);
-const RULES = Object.freeze(['unqualified', 'core-qualified', 'other-qualified', 'qb-string-table', 'search-path-switch', 'global-entity-access']);
+const RULES = Object.freeze(['unqualified', 'core-qualified', 'other-qualified', 'qb-string-table', 'search-path-switch', 'global-entity-access', 'business-schema-bind']);
 
-let tsModule = null;
 function ts() {
-  if (!tsModule) tsModule = require(require.resolve('typescript', { paths: [ROOT] }));
-  return tsModule;
+  const mod = businessTableRef.loadTypeScript(ROOT);
+  if (!mod) throw new Error('check-workspace-table-qualified needs the repository\'s `typescript` (run yarn install).');
+  return mod;
 }
 
-/** WORKSPACE_TABLES from the leaf module's text (a single `as const` array of quoted lower-case names). */
-function loadTables(root = ROOT) {
-  const src = fs.readFileSync(path.join(root, TABLES_FILE), 'utf8');
-  const m = src.match(/export const WORKSPACE_TABLES = \[([\s\S]*?)\] as const;/);
-  if (!m) throw new Error(`${TABLES_FILE}: WORKSPACE_TABLES array literal not found`);
-  const tables = [...m[1].matchAll(/'([a-z_]+)'/g)].map((x) => x[1]);
-  if (tables.length === 0 || new Set(tables).size !== tables.length) throw new Error(`${TABLES_FILE}: WORKSPACE_TABLES is empty or has duplicates`);
-  return tables;
-}
+const loadTables = (root = ROOT) => businessTableRef.loadTables(root);
 
 function patterns(tables) {
   // Longest first, so `shift` never shadows `shift_assignment` even before the look-ahead.
@@ -94,18 +109,29 @@ function patterns(tables) {
     ref: new RegExp(`\\b(FROM|JOIN|INTO|UPDATE|TABLE|ONLY)\\s+(${Q}\\s*\\.\\s*)?"?(${T})"?(?![\\w$."])`, 'g'),
     // any qualified reference anywhere (catches the second table of a comma list when it is qualified)
     qual: new RegExp(`(${Q})\\s*\\.\\s*"?(${T})"?(?![\\w$."(])`, 'g'),
-    primitive: new RegExp(`^(?:t|tables)\\.(${T})$`),
     qbTable: new RegExp(`^(?:"?core"?\\.)?"?(${T})"?$`),
   };
 }
 
 const SQLISH = /\b(SELECT|INSERT|UPDATE|DELETE|WITH|FROM|JOIN|TRUNCATE|MERGE)\b/;
-// A runtime switch: set_config('search_path', …) or a statement that starts with SET [LOCAL|SESSION] search_path. Not the
-// `SET search_path = …` attribute of CREATE FUNCTION / ALTER DATABASE / ALTER ROLE (DDL that pins a function's own path).
-const SEARCH_PATH_SET_CONFIG = /set_config\(\s*'search_path'/i;
-const SEARCH_PATH_STATEMENT = /(?:^|;)\s*SET\s+(?:LOCAL\s+|SESSION\s+)?search_path\b/im;
+// A runtime switch: set_config('search_path', …) or a statement that starts with SET [LOCAL|SESSION] search_path, RESET
+// search_path, RESET ALL or DISCARD ALL. Not the `SET search_path = …` attribute of CREATE FUNCTION / ALTER DATABASE /
+// ALTER ROLE (DDL that pins a function's own path). Variants (re-check Low): a quoted function name (`"set_config"(`,
+// `pg_catalog.set_config (`), a quoted setting (`'"search_path"'`, `SET "search_path"`), and SQL comments anywhere
+// (stripped before matching, so `set_config(/* x */'search_path'` and `-- …` lines cannot hide or fake a match).
+const SET_CONFIG_CALL = 'set_config"?\\s*\\(\\s*';
+const SEARCH_PATH_SET_CONFIG = new RegExp(`${SET_CONFIG_CALL}'\\s*"?search_path"?\\s*'`, 'i');
+// Re-review LOW: set_config whose setting NAME is not a string literal (`set_config($1, …)`, `set_config(${x}, …)`,
+// `set_config(x.name, …)`) can set search_path through a parameter; outside the binders that is a switch too.
+const SET_CONFIG_DYNAMIC_NAME = new RegExp(`${SET_CONFIG_CALL}(?!')`, 'i');
+const SEARCH_PATH_STATEMENT = /(?:^|;)\s*(?:SET\s+(?:LOCAL\s+|SESSION\s+)?"?search_path"?(?![\w])|RESET\s+(?:"?search_path"?(?![\w])|ALL\b)|DISCARD\s+ALL\b)/im;
 const DDL_WITH_PATH_ATTRIBUTE = /\b(?:CREATE\s+(?:OR\s+REPLACE\s+)?(?:FUNCTION|PROCEDURE)|ALTER\s+(?:DATABASE|ROLE|USER|FUNCTION|PROCEDURE))\b/i;
-const isSearchPathSwitch = (text) => SEARCH_PATH_SET_CONFIG.test(text) || (SEARCH_PATH_STATEMENT.test(text) && !DDL_WITH_PATH_ATTRIBUTE.test(text));
+const stripSqlComments = (text) => text.replace(/\/\*[\s\S]*?\*\//g, ' ').replace(/--[^\n]*/g, ' ');
+const isSearchPathSwitch = (raw) => {
+  const text = stripSqlComments(raw);
+  return SEARCH_PATH_SET_CONFIG.test(text) || SET_CONFIG_DYNAMIC_NAME.test(text) || (SEARCH_PATH_STATEMENT.test(text) && !DDL_WITH_PATH_ATTRIBUTE.test(text));
+};
+const BUSINESS_TABLES_SPECIFIER = /(?:^|\/)business-tables(?:\.[cm]?[jt]s)?$/;
 const QB_METHODS = new Set(['from', 'into', 'update', 'delete', 'leftJoin', 'leftJoinAndSelect', 'innerJoin', 'innerJoinAndSelect',
   'leftJoinAndMapOne', 'leftJoinAndMapMany', 'innerJoinAndMapOne', 'innerJoinAndMapMany']);
 const MANAGER_METHODS = new Set(['find', 'findOne', 'findOneBy', 'findBy', 'findOneOrFail', 'findOneByOrFail', 'findAndCount', 'findAndCountBy',
@@ -151,24 +177,53 @@ function scanSource(rel, src, tables, entities) {
   const handled = new Set();
   const lineOf = (n) => sf.getLineAndCharacterOfPosition(n.getStart(sf)).line + 1;
   const binder = SEARCH_PATH_BINDERS.includes(rel);
+  const schemaBinder = BUSINESS_SCHEMA_BINDERS.includes(rel);
   const add = (n, rule, detail) => sites.push({ file: rel, line: lineOf(n), rule, detail: detail.replace(/\s+/g, ' ').slice(0, 100) });
 
+  // Review #1: `X.<table>` interpolated into SQL counts as qualified ONLY when it is the businessTables(manager) primitive
+  // (shared AST helper: X's nearest declaration is `const X = businessTables(…)`, and not between quotes). Any other
+  // `X.<table>` (a request body, a row, a renamed variable) is collected here and reported as other-qualified.
+  let unverified = [];
+  const isCandidate = (e) => {
+    let x = e;
+    while (x && (t.isParenthesizedExpression(x) || t.isAsExpression(x) || t.isNonNullExpression(x))) x = x.expression;
+    return Boolean(x && t.isPropertyAccessExpression(x) && t.isIdentifier(x.name) && tables.includes(x.name.text));
+  };
   const isStr = (n) => t.isStringLiteral(n) || t.isNoSubstitutionTemplateLiteral(n) || t.isTemplateExpression(n);
   const strValue = (n) => {
     if (t.isStringLiteral(n) || t.isNoSubstitutionTemplateLiteral(n)) return n.text;
     let s = n.head.text;
-    for (const span of n.templateSpans) s += '${' + span.expression.getText(sf).trim() + '}' + span.literal.text;
+    n.templateSpans.forEach((span, i) => {
+      const text = span.expression.getText(sf).trim();
+      if (isCandidate(span.expression) && !businessTableRef.isPrimitiveSpan(t, n, i, tables)) unverified.push(text);
+      s += '${' + text + '}' + span.literal.text;
+    });
     return s;
   };
   const flatten = (n) => {
-    if (t.isBinaryExpression(n) && n.operatorToken.kind === t.SyntaxKind.PlusToken) return flatten(n.left) + flatten(n.right);
-    if (t.isParenthesizedExpression(n)) return flatten(n.expression);
-    return isStr(n) ? strValue(n) : '${' + n.getText(sf) + '}';
+    const parts = [];
+    (function collect(x) {
+      if (t.isBinaryExpression(x) && x.operatorToken.kind === t.SyntaxKind.PlusToken) { collect(x.left); collect(x.right); }
+      else if (t.isParenthesizedExpression(x) && t.isBinaryExpression(x.expression) && x.expression.operatorToken.kind === t.SyntaxKind.PlusToken) collect(x.expression);
+      else parts.push(x);
+    })(n);
+    const texts = parts.map((p) => (isStr(p) ? strValue(p) : null));
+    return parts
+      .map((p, i) => {
+        if (texts[i] !== null) return texts[i];
+        const quoted = /['"]$/.test(texts[i - 1] ?? '') || /^['"]/.test(texts[i + 1] ?? '');
+        if (isCandidate(p) && (quoted || !businessTableRef.isPrimitiveRefNode(t, p, tables))) unverified.push(p.getText(sf));
+        return '${' + p.getText(sf) + '}';
+      })
+      .join('');
   };
 
   function recordSql(n, text) {
+    const refs = unverified;
+    unverified = [];
     if (!binder && isSearchPathSwitch(text)) add(n, 'search-path-switch', text);
     if (!SQLISH.test(text)) return;
+    for (const r of refs) add(n, 'other-qualified', `\${${r}} is not from const … = businessTables(manager), or is quoted`);
     const seen = new Set();
     let m;
     P.ref.lastIndex = 0;
@@ -219,6 +274,34 @@ function scanSource(rel, src, tables, entities) {
         else if (MANAGER_METHODS.has(method) && /(?:^|\.)(?:dataSource|connection|DataSource)\.manager$/.test(recv)) add(n, 'global-entity-access', `${recv}.${method}(${a0.text})`);
       }
     }
+    // Review #3: the binder-only functions of business-tables.ts, outside the binders.
+    if (!schemaBinder && t.isImportDeclaration(n) && t.isStringLiteral(n.moduleSpecifier) && BUSINESS_TABLES_SPECIFIER.test(n.moduleSpecifier.text)) {
+      const named = n.importClause?.namedBindings;
+      if (named && t.isNamedImports(named)) {
+        for (const el of named.elements) {
+          const imported = (el.propertyName ?? el.name).text;
+          if (BIND_FUNCTIONS.includes(imported)) add(el, 'business-schema-bind', `import { ${imported} } (binder-only; use businessTables / boundBusinessSchema)`);
+        }
+      } else if (named && t.isNamespaceImport(named)) add(named, 'business-schema-bind', `import * as ${named.name.text} from business-tables (import only the module-safe names)`);
+    }
+    // Re-review LOW: re-exports, and require() / import() of the module (destructuring or a computed member would hide
+    // the name): any of these outside the binders is flagged, whatever it takes.
+    if (!schemaBinder && t.isExportDeclaration(n) && n.moduleSpecifier && t.isStringLiteral(n.moduleSpecifier) && BUSINESS_TABLES_SPECIFIER.test(n.moduleSpecifier.text)) {
+      add(n, 'business-schema-bind', `export … from '${n.moduleSpecifier.text}' (re-export of business-tables outside the binders)`);
+    }
+    if (!schemaBinder && t.isCallExpression(n)) {
+      const callee = t.isIdentifier(n.expression) ? n.expression.text : t.isPropertyAccessExpression(n.expression) ? n.expression.name.text : null;
+      if (callee && BIND_FUNCTIONS.includes(callee)) add(n, 'business-schema-bind', `${callee}(…) outside the binders`);
+      const dynamicLoad = n.expression.kind === t.SyntaxKind.ImportKeyword || (t.isIdentifier(n.expression) && n.expression.text === 'require');
+      const [spec] = n.arguments;
+      if (dynamicLoad && spec && (t.isStringLiteral(spec) || t.isNoSubstitutionTemplateLiteral(spec)) && BUSINESS_TABLES_SPECIFIER.test(spec.text)) {
+        add(n, 'business-schema-bind', `${n.expression.getText(sf)}('${spec.text}') outside the binders (use a static import of the module-safe names)`);
+      }
+    }
+    // Re-review LOW: 'search_path' passed as a query PARAMETER (set_config($1, $2, true) with ['search_path', s]).
+    if (!binder && t.isStringLiteral(n) && n.text.toLowerCase() === 'search_path' && t.isArrayLiteralExpression(n.parent)) {
+      add(n, 'search-path-switch', `'search_path' as a query parameter`);
+    }
     if (t.isDecorator(n) && t.isCallExpression(n.expression) && n.expression.expression.getText(sf) === 'InjectRepository') {
       const [a0] = n.expression.arguments;
       if (a0 && t.isIdentifier(a0) && entities.has(a0.text)) add(n, 'global-entity-access', `@InjectRepository(${a0.text})`);
@@ -227,6 +310,18 @@ function scanSource(rel, src, tables, entities) {
   }
   visit(sf);
   return sites;
+}
+
+/**
+ * Re-check Low: a module named business-tables anywhere but the one primitive module
+ * (packages/rab-server/src/engine/core-modules/tenant/business-tables.ts) is a look-alike the exemption must never trust;
+ * the ratchet reports it (rule business-schema-bind) so it cannot land unnoticed.
+ */
+function secondPrimitiveModules(rels) {
+  const real = `${businessTableRef.PRIMITIVE_MODULE_PATH}.ts`;
+  return rels
+    .filter((rel) => /(?:^|\/)business-tables\.[cm]?[jt]s$/.test(rel) && rel !== real)
+    .map((rel) => ({ file: rel, line: 1, rule: 'business-schema-bind', detail: `a second business-tables module (only ${real} is the primitive)` }));
 }
 
 function listFiles(root = ROOT) {
@@ -248,9 +343,10 @@ function scan(root = ROOT) {
   const tables = loadTables(root);
   const all = listFiles(root).map((abs) => ({ abs, rel: path.relative(root, abs).split(path.sep).join('/'), src: fs.readFileSync(abs, 'utf8') }));
   const entities = workspaceEntities(all, tables);
-  const runtime = all.filter((f) => !EXCLUDE.some((re) => re.test(f.abs)));
+  const runtime = all.filter((f) => !isExcluded(f.rel));
   const sites = [];
   for (const f of runtime) sites.push(...scanSource(f.rel, f.src, tables, entities));
+  sites.push(...secondPrimitiveModules(runtime.map((f) => f.rel)));
   return { sites, tables, entities };
 }
 
@@ -292,11 +388,45 @@ function compare(current, baseline) {
   return { grown, stale, unknownRules };
 }
 
+/**
+ * Review #2: the baseline itself may only shrink against the PR's base branch. `grown` = an entry above the base (or a new
+ * file/rule key); a decrease or a removed entry passes. Run in CI as `--base origin/<base branch>`.
+ */
+function compareToBase(base, head) {
+  const grown = [];
+  for (const file of Object.keys(head).sort()) {
+    for (const [rule, count] of Object.entries(head[file])) {
+      const before = base[file]?.[rule];
+      if (before === undefined) grown.push({ file, rule, base: 0, head: count, newKey: true });
+      else if (count > before) grown.push({ file, rule, base: before, head: count, newKey: false });
+    }
+  }
+  return { grown };
+}
+
+function parseBaseline(text, label) {
+  const parsed = JSON.parse(text);
+  if (!parsed || typeof parsed !== 'object' || typeof parsed.files !== 'object') throw new Error(`${label}: expected { "files": { … } }`);
+  return parsed.files;
+}
+
 function readBaseline(file = BASELINE_FILE) {
   if (!fs.existsSync(file)) return null;
-  const parsed = JSON.parse(fs.readFileSync(file, 'utf8'));
-  if (!parsed || typeof parsed !== 'object' || typeof parsed.files !== 'object') throw new Error(`${path.basename(file)}: expected { "files": { … } }`);
-  return parsed.files;
+  return parseBaseline(fs.readFileSync(file, 'utf8'), path.basename(file));
+}
+
+/** The baseline as committed at `ref` (git show, no shell), or null when that ref has no baseline file yet. */
+function readBaselineAt(ref, root = ROOT) {
+  if (!/^[A-Za-z0-9._/-]{1,200}$/.test(ref) || ref.startsWith('-')) throw new Error(`--base: not a plain git ref: ${JSON.stringify(ref)}`);
+  let text;
+  try {
+    text = execFileSync('git', ['show', `${ref}:${BASELINE_REL}`], { cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+  } catch (error) {
+    const stderr = String(error.stderr ?? '');
+    if (/does not exist in|exists on disk, but not in/.test(stderr)) return null;
+    throw new Error(`--base: git show ${ref}:${BASELINE_REL} failed: ${stderr.trim().split('\n')[0]}`);
+  }
+  return parseBaseline(text, `${ref}:${BASELINE_REL}`);
 }
 
 function baselineDocument(counts) {
@@ -311,6 +441,19 @@ function baselineDocument(counts) {
 }
 
 function main(argv) {
+  const baseIdx = argv.indexOf('--base');
+  if (baseIdx !== -1) {
+    const ref = argv[baseIdx + 1];
+    if (!ref) { console.error('[workspace-table-qualified] --base needs a git ref'); return 1; }
+    const head = readBaseline();
+    if (!head) { console.error(`[workspace-table-qualified] ${BASELINE_REL} is missing.`); return 1; }
+    const base = readBaselineAt(ref);
+    if (!base) { console.log(`[workspace-table-qualified] ${ref} has no ${BASELINE_REL} yet: nothing to compare (the PR that adds it).`); return 0; }
+    const { grown } = compareToBase(base, head);
+    for (const g of grown) console.log(`GROWN  ${g.rule.padEnd(21)} ${g.file}: ${g.newKey ? 'new entry' : `${g.base} ->`} ${g.head}. The baseline may only shrink against ${ref}.`);
+    console.log(`[workspace-table-qualified] baseline vs ${ref}: ${grown.length} grown entr${grown.length === 1 ? 'y' : 'ies'}.`);
+    return grown.length ? 1 : 0;
+  }
   const { sites } = scan();
   const current = countsOf(sites);
   if (argv.includes('--list')) {
@@ -348,4 +491,4 @@ function main(argv) {
 
 if (require.main === module) process.exit(main(process.argv.slice(2)));
 
-module.exports = { scan, scanSource, loadTables, workspaceEntities, countsOf, compare, baselineDocument, readBaseline, RULES, SEARCH_PATH_BINDERS };
+module.exports = { scan, scanSource, secondPrimitiveModules, loadTables, workspaceEntities, countsOf, compare, compareToBase, baselineDocument, readBaseline, readBaselineAt, isExcluded, RULES, SEARCH_PATH_BINDERS, BUSINESS_SCHEMA_BINDERS };

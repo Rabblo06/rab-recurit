@@ -37,24 +37,38 @@ export const RENDER_CONCURRENCY = Math.max(1, Number(process.env.PDF_EQUALITY_CO
  * QR verification (P0 plan §5.2 4(e)): the decoded payload is checked by the REAL `AttendanceQrService.validateQr`
  * against the fixture's own shift (read through a fake manager that returns only that shift). It must be accepted for
  * that shift and refused (InvalidQrException) for another shift id. Returns the problems found (empty = verified).
+ * A QR is accepted until its shift's end + grace (owner decision 0i), and the fixture shifts have fixed (past) dates,
+ * so the check is made with `Date.now` pinned to the shift's own end — the last minute of the shift, deterministic
+ * whatever day the suite runs. Only `Date.now` is pinned (the clock validateQr and jsonwebtoken read), never timers,
+ * and only for the two validations, so renders in flight elsewhere keep their real timers.
  */
+/** A seat with no own period: the QR is judged against the fixture shift's own times (`effectiveAssignmentTime`). */
+const SHIFT_TIMES_SEAT = { period: null };
+
 export async function verifyShiftQr(scenarioId: string, payload: string): Promise<string[]> {
   const seed = scenarioSeeds().find((s) => s.id === scenarioId);
   if (!seed) return [`no scenario ${scenarioId}`];
   const shift = shiftEntity(seed);
   const manager = { findOneByOrFail: async () => shift } as never;
   const problems: string[] = [];
+  // Plain swap, no jest global: this file is also type-checked by the Worker's app tsconfig (types: node only).
+  const realNow = Date.now;
+  Date.now = () => shift.endsAt.getTime();
   try {
-    await fixtureAttendanceQr.validateQr(manager, shift.id, payload);
-  } catch (error) {
-    problems.push(`validateQr refused the payload for its own shift: ${(error as Error).message}`);
+    try {
+      await fixtureAttendanceQr.validateQr(manager, shift.id, payload, SHIFT_TIMES_SEAT);
+    } catch (error) {
+      problems.push(`validateQr refused the payload for its own shift: ${(error as Error).message}`);
+    }
+    const other = '00000000-0000-4000-8000-0000000000ff';
+    const refused = await fixtureAttendanceQr.validateQr(manager, other, payload, SHIFT_TIMES_SEAT).then(
+      () => false,
+      () => true,
+    );
+    if (!refused) problems.push('validateQr accepted the payload for ANOTHER shift');
+  } finally {
+    Date.now = realNow;
   }
-  const other = '00000000-0000-4000-8000-0000000000ff';
-  const refused = await fixtureAttendanceQr.validateQr(manager, other, payload).then(
-    () => false,
-    () => true,
-  );
-  if (!refused) problems.push('validateQr accepted the payload for ANOTHER shift');
   return problems;
 }
 

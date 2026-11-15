@@ -70,7 +70,7 @@ import {
   StaffNotCheckedInException,
 } from '../exceptions/attendance.exceptions';
 import { AttendanceQrService } from './attendance-qr.service';
-import { MISSING_CLOCK_OUT_GRACE_MINUTES } from './missing-clock-out-policy';
+import { isPastClockOutGrace } from './missing-clock-out-policy';
 import { ATTENDANCE_VERSION_SQL, ShiftReportDetail, ShiftReportService } from './shift-report.service';
 
 /** Same allowlist-via-lookup-map pattern as `StaffService`'s `STAFF_SORT_COLUMNS` — see that file's comment. Raw SQL column expressions, never a client-supplied string. */
@@ -277,7 +277,8 @@ export class AttendanceService {
 
   /**
    * Server-authoritative attendance window: `[startsAt - CLOCK_IN_EARLY_MINUTES, endsAt + QR_POST_SHIFT_GRACE_MINUTES]`
-   * (the same bounds the Shift QR is signed for). Check In uses the SAME window (FLAGGED owner decision 2026-10-21:
+   * (the Shift QR uses the same grace past the shift's current end — `AttendanceQrService.validUntil`, checked at scan
+   * time). Check In uses the SAME window (FLAGGED owner decision 2026-10-21:
    * opening reuses CLOCK_IN_EARLY_MINUTES, closing reuses the QR post-shift grace — never unlimited). Pure UTC delta
    * arithmetic against `timestamptz` columns: overnight shifts and DST need nothing special. Structured exceptions only.
    */
@@ -291,12 +292,13 @@ export class AttendanceService {
   private assertClockWindow(shift: ScheduledWindow, kind: 'clock' | 'check_in' = 'clock'): void {
     const now = Date.now();
     const { opensAt, closesAt } = this.attendanceWindow(shift);
-    if (now < opensAt.getTime()) {
+    // Fail closed (QR review): written as "not inside", so an unreadable window (NaN) refuses instead of comparing false.
+    if (!(now >= opensAt.getTime())) {
       throw kind === 'check_in'
         ? new CheckInTooEarlyException(shift.startsAt.toISOString(), opensAt.toISOString())
         : new ClockInTooEarlyException(shift.startsAt.toISOString(), opensAt.toISOString());
     }
-    if (now > closesAt.getTime()) {
+    if (!(now <= closesAt.getTime())) {
       throw kind === 'check_in' ? new CheckInWindowClosedException() : new ClockWindowClosedException();
     }
   }
@@ -436,7 +438,7 @@ export class AttendanceService {
 
       let source: 'staff' | 'qr' = 'staff';
       if (dto.qrToken) {
-        await this.attendanceQr.validateQr(manager, shift.id, dto.qrToken);
+        await this.attendanceQr.validateQr(manager, shift.id, dto.qrToken, assignment);
         source = 'qr';
       }
       const evidence = this.verifyLocation(venue, dto, true);
@@ -521,7 +523,7 @@ export class AttendanceService {
 
       // Strictly additional to the ShiftAssignment/status/check-in checks above — a
       // cryptographically valid QR never substitutes for them (Part 54).
-      await this.attendanceQr.validateQr(manager, shift.id, dto.qrToken);
+      await this.attendanceQr.validateQr(manager, shift.id, dto.qrToken, assignment);
 
       const venue = await manager.findOneByOrFail(Venue, { id: shift.venueId });
       const evidence = this.verifyLocation(venue, dto, assignment.checkInRequired, assignment.checkInCapturedAt ?? null);
@@ -586,9 +588,12 @@ export class AttendanceService {
       if (!attendance) throw new NotFoundException('No active clock-in found.');
 
       const shift = await manager.findOneByOrFail(Shift, { id: attendance.shiftId });
-      await this.attendanceQr.validateQr(manager, shift.id, dto.qrToken);
-
       const assignment = await manager.findOneByOrFail(ShiftAssignment, { id: attendance.shiftAssignmentId });
+      // Same window as Clock In and the on-behalf clock-out (owner decision 2026-11-14): the staff member's OWN end +
+      // QR_POST_SHIFT_GRACE_MINUTES. Past it the clock-out is the manager's recovery (`correct`), never the staff member's.
+      this.assertClockWindow(effectiveAssignmentTime(assignment, shift));
+      await this.attendanceQr.validateQr(manager, shift.id, dto.qrToken, assignment);
+
       const venue = await manager.findOneByOrFail(Venue, { id: shift.venueId });
       const evidence = this.verifyLocation(venue, dto, assignment.checkInRequired, attendance.clockInCapturedAt ?? null);
 
@@ -634,6 +639,12 @@ export class AttendanceService {
       const distance = haversineDistanceMeters({ lat: dto.lat, lng: dto.lng }, { lat: venue.lat!, lng: venue.lng! });
       if (distance <= venue.geofenceRadiusM) {
         throw new ConflictException('You are still within the venue geofence.');
+      }
+      // QR review M3 (owner rule 2026-11-14): a staff member's own clock-out — manual, QR or this automatic one — closes
+      // at their own end + QR_POST_SHIFT_GRACE_MINUTES, the same upper bound clockOutOnBehalf applies. Past it the
+      // clock-out is the manager's recovery, never an uncapped, paid self clock-out.
+      if (!(Date.now() <= this.attendanceWindow(effectiveAssignmentTime(assignment, shift)).closesAt.getTime())) {
+        throw new ClockWindowClosedException();
       }
 
       return this.performClockOut(manager, ctx, attendance, dto, true, 'auto_geofence');
@@ -873,7 +884,7 @@ export class AttendanceService {
       const venue = await manager.findOneByOrFail(Venue, { id: shift.venueId });
       if (venue.enforceGeofence) throw new PresenceEvidenceRequiredException();
       const assignment = await manager.findOneByOrFail(ShiftAssignment, { id: seat.id });
-      if (Date.now() > this.attendanceWindow(effectiveAssignmentTime(assignment, shift)).closesAt.getTime()) {
+      if (!(Date.now() <= this.attendanceWindow(effectiveAssignmentTime(assignment, shift)).closesAt.getTime())) {
         throw new ClockWindowClosedException();
       }
       await this.performClockOut(manager, ctx, attendance, {}, false, 'manager_on_behalf', { by: ctx.userId, reason });
@@ -1210,10 +1221,13 @@ export class AttendanceService {
       attendance.status === AttendanceStatus.ON_BREAK
     ) {
       // Forgotten clock-out recovery (owner brief 2026-10-18): only for a record the monitor has flagged
-      // MISSING_CLOCK_OUT, or an open record already past that same threshold — never for a shift still running.
-      const flagAt = effectiveAssignmentTime(assignment, shift).endsAt.getTime() + MISSING_CLOCK_OUT_GRACE_MINUTES * 60_000;
-      if (attendance.status !== AttendanceStatus.MISSING_CLOCK_OUT && now.getTime() < flagAt) {
-        throw new ConflictException('This staff member is still on shift. A missing clock-out can be recovered once the shift has ended.');
+      // MISSING_CLOCK_OUT, or an open record already past that same threshold (the staff member's own clock-out window,
+      // missing-clock-out-policy.ts) — never for a shift still running, never while the staff member can still clock out.
+      const grace = this.env.get('QR_POST_SHIFT_GRACE_MINUTES');
+      if (attendance.status !== AttendanceStatus.MISSING_CLOCK_OUT && !isPastClockOutGrace(effectiveAssignmentTime(assignment, shift).endsAt, grace, now)) {
+        throw new ConflictException(
+          `This staff member is still on shift or can still clock out. A missing clock-out can be recovered once their clock-out window has closed (${grace} minutes after their scheduled end).`,
+        );
       }
       if (!nextClockOutAt) {
         throw new ConflictException('Add the missing clock-out time first.');

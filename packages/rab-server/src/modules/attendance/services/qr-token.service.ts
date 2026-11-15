@@ -19,8 +19,21 @@ import { EnvironmentService } from '../../../engine/core-modules/environment/env
  * Mirrors `AccessTokenService`'s `sign`/`verify` shape exactly (same
  * `JwtService`, same "pass the secret explicitly per call" convention —
  * see `AuthModule`'s own `JwtModule.register({})` comment), just with its
- * own derived secret and a dynamic, shift-window-based expiry instead of a
- * fixed TTL string.
+ * own derived secret and NO `exp` claim: a QR's lifetime is not a property
+ * of the token but of the shift it names (owner decision 0i, 2026-11-14) —
+ * `AttendanceQrService.validateQr` refuses it once now is past that shift's
+ * CURRENT `endsAt` + `QR_POST_SHIFT_GRACE_MINUTES`, read fresh on every scan.
+ *
+ * A hard ceiling still applies: `verify()` refuses any token whose `iat` is older than `QR_MAX_AGE_DAYS` (default 14),
+ * whatever the shift's end (owner decision 2026-11-14).
+ *
+ * Why no `exp` is still fail-closed: `verify()` below only establishes that
+ * WE issued the token for a given shift/venue/ver — it is never, on its own,
+ * an "accept" decision. The only consumer is `AttendanceQrService.validateQr`,
+ * which always loads the shift and applies the time bound after it. A token
+ * minted before this change still carries its own `exp`, and `verify()`
+ * still enforces any `exp` that is present (both bounds must pass), so no
+ * already-printed QR gains a single second of validity from this change.
  */
 export interface QrTokenPayload {
   shiftId: string;
@@ -61,22 +74,32 @@ export class QrTokenService {
   }
 
   /**
-   * `expiresInSeconds` should cover the whole authorised attendance window
-   * for this shift — `(shift.endsAt + QR_POST_SHIFT_GRACE_MINUTES) -
-   * (shift.startsAt - CLOCK_IN_EARLY_MINUTES)` — computed by the caller
-   * (`AttendanceQrService`/the report-scheduler job), since only they know
-   * the shift's actual start/end. The JWT's own `exp` is the outer bound;
-   * `AttendanceService.assertClockWindow` enforces the precise inner bound
-   * against `now()` on every call — belt and braces, not redundant, since a
-   * QR signed early and scanned right at its outer edge would otherwise be
-   * technically "not yet JWT-expired" well past the real intended window.
+   * Signs a QR for one shift. Deliberately no `expiresIn` — see the class comment: the shift row, not the token, decides
+   * how long a QR is accepted, so a QR printed hours before the shift (pre-shift report) or a shift extended after
+   * printing is judged against the shift's current end at scan time.
    */
-  sign(payload: QrTokenPayload, expiresInSeconds: number): string {
-    return this.jwt.sign(payload, { secret: this.secret(), expiresIn: expiresInSeconds, algorithm: ALGORITHM, issuer: ISSUER, audience: AUDIENCE });
+  sign(payload: QrTokenPayload): string {
+    return this.jwt.sign(payload, { secret: this.secret(), algorithm: ALGORITHM, issuer: ISSUER, audience: AUDIENCE });
   }
 
-  /** Throws (caught by the caller, mapped to a 409 `InvalidQrException`) on a bad signature or expiry — never a 500. */
+  /**
+   * Signature/algorithm/issuer/audience, the `QR_MAX_AGE_DAYS` age ceiling (and a legacy token's own `exp`, if it has one) only. Throws (caught by the
+   * caller, mapped to a 409 `InvalidQrException`) — never a 500. NOT a complete validity check: the shift-based expiry
+   * lives in `AttendanceQrService.validateQr`, the only caller allowed to turn this into an accept.
+   */
   verify(token: string): QrTokenPayload {
-    return this.jwt.verify<QrTokenPayload>(token, { secret: this.secret(), algorithms: [ALGORITHM], issuer: ISSUER, audience: AUDIENCE });
+    return this.jwt.verify<QrTokenPayload>(token, { secret: this.secret(), algorithms: [ALGORITHM], issuer: ISSUER, audience: AUDIENCE, maxAge: this.maxAge() });
+  }
+
+  /**
+   * Hard age ceiling (owner decision 2026-11-14): `QR_MAX_AGE_DAYS` (default 14) measured from `iat`, enforced by
+   * jsonwebtoken's `maxAge` on top of the shift-based expiry. A token older than that fails as TokenExpiredError (mapped to
+   * `expired`); a token with no `iat` fails outright ("iat required when maxAge is specified", mapped to `invalid`).
+   * Fail closed: a missing or non-positive setting throws here rather than verifying without a ceiling.
+   */
+  private maxAge(): string {
+    const days = this.env.get('QR_MAX_AGE_DAYS');
+    if (!Number.isInteger(days) || days < 1) throw new Error('QR_MAX_AGE_DAYS must be a positive integer.');
+    return `${days}d`;
   }
 }
