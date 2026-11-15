@@ -50,9 +50,9 @@ describe('Part D: workspace upgrade commands in the sequence (Twenty upgrade-seq
   it('0.6.0 has two workspace commands (level 21, 0b; level 22, 0a draft): a new workspace starts after them, an adopted one before them', () => {
     expect(WORKSPACE_UPGRADE_COMMANDS['0-6'].map((c) => [c.name, c.timestamp, c.structure?.level, c.structure?.mayDrop === true])).toEqual([
       ['StaffProfileMemberSelect', 1786721480000, 21, false],
-      ['DropWorkspaceCoreForeignKeys', 1786721490000, 22, true],
+      ['DropWorkspaceCoreForeignKeys', 1786721530000, 22, true],
     ]);
-    expect(lastStepOfVersion('0.6.0')).toBe('0.6.0_DropWorkspaceCoreForeignKeys_1786721490000');
+    expect(lastStepOfVersion('0.6.0')).toBe('0.6.0_DropWorkspaceCoreForeignKeys_1786721530000');
     expect(lastInstanceStepOfVersion('0.6.0')).toBe('0.6.0_TypeOrmMigrations');
   });
 

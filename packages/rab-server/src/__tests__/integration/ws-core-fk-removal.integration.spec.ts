@@ -15,8 +15,8 @@ import { codeWorkspaceStructureLevel, declaredFingerprint } from '../../engine/c
 import { dropWorkspaceSchema, FROZEN_TEMPLATE_REGISTRY, provisionServerPath, provisionTypeScript, registryOf, SeededWorkspace, seedWorkspace } from './helpers/workspace-fixtures';
 
 /**
- * OWNER-DB-ULTIMATE Part D, decision 0a (DRAFT SQL, throwaway databases only): `0.6.0_DropWorkspaceCoreForeignKeys_1786721490000`
- * (structure level 22) and WorkspaceCoreForeignKeyRemoval1786721490000. Proves:
+ * OWNER-DB-ULTIMATE Part D, decision 0a (DRAFT SQL, throwaway databases only): `0.6.0_DropWorkspaceCoreForeignKeys_1786721530000`
+ * (structure level 22) and WorkspaceCoreForeignKeyRemoval1786721530000. Proves:
  *  - the runner removes the 72 workspace → core."user" / core.organisation / core.manager_workspace foreign keys from existing
  *    workspaces (level 22, declared v2), idempotently; new workspaces (both provisioners) are built without them, identical;
  *  - THE LOCK TEST: deleting and key-updating a core user takes NO lock on any workspace table at level 22 (and, as the control,

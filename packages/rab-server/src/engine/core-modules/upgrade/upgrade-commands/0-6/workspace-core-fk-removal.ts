@@ -23,7 +23,7 @@ import type { WorkspaceUpgradeCommand } from '../workspace-upgrade-command';
  *
  * FROZEN once approved. Idempotent (`DROP CONSTRAINT IF EXISTS`); declares `mayDrop` (it drops catalog objects).
  */
-export const WORKSPACE_CORE_FK_REMOVAL_TIMESTAMP = 1786721490000;
+export const WORKSPACE_CORE_FK_REMOVAL_TIMESTAMP = 1786721530000;
 
 /** table → the constraints dropped (the exact definitions the frozen template created, for review and the orphan check). */
 export const WORKSPACE_CORE_FOREIGN_KEYS: Readonly<Record<string, ReadonlyArray<readonly [name: string, definition: string]>>> = Object.freeze({
@@ -197,7 +197,7 @@ export function withoutWorkspaceCoreForeignKeys(template: string): string {
  * Expected `core.workspace_schema_fingerprint_v2` of a level-22 workspace per PostgreSQL major (owner approved the 0a SQL,
  * 2026-11-15). Each was measured on a throwaway postgres:<major> owner-login ci-db: two level-21 workspaces + this command, and a
  * server-path workspace built by the level-22 core.provision_workspace (the stripped template); all three agreed
- * (WS-COMMANDS.md §R5). An undeclared major makes WorkspaceCoreForeignKeyRemoval1786721490000 refuse (exit 66): fail closed.
+ * (WS-COMMANDS.md §R5). An undeclared major makes WorkspaceCoreForeignKeyRemoval1786721530000 refuse (exit 66): fail closed.
  */
 export const WORKSPACE_CORE_FK_REMOVAL_FINGERPRINTS_V2: Readonly<Partial<Record<16 | 17 | 18, string>>> = Object.freeze({
   16: 'a75b598e3c29bb33797022cfa90dadd0fad3ae2f230b13462169680ccc1a8389',
@@ -205,7 +205,7 @@ export const WORKSPACE_CORE_FK_REMOVAL_FINGERPRINTS_V2: Readonly<Partial<Record<
   18: 'bbaef750306f5565333887e1562768fb63b68e89f1c1fc521445c68922737e04',
 });
 
-export const WORKSPACE_CORE_FK_REMOVAL_PROVISION_LITERAL = 'db:provision_workspace@WorkspaceCoreForeignKeyRemoval1786721490000';
+export const WORKSPACE_CORE_FK_REMOVAL_PROVISION_LITERAL = 'db:provision_workspace@WorkspaceCoreForeignKeyRemoval1786721530000';
 
 export const WORKSPACE_CORE_FK_REMOVAL: WorkspaceUpgradeCommand = Object.freeze({
   kind: 'workspace',

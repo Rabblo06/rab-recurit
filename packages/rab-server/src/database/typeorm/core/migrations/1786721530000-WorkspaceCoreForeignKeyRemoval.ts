@@ -15,7 +15,7 @@ const LEVEL = 22;
 /**
  * SQL PENDING OWNER OK — OWNER-DB-ULTIMATE Part D, decision 0a option (b) (2026-11-14): owner SQL review FIRST (WS-COMMANDS.md "FOR OWNER REVIEW
  * — 0a"); run only on throwaway databases until approved. The core half of workspace structure level 22; the workspace half is
- * `0.6.0_DropWorkspaceCoreForeignKeys_1786721490000` (upgrade-commands/0-6/workspace-core-fk-removal.ts), applied per existing
+ * `0.6.0_DropWorkspaceCoreForeignKeys_1786721530000` (upgrade-commands/0-6/workspace-core-fk-removal.ts), applied per existing
  * READY workspace by the workspace command runner after this migration, on the same locked start.
  *
  * In ONE transaction:
@@ -27,8 +27,8 @@ const LEVEL = 22;
  * runner's step). down(): restores the level-21 provision body and verify body; level-22 workspaces then fail verify (FK count)
  * until the constraints are re-added (owner-run).
  */
-export class WorkspaceCoreForeignKeyRemoval1786721490000 implements MigrationInterface {
-  name = 'WorkspaceCoreForeignKeyRemoval1786721490000';
+export class WorkspaceCoreForeignKeyRemoval1786721530000 implements MigrationInterface {
+  name = 'WorkspaceCoreForeignKeyRemoval1786721530000';
 
   public async up(queryRunner: QueryRunner): Promise<void> {
     const structure = WORKSPACE_CORE_FK_REMOVAL.structure!;

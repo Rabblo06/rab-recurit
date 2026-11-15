@@ -6,7 +6,7 @@ import { Client } from 'pg';
 import { DataSource, EntityManager } from 'typeorm';
 
 import { AppModule } from '../../app.module';
-import { WorkspaceCoreForeignKeyRemoval1786721490000 } from '../../database/typeorm/core/migrations/1786721490000-WorkspaceCoreForeignKeyRemoval';
+import { WorkspaceCoreForeignKeyRemoval1786721530000 } from '../../database/typeorm/core/migrations/1786721530000-WorkspaceCoreForeignKeyRemoval';
 import { integrationTestDatabase, integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
 import { selectWorkspaceFingerprintsForServer } from '../../database/typeorm/workspace-schema/v1/expected-fingerprints';
 import { assertUsersOfOrganisationTx } from '../../engine/core-modules/core-references/core-references';
@@ -233,14 +233,14 @@ describeIfDb('Part D 0a: the application enforces what the workspace → core fo
     }
   });
 
-  it('down() of WorkspaceCoreForeignKeyRemoval1786721490000 refuses while a level-22 workspace exists (nothing changed)', async () => {
+  it('down() of WorkspaceCoreForeignKeyRemoval1786721530000 refuses while a level-22 workspace exists (nothing changed)', async () => {
     const bodies = async () =>
       (await admin.query(`SELECT pg_catalog.md5(p.prosrc) AS h FROM pg_catalog.pg_proc p WHERE p.oid IN ('core.provision_workspace(uuid)'::regprocedure, 'core.verify_workspace_schema_v1(uuid)'::regprocedure) ORDER BY 1`)).rows;
     const before = await bodies();
     const runnerOf = (c: Client) => ({ isTransactionActive: true, query: async (sql: string, params?: unknown[]) => (await c.query(sql, params as unknown[])).rows }) as never;
     await admin.query('BEGIN');
     try {
-      await expect(new WorkspaceCoreForeignKeyRemoval1786721490000().down(runnerOf(admin))).rejects.toThrow(/down\(\) refused: \d+ workspace schema\(s\) are at structure level 22/);
+      await expect(new WorkspaceCoreForeignKeyRemoval1786721530000().down(runnerOf(admin))).rejects.toThrow(/down\(\) refused: \d+ workspace schema\(s\) are at structure level 22/);
     } finally {
       await admin.query('ROLLBACK');
     }

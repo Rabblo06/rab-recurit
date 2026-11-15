@@ -62,7 +62,7 @@ const { appUrl } = resolveIntegrationTestDatabase(process.env);
  *        body plus exactly the module-20 grant-parity statements (and its own literal, checksum and fingerprint).
  */
 function approvedProvisionBody(through: 19 | 20 | 21 | 22): string {
-  // Part D 0a structure level 22 (WorkspaceCoreForeignKeyRemoval1786721490000; SQL pending owner OK): the same guarded v3 body over
+  // Part D 0a structure level 22 (WorkspaceCoreForeignKeyRemoval1786721530000; SQL pending owner OK): the same guarded v3 body over
   // template(21) + the foreign key removal, derived exactly as that migration derives it.
   if (through === 22) {
     const structure = WORKSPACE_CORE_FK_REMOVAL.structure!;
@@ -187,7 +187,7 @@ describe('Phase B P8 provisioning guards + counts-only health (migrations 178672
       const v20 = await admin.query(`SELECT 1 FROM core.migrations WHERE name = 'WorkspaceGrantParityGuards1786721430000'`);
       const l21 = await admin.query(`SELECT 1 FROM core.migrations WHERE name = 'WorkspaceStaffMemberSelect1786721480000'`);
       const [{ prosrc }] = await admin.query(`SELECT p.prosrc FROM pg_catalog.pg_proc p WHERE p.oid = 'core.provision_workspace(uuid)'::pg_catalog.regprocedure`);
-      const l22 = await admin.query(`SELECT 1 FROM core.migrations WHERE name = 'WorkspaceCoreForeignKeyRemoval1786721490000'`);
+      const l22 = await admin.query(`SELECT 1 FROM core.migrations WHERE name = 'WorkspaceCoreForeignKeyRemoval1786721530000'`);
       expect(prosrc).toBe(approvedProvisionBody(l22.length === 1 ? 22 : l21.length === 1 ? 21 : v20.length === 1 ? 20 : 19));
     }
     expect(await admin.query(PROVISIONING_HEALTH_STATE_SQL)).toEqual([...PROVISIONING_HEALTH_EXPECTED_STATE]);
