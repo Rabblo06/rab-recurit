@@ -53,6 +53,7 @@ export const HWS_CUTOVER_FUNCTIONS = [
   'core.hws_cutover_drop_new_statement_pointers(uuid,uuid[])',
   'core.hws_cutover_purge_core_statement_pointers(uuid)',
   'core.hws_cutover_new_workspace_trg()',
+  'core.hws_cutover_truncate_guard()',
 ] as const;
 
 export const HWS_CUTOVER_FENCE_TRIGGER = 'hws_cutover_core_fence';
@@ -157,6 +158,36 @@ $fn$`;
 
 export const HWS_CUTOVER_NEW_WORKSPACE_TRIGGER_SQL = `CREATE TRIGGER hws_cutover_new_workspace AFTER INSERT ON core.manager_workspace
   FOR EACH ROW EXECUTE FUNCTION core.hws_cutover_new_workspace_trg()`;
+
+/**
+ * (T4) TRUNCATE bypasses RLS: without this, any role holding the owner's privileges could empty the state or remove the
+ * one-way sentinel. A statement-level BEFORE TRUNCATE guard on both tables refuses everyone but rab_secure_owner itself and a
+ * superuser (an organisation / workspace delete cascades with DELETE, never TRUNCATE). rab_secure_owner-owned (it fires on
+ * rab_secure_owner tables), SECURITY INVOKER, bound to its two tables.
+ */
+export const HWS_CUTOVER_TRUNCATE_GUARD_SQL = `
+CREATE FUNCTION core.hws_cutover_truncate_guard()
+RETURNS trigger
+LANGUAGE plpgsql
+VOLATILE
+SECURITY INVOKER
+SET search_path = pg_catalog, pg_temp
+AS $fn$
+BEGIN
+  IF TG_TABLE_SCHEMA IS DISTINCT FROM 'core' OR TG_TABLE_NAME NOT IN ('hws_cutover_state', 'hws_cutover_activation')
+     OR TG_OP IS DISTINCT FROM 'TRUNCATE' OR TG_LEVEL IS DISTINCT FROM 'STATEMENT' THEN
+    RAISE EXCEPTION 'hws cutover: core.hws_cutover_truncate_guard() is attached to the wrong table or event' USING ERRCODE = '42501';
+  END IF;
+  IF current_user = 'rab_secure_owner'::name OR coalesce((SELECT r.rolsuper FROM pg_catalog.pg_roles r WHERE r.rolname = current_user), false) THEN
+    RETURN NULL;
+  END IF;
+  RAISE EXCEPTION 'permission denied: TRUNCATE of the HWS cutover state is not permitted' USING ERRCODE = '42501';
+END
+$fn$`;
+
+export const HWS_CUTOVER_TRUNCATE_TRIGGERS_SQL: readonly string[] = ['hws_cutover_state', 'hws_cutover_activation'].map(
+  (t) => `CREATE TRIGGER ${t}_no_truncate BEFORE TRUNCATE ON core.${t} FOR EACH STATEMENT EXECUTE FUNCTION core.hws_cutover_truncate_guard()`,
+);
 
 /**
  * (0a) Guard shared by the crewflow definers (SECURITY INVOKER: it runs as the calling definer, i.e. crewflow). Returns the
@@ -649,7 +680,7 @@ export const HWS_CUTOVER_CREWFLOW_FUNCTIONS_SQL: readonly string[] = [
 ];
 
 /** Created as rab_secure_owner (after the two tables). */
-export const HWS_CUTOVER_SECURE_FUNCTIONS_SQL: readonly string[] = [HWS_CUTOVER_DROP_NEW_SQL, HWS_CUTOVER_PURGE_CORE_SQL, HWS_CUTOVER_NEW_WORKSPACE_TRG_SQL];
+export const HWS_CUTOVER_SECURE_FUNCTIONS_SQL: readonly string[] = [HWS_CUTOVER_DROP_NEW_SQL, HWS_CUTOVER_PURGE_CORE_SQL, HWS_CUTOVER_NEW_WORKSPACE_TRG_SQL, HWS_CUTOVER_TRUNCATE_GUARD_SQL];
 
 /** Post-condition: owner | definer | config | EXECUTE grantees (sorted, '+'-joined; the owner's implicit right is not listed). */
 export const HWS_CUTOVER_STATE_SQL = `
@@ -675,6 +706,7 @@ export const HWS_CUTOVER_EXPECTED_STATE: Readonly<Record<string, string>> = Obje
   'core.hws_cutover_source_sql(text)': `crewflow|false|${PINNED}|`,
   'core.hws_cutover_started_any()': `crewflow|true|${PINNED}|crewflow_app`,
   'core.hws_cutover_new_workspace_trg()': `rab_secure_owner|true|${PINNED}|`,
+  'core.hws_cutover_truncate_guard()': `rab_secure_owner|false|${PINNED}|`,
   'core.hws_cutover_verify_range(uuid,text,text,integer)': `crewflow|true|${PINNED_LOCK}|`,
 });
 
@@ -714,7 +746,9 @@ SELECT pg_catalog.pg_get_userbyid(c.relowner)::text AS owner, c.relrowsecurity A
            AND t.tgfoid = 'core.hws_cutover_core_fence()'::pg_catalog.regprocedure) AS fences,
        (SELECT pg_catalog.count(*)::int FROM pg_catalog.pg_trigger t
          WHERE t.tgrelid = 'core.manager_workspace'::pg_catalog.regclass AND t.tgname = '${HWS_CUTOVER_NEW_WORKSPACE_TRIGGER}' AND t.tgenabled = 'O'
-           AND t.tgfoid = 'core.hws_cutover_new_workspace_trg()'::pg_catalog.regprocedure) AS new_workspace_triggers
+           AND t.tgfoid = 'core.hws_cutover_new_workspace_trg()'::pg_catalog.regprocedure) AS new_workspace_triggers,
+       (SELECT pg_catalog.count(*)::int FROM pg_catalog.pg_trigger t
+         WHERE t.tgrelid IN (c.oid, a.oid) AND t.tgenabled = 'O' AND t.tgfoid = 'core.hws_cutover_truncate_guard()'::pg_catalog.regprocedure) AS truncate_guards
   FROM pg_catalog.pg_class c, pg_catalog.pg_class a
  WHERE c.oid = 'core.hws_cutover_state'::pg_catalog.regclass AND a.oid = 'core.hws_cutover_activation'::pg_catalog.regclass`;
 
@@ -733,6 +767,7 @@ export interface HwsCutoverTableFacts {
   activation_extra_dml: boolean;
   fences: number;
   new_workspace_triggers: number;
+  truncate_guards: number;
 }
 
 export function hwsCutoverTableProblems(f: HwsCutoverTableFacts | undefined): string[] {
@@ -750,5 +785,6 @@ export function hwsCutoverTableProblems(f: HwsCutoverTableFacts | undefined): st
   if (f.activation_extra_dml) p.push('hws_cutover_activation must be insert-only for crewflow and read-only for crewflow_app');
   if (Number(f.fences) !== HWS_CUTOVER_TABLES.length) p.push(`${f.fences} fence trigger(s), expected ${HWS_CUTOVER_TABLES.length}`);
   if (Number(f.new_workspace_triggers) !== 1) p.push(`${f.new_workspace_triggers} new-workspace trigger(s), expected 1`);
+  if (Number(f.truncate_guards) !== 2) p.push(`${f.truncate_guards} TRUNCATE guard trigger(s), expected 2`);
   return p;
 }

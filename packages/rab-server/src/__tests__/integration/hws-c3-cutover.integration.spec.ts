@@ -876,7 +876,12 @@ describeIfDb('C3 HWS cutover copy path (option A′)', () => {
       }
       await refusalIn(app, [], 'DELETE FROM core.hws_cutover_activation', []);
       expect(await activeNow()).toBe(true);
+      // TRUNCATE bypasses RLS: refused by the statement-level guard for the runtime login, crewflow and crewflow_app.
       expect((await refusalIn(app, [], 'TRUNCATE core.hws_cutover_activation', [])).code).toBe('42501');
+      expect((await refusalIn(app, [], 'TRUNCATE core.hws_cutover_state', [])).code).toBe('42501');
+      for (const role of ['crewflow', 'crewflow_app']) {
+        expect((await refusalIn(admin, [`SET LOCAL ROLE ${role}`], 'TRUNCATE core.hws_cutover_activation', [])).code).toBe('42501');
+      }
       expect(await activeNow()).toBe(true);
     } finally {
       await deactivate();

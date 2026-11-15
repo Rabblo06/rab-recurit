@@ -326,6 +326,8 @@ execute|hws_cutover_source_sql(text)|crewflow|true
 execute|hws_cutover_started_any()|PUBLIC|false
 execute|hws_cutover_started_any()|crewflow_app|true
 execute|hws_cutover_started_any()|crewflow|true
+execute|hws_cutover_truncate_guard()|crewflow_app|false
+execute|hws_cutover_truncate_guard()|crewflow|false
 execute|hws_cutover_verify_range(uuid,text,text,integer)|PUBLIC|false
 execute|hws_cutover_verify_range(uuid,text,text,integer)|crewflow_app|false
 execute|hws_cutover_verify_range(uuid,text,text,integer)|crewflow|true
@@ -636,6 +638,7 @@ owner|function|hws_cutover_purge_core_statement_pointers(uuid)|rab_secure_owner|
 owner|function|hws_cutover_schema(uuid)|crewflow|definer=false
 owner|function|hws_cutover_source_sql(text)|crewflow|definer=false
 owner|function|hws_cutover_started_any()|crewflow|definer=true|search_path=pg_catalog, pg_temp
+owner|function|hws_cutover_truncate_guard()|rab_secure_owner|definer=false
 owner|function|hws_cutover_verify_range(uuid,text,text,integer)|crewflow|definer=true|search_path=pg_catalog, pg_temp
 owner|function|immutable_unaccent(text)|rab_secure_owner|definer=false
 owner|function|is_active_platform_admin(uuid)|rab_secure_owner|definer=true|search_path=pg_catalog, core, pg_temp

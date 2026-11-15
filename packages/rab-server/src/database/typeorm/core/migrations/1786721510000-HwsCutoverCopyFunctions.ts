@@ -13,6 +13,7 @@ import {
   HWS_CUTOVER_STATE_TABLE_SQL,
   HWS_CUTOVER_TABLE_FACTS_SQL,
   HWS_CUTOVER_TABLES,
+  HWS_CUTOVER_TRUNCATE_TRIGGERS_SQL,
   HwsCutoverTableFacts,
   hwsCutoverStateProblems,
   hwsCutoverTableProblems,
@@ -31,6 +32,7 @@ const CREWFLOW_FUNCTIONS = [
 ];
 const SECURE_FUNCTIONS = ['hws_cutover_drop_new_statement_pointers(uuid, uuid[])', 'hws_cutover_purge_core_statement_pointers(uuid)'];
 const SECURE_TRIGGER_FUNCTION = 'hws_cutover_new_workspace_trg()';
+const TRUNCATE_GUARD_FUNCTION = 'hws_cutover_truncate_guard()';
 
 /**
  * OWNER-DB-ULTIMATE Part C3, option A′ — PENDING OWNER CHOICE (A′ vs B′) AND SQL REVIEW (docs/plans/phase-x3/SQL-DRAFTS.md
@@ -43,6 +45,7 @@ const SECURE_TRIGGER_FUNCTION = 'hws_cutover_new_workspace_trg()';
  *     core.hws_cutover_activation (the one-way "cutover active" sentinel, no organisation_id, ENABLE + FORCE, public SELECT,
  *     owner-only INSERT for crewflow, no UPDATE / DELETE policy); the pointer definers drop_new / purge_core (EXECUTE to
  *     crewflow); the new-workspace trigger function + its AFTER INSERT trigger on core.manager_workspace (re-check N-1);
+ *     a BEFORE TRUNCATE guard on both tables (TRUNCATE bypasses RLS; only rab_secure_owner / a superuser may);
  *   - crewflow functions: guard hws_cutover_schema, source builder, definers probe / copy_batch / verify_range (FORCE lifted
  *     only inside their own transaction), hws_cutover_started_any (boot check), hws_cutover_core_fence (trigger function);
  *   - fence triggers `hws_cutover_core_fence` on the 21 core copies (review M-3).
@@ -68,7 +71,9 @@ export class HwsCutoverCopyFunctions1786721510000 implements MigrationInterface 
       await queryRunner.query(`GRANT EXECUTE ON FUNCTION core.${fn} TO crewflow`);
     }
     await queryRunner.query(`REVOKE ALL ON FUNCTION core.${SECURE_TRIGGER_FUNCTION} FROM PUBLIC`);
+    await queryRunner.query(`REVOKE ALL ON FUNCTION core.${TRUNCATE_GUARD_FUNCTION} FROM PUBLIC`);
     await queryRunner.query(HWS_CUTOVER_NEW_WORKSPACE_TRIGGER_SQL);
+    for (const sql of HWS_CUTOVER_TRUNCATE_TRIGGERS_SQL) await queryRunner.query(sql);
     await queryRunner.query('RESET ROLE');
     await withCrewflowCoreCreate(queryRunner, async () => {
       for (const sql of HWS_CUTOVER_CREWFLOW_FUNCTIONS_SQL) await queryRunner.query(sql);
@@ -95,6 +100,9 @@ export class HwsCutoverCopyFunctions1786721510000 implements MigrationInterface 
     await queryRunner.query('SET LOCAL ROLE rab_secure_owner');
     await queryRunner.query(`DROP TRIGGER IF EXISTS ${HWS_CUTOVER_NEW_WORKSPACE_TRIGGER} ON core.manager_workspace`);
     await queryRunner.query(`DROP FUNCTION IF EXISTS core.${SECURE_TRIGGER_FUNCTION}`);
+    await queryRunner.query('DROP TRIGGER IF EXISTS hws_cutover_state_no_truncate ON core.hws_cutover_state');
+    await queryRunner.query('DROP TRIGGER IF EXISTS hws_cutover_activation_no_truncate ON core.hws_cutover_activation');
+    await queryRunner.query(`DROP FUNCTION IF EXISTS core.${TRUNCATE_GUARD_FUNCTION}`);
     for (const fn of SECURE_FUNCTIONS) await queryRunner.query(`DROP FUNCTION IF EXISTS core.${fn}`);
     await queryRunner.query('DROP TABLE IF EXISTS core.hws_cutover_activation');
     await queryRunner.query('DROP TABLE IF EXISTS core.hws_cutover_state');
