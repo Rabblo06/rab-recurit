@@ -10,6 +10,7 @@ import { AuditService } from '../../engine/core-modules/audit/audit.service';
 import { PasswordHashingService } from '../../engine/core-modules/auth/services/password-hashing.service';
 import { RealtimeEventService } from '../../engine/core-modules/realtime/realtime-event.service';
 import { TenantContextService } from '../../engine/core-modules/tenant/tenant-context.service';
+import { BusinessTablesError } from '../../engine/core-modules/tenant/business-tables';
 import { AttendanceQrService } from '../../modules/attendance/services/attendance-qr.service';
 import { Organisation } from '../../modules/identity/entities';
 import { NotificationService } from '../../modules/notification/services/notification.service';
@@ -440,12 +441,15 @@ describeIfDb('shift completion after an offer close (integration)', () => {
       expect(await offerRow(offerId)).toMatchObject({ status: 'staff_accepted', assignment_status: 'staff_accepted' });
       expect((await shiftRow(fx.shiftId)).status).toBe('in_progress');
 
-      // Fail closed with no tenant context at all: the roll-up cannot even resolve the workspace table (no search_path, no
-      // SET LOCAL) — it errors or reads nothing, and changes nothing, even for a shift that is settled (the standby closed
-      // by fixture: the state the 12 soak shifts are left in today).
+      // Fail closed with no tenant context at all: the roll-up cannot even name the workspace table (no binder, so
+      // businessTables(manager) refuses 'unbound' before any SQL runs) and changes nothing, even for a shift that is settled
+      // (the standby closed by fixture: the state the 12 soak shifts are left in today). Any other error is rethrown.
       await adminDataSource.query(`UPDATE ${siblingTable(await businessTableOf(adminDataSource, 'job_offer', offerId), 'shift_assignment')} SET status = 'rejected' WHERE id = $1`, [(await offerRow(offerId)).assignment_id]);
-      const noContext = await dataSource.transaction((m) => completeShiftIfSettled(m, fx.org.id, fx.shiftId)).catch(() => 'refused');
-      expect([false, 'refused']).toContain(noContext);
+      const noContext = await dataSource.transaction((m) => completeShiftIfSettled(m, fx.org.id, fx.shiftId)).catch((error: unknown) => {
+        if (error instanceof BusinessTablesError && error.code === 'unbound') return 'refused';
+        throw error;
+      });
+      expect(noContext).toBe('refused');
       expect((await shiftRow(fx.shiftId)).status).toBe('in_progress');
       // ... and in the right tenant context the same roll-up completes it (how a one-off repair would run — owner approval).
       expect(await tenantContext.runInTenantContext(workerContext(fx), (m) => completeShiftIfSettled(m, fx.org.id, fx.shiftId))).toBe(true);

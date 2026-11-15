@@ -1,0 +1,15 @@
+{
+  "_comment": [
+    "Part C2 ratchet (tools/check-workspace-table-qualified.cjs). Per file and rule: the number of workspace-table references",
+    "that are not yet schema-qualified through businessTables(manager). This file may only SHRINK: a module PR that qualifies",
+    "sites lowers or deletes its rows in the same PR. Never raise a count; qualify the new reference instead. C2-7: empty."
+  ],
+  "files": {
+    "packages/rab-server/src/modules/attendance/services/post-shift-lifecycle.service.ts": {
+      "unqualified": 3
+    },
+    "packages/rab-server/src/modules/attendance/templates/document-context.ts": {
+      "unqualified": 2
+    }
+  }
+}

@@ -2,6 +2,7 @@ import { assertTransition, NotificationType, OFFER_CLOSED_REASON, OFFER_TRANSITI
 import { DataSource } from 'typeorm';
 
 import { AuditAction, AuditService } from '@rab/server/engine/core-modules/audit/audit.service';
+import { businessTables } from '@rab/server/engine/core-modules/tenant/business-tables';
 import { TenantContextService } from '@rab/server/engine/core-modules/tenant/tenant-context.service';
 import { NotificationService } from '@rab/server/modules/notification/services/notification.service';
 import { JobOffer } from '@rab/server/modules/offer/entities/job-offer.entity';
@@ -92,18 +93,19 @@ export async function runShiftCancellationFollowupCycle(
   auditService: AuditService,
 ): Promise<ShiftCancellationFollowupResult> {
   const discoveries = await discoverInWorkspaces(ownerDataSource, tenantContext, async (manager) => {
+      const t = businessTables(manager);
       const assignmentRows = await manager.query<AssignmentCandidate[]>(
         `SELECT sa.id AS assignment_id, sa.organisation_id, sa.workspace_id
-           FROM shift_assignment sa
-           JOIN shift s ON s.id = sa.shift_id
+           FROM ${t.shift_assignment} sa
+           JOIN ${t.shift} s ON s.id = sa.shift_id
           WHERE s.status = 'cancelled' AND sa.status = ANY($1::text[])
           LIMIT 500`,
         [OPEN_ASSIGNMENT_STATUSES],
       );
       const replacementRows = await manager.query<ReplacementCandidate[]>(
         `SELECT rr.id AS request_id, rr.organisation_id, rr.workspace_id
-           FROM replacement_request rr
-           JOIN shift s ON s.id = rr.shift_id
+           FROM ${t.replacement_request} rr
+           JOIN ${t.shift} s ON s.id = rr.shift_id
           WHERE s.status = 'cancelled' AND rr.status = ANY($1::text[])
           LIMIT 500`,
         [OPEN_REPLACEMENT_STATUSES],
@@ -117,6 +119,7 @@ export async function runShiftCancellationFollowupCycle(
   let offersClosed = 0;
   for (const candidate of assignments) {
     const outcome = await runScopedForOrg(tenantContext, candidate.organisation_id, candidate.workspace_id, async (manager) => {
+      const t = businessTables(manager);
       const assignment = await manager.findOne(ShiftAssignment, { where: { id: candidate.assignment_id } });
       if (!assignment || !OPEN_ASSIGNMENT_STATUSES.includes(assignment.status)) return { closed: false, offerClosed: false };
       // Reload canonical shift state — never trust anything about "cancelled" from the scan/payload.
@@ -149,7 +152,7 @@ export async function runShiftCancellationFollowupCycle(
         if (offer.status === OfferStatus.PENDING) {
           assertTransition(OFFER_TRANSITIONS, offer.status, OfferStatus.WITHDRAWN);
           const [, withdrawnCount] = (await manager.query(
-            `UPDATE job_offer SET status = $1, responded_at = $2 WHERE id = $3 AND status = $4`,
+            `UPDATE ${t.job_offer} SET status = $1, responded_at = $2 WHERE id = $3 AND status = $4`,
             [OfferStatus.WITHDRAWN, new Date(), offer.id, OfferStatus.PENDING],
           )) as [unknown, number];
           if (withdrawnCount > 0) {
@@ -169,7 +172,7 @@ export async function runShiftCancellationFollowupCycle(
           // "rejected" label alone.
           assertTransition(OFFER_TRANSITIONS, offer.status, OfferStatus.MANAGER_REJECTED);
           const [, rejectedCount] = (await manager.query(
-            `UPDATE job_offer SET status = $1, manager_rejected_at = $2, rejected_by = NULL, rejection_reason = $3 WHERE id = $4 AND status = $5`,
+            `UPDATE ${t.job_offer} SET status = $1, manager_rejected_at = $2, rejected_by = NULL, rejection_reason = $3 WHERE id = $4 AND status = $5`,
             [OfferStatus.MANAGER_REJECTED, new Date(), 'This shift was cancelled.', offer.id, OfferStatus.STAFF_ACCEPTED],
           )) as [unknown, number];
           if (rejectedCount > 0) {
@@ -200,7 +203,7 @@ export async function runShiftCancellationFollowupCycle(
       // JobOffer row at all).
       assertTransition(SHIFT_ASSIGNMENT_TRANSITIONS, assignment.status, ShiftAssignmentStatus.CANCELLED);
       const [, assignmentCancelledCount] = (await manager.query(
-        `UPDATE shift_assignment SET status = $1 WHERE id = $2 AND status = $3`,
+        `UPDATE ${t.shift_assignment} SET status = $1 WHERE id = $2 AND status = $3`,
         [ShiftAssignmentStatus.CANCELLED, assignment.id, assignment.status],
       )) as [unknown, number];
       if (assignmentCancelledCount === 0) return { closed: false, offerClosed };
@@ -236,6 +239,7 @@ export async function runShiftCancellationFollowupCycle(
   let replacementRequestsCancelled = 0;
   for (const candidate of replacements) {
     const didCancel = await runScopedForOrg(tenantContext, candidate.organisation_id, candidate.workspace_id, async (manager) => {
+      const t = businessTables(manager);
       // PHASE 4 fix (section 30): manager.query() returns [rows, rowCount]
       // for an UPDATE statement, never the rows array directly (see
       // offer.service.ts's confirmAssignment / replacement-request.service.ts's
@@ -247,7 +251,7 @@ export async function runShiftCancellationFollowupCycle(
       // itself was never unsafe (the WHERE clause is a real, correct guard);
       // only this returned count was wrong.
       const [updatedRows] = (await manager.query(
-        `UPDATE replacement_request SET status = 'cancelled', updated_at = now()
+        `UPDATE ${t.replacement_request} SET status = 'cancelled', updated_at = now()
           WHERE id = $1 AND status = ANY($2::text[]) RETURNING id`,
         [candidate.request_id, OPEN_REPLACEMENT_STATUSES],
       )) as [Array<{ id: string }>, number];

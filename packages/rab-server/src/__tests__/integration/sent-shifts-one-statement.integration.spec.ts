@@ -10,7 +10,7 @@ import { Organisation } from '../../modules/identity/entities';
 import { Venue } from '../../modules/venue/entities/venue.entity';
 import { SentShiftView } from '../../modules/scheduling/dto/list-sent-shifts.dto';
 import { SchedulingService } from '../../modules/scheduling/services/scheduling.service';
-import { SENT_SHIFT_ROWS_SQL, SENT_SHIFT_VIEW_SQL, sentShiftsPageAndCountsSql } from '../../modules/scheduling/services/sent-shifts-sql';
+import { SENT_SHIFT_VIEW_SQL, sentShiftRowsSql, sentShiftsPageAndCountsSql } from '../../modules/scheduling/services/sent-shifts-sql';
 import { PasswordHashingService } from '../../engine/core-modules/auth/services/password-hashing.service';
 import { decodeOptionalKeysetCursor, keysetBeforeSql, keysetPage } from '../../engine/dto/keyset-cursor';
 import { ResourceScopeService } from '../../engine/core-modules/resource-scope/resource-scope.service';
@@ -25,7 +25,7 @@ import { integrationTestDatabaseReady } from '../../database/typeorm/core/integr
 /**
  * XP-05 (Phase X Part 2, X4): `GET /shifts/sent` now runs ONE statement for the page rows and the tab counts
  * (`sentShiftsPageAndCountsSql`) instead of running the whole classified CTE twice. Row-set equivalence against the two
- * statements it replaced, rebuilt here verbatim from the same fragments (SENT_SHIFT_ROWS_SQL + SENT_SHIFT_VIEW_SQL), as
+ * statements it replaced, rebuilt here verbatim from the same fragments (sentShiftRowsSql + SENT_SHIFT_VIEW_SQL), as
  * the Venue Manager under the real runtime login, tenant context and RLS:
  *  - every tab view, page sizes 1 / 4 / 50, every offset page AND every keyset (cursor) page to the end;
  *  - every seeded id (in scope, another venue, another requester, a manager-created shift, an unknown id);
@@ -127,7 +127,7 @@ describeIfDb('XP-05 /shifts/sent: one statement for rows + tab counts, row-set e
     const V = fx.vm.userId;
     const tie = '2026-06-01T10:00:00.123456Z';
     const ids = fx.ids;
-    // Every classification branch of SENT_SHIFT_ROWS_SQL / SENT_SHIFT_VIEW_SQL, plus out-of-scope rows.
+    // Every classification branch of sentShiftRowsSql / SENT_SHIFT_VIEW_SQL, plus out-of-scope rows.
     ids.push(await request_({ requestedBy: V, venueId: venueA, status: 'pending_manager_approval' }));
     ids.push(await request_({ requestedBy: V, venueId: venueA, status: 'pending_manager_approval', createdAt: tie }));
     ids.push(await request_({ requestedBy: V, venueId: venueA, status: 'pending_manager_approval', createdAt: tie }));
@@ -194,16 +194,16 @@ describeIfDb('XP-05 /shifts/sent: one statement for rows + tab counts, row-set e
       const viewSql = q.id ? 'TRUE' : SENT_SHIFT_VIEW_SQL[q.view ?? 'all'];
       // The two statements XP-05 replaced, verbatim.
       const legacyRows: Row[] = await m.query(
-        `${SENT_SHIFT_ROWS_SQL} SELECT * FROM (SELECT *, count(*) OVER () AS view_total FROM classified WHERE ${viewSql}) v ${bound}
+        `${sentShiftRowsSql(m)} SELECT * FROM (SELECT *, count(*) OVER () AS view_total FROM classified WHERE ${viewSql}) v ${bound}
           ORDER BY "submittedAt" DESC, id DESC LIMIT $5 OFFSET $6`,
         pageParams,
       );
       const [legacyTabs] = await m.query(
-        `${SENT_SHIFT_ROWS_SQL} SELECT ${Object.entries(SENT_SHIFT_VIEW_SQL).map(([k, w]) => `count(*) FILTER (WHERE ${w})::int AS "${k}"`).join(', ')},
+        `${sentShiftRowsSql(m)} SELECT ${Object.entries(SENT_SHIFT_VIEW_SQL).map(([k, w]) => `count(*) FILTER (WHERE ${w})::int AS "${k}"`).join(', ')},
           count(*)::int AS submitted FROM classified`,
         params,
       );
-      const result: Row[] = await m.query(sentShiftsPageAndCountsSql(viewSql, bound), pageParams);
+      const result: Row[] = await m.query(sentShiftsPageAndCountsSql(m, viewSql, bound), pageParams);
       return { legacyRows, legacyTabs: legacyTabs as Row, result };
     });
   }

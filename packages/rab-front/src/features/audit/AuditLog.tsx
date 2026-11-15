@@ -26,7 +26,7 @@ const AUDIT_ACTIONS = [
   'manager_workspace.onboarding_completed', 'auth.refresh_reuse_detected', 'platform_admin.granted',
   'platform_admin.revoked', 'platform_admin.bootstrapped', 'user.invite_failed', 'user.invite_queued',
   'user.invite_resent', 'user.invite_pending_email_changed', 'user.invite_cancelled', 'user.invite_accepted',
-  'user.activated', 'user.suspended', 'user.reactivated', 'user.deleted', 'user.invite_expired',
+  'user.activated', 'user.suspended', 'user.reactivated', 'user.deleted', 'user.personal_data_erased', 'user.invite_expired',
   'user.invite_cleaned_up', 'user.invite_cleanup_skipped', 'email.sent', 'email.delivery_failed',
   'shift.reminder_sent', 'shift_assignment.no_show', 'shift_assignment.missing_clock_out_flagged',
   'offer.expired_by_worker',

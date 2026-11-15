@@ -18,6 +18,7 @@ import { AuditService } from '@rab/server/engine/core-modules/audit/audit.servic
 import { PasswordHashingService } from '@rab/server/engine/core-modules/auth/services/password-hashing.service';
 import { RealtimeEventService } from '@rab/server/engine/core-modules/realtime/realtime-event.service';
 import { AuthContext } from '@rab/server/engine/core-modules/tenant/auth-context.interface';
+import { BusinessTablesError } from '@rab/server/engine/core-modules/tenant/business-tables';
 import { TenantContextService } from '@rab/server/engine/core-modules/tenant/tenant-context.service';
 import { AttendanceService } from '@rab/server/modules/attendance/services/attendance.service';
 import { Organisation } from '@rab/server/modules/identity/entities/index';
@@ -790,7 +791,7 @@ describeIfDb('manager confirmation deadline correctness (integration)', () => {
       expect(await adminDataSource.manager.query(`SELECT 1 FROM core.worker_due_work WHERE subject_id = $1`, [offer.id])).toHaveLength(0);
     });
 
-    it('X4: with no tenant context bound, the withdrawal CAS matches zero rows', async () => {
+    it('X4: with no tenant context bound, the withdrawal is refused before any SQL and nothing changes', async () => {
       const fx = await seedFixture('dlNoCtx');
       const staff = await factory.createStaff(fx.organisation, { owner: fx.managerA });
       const offer = await sendAndAccept(fx, await seedOpenShift(fx), staff);
@@ -801,11 +802,18 @@ describeIfDb('manager confirmation deadline correctness (integration)', () => {
         await m.query(`SELECT set_config('rab.workspace_id', '', true)`);
         await m.query(`SELECT set_config('rab.user_id', '', true)`);
         const [{ n }] = await m.query(`SELECT count(*)::int AS n FROM job_offer`);
-        const withdrawn = await withdrawUnconfirmedOffer(m, { auditService, notificationService, realtimeEventService }, fx.organisation.id, offer.id, 'worker_pointer');
-        return { n, withdrawn };
+        // C2-3: the withdrawal names its tables through businessTables(manager), which refuses a manager no binder has bound
+        // (fail closed, before the CAS runs) — stricter than the CAS matching zero rows under RLS, which `n` still proves.
+        const outcome = await withdrawUnconfirmedOffer(m, { auditService, notificationService, realtimeEventService }, fx.organisation.id, offer.id, 'worker_pointer').then(
+          (withdrawn) => ({ withdrawn, error: null as unknown }),
+          (error: unknown) => ({ withdrawn: null, error }),
+        );
+        return { n, ...outcome };
       });
       expect(result.n).toBe(0);
       expect(result.withdrawn).toBeNull();
+      expect(result.error).toBeInstanceOf(BusinessTablesError);
+      expect((result.error as BusinessTablesError).code).toBe('unbound');
       expect((await reload(fx, offer.id)).status).toBe(OfferStatus.STAFF_ACCEPTED);
     });
   });

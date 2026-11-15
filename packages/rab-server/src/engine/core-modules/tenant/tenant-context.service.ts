@@ -7,7 +7,9 @@ import { PgReplicaService } from '../../../database/runtime/replica/pg-replica.s
 import { EnvironmentService } from '../environment/environment.service';
 import { timeStage } from '../../observability/request-context';
 import { AuthContext } from './auth-context.interface';
+import { bindBusinessSchema, BusinessTablesError, businessSearchPath, CORE_BUSINESS_SCHEMA, peekBusinessSchema, withBusinessSchema, withBusinessSchemaScope } from './business-tables';
 import { SchemaResolverService, WorkspaceRoutingError } from './schema-resolver.service';
+import { bindEntityManagerToSchema } from './schema-bound-entity-manager';
 import { isUpgradeBlocked } from '../upgrade/workspace-upgrade-block';
 import { CUTOVER_ROUTING_COLUMNS_SQL, cutoverStateRefused } from '../upgrade/hws-cutover-routing';
 
@@ -34,6 +36,12 @@ import { CUTOVER_ROUTING_COLUMNS_SQL, cutoverStateRefused } from '../upgrade/hws
  *      entity calls (ManagerProfile, ManagerWorkspace, ...) resolving exactly as before.
  *
  * Core entities (explicit `schema: 'core'`) and explicitly `core.`-qualified raw SQL are never affected by any of this.
+ *
+ * Part C2-1: the manager handed to the callback is SCHEMA-BOUND (schema-bound-entity-manager.ts): its entity metadata carries
+ * the schema just recorded for businessTables() and bound as search_path, so the 14 workspace entities issue
+ * `"<schema>"."<table>"` themselves instead of relying on search_path. Same connection, same transaction, same GUCs; only the
+ * entity SQL text changes. Raw SQL through `manager.query` still resolves bare table names through search_path until its
+ * own C2 PR (or uses businessTables(), which is bound on the handed-out manager too).
  *
  * `runInTenantContext` is the general-purpose entry point (core/global services, and anything that may legitimately
  * run with no workspace bound). `runInWorkspaceContext` (below) is the stricter boundary for the 15 physical
@@ -139,7 +147,7 @@ export class TenantContextService {
   ): Promise<T> {
     if (options?.useReplica) return this.runRoutedRead(ctx, (manager) => fn(manager));
     const readOnly = options?.readOnly === true;
-    return this.observe('primary', () => this.dataSource.transaction(async (manager) => {
+    return this.observe('primary', () => this.dataSource.transaction((manager) => withBusinessSchemaScope(manager, async () => {
       // ST-05: this stage times the in-transaction binding only. The pool checkout (with its RESET ROLE) and TypeORM's
       // START TRANSACTION run before it, and COMMIT after the callback; none of them is inside it.
       await timeStage('tenant_context_setup', async () => {
@@ -148,14 +156,15 @@ export class TenantContextService {
           // HWS on with a workspace: the registry is FORCE RLS and needs the GUCs bound first, so search_path stays its own
           // statement after resolve().
           await this.bindGucs(manager, ctx, { readOnly });
-          await this.bindSearchPath(manager, await this.schemaResolver.resolve(manager, ctx.workspaceId));
-        } else {
-          // ST-01: the schema is the constant 'core', bound in the same SELECT as the identity GUCs.
-          await this.bindGucs(manager, ctx, { searchPath: 'core', readOnly });
+          await this.bindBusinessSchemaAndPath(manager, ctx, await this.schemaResolver.resolve(manager, ctx.workspaceId));
+          return;
         }
+        // ST-01: the schema is the constant 'core', bound in the same SELECT as the identity GUCs (C2-0: recorded first).
+        bindBusinessSchema(manager, CORE_BUSINESS_SCHEMA, ctx.workspaceId);
+        await this.bindGucs(manager, ctx, { searchPath: businessSearchPath(CORE_BUSINESS_SCHEMA), readOnly });
       });
-      return fn(manager);
-    }));
+      return this.handOut(manager, ctx, (bound) => fn(bound));
+    })));
   }
 
   /**
@@ -185,22 +194,23 @@ export class TenantContextService {
     if (!ctx.workspaceId) throw new WorkspaceRoutingError('missing-context');
     if (options?.useReplica) return this.runRoutedRead(ctx, fn);
     const readOnly = options?.readOnly === true;
-    return this.observe('primary', () => this.dataSource.transaction(async (manager) => {
+    return this.observe('primary', () => this.dataSource.transaction((manager) => withBusinessSchemaScope(manager, async () => {
       const schema = await timeStage('tenant_context_setup', async () => {
         await this.enforceInspectReadOnly(manager, ctx);
         if (this.environment.get('HWS_RUNTIME_ENABLED')) {
           // HWS on: the registry is FORCE RLS and needs the GUCs bound first, so search_path stays its own statement.
           await this.bindGucs(manager, ctx, { readOnly });
           const resolved = await this.schemaResolver.resolve(manager, ctx.workspaceId);
-          await this.bindSearchPath(manager, resolved);
+          await this.bindBusinessSchemaAndPath(manager, ctx, resolved);
           return resolved;
         }
-        // ST-01: HWS off, the schema is the constant 'core', bound in the same SELECT as the identity GUCs.
-        await this.bindGucs(manager, ctx, { searchPath: 'core', readOnly });
-        return 'core';
+        // ST-01: HWS off, the schema is the constant 'core', bound in the same SELECT as the identity GUCs (C2-0: recorded first).
+        bindBusinessSchema(manager, CORE_BUSINESS_SCHEMA, ctx.workspaceId);
+        await this.bindGucs(manager, ctx, { searchPath: businessSearchPath(CORE_BUSINESS_SCHEMA), readOnly });
+        return CORE_BUSINESS_SCHEMA;
       });
-      return fn(manager, schema);
-    }));
+      return this.handOut(manager, ctx, (bound) => fn(bound, schema));
+    })));
   }
 
   /**
@@ -213,7 +223,7 @@ export class TenantContextService {
     if (route.dataSource) {
       const replicaDataSource = route.dataSource;
       const hws = this.environment.get('HWS_RUNTIME_ENABLED') && ctx.workspaceId;
-      const schema = hws ? await this.resolveSchemaOnPrimary(ctx) : 'core';
+      const schema = hws ? await this.resolveSchemaOnPrimary(ctx) : CORE_BUSINESS_SCHEMA;
       try {
         const value = await this.observe('replica', () => this.readOnlyTransaction(replicaDataSource, ctx, schema, fn));
         databaseMetrics.recordReplicaRead();
@@ -235,23 +245,24 @@ export class TenantContextService {
     schema: string | null,
     fn: (manager: EntityManager, schema: string) => Promise<T>,
   ): Promise<T> {
-    return dataSource.transaction(async (manager) => {
+    return dataSource.transaction((manager) => withBusinessSchemaScope(manager, async () => {
       const bound = await timeStage('tenant_context_setup', async () => {
         await manager.query('SET TRANSACTION READ ONLY');
         // ST-01: a schema known before the bind (resolved and validated on the primary already, or 'core') is folded into
         // the binding SELECT; one resolved here (HWS on with a workspace, on the primary) needs the GUCs first.
-        const known = schema ?? (this.environment.get('HWS_RUNTIME_ENABLED') && ctx.workspaceId ? null : 'core');
+        const known = schema ?? (this.environment.get('HWS_RUNTIME_ENABLED') && ctx.workspaceId ? null : CORE_BUSINESS_SCHEMA);
         if (known !== null) {
-          await this.bindGucs(manager, ctx, { searchPath: known });
+          bindBusinessSchema(manager, known, ctx.workspaceId); // C2-0: validated and recorded before it reaches set_config
+          await this.bindGucs(manager, ctx, { searchPath: businessSearchPath(known) });
           return known;
         }
         await this.bindGucs(manager, ctx);
         const resolved = await this.schemaResolver.resolve(manager, ctx.workspaceId);
-        await this.bindSearchPath(manager, resolved);
+        await this.bindBusinessSchemaAndPath(manager, ctx, resolved);
         return resolved;
       });
-      return fn(manager, bound);
-    });
+      return this.handOut(manager, ctx, (boundManager) => fn(boundManager, bound));
+    }));
   }
 
   /** The trusted workspace schema, resolved on the primary in its own short read-only transaction (same RLS binding). */
@@ -323,8 +334,9 @@ export class TenantContextService {
     // T-1: when the schema is already known (ST-01) search_path is set in this same SELECT, and when the caller asked for a
     // read-only transaction (ST-02) so is transaction_read_only; both transaction-local, like the identity GUCs.
     // The search_path value is a bound parameter, which stops SQL injection but NOT a comma-separated list ('a, core' would
-    // be two schemas). Neither this folded $6 nor bindSearchPath() checks the format itself; the value is validated where it
-    // comes from, and only there:
+    // be two schemas). C2-0: every caller now passes it through businessSearchPath(), which refuses anything but 'core' or
+    // `workspace_` + 32 lowercase hex (and returns '' under the test-only trap); provenance is still decided where it comes
+    // from, and only there:
     //   - the literal constant 'core' in the callers above; or
     //   - a schema returned by SchemaResolverService.resolve(): `workspaceSchemaName()` (`workspace_` + 32 lowercase hex, from
     //     a UUID) plus an exact match with the registry row, and, for a cached value, the same exact-name comparison (ST-07).
@@ -337,7 +349,27 @@ export class TenantContextService {
     if (!identity || identity.cu !== identity.su) throw new TenantSessionRoleError(String(identity?.cu), String(identity?.su));
   }
 
-  private async bindSearchPath(manager: EntityManager, schema: string): Promise<void> {
-    await manager.query(`SELECT set_config('search_path', $1, true)`, [schema]);
+  /**
+   * C2-1: the callback gets the SCHEMA-BOUND manager for the schema C2-0 just recorded (and validated: 'core' or exactly the
+   * canonical name of ctx.workspaceId) on `manager` — the real schema, never the trap's ''. businessTables() is recorded on
+   * the bound manager too, for the callback only; nested transactions get the same manager (queryRunner.manager).
+   */
+  private async handOut<T>(manager: EntityManager, ctx: Pick<AuthContext, 'workspaceId'>, run: (bound: EntityManager) => Promise<T>): Promise<T> {
+    // Fail closed: every binder path records the schema before it reaches here. (bindEntityManagerToSchema itself refuses a
+    // manager outside an open transaction.)
+    const schema = peekBusinessSchema(manager);
+    if (schema === undefined) throw new BusinessTablesError('unbound');
+    const bound = await bindEntityManagerToSchema(manager, schema);
+    return withBusinessSchema(bound, schema, ctx.workspaceId, () => run(bound));
+  }
+
+  /**
+   * C2-0: records `schema` for businessTables(manager) FIRST (bindBusinessSchema validates it: 'core' or exactly the
+   * canonical name of ctx.workspaceId), then binds search_path to it — or to '' under the test-only trap (business-tables.ts).
+   * The enclosing withBusinessSchemaScope puts the entry binding back when the transaction callback settles.
+   */
+  private async bindBusinessSchemaAndPath(manager: EntityManager, ctx: Pick<AuthContext, 'workspaceId'>, schema: string): Promise<void> {
+    bindBusinessSchema(manager, schema, ctx.workspaceId);
+    await manager.query(`SELECT set_config('search_path', $1, true)`, [businessSearchPath(schema)]);
   }
 }

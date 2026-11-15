@@ -1,6 +1,7 @@
 import { NotificationType } from '@rab/shared';
 import { DataSource } from 'typeorm';
 
+import { businessTables } from '@rab/server/engine/core-modules/tenant/business-tables';
 import { TenantContextService } from '@rab/server/engine/core-modules/tenant/tenant-context.service';
 import { NotificationService } from '@rab/server/modules/notification/services/notification.service';
 import { assignmentTimeSql } from '@rab/server/modules/scheduling/utils/assignment-time';
@@ -34,13 +35,14 @@ export async function runPayrollPeriodAttentionCycle(
     if (!ws?.org || !ws?.ws) return [];
     const ended = (await activePeriods(m, ws.org)).filter((p) => p.end < today && p.end >= addDays(today, -LOOKBACK_DAYS));
     const out: Candidate[] = [];
+    const t = businessTables(m);
     for (const p of ended) {
       const [counts] = await m.query(
         // sql-injection-reviewed: code-constant SQL fragment from a helper called with literal aliases; values are bound $n parameters.
         `SELECT
-           (SELECT count(*)::int FROM payroll_record pr JOIN attendance a ON a.id = pr.attendance_id JOIN shift_assignment sa ON sa.id = a.shift_assignment_id JOIN shift s ON s.id = pr.shift_id
+           (SELECT count(*)::int FROM ${t.payroll_record} pr JOIN ${t.attendance} a ON a.id = pr.attendance_id JOIN ${t.shift_assignment} sa ON sa.id = a.shift_assignment_id JOIN ${t.shift} s ON s.id = pr.shift_id
              WHERE pr.status = 'pending_approval' AND (${assignmentTimeSql().start} AT TIME ZONE 'Europe/London')::date BETWEEN $1::date AND $2::date) AS pending,
-           (SELECT count(*)::int FROM attendance a JOIN shift_assignment sa ON sa.id = a.shift_assignment_id JOIN shift s ON s.id = a.shift_id
+           (SELECT count(*)::int FROM ${t.attendance} a JOIN ${t.shift_assignment} sa ON sa.id = a.shift_assignment_id JOIN ${t.shift} s ON s.id = a.shift_id
              WHERE a.clock_out_at IS NOT NULL AND a.status <> 'approved'
                AND (${assignmentTimeSql().start} AT TIME ZONE 'Europe/London')::date BETWEEN $1::date AND $2::date) AS unfinalised,
            (SELECT owner_user_id FROM core.manager_workspace WHERE id = $3) AS owner`,

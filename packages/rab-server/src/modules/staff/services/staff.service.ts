@@ -1,4 +1,5 @@
 import { loadSystemRoleDefaultPermissions } from '../../identity/services/system-role-permissions';
+import { lockLiveUser } from '../../identity/services/live-user-lock';
 import {
   ARCHIVE_TRANSITIONS,
   ArchiveState,
@@ -20,6 +21,7 @@ import { EntityManager, In, QueryFailedError } from 'typeorm';
 
 import { AccountInvite, EmailOutbox, Organisation, OrganisationMember, Permission, Role, RolePermission, User, UserRole } from '../../identity/entities';
 import { AuthContext } from '../../../engine/core-modules/tenant/auth-context.interface';
+import { businessTables } from '../../../engine/core-modules/tenant/business-tables';
 import { TenantContextService } from '../../../engine/core-modules/tenant/tenant-context.service';
 import { WorkspaceMembershipService } from '../../../engine/core-modules/tenant/workspace-membership.service';
 import { AccountInviteService, InvitationLifecycleStatus } from '../../../engine/core-modules/auth/services/account-invite.service';
@@ -364,13 +366,14 @@ export class StaffService {
       const scope = await this.resourceScope.resolveTx(manager, ctx);
       if (scope.kind !== 'venue') throw new NotFoundException('Directory not found.');
       if (!scope.venueIds.length) return { data: [], total: 0 };
+      const t = businessTables(manager);
       const query = manager.createQueryBuilder(StaffProfile, 'sp')
         .innerJoin(User, 'u', 'u.id = sp.userId')
         .where('sp.organisationId = :organisationId', { organisationId: ctx.organisationId })
         .andWhere('u.status = :activeStatus', { activeStatus: UserStatus.ACTIVE })
-        .andWhere(`EXISTS (SELECT 1 FROM venue_manager_staff t
+        .andWhere(`EXISTS (SELECT 1 FROM ${t.venue_manager_staff} t
           JOIN core.manager_profile mp ON mp.id = t.manager_profile_id
-          JOIN venue v ON v.workspace_id = t.workspace_id
+          JOIN ${t.venue} v ON v.workspace_id = t.workspace_id
           WHERE t.staff_profile_id = sp.id AND mp.user_id = :teamUserId
             AND v.id IN (:...venueIds)
             AND (:tag::text IS NULL OR (:tag = 'favourite' AND t.is_favourite) OR (:tag = 'emergency' AND t.is_emergency)))`,
@@ -384,9 +387,9 @@ export class StaffService {
         .addSelect('u.firstName', 'firstName').addSelect('u.lastName', 'lastName')
         .addSelect('sp.employmentStatus', 'employmentStatus')
         .addSelect('jr.name', 'jobRoleName')
-        .addSelect(`COALESCE((SELECT t.is_favourite FROM venue_manager_staff t JOIN core.manager_profile mp ON mp.id = t.manager_profile_id
+        .addSelect(`COALESCE((SELECT t.is_favourite FROM ${t.venue_manager_staff} t JOIN core.manager_profile mp ON mp.id = t.manager_profile_id
           WHERE t.staff_profile_id = sp.id AND mp.user_id = :teamUserId LIMIT 1), false)`, 'isFavourite')
-        .addSelect(`COALESCE((SELECT t.is_emergency FROM venue_manager_staff t JOIN core.manager_profile mp ON mp.id = t.manager_profile_id
+        .addSelect(`COALESCE((SELECT t.is_emergency FROM ${t.venue_manager_staff} t JOIN core.manager_profile mp ON mp.id = t.manager_profile_id
           WHERE t.staff_profile_id = sp.id AND mp.user_id = :teamUserId LIMIT 1), false)`, 'isEmergency')
         .orderBy('u.firstName', 'ASC').addOrderBy('sp.id', 'ASC')
         .offset(skip).limit(take).getRawMany();
@@ -405,16 +408,17 @@ export class StaffService {
       throw new ForbiddenException('Staff viewing is not permitted.');
     }
     return this.tenantContext.runInWorkspaceContext(ctx, async (manager) => {
+      const t = businessTables(manager);
       const [row] = await manager.query(
         `SELECT sp.id, u.first_name AS "firstName", u.last_name AS "lastName", jr.name AS "jobRoleName",
             sp.employment_type AS "employmentType", sp.years_experience AS "yearsExperience", sp.other_skills AS "otherSkills",
             sp.available_days AS "availableDays", sp.preferred_shift_times AS "preferredShiftTimes",
             sp.max_hours_per_week AS "maxHoursPerWeek", t.is_favourite AS "isFavourite", t.is_emergency AS "isEmergency"
-         FROM venue_manager_staff t
+         FROM ${t.venue_manager_staff} t
          JOIN core.manager_profile mp ON mp.id = t.manager_profile_id AND mp.user_id = $2 AND mp.type = 'venue'
-         JOIN staff_profile sp ON sp.id = t.staff_profile_id AND sp.workspace_id = t.workspace_id
+         JOIN ${t.staff_profile} sp ON sp.id = t.staff_profile_id AND sp.workspace_id = t.workspace_id
          JOIN core."user" u ON u.id = sp.user_id AND u.status = 'active'
-         LEFT JOIN job_role jr ON jr.id = sp.job_role_id
+         LEFT JOIN ${t.job_role} jr ON jr.id = sp.job_role_id
          WHERE t.staff_profile_id = $1 AND t.organisation_id = $3 AND t.workspace_id = $4`,
         [staffId, ctx.userId, ctx.organisationId, ctx.workspaceId],
       );
@@ -432,8 +436,9 @@ export class StaffService {
       throw new ForbiddenException('Staff viewing is not permitted.');
     }
     return this.tenantContext.runInWorkspaceContext(ctx, async (manager) => {
+      const t = businessTables(manager);
       const rows: Array<{ isFavourite: boolean; isEmergency: boolean }> = await manager.query(
-        `UPDATE venue_manager_staff t SET
+        `UPDATE ${t.venue_manager_staff} t SET
             is_favourite = COALESCE($3::boolean, t.is_favourite), is_emergency = COALESCE($4::boolean, t.is_emergency)
          FROM core.manager_profile mp
          WHERE mp.id = t.manager_profile_id AND mp.user_id = $2 AND mp.type = 'venue'
@@ -482,7 +487,7 @@ export class StaffService {
       const visible = (field: string) => this.memberAccess.isFieldVisible(policy, field);
       const qb = manager
         .createQueryBuilder(StaffProfile, 'sp')
-        .leftJoinAndSelect('sp.user', 'user')
+        .innerJoinAndSelect('sp.user', 'user') // owner 0g: a soft-deleted account (deleted_at, filtered in the join) is not listed
         .where('sp.organisationId = :orgId', { orgId: ctx.organisationId! })
         .andWhere('sp.createdBy = :createdBy', { createdBy: ownerUserId });
       const recordFilter = this.memberAccess.qbWhere(policy, 'sp');
@@ -577,7 +582,7 @@ export class StaffService {
   async get(ctx: AuthContext, id: string): Promise<StaffSummary> {
     return this.tenantContext.runInWorkspaceContext(ctx, async (manager) => {
       const profile = await manager.findOne(StaffProfile, { where: { id }, relations: { user: true } });
-      if (!profile) throw new NotFoundException('Staff member not found.');
+      if (!profile?.user) throw new NotFoundException('Staff member not found.');
       // Read-only: a custom workspace-member may also read staff their workspace OWNER created (creator-based
       // ownership unchanged). Every write path keeps the strict `assertOwned` (the caller's own created_by).
       const scope = await this.resourceScope.resolveTx(manager, ctx);
@@ -835,7 +840,8 @@ export class StaffService {
     let displayChangedFor: string | null = null;
     const summary = await this.tenantContext.runInWorkspaceContext(ctx, async (manager) => {
       const profile = await manager.findOne(StaffProfile, { where: { id }, relations: { user: true } });
-      if (!profile) throw new NotFoundException('Staff member not found.');
+      if (!profile?.user) throw new NotFoundException('Staff member not found.');
+      await lockLiveUser(manager, profile.userId, 'Staff member not found.');
       this.assertOwned(ctx, profile);
 
       if (dto.jobRoleId) {
@@ -916,7 +922,8 @@ export class StaffService {
   ): Promise<StaffSummary> {
     return this.tenantContext.runInWorkspaceContext(ctx, async (manager) => {
       const profile = await manager.findOne(StaffProfile, { where: { id }, relations: { user: true } });
-      if (!profile) throw new NotFoundException('Staff member not found.');
+      if (!profile?.user) throw new NotFoundException('Staff member not found.');
+      await lockLiveUser(manager, profile.userId, 'Staff member not found.');
       this.assertOwned(ctx, profile);
       if (profile.user!.status === UserStatus.INVITED || profile.user!.status === UserStatus.INVITE_EXPIRED) {
         throw new ConflictException('This account has not been activated yet — use Cancel Invitation or Resend Invitation instead.');
@@ -988,14 +995,16 @@ export class StaffService {
         throw new ForbiddenException('Archiving staff is not permitted.');
       }
       const profile = await manager.findOne(StaffProfile, { where: { id }, relations: { user: true } });
-      if (!profile) throw new NotFoundException('Staff member not found.');
+      if (!profile?.user) throw new NotFoundException('Staff member not found.');
+      await lockLiveUser(manager, profile.userId, 'Staff member not found.');
       this.assertOwned(ctx, profile);
       assertTransition(ARCHIVE_TRANSITIONS, archiveStateOf(profile.archivedAt), ArchiveState.ARCHIVED);
       if (profile.employmentStatus !== EmploymentStatus.INACTIVE) {
         throw new ConflictException({ code: 'STAFF_NOT_DEACTIVATED', message: 'Deactivate this staff member before archiving them.' });
       }
+      const t = businessTables(manager);
       const [{ upcoming }] = await manager.query<Array<{ upcoming: number }>>(
-        `SELECT count(*)::int AS upcoming FROM shift_assignment sa JOIN shift s ON s.id = sa.shift_id
+        `SELECT count(*)::int AS upcoming FROM ${t.shift_assignment} sa JOIN ${t.shift} s ON s.id = sa.shift_id
           WHERE sa.staff_profile_id = $1 AND sa.status IN ('offered', 'staff_accepted', 'confirmed')
             AND s.status NOT IN ('cancelled', 'completed', 'declined') AND s.ends_at > now()`,
         [profile.id],
@@ -1022,7 +1031,8 @@ export class StaffService {
         throw new ForbiddenException('Restoring staff is not permitted.');
       }
       const profile = await manager.findOne(StaffProfile, { where: { id }, relations: { user: true } });
-      if (!profile) throw new NotFoundException('Staff member not found.');
+      if (!profile?.user) throw new NotFoundException('Staff member not found.');
+      await lockLiveUser(manager, profile.userId, 'Staff member not found.');
       this.assertOwned(ctx, profile);
       assertTransition(ARCHIVE_TRANSITIONS, archiveStateOf(profile.archivedAt), ArchiveState.ACTIVE);
       await manager.update(StaffProfile, id, { archivedAt: null, archivedBy: null });
@@ -1043,7 +1053,8 @@ export class StaffService {
     await this.stepUpReauth.assertRecentStepUp(ctx, 'user.password_reset');
     return this.tenantContext.runInWorkspaceContext(ctx, async (manager) => {
       const profile = await manager.findOne(StaffProfile, { where: { id }, relations: { user: true } });
-      if (!profile) throw new NotFoundException('Staff member not found.');
+      if (!profile?.user) throw new NotFoundException('Staff member not found.');
+      await lockLiveUser(manager, profile.userId, 'Staff member not found.');
       this.assertOwned(ctx, profile);
       if (profile.user!.status === UserStatus.INVITED || profile.user!.status === UserStatus.INVITE_EXPIRED) {
         throw new ConflictException('This account has not been activated yet — use Resend Invitation instead.');
@@ -1061,7 +1072,8 @@ export class StaffService {
 
   private async findPendingProfileOrFail(manager: EntityManager, ctx: AuthContext, id: string): Promise<StaffProfile> {
     const profile = await manager.findOne(StaffProfile, { where: { id }, relations: { user: true } });
-    if (!profile) throw new NotFoundException('Staff member not found.');
+    if (!profile?.user) throw new NotFoundException('Staff member not found.');
+    await lockLiveUser(manager, profile.userId, 'Staff member not found.');
     this.assertOwned(ctx, profile);
     if (profile.user!.status !== UserStatus.INVITED && profile.user!.status !== UserStatus.INVITE_EXPIRED) {
       throw new ConflictException('This account is not a pending invitation.');
@@ -1184,7 +1196,8 @@ export class StaffService {
     await this.stepUpReauth.assertRecentStepUp(ctx, 'user.email.change');
     const outcome = await this.tenantContext.runInWorkspaceContext(ctx, async (manager) => {
       const profile = await manager.findOne(StaffProfile, { where: { id }, relations: { user: true } });
-      if (!profile) throw new NotFoundException('Staff member not found.');
+      if (!profile?.user) throw new NotFoundException('Staff member not found.');
+      await lockLiveUser(manager, profile.userId, 'Staff member not found.');
       this.assertOwned(ctx, profile);
 
       const newEmail = normalizeEmail(dto.email);
@@ -1308,30 +1321,61 @@ export class StaffService {
   }
 
   /**
-   * Permanent removal — additional to Suspend/Reactivate, never a
-   * replacement (B1). Same creator-private authorization every other Staff
-   * mutation here already uses (`assertOwned`) — Manager A can never delete
-   * Manager B's staff by guessing an id, matching how they already can't
-   * view/edit/deactivate them. `UserDeletionService.assertCanDelete` is the
-   * actual safety gate (self-delete, platform admin, owned workspace,
-   * protected operational history — shift assignments, offers, attendance).
+   * Delete user (owner decision 0g, the Twenty way: UserDeletionService). Additional to Suspend/Reactivate, never a
+   * replacement (B1). Same creator-private authorization every other Staff mutation here already uses (`assertOwned`):
+   * Manager A can never delete Manager B's staff by guessing an id. `UserDeletionService.deleteUser` re-runs the
+   * account-level gates and decides soft vs hard: a member with any history (or who ever signed in) is SOFT deleted — the
+   * account row and the staff profile stay, so shifts, offers, attendance and payroll keep their references — and the
+   * profile's employment is set to inactive in the same transaction, so the scheduling and offer paths (which check
+   * employment status) can no longer pick them. Only a never-activated invite with no history is removed (with its profile).
    *
-   * P2.8 — step-up reauth checked FIRST, before even loading the target:
-   * a hijacked-but-live session alone can never delete a user.
+   * P2.8 — step-up reauth checked FIRST, before even loading the target: a hijacked-but-live session alone can never
+   * delete a user.
    */
   async deleteUser(ctx: AuthContext, id: string, currentPassword: string): Promise<void> {
     await this.stepUpReauth.assertCurrentPassword(ctx, currentPassword);
     let deletedUserId: string | null = null;
     await this.tenantContext.runInWorkspaceContext(ctx, async (manager) => {
+      // Layer 2 (security review M1): the route's PermissionGuard(STAFF_DEACTIVATE) is re-checked here, so a direct
+      // service call (job, command, another service) gets the same 403.
+      if (!(await this.directoryPermissions.userHasPermissionTx(manager, ctx, PermissionFlag.STAFF_DEACTIVATE))) {
+        throw new ForbiddenException('Deleting staff is not permitted.');
+      }
       const profile = await manager.findOne(StaffProfile, { where: { id }, relations: { user: true } });
-      if (!profile) throw new NotFoundException('Staff member not found.');
+      if (!profile?.user) throw new NotFoundException('Staff member not found.');
       this.assertOwned(ctx, profile);
 
-      await this.userDeletion.assertCanDelete(manager, ctx, profile.userId);
-      await this.userDeletion.deleteUser(manager, ctx, profile.userId, profile.user!.email);
+      const outcome = await this.userDeletion.deleteUser(manager, ctx, profile.userId);
+      if (outcome === 'soft_deleted' && profile.employmentStatus !== EmploymentStatus.INACTIVE) {
+        assertTransition(EMPLOYMENT_STATUS_TRANSITIONS, profile.employmentStatus, EmploymentStatus.INACTIVE);
+        await manager.update(StaffProfile, profile.id, { employmentStatus: EmploymentStatus.INACTIVE });
+      }
       deletedUserId = profile.userId;
     });
     await this.invalidateUserDisplay(deletedUserId);
+  }
+
+  /**
+   * GDPR erasure of an already deleted Staff account (owner 0g; who may run it is FLAGGED for the owner in
+   * USER-DELETION.md: today the same people who may delete it — STAFF_DEACTIVATE, creator-private — with step-up reauth).
+   * The profile is found with its deleted account (`withDeleted`); `UserDeletionService.erasePersonalData` refuses
+   * (409 USER_NOT_DELETED) an account that was not deleted first. Only core."user" is anonymised; the staff profile's own
+   * personal fields are listed for the owner (payroll / right-to-work retention), not changed.
+   */
+  async erasePersonalData(ctx: AuthContext, id: string, currentPassword: string): Promise<void> {
+    await this.stepUpReauth.assertCurrentPassword(ctx, currentPassword);
+    let erasedUserId: string | null = null;
+    await this.tenantContext.runInWorkspaceContext(ctx, async (manager) => {
+      if (!(await this.directoryPermissions.userHasPermissionTx(manager, ctx, PermissionFlag.STAFF_DEACTIVATE))) {
+        throw new ForbiddenException('Erasing staff personal data is not permitted.');
+      }
+      const profile = await manager.findOne(StaffProfile, { where: { id } });
+      if (!profile) throw new NotFoundException('Staff member not found.');
+      this.assertOwned(ctx, profile);
+      await this.userDeletion.erasePersonalData(manager, ctx, profile.userId);
+      erasedUserId = profile.userId;
+    });
+    await this.invalidateUserDisplay(erasedUserId);
   }
 
   /** Tombstones the replaced avatar (row kept as `DELETED`); its object is purged later by `storage:reconcile` — mirrors `ProfileService`'s own identical private helper for the self-service case. */
@@ -1356,7 +1400,8 @@ export class StaffService {
     let avatarChangedFor: string | null = null;
     const result = await this.tenantContext.runInWorkspaceContext(ctx, async (manager) => {
       const profile = await manager.findOne(StaffProfile, { where: { id }, relations: { user: true } });
-      if (!profile) throw new NotFoundException('Staff member not found.');
+      if (!profile?.user) throw new NotFoundException('Staff member not found.');
+      await lockLiveUser(manager, profile.userId, 'Staff member not found.');
       this.assertOwned(ctx, profile);
 
       const before = profile.user!.avatarFileId;
@@ -1388,7 +1433,8 @@ export class StaffService {
     let avatarChangedFor: string | null = null;
     const result = await this.tenantContext.runInWorkspaceContext(ctx, async (manager) => {
       const profile = await manager.findOne(StaffProfile, { where: { id }, relations: { user: true } });
-      if (!profile) throw new NotFoundException('Staff member not found.');
+      if (!profile?.user) throw new NotFoundException('Staff member not found.');
+      await lockLiveUser(manager, profile.userId, 'Staff member not found.');
       this.assertOwned(ctx, profile);
 
       const before = profile.user!.avatarFileId;

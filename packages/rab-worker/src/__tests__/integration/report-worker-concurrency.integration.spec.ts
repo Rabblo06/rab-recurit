@@ -29,7 +29,7 @@ import { businessSchema, businessTable } from './helpers/hws-fixtures';
 import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
 import { integrationTestDatabaseReady } from '@rab/server/database/typeorm/core/integration-test-database-gate';
 import { extractPdf } from '../pdf-equality/extract';
-import { ROTATE_SHIFT_QR_LOCK_SQL, ROTATE_SHIFT_QR_UPDATE_SQL } from '@rab/server/modules/scheduling/services/rotate-shift-qr.sql';
+import { rotateShiftQrStatements } from '@rab/server/modules/scheduling/services/rotate-shift-qr.sql';
 
 /**
  * MULTI-WORKER SAFETY of the two report jobs. Two worker instances discover
@@ -457,7 +457,7 @@ describeIfDb('report worker multi-instance concurrency (integration)', () => {
 
   // QR review M1, the lock-wait case: a rotation whose transaction STARTED before the scheduler's write transaction but
   // whose write waited on the scheduler's FOR SHARE lock must still make the report stale. It replays rotateShiftQr's own
-  // statements (rotate-shift-qr.sql.ts). With `updated_at = now()` (the rotation's transaction start, earlier than the
+  // statements (rotate-shift-qr.sql.ts: the same text the service builds from its bound manager's businessTables shift). With `updated_at = now()` (the rotation's transaction start, earlier than the
   // report's stamp) the next tick would see the report as fresh and keep shipping the revoked QR: this test fails then.
   it('PRE-SHIFT M1 lock-wait: a rotation that waited on the report write lock still triggers regeneration with the new QR', async () => {
     const f = await seedFixture();
@@ -474,6 +474,8 @@ describeIfDb('report worker multi-instance concurrency (integration)', () => {
     expect((await runScheduler(f.organisation.id)).generated).toBe(1); // version 1 shipped
     await adminDataSource.query(`UPDATE ${businessTable(f.workspaceId, 'shift')} SET updated_at = clock_timestamp() WHERE id = $1`, [shiftId]); // stale: tick 2 re-renders
     const [{ status }] = await adminDataSource.query(`SELECT status FROM ${businessTable(f.workspaceId, 'shift')} WHERE id = $1`, [shiftId]);
+    // rotateShiftQr's two statements for this workspace's shift table ("<schema>"."shift", what businessTables(manager) names).
+    const rotate = rotateShiftQrStatements(businessTable(f.workspaceId, 'shift'));
 
     const rotation = adminDataSource.createQueryRunner();
     await rotation.connect();
@@ -485,7 +487,8 @@ describeIfDb('report worker multi-instance concurrency (integration)', () => {
       // 1. The rotation transaction starts NOW, before the scheduler's write transaction: its now() is the earlier one.
       await rotation.startTransaction();
       await rotation.query(`SELECT 1`);
-      // The shift lives in the workspace schema with HWS on (core with HWS off), as rotateShiftQr's bound search_path.
+      // The session as rotateShiftQr's binder leaves it (workspace schema with HWS on, core with HWS off); the replayed
+      // statements name the shift table schema-qualified anyway (rotateShiftQrStatements).
       await rotation.query(`SET LOCAL search_path TO "${businessSchema(f.workspaceId)}", core, public`);
       return uploaded;
     });
@@ -494,8 +497,8 @@ describeIfDb('report worker multi-instance concurrency (integration)', () => {
       if (!rotated) {
         // 2. Inside the scheduler's write transaction (it holds the shift FOR SHARE): fire the rotation, do not await it.
         rotated = (async () => {
-          await rotation.query(ROTATE_SHIFT_QR_LOCK_SQL, [shiftId]);
-          return rotation.query(ROTATE_SHIFT_QR_UPDATE_SQL, [shiftId, 1, status]);
+          await rotation.query(rotate.lock, [shiftId]);
+          return rotation.query(rotate.update, [shiftId, 1, status]);
         })();
         // 3. Until it is really waiting on the row lock (this database, this backend only).
         const deadline = Date.now() + 20_000;

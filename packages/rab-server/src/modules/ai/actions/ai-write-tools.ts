@@ -4,6 +4,7 @@ import { EntityManager } from 'typeorm';
 import { z } from 'zod';
 
 import { AuthContext } from '../../../engine/core-modules/tenant/auth-context.interface';
+import { businessTables } from '../../../engine/core-modules/tenant/business-tables';
 import { NOTE_BODY_MAX_LENGTH } from '../../identity/dto/add-note.dto';
 import { SchedulingService } from '../../scheduling/services/scheduling.service';
 import { StaffService } from '../../staff/services/staff.service';
@@ -79,41 +80,45 @@ const SHIFT_FIELDS: readonly AiWriteToolFieldSpec[] = [
 type Lock = '' | 'FOR SHARE' | 'FOR UPDATE';
 
 async function venueSnapshot(m: EntityManager, id: string, lock: Lock) {
+  const t = businessTables(m);
   const [row] = (await m.query(
     // sql-injection-reviewed: code-constant SQL fragment from a helper called with literal aliases; values are bound $n parameters.
     `SELECT id::text AS id, name, status, ${snapshotTimestamp('archived_at')} AS "archivedAt", ${snapshotTimestamp('updated_at')} AS "updatedAt"
-       FROM venue WHERE id = $1 ${lock}`,
+       FROM ${t.venue} WHERE id = $1 ${lock}`,
     [id],
   )) as Array<Record<string, unknown>>;
   return row ?? null;
 }
 
 async function jobRoleSnapshot(m: EntityManager, id: string, lock: Lock) {
+  const t = businessTables(m);
   const [row] = (await m.query(
     // sql-injection-reviewed: code-constant SQL fragment from a helper called with literal aliases; values are bound $n parameters.
-    `SELECT id::text AS id, name, created_by::text AS "createdBy", ${snapshotTimestamp('archived_at')} AS "archivedAt" FROM job_role WHERE id = $1 ${lock}`,
+    `SELECT id::text AS id, name, created_by::text AS "createdBy", ${snapshotTimestamp('archived_at')} AS "archivedAt" FROM ${t.job_role} WHERE id = $1 ${lock}`,
     [id],
   )) as Array<Record<string, unknown>>;
   return row ?? null;
 }
 
 async function shiftSnapshot(m: EntityManager, id: string, lock: Lock) {
+  const t = businessTables(m);
   const [row] = (await m.query(
     // sql-injection-reviewed: code-constant SQL fragment from a helper called with literal aliases; values are bound $n parameters.
     `SELECT id::text AS id, status, venue_id::text AS "venueId", job_role_id::text AS "jobRoleId", created_by::text AS "createdBy",
             ${snapshotTimestamp('starts_at')} AS "startsAt", ${snapshotTimestamp('ends_at')} AS "endsAt", break_minutes AS "breakMinutes",
             required_count AS "requiredCount", notes, ${snapshotTimestamp('archived_at')} AS "archivedAt", ${snapshotTimestamp('updated_at')} AS "updatedAt"
-       FROM shift WHERE id = $1 ${lock}`,
+       FROM ${t.shift} WHERE id = $1 ${lock}`,
     [id],
   )) as Array<Record<string, unknown>>;
   return row ?? null;
 }
 
 async function staffProfileSnapshot(m: EntityManager, id: string, lock: Lock) {
+  const t = businessTables(m);
   const [row] = (await m.query(
     // sql-injection-reviewed: code-constant SQL fragment from a helper called with literal aliases; values are bound $n parameters.
     `SELECT id::text AS id, created_by::text AS "createdBy", ${snapshotTimestamp('archived_at')} AS "archivedAt", ${snapshotTimestamp('updated_at')} AS "updatedAt"
-       FROM staff_profile WHERE id = $1 ${lock}`,
+       FROM ${t.staff_profile} WHERE id = $1 ${lock}`,
     [id],
   )) as Array<Record<string, unknown>>;
   return row ?? null;
@@ -145,7 +150,8 @@ const people = (n: number) => `${n} ${n === 1 ? 'person' : 'people'}`;
 const clip = (s: string, max = 2000) => (s.length <= max ? s : `${s.slice(0, max - 1)}…`);
 
 async function namesFor(m: EntityManager, venueId: string, jobRoleId: string): Promise<{ venue: string; jobRole: string }> {
-  const [row] = (await m.query(`SELECT (SELECT v.name FROM venue v WHERE v.id = $1) AS venue, (SELECT j.name FROM job_role j WHERE j.id = $2) AS "jobRole"`, [venueId, jobRoleId])) as Array<{
+  const t = businessTables(m);
+  const [row] = (await m.query(`SELECT (SELECT v.name FROM ${t.venue} v WHERE v.id = $1) AS venue, (SELECT j.name FROM ${t.job_role} j WHERE j.id = $2) AS "jobRole"`, [venueId, jobRoleId])) as Array<{
     venue: string | null;
     jobRole: string | null;
   }>;

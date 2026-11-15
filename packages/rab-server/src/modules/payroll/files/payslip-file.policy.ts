@@ -5,6 +5,7 @@ import { FileKindPolicy } from '../../../engine/core-modules/storage/file-access
 import { StoredFile } from '../../../engine/core-modules/storage/entities/stored-file.entity';
 import { PermissionsService } from '../../../engine/core-modules/permissions/permissions.service';
 import { AuthContext } from '../../../engine/core-modules/tenant/auth-context.interface';
+import { businessTables } from '../../../engine/core-modules/tenant/business-tables';
 import { PayrollService } from '../services/payroll.service';
 
 /**
@@ -21,9 +22,10 @@ export class PayslipFilePolicy implements FileKindPolicy {
 
   async canRead(manager: EntityManager, ctx: AuthContext, file: StoredFile): Promise<boolean> {
     if (file.resourceType !== 'payslip' || !ctx.organisationId || !ctx.workspaceId) return false;
+    const t = businessTables(manager);
     const [doc] = await manager.query(
       `SELECT d.version, ps.version AS current_version, sp.user_id AS staff_user_id
-         FROM payslip_document d JOIN payslip ps ON ps.id = d.payslip_id JOIN staff_profile sp ON sp.id = ps.staff_profile_id
+         FROM ${t.payslip_document} d JOIN ${t.payslip} ps ON ps.id = d.payslip_id JOIN ${t.staff_profile} sp ON sp.id = ps.staff_profile_id
         WHERE d.file_id = $1 AND d.payslip_id = $2 AND d.organisation_id = $3 AND d.workspace_id = $4`,
       [file.id, file.resourceId, ctx.organisationId, ctx.workspaceId]);
     if (!doc) return false;
