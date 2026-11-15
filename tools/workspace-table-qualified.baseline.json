@@ -5,41 +5,11 @@
     "sites lowers or deletes its rows in the same PR. Never raise a count; qualify the new reference instead. C2-7: empty."
   ],
   "files": {
-    "packages/rab-server/src/modules/ai/actions/ai-proposal.service.ts": {
-      "unqualified": 4
-    },
-    "packages/rab-server/src/modules/ai/actions/ai-write-tools.ts": {
-      "unqualified": 6
-    },
     "packages/rab-server/src/modules/attendance/services/post-shift-lifecycle.service.ts": {
       "unqualified": 3
     },
     "packages/rab-server/src/modules/attendance/templates/document-context.ts": {
       "unqualified": 2
-    },
-    "packages/rab-server/src/modules/dashboard/services/dashboard.service.ts": {
-      "unqualified": 10
-    },
-    "packages/rab-server/src/modules/payroll/files/payslip-file.policy.ts": {
-      "unqualified": 3
-    },
-    "packages/rab-server/src/modules/payroll/files/shift-statement-file.policy.ts": {
-      "unqualified": 2
-    },
-    "packages/rab-server/src/modules/payroll/services/payroll-allocation.ts": {
-      "unqualified": 3
-    },
-    "packages/rab-server/src/modules/payroll/services/payroll-assistant.service.ts": {
-      "unqualified": 10
-    },
-    "packages/rab-server/src/modules/payroll/services/payroll-run.service.ts": {
-      "unqualified": 42
-    },
-    "packages/rab-server/src/modules/payroll/services/payroll.service.ts": {
-      "unqualified": 33
-    },
-    "packages/rab-server/src/modules/search/services/search.service.ts": {
-      "unqualified": 19
     }
   }
 }

@@ -5,6 +5,7 @@ import { FileKindPolicy } from '../../../engine/core-modules/storage/file-access
 import { StoredFile } from '../../../engine/core-modules/storage/entities/stored-file.entity';
 import { PermissionsService } from '../../../engine/core-modules/permissions/permissions.service';
 import { AuthContext } from '../../../engine/core-modules/tenant/auth-context.interface';
+import { businessTables } from '../../../engine/core-modules/tenant/business-tables';
 import { PayrollService } from '../services/payroll.service';
 
 /**
@@ -22,9 +23,10 @@ export class ShiftStatementFilePolicy implements FileKindPolicy {
 
   async canRead(manager: EntityManager, ctx: AuthContext, file: StoredFile): Promise<boolean> {
     if (file.resourceType !== 'payroll_record' || !ctx.organisationId || !ctx.workspaceId) return false;
+    const t = businessTables(manager);
     const [record] = await manager.query(
       `SELECT pr.statement_file_id, sp.user_id AS staff_user_id
-         FROM payroll_record pr JOIN staff_profile sp ON sp.id = pr.staff_profile_id
+         FROM ${t.payroll_record} pr JOIN ${t.staff_profile} sp ON sp.id = pr.staff_profile_id
         WHERE pr.id = $1 AND pr.organisation_id = $2 AND pr.workspace_id = $3`,
       [file.resourceId, ctx.organisationId, ctx.workspaceId],
     );
