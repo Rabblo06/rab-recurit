@@ -66,6 +66,9 @@ export function increasedCounters(before: ReadonlyArray<{ relid: string; what: s
   return after.filter((r) => BigInt(r.n) > (was.get(r.relid) ?? 0n)).map((r) => r.what);
 }
 
+const FINGERPRINT_V1_SQL = 'SELECT core.workspace_schema_fingerprint($1) AS f';
+const FINGERPRINT_V2_SQL = 'SELECT core.workspace_schema_fingerprint_v2($1) AS f';
+
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const WORKSPACE_SCHEMA_RE = /workspace_[0-9a-f]{32}/gi;
 
@@ -685,13 +688,18 @@ export class WorkspaceCommandRunner {
     return rows.length ? 'STRUCTURE_EXTRA' : null;
   }
 
-  /** null when the schema is exactly structure level `level` (verify function clean, fingerprint equal), else the class. */
+  /**
+   * null when the schema is exactly structure level `level` (verify function clean, fingerprint equal), else the class.
+   * Fingerprint v2 (D-RUNNER.md §9.1, WorkspaceStaffMemberSelect1786721480000): every level above the frozen 20 is declared
+   * and compared with `core.workspace_schema_fingerprint_v2` (it also hashes persistence, reloptions, rules, inheritance,
+   * types and operators); levels 14..20 keep their v1 tables.
+   */
   private async structureProblem(q: Query, ws: ReadyWorkspace, level: number): Promise<string | null> {
     const expected = this.expectedFingerprint(level);
     if (!expected) return 'NO_EXPECTED_FINGERPRINT';
     const [v] = (await q('SELECT core.verify_workspace_schema_v1($1) AS p', [ws.workspaceId])) as Array<{ p: string | null }>;
     if (v?.p) return 'VERIFY_FAILED';
-    const [f] = (await q('SELECT core.workspace_schema_fingerprint($1) AS f', [ws.workspaceId])) as Array<{ f: string | null }>;
+    const [f] = (await q(level > LATEST_WORKSPACE_MODULE_VERSION ? FINGERPRINT_V2_SQL : FINGERPRINT_V1_SQL, [ws.workspaceId])) as Array<{ f: string | null }>;
     if (!f?.f || f.f !== expected) return 'FINGERPRINT_MISMATCH';
     return null;
   }

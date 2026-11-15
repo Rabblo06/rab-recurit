@@ -3,7 +3,8 @@ import { createHash, randomBytes } from 'node:crypto';
 import { Client } from 'pg';
 
 import { resolveIntegrationTestDatabase } from '../../database/typeorm/core/test-database-guard';
-import { EXPECTED_WORKSPACE_FINGERPRINTS, selectWorkspaceFingerprintsForServer } from '../../database/typeorm/workspace-schema/v1/expected-fingerprints';
+import { EXPECTED_WORKSPACE_FINGERPRINTS, selectWorkspaceFingerprintsForServer, workspaceFingerprintMajor } from '../../database/typeorm/workspace-schema/v1/expected-fingerprints';
+import { codeWorkspaceStructureLevel, declaredFingerprint } from '../../engine/core-modules/upgrade/workspace-structure-level';
 import { LATEST_WORKSPACE_MODULE_VERSION } from '../../database/typeorm/workspace-schema/workspace-schema-modules';
 import { pgClientRunner, WorkspaceSchemaMigrator } from '../../database/typeorm/workspace-schema/workspace-schema-migrator';
 import { dropWorkspaceSchema, ledgerOf, provisionLegacyV14, provisionServerPath, registryOf, SeededWorkspace, seedWorkspace, sqlstateOf } from './helpers/workspace-fixtures';
@@ -601,9 +602,15 @@ describeIfDb('waves 4+5 lane DB5 schema contract', () => {
     });
 
     it('the migrated workspace is at the latest module with ledger rows and the expected fingerprint', async () => {
+      // Part D: core.provision_workspace builds this code's structure level (21: the 20 frozen modules + StaffProfileMemberSelect),
+      // declared in fingerprint v2; the registry keeps the workspace's v1 value (the drift recorder compares v1).
       const reg = await registryOf(admin, ws.id);
-      expect(reg).toMatchObject({ status: 'READY', module_version: LATEST_WORKSPACE_MODULE_VERSION, drift_status: 'OK' });
-      expect(reg.expected_fingerprint).toBe(EXPECTED_WORKSPACE_FINGERPRINTS[LATEST_WORKSPACE_MODULE_VERSION]);
+      const level = codeWorkspaceStructureLevel();
+      expect(reg).toMatchObject({ status: 'READY', module_version: level, drift_status: 'OK' });
+      const fp = (await admin.query('SELECT core.workspace_schema_fingerprint($1) AS v1, core.workspace_schema_fingerprint_v2($1) AS v2', [ws.id])).rows[0];
+      expect(reg.expected_fingerprint).toBe(fp.v1);
+      expect(fp.v2).toBe(declaredFingerprint(level, workspaceFingerprintMajor()));
+      expect(LATEST_WORKSPACE_MODULE_VERSION).toBe(20);
       const ids = (await ledgerOf(admin, ws.id)).map((l) => l.module_id);
       expect(ids).toEqual(expect.arrayContaining(['v1.016-archive-columns', 'v1.017-search-vectors']));
     });

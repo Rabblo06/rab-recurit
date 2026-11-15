@@ -125,7 +125,7 @@ export class InterfaceGap extends Error {
 export interface B1Interface {
   currentVersion: string;
   /**
-   * stepsForVersion(v) names: the migrations step first, then the version's commands in timestamp order, then (interface
+   * instanceStepsForVersion(v) names (Part D: workspace steps excluded): the migrations step first, then the version's commands in timestamp order, then (interface
    * §4) the test probe commands `<v>_<Name>_<1799999990000+i>` when `probes` are given.
    */
   stepsOf(version: string, probes?: readonly string[]): string[];
@@ -334,7 +334,7 @@ async function runCommandEntry(db: string, args: string[], extra: Record<string,
 /** B1's code, when it is on the branch under test; null otherwise. */
 export function b1(): B1Interface | null {
   const version = load<{ readAppVersion(env: NodeJS.ProcessEnv): string; majorMinorKey(v: string): string }>('upgrade-version');
-  const sequence = load<{ stepsForVersion(v: string): (string | { name: string })[] }>('upgrade-sequence');
+  const sequence = load<{ stepsForVersion(v: string): (string | { name: string })[]; instanceStepsForVersion?(v: string): string[] }>('upgrade-sequence');
   const service = load<{ isLastAttemptCompleted(q: Query, a: { name: string; workspaceId: string | null }): Promise<boolean> }>('upgrade-migration.service');
   if (!version || !sequence || !service || !LEDGER_MIGRATION_ON_BRANCH) return null;
   const check = load<{ decideUpgradeStart(f: UpgradeStartFactsLike): { kind: string; [k: string]: unknown } }>('upgrade-version-check');
@@ -342,8 +342,10 @@ export function b1(): B1Interface | null {
   const registry = load<{ UPGRADE_COMMANDS: Record<string, { name: string; timestamp: number }[]> }>(join('upgrade-commands', 'registry'));
   const migrateEntry = join(SERVER_SRC, 'database', 'typeorm', 'scripts', 'migrate', 'twenty', 'twenty-migrate.ts');
   const currentVersion = version.readAppVersion(process.env);
+  // Part D: a version's WORKSPACE steps (0.6.0_StaffProfileMemberSelect_…) are recorded per workspace, never as instance rows;
+  // the instance logbook these specs read holds the migrations step and the instance commands only.
   const stepsOf = (v: string, probes: readonly string[] = []) => [
-    ...sequence.stepsForVersion(v).map((s) => (typeof s === 'string' ? s : s.name)),
+    ...(sequence.instanceStepsForVersion ? sequence.instanceStepsForVersion(v) : sequence.stepsForVersion(v).map((s) => (typeof s === 'string' ? s : s.name))),
     ...(v === currentVersion ? probes.map((name, i) => `${v}_${name}_${1799999990000 + i}`) : []),
   ];
   return {
