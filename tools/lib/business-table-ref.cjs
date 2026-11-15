@@ -11,8 +11,9 @@
  *     destructuring, no import, no reassignable binding, no other initializer; a hoisted `var X` anywhere in an enclosing
  *     function voids it);
  *   - that `businessTables` callee is itself resolved the same way: its nearest declaration must be the NON-aliased value
- *     import `import { businessTables } from '<…>/tenant/business-tables'` (or `./business-tables` inside tenant/) — not a
- *     local function, an aliased import, a parameter, or nothing (re-review MEDIUM: the callee name alone is not trusted);
+ *     import `import { businessTables } from …` of exactly packages/rab-server/src/engine/core-modules/tenant/business-tables
+ *     ('@rab/server/engine/core-modules/tenant/business-tables', or a relative specifier resolving to that path) — not a
+ *     local function, an aliased import, a look-alike module, a parameter, or nothing (the callee name alone is not trusted);
  *   - the interpolation is not inside quotes in the surrounding SQL text ('${…}' / "${…}" — a quoted value is a string
  *     literal or a single identifier, never the qualified "schema"."table" pair the primitive returns).
  * Anything else is not exempt: check-sql-injection asks for a reviewed comment, the ratchet counts it.
@@ -137,15 +138,28 @@ function nearestDeclaration(ts, ident) {
   return null;
 }
 
-/** The module that may export the primitive: `…/tenant/business-tables` (server relative path or '@rab/server/…'). */
-const BUSINESS_TABLES_MODULE = /(?:^|\/)tenant\/business-tables$/;
-const TENANT_DIR = /(?:^|\/)engine\/core-modules\/tenant\/[^/]+$/;
+/**
+ * The ONE module that exports the primitive (re-check Low: anchored, not "any path ending in tenant/business-tables").
+ * Accepted specifiers: exactly the package path '@rab/server/engine/core-modules/tenant/business-tables' (how the Worker
+ * imports it), or a relative specifier that resolves (path.posix, from the importing file's repo-relative path) to exactly
+ * PRIMITIVE_MODULE_PATH.
+ */
+const PRIMITIVE_MODULE_PATH = 'packages/rab-server/src/engine/core-modules/tenant/business-tables';
+const PRIMITIVE_PACKAGE_SPECIFIER = '@rab/server/engine/core-modules/tenant/business-tables';
+const TENANT_DIR = /^packages\/rab-server\/src\/engine\/core-modules\/tenant\//;
+
+function importsPrimitiveModule(spec, importingFile) {
+  if (spec === PRIMITIVE_PACKAGE_SPECIFIER) return true;
+  if (!spec.startsWith('./') && !spec.startsWith('../')) return false;
+  const from = String(importingFile).replace(/\\/g, '/');
+  return path.posix.normalize(path.posix.join(path.posix.dirname(from), spec)) === PRIMITIVE_MODULE_PATH;
+}
 
 /**
  * The callee `businessTables` really is the primitive: its nearest declaration is a NON-aliased, value (not type-only)
- * `import { businessTables } from '<…>/tenant/business-tables'` (or `./business-tables` from a file inside tenant/).
- * A local function, an aliased import (`{ evil as businessTables }`), a parameter, a default/namespace import or no
- * declaration at all is not.
+ * `import { businessTables } from <the one primitive module>` (see importsPrimitiveModule). A local function, an aliased
+ * import (`{ evil as businessTables }`), a look-alike module, a parameter, a default/namespace import or no declaration at
+ * all is not.
  */
 function calleeIsBusinessTables(ts, callee) {
   if (!ts.isIdentifier(callee) || callee.text !== 'businessTables') return false;
@@ -153,9 +167,7 @@ function calleeIsBusinessTables(ts, callee) {
   if (!d || !ts.isImportSpecifier(d) || d.propertyName !== undefined || d.isTypeOnly) return false;
   const decl = d.parent?.parent?.parent; // ImportSpecifier → NamedImports → ImportClause → ImportDeclaration
   if (!decl || !ts.isImportDeclaration(decl) || decl.importClause?.isTypeOnly || !ts.isStringLiteral(decl.moduleSpecifier)) return false;
-  const spec = decl.moduleSpecifier.text;
-  if (BUSINESS_TABLES_MODULE.test(spec)) return true;
-  return spec === './business-tables' && TENANT_DIR.test(callee.getSourceFile().fileName.replace(/\\/g, '/'));
+  return importsPrimitiveModule(decl.moduleSpecifier.text, callee.getSourceFile().fileName);
 }
 
 /** True when `ident`'s nearest enclosing declaration is `const <ident> = businessTables(…)` with the real primitive. */
@@ -204,4 +216,4 @@ function primitiveSpansByTemplateStart(src, tables, fileName = 'file.ts', root =
   return out;
 }
 
-module.exports = { loadTables, loadTypeScript, candidateText, isPrimitiveRefNode, isPrimitiveSpan, resolvesToBusinessTables, primitiveSpansByTemplateStart, TABLES_FILE };
+module.exports = { loadTables, loadTypeScript, candidateText, isPrimitiveRefNode, isPrimitiveSpan, resolvesToBusinessTables, primitiveSpansByTemplateStart, importsPrimitiveModule, TABLES_FILE, PRIMITIVE_MODULE_PATH, TENANT_DIR };

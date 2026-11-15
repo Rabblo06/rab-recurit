@@ -114,16 +114,23 @@ function patterns(tables) {
 }
 
 const SQLISH = /\b(SELECT|INSERT|UPDATE|DELETE|WITH|FROM|JOIN|TRUNCATE|MERGE)\b/;
-// A runtime switch: set_config('search_path', …) or a statement that starts with SET [LOCAL|SESSION] search_path. Not the
-// `SET search_path = …` attribute of CREATE FUNCTION / ALTER DATABASE / ALTER ROLE (DDL that pins a function's own path).
-const SEARCH_PATH_SET_CONFIG = /set_config\(\s*'search_path'/i;
-const SEARCH_PATH_STATEMENT = /(?:^|;)\s*SET\s+(?:LOCAL\s+|SESSION\s+)?search_path\b/im;
-const DDL_WITH_PATH_ATTRIBUTE = /\b(?:CREATE\s+(?:OR\s+REPLACE\s+)?(?:FUNCTION|PROCEDURE)|ALTER\s+(?:DATABASE|ROLE|USER|FUNCTION|PROCEDURE))\b/i;
+// A runtime switch: set_config('search_path', …) or a statement that starts with SET [LOCAL|SESSION] search_path, RESET
+// search_path, RESET ALL or DISCARD ALL. Not the `SET search_path = …` attribute of CREATE FUNCTION / ALTER DATABASE /
+// ALTER ROLE (DDL that pins a function's own path). Variants (re-check Low): a quoted function name (`"set_config"(`,
+// `pg_catalog.set_config (`), a quoted setting (`'"search_path"'`, `SET "search_path"`), and SQL comments anywhere
+// (stripped before matching, so `set_config(/* x */'search_path'` and `-- …` lines cannot hide or fake a match).
+const SET_CONFIG_CALL = 'set_config"?\\s*\\(\\s*';
+const SEARCH_PATH_SET_CONFIG = new RegExp(`${SET_CONFIG_CALL}'\\s*"?search_path"?\\s*'`, 'i');
 // Re-review LOW: set_config whose setting NAME is not a string literal (`set_config($1, …)`, `set_config(${x}, …)`,
 // `set_config(x.name, …)`) can set search_path through a parameter; outside the binders that is a switch too.
-const SET_CONFIG_DYNAMIC_NAME = /set_config\(\s*(?!')/i;
-const isSearchPathSwitch = (text) =>
-  SEARCH_PATH_SET_CONFIG.test(text) || SET_CONFIG_DYNAMIC_NAME.test(text) || (SEARCH_PATH_STATEMENT.test(text) && !DDL_WITH_PATH_ATTRIBUTE.test(text));
+const SET_CONFIG_DYNAMIC_NAME = new RegExp(`${SET_CONFIG_CALL}(?!')`, 'i');
+const SEARCH_PATH_STATEMENT = /(?:^|;)\s*(?:SET\s+(?:LOCAL\s+|SESSION\s+)?"?search_path"?(?![\w])|RESET\s+(?:"?search_path"?(?![\w])|ALL\b)|DISCARD\s+ALL\b)/im;
+const DDL_WITH_PATH_ATTRIBUTE = /\b(?:CREATE\s+(?:OR\s+REPLACE\s+)?(?:FUNCTION|PROCEDURE)|ALTER\s+(?:DATABASE|ROLE|USER|FUNCTION|PROCEDURE))\b/i;
+const stripSqlComments = (text) => text.replace(/\/\*[\s\S]*?\*\//g, ' ').replace(/--[^\n]*/g, ' ');
+const isSearchPathSwitch = (raw) => {
+  const text = stripSqlComments(raw);
+  return SEARCH_PATH_SET_CONFIG.test(text) || SET_CONFIG_DYNAMIC_NAME.test(text) || (SEARCH_PATH_STATEMENT.test(text) && !DDL_WITH_PATH_ATTRIBUTE.test(text));
+};
 const BUSINESS_TABLES_SPECIFIER = /(?:^|\/)business-tables(?:\.[cm]?[jt]s)?$/;
 const QB_METHODS = new Set(['from', 'into', 'update', 'delete', 'leftJoin', 'leftJoinAndSelect', 'innerJoin', 'innerJoinAndSelect',
   'leftJoinAndMapOne', 'leftJoinAndMapMany', 'innerJoinAndMapOne', 'innerJoinAndMapMany']);
@@ -305,6 +312,18 @@ function scanSource(rel, src, tables, entities) {
   return sites;
 }
 
+/**
+ * Re-check Low: a module named business-tables anywhere but the one primitive module
+ * (packages/rab-server/src/engine/core-modules/tenant/business-tables.ts) is a look-alike the exemption must never trust;
+ * the ratchet reports it (rule business-schema-bind) so it cannot land unnoticed.
+ */
+function secondPrimitiveModules(rels) {
+  const real = `${businessTableRef.PRIMITIVE_MODULE_PATH}.ts`;
+  return rels
+    .filter((rel) => /(?:^|\/)business-tables\.[cm]?[jt]s$/.test(rel) && rel !== real)
+    .map((rel) => ({ file: rel, line: 1, rule: 'business-schema-bind', detail: `a second business-tables module (only ${real} is the primitive)` }));
+}
+
 function listFiles(root = ROOT) {
   const out = [];
   const walk = (dir) => {
@@ -327,6 +346,7 @@ function scan(root = ROOT) {
   const runtime = all.filter((f) => !isExcluded(f.rel));
   const sites = [];
   for (const f of runtime) sites.push(...scanSource(f.rel, f.src, tables, entities));
+  sites.push(...secondPrimitiveModules(runtime.map((f) => f.rel)));
   return { sites, tables, entities };
 }
 
@@ -471,4 +491,4 @@ function main(argv) {
 
 if (require.main === module) process.exit(main(process.argv.slice(2)));
 
-module.exports = { scan, scanSource, loadTables, workspaceEntities, countsOf, compare, compareToBase, baselineDocument, readBaseline, readBaselineAt, isExcluded, RULES, SEARCH_PATH_BINDERS, BUSINESS_SCHEMA_BINDERS };
+module.exports = { scan, scanSource, secondPrimitiveModules, loadTables, workspaceEntities, countsOf, compare, compareToBase, baselineDocument, readBaseline, readBaselineAt, isExcluded, RULES, SEARCH_PATH_BINDERS, BUSINESS_SCHEMA_BINDERS };

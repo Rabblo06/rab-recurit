@@ -56,6 +56,21 @@ test('accepts ${X.<table>} only when X is `const X = businessTables(…)` in an 
 
 test('re-review MEDIUM: the businessTables CALLEE must be the real non-aliased import; a hoisted var voids the const', () => {
   const q = 'const t = businessTables(req.body); m.query(`SELECT 1 FROM ${t.shift}`);';
+  // Re-check Low: only THE primitive module path counts, not any path ending in tenant/business-tables.
+  assert.deepEqual(rules("import { businessTables } from './evil/tenant/business-tables';\n" + q), ['other-qualified']);
+  assert.deepEqual(rules("import { businessTables } from 'evil-pkg/tenant/business-tables';\n" + q), ['other-qualified']);
+  assert.deepEqual(rules("import { businessTables } from '../../tenant/business-tables';\n" + q, WORKER_FILE), ['other-qualified']); // a worker-side tenant/ dir
+  assert.deepEqual(rules("import { businessTables } from '@rab/server/engine/core-modules/tenant/business-tables.evil';\n" + q, WORKER_FILE), ['other-qualified']);
+  assert.deepEqual(rules("import { businessTables } from '../../../engine/core-modules/tenant/../tenant/business-tables';\n" + q), []); // resolves to it
+  assert.deepEqual(rules("import { businessTables } from '../tenant/business-tables';\n" + q, 'packages/rab-server/src/engine/core-modules/user-deletion/x.ts'), []);
+  assert.deepEqual(check.secondPrimitiveModules([
+    'packages/rab-server/src/engine/core-modules/tenant/business-tables.ts',
+    'packages/rab-server/src/modules/foo/tenant/business-tables.ts',
+    'packages/rab-worker/src/tenant/business-tables.ts',
+  ]).map((s) => [s.file, s.rule]), [
+    ['packages/rab-server/src/modules/foo/tenant/business-tables.ts', 'business-schema-bind'],
+    ['packages/rab-worker/src/tenant/business-tables.ts', 'business-schema-bind'],
+  ]);
   assert.deepEqual(rules('const businessTables = (x) => x; ' + q), ['other-qualified']); // local fake callee
   assert.deepEqual(rules("import { evil as businessTables } from '../../../engine/core-modules/tenant/business-tables';\n" + q), ['other-qualified']); // aliased import
   assert.deepEqual(rules("import { businessTables } from './somewhere-else';\n" + q), ['other-qualified']); // wrong module
@@ -117,6 +132,17 @@ test('flags core.<table>, any other qualifier, a QueryBuilder string table and a
   assert.deepEqual(rules("m.query('SELECT 1', ['search_path', s]);"), ['search-path-switch']);
   assert.deepEqual(rules("m.query('SELECT set_config($1,$2,true)', ['search_path', s]);"), ['search-path-switch', 'search-path-switch']);
   assert.deepEqual(rules("m.query(`SELECT set_config('rab.team_shift_id', $1, true)`, [id]);"), []); // a literal, non-search_path name
+  // Re-check Low: spelling variants and comments.
+  assert.deepEqual(rules(`m.query(\`SELECT "set_config"('search_path', $1, true)\`, [s]);`), ['search-path-switch']);
+  assert.deepEqual(rules("m.query(`SELECT pg_catalog.set_config ( 'search_path', $1, true)`, [s]);"), ['search-path-switch']);
+  assert.deepEqual(rules(`m.query(\`SELECT set_config('"search_path"', $1, true)\`, [s]);`), ['search-path-switch']);
+  assert.deepEqual(rules("m.query(`SELECT set_config(/* hidden */ 'search_path', $1, true)`, [s]);"), ['search-path-switch']);
+  assert.deepEqual(rules("m.query(`SELECT 1;\n-- note\nSET \"search_path\" TO core`);"), ['search-path-switch']);
+  assert.deepEqual(rules("m.query('RESET search_path');"), ['search-path-switch']);
+  assert.deepEqual(rules("m.query('RESET ALL');"), ['search-path-switch']);
+  assert.deepEqual(rules("m.query('DISCARD ALL');"), ['search-path-switch']);
+  assert.deepEqual(rules("m.query(`SELECT 1 -- set_config('search_path', 'x', true)\n`);"), []); // only inside a SQL comment
+  assert.deepEqual(rules("m.query('RESET ROLE');"), []);
 });
 
 test('the binders may switch search_path; DDL that pins a function\'s own search_path is not a switch', () => {
