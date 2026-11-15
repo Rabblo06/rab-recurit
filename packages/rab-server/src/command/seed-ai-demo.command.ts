@@ -9,7 +9,7 @@ import { AuditAction, AuditService } from '../engine/core-modules/audit/audit.se
 import { AccountLifecycleService } from '../engine/core-modules/auth/services/account-lifecycle.service';
 import { EnvironmentService } from '../engine/core-modules/environment/environment.service';
 import { AuthContext } from '../engine/core-modules/tenant/auth-context.interface';
-import { bindBusinessSchema, businessSearchPath } from '../engine/core-modules/tenant/business-tables';
+import { bindBusinessSchema, businessSearchPath, businessTables } from '../engine/core-modules/tenant/business-tables';
 import { TenantContextService } from '../engine/core-modules/tenant/tenant-context.service';
 import { loadSystemRoleDefaultPermissions } from '../modules/identity/services/system-role-permissions';
 import { ROLE_DEFS } from '../modules/manager/services/manager.service';
@@ -206,6 +206,9 @@ export class SeedAiDemoCommand extends CommandRunner {
     const schema = this.env.get('HWS_RUNTIME_ENABLED') ? await this.workspaceSchema(m, workspaceId) : 'core';
     const ceoCtx: AuthContext = { organisationId, workspaceId, userId: ceoUserId, role: '' };
     await this.bind(m, ceoCtx, schema);
+    // C2: business tables named through the binding; every read re-checks it, so each statement below names the schema
+    // bound at that moment (the same routing the search_path set by bind() gives).
+    const t = businessTables(m);
 
     // 3b. A synthetic Initial Manager (invited, no password, no invitation): the organisation's payroll calendar is written
     //     under its authority, exactly as the RLS policy on `payroll_calendar` requires (Initial Manager only).
@@ -222,11 +225,11 @@ export class SeedAiDemoCommand extends CommandRunner {
     // 4. Synthetic staff: invited, no password, never invited by email (they cannot sign in).
     const [jobRoles, venues] = [[] as string[], [] as string[]];
     for (const [name, rate] of AI_DEMO_JOB_ROLES) {
-      const [r] = await m.query<Array<{ id: string }>>(`INSERT INTO job_role (organisation_id, workspace_id, name, default_rate_pence, created_by) VALUES ($1, $2, $3, $4, $5) RETURNING id`, [organisationId, workspaceId, name, rate, ceoUserId]);
+      const [r] = await m.query<Array<{ id: string }>>(`INSERT INTO ${t.job_role} (organisation_id, workspace_id, name, default_rate_pence, created_by) VALUES ($1, $2, $3, $4, $5) RETURNING id`, [organisationId, workspaceId, name, rate, ceoUserId]);
       jobRoles.push(r!.id);
     }
     for (const name of AI_DEMO_VENUES) {
-      const [v] = await m.query<Array<{ id: string }>>(`INSERT INTO venue (organisation_id, workspace_id, name, created_by) VALUES ($1, $2, $3, $4) RETURNING id`, [organisationId, workspaceId, name, ceoUserId]);
+      const [v] = await m.query<Array<{ id: string }>>(`INSERT INTO ${t.venue} (organisation_id, workspace_id, name, created_by) VALUES ($1, $2, $3, $4) RETURNING id`, [organisationId, workspaceId, name, ceoUserId]);
       venues.push(v!.id);
     }
     const staff: string[] = [];
@@ -238,7 +241,7 @@ export class SeedAiDemoCommand extends CommandRunner {
       await this.membership(m, organisationId, userId, workspaceId);
       await this.bind(m, ceoCtx, schema);
       const [p] = await m.query<Array<{ id: string }>>(
-        `INSERT INTO staff_profile (organisation_id, user_id, staff_ref, created_by, workspace_id, employment_status, job_role_id)
+        `INSERT INTO ${t.staff_profile} (organisation_id, user_id, staff_ref, created_by, workspace_id, employment_status, job_role_id)
          VALUES ($1, $2, $3, $4, $5, 'active', $6) RETURNING id`,
         [organisationId, userId, `AID-${String(i + 1).padStart(3, '0')}`, ceoUserId, workspaceId, jobRoles[i % jobRoles.length]],
       );
@@ -248,16 +251,18 @@ export class SeedAiDemoCommand extends CommandRunner {
     // 5. Shifts: upcoming (partly filled, full, open, draft) and past (completed, with attendance and payroll).
     const now = Date.now();
     const shift = async (venue: number, role: number, startMs: number, required: number, filled: number, status: string): Promise<string> => {
+      const t = businessTables(m);
       const [row] = await m.query<Array<{ id: string }>>(
-        `INSERT INTO shift (organisation_id, venue_id, job_role_id, starts_at, ends_at, break_minutes, required_count, filled_count, pay_rate_pence, status, created_by, workspace_id)
+        `INSERT INTO ${t.shift} (organisation_id, venue_id, job_role_id, starts_at, ends_at, break_minutes, required_count, filled_count, pay_rate_pence, status, created_by, workspace_id)
          VALUES ($1, $2, $3, $4, $5, 30, $6, $7, $8, $9, $10, $11) RETURNING id`,
         [organisationId, venues[venue], jobRoles[role], new Date(startMs), new Date(startMs + 8 * H), required, filled, AI_DEMO_JOB_ROLES[role]![1], status, ceoUserId, workspaceId],
       );
       return row!.id;
     };
     const assignment = async (shiftId: string, staffId: string, status: string, startMs: number, role: number): Promise<string> => {
+      const t = businessTables(m);
       const [row] = await m.query<Array<{ id: string }>>(
-        `INSERT INTO shift_assignment (organisation_id, shift_id, staff_profile_id, status, pay_rate_snapshot_pence, assigned_by, confirmed_at, period, workspace_id)
+        `INSERT INTO ${t.shift_assignment} (organisation_id, shift_id, staff_profile_id, status, pay_rate_snapshot_pence, assigned_by, confirmed_at, period, workspace_id)
          VALUES ($1, $2, $3, $4, $5, $6, CASE WHEN $4 IN ('confirmed', 'completed') THEN now() END, tstzrange($7, $8), $9) RETURNING id`,
         [organisationId, shiftId, staffId, status, AI_DEMO_JOB_ROLES[role]![1], ceoUserId, new Date(startMs), new Date(startMs + 8 * H), workspaceId],
       );
@@ -266,8 +271,9 @@ export class SeedAiDemoCommand extends CommandRunner {
     let offers = 0;
     const offer = async (assignmentId: string, staffId: string, status: string, role: number) => {
       offers += 1;
+      const t = businessTables(m);
       await m.query(
-        `INSERT INTO job_offer (organisation_id, shift_assignment_id, staff_profile_id, status, sent_at, expires_at, estimated_pay_pence, created_by, workspace_id)
+        `INSERT INTO ${t.job_offer} (organisation_id, shift_assignment_id, staff_profile_id, status, sent_at, expires_at, estimated_pay_pence, created_by, workspace_id)
          VALUES ($1, $2, $3, $4, now(), now() + interval '1 day', $5, $6, $7)`,
         [organisationId, assignmentId, staffId, status, AI_DEMO_JOB_ROLES[role]![1] * 8, ceoUserId, workspaceId],
       );
@@ -309,7 +315,7 @@ export class SeedAiDemoCommand extends CommandRunner {
         const a = await assignment(id, staffId, 'completed', at, role);
         const amount = AI_DEMO_JOB_ROLES[role]![1] * 8;
         const [att] = await m.query<Array<{ id: string }>>(
-          `INSERT INTO attendance (organisation_id, shift_assignment_id, shift_id, staff_profile_id, workspace_id, clock_in_at, clock_out_at, status, worked_minutes, earned_pence)
+          `INSERT INTO ${t.attendance} (organisation_id, shift_assignment_id, shift_id, staff_profile_id, workspace_id, clock_in_at, clock_out_at, status, worked_minutes, earned_pence)
            VALUES ($1, $2, $3, $4, $5, $6, $7, 'approved', 450, $8) RETURNING id`,
           [organisationId, a, id, staffId, workspaceId, new Date(at + late * 60_000), new Date(at + 8 * H), amount],
         );
@@ -336,18 +342,18 @@ export class SeedAiDemoCommand extends CommandRunner {
         [organisationId, cal!.id, p.start, p.end, p.payday],
       );
       await this.bind(m, ceoCtx, schema);
-      const [run] = await m.query<Array<{ id: string }>>(`INSERT INTO payroll_run (organisation_id, workspace_id, period_id, prepared_by) VALUES ($1, $2, $3, $4) RETURNING id`, [organisationId, workspaceId, period!.id, ceoUserId]);
+      const [run] = await m.query<Array<{ id: string }>>(`INSERT INTO ${t.payroll_run} (organisation_id, workspace_id, period_id, prepared_by) VALUES ($1, $2, $3, $4) RETURNING id`, [organisationId, workspaceId, period!.id, ceoUserId]);
       payrollRuns += 1;
       for (const r of p.rows) {
         // The normal payroll lifecycle: created pending_approval from the approved attendance, then approved.
         const [rec] = await m.query<Array<{ id: string }>>(
-          `INSERT INTO payroll_record (organisation_id, workspace_id, attendance_id, shift_id, staff_profile_id, status, worked_minutes, pay_rate_pence, amount_pence)
+          `INSERT INTO ${t.payroll_record} (organisation_id, workspace_id, attendance_id, shift_id, staff_profile_id, status, worked_minutes, pay_rate_pence, amount_pence)
            VALUES ($1, $2, $3, $4, $5, 'pending_approval', 450, $6, $7) RETURNING id`,
           [organisationId, workspaceId, r.attendanceId, r.shiftId, r.staffId, Math.round(r.amount / 8), r.amount],
         );
-        await m.query(`UPDATE payroll_record SET status = 'approved', approved_at = now(), approved_by = $2 WHERE id = $1`, [rec!.id, ceoUserId]);
+        await m.query(`UPDATE ${t.payroll_record} SET status = 'approved', approved_at = now(), approved_by = $2 WHERE id = $1`, [rec!.id, ceoUserId]);
         await m.query(
-          `INSERT INTO payroll_run_line (organisation_id, workspace_id, run_id, payroll_record_id, staff_profile_id, work_date, worked_minutes, pay_rate_pence, amount_pence)
+          `INSERT INTO ${t.payroll_run_line} (organisation_id, workspace_id, run_id, payroll_record_id, staff_profile_id, work_date, worked_minutes, pay_rate_pence, amount_pence)
            VALUES ($1, $2, $3, $4, $5, $6, 450, $7, $8)`,
           [organisationId, workspaceId, run!.id, rec!.id, r.staffId, r.workDate, Math.round(r.amount / 8), r.amount],
         );

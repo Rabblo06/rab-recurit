@@ -1,5 +1,7 @@
 import { EntityManager } from 'typeorm';
 
+import { businessTables } from '../tenant/business-tables';
+
 /**
  * Phase C1b — who is told about a committed change. Every recipient set here is computed SERVER-SIDE, from the
  * database as it is at emit time, inside the SAME transaction (and therefore the same tenant binding and RLS) as the
@@ -15,9 +17,9 @@ import { EntityManager } from 'typeorm';
  *    rule, verbatim) who are not venue managers (`PayrollService.canAccessPayroll` refuses venue scope).
  *
  * Fail closed: a row RLS hides from the acting transaction simply yields no recipient (fewer events, never more); the
- * client's poll still reconciles. Plain SQL only — no `modules/` import (engine never imports modules). Unqualified
- * names are the business tables the caller's own queries use (they resolve through the transaction's search_path,
- * core or the physical workspace schema); identity tables are always `core.`.
+ * client's poll still reconciles. Plain SQL only — no `modules/` import (engine never imports modules). Business tables
+ * are named through `businessTables(manager)` (Part C2: the caller's own transaction binding — core or the physical
+ * workspace schema, the same routing its search_path gives); identity tables are always `core.`.
  *
  * `workspaceId` on a recipient is the workspace the gateway re-checks against that recipient's session
  * (`envelopeMatchesConnection`): the entity's workspace for people who work inside it, and NULL only for org-wide
@@ -44,10 +46,11 @@ export function uniqueRecipients(recipients: Array<RealtimeRecipient | null | un
 }
 
 export async function venueManagerUserIds(manager: EntityManager, venueId: string): Promise<string[]> {
+  const t = businessTables(manager);
   const rows = await manager.query<Array<{ user_id: string }>>(
-    // sql-injection-reviewed: interpolates a module-level SQL constant / constant fragment; every request value is a bound $n parameter.
+    // sql-injection-reviewed: interpolates a module-level SQL constant / constant fragment and businessTables names; every request value is a bound $n parameter.
     `SELECT DISTINCT mp.user_id
-       FROM manager_venue mv
+       FROM ${t.manager_venue} mv
        JOIN core.manager_profile mp ON mp.id = mv.manager_profile_id
        JOIN core."user" u ON u.id = mp.user_id AND ${ACTIVE_USER}
       WHERE mv.venue_id = $1
@@ -60,8 +63,9 @@ export async function venueManagerUserIds(manager: EntityManager, venueId: strin
 
 /** The shift's owner + the venue's managers, bound to the shift's workspace. */
 export async function shiftAudience(manager: EntityManager, shiftId: string): Promise<RealtimeRecipient[]> {
+  const t = businessTables(manager);
   const [shift] = await manager.query<Array<{ workspace_id: string | null; venue_id: string; created_by: string; requested_by: string | null }>>(
-    `SELECT workspace_id, venue_id, created_by, requested_by FROM shift WHERE id = $1`,
+    `SELECT workspace_id, venue_id, created_by, requested_by FROM ${t.shift} WHERE id = $1`,
     [shiftId],
   );
   if (!shift) return [];
@@ -76,9 +80,10 @@ export async function shiftAudience(manager: EntityManager, shiftId: string): Pr
 
 /** Staff with a live seat on the shift (offered / accepted / confirmed) — the people whose offers or upcoming shifts change. */
 export async function shiftStaffAudience(manager: EntityManager, shiftId: string): Promise<RealtimeRecipient[]> {
+  const t = businessTables(manager);
   const rows = await manager.query<Array<{ user_id: string; workspace_id: string | null }>>(
     `SELECT DISTINCT sp.user_id, sa.workspace_id
-       FROM shift_assignment sa JOIN staff_profile sp ON sp.id = sa.staff_profile_id
+       FROM ${t.shift_assignment} sa JOIN ${t.staff_profile} sp ON sp.id = sa.staff_profile_id
       WHERE sa.shift_id = $1 AND sa.status IN ('offered', 'staff_accepted', 'confirmed')`,
     [shiftId],
   );
@@ -87,11 +92,12 @@ export async function shiftStaffAudience(manager: EntityManager, shiftId: string
 
 /** An offer's staff member, its sender, the shift's owner and the venue's managers. */
 export async function offerAudience(manager: EntityManager, offerId: string): Promise<RealtimeRecipient[]> {
+  const t = businessTables(manager);
   const [row] = await manager.query<Array<{ workspace_id: string | null; staff_user_id: string; assigned_by: string | null; shift_id: string }>>(
     `SELECT o.workspace_id, sp.user_id AS staff_user_id, sa.assigned_by, sa.shift_id
-       FROM job_offer o
-       JOIN shift_assignment sa ON sa.id = o.shift_assignment_id
-       JOIN staff_profile sp ON sp.id = o.staff_profile_id
+       FROM ${t.job_offer} o
+       JOIN ${t.shift_assignment} sa ON sa.id = o.shift_assignment_id
+       JOIN ${t.staff_profile} sp ON sp.id = o.staff_profile_id
       WHERE o.id = $1`,
     [offerId],
   );
@@ -106,9 +112,10 @@ export async function offerAudience(manager: EntityManager, offerId: string): Pr
 
 /** An attendance row's staff member + the shift's owner and venue managers (the shift report's readers). */
 export async function attendanceAudience(manager: EntityManager, attendanceId: string): Promise<RealtimeRecipient[]> {
+  const t = businessTables(manager);
   const [row] = await manager.query<Array<{ workspace_id: string | null; staff_user_id: string; shift_id: string }>>(
     `SELECT a.workspace_id, sp.user_id AS staff_user_id, a.shift_id
-       FROM attendance a JOIN staff_profile sp ON sp.id = a.staff_profile_id
+       FROM ${t.attendance} a JOIN ${t.staff_profile} sp ON sp.id = a.staff_profile_id
       WHERE a.id = $1`,
     [attendanceId],
   );
