@@ -36,7 +36,7 @@ function harness(row: Record<string, unknown>) {
       return [{ statement_status: 'queued', statement_dispatch_generation: 3, statement_file_id: null, status: 'approved' }];
     }
     if (sql.startsWith('SELECT pr.id, pr.organisation_id')) return [row];
-    if (sql.startsWith("UPDATE payroll_record SET statement_status = 'failed'")) return [[], 1];
+    if (sql.startsWith(`UPDATE "core"."payroll_record" SET statement_status = 'failed'`)) return [[], 1];
     return [];
   });
   // Narrowed on entry: the statement job hands the renderer only this kind, and any other kind fails the test.
@@ -49,7 +49,7 @@ function harness(row: Record<string, unknown>) {
   // Stop right after the render: the upload / registration path is covered by shift-statement.integration.spec.ts.
   const files = { putObject: jest.fn(async () => { throw new Error('stop after render'); }), discardUnregistered: jest.fn(async () => undefined) };
   const deps = { tenantContext: tenant, files, notifications: {}, render } as never;
-  const failure = () => statements.find((s) => s.sql.startsWith("UPDATE payroll_record SET statement_status = 'failed'"));
+  const failure = () => statements.find((s) => s.sql.startsWith(`UPDATE "core"."payroll_record" SET statement_status = 'failed'`));
   return { deps, render, docs, failure };
 }
 

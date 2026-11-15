@@ -113,8 +113,10 @@ export interface ShiftReportDetail {
   /** Final signed timesheet PDF. */
   finalFile: ReportFileRef | null;
   /**
-   * The QR clock-in/out window (CLOCK_IN_EARLY_MINUTES before start .. QR_POST_SHIFT_GRACE_MINUTES after end), the same
-   * bounds AttendanceQrService signs into the Shift QR. Display only; clock-in/out enforcement is unchanged.
+   * The QR clock-in/out window (CLOCK_IN_EARLY_MINUTES before start .. QR_POST_SHIFT_GRACE_MINUTES after end) for display.
+   * The QR itself carries no expiry: AttendanceQrService.validateQr accepts it until the shift's CURRENT end + grace,
+   * decided at scan time (inclusive, so `closed` here starts one instant before the QR is refused). Display only;
+   * enforcement is validateQr (QR) and assertClockWindow (clock-in / check-in).
    */
   qrWindow: { opensAt: string; closesAt: string; state: 'not_open' | 'open' | 'closed' };
   /** Footer + Time-sheet document, decided from DB time (`report-actions.ts`). */

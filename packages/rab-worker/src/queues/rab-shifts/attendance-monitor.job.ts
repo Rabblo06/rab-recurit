@@ -5,6 +5,7 @@ import { assertTransition, ATTENDANCE_TRANSITIONS, AttendanceStatus, Notificatio
 import { DataSource, EntityManager } from 'typeorm';
 
 import { AuditAction, AuditService } from '@rab/server/engine/core-modules/audit/audit.service';
+import { businessTables } from '@rab/server/engine/core-modules/tenant/business-tables';
 import { TenantContextService } from '@rab/server/engine/core-modules/tenant/tenant-context.service';
 import { NotificationService } from '@rab/server/modules/notification/services/notification.service';
 import { Attendance } from '@rab/server/modules/attendance/entities/attendance.entity';
@@ -67,10 +68,11 @@ export type AttendanceMonitorScope = Omit<ScanCandidate, 'attendance_id'>;
 export type AttendanceMonitorCandidate = ScanCandidate;
 
 export async function discoverAttendanceMonitorScopes(manager: EntityManager): Promise<AttendanceMonitorScope[]> {
+  const t = businessTables(manager);
   return await manager.query<Omit<ScanCandidate, 'attendance_id'>[]>(`
         SELECT DISTINCT a.organisation_id, a.workspace_id
-        FROM attendance a
-        JOIN shift s ON s.id = a.shift_id
+        FROM ${t.attendance} a
+        JOIN ${t.shift} s ON s.id = a.shift_id
         WHERE a.status = 'clocked_in'
           AND a.clock_out_at IS NULL
           AND s.status != 'cancelled'
@@ -99,18 +101,20 @@ export async function processAttendanceMonitorScopes(
   // from hiding shorter assignments that are already overdue.
   const candidates: ScanCandidate[] = [];
   for (const scope of scopes) {
-    const due = await runScopedForOrg(tenantContext, scope.organisation_id, scope.workspace_id, manager =>
+    const due = await runScopedForOrg(tenantContext, scope.organisation_id, scope.workspace_id, (manager) => {
+      const t = businessTables(manager);
       // sql-injection-reviewed: code-constant SQL fragment from a helper called with literal aliases; values are bound $n parameters.
-      manager.query<ScanCandidate[]>(`
+      return manager.query<ScanCandidate[]>(`
         SELECT a.id AS attendance_id, a.organisation_id, a.workspace_id
-        FROM attendance a
-        JOIN shift s ON s.id=a.shift_id
-        JOIN shift_assignment sa ON sa.id=a.shift_assignment_id
+        FROM ${t.attendance} a
+        JOIN ${t.shift} s ON s.id=a.shift_id
+        JOIN ${t.shift_assignment} sa ON sa.id=a.shift_assignment_id
         WHERE a.status='clocked_in' AND a.clock_out_at IS NULL
           AND s.status!='cancelled'
           AND ${assignmentTimeSql().end} <= now() - interval '${MISSING_CLOCK_OUT_GRACE_MS / 60000} minutes'
         ORDER BY ${assignmentTimeSql().end}, a.id LIMIT 500
-      `));
+      `);
+    });
     candidates.push(...due);
   }
 

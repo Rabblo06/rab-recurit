@@ -8,6 +8,7 @@ import { AuditAction, AuditService } from '@rab/server/engine/core-modules/audit
 import { FileKind } from '@rab/server/engine/core-modules/storage/file-kinds';
 import { FileService } from '@rab/server/engine/core-modules/storage/file.service';
 import { PermissionsService } from '@rab/server/engine/core-modules/permissions/permissions.service';
+import { businessTables } from '@rab/server/engine/core-modules/tenant/business-tables';
 import { TenantContextService } from '@rab/server/engine/core-modules/tenant/tenant-context.service';
 import { AttendanceQrService } from '@rab/server/modules/attendance/services/attendance-qr.service';
 import { QrImageService } from '@rab/server/modules/attendance/services/qr-image.service';
@@ -71,11 +72,12 @@ export type ShiftReportCandidate = ScanCandidate;
 export async function discoverShiftReportCandidates(manager: EntityManager, reportAvailableBeforeMinutes: number, organisationId?: string): Promise<ShiftReportCandidate[]> {
   // SQL-injection lint (owner login): the window is a bound integer parameter, never text spliced into the interval literal.
   if (!Number.isInteger(reportAvailableBeforeMinutes) || reportAvailableBeforeMinutes < 0) throw new Error('reportAvailableBeforeMinutes must be a non-negative integer.');
+  const t = businessTables(manager);
   return await manager.query<ScanCandidate[]>(
     `
         SELECT s.id AS shift_id, s.organisation_id, s.workspace_id
-        FROM shift s
-        LEFT JOIN shift_report sr ON sr.shift_id = s.id
+        FROM ${t.shift} s
+        LEFT JOIN ${t.shift_report} sr ON sr.shift_id = s.id
         WHERE s.status NOT IN ('cancelled', 'completed', 'draft')
           AND s.starts_at <= now() + make_interval(mins => $2::int)
           AND s.ends_at > now()
@@ -186,10 +188,11 @@ async function generatePreShiftReport(
       const venueName = info.venueName;
       const roleName = info.roleName;
 
+      const t = businessTables(manager);
       const staffRows = await manager.query(
         `SELECT sa.period, sa.break_minutes AS assignment_break_minutes, sp.staff_ref, u.first_name, u.last_name
-           FROM shift_assignment sa
-           JOIN staff_profile sp ON sp.id = sa.staff_profile_id
+           FROM ${t.shift_assignment} sa
+           JOIN ${t.staff_profile} sp ON sp.id = sa.staff_profile_id
            JOIN core."user" u ON u.id = sp.user_id
           WHERE sa.shift_id = $1 AND sa.status = 'confirmed'
           ORDER BY u.first_name, u.last_name, sa.id`,

@@ -2,6 +2,7 @@ import { PermissionFlag } from '@rab/shared';
 import { EntityManager } from 'typeorm';
 
 import type { PermissionsService } from '@rab/server/engine/core-modules/permissions/permissions.service';
+import { businessTables } from '@rab/server/engine/core-modules/tenant/business-tables';
 
 /**
  * WHO may receive a report email (pre-shift roster + Shift QR, final timesheet) — the ONE rule, used at enqueue time by
@@ -25,11 +26,11 @@ import type { PermissionsService } from '@rab/server/engine/core-modules/permiss
  *     the existing `PermissionsService.userHasPermissionTx` for (O, W, that user), in the caller's transaction, so a
  *     REVOKE override or a role change takes effect on the next enqueue/send.
  *
- * Every query runs on the caller's EntityManager, i.e. inside the caller's own tenant transaction with O AND W bound and
- * its search_path routed to W's tables (`runInTenantContext`/`runInWorkspaceContext` with the workspace set: the
- * physical workspace schema under HWS, `core` otherwise). `manager_venue` is one of the physical workspace tables, so it
- * is deliberately left unqualified and resolves through that search_path; every core table is `core.`-qualified. RLS
- * still applies underneath these explicit predicates. Nothing here changes RLS or context.
+ * Every query runs on the caller's EntityManager, i.e. inside the caller's own tenant transaction with O AND W bound
+ * (`runInTenantContext`/`runInWorkspaceContext` with the workspace set: the physical workspace schema under HWS, `core`
+ * otherwise). `manager_venue` is one of the physical workspace tables, so it is schema-qualified through
+ * `businessTables(manager)` (Part C2: the schema that binder recorded for this transaction); every core table is
+ * `core.`-qualified. RLS still applies underneath these explicit predicates. Nothing here changes RLS or context.
  * Fail closed: no workspace → nobody can be proven to belong to it → no recipients.
  */
 export interface ReportRecipientScope {
@@ -70,6 +71,7 @@ export async function selectReportRecipients(
 ): Promise<ReportRecipientSelection> {
   if (!scope.workspaceId || !scope.organisationId || !scope.venueId) return { recipients: [], excluded: 0, organisationSuspended: false };
 
+  const t = businessTables(manager);
   const candidates = await manager.query<CandidateRow[]>(
     `SELECT u.id AS user_id, u.email,
             (u.status = 'active'
@@ -78,7 +80,7 @@ export async function selectReportRecipients(
              AND NOT EXISTS (SELECT 1 FROM core.organisation_member om
                               WHERE om.user_id = u.id AND om.organisation_id = $2 AND om.status <> 'active')
             ) AS base_eligible
-       FROM manager_venue mv
+       FROM ${t.manager_venue} mv
        JOIN core.manager_profile mp ON mp.id = mv.manager_profile_id AND mp.organisation_id = mv.organisation_id
        JOIN core."user" u ON u.id = mp.user_id AND u.organisation_id = mv.organisation_id
       WHERE mv.venue_id = $1

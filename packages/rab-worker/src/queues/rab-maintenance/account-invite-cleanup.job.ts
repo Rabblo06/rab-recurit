@@ -6,6 +6,7 @@ import { isUpgradeBlocked } from '@rab/server/engine/core-modules/upgrade/worksp
 import {
   bindBusinessSchema,
   businessSearchPath,
+  businessTables,
   CORE_BUSINESS_SCHEMA,
   restoreBusinessSchema,
   snapshotBusinessSchema,
@@ -440,14 +441,21 @@ async function loadWorkspaceCatalogue(manager: EntityManager): Promise<Map<strin
 // (Part 11). The other 4 (`manager_workspace`, `platform_admin`, `active_session`/refresh_token) are genuinely
 // global/core per CLAUDE.md's "Core global infrastructure" list and have no physical-schema counterpart — checked
 // once, against core, same as always.
-const WORKSPACE_TABLE_DEPENDENCY_CHECKS: Array<[string, string]> = [
-  ['shift', `SELECT 1 FROM shift WHERE created_by = $1 LIMIT 1`],
-  ['job_role', `SELECT 1 FROM job_role WHERE created_by = $1 LIMIT 1`],
-  ['venue', `SELECT 1 FROM venue WHERE created_by = $1 LIMIT 1`],
-  ['shift_assignment', `SELECT 1 FROM shift_assignment WHERE assigned_by = $1 LIMIT 1`],
-  ['job_offer', `SELECT 1 FROM job_offer WHERE created_by = $1 OR confirmed_by = $1 OR rejected_by = $1 LIMIT 1`],
-  ['staff_profile_created_by', `SELECT 1 FROM staff_profile WHERE created_by = $1 LIMIT 1`],
-];
+// Part C2 (dual-schema): the statements name their tables through `businessTables(manager)`, read again after every
+// binding switch in `findBlockingDependency` (this is called right after each one), so the same checks read
+// `"core".<table>` in the core pass and `"workspace_<hex>".<table>` in the physical pass — the schema comes only from
+// that binding (core, or the trusted registry row bound with its workspace id), never from search_path resolution.
+function workspaceTableDependencyChecks(manager: EntityManager): Array<[string, string]> {
+  const t = businessTables(manager);
+  return [
+    ['shift', `SELECT 1 FROM ${t.shift} WHERE created_by = $1 LIMIT 1`],
+    ['job_role', `SELECT 1 FROM ${t.job_role} WHERE created_by = $1 LIMIT 1`],
+    ['venue', `SELECT 1 FROM ${t.venue} WHERE created_by = $1 LIMIT 1`],
+    ['shift_assignment', `SELECT 1 FROM ${t.shift_assignment} WHERE assigned_by = $1 LIMIT 1`],
+    ['job_offer', `SELECT 1 FROM ${t.job_offer} WHERE created_by = $1 OR confirmed_by = $1 OR rejected_by = $1 LIMIT 1`],
+    ['staff_profile_created_by', `SELECT 1 FROM ${t.staff_profile} WHERE created_by = $1 LIMIT 1`],
+  ];
+}
 
 const GLOBAL_TABLE_DEPENDENCY_CHECKS: Array<[string, string]> = [
   ['manager_workspace', `SELECT 1 FROM core.manager_workspace WHERE owner_user_id = $1 LIMIT 1`],
@@ -522,20 +530,20 @@ async function findBlockingDependency(
       bindBusinessSchema(manager, CORE_BUSINESS_SCHEMA, null);
       await manager.query(`SELECT set_config('rab.organisation_id',$1,true), set_config('rab.workspace_id',$2,true), set_config('search_path',$3,true)`,
         [scope.organisation_id, scope.id, businessSearchPath(CORE_BUSINESS_SCHEMA)]);
-      for (const [reason, sql] of WORKSPACE_TABLE_DEPENDENCY_CHECKS) {
+      for (const [reason, sql] of workspaceTableDependencyChecks(manager)) {
         if ((await manager.query(sql, [userId])).length > 0) return reason;
       }
 
       // Part 11: the same 5 checks again, against the physical schema, ONLY when the trusted registry reports this
-      // workspace READY. search_path is bound to EXACTLY that one schema — never 'workspace, core' — so the
-      // unqualified table names above resolve to the physical tables here and to core immediately above.
+      // workspace READY. search_path and the businessTables binding are switched to EXACTLY that one schema — never
+      // 'workspace, core' — so the same checks name the physical tables here and the core tables immediately above.
       if (!scope.id) continue;
       const physicalSchema = await resolveReadyPhysicalSchema(manager, scope.id);
       if (physicalSchema === WORKSPACE_UPGRADING) return 'workspace_upgrading';
       if (!physicalSchema) continue;
       bindBusinessSchema(manager, physicalSchema, scope.id);
       await manager.query(`SELECT set_config('search_path',$1,true)`, [businessSearchPath(physicalSchema)]);
-      for (const [reason, sql] of WORKSPACE_TABLE_DEPENDENCY_CHECKS) {
+      for (const [reason, sql] of workspaceTableDependencyChecks(manager)) {
         if ((await manager.query(sql, [userId])).length > 0) return `${reason}_physical`;
       }
       bindBusinessSchema(manager, CORE_BUSINESS_SCHEMA, null);
