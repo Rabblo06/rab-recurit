@@ -17,8 +17,9 @@ describe('rotateShiftQr SQL (QR review M1)', () => {
     expect(ROTATE_SHIFT_QR_UPDATE_SQL).toMatch(/WHERE id = \$1 AND qr_version = \$2 AND status = \$3/);
   });
 
-  it('the lock is a FOR UPDATE row lock on the shift', () => {
+  it('the lock is a FOR UPDATE row lock on the shift and reads not_ended by the database clock (M2)', () => {
     expect(ROTATE_SHIFT_QR_LOCK_SQL).toMatch(/FROM shift WHERE id = \$1 FOR UPDATE$/);
+    expect(ROTATE_SHIFT_QR_LOCK_SQL).toMatch(/\(ends_at > now\(\)\) AS not_ended/);
   });
 
   it('SchedulingService runs the lock, then the update, from these constants (no inline copy)', () => {

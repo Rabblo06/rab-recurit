@@ -68,6 +68,7 @@ import {
   PresenceNotVerifiedException,
   ReasonTooShortException,
   StaffNotCheckedInException,
+  InvalidClockOutTimeException,
 } from '../exceptions/attendance.exceptions';
 import { AttendanceQrService } from './attendance-qr.service';
 import { isPastClockOutGrace } from './missing-clock-out-policy';
@@ -1343,7 +1344,21 @@ export class AttendanceService {
         oldValue = attendance.clockOutAt?.toISOString() ?? '';
         const parsed = new Date(dto.newValue);
         if (Number.isNaN(parsed.getTime())) throw new BadRequestException('newValue must be a valid ISO-8601 timestamp for clockOutAt.');
-        if (parsed.getTime() > now.getTime()) throw new BadRequestException('A clock-out time cannot be in the future.');
+        // QR review L4 (owner decision 2026-11-15): a corrected or recovered clock-out lies inside the same window every
+        // other clock-out path uses — not in the future (database clock), not before the clock-in, not after the staff
+        // member's own end + QR_POST_SHIFT_GRACE_MINUTES (attendanceWindow(effectiveAssignmentTime(...))). Written as
+        // "not inside", so an unreadable window refuses.
+        if (!(parsed.getTime() <= now.getTime())) throw new InvalidClockOutTimeException('in_future', 'A clock-out time cannot be in the future.');
+        if (!(parsed.getTime() >= attendance.clockInAt.getTime())) {
+          throw new InvalidClockOutTimeException('before_clock_in', 'The clock-out time cannot be before the clock-in time.');
+        }
+        const closesAt = this.attendanceWindow(effectiveAssignmentTime(assignment, shift)).closesAt;
+        if (!(parsed.getTime() <= closesAt.getTime())) {
+          throw new InvalidClockOutTimeException(
+            'after_clock_out_window',
+            `The clock-out time cannot be more than ${this.env.get('QR_POST_SHIFT_GRACE_MINUTES')} minutes after the staff member's scheduled end.`,
+          );
+        }
         clockOutAt = parsed;
       } else {
         oldValue = attendance.breakMinutes != null ? String(attendance.breakMinutes) : '';
