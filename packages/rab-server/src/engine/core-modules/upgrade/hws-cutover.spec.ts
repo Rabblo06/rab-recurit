@@ -11,6 +11,14 @@ import { UPGRADE_COMMANDS } from './upgrade-commands/registry';
 import type { UpgradeCommandHost } from './upgrade-commands/upgrade-command';
 import { commandStepName } from './upgrade-sequence';
 import { isUpgradeBlocked, parseUpgradeBlock, upgradeBlockMarker } from './workspace-upgrade-block';
+import {
+  cutoverStateRefused,
+  HWS_CUTOVER_COMMAND_NAME,
+  HWS_CUTOVER_ROUTING_ENFORCED,
+  hwsCutoverRegisteredIn,
+  HwsCutoverMarkError,
+  markNewWorkspaceCutoverVerified,
+} from './hws-cutover-routing';
 
 /** OWNER-DB-ULTIMATE Part C3 (option A′, pending owner choice): the pure parts of the HWS cutover command. */
 describe('C3 HWS cutover: frozen lists stay equal to their sources', () => {
@@ -117,5 +125,41 @@ describe('C3 HWS cutover: the backup marker (owner rule: no cutover without a ve
     const r = await check(host({ marker: { ...good, database: 'secret-db-name' } }));
     expect(JSON.stringify(r)).not.toMatch(/secret-db-name|\/backups\//);
     expect('reason' in parseCutoverBackupMarker('[]')).toBe(true);
+  });
+});
+
+describe('C3 fail-closed routing gate (security review H-1b)', () => {
+  it('refuses started always; once enforced, everything that is not verified (missing state included)', () => {
+    expect(cutoverStateRefused('started', false)).toBe(true);
+    expect(cutoverStateRefused(null, false)).toBe(false);
+    expect(cutoverStateRefused(undefined, false)).toBe(false);
+    expect(cutoverStateRefused('verified', false)).toBe(false);
+    expect(cutoverStateRefused('started', true)).toBe(true);
+    expect(cutoverStateRefused(null, true)).toBe(true);
+    expect(cutoverStateRefused(undefined, true)).toBe(true);
+    expect(cutoverStateRefused('anything-else', true)).toBe(true);
+    expect(cutoverStateRefused('verified', true)).toBe(false);
+  });
+
+  it('is gated on the command being registered (off today: development and CI route as before)', () => {
+    expect(HWS_CUTOVER_COMMAND_NAME).toBe(HWS_CUTOVER_NAME);
+    expect(HWS_CUTOVER_ROUTING_ENFORCED).toBe(false);
+    expect(hwsCutoverRegisteredIn({ '0-6': [] })).toBe(false);
+    expect(hwsCutoverRegisteredIn({ '0-6': [], '0-7': UPGRADE_COMMANDS_0_7 })).toBe(true);
+  });
+
+  it('the creation hook runs only with HWS on and the cutover active, and a refusal throws (the create rolls back)', async () => {
+    const calls: string[] = [];
+    const q = (marked: unknown) => async (sql: string) => {
+      calls.push(sql);
+      return [{ marked }];
+    };
+    await expect(markNewWorkspaceCutoverVerified(q(true), 'w', { hwsRuntimeEnabled: false, enforced: true })).resolves.toBe(false);
+    await expect(markNewWorkspaceCutoverVerified(q(true), 'w', { hwsRuntimeEnabled: true, enforced: false })).resolves.toBe(false);
+    await expect(markNewWorkspaceCutoverVerified(q(true), 'w', { hwsRuntimeEnabled: true })).resolves.toBe(false); // today: not enforced
+    expect(calls).toEqual([]);
+    await expect(markNewWorkspaceCutoverVerified(q(true), 'w', { hwsRuntimeEnabled: true, enforced: true })).resolves.toBe(true);
+    await expect(markNewWorkspaceCutoverVerified(q(false), 'w', { hwsRuntimeEnabled: true, enforced: true })).rejects.toBeInstanceOf(HwsCutoverMarkError);
+    expect(calls).toEqual(['SELECT core.hws_cutover_mark_new_workspace($1) AS marked', 'SELECT core.hws_cutover_mark_new_workspace($1) AS marked']);
   });
 });

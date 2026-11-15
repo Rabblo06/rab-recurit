@@ -25,6 +25,7 @@ const CREWFLOW_FUNCTIONS = [
   'hws_cutover_copy_batch(uuid, text, text, integer)',
   'hws_cutover_verify_range(uuid, text, text, integer)',
   'hws_cutover_started_any()',
+  'hws_cutover_mark_new_workspace(uuid)',
   'hws_cutover_core_fence()',
 ];
 const SECURE_FUNCTIONS = ['hws_cutover_drop_new_statement_pointers(uuid, uuid[])', 'hws_cutover_purge_core_statement_pointers(uuid)'];
@@ -39,11 +40,13 @@ const SECURE_FUNCTIONS = ['hws_cutover_drop_new_statement_pointers(uuid, uuid[])
  *     FORCE RLS with a tenant policy (USING + WITH CHECK) and an owner-only SELECT policy for the boot-check definer;
  *     crewflow_app SELECT only; the runtime login's DML refused by statement-level grant-parity guard triggers.
  *   - crewflow functions: guard hws_cutover_schema, source builder, definers probe / copy_batch / verify_range (FORCE lifted
- *     only inside their own transaction), hws_cutover_started_any (boot check), hws_cutover_core_fence (trigger function).
+ *     only inside their own transaction), hws_cutover_started_any (boot check), hws_cutover_mark_new_workspace (creation
+ *     hook: a workspace created in the same transaction starts 'verified'), hws_cutover_core_fence (trigger function).
  *   - fence triggers `hws_cutover_core_fence` on the 21 core copies (review M-3).
  *   - rab_secure_owner functions: hws_cutover_drop_new_statement_pointers, hws_cutover_purge_core_statement_pointers (EXECUTE
  *     to crewflow; R4 list unchanged: their bodies name only worker_dispatch_pointer).
- * EXECUTE: REVOKE ALL FROM PUBLIC on every function; crewflow_app holds EXECUTE only on hws_cutover_started_any (boolean).
+ * EXECUTE: REVOKE ALL FROM PUBLIC on every function; crewflow_app holds EXECUTE only on hws_cutover_started_any (boolean)
+ * and hws_cutover_mark_new_workspace (same-transaction workspaces only).
  *
  * Identity: the CF-41 bootstrap identity (the owner login, or a superuser on a disposable cluster), able to SET ROLE
  * rab_secure_owner. Self-checks (rolled back on failure): every function's owner / definer / config / grantees; the table's
@@ -65,6 +68,7 @@ export class HwsCutoverCopyFunctions1786721510000 implements MigrationInterface 
     for (const sql of HWS_CUTOVER_STATE_SECURITY_SQL) await queryRunner.query(sql);
     for (const fn of CREWFLOW_FUNCTIONS) await queryRunner.query(`REVOKE ALL ON FUNCTION core.${fn} FROM PUBLIC`);
     await queryRunner.query('GRANT EXECUTE ON FUNCTION core.hws_cutover_started_any() TO crewflow_app');
+    await queryRunner.query('GRANT EXECUTE ON FUNCTION core.hws_cutover_mark_new_workspace(uuid) TO crewflow_app');
     for (const sql of HWS_CUTOVER_FENCE_TRIGGERS_SQL) await queryRunner.query(sql);
     await queryRunner.query('SET LOCAL ROLE rab_secure_owner');
     for (const sql of HWS_CUTOVER_SECURE_FUNCTIONS_SQL) await queryRunner.query(sql);

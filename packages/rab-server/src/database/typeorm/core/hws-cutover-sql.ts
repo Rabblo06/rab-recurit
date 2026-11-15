@@ -46,6 +46,7 @@ export const HWS_CUTOVER_FUNCTIONS = [
   'core.hws_cutover_copy_batch(uuid,text,text,integer)',
   'core.hws_cutover_verify_range(uuid,text,text,integer)',
   'core.hws_cutover_started_any()',
+  'core.hws_cutover_mark_new_workspace(uuid)',
   'core.hws_cutover_core_fence()',
   'core.hws_cutover_drop_new_statement_pointers(uuid,uuid[])',
   'core.hws_cutover_purge_core_statement_pointers(uuid)',
@@ -444,6 +445,44 @@ AS $fn$
 $fn$`;
 
 /**
+ * (D2) Creation hook (security review H-1(b), fail-closed routing): marks a NEW workspace 'verified' — it has no core data by
+ * construction, so it is served from its schema at once once routing requires a verified state. Callable only for a workspace
+ * of the bound organisation created in THIS transaction (created_at = now(), the transaction's start; schema still CREATING),
+ * so it can never mark an existing, not-yet-copied workspace (whose core data would then be skipped by the cutover). A
+ * crewflow definer (the state table refuses the runtime login's own DML); EXECUTE to crewflow_app. Called by the application
+ * only when it routes to the workspace schemas (HWS on) and the cutover is active (hws-cutover-routing.ts).
+ */
+export const HWS_CUTOVER_MARK_NEW_SQL = `
+CREATE FUNCTION core.hws_cutover_mark_new_workspace(p_workspace_id uuid)
+RETURNS boolean
+LANGUAGE plpgsql
+VOLATILE
+SECURITY DEFINER
+SET search_path = pg_catalog, pg_temp
+AS $fn$
+DECLARE
+  v_org uuid;
+  v_n   integer;
+BEGIN
+  IF p_workspace_id IS NULL THEN
+    RAISE EXCEPTION 'hws cutover: a workspace id is required' USING ERRCODE = '22004';
+  END IF;
+  SELECT w.organisation_id INTO v_org
+    FROM core.manager_workspace w
+   WHERE w.id = p_workspace_id AND w.organisation_id = core.current_org()
+     AND w.created_at = pg_catalog.now() AND w.schema_status IS NOT DISTINCT FROM 'CREATING';
+  IF v_org IS NULL THEN
+    RAISE EXCEPTION 'hws cutover: only a workspace created in this transaction can be marked new' USING ERRCODE = '42501';
+  END IF;
+  INSERT INTO core.hws_cutover_state (workspace_id, organisation_id, state, verified_at)
+  VALUES (p_workspace_id, v_org, 'verified', pg_catalog.now())
+  ON CONFLICT (workspace_id) DO NOTHING;
+  GET DIAGNOSTICS v_n = ROW_COUNT;
+  RETURN v_n = 1;
+END
+$fn$`;
+
+/**
  * (E) Review M-3, the DB fence: once a workspace's cutover has STARTED (state row present), its rows in the 21 core copies are
  * read-only for every role except the table owners and a superuser (FK cascades from core.organisation / core.manager_workspace
  * run as the owner crewflow and still pass; the cutover itself never writes core). user_note has no workspace_id: fenced per
@@ -576,6 +615,7 @@ export const HWS_CUTOVER_CREWFLOW_FUNCTIONS_SQL: readonly string[] = [
   HWS_CUTOVER_COPY_BATCH_SQL,
   HWS_CUTOVER_VERIFY_RANGE_SQL,
   HWS_CUTOVER_STARTED_ANY_SQL,
+  HWS_CUTOVER_MARK_NEW_SQL,
   HWS_CUTOVER_FENCE_FUNCTION_SQL,
 ];
 
@@ -605,6 +645,7 @@ export const HWS_CUTOVER_EXPECTED_STATE: Readonly<Record<string, string>> = Obje
   'core.hws_cutover_schema(uuid)': `crewflow|false|${PINNED}|`,
   'core.hws_cutover_source_sql(text)': `crewflow|false|${PINNED}|`,
   'core.hws_cutover_started_any()': `crewflow|true|${PINNED}|crewflow_app`,
+  'core.hws_cutover_mark_new_workspace(uuid)': `crewflow|true|${PINNED}|crewflow_app`,
   'core.hws_cutover_verify_range(uuid,text,text,integer)': `crewflow|true|${PINNED_LOCK}|`,
 });
 

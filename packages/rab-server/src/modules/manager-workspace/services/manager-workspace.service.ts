@@ -20,6 +20,7 @@ import { ManagerWorkspace } from '../entities/manager-workspace.entity';
 import { SubdomainAvailability, SubdomainService } from './subdomain.service';
 import { assertCallerMayProvision, WorkspaceProvisioningService } from './workspace-provisioning.service';
 import { markNewWorkspaceInitial } from '../../../engine/core-modules/upgrade/upgrade-migration.service';
+import { markNewWorkspaceCutoverVerified } from '../../../engine/core-modules/upgrade/hws-cutover-routing';
 
 const POSTGRES_UNIQUE_VIOLATION = '23505';
 /**
@@ -454,6 +455,11 @@ export class ManagerWorkspaceService {
     // upgrade-migration.service.ts:139-172 markAsWorkspaceInitial), in THIS transaction, so a rolled-back create leaves
     // no row. The logbook's workspace_init policy admits only a workspace of the bound organisation.
     await markNewWorkspaceInitial((sql, parameters) => manager.query(sql, parameters) as Promise<unknown[]>, workspace);
+    // Part C3 (fail-closed routing): once the cutover is active, a NEW workspace served from its schema (HWS on) starts
+    // 'verified' in core.hws_cutover_state, in THIS transaction (no core data by construction). Throws → the create rolls back.
+    await markNewWorkspaceCutoverVerified((sql, parameters) => manager.query(sql, parameters) as Promise<unknown[]>, workspace.id, {
+      hwsRuntimeEnabled: this.environment?.get('HWS_RUNTIME_ENABLED') === true,
+    });
 
     // This Manager now owns a real Workspace. Membership is written just
     // below (assignOwnWorkspace), which is what every subsequent request's

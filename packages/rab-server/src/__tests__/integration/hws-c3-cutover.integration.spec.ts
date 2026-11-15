@@ -179,7 +179,7 @@ describeIfDb('C3 HWS cutover copy path (option A′)', () => {
     ).rows.map((r) => r.rel as string);
 
   /** The resolver every API / Worker workspace bind passes through (cache stubbed to "always ask Postgres"). */
-  const resolveAs = async (ws: SeededWorkspace): Promise<string> => {
+  const resolveAs = async (ws: SeededWorkspace, enforceCutover?: boolean): Promise<string> => {
     const cache = { resolveSchema: (_id: string, fetch: () => Promise<unknown>) => fetch(), invalidate: async () => undefined } as unknown as WorkspaceMetadataCacheService;
     const c = new Client({ connectionString: appUrl });
     await c.connect();
@@ -188,7 +188,7 @@ describeIfDb('C3 HWS cutover copy path (option A′)', () => {
       await c.query(`SELECT set_config('rab.organisation_id', $1, true), set_config('rab.workspace_id', $2, true)`, [ws.org, ws.id]);
       const manager = { query: (sql: string, params?: unknown[]) => c.query(sql, params).then((r) => r.rows) } as never;
       try {
-        return await new SchemaResolverService(cache).resolve(manager, ws.id);
+        return await new SchemaResolverService(cache, enforceCutover).resolve(manager, ws.id);
       } catch (error) {
         return error instanceof WorkspaceRoutingError ? `refused:${error.code}` : `error:${(error as Error).name}`;
       }
@@ -740,5 +740,54 @@ describeIfDb('C3 HWS cutover copy path (option A′)', () => {
       await admin.query('DELETE FROM core.venue WHERE id = $1', [planted]);
       await admin.query('COMMIT');
     }
+  });
+
+  it('fail-closed routing (H-1b): once the cutover is active, a workspace with no verified state is refused; before, it is served', async () => {
+    const plain = await make('no-state');
+    expect(await stateOf(plain)).toBeNull();
+    expect(await resolveAs(plain, false)).toBe(plain.schema); // HWS-on development / CI before activation: unchanged
+    expect(await resolveAs(plain, true)).toBe('refused:upgrading'); // activated: no verified state → 503
+    expect(await resolveAs(w1, true)).toBe(w1.schema); // verified by the cutover → served
+  });
+
+  it('fail-closed routing (H-1b): a cutover whose very first query throws blocks nothing, yet no workspace is served from an empty schema', async () => {
+    const fresh = await seedBusiness(await make('scan-throws'));
+    writeBackup();
+    let calls = 0;
+    const failing = async (sql: string, params?: unknown[]) => {
+      calls += 1;
+      if (calls === 1) throw Object.assign(new Error('connection reset during the scan'), { code: '08006' });
+      return (await app.query(sql, params as unknown[])).rows;
+    };
+    await expect(runHwsCutover({ query: failing, log, host: host() }, { workspaceIds: [fresh.id] })).rejects.toMatchObject({ code: '08006' });
+    expect(await migrationError(fresh)).toBeNull(); // nothing could be blocked ...
+    expect(await stateOf(fresh)).toBeNull();
+    expect(await resolveAs(fresh, true)).toBe('refused:upgrading'); // ... but routing still refuses it (no verified state)
+  });
+
+  it('fail-closed routing (H-1b): a workspace created after the cutover is marked verified in its creating transaction and served at once', async () => {
+    const label = `c3-new-${SFX}`;
+    await admin.query('BEGIN');
+    let nw!: SeededWorkspace;
+    try {
+      nw = await seedWorkspace(admin, label);
+      await admin.query(`SELECT set_config('rab.organisation_id', $1, true), set_config('rab.user_id', $2, true)`, [nw.org, nw.owner]);
+      expect((await admin.query('SELECT core.hws_cutover_mark_new_workspace($1) AS m', [nw.id])).rows[0].m).toBe(true);
+      await admin.query('COMMIT');
+    } catch (error) {
+      await admin.query('ROLLBACK');
+      throw error;
+    }
+    created.push(nw);
+    await provisionTypeScript(adminUrl, nw);
+    expect(await stateOf(nw)).toBe('verified');
+    expect(await resolveAs(nw, true)).toBe(nw.schema);
+    // Abuse: an EXISTING workspace (created in an earlier transaction) can never be marked new — its core data would be skipped.
+    const marked = await refusalIn(app, [tenant(w1, w1.owner)], 'SELECT core.hws_cutover_mark_new_workspace($1)', [w1.id]);
+    expect(marked.code).toBe('42501');
+    const old = await make('old-ws');
+    const oldMark = await refusalIn(app, [tenant(old, old.owner)], 'SELECT core.hws_cutover_mark_new_workspace($1)', [old.id]);
+    expect(oldMark.code).toBe('42501');
+    expect(await stateOf(old)).toBeNull();
   });
 });
