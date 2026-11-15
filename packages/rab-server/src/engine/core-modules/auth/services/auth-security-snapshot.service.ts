@@ -243,7 +243,8 @@ export class AuthSecuritySnapshotService {
   private async loadSecurityRow(manager: EntityManager, userId: string, organisationId: string): Promise<SecurityRow> {
     const [row] = await manager.query<SecurityRow[]>(
       `WITH user_row AS (
-         SELECT status, must_reset_password FROM core."user" WHERE id = $1 LIMIT 1
+         -- Owner 0g: a soft-deleted account has no security row (status NULL → 401 below), whatever its status column says.
+         SELECT status, must_reset_password FROM core."user" WHERE id = $1 AND deleted_at IS NULL LIMIT 1
        ),
        role_keys AS (
          SELECT array_agg(DISTINCT r.key) AS keys

@@ -138,6 +138,8 @@ export const SHIPPED_AUDIT_ACTIONS: Readonly<Record<string, SecurityAuditClassif
   'payslip.marked_paid': c('payroll_approval', 'warning'),
   // ── account deletion ────────────────────────────────────────────────────────────────────────────────────────────
   'user.deleted': c('account_deletion', 'critical'),
+  /** Owner 0g: GDPR erasure of a soft-deleted account's personal fields (the row stays, anonymised). */
+  'user.personal_data_erased': c('account_deletion', 'critical'),
   /** Written directly by the Worker's account-invite cleanup (account-invite-cleanup.job.ts): an invited account deleted. */
   'user.invite_cleaned_up': c('account_deletion', 'warning'),
   // ── suspension ──────────────────────────────────────────────────────────────────────────────────────────────────

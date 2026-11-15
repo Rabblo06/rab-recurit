@@ -77,7 +77,8 @@ export class EmailChangeService {
         throw new ForbiddenException('You do not have access to this. Ask an administrator if you need it.');
       }
       const [target] = await manager.query<Array<{ id: string; email: string; first_name: string; status: string }>>(
-        `SELECT id, email, first_name, status FROM core."user" WHERE id = $1 AND organisation_id = $2 FOR UPDATE`,
+        // Owner 0g (security review L3): a soft-deleted account is not found (404), whatever its status.
+        `SELECT id, email, first_name, status FROM core."user" WHERE id = $1 AND organisation_id = $2 AND deleted_at IS NULL FOR UPDATE`,
         [params.targetUserId, ctx.organisationId],
       );
       if (!target) throw new NotFoundException('User not found.');

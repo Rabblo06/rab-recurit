@@ -554,7 +554,9 @@ async function revalidate(manager: EntityManager, row: EmailOutbox): Promise<Rev
   // check's expectations explicitly rather than silently falling through
   // a null check that was never meant to mean "no check needed."
   if (!row.targetUserId) return { ok: false, reason: 'Target user reference is missing (the account was deleted before delivery).' };
-  const stillExists = await manager.query(`SELECT 1 FROM core."user" WHERE id = $1`, [row.targetUserId]);
+  // Owner 0g: a SOFT-deleted account keeps its row (history), so "exists" means "exists and is not deleted": an e-mail
+  // enqueued in a transaction that raced the soft delete is cancelled here, never sent to a deleted person.
+  const stillExists = await manager.query(`SELECT 1 FROM core."user" WHERE id = $1 AND deleted_at IS NULL`, [row.targetUserId]);
   if (stillExists.length === 0) return { ok: false, reason: 'Target user no longer exists.' };
 
   if (row.accountInviteId) {

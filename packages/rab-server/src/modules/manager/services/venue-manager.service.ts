@@ -1,4 +1,5 @@
 import { ManagerType, PermissionFlag } from '@rab/shared';
+import { lockLiveUser } from '../../identity/services/live-user-lock';
 import { ForbiddenException, Inject, Injectable, NotFoundException } from '@nestjs/common';
 import { DataSource, In } from 'typeorm';
 
@@ -159,7 +160,8 @@ export class VenueManagerService {
 
   async deleteUser(ctx: AuthContext, id: string, currentPassword: string) {
     await this.assertOwnWorkspaceVenueManager(ctx, id);
-    return this.managerService.deleteUser(ctx, id, currentPassword);
+    // Not ManagerService.deleteUser: that one requires MANAGER_MANAGE, which a workspace owner may lack (security review M1).
+    return this.managerService.deleteVenueManagerUser(ctx, id, currentPassword);
   }
 
   // ------------------------------------------------------------------ Venue Manager teams (Assigned Staff)
@@ -248,7 +250,7 @@ export class VenueManagerService {
             sp.employment_status AS "employmentStatus", jr.name AS "jobRoleName", t.created_at AS "assignedAt"
          FROM ${t.venue_manager_staff} t
          JOIN ${t.staff_profile} sp ON sp.id = t.staff_profile_id AND sp.workspace_id = t.workspace_id
-         JOIN core."user" u ON u.id = sp.user_id
+         JOIN core."user" u ON u.id = sp.user_id AND u.deleted_at IS NULL
          LEFT JOIN ${t.job_role} jr ON jr.id = sp.job_role_id
          WHERE t.manager_profile_id = $1 AND t.organisation_id = $2 AND t.workspace_id = $3
          ORDER BY u.first_name, u.last_name, sp.id`,
@@ -294,7 +296,7 @@ export class VenueManagerService {
       const [result]: Array<{ live: boolean; added: string[] }> = await manager.query(
         `WITH target AS (
            SELECT mp.id FROM core.manager_profile mp JOIN core."user" mu ON mu.id = mp.user_id
-            WHERE mp.id = $3 AND mp.organisation_id = $1 AND mp.workspace_id = $2 AND mp.type = 'venue'
+            WHERE mp.id = $3 AND mp.organisation_id = $1 AND mp.workspace_id = $2 AND mp.type = 'venue' AND mu.deleted_at IS NULL
               AND (NOT $5::boolean OR (mu.status IN ('active', 'invited') AND core.admin_workspace_in_org($2, $1)))
          ), inserted AS (
            INSERT INTO ${t.venue_manager_staff} (organisation_id, workspace_id, manager_profile_id, staff_profile_id)
@@ -391,7 +393,8 @@ export class VenueManagerService {
     let avatarChangedFor: string | null = null;
     const result = await this.tenantContext.runInWorkspaceContext(ctx, async (manager) => {
       const profile = await manager.findOne(ManagerProfile, { where: { id, workspaceId: ctx.workspaceId!, type: ManagerType.VENUE }, relations: { user: true } });
-      if (!profile) throw new NotFoundException('Venue Manager not found.');
+      if (!profile?.user) throw new NotFoundException('Venue Manager not found.');
+      await lockLiveUser(manager, profile.userId, 'Venue Manager not found.');
       const before = profile.user!.avatarFileId;
       const file = await this.fileService.store(manager, {
         kind: FileKind.PROFILE_IMAGE,
@@ -418,7 +421,8 @@ export class VenueManagerService {
     let avatarChangedFor: string | null = null;
     const result = await this.tenantContext.runInWorkspaceContext(ctx, async (manager) => {
       const profile = await manager.findOne(ManagerProfile, { where: { id, workspaceId: ctx.workspaceId!, type: ManagerType.VENUE }, relations: { user: true } });
-      if (!profile) throw new NotFoundException('Venue Manager not found.');
+      if (!profile?.user) throw new NotFoundException('Venue Manager not found.');
+      await lockLiveUser(manager, profile.userId, 'Venue Manager not found.');
       const before = profile.user!.avatarFileId;
       await manager.update(User, profile.userId, { avatarFileId: null });
       avatarChangedFor = profile.userId;

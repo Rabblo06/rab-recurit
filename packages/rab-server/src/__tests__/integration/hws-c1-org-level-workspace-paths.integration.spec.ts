@@ -27,8 +27,8 @@ import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
  * context, with HWS on (the code default outside production):
  *   4.5  GET /rest/v1/managers/:id/venues — read in the TARGET manager's workspace; another workspace = 404.
  *   4.6  DELETE /rest/v1/managers/:id — the protected-history check covers EVERY schema the target can have rows in (each
- *        workspace schema of the organisation and the `core` copies); the hard delete is refused while history exists in
- *        any of them.
+ *        workspace schema of the organisation and the `core` copies). Owner 0g: only a never-activated invite with no
+ *        history in any of them is hard-deleted; any history (or a schema that cannot be checked) means a soft delete.
  * Real Postgres, RLS on, real HTTP routes, no mocks. Fixture rows are written through the tenant context (unqualified
  * tables, routed like the product's own writes) or, for the pre-cutover `core` copies, explicitly into `core.*`.
  */
@@ -111,6 +111,9 @@ describeIfDb('HWS C1: org-level paths over workspace tables (integration)', () =
 
   const userExists = async (userId: string) =>
     ((await adminDataSource.query(`SELECT 1 FROM core."user" WHERE id = $1`, [userId])) as unknown[]).length === 1;
+
+  const userSoftDeleted = async (userId: string) =>
+    ((await adminDataSource.query(`SELECT 1 FROM core."user" WHERE id = $1 AND deleted_at IS NOT NULL`, [userId])) as unknown[]).length === 1;
 
   beforeAll(async () => {
     const moduleRef = await Test.createTestingModule({ imports: [AppModule] }).compile();
@@ -223,31 +226,39 @@ describeIfDb('HWS C1: org-level paths over workspace tables (integration)', () =
     });
   });
 
-  describe('StaffService.deleteUser with HWS routing (review L4)', () => {
+  describe('StaffService.deleteUser with HWS routing (review L4; owner 0g)', () => {
     const deleteStaff = async (caller: TestIdentity, profileId: string) =>
       request(app.getHttpServer())
         .delete(`/rest/v1/staff/${profileId}`)
         .set('Authorization', `Bearer ${await factory.login(caller)}`)
         .send({ currentPassword: caller.password });
 
-    it('the creator deletes a Staff member with no history (204); the profile is gone from the workspace schema', async () => {
-      const staff = await factory.createStaff({ id: orgId }, { owner: mgrB, label: 'c1-staff-clean' });
+    it('a never-activated invite with no history is hard-deleted (204); the profile is gone from the workspace schema', async () => {
+      const staff = await factory.createStaff({ id: orgId }, { owner: mgrB, label: 'c1-staff-clean', status: 'invited' });
       const res = await deleteStaff(mgrB, staff.profileId!);
       expect(res.status).toBe(204);
       expect(await userExists(staff.userId)).toBe(false);
       expect(await staffProfileExists(mgrB.workspaceId!, staff.profileId!)).toBe(false);
     });
 
-    it('ABUSE: a Staff member with a shift assignment in the workspace schema → 409, nothing deleted', async () => {
-      const staff = await factory.createStaff({ id: orgId }, { owner: mgrB, label: 'c1-staff-history' });
+    it('an ACTIVE Staff member (no history) is soft-deleted: 204, account row and profile kept', async () => {
+      const staff = await factory.createStaff({ id: orgId }, { owner: mgrB, label: 'c1-staff-active' });
+      const res = await deleteStaff(mgrB, staff.profileId!);
+      expect(res.status).toBe(204);
+      expect(await userSoftDeleted(staff.userId)).toBe(true);
+      expect(await staffProfileExists(mgrB.workspaceId!, staff.profileId!)).toBe(true);
+    });
+
+    it('ABUSE: an invite whose profile has a shift assignment in the workspace schema is NOT hard-deleted: soft, history intact', async () => {
+      const staff = await factory.createStaff({ id: orgId }, { owner: mgrB, label: 'c1-staff-history', status: 'invited' });
       await tenantContext.runInTenantContext({ organisationId: orgId, workspaceId: mgrB.workspaceId, userId: mgrB.userId, role: '' }, (m) =>
         assignShift(m, mgrB, venueB, staff.profileId!),
       );
       const res = await deleteStaff(mgrB, staff.profileId!);
-      expect(res.status).toBe(409);
-      expect(res.body.code).toBe('USER_HAS_PROTECTED_HISTORY');
-      expect(await userExists(staff.userId)).toBe(true);
+      expect(res.status).toBe(204);
+      expect(await userSoftDeleted(staff.userId)).toBe(true);
       expect(await staffProfileExists(mgrB.workspaceId!, staff.profileId!)).toBe(true);
+      expect(await adminDataSource.query(`SELECT 1 FROM "${businessSchema(mgrB.workspaceId!)}".shift_assignment WHERE staff_profile_id = $1`, [staff.profileId])).toHaveLength(1);
     });
 
     it('ABUSE: a manager of ANOTHER workspace cannot delete B’s Staff (404: the profile is not in its scope)', async () => {
@@ -255,51 +266,54 @@ describeIfDb('HWS C1: org-level paths over workspace tables (integration)', () =
       const res = await deleteStaff(mgrA, staff.profileId!);
       expect(res.status).toBe(404);
       expect(await userExists(staff.userId)).toBe(true);
+      expect(await userSoftDeleted(staff.userId)).toBe(false);
     });
   });
 
-  describe('4.6 DELETE /rest/v1/managers/:id refuses while protected history exists in ANY schema', () => {
+  describe('4.6 DELETE /rest/v1/managers/:id: a never-activated invite is hard-deleted only when NO schema holds history (owner 0g)', () => {
     const deleteManager = async (caller: TestIdentity, profileId: string) =>
       request(app.getHttpServer())
         .delete(`/rest/v1/managers/${profileId}`)
         .set('Authorization', `Bearer ${await factory.login(caller)}`)
         .send({ currentPassword: caller.password });
 
-    it('ABUSE: history only in ANOTHER workspace’s schema (not the caller’s) → 409 USER_HAS_PROTECTED_HISTORY, nothing deleted', async () => {
-      const target = await factory.createVenueManager({ id: orgId }, { owner: mgrB, label: 'c1-del-ws' });
+    /** A Venue Manager of B that never activated (status invited, never signed in, no token or session). */
+    const invitedVenueManager = async (label: string) => {
+      const target = await factory.createVenueManager({ id: orgId }, { owner: mgrB, label });
+      await adminDataSource.query(`UPDATE core."user" SET status = 'invited' WHERE id = $1`, [target.userId]);
+      return target;
+    };
+
+    it('ABUSE: history only in ANOTHER workspace’s schema (not the caller’s) → soft delete (204), never a hard delete', async () => {
+      const target = await invitedVenueManager('c1-del-ws');
       await venueInWorkspace(mgrB, target.userId, 'C1 venue created by the target');
 
       const res = await deleteManager(ceo, target.profileId!);
-      expect(res.status).toBe(409);
-      expect(res.body.code).toBe('USER_HAS_PROTECTED_HISTORY');
-      expect(JSON.stringify(res.body)).not.toMatch(/foreign key|violates|venue_created_by/i);
-      expect(await userExists(target.userId)).toBe(true);
+      expect(res.status).toBe(204);
+      expect(await userSoftDeleted(target.userId)).toBe(true);
     });
 
-    it('ABUSE: history only in the pre-cutover core copy → 409, nothing deleted', async () => {
-      const target = await factory.createVenueManager({ id: orgId }, { owner: mgrB, label: 'c1-del-core' });
+    it('ABUSE: history only in the pre-cutover core copy → soft delete, the row stays', async () => {
+      const target = await invitedVenueManager('c1-del-core');
       await venueInCoreCopy(mgrB.workspaceId!, target.userId, 'C1 core-copy venue created by the target');
 
       const res = await deleteManager(ceo, target.profileId!);
-      expect(res.status).toBe(409);
-      expect(res.body.code).toBe('USER_HAS_PROTECTED_HISTORY');
-      expect(await userExists(target.userId)).toBe(true);
+      expect(res.status).toBe(204);
+      expect(await userSoftDeleted(target.userId)).toBe(true);
     });
 
-    it('ABUSE: a manager bound to another workspace cannot delete the target either (refused, nothing deleted)', async () => {
-      const target = await factory.createVenueManager({ id: orgId }, { owner: mgrB, label: 'c1-del-a' });
+    it('ABUSE: a manager bound to another workspace finds the history in B’s schema too → soft delete', async () => {
+      const target = await invitedVenueManager('c1-del-a');
       await venueInWorkspace(mgrB, target.userId, 'C1 venue (A caller)');
 
       const res = await deleteManager(mgrA, target.profileId!);
-      // A holds organisation-wide manager.manage, so it sees the profile; the history in B's schema is found → 409.
-      expect(res.status).toBe(409);
-      expect(res.body.code).toBe('USER_HAS_PROTECTED_HISTORY');
-      expect(await userExists(target.userId)).toBe(true);
+      expect(res.status).toBe(204);
+      expect(await userSoftDeleted(target.userId)).toBe(true);
     });
 
-    it('ABUSE: a workspace of the organisation whose schema exists but is not READY cannot be verified → refused', async () => {
+    it('ABUSE: a workspace of the organisation whose schema exists but is not READY cannot be verified → soft delete, never blind', async () => {
       const mgrC = await factory.createInternalManager({ id: orgId }, { permissions: MANAGER_PERMS, label: 'c1-c' });
-      const target = await factory.createVenueManager({ id: orgId }, { owner: mgrB, label: 'c1-del-unverifiable' });
+      const target = await invitedVenueManager('c1-del-unverifiable');
       const [{ status: before }] = await adminDataSource.query<Array<{ status: string }>>(
         `SELECT status FROM core.workspace_schema_registry WHERE workspace_id = $1`,
         [mgrC.workspaceId],
@@ -307,32 +321,52 @@ describeIfDb('HWS C1: org-level paths over workspace tables (integration)', () =
       await adminDataSource.query(`UPDATE core.workspace_schema_registry SET status = 'FAILED' WHERE workspace_id = $1`, [mgrC.workspaceId]);
       try {
         const res = await deleteManager(ceo, target.profileId!);
-        expect(res.status).toBe(409);
-        // Review L2: its own code (an operator problem), not the misleading USER_HAS_PROTECTED_HISTORY; no workspace id leaks.
-        expect(res.body.code).toBe('USER_DELETION_UNVERIFIABLE');
-        expect(JSON.stringify(res.body)).not.toContain(mgrC.workspaceId!);
-        expect(await userExists(target.userId)).toBe(true);
+        expect(res.status).toBe(204);
+        expect(JSON.stringify(res.body ?? {})).not.toContain(mgrC.workspaceId!);
+        expect(await userSoftDeleted(target.userId)).toBe(true);
       } finally {
         await adminDataSource.query(`UPDATE core.workspace_schema_registry SET status = $2 WHERE workspace_id = $1`, [mgrC.workspaceId, before]);
       }
     });
 
-    it('ABUSE (review L1): the CEO cannot see a staff profile in workspace B; its shift assignment would cascade away → 409, profile and history stay', async () => {
-      const target = await factory.createVenueManager({ id: orgId }, { owner: mgrB, label: 'c1-del-hidden-staff' });
+    it('ABUSE (review L1): the CEO cannot see a staff profile in workspace B; its shift assignment would cascade away → soft delete, profile and history stay', async () => {
+      const target = await invitedVenueManager('c1-del-hidden-staff');
       const hiddenProfile = await staffHistoryInWorkspace(mgrB, target.userId, venueB);
 
       const res = await deleteManager(ceo, target.profileId!);
-      expect(res.status).toBe(409);
-      expect(res.body.code).toBe('USER_HAS_PROTECTED_HISTORY');
-      expect(JSON.stringify(res.body)).not.toMatch(/foreign key|violates|shift_assignment/i);
-      expect(await userExists(target.userId)).toBe(true);
+      expect(res.status).toBe(204);
+      expect(await userSoftDeleted(target.userId)).toBe(true);
       expect(await staffProfileExists(mgrB.workspaceId!, hiddenProfile)).toBe(true);
       const assignments = await adminDataSource.query(`SELECT 1 FROM "${businessSchema(mgrB.workspaceId!)}".shift_assignment WHERE staff_profile_id = $1`, [hiddenProfile]);
       expect(assignments).toHaveLength(1);
     });
 
-    it('ABUSE (review L1): a note ABOUT the target (user_note.subject_user_id cascades) is protected history → 409', async () => {
-      const target = await factory.createVenueManager({ id: orgId }, { owner: mgrB, label: 'c1-del-note' });
+    it('ABUSE (security review L1): a hidden staff profile whose ONLY history is a shift-request row (cascades with it) → soft delete, both stay', async () => {
+      const target = await invitedVenueManager('c1-del-hidden-request');
+      const hiddenProfile = await tenantContext.runInTenantContext({ organisationId: orgId, workspaceId: mgrB.workspaceId, userId: mgrB.userId, role: '' }, async (m) => {
+        const [profile] = await m.query<Array<{ id: string }>>(
+          `INSERT INTO staff_profile (organisation_id, user_id, staff_ref, created_by, workspace_id) VALUES ($1, $2, $3, $4, $5) RETURNING id`,
+          [orgId, target.userId, `STF-${randomUUID().slice(0, 8)}`, mgrB.userId, mgrB.workspaceId],
+        );
+        const jobRole = await m.save(JobRole, { organisationId: orgId, name: `C1 L1 Role ${randomUUID().slice(0, 6)}`, defaultRatePence: 1500, createdBy: mgrB.userId, workspaceId: mgrB.workspaceId! });
+        const startsAt = new Date(Date.now() + 120 * 3600 * 1000);
+        const shift = await m.save(Shift, {
+          organisationId: orgId, venueId: venueB, jobRoleId: jobRole.id, startsAt, endsAt: new Date(startsAt.getTime() + 4 * 3600 * 1000), breakMinutes: 0,
+          requiredCount: 1, payRatePence: 1500, status: 'open', createdBy: mgrB.userId, workspaceId: mgrB.workspaceId!,
+        });
+        await m.query(`INSERT INTO shift_request_staff (organisation_id, workspace_id, shift_id, staff_profile_id) VALUES ($1, $2, $3, $4)`, [orgId, mgrB.workspaceId, shift.id, profile!.id]);
+        return profile!.id;
+      });
+
+      const res = await deleteManager(ceo, target.profileId!);
+      expect(res.status).toBe(204);
+      expect(await userSoftDeleted(target.userId)).toBe(true);
+      expect(await staffProfileExists(mgrB.workspaceId!, hiddenProfile)).toBe(true);
+      expect(await adminDataSource.query(`SELECT 1 FROM "${businessSchema(mgrB.workspaceId!)}".shift_request_staff WHERE staff_profile_id = $1`, [hiddenProfile])).toHaveLength(1);
+    });
+
+    it('ABUSE (review L1): a note ABOUT the target (user_note.subject_user_id cascades) is history → soft delete, the note stays', async () => {
+      const target = await invitedVenueManager('c1-del-note');
       await tenantContext.runInTenantContext({ organisationId: orgId, workspaceId: mgrB.workspaceId, userId: mgrB.userId, role: '' }, async (m) => {
         if (hwsOn) {
           await m.query(`INSERT INTO user_note (organisation_id, subject_user_id, author_user_id, body, workspace_id) VALUES ($1, $2, $3, 'C1 note', $4)`, [orgId, target.userId, mgrB.userId, mgrB.workspaceId]);
@@ -342,27 +376,13 @@ describeIfDb('HWS C1: org-level paths over workspace tables (integration)', () =
       });
 
       const res = await deleteManager(ceo, target.profileId!);
-      expect(res.status).toBe(409);
-      expect(res.body.code).toBe('USER_HAS_PROTECTED_HISTORY');
-      expect(await userExists(target.userId)).toBe(true);
+      expect(res.status).toBe(204);
+      expect(await userSoftDeleted(target.userId)).toBe(true);
+      expect(await adminDataSource.query(`SELECT 1 FROM "${businessSchema(mgrB.workspaceId!)}".user_note WHERE subject_user_id = $1`, [target.userId])).toHaveLength(1);
     });
 
-    it('assertCanDelete restores rab.workspace_id and search_path to their values on entry (review L4)', async () => {
-      const target = await factory.createVenueManager({ id: orgId }, { owner: mgrB, label: 'c1-del-gucs' });
-      for (const caller of [ceo, mgrB]) {
-        const ctx = { organisationId: orgId, workspaceId: caller.workspaceId, userId: caller.userId, role: '' };
-        await tenantContext.runInTenantContext(ctx, async (m) => {
-          const read = () => m.query<Array<{ ws: string | null; sp: string }>>(`SELECT current_setting('rab.workspace_id', true) AS ws, current_setting('search_path') AS sp`);
-          const [before] = await read();
-          await userDeletion.assertCanDelete(m, ctx, target.userId);
-          const [after] = await read();
-          expect(after).toEqual(before);
-        });
-      }
-    });
-
-    it('ABUSE (re-review N4): a reference with no ON DELETE that no pre-delete check reads (shift.approved_by) → 409, and the constraint is logged by name', async () => {
-      const target = await factory.createVenueManager({ id: orgId }, { owner: mgrB, label: 'c1-del-approved-by' });
+    it('ABUSE (re-review N4): a reference with no ON DELETE that no pre-delete check reads (shift.approved_by) → soft delete, and the constraint is logged by name', async () => {
+      const target = await invitedVenueManager('c1-del-approved-by');
       await tenantContext.runInTenantContext({ organisationId: orgId, workspaceId: mgrB.workspaceId, userId: mgrB.userId, role: '' }, async (m) => {
         const jobRole = await m.save(JobRole, { organisationId: orgId, name: `C1 N4 Role ${randomUUID().slice(0, 6)}`, defaultRatePence: 1500, createdBy: mgrB.userId, workspaceId: mgrB.workspaceId! });
         const startsAt = new Date(Date.now() + 96 * 3600 * 1000);
@@ -371,39 +391,42 @@ describeIfDb('HWS C1: org-level paths over workspace tables (integration)', () =
           requiredCount: 1, payRatePence: 1500, status: 'open', createdBy: mgrB.userId, approvedBy: target.userId, workspaceId: mgrB.workspaceId!,
         });
       });
-      const warn = jest.spyOn(Logger.prototype, 'warn');
+      const log = jest.spyOn(Logger.prototype, 'log');
       try {
         const res = await deleteManager(ceo, target.profileId!);
-        expect(res.status).toBe(409);
-        expect(res.body.code).toBe('USER_HAS_PROTECTED_HISTORY');
-        expect(JSON.stringify(res.body)).not.toMatch(/foreign key|violates|approved_by/i);
-        expect(await userExists(target.userId)).toBe(true);
-        const lines = warn.mock.calls.map((c) => String(c[0]));
-        expect(lines).toContainEqual(expect.stringMatching(/^user deletion refused by the database: foreign key shift_approved_by_fkey on shift /));
+        expect(res.status).toBe(204);
+        expect(JSON.stringify(res.body ?? {})).not.toMatch(/foreign key|violates|approved_by/i);
+        expect(await userSoftDeleted(target.userId)).toBe(true);
+        const lines = log.mock.calls.map((c) => String(c[0]));
+        expect(lines).toContainEqual(expect.stringMatching(/^user hard delete not safe \(foreign_key:shift_approved_by_fkey:shift\)/));
         expect(lines.join('\n')).not.toContain(target.userId); // identifiers of the schema only, never row data
       } finally {
-        warn.mockRestore();
+        log.mockRestore();
       }
     });
 
-    it('deleteUser restores rab.workspace_id and search_path to their values on entry (review L4)', async () => {
+    it('deleteUser restores rab.workspace_id and search_path to their values on entry, on the hard path and on the soft fallback (review L4)', async () => {
       for (const caller of [ceo, mgrB]) {
-        const target = await factory.createVenueManager({ id: orgId }, { owner: mgrB, label: 'c1-del-gucs-delete' });
-        const ctx = { organisationId: orgId, workspaceId: caller.workspaceId, userId: caller.userId, role: '' };
-        await tenantContext.runInTenantContext(ctx, async (m) => {
-          const read = () => m.query<Array<{ ws: string | null; sp: string }>>(`SELECT current_setting('rab.workspace_id', true) AS ws, current_setting('search_path') AS sp`);
-          const [before] = await read();
-          await userDeletion.assertCanDelete(m, ctx, target.userId);
-          await userDeletion.deleteUser(m, ctx, target.userId, target.email);
-          const [after] = await read();
-          expect(after).toEqual(before);
-        });
-        expect(await userExists(target.userId)).toBe(false);
+        for (const withHistory of [false, true]) {
+          const target = await invitedVenueManager(`c1-del-gucs-${withHistory ? 'hist' : 'clean'}`);
+          if (withHistory) await venueInWorkspace(mgrB, target.userId, 'C1 venue (gucs)');
+          const ctx = { organisationId: orgId, workspaceId: caller.workspaceId, userId: caller.userId, role: '' };
+          const outcome = await tenantContext.runInTenantContext(ctx, async (m) => {
+            const read = () => m.query<Array<{ ws: string | null; sp: string }>>(`SELECT current_setting('rab.workspace_id', true) AS ws, current_setting('search_path') AS sp`);
+            const [before] = await read();
+            const result = await userDeletion.deleteUser(m, ctx, target.userId);
+            const [after] = await read();
+            expect(after).toEqual(before);
+            return result;
+          });
+          expect(outcome).toBe(withHistory ? 'soft_deleted' : 'hard_deleted');
+          expect(await userExists(target.userId)).toBe(withHistory);
+        }
       }
     });
 
-    it('control: a Venue Manager with no history anywhere is deleted (204)', async () => {
-      const target = await factory.createVenueManager({ id: orgId }, { owner: mgrB, label: 'c1-del-clean' });
+    it('control: a never-activated Venue Manager invite with no history anywhere is hard-deleted (204)', async () => {
+      const target = await invitedVenueManager('c1-del-clean');
       const res = await deleteManager(ceo, target.profileId!);
       expect(res.status).toBe(204);
       expect(await userExists(target.userId)).toBe(false);
