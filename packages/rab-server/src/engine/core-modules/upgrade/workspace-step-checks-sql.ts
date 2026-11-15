@@ -35,7 +35,7 @@ const RAB_SET_SQL = `COALESCE((SELECT pg_catalog.string_agg(x.name || '=' || x.v
     SELECT s.name, COALESCE(s.setting, '') FROM pg_catalog.pg_settings s WHERE s.name LIKE 'rab.%') x
    WHERE x.value <> ''), '')`;
 
-/** Layer 3: the session facts that must be unchanged by the command (same backend, transaction, role, every rab.*, path). */
+/** Layer 3: the session facts that must be unchanged by the command (same backend, transaction, role, every rab.*, path, statistics, replication role). */
 // sql-injection-reviewed: KNOWN_LIST / RAB_SET_SQL are built only from the constant KNOWN_RAB_SETTINGS array of this file (plain rab.<snake> names); no runtime value is interpolated.
 export const INVARIANTS_SQL = `SELECT pg_catalog.pg_backend_pid() AS pid, pg_catalog.transaction_timestamp()::text AS tx,
   pg_catalog.current_setting('role') AS role, pg_catalog.current_setting('search_path') AS search_path,
@@ -43,6 +43,9 @@ export const INVARIANTS_SQL = `SELECT pg_catalog.pg_backend_pid() AS pid, pg_cat
   COALESCE(pg_catalog.current_setting('rab.organisation_id', true), '') AS org,
   COALESCE(pg_catalog.current_setting('rab.workspace_id', true), '') AS ws,
   COALESCE(pg_catalog.current_setting('rab.upgrade_scope', true), '') AS scope,
+  -- #166 Info-1: a step may not switch statistics off (the write counters would read zero) nor set replica mode (skips triggers).
+  pg_catalog.current_setting('track_counts') AS track_counts,
+  pg_catalog.current_setting('session_replication_role') AS replication_role,
   ${RAB_SET_SQL} AS rab`;
 
 /**

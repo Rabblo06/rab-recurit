@@ -210,14 +210,15 @@ const approved = (fromFile: string, spec: string) =>
   APPROVED_COMMAND_MODULES.includes(relative(SRC_ROOT, resolve(dirname(fromFile), `${spec}.ts`)).replace(/\\/g, '/'));
 
 /** Review Info / N4: the source guard's scanner (pure; fixtures below). `file` resolves the approved non-sibling imports. */
-function commandFileOffences(src: string, file?: string, allowedNode: readonly string[] = []): string[] {
+function commandFileOffences(src: string, file?: string, allowedNode: readonly string[] = [], strict = false): string[] {
   const out: string[] = [];
   for (const m of src.matchAll(/^\s*(import|export)\s+(type\s+)?[^;]*?\s+from\s+['"]([^'"]+)['"]/gm)) {
     const isType = Boolean(m[2]);
     const spec = m[3]!;
     if (allowedNode.includes(spec)) continue;
     if (m[1] === 'export' && !isType) out.push(`re-export of ${spec}`);
-    else if (!isType && !spec.startsWith('./') && !(file && approved(file, spec))) out.push(`value import of ${spec}`);
+    // strict (#166 F3, the approved modules themselves): EVERY value import must resolve into the approved list, siblings too.
+    else if (!isType && (strict || !spec.startsWith('./')) && !(file && approved(file, spec))) out.push(`value import of ${spec}`);
     if (/^(pg|typeorm|@nestjs\/|node:|child_process|fs)/.test(spec)) out.push(`imports ${spec}`);
   }
   for (const m of src.matchAll(/^\s*import\s+['"]([^'"]+)['"]/gm)) out.push(`side-effect import of ${m[1]}`);
@@ -257,12 +258,20 @@ describe('Part D (review Info / N4): source guard on upgrade-commands/**', () =>
     expect(commandFileOffences(`import { x } from '../../../../metadata/standard-objects/other';`, cmd)).toEqual(['value import of ../../../../metadata/standard-objects/other']);
   });
 
-  it('M1 / E2: the approved modules are themselves pure (only each other, siblings and node:crypto; no driver, Nest, fs or connection)', () => {
+  it('M1 / E2: the approved modules are themselves pure (value imports only of each other and node:crypto; no driver, Nest, fs or connection)', () => {
     const offenders = APPROVED_COMMAND_MODULES.flatMap((rel) => {
       const f = join(SRC_ROOT, rel);
-      return commandFileOffences(readFileSync(f, 'utf8'), f, ['node:crypto']).map((o) => `${rel}: ${o}`);
+      return commandFileOffences(readFileSync(f, 'utf8'), f, ['node:crypto'], true).map((o) => `${rel}: ${o}`);
     });
     expect(offenders).toEqual([]);
+  });
+
+  it('#166 F3: in strict mode a sibling value import outside the approved list is an offence (fixture)', () => {
+    const mod = join(SRC_ROOT, 'engine/metadata/standard-objects/standard-object-sync.ts');
+    expect(commandFileOffences(`import { x } from './standard-object-plan';`, mod, ['node:crypto'], true)).toEqual([]);
+    expect(commandFileOffences(`import { y } from './standard-objects-new-workspace';`, mod, ['node:crypto'], true)).toEqual(['value import of ./standard-objects-new-workspace']);
+    expect(commandFileOffences(`import { Pool } from 'pg';`, mod, ['node:crypto'], true)).toEqual(expect.arrayContaining(['value import of pg', 'imports pg']));
+    expect(commandFileOffences(`import { readFileSync } from 'node:fs';`, mod, ['node:crypto'], true)).toEqual(expect.arrayContaining(['imports node:fs']));
   });
 });
 
@@ -316,6 +325,28 @@ describe('Part D (review M1): write counters are compared as a delta', () => {
     expect(increasedCounters(before, [{ relid: '1', what: 'core.a', n: '5' }])).toEqual([]);
     expect(increasedCounters(before, [{ relid: '1', what: 'core.a', n: '6' }])).toEqual(['core.a']);
     expect(increasedCounters(before, [{ relid: '1', what: 'core.a', n: '5' }, { relid: '2', what: 'core.b', n: '1' }])).toEqual(['core.b']);
+  });
+});
+
+describe('#166 F2: only data steps may write metadata', () => {
+  it('the flagged commands across every release are exactly [SyncStandardObjects]', () => {
+    const flagged = Object.values(WORKSPACE_UPGRADE_COMMANDS).flat().filter((c) => c.writesWorkspaceMetadata).map((c) => c.name);
+    expect(flagged).toEqual(['SyncStandardObjects']);
+    expect(Object.values(WORKSPACE_UPGRADE_COMMANDS).flat().filter((c) => c.writesWorkspaceMetadata && c.structure)).toEqual([]);
+  });
+  it('a command declaring both a structure level and writesWorkspaceMetadata is refused before any statement', async () => {
+    const runner = new WorkspaceCommandRunner({ codeVersion: '0.7.0', versions: ['0.6.0'], force: false, adopt: false, log: () => undefined });
+    const query = jest.fn(async () => []);
+    const both = wsc('Both', 1786721999000, { structure: { level: 22, fingerprints: {} }, writesWorkspaceMetadata: true });
+    const run = (runner as unknown as { runStep: (...a: unknown[]) => Promise<void> }).runStep(
+      { query },
+      { workspaceId: 'w', organisationId: 'o', schemaName: 'workspace_' + '0'.repeat(32), moduleVersion: 21 },
+      '0.7.0_Both_1786721999000',
+      both,
+      new Map(),
+    );
+    await expect(run).rejects.toMatchObject({ errorClass: 'METADATA_WRITE_IN_STRUCTURAL_STEP' });
+    expect(query).not.toHaveBeenCalled();
   });
 });
 

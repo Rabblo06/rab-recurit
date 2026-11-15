@@ -304,6 +304,8 @@ interface Invariants {
   org: string;
   ws: string;
   scope: string;
+  track_counts: string;
+  replication_role: string;
   rab: string;
 }
 
@@ -519,6 +521,11 @@ export class WorkspaceCommandRunner {
   private async runStep(session: UpgradeSession, ws: ReadyWorkspace, name: string, command: WorkspaceUpgradeCommand, levels: Map<number, WorkspaceStructureDeclaration>): Promise<void> {
     const q = session.query;
     const { log } = this.options;
+    // Security review #166 F2: the metadata write exemption is for DATA steps only: a structural step may not also write
+    // metadata (the two kinds of check were reviewed separately and are never combined).
+    if (command.structure && command.writesWorkspaceMetadata) {
+      throw new WorkspaceStepRefused('METADATA_WRITE_IN_STRUCTURAL_STEP', `${name} declares both a structure level and writesWorkspaceMetadata`);
+    }
     await q('BEGIN ISOLATION LEVEL REPEATABLE READ');
     try {
       // sql-injection-reviewed: lockTimeout is a number clamped to 100..60000 by the getter above; nothing else is interpolated.

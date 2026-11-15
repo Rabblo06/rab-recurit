@@ -290,11 +290,13 @@ export function desiredStandardMetadata(standard: readonly StandardObjectDefinit
         is_system: false,
         is_ui_read_only: true,
         is_money: false,
-        is_sensitive: false,
+        // #166 Info-2: an inverse that lists payroll / attendance rows (payrollRecords, payslips, attendances, corrections, …)
+        // is itself payroll data: sensitive (payroll.view), never to AI, search or export by default.
+        is_sensitive: o.kind === 'system',
         is_nullable: true,
         is_unique: false,
         is_searchable: false,
-        settings: { relationType: 'ONE_TO_MANY' },
+        settings: o.kind === 'system' ? { relationType: 'ONE_TO_MANY', sensitiveAuthority: 'payroll.view' } : { relationType: 'ONE_TO_MANY' },
         relation_target_object_uid: objectUid(o),
         relation_target_field_uid: fieldUid(o, f.column),
         position: 1000 + n,

@@ -13,6 +13,7 @@ import { PasswordHashingService } from '../../engine/core-modules/auth/services/
 import { TenantContextService } from '../../engine/core-modules/tenant/tenant-context.service';
 import { lastStepOfVersion } from '../../engine/core-modules/upgrade/upgrade-sequence';
 import { readAppVersion } from '../../engine/core-modules/upgrade/upgrade-version';
+import * as standardSyncModule from '../../engine/metadata/standard-objects/standard-object-sync';
 import { syncStandardObjectsForNewWorkspace } from '../../engine/metadata/standard-objects/standard-objects-new-workspace';
 import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-pipe';
 import { createAdminDataSource } from './helpers/admin-datasource';
@@ -109,6 +110,34 @@ describeIfDb('M1 / E2: a new workspace gets its standard objects (integration)',
     });
     const still = (await admin.query(`SELECT count(*)::int AS n FROM core.field_metadata WHERE workspace_id = $1 AND physical_column = 'earned_pence' AND is_sensitive AND is_locked AND is_money`, [made!.id])).rows[0].n;
     expect(still).toBe(1);
+  });
+
+  it('#166 F1: a sync failure inside POST /manager-workspaces (an aborting SQL error) fails the request, leaves no workspace or metadata, and the pool is never left as crewflow', async () => {
+    const org = await factory.createOrganisation(`m1f-${randomUUID().slice(0, 6)}`);
+    const manager = await factory.createInternalManager(org, { permissions: 'production', label: `m1f-${randomUUID().slice(0, 6)}`, workspace: false });
+    const token = await factory.login(manager);
+    const sub = `m1f-${randomUUID().slice(0, 8)}`;
+    const metadataBefore = Number((await admin.query('SELECT count(*)::int AS n FROM core.object_metadata')).rows[0].n);
+    let seenRole: string | undefined;
+    // The sync runs elevated (crewflow) and then hits an error that ABORTS the transaction, the hardest case for the restore.
+    const spy = jest.spyOn(standardSyncModule, 'syncStandardObjects').mockImplementation(async (q) => {
+      seenRole = ((await q(`SELECT current_user::text AS u`)) as Array<{ u: string }>)[0]?.u;
+      await q('SELECT 1 / 0');
+      throw new Error('unreachable');
+    });
+    try {
+      const res = await request(app.getHttpServer()).post('/rest/v1/manager-workspaces').set({ Authorization: `Bearer ${token}` }).send({ name: `M1F ${sub}`, subdomain: sub });
+      expect(res.status).toBeGreaterThanOrEqual(500);
+    } finally {
+      spy.mockRestore();
+    }
+    expect(seenRole).toBe('crewflow');
+    expect((await admin.query('SELECT count(*)::int AS n FROM core.manager_workspace WHERE subdomain = $1', [sub])).rows[0].n).toBe(0);
+    expect(Number((await admin.query('SELECT count(*)::int AS n FROM core.object_metadata')).rows[0].n)).toBe(metadataBefore);
+    // Every connection the runtime pool hands out next is the plain runtime login, never crewflow.
+    const runtime = app.get(DataSource);
+    const rows = (await Promise.all(Array.from({ length: 8 }, () => runtime.query(`SELECT current_user::text AS u, (current_user = session_user) AS same, current_setting('role') AS r`)))).flat() as Array<{ u: string; same: boolean; r: string }>;
+    for (const r of rows) expect(r).toEqual({ u: new URL(process.env.TEST_DATABASE_URL!).username, same: true, r: 'none' });
   });
 
   it('the runtime login with no tenant context bound sees no metadata rows (FORCE RLS, fail closed)', async () => {

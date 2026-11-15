@@ -92,6 +92,11 @@ describe('M1 / E2: the standard-object definitions', () => {
       expect(inv.object_uid).toBe(f.relation_target_object_uid);
       expect(inv.relation_target_object_uid).toBe(f.object_uid);
     }
+    // #166 Info-2: every inverse that lists rows of a system (payroll / attendance) object is sensitive (payroll.view).
+    const systemUids = new Set(desired.objects.filter((o) => PAYROLL_ATTENDANCE_SYSTEM_TABLES.includes(o.physical_table)).map((o) => o.universal_identifier));
+    const inverses = desired.fields.filter((f) => f.settings.relationType === 'ONE_TO_MANY');
+    for (const f of inverses) expect([f.name, f.is_sensitive, f.settings.sensitiveAuthority ?? null]).toEqual(systemUids.has(f.relation_target_object_uid!) ? [f.name, true, 'payroll.view'] : [f.name, false, null]);
+    expect(inverses.filter((f) => f.is_sensitive).length).toBe(13);
     // Relations into core have no inverse and target a core reference object.
     const core = new Set(desired.objects.filter((o) => CORE_REFERENCE_OBJECTS.some((c) => c.table === o.physical_table)).map((o) => o.universal_identifier));
     for (const f of manyToOne.filter((x) => !x.relation_target_field_uid)) expect(core.has(f.relation_target_object_uid!)).toBe(true);
