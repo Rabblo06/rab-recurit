@@ -35,7 +35,12 @@
  *     workspace table;
  *   - Crewflow-internal field type RANGE (tstzrange, M0-STANDARD-OBJECTS S8), built-in system fields only; MORPH_RELATION is
  *     in the vocabulary (Twenty's 25) but refused (out of scope, M0-BACKEND §0.1);
- *   - no applicationId / isRemote / morph / standardOverrides columns; no metadata version here (E5, agent M1-cache).
+ *   - no applicationId / isRemote / morph / standardOverrides columns; no metadata version here (E5, agent M1-cache);
+ *   - identity split (security review #165 M2): built-in / locked rows are written only by crewflow (SET LOCAL ROLE
+ *     crewflow in the E2 sync; the M2 executor as a crewflow-owned definer), rab_secure_owner or a superuser (the M-T2
+ *     allow-list, registry-guard-allowlist-sql.ts); the request path may change only their display columns;
+ *   - the seven payroll / attendance tables are pinned to `is_system AND NOT allows_custom_fields` (review M1); core
+ *     reference objects only for the four known core tables (I1); labels refuse bidi / zero-width characters (I3).
  *
  * ACCESS: the tables and the guard function are owned by crewflow (handed over inside withCrewflowCoreCreate: no LOGIN role
  * owns a core object); crewflow_app holds SELECT, INSERT, UPDATE, DELETE; nothing for PUBLIC. The runtime login
@@ -47,10 +52,13 @@
 export const METADATA_TABLES = ['object_metadata', 'field_metadata', 'field_metadata_option', 'index_metadata', 'index_field_metadata'] as const;
 export type MetadataTable = (typeof METADATA_TABLES)[number];
 
-/** Row-level guard triggers (BEFORE, FOR EACH ROW). object_metadata never needs the INSERT branch. */
-export const METADATA_ROW_TRIGGERS: Readonly<Record<'object_metadata' | 'field_metadata', string>> = Object.freeze({
-  object_metadata: 'BEFORE UPDATE OR DELETE',
+/** Row-level guard triggers (BEFORE, FOR EACH ROW) on every table. */
+export const METADATA_ROW_TRIGGERS: Readonly<Record<MetadataTable, string>> = Object.freeze({
+  object_metadata: 'BEFORE INSERT OR UPDATE OR DELETE',
   field_metadata: 'BEFORE INSERT OR UPDATE OR DELETE',
+  field_metadata_option: 'BEFORE INSERT OR UPDATE OR DELETE',
+  index_metadata: 'BEFORE INSERT OR UPDATE OR DELETE',
+  index_field_metadata: 'BEFORE INSERT OR UPDATE OR DELETE',
 });
 
 export const METADATA_GUARD_FUNCTION = 'core.metadata_guard()';
@@ -69,6 +77,13 @@ export const STORED_FIELD_TYPES: readonly string[] = Object.freeze([
 
 const sqlList = (values: readonly string[]) => values.map((v) => `'${v}'`).join(', ');
 
+/** OWNER-METADATA-ENGINE §0.3: the seven payroll / attendance tables are system objects (frozen literal). */
+export const PAYROLL_ATTENDANCE_TABLES: readonly string[] = Object.freeze([
+  'attendance', 'attendance_correction', 'payroll_record', 'payroll_run', 'payroll_run_line', 'payslip', 'payslip_document',
+]);
+/** M0-STANDARD-OBJECTS §3: the only core tables a read-only core reference object may stand for (frozen literal). */
+export const CORE_REFERENCE_TABLES: readonly string[] = Object.freeze(['user', 'manager_profile', 'stored_file', 'payroll_calendar_period']);
+
 export const API_NAME_PATTERN = '^[a-z][a-zA-Z0-9]{0,62}$';
 export const CUSTOM_TABLE_PATTERN = '^c_[a-z0-9]{1,30}$';
 export const CUSTOM_COLUMN_PATTERN = '^cf_[a-z0-9]{1,30}$';
@@ -82,8 +97,10 @@ export const DESCRIPTION_MAX = 1000;
 export const SETTINGS_MAX_BYTES = 4096;
 export const DEFAULT_VALUE_MAX_BYTES = 2048;
 
+/** Bidi controls and zero-width / invisible characters (review I3: a label must render as what it says). */
+export const INVISIBLE_CHARACTERS_CLASS = '[\\u00AD\\u061C\\u180E\\u200B-\\u200F\\u202A-\\u202E\\u2060-\\u2064\\u2066-\\u2069\\uFEFF]';
 const label = (col: string) =>
-  `pg_catalog.char_length(pg_catalog.btrim(${col})) BETWEEN 1 AND ${LABEL_MAX} AND ${col} !~ '[[:cntrl:]]'`;
+  `pg_catalog.char_length(pg_catalog.btrim(${col})) BETWEEN 1 AND ${LABEL_MAX} AND ${col} !~ '[[:cntrl:]]' AND ${col} !~ '${INVISIBLE_CHARACTERS_CLASS}'`;
 const finite = (col: string) => `${col} BETWEEN -1e9 AND 1e9`; // NaN and ±Infinity compare outside the range
 const tenantFk = (t: string) =>
   `CONSTRAINT ${t}_workspace_fkey FOREIGN KEY (workspace_id, organisation_id)
@@ -97,62 +114,42 @@ LANGUAGE plpgsql
 SET search_path = pg_catalog, pg_temp
 AS $fn$
 DECLARE
-  v_object_is_custom boolean;
-  v_object_allows_custom_fields boolean;
+  -- Identity split (security review #165 M2): built-in and locked metadata is written only by the sync / executor identity
+  -- (crewflow: SET LOCAL ROLE crewflow, or a crewflow-owned definer), the rab_secure_owner definers or a superuser; the
+  -- request path (crewflow_owner, crewflow_app) may change only display columns of it. Same allow-list as M-T2
+  -- (registry-guard-allowlist-sql.ts).
+  v_privileged boolean := current_user IN ('crewflow'::name, 'rab_secure_owner'::name)
+    OR coalesce((SELECT r.rolsuper FROM pg_catalog.pg_roles r WHERE r.rolname = current_user), false);
+  v_is_custom boolean;
+  v_allows_custom_fields boolean;
+  v_is_system boolean;
+  v_is_locked boolean;
+  v_display text[];
 BEGIN
   -- Metadata is never truncated: a workspace's rows leave only through the FK cascade.
   IF TG_OP = 'TRUNCATE' THEN
     RAISE EXCEPTION 'metadata tables are never truncated' USING ERRCODE = '42501';
   END IF;
 
-  IF TG_OP = 'DELETE' THEN
-    -- A direct DELETE runs this trigger at depth 1. Cascades (workspace or organisation deletion, a custom object's own
-    -- system fields) arrive through the foreign-key triggers, at depth 2 or more, and are allowed. (One IF per table:
-    -- PL/pgSQL resolves every NEW / OLD field an expression names, whatever the other operands of AND evaluate to.)
-    IF pg_trigger_depth() = 1 THEN
-      IF TG_TABLE_NAME = 'object_metadata' THEN
-        IF NOT OLD.is_custom OR OLD.is_system THEN
-          RAISE EXCEPTION 'locked metadata cannot be deleted' USING ERRCODE = '42501';
-        END IF;
-      ELSIF TG_TABLE_NAME = 'field_metadata' THEN
-        IF OLD.is_locked OR OLD.is_system THEN
-          RAISE EXCEPTION 'locked metadata cannot be deleted' USING ERRCODE = '42501';
-        END IF;
-      END IF;
-    END IF;
-    RETURN OLD;
-  END IF;
-
-  IF TG_OP = 'INSERT' THEN
-    IF TG_TABLE_NAME <> 'field_metadata' THEN
-      RAISE EXCEPTION 'metadata_guard: unexpected INSERT trigger' USING ERRCODE = '42501';
-    END IF;
-    -- field_metadata only. The parent object is in the same workspace (composite FK) and therefore visible under the
-    -- tenant policy whenever the insert itself can pass WITH CHECK; a missing parent is left to the FK.
-    SELECT o.is_custom, o.allows_custom_fields INTO v_object_is_custom, v_object_allows_custom_fields
-      FROM core.object_metadata o
-     WHERE o.id = NEW.object_metadata_id AND o.workspace_id = NEW.workspace_id;
-    IF FOUND THEN
-      IF NEW.is_custom AND NOT v_object_allows_custom_fields THEN
-        RAISE EXCEPTION 'custom fields are not allowed on this object'
-          USING ERRCODE = '23514', CONSTRAINT = 'field_metadata_custom_fields_allowed';
-      END IF;
-      IF NEW.type = 'CURRENCY' AND NOT v_object_is_custom THEN
-        RAISE EXCEPTION 'CURRENCY fields are allowed on custom objects only'
-          USING ERRCODE = '23514', CONSTRAINT = 'field_metadata_currency_custom_object_only';
-      END IF;
-    END IF;
-    RETURN NEW;
-  END IF;
-
-  -- UPDATE: everything the engine (and later the DDL executor) trusts never moves.
-  IF NEW.id IS DISTINCT FROM OLD.id
-     OR NEW.organisation_id IS DISTINCT FROM OLD.organisation_id
-     OR NEW.workspace_id IS DISTINCT FROM OLD.workspace_id THEN
-    RAISE EXCEPTION 'metadata column is immutable' USING ERRCODE = '42501';
-  END IF;
+  -- One branch per table: PL/pgSQL resolves every NEW / OLD field an expression names, whatever the other operands of
+  -- AND evaluate to. A direct DELETE runs at trigger depth 1; cascades (workspace or organisation deletion, a custom
+  -- object's own fields, a custom field's options) arrive through the foreign-key triggers at depth 2 or more.
   IF TG_TABLE_NAME = 'object_metadata' THEN
-    IF NEW.physical_table IS DISTINCT FROM OLD.physical_table
+    IF TG_OP = 'INSERT' THEN
+      IF NOT NEW.is_custom AND NOT v_privileged THEN
+        RAISE EXCEPTION 'built-in metadata is written by the sync identity only' USING ERRCODE = '42501';
+      END IF;
+      RETURN NEW;
+    ELSIF TG_OP = 'DELETE' THEN
+      IF pg_trigger_depth() = 1 AND (NOT OLD.is_custom OR OLD.is_system) THEN
+        RAISE EXCEPTION 'locked metadata cannot be deleted' USING ERRCODE = '42501';
+      END IF;
+      RETURN OLD;
+    END IF;
+    IF NEW.id IS DISTINCT FROM OLD.id
+       OR NEW.organisation_id IS DISTINCT FROM OLD.organisation_id
+       OR NEW.workspace_id IS DISTINCT FROM OLD.workspace_id
+       OR NEW.physical_table IS DISTINCT FROM OLD.physical_table
        OR NEW.storage IS DISTINCT FROM OLD.storage
        OR NEW.is_custom IS DISTINCT FROM OLD.is_custom
        OR NEW.is_system IS DISTINCT FROM OLD.is_system
@@ -161,8 +158,49 @@ BEGIN
        OR NEW.name_plural IS DISTINCT FROM OLD.name_plural THEN
       RAISE EXCEPTION 'metadata column is immutable' USING ERRCODE = '42501';
     END IF;
+    IF NOT OLD.is_custom AND NOT v_privileged THEN
+      v_display := CASE WHEN OLD.is_system THEN ARRAY['nav_position', 'updated_at']
+                        ELSE ARRAY['label_singular', 'label_plural', 'description', 'icon', 'color', 'nav_position', 'updated_at'] END;
+      IF (pg_catalog.to_jsonb(NEW) - v_display) IS DISTINCT FROM (pg_catalog.to_jsonb(OLD) - v_display) THEN
+        RAISE EXCEPTION 'built-in metadata is written by the sync identity only' USING ERRCODE = '42501';
+      END IF;
+    END IF;
+    RETURN NEW;
+
   ELSIF TG_TABLE_NAME = 'field_metadata' THEN
-    IF NEW.physical_column IS DISTINCT FROM OLD.physical_column
+    IF TG_OP = 'DELETE' THEN
+      IF pg_trigger_depth() = 1 AND (OLD.is_locked OR OLD.is_system) THEN
+        RAISE EXCEPTION 'locked metadata cannot be deleted' USING ERRCODE = '42501';
+      END IF;
+      RETURN OLD;
+    END IF;
+    IF TG_OP = 'INSERT' THEN
+      -- FOR SHARE: allows_custom_fields / is_custom cannot change under this insert before it commits.
+      SELECT o.is_custom, o.allows_custom_fields INTO v_is_custom, v_allows_custom_fields
+        FROM core.object_metadata o
+       WHERE o.id = NEW.object_metadata_id AND o.workspace_id = NEW.workspace_id
+         FOR SHARE;
+      IF NOT FOUND THEN
+        RAISE EXCEPTION 'the parent object does not exist in this workspace'
+          USING ERRCODE = '23503', CONSTRAINT = 'field_metadata_object_fkey';
+      END IF;
+      IF (NOT NEW.is_custom OR NEW.is_locked OR NEW.is_system) AND NOT v_privileged THEN
+        RAISE EXCEPTION 'built-in metadata is written by the sync identity only' USING ERRCODE = '42501';
+      END IF;
+      IF NEW.is_custom AND NOT v_allows_custom_fields THEN
+        RAISE EXCEPTION 'custom fields are not allowed on this object'
+          USING ERRCODE = '23514', CONSTRAINT = 'field_metadata_custom_fields_allowed';
+      END IF;
+      IF NEW.type = 'CURRENCY' AND NOT v_is_custom THEN
+        RAISE EXCEPTION 'CURRENCY fields are allowed on custom objects only'
+          USING ERRCODE = '23514', CONSTRAINT = 'field_metadata_currency_custom_object_only';
+      END IF;
+      RETURN NEW;
+    END IF;
+    IF NEW.id IS DISTINCT FROM OLD.id
+       OR NEW.organisation_id IS DISTINCT FROM OLD.organisation_id
+       OR NEW.workspace_id IS DISTINCT FROM OLD.workspace_id
+       OR NEW.physical_column IS DISTINCT FROM OLD.physical_column
        OR NEW.type IS DISTINCT FROM OLD.type
        OR NEW.object_metadata_id IS DISTINCT FROM OLD.object_metadata_id
        OR NEW.is_custom IS DISTINCT FROM OLD.is_custom
@@ -175,8 +213,129 @@ BEGIN
        OR (OLD.is_locked AND NEW.is_active IS DISTINCT FROM OLD.is_active) THEN
       RAISE EXCEPTION 'metadata column is immutable' USING ERRCODE = '42501';
     END IF;
+    IF NOT v_privileged THEN
+      IF NEW.is_locked AND NOT OLD.is_locked THEN
+        RAISE EXCEPTION 'built-in metadata is written by the sync identity only' USING ERRCODE = '42501';
+      END IF;
+      IF NOT OLD.is_custom OR OLD.is_locked THEN
+        SELECT o.is_system INTO v_is_system FROM core.object_metadata o
+         WHERE o.id = OLD.object_metadata_id AND o.workspace_id = OLD.workspace_id;
+        v_display := CASE WHEN coalesce(v_is_system, true) THEN ARRAY['position', 'updated_at']
+                          ELSE ARRAY['label', 'description', 'icon', 'position', 'updated_at'] END;
+        IF (pg_catalog.to_jsonb(NEW) - v_display) IS DISTINCT FROM (pg_catalog.to_jsonb(OLD) - v_display) THEN
+          RAISE EXCEPTION 'built-in metadata is written by the sync identity only' USING ERRCODE = '42501';
+        END IF;
+      END IF;
+    END IF;
+    RETURN NEW;
+
+  ELSIF TG_TABLE_NAME = 'field_metadata_option' THEN
+    IF TG_OP = 'DELETE' THEN
+      IF pg_trigger_depth() > 1 OR v_privileged THEN
+        RETURN OLD;
+      END IF;
+      SELECT f.is_custom, f.is_locked INTO v_is_custom, v_is_locked FROM core.field_metadata f
+       WHERE f.id = OLD.field_metadata_id AND f.workspace_id = OLD.workspace_id
+         FOR SHARE;
+      IF FOUND AND (NOT v_is_custom OR v_is_locked) THEN
+        RAISE EXCEPTION 'built-in metadata is written by the sync identity only' USING ERRCODE = '42501';
+      END IF;
+      RETURN OLD;
+    END IF;
+    IF TG_OP = 'UPDATE' AND (
+         NEW.id IS DISTINCT FROM OLD.id
+      OR NEW.organisation_id IS DISTINCT FROM OLD.organisation_id
+      OR NEW.workspace_id IS DISTINCT FROM OLD.workspace_id
+      OR NEW.field_metadata_id IS DISTINCT FROM OLD.field_metadata_id
+      OR NEW.value IS DISTINCT FROM OLD.value) THEN
+      RAISE EXCEPTION 'metadata column is immutable' USING ERRCODE = '42501';
+    END IF;
+    SELECT f.is_custom, f.is_locked INTO v_is_custom, v_is_locked FROM core.field_metadata f
+     WHERE f.id = NEW.field_metadata_id AND f.workspace_id = NEW.workspace_id
+       FOR SHARE;
+    IF NOT FOUND THEN
+      RAISE EXCEPTION 'the parent field does not exist in this workspace'
+        USING ERRCODE = '23503', CONSTRAINT = 'field_metadata_option_field_fkey';
+    END IF;
+    IF (NOT v_is_custom OR v_is_locked) AND NOT v_privileged THEN
+      RAISE EXCEPTION 'built-in metadata is written by the sync identity only' USING ERRCODE = '42501';
+    END IF;
+    RETURN NEW;
+
+  ELSIF TG_TABLE_NAME = 'index_metadata' THEN
+    IF TG_OP = 'INSERT' THEN
+      SELECT o.is_custom INTO v_is_custom FROM core.object_metadata o
+       WHERE o.id = NEW.object_metadata_id AND o.workspace_id = NEW.workspace_id
+         FOR SHARE;
+      IF NOT FOUND THEN
+        RAISE EXCEPTION 'the parent object does not exist in this workspace'
+          USING ERRCODE = '23503', CONSTRAINT = 'index_metadata_object_fkey';
+      END IF;
+      -- An index on a built-in object is created by the sync / executor identity only.
+      IF NOT v_is_custom AND NOT v_privileged THEN
+        RAISE EXCEPTION 'built-in metadata is written by the sync identity only' USING ERRCODE = '42501';
+      END IF;
+      RETURN NEW;
+    END IF;
+    IF TG_OP = 'DELETE' THEN
+      IF pg_trigger_depth() > 1 OR v_privileged THEN
+        RETURN OLD;
+      END IF;
+      IF EXISTS (SELECT 1 FROM core.index_field_metadata x
+                   JOIN core.field_metadata f ON f.id = x.field_metadata_id AND f.object_metadata_id = x.object_metadata_id
+                  WHERE x.index_metadata_id = OLD.id AND (NOT f.is_custom OR f.is_locked)) THEN
+        RAISE EXCEPTION 'built-in metadata is written by the sync identity only' USING ERRCODE = '42501';
+      END IF;
+      RETURN OLD;
+    END IF;
+    -- UPDATE: an index definition never changes (deactivate it, then add a new one).
+    IF NEW.id IS DISTINCT FROM OLD.id
+       OR NEW.organisation_id IS DISTINCT FROM OLD.organisation_id
+       OR NEW.workspace_id IS DISTINCT FROM OLD.workspace_id
+       OR NEW.object_metadata_id IS DISTINCT FROM OLD.object_metadata_id
+       OR NEW.physical_name IS DISTINCT FROM OLD.physical_name
+       OR NEW.is_unique IS DISTINCT FROM OLD.is_unique THEN
+      RAISE EXCEPTION 'metadata column is immutable' USING ERRCODE = '42501';
+    END IF;
+    -- Deactivating an index over a built-in or locked field is the sync / executor identity's decision only.
+    IF NEW.is_active IS DISTINCT FROM OLD.is_active AND NOT v_privileged
+       AND EXISTS (SELECT 1 FROM core.index_field_metadata x
+                     JOIN core.field_metadata f ON f.id = x.field_metadata_id AND f.object_metadata_id = x.object_metadata_id
+                    WHERE x.index_metadata_id = OLD.id AND (NOT f.is_custom OR f.is_locked)) THEN
+      RAISE EXCEPTION 'built-in metadata is written by the sync identity only' USING ERRCODE = '42501';
+    END IF;
+    RETURN NEW;
+
+  ELSIF TG_TABLE_NAME = 'index_field_metadata' THEN
+    IF TG_OP = 'UPDATE' THEN
+      RAISE EXCEPTION 'index fields are immutable' USING ERRCODE = '42501';
+    END IF;
+    IF TG_OP = 'DELETE' THEN
+      IF pg_trigger_depth() > 1 OR v_privileged THEN
+        RETURN OLD;
+      END IF;
+      SELECT f.is_custom, f.is_locked INTO v_is_custom, v_is_locked FROM core.field_metadata f
+       WHERE f.id = OLD.field_metadata_id AND f.object_metadata_id = OLD.object_metadata_id AND f.workspace_id = OLD.workspace_id
+         FOR SHARE;
+      IF FOUND AND (NOT v_is_custom OR v_is_locked) THEN
+        RAISE EXCEPTION 'built-in metadata is written by the sync identity only' USING ERRCODE = '42501';
+      END IF;
+      RETURN OLD;
+    END IF;
+    SELECT f.is_custom, f.is_locked INTO v_is_custom, v_is_locked FROM core.field_metadata f
+     WHERE f.id = NEW.field_metadata_id AND f.object_metadata_id = NEW.object_metadata_id AND f.workspace_id = NEW.workspace_id
+       FOR SHARE;
+    IF NOT FOUND THEN
+      RAISE EXCEPTION 'the indexed field does not exist on this object'
+        USING ERRCODE = '23503', CONSTRAINT = 'index_field_metadata_field_fkey';
+    END IF;
+    IF (NOT v_is_custom OR v_is_locked) AND NOT v_privileged THEN
+      RAISE EXCEPTION 'built-in metadata is written by the sync identity only' USING ERRCODE = '42501';
+    END IF;
+    RETURN NEW;
   END IF;
-  RETURN NEW;
+
+  RAISE EXCEPTION 'metadata_guard: unexpected table' USING ERRCODE = '42501';
 END
 $fn$`;
 
@@ -224,6 +383,10 @@ export const METADATA_TABLES_UP_SQL: readonly string[] = [
     OR (NOT is_custom AND physical_table !~ '^c_' AND universal_identifier IS NOT NULL)),
   CONSTRAINT object_metadata_system_no_custom_fields_ck CHECK (NOT (is_system AND allows_custom_fields)),
   CONSTRAINT object_metadata_core_reference_ck CHECK (storage = 'workspace' OR (NOT is_custom AND is_system AND NOT allows_custom_fields)),
+  CONSTRAINT object_metadata_core_reference_tables_ck CHECK (storage = 'workspace' OR physical_table IN (${sqlList(CORE_REFERENCE_TABLES)})),
+  CONSTRAINT object_metadata_payroll_locked_ck CHECK (is_custom OR storage <> 'workspace'
+    OR physical_table NOT IN (${sqlList(PAYROLL_ATTENDANCE_TABLES)})
+    OR (is_system AND NOT allows_custom_fields)),
   CONSTRAINT object_metadata_nav_position_ck CHECK (nav_position IS NULL OR ${finite('nav_position')})
 )`,
   'CREATE UNIQUE INDEX object_metadata_name_singular_uq ON core.object_metadata (workspace_id, pg_catalog.lower(name_singular))',
@@ -285,7 +448,7 @@ export const METADATA_TABLES_UP_SQL: readonly string[] = [
   CONSTRAINT field_metadata_physical_namespace_ck CHECK (
     physical_column IS NULL OR (is_custom AND physical_column ~ '${CUSTOM_COLUMN_PATTERN}') OR (NOT is_custom AND physical_column !~ '^cf_')),
   CONSTRAINT field_metadata_physical_presence_ck CHECK (
-    (type = 'RELATION' AND settings ->> 'relationType' = 'ONE_TO_MANY') = (physical_column IS NULL)),
+    (type = 'RELATION' AND COALESCE(settings ->> 'relationType', '') = 'ONE_TO_MANY') = (physical_column IS NULL)),
   CONSTRAINT field_metadata_default_value_ck CHECK (default_value IS NULL OR pg_catalog.pg_column_size(default_value) <= ${DEFAULT_VALUE_MAX_BYTES}),
   CONSTRAINT field_metadata_settings_ck CHECK (
     pg_catalog.jsonb_typeof(settings) = 'object' AND pg_catalog.pg_column_size(settings) <= ${SETTINGS_MAX_BYTES}),
@@ -297,7 +460,7 @@ export const METADATA_TABLES_UP_SQL: readonly string[] = [
   CONSTRAINT field_metadata_relation_inverse_ck CHECK (relation_target_field_metadata_id IS NULL OR type = 'RELATION'),
   CONSTRAINT field_metadata_relation_settings_ck CHECK (
     type <> 'RELATION' OR (
-      settings ->> 'relationType' IN ('MANY_TO_ONE', 'ONE_TO_MANY')
+      COALESCE(settings ->> 'relationType', '') IN ('MANY_TO_ONE', 'ONE_TO_MANY')
       AND (settings ->> 'onDelete' IS NULL OR settings ->> 'onDelete' IN ('CASCADE', 'RESTRICT', 'SET_NULL', 'NO_ACTION')))),
   CONSTRAINT field_metadata_position_ck CHECK (${finite('position')})
 )`,

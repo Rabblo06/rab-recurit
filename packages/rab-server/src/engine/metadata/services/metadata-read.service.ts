@@ -3,7 +3,7 @@ import { EntityManager } from 'typeorm';
 
 import { FieldMetadata, FieldMetadataOption, IndexFieldMetadata, IndexMetadata, ObjectMetadata } from '../entities';
 
-/** No organisation / workspace bound on the transaction: refused before any metadata query (fail closed). */
+/** Not a tenant transaction, or no organisation / workspace bound on it: refused before any metadata query (fail closed). */
 export class MetadataContextError extends Error {
   constructor() {
     super('metadata reads need a tenant transaction with an organisation and a workspace bound');
@@ -85,6 +85,9 @@ export class MetadataReadService {
   }
 
   private async boundTenant(manager: EntityManager): Promise<BoundTenant> {
+    // A non-transactional manager would run each statement on whatever pooled connection is free: the GUCs bound by
+    // TenantContextService live on ONE transaction's connection, so refuse anything else before any query.
+    if (!manager.queryRunner?.isTransactionActive) throw new MetadataContextError();
     const rows = (await manager.query('SELECT core.current_org()::text AS organisation_id, core.current_workspace()::text AS workspace_id')) as Array<{
       organisation_id: string | null;
       workspace_id: string | null;
