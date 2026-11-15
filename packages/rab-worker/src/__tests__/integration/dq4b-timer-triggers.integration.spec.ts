@@ -437,8 +437,16 @@ describeIfDb('D-Q4b delayed timer triggers (WORKER_TIMER_TRIGGERS=on, integratio
 
   describe('real BullMQ consumers', () => {
     const workers: Worker[] = [];
-    const consumerFor = (mode: 'shadow' | 'on', include = true) =>
-      createConsumerWorkers(
+    // Every consumer Worker is returned only once it is READY: its blocking connection (BullMQ's own duplicate of `redis`)
+    // has finished the connect handshake (CLIENT SETNAME/SETINFO, ready check, version check). Closing a Worker while that
+    // handshake is still in flight races it: a handshake write after the socket was closed fails with "write EPIPE", which
+    // ioredis does not suppress for a manual close (only connect/read errors), BullMQ's pending init() rejects with it, and
+    // the RedisConnection — whose listeners close() has already removed — re-emits it as an unhandled 'error' that Jest pins
+    // on whichever test is running. The CRASH / RESTART test force-closes a Worker right after creating it, so it hit this in
+    // the full (slower) Worker suite. A real crashed Worker was connected and waiting; waiting for readiness models that and
+    // changes no assertion.
+    const consumerFor = async (mode: 'shadow' | 'on', include = true) => {
+      const created = createConsumerWorkers(
         buildHandlerRegistry([
           {
             queue: CONSUMER_QUEUES.timerTriggers.name,
@@ -451,6 +459,9 @@ describeIfDb('D-Q4b delayed timer triggers (WORKER_TIMER_TRIGGERS=on, integratio
         quietLogger,
         (def) => include && def.key === 'timerTriggers',
       );
+      await Promise.all([...created.values()].map((w) => w.waitUntilReady()));
+      return created;
+    };
     afterEach(async () => {
       for (const w of workers.splice(0)) await w.close();
     });
@@ -459,14 +470,14 @@ describeIfDb('D-Q4b delayed timer triggers (WORKER_TIMER_TRIGGERS=on, integratio
       const fx = await seedFx('dq4bRolling');
       const { offer } = await sendOffer(fx);
       const payload = await makeDue(fx, offer.id);
-      const old = consumerFor('on', false);
+      const old = await consumerFor('on', false);
       expect(old.size).toBe(0);
       const job = await triggers.add('offer-expiry-trigger', payload, { jobId: `offer-expiry.${offer.id}.${payload.dueAtEpochMs}` });
       await new Promise((r) => setTimeout(r, 1_500));
       expect(await job.getState()).toBe('waiting');
       expect((await offerOf(fx, offer.id)).status).toBe(OfferStatus.PENDING);
       // The new Worker takes it.
-      workers.push(...consumerFor('on').values());
+      workers.push(...(await consumerFor('on')).values());
       await until(async () => ((await job.getState()) === 'completed' ? true : undefined));
       expect((await offerOf(fx, offer.id)).status).toBe(OfferStatus.EXPIRED);
     });
@@ -475,7 +486,7 @@ describeIfDb('D-Q4b delayed timer triggers (WORKER_TIMER_TRIGGERS=on, integratio
       const fx = await seedFx('dq4bReplicas');
       const { offer } = await sendOffer(fx);
       const payload = await makeDue(fx, offer.id);
-      workers.push(...consumerFor('on').values(), ...consumerFor('on').values());
+      workers.push(...(await consumerFor('on')).values(), ...(await consumerFor('on')).values());
       const jobs = await Promise.all([
         triggers.add('offer-expiry-trigger', payload, { jobId: `offer-expiry.${offer.id}.${payload.dueAtEpochMs}` }),
         triggers.add('offer-expiry-trigger', payload, { jobId: `offer-expiry.${offer.id}.${payload.dueAtEpochMs}` }), // deduplicated by BullMQ
@@ -493,7 +504,7 @@ describeIfDb('D-Q4b delayed timer triggers (WORKER_TIMER_TRIGGERS=on, integratio
       const b = await seedFx('dq4bForgeB');
       const { offer } = await sendOffer(a);
       const payload = await makeDue(a, offer.id);
-      workers.push(...consumerFor('on').values());
+      workers.push(...(await consumerFor('on')).values());
       const forgedScope = await triggers.add('offer-expiry-trigger', { ...payload, organisationId: b.manager.organisationId, workspaceId: b.manager.workspaceId! }, { jobId: `forged.${offer.id}` });
       const extraKey = await triggers.add('offer-expiry-trigger', { ...payload, role: 'admin' } as never, { jobId: `extra.${offer.id}`, attempts: 3 });
       await until(async () => ((await forgedScope.getState()) === 'completed' ? true : undefined));
@@ -510,7 +521,7 @@ describeIfDb('D-Q4b delayed timer triggers (WORKER_TIMER_TRIGGERS=on, integratio
       const baseline = busy();
       const payloads: TimerTriggerJobData[] = [];
       for (let i = 0; i < 20; i++) payloads.push(await makeDue(fx, (await sendOffer(fx)).offer.id));
-      workers.push(...consumerFor('on').values());
+      workers.push(...(await consumerFor('on')).values());
       let peak = 0;
       let peakWaiting = 0;
       const sampler = setInterval(() => {
@@ -533,14 +544,14 @@ describeIfDb('D-Q4b delayed timer triggers (WORKER_TIMER_TRIGGERS=on, integratio
       const expiresAt = new Date(Math.floor(Date.now() / 1000) * 1000 + 3_000);
       await withManager(fx, (m) => m.update(JobOffer, offer.id, { expiresAt }));
       const payload = { organisationId: fx.manager.organisationId, workspaceId: fx.manager.workspaceId!, subjectId: offer.id, dueAtEpochMs: expiresAt.getTime() };
-      const first = consumerFor('on');
+      const first = await consumerFor('on');
       const job = await triggers.add('offer-expiry-trigger', payload, { jobId: `restart.${offer.id}`, delay: Math.max(0, expiresAt.getTime() - Date.now()) });
       // The Worker process goes away before the due time (crash / deploy): force-closed, nothing in flight.
       for (const w of first.values()) await w.close(true);
       await new Promise((r) => setTimeout(r, Math.max(0, expiresAt.getTime() - Date.now()) + 1_000));
       expect((await offerOf(fx, offer.id)).status).toBe(OfferStatus.PENDING); // nobody consumed it while down
       // Restarted Worker: the job was kept in Redis and runs once.
-      workers.push(...consumerFor('on').values());
+      workers.push(...(await consumerFor('on')).values());
       await until(async () => ((await job.getState()) === 'completed' ? true : undefined), 30_000);
       expect((await Job.fromId(triggers, job.id!))!.returnvalue).toEqual({ outcome: 'acted' });
       expect((await offerOf(fx, offer.id)).status).toBe(OfferStatus.EXPIRED);
@@ -556,7 +567,7 @@ describeIfDb('D-Q4b delayed timer triggers (WORKER_TIMER_TRIGGERS=on, integratio
       const { offer } = await sendOffer(fx);
       const expiresAt = new Date(Math.floor(Date.now() / 1000) * 1000 + 3_000);
       await withManager(fx, (m) => m.update(JobOffer, offer.id, { expiresAt }));
-      workers.push(...consumerFor('on').values());
+      workers.push(...(await consumerFor('on')).values());
       const job = await triggers.add('offer-expiry-trigger', { organisationId: fx.manager.organisationId, workspaceId: fx.manager.workspaceId!, subjectId: offer.id, dueAtEpochMs: expiresAt.getTime() }, { jobId: `early.${offer.id}` });
       await until(async () => ((await job.getState()) === 'completed' ? true : undefined), 30_000);
       expect((await Job.fromId(triggers, job.id!))!.returnvalue).toEqual({ outcome: 'acted' });
