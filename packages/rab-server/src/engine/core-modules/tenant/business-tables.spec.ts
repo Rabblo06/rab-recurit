@@ -22,6 +22,10 @@ import { SchemaResolverService, workspaceSchemaName } from './schema-resolver.se
 import { TenantContextService } from './tenant-context.service';
 import { WorkspaceExecutionContext } from './workspace-execution-context';
 
+// C2-1: these binder fakes have no real QueryRunner/DataSource, so the entity-metadata binding is the identity here (the
+// binders then bind businessTables() on the manager they hand out); schema-bound-entity-manager.spec.ts covers the real one.
+jest.mock('./schema-bound-entity-manager', () => ({ bindEntityManagerToSchema: jest.fn(async (manager: unknown) => manager) }));
+
 /**
  * Part C2-0 (HWS-AUDIT-C2-SIZING.md §5/§7): the businessTables(manager) primitive, unit level. The real-PostgreSQL proof
  * (qualified names resolve, the search_path trap turns an unqualified name into 42P01) is

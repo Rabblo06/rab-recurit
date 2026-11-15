@@ -7,8 +7,9 @@ import { PgReplicaService } from '../../../database/runtime/replica/pg-replica.s
 import { EnvironmentService } from '../environment/environment.service';
 import { timeStage } from '../../observability/request-context';
 import { AuthContext } from './auth-context.interface';
-import { bindBusinessSchema, businessSearchPath, CORE_BUSINESS_SCHEMA, withBusinessSchemaScope } from './business-tables';
+import { bindBusinessSchema, BusinessTablesError, businessSearchPath, CORE_BUSINESS_SCHEMA, peekBusinessSchema, withBusinessSchema, withBusinessSchemaScope } from './business-tables';
 import { SchemaResolverService, WorkspaceRoutingError } from './schema-resolver.service';
+import { bindEntityManagerToSchema } from './schema-bound-entity-manager';
 import { isUpgradeBlocked } from '../upgrade/workspace-upgrade-block';
 
 /**
@@ -34,6 +35,12 @@ import { isUpgradeBlocked } from '../upgrade/workspace-upgrade-block';
  *      entity calls (ManagerProfile, ManagerWorkspace, ...) resolving exactly as before.
  *
  * Core entities (explicit `schema: 'core'`) and explicitly `core.`-qualified raw SQL are never affected by any of this.
+ *
+ * Part C2-1: the manager handed to the callback is SCHEMA-BOUND (schema-bound-entity-manager.ts): its entity metadata carries
+ * the schema just recorded for businessTables() and bound as search_path, so the 14 workspace entities issue
+ * `"<schema>"."<table>"` themselves instead of relying on search_path. Same connection, same transaction, same GUCs; only the
+ * entity SQL text changes. Raw SQL through `manager.query` still resolves bare table names through search_path until its
+ * own C2 PR (or uses businessTables(), which is bound on the handed-out manager too).
  *
  * `runInTenantContext` is the general-purpose entry point (core/global services, and anything that may legitimately
  * run with no workspace bound). `runInWorkspaceContext` (below) is the stricter boundary for the 15 physical
@@ -152,7 +159,7 @@ export class TenantContextService {
         bindBusinessSchema(manager, CORE_BUSINESS_SCHEMA, ctx.workspaceId);
         await this.bindGucs(manager, ctx, { searchPath: businessSearchPath(CORE_BUSINESS_SCHEMA), readOnly });
       });
-      return fn(manager);
+      return this.handOut(manager, ctx, (bound) => fn(bound));
     })));
   }
 
@@ -198,7 +205,7 @@ export class TenantContextService {
         await this.bindGucs(manager, ctx, { searchPath: businessSearchPath(CORE_BUSINESS_SCHEMA), readOnly });
         return CORE_BUSINESS_SCHEMA;
       });
-      return fn(manager, schema);
+      return this.handOut(manager, ctx, (bound) => fn(bound, schema));
     })));
   }
 
@@ -250,7 +257,7 @@ export class TenantContextService {
         await this.bindBusinessSchemaAndPath(manager, ctx, resolved);
         return resolved;
       });
-      return fn(manager, bound);
+      return this.handOut(manager, ctx, (boundManager) => fn(boundManager, bound));
     }));
   }
 
@@ -336,6 +343,20 @@ export class TenantContextService {
     const rows: Array<{ cu: string; su: string }> = await manager.query(bindGucsSql(extras), params);
     const identity = rows?.[0];
     if (!identity || identity.cu !== identity.su) throw new TenantSessionRoleError(String(identity?.cu), String(identity?.su));
+  }
+
+  /**
+   * C2-1: the callback gets the SCHEMA-BOUND manager for the schema C2-0 just recorded (and validated: 'core' or exactly the
+   * canonical name of ctx.workspaceId) on `manager` — the real schema, never the trap's ''. businessTables() is recorded on
+   * the bound manager too, for the callback only; nested transactions get the same manager (queryRunner.manager).
+   */
+  private async handOut<T>(manager: EntityManager, ctx: Pick<AuthContext, 'workspaceId'>, run: (bound: EntityManager) => Promise<T>): Promise<T> {
+    // Fail closed: every binder path records the schema before it reaches here. (bindEntityManagerToSchema itself refuses a
+    // manager outside an open transaction.)
+    const schema = peekBusinessSchema(manager);
+    if (schema === undefined) throw new BusinessTablesError('unbound');
+    const bound = await bindEntityManagerToSchema(manager, schema);
+    return withBusinessSchema(bound, schema, ctx.workspaceId, () => run(bound));
   }
 
   /**

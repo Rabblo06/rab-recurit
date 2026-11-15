@@ -7,6 +7,12 @@ import { EnvironmentService } from '../environment/environment.service';
 /** C2-0: a canonical workspace id; the HWS-on schema below (workspace_deadbeef…) is its registry name, as businessTables requires. */
 const WS_ID = 'deadbeef-dead-beef-dead-beefdeadbeef';
 
+// C2-1: these fakes have no QueryRunner, so the schema binding is replaced by a recorder that returns a tagged wrapper; the
+// real binding is covered by schema-bound-entity-manager.spec.ts and the C2-1 integration suite.
+jest.mock('./schema-bound-entity-manager', () => ({
+  bindEntityManagerToSchema: jest.fn(async (manager: object, schema: string) => Object.assign(Object.create(manager), { boundSchema: schema })),
+}));
+
 describe('TenantContextService', () => {
   // The exact single-round-trip GUC bind. Since e31bf934 it also RESETS the read-only shift-team capability
   // (`rab.team_shift_id` / `rab.team_staff_id`, set only by ShiftTeamService for one query) to '' on every
@@ -450,6 +456,43 @@ describe('TenantContextService', () => {
       const service = new TenantContextService(c.dataSource, buildSchemaResolver(), buildEnvironment(true));
       await service.runInTenantContext(CTX, async () => undefined, { readOnly: true });
       expect(c.framing).toEqual(['START TRANSACTION', 'RESET ROLE', BIND_READ_ONLY_SQL, SEARCH_PATH_SQL, 'COMMIT']);
+    });
+  });
+
+  describe('C2-1: the callback receives the manager schema-bound to the search_path just bound', () => {
+    const CTX = { organisationId: 'org-1', workspaceId: WS_ID, userId: 'user-1', role: 'MANAGER' };
+    const WS = 'workspace_deadbeefdeadbeefdeadbeefdeadbeef';
+
+    it.each([
+      ['runInTenantContext, HWS off', 'tenant', false, CTX, 'core'],
+      ['runInTenantContext, HWS on, no workspace', 'tenant', true, { ...CTX, workspaceId: null }, 'core'],
+      ['runInTenantContext, HWS on, workspace', 'tenant', true, CTX, WS],
+      ['runInWorkspaceContext, HWS off', 'workspace', false, CTX, 'core'],
+      ['runInWorkspaceContext, HWS on', 'workspace', true, CTX, WS],
+    ] as const)('%s', async (_label, entry, hws, ctx, expected) => {
+      const manager = buildManager();
+      const service = new TenantContextService(buildDataSource(manager), buildSchemaResolver(), buildEnvironment(hws));
+      let received: (EntityManager & { boundSchema?: string }) | undefined;
+      const body = async (m: EntityManager) => {
+        received = m;
+      };
+      if (entry === 'tenant') await service.runInTenantContext(ctx, body);
+      else await service.runInWorkspaceContext(ctx, body);
+      expect(received).not.toBe(manager);
+      expect(received?.boundSchema).toBe(expected);
+      // The entity schema and search_path are the same value: the folded $6 or the separate set_config.
+      const calls = (manager.query as jest.Mock).mock.calls as Array<[string, unknown[]?]>;
+      const searchPath = calls.find(([sql]) => sql === SEARCH_PATH_SQL)?.[1]?.[0] ?? calls.find(([sql]) => sql.includes("set_config('search_path', $6"))?.[1]?.[5];
+      expect(searchPath).toBe(expected);
+    });
+
+    it('a failed schema binding fails the transaction closed: the callback never runs', async () => {
+      const { bindEntityManagerToSchema } = jest.requireMock('./schema-bound-entity-manager') as { bindEntityManagerToSchema: jest.Mock };
+      bindEntityManagerToSchema.mockRejectedValueOnce(new Error('bind refused'));
+      const service = new TenantContextService(buildDataSource(buildManager()), buildSchemaResolver(), buildEnvironment(true));
+      const body = jest.fn();
+      await expect(service.runInWorkspaceContext(CTX, body)).rejects.toThrow('bind refused');
+      expect(body).not.toHaveBeenCalled();
     });
   });
 });
