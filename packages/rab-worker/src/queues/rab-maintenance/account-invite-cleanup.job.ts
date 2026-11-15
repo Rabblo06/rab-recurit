@@ -11,6 +11,7 @@ import {
   restoreBusinessSchema,
   snapshotBusinessSchema,
 } from '@rab/server/engine/core-modules/tenant/business-tables';
+import { clearWorkspaceUserReferences, userReferenceColumns, workspaceRestrictReference } from '@rab/server/engine/core-modules/core-references/workspace-user-references';
 
 const WORKSPACE_UPGRADING = Symbol('workspace-upgrading');
 
@@ -392,6 +393,10 @@ async function runDefinerCleanup(manager: EntityManager): Promise<AccountInviteC
           continue;
         }
         const [row] = await manager.query<Array<{ outcome: string }>>('SELECT core.worker_delete_expired_invited_user($1::uuid) AS outcome', [candidate.user_id]);
+        // Part D 0a (structure level 22; security review F1): the definer's foreign_key_violation guard no longer covers a
+        // level-22 workspace schema (it has no foreign key to core."user"). Its former ON DELETE actions are applied here, in
+        // this savepoint; anything left (or an in-schema row that still needs the profile, 23503) rolls the delete back.
+        if (row?.outcome === 'deleted') await clearLevel22WorkspaceReferences(manager, candidate.user_id, candidate.organisation_id, await workspacesOf(candidate.organisation_id));
         if (row?.outcome === 'deleted') {
           deleted += 1;
           await writeAuditRow(manager, candidate.organisation_id, null, 'user.invite_cleaned_up', { deletedUserId: candidate.user_id });
@@ -402,6 +407,13 @@ async function runDefinerCleanup(manager: EntityManager): Promise<AccountInviteC
       } catch (error) {
         await manager.query('ROLLBACK TO SAVEPOINT sp_invite_cleanup_candidate');
         restoreBusinessSchema(manager, bindingAtSavepoint);
+        const workspaceReason = level22RetainReason(error);
+        if (workspaceReason) {
+          // Part D 0a (F1): a level-22 workspace still references the invitee: retained, like the definer's 'referenced'.
+          retained += 1;
+          await writeAuditRow(manager, candidate.organisation_id, candidate.user_id, 'user.invite_cleanup_skipped', { reason: workspaceReason });
+          continue;
+        }
         await writeAuditRow(manager, candidate.organisation_id, candidate.user_id, 'user.invite_cleanup_failed', {
           reason: error instanceof Error ? error.constructor.name : 'unknown_error',
         });
@@ -434,8 +446,11 @@ async function loadWorkspaceCatalogue(manager: EntityManager): Promise<Map<strin
 }
 
 // Business-history dependency checks keep FORCE RLS active and enumerate the
-// user's actual workspace scopes. Foreign keys still reject hidden legacy or
-// concurrently-created dependencies; the candidate savepoint retains the user.
+// user's actual workspace scopes. In `core` and in a workspace schema below structure level 22, foreign keys still reject
+// hidden legacy or concurrently-created dependencies (the candidate savepoint retains the user). A level-22 workspace schema
+// has no foreign key to core."user" (Part D 0a): there the checks run again with the worker's scan rights plus the workspace
+// owner's (withLevel22Visibility), the former RESTRICT columns are probed, and after the delete the former CASCADE / SET NULL
+// actions are applied and verified (clearLevel22WorkspaceReferences).
 
 // The 5 of the 9 dependency checks below that are physical workspace-business tables once a workspace cuts over
 // (Part 11). The other 4 (`manager_workspace`, `platform_admin`, `active_session`/refresh_token) are genuinely
@@ -559,6 +574,18 @@ async function findBlockingDependency(
       for (const [reason, sql] of workspaceTableDependencyChecks(manager)) {
         if ((await manager.query(sql, [userId])).length > 0) return `${reason}_physical`;
       }
+      // Part D 0a (F1): no foreign key guards a level-22 schema, so the same checks run again where they can see every row
+      // (worker scan + workspace owner), plus the former no-ON-DELETE user columns. Unverifiable → retained (fail closed).
+      if (await isLevel22(manager, scope.id)) {
+        const hit = await withLevel22Visibility(manager, scope.id, async () => {
+          for (const [reason, sql] of workspaceTableDependencyChecks(manager)) {
+            if ((await manager.query(sql, [userId])).length > 0) return `${reason}_physical`;
+          }
+          const ref = await workspaceRestrictReference(manager, userId);
+          return ref ? `workspace_reference_physical:${ref}` : null;
+        });
+        if (hit) return hit;
+      }
       bindBusinessSchema(manager, CORE_BUSINESS_SCHEMA, null);
       await manager.query(`SELECT set_config('search_path',$1,true)`, [businessSearchPath(CORE_BUSINESS_SCHEMA)]);
     }
@@ -571,6 +598,84 @@ async function findBlockingDependency(
     await manager.query(`SELECT set_config('rab.organisation_id',$1,true), set_config('rab.workspace_id',$2,true), set_config('search_path',$3,true)`,
       [previous.org ?? '', previous.workspace ?? '', businessSearchPath(entryBinding.schema ?? CORE_BUSINESS_SCHEMA)]);
   }
+}
+
+/** Part D 0a: the workspace's registry structure level is 22 or above (no foreign key to core."user" in its schema). */
+async function isLevel22(manager: EntityManager, workspaceId: string): Promise<boolean> {
+  const [row] = await manager.query<Array<{ module_version: number | null }>>(`SELECT module_version FROM core.workspace_schema_registry WHERE workspace_id = $1`, [workspaceId]);
+  return Number(row?.module_version ?? 0) >= 22;
+}
+
+class Level22Retain extends Error {
+  constructor(readonly reason: string) {
+    super(reason);
+    this.name = 'Level22Retain';
+  }
+}
+
+/** Why a failed candidate is retained because of a level-22 workspace (null: a genuine failure, audited as failed). */
+function level22RetainReason(error: unknown): string | null {
+  if (error instanceof Level22Retain) return error.reason;
+  const driver = (error as { driverError?: { code?: string; constraint?: string } } | null)?.driverError;
+  return driver?.code === '23503' ? `workspace_referenced:${driver.constraint ?? 'unknown'}` : null;
+}
+
+/**
+ * Part D 0a (security review F1): runs `run` in the bound level-22 workspace schema with the worker's scan rights
+ * (`rab.actor_type` = worker: staff_profile, payroll_record, payroll_run, shift_staff_review) plus the workspace owner's
+ * (`rab.user_id` = manager_workspace.owner_user_id: payslip, payslip_document, venue_manager_staff, staff_profile DELETE /
+ * UPDATE). The same binding as the orphan check (owner decision 0a-T2, SECURITY TRADE-OFF). No owner → Level22Retain (fail
+ * closed). Restored on success; on a throw the candidate savepoint rolls the transaction-local settings back.
+ */
+async function withLevel22Visibility<T>(manager: EntityManager, workspaceId: string, run: () => Promise<T>): Promise<T> {
+  const [owner] = await manager.query<Array<{ owner_user_id: string | null }>>(`SELECT owner_user_id FROM core.manager_workspace WHERE id = $1`, [workspaceId]);
+  if (!owner?.owner_user_id) throw new Level22Retain('workspace_unverifiable');
+  const [previous] = await manager.query<Array<{ actor: string | null; uid: string | null }>>(
+    `SELECT current_setting('rab.actor_type', true) AS actor, current_setting('rab.user_id', true) AS uid`,
+  );
+  await manager.query(`SELECT set_config('rab.actor_type', 'worker', true), set_config('rab.user_id', $1, true)`, [owner.owner_user_id]);
+  const result = await run();
+  await manager.query(`SELECT set_config('rab.actor_type', $1, true), set_config('rab.user_id', $2, true)`, [previous?.actor ?? '', previous?.uid ?? '']);
+  return result;
+}
+
+/**
+ * Part D 0a (security review F1), after `core.worker_delete_expired_invited_user` deleted the invitee: in every READY level-22
+ * schema of its organisation, the former ON DELETE actions (CASCADE the invitee's own staff profile and the notes about it,
+ * SET NULL the attribution columns), then a check that no reference is left. A row that still needs the profile raises 23503;
+ * a reference that could not be removed raises Level22Retain. Either rolls the candidate savepoint back (retained).
+ */
+async function clearLevel22WorkspaceReferences(manager: EntityManager, userId: string, organisationId: string, workspaceIds: readonly string[]): Promise<void> {
+  const entryBinding = snapshotBusinessSchema(manager);
+  const [previous] = await manager.query<Array<{ org: string | null; workspace: string | null }>>(
+    `SELECT current_setting('rab.organisation_id', true) AS org, current_setting('rab.workspace_id', true) AS workspace`,
+  );
+  for (const workspaceId of workspaceIds) {
+    const physicalSchema = await resolveReadyPhysicalSchema(manager, workspaceId);
+    if (physicalSchema === WORKSPACE_UPGRADING) throw new Level22Retain('workspace_upgrading');
+    if (!physicalSchema || !(await isLevel22(manager, workspaceId))) continue;
+    bindBusinessSchema(manager, physicalSchema, workspaceId);
+    await manager.query(`SELECT set_config('rab.organisation_id', $1, true), set_config('rab.workspace_id', $2, true), set_config('search_path', $3, true)`, [
+      organisationId,
+      workspaceId,
+      businessSearchPath(physicalSchema),
+    ]);
+    await withLevel22Visibility(manager, workspaceId, async () => {
+      await clearWorkspaceUserReferences(manager, userId);
+      const t = businessTables(manager);
+      for (const c of userReferenceColumns()) {
+        // sql-injection-reviewed: the table comes from businessTables (validated schema, WORKSPACE_TABLES name); the column is a constant of the frozen list.
+        const left = await manager.query(`SELECT 1 FROM ${t[c.table]} WHERE ${c.column} = $1 LIMIT 1`, [userId]);
+        if (left.length > 0) throw new Level22Retain(`workspace_reference_physical:${c.table}.${c.column}`);
+      }
+    });
+  }
+  restoreBusinessSchema(manager, entryBinding);
+  await manager.query(`SELECT set_config('rab.organisation_id', $1, true), set_config('rab.workspace_id', $2, true), set_config('search_path', $3, true)`, [
+    previous?.org ?? '',
+    previous?.workspace ?? '',
+    businessSearchPath(entryBinding.schema ?? CORE_BUSINESS_SCHEMA),
+  ]);
 }
 
 /**

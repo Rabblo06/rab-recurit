@@ -194,10 +194,11 @@ describeIfDb('F3: payroll evidence is never deleted by cascade (core + workspace
           await evidenceIntact();
           return;
         }
-        // Part D 0a (structure level 22; SQL pending owner OK): the workspace → core."user" foreign key is gone, so a raw core delete
-        // no longer reaches the workspace at all. Nothing cascades: the evidence stays (the staff profile is then an orphan that the
-        // daily orphan check reports). The application refuses the delete instead (UserDeletionService → 409; tested in
-        // ws-core-fk-app-enforcement.integration.spec.ts). Rolled back, so the later cases see the same chain.
+        // Part D 0a (structure level 22; owner approved 2026-11-15): the workspace → core."user" foreign key is gone, so a raw core
+        // delete no longer reaches the workspace at all. Nothing cascades: the evidence stays (the staff profile is then an orphan
+        // that the daily orphan check reports). The application never hard-deletes such a user: UserDeletionService soft-deletes
+        // (owner 0g; tested in ws-core-fk-app-enforcement.integration.spec.ts) and the Worker invite cleanup retains it (security
+        // review F1; account-invite-cleanup.integration.spec.ts). Rolled back, so the later cases see the same chain.
         await admin.query('BEGIN');
         try {
           expect(await codeOf(admin.query(`DELETE FROM core."user" WHERE id = $1`, [paid.staffUser]))).toBe('ACCEPTED');

@@ -13,8 +13,8 @@ import { WORKSPACE_CORE_FK_REMOVAL } from '../../../../engine/core-modules/upgra
 const LEVEL = 22;
 
 /**
- * SQL PENDING OWNER OK — OWNER-DB-ULTIMATE Part D, decision 0a option (b) (2026-11-14): owner SQL review FIRST (WS-COMMANDS.md "FOR OWNER REVIEW
- * — 0a"); run only on throwaway databases until approved. The core half of workspace structure level 22; the workspace half is
+ * SQL APPROVED BY THE OWNER 2026-11-15 — OWNER-DB-ULTIMATE Part D, decision 0a option (b) (2026-11-14): owner SQL review FIRST (WS-COMMANDS.md "FOR OWNER REVIEW
+ * — 0a", §R4/§R5). The core half of workspace structure level 22; the workspace half is
  * `0.6.0_DropWorkspaceCoreForeignKeys_1786721530000` (upgrade-commands/0-6/workspace-core-fk-removal.ts), applied per existing
  * READY workspace by the workspace command runner after this migration, on the same locked start.
  *

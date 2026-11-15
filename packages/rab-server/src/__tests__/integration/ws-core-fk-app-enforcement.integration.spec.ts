@@ -125,6 +125,28 @@ describeIfDb('Part D 0a: the application enforces what the workspace → core fo
     }
   });
 
+  it('F3: the reference check key-share locks the user: a concurrent delete makes it wait, then it finds the user gone (404)', async () => {
+    const target = await user(w.org, 'race');
+    const deleter = new Client({ connectionString: adminUrl });
+    await deleter.connect();
+    try {
+      await deleter.query('BEGIN');
+      await deleter.query(`DELETE FROM core."user" WHERE id = $1`, [target]); // holds the row lock until COMMIT
+      let settled = false;
+      const check = asOwner(w, (m) => assertUsersOfOrganisationTx(m, w.org, [target])).finally(() => {
+        settled = true;
+      });
+      check.catch(() => undefined);
+      await new Promise((resolve) => setTimeout(resolve, 1_000));
+      expect(settled).toBe(false); // FOR KEY SHARE waits for the uncommitted delete (a plain read would not)
+      await deleter.query('COMMIT');
+      await expect(check).rejects.toBeInstanceOf(NotFoundException);
+    } finally {
+      await deleter.query('ROLLBACK').catch(() => undefined);
+      await deleter.end();
+    }
+  });
+
   // Owner decision 0g: a user is SOFT deleted (the row stays, every reference keeps resolving); only a never-activated invite
   // with no history is hard-deleted, inside a savepoint that falls back to soft. These cases drive that hard-delete path.
   const invited = async (label: string): Promise<string> =>

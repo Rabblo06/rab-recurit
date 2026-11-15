@@ -21,6 +21,10 @@ export async function assertUsersOfOrganisationTx(manager: Pick<EntityManager, '
   const ids = [...new Set(userIds.filter((u): u is string => typeof u === 'string' && u.length > 0))];
   if (ids.length === 0) return;
   if (!organisationId) throw new NotFoundException('User not found.');
-  const rows = await manager.query(`SELECT pg_catalog.count(*)::int AS n FROM core."user" u WHERE u.id = ANY ($1::uuid[]) AND u.organisation_id = $2`, [ids, organisationId]);
-  if (Number((rows as Array<{ n: number }>)[0]?.n ?? 0) !== ids.length) throw new NotFoundException('User not found.');
+  // FOR KEY SHARE (security review F3): the referenced rows stay locked until the caller's write commits, the way the dropped
+  // foreign key's check locked them. A concurrent delete of one of them waits for this transaction; if the delete got there
+  // first, this waits for it and then finds the row gone (404). core."user"'s UPDATE policy has the same USING predicate as its
+  // SELECT policy, so the lock never hides a row the caller may read.
+  const rows = await manager.query(`SELECT u.id FROM core."user" u WHERE u.id = ANY ($1::uuid[]) AND u.organisation_id = $2 FOR KEY SHARE OF u`, [ids, organisationId]);
+  if ((rows as unknown[]).length !== ids.length) throw new NotFoundException('User not found.');
 }

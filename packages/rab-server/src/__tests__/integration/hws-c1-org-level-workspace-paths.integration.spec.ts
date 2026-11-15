@@ -411,9 +411,10 @@ describeIfDb('HWS C1: org-level paths over workspace tables (integration)', () =
         expect(JSON.stringify(res.body ?? {})).not.toMatch(/foreign key|violates|approved_by/i);
         expect(await userSoftDeleted(target.userId)).toBe(true);
         const lines = log.mock.calls.map((c) => String(c[0]));
-        // Part D 0a (structure level 22): the workspace schema has no shift_approved_by_fkey any more; the application probe of the
-        // former no-ON-DELETE columns finds the reference instead (Q3), still before any data is touched.
-        expect(lines).toContainEqual(expect.stringMatching(/^user hard delete not safe \((foreign_key:shift_approved_by_fkey:shift|history:shift\.approved_by)\)/));
+        // Part D 0a: the application probe of the former no-ON-DELETE columns finds the reference before any data is touched (Q3),
+        // HWS on (no shift_approved_by_fkey in the workspace schema) and off (core copy). The 23503 fallback classifier itself is
+        // exercised by ws-core-fk-app-enforcement (a payslip still needing the profile → foreign_key:payslip_staff_id_fkey).
+        expect(lines).toContainEqual(expect.stringMatching(/^user hard delete not safe \(history:shift\.approved_by\)/));
         expect(lines.join('\n')).not.toContain(target.userId); // identifiers of the schema only, never row data
       } finally {
         log.mockRestore();
