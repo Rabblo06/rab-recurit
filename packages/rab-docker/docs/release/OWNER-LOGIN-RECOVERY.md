@@ -1,6 +1,6 @@
 # Owner-login deployment: recovery and rollback
 
-**Status (2026-11-04).** Owner-approved, and required before the final clean-up PR (#9).
+**Status (2026-11-04).** Owner-approved, and required before the separated-mode retirement (every separated database transitioned, MIX-1).
 
 The evidence is Agent 1's rollback proof on disposable PostgreSQL 16.15:
 - **old code:** main `db498fb4` (the separated deployment);
