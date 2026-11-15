@@ -1,7 +1,7 @@
 import type { Client } from 'pg';
 
 import { checkSchemaCompatibility } from '@rab/server/database/boot-checks/database-boot-gates';
-import { pgClientConfig, probePgSessionAffinity, ResolvedPgEnvironment } from '@rab/server/database/postgres/index';
+import { createPgClient, pgClientConfig, probePgSessionAffinity, ResolvedPgEnvironment } from '@rab/server/database/postgres/index';
 
 import { ReconnectingPgClient } from '../../core/database/reconnecting-pg-client';
 import { WorkerRuntime } from '../../core/runtime/worker-runtime';
@@ -196,7 +196,7 @@ export async function startWorkspaceProvisioningLoops(options: ProvisioningLoops
     statKeys: { lastRunAt: 'lastWorkspaceCoreOrphanAt', failures: 'workspaceCoreOrphanFailures' },
     run: async () => {
       // Report only (owner decision pending on repair): counts per workspace / table / column, never ids or values.
-      const r = await runWorkspaceCoreOrphanCycle(driftConfig, onConnect);
+      const r = await runWorkspaceCoreOrphanCycle(() => createPgClient(pg, { endpoint, purpose: 'orphans', sessionAffinity: true, statementTimeoutMs: 60_000 }), onConnect);
       for (const f of r.findings) logger.warn(`workspace core orphans: workspace=${f.workspaceId} ${f.table}.${f.column} -> ${f.target}: ${f.rows} row(s)`);
       for (const e of r.errors) logger.warn(`workspace core orphans: workspace=${e.workspaceId} ${e.detail}`);
       logger.log(`workspace core orphans: checked=${r.checked} findings=${r.findings.length} errors=${r.errors.length}`);

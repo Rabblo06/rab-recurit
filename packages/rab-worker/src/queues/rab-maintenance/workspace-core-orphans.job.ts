@@ -1,4 +1,4 @@
-import { Client, ClientConfig } from 'pg';
+import type { Client } from 'pg';
 
 import {
   checkWorkspaceCoreOrphans,
@@ -8,13 +8,14 @@ import {
 export type { WorkspaceOrphanCycleResult, WorkspaceOrphanFinding } from '@rab/server/database/typeorm/workspace-schema/workspace-core-orphans';
 
 /**
- * OWNER-DB-ULTIMATE Part D, decision 0a (DRAFT): the daily, REPORT-ONLY orphan check that replaces the database-enforced half of
- * the dropped workspace → core."user" / core.organisation / core.manager_workspace foreign keys. Logic and findings:
- * `@rab/server/database/typeorm/workspace-schema/workspace-core-orphans.ts`. Same connection model as the drift job (its own
- * short-lived connection per cycle, acting as crewflow through `onConnect`); it never writes a row and never changes routing.
+ * OWNER-DB-ULTIMATE Part D, decision 0a (SQL pending owner OK): the daily, REPORT-ONLY orphan check that replaces the
+ * database-enforced half of the dropped workspace → core."user" / core.organisation / core.manager_workspace foreign keys.
+ * Logic and findings: `@rab/server/database/typeorm/workspace-schema/workspace-core-orphans.ts`. One short-lived connection per
+ * cycle, built by the caller through the connection factory (`createPgClient`, Phase B: no connection is opened outside it),
+ * acting as crewflow through `onConnect`; it never writes a row and never changes routing.
  */
-export async function runWorkspaceCoreOrphanCycle(config: ClientConfig, onConnect?: (client: Client) => Promise<void>): Promise<WorkspaceOrphanCycleResult> {
-  const client = new Client({ ...config, connectionTimeoutMillis: config.connectionTimeoutMillis ?? 10_000, statement_timeout: 60_000 });
+export async function runWorkspaceCoreOrphanCycle(createClient: () => Client, onConnect?: (client: Client) => Promise<void>): Promise<WorkspaceOrphanCycleResult> {
+  const client = createClient();
   client.on('error', () => undefined);
   await client.connect();
   try {

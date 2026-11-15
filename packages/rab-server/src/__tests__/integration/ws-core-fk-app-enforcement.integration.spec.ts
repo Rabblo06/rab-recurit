@@ -26,6 +26,7 @@ import { dropWorkspaceSchema, provisionTypeScript, registryOf, SeededWorkspace, 
  *  - the former RESTRICT (Q3): a hard delete of a user still referenced by a no-ON-DELETE column of a workspace → 409;
  *  - the former CASCADE / SET NULL (Q2): the hard delete removes the user's own staff profile and the notes about them and clears
  *    the SET NULL columns, in the same transaction;
+ *  - approved payroll evidence (F3): the delete of the staff member's user is refused (409) and nothing is removed;
  *  - the 0a migration's down() refuses while a level-22 workspace exists (nothing changed).
  */
 jest.setTimeout(300_000);
@@ -150,6 +151,48 @@ describeIfDb('Part D 0a: the application enforces what the workspace → core fo
     expect((await admin.query(`SELECT count(*)::int AS n FROM ${w.schema}.staff_profile WHERE id = $1`, [staff])).rows[0].n).toBe(0);
     expect((await admin.query(`SELECT count(*)::int AS n FROM ${w.schema}.user_note WHERE subject_user_id = $1`, [target])).rows[0].n).toBe(0);
     expect((await admin.query(`SELECT author_user_id FROM ${w.schema}.user_note WHERE id = $1`, [authored])).rows[0].author_user_id).toBeNull();
+  });
+
+  it('approved payroll evidence (F3): the hard delete of the staff member\'s user is refused (409), the user and every row stay', async () => {
+    const one = async (sql: string, params: unknown[]) => (await admin.query(sql, params)).rows[0].id as string;
+    const q = w.schema;
+    const target = await user(w.org, 'paid');
+    const venue = await one(`INSERT INTO ${q}.venue(organisation_id, workspace_id, name) VALUES ($1, $2, $3) RETURNING id`, [w.org, w.id, `paid venue ${SFX}`]);
+    const role = await one(`INSERT INTO ${q}.job_role(organisation_id, workspace_id, name) VALUES ($1, $2, $3) RETURNING id`, [w.org, w.id, `paid role ${SFX}`]);
+    const sp = await one(`INSERT INTO ${q}.staff_profile(organisation_id, workspace_id, user_id, staff_ref) VALUES ($1, $2, $3, $4) RETURNING id`, [w.org, w.id, target, `PAID-${SFX}`]);
+    const shift = await one(
+      `INSERT INTO ${q}.shift(organisation_id, workspace_id, venue_id, job_role_id, starts_at, ends_at, required_count, pay_rate_pence, created_by)
+       VALUES ($1, $2, $3, $4, now() - interval '5 hours', now() - interval '1 hour', 1, 1200, $5) RETURNING id`,
+      [w.org, w.id, venue, role, w.owner],
+    );
+    const sa = await one(
+      `INSERT INTO ${q}.shift_assignment(organisation_id, workspace_id, shift_id, staff_profile_id, pay_rate_snapshot_pence, period)
+       VALUES ($1, $2, $3, $4, 1200, tstzrange(now() - interval '5 hours', now() - interval '1 hour')) RETURNING id`,
+      [w.org, w.id, shift, sp],
+    );
+    const att = await one(
+      `INSERT INTO ${q}.attendance(organisation_id, workspace_id, shift_assignment_id, shift_id, staff_profile_id, clock_in_at, clock_out_at, status)
+       VALUES ($1, $2, $3, $4, $5, now() - interval '5 hours', now() - interval '1 hour', 'approved') RETURNING id`,
+      [w.org, w.id, sa, shift, sp],
+    );
+    const pr = await one(
+      `INSERT INTO ${q}.payroll_record(organisation_id, workspace_id, attendance_id, shift_id, staff_profile_id, worked_minutes, pay_rate_pence,
+                                      amount_pence, status, approved_at, approved_by)
+       VALUES ($1, $2, $3, $4, $5, 240, 1200, 4800, 'approved', now(), $6) RETURNING id`,
+      [w.org, w.id, att, shift, sp, w.owner],
+    );
+    // The pre-delete probe sees no user column naming the target (the evidence points at the staff profile, not the user); the
+    // same-transaction cleanup's staff_profile delete then meets the in-schema RESTRICT and the whole delete is refused.
+    await expect(
+      asOwner(w, async (m) => {
+        await deletion.assertCanDelete(m, ctxOf(w), target);
+        await deletion.deleteUser(m, ctxOf(w), target, 'paid@ws0a.invalid');
+      }),
+    ).rejects.toBeInstanceOf(UserDeletionBlockedException);
+    expect((await admin.query(`SELECT count(*)::int AS n FROM core."user" WHERE id = $1`, [target])).rows[0].n).toBe(1);
+    for (const [table, id] of [['staff_profile', sp], ['shift_assignment', sa], ['attendance', att], ['payroll_record', pr]] as const) {
+      expect((await admin.query(`SELECT count(*)::int AS n FROM ${q}.${table} WHERE id = $1`, [id])).rows[0].n).toBe(1);
+    }
   });
 
   it('down() of WorkspaceCoreForeignKeyRemoval1786721490000 refuses while a level-22 workspace exists (nothing changed)', async () => {
