@@ -108,16 +108,16 @@ describeIfDb('Metadata cache E5: versioned per-workspace cache, PostgreSQL autho
     const label = `mdc-${randomUUID().slice(0, 12)}`;
     let org = orgId;
     if (!org) {
-      const [o] = (await admin.query(`INSERT INTO core.organisation(name, slug) VALUES ($1, $1) RETURNING id`, [label])) as Array<{ id: string }>;
+      const [o] = (await admin.query(`INSERT INTO core.organisation(name, slug) VALUES ($1::text, $1::text) RETURNING id`, [label])) as Array<{ id: string }>;
       org = o!.id;
     }
     const [u] = (await admin.query(
-      `INSERT INTO core."user"(organisation_id, email, first_name, last_name, status) VALUES ($1, $2, 'Md', 'Cache', 'active') RETURNING id`,
+      `INSERT INTO core."user"(organisation_id, email, first_name, last_name, status) VALUES ($1::uuid, $2::text, 'Md', 'Cache', 'active') RETURNING id`,
       [org, `${label}@mdc.invalid`],
     )) as Array<{ id: string }>;
     const [w] = (await admin.query(
       `INSERT INTO core.manager_workspace(organisation_id, owner_user_id, name, subdomain, status, schema_status)
-       VALUES ($1, $2, $3, $3, 'active', 'CREATING') RETURNING id`,
+       VALUES ($1::uuid, $2::uuid, $3::text, $3::text, 'active', 'CREATING') RETURNING id`,
       [org, u!.id, label],
     )) as Array<{ id: string }>;
     const seeded = { org: org!, ws: w!.id };
@@ -141,7 +141,7 @@ describeIfDb('Metadata cache E5: versioned per-workspace cache, PostgreSQL autho
   async function insertObject(m: EntityManager, w: Ws, name: string): Promise<void> {
     await m.query(
       `INSERT INTO core.object_metadata (organisation_id, workspace_id, name_singular, name_plural, label_singular, label_plural, physical_table, is_custom, allows_custom_fields)
-       VALUES ($1, $2, $3, $4, $3, $4, $5, true, true)`,
+       VALUES ($1::uuid, $2::uuid, $3::text, $4::text, $3::text, $4::text, $5::text, true, true)`,
       [w.org, w.ws, name, `${name}s`, `c_${randomUUID().replace(/-/g, '').slice(0, 20)}`],
     );
   }
