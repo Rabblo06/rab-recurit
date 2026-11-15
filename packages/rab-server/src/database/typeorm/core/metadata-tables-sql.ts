@@ -285,7 +285,7 @@ export const METADATA_TABLES_UP_SQL: readonly string[] = [
   CONSTRAINT field_metadata_physical_namespace_ck CHECK (
     physical_column IS NULL OR (is_custom AND physical_column ~ '${CUSTOM_COLUMN_PATTERN}') OR (NOT is_custom AND physical_column !~ '^cf_')),
   CONSTRAINT field_metadata_physical_presence_ck CHECK (
-    (type = 'RELATION' AND settings ->> 'relationType' = 'ONE_TO_MANY') = (physical_column IS NULL)),
+    (type = 'RELATION' AND COALESCE(settings ->> 'relationType', '') = 'ONE_TO_MANY') = (physical_column IS NULL)),
   CONSTRAINT field_metadata_default_value_ck CHECK (default_value IS NULL OR pg_catalog.pg_column_size(default_value) <= ${DEFAULT_VALUE_MAX_BYTES}),
   CONSTRAINT field_metadata_settings_ck CHECK (
     pg_catalog.jsonb_typeof(settings) = 'object' AND pg_catalog.pg_column_size(settings) <= ${SETTINGS_MAX_BYTES}),
@@ -297,7 +297,7 @@ export const METADATA_TABLES_UP_SQL: readonly string[] = [
   CONSTRAINT field_metadata_relation_inverse_ck CHECK (relation_target_field_metadata_id IS NULL OR type = 'RELATION'),
   CONSTRAINT field_metadata_relation_settings_ck CHECK (
     type <> 'RELATION' OR (
-      settings ->> 'relationType' IN ('MANY_TO_ONE', 'ONE_TO_MANY')
+      COALESCE(settings ->> 'relationType', '') IN ('MANY_TO_ONE', 'ONE_TO_MANY')
       AND (settings ->> 'onDelete' IS NULL OR settings ->> 'onDelete' IN ('CASCADE', 'RESTRICT', 'SET_NULL', 'NO_ACTION')))),
   CONSTRAINT field_metadata_position_ck CHECK (${finite('position')})
 )`,

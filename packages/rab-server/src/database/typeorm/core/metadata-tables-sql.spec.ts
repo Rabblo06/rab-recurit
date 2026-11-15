@@ -33,6 +33,13 @@ describe('metadata tables SQL (MetadataEngineTables1786721550000)', () => {
     expect(createOf('field_metadata')).toContain("CHECK (type <> 'MORPH_RELATION')");
   });
 
+  it('relation CHECKs never pass on a missing relationType (NULL IN (...) is NULL, which a CHECK accepts)', () => {
+    const create = createOf('field_metadata');
+    expect(create).toContain("COALESCE(settings ->> 'relationType', '') IN ('MANY_TO_ONE', 'ONE_TO_MANY')");
+    expect(create).toContain("COALESCE(settings ->> 'relationType', '') = 'ONE_TO_MANY') = (physical_column IS NULL)");
+    expect(create).not.toMatch(/[^(]settings ->> 'relationType' (IN|=)/);
+  });
+
   it.each(METADATA_TABLES.map((t) => [t]))('%s: tenant columns, tenant FK, ENABLE + FORCE, one USING + WITH CHECK policy and the grants, in this migration', (t) => {
     const create = createOf(t);
     expect(create).toMatch(/\n {2}organisation_id uuid NOT NULL,\n {2}workspace_id uuid NOT NULL,/);
