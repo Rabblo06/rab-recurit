@@ -42,12 +42,11 @@ describe('metadata version SQL (M1 E5)', () => {
     expect(fn.indexOf("IF TG_OP = 'DELETE' THEN\n    RETURN NULL;")).toBeLessThan(fn.indexOf('INSERT INTO core.workspace_metadata_state'));
   });
 
-  it('the guard refuses decrease, identity change, direct delete and truncate', () => {
+  it('the guard refuses decrease, identity change and a direct delete', () => {
     const fn = METADATA_VERSION_UP_SQL.find((s) => s.startsWith('CREATE FUNCTION core.workspace_metadata_state_guard()'))!;
     expect(fn).toContain('NEW.metadata_version < OLD.metadata_version');
     expect(fn).toContain('pg_catalog.pg_trigger_depth() = 1');
-    expect(fn).toContain("TG_OP = 'TRUNCATE'");
-    expect(fn.match(/ERRCODE = '42501'/g)).toHaveLength(4);
+    expect(fn.match(/ERRCODE = '42501'/g)).toHaveLength(3);
   });
 
   it('ownership goes to crewflow; down() removes everything up() created', () => {

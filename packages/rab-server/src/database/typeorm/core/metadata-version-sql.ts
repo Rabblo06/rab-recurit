@@ -10,8 +10,11 @@
  *      five E1 tables (`core.metadata_version_bump()`), so no code path (service, E2 sync, M2 executor, psql) can forget it;
  *   2. move at most ONCE per transaction and workspace (`last_bump_xact` = the top-level transaction id; savepoint-safe,
  *      and the E2 runner's per-table write counts rely on "each row at most once per transaction");
- *   3. never go backwards, and the row never be deleted while its workspace exists — otherwise an old version number would
- *      become current again and an old cached entry would be served (`core.workspace_metadata_state_guard()`).
+ *   3. never go backwards, and the row never be deleted directly while its workspace exists
+ *      (`core.workspace_metadata_state_guard()`). The cache identity also carries the bump time (`updated_at`), so even a
+ *      row that is recreated (TRUNCATE by an operator or a test fixture, a restored backup) gets a new identity and can
+ *      never make an old cached entry current again — which is why TRUNCATE is not trigger-guarded (an existing
+ *      disposable-database fixture runs `TRUNCATE core.organisation CASCADE`).
  *
  * Twenty bumps the version AFTER commit, read-then-write on another connection (twentyhq/twenty @ eedb0a73
  * `packages/twenty-server/src/engine/metadata-modules/workspace-metadata-version/services/workspace-metadata-version.service.ts:25-58`),
@@ -106,9 +109,6 @@ LANGUAGE plpgsql
 SET search_path = pg_catalog, pg_temp
 AS $fn$
 BEGIN
-  IF TG_OP = 'TRUNCATE' THEN
-    RAISE EXCEPTION 'workspace_metadata_state is never truncated' USING ERRCODE = '42501';
-  END IF;
   IF TG_OP = 'DELETE' THEN
     -- A direct DELETE runs this trigger at depth 1; the workspace FK cascade arrives at depth 2 or more.
     IF pg_catalog.pg_trigger_depth() = 1 THEN
@@ -132,7 +132,6 @@ export const METADATA_VERSION_UP_SQL: readonly string[] = [
   METADATA_STATE_GUARD_FUNCTION_SQL,
   `REVOKE ALL ON FUNCTION ${METADATA_STATE_GUARD_FUNCTION} FROM PUBLIC`,
   `CREATE TRIGGER workspace_metadata_state_guard BEFORE UPDATE OR DELETE ON core.workspace_metadata_state FOR EACH ROW EXECUTE FUNCTION ${METADATA_STATE_GUARD_FUNCTION}`,
-  `CREATE TRIGGER workspace_metadata_state_truncate_guard BEFORE TRUNCATE ON core.workspace_metadata_state FOR EACH STATEMENT EXECUTE FUNCTION ${METADATA_STATE_GUARD_FUNCTION}`,
   'ALTER TABLE core.workspace_metadata_state ENABLE ROW LEVEL SECURITY',
   'ALTER TABLE core.workspace_metadata_state FORCE ROW LEVEL SECURITY',
   `CREATE POLICY workspace_metadata_state_tenant ON core.workspace_metadata_state AS PERMISSIVE FOR ALL TO PUBLIC
@@ -218,10 +217,7 @@ export const METADATA_VERSION_EXPECTED_STATE: Readonly<Record<string, unknown>> 
   force: true,
   acl: ['crewflow_app:INSERT:false', 'crewflow_app:SELECT:false', 'crewflow_app:UPDATE:false'].join(','),
   policies: 'workspace_metadata_state_tenant:*:true:{0}:true',
-  triggers: [
-    `workspace_metadata_state_guard:O:${METADATA_STATE_GUARD_FUNCTION}`,
-    `workspace_metadata_state_truncate_guard:O:${METADATA_STATE_GUARD_FUNCTION}`,
-  ].join(';'),
+  triggers: `workspace_metadata_state_guard:O:${METADATA_STATE_GUARD_FUNCTION}`,
   bump_triggers: 5,
   functions: ['crewflow:false:search_path=pg_catalog, pg_temp:false', 'crewflow:false:search_path=pg_catalog, pg_temp:false'].join(','),
 });

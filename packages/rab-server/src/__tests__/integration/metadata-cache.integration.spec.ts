@@ -13,6 +13,7 @@ import { MetadataCacheModule } from '../../engine/metadata/cache/metadata-cache.
 import { MetadataCacheService } from '../../engine/metadata/cache/metadata-cache.service';
 import { WorkspaceMetadataSnapshot } from '../../engine/metadata/cache/metadata-snapshot';
 import { integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
+import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-pipe';
 import { createAdminDataSource } from './helpers/admin-datasource';
 
 /**
@@ -50,7 +51,7 @@ describeIfDb('Metadata cache E5: versioned per-workspace cache, PostgreSQL autho
 
   beforeAll(async () => {
     const moduleRef = await Test.createTestingModule({ imports: [AppModule, MetadataCacheModule] }).compile();
-    app = moduleRef.createNestApplication();
+    app = applyGlobalValidationPipe(moduleRef.createNestApplication());
     await app.init();
     env = moduleRef.get(EnvironmentService);
     dsA = moduleRef.get(DataSource);
