@@ -316,15 +316,20 @@ describeIfDb('AuthSecuritySnapshotService — consolidated security snapshot cor
       });
 
       // Commits in a SEPARATE, already-finished transaction while the snapshot above is still open.
-      await taken;
-      await withOrgUser(org.id, manager.userId, (m) =>
-        m.query(
-          `DELETE FROM core.role_permission rp USING core.user_role ur
-            WHERE rp.role_id = ur.role_id AND ur.user_id = $1 AND rp.permission_id = $2`,
-          [manager.userId, permissionId],
-        ),
-      );
-      releaseGate();
+      // Race with the transaction itself: if it fails before the signal (pool, DB error), surface THAT error instead of a
+      // 60 s timeout (the transaction stays pending while the gate is held, so this settles only on the signal or a failure).
+      await Promise.race([taken, snapshotPromise]);
+      try {
+        await withOrgUser(org.id, manager.userId, (m) =>
+          m.query(
+            `DELETE FROM core.role_permission rp USING core.user_role ur
+              WHERE rp.role_id = ur.role_id AND ur.user_id = $1 AND rp.permission_id = $2`,
+            [manager.userId, permissionId],
+          ),
+        );
+      } finally {
+        releaseGate(); // never leave the snapshot transaction (and its connection) open if the revoke throws
+      }
       const sawPermissionWithinSnapshot = await snapshotPromise;
 
       // REPEATABLE READ: the already-open snapshot still sees its OWN consistent view, unaffected
