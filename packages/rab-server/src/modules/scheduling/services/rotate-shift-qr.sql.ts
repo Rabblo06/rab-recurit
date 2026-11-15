@@ -22,7 +22,12 @@ import { businessTables } from '../../../engine/core-modules/tenant/business-tab
 /** A quoted, schema-qualified shift table, as businessTables() names it: `"core"."shift"` or `"workspace_<32 hex>"."shift"`. */
 const QUALIFIED_SHIFT_TABLE = /^"(?:core|workspace_[0-9a-f]{32})"\."shift"$/;
 
-/** The statement text for one qualified shift table. Refuses anything that is not a schema-qualified shift table name. */
+/**
+ * TEST / REPLAY ONLY: the statement text for one qualified shift table, exported for the Worker lock-wait regression test
+ * (it replays the service's exact SQL on a raw admin connection that no binder has bound). Module code must call
+ * `rotateShiftQrLockSql(manager)` / `rotateShiftQrUpdateSql(manager)` instead, so the table always comes from the
+ * transaction's own businessTables(manager). Refuses anything that is not a schema-qualified shift table name.
+ */
 export function rotateShiftQrStatements(shiftTable: string): { lock: string; update: string } {
   if (!QUALIFIED_SHIFT_TABLE.test(shiftTable)) throw new Error('rotateShiftQrStatements: not a schema-qualified shift table');
   // sql-injection-reviewed: the only interpolation is the schema-qualified shift table name validated above; values are bound $n parameters.
