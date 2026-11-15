@@ -170,7 +170,7 @@ export function validateStandardDefinitions(
       fieldNames.add(f.name.toLowerCase());
       columns.add(f.column);
       if (!label(f.label)) bad(`${o.table}.${f.column}: bad label`);
-      if ((f.type === 'SELECT') !== Boolean(f.options?.length)) bad(`${o.table}.${f.column}: SELECT needs options and only SELECT has them`);
+      if ((f.type === 'SELECT') !== Boolean(f.options?.length)) bad(`${o.table}.${f.column}: a select-type field needs options, and only a select-type field has them`);
       for (const v of f.options ?? []) if (!OPTION.test(v)) bad(`${o.table}.${f.column}: bad option ${v}`);
       if (f.options && new Set(f.options).size !== f.options.length) bad(`${o.table}.${f.column}: duplicate option`);
       if ((f.type === 'RELATION') !== Boolean(f.relation)) bad(`${o.table}.${f.column}: RELATION needs a relation and only RELATION has one`);
