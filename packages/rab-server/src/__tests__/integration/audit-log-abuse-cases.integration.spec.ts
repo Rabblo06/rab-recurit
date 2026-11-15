@@ -13,6 +13,7 @@ import { PasswordHashingService } from '../../engine/core-modules/auth/services/
 import { TenantContextService } from '../../engine/core-modules/tenant/tenant-context.service';
 import { createAdminDataSource, createCrewflowOwnerProbeDataSource } from './helpers/admin-datasource';
 import { TestIdentityFactory } from './helpers/test-identities';
+import { businessTableOf } from './helpers/hws-fixtures';
 import { generateFixturePassword } from './helpers/fixture-password';
 import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-pipe';
 import { integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
@@ -83,7 +84,7 @@ describeIfDb('audit log abuse cases (integration)', () => {
     // FORCE-RLS'd (IdentitySchema1786665800000), so `rab_owner` needs no
     // bound tenant context for this raw update.
     await adminDataSource.manager.query(
-      `UPDATE core."user" SET status = 'active' WHERE id = (SELECT user_id FROM core.staff_profile WHERE id = $1)`,
+      `UPDATE core."user" SET status = 'active' WHERE id = (SELECT user_id FROM ${await businessTableOf(adminDataSource.manager, 'staff_profile', res.body.id)} WHERE id = $1)`,
       [res.body.id],
     );
     return res.body.id as string;

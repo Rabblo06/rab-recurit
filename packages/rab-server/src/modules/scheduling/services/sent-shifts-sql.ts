@@ -1,3 +1,6 @@
+import { EntityManager } from 'typeorm';
+
+import { businessTables } from '../../../engine/core-modules/tenant/business-tables';
 import { keysetTimestampSql } from '../../../engine/dto/keyset-cursor';
 import { SentShiftView } from '../dto/list-sent-shifts.dto';
 import { SHIFT_ACTION_WINDOW_HOURS } from '../utils/shift-action-window';
@@ -14,8 +17,11 @@ import { SHIFT_ACTION_WINDOW_HOURS } from '../utils/shift-action-window';
 // organisation joined back by shift id: same numbers, but bounded by the caller's own requests. Measured on synthetic
 // volume (EXPLAIN ANALYZE, 100k offers in one organisation): the organisation-wide CTE cost ~0.2 s per call, and restricting it by
 // a sub-select made the planner (blind to the RLS predicates' selectivity) re-aggregate it once per request (~18 s).
-// sql-injection-reviewed: code-constant SQL fragment from a helper called with literal aliases; values are bound $n parameters.
-export const SENT_SHIFT_ROWS_SQL = `WITH rows AS (
+// `manager` is the caller's bound transaction manager: every workspace table is schema-qualified through businessTables(manager).
+export function sentShiftRowsSql(manager: EntityManager): string {
+  const t = businessTables(manager);
+  // sql-injection-reviewed: code-constant SQL fragment from a helper called with literal aliases plus businessTables() names; values are bound $n parameters.
+  return `WITH rows AS (
     SELECT s.id, s.status, s.required_count AS "requiredCount", s.filled_count AS "filledCount",
       coalesce(s.default_starts_at, s.starts_at) AS "startsAt", coalesce(s.default_ends_at, s.ends_at) AS "endsAt",
       s.created_at AS "submittedAt", ${keysetTimestampSql('s.created_at')} AS keyset_ts, v.name AS "venueName", jr.name AS "roleName",
@@ -26,7 +32,7 @@ export const SENT_SHIFT_ROWS_SQL = `WITH rows AS (
       coalesce(c.declined, 0) AS declined, coalesce(c.expired, 0) AS expired, coalesce(c.withdrawn, 0) AS withdrawn,
       coalesce(c.rejected, 0) AS rejected, coalesce(c.not_confirmed_in_time, 0) AS not_confirmed_in_time,
       s.status IN ('cancelled','completed','declined') AS terminal
-    FROM shift s JOIN venue v ON v.id = s.venue_id JOIN job_role jr ON jr.id = s.job_role_id
+    FROM ${t.shift} s JOIN ${t.venue} v ON v.id = s.venue_id JOIN ${t.job_role} jr ON jr.id = s.job_role_id
     LEFT JOIN LATERAL (
       SELECT count(*)::int AS sent,
         count(*) FILTER (WHERE status = 'pending' AND assignment_status = 'offered')::int AS pending,
@@ -41,7 +47,7 @@ export const SENT_SHIFT_ROWS_SQL = `WITH rows AS (
         count(*) FILTER (WHERE status = 'manager_rejected' AND rejected_by IS NULL AND rejection_reason = 'confirmation_deadline_passed')::int AS not_confirmed_in_time
       FROM (
         SELECT DISTINCT ON (o.staff_profile_id) o.status, sa.status AS assignment_status, o.rejected_by, o.rejection_reason
-          FROM shift_assignment sa JOIN job_offer o ON o.shift_assignment_id = sa.id
+          FROM ${t.shift_assignment} sa JOIN ${t.job_offer} o ON o.shift_assignment_id = sa.id
          WHERE sa.shift_id = s.id AND sa.organisation_id = $1 AND o.organisation_id = $1
          ORDER BY o.staff_profile_id, o.sent_at DESC, o.id DESC
       ) latest
@@ -54,6 +60,7 @@ export const SENT_SHIFT_ROWS_SQL = `WITH rows AS (
       (NOT r.terminal AND (r."actionExpired" OR (r.sent > 0 AND r.expired = r.sent))) AS is_expired
     FROM rows r
   )`;
+}
 /** Each tab's predicate over `classified` (the `view` query parameter is validated against these keys by the DTO). */
 export const SENT_SHIFT_VIEW_SQL: Readonly<Record<SentShiftView, string>> = Object.freeze({
   all: 'NOT is_expired',
@@ -66,15 +73,15 @@ export const SENT_SHIFT_VIEW_SQL: Readonly<Record<SentShiftView, string>> = Obje
 
 /**
  * XP-05: ONE statement for the page rows AND the tab counts. `classified` is referenced twice, so PostgreSQL materialises
- * it once (a CTE referenced more than once is never inlined) instead of all of SENT_SHIFT_ROWS_SQL running again in a
+ * it once (a CTE referenced more than once is never inlined) instead of all of sentShiftRowsSql running again in a
  * second statement. The counts come back as one JSON object (`tab_counts`); the page is LEFT JOINed onto the single
  * counts row, so an empty page still returns the counts (one row whose page columns are all NULL). Same predicates,
  * parameters and order as the two statements it replaced (rows, then `count(*) FILTER` per tab); both now read one snapshot.
  * `viewSql` is SENT_SHIFT_VIEW_SQL[view] or 'TRUE'; `bound` is '' or the keyset WHERE built from literal fragments.
  */
-export function sentShiftsPageAndCountsSql(viewSql: string, bound: string): string {
-  // sql-injection-reviewed: composes code constants only (SENT_SHIFT_ROWS_SQL, SENT_SHIFT_VIEW_SQL keys and predicates, the caller's literal viewSql/bound); every value is a bound $n parameter.
-  return `${SENT_SHIFT_ROWS_SQL}, tabs AS (
+export function sentShiftsPageAndCountsSql(manager: EntityManager, viewSql: string, bound: string): string {
+  // sql-injection-reviewed: composes code constants only (sentShiftRowsSql over businessTables() names, SENT_SHIFT_VIEW_SQL keys and predicates, the caller's literal viewSql/bound); every value is a bound $n parameter.
+  return `${sentShiftRowsSql(manager)}, tabs AS (
       SELECT json_build_object(${Object.entries(SENT_SHIFT_VIEW_SQL).map(([k, w]) => `'${k}', count(*) FILTER (WHERE ${w})::int`).join(', ')},
         'submitted', count(*)::int) AS tab_counts FROM classified
     ), page AS (

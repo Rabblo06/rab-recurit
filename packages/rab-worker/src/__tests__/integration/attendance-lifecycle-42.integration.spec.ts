@@ -32,6 +32,7 @@ import { createAdminDataSource } from './helpers/admin-datasource';
 import { SmtpSink } from './helpers/smtp-sink';
 import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
 import { integrationTestDatabaseReady } from '@rab/server/database/typeorm/core/integration-test-database-gate';
+import { businessTable } from './helpers/hws-fixtures';
 
 /**
  * THE 42-STEP ATTENDANCE LIFECYCLE — one ordered, end-to-end flow, executed for
@@ -125,19 +126,19 @@ describeIfDb('attendance lifecycle — 42 steps (integration, end to end)', () =
   /** Moves the SHIFT's window (the server clock is authoritative and never touched). `updated_at` is deliberately untouched — time passing is not an edit. */
   async function moveShift(startsInMs: number, durationMs = 8 * 60 * MIN): Promise<void> {
     await adminDataSource.transaction(async (m) => {
-      await m.query(`ALTER TABLE core.shift DISABLE ROW LEVEL SECURITY`);
-      await m.query(`ALTER TABLE core.shift_assignment DISABLE ROW LEVEL SECURITY`);
-      await m.query(`UPDATE core.shift SET starts_at = now() + make_interval(secs => $2), ends_at = now() + make_interval(secs => $3) WHERE id = $1`, [
+      await m.query(`ALTER TABLE ${businessTable(im.workspaceId!, 'shift')} DISABLE ROW LEVEL SECURITY`);
+      await m.query(`ALTER TABLE ${businessTable(im.workspaceId!, 'shift_assignment')} DISABLE ROW LEVEL SECURITY`);
+      await m.query(`UPDATE ${businessTable(im.workspaceId!, 'shift')} SET starts_at = now() + make_interval(secs => $2), ends_at = now() + make_interval(secs => $3) WHERE id = $1`, [
         shiftId,
         startsInMs / 1000,
         (startsInMs + durationMs) / 1000,
       ]);
       await m.query(
-        `UPDATE core.shift_assignment SET period = tstzrange(now() + make_interval(secs => $2), now() + make_interval(secs => $3)) WHERE shift_id = $1`,
+        `UPDATE ${businessTable(im.workspaceId!, 'shift_assignment')} SET period = tstzrange(now() + make_interval(secs => $2), now() + make_interval(secs => $3)) WHERE shift_id = $1`,
         [shiftId, startsInMs / 1000, (startsInMs + durationMs) / 1000],
       );
-      await m.query(`ALTER TABLE core.shift ENABLE ROW LEVEL SECURITY`);
-      await m.query(`ALTER TABLE core.shift_assignment ENABLE ROW LEVEL SECURITY`);
+      await m.query(`ALTER TABLE ${businessTable(im.workspaceId!, 'shift')} ENABLE ROW LEVEL SECURITY`);
+      await m.query(`ALTER TABLE ${businessTable(im.workspaceId!, 'shift_assignment')} ENABLE ROW LEVEL SECURITY`);
     });
   }
 
@@ -244,7 +245,7 @@ describeIfDb('attendance lifecycle — 42 steps (integration, end to end)', () =
     s3 = await factory.createStaff(org, { owner: im, label: 'staff3' });
     // Approval requires active employment as well as an active login account.
     await tenantContext.runInTenantContext(imContext(), (m) => m.query(
-      `UPDATE core.staff_profile SET employment_status = 'active' WHERE id = ANY($1::uuid[])`,
+      `UPDATE staff_profile SET employment_status = 'active' WHERE id = ANY($1::uuid[])`,
       [[s1.profileId, s2.profileId, s3.profileId]],
     ));
     orgB = await factory.createOrganisation('lifeB');
@@ -357,7 +358,7 @@ describeIfDb('attendance lifecycle — 42 steps (integration, end to end)', () =
   it('Step 10 — the acceptance WAITS for the Internal Manager (never auto-confirmed, even on a VM-requested shift), who then confirms it', async () => {
     const statusOf = async () =>
       (await tenantContext.runInTenantContext(imContext(), (m) =>
-        m.query(`SELECT sa.status AS assignment_status, jo.status AS offer_status FROM core.shift_assignment sa JOIN core.job_offer jo ON jo.shift_assignment_id = sa.id WHERE jo.id = $1`, [offerS2]),
+        m.query(`SELECT sa.status AS assignment_status, jo.status AS offer_status FROM shift_assignment sa JOIN job_offer jo ON jo.shift_assignment_id = sa.id WHERE jo.id = $1`, [offerS2]),
       ))[0];
     expect(await statusOf()).toEqual({ assignment_status: 'staff_accepted', offer_status: 'staff_accepted' });
     expect([200, 201]).toContain((await post(imToken, `/offers/${offerS2}/confirm`)).status);
@@ -368,7 +369,7 @@ describeIfDb('attendance lifecycle — 42 steps (integration, end to end)', () =
     expect([200, 201]).toContain((await post(s3Token, `/offers/${offerS3}/accept`)).status);
     expect([200, 201]).toContain((await post(imToken, `/offers/${offerS3}/confirm`)).status);
     const rows = await tenantContext.runInTenantContext(imContext(), (m) =>
-      m.query(`SELECT sa.status FROM core.shift_assignment sa JOIN core.job_offer jo ON jo.shift_assignment_id = sa.id WHERE jo.id = $1`, [offerS3]),
+      m.query(`SELECT sa.status FROM shift_assignment sa JOIN job_offer jo ON jo.shift_assignment_id = sa.id WHERE jo.id = $1`, [offerS3]),
     );
     expect(rows[0].status).toBe('confirmed');
   });
@@ -496,7 +497,7 @@ describeIfDb('attendance lifecycle — 42 steps (integration, end to end)', () =
     const results = await Promise.all(Array.from({ length: 5 }, () => post(s3Token, '/attendance/clock-in', { shiftId, qrToken: qr, ...INSIDE })));
     expect(results.filter((r) => r.status === 201)).toHaveLength(1);
     expect(results.filter((r) => r.status === 409)).toHaveLength(4);
-    const rows = await tenantContext.runInTenantContext(imContext(), (m) => m.query(`SELECT id FROM core.attendance WHERE staff_profile_id = $1`, [s3.profileId]));
+    const rows = await tenantContext.runInTenantContext(imContext(), (m) => m.query(`SELECT id FROM attendance WHERE staff_profile_id = $1`, [s3.profileId]));
     expect(rows).toHaveLength(1);
     attendanceS3 = rows[0].id;
   });
@@ -581,12 +582,12 @@ describeIfDb('attendance lifecycle — 42 steps (integration, end to end)', () =
     expect(res.status).toBe(201);
     expect(res.body.status).toBe('under_review');
     expect(res.body.breakMinutes).toBe(45);
-    const before = await tenantContext.runInTenantContext(imContext(), (m) => m.query(`SELECT worked_minutes FROM core.attendance WHERE id = $1`, [attendanceS2]));
+    const before = await tenantContext.runInTenantContext(imContext(), (m) => m.query(`SELECT worked_minutes FROM attendance WHERE id = $1`, [attendanceS2]));
     expect(before[0].worked_minutes).toBe(res.body.workedMinutes);
   });
 
   it('Step 36 — the correction is a first-class record (before/after/actor/reason) AND written to the audit log', async () => {
-    const rows = await tenantContext.runInTenantContext(imContext(), (m) => m.query(`SELECT * FROM core.attendance_correction WHERE attendance_id = $1`, [attendanceS2]));
+    const rows = await tenantContext.runInTenantContext(imContext(), (m) => m.query(`SELECT * FROM attendance_correction WHERE attendance_id = $1`, [attendanceS2]));
     expect(rows).toHaveLength(1);
     expect(rows[0]).toEqual(expect.objectContaining({ field: 'breakMinutes', new_value: '45', corrected_by: vm.userId }));
     expect(rows[0].reason).toContain('longer break');
@@ -620,14 +621,14 @@ describeIfDb('attendance lifecycle — 42 steps (integration, end to end)', () =
     const first = await patch(vmToken, `/attendance/report/shift/${shiftId}/finalise`);
     expect(first.status).toBe(200);
     const snapshot = await tenantContext.runInTenantContext(imContext(), (m) =>
-      m.query(`SELECT status, finalised_at, finalised_by FROM core.shift_report WHERE shift_id = $1`, [shiftId]),
+      m.query(`SELECT status, finalised_at, finalised_by FROM shift_report WHERE shift_id = $1`, [shiftId]),
     );
     expect(snapshot[0].status).toBe('finalised');
     expect(snapshot[0].finalised_by).toBe(vm.userId);
     const second = await patch(vmToken, `/attendance/report/shift/${shiftId}/finalise`);
     expect(second.status).toBe(200);
     const after = await tenantContext.runInTenantContext(imContext(), (m) =>
-      m.query(`SELECT status, finalised_at, finalised_by FROM core.shift_report WHERE shift_id = $1`, [shiftId]),
+      m.query(`SELECT status, finalised_at, finalised_by FROM shift_report WHERE shift_id = $1`, [shiftId]),
     );
     expect(after[0].finalised_at.getTime()).toBe(snapshot[0].finalised_at.getTime());
     const finalisedAudits = await tenantContext.runInTenantContext(imContext(), (m) =>
@@ -658,7 +659,7 @@ describeIfDb('attendance lifecycle — 42 steps (integration, end to end)', () =
     expect(isPdf(stored.buffer)).toBe(true);
     expect(stored.file.kind).toBe('FINAL_TIMESHEET_PDF');
     expect(stored.file.objectKey).toContain(`/organisations/${org.id}/`);
-    const report = await tenantContext.runInTenantContext(imContext(), (m) => m.query(`SELECT final_file_id FROM core.shift_report WHERE shift_id = $1`, [shiftId]));
+    const report = await tenantContext.runInTenantContext(imContext(), (m) => m.query(`SELECT final_file_id FROM shift_report WHERE shift_id = $1`, [shiftId]));
     expect(report[0].final_file_id).toBe(finalKey); // the report points at the evidence
   });
 
@@ -710,9 +711,9 @@ describeIfDb('attendance lifecycle — 42 steps (integration, end to end)', () =
     // Tenant isolation of every artefact this flow produced: organisation B sees none of it.
     const ctxB = { organisationId: orgB.id, workspaceId: imB.workspaceId, userId: imB.userId, role: '' };
     const seenByB = await tenantContext.runInTenantContext(ctxB, async (m) => ({
-      reports: await m.query(`SELECT 1 FROM core.shift_report`),
-      corrections: await m.query(`SELECT 1 FROM core.attendance_correction`),
-      attendance: await m.query(`SELECT 1 FROM core.attendance`),
+      reports: await m.query(`SELECT 1 FROM shift_report`),
+      corrections: await m.query(`SELECT 1 FROM attendance_correction`),
+      attendance: await m.query(`SELECT 1 FROM attendance`),
       outbox: await m.query(`SELECT 1 FROM core.email_outbox`),
     }));
     expect(seenByB).toEqual({ reports: [], corrections: [], attendance: [], outbox: [] });

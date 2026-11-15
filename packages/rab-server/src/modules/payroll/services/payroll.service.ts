@@ -15,6 +15,7 @@ import { AuditAction, AuditService } from '../../../engine/core-modules/audit/au
 import { PermissionsService } from '../../../engine/core-modules/permissions/permissions.service';
 import { ResourceScopeService } from '../../../engine/core-modules/resource-scope/resource-scope.service';
 import { AuthContext } from '../../../engine/core-modules/tenant/auth-context.interface';
+import { businessTables } from '../../../engine/core-modules/tenant/business-tables';
 import { TenantContextService } from '../../../engine/core-modules/tenant/tenant-context.service';
 import { RealtimeEventService, RealtimeEventType } from '../../../engine/core-modules/realtime/realtime-event.service';
 import { ShiftStatementWakeService } from '../../../engine/core-modules/statement-wake/shift-statement-wake.service';
@@ -170,8 +171,14 @@ export interface StaffShiftStatement {
 const STATEMENT_SELECT = `pr.status AS statement_payroll_status, pr.statement_status, pr.statement_attempts, pr.statement_file_id, pr.statement_generated_at, pr.statement_notified_at,
     (SELECT f.original_filename FROM core.stored_file f WHERE f.id = pr.statement_file_id AND f.status = 'AVAILABLE') AS statement_filename`;
 
-// sql-injection-reviewed: interpolates a module-level SQL constant / constant fragment; every request value is a bound $n parameter.
-const VIEW_SELECT = `
+/**
+ * The payroll record read model's SELECT for `manager`'s transaction (C2: business tables schema-qualified through
+ * businessTables(manager); the SQL is otherwise the former VIEW_SELECT constant, unchanged).
+ */
+function viewSelect(manager: EntityManager): string {
+  const t = businessTables(manager);
+  // sql-injection-reviewed: interpolates a module-level SQL constant / constant fragment; every request value is a bound $n parameter.
+  return `
   SELECT pr.id, pr.status, pr.attendance_id, pr.shift_id, pr.staff_profile_id, pr.worked_minutes, pr.pay_rate_pence,
     pr.amount_pence, pr.approved_at, pr.rejected_at, pr.rejection_reason, pr.created_at, ${STATEMENT_SELECT},
     ${assignmentTimeSql().start} AS starts_at, ${assignmentTimeSql().end} AS ends_at,
@@ -179,15 +186,16 @@ const VIEW_SELECT = `
     u.first_name, u.last_name, (sp.user_id = $3) AS own_hours,
     (SELECT au.first_name || ' ' || au.last_name FROM core."user" au WHERE au.id = pr.approved_by) AS approved_by_name,
     (SELECT ru.first_name || ' ' || ru.last_name FROM core."user" ru WHERE ru.id = pr.rejected_by) AS rejected_by_name
-  FROM payroll_record pr
-  JOIN attendance a ON a.id = pr.attendance_id
-  JOIN shift_assignment sa ON sa.id = a.shift_assignment_id
-  JOIN shift s ON s.id = pr.shift_id
-  JOIN venue v ON v.id = s.venue_id
-  JOIN job_role jr ON jr.id = s.job_role_id
-  JOIN staff_profile sp ON sp.id = pr.staff_profile_id
+  FROM ${t.payroll_record} pr
+  JOIN ${t.attendance} a ON a.id = pr.attendance_id
+  JOIN ${t.shift_assignment} sa ON sa.id = a.shift_assignment_id
+  JOIN ${t.shift} s ON s.id = pr.shift_id
+  JOIN ${t.venue} v ON v.id = s.venue_id
+  JOIN ${t.job_role} jr ON jr.id = s.job_role_id
+  JOIN ${t.staff_profile} sp ON sp.id = pr.staff_profile_id
   JOIN core."user" u ON u.id = sp.user_id
   WHERE pr.organisation_id = $1 AND pr.workspace_id = $2`;
+}
 
 const iso = (value: unknown): string | null => (value ? new Date(value as string).toISOString() : null);
 const num = (value: unknown): number | null => (value === null || value === undefined ? null : Number(value));
@@ -326,11 +334,12 @@ export class PayrollService {
    * read it (RLS). The only unique keys are the pkey and attendance_id, so a bare DO NOTHING is the same idempotency.
    */
   async createPendingForShift(manager: EntityManager, ctx: AuthContext, shiftId: string): Promise<number> {
+    const t = businessTables(manager);
     const rows: Array<{
       id: string; workspace_id: string; staff_profile_id: string; worked_minutes: number | null; earned_pence: string | null; rate: string;
     }> = await manager.query(
       `SELECT a.id, a.workspace_id, a.staff_profile_id, a.worked_minutes, a.earned_pence, sa.pay_rate_snapshot_pence AS rate
-         FROM attendance a JOIN shift_assignment sa ON sa.id = a.shift_assignment_id
+         FROM ${t.attendance} a JOIN ${t.shift_assignment} sa ON sa.id = a.shift_assignment_id
         WHERE a.shift_id = $1 AND a.organisation_id = $2 AND a.status = 'approved'
         ORDER BY a.id`,
       [shiftId, ctx.organisationId],
@@ -346,7 +355,7 @@ export class PayrollService {
         throw new ConflictException('The recorded pay for a staff member does not match their rate and hours, so payroll cannot be prepared. Contact support.');
       }
       await manager.query(
-        `INSERT INTO payroll_record (organisation_id, workspace_id, attendance_id, shift_id, staff_profile_id, status, worked_minutes, pay_rate_pence, amount_pence)
+        `INSERT INTO ${t.payroll_record} (organisation_id, workspace_id, attendance_id, shift_id, staff_profile_id, status, worked_minutes, pay_rate_pence, amount_pence)
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
          ON CONFLICT DO NOTHING`,
         [ctx.organisationId, row.workspace_id, row.id, shiftId, row.staff_profile_id, PayrollRecordStatus.PENDING_APPROVAL, workedMinutes, ratePence, amountPence],
@@ -360,6 +369,7 @@ export class PayrollService {
   async list(ctx: AuthContext, dto: ListPayrollRecordsDto = {}): Promise<PayrollRecordList> {
     return this.tenantContext.runInWorkspaceContext(ctx, async (manager) => {
       await this.assertPayrollAccess(manager, ctx, PermissionFlag.PAYROLL_VIEW);
+      const t = businessTables(manager);
       const params: unknown[] = [ctx.organisationId, ctx.workspaceId, ctx.userId];
       let where = '';
       if (dto.status) {
@@ -370,18 +380,18 @@ export class PayrollService {
       params.push(take, skip);
       const rows = await manager.query(
         // sql-injection-reviewed: interpolates a module-level SQL constant / constant fragment; every request value is a bound $n parameter.
-        `${VIEW_SELECT}${where}
+        `${viewSelect(manager)}${where}
          ORDER BY (pr.status = 'pending_approval') DESC, s.starts_at DESC, pr.id
          LIMIT $${params.length - 1} OFFSET $${params.length}`,
         params,
       );
       const [{ total }] = await manager.query(
         // sql-injection-reviewed: literal ternary fragment (no value is spliced); values are bound parameters.
-        `SELECT count(*)::int AS total FROM payroll_record pr WHERE pr.organisation_id = $1 AND pr.workspace_id = $2${dto.status ? ' AND pr.status = $3' : ''}`,
+        `SELECT count(*)::int AS total FROM ${t.payroll_record} pr WHERE pr.organisation_id = $1 AND pr.workspace_id = $2${dto.status ? ' AND pr.status = $3' : ''}`,
         dto.status ? [ctx.organisationId, ctx.workspaceId, dto.status] : [ctx.organisationId, ctx.workspaceId],
       );
       const countRows: Array<{ status: PayrollRecordStatusType; n: number }> = await manager.query(
-        `SELECT status, count(*)::int AS n FROM payroll_record WHERE organisation_id = $1 AND workspace_id = $2 GROUP BY status`,
+        `SELECT status, count(*)::int AS n FROM ${t.payroll_record} WHERE organisation_id = $1 AND workspace_id = $2 GROUP BY status`,
         [ctx.organisationId, ctx.workspaceId],
       );
       const fields = await this.fieldPolicy.resolveTx(manager, ctx, 'payroll_record');
@@ -400,6 +410,7 @@ export class PayrollService {
     if (!match) throw new BadRequestException('month must be YYYY-MM.');
     return this.tenantContext.runInWorkspaceContext(ctx, async (manager) => {
       await this.assertPayrollAccess(manager, ctx, PermissionFlag.PAYROLL_VIEW);
+      const t = businessTables(manager);
       const [org] = await manager.query(`SELECT timezone FROM core.organisation WHERE id = $1`, [ctx.organisationId]);
       const timezone = (org?.timezone as string | undefined) || 'Europe/London';
       const start = `${assignmentTimeSql().start}`;
@@ -410,14 +421,14 @@ export class PayrollService {
                 sp.id AS staff_profile_id, sp.staff_ref, sp.employment_status, sp.default_pay_rate_pence, (sp.user_id = $3) AS own_hours,
                 u.first_name, u.last_name, u.email, v.name AS venue_name, jr.name AS role_name,
                 ${start} AS starts_at, ${assignmentTimeSql().end} AS ends_at
-           FROM attendance a
-           JOIN shift_assignment sa ON sa.id = a.shift_assignment_id
-           JOIN shift s ON s.id = a.shift_id
-           JOIN venue v ON v.id = s.venue_id
-           JOIN job_role jr ON jr.id = s.job_role_id
-           JOIN staff_profile sp ON sp.id = a.staff_profile_id
+           FROM ${t.attendance} a
+           JOIN ${t.shift_assignment} sa ON sa.id = a.shift_assignment_id
+           JOIN ${t.shift} s ON s.id = a.shift_id
+           JOIN ${t.venue} v ON v.id = s.venue_id
+           JOIN ${t.job_role} jr ON jr.id = s.job_role_id
+           JOIN ${t.staff_profile} sp ON sp.id = a.staff_profile_id
            JOIN core."user" u ON u.id = sp.user_id
-           LEFT JOIN payroll_record pr ON pr.attendance_id = a.id AND pr.organisation_id = $1 AND pr.workspace_id = $2
+           LEFT JOIN ${t.payroll_record} pr ON pr.attendance_id = a.id AND pr.organisation_id = $1 AND pr.workspace_id = $2
           WHERE a.organisation_id = $1 AND a.workspace_id = $2
             AND ${start} >= (make_date($4::int, $5::int, 1)::timestamp AT TIME ZONE $6::text)
             AND ${start} < ((make_date($4::int, $5::int, 1) + interval '1 month')::timestamp AT TIME ZONE $6::text)
@@ -470,7 +481,8 @@ export class PayrollService {
   async listMine(ctx: AuthContext, pagination: PaginationDto = {}): Promise<{ data: StaffShiftStatement[]; total: number }> {
     return this.tenantContext.runInWorkspaceContext(ctx, async (manager) => {
       if (!(await this.permissions.userHasPermissionTx(manager, ctx, PermissionFlag.PAYSLIP_VIEW_OWN))) throw new ForbiddenException('Permission required.');
-      const [profile] = await manager.query(`SELECT id FROM staff_profile WHERE user_id = $1`, [ctx.userId]);
+      const t = businessTables(manager);
+      const [profile] = await manager.query(`SELECT id FROM ${t.staff_profile} WHERE user_id = $1`, [ctx.userId]);
       if (!profile) return { data: [], total: 0 };
       const { skip, take } = paginationSkipTake({ page: pagination.page, limit: pagination.limit ?? 50 });
       const where = `pr.organisation_id = $1 AND pr.workspace_id = $2 AND pr.staff_profile_id = $3 AND pr.status = ANY($4::text[])`;
@@ -480,19 +492,19 @@ export class PayrollService {
         `SELECT pr.id, pr.status, pr.attendance_id, pr.shift_id, pr.worked_minutes, pr.pay_rate_pence, pr.amount_pence, pr.approved_at,
                 ${STATEMENT_SELECT}, v.name AS venue_name, jr.name AS role_name,
                 ${assignmentTimeSql().start} AS starts_at, ${assignmentTimeSql().end} AS ends_at
-           FROM payroll_record pr
-           JOIN attendance a ON a.id = pr.attendance_id
-           JOIN shift_assignment sa ON sa.id = a.shift_assignment_id
-           JOIN shift s ON s.id = pr.shift_id
-           JOIN venue v ON v.id = s.venue_id
-           JOIN job_role jr ON jr.id = s.job_role_id
+           FROM ${t.payroll_record} pr
+           JOIN ${t.attendance} a ON a.id = pr.attendance_id
+           JOIN ${t.shift_assignment} sa ON sa.id = a.shift_assignment_id
+           JOIN ${t.shift} s ON s.id = pr.shift_id
+           JOIN ${t.venue} v ON v.id = s.venue_id
+           JOIN ${t.job_role} jr ON jr.id = s.job_role_id
           WHERE ${where}
           ORDER BY pr.approved_at DESC, pr.id
           LIMIT $5 OFFSET $6`,
         [...params, take, skip],
       );
       // sql-injection-reviewed: dynamic WHERE assembled only from literal fragments and $n / :named placeholders (values pushed to params); identifiers come from allow-lists. Reviewed 2026-11-04.
-      const [{ total }] = await manager.query(`SELECT count(*)::int AS total FROM payroll_record pr WHERE ${where}`, params);
+      const [{ total }] = await manager.query(`SELECT count(*)::int AS total FROM ${t.payroll_record} pr WHERE ${where}`, params);
       const alloc = await allocateRecords(manager, { organisationId: ctx.organisationId!, workspaceId: ctx.workspaceId! },
         rows.map((r) => ({ id: r.id as string, startsAt: r.starts_at as Date })));
       return {
@@ -562,9 +574,10 @@ export class PayrollService {
 
   /** The one approval write: decision + pay statement REQUEST in one conditional UPDATE, then one audit row per record. */
   private async applyApproval(manager: EntityManager, ctx: AuthContext, records: LockedRecord[], bulk: boolean): Promise<void> {
+    const t = businessTables(manager);
     const ids = records.map((r) => r.id);
     const [, updated] = (await manager.query(
-      `UPDATE payroll_record SET status = $3, approved_at = now(), approved_by = $4, statement_status = 'pending', updated_at = now()
+      `UPDATE ${t.payroll_record} SET status = $3, approved_at = now(), approved_by = $4, statement_status = 'pending', updated_at = now()
         WHERE id = ANY($1::uuid[]) AND workspace_id = $2 AND status = $5`,
       [ids, ctx.workspaceId, PayrollRecordStatus.APPROVED, ctx.userId, PayrollRecordStatus.PENDING_APPROVAL],
     )) as [unknown, number];
@@ -595,13 +608,14 @@ export class PayrollService {
   async retryStatement(ctx: AuthContext, id: string): Promise<PayrollRecordView> {
     return this.tenantContext.runInWorkspaceContext(ctx, async (manager) => {
       await this.assertPayrollAccess(manager, ctx, PermissionFlag.PAYROLL_APPROVE);
+      const t = businessTables(manager);
       const [record] = await manager.query(
-        `SELECT id, status, statement_status, statement_attempts FROM payroll_record WHERE id = $1 AND organisation_id = $2 AND workspace_id = $3 FOR UPDATE`,
+        `SELECT id, status, statement_status, statement_attempts FROM ${t.payroll_record} WHERE id = $1 AND organisation_id = $2 AND workspace_id = $3 FOR UPDATE`,
         [id, ctx.organisationId, ctx.workspaceId]);
       if (!record) throw new NotFoundException('Payroll record not found.');
       if (record.statement_status !== 'failed') throw new ConflictException('Only a failed Approved Shift Statement can be retried.');
       await manager.query(
-        `UPDATE payroll_record SET statement_status = 'pending', statement_attempts = 0, statement_error = NULL, updated_at = now() WHERE id = $1 AND statement_status = 'failed'`, [id]);
+        `UPDATE ${t.payroll_record} SET statement_status = 'pending', statement_attempts = 0, statement_error = NULL, updated_at = now() WHERE id = $1 AND statement_status = 'failed'`, [id]);
       this.statementWake?.afterCommit(manager); // J1b: after commit only, as for an approval.
       await this.auditService.record(manager, ctx, AuditAction.SHIFT_STATEMENT_RETRY_REQUESTED, {
         entityType: 'payroll_record', entityId: id, metadata: { previousAttempts: Number(record.statement_attempts) },
@@ -616,11 +630,12 @@ export class PayrollService {
     const trimmed = reason.trim();
     return this.tenantContext.runInWorkspaceContext(ctx, async (manager) => {
       await this.assertPayrollAccess(manager, ctx, PermissionFlag.PAYROLL_APPROVE);
+      const t = businessTables(manager);
       const [record] = await this.lockRecords(manager, ctx, [id]);
       if (!record) throw new NotFoundException('Payroll record not found.');
       assertTransition(PAYROLL_RECORD_TRANSITIONS, record.status, PayrollRecordStatus.REJECTED);
       const [, updated] = (await manager.query(
-        `UPDATE payroll_record SET status = $3, rejected_at = now(), rejected_by = $4, rejection_reason = $5, updated_at = now()
+        `UPDATE ${t.payroll_record} SET status = $3, rejected_at = now(), rejected_by = $4, rejection_reason = $5, updated_at = now()
           WHERE id = $1 AND workspace_id = $2 AND status = $6`,
         [id, ctx.workspaceId, PayrollRecordStatus.REJECTED, ctx.userId, trimmed, PayrollRecordStatus.PENDING_APPROVAL],
       )) as [unknown, number];
@@ -655,9 +670,10 @@ export class PayrollService {
 
   /** Row-locks the records of THIS workspace among `ids`, in id order (deadlock-free for overlapping bulk requests). */
   private async lockRecords(manager: EntityManager, ctx: AuthContext, ids: string[]): Promise<LockedRecord[]> {
+    const t = businessTables(manager);
     return manager.query(
       `SELECT pr.id, pr.status, pr.attendance_id, pr.shift_id, pr.staff_profile_id, pr.worked_minutes, pr.amount_pence, sp.user_id AS staff_user_id
-         FROM payroll_record pr JOIN staff_profile sp ON sp.id = pr.staff_profile_id
+         FROM ${t.payroll_record} pr JOIN ${t.staff_profile} sp ON sp.id = pr.staff_profile_id
         WHERE pr.id = ANY($1::uuid[]) AND pr.organisation_id = $2 AND pr.workspace_id = $3
         ORDER BY pr.id
         FOR UPDATE OF pr`,
@@ -667,7 +683,7 @@ export class PayrollService {
 
   private async views(manager: EntityManager, ctx: AuthContext, ids: string[]): Promise<PayrollRecordView[]> {
     // sql-injection-reviewed: interpolates a module-level SQL constant / constant fragment; every request value is a bound $n parameter.
-    const rows = await manager.query(`${VIEW_SELECT} AND pr.id = ANY($4::uuid[]) ORDER BY pr.id`, [ctx.organisationId, ctx.workspaceId, ctx.userId, ids]);
+    const rows = await manager.query(`${viewSelect(manager)} AND pr.id = ANY($4::uuid[]) ORDER BY pr.id`, [ctx.organisationId, ctx.workspaceId, ctx.userId, ids]);
     return rows.map(toView);
   }
 }

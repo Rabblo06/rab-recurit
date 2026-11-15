@@ -5,6 +5,7 @@ import { DataSource, EntityManager } from 'typeorm';
 import { AuditAction, AuditService } from '@rab/server/engine/core-modules/audit/audit.service';
 import { FileKind } from '@rab/server/engine/core-modules/storage/file-kinds';
 import { FileService } from '@rab/server/engine/core-modules/storage/file.service';
+import { businessTables } from '@rab/server/engine/core-modules/tenant/business-tables';
 import { TenantContextService } from '@rab/server/engine/core-modules/tenant/tenant-context.service';
 import { NotificationService } from '@rab/server/modules/notification/services/notification.service';
 import { assignmentTimeSql } from '@rab/server/modules/scheduling/utils/assignment-time';
@@ -70,8 +71,9 @@ export async function runShiftStatementDispatchCycle(
 ): Promise<ShiftStatementDispatchResult> {
   const result: ShiftStatementDispatchResult = { claimed: 0, published: 0, reconciledMissing: 0, requeued: 0, publishFailed: 0 };
   const candidates = await discoverInWorkspaces(discoveryDataSource, tenantContext, async (m) => {
+    const t = businessTables(m);
     // sql-injection-reviewed: interpolates a module-level SQL constant / constant fragment; every request value is a bound $n parameter.
-    const rows = await m.query<Candidate[]>(`SELECT id, organisation_id, workspace_id, statement_status FROM payroll_record WHERE ${DUE_SQL} ORDER BY approved_at, id LIMIT 200`);
+    const rows = await m.query<Candidate[]>(`SELECT id, organisation_id, workspace_id, statement_status FROM ${t.payroll_record} WHERE ${DUE_SQL} ORDER BY approved_at, id LIMIT 200`);
     // #24: a full discovery page (200) means more due records may remain in this workspace (global-mode follow-up sweep).
     if (rows.length >= STATEMENT_DISCOVERY_LIMIT) noteLegacyBatchLimitReached();
     return rows;
@@ -100,12 +102,14 @@ export async function dispatchStatementScope(
   // T-1 / ST-02: READ ONLY from the binding SELECT on (same round trip), not a separate SET TRANSACTION READ ONLY.
   const candidates = await tenantContext.runInTenantContext(
     workerCtx(organisationId, workspaceId),
-    (m) =>
-      m.query<Candidate[]>(
+    (m) => {
+      const t = businessTables(m);
+      return m.query<Candidate[]>(
         // sql-injection-reviewed: interpolates a module-level SQL constant / constant fragment; every request value is a bound $n parameter.
-        `SELECT id, organisation_id, workspace_id, statement_status FROM payroll_record WHERE ${DUE_SQL} AND id = ANY($1::uuid[]) ORDER BY approved_at, id LIMIT 200`,
+        `SELECT id, organisation_id, workspace_id, statement_status FROM ${t.payroll_record} WHERE ${DUE_SQL} AND id = ANY($1::uuid[]) ORDER BY approved_at, id LIMIT 200`,
         [[...ids]],
-      ),
+      );
+    },
     { readOnly: true },
   );
   await claimAndPublishCandidates(tenantContext, candidates, publish, result);
@@ -139,9 +143,10 @@ async function claimAndPublishCandidates(
 ): Promise<void> {
   for (const c of candidates) {
     const generation = await tenantContext.runInTenantContext(workerCtx(c.organisation_id, c.workspace_id), async (m) => {
+      const t = businessTables(m);
       const [rows] = (await m.query(
         // sql-injection-reviewed: interpolates a module-level SQL constant / constant fragment; every request value is a bound $n parameter.
-        `UPDATE payroll_record SET statement_status = 'queued', statement_dispatch_generation = statement_dispatch_generation + 1,
+        `UPDATE ${t.payroll_record} SET statement_status = 'queued', statement_dispatch_generation = statement_dispatch_generation + 1,
                 statement_queued_at = now(), statement_processing_at = NULL, updated_at = now()
           WHERE id = $1 AND ${DUE_SQL}
           RETURNING statement_dispatch_generation AS generation`,
@@ -191,11 +196,12 @@ export async function processShiftStatementJob(data: ShiftStatementJobData, deps
   let uploaded: Awaited<ReturnType<FileService['putObject']>> | null = null;
   try {
     const prepared = await deps.tenantContext.runInTenantContext(ctx, async (m) => {
+      const t = businessTables(m);
       const [locked] = await m.query(
-        `SELECT statement_status, statement_dispatch_generation, statement_file_id, status FROM payroll_record WHERE id = $1 FOR UPDATE`, [data.payrollRecordId]);
+        `SELECT statement_status, statement_dispatch_generation, statement_file_id, status FROM ${t.payroll_record} WHERE id = $1 FOR UPDATE`, [data.payrollRecordId]);
       if (!locked || locked.statement_file_id || locked.statement_dispatch_generation !== data.generation
         || !['queued', 'processing'].includes(locked.statement_status) || !['approved', 'processing', 'paid'].includes(locked.status)) return null;
-      await m.query(`UPDATE payroll_record SET statement_status = 'processing', statement_processing_at = now(), updated_at = now() WHERE id = $1`, [data.payrollRecordId]);
+      await m.query(`UPDATE ${t.payroll_record} SET statement_status = 'processing', statement_processing_at = now(), updated_at = now() WHERE id = $1`, [data.payrollRecordId]);
       return loadStatementData(m, data.payrollRecordId);
     });
     if (!prepared) return 'stale';
@@ -211,8 +217,9 @@ export async function processShiftStatementJob(data: ShiftStatementJobData, deps
     const upload = uploaded;
 
     const done = await deps.tenantContext.runInTenantContext(ctx, async (m) => {
+      const t = businessTables(m);
       const [locked] = await m.query(
-        `SELECT statement_status, statement_dispatch_generation, statement_file_id, status FROM payroll_record WHERE id = $1 FOR UPDATE`, [data.payrollRecordId]);
+        `SELECT statement_status, statement_dispatch_generation, statement_file_id, status FROM ${t.payroll_record} WHERE id = $1 FOR UPDATE`, [data.payrollRecordId]);
       if (!locked || locked.statement_file_id || locked.statement_dispatch_generation !== data.generation || locked.statement_status !== 'processing'
         || !['approved', 'processing', 'paid'].includes(locked.status)) return false;
       const eventId = await claimWorkerEvent(m, { organisationId: data.organisationId, workspaceId: data.workspaceId,
@@ -220,10 +227,10 @@ export async function processShiftStatementJob(data: ShiftStatementJobData, deps
       if (!eventId) return false;
       const file = await deps.files.registerAvailable(m, upload);
       await m.query(
-        `UPDATE payroll_record SET statement_status = 'generated', statement_file_id = $2, statement_generated_at = now(), statement_error = NULL, updated_at = now() WHERE id = $1`,
+        `UPDATE ${t.payroll_record} SET statement_status = 'generated', statement_file_id = $2, statement_generated_at = now(), statement_error = NULL, updated_at = now() WHERE id = $1`,
         [data.payrollRecordId, file.id]);
       const notified = await notifyStaff(m, deps.notifications, data, prepared.staffUserId, prepared.data);
-      if (notified) await m.query(`UPDATE payroll_record SET statement_notified_at = now() WHERE id = $1`, [data.payrollRecordId]);
+      if (notified) await m.query(`UPDATE ${t.payroll_record} SET statement_notified_at = now() WHERE id = $1`, [data.payrollRecordId]);
       if (deps.audit) {
         await deps.audit.record(m, { organisationId: data.organisationId, userId: '' }, AuditAction.SHIFT_STATEMENT_GENERATED, {
           entityType: 'payroll_record', entityId: data.payrollRecordId, actorUserId: null,
@@ -247,6 +254,7 @@ export async function processShiftStatementJob(data: ShiftStatementJobData, deps
 }
 
 async function loadStatementData(m: EntityManager, recordId: string): Promise<{ data: ApprovedShiftStatementData; staffUserId: string }> {
+  const t = businessTables(m);
   const [r] = await m.query(
     // sql-injection-reviewed: code-constant SQL fragment from a helper called with literal aliases; values are bound $n parameters.
     `SELECT pr.id, pr.organisation_id, pr.workspace_id, pr.worked_minutes, pr.pay_rate_pence, pr.amount_pence, pr.approved_at,
@@ -255,13 +263,13 @@ async function loadStatementData(m: EntityManager, recordId: string): Promise<{ 
             ${assignmentTimeSql().start} AS starts_at, ${assignmentTimeSql().end} AS ends_at,
             (SELECT au.first_name || ' ' || au.last_name FROM core."user" au WHERE au.id = pr.approved_by) AS approved_by_name,
             o.name AS org_name, o.timezone, mw.name AS workspace_name
-       FROM payroll_record pr
-       JOIN attendance a ON a.id = pr.attendance_id
-       JOIN shift_assignment sa ON sa.id = a.shift_assignment_id
-       JOIN shift s ON s.id = pr.shift_id
-       JOIN venue v ON v.id = s.venue_id
-       JOIN job_role jr ON jr.id = s.job_role_id
-       JOIN staff_profile sp ON sp.id = pr.staff_profile_id
+       FROM ${t.payroll_record} pr
+       JOIN ${t.attendance} a ON a.id = pr.attendance_id
+       JOIN ${t.shift_assignment} sa ON sa.id = a.shift_assignment_id
+       JOIN ${t.shift} s ON s.id = pr.shift_id
+       JOIN ${t.venue} v ON v.id = s.venue_id
+       JOIN ${t.job_role} jr ON jr.id = s.job_role_id
+       JOIN ${t.staff_profile} sp ON sp.id = pr.staff_profile_id
        JOIN core."user" u ON u.id = sp.user_id
        JOIN core.organisation o ON o.id = pr.organisation_id
        LEFT JOIN core.manager_workspace mw ON mw.id = pr.workspace_id
@@ -341,8 +349,9 @@ export function statementFailureCode(error: unknown): string {
 async function recordFailure(job: ShiftStatementJobData, deps: ShiftStatementProcessorDeps, error: unknown): Promise<void> {
   const safe = statementFailureCode(error);
   await deps.tenantContext.runInTenantContext(workerCtx(job.organisationId, job.workspaceId), async (m) => {
+    const t = businessTables(m);
     const [, n] = (await m.query(
-      `UPDATE payroll_record SET statement_status = 'failed', statement_attempts = statement_attempts + 1, statement_error = $3, updated_at = now()
+      `UPDATE ${t.payroll_record} SET statement_status = 'failed', statement_attempts = statement_attempts + 1, statement_error = $3, updated_at = now()
         WHERE id = $1 AND statement_dispatch_generation = $2 AND statement_file_id IS NULL AND statement_status IN ('queued','processing')`,
       [job.payrollRecordId, job.generation, safe],
     )) as [unknown, number];

@@ -6,6 +6,12 @@ import { EnvironmentService } from '../environment/environment.service';
 import { SchemaResolverService } from './schema-resolver.service';
 import { TenantContextService } from './tenant-context.service';
 
+// C2-1: these fakes have no QueryRunner, so the schema binding is replaced by a recorder that returns a tagged wrapper; the
+// real binding is covered by schema-bound-entity-manager.spec.ts and the C2-1 integration suite.
+jest.mock('./schema-bound-entity-manager', () => ({
+  bindEntityManagerToSchema: jest.fn(async (manager: object, schema: string) => Object.assign(Object.create(manager), { boundSchema: schema })),
+}));
+
 /**
  * B4: `{ useReplica: true }` routing in TenantContextService. Unit level (fake DataSources); the real standby is
  * exercised by __tests__/integration/replica-lab.integration.spec.ts.
@@ -36,9 +42,11 @@ function replicaStub(route: ReplicaRoute, retry = true) {
   } as unknown as PgReplicaService;
 }
 
+/** C2-0: a canonical workspace id; the HWS-on schema below (workspace_deadbeef…) is its registry name, as businessTables requires. */
+const WS_ID = 'deadbeef-dead-beef-dead-beefdeadbeef';
 const env = (hws: boolean) => ({ get: jest.fn().mockReturnValue(hws) }) as unknown as EnvironmentService;
-const resolver = () => ({ resolve: jest.fn().mockResolvedValue('workspace_abc') }) as unknown as SchemaResolverService;
-const CTX = { organisationId: 'org-1', workspaceId: 'ws-1', userId: 'user-1', role: 'MANAGER' };
+const resolver = () => ({ resolve: jest.fn().mockResolvedValue('workspace_deadbeefdeadbeefdeadbeefdeadbeef') }) as unknown as SchemaResolverService;
+const CTX = { organisationId: 'org-1', workspaceId: WS_ID, userId: 'user-1', role: 'MANAGER' };
 
 describe('TenantContextService useReplica (B4)', () => {
   beforeEach(() => databaseMetrics.reset());
@@ -59,7 +67,9 @@ describe('TenantContextService useReplica (B4)', () => {
     const rep = side('replica');
     const service = new TenantContextService(primary.dataSource, resolver(), env(false), replicaStub({ dataSource: rep.dataSource }));
     const result = await service.runInWorkspaceContext(CTX, async (m, schema) => {
-      expect(m).toBe(rep.manager);
+      // C2-1: the replica transaction's manager, schema-bound to the same schema as its search_path.
+      expect(Object.getPrototypeOf(m)).toBe(rep.manager);
+      expect((m as unknown as { boundSchema: string }).boundSchema).toBe('core');
       return schema;
     }, { useReplica: true });
     expect(result).toBe('core');
@@ -90,7 +100,7 @@ describe('TenantContextService useReplica (B4)', () => {
     expect(primary.calls.join()).not.toContain('search_path');
     const bind = (rep.manager.query as jest.Mock).mock.calls.find((c) => c[0].includes('search_path'));
     expect(bind[0]).toMatch(/^SELECT set_config\('rab.organisation_id'.*set_config\('search_path', \$6, true\)/);
-    expect(bind[1][5]).toBe('workspace_abc');
+    expect(bind[1][5]).toBe('workspace_deadbeefdeadbeefdeadbeefdeadbeef');
     expect(rep.calls).not.toContain(`SELECT set_config('search_path', $1, true)`);
   });
 

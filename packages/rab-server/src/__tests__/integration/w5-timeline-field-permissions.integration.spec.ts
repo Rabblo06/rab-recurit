@@ -15,6 +15,7 @@ import { bookBeforeDeadline } from './helpers/book-before-deadline';
 import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
 import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-pipe';
 import { integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
+import { businessTableOf, siblingTable } from './helpers/hws-fixtures';
 
 /**
  * Wave 5 lane DATA — (1) field permissions on attendance read DTOs (money follows payroll.view: the Venue Manager never
@@ -89,7 +90,7 @@ describeIfDb('wave 5: field permissions + activity timeline (integration)', () =
     [a, b] = seeded.managers as [TestIdentity, TestIdentity];
     c = (await factory.createOrganisationWithManagers(1, { permissions: 'production', workspace: true, label: 'w5tl-c' })).managers[0]!;
     staff = await factory.createStaff(seeded.organisation, { owner: a, label: 'w5tl-s' });
-    await admin.query(`UPDATE core.staff_profile SET employment_status = 'active' WHERE id = $1`, [staff.profileId]);
+    await admin.query(`UPDATE ${await businessTableOf(admin, 'staff_profile', staff.profileId)} SET employment_status = 'active' WHERE id = $1`, [staff.profileId]);
     [tokenA, tokenB, tokenC, tokenStaff] = [await factory.login(a), await factory.login(b), await factory.login(c), await factory.login(staff)];
 
     const venue = await http().post('/rest/v1/venues').set(auth(tokenA)).send({ name: `Timeline Venue ${randomUUID().slice(0, 6)}`, type: 'hotel' });
@@ -123,7 +124,7 @@ describeIfDb('wave 5: field permissions + activity timeline (integration)', () =
     expect(corrected.status).toBe(201);
     expect((await http().post(`/rest/v1/attendance/report/shift/${shiftId}/staff/${staff.profileId}/attendance-review`).set(auth(tokenA))).status).toBe(200);
     expect((await http().patch(`/rest/v1/attendance/report/shift/${shiftId}/finalise`).set(auth(tokenA))).status).toBe(200);
-    [{ id: recordId }] = await admin.query(`SELECT id FROM core.payroll_record WHERE attendance_id = $1`, [attendanceId]);
+    [{ id: recordId }] = await admin.query(`SELECT id FROM ${siblingTable(await businessTableOf(admin, 'attendance', attendanceId), 'payroll_record')} WHERE attendance_id = $1`, [attendanceId]);
     expect((await http().post(`/rest/v1/payroll/records/${recordId}/approve`).set(auth(tokenA))).status).toBe(200);
   });
 

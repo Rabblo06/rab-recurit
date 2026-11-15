@@ -14,6 +14,7 @@ import { createAdminDataSource } from './helpers/admin-datasource';
 import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
 import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-pipe';
 import { integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
+import { businessTable } from './helpers/hws-fixtures';
 
 /**
  * Venue profile photo (VenuePhoto1786718700000): POST/DELETE /rest/v1/venues/:id/photo and the VENUE_PHOTO read
@@ -90,7 +91,7 @@ describeIfDb('venue profile photo (integration)', () => {
   /** A Staff account that can be offered work (factory default employment status is not ACTIVE). */
   async function activeStaff(w: World, label = 'staff'): Promise<TestIdentity> {
     const staff = await factory.createStaff({ id: w.orgId }, { owner: w.a, label });
-    await adminDataSource.query(`UPDATE core.staff_profile SET employment_status = 'active' WHERE id = $1`, [staff.profileId]);
+    await adminDataSource.query(`UPDATE ${businessTable(w.a.workspaceId!, 'staff_profile')} SET employment_status = 'active' WHERE id = $1`, [staff.profileId]);
     return staff;
   }
 
@@ -302,10 +303,10 @@ describeIfDb('venue profile photo (integration)', () => {
       const token = await factory.login(staff);
       expect((await read(token, fileId)).status).toBe(200);
       // Lapsed but not yet swept: still `pending`, expires_at in the past.
-      await adminDataSource.query(`UPDATE core.job_offer SET expires_at = now() - interval '1 minute' WHERE id = $1`, [offerId]);
+      await adminDataSource.query(`UPDATE ${businessTable(w.a.workspaceId!, 'job_offer')} SET expires_at = now() - interval '1 minute' WHERE id = $1`, [offerId]);
       expect((await read(token, fileId)).status).toBe(404);
       // Swept by the expiry job.
-      await adminDataSource.query(`UPDATE core.job_offer SET status = 'expired' WHERE id = $1`, [offerId]);
+      await adminDataSource.query(`UPDATE ${businessTable(w.a.workspaceId!, 'job_offer')} SET status = 'expired' WHERE id = $1`, [offerId]);
       expect((await read(token, fileId)).status).toBe(404);
     });
 
@@ -319,12 +320,12 @@ describeIfDb('venue profile photo (integration)', () => {
       const confirm = await http().post(`/rest/v1/offers/${offerId}/confirm`).set(auth(w.tokenA));
       expect([200, 201]).toContain(confirm.status);
       // Confirmed offers are not subject to the pending-offer expiry.
-      await adminDataSource.query(`UPDATE core.job_offer SET expires_at = now() - interval '1 minute' WHERE id = $1`, [offerId]);
+      await adminDataSource.query(`UPDATE ${businessTable(w.a.workspaceId!, 'job_offer')} SET expires_at = now() - interval '1 minute' WHERE id = $1`, [offerId]);
       expect((await read(token, fileId)).status).toBe(200);
 
-      await adminDataSource.query(`UPDATE core.shift_assignment SET status = 'completed' WHERE shift_id = $1 AND staff_profile_id = $2`, [shiftId, staff.profileId]);
+      await adminDataSource.query(`UPDATE ${businessTable(w.a.workspaceId!, 'shift_assignment')} SET status = 'completed' WHERE shift_id = $1 AND staff_profile_id = $2`, [shiftId, staff.profileId]);
       expect((await read(token, fileId)).status).toBe(404);
-      await adminDataSource.query(`UPDATE core.shift_assignment SET status = 'cancelled' WHERE shift_id = $1 AND staff_profile_id = $2`, [shiftId, staff.profileId]);
+      await adminDataSource.query(`UPDATE ${businessTable(w.a.workspaceId!, 'shift_assignment')} SET status = 'cancelled' WHERE shift_id = $1 AND staff_profile_id = $2`, [shiftId, staff.profileId]);
       expect((await read(token, fileId)).status).toBe(404);
     });
 
@@ -353,9 +354,9 @@ describeIfDb('venue profile photo (integration)', () => {
 
     // Clocking in needs a signed QR + geofence; the attendance row itself is seeded as the owner (same as venue-manager-scoping).
     await adminDataSource.query(
-      `INSERT INTO core.attendance (organisation_id, workspace_id, shift_assignment_id, shift_id, staff_profile_id, clock_in_at, status)
+      `INSERT INTO ${businessTable(w.a.workspaceId!, 'attendance')} (organisation_id, workspace_id, shift_assignment_id, shift_id, staff_profile_id, clock_in_at, status)
        SELECT sa.organisation_id, sa.workspace_id, sa.id, sa.shift_id, sa.staff_profile_id, now() - interval '10 minutes', 'clocked_in'
-         FROM core.shift_assignment sa WHERE sa.shift_id = $1 AND sa.staff_profile_id = $2`,
+         FROM ${businessTable(w.a.workspaceId!, 'shift_assignment')} sa WHERE sa.shift_id = $1 AND sa.staff_profile_id = $2`,
       [shiftId, staff.profileId],
     );
     const active = await http().get('/rest/v1/attendance/me/active').set(auth(staffToken));
@@ -363,7 +364,7 @@ describeIfDb('venue profile photo (integration)', () => {
     expect(active.body.attendance.venuePhotoFileId).toBe(fileId);
 
     await adminDataSource.query(
-      `UPDATE core.attendance SET status = 'clocked_out', clock_out_at = now(), clock_out_method = 'manual', break_minutes = 0, worked_minutes = 10, earned_pence = 200
+      `UPDATE ${businessTable(w.a.workspaceId!, 'attendance')} SET status = 'clocked_out', clock_out_at = now(), clock_out_method = 'manual', break_minutes = 0, worked_minutes = 10, earned_pence = 200
         WHERE shift_id = $1 AND staff_profile_id = $2`,
       [shiftId, staff.profileId],
     );

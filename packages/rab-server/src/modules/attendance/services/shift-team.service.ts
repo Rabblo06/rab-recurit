@@ -3,6 +3,7 @@ import { ForbiddenException, Injectable, NotFoundException, ServiceUnavailableEx
 import { PermissionsService } from '../../../engine/core-modules/permissions/permissions.service';
 import { AuthContext } from '../../../engine/core-modules/tenant/auth-context.interface';
 import { TenantContextService } from '../../../engine/core-modules/tenant/tenant-context.service';
+import { businessTables } from '../../../engine/core-modules/tenant/business-tables';
 import { Shift } from '../../scheduling/entities/shift.entity';
 import { ShiftAssignment } from '../../scheduling/entities/shift-assignment.entity';
 import { StaffProfile } from '../../staff/entities/staff-profile.entity';
@@ -43,16 +44,17 @@ export class ShiftTeamService {
       // The additive SELECT policy rechecks confirmed membership and live shift.
       await manager.query(`SELECT set_config('rab.team_shift_id', $1, true), set_config('rab.team_staff_id', $2, true)`, [shiftId, caller.id]);
       const time = assignmentTimeSql();
+      const t = businessTables(manager);
       // sql-injection-reviewed: code-constant SQL fragment from a helper called with literal aliases; values are bound $n parameters.
       const rows = await manager.query(`
         SELECT COALESCE(NULLIF(trim(u.first_name), ''), 'Team member') AS "displayName",
                ${time.start} AS "startsAt", ${time.end} AS "endsAt",
                sa.staff_profile_id = $4 AS "isYou"
-        FROM shift_assignment sa
-        JOIN shift s ON s.id = sa.shift_id AND s.organisation_id = sa.organisation_id AND s.workspace_id = sa.workspace_id
-        JOIN staff_profile sp ON sp.id = sa.staff_profile_id AND sp.organisation_id = sa.organisation_id AND sp.workspace_id = sa.workspace_id
+        FROM ${t.shift_assignment} sa
+        JOIN ${t.shift} s ON s.id = sa.shift_id AND s.organisation_id = sa.organisation_id AND s.workspace_id = sa.workspace_id
+        JOIN ${t.staff_profile} sp ON sp.id = sa.staff_profile_id AND sp.organisation_id = sa.organisation_id AND sp.workspace_id = sa.workspace_id
         JOIN core."user" u ON u.id = sp.user_id AND u.organisation_id = sp.organisation_id
-        JOIN venue v ON v.id = s.venue_id AND v.organisation_id = s.organisation_id AND v.workspace_id = s.workspace_id
+        JOIN ${t.venue} v ON v.id = s.venue_id AND v.organisation_id = s.organisation_id AND v.workspace_id = s.workspace_id
         WHERE sa.shift_id = $1 AND sa.organisation_id = $2 AND sa.workspace_id = $3
           AND sa.status = 'confirmed' AND s.venue_id = $5 AND s.status NOT IN ('cancelled', 'completed')
         ORDER BY ${time.start}, u.first_name, sa.id

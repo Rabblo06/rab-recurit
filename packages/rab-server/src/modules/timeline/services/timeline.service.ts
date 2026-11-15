@@ -5,6 +5,7 @@ import { EntityManager } from 'typeorm';
 import { PermissionsService } from '../../../engine/core-modules/permissions/permissions.service';
 import { ResourceScopeService } from '../../../engine/core-modules/resource-scope/resource-scope.service';
 import { AuthContext } from '../../../engine/core-modules/tenant/auth-context.interface';
+import { businessTables } from '../../../engine/core-modules/tenant/business-tables';
 import { TenantContextService } from '../../../engine/core-modules/tenant/tenant-context.service';
 import { PayrollService } from '../../payroll/services/payroll.service';
 import { SchedulingService } from '../../scheduling/services/scheduling.service';
@@ -124,17 +125,18 @@ export class TimelineService {
       // A custom workspace-member may read the shift, but never offers / attendance / payroll — only the shift's own rows.
       if (await this.isDelegated(m, ctx)) return this.page(m, ctx, { entities: [{ type: 'shift', ids: [shiftId] }], showMoney: false }, query);
       const showMoney = await this.payroll.canAccessPayroll(m, ctx, PermissionFlag.PAYROLL_VIEW);
+      const t = businessTables(m);
       const p = [shiftId];
       const entities: TimelineScope['entities'] = [
         { type: 'shift', ids: [shiftId] },
-        { type: 'shift_assignment', ids: await this.ids(m, `SELECT id FROM shift_assignment WHERE shift_id = $1`, p) },
-        { type: 'offer', ids: await this.ids(m, `SELECT o.id FROM job_offer o JOIN shift_assignment sa ON sa.id = o.shift_assignment_id WHERE sa.shift_id = $1`, p) },
-        { type: 'attendance', ids: await this.ids(m, `SELECT id FROM attendance WHERE shift_id = $1`, p) },
-        { type: 'shift_report', ids: await this.ids(m, `SELECT id FROM shift_report WHERE shift_id = $1`, p) },
-        { type: 'replacement_request', ids: await this.ids(m, `SELECT id FROM replacement_request WHERE shift_id = $1`, p) },
-        { type: 'shift_staff_review', ids: await this.ids(m, `SELECT id FROM shift_staff_review WHERE shift_id = $1`, p) },
+        { type: 'shift_assignment', ids: await this.ids(m, `SELECT id FROM ${t.shift_assignment} WHERE shift_id = $1`, p) },
+        { type: 'offer', ids: await this.ids(m, `SELECT o.id FROM ${t.job_offer} o JOIN ${t.shift_assignment} sa ON sa.id = o.shift_assignment_id WHERE sa.shift_id = $1`, p) },
+        { type: 'attendance', ids: await this.ids(m, `SELECT id FROM ${t.attendance} WHERE shift_id = $1`, p) },
+        { type: 'shift_report', ids: await this.ids(m, `SELECT id FROM ${t.shift_report} WHERE shift_id = $1`, p) },
+        { type: 'replacement_request', ids: await this.ids(m, `SELECT id FROM ${t.replacement_request} WHERE shift_id = $1`, p) },
+        { type: 'shift_staff_review', ids: await this.ids(m, `SELECT id FROM ${t.shift_staff_review} WHERE shift_id = $1`, p) },
       ];
-      if (showMoney) entities.push({ type: 'payroll_record', ids: await this.ids(m, `SELECT id FROM payroll_record WHERE shift_id = $1`, p) });
+      if (showMoney) entities.push({ type: 'payroll_record', ids: await this.ids(m, `SELECT id FROM ${t.payroll_record} WHERE shift_id = $1`, p) });
       return this.page(m, ctx, { entities, showMoney }, query);
     });
   }
@@ -144,8 +146,9 @@ export class TimelineService {
     if (!UUID.test(offerId)) throw new NotFoundException('Offer not found.');
     const shiftId = await this.tenantContext.runInWorkspaceContext(ctx, async (m) => {
       if (await this.isDelegated(m, ctx)) throw new NotFoundException('Offer not found.'); // offers are not a member object
+      const t = businessTables(m);
       const [row] = await m.query<Array<{ shift_id: string }>>(
-        `SELECT sa.shift_id FROM job_offer o JOIN shift_assignment sa ON sa.id = o.shift_assignment_id WHERE o.id = $1 AND o.organisation_id = $2`,
+        `SELECT sa.shift_id FROM ${t.job_offer} o JOIN ${t.shift_assignment} sa ON sa.id = o.shift_assignment_id WHERE o.id = $1 AND o.organisation_id = $2`,
         [offerId, ctx.organisationId],
       );
       if (!row) throw new NotFoundException('Offer not found.');
@@ -160,16 +163,17 @@ export class TimelineService {
     return this.tenantContext.runInWorkspaceContext(ctx, async (m) => {
       await this.assertFlag(m, ctx, PermissionFlag.SCHEDULE_VIEW);
       const showMoney = await this.payroll.canAccessPayroll(m, ctx, PermissionFlag.PAYROLL_VIEW);
-      const seat = await this.ids(m, `SELECT shift_assignment_id AS id FROM job_offer WHERE id = $1`, [offerId]);
+      const t = businessTables(m);
+      const seat = await this.ids(m, `SELECT shift_assignment_id AS id FROM ${t.job_offer} WHERE id = $1`, [offerId]);
       const entities: TimelineScope['entities'] = [
         { type: 'offer', ids: [offerId] },
         { type: 'shift_assignment', ids: seat },
-        { type: 'attendance', ids: await this.ids(m, `SELECT id FROM attendance WHERE shift_assignment_id = ANY($1::uuid[])`, [seat]) },
+        { type: 'attendance', ids: await this.ids(m, `SELECT id FROM ${t.attendance} WHERE shift_assignment_id = ANY($1::uuid[])`, [seat]) },
       ];
       if (showMoney) {
         entities.push({
           type: 'payroll_record',
-          ids: await this.ids(m, `SELECT pr.id FROM payroll_record pr JOIN attendance a ON a.id = pr.attendance_id WHERE a.shift_assignment_id = ANY($1::uuid[])`, [seat]),
+          ids: await this.ids(m, `SELECT pr.id FROM ${t.payroll_record} pr JOIN ${t.attendance} a ON a.id = pr.attendance_id WHERE a.shift_assignment_id = ANY($1::uuid[])`, [seat]),
         });
       }
       return this.page(m, ctx, { entities, showMoney }, query);
@@ -186,7 +190,8 @@ export class TimelineService {
     await this.staff.get(ctx, staffProfileId);
     return this.tenantContext.runInWorkspaceContext(ctx, async (m) => {
       await this.assertFlag(m, ctx, PermissionFlag.STAFF_VIEW);
-      const [profile] = await m.query<Array<{ user_id: string }>>(`SELECT user_id FROM staff_profile WHERE id = $1`, [staffProfileId]);
+      const t = businessTables(m);
+      const [profile] = await m.query<Array<{ user_id: string }>>(`SELECT user_id FROM ${t.staff_profile} WHERE id = $1`, [staffProfileId]);
       if (!profile) throw new NotFoundException('Staff member not found.');
       if (await this.isDelegated(m, ctx)) {
         return this.page(m, ctx, { entities: [{ type: 'staff_profile', ids: [staffProfileId] }], showMoney: false }, query);
@@ -195,11 +200,11 @@ export class TimelineService {
       const p = [staffProfileId];
       const entities: TimelineScope['entities'] = [
         { type: 'staff_profile', ids: [staffProfileId] },
-        { type: 'offer', ids: await this.ids(m, `SELECT id FROM job_offer WHERE staff_profile_id = $1`, p) },
-        { type: 'shift_assignment', ids: await this.ids(m, `SELECT id FROM shift_assignment WHERE staff_profile_id = $1`, p) },
-        { type: 'attendance', ids: await this.ids(m, `SELECT id FROM attendance WHERE staff_profile_id = $1`, p) },
+        { type: 'offer', ids: await this.ids(m, `SELECT id FROM ${t.job_offer} WHERE staff_profile_id = $1`, p) },
+        { type: 'shift_assignment', ids: await this.ids(m, `SELECT id FROM ${t.shift_assignment} WHERE staff_profile_id = $1`, p) },
+        { type: 'attendance', ids: await this.ids(m, `SELECT id FROM ${t.attendance} WHERE staff_profile_id = $1`, p) },
       ];
-      if (showMoney) entities.push({ type: 'payroll_record', ids: await this.ids(m, `SELECT id FROM payroll_record WHERE staff_profile_id = $1`, p) });
+      if (showMoney) entities.push({ type: 'payroll_record', ids: await this.ids(m, `SELECT id FROM ${t.payroll_record} WHERE staff_profile_id = $1`, p) });
       return this.page(m, ctx, { entities, subjectUserId: profile.user_id, showMoney }, query);
     });
   }
@@ -211,9 +216,10 @@ export class TimelineService {
       await this.assertFlag(m, ctx, PermissionFlag.ATTENDANCE_VIEW);
       const scope = await this.resourceScope.resolveTx(m, ctx);
       if (scope.kind === 'owner' && scope.delegated) throw new NotFoundException('Attendance not found.');
+      const t = businessTables(m);
       const [row] = await m.query<Array<{ shift_assignment_id: string; venue_id: string; created_by: string | null }>>(
         `SELECT a.shift_assignment_id, s.venue_id, sp.created_by
-           FROM attendance a JOIN shift s ON s.id = a.shift_id JOIN staff_profile sp ON sp.id = a.staff_profile_id
+           FROM ${t.attendance} a JOIN ${t.shift} s ON s.id = a.shift_id JOIN ${t.staff_profile} sp ON sp.id = a.staff_profile_id
           WHERE a.id = $1 AND a.organisation_id = $2`,
         [attendanceId, ctx.organisationId],
       );
@@ -224,7 +230,7 @@ export class TimelineService {
         { type: 'attendance', ids: [attendanceId] },
         { type: 'shift_assignment', ids: [row!.shift_assignment_id] },
       ];
-      if (showMoney) entities.push({ type: 'payroll_record', ids: await this.ids(m, `SELECT id FROM payroll_record WHERE attendance_id = $1`, [attendanceId]) });
+      if (showMoney) entities.push({ type: 'payroll_record', ids: await this.ids(m, `SELECT id FROM ${t.payroll_record} WHERE attendance_id = $1`, [attendanceId]) });
       return this.page(m, ctx, { entities, showMoney }, query);
     });
   }
@@ -234,8 +240,9 @@ export class TimelineService {
     if (!UUID.test(recordId)) throw new NotFoundException('Payroll record not found.');
     return this.tenantContext.runInWorkspaceContext(ctx, async (m) => {
       await this.payroll.assertPayrollAccess(m, ctx, PermissionFlag.PAYROLL_VIEW);
+      const t = businessTables(m);
       const [row] = await m.query<Array<{ attendance_id: string }>>(
-        `SELECT attendance_id FROM payroll_record WHERE id = $1 AND organisation_id = $2 AND workspace_id = $3`,
+        `SELECT attendance_id FROM ${t.payroll_record} WHERE id = $1 AND organisation_id = $2 AND workspace_id = $3`,
         [recordId, ctx.organisationId, ctx.workspaceId],
       );
       if (!row) throw new NotFoundException('Payroll record not found.');

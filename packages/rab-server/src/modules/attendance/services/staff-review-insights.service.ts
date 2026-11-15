@@ -7,6 +7,7 @@ import { StaffProfile } from '../../staff/entities/staff-profile.entity';
 import { PermissionsService } from '../../../engine/core-modules/permissions/permissions.service';
 import { AuthContext } from '../../../engine/core-modules/tenant/auth-context.interface';
 import { TenantContextService } from '../../../engine/core-modules/tenant/tenant-context.service';
+import { businessTables } from '../../../engine/core-modules/tenant/business-tables';
 import { ListStaffReviewsDto, StaffReviewRange } from '../dto/list-staff-reviews.dto';
 import {
   aggregateStaffReviews,
@@ -66,17 +67,18 @@ export class StaffReviewInsightsService {
       const range = dto.range ?? 'all';
       const window = await this.window(manager, ctx, range, dto.from ?? null, dto.to ?? null);
       const rows = await this.rows(manager, ctx, staffProfileId, window, null);
+      const t = businessTables(manager);
       const [identity] = await manager.query(
         `SELECT u.first_name || ' ' || u.last_name AS name, jr.name AS role_name
-           FROM core."user" u LEFT JOIN job_role jr ON jr.id = $2 WHERE u.id = $1`,
+           FROM core."user" u LEFT JOIN ${t.job_role} jr ON jr.id = $2 WHERE u.id = $1`,
         [profile.userId, profile.jobRoleId ?? null],
       );
       const venueManagers: Array<{ userId: string; name: string; venues: string[] }> = await manager.query(
         `SELECT mp.user_id AS "userId", u.first_name || ' ' || u.last_name AS name,
                 coalesce(array_agg(DISTINCT v.name) FILTER (WHERE v.name IS NOT NULL), '{}') AS venues
            FROM core.manager_profile mp JOIN core."user" u ON u.id = mp.user_id
-           LEFT JOIN manager_venue mv ON mv.manager_profile_id = mp.id
-           LEFT JOIN venue v ON v.id = mv.venue_id
+           LEFT JOIN ${t.manager_venue} mv ON mv.manager_profile_id = mp.id
+           LEFT JOIN ${t.venue} v ON v.id = mv.venue_id
           WHERE mp.organisation_id = $1 AND mp.workspace_id = $2 AND mp.type = 'venue' AND u.status = 'active'
           GROUP BY mp.user_id, u.first_name, u.last_name`,
         [ctx.organisationId, ctx.workspaceId],
@@ -152,6 +154,7 @@ export class StaffReviewInsightsService {
     reviewId: string | null,
   ): Promise<StaffReviewRow[]> {
     const t = assignmentTimeSql();
+    const tables = businessTables(manager);
     const raw = await manager.query(
       // sql-injection-reviewed: code-constant SQL fragment from a helper called with literal aliases; values are bound $n parameters.
       `SELECT r.id, r.shift_id AS "shiftId", r.reviewer_user_id AS "reviewerUserId",
@@ -159,11 +162,11 @@ export class StaffReviewInsightsService {
               ${t.start} AS "startsAt", ${t.end} AS "endsAt",
               r.grooming, r.attitude, r.skills, r.attendance, r.time_keeping AS "timeKeeping", r.feedback,
               r.created_at AS "createdAt", r.updated_at AS "updatedAt"
-         FROM shift_staff_review r
-         JOIN shift s ON s.id = r.shift_id
-         JOIN shift_assignment sa ON sa.shift_id = r.shift_id AND sa.staff_profile_id = r.staff_profile_id
-         JOIN venue v ON v.id = s.venue_id
-         JOIN job_role jr ON jr.id = s.job_role_id
+         FROM ${tables.shift_staff_review} r
+         JOIN ${tables.shift} s ON s.id = r.shift_id
+         JOIN ${tables.shift_assignment} sa ON sa.shift_id = r.shift_id AND sa.staff_profile_id = r.staff_profile_id
+         JOIN ${tables.venue} v ON v.id = s.venue_id
+         JOIN ${tables.job_role} jr ON jr.id = s.job_role_id
          JOIN core."user" ru ON ru.id = r.reviewer_user_id
         WHERE r.organisation_id = $1 AND r.staff_profile_id = $2 AND s.created_by = $3
           AND ($4::uuid IS NULL OR r.id = $4)

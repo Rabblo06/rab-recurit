@@ -1,4 +1,5 @@
 import { NO_SHOW_GRACE_MINUTES } from '@rab/server/modules/attendance/services/no-show-policy';
+import { businessTables } from '@rab/server/engine/core-modules/tenant/business-tables';
 import { assignmentTimeSql, confirmationDeadlineSql } from '@rab/server/modules/scheduling/utils/assignment-time';
 import {
   parseTimerTriggerPayload,
@@ -81,11 +82,12 @@ export async function decideTimerTrigger(
   payload: TimerTriggerJobData,
   settings: { lateClockInGraceMinutes: number },
 ): Promise<TimerTriggerDecision> {
+  const t = businessTables(manager);
   let dueAt: number | null;
   let dbNow: number | null;
   if (kind === 'offer-expiry') {
     const [row] = await manager.query<Array<{ status: string; expires_at: Date; db_now: Date }>>(
-      `SELECT status, expires_at, now() AS db_now FROM job_offer WHERE id = $1`,
+      `SELECT status, expires_at, now() AS db_now FROM ${t.job_offer} WHERE id = $1`,
       [payload.subjectId],
     );
     if (!row) return { outcome: 'noop' };
@@ -98,7 +100,7 @@ export async function decideTimerTrigger(
     const [row] = await manager.query<Array<{ status: string; shift_status: string; deadline_at: Date; db_now: Date }>>(
       // sql-injection-reviewed: code-constant SQL fragment from a helper called with literal aliases; values are bound $n parameters.
       `SELECT o.status, s.status AS shift_status, ${confirmationDeadlineSql('o', 'sa', 's')} AS deadline_at, now() AS db_now
-         FROM job_offer o JOIN shift_assignment sa ON sa.id = o.shift_assignment_id JOIN shift s ON s.id = sa.shift_id
+         FROM ${t.job_offer} o JOIN ${t.shift_assignment} sa ON sa.id = o.shift_assignment_id JOIN ${t.shift} s ON s.id = sa.shift_id
         WHERE o.id = $1`,
       [payload.subjectId],
     );
@@ -107,18 +109,18 @@ export async function decideTimerTrigger(
     if (row.status !== 'staff_accepted' || row.shift_status === 'cancelled') return { outcome: 'noop' };
     dueAt = epoch(row.deadline_at);
   } else {
-    const t = assignmentTimeSql();
+    const at = assignmentTimeSql();
     const eventKey = `${kind}:${payload.subjectId}`;
     const [row] = await manager.query<
       Array<{ status: string; shift_status: string; checked_in: boolean; has_attendance: boolean; already_claimed: boolean; starts_at: Date; db_now: Date }>
     >(
       // sql-injection-reviewed: code-constant SQL fragment from a helper called with literal aliases; values are bound $n parameters.
       `SELECT sa.status, s.status AS shift_status, sa.checked_in_at IS NOT NULL AS checked_in,
-              EXISTS (SELECT 1 FROM attendance a WHERE a.shift_assignment_id = sa.id) AS has_attendance,
+              EXISTS (SELECT 1 FROM ${t.attendance} a WHERE a.shift_assignment_id = sa.id) AS has_attendance,
               EXISTS (SELECT 1 FROM core.worker_event we WHERE we.event_key = $2 AND we.status IN ('completed', 'cancelled')) AS already_claimed,
-              ${t.start} AS starts_at, now() AS db_now
-         FROM shift_assignment sa
-         JOIN shift s ON s.id = sa.shift_id
+              ${at.start} AS starts_at, now() AS db_now
+         FROM ${t.shift_assignment} sa
+         JOIN ${t.shift} s ON s.id = sa.shift_id
         WHERE sa.id = $1`,
       [payload.subjectId, eventKey],
     );

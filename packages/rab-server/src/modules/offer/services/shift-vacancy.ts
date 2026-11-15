@@ -1,5 +1,7 @@
 import { EntityManager } from 'typeorm';
 
+import { businessTables } from '../../../engine/core-modules/tenant/business-tables';
+
 /**
  * The ONE definition of "this assignment occupies a seat on its shift", shared by the replacement form's vacancy read,
  * the pipeline summary and the approval-time capacity claim in `applyOfferConfirmation` — never re-implemented.
@@ -46,6 +48,7 @@ export interface ShiftVacancy {
  * first (`SELECT ... FOR UPDATE`), so concurrent approvals serialise and each sees the previous one's committed seat.
  */
 export async function loadShiftVacancy(manager: EntityManager, shiftId: string): Promise<ShiftVacancy> {
+  const t = businessTables(manager);
   const [row] = await manager.query(
     // sql-injection-reviewed: code-constant SQL fragment from a helper called with literal aliases; values are bound $n parameters.
     `SELECT s.required_count, s.filled_count,
@@ -54,8 +57,8 @@ export async function loadShiftVacancy(manager: EntityManager, shiftId: string):
             count(sa.id) FILTER (WHERE sa.status = 'no_show' AND sa.attendance_reviewed_at IS NULL)::int AS provisional_no_shows,
             count(sa.id) FILTER (WHERE sa.status = 'offered')::int AS pending_offers,
             count(sa.id) FILTER (WHERE sa.status = 'staff_accepted')::int AS accepted_awaiting
-       FROM shift s
-       LEFT JOIN shift_assignment sa ON sa.shift_id = s.id
+       FROM ${t.shift} s
+       LEFT JOIN ${t.shift_assignment} sa ON sa.shift_id = s.id
       WHERE s.id = $1
       GROUP BY s.id, s.required_count, s.filled_count`,
     [shiftId],

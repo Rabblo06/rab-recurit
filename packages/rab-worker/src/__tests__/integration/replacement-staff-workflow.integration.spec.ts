@@ -38,6 +38,8 @@ import { runReplacementStaffCycle } from '../../queues/rab-offers/replacement-st
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { generateFixturePassword } from './helpers/fixture-password';
 import { integrationTestDatabaseReady } from '@rab/server/database/typeorm/core/integration-test-database-gate';
+import { provisionFixtureWorkspace } from './helpers/test-identities';
+import { businessSchema, businessTable } from './helpers/hws-fixtures';
 
 const FIXTURE_PASSWORD = generateFixturePassword();
 
@@ -79,7 +81,8 @@ describeIfDb('replacement-staff workflow (integration)', () => {
       // migration (P2.2 fix — same systemic gap already found in rab-server's own
       // bulk-email-abuse-cases/scheduling-offer-abuse-cases, and in this package's own
       // worker-event-idempotency file).
-      await manager.query(`SELECT set_config('search_path', 'core', true)`);
+      // Part C1: the workspace's own schema with HWS on (the code default outside production), core with it off.
+      await manager.query(`SELECT set_config('search_path', $1, true)`, [ctx.workspaceId ? businessSchema(ctx.workspaceId) : 'core']);
       await manager.query(`SELECT set_config('rab.organisation_id', $1, true)`, [ctx.organisationId]);
       await manager.query(`SELECT set_config('rab.workspace_id', $1, true)`, [ctx.workspaceId ?? '']);
       await manager.query(`SELECT set_config('rab.user_id', $1, true)`, [ctx.userId]);
@@ -149,6 +152,8 @@ describeIfDb('replacement-staff workflow (integration)', () => {
         subdomain: `${label}-${managerUserId.slice(0, 8)}`,
         status: 'active',
       });
+      await provisionFixtureWorkspace(manager, workspace.id); // Part C1: READY schema, as the product builds it
+      await manager.query(`SELECT set_config('search_path', $1, true)`, [businessSchema(workspace.id)]); // later fixture writes in this transaction land in the workspace's schema
       workspaceId = workspace.id;
       // rab.workspace_id must be bound before this insert — same ordering bug already fixed in
       // worker-event-idempotency.integration.spec.ts (P2.2).
@@ -681,7 +686,7 @@ describeIfDb('replacement-staff workflow (integration)', () => {
       const final = await getRequest(fx, requestId);
       expect(final!.status).toBe(ReplacementRequestStatus.OFFER_SENT);
       const offerCount = await withContext({ organisationId: fx.organisationId, workspaceId: fx.workspaceId, userId: fx.managerUserId }, (m) =>
-        m.query<Array<{ count: string }>>(`SELECT count(*) FROM core.job_offer WHERE staff_profile_id = ANY($1::uuid[])`, [candidates.map((c) => c.staffProfileId)]),
+        m.query<Array<{ count: string }>>(`SELECT count(*) FROM job_offer WHERE staff_profile_id = ANY($1::uuid[])`, [candidates.map((c) => c.staffProfileId)]),
       );
       expect(Number(offerCount[0]!.count)).toBe(1);
     });
@@ -717,7 +722,7 @@ describeIfDb('replacement-staff workflow (integration)', () => {
 
       const final = await getRequest(fx, requestId);
       const offerCount = await withContext({ organisationId: fx.organisationId, workspaceId: fx.workspaceId, userId: fx.managerUserId }, (m) =>
-        m.query<Array<{ count: string }>>(`SELECT count(*) FROM core.job_offer WHERE staff_profile_id = $1`, [candidate.staffProfileId]),
+        m.query<Array<{ count: string }>>(`SELECT count(*) FROM job_offer WHERE staff_profile_id = $1`, [candidate.staffProfileId]),
       );
       const offersSent = Number(offerCount[0]!.count);
       if (final!.status === ReplacementRequestStatus.OFFER_SENT) {
@@ -740,7 +745,7 @@ describeIfDb('replacement-staff workflow (integration)', () => {
       const final = await getRequest(fx, requestId);
       expect(final!.status).toBe(ReplacementRequestStatus.CANCELLED);
       const offerCount = await withContext({ organisationId: fx.organisationId, workspaceId: fx.workspaceId, userId: fx.managerUserId }, (m) =>
-        m.query<Array<{ count: string }>>(`SELECT count(*) FROM core.job_offer WHERE staff_profile_id = $1`, [candidate.staffProfileId]),
+        m.query<Array<{ count: string }>>(`SELECT count(*) FROM job_offer WHERE staff_profile_id = $1`, [candidate.staffProfileId]),
       );
       expect(Number(offerCount[0]!.count)).toBe(0);
     });
@@ -801,7 +806,7 @@ describeIfDb('replacement-staff workflow (integration)', () => {
 
       await expect(replacementRequestService.approve(authCtx(fx), requestId, { staffProfileId: second.staffProfileId })).rejects.toBeInstanceOf(ConflictException);
       const offerCount = await withContext({ organisationId: fx.organisationId, workspaceId: fx.workspaceId, userId: fx.managerUserId }, (m) =>
-        m.query<Array<{ count: string }>>(`SELECT count(*) FROM core.job_offer WHERE staff_profile_id = ANY($1::uuid[])`, [[candidate.staffProfileId, second.staffProfileId]]),
+        m.query<Array<{ count: string }>>(`SELECT count(*) FROM job_offer WHERE staff_profile_id = ANY($1::uuid[])`, [[candidate.staffProfileId, second.staffProfileId]]),
       );
       expect(Number(offerCount[0]!.count)).toBe(1);
     });
@@ -907,7 +912,8 @@ describeIfDb('replacement-staff workflow (integration)', () => {
         await m.query(`SELECT set_config('rab.organisation_id', '', true)`);
         await m.query(`SELECT set_config('rab.workspace_id', '', true)`);
         await m.query(`SELECT set_config('rab.user_id', '', true)`);
-        return m.query<Array<{ id: string }>>(`SELECT id FROM core.replacement_request WHERE id = $1`, [requestId]);
+        // Part C1: aimed at the workspace schema that holds the request, with no tenant context bound.
+        return m.query<Array<{ id: string }>>(`SELECT id FROM ${businessTable(fx.workspaceId, 'replacement_request')} WHERE id = $1`, [requestId]);
       });
       expect(seenWithNoContext).toHaveLength(0);
     });
@@ -939,6 +945,8 @@ describeIfDb('replacement-staff workflow (integration)', () => {
         const userId = userResult.identifiers[0]!.id as string;
         await manager.query(`SELECT set_config('rab.user_id', $1, true)`, [userId]);
         const workspace = await manager.save(ManagerWorkspace, { organisationId: fx.organisationId, ownerUserId: userId, name: `Other Workspace ${userId}`, subdomain: `otherws-${userId.slice(0, 8)}`, status: 'active' });
+        await provisionFixtureWorkspace(manager, workspace.id); // Part C1: READY schema, as the product builds it
+        await manager.query(`SELECT set_config('search_path', $1, true)`, [businessSchema(workspace.id)]); // later fixture writes in this transaction land in the workspace's schema
         // rab.workspace_id was bound to '' (outer withContext called with workspaceId: null) — rebind
         // to this newly-created workspace before the insert (P2.2 fix, same pattern as elsewhere).
         await manager.query(`SELECT set_config('rab.workspace_id', $1, true)`, [workspace.id]);

@@ -16,6 +16,7 @@ import { TenantContextService } from '../../engine/core-modules/tenant/tenant-co
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { TestIdentityFactory } from './helpers/test-identities';
 import { generateFixturePassword } from './helpers/fixture-password';
+import { businessSchema } from './helpers/hws-fixtures';
 import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-pipe';
 import { integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
 
@@ -54,7 +55,9 @@ describeIfDb('bulk email abuse cases (integration)', () => {
       // transaction's own search_path, which only TenantContextService's real runInTenantContext/
       // runInWorkspaceContext binds. This hand-rolled helper never did, and so broke the moment
       // that cutover landed — found live via a real "relation staff_profile does not exist".
-      await manager.query(`SELECT set_config('search_path', 'core', true)`);
+      // Part C1: the workspace's own schema with HWS on (the code default outside production), core with it off or without a
+      // workspace.
+      await manager.query(`SELECT set_config('search_path', $1, true)`, [ctx.workspaceId ? businessSchema(ctx.workspaceId) : 'core']);
       return fn(manager);
     });
   }

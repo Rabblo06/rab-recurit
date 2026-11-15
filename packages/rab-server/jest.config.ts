@@ -11,6 +11,9 @@ export default {
   globalSetup: '<rootDir>/src/jest-global-setup.ts',
   setupFiles: ['<rootDir>/src/jest-setup.ts'],
   setupFilesAfterEnv: ['<rootDir>/src/jest-probe.ts'],
+  // Part C1 (C1b): node, plus dropping the workspace schemas a test file's fixtures created once the file is done, so one
+  // shared in-band database does not accumulate hundreds of schemas (CREWFLOW_TEST_KEEP_FIXTURE_SCHEMAS=true keeps them).
+  testEnvironment: '<rootDir>/src/__tests__/integration/helpers/fixture-schema-cleanup-environment.ts',
   // Default node_modules exclusion doesn't match workspace packages resolved
   // through a symlink (@rab/shared, @rab/ui) — their real path is outside
   // node_modules, so ts-jest would otherwise try to "compile" their already-built

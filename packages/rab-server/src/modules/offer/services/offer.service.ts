@@ -42,6 +42,7 @@ import { approverAudience, offerAudience, shiftAudience } from '../../../engine/
 import { ResourceScope, ResourceScopeService } from '../../../engine/core-modules/resource-scope/resource-scope.service';
 import { AuthContext } from '../../../engine/core-modules/tenant/auth-context.interface';
 import { TenantContextService } from '../../../engine/core-modules/tenant/tenant-context.service';
+import { businessTables } from '../../../engine/core-modules/tenant/business-tables';
 import { isLegacyUnpagedRequest, keysetSkipTake, LEGACY_UNPAGED_LIMIT, paginationSkipTake } from '../../../engine/dto/pagination.dto';
 import { decodeOptionalKeysetCursor, keysetBeforeSql, keysetPage, keysetTimestampSql } from '../../../engine/dto/keyset-cursor';
 import { toIlikePattern } from '../../../engine/utils/ilike-pattern.util';
@@ -208,8 +209,11 @@ export interface OfferBatchSummary {
   recipients: OfferSummary[];
 }
 
-// sql-injection-reviewed: code-constant SQL fragment from a helper called with literal aliases; values are bound $n parameters.
-const OFFER_SUMMARY_SELECT = `
+/** The offer summary SELECT, over `manager`'s transaction's schema-qualified business tables. */
+function offerSummarySelect(manager: EntityManager): string {
+  const t = businessTables(manager);
+  // sql-injection-reviewed: code-constant SQL fragment from a helper called with literal aliases; values are bound $n parameters.
+  return `
   SELECT
     o.id, o.status, o.sent_at, o.expires_at, o.responded_at, o.decline_reason, o.estimated_pay_pence,
     o.staff_accepted_at, o.manager_confirmed_at, o.manager_rejected_at, o.rejection_reason, o.offer_batch_id,
@@ -222,17 +226,18 @@ const OFFER_SUMMARY_SELECT = `
     a.status AS attendance_status, a.clock_in_at, a.clock_out_at, a.post_shift_completed_at, a.post_shift_expired_at,
     org.timezone, now() AS presentation_now, o.created_by AS offer_created_by,
     ${confirmationProjectionSql('o', 'sa', 's')}
-  FROM job_offer o
-  JOIN shift_assignment sa ON sa.id = o.shift_assignment_id
-  JOIN shift s ON s.id = sa.shift_id
-  JOIN venue v ON v.id = s.venue_id
-  JOIN job_role jr ON jr.id = s.job_role_id
-  JOIN staff_profile sp ON sp.id = o.staff_profile_id
+  FROM ${t.job_offer} o
+  JOIN ${t.shift_assignment} sa ON sa.id = o.shift_assignment_id
+  JOIN ${t.shift} s ON s.id = sa.shift_id
+  JOIN ${t.venue} v ON v.id = s.venue_id
+  JOIN ${t.job_role} jr ON jr.id = s.job_role_id
+  JOIN ${t.staff_profile} sp ON sp.id = o.staff_profile_id
   JOIN core."user" u ON u.id = sp.user_id
   JOIN core.organisation org ON org.id = o.organisation_id
-  LEFT JOIN attendance a ON a.shift_assignment_id = sa.id
+  LEFT JOIN ${t.attendance} a ON a.shift_assignment_id = sa.id
     AND a.staff_profile_id = sp.id AND a.organisation_id = o.organisation_id
 `;
+}
 
 /**
  * `audience` 'manager' (with the caller's user id) adds `canConfirm` — the confirm endpoint's own ownership rule;
@@ -384,14 +389,15 @@ export class OfferService {
       const sortColumn = OFFER_SORT_COLUMNS[dto.sort ?? 'sentAt'] ?? OFFER_SORT_COLUMNS.sentAt;
       const direction = (dto.direction ?? 'desc').toUpperCase() === 'ASC' ? 'ASC' : 'DESC';
 
+      const t = businessTables(manager);
       const [{ count }] = await manager.query(
         // sql-injection-reviewed: dynamic WHERE assembled only from literal fragments and $n / :named placeholders (values pushed to params); identifiers come from allow-lists. Reviewed 2026-11-04.
-        `SELECT count(*)::int AS count FROM job_offer o
-           JOIN shift_assignment sa ON sa.id = o.shift_assignment_id
-           JOIN shift s ON s.id = sa.shift_id
-           JOIN venue v ON v.id = s.venue_id
-           JOIN job_role jr ON jr.id = s.job_role_id
-           JOIN staff_profile sp ON sp.id = o.staff_profile_id
+        `SELECT count(*)::int AS count FROM ${t.job_offer} o
+           JOIN ${t.shift_assignment} sa ON sa.id = o.shift_assignment_id
+           JOIN ${t.shift} s ON s.id = sa.shift_id
+           JOIN ${t.venue} v ON v.id = s.venue_id
+           JOIN ${t.job_role} jr ON jr.id = s.job_role_id
+           JOIN ${t.staff_profile} sp ON sp.id = o.staff_profile_id
            JOIN core."user" u ON u.id = sp.user_id
          ${where}`,
         params,
@@ -401,7 +407,7 @@ export class OfferService {
       const takeIdx = nextParam(take);
       const skipIdx = nextParam(skip);
       // sql-injection-reviewed: interpolates a module-level SQL constant / constant fragment; every request value is a bound $n parameter.
-      const rows = await manager.query(`${OFFER_SUMMARY_SELECT} ${where} ORDER BY ${sortColumn} ${direction}, o.id ${direction} LIMIT ${takeIdx} OFFSET ${skipIdx}`, params);
+      const rows = await manager.query(`${offerSummarySelect(manager)} ${where} ORDER BY ${sortColumn} ${direction}, o.id ${direction} LIMIT ${takeIdx} OFFSET ${skipIdx}`, params);
       return { data: rows.map((r: Record<string, unknown>) => toOfferSummary(r, { kind: 'manager', viewerUserId: ctx.userId })), total: count };
     }, { useReplica: true });
   }
@@ -422,6 +428,7 @@ export class OfferService {
       if (scope.kind === 'venue' && scope.venueIds.length === 0) return counts;
       const params: unknown[] = [];
       const nextParam = (value: unknown) => { params.push(value); return `$${params.length}`; };
+      const t = businessTables(manager);
       const conditions = [
         offerReadScopeCondition(scope, ctx, nextParam),
         `${assignmentTimeSql().start} >= ${nextParam(range.from)}`,
@@ -430,9 +437,9 @@ export class OfferService {
       const rows: Array<{ status: string; n: number }> = await manager.query(
         // sql-injection-reviewed: dynamic WHERE assembled only from literal fragments and $n / :named placeholders (values pushed to params); identifiers come from allow-lists. Reviewed 2026-11-04.
         `SELECT o.status, count(*)::int AS n
-           FROM job_offer o
-           JOIN shift_assignment sa ON sa.id = o.shift_assignment_id
-           JOIN shift s ON s.id = sa.shift_id
+           FROM ${t.job_offer} o
+           JOIN ${t.shift_assignment} sa ON sa.id = o.shift_assignment_id
+           JOIN ${t.shift} s ON s.id = sa.shift_id
           WHERE ${conditions.join(' AND ')}
           GROUP BY o.status`,
         params,
@@ -471,6 +478,7 @@ export class OfferService {
       // the venues and joined every shift and seat of the organisation before filtering to this staff member (~0.4 s for
       // a long-tenure staff member, on every poll). Every read in both steps runs under the caller's tenant context/RLS,
       // and the caller's own staff profile is the only row filter that grants anything.
+      const t = businessTables(manager);
       const params: unknown[] = [staffProfile.id];
       const nextParam = (value: unknown) => { params.push(value); return `$${params.length}`; };
       const conditions = ['o.staff_profile_id = $1'];
@@ -487,8 +495,8 @@ export class OfferService {
           // still running (the same POST_SHIFT_EXPIRED_MS the presentation uses). Correlated per offer, so the page is
           // still read from job_offer in keyset order.
           conditions.push(`(o.sent_at >= now() - interval '30 days' OR EXISTS (
-            SELECT 1 FROM shift_assignment sa JOIN shift s ON s.id = sa.shift_id
-              LEFT JOIN attendance a ON a.shift_assignment_id = sa.id AND a.staff_profile_id = o.staff_profile_id AND a.organisation_id = o.organisation_id
+            SELECT 1 FROM ${t.shift_assignment} sa JOIN ${t.shift} s ON s.id = sa.shift_id
+              LEFT JOIN ${t.attendance} a ON a.shift_assignment_id = sa.id AND a.staff_profile_id = o.staff_profile_id AND a.organisation_id = o.organisation_id
              WHERE sa.id = o.shift_assignment_id
                AND (${assignmentTimeSql().end} > now()
                     OR a.status IN ('clocked_in', 'on_break')
@@ -500,7 +508,7 @@ export class OfferService {
       // (microsecond) text form of sent_at, which a JS Date would truncate.
       const keys: Array<{ id: string; keyset_ts: string }> = await manager.query(
         // sql-injection-reviewed: code-constant SQL fragment from a helper called with literal aliases; values are bound $n parameters.
-        `SELECT o.id, ${keysetTimestampSql('o.sent_at')} AS keyset_ts FROM job_offer o
+        `SELECT o.id, ${keysetTimestampSql('o.sent_at')} AS keyset_ts FROM ${t.job_offer} o
           WHERE ${conditions.join(' AND ')}
           ORDER BY o.sent_at DESC, o.id DESC LIMIT ${nextParam(legacy ? take : take + 1)} OFFSET ${nextParam(skip)}`,
         params,
@@ -515,7 +523,7 @@ export class OfferService {
         ? await manager.query(
             // sql-injection-reviewed: interpolates a module-level SQL constant / constant fragment; every request value is a bound $n parameter.
             `SELECT x.* FROM unnest($1::uuid[]) AS k(id)
-               CROSS JOIN LATERAL (${OFFER_SUMMARY_SELECT} WHERE o.id = k.id AND o.staff_profile_id = $2 OFFSET 0) x
+               CROSS JOIN LATERAL (${offerSummarySelect(manager)} WHERE o.id = k.id AND o.staff_profile_id = $2 OFFSET 0) x
               ORDER BY x.sent_at DESC, x.id DESC`,
             [page.data.map((k) => k.id), staffProfile.id],
           )
@@ -546,9 +554,10 @@ export class OfferService {
   }
 
   private async getShiftLabel(manager: EntityManager, shiftId: string): Promise<string | undefined> {
+    const t = businessTables(manager);
     const rows = await manager.query(
-      `SELECT v.name AS venue_name, jr.name AS role_name FROM shift s
-       JOIN venue v ON v.id = s.venue_id JOIN job_role jr ON jr.id = s.job_role_id
+      `SELECT v.name AS venue_name, jr.name AS role_name FROM ${t.shift} s
+       JOIN ${t.venue} v ON v.id = s.venue_id JOIN ${t.job_role} jr ON jr.id = s.job_role_id
        WHERE s.id = $1`,
       [shiftId],
     );
@@ -620,7 +629,8 @@ export class OfferService {
     await manager.save(assignment);
     // Caller holds the shift lock. Expand only after a valid assignment exists.
     const envelope = assignmentEnvelope(shift, [time]);
-    await manager.query(`UPDATE shift SET starts_at=LEAST(starts_at,$2), ends_at=GREATEST(ends_at,$3),
+    const t = businessTables(manager);
+    await manager.query(`UPDATE ${t.shift} SET starts_at=LEAST(starts_at,$2), ends_at=GREATEST(ends_at,$3),
       default_starts_at=COALESCE(default_starts_at,$4), default_ends_at=COALESCE(default_ends_at,$5) WHERE id=$1`,
       [shift.id, envelope.startsAt, envelope.endsAt, shift.defaultStartsAt ?? shift.startsAt, shift.defaultEndsAt ?? shift.endsAt]);
 
@@ -882,8 +892,9 @@ export class OfferService {
     return this.tenantContext.runInWorkspaceContext(ctx, async (manager) => {
       const { shift, dbNow, blockedReason, window } = await this.loadReplacementShift(manager, ctx, shiftId, false);
       const vacancy = await loadShiftVacancy(manager, shift.id);
+      const t = businessTables(manager);
       const [details] = await manager.query(
-        'SELECT v.name AS venue_name, jr.name AS role_name FROM venue v, job_role jr WHERE v.id = $1 AND jr.id = $2',
+        `SELECT v.name AS venue_name, jr.name AS role_name FROM ${t.venue} v, ${t.job_role} jr WHERE v.id = $1 AND jr.id = $2`,
         [shift.venueId, shift.jobRoleId],
       );
       const original = defaultAssignmentTime(shift);
@@ -1195,7 +1206,8 @@ export class OfferService {
     const assignment = await manager.findOne(ShiftAssignment, { where: { id: offer.shiftAssignmentId }, lock: { mode: 'pessimistic_write' } });
     if (!assignment || assignment.shiftId !== shift.id) throw new NotFoundException('Offer not found.');
     const [clock] = await manager.query('SELECT clock_timestamp() AS now');
-    const attendance = await manager.query('SELECT 1 FROM attendance WHERE shift_assignment_id=$1', [assignment.id]);
+    const t = businessTables(manager);
+    const attendance = await manager.query(`SELECT 1 FROM ${t.attendance} WHERE shift_assignment_id=$1`, [assignment.id]);
     if (!canCancelVenueOffer({ startsAt: shift.startsAt, serverNow: new Date(clock.now), shiftStatus: shift.status, assignmentStatus: assignment.status, offerStatus: offer.status, hasAttendance: attendance.length > 0 })) {
       throw new ConflictException('This booking cannot be cancelled. Cancellation closes 15 minutes before the shift starts.');
     }
@@ -1251,8 +1263,9 @@ export class OfferService {
       // via assertTransition) — a concurrent duplicate request (double-tap,
       // network retry) gets zero affected rows and a clean 409 instead of
       // silently re-applying the same transition twice.
+      const t = businessTables(manager);
       const [, withdrawnCount] = (await manager.query(
-        `UPDATE job_offer SET status = $1, responded_at = $2 WHERE id = $3 AND status = $4`,
+        `UPDATE ${t.job_offer} SET status = $1, responded_at = $2 WHERE id = $3 AND status = $4`,
         [OfferStatus.WITHDRAWN, new Date(), offer.id, offer.status],
       )) as [unknown, number];
       if (withdrawnCount === 0) {
@@ -1334,11 +1347,12 @@ export class OfferService {
       // instant.
       const now = new Date();
       const deadlineSql = confirmationDeadlineSql('o', 'sa', 's');
+      const t = businessTables(manager);
       const [claimedRows] = (await manager.query(
         // sql-injection-reviewed: code-constant SQL fragment from a helper called with literal aliases; values are bound $n parameters.
-        `UPDATE job_offer o
+        `UPDATE ${t.job_offer} o
            SET status = $1, responded_at = $2, staff_accepted_at = $2
-           FROM shift_assignment sa JOIN shift s ON s.id = sa.shift_id
+           FROM ${t.shift_assignment} sa JOIN ${t.shift} s ON s.id = sa.shift_id
            WHERE o.id = $3 AND o.status = $4 AND o.expires_at > now()
              AND sa.id = o.shift_assignment_id
              AND clock_timestamp() < ${deadlineSql}
@@ -1390,7 +1404,7 @@ export class OfferService {
         const [late] = await manager.query<Array<{ past_deadline: boolean; offer_kind: string | null }>>(
           // sql-injection-reviewed: code-constant SQL fragment from a helper called with literal aliases; values are bound $n parameters.
           `SELECT (o.status = 'pending' AND o.expires_at > now() AND clock_timestamp() >= ${deadlineSql}) AS past_deadline, o.offer_kind
-             FROM job_offer o JOIN shift_assignment sa ON sa.id = o.shift_assignment_id JOIN shift s ON s.id = sa.shift_id
+             FROM ${t.job_offer} o JOIN ${t.shift_assignment} sa ON sa.id = o.shift_assignment_id JOIN ${t.shift} s ON s.id = sa.shift_id
             WHERE o.id = $1`,
           [offer.id],
         );
@@ -1501,8 +1515,9 @@ export class OfferService {
       await lockShiftRow(manager, ctx.organisationId!, assignment.shiftId);
 
       // WHERE status = :priorStatus — see staffAccept's identical guard.
+      const t = businessTables(manager);
       const [, declinedCount] = (await manager.query(
-        `UPDATE job_offer SET status = $1, responded_at = $2, decline_reason = $3 WHERE id = $4 AND status = $5`,
+        `UPDATE ${t.job_offer} SET status = $1, responded_at = $2, decline_reason = $3 WHERE id = $4 AND status = $5`,
         [OfferStatus.DECLINED, new Date(), dto.reason, offer.id, offer.status],
       )) as [unknown, number];
       if (declinedCount === 0) {
@@ -1642,8 +1657,9 @@ export class OfferService {
   /** Batch summary for `BatchOfferDrawer` — one shift, N recipients, counted by status. RLS scopes the org filter. */
   async getBatch(ctx: AuthContext, batchId: string): Promise<OfferBatchSummary> {
     return this.tenantContext.runInWorkspaceContext(ctx, async (manager) => {
+      const t = businessTables(manager);
       // sql-injection-reviewed: interpolates a module-level SQL constant / constant fragment; every request value is a bound $n parameter.
-      const rows = await manager.query(`${OFFER_SUMMARY_SELECT} WHERE o.offer_batch_id = $1 ORDER BY u.first_name`, [
+      const rows = await manager.query(`${offerSummarySelect(manager)} WHERE o.offer_batch_id = $1 ORDER BY u.first_name`, [
         batchId,
       ]);
       if (rows.length === 0) throw new NotFoundException('Offer batch not found.');
@@ -1651,7 +1667,7 @@ export class OfferService {
       // A batch shares one sender — every row was stamped with the same
       // ctx.userId in the same send() call — so checking one row's
       // ownership speaks for the whole batch.
-      const [sample] = await manager.query(`SELECT created_by FROM job_offer WHERE offer_batch_id = $1 LIMIT 1`, [
+      const [sample] = await manager.query(`SELECT created_by FROM ${t.job_offer} WHERE offer_batch_id = $1 LIMIT 1`, [
         batchId,
       ]);
       const isOwner = sample?.created_by === ctx.userId;
@@ -1698,8 +1714,9 @@ export class OfferService {
       const now = new Date();
       // WHERE status = :priorStatus — see staffAccept's identical guard
       // (double-tap "reject" must not double-fire the staff notification).
+      const t = businessTables(manager);
       const [, rejectedCount] = (await manager.query(
-        `UPDATE job_offer SET status = $1, manager_rejected_at = $2, rejected_by = $3, rejection_reason = $4
+        `UPDATE ${t.job_offer} SET status = $1, manager_rejected_at = $2, rejected_by = $3, rejection_reason = $4
            WHERE id = $5 AND status = $6`,
         [OfferStatus.MANAGER_REJECTED, now, ctx.userId, dto.reason, offer.id, offer.status],
       )) as [unknown, number];

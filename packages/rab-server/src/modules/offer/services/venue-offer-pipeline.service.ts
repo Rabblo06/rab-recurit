@@ -18,6 +18,7 @@ import { EntityManager, In } from 'typeorm';
 import { AvailabilityAcknowledgement, assertStaffAvailabilityAcknowledged } from '../../staff/services/staff-availability';
 import { TenantContextService } from '../../../engine/core-modules/tenant/tenant-context.service';
 import { AuthContext } from '../../../engine/core-modules/tenant/auth-context.interface';
+import { businessTables } from '../../../engine/core-modules/tenant/business-tables';
 import { PermissionsService } from '../../../engine/core-modules/permissions/permissions.service';
 import { EnvironmentService } from '../../../engine/core-modules/environment/environment.service';
 import { Shift } from '../../scheduling/entities/shift.entity';
@@ -86,8 +87,9 @@ export class VenueOfferPipelineService {
       );
       const [clock] = await manager.query('SELECT clock_timestamp() AS now');
       const serverNow = new Date(clock.now);
+      const t = businessTables(manager);
       const [details] = await manager.query(
-        'SELECT v.name AS "venueName", jr.name AS "roleName" FROM venue v, job_role jr WHERE v.id=$1 AND jr.id=$2',
+        `SELECT v.name AS "venueName", jr.name AS "roleName" FROM ${t.venue} v, ${t.job_role} jr WHERE v.id=$1 AND jr.id=$2`,
         [shift.venueId, shift.jobRoleId],
       );
       // The cancellation LATERAL names `entity_type = 'offer'` (the only type `OfferService.cancelBookingWithManager`
@@ -108,11 +110,11 @@ export class VenueOfferPipelineService {
         cancellation.metadata->>'reason' AS "withdrawnReason", cancellation.created_at AS "cancelledAt",
         deadline.approval_deadline_at AS "approvalDeadlineAt", deadline.awaiting_manager_confirmation AS "awaitingManagerConfirmation",
         deadline.closed_reason AS "closedReason"
-        FROM shift_assignment sa JOIN job_offer o ON o.shift_assignment_id=sa.id
-        JOIN shift s ON s.id=sa.shift_id
+        FROM ${t.shift_assignment} sa JOIN ${t.job_offer} o ON o.shift_assignment_id=sa.id
+        JOIN ${t.shift} s ON s.id=sa.shift_id
         CROSS JOIN LATERAL (SELECT ${confirmationProjectionSql('o', 'sa', 's')}) deadline
-        JOIN staff_profile sp ON sp.id=sa.staff_profile_id JOIN core."user" u ON u.id=sp.user_id
-        LEFT JOIN attendance a ON a.shift_assignment_id=sa.id
+        JOIN ${t.staff_profile} sp ON sp.id=sa.staff_profile_id JOIN core."user" u ON u.id=sp.user_id
+        LEFT JOIN ${t.attendance} a ON a.shift_assignment_id=sa.id
         LEFT JOIN LATERAL (SELECT metadata, created_at FROM core.audit_log al WHERE al.organisation_id=o.organisation_id AND al.entity_type='offer' AND al.entity_id=o.id AND al.action='offer.withdrawn' AND al.metadata->>'source'='manager_pipeline_cancellation' ORDER BY al.created_at DESC, al.id DESC LIMIT 1) cancellation ON true
         WHERE sa.shift_id=$1 AND sa.organisation_id=$2 AND sa.workspace_id=$3 ORDER BY o.sent_at, o.id`,
         [id, ctx.organisationId, ctx.workspaceId],
@@ -296,8 +298,9 @@ export class VenueOfferPipelineService {
         PermissionFlag.OFFER_SEND,
         true,
       );
+      const t = businessTables(manager);
       const [state] = await manager.query(
-        `SELECT clock_timestamp() AS now, count(*)::int AS reserved FROM shift_assignment sa JOIN job_offer o ON o.shift_assignment_id=sa.id WHERE sa.shift_id=$1 AND sa.status IN ('offered','staff_accepted','confirmed','completed') AND o.status IN ('pending','staff_accepted','manager_confirmed')`,
+        `SELECT clock_timestamp() AS now, count(*)::int AS reserved FROM ${t.shift_assignment} sa JOIN ${t.job_offer} o ON o.shift_assignment_id=sa.id WHERE sa.shift_id=$1 AND sa.status IN ('offered','staff_accepted','confirmed','completed') AND o.status IN ('pending','staff_accepted','manager_confirmed')`,
         [id],
       );
       if (
