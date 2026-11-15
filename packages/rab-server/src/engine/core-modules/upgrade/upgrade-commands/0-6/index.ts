@@ -1,6 +1,7 @@
 import type { UpgradeCommand } from '../upgrade-command';
 import type { WorkspaceUpgradeCommand } from '../workspace-upgrade-command';
 import { STAFF_PROFILE_MEMBER_SELECT } from './staff-profile-member-select';
+import { SYNC_STANDARD_OBJECTS } from './sync-standard-objects';
 
 /** Release 0.6.0's upgrade commands (none yet). Keep them ordered by timestamp. */
 export const UPGRADE_COMMANDS_0_6: readonly UpgradeCommand[] = Object.freeze([]);
@@ -11,5 +12,6 @@ export const UPGRADE_COMMANDS_0_6: readonly UpgradeCommand[] = Object.freeze([])
  * D-RUNNER.md §5), so every command below still runs for an adopted workspace; a workspace created on this code starts at
  * the release's last step and is built from the level-21 template instead.
  *   - level 21: StaffProfileMemberSelect (owner decision 0b, 2026-11-14).
+ *   - data: SyncStandardObjects (metadata engine M1 / E2): the 21 workspace tables as standard objects in the metadata tables.
  */
-export const WORKSPACE_UPGRADE_COMMANDS_0_6: readonly WorkspaceUpgradeCommand[] = Object.freeze([STAFF_PROFILE_MEMBER_SELECT]);
+export const WORKSPACE_UPGRADE_COMMANDS_0_6: readonly WorkspaceUpgradeCommand[] = Object.freeze([STAFF_PROFILE_MEMBER_SELECT, SYNC_STANDARD_OBJECTS]);

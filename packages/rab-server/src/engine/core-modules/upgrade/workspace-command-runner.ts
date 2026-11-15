@@ -48,6 +48,10 @@ import {
   SESSION_RESET_SQL,
   TARGET_EXTRA_STRUCTURE_SQL,
   TRACK_COUNTS_SQL,
+  METADATA_WRITE_COUNTERS_SQL,
+  METADATA_WRITTEN_ROWS_SQL,
+  REQUIRED_WORKSPACE_METADATA_TABLES,
+  WORKSPACE_METADATA_TABLES,
 } from './workspace-step-checks-sql';
 import { codeWorkspaceStructureLevel, declaredFingerprint } from './workspace-structure-level';
 import { isUpgradeBlocked, upgradeBlockMarker } from './workspace-upgrade-block';
@@ -66,7 +70,48 @@ export function increasedCounters(before: ReadonlyArray<{ relid: string; what: s
   return after.filter((r) => BigInt(r.n) > (was.get(r.relid) ?? 0n)).map((r) => r.what);
 }
 
-const FINGERPRINT_V1_SQL = 'SELECT core.workspace_schema_fingerprint($1) AS f';
+/** One METADATA_WRITE_COUNTERS_SQL row. */
+export interface MetadataWriteCounter {
+  name: string;
+  relid: string | null;
+  ins: string;
+  upd: string;
+  del: string;
+}
+
+/**
+ * Pure (metadata engine M1 / E2): why the metadata writes of a step that declares `writesWorkspaceMetadata` are not provably
+ * confined to the target workspace (empty = they are). Per table: it must exist, nothing may be deleted, and the transaction's
+ * inserted + updated counter delta must equal the rows of the target written by this transaction as seen under the target's
+ * FORCE-RLS binding (`written`). A write into another workspace's rows is counted but invisible, so the numbers differ; a row
+ * written twice also differs (refused: such a command breaks the at-most-once rule; fail closed).
+ */
+export function metadataWriteProblems(
+  before: readonly MetadataWriteCounter[],
+  after: readonly MetadataWriteCounter[],
+  written: Readonly<Record<string, string | number | undefined>>,
+): string[] {
+  const problems: string[] = [];
+  for (const name of WORKSPACE_METADATA_TABLES) {
+    const b = before.find((r) => r.name === name);
+    const a = after.find((r) => r.name === name);
+    const required = (REQUIRED_WORKSPACE_METADATA_TABLES as readonly string[]).includes(name);
+    // The optional version-state table (M1-cache) may be absent; it must then stay absent (nothing to count).
+    if (!required && !a?.relid && !b?.relid) continue;
+    if (!a?.relid || !b?.relid || a.relid !== b.relid) {
+      problems.push(`core.${name} missing`);
+      continue;
+    }
+    const deleted = BigInt(a.del) - BigInt(b.del);
+    const changed = BigInt(a.ins) - BigInt(b.ins) + (BigInt(a.upd) - BigInt(b.upd));
+    const seen = BigInt(written[name] ?? 0);
+    if (deleted !== 0n) problems.push(`core.${name}: ${deleted} row(s) deleted`);
+    if (changed !== seen) problems.push(`core.${name}: ${changed} row write(s), ${seen} visible in this workspace`);
+  }
+  return problems;
+}
+
+const FINGERPRINT_V1_SQL ='SELECT core.workspace_schema_fingerprint($1) AS f';
 const FINGERPRINT_V2_SQL = 'SELECT core.workspace_schema_fingerprint_v2($1) AS f';
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
@@ -487,6 +532,13 @@ export class WorkspaceCommandRunner {
       // other step that deletes a counted catalog row is refused below (UNDECLARED_DROP).
       const countsBefore = command.structure?.mayDrop ? ((await q(OUTSIDE_COUNTS_SQL, [ws.schemaName])) as Array<{ counts: string }>)[0] : undefined;
       const writesBefore = (await q(OUTSIDE_WRITE_COUNTERS_SQL, [ws.schemaName])) as Array<{ relid: string; what: string; n: string }>;
+      // Metadata engine M1 / E2: a step that declares writesWorkspaceMetadata may write the metadata tables (checked below).
+      const metadataBefore = command.writesWorkspaceMetadata
+        ? ((await q(METADATA_WRITE_COUNTERS_SQL, [[...WORKSPACE_METADATA_TABLES]])) as MetadataWriteCounter[])
+        : undefined;
+      if (metadataBefore?.some((r) => !r.relid && (REQUIRED_WORKSPACE_METADATA_TABLES as readonly string[]).includes(r.name))) {
+        throw new WorkspaceStepRefused('METADATA_TABLES_MISSING', `${name} writes workspace metadata but the metadata tables do not exist`);
+      }
 
       let target = level;
       if (command.structure) {
@@ -534,7 +586,23 @@ export class WorkspaceCommandRunner {
         }
       }
       const writesAfter = (await q(OUTSIDE_WRITE_COUNTERS_SQL, [ws.schemaName])) as Array<{ relid: string; what: string; n: string }>;
-      const data = [...increasedCounters(writesBefore, writesAfter), ...((await q(OUTSIDE_DATA_WRITES_SQL, [ws.schemaName])) as Array<{ what: string }>).map((o) => o.what)];
+      let increased = increasedCounters(writesBefore, writesAfter);
+      if (metadataBefore) {
+        // The metadata tables are exempt from the "no write" rule for this step only, and only when every write is proven to be
+        // the target workspace's own rows (SECURITY TRADE-OFF M1-S1 in the M1-sync PR).
+        const metadataAfter = (await q(METADATA_WRITE_COUNTERS_SQL, [[...WORKSPACE_METADATA_TABLES]])) as MetadataWriteCounter[];
+        const written: Record<string, string> = {};
+        for (const r of metadataAfter) {
+          if (!r.relid) continue;
+          const [row] = (await q(METADATA_WRITTEN_ROWS_SQL[r.name as keyof typeof METADATA_WRITTEN_ROWS_SQL], [ws.workspaceId])) as Array<{ n: string }>;
+          written[r.name] = row?.n ?? '0';
+        }
+        const problems = metadataWriteProblems(metadataBefore, metadataAfter, written);
+        if (problems.length) throw new WorkspaceStepRefused('OUTSIDE_SCHEMA', `${name} wrote metadata it cannot prove is its own workspace's: ${problems.join('; ')}`);
+        const exempt = new Set<string>(WORKSPACE_METADATA_TABLES.map((t) => `core.${t}`));
+        increased = increased.filter((what) => !exempt.has(what));
+      }
+      const data = [...increased, ...((await q(OUTSIDE_DATA_WRITES_SQL, [ws.schemaName])) as Array<{ what: string }>).map((o) => o.what)];
       if (data.length) throw new WorkspaceStepRefused('OUTSIDE_SCHEMA', `${name} wrote outside ${ws.schemaName}: ${data.join('; ')}`);
 
       // Layer 5: what the v1 fingerprint does not hash (M2), then the level (bumped BEFORE the verify function, M3: it may read
