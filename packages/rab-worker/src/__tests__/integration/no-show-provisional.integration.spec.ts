@@ -200,7 +200,7 @@ describeIfDb('provisional no-show (shift monitor) never overrides a manager (int
       let blocked = false;
       for (let i = 0; i < 300 && !blocked && !workerDone; i++) {
         const [{ n }] = await adminDataSource.query(
-          `SELECT count(*)::int AS n FROM pg_stat_activity WHERE wait_event_type = 'Lock' AND query LIKE 'SELECT 1 FROM shift_assignment WHERE id = $1 FOR UPDATE%'`);
+          `SELECT count(*)::int AS n FROM pg_stat_activity WHERE wait_event_type = 'Lock' AND query LIKE 'SELECT 1 FROM "%"."shift_assignment" WHERE id = $1 FOR UPDATE%'`); // Part C2: schema-qualified
         blocked = n > 0;
         if (!blocked) await new Promise((r) => setTimeout(r, 200));
       }
@@ -255,7 +255,7 @@ describeIfDb('provisional no-show (shift monitor) never overrides a manager (int
       let blocked = false;
       for (let i = 0; i < 300 && !blocked && !workerDone; i++) {
         const [{ n }] = await adminDataSource.query(
-          `SELECT count(*)::int AS n FROM pg_stat_activity WHERE wait_event_type = 'Lock' AND query LIKE 'SELECT 1 FROM shift_assignment WHERE id = $1 FOR UPDATE%'`);
+          `SELECT count(*)::int AS n FROM pg_stat_activity WHERE wait_event_type = 'Lock' AND query LIKE 'SELECT 1 FROM "%"."shift_assignment" WHERE id = $1 FOR UPDATE%'`); // Part C2: schema-qualified
         blocked = n > 0;
         if (!blocked) await new Promise((r) => setTimeout(r, 200));
       }

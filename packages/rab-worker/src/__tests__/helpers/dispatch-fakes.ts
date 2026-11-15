@@ -1,5 +1,7 @@
 import { createHash } from 'node:crypto';
 
+import { asTenantBoundManager } from './business-tables-fakes';
+
 /**
  * Phase D unit-test fakes (no database): a TenantContextService stand-in that records the bound context and every
  * statement issued inside it, and a scripted responder. Used by the dispatcher specs to prove (a) per_scope mode issues
@@ -32,12 +34,13 @@ export function fakeTenant(respond: Responder) {
       const tx = contexts.length;
       contexts.push(ctx);
       options.push(opts);
-      const manager = {
+      // Part C2: bound like TenantContextService binds a transaction with HWS off ('core'), so businessTables() answers.
+      const manager = asTenantBoundManager({
         query: async (sql: string, params: unknown[] = []) => {
           statements.push({ sql, params, tx });
           return respond(sql, params);
         },
-      };
+      });
       return fn(manager);
     },
   };

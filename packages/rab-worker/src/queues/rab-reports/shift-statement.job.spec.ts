@@ -1,3 +1,4 @@
+import { withoutCoreBusinessQualifier } from '../../__tests__/helpers/business-tables-fakes';
 import { fakeTenant, PRE_PHASE_D_SQL_SHA256, sha256 } from '../../__tests__/helpers/dispatch-fakes';
 import { ReportScanProcessor } from './report.processors';
 import { PdfNativeInputError, PdfNativeRenderError, PdfNativeThreadCrashError } from './native/runtime/render-protocol';
@@ -18,8 +19,8 @@ function responder(candidates: unknown[], generation: number | null = 4) {
       pageServed = true;
       return [{ workspace_id: WS, organisation_id: ORG }];
     }
-    if (sql.startsWith('SELECT id, organisation_id, workspace_id, statement_status FROM payroll_record')) return candidates;
-    if (sql.startsWith('UPDATE payroll_record SET statement_status = \'queued\'')) return [generation === null ? [] : [{ generation }], generation === null ? 0 : 1];
+    if (sql.startsWith('SELECT id, organisation_id, workspace_id, statement_status FROM "core"."payroll_record"')) return candidates;
+    if (sql.startsWith('UPDATE "core"."payroll_record" SET statement_status = \'queued\'')) return [generation === null ? [] : [{ generation }], generation === null ? 0 : 1];
     return [];
   };
 }
@@ -30,14 +31,16 @@ describe('shift statement dispatch', () => {
     const publish = jest.fn(async () => undefined);
     const result = await runShiftStatementDispatchCycle(dataSource as never, tenant as never, publish);
     const scan = statements.find((s) => s.sql.startsWith('SELECT id, organisation_id, workspace_id, statement_status'))!;
-    const cas = statements.find((s) => s.sql.startsWith("UPDATE payroll_record SET statement_status = 'queued'"))!;
+    const cas = statements.find((s) => s.sql.startsWith(`UPDATE "core"."payroll_record" SET statement_status = 'queued'`))!;
     // T-1 / ST-02: the discovery transaction is READ ONLY through the tenant-context option (folded into the binding
     // SELECT), and no longer sends its own SET TRANSACTION READ ONLY; the CAS transaction stays read-write.
     expect(options[scan.tx]).toEqual({ readOnly: true });
     expect(statements.filter((s) => s.tx === scan.tx && s.sql === 'SET TRANSACTION READ ONLY')).toEqual([]);
     expect(options[cas.tx]).toBeUndefined();
-    expect(sha256(scan.sql)).toBe(PRE_PHASE_D_SQL_SHA256.statementScan);
-    expect(sha256(cas.sql)).toBe(PRE_PHASE_D_SQL_SHA256.statementCas);
+    // Part C2: the table is schema-qualified through businessTables (the fake binds 'core'); every other byte is the pin.
+    expect(scan.sql).toContain('FROM "core"."payroll_record" WHERE');
+    expect(sha256(withoutCoreBusinessQualifier(scan.sql))).toBe(PRE_PHASE_D_SQL_SHA256.statementScan);
+    expect(sha256(withoutCoreBusinessQualifier(cas.sql))).toBe(PRE_PHASE_D_SQL_SHA256.statementCas);
     expect(publish).toHaveBeenCalledWith({ payrollRecordId: P1, organisationId: ORG, workspaceId: WS, generation: 4 });
     expect(result).toMatchObject({ claimed: 1, published: 1 });
   });
@@ -53,8 +56,8 @@ describe('shift statement dispatch', () => {
     expect(statements.filter((s) => s.tx === scan.tx && s.sql === 'SET TRANSACTION READ ONLY')).toEqual([]);
     expect(scan.sql).toContain('AND id = ANY($1::uuid[])');
     expect(scan.params).toEqual([[P1, P2]]);
-    const cas = statements.find((s) => s.sql.startsWith("UPDATE payroll_record SET statement_status = 'queued'"))!;
-    expect(sha256(cas.sql)).toBe(PRE_PHASE_D_SQL_SHA256.statementCas);
+    const cas = statements.find((s) => s.sql.startsWith(`UPDATE "core"."payroll_record" SET statement_status = 'queued'`))!;
+    expect(sha256(withoutCoreBusinessQualifier(cas.sql))).toBe(PRE_PHASE_D_SQL_SHA256.statementCas);
     expect(cas.tx).not.toBe(scan.tx); // the claim is its own short transaction, committed before publishing
     expect(publish).toHaveBeenCalledWith({ payrollRecordId: P1, organisationId: ORG, workspaceId: WS, generation: 4 });
     expect(result).toMatchObject({ claimed: 1, published: 1, reconciledMissing: 1 });

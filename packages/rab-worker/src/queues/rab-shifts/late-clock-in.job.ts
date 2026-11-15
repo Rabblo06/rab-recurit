@@ -4,6 +4,7 @@ import { formatLondonDateTime, NotificationType, ShiftAssignmentStatus, ShiftSta
 import { DataSource, EntityManager } from 'typeorm';
 
 import { AuditAction, AuditService } from '@rab/server/engine/core-modules/audit/audit.service';
+import { businessTables } from '@rab/server/engine/core-modules/tenant/business-tables';
 import { TenantContextService } from '@rab/server/engine/core-modules/tenant/tenant-context.service';
 import { NotificationService } from '@rab/server/modules/notification/services/notification.service';
 import { Shift } from '@rab/server/modules/scheduling/entities/shift.entity';
@@ -92,16 +93,17 @@ export interface LateClockInDeps {
 export type LateClockInCandidate = ScanCandidate;
 
 export async function discoverLateClockInInWorkspace(manager: EntityManager, lateClockInGraceMinutes: number): Promise<LateClockInCandidate[]> {
+  const t = businessTables(manager);
   return await manager.query<ScanCandidate[]>(
     // sql-injection-reviewed: code-constant SQL fragment from a helper called with literal aliases; values are bound $n parameters.
     `
         SELECT sa.id AS assignment_id, sa.organisation_id, sa.workspace_id
-        FROM shift_assignment sa
-        JOIN shift s ON s.id = sa.shift_id
+        FROM ${t.shift_assignment} sa
+        JOIN ${t.shift} s ON s.id = sa.shift_id
         WHERE sa.status = 'confirmed'
           AND s.status NOT IN ('cancelled', 'completed')
           AND ${assignmentTimeSql().start} <= now() - make_interval(mins => $1)
-          AND NOT EXISTS (SELECT 1 FROM attendance a WHERE a.shift_assignment_id = sa.id)
+          AND NOT EXISTS (SELECT 1 FROM ${t.attendance} a WHERE a.shift_assignment_id = sa.id)
           -- Scan fairness: once THIS assignment's late event has already been
           -- claimed (completed OR cancelled), it stays "confirmed, no
           -- attendance" for the rest of the shift and would otherwise be
@@ -153,12 +155,13 @@ export async function flagLateClockInCandidate(
   candidate: LateClockInCandidate,
   lateClockInGraceMinutes: number,
 ): Promise<boolean> {
+  const t = businessTables(manager);
   // --- Pass A: is this candidate still genuinely late? ---
   let assignment = await manager.findOne(ShiftAssignment, { where: { id: candidate.assignment_id } });
   let shift = assignment ? await manager.findOne(Shift, { where: { id: assignment.shiftId } }) : null;
   if (!isStillLate(assignment, shift, lateClockInGraceMinutes)) return false;
 
-  const hasAttendance = await manager.query(`SELECT 1 FROM attendance WHERE shift_assignment_id = $1 LIMIT 1`, [assignment!.id]);
+  const hasAttendance = await manager.query(`SELECT 1 FROM ${t.attendance} WHERE shift_assignment_id = $1 LIMIT 1`, [assignment!.id]);
   if (hasAttendance.length > 0) return false; // clocked in since the scan — never even worth claiming
 
   const eventId = await claimWorkerEvent(manager, {
@@ -181,7 +184,7 @@ export async function flagLateClockInCandidate(
     await cancelWorkerEvent(manager, eventId, 'condition_no_longer_true');
     return false;
   }
-  const hasAttendanceNow = await manager.query(`SELECT 1 FROM attendance WHERE shift_assignment_id = $1 LIMIT 1`, [assignment!.id]);
+  const hasAttendanceNow = await manager.query(`SELECT 1 FROM ${t.attendance} WHERE shift_assignment_id = $1 LIMIT 1`, [assignment!.id]);
   if (hasAttendanceNow.length > 0) {
     await cancelWorkerEvent(manager, eventId, 'staff_clocked_in_before_completion');
     return false;
@@ -194,8 +197,8 @@ export async function flagLateClockInCandidate(
     return false;
   }
 
-  const [venueRow] = await manager.query<Array<{ name: string }>>(`SELECT name FROM venue WHERE id = $1`, [shift!.venueId]);
-  const [roleRow] = await manager.query<Array<{ name: string }>>(`SELECT name FROM job_role WHERE id = $1`, [shift!.jobRoleId]);
+  const [venueRow] = await manager.query<Array<{ name: string }>>(`SELECT name FROM ${t.venue} WHERE id = $1`, [shift!.venueId]);
+  const [roleRow] = await manager.query<Array<{ name: string }>>(`SELECT name FROM ${t.job_role} WHERE id = $1`, [shift!.jobRoleId]);
   const venueName = venueRow?.name ?? 'the venue';
   const roleName = roleRow?.name ?? null;
   const localStart = formatLondonDateTime(effectiveAssignmentTime(assignment!, shift!).startsAt);

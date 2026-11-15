@@ -40,48 +40,6 @@
     },
     "packages/rab-server/src/modules/search/services/search.service.ts": {
       "unqualified": 19
-    },
-    "packages/rab-worker/src/queues/rab-maintenance/account-invite-cleanup.job.ts": {
-      "unqualified": 6
-    },
-    "packages/rab-worker/src/queues/rab-offers/offer-expiry.job.ts": {
-      "unqualified": 7
-    },
-    "packages/rab-worker/src/queues/rab-offers/replacement-staff.job.ts": {
-      "unqualified": 16
-    },
-    "packages/rab-worker/src/queues/rab-reports/final-timesheet.job.ts": {
-      "unqualified": 16
-    },
-    "packages/rab-worker/src/queues/rab-reports/payroll-period-attention.job.ts": {
-      "unqualified": 7
-    },
-    "packages/rab-worker/src/queues/rab-reports/report-recipients.ts": {
-      "unqualified": 1
-    },
-    "packages/rab-worker/src/queues/rab-reports/shift-report-scheduler.job.ts": {
-      "unqualified": 4
-    },
-    "packages/rab-worker/src/queues/rab-reports/shift-statement.job.ts": {
-      "unqualified": 16
-    },
-    "packages/rab-worker/src/queues/rab-shifts/attendance-monitor.job.ts": {
-      "unqualified": 5
-    },
-    "packages/rab-worker/src/queues/rab-shifts/late-clock-in.job.ts": {
-      "unqualified": 7
-    },
-    "packages/rab-worker/src/queues/rab-shifts/shift-cancellation-followup.job.ts": {
-      "unqualified": 8
-    },
-    "packages/rab-worker/src/queues/rab-shifts/shift-monitor.job.ts": {
-      "unqualified": 11
-    },
-    "packages/rab-worker/src/queues/rab-timer-triggers/timer-trigger.handler.ts": {
-      "unqualified": 7
-    },
-    "packages/rab-worker/src/queues/rab-timer-triggers/timer-trigger.processors.ts": {
-      "unqualified": 1
     }
   }
 }
