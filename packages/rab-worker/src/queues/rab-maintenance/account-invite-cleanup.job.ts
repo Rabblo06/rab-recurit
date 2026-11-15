@@ -454,6 +454,19 @@ function workspaceTableDependencyChecks(manager: EntityManager): Array<[string, 
     ['shift_assignment', `SELECT 1 FROM ${t.shift_assignment} WHERE assigned_by = $1 LIMIT 1`],
     ['job_offer', `SELECT 1 FROM ${t.job_offer} WHERE created_by = $1 OR confirmed_by = $1 OR rejected_by = $1 LIMIT 1`],
     ['staff_profile_created_by', `SELECT 1 FROM ${t.staff_profile} WHERE created_by = $1 LIMIT 1`],
+    // Owner 0g security review L2: the same two checks UserDeletionService runs before an invite's hard delete. The
+    // invitee's own staff profile CASCADEs (and everything hanging off it); a note ABOUT the invitee (user_note.subject_user_id) too.
+    [
+      'staff_operational_history',
+      `SELECT 1 FROM ${t.staff_profile} sp WHERE sp.user_id = $1 AND (
+         EXISTS (SELECT 1 FROM ${t.shift_assignment} sa WHERE sa.staff_profile_id = sp.id)
+         OR EXISTS (SELECT 1 FROM ${t.job_offer} jo WHERE jo.staff_profile_id = sp.id)
+         OR EXISTS (SELECT 1 FROM ${t.attendance} a WHERE a.staff_profile_id = sp.id)
+         OR EXISTS (SELECT 1 FROM ${t.shift_request_staff} rs WHERE rs.staff_profile_id = sp.id)
+         OR EXISTS (SELECT 1 FROM ${t.venue_manager_staff} vs WHERE vs.staff_profile_id = sp.id)
+         OR EXISTS (SELECT 1 FROM ${t.replacement_request} rr WHERE rr.selected_staff_profile_id = sp.id)) LIMIT 1`,
+    ],
+    ['user_note_subject', `SELECT 1 FROM ${t.user_note} WHERE subject_user_id = $1 LIMIT 1`],
   ];
 }
 

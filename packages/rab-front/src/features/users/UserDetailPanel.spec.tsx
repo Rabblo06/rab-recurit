@@ -255,6 +255,8 @@ describe('UserDetailPanel — lifecycle actions match the account state machine'
     await openMenu();
     await userEvent.click(screen.getByRole('button', { name: /Delete user/ }));
     const confirm = screen.getAllByRole('button', { name: 'Delete user' }).at(-1)!;
+    // Owner 0g: a delete keeps the person's history (soft delete); the confirmation says so.
+    expect(screen.getByText(/shifts, attendance and payroll history are kept/)).toBeInTheDocument();
     await userEvent.type(screen.getByLabelText('Type DELETE to confirm'), 'DELETE');
     expect(confirm).toBeDisabled();
     await userEvent.type(screen.getByLabelText('Your current password'), 'my-own-password');

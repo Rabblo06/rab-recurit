@@ -155,6 +155,16 @@ export class ManagerController {
   }
 
   /**
+   * Owner 0g: GDPR erasure of an already deleted Manager account (anonymises the account row, keeps it for history). Step-up
+   * reauth: `currentPassword` is required; the service re-checks MANAGER_MANAGE and the CEO carve-out.
+   */
+  @Post(':id/erase-personal-data')
+  @HttpCode(HttpStatus.NO_CONTENT)
+  erasePersonalData(@AuthUser() ctx: AuthContext, @Param('id', ParseUUIDPipe) id: string, @Body() dto: StepUpReauthDto) {
+    return this.managerService.erasePersonalData(ctx, id, dto.currentPassword);
+  }
+
+  /**
    * The ONLY Initial Manager onboarding routes (organisation isolation, 2026-10-15): always the caller's OWN organisation, taken
    * from the verified session inside the service — there is no organisation argument. This class's own
    * `PermissionGuard(MANAGER_MANAGE)` is deliberately loose (any Manager holding that flag reaches the route) —

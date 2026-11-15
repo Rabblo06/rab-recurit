@@ -27,6 +27,10 @@ const SERVER_SRC = path.join(REPO_ROOT, 'packages/rab-server/src');
 const KNOWN_OVERRIDE_WRITERS: Readonly<Record<string, string>> = {
   // E2E fixture seed (disposable e2e databases only): revokes payroll.view for one seeded AI-test user.
   'packages/rab-e2e-testing/ai/seed-ai-e2e.ts': 'e2e fixture seed',
+  // Owner 0g: the soft delete removes the DELETED account's own overrides (user_id = the target, own organisation) in the
+  // same transaction that revokes its sessions and roles. Reached only through StaffService / ManagerService.deleteUser
+  // (layer-2 permission check, step-up password) and audited (user.deleted). It only ever removes access, never grants it.
+  'packages/rab-server/src/engine/core-modules/user-deletion/user-deletion.service.ts': 'soft delete of the account (removes its own overrides only)',
 };
 /** Reviewed SECURITY DEFINER functions (in migrations) that write core.user_permission_override. None today. */
 const KNOWN_DEFINER_WRITERS: readonly string[] = [];
