@@ -40,8 +40,9 @@ const byText = (a: string, b: string) => (a < b ? -1 : a > b ? 1 : 0);
 
 /**
  * Metadata engine E1: the read side of `core.object_metadata` / `field_metadata` / `field_metadata_option` /
- * `index_metadata` / `index_field_metadata` for later phases (M1-cache builds its entries from readWorkspaceMetadata; M2's
- * diff builder and M3's repository read through it). Read-only: no write path lives here.
+ * `index_metadata` / `index_field_metadata` for later phases (M2's diff builder, admin/diagnostic reads). Read-only: no
+ * write path lives here. It is NOT snapshot-consistent with the metadata version (one statement per table): the E5 cache
+ * (MetadataCacheService, agent M1-cache) reads version and rows in one statement and is the path for request-time reads.
  *
  * Every method takes the caller's TENANT transaction (`TenantContextService.runInTenantContext` /
  * `runInWorkspaceContext`). Layers (CLAUDE.md §5.2): this service refuses unless an organisation AND a workspace are bound

@@ -107,16 +107,26 @@ BEGIN
 
   IF TG_OP = 'DELETE' THEN
     -- A direct DELETE runs this trigger at depth 1. Cascades (workspace or organisation deletion, a custom object's own
-    -- system fields) arrive through the foreign-key triggers, at depth 2 or more, and are allowed.
-    IF pg_trigger_depth() = 1 AND (
-         (TG_TABLE_NAME = 'object_metadata' AND (NOT OLD.is_custom OR OLD.is_system))
-      OR (TG_TABLE_NAME = 'field_metadata' AND (OLD.is_locked OR OLD.is_system))) THEN
-      RAISE EXCEPTION 'locked metadata cannot be deleted' USING ERRCODE = '42501';
+    -- system fields) arrive through the foreign-key triggers, at depth 2 or more, and are allowed. (One IF per table:
+    -- PL/pgSQL resolves every NEW / OLD field an expression names, whatever the other operands of AND evaluate to.)
+    IF pg_trigger_depth() = 1 THEN
+      IF TG_TABLE_NAME = 'object_metadata' THEN
+        IF NOT OLD.is_custom OR OLD.is_system THEN
+          RAISE EXCEPTION 'locked metadata cannot be deleted' USING ERRCODE = '42501';
+        END IF;
+      ELSIF TG_TABLE_NAME = 'field_metadata' THEN
+        IF OLD.is_locked OR OLD.is_system THEN
+          RAISE EXCEPTION 'locked metadata cannot be deleted' USING ERRCODE = '42501';
+        END IF;
+      END IF;
     END IF;
     RETURN OLD;
   END IF;
 
   IF TG_OP = 'INSERT' THEN
+    IF TG_TABLE_NAME <> 'field_metadata' THEN
+      RAISE EXCEPTION 'metadata_guard: unexpected INSERT trigger' USING ERRCODE = '42501';
+    END IF;
     -- field_metadata only. The parent object is in the same workspace (composite FK) and therefore visible under the
     -- tenant policy whenever the insert itself can pass WITH CHECK; a missing parent is left to the FK.
     SELECT o.is_custom, o.allows_custom_fields INTO v_object_is_custom, v_object_allows_custom_fields
@@ -141,29 +151,30 @@ BEGIN
      OR NEW.workspace_id IS DISTINCT FROM OLD.workspace_id THEN
     RAISE EXCEPTION 'metadata column is immutable' USING ERRCODE = '42501';
   END IF;
-  IF TG_TABLE_NAME = 'object_metadata' AND (
-       NEW.physical_table IS DISTINCT FROM OLD.physical_table
-    OR NEW.storage IS DISTINCT FROM OLD.storage
-    OR NEW.is_custom IS DISTINCT FROM OLD.is_custom
-    OR NEW.is_system IS DISTINCT FROM OLD.is_system
-    OR NEW.universal_identifier IS DISTINCT FROM OLD.universal_identifier
-    OR NEW.name_singular IS DISTINCT FROM OLD.name_singular
-    OR NEW.name_plural IS DISTINCT FROM OLD.name_plural) THEN
-    RAISE EXCEPTION 'metadata column is immutable' USING ERRCODE = '42501';
-  END IF;
-  IF TG_TABLE_NAME = 'field_metadata' AND (
-       NEW.physical_column IS DISTINCT FROM OLD.physical_column
-    OR NEW.type IS DISTINCT FROM OLD.type
-    OR NEW.object_metadata_id IS DISTINCT FROM OLD.object_metadata_id
-    OR NEW.is_custom IS DISTINCT FROM OLD.is_custom
-    OR NEW.is_system IS DISTINCT FROM OLD.is_system
-    OR NEW.is_money IS DISTINCT FROM OLD.is_money
-    OR NEW.universal_identifier IS DISTINCT FROM OLD.universal_identifier
-    OR NEW.name IS DISTINCT FROM OLD.name
-    OR NEW.relation_target_object_metadata_id IS DISTINCT FROM OLD.relation_target_object_metadata_id
-    OR (OLD.is_locked AND NOT NEW.is_locked)
-    OR (OLD.is_locked AND NEW.is_active IS DISTINCT FROM OLD.is_active)) THEN
-    RAISE EXCEPTION 'metadata column is immutable' USING ERRCODE = '42501';
+  IF TG_TABLE_NAME = 'object_metadata' THEN
+    IF NEW.physical_table IS DISTINCT FROM OLD.physical_table
+       OR NEW.storage IS DISTINCT FROM OLD.storage
+       OR NEW.is_custom IS DISTINCT FROM OLD.is_custom
+       OR NEW.is_system IS DISTINCT FROM OLD.is_system
+       OR NEW.universal_identifier IS DISTINCT FROM OLD.universal_identifier
+       OR NEW.name_singular IS DISTINCT FROM OLD.name_singular
+       OR NEW.name_plural IS DISTINCT FROM OLD.name_plural THEN
+      RAISE EXCEPTION 'metadata column is immutable' USING ERRCODE = '42501';
+    END IF;
+  ELSIF TG_TABLE_NAME = 'field_metadata' THEN
+    IF NEW.physical_column IS DISTINCT FROM OLD.physical_column
+       OR NEW.type IS DISTINCT FROM OLD.type
+       OR NEW.object_metadata_id IS DISTINCT FROM OLD.object_metadata_id
+       OR NEW.is_custom IS DISTINCT FROM OLD.is_custom
+       OR NEW.is_system IS DISTINCT FROM OLD.is_system
+       OR NEW.is_money IS DISTINCT FROM OLD.is_money
+       OR NEW.universal_identifier IS DISTINCT FROM OLD.universal_identifier
+       OR NEW.name IS DISTINCT FROM OLD.name
+       OR NEW.relation_target_object_metadata_id IS DISTINCT FROM OLD.relation_target_object_metadata_id
+       OR (OLD.is_locked AND NOT NEW.is_locked)
+       OR (OLD.is_locked AND NEW.is_active IS DISTINCT FROM OLD.is_active) THEN
+      RAISE EXCEPTION 'metadata column is immutable' USING ERRCODE = '42501';
+    END IF;
   END IF;
   RETURN NEW;
 END
@@ -274,7 +285,7 @@ export const METADATA_TABLES_UP_SQL: readonly string[] = [
   CONSTRAINT field_metadata_physical_namespace_ck CHECK (
     physical_column IS NULL OR (is_custom AND physical_column ~ '${CUSTOM_COLUMN_PATTERN}') OR (NOT is_custom AND physical_column !~ '^cf_')),
   CONSTRAINT field_metadata_physical_presence_ck CHECK (
-    (type = 'RELATION' AND settings ->> 'relationType' = 'ONE_TO_MANY') = (physical_column IS NULL)),
+    (type = 'RELATION' AND COALESCE(settings ->> 'relationType', '') = 'ONE_TO_MANY') = (physical_column IS NULL)),
   CONSTRAINT field_metadata_default_value_ck CHECK (default_value IS NULL OR pg_catalog.pg_column_size(default_value) <= ${DEFAULT_VALUE_MAX_BYTES}),
   CONSTRAINT field_metadata_settings_ck CHECK (
     pg_catalog.jsonb_typeof(settings) = 'object' AND pg_catalog.pg_column_size(settings) <= ${SETTINGS_MAX_BYTES}),
@@ -286,7 +297,7 @@ export const METADATA_TABLES_UP_SQL: readonly string[] = [
   CONSTRAINT field_metadata_relation_inverse_ck CHECK (relation_target_field_metadata_id IS NULL OR type = 'RELATION'),
   CONSTRAINT field_metadata_relation_settings_ck CHECK (
     type <> 'RELATION' OR (
-      settings ->> 'relationType' IN ('MANY_TO_ONE', 'ONE_TO_MANY')
+      COALESCE(settings ->> 'relationType', '') IN ('MANY_TO_ONE', 'ONE_TO_MANY')
       AND (settings ->> 'onDelete' IS NULL OR settings ->> 'onDelete' IN ('CASCADE', 'RESTRICT', 'SET_NULL', 'NO_ACTION')))),
   CONSTRAINT field_metadata_position_ck CHECK (${finite('position')})
 )`,
