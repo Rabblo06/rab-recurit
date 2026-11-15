@@ -4,6 +4,7 @@ import { DataSource, EntityManager } from 'typeorm';
 import { AuditAction, AuditService } from '@rab/server/engine/core-modules/audit/audit.service';
 import { RealtimeEventService, RealtimeEventType } from '@rab/server/engine/core-modules/realtime/realtime-event.service';
 import { offerAudience } from '@rab/server/engine/core-modules/realtime/realtime-recipients';
+import { businessTables } from '@rab/server/engine/core-modules/tenant/business-tables';
 import { TenantContextService } from '@rab/server/engine/core-modules/tenant/tenant-context.service';
 import { NotificationService } from '@rab/server/modules/notification/services/notification.service';
 import { withdrawUnconfirmedOffer, WithdrawalSource } from '@rab/server/modules/offer/services/withdraw-unconfirmed-offer';
@@ -59,9 +60,10 @@ export async function runOfferExpiryCycle(
   realtimeEventService?: RealtimeEventService,
 ): Promise<OfferExpiryResult> {
   const candidates = await discoverInWorkspaces(ownerDataSource, tenantContext, async (manager) => {
+      const t = businessTables(manager);
       return await manager.query<ScanCandidate[]>(`
         SELECT id AS offer_id, organisation_id, workspace_id
-        FROM job_offer
+        FROM ${t.job_offer}
         WHERE status = 'pending' AND expires_at < now()
         ORDER BY expires_at ASC
         LIMIT 500
@@ -182,10 +184,11 @@ export function deadlineRetryDelayMs(attemptCount: number): number {
 type DeadlineState = { status: string; shift_status: string; deadline_at: Date; db_now: Date };
 
 async function readDeadlineState(manager: EntityManager, offerId: string): Promise<DeadlineState | undefined> {
+  const t = businessTables(manager);
   const [row] = await manager.query<DeadlineState[]>(
     // sql-injection-reviewed: code-constant SQL fragment from a helper called with literal aliases; values are bound $n parameters.
     `SELECT o.status, s.status AS shift_status, ${confirmationDeadlineSql('o', 'sa', 's')} AS deadline_at, clock_timestamp() AS db_now
-       FROM job_offer o JOIN shift_assignment sa ON sa.id = o.shift_assignment_id JOIN shift s ON s.id = sa.shift_id
+       FROM ${t.job_offer} o JOIN ${t.shift_assignment} sa ON sa.id = o.shift_assignment_id JOIN ${t.shift} s ON s.id = sa.shift_id
       WHERE o.id = $1`,
     [offerId],
   );
@@ -286,17 +289,18 @@ export async function runConfirmationDeadlineBackstopScan(
   auditService: AuditService,
   realtimeEventService: RealtimeEventService,
 ): Promise<ManagerConfirmationDeadlineResult> {
-  const candidates = await discoverInWorkspaces(ownerDataSource, tenantContext, async (manager) =>
-    manager.query<ConfirmationDeadlineCandidate[]>(
+  const candidates = await discoverInWorkspaces(ownerDataSource, tenantContext, async (manager) => {
+    const t = businessTables(manager);
+    return manager.query<ConfirmationDeadlineCandidate[]>(
       // sql-injection-reviewed: code-constant SQL fragment from a helper called with literal aliases; values are bound $n parameters.
       `SELECT o.id AS offer_id, o.organisation_id, o.workspace_id
-         FROM job_offer o JOIN shift_assignment sa ON sa.id = o.shift_assignment_id JOIN shift s ON s.id = sa.shift_id
+         FROM ${t.job_offer} o JOIN ${t.shift_assignment} sa ON sa.id = o.shift_assignment_id JOIN ${t.shift} s ON s.id = sa.shift_id
         WHERE o.status = 'staff_accepted' AND sa.status = 'staff_accepted' AND s.status <> 'cancelled'
           AND ${confirmationDeadlineSql('o', 'sa', 's')} <= now()
         ORDER BY o.id
         LIMIT 500`,
-    ),
-  );
+    );
+  });
   const deps: OfferExpiryDeps = { notificationService, auditService, realtimeEventService };
   let withdrawn = 0;
   for (const candidate of candidates) {

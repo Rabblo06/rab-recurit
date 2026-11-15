@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { sentShiftPresentation } from './sent-shift-presentation';
-import { ROTATE_SHIFT_QR_LOCK_SQL, ROTATE_SHIFT_QR_UPDATE_SQL } from './rotate-shift-qr.sql';
+import { rotateShiftQrLockSql, rotateShiftQrUpdateSql } from './rotate-shift-qr.sql';
 import { SENT_SHIFT_VIEW_SQL, sentShiftsPageAndCountsSql } from './sent-shifts-sql';
 import { ListSentShiftsDto, SentShiftView } from '../dto/list-sent-shifts.dto';
 import { validateAssignmentTime, effectiveAssignmentBreakMinutes, assignmentEnvelope, defaultAssignmentTime } from '../utils/assignment-time';
@@ -20,6 +20,7 @@ import { AuditAction, AuditService } from '../../../engine/core-modules/audit/au
 import { CoreEntityCacheService } from '../../../engine/core-modules/entity-cache/core-entity-cache.service';
 import { ResourceScope, ResourceScopeService } from '../../../engine/core-modules/resource-scope/resource-scope.service';
 import { AuthContext } from '../../../engine/core-modules/tenant/auth-context.interface';
+import { businessTables } from '../../../engine/core-modules/tenant/business-tables';
 import { RealtimeEventService, RealtimeEventType } from '../../../engine/core-modules/realtime/realtime-event.service';
 import { approverAudience, shiftAudience, shiftStaffAudience } from '../../../engine/core-modules/realtime/realtime-recipients';
 import { TenantContextService } from '../../../engine/core-modules/tenant/tenant-context.service';
@@ -328,8 +329,9 @@ export class SchedulingService {
         throw new ConflictException({ code: 'SHIFT_NOT_DRAFT', message: 'Only draft shifts can be archived. Cancel a published shift instead.' });
       }
       assertTransition(ARCHIVE_TRANSITIONS, archiveStateOf(shift.archivedAt), ArchiveState.ARCHIVED);
+      const t = businessTables(manager);
       const [claimed] = (await manager.query(
-        `UPDATE shift SET archived_at = now(), archived_by = $2, updated_at = now()
+        `UPDATE ${t.shift} SET archived_at = now(), archived_by = $2, updated_at = now()
           WHERE id = $1 AND status = $3 AND archived_at IS NULL RETURNING id`,
         [id, ctx.userId, ShiftStatus.DRAFT],
       )) as [Array<{ id: string }>, number];
@@ -363,8 +365,8 @@ export class SchedulingService {
       // Row lock first, then the compare-and-set on the values read above (rotate-shift-qr.sql.ts): a concurrent rotation
       // or status change is a clean 409, and a rotation that waited on the pre-shift report's lock writes its updated_at
       // after that report's generation stamp, so the report is regenerated with the new QR (QR review M1).
-      await manager.query(ROTATE_SHIFT_QR_LOCK_SQL, [id]);
-      const [claimed] = (await manager.query(ROTATE_SHIFT_QR_UPDATE_SQL, [id, shift.qrVersion, shift.status])) as [Array<{ qr_version: number }>, number];
+      await manager.query(rotateShiftQrLockSql(manager), [id]);
+      const [claimed] = (await manager.query(rotateShiftQrUpdateSql(manager), [id, shift.qrVersion, shift.status])) as [Array<{ qr_version: number }>, number];
       if (claimed.length === 0) throw new ConflictException('This shift changed while its QR code was being replaced — please refresh.');
       await this.auditService.record(manager, ctx, AuditAction.SHIFT_QR_ROTATED, {
         entityType: 'shift',
@@ -385,8 +387,9 @@ export class SchedulingService {
       assertTransition(ARCHIVE_TRANSITIONS, archiveStateOf(shift.archivedAt), ArchiveState.ACTIVE);
       const venue = await manager.findOne(Venue, { where: { id: shift.venueId } });
       if (venue) this.venueService.assertVenueNotArchived(venue);
+      const t = businessTables(manager);
       const [claimed] = (await manager.query(
-        `UPDATE shift SET archived_at = NULL, archived_by = NULL, updated_at = now() WHERE id = $1 AND archived_at IS NOT NULL RETURNING id`,
+        `UPDATE ${t.shift} SET archived_at = NULL, archived_by = NULL, updated_at = now() WHERE id = $1 AND archived_at IS NOT NULL RETURNING id`,
         [id],
       )) as [Array<{ id: string }>, number];
       if (claimed.length === 0) throw new ConflictException('This shift changed while it was being restored — please refresh.');
@@ -532,14 +535,15 @@ export class SchedulingService {
       const ids = (await qb.getRawMany<{ id: string }>()).map((r) => r.id);
       if (ids.length === 0) return empty;
       const truncated = ids.length > ASSISTANT_STAFFING_MAX_SHIFTS;
+      const t = businessTables(manager);
       const rows: Array<Record<string, unknown>> = await manager.query(
         // sql-injection-reviewed: code-constant SQL fragment from a helper called with literal aliases; values are bound $n parameters.
         `SELECT s.id, s.status, s.starts_at, s.ends_at, s.required_count, s.filled_count, v.name AS venue_name, jr.name AS job_role_name,
                 ${shiftSeatCountsSql('sa')}
-           FROM shift s
-           JOIN venue v ON v.id = s.venue_id
-           JOIN job_role jr ON jr.id = s.job_role_id
-           LEFT JOIN shift_assignment sa ON sa.shift_id = s.id
+           FROM ${t.shift} s
+           JOIN ${t.venue} v ON v.id = s.venue_id
+           JOIN ${t.job_role} jr ON jr.id = s.job_role_id
+           LEFT JOIN ${t.shift_assignment} sa ON sa.shift_id = s.id
           WHERE s.id = ANY($1::uuid[])
           GROUP BY s.id, v.name, jr.name
           ORDER BY s.starts_at, s.id`,
@@ -606,7 +610,7 @@ export class SchedulingService {
       // XP-05: one statement for the page rows and the tab counts (sent-shifts-sql.ts).
       const result: Array<Record<string, unknown>> = await manager.query(
         // sql-injection-reviewed: dynamic WHERE assembled only from literal fragments and $n / :named placeholders (values pushed to params); identifiers come from allow-lists. Reviewed 2026-11-04.
-        sentShiftsPageAndCountsSql(id ? 'TRUE' : SENT_SHIFT_VIEW_SQL[view], bound),
+        sentShiftsPageAndCountsSql(manager, id ? 'TRUE' : SENT_SHIFT_VIEW_SQL[view], bound),
         pageParams,
       );
       // Tab counts + the distinct number of submitted requests (one request = one, however many recipients).
@@ -787,8 +791,9 @@ export class SchedulingService {
     const startsAt = startsAtInput ?? shift.startsAt;
     const endsAt = endsAtInput ?? shift.endsAt;
     if (!(endsAt.getTime() > startsAt.getTime())) throw new BadRequestException('A shift must end after it starts.');
+    const t = businessTables(manager);
     const [claimed] = (await manager.query(
-      `UPDATE shift SET starts_at = $2, ends_at = $3, break_minutes = $4, required_count = $5, notes = $6, updated_at = now()
+      `UPDATE ${t.shift} SET starts_at = $2, ends_at = $3, break_minutes = $4, required_count = $5, notes = $6, updated_at = now()
         WHERE id = $1 AND status = $7 AND archived_at IS NULL RETURNING id`,
       [
         id,
@@ -856,8 +861,9 @@ export class SchedulingService {
       // below is for the genuinely-concurrent case, not this one.
       assertTransition(SHIFT_TRANSITIONS, shift.status, ShiftStatus.CANCELLED);
 
+      const t = businessTables(manager);
       const [claimedRows] = (await manager.query(
-        `UPDATE shift
+        `UPDATE ${t.shift}
            SET status = $1, cancelled_reason = $2, cancelled_by = $3, cancelled_at = now(), updated_at = now()
            WHERE id = $4 AND status = $5
            RETURNING id`,
@@ -1283,7 +1289,8 @@ export class SchedulingService {
         .andWhere('sp.createdBy = :owner', { owner: ctx.userId })
         .andWhere('sp.employmentStatus = :employment', { employment: EmploymentStatus.ACTIVE })
         .andWhere('u.status = :account', { account: UserStatus.ACTIVE });
-      if (replacing) qb.andWhere('NOT EXISTS (SELECT 1 FROM shift_assignment sa WHERE sa.shift_id=:shiftId AND sa.staff_profile_id=sp.id)', { shiftId });
+      const t = businessTables(manager);
+      if (replacing) qb.andWhere(`NOT EXISTS (SELECT 1 FROM ${t.shift_assignment} sa WHERE sa.shift_id=:shiftId AND sa.staff_profile_id=sp.id)`, { shiftId });
       if (dto.q?.trim()) qb.andWhere("(u.firstName ILIKE :q OR u.lastName ILIKE :q OR CONCAT(u.firstName, ' ', u.lastName) ILIKE :q OR u.email ILIKE :q OR sp.staffRef ILIKE :q)", { q: toIlikePattern(dto.q.trim()) });
       const total = await qb.getCount();
       const { skip, take } = paginationSkipTake(dto);
@@ -1409,15 +1416,16 @@ export class SchedulingService {
       const { skip, take } = keysetSkipTake(dto);
       // The cursor bound is added AFTER the count: `total` stays the whole filtered list's, as before.
       if (after) qb.andWhere(keysetBeforeSql('shift.createdAt', 'shift.id', ':keysetT', ':keysetId'), { keysetT: after.t, keysetId: after.i });
+      const t = businessTables(manager);
       const rows = await qb
         .select('shift.id', 'id')
         .addSelect('shift.status', 'status')
         .addSelect('shift.startsAt', 'startsAt')
         .addSelect('shift.endsAt', 'endsAt')
         .addSelect('shift.requiredCount', 'requiredCount')
-        .addSelect("(SELECT COUNT(*) FROM shift_assignment sa WHERE sa.shift_id=shift.id AND sa.status IN ('confirmed','completed'))", 'confirmedCount')
-        .addSelect("(SELECT COUNT(*) FROM shift_assignment sa WHERE sa.shift_id=shift.id AND sa.status='staff_accepted')", 'acceptedCount')
-        .addSelect("(SELECT COUNT(*) FROM shift_assignment sa JOIN job_offer o ON o.shift_assignment_id=sa.id WHERE sa.shift_id=shift.id AND o.status='declined')", 'rejectedCount')
+        .addSelect(`(SELECT COUNT(*) FROM ${t.shift_assignment} sa WHERE sa.shift_id=shift.id AND sa.status IN ('confirmed','completed'))`, 'confirmedCount')
+        .addSelect(`(SELECT COUNT(*) FROM ${t.shift_assignment} sa WHERE sa.shift_id=shift.id AND sa.status='staff_accepted')`, 'acceptedCount')
+        .addSelect(`(SELECT COUNT(*) FROM ${t.shift_assignment} sa JOIN ${t.job_offer} o ON o.shift_assignment_id=sa.id WHERE sa.shift_id=shift.id AND o.status='declined')`, 'rejectedCount')
         .addSelect('shift.payRatePence', 'payRatePence')
         .addSelect('shift.notes', 'notes')
         .addSelect('shift.createdAt', 'submittedAt')
@@ -1426,7 +1434,7 @@ export class SchedulingService {
         .addSelect('jr.name', 'roleName')
         .addSelect("CONCAT(vm.firstName, ' ', vm.lastName)", 'venueManagerName')
         .addSelect(
-          '(SELECT COUNT(*) FROM shift_request_staff rs WHERE rs.shift_id = shift.id)',
+          `(SELECT COUNT(*) FROM ${t.shift_request_staff} rs WHERE rs.shift_id = shift.id)`,
           'selectedCount',
         )
         .orderBy('shift.createdAt', 'DESC')

@@ -1,3 +1,4 @@
+import { asLiveTransactionManager } from '../../__tests__/helpers/business-tables-fakes';
 import { peekBusinessSchema } from '@rab/server/engine/core-modules/tenant/business-tables';
 import { workspaceSchemaName } from '@rab/server/engine/core-modules/tenant/schema-resolver.service';
 
@@ -48,7 +49,7 @@ function harness(opts: {
       ];
     }
     if (sql.startsWith('SELECT current_setting')) return [{ org: null, workspace: null }];
-    if (sql === `SELECT 1 FROM shift WHERE created_by = $1 LIMIT 1`) return params[0] === opts.workspaceDependency ? [{ '?column?': 1 }] : [];
+    if (sql === `SELECT 1 FROM "core"."shift" WHERE created_by = $1 LIMIT 1`) return params[0] === opts.workspaceDependency ? [{ '?column?': 1 }] : [];
     if (sql.includes('workspace_schema_registry')) return [];
     return [];
   };
@@ -56,7 +57,8 @@ function harness(opts: {
   const dataSource = {
     transaction: async <T>(fn: (m: unknown) => Promise<T>) => {
       counters.transactions += 1;
-      return fn({ query });
+      // Part C2: a transaction's manager (live query runner); the job binds the business schema itself.
+      return fn(asLiveTransactionManager({ query }));
     },
     // A DataSource-level query (outside a transaction) would also be a database access: counted the same way.
     query: async (sql: string, params: unknown[] = []) => query(sql, params),
@@ -132,7 +134,7 @@ describe('account invite cleanup — F-1 definer path (WORKER_INVITE_AUTO_DELETE
     h.dataSource.transaction = async <T>(fn: (m: unknown) => Promise<T>) =>
       original(async (m: unknown) => {
         const inner = m as { query: (sql: string, p?: unknown[]) => Promise<unknown> };
-        return fn({
+        return fn(asLiveTransactionManager({
           query: async (sql: string, p?: unknown[]) => {
             if (sql.includes('core.worker_delete_expired_invited_user($1')) {
               await inner.query(sql, p);
@@ -140,7 +142,7 @@ describe('account invite cleanup — F-1 definer path (WORKER_INVITE_AUTO_DELETE
             }
             return inner.query(sql, p);
           },
-        });
+        }));
       });
     const result = await runAccountInviteCleanupCycle(h.dataSource as never, ON);
     const sql = h.statements.map((s) => s.sql);
@@ -161,7 +163,7 @@ describe('account invite cleanup — F-1 definer path (WORKER_INVITE_AUTO_DELETE
         const inner = m as { query: (sql: string, p?: unknown[]) => Promise<unknown> };
         let physical = false;
         let aborted = false;
-        manager = {
+        manager = asLiveTransactionManager({
           query: async (sql: string, p?: unknown[]) => {
             if (sql === 'ROLLBACK TO SAVEPOINT sp_invite_cleanup_candidate') aborted = false;
             else if (aborted) throw new Error('current transaction is aborted'); // 25P02, like PostgreSQL
@@ -170,14 +172,15 @@ describe('account invite cleanup — F-1 definer path (WORKER_INVITE_AUTO_DELETE
               physical = true;
               return [{ schema_name: workspaceSchemaName(WS), status: 'READY', schema_version: 1, migration_error: null }];
             }
-            if (physical && sql === `SELECT 1 FROM shift WHERE created_by = $1 LIMIT 1`) {
+            // Part C2: the physical pass names the registry-validated workspace schema explicitly.
+            if (physical && sql === `SELECT 1 FROM "${workspaceSchemaName(WS)}"."shift" WHERE created_by = $1 LIMIT 1`) {
               boundAtThrow.push(peekBusinessSchema(manager as never));
               aborted = true;
               throw new TypeError('boom');
             }
             return inner.query(sql, p);
           },
-        };
+        });
         return fn(manager);
       });
     await runAccountInviteCleanupCycle(h.dataSource as never, ON);

@@ -4,6 +4,7 @@ import { DataSource, EntityManager } from 'typeorm';
 import { AuthContext } from './auth-context.interface';
 import { businessSearchPath, withBusinessSchema } from './business-tables';
 import { SchemaResolverService, WorkspaceRoutingError } from './schema-resolver.service';
+import { bindEntityManagerToSchema } from './schema-bound-entity-manager';
 
 /**
  * One transaction-routing mechanism for workspace-scoped work (Hyper Workspace Phase 3, step 4).
@@ -42,7 +43,9 @@ export class WorkspaceExecutionContext {
       // C2-0: recorded for businessTables(manager) (validated) BEFORE set_config; '' instead under the test-only trap.
       return withBusinessSchema(manager, schema, ctx.workspaceId, async () => {
         await manager.query(`SELECT set_config('search_path', $1, true)`, [businessSearchPath(schema)]);
-        return fn(manager, schema);
+        // C2-1: entity metadata bound to the same (real) schema; businessTables() is recorded on that manager as well.
+        const bound = await bindEntityManagerToSchema(manager, schema);
+        return withBusinessSchema(bound, schema, ctx.workspaceId, () => fn(bound, schema));
       });
     });
   }

@@ -1,6 +1,7 @@
 import { DelayedError, UnrecoverableError } from 'bullmq';
 
 import { TimerTriggerKind, TimerTriggerOutcome } from '@rab/server/engine/worker-shared/timer-trigger.contract';
+import { asTenantBoundManager } from '../../__tests__/helpers/business-tables-fakes';
 import { decideTimerTrigger, handleTimerTrigger, TimerTriggerHandlerDeps, TimerTriggerJobLike } from './timer-trigger.handler';
 
 /**
@@ -18,12 +19,13 @@ type Row = Record<string, unknown>;
 
 function harness(opts: { mode?: 'off' | 'shadow' | 'on'; rows?: Row[]; enabled?: (k: TimerTriggerKind) => boolean; acted?: boolean } = {}) {
   const queries: string[] = [];
-  const manager = {
+  // Part C2: bound like TenantContextService with HWS off ('core'), so businessTables() answers.
+  const manager = asTenantBoundManager({
     query: jest.fn(async (sql: string) => {
       queries.push(sql);
       return sql.startsWith('SET TRANSACTION') ? [] : (opts.rows ?? []);
     }),
-  };
+  });
   const outcomes: Array<[TimerTriggerKind, TimerTriggerOutcome]> = [];
   const action = jest.fn(async () => opts.acted ?? true);
   const runScoped = jest.fn(async (_org: string, _ws: string, fn: (m: never) => Promise<unknown>, _options?: { readOnly?: boolean }) => fn(manager as never));

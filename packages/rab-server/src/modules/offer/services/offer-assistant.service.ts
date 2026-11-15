@@ -4,6 +4,7 @@ import { ForbiddenException, Injectable } from '@nestjs/common';
 import { PermissionsService } from '../../../engine/core-modules/permissions/permissions.service';
 import { ResourceScopeService } from '../../../engine/core-modules/resource-scope/resource-scope.service';
 import { AuthContext } from '../../../engine/core-modules/tenant/auth-context.interface';
+import { businessTables } from '../../../engine/core-modules/tenant/business-tables';
 import { TenantContextService } from '../../../engine/core-modules/tenant/tenant-context.service';
 import { beginAssistantRead } from '../../../engine/utils/assistant-read.util';
 import { assignmentTimeSql } from '../../scheduling/utils/assignment-time';
@@ -51,6 +52,7 @@ export class OfferAssistantService {
         return `$${params.length}`;
       };
       const start = assignmentTimeSql().start;
+      const t = businessTables(manager);
       // sql-injection-reviewed: dynamic WHERE assembled only from literal fragments and $n / :named placeholders (values pushed to params); identifiers come from allow-lists. Reviewed 2026-11-04.
       const where = [offerReadScopeCondition(scope, ctx, nextParam), `${start} >= ${nextParam(range.from)}`, `${start} < ${nextParam(range.to)}`].join(' AND ');
       const rows: Array<{ status: string; n: number; expiring: number; stale: number }> = await manager.query(
@@ -58,9 +60,9 @@ export class OfferAssistantService {
         `SELECT o.status, count(*)::int AS n,
                 count(*) FILTER (WHERE o.status = 'pending' AND o.expires_at >= now() AND o.expires_at < now() + interval '24 hours')::int AS expiring,
                 count(*) FILTER (WHERE o.status = 'pending' AND o.sent_at < now() - interval '24 hours')::int AS stale
-           FROM job_offer o
-           JOIN shift_assignment sa ON sa.id = o.shift_assignment_id
-           JOIN shift s ON s.id = sa.shift_id
+           FROM ${t.job_offer} o
+           JOIN ${t.shift_assignment} sa ON sa.id = o.shift_assignment_id
+           JOIN ${t.shift} s ON s.id = sa.shift_id
           WHERE ${where}
           GROUP BY o.status`,
         params,
@@ -75,9 +77,9 @@ export class OfferAssistantService {
       const [median] = await manager.query(
         // sql-injection-reviewed: dynamic WHERE assembled only from literal fragments and $n / :named placeholders (values pushed to params); identifiers come from allow-lists. Reviewed 2026-11-04.
         `SELECT round(percentile_cont(0.5) WITHIN GROUP (ORDER BY extract(epoch FROM (o.responded_at - o.sent_at)) / 60))::int AS minutes
-           FROM job_offer o
-           JOIN shift_assignment sa ON sa.id = o.shift_assignment_id
-           JOIN shift s ON s.id = sa.shift_id
+           FROM ${t.job_offer} o
+           JOIN ${t.shift_assignment} sa ON sa.id = o.shift_assignment_id
+           JOIN ${t.shift} s ON s.id = sa.shift_id
           WHERE ${where} AND o.responded_at IS NOT NULL AND o.responded_at >= o.sent_at`,
         params,
       );

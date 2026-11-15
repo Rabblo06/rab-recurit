@@ -7,6 +7,7 @@ import { AuditAction, AuditService } from '../../../engine/core-modules/audit/au
 import { PermissionsService } from '../../../engine/core-modules/permissions/permissions.service';
 import { AuthContext } from '../../../engine/core-modules/tenant/auth-context.interface';
 import { TenantContextService } from '../../../engine/core-modules/tenant/tenant-context.service';
+import { businessTables } from '../../../engine/core-modules/tenant/business-tables';
 import { SaveStaffReviewDto } from '../dto/staff-review.dto';
 import { ShiftReportService } from './shift-report.service';
 
@@ -59,8 +60,9 @@ export class ShiftReviewService {
       await manager.query(`SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`, [`finalise:${shiftId}`]);
       if (await this.finalised(manager, shiftId)) throw new ConflictException('This shift report has been finalised; its staff reviews can no longer be changed.');
       const feedback = dto.feedback?.trim() ? dto.feedback.trim() : null;
+      const t = businessTables(manager);
       const [{ inserted }] = await manager.query(
-        `INSERT INTO shift_staff_review (organisation_id, workspace_id, shift_id, staff_profile_id, reviewer_user_id,
+        `INSERT INTO ${t.shift_staff_review} (organisation_id, workspace_id, shift_id, staff_profile_id, reviewer_user_id,
            grooming, attitude, skills, attendance, time_keeping, feedback)
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
          ON CONFLICT (shift_id, staff_profile_id) DO UPDATE SET reviewer_user_id = EXCLUDED.reviewer_user_id,
@@ -82,8 +84,9 @@ export class ShiftReviewService {
     if (!(await this.permissions.userHasPermissionTx(manager, ctx, PermissionFlag.REVIEW_CREATE))) throw new ForbiddenException('Permission required.');
     const shift = await manager.findOne(Shift, { where: { id: shiftId } });
     if (!shift || shift.organisationId !== ctx.organisationId || !(await this.reports.canReadShift(manager, ctx, shift))) throw new NotFoundException('Shift not found.');
+    const t = businessTables(manager);
     const [onShift] = await manager.query(
-      `SELECT 1 FROM shift_assignment WHERE shift_id = $1 AND staff_profile_id = $2 AND status IN ('confirmed','completed','no_show')`,
+      `SELECT 1 FROM ${t.shift_assignment} WHERE shift_id = $1 AND staff_profile_id = $2 AND status IN ('confirmed','completed','no_show')`,
       [shiftId, staffProfileId],
     );
     if (!onShift) throw new NotFoundException('Staff member not found on this shift.');
@@ -91,13 +94,15 @@ export class ShiftReviewService {
   }
 
   private async finalised(manager: EntityManager, shiftId: string): Promise<boolean> {
-    const [row] = await manager.query(`SELECT status FROM shift_report WHERE shift_id = $1`, [shiftId]);
+    const t = businessTables(manager);
+    const [row] = await manager.query(`SELECT status FROM ${t.shift_report} WHERE shift_id = $1`, [shiftId]);
     return row?.status === 'finalised';
   }
 
   private async read(manager: EntityManager, shiftId: string, staffProfileId: string): Promise<StaffReview | null> {
+    const t = businessTables(manager);
     const [r] = await manager.query(
-      `SELECT r.*, u.first_name || ' ' || u.last_name AS reviewer_name FROM shift_staff_review r
+      `SELECT r.*, u.first_name || ' ' || u.last_name AS reviewer_name FROM ${t.shift_staff_review} r
          JOIN core."user" u ON u.id = r.reviewer_user_id WHERE r.shift_id = $1 AND r.staff_profile_id = $2`,
       [shiftId, staffProfileId],
     );

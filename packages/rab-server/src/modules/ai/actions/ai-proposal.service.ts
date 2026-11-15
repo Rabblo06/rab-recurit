@@ -23,6 +23,7 @@ import { AuditAction, AuditService } from '../../../engine/core-modules/audit/au
 import { StepUpReauthService } from '../../../engine/core-modules/auth/services/step-up-reauth.service';
 import { PermissionsService } from '../../../engine/core-modules/permissions/permissions.service';
 import { AuthContext } from '../../../engine/core-modules/tenant/auth-context.interface';
+import { businessTables } from '../../../engine/core-modules/tenant/business-tables';
 import { TenantContextService } from '../../../engine/core-modules/tenant/tenant-context.service';
 import { AI_AGENT_EXECUTION_APPROVED } from '../contracts/agents';
 import { AiProposalServiceContract, AiProposeActionResult } from '../contracts/actions';
@@ -427,13 +428,14 @@ export class AiProposalService implements Omit<AiProposalServiceContract, 'listI
 
   /** Card views. Target labels are resolved live under the caller's RLS (a name is never stored in the proposal). */
   private async toViews(m: EntityManager, ctx: AuthContext, rows: AiProposalRow[]): Promise<AiProposalView[]> {
+    const t = businessTables(m);
     const idsOf = (type: string) => [...new Set(rows.filter((r) => r.targetType === type && r.targetId).map((r) => r.targetId!))];
     const labels = new Map<string, string>();
     const venueIds = idsOf('venue');
-    if (venueIds.length) for (const v of (await m.query(`SELECT id::text AS id, name FROM venue WHERE id = ANY($1::uuid[])`, [venueIds])) as Array<{ id: string; name: string }>) labels.set(v.id, v.name);
+    if (venueIds.length) for (const v of (await m.query(`SELECT id::text AS id, name FROM ${t.venue} WHERE id = ANY($1::uuid[])`, [venueIds])) as Array<{ id: string; name: string }>) labels.set(v.id, v.name);
     const shiftIds = idsOf('shift');
     if (shiftIds.length) {
-      for (const s of (await m.query(`SELECT s.id::text AS id, v.name AS venue FROM shift s LEFT JOIN venue v ON v.id = s.venue_id WHERE s.id = ANY($1::uuid[])`, [shiftIds])) as Array<{ id: string; venue: string | null }>) {
+      for (const s of (await m.query(`SELECT s.id::text AS id, v.name AS venue FROM ${t.shift} s LEFT JOIN ${t.venue} v ON v.id = s.venue_id WHERE s.id = ANY($1::uuid[])`, [shiftIds])) as Array<{ id: string; venue: string | null }>) {
         labels.set(s.id, s.venue ? `Draft shift at ${s.venue}` : 'Draft shift');
       }
     }
@@ -441,7 +443,7 @@ export class AiProposalService implements Omit<AiProposalServiceContract, 'listI
     if (staffIds.length) {
       for (const p of (await m.query(
         `SELECT sp.id::text AS id, u.first_name AS "firstName", u.last_name AS "lastName"
-           FROM staff_profile sp JOIN core."user" u ON u.id = sp.user_id
+           FROM ${t.staff_profile} sp JOIN core."user" u ON u.id = sp.user_id
           WHERE sp.id = ANY($1::uuid[]) AND sp.created_by = core.current_uid()`,
         [staffIds],
       )) as Array<{ id: string; firstName: string | null; lastName: string | null }>) {

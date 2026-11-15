@@ -1,5 +1,7 @@
 import { DataSource, EntityManager, QueryRunner } from 'typeorm';
 
+import { executingDataSourceOf } from '../tenant/schema-bound-entity-manager';
+
 export type AfterCommitTask = () => Promise<void>;
 
 export interface AfterCommitPublisherOptions {
@@ -47,7 +49,9 @@ export class AfterCommitPublisher {
     const runner = manager.queryRunner;
     // Only inside an open transaction: there must be a commit to wait for.
     if (!runner || runner.isReleased || !runner.isTransactionActive) return false;
-    this.subscribe(manager.connection);
+    // The DataSource the transaction runs on broadcasts the commit (TypeORM Broadcaster reads queryRunner.connection.subscribers);
+    // a schema-bound manager's `connection` is a metadata-only source that emits nothing (C2-1).
+    this.subscribe(executingDataSourceOf(manager));
     const tasks = this.pending.get(runner) ?? [];
     if (tasks.length >= this.options.maxPerTransaction) return false;
     tasks.push(task);

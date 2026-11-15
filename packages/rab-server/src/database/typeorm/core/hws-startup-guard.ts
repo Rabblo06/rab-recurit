@@ -1,5 +1,6 @@
 import { DataSource } from 'typeorm';
 
+import { metadataSourceFor } from '../../../engine/core-modules/tenant/schema-bound-entity-manager';
 import { SUPPORTED_WORKSPACE_SCHEMA_VERSIONS } from '../../../engine/core-modules/tenant/schema-resolver.service';
 
 export class HwsStartupError extends Error {
@@ -65,6 +66,14 @@ export const WORKSPACE_TABLE_NAMES: ReadonlySet<string> = new Set([
  *      behaviour in HYPER-WORKSPACE-PHASE3-FOUNDATION.md) make every migration appear perpetually pending.
  */
 export async function assertHwsStartupInvariants(dataSource: DataSource, hwsRuntimeEnabled: boolean): Promise<void> {
+  // C2-1, in BOTH modes (the binders hand out a 'core'-bound manager with HWS off too): build the 'core' schema-bound entity
+  // metadata now, so a build-time refusal (a BaseEntity or lazy relation, an entity that does not resolve as expected)
+  // refuses to start instead of failing the first tenant transaction. It also warms the cache for HWS-off traffic.
+  try {
+    await metadataSourceFor(dataSource, 'core');
+  } catch (error) {
+    throw new HwsStartupError(`schema-bound entity metadata refused: ${error instanceof Error ? error.message : String(error)}`);
+  }
   if (!hwsRuntimeEnabled) return;
 
   const [{ exists }] = await dataSource.query<[{ exists: boolean }]>(

@@ -5,6 +5,7 @@ import { assertTransition, NotificationType, NotificationTypeType, SHIFT_ASSIGNM
 import { DataSource, EntityManager } from 'typeorm';
 
 import { AuditAction, AuditService } from '@rab/server/engine/core-modules/audit/audit.service';
+import { businessTables } from '@rab/server/engine/core-modules/tenant/business-tables';
 import { TenantContextService } from '@rab/server/engine/core-modules/tenant/tenant-context.service';
 import { NotificationService } from '@rab/server/modules/notification/services/notification.service';
 import { Shift } from '@rab/server/modules/scheduling/entities/shift.entity';
@@ -199,7 +200,8 @@ interface ReminderCandidateSnapshot {
  * Pass B shape (Phase 3) rather than inventing a second pattern.
  */
 async function hasAttendanceRow(manager: EntityManager, assignmentId: string): Promise<boolean> {
-  const rows = await manager.query(`SELECT 1 FROM attendance WHERE shift_assignment_id = $1 LIMIT 1`, [assignmentId]);
+  const t = businessTables(manager);
+  const rows = await manager.query(`SELECT 1 FROM ${t.attendance} WHERE shift_assignment_id = $1 LIMIT 1`, [assignmentId]);
   return rows.length > 0;
 }
 
@@ -238,11 +240,12 @@ async function reminderWindowsAlreadyClaimed(
   reminderWindows: readonly ReminderWindowDefinition[],
 ): Promise<boolean> {
   const keys = reminderWindows.map((w) => `${w.eventKeySlug}:${assignmentId}`);
+  const t = businessTables(manager);
   const [row] = await manager.query<Array<{ period: string | null; starts_at: Date; ends_at: Date; claimed: string[] | null }>>(
     `SELECT sa.period::text AS period, s.starts_at, s.ends_at,
             ARRAY(SELECT we.event_key FROM core.worker_event we WHERE we.event_key = ANY($2::text[])) AS claimed
-       FROM shift_assignment sa
-       JOIN shift s ON s.id = sa.shift_id
+       FROM ${t.shift_assignment} sa
+       JOIN ${t.shift} s ON s.id = sa.shift_id
       WHERE sa.id = $1`,
     [assignmentId, keys],
   );
@@ -298,12 +301,13 @@ export async function discoverShiftMonitorInWorkspace(manager: EntityManager): P
   // round-trips, not a micro-optimisation.
   //   reminders: shifts that have NOT started, starting within a day — soonest first.
   //   no-shows: shifts already past the grace period — most recent first, so stale rows sink to the back.
+  const t = businessTables(manager);
   const combinedCandidates = await manager.query<ScanCandidate[]>(
     // sql-injection-reviewed: code-constant SQL fragment from a helper called with literal aliases; values are bound $n parameters.
     `
         (SELECT sa.id AS assignment_id, sa.organisation_id, sa.workspace_id, ${assignmentTimeSql().start} AS starts_at
-           FROM shift_assignment sa
-           JOIN shift s ON s.id = sa.shift_id
+           FROM ${t.shift_assignment} sa
+           JOIN ${t.shift} s ON s.id = sa.shift_id
           WHERE sa.status = 'confirmed'
             AND s.status NOT IN ('cancelled', 'completed')
             AND ${assignmentTimeSql().start} > now()
@@ -312,8 +316,8 @@ export async function discoverShiftMonitorInWorkspace(manager: EntityManager): P
           LIMIT 500)
         UNION ALL
         (SELECT sa.id AS assignment_id, sa.organisation_id, sa.workspace_id, ${assignmentTimeSql().start} AS starts_at
-           FROM shift_assignment sa
-           JOIN shift s ON s.id = sa.shift_id
+           FROM ${t.shift_assignment} sa
+           JOIN ${t.shift} s ON s.id = sa.shift_id
           WHERE sa.status = 'confirmed'
             AND s.status NOT IN ('cancelled', 'completed')
             AND ${assignmentTimeSql().start} <= now() - make_interval(secs => $1)
@@ -467,12 +471,13 @@ async function flagNoShowLoaded(
   first: ReminderCandidateSnapshot,
   msUntilStart: number,
 ): Promise<boolean> {
+  const t = businessTables(manager);
   const loadCurrent = () => loadReminderCandidate(manager, candidate.assignment_id);
   if (-msUntilStart < NO_SHOW_GRACE_MS) return false;
   // A checked-in staff member proved arrival (owner brief 2026-10-21): never flagged as a no-show by the worker. A
   // missing clock-in is then the manager's call (clock in on behalf, record attendance, or confirm the no-show).
   if (first.assignment.checkedInAt) return false;
-  const hasAttendance = await manager.query(`SELECT 1 FROM attendance WHERE shift_assignment_id = $1 LIMIT 1`, [first.assignment.id]);
+  const hasAttendance = await manager.query(`SELECT 1 FROM ${t.attendance} WHERE shift_assignment_id = $1 LIMIT 1`, [first.assignment.id]);
   if (hasAttendance.length > 0) return false;
 
   // A blind status read-then-write is racy across replicas by itself
@@ -495,7 +500,7 @@ async function flagNoShowLoaded(
   // Row lock first (owner rule 2026-10-21): a manager recording attendance or confirming the no-show holds this
   // same assignment lock, so the worker waits for it and then re-reads the committed state instead of overwriting
   // a manager's action with a stale decision.
-  await manager.query(`SELECT 1 FROM shift_assignment WHERE id = $1 FOR UPDATE`, [first.assignment.id]);
+  await manager.query(`SELECT 1 FROM ${t.shift_assignment} WHERE id = $1 FOR UPDATE`, [first.assignment.id]);
   const beforeNoShow = await loadCurrent();
   if (!beforeNoShow) {
     await cancelWorkerEvent(manager, noShowEventId, 'condition_no_longer_true');
@@ -506,7 +511,7 @@ async function flagNoShowLoaded(
     await cancelWorkerEvent(manager, noShowEventId, 'staff_checked_in');
     return false;
   }
-  const hasAttendanceNow = await manager.query(`SELECT 1 FROM attendance WHERE shift_assignment_id = $1 LIMIT 1`, [beforeNoShow.assignment.id]);
+  const hasAttendanceNow = await manager.query(`SELECT 1 FROM ${t.attendance} WHERE shift_assignment_id = $1 LIMIT 1`, [beforeNoShow.assignment.id]);
   if (hasAttendanceNow.length > 0) {
     await cancelWorkerEvent(manager, noShowEventId, 'staff_clocked_in_before_completion');
     return false;
@@ -515,7 +520,7 @@ async function flagNoShowLoaded(
 
   assertTransition(SHIFT_ASSIGNMENT_TRANSITIONS, noShowAssignment.status, ShiftAssignmentStatus.NO_SHOW);
   // Compare-and-set on the status re-read under the lock: never a blind write.
-  const [, flipped] = (await manager.query(`UPDATE shift_assignment SET status = 'no_show' WHERE id = $1 AND status = 'confirmed'`, [
+  const [, flipped] = (await manager.query(`UPDATE ${t.shift_assignment} SET status = 'no_show' WHERE id = $1 AND status = 'confirmed'`, [
     noShowAssignment.id,
   ])) as [unknown, number];
   if (!flipped) {

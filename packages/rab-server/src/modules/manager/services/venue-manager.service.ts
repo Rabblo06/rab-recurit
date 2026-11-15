@@ -7,6 +7,7 @@ import { PermissionsService } from '../../../engine/core-modules/permissions/per
 import { CoreEntityCacheService } from '../../../engine/core-modules/entity-cache/core-entity-cache.service';
 import { ResourceScopeService } from '../../../engine/core-modules/resource-scope/resource-scope.service';
 import { AuthContext } from '../../../engine/core-modules/tenant/auth-context.interface';
+import { businessTables } from '../../../engine/core-modules/tenant/business-tables';
 import { TenantContextService } from '../../../engine/core-modules/tenant/tenant-context.service';
 import { CreateAdminVenueManagerDto } from '../dto/create-admin-venue-manager.dto';
 import { CreateVenueManagerDto } from '../dto/create-venue-manager.dto';
@@ -240,19 +241,20 @@ export class VenueManagerService {
 
   private async listTeamWithin(scope: TeamScope, venueManagerId: string) {
     const ctx = scope.ctx;
-    return this.runInTeamScope(scope, (manager) =>
-      manager.query(
+    return this.runInTeamScope(scope, (manager) => {
+      const t = businessTables(manager);
+      return manager.query(
         `SELECT sp.id, u.first_name AS "firstName", u.last_name AS "lastName", u.email, u.status AS "accountStatus",
             sp.employment_status AS "employmentStatus", jr.name AS "jobRoleName", t.created_at AS "assignedAt"
-         FROM venue_manager_staff t
-         JOIN staff_profile sp ON sp.id = t.staff_profile_id AND sp.workspace_id = t.workspace_id
+         FROM ${t.venue_manager_staff} t
+         JOIN ${t.staff_profile} sp ON sp.id = t.staff_profile_id AND sp.workspace_id = t.workspace_id
          JOIN core."user" u ON u.id = sp.user_id
-         LEFT JOIN job_role jr ON jr.id = sp.job_role_id
+         LEFT JOIN ${t.job_role} jr ON jr.id = sp.job_role_id
          WHERE t.manager_profile_id = $1 AND t.organisation_id = $2 AND t.workspace_id = $3
          ORDER BY u.first_name, u.last_name, sp.id`,
         [venueManagerId, ctx.organisationId, ctx.workspaceId],
-      ),
-    );
+      );
+    });
   }
 
   /**
@@ -272,11 +274,12 @@ export class VenueManagerService {
   private async assignTeamStaffWithin(scope: TeamScope, venueManagerId: string, dto: AssignVenueTeamStaffDto) {
     const ctx = scope.ctx;
     return this.runInTeamScope(scope, async (manager) => {
+      const t = businessTables(manager);
       // `sp.archived_at IS NULL` (2026-10-29, security review): the same rule as the org-admin picker
       // (listAssignableStaffAsOrgAdmin). It applies to the workspace-owner path too: an archived Staff member, previously
       // assignable there by a direct POST, is now 404 like any other ineligible id.
       const eligible: Array<{ id: string }> = await manager.query(
-        `SELECT sp.id FROM staff_profile sp JOIN core."user" u ON u.id = sp.user_id
+        `SELECT sp.id FROM ${t.staff_profile} sp JOIN core."user" u ON u.id = sp.user_id
          WHERE sp.id = ANY($1::uuid[]) AND sp.organisation_id = $2 AND sp.workspace_id = $3 AND sp.archived_at IS NULL
            AND sp.employment_status IN ('active', 'pending_compliance') AND u.status IN ('active', 'invited')`,
         [dto.staffProfileIds, ctx.organisationId, ctx.workspaceId],
@@ -294,7 +297,7 @@ export class VenueManagerService {
             WHERE mp.id = $3 AND mp.organisation_id = $1 AND mp.workspace_id = $2 AND mp.type = 'venue'
               AND (NOT $5::boolean OR (mu.status IN ('active', 'invited') AND core.admin_workspace_in_org($2, $1)))
          ), inserted AS (
-           INSERT INTO venue_manager_staff (organisation_id, workspace_id, manager_profile_id, staff_profile_id)
+           INSERT INTO ${t.venue_manager_staff} (organisation_id, workspace_id, manager_profile_id, staff_profile_id)
            SELECT $1, $2, target.id, s.id FROM target CROSS JOIN unnest($4::uuid[]) AS s(id)
            ON CONFLICT (manager_profile_id, staff_profile_id) DO NOTHING
            RETURNING staff_profile_id
@@ -340,11 +343,12 @@ export class VenueManagerService {
     const limit = dto.limit ?? 25;
     const q = dto.q?.trim() ? `%${dto.q.trim().replace(/[\\%_]/g, (c) => `\\${c}`)}%` : null;
     return this.runInTeamScope(scope, async (manager) => {
+      const t = businessTables(manager);
       const rows: Array<{ total: number } & Record<string, unknown>> = await manager.query(
         `SELECT sp.id, u.first_name AS "firstName", u.last_name AS "lastName", sp.staff_ref AS "staffRef", u.email, u.phone,
                 sp.employment_status AS "employmentStatus", u.status AS "accountStatus", sp.created_at AS "createdAt",
                 count(*) OVER ()::int AS total
-           FROM staff_profile sp JOIN core."user" u ON u.id = sp.user_id
+           FROM ${t.staff_profile} sp JOIN core."user" u ON u.id = sp.user_id
           WHERE sp.organisation_id = $1 AND sp.workspace_id = $2 AND sp.archived_at IS NULL
             AND sp.employment_status IN ('active', 'pending_compliance') AND u.status IN ('active', 'invited')
             AND ($3::text IS NULL OR u.first_name ILIKE $3 OR u.last_name ILIKE $3 OR sp.staff_ref ILIKE $3)
@@ -359,8 +363,9 @@ export class VenueManagerService {
   private async removeTeamStaffWithin(scope: TeamScope, venueManagerId: string, staffProfileId: string): Promise<void> {
     const ctx = scope.ctx;
     await this.runInTeamScope(scope, async (manager) => {
+      const t = businessTables(manager);
       const deleted: Array<{ staff_profile_id: string }> = await manager.query(
-        `DELETE FROM venue_manager_staff
+        `DELETE FROM ${t.venue_manager_staff}
          WHERE manager_profile_id = $1 AND staff_profile_id = $2 AND organisation_id = $3 AND workspace_id = $4
          RETURNING staff_profile_id`,
         [venueManagerId, staffProfileId, ctx.organisationId, ctx.workspaceId],
@@ -481,8 +486,9 @@ export class VenueManagerService {
       if (!venue) throw new NotFoundException('Venue not found.');
 
       // Same row shape as ManagerService.assignVenue; workspace_id is the caller's, which both lookups above proved.
+      const t = businessTables(manager);
       await manager.query(
-        `INSERT INTO manager_venue (organisation_id, manager_profile_id, venue_id, workspace_id)
+        `INSERT INTO ${t.manager_venue} (organisation_id, manager_profile_id, venue_id, workspace_id)
          VALUES ($1, $2, $3, $4) ON CONFLICT (manager_profile_id, venue_id) DO NOTHING`,
         [ctx.organisationId, profile.id, venue.id, workspaceId],
       );

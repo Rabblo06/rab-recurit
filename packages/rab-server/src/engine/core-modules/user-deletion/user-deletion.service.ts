@@ -6,7 +6,7 @@ import { EmailOutbox, User } from '../../../modules/identity/entities';
 import { AuditAction, AuditService } from '../audit/audit.service';
 import { PlatformAdminService } from '../platform-admin/platform-admin.service';
 import { AuthContext } from '../tenant/auth-context.interface';
-import { bindBusinessSchema, businessSearchPath, CORE_BUSINESS_SCHEMA, restoreBusinessSchema, snapshotBusinessSchema } from '../tenant/business-tables';
+import { bindBusinessSchema, businessSearchPath, businessTables, CORE_BUSINESS_SCHEMA, restoreBusinessSchema, snapshotBusinessSchema } from '../tenant/business-tables';
 import { RefreshTokenService } from '../auth/token/services/refresh-token.service';
 import { SchemaResolverService, WorkspaceRoutingError, workspaceSchemaName } from '../tenant/schema-resolver.service';
 
@@ -242,29 +242,30 @@ export class UserDeletionService {
    * account, never a pending/cancelled/expired invite.
    */
   private async findProtectedHistory(manager: EntityManager, userId: string): Promise<string | null> {
+    const t = businessTables(manager); // C2: the scope inEveryScope bound for this visit
     const checks: Array<[string, string]> = [
-      ['shift_created_by', `SELECT 1 FROM shift WHERE created_by = $1 LIMIT 1`],
-      ['job_role_created_by', `SELECT 1 FROM job_role WHERE created_by = $1 LIMIT 1`],
-      ['venue_created_by', `SELECT 1 FROM venue WHERE created_by = $1 LIMIT 1`],
+      ['shift_created_by', `SELECT 1 FROM ${t.shift} WHERE created_by = $1 LIMIT 1`],
+      ['job_role_created_by', `SELECT 1 FROM ${t.job_role} WHERE created_by = $1 LIMIT 1`],
+      ['venue_created_by', `SELECT 1 FROM ${t.venue} WHERE created_by = $1 LIMIT 1`],
       // payroll_record.approved_by / rejected_by are no-ON-DELETE FKs to core.user (a decision is evidence). Only visible
       // to a workspace payroll manager under RLS; when hidden, the FK itself still refuses the delete (fail closed).
-      ['payroll_decision_actor', `SELECT 1 FROM payroll_record WHERE approved_by = $1 OR rejected_by = $1 LIMIT 1`],
+      ['payroll_decision_actor', `SELECT 1 FROM ${t.payroll_record} WHERE approved_by = $1 OR rejected_by = $1 LIMIT 1`],
       // attendance.clock_in_by / clock_out_by: the Venue Manager of an on-behalf punch (no-ON-DELETE FKs; evidence).
-      ['attendance_on_behalf_actor', `SELECT 1 FROM attendance WHERE clock_in_by = $1 OR clock_out_by = $1 LIMIT 1`],
+      ['attendance_on_behalf_actor', `SELECT 1 FROM ${t.attendance} WHERE clock_in_by = $1 OR clock_out_by = $1 LIMIT 1`],
       [
         'job_offer_actor',
-        `SELECT 1 FROM job_offer WHERE created_by = $1 OR confirmed_by = $1 OR rejected_by = $1 LIMIT 1`,
+        `SELECT 1 FROM ${t.job_offer} WHERE created_by = $1 OR confirmed_by = $1 OR rejected_by = $1 LIMIT 1`,
       ],
       // A note ABOUT the user (user_note.subject_user_id ON DELETE CASCADE) is a manager's record, not the user's own data.
-      ['user_note_subject', `SELECT 1 FROM user_note WHERE subject_user_id = $1 LIMIT 1`],
+      ['user_note_subject', `SELECT 1 FROM ${t.user_note} WHERE subject_user_id = $1 LIMIT 1`],
       [
         'staff_operational_history',
-        `SELECT 1 FROM staff_profile sp
+        `SELECT 1 FROM ${t.staff_profile} sp
            WHERE sp.user_id = $1
              AND (
-               EXISTS (SELECT 1 FROM shift_assignment sa WHERE sa.staff_profile_id = sp.id)
-               OR EXISTS (SELECT 1 FROM job_offer jo WHERE jo.staff_profile_id = sp.id)
-               OR EXISTS (SELECT 1 FROM attendance at WHERE at.staff_profile_id = sp.id)
+               EXISTS (SELECT 1 FROM ${t.shift_assignment} sa WHERE sa.staff_profile_id = sp.id)
+               OR EXISTS (SELECT 1 FROM ${t.job_offer} jo WHERE jo.staff_profile_id = sp.id)
+               OR EXISTS (SELECT 1 FROM ${t.attendance} at WHERE at.staff_profile_id = sp.id)
              )
            LIMIT 1`,
       ],
@@ -364,11 +365,12 @@ export class UserDeletionService {
    * is empty and the post-delete pass costs nothing.
    */
   private async staffWithHistory(manager: EntityManager): Promise<string[]> {
+    const t = businessTables(manager);
     const [row] = await manager.query<Array<{ ids: string[] | null }>>(
       `SELECT array_agg(h.staff_profile_id) AS ids FROM (
-         SELECT staff_profile_id FROM shift_assignment UNION SELECT staff_profile_id FROM job_offer UNION SELECT staff_profile_id FROM attendance
+         SELECT staff_profile_id FROM ${t.shift_assignment} UNION SELECT staff_profile_id FROM ${t.job_offer} UNION SELECT staff_profile_id FROM ${t.attendance}
        ) h
-       WHERE NOT EXISTS (SELECT 1 FROM staff_profile sp WHERE sp.id = h.staff_profile_id)`,
+       WHERE NOT EXISTS (SELECT 1 FROM ${t.staff_profile} sp WHERE sp.id = h.staff_profile_id)`,
     );
     return row?.ids ?? [];
   }
@@ -376,11 +378,12 @@ export class UserDeletionService {
   /** The first of `before` whose visible history is entirely gone in the current scope (cascaded with its staff profile). */
   private async historyLost(manager: EntityManager, before: string[]): Promise<string | null> {
     if (before.length === 0) return null;
+    const t = businessTables(manager);
     const rows = await manager.query<Array<{ id: string }>>(
       `SELECT p.id FROM unnest($1::uuid[]) AS p(id)
-        WHERE NOT EXISTS (SELECT 1 FROM shift_assignment WHERE staff_profile_id = p.id)
-          AND NOT EXISTS (SELECT 1 FROM job_offer WHERE staff_profile_id = p.id)
-          AND NOT EXISTS (SELECT 1 FROM attendance WHERE staff_profile_id = p.id)
+        WHERE NOT EXISTS (SELECT 1 FROM ${t.shift_assignment} WHERE staff_profile_id = p.id)
+          AND NOT EXISTS (SELECT 1 FROM ${t.job_offer} WHERE staff_profile_id = p.id)
+          AND NOT EXISTS (SELECT 1 FROM ${t.attendance} WHERE staff_profile_id = p.id)
         LIMIT 1`,
       [before],
     );
