@@ -11,6 +11,7 @@ import { FileKind, FileKindType } from '../engine/core-modules/storage/file-kind
 import { FileService } from '../engine/core-modules/storage/file.service';
 import { StorageDriverFactory } from '../engine/core-modules/storage/storage-driver.factory';
 import { TenantContextService } from '../engine/core-modules/tenant/tenant-context.service';
+import { inSecureOwnerTransaction } from './ops/secure-owner-acting';
 
 interface Options {
   source?: string;
@@ -100,11 +101,17 @@ export class StorageMigrateLocalCommand extends CommandRunner {
     if (results.some((r) => r.outcome === 'failed')) process.exitCode = 1;
   }
 
-  /** DB-driven discovery: only rows that still hold a legacy key and have no file id. `user`, `organisation` and `manager_workspace` are not FORCE'd, so the owner connection sees every tenant. */
+  /**
+   * DB-driven discovery: only rows that still hold a legacy key and have no file id, across every tenant. O-2: `user`,
+   * `organisation` and `manager_workspace` are FORCE'd with an owner-only definer policy since M-T1, so the owner login
+   * acting as itself sees none of their rows here; the cross-tenant scan reads as the table owner, READ ONLY.
+   */
   private async discover(): Promise<Legacy[]> {
-    const users = await this.dataSource.query(`SELECT id, organisation_id, avatar_key AS key FROM core."user" WHERE avatar_key IS NOT NULL AND avatar_file_id IS NULL`);
-    const orgs = await this.dataSource.query(`SELECT id, id AS organisation_id, logo_key AS key FROM core.organisation WHERE logo_key IS NOT NULL AND logo_file_id IS NULL`);
-    const workspaces = await this.dataSource.query(`SELECT id, organisation_id, logo_key AS key FROM core.manager_workspace WHERE logo_key IS NOT NULL AND logo_file_id IS NULL`);
+    const { users, orgs, workspaces } = await inSecureOwnerTransaction(this.dataSource.manager, { readOnly: true }, async (manager) => ({
+      users: await manager.query(`SELECT id, organisation_id, avatar_key AS key FROM core."user" WHERE avatar_key IS NOT NULL AND avatar_file_id IS NULL`),
+      orgs: await manager.query(`SELECT id, id AS organisation_id, logo_key AS key FROM core.organisation WHERE logo_key IS NOT NULL AND logo_file_id IS NULL`),
+      workspaces: await manager.query(`SELECT id, organisation_id, logo_key AS key FROM core.manager_workspace WHERE logo_key IS NOT NULL AND logo_file_id IS NULL`),
+    }));
     return [
       ...users.map((r: { id: string; organisation_id: string; key: string }): Legacy => ({ table: 'user', rowId: r.id, organisationId: r.organisation_id, workspaceId: null, key: r.key, kind: FileKind.PROFILE_IMAGE, resourceType: 'user' })),
       ...orgs.map((r: { id: string; organisation_id: string; key: string }): Legacy => ({ table: 'organisation', rowId: r.id, organisationId: r.organisation_id, workspaceId: null, key: r.key, kind: FileKind.ORGANISATION_LOGO, resourceType: 'organisation' })),

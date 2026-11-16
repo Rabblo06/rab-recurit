@@ -14,6 +14,7 @@ import {
 import { PasswordHashingService } from '../engine/core-modules/auth/services/password-hashing.service';
 import { AuthContext } from '../engine/core-modules/tenant/auth-context.interface';
 import { TenantContextService } from '../engine/core-modules/tenant/tenant-context.service';
+import { actAsSecureOwner, inSecureOwnerTransaction, stopActingAsSecureOwner } from './ops/secure-owner-acting';
 import { seedSuccessMessage } from './seed-success-message';
 
 /** No real user exists yet while the seed is creating one — a fixed, unambiguous placeholder for `rab.user_id`. */
@@ -25,9 +26,17 @@ const SEED_ACTOR_ID = '00000000-0000-0000-0000-000000000000';
  * super-admin role holding every permission + one active user. Role,
  * role_permission and user_role are FORCEd (IdentitySchema migration), so
  * everything after the organisation exists runs inside
- * `runInTenantContext` — the seed command connects as `rab_owner`, and
+ * `runInTenantContext` — the seed command connects as the owner login, and
  * FORCE means even the owner can't skip RLS on those three tables without a
  * bound context.
+ *
+ * O-2: since M-T1 `organisation` and `platform_admin` are FORCE'd with an
+ * owner-only definer policy too, so the login acting as itself can neither
+ * find nor create the organisation (no tenant context exists before it does)
+ * nor write the platform_admin row (its write policy demands an acting
+ * admin). Those two steps act as the table owner rab_secure_owner
+ * (`ops/secure-owner-acting.ts`, transaction-local); everything else is
+ * unchanged.
  */
 @Command({
   name: 'seed',
@@ -53,16 +62,15 @@ export class SeedCommand extends CommandRunner {
     });
 
     const slug = process.env.SEED_ORG_SLUG ?? 'acme';
-    let organisation = await this.dataSource.manager.findOne(Organisation, { where: { slug } });
-    if (!organisation) {
-      const result = await this.dataSource.manager.insert(Organisation, {
+    const organisation = await inSecureOwnerTransaction(this.dataSource.manager, { readOnly: false }, async (manager) => {
+      const found = await manager.findOne(Organisation, { where: { slug } });
+      if (found) return found;
+      const result = await manager.insert(Organisation, {
         name: process.env.SEED_ORG_NAME ?? 'Acme Staffing',
         slug,
       });
-      organisation = await this.dataSource.manager.findOneByOrFail(Organisation, {
-        id: result.identifiers[0]!.id as string,
-      });
-    }
+      return manager.findOneByOrFail(Organisation, { id: result.identifiers[0]!.id as string });
+    });
 
     const email = process.env.SEED_ADMIN_EMAIL ?? 'admin@acme.test';
     // No default. A hard-coded seed password is a shared credential; the operator supplies a generated one for this run.
@@ -122,12 +130,13 @@ export class SeedCommand extends CommandRunner {
         await manager.insert(OrganisationMember, { organisationId, userId: user.id });
         // `core.platform_admin` has no organisation_id at all (Stage 2A
         // Phase 2 — genuinely platform-wide, not "first user of this org").
-        // Writable here because the seed command connects as `rab_owner`,
-        // which this NOT-FORCEd table exempts entirely — same bootstrap
-        // path `grant-platform-admin.command.ts` uses for a real deploy.
+        // Written as the table owner (no acting admin exists yet), then back
+        // to the login — the same path `grant-platform-admin.command.ts` uses.
+        await actAsSecureOwner(manager);
         await manager.query(`INSERT INTO core.platform_admin (user_id) VALUES ($1) ON CONFLICT (user_id) DO NOTHING`, [
           user.id,
         ]);
+        await stopActingAsSecureOwner(manager);
       }
     });
 
