@@ -32,7 +32,7 @@ import { LATEST_WORKSPACE_MODULE_VERSION } from '@rab/server/database/typeorm/wo
 import { runWorkspaceProvisioningCycle } from '../../queues/rab-maintenance/workspace-provisioning.job';
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { generateFixturePassword } from './helpers/fixture-password';
-import { CODE_STRUCTURE_LEVEL, expectedPolicyCountAtCodeLevel } from './helpers/structure-level-expectations';
+import { CODE_STRUCTURE_LEVEL, expectedForeignKeyCountAtCodeLevel, expectedPolicyCountAtCodeLevel } from './helpers/structure-level-expectations';
 import { integrationTestDatabaseReady } from '@rab/server/database/typeorm/core/integration-test-database-gate';
 
 const RUN = integrationTestDatabaseReady();
@@ -234,7 +234,8 @@ describeIfDb('workspace provisioning job (integration)', () => {
       `SELECT count(*)::int AS n FROM pg_constraint k JOIN pg_namespace ns ON ns.oid = k.connamespace WHERE ns.nspname = $1 AND k.contype = 'f'`,
       [expectedSchemaName],
     );
-    expect(fkCount[0]!.n).toBe(V1_EXPECTED.foreignKeys);
+    // Part D 0a (level 22): only the 56 in-schema foreign keys remain (the 72 workspace → core ones are dropped).
+    expect(fkCount[0]!.n).toBe(expectedForeignKeyCountAtCodeLevel());
 
     // Schema-bound CHECK, present on all 15, and its value is THIS workspace's own id — never a different one.
     const boundChecks: Array<{ def: string }> = await adminDataSource.query(
@@ -323,7 +324,7 @@ describeIfDb('workspace provisioning job (integration)', () => {
       `SELECT count(*)::int AS n FROM pg_constraint k JOIN pg_namespace ns ON ns.oid = k.connamespace WHERE ns.nspname = $1 AND k.contype = 'f'`,
       [expectedSchemaName],
     );
-    expect(finalFkCount[0].n).toBe(V1_EXPECTED.foreignKeys);
+    expect(finalFkCount[0].n).toBe(expectedForeignKeyCountAtCodeLevel());
   });
 
   it('one workspace failing mid-batch does not abort or corrupt a sibling workspace in the same tick', async () => {

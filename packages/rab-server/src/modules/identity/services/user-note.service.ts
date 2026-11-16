@@ -5,6 +5,7 @@ import { User, UserNote } from '../entities';
 import { AuthContext } from '../../../engine/core-modules/tenant/auth-context.interface';
 import { businessTables } from '../../../engine/core-modules/tenant/business-tables';
 import { EnvironmentService } from '../../../engine/core-modules/environment/environment.service';
+import { assertUsersOfOrganisationTx } from '../../../engine/core-modules/core-references/core-references';
 
 export interface UserNoteItem {
   id: string;
@@ -67,6 +68,9 @@ export class UserNoteService {
     // including production (still pre-HWS-cutover as of this writing).
     const hwsRuntime = this.env.get('HWS_RUNTIME_ENABLED');
     if (hwsRuntime && !ctx.workspaceId) throw new ConflictException('A workspace is required to add a note.');
+    // Part D 0a: user_note.subject_user_id no longer has a foreign key to core."user" in the workspace schema; the
+    // subject (an id read from another row, never the actor) must be a user of the caller's organisation (404 otherwise).
+    await assertUsersOfOrganisationTx(manager, ctx.organisationId ?? '', [subjectUserId]);
     // Plain `manager.insert(UserNote, {...})` was tried first and does NOT work here: TypeORM builds the INSERT from
     // the entity's full column metadata regardless of which keys the partial object supplies, substituting DEFAULT
     // for anything omitted — so `workspace_id` still appeared in the generated SQL even with the key left out of the

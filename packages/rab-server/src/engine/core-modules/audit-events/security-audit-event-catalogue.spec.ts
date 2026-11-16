@@ -44,6 +44,9 @@ const DIRECT_WRITERS: Record<string, { shippedBy: string | null }> = {
   'packages/rab-server/src/database/typeorm/core/outbox-retention-sql.ts': { shippedBy: 'packages/rab-server/src/engine/core-modules/platform-admin/outbox-operations.service.ts' },
   // Frozen with the applied one-off migration HwsHistoricalRowsPrivilegedCopy1786719520000: never shipped (documented).
   'packages/rab-server/src/database/typeorm/workspace-schema/backfill/privileged-copy.ts': { shippedBy: null },
+  // Part C3 upgrade command (migrate-on-start child, before the API listens): its per-workspace record
+  // 'workspace.hws_cutover_verified' is an operational upgrade record, deliberately not shipped (NOT_SHIPPED_AUDIT_ACTIONS).
+  'packages/rab-server/src/engine/core-modules/upgrade/upgrade-commands/0-7/hws-cutover.ts': { shippedBy: null },
 };
 
 describe('security audit event catalogue (X1.1)', () => {
@@ -83,6 +86,8 @@ describe('security audit event catalogue (X1.1)', () => {
     expect(repoFile('packages/rab-server/src/database/typeorm/core/outbox-retention-sql.ts')).toContain("'email.replay_requested'");
     direct.add(PRIVILEGED_COPY_AUDIT_ACTION);
     direct.add(PRIVILEGED_COPY_SKIPPED_AUDIT_ACTION);
+    direct.add('workspace.hws_cutover_verified'); // upgrade-commands/0-7/hws-cutover.ts
+    expect(repoFile('packages/rab-server/src/engine/core-modules/upgrade/upgrade-commands/0-7/hws-cutover.ts')).toContain("'workspace.hws_cutover_verified'");
     const known = new Set([...shipped, ...NOT_SHIPPED_AUDIT_ACTIONS]);
     expect([...direct].filter((a) => !known.has(a))).toEqual([]);
   });

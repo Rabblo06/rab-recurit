@@ -152,6 +152,10 @@ test('flags core.<table>, any other qualifier, a QueryBuilder string table and a
   assert.deepEqual(rules(ddl, 'packages/rab-server/src/engine/core-modules/upgrade/upgrade-commands/registry.ts'), ['other-qualified']);
   assert.deepEqual(rules(ddl), ['other-qualified']); // module code
   assert.deepEqual(rules("c.query(`SELECT pg_catalog.set_config('search_path', 'pg_catalog, pg_temp', true)`);", 'packages/rab-server/src/database/typeorm/scripts/generate-workspace-fingerprints.ts'), []);
+  const c3 = 'packages/rab-server/src/engine/core-modules/upgrade/upgrade-commands/0-7/hws-cutover.ts';
+  assert.deepEqual(rules("q(`SELECT pg_catalog.set_config('search_path', 'pg_catalog, pg_temp', true)`);", c3), []);
+  assert.deepEqual(rules("q(`SELECT pg_catalog.set_config('search_path', 'pg_catalog, pg_temp', true)`);", 'packages/rab-server/src/engine/core-modules/upgrade/upgrade-commands/0-7/other.ts'), ['search-path-switch']);
+  assert.deepEqual(rules("q('SELECT 1 FROM core.shift');", c3), ['core-qualified']); // only the search_path pin is waived
 });
 
 test('the binders may switch search_path; DDL that pins a function\'s own search_path is not a switch', () => {

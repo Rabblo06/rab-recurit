@@ -441,6 +441,11 @@ export async function runMigrateOnStart(config: MigrateOnStartConfig, deps: Migr
       testFailCommand,
       registry,
       ...(tw ? { workspaceRegistry: tw.registry, workspaceRunner: { workspaceIds: tw.workspaceIds } } : {}),
+      // Part C3 (review L-4): a command that just BLOCKED workspaces bumps the epoch before it goes on; failing is fatal for it.
+      flushBlockCache: async () => {
+        const bump = await bumpEntityCacheAfterUpgrade({ applied: ['workspace-upgrade-block'], env, log, flush: deps.cacheFlush });
+        assertWorkspaceBlockCacheBumped(true, bump);
+      },
     });
     upgradeRun = run;
 
@@ -497,9 +502,10 @@ export async function runMigrateOnStart(config: MigrateOnStartConfig, deps: Migr
         await run.afterApply(upgradeSessionOf(queryRunner));
         // D2/D3: a workspace blocked or unblocked by this run must not be served from a cached resolution: bump the epoch.
         // Review P2: while a workspace is blocked, or when a block changed, a failed bump is FATAL (WorkspaceBlockCacheError,
-        // exit 68): a cached resolution could otherwise route a blocked workspace for up to the cache TTL. No Redis configured =
+        // exit 68): a cached resolution could otherwise route a blocked workspace for up to the cache TTL. Part C3: an instance
+        // command (the HWS cutover) that wrote, kept or lifted a block counts too, also when it failed. No Redis configured =
         // no cache = nothing to bump.
-        const blockSensitive = run.report.workspaces?.blockChanged === true || (run.report.workspaces?.blocked.length ?? 0) > 0;
+        const blockSensitive = run.report.workspaces?.blockChanged === true || (run.report.workspaces?.blocked.length ?? 0) > 0 || run.report.commandBlockChanged;
         const cacheReasons = blockSensitive ? [...done, 'workspace-upgrade-block'] : done;
         const bump = await bumpEntityCacheAfterUpgrade({ applied: cacheReasons, env, log, flush: deps.cacheFlush });
         assertWorkspaceBlockCacheBumped(blockSensitive, bump);

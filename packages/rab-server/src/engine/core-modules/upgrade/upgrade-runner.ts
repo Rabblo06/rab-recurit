@@ -23,7 +23,8 @@
  * have completed the previous version's last workspace command (Twenty run-instance-commands.command.ts:124-168).
  */
 import type { LedgerAttribution } from '../../../database/typeorm/scripts/migrate/owner-login/release-floor';
-import { UpgradeCommand } from './upgrade-commands/upgrade-command';
+import { UpgradeCommand, UpgradeCommandHost } from './upgrade-commands/upgrade-command';
+import { createUpgradeCommandHost } from './upgrade-command-host';
 import type { WorkspaceUpgradeCommand } from './upgrade-commands/workspace-upgrade-command';
 import { UPGRADE_COMMANDS, WORKSPACE_UPGRADE_COMMANDS } from './upgrade-commands/registry';
 import {
@@ -58,6 +59,8 @@ export interface UpgradeRunReport {
   recorded: RecordedStep[];
   /** Set when an upgrade COMMAND (instance, or a workspace step / adoption) failed after every migration applied (warn and serve). */
   commandFailure: { name: string; errorName: string; workspaceId?: string } | null;
+  /** Part C3: an instance command wrote, kept or lifted a workspace block marker (the resolver cache epoch must be bumped). */
+  commandBlockChanged: boolean;
   /** Part D: the workspace pass (null when it did not run). Workspace ids and step names only, never a message. */
   workspaces: {
     total: number;
@@ -84,6 +87,10 @@ export interface UpgradeRunOptions {
   previousVersions?: readonly string[];
   /** Test seam (NODE_ENV=test + disposable database only; validated by the caller): this command name fails. */
   testFailCommand?: string | null;
+  /** Part C3: the host facts lent to instance commands (default: the real process, upgrade-command-host.ts). */
+  host?: UpgradeCommandHost;
+  /** Part C3 (review L-4): bumps the resolver cache epoch on demand (migrate-on-start; throws when it cannot). */
+  flushBlockCache?: () => Promise<void>;
 }
 
 /** One upgrade run's state, shared by the runner hooks. */
@@ -92,7 +99,7 @@ export class UpgradeRun {
   private decision: UpgradeStartDecision | null = null;
 
   constructor(private readonly options: UpgradeRunOptions) {
-    this.report = { codeVersion: options.codeVersion, forced: options.force, decision: null, adoptedFrom: null, recorded: [], commandFailure: null, workspaces: null };
+    this.report = { codeVersion: options.codeVersion, forced: options.force, decision: null, adoptedFrom: null, recorded: [], commandFailure: null, commandBlockChanged: false, workspaces: null };
   }
 
   private get registry() {
@@ -194,7 +201,15 @@ export class UpgradeRun {
       try {
         if (this.options.testFailCommand && this.options.testFailCommand === command.name) throw Object.assign(new Error('test seam: forced command failure'), { name: 'TestCommandFailure' });
         log(`upgrade command ${name}: running`);
-        await command.run({ query: session.query, log });
+        await command.run({
+          query: session.query,
+          log,
+          host: this.options.host ?? createUpgradeCommandHost(),
+          markBlockChanged: () => {
+            this.report.commandBlockChanged = true;
+          },
+          flushBlockCache: this.options.flushBlockCache,
+        });
       } catch (error) {
         const attempt = await withUpgradeScope(session, 'upgrade', (q) => recordUpgradeMigration(q, { name, status: 'failed', executedByVersion: codeVersion, forced: force, error }));
         this.report.recorded.push({ name, status: 'failed', attempt });
