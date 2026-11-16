@@ -11,7 +11,7 @@ export const UPGRADE_COMMANDS_0_6: readonly UpgradeCommand[] = Object.freeze([])
  * Release 0.6.0's WORKSPACE upgrade commands (OWNER-DB-ULTIMATE Part D). 0.6.0 is also the release that adopts the existing
  * workspace-module history (every READY workspace at module 20 gets one is_initial row at the release's last INSTANCE step,
  * D-RUNNER.md §5), so every command below still runs for an adopted workspace; a workspace created on this code starts at
- * the release's last step and is built from the level-21 template instead.
+ * the release's last step and is built from the current template (level 22) instead, with its standard metadata written at creation.
  *   - level 21: StaffProfileMemberSelect (owner decision 0b, 2026-11-14).
  *   - level 22: DropWorkspaceCoreForeignKeys (owner decision 0a option (b); SQL approved by the owner 2026-11-15).
  *   - data: SyncStandardObjects (metadata engine M1 / E2): the 21 workspace tables as standard objects in the metadata tables.

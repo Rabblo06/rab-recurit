@@ -108,6 +108,12 @@ export const PAYROLL_ATTENDANCE_SYSTEM_TABLES: readonly string[] = Object.freeze
   'payslip_document',
 ]);
 
+/**
+ * Structure level 22 (owner decision 0a): relations to core."user" have no FK; they are checked by this service only
+ * (CoreReferenceService.assertUsersOfOrganisationTx), plus the Worker's report-only orphan check.
+ */
+export const CORE_USER_REFERENCE_ENFORCER = 'service:CoreReferenceService';
+
 /** Owner decisions D1, D3, D4 (2026-11-13): standard tables that take no custom fields. */
 export const NO_CUSTOM_FIELD_TABLES: readonly string[] = Object.freeze([
   ...PAYROLL_ATTENDANCE_SYSTEM_TABLES,
@@ -187,9 +193,11 @@ export function validateStandardDefinitions(
         if (f.pgType !== 'uuid') bad(`${o.table}.${f.column}: a relation column is uuid`);
         // Structure level 22 (owner decision 0a): no FK to core."user" any more; such a relation is service-enforced and has no
         // ON DELETE. Every other relation keeps its FK's ON DELETE.
+        // The enforcer is pinned exactly (not any `service:*`): the one reviewed service that checks core user references.
         const service = f.relation.enforcedBy?.startsWith('service:') ?? false;
-        if (f.relation.target === 'workspaceMember' ? !service || f.relation.onDelete !== undefined : service || !f.relation.onDelete) {
-          bad(`${o.table}.${f.column}: a workspaceMember relation is service-enforced without onDelete; any other relation has its FK's onDelete`);
+        const coreUserEnforced = f.relation.enforcedBy === CORE_USER_REFERENCE_ENFORCER;
+        if (f.relation.target === 'workspaceMember' ? !coreUserEnforced || f.relation.onDelete !== undefined : service || !f.relation.onDelete) {
+          bad(`${o.table}.${f.column}: a workspaceMember relation is enforced by ${CORE_USER_REFERENCE_ENFORCER} without onDelete; any other relation has its FK's onDelete`);
         }
       }
     }
