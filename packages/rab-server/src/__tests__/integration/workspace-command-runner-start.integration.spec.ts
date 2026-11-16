@@ -14,6 +14,7 @@ import { readUpgradeStatus } from '../../engine/core-modules/upgrade/upgrade-sta
 import { upgradeSessionOf } from '../../engine/core-modules/upgrade/upgrade-migration.service';
 import { lastStepOfVersion } from '../../engine/core-modules/upgrade/upgrade-sequence';
 import { dropWorkspaceSchema, FROZEN_TEMPLATE_REGISTRY, provisionTypeScript, registryOf, SeededWorkspace, seedWorkspace } from './helpers/workspace-fixtures';
+import { hwsRuntimeOn } from './helpers/hws-fixtures';
 
 /**
  * OWNER-DB-ULTIMATE Part D, security review M3 / L3: the workspace pass through the REAL locked start (runMigrateOnStart,
@@ -37,7 +38,10 @@ import { dropWorkspaceSchema, FROZEN_TEMPLATE_REGISTRY, provisionTypeScript, reg
 jest.setTimeout(600_000);
 
 const RUN = integrationTestDatabaseReady();
-const describeIfDb = RUN ? describe : describe.skip;
+// Release 0.7.0: the start path gets past the HWS cutover (an instance step of 0.7.0) only with HWS on; with HWS off the
+// release stops at the deferred / refused cutover by design (security review L1), so the workspace pass this spec proves never
+// runs there. The HWS-off CI job therefore skips it; the HWS-on jobs run it (the cutover completed when the database was built).
+const describeIfDb = RUN && hwsRuntimeOn() ? describe : describe.skip;
 const SFX = Math.random().toString(36).replace(/[^a-z]/g, '').slice(0, 6) || 'x';
 const L = codeWorkspaceStructureLevel();
 const P = L + 1;
@@ -83,7 +87,7 @@ describeIfDb('Part D through the locked start (runMigrateOnStart)', () => {
     ids: string[],
     cache: { redis?: boolean; flush?: (ns: string) => Promise<void> } = {},
   ) => {
-    const env: NodeJS.ProcessEnv = { PATH: process.env.PATH, NODE_ENV: 'test', PG_DATABASE_URL: appUrl, CREWFLOW_MIGRATE_ON_START: 'true' };
+    const env: NodeJS.ProcessEnv = { PATH: process.env.PATH, NODE_ENV: 'test', PG_DATABASE_URL: appUrl, CREWFLOW_MIGRATE_ON_START: 'true', HWS_RUNTIME_ENABLED: 'true' };
     if (cache.redis) env.REDIS_URL = 'redis://127.0.0.1:1';
     if (process.platform === 'win32' && process.env.SystemRoot) env.SystemRoot = process.env.SystemRoot;
     return runMigrateOnStart(

@@ -655,5 +655,18 @@ describeActivated('workspace cross-tenant RLS attack, activated (post-cutover) s
       expect([s.table, await read(none, a.workspaceId, s)]).toEqual([s.table, []]);
       expect([s.table, await read(none, b.workspaceId, s)]).toEqual([s.table, []]);
     }
+    // Writes across the schema boundary: bound to A, B's schema takes no row and changes no row.
+    const bVenue = businessTable(b.workspaceId, 'venue');
+    const asA = <T>(fn: (m: DataSource['manager']) => Promise<T>) => withContext({ organisationId, workspaceId: a.workspaceId, userId: a.managerUserId }, fn);
+    await expect(
+      asA((m) => m.query(`INSERT INTO ${bVenue} (organisation_id, name, created_by, workspace_id) VALUES ($1, 'planted by A', $2, $3)`, [organisationId, a.managerUserId, b.workspaceId])),
+    ).rejects.toMatchObject({ code: '42501' });
+    const updated = await asA((m) => m.query(`UPDATE ${bVenue} SET name = 'renamed by A' WHERE id = $1 RETURNING id`, [b.venueId]));
+    expect(updated).toEqual([[], 0]);
+    const deleted = await asA((m) => m.query(`DELETE FROM ${bVenue} WHERE id = $1 RETURNING id`, [b.venueId]));
+    expect(deleted).toEqual([[], 0]);
+    const bRow = (await adminDataSource.query(`SELECT name FROM ${bVenue} WHERE id = $1`, [b.venueId])) as Array<{ name: string }>;
+    expect(bRow).toEqual([{ name: 'wsab Venue' }]);
+    expect(((await adminDataSource.query(`SELECT count(*)::int AS n FROM ${bVenue} WHERE name = 'planted by A'`)) as Array<{ n: number }>)[0]!.n).toBe(0);
   }, 60_000);
 });

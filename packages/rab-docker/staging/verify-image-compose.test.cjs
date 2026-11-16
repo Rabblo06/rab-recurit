@@ -85,8 +85,7 @@ const weakenings = [
   ['rab-worker on another image than rab-api (O2: one image)', (v) => { v.services['rab-worker'].image = `adhin007/adolphus@sha256:${'7a'.repeat(32)}`; }, /rab-worker: image differs from rab-api/],
   ['enforce mode switched to warn', (v) => { v.services['rab-worker'].environment.CREWFLOW_RUNTIME_ISOLATION = 'warn'; }, /rab-worker: CREWFLOW_RUNTIME_ISOLATION is not "enforce"/],
   ['enforce mode removed from the API', (v) => { delete v.services['rab-api'].environment.CREWFLOW_RUNTIME_ISOLATION; }, /rab-api: CREWFLOW_RUNTIME_ISOLATION/],
-  // Release 0.7.0: production runs HWS on (C3 switched on); turning it off in one file is the drift.
-  ['HWS switched off', (v) => { v.services['rab-api'].environment.HWS_RUNTIME_ENABLED = 'false'; }, /rab-api\.environment\.HWS_RUNTIME_ENABLED differs/],
+  ['HWS switched on', (v) => { v.services['rab-api'].environment.HWS_RUNTIME_ENABLED = 'true'; }, /rab-api\.environment\.HWS_RUNTIME_ENABLED differs/],
   ['REDIS_URL committed', (v) => { v.services['rab-worker'].environment.REDIS_URL = 'redis://rab-redis:6379'; }, /rab-worker: REDIS_URL is committed/],
   ['API published on every interface', (v) => { v.services['rab-api'].ports[0].host_ip = '0.0.0.0'; }, /every interface/],
   ['Redis port published', (v) => { v.services['rab-redis'].ports = [{ target: 6379, published: '6379' }]; }, /rab-redis: publishes a port/],
@@ -168,10 +167,15 @@ test('environment mode: digest references from the release repository pass; tags
 });
 
 const { checkDeployment } = require('./verify-image-compose.cjs');
-const deployed = (mutate = () => {}) => {
+const deployed = (mutate = () => {}, options = {}) => {
   const m = fresh();
   mutate(m.variantFiles);
-  return checkDeployment(m.variantFiles, m.production);
+  return checkDeployment(m.variantFiles, m.production, {}, options);
+};
+/** A real, empty host directory for the HWS cutover backup bind (the deployed-model rule requires an existing directory). */
+const backupDir = require('node:fs').mkdtempSync(require('node:path').join(require('node:os').tmpdir(), 'crewflow-hws-backup-'));
+const withBackupDir = (dir) => (v) => {
+  v.services['rab-api'].volumes = v.services['rab-api'].volumes.map((x) => (x.target === '/run/crewflow/hws-cutover-backup' ? { ...x, source: dir } : x));
 };
 test('environment mode: the deployed model passes, with the staging CA bind and prefix allowed', { skip }, () => {
   assert.deepEqual(deployed((v) => {
@@ -181,7 +185,7 @@ test('environment mode: the deployed model passes, with the staging CA bind and 
         { type: 'volume', source: 'crewflow-db-target', target: '/run/crewflow/db-target', read_only: true, volume: {} },
         { type: 'bind', source: '/etc/x/pg-ca.crt', target: '/run/crewflow/pg-ca.crt', read_only: true },
         // Release 0.7.0: the operator's HWS cutover backup directory (rab-api only), read-only.
-        ...(s === 'rab-api' ? [{ type: 'bind', source: '/srv/crewflow/hws-cutover-backup', target: '/run/crewflow/hws-cutover-backup', read_only: true }] : []),
+        ...(s === 'rab-api' ? [{ type: 'bind', source: backupDir.split(require('node:path').sep).join('/'), target: '/run/crewflow/hws-cutover-backup', read_only: true }] : []),
       ];
       v.services[s].environment.STORAGE_KEY_PREFIX = 'staging';
     }
@@ -193,12 +197,58 @@ const deployedWeakenings = [
   ['CREWFLOW_API_BIND=0.0.0.0', (v) => { v.services['rab-api'].ports[0].host_ip = '0.0.0.0'; }, /every interface/],
   ['a writable bind mount on the API', (v) => { v.services['rab-api'].volumes = [{ type: 'bind', source: '/srv', target: '/srv' }]; }, /rab-api\.volumes/],
   ['the CA mounted writable', (v) => { v.services['rab-api'].volumes = [{ type: 'bind', source: '/x', target: '/run/crewflow/pg-ca.crt' }]; }, /rab-api\.volumes/],
-  ['HWS switched off by an override', (v) => { v.services['rab-worker'].environment.HWS_RUNTIME_ENABLED = 'false'; }, /HWS_RUNTIME_ENABLED/],
+  ['HWS switched on by an override', (v) => { v.services['rab-worker'].environment.HWS_RUNTIME_ENABLED = 'true'; }, /HWS_RUNTIME_ENABLED/],
   ['the HWS cutover backup mount made writable', (v) => { v.services['rab-api'].volumes = v.services['rab-api'].volumes.map((x) => (x.target === '/run/crewflow/hws-cutover-backup' ? { ...x, read_only: false } : x)); }, /rab-api\.volumes/],
 ];
 for (const [name, mutate, pattern] of deployedWeakenings) {
   test(`environment mode refuses: ${name}`, { skip }, () => assertRefused(deployed(mutate), pattern));
 }
+
+// Security review of the 0.7.0 release PR, M1: HWS on is tied to a 0.7.0+ image (the deploy change flips HWS together with
+// the production digest; both files then say "true", so only the image version can refuse an old image).
+const { hwsImageProblems } = require('./verify-image-compose.cjs');
+const hwsOnBoth = () => {
+  const m = fresh();
+  for (const model of [m.variantFiles, m.production]) for (const s of ['rab-api', 'rab-worker']) model.services[s].environment.HWS_RUNTIME_ENABLED = 'true';
+  return m;
+};
+test('M1: HWS_RUNTIME_ENABLED=true on a 0.6.0 image (stubbed docker image inspect) is refused', { skip }, () => {
+  const m = hwsOnBoth();
+  assertRefused(checkDeployment(m.variantFiles, m.production, {}, { imageAppVersion: () => '0.6.0' }), /HWS_RUNTIME_ENABLED/);
+});
+test('M1: HWS_RUNTIME_ENABLED=true with an unknown image version is refused (fail closed)', { skip }, () => {
+  const m = hwsOnBoth();
+  assertRefused(checkDeployment(m.variantFiles, m.production, {}, { imageAppVersion: () => null }), /HWS_RUNTIME_ENABLED=true needs a 0\.7\.0 or later image/);
+});
+test('M1: HWS_RUNTIME_ENABLED=true on a 0.7.0 image is not refused by the version rule; HWS off needs no image check', () => {
+  const services = { 'rab-api': { image: 'x@sha256:1', environment: { HWS_RUNTIME_ENABLED: 'true' } }, 'rab-worker': { image: 'x@sha256:1', environment: { HWS_RUNTIME_ENABLED: 'true' } } };
+  assert.deepEqual(hwsImageProblems(services, () => '0.7.0', ''), []);
+  assert.deepEqual(hwsImageProblems(services, () => '0.10.2', ''), []);
+  assert.equal(hwsImageProblems(services, () => '0.6.9', '').length, 2);
+  const off = { 'rab-api': { image: 'x', environment: { HWS_RUNTIME_ENABLED: 'false' } } };
+  assert.deepEqual(hwsImageProblems(off, () => { throw new Error('must not inspect'); }, ''), []);
+});
+
+// Security review of the 0.7.0 release PR, L2: the backup bind's source is constrained, and the marker path is committed.
+test('L2: the backup directory may not be the project directory', { skip }, () => {
+  const project = require('node:fs').mkdtempSync(require('node:path').join(require('node:os').tmpdir(), 'crewflow-project-'));
+  assertRefused(deployed(withBackupDir(project.split(require('node:path').sep).join('/')), { projectDirectory: project }), /backup directory is the project directory/);
+});
+test('L2: the backup directory may not be CREWFLOW_SECRETS_DIR (nor an ancestor of it)', { skip }, () => {
+  const secrets = require('node:fs').mkdtempSync(require('node:path').join(require('node:os').tmpdir(), 'crewflow-secrets-'));
+  assertRefused(deployed(withBackupDir(secrets.split(require('node:path').sep).join('/')), { secretsDir: secrets }), /backup directory is CREWFLOW_SECRETS_DIR/);
+  assertRefused(deployed(withBackupDir(require('node:path').dirname(secrets).split(require('node:path').sep).join('/')), { secretsDir: secrets }), /backup directory is CREWFLOW_SECRETS_DIR or an ancestor/);
+});
+test('L2: a backup source that is neither /dev/null nor an existing directory, or under /etc, is refused', { skip }, () => {
+  assertRefused(deployed(withBackupDir('/srv/does-not-exist-crewflow-backup')), /neither \/dev\/null nor an existing directory/);
+  assertRefused(deployed(withBackupDir('/etc')), /backup directory is under \/etc/);
+});
+test('L2: an overridden backup marker path is refused (it is committed on rab-api)', { skip }, () => {
+  assertRefused(deployed((v) => { v.services['rab-api'].environment.CREWFLOW_HWS_CUTOVER_BACKUP_MARKER = '/srv/elsewhere/marker.json'; }), /CREWFLOW_HWS_CUTOVER_BACKUP_MARKER is overridden/);
+});
+test('L2: the committed default (/dev/null) passes the backup rule', { skip }, () => {
+  assert.deepEqual(deployed().filter((x) => /HWS cutover backup/.test(x)), []);
+});
 test('environment mode refuses a Redis without AOF, noeviction or the ACL file', { skip }, () => {
   const set = (flag, value) => (v) => { const c = v.services['rab-redis'].command; c[c.indexOf(flag) + 1] = value; };
   assertRefused(deployed(set('--aclfile', '/tmp/other.acl')), /command lacks --aclfile/);

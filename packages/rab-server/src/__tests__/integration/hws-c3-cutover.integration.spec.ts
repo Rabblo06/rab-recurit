@@ -17,7 +17,9 @@ import { createHwsCutoverCommand, HWS_CUTOVER_VERIFIED_ACTION, HwsCutoverOptions
 import type { UpgradeCommandHost } from '../../engine/core-modules/upgrade/upgrade-commands/upgrade-command';
 import { upgradeSessionOf } from '../../engine/core-modules/upgrade/upgrade-migration.service';
 import { UpgradeRun } from '../../engine/core-modules/upgrade/upgrade-runner';
+import { UpgradeVersionTooOldError } from '../../engine/core-modules/upgrade/upgrade-version-check';
 import { dropWorkspaceSchema, provisionTypeScript, SeededWorkspace, seedWorkspace, sqlstateOf } from './helpers/workspace-fixtures';
+import { assertCutoverFixtureDatabase } from './helpers/hws-fixtures';
 
 /**
  * OWNER-DB-ULTIMATE Part C3 (option A′, PENDING OWNER CHOICE AND SQL REVIEW): the HWS cutover copy path on a real, disposable
@@ -229,7 +231,11 @@ describeIfDb('C3 HWS cutover copy path (option A′)', () => {
    * other spec of the in-band run, so the cluster superuser removes it after each run (it would turn fail-closed routing on
    * for every later fixture workspace).
    */
-  const deactivate = () => admin.query('DELETE FROM core.hws_cutover_activation');
+  // Through the same guard as withCutoverInactive: only the marked disposable TEST database (name, cluster, marker).
+  const deactivate = async () => {
+    await assertCutoverFixtureDatabase({ query: async (sql: string, params?: unknown[]) => (await admin.query(sql, params as unknown[])).rows });
+    return admin.query('DELETE FROM core.hws_cutover_activation');
+  };
   let sentinelAtStart = false;
   /** Release 0.7.0's real step is already completed on this CI database; the logbook case runs the command under its own step. */
   const LEDGER_CASE_TIMESTAMP = 1786721549999;
@@ -669,6 +675,40 @@ describeIfDb('C3 HWS cutover copy path (option A′)', () => {
       expect(await ledgerRows()).toEqual([{ status: 'completed', attempt: 1 }]);
     } finally {
       await admin.query(`DELETE FROM core.upgrade_migration WHERE workspace_id IS NULL AND name = $1`, [step]);
+    }
+  });
+
+  it('security review L1: a deferral STOPS the release (no later step runs), so the next release refuses (65) without --force; also with the real HwsCutover deferred', async () => {
+    const session = upgradeSessionOf(app);
+    const T_DEFER = 1786721549990;
+    const T_LATER = 1786721549991;
+    const deferring = { name: 'L1Deferring', timestamp: T_DEFER, run: async () => ({ deferred: 'test: not applicable in this configuration' }) };
+    let laterRan = false;
+    const laterNoop = { name: 'L1LaterNoop', timestamp: T_LATER, run: async () => void (laterRan = true) };
+    const realDeferred = { ...createHwsCutoverCommand({ workspaceIds: [] }), timestamp: T_DEFER + 5 };
+    const names = [`0.7.0_L1Deferring_${T_DEFER}`, `0.7.0_L1LaterNoop_${T_LATER}`, `0.7.0_HwsCutover_${T_DEFER + 5}`];
+    const rowsOf = async (name: string) => (await admin.query(`SELECT status FROM core.upgrade_migration WHERE workspace_id IS NULL AND name = $1`, [name])).rows;
+    try {
+      for (const [label, registry] of [
+        ['a deferring test command before a no-op one', { '0-7': [deferring, laterNoop] }],
+        ['the real HwsCutover deferred (HWS off, nothing pending)', { '0-7': [realDeferred, laterNoop] }],
+      ] as const) {
+        laterRan = false;
+        const run = new UpgradeRun({ codeVersion: '0.7.0', previousVersions: ['0.4.0', '0.5.0', '0.6.0'], force: true, log, registry, workspaceRegistry: {}, workspaceRunner: { workspaceIds: [] }, host: host({ hws: false }) });
+        await run.beforeApply(session, { fresh: false, attribution: null, unrestrictedTarget: true });
+        try {
+          await run.afterApply(session);
+        } finally {
+          await deactivate();
+        }
+        expect([label, run.report.deferred.length, laterRan, run.report.workspaces]).toEqual([label, 1, false, null]);
+        expect([label, await rowsOf(names[1]!)]).toEqual([label, []]);
+        // The next release, without --force: 0.7.0 is not complete, so its previous-version check refuses (65).
+        const next = new UpgradeRun({ codeVersion: '0.8.0', previousVersions: ['0.4.0', '0.5.0', '0.6.0', '0.7.0'], force: false, log, registry, workspaceRegistry: {}, workspaceRunner: { workspaceIds: [] }, host: host({ hws: true }) });
+        await expect(next.beforeApply(session, { fresh: false, attribution: null, unrestrictedTarget: true })).rejects.toBeInstanceOf(UpgradeVersionTooOldError);
+      }
+    } finally {
+      await admin.query(`DELETE FROM core.upgrade_migration WHERE workspace_id IS NULL AND name = ANY($1::text[])`, [names]);
     }
   });
 
