@@ -7786,6 +7786,7 @@ Reversal:   A shorter QR_MAX_AGE_DAYS, or rotating QRs automatically on schedule
   - The allowance is the same `attendanceWindow().opensAt` every clock-in path uses. The comparison is written "not inside", so an unreadable bound asks for confirmation instead of passing.
   - The shift's scheduled start is only read, never written.
   - In `correct`, an identical resubmission of the stored value is the idempotent no-op, checked before the floor. It returns 201 (not 422) even when a later schedule change put that stored value beyond the floor; a new value there is still refused.
+  - The floor is absolute on `correct` too (follow-up to PR #163): a `clockOutAt` or `breakMinutes` correction that leaves in place a stored clock-in now beyond the floor (after a later schedule move) is refused with 422 `CLOCK_IN_TOO_EARLY_ABSOLUTE`, with or without the confirmation, and nothing is written. Only a new clock-in can need the confirmation on this path.
 - **Same rule on `record-attendance`.**
   - The old hard 400 for an early clock-in becomes the same 409 / confirm rule.
   - Every other check is unchanged: future, clock-out bound, out > in, break < span, version, booking state, finalised.
@@ -7846,7 +7847,8 @@ Reversal:   Lower CLOCK_IN_CONFIRM_FLOOR_HOURS, or require a second approver (pa
     - a finalised report gets the existing 409; `clockOutAt` / `breakMinutes` with the flag record no confirmation; an open row gets the existing "still on shift" 409;
     - another workspace 404, the web console 403, revoked `attendance.edit` 403 at the route and `ForbiddenException` from the service;
     - floor: start − 12 h − 1 min gets 422 even confirmed; exactly start − 12 h gets 409, then 201;
-    - re-sending the stored value after the schedule moved it beyond the floor is 201 with nothing written, and a new value there is 422.
+    - re-sending the stored value after the schedule moved it beyond the floor is 201 with nothing written, and a new value there is 422;
+    - a `clockOutAt` or `breakMinutes` correction with a stored clock-in beyond the moved floor gets 422 with or without the flag, nothing written; an identical resubmission is still 201.
   - `manual-attendance.integration.spec.ts` › record-attendance, unusually early clock-in:
     - early gets 409, then 200 with the flag; the audit row has the confirmation fields; the report row is flagged; idempotent; an ordinary record is not flagged;
     - existing row: an early change needs confirmation, and a later break-only change is not re-asked;
