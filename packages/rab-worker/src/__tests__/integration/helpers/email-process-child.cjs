@@ -18,19 +18,22 @@ const {
 const {
   createEmailSendProcessor,
 } = require('../../../queues/rab-email/email-send.processor');
+const {
+  isLoopbackAlias,
+  resolveIntegrationTestDatabase,
+} = require('@rab/server/database/typeorm/core/test-database-guard');
 (async () => {
-  for (const key of ['DATABASE_URL', 'DATABASE_URL_UNPOOLED']) {
-    if (
-      !['localhost', '127.0.0.1', '::1'].includes(
-        new URL(process.env[key]).hostname,
-      )
-    )
+  // X3.5-S6: the admin (owner) connection is the VALIDATED test pair's admin URL (every X1.8 / X1.9 rule), never the legacy
+  // DATABASE_URL_UNPOOLED the Jest setup used to write. The application connection is the factory's PG_DATABASE_URL.
+  const testDb = resolveIntegrationTestDatabase(process.env);
+  for (const host of [testDb.app.host, testDb.admin.host]) {
+    if (!isLoopbackAlias(host))
       throw new Error('Local test databases only');
   }
   const app = await new DataSource(coreDataSourceOptions).initialize();
   const owner = await new DataSource({
     ...coreDataSourceOptions,
-    url: process.env.DATABASE_URL_UNPOOLED,
+    url: testDb.adminUrl,
   }).initialize();
   // TenantContextService now takes (dataSource, schemaResolver, environment) — this script
   // predates that, caught live via "Cannot read properties of undefined (reading 'get')" when

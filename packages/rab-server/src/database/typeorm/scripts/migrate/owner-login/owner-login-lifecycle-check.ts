@@ -705,18 +705,28 @@ async function transitionScenario(): Promise<void> {
   });
   process.env.CREWFLOW_BOOTSTRAP_PASSWORD = randomBytes(24).toString('hex');
   process.env.CREWFLOW_APP_BOOTSTRAP_PASSWORD = randomBytes(24).toString('hex');
+  // X3.5-S6: the separated build's run exposes its ONE connection as PG_DATABASE_URL (the runtime name), never the legacy
+  // DATABASE_URL / DATABASE_URL_UNPOOLED pair; an inherited value of any of the three is restored afterwards.
   const legacy = async (url: string, upTo: number) => {
+    const names = ['PG_DATABASE_URL', 'DATABASE_URL', 'DATABASE_URL_UNPOOLED'] as const;
+    const saved = names.map((name) => [name, process.env[name]] as const);
     process.env.DB_TARGET = 'test';
-    process.env.DATABASE_URL = url;
-    process.env.DATABASE_URL_UNPOOLED = url;
-    const ds = new GuardedMigrationDataSource({ ...coreMigrationDataSourceOptions, url, name: `sep-${upTo}`, migrations: MIGRATIONS.filter((m) => m.ts <= upTo).map((m) => m.path), logging: false } as DataSourceOptions);
-    await ds.initialize();
+    process.env.PG_DATABASE_URL = url;
+    delete process.env.DATABASE_URL;
+    delete process.env.DATABASE_URL_UNPOOLED;
     try {
-      return (await ds.runMigrations({ transaction: 'each' })).length;
+      const ds = new GuardedMigrationDataSource({ ...coreMigrationDataSourceOptions, url, name: `sep-${upTo}`, migrations: MIGRATIONS.filter((m) => m.ts <= upTo).map((m) => m.path), logging: false } as DataSourceOptions);
+      await ds.initialize();
+      try {
+        return (await ds.runMigrations({ transaction: 'each' })).length;
+      } finally {
+        await ds.destroy();
+      }
     } finally {
-      await ds.destroy();
-      delete process.env.DATABASE_URL;
-      delete process.env.DATABASE_URL_UNPOOLED;
+      for (const [name, value] of saved) {
+        if (value === undefined) delete process.env[name];
+        else process.env[name] = value;
+      }
       delete process.env.DB_TARGET;
     }
   };

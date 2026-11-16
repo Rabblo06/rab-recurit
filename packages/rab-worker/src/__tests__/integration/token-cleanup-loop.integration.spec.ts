@@ -82,7 +82,7 @@ describeIfDb('token cleanup: batch loop within the run cap and step isolation (X
   beforeAll(async () => {
     admin = new Client({ connectionString: integrationTestDatabase().adminUrl });
     await admin.connect();
-    runtime = new DataSource({ type: 'postgres', url: process.env.DATABASE_URL!, entities: [], name: `token-cleanup-loop-${randomUUID()}` });
+    runtime = new DataSource({ type: 'postgres', url: integrationTestDatabase().appUrl, entities: [], name: `token-cleanup-loop-${randomUUID()}` });
     await runtime.initialize();
     const [who] = await runtime.query<Array<{ u: string; bypass: boolean; superuser: boolean }>>(
       `SELECT current_user AS u, r.rolbypassrls AS bypass, r.rolsuper AS superuser FROM pg_roles r WHERE r.rolname = current_user`,
@@ -154,7 +154,7 @@ describeIfDb('token cleanup: batch loop within the run cap and step isolation (X
     await seed(prefix, { refresh: 50, reset: 0, oauth: 40 });
 
     // Another session holds core.refresh_token; the runtime session gives up after 300 ms instead of waiting.
-    const impatient = new DataSource({ type: 'postgres', url: process.env.DATABASE_URL!, entities: [], name: `token-cleanup-iso-${randomUUID()}`, extra: { options: '-c lock_timeout=300' } });
+    const impatient = new DataSource({ type: 'postgres', url: integrationTestDatabase().appUrl, entities: [], name: `token-cleanup-iso-${randomUUID()}`, extra: { options: '-c lock_timeout=300' } });
     await impatient.initialize();
     const holder = new Client({ connectionString: integrationTestDatabase().adminUrl });
     await holder.connect();

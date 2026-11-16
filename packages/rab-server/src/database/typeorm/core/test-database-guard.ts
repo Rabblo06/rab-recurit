@@ -34,8 +34,8 @@
  *     legacy DATABASE_DIRECT_URL (lock connection) and PG_DATABASE_REPLICA_URL (read routing), which a test process never
  *     needs and which are refused whenever non-empty (X1.9: pg-config compares DATABASE_DIRECT_URL by database name only
  *     and refuses a replica only when it is the very same target, so a superuser login on the TEST database slipped through).
- *     An empty value counts as unset. DATABASE_URL and DATABASE_URL_UNPOOLED are overwritten with the validated pair
- *     (below), so an inherited value of either cannot redirect.
+ *     An empty value counts as unset. X3.5-S6: PG_DATABASE_URL is then set to the validated application URL and
+ *     DATABASE_URL / DATABASE_URL_UNPOOLED are blanked (below), so an inherited value of either cannot redirect.
  *   - The same inherited-URL and libpq rules also read the working directory's `.env` (and DOTENV_CONFIG_PATH), as data
  *     only (X1.9): @nestjs/config and `dotenv/config` load that file into process.env LATER (when AppModule or a script is
  *     imported), after this guard ran, so a name present only there would otherwise escape it on a direct `npx jest -c` run.
@@ -46,7 +46,8 @@
  *     ::ffff:127.x) are one endpoint for the development-database and same-database comparisons.
  *   - Error messages never contain a URL, password or username. Only variable names, host, port and database name are shown.
  *
- * Runtime dependencies: `pg` (only the live identity probe) and `dotenv` (parse only, never loads into process.env), so it is
+ * Runtime dependencies: `pg` (only the live identity probe), `dotenv` (parse only, never loads into process.env) and the
+ * pure pg-config name list (X3.5-S6), so it is
  * safe to load from Jest setup, global setup, the admin test helper, and the worker package (which imports the compiled copy
  * of rab-server).
  */
@@ -55,6 +56,8 @@ import * as path from 'path';
 
 import { parse as parseDotenv } from 'dotenv';
 import { Client } from 'pg';
+
+import { presentLegacyPgEnvNames } from '../../postgres/pg-config';
 
 export const TEST_DATABASE_URL = 'TEST_DATABASE_URL';
 /** The test admin connection: the disposable cluster's bootstrap superuser (fixtures, identity probes, migrations only). */
@@ -92,7 +95,7 @@ export const DEVDB_URL = 'DEVDB_URL';
 /**
  * Database URL names that a test process may inherit (Nx loads `.env`; a developer shell exports them) and that the
  * connection factory, a spec or a CLI child would use instead of, or next to, the TEST pair. DATABASE_URL and
- * DATABASE_URL_UNPOOLED are not here: the guard overwrites them with the validated pair.
+ * DATABASE_URL_UNPOOLED are not here: the guard blanks them (X3.5-S6; it used to overwrite them with the validated pair).
  */
 export const INHERITED_DATABASE_URL_NAMES: readonly string[] = [
   'PG_DATABASE_URL',
@@ -439,12 +442,26 @@ function assertNoRedirectingProcessEnv(env: Record<string, string | undefined>, 
 }
 
 /**
+ * The legacy connection names the routed test environment blanks (X3.5-S6). Blanked, not deleted: dotenv (and @nestjs/config)
+ * never overrides a variable that is already present, so an empty value keeps a later `.env` load from bringing a developer's
+ * DATABASE_URL / DATABASE_URL_UNPOOLED back in, and the connection factory treats an empty value as unset.
+ */
+export const ROUTED_TEST_BLANKED_LEGACY_NAMES: readonly string[] = ['DATABASE_URL', 'DATABASE_URL_UNPOOLED'];
+
+/**
  * Called from Jest setupFiles (every test file, every worker) and from the e2e seed scripts. Under NODE_ENV=test it validates
- * the TEST_* pair and the inherited environment, then points the normal DATABASE_URL names at that same validated pair, so
- * every module that reads them (core datasource, Nest ConfigModule, which never overrides an already-set variable) uses the
- * test database and nothing else. X3.5-S7: both admin names (TEST_DATABASE_ADMIN_URL and the deprecated
- * TEST_DATABASE_URL_UNPOOLED) are set to the validated admin URL, so a spec reading either name gets the checked value and a
- * later dotenv load cannot add a different one under the other name.
+ * the TEST_* pair and the inherited environment, then points PG_DATABASE_URL (the one runtime name, the factory's primary) at
+ * the validated application URL, so every module that reads the connection (core datasource, Nest ConfigModule, which never
+ * overrides an already-set variable) uses the test database and nothing else.
+ *   - X3.5-S6 (release 1): the guard no longer writes the legacy DATABASE_URL / DATABASE_URL_UNPOOLED. Both are blanked
+ *     (ROUTED_TEST_BLANKED_LEGACY_NAMES), so the factory resolves PG_DATABASE_URL with no legacy name and no deprecation
+ *     warning, and the elevated endpoint is unconfigured under Jest: a spec or helper that needs the admin connection takes
+ *     it explicitly from the validated pair (integrationTestDatabase().adminUrl / resolveIntegrationTestDatabase(env).adminUrl),
+ *     never from an environment name. Both Jest globalSetups refuse a routed environment that still holds a legacy name
+ *     (routedTestDatabaseLegacyNames).
+ *   - X3.5-S7: both admin names (TEST_DATABASE_ADMIN_URL and the deprecated TEST_DATABASE_URL_UNPOOLED) are set to the
+ *     validated admin URL, so a spec reading either name gets the checked value and a later dotenv load cannot add a
+ *     different one under the other name.
  *
  * Outside NODE_ENV=test it returns null and changes nothing (runtime and CLI processes are unaffected), EXCEPT under Jest
  * (JEST_WORKER_ID set), where any other NODE_ENV is refused (DBT-01): a test file never runs unrouted.
@@ -456,10 +473,24 @@ export function applyIntegrationTestDatabaseEnv(env: NodeJS.ProcessEnv): Resolve
   }
   const resolved = resolveIntegrationTestDatabase(env);
   assertNoRedirectingProcessEnv(env, resolved);
-  env.DATABASE_URL = resolved.appUrl;
-  env.DATABASE_URL_UNPOOLED = resolved.adminUrl;
+  env.PG_DATABASE_URL = resolved.appUrl;
+  for (const name of ROUTED_TEST_BLANKED_LEGACY_NAMES) env[name] = '';
   for (const name of TEST_DATABASE_ADMIN_URL_NAMES) env[name] = resolved.adminUrl;
   return resolved;
+}
+
+/**
+ * X3.5-S6 (audit DBR-08), for the Jest globalSetups: routes a COPY of `env` exactly as setupFiles will (never changes `env`)
+ * and returns the legacy connection names (pg-config LEGACY_PG_ENV_NAMES) that still hold a value in the routed copy. The
+ * globalSetups refuse to start unless this is empty, so the deprecation warnings pg-config now prints under NODE_ENV=test
+ * too can never fire from the test routing itself. Names only. Throws what applyIntegrationTestDatabaseEnv throws.
+ */
+export function routedTestDatabaseLegacyNames(env: Record<string, string | undefined>): string[] {
+  const routed: NodeJS.ProcessEnv = { ...env };
+  if (!applyIntegrationTestDatabaseEnv(routed)) {
+    throw new TestDatabaseConfigError('the test database routing did not run (NODE_ENV is not "test"). Refusing to start.');
+  }
+  return presentLegacyPgEnvNames(routed);
 }
 
 /** Query parameters refused on TEST_DATABASE_WORKER_URL on top of TARGET_OVERRIDE_QUERY_PARAMS (session role / settings). */
@@ -517,7 +548,8 @@ export function resolveWorkerLoginTestDatabase(env: Record<string, string | unde
 /**
  * X1.8 (audit XD-03): the Worker-login switch used by the Phase D worker specs
  * (rab-worker/src/__tests__/integration/helpers/worker-login-env.ts). When PHASE_D_SQL_APPROVED=true and
- * TEST_DATABASE_WORKER_URL is set it points DATABASE_URL at that login; before X1.8 it copied the value unchecked. Now the
+ * TEST_DATABASE_WORKER_URL is set it points PG_DATABASE_URL (X3.5-S6; DATABASE_URL before) at that login; before X1.8 it
+ * copied the value unchecked. Now the
  * value goes through the same rules as the TEST pair FIRST, whatever NODE_ENV says (the switch never goes inert because
  * NODE_ENV is unset or not "test"):
  *   - the TEST pair is required and valid (loopback unless ALLOW_REMOTE_TEST_DATABASE=true, never the development database);
@@ -531,7 +563,9 @@ export function resolveWorkerLoginTestDatabase(env: Record<string, string | unde
 export function applyWorkerLoginTestDatabaseEnv(env: NodeJS.ProcessEnv): boolean {
   const login = resolveWorkerLoginTestDatabase(env);
   if (!login) return false;
-  env.DATABASE_URL = login.workerUrl;
+  // X3.5-S6: the runtime name only (the factory prefers PG_DATABASE_URL); the legacy primary name stays blank.
+  env.PG_DATABASE_URL = login.workerUrl;
+  env.DATABASE_URL = '';
   env.WORKER_CLAIM_MODE = 'global';
   return true;
 }

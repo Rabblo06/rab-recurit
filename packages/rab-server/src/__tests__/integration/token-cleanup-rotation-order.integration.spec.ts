@@ -1,6 +1,6 @@
 import { DataSource } from 'typeorm';
 
-import { integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
+import { integrationTestDatabase, integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
 import { TOKEN_CLEANUP_PREVIOUS_SQL } from '../../database/typeorm/core/migrations/1786721460000-TokenCleanupRotationOrder';
 import { createAdminDataSource } from './helpers/admin-datasource';
 
@@ -48,7 +48,7 @@ describeIfDb('token cleanup never splits a rotated chain across a batch (XP-09, 
 `);
     admin = createAdminDataSource();
     await admin.initialize();
-    runtime = new DataSource({ type: 'postgres', url: process.env.DATABASE_URL, synchronize: false, migrationsRun: false, entities: [] });
+    runtime = new DataSource({ type: 'postgres', url: integrationTestDatabase().appUrl, synchronize: false, migrationsRun: false, entities: [] });
     await runtime.initialize();
     step('connections');
     // Anything already eligible on a shared test database goes first, so the batches below see this suite's rows.

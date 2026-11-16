@@ -178,7 +178,7 @@ export async function runDatabaseBootGates(processName: BootProcess, options: Ru
 
   for (const w of report.warnings) log(`[db-boot-gates] WARNING ${label}: ${w}`);
   log(
-    `[db-boot-gates] process=${processName}${options.cliCommand ? ` command=${options.cliCommand}` : ''} role=${report.role} ` +
+    `[db-boot-gates] process=${processName}${options.cliCommand ? ` command=${options.cliCommand}` : ''} source=${endpointTarget.source} role=${report.role} ` +
       `server=${report.serverVersionNum} database=${report.database} identity=${report.identity} tls=${report.tls === true ? 'on' : 'off'} ` +
       `force-rls=ok(${report.forceRlsTables}) extensions=ok pending=0 schema=compatible` +
       `${report.claimMode ? ` claim-mode=${report.claimMode}` : ''} due-work-exec=${report.grants.dueWork} dispatch-claim-exec=${report.grants.dispatchClaims} dispatch-notify=${report.dispatchNotify} gates=ok`,

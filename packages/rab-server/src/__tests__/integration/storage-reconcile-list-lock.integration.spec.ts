@@ -402,7 +402,7 @@ describeIf('storage:reconcile — LIST comparison and cluster-wide lock (Postgre
   it('6b: a holder process that is KILLED releases the lock with its session (no stale lease, no manual cleanup)', async () => {
     const script = `
       const { Client } = require('pg');
-      const c = new Client({ connectionString: process.env.DATABASE_URL });
+      const c = new Client({ connectionString: process.env.PG_DATABASE_URL });
       c.connect()
         .then(() => c.query('SELECT pg_try_advisory_lock(hashtextextended($1, 0)) AS locked', [process.argv[1]]))
         .then((r) => { process.stdout.write(r.rows[0].locked ? 'held\\n' : 'not-held\\n'); setInterval(() => {}, 1000); })

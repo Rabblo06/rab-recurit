@@ -59,6 +59,11 @@ export const PG_REPLICA_MAX_LAG_DEFAULT_MS = 5_000;
 /** Legacy names: accepted outside production only, refused in production. */
 export const LEGACY_PG_ENV_NAMES = ['DATABASE_URL', 'DATABASE_URL_UNPOOLED', 'DATABASE_DIRECT_URL', 'DB_POOL_MAX'] as const;
 
+/** The legacy names that hold a non-empty value in `env` (an empty value counts as unset, as everywhere here). Names only. */
+export function presentLegacyPgEnvNames(env: Env): string[] {
+  return LEGACY_PG_ENV_NAMES.filter((name) => present(env, name) !== undefined);
+}
+
 /** libpq variables pg may read as fallbacks (password, options, sslnegotiation, ...). Refused in production. */
 export const LIBPQ_ENV_NAMES = [
   'PGHOST',
@@ -443,11 +448,13 @@ export function selectMigrationEndpoint(
 const emittedWarnings = new Set<string>();
 
 /**
- * Prints each warning once per process. Silent under NODE_ENV=test: the Jest setup deliberately fills the legacy names
- * from TEST_DATABASE_URL, so every spec file would otherwise repeat the same deprecation notice.
+ * Prints each warning once per process, in every environment. X3.5-S6 (audit DBR-08), release 1: it used to be silent under
+ * NODE_ENV=test because the Jest setup filled the legacy names from the TEST pair; the Jest setup now routes through
+ * PG_DATABASE_URL only (test-database-guard.ts), and both Jest globalSetups refuse a routed environment that still holds a
+ * legacy name (routedTestDatabaseLegacyNames), so a deprecation line under test is a real finding, not noise. `env` is kept
+ * for the call sites; it no longer changes the behaviour.
  */
-export function emitPgWarnings(resolved: ResolvedPgEnvironment, env: Env = process.env, sink: (line: string) => void = (l) => console.warn(l)): void {
-  if (env.NODE_ENV === 'test') return;
+export function emitPgWarnings(resolved: ResolvedPgEnvironment, _env: Env = process.env, sink: (line: string) => void = (l) => console.warn(l)): void {
   for (const warning of resolved.warnings) {
     if (emittedWarnings.has(warning)) continue;
     emittedWarnings.add(warning);

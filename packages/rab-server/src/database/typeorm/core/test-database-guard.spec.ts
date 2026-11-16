@@ -15,8 +15,11 @@ import {
   resolveForJestGlobalSetup,
   resolveIntegrationTestDatabase,
   resolveTestDatabaseAdminUrl,
+  routedTestDatabaseLegacyNames,
+  ROUTED_TEST_BLANKED_LEGACY_NAMES,
   testDatabaseAdminNameNotice,
 } from './test-database-guard';
+import { presentLegacyPgEnvNames, resolvePgEnvironment } from '../../postgres/pg-config';
 
 // Obviously fake credentials. The abuse tests assert these never appear in any error message.
 const SECRET = 'S3cret-PW-do-not-print';
@@ -98,7 +101,7 @@ describe('integration test database guard', () => {
       DATABASE_URL_UNPOOLED: NEON_DIRECT,
     };
     expect(() => applyIntegrationTestDatabaseEnv(env)).toThrow(/TEST_DATABASE_URL is required/);
-    // Even when the TEST pair is valid, the normal values are overwritten, not kept.
+    // Even when the TEST pair is valid, the normal values are never kept: X3.5-S6 blanks them and routes PG_DATABASE_URL.
     const valid: NodeJS.ProcessEnv = {
       NODE_ENV: 'test',
       DATABASE_URL: NEON_POOLED,
@@ -107,8 +110,9 @@ describe('integration test database guard', () => {
       [TEST_DATABASE_URL_UNPOOLED]: LOCAL_ADMIN,
     };
     applyIntegrationTestDatabaseEnv(valid);
-    expect(valid.DATABASE_URL).toBe(LOCAL_APP);
-    expect(valid.DATABASE_URL_UNPOOLED).toBe(LOCAL_ADMIN);
+    expect(valid.PG_DATABASE_URL).toBe(LOCAL_APP);
+    expect(valid.DATABASE_URL).toBe('');
+    expect(valid.DATABASE_URL_UNPOOLED).toBe('');
   });
 
   it('8. error messages never contain credentials, including for a malformed URL', () => {
@@ -143,7 +147,7 @@ describe('integration test database guard', () => {
       ...over,
     });
     function expectApplyRefused(env: NodeJS.ProcessEnv, pattern: RegExp): void {
-      const before = env.DATABASE_URL;
+      const before = { pg: env.PG_DATABASE_URL, legacy: env.DATABASE_URL, elevated: env.DATABASE_URL_UNPOOLED };
       let message = '';
       try {
         applyIntegrationTestDatabaseEnv(env);
@@ -154,7 +158,7 @@ describe('integration test database guard', () => {
       expect(message).toMatch(pattern);
       expect(message).not.toContain(SECRET);
       expect(message).not.toMatch(/postgres(ql)?:\/\//);
-      expect(env.DATABASE_URL).toBe(before);
+      expect({ pg: env.PG_DATABASE_URL, legacy: env.DATABASE_URL, elevated: env.DATABASE_URL_UNPOOLED }).toEqual(before);
     }
 
     it('DBT-01 reproduction: under Jest, NODE_ENV=development (an Nx-loaded .env) is refused instead of skipping the routing', () => {
@@ -229,17 +233,44 @@ describe('integration test database guard', () => {
     it('an empty inherited value counts as unset, and one naming the test database is allowed (and kept)', () => {
       const empty = jestEnv({ PG_DATABASE_URL: '', DATABASE_DIRECT_URL: '  ' });
       expect(applyIntegrationTestDatabaseEnv(empty)?.app.database).toBe('rab_test_a');
-      expect(empty.DATABASE_URL).toBe(LOCAL_APP);
+      expect(empty.PG_DATABASE_URL).toBe(LOCAL_APP);
       const same = jestEnv({ PG_DATABASE_URL: LOCAL_APP });
       expect(applyIntegrationTestDatabaseEnv(same)?.app.database).toBe('rab_test_a');
       expect(same.PG_DATABASE_URL).toBe(LOCAL_APP);
     });
 
-    it('legacy DATABASE_URL / DATABASE_URL_UNPOOLED inherited from .env cannot redirect: they are replaced by the validated pair', () => {
+    it('legacy DATABASE_URL / DATABASE_URL_UNPOOLED inherited from .env cannot redirect: X3.5-S6 blanks them (a later dotenv load cannot re-add them) and routes PG_DATABASE_URL', () => {
       const env = jestEnv({ DATABASE_URL: DEV_DB, DATABASE_URL_UNPOOLED: OTHER_LOCAL });
       applyIntegrationTestDatabaseEnv(env);
-      expect(env.DATABASE_URL).toBe(LOCAL_APP);
-      expect(env.DATABASE_URL_UNPOOLED).toBe(LOCAL_ADMIN);
+      expect(env.PG_DATABASE_URL).toBe(LOCAL_APP);
+      for (const name of ROUTED_TEST_BLANKED_LEGACY_NAMES) expect({ name, value: env[name] }).toEqual({ name, value: '' });
+      expect(ROUTED_TEST_BLANKED_LEGACY_NAMES).toEqual(['DATABASE_URL', 'DATABASE_URL_UNPOOLED']);
+    });
+
+    it('X3.5-S6: the routed environment resolves through PG_DATABASE_URL only: no legacy name, no elevated endpoint, no deprecation warning', () => {
+      const env = jestEnv({ DATABASE_URL: DEV_DB, DATABASE_URL_UNPOOLED: OTHER_LOCAL });
+      applyIntegrationTestDatabaseEnv(env);
+      expect(presentLegacyPgEnvNames(env)).toEqual([]);
+      const pg = resolvePgEnvironment(env, { processRole: 'cli' });
+      expect(pg.primary.source).toBe('PG_DATABASE_URL');
+      expect(pg.elevated).toBeNull();
+      expect(pg.warnings).toEqual([]);
+      // The admin connection is never an environment name any more: specs take it from the validated pair.
+      expect(resolveIntegrationTestDatabase(env).adminUrl).toBe(LOCAL_ADMIN);
+    });
+
+    it('X3.5-S6 globalSetup check: routedTestDatabaseLegacyNames routes a COPY, reports nothing for a valid pair, never mutates the input', () => {
+      const env = jestEnv({ JEST_WORKER_ID: undefined, DATABASE_URL: DEV_DB, DATABASE_URL_UNPOOLED: OTHER_LOCAL });
+      const before = { ...env };
+      expect(routedTestDatabaseLegacyNames(env)).toEqual([]);
+      expect(env).toEqual(before);
+      // Fail closed: no routing (NODE_ENV not test) is a refusal, never an empty "no legacy name" answer.
+      expect(() => routedTestDatabaseLegacyNames({ ...before, NODE_ENV: 'development' })).toThrow(TestDatabaseConfigError);
+      // The pair rules still apply first.
+      expect(() => routedTestDatabaseLegacyNames({ ...before, PG_DATABASE_URL: DEV_DB })).toThrow(/PG_DATABASE_URL is set/);
+      // A legacy name the routing does not blank: DATABASE_DIRECT_URL is refused outright; DB_POOL_MAX is reported.
+      expect(() => routedTestDatabaseLegacyNames({ ...before, DATABASE_DIRECT_URL: LOCAL_APP })).toThrow(/DATABASE_DIRECT_URL is set/);
+      expect(routedTestDatabaseLegacyNames({ ...before, DB_POOL_MAX: '5' })).toEqual(['DB_POOL_MAX']);
     });
 
     it.each(['PGHOST', 'PGPORT', 'PGUSER', 'PGDATABASE', 'PGHOSTADDR', 'PGSERVICE', 'PGOPTIONS'])('a target-changing libpq variable (%s) is refused', (name) => {
@@ -408,11 +439,13 @@ describe('integration test database guard', () => {
         [TEST_DATABASE_URL]: LOCAL_APP,
         [TEST_DATABASE_URL_UNPOOLED]: LOCAL_ADMIN,
         [TEST_DATABASE_WORKER_URL]: WORKER_ON_TEST_DB,
-        DATABASE_URL: LOCAL_APP,
+        // What setupFiles left behind (X3.5-S6): the application URL under PG_DATABASE_URL, the legacy names blank.
+        PG_DATABASE_URL: LOCAL_APP,
+        DATABASE_URL: '',
         ...over,
       });
       function expectWorkerRefused(env: NodeJS.ProcessEnv, pattern: RegExp): void {
-        const before = { url: env.DATABASE_URL, mode: env.WORKER_CLAIM_MODE };
+        const before = { url: env.PG_DATABASE_URL, legacy: env.DATABASE_URL, mode: env.WORKER_CLAIM_MODE };
         let message = '';
         try {
           applyWorkerLoginTestDatabaseEnv(env);
@@ -423,21 +456,23 @@ describe('integration test database guard', () => {
         expect(message).toMatch(pattern);
         expect(message).not.toContain(SECRET);
         expect(message).not.toMatch(/postgres(ql)?:\/\//);
-        expect({ url: env.DATABASE_URL, mode: env.WORKER_CLAIM_MODE }).toEqual(before);
+        expect({ url: env.PG_DATABASE_URL, legacy: env.DATABASE_URL, mode: env.WORKER_CLAIM_MODE }).toEqual(before);
       }
 
       it('is off (returns false, changes nothing) without the Phase D opt-in or without a worker URL', () => {
         for (const env of [workerEnv({ PHASE_D_SQL_APPROVED: undefined }), workerEnv({ PHASE_D_SQL_APPROVED: 'yes' }), workerEnv({ [TEST_DATABASE_WORKER_URL]: '  ' })]) {
           expect(applyWorkerLoginTestDatabaseEnv(env)).toBe(false);
-          expect(env.DATABASE_URL).toBe(LOCAL_APP);
+          expect(env.PG_DATABASE_URL).toBe(LOCAL_APP);
           expect(env.WORKER_CLAIM_MODE).toBeUndefined();
         }
       });
 
-      it.each([undefined, 'development', 'test'])('accepts a worker login on the TEST database (NODE_ENV=%p) and routes DATABASE_URL to it', (nodeEnv) => {
+      it.each([undefined, 'development', 'test'])('accepts a worker login on the TEST database (NODE_ENV=%p) and routes PG_DATABASE_URL (never DATABASE_URL) to it', (nodeEnv) => {
         const env = workerEnv({ NODE_ENV: nodeEnv });
         expect(applyWorkerLoginTestDatabaseEnv(env)).toBe(true);
-        expect(env.DATABASE_URL).toBe(WORKER_ON_TEST_DB);
+        expect(env.PG_DATABASE_URL).toBe(WORKER_ON_TEST_DB);
+        expect(env.DATABASE_URL).toBe('');
+        expect(presentLegacyPgEnvNames(env)).toEqual([]);
         expect(env.WORKER_CLAIM_MODE).toBe('global');
       });
 
@@ -588,7 +623,8 @@ describe('integration test database guard', () => {
       expect(applyIntegrationTestDatabaseEnv(fromNew)?.admin.label).toBe(TEST_DATABASE_ADMIN_URL);
       expect(fromNew[TEST_DATABASE_ADMIN_URL]).toBe(LOCAL_ADMIN);
       expect(fromNew[TEST_DATABASE_URL_UNPOOLED]).toBe(LOCAL_ADMIN);
-      expect(fromNew.DATABASE_URL_UNPOOLED).toBe(LOCAL_ADMIN);
+      // X3.5-S6: the admin URL no longer rides in the legacy DATABASE_URL_UNPOOLED (blank, so the elevated endpoint is unset).
+      expect(fromNew.DATABASE_URL_UNPOOLED).toBe('');
       const fromOld = s7Env({ [TEST_DATABASE_URL_UNPOOLED]: ` ${LOCAL_ADMIN}` });
       expect(applyIntegrationTestDatabaseEnv(fromOld)?.admin.label).toBe(TEST_DATABASE_URL_UNPOOLED);
       expect(fromOld[TEST_DATABASE_ADMIN_URL]).toBe(LOCAL_ADMIN);

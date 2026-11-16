@@ -10,7 +10,7 @@ const { SmtpDriver } = require('@rab/server/engine/core-modules/email/drivers/sm
 const { createEmailSendProcessor } = require('../../../queues/rab-email/email-send.processor');
 
 (async () => {
-  if (!['localhost', '127.0.0.1', '::1'].includes(new URL(process.env.DATABASE_URL).hostname)) throw new Error('Local test databases only');
+  if (!['localhost', '127.0.0.1', '::1'].includes(new URL(process.env.PG_DATABASE_URL).hostname)) throw new Error('Local test databases only');
   const port = Number(process.env.ETW_SMTP_SINK_PORT);
   if (!Number.isInteger(port) || port <= 0) throw new Error('ETW_SMTP_SINK_PORT is required');
   const app = await new DataSource(coreDataSourceOptions).initialize();

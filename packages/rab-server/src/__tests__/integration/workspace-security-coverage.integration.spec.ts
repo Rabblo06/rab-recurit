@@ -72,7 +72,8 @@ describeIfDb('F4: workspace schemas are covered by check-rls-coverage and the po
   const rlsCoverage = (schema: string) => {
     const out = spawnSync(process.execPath, [join(REPO_ROOT, 'node_modules/tsx/dist/cli.mjs'), join(REPO_ROOT, 'tools/check-rls-coverage.ts')], {
       cwd: REPO_ROOT,
-      env: { ...process.env, DATABASE_URL: appUrl },
+      // X3.5-S6: the runtime name only (the routed Jest env blanks the legacy DATABASE_URL / DATABASE_URL_UNPOOLED).
+      env: { ...process.env, PG_DATABASE_URL: appUrl },
       encoding: 'utf8',
       timeout: 150_000,
     });
