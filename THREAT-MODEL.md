@@ -7768,59 +7768,55 @@ Reversal:   A shorter QR_MAX_AGE_DAYS, or rotating QRs automatically on schedule
   wrong-organisation binding, and the full suites with HWS on (server 2,846 pass / 10 fail = the member staff-visibility gap
   awaiting owner SQL; Worker 741/741).
 
-## Part C3 switched on — release 0.7.0: HWS cutover (copy core → one schema per workspace) runs in production (DRAFT release PR; needs the owner's deploy approval)
+## Part C3 switched on — release 0.7.0: activation of the HWS cutover in production (DRAFT release PR #175; needs the owner's deploy approval)
 
-C3's code and SQL arrived in #150 (migration HwsCutoverCopyFunctions1786721540000; owner approved option A′ and the SQL
-2026-11-15, three security-review rounds). This release registers the step (`'0-7'` in the upgrade registry), bumps the
-version to 0.7.0 (strict upgrade from 0.6.0 only), and sets `HWS_RUNTIME_ENABLED=true` in both production compose files. It
-also mounts the operator's backup directory read-only into rab-api and commits `CREWFLOW_HWS_CUTOVER_BACKUP_MARKER`. Lead to
-review and adapt: the C3 drafts (C3-STATUS.md §5, §9, §11) are folded in here.
+The copy path itself is threat-modelled in the C3 entry added by **PR #178**. That entry covers:
+- the cross-tenant copy;
+- the RLS bypass window (A′);
+- serving a partial copy and the one-way sentinel;
+- the backup marker rules;
+- the core write fence and the HWS-off refusal;
+- rows left behind;
+- forged state;
+- duplicate pay statements;
+- disclosure;
+- the 5-minute budget per start;
+- #150's tests.
 
-- **Assets.** Every tenant's staffing and payroll history (money in pence, worked minutes, attendance corrections, notes about
-  people).
-- **Actors.** The operator starting the release; a bug in the cutover; a runtime login (crewflow_owner / crewflow_worker) under
-  SQL injection; an older or HWS-off image still running against the database.
-- **Cross-tenant copy.** The tenant GUCs are bound to one workspace per transaction. Source rows are filtered by workspace AND
-  organisation, and rows of W under another organisation refuse W. A `<table>_workspace_bound` CHECK sits on every workspace
-  table.
-- **RLS bypass window (SECURITY TRADE-OFF A′, accepted by the owner).** FORCE is lifted only inside frozen crewflow SECURITY
-  DEFINER functions, under ACCESS EXCLUSIVE. It is restored and asserted before return, and never committed off. EXECUTE is
-  for crewflow members holding the migration lock on the same backend; crewflow_app has none. The injection residual is
-  unchanged (BC-01: the owner login can already act as crewflow).
-- **Serving a partial copy.** Every pending workspace is blocked (503 "workspace is being upgraded") before anything else.
-  A started-but-unverified workspace is refused by the resolver even without its marker.
-  - Routing is gated by a one-way database sentinel (`core.hws_cutover_activation`, rab_secure_owner-owned; no UPDATE or
-    DELETE policy; TRUNCATE guarded). Pruning or rolling back the command cannot turn fail-closed routing off.
-  - The cache epoch is bumped right after blocking.
-- **Data loss.**
-  - **Backup.** The copy is refused without a verified backup (owner rule):
-    - the marker must name this database and, when readable, this cluster's `system_identifier`;
-    - it must be at most 24 h old by the database clock;
-    - the dump is re-hashed in full, and must have the recorded size and a `PGDMP` header;
-    - files are opened with no symlink following.
-    - Residual: when `pg_control_system()` is unreadable (a managed provider), the binding is by database NAME only. The
-      runbook's "dump this database, verify the restore" steps are the control.
-  - **Mount.** The backup mount is read-only, rab-api only. When it is unset, an empty file stands in, so no marker can be
-    read and the copy is refused (fail closed).
-  - **Core copies.** They are never written by the cutover. Afterwards, the fence makes them read-only for the runtime login,
-    so an HWS-off or older process gets 42501 instead of silently writing to a dead copy. An HWS-off 0.7.0 process refuses
-    to boot.
-  - **Rows left behind.** Rows of an organisation with no workspace, and ambiguous or unmapped notes, refuse the affected
-    workspace for an operator to resolve. Nothing is dropped.
-  - **Rollback.** Writes after the cutover are lost on a restore-based rollback (documented in MIGRATION-AND-ROLLBACK-PLAN.md
-    §4.7; the backup is mandatory).
-- **Forged state.** The verified state (`core.hws_cutover_state`) and the sentinel are rab_secure_owner-owned. Only the
-  cutover (as crewflow, through owner-only policies) and the new-workspace trigger write them; the runtime logins read only.
-  Audit rows are never read back as state.
-- **Duplicate pay statements.** Only the pointers of rows a batch inserted are reconciled; live workspace pointers are never
-  touched.
-- **Disclosure.** Logs and the audit record carry workspace ids, table names, counts and checksums only: no money, no URL, no
-  marker content.
-- **Availability.** Each copy or verify call holds ACCESS EXCLUSIVE on whole core tables (all organisations). This happens only
-  in the migrate child, before the API listens, with the Worker stopped. There is a 5-minute budget per start; the rest stays
-  blocked and continues at the next start.
-- **Tests.** In #150: `hws-cutover.spec.ts` (unit, now asserting the 0.7.0 registration) and
-  `hws-c3-cutover.integration.spec.ts` (abuse cases of every function; HWS off refused; no backup refused and blocked; kill
-  then resume; copy correctness; checksum mismatch blocked; both-populated never merged; zero rows with no tenant context;
-  logbook failed then completed). In this PR: `verify-image-compose.test.cjs` refuses HWS switched off in one file, or the
-  backup mount made writable.
+This entry covers only what release 0.7.0 adds to switch it on.
+
+- **Activation.**
+  - The release registers the step: `'0-7'` in the upgrade registry, so `0.7.0_HwsCutover_1786721540100` runs.
+  - The version goes to 0.7.0, with `CREWFLOW_PREVIOUS_VERSIONS` + 0.6.0. The upgrade is strict from 0.6.0: an R254/R256 database is refused with 65 and must take 0.6.0 first.
+  - `HWS_RUNTIME_ENABLED=true` is set on rab-api and rab-worker in `docker-compose.image.yml` and `docker-compose.production.yml`. Production then serves workspace data from the workspace schemas.
+- **The backup mount (proposed H6 exception; needs independent security review).** rab-api gets exactly one host mount: `${CREWFLOW_HWS_CUTOVER_BACKUP_DIR:-/dev/null}:/run/crewflow/hws-cutover-backup:ro`.
+  - It is read-only, rab-api only, and pinned by the H6 test (`deployment-worker.test.cjs`, exact string) and by `verify-image-compose` (a writable mount is refused).
+  - When the variable is unset it falls back to an empty file. No marker can be read there, so the copy is refused: fail closed.
+  - Exposure: read-only access to the pre-cutover dump of the same database rab-api already reaches. The operator encrypts the dump at rest and removes it after acceptance (MIGRATION-AND-ROLLBACK-PLAN.md §4.7, §5.1).
+  - `CREWFLOW_HWS_CUTOVER_BACKUP_MARKER` is committed, so an env file cannot redirect it.
+- **Timing.**
+  - The cutover runs in the migrate child before the API listens.
+  - The Worker starts only after the API is healthy, so no Worker writes during the copy.
+  - The migrations must be applied first. The 0.7.0 API refuses (503) every workspace against an unmigrated database: fail closed.
+- **Rollback after the cutover** (§4.7):
+  - the 0.7.0 image refuses to boot with HWS off;
+  - a previous image, where it starts at all, sees the core copies of cut-over workspaces as read-only (the fence);
+  - undoing the release means restoring the pre-cutover dump, and every write after the cutover is lost.
+- **Never silently skipped: the HWS-off / zero-workspace fix, a Part B runner change.**
+  - **Problem.** With HWS off and nothing pending, the step used to be recorded completed. It then never ran when HWS was switched on, so the sentinel was never written and fail-closed routing never turned on.
+  - **Runner change.** An upgrade command may now return `{ deferred }`. The runner then:
+    - records no logbook row and logs a WARNING;
+    - reports the step in `UpgradeRunReport.deferred`;
+    - leaves the version incomplete, so the next start runs the step again;
+    - lets the next release's strict check refuse (65) until the step has completed.
+  - **Where the cutover uses it.** The cutover defers only when HWS is off and nothing is pending. HWS off with something pending still refuses.
+  - **Host environment.** Upgrade commands now read host facts (HWS flag, marker path) from the start's own environment (`createUpgradeCommandHost({ env })`), not from `process.env` in an in-process run.
+- **Tests.**
+  - `hws-c3-cutover.integration.spec.ts` "release 0.7.0 no-op fix":
+    - (a) HWS off with zero workspaces is deferred: no row, no sentinel;
+    - (b) HWS off with every workspace verified is deferred;
+    - (c) the next HWS-on start completes and writes the sentinel;
+    - (d) a later HWS-off start leaves the completed step alone.
+  - `verify-image-compose.test.cjs` refuses HWS switched off in one file, and a writable backup mount.
+  - `deployment-worker.test.cjs` (H6) allows only the exact read-only mount on rab-api, and none on rab-worker.
+  - The B2 ledger, runner and release-floor suites start from a 0.6.0-complete database with a backup marker that passes the real checks. No seam skips the cutover.
