@@ -25,7 +25,7 @@
  * child and the owner-login release step) this list is NO LONGER consulted: the upgrade floor
  * (scripts/migrate/owner-login/release-floor.ts) replaced it, because the list refused every upgrade of an existing
  * production database (SU-01). This module now gates only the LEGACY CF-41 path of the locked runner and the CLI
- * (GuardedMigrationDataSource.runMigrations: setup-db and the TypeORM CLI). Both are retired with the clean-up PR, together
+ * (GuardedMigrationDataSource.runMigrations: setup-db and the TypeORM CLI). Both are retired with the separated-mode retirement, together
  * with this module; until then nothing here changes.
  */
 import type { DbTarget } from './database-target';

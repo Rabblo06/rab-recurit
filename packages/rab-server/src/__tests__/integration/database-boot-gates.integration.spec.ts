@@ -184,9 +184,9 @@ describe('B3 identity in the command and runtime guards (integration, marker abs
 
   it('DB_TARGET=test on an unmarked database proceeds (with a warning); a declared identity it cannot match is refused', async () => {
     silence();
-    await expect(assertDbTarget('migrations', { DB_TARGET: 'test', DATABASE_URL: appUrl }, {})).resolves.toMatchObject({ target: 'test' });
+    await expect(assertDbTarget('migrations', { DB_TARGET: 'test', PG_DATABASE_URL: appUrl }, {})).resolves.toMatchObject({ target: 'test' });
     await expect(
-      assertDbTarget('migrations', { DB_TARGET: 'test', DATABASE_URL: appUrl, CREWFLOW_DEPLOYMENT_ENVIRONMENT: 'test', CREWFLOW_DEPLOYMENT_ID: PROD_ID }, {}),
+      assertDbTarget('migrations', { DB_TARGET: 'test', PG_DATABASE_URL: appUrl, CREWFLOW_DEPLOYMENT_ENVIRONMENT: 'test', CREWFLOW_DEPLOYMENT_ID: PROD_ID }, {}),
     ).rejects.toBeInstanceOf(DbTargetError);
   });
 

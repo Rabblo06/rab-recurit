@@ -1,6 +1,8 @@
+import { MIGRATION_POOL_MAX } from '../typeorm/scripts/migrate/locked-migration-runner';
 import {
   assertConnectionBudget,
   ConnectionBudgetError,
+  DEFAULT_MIGRATE_CONNECTIONS,
   evaluateConnectionBudget,
   planConnectionBudget,
   readDeploymentShape,
@@ -23,7 +25,7 @@ const queryReturning = (row: Record<string, unknown>) => jest.fn(async (sql: str
 const SHAPE_2_1 = { PG_EXPECTED_API_INSTANCES: '2', PG_EXPECTED_WORKER_INSTANCES: '1' };
 
 describe('connection budget (B5)', () => {
-  it('plans the deployment: 2 API x (10 + 1 health login probe) + 1 Worker (12 + 6 + 2 + 2) + migrate 3 + probes 3 = 50', () => {
+  it('plans the deployment: 2 API x (10 + 1 health login probe) + 1 Worker (12 + 6 + 2 + 2) + migrate-on-start 5 + probes 3 = 52', () => {
     const { shape } = readDeploymentShape(SHAPE_2_1);
     const plan = planConnectionBudget(shape!);
     expect(plan.rows.map((r) => [r.item, r.total])).toEqual([
@@ -32,38 +34,66 @@ describe('connection budget (B5)', () => {
       ['Worker runtime pool', 12],
       ['Worker direct/lock pool', 6],
       ['Worker scan-lock + storage-lock clients', 2],
-      ['Worker provisioner child (until E6)', 2],
-      ['rab-migrate', 3],
+      ['Worker in-process provisioner (provisioning + drift clients)', 2],
+      ['API migrate-on-start child', 5],
       ['boot probes + operator session', 3],
     ]);
-    expect(plan.total).toBe(50);
-    // The runtime login: API pools 20 + one /healthz login probe per API instance 2 + Worker 12 + 6 + 2.
-    expect(plan.runtimeRoleTotal).toBe(42);
+    expect(plan.total).toBe(52);
+    // XD-05: one owner login opens every row, so its rolconnlimit is compared with the whole total (before XD-05: 42 of 50).
+    expect(plan.runtimeRoleTotal).toBe(52);
   });
 
   it('the /healthz login probe slot is budgeted: a capacity that fits everything except one probe per API instance is refused', async () => {
-    // usable = 51 - 3 = 48: the pools, Worker, migrate and boot probes (48) fit, the two API probe slots (50) do not.
-    await expect(
-      assertConnectionBudget({ processRole: 'api', ownPoolMax: 10, env: SHAPE_2_1, query: queryReturning(capacityRow({ max_connections: 51 })), log: () => undefined }),
-    ).rejects.toThrow(/up to 50 connections but the database allows 48/);
+    // usable = 53 - 3 = 50: the pools, Worker, migrate and boot probes (50) fit, the two API probe slots (52) do not.
     await expect(
       assertConnectionBudget({ processRole: 'api', ownPoolMax: 10, env: SHAPE_2_1, query: queryReturning(capacityRow({ max_connections: 53 })), log: () => undefined }),
-    ).resolves.toMatchObject({ checked: true, usable: 50 });
+    ).rejects.toThrow(/up to 52 connections but the database allows 50/);
+    await expect(
+      assertConnectionBudget({ processRole: 'api', ownPoolMax: 10, env: SHAPE_2_1, query: queryReturning(capacityRow({ max_connections: 55 })), log: () => undefined }),
+    ).resolves.toMatchObject({ checked: true, usable: 52 });
     // A runtime login limited to the pools alone (40) is refused: the probe connects as that login too.
     const plan = planConnectionBudget(readDeploymentShape(SHAPE_2_1).shape!);
     const limited = evaluateConnectionBudget(plan, { maxConnections: 200, superuserReserved: 3, reserved: 0, providerSettingReserved: 0, roleLimit: 40, databaseLimit: null }, 0);
-    expect(limited.problems.join()).toMatch(/runtime login can open up to 42 connections but its connection limit is 40/);
+    expect(limited.problems.join()).toMatch(/runtime login can open up to 52 connections but its connection limit is 40/);
   });
 
-  it('a 47-connection database (max_connections 50, 3 superuser-reserved): the defaults (50) are refused, API pool 8 (46) fits', async () => {
+  it('XD-05: no row is named after the retired rab-migrate step or provisioner child; every row is the owner login', () => {
+    const plan = planConnectionBudget(readDeploymentShape(SHAPE_2_1).shape!);
+    expect(plan.rows.map((r) => r.item).join('|')).not.toMatch(/rab-migrate|provisioner child|until E6/);
+    expect(plan.rows.filter((r) => !r.runtimeRole)).toEqual([]);
+  });
+
+  it('XD-05: the migrate-on-start default covers the migration runner pool plus its one login client', () => {
+    expect(DEFAULT_MIGRATE_CONNECTIONS).toBe(MIGRATION_POOL_MAX + 1);
+    expect(readDeploymentShape(SHAPE_2_1).shape!.migrateConnections).toBe(5);
+    expect(readDeploymentShape({ ...SHAPE_2_1, PG_EXPECTED_MIGRATE_CONNECTIONS: '3' }).shape!.migrateConnections).toBe(3);
+  });
+
+  it('XD-05: a crewflow_owner connection limit is compared with every row, provisioner, migrate and probes included', () => {
+    const plan = planConnectionBudget(readDeploymentShape(SHAPE_2_1).shape!);
+    const cap = (roleLimit: number): ServerCapacity => ({
+      maxConnections: 500,
+      superuserReserved: 3,
+      reserved: 0,
+      providerSettingReserved: 0,
+      roleLimit,
+      databaseLimit: null,
+      login: 'crewflow_owner',
+    });
+    expect(evaluateConnectionBudget(plan, cap(52), 0).ok).toBe(true);
+    // 51 used to pass (only the 42 pool + probe connections were compared) although the login can open 52.
+    expect(evaluateConnectionBudget(plan, cap(51), 0).problems.join()).toMatch(/runtime login can open up to 52 connections but its connection limit is 51/);
+  });
+
+  it('a 47-connection database (max_connections 50, 3 superuser-reserved): the defaults (52) are refused, API pool 7 (46) fits', async () => {
     await expect(
       assertConnectionBudget({ processRole: 'api', ownPoolMax: 10, env: SHAPE_2_1, query: queryReturning(capacityRow()), log: () => undefined }),
-    ).rejects.toThrow(/up to 50 connections but the database allows 47/);
+    ).rejects.toThrow(/up to 52 connections but the database allows 47/);
 
     const ok = await assertConnectionBudget({
       processRole: 'api',
-      ownPoolMax: 8,
-      env: { ...SHAPE_2_1, PG_EXPECTED_API_POOL_MAX: '8' },
+      ownPoolMax: 7,
+      env: { ...SHAPE_2_1, PG_EXPECTED_API_POOL_MAX: '7' },
       query: queryReturning(capacityRow()),
       log: () => undefined,
     });
@@ -88,7 +118,7 @@ describe('connection budget (B5)', () => {
     expect(evaluateConnectionBudget(plan, cap({ databaseLimit: 40 }), 0)).toMatchObject({ ok: false, capacity: 40 });
   });
 
-  it('refuses when the runtime login connection limit is below the API + Worker total', () => {
+  it('refuses when the runtime login connection limit is below the deployment total', () => {
     const plan = planConnectionBudget(readDeploymentShape(SHAPE_2_1).shape!);
     const result = evaluateConnectionBudget(
       plan,
@@ -96,7 +126,7 @@ describe('connection budget (B5)', () => {
       0,
     );
     expect(result.ok).toBe(false);
-    expect(result.problems.join()).toMatch(/runtime login can open up to 42 connections but its connection limit is 30/);
+    expect(result.problems.join()).toMatch(/runtime login can open up to 52 connections but its connection limit is 30/);
   });
 
   it('warns (does not refuse, does not query) when the instance counts are not declared', async () => {

@@ -141,8 +141,10 @@ describeIfDb('payroll approval (integration)', () => {
     expect(outRes.status).toBe(201);
     const attendanceId = outRes.body.id as string;
     const clockOutAt = new Date(outRes.body.clockOutAt).getTime();
+    // Worked time comes from moving the clock-in hours before the scheduled start: an unusually early clock-in
+    // correction, so it is explicitly confirmed (owner brief 2026-11-15, 409 CLOCK_IN_CONFIRMATION_REQUIRED otherwise).
     const corrected = await http().post(`/rest/v1/attendance/${attendanceId}/correct`).set(auth(tokenA))
-      .send({ field: 'clockInAt', newValue: new Date(clockOutAt - WORKED_TARGET_MINUTES * 60_000).toISOString(), reason: 'Payroll test: real worked time' });
+      .send({ field: 'clockInAt', newValue: new Date(clockOutAt - WORKED_TARGET_MINUTES * 60_000).toISOString(), reason: 'Payroll test: real worked time', confirmUnusualClockIn: true });
     expect(corrected.status).toBe(201);
     return { shiftId, attendanceId, workedMinutes: corrected.body.workedMinutes, earnedPence: corrected.body.earnedPence };
   }

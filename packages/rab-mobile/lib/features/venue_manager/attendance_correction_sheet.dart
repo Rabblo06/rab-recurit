@@ -8,6 +8,7 @@ import '../../core/widgets/schedule_feedback.dart';
 import '../../core/widgets/schedule_toast.dart';
 import 'report_ui.dart';
 import 'shift_report.dart';
+import 'unusual_clock_in_warning.dart';
 import 'venue_manager_provider.dart';
 
 /// Why a manager is entering attendance — wire codes and labels of the server's `ATTENDANCE_RECORD_REASONS`.
@@ -198,24 +199,43 @@ class _AttendanceEntrySheetState extends State<AttendanceEntrySheet> {
     }
     setState(() => _saving = true);
     final overlay = ScheduleToast.overlayOf(context);
+    final provider = context.read<VenueManagerProvider>();
+    Future<ShiftReportDetail> send({bool confirmUnusualClockIn = false}) =>
+        provider.recordAttendance(
+          widget.report.shiftId,
+          widget.row.staffProfileId,
+          clockInAt: _in,
+          clockOutAt: _out,
+          breakMinutes: _breakValue,
+          reasonCode: _reason!,
+          reasonNote: _reason == 'other' ? _note.text : null,
+          expectedVersion: widget.row.attendanceVersion,
+          confirmUnusualClockIn: confirmUnusualClockIn,
+        );
     try {
-      final fresh = await context.read<VenueManagerProvider>().recordAttendance(
-        widget.report.shiftId,
-        widget.row.staffProfileId,
-        clockInAt: _in,
-        clockOutAt: _out,
-        breakMinutes: _breakValue,
-        reasonCode: _reason!,
-        reasonNote: _reason == 'other' ? _note.text : null,
-        expectedVersion: widget.row.attendanceVersion,
-      );
+      ShiftReportDetail fresh;
+      try {
+        fresh = await send();
+      } on ApiException catch (e) {
+        // A clock-in earlier than the normal allowance: nothing was saved. The same warning as the correction; Edit
+        // returns to this form with every value kept, only Confirm sends the same entry again, confirmed.
+        final warning = UnusualClockInWarning.fromError(e);
+        if (warning == null) rethrow;
+        if (!mounted) return;
+        final confirmed = await confirmUnusualClockIn(context, warning);
+        if (!confirmed) return;
+        fresh = await send(confirmUnusualClockIn: true);
+      }
       // Owner decision: no success toast — the review screen shows the saved attendance itself.
       if (mounted) Navigator.of(context).pop(fresh);
     } catch (e) {
       if (!mounted || overlay == null) return;
+      // CLOCK_IN_TOO_EARLY_ABSOLUTE (422): the server's own message, as an error — never the confirmation dialog.
       final invalid =
           e is ApiException &&
-          (e.code == 'INVALID_ATTENDANCE_TIMES' || e.statusCode == 400);
+          (e.code == 'INVALID_ATTENDANCE_TIMES' ||
+              e.code == 'CLOCK_IN_TOO_EARLY_ABSOLUTE' ||
+              e.statusCode == 400);
       ScheduleToast.showOn(
         overlay,
         invalid

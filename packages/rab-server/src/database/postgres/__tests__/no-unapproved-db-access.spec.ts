@@ -63,7 +63,7 @@ const BASELINE: Record<string, { hits: number; why: string }> = {
   'packages/rab-server/src/database/typeorm/scripts/migrate/locked-migration-runner.ts': { hits: 1, why: 'the migration DataSource, built from pgTypeOrmConnectionOptions' },
   'packages/rab-server/src/database/typeorm/scripts/migrate/migration-database-url.ts': { hits: 1, why: 'names which variable the migration URL came from (the factory resolves it)' },
   'packages/rab-server/src/database/typeorm/scripts/migration-security-check.ts': {
-    hits: 11,
+    hits: 6,
     why: 'the M2 CI harness: builds disposable databases as the bootstrap superuser and hands each identity URL to the guarded DataSource',
   },
   // Owner-login (reviewed 2026-11-05, Agent 1). The two CI/developer harnesses below (and twenty-mode-check.ts above) are the owner-login analogues of
@@ -75,8 +75,8 @@ const BASELINE: Record<string, { hits: number; why: string }> = {
     why: 'reads PG_DATABASE_URL only to parse its login name (crewflow_owner dispatch); every connection goes through the factory (withLoginClient)',
   },
   'packages/rab-server/src/database/typeorm/scripts/migrate/owner-login/owner-login-lifecycle-check.ts': {
-    hits: 9,
-    why: 'owner-login lifecycle CI harness on a disposable cluster: superuser probe/seed Clients, a one-migration replay DataSource, and the legacy-chain GuardedMigrationDataSource (sets DATABASE_URL* for it, then deletes them)',
+    hits: 8,
+    why: 'owner-login lifecycle CI harness on a disposable cluster: superuser probe/seed Clients, a one-migration replay DataSource, and the legacy-chain GuardedMigrationDataSource (sets PG_DATABASE_URL for it, then restores it; X3.5-S6)',
   },
   // DB setup like Twenty (area 2): the bootstrap child, the ONLY process that connects as the database admin. Its two
   // configs (admin session, crewflow_owner probe) come from the factory's pgClientConfig (URL policy, TLS, timeouts); the

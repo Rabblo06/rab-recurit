@@ -193,4 +193,11 @@ describe('root yarn start: the Worker provisions in-process; no separate provisi
     expect(start).toContain('npx wait-on tcp:3000 && npx nx run rab-worker:start');
     expect(start).toContain('npx nx run-many -t start -p rab-server rab-front');
   });
+
+  it('X5.1: rab-worker has no `provision` target any more (the separate provisioner process was removed)', () => {
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const project = require('../../../project.json') as { targets: Record<string, unknown> };
+    expect(Object.keys(project.targets)).not.toContain('provision');
+    expect(Object.keys(project.targets)).toContain('start');
+  });
 });

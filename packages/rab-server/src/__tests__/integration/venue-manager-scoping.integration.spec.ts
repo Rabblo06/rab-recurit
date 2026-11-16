@@ -1,11 +1,12 @@
 import { insertMembership, provisionFixtureWorkspace } from './helpers/test-identities';
 import { AvailabilityService } from '../../modules/scheduling/services/availability.service';
 import { ShiftReportService } from '../../modules/attendance/services/shift-report.service';
+import { AttendanceService } from '../../modules/attendance/services/attendance.service';
 import { OfferService } from '../../modules/offer/services/offer.service';
 import { assertVenueTeamSelection } from '../../modules/staff/services/venue-team-scope';
 import 'reflect-metadata';
 import { payForMinutes, ManagerType, PermissionFlag, UserStatus } from '@rab/shared';
-import { INestApplication } from '@nestjs/common';
+import { ForbiddenException, INestApplication } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
 import { randomUUID } from 'node:crypto';
 import request from 'supertest';
@@ -1895,6 +1896,342 @@ describeIfDb('venue manager scoping (integration)', () => {
         expect(row.clock_out_at.toISOString()).toBe(out.toISOString());
         // computeWorkedMinutes (@rab/shared duration.ts): span minus the scheduled 30-minute unpaid break.
         expect(row.worked_minutes).toBe(Math.round((out.getTime() - clockInAt.getTime()) / MIN) - 30);
+      });
+    });
+
+    // Owner brief 2026-11-15 (compact attendance correction warning): a corrected clock-in earlier than the staff
+    // member's own scheduled start − CLOCK_IN_EARLY_MINUTES (15 by default) is saved only with an explicit
+    // `confirmUnusualClockIn: true`; without it, 409 CLOCK_IN_CONFIRMATION_REQUIRED with `earliestAllowed` and nothing is
+    // written. Normal corrections need no confirmation; every other rule (future, order, scope, permission) still applies.
+    describe('unusually early clock-in correction needs explicit confirmation', () => {
+      const MIN = 60_000;
+      const reason = 'Staff arrived early; start time confirmed by the manager.';
+      /** A recorded (clocked-out) seat: shift ended 3 h ago, 7 h long; clocked in start + 15 min, out at the end. */
+      const recordedSeat = () => seedSeat({ status: 'clocked_out', endedAgoMs: 3 * HOUR, clockOut: true });
+      const tablesOf = async (shiftId: string) => {
+        const shift = await businessTableOf(adminDataSource, 'shift', shiftId);
+        return { shift, attendance: siblingTable(shift, 'attendance'), seat: siblingTable(shift, 'shift_assignment'), correction: siblingTable(shift, 'attendance_correction') };
+      };
+      /** The seat's own scheduled start (`effectiveAssignmentTime`): the assignment period's lower bound. */
+      const seatStartOf = async (shiftId: string): Promise<Date> => {
+        const t = await tablesOf(shiftId);
+        const [{ start }] = await adminDataSource.query(`SELECT lower(period) AS start FROM ${t.seat} WHERE shift_id = $1`, [shiftId]);
+        return start as Date;
+      };
+      const stateOf = async (shiftId: string, attendanceId: string) => {
+        const t = await tablesOf(shiftId);
+        const [row] = await adminDataSource.query(`SELECT status, clock_in_at, worked_minutes FROM ${t.attendance} WHERE id = $1`, [attendanceId]);
+        const [{ starts_at: shiftStartsAt }] = await adminDataSource.query(`SELECT starts_at FROM ${t.shift} WHERE id = $1`, [shiftId]);
+        const corrections = await adminDataSource.query(
+          `SELECT field, old_value, new_value, reason, corrected_by FROM ${t.correction} WHERE attendance_id = $1`, [attendanceId]);
+        const audits = await adminDataSource.query(
+          `SELECT actor_user_id, metadata, created_at FROM core.audit_log WHERE entity_id = $1 AND action = 'attendance.corrected'`, [attendanceId]);
+        return { row, shiftStartsAt: shiftStartsAt as Date, corrections, audits };
+      };
+
+      it('a normal clock-in correction (at the scheduled start) is saved with no confirmation', async () => {
+        const s = await recordedSeat();
+        const start = await seatStartOf(s.shiftId);
+        const res = await correct(s.vmToken, s.attendanceId!, { field: 'clockInAt', newValue: start.toISOString(), reason });
+        expect(res.status).toBe(201);
+        const after = await stateOf(s.shiftId, s.attendanceId!);
+        expect(after.row.clock_in_at.toISOString()).toBe(start.toISOString());
+        expect(after.audits).toHaveLength(1);
+        expect(after.audits[0].metadata).not.toHaveProperty('unusualClockInConfirmed');
+        expect((await reportOf(s.vmToken, s.shiftId)).staff[0].unusualClockInConfirmed).toBe(false);
+      });
+
+      it('a clock-in exactly at the earliest allowed time (start − 15 min) is saved with no confirmation', async () => {
+        const s = await recordedSeat();
+        const earliest = new Date((await seatStartOf(s.shiftId)).getTime() - 15 * MIN);
+        const res = await correct(s.vmToken, s.attendanceId!, { field: 'clockInAt', newValue: earliest.toISOString(), reason });
+        expect(res.status).toBe(201);
+        const after = await stateOf(s.shiftId, s.attendanceId!);
+        expect(after.row.clock_in_at.toISOString()).toBe(earliest.toISOString());
+        expect(after.audits[0].metadata).not.toHaveProperty('unusualClockInConfirmed');
+      });
+
+      it('an earlier clock-in without confirmation is refused (409 CLOCK_IN_CONFIRMATION_REQUIRED) and nothing is written', async () => {
+        const s = await recordedSeat();
+        const start = await seatStartOf(s.shiftId);
+        const before = await stateOf(s.shiftId, s.attendanceId!);
+        for (const entered of [new Date(start.getTime() - 16 * MIN), new Date(start.getTime() - 4 * HOUR)]) {
+          // A direct API call that never showed the warning: no flag, or the flag set to false.
+          for (const extra of [{}, { confirmUnusualClockIn: false }]) {
+            const res = await correct(s.vmToken, s.attendanceId!, { field: 'clockInAt', newValue: entered.toISOString(), reason, ...extra });
+            expect(res.status).toBe(409);
+            expect(res.body).toMatchObject({
+              code: 'CLOCK_IN_CONFIRMATION_REQUIRED',
+              message: 'This time is earlier than the normal allowance. Please check before continuing.',
+              earliestAllowed: new Date(start.getTime() - 15 * MIN).toISOString(),
+              enteredTime: entered.toISOString(),
+            });
+          }
+        }
+        const after = await stateOf(s.shiftId, s.attendanceId!);
+        expect(after.row).toEqual(before.row);
+        expect(after.corrections).toHaveLength(0);
+        expect(after.audits).toHaveLength(0);
+        // A non-boolean flag is a validation failure, never a truthy confirmation.
+        const junk = await correct(s.vmToken, s.attendanceId!, {
+          field: 'clockInAt',
+          newValue: new Date(start.getTime() - HOUR).toISOString(),
+          reason,
+          confirmUnusualClockIn: 'true',
+        });
+        expect(junk.status).toBe(400);
+      });
+
+      it('the allowance is measured from the staff member OWN start: seat starting 1 h after the shift, shiftStart − 10 min needs confirmation', async () => {
+        const s = await recordedSeat();
+        const t = await tablesOf(s.shiftId);
+        await adminDataSource.query(`UPDATE ${t.seat} SET period = tstzrange(lower(period) + interval '1 hour', upper(period), '[)') WHERE shift_id = $1`, [s.shiftId]);
+        const before = await stateOf(s.shiftId, s.attendanceId!);
+        const entered = new Date(before.shiftStartsAt.getTime() - 10 * MIN); // inside the SHIFT's allowance, 70 min before the seat
+        const res = await correct(s.vmToken, s.attendanceId!, { field: 'clockInAt', newValue: entered.toISOString(), reason });
+        expect(res.status).toBe(409);
+        expect(res.body.earliestAllowed).toBe(new Date((await seatStartOf(s.shiftId)).getTime() - 15 * MIN).toISOString());
+      });
+
+      it('Confirm saves once: original and corrected values, confirming manager and time are kept; the shift start never moves', async () => {
+        const s = await recordedSeat();
+        const start = await seatStartOf(s.shiftId);
+        const before = await stateOf(s.shiftId, s.attendanceId!);
+        const original = before.row.clock_in_at.toISOString();
+        const entered = new Date(start.getTime() - 4 * HOUR).toISOString();
+        const body = { field: 'clockInAt', newValue: entered, reason, confirmUnusualClockIn: true };
+        const res = await correct(s.vmToken, s.attendanceId!, body);
+        expect(res.status).toBe(201);
+
+        const after = await stateOf(s.shiftId, s.attendanceId!);
+        expect(after.row.clock_in_at.toISOString()).toBe(entered);
+        expect(after.row.status).toBe('under_review'); // a recorded row is reopened for review, as for every correction
+        // Worked minutes recomputed by @rab/shared duration.ts: (end − entered) − the scheduled 30-minute break.
+        expect(after.row.worked_minutes).toBe(7 * 60 + 4 * 60 - 30);
+        expect(after.shiftStartsAt.toISOString()).toBe(before.shiftStartsAt.toISOString());
+        expect((await seatStartOf(s.shiftId)).toISOString()).toBe(start.toISOString());
+        expect(after.corrections).toEqual([{ field: 'clockInAt', old_value: original, new_value: entered, reason, corrected_by: s.venueManager.userId }]);
+        expect(after.audits).toHaveLength(1);
+        expect(after.audits[0].actor_user_id).toBe(s.venueManager.userId);
+        expect(after.audits[0].created_at).toBeInstanceOf(Date);
+        expect(after.audits[0].metadata).toMatchObject({
+          field: 'clockInAt',
+          oldValue: original,
+          newValue: entered,
+          reason,
+          unusualClockInConfirmed: true,
+          earliestAllowed: new Date(start.getTime() - 15 * MIN).toISOString(),
+        });
+
+        // A retried / double-tapped Confirm: no second correction row, no second audit entry.
+        expect((await correct(s.vmToken, s.attendanceId!, body)).status).toBe(201);
+        const again = await stateOf(s.shiftId, s.attendanceId!);
+        expect(again.corrections).toHaveLength(1);
+        expect(again.audits).toHaveLength(1);
+
+        // The report row the reviewer and finaliser see shows it while that clock-in stands…
+        expect(after.audits[0].metadata).toMatchObject({ confirmedClockInAt: entered });
+        expect((await reportOf(s.vmToken, s.shiftId)).staff[0].unusualClockInConfirmed).toBe(true);
+        // …and a later ordinary clock-in correction clears it.
+        expect((await correct(s.vmToken, s.attendanceId!, { field: 'clockInAt', newValue: start.toISOString(), reason })).status).toBe(201);
+        expect((await reportOf(s.vmToken, s.shiftId)).staff[0].unusualClockInConfirmed).toBe(false);
+      });
+
+      it('12 h floor: start − 12 h needs (and accepts) the confirmation; one minute earlier is refused even with it (422), nothing written', async () => {
+        const s = await recordedSeat();
+        const start = await seatStartOf(s.shiftId);
+        const floor = new Date(start.getTime() - 12 * HOUR).toISOString();
+        const before = await stateOf(s.shiftId, s.attendanceId!);
+        const beyond = await correct(s.vmToken, s.attendanceId!, {
+          field: 'clockInAt', newValue: new Date(start.getTime() - 12 * HOUR - MIN).toISOString(), reason, confirmUnusualClockIn: true,
+        });
+        expect(beyond.status).toBe(422);
+        expect(beyond.body).toMatchObject({ code: 'CLOCK_IN_TOO_EARLY_ABSOLUTE', earliestPossible: floor });
+        expect(beyond.body.message).toBe('The clock-in time cannot be more than 12 hours before the scheduled start.');
+        const untouched = await stateOf(s.shiftId, s.attendanceId!);
+        expect(untouched.row).toEqual(before.row);
+        expect(untouched.corrections).toHaveLength(0);
+        expect(untouched.audits).toHaveLength(0);
+
+        const atFloor = { field: 'clockInAt', newValue: floor, reason };
+        expect((await correct(s.vmToken, s.attendanceId!, atFloor)).body.code).toBe('CLOCK_IN_CONFIRMATION_REQUIRED');
+        expect((await correct(s.vmToken, s.attendanceId!, { ...atFloor, confirmUnusualClockIn: true })).status).toBe(201);
+        expect((await stateOf(s.shiftId, s.attendanceId!)).row.clock_in_at.toISOString()).toBe(floor);
+        expect((await reportOf(s.vmToken, s.shiftId)).staff[0].unusualClockInConfirmed).toBe(true);
+      });
+
+      it('re-sending the stored clock-in stays the idempotent 201 even after a schedule change put it beyond the floor; a new time there is 422', async () => {
+        const s = await recordedSeat();
+        const start = await seatStartOf(s.shiftId);
+        const stored = new Date(start.getTime() - 12 * HOUR).toISOString();
+        expect((await correct(s.vmToken, s.attendanceId!, { field: 'clockInAt', newValue: stored, reason, confirmUnusualClockIn: true })).status).toBe(201);
+        // The seat (and shift) start moves an hour later: the stored clock-in is now 13 h before it, beyond the floor.
+        const t = await tablesOf(s.shiftId);
+        await adminDataSource.query(`UPDATE ${t.shift} SET starts_at = starts_at + interval '1 hour' WHERE id = $1`, [s.shiftId]);
+        await adminDataSource.query(`UPDATE ${t.seat} SET period = tstzrange(lower(period) + interval '1 hour', upper(period), '[)') WHERE shift_id = $1`, [s.shiftId]);
+        const before = await stateOf(s.shiftId, s.attendanceId!);
+        for (const extra of [{}, { confirmUnusualClockIn: true }]) {
+          expect((await correct(s.vmToken, s.attendanceId!, { field: 'clockInAt', newValue: stored, reason, ...extra })).status).toBe(201);
+        }
+        const after = await stateOf(s.shiftId, s.attendanceId!);
+        expect(after.row).toEqual(before.row);
+        expect(after.corrections).toHaveLength(1);
+        expect(after.audits).toHaveLength(1);
+        // A different (new) time beyond the moved floor is still refused, confirmed or not.
+        const beyond = await correct(s.vmToken, s.attendanceId!, {
+          field: 'clockInAt', newValue: new Date(start.getTime() - 11 * HOUR - MIN).toISOString(), reason, confirmUnusualClockIn: true,
+        });
+        expect(beyond.status).toBe(422);
+        expect(beyond.body.code).toBe('CLOCK_IN_TOO_EARLY_ABSOLUTE');
+      });
+
+      it('the floor is absolute on correct(): a clockOutAt or breakMinutes correction is refused (422) when the stored clock-in is now beyond it, nothing written', async () => {
+        const s = await recordedSeat();
+        const start = await seatStartOf(s.shiftId);
+        const stored = new Date(start.getTime() - 12 * HOUR).toISOString();
+        expect((await correct(s.vmToken, s.attendanceId!, { field: 'clockInAt', newValue: stored, reason, confirmUnusualClockIn: true })).status).toBe(201);
+        // Inside the floor, the other fields still correct normally.
+        expect((await correct(s.vmToken, s.attendanceId!, { field: 'breakMinutes', newValue: '40', reason })).status).toBe(201);
+        // The seat (and shift) start then moves an hour later: the confirmed stored clock-in is 13 h before it.
+        const t = await tablesOf(s.shiftId);
+        await adminDataSource.query(`UPDATE ${t.shift} SET starts_at = starts_at + interval '1 hour' WHERE id = $1`, [s.shiftId]);
+        await adminDataSource.query(`UPDATE ${t.seat} SET period = tstzrange(lower(period) + interval '1 hour', upper(period), '[)') WHERE shift_id = $1`, [s.shiftId]);
+        const before = await stateOf(s.shiftId, s.attendanceId!);
+        const [{ ends_at: endsAt }] = await adminDataSource.query(`SELECT ends_at FROM ${t.shift} WHERE id = $1`, [s.shiftId]);
+        const bodies = [
+          { field: 'clockOutAt', newValue: new Date((endsAt as Date).getTime() - 30 * MIN).toISOString(), reason },
+          { field: 'breakMinutes', newValue: '45', reason },
+        ];
+        for (const body of bodies) {
+          for (const extra of [{}, { confirmUnusualClockIn: true }]) {
+            const res = await correct(s.vmToken, s.attendanceId!, { ...body, ...extra });
+            expect(res.status).toBe(422);
+            expect(res.body).toMatchObject({ code: 'CLOCK_IN_TOO_EARLY_ABSOLUTE', earliestPossible: new Date(start.getTime() + HOUR - 12 * HOUR).toISOString() });
+          }
+        }
+        const after = await stateOf(s.shiftId, s.attendanceId!);
+        expect(after.row).toEqual(before.row);
+        expect(after.corrections).toHaveLength(before.corrections.length);
+        expect(after.audits).toHaveLength(before.audits.length);
+        // Re-sending the values already stored is still the idempotent no-op (201, nothing written).
+        expect((await correct(s.vmToken, s.attendanceId!, { field: 'breakMinutes', newValue: '40', reason })).status).toBe(201);
+        expect((await stateOf(s.shiftId, s.attendanceId!)).audits).toHaveLength(before.audits.length);
+      });
+
+      it('the future-time and clock-out rules still apply, even with the confirmation', async () => {
+        const s = await recordedSeat();
+        const before = await stateOf(s.shiftId, s.attendanceId!);
+        const future = await correct(s.vmToken, s.attendanceId!, {
+          field: 'clockInAt',
+          newValue: new Date(Date.now() + 10 * MIN).toISOString(),
+          reason,
+          confirmUnusualClockIn: true,
+        });
+        expect(future.status).toBe(400);
+        expect(future.body.message).toBe('A clock-in time cannot be in the future.');
+        const t = await tablesOf(s.shiftId);
+        const [{ clock_out_at: out }] = await adminDataSource.query(`SELECT clock_out_at FROM ${t.attendance} WHERE id = $1`, [s.attendanceId]);
+        const afterOut = await correct(s.vmToken, s.attendanceId!, {
+          field: 'clockInAt',
+          newValue: new Date((out as Date).getTime() + MIN).toISOString(),
+          reason,
+          confirmUnusualClockIn: true,
+        });
+        expect(afterOut.status).toBe(400);
+        expect(afterOut.body.message).toBe('clockOutAt cannot be before clockInAt.');
+        const after = await stateOf(s.shiftId, s.attendanceId!);
+        expect(after.row).toEqual(before.row);
+        expect(after.corrections).toHaveLength(0);
+        expect(after.audits).toHaveLength(0);
+      });
+
+      it('another workspace (404), the web console (403) and a Venue Manager without attendance.edit are refused, even with the confirmation', async () => {
+        const s = await recordedSeat();
+        const start = await seatStartOf(s.shiftId);
+        const body = { field: 'clockInAt', newValue: new Date(start.getTime() - 4 * HOUR).toISOString(), reason, confirmUnusualClockIn: true };
+        const before = await stateOf(s.shiftId, s.attendanceId!);
+
+        const other = await seedOrg();
+        const otherVm = await login(other.venueManager.email);
+        expect((await correct(otherVm, s.attendanceId!, body)).status).toBe(404);
+        // The workspace owner's web session: the route is Venue Manager app only.
+        expect((await correct(s.managerToken, s.attendanceId!, body)).status).toBe(403);
+        // attendance.edit revoked from the Venue Manager's role (the write RoleService.setPermissions performs).
+        await adminDataSource.query(
+          `DELETE FROM core.role_permission rp USING core.permission p, core.user_role ur
+            WHERE rp.permission_id = p.id AND p.key = 'attendance.edit' AND rp.role_id = ur.role_id AND ur.user_id = $1`,
+          [s.venueManager.userId],
+        );
+        await adminDataSource.query(
+          `UPDATE core.role SET permission_version = permission_version + 1 WHERE id IN (SELECT role_id FROM core.user_role WHERE user_id = $1)`,
+          [s.venueManager.userId],
+        );
+        // Layer 1: the version bump re-resolves the session's permissions (the session itself stays valid), so the
+        // route answers exactly 403.
+        expect((await correct(s.vmToken, s.attendanceId!, body)).status).toBe(403);
+        // Layer 2: the service re-checks attendance.edit itself (jobs and other services never pass the guard).
+        const ctx = { organisationId: s.organisation.id, workspaceId: s.venue1.workspaceId, userId: s.venueManager.userId, role: 'venue_manager' };
+        await expect(app.get(AttendanceService).correct(ctx as never, s.attendanceId!, body as never)).rejects.toBeInstanceOf(ForbiddenException);
+
+        const after = await stateOf(s.shiftId, s.attendanceId!);
+        expect(after.row).toEqual(before.row);
+        expect(after.corrections).toHaveLength(0);
+        expect(after.audits).toHaveLength(0);
+      });
+
+      it('a finalised report stays locked: the confirmation changes nothing (existing 409, nothing written)', async () => {
+        // The path the existing finalise test proves: recover the missing clock-out, review the seat, finalise.
+        const s = await seedSeat({ status: 'missing_clock_out', endedAgoMs: 3 * HOUR });
+        const out = await clockOutAt(s.shiftId);
+        expect((await correct(s.vmToken, s.attendanceId!, { field: 'clockOutAt', newValue: out, reason })).status).toBe(201);
+        expect((await reviewSeat(s.vmToken, s.shiftId, s.staff)).status).toBe(200);
+        expect((await finalise(s.vmToken, s.shiftId)).status).toBe(200);
+        const start = await seatStartOf(s.shiftId);
+        const before = await stateOf(s.shiftId, s.attendanceId!);
+        const res = await correct(s.vmToken, s.attendanceId!, {
+          field: 'clockInAt',
+          newValue: new Date(start.getTime() - 4 * HOUR).toISOString(),
+          reason,
+          confirmUnusualClockIn: true,
+        });
+        expect(res.status).toBe(409);
+        expect(res.body.message).toBe('This shift report has been finalised and can no longer be corrected.');
+        expect(res.body.code).not.toBe('CLOCK_IN_CONFIRMATION_REQUIRED');
+        const after = await stateOf(s.shiftId, s.attendanceId!);
+        expect(after.row).toEqual(before.row);
+        expect(after.corrections).toEqual(before.corrections); // only the setup's recovery
+        expect(after.audits).toHaveLength(before.audits.length);
+      });
+
+      it('clockOutAt and breakMinutes corrections sent with the flag behave normally and record no confirmation', async () => {
+        const s = await recordedSeat();
+        const t = await tablesOf(s.shiftId);
+        const [{ ends_at: endsAt }] = await adminDataSource.query(`SELECT ends_at FROM ${t.shift} WHERE id = $1`, [s.shiftId]);
+        const out = new Date((endsAt as Date).getTime() - 30 * MIN).toISOString();
+        expect((await correct(s.vmToken, s.attendanceId!, { field: 'clockOutAt', newValue: out, reason, confirmUnusualClockIn: true })).status).toBe(201);
+        expect((await correct(s.vmToken, s.attendanceId!, { field: 'breakMinutes', newValue: '45', reason, confirmUnusualClockIn: true })).status).toBe(201);
+        const after = await stateOf(s.shiftId, s.attendanceId!);
+        expect(after.corrections.map((c: { field: string }) => c.field).sort()).toEqual(['breakMinutes', 'clockOutAt']);
+        expect(after.audits).toHaveLength(2);
+        for (const audit of after.audits) {
+          expect(audit.metadata).not.toHaveProperty('unusualClockInConfirmed');
+          expect(audit.metadata).not.toHaveProperty('earliestAllowed');
+        }
+      });
+
+      it('an open (clocked-in) row with an early clock-in and no flag gets the existing "still on shift" 409, not the confirmation', async () => {
+        // Ended 100 min ago: still inside the staff member's own clock-out grace, so the row cannot be corrected yet.
+        const s = await seedSeat({ status: 'clocked_in', endedAgoMs: 100 * MIN });
+        const start = await seatStartOf(s.shiftId);
+        const before = await stateOf(s.shiftId, s.attendanceId!);
+        const res = await correct(s.vmToken, s.attendanceId!, { field: 'clockInAt', newValue: new Date(start.getTime() - 4 * HOUR).toISOString(), reason });
+        expect(res.status).toBe(409);
+        expect(res.body.message).toContain('still on shift');
+        expect(res.body.code).not.toBe('CLOCK_IN_CONFIRMATION_REQUIRED');
+        const after = await stateOf(s.shiftId, s.attendanceId!);
+        expect(after.row).toEqual(before.row);
+        expect(after.corrections).toHaveLength(0);
+        expect(after.audits).toHaveLength(0);
       });
     });
 

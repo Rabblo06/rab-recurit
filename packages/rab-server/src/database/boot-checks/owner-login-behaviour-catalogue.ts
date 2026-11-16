@@ -303,7 +303,7 @@ export const OWNER_LOGIN_BEHAVIOUR_CATALOGUE: readonly CatalogueEntry[] = Object
 export const NEEDS_OWNER_APPROVAL_IDS: readonly string[] = OWNER_LOGIN_BEHAVIOUR_CATALOGUE.filter((e) => e.status === 'needs-owner-approval').map((e) => e.id);
 
 /**
- * Accepted differences that stay TRACKED by the PR #9 removal gate (owner, 2026-11-05): HL-1 was under that gate before
- * its acceptance and keeps being reported there, so the final removal PR still reviews it explicitly.
+ * Accepted differences that stay TRACKED by the separated-mode removal gate (owner, 2026-11-05): HL-1 was under that gate before
+ * its acceptance and keeps being reported there, so the separated-mode retirement still reviews it explicitly.
  */
 export const PR9_TRACKED_ACCEPTED_IDS: readonly string[] = Object.freeze(['HL-1']);

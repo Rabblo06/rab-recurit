@@ -291,6 +291,19 @@ SELECT count(*) AS workspace_schemas FROM pg_namespace WHERE nspname LIKE 'works
   With the application stopped they should not wait. A lock timeout means a session was left open. The migration's
   transaction rolls back (or, for the `transaction = false` ones, the migration is re-runnable): fix the cause and re-run
   the check.
+- **Release 0.6.0, workspace command `DropWorkspaceCoreForeignKeys` (structure level 22, Part D 0a; owner decision R-4):
+  run it in a quiet window.** For each workspace, the runner's step drops that schema's foreign keys to core."user",
+  core.organisation and core.manager_workspace.
+  - Dropping a foreign key takes ACCESS EXCLUSIVE on the referenced core table until the step commits. While one
+    workspace's step runs, every login, request and Worker query that reads those three tables waits.
+  - Each step is DDL only and short. The runner's per-step `lock_timeout` (5 s by default) bounds the wait. A step that
+    times out rolls back with nothing changed and can be run again; the command is idempotent.
+  - Keep the application stopped (as above) or schedule a low-traffic window, and confirm the `pg_stat_activity` check
+    before starting.
+  - It happens once per workspace. New workspaces are provisioned at level 22 without these constraints and take no such
+    lock.
+  - The TypeScript provisioner (the rollback artifact) still creates and drops them, so it takes the same lock; do not use
+    it during traffic.
 - Durations are MEASURED only on empty throwaway databases (§8). Time the full chain on a production-sized copy in the
   staging rehearsal before scheduling production.
 
@@ -316,9 +329,12 @@ Pass it on the command line only, never in `.env.migrate`.
 
 ### 4.6 Connection budget
 
-The declared total must fit the server: API instances × pool + Worker pool + the 6-connection lock pool + scans +
-provisioner + rab-migrate's 3 + boot probes. Every process refuses to start otherwise. Staging defaults:
-API 1 × 9, Worker 12, so 37 connections in the worst case. Check it against
+The declared total must fit the server: API instances × (pool + 1 /healthz login probe) + Worker pool + the
+6-connection lock pool + the scan-lock and storage-lock clients (2) + the in-process provisioner (2) + the API's
+migrate-on-start child (5: its migration pool of 4 + one login client; `PG_EXPECTED_MIGRATE_CONNECTIONS`) + boot probes
+and an operator session (3). Every process refuses to start otherwise (`connection-budget.ts`). Staging defaults:
+API 1 × 9, Worker 12, so 40 connections in the worst case (9 + 1 + 12 + 6 + 2 + 2 + 5 + 3). Every row is the one
+`crewflow_owner` login, so a `rolconnlimit` on it is compared with the same total (XD-05). Check it against
 `max_connections - superuser_reserved_connections - reserved_connections`.
 
 ## 5. Backup and restore

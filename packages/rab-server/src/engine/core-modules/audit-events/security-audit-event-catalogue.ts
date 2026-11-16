@@ -213,6 +213,9 @@ export const NOT_SHIPPED_AUDIT_ACTIONS: readonly string[] = Object.freeze([
   'shift.created',
   'shift.published',
   'venue.photo_updated',
+  'venue_role_rate.created',
+  'venue_role_rate.updated',
+  'venue_role_rate.deleted',
   'file.uploaded',
   'file.download_authorized',
   'file.access_denied',
@@ -303,6 +306,9 @@ export const NOT_SHIPPED_AUDIT_ACTIONS: readonly string[] = Object.freeze([
   // Written only by the frozen one-off migration HwsHistoricalRowsPrivilegedCopy1786719520000 (privileged-copy.ts).
   'workspace.hws_backfill_privileged_copy',
   'workspace.hws_backfill_privileged_copy_skipped',
+  // Part C3: the upgrade step's human-readable record per verified workspace (upgrade-commands/0-7/hws-cutover.ts; never
+  // read back — core.hws_cutover_state decides). An operational upgrade record, not a security event: not shipped.
+  'workspace.hws_cutover_verified',
 ]);
 
 /** The category and severity of a shipped action, or null (not shipped). */

@@ -55,8 +55,8 @@ export class ExceptionHandlerService {
 let processDefault: ExceptionHandlerService | undefined;
 
 /**
- * The same service for code that is not built by Nest DI (the Worker's WorkerRuntime is created by hand in main.ts and
- * workspace-provisioner.main.ts). Created on first use, after the entrypoint's `instrument` import has run.
+ * The same service for code that is not built by Nest DI (the Worker's WorkerRuntime is created by hand in main.ts).
+ * Created on first use, after the entrypoint's `instrument` import has run.
  */
 export function defaultExceptionHandlerService(): ExceptionHandlerService {
   processDefault ??= new ExceptionHandlerService(createExceptionHandlerDriver(process.env));

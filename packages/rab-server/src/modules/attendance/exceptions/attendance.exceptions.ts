@@ -217,3 +217,40 @@ export class InvalidClockOutTimeException extends UnprocessableEntityException {
     super({ statusCode: 422, code: 'INVALID_CLOCK_OUT_TIME', reason, message });
   }
 }
+
+/**
+ * Owner brief 2026-11-15 (compact attendance correction warning): a manager-corrected clock-in earlier than the staff
+ * member's own scheduled start minus CLOCK_IN_EARLY_MINUTES is not refused outright; it needs an explicit confirmation
+ * (`confirmUnusualClockIn: true` on the same request). Nothing was written. `earliestAllowed` and `enteredTime` are the
+ * two instants the apps show in the warning (ISO-8601 UTC; each app formats them in its own display time zone).
+ */
+export class ClockInConfirmationRequiredException extends ConflictException {
+  constructor(
+    public readonly earliestAllowed: string,
+    public readonly enteredTime: string,
+  ) {
+    super({
+      statusCode: 409,
+      code: 'CLOCK_IN_CONFIRMATION_REQUIRED',
+      message: 'This time is earlier than the normal allowance. Please check before continuing.',
+      earliestAllowed,
+      enteredTime,
+    });
+  }
+}
+
+/**
+ * Owner decision 2026-11-15: a manager-entered clock-in earlier than the staff member's own scheduled start minus
+ * CLOCK_IN_CONFIRM_FLOOR_HOURS is always refused, even with `confirmUnusualClockIn` (`correct` and `record-attendance`).
+ * The apps show `message` as an error, never the confirmation dialog.
+ */
+export class ClockInTooEarlyAbsoluteException extends UnprocessableEntityException {
+  constructor(public readonly earliestPossible: string, floorHours: number) {
+    super({
+      statusCode: 422,
+      code: 'CLOCK_IN_TOO_EARLY_ABSOLUTE',
+      message: `The clock-in time cannot be more than ${floorHours} hours before the scheduled start.`,
+      earliestPossible,
+    });
+  }
+}

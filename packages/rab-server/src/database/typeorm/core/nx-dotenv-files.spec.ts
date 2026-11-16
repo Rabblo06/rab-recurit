@@ -39,7 +39,7 @@ describe('final review F6: the dotenv files Nx loads for the rab-server / rab-wo
       'packages/rab-server/.env.deploy:prepare.local',
       'packages/rab-server/.command.env',
       'packages/rab-worker/.env.start',
-      'packages/rab-worker/.env.provision.local',
+      'packages/rab-worker/.env.test-pdf-equality.local',
       '.env',
       '.env.local',
       '.local.env',
@@ -81,7 +81,7 @@ describe('final review F6: the dotenv files Nx loads for the rab-server / rab-wo
     }
     const [commandFiles, runtimeFiles] = seen;
     for (const files of [commandFiles, runtimeFiles]) {
-      for (const rel of ['packages/rab-server/.env', 'packages/rab-server/.env.local', 'packages/rab-server/.env.deploy:prepare', 'packages/rab-worker/.env.provision', '.env']) {
+      for (const rel of ['packages/rab-server/.env', 'packages/rab-server/.env.local', 'packages/rab-server/.env.deploy:prepare', 'packages/rab-worker/.env.start', '.env']) {
         expect(files).toContain(join(WORKSPACE_ROOT, rel));
       }
     }
@@ -147,7 +147,7 @@ describe('final review F6: the dotenv files Nx loads for the rab-server / rab-wo
     });
 
     it.each([
-      ['packages/rab-worker/.env.provision', 'RAB_RUNTIME_ENV=production\n'],
+      ['packages/rab-worker/.env.start', 'RAB_RUNTIME_ENV=production\n'],
       ['packages/rab-worker/.env.local', 'CREWFLOW_DEPLOYMENT_ENVIRONMENT=production\n'],
       ['packages/rab-server/.env.start.local', 'CREWFLOW_DEPLOYMENT_ID=' + PROD_ID + '\n'],
       ['.env.local', 'PG_EXPECTED_DATABASE_NAME=neondb\n'],

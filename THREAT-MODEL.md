@@ -693,7 +693,7 @@ Mitigations:
 - **Authority re-derived from PostgreSQL in every transaction** (layer 2), independent of `PermissionGuard(ROLE_MANAGE)`: the caller must hold ROLE_MANAGE, OWN the workspace and have an active membership of it; the role must pass `MemberRolePolicyService` (custom, same workspace, member-safe permissions only, every permission held by the caller). Platform Admin status alone grants nothing. Resend re-checks the role against the caller (Twenty does not). No organisationId / workspaceId / managerId / names accepted (`forbidNonWhitelisted` 400).
 - **Atomic, single-use acceptance.** Public `POST /rest/v1/invitations/accept` hashes the token, resolves routing ids through `core.auth_find_member_invitation` (SECURITY DEFINER, pinned search_path, PUBLIC revoked, returns ids only), then — under the invitation's own workspace context — locks the row `FOR UPDATE`, re-checks live/unexpired (DB clock), organisation not suspended, workspace active, no existing account for the email, and the INVITER's authority now (active, still owns the workspace with an active membership, still holds ROLE_MANAGE, and can still grant the role — re-checked, not trusted from send time). It then creates exactly: the user (recipient's own name + argon2id password), the one custom role, organisation membership and membership of the inviter's workspace — no staff/manager profile, never a new workspace; the one-active-membership index and (organisation, email) uniqueness are the backstops. A compare-and-set marks it accepted in the same transaction. Two simultaneous acceptances: one 200, one generic 400. Any re-check failure ⇒ invitation SUPERSEDED (committed), recipient sees the generic failure.
 - **No oracle.** Unknown, expired, revoked, superseded, consumed, suspended-organisation and malformed tokens all return the same 400 message. No session is issued; the account stays INVITED (password set, email verified by token possession) and becomes ACTIVE through the unchanged login path, so suspension, application-target and session rules all still apply.
-- **Worker.** New job type `MEMBER_INVITATION` is the only one allowed to lack `target_user_id`; a CHECK makes it inseparable from `member_invitation_id`. It is revalidated before delivery: invitation live, unexpired, same workspace as enqueued, this outbox row is the latest for the invitation (older links never delivered after a resend), organisation not suspended. Every other job type still goes through the untouched missing-target-user check. Delivery idempotency and fencing unchanged.
+- **Worker.** New job type `MEMBER_INVITATION` is the only one allowed to lack `target_user_id`; a CHECK makes it inseparable from `member_invitation_id`. It is revalidated before delivery: invitation live, unexpired, same workspace as enqueued, this outbox row is the latest for the invitation (older links never delivered after a resend), organisation not suspended, workspace active (added by S-W1, 2026-11-16: the same shared rule acceptance uses). Every other job type still goes through the untouched missing-target-user check. Delivery idempotency and fencing unchanged.
 - **Redis, bounded and fail-closed.** `InvitationRateLimitService` runs one atomic multi-bucket token-bucket Lua script (Redis clock, deny-all-or-debit-all) on the bounded auth-cache client (150 ms command timeout, no offline queue). Buckets: recipient (hashed email, global), actor, organisation, redemption per IP. Keys `crewflow:{env}:invite-rate:{scope}:{sha256}` — no addresses in Redis. Any Redis failure ⇒ 503, never "unlimited", never a hang. Listing never touches Redis. Redis confers no authority.
 
 SECURITY TRADE-OFF (recorded, unchanged from account invitations):
@@ -3836,9 +3836,11 @@ credential, migration or RLS policy.
 - **SECURITY TRADE-OFF (vetoable):** a standalone provisioner (no launcher, switch unset) keeps the legacy gate
   `HWS_RUNTIME_ENABLED=true` → provision, so `nx run rab-worker:provision` and the standalone specs are unchanged.
   Stricter alternative: require `CREWFLOW_PROVISIONER_ENABLED=true` in the child too. Only the bundle is deployed.
-- **Regression tests:** launcher.test.cjs A1–A12 + 2, 8; `workspace-provisioner.config.spec.ts`;
-  `workspace-provisioning-lock.spec.ts`; `workspace-provisioner-optin.integration.spec.ts` (real `crewflow` login,
-  real entrypoint).
+  **X5.1 (2026-11-15):** the standalone provisioner, this legacy gate, the `rab-worker:provision` target and
+  `workspace-provisioner-optin.integration.spec.ts` were removed; this trade-off no longer applies.
+- **Regression tests:** launcher.test.cjs A1–A12 + 2, 8; `workspace-provisioner.config.spec.ts` (since X5.1: the in-process
+  interval only); `workspace-provisioning-lock.spec.ts`; `workspace-provisioner-optin.integration.spec.ts` (real `crewflow`
+  login, real entrypoint; removed in X5.1 with the entrypoint).
 - **Integration hardening (2026-10-27, on top of `7719959b`):** the switch is now three-state. `"true"` = on
   (60 s default), `"false"` = jobs only (and still REFUSED while `CREWFLOW_PROVISIONER_DATABASE_URL` is set), unset or
   empty = **legacy**: exactly the pre-Phase-A behaviour — provisioner on, URL required ("Missing
@@ -4251,7 +4253,7 @@ databases only.
 - **L-1 — migrator-role setup guard.** The admin URL goes through the factory URL policy (no `?host=`/`?port=`/`?user=`/
   session `options`) and a factory client; the disposable marker is read from server facts (`pg_db_role_setting`,
   `pg_file_settings`, `postmaster.opts`), never `current_setting()`. Both SQL files re-check the same facts.
-- **L-2 — standing migration approval.** `.env.migrate.example` ships `CREWFLOW_MIGRATION_APPROVED` commented out;
+- **L-2 — standing migration approval.** The `.env.migrate` template (removed in X5.1) shipped `CREWFLOW_MIGRATION_APPROVED` commented out;
   `setup-db.ts` with `DB_TARGET=production` refuses without the per-release approval from the process environment (an
   approval in a `.env` file is refused). N1 unchanged.
 - **L-3 — session stability of the migration and provisioning locks.** The live two-connection probe
@@ -5496,7 +5498,7 @@ them is a control that "passed".
 | No logical backup by the app login (PITR only) | BC-12 / G-11 | MEDIUM | Accepted 2026-11-05. Catalogue test (`row_security = off` is refused). |
 | Column-level secret grants lost (`password_hash`, TOTP secret, ...) | BC-13 | HIGH | Accepted 2026-11-05. Catalogue test. |
 | Non-secret column INSERT grants lost: the runtime can set server-owned columns (`ai_usage` id / created_at, `ai_skill` id, `ai_action_proposal` expires_at / created_at / id / origin) on its own tenant's rows | COLGRANT-1 | MEDIUM | Accepted 2026-11-05 (found by Agent 5). Catalogue test. RLS WITH CHECK still holds. |
-| Host-label namespace tables readable by the runtime (the global reserved-label list) | HL-1 | LOW | Accepted 2026-11-05 (Agent 5). Catalogue test. Still tracked by the PR #9 removal gate. |
+| Host-label namespace tables readable by the runtime (the global reserved-label list) | HL-1 | LOW | Accepted 2026-11-05 (Agent 5). Catalogue test. Still tracked by the separated-mode removal gate (`removalGateKeep`). |
 | AI governance that grants enforced: TRUNCATE on five AI tables, `synthetic_data` INSERT, EXECUTE on `core.ai_dev_mark_organisation_synthetic` | AI-1 | MEDIUM | Accepted 2026-11-05 (Agent 5). Catalogue test. The UPDATE / DELETE parity guards and the proposal and trigger CHECKs still hold. |
 | The workspace migrator's identity check (`assertMigrationIdentity`) accepts the runtime login | PROV-1 | MEDIUM | Accepted 2026-11-05 (Agent 5). Catalogue test. Ledger and registry writes still need the M-T2 allow-list. |
 
@@ -5559,7 +5561,7 @@ writes a warning instead.
    R256 = 0e0a6edd), with anything beyond it a contiguous run of the image's chain (a resumed partial upgrade). An older,
    holed or unknown history refuses with `UnsupportedUpgradeStartError` (exit 65, fail closed under every
    `CREWFLOW_UPGRADE_FAILURE` policy; nothing applied). No override exists. N1 still gates the legacy CF-41 path and the CLI
-   until the clean-up PR retires them.
+   until the separated-mode retirement (every separated database transitioned, MIX-1) retires them.
 6. **No logical backup by the app login.** Recovery is PITR only, and restore points taken after a compromise carry the
    backdoors. Accepted by the owner 2026-11-05 (BC-12).
 7. **Pool poisoning across unrelated requests.** Mitigated by pool safety (BC-14).
@@ -6968,6 +6970,166 @@ service: no `ports:`, no password, `--maxmemory-policy noeviction`).
   This closes the "Revisit: before production stage D" note of the Lane A trade-off (unauthenticated Redis is a
   warning, not a refusal, in bullmq mode).
 
+## X1.3 — `seed` / `seed-qa` have no in-command refusal of staging or production targets (accepted risk; cleanup audit XA-03 / NC-04, PR #29 closed)
+
+Owner decision 2026-11-12 (Phase X Part 2, "the Twenty way"): no code change. Running a fixture seed against production
+is an operator error, as in Twenty. PR #29 (`x1/seed-guards`, head `cced3aad`, titled "X1.5" under the cleanup audit's
+numbering) had the fix. It was closed unmerged on 2026-11-15. This entry changes no code. File:line references are to
+the code at this PR's base.
+
+- **Asset:** the integrity of a deployed database: who is a platform administrator, which organisations and accounts exist.
+- **Actor → action → consequence:** an operator (or anyone holding the owner login plus `DB_TARGET=production` and
+  `ALLOW_PRODUCTION_DB_COMMANDS=true`) runs `seed` or `seed-qa` against a production database by mistake. The effects:
+  - `seed` writes the permission catalogue (idempotent), an organisation (`SEED_ORG_SLUG`, default `acme`), a
+    `super_admin` role holding every permission, and an ACTIVE user (`SEED_ADMIN_EMAIL`, default `admin@acme.test`) with
+    the operator-supplied password. It also writes a `core.platform_admin` row for that user (`command/seed.command.ts:45`,
+    `:123-128`), so a new platform administrator exists in the live database.
+  - `seed-qa` writes the `adolphus-qa` fixture organisation and `*.qa@example.test` users that share one password.
+
+  Cleanup audit rating: priority P0, severity LOW–MEDIUM. It needs operator authority, and it is an integrity and cleanup
+  problem, not a disclosure.
+- **What is missing:** a refusal inside the two commands. `seed-ai-demo` has one (`seed-ai-demo.command.ts:42`, refuses
+  any `DB_TARGET` but `local`).
+  - `seed` checks nothing before writing. Its first transaction inserts any missing permission keys, and the `acme`
+    organisation is inserted next (`seed.command.ts:46-65`). Only then does it check `SEED_ADMIN_PASSWORD`
+    (`:69-71`). A run refused for a missing password can therefore already have written the catalogue and the
+    organisation.
+  - `seed-qa` checks its password and that `--admin-email` is present (`seed-qa.command.ts:102-108`), then writes missing
+    permission keys (`:114-119`). Only after that does it check that the address is an active platform administrator
+    (`:325`, refusal at `:354`). Its own comment "Every refusal comes before the first write" (`:100`) is not accurate
+    for the catalogue.
+  - The only target check is the generic CLI gate (`command/main.ts:28`, `assertDbTarget('command')`), which allows
+    production.
+- **Why accepted:** anyone who can pass the production gates below already holds the `crewflow_owner` login, which can
+  write the same rows directly. The guard would stop mistakes, not attackers. Twenty has no such guard, and the owner
+  chose not to add a Crewflow-only mechanism.
+- **Compensating controls (in the code at this PR's base):**
+  - **What production needs.** A production CLI command needs only `DB_TARGET=production` and
+    `ALLOW_PRODUCTION_DB_COMMANDS=true` from the process environment (`database/typeorm/core/database-target.ts:181-187`),
+    plus the owner login.
+    - Both are refused when they come from a `.env` file that Nx loads (`:203-213`).
+    - The deployment identity (`CREWFLOW_DEPLOYMENT_ENVIRONMENT` / `CREWFLOW_DEPLOYMENT_ID`) is **optional** in production
+      since owner decision BC-11, 2026-11-05 (`database/deployment-identity/deployment-identity.ts:147-149`, `:356-367`).
+      When declared, it must say production and match the database's live marker. When undeclared, the marker check is
+      skipped with a warning.
+    - The `database-target.ts:9-15` header still lists the deployment id as required. That header is stale; correcting it
+      is a code follow-up, not part of this entry.
+  - **Authority is per-invocation in the image.**
+    - The owner-login env lint refuses `ALLOW_PRODUCTION_DB_COMMANDS`, `DB_TARGET` and `ALLOW_REMOTE_TEST_DATABASE` in
+      runtime and database env files (`packages/rab-docker/scripts/compose-owner-login.cjs:156`).
+    - `api-prestart.sh` hands `DB_TARGET` / `ALLOW_PRODUCTION_DB_COMMANDS` only to a one-off command with arguments
+      (`docker compose run -e`), and refuses them on the API start (`packages/rab-docker/rab/api-prestart.sh:175-193`;
+      tests 13d/13e, `rab/api-prestart-test/run-prestart-shell-tests.cjs:607-612`).
+    - Exception: `packages/rab-docker/.env.migrate.example:22-25` sets `DB_TARGET=production`,
+      `ALLOW_PRODUCTION_DB_COMMANDS=true` and the deployment identity persistently, for the one-off `rab-migrate` service
+      only. That file is never passed to rab-api or rab-worker; `compose-credential-isolation.cjs` checks this.
+  - **Staging, local and test targets.**
+    - `DB_TARGET=staging` is refused for every command (`database-target.ts:225-227`).
+    - `local` and `test` refuse a dotted remote host (`:229-232`). Exception: `DB_TARGET=test` with
+      `ALLOW_REMOTE_TEST_DATABASE=true` allows a remote host (`:230`).
+    - An undeclared non-production process refuses a database whose marker is bound to production
+      (`deployment-identity.ts:432-436`). A database bound to staging or test passes with a warning only (`:438-439`).
+  - **Owner login.** The CLI boot gates require `crewflow_owner` for every CLI command, before Nest boots
+    (`command/main.ts:32`, `runDatabaseBootGates('cli')` in `database/boot-checks/database-boot-gates.ts`).
+  - **No default passwords.** `seed` needs `SEED_ADMIN_PASSWORD` (`seed.command.ts:69-71`) and `seed-qa` needs
+    `SEED_QA_PASSWORD` (`seed-qa.command.ts:102-105`), each at least 12 characters. `seed-qa` also needs an active
+    platform administrator (`:325`, `:354`).
+  - **No deploy path runs either command.** A `git grep` of `packages/rab-docker` finds only two test harnesses that run
+    `seed-qa`, each against its own disposable database: `staging/rehearsal/run-image-rehearsal.cjs:439` and
+    `rab/runtime-isolation-test/run-h6-runtime.cjs:384`.
+- **Residual:** an operator who passes `DB_TARGET=production` and `ALLOW_PRODUCTION_DB_COMMANDS=true` for some other
+  one-off command, then types `seed` or `seed-qa`, gets fixture rows and (with `seed`) a platform administrator in
+  production. The same applies, with no production authority at all, to a remote `test` database opened with
+  `ALLOW_REMOTE_TEST_DATABASE=true` and to an undeclared staging- or test-bound database. The cleanup is manual: remove
+  the platform-admin row, the user, the role and the organisation.
+- **Revisit when any of these happens:**
+  - a deploy, start, upgrade or CI step, or a runbook, runs `seed` / `seed-qa` against a deployed database;
+  - a staging command path is added (`DB_TARGET=staging` is no longer refused);
+  - `ALLOW_REMOTE_TEST_DATABASE=true` is used against anything but a disposable database;
+  - a deployed staging or test database runs without a declared deployment identity (only a warning protects it);
+  - production command authority becomes persistent in a rab-api / rab-worker environment, or someone other than the
+    owner holds it;
+  - seed fixture rows turn up in a deployed database. The check:
+    `SELECT id, slug FROM core.organisation WHERE slug IN ('acme', 'adolphus-qa');` and
+    `SELECT id, email FROM core."user" WHERE email LIKE '%@acme.test' OR email LIKE '%.qa@example.test';`. Run them in a
+    session that RLS lets see every organisation. A session with no tenant context sees zero rows by design, which is
+    not a clean result;
+  - Twenty adds such a guard.
+
+  Re-opening PR #29 (`seed-target-guard.ts`) is the prepared fix. It must be re-tested under the single `crewflow_owner`
+  login.
+
+## X1.5 — system mail driver: SMTP STARTTLS on port 587 is opportunistic; production does not refuse `EMAIL_SMTP_NO_TLS=true` (accepted risk; XR-04)
+
+Owner decision 2026-11-12 (Phase X Part 2, "the Twenty way"): no change to the **system mail driver**
+(`engine/core-modules/email/email-driver.factory.ts`, the environment-configured transport that sends every
+platform email). Twenty's system driver does the same: its `email-driver.factory.ts` declares `requireTLS` in its
+options type and never sets it. It sets only `secure: false` and `ignoreTLS: true` when `EMAIL_SMTP_NO_TLS` is on
+(checked against `twentyhq/twenty` on 2026-11-15). The acceptance covers only this driver. The planned X1.5a proof test
+(a STARTTLS-less SMTP sink) and the X1.5b fix were not done. This entry changes no code. File:line references are to the
+code at this PR's base.
+
+- **Asset:** the SMTP relay credentials (`EMAIL_SMTP_USER` / `EMAIL_SMTP_PASSWORD`), and the password-reset, activation
+  and invitation links (bearer secrets until used or expired) in every message.
+- **Actor → action → consequence:** an on-path attacker between the host and the SMTP relay strips the relay's
+  `STARTTLS` capability from the EHLO reply → nodemailer, with no `requireTLS`, carries on in clear → the attacker reads
+  the AUTH exchange (relay credentials: send-as-us, reputation) and the message bodies (take over an account by using a
+  reset or invite link first). If an operator sets `EMAIL_SMTP_NO_TLS=true` in production, the same happens with no
+  attacker work, and nothing refuses it. The XR-04 audit marked this as suspected: nodemailer upgrades only when STARTTLS
+  is advertised, unless `requireTLS` is set, but the strip was never run against our transport.
+- **Where (system driver):** `email-driver.factory.ts:37` sets `secure: !noTls && port === 465`, `:38` sets
+  `ignoreTLS: noTls`, and `requireTLS` is never set. `email/drivers/smtp.driver.ts:124` passes these options to
+  `nodemailer.createTransport`; the Worker sends through the same `EmailService`. The two SMTP health probes copy the
+  same options but send no credentials: `platform-admin/admin-panel.service.ts:300-305` and `admin-health.service.ts:241-246`.
+  `productionConfigurationProblems` in `env.validation.ts` has no `EMAIL_SMTP_NO_TLS` rule. The templates default to port
+  587: `packages/rab-docker/env/runtime.env.example:42` and the staging `api.env.example:33` / `worker.env.example:30`.
+- **Known issue, NOT accepted here — the Admin Panel "Test Connection"** (`platform-admin/admin-panel.service.ts:242-248`).
+  The owner accepted only the system driver. Twenty's user-chosen STARTTLS path sets `requireTLS: true`
+  (`imap-smtp-caldav-connection/utils/build-smtp-tls-options.util.ts`). Ours has two gaps:
+  - In `starttls` mode, Test Connection builds the transport with no `requireTLS`. It can send the stored SMTP password,
+    so a strip exposes it.
+  - In `none` mode (`ignoreTLS: true`), the stored, decrypted SMTP password is sent in clear to whatever host and port
+    the platform admin names.
+
+  Both are tracked for a lead fix PR. This entry does not widen the acceptance to them.
+- **Why accepted (system driver only):** this matches Twenty's system driver. Setting `requireTLS` would stop all mail on
+  a relay that offers no STARTTLS, and the production relay's STARTTLS support has not been confirmed (the X1.5b
+  precondition). The cost of an attack is not negligible, and this is not a closed network: a hosted VM talking to a
+  separately hosted relay crosses transit networks the project does not control. Exploiting the strip needs an active
+  on-path position on that path, not just passive capture. The owner accepted that exposure for now.
+- **Compensating controls:**
+  - When STARTTLS is offered and not stripped, nodemailer upgrades, and Node verifies the relay certificate by default.
+    A `git grep rejectUnauthorized` over `packages/rab-server/src/engine/core-modules/email`,
+    `packages/rab-server/src/engine/core-modules/platform-admin` and `packages/rab-worker/src` finds no non-test hit, so
+    nothing turns verification off on these paths.
+  - `EMAIL_SMTP_NO_TLS` defaults to `false` (`environment-variables.ts:1541`, `packages/rab-server/.env.example:117`).
+  - Production refuses `EMAIL_DRIVER=LOGGER` (`env.validation.ts:298`), so links are never written to logs instead.
+  - Every token is single-use and hashed at rest (SHA-256, `password-reset-token.service.ts:19-20`), so a captured link
+    is worth something only until it is used or expires. Lifetimes:
+    - self-service forgot-password: 1 hour (`auth.service.ts:1042`);
+    - admin reset: 48 hours (the service default, `password-reset-token.service.ts:9` and `:50`, issued at
+      `account-lifecycle.service.ts:181-185`);
+    - initial setup: the same 48-hour default would apply, but no code at this PR's base issues that purpose;
+    - account invites: 24 hours, up to 3 sends (`account-invite.service.ts:8-10`).
+  - **Operator rule:** to remove the strip entirely, use port 465 (implicit TLS: `secure` is set, and TLS is negotiated
+    before any SMTP command) or `EMAIL_DRIVER=RESEND` (HTTPS API). Never set `EMAIL_SMTP_NO_TLS=true` outside local
+    development.
+- **Residual:** on 587, an active on-path attacker can downgrade to cleartext and capture the relay credentials and
+  in-flight links. `EMAIL_SMTP_NO_TLS=true` in production sends everything in clear, and no gate refuses it.
+- **Revisit when any of these happens:**
+  - production moves to its final hosting, or the relay or host provider changes: re-assess the host-to-relay path and
+    the relay's STARTTLS support then;
+  - the production relay is confirmed to offer STARTTLS (that removes the only objection to `requireTLS` for 587, so
+    X1.5b can ship);
+  - `EMAIL_SMTP_NO_TLS=true` turns up in any deployed environment;
+  - an SMTP credential leak or a reset-link takeover is suspected;
+  - Twenty's system driver starts setting `requireTLS`;
+  - the system driver (`engine/core-modules/email/email-driver.factory.ts`) changes its TLS options, or the Admin
+    Panel's stored SMTP configuration starts sending real mail (today only Test Connection uses it).
+
+  The prepared fix is the X1.5a sink test, then `requireTLS: true` in `email-driver.factory.ts` when
+  `!noTls && !secure`, plus a production refusal of `EMAIL_SMTP_NO_TLS=true` (env-validation diff to the lead).
+
 ## XA-08 — the forgot-password address is handed over in router state, never the URL (branch phase-x2/x62-forgot-email-router-state, 2026-11-12, PR #112)
 
 Phase X Part 2 finding XA-08 (`docs/plans/PHASE-X-STAGE0-PART2.md` §2.6). Front only: no server, env or header change.
@@ -7637,9 +7799,9 @@ image that runs the apps' own derive step on the read-only volume (`--pull never
     member's OWN end + `QR_POST_SHIFT_GRACE_MINUTES` (`attendanceWindow(effectiveAssignmentTime(...)).closesAt`, the same
     bound as every other clock-out path). Every comparison is written "not inside", so an unreadable time refuses. Worked
     minutes still come only from `@rab/shared` `computeWorkedMinutes`. Tested per bound, including a seat that ends before
-    the shift (own end, not shift end). Open (owner decision pending): `correct(clockInAt)` has no lower bound (only "not
-    in the future" and "not after clock-out"), so a manager with `attendance.edit` could move a clock-in earlier and
-    inflate paid minutes; `recordAttendance` already bounds it at shift start − `CLOCK_IN_EARLY_MINUTES`.
+    the shift (own end, not shift end). The `correct(clockInAt)` lower bound that was open here is
+    resolved by PR #163 (explicit confirmation below start − `CLOCK_IN_EARLY_MINUTES`, hard floor at start −
+    `CLOCK_IN_CONFIRM_FLOOR_HOURS`); see "Unusually early clock-in needs explicit confirmation" below.
   - *Per-staff grace, end to end.* One grace, `QR_POST_SHIFT_GRACE_MINUTES` (120), always from the staff member's OWN end
     (`effectiveAssignmentTime`): the QR is accepted until own end + grace (`validUntil` takes the seat; `validateQr`
     requires it), the staff self clock-out now has the same `assertClockWindow` check the on-behalf clock-out has, and the
@@ -7767,3 +7929,688 @@ Reversal:   A shorter QR_MAX_AGE_DAYS, or rotating QRs automatically on schedule
   unverifiable schema; CEO cannot cascade another workspace's staff profile), the Worker isolation specs with a real
   wrong-organisation binding, and the full suites with HWS on (server 2,846 pass / 10 fail = the member staff-visibility gap
   awaiting owner SQL; Worker 741/741).
+
+## Unusually early clock-in needs explicit confirmation, with a 12-hour hard floor (owner decisions 2026-11-15; branch feat/attendance-unusual-clock-in-warning, PR #163)
+- **Threat:** corrected or recorded hours feed pay (money).
+  - Before this, `POST /attendance/:id/correct` accepted any past clock-in with no lower bound. A mistyped or deliberate early time (for example 05:00 for a 09:00 shift) silently inflated worked minutes and pay for a Venue Manager with `attendance.edit` on the seat's venue.
+  - `record-attendance` refused such a time outright (400), with no way to record a genuine early start.
+- **Control: explicit confirmation, enforced in the service, not only the UI.**
+  - A manager-entered clock-in earlier than the staff member's OWN scheduled start (`effectiveAssignmentTime`) minus `CLOCK_IN_EARLY_MINUTES` (15) is saved only when the request carries `confirmUnusualClockIn: true`.
+  - Otherwise the answer is 409 `CLOCK_IN_CONFIRMATION_REQUIRED` (`earliestAllowed`, `enteredTime`) and nothing is written.
+  - Checked in `AttendanceService` (layer 2) after:
+    - the route guard (`PermissionGuard(attendance.edit)`, Venue Manager app only);
+    - the service-level `attendance.edit` re-check;
+    - the scope check (404 outside the venue / workspace);
+    - the finalised-report lock;
+    - every other validation and state rule.
+  - It runs inside the workspace-bound transaction with workspace RLS.
+  - The flag is declared on both DTOs (`@IsOptional() @IsBoolean()`; `forbidNonWhitelisted` stays global): a non-boolean is 400, and only the exact value `true` counts.
+  - The allowance is the same `attendanceWindow().opensAt` every clock-in path uses. The comparison is written "not inside", so an unreadable bound asks for confirmation instead of passing.
+  - The shift's scheduled start is only read, never written.
+  - In `correct`, an identical resubmission of the stored value is the idempotent no-op, checked before the floor. It returns 201 (not 422) even when a later schedule change put that stored value beyond the floor; a new value there is still refused.
+  - The floor is absolute on `correct` too (follow-up to PR #163): a `clockOutAt` or `breakMinutes` correction that leaves in place a stored clock-in now beyond the floor (after a later schedule move) is refused with 422 `CLOCK_IN_TOO_EARLY_ABSOLUTE`, with or without the confirmation, and nothing is written. Only a new clock-in can need the confirmation on this path.
+- **Same rule on `record-attendance`.**
+  - The old hard 400 for an early clock-in becomes the same 409 / confirm rule.
+  - Every other check is unchanged: future, clock-out bound, out > in, break < span, version, booking state, finalised.
+  - The overlap with another booking is not a pre-confirmation check: it is the database exclusion constraint (23P01) raised when the row is saved. A confirmed resend can therefore still get 409 for an overlap, and nothing is written.
+  - On an existing row the clock-in is judged when the manager enters or changes it, and also when the stored one is kept but is now earlier than the allowance against the seat's CURRENT start (for example the seat start moved later) with no confirmation of exactly that time on record (see "Stored clock-in made unusual" below).
+- **Hard floor.**
+  - A clock-in earlier than the staff member's own start minus `CLOCK_IN_CONFIRM_FLOOR_HOURS` is always refused, even after Confirm: 422 `CLOCK_IN_TOO_EARLY_ABSOLUTE` (`earliestPossible`). This applies to both endpoints.
+  - `CLOCK_IN_CONFIRM_FLOOR_HOURS` defaults to 12 and is validated as whole hours 1-48.
+  - The API and Worker refuse to boot when `CLOCK_IN_CONFIRM_FLOOR_HOURS x 60 <= CLOCK_IN_EARLY_MINUTES`, and the service also clamps the floor so it is never later than the normal allowance. Written "not inside": an unreadable bound refuses.
+  - This caps how far one acknowledged edit can move a clock-in, and so how much it can add to pay.
+- **No second approver (owner decision 2026-11-15).** The confirmation is the entering manager's own explicit acknowledgement, not an extra authorisation. Any Venue Manager allowed to correct the seat can confirm.
+- **Audit and visibility.**
+  - The confirmed save is recorded in the existing single audit row: `attendance.corrected`, or `attendance.manager_recorded` for a new record.
+  - Its metadata adds `unusualClockInConfirmed`, `earliestAllowed` and `confirmedClockInAt`; actor and time are the row's own.
+  - The `attendance_correction` row keeps the original value, corrected value, reason and `corrected_by`.
+  - No duplicate audit or correction rows; a retried Confirm writes nothing.
+  - The shift report row the reviewer and finaliser see carries `unusualClockInConfirmed` ("Unusual time confirmed" in both mobile apps and the web Venue Offers timesheet).
+    - It is derived server-side from that audit row, while the stored clock-in still equals the confirmed one and is still before the allowance.
+    - It is never a client claim, and needs no new column or migration.
+  - The row returns to `under_review`, so the existing attendance review and payroll approval still apply before any payment.
+  - Worked minutes still come only from `@rab/shared` `computeWorkedMinutes`, priced at the confirmation-time rate snapshot.
+- **Stored clock-in made unusual (review finding 2, closed by owner decision 2026-11-16, option b).**
+  - On `record-attendance`, a stored clock-in that is not being changed is judged whenever it is now earlier than the allowance against the seat's current start and no audit row confirms exactly that time. The same predicate as the report flag: `unusualClockInConfirmed` with a matching `confirmedClockInAt`.
+  - Then any write on the row needs `confirmUnusualClockIn: true` (409 `CLOCK_IN_CONFIRMATION_REQUIRED` otherwise), and the 12 h floor applies (422 `CLOCK_IN_TOO_EARLY_ABSOLUTE`, even confirmed).
+  - The floor is absolute: it applies to a stored clock-in outside the allowance whether or not it was confirmed. If the start moves past a confirmed time + 12 h, the next record-attendance write is refused with 422 and nothing is written. The confirmation lookup only decides the 409.
+  - The confirmation is checked last; nothing is written on refusal.
+  - The confirmed write records `confirmedClockInAt` = the stored time in its audit row, so the report row then shows "Unusual time confirmed".
+  - A stored clock-in already confirmed is never asked to confirm again; the floor still applies to it. One still inside the allowance is not judged.
+  - The "not inside the allowance" test fails closed: an unreadable bound is judged.
+- **Old app versions** (release note `packages/rab-iphone/docs/RELEASE_NOTES.md`):
+  - An app built before this change cannot send `confirmUnusualClockIn`. It shows the 409 sentence as an error, so an unusually early clock-in cannot be saved until the app is updated.
+  - Normal corrections are unaffected.
+  - The floor applies to every version.
+
+```
+SECURITY TRADE-OFF
+Decision:   An early manager-entered clock-in (between start - CLOCK_IN_CONFIRM_FLOOR_HOURS and start -
+            CLOCK_IN_EARLY_MINUTES) is accepted with the entering manager's own explicit confirmation; no second
+            approver. record-attendance moves from a hard 400 to the same confirm rule; on an existing row a stored
+            clock-in is judged again only when it is now unusual and was never confirmed.
+Reason:     Owner decisions 2026-11-15: genuine early starts must be recordable, a second approver is not wanted, and
+            recording a missing clock-out must not re-ask about a clock-in that was already confirmed.
+Risk:       A Venue Manager with attendance.edit can still add up to ~12 h before the staff member's start to paid time
+            by confirming; the confirmation is an acknowledgement, not an authorisation.
+Mitigation: 12 h hard floor (422, even confirmed) with a boot refusal for an inconsistent configuration; confirmation
+            enforced in the service after every other rule; audited in the single audit row (unusualClockInConfirmed,
+            earliestAllowed, confirmedClockInAt, actor, time); shown on the report row to the reviewer and finaliser;
+            the row is reopened for review and payroll approval still applies before payment.
+Reversal:   Lower CLOCK_IN_CONFIRM_FLOOR_HOURS, or require a second approver (payroll.approve) for a confirmed time.
+```
+- **Tests:**
+  - `venue-manager-scoping.integration.spec.ts` › correct, unusually early clock-in:
+    - a normal correction, and one exactly at start − 15 min, need no confirmation;
+    - earlier without the flag, or with `false`, gets 409 with the exact body and nothing written; `'true'` is 400;
+    - the allowance is measured from the seat's own start;
+    - Confirm saves once: original and corrected values, the confirming manager, the time and the metadata are kept; a retry adds nothing; the report flag is set, and is cleared by a later normal correction;
+    - future time and clock-in after clock-out are still 400, even with the flag;
+    - a finalised report gets the existing 409; `clockOutAt` / `breakMinutes` with the flag record no confirmation; an open row gets the existing "still on shift" 409;
+    - another workspace 404, the web console 403, revoked `attendance.edit` 403 at the route and `ForbiddenException` from the service;
+    - floor: start − 12 h − 1 min gets 422 even confirmed; exactly start − 12 h gets 409, then 201;
+    - re-sending the stored value after the schedule moved it beyond the floor is 201 with nothing written, and a new value there is 422;
+    - a `clockOutAt` or `breakMinutes` correction with a stored clock-in beyond the moved floor gets 422 with or without the flag, nothing written; an identical resubmission is still 201.
+  - `manual-attendance.integration.spec.ts` › record-attendance, unusually early clock-in:
+    - early gets 409, then 200 with the flag; the audit row has the confirmation fields; the report row is flagged; idempotent; an ordinary record is not flagged;
+    - existing row: an early change needs confirmation, and a later break-only change is not re-asked;
+    - the same floor boundaries;
+    - another workspace or another organisation gets 404 even with the confirmation, and nothing is written;
+    - a stored clock-in made unusual by a later seat start: recording only the clock-out is 409 with nothing written; with Confirm it is saved, audited (`confirmedClockInAt` = the stored time) and flagged; a later break-only change is not re-asked; beyond the moved floor it is 422 even confirmed; still inside the allowance it is not asked;
+    - the floor is absolute: a confirmed stored clock-in whose start then moves past it + 12 h gets 422 on the next write, with or without the flag, and nothing is written.
+  - `env.validation.clock-in-floor.spec.ts` (range, plus the floor-vs-allowance boot refusal).
+  - Flutter `report_review_timesheet_test.dart` and Swift `VMUnusualClockInTests` cover the dialog, Edit keeping values, Confirm resending with the flag, the 422 shown as an error and never the dialog, the report flag and the layouts.
+  - rab-front `VenueOfferPipeline.spec.tsx` covers the timesheet flag.
+
+## OWNER-DB-ULTIMATE Part D, decision 0a: workspace → core foreign keys removed (structure level 22; SQL owner-approved 2026-11-15; branch feat/ws-drop-core-fks, PR #149)
+
+- **What:**
+  - Workspace command `0.6.0_DropWorkspaceCoreForeignKeys_1786721530000` drops the 72 foreign keys from every workspace schema
+    to `core."user"`, `core.organisation` and `core.manager_workspace` (31 + 21 + 20). The 56 foreign keys inside the schema
+    stay. This follows the Twenty pattern: foreign keys only inside a workspace schema.
+  - Core migration `WorkspaceCoreForeignKeyRemoval1786721530000`:
+    - re-creates `verify_workspace_schema_v1` (56 FKs at level 22+);
+    - re-creates `core.provision_workspace`, whose template has the 72 definitions removed, so a new workspace never creates
+      them;
+    - has a `down()` that refuses while level-22 workspaces exist.
+  - Level-22 v2 fingerprints are declared for PostgreSQL 16, 17 and 18.
+  - Integrity is now enforced by the application, plus a daily report-only orphan check.
+- **Threats and controls:**
+  - *A write stores a user, organisation or workspace id that does not exist or belongs to another tenant.*
+    - Control: `organisation_id` / `workspace_id` are bound by FORCE RLS WITH CHECK plus each table's binding CHECK.
+      Non-actor user ids go through `assertUsersOfOrganisationTx`: the user must exist in the caller's organisation, otherwise
+      404. That is stricter than the old FK, which accepted any organisation's user.
+    - Test: ws-core-fk-app-enforcement (another organisation, another workspace, a missing organisation; a missing or foreign
+      user).
+  - *F3, a reference write racing a user delete stores a dangling id.*
+    - Control: the reference check takes `FOR KEY SHARE` on the referenced users, replacing the FK's lock. A concurrent delete
+      waits for the writer, or the writer waits and then gets 404. core."user"'s UPDATE and SELECT policies share their USING
+      predicate, so the lock never hides a readable row.
+    - Test: ws-core-fk-app-enforcement F3 (an uncommitted delete blocks the check; after COMMIT it is 404).
+  - *A user deletion orphans evidence or leaves personal data behind* (the lost RESTRICT / CASCADE / SET NULL). A user is
+    soft-deleted by default (owner 0g); only a never-activated invite with no history is hard-deleted, inside a savepoint.
+    - Before the delete, every scope is probed for the 23 former no-ON-DELETE user columns. A hit means a soft delete.
+    - After the delete, the former CASCADE / SET NULL actions run in every scope. A 23503 rolls the savepoint back to a soft
+      delete.
+    - Tests: ws-core-fk-app-enforcement (RESTRICT probe → soft; CASCADE / SET NULL → hard with the own profile removed and
+      attribution cleared; a payslip still needing the profile → 23503 → soft; a paid shift → soft).
+  - *F2, a hard delete loses pay history hidden from the caller.* Owner decision (b), no new SQL.
+    - Control: in a workspace schema, visible history of a staff profile the caller cannot see makes the hard delete unsafe,
+      so the account is soft-deleted (the 0g rule).
+    - Cost, stated plainly: this is deliberately over-strict. Another user's hidden history counts too. Once any
+      creator-private staff history exists in a workspace, a CEO hard delete of an invite effectively always falls back to soft.
+    - Tests (hws-c1 4.6), each case asserting the logged fallback reason:
+      - L1 hidden-profile cases: `hidden_workspace_history` with HWS on (`history_lost` with HWS off); soft delete, profile
+        and history intact, no new orphan;
+      - an explicit over-strict case: another user's hidden profile with visible history, then a CEO delete of a clean
+        invite: soft, `hidden_workspace_history`, the other profile intact, orphan count unchanged.
+  - *F1, the Worker invite cleanup hard-deletes an expired invitee still referenced from a level-22 schema.* Before this fix the
+    definer's `foreign_key_violation` guard was the only protection.
+    - Control, in every READY level-22 schema of the organisation:
+      - the history checks run again with read rights that see every row, and the 23 columns are probed;
+      - after the definer's delete, the invitee's own references are cleared, then the Worker verifies that none is left;
+      - a leftover or a 23503 rolls the candidate back and retains it.
+    - Control (re-review N1): a workspace schema that exists but does not resolve (not READY, unsupported version, name
+      mismatch) retains the invitee and is never skipped.
+    - Tests: account-invite-cleanup integration (a paid-shift invitee is retained with every row and no orphan; a profile-only
+      invitee is deleted with its profile and no orphan; an unresolvable schema retains it) and off-means-off case 6 under the
+      production login.
+  - *F1-T, accepted by the owner 2026-11-15: the Worker reads and writes as the workspace owner.*
+    - The binding is `rab.actor_type = 'worker'` plus `rab.user_id = manager_workspace.owner_user_id`, the same as the orphan
+      check's (0a-T2).
+    - It is used ONLY to check, and then clear, that one invitee's own references: its staff profile, the notes about it, and
+      its attribution columns.
+    - It runs only in a Worker maintenance job with no request input. The settings are transaction-local and are restored per
+      workspace.
+    - Tests: the F1-T scope cases.
+      - Under the owner-member production login (off-means-off case 7): the schema has 0 FKs to core."user", the invitee and
+        its profile are gone, another user's profile and notes are untouched, and a note the invitee wrote about that user
+        keeps its subject with the author cleared. No orphan.
+      - The same case as the superuser fixture login (account-invite-cleanup F1-T).
+      - With HWS off both cases are core-FK scope checks.
+      - The CASCADE / SET NULL / RESTRICT classification (2 / 6 / 23 columns) is pinned in workspace-user-references.spec.
+  - *Orphans accumulate unnoticed.*
+    - Control: a daily Worker orphan check, report-only, counts only (never ids or values). It reads as the Worker plus the
+      workspace owner's read rights, in a READ ONLY transaction.
+    - Test: ws-core-fk-removal (a planted orphan is found).
+  - *The old lock storm* (availability): one core delete used to lock every referencing table of every workspace.
+    - Control: removing these FKs removes the fan-out.
+    - Tests: ws-core-fk-removal measured 1,430 relation locks with 13 level-21 workspaces and 0 at level 22; user-soft-delete
+      shows no lock in another organisation's schemas.
+- **Accepted by the owner (2026-11-15):**
+  - R-1: the delete-time checks see only what the caller may read. Residual: anything the caller cannot read is never
+    deleted, but can stay as an orphan of the deleted invite, which the daily orphan check reports. That covers:
+    - a hidden profile whose history is also hidden;
+    - a workspace outside the caller's candidate set;
+    - history added to a hidden profile after the snapshot.
+  - R-2: the expired-invite definer (1786721520000) is unchanged. The level-22 path in the Worker covers it (F1).
+  - R-3: 0a is re-applied on top of C1's and 0g's user deletion.
+  - R-4: each workspace's upgrade step holds ACCESS EXCLUSIVE on the three core tables (bounded by the runner's 5 s
+    lock_timeout). Run the 0.6.0 upgrade in a quiet window (MIGRATION-AND-ROLLBACK-PLAN.md §4.4). The TypeScript provisioner
+    (rollback artifact) still creates and then drops the FKs.
+- **Tests:**
+  - ws-core-fk-app-enforcement;
+  - ws-core-fk-removal (lock test, orphan report);
+  - account-invite-cleanup (F1, F1-T, N1) and account-invite-cleanup-off-means-off case 7 (F1-T under the production login);
+  - workspace-user-references.spec (the classification);
+  - hws-c1 4.6 with asserted fallback reasons, and user-soft-delete (0g + 0a);
+  - payroll-evidence-restrict (the F3 raw delete at level 22);
+  - the runner and template suites on top of level 22.
+
+## Part C3 — HWS cutover copy path: core business tables copied into one schema per workspace (option A′ and SQL owner-approved 2026-11-15; branch feat/c3-cutover-copy, PR #150; OFF until release 0.7.0)
+
+- **What:**
+  - Core migration `HwsCutoverCopyFunctions1786721540000` (SQL in
+    `database/typeorm/workspace-schema/backfill/hws-cutover-sql.ts`, beside `privileged-copy.ts`) adds:
+    - frozen crewflow SECURITY DEFINER functions that probe, copy (in batches) and verify the 21 workspace business tables of
+      one workspace, from `core` into that workspace's own schema;
+    - two rab_secure_owner tables: `core.hws_cutover_state` (per workspace: `started` / `verified`) and
+      `core.hws_cutover_activation` (a one-way singleton sentinel);
+    - a write fence trigger on the 21 core tables;
+    - an AFTER INSERT trigger on `core.manager_workspace` that marks a new workspace `verified` once the cutover is active;
+    - TRUNCATE guards on both new tables;
+    - `core.hws_cutover_started_any()` for the boot check.
+  - Instance upgrade command `0.7.0_HwsCutover_1786721540100` (`upgrade-commands/0-7/hws-cutover.ts`), resumable and
+    idempotent:
+    - it blocks every pending workspace first;
+    - it refuses without a verified backup;
+    - then, per workspace, it marks the workspace `started`, copies, and compares per-table row counts and checksums;
+    - it marks the workspace `verified` and unblocks it only if they match.
+  - Fail-closed routing (`hws-cutover-routing.ts`, read in the resolver's registry query): `started` is always refused. Once
+    the sentinel exists, anything other than `verified` is refused with 503 "workspace is being upgraded"; that includes a
+    missing row and an unreadable table.
+  - **Off in #150:** the `0-7` command directory is NOT registered, so no deployment runs it. The 0.7.0 release's entry
+    ("Part C3 switched on") will cover (draft #175, not merged) registration, the version bump, switching HWS on in
+    production and the backup mount.
+- **Threats and controls:**
+  - *A copy puts one tenant's rows into another workspace's schema.*
+    - Control: every definer call is bound to one workspace and its organisation (tenant GUCs, set per transaction). Source
+      rows are filtered by `workspace_id` AND `organisation_id = core.current_org()`. Core rows of W that carry another
+      organisation (`org_mismatch`) refuse W. Each workspace table's `<table>_workspace_bound` CHECK rejects a foreign row.
+    - Test: hws-c3-cutover "review L-1" (a core row of W under another organisation is never copied; W is refused,
+      ORG_MISMATCH).
+  - *The RLS bypass window (SECURITY TRADE-OFF A′, owner-accepted).* FORCE RLS has to be lifted to read every row of W from
+    core and write it into W's schema.
+    - Control: FORCE is lifted only inside frozen crewflow SECURITY DEFINER functions, under ACCESS EXCLUSIVE on each
+      relation. It is restored and asserted before return, and never committed off: a failure rolls the lift back with the
+      transaction.
+    - Control: EXECUTE on the probe / copy / verify / pointer definers only to crewflow and its members (that includes the
+      runtime login under owner-login, BC-01); PUBLIC holds nothing; crewflow_app holds EXECUTE only on
+      hws_cutover_started_any() (boolean). The migration advisory lock on the same backend and the tenant guard are mistake
+      guards, not the authorisation boundary.
+    - Test: hws-c3-cutover:
+      - abuse cases (no lock, another tenant, a table outside the list, limits, not READY, crewflow_app → refused);
+      - a kill partway through the copy leaves the workspace blocked, FORCE on and no verified row.
+  - *A partially copied workspace is served* (data appears missing, or writes land in a half-copied schema).
+    - Control: every pending workspace is blocked (Part D marker, 503) before any copy. The cache epoch is bumped right
+      after blocking, and a failed bump stops the step.
+    - Control: a workspace whose copy started but did not verify is refused by the resolver even without its marker.
+    - Control: the rule "anything but `verified` is refused" is gated on the one-way database sentinel. The sentinel has no
+      UPDATE or DELETE policy and is TRUNCATE-guarded, so pruning or rolling back the command cannot switch fail-closed
+      routing off.
+    - Test: hws-c3-cutover:
+      - "review H-1" (a probe that cannot get its lock fails only after every workspace with core rows is blocked);
+      - "review L-4" (the epoch bump);
+      - "fail-closed routing" ×3: with no state, a workspace is refused once the cutover is active; when the scan's first
+        query throws, nothing is blocked, yet no workspace is served from an empty schema; a workspace created after the
+        cutover is marked at insertion and served;
+      - "re-check N-2" (the sentinel survives DELETE / UPDATE by crewflow, crewflow_app, crewflow_worker and the runtime
+        login; TRUNCATE by the runtime login, crewflow and crewflow_app).
+  - *A copy runs without a way back* (owner rule: a backup before every cutover).
+    - Control: the command refuses before any copy unless `CREWFLOW_HWS_CUTOVER_BACKUP_MARKER` names a verified backup:
+      - the marker is bound to this database's name and, when `pg_control_system()` is readable, to this cluster's
+        `system_identifier`;
+      - it is at most 24 h old by the database clock, and not from the future;
+      - the dump next to it has a `PGDMP` header and the recorded size, and is re-hashed in full (sha256);
+      - `restoreVerified` is true;
+      - files are opened without following symlinks (O_NOFOLLOW and O_NONBLOCK, then fstat).
+    - Test:
+      - hws-c3-cutover "no backup → refused" (the workspace is blocked, nothing is copied);
+      - unit hws-cutover.spec covers the marker refusals: unset, not JSON, extra or missing field, restore not attested,
+        another database, another cluster, older than 24 h, from the future, a path in `dumpFile`, a missing, truncated,
+        swapped or non-custom dump. The refusal never echoes the marker path or its content.
+  - *A copy that does not match is switched over.*
+    - Control: per table, row counts and checksums of every column are compared between core and the workspace schema,
+      inside SQL. Money is compared as bigint pence in SQL and never logged.
+    - Control: a mismatch leaves W `started` and blocked (`HWS_CUTOVER_MISMATCH`), never half-switched.
+    - Control: a workspace whose own schema already holds rows while it is not `started` is refused (`BOTH_POPULATED`).
+      Under owner decision Q5 an operator merges by hand; core rows are never discarded.
+    - Test: hws-c3-cutover:
+      - "resume" (every table verified: counts, rows, checksums, money, minutes; no duplicate, no gap);
+      - checksum mismatch → blocked;
+      - both-populated → refused, nothing merged.
+  - *A crash or kill mid-copy leaves a broken workspace, or a re-run duplicates rows.*
+    - Control: the copy is batched and keyed (`ON CONFLICT DO NOTHING`). `started` survives a crash, and the next start
+      resumes and verifies.
+    - Control: only the statement pointers of payroll rows a batch itself inserted are reconciled. Live workspace pointers
+      are never touched, so no duplicate pay statements.
+    - Test: hws-c3-cutover:
+      - kill, then resume;
+      - "idempotent" (a second run copies nothing and writes no second verified row);
+      - "review M-1" (a live pointer survives fail-then-succeed);
+      - the Part B logbook records failed, then completed.
+  - *Writes to a core copy after its workspace was cut over are silently lost* (an HWS-off or older process still writes to
+    core).
+    - Control: the write fence on the 21 core tables refuses INSERT / UPDATE / DELETE of a workspace's rows for the runtime
+      logins (42501) from the moment its cutover is `started` (a state row exists), so a stale writer fails loudly.
+      `core.user_note` has no `workspace_id` and is fenced per organisation (any workspace of the organisation started).
+      attendance_correction stays insert-only, as before.
+    - Control (review M-3): an API or Worker started with `HWS_RUNTIME_ENABLED=false` refuses to boot once any workspace's
+      cutover has started or the sentinel exists (`core.hws_cutover_started_any()`, in `assertHwsStartupInvariants`).
+    - Control: with HWS off, the cutover command refuses (`HWS_RUNTIME_OFF`) when any workspace is pending, writing
+      nothing: no block, no state, no sentinel. With nothing pending it returns without writing, which the runner would
+      record as complete; the step is unregistered on main, so this never runs. From 0.7.0 (#175) that case becomes an
+      unrecorded deferral.
+    - Test:
+      - hws-c3-cutover "review M-3" (a fenced write → 42501; the HWS-off boot guard refuses) and "HWS off: refused,
+        nothing blocked, nothing copied";
+      - unit hws-startup-guard.spec.
+  - *Rows are dropped because they do not map to exactly one workspace.*
+    - Control (owner decisions Q2 and Q12): nothing is dropped.
+      - A note whose subject has profiles in more than one workspace refuses that workspace
+        (`HWS_CUTOVER_USER_NOTE_AMBIGUOUS`).
+      - A note whose subject has no profile refuses every workspace of the organisation (`HWS_CUTOVER_USER_NOTE_UNMAPPED`).
+      - Rows of the organisation with no workspace refuse it (`HWS_CUTOVER_UNOWNED_ROWS`).
+      - The operator report lists up to 100 note ids, for assignment by hand.
+    - Test: hws-c3-cutover:
+      - "review M-2" (one bad workspace does not keep the others blocked);
+      - "review L-3" (ambiguous notes count as core data);
+      - "owner decision Q2" (unmapped: the note is named, nothing is dropped);
+      - "re-check Info-A" (unowned rows).
+  - *The cutover state is forged to mark an uncopied workspace `verified`* (re-check N-1).
+    - Control: `core.hws_cutover_state` and the sentinel are rab_secure_owner-owned.
+      - Only crewflow (the cutover, through owner-only policies) and the new-workspace trigger write them.
+      - No function an application session can call writes them, and an UPDATE faking a "new" workspace never marks it.
+      - crewflow_app and crewflow_worker read only. The runtime login reads only as itself, but under owner-login it can act
+        as crewflow and then write them (accepted residual R-2, BC-01).
+      - Audit rows are never read back as state.
+    - Test: hws-c3-cutover:
+      - "re-check N-1": as crewflow_app and as crewflow_worker, a direct state or sentinel INSERT → 42501, and the faked-new
+        UPDATE marks nothing;
+      - "review L-2": a forged audit row does not make W verified.
+  - *TRUNCATE bypasses RLS*, so the runtime login (owner-login model, BC-01) could empty the state or the sentinel.
+    - Control: statement-level BEFORE TRUNCATE triggers (`core.hws_cutover_truncate_guard()`); only rab_secure_owner itself
+      and a superuser pass.
+    - Test: hws-c3-cutover "re-check N-2" (TRUNCATE by the runtime login, crewflow and crewflow_app → 42501).
+  - *Disclosure through logs or the audit trail.*
+    - Control: logs and the `workspace.hws_cutover_verified` audit row carry only workspace ids, table names, counts and
+      checksums, plus the user_note ids of the Q2/Q12 operator report and the backup's takenAt: no money, no row values, no
+      marker path, no URL.
+  - *One start keeps the API blocked for too long* (availability).
+    - Control (owner decision Q6): each start has a 5-minute budget (`HWS_CUTOVER_TIME_BUDGET_MS`). Once it is spent, no
+      further workspace starts, but every start makes at least one. The rest stay blocked with 503 and continue at the next
+      start (`HWS_CUTOVER_TIME_BUDGET`).
+    - Test: hws-c3-cutover "owner decision Q6".
+- **Accepted by the owner (2026-11-15):**
+  - R-1 (A′): FORCE is lifted inside a frozen definer call on the 21 core tables AND the 21 tables of W's own schema (the
+    probe: all 43 relations at once, including `core.manager_profile` read-only). The SQL injection residual is unchanged:
+    the owner login can already act as crewflow (BC-01).
+  - R-2: crewflow has an owner-only SELECT policy on `core.hws_cutover_state`, so the boot check needs no tenant. As a result,
+    a session that can SET ROLE crewflow sees every workspace's cutover state: workspace and organisation ids and timestamps,
+    no business data. The same session can also write them (INSERT / UPDATE a verified state, INSERT the sentinel), and one
+    that can SET ROLE rab_secure_owner can TRUNCATE both; same BC-01 residual as R-1.
+  - R-3: the write fence lets crewflow, rab_secure_owner and a superuser through, because FK cascades from organisation and
+    manager_workspace run as the owner. The injection residual is unchanged.
+  - R-4: when `pg_control_system()` is unreadable (a managed provider), the backup is bound by database NAME only, so a dump
+    of a same-named database on another cluster would pass the name check. The control is the runbook's "dump this database,
+    verify the restore" steps.
+  - R-5: each probe, copy or verify call holds ACCESS EXCLUSIVE on whole core tables (all organisations) for its duration —
+    a probe on all 21 plus `core.manager_profile` at once — bounded by the per-start budget.
+  - R-6: Q3 (VALIDATE `staff_profile_workspace_required` after a verified copy) is deferred to a structural workspace
+    command at level 23, with its own owner SQL review. Validating inside the cutover would move every cut-over workspace off
+    its level's expected fingerprint.
+- **Tests:**
+  - hws-c3-cutover.integration.spec:
+    - the abuse cases of every function; HWS off refused; no backup refused and blocked;
+    - kill then resume; copy correctness; idempotent re-run; checksum mismatch blocked; both-populated never merged;
+    - zero rows with no tenant context; the logbook records failed, then completed;
+    - the review cases H-1, M-1, M-2, M-3, L-1 to L-4, N-1, N-2 and Info-A; fail-closed routing; Q2 and Q6.
+    - The sentinel is one-way in production, so the spec removes it as the cluster superuser after each run; otherwise
+      routing in the shared CI database would change for every later spec.
+  - hws-cutover.spec (unit): the frozen 21-table lists, the backup marker refusals, the routing truth table, and that neither
+    the routing gate nor any application code depends on the registry or writes the state;
+  - hws-startup-guard.spec: the HWS-off boot refusal;
+  - the security-posture and semantic goldens (PG16/17/18), the R4 secure-owner invariants, check-rls-coverage
+    (`hws_cutover_activation` forced), and the restricted-migrator drift review.
+
+## Metadata engine M1: metadata tables (E1, #165), versioned cache (E5, #164), standard-object sync (E2, #166) (branches feat/metadata-m1-tables, feat/metadata-m1-cache, feat/metadata-m1-sync; M1 SQL owner-approved on conditions 2026-11-15, owner decision batch 11; final SQL incl. universal_identifier approved 2026-11-16)
+
+- **What.** Crewflow's re-implementation of Twenty's metadata engine (twentyhq/twenty @ eedb0a73; behaviour re-implemented,
+  never copied — AGPL). E1: `core.object_metadata`, `field_metadata`, `field_metadata_option`, `index_metadata`,
+  `index_field_metadata` and the trigger function `core.metadata_guard()` (migration MetadataEngineTables1786721550000).
+  E5: `core.workspace_metadata_state` (one version row per workspace) and the per-workspace metadata cache
+  (MetadataVersionState1786721560000). E2: the 21 workspace tables synced into metadata as standard objects, per workspace
+  (the 0.6.0 SyncStandardObjects upgrade step and the new-workspace path). Each table carries `organisation_id` +
+  `workspace_id`. Metadata describes another tenant's data model and decides which columns the generic API exposes
+  (money, sensitivity, read-only), so a write to it is a write to what the engine trusts.
+- **Threats.**
+  1. A workspace reads or changes another workspace's metadata, or any metadata with no tenant bound.
+  2. The request path loosens built-in metadata: unlocks a locked field, clears `is_money` / `is_sensitive` /
+     `is_ui_read_only`, renames an API name or repoints a physical name, deletes a standard or system object, or adds a
+     custom field to a payroll / attendance object.
+  3. A custom row takes ("squats") the universal identifier of a standard object or field before the sync inserts it, so the
+     sync fails for that workspace or adopts the wrong row.
+  4. A poisoned or stale cache entry serves a workspace another workspace's metadata, or old metadata after a change.
+  5. The privileged section of the sync leaks the `crewflow` role or a binding into later statements, or runs anything
+     beyond the reviewed statements while elevated.
+- **Controls.**
+  - **Tenant isolation (all five tables):** ENABLE + FORCE ROW LEVEL SECURITY and one tenant policy
+    (`organisation_id = core.current_org() AND workspace_id = core.current_workspace()`, USING = WITH CHECK) in the same
+    migration; composite foreign keys to `core.manager_workspace (id, organisation_id)` and between the metadata tables
+    (no cross-workspace parent, relation target or label identifier). Owner `crewflow` (handed over inside
+    withCrewflowCoreCreate), `crewflow_app` S/I/U/D, nothing for PUBLIC: the same shape as shift, venue, manager_venue and
+    role_object/field_permission (security-posture.golden.txt; same policy hash in the semantic golden). `crewflow_owner`
+    reaches them through its membership of `crewflow` (INHERIT; ADMIN only on crewflow_app), so FORCE RLS and the guard
+    are the boundary; crewflow_app lacks only TRUNCATE, which the guard refuses, so no grant-parity trigger is needed.
+  - **Identity split (`core.metadata_guard()`, BEFORE INSERT / UPDATE / DELETE and BEFORE TRUNCATE on all five):** only
+    `crewflow`, `rab_secure_owner` or a superuser (the M-T2 allow-list) may insert or change built-in / locked metadata,
+    options or index fields of built-in / locked fields, or indexes on built-in objects. The request path (crewflow_owner,
+    crewflow_app) may change only display columns (label, description, icon, position) of built-in rows, and of system rows
+    only the position. Physical names, type, kind flags, API names (OB-10), universal identifier, object and relation
+    targets are immutable for everyone; a lock never comes off; standard / system objects and locked / system fields are
+    never deleted directly (cascades from a custom object or a workspace still work). Parent lookups fail closed (23503)
+    and hold the parent FOR SHARE. Error messages carry no input values. SECURITY INVOKER, pinned search_path, no PUBLIC
+    EXECUTE.
+  - **Payroll / attendance pinned to system:** `object_metadata_payroll_locked_ck` forces the 7 payroll / attendance
+    objects (attendance, attendance_correction, payroll_record, payroll_run, payroll_run_line, payslip, payslip_document)
+    to `is_system AND NOT allows_custom_fields`, so no custom field and no label change reaches them. Money fields are only
+    locked, sensitive, read-only built-in NUMBERs; CURRENCY only on custom objects; core references only for four known
+    core tables; labels refuse control, bidi and zero-width characters.
+  - **Universal identifier (owner batch 11, Twenty syncable-entity alignment):** every object and field row carries one,
+    NOT NULL, unique per workspace (`(workspace_id, universal_identifier)`), immutable. `<table>_universal_identifier_kind_ck`
+    splits the namespace: custom rows hold a random version-4 UUID (column DEFAULT gen_random_uuid()), built-in rows the
+    sync's deterministic version-8 UUID. A custom row therefore can never squat a standard identifier, and a built-in insert
+    that forgets its identifier gets the v4 default and is refused (fails closed). Options, indexes and index fields are
+    keyed by immutable natural keys and not synced by identifier.
+  - **E5 cache (#164):** the version row moves in the same transaction as every metadata change (AFTER ROW trigger
+    `core.metadata_version_bump()`, at most once per transaction, never backwards; the row is written only by that
+    trigger, guarded by `core.workspace_metadata_state_guard()`), so committed metadata and the version never disagree
+    (Twenty bumps after commit). Concurrent first changes serialise on a per-workspace advisory lock
+    (`pg_advisory_xact_lock(hashtextextended('crewflow:metadata:' || workspace))`). Redis entries are HMAC-SHA256 envelopes
+    bound to the Redis key, under a purpose sub-key derived from the existing auth-cache MAC key (APP_AUTH_CACHE_HMAC_KEY /
+    APP_SECRET, no new secret); a bad MAC, a different identity (workspace, version, bump time) or any doubt rebuilds from
+    PostgreSQL under the caller's tenant binding.
+  - **E2 sync (#166):** built-in metadata is written in a narrow privileged section: `SAVEPOINT std_sync`, then
+    `SET LOCAL ROLE crewflow`, only the fixed parameterised STANDARD_SYNC_SQL statements (read stored rows, insert / update
+    the differences, never a delete), then the role and bindings are restored and checked. On any error
+    `ROLLBACK TO SAVEPOINT std_sync` reverts role, bindings and metadata together. Pinned at runtime and statically by the
+    elevated-statements specs.
+  - **Upgrade runner (Part D):** a workspace command that declares `writesWorkspaceMetadata` may INSERT / UPDATE only its own
+    workspace's rows of object_metadata, field_metadata, field_metadata_option and workspace_metadata_state
+    (`WORKSPACE_METADATA_TABLES`, per-table write counters); every other write outside the schema keeps the "no write" rule.
+- **Accepted limits (owner-accepted 2026-11-15, same boundary as option N / BC-01).**
+  - **Injected SQL is detection-only.** `crewflow_owner` can, through its membership of `crewflow`, `SET ROLE crewflow`,
+    ALTER, DISABLE TRIGGER or DROP these tables and replace the guard. The guard and the checks protect normal code paths;
+    the semantic posture monitor detects a disabled or re-pointed trigger or a changed body afterwards.
+  - **TRUNCATE rules.** TRUNCATE ignores RLS: it is refused to the request path on all five tables (also through
+    `TRUNCATE core.manager_workspace CASCADE`) and allowed for the privileged identities (operators; test teardowns
+    truncating as the superuser). The E5 version row is not TRUNCATE-guarded; the bump time in the cache identity makes a
+    recreated row a new identity.
+  - **pg_trigger_depth gap.** The delete lock applies at trigger depth 1 (a direct DELETE); deeper deletes are let through
+    so FK cascades (workspace, organisation, a custom object's fields, a custom field's options) work. A DELETE issued from
+    inside another trigger or function would also pass; creating one needs the BC-01 rights above.
+  - **M1-S1 (SECURITY TRADE-OFF): the Part D runner may write its own workspace's metadata.** A command declaring
+    `writesWorkspaceMetadata` runs as `crewflow` (the guard's privileged identity) and may insert / update that workspace's
+    built-in metadata. The runner's write counters restrict it to the four tables above and to INSERT / UPDATE in the bound
+    workspace; commands are reviewed code, never input-driven (same D-T1 detector limits as Part D).
+  - **Universal identifier namespace is stricter than Twenty (owner-accepted 2026-11-16).** Twenty accepts any UUID; here custom = v4, built-in = v8.
+    It is the cheapest database rule that stops squatting; if standard identifiers ever become hand-written constants, the
+    CHECK changes in a new migration. The M2 executor must give the built-in system fields of custom objects a v8 identifier.
+- **Tests.** Unit: the reviewed SQL text (metadata-tables-sql.spec.ts, metadata-version-sql.spec.ts), the cache envelope and
+  LRU, the sync plan and its golden identifier digest, the elevated statements. Integration on the owner-login database as
+  crewflow_owner (metadata-tables.integration.spec.ts): MD-1 catalog; MD-2 zero rows unbound; MT-07 cross-tenant reads and
+  WITH CHECK; MD-3 composite keys; MT-26 / #165 the identity split and immutability; MD-4 type and shape rules; MD-5
+  TRUNCATE; MD-6 workspace cascade; MD-7 the read service; MD-8 the RLS coverage gate; MD-9 universal identifiers; MD-10
+  owner condition 2, on the real request path through TenantContextService (bound workspace read / write only, zero rows
+  and no write unbound, no access to another workspace). #164: the version and cache specs, including concurrent first
+  changes (condition 1). #166: the catalog, new-workspace and M1-S1 runner specs, and the role / binding restore after an
+  error in the elevated section (condition 3).
+
+## X5.1 — separated-mode leftovers removed (branch phase-x/x51-separated-mode-removal, PR #167, 2026-11-15, not merged)
+- **Removed:** the standalone workspace provisioner process (`workspace-provisioner.main.ts`, nx `rab-worker:provision`) and
+  its start-up switch (`resolveProvisionerConfig`); the five suites skipped by name on the removal gate plus the opt-in
+  provisioner Redis-outage suite; the superseded templates `.env.migrate.example` and `staging/env/{api,worker,migrate}.env.example`.
+- **No control changed:** the Worker already provisions in-process on the owner login (T4); every refusal of
+  `CREWFLOW_PROVISIONER_*`, `DATABASE_URL_UNPOOLED` (`never-in-runtime-env.ts`), `.env.migrate` / `.env.ops` (compose gates,
+  `.gitignore`, `.dockerignore`) is unchanged.
+- **Regression tests:** `twenty-expected-differences.spec.ts` (the removed suites and the entrypoint stay gone),
+  `workspace-provisioning.loops.spec.ts` (no `provision` target), `migration-runner.spec.ts` (`.env.migrate` stays ignored),
+  `provisioner-process-role-callers.spec.ts` (no production file passes the `'provisioner'` process role to the boot gates,
+  the runtime-database guard or the runtime-env refusal; the `allowedIn: ['provisioner']` exemption has no live caller and
+  goes with X3.5-S8).
+- **Still open (separated-mode retirement):** the legacy CF-41 runner path, N1 on the legacy/CLI paths, the restricted-migrator
+  CI job, `deploy-prepare.ts`, the `'provisioner'` process role (X3.5-S8) and the health-check provisioner branch.
+
+## X2.5 — HTTP-first API shutdown, a bounded Worker drain, the owner-login connection budget (XR-09, XR-10, XD-05) (branch phase-x/x25-reliability, 2026-11-15, PR #168)
+- **Asset:** the rate limiting of the credential routes (`@RateLimitRequired`, Redis-backed throttler); the API's and
+  Worker's availability across a restart; the database's connection capacity and `crewflow_owner`'s connection limit.
+- **XR-09, before:** `app.enableShutdownHooks()` let Nest quit the throttler and auth-cache Redis clients, the BullMQ
+  producers and the realtime subscriber (`onModuleDestroy`) while the HTTP listener still accepted requests. The throttler
+  failed closed, so every credential request in the stop window (up to the 40 s grace) got 503 `RATE_LIMIT_UNAVAILABLE`.
+  Rate limiting was never bypassed, but sign-in and recovery broke for the whole window.
+- **XR-09, control:** `engine/utils/http-first-shutdown.ts` replaces the shutdown hooks:
+  1. the listener closes first, so new connections are refused and the client retries another replica;
+  2. requests already in flight drain for up to 15 s while Redis is still up, so each one is still throttled by the real
+     guard; responses sent during the drain close their connection;
+  3. every remaining connection is closed, SSE streams included;
+  4. only then does `app.close()` quit queues/Redis and then the database;
+  5. the signal is re-raised (same exit status).
+
+  A 35 s backstop exits 1 if the shutdown hangs, before Docker's SIGKILL at the 40 s grace.
+  No request can reach a guard after its Redis client has quit. The in-flight tracker is registered ahead of Express's
+  handler and also reads `writeHead` headers, so an SSE stream never holds the drain open.
+- **XR-10, control:** `WORKER_SHUTDOWN_TIMEOUT_MS` is declared and parsed strictly
+  (`worker-shutdown-timeout.contract.ts`): unset means 30000; an integer 1000..34000 is accepted; anything else refuses to
+  boot in both processes (it used to become NaN at shutdown, which skipped the drain, or outlived the 45 s grace, so the
+  Worker was SIGKILLed mid-job). The message never echoes the value.
+- **XD-05, control:** the startup connection budget counts every connection the single owner login opens: pools, /healthz
+  probe, the Worker's in-process provisioner, the migrate-on-start child (now 5) and the boot probes. A `rolconnlimit` on
+  `crewflow_owner` is compared with that whole total, and a deployment over capacity or over the login limit refuses to
+  start (fail closed, unchanged rule; before, the check understated the login's use).
+- **Residual:** a client must retry a refused connection (single API with stop-then-start: a short refusal window instead
+  of 503s). A request still running at the 15 s deadline is cut. A deployment within two connections of its limit now
+  refuses to boot (operator check in the PR).
+- **Tests:** `http-first-shutdown.spec.ts` (refusal, not 503; in-flight request answered before Redis quits; streams
+  recognised however their headers were set; deadline cut; second signal ignored; close failure exits 1),
+  `api-shutdown-order.integration.spec.ts` (real AppModule and Redis-backed throttler), `worker-shutdown-timeout.contract.spec.ts`,
+  `env.validation.worker-shutdown-timeout.spec.ts`, `connection-budget.spec.ts`, `connection-budget.event-listener.spec.ts`.
+
+## X3.1 — on/off switches refuse a typo at boot (XR-05 / ENV-01) (branch phase-x/x31-strict-booleans, 2026-11-15, PR #169)
+- **Asset:** the deployment's security and routing posture as the operator configured it: session-enforcement cutover,
+  sign-in methods, SMTP TLS, the auth/session/entity caches, email, push and realtime delivery.
+- **Actor:** an operator (or a template, override or platform setting) entering a switch value that is not exactly `true`.
+- **Before:** fourteen switches (`EMAIL_DELIVERY_ENABLED`, `AUTH_CONTEXT_CACHE_ENABLED`, `USER_SESSION_CACHE_ENABLED`,
+  `CORE_ENTITY_CACHE_ENABLED`, `WORKSPACE_METADATA_CACHE_ENABLED`, `WORKER_FAST_PUBLISH_NOTIFY`,
+  `USER_SESSION_ENFORCEMENT_CUTOVER`, `AUTH_PASSWORD_ENABLED`, `AUTH_GOOGLE_ENABLED`, `AUTH_MICROSOFT_ENABLED`,
+  `AUTH_OAUTH_HANDOFF_ENABLED`, `EMAIL_SMTP_NO_TLS`, `REALTIME_ENABLED`, `PUSH_ENABLED`) read `value === 'true'`, so any
+  other value (`True`, `1`, `yes`, ` true`, a typo) silently meant false. For example `USER_SESSION_ENFORCEMENT_CUTOVER=True`
+  left the cutover off, and nothing reported the mismatch.
+- **Control:** all fourteen use the shared `strictBoolean` helper (`environment-variables.ts`). Exactly `true` or `false` is
+  accepted, unset or empty keeps the default, and anything else refuses to boot (fail closed) with
+  `<NAME> must be exactly true or false`. The message names the variable, never the value. The compose gate
+  (`scripts/compose-owner-login.cjs`, `STRICT_SWITCHES`) refuses the same values in env files, templates and rendered
+  services, so a typo fails the lint before it reaches a running host. `S3_FORCE_PATH_STYLE` uses the same helper (it was
+  already strict).
+- **Accepted exception:** `AI_AGENTS_ENABLED` stays loose on purpose: any value other than `true` is off. That is the safe
+  side, and the variable is never a boot refusal (2026-10-22 crash-loop lesson).
+- **Residual:** a typo now costs availability (a crash loop) instead of a silent posture change. Mitigated by the gate lint
+  and the release note `packages/rab-docker/docs/release/RELEASE-NOTE-X3.1-STRICT-BOOLEANS.md`. A value set outside the
+  committed compose files and env templates (a platform setting, a hand-edited server file) is checked only at boot.
+- **Tests:** `env.validation.strict-booleans.spec.ts` (per flag: unset and empty keep the default, `true` and `false` are
+  accepted, 15 typos each refuse to boot; no value echoed; S3 on the helper; `AI_AGENTS_ENABLED` stays loose);
+  `compose-owner-login.test.cjs` (X3.1 env-file lint and per-service check; the two pins of the old transform now pin
+  `strictBoolean`).
+
+## X3.5-S6 — the Jest routing carries PG_DATABASE_URL only; legacy names warn under test (branch phase-x/x35-legacy-names-r1, PR #176, 2026-11-16, not merged)
+- **Asset:** the disposable test cluster's superuser URL, and the guarantee that test and CI runs never resolve a connection
+  through a deprecated name before release 2 refuses them.
+- **Change (release 1):** setupFiles set PG_DATABASE_URL to the validated TEST application URL and blank DATABASE_URL /
+  DATABASE_URL_UNPOOLED / DB_POOL_MAX (a DB_POOL_MAX value carries over to PG_POOL_MAX_CONNECTIONS when that is unset), so the
+  superuser URL no longer rides in the elevated legacy name and the factory resolves no elevated endpoint under Jest; the admin
+  connection comes only from the validated pair. The Worker-login switch writes PG_DATABASE_URL. pg-config's deprecation
+  warnings print under NODE_ENV=test too, and both Jest globalSetups refuse a routed environment (including what a later
+  `.env` load would add) that still holds a legacy name; release 1 refuses nothing that was accepted before.
+  `PG_LEGACY_NAMES_STRICT=true` (opt-in, set in CI on ci-security's check-rls step and ci-migration-security's two harness
+  steps) refuses every legacy name outside production. Spawned runtime children drop the guard-written PG_DATABASE_URL and get
+  their URL explicitly. `assertDirectLockUrl` (DBR-07) removed; the factory's documented-pooler denylist is the one rule.
+- **Unchanged:** every X1.8 / X1.9 guard rule, every production and runtime refusal of the legacy names.
+- **Abuse cases:** `test-database-guard.spec.ts` (X3.5-S6 and review #176 cases), `pg-config.spec.ts` (strict switch, warnings
+  under test), `integration-test-database-gate.spec.ts` (no spec reads the blanked DATABASE_URL), `runtime-child-env.spec.ts`.
+- **Release 2 (S8):** the fallbacks are removed and the legacy names refused everywhere; the strip lists keep every name.
+
+## S-W1 — the Worker's member-invitation pre-send check also requires an active workspace (branch fix/s-w1-invitation-workspace-active, 2026-11-16)
+- **Finding (Low, `docs/plans/untangle/worker.md` §4):** a manager invites a member; the workspace is then suspended or
+  archived while the invitation email is still queued. The Worker's pre-send revalidation
+  (`email-send.processor.ts` `revalidateMemberInvitation`) was a hand-copied subset of the server's liveness rule
+  (`MemberInvitationService.loadLive`) and had lost the `manager_workspace.status = 'active'` condition, so the email was
+  still delivered — disclosing the workspace's name and existence to the invitee after the workspace was closed.
+  Acceptance was already refused by `loadLive`, so there was no access gain.
+- **Control:** one rule, called by both. `modules/membership/utils/member-invitation-liveness.ts` exports
+  `memberInvitationExpiredSql` (the `expires_at <= now()` boundary, database time), `memberInvitationStateFailure`
+  (accepted / revoked / superseded / expired) and `memberInvitationParentFailure` (organisation not suspended, workspace
+  exists and is `active`). `loadLive` (resolve, accept, accept-with-provider) and the Worker's pre-send check both decide
+  with them, so "may this email be sent?" and "may this link be accepted?" can no longer drift. Fail closed: a workspace or
+  organisation row the check cannot see (missing, or hidden by RLS), a null workspace id, or an invitation row whose
+  expiry was not computed all count as not live. The workspace row is visible to the Worker only through
+  `manager_workspace_member` (`id = current_workspace()`; the Worker binds the row's own workspace for this check only);
+  the owner, platform-admin and MANAGE_IN_ORG branches of `manager_workspace_write` are false for the user-less Worker.
+  `memberInvitationExpiredSql(alias)` throws unless the alias is a plain identifier (`/^[a-z_][a-z0-9_]*$/`), so it can
+  never splice arbitrary text into SQL.
+- **Kept unchanged:** every existing Worker check (invitation exists, same workspace as enqueued, not accepted / revoked /
+  superseded / expired, latest email for the invitation, organisation not suspended) with the same reason texts and order;
+  a not-live invitation's outbox row is settled the same way as before — CANCELLED (terminal, fenced by the claim token)
+  with a sanitized reason, no provider call. New reason: `The workspace is no longer active.`. Token matching, the row lock
+  and the inviter re-checks in acceptance are untouched. No schema, RLS or grant change.
+- **Residual:** an email already handed to the provider before the workspace was closed cannot be recalled; accepting it
+  is still refused server-side.
+- **Tests:** rab-worker `member-invitation-delivery.integration.spec` W10 (suspended and archived workspace: no provider
+  call, row CANCELLED with the workspace reason, a retried job sends nothing) and W11 (same setup, workspace active:
+  delivered once); W1–W9 unchanged. rab-server `member-invitation-liveness.spec` (the shared decision table, including the
+  fail-closed cases and the alias refusal) and `member-invitation.integration.spec` X3b (workspace archived after sending:
+  resolve and accept both get the generic 400, no account is created, the invitation is not superseded).
+
+## O-2 — CLI pre-auth reads and the platform_admin grant on the owner login under M-T1 FORCE RLS (branch fix/o2-cli-force-rls, 2026-11-16; PR #183; no new SQL)
+
+- **Asset:** platform-wide administrator authority (`core.platform_admin`); every tenant's `core."user"` /
+  `core.organisation` / `core.manager_workspace` rows; the legacy-file link columns.
+- **Defect fixed (availability, not a leak):** since M-T1 these tables are FORCE'd with an owner-only definer policy. The CLI
+  login `crewflow_owner` acting as itself sees zero rows with no tenant context, so `grant-platform-admin` answered "No active
+  user found" for every real user (the documented recovery path when every admin is revoked was dead), `seed` failed on the
+  organisation insert, and `storage:migrate-local` discovered nothing and exited 0. Proved live on a disposable database
+  (`cli-owner-login-force-rls.integration.spec.ts`, failing before the fix).
+- **Control now:** `command/ops/secure-owner-acting.ts` `withSecureOwner(manager, fn)` narrows the caller's open transaction
+  with `SET LOCAL ROLE rab_secure_owner` (a frozen literal) for `fn` only, after checking: the process declared the `cli` role,
+  a transaction is open, the session is the owner login acting as itself, not SUPERUSER/BYPASSRLS, and may SET the role; it
+  checks `current_user` (and READ ONLY when asked) after narrowing and `RESET ROLE` (checked) after `fn` resolves. Lookups
+  run in a READ ONLY transaction. The only writes made as the owner are the `platform_admin` grant row and seed's
+  organisation; the session reset (CF-07) and the audit entries run as the login with tenant context. Every grant path is
+  audited (`via: bootstrap_cli` / `via: seed`, actor NULL). This is the step `preauth-force-sql.ts` prescribes for operator
+  scripts and what the three ops commands already do.
+- **Barrier (the login is NOT it):** the API and the Worker connect with the same `crewflow_owner` login, so what keeps this
+  off a request path is (1) the process-role check — only `command/main.ts` declares `cli`, and the step refuses `api` /
+  `worker` / any other role (unit + live tests), and (2) a static test (`secure-owner-acting.spec.ts`) that fails when anything
+  outside `src/command/**` imports the helper. Neither stops injected SQL (G-02, unchanged).
+- **Threats:** *role left on a connection* — `SET LOCAL` ends with the transaction and the step resets explicitly; proved on
+  ONE held connection (no pool checkout in between), with a negative control showing that probe does see a session-level role
+  that survives COMMIT (`secure-owner-acting.integration.spec.ts`). *Wrong person granted* — unchanged: soft-deleted users
+  excluded, an ambiguous email refuses, a non-matching `--org` refuses (abuse cases on the real login). *False migration
+  record* — `storage:migrate-local --apply` link / clear UPDATEs are conditional (`... AND <col> IS NULL RETURNING id`) and
+  must change exactly one row, otherwise the stored_file registration and the `file.migration_completed` audit roll back and
+  the outcome is `failed` (unit-tested); `manager_workspace` logos are reported `unsupported` (exit 1 under `--apply`) and never
+  touched, so no person's id is ever bound into `rab.user_id` to satisfy that table's write policy.
+- **Residual:** `bootstrap-admin` exits 0 on `REFUSED_AMBIGUOUS_*` (proved live; owner item O-8, unchanged). The `--apply`
+  happy path against real S3 was not run (no S3 in the disposable run); `manager_workspace` legacy logos stay unmigrated
+  until a reviewed path exists. `seed` keeps no production target refusal (owner decision X1.3).
+
+## SF-1 — bulk-email message is HTML-escaped (branch fix/sf1-bulk-email-escape, 2026-11-16)
+- **Threat:** a manager or venue manager with bulk email (`POST /rest/v1/staff/bulk-email`, `POST /rest/v1/managers/bulk-email`,
+  and the venue-manager route, which delegates to the manager one) typed raw HTML into the message. `ManagerService.bulkEmail`
+  and `StaffService.bulkEmail` each built `` html: `<p>${dto.message}</p>` `` unescaped, so the HTML part sent under the
+  organisation's identity could carry phishing links, fake buttons, tracking pixels or attribute injection. `BulkEmailDto.message`
+  is only `@IsString @MaxLength(5000)`. (Mail clients do not run `<script>`, but links and images are the real harm.)
+- **Control:** one renderer, `renderBulkNotificationEmail` in `engine/core-modules/email/templates.ts`, used by both services.
+  It escapes the message with the canonical `engine/utils/escape-html.ts` helper (the five HTML-significant characters) and only
+  then turns line breaks into `<br>`. The plain-text part stays the message as typed. `templates.ts`'s private copy of the
+  escaper is replaced by the canonical import (same five characters, same output). Recipient scope, the outbox path and the
+  audit row are unchanged.
+- **Permission (owner decision batch 13, 2026-11-16):** sending a bulk email is an edit-level action, not a view.
+  `POST /staff/bulk-email` now needs `staff.edit` (was `staff.view`) on the route guard, re-checked first in
+  `StaffService.bulkEmail`. There is no `manager.edit` flag: `manager.manage` (the only manager flag, already the
+  `ManagerController` class guard) is now also re-checked in `ManagerService.bulkEmail`; the Venue Manager route keeps its
+  own `venue_manager.create` (class guard, re-checked in `VenueManagerService.bulkEmail` and again in
+  `ManagerService.bulkEmail`, which accepts only those two flags and fails closed on anything else). 403 before any id is
+  read; nothing is queued. The default `venue_manager` role holds `staff.view` but not `staff.edit`; it had no staff to
+  email anyway (staff recipients are the caller's own creations).
+- **Residual (accepted):** escaping removes markup, not text. A plain URL typed in the message is still shown as text, and
+  many mail clients auto-link it. Acceptable for a message from a trusted, authenticated sender with an edit permission.
+- **Tests:** `templates.spec.ts` (`<script>`, `<a href>`, `" onmouseover=` and `&`/`'` come out entity-escaped; line breaks
+  become `<br>` only after escaping; text part unchanged) and `bulk-email-abuse-cases.integration.spec.ts` (the same hostile
+  message is stored escaped in `email_outbox.rendered_html` for both the staff and the manager route; a role with
+  `staff.view` but not `staff.edit`, and one without `manager.manage`, get 403 and nothing is queued).
+
+## SF-3 — create-and-send uses the normal shift-creation checks and audit (branch fix/sf3-create-shift-and-send-scope, 2026-11-16)
+- **Threat:** a manager with `offer.send` → `POST /rest/v1/shifts/with-offers` (`OfferService.createShiftAndSend`) with the id
+  of a job role that is RLS-visible but not theirs, or an archived venue or job role → a shift (OPEN, then OFFERED) and live
+  offers were created anyway, with no `shift.created` audit row. It was a second shift-creation path that checked only the
+  venue scope (`assertVenueAccessibleTx`) and skipped `SchedulingService.resolveDraftTargetsTx` (job-role scope, both
+  archive checks), unlike `POST /rest/v1/shifts`. The job role also selects the snapshotted pay rate (venue role rate or the
+  role's default), so a foreign role could price the shift.
+- **Control:** one insert, `SchedulingService.insertNewShiftTx`, used by `createDraftTx` (DRAFT) and `createShiftAndSend`
+  (OPEN): venue + job-role scope (`assertVenueAccessibleTx` + `assertJobRoleOwned`, 404 out of scope, never 403) → archived
+  venue (409 `VENUE_ARCHIVED`) or job role (409 `JOB_ROLE_ARCHIVED`) refused → `resolvePayRate` snapshot → INSERT
+  (workspace from the venue) → `shift.created` audit (status + requiredCount, no pay) in the same transaction. Only DRAFT or
+  OPEN may be the initial status. Any refusal rolls back the whole transaction (no shift, no offer). Venue and job-role
+  rules, rate resolution and the per-recipient send are unchanged.
+- **Permission (owner decision batch 13, 2026-11-16):** create-and-send creates a shift, so it now needs `schedule.create`
+  as well as `offer.send`, like `POST /shifts`. Both flags are on the route guard (`PermissionGuard` × 2) and both are
+  re-checked in `createShiftAndSend` first (layer 2; 403 before any referenced id is read). Every default role that holds
+  `offer.send` also holds `schedule.create`, so only a custom role with `offer.send` alone loses the action.
+- **Tests:** `scheduling-offer-abuse-cases.integration.spec.ts` › "SF-3": a same-workspace job role created by someone else
+  → 404 "Job role not found." with no shift and no offer (and `POST /shifts` gives the same 404); a role with `offer.send`
+  but not `schedule.create` → 403, no shift; archived job role → 409 `JOB_ROLE_ARCHIVED`
+  and archived venue → 409 `VENUE_ARCHIVED`, no shift; a successful create-and-send writes exactly one `shift.created`
+  row (actor = caller, status `open`, no pay keys).
+
+## SF-4 — venue pay-rate creation checks job-role scope (branch fix/sf4-role-rate-job-role-scope, 2026-11-16)
+- **Threat:** a manager with `venue.edit` → `POST /rest/v1/venues/:id/role-rates` with the id of a job role that RLS shows
+  them (same organisation and workspace) but that is not theirs → a `venue_role_rate` row was written for it.
+  `VenueService.createRoleRate` checked the venue scope and only that the role existed. That rate is what
+  `SchedulingService.resolvePayRate` snapshots for new shifts at that venue and role, so it is payroll input.
+- **Control:** one predicate, `isJobRoleInScope` (`modules/scheduling/utils/job-role-scope.ts`), the rule shift creation
+  (`SchedulingService.assertJobRoleOwned`) and staff creation (`StaffService.assertJobRoleAccessible`) already applied, now
+  used by all three (the two existing copies call it; behaviour unchanged). `createRoleRate` refuses an out-of-scope role
+  with 404 "Job role not found." (never 403), before any write. A Venue Manager keeps the existing reference rule (any job
+  role RLS shows them); an ordinary manager may use only a role they created. Layer 2: `createRoleRate`,
+  `updateRoleRate` and `deleteRoleRate` now re-check the route's own `venue.edit` flag in the service (403, before any id
+  is read). Rate values, defaults, effective dates and rate resolution are unchanged.
+- **Not changed (flagged for the owner):** an archived job role is still accepted for a new venue rate (shift and staff
+  creation refuse archived roles with 409; whether a pay rate counts as "new work" is a payroll decision). `updateRoleRate` still merges its DTO into the entity (the DTO has no `jobRoleId`, and
+  `forbidNonWhitelisted` rejects extra fields, so it cannot re-point a rate at another role).
+- **Audit (owner decision batch 13, 2026-11-16):** `createRoleRate`, `updateRoleRate` and `deleteRoleRate` each write one
+  audit row in the same transaction — `venue_role_rate.created` / `.updated` / `.deleted`, `entityType` `venue_role_rate`,
+  metadata exactly `{ venueId, jobRoleId, effectiveFrom, effectiveTo }` (after the change; before it, for a delete) — never
+  a pay, charge or overtime amount. The three actions are classified NOT shipped off-host (business events, like
+  `venue.photo_updated`) in `security-audit-event-catalogue.ts`; shipping them is a separate decision.
+- **Tests:** `venue-jobrole-ownership-abuse-cases.integration.spec.ts` › "SF-4": an RLS-visible job role created by
+  another manager, and another workspace's job role → 404 with no `venue_role_rate` row; the caller's own role → 201 with
+  the values as sent; create, update and delete each write exactly one audit row with exactly those four metadata keys.

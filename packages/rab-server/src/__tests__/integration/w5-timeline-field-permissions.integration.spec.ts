@@ -119,8 +119,10 @@ describeIfDb('wave 5: field permissions + activity timeline (integration)', () =
     const out = await http().post('/rest/v1/attendance/clock-out').set(auth(tokenStaff)).send({ qrToken: await signQr(shiftId) });
     expect(out.status).toBe(201);
     attendanceId = out.body.id;
+    // Worked time comes from moving the clock-in hours before the scheduled start: an unusually early clock-in
+    // correction, so it is explicitly confirmed (owner brief 2026-11-15, 409 CLOCK_IN_CONFIRMATION_REQUIRED otherwise).
     const corrected = await http().post(`/rest/v1/attendance/${attendanceId}/correct`).set(auth(tokenA))
-      .send({ field: 'clockInAt', newValue: new Date(new Date(out.body.clockOutAt).getTime() - 240 * 60_000).toISOString(), reason: 'Timeline test: real worked time' });
+      .send({ field: 'clockInAt', newValue: new Date(new Date(out.body.clockOutAt).getTime() - 240 * 60_000).toISOString(), reason: 'Timeline test: real worked time', confirmUnusualClockIn: true });
     expect(corrected.status).toBe(201);
     expect((await http().post(`/rest/v1/attendance/report/shift/${shiftId}/staff/${staff.profileId}/attendance-review`).set(auth(tokenA))).status).toBe(200);
     expect((await http().patch(`/rest/v1/attendance/report/shift/${shiftId}/finalise`).set(auth(tokenA))).status).toBe(200);

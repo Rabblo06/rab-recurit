@@ -180,7 +180,7 @@ jobs:
           # --skip-nx-cache: the opt-in lives in the environment, which is not part of nx's task hash; a replayed result
           # from a run without it would be a "skipped" run reported as green, the exact failure E5 exists to remove.
           status=0
-          npx nx run-many -t test -p rab-server --skip-nx-cache --runInBand --testTimeout=180000 '--testFile=(phase-d-|worker-identity-boot-gates\.integration)' --json "--outputFile=${RUNNER_TEMP}/phase-d-server.json" || status=$?
+          npx nx run-many -t test -p rab-server --skip-nx-cache --runInBand --testTimeout=180000 '--testFile=phase-d-' --json "--outputFile=${RUNNER_TEMP}/phase-d-server.json" || status=$?
           node packages/rab-server/src/database/typeorm/scripts/phase-d-ci-suite-check.cjs server "${RUNNER_TEMP}/phase-d-server.json" || status=1
           exit $status
       - name: Phase D worker suites (one owner login, WORKER_CLAIM_MODE=global)

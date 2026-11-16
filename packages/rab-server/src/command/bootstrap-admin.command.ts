@@ -41,7 +41,7 @@ interface BootstrapResult {
  * DEFINER function `core.bootstrap_first_platform_admin` (migration 1786719620000). It holds this command's advisory lock,
  * is one-time (it returns ALREADY_BOOTSTRAPPED / CLOSED once any platform admin has ever existed, so it can never mint a
  * second or replacement administrator), and only `crewflow` may EXECUTE it — never `crewflow_app`, so no API/Worker
- * request path can reach it. Run the command with `DATABASE_URL` set to the `crewflow` identity (the same operator
+ * request path can reach it. Run the command with `PG_DATABASE_URL` set to the `crewflow` identity (the same operator
  * identity as the other one-off commands); the bootstrap superuser also works but is not needed. Everything after the
  * grant — the operational CEO role, the activation invitation and the audit entry — runs as that same connection under
  * ordinary FORCE RLS, with the tenant context bound by `TenantContextService` (no RLS bypass, no new grant).
@@ -66,8 +66,8 @@ interface BootstrapResult {
  * `grant-platform-admin.command.ts`'s own doc comment states the first
  * grant can only ever happen by writing directly as `rab_owner` (this
  * table is deliberately NOT FORCEd for exactly that reason) — this command
- * runs the same way, via the same `DATABASE_URL_UNPOOLED`-as-`rab_owner`
- * convention `start.sh` already uses for migrations. The "existing user by
+ * runs the same way (historically via the `DATABASE_URL_UNPOOLED`-as-`rab_owner`
+ * convention; X3.5-S6: one PG_DATABASE_URL now). The "existing user by
  * email, refuse on cross-org ambiguity" lookup below is the same shape as
  * `grant-platform-admin.command.ts`'s, not a second, competing algorithm —
  * an email that already matches a real, already-activated account is
@@ -247,7 +247,7 @@ export class BootstrapAdminCommand extends CommandRunner {
     if (!row.allowed) {
       throw new Error(
         `Platform Admin bootstrap refused: the connected role "${row.who}" may not run the bootstrap. ` +
-          'Run bootstrap-admin with DATABASE_URL set to the crewflow operator identity, never the crewflow_app runtime identity. Nothing was changed.',
+          'Run bootstrap-admin with PG_DATABASE_URL set to the crewflow operator identity, never the crewflow_app runtime identity. Nothing was changed.',
       );
     }
   }

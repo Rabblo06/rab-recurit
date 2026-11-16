@@ -79,7 +79,7 @@ const H = 3_600_000;
  *
  * Authority: `--admin-email` names an ACTIVE platform administrator; the organisation is created through
  * `core.create_organisation()`, which itself refuses anyone else (CF-13), and that administrator is the audited actor.
- * Run with DATABASE_URL set to the `crewflow` operator identity (the only role allowed to execute the marker function;
+ * Run with PG_DATABASE_URL set to the `crewflow` operator identity (the only role allowed to execute the marker function;
  * `crewflow_app` is refused). Everything runs in ONE transaction: any failure leaves nothing behind. Refuses to run twice
  * (the definer refuses the taken "ai-demo-synthetic" slug and the transaction rolls back). It does NOT turn the organisation's AI switch
  * on: that stays a platform-admin action (Admin Panel, reason + step-up).

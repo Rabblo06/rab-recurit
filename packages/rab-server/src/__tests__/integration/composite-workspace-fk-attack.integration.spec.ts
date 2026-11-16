@@ -15,7 +15,7 @@ import { toTstzRange } from '../../modules/scheduling/utils/tstzrange';
 import { PasswordHashingService } from '../../engine/core-modules/auth/services/password-hashing.service';
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { generateFixturePassword } from './helpers/fixture-password';
-import { integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
+import { integrationTestDatabase, integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
 import { provisionFixtureWorkspace } from './helpers/test-identities';
 import { businessSchema } from './helpers/hws-fixtures';
 
@@ -184,7 +184,7 @@ describeIfDb('composite workspace FK attack (integration)', () => {
   beforeAll(async () => {
     dataSource = new DataSource({
       type: 'postgres',
-      url: process.env.DATABASE_URL,
+      url: integrationTestDatabase().appUrl,
       schema: 'core',
       synchronize: false,
       entities: [Organisation, Role, User, UserRole, ManagerProfile, ManagerWorkspace, StaffProfile, Venue, JobRole, Shift, ShiftAssignment],

@@ -28,7 +28,7 @@ import { renderReportPdf, ReportDocument } from '../../queues/rab-reports/render
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { bookBeforeDeadline } from './helpers/book-before-deadline';
 import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
-import { integrationTestDatabaseReady } from '@rab/server/database/typeorm/core/integration-test-database-gate';
+import { integrationTestDatabase, integrationTestDatabaseReady } from '@rab/server/database/typeorm/core/integration-test-database-gate';
 import { businessTableOf, siblingTable } from './helpers/hws-fixtures';
 
 /**
@@ -163,8 +163,10 @@ describeIf('J1b pay-statement dispatcher wake (integration)', () => {
     expect((await http().post('/rest/v1/attendance/clock-in').set(auth(tokens.staff[i]!)).send({ shiftId, qrToken: await signQr(shiftId) })).status).toBe(201);
     const out = await http().post('/rest/v1/attendance/clock-out').set(auth(tokens.staff[i]!)).send({ qrToken: await signQr(shiftId) });
     const clockOutAt = new Date(out.body.clockOutAt).getTime();
+    // Worked time comes from moving the clock-in hours before the scheduled start: an unusually early clock-in
+    // correction, so it is explicitly confirmed (owner brief 2026-11-15, 409 CLOCK_IN_CONFIRMATION_REQUIRED otherwise).
     expect((await http().post(`/rest/v1/attendance/${out.body.id}/correct`).set(auth(tokens.a))
-      .send({ field: 'clockInAt', newValue: new Date(clockOutAt - 247 * 60_000).toISOString(), reason: 'Statement wake test worked time' })).status).toBe(201);
+      .send({ field: 'clockInAt', newValue: new Date(clockOutAt - 247 * 60_000).toISOString(), reason: 'Statement wake test worked time', confirmUnusualClockIn: true })).status).toBe(201);
     expect((await http().post(`/rest/v1/attendance/report/shift/${shiftId}/staff/${s.profileId}/attendance-review`).set(auth(tokens.a))).status).toBe(200);
     expect((await http().patch(`/rest/v1/attendance/report/shift/${shiftId}/finalise`).set(auth(tokens.a))).status).toBe(200);
     const [rec] = await adminDataSource.query(`SELECT id FROM ${siblingTable(await businessTableOf(adminDataSource, 'attendance', out.body.id), 'payroll_record')} WHERE attendance_id = $1`, [out.body.id]);
@@ -226,7 +228,7 @@ describeIf('J1b pay-statement dispatcher wake (integration)', () => {
   it('the wake runs the unchanged dispatcher (real scan processor, runtime and scan lock): one CAS claim per record, a later wake claims nothing, one file', async () => {
     const def = SCAN_JOBS.find((d) => d.jobName === STATEMENT_WAKE_JOB_NAME)!;
     runtime = new WorkerRuntime(nullStatsRedis(), { metricsLogMs: 0 });
-    scanLock = await ScanLock.open({ connectionString: process.env.DATABASE_URL! }, quiet);
+    scanLock = await ScanLock.open({ connectionString: integrationTestDatabase().appUrl }, quiet);
     const processor = createScanJobProcessor({
       defs: new Map([[def.jobName, def]]),
       isEnabled: () => true,

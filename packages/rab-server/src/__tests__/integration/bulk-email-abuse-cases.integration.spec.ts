@@ -67,9 +67,13 @@ describeIfDb('bulk email abuse cases (integration)', () => {
     return { organisationId: organisation.id };
   }
 
-  /** A real Internal Manager with their own Workspace and the staff/manager permissions these tests need, able to log in and create staff. */
-  async function seedManagerWithWorkspace(organisationId: string, label: string): Promise<{ email: string; userId: string; workspaceId: string }> {
-    const manager = await factory.createInternalManager({ id: organisationId }, { permissions: ['staff.view', 'staff.create', 'manager.manage'], label });
+  /** A real Internal Manager with their own Workspace and the staff/manager permissions these tests need (bulk email needs staff.edit / manager.manage), able to log in and create staff. */
+  async function seedManagerWithWorkspace(
+    organisationId: string,
+    label: string,
+    permissions: string[] = ['staff.view', 'staff.create', 'staff.edit', 'manager.manage'],
+  ): Promise<{ email: string; userId: string; workspaceId: string }> {
+    const manager = await factory.createInternalManager({ id: organisationId }, { permissions, label });
     return { email: manager.email, userId: manager.userId, workspaceId: manager.workspaceId! };
   }
 
@@ -193,6 +197,106 @@ describeIfDb('bulk email abuse cases (integration)', () => {
 
     expect(res.status).toBe(201);
     expect(res.body).toEqual({ queued: 1, skipped: 0 });
+  });
+
+  // SF-1: the message is plain text; markup in it must reach the recipient's mail client escaped, on both routes.
+  const HOSTILE_MESSAGE = ['<script>alert(1)</script>', '<a href="https://evil.example/login">Reset your password</a>', 'x" onmouseover="alert(2)'].join('\n');
+
+  function expectEscaped(html: string | undefined): void {
+    expect(html).toBeDefined();
+    expect(html).not.toContain('<script');
+    expect(html).not.toContain('<a ');
+    expect(html).not.toContain('" onmouseover=');
+    expect(html).toContain('&lt;script&gt;alert(1)&lt;/script&gt;');
+    expect(html).toContain('&lt;a href=&quot;https://evil.example/login&quot;&gt;');
+    expect(html).toContain('x&quot; onmouseover=&quot;alert(2)');
+    expect(html).toContain('<br>');
+  }
+
+  it('SF-1: staff bulk email stores the message HTML-escaped in email_outbox.rendered_html', async () => {
+    const { organisationId } = await seedOrg('bexs');
+    const a = await seedManagerWithWorkspace(organisationId, 'a');
+    const s1 = await seedStaffOwnedBy(organisationId, a.workspaceId, a.userId, 's1');
+    const token = await login(a.email);
+
+    const res = await request(app.getHttpServer())
+      .post('/rest/v1/staff/bulk-email')
+      .set('Authorization', `Bearer ${token}`)
+      .send({ userIds: [s1.id], subject: 'Rota', message: HOSTILE_MESSAGE });
+    expect(res.status).toBe(201);
+    expect(res.body).toEqual({ queued: 1, skipped: 0 });
+
+    const rows = await withContext({ organisationId, workspaceId: a.workspaceId, userId: a.userId }, (m) =>
+      m.find(EmailOutbox, { where: { recipientEmail: s1.email, renderedSubject: 'Rota' } }),
+    );
+    expect(rows).toHaveLength(1);
+    expectEscaped(rows[0]!.renderedHtml);
+    expect(rows[0]!.renderedText).toBe(HOSTILE_MESSAGE);
+  });
+
+  it('SF-1: manager bulk email stores the message HTML-escaped in email_outbox.rendered_html', async () => {
+    const { organisationId } = await seedOrg('bexm');
+    const a = await seedManagerWithWorkspace(organisationId, 'a');
+    const b = await seedManagerWithWorkspace(organisationId, 'b');
+    const tokenA = await login(a.email);
+    const bProfile = await withContext({ organisationId, workspaceId: a.workspaceId, userId: a.userId }, (m) =>
+      m.query<[{ id: string }]>(`SELECT id FROM core.manager_profile WHERE user_id = $1`, [b.userId]),
+    );
+
+    const res = await request(app.getHttpServer())
+      .post('/rest/v1/managers/bulk-email')
+      .set('Authorization', `Bearer ${tokenA}`)
+      .send({ userIds: [bProfile[0]!.id], subject: 'Rota', message: HOSTILE_MESSAGE });
+    expect(res.status).toBe(201);
+    expect(res.body).toEqual({ queued: 1, skipped: 0 });
+
+    const rows = await withContext({ organisationId, workspaceId: a.workspaceId, userId: a.userId }, (m) =>
+      m.find(EmailOutbox, { where: { recipientEmail: b.email, renderedSubject: 'Rota' } }),
+    );
+    expect(rows).toHaveLength(1);
+    expectEscaped(rows[0]!.renderedHtml);
+    expect(rows[0]!.renderedText).toBe(HOSTILE_MESSAGE);
+  });
+
+  // Owner decision batch 13 (2026-11-16): bulk email is an edit-level action, on the route guard and re-checked in the service.
+  it('a view-only role (staff.view, no staff.edit) gets 403 on staff bulk email, and nothing is queued', async () => {
+    const { organisationId } = await seedOrg('bevw');
+    const viewer = await seedManagerWithWorkspace(organisationId, 'viewer', ['staff.view', 'staff.create']);
+    const own = await seedStaffOwnedBy(organisationId, viewer.workspaceId, viewer.userId, 'vs');
+    const token = await login(viewer.email);
+
+    const res = await request(app.getHttpServer())
+      .post('/rest/v1/staff/bulk-email')
+      .set('Authorization', `Bearer ${token}`)
+      .send({ userIds: [own.id], subject: 'ViewOnly', message: 'Should not send.' });
+    expect(res.status).toBe(403);
+
+    const rows = await withContext({ organisationId, workspaceId: viewer.workspaceId, userId: viewer.userId }, (m) =>
+      m.find(EmailOutbox, { where: { recipientEmail: own.email, renderedSubject: 'ViewOnly' } }),
+    );
+    expect(rows).toHaveLength(0);
+  });
+
+  it('a role without manager.manage gets 403 on manager bulk email, and nothing is queued', async () => {
+    const { organisationId } = await seedOrg('bemv');
+    // One org shares one canonical manager role (TestIdentityFactory), so both hold the same set — without manager.manage.
+    const target = await seedManagerWithWorkspace(organisationId, 'target', ['staff.view', 'staff.edit']);
+    const viewer = await seedManagerWithWorkspace(organisationId, 'viewer', ['staff.view', 'staff.edit']);
+    const tokenViewer = await login(viewer.email);
+    const targetProfile = await withContext({ organisationId, workspaceId: target.workspaceId, userId: target.userId }, (m) =>
+      m.query<[{ id: string }]>(`SELECT id FROM core.manager_profile WHERE user_id = $1`, [target.userId]),
+    );
+
+    const res = await request(app.getHttpServer())
+      .post('/rest/v1/managers/bulk-email')
+      .set('Authorization', `Bearer ${tokenViewer}`)
+      .send({ userIds: [targetProfile[0]!.id], subject: 'ViewOnly', message: 'Should not send.' });
+    expect(res.status).toBe(403);
+
+    const rows = await withContext({ organisationId, workspaceId: target.workspaceId, userId: target.userId }, (m) =>
+      m.find(EmailOutbox, { where: { recipientEmail: target.email, renderedSubject: 'ViewOnly' } }),
+    );
+    expect(rows).toHaveLength(0);
   });
 
   it('a request body carrying more than 50 ids is rejected (400)', async () => {

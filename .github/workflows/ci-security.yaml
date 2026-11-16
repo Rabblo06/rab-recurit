@@ -40,7 +40,7 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           fetch-depth: 0
-      - uses: gitleaks/gitleaks-action@dcedce43c6f43de0b836d1fe38946645c9c638dc # v2
+      - uses: gitleaks/gitleaks-action@ff98106e4c7b2bc287b24eaf42907196329070c7 # v2.3.9
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
@@ -51,10 +51,10 @@ jobs:
       security-events: write
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      - uses: github/codeql-action/init@5ba2889ada762081db2c4f32a729827dce632c7b # v3
+      - uses: github/codeql-action/init@33d7b85da1a04171e211befe2c739303b9a4c066 # v4.39.3
         with:
           languages: javascript-typescript
-      - uses: github/codeql-action/analyze@5ba2889ada762081db2c4f32a729827dce632c7b # v3
+      - uses: github/codeql-action/analyze@33d7b85da1a04171e211befe2c739303b9a4c066 # v4.39.3
 
   rls-coverage:
     runs-on: ubuntu-latest
@@ -99,7 +99,8 @@ jobs:
             npx ts-node --transpile-only -P packages/rab-server/tsconfig.app.json \
             packages/rab-server/src/database/typeorm/scripts/migrate/twenty/twenty-migrate.ts
       - name: FORCE RLS coverage and the owner-login posture as crewflow_owner
-        run: PG_DATABASE_URL="$RLS_OWNER_URL" yarn check-rls
+        # X3.5-S6 strict switch: this step must never resolve a legacy database name (DATABASE_URL, ...).
+        run: PG_LEGACY_NAMES_STRICT=true PG_DATABASE_URL="$RLS_OWNER_URL" yarn check-rls
       - name: Security posture golden (exact)
         run: |
           POSTURE_DATABASE_URL="$RLS_ADMIN_URL" npx ts-node --transpile-only -P packages/rab-server/tsconfig.app.json \

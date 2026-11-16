@@ -63,8 +63,9 @@ const PREAUTH_FORCED_TABLES = new Set<string>(PREAUTH_FORCE_TABLES);
  * fails this gate. FORCE matters here because the owner rab_secure_owner is reached by SET ROLE from its members; with
  * FORCE the owner-only policies (CURRENT_USER = rab_secure_owner) still apply to it, and the runtime logins are denied by a
  * RESTRICTIVE policy on top of holding no privilege. They are never on NOT_FORCED_ALLOWLIST: no pre-auth lookup reads them.
+ * Part C3: hws_cutover_activation, the one-way "cutover active" sentinel (instance fact; public SELECT, crewflow-only INSERT).
  */
-const FORCED_NON_TENANT_TABLES = ['deployment_identity', 'deployment_identity_history', 'upgrade_migration'] as const;
+const FORCED_NON_TENANT_TABLES = ['deployment_identity', 'deployment_identity_history', 'upgrade_migration', 'hws_cutover_activation'] as const;
 
 /**
  * F4 (Wave 1 lane S): every physical workspace schema (`^workspace_[0-9a-f]{32}$`, Hyper Workspace V1) is checked too —
@@ -326,8 +327,9 @@ interface DriftedExemptTable {
 }
 
 async function main(): Promise<void> {
-  // Phase B: the connection factory (PG_DATABASE_URL; the deprecated DATABASE_URL outside production — CI still passes
-  // DATABASE_URL="$TEST_DATABASE_URL"). Explicit TLS and target; a refused configuration names variables only.
+  // Phase B: the connection factory (PG_DATABASE_URL; the deprecated DATABASE_URL is still accepted outside production until
+  // X3.5-S8, with a warning; CI and every harness pass PG_DATABASE_URL). Explicit TLS and target; a refused configuration
+  // names variables only.
   const client = createPgClient(resolvePgEnvironment(process.env, { processRole: 'cli' }), { purpose: 'check-rls' });
   await client.connect();
 
@@ -401,9 +403,9 @@ async function main(): Promise<void> {
     const appRoleBypassesRls = roleResult.rows[0]?.rolbypassrls ?? null;
 
     // The check above only proves the *named* role rab_app is safe — it says
-    // nothing about whether DATABASE_URL (what the running app/worker
+    // nothing about whether PG_DATABASE_URL (what the running app/worker
     // actually authenticate as) is that role. A table owner connecting with
-    // this exact same DATABASE_URL bypasses every non-FORCEd policy above
+    // this exact same PG_DATABASE_URL bypasses every non-FORCEd policy above
     // silently — this is the gap a live audit found: the app connecting as
     // rab_owner instead of rab_app on the five NOT_FORCED_ALLOWLIST tables.
     const { rows: currentUserRows } = await client.query<{ current_user: string }>(

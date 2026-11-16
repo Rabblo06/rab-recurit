@@ -12,7 +12,8 @@
  *     (whose zero-member invariant Phase D relies on).
  *
  * The locked runner dispatches on the session login: crewflow_owner gets this rule and the owner-login lifecycle; any other
- * login (the CF-41 superuser or restricted migrator) takes the LEGACY path, retained only until PR #9.
+ * login (the CF-41 superuser or restricted migrator) takes the LEGACY path, retained only until the separated-mode
+ * retirement (every separated database transitioned, MIX-1).
  */
 import type { Query } from '../locked-migration-runner';
 import { OWNER_LOGIN } from './bootstrap';

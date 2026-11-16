@@ -90,7 +90,7 @@ const ctxOf = (org: string, ws: string, user: string): AuthContext => ({
 
 function appSource(max: number): DataSource {
   return new DataSource({
-    type: 'postgres', url: process.env.DATABASE_URL, synchronize: false, entities: [], extra: { max },
+    type: 'postgres', url: integrationTestDatabase().appUrl, synchronize: false, entities: [], extra: { max },
   });
 }
 
