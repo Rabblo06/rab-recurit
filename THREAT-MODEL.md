@@ -8446,3 +8446,29 @@ Reversal:   Lower CLOCK_IN_CONFIRM_FLOOR_HOURS, or require a second approver (pa
 - **Residual:** `bootstrap-admin` exits 0 on `REFUSED_AMBIGUOUS_*` (proved live; owner item O-8, unchanged). The `--apply`
   happy path against real S3 was not run (no S3 in the disposable run); `manager_workspace` legacy logos stay unmigrated
   until a reviewed path exists. `seed` keeps no production target refusal (owner decision X1.3).
+
+## SF-1 — bulk-email message is HTML-escaped (branch fix/sf1-bulk-email-escape, 2026-11-16)
+- **Threat:** a manager or venue manager with bulk email (`POST /rest/v1/staff/bulk-email`, `POST /rest/v1/managers/bulk-email`,
+  and the venue-manager route, which delegates to the manager one) typed raw HTML into the message. `ManagerService.bulkEmail`
+  and `StaffService.bulkEmail` each built `` html: `<p>${dto.message}</p>` `` unescaped, so the HTML part sent under the
+  organisation's identity could carry phishing links, fake buttons, tracking pixels or attribute injection. `BulkEmailDto.message`
+  is only `@IsString @MaxLength(5000)`. (Mail clients do not run `<script>`, but links and images are the real harm.)
+- **Control:** one renderer, `renderBulkNotificationEmail` in `engine/core-modules/email/templates.ts`, used by both services.
+  It escapes the message with the canonical `engine/utils/escape-html.ts` helper (the five HTML-significant characters) and only
+  then turns line breaks into `<br>`. The plain-text part stays the message as typed. `templates.ts`'s private copy of the
+  escaper is replaced by the canonical import (same five characters, same output). Recipient scope, the outbox path and the
+  audit row are unchanged.
+- **Permission (owner decision batch 13, 2026-11-16):** sending a bulk email is an edit-level action, not a view.
+  `POST /staff/bulk-email` now needs `staff.edit` (was `staff.view`) on the route guard, re-checked first in
+  `StaffService.bulkEmail`. There is no `manager.edit` flag: `manager.manage` (the only manager flag, already the
+  `ManagerController` class guard) is now also re-checked in `ManagerService.bulkEmail`; the Venue Manager route keeps its
+  own `venue_manager.create` (class guard, re-checked in `VenueManagerService.bulkEmail` and again in
+  `ManagerService.bulkEmail`, which accepts only those two flags and fails closed on anything else). 403 before any id is
+  read; nothing is queued. The default `venue_manager` role holds `staff.view` but not `staff.edit`; it had no staff to
+  email anyway (staff recipients are the caller's own creations).
+- **Residual (accepted):** escaping removes markup, not text. A plain URL typed in the message is still shown as text, and
+  many mail clients auto-link it. Acceptable for a message from a trusted, authenticated sender with an edit permission.
+- **Tests:** `templates.spec.ts` (`<script>`, `<a href>`, `" onmouseover=` and `&`/`'` come out entity-escaped; line breaks
+  become `<br>` only after escaping; text part unchanged) and `bulk-email-abuse-cases.integration.spec.ts` (the same hostile
+  message is stored escaped in `email_outbox.rendered_html` for both the staff and the manager route; a role with
+  `staff.view` but not `staff.edit`, and one without `manager.manage`, get 403 and nothing is queued).

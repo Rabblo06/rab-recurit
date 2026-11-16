@@ -249,7 +249,7 @@ Source: `packages/rab-server/src/modules/staff/controllers/staff.controller.ts`
 | POST | `/rest/v1/staff/venue-directory/team/:staffId` | `staff.view` | JwtAuthGuard | `addVenueTeamMember` |
 | GET | `/rest/v1/staff/:id` | `staff.view` | JwtAuthGuard | `get` |
 | POST | `/rest/v1/staff` | `staff.create` | JwtAuthGuard, RequireWorkspaceGuard | `create` |
-| POST | `/rest/v1/staff/bulk-email` | `staff.view` | JwtAuthGuard | `bulkEmail` |
+| POST | `/rest/v1/staff/bulk-email` | `staff.edit` | JwtAuthGuard | `bulkEmail` |
 | PATCH | `/rest/v1/staff/:id` | `staff.edit` | JwtAuthGuard | `update` |
 | POST | `/rest/v1/staff/:id/avatar` | `staff.edit` | JwtAuthGuard | `uploadAvatar` |
 | DELETE | `/rest/v1/staff/:id/avatar` | `staff.edit` | JwtAuthGuard | `removeAvatar` |

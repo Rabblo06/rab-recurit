@@ -77,7 +77,7 @@ export class StaffController {
   }
 
   @Post('bulk-email')
-  @UseGuards(PermissionGuard(PermissionFlag.STAFF_VIEW))
+  @UseGuards(PermissionGuard(PermissionFlag.STAFF_EDIT))
   bulkEmail(@AuthUser() ctx: AuthContext, @Body() dto: BulkEmailDto) {
     return this.staffService.bulkEmail(ctx, dto);
   }

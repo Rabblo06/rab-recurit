@@ -31,6 +31,7 @@ import { StepUpReauthService } from '../../../engine/core-modules/auth/services/
 import { AuditAction, AuditService } from '../../../engine/core-modules/audit/audit.service';
 import { EmailOutboxService } from '../../../engine/core-modules/email/email-outbox.service';
 import { EmailQueueService } from '../../../engine/core-modules/email/email-queue.service';
+import { renderBulkNotificationEmail } from '../../../engine/core-modules/email/templates';
 import { RefreshTokenService } from '../../../engine/core-modules/auth/token/services/refresh-token.service';
 import { SecurityVersionService } from '../../../engine/core-modules/auth/services/security-version.service';
 import { CoreEntityCacheService } from '../../../engine/core-modules/entity-cache/core-entity-cache.service';
@@ -548,6 +549,11 @@ export class StaffService {
    */
   async bulkEmail(ctx: AuthContext, dto: BulkEmailDto): Promise<{ queued: number; skipped: number }> {
     const rows = await this.tenantContext.runInWorkspaceContext(ctx, async (manager) => {
+      // Layer 2 (owner decision batch 13, 2026-11-16): sending email to staff is an edit-level action — the route's
+      // `staff.edit` is re-checked here, before any id is read (403; jobs / other services never pass the guard).
+      if (!(await this.directoryPermissions.userHasPermissionTx(manager, ctx, PermissionFlag.STAFF_EDIT))) {
+        throw new ForbiddenException('Sending email to staff is not permitted.');
+      }
       const profiles = await manager.find(StaffProfile, {
         where: { organisationId: ctx.organisationId!, createdBy: ctx.userId, id: In(dto.userIds) },
         relations: { user: true },
@@ -561,7 +567,7 @@ export class StaffService {
               jobType: EmailOutboxJobType.NOTIFICATION,
               recipientEmail: p.user!.email,
               targetUserId: p.userId,
-              rendered: { subject: dto.subject, html: `<p>${dto.message}</p>`, text: dto.message },
+              rendered: renderBulkNotificationEmail({ subject: dto.subject, message: dto.message }),
               createdBy: ctx.userId,
             }),
           ),

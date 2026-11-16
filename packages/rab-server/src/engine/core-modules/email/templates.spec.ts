@@ -1,6 +1,7 @@
 import {
   renderAccountInviteEmail,
   renderAccountSuspendedEmail,
+  renderBulkNotificationEmail,
   renderPasswordResetEmail,
   renderPasswordUpdatedEmail,
   renderWelcomeEmail,
@@ -81,5 +82,38 @@ describe('production email rendering', () => {
     expect(() => renderWelcomeEmail({ firstName: 'A', organisationName: 'B' })).not.toThrow();
     expect(() => renderPasswordUpdatedEmail({ firstName: 'A' })).not.toThrow();
     expect(() => renderAccountSuspendedEmail({ firstName: 'A', organisationName: 'B' })).not.toThrow();
+  });
+
+  // SF-1: a manager-written bulk-email message is plain text. None of it may reach the HTML part as markup.
+  describe('renderBulkNotificationEmail (SF-1)', () => {
+    const hostile = [
+      '<script>alert(1)</script>',
+      '<a href="https://evil.example/login">Reset your password</a>',
+      'x" onmouseover="alert(2)',
+      "it's & <b>bold</b>",
+    ].join('\n');
+
+    it('escapes every HTML-significant character the sender typed', () => {
+      const { html } = renderBulkNotificationEmail({ subject: 'Hi', message: hostile });
+      expect(html).not.toContain('<script');
+      expect(html).not.toContain('<a ');
+      expect(html).not.toContain('<b>');
+      expect(html).not.toContain('" onmouseover=');
+      expect(html).toContain('&lt;script&gt;alert(1)&lt;/script&gt;');
+      expect(html).toContain('&lt;a href=&quot;https://evil.example/login&quot;&gt;Reset your password&lt;/a&gt;');
+      expect(html).toContain('x&quot; onmouseover=&quot;alert(2)');
+      expect(html).toContain('it&#39;s &amp; &lt;b&gt;bold&lt;/b&gt;');
+    });
+
+    it('keeps line breaks only as <br>, added after escaping', () => {
+      const { html } = renderBulkNotificationEmail({ subject: 'Hi', message: 'one\ntwo\r\nthree\rfour' });
+      expect(html).toBe('<p>one<br>two<br>three<br>four</p>');
+    });
+
+    it('keeps the plain-text part and subject exactly as typed', () => {
+      const result = renderBulkNotificationEmail({ subject: 'Rota <update>', message: hostile });
+      expect(result.text).toBe(hostile);
+      expect(result.subject).toBe('Rota <update>');
+    });
   });
 });
