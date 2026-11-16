@@ -1,11 +1,12 @@
 import type { Client } from 'pg';
 
 import { checkSchemaCompatibility } from '@rab/server/database/boot-checks/database-boot-gates';
-import { pgClientConfig, probePgSessionAffinity, ResolvedPgEnvironment } from '@rab/server/database/postgres/index';
+import { createPgClient, pgClientConfig, probePgSessionAffinity, ResolvedPgEnvironment } from '@rab/server/database/postgres/index';
 
 import { ReconnectingPgClient } from '../../core/database/reconnecting-pg-client';
 import { WorkerRuntime } from '../../core/runtime/worker-runtime';
 import { runWorkspaceProvisioningCycle } from './workspace-provisioning.job';
+import { runWorkspaceCoreOrphanCycle } from './workspace-core-orphans.job';
 import { runWorkspaceSchemaDriftCycle } from './workspace-schema-drift.job';
 
 /**
@@ -29,6 +30,8 @@ import { runWorkspaceSchemaDriftCycle } from './workspace-schema-drift.job';
  *     runWorkspaceProvisioningCycle / provisionWorkspaceSchema and are not touched.
  */
 export const WORKSPACE_SCHEMA_DRIFT_INTERVAL_MS = 24 * 60 * 60 * 1000;
+/** Part D 0a: the report-only orphan check of the dropped workspace → core references, daily like the drift check. */
+export const WORKSPACE_CORE_ORPHAN_INTERVAL_MS = 24 * 60 * 60 * 1000;
 export const PROVISIONING_ROLE = 'crewflow';
 
 export class ProvisioningIdentityError extends Error {
@@ -184,6 +187,19 @@ export async function startWorkspaceProvisioningLoops(options: ProvisioningLoops
         logger.warn(`workspace schema drift: workspace=${f.workspaceId} status=${f.status} module=${f.moduleVersion ?? '?'} ${f.detail}`);
       }
       logger.log(`workspace schema drift: checked=${drift.checked} ok=${drift.ok} notReady=${drift.notReady} findings=${drift.findings.length}`);
+    },
+  });
+
+  runtime.every({
+    name: 'workspace core orphans',
+    intervalMs: WORKSPACE_CORE_ORPHAN_INTERVAL_MS,
+    statKeys: { lastRunAt: 'lastWorkspaceCoreOrphanAt', failures: 'workspaceCoreOrphanFailures' },
+    run: async () => {
+      // Report only (owner decision pending on repair): counts per workspace / table / column, never ids or values.
+      const r = await runWorkspaceCoreOrphanCycle(() => createPgClient(pg, { endpoint, purpose: 'orphans', sessionAffinity: true, statementTimeoutMs: 60_000 }), onConnect);
+      for (const f of r.findings) logger.warn(`workspace core orphans: workspace=${f.workspaceId} ${f.table}.${f.column} -> ${f.target}: ${f.rows} row(s)`);
+      for (const e of r.errors) logger.warn(`workspace core orphans: workspace=${e.workspaceId} ${e.detail}`);
+      logger.log(`workspace core orphans: checked=${r.checked} findings=${r.findings.length} errors=${r.errors.length}`);
     },
   });
 
