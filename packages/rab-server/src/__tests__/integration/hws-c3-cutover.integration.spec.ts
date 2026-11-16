@@ -685,8 +685,8 @@ describeIfDb('C3 HWS cutover copy path (option A′)', () => {
     const deferring = { name: 'L1Deferring', timestamp: T_DEFER, run: async () => ({ deferred: 'test: not applicable in this configuration' }) };
     let laterRan = false;
     const laterNoop = { name: 'L1LaterNoop', timestamp: T_LATER, run: async () => void (laterRan = true) };
-    const realDeferred = { ...createHwsCutoverCommand({ workspaceIds: [] }), timestamp: T_DEFER + 5 };
-    const names = [`0.7.0_L1Deferring_${T_DEFER}`, `0.7.0_L1LaterNoop_${T_LATER}`, `0.7.0_HwsCutover_${T_DEFER + 5}`];
+    const realDeferred = { ...createHwsCutoverCommand({ workspaceIds: [] }), timestamp: T_DEFER - 5 }; // before laterNoop (steps run by timestamp)
+    const names = [`0.7.0_L1Deferring_${T_DEFER}`, `0.7.0_L1LaterNoop_${T_LATER}`, `0.7.0_HwsCutover_${T_DEFER - 5}`];
     const rowsOf = async (name: string) => (await admin.query(`SELECT status FROM core.upgrade_migration WHERE workspace_id IS NULL AND name = $1`, [name])).rows;
     try {
       for (const [label, registry] of [
