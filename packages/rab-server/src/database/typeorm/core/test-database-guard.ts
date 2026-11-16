@@ -447,7 +447,10 @@ function assertNoRedirectingProcessEnv(env: Record<string, string | undefined>, 
  * never overrides a variable that is already present, so an empty value keeps a later `.env` load from bringing a developer's
  * DATABASE_URL / DATABASE_URL_UNPOOLED / DB_POOL_MAX back in, and the connection factory treats an empty value as unset.
  * Together with the refusal of DATABASE_DIRECT_URL (FORBIDDEN_IN_TEST_DATABASE_URL_NAMES) this covers every pg-config legacy
- * name, so the routing itself never resolves one and release 1 refuses nothing that was accepted before.
+ * name, so the routing itself never resolves one and release 1 refuses nothing that was accepted before. A DB_POOL_MAX given
+ * to a test run is therefore ignored (the pool uses PG_POOL_MAX_CONNECTIONS or its default): it only ever sized the test pool,
+ * no committed test configuration sets it, and copying it over would add environment reads the factory-only scan
+ * (no-unapproved-db-access.spec.ts) does not allow here.
  */
 export const ROUTED_TEST_BLANKED_LEGACY_NAMES: readonly string[] = ['DATABASE_URL', 'DATABASE_URL_UNPOOLED', 'DB_POOL_MAX'];
 
@@ -477,10 +480,6 @@ export function applyIntegrationTestDatabaseEnv(env: NodeJS.ProcessEnv): Resolve
   const resolved = resolveIntegrationTestDatabase(env);
   assertNoRedirectingProcessEnv(env, resolved);
   env.PG_DATABASE_URL = resolved.appUrl;
-  // Review #176: a DB_POOL_MAX the run was given keeps its meaning under the new name (it was accepted before, and the
-  // factory read it when PG_POOL_MAX_CONNECTIONS was unset). With both set, PG_POOL_MAX_CONNECTIONS wins, as it names the pool.
-  const poolMaxLegacy = env.DB_POOL_MAX?.trim();
-  if (poolMaxLegacy && !env.PG_POOL_MAX_CONNECTIONS?.trim()) env.PG_POOL_MAX_CONNECTIONS = poolMaxLegacy;
   for (const name of ROUTED_TEST_BLANKED_LEGACY_NAMES) env[name] = '';
   for (const name of TEST_DATABASE_ADMIN_URL_NAMES) env[name] = resolved.adminUrl;
   return resolved;

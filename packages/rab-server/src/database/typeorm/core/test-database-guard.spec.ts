@@ -274,14 +274,16 @@ describe('integration test database guard', () => {
       expect(routedTestDatabaseLegacyNames({ ...before, DB_POOL_MAX: '5' })).toEqual([]);
     });
 
-    it('review #176: a DB_POOL_MAX keeps its meaning as PG_POOL_MAX_CONNECTIONS (unless that is set) and is blanked', () => {
+    it('review #176: a DB_POOL_MAX is blanked (never refused, never resolved); PG_POOL_MAX_CONNECTIONS is left as given', () => {
       const legacyOnly = jestEnv({ DB_POOL_MAX: '7' });
       applyIntegrationTestDatabaseEnv(legacyOnly);
-      expect({ pool: legacyOnly.PG_POOL_MAX_CONNECTIONS, legacy: legacyOnly.DB_POOL_MAX }).toEqual({ pool: '7', legacy: '' });
-      expect(resolvePgEnvironment(legacyOnly, { processRole: 'cli' }).pool.max).toBe(7);
+      expect({ pool: legacyOnly.PG_POOL_MAX_CONNECTIONS, legacy: legacyOnly.DB_POOL_MAX }).toEqual({ pool: undefined, legacy: '' });
+      const r = resolvePgEnvironment(legacyOnly, { processRole: 'cli' });
+      expect(r.warnings).toEqual([]);
       const both = jestEnv({ DB_POOL_MAX: '7', PG_POOL_MAX_CONNECTIONS: '9' });
       applyIntegrationTestDatabaseEnv(both);
       expect({ pool: both.PG_POOL_MAX_CONNECTIONS, legacy: both.DB_POOL_MAX }).toEqual({ pool: '9', legacy: '' });
+      expect(resolvePgEnvironment(both, { processRole: 'cli' }).pool.max).toBe(9);
       expect(presentLegacyPgEnvNames(both)).toEqual([]);
     });
 
