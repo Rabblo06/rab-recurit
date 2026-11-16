@@ -21,7 +21,7 @@ import { dropWorkspaceSchema, FROZEN_TEMPLATE_REGISTRY, provisionTypeScript, See
  * tables"): the 0.6.0 workspace command SyncStandardObjects on a real (disposable) database, run by the Part D workspace
  * command runner through the one runtime login (crewflow_owner) holding the migration lock, exactly like the migrate child.
  * Workspaces are built from the frozen module-20 template and adopted at 0.6.0, so they run this code's real 0.6.0 workspace
- * commands (StaffProfileMemberSelect, then SyncStandardObjects). Proves:
+ * commands (StaffProfileMemberSelect at level 21, DropWorkspaceCoreForeignKeys at level 22, then SyncStandardObjects). Proves:
  *  - the metadata of EVERY workspace matches its 21 tables exactly (columns, types, nullability, FKs → relations, CHECK enums
  *    → options), compared with pg_catalog independently of the code's definitions;
  *  - the §0.3 locks hold in the stored rows (seven system objects, no custom fields, locked + read-only fields, S13);

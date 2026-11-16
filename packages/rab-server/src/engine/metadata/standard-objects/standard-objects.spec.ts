@@ -199,6 +199,12 @@ describe('M1 / E2: the sync planner', () => {
     expect(v(tweak('shift', (o) => ({ ...o, fields: o.fields.map((f) => (f.column === 'status' ? { ...f, isUIReadOnly: false } : f)) })))).toThrow(/S13/);
     expect(v(tweak('job_role', (o) => ({ ...o, fields: o.fields.map((f) => (f.column === 'default_rate_pence' ? { ...f, settings: { dataType: 'bigint' as const } } : f)) })))).toThrow(/money/);
     expect(v(D.standard.slice(1))).toThrow(/exactly the 21/);
+    // Level 22: a workspaceMember relation is enforced by exactly service:CoreReferenceService (not any service:*), no onDelete.
+    const member = (change: (r: NonNullable<StandardObjectDefinition['fields'][number]['relation']>) => object) =>
+      tweak('venue', (o) => ({ ...o, fields: o.fields.map((f) => (f.column === 'created_by' ? { ...f, relation: { ...f.relation!, ...change(f.relation!) } } : f)) }));
+    expect(v(member(() => ({ enforcedBy: 'service:SomethingElse' })))).toThrow(/CoreReferenceService/);
+    expect(v(member(() => ({ onDelete: 'CASCADE' as const })))).toThrow(/CoreReferenceService/);
+    expect(D.standard.flatMap((o) => o.fields).filter((f) => f.relation?.target === 'workspaceMember').every((f) => f.relation!.enforcedBy === 'service:CoreReferenceService')).toBe(true);
   });
 });
 
