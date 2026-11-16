@@ -168,9 +168,12 @@ describeIfDb('C3 Q3: staff_profile_workspace_required validated as structure lev
 
   it('fail closed: VALIDATE reads rows without RLS and refuses a NULL workspace_id (23514); the runner leaves a tampered workspace blocked at 22, rows untouched', async () => {
     const t = await make('tamper');
-    // Tamper as the cluster superuser (an operator mistake): the bound CHECK removed, then a row with no workspace.
+    // Tamper as the cluster superuser (an operator mistake): the bound CHECK, the constraint and the column's NOT NULL removed,
+    // then a row with no workspace.
     await admin.query(`ALTER TABLE ${t.schema}.staff_profile DROP CONSTRAINT staff_profile_workspace_bound`);
     await admin.query(`ALTER TABLE ${t.schema}.staff_profile DROP CONSTRAINT staff_profile_workspace_required`);
+    // The column itself is NOT NULL in the template as well (a third guard): the tamper removes it too.
+    await admin.query(`ALTER TABLE ${t.schema}.staff_profile ALTER COLUMN workspace_id DROP NOT NULL`);
     await admin.query(`INSERT INTO ${t.schema}.staff_profile (organisation_id, user_id, staff_ref, workspace_id, created_by) VALUES ($1, $2, $3, NULL, $2)`, [t.org, t.owner, `WSQ3-T-${SFX}`]);
     await admin.query(`ALTER TABLE ${t.schema}.staff_profile ADD CONSTRAINT staff_profile_workspace_required CHECK ((workspace_id IS NOT NULL)) NOT VALID`);
     // The statement itself, as crewflow with a tenant bound (the runner's session shape): refused, nothing validated.

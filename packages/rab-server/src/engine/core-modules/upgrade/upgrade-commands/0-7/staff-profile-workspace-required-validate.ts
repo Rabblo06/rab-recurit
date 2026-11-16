@@ -22,7 +22,7 @@ import type { WorkspaceUpgradeCommand } from '../workspace-upgrade-command';
  *   - Fail closed: the validation scan reads every row WITHOUT row-level security, so a row with workspace_id NULL makes it
  *     fail (23514); the runner rolls the step back, records it failed and blocks the workspace (503) — never served at a level
  *     it did not reach. No row can violate it in practice: `staff_profile_workspace_bound` (validated since the template)
- *     already requires `workspace_id IS NOT NULL AND workspace_id = <this workspace>`. A data pre-check is deliberately not
+ *     already requires `workspace_id IS NOT NULL AND workspace_id = <this workspace>`, and the column itself is NOT NULL. A data pre-check is deliberately not
  *     declared: it would run under FORCE RLS bound to this workspace and could never see a NULL workspace_id row.
  * Twenty has no equivalent (no RLS, no NOT VALID legacy constraints in workspace schemas): a Crewflow addition.
  */
