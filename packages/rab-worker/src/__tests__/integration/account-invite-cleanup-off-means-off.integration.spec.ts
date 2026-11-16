@@ -9,6 +9,10 @@ import { TenantContextService } from '@rab/server/engine/core-modules/tenant/ten
 import { resolveInviteAutoDeleteEnabled, runAccountInviteCleanupCycle } from '../../queues/rab-maintenance/account-invite-cleanup.job';
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { createTestIdentityFactory, TestIdentity, TestIdentityFactory } from './helpers/test-identities';
+import { businessSchema } from './helpers/hws-fixtures';
+import { Client } from 'pg';
+import { resolveIntegrationTestDatabase } from '@rab/server/database/typeorm/core/test-database-guard';
+import { checkWorkspaceCoreOrphans } from '@rab/server/database/typeorm/workspace-schema/workspace-core-orphans';
 import { integrationTestDatabaseReady } from '@rab/server/database/typeorm/core/integration-test-database-gate';
 
 /**
@@ -285,6 +289,66 @@ describeIfDb('D-1: account-invite cleanup with auto-delete OFF changes nothing, 
       expect(await skipReason(ids.withSession)).toBe('had_session');
       expect(await status(ids.withBusinessRef)).toBe('invite_expired');
       expect(await skipReason(ids.withBusinessRef)).toBe('venue');
+    }
+  });
+
+  it('7. Part D 0a (F1-T, review L-1): ON as the owner-member login, the owner-id binding clears only the invitee\'s own references in its workspace', async () => {
+    const owner = await factory.createInternalManager(await factory.createOrganisation('d1f1t'), { label: 'd1f1t-owner' });
+    const org = owner.organisationId;
+    const ws = owner.workspaceId!;
+    const schema = businessSchema(ws);
+    const q = `"${schema}"`;
+    const onCore = schema === 'core'; // HWS off: the core copy, whose foreign keys still act (a core-FK scope check)
+    if (!onCore) {
+      const [{ n }] = await admin.query<Array<{ n: number }>>(
+        `SELECT count(*)::int AS n FROM pg_catalog.pg_constraint k JOIN pg_catalog.pg_namespace s ON s.oid = k.connamespace
+          WHERE s.nspname = $1 AND k.contype = 'f' AND k.confrelid = 'core."user"'::regclass`,
+        [schema],
+      );
+      expect(n).toBe(0);
+    }
+    const one = async (sql: string, params: unknown[]) => ((await admin.query(sql, params)) as Array<{ id: string }>)[0]!.id;
+    const note = (subject: string, author: string, body: string) =>
+      onCore
+        ? one(`INSERT INTO ${q}.user_note (organisation_id, subject_user_id, author_user_id, body) VALUES ($1, $2, $3, $4) RETURNING id`, [org, subject, author, body])
+        : one(`INSERT INTO ${q}.user_note (organisation_id, workspace_id, subject_user_id, author_user_id, body) VALUES ($1, $2, $3, $4, $5) RETURNING id`, [org, ws, subject, author, body]);
+
+    const invitee = await seedInvite(org, { status: 'invite_expired', expires: '-8 days', cleanup: '-1 minute' });
+    const inviteeProfile = await one(
+      `INSERT INTO ${q}.staff_profile (organisation_id, workspace_id, user_id, staff_ref, created_by) VALUES ($1, $2, $3, $4, $5) RETURNING id`,
+      [org, ws, invitee, `INV-${randomUUID().slice(0, 8)}`, owner.userId],
+    );
+    const other = await one(
+      `INSERT INTO core."user" (organisation_id, email, first_name, last_name, status) VALUES ($1, $2, 'Other', 'Staff', 'active') RETURNING id`,
+      [org, `d1f1t-other-${randomUUID()}@example.test`],
+    );
+    const otherProfile = await one(
+      `INSERT INTO ${q}.staff_profile (organisation_id, workspace_id, user_id, staff_ref, created_by) VALUES ($1, $2, $3, $4, $5) RETURNING id`,
+      [org, ws, other, `OTH-${randomUUID().slice(0, 8)}`, other],
+    );
+    const noteAboutOther = await note(other, other, 'about other');
+    const noteByInvitee = await note(other, invitee, 'by invitee');
+
+    const ownerMember = await openAs(ownerMemberRole, ownerMemberPassword);
+    const gone = async () => (await admin.query(`SELECT 1 FROM core."user" WHERE id = $1`, [invitee])).length === 0;
+    for (let tick = 0; tick < 20 && !(await gone()); tick += 1) {
+      await runAccountInviteCleanupCycle(ownerMember, { autoDeleteEnabled: true });
+    }
+    expect(await gone()).toBe(true);
+    expect(await admin.query(`SELECT 1 FROM ${q}.staff_profile WHERE id = $1`, [inviteeProfile])).toHaveLength(0);
+    expect(await admin.query(`SELECT user_id, created_by FROM ${q}.staff_profile WHERE id = $1`, [otherProfile])).toEqual([{ user_id: other, created_by: other }]);
+    expect(await admin.query(`SELECT subject_user_id, author_user_id FROM ${q}.user_note WHERE id = $1`, [noteAboutOther])).toEqual([{ subject_user_id: other, author_user_id: other }]);
+    expect(await admin.query(`SELECT subject_user_id, author_user_id FROM ${q}.user_note WHERE id = $1`, [noteByInvitee])).toEqual([{ subject_user_id: other, author_user_id: null }]);
+
+    const c = new Client({ connectionString: resolveIntegrationTestDatabase(process.env).adminUrl });
+    await c.connect();
+    try {
+      await c.query('SET ROLE crewflow');
+      const orphans = await checkWorkspaceCoreOrphans(c, [ws]);
+      expect(orphans.errors).toEqual([]);
+      expect(orphans.findings).toEqual([]);
+    } finally {
+      await c.end();
     }
   });
 });
