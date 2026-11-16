@@ -120,7 +120,9 @@ test.describe.serial('S2 Manager A business flow in workspace A', () => {
     m ??= await managerFor('A');
     const att = (await sql(`select id, clock_out_at from ${tbl(s.A, 'attendance')} where id = $1`, [s.A.attendanceId]))[0];
     const newIn = new Date(new Date(att.clock_out_at).getTime() - 240 * 60_000).toISOString();
-    const corr = expectStatus(await m.post(`/rest/v1/attendance/${s.A.attendanceId}/correct`, { field: 'clockInAt', newValue: newIn, reason: 'W6 e2e: staff arrived on time, phone clock-in was late' }), 201, 'correct').body;
+    // Worked time comes from moving the clock-in hours before the scheduled start: an unusually early clock-in
+    // correction, so it is explicitly confirmed (owner brief 2026-11-15, 409 CLOCK_IN_CONFIRMATION_REQUIRED otherwise).
+    const corr = expectStatus(await m.post(`/rest/v1/attendance/${s.A.attendanceId}/correct`, { field: 'clockInAt', newValue: newIn, reason: 'W6 e2e: staff arrived on time, phone clock-in was late', confirmUnusualClockIn: true }), 201, 'correct').body;
     const review = expectStatus(await m.post(`/rest/v1/attendance/report/shift/${s.A.shiftId}/staff/${s.A.staffProfileId}/attendance-review`), 200, 'attendance review').body;
     const fin = expectStatus(await m.patch(`/rest/v1/attendance/report/shift/${s.A.shiftId}/finalise`, {}), 200, 'finalise report').body;
     const report = expectStatus(await m.get(`/rest/v1/attendance/report/shift/${s.A.shiftId}`), 200, 'report').body;

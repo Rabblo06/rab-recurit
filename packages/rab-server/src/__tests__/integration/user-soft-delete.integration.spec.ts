@@ -117,8 +117,10 @@ describeIfDb('user soft delete — owner 0g (integration)', () => {
     const out = await http().post('/rest/v1/attendance/clock-out').set(auth(staffToken)).send({ qrToken: await signQr(shiftId) });
     expect(out.status).toBe(201);
     const attendanceId = out.body.id as string;
+    // Worked time comes from moving the clock-in hours before the scheduled start: an unusually early clock-in
+    // correction, so it is explicitly confirmed (owner brief 2026-11-15, 409 CLOCK_IN_CONFIRMATION_REQUIRED otherwise).
     const corrected = await http().post(`/rest/v1/attendance/${attendanceId}/correct`).set(auth(tokenA))
-      .send({ field: 'clockInAt', newValue: new Date(new Date(out.body.clockOutAt).getTime() - 120 * 60_000).toISOString(), reason: '0g test: real worked time' });
+      .send({ field: 'clockInAt', newValue: new Date(new Date(out.body.clockOutAt).getTime() - 120 * 60_000).toISOString(), reason: '0g test: real worked time', confirmUnusualClockIn: true });
     expect(corrected.status).toBe(201);
     expect((await http().post(`/rest/v1/attendance/report/shift/${shiftId}/staff/${s.profileId}/attendance-review`).set(auth(tokenA))).status).toBe(200);
     const fin = await http().patch(`/rest/v1/attendance/report/shift/${shiftId}/finalise`).set(auth(tokenA));

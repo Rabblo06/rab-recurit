@@ -94,6 +94,8 @@ interface ReportRow {
   attendanceStatus: string | null;
   assignmentStatus: string;
   corrected: boolean;
+  /** The clock-in is earlier than the normal allowance and a manager explicitly confirmed it (absent on an older API). */
+  unusualClockInConfirmed?: boolean;
 }
 interface Report {
   ready: boolean;
@@ -1109,6 +1111,9 @@ export default function VenueOfferPipeline() {
                               row.attendanceStatus || row.assignmentStatus
                             ).replaceAll('_', ' ')}
                             {row.corrected ? ' - Corrected' : ''}
+                            {row.unusualClockInConfirmed
+                              ? ' - Unusual time confirmed'
+                              : ''}
                           </td>
                         </tr>
                       ))}

@@ -80,7 +80,9 @@ struct RecordAttendanceDraft: Equatable {
     /// The request body, only for a draft that validates. `expectedVersion`
     /// is the row's `attendanceVersion` echoed unchanged (omitted when the
     /// row had none); the explanation is sent only for "Other".
-    func body(expectedVersion: String?, now: Date?) -> RecordAttendanceBody? {
+    /// `confirmUnusualClockIn` is true only for the resend after Confirm on
+    /// the "Unusual clock-in time" warning (same draft, same body + the flag).
+    func body(expectedVersion: String?, now: Date?, confirmUnusualClockIn: Bool = false) -> RecordAttendanceBody? {
         guard validate(now: now).isEmpty, let reason else { return nil }
         let trimmedNote = note.trimmingCharacters(in: .whitespacesAndNewlines)
         return RecordAttendanceBody(
@@ -89,7 +91,8 @@ struct RecordAttendanceDraft: Equatable {
             breakMinutes: breakValue,
             reasonCode: reason.rawValue,
             reasonNote: reason == .other && !trimmedNote.isEmpty ? trimmedNote : nil,
-            expectedVersion: expectedVersion
+            expectedVersion: expectedVersion,
+            confirmUnusualClockIn: confirmUnusualClockIn ? true : nil
         )
     }
 }
@@ -151,7 +154,10 @@ struct CorrectionDraft: Equatable {
         case body(CorrectAttendanceBody)
     }
 
-    func build(row: ShiftReportStaffRow) -> Outcome {
+    /// `confirmUnusualClockIn` is true only for the resend after Confirm on
+    /// the "Unusual clock-in time" warning: the same draft, the same body,
+    /// plus the explicit confirmation (clock-in corrections only).
+    func build(row: ShiftReportStaffRow, confirmUnusualClockIn: Bool = false) -> Outcome {
         let reasonText = reason.trimmingCharacters(in: .whitespacesAndNewlines)
         guard reasonText.count >= 10 else { return .invalid("Please explain this change in at least 10 characters.") }
         switch field {
@@ -163,7 +169,8 @@ struct CorrectionDraft: Equatable {
         case .clockInAt, .clockOutAt:
             guard let value else { return .invalid("Pick a time.") }
             if let problem = orderProblem(row: row) { return .invalid(problem) }
-            return .body(CorrectAttendanceBody(field: field.rawValue, newValue: ISO8601.string(from: value), reason: reasonText))
+            return .body(CorrectAttendanceBody(field: field.rawValue, newValue: ISO8601.string(from: value), reason: reasonText,
+                                               confirmUnusualClockIn: confirmUnusualClockIn && field == .clockInAt ? true : nil))
         }
     }
 }
