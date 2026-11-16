@@ -35,7 +35,7 @@ const RAB_SET_SQL = `COALESCE((SELECT pg_catalog.string_agg(x.name || '=' || x.v
     SELECT s.name, COALESCE(s.setting, '') FROM pg_catalog.pg_settings s WHERE s.name LIKE 'rab.%') x
    WHERE x.value <> ''), '')`;
 
-/** Layer 3: the session facts that must be unchanged by the command (same backend, transaction, role, every rab.*, path). */
+/** Layer 3: the session facts that must be unchanged by the command (same backend, transaction, role, every rab.*, path, statistics, replication role). */
 // sql-injection-reviewed: KNOWN_LIST / RAB_SET_SQL are built only from the constant KNOWN_RAB_SETTINGS array of this file (plain rab.<snake> names); no runtime value is interpolated.
 export const INVARIANTS_SQL = `SELECT pg_catalog.pg_backend_pid() AS pid, pg_catalog.transaction_timestamp()::text AS tx,
   pg_catalog.current_setting('role') AS role, pg_catalog.current_setting('search_path') AS search_path,
@@ -43,6 +43,9 @@ export const INVARIANTS_SQL = `SELECT pg_catalog.pg_backend_pid() AS pid, pg_cat
   COALESCE(pg_catalog.current_setting('rab.organisation_id', true), '') AS org,
   COALESCE(pg_catalog.current_setting('rab.workspace_id', true), '') AS ws,
   COALESCE(pg_catalog.current_setting('rab.upgrade_scope', true), '') AS scope,
+  -- #166 Info-1: a step may not switch statistics off (the write counters would read zero) nor set replica mode (skips triggers).
+  pg_catalog.current_setting('track_counts') AS track_counts,
+  pg_catalog.current_setting('session_replication_role') AS replication_role,
   ${RAB_SET_SQL} AS rab`;
 
 /**
@@ -197,3 +200,34 @@ export const RELEASE_EXTRA_ADVISORY_SQL = `SELECT pg_catalog.count(CASE
 
 /** N1: the M1 write counters exist only while statistics are collected. */
 export const TRACK_COUNTS_SQL = `SELECT pg_catalog.current_setting('track_counts') AS track_counts`;
+
+/**
+ * Metadata engine M1 / E2: the metadata tables a command that declares `writesWorkspaceMetadata` may write (INSERT / UPDATE
+ * only), its own workspace's rows only: the standard-object sync's three tables and M1-cache's version row (written by the
+ * version trigger on those tables). A frozen list: anything else outside the schema keeps the "no write" rule.
+ */
+export const WORKSPACE_METADATA_TABLES = Object.freeze(['object_metadata', 'field_metadata', 'field_metadata_option', 'workspace_metadata_state'] as const);
+
+/** Per metadata table: its oid (NULL when the table does not exist) and this backend's insert / update / delete counters. */
+export const METADATA_WRITE_COUNTERS_SQL = `SELECT t.name, c.oid::text AS relid,
+       COALESCE(pg_catalog.pg_stat_get_xact_tuples_inserted(c.oid), 0)::text AS ins,
+       COALESCE(pg_catalog.pg_stat_get_xact_tuples_updated(c.oid), 0)::text AS upd,
+       COALESCE(pg_catalog.pg_stat_get_xact_tuples_deleted(c.oid), 0)::text AS del
+  FROM pg_catalog.unnest($1::text[]) AS t(name)
+  LEFT JOIN pg_catalog.pg_class c ON c.oid = pg_catalog.to_regclass('core.' || t.name)`;
+
+/** The metadata tables that must exist for such a command (the version-state table of M1-cache is optional). */
+export const REQUIRED_WORKSPACE_METADATA_TABLES = Object.freeze(['object_metadata', 'field_metadata', 'field_metadata_option'] as const);
+
+/**
+ * Per metadata table: the rows of the TARGET workspace written by this transaction (REPEATABLE READ: `age(xmin) <= 0` is this
+ * transaction), as seen under the runner's FORCE-RLS binding to the target ($1 = its workspace id). A row written into any other
+ * workspace is invisible here, so its write shows up only in the counters, and the two numbers differ. One constant statement
+ * per table (run only for the tables that exist).
+ */
+export const METADATA_WRITTEN_ROWS_SQL: Readonly<Record<(typeof WORKSPACE_METADATA_TABLES)[number], string>> = Object.freeze({
+  object_metadata: `SELECT pg_catalog.count(*)::text AS n FROM core.object_metadata m WHERE m.workspace_id = $1 AND pg_catalog.age(m.xmin) <= 0`,
+  field_metadata: `SELECT pg_catalog.count(*)::text AS n FROM core.field_metadata m WHERE m.workspace_id = $1 AND pg_catalog.age(m.xmin) <= 0`,
+  field_metadata_option: `SELECT pg_catalog.count(*)::text AS n FROM core.field_metadata_option m WHERE m.workspace_id = $1 AND pg_catalog.age(m.xmin) <= 0`,
+  workspace_metadata_state: `SELECT pg_catalog.count(*)::text AS n FROM core.workspace_metadata_state m WHERE m.workspace_id = $1 AND pg_catalog.age(m.xmin) <= 0`,
+});

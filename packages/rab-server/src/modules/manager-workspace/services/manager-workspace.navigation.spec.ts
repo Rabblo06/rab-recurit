@@ -3,6 +3,11 @@ import { ForbiddenException, NotFoundException } from '@nestjs/common';
 import { ManagerProfile } from '../../manager/entities/manager-profile.entity';
 import { ManagerWorkspace } from '../entities/manager-workspace.entity';
 import { ManagerWorkspaceService } from './manager-workspace.service';
+
+// Metadata engine M1 / E2: the standard-object sync needs a real database (covered by standard-objects-*.integration.spec.ts);
+// these no-database specs replace it with a stub that records the call.
+const mockStandardSync = jest.fn(async () => ({ objectsInserted: 25, objectsUpdated: 0, fieldsInserted: 344, fieldsUpdated: 0, optionsInserted: 0, optionsUpdated: 0 }));
+jest.mock('../../../engine/metadata/standard-objects/standard-objects-new-workspace', () => ({ syncStandardObjectsForNewWorkspace: (...a: unknown[]) => mockStandardSync(...(a as [])) }));
 import { WorkspaceProvisioningService } from './workspace-provisioning.service';
 
 /**
