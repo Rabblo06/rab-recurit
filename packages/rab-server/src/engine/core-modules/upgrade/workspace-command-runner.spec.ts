@@ -56,8 +56,16 @@ describe('Part D: workspace upgrade commands in the sequence (Twenty upgrade-seq
     expect(lastInstanceStepOfVersion('0.6.0')).toBe('0.6.0_TypeOrmMigrations');
   });
 
-  it('the level-21 and level-22 commands declare a v2 fingerprint for every supported PostgreSQL major (16, 17, 18)', () => {
-    for (const command of WORKSPACE_UPGRADE_COMMANDS['0-6']) {
+  it('0.7.0 has one workspace command (level 23, C3 Q3 DRAFT), after the instance command of the release (the HWS cutover)', () => {
+    expect(WORKSPACE_UPGRADE_COMMANDS['0-7'].map((c) => [c.name, c.timestamp, c.structure?.level, c.structure?.mayDrop === true, Boolean(c.precheck)])).toEqual([
+      ['ValidateStaffProfileWorkspaceRequired', 1786721570000, 23, false, false],
+    ]);
+    expect(lastInstanceStepOfVersion('0.7.0')).toBe('0.7.0_HwsCutover_1786721540100');
+    expect(lastStepOfVersion('0.7.0')).toBe('0.7.0_ValidateStaffProfileWorkspaceRequired_1786721570000');
+  });
+
+  it('the level-21, level-22 and level-23 commands declare a v2 fingerprint for every supported PostgreSQL major (16, 17, 18)', () => {
+    for (const command of [...WORKSPACE_UPGRADE_COMMANDS['0-6'], ...WORKSPACE_UPGRADE_COMMANDS['0-7']]) {
       const fps = command.structure!.fingerprints;
       expect(Object.keys(fps).sort()).toEqual(['16', '17', '18']);
       for (const v of Object.values(fps)) expect(v).toMatch(/^[0-9a-f]{64}$/);
@@ -168,7 +176,7 @@ describe('Part D (review M3): the code structure level drives the gates', () => 
 
   it('20 with no structural command; 21, 22 with probes; a gap is refused', () => {
     expect(codeWorkspaceStructureLevel({})).toBe(20);
-    expect(codeWorkspaceStructureLevel()).toBe(22);
+    expect(codeWorkspaceStructureLevel()).toBe(23);
     const reg = { '0-7': [probe(21, { provisionFunctionLiteral: 'db:provision_workspace@Probe1799999999991' })], '0-8': [probe(22)] };
     expect(codeWorkspaceStructureLevel(reg)).toBe(22);
     expect(structuralCommandsThrough(21, reg).map((s) => s.structure.level)).toEqual([21]);
@@ -239,10 +247,11 @@ describe('Part D (review Info / N4): source guard on upgrade-commands/**', () =>
 
 describe('Part D (review N4): a structural command cannot land unreviewed', () => {
   /** Raise ONLY together with a review of MIN_COMPATIBLE_WORKSPACE_MODULE_VERSION (D-RUNNER.md §5.3 step 4). */
-  // 21 since StaffProfileMemberSelect (0b), 22 since DropWorkspaceCoreForeignKeys (0a, DRAFT). Reviewed floor: 20 — this code
-  // reads nothing level 21 or 22 creates (a member policy that fails closed when absent; dropped constraints), and a workspace
-  // below the code level is BLOCKED by the runner (review P1). The pair is pinned explicitly, never derived.
-  const REVIEWED_STRUCTURE_LEVEL = 22;
+  // 21 since StaffProfileMemberSelect (0b), 22 since DropWorkspaceCoreForeignKeys (0a), 23 since
+  // ValidateStaffProfileWorkspaceRequired (C3 Q3, DRAFT). Reviewed floor: 20 — this code reads nothing level 21, 22 or 23
+  // creates (a member policy that fails closed when absent; dropped constraints; a CHECK that is enforced on every write either
+  // way), and a workspace below the code level is BLOCKED by the runner (review P1). The pair is pinned explicitly, never derived.
+  const REVIEWED_STRUCTURE_LEVEL = 23;
   const REVIEWED_ROUTING_FLOOR = 20;
   it('the code structure level and the routing floor equal their reviewed values', () => {
     expect(codeWorkspaceStructureLevel()).toBe(REVIEWED_STRUCTURE_LEVEL);

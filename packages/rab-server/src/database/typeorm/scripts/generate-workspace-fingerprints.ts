@@ -316,13 +316,16 @@ async function verify(major: number): Promise<void> {
     const level = codeWorkspaceStructureLevel();
     const want = level > L ? declaredFingerprint(level, major as 16 | 17 | 18) : t[L];
     const atLevel = async (id: string) => (level > L ? fingerprintV2(c, id) : fingerprint(c, id));
-    if (level > L) results.push(`v${L} -> structure level ${level} ${want && (await upgradeToCodeLevel(c, legacy)) === want ? 'OK' : 'MISMATCH'}`);
+    // On a mismatch the MEASURED value is printed (a fingerprint is a catalog hash, not a secret): a new structure level's
+    // declared value is reviewed from this line, like FINGERPRINTS_APPEND_JSON for a module.
+    const verdict = (got: string | null) => (want && got === want ? 'OK' : `MISMATCH (measured ${got ?? 'none'}, declared ${want ?? 'none'})`);
+    if (level > L) results.push(`v${L} -> structure level ${level} ${verdict(await upgradeToCodeLevel(c, legacy))}`);
 
     const ts = await seedWorkspace(c, `fpv-ts-${RUN}`);
     await c.query('SET ROLE crewflow');
     const tsRes = await provisionWorkspaceSchema(c, ts.id);
     await c.query('RESET ROLE');
-    results.push(`typescript ${tsRes.outcome} ${want && (await atLevel(ts.id)) === want ? 'OK' : 'MISMATCH'}`);
+    results.push(`typescript ${tsRes.outcome} ${verdict(await atLevel(ts.id))}`);
 
     // The server path as the RUNTIME login, which is the owner login (owner-login architecture); no other role is unlocked.
     const srv = await seedWorkspace(c, `fpv-srv-${RUN}`);
@@ -333,7 +336,7 @@ async function verify(major: number): Promise<void> {
       await owner.query('COMMIT');
       return rows[0].o as string;
     });
-    results.push(`server path ${outcome} ${want && (await atLevel(srv.id)) === want ? 'OK' : 'MISMATCH'}`);
+    results.push(`server path ${outcome} ${verdict(await atLevel(srv.id))}`);
     for (const r of results) log(`  ${r}`);
     if (results.some((r) => !/ OK$/.test(r) || /FAILED|REFUSED/.test(r))) throw new Error('verification FAILED');
     log(`PostgreSQL ${major}: every provisioning path produces the committed fingerprints (v14, v${L}${level > L ? ` and structure level ${level} (v2)` : ''})`);

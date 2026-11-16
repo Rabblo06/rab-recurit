@@ -32,6 +32,8 @@ const SFX = Math.random().toString(36).replace(/[^a-z]/g, '').slice(0, 6) || 'x'
 const LOCK = MIGRATION_LOCK_KEY.toString();
 const FK_STEP = `0.6.0_${WORKSPACE_CORE_FK_REMOVAL.name}_${WORKSPACE_CORE_FK_REMOVAL.timestamp}`;
 const W = 12;
+/** The registry through level 22 (0a): later structural commands (C3 Q3's level 23) are proven by their own spec. */
+const L22 = { '0-6': [...(WORKSPACE_UPGRADE_COMMANDS['0-6'] ?? [])] };
 
 describeIfDb('Part D 0a: workspace → core foreign keys removed (integration, throwaway database)', () => {
   const { adminUrl, appUrl } = RUN ? integrationTestDatabase() : ({} as never);
@@ -58,7 +60,7 @@ describeIfDb('Part D 0a: workspace → core foreign keys removed (integration, t
     const level21 = { '0-6': (WORKSPACE_UPGRADE_COMMANDS['0-6'] ?? []).filter((c) => (c.structure?.level ?? 0) <= 21) };
     if (how === 'frozen') expect(await provisionTypeScript(adminUrl, ws, { workspaceRegistry: FROZEN_TEMPLATE_REGISTRY })).toBe('READY');
     if (how === 'level21') expect(await provisionTypeScript(adminUrl, ws, { workspaceRegistry: level21 })).toBe('READY');
-    if (how === 'ts') expect(await provisionTypeScript(adminUrl, ws)).toBe('READY');
+    if (how === 'ts') expect(await provisionTypeScript(adminUrl, ws, { workspaceRegistry: L22 })).toBe('READY');
     if (how === 'sql') expect(await provisionServerPath(appUrl, ws)).toBe('READY');
     return ws;
   };
@@ -76,7 +78,7 @@ describeIfDb('Part D 0a: workspace → core foreign keys removed (integration, t
     Number((await admin.query(`SELECT count(*)::int AS n FROM pg_constraint k JOIN pg_namespace s ON s.oid = k.connamespace WHERE s.nspname = $1 AND k.contype = 'f'`, [ws.schema])).rows[0].n);
   const fp = async (ws: SeededWorkspace) => (await admin.query('SELECT core.workspace_schema_fingerprint($1) AS v1, core.workspace_schema_fingerprint_v2($1) AS v2', [ws.id])).rows[0];
   const runner = (o: Partial<WorkspaceRunOptions> & Pick<WorkspaceRunOptions, 'workspaceIds'>) =>
-    new WorkspaceCommandRunner({ codeVersion: '0.6.0', versions: ['0.4.0', '0.5.0'], force: false, adopt: true, log: () => undefined, ...o }).run(session);
+    new WorkspaceCommandRunner({ codeVersion: '0.6.0', versions: ['0.4.0', '0.5.0'], force: false, adopt: true, log: () => undefined, workspaceRegistry: L22, ...o }).run(session);
 
   /** Relation locks held on workspace_* tables by a transaction that deletes / key-updates a core user (rolled back). */
   const workspaceLocksOf = async (sql: string, params: unknown[], schemas: string[]): Promise<number> => {
@@ -119,7 +121,7 @@ describeIfDb('Part D 0a: workspace → core foreign keys removed (integration, t
   });
 
   it('the reference list is exactly the 72 constraints of the frozen template (31 user, 21 organisation, 20 workspace)', async () => {
-    expect(codeWorkspaceStructureLevel()).toBe(22);
+    expect(codeWorkspaceStructureLevel()).toBeGreaterThanOrEqual(22);
     const refs = coreReferences();
     expect(refs).toHaveLength(72);
     expect(refs.filter((r) => r.target === 'core."user"')).toHaveLength(31);
@@ -143,7 +145,10 @@ describeIfDb('Part D 0a: workspace → core foreign keys removed (integration, t
     }
     expect((await runner({ workspaceIds: [a.id, b.id] })).outcomes.map((o) => o.status)).toEqual(['up-to-date', 'up-to-date']);
     const [ts, sql] = [await make('nw-ts', 'ts'), await make('nw-sql', 'sql')];
-    for (const w of [ts, sql]) {
+    // core.provision_workspace builds THIS code's level: compared with the upgraded one only while that is 22.
+    expect(await coreFks(sql)).toBe(0);
+    expect((await registryOf(admin, sql.id)).module_version).toBe(codeWorkspaceStructureLevel());
+    for (const w of codeWorkspaceStructureLevel() === 22 ? [ts, sql] : [ts]) {
       expect(await coreFks(w)).toBe(0);
       expect((await registryOf(admin, w.id)).module_version).toBe(22);
       expect(await fp(w)).toEqual(await fp(a));

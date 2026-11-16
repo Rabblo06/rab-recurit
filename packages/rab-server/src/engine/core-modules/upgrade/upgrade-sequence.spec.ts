@@ -15,9 +15,10 @@ describe('upgrade-sequence (Twenty upgrade-command-registry naming)', () => {
 
   it('a version is its migrations step then its commands by timestamp; the last step decides completeness', () => {
     const registry = { '0-7': [cmd('Second', 1786721490000), cmd('First', 1786721480000)] };
-    expect(stepsForVersion('0.7.0', registry)).toEqual(['0.7.0_TypeOrmMigrations', '0.7.0_First_1786721480000', '0.7.0_Second_1786721490000']);
-    expect(lastStepOfVersion('0.7.0', registry)).toBe('0.7.0_Second_1786721490000');
-    expect(lastStepOfVersion('0.4.0', registry)).toBe('0.4.0_TypeOrmMigrations');
+    // Instance commands only here (no workspace registry): 0.7.0's real workspace command is covered by workspace-command-runner.spec.
+    expect(stepsForVersion('0.7.0', registry, {})).toEqual(['0.7.0_TypeOrmMigrations', '0.7.0_First_1786721480000', '0.7.0_Second_1786721490000']);
+    expect(lastStepOfVersion('0.7.0', registry, {})).toBe('0.7.0_Second_1786721490000');
+    expect(lastStepOfVersion('0.4.0', registry, {})).toBe('0.4.0_TypeOrmMigrations');
   });
 
   it('every registered command has a valid, unique name and timestamp', () => {
