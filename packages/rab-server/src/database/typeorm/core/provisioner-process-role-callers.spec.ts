@@ -62,7 +62,8 @@ export function guardCallsIn(file: string, source: string): GuardCall[] {
   const visit = (node: ts.Node): void => {
     if (ts.isCallExpression(node)) {
       const name = calleeName(node.expression);
-      const spec = name ? GUARDED_CALLS[name] : undefined;
+      // Own keys only: a plain-object lookup would also match Object.prototype members (`x.toString(...)`).
+      const spec = name && Object.prototype.hasOwnProperty.call(GUARDED_CALLS, name) ? GUARDED_CALLS[name] : undefined;
       if (name && spec) {
         out.push({
           file,
@@ -125,6 +126,8 @@ describe("X5.1: the 'provisioner' process role has no live caller", () => {
     const f = 'packages/rab-worker/src/fixture.ts';
     expect(provisionerRoleProblems(guardCallsIn(f, "await runDatabaseBootGates('worker'); assertRuntimeDatabaseIdentity('api');"))).toEqual([]);
     expect(provisionerRoleProblems(guardCallsIn(f, "resolveRuntimeDatabase({ processName: 'api', env });"))).toEqual([]);
+    // Unrelated calls whose names are Object.prototype members are not guard calls.
+    expect(guardCallsIn(f, 'value.toString(16); a.hasOwnProperty(k); o.valueOf();')).toEqual([]);
     for (const bad of [
       "await runDatabaseBootGates('provisioner');",
       "await guards.assertRuntimeDatabaseIdentity('provisioner');",
