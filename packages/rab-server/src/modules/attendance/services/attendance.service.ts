@@ -1722,19 +1722,19 @@ export class AttendanceService {
     if ((input.dto.expectedVersion ?? null) !== currentVersion) {
       throw new ConflictException('This attendance was changed by someone else. Refresh to see the latest times.');
     }
-    // Owner decision 2026-11-16 (review finding 2, option b): the clock-in is judged when the manager enters a new one,
-    // AND when the stored one is kept but is now earlier than the allowance against the seat's CURRENT start (e.g. the
-    // seat start moved later) without a confirmation of exactly that time on record. Then this write needs the explicit
-    // confirmation (409 otherwise) and the hard floor applies (422). An already-confirmed stored time is never re-asked.
-    // "Not inside" the allowance, so an unreadable bound is judged rather than skipped.
+    // Owner decisions 2026-11-16 (review finding 2, option b; re-review): the clock-in is judged when the manager enters
+    // a new one, AND when the stored one is kept but is now earlier than the allowance against the seat's CURRENT start
+    // (e.g. the seat start moved later). Judged means: the hard floor ALWAYS applies (422, confirmed or not — "never
+    // earlier than 12 h before the staff member's start, even after Confirm"), and the explicit confirmation is needed
+    // (409) unless exactly that stored time was already confirmed (never re-asked). "Not inside" the allowance, so an
+    // unreadable bound is judged rather than skipped.
     const clockInEntered = corrections.some((c) => c.field === 'clockInAt');
-    const storedNeedsConfirmation =
-      !clockInEntered &&
-      !(clockInAt.getTime() >= this.attendanceWindow(input.window).opensAt.getTime()) &&
-      !(await this.hasClockInConfirmation(manager, ctx, attendance.id, clockInAt));
-    const unusualEarliest = this.assertManagerEnteredTimes(
-      input.window, input.now, clockInAt, clockOutAt, breakMinutes ?? input.scheduledBreak, clockInEntered || storedNeedsConfirmation,
+    const storedOutsideAllowance = !clockInEntered && !(clockInAt.getTime() >= this.attendanceWindow(input.window).opensAt.getTime());
+    const storedAlreadyConfirmed = storedOutsideAllowance && (await this.hasClockInConfirmation(manager, ctx, attendance.id, clockInAt));
+    const judgedEarliest = this.assertManagerEnteredTimes(
+      input.window, input.now, clockInAt, clockOutAt, breakMinutes ?? input.scheduledBreak, clockInEntered || storedOutsideAllowance,
     );
+    const unusualEarliest = storedAlreadyConfirmed ? null : judgedEarliest;
     const { status, recovered } = this.resolveCorrectionStatus(attendance, assignment, shift, input.now, clockOutAt);
     const unusualAudit = this.requireUnusualClockInConfirmation(unusualEarliest, clockInAt, input.dto.confirmUnusualClockIn);
     const before = {

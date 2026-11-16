@@ -711,6 +711,38 @@ describeIfDb('manual attendance recording and confirmed no-show (integration)', 
         expect(await correctedAudits(s.attendanceId!)).toHaveLength(0);
       });
 
+      it('the floor is absolute: a CONFIRMED stored clock-in is refused (422) once the start moves past it + 12 h, nothing written', async () => {
+        const w = endedAgo(20 * HOUR);
+        const s = await seedSeat({ ...w, attendance: 'missing_clock_out' });
+        const stored = await storedClockIn(s.shiftId);
+        // S1: the start moves 16 min past the punch; the manager confirms the now-unusual clock-in while recording the clock-out.
+        await moveSeat(s.shiftId, new Date(stored.getTime() + 16 * MIN), w.endsAt);
+        const v1 = (await reportOf(s.vmToken, s.shiftId)).staff[0].attendanceVersion;
+        const confirmed = await record(s.vmToken, s.shiftId, s.staff, {
+          clockOutAt: at(w.endsAt, 0), reasonCode: 'forgot_clock_out', expectedVersion: v1, confirmUnusualClockIn: true,
+        });
+        expect(confirmed.status).toBe(200);
+        expect(confirmed.body.staff[0].unusualClockInConfirmed).toBe(true);
+        const correctionsBefore = await corrections(s.shiftId);
+        const auditsBefore = await correctedAudits(s.attendanceId!);
+        const [rowBefore] = await attendanceRows(s.shiftId);
+
+        // The start moves again, to 12 h 1 min after the (confirmed) stored clock-in: beyond the hard floor.
+        const newStart = new Date(stored.getTime() + 12 * HOUR + MIN);
+        await moveSeat(s.shiftId, newStart, new Date(newStart.getTime() + HOUR));
+        const v2 = (await reportOf(s.vmToken, s.shiftId)).staff[0].attendanceVersion;
+        for (const extra of [{}, { confirmUnusualClockIn: true }]) {
+          const res = await record(s.vmToken, s.shiftId, s.staff, { breakMinutes: 45, reasonCode: 'app_issue', expectedVersion: v2, ...extra });
+          expect(res.status).toBe(422);
+          expect(res.body).toMatchObject({ code: 'CLOCK_IN_TOO_EARLY_ABSOLUTE', earliestPossible: new Date(newStart.getTime() - 12 * HOUR).toISOString() });
+        }
+        const [rowAfter] = await attendanceRows(s.shiftId);
+        expect(rowAfter.break_minutes).toBe(rowBefore.break_minutes);
+        expect(rowAfter.status).toBe(rowBefore.status);
+        expect(await corrections(s.shiftId)).toHaveLength(correctionsBefore.length);
+        expect(await correctedAudits(s.attendanceId!)).toHaveLength(auditsBefore.length);
+      });
+
       it('a stored clock-in still inside the allowance after the move is not asked about', async () => {
         const w = endedAgo(3 * HOUR);
         const s = await seedSeat({ ...w, attendance: 'missing_clock_out' });
