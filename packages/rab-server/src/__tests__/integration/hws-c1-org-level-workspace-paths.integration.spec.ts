@@ -318,6 +318,22 @@ describeIfDb('HWS C1: org-level paths over workspace tables (integration)', () =
         .set('Authorization', `Bearer ${await factory.login(caller)}`)
         .send({ currentPassword: caller.password });
 
+    /**
+     * Security review M-1: every soft-delete case asserts WHY the hard delete was refused (the savepoint's logged reason), so a
+     * case can never pass because of an unrelated fallback (e.g. hidden staff history left by an earlier case, F2 (b)).
+     */
+    const deleteManagerExpectingFallback = async (caller: TestIdentity, profileId: string, reason: string) => {
+      const log = jest.spyOn(Logger.prototype, 'log');
+      try {
+        const res = await deleteManager(caller, profileId);
+        const lines = log.mock.calls.map((c) => String(c[0]));
+        expect(lines).toContainEqual(`user hard delete not safe (${reason}); the account is soft-deleted instead`);
+        return res;
+      } finally {
+        log.mockRestore();
+      }
+    };
+
     /** A Venue Manager of B that never activated (status invited, never signed in, no token or session). */
     const invitedVenueManager = async (label: string) => {
       const target = await factory.createVenueManager({ id: orgId }, { owner: mgrB, label });
@@ -329,7 +345,7 @@ describeIfDb('HWS C1: org-level paths over workspace tables (integration)', () =
       const target = await invitedVenueManager('c1-del-ws');
       await venueInWorkspace(mgrB, target.userId, 'C1 venue created by the target');
 
-      const res = await deleteManager(ceo, target.profileId!);
+      const res = await deleteManagerExpectingFallback(ceo, target.profileId!, 'history:venue_created_by');
       expect(res.status).toBe(204);
       expect(await userSoftDeleted(target.userId)).toBe(true);
     });
@@ -338,7 +354,7 @@ describeIfDb('HWS C1: org-level paths over workspace tables (integration)', () =
       const target = await invitedVenueManager('c1-del-core');
       await venueInCoreCopy(mgrB.workspaceId!, target.userId, 'C1 core-copy venue created by the target');
 
-      const res = await deleteManager(ceo, target.profileId!);
+      const res = await deleteManagerExpectingFallback(ceo, target.profileId!, 'history:venue_created_by');
       expect(res.status).toBe(204);
       expect(await userSoftDeleted(target.userId)).toBe(true);
     });
@@ -347,7 +363,7 @@ describeIfDb('HWS C1: org-level paths over workspace tables (integration)', () =
       const target = await invitedVenueManager('c1-del-a');
       await venueInWorkspace(mgrB, target.userId, 'C1 venue (A caller)');
 
-      const res = await deleteManager(mgrA, target.profileId!);
+      const res = await deleteManagerExpectingFallback(mgrA, target.profileId!, 'history:venue_created_by');
       expect(res.status).toBe(204);
       expect(await userSoftDeleted(target.userId)).toBe(true);
     });
@@ -361,7 +377,7 @@ describeIfDb('HWS C1: org-level paths over workspace tables (integration)', () =
       );
       await adminDataSource.query(`UPDATE core.workspace_schema_registry SET status = 'FAILED' WHERE workspace_id = $1`, [mgrC.workspaceId]);
       try {
-        const res = await deleteManager(ceo, target.profileId!);
+        const res = await deleteManagerExpectingFallback(ceo, target.profileId!, 'unverifiable_workspace');
         expect(res.status).toBe(204);
         expect(JSON.stringify(res.body ?? {})).not.toContain(mgrC.workspaceId!);
         expect(await userSoftDeleted(target.userId)).toBe(true);
@@ -375,7 +391,7 @@ describeIfDb('HWS C1: org-level paths over workspace tables (integration)', () =
       const hiddenProfile = await staffHistoryInWorkspace(mgrB, target.userId, venueB);
 
       const orphansBefore = await profileOrphansInB();
-      const res = await deleteManager(ceo, target.profileId!);
+      const res = await deleteManagerExpectingFallback(ceo, target.profileId!, hwsOn ? 'hidden_workspace_history' : 'history_lost');
       expect(res.status).toBe(204);
       await expectHiddenProfileOutcome(target.userId);
       expect(await staffProfileExists(mgrB.workspaceId!, hiddenProfile)).toBe(true);
@@ -404,7 +420,7 @@ describeIfDb('HWS C1: org-level paths over workspace tables (integration)', () =
       });
 
       const orphansBefore = await profileOrphansInB();
-      const res = await deleteManager(ceo, target.profileId!);
+      const res = await deleteManagerExpectingFallback(ceo, target.profileId!, hwsOn ? 'hidden_workspace_history' : 'history_lost');
       expect(res.status).toBe(204);
       await expectHiddenProfileOutcome(target.userId);
       expect(await staffProfileExists(mgrB.workspaceId!, hiddenProfile)).toBe(true);
@@ -424,10 +440,35 @@ describeIfDb('HWS C1: org-level paths over workspace tables (integration)', () =
         }
       });
 
-      const res = await deleteManager(ceo, target.profileId!);
+      const res = await deleteManagerExpectingFallback(ceo, target.profileId!, 'history:user_note_subject');
       expect(res.status).toBe(204);
       expect(await userSoftDeleted(target.userId)).toBe(true);
       expect(await adminDataSource.query(`SELECT 1 FROM "${businessSchema(mgrB.workspaceId!)}".user_note WHERE subject_user_id = $1`, [target.userId])).toHaveLength(1);
+    });
+
+    it('F2 (b) over-strict, by design: ANOTHER user\'s hidden staff profile with visible history in B makes a CEO hard delete of a clean invite fall back to soft (HWS on)', async () => {
+      const [{ id: otherUserId }] = await adminDataSource.query<Array<{ id: string }>>(
+        `INSERT INTO core."user" (organisation_id, email, first_name, last_name, status) VALUES ($1, $2, 'Other', 'Staff', 'active') RETURNING id`,
+        [orgId, `c1-f2-other-${randomUUID()}@example.test`],
+      );
+      const otherProfile = await staffHistoryInWorkspace(mgrB, otherUserId, venueB);
+      const target = await invitedVenueManager('c1-del-f2-overstrict');
+      const orphansBefore = await profileOrphansInB();
+      if (hwsOn) {
+        const res = await deleteManagerExpectingFallback(ceo, target.profileId!, 'hidden_workspace_history');
+        expect(res.status).toBe(204);
+        expect(await userSoftDeleted(target.userId)).toBe(true);
+      } else {
+        // HWS off: the hidden profile lives in the core copy, whose foreign keys still cascade; it is not the target's, so
+        // historyLost finds nothing lost and the clean invite is hard-deleted.
+        const res = await deleteManager(ceo, target.profileId!);
+        expect(res.status).toBe(204);
+        expect(await userExists(target.userId)).toBe(false);
+      }
+      expect(await staffProfileExists(mgrB.workspaceId!, otherProfile)).toBe(true);
+      expect(await adminDataSource.query(`SELECT 1 FROM "${businessSchema(mgrB.workspaceId!)}".shift_assignment WHERE staff_profile_id = $1`, [otherProfile])).toHaveLength(1);
+      expect(await profileOrphansInB()).toBe(orphansBefore);
+      await dropHiddenProfile(otherProfile);
     });
 
     it('ABUSE (re-review N4): a reference with no ON DELETE that no pre-delete check reads (shift.approved_by) → soft delete, and the constraint is logged by name', async () => {

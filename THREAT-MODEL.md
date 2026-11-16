@@ -7802,8 +7802,14 @@ Reversal:   A shorter QR_MAX_AGE_DAYS, or rotating QRs automatically on schedule
       attribution cleared; a payslip still needing the profile → 23503 → soft; a paid shift → soft).
   - *F2, a hard delete loses pay history hidden from the caller.* Owner decision (b), no new SQL.
     - Control: in a workspace schema, visible history of a staff profile the caller cannot see makes the hard delete unsafe,
-      so the account is soft-deleted (the 0g rule, deliberately over-strict).
-    - Test: hws-c1 L1 hidden-profile cases (soft delete, profile and history intact, no new orphan).
+      so the account is soft-deleted (the 0g rule).
+    - Cost, stated plainly: this is deliberately over-strict. Another user's hidden history counts too. Once any
+      creator-private staff history exists in a workspace, a CEO hard delete of an invite effectively always falls back to soft.
+    - Tests (hws-c1 4.6), each case asserting the logged fallback reason:
+      - L1 hidden-profile cases: `hidden_workspace_history` with HWS on (`history_lost` with HWS off); soft delete, profile
+        and history intact, no new orphan;
+      - an explicit over-strict case: another user's hidden profile with visible history, then a CEO delete of a clean
+        invite: soft, `hidden_workspace_history`, the other profile intact, orphan count unchanged.
   - *F1, the Worker invite cleanup hard-deletes an expired invitee still referenced from a level-22 schema.* Before this fix the
     definer's `foreign_key_violation` guard was the only protection.
     - Control, in every READY level-22 schema of the organisation:
@@ -7822,8 +7828,13 @@ Reversal:   A shorter QR_MAX_AGE_DAYS, or rotating QRs automatically on schedule
       its attribution columns.
     - It runs only in a Worker maintenance job with no request input. The settings are transaction-local and are restored per
       workspace.
-    - Test: F1-T scope case. Another user's staff profile, notes and attribution columns in the same workspace are untouched;
-      only the invitee's own profile goes; no orphan.
+    - Tests: the F1-T scope cases.
+      - Under the owner-member production login (off-means-off case 7): the schema has 0 FKs to core."user", the invitee and
+        its profile are gone, another user's profile and notes are untouched, and a note the invitee wrote about that user
+        keeps its subject with the author cleared. No orphan.
+      - The same case as the superuser fixture login (account-invite-cleanup F1-T).
+      - With HWS off both cases are core-FK scope checks.
+      - The CASCADE / SET NULL / RESTRICT classification (2 / 6 / 23 columns) is pinned in workspace-user-references.spec.
   - *Orphans accumulate unnoticed.*
     - Control: a daily Worker orphan check, report-only, counts only (never ids or values). It reads as the Worker plus the
       workspace owner's read rights, in a READ ONLY transaction.
@@ -7833,13 +7844,21 @@ Reversal:   A shorter QR_MAX_AGE_DAYS, or rotating QRs automatically on schedule
     - Tests: ws-core-fk-removal measured 1,430 relation locks with 13 level-21 workspaces and 0 at level 22; user-soft-delete
       shows no lock in another organisation's schemas.
 - **Accepted by the owner (2026-11-15):**
-  - R-1: the delete-time checks see only what the caller may read. Residual: a hidden profile whose history is also hidden
-    stays as an orphan of the deleted invite, and the daily orphan check reports it.
+  - R-1: the delete-time checks see only what the caller may read. Residual: anything the caller cannot read is never
+    deleted, but can stay as an orphan of the deleted invite, which the daily orphan check reports. That covers:
+    - a hidden profile whose history is also hidden;
+    - a workspace outside the caller's candidate set;
+    - history added to a hidden profile after the snapshot.
   - R-2: the expired-invite definer (1786721520000) is unchanged. The level-22 path in the Worker covers it (F1).
   - R-3: 0a is re-applied on top of C1's and 0g's user deletion.
   - R-4: each workspace's upgrade step holds ACCESS EXCLUSIVE on the three core tables (bounded by the runner's 5 s
     lock_timeout). Run the 0.6.0 upgrade in a quiet window (MIGRATION-AND-ROLLBACK-PLAN.md §4.4). The TypeScript provisioner
     (rollback artifact) still creates and then drops the FKs.
-- **Tests:** ws-core-fk-app-enforcement, ws-core-fk-removal (lock test, orphan report), account-invite-cleanup (F1, F1-T, N1),
-  hws-c1 and user-soft-delete (0g + 0a), payroll-evidence-restrict (F3 at level 22), and the runner and template suites on top
-  of level 22.
+- **Tests:**
+  - ws-core-fk-app-enforcement;
+  - ws-core-fk-removal (lock test, orphan report);
+  - account-invite-cleanup (F1, F1-T, N1) and account-invite-cleanup-off-means-off case 7 (F1-T under the production login);
+  - workspace-user-references.spec (the classification);
+  - hws-c1 4.6 with asserted fallback reasons, and user-soft-delete (0g + 0a);
+  - payroll-evidence-restrict (the F3 raw delete at level 22);
+  - the runner and template suites on top of level 22.
