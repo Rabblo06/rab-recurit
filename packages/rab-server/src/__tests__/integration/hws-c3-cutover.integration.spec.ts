@@ -230,6 +230,9 @@ describeIfDb('C3 HWS cutover copy path (option A′)', () => {
    * for every later fixture workspace).
    */
   const deactivate = () => admin.query('DELETE FROM core.hws_cutover_activation');
+  let sentinelAtStart = false;
+  /** Release 0.7.0's real step is already completed on this CI database; the logbook case runs the command under its own step. */
+  const LEDGER_CASE_TIMESTAMP = 1786721549999;
   const activeNow = async () => Number((await admin.query('SELECT count(*)::int AS n FROM core.hws_cutover_activation')).rows[0].n) === 1;
   const startedAny = async () => (await app.query('SELECT core.hws_cutover_started_any() AS s')).rows[0].s as boolean;
   const cutover = async (q: Client, ids: string[], h: UpgradeCommandHost, extra: HwsCutoverOptions = {}, ctx: { flushBlockCache?: () => Promise<void>; markBlockChanged?: () => void } = {}) => {
@@ -250,6 +253,11 @@ describeIfDb('C3 HWS cutover copy path (option A′)', () => {
     // The command reads it as the runtime login; null when this login may not call pg_control_system() (same rule).
     clusterId = await app.query('SELECT system_identifier::text AS s FROM pg_control_system()').then((r) => r.rows[0].s as string, () => null);
     backupDir = mkdtempSync(join(tmpdir(), 'c3-backup-'));
+    // Release 0.7.0 registers the cutover: this CI database was built by a 0.7.0 start with HWS on, which already wrote the
+    // sentinel (fail-closed routing on, new workspaces verified at insertion). These cases start from "not activated" and the
+    // production state is put back afterwards (the next spec of the in-band run sees what the build left).
+    sentinelAtStart = await activeNow();
+    await deactivate();
   });
 
   afterAll(async () => {
@@ -260,8 +268,9 @@ describeIfDb('C3 HWS cutover copy path (option A′)', () => {
       await admin.query(`DELETE FROM core.worker_dispatch_pointer WHERE workspace_id = $1`, [ws.id]).catch(() => undefined);
       await admin.query(`DELETE FROM core.hws_cutover_state WHERE workspace_id = $1`, [ws.id]).catch(() => undefined);
     }
-    await admin.query(`DELETE FROM core.upgrade_migration WHERE workspace_id IS NULL AND name LIKE '0.7.0_%' AND executed_by_version = '0.7.0'`).catch(() => undefined);
+    await admin.query(`DELETE FROM core.upgrade_migration WHERE workspace_id IS NULL AND name = $1`, [`0.7.0_HwsCutover_${LEDGER_CASE_TIMESTAMP}`]).catch(() => undefined);
     await admin.query('DELETE FROM core.hws_cutover_activation').catch(() => undefined);
+    if (sentinelAtStart) await admin.query('INSERT INTO core.hws_cutover_activation DEFAULT VALUES ON CONFLICT DO NOTHING').catch(() => undefined);
     if (backupDir) rmSync(backupDir, { recursive: true, force: true });
     await app?.end();
     await admin?.end();
@@ -563,8 +572,8 @@ describeIfDb('C3 HWS cutover copy path (option A′)', () => {
 
   it('through the Part B logbook (UpgradeRun): failed attempt 1 (no backup, blocks reported) → completed attempt 2', async () => {
     const w3 = await seedBusiness(await make('ledger'));
-    const command = createHwsCutoverCommand({ workspaceIds: [w3.id] });
-    const step = '0.7.0_HwsCutover_1786721540100';
+    const command = { ...createHwsCutoverCommand({ workspaceIds: [w3.id] }), timestamp: LEDGER_CASE_TIMESTAMP };
+    const step = `0.7.0_HwsCutover_${LEDGER_CASE_TIMESTAMP}`;
     const session = upgradeSessionOf(app);
     const runOnce = async (h: UpgradeCommandHost) => {
       const run = new UpgradeRun({
