@@ -196,6 +196,10 @@ struct VMStaffReportCard: View {
                 ReportField("Break", "\(row.breakMinutes ?? row.scheduledBreakMinutes) min\(row.breakMinutes == nil ? " (scheduled)" : "")")
                 ReportField("Worked", vmWorkedLabel(row))
                 if row.corrected { ReportField("", "Corrected", valueColor: VMColor.reportMuted) }
+                if row.unusualClockInConfirmed {
+                    ReportField("", "Unusual time confirmed", valueColor: VMColor.reportMuted)
+                        .accessibilityIdentifier("vm.report.unusualTimeConfirmed")
+                }
                 if row.attendanceReviewed {
                     ReportField("Reviewed by", ([row.attendanceReviewedByName ?? "Manager"] + (row.attendanceReviewedAt.map { [CrewflowDateFormat.dayTime($0)] } ?? [])).joined(separator: " · "))
                 }

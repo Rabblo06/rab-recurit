@@ -38,6 +38,8 @@ class ShiftReportStaffRow {
           : DateTime.parse(json['attendanceReviewedAt'] as String),
       attendanceReviewedByName = json['attendanceReviewedByName'] as String?,
       manuallyEntered = json['manuallyEntered'] as bool? ?? false,
+      unusualClockInConfirmed =
+          json['unusualClockInConfirmed'] as bool? ?? false,
       attendanceVersion = json['attendanceVersion'] as String?,
       // Older servers do not send it: a no-show seat whose review is complete is the confirmed one.
       noShowConfirmed =
@@ -88,6 +90,10 @@ class ShiftReportStaffRow {
 
   /// The attendance was entered by a manager (the staff member never clocked in with the app).
   final bool manuallyEntered;
+
+  /// The clock-in is earlier than the normal allowance and a manager explicitly confirmed that time (server-derived;
+  /// false from an older server that does not send it).
+  final bool unusualClockInConfirmed;
 
   /// Optimistic-concurrency token sent back with "Record attendance" (`expectedVersion`); null without attendance.
   final String? attendanceVersion;

@@ -140,8 +140,10 @@ describeIfDb('approved shift statement pipeline (integration)', () => {
     expect((await http().post('/rest/v1/attendance/clock-in').set(auth(tokens.staff[i]!)).send({ shiftId, qrToken: await signQr(shiftId) })).status).toBe(201);
     const out = await http().post('/rest/v1/attendance/clock-out').set(auth(tokens.staff[i]!)).send({ qrToken: await signQr(shiftId) });
     const clockOutAt = new Date(out.body.clockOutAt).getTime();
+    // Worked time comes from moving the clock-in hours before the scheduled start: an unusually early clock-in
+    // correction, so it is explicitly confirmed (owner brief 2026-11-15, 409 CLOCK_IN_CONFIRMATION_REQUIRED otherwise).
     expect((await http().post(`/rest/v1/attendance/${out.body.id}/correct`).set(auth(tokens.a))
-      .send({ field: 'clockInAt', newValue: new Date(clockOutAt - 247 * 60_000).toISOString(), reason: 'Pay statement test worked time' })).status).toBe(201);
+      .send({ field: 'clockInAt', newValue: new Date(clockOutAt - 247 * 60_000).toISOString(), reason: 'Pay statement test worked time', confirmUnusualClockIn: true })).status).toBe(201);
     expect((await http().post(`/rest/v1/attendance/report/shift/${shiftId}/staff/${s.profileId}/attendance-review`).set(auth(tokens.a))).status).toBe(200);
     expect((await http().patch(`/rest/v1/attendance/report/shift/${shiftId}/finalise`).set(auth(tokens.a))).status).toBe(200);
     await scheduleAt(shiftId, scheduledAt);
