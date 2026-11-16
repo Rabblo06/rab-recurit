@@ -8,7 +8,7 @@ import { PasswordHashingService } from '@rab/server/engine/core-modules/auth/ser
 import { TenantContextService } from '@rab/server/engine/core-modules/tenant/tenant-context.service';
 import { resolveInviteAutoDeleteEnabled, runAccountInviteCleanupCycle } from '../../queues/rab-maintenance/account-invite-cleanup.job';
 import { createAdminDataSource } from './helpers/admin-datasource';
-import { businessTable } from './helpers/hws-fixtures';
+import { businessTable, hwsRuntimeOn } from './helpers/hws-fixtures';
 import { createTestIdentityFactory, TestIdentity, TestIdentityFactory } from './helpers/test-identities';
 import { businessSchema } from './helpers/hws-fixtures';
 import { Client } from 'pg';
@@ -296,7 +296,9 @@ describeIfDb('D-1: account-invite cleanup with auto-delete OFF changes nothing, 
       expect(await status(ids.withSession)).toBe('invite_expired');
       expect(await skipReason(ids.withSession)).toBe('had_session');
       expect(await status(ids.withBusinessRef)).toBe('invite_expired');
-      expect(await skipReason(ids.withBusinessRef)).toBe('venue');
+      // The venue lives where the application reads it: the workspace schema with HWS on (reason `venue_physical`, found by the
+      // physical-schema pass), the core copy with HWS off (`venue`).
+      expect(await skipReason(ids.withBusinessRef)).toBe(hwsRuntimeOn() ? 'venue_physical' : 'venue');
     }
   });
 
