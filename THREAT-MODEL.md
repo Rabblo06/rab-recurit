@@ -8038,3 +8038,25 @@ Reversal:   A shorter QR_MAX_AGE_DAYS, or rotating QRs automatically on schedule
   - hws-startup-guard.spec: the HWS-off boot refusal;
   - the security-posture and semantic goldens (PG16/17/18), the R4 secure-owner invariants, check-rls-coverage
     (`hws_cutover_activation` forced), and the restricted-migrator drift review.
+
+## SF-3 — create-and-send uses the normal shift-creation checks and audit (branch fix/sf3-create-shift-and-send-scope, 2026-11-16)
+- **Threat:** a manager with `offer.send` → `POST /rest/v1/shifts/with-offers` (`OfferService.createShiftAndSend`) with the id
+  of a job role that is RLS-visible but not theirs, or an archived venue or job role → a shift (OPEN, then OFFERED) and live
+  offers were created anyway, with no `shift.created` audit row. It was a second shift-creation path that checked only the
+  venue scope (`assertVenueAccessibleTx`) and skipped `SchedulingService.resolveDraftTargetsTx` (job-role scope, both
+  archive checks), unlike `POST /rest/v1/shifts`. The job role also selects the snapshotted pay rate (venue role rate or the
+  role's default), so a foreign role could price the shift.
+- **Control:** one insert, `SchedulingService.insertNewShiftTx`, used by `createDraftTx` (DRAFT) and `createShiftAndSend`
+  (OPEN): venue + job-role scope (`assertVenueAccessibleTx` + `assertJobRoleOwned`, 404 out of scope, never 403) → archived
+  venue (409 `VENUE_ARCHIVED`) or job role (409 `JOB_ROLE_ARCHIVED`) refused → `resolvePayRate` snapshot → INSERT
+  (workspace from the venue) → `shift.created` audit (status + requiredCount, no pay) in the same transaction. Only DRAFT or
+  OPEN may be the initial status. Any refusal rolls back the whole transaction (no shift, no offer). `createShiftAndSend`
+  also re-checks its route flag `offer.send` in the service first (layer 2; 403, before any id is read). Venue and
+  job-role rules, rate resolution and the per-recipient send are unchanged.
+- **Not changed (flagged):** `POST /shifts` re-checks `schedule.create` in the service; create-and-send is gated by
+  `offer.send` only, as before. Whether creating a shift through create-and-send should also need `schedule.create` is a
+  permission decision for the owner, not made here.
+- **Tests:** `scheduling-offer-abuse-cases.integration.spec.ts` › "SF-3": a same-workspace job role created by someone else
+  → 404 with no shift and no offer (and `POST /shifts` gives the same 404); archived job role → 409 `JOB_ROLE_ARCHIVED`
+  and archived venue → 409 `VENUE_ARCHIVED`, no shift; a successful create-and-send writes exactly one `shift.created`
+  row (actor = caller, status `open`, no pay keys).

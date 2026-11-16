@@ -1176,6 +1176,115 @@ describeIfDb('scheduling + offer abuse cases (integration)', () => {
       expect(after).toBe(before);
     });
 
+    // SF-3: create-and-send inserts the shift through the same SchedulingService path as POST /shifts — job-role scope
+    // (404, never 403), archived venue / job role refused (409), and the shift.created audit row.
+    describe('SF-3 — same scope, archive and audit rules as POST /shifts', () => {
+      async function shiftCount(venue: Venue): Promise<number> {
+        const [{ n }] = await adminDataSource.manager.query<[{ n: number }]>(
+          `SELECT count(*)::int AS n FROM ${businessTable(venue.workspaceId!, 'shift')} WHERE venue_id = $1`,
+          [venue.id],
+        );
+        return n;
+      }
+
+      async function userIdOf(email: string): Promise<string> {
+        const [{ id }] = await adminDataSource.manager.query<[{ id: string }]>(`SELECT id FROM core."user" WHERE email = $1`, [email]);
+        return id;
+      }
+
+      it("a job role outside the caller's scope (RLS-visible, created by someone else) → 404, and no shift or offer is created", async () => {
+        const { organisation, adminEmail, venue } = await seedOrg(MANAGER_PERMS);
+        const adminToken = await login(adminEmail);
+        const staff = await seedStaff(organisation);
+        // Same organisation and workspace (so RLS shows it), but not the caller's own role: assertJobRoleOwned's rule.
+        const foreignRole = await seedJobRole(organisation, await userIdOf(staff.email));
+        const before = await shiftCount(venue);
+
+        const res = await request(app.getHttpServer())
+          .post('/rest/v1/shifts/with-offers')
+          .set('Authorization', `Bearer ${adminToken}`)
+          .send(shiftAndSendBody(venue, foreignRole, [staff.staffProfileId]));
+
+        expect(res.status).toBe(404);
+        expect(await shiftCount(venue)).toBe(before);
+        const [{ n: offers }] = await adminDataSource.manager.query<[{ n: number }]>(
+          `SELECT count(*)::int AS n FROM ${businessTable(venue.workspaceId!, 'job_offer')} WHERE staff_profile_id = $1`,
+          [staff.staffProfileId],
+        );
+        expect(offers).toBe(0);
+        // Same answer as the normal create path for the same role.
+        const plain = await request(app.getHttpServer())
+          .post('/rest/v1/shifts')
+          .set('Authorization', `Bearer ${adminToken}`)
+          .send({ venueId: venue.id, jobRoleId: foreignRole.id, startsAt: new Date(Date.now() + 52 * 3600 * 1000).toISOString(), endsAt: new Date(Date.now() + 60 * 3600 * 1000).toISOString(), requiredCount: 1 });
+        expect(plain.status).toBe(404);
+      });
+
+      it('an archived job role → 409 JOB_ROLE_ARCHIVED, and no shift is created', async () => {
+        const { organisation, adminEmail, venue } = await seedOrg(MANAGER_PERMS);
+        const adminToken = await login(adminEmail);
+        const jobRole = await seedJobRole(organisation, venue.createdBy!);
+        const staff = await seedStaff(organisation);
+        await adminDataSource.manager.query(
+          `UPDATE ${businessTable(venue.workspaceId!, 'job_role')} SET archived_at = now(), archived_by = created_by WHERE id = $1`,
+          [jobRole.id],
+        );
+        const before = await shiftCount(venue);
+
+        const res = await request(app.getHttpServer())
+          .post('/rest/v1/shifts/with-offers')
+          .set('Authorization', `Bearer ${adminToken}`)
+          .send(shiftAndSendBody(venue, jobRole, [staff.staffProfileId]));
+
+        expect(res.status).toBe(409);
+        expect(res.body.code).toBe('JOB_ROLE_ARCHIVED');
+        expect(await shiftCount(venue)).toBe(before);
+      });
+
+      it('an archived venue → 409 VENUE_ARCHIVED, and no shift is created', async () => {
+        const { organisation, adminEmail, venue } = await seedOrg(MANAGER_PERMS);
+        const adminToken = await login(adminEmail);
+        const jobRole = await seedJobRole(organisation, venue.createdBy!);
+        const staff = await seedStaff(organisation);
+        await adminDataSource.manager.query(
+          `UPDATE ${businessTable(venue.workspaceId!, 'venue')} SET status = 'archived', archived_at = now(), archived_by = created_by WHERE id = $1`,
+          [venue.id],
+        );
+        const before = await shiftCount(venue);
+
+        const res = await request(app.getHttpServer())
+          .post('/rest/v1/shifts/with-offers')
+          .set('Authorization', `Bearer ${adminToken}`)
+          .send(shiftAndSendBody(venue, jobRole, [staff.staffProfileId]));
+
+        expect(res.status).toBe(409);
+        expect(res.body.code).toBe('VENUE_ARCHIVED');
+        expect(await shiftCount(venue)).toBe(before);
+      });
+
+      it('a successful create-and-send writes exactly one shift.created audit row for the new shift', async () => {
+        const { organisation, adminEmail, venue } = await seedOrg(MANAGER_PERMS);
+        const adminToken = await login(adminEmail);
+        const jobRole = await seedJobRole(organisation, venue.createdBy!);
+        const staff = await seedStaff(organisation);
+
+        const res = await request(app.getHttpServer())
+          .post('/rest/v1/shifts/with-offers')
+          .set('Authorization', `Bearer ${adminToken}`)
+          .send(shiftAndSendBody(venue, jobRole, [staff.staffProfileId]));
+        expect(res.status).toBe(201);
+
+        const audit = await adminDataSource.manager.query<Array<{ actor_user_id: string; metadata: Record<string, unknown> }>>(
+          `SELECT actor_user_id, metadata FROM core.audit_log WHERE action = 'shift.created' AND entity_type = 'shift' AND entity_id = $1`,
+          [res.body.shiftId],
+        );
+        expect(audit).toHaveLength(1);
+        expect(audit[0]!.actor_user_id).toBe(venue.createdBy);
+        expect(audit[0]!.metadata).toMatchObject({ status: 'open', requiredCount: 1 });
+        expect(JSON.stringify(audit[0]!.metadata)).not.toMatch(/pence|rate/i);
+      });
+    });
+
     it('a role without OFFER_SEND cannot use the unified create-and-send endpoint', async () => {
       const { organisation, adminEmail, venue } = await seedOrg([PermissionFlag.SCHEDULE_VIEW]);
       const adminToken = await login(adminEmail);

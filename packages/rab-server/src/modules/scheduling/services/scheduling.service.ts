@@ -65,6 +65,23 @@ const ASSISTANT_STAFFABLE_STATUSES = [
 /** AI Phase 1: hard bound on the shifts one staffing aggregate reads. */
 export const ASSISTANT_STAFFING_MAX_SHIFTS = 2000;
 
+/** What `SchedulingService.insertNewShiftTx` needs to insert a shift (SF-3). Fields are mapped explicitly, never spread. */
+export interface NewShiftInput {
+  venueId: string;
+  jobRoleId: string;
+  startsAt: string;
+  endsAt: string;
+  breakMinutes?: number;
+  requiredCount: number;
+  payRatePence?: number;
+  chargeRatePence?: number;
+  notes?: string;
+  address?: string;
+}
+
+/** The only statuses a newly inserted shift may start in: DRAFT (create) or OPEN (create-and-send). */
+export type NewShiftStatus = typeof ShiftStatus.DRAFT | typeof ShiftStatus.OPEN;
+
 /** AI Phase 1 staffing read model — operational fields only (no staff identity, note, address or rate). */
 export interface AssistantStaffingShift {
   shiftId: string;
@@ -719,9 +736,22 @@ export class SchedulingService {
    */
   async createDraftTx(manager: EntityManager, ctx: AuthContext, dto: CreateShiftDto): Promise<Shift> {
     await this.assertFlagTx(manager, ctx, PermissionFlag.SCHEDULE_CREATE, 'Creating shifts is not permitted.');
-    const { venue } = await this.resolveDraftTargetsTx(manager, ctx, dto.venueId, dto.jobRoleId);
+    return this.insertNewShiftTx(manager, ctx, dto, ShiftStatus.DRAFT);
+  }
 
-    const payRatePence = await this.resolvePayRate(manager, dto);
+  /**
+   * The one place a manager-created shift row is inserted, inside the caller's transaction (SF-3): `createDraftTx` (DRAFT)
+   * and `OfferService.createShiftAndSend` (OPEN) both call it, so neither can skip a check. In order: venue + job-role scope
+   * and archive rules (`resolveDraftTargetsTx`: 404 out of scope, 409 archived) → the pay rate snapshot (`resolvePayRate`)
+   * → the INSERT (workspace inherited from the venue) → the `shift.created` audit row in the same transaction. The
+   * caller's own permission flag is checked by the caller, before this runs. An INSERT value is not a status transition,
+   * so `assertTransition` does not apply; only DRAFT and OPEN are accepted as the initial status.
+   */
+  async insertNewShiftTx(manager: EntityManager, ctx: AuthContext, input: NewShiftInput, initialStatus: NewShiftStatus): Promise<Shift> {
+    if (initialStatus !== ShiftStatus.DRAFT && initialStatus !== ShiftStatus.OPEN) throw new ConflictException('A new shift can only start as a draft or open.');
+    const { venue } = await this.resolveDraftTargetsTx(manager, ctx, input.venueId, input.jobRoleId);
+
+    const payRatePence = await this.resolvePayRate(manager, input);
 
     const shift = manager.create(Shift, {
       organisationId: ctx.organisationId!,
@@ -731,16 +761,17 @@ export class SchedulingService {
       // case where the caller's own ctx.workspaceId can differ from the
       // Venue's owning workspace.
       workspaceId: venue.workspaceId,
-      venueId: dto.venueId,
-      jobRoleId: dto.jobRoleId,
-      startsAt: new Date(dto.startsAt),
-      endsAt: new Date(dto.endsAt),
-      breakMinutes: dto.breakMinutes ?? 0,
-      requiredCount: dto.requiredCount,
+      venueId: input.venueId,
+      jobRoleId: input.jobRoleId,
+      startsAt: new Date(input.startsAt),
+      endsAt: new Date(input.endsAt),
+      breakMinutes: input.breakMinutes ?? 0,
+      requiredCount: input.requiredCount,
       payRatePence,
-      chargeRatePence: dto.chargeRatePence ?? 0,
-      notes: dto.notes,
-      status: ShiftStatus.DRAFT,
+      chargeRatePence: input.chargeRatePence ?? 0,
+      notes: input.notes,
+      address: input.address,
+      status: initialStatus,
       createdBy: ctx.userId,
     });
     const saved = await manager.save(shift);
@@ -748,7 +779,7 @@ export class SchedulingService {
     await this.auditService.record(manager, ctx, AuditAction.SHIFT_CREATED, {
       entityType: 'shift',
       entityId: saved.id,
-      metadata: { status: ShiftStatus.DRAFT, requiredCount: saved.requiredCount },
+      metadata: { status: initialStatus, requiredCount: saved.requiredCount },
     });
     return saved;
   }
