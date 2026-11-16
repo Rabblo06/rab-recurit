@@ -59,6 +59,13 @@ export const PG_REPLICA_MAX_LAG_DEFAULT_MS = 5_000;
 /** Legacy names: accepted outside production only, refused in production. */
 export const LEGACY_PG_ENV_NAMES = ['DATABASE_URL', 'DATABASE_URL_UNPOOLED', 'DATABASE_DIRECT_URL', 'DB_POOL_MAX'] as const;
 
+/**
+ * X3.5-S6 (release 1), the CI-only strict switch: `PG_LEGACY_NAMES_STRICT=true` makes every environment refuse the legacy
+ * names, exactly as production already does, so a CI step proves it never relies on one before release 2 (S8) refuses them
+ * everywhere. Strict `true` / `false` / unset (any other value refuses to start). Off by default: outside CI nothing changes.
+ */
+export const PG_LEGACY_NAMES_STRICT = 'PG_LEGACY_NAMES_STRICT';
+
 /** The legacy names that hold a non-empty value in `env` (an empty value counts as unset, as everywhere here). Names only. */
 export function presentLegacyPgEnvNames(env: Env): string[] {
   return LEGACY_PG_ENV_NAMES.filter((name) => present(env, name) !== undefined);
@@ -273,6 +280,15 @@ export function resolvePgEnvironment(env: Env = process.env, options: ResolvePgO
   const pgUrl = present(env, 'PG_DATABASE_URL');
   const legacy = Object.fromEntries(LEGACY_PG_ENV_NAMES.map((name) => [name, present(env, name)])) as Record<(typeof LEGACY_PG_ENV_NAMES)[number], string | undefined>;
 
+  if (!production && boolSetting(env, PG_LEGACY_NAMES_STRICT)) {
+    const setLegacy = LEGACY_PG_ENV_NAMES.filter((name) => legacy[name] !== undefined);
+    if (setLegacy.length > 0) {
+      throw new PgConfigError(
+        `${PG_LEGACY_NAMES_STRICT}=true refuses the legacy database variable(s) ${setLegacy.join(', ')}. Use PG_DATABASE_URL (and PG_POOL_MAX_CONNECTIONS) only, and remove the legacy names. Refusing to start.`,
+      );
+    }
+  }
+
   if (production) {
     const setLegacy = LEGACY_PG_ENV_NAMES.filter((name) => legacy[name] !== undefined);
     if (setLegacy.length > 0) {
@@ -462,7 +478,7 @@ export function emitPgWarnings(resolved: ResolvedPgEnvironment, _env: Env = proc
   }
 }
 
-const RELEVANT_ENV_NAMES = [...PG_ENV_NAMES, ...LEGACY_PG_ENV_NAMES, ...LIBPQ_ENV_NAMES, ...RETIRED_OPS_ENV_NAMES, 'NODE_ENV', 'RAB_RUNTIME_ENV', 'DB_TARGET', 'WORKER_DISPATCH_MODE'];
+const RELEVANT_ENV_NAMES = [...PG_ENV_NAMES, PG_LEGACY_NAMES_STRICT, ...LEGACY_PG_ENV_NAMES, ...LIBPQ_ENV_NAMES, ...RETIRED_OPS_ENV_NAMES, 'NODE_ENV', 'RAB_RUNTIME_ENV', 'DB_TARGET', 'WORKER_DISPATCH_MODE'];
 const cache = new Map<string, ResolvedPgEnvironment>();
 
 /**

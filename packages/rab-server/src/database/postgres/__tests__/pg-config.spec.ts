@@ -235,6 +235,25 @@ describe('pg-config: warnings', () => {
     expect(lines).toHaveLength(1);
   });
 
+  it('X3.5-S6 CI strict switch: PG_LEGACY_NAMES_STRICT=true refuses every legacy name outside production too (names only)', () => {
+    for (const name of ['DATABASE_URL', 'DATABASE_URL_UNPOOLED', 'DATABASE_DIRECT_URL', 'DB_POOL_MAX']) {
+      const value = name === 'DB_POOL_MAX' ? '5' : APP;
+      const message = refusal({ PG_DATABASE_URL: APP, [name]: value, PG_LEGACY_NAMES_STRICT: 'true' }, { processRole: 'cli' });
+      expect(message).toMatch(new RegExp(`PG_LEGACY_NAMES_STRICT=true refuses the legacy database variable\\(s\\) ${name}\\.`));
+      expect(message).not.toContain(SECRET);
+    }
+    // Off (unset / false): release-1 behaviour, the legacy name is still accepted with a warning.
+    for (const strict of [undefined, 'false', '']) {
+      const r = resolvePgEnvironment({ DATABASE_URL: APP, PG_LEGACY_NAMES_STRICT: strict }, { processRole: 'cli' });
+      expect(r.primary.source).toBe('DATABASE_URL');
+      expect(r.warnings.join('\n')).toMatch(/DATABASE_URL is deprecated/);
+    }
+    // On with only PG_DATABASE_URL: nothing changes. An empty legacy value counts as unset (the routed Jest environment).
+    expect(resolvePgEnvironment({ PG_DATABASE_URL: APP, DATABASE_URL: '', PG_LEGACY_NAMES_STRICT: 'true' }, { processRole: 'cli' }).warnings).toEqual([]);
+    // Fail closed on a typo, never silently off.
+    expect(refusal({ PG_DATABASE_URL: APP, PG_LEGACY_NAMES_STRICT: 'yes' }, { processRole: 'cli' })).toMatch(/PG_LEGACY_NAMES_STRICT must be exactly true or false/);
+  });
+
   it('presentLegacyPgEnvNames lists the legacy names that hold a value (empty counts as unset), names only', () => {
     expect(presentLegacyPgEnvNames({ PG_DATABASE_URL: APP })).toEqual([]);
     expect(presentLegacyPgEnvNames({ PG_DATABASE_URL: APP, DATABASE_URL: '', DATABASE_URL_UNPOOLED: '  ' })).toEqual([]);
