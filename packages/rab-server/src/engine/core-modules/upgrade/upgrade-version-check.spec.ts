@@ -2,8 +2,11 @@ import type { LedgerAttribution } from '../../../database/typeorm/scripts/migrat
 import { decideUpgradeStart, UpgradeStartFacts, UpgradeVersionTooOldError } from './upgrade-version-check';
 import { AppVersionError } from './upgrade-version';
 
+// The 0.6.0 adoption rules, pinned to the previous-versions list 0.6.0 shipped with (release 0.7.0 appended 0.6.0 to
+// CREWFLOW_PREVIOUS_VERSIONS; the 0.7.0 cases below pass their own list).
 const base = (over: Partial<UpgradeStartFacts> = {}): UpgradeStartFacts => ({
   codeVersion: '0.6.0',
+  previousVersions: ['0.4.0', '0.5.0'],
   fresh: false,
   force: false,
   ledgerExists: true,

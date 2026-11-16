@@ -298,8 +298,14 @@ const envOf = (svc) => svc?.environment ?? {};
 const baseName = (p) => String(p).split(/[\\/]/).pop();
 /** The one bind every app service has: the PostgreSQL CA, read-only (verify-full). */
 const caMount = (v) => v.type === 'bind' && v.target === '/run/crewflow/pg-ca.crt' && v.read_only === true;
-const withoutCa = (vols) => {
-  const rest = (vols ?? []).filter((v) => !caMount(v));
+/**
+ * Release 0.7.0 (Part C3): rab-api's HWS cutover backup directory, read-only. Like the CA, its SOURCE is the operator's
+ * (CREWFLOW_HWS_CUTOVER_BACKUP_DIR in compose.env; /dev/null when unset), so only the target and read-only are compared: a
+ * writable one is not this mount and still fails the comparison.
+ */
+const backupMount = (name, v) => name === 'rab-api' && v.type === 'bind' && v.target === '/run/crewflow/hws-cutover-backup' && v.read_only === true;
+const withoutCa = (vols, name = null) => {
+  const rest = (vols ?? []).filter((v) => !caMount(v) && !backupMount(name, v));
   return rest.length ? rest : undefined;
 };
 /**
@@ -322,7 +328,7 @@ const importGuardMount = (v) => longFormTmpfs(v)
   && Number(v.tmpfs?.size) === IMPORT_GUARD_BYTES
   && Number(v.tmpfs?.mode) === IMPORT_GUARD_MODE;
 /** The variant's volumes for the production comparison: the CA bind, and on rab-api the exact import guard, left out. */
-const comparableVariantVolumes = (name, vols) => withoutCa(name === IMPORT_GUARD_SERVICE ? (vols ?? []).filter((v) => !importGuardMount(v)) : vols);
+const comparableVariantVolumes = (name, vols) => withoutCa(name === IMPORT_GUARD_SERVICE ? (vols ?? []).filter((v) => !importGuardMount(v)) : vols, name);
 /**
  * rab-ops removal (PR 2): the retired operations container must not come back, by name, under the "ops" profile, or under
  * ANY name and profile (security review of PR #124, MEDIUM: a `rab-maint` with `profiles: ["maint"]` reading .env.ops
@@ -434,7 +440,7 @@ function checkVariant(variant, production, variantFiles = variant) {
       // Allowed differences: the read-only PostgreSQL CA bind (the image file mounts it from the host) and rab-api's exact
       // OpenShip import guard.
       const av = key === 'volumes' ? comparableVariantVolumes(name, a.volumes) : a[key];
-      const bv = key === 'volumes' ? withoutCa(b.volumes) : b[key];
+      const bv = key === 'volumes' ? withoutCa(b.volumes, name) : b[key];
       if (stable(av) !== stable(bv)) fail(`${name}.${key} differs from docker-compose.production.yml: ${stable(av)} vs ${stable(bv)}`);
     }
     for (const key of PINNED_ENV) {
@@ -714,7 +720,7 @@ function checkDeployment(merged, production, envFileKeys = {}, { dockerRoot = un
     }
     for (const key of RUNTIME_KEYS) {
       const value = key === 'volumes' ? comparableVariantVolumes(name, a.volumes) : a[key];
-      const expected = key === 'volumes' ? withoutCa(b.volumes) : b[key];
+      const expected = key === 'volumes' ? withoutCa(b.volumes, name) : b[key];
       if (stable(value) !== stable(expected)) fail(`${name}.${key} differs from docker-compose.production.yml in the deployed model`);
     }
     // The approval mode is the operator's compose.env opt-in (BC-11/C4): validated, not compared with the reference render.
