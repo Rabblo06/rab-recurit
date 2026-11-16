@@ -36,7 +36,7 @@ const FIXTURE_PASSWORD = generateFixturePassword();
  * This file can't invoke the real `GrantPlatformAdminCommand` class
  * directly in this shared test run — that class's own module
  * (`CommandModule`) reads `coreDataSourceOptions.url` from
- * `process.env.DATABASE_URL` at import time, and this suite's `DATABASE_URL`
+ * `process.env.PG_DATABASE_URL` at import time (DATABASE_URL before X3.5-S6), and this suite's connection
  * is already pinned to `rab_app` for the whole `--runInBand` run (the
  * command is meant to be invoked with `DATABASE_URL` pointed at `rab_owner`
  * instead — a different, deliberately separate real-world invocation, see

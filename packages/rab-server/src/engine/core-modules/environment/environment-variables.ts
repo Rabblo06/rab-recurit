@@ -6,14 +6,27 @@ import { WORKER_SCAN_INTERVAL_SETTINGS as SCAN_INTERVALS } from './worker-scan-i
 import { TIMER_TRIGGER_KINDS_PATTERN } from '../../worker-shared/timer-trigger.contract';
 // Phase B (B3): the deployment identity's accepted values, from their one definition.
 import { DEPLOYMENT_ENVIRONMENTS, IDENTITY_BOOTSTRAP_VALUE } from '../../../database/deployment-identity/deployment-identity';
-// Part C1: the HWS_RUNTIME_ENABLED default rule (on outside production), shared with the standalone provisioner.
+// Part C1: the HWS_RUNTIME_ENABLED default rule (on outside production), in one place (hws-runtime-default.ts).
 import { resolveHwsRuntimeEnabled } from './hws-runtime-default';
 
 /**
  * Wave 1 lane A: a security flag accepts exactly `true`/`false`. Anything else is left as the raw
  * string, so `@IsBoolean()` rejects it and the process refuses to boot (fail closed on a typo such as
  * `APP_JWT_LEGACY_VERIFY_ENABLED=flase`, instead of silently picking either behaviour).
+ *
+ * Phase X3.1 (XR-05 / ENV-01): every on/off switch in this file goes through this one helper, the fourteen that used to
+ * read `value === 'true'` included (a typo such as `USER_SESSION_ENFORCEMENT_CUTOVER=True` used to mean false, silently),
+ * with two exceptions: HWS_RUNTIME_ENABLED has its own strict resolver (`resolveHwsRuntimeEnabled`, because its unset
+ * default depends on NODE_ENV), and AI_AGENTS_ENABLED is loose on purpose (below).
+ * Accepted: exactly `true` or `false`, lower case, no spaces. Unset or empty (`KEY=`) keeps the field's default, because
+ * env.validation.ts drops empty values before this runs. Everything else (`True`, `TRUE`, `1`, `0`, `yes`, `on`,
+ * ` true`, `flase`) refuses to boot. AI_AGENTS_ENABLED: loose on purpose (see its comment). The compose gate
+ * (packages/rab-docker/scripts/compose-owner-login.cjs) reads this file to find every strict switch it lints.
+ * `@Type(() => String)` must stay above every `@Transform(strictBoolean)`: without it enableImplicitConversion turns any
+ * non-empty string into `true` before the transform sees it.
  */
+const STRICT_BOOLEAN_MESSAGE = '$property must be exactly true or false (lower case; unset or empty keeps the default)';
+
 function strictBoolean(value: unknown): unknown {
   if (value === true || value === 'true') return true;
   if (value === false || value === 'false') return false;
@@ -343,8 +356,8 @@ export class EnvironmentVariables {
    */
   @IsOptional()
   @Type(() => String)
-  @Transform(({ value }) => value === 'true')
-  @IsBoolean()
+  @Transform(({ value }) => strictBoolean(value))
+  @IsBoolean({ message: STRICT_BOOLEAN_MESSAGE })
   EMAIL_DELIVERY_ENABLED: boolean = true;
 
   /**
@@ -397,8 +410,8 @@ export class EnvironmentVariables {
    */
   @IsOptional()
   @Type(() => String)
-  @Transform(({ value }) => value === 'true')
-  @IsBoolean()
+  @Transform(({ value }) => strictBoolean(value))
+  @IsBoolean({ message: STRICT_BOOLEAN_MESSAGE })
   AUTH_CONTEXT_CACHE_ENABLED: boolean = false;
 
   /**
@@ -417,8 +430,8 @@ export class EnvironmentVariables {
    */
   @IsOptional()
   @Type(() => String)
-  @Transform(({ value }) => value === 'true')
-  @IsBoolean()
+  @Transform(({ value }) => strictBoolean(value))
+  @IsBoolean({ message: STRICT_BOOLEAN_MESSAGE })
   USER_SESSION_CACHE_ENABLED: boolean = false;
 
   /**
@@ -437,8 +450,8 @@ export class EnvironmentVariables {
    */
   @IsOptional()
   @Type(() => String)
-  @Transform(({ value }) => value === 'true')
-  @IsBoolean()
+  @Transform(({ value }) => strictBoolean(value))
+  @IsBoolean({ message: STRICT_BOOLEAN_MESSAGE })
   CORE_ENTITY_CACHE_ENABLED: boolean = false;
 
   /**
@@ -453,8 +466,8 @@ export class EnvironmentVariables {
    */
   @IsOptional()
   @Type(() => String)
-  @Transform(({ value }) => value === 'true')
-  @IsBoolean()
+  @Transform(({ value }) => strictBoolean(value))
+  @IsBoolean({ message: STRICT_BOOLEAN_MESSAGE })
   WORKSPACE_METADATA_CACHE_ENABLED: boolean = false;
 
   /**
@@ -668,6 +681,17 @@ export class EnvironmentVariables {
   WORKER_SCHEDULER_RECONCILE_SECONDS: number = 60;
 
   /**
+   * XR-10 (Phase X2.5): how long the Worker's SIGTERM drain waits for active jobs and in-flight cycles before it exits
+   * anyway (rab-worker main.ts; engine/worker-shared/worker-shutdown-timeout.contract.ts). Unset (or empty) → 30000, the
+   * unchanged default; a plain integer from 1000 to 34000 ms; anything else (NaN, a sign, spaces, an exponent, > 34000)
+   * refuses to boot (env.validation.ts). The ceiling keeps the drain plus the 10 s hard-exit margin inside the Worker's
+   * `stop_grace_period: 45s`, so Docker never SIGKILLs a job mid-drain. Read by rab-worker only.
+   */
+  @IsOptional()
+  @IsString()
+  WORKER_SHUTDOWN_TIMEOUT_MS?: string;
+
+  /**
    * PDF renderer P5 (owner decision D10): every report renders natively (@react-pdf/renderer, no browser). The key is
    * kept for ONE release and accepts only `native` (unset or empty = native); `chromium` refuses to boot, because this
    * Worker has no browser (roll back by redeploying the previous image). Delete the key in the release after.
@@ -723,8 +747,8 @@ export class EnvironmentVariables {
    */
   @IsOptional()
   @Type(() => String)
-  @Transform(({ value }) => value === 'true')
-  @IsBoolean()
+  @Transform(({ value }) => strictBoolean(value))
+  @IsBoolean({ message: STRICT_BOOLEAN_MESSAGE })
   WORKER_FAST_PUBLISH_NOTIFY: boolean = false;
 
   /**
@@ -1234,8 +1258,8 @@ export class EnvironmentVariables {
    */
   @IsOptional()
   @Type(() => String)
-  @Transform(({ value }) => value === 'true')
-  @IsBoolean()
+  @Transform(({ value }) => strictBoolean(value))
+  @IsBoolean({ message: STRICT_BOOLEAN_MESSAGE })
   USER_SESSION_ENFORCEMENT_CUTOVER: boolean = false;
 
   /**
@@ -1249,8 +1273,8 @@ export class EnvironmentVariables {
    */
   @IsOptional()
   @Type(() => String)
-  @Transform(({ value }) => value === 'true')
-  @IsBoolean()
+  @Transform(({ value }) => strictBoolean(value))
+  @IsBoolean({ message: STRICT_BOOLEAN_MESSAGE })
   AUTH_PASSWORD_ENABLED: boolean = true;
 
   /**
@@ -1431,41 +1455,41 @@ export class EnvironmentVariables {
 
   @IsOptional()
   @Type(() => String)
-  @Transform(({ value }) => value === 'true')
-  @IsBoolean()
+  @Transform(({ value }) => strictBoolean(value))
+  @IsBoolean({ message: STRICT_BOOLEAN_MESSAGE })
   AUTH_GOOGLE_ENABLED: boolean = false;
 
-  @ValidateIf((env: EnvironmentVariables) => env.AUTH_GOOGLE_ENABLED)
+  @ValidateIf((env: EnvironmentVariables) => env.AUTH_GOOGLE_ENABLED === true)
   @IsNotEmpty()
   @IsString()
   AUTH_GOOGLE_CLIENT_ID?: string;
 
-  @ValidateIf((env: EnvironmentVariables) => env.AUTH_GOOGLE_ENABLED)
+  @ValidateIf((env: EnvironmentVariables) => env.AUTH_GOOGLE_ENABLED === true)
   @IsNotEmpty()
   @IsString()
   AUTH_GOOGLE_CLIENT_SECRET?: string;
 
-  @ValidateIf((env: EnvironmentVariables) => env.AUTH_GOOGLE_ENABLED)
+  @ValidateIf((env: EnvironmentVariables) => env.AUTH_GOOGLE_ENABLED === true)
   @IsUrl({ require_tld: false, require_protocol: true })
   AUTH_GOOGLE_CALLBACK_URL?: string;
 
   @IsOptional()
   @Type(() => String)
-  @Transform(({ value }) => value === 'true')
-  @IsBoolean()
+  @Transform(({ value }) => strictBoolean(value))
+  @IsBoolean({ message: STRICT_BOOLEAN_MESSAGE })
   AUTH_MICROSOFT_ENABLED: boolean = false;
 
-  @ValidateIf((env: EnvironmentVariables) => env.AUTH_MICROSOFT_ENABLED)
+  @ValidateIf((env: EnvironmentVariables) => env.AUTH_MICROSOFT_ENABLED === true)
   @IsNotEmpty()
   @IsString()
   AUTH_MICROSOFT_CLIENT_ID?: string;
 
-  @ValidateIf((env: EnvironmentVariables) => env.AUTH_MICROSOFT_ENABLED)
+  @ValidateIf((env: EnvironmentVariables) => env.AUTH_MICROSOFT_ENABLED === true)
   @IsNotEmpty()
   @IsString()
   AUTH_MICROSOFT_CLIENT_SECRET?: string;
 
-  @ValidateIf((env: EnvironmentVariables) => env.AUTH_MICROSOFT_ENABLED)
+  @ValidateIf((env: EnvironmentVariables) => env.AUTH_MICROSOFT_ENABLED === true)
   @IsUrl({ require_tld: false, require_protocol: true })
   AUTH_MICROSOFT_CALLBACK_URL?: string;
 
@@ -1476,7 +1500,7 @@ export class EnvironmentVariables {
    * Exposed as a closed `@IsIn` set of one, rather than omitted entirely, specifically so an
    * operator cannot widen it to `'common'`/`'consumers'` without an actual code change.
    */
-  @ValidateIf((env: EnvironmentVariables) => env.AUTH_MICROSOFT_ENABLED)
+  @ValidateIf((env: EnvironmentVariables) => env.AUTH_MICROSOFT_ENABLED === true)
   @IsIn(['organizations'])
   AUTH_MICROSOFT_TENANT: string = 'organizations';
 
@@ -1502,8 +1526,8 @@ export class EnvironmentVariables {
    */
   @IsOptional()
   @Type(() => String)
-  @Transform(({ value }) => value === 'true')
-  @IsBoolean()
+  @Transform(({ value }) => strictBoolean(value))
+  @IsBoolean({ message: STRICT_BOOLEAN_MESSAGE })
   AUTH_OAUTH_HANDOFF_ENABLED: boolean = false;
 
   @IsOptional()
@@ -1530,14 +1554,15 @@ export class EnvironmentVariables {
    * enableImplicitConversion (env.validation.ts) coerces the raw string to
    * a real boolean via Boolean(value) *before* @Transform below runs,
    * turning both "true" and "false" into JS `true` (any non-empty string
-   * is truthy) and making value === 'true' always compare a boolean
-   * against a string. Pinning the type to String defers that coercion to
-   * this Transform instead, which does it correctly.
+   * is truthy) and making the comparison see a boolean instead of the
+   * string. Pinning the type to String defers that coercion to this
+   * Transform instead, which does it correctly. Strict since X3.1: only
+   * true/false; anything else refuses to boot.
    */
   @IsOptional()
   @Type(() => String)
-  @Transform(({ value }) => value === 'true')
-  @IsBoolean()
+  @Transform(({ value }) => strictBoolean(value))
+  @IsBoolean({ message: STRICT_BOOLEAN_MESSAGE })
   EMAIL_SMTP_NO_TLS: boolean = false;
 
   /**
@@ -1701,17 +1726,15 @@ export class EnvironmentVariables {
 
   /**
    * Required by R2/MinIO/Spaces and most non-AWS providers; AWS S3 should
-   * keep it false. Same @Type/@Transform gotcha as EMAIL_SMTP_NO_TLS, PLUS
-   * one more: mapping every non-"true" string to `false` (as the other
-   * boolean vars in this file do) would silently accept a typo'd value like
-   * "yes" as `false` instead of refusing to boot — this one instead passes
-   * anything that isn't exactly "true"/"false" straight through unconverted,
-   * so @IsBoolean() below correctly rejects it as invalid.
+   * keep it false. Same @Type/@Transform gotcha as EMAIL_SMTP_NO_TLS. Strict
+   * boolean (the shared strictBoolean helper since X3.1): anything that isn't
+   * exactly "true"/"false" passes through unconverted, so @IsBoolean() below
+   * rejects it and the process refuses to boot.
    */
   @IsOptional()
   @Type(() => String)
-  @Transform(({ value }) => (value === 'true' ? true : value === 'false' ? false : value))
-  @IsBoolean()
+  @Transform(({ value }) => strictBoolean(value))
+  @IsBoolean({ message: STRICT_BOOLEAN_MESSAGE })
   S3_FORCE_PATH_STYLE: boolean = false;
 
   /** Lifetime of a presigned URL. Short on purpose: a URL is a bearer token for one object. */
@@ -1931,8 +1954,8 @@ export class EnvironmentVariables {
    */
   @IsOptional()
   @Type(() => String)
-  @Transform(({ value }) => value === 'true')
-  @IsBoolean()
+  @Transform(({ value }) => strictBoolean(value))
+  @IsBoolean({ message: STRICT_BOOLEAN_MESSAGE })
   REALTIME_ENABLED: boolean = false;
 
   /** How often an open SSE connection re-checks `SecurityVersionService.readVector()` (cheap, version-only) to detect mid-connection revocation/permission/membership changes without redoing the full, expensive `AuthSecuritySnapshotService.build()`. */
@@ -1958,8 +1981,8 @@ export class EnvironmentVariables {
    */
   @IsOptional()
   @Type(() => String)
-  @Transform(({ value }) => value === 'true')
-  @IsBoolean()
+  @Transform(({ value }) => strictBoolean(value))
+  @IsBoolean({ message: STRICT_BOOLEAN_MESSAGE })
   PUSH_ENABLED: boolean = false;
 
   /**

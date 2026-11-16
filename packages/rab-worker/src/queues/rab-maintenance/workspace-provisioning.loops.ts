@@ -15,10 +15,10 @@ import { runWorkspaceSchemaDriftCycle } from './workspace-schema-drift.job';
  *     owner login (crewflow_owner), with `actAsCrewflow` — every provisioning and drift session runs `SET ROLE crewflow`, so
  *     the workspace DDL, the registry/ledger writes and the provision guard see exactly the identity the separate
  *     provisioner always had (and M-T2's registry allow-list admits it);
- *   - the superseded separate provisioner process (workspace-provisioner.main.ts; unused, removed in the final clean-up PR),
- *     whose login already IS crewflow.
+ *   - (formerly) the superseded separate provisioner process (workspace-provisioner.main.ts, removed in X5.1), whose login
+ *     already WAS crewflow; an already-crewflow or superuser session is still left untouched.
  *
- * Moved here UNCHANGED from workspace-provisioner.main.ts:
+ * Moved here UNCHANGED from the separate provisioner process (workspace-provisioner.main.ts, since removed in X5.1):
  *   - its own session-affine ReconnectingPgClient (never a pool connection: provisionWorkspaceSchema runs BEGIN/COMMIT
  *     pairs and holds a SESSION advisory lock), probed for session affinity first, reconnecting with bounded backoff;
  *   - the per-cycle provisioner-strict schema check (`checkSchemaCompatibility` with process 'provisioner': ledger ahead,

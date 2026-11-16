@@ -441,11 +441,31 @@ async function appliedCount(db: string): Promise<number> {
  * Runs every pending migration with timestamp <= upTo, through the real guarded runner, as `identity`. Migrations named in
  * `held` are not loaded at all, so they stay pending (the upgrade scenario's pre-0b base and its Phase 0b steps).
  */
+/**
+ * X3.5-S6: the guarded runner's target guard reads the process environment, so the run's ONE connection is exposed there as
+ * PG_DATABASE_URL (the runtime name; the legacy DATABASE_URL / DATABASE_URL_UNPOOLED pair it used to set is never written,
+ * and an inherited value of either is removed for the run). Every name is restored afterwards, on failure too.
+ */
+async function withMigrationConnection<T>(connection: string, fn: () => Promise<T>): Promise<T> {
+  const names = ['PG_DATABASE_URL', 'DATABASE_URL', 'DATABASE_URL_UNPOOLED'] as const;
+  const saved = names.map((name) => [name, process.env[name]] as const);
+  process.env.DB_TARGET = 'test';
+  process.env.PG_DATABASE_URL = connection;
+  delete process.env.DATABASE_URL;
+  delete process.env.DATABASE_URL_UNPOOLED;
+  try {
+    return await fn();
+  } finally {
+    for (const [name, value] of saved) {
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    }
+  }
+}
+
 async function migrate(db: string, identity: Identity, upTo: number, held: ReadonlySet<string> = NONE_HELD): Promise<string[]> {
   const connection = url(db, identity);
-  process.env.DB_TARGET = 'test';
-  process.env.DATABASE_URL = connection;
-  process.env.DATABASE_URL_UNPOOLED = connection;
+  return withMigrationConnection(connection, async () => {
   const ds = new GuardedMigrationDataSource({
     ...coreMigrationDataSourceOptions,
     url: connection,
@@ -458,17 +478,14 @@ async function migrate(db: string, identity: Identity, upTo: number, held: Reado
     return (await ds.runMigrations({ transaction: 'each' })).map((m) => m.name);
   } finally {
     await ds.destroy();
-    delete process.env.DATABASE_URL;
-    delete process.env.DATABASE_URL_UNPOOLED;
   }
+  });
 }
 
 /** Phase 0b revert through the real guarded runner (undoLastMigration requires the bootstrap-capable identity). */
 async function revertLast(db: string, identity: Identity, upTo: number, held: ReadonlySet<string> = NONE_HELD): Promise<void> {
   const connection = url(db, identity);
-  process.env.DB_TARGET = 'test';
-  process.env.DATABASE_URL = connection;
-  process.env.DATABASE_URL_UNPOOLED = connection;
+  return withMigrationConnection(connection, async () => {
   const ds = new GuardedMigrationDataSource({
     ...coreMigrationDataSourceOptions,
     url: connection,
@@ -481,9 +498,8 @@ async function revertLast(db: string, identity: Identity, upTo: number, held: Re
     await ds.undoLastMigration({ transaction: 'each' });
   } finally {
     await ds.destroy();
-    delete process.env.DATABASE_URL;
-    delete process.env.DATABASE_URL_UNPOOLED;
   }
+  });
 }
 
 /**
@@ -574,8 +590,9 @@ async function finalChecks(db: string, scenario: 'fresh' | 'upgrade'): Promise<v
   await lifecycleChecks(db);
 
   // The child gets the crewflow_app URL it needs and none of the bootstrap secrets.
-  const childEnv: NodeJS.ProcessEnv = { ...process.env, DATABASE_URL: url(db, 'crewflow_app') };
-  for (const k of ['MIGRATION_SECURITY_ADMIN_URL', 'CREWFLOW_BOOTSTRAP_PASSWORD', 'CREWFLOW_APP_BOOTSTRAP_PASSWORD', 'DATABASE_URL_UNPOOLED',
+  // X3.5-S6: the runtime name only (PG_DATABASE_URL); the legacy DATABASE_URL / DATABASE_URL_UNPOOLED never reach the child.
+  const childEnv: NodeJS.ProcessEnv = { ...process.env, PG_DATABASE_URL: url(db, 'crewflow_app') };
+  for (const k of ['MIGRATION_SECURITY_ADMIN_URL', 'CREWFLOW_BOOTSTRAP_PASSWORD', 'CREWFLOW_APP_BOOTSTRAP_PASSWORD', 'DATABASE_URL', 'DATABASE_URL_UNPOOLED',
     // X3.5-S7: the test admin URL under every name it can carry (the shared list, so a rename cannot be missed here).
     'TEST_DATABASE_URL', ...TEST_DATABASE_ADMIN_URL_NAMES, 'TEST_DATABASE_CREWFLOW_URL', 'APP_SECRET',
     // E5: CI now exports the worker's bootstrap password (disposable-postgres); the RLS-gate child needs neither it nor the URL.
@@ -595,7 +612,7 @@ async function finalChecks(db: string, scenario: 'fresh' | 'upgrade'): Promise<v
 
   // Phase D: the same refusal for the Worker's legacy login — only when this run knows its password.
   if (workerPasswordKnown) {
-    const workerEnv: NodeJS.ProcessEnv = { ...childEnv, DATABASE_URL: url(db, 'crewflow_worker'), RAB_APP_ROLE: 'crewflow_worker' };
+    const workerEnv: NodeJS.ProcessEnv = { ...childEnv, PG_DATABASE_URL: url(db, 'crewflow_worker'), RAB_APP_ROLE: 'crewflow_worker' };
     refusesLegacyLogin(
       'crewflow_worker',
       spawnSync('yarn', ['check-rls'], { cwd: repoRoot, env: workerEnv, encoding: 'utf8', shell: process.platform === 'win32' }),

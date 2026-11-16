@@ -16,7 +16,7 @@ import { createAdminDataSource } from './helpers/admin-datasource';
 import { TestIdentityFactory } from './helpers/test-identities';
 import { sqlStateAsSchemaRole } from './helpers/schema-role';
 import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-pipe';
-import { integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
+import { integrationTestDatabase, integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
 
 /**
  * P2.9 gap review, item 2 (owner-approved, corrected, non-destructive design) — the Initial
@@ -585,13 +585,13 @@ describeIfDb('workspace schema SUPERSEDED fencing (SQL-level, integration)', () 
    * this harness resolves to a DIFFERENT, narrower effective role — it gets a permission-denied
    * error for these three, itself a valid, even stronger proof that the ordinary runtime can
    * never touch workspace-schema lifecycle state directly, but not a test of the functions' OWN
-   * allow-list guard). `process.env.DATABASE_URL` in this test environment is the literal
+   * allow-list guard). The validated test application URL (`integrationTestDatabase().appUrl`) is the literal
    * `crewflow` credential (`TEST_DATABASE_URL`, mapped by `applyIntegrationTestDatabaseEnv`) — a
    * fresh raw connection with it, with no ORM/tenant-context layer in between, is what actually
    * runs these three exactly the way the real standalone provisioner process does.
    */
   async function asProvisioner<T>(fn: (client: Client) => Promise<T>): Promise<T> {
-    const client = new Client({ connectionString: process.env.DATABASE_URL });
+    const client = new Client({ connectionString: integrationTestDatabase().appUrl });
     await client.connect();
     try {
       return await fn(client);

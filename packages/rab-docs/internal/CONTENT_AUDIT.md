@@ -52,7 +52,7 @@ Source-backed inventory of every feature the documentation covers: its implement
 | CEO own-workspace operational home | Verified | `manager-workspace.service.ts:358-382` | `ceo-own-workspace-operational-home.integration.spec.ts` (5) | getting-started/organisations-and-workspaces, developers/workspace-isolation |
 | One active workspace membership per user; no switching | Verified | migration `1786675000000-WorkspaceMembershipCutover.ts`, `workspace-membership.service.ts` | Membership abuse cases | workspaces/access-changes |
 | Workspace isolation via RLS (`rab.*` GUCs) | Verified | `S/engine/core-modules/tenant/tenant-context.service.ts:120-134`, migration `1786665700000-TenantSessionContext.ts` | `manager-profile-isolation`, `check-rls-coverage` | workspaces/overview, security/data-isolation, developers/workspace-isolation |
-| Per-workspace schemas (HWS) | In development | `S/.../tenant/schema-resolver.service.ts`, `W/workspace-provisioner.main.ts` | Flag `HWS_RUNTIME_ENABLED` default false | getting-started/product-status, developers/workspace-isolation |
+| Per-workspace schemas (HWS) | In development | `S/.../tenant/schema-resolver.service.ts`, `W/queues/rab-maintenance/workspace-provisioning.loops.ts` | Flag `HWS_RUNTIME_ENABLED` default false | getting-started/product-status, developers/workspace-isolation |
 | Workspace-branded sign-in by hostname | Planned | — | Handoff: audited, not built | getting-started/product-status, workspaces/workspace-settings |
 
 ## Staff and venues

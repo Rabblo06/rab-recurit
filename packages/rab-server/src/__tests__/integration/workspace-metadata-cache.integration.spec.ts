@@ -136,7 +136,7 @@ describeIfDb('Workspace Metadata Cache (integration)', () => {
 
       // Drive it straight to READY via the same SECURITY DEFINER functions the real provisioner
       // uses — this file is testing the CACHE's read side, not provisioning itself (already proven
-      // end-to-end in workspace-provisioner-entrypoint.integration.spec.ts).
+      // end-to-end in rab-worker's workspace-provisioning-owner-login.integration.spec.ts).
       await manager.query(`SELECT core.begin_workspace_schema_attempt($1)`, [workspace.id]);
       await manager.query(`SELECT core.register_workspace_schema($1)`, [workspace.id]);
       await manager.query(`SELECT core.provision_workspace_schema($1)`, [workspace.id]);

@@ -31,7 +31,7 @@ import { resolveIntervalMs, SCAN_JOBS, schedulerIdOf } from '../../core/schedule
 import { WorkerDependencies } from '../../core/scheduler/worker-dependencies';
 import { WorkerModule } from '../../worker.module';
 import { EXPECTED_HANDLERS, EXPECTED_SCAN_SCHEDULER_IDS, SEPARATE_MODE_SCAN_IDS } from './helpers/expected-scan-jobs';
-import { integrationTestDatabaseReady } from '@rab/server/database/typeorm/core/integration-test-database-gate';
+import { integrationTestDatabase, integrationTestDatabaseReady } from '@rab/server/database/typeorm/core/integration-test-database-gate';
 
 /**
  * Lane A M3/M7: the REAL WorkerModule graph discovers all scan handlers + 5 consumer handlers (D-Q4b: + crewflow-timer-triggers) (no duplicates, no
@@ -67,7 +67,7 @@ describeIfDb('real WorkerModule: discovery + every scan adapter as crewflow_app 
     const [{ current_user: role }] = await runtimeDataSource.query('SELECT current_user');
     // BC-02 (owner-login architecture): the one runtime login is crewflow_owner; crewflow_app / crewflow_worker are schema roles.
     expect(role).toBe('crewflow_owner');
-    direct = new DataSource({ type: 'postgres', url: process.env.DATABASE_URL, schema: 'core', entities: [], synchronize: false });
+    direct = new DataSource({ type: 'postgres', url: integrationTestDatabase().appUrl, schema: 'core', entities: [], synchronize: false });
     await direct.initialize();
     redis = new Redis(process.env.REDIS_URL!, { maxRetriesPerRequest: null });
     publisher = redis.duplicate();
@@ -109,7 +109,7 @@ describeIfDb('real WorkerModule: discovery + every scan adapter as crewflow_app 
     // ...and every scan that will be scheduled is exactly the expected set.
     expect(SCAN_JOBS.map(schedulerIdOf)).toEqual([...EXPECTED_SCAN_SCHEDULER_IDS]);
 
-    lock = await ScanLock.open({ connectionString: process.env.DATABASE_URL! }, { log: () => undefined, warn: () => undefined });
+    lock = await ScanLock.open({ connectionString: integrationTestDatabase().appUrl }, { log: () => undefined, warn: () => undefined });
     const runtime = new WorkerRuntime(redis, { statsKey: 'lane-a-it:stats', statsWrite: 'fields', metricsLogMs: 0 });
     const errors: unknown[] = [];
     jest.spyOn((runtime as unknown as { logger: Logger }).logger, 'error').mockImplementation((_m, e) => void errors.push(e));

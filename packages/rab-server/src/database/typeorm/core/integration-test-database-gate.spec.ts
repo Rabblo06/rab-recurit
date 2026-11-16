@@ -100,10 +100,17 @@ describe('DEAD-07 integration test database gate', () => {
     const isGateName = (name: string): boolean => GATE_NAMES.has(name) || /^CREWFLOW_\w*_DATABASE_URL$/.test(name);
     /** Review B-2: a spec never takes the admin / elevated connection from the environment (integrationTestDatabase().adminUrl). */
     const ADMIN_NAMES = new Set<string>(['TEST_DATABASE_URL_UNPOOLED', 'TEST_DATABASE_ADMIN_URL', 'DATABASE_URL_UNPOOLED']);
+    /**
+     * X3.5-S6: setupFiles route through PG_DATABASE_URL and BLANK the legacy primary name, so a spec reading DATABASE_URL from
+     * the environment would get an empty string. A spec takes the application URL from the validated pair
+     * (integrationTestDatabase().appUrl) or, in a child it spawns, from PG_DATABASE_URL.
+     */
+    const LEGACY_PRIMARY_NAMES = new Set<string>(['DATABASE_URL']);
 
     interface Analysis {
       skipGates: string[];
       adminReads: string[];
+      legacyReads: string[];
     }
 
     function analyse(fileName: string, source: string): Analysis {
@@ -210,6 +217,7 @@ describe('DEAD-07 integration test database gate', () => {
 
       const skipGates: string[] = [];
       const adminReads: string[] = [];
+      const legacyReads: string[] = [];
       const walk = (node: ts.Node): void => {
         if (ts.isConditionalExpression(node) && (hasSkip(node.whenTrue) || hasSkip(node.whenFalse)) && readsAny(node.condition, isGateName)) {
           skipGates.push(line(node));
@@ -223,10 +231,11 @@ describe('DEAD-07 integration test database gate', () => {
         }
         const name = directRead(node);
         if (name !== null && ADMIN_NAMES.has(name) && !isWrite(node)) adminReads.push(line(node));
+        if (name !== null && LEGACY_PRIMARY_NAMES.has(name) && !isWrite(node)) legacyReads.push(line(node));
         ts.forEachChild(node, walk);
       };
       walk(sf);
-      return { skipGates, adminReads };
+      return { skipGates, adminReads, legacyReads };
     }
 
     it('the gate scan flags every known shape (review B-1 fixtures) and accepts the gate', () => {
@@ -297,9 +306,28 @@ describe('DEAD-07 integration test database gate', () => {
       for (const source of ok) expect([source, analyse('fixture.spec.ts', source).adminReads]).toEqual([source, []]);
     });
 
+    it('X3.5-S6: the legacy-read rule flags a spec taking the application URL from the blanked DATABASE_URL, not a write', () => {
+      const mustFlag = [
+        'const client = new Client({ connectionString: process.env.DATABASE_URL });',
+        "const DB_URL = process.env['DATABASE_URL'];",
+        'const { DATABASE_URL: u } = process.env;\nconnect(u);',
+        'const e = process.env;\nopen(e.DATABASE_URL!);',
+      ];
+      for (const source of mustFlag) expect([source, analyse('fixture.spec.ts', source).legacyReads.length > 0]).toEqual([source, true]);
+      const ok = [
+        "process.env.DATABASE_URL = 'postgres://x@127.0.0.1/db';",
+        'delete process.env.DATABASE_URL;',
+        'const client = new Client({ connectionString: integrationTestDatabase().appUrl });',
+        'const child = new Client({ connectionString: process.env.PG_DATABASE_URL });',
+        "const env = { DATABASE_URL: 'x' };\nexpect(env.DATABASE_URL).toBe('x');",
+      ];
+      for (const source of ok) expect([source, analyse('fixture.spec.ts', source).legacyReads]).toEqual([source, []]);
+    });
+
     it('no rab-server or rab-worker spec or test helper gates on a connection variable or reads the admin URL from the environment', () => {
       const skipGates: string[] = [];
       const adminReads: string[] = [];
+      const legacyReads: string[] = [];
       const walk = (dir: string): void => {
         for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
           const full = path.join(dir, entry.name);
@@ -310,11 +338,12 @@ describe('DEAD-07 integration test database gate', () => {
             const a = analyse(rel, fs.readFileSync(full, 'utf8'));
             skipGates.push(...a.skipGates);
             adminReads.push(...a.adminReads);
+            legacyReads.push(...a.legacyReads);
           }
         }
       };
       for (const root of ROOTS) walk(path.join(REPO, root));
-      expect({ skipGates, adminReads }).toEqual({ skipGates: [], adminReads: [] });
+      expect({ skipGates, adminReads, legacyReads }).toEqual({ skipGates: [], adminReads: [], legacyReads: [] });
     });
   });
 });

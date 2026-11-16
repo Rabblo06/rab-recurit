@@ -5,8 +5,8 @@
  *   API        packages/rab-server/src/main.ts           runDatabaseBootGates('api')
  *   Worker     packages/rab-worker/src/main.ts (jobs)    runDatabaseBootGates('worker')
  *   CLI        packages/rab-server/src/command/main.ts   runDatabaseBootGates('cli', { cliCommand: <argv command> })
- *   Provisioner packages/rab-worker/src/workspace-provisioner.main.ts  runDatabaseBootGates('provisioner') — on its
- *              privileged provisioning connection (the elevated endpoint when one is configured), expecting `crewflow`
+ *   Provisioner runDatabaseBootGates('provisioner') — the role the separate provisioner process used (that process,
+ *              workspace-provisioner.main.ts, was removed in X5.1; the role and its guards stay until the legacy names go)
  *
  * Gates, in order (each refusal names the gate and an action, never a URL, user name or password):
  *   1. role      (owner-login architecture, owner's final decision 2026-11-04) current_user AND session_user are the owner
@@ -178,7 +178,7 @@ export async function runDatabaseBootGates(processName: BootProcess, options: Ru
 
   for (const w of report.warnings) log(`[db-boot-gates] WARNING ${label}: ${w}`);
   log(
-    `[db-boot-gates] process=${processName}${options.cliCommand ? ` command=${options.cliCommand}` : ''} role=${report.role} ` +
+    `[db-boot-gates] process=${processName}${options.cliCommand ? ` command=${options.cliCommand}` : ''} source=${endpointTarget.source} role=${report.role} ` +
       `server=${report.serverVersionNum} database=${report.database} identity=${report.identity} tls=${report.tls === true ? 'on' : 'off'} ` +
       `force-rls=ok(${report.forceRlsTables}) extensions=ok pending=0 schema=compatible` +
       `${report.claimMode ? ` claim-mode=${report.claimMode}` : ''} due-work-exec=${report.grants.dueWork} dispatch-claim-exec=${report.grants.dispatchClaims} dispatch-notify=${report.dispatchNotify} gates=ok`,

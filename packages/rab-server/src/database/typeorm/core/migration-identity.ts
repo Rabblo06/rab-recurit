@@ -18,7 +18,8 @@
  * `crewflow_owner` (not SUPERUSER, not BYPASSRLS, nothing privileged reachable): scripts/migrate/owner-login/
  * owner-login-identity.ts, applied by the locked runner whenever the session login is crewflow_owner. The CF-41 rule above
  * is the LEGACY path (superuser on a disposable/local cluster, or the restricted migrator) — RETAINED FOR MIGRATION
- * COMPATIBILITY until PR #9 (REMOVE AFTER VERIFIED REPLACEMENT), because existing CI, compose and production flows still
+ * COMPATIBILITY until the separated-mode retirement (every separated database transitioned, MIX-1, and the
+ * restricted-migrator CI job retired; REMOVE AFTER VERIFIED REPLACEMENT), because existing CI and recovery flows still
  * build and migrate through it.
  */
 export const ROLE_SPLIT_MIGRATION = 'CrewflowSingleCredentialRoleArchitecture1786682000000';

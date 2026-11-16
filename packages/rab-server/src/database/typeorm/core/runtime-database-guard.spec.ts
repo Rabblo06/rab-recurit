@@ -373,7 +373,7 @@ describe('runtime database identity guard (API, worker and provisioner boot)', (
   // provisioner's privileged-credential isolation, so the ordinary worker legitimately sets it.)
   // Owner-login architecture (behaviour change, catalogued): the API and the Worker take ONE URL, so the Worker now REFUSES
   // DATABASE_DIRECT_URL by name (tests 16 and 16b). The lock-endpoint probe machinery below is retained only for the
-  // superseded separate provisioner process (unused; removed in the final clean-up PR), so cases 17-22 exercise it there.
+  // provisioner process role (the separate process was removed in X5.1; the role stays until X3.5-S8), so cases 17-22 exercise it there.
   describe('DATABASE_DIRECT_URL (rab-worker\'s directDataSource — the previously-unguarded path)', () => {
     it('16b. owner-login: a NON-production worker (and the API) refuse DATABASE_DIRECT_URL by name — one URL only', () => {
       for (const processName of ['api', 'worker'] as const) {

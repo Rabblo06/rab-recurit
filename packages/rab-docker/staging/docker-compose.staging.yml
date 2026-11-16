@@ -14,8 +14,7 @@
 #   - STORAGE_KEY_PREFIX=staging, so an object key copied into the wrong bucket is recognisable.
 # The env files (${CREWFLOW_SECRETS_DIR}/database.env and runtime.env, read by rab-api and rab-worker) and the PostgreSQL
 # CA mount come from docker-compose.image.yml itself. The separated-mode
-# per-service files (api.env / worker.env / .env.migrate) are no longer read; their templates in staging/env/ are
-# superseded and removed in the final clean-up PR (#9).
+# per-service files (api.env / worker.env / .env.migrate) are not read; their templates were removed in X5.1.
 name: crewflow-staging
 
 services:

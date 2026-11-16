@@ -1,7 +1,7 @@
 /**
  * Phase X U-1 (owner decisions 2026-11-11, P1-1 / P1-2 / P1-3): the UPGRADE FLOOR. It replaces the N1 production approval
  * list (core/production-migration-approval.ts) on the owner-login path of the locked runner only. N1 stays, unchanged, on
- * the legacy CF-41 path and the CLI (GuardedMigrationDataSource) until the clean-up PR retires those paths (P1-4).
+ * the legacy CF-41 path and the CLI (GuardedMigrationDataSource) until the separated-mode retirement retires those paths (P1-4).
  *
  * Why: N1 refused every pending migration after its 2026-10-22 cutoff, so every upgrade of an EXISTING production database
  * (one with tenant rows; a proven fresh install was waived) refused with exit 65 and a restart loop (finding SU-01 /

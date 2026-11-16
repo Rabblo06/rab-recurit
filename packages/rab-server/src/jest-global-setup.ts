@@ -10,6 +10,8 @@
 import {
   assertSameDatabaseAtRuntime,
   resolveForJestGlobalSetup,
+  routedTestDatabaseLegacyNames,
+  TestDatabaseConfigError,
   testDatabaseAdminNameNotice,
 } from './database/typeorm/core/test-database-guard';
 
@@ -20,6 +22,12 @@ export default async function globalSetup(): Promise<void> {
   const notice = testDatabaseAdminNameNotice(resolved);
   // eslint-disable-next-line no-console
   if (notice) console.warn(notice);
+  // X3.5-S6 (DBR-08): setupFiles route every test file through PG_DATABASE_URL only. pg-config now prints its deprecation
+  // warnings under NODE_ENV=test too, so the routing itself must leave no legacy name behind (names only, never values).
+  const legacy = routedTestDatabaseLegacyNames(process.env);
+  if (legacy.length > 0) {
+    throw new TestDatabaseConfigError(`the routed test environment still holds the legacy name(s) ${legacy.join(', ')}; it must use PG_DATABASE_URL only. Refusing to start.`);
+  }
   const identity = await assertSameDatabaseAtRuntime(resolved);
   // Non-secret evidence line: database name, cluster identifier and endpoint key only.
   // eslint-disable-next-line no-console

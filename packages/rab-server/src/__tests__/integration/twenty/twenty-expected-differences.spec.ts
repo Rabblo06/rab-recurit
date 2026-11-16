@@ -1,6 +1,7 @@
 /**
- * T7: the behaviour-change catalogue is well-formed, and the gate for the final removal PR (#9) is computable.
- * Structural only (no database). The gate itself is enforced in PR #9's CI by `TWENTY_REMOVAL_GATE=enforce`.
+ * T7: the behaviour-change catalogue is well-formed, and the gate for the separated-mode retirement (the final removal,
+ * formerly the placeholder "PR #9") is computable. Structural only (no database). The gate itself is enforced in that
+ * retirement's CI by `TWENTY_REMOVAL_GATE=enforce`.
  */
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
@@ -10,14 +11,14 @@ import catalogue from './twenty-expected-differences.json';
 type Diff = { id: string; severity: string; acceptance: string; change: string; test: string };
 const SEVERITIES = ['CRITICAL', 'HIGH', 'MEDIUM', 'LOW', 'INFO'];
 
-/** Everything that still blocks PR #9: unapproved differences and an incomplete migration of restricted-login tests. */
+/** Everything that still blocks the separated-mode retirement: unapproved differences and an incomplete migration of restricted-login tests. */
 export function removalGateProblems(c: typeof catalogue = catalogue): string[] {
   const out: string[] = [];
   for (const d of c.differences as Diff[]) if (/NEEDS OWNER APPROVAL/.test(d.acceptance)) out.push(`${d.id}: ${d.acceptance}`);
   if (!c.migratedTests.entries.length) out.push('migratedTests is empty: the TW-D differential has not been classified');
-  // Accepted differences kept on the PR #9 removal gate by coordinator decision (Agent 3 review); owner accepted HL-1 2026-11-05.
-  for (const id of (c as { removalGateKeep?: { ids: string[] } }).removalGateKeep?.ids ?? []) out.push(`KEEP-ON-GATE: ${id} (owner-accepted; kept on the PR #9 gate by coordinator decision)`);
-  // Suites skipped BY NAME ("remove in PR #9"): the gate passes only once each file is gone.
+  // Accepted differences kept on the removal gate by coordinator decision (Agent 3 review); owner accepted HL-1 2026-11-05.
+  for (const id of (c as { removalGateKeep?: { ids: string[] } }).removalGateKeep?.ids ?? []) out.push(`KEEP-ON-GATE: ${id} (owner-accepted; kept on the removal gate by coordinator decision)`);
+  // Suites that were skipped BY NAME (deleted in X5.1): the gate reports any of them that exists again.
   const repoRoot = join(__dirname, '../../../../../..');
   for (const f of (c as { removeInPr9?: { files: Array<{ file: string; reason: string }> } }).removeInPr9?.files ?? []) {
     if (existsSync(join(repoRoot, f.file))) out.push(`REMOVE-IN-PR9: ${f.file} still exists (${f.reason})`);
@@ -56,12 +57,17 @@ describe('twenty-expected-differences.json (behaviour-change catalogue)', () => 
     }
   });
 
-  it('the PR #9 removal gate reports what still blocks it (enforced only when TWENTY_REMOVAL_GATE=enforce)', () => {
+  it('X5.1: the suites that were skipped by name are deleted and stay deleted (regression guard)', () => {
+    const files = (catalogue as { removeInPr9?: { files: Array<{ file: string }> } }).removeInPr9?.files ?? [];
+    expect(files.length).toBeGreaterThan(0);
+    for (const f of files) expect({ file: f.file, exists: existsSync(join(__dirname, '../../../../../..', f.file)) }).toEqual({ file: f.file, exists: false });
+    // The standalone provisioner process they exercised is gone too (the Worker provisions in-process, owner login).
+    expect(existsSync(join(__dirname, '../../../../../..', 'packages/rab-worker/src/workspace-provisioner.main.ts'))).toBe(false);
+    expect(removalGateProblems().filter((l) => l.startsWith('REMOVE-IN-PR9'))).toEqual([]);
+  });
+
+  it('the separated-mode removal gate reports what still blocks it (enforced only when TWENTY_REMOVAL_GATE=enforce)', () => {
     const problems = removalGateProblems();
-    // The suites skipped by name are on the gate: every listed file is reported while it still exists.
-    for (const f of (catalogue as { removeInPr9?: { files: Array<{ file: string }> } }).removeInPr9?.files ?? []) {
-      if (existsSync(join(__dirname, '../../../../../..', f.file))) expect(problems.some((l) => l.includes(f.file))).toBe(true);
-    }
     if (process.env.TWENTY_REMOVAL_GATE === 'enforce') expect(problems).toEqual([]);
     else expect(Array.isArray(problems)).toBe(true);
   });
