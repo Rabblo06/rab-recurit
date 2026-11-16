@@ -4,7 +4,8 @@
  * last entry of the previous-versions list). Re-implemented, not copied.
  *
  * The version is `MAJOR.MINOR.PATCH`, one per release, from the root `package.json` and baked into the image as
- * `CREWFLOW_APP_VERSION` (Dockerfile ARG → ENV). R254 = 0.4.0, R256 = 0.5.0, the first release with the logbook = 0.6.0.
+ * `CREWFLOW_APP_VERSION` (Dockerfile ARG → ENV). R254 = 0.4.0, R256 = 0.5.0, the first release with the logbook = 0.6.0,
+ * the release that switches the HWS cutover (Part C3) on = 0.7.0.
  *
  * Pure apart from readAppVersion's file read; no side effects on import.
  */
@@ -16,8 +17,11 @@ export const CREWFLOW_APP_VERSION_VAR = 'CREWFLOW_APP_VERSION';
 /** Strict MAJOR.MINOR.PATCH without leading zeros (the same rule as the table's CHECK). */
 export const VERSION_PATTERN = /^(0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})$/;
 
-/** Every published version before the current code's, oldest first (Twenty TWENTY_PREVIOUS_VERSIONS). Append only. */
-export const CREWFLOW_PREVIOUS_VERSIONS: readonly string[] = Object.freeze(['0.4.0', '0.5.0']);
+/**
+ * Every published version before the current code's, oldest first (Twenty TWENTY_PREVIOUS_VERSIONS). Append only.
+ * 0.6.0 appended by the 0.7.0 release (C3 switched on): from 0.7.0 on the code upgrades strictly from 0.6.0 only.
+ */
+export const CREWFLOW_PREVIOUS_VERSIONS: readonly string[] = Object.freeze(['0.4.0', '0.5.0', '0.6.0']);
 
 /** The adoption release (B3): the one version that accepts an R254 or R256 history with no logbook rows. */
 export const ADOPTION_RELEASE_VERSION = '0.6.0';

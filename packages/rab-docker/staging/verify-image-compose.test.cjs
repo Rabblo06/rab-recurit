@@ -85,7 +85,8 @@ const weakenings = [
   ['rab-worker on another image than rab-api (O2: one image)', (v) => { v.services['rab-worker'].image = `adhin007/adolphus@sha256:${'7a'.repeat(32)}`; }, /rab-worker: image differs from rab-api/],
   ['enforce mode switched to warn', (v) => { v.services['rab-worker'].environment.CREWFLOW_RUNTIME_ISOLATION = 'warn'; }, /rab-worker: CREWFLOW_RUNTIME_ISOLATION is not "enforce"/],
   ['enforce mode removed from the API', (v) => { delete v.services['rab-api'].environment.CREWFLOW_RUNTIME_ISOLATION; }, /rab-api: CREWFLOW_RUNTIME_ISOLATION/],
-  ['HWS switched on', (v) => { v.services['rab-api'].environment.HWS_RUNTIME_ENABLED = 'true'; }, /rab-api\.environment\.HWS_RUNTIME_ENABLED differs/],
+  // Release 0.7.0: production runs HWS on (C3 switched on); turning it off in one file is the drift.
+  ['HWS switched off', (v) => { v.services['rab-api'].environment.HWS_RUNTIME_ENABLED = 'false'; }, /rab-api\.environment\.HWS_RUNTIME_ENABLED differs/],
   ['REDIS_URL committed', (v) => { v.services['rab-worker'].environment.REDIS_URL = 'redis://rab-redis:6379'; }, /rab-worker: REDIS_URL is committed/],
   ['API published on every interface', (v) => { v.services['rab-api'].ports[0].host_ip = '0.0.0.0'; }, /every interface/],
   ['Redis port published', (v) => { v.services['rab-redis'].ports = [{ target: 6379, published: '6379' }]; }, /rab-redis: publishes a port/],
@@ -179,6 +180,8 @@ test('environment mode: the deployed model passes, with the staging CA bind and 
         { type: 'volume', source: 'crewflow-db-ca', target: '/run/crewflow/db-ca', read_only: true, volume: {} },
         { type: 'volume', source: 'crewflow-db-target', target: '/run/crewflow/db-target', read_only: true, volume: {} },
         { type: 'bind', source: '/etc/x/pg-ca.crt', target: '/run/crewflow/pg-ca.crt', read_only: true },
+        // Release 0.7.0: the operator's HWS cutover backup directory (rab-api only), read-only.
+        ...(s === 'rab-api' ? [{ type: 'bind', source: '/srv/crewflow/hws-cutover-backup', target: '/run/crewflow/hws-cutover-backup', read_only: true }] : []),
       ];
       v.services[s].environment.STORAGE_KEY_PREFIX = 'staging';
     }
@@ -190,7 +193,8 @@ const deployedWeakenings = [
   ['CREWFLOW_API_BIND=0.0.0.0', (v) => { v.services['rab-api'].ports[0].host_ip = '0.0.0.0'; }, /every interface/],
   ['a writable bind mount on the API', (v) => { v.services['rab-api'].volumes = [{ type: 'bind', source: '/srv', target: '/srv' }]; }, /rab-api\.volumes/],
   ['the CA mounted writable', (v) => { v.services['rab-api'].volumes = [{ type: 'bind', source: '/x', target: '/run/crewflow/pg-ca.crt' }]; }, /rab-api\.volumes/],
-  ['HWS switched on by an override', (v) => { v.services['rab-worker'].environment.HWS_RUNTIME_ENABLED = 'true'; }, /HWS_RUNTIME_ENABLED/],
+  ['HWS switched off by an override', (v) => { v.services['rab-worker'].environment.HWS_RUNTIME_ENABLED = 'false'; }, /HWS_RUNTIME_ENABLED/],
+  ['the HWS cutover backup mount made writable', (v) => { v.services['rab-api'].volumes = v.services['rab-api'].volumes.map((x) => (x.target === '/run/crewflow/hws-cutover-backup' ? { ...x, read_only: false } : x)); }, /rab-api\.volumes/],
 ];
 for (const [name, mutate, pattern] of deployedWeakenings) {
   test(`environment mode refuses: ${name}`, { skip }, () => assertRefused(deployed(mutate), pattern));

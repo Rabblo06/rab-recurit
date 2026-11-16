@@ -22,7 +22,14 @@ const read = (rel: string) => readFileSync(join(REPO, rel), 'utf8');
 const CHECKED = /^(WORKER_[A-Z_]+|WORKSPACE_PROVISIONER_INTERVAL_SECONDS|DISABLE_DB_MIGRATIONS|DISABLE_CRON_JOBS_REGISTRATION|CREWFLOW_MIGRATE_ON_START|CREWFLOW_MIGRATION_APPROVAL_MODE|CREWFLOW_WORKER_SCHEMA_WAIT_SECONDS|PG_POOL_MAX_CONNECTIONS|HWS_RUNTIME_ENABLED|AI_ENABLED|PUSH_ENABLED|REALTIME_ENABLED)$/;
 
 /** Documented deliberate differences: `<harness>/<service>/<KEY>` -> reason. Keep this list short and explained. */
-const ALLOWED: Record<string, string> = {};
+const COST_HWS_OFF =
+  'release 0.7.0 switched production to HWS on; the cost baselines were measured with HWS off and the cost seeding writes the ' +
+  'core tables, so the cost stack stays HWS off until it is re-measured under HWS on (lead / owner decision, 0.7.0 release PR)';
+const ALLOWED: Record<string, string> = {
+  'cost/api/HWS_RUNTIME_ENABLED': COST_HWS_OFF,
+  'cost/worker/HWS_RUNTIME_ENABLED': COST_HWS_OFF,
+  'cost/worker2/HWS_RUNTIME_ENABLED': COST_HWS_OFF,
+};
 
 /** Code defaults for keys production leaves unset (the value production therefore runs). */
 function codeDefaults(): Record<string, string> {

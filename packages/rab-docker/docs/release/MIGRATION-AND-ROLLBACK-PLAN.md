@@ -321,6 +321,59 @@ provisioner + rab-migrate's 3 + boot probes. Every process refuses to start othe
 API 1 × 9, Worker 12, so 37 connections in the worst case. Check it against
 `max_connections - superuser_reserved_connections - reserved_connections`.
 
+### 4.7 Release 0.7.0: the HWS cutover and its backup (owner decisions 2026-11-15, Part C3)
+
+Release 0.7.0 switches C3 on: `HWS_RUNTIME_ENABLED=true` on rab-api and rab-worker, and the instance upgrade step
+`0.7.0_HwsCutover_1786721540100` copies every workspace's rows from the shared `core` tables into its own schema on the
+first start, in the migrate child, before the API listens. Owner rule: **no cutover without a verified backup.** The
+release needs the owner's deploy approval. 0.7.0 upgrades **only from a database that completed 0.6.0** (strict upgrade
+rule from 0.7.0 on): deploy and complete 0.6.0 first.
+
+**Before the first 0.7.0 start (required):**
+1. Stop the API and the Worker (nothing may write between the backup and the cutover). Keep the database running.
+2. As an operator login (§5.1), `pg_dump --format=custom --file=<dir>/pre-cutover.dump <db>`, where `<dir>` is the host
+   directory you will set as `CREWFLOW_HWS_CUTOVER_BACKUP_DIR` in compose.env.
+3. Restore it into a scratch database (`createdb <scratch> && pg_restore --exit-on-error -d <scratch> <dir>/pre-cutover.dump`),
+   compare the row counts of the 21 core business tables with the live database, drop the scratch database.
+4. Record `sha256sum` and the size in bytes of the dump, and the cluster identity:
+   `SELECT system_identifier::text FROM pg_control_system();` (null when your login may not call it, e.g. a managed
+   provider: the marker is then bound to the database NAME only, so take the dump from the database being upgraded, step 2,
+   and verify the restore, step 3).
+5. Write `<dir>/marker.json` with exactly these fields:
+   `{"kind":"crewflow-hws-cutover-backup","version":1,"database":"<db>","systemIdentifier":"<id or null>","takenAt":"<ISO-8601 with zone, now>","format":"pg_dump-custom","dumpFile":"pre-cutover.dump","sha256":"<64 hex>","sizeBytes":<n>,"restoreVerified":true}`
+   (`systemIdentifier` is a JSON string, or `null`).
+6. Set `CREWFLOW_HWS_CUTOVER_BACKUP_DIR=<dir>` in compose.env. Compose mounts it read-only into rab-api at
+   `/run/crewflow/hws-cutover-backup`; `CREWFLOW_HWS_CUTOVER_BACKUP_MARKER` is committed and points at `marker.json` there.
+7. Run the migrations before the API serves (migrate-on-start does this; never start the 0.7.0 API with migrate-on-start
+   disabled against an unmigrated database: the routing reads tables migration 1786721540000 creates, and fails closed,
+   503 for every workspace).
+8. Start the release: `docker compose pull && docker compose up -d`.
+
+**What the cutover checks by itself** (it cannot take or restore the backup): the marker's exact fields; this database's
+name and, when readable, this cluster's `system_identifier`; the backup is **at most 24 hours old by the database clock**
+and not from the future; the dump sits next to the marker, starts with `PGDMP`, and has exactly the recorded size and
+sha256 — the **whole dump is re-hashed** (about a few seconds per GB). It cannot verify that nothing wrote after the dump:
+step 1 is that control.
+
+**Outcomes.** Exit 0: done, every workspace is served from its schema. Exit 70: the step failed (logbook `failed`); the
+blocked workspaces answer 503 "workspace is being upgraded" until a later start succeeds; read the `hws cutover: ...` log
+lines (workspace ids, table names, counts only). The step is resumable: a crash or a 5-minute time budget leaves the
+remaining workspaces blocked and the next start continues (idempotent copy). Refusals that need an operator (never resolved
+automatically, nothing dropped): `NO_BACKUP`, `HWS_CUTOVER_BOTH_POPULATED`, `HWS_CUTOVER_USER_NOTE_AMBIGUOUS` /
+`_UNMAPPED` (the log names the note ids), `HWS_CUTOVER_UNOWNED_ROWS`, `WORKSPACE_NOT_READY`.
+
+**Locks.** Each copy / verify call holds ACCESS EXCLUSIVE on the core table it reads (all organisations) and on the
+workspace's table until its transaction ends; `lock_timeout` 10 s. Only in the migrate child, before the API listens, with
+the Worker stopped (compose starts it after the API is healthy).
+
+**Rollback (owner decision Q9).** After the cutover has started on a database:
+- the 0.7.0 image refuses to boot with HWS off;
+- a previous image (0.6.0, HWS off), where it starts against this database at all (R-4), finds the core copies of
+  cut-over workspaces READ-ONLY (the fence, 42501 on a write): it serves the pre-cutover snapshot, and every write made
+  since the cutover is not visible to it;
+- to undo the release entirely, restore the pre-cutover dump into a new database (R-7, §6): every write after the cutover
+  is lost. Keep the backup until the release is accepted.
+
 ## 5. Backup and restore
 
 ### 5.1 Backups
