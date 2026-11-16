@@ -7863,7 +7863,7 @@ Reversal:   A shorter QR_MAX_AGE_DAYS, or rotating QRs automatically on schedule
   - payroll-evidence-restrict (the F3 raw delete at level 22);
   - the runner and template suites on top of level 22.
 
-## Part C3 switched on — release 0.7.0: activation of the HWS cutover in production (DRAFT release PR #175; needs the owner's deploy approval)
+## Release 0.7.0 — the C3 cutover registered; HWS switched on in the deploy change (DRAFT release PR #175; needs the owner's deploy approval)
 
 The copy path itself is threat-modelled in the C3 entry added by **PR #178**. That entry covers:
 - the cross-tenant copy;
@@ -7883,12 +7883,20 @@ This entry covers only what release 0.7.0 adds to switch it on.
 - **Activation.**
   - The release registers the step: `'0-7'` in the upgrade registry, so `0.7.0_HwsCutover_1786721540100` runs.
   - The version goes to 0.7.0, with `CREWFLOW_PREVIOUS_VERSIONS` + 0.6.0. The upgrade is strict from 0.6.0: an R254/R256 database is refused with 65 and must take 0.6.0 first.
-  - `HWS_RUNTIME_ENABLED=true` is set on rab-api and rab-worker in `docker-compose.image.yml` and `docker-compose.production.yml`. Production then serves workspace data from the workspace schemas.
+  - `HWS_RUNTIME_ENABLED` stays `"false"` in both production compose files in this release PR (security review M1). It flips to `"true"` only in the deploy change that also bumps the production digest to the published 0.7.0 image. An image older than 0.7.0 never runs with HWS on, because it never ran the cutover and would serve un-copied workspace schemas.
+  - `staging/verify-image-compose.cjs` enforces this in the deployed model. It refuses `HWS_RUNTIME_ENABLED=true` unless the resolved rab-api / rab-worker image's baked `CREWFLOW_APP_VERSION` (from `docker image inspect`) is at least 0.7.0. An unknown version is refused (fail closed).
 - **The backup mount (proposed H6 exception; needs independent security review).** rab-api gets exactly one host mount: `${CREWFLOW_HWS_CUTOVER_BACKUP_DIR:-/dev/null}:/run/crewflow/hws-cutover-backup:ro`.
-  - It is read-only, rab-api only, and pinned by the H6 test (`deployment-worker.test.cjs`, exact string) and by `verify-image-compose` (a writable mount is refused).
+  - It is read-only and rab-api only. The H6 test (`deployment-worker.test.cjs`) pins the exact string in both production files, and `verify-image-compose` refuses a writable mount.
+  - In the deployed model (`verify-image-compose`, security review L2), its source must be exactly `/dev/null`, or an existing directory that:
+    - is not the project directory, `CREWFLOW_SECRETS_DIR` or an env file's directory, nor an ancestor of one;
+    - is not under `/etc`, `/root`, `/home`, `/proc` or `/sys`.
   - When the variable is unset it falls back to an empty file. No marker can be read there, so the copy is refused: fail closed.
   - Exposure: read-only access to the pre-cutover dump of the same database rab-api already reaches. The operator encrypts the dump at rest and removes it after acceptance (MIGRATION-AND-ROLLBACK-PLAN.md §4.7, §5.1).
-  - `CREWFLOW_HWS_CUTOVER_BACKUP_MARKER` is committed, so an env file cannot redirect it.
+  - `CREWFLOW_HWS_CUTOVER_BACKUP_MARKER` is committed on rab-api, and nothing can redirect it:
+    - an env file cannot set it (`compose-owner-login.cjs` `COMMITTED_KEYS`);
+    - a compose override cannot change it (`verify-image-compose` `PINNED_ENV`);
+    - the committed `environment:` value wins over `env_file` anyway.
+  - **Residual: erased data persists in the dump.** While the dump stays mounted, it keeps data that is erased after it was taken (GDPR erasure, user deletion). Unset `CREWFLOW_HWS_CUTOVER_BACKUP_DIR` and move the dump to the encrypted backup store as soon as the release is accepted. That store's retention (§5.1) then governs it.
 - **Timing.**
   - The cutover runs in the migrate child before the API listens.
   - The Worker starts only after the API is healthy, so no Worker writes during the copy.
@@ -7902,8 +7910,10 @@ This entry covers only what release 0.7.0 adds to switch it on.
   - **Runner change.** An upgrade command may now return `{ deferred }`. The runner then:
     - records no logbook row and logs a WARNING;
     - reports the step in `UpgradeRunReport.deferred`;
-    - leaves the version incomplete, so the next start runs the step again;
-    - lets the next release's strict check refuse (65) until the step has completed.
+    - **stops the release** (security review L1): no later instance command and no workspace pass of the version run;
+    - so no later step can be recorded and the version stays incomplete; the next start runs the step again;
+    - lets the next release's strict check refuse (65), without --force, unconditionally until the step has completed;
+    - and `PUBLISHED_VERSION_STEPS` pins each published version's steps (append-only), with a spec that fails if a registered step disappears, e.g. `UPGRADE_COMMANDS['0-7']` while 0.7.0 is the code or a previous version.
   - **Where the cutover uses it.** The cutover defers only when HWS is off and nothing is pending. HWS off with something pending still refuses.
   - **Host environment.** Upgrade commands now read host facts (HWS flag, marker path) from the start's own environment (`createUpgradeCommandHost({ env })`), not from `process.env` in an in-process run.
 - **Tests.**

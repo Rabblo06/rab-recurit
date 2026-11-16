@@ -543,11 +543,10 @@ services:
       RAB_RUNTIME_ENV: production
       AI_ENABLED: 'false'
       REDIS_URL: redis://rab-redis:6379
-      # Release 0.7.0 (owner decision 2026-11-15, Part C3): workspace data is served from each workspace's own schema. The
-      # first start of 0.7.0 runs the HWS cutover (copy core -> workspace schemas) in the migrate child before the API listens;
-      # it refuses to copy without a verified backup (CREWFLOW_HWS_CUTOVER_BACKUP_MARKER, rab-api). Once the cutover has
-      # started, an HWS-off process of this release refuses to boot. Rollback: docs/release/MIGRATION-AND-ROLLBACK-PLAN.md §4.7.
-      HWS_RUNTIME_ENABLED: "true"
+      # Stays "false" here (security review of the 0.7.0 release PR, M1): it flips to "true" only in the deploy change that
+      # also bumps the production digest to the published 0.7.0 image (the release that runs the HWS cutover), and
+      # staging/verify-image-compose.cjs refuses "true" on an image older than 0.7.0. Runbook: MIGRATION-AND-ROLLBACK-PLAN.md §4.7.
+      HWS_RUNTIME_ENABLED: "false"
       STORAGE_DRIVER: S3
       STORAGE_KEY_PREFIX: production
       S3_FORCE_PATH_STYLE: "true"
@@ -645,11 +644,10 @@ services:
       RAB_RUNTIME_ENV: production
       AI_ENABLED: 'false'
       REDIS_URL: redis://rab-redis:6379
-      # Release 0.7.0 (owner decision 2026-11-15, Part C3): workspace data is served from each workspace's own schema. The
-      # first start of 0.7.0 runs the HWS cutover (copy core -> workspace schemas) in the migrate child before the API listens;
-      # it refuses to copy without a verified backup (CREWFLOW_HWS_CUTOVER_BACKUP_MARKER, rab-api). Once the cutover has
-      # started, an HWS-off process of this release refuses to boot. Rollback: docs/release/MIGRATION-AND-ROLLBACK-PLAN.md §4.7.
-      HWS_RUNTIME_ENABLED: "true"
+      # Stays "false" here (security review of the 0.7.0 release PR, M1): it flips to "true" only in the deploy change that
+      # also bumps the production digest to the published 0.7.0 image (the release that runs the HWS cutover), and
+      # staging/verify-image-compose.cjs refuses "true" on an image older than 0.7.0. Runbook: MIGRATION-AND-ROLLBACK-PLAN.md §4.7.
+      HWS_RUNTIME_ENABLED: "false"
       # The owner's "feel instant" onboarding pin, read by the in-process provisioner (Agent 2 interface).
       WORKSPACE_PROVISIONER_INTERVAL_SECONDS: "5"
       STORAGE_DRIVER: S3

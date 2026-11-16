@@ -225,11 +225,11 @@ describeIfB1("the upgrade logbook on real databases (Part B3, B1's start path an
     // Everything before the failing migration applied and stays; the failing one and everything after it did not.
     expect(await cl.migrationNames(db)).toEqual(appliedBefore(before, pending));
     expect(await cl.migrationNames(db)).not.toContain(pending);
-    // Never recorded completed while a migration is missing.
-    expect(of(await cl.ledger(db), migrationsStep(V)).filter(([status]) => status === 'completed')).toEqual([]);
+    // The failed migrations step is recorded failed (the logbook exists on a 0.6.0-complete database), never completed.
+    expect(of(await cl.ledger(db), migrationsStep(V))).toEqual([['failed', 1]]);
     const retry = await start(db);
     expect([retry.exitCode, retry.serve]).toEqual([EXIT.ok, true]);
-    expect(of(await cl.ledger(db), migrationsStep(V)).slice(-1)[0]?.[0]).toBe('completed');
+    expect(of(await cl.ledger(db), migrationsStep(V))).toEqual([['failed', 1], ['completed', 2]]);
   });
 
   // ------------------------------------------------------------------------------------------------ LU-4 / LU-10 (70)

@@ -258,6 +258,17 @@ function assertNoHostAccess(name, svc) {
   }
 }
 
+test('H6 (0.7.0): docker-compose.image.yml rab-api carries exactly the read-only HWS cutover backup bind, rab-worker none', { skip }, () => {
+  const image = loadCompose('packages/rab-docker/docker-compose.image.yml').services;
+  const api = (image['rab-api'].volumes ?? []).filter((v) => typeof v === 'string' && v.includes('hws-cutover-backup'));
+  assert.deepEqual(api, [HWS_CUTOVER_BACKUP_MOUNT], 'rab-api: the backup bind, exact string (read-only, fixed target, /dev/null default)');
+  const worker = (image['rab-worker'].volumes ?? []).filter((v) => JSON.stringify(v).includes('hws-cutover-backup'));
+  assert.deepEqual(worker, [], 'rab-worker: no backup bind');
+  // Every other string bind on rab-api in image.yml is the PostgreSQL CA (read-only), as before 0.7.0.
+  const others = (image['rab-api'].volumes ?? []).filter((v) => typeof v === 'string' && !v.startsWith('crewflow-db-') && v !== HWS_CUTOVER_BACKUP_MOUNT);
+  assert.deepEqual(others, ['${CREWFLOW_PG_CA_FILE:-/dev/null}:/run/crewflow/pg-ca.crt:ro']);
+});
+
 test(
   'H6 rab-api: non-root, read-only root with NO tmpfs, no capabilities, no-new-privileges, bounded PIDs/memory/CPU, stop grace',
   { skip },

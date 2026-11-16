@@ -224,10 +224,12 @@ export class UpgradeRun {
         return;
       }
       if (result && typeof result.deferred === 'string') {
-        // Release 0.7.0 (C3 no-op fix): NOT recorded, so the step is not completed and runs again at the next start.
+        // Release 0.7.0 (C3 no-op fix; security review L1): NOT recorded, and the release STOPS here: no later instance
+        // command and no workspace pass run, so no later step can be recorded completed and make the version look complete.
+        // The next start runs this step again; the next release's strict previous-version check refuses (65) until it has.
         this.report.deferred.push(name);
-        log(`WARNING: upgrade command ${name} DEFERRED, not recorded: ${result.deferred.slice(0, 300)}. ${codeVersion} stays incomplete; the next start runs it again.`);
-        continue;
+        log(`WARNING: upgrade command ${name} DEFERRED, not recorded: ${result.deferred.slice(0, 300)}. ${codeVersion} stops here and stays incomplete (no later step runs); the next start runs it again.`);
+        return;
       }
       const attempt = await withUpgradeScope(session, 'upgrade', (q) => recordUpgradeMigration(q, { name, status: 'completed', executedByVersion: codeVersion, forced: force }));
       this.report.recorded.push({ name, status: 'completed', attempt });

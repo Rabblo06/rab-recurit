@@ -8,8 +8,10 @@ publish.
 
 0.7.0 is the release that switches C3 on (owner decision 2026-11-15, Part C3 Q8: "C3 ships in its own release").
 
-- **Workspace data moves into each workspace's own schema.** `HWS_RUNTIME_ENABLED=true` on rab-api and rab-worker in both
-  production compose files. On the first start, the upgrade step `0.7.0_HwsCutover_1786721540100` copies every workspace's
+- **Workspace data moves into each workspace's own schema.** The release registers the cutover step. `HWS_RUNTIME_ENABLED`
+  becomes `true` on rab-api and rab-worker in the **deploy change** that also bumps the production digest to the published
+  0.7.0 image, never before: `verify-image-compose` refuses HWS on with an image older than 0.7.0. On the first start with
+  HWS on, the upgrade step `0.7.0_HwsCutover_1786721540100` copies every workspace's
   rows from the shared `core` tables into its schema. It then checks the copy (row counts, every row in both directions,
   checksums, money in pence and worked minutes) before that workspace is served from its schema.
 - **The copy is safe to interrupt.** A workspace being copied answers 503 "workspace is being upgraded". A failed or

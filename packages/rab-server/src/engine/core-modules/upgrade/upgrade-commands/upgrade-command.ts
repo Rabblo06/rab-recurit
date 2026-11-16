@@ -49,11 +49,12 @@ export interface UpgradeCommandContext {
 }
 
 /**
- * Release 0.7.0 (C3 no-op fix): what a command may return instead of completing. `deferred` = the command could not do its
- * job in THIS deployment's configuration yet and wrote nothing; the runner records NO logbook row (like a crash), so the step
- * is not completed, the version is not complete, and the next start runs it again. Never a way to skip work silently: the
- * runner logs it, reports it (`UpgradeRunReport.deferred`), and the next release's strict previous-version check refuses (65)
- * until it has completed. A deferred command must not be a prerequisite of the release's later steps (they still run).
+ * Release 0.7.0 (C3 no-op fix; security review L1): what a command may return instead of completing. `deferred` = the command
+ * could not do its job in THIS deployment's configuration yet and wrote nothing. The runner then records NO logbook row (like
+ * a crash) and STOPS the release: no later instance command and no workspace pass of the version run, so nothing after it can
+ * be recorded and the version stays incomplete (its last instance step is never completed while this one is deferred). The
+ * next start runs it again. Never a way to skip work: the runner logs it, reports it (`UpgradeRunReport.deferred`), and the
+ * next release's strict previous-version check refuses (65), without --force, until it has completed.
  */
 export interface UpgradeCommandResult {
   /** Operator-facing reason (no secret, no row data). */

@@ -336,9 +336,13 @@ API 1 × 9, Worker 12, so 37 connections in the worst case. Check it against
 
 ### 4.7 Release 0.7.0: the HWS cutover and its backup (owner decisions 2026-11-15, Part C3)
 
-Release 0.7.0 switches C3 on: `HWS_RUNTIME_ENABLED=true` on rab-api and rab-worker, and the instance upgrade step
-`0.7.0_HwsCutover_1786721540100` copies every workspace's rows from the shared `core` tables into its own schema on the
-first start, in the migrate child, before the API listens. Owner rule: **no cutover without a verified backup.** The
+Release 0.7.0 registers C3: the instance upgrade step `0.7.0_HwsCutover_1786721540100` copies every workspace's rows from
+the shared `core` tables into its own schema on the first start with HWS on, in the migrate child, before the API listens.
+`HWS_RUNTIME_ENABLED` becomes `true` on rab-api and rab-worker in the deploy change that also bumps the production digest
+to the published 0.7.0 image. `staging/verify-image-compose.cjs --environment` refuses HWS on with an image older than
+0.7.0: pull the release first, so its `CREWFLOW_APP_VERSION` can be inspected. With HWS still off, a 0.7.0 start refuses
+the cutover (`HWS_RUNTIME_OFF`; exit 70, serves the core copies) or defers it when nothing is pending. Either way, 0.7.0
+is not complete until a start with HWS on has run it. Owner rule: **no cutover without a verified backup.** The
 release needs the owner's deploy approval. 0.7.0 upgrades **only from a database that completed 0.6.0** (strict upgrade
 rule from 0.7.0 on): deploy and complete 0.6.0 first.
 

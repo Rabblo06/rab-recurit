@@ -481,8 +481,11 @@ describeActivated('composite workspace FK attack, activated (post-cutover) state
         ),
       ),
     );
-    // workspace_id A -> B on an existing row of A's schema: refused (RLS WITH CHECK / the schema's workspace-bound CHECK).
-    await expect(asA((m) => m.query(`UPDATE ${businessTable(a.workspaceId, 'venue')} SET workspace_id = $1 WHERE id = $2`, [b.workspaceId, a.venueId]))).rejects.toThrow();
+    // workspace_id A -> B on an existing row of A's schema: refused by RLS WITH CHECK (42501; PostgreSQL checks the policy
+    // before the schema's workspace-bound CHECK and before the composite FKs).
+    await expect(asA((m) => m.query(`UPDATE ${businessTable(a.workspaceId, 'venue')} SET workspace_id = $1 WHERE id = $2`, [b.workspaceId, a.venueId]))).rejects.toMatchObject({
+      code: '42501',
+    });
     // A's own same-workspace Shift succeeds.
     await asA((m) =>
       m.query(
