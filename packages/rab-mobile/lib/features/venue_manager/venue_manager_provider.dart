@@ -690,14 +690,23 @@ class VenueManagerProvider extends ChangeNotifier {
   /// a Venue Manager can correct (`CorrectAttendanceDto` on the server).
   /// `reason` is required server-side (`@MinLength(10)`) and every
   /// correction is audited — see `AttendanceService.correct`.
+  /// [confirmUnusualClockIn] is sent (as `true`) only after the manager
+  /// pressed Confirm on the "Unusual clock-in time" warning, which the server
+  /// asks for with 409 `CLOCK_IN_CONFIRMATION_REQUIRED`.
   Future<void> correctAttendance(
     String attendanceId, {
     required String field,
     required String newValue,
     required String reason,
+    bool confirmUnusualClockIn = false,
   }) => api.post(
     '/attendance/$attendanceId/correct',
-    body: {'field': field, 'newValue': newValue, 'reason': reason},
+    body: {
+      'field': field,
+      'newValue': newValue,
+      'reason': reason,
+      if (confirmUnusualClockIn) 'confirmUnusualClockIn': true,
+    },
   );
 
   /// Completes one seat's ATTENDANCE review (server `POST .../attendance-review`, `attendance.edit`). The server refuses
@@ -726,6 +735,7 @@ class VenueManagerProvider extends ChangeNotifier {
     required String reasonCode,
     String? reasonNote,
     String? expectedVersion,
+    bool confirmUnusualClockIn = false,
   }) async {
     final json = await api.post(
       '/attendance/report/shift/$shiftId/staff/$staffProfileId/record-attendance',
@@ -738,6 +748,8 @@ class VenueManagerProvider extends ChangeNotifier {
         if (reasonNote != null && reasonNote.trim().isNotEmpty)
           'reasonNote': reasonNote.trim(),
         'expectedVersion': ?expectedVersion,
+        // Only after Confirm on "Unusual clock-in time" (server 409 CLOCK_IN_CONFIRMATION_REQUIRED).
+        if (confirmUnusualClockIn) 'confirmUnusualClockIn': true,
       },
     );
     return ShiftReportDetail.fromJson(json as Map<String, dynamic>);

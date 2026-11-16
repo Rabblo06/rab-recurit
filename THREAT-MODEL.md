@@ -7637,9 +7637,9 @@ image that runs the apps' own derive step on the read-only volume (`--pull never
     member's OWN end + `QR_POST_SHIFT_GRACE_MINUTES` (`attendanceWindow(effectiveAssignmentTime(...)).closesAt`, the same
     bound as every other clock-out path). Every comparison is written "not inside", so an unreadable time refuses. Worked
     minutes still come only from `@rab/shared` `computeWorkedMinutes`. Tested per bound, including a seat that ends before
-    the shift (own end, not shift end). Open (owner decision pending): `correct(clockInAt)` has no lower bound (only "not
-    in the future" and "not after clock-out"), so a manager with `attendance.edit` could move a clock-in earlier and
-    inflate paid minutes; `recordAttendance` already bounds it at shift start − `CLOCK_IN_EARLY_MINUTES`.
+    the shift (own end, not shift end). The `correct(clockInAt)` lower bound that was open here is
+    resolved by PR #163 (explicit confirmation below start − `CLOCK_IN_EARLY_MINUTES`, hard floor at start −
+    `CLOCK_IN_CONFIRM_FLOOR_HOURS`); see "Unusually early clock-in needs explicit confirmation" below.
   - *Per-staff grace, end to end.* One grace, `QR_POST_SHIFT_GRACE_MINUTES` (120), always from the staff member's OWN end
     (`effectiveAssignmentTime`): the QR is accepted until own end + grace (`validUntil` takes the seat; `validateQr`
     requires it), the staff self clock-out now has the same `assertClockWindow` check the on-behalf clock-out has, and the
@@ -7767,6 +7767,96 @@ Reversal:   A shorter QR_MAX_AGE_DAYS, or rotating QRs automatically on schedule
   unverifiable schema; CEO cannot cascade another workspace's staff profile), the Worker isolation specs with a real
   wrong-organisation binding, and the full suites with HWS on (server 2,846 pass / 10 fail = the member staff-visibility gap
   awaiting owner SQL; Worker 741/741).
+
+## Unusually early clock-in needs explicit confirmation, with a 12-hour hard floor (owner decisions 2026-11-15; branch feat/attendance-unusual-clock-in-warning, PR #163)
+- **Threat:** corrected or recorded hours feed pay (money).
+  - Before this, `POST /attendance/:id/correct` accepted any past clock-in with no lower bound. A mistyped or deliberate early time (for example 05:00 for a 09:00 shift) silently inflated worked minutes and pay for a Venue Manager with `attendance.edit` on the seat's venue.
+  - `record-attendance` refused such a time outright (400), with no way to record a genuine early start.
+- **Control: explicit confirmation, enforced in the service, not only the UI.**
+  - A manager-entered clock-in earlier than the staff member's OWN scheduled start (`effectiveAssignmentTime`) minus `CLOCK_IN_EARLY_MINUTES` (15) is saved only when the request carries `confirmUnusualClockIn: true`.
+  - Otherwise the answer is 409 `CLOCK_IN_CONFIRMATION_REQUIRED` (`earliestAllowed`, `enteredTime`) and nothing is written.
+  - Checked in `AttendanceService` (layer 2) after:
+    - the route guard (`PermissionGuard(attendance.edit)`, Venue Manager app only);
+    - the service-level `attendance.edit` re-check;
+    - the scope check (404 outside the venue / workspace);
+    - the finalised-report lock;
+    - every other validation and state rule.
+  - It runs inside the workspace-bound transaction with workspace RLS.
+  - The flag is declared on both DTOs (`@IsOptional() @IsBoolean()`; `forbidNonWhitelisted` stays global): a non-boolean is 400, and only the exact value `true` counts.
+  - The allowance is the same `attendanceWindow().opensAt` every clock-in path uses. The comparison is written "not inside", so an unreadable bound asks for confirmation instead of passing.
+  - The shift's scheduled start is only read, never written.
+  - In `correct`, an identical resubmission of the stored value is the idempotent no-op, checked before the floor. It returns 201 (not 422) even when a later schedule change put that stored value beyond the floor; a new value there is still refused.
+- **Same rule on `record-attendance`.**
+  - The old hard 400 for an early clock-in becomes the same 409 / confirm rule.
+  - Every other check is unchanged: future, clock-out bound, out > in, break < span, version, booking state, finalised.
+  - The overlap with another booking is not a pre-confirmation check: it is the database exclusion constraint (23P01) raised when the row is saved. A confirmed resend can therefore still get 409 for an overlap, and nothing is written.
+  - On an existing row the clock-in is judged when the manager enters or changes it, and also when the stored one is kept but is now earlier than the allowance against the seat's CURRENT start (for example the seat start moved later) with no confirmation of exactly that time on record (see "Stored clock-in made unusual" below).
+- **Hard floor.**
+  - A clock-in earlier than the staff member's own start minus `CLOCK_IN_CONFIRM_FLOOR_HOURS` is always refused, even after Confirm: 422 `CLOCK_IN_TOO_EARLY_ABSOLUTE` (`earliestPossible`). This applies to both endpoints.
+  - `CLOCK_IN_CONFIRM_FLOOR_HOURS` defaults to 12 and is validated as whole hours 1-48.
+  - The API and Worker refuse to boot when `CLOCK_IN_CONFIRM_FLOOR_HOURS x 60 <= CLOCK_IN_EARLY_MINUTES`, and the service also clamps the floor so it is never later than the normal allowance. Written "not inside": an unreadable bound refuses.
+  - This caps how far one acknowledged edit can move a clock-in, and so how much it can add to pay.
+- **No second approver (owner decision 2026-11-15).** The confirmation is the entering manager's own explicit acknowledgement, not an extra authorisation. Any Venue Manager allowed to correct the seat can confirm.
+- **Audit and visibility.**
+  - The confirmed save is recorded in the existing single audit row: `attendance.corrected`, or `attendance.manager_recorded` for a new record.
+  - Its metadata adds `unusualClockInConfirmed`, `earliestAllowed` and `confirmedClockInAt`; actor and time are the row's own.
+  - The `attendance_correction` row keeps the original value, corrected value, reason and `corrected_by`.
+  - No duplicate audit or correction rows; a retried Confirm writes nothing.
+  - The shift report row the reviewer and finaliser see carries `unusualClockInConfirmed` ("Unusual time confirmed" in both mobile apps and the web Venue Offers timesheet).
+    - It is derived server-side from that audit row, while the stored clock-in still equals the confirmed one and is still before the allowance.
+    - It is never a client claim, and needs no new column or migration.
+  - The row returns to `under_review`, so the existing attendance review and payroll approval still apply before any payment.
+  - Worked minutes still come only from `@rab/shared` `computeWorkedMinutes`, priced at the confirmation-time rate snapshot.
+- **Stored clock-in made unusual (review finding 2, closed by owner decision 2026-11-16, option b).**
+  - On `record-attendance`, a stored clock-in that is not being changed is judged whenever it is now earlier than the allowance against the seat's current start and no audit row confirms exactly that time. The same predicate as the report flag: `unusualClockInConfirmed` with a matching `confirmedClockInAt`.
+  - Then any write on the row needs `confirmUnusualClockIn: true` (409 `CLOCK_IN_CONFIRMATION_REQUIRED` otherwise), and the 12 h floor applies (422 `CLOCK_IN_TOO_EARLY_ABSOLUTE`, even confirmed).
+  - The floor is absolute: it applies to a stored clock-in outside the allowance whether or not it was confirmed. If the start moves past a confirmed time + 12 h, the next record-attendance write is refused with 422 and nothing is written. The confirmation lookup only decides the 409.
+  - The confirmation is checked last; nothing is written on refusal.
+  - The confirmed write records `confirmedClockInAt` = the stored time in its audit row, so the report row then shows "Unusual time confirmed".
+  - A stored clock-in already confirmed is never asked to confirm again; the floor still applies to it. One still inside the allowance is not judged.
+  - The "not inside the allowance" test fails closed: an unreadable bound is judged.
+- **Old app versions** (release note `packages/rab-iphone/docs/RELEASE_NOTES.md`):
+  - An app built before this change cannot send `confirmUnusualClockIn`. It shows the 409 sentence as an error, so an unusually early clock-in cannot be saved until the app is updated.
+  - Normal corrections are unaffected.
+  - The floor applies to every version.
+
+```
+SECURITY TRADE-OFF
+Decision:   An early manager-entered clock-in (between start - CLOCK_IN_CONFIRM_FLOOR_HOURS and start -
+            CLOCK_IN_EARLY_MINUTES) is accepted with the entering manager's own explicit confirmation; no second
+            approver. record-attendance moves from a hard 400 to the same confirm rule; on an existing row a stored
+            clock-in is judged again only when it is now unusual and was never confirmed.
+Reason:     Owner decisions 2026-11-15: genuine early starts must be recordable, a second approver is not wanted, and
+            recording a missing clock-out must not re-ask about a clock-in that was already confirmed.
+Risk:       A Venue Manager with attendance.edit can still add up to ~12 h before the staff member's start to paid time
+            by confirming; the confirmation is an acknowledgement, not an authorisation.
+Mitigation: 12 h hard floor (422, even confirmed) with a boot refusal for an inconsistent configuration; confirmation
+            enforced in the service after every other rule; audited in the single audit row (unusualClockInConfirmed,
+            earliestAllowed, confirmedClockInAt, actor, time); shown on the report row to the reviewer and finaliser;
+            the row is reopened for review and payroll approval still applies before payment.
+Reversal:   Lower CLOCK_IN_CONFIRM_FLOOR_HOURS, or require a second approver (payroll.approve) for a confirmed time.
+```
+- **Tests:**
+  - `venue-manager-scoping.integration.spec.ts` › correct, unusually early clock-in:
+    - a normal correction, and one exactly at start − 15 min, need no confirmation;
+    - earlier without the flag, or with `false`, gets 409 with the exact body and nothing written; `'true'` is 400;
+    - the allowance is measured from the seat's own start;
+    - Confirm saves once: original and corrected values, the confirming manager, the time and the metadata are kept; a retry adds nothing; the report flag is set, and is cleared by a later normal correction;
+    - future time and clock-in after clock-out are still 400, even with the flag;
+    - a finalised report gets the existing 409; `clockOutAt` / `breakMinutes` with the flag record no confirmation; an open row gets the existing "still on shift" 409;
+    - another workspace 404, the web console 403, revoked `attendance.edit` 403 at the route and `ForbiddenException` from the service;
+    - floor: start − 12 h − 1 min gets 422 even confirmed; exactly start − 12 h gets 409, then 201;
+    - re-sending the stored value after the schedule moved it beyond the floor is 201 with nothing written, and a new value there is 422.
+  - `manual-attendance.integration.spec.ts` › record-attendance, unusually early clock-in:
+    - early gets 409, then 200 with the flag; the audit row has the confirmation fields; the report row is flagged; idempotent; an ordinary record is not flagged;
+    - existing row: an early change needs confirmation, and a later break-only change is not re-asked;
+    - the same floor boundaries;
+    - another workspace or another organisation gets 404 even with the confirmation, and nothing is written;
+    - a stored clock-in made unusual by a later seat start: recording only the clock-out is 409 with nothing written; with Confirm it is saved, audited (`confirmedClockInAt` = the stored time) and flagged; a later break-only change is not re-asked; beyond the moved floor it is 422 even confirmed; still inside the allowance it is not asked;
+    - the floor is absolute: a confirmed stored clock-in whose start then moves past it + 12 h gets 422 on the next write, with or without the flag, and nothing is written.
+  - `env.validation.clock-in-floor.spec.ts` (range, plus the floor-vs-allowance boot refusal).
+  - Flutter `report_review_timesheet_test.dart` and Swift `VMUnusualClockInTests` cover the dialog, Edit keeping values, Confirm resending with the flag, the 422 shown as an error and never the dialog, the report flag and the layouts.
+  - rab-front `VenueOfferPipeline.spec.tsx` covers the timesheet flag.
 
 ## OWNER-DB-ULTIMATE Part D, decision 0a: workspace → core foreign keys removed (structure level 22; SQL owner-approved 2026-11-15; branch feat/ws-drop-core-fks, PR #149)
 
