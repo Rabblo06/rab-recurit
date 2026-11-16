@@ -1002,6 +1002,11 @@ export class OfferService {
       if (!(await this.permissions.userHasPermissionTx(manager, ctx, PermissionFlag.OFFER_SEND))) {
         throw new ForbiddenException('Sending offers is not permitted.');
       }
+      // Creating the shift needs what POST /shifts needs (owner decision batch 13, 2026-11-16): schedule.create, checked
+      // before any referenced id is read (403, a categorical lack — never an existence oracle).
+      if (!(await this.permissions.userHasPermissionTx(manager, ctx, PermissionFlag.SCHEDULE_CREATE))) {
+        throw new ForbiddenException('Creating shifts is not permitted.');
+      }
       // SF-3: the same insert as SchedulingService.create — venue AND job-role scope (404 out of scope), archived venue or
       // job role refused (409), the pay rate snapshot, and the shift.created audit row — only the initial status differs.
       const shift = await this.schedulingService.insertNewShiftTx(

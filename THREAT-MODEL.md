@@ -8140,13 +8140,14 @@ Reversal:   Lower CLOCK_IN_CONFIRM_FLOOR_HOURS, or require a second approver (pa
   (OPEN): venue + job-role scope (`assertVenueAccessibleTx` + `assertJobRoleOwned`, 404 out of scope, never 403) → archived
   venue (409 `VENUE_ARCHIVED`) or job role (409 `JOB_ROLE_ARCHIVED`) refused → `resolvePayRate` snapshot → INSERT
   (workspace from the venue) → `shift.created` audit (status + requiredCount, no pay) in the same transaction. Only DRAFT or
-  OPEN may be the initial status. Any refusal rolls back the whole transaction (no shift, no offer). `createShiftAndSend`
-  also re-checks its route flag `offer.send` in the service first (layer 2; 403, before any id is read). Venue and
-  job-role rules, rate resolution and the per-recipient send are unchanged.
-- **Not changed (flagged):** `POST /shifts` re-checks `schedule.create` in the service; create-and-send is gated by
-  `offer.send` only, as before. Whether creating a shift through create-and-send should also need `schedule.create` is a
-  permission decision for the owner, not made here.
+  OPEN may be the initial status. Any refusal rolls back the whole transaction (no shift, no offer). Venue and job-role
+  rules, rate resolution and the per-recipient send are unchanged.
+- **Permission (owner decision batch 13, 2026-11-16):** create-and-send creates a shift, so it now needs `schedule.create`
+  as well as `offer.send`, like `POST /shifts`. Both flags are on the route guard (`PermissionGuard` × 2) and both are
+  re-checked in `createShiftAndSend` first (layer 2; 403 before any referenced id is read). Every default role that holds
+  `offer.send` also holds `schedule.create`, so only a custom role with `offer.send` alone loses the action.
 - **Tests:** `scheduling-offer-abuse-cases.integration.spec.ts` › "SF-3": a same-workspace job role created by someone else
-  → 404 with no shift and no offer (and `POST /shifts` gives the same 404); archived job role → 409 `JOB_ROLE_ARCHIVED`
+  → 404 "Job role not found." with no shift and no offer (and `POST /shifts` gives the same 404); a role with `offer.send`
+  but not `schedule.create` → 403, no shift; archived job role → 409 `JOB_ROLE_ARCHIVED`
   and archived venue → 409 `VENUE_ARCHIVED`, no shift; a successful create-and-send writes exactly one `shift.created`
   row (actor = caller, status `open`, no pay keys).

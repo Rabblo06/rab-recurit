@@ -1206,6 +1206,7 @@ describeIfDb('scheduling + offer abuse cases (integration)', () => {
           .send(shiftAndSendBody(venue, foreignRole, [staff.staffProfileId]));
 
         expect(res.status).toBe(404);
+        expect(res.body.message).toBe('Job role not found.');
         expect(await shiftCount(venue)).toBe(before);
         const [{ n: offers }] = await adminDataSource.manager.query<[{ n: number }]>(
           `SELECT count(*)::int AS n FROM ${businessTable(venue.workspaceId!, 'job_offer')} WHERE staff_profile_id = $1`,
@@ -1218,6 +1219,22 @@ describeIfDb('scheduling + offer abuse cases (integration)', () => {
           .set('Authorization', `Bearer ${adminToken}`)
           .send({ venueId: venue.id, jobRoleId: foreignRole.id, startsAt: new Date(Date.now() + 52 * 3600 * 1000).toISOString(), endsAt: new Date(Date.now() + 60 * 3600 * 1000).toISOString(), requiredCount: 1 });
         expect(plain.status).toBe(404);
+      });
+
+      it('a role with offer.send but not schedule.create → 403, and no shift is created (owner decision batch 13)', async () => {
+        const { organisation, adminEmail, venue } = await seedOrg([PermissionFlag.SCHEDULE_VIEW, PermissionFlag.OFFER_SEND, PermissionFlag.OFFER_CONFIRM]);
+        const adminToken = await login(adminEmail);
+        const jobRole = await seedJobRole(organisation, venue.createdBy!);
+        const staff = await seedStaff(organisation);
+        const before = await shiftCount(venue);
+
+        const res = await request(app.getHttpServer())
+          .post('/rest/v1/shifts/with-offers')
+          .set('Authorization', `Bearer ${adminToken}`)
+          .send(shiftAndSendBody(venue, jobRole, [staff.staffProfileId]));
+
+        expect(res.status).toBe(403);
+        expect(await shiftCount(venue)).toBe(before);
       });
 
       it('an archived job role → 409 JOB_ROLE_ARCHIVED, and no shift is created', async () => {
