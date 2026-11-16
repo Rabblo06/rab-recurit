@@ -668,6 +668,17 @@ export class EnvironmentVariables {
   WORKER_SCHEDULER_RECONCILE_SECONDS: number = 60;
 
   /**
+   * XR-10 (Phase X2.5): how long the Worker's SIGTERM drain waits for active jobs and in-flight cycles before it exits
+   * anyway (rab-worker main.ts; engine/worker-shared/worker-shutdown-timeout.contract.ts). Unset (or empty) → 30000, the
+   * unchanged default; a plain integer from 1000 to 34000 ms; anything else (NaN, a sign, spaces, an exponent, > 34000)
+   * refuses to boot (env.validation.ts). The ceiling keeps the drain plus the 10 s hard-exit margin inside the Worker's
+   * `stop_grace_period: 45s`, so Docker never SIGKILLs a job mid-drain. Read by rab-worker only.
+   */
+  @IsOptional()
+  @IsString()
+  WORKER_SHUTDOWN_TIMEOUT_MS?: string;
+
+  /**
    * PDF renderer P5 (owner decision D10): every report renders natively (@react-pdf/renderer, no browser). The key is
    * kept for ONE release and accepts only `native` (unset or empty = native); `chromium` refuses to boot, because this
    * Worker has no browser (roll back by redeploying the previous image). Delete the key in the release after.

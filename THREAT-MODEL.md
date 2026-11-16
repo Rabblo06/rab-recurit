@@ -8055,3 +8055,37 @@ Reversal:   A shorter QR_MAX_AGE_DAYS, or rotating QRs automatically on schedule
   goes with X3.5-S8).
 - **Still open (separated-mode retirement):** the legacy CF-41 runner path, N1 on the legacy/CLI paths, the restricted-migrator
   CI job, `deploy-prepare.ts`, the `'provisioner'` process role (X3.5-S8) and the health-check provisioner branch.
+
+## X2.5 — HTTP-first API shutdown, a bounded Worker drain, the owner-login connection budget (XR-09, XR-10, XD-05) (branch phase-x/x25-reliability, 2026-11-15, PR #168)
+- **Asset:** the rate limiting of the credential routes (`@RateLimitRequired`, Redis-backed throttler); the API's and
+  Worker's availability across a restart; the database's connection capacity and `crewflow_owner`'s connection limit.
+- **XR-09, before:** `app.enableShutdownHooks()` let Nest quit the throttler and auth-cache Redis clients, the BullMQ
+  producers and the realtime subscriber (`onModuleDestroy`) while the HTTP listener still accepted requests. The throttler
+  failed closed, so every credential request in the stop window (up to the 40 s grace) got 503 `RATE_LIMIT_UNAVAILABLE`.
+  Rate limiting was never bypassed, but sign-in and recovery broke for the whole window.
+- **XR-09, control:** `engine/utils/http-first-shutdown.ts` replaces the shutdown hooks:
+  1. the listener closes first, so new connections are refused and the client retries another replica;
+  2. requests already in flight drain for up to 15 s while Redis is still up, so each one is still throttled by the real
+     guard; responses sent during the drain close their connection;
+  3. every remaining connection is closed, SSE streams included;
+  4. only then does `app.close()` quit queues/Redis and then the database;
+  5. the signal is re-raised (same exit status).
+
+  A 35 s backstop exits 1 if the shutdown hangs, before Docker's SIGKILL at the 40 s grace.
+  No request can reach a guard after its Redis client has quit. The in-flight tracker is registered ahead of Express's
+  handler and also reads `writeHead` headers, so an SSE stream never holds the drain open.
+- **XR-10, control:** `WORKER_SHUTDOWN_TIMEOUT_MS` is declared and parsed strictly
+  (`worker-shutdown-timeout.contract.ts`): unset means 30000; an integer 1000..34000 is accepted; anything else refuses to
+  boot in both processes (it used to become NaN at shutdown, which skipped the drain, or outlived the 45 s grace, so the
+  Worker was SIGKILLed mid-job). The message never echoes the value.
+- **XD-05, control:** the startup connection budget counts every connection the single owner login opens: pools, /healthz
+  probe, the Worker's in-process provisioner, the migrate-on-start child (now 5) and the boot probes. A `rolconnlimit` on
+  `crewflow_owner` is compared with that whole total, and a deployment over capacity or over the login limit refuses to
+  start (fail closed, unchanged rule; before, the check understated the login's use).
+- **Residual:** a client must retry a refused connection (single API with stop-then-start: a short refusal window instead
+  of 503s). A request still running at the 15 s deadline is cut. A deployment within two connections of its limit now
+  refuses to boot (operator check in the PR).
+- **Tests:** `http-first-shutdown.spec.ts` (refusal, not 503; in-flight request answered before Redis quits; streams
+  recognised however their headers were set; deadline cut; second signal ignored; close failure exits 1),
+  `api-shutdown-order.integration.spec.ts` (real AppModule and Redis-backed throttler), `worker-shutdown-timeout.contract.spec.ts`,
+  `env.validation.worker-shutdown-timeout.spec.ts`, `connection-budget.spec.ts`, `connection-budget.event-listener.spec.ts`.
