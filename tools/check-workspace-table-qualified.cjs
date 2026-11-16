@@ -92,6 +92,10 @@ const SEARCH_PATH_BINDERS = Object.freeze([
   // A measurement tool, not runtime: the operator/dev fingerprint generator runs each structural command on a throwaway
   // database with search_path pinned to pg_catalog, pg_temp, exactly as the runner does (0b, #146).
   'packages/rab-server/src/database/typeorm/scripts/generate-workspace-fingerprints.ts',
+  // Not a business-table binder: the C3 cutover instance command (0.7.0, not registered until its release PR) pins its own
+  // transactions to the constant 'pg_catalog, pg_temp' (every name it uses is core.-qualified or pg_catalog.); it binds no
+  // business schema and never calls businessTables.
+  'packages/rab-server/src/engine/core-modules/upgrade/upgrade-commands/0-7/hws-cutover.ts',
 ]);
 /**
  * Part D workspace upgrade COMMANDS: versioned, frozen DDL (`upgrade-commands/<major>-<minor>/*.ts`) whose `sql(schemaName)`
