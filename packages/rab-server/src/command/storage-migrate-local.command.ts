@@ -130,6 +130,7 @@ export class StorageMigrateLocalCommand extends CommandRunner {
 
   private async migrateOne(item: Legacy, root: string, apply: boolean): Promise<{ outcome: Outcome; detail?: string }> {
     if (item.table === 'manager_workspace') return { outcome: 'unsupported', detail: 'manager_workspace logos are not migrated by this command yet' };
+    const statements = APPLY_SQL[item.table];
     // 1. The key must be inside the source root and belong to the SAME organisation as the referencing row.
     const full = resolve(root, item.key);
     if (item.key.includes('..') || !full.startsWith(`${root}${sep}`)) return { outcome: 'invalid_key' };
@@ -163,10 +164,7 @@ export class StorageMigrateLocalCommand extends CommandRunner {
       const ctx = { organisationId: item.organisationId, workspaceId: item.workspaceId, userId: '', role: '' };
       const fileId = await this.tenantContext.runInTenantContext(ctx, async (manager) => {
         const file = await this.files.registerAvailable(manager, uploaded);
-        const column = item.table === 'user' ? 'avatar_file_id' : 'logo_file_id';
-        const table = item.table === 'user' ? 'core."user"' : `core.${item.table}`;
-        // sql-injection-reviewed: item.table is the union 'user' | 'organisation' (manager_workspace returned above) set by this command's own discovery query, never input.
-        assertOneRow(await manager.query(`UPDATE ${table} SET ${column} = $1 WHERE id = $2 AND ${column} IS NULL RETURNING id`, [file.id, item.rowId]), 'link');
+        assertOneRow(await manager.query(statements.link, [file.id, item.rowId]), 'link');
         await this.audit.record(manager, { organisationId: item.organisationId, userId: '', inspectedBy: undefined }, AuditAction.FILE_MIGRATION_COMPLETED, {
           entityType: 'stored_file',
           entityId: file.id,
@@ -180,14 +178,7 @@ export class StorageMigrateLocalCommand extends CommandRunner {
         const file = await this.files.findAvailable(manager, fileId);
         if (!file) throw new Error('migrated file not readable');
         await this.files.readVerified(file);
-        const table = item.table === 'user' ? 'core."user"' : `core.${item.table}`;
-        const keyColumn = item.table === 'user' ? 'avatar_key' : 'logo_key';
-        const fileColumn = item.table === 'user' ? 'avatar_file_id' : 'logo_file_id';
-        // sql-injection-reviewed: item.table is the union 'user' | 'organisation' (manager_workspace returned above) set by this command's own discovery query, never input.
-        assertOneRow(
-          await manager.query(`UPDATE ${table} SET ${keyColumn} = NULL WHERE id = $1 AND ${keyColumn} IS NOT NULL AND ${fileColumn} = $2 RETURNING id`, [item.rowId, fileId]),
-          'clear',
-        );
+        assertOneRow(await manager.query(statements.clear, [item.rowId, fileId]), 'clear');
       });
       return { outcome: 'migrated', detail: fileId };
     } catch (error) {
@@ -195,6 +186,22 @@ export class StorageMigrateLocalCommand extends CommandRunner {
     }
   }
 }
+
+/**
+ * The only rows --apply writes, each with its two frozen statements: no table or column name is ever built at run time
+ * (manager_workspace is `unsupported`, see migrateOne). link: point the row at the new stored_file, only if it has none yet;
+ * clear: retire the legacy key, only if it is still set and the row points at THIS file. Each must change exactly one row.
+ */
+const APPLY_SQL: Readonly<Record<'user' | 'organisation', Readonly<{ link: string; clear: string }>>> = Object.freeze({
+  user: Object.freeze({
+    link: 'UPDATE core."user" SET avatar_file_id = $1 WHERE id = $2 AND avatar_file_id IS NULL RETURNING id',
+    clear: 'UPDATE core."user" SET avatar_key = NULL WHERE id = $1 AND avatar_key IS NOT NULL AND avatar_file_id = $2 RETURNING id',
+  }),
+  organisation: Object.freeze({
+    link: 'UPDATE core.organisation SET logo_file_id = $1 WHERE id = $2 AND logo_file_id IS NULL RETURNING id',
+    clear: 'UPDATE core.organisation SET logo_key = NULL WHERE id = $1 AND logo_key IS NOT NULL AND logo_file_id = $2 RETURNING id',
+  }),
+});
 
 /**
  * TypeORM's postgres driver returns `[rows, rowCount]` for UPDATE. Anything but exactly one changed row throws, which rolls
