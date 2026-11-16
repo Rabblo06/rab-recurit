@@ -22,7 +22,7 @@ function fakeClient(rows: Array<{ id: string; status: string; version: number; f
 describe('checkWorkspaceSchemaDrift: AHEAD (Phase B schema-version compatibility; Part D structure level)', () => {
   it('counts a workspace at the code structure level as OK, one above it as AHEAD, one below as BEHIND (20 included, since level 21)', async () => {
     const L = codeWorkspaceStructureLevel();
-    expect(L).toBe(21);
+    expect(L).toBeGreaterThanOrEqual(21);
     const result = await checkWorkspaceSchemaDrift(
       fakeClient([
         { id: 'current', status: 'OK', version: L, fingerprint: 'a'.repeat(64) },

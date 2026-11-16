@@ -61,12 +61,14 @@ export interface StandardFieldSettings {
 export interface StandardRelationDefinition {
   /** A workspace table of this list, or a core reference object. */
   readonly target: string;
-  readonly onDelete: RelationOnDelete;
+  /** The FK's ON DELETE action; absent when no foreign key backs the relation (core."user" since structure level 22). */
+  readonly onDelete?: RelationOnDelete;
   /** The ONE_TO_MANY field created on the target (workspace targets only; core reference objects get no inverse). */
   readonly inverse?: { readonly name: string; readonly label: string };
   /**
    * The constraint that enforces the relation when it is not a plain FK to the target's `id` (shift_staff_review.staff_profile_id
-   * is enforced through its composite FK to shift_assignment(shift_id, staff_profile_id)).
+   * is enforced through its composite FK to shift_assignment(shift_id, staff_profile_id)), or `service:<Name>` when only the
+   * service layer enforces it (every relation to core."user" since DropWorkspaceCoreForeignKeys, owner decision 0a).
    */
   readonly enforcedBy?: string;
 }

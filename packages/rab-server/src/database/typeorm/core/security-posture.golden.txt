@@ -302,6 +302,35 @@ execute|host_label_sync_organisation()|crewflow|false
 execute|host_label_sync_workspace()|PUBLIC|false
 execute|host_label_sync_workspace()|crewflow_app|false
 execute|host_label_sync_workspace()|crewflow|false
+execute|hws_cutover_copy_batch(uuid,text,text,integer)|PUBLIC|false
+execute|hws_cutover_copy_batch(uuid,text,text,integer)|crewflow_app|false
+execute|hws_cutover_copy_batch(uuid,text,text,integer)|crewflow|true
+execute|hws_cutover_core_fence()|crewflow_app|false
+execute|hws_cutover_core_fence()|crewflow|true
+execute|hws_cutover_drop_new_statement_pointers(uuid,uuid[])|PUBLIC|false
+execute|hws_cutover_drop_new_statement_pointers(uuid,uuid[])|crewflow_app|false
+execute|hws_cutover_drop_new_statement_pointers(uuid,uuid[])|crewflow|true
+execute|hws_cutover_new_workspace_trg()|PUBLIC|false
+execute|hws_cutover_new_workspace_trg()|crewflow_app|false
+execute|hws_cutover_new_workspace_trg()|crewflow|false
+execute|hws_cutover_probe(uuid)|PUBLIC|false
+execute|hws_cutover_probe(uuid)|crewflow_app|false
+execute|hws_cutover_probe(uuid)|crewflow|true
+execute|hws_cutover_purge_core_statement_pointers(uuid)|PUBLIC|false
+execute|hws_cutover_purge_core_statement_pointers(uuid)|crewflow_app|false
+execute|hws_cutover_purge_core_statement_pointers(uuid)|crewflow|true
+execute|hws_cutover_schema(uuid)|crewflow_app|false
+execute|hws_cutover_schema(uuid)|crewflow|true
+execute|hws_cutover_source_sql(text)|crewflow_app|false
+execute|hws_cutover_source_sql(text)|crewflow|true
+execute|hws_cutover_started_any()|PUBLIC|false
+execute|hws_cutover_started_any()|crewflow_app|true
+execute|hws_cutover_started_any()|crewflow|true
+execute|hws_cutover_truncate_guard()|crewflow_app|false
+execute|hws_cutover_truncate_guard()|crewflow|false
+execute|hws_cutover_verify_range(uuid,text,text,integer)|PUBLIC|false
+execute|hws_cutover_verify_range(uuid,text,text,integer)|crewflow_app|false
+execute|hws_cutover_verify_range(uuid,text,text,integer)|crewflow|true
 execute|immutable_unaccent(text)|crewflow_app|true
 execute|immutable_unaccent(text)|crewflow|true
 execute|is_active_platform_admin(uuid)|PUBLIC|false
@@ -606,6 +635,17 @@ owner|function|host_label_shape_ok(text)|rab_secure_owner|definer=false
 owner|function|host_label_status(text,uuid)|rab_secure_owner|definer=true|search_path=pg_catalog, pg_temp
 owner|function|host_label_sync_organisation()|rab_secure_owner|definer=true|search_path=pg_catalog, pg_temp
 owner|function|host_label_sync_workspace()|rab_secure_owner|definer=true|search_path=pg_catalog, pg_temp
+owner|function|hws_cutover_copy_batch(uuid,text,text,integer)|crewflow|definer=true|search_path=pg_catalog, pg_temp
+owner|function|hws_cutover_core_fence()|crewflow|definer=false
+owner|function|hws_cutover_drop_new_statement_pointers(uuid,uuid[])|rab_secure_owner|definer=true|search_path=pg_catalog, pg_temp
+owner|function|hws_cutover_new_workspace_trg()|rab_secure_owner|definer=true|search_path=pg_catalog, pg_temp
+owner|function|hws_cutover_probe(uuid)|crewflow|definer=true|search_path=pg_catalog, pg_temp
+owner|function|hws_cutover_purge_core_statement_pointers(uuid)|rab_secure_owner|definer=true|search_path=pg_catalog, pg_temp
+owner|function|hws_cutover_schema(uuid)|crewflow|definer=false
+owner|function|hws_cutover_source_sql(text)|crewflow|definer=false
+owner|function|hws_cutover_started_any()|crewflow|definer=true|search_path=pg_catalog, pg_temp
+owner|function|hws_cutover_truncate_guard()|rab_secure_owner|definer=false
+owner|function|hws_cutover_verify_range(uuid,text,text,integer)|crewflow|definer=true|search_path=pg_catalog, pg_temp
 owner|function|immutable_unaccent(text)|rab_secure_owner|definer=false
 owner|function|is_active_platform_admin(uuid)|rab_secure_owner|definer=true|search_path=pg_catalog, core, pg_temp
 owner|function|list_organisations_for_admin()|rab_secure_owner|definer=true|search_path=pg_catalog, pg_temp
@@ -714,6 +754,8 @@ owner|table|field_metadata_option|crewflow
 owner|table|field_metadata|crewflow
 owner|table|host_label_claim|crewflow
 owner|table|hws_backfill_checkpoint|crewflow
+owner|table|hws_cutover_activation|rab_secure_owner
+owner|table|hws_cutover_state|rab_secure_owner
 owner|table|index_field_metadata|crewflow
 owner|table|index_metadata|crewflow
 owner|table|job_offer|crewflow
@@ -809,6 +851,8 @@ rls|field_metadata_option|enable=true|force=true
 rls|field_metadata|enable=true|force=true
 rls|host_label_claim|enable=true|force=true
 rls|hws_backfill_checkpoint|enable=true|force=true
+rls|hws_cutover_activation|enable=true|force=true
+rls|hws_cutover_state|enable=true|force=true
 rls|index_field_metadata|enable=true|force=true
 rls|index_metadata|enable=true|force=true
 rls|job_offer|enable=true|force=true
@@ -932,6 +976,10 @@ table|host_label_claim|crewflow_app|
 table|host_label_claim|crewflow|S,I,U,D,T,R,G
 table|hws_backfill_checkpoint|crewflow_app|S,I,U
 table|hws_backfill_checkpoint|crewflow|S,I,U,D,T,R,G
+table|hws_cutover_activation|crewflow_app|S
+table|hws_cutover_activation|crewflow|S,I
+table|hws_cutover_state|crewflow_app|S
+table|hws_cutover_state|crewflow|S,I,U
 table|index_field_metadata|crewflow_app|S,I,U,D
 table|index_field_metadata|crewflow|S,I,U,D,T,R,G
 table|index_metadata|crewflow_app|S,I,U,D
@@ -1193,133 +1241,61 @@ ws|column|payslip.payment_reference|crewflow_app|UPDATE
 ws|column|payslip.updated_at|crewflow_app|UPDATE
 ws|column|payslip.version|crewflow_app|UPDATE
 ws|fk|attendance_correction|attendance_correction_attendance_id_fkey|FOREIGN KEY (attendance_id) REFERENCES workspace_*.attendance(id) ON DELETE CASCADE
-ws|fk|attendance_correction|attendance_correction_corrected_by_fkey|FOREIGN KEY (corrected_by) REFERENCES core."user"(id)
-ws|fk|attendance_correction|attendance_correction_organisation_id_fkey|FOREIGN KEY (organisation_id) REFERENCES core.organisation(id) ON DELETE CASCADE
-ws|fk|attendance_correction|attendance_correction_workspace_id_fkey|FOREIGN KEY (workspace_id) REFERENCES core.manager_workspace(id)
-ws|fk|attendance|attendance_clock_in_by_fkey|FOREIGN KEY (clock_in_by) REFERENCES core."user"(id)
-ws|fk|attendance|attendance_clock_out_by_fkey|FOREIGN KEY (clock_out_by) REFERENCES core."user"(id)
-ws|fk|attendance|attendance_organisation_id_fkey|FOREIGN KEY (organisation_id) REFERENCES core.organisation(id) ON DELETE CASCADE
 ws|fk|attendance|attendance_shift_assignment_id_fkey|FOREIGN KEY (shift_assignment_id) REFERENCES workspace_*.shift_assignment(id) ON DELETE CASCADE
 ws|fk|attendance|attendance_shift_assignment_workspace_fkey|FOREIGN KEY (shift_assignment_id, workspace_id) REFERENCES workspace_*.shift_assignment(id, workspace_id)
 ws|fk|attendance|attendance_shift_id_fkey|FOREIGN KEY (shift_id) REFERENCES workspace_*.shift(id) ON DELETE CASCADE
 ws|fk|attendance|attendance_shift_workspace_fkey|FOREIGN KEY (shift_id, workspace_id) REFERENCES workspace_*.shift(id, workspace_id)
 ws|fk|attendance|attendance_staff_profile_id_fkey|FOREIGN KEY (staff_profile_id) REFERENCES workspace_*.staff_profile(id) ON DELETE CASCADE
 ws|fk|attendance|attendance_staff_workspace_fkey|FOREIGN KEY (staff_profile_id, workspace_id) REFERENCES workspace_*.staff_profile(id, workspace_id)
-ws|fk|attendance|attendance_workspace_id_fkey|FOREIGN KEY (workspace_id) REFERENCES core.manager_workspace(id)
-ws|fk|job_offer|job_offer_confirmed_by_fkey|FOREIGN KEY (confirmed_by) REFERENCES core."user"(id)
-ws|fk|job_offer|job_offer_created_by_fkey|FOREIGN KEY (created_by) REFERENCES core."user"(id) ON DELETE SET NULL
-ws|fk|job_offer|job_offer_organisation_id_fkey|FOREIGN KEY (organisation_id) REFERENCES core.organisation(id) ON DELETE CASCADE
-ws|fk|job_offer|job_offer_rejected_by_fkey|FOREIGN KEY (rejected_by) REFERENCES core."user"(id)
 ws|fk|job_offer|job_offer_shift_assignment_id_fkey|FOREIGN KEY (shift_assignment_id) REFERENCES workspace_*.shift_assignment(id) ON DELETE CASCADE
 ws|fk|job_offer|job_offer_shift_assignment_workspace_fkey|FOREIGN KEY (shift_assignment_id, workspace_id) REFERENCES workspace_*.shift_assignment(id, workspace_id)
 ws|fk|job_offer|job_offer_staff_profile_id_fkey|FOREIGN KEY (staff_profile_id) REFERENCES workspace_*.staff_profile(id) ON DELETE CASCADE
 ws|fk|job_offer|job_offer_staff_workspace_fkey|FOREIGN KEY (staff_profile_id, workspace_id) REFERENCES workspace_*.staff_profile(id, workspace_id)
-ws|fk|job_offer|job_offer_workspace_id_fkey|FOREIGN KEY (workspace_id) REFERENCES core.manager_workspace(id)
-ws|fk|job_role|job_role_created_by_fkey|FOREIGN KEY (created_by) REFERENCES core."user"(id)
-ws|fk|job_role|job_role_organisation_id_fkey|FOREIGN KEY (organisation_id) REFERENCES core.organisation(id) ON DELETE CASCADE
-ws|fk|job_role|job_role_workspace_id_fkey|FOREIGN KEY (workspace_id) REFERENCES core.manager_workspace(id)
 ws|fk|manager_venue|manager_venue_manager_profile_workspace_fkey|FOREIGN KEY (manager_profile_id, organisation_id, workspace_id) REFERENCES core.manager_profile(id, organisation_id, workspace_id) MATCH FULL ON DELETE CASCADE
-ws|fk|manager_venue|manager_venue_organisation_id_fkey|FOREIGN KEY (organisation_id) REFERENCES core.organisation(id) ON DELETE CASCADE
 ws|fk|manager_venue|manager_venue_venue_id_fkey|FOREIGN KEY (venue_id) REFERENCES workspace_*.venue(id) ON DELETE CASCADE
 ws|fk|manager_venue|manager_venue_venue_workspace_fkey|FOREIGN KEY (venue_id, workspace_id) REFERENCES workspace_*.venue(id, workspace_id)
-ws|fk|manager_venue|manager_venue_workspace_id_fkey|FOREIGN KEY (workspace_id) REFERENCES core.manager_workspace(id)
-ws|fk|payroll_record|payroll_record_approved_by_fkey|FOREIGN KEY (approved_by) REFERENCES core."user"(id)
 ws|fk|payroll_record|payroll_record_attendance_id_fkey|FOREIGN KEY (attendance_id) REFERENCES workspace_*.attendance(id) ON DELETE RESTRICT
-ws|fk|payroll_record|payroll_record_organisation_id_fkey|FOREIGN KEY (organisation_id) REFERENCES core.organisation(id) ON DELETE CASCADE
-ws|fk|payroll_record|payroll_record_rejected_by_fkey|FOREIGN KEY (rejected_by) REFERENCES core."user"(id)
 ws|fk|payroll_record|payroll_record_shift_workspace_fkey|FOREIGN KEY (shift_id, workspace_id) REFERENCES workspace_*.shift(id, workspace_id) ON DELETE RESTRICT
 ws|fk|payroll_record|payroll_record_staff_workspace_fkey|FOREIGN KEY (staff_profile_id, workspace_id) REFERENCES workspace_*.staff_profile(id, workspace_id) ON DELETE RESTRICT
 ws|fk|payroll_record|payroll_record_statement_file_id_fkey|FOREIGN KEY (statement_file_id) REFERENCES core.stored_file(id)
-ws|fk|payroll_record|payroll_record_workspace_id_fkey|FOREIGN KEY (workspace_id) REFERENCES core.manager_workspace(id)
-ws|fk|payroll_run_line|payroll_run_line_organisation_id_fkey|FOREIGN KEY (organisation_id) REFERENCES core.organisation(id) ON DELETE CASCADE
 ws|fk|payroll_run_line|payroll_run_line_original_period_fkey|FOREIGN KEY (original_period_id) REFERENCES core.payroll_calendar_period(id)
 ws|fk|payroll_run_line|payroll_run_line_record_id_fkey|FOREIGN KEY (payroll_record_id) REFERENCES workspace_*.payroll_record(id)
 ws|fk|payroll_run_line|payroll_run_line_run_id_fkey|FOREIGN KEY (run_id) REFERENCES workspace_*.payroll_run(id)
 ws|fk|payroll_run_line|payroll_run_line_staff_id_fkey|FOREIGN KEY (staff_profile_id) REFERENCES workspace_*.staff_profile(id)
-ws|fk|payroll_run_line|payroll_run_line_workspace_id_fkey|FOREIGN KEY (workspace_id) REFERENCES core.manager_workspace(id)
-ws|fk|payroll_run|payroll_run_finalised_by_fkey|FOREIGN KEY (finalised_by) REFERENCES core."user"(id)
-ws|fk|payroll_run|payroll_run_organisation_id_fkey|FOREIGN KEY (organisation_id) REFERENCES core.organisation(id) ON DELETE CASCADE
 ws|fk|payroll_run|payroll_run_period_id_fkey|FOREIGN KEY (period_id) REFERENCES core.payroll_calendar_period(id)
-ws|fk|payroll_run|payroll_run_prepared_by_fkey|FOREIGN KEY (prepared_by) REFERENCES core."user"(id)
-ws|fk|payroll_run|payroll_run_workspace_id_fkey|FOREIGN KEY (workspace_id) REFERENCES core.manager_workspace(id)
 ws|fk|payslip_document|payslip_document_file_id_fkey|FOREIGN KEY (file_id) REFERENCES core.stored_file(id)
-ws|fk|payslip_document|payslip_document_organisation_id_fkey|FOREIGN KEY (organisation_id) REFERENCES core.organisation(id) ON DELETE CASCADE
 ws|fk|payslip_document|payslip_document_payslip_id_fkey|FOREIGN KEY (payslip_id) REFERENCES workspace_*.payslip(id)
-ws|fk|payslip_document|payslip_document_uploaded_by_fkey|FOREIGN KEY (uploaded_by) REFERENCES core."user"(id)
-ws|fk|payslip_document|payslip_document_workspace_id_fkey|FOREIGN KEY (workspace_id) REFERENCES core.manager_workspace(id)
-ws|fk|payslip|payslip_net_recorded_by_fkey|FOREIGN KEY (net_recorded_by) REFERENCES core."user"(id)
-ws|fk|payslip|payslip_organisation_id_fkey|FOREIGN KEY (organisation_id) REFERENCES core.organisation(id) ON DELETE CASCADE
-ws|fk|payslip|payslip_paid_by_fkey|FOREIGN KEY (paid_by) REFERENCES core."user"(id)
 ws|fk|payslip|payslip_run_id_fkey|FOREIGN KEY (run_id) REFERENCES workspace_*.payroll_run(id)
 ws|fk|payslip|payslip_staff_id_fkey|FOREIGN KEY (staff_profile_id) REFERENCES workspace_*.staff_profile(id)
-ws|fk|payslip|payslip_workspace_id_fkey|FOREIGN KEY (workspace_id) REFERENCES core.manager_workspace(id)
-ws|fk|replacement_request|replacement_request_approved_by_fkey|FOREIGN KEY (approved_by) REFERENCES core."user"(id) ON DELETE SET NULL
 ws|fk|replacement_request|replacement_request_declined_offer_id_fkey|FOREIGN KEY (declined_offer_id) REFERENCES workspace_*.job_offer(id) ON DELETE SET NULL
 ws|fk|replacement_request|replacement_request_declined_shift_assignment_id_fkey|FOREIGN KEY (declined_shift_assignment_id) REFERENCES workspace_*.shift_assignment(id) ON DELETE CASCADE
-ws|fk|replacement_request|replacement_request_notified_user_id_fkey|FOREIGN KEY (notified_user_id) REFERENCES core."user"(id) ON DELETE SET NULL
-ws|fk|replacement_request|replacement_request_organisation_id_fkey|FOREIGN KEY (organisation_id) REFERENCES core.organisation(id) ON DELETE CASCADE
-ws|fk|replacement_request|replacement_request_rejected_by_fkey|FOREIGN KEY (rejected_by) REFERENCES core."user"(id) ON DELETE SET NULL
 ws|fk|replacement_request|replacement_request_resulting_offer_id_fkey|FOREIGN KEY (resulting_offer_id) REFERENCES workspace_*.job_offer(id) ON DELETE SET NULL
 ws|fk|replacement_request|replacement_request_selected_staff_profile_id_fkey|FOREIGN KEY (selected_staff_profile_id) REFERENCES workspace_*.staff_profile(id) ON DELETE SET NULL
 ws|fk|replacement_request|replacement_request_shift_id_fkey|FOREIGN KEY (shift_id) REFERENCES workspace_*.shift(id) ON DELETE CASCADE
 ws|fk|replacement_request|replacement_request_shift_workspace_fkey|FOREIGN KEY (shift_id, workspace_id) REFERENCES workspace_*.shift(id, workspace_id)
-ws|fk|replacement_request|replacement_request_workspace_id_fkey|FOREIGN KEY (workspace_id) REFERENCES core.manager_workspace(id)
-ws|fk|shift_assignment|shift_assignment_assigned_by_fkey|FOREIGN KEY (assigned_by) REFERENCES core."user"(id)
-ws|fk|shift_assignment|shift_assignment_attendance_reviewed_by_fkey|FOREIGN KEY (attendance_reviewed_by) REFERENCES core."user"(id)
-ws|fk|shift_assignment|shift_assignment_organisation_id_fkey|FOREIGN KEY (organisation_id) REFERENCES core.organisation(id) ON DELETE CASCADE
 ws|fk|shift_assignment|shift_assignment_shift_id_fkey|FOREIGN KEY (shift_id) REFERENCES workspace_*.shift(id) ON DELETE CASCADE
 ws|fk|shift_assignment|shift_assignment_shift_workspace_fkey|FOREIGN KEY (shift_id, workspace_id) REFERENCES workspace_*.shift(id, workspace_id)
 ws|fk|shift_assignment|shift_assignment_staff_profile_id_fkey|FOREIGN KEY (staff_profile_id) REFERENCES workspace_*.staff_profile(id) ON DELETE CASCADE
 ws|fk|shift_assignment|shift_assignment_staff_workspace_fkey|FOREIGN KEY (staff_profile_id, workspace_id) REFERENCES workspace_*.staff_profile(id, workspace_id)
-ws|fk|shift_assignment|shift_assignment_workspace_id_fkey|FOREIGN KEY (workspace_id) REFERENCES core.manager_workspace(id)
 ws|fk|shift_report|shift_report_final_file_id_fkey|FOREIGN KEY (final_file_id) REFERENCES core.stored_file(id) ON DELETE SET NULL
-ws|fk|shift_report|shift_report_finalised_by_fkey|FOREIGN KEY (finalised_by) REFERENCES core."user"(id)
-ws|fk|shift_report|shift_report_organisation_id_fkey|FOREIGN KEY (organisation_id) REFERENCES core.organisation(id) ON DELETE CASCADE
 ws|fk|shift_report|shift_report_original_file_id_fkey|FOREIGN KEY (original_file_id) REFERENCES core.stored_file(id) ON DELETE RESTRICT
 ws|fk|shift_report|shift_report_pre_shift_file_id_fkey|FOREIGN KEY (pre_shift_file_id) REFERENCES core.stored_file(id) ON DELETE SET NULL
 ws|fk|shift_report|shift_report_shift_id_fkey|FOREIGN KEY (shift_id) REFERENCES workspace_*.shift(id) ON DELETE CASCADE
 ws|fk|shift_report|shift_report_shift_workspace_fkey|FOREIGN KEY (shift_id, workspace_id) REFERENCES workspace_*.shift(id, workspace_id)
-ws|fk|shift_report|shift_report_workspace_id_fkey|FOREIGN KEY (workspace_id) REFERENCES core.manager_workspace(id)
-ws|fk|shift_request_staff|shift_request_staff_organisation_id_fkey|FOREIGN KEY (organisation_id) REFERENCES core.organisation(id) ON DELETE CASCADE
 ws|fk|shift_request_staff|shift_request_staff_shift_id_fkey|FOREIGN KEY (shift_id) REFERENCES workspace_*.shift(id) ON DELETE CASCADE
 ws|fk|shift_request_staff|shift_request_staff_staff_profile_id_fkey|FOREIGN KEY (staff_profile_id) REFERENCES workspace_*.staff_profile(id) ON DELETE CASCADE
 ws|fk|shift_staff_review|shift_staff_review_assignment_fkey|FOREIGN KEY (shift_id, staff_profile_id) REFERENCES workspace_*.shift_assignment(shift_id, staff_profile_id) ON DELETE CASCADE
-ws|fk|shift_staff_review|shift_staff_review_organisation_id_fkey|FOREIGN KEY (organisation_id) REFERENCES core.organisation(id) ON DELETE CASCADE
-ws|fk|shift_staff_review|shift_staff_review_reviewer_user_id_fkey|FOREIGN KEY (reviewer_user_id) REFERENCES core."user"(id)
 ws|fk|shift_staff_review|shift_staff_review_shift_workspace_fkey|FOREIGN KEY (shift_id, workspace_id) REFERENCES workspace_*.shift(id, workspace_id) ON DELETE CASCADE
-ws|fk|shift_staff_review|shift_staff_review_workspace_id_fkey|FOREIGN KEY (workspace_id) REFERENCES core.manager_workspace(id)
-ws|fk|shift|shift_approved_by_fkey|FOREIGN KEY (approved_by) REFERENCES core."user"(id)
-ws|fk|shift|shift_cancelled_by_fkey|FOREIGN KEY (cancelled_by) REFERENCES core."user"(id)
-ws|fk|shift|shift_created_by_fkey|FOREIGN KEY (created_by) REFERENCES core."user"(id)
-ws|fk|shift|shift_declined_by_fkey|FOREIGN KEY (declined_by) REFERENCES core."user"(id)
 ws|fk|shift|shift_job_role_id_fkey|FOREIGN KEY (job_role_id) REFERENCES workspace_*.job_role(id) ON DELETE RESTRICT
-ws|fk|shift|shift_organisation_id_fkey|FOREIGN KEY (organisation_id) REFERENCES core.organisation(id) ON DELETE CASCADE
-ws|fk|shift|shift_requested_by_fkey|FOREIGN KEY (requested_by) REFERENCES core."user"(id)
 ws|fk|shift|shift_venue_id_fkey|FOREIGN KEY (venue_id) REFERENCES workspace_*.venue(id) ON DELETE RESTRICT
 ws|fk|shift|shift_venue_workspace_fkey|FOREIGN KEY (venue_id, workspace_id) REFERENCES workspace_*.venue(id, workspace_id)
-ws|fk|shift|shift_workspace_id_fkey|FOREIGN KEY (workspace_id) REFERENCES core.manager_workspace(id)
-ws|fk|staff_profile|staff_profile_created_by_fkey|FOREIGN KEY (created_by) REFERENCES core."user"(id) ON DELETE SET NULL
 ws|fk|staff_profile|staff_profile_job_role_id_fkey|FOREIGN KEY (job_role_id) REFERENCES workspace_*.job_role(id) ON DELETE SET NULL
-ws|fk|staff_profile|staff_profile_organisation_id_fkey|FOREIGN KEY (organisation_id) REFERENCES core.organisation(id) ON DELETE CASCADE
-ws|fk|staff_profile|staff_profile_user_id_fkey|FOREIGN KEY (user_id) REFERENCES core."user"(id) ON DELETE CASCADE
-ws|fk|staff_profile|staff_profile_workspace_id_fkey|FOREIGN KEY (workspace_id) REFERENCES core.manager_workspace(id)
-ws|fk|user_note|user_note_author_user_id_fkey|FOREIGN KEY (author_user_id) REFERENCES core."user"(id) ON DELETE SET NULL
-ws|fk|user_note|user_note_organisation_id_fkey|FOREIGN KEY (organisation_id) REFERENCES core.organisation(id) ON DELETE CASCADE
-ws|fk|user_note|user_note_subject_user_id_fkey|FOREIGN KEY (subject_user_id) REFERENCES core."user"(id) ON DELETE CASCADE
-ws|fk|user_note|user_note_workspace_id_fkey|FOREIGN KEY (workspace_id) REFERENCES core.manager_workspace(id) ON DELETE CASCADE
 ws|fk|venue_manager_staff|venue_manager_staff_manager_org_ws_fkey|FOREIGN KEY (manager_profile_id, organisation_id, workspace_id) REFERENCES core.manager_profile(id, organisation_id, workspace_id) ON DELETE CASCADE
-ws|fk|venue_manager_staff|venue_manager_staff_organisation_id_fkey|FOREIGN KEY (organisation_id) REFERENCES core.organisation(id)
 ws|fk|venue_manager_staff|venue_manager_staff_staff_org_ws_fkey|FOREIGN KEY (staff_profile_id, organisation_id, workspace_id) REFERENCES workspace_*.staff_profile(id, organisation_id, workspace_id) ON DELETE CASCADE
-ws|fk|venue_manager_staff|venue_manager_staff_workspace_id_fkey|FOREIGN KEY (workspace_id) REFERENCES core.manager_workspace(id)
 ws|fk|venue_role_rate|venue_role_rate_job_role_id_fkey|FOREIGN KEY (job_role_id) REFERENCES workspace_*.job_role(id) ON DELETE CASCADE
-ws|fk|venue_role_rate|venue_role_rate_organisation_id_fkey|FOREIGN KEY (organisation_id) REFERENCES core.organisation(id) ON DELETE CASCADE
 ws|fk|venue_role_rate|venue_role_rate_venue_id_fkey|FOREIGN KEY (venue_id) REFERENCES workspace_*.venue(id) ON DELETE CASCADE
 ws|fk|venue_role_rate|venue_role_rate_venue_workspace_fkey|FOREIGN KEY (venue_id, workspace_id) REFERENCES workspace_*.venue(id, workspace_id)
-ws|fk|venue_role_rate|venue_role_rate_workspace_id_fkey|FOREIGN KEY (workspace_id) REFERENCES core.manager_workspace(id)
-ws|fk|venue|venue_created_by_fkey|FOREIGN KEY (created_by) REFERENCES core."user"(id)
-ws|fk|venue|venue_organisation_id_fkey|FOREIGN KEY (organisation_id) REFERENCES core.organisation(id) ON DELETE CASCADE
 ws|fk|venue|venue_photo_file_id_fkey|FOREIGN KEY (photo_file_id) REFERENCES core.stored_file(id) ON DELETE SET NULL
-ws|fk|venue|venue_workspace_id_fkey|FOREIGN KEY (workspace_id) REFERENCES core.manager_workspace(id)
 ws|owner|i|attendance_correction_attendance_idx|crewflow
 ws|owner|i|attendance_correction_pkey|crewflow
 ws|owner|i|attendance_one_active_per_staff|crewflow

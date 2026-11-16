@@ -185,6 +185,12 @@ export function validateStandardDefinitions(
         if (target!.kind === 'coreReference' && f.relation.inverse) bad(`${o.table}.${f.column}: core reference objects get no inverse field`);
         if (target!.kind !== 'coreReference' && !f.relation.inverse) bad(`${o.table}.${f.column}: a workspace relation needs an inverse`);
         if (f.pgType !== 'uuid') bad(`${o.table}.${f.column}: a relation column is uuid`);
+        // Structure level 22 (owner decision 0a): no FK to core."user" any more; such a relation is service-enforced and has no
+        // ON DELETE. Every other relation keeps its FK's ON DELETE.
+        const service = f.relation.enforcedBy?.startsWith('service:') ?? false;
+        if (f.relation.target === 'workspaceMember' ? !service || f.relation.onDelete !== undefined : service || !f.relation.onDelete) {
+          bad(`${o.table}.${f.column}: a workspaceMember relation is service-enforced without onDelete; any other relation has its FK's onDelete`);
+        }
       }
     }
     if (o.labelIdentifierColumn !== null && !columns.has(o.labelIdentifierColumn)) bad(`${o.table}: label identifier ${o.labelIdentifierColumn} is not a column`);
@@ -212,7 +218,7 @@ function fieldSettings(o: StandardObjectDefinition, f: StandardFieldDefinition):
   if (f.sensitive) s.sensitiveAuthority = f.sensitive.authority;
   if (f.relation) {
     s.relationType = 'MANY_TO_ONE';
-    s.onDelete = f.relation.onDelete;
+    if (f.relation.onDelete) s.onDelete = f.relation.onDelete;
     if (f.relation.enforcedBy) s.enforcedBy = f.relation.enforcedBy;
   }
   return s;

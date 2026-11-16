@@ -63,8 +63,9 @@ const PREAUTH_FORCED_TABLES = new Set<string>(PREAUTH_FORCE_TABLES);
  * fails this gate. FORCE matters here because the owner rab_secure_owner is reached by SET ROLE from its members; with
  * FORCE the owner-only policies (CURRENT_USER = rab_secure_owner) still apply to it, and the runtime logins are denied by a
  * RESTRICTIVE policy on top of holding no privilege. They are never on NOT_FORCED_ALLOWLIST: no pre-auth lookup reads them.
+ * Part C3: hws_cutover_activation, the one-way "cutover active" sentinel (instance fact; public SELECT, crewflow-only INSERT).
  */
-const FORCED_NON_TENANT_TABLES = ['deployment_identity', 'deployment_identity_history', 'upgrade_migration'] as const;
+const FORCED_NON_TENANT_TABLES = ['deployment_identity', 'deployment_identity_history', 'upgrade_migration', 'hws_cutover_activation'] as const;
 
 /**
  * F4 (Wave 1 lane S): every physical workspace schema (`^workspace_[0-9a-f]{32}$`, Hyper Workspace V1) is checked too —

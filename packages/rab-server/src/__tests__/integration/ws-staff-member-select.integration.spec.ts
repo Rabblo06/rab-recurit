@@ -14,7 +14,6 @@ import { PasswordHashingService } from '../../engine/core-modules/auth/services/
 import { TenantContextService } from '../../engine/core-modules/tenant/tenant-context.service';
 import { WorkspaceStaffMemberSelect1786721480000 } from '../../database/typeorm/core/migrations/1786721480000-WorkspaceStaffMemberSelect';
 import { STAFF_PROFILE_MEMBER_SELECT } from '../../engine/core-modules/upgrade/upgrade-commands/0-6/staff-profile-member-select';
-import { SYNC_STANDARD_OBJECTS } from '../../engine/core-modules/upgrade/upgrade-commands/0-6/sync-standard-objects';
 import { upgradeSessionOf, UpgradeSession } from '../../engine/core-modules/upgrade/upgrade-migration.service';
 import { WorkspaceCommandRunner, WorkspaceRunOptions } from '../../engine/core-modules/upgrade/workspace-command-runner';
 import { codeWorkspaceStructureLevel, declaredFingerprint } from '../../engine/core-modules/upgrade/workspace-structure-level';
@@ -56,8 +55,8 @@ const describeIfDb = RUN ? describe : describe.skip;
 const SFX = Math.random().toString(36).replace(/[^a-z]/g, '').slice(0, 6) || 'x';
 const LOCK = MIGRATION_LOCK_KEY.toString();
 const STEP = `0.6.0_${STAFF_PROFILE_MEMBER_SELECT.name}_${STAFF_PROFILE_MEMBER_SELECT.timestamp}`;
-/** Metadata engine M1 / E2: the 0.6.0 data command that follows (the standard-object sync); the version's last step. */
-const SYNC = `0.6.0_${SYNC_STANDARD_OBJECTS.name}_${SYNC_STANDARD_OBJECTS.timestamp}`;
+/** The registry through level 21 only (later structural commands, e.g. 0a's level 22, are proven by their own spec). */
+const L21 = { '0-6': [STAFF_PROFILE_MEMBER_SELECT] };
 
 describeIfDb('Part D 0b: staff_profile_member_select as a workspace upgrade command (integration)', () => {
   const { adminUrl, appUrl } = RUN ? integrationTestDatabase() : ({} as never);
@@ -74,7 +73,7 @@ describeIfDb('Part D 0b: staff_profile_member_select as a workspace upgrade comm
     const ws = await seedWorkspace(admin, `ws0b-${n}-${SFX}-${String.fromCharCode(97 + (seq % 26))}${seq}`, orgSlug ? { orgSlug } : {});
     created.push(ws);
     if (how === 'frozen') expect(await provisionTypeScript(adminUrl, ws, { workspaceRegistry: FROZEN_TEMPLATE_REGISTRY })).toBe('READY');
-    if (how === 'ts') expect(await provisionTypeScript(adminUrl, ws)).toBe('READY');
+    if (how === 'ts') expect(await provisionTypeScript(adminUrl, ws, { workspaceRegistry: L21 })).toBe('READY');
     if (how === 'sql') expect(await provisionServerPath(appUrl, ws)).toBe('READY');
     return ws;
   };
@@ -93,7 +92,7 @@ describeIfDb('Part D 0b: staff_profile_member_select as a workspace upgrade comm
       is_initial: boolean;
     }>;
   const runner = (o: Partial<WorkspaceRunOptions> & Pick<WorkspaceRunOptions, 'workspaceIds'>) =>
-    new WorkspaceCommandRunner({ codeVersion: '0.6.0', versions: ['0.4.0', '0.5.0'], force: false, adopt: true, log: (l) => lines.push(l), ...o }).run(session);
+    new WorkspaceCommandRunner({ codeVersion: '0.6.0', versions: ['0.4.0', '0.5.0'], force: false, adopt: true, log: (l) => lines.push(l), workspaceRegistry: L21, ...o }).run(session);
 
   beforeAll(async () => {
     admin = new Client({ connectionString: adminUrl });
@@ -118,7 +117,7 @@ describeIfDb('Part D 0b: staff_profile_member_select as a workspace upgrade comm
   });
 
   it('the command is the reviewed level 21 of this code, declared for this PostgreSQL major, and the database runs fingerprint v2', async () => {
-    expect(codeWorkspaceStructureLevel()).toBe(21);
+    expect(codeWorkspaceStructureLevel()).toBeGreaterThanOrEqual(21);
     expect(STAFF_PROFILE_MEMBER_SELECT.structure).toMatchObject({ level: 21, provisionFunctionLiteral: 'db:provision_workspace@WorkspaceStaffMemberSelect1786721480000' });
     expect(STAFF_PROFILE_MEMBER_SELECT.structure?.mayDrop).toBeUndefined();
     expect(declared).toMatch(/^[0-9a-f]{64}$/);
@@ -143,7 +142,7 @@ describeIfDb('Part D 0b: staff_profile_member_select as a workspace upgrade comm
       const first = await runner({ workspaceIds: [a.id, b.id] });
       expect(first.failures).toEqual([]);
       for (const w of [a, b]) {
-        expect(first.outcomes.find((o) => o.workspaceId === w.id)).toMatchObject({ status: 'adopted', completed: [STEP, SYNC] });
+        expect(first.outcomes.find((o) => o.workspaceId === w.id)).toMatchObject({ status: 'adopted', completed: [STEP] });
         expect(await hasPolicy(w)).toBe(true);
         const reg = await registryOf(admin, w.id);
         const f = await fp(w);
@@ -153,13 +152,12 @@ describeIfDb('Part D 0b: staff_profile_member_select as a workspace upgrade comm
         expect((await rows(w)).map((r) => [r.name, r.status, r.attempt, r.is_initial])).toEqual([
           ['0.6.0_TypeOrmMigrations', 'completed', 1, true],
           [STEP, 'completed', 1, false],
-          [SYNC, 'completed', 1, false],
         ]);
       }
       const second = await runner({ workspaceIds: [a.id, b.id] });
       expect(second.failures).toEqual([]);
       expect(second.outcomes.map((o) => o.status)).toEqual(['up-to-date', 'up-to-date']);
-      expect((await rows(a)).length).toBe(3);
+      expect((await rows(a)).length).toBe(2);
     });
 
     it('idempotent after a crash between COMMIT and the logbook row: the step re-runs, completes, and changes nothing', async () => {
@@ -180,7 +178,6 @@ describeIfDb('Part D 0b: staff_profile_member_select as a workspace upgrade comm
       expect((await rows(w)).map((r) => [r.name, r.status, r.attempt])).toEqual([
         ['0.6.0_TypeOrmMigrations', 'completed', 1],
         [STEP, 'completed', 1],
-        [SYNC, 'completed', 1],
       ]);
       expect(await fp(w)).toEqual(before);
       expect(before.v2).toBe(declared);
@@ -204,7 +201,10 @@ describeIfDb('Part D 0b: staff_profile_member_select as a workspace upgrade comm
     const sql = await make('nw-sql', 'sql');
     const want = await fp(upgraded);
     expect(want.v2).toBe(declared);
-    for (const w of [ts, sql]) {
+    // core.provision_workspace builds THIS code's level: compared with the upgraded one only while that is 21.
+    expect(await hasPolicy(sql)).toBe(true);
+    expect((await registryOf(admin, sql.id)).module_version).toBe(codeWorkspaceStructureLevel());
+    for (const w of codeWorkspaceStructureLevel() === 21 ? [ts, sql] : [ts]) {
       expect(await hasPolicy(w)).toBe(true);
       const reg = await registryOf(admin, w.id);
       expect(reg).toMatchObject({ status: 'READY', module_version: 21, drift_status: 'OK' });
@@ -214,11 +214,11 @@ describeIfDb('Part D 0b: staff_profile_member_select as a workspace upgrade comm
       expect((await ledgerOf(admin, w.id)).length).toBe(20);
     }
     // A new workspace's creation-time cursor (Part B is_initial) is the code version's last step: the runner runs nothing.
-    for (const w of [ts, sql]) {
-      await admin.query(`INSERT INTO core.upgrade_migration (name, status, attempt, executed_by_version, is_initial, workspace_id) VALUES ($1, 'completed', 1, '0.6.0', true, $2)`, [SYNC, w.id]);
+    for (const w of [ts]) {
+      await admin.query(`INSERT INTO core.upgrade_migration (name, status, attempt, executed_by_version, is_initial, workspace_id) VALUES ($1, 'completed', 1, '0.6.0', true, $2)`, [STEP, w.id]);
     }
-    const out = await runner({ workspaceIds: [ts.id, sql.id] });
-    expect(out.outcomes.map((o) => o.status)).toEqual(['up-to-date', 'up-to-date']);
+    const out = await runner({ workspaceIds: [ts.id] });
+    expect(out.outcomes.map((o) => o.status)).toEqual(['up-to-date']);
   });
 
   it('security review F1: down() refuses while any workspace carries the level-21 policy (nothing changed); after the per-workspace cleanup it restores level 20', async () => {
@@ -340,7 +340,7 @@ describeIfDb('Part D 0b: staff_profile_member_select as a workspace upgrade comm
         [w1.org, owner2, `ws0b-rls-w2-${SFX}`],
       )).rows.map((r) => ({ id: r.id, org: r.org, owner: r.owner, schema: `workspace_${String(r.id).replace(/-/g, '')}`, label: 'w2' }))[0]!;
       created.push(w2);
-      expect(await provisionTypeScript(adminUrl, w2)).toBe('READY');
+      expect(await provisionTypeScript(adminUrl, w2, { workspaceRegistry: L21 })).toBe('READY');
       other = await make('rls-other', 'ts');
       staffView = (await admin.query(`SELECT id FROM core.permission WHERE key = 'staff.view'`)).rows[0].id;
       venueView = (await admin.query(`SELECT id FROM core.permission WHERE key = 'venue.view'`)).rows[0].id;

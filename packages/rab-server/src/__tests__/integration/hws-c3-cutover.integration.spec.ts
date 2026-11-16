@@ -1,0 +1,934 @@
+import 'reflect-metadata';
+import { createHash, randomUUID } from 'node:crypto';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { Client } from 'pg';
+
+import { integrationTestDatabase, integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
+import { HWS_CUTOVER_TABLES } from '../../database/typeorm/workspace-schema/backfill/hws-cutover-sql';
+import { MIGRATION_LOCK_KEY } from '../../database/typeorm/scripts/migrate/migration-lock';
+import { assertHwsStartupInvariants, HwsStartupError } from '../../database/typeorm/core/hws-startup-guard';
+import { SchemaResolverService, WorkspaceRoutingError } from '../../engine/core-modules/tenant/schema-resolver.service';
+import type { WorkspaceMetadataCacheService } from '../../engine/core-modules/entity-cache/workspace-metadata-cache.service';
+import { createUpgradeCommandHost } from '../../engine/core-modules/upgrade/upgrade-command-host';
+import { CUTOVER_BACKUP_MARKER_ENV } from '../../engine/core-modules/upgrade/upgrade-commands/0-7/hws-cutover-backup';
+import { createHwsCutoverCommand, HWS_CUTOVER_VERIFIED_ACTION, HwsCutoverOptions, HwsCutoverRefused, runHwsCutover } from '../../engine/core-modules/upgrade/upgrade-commands/0-7/hws-cutover';
+import type { UpgradeCommandHost } from '../../engine/core-modules/upgrade/upgrade-commands/upgrade-command';
+import { upgradeSessionOf } from '../../engine/core-modules/upgrade/upgrade-migration.service';
+import { UpgradeRun } from '../../engine/core-modules/upgrade/upgrade-runner';
+import { dropWorkspaceSchema, provisionTypeScript, SeededWorkspace, seedWorkspace, sqlstateOf } from './helpers/workspace-fixtures';
+
+/**
+ * OWNER-DB-ULTIMATE Part C3 (option A′, PENDING OWNER CHOICE AND SQL REVIEW): the HWS cutover copy path on a real, disposable
+ * database, through the one runtime login (TEST_DATABASE_URL = crewflow_owner) holding the migration lock, exactly as the
+ * migrate-on-start child runs an upgrade command. Workspaces are READY (TypeScript provisioner, module 20) with their
+ * business rows seeded in the core copies by the cluster superuser (the shape of deploy-order-tests/seed-organisations.sql).
+ * Proves:
+ *  - abuse cases of every new function (no lock, another tenant, a table outside the list, limits, not READY, crewflow_app);
+ *  - HWS off → refused, nothing blocked or copied; no backup → refused, the workspace BLOCKED (resolver: 'upgrading' = 503),
+ *    nothing copied;
+ *  - copy correctness on seeded data (every table: counts, rows, money and minutes equal), statement pointers reconciled;
+ *  - a kill (pg_terminate_backend) partway through, then a resume: no duplicate, no gap, FORCE never left off;
+ *  - a checksum mismatch → the workspace stays blocked, no verified row, the step fails;
+ *  - zero rows with no tenant context, and with another organisation bound, in core and in the workspace schema;
+ *  - through UpgradeRun (Part B logbook): failed (attempt 1) → completed (attempt 2).
+ */
+jest.setTimeout(600_000);
+
+const RUN = integrationTestDatabaseReady();
+const describeIfDb = RUN ? describe : describe.skip;
+const LOCK = MIGRATION_LOCK_KEY.toString();
+const SFX = Math.random().toString(36).replace(/[^a-z]/g, '').slice(0, 6) || 'x';
+
+interface Seeded extends SeededWorkspace {
+  venueId: string;
+}
+
+describeIfDb('C3 HWS cutover copy path (option A′)', () => {
+  const { adminUrl, appUrl } = RUN ? integrationTestDatabase() : ({} as never);
+  let admin: Client;
+  let app: Client;
+  let dbName: string;
+  let clusterId: string | null = null;
+  const created: SeededWorkspace[] = [];
+  const lines: string[] = [];
+  const log = (l: string) => lines.push(l);
+  let backupDir: string;
+  let seq = 0;
+
+  const make = async (n: string): Promise<SeededWorkspace> => {
+    seq += 1;
+    const ws = await seedWorkspace(admin, `c3-${n}-${SFX}-${seq.toString(36)}`);
+    created.push(ws);
+    await provisionTypeScript(adminUrl, ws);
+    return ws;
+  };
+
+  /** One representative row graph per workspace in the CORE copies (superuser, no RLS), money in bigint pence. */
+  const seedBusiness = async (ws: SeededWorkspace): Promise<Seeded> => {
+    const one = async (sql: string, params: unknown[]) => (await admin.query(sql, params)).rows[0] as Record<string, string>;
+    const { org, owner, id } = ws;
+    const t0 = new Date(Date.UTC(2026, 9, 1, 9, 0, 0));
+    const at = (h: number) => new Date(t0.getTime() + h * 3_600_000).toISOString();
+    await admin.query(`INSERT INTO core.manager_profile (organisation_id, user_id, type, workspace_id) VALUES ($1, $2, 'ceo', $3)`, [org, owner, id]);
+    const vmUser = await one(`INSERT INTO core."user" (organisation_id, email, first_name, last_name, status) VALUES ($1, $2, 'C3', 'VenueMgr', 'active') RETURNING id`, [org, `vm-${ws.label}@c3.invalid`]);
+    const vm = await one(`INSERT INTO core.manager_profile (organisation_id, user_id, type, workspace_id) VALUES ($1, $2, 'venue', $3) RETURNING id`, [org, vmUser.id, id]);
+    const venue = await one(`INSERT INTO core.venue (organisation_id, name, created_by, workspace_id) VALUES ($1, 'C3 Hall', $2, $3) RETURNING id`, [org, owner, id]);
+    const venue2 = await one(`INSERT INTO core.venue (organisation_id, name, created_by, workspace_id) VALUES ($1, 'C3 Garden', $2, $3) RETURNING id`, [org, owner, id]);
+    const jr = await one(`INSERT INTO core.job_role (organisation_id, name, default_rate_pence, created_by, workspace_id) VALUES ($1, 'C3 Bartender', 1500, $2, $3) RETURNING id`, [org, owner, id]);
+    await admin.query(`INSERT INTO core.venue_role_rate (organisation_id, venue_id, job_role_id, pay_rate_pence, workspace_id) VALUES ($1, $2, $3, 1650, $4)`, [org, venue.id, jr.id, id]);
+    await admin.query(`INSERT INTO core.manager_venue (organisation_id, manager_profile_id, venue_id, workspace_id) VALUES ($1, $2, $3, $4)`, [org, vm.id, venue.id, id]);
+    const staff: Array<{ user: string; sp: string }> = [];
+    for (let i = 1; i <= 3; i += 1) {
+      const u = await one(`INSERT INTO core."user" (organisation_id, email, first_name, last_name, status) VALUES ($1, $2, 'C3', $3, 'active') RETURNING id`, [org, `s${i}-${ws.label}@c3.invalid`, `Staff ${i}`]);
+      const sp = await one(`INSERT INTO core.staff_profile (organisation_id, user_id, staff_ref, created_by, workspace_id) VALUES ($1, $2, $3, $4, $5) RETURNING id`, [org, u.id, `C3-${seq}-${i}`, owner, id]);
+      staff.push({ user: u.id, sp: sp.id });
+    }
+    await admin.query(`INSERT INTO core.venue_manager_staff (organisation_id, workspace_id, manager_profile_id, staff_profile_id) VALUES ($1, $2, $3, $4)`, [org, id, vm.id, staff[0]!.sp]);
+    const past = await one(
+      `INSERT INTO core.shift (organisation_id, venue_id, job_role_id, starts_at, ends_at, break_minutes, required_count, filled_count, pay_rate_pence, status, created_by, workspace_id)
+       VALUES ($1, $2, $3, $4, $5, 30, 2, 2, 1500, 'completed', $6, $7) RETURNING id`,
+      [org, venue.id, jr.id, at(0), at(8), owner, id],
+    );
+    const future = await one(
+      `INSERT INTO core.shift (organisation_id, venue_id, job_role_id, starts_at, ends_at, break_minutes, required_count, filled_count, pay_rate_pence, status, created_by, workspace_id)
+       VALUES ($1, $2, $3, $4, $5, 30, 2, 0, 1500, 'open', $6, $7) RETURNING id`,
+      [org, venue2.id, jr.id, at(24 * 400), at(24 * 400 + 8), owner, id],
+    );
+    await admin.query(`INSERT INTO core.shift_request_staff (organisation_id, workspace_id, shift_id, staff_profile_id) VALUES ($1, $2, $3, $4)`, [org, id, future.id, staff[2]!.sp]);
+    await admin.query(`INSERT INTO core.shift_report (organisation_id, workspace_id, shift_id) VALUES ($1, $2, $3)`, [org, id, past.id]);
+    const cal = await one(`INSERT INTO core.payroll_calendar (organisation_id, year, version, source, created_by) VALUES ($1, 2026, 1, 'c3-seed', $2) RETURNING id`, [org, owner]);
+    const per = await one(
+      `INSERT INTO core.payroll_calendar_period (organisation_id, calendar_id, period_start, period_end, payday) VALUES ($1, $2, $3::date, $4::date, $5::date) RETURNING id`,
+      [org, cal.id, '2026-09-25', '2026-10-08', '2026-10-12'],
+    );
+    const run = await one(`INSERT INTO core.payroll_run (organisation_id, workspace_id, period_id, prepared_by) VALUES ($1, $2, $3, $4) RETURNING id`, [org, id, per.id, owner]);
+    for (let i = 0; i < 2; i += 1) {
+      const sp = staff[i]!.sp;
+      const asg = await one(
+        `INSERT INTO core.shift_assignment (organisation_id, shift_id, staff_profile_id, status, pay_rate_snapshot_pence, assigned_by, confirmed_at, period, workspace_id)
+         VALUES ($1, $2, $3, 'completed', 1500, $4, $5, tstzrange($6::timestamptz, $7::timestamptz), $8) RETURNING id`,
+        [org, past.id, sp, owner, at(-24), at(0), at(8), id],
+      );
+      await admin.query(
+        `INSERT INTO core.job_offer (organisation_id, shift_assignment_id, staff_profile_id, status, sent_at, expires_at, estimated_pay_pence, created_by, workspace_id)
+         VALUES ($1, $2, $3, 'staff_accepted', $4, $5, 11250, $6, $7)`,
+        [org, asg.id, sp, at(-48), at(-24), owner, id],
+      );
+      const att = await one(
+        `INSERT INTO core.attendance (organisation_id, shift_assignment_id, shift_id, staff_profile_id, workspace_id, clock_in_at, clock_out_at, status, worked_minutes, earned_pence)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, 'approved', 450, 11250) RETURNING id`,
+        [org, asg.id, past.id, sp, id, at(0), at(8)],
+      );
+      await admin.query(
+        `INSERT INTO core.attendance_correction (organisation_id, workspace_id, attendance_id, field, old_value, new_value, reason, corrected_by)
+         VALUES ($1, $2, $3, 'clockOutAt', $4, $5, 'C3 seed correction', $6)`,
+        [org, id, att.id, at(7), at(8), owner],
+      );
+      const rec = await one(
+        `INSERT INTO core.payroll_record (organisation_id, workspace_id, attendance_id, shift_id, staff_profile_id, status, worked_minutes, pay_rate_pence, amount_pence, approved_at, approved_by)
+         VALUES ($1, $2, $3, $4, $5, 'approved', 450, 1500, $6, $7, $8) RETURNING id`,
+        [org, id, att.id, past.id, sp, String(11250 + i), at(24), owner],
+      );
+      await admin.query(
+        `INSERT INTO core.payroll_run_line (organisation_id, workspace_id, run_id, payroll_record_id, staff_profile_id, work_date, worked_minutes, pay_rate_pence, amount_pence)
+         VALUES ($1, $2, $3, $4, $5, $6::date, 450, 1500, $7)`,
+        [org, id, run.id, rec.id, sp, '2026-10-01', String(11250 + i)],
+      );
+      await admin.query(`INSERT INTO core.payslip (organisation_id, workspace_id, run_id, staff_profile_id) VALUES ($1, $2, $3, $4)`, [org, id, run.id, sp]);
+    }
+    await admin.query(`INSERT INTO core.user_note (organisation_id, subject_user_id, author_user_id, body) VALUES ($1, $2, $3, 'C3 note about staff one')`, [org, staff[0]!.user, owner]);
+    await admin.query(`INSERT INTO core.user_note (organisation_id, subject_user_id, author_user_id, body) VALUES ($1, $2, $3, 'C3 note about the venue manager')`, [org, vmUser.id, owner]);
+    return { ...ws, venueId: venue.id };
+  };
+
+  const countIn = async (schema: string, table: string, ws: SeededWorkspace): Promise<number> => {
+    if (schema === 'core' && table === 'user_note') {
+      return Number(
+        (
+          await admin.query(
+            `SELECT count(*)::int AS n FROM core.user_note n WHERE n.subject_user_id IN (SELECT user_id FROM core.staff_profile WHERE workspace_id = $1 UNION SELECT user_id FROM core.manager_profile WHERE workspace_id = $1)`,
+            [ws.id],
+          )
+        ).rows[0].n,
+      );
+    }
+    const where = schema === 'core' ? ' WHERE workspace_id = $1' : '';
+    return Number((await admin.query(`SELECT count(*)::int AS n FROM ${schema}.${table}${where}`, schema === 'core' ? [ws.id] : [])).rows[0].n);
+  };
+  const wsTotal = async (ws: SeededWorkspace) => {
+    let n = 0;
+    for (const t of HWS_CUTOVER_TABLES) n += await countIn(ws.schema, t, ws);
+    return n;
+  };
+  const migrationError = async (ws: SeededWorkspace) => (await admin.query('SELECT migration_error FROM core.workspace_schema_registry WHERE workspace_id = $1', [ws.id])).rows[0].migration_error as string | null;
+  const stateOf = async (ws: SeededWorkspace) =>
+    ((await admin.query('SELECT state FROM core.hws_cutover_state WHERE workspace_id = $1', [ws.id])).rows[0]?.state as string | undefined) ?? null;
+  const verifiedRows = async (ws: SeededWorkspace) =>
+    Number((await admin.query(`SELECT count(*)::int AS n FROM core.audit_log WHERE entity_id = $1 AND action = $2`, [ws.id, HWS_CUTOVER_VERIFIED_ACTION])).rows[0].n);
+  /** FORCE + ENABLE on every core business table and on every table of the given schemas. */
+  const forceOffAnywhere = async (schemas: string[]) =>
+    (
+      await admin.query(
+        `SELECT n.nspname || '.' || c.relname AS rel FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+          WHERE c.relkind = 'r' AND c.relname = ANY ($1::text[]) AND (n.nspname = 'core' OR n.nspname = ANY ($2::text[]))
+            AND NOT (c.relrowsecurity AND c.relforcerowsecurity)`,
+        [[...HWS_CUTOVER_TABLES, 'manager_profile'], schemas],
+      )
+    ).rows.map((r) => r.rel as string);
+
+  /** The resolver every API / Worker workspace bind passes through (cache stubbed to "always ask Postgres"). */
+  /** `active`: the cutover sentinel exists — inserted inside this throwaway transaction only (never committed). */
+  const resolveAs = async (ws: SeededWorkspace, active?: boolean): Promise<string> => {
+    const cache = { resolveSchema: (_id: string, fetch: () => Promise<unknown>) => fetch(), invalidate: async () => undefined } as unknown as WorkspaceMetadataCacheService;
+    const c = new Client({ connectionString: appUrl });
+    await c.connect();
+    try {
+      await c.query('BEGIN');
+      if (active) {
+        await c.query('SET LOCAL ROLE crewflow');
+        await c.query('INSERT INTO core.hws_cutover_activation DEFAULT VALUES ON CONFLICT DO NOTHING');
+        await c.query('RESET ROLE');
+      }
+      await c.query(`SELECT set_config('rab.organisation_id', $1, true), set_config('rab.workspace_id', $2, true)`, [ws.org, ws.id]);
+      const manager = { query: (sql: string, params?: unknown[]) => c.query(sql, params).then((r) => r.rows) } as never;
+      try {
+        return await new SchemaResolverService(cache).resolve(manager, ws.id);
+      } catch (error) {
+        return error instanceof WorkspaceRoutingError ? `refused:${error.code}` : `error:${(error as Error).name}`;
+      }
+    } finally {
+      await c.query('ROLLBACK').catch(() => undefined);
+      await c.end();
+    }
+  };
+
+  /** A real pg_dump-shaped file + the marker the runbook writes. */
+  const writeBackup = (opts: { takenAt?: string } = {}) => {
+    const dump = Buffer.concat([Buffer.from('PGDMP'), Buffer.from(randomUUID())]);
+    writeFileSync(join(backupDir, 'pre-cutover.dump'), dump);
+    const marker = {
+      kind: 'crewflow-hws-cutover-backup',
+      version: 1,
+      database: dbName,
+      systemIdentifier: clusterId,
+      takenAt: opts.takenAt ?? new Date().toISOString(),
+      format: 'pg_dump-custom',
+      dumpFile: 'pre-cutover.dump',
+      sha256: createHash('sha256').update(dump).digest('hex'),
+      sizeBytes: dump.length,
+      restoreVerified: true,
+    };
+    writeFileSync(join(backupDir, 'marker.json'), JSON.stringify(marker));
+  };
+  const host = (opts: { backup?: boolean; hws?: boolean } = {}): UpgradeCommandHost =>
+    createUpgradeCommandHost({ env: opts.backup === false ? {} : { [CUTOVER_BACKUP_MARKER_ENV]: join(backupDir, 'marker.json') }, hwsRuntimeEnabled: opts.hws ?? true });
+  /**
+   * The cutover writes the one-way activation sentinel. In production it is never removed; this database is SHARED with every
+   * other spec of the in-band run, so the cluster superuser removes it after each run (it would turn fail-closed routing on
+   * for every later fixture workspace).
+   */
+  const deactivate = () => admin.query('DELETE FROM core.hws_cutover_activation');
+  const activeNow = async () => Number((await admin.query('SELECT count(*)::int AS n FROM core.hws_cutover_activation')).rows[0].n) === 1;
+  const startedAny = async () => (await app.query('SELECT core.hws_cutover_started_any() AS s')).rows[0].s as boolean;
+  const cutover = async (q: Client, ids: string[], h: UpgradeCommandHost, extra: HwsCutoverOptions = {}, ctx: { flushBlockCache?: () => Promise<void>; markBlockChanged?: () => void } = {}) => {
+    try {
+      return await runHwsCutover({ query: (sql, params) => q.query(sql, params as unknown[]).then((r) => r.rows), log, host: h, ...ctx }, { workspaceIds: ids, ...extra });
+    } finally {
+      await deactivate();
+    }
+  };
+
+  beforeAll(async () => {
+    admin = new Client({ connectionString: adminUrl });
+    app = new Client({ connectionString: appUrl });
+    await admin.connect();
+    await app.connect();
+    await app.query('SELECT pg_advisory_lock($1::bigint)', [LOCK]);
+    dbName = (await app.query('SELECT current_database() AS d')).rows[0].d;
+    // The command reads it as the runtime login; null when this login may not call pg_control_system() (same rule).
+    clusterId = await app.query('SELECT system_identifier::text AS s FROM pg_control_system()').then((r) => r.rows[0].s as string, () => null);
+    backupDir = mkdtempSync(join(tmpdir(), 'c3-backup-'));
+  });
+
+  afterAll(async () => {
+    await app?.query('SELECT pg_advisory_unlock_all()').catch(() => undefined);
+    for (const ws of created) {
+      await dropWorkspaceSchema(admin, ws.schema).catch(() => undefined);
+      await admin.query(`UPDATE core.workspace_schema_registry SET status = 'FAILED', migration_error = NULL WHERE workspace_id = $1`, [ws.id]).catch(() => undefined);
+      await admin.query(`DELETE FROM core.worker_dispatch_pointer WHERE workspace_id = $1`, [ws.id]).catch(() => undefined);
+      await admin.query(`DELETE FROM core.hws_cutover_state WHERE workspace_id = $1`, [ws.id]).catch(() => undefined);
+    }
+    await admin.query(`DELETE FROM core.upgrade_migration WHERE workspace_id IS NULL AND name LIKE '0.7.0_%' AND executed_by_version = '0.7.0'`).catch(() => undefined);
+    await admin.query('DELETE FROM core.hws_cutover_activation').catch(() => undefined);
+    if (backupDir) rmSync(backupDir, { recursive: true, force: true });
+    await app?.end();
+    await admin?.end();
+  });
+
+  it('the session is the one runtime login, holding the migration lock', async () => {
+    expect((await app.query('SELECT current_user::text AS u')).rows[0].u).toBe('crewflow_owner');
+  });
+
+  it('abuse cases: no lock, another tenant, a table outside the list, limits, not READY, crewflow_app → refused', async () => {
+    const a = await make('abuse-a');
+    const b = await make('abuse-b');
+    const bound = async (c: Client, org: string, ws: string, sql: string, params: unknown[]) => {
+      await c.query('BEGIN');
+      try {
+        await c.query(`SELECT set_config('rab.organisation_id', $1, true), set_config('rab.workspace_id', $2, true)`, [org, ws]);
+        return await c.query(sql, params);
+      } finally {
+        await c.query('ROLLBACK').catch(() => undefined);
+      }
+    };
+    const copy = 'SELECT * FROM core.hws_cutover_copy_batch($1, $2, $3, $4)';
+    const verify = 'SELECT * FROM core.hws_cutover_verify_range($1, $2, $3, $4)';
+    const noLock = new Client({ connectionString: appUrl });
+    await noLock.connect();
+    try {
+      expect(await sqlstateOf(bound(noLock, a.org, a.id, copy, [a.id, 'venue', null, 10]))).toBe('42501');
+      expect(await sqlstateOf(bound(noLock, a.org, a.id, verify, [a.id, 'venue', null, 10]))).toBe('42501');
+      expect(await sqlstateOf(bound(noLock, a.org, a.id, 'SELECT * FROM core.hws_cutover_probe($1)', [a.id]))).toBe('42501');
+      expect(await sqlstateOf(bound(noLock, a.org, a.id, 'SELECT core.hws_cutover_drop_new_statement_pointers($1, ARRAY[$1]::uuid[])', [a.id]))).toBe('42501');
+      expect(await sqlstateOf(bound(noLock, a.org, a.id, 'SELECT core.hws_cutover_purge_core_statement_pointers($1)', [a.id]))).toBe('42501');
+    } finally {
+      await noLock.end();
+    }
+    // The lock holder, but the tenant bound to ANOTHER workspace (and another organisation).
+    expect(await sqlstateOf(bound(app, b.org, b.id, copy, [a.id, 'venue', null, 10]))).toBe('42501');
+    expect(await sqlstateOf(bound(app, a.org, b.id, copy, [a.id, 'venue', null, 10]))).toBe('42501');
+    expect(await sqlstateOf(bound(app, b.org, b.id, 'SELECT core.hws_cutover_purge_core_statement_pointers($1)', [a.id]))).toBe('42501');
+    expect(await sqlstateOf(bound(app, b.org, b.id, 'SELECT core.hws_cutover_drop_new_statement_pointers($1, ARRAY[$1]::uuid[])', [a.id]))).toBe('42501');
+    // Closed table list, limits, keyset arity.
+    for (const t of ['user', 'organisation', 'manager_workspace', 'audit_log', 'venue; DROP TABLE core.venue', null]) {
+      expect(await sqlstateOf(bound(app, a.org, a.id, copy, [a.id, t, null, 10]))).toBe('22023');
+      expect(await sqlstateOf(bound(app, a.org, a.id, verify, [a.id, t, null, 10]))).toBe('22023');
+    }
+    for (const n of [0, -1, 10_001, null]) expect(await sqlstateOf(bound(app, a.org, a.id, copy, [a.id, 'venue', null, n]))).toBe('22023');
+    expect(await sqlstateOf(bound(app, a.org, a.id, copy, [a.id, 'manager_venue', randomUUID(), 10]))).toBe('22023');
+    expect(await sqlstateOf(bound(app, a.org, a.id, copy, [a.id, 'venue', 'not-a-uuid', 10]))).toBe('22P02');
+    // Not READY (a workspace with no schema) → 55000; a registry name mismatch → 55000.
+    const notReady = await seedWorkspace(admin, `c3-notready-${SFX}`);
+    created.push(notReady);
+    expect(await sqlstateOf(bound(app, notReady.org, notReady.id, copy, [notReady.id, 'venue', null, 10]))).toBe('55000');
+    // crewflow_app (the restricted reference grant set) holds no EXECUTE on any of them.
+    await admin.query('BEGIN');
+    try {
+      await admin.query('SET LOCAL ROLE crewflow_app');
+      for (const fn of [
+        'core.hws_cutover_copy_batch(uuid,text,text,integer)',
+        'core.hws_cutover_verify_range(uuid,text,text,integer)',
+        'core.hws_cutover_probe(uuid)',
+        'core.hws_cutover_schema(uuid)',
+        'core.hws_cutover_source_sql(text)',
+        'core.hws_cutover_drop_new_statement_pointers(uuid,uuid[])',
+        'core.hws_cutover_purge_core_statement_pointers(uuid)',
+        'core.hws_cutover_core_fence()',
+      ]) {
+        expect((await admin.query(`SELECT has_function_privilege('crewflow_app', $1, 'EXECUTE') AS x`, [fn])).rows[0].x).toBe(false);
+      }
+      await admin.query('SAVEPOINT s');
+      expect(await sqlstateOf(admin.query(copy, [a.id, 'venue', null, 10]))).toBe('42501');
+    } finally {
+      await admin.query('ROLLBACK');
+    }
+    expect(await forceOffAnywhere([a.schema, b.schema])).toEqual([]);
+  });
+
+  it('re-check N-1: crewflow_app and crewflow_worker cannot forge a verified state (no app-callable marker; the trigger is INSERT-only)', async () => {
+    const victim = await seedBusiness(await make('n1-victim'));
+    expect(await startedAny()).toBe(false);
+    // The 3-step forgery's first step (fake a new workspace's columns); errors swallowed so the attempt goes on either way.
+    const forge = [
+      `DO $f$ BEGIN UPDATE core.manager_workspace SET created_at = now(), schema_status = 'CREATING' WHERE id = '${victim.id}'; EXCEPTION WHEN OTHERS THEN NULL; END $f$`,
+    ];
+    for (const role of ['crewflow_app', 'crewflow_worker']) {
+      const setup = [`SET LOCAL ROLE ${role}`, tenant(victim, victim.owner), ...forge];
+      // The old app-callable marker is gone ...
+      expect((await refusalIn(admin, setup, 'SELECT core.hws_cutover_mark_new_workspace($1)', [victim.id])).code).toBe('42883');
+      // ... and the state table takes no write from them.
+      const direct = await refusalIn(admin, setup, `INSERT INTO core.hws_cutover_state (workspace_id, organisation_id, state, verified_at) VALUES ($1, $2, 'verified', now())`, [victim.id, victim.org]);
+      expect(direct.code).toBe('42501');
+      const sentinel = await refusalIn(admin, [`SET LOCAL ROLE ${role}`], 'INSERT INTO core.hws_cutover_activation DEFAULT VALUES', []);
+      expect(sentinel.code).toBe('42501');
+    }
+    // Even with the cutover active, the faked-new UPDATE fires no marking (the trigger is AFTER INSERT only).
+    await admin.query('SET ROLE crewflow');
+    await admin.query('INSERT INTO core.hws_cutover_activation DEFAULT VALUES ON CONFLICT DO NOTHING');
+    await admin.query('RESET ROLE');
+    try {
+      for (const role of ['crewflow_app', 'crewflow_worker']) {
+        await admin.query('BEGIN');
+        try {
+          await admin.query(`SET LOCAL ROLE ${role}`);
+          await admin.query(tenant(victim, victim.owner));
+          await admin.query(forge[0]!);
+        } finally {
+          await admin.query('COMMIT').catch(() => admin.query('ROLLBACK'));
+        }
+      }
+      expect(await stateOf(victim)).toBeNull();
+    } finally {
+      await deactivate();
+    }
+    expect(await stateOf(victim)).toBeNull();
+    expect(await startedAny()).toBe(false);
+  });
+
+  let w1: Seeded;
+  let corePointersBefore: string[] = [];
+  let noPointerRecord = '';
+
+  it('HWS off: refused (HWS_RUNTIME_OFF); nothing blocked, nothing copied', async () => {
+    w1 = await seedBusiness(await make('main'));
+    writeBackup();
+    await expect(cutover(app, [w1.id], host({ hws: false }))).rejects.toMatchObject({ name: 'HwsCutoverRefused', errorClass: 'HWS_RUNTIME_OFF' });
+    expect(await migrationError(w1)).toBeNull();
+    expect(await wsTotal(w1)).toBe(0);
+    expect(await verifiedRows(w1)).toBe(0);
+  });
+
+  it('no backup → refused (NO_BACKUP): the workspace is BLOCKED (503 "being upgraded"), nothing is copied', async () => {
+    expect(await resolveAs(w1)).toBe(w1.schema);
+    await expect(cutover(app, [w1.id], host({ backup: false }))).rejects.toMatchObject({ name: 'HwsCutoverRefused', errorClass: 'NO_BACKUP' });
+    expect(await migrationError(w1)).toBe('upgrade-blocked: HwsCutover (HWS_CUTOVER_PENDING)');
+    expect(await resolveAs(w1)).toBe('refused:upgrading');
+    expect(await wsTotal(w1)).toBe(0);
+    // A stale backup refuses the same way.
+    writeBackup({ takenAt: new Date(Date.now() - 25 * 3_600_000).toISOString() });
+    await expect(cutover(app, [w1.id], host())).rejects.toMatchObject({ errorClass: 'NO_BACKUP' });
+    expect(await wsTotal(w1)).toBe(0);
+    expect(await verifiedRows(w1)).toBe(0);
+  });
+
+  it('a kill partway through the copy leaves the workspace blocked, FORCE on, no verified row', async () => {
+    writeBackup();
+    // One historical approved record whose core twin has NO statement pointer: the copy must not create due work for it.
+    const recs = (await admin.query(`SELECT id FROM core.payroll_record WHERE workspace_id = $1 ORDER BY id`, [w1.id])).rows.map((r) => r.id as string);
+    noPointerRecord = recs[0]!;
+    await admin.query(`DELETE FROM core.worker_dispatch_pointer WHERE queue = 'statement' AND subject_id = $1`, [noPointerRecord]);
+    corePointersBefore = (
+      await admin.query(`SELECT subject_id FROM core.worker_dispatch_pointer WHERE queue = 'statement' AND workspace_id = $1 AND source_schema = 'core' ORDER BY 1`, [w1.id])
+    ).rows.map((r) => r.subject_id as string);
+    expect(corePointersBefore).not.toContain(noPointerRecord);
+
+    await app.query('SELECT pg_advisory_unlock($1::bigint)', [LOCK]);
+    const k = new Client({ connectionString: appUrl });
+    await k.connect();
+    k.on('error', () => undefined);
+    await k.query('SELECT pg_advisory_lock($1::bigint)', [LOCK]);
+    const pid = (await k.query('SELECT pg_backend_pid() AS p')).rows[0].p;
+    let killed = false;
+    const run = cutover(k, [w1.id], host(), {
+      batchSize: 1,
+      afterBatch: async ({ table, batch }) => {
+        if (!killed && table === 'shift_assignment' && batch === 1) {
+          killed = true;
+          await admin.query('SELECT pg_terminate_backend($1)', [pid]);
+          // Wait until the backend is really gone, so no further batch of this run can commit.
+          for (let i = 0; i < 200; i += 1) {
+            if (!(await admin.query('SELECT 1 FROM pg_stat_activity WHERE pid = $1', [pid])).rows.length) break;
+            await new Promise((r) => setTimeout(r, 50));
+          }
+        }
+      },
+    });
+    await expect(run).rejects.toBeDefined();
+    expect(killed).toBe(true);
+    await k.end().catch(() => undefined);
+    await app.query('SELECT pg_advisory_lock($1::bigint)', [LOCK]);
+
+    expect(await migrationError(w1)).toBe('upgrade-blocked: HwsCutover (HWS_CUTOVER_PENDING)');
+    expect(await resolveAs(w1)).toBe('refused:upgrading');
+    expect(await countIn(w1.schema, 'job_role', w1)).toBe(1);
+    expect(await countIn(w1.schema, 'shift_assignment', w1)).toBe(1);
+    expect(await countIn(w1.schema, 'payroll_record', w1)).toBe(0);
+    expect(await verifiedRows(w1)).toBe(0);
+    expect(await stateOf(w1)).toBe('started');
+    expect(await forceOffAnywhere([w1.schema])).toEqual([]);
+  });
+
+  it('resume: copies the rest, verifies every table (counts, rows, checksums, money, minutes), unblocks; no duplicate, no gap', async () => {
+    const report = await cutover(app, [w1.id], host(), { batchSize: 1 });
+    expect(report.backup).toBe('verified');
+    expect(report.workspaces).toEqual([expect.objectContaining({ workspaceId: w1.id, status: 'verified' })]);
+    for (const t of HWS_CUTOVER_TABLES) {
+      expect({ t, n: await countIn(w1.schema, t, w1) }).toEqual({ t, n: await countIn('core', t, w1) });
+    }
+    expect(await countIn(w1.schema, 'payroll_record', w1)).toBe(2);
+    expect(await countIn(w1.schema, 'user_note', w1)).toBe(2);
+    // Full-precision equality, both directions, for the money tables (every column, as canonical jsonb text).
+    for (const t of ['payroll_record', 'payroll_run_line', 'attendance', 'attendance_correction', 'payslip', 'payroll_run']) {
+      const diff = await admin.query(
+        `SELECT (SELECT count(*) FROM (SELECT to_jsonb(c)::text FROM core.${t} c WHERE c.workspace_id = $1 EXCEPT ALL SELECT to_jsonb(w)::text FROM ${w1.schema}.${t} w) x)::int AS missing,
+                (SELECT count(*) FROM (SELECT to_jsonb(w)::text FROM ${w1.schema}.${t} w EXCEPT ALL SELECT to_jsonb(c)::text FROM core.${t} c WHERE c.workspace_id = $1) x)::int AS extra`,
+        [w1.id],
+      );
+      expect({ t, ...diff.rows[0] }).toEqual({ t, missing: 0, extra: 0 });
+    }
+    const pence = await admin.query(
+      `SELECT (SELECT sum(amount_pence)::text FROM core.payroll_record WHERE workspace_id = $1) AS core, (SELECT sum(amount_pence)::text FROM ${w1.schema}.payroll_record) AS ws`,
+      [w1.id],
+    );
+    expect(pence.rows[0]).toEqual({ core: '22501', ws: '22501' });
+    expect(await migrationError(w1)).toBeNull();
+    expect(await resolveAs(w1)).toBe(w1.schema);
+    expect(await verifiedRows(w1)).toBe(1);
+    const meta = (await admin.query(`SELECT metadata FROM core.audit_log WHERE entity_id = $1 AND action = $2`, [w1.id, HWS_CUTOVER_VERIFIED_ACTION])).rows[0].metadata;
+    expect(meta).toMatchObject({ step: 'HwsCutover', outcome: 'copied-and-verified', tables: { payroll_record: { rows: 2 } } });
+    // Review Info-4: no per-workspace money in the audit record or the log.
+    expect(JSON.stringify(meta)).not.toMatch(/pence|22501|11250/);
+    expect(lines.some((l) => /22501|11250/.test(l))).toBe(false);
+    expect(await stateOf(w1)).toBe('verified');
+    // Statement pointers (Q13): exactly the core twins' pointers now exist for the workspace copy; none for the record whose
+    // twin had none; every core-source pointer of the workspace is purged.
+    const after = await admin.query(`SELECT subject_id, source_schema FROM core.worker_dispatch_pointer WHERE queue = 'statement' AND workspace_id = $1 ORDER BY 1`, [w1.id]);
+    expect(after.rows.map((r) => r.subject_id)).toEqual(corePointersBefore);
+    expect(after.rows.every((r) => r.source_schema === w1.schema)).toBe(true);
+    expect(after.rows.map((r) => r.subject_id)).not.toContain(noPointerRecord);
+    expect(await forceOffAnywhere([w1.schema])).toEqual([]);
+  });
+
+  it('idempotent: a second run copies and verifies nothing again and writes no second verified row', async () => {
+    const before = await wsTotal(w1);
+    const report = await cutover(app, [w1.id], host({ backup: false }));
+    expect(report.workspaces).toEqual([{ workspaceId: w1.id, status: 'already-verified' }]);
+    expect(await wsTotal(w1)).toBe(before);
+    expect(await verifiedRows(w1)).toBe(1);
+  });
+
+  it('zero rows with no tenant context, and with another organisation bound, in the workspace schema and in core', async () => {
+    const other = await make('other-org');
+    const c = new Client({ connectionString: appUrl });
+    await c.connect();
+    try {
+      for (const t of HWS_CUTOVER_TABLES) {
+        expect({ t, n: Number((await c.query(`SELECT count(*)::int AS n FROM ${w1.schema}.${t}`)).rows[0].n) }).toEqual({ t, n: 0 });
+        expect({ t, n: Number((await c.query(`SELECT count(*)::int AS n FROM core.${t}`)).rows[0].n) }).toEqual({ t, n: 0 });
+      }
+      // The new tenant table (core.hws_cutover_state, review L-2): no tenant context -> zero rows (w1's row exists).
+      expect(await stateOf(w1)).toBe('verified');
+      expect(Number((await c.query('SELECT count(*)::int AS n FROM core.hws_cutover_state')).rows[0].n)).toBe(0);
+      await c.query('BEGIN');
+      await c.query(`SELECT set_config('rab.organisation_id', $1, true), set_config('rab.workspace_id', $2, true)`, [other.org, w1.id]);
+      for (const t of ['payroll_record', 'staff_profile', 'attendance', 'payslip', 'attendance_correction', 'user_note']) {
+        expect({ t, n: Number((await c.query(`SELECT count(*)::int AS n FROM ${w1.schema}.${t}`)).rows[0].n) }).toEqual({ t, n: 0 });
+      }
+      expect(Number((await c.query('SELECT count(*)::int AS n FROM core.hws_cutover_state WHERE workspace_id = $1', [w1.id])).rows[0].n)).toBe(0);
+      await c.query('ROLLBACK');
+    } finally {
+      await c.end();
+    }
+  });
+
+  it('a checksum mismatch → the workspace stays BLOCKED (HWS_CUTOVER_MISMATCH), no verified row, the step fails', async () => {
+    const w2 = await seedBusiness(await make('mismatch'));
+    writeBackup();
+    const run = cutover(app, [w2.id], host(), {
+      beforeVerify: async () => {
+        // A planted difference after the copy (venue has no update guard): one column of one row.
+        await admin.query(`UPDATE ${w2.schema}.venue SET name = name || ' (changed)' WHERE id = $1`, [w2.venueId]);
+      },
+    });
+    await expect(run).rejects.toMatchObject({ name: 'HwsCutoverRefused', errorClass: 'HWS_CUTOVER_WORKSPACE_FAILED' });
+    expect(await migrationError(w2)).toBe('upgrade-blocked: HwsCutover (HWS_CUTOVER_MISMATCH)');
+    expect(await resolveAs(w2)).toBe('refused:upgrading');
+    expect(await verifiedRows(w2)).toBe(0);
+    expect(lines.some((l) => l.includes(w2.id) && l.includes('venue: checksum mismatch'))).toBe(true);
+    // Never half-switched: the next start re-verifies, finds the same difference (the copy never overwrites), stays blocked.
+    await expect(cutover(app, [w2.id], host())).rejects.toMatchObject({ errorClass: 'HWS_CUTOVER_WORKSPACE_FAILED' });
+    expect(await migrationError(w2)).toBe('upgrade-blocked: HwsCutover (HWS_CUTOVER_MISMATCH)');
+    expect(await forceOffAnywhere([w2.schema])).toEqual([]);
+  });
+
+  it('rows already in the schema of a workspace never cut over → refused (BOTH_POPULATED), blocked, nothing merged', async () => {
+    const w4 = await seedBusiness(await make('both'));
+    writeBackup();
+    await admin.query(
+      `INSERT INTO ${w4.schema}.job_role (organisation_id, name, default_rate_pence, created_by, workspace_id) VALUES ($1, 'Written with HWS on', 1700, $2, $3)`,
+      [w4.org, w4.owner, w4.id],
+    );
+    // First start without a backup: blocked, refused before any copy, no cutover state written ...
+    await expect(cutover(app, [w4.id], host({ backup: false }))).rejects.toMatchObject({ errorClass: 'NO_BACKUP' });
+    expect(await migrationError(w4)).toBe('upgrade-blocked: HwsCutover (HWS_CUTOVER_PENDING)');
+    expect(await stateOf(w4)).toBeNull();
+    // ... so the next start (backup present) cannot take its schema rows for a partial copy of ours: refused, nothing merged.
+    await expect(cutover(app, [w4.id], host())).rejects.toMatchObject({ errorClass: 'HWS_CUTOVER_WORKSPACE_FAILED' });
+    expect(await migrationError(w4)).toBe('upgrade-blocked: HwsCutover (HWS_CUTOVER_BOTH_POPULATED)');
+    expect(await wsTotal(w4)).toBe(1);
+    expect(await verifiedRows(w4)).toBe(0);
+  });
+
+  it('through the Part B logbook (UpgradeRun): failed attempt 1 (no backup, blocks reported) → completed attempt 2', async () => {
+    const w3 = await seedBusiness(await make('ledger'));
+    const command = createHwsCutoverCommand({ workspaceIds: [w3.id] });
+    const step = '0.7.0_HwsCutover_1786721540100';
+    const session = upgradeSessionOf(app);
+    const runOnce = async (h: UpgradeCommandHost) => {
+      const run = new UpgradeRun({
+        codeVersion: '0.7.0',
+        previousVersions: ['0.4.0', '0.5.0', '0.6.0'],
+        force: true,
+        log,
+        registry: { '0-7': [command] },
+        workspaceRegistry: {},
+        workspaceRunner: { workspaceIds: [] },
+        host: h,
+      });
+      await run.beforeApply(session, { fresh: false, attribution: null, unrestrictedTarget: true });
+      try {
+        await run.afterApply(session);
+      } finally {
+        await deactivate();
+      }
+      return run.report;
+    };
+    const rows = async () => (await admin.query(`SELECT status, attempt, forced FROM core.upgrade_migration WHERE workspace_id IS NULL AND name = $1 ORDER BY attempt`, [step])).rows;
+    const first = await runOnce(host({ backup: false }));
+    expect(first.commandFailure).toMatchObject({ name: step, errorName: 'HwsCutoverRefused' });
+    expect(first.commandBlockChanged).toBe(true);
+    expect(await rows()).toEqual([{ status: 'failed', attempt: 1, forced: true }]);
+    expect(await migrationError(w3)).toBe('upgrade-blocked: HwsCutover (HWS_CUTOVER_PENDING)');
+    writeBackup();
+    const second = await runOnce(host());
+    expect(second.commandFailure).toBeNull();
+    expect(second.commandBlockChanged).toBe(true);
+    expect(await rows()).toEqual([
+      { status: 'failed', attempt: 1, forced: true },
+      { status: 'completed', attempt: 2, forced: true },
+    ]);
+    expect(await migrationError(w3)).toBeNull();
+    expect(await verifiedRows(w3)).toBe(1);
+  });
+
+  /** SQLSTATE + message of a statement inside a throwaway transaction (always rolled back). */
+  const refusalIn = async (c: Client, setup: string[], sql: string, params: unknown[]): Promise<{ code: string; message: string }> => {
+    await c.query('BEGIN');
+    try {
+      for (const s of setup) await c.query(s);
+      await c.query(sql, params);
+      return { code: 'ACCEPTED', message: '' };
+    } catch (e) {
+      return { code: (e as { code?: string }).code ?? 'NO-CODE', message: (e as Error).message };
+    } finally {
+      await c.query('ROLLBACK').catch(() => undefined);
+    }
+  };
+  const tenant = (ws: SeededWorkspace, user?: string) =>
+    `SELECT set_config('rab.organisation_id', '${ws.org}', true), set_config('rab.workspace_id', '${ws.id}', true), set_config('rab.user_id', '${user ?? ''}', true)`;
+
+  it('review M-3: once W is cut over its core copy is read-only for the runtime login (fence), and an HWS-off process refuses to boot', async () => {
+    expect(await stateOf(w1)).toBe('verified');
+    const c = new Client({ connectionString: appUrl });
+    await c.connect();
+    try {
+      const venue = (await admin.query('SELECT id, (SELECT id FROM core.job_role WHERE workspace_id = $1 LIMIT 1) AS jr FROM core.venue WHERE workspace_id = $1 LIMIT 1', [w1.id])).rows[0];
+      const ins = await refusalIn(
+        c,
+        [tenant(w1, w1.owner)],
+        `INSERT INTO core.shift (organisation_id, venue_id, job_role_id, starts_at, ends_at, break_minutes, required_count, filled_count, pay_rate_pence, status, created_by, workspace_id)
+         VALUES ($1, $2, $3, now() + interval '30 days', now() + interval '30 days 8 hours', 30, 1, 0, 1500, 'open', $4, $5)`,
+        [w1.org, venue.id, venue.jr, w1.owner, w1.id],
+      );
+      expect(ins.code).toBe('42501');
+      expect(ins.message).toMatch(/served from its own schema/);
+      const upd = await refusalIn(c, [tenant(w1, w1.owner)], `UPDATE core.payroll_record SET updated_at = updated_at WHERE workspace_id = $1`, [w1.id]);
+      expect(upd.code).toBe('42501');
+      expect(upd.message).toMatch(/served from its own schema/);
+      // The table owner (FK cascades run as it) still passes: the fence is for the runtime login only.
+      const owner = await refusalIn(admin, ['SET LOCAL ROLE crewflow', tenant(w1)], `UPDATE core.venue SET name = name WHERE workspace_id = $1`, [w1.id]);
+      expect(owner.code).toBe('ACCEPTED');
+      // A workspace never cut over is not fenced.
+      const free = await make('fence-free');
+      const jr = await refusalIn(c, [tenant(free, free.owner)], `INSERT INTO core.job_role (organisation_id, name, default_rate_pence, created_by, workspace_id) VALUES ($1, 'x', 1, $2, $3)`, [free.org, free.owner, free.id]);
+      expect(jr.message).not.toMatch(/served from its own schema/);
+    } finally {
+      await c.end();
+    }
+    const asDataSource = { query: (sql: string) => app.query(sql).then((r) => r.rows) } as never;
+    await expect(assertHwsStartupInvariants(asDataSource, false)).rejects.toBeInstanceOf(HwsStartupError);
+  });
+
+  it('review L-2: the runtime login and crewflow_app cannot write the cutover state; a forged audit row does not make W verified', async () => {
+    const w6 = await seedBusiness(await make('forged'));
+    const insertState = `INSERT INTO core.hws_cutover_state (workspace_id, organisation_id, state, verified_at) VALUES ($1, $2, 'verified', now())`;
+    expect((await refusalIn(app, [tenant(w6)], insertState, [w6.id, w6.org])).code).toBe('42501');
+    expect((await refusalIn(admin, ['SET LOCAL ROLE crewflow_app', tenant(w6)], insertState, [w6.id, w6.org])).code).toBe('42501');
+    // crewflow_app may insert audit rows: one claiming the cutover verified changes nothing.
+    await admin.query(
+      `INSERT INTO core.audit_log (id, organisation_id, actor_user_id, action, metadata, entity_type, entity_id) VALUES (gen_random_uuid(), $1, NULL, $2, '{}'::jsonb, 'manager_workspace', $3)`,
+      [w6.org, HWS_CUTOVER_VERIFIED_ACTION, w6.id],
+    );
+    await expect(cutover(app, [w6.id], host({ backup: false }))).rejects.toMatchObject({ errorClass: 'NO_BACKUP' });
+    expect(await stateOf(w6)).toBeNull();
+    expect(await migrationError(w6)).toBe('upgrade-blocked: HwsCutover (HWS_CUTOVER_PENDING)');
+  });
+
+  it('review H-1: a probe that cannot get its lock fails the step only AFTER every workspace with core rows is blocked', async () => {
+    const w7 = await seedBusiness(await make('lockwait'));
+    writeBackup();
+    const holder = new Client({ connectionString: adminUrl });
+    await holder.connect();
+    let changed = false;
+    try {
+      await holder.query('BEGIN');
+      await holder.query('LOCK TABLE core.shift IN ACCESS SHARE MODE');
+      const err = await cutover(app, [w7.id], host(), {}, { markBlockChanged: () => (changed = true) }).then(
+        () => null,
+        (e) => e as { code?: string },
+      );
+      expect(err?.code).toBe('55P03');
+    } finally {
+      await holder.query('ROLLBACK').catch(() => undefined);
+      await holder.end();
+    }
+    expect(changed).toBe(true);
+    expect(await migrationError(w7)).toBe('upgrade-blocked: HwsCutover (HWS_CUTOVER_PENDING)');
+    expect(await resolveAs(w7)).toBe('refused:upgrading');
+    expect(await wsTotal(w7)).toBe(0);
+    expect(await forceOffAnywhere([w7.schema])).toEqual([]);
+  });
+
+  it('review L-4: the resolver cache epoch is bumped right after blocking, before any copy; a failed bump stops the step', async () => {
+    const w8 = await seedBusiness(await make('epoch'));
+    writeBackup();
+    const order: string[] = [];
+    const copyHook = { afterBatch: async () => void order.push('copy') };
+    await expect(
+      cutover(app, [w8.id], host(), copyHook, {
+        flushBlockCache: async () => {
+          order.push(`flush:${await migrationError(w8)}`);
+          throw new Error('redis unreachable');
+        },
+      }),
+    ).rejects.toThrow('redis unreachable');
+    expect(order).toEqual(['flush:upgrade-blocked: HwsCutover (HWS_CUTOVER_PENDING)']);
+    expect(await wsTotal(w8)).toBe(0);
+    expect(await migrationError(w8)).toBe('upgrade-blocked: HwsCutover (HWS_CUTOVER_PENDING)');
+    order.length = 0;
+    await cutover(app, [w8.id], host(), copyHook, { flushBlockCache: async () => void order.push('flush') });
+    expect(order[0]).toBe('flush');
+    expect(order.filter((o) => o === 'flush')).toHaveLength(1);
+    expect(order).toContain('copy');
+    expect(await stateOf(w8)).toBe('verified');
+  });
+
+  it('review M-1: a nothing-to-copy workspace keeps its live workspace statement pointer, across a fail-then-succeed sequence', async () => {
+    const live = await make('live');
+    const other = await seedBusiness(await make('m1-other'));
+    const subject = randomUUID();
+    await admin.query(
+      `INSERT INTO core.worker_dispatch_pointer (queue, subject_id, organisation_id, workspace_id, due_at, source_schema) VALUES ('statement', $1, $2, $3, now(), $4)`,
+      [subject, live.org, live.id, live.schema],
+    );
+    const pointers = async () => Number((await admin.query('SELECT count(*)::int AS n FROM core.worker_dispatch_pointer WHERE subject_id = $1', [subject])).rows[0].n);
+    await expect(cutover(app, [live.id, other.id], host({ backup: false }))).rejects.toMatchObject({ errorClass: 'NO_BACKUP' });
+    expect(await stateOf(live)).toBe('verified');
+    expect(await migrationError(live)).toBeNull();
+    expect(await pointers()).toBe(1);
+    writeBackup();
+    await cutover(app, [live.id, other.id], host());
+    expect(await stateOf(other)).toBe('verified');
+    expect(await pointers()).toBe(1);
+  });
+
+  it('review M-2: one bad workspace does not keep the others blocked (A served, B blocked USER_NOTE_AMBIGUOUS)', async () => {
+    const a = await seedBusiness(await make('m2-a'));
+    const b = await seedBusiness(await make('m2-b'));
+    const subject = (
+      await admin.query(`SELECT n.subject_user_id AS u FROM core.user_note n JOIN core.staff_profile sp ON sp.user_id = n.subject_user_id WHERE sp.workspace_id = $1 LIMIT 1`, [b.id])
+    ).rows[0].u;
+    await admin.query(`INSERT INTO core.manager_profile (organisation_id, user_id, type, workspace_id) VALUES ($1, $2, 'venue', $3)`, [b.org, subject, b.id]);
+    const noteId = (await admin.query('SELECT id FROM core.user_note WHERE subject_user_id = $1', [subject])).rows[0].id as string;
+    writeBackup();
+    await expect(cutover(app, [a.id, b.id], host())).rejects.toMatchObject({ errorClass: 'HWS_CUTOVER_WORKSPACE_FAILED' });
+    // Owner decision Q2: the report names the note to assign by hand; nothing was dropped.
+    expect(lines.some((l) => l.includes(b.id) && l.includes('HWS_CUTOVER_USER_NOTE_AMBIGUOUS') && l.includes(noteId))).toBe(true);
+    expect(Number((await admin.query('SELECT count(*)::int AS n FROM core.user_note WHERE id = $1', [noteId])).rows[0].n)).toBe(1);
+    expect(await stateOf(a)).toBe('verified');
+    expect(await migrationError(a)).toBeNull();
+    expect(await resolveAs(a)).toBe(a.schema);
+    expect(await migrationError(b)).toBe('upgrade-blocked: HwsCutover (HWS_CUTOVER_USER_NOTE_AMBIGUOUS)');
+    expect(await resolveAs(b)).toBe('refused:upgrading');
+    expect(await stateOf(b)).toBeNull();
+  });
+
+  it('review L-3: ambiguous notes are core data — a workspace whose only core data is one is refused, never "nothing to copy"', async () => {
+    const l3 = await make('l3');
+    const elsewhere = await make('l3-elsewhere');
+    await admin.query(`INSERT INTO core.manager_profile (organisation_id, user_id, type, workspace_id) VALUES ($1, $2, 'ceo', $3)`, [l3.org, l3.owner, l3.id]);
+    // The owner also holds a staff profile in another workspace (planted; throwaway database): the note's subject is ambiguous,
+    // and that staff profile is not a core row of l3, so l3's ONLY core data is the ambiguous note.
+    await admin.query('BEGIN');
+    await admin.query('SET LOCAL session_replication_role = replica');
+    const planted = (
+      await admin.query(`INSERT INTO core.staff_profile (organisation_id, user_id, staff_ref, created_by, workspace_id) VALUES ($1, $2, $3, $4, $5) RETURNING id`, [
+        elsewhere.org,
+        l3.owner,
+        `L3-${SFX}`,
+        elsewhere.owner,
+        elsewhere.id,
+      ])
+    ).rows[0].id;
+    await admin.query('COMMIT');
+    await admin.query(`INSERT INTO core.user_note (organisation_id, subject_user_id, author_user_id, body) VALUES ($1, $2, $2, 'ambiguous subject')`, [l3.org, l3.owner]);
+    writeBackup();
+    try {
+      await expect(cutover(app, [l3.id], host())).rejects.toMatchObject({ errorClass: 'HWS_CUTOVER_WORKSPACE_FAILED' });
+      expect(await stateOf(l3)).toBeNull();
+      expect(await migrationError(l3)).toBe('upgrade-blocked: HwsCutover (HWS_CUTOVER_USER_NOTE_AMBIGUOUS)');
+    } finally {
+      await admin.query('BEGIN');
+      await admin.query('SET LOCAL session_replication_role = replica');
+      await admin.query('DELETE FROM core.staff_profile WHERE id = $1', [planted]);
+      await admin.query('COMMIT');
+    }
+  });
+
+  it('review L-1: a core row of W carrying another organisation is never copied; W is refused (ORG_MISMATCH)', async () => {
+    const w9 = await seedBusiness(await make('orgmix'));
+    const foreign = await make('orgmix-foreign');
+    writeBackup();
+    await admin.query('BEGIN');
+    await admin.query('SET LOCAL session_replication_role = replica'); // throwaway database only: plant a row the FKs would refuse
+    const planted = (
+      await admin.query(`INSERT INTO core.venue (organisation_id, name, created_by, workspace_id) VALUES ($1, 'Planted', $2, $3) RETURNING id`, [foreign.org, foreign.owner, w9.id])
+    ).rows[0].id;
+    await admin.query('COMMIT');
+    try {
+      await expect(cutover(app, [w9.id], host())).rejects.toMatchObject({ errorClass: 'HWS_CUTOVER_WORKSPACE_FAILED' });
+      expect(await migrationError(w9)).toBe('upgrade-blocked: HwsCutover (HWS_CUTOVER_ORG_MISMATCH)');
+      expect(await wsTotal(w9)).toBe(0);
+      expect(await stateOf(w9)).toBeNull();
+    } finally {
+      await admin.query('BEGIN');
+      await admin.query('SET LOCAL session_replication_role = replica');
+      await admin.query('DELETE FROM core.venue WHERE id = $1', [planted]);
+      await admin.query('COMMIT');
+    }
+  });
+
+  it('fail-closed routing (H-1b): once the cutover is active, a workspace with no verified state is refused; before, it is served', async () => {
+    const plain = await make('no-state');
+    expect(await stateOf(plain)).toBeNull();
+    expect(await resolveAs(plain, false)).toBe(plain.schema); // HWS-on development / CI before activation: unchanged
+    expect(await resolveAs(plain, true)).toBe('refused:upgrading'); // activated: no verified state → 503
+    expect(await resolveAs(w1, true)).toBe(w1.schema); // verified by the cutover → served
+  });
+
+  it('fail-closed routing (H-1b): a cutover whose very first query throws blocks nothing, yet no workspace is served from an empty schema', async () => {
+    const fresh = await seedBusiness(await make('scan-throws'));
+    writeBackup();
+    let calls = 0;
+    const failing = async (sql: string, params?: unknown[]) => {
+      calls += 1;
+      if (calls === 1) throw Object.assign(new Error('connection reset during the scan'), { code: '08006' });
+      return (await app.query(sql, params as unknown[])).rows;
+    };
+    await expect(runHwsCutover({ query: failing, log, host: host() }, { workspaceIds: [fresh.id] })).rejects.toMatchObject({ code: '08006' });
+    expect(await migrationError(fresh)).toBeNull(); // nothing could be blocked ...
+    expect(await stateOf(fresh)).toBeNull();
+    expect(await resolveAs(fresh, true)).toBe('refused:upgrading'); // ... but routing still refuses it (no verified state)
+  });
+
+  it('fail-closed routing (H-1b, N-1): once active, the database marks a new workspace verified at insertion; it is served at once', async () => {
+    // Before activation the trigger writes nothing (an HWS-off deployment's new workspace keeps its data in core).
+    const before = await make('pre-activation');
+    expect(await stateOf(before)).toBeNull();
+    await admin.query('SET ROLE crewflow');
+    await admin.query('INSERT INTO core.hws_cutover_activation DEFAULT VALUES ON CONFLICT DO NOTHING');
+    await admin.query('RESET ROLE');
+    try {
+      expect(await activeNow()).toBe(true);
+      const nw = await make('post-activation'); // core.manager_workspace INSERT → AFTER INSERT trigger
+      expect(await stateOf(nw)).toBe('verified');
+      expect(await resolveAs(nw, true)).toBe(nw.schema);
+      expect(await stateOf(before)).toBeNull(); // existing workspaces are untouched: the cutover decides for them
+      expect(await resolveAs(before, true)).toBe('refused:upgrading');
+    } finally {
+      await deactivate();
+    }
+  });
+
+  it('re-check Info-A: core rows of the organisation with no workspace are refused (UNOWNED_ROWS), never silently left behind', async () => {
+    const wa = await seedBusiness(await make('unowned'));
+    writeBackup();
+    const planted = (
+      await admin.query(`INSERT INTO core.venue (organisation_id, name, created_by, workspace_id) VALUES ($1, 'No workspace', $2, NULL) RETURNING id`, [wa.org, wa.owner])
+    ).rows[0].id;
+    try {
+      await expect(cutover(app, [wa.id], host())).rejects.toMatchObject({ errorClass: 'HWS_CUTOVER_WORKSPACE_FAILED' });
+      expect(await migrationError(wa)).toBe('upgrade-blocked: HwsCutover (HWS_CUTOVER_UNOWNED_ROWS)');
+      expect(await stateOf(wa)).toBeNull();
+      expect(await wsTotal(wa)).toBe(0);
+    } finally {
+      await admin.query('DELETE FROM core.venue WHERE id = $1', [planted]);
+    }
+  });
+
+  it('re-check N-2: the cutover activation is one-way for every non-superuser role (no UPDATE / DELETE path)', async () => {
+    await admin.query('SET ROLE crewflow');
+    await admin.query('INSERT INTO core.hws_cutover_activation DEFAULT VALUES ON CONFLICT DO NOTHING');
+    await admin.query('RESET ROLE');
+    try {
+      for (const role of ['crewflow', 'crewflow_app', 'crewflow_worker']) {
+        await refusalIn(admin, [`SET LOCAL ROLE ${role}`], 'DELETE FROM core.hws_cutover_activation', []);
+        expect(await activeNow()).toBe(true);
+        await refusalIn(admin, [`SET LOCAL ROLE ${role}`], 'UPDATE core.hws_cutover_activation SET activated_at = now()', []);
+      }
+      await refusalIn(app, [], 'DELETE FROM core.hws_cutover_activation', []);
+      expect(await activeNow()).toBe(true);
+      // TRUNCATE bypasses RLS: refused by the statement-level guard for the runtime login, crewflow and crewflow_app.
+      expect((await refusalIn(app, [], 'TRUNCATE core.hws_cutover_activation', [])).code).toBe('42501');
+      expect((await refusalIn(app, [], 'TRUNCATE core.hws_cutover_state', [])).code).toBe('42501');
+      for (const role of ['crewflow', 'crewflow_app']) {
+        expect((await refusalIn(admin, [`SET LOCAL ROLE ${role}`], 'TRUNCATE core.hws_cutover_activation', [])).code).toBe('42501');
+      }
+      expect(await activeNow()).toBe(true);
+    } finally {
+      await deactivate();
+    }
+  });
+
+  it('owner decision Q2: a note of the organisation whose subject has no profile refuses its workspaces (UNMAPPED), naming the note; nothing is dropped', async () => {
+    const wn = await seedBusiness(await make('unmapped'));
+    const loose = (
+      await admin.query(`INSERT INTO core."user" (organisation_id, email, first_name, last_name, status) VALUES ($1, $2, 'C3', 'NoProfile', 'active') RETURNING id`, [
+        wn.org,
+        `noprofile-${wn.label}@c3.invalid`,
+      ])
+    ).rows[0].id;
+    const noteId = (
+      await admin.query(`INSERT INTO core.user_note (organisation_id, subject_user_id, author_user_id, body) VALUES ($1, $2, $3, 'about someone with no profile') RETURNING id`, [
+        wn.org,
+        loose,
+        wn.owner,
+      ])
+    ).rows[0].id;
+    writeBackup();
+    await expect(cutover(app, [wn.id], host())).rejects.toMatchObject({ errorClass: 'HWS_CUTOVER_WORKSPACE_FAILED' });
+    expect(await migrationError(wn)).toBe('upgrade-blocked: HwsCutover (HWS_CUTOVER_USER_NOTE_UNMAPPED)');
+    expect(lines.some((l) => l.includes(wn.id) && l.includes('HWS_CUTOVER_USER_NOTE_UNMAPPED') && l.includes(noteId))).toBe(true);
+    expect(await stateOf(wn)).toBeNull();
+    expect(Number((await admin.query('SELECT count(*)::int AS n FROM core.user_note WHERE id = $1', [noteId])).rows[0].n)).toBe(1);
+  });
+
+  it('owner decision Q6: the per-start time budget defers the remaining workspaces (blocked, resumed next start); every start makes progress', async () => {
+    const x = await seedBusiness(await make('budget-x'));
+    const y = await seedBusiness(await make('budget-y'));
+    writeBackup();
+    await expect(cutover(app, [x.id, y.id], host(), { timeBudgetMs: 0 })).rejects.toMatchObject({ errorClass: 'HWS_CUTOVER_TIME_BUDGET' });
+    const states = [await stateOf(x), await stateOf(y)];
+    expect(states.filter((st) => st === 'verified')).toHaveLength(1); // progress: one workspace per start at least
+    const deferredWs = states[0] === 'verified' ? y : x;
+    expect(await stateOf(deferredWs)).toBeNull();
+    expect(await migrationError(deferredWs)).toBe('upgrade-blocked: HwsCutover (HWS_CUTOVER_PENDING)');
+    expect(await resolveAs(deferredWs, true)).toBe('refused:upgrading');
+    const report = await cutover(app, [x.id, y.id], host());
+    expect(report.workspaces.map((o) => o.status).sort()).toEqual(['already-verified', 'verified']);
+    expect(await stateOf(x)).toBe('verified');
+    expect(await stateOf(y)).toBe('verified');
+  });
+});

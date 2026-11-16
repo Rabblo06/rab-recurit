@@ -3,6 +3,7 @@ import { EntityManager } from 'typeorm';
 
 import { MIN_COMPATIBLE_WORKSPACE_MODULE_VERSION } from '../../../database/typeorm/workspace-schema/workspace-schema-modules';
 import { codeWorkspaceStructureLevel } from '../upgrade/workspace-structure-level';
+import { CUTOVER_ROUTING_COLUMNS_SQL, cutoverStateRefused } from '../upgrade/hws-cutover-routing';
 import { isUpgradeBlocked } from '../upgrade/workspace-upgrade-block';
 import { CachedResolvedSchema, WorkspaceMetadataCacheService } from '../entity-cache/workspace-metadata-cache.service';
 
@@ -92,8 +93,22 @@ export class SchemaResolverService {
     const expected = workspaceSchemaName(workspaceId);
 
     const fetch = async (): Promise<CachedResolvedSchema> => {
-      const rows: Array<{ schema_name: string; status: string; schema_version: number; module_version: number; migration_error: string | null }> = await manager.query(
-        `SELECT schema_name, status, schema_version, module_version, migration_error FROM core.workspace_schema_registry WHERE workspace_id = $1`,
+      // Part C3 (review H-1b, fail closed): a workspace whose cutover copy has STARTED but not verified is refused like a
+      // blocked one, even if its block marker were lost; once the cutover is active (the one-way DB sentinel), so is one with
+      // NO verified state (hws-cutover-routing.ts). An unreadable state makes this query fail: refused.
+      const rows: Array<{
+        schema_name: string;
+        status: string;
+        schema_version: number;
+        module_version: number;
+        migration_error: string | null;
+        cutover_state: string | null;
+        cutover_active: boolean;
+      }> = await manager.query(
+        // sql-injection-reviewed: CUTOVER_ROUTING_COLUMNS_SQL is a code constant (hws-cutover-routing.ts); the only value is $1
+        `SELECT r.schema_name, r.status, r.schema_version, r.module_version, r.migration_error,
+                ${CUTOVER_ROUTING_COLUMNS_SQL}
+           FROM core.workspace_schema_registry r WHERE r.workspace_id = $1`,
         [workspaceId],
       );
       if (rows.length !== 1) throw new WorkspaceRoutingError('registry-missing');
@@ -104,7 +119,7 @@ export class SchemaResolverService {
       // Part D, owner decisions D2/D3: an upgrade step failed with a structure that does not match this code: the workspace is
       // blocked until the step succeeds (503 "being upgraded"; never cached). Raised only after the caller's organisation is
       // bound and the row is visible to it, so another tenant still gets 'registry-missing' (404).
-      if (isUpgradeBlocked(row.migration_error)) throw new WorkspaceRoutingError('upgrading');
+      if (isUpgradeBlocked(row.migration_error) || cutoverStateRefused(row.cutover_state, row.cutover_active)) throw new WorkspaceRoutingError('upgrading');
       const moduleVersion = Number(row.module_version);
       // Phase B: below the floor is refused here, so it is never cached.
       assertCompatibleModuleVersion(moduleVersion);

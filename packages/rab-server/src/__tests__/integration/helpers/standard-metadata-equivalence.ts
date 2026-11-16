@@ -108,7 +108,14 @@ export async function metadataCatalogDifferences(admin: Client, ws: WorkspaceRef
     for (const f of own.filter((x) => x.type === 'RELATION')) {
       const backed = fks.some((k) => k.t === t && k.cols.includes(f.physical_column!) && k.tcols.includes('id'));
       const enforcedBy = f.settings?.enforcedBy;
-      if (!backed && !(typeof enforcedBy === 'string' && checks.some((k) => k.t === t && k.name === enforcedBy))) out.push(`${t}.${f.physical_column}: relation without a constraint`);
+      // Structure level 22 (owner decision 0a): relations to core."user" have no FK; they must say they are service-enforced
+      // and carry no ON DELETE. Any other relation must be backed by a constraint of the table.
+      const toCoreUser = standard.find((o2) => o2.id === f.target_object)?.physical_table === 'user';
+      if (toCoreUser) {
+        if (backed || enforcedBy !== 'service:CoreReferenceService' || f.settings?.onDelete !== undefined) out.push(`${t}.${f.physical_column}: core user relation is not marked service-enforced`);
+      } else if (!backed && !(typeof enforcedBy === 'string' && checks.some((k) => k.t === t && k.name === enforcedBy))) {
+        out.push(`${t}.${f.physical_column}: relation without a constraint`);
+      }
       if (f.settings?.relationType !== 'MANY_TO_ONE') out.push(`${t}.${f.physical_column}: relation type ${String(f.settings?.relationType)}`);
     }
   }
