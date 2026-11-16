@@ -54,6 +54,7 @@ Boot fails if every provider is disabled, or if enabling a provider leaves its c
 | Variable | Default | Meaning |
 | --- | --- | --- |
 | `CLOCK_IN_EARLY_MINUTES` | 15 | How early clock-in opens. |
+| `CLOCK_IN_CONFIRM_FLOOR_HOURS` | 12 | Hard floor (1-48 hours before the staff member's start) for a manager-entered clock-in; between it and `CLOCK_IN_EARLY_MINUTES` the manager must confirm. |
 | `QR_POST_SHIFT_GRACE_MINUTES` | 120 | How long after the end clock-in/out stays open. |
 | `REPORT_AVAILABLE_BEFORE_MINUTES` | 180 | When the roster PDF is produced. |
 | `PDF_RENDERER` | `chromium` | How the Worker renders report PDFs that have a native layout (today the final timesheet): `chromium`, or `native` (pure JavaScript, no browser). Exactly one of the two; anything else refuses to boot. No automatic fallback between them. |

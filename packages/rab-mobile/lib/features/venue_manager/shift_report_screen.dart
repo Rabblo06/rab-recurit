@@ -451,6 +451,13 @@ class _StaffCard extends StatelessWidget {
           ReportField('Worked', workedLabel(row)),
           if (row.corrected)
             const ReportField('', 'Corrected', valueColor: ReportTokens.muted),
+          if (row.unusualClockInConfirmed)
+            ReportField(
+              '',
+              'Unusual time confirmed',
+              key: Key('unusual-time-confirmed-${row.staffProfileId}'),
+              valueColor: ReportTokens.muted,
+            ),
           if (row.attendanceReviewed)
             ReportField(
               'Reviewed by',
