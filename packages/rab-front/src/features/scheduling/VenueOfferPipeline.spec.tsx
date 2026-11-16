@@ -715,6 +715,26 @@ describe('preserved behaviour', () => {
     expect(screen.getByText(/Finalised by Vera Venue/)).toBeTruthy();
     expect(screen.getAllByRole('button', { name: 'Download' })).toHaveLength(2);
   });
+  it('the timesheet rows show "Unusual time confirmed" only for a seat the server flags', async () => {
+    const seat = {
+      staffProfileId: 'staff', staffName: 'Jordan Staff', avatarFileId: null, clockInAt: '2030-01-01T14:00:00Z', clockOutAt: '2030-01-01T23:00:00Z',
+      breakMinutes: 30, workedMinutes: 510, attendanceStatus: 'under_review', assignmentStatus: 'completed', corrected: true,
+    };
+    board.report = {
+      ...board.report!,
+      ready: true,
+      staff: [
+        { ...seat, unusualClockInConfirmed: true },
+        { ...seat, staffProfileId: 'other', staffName: 'Riley Staff', clockInAt: '2030-01-01T18:00:00Z', unusualClockInConfirmed: false },
+      ],
+    };
+    mount();
+    await userEvent.click(await screen.findByRole('button', { name: 'Timesheet report' }));
+    // Exactly one status cell carries it — the flagged seat's; the ordinary seat's cell reads only "Corrected".
+    expect(screen.getAllByText(/Unusual time confirmed/)).toHaveLength(1);
+    expect(screen.getByText(/under review - Corrected - Unusual time confirmed/)).toBeTruthy();
+    expect(screen.getAllByText(/^under review - Corrected$/)).toHaveLength(1);
+  });
   it('retains the board, scroll position and open accessible menu across refreshes', async () => {
     board.staff[0].name = 'ReplacementStaff Test With A Very Long Family Name';
     const qc = mount();
