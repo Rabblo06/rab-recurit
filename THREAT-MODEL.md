@@ -693,7 +693,7 @@ Mitigations:
 - **Authority re-derived from PostgreSQL in every transaction** (layer 2), independent of `PermissionGuard(ROLE_MANAGE)`: the caller must hold ROLE_MANAGE, OWN the workspace and have an active membership of it; the role must pass `MemberRolePolicyService` (custom, same workspace, member-safe permissions only, every permission held by the caller). Platform Admin status alone grants nothing. Resend re-checks the role against the caller (Twenty does not). No organisationId / workspaceId / managerId / names accepted (`forbidNonWhitelisted` 400).
 - **Atomic, single-use acceptance.** Public `POST /rest/v1/invitations/accept` hashes the token, resolves routing ids through `core.auth_find_member_invitation` (SECURITY DEFINER, pinned search_path, PUBLIC revoked, returns ids only), then — under the invitation's own workspace context — locks the row `FOR UPDATE`, re-checks live/unexpired (DB clock), organisation not suspended, workspace active, no existing account for the email, and the INVITER's authority now (active, still owns the workspace with an active membership, still holds ROLE_MANAGE, and can still grant the role — re-checked, not trusted from send time). It then creates exactly: the user (recipient's own name + argon2id password), the one custom role, organisation membership and membership of the inviter's workspace — no staff/manager profile, never a new workspace; the one-active-membership index and (organisation, email) uniqueness are the backstops. A compare-and-set marks it accepted in the same transaction. Two simultaneous acceptances: one 200, one generic 400. Any re-check failure ⇒ invitation SUPERSEDED (committed), recipient sees the generic failure.
 - **No oracle.** Unknown, expired, revoked, superseded, consumed, suspended-organisation and malformed tokens all return the same 400 message. No session is issued; the account stays INVITED (password set, email verified by token possession) and becomes ACTIVE through the unchanged login path, so suspension, application-target and session rules all still apply.
-- **Worker.** New job type `MEMBER_INVITATION` is the only one allowed to lack `target_user_id`; a CHECK makes it inseparable from `member_invitation_id`. It is revalidated before delivery: invitation live, unexpired, same workspace as enqueued, this outbox row is the latest for the invitation (older links never delivered after a resend), organisation not suspended. Every other job type still goes through the untouched missing-target-user check. Delivery idempotency and fencing unchanged.
+- **Worker.** New job type `MEMBER_INVITATION` is the only one allowed to lack `target_user_id`; a CHECK makes it inseparable from `member_invitation_id`. It is revalidated before delivery: invitation live, unexpired, same workspace as enqueued, this outbox row is the latest for the invitation (older links never delivered after a resend), organisation not suspended, workspace active (added by S-W1, 2026-11-16: the same shared rule acceptance uses). Every other job type still goes through the untouched missing-target-user check. Delivery idempotency and fencing unchanged.
 - **Redis, bounded and fail-closed.** `InvitationRateLimitService` runs one atomic multi-bucket token-bucket Lua script (Redis clock, deny-all-or-debit-all) on the bounded auth-cache client (150 ms command timeout, no offline queue). Buckets: recipient (hashed email, global), actor, organisation, redemption per IP. Keys `crewflow:{env}:invite-rate:{scope}:{sha256}` — no addresses in Redis. Any Redis failure ⇒ 503, never "unlimited", never a hang. Listing never touches Redis. Redis confers no authority.
 
 SECURITY TRADE-OFF (recorded, unchanged from account invitations):
@@ -8038,3 +8038,30 @@ Reversal:   A shorter QR_MAX_AGE_DAYS, or rotating QRs automatically on schedule
   - hws-startup-guard.spec: the HWS-off boot refusal;
   - the security-posture and semantic goldens (PG16/17/18), the R4 secure-owner invariants, check-rls-coverage
     (`hws_cutover_activation` forced), and the restricted-migrator drift review.
+
+## S-W1 — the Worker's member-invitation pre-send check also requires an active workspace (branch fix/s-w1-invitation-workspace-active, 2026-11-16)
+- **Finding (Low, `docs/plans/untangle/worker.md` §4):** a manager invites a member; the workspace is then suspended or
+  archived while the invitation email is still queued. The Worker's pre-send revalidation
+  (`email-send.processor.ts` `revalidateMemberInvitation`) was a hand-copied subset of the server's liveness rule
+  (`MemberInvitationService.loadLive`) and had lost the `manager_workspace.status = 'active'` condition, so the email was
+  still delivered — disclosing the workspace's name and existence to the invitee after the workspace was closed.
+  Acceptance was already refused by `loadLive`, so there was no access gain.
+- **Control:** one rule, called by both. `modules/membership/utils/member-invitation-liveness.ts` exports
+  `memberInvitationExpiredSql` (the `expires_at <= now()` boundary, database time), `memberInvitationStateFailure`
+  (accepted / revoked / superseded / expired) and `memberInvitationParentFailure` (organisation not suspended, workspace
+  exists and is `active`). `loadLive` (resolve, accept, accept-with-provider) and the Worker's pre-send check both decide
+  with them, so "may this email be sent?" and "may this link be accepted?" can no longer drift. Fail closed: a workspace or
+  organisation row the check cannot see (missing, or hidden by RLS — `manager_workspace`'s SELECT policy is
+  `id = current_workspace() OR owner_user_id = current_uid()`, and the Worker binds the row's own workspace for this check
+  only), a null workspace id, or an invitation row whose expiry was not computed all count as not live.
+- **Kept unchanged:** every existing Worker check (invitation exists, same workspace as enqueued, not accepted / revoked /
+  superseded / expired, latest email for the invitation, organisation not suspended) with the same reason texts and order;
+  a not-live invitation's outbox row is settled the same way as before — CANCELLED (terminal, fenced by the claim token)
+  with a sanitized reason, no provider call. New reason: `The workspace is no longer active.`. Token matching, the row lock
+  and the inviter re-checks in acceptance are untouched. No schema, RLS or grant change.
+- **Residual:** an email already handed to the provider before the workspace was closed cannot be recalled; accepting it
+  is still refused server-side.
+- **Tests:** rab-worker `member-invitation-delivery.integration.spec` W10 (suspended and archived workspace: no provider
+  call, row CANCELLED with the workspace reason, a retried job sends nothing) and W11 (same setup, workspace active:
+  delivered once); W1–W9 unchanged. rab-server `member-invitation-liveness.spec` (the shared decision table, including the
+  fail-closed cases).
