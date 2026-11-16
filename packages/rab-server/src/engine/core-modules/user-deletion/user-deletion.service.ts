@@ -12,8 +12,9 @@ import { SecurityVersionService } from '../auth/services/security-version.servic
 import { FileService } from '../storage/file.service';
 import { StoredFile } from '../storage/entities/stored-file.entity';
 import { WorkspaceMembershipService } from '../tenant/workspace-membership.service';
-import { bindBusinessSchema, businessSearchPath, businessTables, CORE_BUSINESS_SCHEMA, restoreBusinessSchema, snapshotBusinessSchema } from '../tenant/business-tables';
+import { bindBusinessSchema, boundBusinessSchema, businessSearchPath, businessTables, CORE_BUSINESS_SCHEMA, restoreBusinessSchema, snapshotBusinessSchema } from '../tenant/business-tables';
 import { SchemaResolverService, WorkspaceRoutingError, workspaceSchemaName } from '../tenant/schema-resolver.service';
+import { clearWorkspaceUserReferences, workspaceRestrictReference } from '../core-references/workspace-user-references';
 
 /**
  * Codes the frontend maps to a specific, safe message — never the raw FK detail. Since owner decision 0g (2026-11-14) a
@@ -267,16 +268,28 @@ export class UserDeletionService {
       const blocking = await this.inEveryScope(manager, ctx, workspaces, async () => {
         const t = businessTables(manager); // C2: the scope inEveryScope bound for this visit
         await manager.query(`SELECT id FROM ${t.staff_profile} WHERE user_id = $1 FOR UPDATE`, [target.id]);
-        return this.findProtectedHistory(manager, target.id);
+        // Part D 0a (structure level 22): a workspace schema no longer RESTRICTs the delete through foreign keys to core."user";
+        // every former no-ON-DELETE user column is probed instead (Q3). A hit means not safe: soft delete.
+        return (await this.findProtectedHistory(manager, target.id)) ?? (await workspaceRestrictReference(manager, target.id));
       });
       if (blocking) throw new HardDeleteNotSafe(`history:${blocking}`);
 
       // The profiles the caller cannot see were not checked above: snapshot their visible history, re-check after the delete.
       const historyBefore = new Map<string, string[]>();
+      let hiddenWorkspaceHistory = false;
       await this.inEveryScope(manager, ctx, workspaces, async (scope) => {
-        historyBefore.set(scope.label, await this.staffWithHistory(manager));
+        const hidden = await this.staffWithHistory(manager);
+        historyBefore.set(scope.label, hidden);
+        if (hidden.length > 0 && boundBusinessSchema(manager) !== CORE_BUSINESS_SCHEMA) hiddenWorkspaceHistory = true;
         return null;
       });
+      // Security review F2, owner decision (b), 2026-11-15. A workspace schema at structure level 22 has no foreign key to
+      // core."user", so a staff profile the caller cannot see is not cascaded with the user and historyLost below cannot tell
+      // whether it was the target's. The owner's 0g rule applies ("never hard-delete a user with history"): visible history of
+      // a profile the caller cannot see, in a workspace schema, makes the hard delete unsafe and the account is soft-deleted.
+      // Deliberately over-strict (another user's hidden history counts too). Residual: a hidden profile whose history is ALSO
+      // hidden from the caller is not seen here; it stays (never deleted) and the daily orphan check reports it.
+      if (hiddenWorkspaceHistory) throw new HardDeleteNotSafe('hidden_workspace_history');
 
       await this.refreshTokenService.revokeAllForUser(manager, target.id, 'account_deleted');
       await this.cancelOpenEmail(manager, target.id);
@@ -287,6 +300,14 @@ export class UserDeletionService {
         metadata: { deletion: 'hard', deletedUserId: target.id },
       });
       await manager.delete(User, { id: target.id });
+      // Part D 0a (Q2): what the dropped workspace foreign keys did ON DELETE (CASCADE the target's own staff profile and the
+      // notes about them, SET NULL the attribution columns), in every scope, inside this savepoint, BEFORE the historyLost
+      // re-check (which then sees what the in-schema cascades removed). In `core` the real foreign keys already did it (no-op).
+      // A row that still needs the profile raises 23503: the savepoint rolls back and the account is soft-deleted instead.
+      await this.inEveryScope(manager, ctx, workspaces, async () => {
+        await clearWorkspaceUserReferences(manager, target.id);
+        return null;
+      });
 
       const lost = await this.inEveryScope(manager, ctx, workspaces, (scope) => this.historyLost(manager, historyBefore.get(scope.label) ?? []));
       if (lost) throw new HardDeleteNotSafe('history_lost');
