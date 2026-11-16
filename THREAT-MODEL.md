@@ -8038,3 +8038,23 @@ Reversal:   A shorter QR_MAX_AGE_DAYS, or rotating QRs automatically on schedule
   - hws-startup-guard.spec: the HWS-off boot refusal;
   - the security-posture and semantic goldens (PG16/17/18), the R4 secure-owner invariants, check-rls-coverage
     (`hws_cutover_activation` forced), and the restricted-migrator drift review.
+
+## SF-4 — venue pay-rate creation checks job-role scope (branch fix/sf4-role-rate-job-role-scope, 2026-11-16)
+- **Threat:** a manager with `venue.edit` → `POST /rest/v1/venues/:id/role-rates` with the id of a job role that RLS shows
+  them (same organisation and workspace) but that is not theirs → a `venue_role_rate` row was written for it.
+  `VenueService.createRoleRate` checked the venue scope and only that the role existed. That rate is what
+  `SchedulingService.resolvePayRate` snapshots for new shifts at that venue and role, so it is payroll input.
+- **Control:** one predicate, `isJobRoleInScope` (`modules/scheduling/utils/job-role-scope.ts`), the rule shift creation
+  (`SchedulingService.assertJobRoleOwned`) and staff creation (`StaffService.assertJobRoleAccessible`) already applied, now
+  used by all three (the two existing copies call it; behaviour unchanged). `createRoleRate` refuses an out-of-scope role
+  with 404 "Job role not found." (never 403), before any write. A Venue Manager keeps the existing reference rule (any job
+  role RLS shows them); an ordinary manager may use only a role they created. Layer 2: `createRoleRate`,
+  `updateRoleRate` and `deleteRoleRate` now re-check the route's own `venue.edit` flag in the service (403, before any id
+  is read). Rate values, defaults, effective dates and rate resolution are unchanged.
+- **Not changed (flagged for the owner):** an archived job role is still accepted for a new venue rate (shift and staff
+  creation refuse archived roles with 409; whether a pay rate counts as "new work" is a payroll decision). Venue-rate
+  writes still write no audit row. `updateRoleRate` still merges its DTO into the entity (the DTO has no `jobRoleId`, and
+  `forbidNonWhitelisted` rejects extra fields, so it cannot re-point a rate at another role).
+- **Tests:** `venue-jobrole-ownership-abuse-cases.integration.spec.ts` › "SF-4": an RLS-visible job role created by
+  another manager, and another workspace's job role → 404 with no `venue_role_rate` row; the caller's own role → 201 with
+  the values as sent.

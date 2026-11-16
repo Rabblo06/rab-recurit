@@ -17,7 +17,7 @@ import { BootstrapTimer } from './helpers/bootstrap-trace';
 import { generateFixturePassword } from './helpers/fixture-password';
 import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-pipe';
 import { integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
-import { businessSchema } from './helpers/hws-fixtures';
+import { businessSchema, businessTable } from './helpers/hws-fixtures';
 
 const FIXTURE_PASSWORD = generateFixturePassword();
 
@@ -247,6 +247,53 @@ describeIfDb('venue/job-role ownership abuse cases (integration)', () => {
       .set('Authorization', `Bearer ${tokenB}`)
       .send({ venueId: venueBId, jobRoleId: jobRoleBId, startsAt, endsAt, requiredCount: 1 });
     expect(ownWorks.status).toBe(201);
+  });
+
+  // SF-4: a venue pay rate may only name a job role the caller may use for a shift (same rule, 404 not 403).
+  it("SF-4: Manager B cannot attach a venue pay rate to a job role outside their scope — 404 and no rate row; their own role still works", async () => {
+    const { organisation, managers } = await seedOrgWithManagers(2);
+    const [a, b] = managers;
+    const [tokenA, tokenB] = await Promise.all([login(a!.email), login(b!.email)]);
+    const venueBId = await createVenue(tokenB);
+    const jobRoleBId = await createJobRole(tokenB);
+    const jobRoleAId = await createJobRole(tokenA); // another workspace: RLS already hides it
+    const [{ id: workspaceBId }] = await adminDataSource.manager.query<[{ id: string }]>(
+      `SELECT id FROM core.manager_workspace WHERE owner_user_id = $1`,
+      [b!.userId],
+    );
+    // RLS-visible to B (B's own organisation and workspace) but created by someone else: the case RLS alone does not stop.
+    const [{ id: foreignRoleId }] = await adminDataSource.manager.query<[{ id: string }]>(
+      `INSERT INTO ${businessTable(workspaceBId, 'job_role')} (organisation_id, workspace_id, name, default_rate_pence, created_by)
+       VALUES ($1, $2, $3, 900, $4) RETURNING id`,
+      [organisation.id, workspaceBId, `Foreign-${randomUUID()}`, a!.userId],
+    );
+    const rateRows = async () => {
+      const [{ n }] = await adminDataSource.manager.query<[{ n: number }]>(
+        `SELECT count(*)::int AS n FROM ${businessTable(workspaceBId, 'venue_role_rate')} WHERE venue_id = $1`,
+        [venueBId],
+      );
+      return n;
+    };
+
+    for (const jobRoleId of [foreignRoleId, jobRoleAId]) {
+      const res = await request(app.getHttpServer())
+        .post(`/rest/v1/venues/${venueBId}/role-rates`)
+        .set('Authorization', `Bearer ${tokenB}`)
+        .send({ jobRoleId, payRatePence: 1500 });
+      expect(res.status).toBe(404);
+      expect(res.body.message).toBe('Job role not found.');
+    }
+    expect(await rateRows()).toBe(0);
+
+    // Not a blanket lock: B's own job role at B's own venue is accepted, with the values as sent.
+    const own = await request(app.getHttpServer())
+      .post(`/rest/v1/venues/${venueBId}/role-rates`)
+      .set('Authorization', `Bearer ${tokenB}`)
+      .send({ jobRoleId: jobRoleBId, payRatePence: 1500 });
+    expect(own.status).toBe(201);
+    expect(own.body.jobRoleId).toBe(jobRoleBId);
+    expect(Number(own.body.payRatePence)).toBe(1500);
+    expect(await rateRows()).toBe(1);
   });
 
   it('a query with no tenant context bound returns zero rows for venue and job_role', async () => {

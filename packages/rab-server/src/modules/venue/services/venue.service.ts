@@ -15,6 +15,7 @@ import { PaginationDto, paginationSkipTake } from '../../../engine/dto/paginatio
 import { toIlikePattern } from '../../../engine/utils/ilike-pattern.util';
 import { JobRole } from '../../scheduling/entities/job-role.entity';
 import { VenueRoleRate } from '../../scheduling/entities/venue-role-rate.entity';
+import { isJobRoleInScope } from '../../scheduling/utils/job-role-scope';
 import { CreateVenueDto } from '../dto/create-venue.dto';
 import { CreateVenueRoleRateDto } from '../dto/create-venue-role-rate.dto';
 import { ListVenuesDto } from '../dto/list-venues.dto';
@@ -450,11 +451,17 @@ export class VenueService {
     });
   }
 
+  /**
+   * Layers: route PermissionGuard(VENUE_EDIT) → VENUE_EDIT re-checked here (403, before any id is read) → venue scope
+   * (`assertVenueAccessibleTx`, 404) → job-role scope (SF-4: `isJobRoleInScope`, the rule shift and staff creation use;
+   * 404 for a role outside the caller's scope, never 403) → workspace RLS. The rate values are written as before.
+   */
   async createRoleRate(ctx: AuthContext, venueId: string, dto: CreateVenueRoleRateDto): Promise<VenueRoleRate> {
     return this.tenantContext.runInWorkspaceContext(ctx, async (manager) => {
+      await this.assertCanEditVenueTx(manager, ctx);
       const venue = await this.assertVenueAccessibleTx(manager, ctx, venueId);
       const role = await manager.findOne(JobRole, { where: { id: dto.jobRoleId } });
-      if (!role) throw new NotFoundException('Job role not found.');
+      if (!role || !isJobRoleInScope(await this.resourceScope.resolveTx(manager, ctx), ctx, role)) throw new NotFoundException('Job role not found.');
       const rate = manager.create(VenueRoleRate, {
         organisationId: ctx.organisationId!,
         venueId,
@@ -477,6 +484,7 @@ export class VenueService {
     dto: UpdateVenueRoleRateDto,
   ): Promise<VenueRoleRate> {
     return this.tenantContext.runInWorkspaceContext(ctx, async (manager) => {
+      await this.assertCanEditVenueTx(manager, ctx);
       await this.assertVenueAccessibleTx(manager, ctx, venueId);
       const rate = await manager.findOne(VenueRoleRate, { where: { id: rateId, venueId } });
       if (!rate) throw new NotFoundException('Pay rate not found.');
@@ -488,6 +496,7 @@ export class VenueService {
 
   async deleteRoleRate(ctx: AuthContext, venueId: string, rateId: string): Promise<void> {
     return this.tenantContext.runInWorkspaceContext(ctx, async (manager) => {
+      await this.assertCanEditVenueTx(manager, ctx);
       await this.assertVenueAccessibleTx(manager, ctx, venueId);
       const rate = await manager.findOne(VenueRoleRate, { where: { id: rateId, venueId } });
       if (!rate) throw new NotFoundException('Pay rate not found.');

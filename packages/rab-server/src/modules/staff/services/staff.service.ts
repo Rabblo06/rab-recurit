@@ -35,6 +35,7 @@ import { RefreshTokenService } from '../../../engine/core-modules/auth/token/ser
 import { SecurityVersionService } from '../../../engine/core-modules/auth/services/security-version.service';
 import { CoreEntityCacheService } from '../../../engine/core-modules/entity-cache/core-entity-cache.service';
 import { ResourceScopeService } from '../../../engine/core-modules/resource-scope/resource-scope.service';
+import { isJobRoleInScope } from '../../scheduling/utils/job-role-scope';
 import { UserDeletionService } from '../../../engine/core-modules/user-deletion/user-deletion.service';
 import { FileKind } from '../../../engine/core-modules/storage/file-kinds';
 import { FileService } from '../../../engine/core-modules/storage/file.service';
@@ -348,9 +349,7 @@ export class StaffService {
     // exact same entity).
     const jobRole = await manager.findOne(JobRole, { where: { id: jobRoleId, organisationId: ctx.organisationId! } });
     if (!jobRole) throw new NotFoundException('Job role not found.');
-    const scope = await this.resourceScope.resolveTx(manager, ctx);
-    const inScope = scope.kind === 'venue' || (scope.kind === 'owner' && jobRole.createdBy === ctx.userId);
-    if (!inScope) throw new NotFoundException('Job role not found.');
+    if (!isJobRoleInScope(await this.resourceScope.resolveTx(manager, ctx), ctx, jobRole)) throw new NotFoundException('Job role not found.');
     // Wave 5: a NEWLY chosen role must not be archived (keeping an already-assigned archived role on edit is fine).
     if (rejectArchived && jobRole.archivedAt) {
       throw new ConflictException({ code: 'JOB_ROLE_ARCHIVED', message: 'This job role is archived. Restore it before using it.' });
