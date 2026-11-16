@@ -17,6 +17,7 @@ import 'package:rab_staff/features/venue_manager/attendance_correction_sheet.dar
 import 'package:rab_staff/features/venue_manager/review_staff_report_screen.dart';
 import 'package:rab_staff/features/venue_manager/shift_report.dart';
 import 'package:rab_staff/features/venue_manager/shift_report_screen.dart';
+import 'package:rab_staff/features/venue_manager/unusual_clock_in_warning.dart';
 import 'package:rab_staff/features/venue_manager/report_document_screen.dart';
 import 'package:rab_staff/features/venue_manager/report_ui.dart';
 import 'package:rab_staff/features/venue_manager/venue_manager_provider.dart';
@@ -37,6 +38,7 @@ Map<String, dynamic> row({
   bool performanceReviewed = false,
   bool corrected = false,
   bool manuallyEntered = false,
+  bool unusualConfirmed = false,
 }) => {
   'staffProfileId': id,
   'staffName': name,
@@ -62,6 +64,7 @@ Map<String, dynamic> row({
       : null,
   'attendanceReviewedByName': reviewed ? 'Venue Test' : null,
   'manuallyEntered': manuallyEntered,
+  'unusualClockInConfirmed': unusualConfirmed,
   'attendanceVersion': attendanceId == null ? null : 'v-$attendanceId',
   'noShowConfirmed': assignment == 'no_show' && reviewed,
   'noShowConfirmableAt': start
@@ -201,11 +204,19 @@ class Fake {
   /// A rejection (status, body) for "Record attendance".
   (int, Map<String, dynamic>)? rejectRecord;
 
+  /// When set, "Record attendance" behaves like the server: a `clockInAt` before this instant sent without
+  /// `confirmUnusualClockIn: true` is refused with 409 `CLOCK_IN_CONFIRMATION_REQUIRED` (nothing applied).
+  DateTime? earliestRecordClockIn;
+
   /// Server latency for "Record attendance" (to observe the loading state).
   Duration recordDelay = Duration.zero;
 
   /// A rejection (status, message) the server returns instead of applying the write.
   (int, String)? rejectCorrect;
+
+  /// When set, behaves like `AttendanceService.correct`: a `clockInAt` before this instant sent without
+  /// `confirmUnusualClockIn: true` is refused with 409 `CLOCK_IN_CONFIRMATION_REQUIRED` (nothing applied).
+  DateTime? earliestClockIn;
   (int, String)? rejectReview;
   final requests = <(String, String, Map<String, dynamic>?)>[];
 
@@ -241,6 +252,25 @@ class Fake {
       }
       if (path.endsWith('/record-attendance')) {
         if (recordDelay > Duration.zero) await Future<void>.delayed(recordDelay);
+        final earliestRecord = earliestRecordClockIn;
+        if (earliestRecord != null &&
+            body?['confirmUnusualClockIn'] != true &&
+            DateTime.parse(
+              body!['clockInAt'] as String,
+            ).isBefore(earliestRecord)) {
+          return http.Response(
+            jsonEncode({
+              'statusCode': 409,
+              'code': 'CLOCK_IN_CONFIRMATION_REQUIRED',
+              'message':
+                  'This time is earlier than the normal allowance. Please check before continuing.',
+              'earliestAllowed': earliestRecord.toUtc().toIso8601String(),
+              'enteredTime': body['clockInAt'],
+            }),
+            409,
+            headers: {'content-type': 'application/json'},
+          );
+        }
         final reject = rejectRecord;
         if (reject != null) {
           return http.Response(
@@ -264,6 +294,24 @@ class Fake {
         return _json(reportJson);
       }
       if (path.endsWith('/correct')) {
+        final earliest = earliestClockIn;
+        if (earliest != null &&
+            body?['field'] == 'clockInAt' &&
+            body?['confirmUnusualClockIn'] != true &&
+            DateTime.parse(body!['newValue'] as String).isBefore(earliest)) {
+          return http.Response(
+            jsonEncode({
+              'statusCode': 409,
+              'code': 'CLOCK_IN_CONFIRMATION_REQUIRED',
+              'message':
+                  'This time is earlier than the normal allowance. Please check before continuing.',
+              'earliestAllowed': earliest.toUtc().toIso8601String(),
+              'enteredTime': body['newValue'],
+            }),
+            409,
+            headers: {'content-type': 'application/json'},
+          );
+        }
         final reject = rejectCorrect;
         if (reject != null) {
           return http.Response(
@@ -996,6 +1044,401 @@ void main() {
     });
   });
 
+  // Owner brief 2026-11-15 ("Compact attendance correction warning"): the server refuses a clock-in earlier than the
+  // seat's start − CLOCK_IN_EARLY_MINUTES with 409 CLOCK_IN_CONFIRMATION_REQUIRED unless confirmed; the app shows the
+  // review screen's own AlertDialog (Edit / Confirm) and resends with `confirmUnusualClockIn: true` only on Confirm.
+  group('Unusual clock-in correction (owner brief 2026-11-15)', () {
+    // Shift 15:45, allowance 15 minutes → earliest allowed 15:30 (the server's rule, mirrored by the Fake).
+    final earliest = start.subtract(const Duration(minutes: 15));
+    const reason = 'Staff arrived early; start confirmed by the manager.';
+
+    Future<Fake> openRecorded(WidgetTester tester) async {
+      final json = report(
+        staff: [row(inAt: clockIn, outAt: end, status: 'clocked_out')],
+      );
+      final f = Fake(json)..earliestClockIn = earliest;
+      final d = detail(json);
+      await mount(
+        tester,
+        f,
+        ReviewStaffReportScreen(report: d, row: d.staff.first),
+      );
+      return f;
+    }
+
+    /// Types a clock-in time through the time picker's keyboard entry (12-hour test locale).
+    Future<void> enterClockIn(
+      WidgetTester tester,
+      String hour,
+      String minute, {
+      required bool am,
+    }) async {
+      await tester.tap(find.byKey(const Key('correction-time')));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byIcon(Icons.keyboard_outlined));
+      await tester.pumpAndSettle();
+      final fields = find.descendant(
+        of: find.byType(Dialog),
+        matching: find.byType(TextField),
+      );
+      await tester.enterText(fields.first, hour);
+      await tester.enterText(fields.last, minute);
+      await tester.tap(find.text(am ? 'AM' : 'PM'));
+      await tester.tap(find.text('OK'));
+      await tester.pumpAndSettle();
+    }
+
+    /// Saves the correction. While the warning is open the Save button keeps its busy spinner (behind the modal
+    /// barrier), so this pumps frames instead of waiting for the screen to settle.
+    Future<void> saveWithReason(WidgetTester tester) async {
+      await tester.enterText(
+        find.byKey(const Key('correction-reason')),
+        reason,
+      );
+      await tester.tap(find.byKey(const Key('save-review-screen')));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 500));
+    }
+
+    final dialog = find.byKey(const Key('unusual-clock-in-dialog'));
+
+    testWidgets('a normal correction is saved with no warning', (tester) async {
+      final f = await openRecorded(tester);
+      await enterClockIn(tester, '3', '50', am: false); // 15:50
+      await saveWithReason(tester);
+      await tester.pumpAndSettle();
+      expect(dialog, findsNothing);
+      final write = f.writes().single;
+      expect(write.$3, {
+        'field': 'clockInAt',
+        'newValue': DateTime(2026, 10, 16, 15, 50).toUtc().toIso8601String(),
+        'reason': reason,
+      });
+      expect(find.byKey(const Key('correction-confirmation')), findsOneWidget);
+    });
+
+    testWidgets(
+      'a correction exactly at the earliest allowed time shows no warning',
+      (tester) async {
+        final f = await openRecorded(tester);
+        await enterClockIn(tester, '3', '30', am: false); // 15:30 == earliest
+        await saveWithReason(tester);
+        await tester.pumpAndSettle();
+        expect(dialog, findsNothing);
+        expect(f.writes().single.$3?['confirmUnusualClockIn'], isNull);
+        expect(
+          find.byKey(const Key('correction-confirmation')),
+          findsOneWidget,
+        );
+      },
+    );
+
+    testWidgets(
+      'an earlier correction shows the compact warning: title, one sentence, the two times, Edit and Confirm',
+      (tester) async {
+        final f = await openRecorded(tester);
+        await enterClockIn(tester, '5', '00', am: true); // 05:00
+        await saveWithReason(tester);
+        expect(dialog, findsOneWidget);
+        Finder inDialog(Finder m) => find.descendant(of: dialog, matching: m);
+        expect(inDialog(find.text('Unusual clock-in time')), findsOneWidget);
+        expect(
+          inDialog(
+            find.text(
+              'This time is earlier than the normal allowance. Please check before continuing.',
+            ),
+          ),
+          findsOneWidget,
+        );
+        expect(inDialog(find.text('Earliest allowed')), findsOneWidget);
+        expect(inDialog(find.text('15:30')), findsOneWidget);
+        expect(inDialog(find.text('Entered time')), findsOneWidget);
+        expect(inDialog(find.text('05:00')), findsOneWidget);
+        // The same design as "Confirm no-show": no extra icon.
+        expect(inDialog(find.byType(Icon)), findsNothing);
+        expect(inDialog(find.byType(TextButton)), findsOneWidget); // Edit
+        expect(inDialog(find.byType(FilledButton)), findsOneWidget); // Confirm
+        expect(inDialog(find.text('Edit')), findsOneWidget);
+        expect(inDialog(find.text('Confirm')), findsOneWidget);
+        // Nothing else to fill in: no reason input, no choices, no extra step.
+        expect(inDialog(find.byType(TextField)), findsNothing);
+        expect(inDialog(find.byType(Checkbox)), findsNothing);
+        expect(
+          inDialog(find.byWidgetPredicate((w) => w is Radio)),
+          findsNothing,
+        );
+        // The refused request was the only write; nothing saved yet.
+        expect(f.writes().single.$3?['confirmUnusualClockIn'], isNull);
+        expect(find.byKey(const Key('correction-confirmation')), findsNothing);
+        await shot(tester, '07-unusual-clock-in-warning');
+      },
+    );
+
+    testWidgets(
+      'Edit closes the warning and returns to the form with the entered time and reason kept',
+      (tester) async {
+        final f = await openRecorded(tester);
+        await enterClockIn(tester, '5', '00', am: true);
+        await saveWithReason(tester);
+        await tester.tap(find.byKey(const Key('unusual-clock-in-edit')));
+        await tester.pumpAndSettle();
+        expect(dialog, findsNothing);
+        expect(
+          find.descendant(
+            of: find.byKey(const Key('correction-time')),
+            matching: find.text('05:00'),
+          ),
+          findsOneWidget,
+        );
+        expect(
+          find.text('Will be saved as Fri 16 Oct 2026, 05:00'),
+          findsOneWidget,
+        );
+        expect(
+          tester
+              .widget<TextField>(find.byKey(const Key('correction-reason')))
+              .controller!
+              .text,
+          reason,
+        );
+        expect(f.writes(), hasLength(1)); // nothing resent
+        expect(find.byKey(const Key('correction-confirmation')), findsNothing);
+        expect(
+          find.byType(ScheduleMessageCard),
+          findsNothing,
+        ); // no error either
+      },
+    );
+
+    testWidgets(
+      'Confirm sends the same correction once more with the explicit confirmation, and it is saved',
+      (tester) async {
+        final f = await openRecorded(tester);
+        await enterClockIn(tester, '5', '00', am: true);
+        await saveWithReason(tester);
+        await tester.tap(find.byKey(const Key('unusual-clock-in-confirm')));
+        await tester.pumpAndSettle();
+        expect(dialog, findsNothing);
+        final writes = f.writes().toList();
+        expect(writes, hasLength(2));
+        final sent = {
+          'field': 'clockInAt',
+          'newValue': DateTime(2026, 10, 16, 5, 0).toUtc().toIso8601String(),
+          'reason': reason,
+        };
+        expect(writes[0].$3, sent);
+        expect(writes[1].$2, '/attendance/att-1/correct');
+        expect(writes[1].$3, {...sent, 'confirmUnusualClockIn': true});
+        expect(
+          find.byKey(const Key('correction-confirmation')),
+          findsOneWidget,
+        );
+      },
+    );
+
+    test(
+      'only CLOCK_IN_CONFIRMATION_REQUIRED (409) with both times opens the warning',
+      () {
+        final body = {
+          'code': 'CLOCK_IN_CONFIRMATION_REQUIRED',
+          'earliestAllowed': '2026-10-16T08:45:00.000Z',
+          'enteredTime': '2026-10-16T05:00:00.000Z',
+        };
+        final w = UnusualClockInWarning.fromError(
+          ApiException(409, 'x', body: body),
+        );
+        expect(w?.earliestAllowed, DateTime.utc(2026, 10, 16, 8, 45));
+        expect(w?.enteredTime, DateTime.utc(2026, 10, 16, 5));
+        expect(
+          UnusualClockInWarning.fromError(ApiException(422, 'x', body: body)),
+          isNull,
+        );
+        expect(
+          UnusualClockInWarning.fromError(
+            ApiException(
+              409,
+              'x',
+              body: {...body, 'code': 'INVALID_CLOCK_OUT_TIME'},
+            ),
+          ),
+          isNull,
+        );
+        expect(
+          UnusualClockInWarning.fromError(
+            ApiException(
+              409,
+              'x',
+              body: {'code': 'CLOCK_IN_CONFIRMATION_REQUIRED'},
+            ),
+          ),
+          isNull,
+        );
+        expect(UnusualClockInWarning.fromError(Exception('x')), isNull);
+      },
+    );
+
+    testWidgets(
+      'a correction beyond the 12-hour floor shows the server message as an error, never the warning',
+      (tester) async {
+        final f = await openRecorded(tester);
+        f
+          ..earliestClockIn = null
+          ..rejectCorrect = (
+            422,
+            'The clock-in time cannot be more than 12 hours before the scheduled start.',
+          );
+        await enterClockIn(tester, '1', '00', am: true); // 01:00
+        await saveWithReason(tester);
+        await tester.pumpAndSettle();
+        expect(dialog, findsNothing);
+        expect(
+          find.text(
+            'The clock-in time cannot be more than 12 hours before the scheduled start.',
+          ),
+          findsOneWidget,
+        );
+        expect(find.byKey(const Key('correction-confirmation')), findsNothing);
+        expect(f.writes(), hasLength(1));
+      },
+    );
+
+    testWidgets(
+      'the shift report card shows "Unusual time confirmed" for a flagged seat only',
+      (tester) async {
+        // Reviewed seats: their short badge fits this card width (the longer "Corrected · Awaiting review" badge already
+        // overflows a 415 px card next to a name, independently of this flag).
+        final json = report(
+          staff: [
+            row(
+              inAt: DateTime(2026, 10, 16, 5, 0),
+              outAt: end,
+              status: 'under_review',
+              corrected: true,
+              reviewed: true,
+              unusualConfirmed: true,
+            ),
+            row(
+              id: 'staff-2',
+              name: 'Staff Test 2',
+              attendanceId: 'att-2',
+              inAt: clockIn,
+              outAt: end,
+              status: 'under_review',
+              corrected: true,
+              reviewed: true,
+            ),
+          ],
+        );
+        await mount(
+          tester,
+          Fake(json),
+          const ShiftReportScreen(shiftId: 'shift-1'),
+        );
+        expect(
+          find.byKey(const Key('unusual-time-confirmed-staff-1')),
+          findsOneWidget,
+        );
+        expect(
+          find.byKey(const Key('unusual-time-confirmed-staff-2')),
+          findsNothing,
+        );
+        expect(find.text('Unusual time confirmed'), findsOneWidget);
+      },
+    );
+
+    // Same day: times only. Different days: both values carry the day, the longest text the dialog shows, so it is
+    // checked at the largest text scales on the narrowest phone.
+    final sameDay = (DateTime(2026, 10, 16, 5, 0), '08:45', '05:00');
+    final otherDay = (
+      DateTime(2026, 10, 15, 23, 0),
+      'Fri 16 Oct, 08:45',
+      'Thu 15 Oct, 23:00',
+    );
+    for (final (label, size, ratio, scale, wide, (entered, early, typed)) in [
+      (
+        'small phone 320x640, text x1.3',
+        const Size(640, 1280),
+        2.0,
+        1.3,
+        false,
+        sameDay,
+      ),
+      (
+        'small phone 320x640, text x1.3, different days',
+        const Size(640, 1280),
+        2.0,
+        1.3,
+        false,
+        otherDay,
+      ),
+      (
+        'small phone 320x640, text x2.0, different days',
+        const Size(640, 1280),
+        2.0,
+        2.0,
+        false,
+        otherDay,
+      ),
+      ('wide screen 1280x800', const Size(2560, 1600), 2.0, 1.0, true, sameDay),
+    ]) {
+      testWidgets('the warning lays out without overflow on a $label', (
+        tester,
+      ) async {
+        bool? result;
+        await mount(
+          tester,
+          Fake(report(staff: [row()])),
+          Scaffold(
+            body: Builder(
+              builder: (context) => TextButton(
+                onPressed: () async => result = await confirmUnusualClockIn(
+                  context,
+                  UnusualClockInWarning(DateTime(2026, 10, 16, 8, 45), entered),
+                ),
+                child: const Text('open'),
+              ),
+            ),
+          ),
+          size: size,
+          ratio: ratio,
+          textScale: scale,
+        );
+        await tester.tap(find.text('open'));
+        await tester.pumpAndSettle();
+        expect(tester.takeException(), isNull);
+        expect(dialog, findsOneWidget);
+        expect(find.text(early), findsOneWidget);
+        expect(find.text(typed), findsOneWidget);
+        final screen =
+            Offset.zero &
+            (tester.view.physicalSize / tester.view.devicePixelRatio);
+        // Both actions stay on screen (the content scrolls instead of pushing them off).
+        for (final key in [
+          'unusual-clock-in-edit',
+          'unusual-clock-in-confirm',
+        ]) {
+          final button = tester.getRect(find.byKey(Key(key)));
+          expect(screen.contains(button.topLeft), isTrue, reason: key);
+          expect(screen.contains(button.bottomRight), isTrue, reason: key);
+        }
+        if (wide) {
+          // Compact on a large screen: a standard narrow dialog, never a full-width sheet. (Not asserted on the small
+          // phone: the test font draws every glyph as a full square, which inflates text height well beyond real fonts.)
+          final box = tester.getSize(
+            find.descendant(of: dialog, matching: find.byType(Material)).first,
+          );
+          expect(box.width, lessThan(600));
+          expect(box.height, lessThan(screen.height * 0.6));
+        }
+        // Dismissing it (tap outside) is the same as Edit: not confirmed.
+        await tester.tapAt(const Offset(4, 4));
+        await tester.pumpAndSettle();
+        expect(dialog, findsNothing);
+        expect(result, isFalse);
+      });
+    }
+  });
+
   group('Manual attendance and no-show (owner rule 2026-10-21)', () {
     // A seat the worker provisionally marked as a no-show: no attendance, not reviewed.
     Map<String, dynamic> provisional() =>
@@ -1469,6 +1912,163 @@ void main() {
         expect(find.byKey(const Key('save-performance-review')), findsOneWidget);
         expect(find.byKey(const Key('record-attendance')), findsNothing);
         expect(find.byKey(const Key('confirm-no-show')), findsNothing);
+      },
+    );
+    // Owner decisions 2026-11-15: Record attendance uses the same Edit/Confirm warning as the correction, and a clock-in
+    // beyond the 12-hour floor is the server's error message, never the warning.
+    testWidgets(
+      'Record attendance with an early clock-in shows the same warning: Edit keeps the sheet and its values, Confirm saves with the explicit confirmation',
+      (tester) async {
+        var now = DateTime(
+          2026,
+          10,
+          16,
+          14,
+          0,
+        ); // before the 15:30 allowance (shift 15:45)
+        final f = Fake(report(staff: [provisional()], ready: true))
+          ..earliestRecordClockIn = start.subtract(const Duration(minutes: 15))
+          ..afterRecord = () => report(staff: [recorded()], ready: true);
+        await openReview(tester, f);
+        final d = detail(f.reportJson);
+        final ctx = tester.element(find.byType(ReviewStaffReportScreen));
+        final result = showAttendanceEntrySheet(
+          ctx,
+          report: d,
+          row: d.staff.first,
+          clock: () => now,
+        );
+        await tester.pumpAndSettle();
+        await pickAt(tester, 'entry-clock-in'); // 16 Oct 14:00
+        now = DateTime(2026, 10, 16, 22, 40);
+        await pickAt(tester, 'entry-clock-out'); // 16 Oct 22:40
+        now = DateTime(2026, 10, 17, 9);
+        await chooseReason(tester, 'Staff forgot to clock in');
+        await tapSave(tester);
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 500));
+
+        final dialog = find.byKey(const Key('unusual-clock-in-dialog'));
+        expect(dialog, findsOneWidget);
+        Finder inDialog(Finder m) => find.descendant(of: dialog, matching: m);
+        expect(inDialog(find.text('Unusual clock-in time')), findsOneWidget);
+        expect(inDialog(find.text('15:30')), findsOneWidget);
+        expect(inDialog(find.text('14:00')), findsOneWidget);
+        expect(f.writes().single.$3?['confirmUnusualClockIn'], isNull);
+
+        await tester.tap(find.byKey(const Key('unusual-clock-in-edit')));
+        await tester.pumpAndSettle();
+        expect(dialog, findsNothing);
+        expect(find.byType(AttendanceEntrySheet), findsOneWidget);
+        expect(find.text('Fri 16 Oct 2026, 14:00'), findsOneWidget);
+        expect(find.text('Fri 16 Oct 2026, 22:40'), findsOneWidget);
+        expect(f.writes(), hasLength(1));
+        expect(
+          find.byKey(const ValueKey('schedule-toast-error')),
+          findsNothing,
+        );
+
+        await tapSave(tester);
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 500));
+        await tester.tap(find.byKey(const Key('unusual-clock-in-confirm')));
+        await tester.pumpAndSettle();
+        final writes = f.writes().toList();
+        expect(
+          writes,
+          hasLength(3),
+        ); // refused, refused again (before Confirm), confirmed
+        final entry = {
+          'clockInAt': DateTime(2026, 10, 16, 14, 0).toUtc().toIso8601String(),
+          'clockOutAt': DateTime(
+            2026,
+            10,
+            16,
+            22,
+            40,
+          ).toUtc().toIso8601String(),
+          'breakMinutes': 30,
+          'reasonCode': 'forgot_clock_in',
+        };
+        expect(writes[1].$3, entry);
+        expect(writes[2].$3, {...entry, 'confirmUnusualClockIn': true});
+        expect(await result, isNotNull);
+        expect(find.byType(AttendanceEntrySheet), findsNothing);
+      },
+    );
+
+    testWidgets(
+      'Record attendance beyond the 12-hour floor: the server message is an error toast, never the warning; the sheet keeps its values',
+      (tester) async {
+        var now = DateTime(2026, 10, 16, 3, 0);
+        final f = Fake(report(staff: [provisional()], ready: true))
+          ..rejectRecord = (
+            422,
+            {
+              'statusCode': 422,
+              'code': 'CLOCK_IN_TOO_EARLY_ABSOLUTE',
+              'message':
+                  'The clock-in time cannot be more than 12 hours before the scheduled start.',
+              'earliestPossible': start
+                  .subtract(const Duration(hours: 12))
+                  .toUtc()
+                  .toIso8601String(),
+            },
+          );
+        await openReview(tester, f);
+        final d = detail(f.reportJson);
+        final ctx = tester.element(find.byType(ReviewStaffReportScreen));
+        showAttendanceEntrySheet(
+          ctx,
+          report: d,
+          row: d.staff.first,
+          clock: () => now,
+        );
+        await tester.pumpAndSettle();
+        await pickAt(tester, 'entry-clock-in'); // 16 Oct 03:00
+        now = DateTime(2026, 10, 16, 22, 40);
+        await pickAt(tester, 'entry-clock-out');
+        now = DateTime(2026, 10, 17, 9);
+        await chooseReason(tester, 'Mobile application issue');
+        await tapSave(tester);
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 300));
+        expect(find.byKey(const Key('unusual-clock-in-dialog')), findsNothing);
+        final toast = find.byKey(const ValueKey('schedule-toast-error'));
+        expect(toast, findsOneWidget);
+        expect(
+          find.descendant(
+            of: toast,
+            matching: find.text('Invalid attendance times'),
+          ),
+          findsOneWidget,
+        );
+        expect(
+          find.descendant(
+            of: toast,
+            matching: find.text(
+              'The clock-in time cannot be more than 12 hours before the scheduled start.',
+            ),
+          ),
+          findsOneWidget,
+        );
+        await tester.pumpAndSettle();
+        expect(find.byType(AttendanceEntrySheet), findsOneWidget);
+        expect(find.text('Fri 16 Oct 2026, 03:00'), findsOneWidget);
+      },
+    );
+
+    testWidgets(
+      '"Unusual time confirmed" shows on the recorded-attendance card only when the server says so',
+      (tester) async {
+        final flagged = {...recorded(), 'unusualClockInConfirmed': true};
+        final f = Fake(report(staff: [flagged], ready: true));
+        await openReview(tester, f);
+        expect(find.byKey(const Key('unusual-time-confirmed')), findsOneWidget);
+        expect(find.text('Unusual time confirmed'), findsOneWidget);
+        f.reportJson = report(staff: [recorded()], ready: true);
+        await openReview(tester, f);
+        expect(find.byKey(const Key('unusual-time-confirmed')), findsNothing);
       },
     );
   });

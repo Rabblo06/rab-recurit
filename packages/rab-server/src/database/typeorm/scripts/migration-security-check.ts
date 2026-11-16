@@ -53,6 +53,7 @@ import { DataSourceOptions } from 'typeorm';
 
 import { coreMigrationDataSourceOptions, GuardedMigrationDataSource } from '../core/core.datasource';
 import { MigrationIdentityError } from '../core/migration-identity';
+import { METADATA_TABLES } from '../core/metadata-tables-sql';
 import { postMigrationPrivilegeProblems, privilegeDrift, privilegeDriftSnapshot } from '../core/migration-privilege-drift';
 import {
   PHASE_0B_MIGRATION_TIMESTAMP,
@@ -219,6 +220,20 @@ export const REVIEWED_MIGRATION_DRIFT: Readonly<Record<string, readonly string[]
     "+ policy|hws_cutover_state|hws_cutover_state_crewflow_update|w|permissive=true|roles=crewflow|using=((CURRENT_USER = 'crewflow'::name) AND (organisation_id = core.current_org()))|check=((CURRENT_USER = 'crewflow'::name) AND (organisation_id = core.current_org()))",
     "+ policy|hws_cutover_state|hws_cutover_state_secure_owner_definer|*|permissive=true|roles=rab_secure_owner|using=(CURRENT_USER = 'rab_secure_owner'::name)|check=(CURRENT_USER = 'rab_secure_owner'::name)",
     '+ policy|hws_cutover_state|hws_cutover_state_tenant_read|r|permissive=true|roles=public|using=(organisation_id = core.current_org())|check=',
+  ],
+  // Metadata engine M1 / E1 (SQL owner-approved 2026-11-16; docs/plans/phase-x4/M1-SQL-FOR-OWNER.md § M1-meta): the plain
+  // tenant policy of each of the five metadata tables, added only (FOR ALL TO PUBLIC, USING = WITH CHECK on the bound
+  // organisation AND workspace). Owner, FORCE RLS, grants and triggers are pinned by the golden posture snapshot and the
+  // migration's own post-condition; no runtime login gains a privilege it did not have.
+  '1786721550000-MetadataEngineTables': METADATA_TABLES.map(
+    (t) =>
+      `+ policy|${t}|${t}_tenant|*|permissive=true|roles=public|using=((organisation_id = core.current_org()) AND (workspace_id = core.current_workspace()))|check=((organisation_id = core.current_org()) AND (workspace_id = core.current_workspace()))`,
+  ),
+  // Metadata engine M1 / E5 (DRAFT, owner SQL review pending; docs/plans/phase-x4/M1-SQL-FOR-OWNER.md § M1-cache): the same
+  // plain tenant policy on the metadata version table core.workspace_metadata_state. Owner, FORCE RLS, grants (no DELETE)
+  // and triggers are pinned by the migration's own post-condition; no runtime login gains a privilege it did not have.
+  '1786721560000-MetadataVersionState': [
+    "+ policy|workspace_metadata_state|workspace_metadata_state_tenant|*|permissive=true|roles=public|using=((organisation_id = core.current_org()) AND (workspace_id = core.current_workspace()))|check=((organisation_id = core.current_org()) AND (workspace_id = core.current_workspace()))",
   ],
 };
 
@@ -441,11 +456,31 @@ async function appliedCount(db: string): Promise<number> {
  * Runs every pending migration with timestamp <= upTo, through the real guarded runner, as `identity`. Migrations named in
  * `held` are not loaded at all, so they stay pending (the upgrade scenario's pre-0b base and its Phase 0b steps).
  */
+/**
+ * X3.5-S6: the guarded runner's target guard reads the process environment, so the run's ONE connection is exposed there as
+ * PG_DATABASE_URL (the runtime name; the legacy DATABASE_URL / DATABASE_URL_UNPOOLED pair it used to set is never written,
+ * and an inherited value of either is removed for the run). Every name is restored afterwards, on failure too.
+ */
+async function withMigrationConnection<T>(connection: string, fn: () => Promise<T>): Promise<T> {
+  const names = ['PG_DATABASE_URL', 'DATABASE_URL', 'DATABASE_URL_UNPOOLED'] as const;
+  const saved = names.map((name) => [name, process.env[name]] as const);
+  process.env.DB_TARGET = 'test';
+  process.env.PG_DATABASE_URL = connection;
+  delete process.env.DATABASE_URL;
+  delete process.env.DATABASE_URL_UNPOOLED;
+  try {
+    return await fn();
+  } finally {
+    for (const [name, value] of saved) {
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    }
+  }
+}
+
 async function migrate(db: string, identity: Identity, upTo: number, held: ReadonlySet<string> = NONE_HELD): Promise<string[]> {
   const connection = url(db, identity);
-  process.env.DB_TARGET = 'test';
-  process.env.DATABASE_URL = connection;
-  process.env.DATABASE_URL_UNPOOLED = connection;
+  return withMigrationConnection(connection, async () => {
   const ds = new GuardedMigrationDataSource({
     ...coreMigrationDataSourceOptions,
     url: connection,
@@ -458,17 +493,14 @@ async function migrate(db: string, identity: Identity, upTo: number, held: Reado
     return (await ds.runMigrations({ transaction: 'each' })).map((m) => m.name);
   } finally {
     await ds.destroy();
-    delete process.env.DATABASE_URL;
-    delete process.env.DATABASE_URL_UNPOOLED;
   }
+  });
 }
 
 /** Phase 0b revert through the real guarded runner (undoLastMigration requires the bootstrap-capable identity). */
 async function revertLast(db: string, identity: Identity, upTo: number, held: ReadonlySet<string> = NONE_HELD): Promise<void> {
   const connection = url(db, identity);
-  process.env.DB_TARGET = 'test';
-  process.env.DATABASE_URL = connection;
-  process.env.DATABASE_URL_UNPOOLED = connection;
+  return withMigrationConnection(connection, async () => {
   const ds = new GuardedMigrationDataSource({
     ...coreMigrationDataSourceOptions,
     url: connection,
@@ -481,9 +513,8 @@ async function revertLast(db: string, identity: Identity, upTo: number, held: Re
     await ds.undoLastMigration({ transaction: 'each' });
   } finally {
     await ds.destroy();
-    delete process.env.DATABASE_URL;
-    delete process.env.DATABASE_URL_UNPOOLED;
   }
+  });
 }
 
 /**
@@ -574,8 +605,9 @@ async function finalChecks(db: string, scenario: 'fresh' | 'upgrade'): Promise<v
   await lifecycleChecks(db);
 
   // The child gets the crewflow_app URL it needs and none of the bootstrap secrets.
-  const childEnv: NodeJS.ProcessEnv = { ...process.env, DATABASE_URL: url(db, 'crewflow_app') };
-  for (const k of ['MIGRATION_SECURITY_ADMIN_URL', 'CREWFLOW_BOOTSTRAP_PASSWORD', 'CREWFLOW_APP_BOOTSTRAP_PASSWORD', 'DATABASE_URL_UNPOOLED',
+  // X3.5-S6: the runtime name only (PG_DATABASE_URL); the legacy DATABASE_URL / DATABASE_URL_UNPOOLED never reach the child.
+  const childEnv: NodeJS.ProcessEnv = { ...process.env, PG_DATABASE_URL: url(db, 'crewflow_app') };
+  for (const k of ['MIGRATION_SECURITY_ADMIN_URL', 'CREWFLOW_BOOTSTRAP_PASSWORD', 'CREWFLOW_APP_BOOTSTRAP_PASSWORD', 'DATABASE_URL', 'DATABASE_URL_UNPOOLED',
     // X3.5-S7: the test admin URL under every name it can carry (the shared list, so a rename cannot be missed here).
     'TEST_DATABASE_URL', ...TEST_DATABASE_ADMIN_URL_NAMES, 'TEST_DATABASE_CREWFLOW_URL', 'APP_SECRET',
     // E5: CI now exports the worker's bootstrap password (disposable-postgres); the RLS-gate child needs neither it nor the URL.
@@ -595,7 +627,7 @@ async function finalChecks(db: string, scenario: 'fresh' | 'upgrade'): Promise<v
 
   // Phase D: the same refusal for the Worker's legacy login — only when this run knows its password.
   if (workerPasswordKnown) {
-    const workerEnv: NodeJS.ProcessEnv = { ...childEnv, DATABASE_URL: url(db, 'crewflow_worker'), RAB_APP_ROLE: 'crewflow_worker' };
+    const workerEnv: NodeJS.ProcessEnv = { ...childEnv, PG_DATABASE_URL: url(db, 'crewflow_worker'), RAB_APP_ROLE: 'crewflow_worker' };
     refusesLegacyLogin(
       'crewflow_worker',
       spawnSync('yarn', ['check-rls'], { cwd: repoRoot, env: workerEnv, encoding: 'utf8', shell: process.platform === 'win32' }),

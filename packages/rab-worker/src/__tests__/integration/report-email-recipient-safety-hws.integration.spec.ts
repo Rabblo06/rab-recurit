@@ -32,6 +32,7 @@ import { createAdminDataSource } from './helpers/admin-datasource';
 import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
 import { integrationTestDatabaseReady } from '@rab/server/database/typeorm/core/integration-test-database-gate';
 import { hwsRuntimeOn } from './helpers/hws-fixtures';
+import { businessTables } from '@rab/server/engine/core-modules/tenant/business-tables';
 
 /**
  * REPORT EMAIL SAFETY under HWS routing (security review S-2). With `HWS_RUNTIME_ENABLED=true` the workspace business
@@ -140,13 +141,13 @@ describeIfDb('report emails under HWS routing: enqueue + send-time re-check read
     unroutable = await factory.createVenueManager(organisation, { owner, label: 'hwsunroutable' });
     const staff = await factory.createStaff(organisation, { owner });
 
-    // ---- business data in the WORKSPACE schema (HWS tenant context routes the unqualified tables there)
+    // ---- business data in the WORKSPACE schema (written through the HWS tenant context: businessTables names that schema)
     const startsAt = new Date(Date.now() + 60 * 60 * 1000);
     const endsAt = new Date(startsAt.getTime() + 8 * 3600 * 1000);
     ({ venueId, shiftId } = await hwsTenant.runInTenantContext(ownerCtx(), async (m) => {
       const venue = await m.save(Venue, { organisationId, name: 'HWS Venue', createdBy: owner.userId, workspaceId });
       for (const vm of [keeper, moved, unroutable]) {
-        await m.query(`INSERT INTO manager_venue (organisation_id, manager_profile_id, venue_id, workspace_id) VALUES ($1, $2, $3, $4)`, [
+        await m.query(`INSERT INTO ${businessTables(m).manager_venue} (organisation_id, manager_profile_id, venue_id, workspace_id) VALUES ($1, $2, $3, $4)`, [
           organisationId,
           vm.profileId,
           venue.id,
@@ -157,11 +158,11 @@ describeIfDb('report emails under HWS routing: enqueue + send-time re-check read
       // schema; with HWS off it wrote it to core, and the workspace copy is created here as before.
       const [sp] = hwsRuntimeOn()
         ? await (async () => {
-            await m.query(`UPDATE staff_profile SET employment_status = 'active' WHERE id = $1`, [staff.profileId]);
-            return m.query(`SELECT id FROM staff_profile WHERE id = $1`, [staff.profileId]);
+            await m.query(`UPDATE ${businessTables(m).staff_profile} SET employment_status = 'active' WHERE id = $1`, [staff.profileId]);
+            return m.query(`SELECT id FROM ${businessTables(m).staff_profile} WHERE id = $1`, [staff.profileId]);
           })()
         : await m.query(
-            `INSERT INTO staff_profile (organisation_id, user_id, staff_ref, created_by, workspace_id, employment_status) VALUES ($1, $2, $3, $4, $5, 'active') RETURNING id`,
+            `INSERT INTO ${businessTables(m).staff_profile} (organisation_id, user_id, staff_ref, created_by, workspace_id, employment_status) VALUES ($1, $2, $3, $4, $5, 'active') RETURNING id`,
             [organisationId, staff.userId, `STF-${randomUUID().slice(0, 8)}`, owner.userId, workspaceId],
           );
       const jobRole = await m.save(JobRole, { organisationId, name: `Role ${randomUUID().slice(0, 6)}`, defaultRatePence: 1500, createdBy: owner.userId, workspaceId });
@@ -204,7 +205,7 @@ describeIfDb('report emails under HWS routing: enqueue + send-time re-check read
     const roster = await runShiftReportSchedulerCycle(adminDataSource, hwsTenant, app.get(AttendanceQrService), app.get(QrImageService), app.get(EmailOutboxService), files, reportAvailableBefore, { organisationId });
     expect(roster).toMatchObject({ generated: 1, failed: 0 });
     await hwsTenant.runInTenantContext(ownerCtx(), (m) =>
-      m.query(`UPDATE shift_report SET status = 'finalised', finalised_at = now(), finalised_by = $2 WHERE shift_id = $1`, [shiftId, owner.userId]),
+      m.query(`UPDATE ${businessTables(m).shift_report} SET status = 'finalised', finalised_at = now(), finalised_by = $2 WHERE shift_id = $1`, [shiftId, owner.userId]),
     );
     expect(await runFinalTimesheetCycle(adminDataSource, hwsTenant, app.get(EmailOutboxService), files, { organisationId })).toMatchObject({ sent: 1, failed: 0 });
 
@@ -217,7 +218,7 @@ describeIfDb('report emails under HWS routing: enqueue + send-time re-check read
     );
 
     // ---- access lost AFTER enqueue, in the WORKSPACE schema only: the stale core row for `moved` stays
-    await hwsTenant.runInTenantContext(ownerCtx(), (m) => m.query(`DELETE FROM manager_venue WHERE manager_profile_id = $1 AND venue_id = $2`, [moved.profileId, venueId]));
+    await hwsTenant.runInTenantContext(ownerCtx(), (m) => m.query(`DELETE FROM ${businessTables(m).manager_venue} WHERE manager_profile_id = $1 AND venue_id = $2`, [moved.profileId, venueId]));
   }, 300_000);
 
   afterAll(async () => {

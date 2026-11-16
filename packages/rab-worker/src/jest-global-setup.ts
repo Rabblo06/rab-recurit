@@ -8,6 +8,8 @@ import {
   assertSameDatabaseAtRuntime,
   assertWorkerLoginNotPrivilegedAtRuntime,
   resolveForJestGlobalSetup,
+  routedTestDatabaseLegacyNames,
+  TestDatabaseConfigError,
   testDatabaseAdminNameNotice,
 } from '@rab/server/database/typeorm/core/test-database-guard';
 
@@ -18,6 +20,12 @@ export default async function globalSetup(): Promise<void> {
   const notice = testDatabaseAdminNameNotice(resolved);
   // eslint-disable-next-line no-console
   if (notice) console.warn(notice);
+  // X3.5-S6 (DBR-08): setupFiles route every test file through PG_DATABASE_URL only. pg-config now prints its deprecation
+  // warnings under NODE_ENV=test too, so the routing itself must leave no legacy name behind (names only, never values).
+  const legacy = routedTestDatabaseLegacyNames(process.env);
+  if (legacy.length > 0) {
+    throw new TestDatabaseConfigError(`the routed test environment still holds the legacy name(s) ${legacy.join(', ')}; it must use PG_DATABASE_URL only. Refusing to start.`);
+  }
   const identity = await assertSameDatabaseAtRuntime(resolved);
   // X1.8: when the Phase D worker-login switch is on (PHASE_D_SQL_APPROVED=true + TEST_DATABASE_WORKER_URL), that login
   // must pass the static rules and, live, be neither a superuser nor BYPASSRLS before any spec routes the Worker to it.

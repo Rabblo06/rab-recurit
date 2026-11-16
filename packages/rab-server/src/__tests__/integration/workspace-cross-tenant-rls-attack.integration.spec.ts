@@ -19,7 +19,7 @@ import { toTstzRange } from '../../modules/scheduling/utils/tstzrange';
 import { PasswordHashingService } from '../../engine/core-modules/auth/services/password-hashing.service';
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { generateFixturePassword } from './helpers/fixture-password';
-import { integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
+import { integrationTestDatabase, integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
 import { provisionFixtureWorkspace } from './helpers/test-identities';
 import { businessSchema, businessTable, hwsRuntimeOn, withCutoverInactive } from './helpers/hws-fixtures';
 
@@ -338,7 +338,7 @@ describeIfDb('workspace cross-tenant RLS attack (integration)', () => {
     // NestJS HTTP app or its controllers.
     dataSource = new DataSource({
       type: 'postgres',
-      url: process.env.DATABASE_URL,
+      url: integrationTestDatabase().appUrl,
       schema: 'core',
       synchronize: false,
       entities: [

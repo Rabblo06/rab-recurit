@@ -419,7 +419,7 @@ export async function assertRuntimeDatabaseIdentity(
   // Sanitised summary only: no URL, userinfo, password or username. The role is the connected role name, which is not a secret.
   // eslint-disable-next-line no-console
   console.log(
-    `[runtime-db-guard] process=${processName} runtime=${resolved.runtimeEnvironment} classification=${resolved.classification} endpoint=${resolved.app.endpointKey} database=${appProbe.database} cluster=${appProbe.systemIdentifier} role=${appProbe.currentUser} probe=read-only-ok identity=${appProbe.identity}`,
+    `[runtime-db-guard] process=${processName} source=${resolved.pg.primary.source} runtime=${resolved.runtimeEnvironment} classification=${resolved.classification} endpoint=${resolved.app.endpointKey} database=${appProbe.database} cluster=${appProbe.systemIdentifier} role=${appProbe.currentUser} probe=read-only-ok identity=${appProbe.identity}`,
   );
   recordedRuntimeDb = Object.freeze({ processName, runtimeEnvironment: resolved.runtimeEnvironment, classification: resolved.classification });
   return resolved;

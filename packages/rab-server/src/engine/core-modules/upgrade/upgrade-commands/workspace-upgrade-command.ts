@@ -66,4 +66,12 @@ export interface WorkspaceUpgradeCommand {
   readonly run?: (ctx: WorkspaceUpgradeCommandContext) => Promise<void>;
   /** Present only for a command that changes the workspace structure. */
   readonly structure?: WorkspaceStructureDeclaration;
+  /**
+   * Metadata engine M1 / E2: the command writes THIS workspace's rows of the metadata tables (core.object_metadata,
+   * core.field_metadata, core.field_metadata_option, and core.workspace_metadata_state through its version trigger). Only then
+   * the runner allows INSERT / UPDATE on exactly those tables (never DELETE) and proves every write stayed in this workspace
+   * (workspace-command-runner.ts, metadata write check). Every other table outside the schema keeps the "no write" rule. A
+   * command that sets it must write each metadata row at most once (one INSERT or one UPDATE).
+   */
+  readonly writesWorkspaceMetadata?: true;
 }

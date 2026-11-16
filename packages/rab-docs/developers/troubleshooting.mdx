@@ -28,7 +28,7 @@ icon: "bug"
     Real-time is disabled (`REALTIME_ENABLED=false`) and the endpoint returns 204; current clients stop reconnecting on 204. Update an old client build.
   </Accordion>
   <Accordion title="“Preparing your workspace” never finishes locally">
-    Per-workspace schemas are enabled (`HWS_RUNTIME_ENABLED=true`) but the provisioner is not running. Start it with `npx nx run rab-worker:provision`.
+    The Worker is not running: it provisions workspace schemas itself, in-process. Start it (`npx nx run rab-worker:start`, or the `worker` service of the compose stack) and check its log for the provisioning lines.
   </Accordion>
   <Accordion title="Invitation emails never arrive locally">
     With `EMAIL_DRIVER=LOGGER`, emails (including activation links) are written to the API log instead of being sent.

@@ -1,5 +1,6 @@
 import { EntityManager } from 'typeorm';
 
+import { businessTables } from '../../../engine/core-modules/tenant/business-tables';
 import { Shift } from '../../scheduling/entities/shift.entity';
 import { DocumentShiftInfo } from './adolphus-document';
 
@@ -25,8 +26,9 @@ function contactField(contact: unknown, key: string): string | null {
  * the template omits that line.
  */
 export async function loadDocumentShiftInfo(manager: EntityManager, shift: Shift, generatedAt: Date): Promise<DocumentShiftInfo> {
-  const [venue] = await manager.query(`SELECT name, address, contact FROM venue WHERE id = $1`, [shift.venueId]);
-  const [role] = await manager.query(`SELECT name FROM job_role WHERE id = $1`, [shift.jobRoleId]);
+  const t = businessTables(manager);
+  const [venue] = await manager.query(`SELECT name, address, contact FROM ${t.venue} WHERE id = $1`, [shift.venueId]);
+  const [role] = await manager.query(`SELECT name FROM ${t.job_role} WHERE id = $1`, [shift.jobRoleId]);
   const [org] = await manager.query(`SELECT timezone FROM core.organisation WHERE id = $1`, [shift.organisationId]);
   const [workspace] = shift.workspaceId ? await manager.query(`SELECT name FROM core.manager_workspace WHERE id = $1`, [shift.workspaceId]) : [];
   const timezone = (org?.timezone as string | undefined) || 'Europe/London';

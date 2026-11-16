@@ -329,9 +329,12 @@ Pass it on the command line only, never in `.env.migrate`.
 
 ### 4.6 Connection budget
 
-The declared total must fit the server: API instances × pool + Worker pool + the 6-connection lock pool + scans +
-provisioner + rab-migrate's 3 + boot probes. Every process refuses to start otherwise. Staging defaults:
-API 1 × 9, Worker 12, so 37 connections in the worst case. Check it against
+The declared total must fit the server: API instances × (pool + 1 /healthz login probe) + Worker pool + the
+6-connection lock pool + the scan-lock and storage-lock clients (2) + the in-process provisioner (2) + the API's
+migrate-on-start child (5: its migration pool of 4 + one login client; `PG_EXPECTED_MIGRATE_CONNECTIONS`) + boot probes
+and an operator session (3). Every process refuses to start otherwise (`connection-budget.ts`). Staging defaults:
+API 1 × 9, Worker 12, so 40 connections in the worst case (9 + 1 + 12 + 6 + 2 + 2 + 5 + 3). Every row is the one
+`crewflow_owner` login, so a `rolconnlimit` on it is compared with the same total (XD-05). Check it against
 `max_connections - superuser_reserved_connections - reserved_connections`.
 
 ### 4.7 Release 0.7.0: the HWS cutover and its backup (owner decisions 2026-11-15, Part C3)

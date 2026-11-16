@@ -29,7 +29,7 @@ import { integrationTestDatabaseReady } from '@rab/server/database/typeorm/core/
  * Worker-side guarantees for email-first member invitations, against real PostgreSQL (RLS on) and the real send
  * processor — only the email provider is a counting fake:
  *  - only a CURRENT invitation is ever delivered (not revoked, superseded, accepted or expired; latest email only;
- *    organisation not suspended; same workspace the row was enqueued for);
+ *    organisation not suspended; workspace still active (S-W1); same workspace the row was enqueued for);
  *  - the "missing target user ⇒ cancel" safeguard is NOT broadened for any other job type;
  *  - retries never deliver twice.
  */
@@ -197,6 +197,45 @@ describeIfDb('member invitation delivery (worker revalidation)', () => {
     await processorWith(provider.service)(fakeJob(row!.id, suspendedOrg.id));
     expect(provider.calls).toHaveLength(0);
     expect((await statusOf(row!.id)).last_error_message_sanitized).toBe('The organisation is suspended.');
+  });
+
+  /**
+   * S-W1: the Worker's pre-send check uses the SAME liveness rule as acceptance (`member-invitation-liveness.ts`), which
+   * includes "the workspace is active". Each case gets its own workspace (a second internal manager in `org`) so changing
+   * its status never affects the other tests; an invitation queued while the workspace was active must not be emailed
+   * once the workspace is suspended or archived, and its outbox row is settled exactly like any other no-longer-valid
+   * invitation (CANCELLED with a sanitized reason, no provider call). The active control proves the new condition does
+   * not over-block.
+   */
+  async function inviteInOwnWorkspace(label: string): Promise<{ row: { id: string; status: string }; workspaceId: string; address: string }> {
+    const m = await factory.createInternalManager(org, { permissions: 'production' });
+    const mctx: AuthContext = { ...(await factory.signedInContext(m)), workspaceId: m.workspaceId!, role: '' }; // fresh session ⇒ step-up grant for role.create
+    const role = await roles.create(mctx, staffViewerRole(`${label} member`));
+    const address = `ws-${randomUUID().slice(0, 8)}@example.test`;
+    const { results } = await invitations.send(mctx, [address], role.id);
+    expect(results[0]!.outcome).toBe('invited');
+    const [row] = await outboxRows(results[0]!.invitation!.id);
+    return { row: row!, workspaceId: m.workspaceId!, address };
+  }
+
+  it.each(['suspended', 'archived'])('W10 (abuse, S-W1): a %s workspace receives no invitation email; the row is cancelled like any invalid invitation', async (status: string) => {
+    const { row, workspaceId } = await inviteInOwnWorkspace(`Ws ${status}`);
+    await admin.query(`UPDATE core.manager_workspace SET status = $2 WHERE id = $1`, [workspaceId, status]);
+    const provider = countingProvider();
+    await processorWith(provider.service)(fakeJob(row.id));
+    expect(provider.calls).toHaveLength(0);
+    expect(await statusOf(row.id)).toMatchObject({ status: EmailOutboxStatus.CANCELLED, last_error_message_sanitized: 'The workspace is no longer active.' });
+    // A retried job for the settled row sends nothing either (CANCELLED is terminal).
+    await processorWith(provider.service)(fakeJob(row.id));
+    expect(provider.calls).toHaveLength(0);
+  });
+
+  it('W11 (S-W1 control): the same setup with the workspace still active is delivered once', async () => {
+    const { row, address } = await inviteInOwnWorkspace('Ws active');
+    const provider = countingProvider();
+    await processorWith(provider.service)(fakeJob(row.id));
+    expect(provider.calls).toEqual([address]);
+    expect((await statusOf(row.id)).status).toBe(EmailOutboxStatus.SENT);
   });
 
   it('W8: the missing-target-user safeguard is unchanged for every other job type', async () => {

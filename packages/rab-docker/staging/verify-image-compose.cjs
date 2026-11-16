@@ -43,7 +43,7 @@ const path = require('node:path');
 
 const REPO = path.resolve(__dirname, '../../..');
 // The bundled db's environment rules, one definition for the committed and the deployed model (PR #125 review, finding 6).
-const { bundledDbEnvironmentProblems, credentialMountProblems, topLevelVolumeProblems } = require('../scripts/compose-owner-login.cjs');
+const { bundledDbEnvironmentProblems, credentialMountProblems, topLevelVolumeProblems, strictSwitchProblems } = require('../scripts/compose-owner-login.cjs');
 const VARIANT = path.join(REPO, 'packages/rab-docker/docker-compose.image.yml');
 const PRODUCTION = path.join(REPO, 'packages/rab-docker/docker-compose.production.yml');
 
@@ -499,6 +499,9 @@ function checkVariant(variant, production, variantFiles = variant) {
     }
     if ('WORKER_SCHEDULER' in envOf(services[name])) fail(`${name}: commits WORKER_SCHEDULER (production runs bullmq; interval is refused)`);
     if (name === 'rab-api') for (const pr of featureSweepProblems(envOf(services['rab-api']), envOf(services['rab-worker']))) fail(pr);
+    // Phase X3.1: every strict on/off switch committed for the service is exactly true or false (list read from
+    // environment-variables.ts by the owner-login gate; rab-api and rab-worker refuse anything else at boot).
+    for (const pr of strictSwitchProblems(name, envOf(services[name]))) fail(pr);
     for (const removed of ['CREWFLOW_UPGRADE_FAILURE', 'CREWFLOW_UPGRADE_FAILURE_POLICY']) {
       if (removed in envOf(services[name])) fail(`${name}: commits the removed ${removed} (OWNER-DB-ULTIMATE Part B3)`);
     }
@@ -856,6 +859,7 @@ function checkDeployment(merged, production, envFileKeys = {}, { dockerRoot = un
   // Phase X J2 (SJ-03): the switches come from the env files (or a compose value); the intervals must be committed.
   const switchesFromFiles = Object.fromEntries(['rab-api', 'rab-worker'].map((n) => [n, envFileKeys[n]?.switches ?? {}]));
   for (const pr of featureSweepProblems(envOf(services['rab-api']), envOf(services['rab-worker']), switchesFromFiles, ' in the deployed model')) fail(pr);
+  for (const name of ['rab-api', 'rab-worker']) for (const pr of strictSwitchProblems(name, envOf(services[name]))) fail(`${pr} in the deployed model`);
   for (const name of ['rab-api', 'rab-worker']) {
     for (const rule of Object.values(FEATURE_SWEEPS)) {
       if ((envFileKeys[name]?.names ?? []).includes(rule.key)) fail(`${name}: ${rule.key} is set in an env file (commit it in the compose files on both services)`);

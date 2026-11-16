@@ -104,7 +104,8 @@ packages/rab-e2e-testing/web/.qa-shots/
 
 # Local-only secrets/artifacts (never commit)
 .env.provisioner
-# Phase B: the one-off rab-migrate credential file (template: packages/rab-docker/.env.migrate.example)
+# Phase B: the retired one-off rab-migrate credential file (template removed in X5.1): still ignored so a leftover
+# .env.migrate holding old credentials is never committed
 .env.migrate
 **/.env.migrate
 # Retired (rab-ops removed): still ignored so a leftover .env.ops holding old credentials is never committed

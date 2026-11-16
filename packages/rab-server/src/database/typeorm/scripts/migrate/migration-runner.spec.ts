@@ -4,7 +4,7 @@
  * killed holder, gates after the lock) is exercised against a disposable cluster by the B6-A verification script; the cache
  * flush against a real Redis is in entity-cache-flush.integration.spec.ts.
  */
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
 
@@ -311,12 +311,14 @@ describe('setup-db production approval (security review L-2)', () => {
     }
   });
 
-  it('.env.migrate.example ships the approval commented out (no standing approval in a copied template)', () => {
-    const template = readFileSync(join(__dirname, '../../../../../../rab-docker/.env.migrate.example'), 'utf8');
-    expect(template).not.toMatch(/^\s*CREWFLOW_MIGRATION_APPROVED\s*=/m);
-    expect(template).toMatch(/^#\s*CREWFLOW_MIGRATION_APPROVED=pending-<count>-<sha256>$/m);
-    // F5: the template no longer documents the retired constant as an approval to set.
-    expect(template).not.toMatch(/CREWFLOW_MIGRATION_APPROVED=apply-pending-migrations/);
+  it('X5.1: the separated-mode .env.migrate template is gone, and the real file stays git-ignored and out of the image build context', () => {
+    const repoRoot = join(__dirname, '../../../../../../..');
+    expect(existsSync(join(repoRoot, 'packages/rab-docker/.env.migrate.example'))).toBe(false);
+    const gitignore = readFileSync(join(repoRoot, '.gitignore'), 'utf8');
+    expect(gitignore).toMatch(/^\.env\.migrate$/m);
+    expect(gitignore).toMatch(/^\*\*\/\.env\.migrate$/m);
+    // .dockerignore excludes every nested .env.* (which covers .env.migrate) from the build context.
+    expect(readFileSync(join(repoRoot, '.dockerignore'), 'utf8')).toMatch(/^\*\*\/\.env\.\*$/m);
   });
 });
 
@@ -508,7 +510,7 @@ describe('BC-11 (owner decision 2026-11-05): deploy-prepare follows CREWFLOW_MIG
     expect(apply.applied).toEqual(PENDING_AB);
   });
 
-  it('the legacy CF-41 login keeps the F5 flow in every mode until PR #9', async () => {
+  it('the legacy CF-41 login keeps the F5 flow in every mode until the separated-mode retirement', async () => {
     const r = run({ PG_DATABASE_URL: 'postgres://crewflow_migrator:x@127.0.0.1:5432/crewflow', CREWFLOW_MIGRATION_APPROVAL_MODE: 'none' });
     await expect(r.result).resolves.toBe(EXIT_PENDING_NOT_APPROVED);
     expect(r.calls[0].mode).toBe('check');

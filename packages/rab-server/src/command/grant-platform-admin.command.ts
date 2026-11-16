@@ -5,6 +5,7 @@ import { revokeSessionsForPrivilegedGrant } from '../engine/core-modules/platfor
 
 import { AuditAction, AuditService } from '../engine/core-modules/audit/audit.service';
 import { TenantContextService } from '../engine/core-modules/tenant/tenant-context.service';
+import { inSecureOwnerTransaction, withSecureOwner } from './ops/secure-owner-acting';
 
 interface GrantPlatformAdminOptions {
   email?: string;
@@ -17,13 +18,17 @@ interface GrantPlatformAdminOptions {
  * Never runs automatically at server startup, never reads an env-var grant
  * list — a human operator invokes this deliberately, out of band.
  *
- * Connects as `rab_owner` (same convention as `seed`/`ping` — invoked with
- * `DATABASE_URL` pointed at the owner role), which is what lets it write
- * `core.platform_admin` at all: that table's own `platform_admin_write`/
- * `_update` RLS policies require the ACTING session to already be an active
- * admin — an impossible bootstrap requirement for the very first grant, by
- * design. `rab_owner` bypasses that entirely (the table is deliberately
- * NOT FORCEd, same pre-auth-exemption class as `organisation`).
+ * Runs on the owner login crewflow_owner (main.ts gate 1, like every CLI
+ * command). `core.platform_admin`'s own `platform_admin_write`/`_update` RLS
+ * policies require the ACTING session to already be an active admin — an
+ * impossible requirement for the very first grant, by design. O-2: since M-T1
+ * `user`, `organisation` and `platform_admin` are FORCE'd with an owner-only
+ * definer policy, so the login acting as itself sees none of their rows with
+ * no tenant context and cannot write the grant. The pre-auth lookup and the
+ * grant row therefore run acting as the table owner rab_secure_owner
+ * (`ops/secure-owner-acting.ts`, `SET LOCAL ROLE`, verified, transaction
+ * only); the session reset and the audit entry then run as the login itself
+ * with the target's tenant context bound, in the same transaction as the grant.
  *
  * `email` alone doesn't uniquely identify a user — `core.user`'s own
  * uniqueness is `(organisation_id, email)`, not email alone, so the same
@@ -71,13 +76,16 @@ export class GrantPlatformAdminCommand extends CommandRunner {
       orgFilter = `AND o.slug = $${params.length}`;
     }
 
-    const candidates = await this.dataSource.query<Array<{ id: string; organisation_id: string; org_slug: string; email: string }>>(
-      // sql-injection-reviewed: dynamic WHERE assembled only from literal fragments and $n / :named placeholders (values pushed to params); identifiers come from allow-lists. Reviewed 2026-11-04.
-      `SELECT u.id, u.organisation_id, o.slug AS org_slug, u.email
-         FROM core."user" u
-         JOIN core.organisation o ON o.id = u.organisation_id
-        WHERE u.email = $1 AND u.deleted_at IS NULL ${orgFilter}`,
-      params,
+    // Pre-auth lookup: no tenant context can exist yet, so it reads as the table owner, READ ONLY (O-2).
+    const candidates = await inSecureOwnerTransaction(this.dataSource, { readOnly: true }, (manager) =>
+      manager.query<Array<{ id: string; organisation_id: string; org_slug: string; email: string }>>(
+        // sql-injection-reviewed: dynamic WHERE assembled only from literal fragments and $n / :named placeholders (values pushed to params); identifiers come from allow-lists. Reviewed 2026-11-04.
+        `SELECT u.id, u.organisation_id, o.slug AS org_slug, u.email
+           FROM core."user" u
+           JOIN core.organisation o ON o.id = u.organisation_id
+          WHERE u.email = $1 AND u.deleted_at IS NULL ${orgFilter}`,
+        params,
+      ),
     );
 
     if (candidates.length === 0) {
@@ -94,9 +102,8 @@ export class GrantPlatformAdminCommand extends CommandRunner {
 
     const target = candidates[0]!;
 
-    const [existing] = await this.dataSource.query<Array<{ revoked_at: Date | null }>>(
-      `SELECT revoked_at FROM core.platform_admin WHERE user_id = $1`,
-      [target.id],
+    const [existing] = await inSecureOwnerTransaction(this.dataSource, { readOnly: true }, (manager) =>
+      manager.query<Array<{ revoked_at: Date | null }>>(`SELECT revoked_at FROM core.platform_admin WHERE user_id = $1`, [target.id]),
     );
 
     if (existing && existing.revoked_at === null) {
@@ -107,13 +114,17 @@ export class GrantPlatformAdminCommand extends CommandRunner {
     await this.tenantContext.runInTenantContext(
       { organisationId: target.organisation_id, workspaceId: null, userId: target.id, role: '' },
       async (manager) => {
-        await manager.query(
-          `INSERT INTO core.platform_admin (user_id, granted_by)
-           VALUES ($1, NULL)
-           ON CONFLICT (user_id) DO UPDATE
-             SET granted_at = now(), granted_by = NULL, revoked_at = NULL, revoked_by = NULL,
-                 security_version = core.platform_admin.security_version + 1`,
-          [target.id],
+        // The grant row as the table owner (no acting admin can exist for a bootstrap/recovery grant), then back to the
+        // login for everything else in this transaction (O-2).
+        await withSecureOwner(manager, (m) =>
+          m.query(
+            `INSERT INTO core.platform_admin (user_id, granted_by)
+             VALUES ($1, NULL)
+             ON CONFLICT (user_id) DO UPDATE
+               SET granted_at = now(), granted_by = NULL, revoked_at = NULL, revoked_by = NULL,
+                   security_version = core.platform_admin.security_version + 1`,
+            [target.id],
+          ),
         );
         // CF-07: the promoted user's existing sessions end with the grant (same transaction).
         await revokeSessionsForPrivilegedGrant(manager, target.id);

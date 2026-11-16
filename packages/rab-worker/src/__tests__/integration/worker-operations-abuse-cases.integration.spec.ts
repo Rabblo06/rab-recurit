@@ -3,13 +3,15 @@ import 'reflect-metadata';
 import { AttendanceStatus, ManagerType, NotificationType, OfferStatus, ShiftAssignmentStatus, ShiftStatus, UserStatus } from '@rab/shared';
 import { Test } from '@nestjs/testing';
 import { randomUUID } from 'node:crypto';
-import { DataSource } from 'typeorm';
+import { DataSource, EntityManager } from 'typeorm';
 
 import { EnvironmentService } from '@rab/server/engine/core-modules/environment/environment.service';
 import { AppModule } from '@rab/server/app.module';
 import { AuditService } from '@rab/server/engine/core-modules/audit/audit.service';
 import { AUTH_TOKEN_CLEANUP_RETENTION_DAYS } from '@rab/server/engine/core-modules/auth/token/retention-policy';
 import { PasswordHashingService } from '@rab/server/engine/core-modules/auth/services/password-hashing.service';
+import { BusinessTablesError, businessTables } from '@rab/server/engine/core-modules/tenant/business-tables';
+import { WorkspaceRoutingError } from '@rab/server/engine/core-modules/tenant/schema-resolver.service';
 import { TenantContextService } from '@rab/server/engine/core-modules/tenant/tenant-context.service';
 import { EmailOutbox, NotificationPreference, Organisation, RefreshToken, Role, User, UserRole } from '@rab/server/modules/identity/entities/index';
 import { EmailService } from '@rab/server/engine/core-modules/email/email.service';
@@ -36,7 +38,7 @@ import { createAdminDataSource } from './helpers/admin-datasource';
 import { generateFixturePassword } from './helpers/fixture-password';
 import { integrationTestDatabaseReady } from '@rab/server/database/typeorm/core/integration-test-database-gate';
 import { provisionFixtureWorkspace } from './helpers/test-identities';
-import { businessSchema, hwsRuntimeOn } from './helpers/hws-fixtures';
+import { hwsRuntimeOn } from './helpers/hws-fixtures';
 
 const FIXTURE_PASSWORD = generateFixturePassword();
 
@@ -84,20 +86,15 @@ describeIfDb('worker operations abuse cases (integration)', () => {
     jobRoleId: string;
   }
 
-  async function withContext<T>(ctx: { organisationId: string; workspaceId: string | null; userId: string }, fn: (manager: DataSource['manager']) => Promise<T>): Promise<T> {
-    return dataSource.transaction(async (manager) => {
-      // search_path: coreDataSourceOptions lost its static schema:'core' default in the HWS Part 2
-      // migration (P2.2 fix — same systemic gap already found in rab-server's own
-      // bulk-email-abuse-cases/scheduling-offer-abuse-cases, and in this package's own
-      // worker-event-idempotency file).
-      // Part C1: the workspace's own schema with HWS on (the code default outside production), core with it off.
-      await manager.query(`SELECT set_config('search_path', $1, true)`, [ctx.workspaceId ? businessSchema(ctx.workspaceId) : 'core']);
-      await manager.query(`SELECT set_config('rab.organisation_id', $1, true)`, [ctx.organisationId]);
-      await manager.query(`SELECT set_config('rab.workspace_id', $1, true)`, [ctx.workspaceId ?? '']);
-      await manager.query(`SELECT set_config('rab.user_id', $1, true)`, [ctx.userId]);
-      await manager.query(`SELECT set_config('rab.role', '', true)`);
-      return fn(manager);
-    });
+  /**
+   * Part C2 (C2-7): the suite's tenant transaction is the REAL binder (TenantContextService.runInTenantContext, the entry point
+   * the Worker's runScopedForOrg uses), not a hand-built transaction that sets search_path and the rab.* GUCs itself. The
+   * callback therefore gets what production code gets: the GUCs bound, the workspace schema resolved from the registry (fail
+   * closed: missing / not READY → WorkspaceRoutingError before `fn` runs), the schema-bound EntityManager and the
+   * businessTables(manager) binding — under the search_path trap too. With HWS off it binds `core`.
+   */
+  function withContext<T>(ctx: { organisationId: string; workspaceId: string | null; userId: string }, fn: (manager: EntityManager) => Promise<T>): Promise<T> {
+    return tenantContext.runInTenantContext({ organisationId: ctx.organisationId, workspaceId: ctx.workspaceId, userId: ctx.userId, role: '' }, fn);
   }
 
   async function seedOrgFixture(label: string): Promise<OrgFixture> {
@@ -138,11 +135,13 @@ describeIfDb('worker operations abuse cases (integration)', () => {
         status: 'active',
       });
       await provisionFixtureWorkspace(manager, workspace.id); // Part C1: READY schema, as the product builds it
-      await manager.query(`SELECT set_config('search_path', $1, true)`, [businessSchema(workspace.id)]); // later fixture writes in this transaction land in the workspace's schema
       workspaceId = workspace.id;
-      // rab.workspace_id must be bound before this insert — same ordering bug already fixed in
-      // worker-event-idempotency.integration.spec.ts (P2.2).
-      await manager.query(`SELECT set_config('rab.workspace_id', $1, true)`, [workspaceId]);
+    });
+
+    // Part C2 (C2-7): the workspace's rows are written through the binder for the new workspace (its schema resolved from the
+    // registry row provisioned above, rab.workspace_id bound before any insert), instead of re-pointing search_path by hand
+    // inside the bootstrap transaction.
+    await withContext({ organisationId, workspaceId, userId: managerUserId }, async (manager) => {
       await manager.insert(ManagerProfile, { organisationId, userId: managerUserId, type: ManagerType.INTERNAL, workspaceId });
 
       const staffHash = await passwordHashing.hash(FIXTURE_PASSWORD);
@@ -252,7 +251,7 @@ describeIfDb('worker operations abuse cases (integration)', () => {
       'DB boundary %s seconds', async (seconds, count, complete, expired) => {
         const {ctx,id} = await fixture();
         await withContext(ctx, async m => {
-          await m.query("UPDATE attendance SET clock_out_at=now()-make_interval(secs=>$2) WHERE id=$1",[id,seconds]);
+          await m.query(`UPDATE ${businessTables(m).attendance} SET clock_out_at=now()-make_interval(secs=>$2) WHERE id=$1`,[id,seconds]);
           expect((await PostShiftLifecycleService.discover(m)).some(row => row.id === id)).toBe(Number(seconds) >= 3600);
           const service = new PostShiftLifecycleService(auditService);
           expect(await service.advance(m,id)).toBe(count);
@@ -266,28 +265,51 @@ describeIfDb('worker operations abuse cases (integration)', () => {
       });
     it('concurrent workers and a restarted worker emit one event per milestone; tenant denial and corrections remain safe', async () => {
       const {ctx,id} = await fixture();
-      await withContext(ctx,m=>m.query("UPDATE attendance SET clock_out_at=now()-interval '3 hours' WHERE id=$1",[id]));
+      await withContext(ctx,m=>m.query(`UPDATE ${businessTables(m).attendance} SET clock_out_at=now()-interval '3 hours' WHERE id=$1`,[id]));
       const run = () => withContext(ctx,m=>new PostShiftLifecycleService(auditService).advance(m,id));
       expect((await Promise.all([run(),run()])).reduce((a,b)=>a+b,0)).toBe(2);
       expect(await run()).toBe(0);
       await withContext(ctx,async m=>{
         const [audit] = await m.query("SELECT count(*)::int AS count FROM core.audit_log WHERE entity_id=$1 AND action IN ('attendance.post_shift_completed','attendance.post_shift_expired')",[id]);
         expect(audit.count).toBe(2);
-        await m.query("UPDATE attendance SET clock_out_at=now() WHERE id=$1",[id]);
+        await m.query(`UPDATE ${businessTables(m).attendance} SET clock_out_at=now() WHERE id=$1`,[id]);
         const row=await m.findOneByOrFail(Attendance,{id});
         expect(row.postShiftCompletedAt).toBeNull(); expect(row.postShiftExpiredAt).toBeNull();
       });
-      // A foreign (unknown) organisation + workspace advances nothing. Part C1: with HWS on there is no schema for an unknown
-      // workspace, so the attempt is refused outright (the relation cannot even be resolved: SQLSTATE 42P01 / 3F000, matched
-      // by code, not message); with HWS off it sees 0 rows.
+      // A foreign (unknown) organisation + workspace advances nothing. Part C2 (C2-7): through the real binder with HWS on, the
+      // unknown workspace has no registry row, so the binder refuses before ANY business SQL runs (WorkspaceRoutingError
+      // 'registry-missing', matched by name + code). Before C2-7 the hand-built harness pointed search_path at a schema that
+      // does not exist and the service's own SELECT failed with 42P01 / 3F000; the refusal now happens one layer earlier.
+      // With HWS off the binder binds core and the service sees 0 rows (RLS).
       const foreign = () => withContext({...ctx,organisationId:randomUUID(),workspaceId:randomUUID()},m=>new PostShiftLifecycleService(auditService).advance(m,id));
-      if (hwsRuntimeOn()) await expect(foreign()).rejects.toMatchObject({ driverError: expect.objectContaining({ code: expect.stringMatching(/^(42P01|3F000)$/) }) });
+      if (hwsRuntimeOn()) await expect(foreign()).rejects.toMatchObject({ name: WorkspaceRoutingError.name, code: 'registry-missing' });
       else expect(await foreign()).toBe(0);
-      // The real attack (review L3): the row's OWN workspace schema (search_path) bound with another organisation's GUCs. The
-      // row is due again (clock-out reset to 3 h ago), so a non-zero result would be a real cross-tenant write; RLS must hide it.
-      await withContext(ctx,m=>m.query("UPDATE attendance SET clock_out_at=now()-interval '3 hours' WHERE id=$1",[id]));
+      // The real attack (review L3): the row's OWN workspace schema bound with another organisation's GUCs. The row is due
+      // again (clock-out reset to 3 h ago), so a non-zero result would be a real cross-tenant write.
+      await withContext(ctx,m=>m.query(`UPDATE ${businessTables(m).attendance} SET clock_out_at=now()-interval '3 hours' WHERE id=$1`,[id]));
+      // (a) The real binder with the other organisation's context. HWS on: the registry is FORCE RLS, so the other organisation
+      //     cannot resolve the workspace at all ('registry-missing', nothing runs) — unless the resolution is served from the
+      //     workspace metadata cache (WORKSPACE_METADATA_CACHE_ENABLED, off by default), which binds the row's schema and
+      //     leaves the row to RLS: (b) proves that leg deterministically. HWS off: core bound, RLS hides the row (0).
       const wrongOrg = () => withContext({...ctx,organisationId:randomUUID()},m=>new PostShiftLifecycleService(auditService).advance(m,id));
-      expect(await wrongOrg()).toBe(0);
+      if (!hwsRuntimeOn()) expect(await wrongOrg()).toBe(0);
+      else if (!app.get(EnvironmentService).get('WORKSPACE_METADATA_CACHE_ENABLED')) await expect(wrongOrg()).rejects.toMatchObject({ name: WorkspaceRoutingError.name, code: 'registry-missing' });
+      else await expect(wrongOrg().catch((e: unknown) => (e instanceof WorkspaceRoutingError && e.code === 'registry-missing' ? 0 : Promise.reject(e)))).resolves.toBe(0);
+      // (b) The L3 shape exactly, on the real binding: the row's own workspace schema resolved and bound by runInTenantContext,
+      //     then only the identity GUC re-pointed at another organisation (right schema, wrong tenant). RLS and the service's
+      //     core.current_org() predicate must hide the row: 0 advanced.
+      await expect(withContext(ctx, async m => {
+        await m.query(`SELECT set_config('rab.organisation_id', $1, true)`, [randomUUID()]);
+        return new PostShiftLifecycleService(auditService).advance(m, id);
+      })).resolves.toBe(0);
+      // (c) A caller that bypasses the binders (a bare transaction: the pre-C2-7 harness shape, GUCs set by hand) cannot run the
+      //     service at all: businessTables(manager) refuses the unbound manager (fail closed, BusinessTablesError 'unbound')
+      //     before any business SQL is sent — for the write path and for discovery.
+      await expect(dataSource.transaction(async m => {
+        await m.query(`SELECT set_config('rab.organisation_id', $1, true), set_config('rab.workspace_id', $2, true)`, [ctx.organisationId, ctx.workspaceId]);
+        return new PostShiftLifecycleService(auditService).advance(m, id);
+      })).rejects.toMatchObject({ name: BusinessTablesError.name, code: 'unbound' });
+      await expect(dataSource.transaction(m => PostShiftLifecycleService.discover(m))).rejects.toMatchObject({ name: BusinessTablesError.name, code: 'unbound' });
       await withContext(ctx,async m=>{
         const row=await m.findOneByOrFail(Attendance,{id});
         expect(row.postShiftCompletedAt).toBeNull(); expect(row.postShiftExpiredAt).toBeNull();
@@ -300,7 +322,7 @@ describeIfDb('worker operations abuse cases (integration)', () => {
       await withContext(ctx,async m=>{
         const service=new PostShiftLifecycleService(auditService);
         expect(await service.advance(m,id)).toBe(0);
-        await m.query("UPDATE attendance SET clock_out_at=now()-interval '3 hours', status='clocked_in' WHERE id=$1",[id]);
+        await m.query(`UPDATE ${businessTables(m).attendance} SET clock_out_at=now()-interval '3 hours', status='clocked_in' WHERE id=$1`,[id]);
         expect(await service.advance(m,id)).toBe(0);
       });
     });

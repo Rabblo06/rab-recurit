@@ -3,6 +3,7 @@ import { DataSource, EntityManager } from 'typeorm';
 import { databaseMetrics } from '../../../database/runtime/database-metrics';
 import { PgReplicaService, ReplicaRoute } from '../../../database/runtime/replica/pg-replica.service';
 import { EnvironmentService } from '../environment/environment.service';
+import { SEARCH_PATH_TRAP_VAR } from './business-tables';
 import { SchemaResolverService } from './schema-resolver.service';
 import { TenantContextService } from './tenant-context.service';
 
@@ -49,7 +50,17 @@ const resolver = () => ({ resolve: jest.fn().mockResolvedValue('workspace_deadbe
 const CTX = { organisationId: 'org-1', workspaceId: WS_ID, userId: 'user-1', role: 'MANAGER' };
 
 describe('TenantContextService useReplica (B4)', () => {
-  beforeEach(() => databaseMetrics.reset());
+  // C2-7: the bound search_path values below are pinned with the test-only trap OFF (the trap CI job sets it for every suite;
+  // with it on the binders pass '' — tenant-context.service.spec.ts pins that). The value found is put back after each test.
+  const trapFound = process.env[SEARCH_PATH_TRAP_VAR];
+  beforeEach(() => {
+    databaseMetrics.reset();
+    delete process.env[SEARCH_PATH_TRAP_VAR];
+  });
+  afterEach(() => {
+    if (trapFound === undefined) delete process.env[SEARCH_PATH_TRAP_VAR];
+    else process.env[SEARCH_PATH_TRAP_VAR] = trapFound;
+  });
 
   it('without the option nothing changes: primary, no READ ONLY, replica never consulted', async () => {
     const primary = side('primary');

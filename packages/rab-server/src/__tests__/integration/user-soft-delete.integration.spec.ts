@@ -24,6 +24,7 @@ import { createAdminDataSource } from './helpers/admin-datasource';
 import { bookBeforeDeadline } from './helpers/book-before-deadline';
 import { businessTable, dropFixtureWorkspaceSchema } from './helpers/hws-fixtures';
 import { provisionFixtureWorkspace, TestIdentity, TestIdentityFactory } from './helpers/test-identities';
+import { businessTables } from '../../engine/core-modules/tenant/business-tables';
 
 /**
  * Owner decision 0g (2026-11-14): user deletion the Twenty way (twentyhq/twenty @ eedb0a73 user.service.ts:259-283 —
@@ -117,8 +118,10 @@ describeIfDb('user soft delete — owner 0g (integration)', () => {
     const out = await http().post('/rest/v1/attendance/clock-out').set(auth(staffToken)).send({ qrToken: await signQr(shiftId) });
     expect(out.status).toBe(201);
     const attendanceId = out.body.id as string;
+    // Worked time comes from moving the clock-in hours before the scheduled start: an unusually early clock-in
+    // correction, so it is explicitly confirmed (owner brief 2026-11-15, 409 CLOCK_IN_CONFIRMATION_REQUIRED otherwise).
     const corrected = await http().post(`/rest/v1/attendance/${attendanceId}/correct`).set(auth(tokenA))
-      .send({ field: 'clockInAt', newValue: new Date(new Date(out.body.clockOutAt).getTime() - 120 * 60_000).toISOString(), reason: '0g test: real worked time' });
+      .send({ field: 'clockInAt', newValue: new Date(new Date(out.body.clockOutAt).getTime() - 120 * 60_000).toISOString(), reason: '0g test: real worked time', confirmUnusualClockIn: true });
     expect(corrected.status).toBe(201);
     expect((await http().post(`/rest/v1/attendance/report/shift/${shiftId}/staff/${s.profileId}/attendance-review`).set(auth(tokenA))).status).toBe(200);
     const fin = await http().patch(`/rest/v1/attendance/report/shift/${shiftId}/finalise`).set(auth(tokenA));
@@ -291,7 +294,7 @@ describeIfDb('user soft delete — owner 0g (integration)', () => {
       // Target with history (it created a venue in A): an ACTIVE Venue Manager → soft delete.
       const vm = await factory.createVenueManager({ id: orgId }, { owner: a, label: 'udel-lock-vm' });
       await tenantContext.runInTenantContext(ctxOf(a), (m) =>
-        m.query(`INSERT INTO venue (organisation_id, name, created_by, workspace_id) VALUES ($1, $2, $3, $4)`, [orgId, `0g lock venue ${randomUUID().slice(0, 6)}`, vm.userId, a.workspaceId]),
+        m.query(`INSERT INTO ${businessTables(m).venue} (organisation_id, name, created_by, workspace_id) VALUES ($1, $2, $3, $4)`, [orgId, `0g lock venue ${randomUUID().slice(0, 6)}`, vm.userId, a.workspaceId]),
       );
       const soft = await tenantContext.runInTenantContext(ctxOf(a), async (m) => {
         const outcome = await userDeletion.deleteUser(m, ctxOf(a), vm.userId);

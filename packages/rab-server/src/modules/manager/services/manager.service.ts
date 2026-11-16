@@ -16,7 +16,7 @@ import { AccountLifecycleService } from '../../../engine/core-modules/auth/servi
 import { AuditAction, AuditService } from '../../../engine/core-modules/audit/audit.service';
 import { EmailOutboxService } from '../../../engine/core-modules/email/email-outbox.service';
 import { EmailQueueService } from '../../../engine/core-modules/email/email-queue.service';
-import { renderAccountActivationEmail, renderCeoInvitationEmail } from '../../../engine/core-modules/email/templates';
+import { renderAccountActivationEmail, renderBulkNotificationEmail, renderCeoInvitationEmail } from '../../../engine/core-modules/email/templates';
 import { RefreshTokenService } from '../../../engine/core-modules/auth/token/services/refresh-token.service';
 import { SecurityVersionService } from '../../../engine/core-modules/auth/services/security-version.service';
 import { StepUpReauthService } from '../../../engine/core-modules/auth/services/step-up-reauth.service';
@@ -460,8 +460,21 @@ export class ManagerService {
    * durable-outbox path as every other email in this app — see
    * `StaffService.bulkEmail`'s own doc comment for the full rationale.
    */
-  async bulkEmail(ctx: AuthContext, dto: BulkEmailDto): Promise<{ queued: number; skipped: number }> {
+  async bulkEmail(
+    ctx: AuthContext,
+    dto: BulkEmailDto,
+    requiredPermission: typeof PermissionFlag.MANAGER_MANAGE | typeof PermissionFlag.VENUE_MANAGER_CREATE = PermissionFlag.MANAGER_MANAGE,
+  ): Promise<{ queued: number; skipped: number }> {
     const rows = await this.tenantContext.runInTenantContext(ctx, async (manager) => {
+      // Layer 2 (owner decision batch 13, 2026-11-16): sending email is an edit-level action — the route's own flag
+      // (`manager.manage`, or `venue_manager.create` for the Venue Manager route) is re-checked here, before any id is
+      // read. Fail closed on any other value (e.g. passed through an `as never` cast).
+      if (requiredPermission !== PermissionFlag.MANAGER_MANAGE && requiredPermission !== PermissionFlag.VENUE_MANAGER_CREATE) {
+        throw new ForbiddenException('Sending email is not permitted.');
+      }
+      if (!(await this.permissions.userHasPermissionTx(manager, ctx, requiredPermission))) {
+        throw new ForbiddenException('Sending email is not permitted.');
+      }
       const profiles = await manager.find(ManagerProfile, {
         where: { organisationId: ctx.organisationId!, id: In(dto.userIds) },
         relations: { user: true },
@@ -475,7 +488,7 @@ export class ManagerService {
               jobType: EmailOutboxJobType.NOTIFICATION,
               recipientEmail: p.user!.email,
               targetUserId: p.userId,
-              rendered: { subject: dto.subject, html: `<p>${dto.message}</p>`, text: dto.message },
+              rendered: renderBulkNotificationEmail({ subject: dto.subject, message: dto.message }),
               createdBy: ctx.userId,
             }),
           ),

@@ -9,7 +9,9 @@
  *   PG_EXPECTED_WORKER_INSTANCES     peak Worker containers at once
  *   PG_EXPECTED_API_POOL_MAX         default 10 — the API pool (PG_POOL_MAX_CONNECTIONS of the API processes)
  *   PG_EXPECTED_WORKER_POOL_MAX      default 12 — the Worker runtime pool (PG_POOL_MAX_CONNECTIONS of the Worker)
- *   PG_EXPECTED_MIGRATE_CONNECTIONS  default 3  — the one-shot rab-migrate step while it runs
+ *   PG_EXPECTED_MIGRATE_CONNECTIONS  default 5  — the API's migrate-on-start child while it runs (owner login, XD-05: its
+ *                                    migration pool MIGRATION_POOL_MAX 4 + one login client for the marker read and the
+ *                                    SIGTERM self-cancel; there is no separate rab-migrate step any more)
  *   PG_PROVIDER_RESERVED_CONNECTIONS default 0  — slots a managed provider keeps for itself beyond what the server
  *                                    reports (declared by the operator; see the runbook)
  *   WORKER_DISPATCH_MODE             default poll — Phase D: `event` adds one LISTEN connection per Worker replica (direct
@@ -20,7 +22,8 @@
  *
  * Per Worker container, from the code (Phase B audit; file:line in the A3/A4 report):
  *   runtime pool PG_EXPECTED_WORKER_POOL_MAX + direct/lock pool 6 (5 lock-holding scans + 1) + BullMQ scan-lock client 1
- *   + storage-reconcile lock client 1 + provisioner child 2 (provisioning client + drift client; until E6 retires it).
+ *   + storage-reconcile lock client 1 + in-process provisioner 2 (provisioning client + drift client,
+ *   workspace-provisioning.loops.ts; owner-login T4 moved it from a child process into the Worker, on the Worker's login).
  * Boot probes are short-lived and sequential (runtime guard, boot gates, session probe); BOOT_PROBE_ALLOWANCE covers
  * the probes of one starting process plus one operator session.
  *
@@ -32,8 +35,14 @@
  *
  * Capacity: max_connections − superuser_reserved_connections − reserved_connections (PostgreSQL 16) − the RDS-style
  * rds.rds_superuser_reserved_connections when the server reports it − PG_PROVIDER_RESERVED_CONNECTIONS. Also bounded by
- * the database's datconnlimit and the checking login's rolconnlimit: crewflow_app is compared with every runtime-role row
- * (the API, and Workers that still log in as crewflow_app); a crewflow_worker Worker with the Worker rows only.
+ * the database's datconnlimit and the checking login's rolconnlimit.
+ *
+ * XD-05 (Phase X2.5): on the owner login every row is the SAME login, crewflow_owner: the API and Worker pools, the
+ * Worker's in-process provisioner clients, the API's migrate-on-start child, the boot probes and an operator session. So
+ * every row is now `runtimeRole: true` and a rolconnlimit on crewflow_owner is compared with the whole total (before, the
+ * provisioner, migrate and probe rows were left out, so the check understated the login's use by 2 × Workers + 6 at the
+ * old defaults).
+ * A crewflow_worker login (the legacy global claim mode) is still compared with the Worker rows only.
  */
 
 export const WORKER_DIRECT_POOL_MAX_BUDGET = 6;
@@ -48,7 +57,8 @@ export const WORKER_DISPATCH_LISTENER_CONNECTIONS = 1;
 
 export const DEFAULT_API_POOL_MAX = 10;
 export const DEFAULT_WORKER_POOL_MAX = 12;
-export const DEFAULT_MIGRATE_CONNECTIONS = 3;
+/** XD-05: the API's migrate-on-start child: MIGRATION_POOL_MAX (4, locked-migration-runner.ts) + 1 login client. Was 3. */
+export const DEFAULT_MIGRATE_CONNECTIONS = 5;
 
 export const CONNECTION_BUDGET_ENV_NAMES = [
   'PG_EXPECTED_API_INSTANCES',
@@ -84,7 +94,7 @@ export interface BudgetRow {
   each: number;
   count: number;
   total: number;
-  /** Whether these connections log in as the runtime role (counted against its rolconnlimit). */
+  /** Whether these connections log in as the runtime login (counted against its rolconnlimit). Owner login: every row. */
   runtimeRole: boolean;
   /** Phase D: opened by the Worker's runtime login (crewflow_app or crewflow_worker) — a crewflow_worker rolconnlimit covers these only. */
   workerLogin?: boolean;
@@ -197,14 +207,26 @@ export function planConnectionBudget(shape: DeploymentShape): BudgetPlan {
         ]
       : []),
     {
-      item: 'Worker provisioner child (until E6)',
+      item: 'Worker in-process provisioner (provisioning + drift clients)',
       each: WORKER_PROVISIONER_CONNECTIONS,
       count: shape.workerInstances,
       total: WORKER_PROVISIONER_CONNECTIONS * shape.workerInstances,
-      runtimeRole: false,
+      runtimeRole: true,
+      workerLogin: true,
     },
-    { item: 'rab-migrate', each: shape.migrateConnections, count: 1, total: shape.migrateConnections, runtimeRole: false },
-    { item: 'boot probes + operator session', each: BOOT_PROBE_ALLOWANCE, count: 1, total: BOOT_PROBE_ALLOWANCE, runtimeRole: false },
+    // The migrate child runs in an API container BEFORE that container's main.js opens its pool (api-prestart.sh), so
+    // while it runs it uses slots its own instance's pool and /healthz probe do not. Counting it once on top of every
+    // pool is therefore enough ONLY while migrateConnections <= apiPoolMax + 1: then every API instance's child (several
+    // can start at once in a rolling deploy; one migrates under the lock, the others wait) fits inside its own
+    // instance's unused slots, and this row is headroom. Defaults: 5 <= 10 + 1; the runtime.env template: 5 <= 9 + 1.
+    {
+      item: 'API migrate-on-start child',
+      each: shape.migrateConnections,
+      count: 1,
+      total: shape.migrateConnections,
+      runtimeRole: true,
+    },
+    { item: 'boot probes + operator session', each: BOOT_PROBE_ALLOWANCE, count: 1, total: BOOT_PROBE_ALLOWANCE, runtimeRole: true },
   ];
   return {
     rows,
@@ -232,8 +254,8 @@ export function evaluateConnectionBudget(plan: BudgetPlan, capacity: ServerCapac
         `${capacity.databaseLimit !== null && capacity.databaseLimit >= 0 ? `, database limit ${capacity.databaseLimit}` : ''})`,
     );
   }
-  // Phase D: a crewflow_worker login opens only the Worker rows; crewflow_app is compared with every runtime row (it may
-  // still be the Workers' login in per_scope mode — conservative).
+  // XD-05: the owner login (crewflow_owner), or any other login, opens every row; a crewflow_worker login (Phase D legacy
+  // global claim mode) opens only the Worker rows.
   const roleTotal = capacity.login === 'crewflow_worker' ? plan.workerRoleTotal : plan.runtimeRoleTotal;
   if (capacity.roleLimit !== null && capacity.roleLimit >= 0 && roleTotal > capacity.roleLimit) {
     problems.push(`the runtime login can open up to ${roleTotal} connections but its connection limit is ${capacity.roleLimit}`);

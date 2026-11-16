@@ -18,6 +18,7 @@ import { assertRuntimeDatabaseIdentity, RuntimeDbError } from './database/typeor
 import { runDatabaseBootGates } from './database/boot-checks/database-boot-gates';
 import { installSessionRoleResetOnDataSource } from './database/postgres/session-role-reset';
 import { startSecurityPostureMonitoring } from './engine/core-modules/health/security-readiness';
+import { installHttpFirstShutdown } from './engine/utils/http-first-shutdown';
 
 /** Refuses to start: prints a sanitised reason and exits non-zero before any listener or connection is opened. */
 function refuseStartup(error: unknown): never {
@@ -55,8 +56,10 @@ async function bootstrap(): Promise<void> {
   await assertHwsStartupInvariants(app.get(DataSource), environmentService.get('HWS_RUNTIME_ENABLED')).catch(refuseStartup);
   // SIGTERM/SIGINT -> stop accepting connections, let in-flight requests finish, then close Postgres/Redis/BullMQ
   // (each provider's onModuleDestroy). Without this Node exits immediately and drops in-flight requests and connections.
-  app.enableShutdownHooks();
-  releaseEarlyBootSignalGuard(); // Nest's own SIGTERM/SIGINT handling is now installed
+  // XR-09: in THAT order. Nest's own enableShutdownHooks() quits the Redis/queue clients first and closes HTTP last, so the
+  // throttler answered 503 to every credential request during the stop window (engine/utils/http-first-shutdown.ts).
+  installHttpFirstShutdown(app);
+  releaseEarlyBootSignalGuard(); // the HTTP-first SIGTERM/SIGINT handling is now installed
 
   // SEC-03 / PHASE 11 EDGE-01: without `trust proxy`, Express ignores
   // `X-Forwarded-For` entirely (default `trust proxy = false`), so every

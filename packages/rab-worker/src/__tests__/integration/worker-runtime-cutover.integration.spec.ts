@@ -12,6 +12,7 @@ import { runTokenCleanupCycle } from '../../queues/rab-maintenance/token-cleanup
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
 import { businessSchema, hwsRuntimeOn } from './helpers/hws-fixtures';
+import { businessTables } from '@rab/server/engine/core-modules/tenant/business-tables';
 
 /**
  * Twenty-style worker runtime cutover (see HYPER-WORKSPACE-PHASE3-FOUNDATION.md). The worker runs as rab_app. These tests check the
@@ -132,14 +133,14 @@ describe('worker runtime cutover (integration)', () => {
   describe('worker actor marker: workspace isolation for Staff rows', () => {
     it('Workspace A worker context sees Workspace A Staff', async () => {
       const ids = await tenantContext.runInTenantContext(workerCtx(orgA.id, managerA.workspaceId!), (m) =>
-        m.query<Array<{ id: string }>>(`SELECT id FROM staff_profile`),
+        m.query<Array<{ id: string }>>(`SELECT id FROM ${businessTables(m).staff_profile}`),
       );
       expect(ids.map((r) => r.id)).toContain(staffA.profileId);
     });
 
     it('Workspace A worker context cannot read Workspace B Staff', async () => {
       const rows = await tenantContext.runInTenantContext(workerCtx(orgA.id, managerA.workspaceId!), (m) =>
-        m.query<Array<{ id: string }>>(`SELECT id FROM staff_profile WHERE id = $1`, [staffB.profileId]),
+        m.query<Array<{ id: string }>>(`SELECT id FROM ${businessTables(m).staff_profile} WHERE id = $1`, [staffB.profileId]),
       );
       expect(rows).toHaveLength(0);
     });
@@ -181,7 +182,7 @@ describe('worker runtime cutover (integration)', () => {
     it('a human context (no actor marker) sees no Staff row it is not entitled to — the worker path does not widen it', async () => {
       const rows = await tenantContext.runInTenantContext(
         { organisationId: orgA.id, workspaceId: managerA.workspaceId!, userId: '', role: '' },
-        (m) => m.query<Array<{ id: string }>>(`SELECT id FROM staff_profile`),
+        (m) => m.query<Array<{ id: string }>>(`SELECT id FROM ${businessTables(m).staff_profile}`),
       );
       expect(rows).toHaveLength(0);
     });
@@ -210,7 +211,7 @@ describe('worker runtime cutover (integration)', () => {
       await expect(
         tenantContext.runInTenantContext(workerCtx(orgA.id, managerA.workspaceId!), (m) =>
           m.query(
-            `INSERT INTO staff_profile (organisation_id, user_id, staff_ref, created_by, workspace_id, employment_status)
+            `INSERT INTO ${businessTables(m).staff_profile} (organisation_id, user_id, staff_ref, created_by, workspace_id, employment_status)
              VALUES ($1, $2, $3, $2, $4, 'active')`,
             [orgA.id, managerA.userId, `cutover-${randomUUID().slice(0, 8)}`, managerA.workspaceId],
           ),
@@ -221,12 +222,12 @@ describe('worker runtime cutover (integration)', () => {
     it('a worker context cannot UPDATE or DELETE a Workspace A staff_profile row (count 0 or denied)', async () => {
       const updated = await tenantContext
         .runInTenantContext(workerCtx(orgA.id, managerA.workspaceId!), (m) =>
-          m.query(`UPDATE staff_profile SET staff_ref = staff_ref WHERE id = $1 RETURNING id`, [staffA.profileId]),
+          m.query(`UPDATE ${businessTables(m).staff_profile} SET staff_ref = staff_ref WHERE id = $1 RETURNING id`, [staffA.profileId]),
         )
         .catch(() => 'denied');
       const deleted = await tenantContext
         .runInTenantContext(workerCtx(orgA.id, managerA.workspaceId!), (m) =>
-          m.query(`DELETE FROM staff_profile WHERE id = $1 RETURNING id`, [staffA.profileId]),
+          m.query(`DELETE FROM ${businessTables(m).staff_profile} WHERE id = $1 RETURNING id`, [staffA.profileId]),
         )
         .catch(() => 'denied');
       expect(updated === 'denied' || (updated as unknown[][])[0]?.length === 0).toBe(true);
@@ -234,7 +235,7 @@ describe('worker runtime cutover (integration)', () => {
       // The row survived: read it back through Manager A's own human context (the owner cannot see FORCE-RLS rows without one).
       const stillThere = await tenantContext.runInTenantContext(
         { organisationId: orgA.id, workspaceId: managerA.workspaceId!, userId: managerA.userId, role: '' },
-        (m) => m.query(`SELECT id FROM staff_profile WHERE id = $1`, [staffA.profileId]),
+        (m) => m.query(`SELECT id FROM ${businessTables(m).staff_profile} WHERE id = $1`, [staffA.profileId]),
       );
       expect(stillThere).toHaveLength(1);
     });

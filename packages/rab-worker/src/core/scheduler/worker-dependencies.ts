@@ -29,9 +29,9 @@ import type { TimerTriggerArmProducer } from '../../queues/rab-timer-triggers/ti
  */
 export interface WorkerJobDependencies {
   logger: Logger;
-  /** Pooled crewflow_app (DATABASE_URL), the shared TypeORM module's DataSource. */
+  /** Pooled runtime login (PG_DATABASE_URL), the shared TypeORM module's DataSource. */
   runtimeDataSource: DataSource;
-  /** Direct crewflow_app (DATABASE_DIRECT_URL ?? DATABASE_URL) — session advisory locks inside the report/cleanup cycles. */
+  /** Direct connection, same login (the factory's lock endpoint: PG_DATABASE_URL) — session advisory locks inside the report/cleanup cycles. */
   directDataSource: DataSource;
   tenantContext: TenantContextService;
   auditService: AuditService;
