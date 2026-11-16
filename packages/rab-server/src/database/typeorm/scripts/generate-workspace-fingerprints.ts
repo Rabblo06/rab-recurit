@@ -319,13 +319,21 @@ async function verify(major: number): Promise<void> {
     // On a mismatch the MEASURED value is printed (a fingerprint is a catalog hash, not a secret): a new structure level's
     // declared value is reviewed from this line, like FINGERPRINTS_APPEND_JSON for a module.
     const verdict = (got: string | null) => (want && got === want ? 'OK' : `MISMATCH (measured ${got ?? 'none'}, declared ${want ?? 'none'})`);
-    if (level > L) results.push(`v${L} -> structure level ${level} ${verdict(await upgradeToCodeLevel(c, legacy))}`);
+    if (level > L) {
+      results.push(`v${L} -> structure level ${level} ${verdict(await upgradeToCodeLevel(c, legacy))}`);
+      log(`  ${results[results.length - 1]}`);
+    }
 
     const ts = await seedWorkspace(c, `fpv-ts-${RUN}`);
     await c.query('SET ROLE crewflow');
-    const tsRes = await provisionWorkspaceSchema(c, ts.id);
+    // A refused provision (e.g. the declared value of a new level is not yet known) is a result line, never an early exit,
+    // so the upgrade-path measurement above is still printed.
+    const tsOutcome = await provisionWorkspaceSchema(c, ts.id).then(
+      (r) => r.outcome as string,
+      (e: Error) => `REFUSED (${e.message.replace(/postgres(ql)?:\/\/\S+/g, '<url>').slice(0, 120)})`,
+    );
     await c.query('RESET ROLE');
-    results.push(`typescript ${tsRes.outcome} ${verdict(await atLevel(ts.id))}`);
+    results.push(`typescript ${tsOutcome} ${verdict(await atLevel(ts.id))}`);
 
     // The server path as the RUNTIME login, which is the owner login (owner-login architecture); no other role is unlocked.
     const srv = await seedWorkspace(c, `fpv-srv-${RUN}`);
