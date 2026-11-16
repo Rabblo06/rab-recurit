@@ -2084,6 +2084,39 @@ describeIfDb('venue manager scoping (integration)', () => {
         expect(beyond.body.code).toBe('CLOCK_IN_TOO_EARLY_ABSOLUTE');
       });
 
+      it('the floor is absolute on correct(): a clockOutAt or breakMinutes correction is refused (422) when the stored clock-in is now beyond it, nothing written', async () => {
+        const s = await recordedSeat();
+        const start = await seatStartOf(s.shiftId);
+        const stored = new Date(start.getTime() - 12 * HOUR).toISOString();
+        expect((await correct(s.vmToken, s.attendanceId!, { field: 'clockInAt', newValue: stored, reason, confirmUnusualClockIn: true })).status).toBe(201);
+        // Inside the floor, the other fields still correct normally.
+        expect((await correct(s.vmToken, s.attendanceId!, { field: 'breakMinutes', newValue: '40', reason })).status).toBe(201);
+        // The seat (and shift) start then moves an hour later: the confirmed stored clock-in is 13 h before it.
+        const t = await tablesOf(s.shiftId);
+        await adminDataSource.query(`UPDATE ${t.shift} SET starts_at = starts_at + interval '1 hour' WHERE id = $1`, [s.shiftId]);
+        await adminDataSource.query(`UPDATE ${t.seat} SET period = tstzrange(lower(period) + interval '1 hour', upper(period), '[)') WHERE shift_id = $1`, [s.shiftId]);
+        const before = await stateOf(s.shiftId, s.attendanceId!);
+        const [{ ends_at: endsAt }] = await adminDataSource.query(`SELECT ends_at FROM ${t.shift} WHERE id = $1`, [s.shiftId]);
+        const bodies = [
+          { field: 'clockOutAt', newValue: new Date((endsAt as Date).getTime() - 30 * MIN).toISOString(), reason },
+          { field: 'breakMinutes', newValue: '45', reason },
+        ];
+        for (const body of bodies) {
+          for (const extra of [{}, { confirmUnusualClockIn: true }]) {
+            const res = await correct(s.vmToken, s.attendanceId!, { ...body, ...extra });
+            expect(res.status).toBe(422);
+            expect(res.body).toMatchObject({ code: 'CLOCK_IN_TOO_EARLY_ABSOLUTE', earliestPossible: new Date(start.getTime() + HOUR - 12 * HOUR).toISOString() });
+          }
+        }
+        const after = await stateOf(s.shiftId, s.attendanceId!);
+        expect(after.row).toEqual(before.row);
+        expect(after.corrections).toHaveLength(before.corrections.length);
+        expect(after.audits).toHaveLength(before.audits.length);
+        // Re-sending the values already stored is still the idempotent no-op (201, nothing written).
+        expect((await correct(s.vmToken, s.attendanceId!, { field: 'breakMinutes', newValue: '40', reason })).status).toBe(201);
+        expect((await stateOf(s.shiftId, s.attendanceId!)).audits).toHaveLength(before.audits.length);
+      });
+
       it('the future-time and clock-out rules still apply, even with the confirmation', async () => {
         const s = await recordedSeat();
         const before = await stateOf(s.shiftId, s.attendanceId!);
