@@ -8038,3 +8038,25 @@ Reversal:   A shorter QR_MAX_AGE_DAYS, or rotating QRs automatically on schedule
   - hws-startup-guard.spec: the HWS-off boot refusal;
   - the security-posture and semantic goldens (PG16/17/18), the R4 secure-owner invariants, check-rls-coverage
     (`hws_cutover_activation` forced), and the restricted-migrator drift review.
+
+## O-2 — CLI pre-auth reads and the platform_admin grant on the owner login under M-T1 FORCE RLS (branch fix/o2-cli-force-rls, 2026-11-16; no new SQL)
+
+- **Asset:** platform-wide administrator authority (`core.platform_admin`); every tenant's `core."user"` /
+  `core.organisation` / `core.manager_workspace` rows.
+- **Defect fixed (availability, not a leak):** since M-T1 these tables are FORCE'd with an owner-only definer policy. The CLI
+  login `crewflow_owner` acting as itself sees zero rows with no tenant context, so `grant-platform-admin` answered "No active
+  user found" for every real user (the documented recovery path when every admin is revoked was dead), `seed` failed on the
+  organisation insert, and `storage:migrate-local` discovered nothing and exited 0. Proved live on a disposable database
+  (`cli-owner-login-force-rls.integration.spec.ts`, failing before the fix).
+- **Control now:** `command/ops/secure-owner-acting.ts` narrows ONE transaction with `SET LOCAL ROLE rab_secure_owner` (a
+  frozen literal) after checking the session is the owner login acting as itself, not SUPERUSER/BYPASSRLS, and allowed to
+  SET the role; it checks `current_user` afterwards. Lookups run READ ONLY. The grant row is the only write made as the owner;
+  `RESET ROLE` (checked) follows before the session reset and the audit entry, which run as the login with tenant context.
+  This is exactly the step `preauth-force-sql.ts` prescribes for operator scripts and what the three ops commands already do.
+- **Threats:** *a request path reaching it* — only CLI commands import it; main.ts boot gate 1 limits every CLI command to
+  `crewflow_owner`, and the API/Worker never run commands. *Role left on a pooled connection* — `SET LOCAL` ends with the
+  transaction, the pool's checkout `RESET ROLE` runs anyway, and a spec asserts the connection acts as the login after the
+  grant. *Wrong person granted* — unchanged: soft-deleted users are excluded, an ambiguous email refuses, `--org` that does not
+  match refuses (both abuse cases tested on the real login).
+- **Residual (unchanged, owner item O-8):** `bootstrap-admin` exits 0 on `REFUSED_AMBIGUOUS_*` (proved live); not changed here.
+  `storage:migrate-local --apply` (S3 only) was not exercised: its writes run as the login with tenant context bound.
