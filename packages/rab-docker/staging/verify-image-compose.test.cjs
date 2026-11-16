@@ -172,8 +172,20 @@ const deployed = (mutate = () => {}, options = {}) => {
   mutate(m.variantFiles);
   return checkDeployment(m.variantFiles, m.production, {}, options);
 };
-/** A real, empty host directory for the HWS cutover backup bind (the deployed-model rule requires an existing directory). */
-const backupDir = require('node:fs').mkdtempSync(require('node:path').join(require('node:os').tmpdir(), 'crewflow-hws-backup-'));
+/**
+ * A real host directory for the HWS cutover backup bind (the deployed-model rule requires an existing directory). Created next
+ * to this file, not in os.tmpdir(): /tmp is on the rule's denylist (re-check R1). Removed when the run ends.
+ */
+const testDirs = [];
+const testDir = (prefix) => {
+  const d = require('node:fs').mkdtempSync(require('node:path').join(__dirname, `.test-${prefix}-`));
+  testDirs.push(d);
+  return d;
+};
+process.on('exit', () => {
+  for (const d of testDirs) require('node:fs').rmSync(d, { recursive: true, force: true });
+});
+const backupDir = testDir('hws-backup');
 const withBackupDir = (dir) => (v) => {
   v.services['rab-api'].volumes = v.services['rab-api'].volumes.map((x) => (x.target === '/run/crewflow/hws-cutover-backup' ? { ...x, source: dir } : x));
 };
@@ -245,6 +257,35 @@ test('L2: a backup source that is neither /dev/null nor an existing directory, o
 });
 test('L2: an overridden backup marker path is refused (it is committed on rab-api)', { skip }, () => {
   assertRefused(deployed((v) => { v.services['rab-api'].environment.CREWFLOW_HWS_CUTOVER_BACKUP_MARKER = '/srv/elsewhere/marker.json'; }), /CREWFLOW_HWS_CUTOVER_BACKUP_MARKER is overridden/);
+});
+// Security re-check R1: the --env-file directories are protected too, /dev, /tmp and /boot are refused, and the directory
+// may hold only the marker and the dump(s).
+test('R1: the backup directory may not be an --env-file directory, nor an ancestor of one', { skip }, () => {
+  const fsx = require('node:fs');
+  const px = require('node:path');
+  const envDir = fsx.mkdtempSync(px.join(require('node:os').tmpdir(), 'crewflow-envfiles-'));
+  const envFile = px.join(envDir, 'compose.env');
+  fsx.writeFileSync(envFile, 'CREWFLOW_API_BIND=127.0.0.1\n');
+  const posix = (d) => d.split(px.sep).join('/');
+  assertRefused(deployed(withBackupDir(posix(envDir)), { envFiles: [envFile] }), /backup directory is an --env-file directory or an ancestor/);
+  assertRefused(deployed(withBackupDir(posix(px.dirname(envDir))), { envFiles: [envFile] }), /backup directory is an --env-file directory or an ancestor/);
+});
+test('R1: /dev (other than the /dev/null default) is refused', { skip }, () => {
+  assertRefused(deployed(withBackupDir('/dev')), /backup directory is under \/dev/);
+});
+test('R1: the backup directory holds only regular marker.json / *.dump files', { skip }, () => {
+  const fsx = require('node:fs');
+  const px = require('node:path');
+  const dir = testDir('hws-backup-ok');
+  fsx.writeFileSync(px.join(dir, 'marker.json'), '{}');
+  fsx.writeFileSync(px.join(dir, 'pre-cutover.dump'), 'PGDMP');
+  const posix = (d) => d.split(px.sep).join('/');
+  assert.deepEqual(deployed(withBackupDir(posix(dir))).filter((x) => /HWS cutover backup/.test(x)), []);
+  fsx.writeFileSync(px.join(dir, 'id_rsa'), 'not a dump');
+  assertRefused(deployed(withBackupDir(posix(dir))), /holds something other than regular marker\.json \/ \*\.dump files/);
+  fsx.rmSync(px.join(dir, 'id_rsa'));
+  fsx.mkdirSync(px.join(dir, 'nested.dump'));
+  assertRefused(deployed(withBackupDir(posix(dir))), /holds something other than regular marker\.json/);
 });
 test('L2: the committed default (/dev/null) passes the backup rule', { skip }, () => {
   assert.deepEqual(deployed().filter((x) => /HWS cutover backup/.test(x)), []);

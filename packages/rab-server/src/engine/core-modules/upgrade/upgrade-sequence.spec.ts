@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { commandStepName, instanceStepsForVersion, lastStepOfVersion, migrationsStepName, STEP_NAME_PATTERN, stepsForVersion, versionOfStep } from './upgrade-sequence';
 import { PUBLISHED_VERSION_STEPS } from './upgrade-commands/published-steps';
 import { CREWFLOW_PREVIOUS_VERSIONS, readAppVersion } from './upgrade-version';
@@ -39,6 +40,14 @@ describe('published versions keep their steps (security review of the 0.7.0 rele
       expect([v, PUBLISHED_VERSION_STEPS[v]]).toEqual([v, expect.any(Array)]);
       expect([v, stepsForVersion(v)]).toEqual([v, [...PUBLISHED_VERSION_STEPS[v]!]]);
     }
+  });
+
+  it('re-check R2: the steps of the PUBLISHED versions match a second, independent pin (sha256), so editing them needs two reviewed changes', () => {
+    // Update this hash ONLY when a release is published (its version appended to CREWFLOW_PREVIOUS_VERSIONS); never to edit an
+    // already published version's steps. (No CODEOWNERS file exists in this repository; adding one changes review rules for the
+    // whole repository and is a lead / owner decision, so the second pin lives here.)
+    const published = CREWFLOW_PREVIOUS_VERSIONS.map((v) => [v, PUBLISHED_VERSION_STEPS[v]]);
+    expect(createHash('sha256').update(JSON.stringify(published)).digest('hex')).toBe('a04747d5d4aee8904252735c6e32f6ea3d9c5f16f49078bafba72f1642a192b8');
   });
 
   it('the HWS cutover stays registered while 0.7.0 is the code version or a previous one', () => {

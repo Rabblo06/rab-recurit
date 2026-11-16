@@ -664,12 +664,15 @@ function hwsImageProblems(services, imageAppVersion, where) {
 }
 
 /**
- * Security review of the 0.7.0 release PR, L2: the rab-api HWS cutover backup bind. Its source is the operator's
- * (CREWFLOW_HWS_CUTOVER_BACKUP_DIR) and must be exactly /dev/null (unset), or an existing directory that is not the project
- * directory, CREWFLOW_SECRETS_DIR or an env file's directory (nor an ancestor of one), and not under /etc, /root, /home,
- * /proc or /sys. Read-only is enforced by the volume comparison. Pure apart from realpath / stat.
+ * Security review of the 0.7.0 release PR, L2 (+ re-check R1): the rab-api HWS cutover backup bind. Its source is the
+ * operator's (CREWFLOW_HWS_CUTOVER_BACKUP_DIR) and must be exactly /dev/null (unset), or an existing directory that:
+ *   - is not the project directory, CREWFLOW_SECRETS_DIR, a service env file's directory or a --env-file's directory (nor an
+ *     ancestor of one);
+ *   - is not under /etc, /root, /home, /proc, /sys, /dev, /tmp or /boot;
+ *   - holds only regular files (no symlink, no directory) named marker.json or *.dump.
+ * Read-only is enforced by the volume comparison. Pure apart from realpath / stat / readdir.
  */
-function backupBindProblems(services, { projectDirectory = null, secretsDir = null } = {}, where = '') {
+function backupBindProblems(services, { projectDirectory = null, secretsDir = null, envFiles = [] } = {}, where = '') {
   const out = [];
   const api = services?.['rab-api'];
   const norm = (p) => {
@@ -704,7 +707,18 @@ function backupBindProblems(services, { projectDirectory = null, secretsDir = nu
     }
     if (!isDir) out.push(`rab-api: the HWS cutover backup source is neither /dev/null nor an existing directory${where}`);
     const under = (dir) => source === dir || source.startsWith(`${dir}/`);
-    for (const dir of ['/etc', '/root', '/home', '/proc', '/sys']) if (under(dir)) out.push(`rab-api: the HWS cutover backup directory is under ${dir}${where}`);
+    for (const dir of ['/etc', '/root', '/home', '/proc', '/sys', '/dev', '/tmp', '/boot']) if (under(dir)) out.push(`rab-api: the HWS cutover backup directory is under ${dir}${where}`);
+    if (isDir) {
+      // Re-check R1: only the dump(s) and the marker; nothing else of the host is exposed through this mount.
+      let entries = [];
+      try {
+        entries = fs.readdirSync(source, { withFileTypes: true });
+      } catch {
+        out.push(`rab-api: the HWS cutover backup directory cannot be listed${where}`);
+      }
+      const stray = entries.filter((e) => !e.isFile() || !(e.name === 'marker.json' || /\.dump$/.test(e.name)));
+      if (stray.length) out.push(`rab-api: the HWS cutover backup directory holds something other than regular marker.json / *.dump files (${stray.length} entr${stray.length === 1 ? 'y' : 'ies'})${where}`);
+    }
     if (source === '/') out.push(`rab-api: the HWS cutover backup directory is the host root${where}`);
     const envDirs = [];
     for (const svc of Object.values(services ?? {})) {
@@ -717,6 +731,7 @@ function backupBindProblems(services, { projectDirectory = null, secretsDir = nu
       ['the project directory', norm(projectDirectory)],
       ['CREWFLOW_SECRETS_DIR', norm(secretsDir)],
       ...envDirs.map((d) => ['an env file directory', d]),
+      ...(envFiles ?? []).map((f) => norm(f)).filter(Boolean).map((f) => ['an --env-file directory', path.posix.dirname(f)]),
     ];
     for (const [label, dir] of protectedDirs) {
       if (!dir) continue;
@@ -726,12 +741,12 @@ function backupBindProblems(services, { projectDirectory = null, secretsDir = nu
   return out;
 }
 
-function checkDeployment(merged, production, envFileKeys = {}, { dockerRoot = undefined, imageAppVersion = null, projectDirectory = null, secretsDir = null } = {}) {
+function checkDeployment(merged, production, envFileKeys = {}, { dockerRoot = undefined, imageAppVersion = null, projectDirectory = null, secretsDir = null, envFiles = [] } = {}) {
   const problems = [];
   const fail = (m) => problems.push(m);
   const services = merged?.services ?? {};
   for (const pr of hwsImageProblems(services, imageAppVersion, ' in the deployed model')) fail(pr);
-  for (const pr of backupBindProblems(services, { projectDirectory, secretsDir }, ' in the deployed model')) fail(pr);
+  for (const pr of backupBindProblems(services, { projectDirectory, secretsDir, envFiles }, ' in the deployed model')) fail(pr);
   // Credential isolation in the deployed model (the same rules checkVariant applies to the committed file).
   for (const name of ['rab-api', 'rab-worker']) {
     const svc = services[name];
@@ -1013,6 +1028,7 @@ function environmentMode(argv) {
         imageAppVersion: imageAppVersionOf,
         projectDirectory,
         secretsDir: env.CREWFLOW_SECRETS_DIR ?? null,
+        envFiles: envFileArgs.map((f) => path.resolve(f)),
       }),
     ],
     lines: images.lines,
