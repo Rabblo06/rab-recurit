@@ -60,7 +60,12 @@ const loginOf = (url: string) => {
     return '';
   }
 };
-const RUN = MIGRATION_ON_BRANCH && loginOf(OWNER_URL) === 'crewflow_owner';
+// I-2: with the migration on the branch, a runtime login other than crewflow_owner is a CI misconfiguration, never a skip
+// (same rule as integrationTestDatabaseReady: fail loudly, so MD-1 … MD-10 can never drop out silently). Never prints a URL.
+if (MIGRATION_ON_BRANCH && loginOf(OWNER_URL) !== 'crewflow_owner') {
+  throw new Error('metadata-tables spec: TEST_DATABASE_URL must be the runtime login crewflow_owner (MetadataEngineTables1786721550000 is on this branch)');
+}
+const RUN = MIGRATION_ON_BRANCH;
 const describeIfMetadata = RUN ? describe : describe.skip;
 const RUN_ID = randomBytes(4).toString('hex');
 
@@ -825,6 +830,16 @@ describeIfMetadata('metadata engine E1: the five metadata tables, FORCE RLS, the
       expect((await attempt(c, nulF, nulFp)).code).toBe('23502');
       expect((await attempt(c, 'UPDATE core.field_metadata SET universal_identifier = $2 WHERE id = $1', [field.id, randomUUID()])).code).toBe('42501');
       expect((await attempt(c, 'UPDATE core.object_metadata SET universal_identifier = $2 WHERE id = $1', [obj.id, randomUUID()])).code).toBe('42501');
+      // I-1: the squat cases on the request role itself: a custom row holding a built-in (v8) identifier is refused by the kind CHECK
+      const [sqF, sqFp] = fieldInsert({ ...t, universal_identifier: v8(), object_metadata_id: A1.staff, type: 'TEXT', name: 'squatReq', label: 'Squat', physical_column: `cf_${custom}q`, is_custom: true });
+      expect(await attempt(c, sqF, sqFp)).toMatchObject({ code: '23514', constraint: 'field_metadata_universal_identifier_kind_ck' });
+      const [sqO, sqOp] = objectInsert({ ...t, universal_identifier: v8(), name_singular: 'squatThing', name_plural: 'squatThings', label_singular: 'S', label_plural: 'S', physical_table: `c_${custom}3`, is_custom: true, allows_custom_fields: true });
+      expect(await attempt(c, sqO, sqOp)).toMatchObject({ code: '23514', constraint: 'object_metadata_universal_identifier_kind_ck' });
+      // and taking the exact identifier of a standard field / object of this workspace fails the same way
+      const [stF, stFp] = fieldInsert({ ...t, universal_identifier: UID.staffRef, object_metadata_id: A1.staff, type: 'TEXT', name: 'squatRef', label: 'Squat', physical_column: `cf_${custom}r`, is_custom: true });
+      expect(await attempt(c, stF, stFp)).toMatchObject({ code: '23514', constraint: 'field_metadata_universal_identifier_kind_ck' });
+      const [stO, stOp] = objectInsert({ ...t, universal_identifier: UID.payroll, name_singular: 'squatPay', name_plural: 'squatPays', label_singular: 'S', label_plural: 'S', physical_table: `c_${custom}4`, is_custom: true, allows_custom_fields: true });
+      expect(await attempt(c, stO, stOp)).toMatchObject({ code: '23514', constraint: 'object_metadata_universal_identifier_kind_ck' });
     });
     await boundAsCrewflow(A1, async (c) => {
       // a built-in INSERT that forgets its identifier gets the v4 DEFAULT and is refused (fails closed, as before)
@@ -982,6 +997,10 @@ describeIfMetadata('metadata engine E1: the five metadata tables, FORCE RLS, the
 
     it('MD-10 (3) no access to another workspace: its rows are unreadable, untouchable and cannot be created (same and other organisation)', async () => {
       const before = { a2: await countsOf(A2.workspace), b1: await countsOf(B1.workspace) };
+      // I-4: the other workspaces really hold rows in every table, so "0 rows read / touched" below proves isolation, not emptiness
+      for (const [tag, counts] of Object.entries(before)) {
+        for (const tbl of METADATA_TABLES) expect({ tag, tbl, nonZero: counts[tbl]! > 0 }).toEqual({ tag, tbl, nonZero: true });
+      }
       const others = [A2, B1];
       const ws = others.map((o) => o.workspace);
       const r = await requestRolledBack(ctxOf(A1.org, A1.workspace, A1.user), async (m) => {
