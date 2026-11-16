@@ -302,8 +302,8 @@ async function bootstrap(): Promise<void> {
   // identity — see this file's own top doc comment.
   //   runtimeDataSource — pooled runtime login (via the shared TypeORM module). Discovery, scans, token/invite
   //                       cleanup, storage-catalogue enumeration, email.
-  //   directDataSource  — direct connection, same login (the factory's lock endpoint: PG_DATABASE_URL; legacy
-  //                       DATABASE_DIRECT_URL / DATABASE_URL outside production). Used ONLY where a session advisory lock
+  //   directDataSource  — direct connection, same login (the factory's lock endpoint: PG_DATABASE_URL; the Worker refuses
+  //                       the legacy DATABASE_DIRECT_URL / DATABASE_URL, never-in-runtime-env.ts). Used ONLY where a session advisory lock
   //                       needs connection affinity (the five lock-holding scans).
   const runtimeDataSource = appContext.get(DataSource);
   await assertRuntimeDbRole(runtimeDataSource, 'worker');

@@ -511,7 +511,7 @@ export async function runLockedMigrations(options: LockedMigrationOptions): Prom
         throw new Error(`${options.label}: a production apply run needs the per-release approval gate (CREWFLOW_MIGRATION_APPROVED). Nothing was applied. Refusing.`);
       }
     }
-    log(`gates passed after the lock: target=${guarded.target} role=${facts.currentUser} pending=${pendingBefore.length}`);
+    log(`gates passed after the lock: target=${guarded.target} source=${connection.source} role=${facts.currentUser} pending=${pendingBefore.length}`);
     if (mode === 'apply' && ownerLogin && ownerState && options.beforeApply) {
       await options.beforeApply({
         query,

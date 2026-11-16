@@ -8115,3 +8115,20 @@ Reversal:   A shorter QR_MAX_AGE_DAYS, or rotating QRs automatically on schedule
   accepted, 15 typos each refuse to boot; no value echoed; S3 on the helper; `AI_AGENTS_ENABLED` stays loose);
   `compose-owner-login.test.cjs` (X3.1 env-file lint and per-service check; the two pins of the old transform now pin
   `strictBoolean`).
+
+## X3.5-S6 — the Jest routing carries PG_DATABASE_URL only; legacy names warn under test (branch phase-x/x35-legacy-names-r1, PR #176, 2026-11-16, not merged)
+- **Asset:** the disposable test cluster's superuser URL, and the guarantee that test and CI runs never resolve a connection
+  through a deprecated name before release 2 refuses them.
+- **Change (release 1):** setupFiles set PG_DATABASE_URL to the validated TEST application URL and blank DATABASE_URL /
+  DATABASE_URL_UNPOOLED / DB_POOL_MAX (a DB_POOL_MAX value carries over to PG_POOL_MAX_CONNECTIONS when that is unset), so the
+  superuser URL no longer rides in the elevated legacy name and the factory resolves no elevated endpoint under Jest; the admin
+  connection comes only from the validated pair. The Worker-login switch writes PG_DATABASE_URL. pg-config's deprecation
+  warnings print under NODE_ENV=test too, and both Jest globalSetups refuse a routed environment (including what a later
+  `.env` load would add) that still holds a legacy name; release 1 refuses nothing that was accepted before.
+  `PG_LEGACY_NAMES_STRICT=true` (opt-in, set in CI on ci-security's check-rls step and ci-migration-security's two harness
+  steps) refuses every legacy name outside production. Spawned runtime children drop the guard-written PG_DATABASE_URL and get
+  their URL explicitly. `assertDirectLockUrl` (DBR-07) removed; the factory's documented-pooler denylist is the one rule.
+- **Unchanged:** every X1.8 / X1.9 guard rule, every production and runtime refusal of the legacy names.
+- **Abuse cases:** `test-database-guard.spec.ts` (X3.5-S6 and review #176 cases), `pg-config.spec.ts` (strict switch, warnings
+  under test), `integration-test-database-gate.spec.ts` (no spec reads the blanked DATABASE_URL), `runtime-child-env.spec.ts`.
+- **Release 2 (S8):** the fallbacks are removed and the legacy names refused everywhere; the strip lists keep every name.

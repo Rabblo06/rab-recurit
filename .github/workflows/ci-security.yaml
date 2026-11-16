@@ -99,7 +99,8 @@ jobs:
             npx ts-node --transpile-only -P packages/rab-server/tsconfig.app.json \
             packages/rab-server/src/database/typeorm/scripts/migrate/twenty/twenty-migrate.ts
       - name: FORCE RLS coverage and the owner-login posture as crewflow_owner
-        run: PG_DATABASE_URL="$RLS_OWNER_URL" yarn check-rls
+        # X3.5-S6 strict switch: this step must never resolve a legacy database name (DATABASE_URL, ...).
+        run: PG_LEGACY_NAMES_STRICT=true PG_DATABASE_URL="$RLS_OWNER_URL" yarn check-rls
       - name: Security posture golden (exact)
         run: |
           POSTURE_DATABASE_URL="$RLS_ADMIN_URL" npx ts-node --transpile-only -P packages/rab-server/tsconfig.app.json \

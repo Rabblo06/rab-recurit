@@ -37,6 +37,8 @@ const PARENT: NodeJS.ProcessEnv = {
   TEST_DATABASE_WORKER_URL: APP,
   DATABASE_URL: APP,
   DATABASE_URL_UNPOOLED: ADMIN,
+  // X3.5-S6: setupFiles route the application URL here now; a spawned child never inherits it (RUNTIME_CHILD_STRIPPED_NAMES).
+  PG_DATABASE_URL: APP,
   MIGRATION_SECURITY_ADMIN_URL: MIGRATION_ADMIN,
   ...ROLE_PASSWORDS,
   X35_ALIAS_OF_ADMIN: ADMIN.replace('postgres://', 'postgresql://'),

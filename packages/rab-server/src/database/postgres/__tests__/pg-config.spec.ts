@@ -3,6 +3,7 @@ import {
   isPgProductionEnvironment,
   PgConfigError,
   PgProcessRole,
+  presentLegacyPgEnvNames,
   readPrimaryDatabaseUrl,
   readReplicaDatabaseUrl,
   resolvePgEnvironment,
@@ -220,16 +221,48 @@ describe('pg-config: pooler policy (P4)', () => {
 });
 
 describe('pg-config: warnings', () => {
-  it('prints each warning once per process, names only, and stays silent under NODE_ENV=test', () => {
+  it('prints each warning once per process, names only, and is NOT silent under NODE_ENV=test (X3.5-S6, DBR-08)', () => {
     const r = resolvePgEnvironment({ DATABASE_URL: APP });
+    expect(r.warnings.join('\n')).toMatch(/DATABASE_URL is deprecated/);
+    expect(r.warnings.join('\n')).not.toContain(SECRET);
+    // The once-per-process set is module-wide, so this case uses a warning no other case can have emitted already.
+    const unique = { ...r, warnings: ['X3.5-S6 emit-once probe (pg-config.spec)'] };
     const lines: string[] = [];
-    emitPgWarnings(r, { NODE_ENV: 'test' }, (l) => lines.push(l));
-    expect(lines).toEqual([]);
-    emitPgWarnings(r, { NODE_ENV: 'development' }, (l) => lines.push(l));
-    emitPgWarnings(r, { NODE_ENV: 'development' }, (l) => lines.push(l));
+    emitPgWarnings(unique, { NODE_ENV: 'test' }, (l) => lines.push(l));
+    expect(lines).toEqual(['[pg-config] warning: X3.5-S6 emit-once probe (pg-config.spec)']);
+    emitPgWarnings(unique, { NODE_ENV: 'development' }, (l) => lines.push(l));
+    emitPgWarnings(unique, { NODE_ENV: 'test' }, (l) => lines.push(l));
     expect(lines).toHaveLength(1);
-    expect(lines[0]).toMatch(/^\[pg-config\] warning: DATABASE_URL is deprecated/);
-    expect(lines.join('\n')).not.toContain(SECRET);
+  });
+
+  it('X3.5-S6 CI strict switch: PG_LEGACY_NAMES_STRICT=true refuses every legacy name outside production too (names only)', () => {
+    for (const name of ['DATABASE_URL', 'DATABASE_URL_UNPOOLED', 'DATABASE_DIRECT_URL', 'DB_POOL_MAX']) {
+      const value = name === 'DB_POOL_MAX' ? '5' : APP;
+      const message = refusal({ PG_DATABASE_URL: APP, [name]: value, PG_LEGACY_NAMES_STRICT: 'true' }, { processRole: 'cli' });
+      expect(message).toMatch(new RegExp(`PG_LEGACY_NAMES_STRICT=true refuses the legacy database variable\\(s\\) ${name}\\.`));
+      expect(message).not.toContain(SECRET);
+    }
+    // Off (unset / false): release-1 behaviour, the legacy name is still accepted with a warning.
+    for (const strict of [undefined, 'false', '']) {
+      const r = resolvePgEnvironment({ DATABASE_URL: APP, PG_LEGACY_NAMES_STRICT: strict }, { processRole: 'cli' });
+      expect(r.primary.source).toBe('DATABASE_URL');
+      expect(r.warnings.join('\n')).toMatch(/DATABASE_URL is deprecated/);
+    }
+    // On with only PG_DATABASE_URL: nothing changes. An empty legacy value counts as unset (the routed Jest environment).
+    expect(resolvePgEnvironment({ PG_DATABASE_URL: APP, DATABASE_URL: '', PG_LEGACY_NAMES_STRICT: 'true' }, { processRole: 'cli' }).warnings).toEqual([]);
+    // Fail closed on a typo, never silently off.
+    expect(refusal({ PG_DATABASE_URL: APP, PG_LEGACY_NAMES_STRICT: 'yes' }, { processRole: 'cli' })).toMatch(/PG_LEGACY_NAMES_STRICT must be exactly true or false/);
+  });
+
+  it('presentLegacyPgEnvNames lists the legacy names that hold a value (empty counts as unset), names only', () => {
+    expect(presentLegacyPgEnvNames({ PG_DATABASE_URL: APP })).toEqual([]);
+    expect(presentLegacyPgEnvNames({ PG_DATABASE_URL: APP, DATABASE_URL: '', DATABASE_URL_UNPOOLED: '  ' })).toEqual([]);
+    expect(presentLegacyPgEnvNames({ DATABASE_URL: APP, DATABASE_URL_UNPOOLED: APP, DATABASE_DIRECT_URL: APP, DB_POOL_MAX: '5' })).toEqual([
+      'DATABASE_URL',
+      'DATABASE_URL_UNPOOLED',
+      'DATABASE_DIRECT_URL',
+      'DB_POOL_MAX',
+    ]);
   });
 });
 

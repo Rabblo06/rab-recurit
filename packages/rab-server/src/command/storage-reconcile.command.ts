@@ -14,7 +14,7 @@ import {
 } from '../engine/worker-shared/maintenance-catalogue';
 import { TenantContextService } from '../engine/core-modules/tenant/tenant-context.service';
 import { assertRuntimeDbRole, RuntimeDbIdentity } from '../engine/utils/assert-runtime-db-role';
-import { createPgClient, detectTransactionPooler, resolvePgEnvironmentCached } from '../database/postgres';
+import { createPgClient, resolvePgEnvironmentCached } from '../database/postgres';
 
 interface Options {
   checkBytes?: boolean;
@@ -49,30 +49,9 @@ const LOCK_POLL_MS = 500;
 /** CLI exit code when the lock could not be taken within the wait (1 stays reserved for "integrity problems found"). */
 export const RECONCILE_LOCKED_EXIT_CODE = 3;
 
-/**
- * Phase A review F1: the reconcile lock is a SESSION advisory lock, which a transaction-mode pooler (`-pooler` host,
- * e.g. rab-api's pooled URL) can neither hold nor release reliably — the unlock may reach another backend (leak) or
- * a second client may re-enter the same backend's lock (no exclusion). Refuse such a URL before connecting; the error
- * names the variables only, never the URL. Phase B: the lock connection now comes from the connection factory, which
- * applies the full documented-pooler denylist (pg-url-policy.ts) to every session-affine connection; this URL-level
- * check is the same rule for callers that only hold a string.
- */
-export function assertDirectLockUrl(url: string): void {
-  let host = '';
-  let port = 5432;
-  try {
-    const parsed = new URL(url);
-    host = parsed.hostname;
-    port = parsed.port ? Number(parsed.port) : 5432;
-  } catch {
-    throw new Error('storage reconciliation: PG_DATABASE_URL / DATABASE_DIRECT_URL / DATABASE_URL is not a valid connection URL');
-  }
-  if (/-pooler\./.test(host) || detectTransactionPooler(host, port)) {
-    throw new Error(
-      'storage reconciliation: the lock needs a direct (non -pooler) database connection; point PG_DATABASE_URL (or, outside production, the deprecated DATABASE_DIRECT_URL) at a direct host',
-    );
-  }
-}
+// X3.5-S6 (audit DBR-07): the URL-string check `assertDirectLockUrl` was deleted (only its own spec called it). The lock
+// connection comes from the connection factory (`endpoint: 'lock'`, session affinity), which refuses every documented
+// transaction-pooler shape before connecting: the factory's documented-pooler denylist (pg-url-policy.ts, create-pg-pool.ts), names only.
 
 /** Why the last `run()` did not reconcile (nothing else ever sets it). */
 export type ReconcileSkipReason = 'locked';
@@ -279,8 +258,8 @@ export class StorageReconcileCommand extends CommandRunner {
    * guard as every other runtime connection. Returns the connection holding the lock, or null when the wait ran out.
    */
   private async acquireReconcileLock(waitMs: number, runtimeIdentity?: RuntimeDbIdentity): Promise<Client | null> {
-    // Phase B: the factory's lock connection (PG_DATABASE_URL; legacy DATABASE_DIRECT_URL / DATABASE_URL outside
-    // production), with explicit TLS and the pooler denylist (session affinity). Short timeouts as before: lock calls
+    // Phase B: the factory's lock connection (PG_DATABASE_URL; the deprecated DATABASE_DIRECT_URL / DATABASE_URL are still
+    // accepted outside production until X3.5-S8), with explicit TLS and the pooler denylist (session affinity). Short timeouts as before: lock calls
     // are instantaneous.
     const client = createPgClient(resolvePgEnvironmentCached(process.env), {
       endpoint: 'lock',
