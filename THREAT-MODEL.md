@@ -8413,3 +8413,36 @@ Reversal:   Lower CLOCK_IN_CONFIRM_FLOOR_HOURS, or require a second approver (pa
   delivered once); W1–W9 unchanged. rab-server `member-invitation-liveness.spec` (the shared decision table, including the
   fail-closed cases and the alias refusal) and `member-invitation.integration.spec` X3b (workspace archived after sending:
   resolve and accept both get the generic 400, no account is created, the invitation is not superseded).
+
+## O-2 — CLI pre-auth reads and the platform_admin grant on the owner login under M-T1 FORCE RLS (branch fix/o2-cli-force-rls, 2026-11-16; PR #183; no new SQL)
+
+- **Asset:** platform-wide administrator authority (`core.platform_admin`); every tenant's `core."user"` /
+  `core.organisation` / `core.manager_workspace` rows; the legacy-file link columns.
+- **Defect fixed (availability, not a leak):** since M-T1 these tables are FORCE'd with an owner-only definer policy. The CLI
+  login `crewflow_owner` acting as itself sees zero rows with no tenant context, so `grant-platform-admin` answered "No active
+  user found" for every real user (the documented recovery path when every admin is revoked was dead), `seed` failed on the
+  organisation insert, and `storage:migrate-local` discovered nothing and exited 0. Proved live on a disposable database
+  (`cli-owner-login-force-rls.integration.spec.ts`, failing before the fix).
+- **Control now:** `command/ops/secure-owner-acting.ts` `withSecureOwner(manager, fn)` narrows the caller's open transaction
+  with `SET LOCAL ROLE rab_secure_owner` (a frozen literal) for `fn` only, after checking: the process declared the `cli` role,
+  a transaction is open, the session is the owner login acting as itself, not SUPERUSER/BYPASSRLS, and may SET the role; it
+  checks `current_user` (and READ ONLY when asked) after narrowing and `RESET ROLE` (checked) after `fn` resolves. Lookups
+  run in a READ ONLY transaction. The only writes made as the owner are the `platform_admin` grant row and seed's
+  organisation; the session reset (CF-07) and the audit entries run as the login with tenant context. Every grant path is
+  audited (`via: bootstrap_cli` / `via: seed`, actor NULL). This is the step `preauth-force-sql.ts` prescribes for operator
+  scripts and what the three ops commands already do.
+- **Barrier (the login is NOT it):** the API and the Worker connect with the same `crewflow_owner` login, so what keeps this
+  off a request path is (1) the process-role check — only `command/main.ts` declares `cli`, and the step refuses `api` /
+  `worker` / any other role (unit + live tests), and (2) a static test (`secure-owner-acting.spec.ts`) that fails when anything
+  outside `src/command/**` imports the helper. Neither stops injected SQL (G-02, unchanged).
+- **Threats:** *role left on a connection* — `SET LOCAL` ends with the transaction and the step resets explicitly; proved on
+  ONE held connection (no pool checkout in between), with a negative control showing that probe does see a session-level role
+  that survives COMMIT (`secure-owner-acting.integration.spec.ts`). *Wrong person granted* — unchanged: soft-deleted users
+  excluded, an ambiguous email refuses, a non-matching `--org` refuses (abuse cases on the real login). *False migration
+  record* — `storage:migrate-local --apply` link / clear UPDATEs are conditional (`... AND <col> IS NULL RETURNING id`) and
+  must change exactly one row, otherwise the stored_file registration and the `file.migration_completed` audit roll back and
+  the outcome is `failed` (unit-tested); `manager_workspace` logos are reported `unsupported` (exit 1 under `--apply`) and never
+  touched, so no person's id is ever bound into `rab.user_id` to satisfy that table's write policy.
+- **Residual:** `bootstrap-admin` exits 0 on `REFUSED_AMBIGUOUS_*` (proved live; owner item O-8, unchanged). The `--apply`
+  happy path against real S3 was not run (no S3 in the disposable run); `manager_workspace` legacy logos stay unmigrated
+  until a reviewed path exists. `seed` keeps no production target refusal (owner decision X1.3).
