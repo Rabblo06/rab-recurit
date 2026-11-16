@@ -24,6 +24,7 @@ import { integrationTestDatabaseReady } from '../../database/typeorm/core/integr
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { businessSchema } from './helpers/hws-fixtures';
 import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
+import { businessTables } from '../../engine/core-modules/tenant/business-tables';
 
 /**
  * Part C1 (HWS-AUDIT.md §0.1): the two org-level paths that read workspace tables from a workspace-less (or other-workspace)
@@ -32,8 +33,8 @@ import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
  *   4.6  DELETE /rest/v1/managers/:id — the protected-history check covers EVERY schema the target can have rows in (each
  *        workspace schema of the organisation and the `core` copies). Owner 0g: only a never-activated invite with no
  *        history in any of them is hard-deleted; any history (or a schema that cannot be checked) means a soft delete.
- * Real Postgres, RLS on, real HTTP routes, no mocks. Fixture rows are written through the tenant context (unqualified
- * tables, routed like the product's own writes) or, for the pre-cutover `core` copies, explicitly into `core.*`.
+ * Real Postgres, RLS on, real HTTP routes, no mocks. Fixture rows are written through the tenant context (tables named
+ * through businessTables(m), routed like the product's own writes) or, for the pre-cutover `core` copies, explicitly into `core.*`.
  */
 const RUN = integrationTestDatabaseReady();
 const describeIfDb = RUN ? describe : describe.skip;
@@ -64,7 +65,7 @@ describeIfDb('HWS C1: org-level paths over workspace tables (integration)', () =
   async function venueInWorkspace(owner: TestIdentity, createdBy: string, name: string): Promise<string> {
     return tenantContext.runInTenantContext({ organisationId: orgId, workspaceId: owner.workspaceId, userId: owner.userId, role: '' }, async (m) => {
       const [row] = await m.query<Array<{ id: string }>>(
-        `INSERT INTO venue (organisation_id, name, created_by, workspace_id) VALUES ($1, $2, $3, $4) RETURNING id`,
+        `INSERT INTO ${businessTables(m).venue} (organisation_id, name, created_by, workspace_id) VALUES ($1, $2, $3, $4) RETURNING id`,
         [orgId, name, createdBy, owner.workspaceId],
       );
       return row!.id;
@@ -84,7 +85,7 @@ describeIfDb('HWS C1: org-level paths over workspace tables (integration)', () =
   async function staffHistoryInWorkspace(owner: TestIdentity, userId: string, venueId: string): Promise<string> {
     return tenantContext.runInTenantContext({ organisationId: orgId, workspaceId: owner.workspaceId, userId: owner.userId, role: '' }, async (m) => {
       const [profile] = await m.query<Array<{ id: string }>>(
-        `INSERT INTO staff_profile (organisation_id, user_id, staff_ref, created_by, workspace_id) VALUES ($1, $2, $3, $4, $5) RETURNING id`,
+        `INSERT INTO ${businessTables(m).staff_profile} (organisation_id, user_id, staff_ref, created_by, workspace_id) VALUES ($1, $2, $3, $4, $5) RETURNING id`,
         [orgId, userId, `STF-${randomUUID().slice(0, 8)}`, owner.userId, owner.workspaceId],
       );
       await assignShift(m, owner, venueId, profile!.id);
@@ -406,7 +407,7 @@ describeIfDb('HWS C1: org-level paths over workspace tables (integration)', () =
       const target = await invitedVenueManager('c1-del-hidden-request');
       const hiddenProfile = await tenantContext.runInTenantContext({ organisationId: orgId, workspaceId: mgrB.workspaceId, userId: mgrB.userId, role: '' }, async (m) => {
         const [profile] = await m.query<Array<{ id: string }>>(
-          `INSERT INTO staff_profile (organisation_id, user_id, staff_ref, created_by, workspace_id) VALUES ($1, $2, $3, $4, $5) RETURNING id`,
+          `INSERT INTO ${businessTables(m).staff_profile} (organisation_id, user_id, staff_ref, created_by, workspace_id) VALUES ($1, $2, $3, $4, $5) RETURNING id`,
           [orgId, target.userId, `STF-${randomUUID().slice(0, 8)}`, mgrB.userId, mgrB.workspaceId],
         );
         const jobRole = await m.save(JobRole, { organisationId: orgId, name: `C1 L1 Role ${randomUUID().slice(0, 6)}`, defaultRatePence: 1500, createdBy: mgrB.userId, workspaceId: mgrB.workspaceId! });
@@ -415,7 +416,7 @@ describeIfDb('HWS C1: org-level paths over workspace tables (integration)', () =
           organisationId: orgId, venueId: venueB, jobRoleId: jobRole.id, startsAt, endsAt: new Date(startsAt.getTime() + 4 * 3600 * 1000), breakMinutes: 0,
           requiredCount: 1, payRatePence: 1500, status: 'open', createdBy: mgrB.userId, workspaceId: mgrB.workspaceId!,
         });
-        await m.query(`INSERT INTO shift_request_staff (organisation_id, workspace_id, shift_id, staff_profile_id) VALUES ($1, $2, $3, $4)`, [orgId, mgrB.workspaceId, shift.id, profile!.id]);
+        await m.query(`INSERT INTO ${businessTables(m).shift_request_staff} (organisation_id, workspace_id, shift_id, staff_profile_id) VALUES ($1, $2, $3, $4)`, [orgId, mgrB.workspaceId, shift.id, profile!.id]);
         return profile!.id;
       });
 
@@ -434,9 +435,9 @@ describeIfDb('HWS C1: org-level paths over workspace tables (integration)', () =
       const target = await invitedVenueManager('c1-del-note');
       await tenantContext.runInTenantContext({ organisationId: orgId, workspaceId: mgrB.workspaceId, userId: mgrB.userId, role: '' }, async (m) => {
         if (hwsOn) {
-          await m.query(`INSERT INTO user_note (organisation_id, subject_user_id, author_user_id, body, workspace_id) VALUES ($1, $2, $3, 'C1 note', $4)`, [orgId, target.userId, mgrB.userId, mgrB.workspaceId]);
+          await m.query(`INSERT INTO ${businessTables(m).user_note} (organisation_id, subject_user_id, author_user_id, body, workspace_id) VALUES ($1, $2, $3, 'C1 note', $4)`, [orgId, target.userId, mgrB.userId, mgrB.workspaceId]);
         } else {
-          await m.query(`INSERT INTO user_note (organisation_id, subject_user_id, author_user_id, body) VALUES ($1, $2, $3, 'C1 note')`, [orgId, target.userId, mgrB.userId]);
+          await m.query(`INSERT INTO ${businessTables(m).user_note} (organisation_id, subject_user_id, author_user_id, body) VALUES ($1, $2, $3, 'C1 note')`, [orgId, target.userId, mgrB.userId]);
         }
       });
 

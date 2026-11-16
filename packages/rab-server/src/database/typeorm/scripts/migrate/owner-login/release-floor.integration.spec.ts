@@ -52,8 +52,8 @@ const NEWER = codeMigrationNames(MIGRATIONS_DIR).filter((n) => !R254.includes(n)
 if (NEWER[0] !== 'OutboxClaimIndexes1786721440000' || NEWER[1] !== 'RefreshTokenReplacedByIndex1786721450000') {
   throw new Error('the first two migrations after R254 must be the R256 index migrations (the resume and hole cases name them)');
 }
-/** Release 0.7.0: the last migration 0.6.0 ships (the C3 functions merge while the version is 0.6.0; 0.7.0 registers the step). */
-const V060_LAST = 1786721540000;
+/** Release 0.7.0: the last migration 0.6.0 ships (MetadataVersionState1786721560000, main 6564e74d; the C3 functions merged while the version was 0.6.0; 0.7.0 registers the step). */
+const V060_LAST = 1786721560000;
 /** The migrations after 0.6.0's (what a 0.7.0 start applies to a 0.6.0-complete database; possibly none). */
 const AFTER_060 = codeMigrationNames(MIGRATIONS_DIR).filter((n) => Number(n.slice(-13)) > V060_LAST);
 const filesThrough = (lastTimestamp: number) =>

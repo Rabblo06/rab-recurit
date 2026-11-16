@@ -18,6 +18,7 @@ import { createAdminDataSource } from './helpers/admin-datasource';
 import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
 import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-pipe';
 import { integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
+import { BusinessTables, businessTables } from '../../engine/core-modules/tenant/business-tables';
 
 /**
  * LAYER2_HARDENING_2026-10-25 (docs/security/) — abuse cases for the layer-2 (service) permission checks added to
@@ -89,8 +90,9 @@ describeIfDb('layer-2 service permission hardening (integration)', () => {
     )) as Array<{ actor_user_id: string; target_user_id: string | null; entity_type: string; entity_id: string; metadata: Record<string, unknown> }>;
 
   /** Counts through the runtime role in the caller's own workspace context (the same search_path / RLS a request gets). */
-  const countInWorkspace = (sql: string, params: unknown[]) =>
-    tenantContext.runInWorkspaceContext(ctxA, async (m) => Number(((await m.query(sql, params)) as Array<{ n: number }>)[0]!.n));
+  // Part C2: `sql` gets the binder's businessTables, so the workspace tables are named in the caller's bound schema.
+  const countInWorkspace = (sql: (t: BusinessTables) => string, params: unknown[]) =>
+    tenantContext.runInWorkspaceContext(ctxA, async (m) => Number(((await m.query(sql(businessTables(m)), params)) as Array<{ n: number }>)[0]!.n));
 
   const shiftDto = () => {
     const start = new Date(Date.now() + 6 * 86_400_000);
@@ -170,12 +172,12 @@ describeIfDb('layer-2 service permission hardening (integration)', () => {
 
   describe('F2 SchedulingService.create (SCHEDULE_CREATE) / publish (SCHEDULE_PUBLISH)', () => {
     it('create(): without SCHEDULE_CREATE → 403, no shift row and no shift.created audit row', async () => {
-      const shiftsBefore = await countInWorkspace(`SELECT count(*)::int AS n FROM shift WHERE venue_id = $1`, [venueId]);
+      const shiftsBefore = await countInWorkspace((t) => `SELECT count(*)::int AS n FROM ${t.shift} WHERE venue_id = $1`, [venueId]);
       const auditBefore = (await auditRows('shift.created', { actorUserId: a.userId })).length;
       await withRevoked(a, PermissionFlag.SCHEDULE_CREATE, async () => {
         await expect(scheduling.create(ctxA, shiftDto() as never)).rejects.toBeInstanceOf(ForbiddenException);
       });
-      expect(await countInWorkspace(`SELECT count(*)::int AS n FROM shift WHERE venue_id = $1`, [venueId])).toBe(shiftsBefore);
+      expect(await countInWorkspace((t) => `SELECT count(*)::int AS n FROM ${t.shift} WHERE venue_id = $1`, [venueId])).toBe(shiftsBefore);
       expect((await auditRows('shift.created', { actorUserId: a.userId })).length).toBe(auditBefore);
     });
 
@@ -191,7 +193,7 @@ describeIfDb('layer-2 service permission hardening (integration)', () => {
         await expect(scheduling.publish(ctxA, draft.id)).rejects.toBeInstanceOf(ForbiddenException);
         await expect(scheduling.publish(ctxA, randomUUID())).rejects.toBeInstanceOf(ForbiddenException);
       });
-      const [row] = (await tenantContext.runInWorkspaceContext(ctxA, (m) => m.query(`SELECT status, published_at FROM shift WHERE id = $1`, [draft.id]))) as Array<{ status: string; published_at: Date | null }>;
+      const [row] = (await tenantContext.runInWorkspaceContext(ctxA, (m) => m.query(`SELECT status, published_at FROM ${businessTables(m).shift} WHERE id = $1`, [draft.id]))) as Array<{ status: string; published_at: Date | null }>;
       expect(row).toEqual({ status: ShiftStatus.DRAFT, published_at: null });
       expect(await auditRows('shift.published', { entityId: draft.id })).toHaveLength(0);
     });
@@ -210,7 +212,7 @@ describeIfDb('layer-2 service permission hardening (integration)', () => {
   // ─────────────────────────────────────────────── F3: StaffService.addNote
 
   describe('F3 StaffService.addNote (STAFF_EDIT, length cap, audit)', () => {
-    const noteCount = () => countInWorkspace(`SELECT count(*)::int AS n FROM user_note WHERE subject_user_id = $1`, [staffMember.userId]);
+    const noteCount = () => countInWorkspace((t) => `SELECT count(*)::int AS n FROM ${t.user_note} WHERE subject_user_id = $1`, [staffMember.userId]);
 
     it('without STAFF_EDIT → 403, no note written, no staff.note_added audit row', async () => {
       const before = await noteCount();

@@ -640,6 +640,26 @@ describeIfDb('Members: custom workspace roles, email-first invitations, member a
     expect((await accept({ token: raw, firstName: 'Sus', lastName: 'Pended', newPassword: STRONG })).body.message).toBe(GENERIC);
   });
 
+  it('X3b (S-W1). an invitation whose workspace was archived after sending cannot be resolved or accepted', async () => {
+    // Its own organisation, like X3, so archiving the workspace cannot affect any other case.
+    const seeded = await factory.createOrganisationWithManagers(1, { permissions: 'production', workspace: true, label: 'arch' });
+    const m = seeded.managers[0]!;
+    const t = await factory.login(m);
+    const role = (await createRole(t, 'Arch', ['staff.view'])).body;
+    const { raw, address, id } = await inviteOne(t, role.id);
+    await owner.query(`UPDATE core.manager_workspace SET status = 'archived' WHERE id = $1`, [m.workspaceId]);
+    const resolved = await resolve(raw);
+    expect(resolved.status).toBe(400);
+    expect(resolved.body.message).toBe(GENERIC);
+    const accepted = await accept({ token: raw, firstName: 'Arch', lastName: 'Ived', newPassword: STRONG });
+    expect(accepted.status).toBe(400);
+    expect(accepted.body.message).toBe(GENERIC);
+    // Nothing was created, and the refusal happens before any re-check could supersede (burn) the invitation.
+    expect(await owner.query(`SELECT 1 FROM core."user" WHERE email = $1`, [address])).toHaveLength(0);
+    const [row] = await owner.query(`SELECT accepted_at, superseded_at FROM core.member_invitation WHERE id = $1`, [id]);
+    expect(row).toMatchObject({ accepted_at: null, superseded_at: null });
+  });
+
   it('X4. token buckets are atomic across concurrent callers and namespaced with hashed identifiers', async () => {
     const limiter = app.get(InvitationRateLimitService);
     const id = `bucket-${randomUUID()}`;

@@ -6,6 +6,7 @@ import { DataSource, EntityManager } from 'typeorm';
 
 import { ApplicationTarget } from '../../../engine/core-modules/auth/application-access';
 import { PasswordHashingService } from '../../../engine/core-modules/auth/services/password-hashing.service';
+import { businessTables } from '../../../engine/core-modules/tenant/business-tables';
 import { TenantContextService } from '../../../engine/core-modules/tenant/tenant-context.service';
 import { Organisation, Permission, Role, RolePermission, User, UserRole } from '../../../modules/identity/entities';
 import { ROLE_DEFS } from '../../../modules/manager/services/manager.service';
@@ -404,8 +405,8 @@ export class TestIdentityFactory {
     await this.infra.tenantContext.runInTenantContext(
       { organisationId: org.id, workspaceId: owner.workspaceId, userId: owner.userId, role: '' },
       (m) =>
-        // Part C1: unqualified, so it lands in the owner's workspace (its schema with HWS on, the core copy with HWS off).
-        m.query(`INSERT INTO manager_venue (organisation_id, manager_profile_id, venue_id, workspace_id) VALUES ($1, $2, $3, $4)`, [
+        // Part C2: qualified through the binder's schema (the owner's workspace schema with HWS on, core with it off).
+        m.query(`INSERT INTO ${businessTables(m).manager_venue} (organisation_id, manager_profile_id, venue_id, workspace_id) VALUES ($1, $2, $3, $4)`, [
           org.id,
           managerProfileId,
           venueId,
@@ -431,8 +432,8 @@ export class TestIdentityFactory {
     // manager in the workspace (staff_profile_insert). The bootstrap context is not a manager and must not create Staff.
     await this.infra.tenantContext.runInTenantContext({ organisationId: org.id, workspaceId: opts.owner.workspaceId, userId: opts.owner.userId, role: '' }, async (m) => {
       const profile = await m.query(
-        // Part C1: unqualified (workspace table), routed by the tenant context like the product's own write.
-        `INSERT INTO staff_profile (organisation_id, user_id, staff_ref, created_by, workspace_id) VALUES ($1, $2, $3, $4, $5) RETURNING id`,
+        // Part C2: qualified through the binder's schema, like the product's own write.
+        `INSERT INTO ${businessTables(m).staff_profile} (organisation_id, user_id, staff_ref, created_by, workspace_id) VALUES ($1, $2, $3, $4, $5) RETURNING id`,
         [org.id, userId, `STF-${randomUUID().slice(0, 8)}`, opts.owner.userId, opts.owner.workspaceId],
       );
       profileId = profile[0].id as string;

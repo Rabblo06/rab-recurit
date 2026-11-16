@@ -20,6 +20,7 @@ import { ManagerWorkspace } from '../entities/manager-workspace.entity';
 import { SubdomainAvailability, SubdomainService } from './subdomain.service';
 import { assertCallerMayProvision, WorkspaceProvisioningService } from './workspace-provisioning.service';
 import { markNewWorkspaceInitial } from '../../../engine/core-modules/upgrade/upgrade-migration.service';
+import { syncStandardObjectsForNewWorkspace } from '../../../engine/metadata/standard-objects/standard-objects-new-workspace';
 
 const POSTGRES_UNIQUE_VIOLATION = '23505';
 /**
@@ -450,6 +451,9 @@ export class ManagerWorkspaceService {
       throwIfHostLabelViolation(error);
       throw error;
     }
+    // Metadata engine M1 / E2: the new workspace's standard objects (the 21 workspace tables with their §0.3 locks), in THIS
+    // transaction, BEFORE its is_initial row: that row says the release's SyncStandardObjects step is done for this workspace.
+    await syncStandardObjectsForNewWorkspace((sql, parameters) => manager.query(sql, parameters) as Promise<unknown[]>, workspace);
     // OWNER-DB-ULTIMATE Part B3: a new workspace starts at the current version (Twenty workspace.service.ts:813 →
     // upgrade-migration.service.ts:139-172 markAsWorkspaceInitial), in THIS transaction, so a rolled-back create leaves
     // no row. The logbook's workspace_init policy admits only a workspace of the bound organisation.

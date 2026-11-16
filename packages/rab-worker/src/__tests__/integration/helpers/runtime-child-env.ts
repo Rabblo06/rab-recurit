@@ -10,6 +10,9 @@ import { TEST_DATABASE_ADMIN_URL_NAMES } from '@rab/server/database/typeorm/core
 export const RUNTIME_CHILD_STRIPPED_NAMES: readonly string[] = [
   ...TEST_DATABASE_ADMIN_URL_NAMES,
   'DATABASE_URL_UNPOOLED',
+  // X3.5-S6: setupFiles now write the test application URL here (it used to go to DATABASE_URL, which the runtime refusal
+  // list already strips). A spawned child gets its connection explicitly, after this base, exactly as before.
+  'PG_DATABASE_URL',
   'MIGRATION_SECURITY_ADMIN_URL',
   'CREWFLOW_BOOTSTRAP_PASSWORD',
   'CREWFLOW_APP_BOOTSTRAP_PASSWORD',

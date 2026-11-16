@@ -1,5 +1,5 @@
 import { asLiveTransactionManager } from '../../__tests__/helpers/business-tables-fakes';
-import { peekBusinessSchema } from '@rab/server/engine/core-modules/tenant/business-tables';
+import { businessSearchPath, peekBusinessSchema } from '@rab/server/engine/core-modules/tenant/business-tables';
 import { workspaceSchemaName } from '@rab/server/engine/core-modules/tenant/schema-resolver.service';
 
 import { InviteAutoDeleteConfigError, resolveInviteAutoDeleteEnabled, runAccountInviteCleanupCycle } from './account-invite-cleanup.job';
@@ -112,7 +112,7 @@ describe('account invite cleanup — F-1 definer path (WORKER_INVITE_AUTO_DELETE
     const binds = h.statements
       .filter((s) => s.sql.startsWith(`SELECT set_config('rab.organisation_id',$1,true), set_config('rab.workspace_id',$2,true)`))
       .map((s) => s.params);
-    expect(binds.every((params) => params[2] === 'core')).toBe(true);
+    expect(binds.every((params) => params[2] === businessSearchPath('core'))).toBe(true); // C2-7: the binders' own value in either mode
     expect(binds.map((params) => params.slice(0, 2))).toContainEqual([ORG, WS]);
     expect(binds.map((params) => params.slice(0, 2))).not.toContainEqual([OTHER_ORG, OTHER_WS]);
     // Deletes only through the definer, never for a blocked candidate.

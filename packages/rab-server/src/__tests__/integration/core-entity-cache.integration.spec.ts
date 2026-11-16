@@ -22,6 +22,7 @@ import { createAdminDataSource } from './helpers/admin-datasource';
 import { TestIdentityFactory } from './helpers/test-identities';
 import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-pipe';
 import { integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
+import { businessTables } from '../../engine/core-modules/tenant/business-tables';
 
 /**
  * Redis checkpoint — Core Entity Cache. `CORE_ENTITY_CACHE_ENABLED`/`WORKSPACE_METADATA_CACHE_ENABLED`
@@ -340,7 +341,7 @@ describeIfDb('Core Entity Cache (integration)', () => {
       expect(first?.name).toBe('Original Venue Name');
 
       // Raw SQL, like the superuser update it replaces: no application-side cache invalidation runs.
-      await asManager((m) => m.query(`UPDATE venue SET name = 'Renamed Venue' WHERE id = $1`, [venueId]));
+      await asManager((m) => m.query(`UPDATE ${businessTables(m).venue} SET name = 'Renamed Venue' WHERE id = $1`, [venueId]));
       const stale = await tenantContext.runInTenantContext({ organisationId: org.id, workspaceId, userId: manager.userId, role: '' }, (m) =>
         entityCache.getVenueSummary(m, venueId),
       );

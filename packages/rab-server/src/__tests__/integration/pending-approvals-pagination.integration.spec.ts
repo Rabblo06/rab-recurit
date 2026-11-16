@@ -16,6 +16,7 @@ import { createAdminDataSource } from './helpers/admin-datasource';
 import { TestIdentityFactory, TestIdentity } from './helpers/test-identities';
 import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-pipe';
 import { integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
+import { businessTables } from '../../engine/core-modules/tenant/business-tables';
 
 /**
  * PERF-01 — `GET /shifts/requests/pending` (`SchedulingService.listPendingApprovals`)
@@ -116,7 +117,7 @@ describeIfDb('pending approvals pagination (PERF-01, integration)', () => {
         // always stamps `now()` on insert regardless of a supplied value.
         if (opts.sameCreatedAt && ids.length > 1) {
           const fixedInstant = new Date();
-          await m.query(`UPDATE shift SET created_at = $1 WHERE id = ANY($2::uuid[])`, [fixedInstant, ids]);
+          await m.query(`UPDATE ${businessTables(m).shift} SET created_at = $1 WHERE id = ANY($2::uuid[])`, [fixedInstant, ids]);
         }
       },
     );

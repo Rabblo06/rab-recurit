@@ -1,5 +1,6 @@
 import { DataSource, EntityManager } from 'typeorm';
 
+import { SEARCH_PATH_TRAP_VAR } from './business-tables';
 import { SchemaResolverService, WorkspaceRoutingError } from './schema-resolver.service';
 import { bindGucsSql, TenantContextService, TenantSessionRoleError } from './tenant-context.service';
 import { EnvironmentService } from '../environment/environment.service';
@@ -14,6 +15,18 @@ jest.mock('./schema-bound-entity-manager', () => ({
 }));
 
 describe('TenantContextService', () => {
+  // C2-7: these cases pin the exact statements with the test-only search_path trap OFF. The trap CI job sets
+  // CREWFLOW_TEST_SEARCH_PATH_TRAP=true for every suite; with it on, every binder passes '' instead of the schema (pinned in
+  // its own case below). `--runInBand` suites share one process.env, so the value found is put back after every test.
+  const trapFound = process.env[SEARCH_PATH_TRAP_VAR];
+  beforeEach(() => {
+    delete process.env[SEARCH_PATH_TRAP_VAR];
+  });
+  afterEach(() => {
+    if (trapFound === undefined) delete process.env[SEARCH_PATH_TRAP_VAR];
+    else process.env[SEARCH_PATH_TRAP_VAR] = trapFound;
+  });
+
   // The exact single-round-trip GUC bind. Since e31bf934 it also RESETS the read-only shift-team capability
   // (`rab.team_shift_id` / `rab.team_staff_id`, set only by ShiftTeamService for one query) to '' on every
   // transaction, so a capability can never outlive the call that set it. Both resets are literal '' — never a
@@ -177,6 +190,29 @@ describe('TenantContextService', () => {
       // The registry is FORCE RLS: the GUCs are bound first (no path), then the separate search_path after resolve().
       expect(manager.query).toHaveBeenNthCalledWith(2, BIND_GUCS_SQL, ['org-1', WS_ID, 'user-1', 'MANAGER', '']);
       expect(manager.query).toHaveBeenNthCalledWith(3, SEARCH_PATH_SQL, ['workspace_deadbeefdeadbeefdeadbeefdeadbeef']);
+    });
+
+    it('C2-0 trap (test-only, NODE_ENV=test): search_path is bound to "" in both shapes, while the callback still gets the real schema', async () => {
+      process.env[SEARCH_PATH_TRAP_VAR] = 'true';
+      const seen: Array<string | undefined> = [];
+      const body = async (m: EntityManager) => {
+        seen.push((m as EntityManager & { boundSchema?: string }).boundSchema);
+      };
+
+      const off = buildManager();
+      await new TenantContextService(buildDataSource(off), buildSchemaResolver(), buildEnvironment(false)).runInTenantContext(
+        { organisationId: 'org-1', workspaceId: WS_ID, userId: 'user-1', role: 'MANAGER' },
+        body,
+      );
+      expect(off.query).toHaveBeenNthCalledWith(2, BIND_WITH_PATH_SQL, ['org-1', WS_ID, 'user-1', 'MANAGER', '', '']);
+
+      const on = buildManager();
+      await new TenantContextService(buildDataSource(on), buildSchemaResolver('workspace_deadbeefdeadbeefdeadbeefdeadbeef'), buildEnvironment(true)).runInTenantContext(
+        { organisationId: 'org-1', workspaceId: WS_ID, userId: 'user-1', role: 'MANAGER' },
+        body,
+      );
+      expect(on.query).toHaveBeenNthCalledWith(3, SEARCH_PATH_SQL, ['']);
+      expect(seen).toEqual(['core', 'workspace_deadbeefdeadbeefdeadbeefdeadbeef']);
     });
 
     it('fails closed: a workspace that is not READY (or otherwise unroutable) rejects before any business callback runs, and search_path is never set', async () => {

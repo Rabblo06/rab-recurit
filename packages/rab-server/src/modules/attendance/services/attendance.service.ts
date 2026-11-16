@@ -58,6 +58,8 @@ import {
   CheckInRequiredException,
   CheckInTooEarlyException,
   CheckInWindowClosedException,
+  ClockInConfirmationRequiredException,
+  ClockInTooEarlyAbsoluteException,
   ClockInTooEarlyException,
   ClockWindowClosedException,
   GeofenceMisconfiguredException,
@@ -292,6 +294,37 @@ export class AttendanceService {
       opensAt: new Date(shift.startsAt.getTime() - this.env.get('CLOCK_IN_EARLY_MINUTES') * 60_000),
       closesAt: new Date(shift.endsAt.getTime() + this.env.get('QR_POST_SHIFT_GRACE_MINUTES') * 60_000),
     };
+  }
+
+  /**
+   * Owner decisions 2026-11-15 for a manager-ENTERED clock-in (`correct` and `record-attendance`), both measured from the
+   * staff member's own scheduled start (`effectiveAssignmentTime`):
+   * - earlier than the hard floor (start - CLOCK_IN_CONFIRM_FLOOR_HOURS, never later than the normal allowance) ->
+   *   always 422 CLOCK_IN_TOO_EARLY_ABSOLUTE, confirmation or not;
+   * - earlier than the normal allowance (start - CLOCK_IN_EARLY_MINUTES, the opening of the same window every clock-in
+   *   path uses) -> returns that allowance: the caller then needs the explicit confirmation
+   *   (`requireUnusualClockInConfirmation`), checked only after every other rule;
+   * - otherwise null.
+   * Both comparisons are written as "not inside", so an unreadable bound refuses / asks instead of passing.
+   */
+  private checkEnteredClockIn(window: ScheduledWindow, clockInAt: Date): Date | null {
+    const earliestAllowed = this.attendanceWindow(window).opensAt;
+    const floorHours = this.env.get('CLOCK_IN_CONFIRM_FLOOR_HOURS');
+    const floor = new Date(Math.min(window.startsAt.getTime() - floorHours * 3_600_000, earliestAllowed.getTime()));
+    if (!(clockInAt.getTime() >= floor.getTime())) throw new ClockInTooEarlyAbsoluteException(floor.toISOString(), floorHours);
+    return clockInAt.getTime() >= earliestAllowed.getTime() ? null : earliestAllowed;
+  }
+
+  /**
+   * An unusually early entered clock-in (`checkEnteredClockIn` returned its allowance) is saved only with an explicit
+   * `confirmUnusualClockIn: true`; otherwise 409 CLOCK_IN_CONFIRMATION_REQUIRED and nothing is written. Returns the audit
+   * metadata recording the confirmation (actor and time are the audit row's own; `confirmedClockInAt` lets the shift
+   * report show "Unusual time confirmed" while that clock-in stands), or nothing for a usual time.
+   */
+  private requireUnusualClockInConfirmation(earliestAllowed: Date | null, clockInAt: Date, confirmed: boolean | undefined): Record<string, unknown> {
+    if (!earliestAllowed) return {};
+    if (confirmed !== true) throw new ClockInConfirmationRequiredException(earliestAllowed.toISOString(), clockInAt.toISOString());
+    return { unusualClockInConfirmed: true, earliestAllowed: earliestAllowed.toISOString(), confirmedClockInAt: clockInAt.toISOString() };
   }
 
   private assertClockWindow(shift: ScheduledWindow, kind: 'clock' | 'check_in' = 'clock'): void {
@@ -1390,13 +1423,37 @@ export class AttendanceService {
         (dto.field === 'breakMinutes' && attendance.breakMinutes != null && breakMinutes === attendance.breakMinutes);
       if (unchanged) return this.fieldPolicy.omit(await this.fieldPolicy.resolveTx(manager, ctx, 'attendance'), await this.loadSummary(manager, attendance.id));
 
+      // The hard floor is absolute (owner: "never earlier than 12 h before the staff member's start, even after
+      // Confirm"): 422 when the clock-in this correction leaves in place is below it — the NEW clock-in, or, for a
+      // clockOutAt / breakMinutes correction, the STORED one that a later schedule move put beyond the floor (the same
+      // rule record-attendance applies). An identical resubmission returned above, so re-sending an already-stored value
+      // stays the idempotent no-op. Only a new clock-in can need the confirmation (its allowance, or null), checked below
+      // after the state rules; the stored one is not re-confirmed here.
+      const judgedEarliest = this.checkEnteredClockIn(effectiveAssignmentTime(assignment, shift), clockInAt);
+      const unusualEarliest = dto.field === 'clockInAt' ? judgedEarliest : null;
+
       const { status, recovered } = this.resolveCorrectionStatus(attendance, assignment, shift, now, clockOutAt);
+
+      // Owner brief 2026-11-15: an unusually early clock-in (below the allowance, above the floor) needs the explicit
+      // confirmation. Checked after every validation and state rule above, so the warning is never shown for a
+      // correction that would be refused anyway. The shift's scheduled start is only read, never changed.
+      const unusualAudit = this.requireUnusualClockInConfirmation(unusualEarliest, clockInAt, dto.confirmUnusualClockIn);
+
       await this.persistManagerTimes(manager, ctx, attendance, assignment, shift, { clockInAt, clockOutAt, breakMinutes }, {
         status,
         recovered,
         corrections: [{ field: dto.field, oldValue, newValue: dto.newValue }],
         reason: dto.reason,
-        audit: { field: dto.field, oldValue, newValue: dto.newValue, reason: dto.reason, recoveredMissingClockOut: recovered },
+        audit: {
+          field: dto.field,
+          oldValue,
+          newValue: dto.newValue,
+          reason: dto.reason,
+          recoveredMissingClockOut: recovered,
+          // The same single audit row records that the manager confirmed an unusually early clock-in (actor + time are
+          // the audit row's own); no second audit entry and no second correction row.
+          ...unusualAudit,
+        },
       });
       return this.fieldPolicy.omit(await this.fieldPolicy.resolveTx(manager, ctx, 'attendance'), await this.loadSummary(manager, attendance.id));
     });
@@ -1405,9 +1462,11 @@ export class AttendanceService {
   /**
    * Validation shared by every manager-ENTERED time (`recordAttendance`). Times are absolute instants, so overnight
    * shifts and the Europe/London DST change are plain millisecond arithmetic. Bounds (FLAGGED ASSUMPTION, owner to
-   * confirm): the same window the Shift QR accepts punches in — clock-in no earlier than CLOCK_IN_EARLY_MINUTES before
-   * the seat's scheduled start, clock-out no later than QR_POST_SHIFT_GRACE_MINUTES after its scheduled end — never in
-   * the future, clock-out strictly after clock-in, and the (recorded or scheduled) unpaid break shorter than the span.
+   * confirm): clock-out no later than QR_POST_SHIFT_GRACE_MINUTES after the seat's scheduled end, never in the future,
+   * clock-out strictly after clock-in, and the (recorded or scheduled) unpaid break shorter than the span. An entered
+   * clock-in earlier than CLOCK_IN_EARLY_MINUTES before the seat's start is not refused here (owner decision 2026-11-15):
+   * below CLOCK_IN_CONFIRM_FLOOR_HOURS it is (422), and between the two this returns the allowance so the caller can
+   * require the explicit confirmation after its state rules.
    */
   private assertManagerEnteredTimes(
     window: ScheduledWindow,
@@ -1415,21 +1474,25 @@ export class AttendanceService {
     clockInAt: Date,
     clockOutAt: Date | null,
     effectiveBreakMinutes: number,
-  ): void {
+    clockInEntered: boolean,
+  ): Date | null {
     const invalid = (message: string) => new BadRequestException({ statusCode: 400, code: 'INVALID_ATTENDANCE_TIMES', message });
-    const early = this.env.get('CLOCK_IN_EARLY_MINUTES');
     const grace = this.env.get('QR_POST_SHIFT_GRACE_MINUTES');
-    const earliest = window.startsAt.getTime() - early * 60_000;
     const latest = window.endsAt.getTime() + grace * 60_000;
     if (clockInAt.getTime() > now.getTime()) throw invalid('The clock-in time cannot be in the future.');
     if (clockOutAt && clockOutAt.getTime() > now.getTime()) throw invalid('The clock-out time cannot be in the future.');
-    if (clockInAt.getTime() < earliest) throw invalid(`The clock-in time cannot be more than ${early} minutes before the scheduled start.`);
+    // Owner decision 2026-11-15: an early clock-in is no longer refused outright. Below the hard floor it is (422);
+    // between the floor and the allowance it needs the explicit confirmation, which the caller checks after its state
+    // rules. `clockInEntered`: the caller judges this clock-in (a new one, or a stored one that is now unusual and was
+    // never confirmed — `recordOnExisting`); an already-confirmed or usual stored one is kept as it is.
+    const unusualEarliest = clockInEntered ? this.checkEnteredClockIn(window, clockInAt) : null;
     if (clockInAt.getTime() > latest) throw invalid(`The clock-in time cannot be more than ${grace} minutes after the scheduled end.`);
-    if (!clockOutAt) return;
+    if (!clockOutAt) return unusualEarliest;
     if (clockOutAt.getTime() > latest) throw invalid(`The clock-out time cannot be more than ${grace} minutes after the scheduled end.`);
     if (clockOutAt.getTime() <= clockInAt.getTime()) throw invalid('The clock-out time must be after the clock-in time.');
     const spanMinutes = Math.round((clockOutAt.getTime() - clockInAt.getTime()) / 60_000);
     if (effectiveBreakMinutes >= spanMinutes) throw invalid('The break must be shorter than the time between clock-in and clock-out.');
+    return unusualEarliest;
   }
 
   /** Opaque optimistic-concurrency token for one attendance row (microsecond `updated_at`); the report exposes it as `attendanceVersion`. */
@@ -1515,7 +1578,9 @@ export class AttendanceService {
         throw new BadRequestException({ statusCode: 400, code: 'INVALID_ATTENDANCE_TIMES', message: 'Enter both the clock-in and clock-out times.' });
       }
       const breakMinutes = dto.breakMinutes ?? null;
-      this.assertManagerEnteredTimes(window, now, reqIn, reqOut, breakMinutes ?? scheduledBreak);
+      const unusualEarliest = this.assertManagerEnteredTimes(window, now, reqIn, reqOut, breakMinutes ?? scheduledBreak, true);
+      // After every validation and booking-state rule above, before anything is written.
+      const unusualAudit = this.requireUnusualClockInConfirmation(unusualEarliest, reqIn, dto.confirmUnusualClockIn);
 
       const { workedMinutes } = computeWorkedMinutes({ clockInAt: reqIn, clockOutAt: reqOut, scheduledBreakMinutes: breakMinutes ?? scheduledBreak });
       const earnedPence = payForMinutes(assignment.payRateSnapshotPence, workedMinutes);
@@ -1590,11 +1655,30 @@ export class AttendanceService {
           workedMinutes,
           earnedPence,
           supersededProvisionalNoShow,
+          ...unusualAudit,
         },
       });
       await this.emitAttendanceChanged(manager, ctx, attendance.id); // C1b realtime
       return this.shiftReports.getReportWithManager(manager, ctx, shiftId);
     });
+  }
+
+  /**
+   * Whether a manager explicitly confirmed exactly this clock-in for this attendance: an `attendance.corrected` /
+   * `attendance.manager_recorded` audit row with `unusualClockInConfirmed` whose `confirmedClockInAt` equals it — the same
+   * predicate the shift report uses for `unusualClockInConfirmed`. Read in the caller's tenant-bound transaction
+   * (`core.audit_log` RLS is organisation-scoped), through the (organisation_id, entity_type, entity_id) index.
+   */
+  private async hasClockInConfirmation(manager: EntityManager, ctx: AuthContext, attendanceId: string, clockInAt: Date): Promise<boolean> {
+    const rows = await manager.query(
+      `SELECT 1 FROM core.audit_log
+        WHERE organisation_id = $1 AND entity_type = 'attendance' AND entity_id = $2
+          AND action IN ('attendance.corrected', 'attendance.manager_recorded') AND metadata->>'unusualClockInConfirmed' = 'true'
+          AND (metadata->>'confirmedClockInAt')::timestamptz = $3
+        LIMIT 1`,
+      [ctx.organisationId, attendanceId, clockInAt],
+    );
+    return rows.length > 0;
   }
 
   /** `recordAttendance` on a seat that already has attendance: change only what differs, through the shared write path. */
@@ -1642,8 +1726,21 @@ export class AttendanceService {
     if ((input.dto.expectedVersion ?? null) !== currentVersion) {
       throw new ConflictException('This attendance was changed by someone else. Refresh to see the latest times.');
     }
-    this.assertManagerEnteredTimes(input.window, input.now, clockInAt, clockOutAt, breakMinutes ?? input.scheduledBreak);
+    // Owner decisions 2026-11-16 (review finding 2, option b; re-review): the clock-in is judged when the manager enters
+    // a new one, AND when the stored one is kept but is now earlier than the allowance against the seat's CURRENT start
+    // (e.g. the seat start moved later). Judged means: the hard floor ALWAYS applies (422, confirmed or not — "never
+    // earlier than 12 h before the staff member's start, even after Confirm"), and the explicit confirmation is needed
+    // (409) unless exactly that stored time was already confirmed (never re-asked). "Not inside" the allowance, so an
+    // unreadable bound is judged rather than skipped.
+    const clockInEntered = corrections.some((c) => c.field === 'clockInAt');
+    const storedOutsideAllowance = !clockInEntered && !(clockInAt.getTime() >= this.attendanceWindow(input.window).opensAt.getTime());
+    const storedAlreadyConfirmed = storedOutsideAllowance && (await this.hasClockInConfirmation(manager, ctx, attendance.id, clockInAt));
+    const judgedEarliest = this.assertManagerEnteredTimes(
+      input.window, input.now, clockInAt, clockOutAt, breakMinutes ?? input.scheduledBreak, clockInEntered || storedOutsideAllowance,
+    );
+    const unusualEarliest = storedAlreadyConfirmed ? null : judgedEarliest;
     const { status, recovered } = this.resolveCorrectionStatus(attendance, assignment, shift, input.now, clockOutAt);
+    const unusualAudit = this.requireUnusualClockInConfirmation(unusualEarliest, clockInAt, input.dto.confirmUnusualClockIn);
     const before = {
       clockInAt: attendance.clockInAt.toISOString(),
       clockOutAt: attendance.clockOutAt?.toISOString() ?? null,
@@ -1663,6 +1760,7 @@ export class AttendanceService {
         before,
         after: { clockInAt: clockInAt.toISOString(), clockOutAt: clockOutAt?.toISOString() ?? null, breakMinutes, status },
         recoveredMissingClockOut: recovered,
+        ...unusualAudit,
       },
     });
   }

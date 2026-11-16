@@ -59,8 +59,9 @@ process.env.AUTH_MICROSOFT_CALLBACK_URL ??= 'http://localhost:3000/rest/v1/auth/
 // by Nx can set it). This REQUIRES TEST_DATABASE_URL and TEST_DATABASE_ADMIN_URL (or its deprecated name
 // TEST_DATABASE_URL_UNPOOLED, X3.5-S7 release 1; both set and different is refused) (no fallback to the developer's .env
 // DATABASE_URL names, which can point at a remote database), validates that both target the same logical database, refuses
-// an inherited PG_DATABASE_URL (or other database URL) that would redirect a connection, and points DATABASE_URL names at
-// that validated pair. Runs before any module reads them. See
+// an inherited PG_DATABASE_URL (or other database URL) that would redirect a connection, and points PG_DATABASE_URL at the
+// validated application URL (X3.5-S6: DATABASE_URL / DATABASE_URL_UNPOOLED are blanked, never written; the admin URL comes
+// from the validated pair, integrationTestDatabase().adminUrl). Runs before any module reads them. See
 // src/database/typeorm/core/test-database-guard.ts and jest-global-setup.ts (the live identity proof).
 // AI Phase 1 "real models only" (PHASE1_TWENTY_PLAN §5, EX-1 control 11): tests never see a real provider key or a retired
 // AI setting, whatever the developer's local `.env` holds (ConfigModule loads `<cwd>/.env` for a Jest run too, and dotenv

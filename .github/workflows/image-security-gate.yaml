@@ -217,7 +217,7 @@ jobs:
       - name: Upload Trivy SARIF
         if: ${{ !cancelled() && steps.gates.outcome != 'skipped' }}
         continue-on-error: true
-        uses: github/codeql-action/upload-sarif@5ba2889ada762081db2c4f32a729827dce632c7b # v3
+        uses: github/codeql-action/upload-sarif@33d7b85da1a04171e211befe2c739303b9a4c066 # v4.39.3
         with:
           sarif_file: ${{ env.RESULTS }}/image-trivy.sarif
           category: trivy-image-${{ env.ARCH }}

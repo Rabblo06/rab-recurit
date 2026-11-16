@@ -7,6 +7,13 @@ import { EntityManager } from 'typeorm';
 import { AccountInvite, EmailOutbox, PasswordResetToken } from '@rab/server/modules/identity/entities/index';
 import { ShiftReport } from '@rab/server/modules/attendance/entities/shift-report.entity';
 import { Shift } from '@rab/server/modules/scheduling/entities/shift.entity';
+import {
+  MemberInvitationParentFailure,
+  MemberInvitationStateFailure,
+  memberInvitationExpiredSql,
+  memberInvitationParentFailure,
+  memberInvitationStateFailure,
+} from '@rab/server/modules/membership/utils/member-invitation-liveness';
 import { AuditAction, AuditActionType, AuditService } from '@rab/server/engine/core-modules/audit/audit.service';
 import { EmailService } from '@rab/server/engine/core-modules/email/email.service';
 import { emailBodyCarriesSecret } from '@rab/server/engine/core-modules/email/email-outbox.service';
@@ -641,40 +648,61 @@ async function revalidateAttachment(manager: EntityManager, row: EmailOutbox, pe
  * still hold at the moment of sending (not merely at enqueue time):
  *  - the outbox row is linked to an invitation that still exists in this organisation and the SAME workspace the
  *    row was enqueued for;
- *  - the invitation is not accepted, revoked or superseded, and has not expired;
  *  - this outbox row is that invitation's LATEST email — a resend rotates the token and enqueues a new row, so an
  *    older queued email (carrying a dead link) must never be delivered;
- *  - the organisation is not suspended.
+ *  - the invitation is LIVE by the same rule acceptance uses (`member-invitation-liveness.ts`, also called by
+ *    `MemberInvitationService.loadLive`): not accepted, revoked or superseded, not expired, organisation not
+ *    suspended, workspace still `active`. S-W1: this check used to be a hand-copied subset of that rule and had lost
+ *    the workspace condition, so an invitation for a suspended or archived workspace was still emailed.
  * `member_invitation`'s RLS policy is organisation AND workspace scoped, while this processor's outer context is
  * deliberately workspace-less — so the row's own (trusted, server-written) workspace is bound for this check only,
- * then cleared, on the same connection (same pattern and reasoning as the roster-attachment check above).
+ * then cleared, on the same connection (same pattern and reasoning as the roster-attachment check above). The same
+ * binding is what lets `manager_workspace` (SELECT policy `id = current_workspace()`) show the workspace's status; a
+ * workspace the check cannot see is treated as not active (fail closed).
  */
 async function revalidateMemberInvitation(manager: EntityManager, row: EmailOutbox): Promise<{ ok: true } | { ok: false; reason: string }> {
   if (!row.memberInvitationId) return { ok: false, reason: 'Invitation reference is missing.' };
   await manager.query(`SELECT set_config('rab.workspace_id', $1, true)`, [row.workspaceId ?? '']);
   let reason: string | null = null;
-  const [invitation] = await manager.query<Array<{ accepted_at: Date | null; revoked_at: Date | null; superseded_at: Date | null; expired: boolean; workspace_id: string | null }>>(
-    `SELECT accepted_at, revoked_at, superseded_at, (expires_at <= now()) AS expired, workspace_id FROM core.member_invitation WHERE id = $1`,
+  const [invitation] = await manager.query<
+    Array<{ accepted_at: Date | null; revoked_at: Date | null; superseded_at: Date | null; is_expired: boolean; workspace_id: string | null }>
+  >(
+    // sql-injection-reviewed: a constant expiry expression (no value is spliced); the id is a bound parameter.
+    `SELECT accepted_at, revoked_at, superseded_at, ${memberInvitationExpiredSql()} AS is_expired, workspace_id FROM core.member_invitation WHERE id = $1`,
     [row.memberInvitationId],
   );
   if (!invitation) reason = 'Invitation no longer exists.';
   else if ((invitation.workspace_id ?? null) !== (row.workspaceId ?? null)) reason = 'Invitation scope does not match this email.';
-  else if (invitation.accepted_at) reason = 'Invitation was already accepted before delivery.';
-  else if (invitation.revoked_at) reason = 'Invitation was revoked before delivery.';
-  else if (invitation.superseded_at) reason = 'Invitation was superseded before delivery.';
-  else if (invitation.expired) reason = 'Invitation expired before delivery.';
   else {
-    const [latest] = await manager.query<Array<{ id: string }>>(
-      `SELECT id FROM core.email_outbox WHERE member_invitation_id = $1 ORDER BY created_at DESC, id DESC LIMIT 1`,
-      [row.memberInvitationId],
-    );
-    if (latest && latest.id !== row.id) reason = 'A newer invitation email supersedes this one.';
-    const [org] = await manager.query<Array<{ suspended_at: Date | null }>>(`SELECT suspended_at FROM core.organisation WHERE id = $1`, [row.organisationId]);
-    if (!reason && (!org || org.suspended_at)) reason = 'The organisation is suspended.';
+    const state = memberInvitationStateFailure(invitation);
+    if (state) reason = MEMBER_INVITATION_STATE_REASON[state];
+    else {
+      const [latest] = await manager.query<Array<{ id: string }>>(
+        `SELECT id FROM core.email_outbox WHERE member_invitation_id = $1 ORDER BY created_at DESC, id DESC LIMIT 1`,
+        [row.memberInvitationId],
+      );
+      if (latest && latest.id !== row.id) reason = 'A newer invitation email supersedes this one.';
+      if (!reason) {
+        const parent = await memberInvitationParentFailure(manager, row.organisationId, invitation.workspace_id);
+        if (parent) reason = MEMBER_INVITATION_PARENT_REASON[parent];
+      }
+    }
   }
   await manager.query(`SELECT set_config('rab.workspace_id', '', true)`);
   return reason ? { ok: false, reason } : { ok: true };
 }
+
+const MEMBER_INVITATION_STATE_REASON: Record<MemberInvitationStateFailure, string> = {
+  accepted: 'Invitation was already accepted before delivery.',
+  revoked: 'Invitation was revoked before delivery.',
+  superseded: 'Invitation was superseded before delivery.',
+  expired: 'Invitation expired before delivery.',
+};
+
+const MEMBER_INVITATION_PARENT_REASON: Record<MemberInvitationParentFailure, string> = {
+  organisation_suspended: 'The organisation is suspended.',
+  workspace_inactive: 'The workspace is no longer active.',
+};
 
 /**
  * Pre-delivery revalidation for a platform administrator's CEO (organisation) invitation — the second job type with no

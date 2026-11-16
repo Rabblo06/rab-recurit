@@ -2,6 +2,7 @@ import 'reflect-metadata';
 import { DataSource, EntityManager } from 'typeorm';
 
 import { EnvironmentService } from '../../engine/core-modules/environment/environment.service';
+import { SEARCH_PATH_TRAP_VAR } from '../../engine/core-modules/tenant/business-tables';
 import { SchemaResolverService } from '../../engine/core-modules/tenant/schema-resolver.service';
 import { TenantContextService } from '../../engine/core-modules/tenant/tenant-context.service';
 import { integrationTestDatabase } from '../../database/typeorm/core/integration-test-database-gate';
@@ -52,6 +53,18 @@ suite('T-1 tenant-context framing (real PostgreSQL, as crewflow_owner, pool max 
   let dataSource: DataSource;
   let tenant: TenantContextService;
   let baseline: Snapshot;
+
+  // C2-7: the framing assertions pin the binding SELECT's real search_path value ('core'), so they run with the test-only
+  // search_path trap OFF (the trap CI job sets it for every suite; with it on the binders bind '' — pinned in
+  // tenant-context.service.spec.ts and business-tables.integration.spec.ts). The value found is put back after every test.
+  const trapFound = process.env[SEARCH_PATH_TRAP_VAR];
+  beforeEach(() => {
+    delete process.env[SEARCH_PATH_TRAP_VAR];
+  });
+  afterEach(() => {
+    if (trapFound === undefined) delete process.env[SEARCH_PATH_TRAP_VAR];
+    else process.env[SEARCH_PATH_TRAP_VAR] = trapFound;
+  });
 
   beforeAll(async () => {
     dataSource = makeDataSource();

@@ -11,6 +11,7 @@ import { createAdminDataSource } from './helpers/admin-datasource';
 import { createTestIdentityFactory, TestIdentity, TestIdentityFactory } from './helpers/test-identities';
 import { hwsRuntimeOn } from './helpers/hws-fixtures';
 import { integrationTestDatabaseReady } from '@rab/server/database/typeorm/core/integration-test-database-gate';
+import { businessTables } from '@rab/server/engine/core-modules/tenant/business-tables';
 
 /**
  * Phase D F-1 (owner condition D8) — the account-invite cleanup cycle on the RUNTIME data source (never the admin one,
@@ -115,17 +116,17 @@ describeIfApproved('Phase D F-1 account-invite cleanup on the runtime data sourc
   it('3. crewflow_worker: a shift created by the user in its workspace retains it (Worker-side check under tenant context)', async () => {
     const id = await seedInvited({ status: 'invite_expired', expiresAgo: '8 days', cleanupAgo: '1 minute' });
     await tenantContext.runInTenantContext({ organisationId: owner.organisationId, workspaceId: owner.workspaceId, userId: owner.userId, role: '' }, async (m) => {
-      // Part C1: unqualified (workspace tables), routed by the tenant context like the product's own writes.
+      // Part C2: qualified through the binder (businessTables), routed like the product's own writes.
       const [{ id: venueId }] = await m.query<[{ id: string }]>(
-        `INSERT INTO venue (organisation_id, workspace_id, name, created_by) VALUES ($1, $2, 'F1 Venue', $3) RETURNING id`,
+        `INSERT INTO ${businessTables(m).venue} (organisation_id, workspace_id, name, created_by) VALUES ($1, $2, 'F1 Venue', $3) RETURNING id`,
         [owner.organisationId, owner.workspaceId, owner.userId],
       );
       const [{ id: jobRoleId }] = await m.query<[{ id: string }]>(
-        `INSERT INTO job_role (organisation_id, workspace_id, name, default_rate_pence, created_by) VALUES ($1, $2, 'F1 Role', 1500, $3) RETURNING id`,
+        `INSERT INTO ${businessTables(m).job_role} (organisation_id, workspace_id, name, default_rate_pence, created_by) VALUES ($1, $2, 'F1 Role', 1500, $3) RETURNING id`,
         [owner.organisationId, owner.workspaceId, owner.userId],
       );
       await m.query(
-        `INSERT INTO shift (organisation_id, workspace_id, venue_id, job_role_id, starts_at, ends_at, break_minutes, required_count, pay_rate_pence, status, created_by)
+        `INSERT INTO ${businessTables(m).shift} (organisation_id, workspace_id, venue_id, job_role_id, starts_at, ends_at, break_minutes, required_count, pay_rate_pence, status, created_by)
          VALUES ($1, $2, $3, $4, now() + interval '1 day', now() + interval '1 day 8 hours', 0, 1, 1500, 'draft', $5)`,
         [owner.organisationId, owner.workspaceId, venueId, jobRoleId, id],
       );

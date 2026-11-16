@@ -35,6 +35,7 @@ import { TenantContextService } from '../../../engine/core-modules/tenant/tenant
 import { WorkspaceMembershipService } from '../../../engine/core-modules/tenant/workspace-membership.service';
 import { EmailOutbox, OrganisationMember, User, UserRole } from '../../identity/entities';
 import { AssignableMemberRole, MemberRolePolicyService } from '../../identity/services/member-role-policy.service';
+import { memberInvitationExpiredSql, memberInvitationParentFailure, memberInvitationStateFailure } from '../utils/member-invitation-liveness';
 
 /** The one message every invalid, unknown, expired, revoked, superseded or consumed link produces — no state oracle. */
 export const INVALID_INVITATION_MESSAGE = 'This invitation link is invalid or has expired.';
@@ -499,19 +500,16 @@ export class MemberInvitationService implements OnModuleInit {
     return { userId };
   }
 
-  /** Live, unexpired, organisation active, workspace active. Runs under the invitation's own tenant context. */
+  /** Live, unexpired, organisation active, workspace active (`member-invitation-liveness.ts`, shared with the Worker's pre-send check). Runs under the invitation's own tenant context. */
   private async loadLive(manager: EntityManager, invitationId: string, tokenHash: string, lock: boolean): Promise<InvitationRow | null> {
     const [row] = await manager.query<InvitationRow[]>(
-      // sql-injection-reviewed: literal ternary fragment (no value is spliced); values are bound parameters.
-      `SELECT i.*, i.email::text AS email, (i.expires_at <= now()) AS is_expired FROM core.member_invitation i
+      // sql-injection-reviewed: literal ternary fragment and a constant expiry expression (no value is spliced); values are bound parameters.
+      `SELECT i.*, i.email::text AS email, ${memberInvitationExpiredSql('i')} AS is_expired FROM core.member_invitation i
         WHERE i.id = $1 AND i.token_hash = $2${lock ? ' FOR UPDATE' : ''}`,
       [invitationId, tokenHash],
     );
-    if (!row || row.accepted_at || row.revoked_at || row.superseded_at || row.is_expired) return null;
-    const [org] = await manager.query<Array<{ suspended_at: string | null }>>(`SELECT suspended_at FROM core.organisation WHERE id = $1`, [row.organisation_id]);
-    if (!org || org.suspended_at) return null;
-    const [ws] = await manager.query<Array<{ status: string }>>(`SELECT status FROM core.manager_workspace WHERE id = $1`, [row.workspace_id]);
-    if (!ws || ws.status !== 'active') return null;
+    if (!row || memberInvitationStateFailure(row)) return null;
+    if (await memberInvitationParentFailure(manager, row.organisation_id, row.workspace_id)) return null;
     return row;
   }
 

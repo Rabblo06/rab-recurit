@@ -10,6 +10,10 @@ The API validates its environment when it starts (`packages/rab-server/src/engin
   This page lists variable **names** only. Keep values in your deployment platform's secret store or an untracked `.env` file.
 </Warning>
 
+<Note>
+  **On/off switches are strict.** Every boolean variable (`…_ENABLED`, `EMAIL_SMTP_NO_TLS`, `WORKER_FAST_PUBLISH_NOTIFY`, …) accepts exactly `true` or `false`, lower case. Unset or empty keeps the default. Anything else (`True`, `1`, `yes`, a typo) stops the process at boot. `AI_AGENTS_ENABLED` is the one exception: any value other than `true` means off. See `packages/rab-docker/docs/release/RELEASE-NOTE-X3.1-STRICT-BOOLEANS.md`.
+</Note>
+
 ## Required
 
 | Variable | Purpose |
@@ -54,6 +58,7 @@ Boot fails if every provider is disabled, or if enabling a provider leaves its c
 | Variable | Default | Meaning |
 | --- | --- | --- |
 | `CLOCK_IN_EARLY_MINUTES` | 15 | How early clock-in opens. |
+| `CLOCK_IN_CONFIRM_FLOOR_HOURS` | 12 | Hard floor (1-48 hours before the staff member's start) for a manager-entered clock-in; between it and `CLOCK_IN_EARLY_MINUTES` the manager must confirm. |
 | `QR_POST_SHIFT_GRACE_MINUTES` | 120 | How long after the end clock-in/out stays open. |
 | `REPORT_AVAILABLE_BEFORE_MINUTES` | 180 | When the roster PDF is produced. |
 | `PDF_RENDERER` | `chromium` | How the Worker renders report PDFs that have a native layout (today the final timesheet): `chromium`, or `native` (pure JavaScript, no browser). Exactly one of the two; anything else refuses to boot. No automatic fallback between them. |
@@ -61,6 +66,10 @@ Boot fails if every provider is disabled, or if enabling a provider leaves its c
 | `LATE_CLOCK_IN_GRACE_MINUTES` | 10 | When a confirmed person counts as late. |
 
 `MANAGER_CONFIRMATION_TIMEOUT_MINUTES` no longer exists: Crewflow never confirms an offer automatically, and the manager-confirmation deadline (30 minutes before a standard offer's start) is fixed, not configurable. A deployment that still sets it keeps booting; the value is ignored. `WORKER_MANAGER_CONFIRMATION_TIMEOUT_INTERVAL_SECONDS` still sets how often the Worker checks for passed deadlines.
+
+## Worker shutdown
+
+`WORKER_SHUTDOWN_TIMEOUT_MS` (default 30000) is how long the Worker waits, after SIGTERM, for its active jobs and in-flight cycles before it exits anyway. It must be a plain integer from 1000 to 34000: the drain plus the Worker's 10-second hard-exit margin has to end inside the Worker's `stop_grace_period: 45s`, or Docker kills a job mid-drain. Anything else refuses to boot, including a value with a unit such as `30s` and a value with a trailing carriage return (`30000\r`, from an env file saved with Windows CRLF line endings).
 
 ## Feature flags (all default `false`)
 
@@ -93,7 +102,6 @@ A mock value refuses to boot outside tests, and the old key name refuses to boot
 | `PG_DATABASE_REPLICA_URL`, `PG_DATABASE_REPLICA_TIMEOUT_MS`, `PG_DATABASE_REPLICA_MAX_LAG_MS` | Optional read replica. |
 | `CREWFLOW_DEPLOYMENT_ENVIRONMENT`, `CREWFLOW_DEPLOYMENT_ID`, `PG_EXPECTED_DATABASE_NAME` | Deployment identity, compared with the database's protected marker (required in production). |
 | `DATABASE_URL_UNPOOLED`, `DATABASE_DIRECT_URL`, `DB_POOL_MAX` | Deprecated; non-production only, refused in production. Migrations take their own `PG_DATABASE_URL` in the one-off `rab-migrate` step. |
-| `WORKER_SHUTDOWN_TIMEOUT_MS` | The Worker. |
 | `CREWFLOW_PROVISIONER_ENABLED`, `CREWFLOW_PROVISIONER_DATABASE_URL`, `WORKSPACE_PROVISIONER_INTERVAL_SECONDS` | The Worker's workspace provisioner. Set the switch explicitly to `true` or `false`. See [Deployment](/developers/deployment#environment). |
 | `BOOTSTRAP_ADMIN_EMAIL` | The `bootstrap-admin` command. |
 

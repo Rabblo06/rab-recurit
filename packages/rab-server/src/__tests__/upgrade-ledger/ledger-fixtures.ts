@@ -28,10 +28,11 @@ const DEPLOY_ORDER_TESTS = join(REPO_ROOT, 'packages', 'rab-docker', 'deploy-ord
 export const R254_LAST = 1786721430000;
 export const R256_LAST = 1786721450000;
 /**
- * Release 0.7.0: the last migration 0.6.0 ships (HwsCutoverCopyFunctions1786721540000: the C3 functions merge while the
- * version is still 0.6.0; the step is registered by 0.7.0). A "0.6.0-complete" template holds every migration through it.
+ * Release 0.7.0: the last migration 0.6.0 ships (MetadataVersionState1786721560000, main 6564e74d; the C3 functions,
+ * HwsCutoverCopyFunctions1786721540000, merged while the version was still 0.6.0; the step is registered by 0.7.0). A
+ * "0.6.0-complete" template holds every migration through it.
  */
-export const V060_LAST = 1786721540000;
+export const V060_LAST = 1786721560000;
 export const V060 = '0.6.0';
 
 const DB_NAME_RE = /^b2_ledger_[0-9a-f]{8}_[a-z0-9]+$/;

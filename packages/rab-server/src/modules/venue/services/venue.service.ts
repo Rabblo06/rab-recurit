@@ -15,6 +15,7 @@ import { PaginationDto, paginationSkipTake } from '../../../engine/dto/paginatio
 import { toIlikePattern } from '../../../engine/utils/ilike-pattern.util';
 import { JobRole } from '../../scheduling/entities/job-role.entity';
 import { VenueRoleRate } from '../../scheduling/entities/venue-role-rate.entity';
+import { isJobRoleInScope } from '../../scheduling/utils/job-role-scope';
 import { CreateVenueDto } from '../dto/create-venue.dto';
 import { CreateVenueRoleRateDto } from '../dto/create-venue-role-rate.dto';
 import { ListVenuesDto } from '../dto/list-venues.dto';
@@ -450,11 +451,19 @@ export class VenueService {
     });
   }
 
+  /**
+   * Layers: route PermissionGuard(VENUE_EDIT) → VENUE_EDIT re-checked here (403, before any id is read) → venue scope
+   * (`assertVenueAccessibleTx`, 404) → job-role scope (SF-4: `isJobRoleInScope`, the rule shift and staff creation use;
+   * 404 for a role outside the caller's scope, never 403) → workspace RLS. The rate values are written as before.
+   * Create, update and delete each write one `venue_role_rate.*` audit row in the same transaction (owner decision batch
+   * 13): venue, job role and effective dates only — never a pay, charge or overtime amount.
+   */
   async createRoleRate(ctx: AuthContext, venueId: string, dto: CreateVenueRoleRateDto): Promise<VenueRoleRate> {
     return this.tenantContext.runInWorkspaceContext(ctx, async (manager) => {
+      await this.assertCanEditVenueTx(manager, ctx);
       const venue = await this.assertVenueAccessibleTx(manager, ctx, venueId);
       const role = await manager.findOne(JobRole, { where: { id: dto.jobRoleId } });
-      if (!role) throw new NotFoundException('Job role not found.');
+      if (!role || !isJobRoleInScope(await this.resourceScope.resolveTx(manager, ctx), ctx, role)) throw new NotFoundException('Job role not found.');
       const rate = manager.create(VenueRoleRate, {
         organisationId: ctx.organisationId!,
         venueId,
@@ -466,7 +475,9 @@ export class VenueService {
         effectiveFrom: dto.effectiveFrom ?? new Date().toISOString().slice(0, 10),
         effectiveTo: dto.effectiveTo,
       });
-      return manager.save(rate);
+      const saved = await manager.save(rate);
+      await this.auditService.record(manager, ctx, AuditAction.VENUE_ROLE_RATE_CREATED, { entityType: 'venue_role_rate', entityId: saved.id, metadata: roleRateAuditMetadata(saved) });
+      return saved;
     });
   }
 
@@ -477,21 +488,33 @@ export class VenueService {
     dto: UpdateVenueRoleRateDto,
   ): Promise<VenueRoleRate> {
     return this.tenantContext.runInWorkspaceContext(ctx, async (manager) => {
+      await this.assertCanEditVenueTx(manager, ctx);
       await this.assertVenueAccessibleTx(manager, ctx, venueId);
       const rate = await manager.findOne(VenueRoleRate, { where: { id: rateId, venueId } });
       if (!rate) throw new NotFoundException('Pay rate not found.');
       manager.merge(VenueRoleRate, rate, dto);
       await manager.save(rate);
-      return manager.findOneByOrFail(VenueRoleRate, { id: rateId });
+      const updated = await manager.findOneByOrFail(VenueRoleRate, { id: rateId });
+      await this.auditService.record(manager, ctx, AuditAction.VENUE_ROLE_RATE_UPDATED, { entityType: 'venue_role_rate', entityId: rateId, metadata: roleRateAuditMetadata(updated) });
+      return updated;
     });
   }
 
   async deleteRoleRate(ctx: AuthContext, venueId: string, rateId: string): Promise<void> {
     return this.tenantContext.runInWorkspaceContext(ctx, async (manager) => {
+      await this.assertCanEditVenueTx(manager, ctx);
       await this.assertVenueAccessibleTx(manager, ctx, venueId);
       const rate = await manager.findOne(VenueRoleRate, { where: { id: rateId, venueId } });
       if (!rate) throw new NotFoundException('Pay rate not found.');
+      const metadata = roleRateAuditMetadata(rate);
       await manager.remove(rate);
+      await this.auditService.record(manager, ctx, AuditAction.VENUE_ROLE_RATE_DELETED, { entityType: 'venue_role_rate', entityId: rateId, metadata });
     });
   }
+}
+
+/** Audit metadata for a venue pay rate change (owner decision batch 13, 2026-11-16): which rate, never how much. */
+function roleRateAuditMetadata(rate: VenueRoleRate): Record<string, unknown> {
+  const day = (value: unknown): string | null => (value == null ? null : value instanceof Date ? value.toISOString().slice(0, 10) : String(value));
+  return { venueId: rate.venueId, jobRoleId: rate.jobRoleId, effectiveFrom: day(rate.effectiveFrom), effectiveTo: day(rate.effectiveTo) };
 }

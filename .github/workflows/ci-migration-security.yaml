@@ -66,6 +66,8 @@ jobs:
         run: |
           npx ts-node --transpile-only -P packages/rab-server/tsconfig.app.json             packages/rab-server/src/database/typeorm/scripts/migration-security-check.ts
         env:
+          # X3.5-S6 strict switch: the harness and its children never resolve a legacy database name (DATABASE_URL, ...).
+          PG_LEGACY_NAMES_STRICT: 'true'
           # Pinned: this job must run BOTH scenarios (the other workflows build their test database with `fresh` only).
           MIGRATION_SECURITY_SCENARIOS: fresh,upgrade
           MIGRATION_SECURITY_KEEP_DATABASES: 'true'
@@ -174,6 +176,8 @@ jobs:
         run: |
           npx ts-node --transpile-only -P packages/rab-server/tsconfig.app.json             packages/rab-server/src/database/typeorm/scripts/migrate/owner-login/owner-login-lifecycle-check.ts
         env:
+          # X3.5-S6 strict switch: the lifecycle check and its children never resolve a legacy database name.
+          PG_LEGACY_NAMES_STRICT: 'true'
           OWNER_LOGIN_CHECK_SCENARIOS: ${{ matrix.scenarios }}
           # The provider-admin psql scripts run for real inside the container (postgres-init/owner-login/*.sql).
           OWNER_LOGIN_CHECK_CONTAINER: owner-login-postgres

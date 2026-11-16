@@ -1,11 +1,12 @@
 import { insertMembership, provisionFixtureWorkspace } from './helpers/test-identities';
 import { AvailabilityService } from '../../modules/scheduling/services/availability.service';
 import { ShiftReportService } from '../../modules/attendance/services/shift-report.service';
+import { AttendanceService } from '../../modules/attendance/services/attendance.service';
 import { OfferService } from '../../modules/offer/services/offer.service';
 import { assertVenueTeamSelection } from '../../modules/staff/services/venue-team-scope';
 import 'reflect-metadata';
 import { payForMinutes, ManagerType, PermissionFlag, UserStatus } from '@rab/shared';
-import { INestApplication } from '@nestjs/common';
+import { ForbiddenException, INestApplication } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
 import { randomUUID } from 'node:crypto';
 import request from 'supertest';
@@ -24,6 +25,7 @@ import { generateFixturePassword } from './helpers/fixture-password';
 import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-pipe';
 import { integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
 import { businessSchema, businessTableOf, siblingTable } from './helpers/hws-fixtures';
+import { businessTables } from '../../engine/core-modules/tenant/business-tables';
 
 const FIXTURE_PASSWORD = generateFixturePassword();
 
@@ -298,8 +300,8 @@ describeIfDb('venue manager scoping (integration)', () => {
     await tenantContext.runInTenantContext(
       { organisationId: organisation.id, workspaceId, userId: managerUserId, role: '' },
       async (m) => {
-        await m.query(`UPDATE core."user" SET status = 'active' WHERE id = (SELECT user_id FROM staff_profile WHERE id = $1)`, [staffProfileId]);
-        await m.query(`UPDATE staff_profile SET employment_status = 'active' WHERE id = $1`, [staffProfileId]);
+        await m.query(`UPDATE core."user" SET status = 'active' WHERE id = (SELECT user_id FROM ${businessTables(m).staff_profile} WHERE id = $1)`, [staffProfileId]);
+        await m.query(`UPDATE ${businessTables(m).staff_profile} SET employment_status = 'active' WHERE id = $1`, [staffProfileId]);
       },
     );
   }
@@ -318,7 +320,7 @@ describeIfDb('venue manager scoping (integration)', () => {
     await tenantContext.runInTenantContext(
       { organisationId: organisation.id, workspaceId, userId: managerUserId, role: '' },
       (m) => m.query(
-        `UPDATE shift_assignment SET status = 'confirmed', confirmed_at = now() WHERE shift_id = $1 AND staff_profile_id = $2`,
+        `UPDATE ${businessTables(m).shift_assignment} SET status = 'confirmed', confirmed_at = now() WHERE shift_id = $1 AND staff_profile_id = $2`,
         [shiftId, staffProfileId],
       ),
     );
@@ -529,7 +531,7 @@ describeIfDb('venue manager scoping (integration)', () => {
       { organisationId: organisation.id, workspaceId, userId: manager.userId, role: '' },
       async (m) => {
         for (const id of [activeStaff, suspendedStaff, unassigned]) {
-          await m.query(`UPDATE core."user" SET status = 'active' WHERE id = (SELECT user_id FROM staff_profile WHERE id = $1)`, [id]);
+          await m.query(`UPDATE core."user" SET status = 'active' WHERE id = (SELECT user_id FROM ${businessTables(m).staff_profile} WHERE id = $1)`, [id]);
         }
       },
     );
@@ -663,12 +665,12 @@ describeIfDb('venue manager scoping (integration)', () => {
     await expect(tenantContext.runInTenantContext(ctx, m => assertVenueTeamSelection(m, ctx, [unadded], a.venue1.workspaceId))).rejects.toThrow('team');
     await tenantContext.runInTenantContext(ctx, async m => {
       await assertVenueTeamSelection(m, ctx, [own], a.venue1.workspaceId);
-      const rows = await m.query('SELECT * FROM venue_manager_staff');
+      const rows = await m.query(`SELECT * FROM ${businessTables(m).venue_manager_staff}`);
       expect(rows).toHaveLength(1);
-      expect((await m.query('SELECT * FROM shift_assignment'))).toHaveLength(0);
+      expect((await m.query(`SELECT * FROM ${businessTables(m).shift_assignment}`))).toHaveLength(0);
     });
     await expect(tenantContext.runInTenantContext(ctx, m => m.query(
-      'INSERT INTO venue_manager_staff (organisation_id,workspace_id,manager_profile_id,staff_profile_id) VALUES ($1,$2,$3,$4)',
+      `INSERT INTO ${businessTables(m).venue_manager_staff} (organisation_id,workspace_id,manager_profile_id,staff_profile_id) VALUES ($1,$2,$3,$4)`,
       [a.organisation.id,b.venue1.workspaceId,a.venueManagerProfileId,foreign]))).rejects.toThrow();
   });
 
@@ -740,19 +742,19 @@ describeIfDb('venue manager scoping (integration)', () => {
       expect(result.results.every((r: any) => r.ok)).toBe(true);
       const [{ id: workspaceId }] = await adminDataSource.manager.query('SELECT id FROM core.manager_workspace WHERE owner_user_id=$1', [seed.manager.userId]);
       const ctx = { organisationId: seed.organisation.id, workspaceId, userId: seed.manager.userId, role: 'manager' };
-      const rows = await tenantContext.runInTenantContext(ctx, m => m.query('SELECT lower(period) AS start, upper(period) AS finish, break_minutes FROM shift_assignment WHERE shift_id=$1 AND staff_profile_id=$2', [seed.shiftId, seed.staffA]));
+      const rows = await tenantContext.runInTenantContext(ctx, m => m.query(`SELECT lower(period) AS start, upper(period) AS finish, break_minutes FROM ${businessTables(m).shift_assignment} WHERE shift_id=$1 AND staff_profile_id=$2`, [seed.shiftId, seed.staffA]));
       expect(rows[0].break_minutes).toBe(60);
       expect(rows[0].start.toISOString()).toBe(new Date(row.startsAt).toISOString());
       expect(rows[0].finish.toISOString()).toBe(new Date(row.endsAt).toISOString());
-      const [user] = await tenantContext.runInTenantContext(ctx,m=>m.query('SELECT user_id FROM staff_profile WHERE id=$1',[seed.staffA]));
+      const [user] = await tenantContext.runInTenantContext(ctx,m=>m.query(`SELECT user_id FROM ${businessTables(m).staff_profile} WHERE id=$1`,[seed.staffA]));
       const mine = await app.get(OfferService).listMine({...ctx,userId:user.user_id,role:'staff'},{});
       const offer = mine.find(o=>o.shiftId===seed.shiftId)!;
       expect(offer.startsAt.toISOString()).toBe(new Date(row.startsAt).toISOString());
       expect(offer.endsAt.toISOString()).toBe(new Date(row.endsAt).toISOString());
       await tenantContext.runInTenantContext(ctx, async m => {
-        const [shift] = await m.query('SELECT pay_rate_pence,break_minutes,ends_at,default_ends_at FROM shift WHERE id=$1',[seed.shiftId]);
+        const [shift] = await m.query(`SELECT pay_rate_pence,break_minutes,ends_at,default_ends_at FROM ${businessTables(m).shift} WHERE id=$1`,[seed.shiftId]);
         expect(offer.estimatedPayPence).toBe(payForMinutes(Number(shift.pay_rate_pence),540-60));
-        await m.query("UPDATE shift_assignment SET status='confirmed' WHERE shift_id=$1 AND staff_profile_id=$2",[seed.shiftId,seed.staffA]);
+        await m.query(`UPDATE ${businessTables(m).shift_assignment} SET status='confirmed' WHERE shift_id=$1 AND staff_profile_id=$2`,[seed.shiftId,seed.staffA]);
         expect(new Date(shift.default_ends_at).getUTCHours()).toBe(5);
         expect(new Date(shift.ends_at).getUTCHours()).toBe(9);
         const midnight = new Date(row.startsAt).getTime();
@@ -796,7 +798,7 @@ describeIfDb('venue manager scoping (integration)', () => {
       return (await request(app.getHttpServer()).get(seed.url).set('Authorization',`Bearer ${seed.managerToken}`).expect(200)).body;
     }
     async function acceptPipeline(seed: Awaited<ReturnType<typeof pipelineSeed>>, offerId: string, staffId: string) {
-      const [user] = await tenantContext.runInTenantContext(seed.ctx,m=>m.query('SELECT user_id FROM staff_profile WHERE id=$1',[staffId]));
+      const [user] = await tenantContext.runInTenantContext(seed.ctx,m=>m.query(`SELECT user_id FROM ${businessTables(m).staff_profile} WHERE id=$1`,[staffId]));
       await app.get(OfferService).staffAccept({...seed.ctx,userId:user.user_id,role:'staff'},offerId);
     }
     /** Owner rule 2026-11-06: accepting never confirms (not even on a VM request) — the approving Internal Manager confirms. */
@@ -856,7 +858,7 @@ describeIfDb('venue manager scoping (integration)', () => {
       expect(board.staff).toHaveLength(5);
       expect(board.staff.map((o:any)=>o.offerId).sort()).toEqual(offers.map((o:any)=>o.offerId).sort());
       for(let i=0;i<offers.length;i++) {
-        const [staff] = await tenantContext.runInTenantContext(seed.ctx,m=>m.query('SELECT user_id FROM staff_profile WHERE id=$1',[offers[i].staffProfileId]));
+        const [staff] = await tenantContext.runInTenantContext(seed.ctx,m=>m.query(`SELECT user_id FROM ${businessTables(m).staff_profile} WHERE id=$1`,[offers[i].staffProfileId]));
         const mine = await app.get(OfferService).listMine({...seed.ctx,userId:staff.user_id,role:'staff'},{});
         const own = mine.filter(o=>o.shiftId===seed.shiftId);
         expect(own).toHaveLength(1); expect(own[0].id).toBe(offers[i].offerId);
@@ -885,7 +887,7 @@ describeIfDb('venue manager scoping (integration)', () => {
     }, 60_000); // Five staff through approval, responses and full confirmation: measured over the 5 s default on the shared validation DB.
     it('Sent Shifts retains declined responses and denies foreign IDs, even another manager of the same venue', async()=>{
       const seed=await pipelineSeed(); const offers=await approvePipeline(seed);
-      const [user] = await tenantContext.runInTenantContext(seed.ctx,m=>m.query('SELECT user_id FROM staff_profile WHERE id=$1',[seed.staffA]));
+      const [user] = await tenantContext.runInTenantContext(seed.ctx,m=>m.query(`SELECT user_id FROM ${businessTables(m).staff_profile} WHERE id=$1`,[seed.staffA]));
       const offer = offers.find((o:any)=>o.staffProfileId===seed.staffA);
       await app.get(OfferService).decline({...seed.ctx,userId:user.user_id,role:'staff'},offer.offerId,{reason:'Unavailable'});
       const url=`/rest/v1/shifts/sent/${seed.shiftId}`;
@@ -942,24 +944,24 @@ describeIfDb('venue manager scoping (integration)', () => {
     it('pipeline follows real staff acceptance, decline, late and attendance facts, including verified geofence clock-out',async()=>{
       const seed=await pipelineSeed();const offers=await approvePipeline(seed);const a=offers.find((o:any)=>o.staffProfileId===seed.staffA),b=offers.find((o:any)=>o.staffProfileId===seed.staffB);
       await acceptAndConfirmPipeline(seed,a.offerId,seed.staffA);
-      const [staffB]=await tenantContext.runInTenantContext(seed.ctx,m=>m.query('SELECT user_id FROM staff_profile WHERE id=$1',[seed.staffB]));
+      const [staffB]=await tenantContext.runInTenantContext(seed.ctx,m=>m.query(`SELECT user_id FROM ${businessTables(m).staff_profile} WHERE id=$1`,[seed.staffB]));
       await app.get(OfferService).decline({...seed.ctx,userId:staffB.user_id,role:'staff'},b.offerId,{reason:'Unavailable'});
       // Accepted and then confirmed by the Internal Manager (no auto-confirm on accept since 2026-11-06): shown as Confirmed.
       let board=await readPipeline(seed);expect(board.staff.find((r:any)=>r.offerId===a.offerId)).toMatchObject({stage:'confirmed',assignmentStatus:'confirmed'});expect(board.staff.find((r:any)=>r.offerId===b.offerId)).toMatchObject({stage:'rejected',terminalSource:'Declined by staff',declineReason:'Unavailable'});expect(board.tableStatus).toBe('1 staff rejected');expectReconciled(board);
-      await tenantContext.runInTenantContext(seed.ctx,m=>m.query("UPDATE shift SET starts_at=now()-interval '20 minutes',ends_at=now()+interval '2 hours' WHERE id=$1",[seed.shiftId]));
-      await tenantContext.runInTenantContext(seed.ctx,m=>m.query("UPDATE shift_assignment SET period=tstzrange(now()-interval '20 minutes',now()+interval '2 hours','[)') WHERE shift_id=$1",[seed.shiftId]));
+      await tenantContext.runInTenantContext(seed.ctx,m=>m.query(`UPDATE ${businessTables(m).shift} SET starts_at=now()-interval '20 minutes',ends_at=now()+interval '2 hours' WHERE id=$1`,[seed.shiftId]));
+      await tenantContext.runInTenantContext(seed.ctx,m=>m.query(`UPDATE ${businessTables(m).shift_assignment} SET period=tstzrange(now()-interval '20 minutes',now()+interval '2 hours','[)') WHERE shift_id=$1`,[seed.shiftId]));
       board=await readPipeline(seed);expect(board.staff.find((r:any)=>r.offerId===a.offerId).stage).toBe('late');
       await tenantContext.runInTenantContext(seed.ctx,async m=>{
-        const [sa]=await m.query('SELECT id FROM shift_assignment WHERE shift_id=$1 AND staff_profile_id=$2',[seed.shiftId,seed.staffA]);
-        await m.query(`INSERT INTO attendance (organisation_id,workspace_id,shift_id,shift_assignment_id,staff_profile_id,status,clock_in_at) VALUES ($1,$2,$3,$4,$5,'clocked_in',now()-interval '10 minutes')`,[seed.ctx.organisationId,seed.ctx.workspaceId,seed.shiftId,sa.id,seed.staffA]);
+        const [sa]=await m.query(`SELECT id FROM ${businessTables(m).shift_assignment} WHERE shift_id=$1 AND staff_profile_id=$2`,[seed.shiftId,seed.staffA]);
+        await m.query(`INSERT INTO ${businessTables(m).attendance} (organisation_id,workspace_id,shift_id,shift_assignment_id,staff_profile_id,status,clock_in_at) VALUES ($1,$2,$3,$4,$5,'clocked_in',now()-interval '10 minutes')`,[seed.ctx.organisationId,seed.ctx.workspaceId,seed.shiftId,sa.id,seed.staffA]);
       });
       board=await readPipeline(seed);expect(board.staff.find((r:any)=>r.offerId===a.offerId).stage).toBe('clocked_in');expect(board.report.ready).toBe(false);
       expect(board.summary).toMatchObject({clockedIn:1,pendingReview:0});expectReconciled(board);
       // Forgotten clock-out flagged by the monitor: one lane only (Pending Review), never also counted as Clocked In.
-      await tenantContext.runInTenantContext(seed.ctx,m=>m.query("UPDATE attendance SET status='missing_clock_out' WHERE shift_id=$1",[seed.shiftId]));
+      await tenantContext.runInTenantContext(seed.ctx,m=>m.query(`UPDATE ${businessTables(m).attendance} SET status='missing_clock_out' WHERE shift_id=$1`,[seed.shiftId]));
       board=await readPipeline(seed);expect(board.staff.find((r:any)=>r.offerId===a.offerId).stage).toBe('pending_review');
       expect(board.summary).toMatchObject({clockedIn:0,pendingReview:1});expectReconciled(board);
-      await tenantContext.runInTenantContext(seed.ctx,m=>m.query("UPDATE attendance SET status='clocked_out',clock_out_at=now(),clock_out_method='auto_geofence',break_minutes=0,worked_minutes=10,earned_pence=200 WHERE shift_id=$1",[seed.shiftId]));
+      await tenantContext.runInTenantContext(seed.ctx,m=>m.query(`UPDATE ${businessTables(m).attendance} SET status='clocked_out',clock_out_at=now(),clock_out_method='auto_geofence',break_minutes=0,worked_minutes=10,earned_pence=200 WHERE shift_id=$1`,[seed.shiftId]));
       board=await readPipeline(seed);expect(board.staff.find((r:any)=>r.offerId===a.offerId)).toMatchObject({stage:'clocked_out',clockOutMethod:'auto_geofence',workedMinutes:10,attendanceReviewed:false});expect(board.report.ready).toBe(true);
       expect(board.summary).toMatchObject({clockedIn:0,pendingReview:0,clockedOut:1});expectReconciled(board);
       await request(app.getHttpServer()).post('/rest/v1/files/previews').set('Authorization',`Bearer ${seed.managerToken}`).send({fileIds:[randomUUID()]}).expect(201).expect(({body})=>expect(body.previews).toEqual({}));
@@ -972,10 +974,10 @@ describeIfDb('venue manager scoping (integration)', () => {
       const board=await readPipeline(seed);const card=board.staff.find((r:any)=>r.offerId===id);expect(card.stage).toBe('deleted');expect(card.terminalSource).toBe('Cancelled by Internal Manager');expect(card.withdrawnReason).toBe('Venue requested replacement');
       await tenantContext.runInTenantContext(seed.ctx,async m=>{
         const audit=await m.query("SELECT id FROM core.audit_log WHERE entity_id=$1 AND action='offer.withdrawn'",[id]);expect(audit).toHaveLength(1);
-        const notes=await m.query("SELECT body FROM user_note WHERE organisation_id=$1 AND body LIKE '%Venue requested replacement%'",[seed.organisation.id]);expect(notes).toHaveLength(1);
+        const notes=await m.query(`SELECT body FROM ${businessTables(m).user_note} WHERE organisation_id=$1 AND body LIKE '%Venue requested replacement%'`,[seed.organisation.id]);expect(notes).toHaveLength(1);
       });
       await request(app.getHttpServer()).post(`${seed.url}/offers/${offers[1].offerId}/cancel`).set('Authorization',`Bearer ${seed.managerToken}`).send({}).expect(201);
-      await tenantContext.runInTenantContext(seed.ctx,async m=>expect(await m.query('SELECT id FROM user_note WHERE organisation_id=$1',[seed.organisation.id])).toHaveLength(1));
+      await tenantContext.runInTenantContext(seed.ctx,async m=>expect(await m.query(`SELECT id FROM ${businessTables(m).user_note} WHERE organisation_id=$1`,[seed.organisation.id])).toHaveLength(1));
     });
     it('pipeline cancellation releases confirmed seat and replacement uses canonical send; active mobile projection is cancelled',async()=>{
       const seed=await pipelineSeed();const offers=await approvePipeline(seed);const offer=offers.find((o:any)=>o.staffProfileId===seed.staffA);
@@ -983,7 +985,7 @@ describeIfDb('venue manager scoping (integration)', () => {
       await request(app.getHttpServer()).post(`${seed.url}/offers/${offer.offerId}/cancel`).set('Authorization',`Bearer ${seed.managerToken}`).send({}).expect(201);
       const board=await readPipeline(seed);expect(board.summary.filled).toBe(0);expect(board.replacementPlaces).toBe(1);
       expect(board.staff.find((r:any)=>r.offerId===offer.offerId).stage).toBe('cancelled');expect(board.summary.cancelled).toBe(1);expectReconciled(board);
-      const [user]=await tenantContext.runInTenantContext(seed.ctx,m=>m.query('SELECT user_id FROM staff_profile WHERE id=$1',[seed.staffA]));
+      const [user]=await tenantContext.runInTenantContext(seed.ctx,m=>m.query(`SELECT user_id FROM ${businessTables(m).staff_profile} WHERE id=$1`,[seed.staffA]));
       const mine=await app.get(OfferService).listMine({...seed.ctx,userId:user.user_id,role:'staff'},{});expect(mine.find(o=>o.id===offer.offerId)?.presentation.state).toBe('cancelled');
       const replacement=await createStaff(seed.managerToken,'Replacement');await activateStaff(seed.organisation,seed.manager.userId,replacement);
       const picker=await request(app.getHttpServer()).get(`/rest/v1/shifts/${seed.shiftId}/selectable-staff`).set('Authorization',`Bearer ${seed.managerToken}`).expect(200);expect(picker.body.data.map((r:any)=>r.id)).toEqual([replacement]);
@@ -1005,18 +1007,18 @@ describeIfDb('venue manager scoping (integration)', () => {
     it('pipeline server cancellation cutoff blocks at T-15m and closed shifts; client scope fields are rejected',async()=>{
       const seed=await pipelineSeed();const offers=await approvePipeline(seed);
       await request(app.getHttpServer()).post(`${seed.url}/offers/${offers[0].offerId}/cancel`).set('Authorization',`Bearer ${seed.managerToken}`).send({workspaceId:randomUUID()}).expect(400);
-      await tenantContext.runInTenantContext(seed.ctx,m=>m.query("UPDATE shift SET starts_at=clock_timestamp()+interval '15 minutes', ends_at=clock_timestamp()+interval '4 hours' WHERE id=$1",[seed.shiftId]));
+      await tenantContext.runInTenantContext(seed.ctx,m=>m.query(`UPDATE ${businessTables(m).shift} SET starts_at=clock_timestamp()+interval '15 minutes', ends_at=clock_timestamp()+interval '4 hours' WHERE id=$1`,[seed.shiftId]));
       await request(app.getHttpServer()).post(`${seed.url}/offers/${offers[0].offerId}/cancel`).set('Authorization',`Bearer ${seed.managerToken}`).send({}).expect(409);
       expect((await readPipeline(seed)).staff.every((r:any)=>!r.canManagerCancel)).toBe(true);
-      await tenantContext.runInTenantContext(seed.ctx,m=>m.query("UPDATE shift SET starts_at=clock_timestamp()+interval '1 day', ends_at=clock_timestamp()+interval '2 days', status='cancelled' WHERE id=$1",[seed.shiftId]));
+      await tenantContext.runInTenantContext(seed.ctx,m=>m.query(`UPDATE ${businessTables(m).shift} SET starts_at=clock_timestamp()+interval '1 day', ends_at=clock_timestamp()+interval '2 days', status='cancelled' WHERE id=$1`,[seed.shiftId]));
       await request(app.getHttpServer()).post(`${seed.url}/offers/${offers[0].offerId}/cancel`).set('Authorization',`Bearer ${seed.managerToken}`).send({}).expect(409);
     });
 
     async function mutateStaff(seed: Awaited<ReturnType<typeof seedPendingRequest>>, staffId: string, account: string, employment = 'active', owner?: string) {
       const [{ id: workspaceId }] = await adminDataSource.manager.query('SELECT id FROM core.manager_workspace WHERE owner_user_id = $1', [seed.manager.userId]);
       await tenantContext.runInTenantContext({ organisationId: seed.organisation.id, workspaceId, userId: seed.manager.userId, role: 'manager' }, async (m) => {
-        await m.query('UPDATE core."user" SET status = $1 WHERE id = (SELECT user_id FROM staff_profile WHERE id = $2)', [account, staffId]);
-        await m.query('UPDATE staff_profile SET employment_status = $1, created_by = COALESCE($3::uuid, created_by) WHERE id = $2', [employment, staffId, owner ?? null]);
+        await m.query(`UPDATE core."user" SET status = $1 WHERE id = (SELECT user_id FROM ${businessTables(m).staff_profile} WHERE id = $2)`, [account, staffId]);
+        await m.query(`UPDATE ${businessTables(m).staff_profile} SET employment_status = $1, created_by = COALESCE($3::uuid, created_by) WHERE id = $2`, [employment, staffId, owner ?? null]);
       });
     }
     it('atomic selection Confirm persists final staff without offers; Approve sends only that persisted list', async () => {
@@ -1695,14 +1697,14 @@ describeIfDb('venue manager scoping (integration)', () => {
       expect(await dataSource.query(`SELECT id FROM core.shift_staff_review`)).toHaveLength(0);
       const [{ id: workspaceId }] = await adminDataSource.query(`SELECT workspace_id AS id FROM ${await businessTableOf(adminDataSource, 'shift', s.shift1)} WHERE id = $1`, [s.shift1]);
       const stranger = await tenantContext.runInTenantContext({ organisationId: s.organisation.id, workspaceId, userId: randomUUID(), role: '' },
-        (m) => m.query(`SELECT id FROM shift_staff_review WHERE shift_id = $1`, [s.shift1]));
+        (m) => m.query(`SELECT id FROM ${businessTables(m).shift_staff_review} WHERE shift_id = $1`, [s.shift1]));
       expect(stranger).toHaveLength(0);
       const ownVm = await tenantContext.runInTenantContext({ organisationId: s.organisation.id, workspaceId, userId: s.venueManager.userId, role: '' },
-        (m) => m.query(`SELECT id FROM shift_staff_review WHERE shift_id = $1`, [s.shift1]));
+        (m) => m.query(`SELECT id FROM ${businessTables(m).shift_staff_review} WHERE shift_id = $1`, [s.shift1]));
       expect(ownVm).toHaveLength(1);
       // RLS WITH CHECK pins the reviewer to the caller even if a service bug tried otherwise.
       await expect(tenantContext.runInTenantContext({ organisationId: s.organisation.id, workspaceId, userId: s.venueManager.userId, role: '' },
-        (m) => m.query(`UPDATE shift_staff_review SET reviewer_user_id = $2 WHERE shift_id = $1`, [s.shift1, s.manager.userId]))).rejects.toThrow(/row-level security/);
+        (m) => m.query(`UPDATE ${businessTables(m).shift_staff_review} SET reviewer_user_id = $2 WHERE shift_id = $1`, [s.shift1, s.manager.userId]))).rejects.toThrow(/row-level security/);
     });
 
     it('typed sign-off is recorded with the server signer/time, is all-or-nothing, and locks reviews', async () => {
@@ -1894,6 +1896,342 @@ describeIfDb('venue manager scoping (integration)', () => {
         expect(row.clock_out_at.toISOString()).toBe(out.toISOString());
         // computeWorkedMinutes (@rab/shared duration.ts): span minus the scheduled 30-minute unpaid break.
         expect(row.worked_minutes).toBe(Math.round((out.getTime() - clockInAt.getTime()) / MIN) - 30);
+      });
+    });
+
+    // Owner brief 2026-11-15 (compact attendance correction warning): a corrected clock-in earlier than the staff
+    // member's own scheduled start − CLOCK_IN_EARLY_MINUTES (15 by default) is saved only with an explicit
+    // `confirmUnusualClockIn: true`; without it, 409 CLOCK_IN_CONFIRMATION_REQUIRED with `earliestAllowed` and nothing is
+    // written. Normal corrections need no confirmation; every other rule (future, order, scope, permission) still applies.
+    describe('unusually early clock-in correction needs explicit confirmation', () => {
+      const MIN = 60_000;
+      const reason = 'Staff arrived early; start time confirmed by the manager.';
+      /** A recorded (clocked-out) seat: shift ended 3 h ago, 7 h long; clocked in start + 15 min, out at the end. */
+      const recordedSeat = () => seedSeat({ status: 'clocked_out', endedAgoMs: 3 * HOUR, clockOut: true });
+      const tablesOf = async (shiftId: string) => {
+        const shift = await businessTableOf(adminDataSource, 'shift', shiftId);
+        return { shift, attendance: siblingTable(shift, 'attendance'), seat: siblingTable(shift, 'shift_assignment'), correction: siblingTable(shift, 'attendance_correction') };
+      };
+      /** The seat's own scheduled start (`effectiveAssignmentTime`): the assignment period's lower bound. */
+      const seatStartOf = async (shiftId: string): Promise<Date> => {
+        const t = await tablesOf(shiftId);
+        const [{ start }] = await adminDataSource.query(`SELECT lower(period) AS start FROM ${t.seat} WHERE shift_id = $1`, [shiftId]);
+        return start as Date;
+      };
+      const stateOf = async (shiftId: string, attendanceId: string) => {
+        const t = await tablesOf(shiftId);
+        const [row] = await adminDataSource.query(`SELECT status, clock_in_at, worked_minutes FROM ${t.attendance} WHERE id = $1`, [attendanceId]);
+        const [{ starts_at: shiftStartsAt }] = await adminDataSource.query(`SELECT starts_at FROM ${t.shift} WHERE id = $1`, [shiftId]);
+        const corrections = await adminDataSource.query(
+          `SELECT field, old_value, new_value, reason, corrected_by FROM ${t.correction} WHERE attendance_id = $1`, [attendanceId]);
+        const audits = await adminDataSource.query(
+          `SELECT actor_user_id, metadata, created_at FROM core.audit_log WHERE entity_id = $1 AND action = 'attendance.corrected'`, [attendanceId]);
+        return { row, shiftStartsAt: shiftStartsAt as Date, corrections, audits };
+      };
+
+      it('a normal clock-in correction (at the scheduled start) is saved with no confirmation', async () => {
+        const s = await recordedSeat();
+        const start = await seatStartOf(s.shiftId);
+        const res = await correct(s.vmToken, s.attendanceId!, { field: 'clockInAt', newValue: start.toISOString(), reason });
+        expect(res.status).toBe(201);
+        const after = await stateOf(s.shiftId, s.attendanceId!);
+        expect(after.row.clock_in_at.toISOString()).toBe(start.toISOString());
+        expect(after.audits).toHaveLength(1);
+        expect(after.audits[0].metadata).not.toHaveProperty('unusualClockInConfirmed');
+        expect((await reportOf(s.vmToken, s.shiftId)).staff[0].unusualClockInConfirmed).toBe(false);
+      });
+
+      it('a clock-in exactly at the earliest allowed time (start − 15 min) is saved with no confirmation', async () => {
+        const s = await recordedSeat();
+        const earliest = new Date((await seatStartOf(s.shiftId)).getTime() - 15 * MIN);
+        const res = await correct(s.vmToken, s.attendanceId!, { field: 'clockInAt', newValue: earliest.toISOString(), reason });
+        expect(res.status).toBe(201);
+        const after = await stateOf(s.shiftId, s.attendanceId!);
+        expect(after.row.clock_in_at.toISOString()).toBe(earliest.toISOString());
+        expect(after.audits[0].metadata).not.toHaveProperty('unusualClockInConfirmed');
+      });
+
+      it('an earlier clock-in without confirmation is refused (409 CLOCK_IN_CONFIRMATION_REQUIRED) and nothing is written', async () => {
+        const s = await recordedSeat();
+        const start = await seatStartOf(s.shiftId);
+        const before = await stateOf(s.shiftId, s.attendanceId!);
+        for (const entered of [new Date(start.getTime() - 16 * MIN), new Date(start.getTime() - 4 * HOUR)]) {
+          // A direct API call that never showed the warning: no flag, or the flag set to false.
+          for (const extra of [{}, { confirmUnusualClockIn: false }]) {
+            const res = await correct(s.vmToken, s.attendanceId!, { field: 'clockInAt', newValue: entered.toISOString(), reason, ...extra });
+            expect(res.status).toBe(409);
+            expect(res.body).toMatchObject({
+              code: 'CLOCK_IN_CONFIRMATION_REQUIRED',
+              message: 'This time is earlier than the normal allowance. Please check before continuing.',
+              earliestAllowed: new Date(start.getTime() - 15 * MIN).toISOString(),
+              enteredTime: entered.toISOString(),
+            });
+          }
+        }
+        const after = await stateOf(s.shiftId, s.attendanceId!);
+        expect(after.row).toEqual(before.row);
+        expect(after.corrections).toHaveLength(0);
+        expect(after.audits).toHaveLength(0);
+        // A non-boolean flag is a validation failure, never a truthy confirmation.
+        const junk = await correct(s.vmToken, s.attendanceId!, {
+          field: 'clockInAt',
+          newValue: new Date(start.getTime() - HOUR).toISOString(),
+          reason,
+          confirmUnusualClockIn: 'true',
+        });
+        expect(junk.status).toBe(400);
+      });
+
+      it('the allowance is measured from the staff member OWN start: seat starting 1 h after the shift, shiftStart − 10 min needs confirmation', async () => {
+        const s = await recordedSeat();
+        const t = await tablesOf(s.shiftId);
+        await adminDataSource.query(`UPDATE ${t.seat} SET period = tstzrange(lower(period) + interval '1 hour', upper(period), '[)') WHERE shift_id = $1`, [s.shiftId]);
+        const before = await stateOf(s.shiftId, s.attendanceId!);
+        const entered = new Date(before.shiftStartsAt.getTime() - 10 * MIN); // inside the SHIFT's allowance, 70 min before the seat
+        const res = await correct(s.vmToken, s.attendanceId!, { field: 'clockInAt', newValue: entered.toISOString(), reason });
+        expect(res.status).toBe(409);
+        expect(res.body.earliestAllowed).toBe(new Date((await seatStartOf(s.shiftId)).getTime() - 15 * MIN).toISOString());
+      });
+
+      it('Confirm saves once: original and corrected values, confirming manager and time are kept; the shift start never moves', async () => {
+        const s = await recordedSeat();
+        const start = await seatStartOf(s.shiftId);
+        const before = await stateOf(s.shiftId, s.attendanceId!);
+        const original = before.row.clock_in_at.toISOString();
+        const entered = new Date(start.getTime() - 4 * HOUR).toISOString();
+        const body = { field: 'clockInAt', newValue: entered, reason, confirmUnusualClockIn: true };
+        const res = await correct(s.vmToken, s.attendanceId!, body);
+        expect(res.status).toBe(201);
+
+        const after = await stateOf(s.shiftId, s.attendanceId!);
+        expect(after.row.clock_in_at.toISOString()).toBe(entered);
+        expect(after.row.status).toBe('under_review'); // a recorded row is reopened for review, as for every correction
+        // Worked minutes recomputed by @rab/shared duration.ts: (end − entered) − the scheduled 30-minute break.
+        expect(after.row.worked_minutes).toBe(7 * 60 + 4 * 60 - 30);
+        expect(after.shiftStartsAt.toISOString()).toBe(before.shiftStartsAt.toISOString());
+        expect((await seatStartOf(s.shiftId)).toISOString()).toBe(start.toISOString());
+        expect(after.corrections).toEqual([{ field: 'clockInAt', old_value: original, new_value: entered, reason, corrected_by: s.venueManager.userId }]);
+        expect(after.audits).toHaveLength(1);
+        expect(after.audits[0].actor_user_id).toBe(s.venueManager.userId);
+        expect(after.audits[0].created_at).toBeInstanceOf(Date);
+        expect(after.audits[0].metadata).toMatchObject({
+          field: 'clockInAt',
+          oldValue: original,
+          newValue: entered,
+          reason,
+          unusualClockInConfirmed: true,
+          earliestAllowed: new Date(start.getTime() - 15 * MIN).toISOString(),
+        });
+
+        // A retried / double-tapped Confirm: no second correction row, no second audit entry.
+        expect((await correct(s.vmToken, s.attendanceId!, body)).status).toBe(201);
+        const again = await stateOf(s.shiftId, s.attendanceId!);
+        expect(again.corrections).toHaveLength(1);
+        expect(again.audits).toHaveLength(1);
+
+        // The report row the reviewer and finaliser see shows it while that clock-in stands…
+        expect(after.audits[0].metadata).toMatchObject({ confirmedClockInAt: entered });
+        expect((await reportOf(s.vmToken, s.shiftId)).staff[0].unusualClockInConfirmed).toBe(true);
+        // …and a later ordinary clock-in correction clears it.
+        expect((await correct(s.vmToken, s.attendanceId!, { field: 'clockInAt', newValue: start.toISOString(), reason })).status).toBe(201);
+        expect((await reportOf(s.vmToken, s.shiftId)).staff[0].unusualClockInConfirmed).toBe(false);
+      });
+
+      it('12 h floor: start − 12 h needs (and accepts) the confirmation; one minute earlier is refused even with it (422), nothing written', async () => {
+        const s = await recordedSeat();
+        const start = await seatStartOf(s.shiftId);
+        const floor = new Date(start.getTime() - 12 * HOUR).toISOString();
+        const before = await stateOf(s.shiftId, s.attendanceId!);
+        const beyond = await correct(s.vmToken, s.attendanceId!, {
+          field: 'clockInAt', newValue: new Date(start.getTime() - 12 * HOUR - MIN).toISOString(), reason, confirmUnusualClockIn: true,
+        });
+        expect(beyond.status).toBe(422);
+        expect(beyond.body).toMatchObject({ code: 'CLOCK_IN_TOO_EARLY_ABSOLUTE', earliestPossible: floor });
+        expect(beyond.body.message).toBe('The clock-in time cannot be more than 12 hours before the scheduled start.');
+        const untouched = await stateOf(s.shiftId, s.attendanceId!);
+        expect(untouched.row).toEqual(before.row);
+        expect(untouched.corrections).toHaveLength(0);
+        expect(untouched.audits).toHaveLength(0);
+
+        const atFloor = { field: 'clockInAt', newValue: floor, reason };
+        expect((await correct(s.vmToken, s.attendanceId!, atFloor)).body.code).toBe('CLOCK_IN_CONFIRMATION_REQUIRED');
+        expect((await correct(s.vmToken, s.attendanceId!, { ...atFloor, confirmUnusualClockIn: true })).status).toBe(201);
+        expect((await stateOf(s.shiftId, s.attendanceId!)).row.clock_in_at.toISOString()).toBe(floor);
+        expect((await reportOf(s.vmToken, s.shiftId)).staff[0].unusualClockInConfirmed).toBe(true);
+      });
+
+      it('re-sending the stored clock-in stays the idempotent 201 even after a schedule change put it beyond the floor; a new time there is 422', async () => {
+        const s = await recordedSeat();
+        const start = await seatStartOf(s.shiftId);
+        const stored = new Date(start.getTime() - 12 * HOUR).toISOString();
+        expect((await correct(s.vmToken, s.attendanceId!, { field: 'clockInAt', newValue: stored, reason, confirmUnusualClockIn: true })).status).toBe(201);
+        // The seat (and shift) start moves an hour later: the stored clock-in is now 13 h before it, beyond the floor.
+        const t = await tablesOf(s.shiftId);
+        await adminDataSource.query(`UPDATE ${t.shift} SET starts_at = starts_at + interval '1 hour' WHERE id = $1`, [s.shiftId]);
+        await adminDataSource.query(`UPDATE ${t.seat} SET period = tstzrange(lower(period) + interval '1 hour', upper(period), '[)') WHERE shift_id = $1`, [s.shiftId]);
+        const before = await stateOf(s.shiftId, s.attendanceId!);
+        for (const extra of [{}, { confirmUnusualClockIn: true }]) {
+          expect((await correct(s.vmToken, s.attendanceId!, { field: 'clockInAt', newValue: stored, reason, ...extra })).status).toBe(201);
+        }
+        const after = await stateOf(s.shiftId, s.attendanceId!);
+        expect(after.row).toEqual(before.row);
+        expect(after.corrections).toHaveLength(1);
+        expect(after.audits).toHaveLength(1);
+        // A different (new) time beyond the moved floor is still refused, confirmed or not.
+        const beyond = await correct(s.vmToken, s.attendanceId!, {
+          field: 'clockInAt', newValue: new Date(start.getTime() - 11 * HOUR - MIN).toISOString(), reason, confirmUnusualClockIn: true,
+        });
+        expect(beyond.status).toBe(422);
+        expect(beyond.body.code).toBe('CLOCK_IN_TOO_EARLY_ABSOLUTE');
+      });
+
+      it('the floor is absolute on correct(): a clockOutAt or breakMinutes correction is refused (422) when the stored clock-in is now beyond it, nothing written', async () => {
+        const s = await recordedSeat();
+        const start = await seatStartOf(s.shiftId);
+        const stored = new Date(start.getTime() - 12 * HOUR).toISOString();
+        expect((await correct(s.vmToken, s.attendanceId!, { field: 'clockInAt', newValue: stored, reason, confirmUnusualClockIn: true })).status).toBe(201);
+        // Inside the floor, the other fields still correct normally.
+        expect((await correct(s.vmToken, s.attendanceId!, { field: 'breakMinutes', newValue: '40', reason })).status).toBe(201);
+        // The seat (and shift) start then moves an hour later: the confirmed stored clock-in is 13 h before it.
+        const t = await tablesOf(s.shiftId);
+        await adminDataSource.query(`UPDATE ${t.shift} SET starts_at = starts_at + interval '1 hour' WHERE id = $1`, [s.shiftId]);
+        await adminDataSource.query(`UPDATE ${t.seat} SET period = tstzrange(lower(period) + interval '1 hour', upper(period), '[)') WHERE shift_id = $1`, [s.shiftId]);
+        const before = await stateOf(s.shiftId, s.attendanceId!);
+        const [{ ends_at: endsAt }] = await adminDataSource.query(`SELECT ends_at FROM ${t.shift} WHERE id = $1`, [s.shiftId]);
+        const bodies = [
+          { field: 'clockOutAt', newValue: new Date((endsAt as Date).getTime() - 30 * MIN).toISOString(), reason },
+          { field: 'breakMinutes', newValue: '45', reason },
+        ];
+        for (const body of bodies) {
+          for (const extra of [{}, { confirmUnusualClockIn: true }]) {
+            const res = await correct(s.vmToken, s.attendanceId!, { ...body, ...extra });
+            expect(res.status).toBe(422);
+            expect(res.body).toMatchObject({ code: 'CLOCK_IN_TOO_EARLY_ABSOLUTE', earliestPossible: new Date(start.getTime() + HOUR - 12 * HOUR).toISOString() });
+          }
+        }
+        const after = await stateOf(s.shiftId, s.attendanceId!);
+        expect(after.row).toEqual(before.row);
+        expect(after.corrections).toHaveLength(before.corrections.length);
+        expect(after.audits).toHaveLength(before.audits.length);
+        // Re-sending the values already stored is still the idempotent no-op (201, nothing written).
+        expect((await correct(s.vmToken, s.attendanceId!, { field: 'breakMinutes', newValue: '40', reason })).status).toBe(201);
+        expect((await stateOf(s.shiftId, s.attendanceId!)).audits).toHaveLength(before.audits.length);
+      });
+
+      it('the future-time and clock-out rules still apply, even with the confirmation', async () => {
+        const s = await recordedSeat();
+        const before = await stateOf(s.shiftId, s.attendanceId!);
+        const future = await correct(s.vmToken, s.attendanceId!, {
+          field: 'clockInAt',
+          newValue: new Date(Date.now() + 10 * MIN).toISOString(),
+          reason,
+          confirmUnusualClockIn: true,
+        });
+        expect(future.status).toBe(400);
+        expect(future.body.message).toBe('A clock-in time cannot be in the future.');
+        const t = await tablesOf(s.shiftId);
+        const [{ clock_out_at: out }] = await adminDataSource.query(`SELECT clock_out_at FROM ${t.attendance} WHERE id = $1`, [s.attendanceId]);
+        const afterOut = await correct(s.vmToken, s.attendanceId!, {
+          field: 'clockInAt',
+          newValue: new Date((out as Date).getTime() + MIN).toISOString(),
+          reason,
+          confirmUnusualClockIn: true,
+        });
+        expect(afterOut.status).toBe(400);
+        expect(afterOut.body.message).toBe('clockOutAt cannot be before clockInAt.');
+        const after = await stateOf(s.shiftId, s.attendanceId!);
+        expect(after.row).toEqual(before.row);
+        expect(after.corrections).toHaveLength(0);
+        expect(after.audits).toHaveLength(0);
+      });
+
+      it('another workspace (404), the web console (403) and a Venue Manager without attendance.edit are refused, even with the confirmation', async () => {
+        const s = await recordedSeat();
+        const start = await seatStartOf(s.shiftId);
+        const body = { field: 'clockInAt', newValue: new Date(start.getTime() - 4 * HOUR).toISOString(), reason, confirmUnusualClockIn: true };
+        const before = await stateOf(s.shiftId, s.attendanceId!);
+
+        const other = await seedOrg();
+        const otherVm = await login(other.venueManager.email);
+        expect((await correct(otherVm, s.attendanceId!, body)).status).toBe(404);
+        // The workspace owner's web session: the route is Venue Manager app only.
+        expect((await correct(s.managerToken, s.attendanceId!, body)).status).toBe(403);
+        // attendance.edit revoked from the Venue Manager's role (the write RoleService.setPermissions performs).
+        await adminDataSource.query(
+          `DELETE FROM core.role_permission rp USING core.permission p, core.user_role ur
+            WHERE rp.permission_id = p.id AND p.key = 'attendance.edit' AND rp.role_id = ur.role_id AND ur.user_id = $1`,
+          [s.venueManager.userId],
+        );
+        await adminDataSource.query(
+          `UPDATE core.role SET permission_version = permission_version + 1 WHERE id IN (SELECT role_id FROM core.user_role WHERE user_id = $1)`,
+          [s.venueManager.userId],
+        );
+        // Layer 1: the version bump re-resolves the session's permissions (the session itself stays valid), so the
+        // route answers exactly 403.
+        expect((await correct(s.vmToken, s.attendanceId!, body)).status).toBe(403);
+        // Layer 2: the service re-checks attendance.edit itself (jobs and other services never pass the guard).
+        const ctx = { organisationId: s.organisation.id, workspaceId: s.venue1.workspaceId, userId: s.venueManager.userId, role: 'venue_manager' };
+        await expect(app.get(AttendanceService).correct(ctx as never, s.attendanceId!, body as never)).rejects.toBeInstanceOf(ForbiddenException);
+
+        const after = await stateOf(s.shiftId, s.attendanceId!);
+        expect(after.row).toEqual(before.row);
+        expect(after.corrections).toHaveLength(0);
+        expect(after.audits).toHaveLength(0);
+      });
+
+      it('a finalised report stays locked: the confirmation changes nothing (existing 409, nothing written)', async () => {
+        // The path the existing finalise test proves: recover the missing clock-out, review the seat, finalise.
+        const s = await seedSeat({ status: 'missing_clock_out', endedAgoMs: 3 * HOUR });
+        const out = await clockOutAt(s.shiftId);
+        expect((await correct(s.vmToken, s.attendanceId!, { field: 'clockOutAt', newValue: out, reason })).status).toBe(201);
+        expect((await reviewSeat(s.vmToken, s.shiftId, s.staff)).status).toBe(200);
+        expect((await finalise(s.vmToken, s.shiftId)).status).toBe(200);
+        const start = await seatStartOf(s.shiftId);
+        const before = await stateOf(s.shiftId, s.attendanceId!);
+        const res = await correct(s.vmToken, s.attendanceId!, {
+          field: 'clockInAt',
+          newValue: new Date(start.getTime() - 4 * HOUR).toISOString(),
+          reason,
+          confirmUnusualClockIn: true,
+        });
+        expect(res.status).toBe(409);
+        expect(res.body.message).toBe('This shift report has been finalised and can no longer be corrected.');
+        expect(res.body.code).not.toBe('CLOCK_IN_CONFIRMATION_REQUIRED');
+        const after = await stateOf(s.shiftId, s.attendanceId!);
+        expect(after.row).toEqual(before.row);
+        expect(after.corrections).toEqual(before.corrections); // only the setup's recovery
+        expect(after.audits).toHaveLength(before.audits.length);
+      });
+
+      it('clockOutAt and breakMinutes corrections sent with the flag behave normally and record no confirmation', async () => {
+        const s = await recordedSeat();
+        const t = await tablesOf(s.shiftId);
+        const [{ ends_at: endsAt }] = await adminDataSource.query(`SELECT ends_at FROM ${t.shift} WHERE id = $1`, [s.shiftId]);
+        const out = new Date((endsAt as Date).getTime() - 30 * MIN).toISOString();
+        expect((await correct(s.vmToken, s.attendanceId!, { field: 'clockOutAt', newValue: out, reason, confirmUnusualClockIn: true })).status).toBe(201);
+        expect((await correct(s.vmToken, s.attendanceId!, { field: 'breakMinutes', newValue: '45', reason, confirmUnusualClockIn: true })).status).toBe(201);
+        const after = await stateOf(s.shiftId, s.attendanceId!);
+        expect(after.corrections.map((c: { field: string }) => c.field).sort()).toEqual(['breakMinutes', 'clockOutAt']);
+        expect(after.audits).toHaveLength(2);
+        for (const audit of after.audits) {
+          expect(audit.metadata).not.toHaveProperty('unusualClockInConfirmed');
+          expect(audit.metadata).not.toHaveProperty('earliestAllowed');
+        }
+      });
+
+      it('an open (clocked-in) row with an early clock-in and no flag gets the existing "still on shift" 409, not the confirmation', async () => {
+        // Ended 100 min ago: still inside the staff member's own clock-out grace, so the row cannot be corrected yet.
+        const s = await seedSeat({ status: 'clocked_in', endedAgoMs: 100 * MIN });
+        const start = await seatStartOf(s.shiftId);
+        const before = await stateOf(s.shiftId, s.attendanceId!);
+        const res = await correct(s.vmToken, s.attendanceId!, { field: 'clockInAt', newValue: new Date(start.getTime() - 4 * HOUR).toISOString(), reason });
+        expect(res.status).toBe(409);
+        expect(res.body.message).toContain('still on shift');
+        expect(res.body.code).not.toBe('CLOCK_IN_CONFIRMATION_REQUIRED');
+        const after = await stateOf(s.shiftId, s.attendanceId!);
+        expect(after.row).toEqual(before.row);
+        expect(after.corrections).toHaveLength(0);
+        expect(after.audits).toHaveLength(0);
       });
     });
 

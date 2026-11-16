@@ -59,6 +59,18 @@ export const PG_REPLICA_MAX_LAG_DEFAULT_MS = 5_000;
 /** Legacy names: accepted outside production only, refused in production. */
 export const LEGACY_PG_ENV_NAMES = ['DATABASE_URL', 'DATABASE_URL_UNPOOLED', 'DATABASE_DIRECT_URL', 'DB_POOL_MAX'] as const;
 
+/**
+ * X3.5-S6 (release 1), the CI-only strict switch: `PG_LEGACY_NAMES_STRICT=true` makes every environment refuse the legacy
+ * names, exactly as production already does, so a CI step proves it never relies on one before release 2 (S8) refuses them
+ * everywhere. Strict `true` / `false` / unset (any other value refuses to start). Off by default: outside CI nothing changes.
+ */
+export const PG_LEGACY_NAMES_STRICT = 'PG_LEGACY_NAMES_STRICT';
+
+/** The legacy names that hold a non-empty value in `env` (an empty value counts as unset, as everywhere here). Names only. */
+export function presentLegacyPgEnvNames(env: Env): string[] {
+  return LEGACY_PG_ENV_NAMES.filter((name) => present(env, name) !== undefined);
+}
+
 /** libpq variables pg may read as fallbacks (password, options, sslnegotiation, ...). Refused in production. */
 export const LIBPQ_ENV_NAMES = [
   'PGHOST',
@@ -268,6 +280,15 @@ export function resolvePgEnvironment(env: Env = process.env, options: ResolvePgO
   const pgUrl = present(env, 'PG_DATABASE_URL');
   const legacy = Object.fromEntries(LEGACY_PG_ENV_NAMES.map((name) => [name, present(env, name)])) as Record<(typeof LEGACY_PG_ENV_NAMES)[number], string | undefined>;
 
+  if (!production && boolSetting(env, PG_LEGACY_NAMES_STRICT)) {
+    const setLegacy = LEGACY_PG_ENV_NAMES.filter((name) => legacy[name] !== undefined);
+    if (setLegacy.length > 0) {
+      throw new PgConfigError(
+        `${PG_LEGACY_NAMES_STRICT}=true refuses the legacy database variable(s) ${setLegacy.join(', ')}. Use PG_DATABASE_URL (and PG_POOL_MAX_CONNECTIONS) only, and remove the legacy names. Refusing to start.`,
+      );
+    }
+  }
+
   if (production) {
     const setLegacy = LEGACY_PG_ENV_NAMES.filter((name) => legacy[name] !== undefined);
     if (setLegacy.length > 0) {
@@ -443,11 +464,13 @@ export function selectMigrationEndpoint(
 const emittedWarnings = new Set<string>();
 
 /**
- * Prints each warning once per process. Silent under NODE_ENV=test: the Jest setup deliberately fills the legacy names
- * from TEST_DATABASE_URL, so every spec file would otherwise repeat the same deprecation notice.
+ * Prints each warning once per process, in every environment. X3.5-S6 (audit DBR-08), release 1: it used to be silent under
+ * NODE_ENV=test because the Jest setup filled the legacy names from the TEST pair; the Jest setup now routes through
+ * PG_DATABASE_URL only (test-database-guard.ts), and both Jest globalSetups refuse a routed environment that still holds a
+ * legacy name (routedTestDatabaseLegacyNames), so a deprecation line under test is a real finding, not noise. `env` is kept
+ * for the call sites; it no longer changes the behaviour.
  */
-export function emitPgWarnings(resolved: ResolvedPgEnvironment, env: Env = process.env, sink: (line: string) => void = (l) => console.warn(l)): void {
-  if (env.NODE_ENV === 'test') return;
+export function emitPgWarnings(resolved: ResolvedPgEnvironment, _env: Env = process.env, sink: (line: string) => void = (l) => console.warn(l)): void {
   for (const warning of resolved.warnings) {
     if (emittedWarnings.has(warning)) continue;
     emittedWarnings.add(warning);
@@ -455,7 +478,7 @@ export function emitPgWarnings(resolved: ResolvedPgEnvironment, env: Env = proce
   }
 }
 
-const RELEVANT_ENV_NAMES = [...PG_ENV_NAMES, ...LEGACY_PG_ENV_NAMES, ...LIBPQ_ENV_NAMES, ...RETIRED_OPS_ENV_NAMES, 'NODE_ENV', 'RAB_RUNTIME_ENV', 'DB_TARGET', 'WORKER_DISPATCH_MODE'];
+const RELEVANT_ENV_NAMES = [...PG_ENV_NAMES, PG_LEGACY_NAMES_STRICT, ...LEGACY_PG_ENV_NAMES, ...LIBPQ_ENV_NAMES, ...RETIRED_OPS_ENV_NAMES, 'NODE_ENV', 'RAB_RUNTIME_ENV', 'DB_TARGET', 'WORKER_DISPATCH_MODE'];
 const cache = new Map<string, ResolvedPgEnvironment>();
 
 /**

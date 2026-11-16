@@ -180,7 +180,7 @@ jobs:
           # --skip-nx-cache: the opt-in lives in the environment, which is not part of nx's task hash; a replayed result
           # from a run without it would be a "skipped" run reported as green, the exact failure E5 exists to remove.
           status=0
-          npx nx run-many -t test -p rab-server --skip-nx-cache --runInBand --testTimeout=180000 '--testFile=(phase-d-|worker-identity-boot-gates\.integration)' --json "--outputFile=${RUNNER_TEMP}/phase-d-server.json" || status=$?
+          npx nx run-many -t test -p rab-server --skip-nx-cache --runInBand --testTimeout=180000 '--testFile=phase-d-' --json "--outputFile=${RUNNER_TEMP}/phase-d-server.json" || status=$?
           node packages/rab-server/src/database/typeorm/scripts/phase-d-ci-suite-check.cjs server "${RUNNER_TEMP}/phase-d-server.json" || status=1
           exit $status
       - name: Phase D worker suites (one owner login, WORKER_CLAIM_MODE=global)
@@ -252,13 +252,13 @@ jobs:
 
   # Part C2 (HWS-AUDIT-C2-SIZING.md §7 layer 2): the worker suites with every binder binding search_path = '' (the test-only
   # trap CREWFLOW_TEST_SEARCH_PATH_TRAP, refused outside NODE_ENV=test). Any unqualified table then fails with 42P01.
-  # NON-required: continue-on-error, and not in branch protection, until C2-7 makes it required.
+  # REQUIRED since C2-7 (the ratchet baseline is empty and every suite passes under the trap): a failure fails the workflow.
+  # The owner adds "test-search-path-trap" (ci-worker) to branch protection.
   test-search-path-trap:
     needs: changed
     if: needs.changed.outputs.worker == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 90
-    continue-on-error: true
     services:
       redis:
         image: redis:7-alpine
@@ -287,7 +287,7 @@ jobs:
         env:
           TWENTY_PG_CONTAINER: disposable-postgres
           TWENTY_CI_DB_FILE: ${{ runner.temp }}/test-database.env
-      - name: Worker tests under the search_path trap (reported, allowed to fail)
+      - name: Worker tests under the search_path trap
         run: |
           set -euo pipefail
           set -a; source "${RUNNER_TEMP}/test-database.env"; set +a

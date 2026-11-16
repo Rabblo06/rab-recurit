@@ -13,6 +13,7 @@ import { parseTimerTriggerKinds } from '../../worker-shared/timer-trigger.contra
 import { runtimeDbConfigProblems } from '../../../database/owner-login/runtime-db-config';
 import { rateLimitBypassProductionProblem } from '../throttler/rate-limit-bypass';
 import { assertPdfNativeMemoryFits, parsePdfNativeMemoryBudgetMb, PDF_NATIVE_CONCURRENCY_DEFAULT } from '../../worker-shared/pdf-native-memory.contract';
+import { parseWorkerShutdownTimeoutMs } from '../../worker-shared/worker-shutdown-timeout.contract';
 
 /**
  * Phase B (B1): the database configuration rules (pg-config.ts) as one boot problem, or null. The per-process pooler rule
@@ -66,6 +67,15 @@ export function validate(config: Record<string, unknown>): EnvironmentVariables 
   if (validated.REPORT_AVAILABLE_BEFORE_MINUTES >= validated.QR_MAX_AGE_DAYS * 1440) {
     throw new Error(
       'Invalid environment configuration:\nREPORT_AVAILABLE_BEFORE_MINUTES must be less than QR_MAX_AGE_DAYS x 1440 minutes (otherwise a pre-shift report QR could already be past the age ceiling when the shift starts).',
+    );
+  }
+
+  // Owner decision 2026-11-15 (PR #163): the manager-entered clock-in floor must lie strictly before the normal clock-in
+  // allowance, otherwise the confirmation band is empty and the floor would refuse clock-ins every punch path accepts.
+  // Refused in every environment.
+  if (validated.CLOCK_IN_CONFIRM_FLOOR_HOURS * 60 <= validated.CLOCK_IN_EARLY_MINUTES) {
+    throw new Error(
+      'Invalid environment configuration:\nCLOCK_IN_CONFIRM_FLOOR_HOURS x 60 must be greater than CLOCK_IN_EARLY_MINUTES (the hard floor for a manager-entered clock-in must lie before the normal clock-in allowance).',
     );
   }
 
@@ -135,6 +145,16 @@ ${(error as Error).message}`);
       validated.PDF_NATIVE_CONCURRENCY === undefined ? PDF_NATIVE_CONCURRENCY_DEFAULT : Number(validated.PDF_NATIVE_CONCURRENCY),
       parsePdfNativeMemoryBudgetMb(validated.PDF_NATIVE_MEMORY_BUDGET_MB),
     );
+  } catch (error) {
+    throw new Error(`Invalid environment configuration:
+${(error as Error).message}`);
+  }
+
+  // XR-10: the Worker's SIGTERM drain budget. The shared parser (the one the Worker re-checks at boot) is the rule: unset →
+  // 30000; 1000..34000 ms so the drain plus the hard-exit margin end inside the 45 s stop_grace_period; anything else
+  // (NaN included) refuses to boot, never on the first SIGTERM.
+  try {
+    parseWorkerShutdownTimeoutMs(validated.WORKER_SHUTDOWN_TIMEOUT_MS);
   } catch (error) {
     throw new Error(`Invalid environment configuration:
 ${(error as Error).message}`);

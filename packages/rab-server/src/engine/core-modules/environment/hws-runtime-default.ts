@@ -2,8 +2,8 @@ import { isProductionRuntime } from '../throttler/rate-limit-bypass';
 
 /**
  * Part C1 (OWNER-DB-ULTIMATE.md Part C, HWS-AUDIT.md §5.1): the ONE rule for what `HWS_RUNTIME_ENABLED` means, shared by the
- * environment class (environment-variables.ts, API + Worker + commands) and the standalone workspace provisioner
- * (rab-worker/src/workspace-provisioner.config.ts), which reads the raw environment before any Nest module exists.
+ * environment class (environment-variables.ts, API + Worker + commands) and any code that reads the raw environment before
+ * a Nest module exists (the standalone workspace provisioner that did so was removed in X5.1).
  *
  *   "true"            → on
  *   "false"           → off

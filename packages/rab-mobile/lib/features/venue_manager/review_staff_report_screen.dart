@@ -10,6 +10,7 @@ import 'attendance_correction_sheet.dart';
 import 'report_ui.dart';
 import 'shift_report.dart';
 import 'shift_report_screen.dart' show staffReportBadge, workedLabel;
+import 'unusual_clock_in_warning.dart';
 import 'venue_manager_provider.dart';
 
 enum _Tab { attendance, review }
@@ -688,13 +689,31 @@ class _AttendanceTabState extends State<_AttendanceTab> {
       CorrectionField.clockOutAt => 'clockOutAt',
       CorrectionField.breakMinutes => 'breakMinutes',
     };
+    final provider = context.read<VenueManagerProvider>();
     try {
-      await context.read<VenueManagerProvider>().correctAttendance(
-        id,
-        field: field,
-        newValue: value,
-        reason: reason,
-      );
+      try {
+        await provider.correctAttendance(
+          id,
+          field: field,
+          newValue: value,
+          reason: reason,
+        );
+      } on ApiException catch (e) {
+        // A clock-in earlier than the normal allowance: nothing was saved. Edit closes the warning and keeps every
+        // value in the form; only an explicit Confirm sends the same correction again, confirmed.
+        final warning = UnusualClockInWarning.fromError(e);
+        if (warning == null) rethrow;
+        if (!mounted) return null;
+        final confirmed = await confirmUnusualClockIn(context, warning);
+        if (!confirmed) return null;
+        await provider.correctAttendance(
+          id,
+          field: field,
+          newValue: value,
+          reason: reason,
+          confirmUnusualClockIn: true,
+        );
+      }
       return field;
     } on ApiException catch (e) {
       if (mounted) setState(() => _error = e.userMessage);
@@ -1040,6 +1059,13 @@ class _RecordedAttendance extends StatelessWidget {
               'Source',
               'Entered by manager',
               key: Key('manager-entered'),
+            ),
+          if (row.unusualClockInConfirmed)
+            const ReportField(
+              '',
+              'Unusual time confirmed',
+              key: Key('unusual-time-confirmed'),
+              valueColor: ReportTokens.muted,
             ),
           if (row.attendanceReviewed && !row.noShowConfirmed)
             ReportField(

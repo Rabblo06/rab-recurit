@@ -31,6 +31,7 @@ import { TestIdentityFactory, TestIdentity } from './helpers/test-identities';
 import { businessTable, hwsRuntimeOn } from './helpers/hws-fixtures';
 import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-pipe';
 import { integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
+import { businessTables } from '../../engine/core-modules/tenant/business-tables';
 
 /**
  * Real-time outbox (Stage 1) — `core.realtime_event`
@@ -445,7 +446,7 @@ describeIfDb('realtime event outbox — core.realtime_event (integration)', () =
       const withdraw = () =>
         tenantContext.runInTenantContext(ctx, async (m) => {
           // FIXTURE (tests only): the assignment now starts in 10 minutes, so its approval deadline passed 20 minutes ago.
-          await m.query(`UPDATE shift_assignment SET period = tstzrange(now() + interval '10 minutes', now() + interval '8 hours', '[)') WHERE id = $1`, [accepted.shiftAssignmentId]);
+          await m.query(`UPDATE ${businessTables(m).shift_assignment} SET period = tstzrange(now() + interval '10 minutes', now() + interval '8 hours', '[)') WHERE id = $1`, [accepted.shiftAssignmentId]);
           return withdrawUnconfirmedOffer(m, { auditService, notificationService, realtimeEventService }, org.id, offer.id, 'worker_pointer');
         });
       expect(await withdraw()).not.toBeNull();

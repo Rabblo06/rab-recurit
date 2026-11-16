@@ -3,10 +3,11 @@
  *
  * Before this helper, about 280 specs decided with `Boolean(<legacy primary connection name>)` followed by
  * `RUN ? describe : describe.skip`, and a handful with the raw TEST_* names. Under Jest the skip branch was unreachable:
- * setupFiles (test-database-guard.ts, applyIntegrationTestDatabaseEnv) writes the legacy names from the validated TEST pair,
+ * setupFiles (test-database-guard.ts, applyIntegrationTestDatabaseEnv) wrote the legacy names from the validated TEST pair,
  * and globalSetup fails the whole run without that pair. So those gates were dead conditions. They were also a trap: the day
- * the routing stops writing the legacy name (X3.5-S6) or the deprecated admin name (X3.5-S8), every one of those suites
- * would SKIP SILENTLY instead of failing.
+ * the routing stopped writing the legacy name (X3.5-S6, done: it now writes PG_DATABASE_URL and blanks DATABASE_URL /
+ * DATABASE_URL_UNPOOLED) or the deprecated admin name (X3.5-S8), every one of those suites would have SKIPPED SILENTLY
+ * instead of failing.
  *
  * This gate keys on what the routing itself checks, never on a connection variable a later change can stop writing:
  *   - NODE_ENV must be `test` (assertJestNodeEnv: under Jest setupFiles refuses anything else, so the routing ran);

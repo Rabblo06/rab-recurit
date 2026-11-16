@@ -156,14 +156,13 @@ jobs:
 
   # Part C2 (HWS-AUDIT-C2-SIZING.md §7 layer 2): the server suites with every binder binding search_path = '' (the test-only
   # trap CREWFLOW_TEST_SEARCH_PATH_TRAP, refused outside NODE_ENV=test). Any unqualified table then fails with 42P01.
-  # NON-required: continue-on-error, and not in branch protection, until C2-7 makes it required. The FAILED-FILE list is
-  # the remaining work per module.
+  # REQUIRED since C2-7 (the ratchet baseline is empty and every suite passes under the trap): a failure fails the workflow.
+  # The owner adds "test-search-path-trap (1)", "(2)", "(3)" to branch protection. The FAILED-FILE list names failing suites.
   test-search-path-trap:
     needs: changed
     if: needs.changed.outputs.server == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 120
-    continue-on-error: true
     strategy:
       fail-fast: false
       matrix:
@@ -194,7 +193,7 @@ jobs:
         env:
           TWENTY_PG_CONTAINER: disposable-postgres
           TWENTY_CI_DB_FILE: ${{ runner.temp }}/test-database.env
-      - name: Server tests under the search_path trap (reported, allowed to fail)
+      - name: Server tests under the search_path trap
         run: |
           set -euo pipefail
           set -a; source "${RUNNER_TEMP}/test-database.env"; set +a
