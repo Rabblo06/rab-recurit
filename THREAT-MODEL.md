@@ -693,7 +693,7 @@ Mitigations:
 - **Authority re-derived from PostgreSQL in every transaction** (layer 2), independent of `PermissionGuard(ROLE_MANAGE)`: the caller must hold ROLE_MANAGE, OWN the workspace and have an active membership of it; the role must pass `MemberRolePolicyService` (custom, same workspace, member-safe permissions only, every permission held by the caller). Platform Admin status alone grants nothing. Resend re-checks the role against the caller (Twenty does not). No organisationId / workspaceId / managerId / names accepted (`forbidNonWhitelisted` 400).
 - **Atomic, single-use acceptance.** Public `POST /rest/v1/invitations/accept` hashes the token, resolves routing ids through `core.auth_find_member_invitation` (SECURITY DEFINER, pinned search_path, PUBLIC revoked, returns ids only), then — under the invitation's own workspace context — locks the row `FOR UPDATE`, re-checks live/unexpired (DB clock), organisation not suspended, workspace active, no existing account for the email, and the INVITER's authority now (active, still owns the workspace with an active membership, still holds ROLE_MANAGE, and can still grant the role — re-checked, not trusted from send time). It then creates exactly: the user (recipient's own name + argon2id password), the one custom role, organisation membership and membership of the inviter's workspace — no staff/manager profile, never a new workspace; the one-active-membership index and (organisation, email) uniqueness are the backstops. A compare-and-set marks it accepted in the same transaction. Two simultaneous acceptances: one 200, one generic 400. Any re-check failure ⇒ invitation SUPERSEDED (committed), recipient sees the generic failure.
 - **No oracle.** Unknown, expired, revoked, superseded, consumed, suspended-organisation and malformed tokens all return the same 400 message. No session is issued; the account stays INVITED (password set, email verified by token possession) and becomes ACTIVE through the unchanged login path, so suspension, application-target and session rules all still apply.
-- **Worker.** New job type `MEMBER_INVITATION` is the only one allowed to lack `target_user_id`; a CHECK makes it inseparable from `member_invitation_id`. It is revalidated before delivery: invitation live, unexpired, same workspace as enqueued, this outbox row is the latest for the invitation (older links never delivered after a resend), organisation not suspended. Every other job type still goes through the untouched missing-target-user check. Delivery idempotency and fencing unchanged.
+- **Worker.** New job type `MEMBER_INVITATION` is the only one allowed to lack `target_user_id`; a CHECK makes it inseparable from `member_invitation_id`. It is revalidated before delivery: invitation live, unexpired, same workspace as enqueued, this outbox row is the latest for the invitation (older links never delivered after a resend), organisation not suspended, workspace active (added by S-W1, 2026-11-16: the same shared rule acceptance uses). Every other job type still goes through the untouched missing-target-user check. Delivery idempotency and fencing unchanged.
 - **Redis, bounded and fail-closed.** `InvitationRateLimitService` runs one atomic multi-bucket token-bucket Lua script (Redis clock, deny-all-or-debit-all) on the bounded auth-cache client (150 ms command timeout, no offline queue). Buckets: recipient (hashed email, global), actor, organisation, redemption per IP. Keys `crewflow:{env}:invite-rate:{scope}:{sha256}` — no addresses in Redis. Any Redis failure ⇒ 503, never "unlimited", never a hang. Listing never touches Redis. Redis confers no authority.
 
 SECURITY TRADE-OFF (recorded, unchanged from account invitations):
@@ -3836,9 +3836,11 @@ credential, migration or RLS policy.
 - **SECURITY TRADE-OFF (vetoable):** a standalone provisioner (no launcher, switch unset) keeps the legacy gate
   `HWS_RUNTIME_ENABLED=true` → provision, so `nx run rab-worker:provision` and the standalone specs are unchanged.
   Stricter alternative: require `CREWFLOW_PROVISIONER_ENABLED=true` in the child too. Only the bundle is deployed.
-- **Regression tests:** launcher.test.cjs A1–A12 + 2, 8; `workspace-provisioner.config.spec.ts`;
-  `workspace-provisioning-lock.spec.ts`; `workspace-provisioner-optin.integration.spec.ts` (real `crewflow` login,
-  real entrypoint).
+  **X5.1 (2026-11-15):** the standalone provisioner, this legacy gate, the `rab-worker:provision` target and
+  `workspace-provisioner-optin.integration.spec.ts` were removed; this trade-off no longer applies.
+- **Regression tests:** launcher.test.cjs A1–A12 + 2, 8; `workspace-provisioner.config.spec.ts` (since X5.1: the in-process
+  interval only); `workspace-provisioning-lock.spec.ts`; `workspace-provisioner-optin.integration.spec.ts` (real `crewflow`
+  login, real entrypoint; removed in X5.1 with the entrypoint).
 - **Integration hardening (2026-10-27, on top of `7719959b`):** the switch is now three-state. `"true"` = on
   (60 s default), `"false"` = jobs only (and still REFUSED while `CREWFLOW_PROVISIONER_DATABASE_URL` is set), unset or
   empty = **legacy**: exactly the pre-Phase-A behaviour — provisioner on, URL required ("Missing
@@ -4251,7 +4253,7 @@ databases only.
 - **L-1 — migrator-role setup guard.** The admin URL goes through the factory URL policy (no `?host=`/`?port=`/`?user=`/
   session `options`) and a factory client; the disposable marker is read from server facts (`pg_db_role_setting`,
   `pg_file_settings`, `postmaster.opts`), never `current_setting()`. Both SQL files re-check the same facts.
-- **L-2 — standing migration approval.** `.env.migrate.example` ships `CREWFLOW_MIGRATION_APPROVED` commented out;
+- **L-2 — standing migration approval.** The `.env.migrate` template (removed in X5.1) shipped `CREWFLOW_MIGRATION_APPROVED` commented out;
   `setup-db.ts` with `DB_TARGET=production` refuses without the per-release approval from the process environment (an
   approval in a `.env` file is refused). N1 unchanged.
 - **L-3 — session stability of the migration and provisioning locks.** The live two-connection probe
@@ -5496,7 +5498,7 @@ them is a control that "passed".
 | No logical backup by the app login (PITR only) | BC-12 / G-11 | MEDIUM | Accepted 2026-11-05. Catalogue test (`row_security = off` is refused). |
 | Column-level secret grants lost (`password_hash`, TOTP secret, ...) | BC-13 | HIGH | Accepted 2026-11-05. Catalogue test. |
 | Non-secret column INSERT grants lost: the runtime can set server-owned columns (`ai_usage` id / created_at, `ai_skill` id, `ai_action_proposal` expires_at / created_at / id / origin) on its own tenant's rows | COLGRANT-1 | MEDIUM | Accepted 2026-11-05 (found by Agent 5). Catalogue test. RLS WITH CHECK still holds. |
-| Host-label namespace tables readable by the runtime (the global reserved-label list) | HL-1 | LOW | Accepted 2026-11-05 (Agent 5). Catalogue test. Still tracked by the PR #9 removal gate. |
+| Host-label namespace tables readable by the runtime (the global reserved-label list) | HL-1 | LOW | Accepted 2026-11-05 (Agent 5). Catalogue test. Still tracked by the separated-mode removal gate (`removalGateKeep`). |
 | AI governance that grants enforced: TRUNCATE on five AI tables, `synthetic_data` INSERT, EXECUTE on `core.ai_dev_mark_organisation_synthetic` | AI-1 | MEDIUM | Accepted 2026-11-05 (Agent 5). Catalogue test. The UPDATE / DELETE parity guards and the proposal and trigger CHECKs still hold. |
 | The workspace migrator's identity check (`assertMigrationIdentity`) accepts the runtime login | PROV-1 | MEDIUM | Accepted 2026-11-05 (Agent 5). Catalogue test. Ledger and registry writes still need the M-T2 allow-list. |
 
@@ -5559,7 +5561,7 @@ writes a warning instead.
    R256 = 0e0a6edd), with anything beyond it a contiguous run of the image's chain (a resumed partial upgrade). An older,
    holed or unknown history refuses with `UnsupportedUpgradeStartError` (exit 65, fail closed under every
    `CREWFLOW_UPGRADE_FAILURE` policy; nothing applied). No override exists. N1 still gates the legacy CF-41 path and the CLI
-   until the clean-up PR retires them.
+   until the separated-mode retirement (every separated database transitioned, MIX-1) retires them.
 6. **No logical backup by the app login.** Recovery is PITR only, and restore points taken after a compromise carry the
    backdoors. Accepted by the owner 2026-11-05 (BC-12).
 7. **Pool poisoning across unrelated requests.** Mitigated by pool safety (BC-14).
@@ -6968,6 +6970,166 @@ service: no `ports:`, no password, `--maxmemory-policy noeviction`).
   This closes the "Revisit: before production stage D" note of the Lane A trade-off (unauthenticated Redis is a
   warning, not a refusal, in bullmq mode).
 
+## X1.3 — `seed` / `seed-qa` have no in-command refusal of staging or production targets (accepted risk; cleanup audit XA-03 / NC-04, PR #29 closed)
+
+Owner decision 2026-11-12 (Phase X Part 2, "the Twenty way"): no code change. Running a fixture seed against production
+is an operator error, as in Twenty. PR #29 (`x1/seed-guards`, head `cced3aad`, titled "X1.5" under the cleanup audit's
+numbering) had the fix. It was closed unmerged on 2026-11-15. This entry changes no code. File:line references are to
+the code at this PR's base.
+
+- **Asset:** the integrity of a deployed database: who is a platform administrator, which organisations and accounts exist.
+- **Actor → action → consequence:** an operator (or anyone holding the owner login plus `DB_TARGET=production` and
+  `ALLOW_PRODUCTION_DB_COMMANDS=true`) runs `seed` or `seed-qa` against a production database by mistake. The effects:
+  - `seed` writes the permission catalogue (idempotent), an organisation (`SEED_ORG_SLUG`, default `acme`), a
+    `super_admin` role holding every permission, and an ACTIVE user (`SEED_ADMIN_EMAIL`, default `admin@acme.test`) with
+    the operator-supplied password. It also writes a `core.platform_admin` row for that user (`command/seed.command.ts:45`,
+    `:123-128`), so a new platform administrator exists in the live database.
+  - `seed-qa` writes the `adolphus-qa` fixture organisation and `*.qa@example.test` users that share one password.
+
+  Cleanup audit rating: priority P0, severity LOW–MEDIUM. It needs operator authority, and it is an integrity and cleanup
+  problem, not a disclosure.
+- **What is missing:** a refusal inside the two commands. `seed-ai-demo` has one (`seed-ai-demo.command.ts:42`, refuses
+  any `DB_TARGET` but `local`).
+  - `seed` checks nothing before writing. Its first transaction inserts any missing permission keys, and the `acme`
+    organisation is inserted next (`seed.command.ts:46-65`). Only then does it check `SEED_ADMIN_PASSWORD`
+    (`:69-71`). A run refused for a missing password can therefore already have written the catalogue and the
+    organisation.
+  - `seed-qa` checks its password and that `--admin-email` is present (`seed-qa.command.ts:102-108`), then writes missing
+    permission keys (`:114-119`). Only after that does it check that the address is an active platform administrator
+    (`:325`, refusal at `:354`). Its own comment "Every refusal comes before the first write" (`:100`) is not accurate
+    for the catalogue.
+  - The only target check is the generic CLI gate (`command/main.ts:28`, `assertDbTarget('command')`), which allows
+    production.
+- **Why accepted:** anyone who can pass the production gates below already holds the `crewflow_owner` login, which can
+  write the same rows directly. The guard would stop mistakes, not attackers. Twenty has no such guard, and the owner
+  chose not to add a Crewflow-only mechanism.
+- **Compensating controls (in the code at this PR's base):**
+  - **What production needs.** A production CLI command needs only `DB_TARGET=production` and
+    `ALLOW_PRODUCTION_DB_COMMANDS=true` from the process environment (`database/typeorm/core/database-target.ts:181-187`),
+    plus the owner login.
+    - Both are refused when they come from a `.env` file that Nx loads (`:203-213`).
+    - The deployment identity (`CREWFLOW_DEPLOYMENT_ENVIRONMENT` / `CREWFLOW_DEPLOYMENT_ID`) is **optional** in production
+      since owner decision BC-11, 2026-11-05 (`database/deployment-identity/deployment-identity.ts:147-149`, `:356-367`).
+      When declared, it must say production and match the database's live marker. When undeclared, the marker check is
+      skipped with a warning.
+    - The `database-target.ts:9-15` header still lists the deployment id as required. That header is stale; correcting it
+      is a code follow-up, not part of this entry.
+  - **Authority is per-invocation in the image.**
+    - The owner-login env lint refuses `ALLOW_PRODUCTION_DB_COMMANDS`, `DB_TARGET` and `ALLOW_REMOTE_TEST_DATABASE` in
+      runtime and database env files (`packages/rab-docker/scripts/compose-owner-login.cjs:156`).
+    - `api-prestart.sh` hands `DB_TARGET` / `ALLOW_PRODUCTION_DB_COMMANDS` only to a one-off command with arguments
+      (`docker compose run -e`), and refuses them on the API start (`packages/rab-docker/rab/api-prestart.sh:175-193`;
+      tests 13d/13e, `rab/api-prestart-test/run-prestart-shell-tests.cjs:607-612`).
+    - Exception: `packages/rab-docker/.env.migrate.example:22-25` sets `DB_TARGET=production`,
+      `ALLOW_PRODUCTION_DB_COMMANDS=true` and the deployment identity persistently, for the one-off `rab-migrate` service
+      only. That file is never passed to rab-api or rab-worker; `compose-credential-isolation.cjs` checks this.
+  - **Staging, local and test targets.**
+    - `DB_TARGET=staging` is refused for every command (`database-target.ts:225-227`).
+    - `local` and `test` refuse a dotted remote host (`:229-232`). Exception: `DB_TARGET=test` with
+      `ALLOW_REMOTE_TEST_DATABASE=true` allows a remote host (`:230`).
+    - An undeclared non-production process refuses a database whose marker is bound to production
+      (`deployment-identity.ts:432-436`). A database bound to staging or test passes with a warning only (`:438-439`).
+  - **Owner login.** The CLI boot gates require `crewflow_owner` for every CLI command, before Nest boots
+    (`command/main.ts:32`, `runDatabaseBootGates('cli')` in `database/boot-checks/database-boot-gates.ts`).
+  - **No default passwords.** `seed` needs `SEED_ADMIN_PASSWORD` (`seed.command.ts:69-71`) and `seed-qa` needs
+    `SEED_QA_PASSWORD` (`seed-qa.command.ts:102-105`), each at least 12 characters. `seed-qa` also needs an active
+    platform administrator (`:325`, `:354`).
+  - **No deploy path runs either command.** A `git grep` of `packages/rab-docker` finds only two test harnesses that run
+    `seed-qa`, each against its own disposable database: `staging/rehearsal/run-image-rehearsal.cjs:439` and
+    `rab/runtime-isolation-test/run-h6-runtime.cjs:384`.
+- **Residual:** an operator who passes `DB_TARGET=production` and `ALLOW_PRODUCTION_DB_COMMANDS=true` for some other
+  one-off command, then types `seed` or `seed-qa`, gets fixture rows and (with `seed`) a platform administrator in
+  production. The same applies, with no production authority at all, to a remote `test` database opened with
+  `ALLOW_REMOTE_TEST_DATABASE=true` and to an undeclared staging- or test-bound database. The cleanup is manual: remove
+  the platform-admin row, the user, the role and the organisation.
+- **Revisit when any of these happens:**
+  - a deploy, start, upgrade or CI step, or a runbook, runs `seed` / `seed-qa` against a deployed database;
+  - a staging command path is added (`DB_TARGET=staging` is no longer refused);
+  - `ALLOW_REMOTE_TEST_DATABASE=true` is used against anything but a disposable database;
+  - a deployed staging or test database runs without a declared deployment identity (only a warning protects it);
+  - production command authority becomes persistent in a rab-api / rab-worker environment, or someone other than the
+    owner holds it;
+  - seed fixture rows turn up in a deployed database. The check:
+    `SELECT id, slug FROM core.organisation WHERE slug IN ('acme', 'adolphus-qa');` and
+    `SELECT id, email FROM core."user" WHERE email LIKE '%@acme.test' OR email LIKE '%.qa@example.test';`. Run them in a
+    session that RLS lets see every organisation. A session with no tenant context sees zero rows by design, which is
+    not a clean result;
+  - Twenty adds such a guard.
+
+  Re-opening PR #29 (`seed-target-guard.ts`) is the prepared fix. It must be re-tested under the single `crewflow_owner`
+  login.
+
+## X1.5 — system mail driver: SMTP STARTTLS on port 587 is opportunistic; production does not refuse `EMAIL_SMTP_NO_TLS=true` (accepted risk; XR-04)
+
+Owner decision 2026-11-12 (Phase X Part 2, "the Twenty way"): no change to the **system mail driver**
+(`engine/core-modules/email/email-driver.factory.ts`, the environment-configured transport that sends every
+platform email). Twenty's system driver does the same: its `email-driver.factory.ts` declares `requireTLS` in its
+options type and never sets it. It sets only `secure: false` and `ignoreTLS: true` when `EMAIL_SMTP_NO_TLS` is on
+(checked against `twentyhq/twenty` on 2026-11-15). The acceptance covers only this driver. The planned X1.5a proof test
+(a STARTTLS-less SMTP sink) and the X1.5b fix were not done. This entry changes no code. File:line references are to the
+code at this PR's base.
+
+- **Asset:** the SMTP relay credentials (`EMAIL_SMTP_USER` / `EMAIL_SMTP_PASSWORD`), and the password-reset, activation
+  and invitation links (bearer secrets until used or expired) in every message.
+- **Actor → action → consequence:** an on-path attacker between the host and the SMTP relay strips the relay's
+  `STARTTLS` capability from the EHLO reply → nodemailer, with no `requireTLS`, carries on in clear → the attacker reads
+  the AUTH exchange (relay credentials: send-as-us, reputation) and the message bodies (take over an account by using a
+  reset or invite link first). If an operator sets `EMAIL_SMTP_NO_TLS=true` in production, the same happens with no
+  attacker work, and nothing refuses it. The XR-04 audit marked this as suspected: nodemailer upgrades only when STARTTLS
+  is advertised, unless `requireTLS` is set, but the strip was never run against our transport.
+- **Where (system driver):** `email-driver.factory.ts:37` sets `secure: !noTls && port === 465`, `:38` sets
+  `ignoreTLS: noTls`, and `requireTLS` is never set. `email/drivers/smtp.driver.ts:124` passes these options to
+  `nodemailer.createTransport`; the Worker sends through the same `EmailService`. The two SMTP health probes copy the
+  same options but send no credentials: `platform-admin/admin-panel.service.ts:300-305` and `admin-health.service.ts:241-246`.
+  `productionConfigurationProblems` in `env.validation.ts` has no `EMAIL_SMTP_NO_TLS` rule. The templates default to port
+  587: `packages/rab-docker/env/runtime.env.example:42` and the staging `api.env.example:33` / `worker.env.example:30`.
+- **Known issue, NOT accepted here — the Admin Panel "Test Connection"** (`platform-admin/admin-panel.service.ts:242-248`).
+  The owner accepted only the system driver. Twenty's user-chosen STARTTLS path sets `requireTLS: true`
+  (`imap-smtp-caldav-connection/utils/build-smtp-tls-options.util.ts`). Ours has two gaps:
+  - In `starttls` mode, Test Connection builds the transport with no `requireTLS`. It can send the stored SMTP password,
+    so a strip exposes it.
+  - In `none` mode (`ignoreTLS: true`), the stored, decrypted SMTP password is sent in clear to whatever host and port
+    the platform admin names.
+
+  Both are tracked for a lead fix PR. This entry does not widen the acceptance to them.
+- **Why accepted (system driver only):** this matches Twenty's system driver. Setting `requireTLS` would stop all mail on
+  a relay that offers no STARTTLS, and the production relay's STARTTLS support has not been confirmed (the X1.5b
+  precondition). The cost of an attack is not negligible, and this is not a closed network: a hosted VM talking to a
+  separately hosted relay crosses transit networks the project does not control. Exploiting the strip needs an active
+  on-path position on that path, not just passive capture. The owner accepted that exposure for now.
+- **Compensating controls:**
+  - When STARTTLS is offered and not stripped, nodemailer upgrades, and Node verifies the relay certificate by default.
+    A `git grep rejectUnauthorized` over `packages/rab-server/src/engine/core-modules/email`,
+    `packages/rab-server/src/engine/core-modules/platform-admin` and `packages/rab-worker/src` finds no non-test hit, so
+    nothing turns verification off on these paths.
+  - `EMAIL_SMTP_NO_TLS` defaults to `false` (`environment-variables.ts:1541`, `packages/rab-server/.env.example:117`).
+  - Production refuses `EMAIL_DRIVER=LOGGER` (`env.validation.ts:298`), so links are never written to logs instead.
+  - Every token is single-use and hashed at rest (SHA-256, `password-reset-token.service.ts:19-20`), so a captured link
+    is worth something only until it is used or expires. Lifetimes:
+    - self-service forgot-password: 1 hour (`auth.service.ts:1042`);
+    - admin reset: 48 hours (the service default, `password-reset-token.service.ts:9` and `:50`, issued at
+      `account-lifecycle.service.ts:181-185`);
+    - initial setup: the same 48-hour default would apply, but no code at this PR's base issues that purpose;
+    - account invites: 24 hours, up to 3 sends (`account-invite.service.ts:8-10`).
+  - **Operator rule:** to remove the strip entirely, use port 465 (implicit TLS: `secure` is set, and TLS is negotiated
+    before any SMTP command) or `EMAIL_DRIVER=RESEND` (HTTPS API). Never set `EMAIL_SMTP_NO_TLS=true` outside local
+    development.
+- **Residual:** on 587, an active on-path attacker can downgrade to cleartext and capture the relay credentials and
+  in-flight links. `EMAIL_SMTP_NO_TLS=true` in production sends everything in clear, and no gate refuses it.
+- **Revisit when any of these happens:**
+  - production moves to its final hosting, or the relay or host provider changes: re-assess the host-to-relay path and
+    the relay's STARTTLS support then;
+  - the production relay is confirmed to offer STARTTLS (that removes the only objection to `requireTLS` for 587, so
+    X1.5b can ship);
+  - `EMAIL_SMTP_NO_TLS=true` turns up in any deployed environment;
+  - an SMTP credential leak or a reset-link takeover is suspected;
+  - Twenty's system driver starts setting `requireTLS`;
+  - the system driver (`engine/core-modules/email/email-driver.factory.ts`) changes its TLS options, or the Admin
+    Panel's stored SMTP configuration starts sending real mail (today only Test Connection uses it).
+
+  The prepared fix is the X1.5a sink test, then `requireTLS: true` in `email-driver.factory.ts` when
+  `!noTls && !secure`, plus a production refusal of `EMAIL_SMTP_NO_TLS=true` (env-validation diff to the lead).
+
 ## XA-08 — the forgot-password address is handed over in router state, never the URL (branch phase-x2/x62-forgot-email-router-state, 2026-11-12, PR #112)
 
 Phase X Part 2 finding XA-08 (`docs/plans/PHASE-X-STAGE0-PART2.md` §2.6). Front only: no server, env or header change.
@@ -7786,6 +7948,7 @@ Reversal:   A shorter QR_MAX_AGE_DAYS, or rotating QRs automatically on schedule
   - The allowance is the same `attendanceWindow().opensAt` every clock-in path uses. The comparison is written "not inside", so an unreadable bound asks for confirmation instead of passing.
   - The shift's scheduled start is only read, never written.
   - In `correct`, an identical resubmission of the stored value is the idempotent no-op, checked before the floor. It returns 201 (not 422) even when a later schedule change put that stored value beyond the floor; a new value there is still refused.
+  - The floor is absolute on `correct` too (follow-up to PR #163): a `clockOutAt` or `breakMinutes` correction that leaves in place a stored clock-in now beyond the floor (after a later schedule move) is refused with 422 `CLOCK_IN_TOO_EARLY_ABSOLUTE`, with or without the confirmation, and nothing is written. Only a new clock-in can need the confirmation on this path.
 - **Same rule on `record-attendance`.**
   - The old hard 400 for an early clock-in becomes the same 409 / confirm rule.
   - Every other check is unchanged: future, clock-out bound, out > in, break < span, version, booking state, finalised.
@@ -7846,7 +8009,8 @@ Reversal:   Lower CLOCK_IN_CONFIRM_FLOOR_HOURS, or require a second approver (pa
     - a finalised report gets the existing 409; `clockOutAt` / `breakMinutes` with the flag record no confirmation; an open row gets the existing "still on shift" 409;
     - another workspace 404, the web console 403, revoked `attendance.edit` 403 at the route and `ForbiddenException` from the service;
     - floor: start − 12 h − 1 min gets 422 even confirmed; exactly start − 12 h gets 409, then 201;
-    - re-sending the stored value after the schedule moved it beyond the floor is 201 with nothing written, and a new value there is 422.
+    - re-sending the stored value after the schedule moved it beyond the floor is 201 with nothing written, and a new value there is 422;
+    - a `clockOutAt` or `breakMinutes` correction with a stored clock-in beyond the moved floor gets 422 with or without the flag, nothing written; an identical resubmission is still 201.
   - `manual-attendance.integration.spec.ts` › record-attendance, unusually early clock-in:
     - early gets 409, then 200 with the flag; the audit row has the confirmation fields; the report row is flagged; idempotent; an ordinary record is not flagged;
     - existing row: an early change needs confirmation, and a later break-only change is not re-asked;
@@ -8221,3 +8385,232 @@ Reversal:   Lower CLOCK_IN_CONFIRM_FLOOR_HOURS, or require a second approver (pa
   and no write unbound, no access to another workspace). #164: the version and cache specs, including concurrent first
   changes (condition 1). #166: the catalog, new-workspace and M1-S1 runner specs, and the role / binding restore after an
   error in the elevated section (condition 3).
+
+## X5.1 — separated-mode leftovers removed (branch phase-x/x51-separated-mode-removal, PR #167, 2026-11-15, not merged)
+- **Removed:** the standalone workspace provisioner process (`workspace-provisioner.main.ts`, nx `rab-worker:provision`) and
+  its start-up switch (`resolveProvisionerConfig`); the five suites skipped by name on the removal gate plus the opt-in
+  provisioner Redis-outage suite; the superseded templates `.env.migrate.example` and `staging/env/{api,worker,migrate}.env.example`.
+- **No control changed:** the Worker already provisions in-process on the owner login (T4); every refusal of
+  `CREWFLOW_PROVISIONER_*`, `DATABASE_URL_UNPOOLED` (`never-in-runtime-env.ts`), `.env.migrate` / `.env.ops` (compose gates,
+  `.gitignore`, `.dockerignore`) is unchanged.
+- **Regression tests:** `twenty-expected-differences.spec.ts` (the removed suites and the entrypoint stay gone),
+  `workspace-provisioning.loops.spec.ts` (no `provision` target), `migration-runner.spec.ts` (`.env.migrate` stays ignored),
+  `provisioner-process-role-callers.spec.ts` (no production file passes the `'provisioner'` process role to the boot gates,
+  the runtime-database guard or the runtime-env refusal; the `allowedIn: ['provisioner']` exemption has no live caller and
+  goes with X3.5-S8).
+- **Still open (separated-mode retirement):** the legacy CF-41 runner path, N1 on the legacy/CLI paths, the restricted-migrator
+  CI job, `deploy-prepare.ts`, the `'provisioner'` process role (X3.5-S8) and the health-check provisioner branch.
+
+## X2.5 — HTTP-first API shutdown, a bounded Worker drain, the owner-login connection budget (XR-09, XR-10, XD-05) (branch phase-x/x25-reliability, 2026-11-15, PR #168)
+- **Asset:** the rate limiting of the credential routes (`@RateLimitRequired`, Redis-backed throttler); the API's and
+  Worker's availability across a restart; the database's connection capacity and `crewflow_owner`'s connection limit.
+- **XR-09, before:** `app.enableShutdownHooks()` let Nest quit the throttler and auth-cache Redis clients, the BullMQ
+  producers and the realtime subscriber (`onModuleDestroy`) while the HTTP listener still accepted requests. The throttler
+  failed closed, so every credential request in the stop window (up to the 40 s grace) got 503 `RATE_LIMIT_UNAVAILABLE`.
+  Rate limiting was never bypassed, but sign-in and recovery broke for the whole window.
+- **XR-09, control:** `engine/utils/http-first-shutdown.ts` replaces the shutdown hooks:
+  1. the listener closes first, so new connections are refused and the client retries another replica;
+  2. requests already in flight drain for up to 15 s while Redis is still up, so each one is still throttled by the real
+     guard; responses sent during the drain close their connection;
+  3. every remaining connection is closed, SSE streams included;
+  4. only then does `app.close()` quit queues/Redis and then the database;
+  5. the signal is re-raised (same exit status).
+
+  A 35 s backstop exits 1 if the shutdown hangs, before Docker's SIGKILL at the 40 s grace.
+  No request can reach a guard after its Redis client has quit. The in-flight tracker is registered ahead of Express's
+  handler and also reads `writeHead` headers, so an SSE stream never holds the drain open.
+- **XR-10, control:** `WORKER_SHUTDOWN_TIMEOUT_MS` is declared and parsed strictly
+  (`worker-shutdown-timeout.contract.ts`): unset means 30000; an integer 1000..34000 is accepted; anything else refuses to
+  boot in both processes (it used to become NaN at shutdown, which skipped the drain, or outlived the 45 s grace, so the
+  Worker was SIGKILLed mid-job). The message never echoes the value.
+- **XD-05, control:** the startup connection budget counts every connection the single owner login opens: pools, /healthz
+  probe, the Worker's in-process provisioner, the migrate-on-start child (now 5) and the boot probes. A `rolconnlimit` on
+  `crewflow_owner` is compared with that whole total, and a deployment over capacity or over the login limit refuses to
+  start (fail closed, unchanged rule; before, the check understated the login's use).
+- **Residual:** a client must retry a refused connection (single API with stop-then-start: a short refusal window instead
+  of 503s). A request still running at the 15 s deadline is cut. A deployment within two connections of its limit now
+  refuses to boot (operator check in the PR).
+- **Tests:** `http-first-shutdown.spec.ts` (refusal, not 503; in-flight request answered before Redis quits; streams
+  recognised however their headers were set; deadline cut; second signal ignored; close failure exits 1),
+  `api-shutdown-order.integration.spec.ts` (real AppModule and Redis-backed throttler), `worker-shutdown-timeout.contract.spec.ts`,
+  `env.validation.worker-shutdown-timeout.spec.ts`, `connection-budget.spec.ts`, `connection-budget.event-listener.spec.ts`.
+
+## X3.1 — on/off switches refuse a typo at boot (XR-05 / ENV-01) (branch phase-x/x31-strict-booleans, 2026-11-15, PR #169)
+- **Asset:** the deployment's security and routing posture as the operator configured it: session-enforcement cutover,
+  sign-in methods, SMTP TLS, the auth/session/entity caches, email, push and realtime delivery.
+- **Actor:** an operator (or a template, override or platform setting) entering a switch value that is not exactly `true`.
+- **Before:** fourteen switches (`EMAIL_DELIVERY_ENABLED`, `AUTH_CONTEXT_CACHE_ENABLED`, `USER_SESSION_CACHE_ENABLED`,
+  `CORE_ENTITY_CACHE_ENABLED`, `WORKSPACE_METADATA_CACHE_ENABLED`, `WORKER_FAST_PUBLISH_NOTIFY`,
+  `USER_SESSION_ENFORCEMENT_CUTOVER`, `AUTH_PASSWORD_ENABLED`, `AUTH_GOOGLE_ENABLED`, `AUTH_MICROSOFT_ENABLED`,
+  `AUTH_OAUTH_HANDOFF_ENABLED`, `EMAIL_SMTP_NO_TLS`, `REALTIME_ENABLED`, `PUSH_ENABLED`) read `value === 'true'`, so any
+  other value (`True`, `1`, `yes`, ` true`, a typo) silently meant false. For example `USER_SESSION_ENFORCEMENT_CUTOVER=True`
+  left the cutover off, and nothing reported the mismatch.
+- **Control:** all fourteen use the shared `strictBoolean` helper (`environment-variables.ts`). Exactly `true` or `false` is
+  accepted, unset or empty keeps the default, and anything else refuses to boot (fail closed) with
+  `<NAME> must be exactly true or false`. The message names the variable, never the value. The compose gate
+  (`scripts/compose-owner-login.cjs`, `STRICT_SWITCHES`) refuses the same values in env files, templates and rendered
+  services, so a typo fails the lint before it reaches a running host. `S3_FORCE_PATH_STYLE` uses the same helper (it was
+  already strict).
+- **Accepted exception:** `AI_AGENTS_ENABLED` stays loose on purpose: any value other than `true` is off. That is the safe
+  side, and the variable is never a boot refusal (2026-10-22 crash-loop lesson).
+- **Residual:** a typo now costs availability (a crash loop) instead of a silent posture change. Mitigated by the gate lint
+  and the release note `packages/rab-docker/docs/release/RELEASE-NOTE-X3.1-STRICT-BOOLEANS.md`. A value set outside the
+  committed compose files and env templates (a platform setting, a hand-edited server file) is checked only at boot.
+- **Tests:** `env.validation.strict-booleans.spec.ts` (per flag: unset and empty keep the default, `true` and `false` are
+  accepted, 15 typos each refuse to boot; no value echoed; S3 on the helper; `AI_AGENTS_ENABLED` stays loose);
+  `compose-owner-login.test.cjs` (X3.1 env-file lint and per-service check; the two pins of the old transform now pin
+  `strictBoolean`).
+
+## X3.5-S6 — the Jest routing carries PG_DATABASE_URL only; legacy names warn under test (branch phase-x/x35-legacy-names-r1, PR #176, 2026-11-16, not merged)
+- **Asset:** the disposable test cluster's superuser URL, and the guarantee that test and CI runs never resolve a connection
+  through a deprecated name before release 2 refuses them.
+- **Change (release 1):** setupFiles set PG_DATABASE_URL to the validated TEST application URL and blank DATABASE_URL /
+  DATABASE_URL_UNPOOLED / DB_POOL_MAX (a DB_POOL_MAX value carries over to PG_POOL_MAX_CONNECTIONS when that is unset), so the
+  superuser URL no longer rides in the elevated legacy name and the factory resolves no elevated endpoint under Jest; the admin
+  connection comes only from the validated pair. The Worker-login switch writes PG_DATABASE_URL. pg-config's deprecation
+  warnings print under NODE_ENV=test too, and both Jest globalSetups refuse a routed environment (including what a later
+  `.env` load would add) that still holds a legacy name; release 1 refuses nothing that was accepted before.
+  `PG_LEGACY_NAMES_STRICT=true` (opt-in, set in CI on ci-security's check-rls step and ci-migration-security's two harness
+  steps) refuses every legacy name outside production. Spawned runtime children drop the guard-written PG_DATABASE_URL and get
+  their URL explicitly. `assertDirectLockUrl` (DBR-07) removed; the factory's documented-pooler denylist is the one rule.
+- **Unchanged:** every X1.8 / X1.9 guard rule, every production and runtime refusal of the legacy names.
+- **Abuse cases:** `test-database-guard.spec.ts` (X3.5-S6 and review #176 cases), `pg-config.spec.ts` (strict switch, warnings
+  under test), `integration-test-database-gate.spec.ts` (no spec reads the blanked DATABASE_URL), `runtime-child-env.spec.ts`.
+- **Release 2 (S8):** the fallbacks are removed and the legacy names refused everywhere; the strip lists keep every name.
+
+## S-W1 — the Worker's member-invitation pre-send check also requires an active workspace (branch fix/s-w1-invitation-workspace-active, 2026-11-16)
+- **Finding (Low, `docs/plans/untangle/worker.md` §4):** a manager invites a member; the workspace is then suspended or
+  archived while the invitation email is still queued. The Worker's pre-send revalidation
+  (`email-send.processor.ts` `revalidateMemberInvitation`) was a hand-copied subset of the server's liveness rule
+  (`MemberInvitationService.loadLive`) and had lost the `manager_workspace.status = 'active'` condition, so the email was
+  still delivered — disclosing the workspace's name and existence to the invitee after the workspace was closed.
+  Acceptance was already refused by `loadLive`, so there was no access gain.
+- **Control:** one rule, called by both. `modules/membership/utils/member-invitation-liveness.ts` exports
+  `memberInvitationExpiredSql` (the `expires_at <= now()` boundary, database time), `memberInvitationStateFailure`
+  (accepted / revoked / superseded / expired) and `memberInvitationParentFailure` (organisation not suspended, workspace
+  exists and is `active`). `loadLive` (resolve, accept, accept-with-provider) and the Worker's pre-send check both decide
+  with them, so "may this email be sent?" and "may this link be accepted?" can no longer drift. Fail closed: a workspace or
+  organisation row the check cannot see (missing, or hidden by RLS), a null workspace id, or an invitation row whose
+  expiry was not computed all count as not live. The workspace row is visible to the Worker only through
+  `manager_workspace_member` (`id = current_workspace()`; the Worker binds the row's own workspace for this check only);
+  the owner, platform-admin and MANAGE_IN_ORG branches of `manager_workspace_write` are false for the user-less Worker.
+  `memberInvitationExpiredSql(alias)` throws unless the alias is a plain identifier (`/^[a-z_][a-z0-9_]*$/`), so it can
+  never splice arbitrary text into SQL.
+- **Kept unchanged:** every existing Worker check (invitation exists, same workspace as enqueued, not accepted / revoked /
+  superseded / expired, latest email for the invitation, organisation not suspended) with the same reason texts and order;
+  a not-live invitation's outbox row is settled the same way as before — CANCELLED (terminal, fenced by the claim token)
+  with a sanitized reason, no provider call. New reason: `The workspace is no longer active.`. Token matching, the row lock
+  and the inviter re-checks in acceptance are untouched. No schema, RLS or grant change.
+- **Residual:** an email already handed to the provider before the workspace was closed cannot be recalled; accepting it
+  is still refused server-side.
+- **Tests:** rab-worker `member-invitation-delivery.integration.spec` W10 (suspended and archived workspace: no provider
+  call, row CANCELLED with the workspace reason, a retried job sends nothing) and W11 (same setup, workspace active:
+  delivered once); W1–W9 unchanged. rab-server `member-invitation-liveness.spec` (the shared decision table, including the
+  fail-closed cases and the alias refusal) and `member-invitation.integration.spec` X3b (workspace archived after sending:
+  resolve and accept both get the generic 400, no account is created, the invitation is not superseded).
+
+## O-2 — CLI pre-auth reads and the platform_admin grant on the owner login under M-T1 FORCE RLS (branch fix/o2-cli-force-rls, 2026-11-16; PR #183; no new SQL)
+
+- **Asset:** platform-wide administrator authority (`core.platform_admin`); every tenant's `core."user"` /
+  `core.organisation` / `core.manager_workspace` rows; the legacy-file link columns.
+- **Defect fixed (availability, not a leak):** since M-T1 these tables are FORCE'd with an owner-only definer policy. The CLI
+  login `crewflow_owner` acting as itself sees zero rows with no tenant context, so `grant-platform-admin` answered "No active
+  user found" for every real user (the documented recovery path when every admin is revoked was dead), `seed` failed on the
+  organisation insert, and `storage:migrate-local` discovered nothing and exited 0. Proved live on a disposable database
+  (`cli-owner-login-force-rls.integration.spec.ts`, failing before the fix).
+- **Control now:** `command/ops/secure-owner-acting.ts` `withSecureOwner(manager, fn)` narrows the caller's open transaction
+  with `SET LOCAL ROLE rab_secure_owner` (a frozen literal) for `fn` only, after checking: the process declared the `cli` role,
+  a transaction is open, the session is the owner login acting as itself, not SUPERUSER/BYPASSRLS, and may SET the role; it
+  checks `current_user` (and READ ONLY when asked) after narrowing and `RESET ROLE` (checked) after `fn` resolves. Lookups
+  run in a READ ONLY transaction. The only writes made as the owner are the `platform_admin` grant row and seed's
+  organisation; the session reset (CF-07) and the audit entries run as the login with tenant context. Every grant path is
+  audited (`via: bootstrap_cli` / `via: seed`, actor NULL). This is the step `preauth-force-sql.ts` prescribes for operator
+  scripts and what the three ops commands already do.
+- **Barrier (the login is NOT it):** the API and the Worker connect with the same `crewflow_owner` login, so what keeps this
+  off a request path is (1) the process-role check — only `command/main.ts` declares `cli`, and the step refuses `api` /
+  `worker` / any other role (unit + live tests), and (2) a static test (`secure-owner-acting.spec.ts`) that fails when anything
+  outside `src/command/**` imports the helper. Neither stops injected SQL (G-02, unchanged).
+- **Threats:** *role left on a connection* — `SET LOCAL` ends with the transaction and the step resets explicitly; proved on
+  ONE held connection (no pool checkout in between), with a negative control showing that probe does see a session-level role
+  that survives COMMIT (`secure-owner-acting.integration.spec.ts`). *Wrong person granted* — unchanged: soft-deleted users
+  excluded, an ambiguous email refuses, a non-matching `--org` refuses (abuse cases on the real login). *False migration
+  record* — `storage:migrate-local --apply` link / clear UPDATEs are conditional (`... AND <col> IS NULL RETURNING id`) and
+  must change exactly one row, otherwise the stored_file registration and the `file.migration_completed` audit roll back and
+  the outcome is `failed` (unit-tested); `manager_workspace` logos are reported `unsupported` (exit 1 under `--apply`) and never
+  touched, so no person's id is ever bound into `rab.user_id` to satisfy that table's write policy.
+- **Residual:** `bootstrap-admin` exits 0 on `REFUSED_AMBIGUOUS_*` (proved live; owner item O-8, unchanged). The `--apply`
+  happy path against real S3 was not run (no S3 in the disposable run); `manager_workspace` legacy logos stay unmigrated
+  until a reviewed path exists. `seed` keeps no production target refusal (owner decision X1.3).
+
+## SF-1 — bulk-email message is HTML-escaped (branch fix/sf1-bulk-email-escape, 2026-11-16)
+- **Threat:** a manager or venue manager with bulk email (`POST /rest/v1/staff/bulk-email`, `POST /rest/v1/managers/bulk-email`,
+  and the venue-manager route, which delegates to the manager one) typed raw HTML into the message. `ManagerService.bulkEmail`
+  and `StaffService.bulkEmail` each built `` html: `<p>${dto.message}</p>` `` unescaped, so the HTML part sent under the
+  organisation's identity could carry phishing links, fake buttons, tracking pixels or attribute injection. `BulkEmailDto.message`
+  is only `@IsString @MaxLength(5000)`. (Mail clients do not run `<script>`, but links and images are the real harm.)
+- **Control:** one renderer, `renderBulkNotificationEmail` in `engine/core-modules/email/templates.ts`, used by both services.
+  It escapes the message with the canonical `engine/utils/escape-html.ts` helper (the five HTML-significant characters) and only
+  then turns line breaks into `<br>`. The plain-text part stays the message as typed. `templates.ts`'s private copy of the
+  escaper is replaced by the canonical import (same five characters, same output). Recipient scope, the outbox path and the
+  audit row are unchanged.
+- **Permission (owner decision batch 13, 2026-11-16):** sending a bulk email is an edit-level action, not a view.
+  `POST /staff/bulk-email` now needs `staff.edit` (was `staff.view`) on the route guard, re-checked first in
+  `StaffService.bulkEmail`. There is no `manager.edit` flag: `manager.manage` (the only manager flag, already the
+  `ManagerController` class guard) is now also re-checked in `ManagerService.bulkEmail`; the Venue Manager route keeps its
+  own `venue_manager.create` (class guard, re-checked in `VenueManagerService.bulkEmail` and again in
+  `ManagerService.bulkEmail`, which accepts only those two flags and fails closed on anything else). 403 before any id is
+  read; nothing is queued. The default `venue_manager` role holds `staff.view` but not `staff.edit`; it had no staff to
+  email anyway (staff recipients are the caller's own creations).
+- **Residual (accepted):** escaping removes markup, not text. A plain URL typed in the message is still shown as text, and
+  many mail clients auto-link it. Acceptable for a message from a trusted, authenticated sender with an edit permission.
+- **Tests:** `templates.spec.ts` (`<script>`, `<a href>`, `" onmouseover=` and `&`/`'` come out entity-escaped; line breaks
+  become `<br>` only after escaping; text part unchanged) and `bulk-email-abuse-cases.integration.spec.ts` (the same hostile
+  message is stored escaped in `email_outbox.rendered_html` for both the staff and the manager route; a role with
+  `staff.view` but not `staff.edit`, and one without `manager.manage`, get 403 and nothing is queued).
+
+## SF-3 — create-and-send uses the normal shift-creation checks and audit (branch fix/sf3-create-shift-and-send-scope, 2026-11-16)
+- **Threat:** a manager with `offer.send` → `POST /rest/v1/shifts/with-offers` (`OfferService.createShiftAndSend`) with the id
+  of a job role that is RLS-visible but not theirs, or an archived venue or job role → a shift (OPEN, then OFFERED) and live
+  offers were created anyway, with no `shift.created` audit row. It was a second shift-creation path that checked only the
+  venue scope (`assertVenueAccessibleTx`) and skipped `SchedulingService.resolveDraftTargetsTx` (job-role scope, both
+  archive checks), unlike `POST /rest/v1/shifts`. The job role also selects the snapshotted pay rate (venue role rate or the
+  role's default), so a foreign role could price the shift.
+- **Control:** one insert, `SchedulingService.insertNewShiftTx`, used by `createDraftTx` (DRAFT) and `createShiftAndSend`
+  (OPEN): venue + job-role scope (`assertVenueAccessibleTx` + `assertJobRoleOwned`, 404 out of scope, never 403) → archived
+  venue (409 `VENUE_ARCHIVED`) or job role (409 `JOB_ROLE_ARCHIVED`) refused → `resolvePayRate` snapshot → INSERT
+  (workspace from the venue) → `shift.created` audit (status + requiredCount, no pay) in the same transaction. Only DRAFT or
+  OPEN may be the initial status. Any refusal rolls back the whole transaction (no shift, no offer). Venue and job-role
+  rules, rate resolution and the per-recipient send are unchanged.
+- **Permission (owner decision batch 13, 2026-11-16):** create-and-send creates a shift, so it now needs `schedule.create`
+  as well as `offer.send`, like `POST /shifts`. Both flags are on the route guard (`PermissionGuard` × 2) and both are
+  re-checked in `createShiftAndSend` first (layer 2; 403 before any referenced id is read). Every default role that holds
+  `offer.send` also holds `schedule.create`, so only a custom role with `offer.send` alone loses the action.
+- **Tests:** `scheduling-offer-abuse-cases.integration.spec.ts` › "SF-3": a same-workspace job role created by someone else
+  → 404 "Job role not found." with no shift and no offer (and `POST /shifts` gives the same 404); a role with `offer.send`
+  but not `schedule.create` → 403, no shift; archived job role → 409 `JOB_ROLE_ARCHIVED`
+  and archived venue → 409 `VENUE_ARCHIVED`, no shift; a successful create-and-send writes exactly one `shift.created`
+  row (actor = caller, status `open`, no pay keys).
+
+## SF-4 — venue pay-rate creation checks job-role scope (branch fix/sf4-role-rate-job-role-scope, 2026-11-16)
+- **Threat:** a manager with `venue.edit` → `POST /rest/v1/venues/:id/role-rates` with the id of a job role that RLS shows
+  them (same organisation and workspace) but that is not theirs → a `venue_role_rate` row was written for it.
+  `VenueService.createRoleRate` checked the venue scope and only that the role existed. That rate is what
+  `SchedulingService.resolvePayRate` snapshots for new shifts at that venue and role, so it is payroll input.
+- **Control:** one predicate, `isJobRoleInScope` (`modules/scheduling/utils/job-role-scope.ts`), the rule shift creation
+  (`SchedulingService.assertJobRoleOwned`) and staff creation (`StaffService.assertJobRoleAccessible`) already applied, now
+  used by all three (the two existing copies call it; behaviour unchanged). `createRoleRate` refuses an out-of-scope role
+  with 404 "Job role not found." (never 403), before any write. A Venue Manager keeps the existing reference rule (any job
+  role RLS shows them); an ordinary manager may use only a role they created. Layer 2: `createRoleRate`,
+  `updateRoleRate` and `deleteRoleRate` now re-check the route's own `venue.edit` flag in the service (403, before any id
+  is read). Rate values, defaults, effective dates and rate resolution are unchanged.
+- **Not changed (flagged for the owner):** an archived job role is still accepted for a new venue rate (shift and staff
+  creation refuse archived roles with 409; whether a pay rate counts as "new work" is a payroll decision). `updateRoleRate` still merges its DTO into the entity (the DTO has no `jobRoleId`, and
+  `forbidNonWhitelisted` rejects extra fields, so it cannot re-point a rate at another role).
+- **Audit (owner decision batch 13, 2026-11-16):** `createRoleRate`, `updateRoleRate` and `deleteRoleRate` each write one
+  audit row in the same transaction — `venue_role_rate.created` / `.updated` / `.deleted`, `entityType` `venue_role_rate`,
+  metadata exactly `{ venueId, jobRoleId, effectiveFrom, effectiveTo }` (after the change; before it, for a delete) — never
+  a pay, charge or overtime amount. The three actions are classified NOT shipped off-host (business events, like
+  `venue.photo_updated`) in `security-audit-event-catalogue.ts`; shipping them is a separate decision.
+- **Tests:** `venue-jobrole-ownership-abuse-cases.integration.spec.ts` › "SF-4": an RLS-visible job role created by
+  another manager, and another workspace's job role → 404 with no `venue_role_rate` row; the caller's own role → 201 with
+  the values as sent; create, update and delete each write exactly one audit row with exactly those four metadata keys.

@@ -11,7 +11,7 @@
 > per-service `up -d --no-deps rab-api` / `rab-worker`, `rab-migrate` or `CREWFLOW_IMAGE_DIGEST` step below is superseded;
 > follow `OWNER-LOGIN-DEPLOYMENT.md` section 3.
 
-> **Owner login (2026-11-04).** The deployment files now run ONE `crewflow_owner` login. Staging uses the shared templates in `packages/rab-docker/env/` (`database.env`, `runtime.env`, `compose.env`, Redis ACL) with staging-only values. The per-service `api.env` / `worker.env` / `migrate.env` / `.env.migrate` below are **superseded**; they are removed in the final clean-up PR (#9). Where this runbook names `crewflow_app`, `crewflow`, `crewflow_migrator` or `DB_TARGET`, follow `OWNER-LOGIN-DEPLOYMENT.md` instead (sections 2–5). Since DB-SETUP (2026-11-12) the database is one setting (or the bundled `db`): `PG_DATABASE_PASSWORD` and the optional `PG_DATABASE_URL` (staging's admin URL, or an existing `crewflow_owner` URL) live in `compose.env`, never in `database.env`, and the one-shot `db-setup` service creates staging's own `crewflow_owner` (PR #125: rab-api / rab-worker never receive `PG_DATABASE_URL`). No SQL or `psql` step is part of the staging install; the `psql` commands below are checks.
+> **Owner login (2026-11-04).** The deployment files now run ONE `crewflow_owner` login. Staging uses the shared templates in `packages/rab-docker/env/` (`database.env`, `runtime.env`, `compose.env`, Redis ACL) with staging-only values. The per-service `api.env` / `worker.env` / `migrate.env` / `.env.migrate` below are **superseded**; their templates (`staging/env/{api,worker,migrate}.env.example`) were removed in X5.1, so the sections below that use them are historical. Where this runbook names `crewflow_app`, `crewflow`, `crewflow_migrator` or `DB_TARGET`, follow `OWNER-LOGIN-DEPLOYMENT.md` instead (sections 2–5). Since DB-SETUP (2026-11-12) the database is one setting (or the bundled `db`): `PG_DATABASE_PASSWORD` and the optional `PG_DATABASE_URL` (staging's admin URL, or an existing `crewflow_owner` URL) live in `compose.env`, never in `database.env`, and the one-shot `db-setup` service creates staging's own `crewflow_owner` (PR #125: rab-api / rab-worker never receive `PG_DATABASE_URL`). No SQL or `psql` step is part of the staging install; the `psql` commands below are checks.
 
 Status: **PLAN, 2026-11-03. Nothing is provisioned.** This runbook creates no host, database, bucket, DNS record or secret.
 Every numbered phase below needs its own owner approval. The temporary OpenShip/Neon deployment is not touched by any
@@ -114,8 +114,7 @@ Generate each value on the operator's machine or on the VM. Never reuse a produc
 
 ```bash
 sudo cp release/packages/rab-docker/staging/env/compose.env.example /etc/crewflow-staging/compose.env
-sudo cp release/packages/rab-docker/staging/env/api.env.example     /etc/crewflow-staging/secrets/api.env
-sudo cp release/packages/rab-docker/staging/env/worker.env.example  /etc/crewflow-staging/secrets/worker.env
+# database.env / runtime.env: copy packages/rab-docker/env/{database,runtime}.env.example (owner login, see the note at the top).
 sudo cp release/packages/rab-docker/hosting/redis/users.acl.example /etc/crewflow-staging/secrets/redis-users.acl
 sudo chmod 0600 /etc/crewflow-staging/compose.env /etc/crewflow-staging/secrets/*
 sudo chmod 0644 /etc/crewflow-staging/secrets/redis-users.acl   # read by the redis user (uid 999); holds hashes only
@@ -173,8 +172,8 @@ $C config --quiet --no-env-resolution                 # renders without reading 
 > - the bootstrap flag and `db:bind-identity`;
 > - the production configuration refusals.
 
-3. **Phase A**: create `.env.migrate` with `rab_owner` and `CREWFLOW_MIGRATION_PHASE=A` (template
-   `staging/env/migrate.env.example`, 0600).
+3. **Phase A**: create `.env.migrate` with `rab_owner` and `CREWFLOW_MIGRATION_PHASE=A` (0600; its template
+   was removed in X5.1: this separated-mode section is historical).
    - `$C run --rm rab-migrate` returns exit 3, the list of **all 250**, and a token.
    - Owner approval, then `$C run --rm -e CREWFLOW_MIGRATION_APPROVED=<token> rab-migrate`. Expected: the run stops at
      the role split, which refuses `rab_owner` (exit 1 after the 128 phase A migrations).

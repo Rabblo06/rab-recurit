@@ -4,7 +4,7 @@ import { DataSource } from 'typeorm';
 
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { sqlStateAsSchemaRole } from './helpers/schema-role';
-import { integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
+import { integrationTestDatabase, integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
 
 /**
  * P0 finalization (FULL-ARCHITECTURE-UPGRADE-PLAN.md §8A.9, Check A — the workspace-lifecycle
@@ -47,7 +47,7 @@ describeIfDb('workspace lifecycle grant tightening (integration, §8A.9 Check A)
   let adminDataSource: DataSource;
 
   beforeAll(async () => {
-    appClient = new Client({ connectionString: process.env.DATABASE_URL });
+    appClient = new Client({ connectionString: integrationTestDatabase().appUrl });
     await appClient.connect();
     adminDataSource = createAdminDataSource();
     await adminDataSource.initialize();

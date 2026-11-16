@@ -3,7 +3,8 @@
  *
  *   API / Worker jobs / CLI   database-boot-gates.ts gate 7 (via assertNoPendingMigrations) and the API prestart
  *                             (scripts/check-pending-migrations.ts)
- *   Provisioner child         rab-worker/src/workspace-provisioner.main.ts (boot gates + before every provisioning cycle)
+ *   In-process provisioner    rab-worker workspace-provisioning.loops.ts (before every provisioning cycle; the separate
+ *                             provisioner process was removed in X5.1)
  *   rab-migrate               scripts/migrate/locked-migration-runner.ts (ledger, before applying) and
  *                             scripts/migrate/deploy-post-checks.ts (provision function + READY workspaces, after applying)
  *

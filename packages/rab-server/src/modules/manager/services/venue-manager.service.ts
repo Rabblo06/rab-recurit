@@ -453,7 +453,7 @@ export class VenueManagerService {
       }),
     );
     if (own.length === 0) return { queued: 0, skipped: dto.userIds.length };
-    const result = await this.managerService.bulkEmail(ctx, { ...dto, userIds: own.map((p) => p.id) });
+    const result = await this.managerService.bulkEmail(ctx, { ...dto, userIds: own.map((p) => p.id) }, PermissionFlag.VENUE_MANAGER_CREATE);
     return { queued: result.queued, skipped: result.skipped + (dto.userIds.length - own.length) };
   }
 

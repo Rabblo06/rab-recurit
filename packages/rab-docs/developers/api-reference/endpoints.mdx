@@ -249,7 +249,7 @@ Source: `packages/rab-server/src/modules/staff/controllers/staff.controller.ts`
 | POST | `/rest/v1/staff/venue-directory/team/:staffId` | `staff.view` | JwtAuthGuard | `addVenueTeamMember` |
 | GET | `/rest/v1/staff/:id` | `staff.view` | JwtAuthGuard | `get` |
 | POST | `/rest/v1/staff` | `staff.create` | JwtAuthGuard, RequireWorkspaceGuard | `create` |
-| POST | `/rest/v1/staff/bulk-email` | `staff.view` | JwtAuthGuard | `bulkEmail` |
+| POST | `/rest/v1/staff/bulk-email` | `staff.edit` | JwtAuthGuard | `bulkEmail` |
 | PATCH | `/rest/v1/staff/:id` | `staff.edit` | JwtAuthGuard | `update` |
 | POST | `/rest/v1/staff/:id/avatar` | `staff.edit` | JwtAuthGuard | `uploadAvatar` |
 | DELETE | `/rest/v1/staff/:id/avatar` | `staff.edit` | JwtAuthGuard | `removeAvatar` |
@@ -329,7 +329,7 @@ Source: `packages/rab-server/src/modules/offer/controllers/offer.controller.ts`
 | GET | `/rest/v1/offers/mine` | `offer.respond` | JwtAuthGuard | `listMine` |
 | POST | `/rest/v1/shifts/:shiftId/offers` | `offer.send` | JwtAuthGuard, Manager web app only | `send` |
 | POST | `/rest/v1/shifts/:shiftId/offers/bulk` | `offer.send` | JwtAuthGuard, Manager web app only | `sendBulk` |
-| POST | `/rest/v1/shifts/with-offers` | `offer.send` | JwtAuthGuard, Manager web app only | `createShiftAndSend` |
+| POST | `/rest/v1/shifts/with-offers` | `offer.send` `schedule.create` | JwtAuthGuard, Manager web app only | `createShiftAndSend` |
 | POST | `/rest/v1/shifts/:id/approve` | `staffing_request.approve` | JwtAuthGuard, Manager web app only | `approveShiftRequest` |
 | GET | `/rest/v1/offers/batches/:batchId` | `schedule.view` | JwtAuthGuard | `getBatch` |
 | POST | `/rest/v1/offers/batches/:batchId/confirm-all` | `offer.confirm` | JwtAuthGuard, Manager web app only | `confirmAll` |

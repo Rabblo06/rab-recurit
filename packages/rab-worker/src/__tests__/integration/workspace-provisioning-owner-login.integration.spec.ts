@@ -337,7 +337,7 @@ describeIfDb('T4: in-process workspace provisioning on the owner login (integrat
 
   // ---------------------------------------------------------------------------------------------------------------------
   // Agent 5's review: in-process equivalents of the superseded provisioner-process tests (R5a, R5b, opt-in 1 and 2), so they
-  // exist before PR #9 removes the process tests. Opt-in 3a / 3b / 4 need no database (workspace-provisioning.loops.spec.ts).
+  // existed before X5.1 removed the separate-process tests. Opt-in 3a / 3b / 4 need no database (workspace-provisioning.loops.spec.ts).
   // ---------------------------------------------------------------------------------------------------------------------
   const LOCK_KEY = `hashtext('rab_workspace_provisioning')`;
 

@@ -103,7 +103,7 @@ export async function deployPrepare(deps: DeployPrepareDeps = {}): Promise<numbe
   const approval = readMigrationApproval(env);
   // Owner decision BC-11 (2026-11-05): the release step follows CREWFLOW_MIGRATION_APPROVAL_MODE (default none). Owner login,
   // mode none: an apply run without a token (N1 still gates every existing database). Mode token: exactly the F5 flow below
-  // (no token = check run, exit 3). The legacy CF-41 login keeps the F5 flow in every mode until PR #9.
+  // (no token = check run, exit 3). The legacy CF-41 login keeps the F5 flow in every mode until the separated-mode retirement.
   const approvalMode = readMigrationApprovalMode(env);
   const ownerLogin = urlNamesOwnerLogin(env);
   const directApply = ownerLogin && approvalMode === 'none';

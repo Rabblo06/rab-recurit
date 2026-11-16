@@ -1423,10 +1423,14 @@ export class AttendanceService {
         (dto.field === 'breakMinutes' && attendance.breakMinutes != null && breakMinutes === attendance.breakMinutes);
       if (unchanged) return this.fieldPolicy.omit(await this.fieldPolicy.resolveTx(manager, ctx, 'attendance'), await this.loadSummary(manager, attendance.id));
 
-      // A NEW clock-in (an identical resubmission returned above, so re-sending an already-stored value stays the
-      // idempotent no-op even if a later schedule change put it beyond the floor): 422 below the hard floor, else the
-      // allowance it is earlier than (or null), confirmed below after the state rules.
-      const unusualEarliest = dto.field === 'clockInAt' ? this.checkEnteredClockIn(effectiveAssignmentTime(assignment, shift), clockInAt) : null;
+      // The hard floor is absolute (owner: "never earlier than 12 h before the staff member's start, even after
+      // Confirm"): 422 when the clock-in this correction leaves in place is below it — the NEW clock-in, or, for a
+      // clockOutAt / breakMinutes correction, the STORED one that a later schedule move put beyond the floor (the same
+      // rule record-attendance applies). An identical resubmission returned above, so re-sending an already-stored value
+      // stays the idempotent no-op. Only a new clock-in can need the confirmation (its allowance, or null), checked below
+      // after the state rules; the stored one is not re-confirmed here.
+      const judgedEarliest = this.checkEnteredClockIn(effectiveAssignmentTime(assignment, shift), clockInAt);
+      const unusualEarliest = dto.field === 'clockInAt' ? judgedEarliest : null;
 
       const { status, recovered } = this.resolveCorrectionStatus(attendance, assignment, shift, now, clockOutAt);
 

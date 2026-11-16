@@ -47,7 +47,6 @@ import { isLegacyUnpagedRequest, keysetSkipTake, LEGACY_UNPAGED_LIMIT, paginatio
 import { decodeOptionalKeysetCursor, keysetBeforeSql, keysetPage, keysetTimestampSql } from '../../../engine/dto/keyset-cursor';
 import { toIlikePattern } from '../../../engine/utils/ilike-pattern.util';
 import { NotificationService } from '../../notification/services/notification.service';
-import { VenueService } from '../../venue/services/venue.service';
 import { ApproveShiftRequestDto } from '../dto/approve-shift-request.dto';
 import { CreateShiftAndSendDto } from '../dto/create-shift-and-send.dto';
 import { DeclineOfferDto } from '../dto/decline-offer.dto';
@@ -318,7 +317,6 @@ export class OfferService {
     private readonly notificationService: NotificationService,
     private readonly schedulingService: SchedulingService,
     private readonly resourceScope: ResourceScopeService,
-    private readonly venueService: VenueService,
     private readonly userNotes: UserNoteService,
     private readonly permissions: PermissionsService,
     // Phase D-Q4b: delayed timer triggers (WORKER_TIMER_TRIGGERS, default off ⇒ these arm nothing). Optional so a context
@@ -980,15 +978,15 @@ export class OfferService {
   /**
    * The unified "New Shift" drawer's single action: creates the shift and
    * sends every selected staff member their offer in one transaction, no
-   * separate create → publish → send-offer round trip. Reuses `resolvePayRate`
-   * (SchedulingService) and `sendOne` (this file) verbatim rather than
-   * duplicating either — this is genuinely the same shift-creation and
-   * per-recipient-send logic those already have, just composed together.
+   * separate create → publish → send-offer round trip. The shift row comes from
+   * `SchedulingService.insertNewShiftTx`, the same insert `SchedulingService.create`
+   * uses (scope, archive checks, rate snapshot, `shift.created` audit — SF-3), and
+   * each offer from `sendOne` (this file); neither is duplicated here.
    *
    * The shift is created directly in OPEN status, skipping DRAFT — `assertTransition`
    * only guards explicit status *changes* on existing rows, never an initial
-   * INSERT value, so there's nothing to satisfy here (see SchedulingService.create,
-   * which does the same for DRAFT). `requiredCount` is set to the number of
+   * INSERT value, so there's nothing to satisfy here (`insertNewShiftTx` accepts
+   * only DRAFT or OPEN). `requiredCount` is set to the number of
    * staff *successfully* sent an offer, corrected down after the send loop if
    * any recipient failed eligibility — never inflated by an attempt that never
    * became a real offer. If every recipient fails, the whole transaction
@@ -1000,32 +998,33 @@ export class OfferService {
     dto: CreateShiftAndSendDto,
   ): Promise<BulkOfferResult & { shiftId: string }> {
     return this.tenantContext.runInWorkspaceContext(ctx, async (manager) => {
-      // Also closes the same IDOR SchedulingService.create() already
-      // closes: without this, a Manager could create a shift against
-      // another Manager's private venue by reusing a known venue id, even
-      // though they can no longer see it in a list.
-      const venue = await this.venueService.assertVenueAccessibleTx(manager, ctx, dto.venueId);
-      const payRatePence = await this.schedulingService.resolvePayRate(manager, dto);
-
-      const shift = manager.create(Shift, {
-        organisationId: ctx.organisationId!,
-        venueId: dto.venueId,
-        jobRoleId: dto.jobRoleId,
-        startsAt: new Date(dto.startsAt),
-        endsAt: new Date(dto.endsAt),
-        breakMinutes: dto.breakMinutes ?? 0,
-        requiredCount: dto.requiredCount ?? dto.staffProfileIds.length,
-        payRatePence,
-        notes: dto.notes,
-        address: dto.address,
-        status: ShiftStatus.OPEN,
-        createdBy: ctx.userId,
-        // Inherited from the parent Venue — keeps Shift.workspaceId =
-        // Venue.workspaceId true by construction, matching every other
-        // Shift-creation path (SchedulingService.create).
-        workspaceId: venue.workspaceId,
-      });
-      await manager.save(shift);
+      // Layer 2: the route's PermissionGuard(OFFER_SEND), re-checked here (jobs / other services never pass the guard).
+      if (!(await this.permissions.userHasPermissionTx(manager, ctx, PermissionFlag.OFFER_SEND))) {
+        throw new ForbiddenException('Sending offers is not permitted.');
+      }
+      // Creating the shift needs what POST /shifts needs (owner decision batch 13, 2026-11-16): schedule.create, checked
+      // before any referenced id is read (403, a categorical lack — never an existence oracle).
+      if (!(await this.permissions.userHasPermissionTx(manager, ctx, PermissionFlag.SCHEDULE_CREATE))) {
+        throw new ForbiddenException('Creating shifts is not permitted.');
+      }
+      // SF-3: the same insert as SchedulingService.create — venue AND job-role scope (404 out of scope), archived venue or
+      // job role refused (409), the pay rate snapshot, and the shift.created audit row — only the initial status differs.
+      const shift = await this.schedulingService.insertNewShiftTx(
+        manager,
+        ctx,
+        {
+          venueId: dto.venueId,
+          jobRoleId: dto.jobRoleId,
+          startsAt: dto.startsAt,
+          endsAt: dto.endsAt,
+          breakMinutes: dto.breakMinutes,
+          requiredCount: dto.requiredCount ?? dto.staffProfileIds.length,
+          payRatePence: dto.payRatePence,
+          notes: dto.notes,
+          address: dto.address,
+        },
+        ShiftStatus.OPEN,
+      );
 
       const shiftLabel = await this.getShiftLabel(manager, shift.id);
       const batchId = randomUUID();

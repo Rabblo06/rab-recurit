@@ -83,14 +83,12 @@ export async function tryAcquireProvisioningLock(client: Pick<Client, 'query'>, 
  * (`core.workspace_schema_routable()`), so no business operation can silently use it half-built. Business
  * operations remain unavailable for that Workspace until this job (or a retried attempt) reaches `READY`.
  *
- * Scheduled only by `workspace-provisioner.main.ts`, and only when that process is enabled (Phase A:
- * `CREWFLOW_PROVISIONER_ENABLED=true` — the Worker bundle starts the provisioner child only then — or, standalone with the
- * switch unset, HWS runtime routing on — `HWS_RUNTIME_ENABLED=true`, or unset outside production (Part C1); see
- * workspace-provisioner.config.ts). When it is not enabled the
- * process exits before opening the dedicated connection this needs, and new Workspaces stay `CREATING` unless the API's
- * server-path provisioning builds them.
+ * Scheduled by the Worker's in-process provisioning loop (workspace-provisioning.loops.ts; owner login, T4), always, every
+ * WORKSPACE_PROVISIONER_INTERVAL_SECONDS (workspace-provisioner.config.ts). The separate provisioner process that scheduled
+ * it before (workspace-provisioner.main.ts, with its CREWFLOW_PROVISIONER_ENABLED / HWS gate) was removed in X5.1.
  *
- * `client` is a single, long-lived `crewflow` connection (`DATABASE_URL_UNPOOLED`) — never the pooled
+ * `client` is the in-process provisioner's own single, long-lived session (the owner login acting as `crewflow` via SET
+ * ROLE, workspace-provisioning.loops.ts) — never the pooled
  * `runtimeDataSource` every other job in this worker uses. `provisionWorkspaceSchema` manages its own `BEGIN`/
  * `COMMIT`/`ROLLBACK` pairs directly on it, so the advisory lock here is session-level (`pg_advisory_lock`,
  * explicitly released in `finally`), not the transaction-scoped `pg_advisory_xact_lock` idiom the other jobs use.
@@ -108,7 +106,7 @@ export async function tryAcquireProvisioningLock(client: Pick<Client, 'query'>, 
  * with no tenant context bound always returned zero rows against the real `crewflow` credential;
  * every existing test for this job happened to use the disposable database's superuser connection,
  * which bypasses RLS unconditionally and silently masked it. Confirmed live via the real standalone
- * `workspace-provisioner.main.ts` process before this fix.
+ * provisioner process (since removed, X5.1) before this fix.
  */
 export async function runWorkspaceProvisioningCycle(
   client: Client,

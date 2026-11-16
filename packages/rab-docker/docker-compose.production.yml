@@ -140,7 +140,7 @@ x-crewflow-optional-env: &optional-env
   PG_EXPECTED_WORKER_INSTANCES:
   PG_EXPECTED_API_POOL_MAX:
   PG_EXPECTED_WORKER_POOL_MAX:
-  PG_EXPECTED_MIGRATE_CONNECTIONS: ${PG_EXPECTED_MIGRATE_CONNECTIONS:-3}
+  PG_EXPECTED_MIGRATE_CONNECTIONS: ${PG_EXPECTED_MIGRATE_CONNECTIONS:-5}
   PG_PROVIDER_RESERVED_CONNECTIONS: ${PG_PROVIDER_RESERVED_CONNECTIONS:-0}
   # -- Deployment identity (BC-11 opt-in): both or neither, e.g. production + the uuid the database was bound with --
   CREWFLOW_DEPLOYMENT_ENVIRONMENT:
@@ -625,7 +625,8 @@ services:
       <<: [*required-env, *optional-env]
       # OPTIONAL, rab-worker only. Event-loop watchdog: a loop silent this long is a stall (30-900 s).
       CREWFLOW_WORKER_WATCHDOG_STALE_SECONDS: ${CREWFLOW_WORKER_WATCHDOG_STALE_SECONDS:-120}
-      # Milliseconds the Worker waits for running jobs on shutdown (keep below stop_grace_period).
+      # Milliseconds the Worker waits for running jobs on shutdown: a plain integer from 1000 to 34000 (drain + 10 s
+      # hard-exit margin < the 45 s stop_grace_period); anything else refuses to boot (XR-10).
       WORKER_SHUTDOWN_TIMEOUT_MS: ${WORKER_SHUTDOWN_TIMEOUT_MS:-30000}
       # PINNED (owner decisions; shown, not to be changed):
       NODE_ENV: production

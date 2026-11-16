@@ -9,6 +9,8 @@ import {
 import { toPlainText } from '@react-email/render';
 import { renderToStaticMarkup } from 'react-dom/server';
 
+import { escapeHtml } from '../../utils/escape-html';
+
 interface RenderedEmail {
   subject: string;
   html: string;
@@ -95,8 +97,16 @@ export function renderAccountSuspendedEmail(params: { firstName: string; organis
   return { subject: 'Your account access has been suspended', html, text: toPlainText(html) };
 }
 
-const escapeHtml = (value: string) =>
-  value.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+/**
+ * SF-1: the one renderer for a manager-written bulk email (`POST /staff/bulk-email`, `POST /managers/bulk-email`
+ * and the venue-manager route, which delegates to the manager one). The message is plain text typed by a user, so
+ * it is HTML-escaped before it goes into the HTML part; a line break becomes `<br>` only after escaping, so no
+ * markup the sender typed can reach the recipient's mail client. The plain-text part is the message as typed.
+ */
+export function renderBulkNotificationEmail(params: { subject: string; message: string }): RenderedEmail {
+  const body = escapeHtml(params.message).replace(/\r\n|\r|\n/g, '<br>');
+  return { subject: params.subject, html: `<p>${body}</p>`, text: params.message };
+}
 
 function plainEmail(subject: string, paragraphs: string[], action?: { label: string; url: string }): RenderedEmail {
   const body = paragraphs.map((p) => `<p style="font-family:Arial,sans-serif;font-size:15px;line-height:1.5;color:#30271f">${escapeHtml(p)}</p>`).join('');
