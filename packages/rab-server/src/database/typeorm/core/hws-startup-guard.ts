@@ -74,7 +74,10 @@ export async function assertHwsStartupInvariants(dataSource: DataSource, hwsRunt
   } catch (error) {
     throw new HwsStartupError(`schema-bound entity metadata refused: ${error instanceof Error ? error.message : String(error)}`);
   }
-  if (!hwsRuntimeEnabled) return;
+  if (!hwsRuntimeEnabled) {
+    await assertNoCutoverWhileHwsOff(dataSource);
+    return;
+  }
 
   const [{ exists }] = await dataSource.query<[{ exists: boolean }]>(
     `SELECT to_regclass('core.workspace_schema_registry') IS NOT NULL AS exists`,
@@ -109,6 +112,26 @@ export async function assertHwsStartupInvariants(dataSource: DataSource, hwsRunt
   if (migrationsTableName !== 'core.migrations') {
     throw new HwsStartupError(
       `HWS_RUNTIME_ENABLED=true but migrationsTableName is "${migrationsTableName ?? 'unset'}", not the schema-qualified "core.migrations". An unqualified name resolves against the now-dynamic search_path instead of always targeting core. Refusing to start.`,
+    );
+  }
+}
+
+/**
+ * Part C3 (security review M-3): with HWS runtime routing OFF, this process would read and write the `core` copies. Once
+ * ANY workspace's cutover has started (core.hws_cutover_state, migration HwsCutoverCopyFunctions1786721540000), its data is
+ * served from its own schema and its core copy is frozen, so an HWS-off API or Worker would show stale data and (where the
+ * DB fence did not exist) silently lose writes. Refuse to start instead. `core.hws_cutover_started_any()` is a boolean
+ * crewflow definer (no tenant needed); a database without it (before that migration) has no cutover state at all.
+ */
+export async function assertNoCutoverWhileHwsOff(dataSource: Pick<DataSource, 'query'>): Promise<void> {
+  const [{ present }] = await dataSource.query<[{ present: boolean }]>(
+    `SELECT pg_catalog.to_regprocedure('core.hws_cutover_started_any()') IS NOT NULL AS present`,
+  );
+  if (!present) return;
+  const [{ started }] = await dataSource.query<[{ started: boolean }]>(`SELECT core.hws_cutover_started_any() AS started`);
+  if (started) {
+    throw new HwsStartupError(
+      'HWS_RUNTIME_ENABLED=false but the HWS cutover has started on this database: workspace data is served from the workspace schemas and the core copies are read-only. Start with HWS_RUNTIME_ENABLED=true. Refusing to start.',
     );
   }
 }

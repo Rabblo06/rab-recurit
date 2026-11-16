@@ -11,6 +11,8 @@ import { AuthService } from '../../engine/core-modules/auth/services/auth.servic
 import { PasswordHashingService } from '../../engine/core-modules/auth/services/password-hashing.service';
 import { AuthContext } from '../../engine/core-modules/tenant/auth-context.interface';
 import { TenantContextService } from '../../engine/core-modules/tenant/tenant-context.service';
+import { workspaceSchemaName } from '../../engine/core-modules/tenant/schema-resolver.service';
+import { codeWorkspaceStructureLevel } from '../../engine/core-modules/upgrade/workspace-structure-level';
 import { erasedEmailFor, UserDeletionService } from '../../engine/core-modules/user-deletion/user-deletion.service';
 import { AttendanceQrService } from '../../modules/attendance/services/attendance-qr.service';
 import { ManagerService, ROLE_DEFS } from '../../modules/manager/services/manager.service';
@@ -314,7 +316,14 @@ describeIfDb('user soft delete — owner 0g (integration)', () => {
           const outcome = await userDeletion.deleteUser(m, ctxOf(a), inviteUserId);
           return { outcome, locks: await relationLocks(m) };
         });
-        if (hard.outcome === 'hard_deleted') {
+        if (codeWorkspaceStructureLevel() >= 22) {
+          // Part D 0a (structure level 22): no workspace schema has a foreign key to core."user" any more, so the hard
+          // delete's RI checks touch none of the other organisation's schemas (the lock fan-out of C1-STATUS §5 is gone).
+          // Only this organisation's candidate workspaces are visited, by the application (Q2/Q3 in UserDeletionService).
+          expect(hard.outcome).toBe('hard_deleted');
+          const otherSchemas = new Set(lockWorkspaces.map((id) => workspaceSchemaName(id)));
+          expect(hard.locks.filter((l) => otherSchemas.has(l.nspname))).toEqual([]);
+        } else if (hard.outcome === 'hard_deleted') {
           const lockedSchemas = new Set(hard.locks.filter((l) => l.nspname.startsWith('workspace_')).map((l) => l.nspname));
           expect(lockedSchemas.size).toBeGreaterThanOrEqual(W);
         } else {

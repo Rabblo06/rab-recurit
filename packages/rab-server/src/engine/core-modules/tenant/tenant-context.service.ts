@@ -11,6 +11,7 @@ import { bindBusinessSchema, BusinessTablesError, businessSearchPath, CORE_BUSIN
 import { SchemaResolverService, WorkspaceRoutingError } from './schema-resolver.service';
 import { bindEntityManagerToSchema } from './schema-bound-entity-manager';
 import { isUpgradeBlocked } from '../upgrade/workspace-upgrade-block';
+import { CUTOVER_ROUTING_COLUMNS_SQL, cutoverStateRefused } from '../upgrade/hws-cutover-routing';
 
 /**
  * Binds the request's tenant/actor identity into the Postgres session so
@@ -129,11 +130,14 @@ export class TenantContextService {
    */
   async isWorkspaceUpgradeBlocked(manager: EntityManager, workspaceId: string): Promise<boolean> {
     if (!this.environment.get('HWS_RUNTIME_ENABLED')) return false;
-    const rows: Array<{ migration_error: string | null }> = await manager.query(
-      'SELECT migration_error FROM core.workspace_schema_registry WHERE workspace_id = $1',
+    // Part C3 (review H-1b): same fail-closed cutover rule as SchemaResolverService (hws-cutover-routing.ts).
+    const rows: Array<{ migration_error: string | null; cutover_state: string | null; cutover_active: boolean }> = await manager.query(
+      // sql-injection-reviewed: CUTOVER_ROUTING_COLUMNS_SQL is a code constant (hws-cutover-routing.ts); the only value is $1
+      `SELECT r.migration_error, ${CUTOVER_ROUTING_COLUMNS_SQL}
+         FROM core.workspace_schema_registry r WHERE r.workspace_id = $1`,
       [workspaceId],
     );
-    return isUpgradeBlocked(rows[0]?.migration_error);
+    return isUpgradeBlocked(rows[0]?.migration_error) || cutoverStateRefused(rows[0]?.cutover_state, rows[0]?.cutover_active);
   }
 
   async runInTenantContext<T>(
