@@ -1,6 +1,7 @@
 import type { UpgradeCommand } from '../upgrade-command';
 import type { WorkspaceUpgradeCommand } from '../workspace-upgrade-command';
 import { STAFF_PROFILE_MEMBER_SELECT } from './staff-profile-member-select';
+import { WORKSPACE_CORE_FK_REMOVAL } from './workspace-core-fk-removal';
 
 /** Release 0.6.0's upgrade commands (none yet). Keep them ordered by timestamp. */
 export const UPGRADE_COMMANDS_0_6: readonly UpgradeCommand[] = Object.freeze([]);
@@ -11,5 +12,6 @@ export const UPGRADE_COMMANDS_0_6: readonly UpgradeCommand[] = Object.freeze([])
  * D-RUNNER.md §5), so every command below still runs for an adopted workspace; a workspace created on this code starts at
  * the release's last step and is built from the level-21 template instead.
  *   - level 21: StaffProfileMemberSelect (owner decision 0b, 2026-11-14).
+ *   - level 22: DropWorkspaceCoreForeignKeys (owner decision 0a option (b); SQL approved by the owner 2026-11-15).
  */
-export const WORKSPACE_UPGRADE_COMMANDS_0_6: readonly WorkspaceUpgradeCommand[] = Object.freeze([STAFF_PROFILE_MEMBER_SELECT]);
+export const WORKSPACE_UPGRADE_COMMANDS_0_6: readonly WorkspaceUpgradeCommand[] = Object.freeze([STAFF_PROFILE_MEMBER_SELECT, WORKSPACE_CORE_FK_REMOVAL]);

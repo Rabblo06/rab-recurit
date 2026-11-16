@@ -205,6 +205,21 @@ export const REVIEWED_MIGRATION_DRIFT: Readonly<Record<string, readonly string[]
     "+ policy|upgrade_migration|upgrade_migration_workspace_insert|a|permissive=true|roles=public|using=|check=((current_setting('rab.upgrade_scope'::text, true) = 'workspace_init'::text) AND is_initial AND (workspace_id IS NOT NULL) AND (EXISTS ( SELECT 1 FROM core.manager_workspace w WHERE ((w.id = upgrade_migration.workspace_id) AND (w.organisation_id = core.current_org())))))",
     "+ policy|upgrade_migration|upgrade_migration_workspace_select|r|permissive=true|roles=public|using=((current_setting('rab.upgrade_scope'::text, true) = 'workspace_init'::text) AND (workspace_id IS NOT NULL) AND (EXISTS ( SELECT 1 FROM core.manager_workspace w WHERE ((w.id = upgrade_migration.workspace_id) AND (w.organisation_id = core.current_org())))))|check=",
   ],
+  // Part C3 (option A′, PENDING OWNER SQL REVIEW — SQL-DRAFTS.md §6): the seven policies of the two NEW rab_secure_owner
+  // tables, added only. core.hws_cutover_state: tenant SELECT for everyone; owner-only (CURRENT_USER = crewflow) SELECT and
+  // INSERT / UPDATE within the bound organisation for the cutover; owner-only ALL for rab_secure_owner (the new-workspace
+  // trigger). core.hws_cutover_activation (the one-way sentinel): SELECT for everyone, INSERT for crewflow itself, no UPDATE /
+  // DELETE. A member of crewflow (a runtime login) matches no write policy; crewflow_app holds SELECT only (golden posture +
+  // the migration's own self-check pin grants, FORCE and triggers). Lines as measured by this harness in CI, whitespace collapsed.
+  '1786721540000-HwsCutoverCopyFunctions': [
+    "+ policy|hws_cutover_activation|hws_cutover_activation_crewflow_insert|a|permissive=true|roles=crewflow|using=|check=(CURRENT_USER = 'crewflow'::name)",
+    '+ policy|hws_cutover_activation|hws_cutover_activation_read|r|permissive=true|roles=public|using=true|check=',
+    "+ policy|hws_cutover_state|hws_cutover_state_crewflow_insert|a|permissive=true|roles=crewflow|using=|check=((CURRENT_USER = 'crewflow'::name) AND (organisation_id = core.current_org()))",
+    "+ policy|hws_cutover_state|hws_cutover_state_crewflow_read|r|permissive=true|roles=crewflow|using=(CURRENT_USER = 'crewflow'::name)|check=",
+    "+ policy|hws_cutover_state|hws_cutover_state_crewflow_update|w|permissive=true|roles=crewflow|using=((CURRENT_USER = 'crewflow'::name) AND (organisation_id = core.current_org()))|check=((CURRENT_USER = 'crewflow'::name) AND (organisation_id = core.current_org()))",
+    "+ policy|hws_cutover_state|hws_cutover_state_secure_owner_definer|*|permissive=true|roles=rab_secure_owner|using=(CURRENT_USER = 'rab_secure_owner'::name)|check=(CURRENT_USER = 'rab_secure_owner'::name)",
+    '+ policy|hws_cutover_state|hws_cutover_state_tenant_read|r|permissive=true|roles=public|using=(organisation_id = core.current_org())|check=',
+  ],
 };
 
 type Identity = 'phaseA' | 'bootstrap' | 'restricted' | 'crewflow' | 'crewflow_app' | 'crewflow_worker';

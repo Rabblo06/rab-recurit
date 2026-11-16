@@ -7768,6 +7768,101 @@ Reversal:   A shorter QR_MAX_AGE_DAYS, or rotating QRs automatically on schedule
   wrong-organisation binding, and the full suites with HWS on (server 2,846 pass / 10 fail = the member staff-visibility gap
   awaiting owner SQL; Worker 741/741).
 
+## OWNER-DB-ULTIMATE Part D, decision 0a: workspace → core foreign keys removed (structure level 22; SQL owner-approved 2026-11-15; branch feat/ws-drop-core-fks, PR #149)
+
+- **What:**
+  - Workspace command `0.6.0_DropWorkspaceCoreForeignKeys_1786721530000` drops the 72 foreign keys from every workspace schema
+    to `core."user"`, `core.organisation` and `core.manager_workspace` (31 + 21 + 20). The 56 foreign keys inside the schema
+    stay. This follows the Twenty pattern: foreign keys only inside a workspace schema.
+  - Core migration `WorkspaceCoreForeignKeyRemoval1786721530000`:
+    - re-creates `verify_workspace_schema_v1` (56 FKs at level 22+);
+    - re-creates `core.provision_workspace`, whose template has the 72 definitions removed, so a new workspace never creates
+      them;
+    - has a `down()` that refuses while level-22 workspaces exist.
+  - Level-22 v2 fingerprints are declared for PostgreSQL 16, 17 and 18.
+  - Integrity is now enforced by the application, plus a daily report-only orphan check.
+- **Threats and controls:**
+  - *A write stores a user, organisation or workspace id that does not exist or belongs to another tenant.*
+    - Control: `organisation_id` / `workspace_id` are bound by FORCE RLS WITH CHECK plus each table's binding CHECK.
+      Non-actor user ids go through `assertUsersOfOrganisationTx`: the user must exist in the caller's organisation, otherwise
+      404. That is stricter than the old FK, which accepted any organisation's user.
+    - Test: ws-core-fk-app-enforcement (another organisation, another workspace, a missing organisation; a missing or foreign
+      user).
+  - *F3, a reference write racing a user delete stores a dangling id.*
+    - Control: the reference check takes `FOR KEY SHARE` on the referenced users, replacing the FK's lock. A concurrent delete
+      waits for the writer, or the writer waits and then gets 404. core."user"'s UPDATE and SELECT policies share their USING
+      predicate, so the lock never hides a readable row.
+    - Test: ws-core-fk-app-enforcement F3 (an uncommitted delete blocks the check; after COMMIT it is 404).
+  - *A user deletion orphans evidence or leaves personal data behind* (the lost RESTRICT / CASCADE / SET NULL). A user is
+    soft-deleted by default (owner 0g); only a never-activated invite with no history is hard-deleted, inside a savepoint.
+    - Before the delete, every scope is probed for the 23 former no-ON-DELETE user columns. A hit means a soft delete.
+    - After the delete, the former CASCADE / SET NULL actions run in every scope. A 23503 rolls the savepoint back to a soft
+      delete.
+    - Tests: ws-core-fk-app-enforcement (RESTRICT probe → soft; CASCADE / SET NULL → hard with the own profile removed and
+      attribution cleared; a payslip still needing the profile → 23503 → soft; a paid shift → soft).
+  - *F2, a hard delete loses pay history hidden from the caller.* Owner decision (b), no new SQL.
+    - Control: in a workspace schema, visible history of a staff profile the caller cannot see makes the hard delete unsafe,
+      so the account is soft-deleted (the 0g rule).
+    - Cost, stated plainly: this is deliberately over-strict. Another user's hidden history counts too. Once any
+      creator-private staff history exists in a workspace, a CEO hard delete of an invite effectively always falls back to soft.
+    - Tests (hws-c1 4.6), each case asserting the logged fallback reason:
+      - L1 hidden-profile cases: `hidden_workspace_history` with HWS on (`history_lost` with HWS off); soft delete, profile
+        and history intact, no new orphan;
+      - an explicit over-strict case: another user's hidden profile with visible history, then a CEO delete of a clean
+        invite: soft, `hidden_workspace_history`, the other profile intact, orphan count unchanged.
+  - *F1, the Worker invite cleanup hard-deletes an expired invitee still referenced from a level-22 schema.* Before this fix the
+    definer's `foreign_key_violation` guard was the only protection.
+    - Control, in every READY level-22 schema of the organisation:
+      - the history checks run again with read rights that see every row, and the 23 columns are probed;
+      - after the definer's delete, the invitee's own references are cleared, then the Worker verifies that none is left;
+      - a leftover or a 23503 rolls the candidate back and retains it.
+    - Control (re-review N1): a workspace schema that exists but does not resolve (not READY, unsupported version, name
+      mismatch) retains the invitee and is never skipped.
+    - Tests: account-invite-cleanup integration (a paid-shift invitee is retained with every row and no orphan; a profile-only
+      invitee is deleted with its profile and no orphan; an unresolvable schema retains it) and off-means-off case 6 under the
+      production login.
+  - *F1-T, accepted by the owner 2026-11-15: the Worker reads and writes as the workspace owner.*
+    - The binding is `rab.actor_type = 'worker'` plus `rab.user_id = manager_workspace.owner_user_id`, the same as the orphan
+      check's (0a-T2).
+    - It is used ONLY to check, and then clear, that one invitee's own references: its staff profile, the notes about it, and
+      its attribution columns.
+    - It runs only in a Worker maintenance job with no request input. The settings are transaction-local and are restored per
+      workspace.
+    - Tests: the F1-T scope cases.
+      - Under the owner-member production login (off-means-off case 7): the schema has 0 FKs to core."user", the invitee and
+        its profile are gone, another user's profile and notes are untouched, and a note the invitee wrote about that user
+        keeps its subject with the author cleared. No orphan.
+      - The same case as the superuser fixture login (account-invite-cleanup F1-T).
+      - With HWS off both cases are core-FK scope checks.
+      - The CASCADE / SET NULL / RESTRICT classification (2 / 6 / 23 columns) is pinned in workspace-user-references.spec.
+  - *Orphans accumulate unnoticed.*
+    - Control: a daily Worker orphan check, report-only, counts only (never ids or values). It reads as the Worker plus the
+      workspace owner's read rights, in a READ ONLY transaction.
+    - Test: ws-core-fk-removal (a planted orphan is found).
+  - *The old lock storm* (availability): one core delete used to lock every referencing table of every workspace.
+    - Control: removing these FKs removes the fan-out.
+    - Tests: ws-core-fk-removal measured 1,430 relation locks with 13 level-21 workspaces and 0 at level 22; user-soft-delete
+      shows no lock in another organisation's schemas.
+- **Accepted by the owner (2026-11-15):**
+  - R-1: the delete-time checks see only what the caller may read. Residual: anything the caller cannot read is never
+    deleted, but can stay as an orphan of the deleted invite, which the daily orphan check reports. That covers:
+    - a hidden profile whose history is also hidden;
+    - a workspace outside the caller's candidate set;
+    - history added to a hidden profile after the snapshot.
+  - R-2: the expired-invite definer (1786721520000) is unchanged. The level-22 path in the Worker covers it (F1).
+  - R-3: 0a is re-applied on top of C1's and 0g's user deletion.
+  - R-4: each workspace's upgrade step holds ACCESS EXCLUSIVE on the three core tables (bounded by the runner's 5 s
+    lock_timeout). Run the 0.6.0 upgrade in a quiet window (MIGRATION-AND-ROLLBACK-PLAN.md §4.4). The TypeScript provisioner
+    (rollback artifact) still creates and then drops the FKs.
+- **Tests:**
+  - ws-core-fk-app-enforcement;
+  - ws-core-fk-removal (lock test, orphan report);
+  - account-invite-cleanup (F1, F1-T, N1) and account-invite-cleanup-off-means-off case 7 (F1-T under the production login);
+  - workspace-user-references.spec (the classification);
+  - hws-c1 4.6 with asserted fallback reasons, and user-soft-delete (0g + 0a);
+  - payroll-evidence-restrict (the F3 raw delete at level 22);
+  - the runner and template suites on top of level 22.
+
 ## X3.5-S6 — the Jest routing carries PG_DATABASE_URL only; legacy names warn under test (branch phase-x/x35-legacy-names-r1, PR #176, 2026-11-16, not merged)
 - **Asset:** the disposable test cluster's superuser URL, and the guarantee that test and CI runs never resolve a connection
   through a deprecated name before release 2 refuses them.

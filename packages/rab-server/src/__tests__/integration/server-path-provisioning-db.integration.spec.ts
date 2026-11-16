@@ -5,6 +5,7 @@ import { Client } from 'pg';
 import { resolveIntegrationTestDatabase } from '../../database/typeorm/core/test-database-guard';
 import { provisionWorkspaceSchema, WORKSPACE_TABLES } from '../../database/typeorm/workspace-schema/provision-workspace-schema';
 import { integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
+import { codeWorkspaceStructureLevel } from '../../engine/core-modules/upgrade/workspace-structure-level';
 
 /**
  * Server-path workspace provisioning — DATABASE layer (migration ServerPathWorkspaceProvisioning1786719500000).
@@ -535,8 +536,8 @@ describeIfDb('server-path workspace provisioning — database layer (crewflow_ap
 
   it.each([
     // Part D level 21 (42 policies): during provisioning no registry version is visible, so the verify function accepts every
-    // KNOWN policy count (39, 41, 42); ONE missing policy (41) is then caught by the level-21 v2 fingerprint instead, TWO by the count.
-    ['a missing RLS policy', (s: string) => `DROP POLICY staff_profile_shift_team_select ON ${s}.staff_profile`, /^verification failed: fingerprint [0-9a-f]{64} does not match the expected fingerprint \(v2\) for structure level 21$/],
+    // KNOWN policy count (39, 41, 42); ONE missing policy (41) is then caught by the code level's v2 fingerprint instead, TWO by the count.
+    ['a missing RLS policy', (s: string) => `DROP POLICY staff_profile_shift_team_select ON ${s}.staff_profile`, new RegExp(`^verification failed: fingerprint [0-9a-f]{64} does not match the expected fingerprint \\(v2\\) for structure level ${codeWorkspaceStructureLevel()}$`)],
     ['two missing RLS policies', (s: string) => `DROP POLICY staff_profile_shift_team_select ON ${s}.staff_profile; DROP POLICY staff_profile_member_select ON ${s}.staff_profile`, 'verification failed: policy count'],
     ['an incomplete schema (a table missing)', (s: string) => `DROP TABLE ${s}.payslip_document`, 'verification failed: table count'],
     ['FORCE RLS removed from a table', (s: string) => `ALTER TABLE ${s}.shift NO FORCE ROW LEVEL SECURITY`, 'verification failed: FORCE RLS'],
