@@ -20,6 +20,7 @@ import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
 import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-pipe';
 import { integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
 import { businessTable } from './helpers/hws-fixtures';
+import { businessTables } from '../../engine/core-modules/tenant/business-tables';
 
 /**
  * Payroll approval (PayrollRecord1786718800000, owner rule 2026-10-20): Clock out -> report finalised (attendance
@@ -367,18 +368,18 @@ describeIfDb('payroll approval (integration)', () => {
     // RLS: bound as staff 0, the payroll table shows exactly their own row.
     const asStaff0 = await tenantContext.runInWorkspaceContext(
       { organisationId: orgId, workspaceId: staff[0]!.workspaceId, userId: staff[0]!.userId, role: '' } as AuthContext,
-      (m) => m.query(`SELECT attendance_id FROM payroll_record`));
+      (m) => m.query(`SELECT attendance_id FROM ${businessTables(m).payroll_record}`));
     expect(asStaff0.map((r: { attendance_id: string }) => r.attendance_id)).toEqual([worked.s0!.attendanceId]);
     // Directly naming another staff member's record id still returns nothing.
     const other = await tenantContext.runInWorkspaceContext(
       { organisationId: orgId, workspaceId: staff[0]!.workspaceId, userId: staff[0]!.userId, role: '' } as AuthContext,
-      (m) => m.query(`SELECT id FROM payroll_record WHERE attendance_id = $1`, [worked.s2!.attendanceId]));
+      (m) => m.query(`SELECT id FROM ${businessTables(m).payroll_record} WHERE attendance_id = $1`, [worked.s2!.attendanceId]));
     expect(other).toEqual([]);
     const asVm = await tenantContext.runInWorkspaceContext(
       { organisationId: orgId, workspaceId: vm.workspaceId, userId: vm.userId, role: '' } as AuthContext,
-      (m) => m.query(`SELECT id FROM payroll_record`));
+      (m) => m.query(`SELECT id FROM ${businessTables(m).payroll_record}`));
     expect(asVm).toEqual([]);
-    const asManagerB = await tenantContext.runInWorkspaceContext(managerCtx(b), (m) => m.query(`SELECT id FROM payroll_record`));
+    const asManagerB = await tenantContext.runInWorkspaceContext(managerCtx(b), (m) => m.query(`SELECT id FROM ${businessTables(m).payroll_record}`));
     expect(asManagerB).toEqual([]);
   });
 
@@ -425,9 +426,9 @@ describeIfDb('payroll approval (integration)', () => {
 
   it('humans can never record a generated statement or a notification (RLS)', async () => {
     await expect(tenantContext.runInWorkspaceContext(managerCtx(a), (m) => m.query(
-      `UPDATE payroll_record SET statement_status = 'failed' WHERE attendance_id = $1`, [worked.s3!.attendanceId]))).rejects.toMatchObject({ code: '42501' });
+      `UPDATE ${businessTables(m).payroll_record} SET statement_status = 'failed' WHERE attendance_id = $1`, [worked.s3!.attendanceId]))).rejects.toMatchObject({ code: '42501' });
     await expect(tenantContext.runInWorkspaceContext(managerCtx(a), (m) => m.query(
-      `UPDATE payroll_record SET statement_notified_at = now() WHERE attendance_id = $1`, [worked.s3!.attendanceId]))).rejects.toMatchObject({ code: '42501' });
+      `UPDATE ${businessTables(m).payroll_record} SET statement_notified_at = now() WHERE attendance_id = $1`, [worked.s3!.attendanceId]))).rejects.toMatchObject({ code: '42501' });
   });
 
   it('(10) a query with no tenant context bound returns zero rows', async () => {
@@ -439,21 +440,21 @@ describeIfDb('payroll approval (integration)', () => {
     const ctxA = managerCtx(a);
     // INSERT with invented figures for a real approved attendance is refused by the RLS mirror check (before any unique check).
     await expect(tenantContext.runInWorkspaceContext(ctxA, (m) => m.query(
-      `INSERT INTO payroll_record (organisation_id, workspace_id, attendance_id, shift_id, staff_profile_id, worked_minutes, pay_rate_pence, amount_pence)
+      `INSERT INTO ${businessTables(m).payroll_record} (organisation_id, workspace_id, attendance_id, shift_id, staff_profile_id, worked_minutes, pay_rate_pence, amount_pence)
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
       [orgId, a.workspaceId, worked.s4!.attendanceId, worked.s4!.shiftId, staff[4]!.profileId, 600, 999999, 999999]))).rejects.toMatchObject({ code: '42501' });
     // The money snapshot is immutable for the runtime role (column-level UPDATE grant).
     await expect(tenantContext.runInWorkspaceContext(ctxA, (m) => m.query(
-      `UPDATE payroll_record SET amount_pence = 1 WHERE attendance_id = $1`, [worked.s4!.attendanceId]))).rejects.toMatchObject({ code: '42501' });
+      `UPDATE ${businessTables(m).payroll_record} SET amount_pence = 1 WHERE attendance_id = $1`, [worked.s4!.attendanceId]))).rejects.toMatchObject({ code: '42501' });
     await expect(tenantContext.runInWorkspaceContext(ctxA, (m) => m.query(
-      `DELETE FROM payroll_record WHERE attendance_id = $1`, [worked.s4!.attendanceId]))).rejects.toMatchObject({ code: '42501' });
+      `DELETE FROM ${businessTables(m).payroll_record} WHERE attendance_id = $1`, [worked.s4!.attendanceId]))).rejects.toMatchObject({ code: '42501' });
     // Recording the staff member themselves as approver violates the UPDATE WITH CHECK (segregation of duties).
     await expect(tenantContext.runInWorkspaceContext(ctxA, (m) => m.query(
-      `UPDATE payroll_record SET approved_by = $2 WHERE attendance_id = $1`, [worked.s4!.attendanceId, staff[4]!.userId]))).rejects.toMatchObject({ code: '42501' });
+      `UPDATE ${businessTables(m).payroll_record} SET approved_by = $2 WHERE attendance_id = $1`, [worked.s4!.attendanceId, staff[4]!.userId]))).rejects.toMatchObject({ code: '42501' });
     // Staff cannot write their own record either.
     await expect(tenantContext.runInWorkspaceContext(
       { organisationId: orgId, workspaceId: staff[1]!.workspaceId, userId: staff[1]!.userId, role: '' } as AuthContext,
-      (m) => m.query(`UPDATE payroll_record SET status = 'approved', approved_at = now(), approved_by = $2 WHERE attendance_id = $1 RETURNING id`, [worked.s1!.attendanceId, a.userId]),
+      (m) => m.query(`UPDATE ${businessTables(m).payroll_record} SET status = 'approved', approved_at = now(), approved_by = $2 WHERE attendance_id = $1 RETURNING id`, [worked.s1!.attendanceId, a.userId]),
     )).resolves.toEqual([[], 0]);
     expect((await recordFor(worked.s1!.attendanceId))!.status).toBe('rejected');
   });

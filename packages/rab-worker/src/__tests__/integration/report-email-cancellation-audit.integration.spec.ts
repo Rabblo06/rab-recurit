@@ -32,6 +32,7 @@ import { inspectPdf } from '../helpers/pdf-inspect';
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
 import { integrationTestDatabaseReady } from '@rab/server/database/typeorm/core/integration-test-database-gate';
+import { businessTables } from '@rab/server/engine/core-modules/tenant/business-tables';
 
 /**
  * REPORT EMAIL CANCELLATION — owner decisions S-6 and S-10, plus the measurements behind N-1 and N-2 (Phase 0).
@@ -211,7 +212,7 @@ describeIfDb('report email cancellation: S-6 audit + no replay, S-10 eligibility
 
   const finalise = (f: Fixture) =>
     tenantContext.runInTenantContext(ownerCtx(f), (m) =>
-      m.query(`UPDATE shift_report SET status = 'finalised', finalised_at = now(), finalised_by = $2 WHERE shift_id = $1`, [f.shiftId, f.owner.userId]),
+      m.query(`UPDATE ${businessTables(m).shift_report} SET status = 'finalised', finalised_at = now(), finalised_by = $2 WHERE shift_id = $1`, [f.shiftId, f.owner.userId]),
     );
 
   const runScheduler = (f: Fixture) =>
@@ -253,7 +254,7 @@ describeIfDb('report email cancellation: S-6 audit + no replay, S-10 eligibility
   const reportRow = (f: Fixture) =>
     tenantContext
       .runInTenantContext(ownerCtx(f), (m) =>
-        m.query(`SELECT id, status, pre_shift_file_id, original_file_id, final_file_id, final_pdf_sent_at FROM shift_report WHERE shift_id = $1`, [f.shiftId]),
+        m.query(`SELECT id, status, pre_shift_file_id, original_file_id, final_file_id, final_pdf_sent_at FROM ${businessTables(m).shift_report} WHERE shift_id = $1`, [f.shiftId]),
       )
       .then((rows: Array<Record<string, unknown>>) => rows[0]!);
   const sha = (b: Buffer) => createHash('sha256').update(b).digest('hex');
@@ -384,7 +385,7 @@ describeIfDb('report email cancellation: S-6 audit + no replay, S-10 eligibility
     // and the shift changed (break 30 -> 45 min), which is what makes the scheduler generate a new roster.
     const newVm = await venueManager(f, 's6new');
     await deactivate(f, vm.userId);
-    await tenantContext.runInTenantContext(ownerCtx(f), (m) => m.query(`UPDATE shift SET break_minutes = 45, updated_at = now() WHERE id = $1`, [f.shiftId]));
+    await tenantContext.runInTenantContext(ownerCtx(f), (m) => m.query(`UPDATE ${businessTables(m).shift} SET break_minutes = 45, updated_at = now() WHERE id = $1`, [f.shiftId]));
 
     expect(await runScheduler(f)).toMatchObject({ generated: 1, failed: 0 });
     const fresh = (await reportRows(f)).filter((r) => r.id !== cancelled!.id);
@@ -573,7 +574,7 @@ describeIfDb('report email cancellation: S-6 audit + no replay, S-10 eligibility
 
     it('N1-b: the row workspace is not routable under HWS (registry missing) — attempts until terminal, provider calls, final state', async () => {
       // A second, fresh report row for the same manager (regenerate after a shift change).
-      await tenantContext.runInTenantContext(ownerCtx(f), (m) => m.query(`UPDATE shift SET break_minutes = 40, updated_at = now() WHERE id = $1`, [f.shiftId]));
+      await tenantContext.runInTenantContext(ownerCtx(f), (m) => m.query(`UPDATE ${businessTables(m).shift} SET break_minutes = 40, updated_at = now() WHERE id = $1`, [f.shiftId]));
       expect(await runScheduler(f)).toMatchObject({ generated: 1, failed: 0 });
       const row = (await reportRows(f)).find((r) => r.status === 'PENDING' && r.target_user_id === vm.userId)!;
       const env = app.get(EnvironmentService);

@@ -52,6 +52,7 @@ import { buildTimerTriggerActions, TimerTriggerConsumer } from '../../queues/rab
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { createTestIdentityFactory, TestIdentity, TestIdentityFactory } from './helpers/test-identities';
 import { integrationTestDatabaseReady } from '@rab/server/database/typeorm/core/integration-test-database-gate';
+import { businessTables } from '@rab/server/engine/core-modules/tenant/business-tables';
 
 const RUN = integrationTestDatabaseReady();
 const describeIfDb = RUN ? describe : describe.skip;
@@ -150,7 +151,7 @@ describeIfDb('D-Q4b delayed timer triggers (WORKER_TIMER_TRIGGERS=on, integratio
   const deadlineOf = async (fx: Fx, offerId: string): Promise<number> =>
     withManager(fx, async (m) => {
       const [row] = await m.query(
-        `SELECT lower(sa.period) - interval '30 minutes' AS d FROM job_offer o JOIN shift_assignment sa ON sa.id = o.shift_assignment_id WHERE o.id = $1`,
+        `SELECT lower(sa.period) - interval '30 minutes' AS d FROM ${businessTables(m).job_offer} o JOIN ${businessTables(m).shift_assignment} sa ON sa.id = o.shift_assignment_id WHERE o.id = $1`,
         [offerId],
       );
       return new Date(row.d).getTime();
@@ -160,7 +161,7 @@ describeIfDb('D-Q4b delayed timer triggers (WORKER_TIMER_TRIGGERS=on, integratio
     const start = new Date(Math.floor(Date.now() / 1000) * 1000 + 29 * 60_000);
     await withManager(fx, async (m) => {
       await m.query(
-        `UPDATE shift_assignment sa SET period = tstzrange($2, $3, '[)') FROM job_offer o WHERE o.id = $1 AND sa.id = o.shift_assignment_id`,
+        `UPDATE ${businessTables(m).shift_assignment} sa SET period = tstzrange($2, $3, '[)') FROM ${businessTables(m).job_offer} o WHERE o.id = $1 AND sa.id = o.shift_assignment_id`,
         [offerId, start, new Date(start.getTime() + 8 * 3600_000)],
       );
     });

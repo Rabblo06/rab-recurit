@@ -8614,3 +8614,27 @@ Reversal:   Lower CLOCK_IN_CONFIRM_FLOOR_HOURS, or require a second approver (pa
 - **Tests:** `venue-jobrole-ownership-abuse-cases.integration.spec.ts` › "SF-4": an RLS-visible job role created by
   another manager, and another workspace's job role → 404 with no `venue_role_rate` row; the caller's own role → 201 with
   the values as sent; create, update and delete each write exactly one audit row with exactly those four metadata keys.
+
+## Part C2 (C2-7) — every workspace business-table statement names its schema; the search_path trap is required (branch feat/hws-c2-7, PR #170, 2026-11-16; no SQL)
+- **Threat:** a statement that names a workspace business table (`shift`, `attendance`, `staff_profile`, …) without a schema
+  is resolved by the transaction's `search_path`. A binder slip, a reused manager or a later code change that leaves the
+  wrong `search_path` bound would then read or write another schema's rows (another workspace's, or the legacy `core`
+  copies) without any error.
+- **Control:** every such statement is named through `businessTables(manager)` (C2-0). The schema comes only from a binder
+  (the registry-resolved, canonical `workspace_<32 hex>` of the bound workspace, or `core`), never from input. A manager
+  that no binder bound cannot run the statement at all (`BusinessTablesError('unbound')`, before any SQL). C2-7 qualifies the
+  last five sites (`post-shift-lifecycle.service.ts`, `templates/document-context.ts`) and one dynamic table the static scan
+  could not see (`role.service.ts assertRelationsInScopeTx`, now two literal statements). The ratchet
+  (`tools/check-workspace-table-qualified.cjs`) has an empty baseline and fails on any non-empty one. The runtime trap
+  (`CREWFLOW_TEST_SEARCH_PATH_TRAP`, test-only, refused outside `NODE_ENV=test`) binds `search_path = ''`, so any
+  unqualified table fails with 42P01. Its CI jobs (`test-search-path-trap` (1)–(3) in ci-server, `test-search-path-trap` in
+  ci-worker) are now required: `continue-on-error` is removed. The owner adds them to branch protection.
+- **Residual:** production still binds `search_path` to the resolved schema (defence in depth, lenient). Owner decision
+  still open: bind `''` in production too (strict). The static ratchet cannot see a table name assembled from a variable;
+  the required trap jobs cover that at runtime for every path the suites exercise.
+- **Tests:** `worker-operations-abuse-cases.integration.spec.ts` › post-shift lifecycle now runs on the real binder. A foreign
+  workspace is refused by the binder (`WorkspaceRoutingError('registry-missing')`). The L3 shape (the row's own schema bound,
+  the organisation GUC switched to another org) advances 0 rows. A bare transaction outside any binder gets
+  `BusinessTablesError('unbound')` for `advance` and `discover`. `tenant-context.service.spec.ts` and
+  `workspace-execution-context.integration.spec.ts` pin the trap behaviour (`''` bound, the real schema still handed to the
+  callback). Every server and worker suite passes under the trap.

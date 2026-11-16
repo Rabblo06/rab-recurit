@@ -212,6 +212,12 @@ test('the committed baseline matches the tree exactly (no new site, no stale ent
   assert.deepEqual(result, { grown: [], stale: [], unknownRules: [] });
 });
 
+test('C2-7: the committed baseline is empty ({}), and a non-empty baseline is reported even when its counts match', () => {
+  assert.deepEqual(check.readBaseline(), {});
+  assert.deepEqual(check.assertEmptyBaseline({}), []);
+  assert.deepEqual(check.assertEmptyBaseline({ 'packages/rab-server/src/x.ts': { unqualified: 1 } }), ['packages/rab-server/src/x.ts']);
+});
+
 test('check-sql-injection: ${X.<table>} needs no review comment only for X = businessTables(…), unquoted (review #1)', () => {
   const imp = IMPORT.trimEnd();
   const sites = (lines, file = 'packages/rab-server/src/modules/x/services/x.service.ts') =>

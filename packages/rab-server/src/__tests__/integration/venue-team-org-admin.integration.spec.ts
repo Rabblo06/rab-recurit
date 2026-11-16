@@ -16,6 +16,7 @@ import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
 import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-pipe';
 import { integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
 import { businessTable, businessTableOf } from './helpers/hws-fixtures';
+import { businessTables } from '../../engine/core-modules/tenant/business-tables';
 
 /**
  * Owner decision 2026-10-28: the EXISTING Assigned Staff feature (venue_manager_staff) extended to organisation
@@ -253,11 +254,11 @@ describeIfDb('Assigned Staff for organisation administrators (CEO / platform adm
     // cannot write a team row.
     await tenant.runInWorkspaceContext({ organisationId: org.id, workspaceId: managerA.workspaceId!, userId: revoked.userId, role: '' }, async (m) => {
       await m.query(`SELECT set_config('rab.admin_scope', 'venue_team', true)`);
-      expect((await m.query(`SELECT count(*)::int AS n FROM staff_profile`))[0].n).toBe(0);
-      expect((await m.query(`SELECT count(*)::int AS n FROM venue_manager_staff`))[0].n).toBe(0);
+      expect((await m.query(`SELECT count(*)::int AS n FROM ${businessTables(m).staff_profile}`))[0].n).toBe(0);
+      expect((await m.query(`SELECT count(*)::int AS n FROM ${businessTables(m).venue_manager_staff}`))[0].n).toBe(0);
       await m.query('SAVEPOINT w');
       await expect(
-        m.query(`INSERT INTO venue_manager_staff (organisation_id, workspace_id, manager_profile_id, staff_profile_id) VALUES ($1, $2, $3, $4)`, [
+        m.query(`INSERT INTO ${businessTables(m).venue_manager_staff} (organisation_id, workspace_id, manager_profile_id, staff_profile_id) VALUES ($1, $2, $3, $4)`, [
           org.id, managerA.workspaceId, vmA.profileId, staffA.profileId,
         ]),
       ).rejects.toMatchObject({ code: '42501' });
@@ -279,7 +280,7 @@ describeIfDb('Assigned Staff for organisation administrators (CEO / platform adm
     for (const [user, expected] of [[granted, true], [noGrant, false]] as const) {
       await tenant.runInWorkspaceContext({ organisationId: org.id, workspaceId: managerB.workspaceId!, userId: user.userId, role: '' }, async (m) => {
         await m.query(`SELECT set_config('rab.admin_scope', 'venue_team', true)`);
-        const n = (await m.query(`SELECT count(*)::int AS n FROM staff_profile WHERE id = $1`, [staffB.profileId]))[0].n;
+        const n = (await m.query(`SELECT count(*)::int AS n FROM ${businessTables(m).staff_profile} WHERE id = $1`, [staffB.profileId]))[0].n;
         expect(n > 0).toBe(expected);
       });
     }
@@ -323,10 +324,10 @@ describeIfDb('Assigned Staff for organisation administrators (CEO / platform adm
 
   it('without the admin scope the CEO’s ordinary database visibility is unchanged (picker-only widening)', async () => {
     await tenant.runInWorkspaceContext({ organisationId: org.id, workspaceId: managerA.workspaceId!, userId: ceo.userId, role: '' }, async (m) => {
-      expect((await m.query(`SELECT count(*)::int AS n FROM staff_profile`))[0].n).toBe(0);
-      expect((await m.query(`SELECT count(*)::int AS n FROM venue_manager_staff`))[0].n).toBe(0);
+      expect((await m.query(`SELECT count(*)::int AS n FROM ${businessTables(m).staff_profile}`))[0].n).toBe(0);
+      expect((await m.query(`SELECT count(*)::int AS n FROM ${businessTables(m).venue_manager_staff}`))[0].n).toBe(0);
       await m.query(`SELECT set_config('rab.admin_scope', 'venue_team', true)`);
-      expect((await m.query(`SELECT count(*)::int AS n FROM staff_profile`))[0].n).toBeGreaterThan(0);
+      expect((await m.query(`SELECT count(*)::int AS n FROM ${businessTables(m).staff_profile}`))[0].n).toBeGreaterThan(0);
     });
   });
 

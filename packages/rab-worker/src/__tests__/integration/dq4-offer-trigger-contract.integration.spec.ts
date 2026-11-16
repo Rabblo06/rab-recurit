@@ -21,6 +21,7 @@ import { runOfferExpiryCycle } from '../../queues/rab-offers/offer-expiry.job';
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { createTestIdentityFactory, TestIdentity, TestIdentityFactory } from './helpers/test-identities';
 import { integrationTestDatabaseReady } from '@rab/server/database/typeorm/core/integration-test-database-gate';
+import { businessTables } from '@rab/server/engine/core-modules/tenant/business-tables';
 
 /**
  * D-Q4b test preparation (docs/PHASE_DQ4_DQ5_PLAN_2026-11-03.md §D-Q4b). CHARACTERISATION of the database contract a
@@ -139,7 +140,7 @@ describeIfDb('D-Q4b characterisation: the offer-expiry CAS contract a delayed tr
     const fx = await seedFx('dq4bAccepted');
     const { offerId, staff } = await sendOffer(fx, new Date(Date.now() + 60_000));
     await offerService.staffAccept({ organisationId: fx.manager.organisationId, workspaceId: fx.manager.workspaceId, userId: staff.userId, role: 'staff' }, offerId);
-    await withManager(fx, (m) => m.query(`UPDATE job_offer SET expires_at = now() - interval '1 minute' WHERE id = $1`, [offerId]));
+    await withManager(fx, (m) => m.query(`UPDATE ${businessTables(m).job_offer} SET expires_at = now() - interval '1 minute' WHERE id = $1`, [offerId]));
     expect(await fireTrigger({ organisationId: fx.manager.organisationId, workspaceId: fx.manager.workspaceId, offerId })).toBeNull();
     expect(await statusOf(fx, offerId)).toBe(OfferStatus.STAFF_ACCEPTED);
   });

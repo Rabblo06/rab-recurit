@@ -23,6 +23,7 @@ import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
 import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-pipe';
 import { integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
 import { businessTable } from './helpers/hws-fixtures';
+import { businessTables } from '../../engine/core-modules/tenant/business-tables';
 
 /**
  * Agency payment calendar, allocation, payroll runs and official payslips (PayrollCalendarRunsPayslips1786719200000).
@@ -256,8 +257,8 @@ describeIfDb('payroll calendar, runs and payslips (integration)', () => {
     const again = await http().post('/rest/v1/payroll/runs/prepare').set(auth(tokenA)).send({ periodId });
     expect(again.body.totals.records).toBe(3);
     await expect(tenantContext.runInWorkspaceContext(ctxOf(a), (m) => m.query(
-      `INSERT INTO payroll_run_line (organisation_id, workspace_id, run_id, payroll_record_id, staff_profile_id, work_date, worked_minutes, pay_rate_pence, amount_pence)
-       SELECT organisation_id, workspace_id, run_id, payroll_record_id, staff_profile_id, work_date, worked_minutes, pay_rate_pence, amount_pence FROM payroll_run_line WHERE run_id = $1 LIMIT 1`,
+      `INSERT INTO ${businessTables(m).payroll_run_line} (organisation_id, workspace_id, run_id, payroll_record_id, staff_profile_id, work_date, worked_minutes, pay_rate_pence, amount_pence)
+       SELECT organisation_id, workspace_id, run_id, payroll_record_id, staff_profile_id, work_date, worked_minutes, pay_rate_pence, amount_pence FROM ${businessTables(m).payroll_run_line} WHERE run_id = $1 LIMIT 1`,
       [runId]))).rejects.toMatchObject({ code: '23505' });
     const csv = await http().get(`/rest/v1/payroll/runs/${runId}/export`).set(auth(tokenA));
     expect(csv.status).toBe(200);
@@ -273,7 +274,7 @@ describeIfDb('payroll calendar, runs and payslips (integration)', () => {
     expect((await http().post(`/rest/v1/payroll/runs/${runId}/payslips/${staff[0]!.profileId}/mark-paid`).set(auth(tokenB)).send({})).status).toBe(404);
     expect((await http().get(`/rest/v1/payroll/runs/${runId}`).set(auth(tokenVm))).status).toBe(403);
     expect((await http().get(`/rest/v1/payroll/runs/${runId}`).set(auth(staffTokens[0]!))).status).toBe(403);
-    const asB = await tenantContext.runInWorkspaceContext(ctxOf(b), (m) => m.query(`SELECT id FROM payroll_run_line`));
+    const asB = await tenantContext.runInWorkspaceContext(ctxOf(b), (m) => m.query(`SELECT id FROM ${businessTables(m).payroll_run_line}`));
     expect(asB).toEqual([]);
   });
 
@@ -343,7 +344,7 @@ describeIfDb('payroll calendar, runs and payslips (integration)', () => {
     expect((await http().get(`/rest/v1/files/${fileV2}/download`).set(auth(staffTokens[0]!))).status).toBe(404);
     expect((await http().get(`/rest/v1/files/${fileV2}/download`).set(auth(tokenB))).status).toBe(404);
     expect((await http().get(`/rest/v1/files/${fileV2}/download`).set(auth(tokenVm))).status).toBe(404);
-    const asStaff0 = await tenantContext.runInWorkspaceContext(ctxOf(staff[0]!), (m) => m.query(`SELECT staff_profile_id FROM payslip`));
+    const asStaff0 = await tenantContext.runInWorkspaceContext(ctxOf(staff[0]!), (m) => m.query(`SELECT staff_profile_id FROM ${businessTables(m).payslip}`));
     expect(asStaff0.map((r: { staff_profile_id: string }) => r.staff_profile_id)).toEqual([staff[0]!.profileId]);
     const mine0 = await http().get('/rest/v1/payroll/me/payslips').set(auth(staffTokens[0]!));
     expect(mine0.body.data.every((d: { document: unknown }) => d.document === null)).toBe(true);
@@ -387,7 +388,7 @@ describeIfDb('payroll calendar, runs and payslips (integration)', () => {
     expect(own.status).toBe(403);
     expect((await http().get('/rest/v1/payroll/me/payslips').set(auth(staffTokens[0]!))).body.data[0].status).toBe('processing');
     await expect(tenantContext.runInWorkspaceContext(ctxOf(staff[0]!), (m) => m.query(
-      `UPDATE payslip SET paid_at = now(), paid_by = $2 WHERE staff_profile_id = $1`, [staff[0]!.profileId, staff[0]!.userId]))).rejects.toMatchObject({ code: '42501' });
+      `UPDATE ${businessTables(m).payslip} SET paid_at = now(), paid_by = $2 WHERE staff_profile_id = $1`, [staff[0]!.profileId, staff[0]!.userId]))).rejects.toMatchObject({ code: '42501' });
   });
 
   it('failed statement retry: re-queued through the same durable path, audited; humans cannot forge statement state or skip the state machine', async () => {
@@ -407,17 +408,17 @@ describeIfDb('payroll calendar, runs and payslips (integration)', () => {
     expect((await http().post(`/rest/v1/payroll/records/${id}/statement/retry`).set(auth(tokenA))).status).toBe(409);
     const audits = await adminDataSource.query(`SELECT count(*)::int AS n FROM core.audit_log WHERE action = 'payroll_record.shift_statement_retry_requested' AND entity_id::text = $1`, [id]);
     expect(audits[0].n).toBe(1);
-    await expect(tenantContext.runInWorkspaceContext(ctxOf(a), (m) => m.query(`UPDATE payroll_record SET statement_status = 'generated' WHERE id = $1`, [id]))).rejects.toMatchObject({ code: '42501' });
-    await expect(tenantContext.runInWorkspaceContext(ctxOf(a), (m) => m.query(`UPDATE payroll_record SET status = 'pending_approval' WHERE id = $1`, [id]))).rejects.toMatchObject({ code: '23514' });
+    await expect(tenantContext.runInWorkspaceContext(ctxOf(a), (m) => m.query(`UPDATE ${businessTables(m).payroll_record} SET statement_status = 'generated' WHERE id = $1`, [id]))).rejects.toMatchObject({ code: '42501' });
+    await expect(tenantContext.runInWorkspaceContext(ctxOf(a), (m) => m.query(`UPDATE ${businessTables(m).payroll_record} SET status = 'pending_approval' WHERE id = $1`, [id]))).rejects.toMatchObject({ code: '23514' });
   });
 
   it('new tables return zero rows with no tenant context; lines and documents are insert-only', async () => {
     for (const t of ['payroll_calendar', 'payroll_calendar_period', 'payroll_run', 'payroll_run_line', 'payslip', 'payslip_document']) {
       expect(await dataSource.manager.query(`SELECT * FROM core.${t}`)).toEqual([]);
     }
-    await expect(tenantContext.runInWorkspaceContext(ctxOf(a), (m) => m.query(`DELETE FROM payroll_run_line WHERE run_id = $1`, [runId]))).rejects.toMatchObject({ code: '42501' });
-    await expect(tenantContext.runInWorkspaceContext(ctxOf(a), (m) => m.query(`UPDATE payroll_run_line SET amount_pence = 1 WHERE run_id = $1`, [runId]))).rejects.toMatchObject({ code: '42501' });
-    await expect(tenantContext.runInWorkspaceContext(ctxOf(a), (m) => m.query(`UPDATE payslip_document SET version = 9`))).rejects.toMatchObject({ code: '42501' });
+    await expect(tenantContext.runInWorkspaceContext(ctxOf(a), (m) => m.query(`DELETE FROM ${businessTables(m).payroll_run_line} WHERE run_id = $1`, [runId]))).rejects.toMatchObject({ code: '42501' });
+    await expect(tenantContext.runInWorkspaceContext(ctxOf(a), (m) => m.query(`UPDATE ${businessTables(m).payroll_run_line} SET amount_pence = 1 WHERE run_id = $1`, [runId]))).rejects.toMatchObject({ code: '42501' });
+    await expect(tenantContext.runInWorkspaceContext(ctxOf(a), (m) => m.query(`UPDATE ${businessTables(m).payslip_document} SET version = 9`))).rejects.toMatchObject({ code: '42501' });
     await expect(tenantContext.runInTenantContext(ctxOf(a), (m) => m.query(`DELETE FROM core.payroll_calendar_period`))).rejects.toMatchObject({ code: '42501' });
   });
 

@@ -13,6 +13,7 @@ import { paydayLabel, PeriodRef, periodLabel } from '@rab/server/modules/payroll
 import type { Shift } from '@rab/server/modules/scheduling/entities/shift.entity';
 import { effectiveAssignmentBreakMinutes, effectiveAssignmentTime } from '@rab/server/modules/scheduling/utils/assignment-time';
 
+import { asTenantBoundManager } from '../helpers/business-tables-fakes';
 import { DocumentKind, ReportDocument } from './documents';
 
 /**
@@ -121,19 +122,24 @@ export const FIXTURE_ORG_ID = '0e6f3a4c-1111-4a5b-9c8d-000000000001';
 export const FIXTURE_VENUE_ID = '0e6f3a4c-2222-4a5b-9c8d-000000000002';
 const ROLE_ID = '0e6f3a4c-3333-4a5b-9c8d-000000000003';
 
-/** Answers exactly the four reads `loadDocumentShiftInfo` makes; anything else is a builder change and fails loudly. */
+/**
+ * Answers exactly the four reads `loadDocumentShiftInfo` makes; anything else is a builder change and fails loudly. The fake
+ * is bound the way the Worker's tenant transaction binds its manager (Part C2: `asTenantBoundManager`, the HWS-off `core`
+ * binding), so the builder's `businessTables(manager)` names the workspace tables `"core"."venue"` / `"core"."job_role"`; an
+ * unbound manager would make the builder throw (fail closed), exactly as in production.
+ */
 function documentContextManager(seed: ScenarioSeed): EntityManager {
   const query = async (sql: string, params: unknown[]) => {
     const s = sql.replace(/\s+/g, ' ').trim();
-    if (s === 'SELECT name, address, contact FROM venue WHERE id = $1' && params[0] === FIXTURE_VENUE_ID) {
+    if (s === 'SELECT name, address, contact FROM "core"."venue" WHERE id = $1' && params[0] === FIXTURE_VENUE_ID) {
       return [{ name: seed.venue.name, address: seed.venue.address, contact: seed.venue.contact }];
     }
-    if (s === 'SELECT name FROM job_role WHERE id = $1' && params[0] === ROLE_ID) return [{ name: seed.role }];
+    if (s === 'SELECT name FROM "core"."job_role" WHERE id = $1' && params[0] === ROLE_ID) return [{ name: seed.role }];
     if (s === 'SELECT timezone FROM core.organisation WHERE id = $1' && params[0] === FIXTURE_ORG_ID) return [{ timezone: seed.timezone }];
     if (s === 'SELECT name FROM core.manager_workspace WHERE id = $1') return seed.workspaceName == null ? [] : [{ name: seed.workspaceName }];
     throw new Error(`pdf-equality fixture: loadDocumentShiftInfo issued an unexpected query (update fixtures.ts): ${s}`);
   };
-  return { query } as unknown as EntityManager;
+  return asTenantBoundManager({ query }) as unknown as EntityManager;
 }
 
 export function shiftEntity(seed: ScenarioSeed): Shift {

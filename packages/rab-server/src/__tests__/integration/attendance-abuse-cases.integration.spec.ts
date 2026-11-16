@@ -27,6 +27,7 @@ import { generateFixturePassword } from './helpers/fixture-password';
 import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-pipe';
 import { integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
 import { businessSchema, businessTable, businessTableOf, siblingTable } from './helpers/hws-fixtures';
+import { businessTables } from '../../engine/core-modules/tenant/business-tables';
 
 const FIXTURE_PASSWORD = generateFixturePassword();
 
@@ -242,7 +243,7 @@ describeIfDb('attendance abuse cases (integration)', () => {
       await manager.insert(UserRole, { userId, roleId: role.id, organisationId: organisation.id });
 
       const profile = await manager.query(
-        `INSERT INTO staff_profile (organisation_id, user_id, staff_ref, created_by, workspace_id, employment_status) VALUES ($1, $2, $3, $4, $5, 'active') RETURNING id`,
+        `INSERT INTO ${businessTables(manager).staff_profile} (organisation_id, user_id, staff_ref, created_by, workspace_id, employment_status) VALUES ($1, $2, $3, $4, $5, 'active') RETURNING id`,
         [organisation.id, userId, `STF-${randomUUID().slice(0, 8)}`, createdByUserId, creatorWorkspaceId],
       );
       await insertMembership(manager, organisation.id, userId, creatorWorkspaceId);
@@ -492,7 +493,7 @@ describeIfDb('attendance abuse cases (integration)', () => {
       // verification query to see the row at all.
       const count = await tenantContext.runInTenantContext(
         { organisationId: organisation.id, workspaceId: venue.workspaceId!, userId: managerUserId, role: '' },
-        (manager) => manager.query(`SELECT count(*) FROM attendance WHERE staff_profile_id = $1`, [staffA.staffProfileId]),
+        (manager) => manager.query(`SELECT count(*) FROM ${businessTables(manager).attendance} WHERE staff_profile_id = $1`, [staffA.staffProfileId]),
       );
       expect(Number(count[0].count)).toBe(1);
     });
@@ -518,7 +519,7 @@ describeIfDb('attendance abuse cases (integration)', () => {
 
     const rows = await tenantContext.runInTenantContext(
       { organisationId: organisation.id, workspaceId: venue.workspaceId!, userId: managerUserId, role: '' },
-      (manager) => manager.query(`SELECT status FROM attendance WHERE staff_profile_id = $1`, [staffA.staffProfileId]),
+      (manager) => manager.query(`SELECT status FROM ${businessTables(manager).attendance} WHERE staff_profile_id = $1`, [staffA.staffProfileId]),
     );
     expect(rows).toHaveLength(1);
     expect(rows[0].status).toBe('clocked_in');
@@ -924,7 +925,7 @@ describeIfDb('attendance abuse cases (integration)', () => {
 
       const rows = await tenantContext.runInTenantContext(
         { organisationId: organisation.id, workspaceId: venue.workspaceId!, userId: managerUserId, role: '' },
-        (manager) => manager.query(`SELECT clock_out_method FROM attendance WHERE staff_profile_id = $1`, [staffA.staffProfileId]),
+        (manager) => manager.query(`SELECT clock_out_method FROM ${businessTables(manager).attendance} WHERE staff_profile_id = $1`, [staffA.staffProfileId]),
       );
       expect(rows[0].clock_out_method).toBe('auto_geofence');
     });
@@ -1010,7 +1011,7 @@ describeIfDb('attendance abuse cases (integration)', () => {
       await confirmShiftForStaff(managerToken, staffToken, staff.staffProfileId, shiftId);
       const startsAt = new Date(Date.now() + 2 * 3600_000);
       await tenantContext.runInTenantContext({organisationId: organisation.id, workspaceId: venue.workspaceId ?? null, userId: managerUserId, role: 'manager'}, m =>
-        m.query("UPDATE shift_assignment sa SET period=tstzrange($2::timestamptz,upper(sa.period),'[)') WHERE shift_id=$1", [shiftId, startsAt]));
+        m.query(`UPDATE ${businessTables(m).shift_assignment} sa SET period=tstzrange($2::timestamptz,upper(sa.period),'[)') WHERE shift_id=$1`, [shiftId, startsAt]));
       const res = await clockIn(staffToken, organisation, venue, managerUserId, shiftId);
       expect(res.status).toBe(409);
       expect(res.body.code).toBe('CLOCK_IN_TOO_EARLY');
@@ -1226,7 +1227,7 @@ describeIfDb('attendance abuse cases (integration)', () => {
 
       const corrections = await tenantContext.runInTenantContext(
         { organisationId: organisation.id, workspaceId: venue.workspaceId!, userId: managerUserId, role: '' },
-        (manager) => manager.query(`SELECT field, old_value, new_value, reason FROM attendance_correction WHERE attendance_id = $1`, [clockOutRes.body.id]),
+        (manager) => manager.query(`SELECT field, old_value, new_value, reason FROM ${businessTables(manager).attendance_correction} WHERE attendance_id = $1`, [clockOutRes.body.id]),
       );
       expect(corrections).toHaveLength(1);
       expect(corrections[0].field).toBe('breakMinutes');

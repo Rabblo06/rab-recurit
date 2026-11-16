@@ -17,6 +17,7 @@ import { ManagerWorkspace } from '../../modules/manager-workspace/entities/manag
 import { generateFixturePassword } from './helpers/fixture-password';
 import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-pipe';
 import { integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
+import { businessTables } from '../../engine/core-modules/tenant/business-tables';
 
 const FIXTURE_PASSWORD = generateFixturePassword();
 
@@ -361,7 +362,7 @@ describeIfDb('dashboard summary + global search (integration)', () => {
       await tenantContext.runInTenantContext(
         { organisationId: organisation.id, workspaceId: workspaceB, userId: managerB!.userId, role: '' },
         (m) =>
-          m.query(`INSERT INTO venue (organisation_id, name, type, created_by, workspace_id) VALUES ($1, $2, 'other', $3, $4)`, [
+          m.query(`INSERT INTO ${businessTables(m).venue} (organisation_id, name, type, created_by, workspace_id) VALUES ($1, $2, 'other', $3, $4)`, [
             organisation.id,
             impostorName,
             managerA!.userId,
@@ -414,7 +415,7 @@ describeIfDb('dashboard summary + global search (integration)', () => {
       await tenantContext.runInTenantContext(
         { organisationId: organisation.id, workspaceId: workspaceA, userId: managerA!.userId, role: '' },
         (m) =>
-          m.query(`INSERT INTO venue (organisation_id, name, type, created_by, workspace_id) VALUES ($1, $2, 'other', $3, $4)`, [
+          m.query(`INSERT INTO ${businessTables(m).venue} (organisation_id, name, type, created_by, workspace_id) VALUES ($1, $2, 'other', $3, $4)`, [
             organisation.id,
             impostorName,
             managerB!.userId,

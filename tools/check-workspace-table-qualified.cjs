@@ -28,7 +28,8 @@
  * Ratchet: tools/workspace-table-qualified.baseline.json records, per file and rule, how many sites exist today. The check
  * FAILS when a file/rule has MORE sites than its baseline (a new unqualified reference: qualify it with businessTables()), and
  * also when it has FEWER (a stale baseline: lower the entry, or delete it at zero, in the same PR). The baseline may only
- * shrink; C2-7 asserts it is empty.
+ * shrink. Since C2-7 it is EMPTY and must stay empty: a non-empty `files` object fails the check (assertEmptyBaseline), even
+ * when its counts match the tree, so no unqualified site can be re-admitted by adding a baseline row.
  *
  *   node tools/check-workspace-table-qualified.cjs                    # exit 1 on a new site or a stale baseline entry
  *   node tools/check-workspace-table-qualified.cjs --list             # print every site (for the module PRs)
@@ -445,6 +446,11 @@ function readBaselineAt(ref, root = ROOT) {
   return parseBaseline(text, `${ref}:${BASELINE_REL}`);
 }
 
+/** C2-7: the baseline is empty for good. Returns the offending file keys (none = OK). */
+function assertEmptyBaseline(baseline) {
+  return Object.keys(baseline ?? {});
+}
+
 function baselineDocument(counts) {
   return {
     _comment: [
@@ -493,6 +499,8 @@ function main(argv) {
     console.error(`[workspace-table-qualified] ${path.relative(ROOT, BASELINE_FILE)} is missing.`);
     return 1;
   }
+  const nonEmpty = assertEmptyBaseline(baseline);
+  for (const f of nonEmpty) console.log(`BASELINE ${f}: C2-7 emptied the baseline; it must stay {}. Qualify the site with businessTables(manager) instead.`);
   const { grown, stale, unknownRules } = compare(current, baseline);
   for (const g of grown) {
     console.log(`NEW    ${g.rule.padEnd(21)} ${g.file}: ${g.current} site(s), baseline ${g.baseline}. Qualify it: const t = businessTables(manager); … \${t.<table>}`);
@@ -502,9 +510,9 @@ function main(argv) {
   for (const u of unknownRules) console.log(`BAD    baseline entry ${u.file} / ${u.rule}: unknown rule or not a non-negative integer.`);
   const baselineTotal = Object.values(baseline).reduce((n, rules) => n + Object.values(rules).reduce((a, b) => a + (Number(b) || 0), 0), 0);
   console.log(`[workspace-table-qualified] ${sites.length} unqualified site(s) (baseline ${baselineTotal}); ${grown.length} grown, ${stale.length} stale. (A static scan with stated limits: see the header.)`);
-  return grown.length || stale.length || unknownRules.length ? 1 : 0;
+  return grown.length || stale.length || unknownRules.length || nonEmpty.length ? 1 : 0;
 }
 
 if (require.main === module) process.exit(main(process.argv.slice(2)));
 
-module.exports = { scan, scanSource, secondPrimitiveModules, loadTables, workspaceEntities, countsOf, compare, compareToBase, baselineDocument, readBaseline, readBaselineAt, isExcluded, RULES, SEARCH_PATH_BINDERS, BUSINESS_SCHEMA_BINDERS };
+module.exports = { assertEmptyBaseline, scan, scanSource, secondPrimitiveModules, loadTables, workspaceEntities, countsOf, compare, compareToBase, baselineDocument, readBaseline, readBaselineAt, isExcluded, RULES, SEARCH_PATH_BINDERS, BUSINESS_SCHEMA_BINDERS };
