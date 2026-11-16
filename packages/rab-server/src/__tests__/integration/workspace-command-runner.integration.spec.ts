@@ -200,7 +200,9 @@ describeIfDb('Part D workspace command runner (integration)', () => {
 
       // Through UpgradeRun (the migrate child's hooks): the previous-version check, then afterApply's workspace pass.
       // The 0.6.0 adoption release, with the previous-versions list it shipped with (0.7.0 appended 0.6.0).
-      const run = new UpgradeRun({ codeVersion: '0.6.0', previousVersions: ['0.4.0', '0.5.0'], force: false, log: (l) => lines.push(l), workspaceRunner: { workspaceIds: [a.id, b.id, drift.id, legacy.id] } });
+      // 0.6.0's own registry (this code also knows 0.7.0's workspace commands; 0.6.0 did not).
+      const r06 = { '0-6': [...(WORKSPACE_UPGRADE_COMMANDS['0-6'] ?? [])] };
+      const run = new UpgradeRun({ codeVersion: '0.6.0', previousVersions: ['0.4.0', '0.5.0'], force: false, log: (l) => lines.push(l), workspaceRegistry: r06, workspaceRunner: { workspaceIds: [a.id, b.id, drift.id, legacy.id] } });
       await run.beforeApply(session060, { fresh: false, attribution: null, unrestrictedTarget: true });
       await run.afterApply(session060);
       for (const ws of [a, b]) {
@@ -221,7 +223,7 @@ describeIfDb('Part D workspace command runner (integration)', () => {
       expect(failures[legacy.id]).toBe('BEHIND');
       expect(run.report.commandFailure).toMatchObject({ name: '0.6.0_WorkspaceAdoption' });
 
-      const again = await new WorkspaceCommandRunner({ codeVersion: '0.6.0', versions: ['0.4.0', '0.5.0'], force: false, adopt: true, log: (l) => lines.push(l), workspaceIds: [a.id, b.id, drift.id] }).run(session060);
+      const again = await new WorkspaceCommandRunner({ codeVersion: '0.6.0', versions: ['0.4.0', '0.5.0'], force: false, adopt: true, log: (l) => lines.push(l), workspaceRegistry: r06, workspaceIds: [a.id, b.id, drift.id] }).run(session060);
       expect(again.outcomes.find((o) => o.workspaceId === a.id)!.status).toBe('up-to-date');
       expect((await rows060(a)).length).toBe(1 + REAL.length);
       expect(again.failures.map((f) => f.workspaceId)).toEqual([drift.id]);
