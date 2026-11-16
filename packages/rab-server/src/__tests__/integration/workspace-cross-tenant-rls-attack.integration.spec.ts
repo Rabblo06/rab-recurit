@@ -600,7 +600,7 @@ describeActivated('workspace cross-tenant RLS attack, activated (post-cutover) s
   beforeAll(async () => {
     dataSource = new DataSource({
       type: 'postgres',
-      url: process.env.DATABASE_URL,
+      url: integrationTestDatabase().appUrl,
       schema: 'core',
       synchronize: false,
       entities: [Organisation, Role, User, UserRole, ManagerProfile, ManagerWorkspace, StaffProfile, Venue, JobRole, Shift, ShiftAssignment, JobOffer, Attendance, ShiftReport, AttendanceCorrection],
