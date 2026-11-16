@@ -6,7 +6,7 @@ import { WORKER_SCAN_INTERVAL_SETTINGS as SCAN_INTERVALS } from './worker-scan-i
 import { TIMER_TRIGGER_KINDS_PATTERN } from '../../worker-shared/timer-trigger.contract';
 // Phase B (B3): the deployment identity's accepted values, from their one definition.
 import { DEPLOYMENT_ENVIRONMENTS, IDENTITY_BOOTSTRAP_VALUE } from '../../../database/deployment-identity/deployment-identity';
-// Part C1: the HWS_RUNTIME_ENABLED default rule (on outside production), shared with the standalone provisioner.
+// Part C1: the HWS_RUNTIME_ENABLED default rule (on outside production), in one place (hws-runtime-default.ts).
 import { resolveHwsRuntimeEnabled } from './hws-runtime-default';
 
 /**

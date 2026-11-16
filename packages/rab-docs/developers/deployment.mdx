@@ -49,17 +49,9 @@ Why restoring is the only way back: 0.6.0 adds the upgrade logbook (`core.upgrad
 
 ## Environment
 
-Set every required variable in the hosting platform's secret store. See [Environment configuration](/developers/environment-configuration). The API and the Worker need the same application settings, including the same `APP_SECRET`. Neither receives `PG_DATABASE_URL`: it goes to the one-shot `db-setup` service only. Only the Worker additionally takes `CREWFLOW_PROVISIONER_DATABASE_URL`, which the launcher hands to the provisioner process alone as its `PG_DATABASE_URL`. The `rab-migrate` step takes only `.env.migrate` (template `packages/rab-docker/.env.migrate.example`).
+Set every required variable in the hosting platform's secret store. See [Environment configuration](/developers/environment-configuration). The API and the Worker need the same application settings, including the same `APP_SECRET`. Neither receives `PG_DATABASE_URL`: it goes to the one-shot `db-setup` service only. The Worker takes no provisioner URL: it provisions in-process on the same owner login (`CREWFLOW_PROVISIONER_*` is refused). There is no `rab-migrate` step and no `.env.migrate`: the API migrates on start under the migration lock.
 
-Set `CREWFLOW_PROVISIONER_ENABLED` explicitly on the Worker:
-
-| Value | Worker runs | `CREWFLOW_PROVISIONER_DATABASE_URL` |
-| --- | --- | --- |
-| `true` | Jobs and the workspace provisioner. Production and QA need this, because the provisioner is the only path that builds new workspaces there. | Required. |
-| `false` | Jobs only. New workspaces are not built by this service. | Must be absent; the Worker refuses to start if it is set. |
-| unset | The behaviour from before the switch existed: jobs and the provisioner, every 5 seconds. The Worker logs a line asking for an explicit value. Only for environments configured before the switch; never for a new one. | Required. |
-
-Any other value refuses to start. `WORKSPACE_PROVISIONER_INTERVAL_SECONDS` sets how often the provisioner polls, as a whole number from 5 to 120. Left unset, it is 60 with `true` and 5 when the switch is unset. Production and QA pin 5.
+`CREWFLOW_PROVISIONER_ENABLED` and the other `CREWFLOW_PROVISIONER_*` names are refused on the Worker: provisioning always runs in-process. `WORKSPACE_PROVISIONER_INTERVAL_SECONDS` sets how often it polls, as a whole number from 5 to 120 (default 60); production and QA pin 5. Any other value refuses to start.
 
 ## CI
 

@@ -312,7 +312,7 @@ export function selectSecurityPostureGolden(goldens: SecurityPostureGoldens, maj
  * BC-17 (owner decision 2026-11-05, MITIGATE): on an owner-login database the legacy logins crewflow and crewflow_app are
  * NOLOGIN (fresh install: the locked runner; transition: transition-from-separated.sql). The committed golden is the
  * owner-login posture. A SEPARATED-layout database (no crewflow_owner role in the cluster: the M2 restricted-migrator
- * harness, the legacy CF-41 path until PR #9) keeps both as LOGIN; these are the only golden lines that differ, and they
+ * harness, the legacy CF-41 path until the separated-mode retirement) keeps both as LOGIN; these are the only golden lines that differ, and they
  * are swapped for exactly these lines there. crewflow_worker keeps LOGIN in both layouts (its historical migrations assert it).
  */
 export const SEPARATED_LAYOUT_ROLE_LINES: Readonly<Record<string, string>> = Object.freeze({

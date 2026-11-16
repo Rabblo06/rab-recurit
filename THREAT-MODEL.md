@@ -3836,9 +3836,11 @@ credential, migration or RLS policy.
 - **SECURITY TRADE-OFF (vetoable):** a standalone provisioner (no launcher, switch unset) keeps the legacy gate
   `HWS_RUNTIME_ENABLED=true` → provision, so `nx run rab-worker:provision` and the standalone specs are unchanged.
   Stricter alternative: require `CREWFLOW_PROVISIONER_ENABLED=true` in the child too. Only the bundle is deployed.
-- **Regression tests:** launcher.test.cjs A1–A12 + 2, 8; `workspace-provisioner.config.spec.ts`;
-  `workspace-provisioning-lock.spec.ts`; `workspace-provisioner-optin.integration.spec.ts` (real `crewflow` login,
-  real entrypoint).
+  **X5.1 (2026-11-15):** the standalone provisioner, this legacy gate, the `rab-worker:provision` target and
+  `workspace-provisioner-optin.integration.spec.ts` were removed; this trade-off no longer applies.
+- **Regression tests:** launcher.test.cjs A1–A12 + 2, 8; `workspace-provisioner.config.spec.ts` (since X5.1: the in-process
+  interval only); `workspace-provisioning-lock.spec.ts`; `workspace-provisioner-optin.integration.spec.ts` (real `crewflow`
+  login, real entrypoint; removed in X5.1 with the entrypoint).
 - **Integration hardening (2026-10-27, on top of `7719959b`):** the switch is now three-state. `"true"` = on
   (60 s default), `"false"` = jobs only (and still REFUSED while `CREWFLOW_PROVISIONER_DATABASE_URL` is set), unset or
   empty = **legacy**: exactly the pre-Phase-A behaviour — provisioner on, URL required ("Missing
@@ -4251,7 +4253,7 @@ databases only.
 - **L-1 — migrator-role setup guard.** The admin URL goes through the factory URL policy (no `?host=`/`?port=`/`?user=`/
   session `options`) and a factory client; the disposable marker is read from server facts (`pg_db_role_setting`,
   `pg_file_settings`, `postmaster.opts`), never `current_setting()`. Both SQL files re-check the same facts.
-- **L-2 — standing migration approval.** `.env.migrate.example` ships `CREWFLOW_MIGRATION_APPROVED` commented out;
+- **L-2 — standing migration approval.** The `.env.migrate` template (removed in X5.1) shipped `CREWFLOW_MIGRATION_APPROVED` commented out;
   `setup-db.ts` with `DB_TARGET=production` refuses without the per-release approval from the process environment (an
   approval in a `.env` file is refused). N1 unchanged.
 - **L-3 — session stability of the migration and provisioning locks.** The live two-connection probe
@@ -5496,7 +5498,7 @@ them is a control that "passed".
 | No logical backup by the app login (PITR only) | BC-12 / G-11 | MEDIUM | Accepted 2026-11-05. Catalogue test (`row_security = off` is refused). |
 | Column-level secret grants lost (`password_hash`, TOTP secret, ...) | BC-13 | HIGH | Accepted 2026-11-05. Catalogue test. |
 | Non-secret column INSERT grants lost: the runtime can set server-owned columns (`ai_usage` id / created_at, `ai_skill` id, `ai_action_proposal` expires_at / created_at / id / origin) on its own tenant's rows | COLGRANT-1 | MEDIUM | Accepted 2026-11-05 (found by Agent 5). Catalogue test. RLS WITH CHECK still holds. |
-| Host-label namespace tables readable by the runtime (the global reserved-label list) | HL-1 | LOW | Accepted 2026-11-05 (Agent 5). Catalogue test. Still tracked by the PR #9 removal gate. |
+| Host-label namespace tables readable by the runtime (the global reserved-label list) | HL-1 | LOW | Accepted 2026-11-05 (Agent 5). Catalogue test. Still tracked by the separated-mode removal gate (`removalGateKeep`). |
 | AI governance that grants enforced: TRUNCATE on five AI tables, `synthetic_data` INSERT, EXECUTE on `core.ai_dev_mark_organisation_synthetic` | AI-1 | MEDIUM | Accepted 2026-11-05 (Agent 5). Catalogue test. The UPDATE / DELETE parity guards and the proposal and trigger CHECKs still hold. |
 | The workspace migrator's identity check (`assertMigrationIdentity`) accepts the runtime login | PROV-1 | MEDIUM | Accepted 2026-11-05 (Agent 5). Catalogue test. Ledger and registry writes still need the M-T2 allow-list. |
 
@@ -5559,7 +5561,7 @@ writes a warning instead.
    R256 = 0e0a6edd), with anything beyond it a contiguous run of the image's chain (a resumed partial upgrade). An older,
    holed or unknown history refuses with `UnsupportedUpgradeStartError` (exit 65, fail closed under every
    `CREWFLOW_UPGRADE_FAILURE` policy; nothing applied). No override exists. N1 still gates the legacy CF-41 path and the CLI
-   until the clean-up PR retires them.
+   until the separated-mode retirement (every separated database transitioned, MIX-1) retires them.
 6. **No logical backup by the app login.** Recovery is PITR only, and restore points taken after a compromise carry the
    backdoors. Accepted by the owner 2026-11-05 (BC-12).
 7. **Pool poisoning across unrelated requests.** Mitigated by pool safety (BC-14).
@@ -8038,3 +8040,18 @@ Reversal:   A shorter QR_MAX_AGE_DAYS, or rotating QRs automatically on schedule
   - hws-startup-guard.spec: the HWS-off boot refusal;
   - the security-posture and semantic goldens (PG16/17/18), the R4 secure-owner invariants, check-rls-coverage
     (`hws_cutover_activation` forced), and the restricted-migrator drift review.
+
+## X5.1 — separated-mode leftovers removed (branch phase-x/x51-separated-mode-removal, PR #167, 2026-11-15, not merged)
+- **Removed:** the standalone workspace provisioner process (`workspace-provisioner.main.ts`, nx `rab-worker:provision`) and
+  its start-up switch (`resolveProvisionerConfig`); the five suites skipped by name on the removal gate plus the opt-in
+  provisioner Redis-outage suite; the superseded templates `.env.migrate.example` and `staging/env/{api,worker,migrate}.env.example`.
+- **No control changed:** the Worker already provisions in-process on the owner login (T4); every refusal of
+  `CREWFLOW_PROVISIONER_*`, `DATABASE_URL_UNPOOLED` (`never-in-runtime-env.ts`), `.env.migrate` / `.env.ops` (compose gates,
+  `.gitignore`, `.dockerignore`) is unchanged.
+- **Regression tests:** `twenty-expected-differences.spec.ts` (the removed suites and the entrypoint stay gone),
+  `workspace-provisioning.loops.spec.ts` (no `provision` target), `migration-runner.spec.ts` (`.env.migrate` stays ignored),
+  `provisioner-process-role-callers.spec.ts` (no production file passes the `'provisioner'` process role to the boot gates,
+  the runtime-database guard or the runtime-env refusal; the `allowedIn: ['provisioner']` exemption has no live caller and
+  goes with X3.5-S8).
+- **Still open (separated-mode retirement):** the legacy CF-41 runner path, N1 on the legacy/CLI paths, the restricted-migrator
+  CI job, `deploy-prepare.ts`, the `'provisioner'` process role (X3.5-S8) and the health-check provisioner branch.

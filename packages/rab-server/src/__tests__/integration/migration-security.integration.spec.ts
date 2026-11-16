@@ -131,7 +131,7 @@ describeIfDb('M2: catalog drift check catches unsafe migrations and passes safe 
   // Owner-login architecture (Agent 1's answer, 2026-11-04): on an owner-login database the provider admin owns the database
   // and crewflow holds no grant option on it, so the restricted migrator's GRANT changes nothing; drift detection is proven
   // with the role that CAN grant it (crewflow_owner). On the separated layout (ci-migration-security's restricted-migrator
-  // job; LEGACY, REMOVE IN PR #9) the original case runs unchanged.
+  // job; LEGACY, removed with the separated-mode retirement) the original case runs unchanged.
   const isOwnerLoginDatabase = async (): Promise<boolean> =>
     ((await ds.query(`SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'crewflow_owner' AND rolcanlogin) AS o`)) as Array<{ o: boolean }>)[0]!.o;
   const grantDatabaseCreate = `DO $$ BEGIN EXECUTE format('GRANT CREATE ON DATABASE %I TO crewflow_app', current_database()); END $$`;
