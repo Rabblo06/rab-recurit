@@ -63,6 +63,7 @@ import { resolveMigrationConnection } from '../migration-database-url';
 import { Classification, classifyDatabaseState, FreshInstallProof } from './fresh-install';
 import { runCacheFlush } from '../../cache-flush';
 import { UpgradeRun, UpgradeRunReport } from '../../../../../engine/core-modules/upgrade/upgrade-runner';
+import { createUpgradeCommandHost } from '../../../../../engine/core-modules/upgrade/upgrade-command-host';
 import { upgradeSessionOf } from '../../../../../engine/core-modules/upgrade/upgrade-migration.service';
 import { UPGRADE_COMMANDS } from '../../../../../engine/core-modules/upgrade/upgrade-commands/registry';
 import type { UpgradeCommand } from '../../../../../engine/core-modules/upgrade/upgrade-commands/upgrade-command';
@@ -440,6 +441,9 @@ export async function runMigrateOnStart(config: MigrateOnStartConfig, deps: Migr
       log,
       testFailCommand,
       registry,
+      // Release 0.7.0: upgrade commands read host facts (HWS flag, backup marker path) from THIS start's environment, the same
+      // one every other decision of the start uses (process.env in the migrate child; the given env in process).
+      host: createUpgradeCommandHost({ env }),
       ...(tw ? { workspaceRegistry: tw.registry, workspaceRunner: { workspaceIds: tw.workspaceIds } } : {}),
       // Part C3 (review L-4): a command that just BLOCKED workspaces bumps the epoch before it goes on; failing is fatal for it.
       flushBlockCache: async () => {
