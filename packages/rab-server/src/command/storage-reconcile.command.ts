@@ -51,7 +51,7 @@ export const RECONCILE_LOCKED_EXIT_CODE = 3;
 
 // X3.5-S6 (audit DBR-07): the URL-string check `assertDirectLockUrl` was deleted (only its own spec called it). The lock
 // connection comes from the connection factory (`endpoint: 'lock'`, session affinity), which refuses every documented
-// transaction-pooler shape before connecting (pg-url-policy.ts, create-pg-pool.ts) — the same rule, with names only.
+// transaction-pooler shape before connecting: the factory's documented-pooler denylist (pg-url-policy.ts, create-pg-pool.ts), names only.
 
 /** Why the last `run()` did not reconcile (nothing else ever sets it). */
 export type ReconcileSkipReason = 'locked';

@@ -244,7 +244,7 @@ describe('integration test database guard', () => {
       applyIntegrationTestDatabaseEnv(env);
       expect(env.PG_DATABASE_URL).toBe(LOCAL_APP);
       for (const name of ROUTED_TEST_BLANKED_LEGACY_NAMES) expect({ name, value: env[name] }).toEqual({ name, value: '' });
-      expect(ROUTED_TEST_BLANKED_LEGACY_NAMES).toEqual(['DATABASE_URL', 'DATABASE_URL_UNPOOLED']);
+      expect(ROUTED_TEST_BLANKED_LEGACY_NAMES).toEqual(['DATABASE_URL', 'DATABASE_URL_UNPOOLED', 'DB_POOL_MAX']);
     });
 
     it('X3.5-S6: the routed environment resolves through PG_DATABASE_URL only: no legacy name, no elevated endpoint, no deprecation warning', () => {
@@ -268,9 +268,37 @@ describe('integration test database guard', () => {
       expect(() => routedTestDatabaseLegacyNames({ ...before, NODE_ENV: 'development' })).toThrow(TestDatabaseConfigError);
       // The pair rules still apply first.
       expect(() => routedTestDatabaseLegacyNames({ ...before, PG_DATABASE_URL: DEV_DB })).toThrow(/PG_DATABASE_URL is set/);
-      // A legacy name the routing does not blank: DATABASE_DIRECT_URL is refused outright; DB_POOL_MAX is reported.
+      // DATABASE_DIRECT_URL stays refused outright (X1.9), as before.
       expect(() => routedTestDatabaseLegacyNames({ ...before, DATABASE_DIRECT_URL: LOCAL_APP })).toThrow(/DATABASE_DIRECT_URL is set/);
-      expect(routedTestDatabaseLegacyNames({ ...before, DB_POOL_MAX: '5' })).toEqual(['DB_POOL_MAX']);
+      // Review #176: DB_POOL_MAX was accepted before, so release 1 must not refuse it: it is blanked, never reported.
+      expect(routedTestDatabaseLegacyNames({ ...before, DB_POOL_MAX: '5' })).toEqual([]);
+    });
+
+    it('review #176: a DB_POOL_MAX keeps its meaning as PG_POOL_MAX_CONNECTIONS (unless that is set) and is blanked', () => {
+      const legacyOnly = jestEnv({ DB_POOL_MAX: '7' });
+      applyIntegrationTestDatabaseEnv(legacyOnly);
+      expect({ pool: legacyOnly.PG_POOL_MAX_CONNECTIONS, legacy: legacyOnly.DB_POOL_MAX }).toEqual({ pool: '7', legacy: '' });
+      expect(resolvePgEnvironment(legacyOnly, { processRole: 'cli' }).pool.max).toBe(7);
+      const both = jestEnv({ DB_POOL_MAX: '7', PG_POOL_MAX_CONNECTIONS: '9' });
+      applyIntegrationTestDatabaseEnv(both);
+      expect({ pool: both.PG_POOL_MAX_CONNECTIONS, legacy: both.DB_POOL_MAX }).toEqual({ pool: '9', legacy: '' });
+      expect(presentLegacyPgEnvNames(both)).toEqual([]);
+    });
+
+    it('review #176: routedTestDatabaseLegacyNames also reads what a later .env load would add, and the blanked names win', () => {
+      const env = jestEnv({ JEST_WORKER_ID: undefined });
+      const dotenv = `DATABASE_URL=${OTHER_LOCAL}\nDATABASE_URL_UNPOOLED=${OTHER_LOCAL}\nDB_POOL_MAX=4\n`;
+      const read = (file: string): string | null => (file === require('path').resolve('/w', '.env') ? dotenv : null);
+      expect(routedTestDatabaseLegacyNames(env, '/w', read)).toEqual([]);
+      // The helper itself sees them (so the merge is real), and the routed copy's blank values are what wins.
+      expect(Object.keys(laterDotenvValues({}, '/w', read, ['DATABASE_URL', 'DATABASE_URL_UNPOOLED', 'DB_POOL_MAX'])).sort()).toEqual([
+        'DATABASE_URL',
+        'DATABASE_URL_UNPOOLED',
+        'DB_POOL_MAX',
+      ]);
+      // A legacy DATABASE_DIRECT_URL only in that .env is refused, as before (X1.9 finding 2).
+      const direct = (file: string): string | null => (file === require('path').resolve('/w', '.env') ? `DATABASE_DIRECT_URL=${OTHER_LOCAL}\n` : null);
+      expect(Object.keys(laterDotenvValues({}, '/w', direct))).toEqual(['DATABASE_DIRECT_URL']);
     });
 
     it.each(['PGHOST', 'PGPORT', 'PGUSER', 'PGDATABASE', 'PGHOSTADDR', 'PGSERVICE', 'PGOPTIONS'])('a target-changing libpq variable (%s) is refused', (name) => {

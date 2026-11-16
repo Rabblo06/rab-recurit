@@ -8,9 +8,11 @@ const { SchemaResolverService } = require('@rab/server/engine/core-modules/tenan
 const { AuditService } = require('@rab/server/engine/core-modules/audit/audit.service');
 const { SmtpDriver } = require('@rab/server/engine/core-modules/email/drivers/smtp.driver');
 const { createEmailSendProcessor } = require('../../../queues/rab-email/email-send.processor');
+const { isLoopbackAlias, resolveIntegrationTestDatabase } = require('@rab/server/database/typeorm/core/test-database-guard');
 
 (async () => {
-  if (!['localhost', '127.0.0.1', '::1'].includes(new URL(process.env.PG_DATABASE_URL).hostname)) throw new Error('Local test databases only');
+  // X3.5-S6 review: the VALIDATED test pair (every X1.8 / X1.9 rule), loopback only; the factory connects via PG_DATABASE_URL.
+  if (!isLoopbackAlias(resolveIntegrationTestDatabase(process.env).app.host)) throw new Error('Local test databases only');
   const port = Number(process.env.ETW_SMTP_SINK_PORT);
   if (!Number.isInteger(port) || port <= 0) throw new Error('ETW_SMTP_SINK_PORT is required');
   const app = await new DataSource(coreDataSourceOptions).initialize();

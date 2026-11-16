@@ -57,7 +57,7 @@ import * as path from 'path';
 import { parse as parseDotenv } from 'dotenv';
 import { Client } from 'pg';
 
-import { presentLegacyPgEnvNames } from '../../postgres/pg-config';
+import { LEGACY_PG_ENV_NAMES, presentLegacyPgEnvNames } from '../../postgres/pg-config';
 
 export const TEST_DATABASE_URL = 'TEST_DATABASE_URL';
 /** The test admin connection: the disposable cluster's bootstrap superuser (fixtures, identity probes, migrations only). */
@@ -412,11 +412,12 @@ export function laterDotenvValues(
   env: Record<string, string | undefined>,
   cwd: string = process.cwd(),
   read: (file: string) => string | null = readFileIfExists,
+  extraNames: readonly string[] = [],
 ): Record<string, string> {
   const files = [path.resolve(cwd, '.env')];
   const configured = env.DOTENV_CONFIG_PATH?.trim();
   if (configured) files.push(path.resolve(cwd, configured));
-  const names = new Set([...INHERITED_DATABASE_URL_NAMES, ...FORBIDDEN_IN_TEST_DATABASE_URL_NAMES, ...TARGET_CHANGING_LIBPQ_ENV_NAMES]);
+  const names = new Set([...INHERITED_DATABASE_URL_NAMES, ...FORBIDDEN_IN_TEST_DATABASE_URL_NAMES, ...TARGET_CHANGING_LIBPQ_ENV_NAMES, ...extraNames]);
   const out: Record<string, string> = {};
   for (const file of files) {
     const content = read(file);
@@ -444,9 +445,11 @@ function assertNoRedirectingProcessEnv(env: Record<string, string | undefined>, 
 /**
  * The legacy connection names the routed test environment blanks (X3.5-S6). Blanked, not deleted: dotenv (and @nestjs/config)
  * never overrides a variable that is already present, so an empty value keeps a later `.env` load from bringing a developer's
- * DATABASE_URL / DATABASE_URL_UNPOOLED back in, and the connection factory treats an empty value as unset.
+ * DATABASE_URL / DATABASE_URL_UNPOOLED / DB_POOL_MAX back in, and the connection factory treats an empty value as unset.
+ * Together with the refusal of DATABASE_DIRECT_URL (FORBIDDEN_IN_TEST_DATABASE_URL_NAMES) this covers every pg-config legacy
+ * name, so the routing itself never resolves one and release 1 refuses nothing that was accepted before.
  */
-export const ROUTED_TEST_BLANKED_LEGACY_NAMES: readonly string[] = ['DATABASE_URL', 'DATABASE_URL_UNPOOLED'];
+export const ROUTED_TEST_BLANKED_LEGACY_NAMES: readonly string[] = ['DATABASE_URL', 'DATABASE_URL_UNPOOLED', 'DB_POOL_MAX'];
 
 /**
  * Called from Jest setupFiles (every test file, every worker) and from the e2e seed scripts. Under NODE_ENV=test it validates
@@ -474,6 +477,10 @@ export function applyIntegrationTestDatabaseEnv(env: NodeJS.ProcessEnv): Resolve
   const resolved = resolveIntegrationTestDatabase(env);
   assertNoRedirectingProcessEnv(env, resolved);
   env.PG_DATABASE_URL = resolved.appUrl;
+  // Review #176: a DB_POOL_MAX the run was given keeps its meaning under the new name (it was accepted before, and the
+  // factory read it when PG_POOL_MAX_CONNECTIONS was unset). With both set, PG_POOL_MAX_CONNECTIONS wins, as it names the pool.
+  const poolMaxLegacy = env.DB_POOL_MAX?.trim();
+  if (poolMaxLegacy && !env.PG_POOL_MAX_CONNECTIONS?.trim()) env.PG_POOL_MAX_CONNECTIONS = poolMaxLegacy;
   for (const name of ROUTED_TEST_BLANKED_LEGACY_NAMES) env[name] = '';
   for (const name of TEST_DATABASE_ADMIN_URL_NAMES) env[name] = resolved.adminUrl;
   return resolved;
@@ -481,16 +488,22 @@ export function applyIntegrationTestDatabaseEnv(env: NodeJS.ProcessEnv): Resolve
 
 /**
  * X3.5-S6 (audit DBR-08), for the Jest globalSetups: routes a COPY of `env` exactly as setupFiles will (never changes `env`)
- * and returns the legacy connection names (pg-config LEGACY_PG_ENV_NAMES) that still hold a value in the routed copy. The
- * globalSetups refuse to start unless this is empty, so the deprecation warnings pg-config now prints under NODE_ENV=test
- * too can never fire from the test routing itself. Names only. Throws what applyIntegrationTestDatabaseEnv throws.
+ * and returns the legacy connection names (pg-config LEGACY_PG_ENV_NAMES) that still hold a value in the routed copy, or
+ * that a LATER dotenv load (the working directory's `.env`, DOTENV_CONFIG_PATH; laterDotenvValues) would add to it. dotenv
+ * never overrides a present variable, so the blanked names win over the file. The globalSetups refuse to start unless this
+ * is empty, so the deprecation warnings pg-config now prints under NODE_ENV=test too can never fire from the test routing
+ * itself. Names only. Throws what applyIntegrationTestDatabaseEnv throws. `cwd` / `read` are the test seams.
  */
-export function routedTestDatabaseLegacyNames(env: Record<string, string | undefined>): string[] {
+export function routedTestDatabaseLegacyNames(
+  env: Record<string, string | undefined>,
+  cwd: string = process.cwd(),
+  read: (file: string) => string | null = readFileIfExists,
+): string[] {
   const routed: NodeJS.ProcessEnv = { ...env };
   if (!applyIntegrationTestDatabaseEnv(routed)) {
     throw new TestDatabaseConfigError('the test database routing did not run (NODE_ENV is not "test"). Refusing to start.');
   }
-  return presentLegacyPgEnvNames(routed);
+  return presentLegacyPgEnvNames({ ...laterDotenvValues(routed, cwd, read, LEGACY_PG_ENV_NAMES), ...routed });
 }
 
 /** Query parameters refused on TEST_DATABASE_WORKER_URL on top of TARGET_OVERRIDE_QUERY_PARAMS (session role / settings). */
