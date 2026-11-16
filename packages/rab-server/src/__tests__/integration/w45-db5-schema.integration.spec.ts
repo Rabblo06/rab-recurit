@@ -9,6 +9,7 @@ import { LATEST_WORKSPACE_MODULE_VERSION } from '../../database/typeorm/workspac
 import { pgClientRunner, WorkspaceSchemaMigrator } from '../../database/typeorm/workspace-schema/workspace-schema-migrator';
 import { dropWorkspaceSchema, ledgerOf, provisionLegacyV14, provisionServerPath, registryOf, SeededWorkspace, seedWorkspace, sqlstateOf } from './helpers/workspace-fixtures';
 import { integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
+import { withCutoverInactive } from './helpers/hws-fixtures';
 
 /**
  * Waves 4+5 lane DB5 (schema owner): abuse-case and no-context tests for every object in docs/evidence/w45-db5/CONTRACT.md,
@@ -42,6 +43,7 @@ const spq = async (c: Client, sql: string, params?: unknown[]): Promise<string> 
 };
 
 describeIfDb('waves 4+5 lane DB5 schema contract', () => {
+  let restoreCutover: (() => Promise<void>) | undefined;
   const { adminUrl, appUrl } = RUN ? resolveIntegrationTestDatabase(process.env) : ({} as never);
   const sfx = Math.random().toString(36).slice(2, 8);
   let admin: Client;
@@ -120,9 +122,13 @@ describeIfDb('waves 4+5 lane DB5 schema contract', () => {
     // D4: the fingerprint table follows the server's major (PG16 and PG18 differ), exactly as the runner selects it; the
     // migrator in this process and the assertions below then read the same table.
     await selectWorkspaceFingerprintsForServer(async (sql) => (await admin.query(sql)).rows);
+    // Release 0.7.0: this suite exercises the PRE-cutover world (the core copies / the HWS-off path), which an activated
+    // database fences (core copies read-only). The sentinel is removed for this suite only and put back afterwards.
+    restoreCutover = await withCutoverInactive({ query: async (sql: string, params?: unknown[]) => (await admin.query(sql, params as unknown[])).rows });
   });
 
   afterAll(async () => {
+    await restoreCutover?.();
     for (const c of clients) await c.end().catch(() => undefined);
     // Leave no fake (undecryptable) TOTP secrets behind for suites that scan every encrypted value (secret:rotate).
     await admin.query(

@@ -11,6 +11,7 @@ import { TenantContextService } from '@rab/server/engine/core-modules/tenant/ten
 import { discoverInWorkspaces } from '../../core/database/workspace-discovery';
 import { runRealtimeOutboxPublishCycle, RealtimePublishFn } from '../../queues/rab-realtime/publish-outbox.job';
 import { createAdminDataSource } from './helpers/admin-datasource';
+import { withCutoverInactive } from './helpers/hws-fixtures';
 import { createTestIdentityFactory, TestIdentityFactory } from './helpers/test-identities';
 import { integrationTestDatabaseReady } from '@rab/server/database/typeorm/core/integration-test-database-gate';
 
@@ -30,6 +31,7 @@ jest.setTimeout(90_000);
 
 describeIfDb('W6-E2E-07 not-yet-routable workspaces are skipped, not fatal (integration)', () => {
   let app: import('@nestjs/common').INestApplication;
+  let restoreCutover: (() => Promise<void>) | undefined;
   let dataSource: DataSource;
   let adminDataSource: DataSource;
   let appTenant: TenantContextService;
@@ -50,10 +52,14 @@ describeIfDb('W6-E2E-07 not-yet-routable workspaces are skipped, not fatal (inte
     appTenant = new TenantContextService(dataSource, app.get(SchemaResolverService), offEnv);
     adminDataSource = createAdminDataSource();
     await adminDataSource.initialize();
+    // Release 0.7.0: these cases need the PRE-cutover world (not-yet-READY workspaces whose core copy the legacy (HWS off)
+    // context writes); restored afterwards.
+    restoreCutover = await withCutoverInactive(adminDataSource);
     factory = createTestIdentityFactory({ app, dataSource, adminDataSource, tenantContext: appTenant, passwordHashing: app.get(PasswordHashingService) });
   });
 
   afterAll(async () => {
+    await restoreCutover?.();
     await app.close();
     await adminDataSource.destroy();
   });

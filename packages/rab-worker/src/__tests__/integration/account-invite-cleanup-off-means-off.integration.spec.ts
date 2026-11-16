@@ -8,7 +8,12 @@ import { PasswordHashingService } from '@rab/server/engine/core-modules/auth/ser
 import { TenantContextService } from '@rab/server/engine/core-modules/tenant/tenant-context.service';
 import { resolveInviteAutoDeleteEnabled, runAccountInviteCleanupCycle } from '../../queues/rab-maintenance/account-invite-cleanup.job';
 import { createAdminDataSource } from './helpers/admin-datasource';
+import { businessTable } from './helpers/hws-fixtures';
 import { createTestIdentityFactory, TestIdentity, TestIdentityFactory } from './helpers/test-identities';
+import { businessSchema } from './helpers/hws-fixtures';
+import { Client } from 'pg';
+import { resolveIntegrationTestDatabase } from '@rab/server/database/typeorm/core/test-database-guard';
+import { checkWorkspaceCoreOrphans } from '@rab/server/database/typeorm/workspace-schema/workspace-core-orphans';
 import { integrationTestDatabaseReady } from '@rab/server/database/typeorm/core/integration-test-database-gate';
 
 /**
@@ -107,7 +112,9 @@ describeIfDb('D-1: account-invite cleanup with auto-delete OFF changes nothing, 
       [org, ids.withSession, randomBytes(32).toString('hex'), randomUUID()],
     );
     await tenantContext.runInTenantContext({ organisationId: org, workspaceId: owner.workspaceId, userId: owner.userId, role: '' }, (m) =>
-      m.query(`INSERT INTO core.venue (organisation_id, workspace_id, name, created_by) VALUES ($1, $2, 'D1 Venue', $3)`, [org, owner.workspaceId, ids.withBusinessRef]),
+      // Release 0.7.0 (C2 fixture rule): where the application reads it (the workspace schema with HWS on; the core copy is
+      // read-only after the cutover).
+      m.query(`INSERT INTO ${businessTable(owner.workspaceId!, 'venue')} (organisation_id, workspace_id, name, created_by) VALUES ($1, $2, 'D1 Venue', $3)`, [org, owner.workspaceId, ids.withBusinessRef]),
     );
     return { owner, ids };
   }
@@ -123,7 +130,12 @@ describeIfDb('D-1: account-invite cleanup with auto-delete OFF changes nothing, 
       [ids],
     );
     const sessions = await admin.query(`SELECT user_id, revoked_at FROM core.refresh_token WHERE user_id = ANY($1::uuid[]) ORDER BY user_id`, [ids]);
-    const venues = await admin.query(`SELECT created_by FROM core.venue WHERE created_by = ANY($1::uuid[]) ORDER BY created_by`, [ids]);
+    // Every fixture's venue table (one per workspace with HWS on; core.venue with HWS off).
+    const venueTables = [...new Set(fixtures.map((f) => businessTable(f.owner.workspaceId!, 'venue')))];
+    const venues = await admin.query(
+      `SELECT created_by FROM (${venueTables.map((t) => `SELECT created_by FROM ${t} WHERE created_by = ANY($1::uuid[])`).join(' UNION ALL ')}) v ORDER BY created_by`,
+      [ids],
+    );
     const fixtureAudit = await admin.query(
       `SELECT count(*)::int AS n FROM core.audit_log WHERE target_user_id = ANY($1::uuid[]) OR metadata->>'deletedUserId' = ANY($1::text[])`,
       [ids],
@@ -285,6 +297,66 @@ describeIfDb('D-1: account-invite cleanup with auto-delete OFF changes nothing, 
       expect(await skipReason(ids.withSession)).toBe('had_session');
       expect(await status(ids.withBusinessRef)).toBe('invite_expired');
       expect(await skipReason(ids.withBusinessRef)).toBe('venue');
+    }
+  });
+
+  it('7. Part D 0a (F1-T, review L-1): ON as the owner-member login, the owner-id binding clears only the invitee\'s own references in its workspace', async () => {
+    const owner = await factory.createInternalManager(await factory.createOrganisation('d1f1t'), { label: 'd1f1t-owner' });
+    const org = owner.organisationId;
+    const ws = owner.workspaceId!;
+    const schema = businessSchema(ws);
+    const q = `"${schema}"`;
+    const onCore = schema === 'core'; // HWS off: the core copy, whose foreign keys still act (a core-FK scope check)
+    if (!onCore) {
+      const [{ n }] = await admin.query<Array<{ n: number }>>(
+        `SELECT count(*)::int AS n FROM pg_catalog.pg_constraint k JOIN pg_catalog.pg_namespace s ON s.oid = k.connamespace
+          WHERE s.nspname = $1 AND k.contype = 'f' AND k.confrelid = 'core."user"'::regclass`,
+        [schema],
+      );
+      expect(n).toBe(0);
+    }
+    const one = async (sql: string, params: unknown[]) => ((await admin.query(sql, params)) as Array<{ id: string }>)[0]!.id;
+    const note = (subject: string, author: string, body: string) =>
+      onCore
+        ? one(`INSERT INTO ${q}.user_note (organisation_id, subject_user_id, author_user_id, body) VALUES ($1, $2, $3, $4) RETURNING id`, [org, subject, author, body])
+        : one(`INSERT INTO ${q}.user_note (organisation_id, workspace_id, subject_user_id, author_user_id, body) VALUES ($1, $2, $3, $4, $5) RETURNING id`, [org, ws, subject, author, body]);
+
+    const invitee = await seedInvite(org, { status: 'invite_expired', expires: '-8 days', cleanup: '-1 minute' });
+    const inviteeProfile = await one(
+      `INSERT INTO ${q}.staff_profile (organisation_id, workspace_id, user_id, staff_ref, created_by) VALUES ($1, $2, $3, $4, $5) RETURNING id`,
+      [org, ws, invitee, `INV-${randomUUID().slice(0, 8)}`, owner.userId],
+    );
+    const other = await one(
+      `INSERT INTO core."user" (organisation_id, email, first_name, last_name, status) VALUES ($1, $2, 'Other', 'Staff', 'active') RETURNING id`,
+      [org, `d1f1t-other-${randomUUID()}@example.test`],
+    );
+    const otherProfile = await one(
+      `INSERT INTO ${q}.staff_profile (organisation_id, workspace_id, user_id, staff_ref, created_by) VALUES ($1, $2, $3, $4, $5) RETURNING id`,
+      [org, ws, other, `OTH-${randomUUID().slice(0, 8)}`, other],
+    );
+    const noteAboutOther = await note(other, other, 'about other');
+    const noteByInvitee = await note(other, invitee, 'by invitee');
+
+    const ownerMember = await openAs(ownerMemberRole, ownerMemberPassword);
+    const gone = async () => (await admin.query(`SELECT 1 FROM core."user" WHERE id = $1`, [invitee])).length === 0;
+    for (let tick = 0; tick < 20 && !(await gone()); tick += 1) {
+      await runAccountInviteCleanupCycle(ownerMember, { autoDeleteEnabled: true });
+    }
+    expect(await gone()).toBe(true);
+    expect(await admin.query(`SELECT 1 FROM ${q}.staff_profile WHERE id = $1`, [inviteeProfile])).toHaveLength(0);
+    expect(await admin.query(`SELECT user_id, created_by FROM ${q}.staff_profile WHERE id = $1`, [otherProfile])).toEqual([{ user_id: other, created_by: other }]);
+    expect(await admin.query(`SELECT subject_user_id, author_user_id FROM ${q}.user_note WHERE id = $1`, [noteAboutOther])).toEqual([{ subject_user_id: other, author_user_id: other }]);
+    expect(await admin.query(`SELECT subject_user_id, author_user_id FROM ${q}.user_note WHERE id = $1`, [noteByInvitee])).toEqual([{ subject_user_id: other, author_user_id: null }]);
+
+    const c = new Client({ connectionString: resolveIntegrationTestDatabase(process.env).adminUrl });
+    await c.connect();
+    try {
+      await c.query('SET ROLE crewflow');
+      const orphans = await checkWorkspaceCoreOrphans(c, [ws]);
+      expect(orphans.errors).toEqual([]);
+      expect(orphans.findings).toEqual([]);
+    } finally {
+      await c.end();
     }
   });
 });

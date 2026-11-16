@@ -4,12 +4,16 @@
  * (the floor, like N1 before it, applies to production targets only). Every case asserts the database afterwards (ledger,
  * tenant rows), not only the outcome.
  *
+ *   Release 0.7.0 (strict upgrade from 0.6.0; only 0.6.0 adopted a history without logbook rows):
  *   fresh             an EMPTY database                                   ok, the whole chain (floor not consulted)
- *   R254              a v0.4.0 / cd7c7e32 / 4c38aa1a ledger + tenant rows  ok, exactly the newer migrations, rows intact,
- *                                                                          entity-cache epoch bumped once, nothing else in Redis
- *   resume            R254 + 1786721440000 + tenant rows                   ok, exactly the rest (1786721450000 onwards)
- *   R256 (CURRENT)    the upgraded database again                          ok, nothing applied, no bump
- *   AHEAD             R256 + a newer unknown name                          ok, nothing applied
+ *   R254              a v0.4.0 / cd7c7e32 / 4c38aa1a ledger + tenant rows  65 behind: the floor passes, the previous-version
+ *                                                                          check refuses (0.7.0 never adopts), nothing applied,
+ *                                                                          rows and Redis untouched
+ *   0.6.0-complete    every 0.6.0 migration + 0.6.0's logbook row          ok, exactly the migrations after 0.6.0's, rows intact,
+ *                                                                          the entity-cache epoch bumped only when one applied
+ *   CURRENT           the upgraded database again                          ok, nothing applied, no bump
+ *   AHEAD             + a newer unknown name                               ok, nothing applied
+ *   resume            0.6.0-complete minus 0.6.0's last migration          ok, exactly the rest
  *   older             R254 minus its last four ledger rows + tenant rows   65 behind (UnsupportedUpgradeStartError),
  *                                                                          serve=false, ledger and rows unchanged
  *   unknown (hole)    R254 + 1786721450000 recorded, 1786721440000 not     65 behind, nothing applied
@@ -48,6 +52,10 @@ const NEWER = codeMigrationNames(MIGRATIONS_DIR).filter((n) => !R254.includes(n)
 if (NEWER[0] !== 'OutboxClaimIndexes1786721440000' || NEWER[1] !== 'RefreshTokenReplacedByIndex1786721450000') {
   throw new Error('the first two migrations after R254 must be the R256 index migrations (the resume and hole cases name them)');
 }
+/** Release 0.7.0: the last migration 0.6.0 ships (the C3 functions merge while the version is 0.6.0; 0.7.0 registers the step). */
+const V060_LAST = 1786721540000;
+/** The migrations after 0.6.0's (what a 0.7.0 start applies to a 0.6.0-complete database; possibly none). */
+const AFTER_060 = codeMigrationNames(MIGRATIONS_DIR).filter((n) => Number(n.slice(-13)) > V060_LAST);
 const filesThrough = (lastTimestamp: number) =>
   readdirSync(MIGRATIONS_DIR)
     .filter((f) => /^\d{13}-[^.]+\.(ts|js)$/.test(f) && Number(f.slice(0, 13)) <= lastTimestamp)
@@ -159,14 +167,36 @@ describeIfOwnerCluster('the upgrade floor on real databases (production target s
     expect(lines.join('\n')).not.toMatch(/upgrade floor:/);
   });
 
-  describe('an existing R254 database (with tenant rows) upgrades, then is CURRENT, then tolerates AHEAD', () => {
-    const db = dbName('r254');
+  /**
+   * A 0.6.0-complete database: the R254 template upgraded by the migrations through `last` (as 0.6.0's start applied them,
+   * through the test seam) plus the logbook row 0.6.0 leaves (superuser fixture on a disposable database).
+   */
+  async function complete060(db: string, last = V060_LAST): Promise<void> {
+    await createDatabase(db, TPL);
+    await runLockedMigrations({
+      label: 'u1a-floor-060',
+      env: { NODE_ENV: 'test', PG_DATABASE_URL: withDb(OWNER_URL, db) },
+      dotenvValues: {},
+      mode: 'apply',
+      approvalMode: 'none',
+      requireOwnerLogin: true,
+      assertTarget: testSeam(db),
+      dataSourceOverrides: { migrations: filesThrough(last) },
+      log: () => undefined,
+    });
+    await adminQuery(db, `INSERT INTO core.upgrade_migration (name, status, attempt, executed_by_version, is_initial, workspace_id, forced) VALUES ('0.6.0_TypeOrmMigrations', 'completed', 1, '0.6.0', false, NULL, false)`);
+  }
+
+  describe('an existing R254 database is refused by 0.7.0; a 0.6.0-complete one upgrades, then is CURRENT, then tolerates AHEAD', () => {
+    const r254 = dbName('r254');
+    const db = dbName('v060');
     const ns = `u1afloor${RUN_ID}`;
     let redis: Redis | null = null;
     const k = (rest: string) => `crewflow:${ns}:${rest}`;
 
     beforeAll(async () => {
-      await createDatabase(db, TPL);
+      await createDatabase(r254, TPL);
+      await complete060(db);
       if (REDIS_URL) {
         redis = new Redis(REDIS_URL, { lazyConnect: true, maxRetriesPerRequest: 1 });
         await redis.connect();
@@ -185,20 +215,39 @@ describeIfOwnerCluster('the upgrade floor on real databases (production target s
       }
     });
 
-    it('R254: applies exactly the newer migrations, keeps the tenant rows, bumps the entity-cache epoch only', async () => {
+    it('R254 under 0.7.0: the floor passes, the previous-version check refuses (65 behind), nothing applied, rows and Redis untouched', async () => {
+      const before = { ledger: await ledger(r254), rows: await tenantRows(r254) };
+      expect(before.rows.named).toBe(1);
+      const env: Record<string, string> = REDIS_URL ? { REDIS_URL, NODE_ENV: ns } : {};
+      const { result, lines } = await migrateOnStart(r254, env);
+      expect(result).toMatchObject({ outcome: 'behind', serve: false, applied: [] });
+      expect(result.reason).toMatch(/only 0\.6\.0 adopts a database without logbook rows/);
+      expect(lines.join('\n')).toContain('upgrade floor: upgrade floor passed: the ledger contains R254');
+      expect(await ledger(r254)).toEqual(before.ledger);
+      expect(await tenantRows(r254)).toEqual(before.rows);
+      if (redis) {
+        expect(lines.join('\n')).not.toMatch(/entity-cache epoch bumped/);
+        expect(await redis.get(k('entitycache:user:u1:epoch'))).toBe('3');
+      }
+    });
+
+    it('0.6.0-complete: applies exactly the migrations after 0.6.0\'s, keeps the tenant rows, bumps the entity-cache epoch only when one applied', async () => {
       const before = await tenantRows(db);
       expect(before.named).toBe(1);
+      const ledgerBefore = await ledger(db);
       const env: Record<string, string> = REDIS_URL ? { REDIS_URL, NODE_ENV: ns } : {};
       const { result, lines } = await migrateOnStart(db, env);
-      expect(result).toMatchObject({ outcome: 'ok', serve: true, state: 'CHAIN-PARTIAL' });
-      expect(result.applied).toEqual(NEWER);
-      expect(lines.join('\n')).toContain(`upgrade floor: upgrade floor passed: the ledger contains R254; ${NEWER.length} migration(s) to apply`);
-      expect(lines.join('\n')).toMatch(/fresh install not proven/);
-      expect(await ledger(db)).toEqual([...R254, ...NEWER]);
+      expect(result).toMatchObject({ outcome: 'ok', serve: true, state: AFTER_060.length ? 'CHAIN-PARTIAL' : 'CURRENT' });
+      expect(result.applied).toEqual(AFTER_060);
+      expect(await ledger(db)).toEqual([...ledgerBefore, ...AFTER_060]);
       expect(await tenantRows(db)).toEqual(before);
       if (redis) {
-        expect(lines.join('\n')).toContain(`entity-cache epoch bumped after ${NEWER.length} applied migration`);
-        expect(await redis.get(k('entitycache:user:u1:epoch'))).toBe('4');
+        if (AFTER_060.length) {
+          expect(lines.join('\n')).toContain(`entity-cache epoch bumped after ${AFTER_060.length} applied migration`);
+          expect(await redis.get(k('entitycache:user:u1:epoch'))).toBe('4');
+        } else {
+          expect(await redis.get(k('entitycache:user:u1:epoch'))).toBe('3');
+        }
         expect(await redis.get(k('entitycache:user:u1:v3'))).toBe('{"cached":true}');
         expect(await redis.get(`bull:${ns}:queue:1`)).toBe('job');
         expect(await redis.get(`${ns}-throttler-key`)).toBe('7');
@@ -206,19 +255,21 @@ describeIfOwnerCluster('the upgrade floor on real databases (production target s
       }
     });
 
-    it('R256 (CURRENT): nothing applied, no epoch bump', async () => {
+    it('CURRENT: nothing applied, no epoch bump', async () => {
+      const epoch = redis ? await redis.get(k('entitycache:user:u1:epoch')) : null;
       const env: Record<string, string> = REDIS_URL ? { REDIS_URL, NODE_ENV: ns } : {};
       const { result, lines } = await migrateOnStart(db, env);
       expect(result).toMatchObject({ outcome: 'ok', serve: true, state: 'CURRENT', applied: [] });
       expect(lines.join('\n')).not.toMatch(/entity-cache epoch bumped/);
-      if (redis) expect(await redis.get(k('entitycache:user:u1:epoch'))).toBe('4');
+      if (redis) expect(await redis.get(k('entitycache:user:u1:epoch'))).toBe(epoch);
     });
 
     it('AHEAD (an image rollback): allowed, nothing applied', async () => {
+      const before = await ledger(db);
       await adminQuery(db, `INSERT INTO core.migrations (timestamp, name) VALUES (1799999999999, 'FutureRelease1799999999999')`);
       const { result } = await migrateOnStart(db);
       expect(result).toMatchObject({ outcome: 'ok', serve: true, state: 'AHEAD', applied: [] });
-      expect(await ledger(db)).toEqual([...R254, ...NEWER, 'FutureRelease1799999999999']);
+      expect(await ledger(db)).toEqual([...before, 'FutureRelease1799999999999']);
     });
 
     it('the locked session on another database than the guarded one: identity (67), never a migration failure', async () => {
@@ -228,24 +279,15 @@ describeIfOwnerCluster('the upgrade floor on real databases (production target s
     });
   });
 
-  it('resume: R254 plus 1786721440000 (a partial upgrade) applies exactly the rest', async () => {
+  it('resume: a 0.6.0-complete database missing 0.6.0\'s last migration (a partial upgrade) applies exactly the rest', async () => {
     const db = dbName('resume');
-    await createDatabase(db, TPL);
-    await runLockedMigrations({
-      label: 'u1a-floor-partial',
-      env: { NODE_ENV: 'test', PG_DATABASE_URL: withDb(OWNER_URL, db) },
-      dotenvValues: {},
-      mode: 'apply',
-      approvalMode: 'none',
-      requireOwnerLogin: true,
-      assertTarget: testSeam(db),
-      dataSourceOverrides: { migrations: filesThrough(1786721440000) },
-      log: () => undefined,
-    });
-    expect(await ledger(db)).toEqual([...R254, NEWER[0]]);
-    const { result, lines } = await migrateOnStart(db);
-    expect(result).toMatchObject({ outcome: 'ok', serve: true, applied: NEWER.slice(1) });
-    expect(lines.join('\n')).toMatch(/plus 1 later migration\(s\) \(resuming a partial upgrade\)/);
+    await complete060(db, V060_LAST - 1);
+    const before = await ledger(db);
+    const rest = codeMigrationNames(MIGRATIONS_DIR).filter((n) => !before.includes(n));
+    expect(rest.length).toBeGreaterThanOrEqual(1);
+    const { result } = await migrateOnStart(db);
+    expect(result).toMatchObject({ outcome: 'ok', serve: true, applied: rest });
+    expect(await ledger(db)).toEqual([...before, ...rest]);
     expect((await tenantRows(db)).named).toBe(1);
   });
 

@@ -17,7 +17,7 @@ import { createAdminDataSource } from './helpers/admin-datasource';
 import { generateFixturePassword } from './helpers/fixture-password';
 import { integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
 import { provisionFixtureWorkspace } from './helpers/test-identities';
-import { businessSchema } from './helpers/hws-fixtures';
+import { businessSchema, withCutoverInactive } from './helpers/hws-fixtures';
 
 const FIXTURE_PASSWORD = generateFixturePassword();
 
@@ -40,6 +40,7 @@ describeIfDb('composite workspace FK attack (integration)', () => {
   let dataSource: DataSource;
   let adminDataSource: DataSource;
   let passwordHashing: PasswordHashingService;
+  let restoreCutover: (() => Promise<void>) | undefined;
 
   const password = FIXTURE_PASSWORD;
 
@@ -192,10 +193,14 @@ describeIfDb('composite workspace FK attack (integration)', () => {
     await dataSource.initialize();
     adminDataSource = createAdminDataSource();
     await adminDataSource.initialize();
+    // Release 0.7.0: this suite exercises the PRE-cutover world (the core copies / the HWS-off path), which an activated
+    // database fences (core copies read-only). The sentinel is removed for this suite only and put back afterwards.
+    restoreCutover = await withCutoverInactive(adminDataSource);
     passwordHashing = new PasswordHashingService();
   });
 
   afterAll(async () => {
+    await restoreCutover?.();
     await dataSource.destroy();
     await adminDataSource.destroy();
   });

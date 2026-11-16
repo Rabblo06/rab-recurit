@@ -20,7 +20,7 @@ import { createAdminDataSource } from './helpers/admin-datasource';
 import { generateFixturePassword } from './helpers/fixture-password';
 import { integrationTestDatabaseReady } from '@rab/server/database/typeorm/core/integration-test-database-gate';
 import { provisionFixtureWorkspace } from './helpers/test-identities';
-import { businessSchema } from './helpers/hws-fixtures';
+import { businessSchema, businessTable } from './helpers/hws-fixtures';
 import { Client } from 'pg';
 import { resolveIntegrationTestDatabase } from '@rab/server/database/typeorm/core/test-database-guard';
 import { checkWorkspaceCoreOrphans } from '@rab/server/database/typeorm/workspace-schema/workspace-core-orphans';
@@ -459,8 +459,17 @@ describeIfDb('account invite cleanup job (integration)', () => {
     const fx = await expiredStaffInvite();
     const q = `"${businessSchema(fx.workspaceId)}"`;
     const one = async (sql: string, params: unknown[]) => ((await adminDataSource.manager.query(sql, params)) as Array<{ id: string }>)[0]!.id;
-    // The pre-cutover core copy of user_note has no workspace_id column (HWS off: the rows live there; core keeps its foreign keys).
+    // HWS off: the rows live in the pre-cutover core copy (no workspace_id column on its user_note), where core keeps its
+    // foreign keys: this case is then a core-FK scope check. HWS on: the level-22 workspace schema, asserted first.
     const onCore = businessSchema(fx.workspaceId) === 'core';
+    if (!onCore) {
+      const [{ n }] = await adminDataSource.manager.query<Array<{ n: number }>>(
+        `SELECT count(*)::int AS n FROM pg_catalog.pg_constraint k JOIN pg_catalog.pg_namespace s ON s.oid = k.connamespace
+          WHERE s.nspname = $1 AND k.contype = 'f' AND k.confrelid = 'core."user"'::regclass`,
+        [businessSchema(fx.workspaceId)],
+      );
+      expect(n).toBe(0); // level 22: no workspace → core."user" foreign key, the application does the work
+    }
     const noteWs = onCore ? '' : 'workspace_id, ';
     const noteWsArg = onCore ? '' : '$4, ';
     const noteWsParam = onCore ? [] : [fx.workspaceId];
@@ -482,6 +491,12 @@ describeIfDb('account invite cleanup job (integration)', () => {
       [fx.organisationId, other, fx.ownerUserId, ...noteWsParam],
     );
     const invitee = fx.userId;
+    // L-2, positive SET NULL control: a note about the OTHER user written by the invitee survives with its subject, author cleared.
+    // (staff_profile.created_by = invitee is not used: the Worker's own dependency check retains an invitee who created a profile.)
+    const noteByInvitee = await one(
+      `INSERT INTO ${q}.user_note (organisation_id, ${noteWs}subject_user_id, author_user_id, body) VALUES ($1, ${noteWsArg}$2, $3, 'by invitee') RETURNING id`,
+      [fx.organisationId, other, invitee, ...noteWsParam],
+    );
     const inviteeProfiles = await adminDataSource.manager.query(`SELECT id FROM ${q}.staff_profile WHERE user_id = $1`, [invitee]);
     expect(inviteeProfiles).toHaveLength(1);
 
@@ -497,6 +512,9 @@ describeIfDb('account invite cleanup job (integration)', () => {
     ]);
     expect(await adminDataSource.manager.query(`SELECT subject_user_id, author_user_id FROM ${q}.user_note WHERE id = $1`, [noteByOwner])).toEqual([
       { subject_user_id: other, author_user_id: fx.ownerUserId },
+    ]);
+    expect(await adminDataSource.manager.query(`SELECT subject_user_id, author_user_id FROM ${q}.user_note WHERE id = $1`, [noteByInvitee])).toEqual([
+      { subject_user_id: other, author_user_id: null },
     ]);
     expect(await adminDataSource.manager.findOneByOrFail(User, { id: other })).toMatchObject({ id: other });
     const orphans = await orphansOf(fx.workspaceId);
@@ -557,7 +575,9 @@ describeIfDb('account invite cleanup job (integration)', () => {
       [organisation.id],
     );
     await tenantContext.runInTenantContext({ organisationId: organisation.id, workspaceId, userId: userRow.id, role: '' }, (manager) =>
-      manager.query(`INSERT INTO core.venue (organisation_id, workspace_id, name, created_by) VALUES ($1, $2, 'Test Venue', $3)`, [
+      // Release 0.7.0 (C2 fixture rule): the business row lands where the application reads it (the workspace schema with HWS on;
+      // after the cutover the core copy is read-only).
+      manager.query(`INSERT INTO ${businessTable(workspaceId, 'venue')} (organisation_id, workspace_id, name, created_by) VALUES ($1, $2, 'Test Venue', $3)`, [
         organisation.id,
         workspaceId,
         userRow.id,
@@ -625,10 +645,10 @@ describeIfDb('account invite cleanup job (integration)', () => {
         // needs real tenant context bound to see them (the same gotcha this
         // whole engagement has hit before with FORCE'd tables).
         await tenantContext.runInTenantContext({ organisationId, workspaceId, userId, role: '' }, async (manager) => {
-          const [{ id: venueId }] = await manager.query<[{ id: string }]>(`SELECT id FROM core.venue WHERE organisation_id = $1 LIMIT 1`, [organisationId]);
-          const [{ id: jobRoleId }] = await manager.query<[{ id: string }]>(`SELECT id FROM core.job_role WHERE organisation_id = $1 LIMIT 1`, [organisationId]);
+          const [{ id: venueId }] = await manager.query<[{ id: string }]>(`SELECT id FROM ${businessTable(workspaceId, 'venue')} WHERE organisation_id = $1 LIMIT 1`, [organisationId]);
+          const [{ id: jobRoleId }] = await manager.query<[{ id: string }]>(`SELECT id FROM ${businessTable(workspaceId, 'job_role')} WHERE organisation_id = $1 LIMIT 1`, [organisationId]);
           await manager.query(
-            `INSERT INTO core.shift (organisation_id, workspace_id, venue_id, job_role_id, starts_at, ends_at, break_minutes, required_count, pay_rate_pence, status, created_by)
+            `INSERT INTO ${businessTable(workspaceId, 'shift')} (organisation_id, workspace_id, venue_id, job_role_id, starts_at, ends_at, break_minutes, required_count, pay_rate_pence, status, created_by)
              VALUES ($1, $2, $3, $4, now() + interval '1 day', now() + interval '1 day 8 hours', 0, 1, 1500, 'draft', $5)`,
             [organisationId, workspaceId, venueId, jobRoleId, userId],
           );
@@ -644,8 +664,8 @@ describeIfDb('account invite cleanup job (integration)', () => {
         [organisationId],
       );
       await tenantContext.runInTenantContext({ organisationId, workspaceId, userId: ownerUserId, role: '' }, async (manager) => {
-        await manager.query(`INSERT INTO core.venue (organisation_id, workspace_id, name, created_by) VALUES ($1, $2, 'Work01 Venue', $3)`, [organisationId, workspaceId, ownerUserId]);
-        await manager.query(`INSERT INTO core.job_role (organisation_id, workspace_id, name, default_rate_pence, created_by) VALUES ($1, $2, 'Work01 Role', 1500, $3)`, [
+        await manager.query(`INSERT INTO ${businessTable(workspaceId, 'venue')} (organisation_id, workspace_id, name, created_by) VALUES ($1, $2, 'Work01 Venue', $3)`, [organisationId, workspaceId, ownerUserId]);
+        await manager.query(`INSERT INTO ${businessTable(workspaceId, 'job_role')} (organisation_id, workspace_id, name, default_rate_pence, created_by) VALUES ($1, $2, 'Work01 Role', 1500, $3)`, [
           organisationId,
           workspaceId,
           ownerUserId,
