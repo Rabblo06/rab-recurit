@@ -80,8 +80,8 @@ describeIfDb('workspace provisioning — owner-driven flow (Phase B P8)', () => 
     await app.init();
     admin = createAdminDataSource();
     await admin.initialize();
-    // Release 0.7.0: this suite exercises the PRE-cutover world (the core copies / the HWS-off path), which an activated
-    // database fences (core copies read-only). The sentinel is removed for this suite only and put back afterwards.
+    // Release 0.7.0, why pre-cutover: the flow runs mostly HWS OFF and seeds into workspaces that are still CREATING (not READY),
+    // i.e. the pre-cutover provisioning world; an activated database marks them verified and fences their core copy. Restored after.
     restoreCutover = await withCutoverInactive(admin);
     factory = new TestIdentityFactory({
       app,

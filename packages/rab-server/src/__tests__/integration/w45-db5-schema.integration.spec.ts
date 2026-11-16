@@ -122,8 +122,8 @@ describeIfDb('waves 4+5 lane DB5 schema contract', () => {
     // D4: the fingerprint table follows the server's major (PG16 and PG18 differ), exactly as the runner selects it; the
     // migrator in this process and the assertions below then read the same table.
     await selectWorkspaceFingerprintsForServer(async (sql) => (await admin.query(sql)).rows);
-    // Release 0.7.0: this suite exercises the PRE-cutover world (the core copies / the HWS-off path), which an activated
-    // database fences (core copies read-only). The sentinel is removed for this suite only and put back afterwards.
+    // Release 0.7.0, why pre-cutover: this schema contract is asserted on the core copies as well as every workspace schema
+    // (archive pair CHECKs, money CHECKs written into core); an activated database makes core read-only. Sentinel restored after.
     restoreCutover = await withCutoverInactive({ query: async (sql: string, params?: unknown[]) => (await admin.query(sql, params as unknown[])).rows });
   });
 

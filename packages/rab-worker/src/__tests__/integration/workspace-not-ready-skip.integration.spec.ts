@@ -52,8 +52,8 @@ describeIfDb('W6-E2E-07 not-yet-routable workspaces are skipped, not fatal (inte
     appTenant = new TenantContextService(dataSource, app.get(SchemaResolverService), offEnv);
     adminDataSource = createAdminDataSource();
     await adminDataSource.initialize();
-    // Release 0.7.0: these cases need the PRE-cutover world (not-yet-READY workspaces whose core copy the legacy (HWS off)
-    // context writes); restored afterwards.
+    // Release 0.7.0, why pre-cutover: the subject is a not-yet-READY workspace whose rows the legacy (HWS off) context writes
+    // into the core copy; after activation a new workspace is verified at creation and its core copy fenced. Restored after.
     restoreCutover = await withCutoverInactive(adminDataSource);
     factory = createTestIdentityFactory({ app, dataSource, adminDataSource, tenantContext: appTenant, passwordHashing: app.get(PasswordHashingService) });
   });

@@ -21,7 +21,7 @@ import { createAdminDataSource } from './helpers/admin-datasource';
 import { generateFixturePassword } from './helpers/fixture-password';
 import { integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
 import { provisionFixtureWorkspace } from './helpers/test-identities';
-import { businessSchema, withCutoverInactive } from './helpers/hws-fixtures';
+import { businessSchema, businessTable, hwsRuntimeOn, withCutoverInactive } from './helpers/hws-fixtures';
 
 const FIXTURE_PASSWORD = generateFixturePassword();
 
@@ -362,8 +362,8 @@ describeIfDb('workspace cross-tenant RLS attack (integration)', () => {
     await dataSource.initialize();
     adminDataSource = createAdminDataSource();
     await adminDataSource.initialize();
-    // Release 0.7.0: this suite exercises the PRE-cutover world (the core copies / the HWS-off path), which an activated
-    // database fences (core copies read-only). The sentinel is removed for this suite only and put back afterwards.
+    // Release 0.7.0: this describe proves workspace_id RLS on the CORE copies (the pre-cutover world, read-only once activated);
+    // the activated variant below proves the cross-schema isolation. Sentinel restored after.
     restoreCutover = await withCutoverInactive(adminDataSource);
     passwordHashing = new PasswordHashingService();
   });
@@ -452,4 +452,208 @@ describeIfDb('workspace cross-tenant RLS attack (integration)', () => {
     // round-trips — past this suite's own 5s default under a loaded
     // machine, independent of RLS correctness.
   }, 30_000);
+});
+
+/**
+ * Release 0.7.0: the SAME isolation proof in the ACTIVATED state production runs after the HWS cutover (the in-band CI
+ * database is built by a 0.7.0 start with HWS on: sentinel written, new workspaces verified at creation, core copies
+ * read-only). Business rows live in each workspace's own schema. The attack now is a cross-SCHEMA read: bound to A, read B's
+ * schema (and the reverse), every query filtering ONLY on the shared organisation_id. Expected: A sees A's row in A's schema
+ * and nothing in B's; B the reverse; no workspace bound sees neither schema's row. HWS-off runs skip it (that state does not
+ * exist with HWS off).
+ */
+const describeActivated = RUN && hwsRuntimeOn() ? describe : describe.skip;
+
+describeActivated('workspace cross-tenant RLS attack, activated (post-cutover) state (integration)', () => {
+  let dataSource: DataSource;
+  let adminDataSource: DataSource;
+  let passwordHashing: PasswordHashingService;
+
+  async function withContext<T>(
+    ctx: { organisationId: string; workspaceId: string | null; userId: string },
+    fn: (manager: DataSource['manager']) => Promise<T>,
+  ): Promise<T> {
+    return dataSource.transaction(async (manager) => {
+      await manager.query(`SELECT set_config('rab.organisation_id', $1, true)`, [ctx.organisationId]);
+      await manager.query(`SELECT set_config('rab.workspace_id', $1, true)`, [ctx.workspaceId ?? '']);
+      await manager.query(`SELECT set_config('rab.user_id', $1, true)`, [ctx.userId]);
+      await manager.query(`SELECT set_config('rab.role', '', true)`);
+      return fn(manager);
+    });
+  }
+  const one = async (manager: DataSource['manager'], sql: string, params: unknown[]) => ((await manager.query(sql, params)) as Array<{ id: string }>)[0]!.id;
+
+  async function newUser(manager: DataSource['manager'], organisationId: string, label: string, roleKey: string, roleName: string): Promise<string> {
+    let role = await manager.findOne(Role, { where: { organisationId, key: roleKey } });
+    if (!role) {
+      const roleResult = await manager.insert(Role, { organisationId, key: roleKey, name: roleName, isSystem: true });
+      role = await manager.findOneByOrFail(Role, { id: roleResult.identifiers[0]!.id as string });
+    }
+    const result = await manager.insert(User, {
+      organisationId,
+      email: `${label}-${roleKey}-${randomUUID()}@example.test`,
+      passwordHash: await passwordHashing.hash(FIXTURE_PASSWORD),
+      firstName: label,
+      lastName: roleName,
+      status: UserStatus.ACTIVE,
+    });
+    const userId = result.identifiers[0]!.id as string;
+    await manager.insert(UserRole, { userId, roleId: role.id, organisationId });
+    return userId;
+  }
+
+  /** One workspace with every isolation surface: identities in core, business rows in the workspace's own schema. */
+  async function seedActivated(organisationId: string, label: string) {
+    let workspaceId!: string;
+    let managerUserId!: string;
+    await withContext({ organisationId, workspaceId: null, userId: randomUUID() }, async (manager) => {
+      managerUserId = await newUser(manager, organisationId, label, 'manager', 'Manager');
+      await manager.query(`SELECT set_config('rab.user_id', $1, true)`, [managerUserId]);
+      const workspace = await manager.save(ManagerWorkspace, {
+        organisationId,
+        ownerUserId: managerUserId,
+        name: `${label} Workspace ${managerUserId}`,
+        subdomain: `${label}-${managerUserId.slice(0, 8)}`,
+        status: 'active',
+      });
+      await provisionFixtureWorkspace(manager, workspace.id);
+      workspaceId = workspace.id;
+      await manager.query(`SELECT set_config('rab.workspace_id', $1, true)`, [workspaceId]);
+      await manager.insert(ManagerProfile, { organisationId, userId: managerUserId, type: ManagerType.INTERNAL, workspaceId });
+    });
+    const ids = await withContext({ organisationId, workspaceId, userId: managerUserId }, async (manager) => {
+      const t = (table: string) => businessTable(workspaceId, table);
+      const staffUserId = await newUser(manager, organisationId, label, 'staff', 'Staff');
+      const staffProfileId = await one(manager, `INSERT INTO ${t('staff_profile')} (organisation_id, user_id, staff_ref, created_by, workspace_id) VALUES ($1, $2, $3, $4, $5) RETURNING id`, [
+        organisationId,
+        staffUserId,
+        `STF-${label}-${randomUUID().slice(0, 8)}`,
+        managerUserId,
+        workspaceId,
+      ]);
+      const venueId = await one(manager, `INSERT INTO ${t('venue')} (organisation_id, name, created_by, workspace_id) VALUES ($1, $2, $3, $4) RETURNING id`, [
+        organisationId,
+        `${label} Venue`,
+        managerUserId,
+        workspaceId,
+      ]);
+      const jobRoleId = await one(manager, `INSERT INTO ${t('job_role')} (organisation_id, name, default_rate_pence, created_by, workspace_id) VALUES ($1, $2, 1500, $3, $4) RETURNING id`, [
+        organisationId,
+        `${label} Role ${randomUUID().slice(0, 6)}`,
+        managerUserId,
+        workspaceId,
+      ]);
+      const shiftId = await one(
+        manager,
+        `INSERT INTO ${t('shift')} (organisation_id, venue_id, job_role_id, starts_at, ends_at, break_minutes, required_count, pay_rate_pence, status, created_by, workspace_id)
+         VALUES ($1, $2, $3, now() + interval '2 days', now() + interval '2 days 8 hours', 0, 1, 1500, 'open', $4, $5) RETURNING id`,
+        [organisationId, venueId, jobRoleId, managerUserId, workspaceId],
+      );
+      const shiftAssignmentId = await one(
+        manager,
+        `INSERT INTO ${t('shift_assignment')} (organisation_id, shift_id, staff_profile_id, status, pay_rate_snapshot_pence, assigned_by, confirmed_at, period, workspace_id)
+         VALUES ($1, $2, $3, 'confirmed', 1500, $4, now(), tstzrange(now() + interval '2 days', now() + interval '2 days 8 hours'), $5) RETURNING id`,
+        [organisationId, shiftId, staffProfileId, managerUserId, workspaceId],
+      );
+      const jobOfferId = await one(
+        manager,
+        `INSERT INTO ${t('job_offer')} (organisation_id, shift_assignment_id, staff_profile_id, status, sent_at, expires_at, estimated_pay_pence, created_by, workspace_id)
+         VALUES ($1, $2, $3, 'manager_confirmed', now(), now() + interval '1 hour', 12000, $4, $5) RETURNING id`,
+        [organisationId, shiftAssignmentId, staffProfileId, managerUserId, workspaceId],
+      );
+      const attendanceId = await one(
+        manager,
+        `INSERT INTO ${t('attendance')} (organisation_id, shift_assignment_id, shift_id, staff_profile_id, workspace_id, clock_in_at, status)
+         VALUES ($1, $2, $3, $4, $5, now(), 'clocked_in') RETURNING id`,
+        [organisationId, shiftAssignmentId, shiftId, staffProfileId, workspaceId],
+      );
+      const shiftReportId = await one(manager, `INSERT INTO ${t('shift_report')} (organisation_id, workspace_id, shift_id, status) VALUES ($1, $2, $3, 'ready') RETURNING id`, [
+        organisationId,
+        workspaceId,
+        shiftId,
+      ]);
+      const attendanceCorrectionId = await one(
+        manager,
+        `INSERT INTO ${t('attendance_correction')} (organisation_id, workspace_id, attendance_id, field, old_value, new_value, reason, corrected_by)
+         VALUES ($1, $2, $3, 'breakMinutes', '0', '30', $4, $5) RETURNING id`,
+        [organisationId, workspaceId, attendanceId, `${label} correction for the activated RLS attack fixture`, managerUserId],
+      );
+      // manager_venue: a Venue Manager assigned INTO this workspace's venue (its own isolation surface).
+      const vmUserId = await newUser(manager, organisationId, label, 'venue_manager', 'Venue Manager');
+      const vmProfileId = await one(manager, `INSERT INTO core.manager_profile (organisation_id, user_id, type, workspace_id) VALUES ($1, $2, $3, $4) RETURNING id`, [
+        organisationId,
+        vmUserId,
+        ManagerType.VENUE,
+        workspaceId,
+      ]);
+      await manager.query(`INSERT INTO ${t('manager_venue')} (organisation_id, manager_profile_id, venue_id, workspace_id) VALUES ($1, $2, $3, $4)`, [
+        organisationId,
+        vmProfileId,
+        venueId,
+        workspaceId,
+      ]);
+      return { staffProfileId, venueId, jobRoleId, shiftId, shiftAssignmentId, jobOfferId, attendanceId, shiftReportId, attendanceCorrectionId, vmProfileId };
+    });
+    return { workspaceId, managerUserId, ...ids };
+  }
+
+  beforeAll(async () => {
+    dataSource = new DataSource({
+      type: 'postgres',
+      url: process.env.DATABASE_URL,
+      schema: 'core',
+      synchronize: false,
+      entities: [Organisation, Role, User, UserRole, ManagerProfile, ManagerWorkspace, StaffProfile, Venue, JobRole, Shift, ShiftAssignment, JobOffer, Attendance, ShiftReport, AttendanceCorrection],
+    });
+    await dataSource.initialize();
+    adminDataSource = createAdminDataSource();
+    await adminDataSource.initialize();
+    passwordHashing = new PasswordHashingService();
+    // The state under test: the cutover is active on this database.
+    expect(((await adminDataSource.query('SELECT count(*)::int AS n FROM core.hws_cutover_activation')) as Array<{ n: number }>)[0]!.n).toBe(1);
+  });
+
+  afterAll(async () => {
+    await dataSource.destroy();
+    await adminDataSource.destroy();
+  });
+
+  it('two Managers sharing one organisation_id are isolated across their workspace schemas, in both directions, without relying on created_by; no workspace bound sees neither', async () => {
+    const orgInsert = await adminDataSource.manager.insert(Organisation, { name: `attack-act-${randomUUID()}`, slug: `attack-act-${randomUUID()}` });
+    const organisationId = orgInsert.identifiers[0]!.id as string;
+    const a = await seedActivated(organisationId, 'wsaa');
+    const b = await seedActivated(organisationId, 'wsab');
+
+    type Row = { id: string };
+    const surfaces: Array<{ table: string; idCol: string; aId: string; bId: string }> = [
+      { table: 'staff_profile', idCol: 'id', aId: a.staffProfileId, bId: b.staffProfileId },
+      { table: 'venue', idCol: 'id', aId: a.venueId, bId: b.venueId },
+      { table: 'job_role', idCol: 'id', aId: a.jobRoleId, bId: b.jobRoleId },
+      { table: 'shift', idCol: 'id', aId: a.shiftId, bId: b.shiftId },
+      { table: 'shift_assignment', idCol: 'id', aId: a.shiftAssignmentId, bId: b.shiftAssignmentId },
+      { table: 'job_offer', idCol: 'id', aId: a.jobOfferId, bId: b.jobOfferId },
+      { table: 'attendance', idCol: 'id', aId: a.attendanceId, bId: b.attendanceId },
+      { table: 'shift_report', idCol: 'id', aId: a.shiftReportId, bId: b.shiftReportId },
+      { table: 'attendance_correction', idCol: 'id', aId: a.attendanceCorrectionId, bId: b.attendanceCorrectionId },
+      { table: 'manager_venue', idCol: 'manager_profile_id', aId: a.vmProfileId, bId: b.vmProfileId },
+    ];
+    const read = (ctx: { workspaceId: string | null; userId: string }, schemaOf: string, s: (typeof surfaces)[number]) =>
+      withContext({ organisationId, ...ctx }, async (m) =>
+        ((await m.query(`SELECT ${s.idCol} AS id FROM ${businessTable(schemaOf, s.table)} WHERE organisation_id = $1`, [organisationId])) as Row[]).map((r) => r.id),
+      );
+    for (const s of surfaces) {
+      const ctxA = { workspaceId: a.workspaceId, userId: a.managerUserId };
+      const ctxB = { workspaceId: b.workspaceId, userId: b.managerUserId };
+      const none = { workspaceId: null, userId: randomUUID() };
+      // A, in its own schema: its row. A, reading B's schema: nothing.
+      expect([s.table, await read(ctxA, a.workspaceId, s)]).toEqual([s.table, expect.arrayContaining([s.aId])]);
+      expect([s.table, await read(ctxA, b.workspaceId, s)]).toEqual([s.table, []]);
+      // The reverse direction.
+      expect([s.table, await read(ctxB, b.workspaceId, s)]).toEqual([s.table, expect.arrayContaining([s.bId])]);
+      expect([s.table, await read(ctxB, a.workspaceId, s)]).toEqual([s.table, []]);
+      // Fail closed: no workspace bound sees neither schema's row.
+      expect([s.table, await read(none, a.workspaceId, s)]).toEqual([s.table, []]);
+      expect([s.table, await read(none, b.workspaceId, s)]).toEqual([s.table, []]);
+    }
+  }, 60_000);
 });
