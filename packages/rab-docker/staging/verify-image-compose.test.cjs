@@ -173,12 +173,14 @@ const deployed = (mutate = () => {}, options = {}) => {
   return checkDeployment(m.variantFiles, m.production, {}, options);
 };
 /**
- * A real host directory for the HWS cutover backup bind (the deployed-model rule requires an existing directory). Created next
- * to this file, not in os.tmpdir(): /tmp is on the rule's denylist (re-check R1). Removed when the run ends.
+ * A real host directory for the HWS cutover backup bind (the deployed-model rule requires an existing directory). Not in
+ * /tmp (os.tmpdir() on Linux) nor under /home (the CI checkout, /home/runner/work): both are on the rule's denylist
+ * (re-check R1). /var/tmp on a POSIX host; os.tmpdir() on a developer's Windows host. Removed when the run ends.
  */
 const testDirs = [];
+const TEST_DIR_BASE = process.platform === 'win32' ? require('node:os').tmpdir() : '/var/tmp';
 const testDir = (prefix) => {
-  const d = require('node:fs').mkdtempSync(require('node:path').join(__dirname, `.test-${prefix}-`));
+  const d = require('node:fs').mkdtempSync(require('node:path').join(TEST_DIR_BASE, `crewflow-${prefix}-`));
   testDirs.push(d);
   return d;
 };
