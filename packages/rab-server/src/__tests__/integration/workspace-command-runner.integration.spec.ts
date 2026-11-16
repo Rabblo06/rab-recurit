@@ -106,6 +106,7 @@ describeIfDb('Part D workspace command runner (integration)', () => {
   /** Hex digits of a schema name reversed, so the static scan cannot see the name (the dynamic-SQL abuse cases). */
   const hidden = (ws: SeededWorkspace) => `'workspace_' || reverse('${ws.schema.slice('workspace_'.length).split('').reverse().join('')}')`;
 
+  let instanceBaseline: string[] = [];
   beforeAll(async () => {
     admin = new Client({ connectionString: adminUrl });
     app = new Client({ connectionString: appUrl });
@@ -114,6 +115,9 @@ describeIfDb('Part D workspace command runner (integration)', () => {
     await selectWorkspaceFingerprintsForServer(async (sql) => (await admin.query(sql)).rows);
     await app.query('SELECT pg_advisory_lock($1::bigint)', [LOCK]);
     session = upgradeSessionOf(app);
+    // Release 0.7.0: this CI database was built by a 0.7.0 start, so it already holds real 0.7.0 instance rows. Only the
+    // rows this spec adds are removed afterwards.
+    instanceBaseline = (await admin.query(`SELECT id FROM core.upgrade_migration WHERE workspace_id IS NULL`)).rows.map((r) => String(r.id));
     // The expected structure level P = the frozen template + this code's real structural commands + the probe column (v2),
     // measured on a reference workspace and rolled back.
     const ref = await make('ref');
@@ -134,7 +138,9 @@ describeIfDb('Part D workspace command runner (integration)', () => {
       await admin.query(`UPDATE core.workspace_schema_registry SET status = 'FAILED', module_version = LEAST(module_version, 20) WHERE workspace_id = $1`, [ws.id]).catch(() => undefined);
       await admin.query('DELETE FROM core.manager_workspace WHERE id = $1', [ws.id]).catch(() => undefined);
     }
-    await admin.query(`DELETE FROM core.upgrade_migration WHERE workspace_id IS NULL AND name LIKE '0.7.0_%' AND executed_by_version = '0.7.0'`).catch(() => undefined);
+    await admin
+      .query(`DELETE FROM core.upgrade_migration WHERE workspace_id IS NULL AND name LIKE '0.7.0_%' AND executed_by_version = '0.7.0' AND NOT (id::text = ANY ($1::text[]))`, [instanceBaseline])
+      .catch(() => undefined);
     await app?.end();
     await admin?.end();
   });
@@ -151,7 +157,8 @@ describeIfDb('Part D workspace command runner (integration)', () => {
     await admin.query(`DROP POLICY job_role_tenant ON ${drift.schema}.job_role`);
 
     // Through UpgradeRun (the migrate child's hooks): the previous-version check, then afterApply's workspace pass.
-    const run = new UpgradeRun({ codeVersion: '0.6.0', force: false, log: (l) => lines.push(l), workspaceRunner: { workspaceIds: [a.id, b.id, drift.id, legacy.id] } });
+    // The 0.6.0 adoption release, with the previous-versions list it shipped with (0.7.0 appended 0.6.0).
+    const run = new UpgradeRun({ codeVersion: '0.6.0', previousVersions: ['0.4.0', '0.5.0'], force: false, log: (l) => lines.push(l), workspaceRunner: { workspaceIds: [a.id, b.id, drift.id, legacy.id] } });
     await run.beforeApply(session, { fresh: false, attribution: null, unrestrictedTarget: true });
     await run.afterApply(session);
     for (const ws of [a, b]) {
@@ -736,7 +743,8 @@ describeIfDb('Part D workspace command runner (integration)', () => {
     let fail = true;
     const registry = withReal({ '0-7': [probeColumn, cmd('Last07', 1, { run: async ({ workspaceId }) => { if (fail && workspaceId === b.id) throw new Error('b not yet'); } })] });
     await runner({ workspaceRegistry: registry, workspaceIds: [a.id, b.id] });
-    await admin.query(`INSERT INTO core.upgrade_migration (name, status, attempt, executed_by_version) VALUES ('0.7.0_TypeOrmMigrations', 'completed', 1, '0.7.0')`);
+    // A 0.7.0-built database already holds this row (release 0.7.0): kept as it is.
+    await admin.query(`INSERT INTO core.upgrade_migration (name, status, attempt, executed_by_version) VALUES ('0.7.0_TypeOrmMigrations', 'completed', 1, '0.7.0') ON CONFLICT DO NOTHING`);
     const at = (force: boolean) =>
       new UpgradeRun({ codeVersion: '0.8.0', previousVersions: ['0.6.0', '0.7.0'], force, log: (l) => lines.push(l), workspaceRegistry: registry, workspaceRunner: { workspaceIds: [a.id, b.id] } }).beforeApply(session, {
         fresh: false,
