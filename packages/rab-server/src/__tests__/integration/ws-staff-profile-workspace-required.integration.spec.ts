@@ -130,6 +130,15 @@ describeIfDb('C3 Q3: staff_profile_workspace_required validated as structure lev
     const measured = await v2(m);
     // eslint-disable-next-line no-console
     console.log(`[q3-fp] postgres=${workspaceFingerprintMajor()} level22-v2=${before} level23-v2=${measured} declared=${declaredFingerprint(23, workspaceFingerprintMajor())}`);
+    // Diagnostic (log only): the v2 lines in which a freshly provisioned level-23 workspace (server path) differs from this
+    // upgraded one. Expected: none.
+    const fresh = await seedWorkspace(admin, `wsq3-fresh-${SFX}`);
+    created.push(fresh);
+    const freshOutcome = await provisionServerPath(appUrl, fresh);
+    const lines = async (w: SeededWorkspace) => new Set((await admin.query('SELECT l FROM core.workspace_schema_fingerprint_v2_lines($1) AS f(l)', [w.id])).rows.map((r) => String(r.l)));
+    const [lu, lf] = [await lines(m), await lines(fresh)];
+    // eslint-disable-next-line no-console
+    console.log(`[q3-diff] fresh=${freshOutcome} fresh-v2=${await v2(fresh)} only-upgraded=${JSON.stringify([...lu].filter((l) => !lf.has(l)))} only-fresh=${JSON.stringify([...lf].filter((l) => !lu.has(l)))}`);
     expect(before).toBe(declaredFingerprint(22, workspaceFingerprintMajor()));
     expect(await constraintOf(m)).toEqual({ validated: true, def: 'CHECK ((workspace_id IS NOT NULL))' });
     expect(measured).toBe(declaredFingerprint(23, workspaceFingerprintMajor()));
