@@ -296,6 +296,52 @@ describeIfDb('venue/job-role ownership abuse cases (integration)', () => {
     expect(await rateRows()).toBe(1);
   });
 
+  // Owner decision batch 13: every venue pay-rate write leaves exactly one audit row — which rate, never how much.
+  it('SF-4: creating, updating and deleting a venue pay rate each write exactly one venue_role_rate audit row with no pay amounts', async () => {
+    const { managers } = await seedOrgWithManagers(1);
+    const [m] = managers;
+    const token = await login(m!.email);
+    const venueId = await createVenue(token);
+    const jobRoleId = await createJobRole(token);
+    const auditRows = async (action: string, rateId: string) =>
+      adminDataSource.manager.query<Array<{ actor_user_id: string; entity_type: string; metadata: Record<string, unknown> }>>(
+        `SELECT actor_user_id, entity_type, metadata FROM core.audit_log WHERE action = $1 AND entity_id = $2`,
+        [action, rateId],
+      );
+    const expectOne = async (action: string, rateId: string, expected: Record<string, unknown>) => {
+      const rows = await auditRows(action, rateId);
+      expect(rows).toHaveLength(1);
+      expect(rows[0]!.actor_user_id).toBe(m!.userId);
+      expect(rows[0]!.entity_type).toBe('venue_role_rate');
+      // Exact equality: only these four keys, so no pay, charge or overtime value can be present.
+      expect(rows[0]!.metadata).toEqual(expected);
+    };
+
+    const created = await request(app.getHttpServer())
+      .post(`/rest/v1/venues/${venueId}/role-rates`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({ jobRoleId, payRatePence: 1500, chargeRatePence: 250, effectiveFrom: '2030-01-01' });
+    expect(created.status).toBe(201);
+    const rateId = created.body.id as string;
+    await expectOne('venue_role_rate.created', rateId, { venueId, jobRoleId, effectiveFrom: '2030-01-01', effectiveTo: null });
+
+    const updated = await request(app.getHttpServer())
+      .patch(`/rest/v1/venues/${venueId}/role-rates/${rateId}`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({ payRatePence: 1700, effectiveTo: '2030-12-31' });
+    expect(updated.status).toBe(200);
+    await expectOne('venue_role_rate.updated', rateId, { venueId, jobRoleId, effectiveFrom: '2030-01-01', effectiveTo: '2030-12-31' });
+
+    const deleted = await request(app.getHttpServer())
+      .delete(`/rest/v1/venues/${venueId}/role-rates/${rateId}`)
+      .set('Authorization', `Bearer ${token}`);
+    expect(deleted.status).toBe(200);
+    await expectOne('venue_role_rate.deleted', rateId, { venueId, jobRoleId, effectiveFrom: '2030-01-01', effectiveTo: '2030-12-31' });
+    // Exactly one row per write — the create and update rows are not duplicated by later writes.
+    expect(await auditRows('venue_role_rate.created', rateId)).toHaveLength(1);
+    expect(await auditRows('venue_role_rate.updated', rateId)).toHaveLength(1);
+  });
+
   it('a query with no tenant context bound returns zero rows for venue and job_role', async () => {
     const venueRows = await dataSource.manager.query(`SELECT id FROM core.venue LIMIT 1`);
     expect(venueRows).toEqual([]);
