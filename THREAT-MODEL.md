@@ -8495,3 +8495,27 @@ Reversal:   Lower CLOCK_IN_CONFIRM_FLOOR_HOURS, or require a second approver (pa
   but not `schedule.create` → 403, no shift; archived job role → 409 `JOB_ROLE_ARCHIVED`
   and archived venue → 409 `VENUE_ARCHIVED`, no shift; a successful create-and-send writes exactly one `shift.created`
   row (actor = caller, status `open`, no pay keys).
+
+## SF-4 — venue pay-rate creation checks job-role scope (branch fix/sf4-role-rate-job-role-scope, 2026-11-16)
+- **Threat:** a manager with `venue.edit` → `POST /rest/v1/venues/:id/role-rates` with the id of a job role that RLS shows
+  them (same organisation and workspace) but that is not theirs → a `venue_role_rate` row was written for it.
+  `VenueService.createRoleRate` checked the venue scope and only that the role existed. That rate is what
+  `SchedulingService.resolvePayRate` snapshots for new shifts at that venue and role, so it is payroll input.
+- **Control:** one predicate, `isJobRoleInScope` (`modules/scheduling/utils/job-role-scope.ts`), the rule shift creation
+  (`SchedulingService.assertJobRoleOwned`) and staff creation (`StaffService.assertJobRoleAccessible`) already applied, now
+  used by all three (the two existing copies call it; behaviour unchanged). `createRoleRate` refuses an out-of-scope role
+  with 404 "Job role not found." (never 403), before any write. A Venue Manager keeps the existing reference rule (any job
+  role RLS shows them); an ordinary manager may use only a role they created. Layer 2: `createRoleRate`,
+  `updateRoleRate` and `deleteRoleRate` now re-check the route's own `venue.edit` flag in the service (403, before any id
+  is read). Rate values, defaults, effective dates and rate resolution are unchanged.
+- **Not changed (flagged for the owner):** an archived job role is still accepted for a new venue rate (shift and staff
+  creation refuse archived roles with 409; whether a pay rate counts as "new work" is a payroll decision). `updateRoleRate` still merges its DTO into the entity (the DTO has no `jobRoleId`, and
+  `forbidNonWhitelisted` rejects extra fields, so it cannot re-point a rate at another role).
+- **Audit (owner decision batch 13, 2026-11-16):** `createRoleRate`, `updateRoleRate` and `deleteRoleRate` each write one
+  audit row in the same transaction — `venue_role_rate.created` / `.updated` / `.deleted`, `entityType` `venue_role_rate`,
+  metadata exactly `{ venueId, jobRoleId, effectiveFrom, effectiveTo }` (after the change; before it, for a delete) — never
+  a pay, charge or overtime amount. The three actions are classified NOT shipped off-host (business events, like
+  `venue.photo_updated`) in `security-audit-event-catalogue.ts`; shipping them is a separate decision.
+- **Tests:** `venue-jobrole-ownership-abuse-cases.integration.spec.ts` › "SF-4": an RLS-visible job role created by
+  another manager, and another workspace's job role → 404 with no `venue_role_rate` row; the caller's own role → 201 with
+  the values as sent; create, update and delete each write exactly one audit row with exactly those four metadata keys.

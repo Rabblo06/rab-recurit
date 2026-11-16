@@ -3,6 +3,7 @@ import { sentShiftPresentation } from './sent-shift-presentation';
 import { rotateShiftQrLockSql, rotateShiftQrUpdateSql } from './rotate-shift-qr.sql';
 import { SENT_SHIFT_VIEW_SQL, sentShiftsPageAndCountsSql } from './sent-shifts-sql';
 import { ListSentShiftsDto, SentShiftView } from '../dto/list-sent-shifts.dto';
+import { isJobRoleInScope } from '../utils/job-role-scope';
 import { validateAssignmentTime, effectiveAssignmentBreakMinutes, assignmentEnvelope, defaultAssignmentTime } from '../utils/assignment-time';
 import { resolveVenueOfferStatus } from '../../offer/services/venue-offer-presentation';
 import { PermissionsService } from '../../../engine/core-modules/permissions/permissions.service';
@@ -214,9 +215,7 @@ export class SchedulingService {
    * not privacy-sensitive the way Staff/Shift/Offer/Venue are.
    */
   private async assertJobRoleOwned(manager: EntityManager, ctx: AuthContext, jobRole: JobRole): Promise<void> {
-    const scope = await this.resourceScope.resolveTx(manager, ctx);
-    if (scope.kind === 'venue') return;
-    if (scope.kind === 'owner' && jobRole.createdBy === ctx.userId) return;
+    if (isJobRoleInScope(await this.resourceScope.resolveTx(manager, ctx), ctx, jobRole)) return;
     throw new NotFoundException('Job role not found.');
   }
 

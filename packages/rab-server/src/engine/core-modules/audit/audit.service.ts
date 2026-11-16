@@ -144,6 +144,14 @@ export const AuditAction = {
   /** One-off repair (owner decision 2026-11-06, Q3): `shift:complete-settled --apply` completed a settled in_progress shift. Actor: an active platform admin. */
   SHIFT_COMPLETED_BY_REPAIR: 'shift.completed_by_repair',
   VENUE_GEOFENCE_UPDATED: 'venue.geofence_updated',
+  /**
+   * A venue pay rate (`venue_role_rate`) was created, changed or deleted (VenueService; owner decision batch 13,
+   * 2026-11-16). `entityType` `venue_role_rate`. Metadata: venueId, jobRoleId, effectiveFrom, effectiveTo — never a pay,
+   * charge or overtime amount.
+   */
+  VENUE_ROLE_RATE_CREATED: 'venue_role_rate.created',
+  VENUE_ROLE_RATE_UPDATED: 'venue_role_rate.updated',
+  VENUE_ROLE_RATE_DELETED: 'venue_role_rate.deleted',
   VENUE_PHOTO_UPDATED: 'venue.photo_updated',
   FILE_UPLOADED: 'file.uploaded',
   FILE_DOWNLOAD_AUTHORIZED: 'file.download_authorized',
