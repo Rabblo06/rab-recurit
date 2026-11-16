@@ -1011,7 +1011,7 @@ describeIfDb('attendance abuse cases (integration)', () => {
       await confirmShiftForStaff(managerToken, staffToken, staff.staffProfileId, shiftId);
       const startsAt = new Date(Date.now() + 2 * 3600_000);
       await tenantContext.runInTenantContext({organisationId: organisation.id, workspaceId: venue.workspaceId ?? null, userId: managerUserId, role: 'manager'}, m =>
-        m.query("UPDATE shift_assignment sa SET period=tstzrange($2::timestamptz,upper(sa.period),'[)') WHERE shift_id=$1", [shiftId, startsAt]));
+        m.query(`UPDATE ${businessTables(m).shift_assignment} sa SET period=tstzrange($2::timestamptz,upper(sa.period),'[)') WHERE shift_id=$1`, [shiftId, startsAt]));
       const res = await clockIn(staffToken, organisation, venue, managerUserId, shiftId);
       expect(res.status).toBe(409);
       expect(res.body.code).toBe('CLOCK_IN_TOO_EARLY');

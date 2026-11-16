@@ -106,7 +106,7 @@ describe('Staff same-shift Teams (real Postgres/RLS/HTTP)', () => {
       const result = await roster(callerToken);
       expect(result.status).toBe(200); expect(result.body).toHaveLength(1);
     } finally {
-      await tenant.runInWorkspaceContext(ctx(manager), m => m.query("UPDATE shift_assignment SET status='confirmed' WHERE id=$1", [peerAssignment]));
+      await tenant.runInWorkspaceContext(ctx(manager), m => m.query(`UPDATE ${businessTables(m).shift_assignment} SET status='confirmed' WHERE id=$1`, [peerAssignment]));
     }
   });
   it('uses updated individual assignment intervals', async () => {
@@ -115,10 +115,10 @@ describe('Staff same-shift Teams (real Postgres/RLS/HTTP)', () => {
     expect(result.body.find((r: { isYou: boolean }) => !r.isYou).startsAt).toBe('2030-10-27T01:00:00.000Z');
   });
   it('denies a caller removed from the shift on the next read', async () => {
-    await tenant.runInWorkspaceContext(ctx(manager), m => m.query("UPDATE shift_assignment SET status='withdrawn' WHERE shift_id=$1 AND staff_profile_id=$2", [shift, caller.profileId]));
+    await tenant.runInWorkspaceContext(ctx(manager), m => m.query(`UPDATE ${businessTables(m).shift_assignment} SET status='withdrawn' WHERE shift_id=$1 AND staff_profile_id=$2`, [shift, caller.profileId]));
     try { expect((await roster(callerToken)).status).toBe(404); }
     finally {
-      await tenant.runInWorkspaceContext(ctx(manager), m => m.query("UPDATE shift_assignment SET status='confirmed' WHERE shift_id=$1 AND staff_profile_id=$2", [shift, caller.profileId]));
+      await tenant.runInWorkspaceContext(ctx(manager), m => m.query(`UPDATE ${businessTables(m).shift_assignment} SET status='confirmed' WHERE shift_id=$1 AND staff_profile_id=$2`, [shift, caller.profileId]));
     }
   });
   it('waits for concurrent cancellation, then denies the roster', async () => {

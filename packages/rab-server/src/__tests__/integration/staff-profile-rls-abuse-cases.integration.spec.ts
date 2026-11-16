@@ -14,7 +14,7 @@ import { createAdminDataSource, createCrewflowOwnerProbeDataSource } from './hel
 import { businessSchema, businessTable, hwsRuntimeOn } from './helpers/hws-fixtures';
 import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
 import { integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
-import { businessTables } from '../../engine/core-modules/tenant/business-tables';
+import { BusinessTables, businessTables } from '../../engine/core-modules/tenant/business-tables';
 
 /**
  * Staff / Venue Manager RLS redesign: adversarial suite. The database answers "which rows may this caller address?"
@@ -56,13 +56,16 @@ const RUN = integrationTestDatabaseReady();
     role: '',
   });
 
-  /** Runs `sql` as rab_app under the identity's tenant context and returns the rows. */
+  /**
+   * Runs `sql` as rab_app under the identity's tenant context and returns the rows. Part C2: `sql` gets the binder's
+   * businessTables, so workspace tables are named in the schema the binder resolved for that identity (never search_path).
+   */
   async function asCaller<T = Record<string, unknown>>(
     who: { organisationId: string; workspaceId: string | null; userId: string | null },
-    sql: string,
+    sql: (t: BusinessTables) => string,
     params: unknown[] = [],
   ): Promise<T[]> {
-    const result: unknown = await tenantContext.runInTenantContext(ctxOf(who), (m) => m.query(sql, params));
+    const result: unknown = await tenantContext.runInTenantContext(ctxOf(who), (m) => m.query(sql(businessTables(m)), params));
     // UPDATE and DELETE come back from TypeORM as [rows, rowCount]; SELECT and RETURNING come back as rows.
     if (Array.isArray(result) && result.length === 2 && Array.isArray(result[0]) && typeof result[1] === "number") return result[0] as T[];
     return result as T[];
@@ -72,13 +75,13 @@ const RUN = integrationTestDatabaseReady();
   async function profileIdOf(userId: string): Promise<string> {
     const who = [staffA1, staffA2, staffB1, staffX].find((s) => s.userId === userId);
     if (!who) throw new Error("unknown staff identity");
-    const rows = await asCaller<{ id: string }>(who, `SELECT id FROM staff_profile WHERE user_id = $1`, [userId]);
+    const rows = await asCaller<{ id: string }>(who, (t) => `SELECT id FROM ${t.staff_profile} WHERE user_id = $1`, [userId]);
     return rows[0]!.id;
   }
 
   /** Visible staff profile ids for a caller, as rab_app under the caller's context. */
   async function visibleStaff(who: { organisationId: string; workspaceId: string | null; userId: string | null }): Promise<string[]> {
-    const rows = await asCaller<{ id: string }>(who, `SELECT id FROM staff_profile`);
+    const rows = await asCaller<{ id: string }>(who, (t) => `SELECT id FROM ${t.staff_profile}`);
     return rows.map((r) => r.id);
   }
 
@@ -187,14 +190,14 @@ const RUN = integrationTestDatabaseReady();
   it('wrong workspace context (Manager A in Workspace B) yields zero rows', async () => {
     const rows = await asCaller(
       { organisationId: org.id, workspaceId: managerB.workspaceId, userId: managerA.userId },
-      `SELECT id FROM staff_profile`,
+      (t) => `SELECT id FROM ${t.staff_profile}`,
     );
     expect(rows).toHaveLength(0);
   });
 
   it('wrong organisation context (Organisation X with Workspace A) yields zero rows', async () => {
     const attempt = () =>
-      asCaller({ organisationId: orgX.id, workspaceId: managerA.workspaceId, userId: managerA.userId }, `SELECT id FROM staff_profile`);
+      asCaller({ organisationId: orgX.id, workspaceId: managerA.workspaceId, userId: managerA.userId }, (t) => `SELECT id FROM ${t.staff_profile}`);
     // Part C1: with HWS on, organisation X cannot even resolve workspace A's schema (fail closed before any query); with HWS
     // off the core copy shows zero rows.
     if (hwsRuntimeOn()) await expect(attempt()).rejects.toMatchObject({ name: 'WorkspaceRoutingError' });
@@ -238,13 +241,13 @@ const RUN = integrationTestDatabaseReady();
 
   it('Staff A1 can update their own profile', async () => {
     const id = await profileIdOf(staffA1.userId!);
-    const rows = await asCaller(staffA1, `UPDATE staff_profile SET preferred_name = 'Self' WHERE id = $1 RETURNING id`, [id]);
+    const rows = await asCaller(staffA1, (t) => `UPDATE ${t.staff_profile} SET preferred_name = 'Self' WHERE id = $1 RETURNING id`, [id]);
     expect(rows).toHaveLength(1);
   });
 
   it('Staff A1 cannot modify Staff A2 (zero rows affected)', async () => {
     const id = await profileIdOf(staffA2.userId!);
-    const rows = await asCaller(staffA1, `UPDATE staff_profile SET preferred_name = 'Hijack' WHERE id = $1 RETURNING id`, [id]);
+    const rows = await asCaller(staffA1, (t) => `UPDATE ${t.staff_profile} SET preferred_name = 'Hijack' WHERE id = $1 RETURNING id`, [id]);
     expect(rows).toHaveLength(0);
   });
 
@@ -252,7 +255,7 @@ const RUN = integrationTestDatabaseReady();
     await expect(
       asCaller(
         managerA,
-        `INSERT INTO staff_profile (organisation_id, user_id, workspace_id, staff_ref) VALUES ($1, $2, $3, 'XWS-1')`,
+        (t) => `INSERT INTO ${t.staff_profile} (organisation_id, user_id, workspace_id, staff_ref) VALUES ($1, $2, $3, 'XWS-1')`,
         [org.id, randomUUID(), managerB.workspaceId],
       ),
     ).rejects.toMatchObject({ code: '42501' });
@@ -260,7 +263,7 @@ const RUN = integrationTestDatabaseReady();
 
   it('Manager A cannot delete Workspace B Staff (zero rows affected)', async () => {
     const id = await profileIdOf(staffB1.userId!);
-    const rows = await asCaller(managerA, `DELETE FROM staff_profile WHERE id = $1 RETURNING id`, [id]);
+    const rows = await asCaller(managerA, (t) => `DELETE FROM ${t.staff_profile} WHERE id = $1 RETURNING id`, [id]);
     expect(rows).toHaveLength(0);
   });
 
@@ -268,7 +271,7 @@ const RUN = integrationTestDatabaseReady();
     await expect(
       asCaller(
         vmA,
-        `INSERT INTO staff_profile (organisation_id, user_id, workspace_id, staff_ref) VALUES ($1, $2, $3, 'VMS-1')`,
+        (t) => `INSERT INTO ${t.staff_profile} (organisation_id, user_id, workspace_id, staff_ref) VALUES ($1, $2, $3, 'VMS-1')`,
         [org.id, randomUUID(), vmA.workspaceId],
       ),
     ).rejects.toMatchObject({ code: '42501' });
@@ -278,7 +281,7 @@ const RUN = integrationTestDatabaseReady();
     await expect(
       asCaller(
         vmA,
-        `INSERT INTO venue_manager_staff (manager_profile_id, staff_profile_id, organisation_id, workspace_id) VALUES ($1, $2, $3, $4)`,
+        (t) => `INSERT INTO ${t.venue_manager_staff} (manager_profile_id, staff_profile_id, organisation_id, workspace_id) VALUES ($1, $2, $3, $4)`,
         [vmA.profileId, await profileIdOf(staffB1.userId!), org.id, vmA.workspaceId],
       ),
     ).rejects.toThrow();
@@ -288,14 +291,14 @@ const RUN = integrationTestDatabaseReady();
     await expect(
       asCaller(
         vmA,
-        `INSERT INTO venue_manager_staff (manager_profile_id, staff_profile_id, organisation_id, workspace_id) VALUES ($1, $2, $3, $4)`,
+        (t) => `INSERT INTO ${t.venue_manager_staff} (manager_profile_id, staff_profile_id, organisation_id, workspace_id) VALUES ($1, $2, $3, $4)`,
         [vmA.profileId, await profileIdOf(staffX.userId!), org.id, vmA.workspaceId],
       ),
     ).rejects.toThrow();
   });
 
   it('a Venue Manager can no longer insert their own team row (RLS); only the workspace owner assigns staff', async () => {
-    const insert = `INSERT INTO venue_manager_staff (manager_profile_id, staff_profile_id, organisation_id, workspace_id) VALUES ($1, $2, $3, $4) RETURNING staff_profile_id`;
+    const insert = (t: BusinessTables) => `INSERT INTO ${t.venue_manager_staff} (manager_profile_id, staff_profile_id, organisation_id, workspace_id) VALUES ($1, $2, $3, $4) RETURNING staff_profile_id`;
     const staff = await profileIdOf(staffA1.userId!);
     await expect(asCaller(vmA, insert, [vmA.profileId, staff, org.id, vmA.workspaceId])).rejects.toThrow(/row-level security/);
     const rows = await asCaller(managerA, insert, [vmA.profileId, staff, org.id, vmA.workspaceId]);
@@ -303,17 +306,17 @@ const RUN = integrationTestDatabaseReady();
     // The other workspace's owner cannot write into Workspace A's team table.
     await expect(asCaller(managerB, insert, [vmA.profileId, await profileIdOf(staffA2.userId!), org.id, vmA.workspaceId])).rejects.toThrow();
     // The Venue Manager now sees the owner-assigned row.
-    const seen = await asCaller<{ n: number }>(vmA, `SELECT count(*)::int AS n FROM venue_manager_staff WHERE staff_profile_id = $1`, [staff]);
+    const seen = await asCaller<{ n: number }>(vmA, (t) => `SELECT count(*)::int AS n FROM ${t.venue_manager_staff} WHERE staff_profile_id = $1`, [staff]);
     expect(seen[0]!.n).toBe(1);
   });
 
   // ------------------------------------------------------------------ no policy recursion
 
   it('reading venue_manager_staff under a Staff context completes without a recursion error', async () => {
-    await expect(asCaller(staffA1, `SELECT count(*)::int AS n FROM venue_manager_staff`)).resolves.toBeDefined();
+    await expect(asCaller(staffA1, (t) => `SELECT count(*)::int AS n FROM ${t.venue_manager_staff}`)).resolves.toBeDefined();
   });
 
   it('venue_manager_staff under the Venue Manager context completes without a recursion error', async () => {
-    await expect(asCaller(vmA, `SELECT count(*)::int AS n FROM venue_manager_staff`)).resolves.toBeDefined();
+    await expect(asCaller(vmA, (t) => `SELECT count(*)::int AS n FROM ${t.venue_manager_staff}`)).resolves.toBeDefined();
   });
 });

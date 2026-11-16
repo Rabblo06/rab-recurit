@@ -753,7 +753,7 @@ describeIfDb('venue manager scoping (integration)', () => {
       await tenantContext.runInTenantContext(ctx, async m => {
         const [shift] = await m.query(`SELECT pay_rate_pence,break_minutes,ends_at,default_ends_at FROM ${businessTables(m).shift} WHERE id=$1`,[seed.shiftId]);
         expect(offer.estimatedPayPence).toBe(payForMinutes(Number(shift.pay_rate_pence),540-60));
-        await m.query("UPDATE shift_assignment SET status='confirmed' WHERE shift_id=$1 AND staff_profile_id=$2",[seed.shiftId,seed.staffA]);
+        await m.query(`UPDATE ${businessTables(m).shift_assignment} SET status='confirmed' WHERE shift_id=$1 AND staff_profile_id=$2`,[seed.shiftId,seed.staffA]);
         expect(new Date(shift.default_ends_at).getUTCHours()).toBe(5);
         expect(new Date(shift.ends_at).getUTCHours()).toBe(9);
         const midnight = new Date(row.startsAt).getTime();
@@ -947,8 +947,8 @@ describeIfDb('venue manager scoping (integration)', () => {
       await app.get(OfferService).decline({...seed.ctx,userId:staffB.user_id,role:'staff'},b.offerId,{reason:'Unavailable'});
       // Accepted and then confirmed by the Internal Manager (no auto-confirm on accept since 2026-11-06): shown as Confirmed.
       let board=await readPipeline(seed);expect(board.staff.find((r:any)=>r.offerId===a.offerId)).toMatchObject({stage:'confirmed',assignmentStatus:'confirmed'});expect(board.staff.find((r:any)=>r.offerId===b.offerId)).toMatchObject({stage:'rejected',terminalSource:'Declined by staff',declineReason:'Unavailable'});expect(board.tableStatus).toBe('1 staff rejected');expectReconciled(board);
-      await tenantContext.runInTenantContext(seed.ctx,m=>m.query("UPDATE shift SET starts_at=now()-interval '20 minutes',ends_at=now()+interval '2 hours' WHERE id=$1",[seed.shiftId]));
-      await tenantContext.runInTenantContext(seed.ctx,m=>m.query("UPDATE shift_assignment SET period=tstzrange(now()-interval '20 minutes',now()+interval '2 hours','[)') WHERE shift_id=$1",[seed.shiftId]));
+      await tenantContext.runInTenantContext(seed.ctx,m=>m.query(`UPDATE ${businessTables(m).shift} SET starts_at=now()-interval '20 minutes',ends_at=now()+interval '2 hours' WHERE id=$1`,[seed.shiftId]));
+      await tenantContext.runInTenantContext(seed.ctx,m=>m.query(`UPDATE ${businessTables(m).shift_assignment} SET period=tstzrange(now()-interval '20 minutes',now()+interval '2 hours','[)') WHERE shift_id=$1`,[seed.shiftId]));
       board=await readPipeline(seed);expect(board.staff.find((r:any)=>r.offerId===a.offerId).stage).toBe('late');
       await tenantContext.runInTenantContext(seed.ctx,async m=>{
         const [sa]=await m.query(`SELECT id FROM ${businessTables(m).shift_assignment} WHERE shift_id=$1 AND staff_profile_id=$2`,[seed.shiftId,seed.staffA]);
@@ -957,10 +957,10 @@ describeIfDb('venue manager scoping (integration)', () => {
       board=await readPipeline(seed);expect(board.staff.find((r:any)=>r.offerId===a.offerId).stage).toBe('clocked_in');expect(board.report.ready).toBe(false);
       expect(board.summary).toMatchObject({clockedIn:1,pendingReview:0});expectReconciled(board);
       // Forgotten clock-out flagged by the monitor: one lane only (Pending Review), never also counted as Clocked In.
-      await tenantContext.runInTenantContext(seed.ctx,m=>m.query("UPDATE attendance SET status='missing_clock_out' WHERE shift_id=$1",[seed.shiftId]));
+      await tenantContext.runInTenantContext(seed.ctx,m=>m.query(`UPDATE ${businessTables(m).attendance} SET status='missing_clock_out' WHERE shift_id=$1`,[seed.shiftId]));
       board=await readPipeline(seed);expect(board.staff.find((r:any)=>r.offerId===a.offerId).stage).toBe('pending_review');
       expect(board.summary).toMatchObject({clockedIn:0,pendingReview:1});expectReconciled(board);
-      await tenantContext.runInTenantContext(seed.ctx,m=>m.query("UPDATE attendance SET status='clocked_out',clock_out_at=now(),clock_out_method='auto_geofence',break_minutes=0,worked_minutes=10,earned_pence=200 WHERE shift_id=$1",[seed.shiftId]));
+      await tenantContext.runInTenantContext(seed.ctx,m=>m.query(`UPDATE ${businessTables(m).attendance} SET status='clocked_out',clock_out_at=now(),clock_out_method='auto_geofence',break_minutes=0,worked_minutes=10,earned_pence=200 WHERE shift_id=$1`,[seed.shiftId]));
       board=await readPipeline(seed);expect(board.staff.find((r:any)=>r.offerId===a.offerId)).toMatchObject({stage:'clocked_out',clockOutMethod:'auto_geofence',workedMinutes:10,attendanceReviewed:false});expect(board.report.ready).toBe(true);
       expect(board.summary).toMatchObject({clockedIn:0,pendingReview:0,clockedOut:1});expectReconciled(board);
       await request(app.getHttpServer()).post('/rest/v1/files/previews').set('Authorization',`Bearer ${seed.managerToken}`).send({fileIds:[randomUUID()]}).expect(201).expect(({body})=>expect(body.previews).toEqual({}));
@@ -1006,10 +1006,10 @@ describeIfDb('venue manager scoping (integration)', () => {
     it('pipeline server cancellation cutoff blocks at T-15m and closed shifts; client scope fields are rejected',async()=>{
       const seed=await pipelineSeed();const offers=await approvePipeline(seed);
       await request(app.getHttpServer()).post(`${seed.url}/offers/${offers[0].offerId}/cancel`).set('Authorization',`Bearer ${seed.managerToken}`).send({workspaceId:randomUUID()}).expect(400);
-      await tenantContext.runInTenantContext(seed.ctx,m=>m.query("UPDATE shift SET starts_at=clock_timestamp()+interval '15 minutes', ends_at=clock_timestamp()+interval '4 hours' WHERE id=$1",[seed.shiftId]));
+      await tenantContext.runInTenantContext(seed.ctx,m=>m.query(`UPDATE ${businessTables(m).shift} SET starts_at=clock_timestamp()+interval '15 minutes', ends_at=clock_timestamp()+interval '4 hours' WHERE id=$1`,[seed.shiftId]));
       await request(app.getHttpServer()).post(`${seed.url}/offers/${offers[0].offerId}/cancel`).set('Authorization',`Bearer ${seed.managerToken}`).send({}).expect(409);
       expect((await readPipeline(seed)).staff.every((r:any)=>!r.canManagerCancel)).toBe(true);
-      await tenantContext.runInTenantContext(seed.ctx,m=>m.query("UPDATE shift SET starts_at=clock_timestamp()+interval '1 day', ends_at=clock_timestamp()+interval '2 days', status='cancelled' WHERE id=$1",[seed.shiftId]));
+      await tenantContext.runInTenantContext(seed.ctx,m=>m.query(`UPDATE ${businessTables(m).shift} SET starts_at=clock_timestamp()+interval '1 day', ends_at=clock_timestamp()+interval '2 days', status='cancelled' WHERE id=$1`,[seed.shiftId]));
       await request(app.getHttpServer()).post(`${seed.url}/offers/${offers[0].offerId}/cancel`).set('Authorization',`Bearer ${seed.managerToken}`).send({}).expect(409);
     });
 

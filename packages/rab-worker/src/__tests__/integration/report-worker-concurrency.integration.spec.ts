@@ -81,7 +81,7 @@ describeIfDb('report worker multi-instance concurrency (integration)', () => {
     await adminDataSource.destroy();
   });
 
-  const protectedTables = ['shift_report', 'shift', 'shift_assignment', 'attendance'];
+  const protectedTables = ['shift_report', 'shift', 'shift_assignment', 'attendance'] as const;
   async function assertRls() {
     const rows = await dataSource.query(`SELECT relname, relrowsecurity, relforcerowsecurity
       FROM pg_class WHERE relnamespace='core'::regnamespace AND relname=ANY($1) ORDER BY relname`, [protectedTables]);
@@ -391,11 +391,12 @@ describeIfDb('report worker multi-instance concurrency (integration)', () => {
     for (const f of [a,b]) {
       const other = f === a ? b : a;
       await tenantContext.runInTenantContext({ organisationId:f.organisation.id, workspaceId:f.workspaceId,userId:f.owner.userId,role:'' },async manager=>{
-        for (const table of [...protectedTables,'stored_file']) {
-          // Part C1: business tables through the routed (workspace) name; stored_file is a core table.
-          // sql-injection-reviewed: table comes from this test's own literal list
-          expect((await manager.query(`SELECT id FROM ${table === 'stored_file' ? 'core.stored_file' : table} WHERE organisation_id=$1`,[f.organisation.id])).length).toBeGreaterThan(0);
-          expect(await manager.query(`SELECT id FROM ${table === 'stored_file' ? 'core.stored_file' : table} WHERE organisation_id=$1`,[other.organisation.id])).toEqual([]);
+        const t = businessTables(manager);
+        for (const table of [...protectedTables,'stored_file'] as const) {
+          // Part C2: business tables through businessTables (the bound workspace schema); stored_file is a core table.
+          const name = table === 'stored_file' ? 'core.stored_file' : t[table];
+          expect((await manager.query(`SELECT id FROM ${name} WHERE organisation_id=$1`,[f.organisation.id])).length).toBeGreaterThan(0);
+          expect(await manager.query(`SELECT id FROM ${name} WHERE organisation_id=$1`,[other.organisation.id])).toEqual([]);
           const [rows] = await manager.query(`UPDATE core.${table} SET id=id WHERE organisation_id=$1 RETURNING id`,[other.organisation.id]);
           expect(rows).toEqual([]);
         }
