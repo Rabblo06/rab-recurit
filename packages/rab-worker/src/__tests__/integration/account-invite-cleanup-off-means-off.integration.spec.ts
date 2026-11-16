@@ -8,6 +8,7 @@ import { PasswordHashingService } from '@rab/server/engine/core-modules/auth/ser
 import { TenantContextService } from '@rab/server/engine/core-modules/tenant/tenant-context.service';
 import { resolveInviteAutoDeleteEnabled, runAccountInviteCleanupCycle } from '../../queues/rab-maintenance/account-invite-cleanup.job';
 import { createAdminDataSource } from './helpers/admin-datasource';
+import { businessTable } from './helpers/hws-fixtures';
 import { createTestIdentityFactory, TestIdentity, TestIdentityFactory } from './helpers/test-identities';
 import { integrationTestDatabaseReady } from '@rab/server/database/typeorm/core/integration-test-database-gate';
 
@@ -107,7 +108,9 @@ describeIfDb('D-1: account-invite cleanup with auto-delete OFF changes nothing, 
       [org, ids.withSession, randomBytes(32).toString('hex'), randomUUID()],
     );
     await tenantContext.runInTenantContext({ organisationId: org, workspaceId: owner.workspaceId, userId: owner.userId, role: '' }, (m) =>
-      m.query(`INSERT INTO core.venue (organisation_id, workspace_id, name, created_by) VALUES ($1, $2, 'D1 Venue', $3)`, [org, owner.workspaceId, ids.withBusinessRef]),
+      // Release 0.7.0 (C2 fixture rule): where the application reads it (the workspace schema with HWS on; the core copy is
+      // read-only after the cutover).
+      m.query(`INSERT INTO ${businessTable(owner.workspaceId!, 'venue')} (organisation_id, workspace_id, name, created_by) VALUES ($1, $2, 'D1 Venue', $3)`, [org, owner.workspaceId, ids.withBusinessRef]),
     );
     return { owner, ids };
   }
@@ -123,7 +126,12 @@ describeIfDb('D-1: account-invite cleanup with auto-delete OFF changes nothing, 
       [ids],
     );
     const sessions = await admin.query(`SELECT user_id, revoked_at FROM core.refresh_token WHERE user_id = ANY($1::uuid[]) ORDER BY user_id`, [ids]);
-    const venues = await admin.query(`SELECT created_by FROM core.venue WHERE created_by = ANY($1::uuid[]) ORDER BY created_by`, [ids]);
+    // Every fixture's venue table (one per workspace with HWS on; core.venue with HWS off).
+    const venueTables = [...new Set(fixtures.map((f) => businessTable(f.owner.workspaceId!, 'venue')))];
+    const venues = await admin.query(
+      `SELECT created_by FROM (${venueTables.map((t) => `SELECT created_by FROM ${t} WHERE created_by = ANY($1::uuid[])`).join(' UNION ALL ')}) v ORDER BY created_by`,
+      [ids],
+    );
     const fixtureAudit = await admin.query(
       `SELECT count(*)::int AS n FROM core.audit_log WHERE target_user_id = ANY($1::uuid[]) OR metadata->>'deletedUserId' = ANY($1::text[])`,
       [ids],

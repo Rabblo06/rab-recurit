@@ -20,7 +20,7 @@ import { createAdminDataSource } from './helpers/admin-datasource';
 import { generateFixturePassword } from './helpers/fixture-password';
 import { integrationTestDatabaseReady } from '@rab/server/database/typeorm/core/integration-test-database-gate';
 import { provisionFixtureWorkspace } from './helpers/test-identities';
-import { businessSchema } from './helpers/hws-fixtures';
+import { businessSchema, businessTable } from './helpers/hws-fixtures';
 
 const FIXTURE_PASSWORD = generateFixturePassword();
 
@@ -398,7 +398,9 @@ describeIfDb('account invite cleanup job (integration)', () => {
       [organisation.id],
     );
     await tenantContext.runInTenantContext({ organisationId: organisation.id, workspaceId, userId: userRow.id, role: '' }, (manager) =>
-      manager.query(`INSERT INTO core.venue (organisation_id, workspace_id, name, created_by) VALUES ($1, $2, 'Test Venue', $3)`, [
+      // Release 0.7.0 (C2 fixture rule): the business row lands where the application reads it (the workspace schema with HWS on;
+      // after the cutover the core copy is read-only).
+      manager.query(`INSERT INTO ${businessTable(workspaceId, 'venue')} (organisation_id, workspace_id, name, created_by) VALUES ($1, $2, 'Test Venue', $3)`, [
         organisation.id,
         workspaceId,
         userRow.id,
@@ -466,10 +468,10 @@ describeIfDb('account invite cleanup job (integration)', () => {
         // needs real tenant context bound to see them (the same gotcha this
         // whole engagement has hit before with FORCE'd tables).
         await tenantContext.runInTenantContext({ organisationId, workspaceId, userId, role: '' }, async (manager) => {
-          const [{ id: venueId }] = await manager.query<[{ id: string }]>(`SELECT id FROM core.venue WHERE organisation_id = $1 LIMIT 1`, [organisationId]);
-          const [{ id: jobRoleId }] = await manager.query<[{ id: string }]>(`SELECT id FROM core.job_role WHERE organisation_id = $1 LIMIT 1`, [organisationId]);
+          const [{ id: venueId }] = await manager.query<[{ id: string }]>(`SELECT id FROM ${businessTable(workspaceId, 'venue')} WHERE organisation_id = $1 LIMIT 1`, [organisationId]);
+          const [{ id: jobRoleId }] = await manager.query<[{ id: string }]>(`SELECT id FROM ${businessTable(workspaceId, 'job_role')} WHERE organisation_id = $1 LIMIT 1`, [organisationId]);
           await manager.query(
-            `INSERT INTO core.shift (organisation_id, workspace_id, venue_id, job_role_id, starts_at, ends_at, break_minutes, required_count, pay_rate_pence, status, created_by)
+            `INSERT INTO ${businessTable(workspaceId, 'shift')} (organisation_id, workspace_id, venue_id, job_role_id, starts_at, ends_at, break_minutes, required_count, pay_rate_pence, status, created_by)
              VALUES ($1, $2, $3, $4, now() + interval '1 day', now() + interval '1 day 8 hours', 0, 1, 1500, 'draft', $5)`,
             [organisationId, workspaceId, venueId, jobRoleId, userId],
           );
@@ -485,8 +487,8 @@ describeIfDb('account invite cleanup job (integration)', () => {
         [organisationId],
       );
       await tenantContext.runInTenantContext({ organisationId, workspaceId, userId: ownerUserId, role: '' }, async (manager) => {
-        await manager.query(`INSERT INTO core.venue (organisation_id, workspace_id, name, created_by) VALUES ($1, $2, 'Work01 Venue', $3)`, [organisationId, workspaceId, ownerUserId]);
-        await manager.query(`INSERT INTO core.job_role (organisation_id, workspace_id, name, default_rate_pence, created_by) VALUES ($1, $2, 'Work01 Role', 1500, $3)`, [
+        await manager.query(`INSERT INTO ${businessTable(workspaceId, 'venue')} (organisation_id, workspace_id, name, created_by) VALUES ($1, $2, 'Work01 Venue', $3)`, [organisationId, workspaceId, ownerUserId]);
+        await manager.query(`INSERT INTO ${businessTable(workspaceId, 'job_role')} (organisation_id, workspace_id, name, default_rate_pence, created_by) VALUES ($1, $2, 'Work01 Role', 1500, $3)`, [
           organisationId,
           workspaceId,
           ownerUserId,

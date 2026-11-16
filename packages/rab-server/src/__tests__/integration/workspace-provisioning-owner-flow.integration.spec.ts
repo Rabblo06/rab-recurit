@@ -21,6 +21,7 @@ import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
 import { withServerProvisioningDeferred } from '../../modules/manager-workspace/services/workspace-provisioning-test-seam';
 import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-pipe';
 import { integrationTestDatabase, integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
+import { withCutoverInactive } from './helpers/hws-fixtures';
 
 /**
  * Phase B P8 — the owner's own request is the only provisioning path (no privileged background builder):
@@ -39,6 +40,7 @@ const RUN = integrationTestDatabaseReady();
 const describeIfDb = RUN ? describe : describe.skip;
 
 describeIfDb('workspace provisioning — owner-driven flow (Phase B P8)', () => {
+  let restoreCutover: (() => Promise<void>) | undefined;
   jest.setTimeout(180_000);
 
   let app: INestApplication;
@@ -78,6 +80,9 @@ describeIfDb('workspace provisioning — owner-driven flow (Phase B P8)', () => 
     await app.init();
     admin = createAdminDataSource();
     await admin.initialize();
+    // Release 0.7.0: this suite exercises the PRE-cutover world (the core copies / the HWS-off path), which an activated
+    // database fences (core copies read-only). The sentinel is removed for this suite only and put back afterwards.
+    restoreCutover = await withCutoverInactive(admin);
     factory = new TestIdentityFactory({
       app,
       dataSource: app.get(DataSource),
@@ -106,6 +111,7 @@ describeIfDb('workspace provisioning — owner-driven flow (Phase B P8)', () => 
   });
 
   afterAll(async () => {
+    await restoreCutover?.();
     await admin?.destroy();
     await app?.close();
   });

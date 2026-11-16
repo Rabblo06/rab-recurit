@@ -12,6 +12,7 @@ import { Organisation } from '../../modules/identity/entities/index';
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { BootstrapTimer } from './helpers/bootstrap-trace';
 import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
+import { withCutoverInactive } from './helpers/hws-fixtures';
 
 /**
  * Legacy core.manager_venue: a link row must belong to a workspace, and must be bound to a manager profile in that SAME workspace.
@@ -19,6 +20,7 @@ import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
  * and workspace_id NOT NULL enforce this at the database. RLS refuses a link into another workspace as well (defence in depth).
  */
 describe('core.manager_venue workspace binding (integration)', () => {
+  let restoreCutover: (() => Promise<void>) | undefined;
   let app: INestApplication;
   let runtime: DataSource;
   let adminDataSource: DataSource;
@@ -45,6 +47,9 @@ describe('core.manager_venue workspace binding (integration)', () => {
     tenantContext = app.get(TenantContextService);
     adminDataSource = createAdminDataSource();
     await adminDataSource.initialize();
+    // Release 0.7.0: this suite exercises the PRE-cutover world (the core copies / the HWS-off path), which an activated
+    // database fences (core copies read-only). The sentinel is removed for this suite only and put back afterwards.
+    restoreCutover = await withCutoverInactive(adminDataSource);
     factory = new TestIdentityFactory({
       app,
       dataSource: runtime,
@@ -65,6 +70,7 @@ describe('core.manager_venue workspace binding (integration)', () => {
   }, 120_000);
 
   afterAll(async () => {
+    await restoreCutover?.();
     await adminDataSource?.destroy();
     await app?.close();
   });

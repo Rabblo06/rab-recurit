@@ -79,3 +79,18 @@ export async function dropFixtureWorkspaceSchema(admin: FixtureQueryable, worksp
   await admin.query(`DROP SCHEMA IF EXISTS "${schema}" CASCADE`);
   await admin.query(`DELETE FROM core.workspace_schema_registry WHERE workspace_id = $1`, [workspaceId]);
 }
+
+/**
+ * Release 0.7.0: a spec that needs the PRE-cutover world (core copies writable, workspaces not marked verified at creation).
+ * The in-band CI database was built by a 0.7.0 start with HWS on, which wrote the one-way activation sentinel; this removes
+ * it as the cluster superuser (test-only: production never removes it) for the calling spec, and the returned function puts
+ * back exactly what was there. Call it in beforeAll BEFORE creating the spec's workspaces, and the restore in afterAll.
+ */
+export async function withCutoverInactive(admin: FixtureQueryable): Promise<() => Promise<void>> {
+  const rows = (await admin.query('SELECT count(*)::int AS n FROM core.hws_cutover_activation')) as Array<{ n: number }>;
+  const wasActive = Number(rows[0]?.n ?? 0) > 0;
+  await admin.query('DELETE FROM core.hws_cutover_activation');
+  return async () => {
+    if (wasActive) await admin.query('INSERT INTO core.hws_cutover_activation DEFAULT VALUES ON CONFLICT DO NOTHING');
+  };
+}
