@@ -31,7 +31,15 @@ describe('member-invitation liveness (shared by API acceptance and Worker pre-se
   it('expiry is decided in SQL with database time, inclusive at the boundary', () => {
     expect(memberInvitationExpiredSql()).toBe('(expires_at <= now())');
     expect(memberInvitationExpiredSql('i')).toBe('(i.expires_at <= now())');
+    expect(memberInvitationExpiredSql('mi_2')).toBe('(mi_2.expires_at <= now())');
   });
+
+  it.each(['', 'I', '1i', 'i.x', 'i ', 'i; DROP TABLE core.member_invitation; --', '"i"', "i'", 'i)--'])(
+    'expiry: an alias that is not a plain identifier (%p) throws instead of reaching SQL',
+    (alias) => {
+      expect(() => memberInvitationExpiredSql(alias)).toThrow(/plain SQL identifier/);
+    },
+  );
 
   /** A manager answering the two parent lookups from fixed rows (`undefined` = row not visible / missing). */
   function managerWith(org: { suspended_at: Date | null } | undefined, ws: { status: string } | undefined): EntityManager {

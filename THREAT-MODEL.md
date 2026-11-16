@@ -8051,9 +8051,12 @@ Reversal:   A shorter QR_MAX_AGE_DAYS, or rotating QRs automatically on schedule
   (accepted / revoked / superseded / expired) and `memberInvitationParentFailure` (organisation not suspended, workspace
   exists and is `active`). `loadLive` (resolve, accept, accept-with-provider) and the Worker's pre-send check both decide
   with them, so "may this email be sent?" and "may this link be accepted?" can no longer drift. Fail closed: a workspace or
-  organisation row the check cannot see (missing, or hidden by RLS — `manager_workspace`'s SELECT policy is
-  `id = current_workspace() OR owner_user_id = current_uid()`, and the Worker binds the row's own workspace for this check
-  only), a null workspace id, or an invitation row whose expiry was not computed all count as not live.
+  organisation row the check cannot see (missing, or hidden by RLS), a null workspace id, or an invitation row whose
+  expiry was not computed all count as not live. The workspace row is visible to the Worker only through
+  `manager_workspace_member` (`id = current_workspace()`; the Worker binds the row's own workspace for this check only);
+  the owner, platform-admin and MANAGE_IN_ORG branches of `manager_workspace_write` are false for the user-less Worker.
+  `memberInvitationExpiredSql(alias)` throws unless the alias is a plain identifier (`/^[a-z_][a-z0-9_]*$/`), so it can
+  never splice arbitrary text into SQL.
 - **Kept unchanged:** every existing Worker check (invitation exists, same workspace as enqueued, not accepted / revoked /
   superseded / expired, latest email for the invitation, organisation not suspended) with the same reason texts and order;
   a not-live invitation's outbox row is settled the same way as before — CANCELLED (terminal, fenced by the claim token)
@@ -8064,4 +8067,5 @@ Reversal:   A shorter QR_MAX_AGE_DAYS, or rotating QRs automatically on schedule
 - **Tests:** rab-worker `member-invitation-delivery.integration.spec` W10 (suspended and archived workspace: no provider
   call, row CANCELLED with the workspace reason, a retried job sends nothing) and W11 (same setup, workspace active:
   delivered once); W1–W9 unchanged. rab-server `member-invitation-liveness.spec` (the shared decision table, including the
-  fail-closed cases).
+  fail-closed cases and the alias refusal) and `member-invitation.integration.spec` X3b (workspace archived after sending:
+  resolve and accept both get the generic 400, no account is created, the invitation is not superseded).

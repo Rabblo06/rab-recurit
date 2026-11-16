@@ -15,9 +15,18 @@ import { EntityManager } from 'typeorm';
  * the invitation was reached, not of whether it is live.
  */
 
-/** SQL expression for the expiry boundary, evaluated against a `core.member_invitation` row (alias optional). */
+/** A plain lower-case SQL identifier: the only text `memberInvitationExpiredSql` will ever put into SQL. */
+const SQL_ALIAS = /^[a-z_][a-z0-9_]*$/;
+
+/**
+ * SQL expression for the expiry boundary, evaluated against a `core.member_invitation` row (alias optional). The alias
+ * is spliced into SQL text, so it must be a plain identifier: anything else (quotes, dots, spaces, an empty string)
+ * throws instead of being interpolated.
+ */
 export function memberInvitationExpiredSql(alias?: string): string {
-  return `(${alias ? `${alias}.` : ''}expires_at <= now())`;
+  if (alias === undefined) return '(expires_at <= now())';
+  if (!SQL_ALIAS.test(alias)) throw new Error('memberInvitationExpiredSql: alias must be a plain SQL identifier.');
+  return `(${alias}.expires_at <= now())`;
 }
 
 export type MemberInvitationStateFailure = 'accepted' | 'revoked' | 'superseded' | 'expired';
