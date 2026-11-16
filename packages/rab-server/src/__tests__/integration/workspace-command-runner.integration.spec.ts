@@ -53,7 +53,11 @@ const REAL = (WORKSPACE_UPGRADE_COMMANDS['0-6'] ?? []).map((c) => `0.6.0_${c.nam
 /** The structure level 0.6.0's own workspace commands reach (an adopted 0.6.0 workspace ends there). */
 const L06 = Math.max(LATEST_WORKSPACE_MODULE_VERSION, ...(WORKSPACE_UPGRADE_COMMANDS['0-6'] ?? []).map((c) => c.structure?.level ?? 0));
 /** A test registry ON TOP of this code's real one (the sequence must keep the real steps an adopted cursor points at). */
-const withReal = (extra: Readonly<Record<string, readonly WorkspaceUpgradeCommand[]>>): Record<string, readonly WorkspaceUpgradeCommand[]> => ({ ...WORKSPACE_UPGRADE_COMMANDS, ...extra });
+const withReal = (extra: Readonly<Record<string, readonly WorkspaceUpgradeCommand[]>>): Record<string, readonly WorkspaceUpgradeCommand[]> => ({
+  ...WORKSPACE_UPGRADE_COMMANDS,
+  // A release key the code already uses keeps its real commands, the test's are appended (0.7.0 may carry real ones).
+  ...Object.fromEntries(Object.entries(extra).map(([k, list]) => [k, [...(WORKSPACE_UPGRADE_COMMANDS[k] ?? []), ...list]])),
+});
 
 describeIfDb('Part D workspace command runner (integration)', () => {
   const { adminUrl, appUrl } = RUN ? integrationTestDatabase() : ({} as never);
@@ -128,7 +132,7 @@ describeIfDb('Part D workspace command runner (integration)', () => {
     // measured on a reference workspace and rolled back.
     const ref = await make('ref');
     await admin.query('BEGIN');
-    for (const c of WORKSPACE_UPGRADE_COMMANDS['0-6'] ?? []) if (c.sql) await admin.query(c.sql(ref.schema));
+    for (const c of [...(WORKSPACE_UPGRADE_COMMANDS['0-6'] ?? []), ...(WORKSPACE_UPGRADE_COMMANDS['0-7'] ?? [])]) if (c.sql) await admin.query(c.sql(ref.schema));
     await admin.query(probeColumn.sql!(ref.schema));
     level21 = await fingerprintV2(ref);
     await admin.query('ROLLBACK');
@@ -207,8 +211,8 @@ describeIfDb('Part D workspace command runner (integration)', () => {
       }
       expect(await rows060(drift)).toEqual([]);
       expect(await rows060(legacy)).toEqual([]);
-      expect(run.report.workspaces).toMatchObject({ total: 4, adopted: 2 });
       const failures = Object.fromEntries(run.report.workspaces!.failures.map((f) => [f.workspaceId, f.errorClass]));
+      expect({ ...run.report.workspaces, failures }).toMatchObject({ total: 4, adopted: 2 });
       expect(['VERIFY_FAILED', 'FINGERPRINT_MISMATCH']).toContain(failures[drift.id]);
       expect(failures[legacy.id]).toBe('BEHIND');
       expect(run.report.commandFailure).toMatchObject({ name: '0.6.0_WorkspaceAdoption' });
