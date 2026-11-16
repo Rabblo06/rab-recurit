@@ -7963,7 +7963,10 @@ Reversal:   A shorter QR_MAX_AGE_DAYS, or rotating QRs automatically on schedule
       attendance_correction stays insert-only, as before.
     - Control (review M-3): an API or Worker started with `HWS_RUNTIME_ENABLED=false` refuses to boot once any workspace's
       cutover has started or the sentinel exists (`core.hws_cutover_started_any()`, in `assertHwsStartupInvariants`).
-    - Control: the cutover command itself refuses with HWS off and writes nothing: no block, no state, no sentinel.
+    - Control: with HWS off, the cutover command refuses (`HWS_RUNTIME_OFF`) when any workspace is pending, writing
+      nothing: no block, no state, no sentinel. With nothing pending it returns without writing, which the runner would
+      record as complete; the step is unregistered on main, so this never runs. From 0.7.0 (#175) that case becomes an
+      unrecorded deferral.
     - Test:
       - hws-c3-cutover "review M-3" (a fenced write → 42501; the HWS-off boot guard refuses) and "HWS off: refused,
         nothing blocked, nothing copied";
