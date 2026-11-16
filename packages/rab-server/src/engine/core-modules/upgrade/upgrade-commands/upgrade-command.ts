@@ -48,10 +48,23 @@ export interface UpgradeCommandContext {
   flushBlockCache?: () => Promise<void>;
 }
 
+/**
+ * Release 0.7.0 (C3 no-op fix): what a command may return instead of completing. `deferred` = the command could not do its
+ * job in THIS deployment's configuration yet and wrote nothing; the runner records NO logbook row (like a crash), so the step
+ * is not completed, the version is not complete, and the next start runs it again. Never a way to skip work silently: the
+ * runner logs it, reports it (`UpgradeRunReport.deferred`), and the next release's strict previous-version check refuses (65)
+ * until it has completed. A deferred command must not be a prerequisite of the release's later steps (they still run).
+ */
+export interface UpgradeCommandResult {
+  /** Operator-facing reason (no secret, no row data). */
+  deferred: string;
+}
+
 export interface UpgradeCommand {
   /** Class-like name: [A-Za-z][A-Za-z0-9]*. */
   name: string;
   /** 13-digit creation timestamp: the order inside its release. */
   timestamp: number;
-  run(ctx: UpgradeCommandContext): Promise<void>;
+  /** Resolves (completed), resolves with `{ deferred }` (not recorded; runs again next start), or throws (failed). */
+  run(ctx: UpgradeCommandContext): Promise<void | UpgradeCommandResult>;
 }

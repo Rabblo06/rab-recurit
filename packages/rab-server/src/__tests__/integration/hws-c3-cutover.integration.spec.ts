@@ -348,7 +348,11 @@ describeIfDb('C3 HWS cutover copy path (option A′)', () => {
 
   it('re-check N-1: crewflow_app and crewflow_worker cannot forge a verified state (no app-callable marker; the trigger is INSERT-only)', async () => {
     const victim = await seedBusiness(await make('n1-victim'));
-    expect(await startedAny()).toBe(false);
+    // Release 0.7.0: on the shared CI database (built by a 0.7.0 start, sentinel written) other specs' workspaces were
+    // verified at insertion, so started_any() can already be true here. What matters: the forgery never changes it, and
+    // the victim never gets a state row (asserted below).
+    const startedBefore = await startedAny();
+    expect(await stateOf(victim)).toBeNull();
     // The 3-step forgery's first step (fake a new workspace's columns); errors swallowed so the attempt goes on either way.
     const forge = [
       `DO $f$ BEGIN UPDATE core.manager_workspace SET created_at = now(), schema_status = 'CREATING' WHERE id = '${victim.id}'; EXCEPTION WHEN OTHERS THEN NULL; END $f$`,
@@ -383,7 +387,7 @@ describeIfDb('C3 HWS cutover copy path (option A′)', () => {
       await deactivate();
     }
     expect(await stateOf(victim)).toBeNull();
-    expect(await startedAny()).toBe(false);
+    expect(await startedAny()).toBe(startedBefore);
   });
 
   let w1: Seeded;
@@ -610,6 +614,62 @@ describeIfDb('C3 HWS cutover copy path (option A′)', () => {
     ]);
     expect(await migrationError(w3)).toBeNull();
     expect(await verifiedRows(w3)).toBe(1);
+  });
+
+  it('release 0.7.0 no-op fix: HWS off with nothing pending is DEFERRED (no logbook row, no sentinel), never completed; the first start with HWS on completes and writes the sentinel', async () => {
+    const NOOP_TIMESTAMP = 1786721549998;
+    const step = `0.7.0_HwsCutover_${NOOP_TIMESTAMP}`;
+    const session = upgradeSessionOf(app);
+    const ledgerRows = async () => (await admin.query(`SELECT status, attempt FROM core.upgrade_migration WHERE workspace_id IS NULL AND name = $1 ORDER BY attempt`, [step])).rows;
+    /** One locked start's afterApply with only this command (its own step), returning the report and whether the sentinel was written. */
+    const start = async (ids: string[], h: UpgradeCommandHost) => {
+      const run = new UpgradeRun({
+        codeVersion: '0.7.0',
+        previousVersions: ['0.4.0', '0.5.0', '0.6.0'],
+        force: true,
+        log,
+        registry: { '0-7': [{ ...createHwsCutoverCommand({ workspaceIds: ids }), timestamp: NOOP_TIMESTAMP }] },
+        workspaceRegistry: {},
+        workspaceRunner: { workspaceIds: [] },
+        host: h,
+      });
+      await run.beforeApply(session, { fresh: false, attribution: null, unrestrictedTarget: true });
+      try {
+        await run.afterApply(session);
+        return { report: run.report, activated: await activeNow() };
+      } finally {
+        await deactivate();
+      }
+    };
+    try {
+      // (a) HWS off, zero workspaces in scope: deferred, nothing recorded, no sentinel.
+      const a = await start([], host({ hws: false }));
+      expect(a.report.deferred).toEqual([step]);
+      expect(a.report.commandFailure).toBeNull();
+      expect(a.activated).toBe(false);
+      expect(await ledgerRows()).toEqual([]);
+      // (b) HWS off, every workspace in scope already verified (created while the cutover was active): deferred the same way.
+      await admin.query('INSERT INTO core.hws_cutover_activation DEFAULT VALUES ON CONFLICT DO NOTHING');
+      const v = await make('noop-verified');
+      await deactivate();
+      expect(await stateOf(v)).toBe('verified');
+      const b = await start([v.id], host({ hws: false }));
+      expect(b.report.deferred).toEqual([step]);
+      expect(b.activated).toBe(false);
+      expect(await ledgerRows()).toEqual([]);
+      // (c) The next start with HWS ON, still nothing pending: completed (attempt 1) AND the one-way sentinel written.
+      const c = await start([v.id], host({ hws: true, backup: false }));
+      expect(c.report.deferred).toEqual([]);
+      expect(c.report.commandFailure).toBeNull();
+      expect(c.activated).toBe(true);
+      expect(await ledgerRows()).toEqual([{ status: 'completed', attempt: 1 }]);
+      // Completed now: a later HWS-off start does not run it again (and an HWS-off API refuses to boot once activated).
+      const d = await start([v.id], host({ hws: false }));
+      expect(d.report.deferred).toEqual([]);
+      expect(await ledgerRows()).toEqual([{ status: 'completed', attempt: 1 }]);
+    } finally {
+      await admin.query(`DELETE FROM core.upgrade_migration WHERE workspace_id IS NULL AND name = $1`, [step]);
+    }
   });
 
   /** SQLSTATE + message of a statement inside a throwaway transaction (always rolled back). */

@@ -6,12 +6,18 @@
  * Every database this module creates matches DB_NAME_RE and is dropped by dropAll(). The admin URL is the disposable
  * cluster's superuser (fixtures only); the owner URL is crewflow_owner (what the start path connects as). No URL is logged.
  */
-import { readdirSync, readFileSync } from 'node:fs';
+import { createHash, randomBytes } from 'node:crypto';
+import { mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import { Client } from 'pg';
 
 import { GuardedTarget, LockedMigrationOptions, runLockedMigrations } from '../../database/typeorm/scripts/migrate/locked-migration-runner';
+import { provisionWorkspaceSchema } from '../../database/typeorm/workspace-schema/provision-workspace-schema';
+import { selectWorkspaceFingerprintsForServer } from '../../database/typeorm/workspace-schema/v1/expected-fingerprints';
+import { WORKSPACE_UPGRADE_COMMANDS } from '../../engine/core-modules/upgrade/upgrade-commands/registry';
+import { lastStepOfVersion } from '../../engine/core-modules/upgrade/upgrade-sequence';
 import { LEDGER_SELECT_SQL, LedgerRow, withDatabase } from './ledger-contract';
 
 export const REPO_ROOT = join(__dirname, '..', '..', '..', '..', '..');
@@ -21,6 +27,12 @@ const DEPLOY_ORDER_TESTS = join(REPO_ROOT, 'packages', 'rab-docker', 'deploy-ord
 /** The last migration of each release (release-floor.ts RELEASE_MANIFESTS). */
 export const R254_LAST = 1786721430000;
 export const R256_LAST = 1786721450000;
+/**
+ * Release 0.7.0: the last migration 0.6.0 ships (HwsCutoverCopyFunctions1786721540000: the C3 functions merge while the
+ * version is still 0.6.0; the step is registered by 0.7.0). A "0.6.0-complete" template holds every migration through it.
+ */
+export const V060_LAST = 1786721540000;
+export const V060 = '0.6.0';
 
 const DB_NAME_RE = /^b2_ledger_[0-9a-f]{8}_[a-z0-9]+$/;
 
@@ -120,6 +132,81 @@ export class Cluster {
       log: () => undefined,
     });
     return built.applied.length;
+  }
+
+  /**
+   * Release 0.7.0: a "0.6.0-complete" template, as a database that 0.6.0 installed and served looks:
+   *   - the migrations through `last` (V060_LAST; one earlier to leave exactly one migration pending for the 0.7.0 start);
+   *   - the deploy-order seed, every seeded workspace provisioned as 0.6.0 provisions it (the 0.6.0 workspace commands);
+   *   - the logbook 0.6.0 leaves (superuser fixture on a disposable database): `0.6.0_TypeOrmMigrations` completed, and each
+   *     workspace's creation cursor at 0.6.0's last step.
+   * No activation sentinel (0.6.0 never runs the cutover).
+   */
+  async build060Complete(db: string, last: number = V060_LAST): Promise<void> {
+    await this.buildRelease(db, last);
+    await this.seed(db);
+    const registry = { '0-6': [...(WORKSPACE_UPGRADE_COMMANDS['0-6'] ?? [])] };
+    const c = new Client({ connectionString: withDatabase(this.adminUrl, db), application_name: 'b2-ledger-060' });
+    await c.connect();
+    try {
+      await selectWorkspaceFingerprintsForServer(async (sql) => (await c.query(sql)).rows);
+      const ids = (await c.query('SELECT id::text AS id FROM core.manager_workspace ORDER BY id')).rows.map((r) => String(r.id));
+      await c.query('SET ROLE crewflow');
+      for (const id of ids) {
+        const out = await provisionWorkspaceSchema(c, id, { workspaceRegistry: registry });
+        if (out.outcome !== 'READY') throw new Error(`0.6.0 template: workspace provisioning returned ${out.outcome}`);
+      }
+      await c.query('RESET ROLE');
+      await c.query("INSERT INTO core.upgrade_migration (name, status, attempt, executed_by_version, is_initial, workspace_id, forced) VALUES ('0.6.0_TypeOrmMigrations', 'completed', 1, $1, false, NULL, false)", [V060]);
+      const cursor = lastStepOfVersion(V060, undefined, registry);
+      for (const id of ids) {
+        await c.query("INSERT INTO core.upgrade_migration (name, status, attempt, executed_by_version, is_initial, workspace_id, forced) VALUES ($1, 'completed', 1, $2, true, $3::uuid, false)", [cursor, V060, id]);
+      }
+    } finally {
+      await c.end();
+    }
+  }
+
+  private readonly backupDirs: string[] = [];
+
+  /**
+   * Release 0.7.0: a backup marker the HWS cutover's REAL checks accept for `db` (owner rule: no cutover without a verified
+   * backup): this database's name, the cluster's system_identifier as the runtime login reads it (null when it may not),
+   * takenAt now, a pg_dump custom-format header, and the exact size and sha256 of the file (the cutover re-hashes it). The
+   * file is not a restorable dump: the cutover cannot verify content beyond that, and the operator's restore test is
+   * attested by the marker (as in hws-c3-cutover.integration.spec.ts). Returns the env the start needs.
+   */
+  async backupEnv(db: string): Promise<Record<string, string>> {
+    const dir = mkdtempSync(join(tmpdir(), 'b2-backup-'));
+    this.backupDirs.push(dir);
+    const dump = Buffer.concat([Buffer.from('PGDMP', 'latin1'), randomBytes(4096)]);
+    writeFileSync(join(dir, 'pre-cutover.dump'), dump, { mode: 0o600 });
+    const c = new Client({ connectionString: withDatabase(this.ownerUrl, db), application_name: 'b2-ledger-backup' });
+    await c.connect();
+    let systemIdentifier: string | null;
+    try {
+      systemIdentifier = await c.query('SELECT system_identifier::text AS s FROM pg_control_system()').then((r) => String(r.rows[0].s), () => null);
+    } finally {
+      await c.end();
+    }
+    const marker = {
+      kind: 'crewflow-hws-cutover-backup',
+      version: 1,
+      database: db,
+      systemIdentifier,
+      takenAt: new Date().toISOString(),
+      format: 'pg_dump-custom',
+      dumpFile: 'pre-cutover.dump',
+      sha256: createHash('sha256').update(dump).digest('hex'),
+      sizeBytes: dump.length,
+      restoreVerified: true,
+    };
+    writeFileSync(join(dir, 'marker.json'), JSON.stringify(marker), { mode: 0o600 });
+    return { CREWFLOW_HWS_CUTOVER_BACKUP_MARKER: join(dir, 'marker.json') };
+  }
+
+  removeBackups(): void {
+    for (const dir of this.backupDirs.splice(0)) rmSync(dir, { recursive: true, force: true });
   }
 
   /** The deploy-order seed: two synthetic organisations with staff, shifts, attendance and payroll (superuser). */
