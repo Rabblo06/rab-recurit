@@ -3,12 +3,13 @@ import * as path from 'path';
 
 import { EntityManager } from 'typeorm';
 
-import { setPgProcessRole } from '../../database/postgres/pg-config';
+import { PgProcessRole, setPgProcessRole } from '../../database/postgres/pg-config';
 import { SecureOwnerActingError, withSecureOwner } from './secure-owner-acting';
 
 /** O-2 review: the refusal branches of the owner-acting step, and the import barrier around it. */
 
 interface Script {
+  role?: PgProcessRole;
   inTransaction?: boolean;
   facts?: Record<string, unknown> | null;
   after?: { acting: string; read_only: string };
@@ -56,9 +57,9 @@ describe('withSecureOwner (O-2)', () => {
     expect(ran(sql, 'RESET ROLE')).toBe(false);
   });
 
-  const refusals: Array<[string, Script, RegExp, (() => void)?]> = [
-    ['the process is not the CLI (API / Worker share the login)', {}, /process is "api", not the CLI/, () => setPgProcessRole('api')],
-    ['the process is the Worker', {}, /process is "worker", not the CLI/, () => setPgProcessRole('worker')],
+  const refusals: Array<[string, Script, RegExp]> = [
+    ['the process is not the CLI (API / Worker share the login)', { role: 'api' }, /process is "api", not the CLI/],
+    ['the process is the Worker', { role: 'worker' }, /process is "worker", not the CLI/],
     ['no open transaction', { inTransaction: false }, /no open transaction/],
     ['the identity cannot be read', { facts: null }, /cannot read the connecting identity/],
     ['the login is not crewflow_owner', { facts: { ...GOOD_FACTS, login: 'crewflow', acting: 'crewflow' } }, /not the owner login crewflow_owner/],
@@ -67,8 +68,8 @@ describe('withSecureOwner (O-2)', () => {
     ['the login may not SET the role', { facts: { ...GOOD_FACTS, can_set: false } }, /may not SET ROLE rab_secure_owner/],
   ];
 
-  it.each(refusals)('refuses before SET LOCAL ROLE when %s; fn never runs', async (_name, script, message, arrange) => {
-    arrange?.();
+  it.each(refusals)('refuses before SET LOCAL ROLE when %s; fn never runs', async (_name, script, message) => {
+    if (script.role) setPgProcessRole(script.role);
     const { manager, sql } = fakeManager(script);
     const fn = jest.fn(async () => undefined);
     await expect(withSecureOwner(manager, fn)).rejects.toThrow(SecureOwnerActingError);

@@ -168,7 +168,7 @@ describeIfDb('CLI commands on the owner login under M-T1 FORCE RLS (O-2)', () =>
       expect(await admin.query(`SELECT 1 FROM core.platform_admin WHERE user_id = $1`, [target.userId])).toHaveLength(0);
     });
 
-    it('CF-07: the grant ends the user's existing web session and refresh token in the same transaction', async () => {
+    it('CF-07: the grant ends the existing web session and refresh token in the same transaction', async () => {
       const target = await seedOrgUser('grant-cf07');
       const sessionId = randomUUID();
       await admin.query(
