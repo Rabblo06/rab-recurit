@@ -11,7 +11,7 @@ import { EXPECTED_WORKSPACE_FINGERPRINTS, selectWorkspaceFingerprintsForServer, 
 import { LATEST_WORKSPACE_MODULE_VERSION } from '../../database/typeorm/workspace-schema/workspace-schema-modules';
 import type { WorkspaceUpgradeCommand } from '../../engine/core-modules/upgrade/upgrade-commands/workspace-upgrade-command';
 import { WORKSPACE_UPGRADE_COMMANDS } from '../../engine/core-modules/upgrade/upgrade-commands/registry';
-import { codeWorkspaceStructureLevel, declaredFingerprint } from '../../engine/core-modules/upgrade/workspace-structure-level';
+import { declaredFingerprint } from '../../engine/core-modules/upgrade/workspace-structure-level';
 import { countFailedWorkspaceCursors, upgradeSessionOf, UpgradeSession, withUpgradeScope } from '../../engine/core-modules/upgrade/upgrade-migration.service';
 import { TARGET_EXTRA_STRUCTURE_SQL } from '../../engine/core-modules/upgrade/workspace-step-checks-sql';
 import { SchemaResolverService } from '../../engine/core-modules/tenant/schema-resolver.service';
@@ -46,18 +46,19 @@ const SFX = Math.random().toString(36).replace(/[^a-z]/g, '').slice(0, 6) || 'x'
 const LOCK = MIGRATION_LOCK_KEY.toString();
 const T0 = 1786800000000;
 /** Part D: this code's structure level (21 since StaffProfileMemberSelect) and the probes' level above it. */
-const L = codeWorkspaceStructureLevel();
+/** The structure level this code's real 0.6.0 workspace commands reach (an adopted workspace's level before the probes). */
+const L = Math.max(LATEST_WORKSPACE_MODULE_VERSION, ...(WORKSPACE_UPGRADE_COMMANDS['0-6'] ?? []).map((c) => c.structure?.level ?? 0));
 const P = L + 1;
 /** This code's real 0.6.0 workspace steps: an adopted workspace runs them right after its is_initial row. */
 const REAL = (WORKSPACE_UPGRADE_COMMANDS['0-6'] ?? []).map((c) => `0.6.0_${c.name}_${c.timestamp}`);
 /** The structure level 0.6.0's own workspace commands reach (an adopted 0.6.0 workspace ends there). */
 const L06 = Math.max(LATEST_WORKSPACE_MODULE_VERSION, ...(WORKSPACE_UPGRADE_COMMANDS['0-6'] ?? []).map((c) => c.structure?.level ?? 0));
 /** A test registry ON TOP of this code's real one (the sequence must keep the real steps an adopted cursor points at). */
-const withReal = (extra: Readonly<Record<string, readonly WorkspaceUpgradeCommand[]>>): Record<string, readonly WorkspaceUpgradeCommand[]> => ({
-  ...WORKSPACE_UPGRADE_COMMANDS,
-  // A release key the code already uses keeps its real commands, the test's are appended (0.7.0 may carry real ones).
-  ...Object.fromEntries(Object.entries(extra).map(([k, list]) => [k, [...(WORKSPACE_UPGRADE_COMMANDS[k] ?? []), ...list]])),
-});
+/**
+ * The test's commands STAND IN for release 0.7.0's workspace commands (a real 0.7.0 workspace command, e.g. C3 Q3's level 23,
+ * is proven by its own spec): the real releases up to 0.6.0 stay, the keys the test gives replace the real ones.
+ */
+const withReal = (extra: Readonly<Record<string, readonly WorkspaceUpgradeCommand[]>>): Record<string, readonly WorkspaceUpgradeCommand[]> => ({ ...WORKSPACE_UPGRADE_COMMANDS, ...extra });
 
 describeIfDb('Part D workspace command runner (integration)', () => {
   const { adminUrl, appUrl } = RUN ? integrationTestDatabase() : ({} as never);
@@ -105,7 +106,8 @@ describeIfDb('Part D workspace command runner (integration)', () => {
       log: (l) => lines.push(l),
       expectedFingerprint: (level, major) => (level === P ? level21 : level > 20 ? declaredFingerprint(level, major) : EXPECTED_WORKSPACE_FINGERPRINTS[level]),
       ...o,
-      workspaceRegistry: o.workspaceRegistry ? withReal(o.workspaceRegistry) : undefined,
+      // 0.7.0's real workspace commands are replaced by the test's (none when the case gives none).
+      workspaceRegistry: withReal(o.workspaceRegistry ?? { '0-7': [] }),
     }).run(session);
   const adopt = (ids: string[]) => runner({ codeVersion: '0.6.0', versions: ['0.4.0', '0.5.0'], adopt: true, workspaceIds: ids });
   const cmd = (name: string, i: number, body: Partial<WorkspaceUpgradeCommand>): WorkspaceUpgradeCommand => ({ kind: 'workspace', name, timestamp: T0 + i, ...body });
@@ -132,7 +134,7 @@ describeIfDb('Part D workspace command runner (integration)', () => {
     // measured on a reference workspace and rolled back.
     const ref = await make('ref');
     await admin.query('BEGIN');
-    for (const c of [...(WORKSPACE_UPGRADE_COMMANDS['0-6'] ?? []), ...(WORKSPACE_UPGRADE_COMMANDS['0-7'] ?? [])]) if (c.sql) await admin.query(c.sql(ref.schema));
+    for (const c of WORKSPACE_UPGRADE_COMMANDS['0-6'] ?? []) if (c.sql) await admin.query(c.sql(ref.schema));
     await admin.query(probeColumn.sql!(ref.schema));
     level21 = await fingerprintV2(ref);
     await admin.query('ROLLBACK');
@@ -212,7 +214,9 @@ describeIfDb('Part D workspace command runner (integration)', () => {
       expect(await rows060(drift)).toEqual([]);
       expect(await rows060(legacy)).toEqual([]);
       const failures = Object.fromEntries(run.report.workspaces!.failures.map((f) => [f.workspaceId, f.errorClass]));
-      expect({ ...run.report.workspaces, failures }).toMatchObject({ total: 4, adopted: 2 });
+      // eslint-disable-next-line no-console
+      if (run.report.workspaces?.adopted !== 2) console.log(`[adoption-060] ${JSON.stringify({ failures, report: run.report.workspaces, lines: lines.slice(-30) })}`);
+      expect(run.report.workspaces).toMatchObject({ total: 4, adopted: 2 });
       expect(['VERIFY_FAILED', 'FINGERPRINT_MISMATCH']).toContain(failures[drift.id]);
       expect(failures[legacy.id]).toBe('BEHIND');
       expect(run.report.commandFailure).toMatchObject({ name: '0.6.0_WorkspaceAdoption' });
