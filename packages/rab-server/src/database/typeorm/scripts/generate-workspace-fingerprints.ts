@@ -346,6 +346,15 @@ async function verify(major: number): Promise<void> {
     });
     results.push(`server path ${outcome} ${verdict(await atLevel(srv.id))}`);
     for (const r of results) log(`  ${r}`);
+    // When the upgraded and the provisioned workspace disagree, print the v2 lines that differ (catalog descriptions with the
+    // schema name and workspace id normalised; no data): what a reviewer needs to see which object the paths build differently.
+    if (level > L) {
+      const v2lines = async (id: string) => new Set((await c.query('SELECT l FROM core.workspace_schema_fingerprint_v2_lines($1) AS f(l)', [id])).rows.map((r) => String(r.l)));
+      const [up, pr] = [await v2lines(legacy.id), await v2lines(srv.id)];
+      const onlyUp = [...up].filter((l) => !pr.has(l));
+      const onlyPr = [...pr].filter((l) => !up.has(l));
+      if (onlyUp.length || onlyPr.length) log(`  v2 line diff, upgraded vs server path: only-upgraded=${JSON.stringify(onlyUp)} only-provisioned=${JSON.stringify(onlyPr)}`);
+    }
     if (results.some((r) => !/ OK$/.test(r) || /FAILED|REFUSED/.test(r))) throw new Error('verification FAILED');
     log(`PostgreSQL ${major}: every provisioning path produces the committed fingerprints (v14, v${L}${level > L ? ` and structure level ${level} (v2)` : ''})`);
   });
