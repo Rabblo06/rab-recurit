@@ -7862,3 +7862,165 @@ Reversal:   A shorter QR_MAX_AGE_DAYS, or rotating QRs automatically on schedule
   - hws-c1 4.6 with asserted fallback reasons, and user-soft-delete (0g + 0a);
   - payroll-evidence-restrict (the F3 raw delete at level 22);
   - the runner and template suites on top of level 22.
+
+## Part C3 — HWS cutover copy path: core business tables copied into one schema per workspace (option A′ and SQL owner-approved 2026-11-15; branch feat/c3-cutover-copy, PR #150; OFF until release 0.7.0)
+
+- **What:**
+  - Core migration `HwsCutoverCopyFunctions1786721540000` (SQL in
+    `database/typeorm/workspace-schema/backfill/hws-cutover-sql.ts`, beside `privileged-copy.ts`) adds:
+    - frozen crewflow SECURITY DEFINER functions that probe, copy (in batches) and verify the 21 workspace business tables of
+      one workspace, from `core` into that workspace's own schema;
+    - two rab_secure_owner tables: `core.hws_cutover_state` (per workspace: `started` / `verified`) and
+      `core.hws_cutover_activation` (a one-way singleton sentinel);
+    - a write fence trigger on the 21 core tables;
+    - an AFTER INSERT trigger on `core.manager_workspace` that marks a new workspace `verified` once the cutover is active;
+    - TRUNCATE guards on both new tables;
+    - `core.hws_cutover_started_any()` for the boot check.
+  - Instance upgrade command `0.7.0_HwsCutover_1786721540100` (`upgrade-commands/0-7/hws-cutover.ts`), resumable and
+    idempotent:
+    - it blocks every pending workspace first;
+    - it refuses without a verified backup;
+    - then, per workspace, it marks the workspace `started`, copies, and compares per-table row counts and checksums;
+    - it marks the workspace `verified` and unblocks it only if they match.
+  - Fail-closed routing (`hws-cutover-routing.ts`, read in the resolver's registry query): `started` is always refused. Once
+    the sentinel exists, anything other than `verified` is refused with 503 "workspace is being upgraded"; that includes a
+    missing row and an unreadable table.
+  - **Off in #150:** the `0-7` command directory is NOT registered, so no deployment runs it. The 0.7.0 release's entry
+    ("Part C3 switched on", #175) covers registration, the version bump, switching HWS on in production and the backup mount.
+- **Threats and controls:**
+  - *A copy puts one tenant's rows into another workspace's schema.*
+    - Control: every definer call is bound to one workspace and its organisation (tenant GUCs, set per transaction). Source
+      rows are filtered by `workspace_id` AND `organisation_id = core.current_org()`. Core rows of W that carry another
+      organisation (`org_mismatch`) refuse W. Each workspace table's `<table>_workspace_bound` CHECK rejects a foreign row.
+    - Test: hws-c3-cutover "review L-1" (a core row of W under another organisation is never copied; W is refused,
+      ORG_MISMATCH).
+  - *The RLS bypass window (SECURITY TRADE-OFF A′, owner-accepted).* FORCE RLS has to be lifted to read every row of W from
+    core and write it into W's schema.
+    - Control: FORCE is lifted only inside frozen crewflow SECURITY DEFINER functions, under ACCESS EXCLUSIVE on each
+      relation. It is restored and asserted before return, and never committed off: a failure rolls the lift back with the
+      transaction.
+    - Control: EXECUTE is granted only to crewflow (REVOKE ALL FROM PUBLIC; crewflow_app holds nothing). The migration
+      advisory lock on the same backend and the tenant guard are mistake guards, not the authorisation boundary.
+    - Test: hws-c3-cutover:
+      - abuse cases (no lock, another tenant, a table outside the list, limits, not READY, crewflow_app → refused);
+      - a kill partway through the copy leaves the workspace blocked, FORCE on and no verified row.
+  - *A partially copied workspace is served* (data appears missing, or writes land in a half-copied schema).
+    - Control: every pending workspace is blocked (Part D marker, 503) before any copy. The cache epoch is bumped right
+      after blocking, and a failed bump stops the step.
+    - Control: a workspace whose copy started but did not verify is refused by the resolver even without its marker.
+    - Control: the rule "anything but `verified` is refused" is gated on the one-way database sentinel. The sentinel has no
+      UPDATE or DELETE policy and is TRUNCATE-guarded, so pruning or rolling back the command cannot switch fail-closed
+      routing off.
+    - Test: hws-c3-cutover:
+      - "review H-1" (a probe that cannot get its lock fails only after every workspace with core rows is blocked);
+      - "review L-4" (the epoch bump);
+      - "fail-closed routing" ×3: with no state, a workspace is refused once the cutover is active; when the scan's first
+        query throws, nothing is blocked, yet no workspace is served from an empty schema; a workspace created after the
+        cutover is marked at insertion and served;
+      - "re-check N-2" (the sentinel survives DELETE / UPDATE / TRUNCATE by every non-superuser role).
+  - *A copy runs without a way back* (owner rule: a backup before every cutover).
+    - Control: the command refuses before any copy unless `CREWFLOW_HWS_CUTOVER_BACKUP_MARKER` names a verified backup:
+      - the marker is bound to this database's name and, when `pg_control_system()` is readable, to this cluster's
+        `system_identifier`;
+      - it is at most 24 h old by the database clock, and not from the future;
+      - the dump next to it has a `PGDMP` header and the recorded size, and is re-hashed in full (sha256);
+      - `restoreVerified` is true;
+      - files are opened without following symlinks (O_NOFOLLOW and O_NONBLOCK, then fstat).
+    - Test:
+      - hws-c3-cutover "no backup → refused" (the workspace is blocked, nothing is copied);
+      - unit hws-cutover.spec covers the marker refusals: unset, not JSON, extra or missing field, restore not attested,
+        another database, another cluster, older than 24 h, from the future, a path in `dumpFile`, a missing, truncated,
+        swapped or non-custom dump. The refusal never echoes the marker path or its content.
+  - *A copy that does not match is switched over.*
+    - Control: per table, row counts and checksums of every column are compared between core and the workspace schema,
+      inside SQL. Money is compared as bigint pence in SQL and never logged.
+    - Control: a mismatch leaves W `started` and blocked (`HWS_CUTOVER_MISMATCH`), never half-switched.
+    - Control: a workspace whose own schema already holds rows while it is not `started` is refused (`BOTH_POPULATED`).
+      Under owner decision Q5 an operator merges by hand; core rows are never discarded.
+    - Test: hws-c3-cutover:
+      - "resume" (every table verified: counts, rows, checksums, money, minutes; no duplicate, no gap);
+      - checksum mismatch → blocked;
+      - both-populated → refused, nothing merged.
+  - *A crash or kill mid-copy leaves a broken workspace, or a re-run duplicates rows.*
+    - Control: the copy is batched and keyed (`ON CONFLICT DO NOTHING`). `started` survives a crash, and the next start
+      resumes and verifies.
+    - Control: only the statement pointers of payroll rows a batch itself inserted are reconciled. Live workspace pointers
+      are never touched, so no duplicate pay statements.
+    - Test: hws-c3-cutover:
+      - kill, then resume;
+      - "idempotent" (a second run copies nothing and writes no second verified row);
+      - "review M-1" (a live pointer survives fail-then-succeed);
+      - the Part B logbook records failed, then completed.
+  - *Writes to a core copy after its workspace was cut over are silently lost* (an HWS-off or older process still writes to
+    core).
+    - Control: the write fence on the 21 core tables refuses INSERT / UPDATE / DELETE of a cut-over workspace's rows for the
+      runtime logins (42501), so a stale writer fails loudly. attendance_correction stays insert-only, as before.
+    - Control (review M-3): an API or Worker started with `HWS_RUNTIME_ENABLED=false` refuses to boot once any workspace's
+      cutover has started or the sentinel exists (`core.hws_cutover_started_any()`, in `assertHwsStartupInvariants`).
+    - Control: the cutover command itself refuses with HWS off and writes nothing: no block, no state, no sentinel.
+    - Test:
+      - hws-c3-cutover "review M-3" (a fenced write → 42501; the HWS-off boot guard refuses) and "HWS off: refused,
+        nothing blocked, nothing copied";
+      - unit hws-startup-guard.spec.
+  - *Rows are dropped because they do not map to exactly one workspace.*
+    - Control (owner decisions Q2 and Q12): nothing is dropped.
+      - A note whose subject has profiles in more than one workspace refuses that workspace
+        (`HWS_CUTOVER_USER_NOTE_AMBIGUOUS`).
+      - A note whose subject has no profile refuses every workspace of the organisation (`HWS_CUTOVER_USER_NOTE_UNMAPPED`).
+      - Rows of the organisation with no workspace refuse it (`HWS_CUTOVER_UNOWNED_ROWS`).
+      - The operator report lists up to 100 note ids, for assignment by hand.
+    - Test: hws-c3-cutover:
+      - "review M-2" (one bad workspace does not keep the others blocked);
+      - "review L-3" (ambiguous notes count as core data);
+      - "owner decision Q2" (unmapped: the note is named, nothing is dropped);
+      - "re-check Info-A" (unowned rows).
+  - *The cutover state is forged to mark an uncopied workspace `verified`* (re-check N-1).
+    - Control: `core.hws_cutover_state` and the sentinel are rab_secure_owner-owned.
+      - Only crewflow (the cutover, through owner-only policies) and the new-workspace trigger write them.
+      - No function an application session can call writes them, and an UPDATE faking a "new" workspace never marks it.
+      - The runtime logins, crewflow_app and crewflow_worker read only.
+      - Audit rows are never read back as state.
+    - Test: hws-c3-cutover:
+      - "re-check N-1": as crewflow_app and as crewflow_worker, a direct state or sentinel INSERT → 42501, and the faked-new
+        UPDATE marks nothing;
+      - "review L-2": a forged audit row does not make W verified.
+  - *TRUNCATE bypasses RLS*, so the runtime login (owner-login model, BC-01) could empty the state or the sentinel.
+    - Control: statement-level BEFORE TRUNCATE triggers (`core.hws_cutover_truncate_guard()`); only rab_secure_owner itself
+      and a superuser pass.
+    - Test: hws-c3-cutover "re-check N-2" (TRUNCATE by the runtime login, crewflow and crewflow_app → 42501).
+  - *Disclosure through logs or the audit trail.*
+    - Control: logs and the `workspace.hws_cutover_verified` audit row carry only workspace ids, table names, counts and
+      checksums: no money, no row values, no marker content, no URL.
+  - *One start keeps the API blocked for too long* (availability).
+    - Control (owner decision Q6): each start has a 5-minute budget (`HWS_CUTOVER_TIME_BUDGET_MS`). Once it is spent, no
+      further workspace starts, but every start makes at least one. The rest stay blocked with 503 and continue at the next
+      start (`HWS_CUTOVER_TIME_BUDGET`).
+    - Test: hws-c3-cutover "owner decision Q6".
+- **Accepted by the owner (2026-11-15):**
+  - R-1 (A′): FORCE is lifted inside a frozen definer call on all 21 tables, plus `core.manager_profile` read-only. The SQL
+    injection residual is unchanged: the owner login can already act as crewflow (BC-01).
+  - R-2: crewflow has an owner-only SELECT policy on `core.hws_cutover_state`, so the boot check needs no tenant. As a result,
+    a session that can SET ROLE crewflow sees every workspace's cutover state: workspace ids and timestamps, no business data.
+  - R-3: the write fence lets crewflow, rab_secure_owner and a superuser through, because FK cascades from organisation and
+    manager_workspace run as the owner. The injection residual is unchanged.
+  - R-4: when `pg_control_system()` is unreadable (a managed provider), the backup is bound by database NAME only, so a dump
+    of a same-named database on another cluster would pass the name check. The control is the runbook's "dump this database,
+    verify the restore" steps.
+  - R-5: each copy or verify call holds ACCESS EXCLUSIVE on whole core tables (all organisations) for its duration, bounded
+    by the per-start budget.
+  - R-6: Q3 (VALIDATE `staff_profile_workspace_required` after a verified copy) is deferred to a structural workspace
+    command at level 23, with its own owner SQL review. Validating inside the cutover would move every cut-over workspace off
+    its level's expected fingerprint.
+- **Tests:**
+  - hws-c3-cutover.integration.spec:
+    - the abuse cases of every function; HWS off refused; no backup refused and blocked;
+    - kill then resume; copy correctness; idempotent re-run; checksum mismatch blocked; both-populated never merged;
+    - zero rows with no tenant context; the logbook records failed, then completed;
+    - the review cases H-1, M-1, M-2, M-3, L-1 to L-4, N-1, N-2 and Info-A; fail-closed routing; Q2 and Q6.
+    - The sentinel is one-way in production, so the spec removes it as the cluster superuser after each run; otherwise
+      routing in the shared CI database would change for every later spec.
+  - hws-cutover.spec (unit): the frozen 21-table lists, the backup marker refusals, the routing truth table, and that neither
+    the routing gate nor any application code depends on the registry or writes the state;
+  - hws-startup-guard.spec: the HWS-off boot refusal;
+  - the security-posture and semantic goldens (PG16/17/18), the R4 secure-owner invariants, check-rls-coverage
+    (`hws_cutover_activation` forced), and the restricted-migrator drift review.
