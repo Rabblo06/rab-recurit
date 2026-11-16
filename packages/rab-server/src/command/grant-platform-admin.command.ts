@@ -5,7 +5,7 @@ import { revokeSessionsForPrivilegedGrant } from '../engine/core-modules/platfor
 
 import { AuditAction, AuditService } from '../engine/core-modules/audit/audit.service';
 import { TenantContextService } from '../engine/core-modules/tenant/tenant-context.service';
-import { actAsSecureOwner, inSecureOwnerTransaction, stopActingAsSecureOwner } from './ops/secure-owner-acting';
+import { inSecureOwnerTransaction, withSecureOwner } from './ops/secure-owner-acting';
 
 interface GrantPlatformAdminOptions {
   email?: string;
@@ -77,7 +77,7 @@ export class GrantPlatformAdminCommand extends CommandRunner {
     }
 
     // Pre-auth lookup: no tenant context can exist yet, so it reads as the table owner, READ ONLY (O-2).
-    const candidates = await inSecureOwnerTransaction(this.dataSource.manager, { readOnly: true }, (manager) =>
+    const candidates = await inSecureOwnerTransaction(this.dataSource, { readOnly: true }, (manager) =>
       manager.query<Array<{ id: string; organisation_id: string; org_slug: string; email: string }>>(
         // sql-injection-reviewed: dynamic WHERE assembled only from literal fragments and $n / :named placeholders (values pushed to params); identifiers come from allow-lists. Reviewed 2026-11-04.
         `SELECT u.id, u.organisation_id, o.slug AS org_slug, u.email
@@ -102,7 +102,7 @@ export class GrantPlatformAdminCommand extends CommandRunner {
 
     const target = candidates[0]!;
 
-    const [existing] = await inSecureOwnerTransaction(this.dataSource.manager, { readOnly: true }, (manager) =>
+    const [existing] = await inSecureOwnerTransaction(this.dataSource, { readOnly: true }, (manager) =>
       manager.query<Array<{ revoked_at: Date | null }>>(`SELECT revoked_at FROM core.platform_admin WHERE user_id = $1`, [target.id]),
     );
 
@@ -116,16 +116,16 @@ export class GrantPlatformAdminCommand extends CommandRunner {
       async (manager) => {
         // The grant row as the table owner (no acting admin can exist for a bootstrap/recovery grant), then back to the
         // login for everything else in this transaction (O-2).
-        await actAsSecureOwner(manager);
-        await manager.query(
-          `INSERT INTO core.platform_admin (user_id, granted_by)
-           VALUES ($1, NULL)
-           ON CONFLICT (user_id) DO UPDATE
-             SET granted_at = now(), granted_by = NULL, revoked_at = NULL, revoked_by = NULL,
-                 security_version = core.platform_admin.security_version + 1`,
-          [target.id],
+        await withSecureOwner(manager, (m) =>
+          m.query(
+            `INSERT INTO core.platform_admin (user_id, granted_by)
+             VALUES ($1, NULL)
+             ON CONFLICT (user_id) DO UPDATE
+               SET granted_at = now(), granted_by = NULL, revoked_at = NULL, revoked_by = NULL,
+                   security_version = core.platform_admin.security_version + 1`,
+            [target.id],
+          ),
         );
-        await stopActingAsSecureOwner(manager);
         // CF-07: the promoted user's existing sessions end with the grant (same transaction).
         await revokeSessionsForPrivilegedGrant(manager, target.id);
         // actor_user_id = NULL — no authenticated human actor exists for a

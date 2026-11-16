@@ -11,10 +11,11 @@ import {
   User,
   UserRole,
 } from '../modules/identity/entities';
+import { AuditAction, AuditService } from '../engine/core-modules/audit/audit.service';
 import { PasswordHashingService } from '../engine/core-modules/auth/services/password-hashing.service';
 import { AuthContext } from '../engine/core-modules/tenant/auth-context.interface';
 import { TenantContextService } from '../engine/core-modules/tenant/tenant-context.service';
-import { actAsSecureOwner, inSecureOwnerTransaction, stopActingAsSecureOwner } from './ops/secure-owner-acting';
+import { inSecureOwnerTransaction, withSecureOwner } from './ops/secure-owner-acting';
 import { seedSuccessMessage } from './seed-success-message';
 
 /** No real user exists yet while the seed is creating one — a fixed, unambiguous placeholder for `rab.user_id`. */
@@ -47,6 +48,7 @@ export class SeedCommand extends CommandRunner {
     private readonly dataSource: DataSource,
     private readonly tenantContext: TenantContextService,
     private readonly passwordHashing: PasswordHashingService,
+    private readonly auditService: AuditService,
   ) {
     super();
   }
@@ -62,7 +64,7 @@ export class SeedCommand extends CommandRunner {
     });
 
     const slug = process.env.SEED_ORG_SLUG ?? 'acme';
-    const organisation = await inSecureOwnerTransaction(this.dataSource.manager, { readOnly: false }, async (manager) => {
+    const organisation = await inSecureOwnerTransaction(this.dataSource, { readOnly: false }, async (manager) => {
       const found = await manager.findOne(Organisation, { where: { slug } });
       if (found) return found;
       const result = await manager.insert(Organisation, {
@@ -132,11 +134,19 @@ export class SeedCommand extends CommandRunner {
         // Phase 2 — genuinely platform-wide, not "first user of this org").
         // Written as the table owner (no acting admin exists yet), then back
         // to the login — the same path `grant-platform-admin.command.ts` uses.
-        await actAsSecureOwner(manager);
-        await manager.query(`INSERT INTO core.platform_admin (user_id) VALUES ($1) ON CONFLICT (user_id) DO NOTHING`, [
-          user.id,
-        ]);
-        await stopActingAsSecureOwner(manager);
+        const granted = await withSecureOwner(manager, (m) =>
+          m.query<Array<{ user_id: string }>>(`INSERT INTO core.platform_admin (user_id) VALUES ($1) ON CONFLICT (user_id) DO NOTHING RETURNING user_id`, [
+            user!.id,
+          ]),
+        );
+        // Every platform_admin grant path leaves an audit entry; back on the login, tenant context bound (O-2 review).
+        if (granted.length === 1) {
+          await this.auditService.record(manager, { organisationId, userId: user.id }, AuditAction.PLATFORM_ADMIN_GRANTED, {
+            targetUserId: user.id,
+            actorUserId: null,
+            metadata: { via: 'seed' },
+          });
+        }
       }
     });
 

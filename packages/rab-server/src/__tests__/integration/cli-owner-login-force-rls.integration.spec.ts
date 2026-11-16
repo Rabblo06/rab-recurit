@@ -1,5 +1,5 @@
 import 'reflect-metadata';
-import { randomUUID } from 'node:crypto';
+import { randomBytes, randomUUID } from 'node:crypto';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -12,6 +12,7 @@ import { GrantPlatformAdminCommand } from '../../command/grant-platform-admin.co
 import { SeedCommand } from '../../command/seed.command';
 import { StorageMigrateLocalCommand } from '../../command/storage-migrate-local.command';
 import { AuditAction } from '../../engine/core-modules/audit/audit.service';
+import { setPgProcessRole } from '../../database/postgres/pg-config';
 import { integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
 import { createAdminDataSource } from './helpers/admin-datasource';
 import { generateFixturePassword } from './helpers/fixture-password';
@@ -32,7 +33,9 @@ const PNG_BYTES = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0
  * Each command is taken from the real CommandModule DI graph, so it runs on the same DataSource the CLI uses (DATABASE_URL,
  * routed by the test guard to TEST_DATABASE_URL = crewflow_owner); the first test asserts that identity, so the suite can
  * never pass vacuously on a superuser or BYPASSRLS login. The superuser fixture connection is used only to create and
- * inspect rows.
+ * inspect rows. The process declares the `cli` role, as command/main.ts does (the owner-acting step refuses any other).
+ * "No role left on the connection" is proved on one held connection in command/ops/secure-owner-acting.integration.spec.ts
+ * (a pooled check here could not fail: the pool's checkout RESET ROLE would hide a leak).
  */
 describeIfDb('CLI commands on the owner login under M-T1 FORCE RLS (O-2)', () => {
   let moduleRef: TestingModule;
@@ -54,6 +57,7 @@ describeIfDb('CLI commands on the owner login under M-T1 FORCE RLS (O-2)', () =>
     migrateLocal = moduleRef.get(StorageMigrateLocalCommand);
     admin = createAdminDataSource();
     await admin.initialize();
+    setPgProcessRole('cli');
   });
 
   beforeEach(() => {
@@ -69,6 +73,7 @@ describeIfDb('CLI commands on the owner login under M-T1 FORCE RLS (O-2)', () =>
   });
 
   afterAll(async () => {
+    setPgProcessRole('api');
     if (createdUserIds.length) await admin.query(`DELETE FROM core.platform_admin WHERE user_id = ANY($1::uuid[])`, [createdUserIds]);
     for (const dir of tempDirs) rmSync(dir, { recursive: true, force: true });
     await admin.destroy();
@@ -163,11 +168,29 @@ describeIfDb('CLI commands on the owner login under M-T1 FORCE RLS (O-2)', () =>
       expect(await admin.query(`SELECT 1 FROM core.platform_admin WHERE user_id = $1`, [target.userId])).toHaveLength(0);
     });
 
-    it('after the command the pooled connection acts as the login again (no role left behind)', async () => {
-      const target = await seedOrgUser('grant-role-reset');
+    it('CF-07: the grant ends the user's existing web session and refresh token in the same transaction', async () => {
+      const target = await seedOrgUser('grant-cf07');
+      const sessionId = randomUUID();
+      await admin.query(
+        `INSERT INTO core.user_session (id, organisation_id, user_id, application_target, absolute_expires_at, web_session_token_hash)
+         VALUES ($1, $2, $3, 'manager_web', now() + interval '1 day', $4)`,
+        [sessionId, target.organisationId, target.userId, randomBytes(32).toString('hex')],
+      );
+      await admin.query(
+        `INSERT INTO core.refresh_token (id, organisation_id, user_id, token_hash, application_target, family_id, expires_at, created_at, family_expires_at)
+         VALUES (gen_random_uuid(), $1, $2, $3, 'manager_web', gen_random_uuid(), now() + interval '1 hour', now(), now() + interval '1 day')`,
+        [target.organisationId, target.userId, randomBytes(32).toString('hex')],
+      );
+      const [{ security_version: before }] = await admin.query(`SELECT security_version FROM core."user" WHERE id = $1`, [target.userId]);
+
       await grant.run([], { email: target.email });
-      const [who] = await runtime.query(`SELECT current_user AS acting`);
-      expect(who.acting).toBe('crewflow_owner');
+
+      expect(await admin.query(`SELECT revoked_reason FROM core.user_session WHERE id = $1 AND revoked_at IS NOT NULL`, [sessionId])).toEqual([
+        { revoked_reason: 'platform_admin_granted' },
+      ]);
+      expect(await admin.query(`SELECT 1 FROM core.refresh_token WHERE user_id = $1 AND revoked_at IS NULL`, [target.userId])).toHaveLength(0);
+      const [{ security_version: after }] = await admin.query(`SELECT security_version FROM core."user" WHERE id = $1`, [target.userId]);
+      expect(Number(after)).toBe(Number(before) + 1);
     });
   });
 
@@ -187,6 +210,10 @@ describeIfDb('CLI commands on the owner login under M-T1 FORCE RLS (O-2)', () =>
       createdUserIds.push(users[0].id);
       expect(await admin.query(`SELECT revoked_at FROM core.platform_admin WHERE user_id = $1`, [users[0].id])).toEqual([{ revoked_at: null }]);
       expect(await admin.query(`SELECT 1 FROM core.user_role WHERE user_id = $1`, [users[0].id])).toHaveLength(1);
+      // Every platform_admin grant path is audited: exactly one entry, no fabricated actor, written once across two runs.
+      expect(
+        await admin.query(`SELECT actor_user_id, metadata FROM core.audit_log WHERE target_user_id = $1 AND action = $2`, [users[0].id, AuditAction.PLATFORM_ADMIN_GRANTED]),
+      ).toEqual([{ actor_user_id: null, metadata: { via: 'seed' } }]);
     });
   });
 
