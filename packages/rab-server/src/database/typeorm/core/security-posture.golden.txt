@@ -364,6 +364,8 @@ execute|member_holds_workspace_permission(uuid,text)|crewflow_app|true
 execute|member_holds_workspace_permission(uuid,text)|crewflow|true
 execute|metadata_guard()|crewflow_app|false
 execute|metadata_guard()|crewflow|true
+execute|metadata_version_bump()|crewflow_app|false
+execute|metadata_version_bump()|crewflow|true
 execute|mfa_accept_totp_step(uuid,bigint)|PUBLIC|false
 execute|mfa_accept_totp_step(uuid,bigint)|crewflow_app|true
 execute|mfa_accept_totp_step(uuid,bigint)|crewflow|false
@@ -546,6 +548,8 @@ execute|worker_resolve_workspace_organisation(uuid)|crewflow|true
 execute|worker_workspace_provisioning_health()|PUBLIC|false
 execute|worker_workspace_provisioning_health()|crewflow_app|true
 execute|worker_workspace_provisioning_health()|crewflow|false
+execute|workspace_metadata_state_guard()|crewflow_app|false
+execute|workspace_metadata_state_guard()|crewflow|true
 execute|workspace_schema_fingerprint(uuid)|crewflow_app|false
 execute|workspace_schema_fingerprint(uuid)|crewflow|true
 execute|workspace_schema_fingerprint_lines(uuid)|crewflow_app|false
@@ -658,6 +662,7 @@ owner|function|mark_workspace_schema_ready(uuid,integer)|rab_secure_owner|define
 owner|function|mark_workspace_schema_superseded(uuid,text)|rab_secure_owner|definer=true|search_path=pg_catalog, pg_temp
 owner|function|member_holds_workspace_permission(uuid,text)|crewflow|definer=false
 owner|function|metadata_guard()|crewflow|definer=false
+owner|function|metadata_version_bump()|crewflow|definer=false
 owner|function|mfa_accept_totp_step(uuid,bigint)|rab_secure_owner|definer=true|search_path=pg_catalog, pg_temp
 owner|function|mfa_consume_recovery_code(uuid,text)|rab_secure_owner|definer=true|search_path=pg_catalog, pg_temp
 owner|function|mfa_disable(uuid)|rab_secure_owner|definer=true|search_path=pg_catalog, pg_temp
@@ -722,6 +727,7 @@ owner|function|worker_release_dispatch_claim(text,uuid,uuid,integer)|rab_secure_
 owner|function|worker_reschedule_due_work(uuid,uuid,timestamp with time zone)|rab_secure_owner|definer=true|search_path=pg_catalog, core, pg_temp
 owner|function|worker_resolve_workspace_organisation(uuid)|rab_secure_owner|definer=true|search_path=pg_catalog, core, pg_temp
 owner|function|worker_workspace_provisioning_health()|rab_secure_owner|definer=true|search_path=pg_catalog, pg_temp
+owner|function|workspace_metadata_state_guard()|crewflow|definer=false
 owner|function|workspace_schema_fingerprint(uuid)|crewflow|definer=false
 owner|function|workspace_schema_fingerprint_lines(uuid)|crewflow|definer=false
 owner|function|workspace_schema_fingerprint_v2(uuid)|rab_secure_owner|definer=false
@@ -826,6 +832,7 @@ owner|table|worker_dispatch_pointer|rab_secure_owner
 owner|table|worker_due_work|rab_secure_owner
 owner|table|worker_event|crewflow
 owner|table|workspace_membership|crewflow
+owner|table|workspace_metadata_state|crewflow
 owner|table|workspace_schema_migration|crewflow
 owner|table|workspace_schema_registry|crewflow
 rls|account_invite|enable=true|force=true
@@ -922,6 +929,7 @@ rls|worker_dispatch_pointer|enable=true|force=true
 rls|worker_due_work|enable=true|force=true
 rls|worker_event|enable=true|force=true
 rls|workspace_membership|enable=true|force=true
+rls|workspace_metadata_state|enable=true|force=true
 rls|workspace_schema_migration|enable=true|force=true
 rls|workspace_schema_registry|enable=true|force=true
 role|crewflow_app|super=false|bypassrls=false|login=false|member_of=
@@ -1120,6 +1128,8 @@ table|worker_event|crewflow_app|S,I,U
 table|worker_event|crewflow|S,I,U,D,T,R,G
 table|workspace_membership|crewflow_app|S,I,U
 table|workspace_membership|crewflow|S,I,U,D,T,R,G
+table|workspace_metadata_state|crewflow_app|S,I,U
+table|workspace_metadata_state|crewflow|S,I,U,D,T,R,G
 table|workspace_schema_migration|crewflow_app|S
 table|workspace_schema_migration|crewflow|S,I,U,D,T,R,G
 table|workspace_schema_registry|crewflow_app|S
