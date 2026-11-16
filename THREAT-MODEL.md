@@ -8472,3 +8472,26 @@ Reversal:   Lower CLOCK_IN_CONFIRM_FLOOR_HOURS, or require a second approver (pa
   become `<br>` only after escaping; text part unchanged) and `bulk-email-abuse-cases.integration.spec.ts` (the same hostile
   message is stored escaped in `email_outbox.rendered_html` for both the staff and the manager route; a role with
   `staff.view` but not `staff.edit`, and one without `manager.manage`, get 403 and nothing is queued).
+
+## SF-3 — create-and-send uses the normal shift-creation checks and audit (branch fix/sf3-create-shift-and-send-scope, 2026-11-16)
+- **Threat:** a manager with `offer.send` → `POST /rest/v1/shifts/with-offers` (`OfferService.createShiftAndSend`) with the id
+  of a job role that is RLS-visible but not theirs, or an archived venue or job role → a shift (OPEN, then OFFERED) and live
+  offers were created anyway, with no `shift.created` audit row. It was a second shift-creation path that checked only the
+  venue scope (`assertVenueAccessibleTx`) and skipped `SchedulingService.resolveDraftTargetsTx` (job-role scope, both
+  archive checks), unlike `POST /rest/v1/shifts`. The job role also selects the snapshotted pay rate (venue role rate or the
+  role's default), so a foreign role could price the shift.
+- **Control:** one insert, `SchedulingService.insertNewShiftTx`, used by `createDraftTx` (DRAFT) and `createShiftAndSend`
+  (OPEN): venue + job-role scope (`assertVenueAccessibleTx` + `assertJobRoleOwned`, 404 out of scope, never 403) → archived
+  venue (409 `VENUE_ARCHIVED`) or job role (409 `JOB_ROLE_ARCHIVED`) refused → `resolvePayRate` snapshot → INSERT
+  (workspace from the venue) → `shift.created` audit (status + requiredCount, no pay) in the same transaction. Only DRAFT or
+  OPEN may be the initial status. Any refusal rolls back the whole transaction (no shift, no offer). Venue and job-role
+  rules, rate resolution and the per-recipient send are unchanged.
+- **Permission (owner decision batch 13, 2026-11-16):** create-and-send creates a shift, so it now needs `schedule.create`
+  as well as `offer.send`, like `POST /shifts`. Both flags are on the route guard (`PermissionGuard` × 2) and both are
+  re-checked in `createShiftAndSend` first (layer 2; 403 before any referenced id is read). Every default role that holds
+  `offer.send` also holds `schedule.create`, so only a custom role with `offer.send` alone loses the action.
+- **Tests:** `scheduling-offer-abuse-cases.integration.spec.ts` › "SF-3": a same-workspace job role created by someone else
+  → 404 "Job role not found." with no shift and no offer (and `POST /shifts` gives the same 404); a role with `offer.send`
+  but not `schedule.create` → 403, no shift; archived job role → 409 `JOB_ROLE_ARCHIVED`
+  and archived venue → 409 `VENUE_ARCHIVED`, no shift; a successful create-and-send writes exactly one `shift.created`
+  row (actor = caller, status `open`, no pay keys).

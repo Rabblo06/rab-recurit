@@ -75,13 +75,14 @@ export class OfferController {
 
   /**
    * The unified "New Shift" drawer: one call creates the shift and sends
-   * every selected staff member their offer. Gated on OFFER_SEND alone,
-   * same as `sendBulk` — the action's primary effect for the permission
-   * matrix is "sending an offer," shift creation is incidental to that.
+   * every selected staff member their offer. Needs OFFER_SEND (it sends
+   * offers) AND SCHEDULE_CREATE (it creates a shift, like POST /shifts) —
+   * owner decision batch 13, 2026-11-16 (SF-3). Both are re-checked in
+   * `OfferService.createShiftAndSend`.
    */
   @Post('shifts/with-offers')
   @ManagerApplication()
-  @UseGuards(PermissionGuard(PermissionFlag.OFFER_SEND))
+  @UseGuards(PermissionGuard(PermissionFlag.OFFER_SEND), PermissionGuard(PermissionFlag.SCHEDULE_CREATE))
   createShiftAndSend(@AuthUser() ctx: AuthContext, @Body() dto: CreateShiftAndSendDto) {
     return this.offerService.createShiftAndSend(ctx, dto);
   }
