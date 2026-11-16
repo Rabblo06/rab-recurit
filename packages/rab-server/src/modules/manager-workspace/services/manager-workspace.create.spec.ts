@@ -2,6 +2,11 @@ import { ManagerProfile } from '../../manager/entities/manager-profile.entity';
 import { ManagerWorkspace } from '../entities/manager-workspace.entity';
 import { ManagerWorkspaceService } from './manager-workspace.service';
 
+// Metadata engine M1 / E2: the standard-object sync needs a real database (covered by standard-objects-*.integration.spec.ts);
+// these no-database specs replace it with a stub that records the call.
+const mockStandardSync = jest.fn(async () => ({ objectsInserted: 25, objectsUpdated: 0, fieldsInserted: 344, fieldsUpdated: 0, optionsInserted: 0, optionsUpdated: 0 }));
+jest.mock('../../../engine/metadata/standard-objects/standard-objects-new-workspace', () => ({ syncStandardObjectsForNewWorkspace: (...a: unknown[]) => mockStandardSync(...(a as [])) }));
+
 /**
  * Unit test (no database): ManagerWorkspaceService.create must write an explicit, NON-ROUTABLE initial schema lifecycle state.
  * NULL is legacy and must not be the state of a newly created workspace.
@@ -51,5 +56,8 @@ describe('ManagerWorkspaceService.create: initial schema lifecycle', () => {
     expect(saved[0]!.schemaStatus).toBe('CREATING');
     expect(saved[0]!.schemaStatus).not.toBeNull();
     expect(saved[0]!.schemaStatus).not.toBe('READY');
+    // M1 / E2: the new workspace's standard objects are written in the same transaction, for the saved workspace row.
+    expect(mockStandardSync).toHaveBeenCalledTimes(1);
+    expect((mockStandardSync.mock.calls[0] as unknown[])[1]).toEqual(expect.objectContaining({ id: 'workspace-1', organisationId: 'org-1' }));
   });
 });
