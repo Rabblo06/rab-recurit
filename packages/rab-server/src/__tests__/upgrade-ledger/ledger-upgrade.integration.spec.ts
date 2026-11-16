@@ -173,8 +173,13 @@ describeIfB1("the upgrade logbook on real databases (Part B3, B1's start path an
     expect(of(rows, cutoverStep)).toEqual([['failed', 1], ['completed', 2]]);
     expect(attemptProblems(rows)).toEqual([]);
     expect(await complete(db)).toBe(true);
-    // The core copies are never written by the cutover: every seeded fact is identical.
-    expect(factDifferences(before.facts, await cl.facts(db))).toEqual([]);
+    // The core copies are never written by the cutover: every seeded fact is identical, except the ONE insert-only audit
+    // record per verified workspace the cutover writes by design (C3: workspace.hws_cutover_verified; one per seeded org).
+    const diff = factDifferences(before.facts, await cl.facts(db));
+    expect(diff.filter((d) => !d.startsWith('rows|audit_log|'))).toEqual([]);
+    expect(diff.filter((d) => d.startsWith('rows|audit_log|')).map((d) => d.replace(/^(rows\|audit_log\|[^:]+): 0:- -> 1:[0-9a-f]{32}$/, '$1 +1'))).toEqual(
+      diff.filter((d) => d.startsWith('rows|audit_log|')).map((d) => `${d.split(':')[0]} +1`),
+    );
     expect(before.ids.every((id) => ids(rows).includes(id))).toBe(true);
     const again = await start(db);
     expect([again.exitCode, again.serve]).toEqual([EXIT.ok, true]);

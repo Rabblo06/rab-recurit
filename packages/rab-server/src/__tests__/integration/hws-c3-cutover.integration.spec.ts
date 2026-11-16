@@ -348,7 +348,11 @@ describeIfDb('C3 HWS cutover copy path (option A′)', () => {
 
   it('re-check N-1: crewflow_app and crewflow_worker cannot forge a verified state (no app-callable marker; the trigger is INSERT-only)', async () => {
     const victim = await seedBusiness(await make('n1-victim'));
-    expect(await startedAny()).toBe(false);
+    // Release 0.7.0: on the shared CI database (built by a 0.7.0 start, sentinel written) other specs' workspaces were
+    // verified at insertion, so started_any() can already be true here. What matters: the forgery never changes it, and
+    // the victim never gets a state row (asserted below).
+    const startedBefore = await startedAny();
+    expect(await stateOf(victim)).toBeNull();
     // The 3-step forgery's first step (fake a new workspace's columns); errors swallowed so the attempt goes on either way.
     const forge = [
       `DO $f$ BEGIN UPDATE core.manager_workspace SET created_at = now(), schema_status = 'CREATING' WHERE id = '${victim.id}'; EXCEPTION WHEN OTHERS THEN NULL; END $f$`,
@@ -383,7 +387,7 @@ describeIfDb('C3 HWS cutover copy path (option A′)', () => {
       await deactivate();
     }
     expect(await stateOf(victim)).toBeNull();
-    expect(await startedAny()).toBe(false);
+    expect(await startedAny()).toBe(startedBefore);
   });
 
   let w1: Seeded;
