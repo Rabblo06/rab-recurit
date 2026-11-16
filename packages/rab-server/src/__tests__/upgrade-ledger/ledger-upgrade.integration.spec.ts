@@ -117,7 +117,9 @@ describeIfB1("the upgrade logbook on real databases (Part B3, B1's start path an
   /** Per database: the backup marker env (made once, the first time a start needs it). */
   const backups = new Map<string, Record<string, string>>();
   const backupOf = async (db: string) => {
-    if (!backups.has(db)) backups.set(db, await cl.backupEnv(db));
+    // Release 0.7.0 runs with HWS on (production compose): explicit, so an in-process run (upgrade --force) in an HWS-off CI job
+    // does not defer the cutover.
+    if (!backups.has(db)) backups.set(db, { ...(await cl.backupEnv(db)), HWS_RUNTIME_ENABLED: 'true' });
     return backups.get(db)!;
   };
   /** The start path with this database's verified backup marker (the 0.7.0 cutover refuses to copy without one). */
