@@ -1074,8 +1074,12 @@ async function ciDatabase(ctx: Ctx, major: number): Promise<number> {
   r.database = db;
   await createEmptyDatabase(ctx, db);
   await providerStep(ctx, db, r);
-  const c = await runChild(entry, childEnvironment(ownerUrl(ctx, db)));
-  r.evidence.push(`child (${entry === SOURCE_ENTRYPOINT ? 'source via ts-node' : 'dist'}): ${summary(c)}`);
+  // Release 0.7.0: the CI database is built in the HWS mode of the job that will use it (the job's HWS_RUNTIME_ENABLED, when
+  // set). The first start with HWS on activates the cutover (one-way sentinel; an HWS-off process then refuses to boot and the
+  // core copies are read-only), so an HWS-OFF job must get a database whose cutover stayed deferred, as production's would.
+  const hws = process.env.HWS_RUNTIME_ENABLED;
+  const c = await runChild(entry, childEnvironment(ownerUrl(ctx, db), hws === undefined ? {} : { HWS_RUNTIME_ENABLED: hws }));
+  r.evidence.push(`child (${entry === SOURCE_ENTRYPOINT ? 'source via ts-node' : 'dist'}, HWS_RUNTIME_ENABLED=${hws ?? 'unset'}): ${summary(c)}`);
   expect(r, c.exitCode === EXIT.ok && c.result?.state === 'EMPTY' && c.result?.serve === true, 'fresh install: exit 0, EMPTY, serve=true');
   neverLoadedGated(r, c);
   if (c.exitCode === EXIT.ok) await assertHeadState(ctx, db, r);
