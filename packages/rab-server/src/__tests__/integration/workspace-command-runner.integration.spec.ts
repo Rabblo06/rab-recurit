@@ -785,8 +785,12 @@ describeIfDb('Part D workspace command runner (integration)', () => {
     let fail = true;
     const registry = withReal({ '0-7': [probeColumn, cmd('Last07', 1, { run: async ({ workspaceId }) => { if (fail && workspaceId === b.id) throw new Error('b not yet'); } })] });
     await runner({ workspaceRegistry: registry, workspaceIds: [a.id, b.id] });
-    // A 0.7.0-built database already holds this row (release 0.7.0): kept as it is.
+    // A 0.7.0-built database already holds these rows (release 0.7.0): kept as they are. On a database built with HWS off the
+    // cutover step is DEFERRED (not recorded), so its completion is seeded here: this case is about workspace steps.
     await admin.query(`INSERT INTO core.upgrade_migration (name, status, attempt, executed_by_version) VALUES ('0.7.0_TypeOrmMigrations', 'completed', 1, '0.7.0') ON CONFLICT DO NOTHING`);
+    if (!(await admin.query(`SELECT 1 FROM core.upgrade_migration WHERE workspace_id IS NULL AND name = '0.7.0_HwsCutover_1786721540100' AND status = 'completed'`)).rows.length) {
+      await admin.query(`INSERT INTO core.upgrade_migration (name, status, attempt, executed_by_version) VALUES ('0.7.0_HwsCutover_1786721540100', 'completed', 1, '0.7.0') ON CONFLICT DO NOTHING`);
+    }
     const at = (force: boolean) =>
       new UpgradeRun({ codeVersion: '0.8.0', previousVersions: ['0.6.0', '0.7.0'], force, log: (l) => lines.push(l), workspaceRegistry: registry, workspaceRunner: { workspaceIds: [a.id, b.id] } }).beforeApply(session, {
         fresh: false,
