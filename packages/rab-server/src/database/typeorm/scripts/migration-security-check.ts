@@ -53,6 +53,7 @@ import { DataSourceOptions } from 'typeorm';
 
 import { coreMigrationDataSourceOptions, GuardedMigrationDataSource } from '../core/core.datasource';
 import { MigrationIdentityError } from '../core/migration-identity';
+import { METADATA_TABLES } from '../core/metadata-tables-sql';
 import { postMigrationPrivilegeProblems, privilegeDrift, privilegeDriftSnapshot } from '../core/migration-privilege-drift';
 import {
   PHASE_0B_MIGRATION_TIMESTAMP,
@@ -219,6 +220,20 @@ export const REVIEWED_MIGRATION_DRIFT: Readonly<Record<string, readonly string[]
     "+ policy|hws_cutover_state|hws_cutover_state_crewflow_update|w|permissive=true|roles=crewflow|using=((CURRENT_USER = 'crewflow'::name) AND (organisation_id = core.current_org()))|check=((CURRENT_USER = 'crewflow'::name) AND (organisation_id = core.current_org()))",
     "+ policy|hws_cutover_state|hws_cutover_state_secure_owner_definer|*|permissive=true|roles=rab_secure_owner|using=(CURRENT_USER = 'rab_secure_owner'::name)|check=(CURRENT_USER = 'rab_secure_owner'::name)",
     '+ policy|hws_cutover_state|hws_cutover_state_tenant_read|r|permissive=true|roles=public|using=(organisation_id = core.current_org())|check=',
+  ],
+  // Metadata engine M1 / E1 (SQL owner-approved 2026-11-16; docs/plans/phase-x4/M1-SQL-FOR-OWNER.md § M1-meta): the plain
+  // tenant policy of each of the five metadata tables, added only (FOR ALL TO PUBLIC, USING = WITH CHECK on the bound
+  // organisation AND workspace). Owner, FORCE RLS, grants and triggers are pinned by the golden posture snapshot and the
+  // migration's own post-condition; no runtime login gains a privilege it did not have.
+  '1786721550000-MetadataEngineTables': METADATA_TABLES.map(
+    (t) =>
+      `+ policy|${t}|${t}_tenant|*|permissive=true|roles=public|using=((organisation_id = core.current_org()) AND (workspace_id = core.current_workspace()))|check=((organisation_id = core.current_org()) AND (workspace_id = core.current_workspace()))`,
+  ),
+  // Metadata engine M1 / E5 (DRAFT, owner SQL review pending; docs/plans/phase-x4/M1-SQL-FOR-OWNER.md § M1-cache): the same
+  // plain tenant policy on the metadata version table core.workspace_metadata_state. Owner, FORCE RLS, grants (no DELETE)
+  // and triggers are pinned by the migration's own post-condition; no runtime login gains a privilege it did not have.
+  '1786721560000-MetadataVersionState': [
+    "+ policy|workspace_metadata_state|workspace_metadata_state_tenant|*|permissive=true|roles=public|using=((organisation_id = core.current_org()) AND (workspace_id = core.current_workspace()))|check=((organisation_id = core.current_org()) AND (workspace_id = core.current_workspace()))",
   ],
 };
 

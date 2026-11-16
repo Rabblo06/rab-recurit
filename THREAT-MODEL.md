@@ -8128,3 +8128,96 @@ Reversal:   Lower CLOCK_IN_CONFIRM_FLOOR_HOURS, or require a second approver (pa
   - hws-startup-guard.spec: the HWS-off boot refusal;
   - the security-posture and semantic goldens (PG16/17/18), the R4 secure-owner invariants, check-rls-coverage
     (`hws_cutover_activation` forced), and the restricted-migrator drift review.
+
+## Metadata engine M1: metadata tables (E1, #165), versioned cache (E5, #164), standard-object sync (E2, #166) (branches feat/metadata-m1-tables, feat/metadata-m1-cache, feat/metadata-m1-sync; M1 SQL owner-approved on conditions 2026-11-15, owner decision batch 11; final SQL incl. universal_identifier approved 2026-11-16)
+
+- **What.** Crewflow's re-implementation of Twenty's metadata engine (twentyhq/twenty @ eedb0a73; behaviour re-implemented,
+  never copied — AGPL). E1: `core.object_metadata`, `field_metadata`, `field_metadata_option`, `index_metadata`,
+  `index_field_metadata` and the trigger function `core.metadata_guard()` (migration MetadataEngineTables1786721550000).
+  E5: `core.workspace_metadata_state` (one version row per workspace) and the per-workspace metadata cache
+  (MetadataVersionState1786721560000). E2: the 21 workspace tables synced into metadata as standard objects, per workspace
+  (the 0.6.0 SyncStandardObjects upgrade step and the new-workspace path). Each table carries `organisation_id` +
+  `workspace_id`. Metadata describes another tenant's data model and decides which columns the generic API exposes
+  (money, sensitivity, read-only), so a write to it is a write to what the engine trusts.
+- **Threats.**
+  1. A workspace reads or changes another workspace's metadata, or any metadata with no tenant bound.
+  2. The request path loosens built-in metadata: unlocks a locked field, clears `is_money` / `is_sensitive` /
+     `is_ui_read_only`, renames an API name or repoints a physical name, deletes a standard or system object, or adds a
+     custom field to a payroll / attendance object.
+  3. A custom row takes ("squats") the universal identifier of a standard object or field before the sync inserts it, so the
+     sync fails for that workspace or adopts the wrong row.
+  4. A poisoned or stale cache entry serves a workspace another workspace's metadata, or old metadata after a change.
+  5. The privileged section of the sync leaks the `crewflow` role or a binding into later statements, or runs anything
+     beyond the reviewed statements while elevated.
+- **Controls.**
+  - **Tenant isolation (all five tables):** ENABLE + FORCE ROW LEVEL SECURITY and one tenant policy
+    (`organisation_id = core.current_org() AND workspace_id = core.current_workspace()`, USING = WITH CHECK) in the same
+    migration; composite foreign keys to `core.manager_workspace (id, organisation_id)` and between the metadata tables
+    (no cross-workspace parent, relation target or label identifier). Owner `crewflow` (handed over inside
+    withCrewflowCoreCreate), `crewflow_app` S/I/U/D, nothing for PUBLIC: the same shape as shift, venue, manager_venue and
+    role_object/field_permission (security-posture.golden.txt; same policy hash in the semantic golden). `crewflow_owner`
+    reaches them through its membership of `crewflow` (INHERIT; ADMIN only on crewflow_app), so FORCE RLS and the guard
+    are the boundary; crewflow_app lacks only TRUNCATE, which the guard refuses, so no grant-parity trigger is needed.
+  - **Identity split (`core.metadata_guard()`, BEFORE INSERT / UPDATE / DELETE and BEFORE TRUNCATE on all five):** only
+    `crewflow`, `rab_secure_owner` or a superuser (the M-T2 allow-list) may insert or change built-in / locked metadata,
+    options or index fields of built-in / locked fields, or indexes on built-in objects. The request path (crewflow_owner,
+    crewflow_app) may change only display columns (label, description, icon, position) of built-in rows, and of system rows
+    only the position. Physical names, type, kind flags, API names (OB-10), universal identifier, object and relation
+    targets are immutable for everyone; a lock never comes off; standard / system objects and locked / system fields are
+    never deleted directly (cascades from a custom object or a workspace still work). Parent lookups fail closed (23503)
+    and hold the parent FOR SHARE. Error messages carry no input values. SECURITY INVOKER, pinned search_path, no PUBLIC
+    EXECUTE.
+  - **Payroll / attendance pinned to system:** `object_metadata_payroll_locked_ck` forces the 7 payroll / attendance
+    objects (attendance, attendance_correction, payroll_record, payroll_run, payroll_run_line, payslip, payslip_document)
+    to `is_system AND NOT allows_custom_fields`, so no custom field and no label change reaches them. Money fields are only
+    locked, sensitive, read-only built-in NUMBERs; CURRENCY only on custom objects; core references only for four known
+    core tables; labels refuse control, bidi and zero-width characters.
+  - **Universal identifier (owner batch 11, Twenty syncable-entity alignment):** every object and field row carries one,
+    NOT NULL, unique per workspace (`(workspace_id, universal_identifier)`), immutable. `<table>_universal_identifier_kind_ck`
+    splits the namespace: custom rows hold a random version-4 UUID (column DEFAULT gen_random_uuid()), built-in rows the
+    sync's deterministic version-8 UUID. A custom row therefore can never squat a standard identifier, and a built-in insert
+    that forgets its identifier gets the v4 default and is refused (fails closed). Options, indexes and index fields are
+    keyed by immutable natural keys and not synced by identifier.
+  - **E5 cache (#164):** the version row moves in the same transaction as every metadata change (AFTER ROW trigger
+    `core.metadata_version_bump()`, at most once per transaction, never backwards; the row is written only by that
+    trigger, guarded by `core.workspace_metadata_state_guard()`), so committed metadata and the version never disagree
+    (Twenty bumps after commit). Concurrent first changes serialise on a per-workspace advisory lock
+    (`pg_advisory_xact_lock(hashtextextended('crewflow:metadata:' || workspace))`). Redis entries are HMAC-SHA256 envelopes
+    bound to the Redis key, under a purpose sub-key derived from the existing auth-cache MAC key (APP_AUTH_CACHE_HMAC_KEY /
+    APP_SECRET, no new secret); a bad MAC, a different identity (workspace, version, bump time) or any doubt rebuilds from
+    PostgreSQL under the caller's tenant binding.
+  - **E2 sync (#166):** built-in metadata is written in a narrow privileged section: `SAVEPOINT std_sync`, then
+    `SET LOCAL ROLE crewflow`, only the fixed parameterised STANDARD_SYNC_SQL statements (read stored rows, insert / update
+    the differences, never a delete), then the role and bindings are restored and checked. On any error
+    `ROLLBACK TO SAVEPOINT std_sync` reverts role, bindings and metadata together. Pinned at runtime and statically by the
+    elevated-statements specs.
+  - **Upgrade runner (Part D):** a workspace command that declares `writesWorkspaceMetadata` may INSERT / UPDATE only its own
+    workspace's rows of object_metadata, field_metadata, field_metadata_option and workspace_metadata_state
+    (`WORKSPACE_METADATA_TABLES`, per-table write counters); every other write outside the schema keeps the "no write" rule.
+- **Accepted limits (owner-accepted 2026-11-15, same boundary as option N / BC-01).**
+  - **Injected SQL is detection-only.** `crewflow_owner` can, through its membership of `crewflow`, `SET ROLE crewflow`,
+    ALTER, DISABLE TRIGGER or DROP these tables and replace the guard. The guard and the checks protect normal code paths;
+    the semantic posture monitor detects a disabled or re-pointed trigger or a changed body afterwards.
+  - **TRUNCATE rules.** TRUNCATE ignores RLS: it is refused to the request path on all five tables (also through
+    `TRUNCATE core.manager_workspace CASCADE`) and allowed for the privileged identities (operators; test teardowns
+    truncating as the superuser). The E5 version row is not TRUNCATE-guarded; the bump time in the cache identity makes a
+    recreated row a new identity.
+  - **pg_trigger_depth gap.** The delete lock applies at trigger depth 1 (a direct DELETE); deeper deletes are let through
+    so FK cascades (workspace, organisation, a custom object's fields, a custom field's options) work. A DELETE issued from
+    inside another trigger or function would also pass; creating one needs the BC-01 rights above.
+  - **M1-S1 (SECURITY TRADE-OFF): the Part D runner may write its own workspace's metadata.** A command declaring
+    `writesWorkspaceMetadata` runs as `crewflow` (the guard's privileged identity) and may insert / update that workspace's
+    built-in metadata. The runner's write counters restrict it to the four tables above and to INSERT / UPDATE in the bound
+    workspace; commands are reviewed code, never input-driven (same D-T1 detector limits as Part D).
+  - **Universal identifier namespace is stricter than Twenty (owner-accepted 2026-11-16).** Twenty accepts any UUID; here custom = v4, built-in = v8.
+    It is the cheapest database rule that stops squatting; if standard identifiers ever become hand-written constants, the
+    CHECK changes in a new migration. The M2 executor must give the built-in system fields of custom objects a v8 identifier.
+- **Tests.** Unit: the reviewed SQL text (metadata-tables-sql.spec.ts, metadata-version-sql.spec.ts), the cache envelope and
+  LRU, the sync plan and its golden identifier digest, the elevated statements. Integration on the owner-login database as
+  crewflow_owner (metadata-tables.integration.spec.ts): MD-1 catalog; MD-2 zero rows unbound; MT-07 cross-tenant reads and
+  WITH CHECK; MD-3 composite keys; MT-26 / #165 the identity split and immutability; MD-4 type and shape rules; MD-5
+  TRUNCATE; MD-6 workspace cascade; MD-7 the read service; MD-8 the RLS coverage gate; MD-9 universal identifiers; MD-10
+  owner condition 2, on the real request path through TenantContextService (bound workspace read / write only, zero rows
+  and no write unbound, no access to another workspace). #164: the version and cache specs, including concurrent first
+  changes (condition 1). #166: the catalog, new-workspace and M1-S1 runner specs, and the role / binding restore after an
+  error in the elevated section (condition 3).
