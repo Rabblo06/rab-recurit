@@ -1479,7 +1479,8 @@ export class AttendanceService {
     if (clockOutAt && clockOutAt.getTime() > now.getTime()) throw invalid('The clock-out time cannot be in the future.');
     // Owner decision 2026-11-15: an early clock-in is no longer refused outright. Below the hard floor it is (422);
     // between the floor and the allowance it needs the explicit confirmation, which the caller checks after its state
-    // rules. Only a clock-in the manager is entering now is judged; an unchanged, already-stored one is kept as it is.
+    // rules. `clockInEntered`: the caller judges this clock-in (a new one, or a stored one that is now unusual and was
+    // never confirmed — `recordOnExisting`); an already-confirmed or usual stored one is kept as it is.
     const unusualEarliest = clockInEntered ? this.checkEnteredClockIn(window, clockInAt) : null;
     if (clockInAt.getTime() > latest) throw invalid(`The clock-in time cannot be more than ${grace} minutes after the scheduled end.`);
     if (!clockOutAt) return unusualEarliest;
@@ -1658,6 +1659,24 @@ export class AttendanceService {
     });
   }
 
+  /**
+   * Whether a manager explicitly confirmed exactly this clock-in for this attendance: an `attendance.corrected` /
+   * `attendance.manager_recorded` audit row with `unusualClockInConfirmed` whose `confirmedClockInAt` equals it — the same
+   * predicate the shift report uses for `unusualClockInConfirmed`. Read in the caller's tenant-bound transaction
+   * (`core.audit_log` RLS is organisation-scoped), through the (organisation_id, entity_type, entity_id) index.
+   */
+  private async hasClockInConfirmation(manager: EntityManager, ctx: AuthContext, attendanceId: string, clockInAt: Date): Promise<boolean> {
+    const rows = await manager.query(
+      `SELECT 1 FROM core.audit_log
+        WHERE organisation_id = $1 AND entity_type = 'attendance' AND entity_id = $2
+          AND action IN ('attendance.corrected', 'attendance.manager_recorded') AND metadata->>'unusualClockInConfirmed' = 'true'
+          AND (metadata->>'confirmedClockInAt')::timestamptz = $3
+        LIMIT 1`,
+      [ctx.organisationId, attendanceId, clockInAt],
+    );
+    return rows.length > 0;
+  }
+
   /** `recordAttendance` on a seat that already has attendance: change only what differs, through the shared write path. */
   private async recordOnExisting(
     manager: EntityManager,
@@ -1703,8 +1722,19 @@ export class AttendanceService {
     if ((input.dto.expectedVersion ?? null) !== currentVersion) {
       throw new ConflictException('This attendance was changed by someone else. Refresh to see the latest times.');
     }
+    // Owner decision 2026-11-16 (review finding 2, option b): the clock-in is judged when the manager enters a new one,
+    // AND when the stored one is kept but is now earlier than the allowance against the seat's CURRENT start (e.g. the
+    // seat start moved later) without a confirmation of exactly that time on record. Then this write needs the explicit
+    // confirmation (409 otherwise) and the hard floor applies (422). An already-confirmed stored time is never re-asked.
+    // "Not inside" the allowance, so an unreadable bound is judged rather than skipped.
     const clockInEntered = corrections.some((c) => c.field === 'clockInAt');
-    const unusualEarliest = this.assertManagerEnteredTimes(input.window, input.now, clockInAt, clockOutAt, breakMinutes ?? input.scheduledBreak, clockInEntered);
+    const storedNeedsConfirmation =
+      !clockInEntered &&
+      !(clockInAt.getTime() >= this.attendanceWindow(input.window).opensAt.getTime()) &&
+      !(await this.hasClockInConfirmation(manager, ctx, attendance.id, clockInAt));
+    const unusualEarliest = this.assertManagerEnteredTimes(
+      input.window, input.now, clockInAt, clockOutAt, breakMinutes ?? input.scheduledBreak, clockInEntered || storedNeedsConfirmation,
+    );
     const { status, recovered } = this.resolveCorrectionStatus(attendance, assignment, shift, input.now, clockOutAt);
     const unusualAudit = this.requireUnusualClockInConfirmation(unusualEarliest, clockInAt, input.dto.confirmUnusualClockIn);
     const before = {

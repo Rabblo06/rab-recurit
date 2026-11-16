@@ -631,6 +631,98 @@ describeIfDb('manual attendance recording and confirmed no-show (integration)', 
       expect(breakOnly.body.staff[0]).toMatchObject({ clockInAt: early, breakMinutes: 45, unusualClockInConfirmed: true });
     });
 
+    // Owner decision 2026-11-16 (review finding 2, option b): a STORED clock-in that is now unusually early against the
+    // seat's current start (its start moved later) and was never confirmed is judged on any record-attendance write.
+    describe('a stored clock-in made unusual by a later seat start', () => {
+      const tablesOf = async (shiftId: string) => {
+        const shift = await businessTableOf(adminDataSource, 'shift', shiftId);
+        return { shift, seat: siblingTable(shift, 'shift_assignment'), attendance: siblingTable(shift, 'attendance') };
+      };
+      /** Moves the shift and the seat to start at `startsAt` (keeping `endsAt`), as a later reschedule would. */
+      const moveSeat = async (shiftId: string, startsAt: Date, endsAt: Date) => {
+        const t = await tablesOf(shiftId);
+        await adminDataSource.query(`UPDATE ${t.shift} SET starts_at = $2, ends_at = $3 WHERE id = $1`, [shiftId, startsAt, endsAt]);
+        await adminDataSource.query(`UPDATE ${t.seat} SET period = tstzrange($2, $3, '[)') WHERE shift_id = $1`, [shiftId, startsAt, endsAt]);
+      };
+      const storedClockIn = async (shiftId: string): Promise<Date> =>
+        (await adminDataSource.query(`SELECT clock_in_at FROM ${(await tablesOf(shiftId)).attendance} WHERE shift_id = $1`, [shiftId]))[0].clock_in_at as Date;
+      const correctedAudits = async (attendanceId: string) =>
+        adminDataSource.query(`SELECT metadata FROM core.audit_log WHERE entity_id = $1 AND action = 'attendance.corrected'`, [attendanceId]);
+
+      it('recording only the clock-out is refused (409) until confirmed; Confirm saves, audits and flags; no second prompt afterwards', async () => {
+        const w = endedAgo(3 * HOUR);
+        const s = await seedSeat({ ...w, attendance: 'missing_clock_out' });
+        const stored = await storedClockIn(s.shiftId); // start + 15 min, an ordinary app punch
+        // The seat now starts 16 min after that punch: the stored clock-in is 1 min before the allowance.
+        const newStart = new Date(stored.getTime() + 16 * MIN);
+        await moveSeat(s.shiftId, newStart, w.endsAt);
+        const before = (await reportOf(s.vmToken, s.shiftId)).staff[0];
+        expect(before.unusualClockInConfirmed).toBe(false);
+        const body = { clockOutAt: at(w.endsAt, 0), reasonCode: 'forgot_clock_out', expectedVersion: before.attendanceVersion };
+
+        const refused = await record(s.vmToken, s.shiftId, s.staff, body);
+        expect(refused.status).toBe(409);
+        expect(refused.body).toMatchObject({
+          code: 'CLOCK_IN_CONFIRMATION_REQUIRED',
+          earliestAllowed: new Date(newStart.getTime() - 15 * MIN).toISOString(),
+          enteredTime: stored.toISOString(),
+        });
+        const [rowAfterRefusal] = await attendanceRows(s.shiftId);
+        expect(rowAfterRefusal).toMatchObject({ status: 'missing_clock_out', clock_out_at: null });
+        expect(await corrections(s.shiftId)).toHaveLength(0);
+        expect(await correctedAudits(s.attendanceId!)).toHaveLength(0);
+
+        const saved = await record(s.vmToken, s.shiftId, s.staff, { ...body, confirmUnusualClockIn: true });
+        expect(saved.status).toBe(200);
+        expect(saved.body.staff[0]).toMatchObject({ clockInAt: stored.toISOString(), clockOutAt: at(w.endsAt, 0), unusualClockInConfirmed: true });
+        expect((await corrections(s.shiftId)).map((r: any) => r.field)).toEqual(['clockOutAt']); // the clock-in itself is unchanged
+        const audits = await correctedAudits(s.attendanceId!);
+        expect(audits).toHaveLength(1);
+        expect(audits[0].metadata).toMatchObject({
+          source: 'record_attendance', fields: ['clockOutAt'], unusualClockInConfirmed: true,
+          earliestAllowed: new Date(newStart.getTime() - 15 * MIN).toISOString(), confirmedClockInAt: stored.toISOString(),
+        });
+
+        // Already confirmed: a later break-only change is not asked about again.
+        const again = await record(s.vmToken, s.shiftId, s.staff, {
+          breakMinutes: 45, reasonCode: 'forgot_clock_out', expectedVersion: saved.body.staff[0].attendanceVersion,
+        });
+        expect(again.status).toBe(200);
+        expect(again.body.staff[0]).toMatchObject({ breakMinutes: 45, unusualClockInConfirmed: true });
+      });
+
+      it('beyond the 12 h floor against the moved start: 422 even with the confirmation, nothing written', async () => {
+        const w = endedAgo(20 * HOUR);
+        const s = await seedSeat({ ...w, attendance: 'missing_clock_out' });
+        const stored = await storedClockIn(s.shiftId);
+        // The seat now starts 12 h 1 min after the stored punch (and lasts an hour, still well in the past).
+        const newStart = new Date(stored.getTime() + 12 * HOUR + MIN);
+        const newEnd = new Date(newStart.getTime() + HOUR);
+        await moveSeat(s.shiftId, newStart, newEnd);
+        const v = (await reportOf(s.vmToken, s.shiftId)).staff[0].attendanceVersion;
+        const res = await record(s.vmToken, s.shiftId, s.staff, {
+          clockOutAt: newEnd.toISOString(), reasonCode: 'forgot_clock_out', expectedVersion: v, confirmUnusualClockIn: true,
+        });
+        expect(res.status).toBe(422);
+        expect(res.body).toMatchObject({ code: 'CLOCK_IN_TOO_EARLY_ABSOLUTE', earliestPossible: new Date(newStart.getTime() - 12 * HOUR).toISOString() });
+        const [row] = await attendanceRows(s.shiftId);
+        expect(row).toMatchObject({ status: 'missing_clock_out', clock_out_at: null });
+        expect(await corrections(s.shiftId)).toHaveLength(0);
+        expect(await correctedAudits(s.attendanceId!)).toHaveLength(0);
+      });
+
+      it('a stored clock-in still inside the allowance after the move is not asked about', async () => {
+        const w = endedAgo(3 * HOUR);
+        const s = await seedSeat({ ...w, attendance: 'missing_clock_out' });
+        const stored = await storedClockIn(s.shiftId);
+        await moveSeat(s.shiftId, new Date(stored.getTime() + 15 * MIN), w.endsAt); // exactly at the allowance
+        const v = (await reportOf(s.vmToken, s.shiftId)).staff[0].attendanceVersion;
+        const res = await record(s.vmToken, s.shiftId, s.staff, { clockOutAt: at(w.endsAt, 0), reasonCode: 'forgot_clock_out', expectedVersion: v });
+        expect(res.status).toBe(200);
+        expect(res.body.staff[0].unusualClockInConfirmed).toBe(false);
+      });
+    });
+
     it('the confirmation never widens scope: another workspace and another organisation get 404 with it, nothing written', async () => {
       const w = endedAgo(2 * HOUR);
       const s = await seedSeat({ ...w, assignment: 'no_show' });
