@@ -17,7 +17,7 @@ import { createAdminDataSource } from './helpers/admin-datasource';
 import { generateFixturePassword } from './helpers/fixture-password';
 import { integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
 import { provisionFixtureWorkspace } from './helpers/test-identities';
-import { businessSchema, withCutoverInactive } from './helpers/hws-fixtures';
+import { businessSchema, businessTable, hwsRuntimeOn, withCutoverInactive } from './helpers/hws-fixtures';
 
 const FIXTURE_PASSWORD = generateFixturePassword();
 
@@ -193,8 +193,8 @@ describeIfDb('composite workspace FK attack (integration)', () => {
     await dataSource.initialize();
     adminDataSource = createAdminDataSource();
     await adminDataSource.initialize();
-    // Release 0.7.0: this suite exercises the PRE-cutover world (the core copies / the HWS-off path), which an activated
-    // database fences (core copies read-only). The sentinel is removed for this suite only and put back afterwards.
+    // Release 0.7.0: this describe proves the composite FKs on the CORE copies (the pre-cutover world, read-only once activated);
+    // the activated variant below proves the same attacks in the workspace schemas. Sentinel restored after.
     restoreCutover = await withCutoverInactive(adminDataSource);
     passwordHashing = new PasswordHashingService();
   });
@@ -291,4 +291,215 @@ describeIfDb('composite workspace FK attack (integration)', () => {
       ),
     );
   }, 30_000);
+});
+
+/**
+ * Release 0.7.0: the SAME attacks in the ACTIVATED state production runs after the HWS cutover (the in-band CI database is
+ * built by a 0.7.0 start with HWS on: sentinel written, every new workspace verified at creation, core copies read-only).
+ * Business rows live in each workspace's own schema; every attack writes INTO workspace A's schema, as the runtime login bound
+ * to A, pointing at workspace B's rows. Expected: the same refusals (23503 at the database), the workspace_id A -> B mutation
+ * refused, A's own same-workspace relationship accepted, and the core copy no way around it (42501, the fence). HWS-off runs
+ * skip it (that state does not exist with HWS off).
+ */
+const describeActivated = RUN && hwsRuntimeOn() ? describe : describe.skip;
+
+describeActivated('composite workspace FK attack, activated (post-cutover) state (integration)', () => {
+  let dataSource: DataSource;
+  let adminDataSource: DataSource;
+  let passwordHashing: PasswordHashingService;
+
+  async function withContext<T>(
+    ctx: { organisationId: string; workspaceId: string | null; userId: string },
+    fn: (manager: DataSource['manager']) => Promise<T>,
+  ): Promise<T> {
+    return dataSource.transaction(async (manager) => {
+      await manager.query(`SELECT set_config('rab.organisation_id', $1, true)`, [ctx.organisationId]);
+      await manager.query(`SELECT set_config('rab.workspace_id', $1, true)`, [ctx.workspaceId ?? '']);
+      await manager.query(`SELECT set_config('rab.user_id', $1, true)`, [ctx.userId]);
+      await manager.query(`SELECT set_config('rab.role', '', true)`);
+      return fn(manager);
+    });
+  }
+  const one = async (manager: DataSource['manager'], sql: string, params: unknown[]) => ((await manager.query(sql, params)) as Array<{ id: string }>)[0]!.id;
+
+  /** One workspace: identities in core (not business tables), business rows in the workspace's own schema. */
+  async function seedActivated(organisationId: string, label: string) {
+    let workspaceId!: string;
+    let managerUserId!: string;
+    let staffProfileId!: string;
+    await withContext({ organisationId, workspaceId: null, userId: randomUUID() }, async (manager) => {
+      let role = await manager.findOne(Role, { where: { organisationId, key: 'manager' } });
+      if (!role) {
+        const roleResult = await manager.insert(Role, { organisationId, key: 'manager', name: 'Manager', isSystem: true });
+        role = await manager.findOneByOrFail(Role, { id: roleResult.identifiers[0]!.id as string });
+      }
+      const managerResult = await manager.insert(User, {
+        organisationId,
+        email: `${label}-mgr-${randomUUID()}@example.test`,
+        passwordHash: await passwordHashing.hash(FIXTURE_PASSWORD),
+        firstName: label,
+        lastName: 'Manager',
+        status: UserStatus.ACTIVE,
+      });
+      managerUserId = managerResult.identifiers[0]!.id as string;
+      await manager.insert(UserRole, { userId: managerUserId, roleId: role.id, organisationId });
+      await manager.query(`SELECT set_config('rab.user_id', $1, true)`, [managerUserId]);
+      const workspace = await manager.save(ManagerWorkspace, {
+        organisationId,
+        ownerUserId: managerUserId,
+        name: `${label} Workspace ${managerUserId}`,
+        subdomain: `${label}-${managerUserId.slice(0, 8)}`,
+        status: 'active',
+      });
+      await provisionFixtureWorkspace(manager, workspace.id);
+      workspaceId = workspace.id;
+      await manager.query(`SELECT set_config('rab.workspace_id', $1, true)`, [workspaceId]);
+      await manager.insert(ManagerProfile, { organisationId, userId: managerUserId, type: ManagerType.INTERNAL, workspaceId });
+      const staffResult = await manager.insert(User, {
+        organisationId,
+        email: `${label}-staff-${randomUUID()}@example.test`,
+        passwordHash: await passwordHashing.hash(FIXTURE_PASSWORD),
+        firstName: label,
+        lastName: 'Staff',
+        status: UserStatus.ACTIVE,
+      });
+      const staffUserId = staffResult.identifiers[0]!.id as string;
+      staffProfileId = await one(
+        manager,
+        `INSERT INTO ${businessTable(workspaceId, 'staff_profile')} (organisation_id, user_id, staff_ref, created_by, workspace_id) VALUES ($1, $2, $3, $4, $5) RETURNING id`,
+        [organisationId, staffUserId, `STF-${label}-${randomUUID().slice(0, 8)}`, managerUserId, workspaceId],
+      );
+    });
+    let venueId!: string;
+    let jobRoleId!: string;
+    let shiftId!: string;
+    let shiftAssignmentId!: string;
+    await withContext({ organisationId, workspaceId, userId: managerUserId }, async (manager) => {
+      venueId = await one(manager, `INSERT INTO ${businessTable(workspaceId, 'venue')} (organisation_id, name, created_by, workspace_id) VALUES ($1, $2, $3, $4) RETURNING id`, [
+        organisationId,
+        `${label} Venue`,
+        managerUserId,
+        workspaceId,
+      ]);
+      jobRoleId = await one(
+        manager,
+        `INSERT INTO ${businessTable(workspaceId, 'job_role')} (organisation_id, name, default_rate_pence, created_by, workspace_id) VALUES ($1, $2, 1500, $3, $4) RETURNING id`,
+        [organisationId, `${label} Role ${randomUUID().slice(0, 6)}`, managerUserId, workspaceId],
+      );
+      shiftId = await one(
+        manager,
+        `INSERT INTO ${businessTable(workspaceId, 'shift')} (organisation_id, venue_id, job_role_id, starts_at, ends_at, break_minutes, required_count, pay_rate_pence, status, created_by, workspace_id)
+         VALUES ($1, $2, $3, now() + interval '2 days', now() + interval '2 days 8 hours', 0, 1, 1500, 'open', $4, $5) RETURNING id`,
+        [organisationId, venueId, jobRoleId, managerUserId, workspaceId],
+      );
+      shiftAssignmentId = await one(
+        manager,
+        `INSERT INTO ${businessTable(workspaceId, 'shift_assignment')} (organisation_id, shift_id, staff_profile_id, status, pay_rate_snapshot_pence, assigned_by, confirmed_at, period, workspace_id)
+         VALUES ($1, $2, $3, 'confirmed', 1500, $4, now(), tstzrange(now() + interval '2 days', now() + interval '2 days 8 hours'), $5) RETURNING id`,
+        [organisationId, shiftId, staffProfileId, managerUserId, workspaceId],
+      );
+    });
+    return { workspaceId, managerUserId, staffProfileId, venueId, jobRoleId, shiftId, shiftAssignmentId };
+  }
+
+  beforeAll(async () => {
+    dataSource = new DataSource({
+      type: 'postgres',
+      url: process.env.DATABASE_URL,
+      schema: 'core',
+      synchronize: false,
+      entities: [Organisation, Role, User, UserRole, ManagerProfile, ManagerWorkspace, StaffProfile, Venue, JobRole, Shift, ShiftAssignment],
+    });
+    await dataSource.initialize();
+    adminDataSource = createAdminDataSource();
+    await adminDataSource.initialize();
+    passwordHashing = new PasswordHashingService();
+    // The state under test: the cutover is active on this database.
+    expect(((await adminDataSource.query('SELECT count(*)::int AS n FROM core.hws_cutover_activation')) as Array<{ n: number }>)[0]!.n).toBe(1);
+  });
+
+  afterAll(async () => {
+    await dataSource.destroy();
+    await adminDataSource.destroy();
+  });
+
+  it('every cross-workspace reference written into a workspace schema is rejected at the DB layer; the workspace_id mutation is refused; same-workspace relationships keep working; the core copy is no way around it', async () => {
+    const orgInsert = await adminDataSource.manager.insert(Organisation, { name: `fkattack-act-${randomUUID()}`, slug: `fkattack-act-${randomUUID()}` });
+    const organisationId = orgInsert.identifiers[0]!.id as string;
+    const a = await seedActivated(organisationId, 'fkaa');
+    const b = await seedActivated(organisationId, 'fkab');
+    const asA = <T>(fn: (m: DataSource['manager']) => Promise<T>) => withContext({ organisationId, workspaceId: a.workspaceId, userId: a.managerUserId }, fn);
+    const fk = (p: Promise<unknown>) => expect(p).rejects.toMatchObject({ code: '23503' });
+
+    // Workspace A Shift -> Workspace B Venue.
+    await fk(
+      asA((m) =>
+        m.query(
+          `INSERT INTO ${businessTable(a.workspaceId, 'shift')} (organisation_id, venue_id, job_role_id, starts_at, ends_at, break_minutes, required_count, pay_rate_pence, status, created_by, workspace_id)
+           VALUES ($1, $2, $3, now() + interval '2 days', now() + interval '2 days 8 hours', 0, 1, 1500, 'open', $4, $5)`,
+          [organisationId, b.venueId, a.jobRoleId, a.managerUserId, a.workspaceId],
+        ),
+      ),
+    );
+    // Workspace A ShiftAssignment -> Workspace B Staff.
+    await fk(
+      asA((m) =>
+        m.query(
+          `INSERT INTO ${businessTable(a.workspaceId, 'shift_assignment')} (organisation_id, shift_id, staff_profile_id, status, pay_rate_snapshot_pence, assigned_by, confirmed_at, period, workspace_id)
+           VALUES ($1, $2, $3, 'confirmed', 1500, $4, now(), tstzrange(now(), now() + interval '8 hours'), $5)`,
+          [organisationId, a.shiftId, b.staffProfileId, a.managerUserId, a.workspaceId],
+        ),
+      ),
+    );
+    // Workspace A Offer -> Workspace B Staff.
+    await fk(
+      asA((m) =>
+        m.query(
+          `INSERT INTO ${businessTable(a.workspaceId, 'job_offer')} (organisation_id, shift_assignment_id, staff_profile_id, status, sent_at, expires_at, estimated_pay_pence, created_by, workspace_id)
+           VALUES ($1, $2, $3, 'pending', now(), now() + interval '1 hour', 12000, $4, $5)`,
+          [organisationId, a.shiftAssignmentId, b.staffProfileId, a.managerUserId, a.workspaceId],
+        ),
+      ),
+    );
+    // Workspace A Attendance -> Workspace B Shift.
+    await fk(
+      asA((m) =>
+        m.query(
+          `INSERT INTO ${businessTable(a.workspaceId, 'attendance')} (organisation_id, shift_assignment_id, shift_id, staff_profile_id, workspace_id, clock_in_at, status)
+           VALUES ($1, $2, $3, $4, $5, now(), 'clocked_in')`,
+          [organisationId, a.shiftAssignmentId, b.shiftId, a.staffProfileId, a.workspaceId],
+        ),
+      ),
+    );
+    // Workspace A Attendance -> Workspace B Staff.
+    await fk(
+      asA((m) =>
+        m.query(
+          `INSERT INTO ${businessTable(a.workspaceId, 'attendance')} (organisation_id, shift_assignment_id, shift_id, staff_profile_id, workspace_id, clock_in_at, status)
+           VALUES ($1, $2, $3, $4, $5, now(), 'clocked_in')`,
+          [organisationId, a.shiftAssignmentId, a.shiftId, b.staffProfileId, a.workspaceId],
+        ),
+      ),
+    );
+    // workspace_id A -> B on an existing row of A's schema: refused (RLS WITH CHECK / the schema's workspace-bound CHECK).
+    await expect(asA((m) => m.query(`UPDATE ${businessTable(a.workspaceId, 'venue')} SET workspace_id = $1 WHERE id = $2`, [b.workspaceId, a.venueId]))).rejects.toThrow();
+    // A's own same-workspace Shift succeeds.
+    await asA((m) =>
+      m.query(
+        `INSERT INTO ${businessTable(a.workspaceId, 'shift')} (organisation_id, venue_id, job_role_id, starts_at, ends_at, break_minutes, required_count, pay_rate_pence, status, created_by, workspace_id)
+         VALUES ($1, $2, $3, now() + interval '3 days', now() + interval '3 days 8 hours', 0, 1, 1500, 'open', $4, $5)`,
+        [organisationId, a.venueId, a.jobRoleId, a.managerUserId, a.workspaceId],
+      ),
+    );
+    // The core copy is no way around it: a write into core for A is refused by the fence (core copies read-only).
+    await expect(
+      asA((m) =>
+        m.query(
+          `INSERT INTO core.shift (organisation_id, venue_id, job_role_id, starts_at, ends_at, break_minutes, required_count, pay_rate_pence, status, created_by, workspace_id)
+           VALUES ($1, $2, $3, now() + interval '4 days', now() + interval '4 days 8 hours', 0, 1, 1500, 'open', $4, $5)`,
+          [organisationId, a.venueId, a.jobRoleId, a.managerUserId, a.workspaceId],
+        ),
+      ),
+    ).rejects.toMatchObject({ code: '42501' });
+  }, 60_000);
 });

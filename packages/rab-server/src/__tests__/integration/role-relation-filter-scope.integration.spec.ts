@@ -75,8 +75,9 @@ describeIfDb('member role record filters: relation ids are checked in the routed
     await app.init();
     owner = createAdminDataSource();
     await owner.initialize();
-    // Release 0.7.0: the HWS-off case writes the core copies (the pre-cutover world), which an activated database fences. The
-    // sentinel is removed for this suite only, before its workspaces exist, and put back afterwards.
+    // Release 0.7.0, why pre-cutover: the suite's HWS-OFF case is the legacy routing (venue / job role written into the core
+    // copies), which only exists before the cutover (an activated database fences core; an HWS-off API refuses to boot there).
+    // Removed for this suite only, before its workspaces exist; restored after.
     restoreCutover = await withCutoverInactive(owner);
     factory = new TestIdentityFactory({
       app,

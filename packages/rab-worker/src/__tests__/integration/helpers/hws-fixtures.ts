@@ -1,5 +1,6 @@
 import { resolveHwsRuntimeEnabled } from '@rab/server/engine/core-modules/environment/hws-runtime-default';
 import { workspaceSchemaName } from '@rab/server/engine/core-modules/tenant/schema-resolver.service';
+import { assertJestNodeEnv, DISPOSABLE_TEST_DATABASE_SETTING, resolveIntegrationTestDatabase, TestDatabaseConfigError } from '@rab/server/database/typeorm/core/test-database-guard';
 
 /**
  * Part C1 fixture helpers: HWS runtime routing is ON by default outside production, so a business row a suite seeds must land
@@ -73,6 +74,20 @@ export function siblingTable(qualified: string, table: string): string {
  * back exactly what was there. Call it in beforeAll BEFORE creating the spec's workspaces, and the restore in afterAll.
  */
 export async function withCutoverInactive(admin: FixtureQueryable): Promise<() => Promise<void>> {
+  // Test databases ONLY (the existing test-database guard): NODE_ENV=test, the validated TEST pair, and the connection must
+  // be on that TEST database AND carry the database-level disposable marker (read from the catalog, as the Jest globalSetup
+  // reads it). Anything else throws before the sentinel is touched, so a real deployment's sentinel can never be removed.
+  assertJestNodeEnv(process.env);
+  const resolved = resolveIntegrationTestDatabase(process.env);
+  const [id] = (await admin.query(
+    `SELECT current_database() AS db,
+            (SELECT split_part(cfg, '=', 2) FROM pg_db_role_setting s JOIN pg_database d ON d.oid = s.setdatabase, unnest(s.setconfig) cfg
+              WHERE d.datname = current_database() AND s.setrole = 0 AND split_part(cfg, '=', 1) = $1 LIMIT 1) AS marker`,
+    [DISPOSABLE_TEST_DATABASE_SETTING],
+  )) as Array<{ db: string; marker: string | null }>;
+  if (!id || id.db !== resolved.app.database || id.marker !== 'true') {
+    throw new TestDatabaseConfigError('withCutoverInactive: not the marked disposable TEST database; the activation sentinel was not touched. Refusing.');
+  }
   const rows = (await admin.query('SELECT count(*)::int AS n FROM core.hws_cutover_activation')) as Array<{ n: number }>;
   const wasActive = Number(rows[0]?.n ?? 0) > 0;
   await admin.query('DELETE FROM core.hws_cutover_activation');

@@ -47,8 +47,8 @@ describe('core.manager_venue workspace binding (integration)', () => {
     tenantContext = app.get(TenantContextService);
     adminDataSource = createAdminDataSource();
     await adminDataSource.initialize();
-    // Release 0.7.0: this suite exercises the PRE-cutover world (the core copies / the HWS-off path), which an activated
-    // database fences (core copies read-only). The sentinel is removed for this suite only and put back afterwards.
+    // Release 0.7.0, why pre-cutover: the subject is core.manager_venue's own workspace binding (NOT NULL, composite FK) on the
+    // core copy, which an activated database makes read-only. Sentinel restored after.
     restoreCutover = await withCutoverInactive(adminDataSource);
     factory = new TestIdentityFactory({
       app,
