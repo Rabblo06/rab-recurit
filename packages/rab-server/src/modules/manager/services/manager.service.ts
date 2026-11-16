@@ -16,7 +16,7 @@ import { AccountLifecycleService } from '../../../engine/core-modules/auth/servi
 import { AuditAction, AuditService } from '../../../engine/core-modules/audit/audit.service';
 import { EmailOutboxService } from '../../../engine/core-modules/email/email-outbox.service';
 import { EmailQueueService } from '../../../engine/core-modules/email/email-queue.service';
-import { renderAccountActivationEmail, renderCeoInvitationEmail } from '../../../engine/core-modules/email/templates';
+import { renderAccountActivationEmail, renderBulkNotificationEmail, renderCeoInvitationEmail } from '../../../engine/core-modules/email/templates';
 import { RefreshTokenService } from '../../../engine/core-modules/auth/token/services/refresh-token.service';
 import { SecurityVersionService } from '../../../engine/core-modules/auth/services/security-version.service';
 import { StepUpReauthService } from '../../../engine/core-modules/auth/services/step-up-reauth.service';
@@ -475,7 +475,7 @@ export class ManagerService {
               jobType: EmailOutboxJobType.NOTIFICATION,
               recipientEmail: p.user!.email,
               targetUserId: p.userId,
-              rendered: { subject: dto.subject, html: `<p>${dto.message}</p>`, text: dto.message },
+              rendered: renderBulkNotificationEmail({ subject: dto.subject, message: dto.message }),
               createdBy: ctx.userId,
             }),
           ),

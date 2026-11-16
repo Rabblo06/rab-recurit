@@ -8038,3 +8038,18 @@ Reversal:   A shorter QR_MAX_AGE_DAYS, or rotating QRs automatically on schedule
   - hws-startup-guard.spec: the HWS-off boot refusal;
   - the security-posture and semantic goldens (PG16/17/18), the R4 secure-owner invariants, check-rls-coverage
     (`hws_cutover_activation` forced), and the restricted-migrator drift review.
+
+## SF-1 — bulk-email message is HTML-escaped (branch fix/sf1-bulk-email-escape, 2026-11-16)
+- **Threat:** a manager or venue manager with bulk email (`POST /rest/v1/staff/bulk-email`, `POST /rest/v1/managers/bulk-email`,
+  and the venue-manager route, which delegates to the manager one) typed raw HTML into the message. `ManagerService.bulkEmail`
+  and `StaffService.bulkEmail` each built `` html: `<p>${dto.message}</p>` `` unescaped, so the HTML part sent under the
+  organisation's identity could carry phishing links, fake buttons, tracking pixels or attribute injection. `BulkEmailDto.message`
+  is only `@IsString @MaxLength(5000)`. (Mail clients do not run `<script>`, but links and images are the real harm.)
+- **Control:** one renderer, `renderBulkNotificationEmail` in `engine/core-modules/email/templates.ts`, used by both services.
+  It escapes the message with the canonical `engine/utils/escape-html.ts` helper (the five HTML-significant characters) and only
+  then turns line breaks into `<br>`. The plain-text part stays the message as typed. `templates.ts`'s private copy of the
+  escaper is replaced by the canonical import (same five characters, same output). Recipient scope, the outbox path and the
+  audit row are unchanged.
+- **Tests:** `templates.spec.ts` (`<script>`, `<a href>`, `" onmouseover=` and `&`/`'` come out entity-escaped; line breaks
+  become `<br>` only after escaping; text part unchanged) and `bulk-email-abuse-cases.integration.spec.ts` (the same hostile
+  message is stored escaped in `email_outbox.rendered_html` for both the staff and the manager route).

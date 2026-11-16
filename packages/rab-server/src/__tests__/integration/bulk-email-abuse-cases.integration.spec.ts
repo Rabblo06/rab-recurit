@@ -195,6 +195,65 @@ describeIfDb('bulk email abuse cases (integration)', () => {
     expect(res.body).toEqual({ queued: 1, skipped: 0 });
   });
 
+  // SF-1: the message is plain text; markup in it must reach the recipient's mail client escaped, on both routes.
+  const HOSTILE_MESSAGE = ['<script>alert(1)</script>', '<a href="https://evil.example/login">Reset your password</a>', 'x" onmouseover="alert(2)'].join('\n');
+
+  function expectEscaped(html: string | undefined): void {
+    expect(html).toBeDefined();
+    expect(html).not.toContain('<script');
+    expect(html).not.toContain('<a ');
+    expect(html).not.toContain('" onmouseover=');
+    expect(html).toContain('&lt;script&gt;alert(1)&lt;/script&gt;');
+    expect(html).toContain('&lt;a href=&quot;https://evil.example/login&quot;&gt;');
+    expect(html).toContain('x&quot; onmouseover=&quot;alert(2)');
+    expect(html).toContain('<br>');
+  }
+
+  it('SF-1: staff bulk email stores the message HTML-escaped in email_outbox.rendered_html', async () => {
+    const { organisationId } = await seedOrg('bexs');
+    const a = await seedManagerWithWorkspace(organisationId, 'a');
+    const s1 = await seedStaffOwnedBy(organisationId, a.workspaceId, a.userId, 's1');
+    const token = await login(a.email);
+
+    const res = await request(app.getHttpServer())
+      .post('/rest/v1/staff/bulk-email')
+      .set('Authorization', `Bearer ${token}`)
+      .send({ userIds: [s1.id], subject: 'Rota', message: HOSTILE_MESSAGE });
+    expect(res.status).toBe(201);
+    expect(res.body).toEqual({ queued: 1, skipped: 0 });
+
+    const rows = await withContext({ organisationId, workspaceId: a.workspaceId, userId: a.userId }, (m) =>
+      m.find(EmailOutbox, { where: { recipientEmail: s1.email, renderedSubject: 'Rota' } }),
+    );
+    expect(rows).toHaveLength(1);
+    expectEscaped(rows[0]!.renderedHtml);
+    expect(rows[0]!.renderedText).toBe(HOSTILE_MESSAGE);
+  });
+
+  it('SF-1: manager bulk email stores the message HTML-escaped in email_outbox.rendered_html', async () => {
+    const { organisationId } = await seedOrg('bexm');
+    const a = await seedManagerWithWorkspace(organisationId, 'a');
+    const b = await seedManagerWithWorkspace(organisationId, 'b');
+    const tokenA = await login(a.email);
+    const bProfile = await withContext({ organisationId, workspaceId: a.workspaceId, userId: a.userId }, (m) =>
+      m.query<[{ id: string }]>(`SELECT id FROM core.manager_profile WHERE user_id = $1`, [b.userId]),
+    );
+
+    const res = await request(app.getHttpServer())
+      .post('/rest/v1/managers/bulk-email')
+      .set('Authorization', `Bearer ${tokenA}`)
+      .send({ userIds: [bProfile[0]!.id], subject: 'Rota', message: HOSTILE_MESSAGE });
+    expect(res.status).toBe(201);
+    expect(res.body).toEqual({ queued: 1, skipped: 0 });
+
+    const rows = await withContext({ organisationId, workspaceId: a.workspaceId, userId: a.userId }, (m) =>
+      m.find(EmailOutbox, { where: { recipientEmail: b.email, renderedSubject: 'Rota' } }),
+    );
+    expect(rows).toHaveLength(1);
+    expectEscaped(rows[0]!.renderedHtml);
+    expect(rows[0]!.renderedText).toBe(HOSTILE_MESSAGE);
+  });
+
   it('a request body carrying more than 50 ids is rejected (400)', async () => {
     const { organisationId } = await seedOrg('becap');
     const a = await seedManagerWithWorkspace(organisationId, 'a');

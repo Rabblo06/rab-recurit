@@ -31,6 +31,7 @@ import { StepUpReauthService } from '../../../engine/core-modules/auth/services/
 import { AuditAction, AuditService } from '../../../engine/core-modules/audit/audit.service';
 import { EmailOutboxService } from '../../../engine/core-modules/email/email-outbox.service';
 import { EmailQueueService } from '../../../engine/core-modules/email/email-queue.service';
+import { renderBulkNotificationEmail } from '../../../engine/core-modules/email/templates';
 import { RefreshTokenService } from '../../../engine/core-modules/auth/token/services/refresh-token.service';
 import { SecurityVersionService } from '../../../engine/core-modules/auth/services/security-version.service';
 import { CoreEntityCacheService } from '../../../engine/core-modules/entity-cache/core-entity-cache.service';
@@ -561,7 +562,7 @@ export class StaffService {
               jobType: EmailOutboxJobType.NOTIFICATION,
               recipientEmail: p.user!.email,
               targetUserId: p.userId,
-              rendered: { subject: dto.subject, html: `<p>${dto.message}</p>`, text: dto.message },
+              rendered: renderBulkNotificationEmail({ subject: dto.subject, message: dto.message }),
               createdBy: ctx.userId,
             }),
           ),
