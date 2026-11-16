@@ -69,6 +69,15 @@ export function validate(config: Record<string, unknown>): EnvironmentVariables 
     );
   }
 
+  // Owner decision 2026-11-15 (PR #163): the manager-entered clock-in floor must lie strictly before the normal clock-in
+  // allowance, otherwise the confirmation band is empty and the floor would refuse clock-ins every punch path accepts.
+  // Refused in every environment.
+  if (validated.CLOCK_IN_CONFIRM_FLOOR_HOURS * 60 <= validated.CLOCK_IN_EARLY_MINUTES) {
+    throw new Error(
+      'Invalid environment configuration:\nCLOCK_IN_CONFIRM_FLOOR_HOURS x 60 must be greater than CLOCK_IN_EARLY_MINUTES (the hard floor for a manager-entered clock-in must lie before the normal clock-in allowance).',
+    );
+  }
+
   // O3 C2 (owner decision 2026-11-05, "exactly like Twenty"): WORKER_SCHEDULER unset → bullmq in production (the API
   // registers the job schedulers at start-up, the Worker consumes), interval elsewhere (development and test keep the
   // process-local timers: `yarn start` has no api-prestart.sh to register anything). An explicit `interval` in production is

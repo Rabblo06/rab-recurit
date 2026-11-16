@@ -684,8 +684,10 @@ describeIfApproved('Phase D two-Worker concurrency and failure (integration — 
     expect((await http().post('/rest/v1/attendance/clock-in').set(auth(tokenS)).send({ shiftId, qrToken: await signQr() })).status).toBe(201);
     const out = await http().post('/rest/v1/attendance/clock-out').set(auth(tokenS)).send({ qrToken: await signQr() });
     const clockOutAt = new Date(out.body.clockOutAt).getTime();
+    // Worked time comes from moving the clock-in hours before the scheduled start: an unusually early clock-in
+    // correction, so it is explicitly confirmed (owner brief 2026-11-15, 409 CLOCK_IN_CONFIRMATION_REQUIRED otherwise).
     expect((await http().post(`/rest/v1/attendance/${out.body.id}/correct`).set(auth(tokenM))
-      .send({ field: 'clockInAt', newValue: new Date(clockOutAt - 247 * 60_000).toISOString(), reason: 'W4 test worked time' })).status).toBe(201);
+      .send({ field: 'clockInAt', newValue: new Date(clockOutAt - 247 * 60_000).toISOString(), reason: 'W4 test worked time', confirmUnusualClockIn: true })).status).toBe(201);
     expect((await http().post(`/rest/v1/attendance/report/shift/${shiftId}/staff/${staff.profileId}/attendance-review`).set(auth(tokenM))).status).toBe(200);
     expect((await http().patch(`/rest/v1/attendance/report/shift/${shiftId}/finalise`).set(auth(tokenM))).status).toBe(200);
     const [rec] = await admin.query<[{ id: string }]>(`SELECT id FROM ${siblingTable(await businessTableOf(admin, 'attendance', out.body.id), 'payroll_record')} WHERE attendance_id = $1`, [out.body.id]);
