@@ -67,9 +67,13 @@ describeIfDb('bulk email abuse cases (integration)', () => {
     return { organisationId: organisation.id };
   }
 
-  /** A real Internal Manager with their own Workspace and the staff/manager permissions these tests need, able to log in and create staff. */
-  async function seedManagerWithWorkspace(organisationId: string, label: string): Promise<{ email: string; userId: string; workspaceId: string }> {
-    const manager = await factory.createInternalManager({ id: organisationId }, { permissions: ['staff.view', 'staff.create', 'manager.manage'], label });
+  /** A real Internal Manager with their own Workspace and the staff/manager permissions these tests need (bulk email needs staff.edit / manager.manage), able to log in and create staff. */
+  async function seedManagerWithWorkspace(
+    organisationId: string,
+    label: string,
+    permissions: string[] = ['staff.view', 'staff.create', 'staff.edit', 'manager.manage'],
+  ): Promise<{ email: string; userId: string; workspaceId: string }> {
+    const manager = await factory.createInternalManager({ id: organisationId }, { permissions, label });
     return { email: manager.email, userId: manager.userId, workspaceId: manager.workspaceId! };
   }
 
@@ -252,6 +256,47 @@ describeIfDb('bulk email abuse cases (integration)', () => {
     expect(rows).toHaveLength(1);
     expectEscaped(rows[0]!.renderedHtml);
     expect(rows[0]!.renderedText).toBe(HOSTILE_MESSAGE);
+  });
+
+  // Owner decision batch 13 (2026-11-16): bulk email is an edit-level action, on the route guard and re-checked in the service.
+  it('a view-only role (staff.view, no staff.edit) gets 403 on staff bulk email, and nothing is queued', async () => {
+    const { organisationId } = await seedOrg('bevw');
+    const viewer = await seedManagerWithWorkspace(organisationId, 'viewer', ['staff.view', 'staff.create']);
+    const own = await seedStaffOwnedBy(organisationId, viewer.workspaceId, viewer.userId, 'vs');
+    const token = await login(viewer.email);
+
+    const res = await request(app.getHttpServer())
+      .post('/rest/v1/staff/bulk-email')
+      .set('Authorization', `Bearer ${token}`)
+      .send({ userIds: [own.id], subject: 'ViewOnly', message: 'Should not send.' });
+    expect(res.status).toBe(403);
+
+    const rows = await withContext({ organisationId, workspaceId: viewer.workspaceId, userId: viewer.userId }, (m) =>
+      m.find(EmailOutbox, { where: { recipientEmail: own.email, renderedSubject: 'ViewOnly' } }),
+    );
+    expect(rows).toHaveLength(0);
+  });
+
+  it('a role without manager.manage gets 403 on manager bulk email, and nothing is queued', async () => {
+    const { organisationId } = await seedOrg('bemv');
+    // One org shares one canonical manager role (TestIdentityFactory), so both hold the same set — without manager.manage.
+    const target = await seedManagerWithWorkspace(organisationId, 'target', ['staff.view', 'staff.edit']);
+    const viewer = await seedManagerWithWorkspace(organisationId, 'viewer', ['staff.view', 'staff.edit']);
+    const tokenViewer = await login(viewer.email);
+    const targetProfile = await withContext({ organisationId, workspaceId: target.workspaceId, userId: target.userId }, (m) =>
+      m.query<[{ id: string }]>(`SELECT id FROM core.manager_profile WHERE user_id = $1`, [target.userId]),
+    );
+
+    const res = await request(app.getHttpServer())
+      .post('/rest/v1/managers/bulk-email')
+      .set('Authorization', `Bearer ${tokenViewer}`)
+      .send({ userIds: [targetProfile[0]!.id], subject: 'ViewOnly', message: 'Should not send.' });
+    expect(res.status).toBe(403);
+
+    const rows = await withContext({ organisationId, workspaceId: target.workspaceId, userId: target.userId }, (m) =>
+      m.find(EmailOutbox, { where: { recipientEmail: target.email, renderedSubject: 'ViewOnly' } }),
+    );
+    expect(rows).toHaveLength(0);
   });
 
   it('a request body carrying more than 50 ids is rejected (400)', async () => {

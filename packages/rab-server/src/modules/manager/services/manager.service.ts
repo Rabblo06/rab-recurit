@@ -460,8 +460,21 @@ export class ManagerService {
    * durable-outbox path as every other email in this app — see
    * `StaffService.bulkEmail`'s own doc comment for the full rationale.
    */
-  async bulkEmail(ctx: AuthContext, dto: BulkEmailDto): Promise<{ queued: number; skipped: number }> {
+  async bulkEmail(
+    ctx: AuthContext,
+    dto: BulkEmailDto,
+    requiredPermission: typeof PermissionFlag.MANAGER_MANAGE | typeof PermissionFlag.VENUE_MANAGER_CREATE = PermissionFlag.MANAGER_MANAGE,
+  ): Promise<{ queued: number; skipped: number }> {
     const rows = await this.tenantContext.runInTenantContext(ctx, async (manager) => {
+      // Layer 2 (owner decision batch 13, 2026-11-16): sending email is an edit-level action — the route's own flag
+      // (`manager.manage`, or `venue_manager.create` for the Venue Manager route) is re-checked here, before any id is
+      // read. Fail closed on any other value (e.g. passed through an `as never` cast).
+      if (requiredPermission !== PermissionFlag.MANAGER_MANAGE && requiredPermission !== PermissionFlag.VENUE_MANAGER_CREATE) {
+        throw new ForbiddenException('Sending email is not permitted.');
+      }
+      if (!(await this.permissions.userHasPermissionTx(manager, ctx, requiredPermission))) {
+        throw new ForbiddenException('Sending email is not permitted.');
+      }
       const profiles = await manager.find(ManagerProfile, {
         where: { organisationId: ctx.organisationId!, id: In(dto.userIds) },
         relations: { user: true },
