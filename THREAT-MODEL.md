@@ -8592,49 +8592,96 @@ Reversal:   Lower CLOCK_IN_CONFIRM_FLOOR_HOURS, or require a second approver (pa
   under test), `integration-test-database-gate.spec.ts` (no spec reads the blanked DATABASE_URL), `runtime-child-env.spec.ts`.
 - **Release 2 (S8):** the fallbacks are removed and the legacy names refused everywhere; the strip lists keep every name.
 
-## CI gate — exact owner-approved growth for the import-boundary ratchet (branch ci/import-boundaries-approved-growth, 2026-11-17; owner approval 2026-11-17 for PR #204)
+## CI gate — exact owner-approved growth for the import-boundary ratchet (branch ci/import-boundaries-approved-growth, 2026-11-17; owner approval 2026-11-17 for PR #204; approvals read from the base ref since branch ci/import-boundaries-approvals-from-base, 2026-11-17)
 - **Threat:** the import-boundary ratchet (`tools/check-import-boundaries.cjs`, PR #191) is a CI security gate: its `--base`
   step refuses any growth of `tools/import-boundaries.baseline.json` against the PR's base branch, so a new Worker import of
   rab-server internals (or engine -> modules, feature -> feature) cannot land unnoticed. It had no way to record an owner
   approval, so an approved change could only pass by weakening the gate, bypassing it, or deleting the step. Any approval
-  mechanism is itself a way to widen the gate: a broad pattern, an open-ended count or a forgotten approval would let later
-  PRs add violations silently.
-- **Control:** `APPROVED_GROWTH` is a frozen list in the check itself. Each entry names one rule, one file, the exact base
-  count `from` (0 = no entry at the base), the exact head count `to`, an `approved: 'owner YYYY-MM-DD'` date and a reason;
-  `validateApprovedGrowth` refuses a malformed, undated, duplicate or non-growing entry (fail closed). `compareToBase`
-  accepts a growth only when rule and file match exactly, the base count equals `from` and the head count equals `to`;
-  one more edge, another file, another rule, or a different base count still fails. An entry whose `from` no longer equals
-  the base count is reported STALE and fails `--base`, so the entry must be deleted once the growth has merged and cannot be
-  reused. The tree check (counts equal the committed baseline) is unchanged. The first two entries were the owner-approved
-  (2026-11-17) Worker imports for PR #204: `push-dispatch.job.ts` 1 -> 2 (`audit-events/audit-event-shipping`) and
-  `push-send.processor.ts` 10 -> 11 (`audit/audit.service`), the same imports the email path already uses. Both are
-  deleted by the cleanup PR (branch ci/import-boundaries-approved-growth-cleanup), which merges immediately after #204;
-  the shipped list is empty from then on.
-- **Residual (accepted):** the approval lives in the repository, so whoever can merge a PR that edits the check can also add
-  an entry. "An entry must arrive in its own PR, separate from the PR that uses it, with the owner's date" is enforced only
-  by review, not mechanically: the check reads `APPROVED_GROWTH` from the HEAD being checked, so a PR that adds an entry
-  and uses it in the same diff passes `--base`; only the date format is validated, not who approved it.
-  A slot closes only when the base COUNT for that rule and file changes, not when the PR it was approved for merges or is
-  closed: while the base still equals `from`, any PR may use the slot (the slot is one exact count for one file and rule),
-  and if the base later returns to `from` (the import is removed again) a forgotten entry would match once more. That is
-  why a stale entry fails `--base` and must be deleted. A push to main never runs `--base` (the step is
-  `if: github.event_name == 'pull_request'`), so a stale entry is caught only on the next pull request, not at merge time.
-  Consequence for the first two entries: between #204 merging and the cleanup PR merging, `--base` reports both entries
-  STALE and ci-security is red for every PR opened or updated in that window; the cleanup PR must merge straight after
-  #204 and before any other PR. Counts are per file, not per edge: an approved `to` could be met by a different import in
-  that file than the one approved; the reviewer of the using PR checks the actual import (`--list`). `--write-baseline`
-  still refuses any growth; the baseline is raised by hand in the using PR.
-- **Planned follow-ups:** read `APPROVED_GROWTH` from the base ref instead of the head (so an approval has to be on main
-  before any PR can use it, which makes "its own PR" mechanical), and add an optional `target` per entry (the exact import
-  target the growth is for, so a different import in the same file cannot use the slot).
+  mechanism is itself a way to widen the gate: a broad pattern, an open-ended count, a forgotten approval or an approval
+  written by the PR that uses it would let PRs add violations silently.
+- **Control:** approvals are data in `tools/import-boundaries.approved.json` (`{ "approved": [...] }`; until the follow-up
+  branch they were the `APPROVED_GROWTH` constant in the check). Each entry names one rule, one file, the exact base count
+  `from` (0 = no entry at the base), the exact head count `to`, an `approved: "owner YYYY-MM-DD"` date, a reason and an
+  optional `target` (the resolved import target as `--list` prints it). `validateApprovedGrowth` refuses a malformed,
+  undated, duplicate or non-growing entry, a `file` the check does not scan, and a `target` that is not an edge of that rule
+  from that file (fail closed). `compareToBase` accepts a growth only when rule and file match exactly, the base count
+  equals `from` and the head count equals `to`; one more edge, another file, another rule, or a different base count still
+  fails. An entry whose `from` no longer equals the base count is reported STALE and fails `--base` while the head still
+  lists it (by rule and file), so the entry must be deleted once the growth has merged and cannot be reused. Deleting it is
+  never blocked: a PR whose approvals file no longer lists a stale base entry is not failed for it (review of #225, F1:
+  before this, the stale loop read only the base list, so every PR failed, including the one deleting the entry, and the
+  using PR could not delete it either because that tripped CHANGED TOGETHER: a deadlock of a required gate). Growth is
+  still accepted only through the base list, so deleting an entry in the head can clear a hygiene failure but can never
+  accept a growth.
+  - **Approvals come from the base ref.** `--base` reads the approvals file with `git show <base>:tools/import-boundaries.approved.json`
+    (the same fail-closed reader as the base baseline: an unknown ref, a shallow clone or any git failure throws; only "path
+    does not exist in <ref>" means no approvals) and validates it the same way. An entry added in the head is never used by
+    the PR that adds it: an approval has to be merged to the base branch, in its own PR, before any PR can use it. The head
+    copy is still validated, so a malformed file fails in the PR that introduces it.
+  - **Not in the same diff.** `--base` fails (CHANGED TOGETHER) when the diff from the merge-base with the base ref to the
+    checkout changes the approvals file together with any `tools/*.baseline.json` (this ratchet's or another's). The one
+    exception is the using PR consuming its own approval: when the head approvals document is exactly the base document
+    minus the entries this PR uses (deep equality: same `_comment`, the remaining entries unchanged and in order), `--base`
+    prints CONSUMED instead. Editing, adding or removing any other entry, or the comment, still fails CHANGED TOGETHER.
+    So the using PR deletes its entry in the same PR and no cleanup PR or red window is needed.
+  - **Base without a baseline.** When the base ref is `main` (`origin/main`, `refs/heads/main`, `refs/remotes/origin/main`)
+    and it has no `tools/import-boundaries.baseline.json`, `--base` fails closed (exit 1): main has had the baseline since
+    #191, so its absence means a broken checkout. Any other base without one is still "nothing to compare".
+  - **Base-branch change reruns the gate.** `ci-security.yaml` triggers on `pull_request` types `opened, synchronize,
+    reopened, edited`; `edited` covers a changed base branch, so a `--base` result computed against the old base does not
+    stand. (It also reruns on a title or body edit; the concurrency group cancels the older run.)
+  - **Target.** With a `target`, `--base` requires the head file to have at least `to - from` more edges of that rule to
+    `target` than the file at the base ref (WRONG TARGET otherwise), so a different import in the same file cannot fill the
+    slot, even when the file already imported the target at the base. The tree check (no base available) requires, while
+    the file's count is above `from`, at least one edge of that rule from the file to `target` (TARGET MISSING).
+  - git runs with `LC_ALL=C` and without `LANGUAGE`, so the "does not exist in" match does not depend on the runner's
+    locale. `--base` accepts a plain ref name plus `~N` / `^N` ancestry suffixes only (no `@{...}`, `^{...}`, `:`, ranges,
+    leading `^` or `-`); git runs without a shell.
+  - The first two entries were the owner-approved (2026-11-17) Worker imports for PR #204: `push-dispatch.job.ts` 1 -> 2
+    (`audit-events/audit-event-shipping`) and `push-send.processor.ts` 10 -> 11 (`audit/audit.service`), the same imports
+    the email path already uses. Both were deleted by the cleanup PR (branch ci/import-boundaries-approved-growth-cleanup,
+    #215), which merged straight after #204; the shipped list is empty.
+- **Residual (accepted):**
+  - Self-approval through the data list is now mechanically blocked: the using PR cannot add or edit its own approval.
+    Editing the TOOL is not: CI runs the PR's own copy of `check-import-boundaries.cjs` and `ci-security.yaml`, so a PR that
+    changes the check (for example to read approvals from the head again, or to drop the CHANGED TOGETHER rule) can pass
+    its own gate. Changes to the tool and the workflow remain a review control (the owner's PR review; the repository has
+    no CODEOWNERS file today), not a mechanical one.
+  - The approval PR itself is reviewed like any PR: only the date format is validated, not who approved it. Two PRs from the
+    same author (approval first, use second) both go through review.
+  - A slot closes only when the base COUNT for that rule and file changes, not when the PR it was approved for merges or is
+    closed: while the base still equals `from`, any PR may use the slot, and if the base later returns to `from` a forgotten
+    entry would match once more. That is why a stale entry fails `--base` and must be deleted. A push to main never runs
+    `--base` (the step is `if: github.event_name == 'pull_request'`), so a stale entry is caught only on the next pull
+    request. If a using PR merges without deleting its entry (CONSUMED is allowed, not required), every later PR that still
+    lists the entry fails STALE until one of them deletes it; any PR may delete it, so this is a hygiene failure that the
+    next PR clears, not an outage.
+  - `target` is optional. Without it, counts are per file, not per edge, and an approved `to` could be met by a different
+    import in that file; the reviewer checks the actual import (`--list`). The tree check's target rule is presence only;
+    the exact count of new edges to the target is enforced by `--base`.
+  - The CHANGED TOGETHER diff covers committed and uncommitted changes to tracked files; an untracked file is not in it
+    (irrelevant in CI, where the checkout is a commit). `--write-baseline` still refuses any growth; the baseline is raised
+    by hand in the using PR.
 - **Tests:** `check-import-boundaries.test.cjs`: an approved exact growth passes; the same file one above `to` fails; an
   unlisted file growing fails; the same file under a different rule fails; a base count other than `from` fails and the
   approval is reported stale (also once the growth has merged); a consumed entry (base already at `to`) is stale, and the
   same entry matches again once the base returns to `from`, which is why stale must fail; partial use (from 10, to 12,
-  head 11) fails as grown; `from: 0` matches a file absent at the base; malformed, undated, duplicate and non-growing
-  entries are refused; the shipped list is valid and frozen. The CLI's exit 1 on a stale approval is not tested: `main()`
-  reads the module's own `APPROVED_GROWTH` (empty) and the base baseline through `git show`, so it cannot be driven with
-  fixture approvals without git refs; `compareToBase` carries that logic and is tested directly.
+  head 11) fails as grown; `from: 0` matches a file absent at the base; malformed, undated, duplicate, non-growing,
+  unscanned-file and wrong-target entries and malformed approval documents are refused; the shipped approvals file is
+  valid and frozen. End to end in a throwaway git repository (`main(argv, { root })`): an approval present only in the
+  head does not let the growth through (GROWN, exit 1), the same approval present on the base does (exit 0); an
+  approval-only PR passes and its entry is not in force; approvals file plus a baseline in one diff fails (committed or
+  uncommitted) even when the base approval matches; an approved count reached through a different import fails in
+  `--base` (WRONG TARGET) and in the tree check (TARGET MISSING); a file that already imported the target at the base cannot
+  fill the slot with another import (`--base`); the tree check exits 1 when the baseline file is missing. Review of #225:
+  a branch that deletes a consumed approval (base count already at `to`) exits 0, an unrelated branch that still lists it
+  exits 1 STALE; the using PR that deletes exactly its own used entry exits 0 (CONSUMED), and the same PR that also edits,
+  adds or removes another entry, keeps and edits its own, or edits `_comment` fails CHANGED TOGETHER; a stale entry is
+  reported only while the head lists it, and an approval only in the head never accepts a growth; `--base main` without a
+  baseline exits 1 while another base without one is "nothing to compare"; the `ci-security.yaml` `pull_request` trigger
+  lists `opened, synchronize, reopened, edited`. `--base` refs:
+  `~N` / `^N` suffixes accepted, every other revision syntax refused, a step past the root commit throws. git's
+  environment is `LC_ALL=C` without `LANGUAGE`, and a German locale in the caller still reads a missing path as absent.
 
 ## S-W1 — the Worker's member-invitation pre-send check also requires an active workspace (branch fix/s-w1-invitation-workspace-active, 2026-11-16)
 - **Finding (Low, `docs/plans/untangle/worker.md` §4):** a manager invites a member; the workspace is then suspended or
