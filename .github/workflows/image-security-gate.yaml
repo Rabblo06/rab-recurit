@@ -198,7 +198,7 @@ jobs:
         run: python3 "$GATE" slim "$OUT/image-layout" "$RUNNER_TEMP/meta/image"
       - name: Upload layout metadata
         if: ${{ !cancelled() && env.CANDIDATE_RUN == '' && steps.build.outputs.image-id != '' }}
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: image-layout-meta-${{ env.ARCH }}
           path: ${{ runner.temp }}/meta
@@ -206,7 +206,7 @@ jobs:
           if-no-files-found: error
       - name: Upload the complete layout (export only; input to the gated index)
         if: ${{ !cancelled() && env.EXPORT_LAYOUTS == 'true' && env.CANDIDATE_RUN == '' && steps.gates.outcome == 'success' }}
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: image-layout-image-${{ env.ARCH }}
           path: ${{ steps.build.outputs.image-layout }}
@@ -229,7 +229,7 @@ jobs:
             --expected image-config,image-container,image-fs,image-attest,image-scan,image-vulns,image-secrets,image-pdf
       - name: Upload evidence (results, scanner output, SBOMs, provenance, scanner versions and DB timestamps, PDF)
         if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: image-gate-evidence-${{ env.ARCH }}
           path: |
@@ -319,7 +319,7 @@ jobs:
         run: python3 "$GATE" --mode "$MODE" --results "$RUNNER_TEMP/results" summary --expected manifest --title "Image gate - multi-platform manifest"
       - name: Upload the gated multi-platform layout (what publish-image pushes, or a later candidate verify reads)
         if: ${{ !cancelled() && env.EXPORT_LAYOUTS == 'true' && steps.merge.outcome == 'success' }}
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: gated-image-layout
           path: ${{ env.IMAGE_GATED_LAYOUT }}
@@ -328,7 +328,7 @@ jobs:
           if-no-files-found: error
       - name: Upload the release manifest (candidate, not published)
         if: ${{ !cancelled() && steps.merge.outcome == 'success' }}
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: release-manifest-candidate
           path: ${{ runner.temp }}/merged/release-manifest.json
@@ -336,7 +336,7 @@ jobs:
           if-no-files-found: error
       - name: Upload manifest evidence
         if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: image-gate-evidence-manifest
           path: |

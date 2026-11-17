@@ -129,7 +129,7 @@ jobs:
             packages/rab-server/src/database/typeorm/scripts/twenty-mode-check.ts lifecycle --report "${RUNNER_TEMP}/twenty-scenarios-pg${{ matrix.pg }}.json"
         env:
           TWENTY_PG_CONTAINER: twenty-pg
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always()
         with:
           name: twenty-findings-pg${{ matrix.pg }}

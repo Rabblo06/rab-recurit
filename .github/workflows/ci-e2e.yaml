@@ -65,7 +65,7 @@ jobs:
         working-directory: packages/rab-e2e-testing
       - name: Mocked web specs (default config)
         run: npx nx e2e rab-e2e-testing
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always()
         with:
           name: playwright-report-mocked
@@ -90,7 +90,7 @@ jobs:
       - name: Isolated web specs (isolated Vite on 127.0.0.1:5174, dead API URL)
         run: yarn playwright test -c playwright.isolated.config.ts
         working-directory: packages/rab-e2e-testing
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always()
         with:
           name: playwright-results-isolated
@@ -116,7 +116,7 @@ jobs:
       - run: npx nx run-many -t build -p rab-shared,rab-ui
       - name: AI visual and accessibility suites
         run: bash packages/rab-e2e-testing/web/ai/run-ai-visual.sh
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always()
         with:
           name: playwright-results-ai-visual
@@ -183,7 +183,7 @@ jobs:
           mkdir -p test-results/e2e-live/logs
           cp "${RUNNER_TEMP}"/e2e-live/*.log test-results/e2e-live/logs/ 2> /dev/null || true
           cp -r .audit/p1a-baseline test-results/e2e-live/perf-baseline 2> /dev/null || true
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always()
         with:
           name: playwright-results-live

@@ -90,7 +90,7 @@ jobs:
           npx nx run-many -t test -p rab-server --skip-nx-cache --runInBand --testTimeout=180000 --output-style=stream "--shard=${{ matrix.shard }}/3" --json "--outputFile=${RUNNER_TEMP}/jest-results/rab-server-${{ matrix.shard }}.json" || status=$?
           node -e 'const fs=require("fs");for(const f of process.argv.slice(1)){if(!fs.existsSync(f)){console.log(`no jest result: ${f}`);continue}const r=JSON.parse(fs.readFileSync(f,"utf8"));for(const t of r.testResults){const n=s=>t.assertionResults.filter(a=>a.status===s).length;const name=t.name.split(/[\\/]/).slice(-2).join("/");if(t.status!=="passed"||n("failed"))console.log(`FAILED-FILE ${name} passed=${n("passed")} failed=${n("failed")}${t.testExecError||(!t.assertionResults.length&&t.failureMessage)?" (file failed to run)":""}`)}console.log(`jest ${f.split(/[\\/]/).pop()}: suites=${r.numTotalTestSuites} failedSuites=${r.numFailedTestSuites} tests=${r.numTotalTests} failed=${r.numFailedTests}`)}' "${RUNNER_TEMP}"/jest-results/*.json
           exit $status
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always()
         with:
           name: jest-results-server-${{ matrix.shard }}
@@ -205,7 +205,7 @@ jobs:
           npx nx run-many -t test -p rab-server --skip-nx-cache --runInBand --testTimeout=180000 --output-style=stream "--shard=${{ matrix.shard }}/3" --json "--outputFile=${RUNNER_TEMP}/jest-results/rab-server-trap-${{ matrix.shard }}.json" || status=$?
           node -e 'const fs=require("fs");for(const f of process.argv.slice(1)){if(!fs.existsSync(f)){console.log(`no jest result: ${f}`);continue}const r=JSON.parse(fs.readFileSync(f,"utf8"));for(const t of r.testResults){const n=s=>t.assertionResults.filter(a=>a.status===s).length;const name=t.name.split(/[\/]/).slice(-2).join("/");if(t.status!=="passed"||n("failed"))console.log(`FAILED-FILE ${name} passed=${n("passed")} failed=${n("failed")}`)}console.log(`jest ${f.split(/[\/]/).pop()}: suites=${r.numTotalTestSuites} failedSuites=${r.numFailedTestSuites} tests=${r.numTotalTests} failed=${r.numFailedTests}`)}' "${RUNNER_TEMP}"/jest-results/*.json
           exit $status
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always()
         with:
           name: jest-results-server-trap-${{ matrix.shard }}
