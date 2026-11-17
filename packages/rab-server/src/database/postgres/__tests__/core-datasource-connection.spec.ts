@@ -1,7 +1,7 @@
 import { DataSource } from 'typeorm';
 import { PostgresConnectionOptions } from 'typeorm/driver/postgres/PostgresConnectionOptions';
 
-import { coreDataSourceOptions, coreMigrationDataSource, coreMigrationDataSourceOptions } from '../../typeorm/core/core.datasource';
+import { assertMigrationConnectionConfig, coreDataSourceOptions, coreMigrationDataSource, coreMigrationDataSourceOptions } from '../../typeorm/core/core.datasource';
 import { PgConfigError } from '../pg-url-policy';
 
 // Phase B (B1): coreDataSourceOptions / coreMigrationDataSourceOptions take their connection from the factory, lazily,
@@ -47,21 +47,24 @@ describe('core.datasource connection fields (factory)', () => {
     expect(o.migrationsTableName).toBe('core.migrations');
   });
 
-  it('migration: the elevated legacy URL when set, else the primary; 15/16-minute timeouts; crewflow-migrate', () => {
-    process.env.DATABASE_URL = `postgres://crewflow_app:${SECRET}@localhost:5432/rab`;
-    process.env.DATABASE_URL_UNPOOLED = `postgres://crewflow:${SECRET}@localhost:5432/rab`;
-    const legacy = { ...coreMigrationDataSourceOptions } as PostgresConnectionOptions;
-    expect(legacy.username).toBe('crewflow');
-    expect(legacy.extra).toMatchObject({
+  it('migration: the primary (PG_DATABASE_URL); 15/16-minute timeouts; crewflow-migrate', () => {
+    process.env.PG_DATABASE_URL = `postgres://crewflow_migrator:${SECRET}@localhost:5432/rab`;
+    const migration = { ...coreMigrationDataSourceOptions } as PostgresConnectionOptions;
+    expect(migration.username).toBe('crewflow_migrator');
+    expect(migration.extra).toMatchObject({
       query_timeout: 960_000,
       options: '-c statement_timeout=900000 -c idle_in_transaction_session_timeout=60000',
       application_name: 'crewflow-migrate',
     });
-    delete process.env.DATABASE_URL;
-    delete process.env.DATABASE_URL_UNPOOLED;
-    process.env.PG_DATABASE_URL = `postgres://crewflow_migrator:${SECRET}@localhost:5432/rab`;
-    expect(({ ...coreMigrationDataSourceOptions } as PostgresConnectionOptions).username).toBe('crewflow_migrator');
     expect((coreMigrationDataSourceOptions as PostgresConnectionOptions).entities).toBe(coreDataSourceOptions.entities);
+  });
+
+  it('X3.5-S8: the legacy DATABASE_URL / DATABASE_URL_UNPOOLED elevated migration connection is refused, never used (deferred to connect)', async () => {
+    delete process.env.PG_DATABASE_URL;
+    process.env.DATABASE_URL = `postgres://crewflow_app:${SECRET}@localhost:5432/rab`;
+    process.env.DATABASE_URL_UNPOOLED = `postgres://crewflow:${SECRET}@localhost:5432/rab`;
+    expect(() => assertMigrationConnectionConfig()).toThrow(/refuses the legacy database variable\(s\) DATABASE_URL, DATABASE_URL_UNPOOLED/);
+    expect(() => assertMigrationConnectionConfig()).not.toThrow(new RegExp(SECRET));
   });
 
   it('a refused configuration is deferred: reading the options does not throw, connecting rejects with the PgConfigError', async () => {

@@ -95,7 +95,8 @@ export interface ProvisioningLoopsLogger {
 
 export interface ProvisioningLoopsOptions {
   pg: ResolvedPgEnvironment;
-  endpoint: 'primary' | 'elevated';
+  /** The one endpoint (PG_DATABASE_URL); the legacy elevated endpoint is gone since X3.5-S8. */
+  endpoint: 'primary';
   runtime: WorkerRuntime;
   logger: ProvisioningLoopsLogger;
   intervalMs: number;

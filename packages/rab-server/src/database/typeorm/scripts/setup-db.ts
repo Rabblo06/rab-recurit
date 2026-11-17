@@ -6,7 +6,7 @@
  * Phase B (P7): the run is serialised by the migration advisory lock taken on the migration session itself, and every gate
  * (DB_TARGET, N1 production approval, CF-41 identity) is re-checked after the lock, on that session
  * (migrate/locked-migration-runner.ts). The connection is PG_DATABASE_URL, the migration-only credential of this one-off
- * process (legacy DATABASE_URL_UNPOOLED / DATABASE_URL accepted outside production with a warning; migrate/
+ * process (the legacy DATABASE_URL_UNPOOLED / DATABASE_URL are refused in every environment since X3.5-S8; migrate/
  * migration-database-url.ts). Failure exits non-zero, so nothing that depends on this run starts on a partially migrated
  * schema. Policy: docs/architecture/MIGRATION-EXECUTION-POLICY.md.
  *

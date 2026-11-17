@@ -8,7 +8,7 @@ import { integrationTestDatabase, integrationTestDatabaseReady } from '@rab/serv
  * Index fix (owner-approved 2026-11-06; OutboxClaimIndexes1786721440000, RefreshTokenReplacedByIndex1786721450000): EXPLAIN
  * regression tests for the per-scope dispatch claims and the token-cleanup delete, planned as the RUNTIME LOGIN.
  *
- * How the runtime plans are reproduced: the test cluster's superuser (TEST_DATABASE_URL_UNPOOLED) seeds synthetic rows in ONE
+ * How the runtime plans are reproduced: the test cluster's superuser (TEST_DATABASE_ADMIN_URL) seeds synthetic rows in ONE
  * transaction that is always rolled back (nothing is committed, so no other suite or dispatcher ever sees them), ANALYZEs
  * the tables inside it, then `SET LOCAL ROLE crewflow_owner` — the one login the API and the Worker connect as — and binds
  * exactly the transaction-local GUCs TenantContextService binds (rab.organisation_id / workspace_id / user_id / role /

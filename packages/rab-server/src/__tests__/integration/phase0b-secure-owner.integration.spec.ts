@@ -76,7 +76,7 @@ describeIfDb('Phase 0b: rab_secure_owner owns schema core and the helpers it exe
     admin = client(adminUrl);
     await admin.connect();
     if (!(await admin.query('SELECT rolsuper FROM pg_roles WHERE rolname = current_user')).rows[0].rolsuper) {
-      throw new Error('this suite needs the disposable database bootstrap superuser as TEST_DATABASE_URL_UNPOOLED');
+      throw new Error('this suite needs the disposable database bootstrap superuser as TEST_DATABASE_ADMIN_URL');
     }
     ds = createAdminDataSource();
     await ds.initialize();

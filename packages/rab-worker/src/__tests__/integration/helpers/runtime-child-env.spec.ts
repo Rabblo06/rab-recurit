@@ -76,12 +76,13 @@ describe('runtimeChildBaseEnv (X3.5-S7 review A-2)', () => {
     }
     expect(holding(child, [ADMIN_PW, ENCODED_PW, DECODED_MIGRATION_PW, ...Object.values(ROLE_PASSWORDS)])).toEqual([]);
     expect(child.X35_UNRELATED).toBe('kept');
-    expect(child.DATABASE_URL).toBe(APP);
+    // X3.5-S8: the legacy names are refused by every runtime process role, the provisioner included, so none is inherited.
+    for (const legacy of ['DATABASE_URL', 'DATABASE_URL_UNPOOLED', 'DATABASE_DIRECT_URL']) expect([legacy, legacy in child]).toEqual([legacy, false]);
   });
 
-  it('a spec still re-adds a name deliberately AFTER the base (the provisioner child gets its own DATABASE_URL_UNPOOLED)', () => {
-    const child = childEnv({ ...runtimeChildBaseEnv(PARENT), DATABASE_URL_UNPOOLED: CREWFLOW });
-    expect(child.DATABASE_URL_UNPOOLED).toBe(CREWFLOW);
+  it('a spec still re-adds a name deliberately AFTER the base (the child gets its own PG_DATABASE_URL)', () => {
+    const child = childEnv({ ...runtimeChildBaseEnv(PARENT), PG_DATABASE_URL: CREWFLOW });
+    expect(child.PG_DATABASE_URL).toBe(CREWFLOW);
     expect(child.TEST_DATABASE_ADMIN_URL).toBeUndefined();
   });
 });

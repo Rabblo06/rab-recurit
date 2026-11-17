@@ -16,11 +16,13 @@
  *   - TEST_DATABASE_URL (application role) and TEST_DATABASE_ADMIN_URL (admin role: the disposable cluster's bootstrap
  *     superuser) must BOTH be set, and each must name its login in the URL. No fallback to DATABASE_URL or
  *     DATABASE_URL_UNPOOLED, which may come from `.env`.
- *   - X3.5-S7 (audit DBT-08), release 1: TEST_DATABASE_URL_UNPOOLED is the deprecated name of TEST_DATABASE_ADMIN_URL. It
- *     is still accepted (globalSetup prints one name-only deprecation line), every check above applies to whichever name
- *     supplied the URL, and both names set to different values is refused (compared as written after trimming, so even a
- *     different password is a refusal). After validation both names hold the validated value, so a later dotenv load
- *     cannot bring a different admin URL in under either name. Release 2 refuses the old name.
+ *   - X3.5-S8 (audit DBT-08), release 2: TEST_DATABASE_URL_UNPOOLED, the old name of TEST_DATABASE_ADMIN_URL, is refused
+ *     whenever non-empty (inherited or in a `.env` a later load would read), with a message naming the new name. After
+ *     validation only TEST_DATABASE_ADMIN_URL holds the admin URL; the old name is blanked so a later dotenv load cannot
+ *     bring it back. (Release 1, X3.5-S7, still accepted it with a deprecation line.)
+ *   - X3.5-S8: the legacy connection names DATABASE_URL, DATABASE_URL_UNPOOLED, DATABASE_DIRECT_URL and DB_POOL_MAX are
+ *     refused whenever non-empty (inherited or in a `.env` a later load would read), with the same message the connection
+ *     factory gives (pg-config.ts legacyPgEnvRefusalMessage). Release 1 silently blanked them.
  *   - Both must name the same logical database on the same endpoint. Hostnames are NOT compared literally, because a pooled
  *     and a direct Neon URL legitimately differ by the `-pooler` suffix. TEST_DATABASE_CREWFLOW_URL and
  *     TEST_DATABASE_WORKER_URL, when set, must name that same database and endpoint too.
@@ -34,8 +36,8 @@
  *     legacy DATABASE_DIRECT_URL (lock connection) and PG_DATABASE_REPLICA_URL (read routing), which a test process never
  *     needs and which are refused whenever non-empty (X1.9: pg-config compares DATABASE_DIRECT_URL by database name only
  *     and refuses a replica only when it is the very same target, so a superuser login on the TEST database slipped through).
- *     An empty value counts as unset. X3.5-S6: PG_DATABASE_URL is then set to the validated application URL and
- *     DATABASE_URL / DATABASE_URL_UNPOOLED are blanked (below), so an inherited value of either cannot redirect.
+ *     An empty value counts as unset. X3.5-S6: PG_DATABASE_URL is then set to the validated application URL, and the legacy
+ *     names (refused above when non-empty, X3.5-S8) are blanked, so a later dotenv load cannot bring one back.
  *   - The same inherited-URL and libpq rules also read the working directory's `.env` (and DOTENV_CONFIG_PATH), as data
  *     only (X1.9): @nestjs/config and `dotenv/config` load that file into process.env LATER (when AppModule or a script is
  *     imported), after this guard ran, so a name present only there would otherwise escape it on a direct `npx jest -c` run.
@@ -57,19 +59,20 @@ import * as path from 'path';
 import { parse as parseDotenv } from 'dotenv';
 import { Client } from 'pg';
 
-import { LEGACY_PG_ENV_NAMES, presentLegacyPgEnvNames } from '../../postgres/pg-config';
+import { LEGACY_PG_ENV_NAMES, legacyPgEnvRefusalMessage, presentLegacyPgEnvNames } from '../../postgres/pg-config';
 
 export const TEST_DATABASE_URL = 'TEST_DATABASE_URL';
 /** The test admin connection: the disposable cluster's bootstrap superuser (fixtures, identity probes, migrations only). */
 export const TEST_DATABASE_ADMIN_URL = 'TEST_DATABASE_ADMIN_URL';
 /**
- * Deprecated name of TEST_DATABASE_ADMIN_URL (X3.5-S7 release 1: accepted with a deprecation line; refused next release).
- * It never meant "unpooled": the guard used to map it onto DATABASE_URL_UNPOOLED.
+ * The old name of TEST_DATABASE_ADMIN_URL. X3.5-S8 (release 2): refused whenever non-empty (X3.5-S7, release 1, still accepted
+ * it with a deprecation line). It never meant "unpooled": the guard used to map it onto DATABASE_URL_UNPOOLED.
  */
 export const TEST_DATABASE_URL_UNPOOLED = 'TEST_DATABASE_URL_UNPOOLED';
 /**
  * Every name that can carry the test admin (superuser) URL, new name first. A child-process strip list must remove ALL of
- * them (test-database-admin-url-names.spec.ts checks the committed strip lists) and keeps the old name after release 2 too.
+ * them (test-database-admin-url-names.spec.ts checks the committed strip lists) and keeps the old name permanently: the
+ * guard refuses it, but a strip list must still never let a stray value through.
  */
 export const TEST_DATABASE_ADMIN_URL_NAMES: readonly string[] = [TEST_DATABASE_ADMIN_URL, TEST_DATABASE_URL_UNPOOLED];
 /** The `crewflow` login (worker provisioner tests). Optional; when set it must name the TEST database. */
@@ -155,10 +158,8 @@ export interface ResolvedTestDatabase {
   appUrl: string;
   adminUrl: string;
   app: TestDatabaseIdentity;
-  /** `admin.label` is the name that supplied the admin URL (TEST_DATABASE_ADMIN_URL, or the deprecated name). */
+  /** `admin.label` is TEST_DATABASE_ADMIN_URL (the only accepted name since X3.5-S8). */
   admin: TestDatabaseIdentity;
-  /** True when the admin URL came ONLY from the deprecated TEST_DATABASE_URL_UNPOOLED (globalSetup prints a notice). */
-  adminFromDeprecatedName: boolean;
 }
 
 /** Parses a connection string into printable identity fields. Throws without ever echoing the raw value. */
@@ -248,24 +249,22 @@ function developmentDatabaseRefusal(id: TestDatabaseIdentity, env: Record<string
   return null;
 }
 
+/** X3.5-S8: the refusal for the old admin name. Names only, never a value. */
+export function retiredTestDatabaseAdminNameMessage(): string {
+  return (
+    `${TEST_DATABASE_URL_UNPOOLED} was renamed to ${TEST_DATABASE_ADMIN_URL} and is refused since release 2 of the legacy database names (X3.5-S8). ` +
+    `Rename it to ${TEST_DATABASE_ADMIN_URL} (same value) and remove the old name. Refusing to start.`
+  );
+}
+
 /**
- * X3.5-S7: the admin URL from TEST_DATABASE_ADMIN_URL or its deprecated name. When both are set (non-empty) they must be the
- * very same value after trimming, otherwise refused, naming both variables and no value. Pure.
+ * X3.5-S8: the admin URL from TEST_DATABASE_ADMIN_URL only. The old name TEST_DATABASE_URL_UNPOOLED is refused whenever
+ * non-empty, whether or not the new name is set (X3.5-S7 accepted it with a deprecation line). Pure; names only.
  */
-export function resolveTestDatabaseAdminUrl(
-  env: Record<string, string | undefined>,
-): { url: string; label: string; fromDeprecatedName: boolean } | null {
+export function resolveTestDatabaseAdminUrl(env: Record<string, string | undefined>): { url: string; label: string } | null {
+  if (present(env, TEST_DATABASE_URL_UNPOOLED) !== undefined) throw new TestDatabaseConfigError(retiredTestDatabaseAdminNameMessage());
   const current = present(env, TEST_DATABASE_ADMIN_URL);
-  const deprecated = present(env, TEST_DATABASE_URL_UNPOOLED);
-  if (current !== undefined && deprecated !== undefined && current !== deprecated) {
-    throw new TestDatabaseConfigError(
-      `${TEST_DATABASE_ADMIN_URL} and its deprecated name ${TEST_DATABASE_URL_UNPOOLED} are both set, to different values (values not shown). ` +
-        `Set only ${TEST_DATABASE_ADMIN_URL}. Refusing to start.`,
-    );
-  }
-  if (current !== undefined) return { url: current, label: TEST_DATABASE_ADMIN_URL, fromDeprecatedName: false };
-  if (deprecated !== undefined) return { url: deprecated, label: TEST_DATABASE_URL_UNPOOLED, fromDeprecatedName: true };
-  return null;
+  return current !== undefined ? { url: current, label: TEST_DATABASE_ADMIN_URL } : null;
 }
 
 /**
@@ -282,7 +281,7 @@ export function resolveIntegrationTestDatabase(env: Record<string, string | unde
   const adminSource = resolveTestDatabaseAdminUrl(env);
   if (!adminSource) {
     throw new TestDatabaseConfigError(
-      `${TEST_DATABASE_ADMIN_URL} is required for integration tests (its deprecated name ${TEST_DATABASE_URL_UNPOOLED} is still accepted this release). ` +
+      `${TEST_DATABASE_ADMIN_URL} is required for integration tests (the old name ${TEST_DATABASE_URL_UNPOOLED} is refused). ` +
         'DATABASE_URL_UNPOOLED is never used as a fallback.',
     );
   }
@@ -328,16 +327,7 @@ export function resolveIntegrationTestDatabase(env: Record<string, string | unde
       );
     }
   }
-  return { appUrl, adminUrl, app, admin, adminFromDeprecatedName: adminSource.fromDeprecatedName };
-}
-
-/**
- * X3.5-S7: the one name-only line globalSetup prints when the admin URL came from the deprecated name; null otherwise.
- * Never contains a value.
- */
-export function testDatabaseAdminNameNotice(resolved: ResolvedTestDatabase): string | null {
-  if (!resolved.adminFromDeprecatedName) return null;
-  return `[test-db-guard] ${TEST_DATABASE_URL_UNPOOLED} is deprecated: rename it to ${TEST_DATABASE_ADMIN_URL} (same value). The old name is refused in the next release.`;
+  return { appUrl, adminUrl, app, admin };
 }
 
 /** Prints NODE_ENV only when it is one of the declared values; anything else is not echoed. */
@@ -359,10 +349,14 @@ export function assertJestNodeEnv(env: Record<string, string | undefined>): void
 }
 
 /**
- * The inherited-environment rules for a test process: no target-changing libpq variable, and no inherited database URL
- * that names anything but the validated TEST database (an empty value counts as unset). Pure: reads `env` only.
+ * The inherited-environment rules for a test process: no legacy connection name and no old admin name (X3.5-S8), no
+ * target-changing libpq variable, and no inherited database URL that names anything but the validated TEST database (an
+ * empty value counts as unset). Pure: reads `env` only.
  */
 export function assertNoRedirectingDatabaseEnv(env: Record<string, string | undefined>, resolved: ResolvedTestDatabase): void {
+  const legacy = presentLegacyPgEnvNames(env);
+  if (legacy.length > 0) throw new TestDatabaseConfigError(legacyPgEnvRefusalMessage(legacy, 'the integration-test run'));
+  if (present(env, TEST_DATABASE_URL_UNPOOLED) !== undefined) throw new TestDatabaseConfigError(retiredTestDatabaseAdminNameMessage());
   const libpq = TARGET_CHANGING_LIBPQ_ENV_NAMES.filter((name) => present(env, name) !== undefined);
   if (libpq.length > 0) {
     throw new TestDatabaseConfigError(
@@ -417,7 +411,15 @@ export function laterDotenvValues(
   const files = [path.resolve(cwd, '.env')];
   const configured = env.DOTENV_CONFIG_PATH?.trim();
   if (configured) files.push(path.resolve(cwd, configured));
-  const names = new Set([...INHERITED_DATABASE_URL_NAMES, ...FORBIDDEN_IN_TEST_DATABASE_URL_NAMES, ...TARGET_CHANGING_LIBPQ_ENV_NAMES, ...extraNames]);
+  const names = new Set([
+    ...INHERITED_DATABASE_URL_NAMES,
+    ...FORBIDDEN_IN_TEST_DATABASE_URL_NAMES,
+    ...TARGET_CHANGING_LIBPQ_ENV_NAMES,
+    // X3.5-S8: the refused legacy names and the old admin name, so a value present only in a `.env` is refused too.
+    ...LEGACY_PG_ENV_NAMES,
+    TEST_DATABASE_URL_UNPOOLED,
+    ...extraNames,
+  ]);
   const out: Record<string, string> = {};
   for (const file of files) {
     const content = read(file);
@@ -443,31 +445,28 @@ function assertNoRedirectingProcessEnv(env: Record<string, string | undefined>, 
 }
 
 /**
- * The legacy connection names the routed test environment blanks (X3.5-S6). Blanked, not deleted: dotenv (and @nestjs/config)
- * never overrides a variable that is already present, so an empty value keeps a later `.env` load from bringing a developer's
- * DATABASE_URL / DATABASE_URL_UNPOOLED / DB_POOL_MAX back in, and the connection factory treats an empty value as unset.
- * Together with the refusal of DATABASE_DIRECT_URL (FORBIDDEN_IN_TEST_DATABASE_URL_NAMES) this covers every pg-config legacy
- * name, so the routing itself never resolves one and release 1 refuses nothing that was accepted before. A DB_POOL_MAX given
- * to a test run is therefore ignored (the pool uses PG_POOL_MAX_CONNECTIONS or its default): it only ever sized the test pool,
- * no committed test configuration sets it, and copying it over would add environment reads the factory-only scan
- * (no-unapproved-db-access.spec.ts) does not allow here.
+ * The retired names the routed test environment blanks after validation (X3.5-S6; X3.5-S8 refuses every one of them when
+ * non-empty BEFORE routing, so this only ever overwrites an unset or empty value). Blanked, not deleted: dotenv (and
+ * @nestjs/config) never overrides a variable that is already present, so an empty value keeps a later `.env` load (one the
+ * guard did not read, e.g. a changed DOTENV_CONFIG_PATH) from bringing an old value back, and the connection factory and this
+ * guard treat an empty value as unset. DATABASE_DIRECT_URL stays refused rather than blanked
+ * (FORBIDDEN_IN_TEST_DATABASE_URL_NAMES, X1.9).
  */
-export const ROUTED_TEST_BLANKED_LEGACY_NAMES: readonly string[] = ['DATABASE_URL', 'DATABASE_URL_UNPOOLED', 'DB_POOL_MAX'];
+export const ROUTED_TEST_BLANKED_LEGACY_NAMES: readonly string[] = ['DATABASE_URL', 'DATABASE_URL_UNPOOLED', 'DB_POOL_MAX', TEST_DATABASE_URL_UNPOOLED];
 
 /**
  * Called from Jest setupFiles (every test file, every worker) and from the e2e seed scripts. Under NODE_ENV=test it validates
  * the TEST_* pair and the inherited environment, then points PG_DATABASE_URL (the one runtime name, the factory's primary) at
  * the validated application URL, so every module that reads the connection (core datasource, Nest ConfigModule, which never
  * overrides an already-set variable) uses the test database and nothing else.
- *   - X3.5-S6 (release 1): the guard no longer writes the legacy DATABASE_URL / DATABASE_URL_UNPOOLED. Both are blanked
- *     (ROUTED_TEST_BLANKED_LEGACY_NAMES), so the factory resolves PG_DATABASE_URL with no legacy name and no deprecation
- *     warning, and the elevated endpoint is unconfigured under Jest: a spec or helper that needs the admin connection takes
- *     it explicitly from the validated pair (integrationTestDatabase().adminUrl / resolveIntegrationTestDatabase(env).adminUrl),
+ *   - X3.5-S6: the guard never writes the legacy DATABASE_URL / DATABASE_URL_UNPOOLED; X3.5-S8 refuses them (and the
+ *     other legacy names) when non-empty, then blanks them (ROUTED_TEST_BLANKED_LEGACY_NAMES), so the factory resolves
+ *     PG_DATABASE_URL only. There is no elevated endpoint: a spec or helper that needs the admin connection takes it
+ *     explicitly from the validated pair (integrationTestDatabase().adminUrl / resolveIntegrationTestDatabase(env).adminUrl),
  *     never from an environment name. Both Jest globalSetups refuse a routed environment that still holds a legacy name
  *     (routedTestDatabaseLegacyNames).
- *   - X3.5-S7: both admin names (TEST_DATABASE_ADMIN_URL and the deprecated TEST_DATABASE_URL_UNPOOLED) are set to the
- *     validated admin URL, so a spec reading either name gets the checked value and a later dotenv load cannot add a
- *     different one under the other name.
+ *   - X3.5-S8: only TEST_DATABASE_ADMIN_URL is set to the validated admin URL; the old name TEST_DATABASE_URL_UNPOOLED is
+ *     refused when non-empty and blanked, so a later dotenv load cannot add it.
  *
  * Outside NODE_ENV=test it returns null and changes nothing (runtime and CLI processes are unaffected), EXCEPT under Jest
  * (JEST_WORKER_ID set), where any other NODE_ENV is refused (DBT-01): a test file never runs unrouted.
@@ -481,7 +480,7 @@ export function applyIntegrationTestDatabaseEnv(env: NodeJS.ProcessEnv): Resolve
   assertNoRedirectingProcessEnv(env, resolved);
   env.PG_DATABASE_URL = resolved.appUrl;
   for (const name of ROUTED_TEST_BLANKED_LEGACY_NAMES) env[name] = '';
-  for (const name of TEST_DATABASE_ADMIN_URL_NAMES) env[name] = resolved.adminUrl;
+  env[TEST_DATABASE_ADMIN_URL] = resolved.adminUrl;
   return resolved;
 }
 
@@ -490,8 +489,9 @@ export function applyIntegrationTestDatabaseEnv(env: NodeJS.ProcessEnv): Resolve
  * and returns the legacy connection names (pg-config LEGACY_PG_ENV_NAMES) that still hold a value in the routed copy, or
  * that a LATER dotenv load (the working directory's `.env`, DOTENV_CONFIG_PATH; laterDotenvValues) would add to it. dotenv
  * never overrides a present variable, so the blanked names win over the file. The globalSetups refuse to start unless this
- * is empty, so the deprecation warnings pg-config now prints under NODE_ENV=test too can never fire from the test routing
- * itself. Names only. Throws what applyIntegrationTestDatabaseEnv throws. `cwd` / `read` are the test seams.
+ * is empty. Since X3.5-S8 the routing itself refuses a non-empty legacy name first, so this is the regression guard on the
+ * routing (it can only report something if the blanking or the refusal regresses). Names only. Throws what
+ * applyIntegrationTestDatabaseEnv throws. `cwd` / `read` are the test seams.
  */
 export function routedTestDatabaseLegacyNames(
   env: Record<string, string | undefined>,

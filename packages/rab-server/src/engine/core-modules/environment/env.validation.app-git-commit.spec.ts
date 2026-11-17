@@ -4,7 +4,7 @@ import { validate } from './env.validation';
  * Admin Panel "Commit": APP_GIT_COMMIT is optional. An empty value (a Docker build arg that was not passed) counts as
  * unset instead of refusing to boot; anything that is not a 7–40 character lowercase hex SHA still refuses.
  */
-const base = { DATABASE_URL: 'postgres://rab:rab@localhost:5432/rab', REDIS_URL: 'redis://localhost:6379', APP_SECRET: 'a'.repeat(32) };
+const base = { PG_DATABASE_URL: 'postgres://rab:rab@localhost:5432/rab', REDIS_URL: 'redis://localhost:6379', APP_SECRET: 'a'.repeat(32) };
 
 describe('APP_GIT_COMMIT', () => {
   it('may be absent or empty', () => {

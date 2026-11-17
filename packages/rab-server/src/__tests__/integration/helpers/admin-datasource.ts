@@ -17,7 +17,7 @@ import { resolveIntegrationTestDatabase } from '../../../database/typeorm/core/t
  * for everything that actually exercises RLS/auth, while this connection
  * covers the "owner/migration-style" setup a real seed script would do.
  *
- * The URL comes ONLY from TEST_DATABASE_ADMIN_URL (or its deprecated name TEST_DATABASE_URL_UNPOOLED, X3.5-S7), validated by the same
+ * The URL comes ONLY from TEST_DATABASE_ADMIN_URL (the old name TEST_DATABASE_URL_UNPOOLED is refused, X3.5-S8), validated by the same
  * guard as the application connection (same logical database, same endpoint,
  * no remote host without ALLOW_REMOTE_TEST_DATABASE=true). It never falls back
  * to DATABASE_URL_UNPOOLED: that name is read from the developer's .env, which

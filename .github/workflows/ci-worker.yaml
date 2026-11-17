@@ -40,7 +40,7 @@ jobs:
       # PostgreSQL (M2 CI reliability, 2026-10-28): same change as ci-server. No service volume of postgres-init (checkout
       # failed with EACCES) and no rab_owner migration run (refused at the role split). The database is started after
       # checkout and built by the restricted-migrator fresh install; tests get TEST_DATABASE_URL (crewflow_app),
-      # TEST_DATABASE_URL_UNPOOLED (bootstrap superuser) and TEST_DATABASE_CREWFLOW_URL (crewflow, provisioner tests).
+      # TEST_DATABASE_ADMIN_URL (bootstrap superuser) and TEST_DATABASE_CREWFLOW_URL (crewflow, provisioner tests).
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -74,7 +74,7 @@ jobs:
         run: |
           set -euo pipefail
           set -a; source "${RUNNER_TEMP}/test-database.env"; set +a
-          # TEST_DATABASE_URL = crewflow_owner (the one runtime login); TEST_DATABASE_URL_UNPOOLED = the cluster superuser
+          # TEST_DATABASE_URL = crewflow_owner (the one runtime login); TEST_DATABASE_ADMIN_URL = the cluster superuser
           # (fixtures only). The Twenty catalogue suites run in ci-twenty-tests.yaml, not here.
           test_env="$(node packages/rab-server/src/database/typeorm/scripts/twenty-test-env.cjs "$OWNER_DB" --source bootstrap)"  # a helper refusal fails the step here, not later
           eval "$test_env"

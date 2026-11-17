@@ -318,7 +318,7 @@ describeIfDb('admin panel routes (integration)', () => {
 
   it('environment view: secrets, URLs and hosts are Set / Not set only — planted values never appear', async () => {
     overrides.APP_SECRET = 'planted-app-secret-0123456789abcdef';
-    overrides.DATABASE_URL = 'postgres://planted_user:planted_pw@planted-db-host.internal:5432/rab';
+    overrides.PG_DATABASE_URL = 'postgres://planted_user:planted_pw@planted-db-host.internal:5432/rab';
     overrides.S3_ENDPOINT = 'https://planted-s3-host.internal';
     overrides.EMAIL_SMTP_HOST = 'planted-smtp-host.internal';
     overrides.EMAIL_FROM_ADDRESS = 'https://planted-from-url.internal/x';
@@ -329,7 +329,7 @@ describeIfDb('admin panel routes (integration)', () => {
     for (const planted of ['planted-app-secret', 'planted_pw', 'planted_user', 'planted-db-host', 'planted-s3-host', 'planted-smtp-host', 'planted-from-url']) expect(raw).not.toContain(planted);
     const row = (key: string) => res.body.find((r: { key: string }) => r.key === key);
     expect(row('APP_SECRET')).toMatchObject({ state: 'set', value: null });
-    expect(row('DATABASE_URL')).toMatchObject({ state: 'set', value: null });
+    expect(row('PG_DATABASE_URL')).toMatchObject({ state: 'set', value: null });
     expect(row('EMAIL_FROM_ADDRESS')).toMatchObject({ state: 'set', value: null });
     expect(row('S3_BUCKET')).toMatchObject({ state: 'value', value: 'planted-bucket' });
     expect(row('NODE_ENV')).toMatchObject({ state: 'value', value: 'test' });

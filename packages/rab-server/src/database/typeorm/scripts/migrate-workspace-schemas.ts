@@ -7,8 +7,8 @@
  *     ts-node --transpile-only -P packages/rab-server/tsconfig.app.json \
  *     packages/rab-server/src/database/typeorm/scripts/migrate-workspace-schemas.ts [--through=<version>]
  *
- * Connects ONLY through the migration connection (PG_DATABASE_URL; legacy DATABASE_URL_UNPOOLED / DATABASE_URL outside
- * production with a warning, migrate/migration-database-url.ts), after the DB_TARGET guard and its read-only identity probe,
+ * Connects ONLY through the migration connection (PG_DATABASE_URL; the legacy DATABASE_URL_UNPOOLED / DATABASE_URL are
+ * refused in every environment, migrate/migration-database-url.ts), after the DB_TARGET guard and its read-only identity probe,
  * and the migrator itself refuses the runtime role. Exit 1 when any workspace FAILED or was REFUSED (each is rolled back
  * and recorded in core.workspace_schema_migration; the others are migrated).
  */

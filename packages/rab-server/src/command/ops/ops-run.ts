@@ -256,13 +256,8 @@ export function assertOpsRun(
   if (resolved.primary.source !== 'PG_DATABASE_URL' || resolved.primary.target.user !== OWNER_LOGIN_ROLE) {
     throw new OpsRunError(`"${command}" runs only under the owner login ${OWNER_LOGIN_ROLE} named by PG_DATABASE_URL. Refusing.`);
   }
-  // Defence in depth: the only source of `resolved.elevated` is DATABASE_URL_UNPOOLED, which
-  // assertOwnerLoginOpsEnvironment above already refuses, so this is reachable only when a caller passes a `resolved`
-  // built from a different environment than `env` (a direct call from other code or a test). Kept so a second endpoint
-  // can never reach the run whatever the caller passes.
-  if (resolved.elevated !== null) {
-    throw new OpsRunError(`"${command}" on the owner-login path uses the one login only; a second database endpoint (${resolved.elevated.source}) is refused.`);
-  }
+  // X3.5-S8: no second endpoint can reach the run, whatever the caller passes. The factory refuses DATABASE_URL_UNPOOLED
+  // (its only former source) in every environment, and ResolvedPgEnvironment no longer has an elevated endpoint at all.
   return readOpsLabelFromFlags(flags, command, mode);
 }
 

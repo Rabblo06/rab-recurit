@@ -53,18 +53,24 @@ describe('resolveMigrationConnection (P1/P7, through the shared factory)', () =>
       resolveMigrationConnection({ DB_TARGET: 'production', PG_DATABASE_URL: 'postgres://m:p@ep-x-pooler.eu-central-1.aws.neon.tech/neondb?sslmode=verify-full' }),
     ).toThrow(/pooler/);
   });
-  it('non-production: the deprecated DATABASE_URL_UNPOOLED names the migration endpoint, with a warning', () => {
-    const c = resolveMigrationConnection({ DB_TARGET: 'test', DATABASE_URL_UNPOOLED: MIG, DATABASE_URL: APP });
-    expect(c).toMatchObject({ endpoint: 'elevated', source: 'DATABASE_URL_UNPOOLED', url: MIG });
-    expect(c.warnings.join()).toMatch(/deprecated/);
-    expect(resolveMigrationConnection({ DB_TARGET: 'local', DATABASE_URL: MIG })).toMatchObject({ endpoint: 'primary', source: 'DATABASE_URL' });
+  it('X3.5-S8 non-production: the legacy DATABASE_URL_UNPOOLED / DATABASE_URL never name the migration endpoint; they are refused', () => {
+    expect(() => resolveMigrationConnection({ DB_TARGET: 'test', DATABASE_URL_UNPOOLED: MIG, DATABASE_URL: APP })).toThrow(
+      /the migrate process refuses the legacy database variable\(s\) DATABASE_URL, DATABASE_URL_UNPOOLED/,
+    );
+    expect(() => resolveMigrationConnection({ DB_TARGET: 'local', DATABASE_URL: MIG })).toThrow(/DATABASE_URL -> use PG_DATABASE_URL/);
+    const c = resolveMigrationConnection({ DB_TARGET: 'test', PG_DATABASE_URL: MIG });
+    expect(c).toMatchObject({ endpoint: 'primary', source: 'PG_DATABASE_URL', url: MIG });
+    expect(c.warnings).toEqual([]);
   });
-  it('non-production: PG_DATABASE_URL and a DATABASE_URL_UNPOOLED naming another target is refused, not silently overridden', () => {
-    expect(() => resolveMigrationConnection({ DB_TARGET: 'test', PG_DATABASE_URL: MIG, DATABASE_URL_UNPOOLED: APP })).toThrow(/different targets/);
-    expect(resolveMigrationConnection({ DB_TARGET: 'test', PG_DATABASE_URL: MIG, DATABASE_URL_UNPOOLED: MIG }).url).toBe(MIG);
+  it('X3.5-S8 non-production: PG_DATABASE_URL next to DATABASE_URL_UNPOOLED is refused whatever the target (same or another)', () => {
+    for (const legacy of [APP, MIG]) {
+      expect(() => resolveMigrationConnection({ DB_TARGET: 'test', PG_DATABASE_URL: MIG, DATABASE_URL_UNPOOLED: legacy })).toThrow(/DATABASE_URL_UNPOOLED -> use PG_DATABASE_URL/);
+    }
   });
-  it('non-production: PG_DATABASE_URL and a DATABASE_URL naming another target is refused (factory rule)', () => {
-    expect(() => resolveMigrationConnection({ DB_TARGET: 'test', PG_DATABASE_URL: MIG, DATABASE_URL: OTHER })).toThrow(/different targets/);
+  it('X3.5-S8 non-production: PG_DATABASE_URL next to DATABASE_URL is refused whatever the target (factory rule)', () => {
+    for (const legacy of [OTHER, MIG]) {
+      expect(() => resolveMigrationConnection({ DB_TARGET: 'test', PG_DATABASE_URL: MIG, DATABASE_URL: legacy })).toThrow(/refuses the legacy database variable\(s\) DATABASE_URL:/);
+    }
   });
   it('nothing set is refused; messages never contain the URL', () => {
     expect(() => resolveMigrationConnection({ DB_TARGET: 'test' })).toThrow(/PG_DATABASE_URL is required/);

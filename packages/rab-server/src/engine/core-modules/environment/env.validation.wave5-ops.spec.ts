@@ -5,7 +5,7 @@ import { validate } from './env.validation';
  * `@Type(() => String)` ahead of the strict-boolean transform, `enableImplicitConversion` turned the STRING 'false' into
  * `true` — which would have switched outbox retention (and the L1) ON in an environment that set them explicitly off.
  */
-const base = { DATABASE_URL: 'postgres://rab:rab@localhost:5432/rab', REDIS_URL: 'redis://localhost:6379', APP_SECRET: 'a'.repeat(32) };
+const base = { PG_DATABASE_URL: 'postgres://rab:rab@localhost:5432/rab', REDIS_URL: 'redis://localhost:6379', APP_SECRET: 'a'.repeat(32) };
 
 describe('wave 5 lane OPS environment variables', () => {
   it.each(['OUTBOX_RETENTION_ENABLED', 'METADATA_L1_CACHE_ENABLED', 'LOGIN_HANDOFF_CLEANUP_ENABLED'])('%s: "false" is false, "true" is true, a typo refuses to boot', (key) => {

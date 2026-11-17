@@ -30,7 +30,7 @@ interface SeedAiDemoOptions {
  * The target rules, pure (exported for its unit test). The command runs ONLY against the development database:
  *   - NODE_ENV=development and RAB_RUNTIME_ENV=development (the same declaration the dev API/Worker carry);
  *   - DB_TARGET=local (the command bootstrap already resolved and probed it; `test`, `staging`, `production` refused);
- *   - PG_DATABASE_URL (or the deprecated DATABASE_URL) on a loopback host or a listed compose database service
+ *   - PG_DATABASE_URL on a loopback host or a listed compose database service
  *     (deployment-identity.ts LOCAL_DATABASE_SERVICE_HOSTS).
  * The live checks follow in `run()`: the database must NOT carry the disposable-test marker, and the connection must be
  * the operator identity allowed to run the synthetic-marker function. Messages never contain a URL or credential.
@@ -40,10 +40,10 @@ export function seedAiDemoTargetProblems(env: Record<string, string | undefined>
   if (env.NODE_ENV !== 'development') problems.push(`NODE_ENV must be development (got ${env.NODE_ENV ?? 'unset'}).`);
   if (env.RAB_RUNTIME_ENV !== 'development') problems.push(`RAB_RUNTIME_ENV must be development (got ${env.RAB_RUNTIME_ENV ?? 'unset'}).`);
   if (env.DB_TARGET !== 'local') problems.push(`DB_TARGET must be local (got ${env.DB_TARGET ?? 'unset'}); test, staging and production databases are refused.`);
-  // Phase B: the process's primary URL (PG_DATABASE_URL; the deprecated DATABASE_URL outside production).
+  // Phase B: the process's primary URL, PG_DATABASE_URL (X3.5-S8: the legacy DATABASE_URL is refused, never read).
   const primary = readPrimaryDatabaseUrl(env);
   if (!primary) {
-    problems.push('PG_DATABASE_URL is required (or, outside production, the deprecated DATABASE_URL).');
+    problems.push('PG_DATABASE_URL is required (the legacy DATABASE_URL is refused in every environment).');
   } else {
     try {
       const id = describeDatabaseUrl(primary.value, primary.name);

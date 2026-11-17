@@ -4,7 +4,7 @@
  * check), with the time of each check query. Refuses anything but the disposable test database (resolveIntegrationTestDatabase,
  * NODE_ENV=test). Prints numbers only (no URL, no secret).
  *
- *   NODE_ENV=test TEST_DATABASE_URL=… TEST_DATABASE_URL_UNPOOLED=… PERF_WORKSPACES=1000 \
+ *   NODE_ENV=test TEST_DATABASE_URL=… TEST_DATABASE_ADMIN_URL=… PERF_WORKSPACES=1000 \
  *     ts-node --transpile-only -P packages/rab-server/tsconfig.app.json packages/rab-server/src/__tests__/perf/workspace-runner-perf.ts
  * Phases (PERF_PHASE): seed | measure | all (default).
  */

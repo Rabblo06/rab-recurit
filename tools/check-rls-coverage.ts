@@ -327,9 +327,8 @@ interface DriftedExemptTable {
 }
 
 async function main(): Promise<void> {
-  // Phase B: the connection factory (PG_DATABASE_URL; the deprecated DATABASE_URL is still accepted outside production until
-  // X3.5-S8, with a warning; CI and every harness pass PG_DATABASE_URL). Explicit TLS and target; a refused configuration
-  // names variables only.
+  // Phase B: the connection factory (PG_DATABASE_URL only; the legacy DATABASE_URL is refused in every environment since
+  // X3.5-S8). Explicit TLS and target; a refused configuration names variables only.
   const client = createPgClient(resolvePgEnvironment(process.env, { processRole: 'cli' }), { purpose: 'check-rls' });
   await client.connect();
 

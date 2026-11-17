@@ -20,7 +20,7 @@ const SECURE: Partial<EnvironmentVariables> = {
   WORKER_DISPATCH_MODE: 'poll',
 };
 const problems = (over: Partial<EnvironmentVariables>) => productionConfigurationProblems({ ...SECURE, ...over } as EnvironmentVariables);
-const base = { DATABASE_URL: 'postgres://rab:rab@localhost:5432/rab', REDIS_URL: 'redis://localhost:6379', APP_SECRET: 'a'.repeat(32) };
+const base = { PG_DATABASE_URL: 'postgres://rab:rab@localhost:5432/rab', REDIS_URL: 'redis://localhost:6379', APP_SECRET: 'a'.repeat(32) };
 
 describe('SJ-05: global claims and event dispatch are refused in production', () => {
   it('the approval is a code constant and is false (flipping it is the reviewed J5 change)', () => {

@@ -5,7 +5,7 @@ import { validate } from './env.validation';
  * clock-out grace (0..1440), QR_MAX_AGE_DAYS the Shift QR age ceiling (1..90, whole days), and the pre-shift report window
  * must stay below that ceiling so a printed report never carries an already-dead QR.
  */
-const base = { DATABASE_URL: 'postgres://rab:rab@localhost:5432/rab', REDIS_URL: 'redis://localhost:6379', APP_SECRET: 'a'.repeat(32) };
+const base = { PG_DATABASE_URL: 'postgres://rab:rab@localhost:5432/rab', REDIS_URL: 'redis://localhost:6379', APP_SECRET: 'a'.repeat(32) };
 
 describe('attendance QR environment variables', () => {
   it('defaults: 120-minute grace, 14-day ceiling, 180-minute report window', () => {

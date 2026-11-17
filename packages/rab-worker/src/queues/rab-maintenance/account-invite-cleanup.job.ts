@@ -129,7 +129,7 @@ export function resolveInviteAutoDeleteEnabled(env: { get(key: string): unknown 
  *     missing, not READY, or at an unsupported version is simply skipped for the physical half of the check (its
  *     business rows, if any, are still in core and already covered by the first half).
  *
- * Connects via `DATABASE_URL_UNPOOLED` (P1C.2: `crewflow`, the same
+ * Historically connected via `DATABASE_URL_UNPOOLED` (retired; refused since X3.5-S8) (P1C.2: `crewflow`, the same
  * cross-org-maintenance convention `BootstrapAdminCommand` already
  * established this session) — this is a genuinely cross-tenant background
  * job, unlike every request-driven service in this app. Both `core.user`

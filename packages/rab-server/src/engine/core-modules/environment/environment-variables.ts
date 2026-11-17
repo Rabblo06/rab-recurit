@@ -59,11 +59,6 @@ export class EnvironmentVariables {
   @IsString()
   PG_DATABASE_URL?: string;
 
-  /** Deprecated (non-production only; production refuses it). Superseded by PG_DATABASE_URL. */
-  @IsOptional()
-  @IsString()
-  DATABASE_URL?: string;
-
   /** Runtime pool ceiling per process (default 10). Strictly validated in pg-config.ts (digits only, 1-100). */
   @IsOptional()
   @Type(() => String)

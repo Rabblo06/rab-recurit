@@ -18,7 +18,7 @@ import { integrationTestDatabase, integrationTestDatabaseReady } from '@rab/serv
  *
  * The backlog is independent tokens (no `replaced_by` chain), so it cannot trigger the XP-09 heap-order 23503 that the
  * current (pre-fix) body of core.worker_cleanup_auth_tokens can hit on split rotation chains; that bug and its fix are covered
- * by branch fix/xp09-token-cleanup. Fixtures are written by the cluster superuser (TEST_DATABASE_URL_UNPOOLED), like the
+ * by branch fix/xp09-token-cleanup. Fixtures are written by the cluster superuser (TEST_DATABASE_ADMIN_URL), like the
  * other integration suites; the code under test only ever uses the runtime login.
  */
 const RUN = integrationTestDatabaseReady();

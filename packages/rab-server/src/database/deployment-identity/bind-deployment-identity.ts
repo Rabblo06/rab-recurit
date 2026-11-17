@@ -36,9 +36,9 @@
  * against the migration identity (it can SET ROLE rab_secure_owner and write the marker directly).
  * Prints the before / after environment and deployment id, the database and the hosts. Never a URL, user name or password.
  *
- * Connection (Phase B / B1): the command's own PG_DATABASE_URL (the migration identity; outside production the deprecated
- * DATABASE_URL_UNPOOLED still names it), resolved by the shared factory exactly as the target guard resolved it (same
- * endpoint, URL policy and TLS), so the database the guard probed is the database written to.
+ * Connection (Phase B / B1): the command's own PG_DATABASE_URL (the migration identity; X3.5-S8: the legacy
+ * DATABASE_URL / DATABASE_URL_UNPOOLED are refused in every environment), resolved by the shared factory exactly as the
+ * target guard resolved it (same endpoint, URL policy and TLS), so the database the guard probed is the database written to.
  */
 import { createPgClient, detectTransactionPooler } from '../postgres';
 import { BOUND_HOST_PATTERN, MAX_BOUND_HOSTS } from '../typeorm/core/deployment-identity-sql';
@@ -62,7 +62,7 @@ export const BIND_USAGE = `${BIND_COMMAND}: bind or rebind this database's deplo
 
 Environment (process environment only, never .env):
   DB_TARGET=local|test|production
-  PG_DATABASE_URL=<migration-identity URL>      (outside production also the deprecated DATABASE_URL / DATABASE_URL_UNPOOLED)
+  PG_DATABASE_URL=<migration-identity URL>      (the only name: DATABASE_URL / DATABASE_URL_UNPOOLED are refused)
   production also: ALLOW_PRODUCTION_DB_COMMANDS=true
                    CREWFLOW_DEPLOYMENT_ENVIRONMENT=production CREWFLOW_DEPLOYMENT_ID=<the id the database is bound to now>
   first bind of a fresh production database only:
@@ -351,11 +351,10 @@ export async function bindDeploymentIdentityInTransaction(
 
 export async function runBind(argv: readonly string[], env: Record<string, string | undefined>, log: (line: string) => void): Promise<void> {
   const args = parseBindArgs(argv);
-  // The factory's rule (selectMigrationEndpoint): PG_DATABASE_URL; outside production the deprecated DATABASE_URL_UNPOOLED
-  // when PG_DATABASE_URL is unset; both naming different targets is refused by the guard.
+  // The factory's rule (selectMigrationEndpoint): PG_DATABASE_URL, the one endpoint (X3.5-S8).
   const target = await assertDbTarget(BIND_COMMAND, env);
   const endpoint = target.migrationEndpoint;
-  const host = (endpoint === 'elevated' && target.admin ? target.admin : target.app).host;
+  const host = target.app.host;
 
   const client = createPgClient(target.pg, { endpoint, purpose: 'bind-identity', sessionAffinity: true });
   await client.connect();

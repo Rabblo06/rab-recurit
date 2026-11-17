@@ -79,19 +79,9 @@ function selectEndpoint(resolved: ResolvedPgEnvironment, request: PgConnectionRe
   if (request.url !== undefined) {
     const label = request.urlLabel ?? 'the database URL';
     const target = parsePgUrl(request.url, label, { allowSessionRole: resolved.allowSessionRole });
-    return { source: label, target, ssl: buildPgSsl(target.sslmode, resolved.tls, label), deprecated: false };
+    return { source: label, target, ssl: buildPgSsl(target.sslmode, resolved.tls, label) };
   }
   const name = request.endpoint ?? 'primary';
-  if (name === 'elevated') {
-    if (!resolved.elevated) {
-      throw new PgConfigError(
-        resolved.production
-          ? 'this command needs the elevated owner connection, which production does not configure (DATABASE_URL_UNPOOLED is refused in production). Refusing.'
-          : 'this command needs the elevated owner connection: set DATABASE_URL_UNPOOLED (deprecated; non-production only). Refusing.',
-      );
-    }
-    return resolved.elevated;
-  }
   return name === 'lock' ? resolved.lock : resolved.primary;
 }
 

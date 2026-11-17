@@ -33,10 +33,10 @@
  * Staging has no command path yet, so DB_TARGET=staging stays refused (fail closed).
  *
  * Connections (Phase B / B1): this guard never reads a database URL variable itself and never builds its own client. The
- * shared factory (src/database/postgres) resolves the process's connections — PG_DATABASE_URL, or outside production the
- * deprecated DATABASE_URL (+ DATABASE_URL_UNPOOLED as the elevated migration connection) — with the same URL policy, TLS
- * and startup options the real pools use, and the probe is a factory client opened read-only. The migration endpoint is
- * the factory's selectMigrationEndpoint rule (core.datasource.ts and the locked runner apply the same one).
+ * shared factory (src/database/postgres) resolves the process's one connection — PG_DATABASE_URL (X3.5-S8: the legacy
+ * DATABASE_URL / DATABASE_URL_UNPOOLED are refused in every environment) — with the same URL policy, TLS and startup
+ * options the real pools use, and the probe is a factory client opened read-only. The migration endpoint is the factory's
+ * selectMigrationEndpoint rule (core.datasource.ts and the locked runner apply the same one).
  *
  * A marker the login may not read (SQLSTATE 42501 — e.g. a migration login without its owner-role memberships, which has
  * no USAGE on schema core): the migration DataSource and the locked runner pass `deferUnreadableMarker`, so the CF-41
@@ -89,16 +89,14 @@ export const ALLOW_PRODUCTION_DB_COMMANDS = 'ALLOW_PRODUCTION_DB_COMMANDS';
 const BIND_IDENTITY_PURPOSE = 'db:bind-identity';
 const MIGRATION_IDENTITY_PURPOSES: ReadonlySet<string> = new Set(['migrations', BIND_IDENTITY_PURPOSE]);
 
-/** Where a migration-identity session connects: the factory's parse of the endpoint selectMigrationEndpoint chose. */
+/** Where a migration-identity session connects: the factory's parse of PG_DATABASE_URL (the only endpoint, X3.5-S8). */
 export interface MigrationSessionLocation {
   app: { host?: string };
-  admin?: { host?: string } | null;
-  migrationEndpoint?: 'primary' | 'elevated';
 }
 
 /** The host a migration-identity session connects to, as the factory parsed it ('' when unknown: never a location match). */
 export function migrationConnectionHost(resolved: MigrationSessionLocation): string {
-  return (resolved.migrationEndpoint === 'elevated' && resolved.admin ? resolved.admin : resolved.app).host ?? '';
+  return resolved.app.host ?? '';
 }
 
 export interface DbTargetInput {
@@ -114,14 +112,12 @@ export interface ResolvedDbTarget {
   purpose: string;
   target: DbTarget;
   classification: 'PRODUCTION' | 'NON-PRODUCTION';
-  /** The process's primary connection (PG_DATABASE_URL, or the deprecated DATABASE_URL outside production). */
+  /** The process's one connection (PG_DATABASE_URL). */
   app: PgTargetIdentity;
-  /** The deprecated elevated connection (DATABASE_URL_UNPOOLED, non-production only), or null. */
-  admin: PgTargetIdentity | null;
   /** The factory resolution every connection of this command must use. */
   pg: ResolvedPgEnvironment;
-  /** The endpoint a migration-identity command connects with (selectMigrationEndpoint); 'primary' for the CLI. */
-  migrationEndpoint: 'primary' | 'elevated';
+  /** The endpoint a migration-identity command connects with (selectMigrationEndpoint): always the primary since X3.5-S8. */
+  migrationEndpoint: 'primary';
   /** The declared deployment identity (required for production, optional elsewhere). */
   declared: DeclaredDeploymentIdentity | null;
   /** True only for a production target with the one-time bootstrap flag set (validated live against the marker). */
@@ -187,24 +183,19 @@ export function resolveDbTarget(input: DbTargetInput): ResolvedDbTarget {
   }
 
   // The factory decides which connections exist and validates every URL (target overrides, TLS, legacy names refused in
-  // production). The pooler rule belongs to the process's real connection (enforced where that is built), not this guard.
+  // every environment). The pooler rule belongs to the process's real connection (enforced where that is built), not this guard.
   const migrationIdentity = MIGRATION_IDENTITY_PURPOSES.has(purpose);
   const processRole = input.processRole ?? (migrationIdentity ? 'migrate' : 'cli');
   const pg = asTargetError(() => resolvePgEnvironmentCached(env, { processRole, enforceProcessPolicy: false }));
   const migrationEndpoint = migrationIdentity ? asTargetError(() => selectMigrationEndpoint(pg, env, production ? dotenvValues : {})).name : 'primary';
   const app = describePgTarget(pg.primary.target);
-  const admin = pg.elevated ? describePgTarget(pg.elevated.target) : null;
-  if (admin && (admin.database !== app.database || admin.endpointKey !== app.endpointKey)) {
-    throw new DbTargetError(
-      `${app.label} and ${admin.label} resolve to different databases or endpoints (${app.database}@${app.endpointKey} vs ${admin.database}@${admin.endpointKey}). Refusing: the command would split its connections.`,
-    );
-  }
 
   if (production) {
     const primaryValue = readPrimaryDatabaseUrl(env)?.value;
     const fromDotenv =
       PRODUCTION_AUTHORITY_VARS.some((name) => dotenvValues[name] !== undefined) ||
       (primaryValue !== undefined &&
+        // DATABASE_URL stays compared (X3.5-S8): a value copied from an old .env's legacy line is still file authority.
         [dotenvValues.PG_DATABASE_URL, dotenvValues.DATABASE_URL].some((value) => value !== undefined && value.trim() === primaryValue));
     if (fromDotenv) {
       throw new DbTargetError(
@@ -215,7 +206,7 @@ export function resolveDbTarget(input: DbTargetInput): ResolvedDbTarget {
 
   const declared = asTargetError(() => assertDeclaredIdentityForProcess(env, production, `${purpose} command`));
   const bootstrapRequested = asTargetError(() => readBootstrapFlag(env));
-  const base = { purpose, target, app, admin, pg, migrationEndpoint, declared, bootstrapRequested };
+  const base = { purpose, target, app, pg, migrationEndpoint, declared, bootstrapRequested };
 
   if (production) return { ...base, classification: 'PRODUCTION' };
 
@@ -230,9 +221,6 @@ export function resolveDbTarget(input: DbTargetInput): ResolvedDbTarget {
   const remoteAllowed = target === 'test' && env.ALLOW_REMOTE_TEST_DATABASE === 'true';
   if (!isLocalHost(app) && !remoteAllowed) {
     throw new DbTargetError(`DB_TARGET=${target} refuses a remote host ("${app.host}"). Use a loopback or docker-service database.`);
-  }
-  if (admin && !isLocalHost(admin) && !remoteAllowed) {
-    throw new DbTargetError(`DB_TARGET=${target} refuses a remote ${admin.label} host ("${admin.host}").`);
   }
   // INTERIM (security review H-1) — remove once production carries a bound deployment marker: today's production database
   // has no marker yet, so even DB_TARGET=test with ALLOW_REMOTE_TEST_DATABASE=true must not reach it. Checked before any
@@ -272,8 +260,8 @@ export interface DbIdentityCheck {
  * same connection.
  */
 export async function probeDbIdentity(pg: ResolvedPgEnvironment, endpoint: PgEndpointName, identity?: DbIdentityCheck): Promise<DbIdentityProbe> {
-  const probed = endpoint === 'elevated' ? pg.elevated : endpoint === 'lock' ? pg.lock : pg.primary;
-  const label = probed?.source ?? endpoint;
+  const probed = endpoint === 'lock' ? pg.lock : pg.primary;
+  const label = probed.source;
   const client = asTargetError(() => createPgClient(pg, { endpoint, purpose: 'probe', readOnly: true }));
   let row: { db: string; sid: string } | undefined;
   try {
@@ -362,7 +350,7 @@ export interface AssertDbTargetOptions {
 export type GuardedDbTarget = ResolvedDbTarget & { identityDeferred: boolean };
 
 /**
- * Full guard: resolve, probe both connections read-only, confirm they agree, enforce the deployment identity marker,
+ * Full guard: resolve, probe the connection read-only, enforce the deployment identity marker,
  * print a sanitised summary, return. Call before any write-capable operation. Throws DbTargetError to fail.
  */
 export async function assertDbTarget(
@@ -379,12 +367,6 @@ export async function assertDbTarget(
     deferUnreadableMarker: options.deferUnreadableMarker,
     locationMismatch: purpose === BIND_IDENTITY_PURPOSE ? 'warn' : 'refuse',
   });
-  if (resolved.admin) {
-    const adminProbe = await probeDbIdentity(resolved.pg, 'elevated');
-    if (adminProbe.database !== appProbe.database || adminProbe.systemIdentifier !== appProbe.systemIdentifier) {
-      throw new DbTargetError(`runtime identity mismatch between ${resolved.app.label} and ${resolved.admin.label}. Refusing.`);
-    }
-  }
   for (const warning of appProbe.warnings) {
     // eslint-disable-next-line no-console
     console.warn(`[db-target] WARNING purpose=${purpose}: ${warning}`);

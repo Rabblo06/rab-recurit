@@ -12,7 +12,7 @@ import { isScanJobEnabled, resolveIntervalMs, SCAN_JOBS, ScanJobDefinition } fro
  *  3. The daily scans use firstRunAfterInterval, so an interval-mode start does not run them; interval mode times the
  *     first run from the persisted cluster stamp (lastRunAt), so frequent deploys can never starve a daily scan.
  */
-const base = { DATABASE_URL: 'postgres://rab:rab@localhost:5432/rab', REDIS_URL: 'redis://localhost:6379', APP_SECRET: 'a'.repeat(32) };
+const base = { PG_DATABASE_URL: 'postgres://rab:rab@localhost:5432/rab', REDIS_URL: 'redis://localhost:6379', APP_SECRET: 'a'.repeat(32) };
 const envOf = (overrides: Record<string, string> = {}) => {
   const validated = validate({ ...base, ...overrides }) as unknown as Record<string, unknown>;
   return { get: (k: string) => validated[k] as never };

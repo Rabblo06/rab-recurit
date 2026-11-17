@@ -79,7 +79,7 @@ describeIfApproved('Phase D F2: dispatch-pointer identity is the physical source
 
   beforeAll(async () => {
     const adminUrl = integrationTestDatabase().adminUrl;
-    const target = describeDatabaseUrl(adminUrl, 'TEST_DATABASE_URL_UNPOOLED');
+    const target = describeDatabaseUrl(adminUrl, 'TEST_DATABASE_ADMIN_URL');
     const w = describeDatabaseUrl(WORKER_URL!, 'TEST_DATABASE_WORKER_URL');
     if (w.database !== target.database || w.host !== target.host || w.port !== target.port) throw new Error('TEST_DATABASE_WORKER_URL names another database. Refusing.');
     admin = await connect(adminUrl);

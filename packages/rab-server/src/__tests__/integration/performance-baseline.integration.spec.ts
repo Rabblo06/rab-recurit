@@ -32,7 +32,7 @@ import { integrationTestDatabaseReady } from '../../database/typeorm/core/integr
  *
  * Output: `<repo-root>/.audit/p1a-baseline/baseline-<timestamp>.json` (gitignored — `.audit/` is
  * already in `.gitignore`) plus a human-readable summary on stdout. No production/remote database
- * is ever touched — same `TEST_DATABASE_URL`/`TEST_DATABASE_URL_UNPOOLED` guard as every other
+ * is ever touched — same `TEST_DATABASE_URL`/`TEST_DATABASE_ADMIN_URL` guard as every other
  * integration spec in this file's own directory.
  *
  * SAFETY: only ever reads back the SAFE `RequestCompletePayload` shape this process already

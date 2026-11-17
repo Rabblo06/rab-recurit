@@ -34,7 +34,7 @@ const PRE_MIGRATION_MAIN_TS: Array<[string, number | string, string, string]> = 
 describe('scan job registry (BullMQ migration M2/M4)', () => {
   // Phase A pa-intervals: the REAL validated environment with nothing set — every interval must resolve to exactly the
   // pre-migration cadence below (the defaults-unchanged proof). Minimal base = the keys validate() requires.
-  const validated = validate({ DATABASE_URL: 'postgres://rab:rab@localhost:5432/rab', REDIS_URL: 'redis://localhost:6379', APP_SECRET: 'a'.repeat(32) });
+  const validated = validate({ PG_DATABASE_URL: 'postgres://rab:rab@localhost:5432/rab', REDIS_URL: 'redis://localhost:6379', APP_SECRET: 'a'.repeat(32) });
   const env = { get: (k: string) => (validated as unknown as Record<string, number>)[k]! };
 
   it('has exactly the 19 jobs-process loops, in main.ts order, plus the AI retention scan, with the same names, intervals and stats keys', () => {

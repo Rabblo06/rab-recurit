@@ -13,7 +13,7 @@ import { integrationTestDatabaseReady } from '../../database/typeorm/core/integr
 /**
  * Waves 4+5 lane DB5 (schema owner): abuse-case and no-context tests for every object in docs/evidence/w45-db5/CONTRACT.md,
  * against the real functions on a disposable database built from migrations alone (bootstrap superuser as
- * TEST_DATABASE_URL_UNPOOLED, crewflow_app as TEST_DATABASE_URL).
+ * TEST_DATABASE_ADMIN_URL, crewflow_app as TEST_DATABASE_URL).
  *
  *  §1 MFA: guard trigger (runtime role cannot write/rewind MFA state), atomic replay protection incl. a real concurrent race,
  *     recovery codes single-use + never readable, cross-tenant / no-context refusals, envelope CHECK on the secret.
@@ -115,7 +115,7 @@ describeIfDb('waves 4+5 lane DB5 schema contract', () => {
     admin = new Client({ connectionString: adminUrl });
     await admin.connect();
     if (!(await admin.query('SELECT rolsuper FROM pg_roles WHERE rolname = current_user')).rows[0].rolsuper) {
-      throw new Error('this suite needs the disposable database bootstrap superuser as TEST_DATABASE_URL_UNPOOLED');
+      throw new Error('this suite needs the disposable database bootstrap superuser as TEST_DATABASE_ADMIN_URL');
     }
     // D4: the fingerprint table follows the server's major (PG16 and PG18 differ), exactly as the runner selects it; the
     // migrator in this process and the assertions below then read the same table.

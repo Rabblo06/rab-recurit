@@ -105,7 +105,7 @@ function adminRoutes(state) {
       return json(200, [
         ['App', 'NODE_ENV', 'value', 'production', 'env'], ['App', 'APP_VERSION', 'value', 'v0.3.0', 'env'], ['App', 'APP_GIT_COMMIT', 'value', 'efc4709', 'env'], ['App', 'APP_URL', 'set', null, 'env'],
         ['App', 'ACCOUNTS_URL', 'set', null, 'env'], ['Secrets', 'APP_SECRET', 'set', null, 'env (secret)'], ['Secrets', 'APP_AUTH_CACHE_HMAC_KEY', 'set', null, 'env (secret)'],
-        ['Database', 'DATABASE_URL', 'set', null, 'env (secret)'], ['Redis', 'REDIS_URL', 'set', null, 'env (secret)'], ['Redis', 'BULLMQ_PREFIX', 'value', 'crewflow:production:bull', 'env'],
+        ['Database', 'PG_DATABASE_URL', 'set', null, 'env (secret)'], ['Redis', 'REDIS_URL', 'set', null, 'env (secret)'], ['Redis', 'BULLMQ_PREFIX', 'value', 'crewflow:production:bull', 'env'],
         ['Worker', 'WORKER_SCHEDULER', 'value', 'interval', 'env'], ['Storage', 'STORAGE_DRIVER', 'value', 'S3', 'env'], ['Storage', 'S3_BUCKET', 'value', 'rab-production-storage', 'env'],
         ['Email', 'EMAIL_DRIVER', 'value', 'RESEND', 'env'], ['Email', 'EMAIL_FROM_ADDRESS', 'value', 'no-reply@example-crewflow.test', 'env'], ['Email', 'RESEND_API_KEY', 'set', null, 'env (secret)'],
       ].map(([group, key, st, value, source]) => ({ group, key, state: st, value, source })));

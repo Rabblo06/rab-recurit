@@ -62,7 +62,7 @@ describeIfDb('posture + CI gate report a persistent crewflow.dispatch_notify (ro
     c = new Client({ connectionString: adminUrl, connectionTimeoutMillis: 15_000 });
     await c.connect();
     const { rows } = await c.query('SELECT current_database() AS db, (SELECT rolsuper FROM pg_roles WHERE rolname = current_user) AS su');
-    if (!rows[0].su) throw new Error('this suite needs the disposable database bootstrap superuser as TEST_DATABASE_URL_UNPOOLED');
+    if (!rows[0].su) throw new Error('this suite needs the disposable database bootstrap superuser as TEST_DATABASE_ADMIN_URL');
     db = rows[0].db;
   });
 

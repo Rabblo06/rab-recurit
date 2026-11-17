@@ -61,7 +61,7 @@ describe('Admin Panel — unit', () => {
   it('environment rows: a secret, URL or host never echoes its value, even when planted; plain values pass only when token-shaped', () => {
     const planted: Record<string, unknown> = {
       APP_SECRET: 'planted-secret',
-      DATABASE_URL: 'postgres://u:planted-pw@planted-host/db',
+      PG_DATABASE_URL: 'postgres://u:planted-pw@planted-host/db',
       REDIS_URL: 'redis://:planted@host:6379',
       APP_URL: 'https://planted-app.example',
       WORKSPACE_BASE_DOMAIN: 'planted-domain.example',
@@ -79,6 +79,9 @@ describe('Admin Panel — unit', () => {
     expect(row('APP_SECRET')).toMatchObject({ state: 'set', value: null, source: 'env (secret)' });
     expect(row('S3_BUCKET')).toMatchObject({ state: 'set', value: null });
     expect(row('RESEND_API_KEY')).toMatchObject({ state: 'not_set', value: null });
+    expect(row('PG_DATABASE_URL')).toMatchObject({ state: 'set', value: null });
+    // X3.5-S8: the legacy DATABASE_URL is refused at boot, so the viewer no longer lists it.
+    expect(rows.find((r) => r.key === 'DATABASE_URL')).toBeUndefined();
     // Every secret-looking key is classed secret/url, never value.
     for (const e of ENVIRONMENT_ALLOWLIST) if (/SECRET|PASSWORD|KEY$|KEYRING|_URL$|DSN|JSON|P8|ENDPOINT|HOST$|ACCESS_KEY/.test(e.key) && !/KID$|_ENABLED$/.test(e.key)) expect({ k: e.key, kind: e.kind }).not.toEqual({ k: e.key, kind: 'value' });
   });

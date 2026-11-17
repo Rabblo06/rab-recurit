@@ -3,9 +3,10 @@ import { TEST_DATABASE_ADMIN_URL_NAMES } from '@rab/server/database/typeorm/core
 
 /**
  * Test-harness credentials a spawned runtime child never inherits, on top of never-in-runtime-env.ts (which deliberately
- * lets the provisioner keep some of them, e.g. DATABASE_URL_UNPOOLED and the owner-login role passwords). X3.5-S7 review
- * A-2: Jest's setupFiles writes the test cluster's SUPERUSER URL under both admin names and under DATABASE_URL_UNPOOLED, and
- * CI exports the harness admin URL and every role bootstrap password job-wide.
+ * lets the provisioner keep some of them, e.g. the owner-login role passwords; since X3.5-S8 it refuses DATABASE_URL_UNPOOLED
+ * for the provisioner too, but it stays listed here). X3.5-S7 review A-2: CI exports the harness admin URL and every role
+ * bootstrap password job-wide, and setupFiles writes the test cluster's SUPERUSER URL under TEST_DATABASE_ADMIN_URL (both
+ * admin names stay stripped permanently).
  */
 export const RUNTIME_CHILD_STRIPPED_NAMES: readonly string[] = [
   ...TEST_DATABASE_ADMIN_URL_NAMES,
@@ -46,8 +47,8 @@ function adminPasswords(env: NodeJS.ProcessEnv): string[] {
  * never-in-runtime-env.ts), minus RUNTIME_CHILD_STRIPPED_NAMES and every TEST_DATABASE_* name, and minus any other variable
  * whose value holds an admin URL's password (raw or percent-decoded, 8+ characters). CI exports DB_TARGET and the role
  * bootstrap passwords job-wide for the harness and the fixtures; a spawned API / Worker / provisioner must not inherit
- * them, exactly as a deployment never forwards them. A test that sets one of these names on purpose (the provisioner's
- * DATABASE_URL_UNPOOLED, or a name the spec proves is refused) spreads it AFTER this base.
+ * them, exactly as a deployment never forwards them. A test that sets one of these names on purpose (the child's own
+ * PG_DATABASE_URL, or a name the spec proves is refused) spreads it AFTER this base.
  */
 export function runtimeChildBaseEnv(
   env: NodeJS.ProcessEnv = process.env,

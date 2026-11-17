@@ -84,8 +84,8 @@ describe('never-in-runtime-env (security review L-4): one list, two enforcers', 
       // A blank value counts as absent.
       expect(resolveRuntimeDatabase({ processName, env: { NODE_ENV: 'development', PG_DATABASE_URL: LOCAL, [name]: ' ' }, dotenvValues: {} }).classification).toBe('LOCAL');
     }
-    // Only the provisioner may hold the deprecated elevated name (non-production).
-    expect(forbidden.includes('DATABASE_URL_UNPOOLED')).toBe(processName !== 'provisioner');
+    // X3.5-S8: no runtime process may hold the legacy names any more, the provisioner role included.
+    for (const legacy of ['DATABASE_URL_UNPOOLED', 'DATABASE_URL', 'DATABASE_DIRECT_URL']) expect({ legacy, refused: forbidden.includes(legacy) }).toEqual({ legacy, refused: true });
   });
 
   it('L-4 follow-up: the ONLY value-aware entry is DB_TARGET (local|test, outside production); ALLOW_PRODUCTION_DB_COMMANDS stays by name', () => {
@@ -119,8 +119,14 @@ describe('never-in-runtime-env (security review L-4): one list, two enforcers', 
         expect(runtimeEnvRefusal({ NODE_ENV: 'development', [name]: 'x' }, processName)?.name).toBe(name);
       }
     }
-    // The provisioner process role (the separate process was removed in X5.1; the role stays until X3.5-S8) is left exactly as it was.
-    for (const name of OWNER_LOGIN_NAMES) expect(forbiddenRuntimeEnvNames('provisioner')).not.toContain(name);
+    // The provisioner process role (the separate process was removed in X5.1) is left exactly as it was for the non-legacy
+    // names; X3.5-S8 refuses the three legacy database names there too.
+    const LEGACY = ['DATABASE_URL', 'DATABASE_DIRECT_URL', 'DATABASE_URL_UNPOOLED'];
+    for (const name of OWNER_LOGIN_NAMES.filter((n) => !LEGACY.includes(n))) expect(forbiddenRuntimeEnvNames('provisioner')).not.toContain(name);
+    for (const name of LEGACY) {
+      expect(forbiddenRuntimeEnvNames('provisioner')).toContain(name);
+      expect(runtimeEnvRefusal({ NODE_ENV: 'development', [name]: 'x' }, 'provisioner')?.name).toBe(name);
+    }
     // Actionable messages: the legacy name says what to rename it to.
     expect(runtimeEnvRefusal({ DATABASE_URL: 'x' }, 'api')?.why).toMatch(/Rename it to PG_DATABASE_URL/);
   });

@@ -5,7 +5,7 @@ import { validate } from './env.validation';
  * refused earlier than own start minus this many hours, even with the confirmation). Whole hours 1..48, default 12;
  * anything else refuses to boot.
  */
-const base = { DATABASE_URL: 'postgres://rab:rab@localhost:5432/rab', REDIS_URL: 'redis://localhost:6379', APP_SECRET: 'a'.repeat(32) };
+const base = { PG_DATABASE_URL: 'postgres://rab:rab@localhost:5432/rab', REDIS_URL: 'redis://localhost:6379', APP_SECRET: 'a'.repeat(32) };
 
 describe('CLOCK_IN_CONFIRM_FLOOR_HOURS', () => {
   it('defaults to 12 hours', () => {

@@ -166,15 +166,15 @@ describe('db:bind-identity connection variables (Phase B: the factory, through t
   const OTHER = 'postgres://crewflow_app:pw@127.0.0.1:5432/rab';
   const target = (env: Record<string, string | undefined>) => resolveDbTarget({ purpose: BIND_COMMAND, env: { DB_TARGET: 'local', ...env }, dotenvValues: {} });
 
-  it('PG_DATABASE_URL is the migration endpoint; outside production the deprecated DATABASE_URL_UNPOOLED still is', () => {
+  it('PG_DATABASE_URL is the migration endpoint, the only one (X3.5-S8)', () => {
     expect(target({ PG_DATABASE_URL: MIG }).migrationEndpoint).toBe('primary');
     expect(target({ PG_DATABASE_URL: MIG }).pg.processRole).toBe('migrate');
-    expect(target({ DATABASE_URL: OTHER, DATABASE_URL_UNPOOLED: MIG }).migrationEndpoint).toBe('elevated');
   });
 
-  it('two variables naming different targets are refused (no silent preference)', () => {
-    expect(() => target({ PG_DATABASE_URL: MIG, DATABASE_URL_UNPOOLED: OTHER })).toThrow(DbTargetError);
-    expect(() => target({ PG_DATABASE_URL: MIG, DATABASE_URL_UNPOOLED: OTHER })).toThrow(/different targets/);
-    expect(() => target({ PG_DATABASE_URL: MIG, DATABASE_URL: OTHER })).toThrow(/different targets/);
+  it('X3.5-S8: the legacy DATABASE_URL / DATABASE_URL_UNPOOLED are refused, alone or next to PG_DATABASE_URL, whatever the target', () => {
+    for (const env of [{ DATABASE_URL: OTHER, DATABASE_URL_UNPOOLED: MIG }, { PG_DATABASE_URL: MIG, DATABASE_URL_UNPOOLED: OTHER }, { PG_DATABASE_URL: MIG, DATABASE_URL_UNPOOLED: MIG }, { PG_DATABASE_URL: MIG, DATABASE_URL: OTHER }]) {
+      expect(() => target(env)).toThrow(DbTargetError);
+      expect(() => target(env)).toThrow(/refuses the legacy database variable\(s\) /);
+    }
   });
 });

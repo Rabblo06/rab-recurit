@@ -91,7 +91,7 @@ describeIfDb('Phase D R4 regression: secure-owner invariants still reject (rolle
     await c.connect();
     try {
       if (!(await c.query('SELECT rolsuper FROM pg_catalog.pg_roles WHERE rolname = current_user')).rows[0].rolsuper) {
-        throw new Error('this suite needs the disposable database bootstrap superuser as TEST_DATABASE_URL_UNPOOLED');
+        throw new Error('this suite needs the disposable database bootstrap superuser as TEST_DATABASE_ADMIN_URL');
       }
       baseline = await secureOwnerInvariantViolations(async (sql) => (await c.query(sql)).rows);
     } finally {

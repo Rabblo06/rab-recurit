@@ -5,11 +5,12 @@ import * as path from 'path';
 import { TEST_DATABASE_ADMIN_URL, TEST_DATABASE_ADMIN_URL_NAMES, TEST_DATABASE_URL_UNPOOLED } from './test-database-guard';
 
 /**
- * X3.5-S7 (audit DBT-08 step 6), release 1: the test admin URL (the disposable cluster's bootstrap SUPERUSER) has a new name,
- * TEST_DATABASE_ADMIN_URL, and the deprecated TEST_DATABASE_URL_UNPOOLED is still accepted. Every place that keeps the admin
- * URL away from a child process (the migrate / RLS-gate children, the e2e API, Worker, Vite and Playwright, spec-spawned
- * runtime children) must handle BOTH names; one that only knows the old name would hand the superuser URL to the child as
- * soon as a developer or CI sets the new one (the DBT-12 class).
+ * X3.5-S7 (audit DBT-08 step 6) / X3.5-S8: the test admin URL (the disposable cluster's bootstrap SUPERUSER) is
+ * TEST_DATABASE_ADMIN_URL. Release 1 still accepted the old TEST_DATABASE_URL_UNPOOLED; release 2 (X3.5-S8) refuses it. Every
+ * place that keeps the admin URL away from a child process (the migrate / RLS-gate children, the e2e API, Worker, Vite and
+ * Playwright, spec-spawned runtime children) must still handle BOTH names, permanently: one that only knows the old name
+ * would hand the superuser URL to the child, and one that drops the old name would let a stray old value through (the DBT-12
+ * class).
  *
  * Review A-3: so this is not a list of known files. EVERY tracked code file is scanned, and every code line naming the
  * deprecated name must name the new one too. The TypeScript strip sites import TEST_DATABASE_ADMIN_URL_NAMES instead of
@@ -23,11 +24,7 @@ const SKIPPED_DIRS = new Set(['node_modules', '.git', 'dist', 'dist-cjs', 'dist-
 
 /** Files that may name only the old name, each with why. Paths are repository-relative with forward slashes. */
 const OLD_NAME_ONLY_ALLOWED: Record<string, string> = {
-  'packages/rab-server/src/database/typeorm/core/test-database-guard.ts': 'defines and resolves both names',
-  'packages/rab-server/src/__tests__/integration/twenty/twenty-kit.ts':
-    'a reader, not a strip list; the guard writes both names (moves to the gate helper in DEAD-07 B-2)',
-  '.github/workflows/ci-security.yaml': 'lead-owned setter, not a strip list; draft in LEGACY-NAMES-PLAN.md §5.1 (required at release 2)',
-  '.github/workflows/ci-migration-security.yaml': 'lead-owned reader of the helper output, which emits both names; draft in LEGACY-NAMES-PLAN.md §5.1',
+  'packages/rab-server/src/database/typeorm/core/test-database-guard.ts': 'defines the old name and refuses it (X3.5-S8)',
 };
 
 const isCommentLine = (line: string): boolean => /^\s*(#|\/\/|\*|\/\*)/.test(line);
@@ -104,7 +101,7 @@ describe('X3.5-S7 the test admin URL names everywhere they are stripped, set or 
     }
   });
 
-  describe('the CI helpers emit both names with the same value (synthetic, loopback values only; nothing printed)', () => {
+  describe('X3.5-S8: the CI helpers emit the new admin name only, never the refused old one (synthetic, loopback values only; nothing printed)', () => {
     const ADMIN = 'postgres://x35_admin:x35-sentinel-pw@127.0.0.1:1/postgres';
     const run = (script: string, args: string[]): Record<string, string> => {
       const env: NodeJS.ProcessEnv = {
@@ -133,7 +130,7 @@ describe('X3.5-S7 the test admin URL names everywhere they are stripped, set or 
     ])('%s', (script, args) => {
       const exported = run(script, args);
       expect(exported[TEST_DATABASE_ADMIN_URL]).toBeTruthy();
-      expect(exported[TEST_DATABASE_URL_UNPOOLED]).toBe(exported[TEST_DATABASE_ADMIN_URL]);
+      expect(TEST_DATABASE_URL_UNPOOLED in exported).toBe(false);
       expect(new URL(exported[TEST_DATABASE_ADMIN_URL]).username).toBe('x35_admin');
     });
   });

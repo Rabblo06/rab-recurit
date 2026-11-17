@@ -258,9 +258,9 @@ export class StorageReconcileCommand extends CommandRunner {
    * guard as every other runtime connection. Returns the connection holding the lock, or null when the wait ran out.
    */
   private async acquireReconcileLock(waitMs: number, runtimeIdentity?: RuntimeDbIdentity): Promise<Client | null> {
-    // Phase B: the factory's lock connection (PG_DATABASE_URL; the deprecated DATABASE_DIRECT_URL / DATABASE_URL are still
-    // accepted outside production until X3.5-S8), with explicit TLS and the pooler denylist (session affinity). Short timeouts as before: lock calls
-    // are instantaneous.
+    // Phase B: the factory's lock connection (PG_DATABASE_URL; the legacy DATABASE_DIRECT_URL / DATABASE_URL are refused in
+    // every environment since X3.5-S8), with explicit TLS and the pooler denylist (session affinity). Short timeouts as
+    // before: lock calls are instantaneous.
     const client = createPgClient(resolvePgEnvironmentCached(process.env), {
       endpoint: 'lock',
       purpose: 'storage-lock',

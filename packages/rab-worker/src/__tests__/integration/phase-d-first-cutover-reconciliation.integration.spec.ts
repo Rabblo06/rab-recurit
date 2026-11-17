@@ -33,7 +33,7 @@ import { integrationTestDatabaseReady } from '@rab/server/database/typeorm/core/
  *
  * OPT-IN: needs migrations 1786721300000–1786721320000 applied and the operator-created `crewflow_worker` login.
  * Skipped unless PHASE_D_SQL_APPROVED=true and TEST_DATABASE_WORKER_URL are set. The admin connection
- * (TEST_DATABASE_URL_UNPOOLED) must be the test cluster's SUPERUSER: it is the only identity that can remove the
+ * (TEST_DATABASE_ADMIN_URL) must be the test cluster's SUPERUSER: it is the only identity that can remove the
  * fixtures' pointers (pointer table: rab_secure_owner, FORCE RLS, runtime deny policy) to reproduce "rows written before
  * the triggers existed". It deletes ONLY the pointers of this suite's own rows.
  *

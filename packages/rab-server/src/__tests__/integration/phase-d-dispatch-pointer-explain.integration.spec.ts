@@ -8,7 +8,7 @@ import { integrationTestDatabase, integrationTestDatabaseReady } from '../../dat
  * due_at in the past), separately, plus wall time of the real definer call.
  *
  * Opt-in: PHASE_D_SQL_APPROVED=true AND PHASE_D_EXPLAIN=true, on a DISPOSABLE database
- * that carries the approved migrations (bootstrap superuser URL in TEST_DATABASE_URL_UNPOOLED). Everything runs inside ONE
+ * that carries the approved migrations (bootstrap superuser URL in TEST_DATABASE_ADMIN_URL). Everything runs inside ONE
  * transaction that is always rolled back: no pointer, organisation or plan setting survives. Plans are printed (for
  * docs/plans/PHASE-D-SQL-GATE.md / the lead's performance report) and asserted only on shape: index scans on worker_dispatch_pointer_fair_idx,
  * no sequential scan of the pointer table, bounded rows per step. Absolute timings are recorded, never asserted.

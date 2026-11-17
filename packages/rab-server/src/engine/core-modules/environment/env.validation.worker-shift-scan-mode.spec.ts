@@ -6,7 +6,7 @@ import { COMBINED_SHIFT_SCAN_MEMBER_KEYS, COMBINED_SHIFT_SCAN_MIN_TICK_SECONDS, 
  * Combined mode ticks at the greatest common divisor of the four member intervals and refuses to boot below 30 s.
  * Separate mode (the default) must accept every configuration it accepts today, including ones with no common tick.
  */
-const base = { DATABASE_URL: 'postgres://rab:rab@localhost:5432/rab', REDIS_URL: 'redis://localhost:6379', APP_SECRET: 'a'.repeat(32) };
+const base = { PG_DATABASE_URL: 'postgres://rab:rab@localhost:5432/rab', REDIS_URL: 'redis://localhost:6379', APP_SECRET: 'a'.repeat(32) };
 
 describe('WORKER_SHIFT_SCAN_MODE (Phase D-Q4a)', () => {
   it('defaults to separate (unset or empty), other Worker defaults unchanged', () => {

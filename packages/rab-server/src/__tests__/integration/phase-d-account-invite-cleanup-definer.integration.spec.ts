@@ -56,7 +56,7 @@ describeIfApproved('Phase D F-1: account-invite cleanup definers (integration; n
 
   beforeAll(async () => {
     const adminUrl = integrationTestDatabase().adminUrl;
-    const t = describeDatabaseUrl(adminUrl, 'TEST_DATABASE_URL_UNPOOLED');
+    const t = describeDatabaseUrl(adminUrl, 'TEST_DATABASE_ADMIN_URL');
     const w = describeDatabaseUrl(WORKER_URL!, 'TEST_DATABASE_WORKER_URL');
     if (w.database !== t.database || w.host !== t.host || w.port !== t.port) throw new Error('TEST_DATABASE_WORKER_URL names another database. Refusing.');
     admin = await connect(adminUrl);

@@ -25,7 +25,7 @@ import { integrationTestDatabaseReady } from '@rab/server/database/typeorm/core/
  *
  * ┌──────────────────────────────────────────────────────────────────────────────────────────────────────────────┐
  * │ GATED. Needs migrations 1786721300000–1786721320000 applied and the `crewflow_worker` login. Skipped unless     │
- * │ PHASE_D_SQL_APPROVED=true and TEST_DATABASE_WORKER_URL are set. The admin connection (TEST_DATABASE_URL_UNPOOLED)  │
+ * │ PHASE_D_SQL_APPROVED=true and TEST_DATABASE_WORKER_URL are set. The admin connection (TEST_DATABASE_ADMIN_URL)     │
  * │ must be the test cluster's SUPERUSER (asserted): only it can delete a pointer (rab_secure_owner, FORCE RLS).    │
  * └──────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
  *

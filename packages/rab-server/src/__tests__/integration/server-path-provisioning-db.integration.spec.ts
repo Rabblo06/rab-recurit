@@ -11,7 +11,7 @@ import { codeWorkspaceStructureLevel } from '../../engine/core-modules/upgrade/w
  * Server-path workspace provisioning — DATABASE layer (migration ServerPathWorkspaceProvisioning1786719500000).
  *
  * Every assertion that matters runs over the REAL restricted runtime login (`crewflow_app`, TEST_DATABASE_URL), never only
- * a superuser. The admin connection (TEST_DATABASE_URL_UNPOOLED, the bootstrap superuser of a disposable database) is used
+ * a superuser. The admin connection (TEST_DATABASE_ADMIN_URL, the bootstrap superuser of a disposable database) is used
  * for fixtures, catalog reads, failure injection and — via `SET ROLE crewflow` — to run the legacy TypeScript provisioner
  * so the two paths can be compared object by object.
  *
@@ -164,7 +164,7 @@ describeIfDb('server-path workspace provisioning — database layer (crewflow_ap
     admin = new Client({ connectionString: adminUrl });
     await admin.connect();
     const [{ rolsuper }] = (await admin.query(`SELECT rolsuper FROM pg_roles WHERE rolname = current_user`)).rows;
-    if (!rolsuper) throw new Error('this suite needs the disposable database bootstrap superuser as TEST_DATABASE_URL_UNPOOLED');
+    if (!rolsuper) throw new Error('this suite needs the disposable database bootstrap superuser as TEST_DATABASE_ADMIN_URL');
     // The TypeScript provisioner compares against the fingerprints of THIS server's major (it read the PostgreSQL 16 table
     // before, so §12.15 failed on 17 / 18: D-RUNNER.md §12.1 note).
     await selectWorkspaceFingerprintsForServer(async (sql) => (await admin.query(sql)).rows);

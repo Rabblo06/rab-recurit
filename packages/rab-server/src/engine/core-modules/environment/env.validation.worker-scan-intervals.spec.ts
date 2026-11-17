@@ -7,7 +7,7 @@ import { WORKER_SCAN_INTERVAL_KEYS, WORKER_SCAN_INTERVAL_SETTINGS } from './work
  * Worker scan interval settings: unset ⇒ exactly the historical cadences; every key bounded; anything out of bounds,
  * fractional or non-numeric refuses to boot (fail closed, like every other env key). Pre-existing keys keep their meaning.
  */
-const base = { DATABASE_URL: 'postgres://rab:rab@localhost:5432/rab', REDIS_URL: 'redis://localhost:6379', APP_SECRET: 'a'.repeat(32) };
+const base = { PG_DATABASE_URL: 'postgres://rab:rab@localhost:5432/rab', REDIS_URL: 'redis://localhost:6379', APP_SECRET: 'a'.repeat(32) };
 
 // Hand-written (not read from the settings table): the cadences the Worker used before these keys existed, in seconds.
 const HISTORICAL: Record<string, number> = {

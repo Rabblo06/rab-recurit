@@ -93,7 +93,7 @@ describeIfDb('constraint + state regression in core and every workspace schema (
     admin = new Client({ connectionString: adminUrl });
     await admin.connect();
     if (!(await admin.query('SELECT rolsuper FROM pg_roles WHERE rolname = current_user')).rows[0].rolsuper) {
-      throw new Error('this suite needs the disposable database bootstrap superuser as TEST_DATABASE_URL_UNPOOLED');
+      throw new Error('this suite needs the disposable database bootstrap superuser as TEST_DATABASE_ADMIN_URL');
     }
     srv = await seedWorkspace(admin, `s2c-srv-${sfx}`);
     ts = await seedWorkspace(admin, `s2c-ts-${sfx}`);

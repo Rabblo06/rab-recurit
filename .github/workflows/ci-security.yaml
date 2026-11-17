@@ -99,8 +99,8 @@ jobs:
             npx ts-node --transpile-only -P packages/rab-server/tsconfig.app.json \
             packages/rab-server/src/database/typeorm/scripts/migrate/twenty/twenty-migrate.ts
       - name: FORCE RLS coverage and the owner-login posture as crewflow_owner
-        # X3.5-S6 strict switch: this step must never resolve a legacy database name (DATABASE_URL, ...).
-        run: PG_LEGACY_NAMES_STRICT=true PG_DATABASE_URL="$RLS_OWNER_URL" yarn check-rls
+        # X3.5-S8: every process refuses the legacy database names (DATABASE_URL, ...) in every environment.
+        run: PG_DATABASE_URL="$RLS_OWNER_URL" yarn check-rls
       - name: Security posture golden (exact)
         run: |
           POSTURE_DATABASE_URL="$RLS_ADMIN_URL" npx ts-node --transpile-only -P packages/rab-server/tsconfig.app.json \
@@ -111,7 +111,7 @@ jobs:
             packages/rab-server/src/database/typeorm/scripts/check-semantic-posture.ts
       - name: Owner-login guards and behaviour-change catalogue (real PostgreSQL, as crewflow_owner)
         run: |
-          TEST_DATABASE_URL="$RLS_OWNER_URL" TEST_DATABASE_URL_UNPOOLED="$RLS_ADMIN_URL" DB_TARGET=local \
+          TEST_DATABASE_URL="$RLS_OWNER_URL" TEST_DATABASE_ADMIN_URL="$RLS_ADMIN_URL" DB_TARGET=local \
             npx jest -c packages/rab-server/jest.config.ts --runInBand --testTimeout=120000 \
             packages/rab-server/src/__tests__/integration/owner-login-guards.integration.spec.ts \
             packages/rab-server/src/__tests__/integration/owner-login-behaviour-catalogue.integration.spec.ts

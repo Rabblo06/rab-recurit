@@ -68,7 +68,7 @@ describeIfDb('WorkspaceSchemaMigrator + ledger + drift (B3/B4)', () => {
     admin = new Client({ connectionString: adminUrl });
     await admin.connect();
     if (!(await admin.query('SELECT rolsuper FROM pg_roles WHERE rolname = current_user')).rows[0].rolsuper) {
-      throw new Error('this suite needs the disposable database bootstrap superuser as TEST_DATABASE_URL_UNPOOLED');
+      throw new Error('this suite needs the disposable database bootstrap superuser as TEST_DATABASE_ADMIN_URL');
     }
     // D4: select the fingerprint table by the server's major, as the runner does; every fingerprint read below (and in the
     // migrator this suite drives) follows it.

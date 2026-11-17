@@ -8638,3 +8638,37 @@ Reversal:   Lower CLOCK_IN_CONFIRM_FLOOR_HOURS, or require a second approver (pa
   `BusinessTablesError('unbound')` for `advance` and `discover`. `tenant-context.service.spec.ts` and
   `workspace-execution-context.integration.spec.ts` pin the trap behaviour (`''` bound, the real schema still handed to the
   callback). Every server and worker suite passes under the trap.
+
+## X3.5-S8 — the legacy database names are refused in every environment (release 2) (branch refactor/x35-s8-release2-legacy-db-names, 2026-11-17, DRAFT, merge only after 0.6.0 is deployed and the owner approves)
+- **Asset:** which database a process connects to and as whom (the one owner login, PG_DATABASE_URL), the disposable test
+  cluster's superuser URL, and the guarantee that a leftover old variable can never silently pick a connection.
+- **Change (release 2):** `DATABASE_URL`, `DATABASE_URL_UNPOOLED`, `DATABASE_DIRECT_URL` and `DB_POOL_MAX` are refused
+  whenever non-empty, in every environment and every process role (API, Worker, provisioner role, CLI, migrate), before
+  anything else resolves (`pg-config.ts` `assertNoLegacyPgEnv`). The refusal names each replacement (`PG_DATABASE_URL`, a direct
+  `PG_DATABASE_URL`, `PG_POOL_MAX_CONNECTIONS`, `TEST_DATABASE_ADMIN_URL` for tests) and never a value. The fallbacks are gone:
+  no DATABASE_URL primary, no DATABASE_DIRECT_URL lock endpoint, no DATABASE_URL_UNPOOLED elevated endpoint (the `elevated`
+  endpoint no longer exists in `ResolvedPgEnvironment`, `create-pg-pool.ts`, the boot gates, `database-target.ts`,
+  `runtime-database-guard.ts`, `migration-database-url.ts` or `db:bind-identity`), no DB_POOL_MAX alias. The runtime guard
+  now refuses a lock endpoint that is not the primary (fail closed) instead of probing a second target.
+  `never-in-runtime-env.ts`: DATABASE_URL_UNPOOLED, DATABASE_URL and DATABASE_DIRECT_URL are refused for the provisioner role
+  too (no more `allowedIn: ['provisioner']` for them). The release-1 strict switch `PG_LEGACY_NAMES_STRICT` is removed (the
+  refusal is now unconditional) and its CI settings dropped. `DATABASE_URL` is no longer declared in
+  `environment-variables.ts` nor listed in the admin environment viewer.
+- **Jest:** `TEST_DATABASE_URL_UNPOOLED` is refused (renamed to `TEST_DATABASE_ADMIN_URL`), and so is every legacy name,
+  inherited or present only in a `.env` a later dotenv load would read; nothing is routed on a refusal. setupFiles write the
+  admin URL under `TEST_DATABASE_ADMIN_URL` only and blank the retired names (a later dotenv load cannot add them). The CI
+  helpers (`twenty-test-env.cjs`, `migration-security-test-env.cjs`) emit the new name only; `ci-security.yaml` and
+  `ci-migration-security.yaml` use it; `run-live.sh` refuses the old name.
+- **Unchanged (kept on purpose):** every X1.8 / X1.9 test guard rule and the disposable-marker proof; `LEGACY_PG_ENV_NAMES` as a
+  permanent refusal list; every child-process strip list keeps BOTH admin names and the legacy names (a stray value is still
+  stripped); the production `.env`-authority comparisons still include the legacy names (a value copied from an old `.env`
+  line is still file authority); the ops commands' own legacy refusal; `api-prestart.sh` and the compose credential checks.
+- **Abuse cases:** `pg-config.spec.ts` (each legacy name refused alone and next to PG_DATABASE_URL, same or another target, for
+  every process role and non-production environment; the memoised resolution never hides one), `env.validation.database.spec.ts`,
+  `migration-runner.spec.ts` (migrate with DATABASE_URL_UNPOOLED refused), `database-target.spec.ts` (CLI / migration commands),
+  `runtime-database-guard.spec.ts` (the provisioner role with DATABASE_URL_UNPOOLED or DATABASE_DIRECT_URL refused),
+  `core-datasource-connection.spec.ts`, `never-in-runtime-env.spec.ts`, `test-database-guard.spec.ts` (Jest with
+  TEST_DATABASE_URL_UNPOOLED or any legacy name refused, inherited or in `.env`), `test-database-admin-url-names.spec.ts` (the
+  CI helpers never emit the old name), `runtime-child-env.spec.ts`.
+- **Residual:** the unused worker-bundle / H6 harness compose files still name the legacy variables; they are not in any
+  workflow and already fail on the owner-login runtime (separated-mode retirement, PR F). Rollback is a plain revert (no SQL).

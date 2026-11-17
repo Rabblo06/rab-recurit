@@ -7,6 +7,7 @@ import { integrationTestDatabase, integrationTestDatabaseReady } from './integra
 import {
   FORBIDDEN_IN_TEST_DATABASE_URL_NAMES,
   INHERITED_DATABASE_URL_NAMES,
+  TEST_DATABASE_ADMIN_URL,
   TEST_DATABASE_URL,
   TEST_DATABASE_URL_UNPOOLED,
   TestDatabaseConfigError,
@@ -27,15 +28,15 @@ const ADMIN = `postgres://ci_bootstrap:${SECRET}@127.0.0.1:55462/rab_test_gate`;
 describe('DEAD-07 integration test database gate', () => {
   describe('the gate', () => {
     it('is true for NODE_ENV=test and a valid TEST pair, and reads no legacy connection name', () => {
-      expect(integrationTestDatabaseReady({ NODE_ENV: 'test', [TEST_DATABASE_URL]: APP, [TEST_DATABASE_URL_UNPOOLED]: ADMIN })).toBe(true);
+      expect(integrationTestDatabaseReady({ NODE_ENV: 'test', [TEST_DATABASE_URL]: APP, [TEST_DATABASE_ADMIN_URL]: ADMIN })).toBe(true);
     });
 
     it('integrationTestDatabase() hands an opt-in the validated identity, and throws (never null) on an invalid pair', () => {
-      const resolved = integrationTestDatabase({ NODE_ENV: 'test', [TEST_DATABASE_URL]: APP, [TEST_DATABASE_URL_UNPOOLED]: ADMIN });
+      const resolved = integrationTestDatabase({ NODE_ENV: 'test', [TEST_DATABASE_URL]: APP, [TEST_DATABASE_ADMIN_URL]: ADMIN });
       expect(resolved.app.login).toBe('crewflow_owner');
       expect(resolved.app.port).toBe('55462');
       expect(() => integrationTestDatabase({ NODE_ENV: 'test', [TEST_DATABASE_URL]: APP })).toThrow(TestDatabaseConfigError);
-      expect(() => integrationTestDatabase({ NODE_ENV: 'development', [TEST_DATABASE_URL]: APP, [TEST_DATABASE_URL_UNPOOLED]: ADMIN })).toThrow(TestDatabaseConfigError);
+      expect(() => integrationTestDatabase({ NODE_ENV: 'development', [TEST_DATABASE_URL]: APP, [TEST_DATABASE_ADMIN_URL]: ADMIN })).toThrow(TestDatabaseConfigError);
     });
 
     it('is true in this Jest process (setupFiles routed it; globalSetup proved the pair live)', () => {
@@ -44,12 +45,14 @@ describe('DEAD-07 integration test database gate', () => {
 
     it.each<[string, Record<string, string | undefined>, RegExp]>([
       ['the TEST pair missing (the legacy names alone never count)', { NODE_ENV: 'test', DATABASE_URL: APP, DATABASE_URL_UNPOOLED: ADMIN, PG_DATABASE_URL: APP }, /TEST_DATABASE_URL is required/],
-      ['the admin half missing', { NODE_ENV: 'test', [TEST_DATABASE_URL]: APP }, /TEST_DATABASE_URL_UNPOOLED is required|TEST_DATABASE_ADMIN_URL is required/],
-      ['NODE_ENV not test (an Nx-loaded .env)', { NODE_ENV: 'development', [TEST_DATABASE_URL]: APP, [TEST_DATABASE_URL_UNPOOLED]: ADMIN }, /not "test"/],
-      ['NODE_ENV unset', { [TEST_DATABASE_URL]: APP, [TEST_DATABASE_URL_UNPOOLED]: ADMIN }, /not "test"/],
+      ['the admin half missing', { NODE_ENV: 'test', [TEST_DATABASE_URL]: APP }, /TEST_DATABASE_ADMIN_URL is required/],
+      // X3.5-S8: the old admin name never counts; it is refused, naming the new name.
+      ['the admin half only under the old name', { NODE_ENV: 'test', [TEST_DATABASE_URL]: APP, [TEST_DATABASE_URL_UNPOOLED]: ADMIN }, /TEST_DATABASE_URL_UNPOOLED was renamed to TEST_DATABASE_ADMIN_URL/],
+      ['NODE_ENV not test (an Nx-loaded .env)', { NODE_ENV: 'development', [TEST_DATABASE_URL]: APP, [TEST_DATABASE_ADMIN_URL]: ADMIN }, /not "test"/],
+      ['NODE_ENV unset', { [TEST_DATABASE_URL]: APP, [TEST_DATABASE_ADMIN_URL]: ADMIN }, /not "test"/],
       [
         'the pair on two databases',
-        { NODE_ENV: 'test', [TEST_DATABASE_URL]: APP, [TEST_DATABASE_URL_UNPOOLED]: ADMIN.replace('rab_test_gate', 'rab_other') },
+        { NODE_ENV: 'test', [TEST_DATABASE_URL]: APP, [TEST_DATABASE_ADMIN_URL]: ADMIN.replace('rab_test_gate', 'rab_other') },
         /different databases/,
       ],
       [
@@ -57,11 +60,11 @@ describe('DEAD-07 integration test database gate', () => {
         {
           NODE_ENV: 'test',
           [TEST_DATABASE_URL]: APP.replace('127.0.0.1:55462', 'db.example.test'),
-          [TEST_DATABASE_URL_UNPOOLED]: ADMIN.replace('127.0.0.1:55462', 'db.example.test'),
+          [TEST_DATABASE_ADMIN_URL]: ADMIN.replace('127.0.0.1:55462', 'db.example.test'),
         },
         /Remote test database/,
       ],
-      ['the development database', { NODE_ENV: 'test', [TEST_DATABASE_URL]: APP.replace('55462', '15432'), [TEST_DATABASE_URL_UNPOOLED]: ADMIN.replace('55462', '15432') }, /development database/],
+      ['the development database', { NODE_ENV: 'test', [TEST_DATABASE_URL]: APP.replace('55462', '15432'), [TEST_DATABASE_ADMIN_URL]: ADMIN.replace('55462', '15432') }, /development database/],
     ])('throws (never returns false) for %s, without echoing a value', (_name, env, pattern) => {
       let result: unknown = 'not called';
       let message = '';

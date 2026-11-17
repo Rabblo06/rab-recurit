@@ -272,7 +272,7 @@ export class ElevatedOpsSession {
     // The same login on its own one-connection pool (no second credential exists).
     if (app.path !== 'owner-login') throw new ElevatedOpsSessionError('the narrowed session exists only on the owner-login path.');
     if (resolved.processRole !== 'cli') throw new ElevatedOpsSessionError('the owner-login elevated session exists only in a one-off CLI process.');
-    if (resolved.elevated !== null) throw new ElevatedOpsSessionError('the owner-login path uses the one login only; a second database endpoint is refused.');
+    // X3.5-S8: there is no second endpoint to refuse (ResolvedPgEnvironment has none; the factory refuses DATABASE_URL_UNPOOLED).
     if (resolved.primary.source !== 'PG_DATABASE_URL' || resolved.primary.target.user !== OWNER_LOGIN_ROLE || app.login !== OWNER_LOGIN_ROLE) {
       throw new ElevatedOpsSessionError(`the owner-login elevated session needs PG_DATABASE_URL naming ${OWNER_LOGIN_ROLE}.`);
     }
