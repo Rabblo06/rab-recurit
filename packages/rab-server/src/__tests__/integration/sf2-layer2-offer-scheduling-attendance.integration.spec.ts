@@ -1,5 +1,5 @@
 import 'reflect-metadata';
-import { EmploymentStatus, PermissionFlag, PermissionFlagType, ShiftStatus } from '@rab/shared';
+import { EmploymentStatus, PermissionFlag, PermissionFlagType, ReplacementRequestStatus, ShiftAssignmentStatus, ShiftStatus } from '@rab/shared';
 import { ForbiddenException, INestApplication } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
 import { randomUUID } from 'node:crypto';
@@ -12,9 +12,12 @@ import { AuthContext } from '../../engine/core-modules/tenant/auth-context.inter
 import { TenantContextService } from '../../engine/core-modules/tenant/tenant-context.service';
 import { AttendanceService } from '../../modules/attendance/services/attendance.service';
 import { OfferService } from '../../modules/offer/services/offer.service';
+import { ReplacementRequest } from '../../modules/offer/entities/replacement-request.entity';
 import { ReplacementRequestService } from '../../modules/offer/services/replacement-request.service';
 import { JobRole } from '../../modules/scheduling/entities/job-role.entity';
 import { Shift } from '../../modules/scheduling/entities/shift.entity';
+import { ShiftAssignment } from '../../modules/scheduling/entities/shift-assignment.entity';
+import { toTstzRange } from '../../modules/scheduling/utils/tstzrange';
 import { SchedulingService } from '../../modules/scheduling/services/scheduling.service';
 import { StaffProfile } from '../../modules/staff/entities/staff-profile.entity';
 import { Venue } from '../../modules/venue/entities/venue.entity';
@@ -58,6 +61,7 @@ describeIfDb('SF-2 layer-2 re-checks: offers, replacement requests, scheduling, 
   let jobRoleId: string;
   let openShiftId: string;
   let pendingRequestId: string; // a Venue Manager's shift request awaiting approval
+  let replacementRequestId: string; // a real replacement request awaiting approval (staff1 declined, staff2 shortlisted)
   let pendingOffer: { id: string; offerBatchId: string };
   let acceptedOffer: { id: string; offerBatchId: string };
 
@@ -94,6 +98,7 @@ describeIfDb('SF-2 layer-2 re-checks: offers, replacement requests, scheduling, 
     const [row] = (await admin.query(
       `SELECT
          (SELECT count(*) FROM core.audit_log WHERE organisation_id = $1)::int AS audit,
+         (SELECT count(*) FROM core.email_outbox WHERE organisation_id = $1)::int AS outbox,
          (SELECT count(*) FROM core.notification WHERE organisation_id = $1)::int AS notifications,
          (SELECT count(*) FROM core.realtime_event WHERE organisation_id = $1)::int AS realtime,
          (SELECT count(*) FROM ${t('job_role')} WHERE organisation_id = $1)::int AS job_roles,
@@ -167,6 +172,21 @@ describeIfDb('SF-2 layer-2 re-checks: offers, replacement requests, scheduling, 
     acceptedOffer = { id: toAccept.id, offerBatchId: toAccept.offerBatchId! };
     await offers.staffAccept(staffCtx(staff1), acceptedOffer.id);
     pendingRequestId = await seedShift(ShiftStatus.PENDING_MANAGER_APPROVAL, { requestedBy: vm.userId });
+    // A real replacement request: staff1 declined a seat on its own shift; staff2 is the shortlisted candidate.
+    const declinedShiftId = await seedShift(ShiftStatus.OPEN);
+    replacementRequestId = await tenantContext.runInTenantContext(ctxOf(owner), async (m) => {
+      const shift = await m.findOneByOrFail(Shift, { id: declinedShiftId });
+      const seat = await m.save(ShiftAssignment, {
+        organisationId: orgId, shiftId: shift.id, staffProfileId: staff1.profileId!, status: ShiftAssignmentStatus.DECLINED,
+        payRateSnapshotPence: 1500, assignedBy: owner.userId, period: toTstzRange(shift.startsAt, shift.endsAt), workspaceId: owner.workspaceId!,
+      } as Partial<ShiftAssignment>);
+      const request = await m.save(ReplacementRequest, {
+        organisationId: orgId, workspaceId: owner.workspaceId!, shiftId: shift.id, declinedShiftAssignmentId: seat.id,
+        status: ReplacementRequestStatus.AWAITING_APPROVAL,
+        candidatesSnapshot: [{ staffProfileId: staff2.profileId!, firstName: 'Cand', lastName: 'Two', score: 10, reasons: [] }],
+      } as Partial<ReplacementRequest>);
+      return request.id;
+    });
   });
 
   afterAll(async () => {
@@ -188,7 +208,7 @@ describeIfDb('SF-2 layer-2 re-checks: offers, replacement requests, scheduling, 
         await expectRefusedAndInert(() => scheduling.get(ctx, id));
         await expectRefusedAndInert(() => scheduling.getRequestedStaff(ctx, id));
       }
-      await expectRefusedAndInert(() => replacements.get(ctx, randomUUID()));
+      for (const id of [replacementRequestId, randomUUID()]) await expectRefusedAndInert(() => replacements.get(ctx, id));
     });
   });
 
@@ -206,9 +226,14 @@ describeIfDb('SF-2 layer-2 re-checks: offers, replacement requests, scheduling, 
     await withRevoked(owner, PermissionFlag.OFFER_SEND, async () => {
       await expectRefusedAndInert(() => offers.send(ctx, openShiftId, { staffProfileId: staff2.profileId! } as never));
       await expectRefusedAndInert(() => offers.sendBulk(ctx, openShiftId, { staffProfileIds: [staff2.profileId!] } as never));
-      await expectRefusedAndInert(() => replacements.approve(ctx, randomUUID(), { staffProfileId: staff2.profileId! } as never));
-      await expectRefusedAndInert(() => replacements.reject(ctx, randomUUID()));
+      // A real request awaiting approval (the request stays awaiting_approval, no offer is sent) and an unknown id alike.
+      for (const id of [replacementRequestId, randomUUID()]) {
+        await expectRefusedAndInert(() => replacements.approve(ctx, id, { staffProfileId: staff2.profileId! } as never));
+        await expectRefusedAndInert(() => replacements.reject(ctx, id));
+      }
     });
+    // Control: with offer.send the request is still readable and awaiting approval (the refusals above changed nothing).
+    expect((await replacements.get(ctx, replacementRequestId)).status).toBe(ReplacementRequestStatus.AWAITING_APPROVAL);
   });
 
   it('withdraw without offer.withdraw → 403, the pending offer stays pending', async () => {
