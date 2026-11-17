@@ -45,26 +45,68 @@ jobs:
             # must re-run every suite on the new Node, so it counts as a change to every package below (and to e2e).
             toolchain: &toolchain
               - '.nvmrc'
-            shared: &shared
+            # Root Node manifests and shared build/test configuration: a dependency bump or a config change alters what every
+            # Node suite compiles and runs, so it re-runs each of them (the Flutter app is unaffected and is not included).
+            node: &node
+              - 'package.json'
+              - 'yarn.lock'
+              - '.yarnrc.yml'
+              - '.yarn/**'
+              - 'yarn.config.cjs'
+              - 'tsconfig.base.json'
+              - 'jest.preset.js'
+            # CI wiring every Node job runs through (this filter and the composite actions: yarn-install, restore-cache,
+            # disposable-postgres, ...): a change to it must run the suites it wires.
+            ci-wiring: &ciwiring
+              - '.github/workflows/changed-files.yaml'
+              - '.github/actions/**'
+            # Source of each package plus everything it imports (the Nx project graph: server -> shared, emails;
+            # worker -> server; front -> shared, ui). The *-lib keys are anchors; the outputs below add the triggers that
+            # must not spread to other packages (root manifests, CI wiring, the package's own workflow file).
+            shared-lib: &shared
               - *toolchain
               - 'packages/rab-shared/**'
-            ui: &ui
+            ui-lib: &ui
               - *toolchain
               - 'packages/rab-ui/**'
-            server: &server
+            # rab-server depends on @rab/emails (packages/rab-server/package.json): an email-template change must run the
+            # server (and so the Worker) suites. Before this, a PR touching only packages/rab-emails/** ran no server CI.
+            emails-lib: &emails
+              - *toolchain
+              - 'packages/rab-emails/**'
+            server-lib: &server
               - *shared
+              - *emails
               - 'packages/rab-server/**'
-            worker:
+            shared:
               - *shared
+              - *node
+              - *ciwiring
+              - '.github/workflows/ci-shared.yaml'
+            ui:
+              - *ui
+              - *node
+              - *ciwiring
+              - '.github/workflows/ci-ui.yaml'
+            server:
+              - *server
+              - *node
+              - *ciwiring
+              - '.github/workflows/ci-server.yaml'
+            worker:
               - *server
               - 'packages/rab-worker/**'
+              - *node
+              - *ciwiring
               # X3.3: a change to the Worker CI itself (or to this filter) must run the Worker CI.
               - '.github/workflows/ci-worker.yaml'
-              - '.github/workflows/changed-files.yaml'
             front:
               - *shared
               - *ui
               - 'packages/rab-front/**'
+              - *node
+              - *ciwiring
+              - '.github/workflows/ci-front.yaml'
             mobile:
               - *shared
               - *ui
@@ -82,6 +124,7 @@ jobs:
               - 'packages/rab-worker/**'
               - 'packages/rab-shared/**'
               - 'packages/rab-ui/**'
+              - 'packages/rab-emails/**'
             # The e2e package itself, the fixtures its AI visual suites load, and the CI wiring that runs it: a change
             # to any of these must run ci-e2e even when no application package changed.
             e2e:
