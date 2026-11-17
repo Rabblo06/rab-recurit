@@ -10,10 +10,6 @@ import { AuditService } from '@rab/server/engine/core-modules/audit/audit.servic
 import { EnvironmentService } from '@rab/server/engine/core-modules/environment/environment.service';
 import { RealtimeEventService } from '@rab/server/engine/core-modules/realtime/realtime-event.service';
 import { PasswordHashingService } from '@rab/server/engine/core-modules/auth/services/password-hashing.service';
-import { AuthContext } from '@rab/server/engine/core-modules/tenant/auth-context.interface';
-
-/** AuthContext with a non-null organisationId: what these fixtures always build, and what `withContext` binds. */
-type OrgBoundContext = AuthContext & { organisationId: string };
 import { TenantContextService } from '@rab/server/engine/core-modules/tenant/tenant-context.service';
 import { Organisation } from '@rab/server/modules/identity/entities/index';
 import { NotificationService } from '@rab/server/modules/notification/services/notification.service';
@@ -29,7 +25,7 @@ import { Venue } from '@rab/server/modules/venue/entities/venue.entity';
 import { runOfferExpiryCycle } from '../../queues/rab-offers/offer-expiry.job';
 import { runReplacementStaffCycle } from '../../queues/rab-offers/replacement-staff.job';
 import { createAdminDataSource } from './helpers/admin-datasource';
-import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
+import { OrgBoundContext, TestIdentity, TestIdentityFactory } from './helpers/test-identities';
 import { integrationTestDatabaseReady } from '@rab/server/database/typeorm/core/integration-test-database-gate';
 import { businessSchema, businessTable } from './helpers/hws-fixtures';
 

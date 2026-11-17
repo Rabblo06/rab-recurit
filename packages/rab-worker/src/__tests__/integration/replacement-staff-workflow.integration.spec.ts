@@ -8,6 +8,7 @@ import {
   OfferStatusType,
   ReplacementCandidateSnapshot,
   ReplacementRequestStatus,
+  ReplacementRequestStatusType,
   ShiftAssignmentStatus,
   ShiftStatus,
   ShiftStatusType,
@@ -296,7 +297,7 @@ describeIfDb('replacement-staff workflow (integration)', () => {
     fx: OrgFixture,
     fixture: DeclinedOfferFixture,
     candidates: ReplacementCandidateSnapshot[],
-    status: string = ReplacementRequestStatus.AWAITING_APPROVAL,
+    status: ReplacementRequestStatusType = ReplacementRequestStatus.AWAITING_APPROVAL,
   ): Promise<string> {
     return withContext({ organisationId: fx.organisationId, workspaceId: fx.workspaceId, userId: fx.managerUserId }, async (manager) => {
       const request = await manager.save(ReplacementRequest, {
@@ -305,7 +306,7 @@ describeIfDb('replacement-staff workflow (integration)', () => {
         shiftId: fixture.shiftId,
         declinedShiftAssignmentId: fixture.declinedAssignmentId,
         declinedOfferId: fixture.declinedOfferId,
-        status: status as never,
+        status,
         candidatesSnapshot: candidates,
       });
       return request.id;
@@ -985,6 +986,11 @@ describeIfDb('replacement-staff workflow (integration)', () => {
       // The refused attempt must leave the row untouched (as G4 checks for the cross-organisation case).
       const stillIntact = await getRequest(fx, requestId);
       expect(stillIntact!.status).toBe(ReplacementRequestStatus.AWAITING_APPROVAL);
+      // ...and no offer reached the candidate.
+      const offerCount = await withContext({ organisationId: fx.organisationId, workspaceId: fx.workspaceId, userId: fx.managerUserId }, (m) =>
+        m.query<Array<{ count: string }>>(`SELECT count(*) FROM job_offer WHERE staff_profile_id = $1`, [candidate.staffProfileId]),
+      );
+      expect(Number(offerCount[0]!.count)).toBe(0);
     });
   });
 

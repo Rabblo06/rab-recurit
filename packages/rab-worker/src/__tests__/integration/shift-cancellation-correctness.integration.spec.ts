@@ -22,10 +22,6 @@ import { EmailService } from '@rab/server/engine/core-modules/email/email.servic
 import { EnvironmentService } from '@rab/server/engine/core-modules/environment/environment.service';
 import { PasswordHashingService } from '@rab/server/engine/core-modules/auth/services/password-hashing.service';
 import { FileService } from '@rab/server/engine/core-modules/storage/file.service';
-import { AuthContext } from '@rab/server/engine/core-modules/tenant/auth-context.interface';
-
-/** AuthContext with a non-null organisationId: what these fixtures always build, and what `withContext` binds. */
-type OrgBoundContext = AuthContext & { organisationId: string };
 import { TenantContextService } from '@rab/server/engine/core-modules/tenant/tenant-context.service';
 import { Attendance } from '@rab/server/modules/attendance/entities/attendance.entity';
 import { ShiftReport } from '@rab/server/modules/attendance/entities/shift-report.entity';
@@ -54,7 +50,7 @@ import { runShiftReportSchedulerCycle } from '../../queues/rab-reports/shift-rep
 import { runShiftCancellationFollowupCycle } from '../../queues/rab-shifts/shift-cancellation-followup.job';
 import { runShiftMonitorCycle } from '../../queues/rab-shifts/shift-monitor.job';
 import { createAdminDataSource } from './helpers/admin-datasource';
-import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
+import { OrgBoundContext, TestIdentity, TestIdentityFactory } from './helpers/test-identities';
 import { integrationTestDatabaseReady } from '@rab/server/database/typeorm/core/integration-test-database-gate';
 import { businessSchema } from './helpers/hws-fixtures';
 
