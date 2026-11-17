@@ -11,6 +11,7 @@ import { PasswordHashingService } from '../../engine/core-modules/auth/services/
 import { AuthContext } from '../../engine/core-modules/tenant/auth-context.interface';
 import { TenantContextService } from '../../engine/core-modules/tenant/tenant-context.service';
 import { ROLE_DEFS } from '../../modules/manager/services/manager.service';
+import { SchedulingService } from '../../modules/scheduling/services/scheduling.service';
 import { SearchService } from '../../modules/search/services/search.service';
 import { StaffService } from '../../modules/staff/services/staff.service';
 import { createAdminDataSource } from './helpers/admin-datasource';
@@ -40,6 +41,7 @@ describeIfDb('SF-6: search uses the same scope as the lists (integration)', () =
   let factory: TestIdentityFactory;
   let searchService: SearchService;
   let staffService: StaffService;
+  let schedulingService: SchedulingService;
   let orgId: string;
   let a: TestIdentity;
   let b: TestIdentity;
@@ -78,6 +80,7 @@ describeIfDb('SF-6: search uses the same scope as the lists (integration)', () =
     await admin.initialize();
     searchService = moduleRef.get(SearchService);
     staffService = moduleRef.get(StaffService);
+    schedulingService = moduleRef.get(SchedulingService);
     factory = new TestIdentityFactory({
       app, dataSource: moduleRef.get(DataSource), adminDataSource: admin,
       tenantContext: moduleRef.get(TenantContextService), passwordHashing: moduleRef.get(PasswordHashingService),
@@ -178,6 +181,35 @@ describeIfDb('SF-6: search uses the same scope as the lists (integration)', () =
     const staffIds = found.filter((r) => r.type === 'Staff').map((r) => r.id);
     expect(staffIds).toEqual([teamMember.profileId]);
     expect(staffIds).not.toContain(outsider.profileId); // SF-6: was found (workspace_id alone)
+  });
+
+  it("no over-narrowing: an owner-scope manager still finds a Venue Manager's pending-approval request in their workspace, as list() shows it", async () => {
+    const venueName = `Sfsix Request ${tag}`;
+    const venue = await http().post('/rest/v1/venues').set(auth(tokenB)).send({ name: venueName, type: 'hotel' });
+    expect(venue.status).toBe(201);
+    const role = await http().post('/rest/v1/job-roles').set(auth(tokenB)).send({ name: `Sf6 Request Role ${tag}`, defaultRatePence: 1500 });
+    expect(role.status).toBe(201);
+    const vm = await factory.createVenueManager({ id: orgId }, { owner: b, venueIds: [venue.body.id], label: 'sf6-req-vm' });
+    const teamMember = await staff(b, `Requested${tag}`, 'Staffer');
+    await admin.query(
+      `INSERT INTO ${businessTable(b.workspaceId!, 'venue_manager_staff')} (manager_profile_id, staff_profile_id, organisation_id, workspace_id) VALUES ($1, $2, $3, $4)`,
+      [vm.profileId, teamMember.profileId, orgId, b.workspaceId],
+    );
+    const startsAt = new Date(Date.now() + 30 * 24 * 60 * MIN);
+    const vmCtx = { organisationId: orgId, workspaceId: b.workspaceId, userId: vm.userId, role: '' } as AuthContext;
+    // The real Venue Manager request path: created_by is the Venue Manager, status pending_manager_approval.
+    const requested = await schedulingService.submitRequest(vmCtx, {
+      venueId: venue.body.id, jobRoleId: role.body.id, startsAt: startsAt.toISOString(),
+      endsAt: new Date(startsAt.getTime() + 5 * 60 * MIN).toISOString(), staffRequired: 1, staffProfileIds: [teamMember.profileId!],
+    } as never);
+    expect(requested.status).toBe('pending_manager_approval');
+
+    const list = await http().get('/rest/v1/shifts').query({ q: venueName }).set(auth(tokenB));
+    expect(list.status).toBe(200);
+    expect(list.body.data.map((r: { id: string }) => r.id)).toContain(requested.id);
+    expect(ids(await search(tokenB, `sfsix request ${tag}`), 'Shift')).toEqual([requested.id]);
+    // Another workspace's manager in the same organisation still does not find it (workspace pin).
+    expect(ids(await search(tokenA, `sfsix request ${tag}`), 'Shift')).toEqual([]);
   });
 
   it('managers: search is organisation-pinned like ManagerService.list() — another organisation\'s manager is never found', async () => {

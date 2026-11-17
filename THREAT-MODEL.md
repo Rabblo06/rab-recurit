@@ -8659,5 +8659,8 @@ Reversal:   Lower CLOCK_IN_CONFIRM_FLOOR_HOURS, or require a second approver (pa
   `created_by` is A are hidden from B's search (each was found before the change) and from B's lists, and A does not find
   them either; a Venue Manager's direct `SearchService.search` returns their team member and not another staff member of
   the same workspace (who was found before), matching `venueDirectory`; another organisation's manager with the same name
-  is never returned. `dashboard-search.integration.spec.ts`'s two cross-workspace tests used to assert the old
+  is never returned; no over-narrowing: an owner-scope manager still finds a Venue Manager's pending-approval request in
+  their workspace (as `list()` shows it). `search-managers-org-pin.spec.ts` pins the managers' organisation predicate
+  itself (RLS alone would hide another organisation's managers, so the integration case cannot tell the two layers apart).
+  `dashboard-search.integration.spec.ts`'s two cross-workspace tests used to assert the old
   `workspace_id`-only search result; they now assert the row is hidden from both managers.
