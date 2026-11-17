@@ -81,6 +81,7 @@ describeDb('PG_SSL_CA_CERT against a PostgreSQL behind a private / self-signed c
   let selfSignedPem: string;
   let caFront: TlsFront;
   let selfSignedFront: TlsFront;
+  let ipFront: TlsFront;
   let creds: { user: string; password: string; database: string };
 
   beforeAll(async () => {
@@ -94,6 +95,10 @@ describeDb('PG_SSL_CA_CERT against a PostgreSQL behind a private / self-signed c
     openssl(['req', '-new', ...ec, '-keyout', 'server.key', '-out', 'server.csr', '-subj', '/CN=localhost'], dir);
     fs.writeFileSync(path.join(dir, 'server.ext'), 'subjectAltName=DNS:localhost\nbasicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature\nextendedKeyUsage=serverAuth\n');
     openssl(['x509', '-req', '-in', 'server.csr', '-CA', 'ca.crt', '-CAkey', 'ca.key', '-CAcreateserial', '-out', 'server.crt', '-days', '2', '-extfile', 'server.ext'], dir);
+    // The same CA, a server certificate for an IP address (IP SAN 127.0.0.1 only).
+    openssl(['req', '-new', ...ec, '-keyout', 'server-ip.key', '-out', 'server-ip.csr', '-subj', '/CN=127.0.0.1'], dir);
+    fs.writeFileSync(path.join(dir, 'server-ip.ext'), 'subjectAltName=IP:127.0.0.1\nbasicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature\nextendedKeyUsage=serverAuth\n');
+    openssl(['x509', '-req', '-in', 'server-ip.csr', '-CA', 'ca.crt', '-CAkey', 'ca.key', '-CAcreateserial', '-out', 'server-ip.crt', '-days', '2', '-extfile', 'server-ip.ext'], dir);
     // An unrelated CA (the wrong root).
     openssl(['req', '-x509', '-new', ...ec, '-keyout', 'other.key', '-out', 'other.crt', '-days', '2', '-subj', '/CN=some other CA',
       '-addext', 'basicConstraints=critical,CA:TRUE'], dir);
@@ -107,11 +112,13 @@ describeDb('PG_SSL_CA_CERT against a PostgreSQL behind a private / self-signed c
     const upstream = { host: url.hostname, port: Number(url.port || 5432) };
     caFront = await startTlsFront(read('server.key'), read('server.crt'), upstream);
     selfSignedFront = await startTlsFront(read('self.key'), selfSignedPem, upstream);
+    ipFront = await startTlsFront(read('server-ip.key'), read('server-ip.crt'), upstream);
   });
 
   afterAll(async () => {
     await caFront?.close();
     await selfSignedFront?.close();
+    await ipFront?.close();
     if (dir) fs.rmSync(dir, { recursive: true, force: true });
   });
 
@@ -166,20 +173,26 @@ describeDb('PG_SSL_CA_CERT against a PostgreSQL behind a private / self-signed c
 
   it('DENIAL: without the CA (system store only) the private certificate is refused', async () => {
     const e = await connectError(prodEnv(urlFor('localhost', caFront.port), {}));
-    expect(e.code ?? e.message).toMatch(/UNABLE_TO_GET_ISSUER_CERT_LOCALLY|SELF_SIGNED_CERT_IN_CHAIN|unable to get local issuer/i);
+    expect(e.code ?? e.message).toMatch(/UNABLE_TO_VERIFY_LEAF_SIGNATURE|UNABLE_TO_GET_ISSUER_CERT_LOCALLY|SELF_SIGNED_CERT_IN_CHAIN|unable to (verify the first|get local issuer)/i);
   });
 
   it('DENIAL: the wrong CA is refused', async () => {
     const e = await connectError(prodEnv(urlFor('localhost', caFront.port), { PG_SSL_CA_CERT: otherCaPem }));
-    expect(e.code ?? e.message).toMatch(/UNABLE_TO_GET_ISSUER_CERT_LOCALLY|unable to get local issuer/i);
+    expect(e.code ?? e.message).toMatch(/UNABLE_TO_VERIFY_LEAF_SIGNATURE|UNABLE_TO_GET_ISSUER_CERT_LOCALLY|unable to (verify the first|get local issuer)/i);
     const self = await connectError(prodEnv(urlFor('localhost', selfSignedFront.port), { PG_SSL_CA_CERT: caPem }));
     expect(self.code ?? self.message).toMatch(/DEPTH_ZERO_SELF_SIGNED_CERT|self[- ]signed/i);
   });
 
   it('DENIAL: host-name verification stays on — the right CA but a host the certificate does not name is refused', async () => {
     // The certificate names DNS:localhost only; dialling 127.0.0.1 is exactly the "IP address / proxy host" mismatch.
+    // REGRESSION (found here): before pg-tls.ts bound the check to the IP, pg + Node verified an IP host against
+    // "localhost", so this certificate was ACCEPTED for 127.0.0.1.
     const e = await connectError(prodEnv(urlFor('127.0.0.1', caFront.port), { PG_SSL_CA_CERT: caPem }));
     expect(e.code ?? e.message).toMatch(/ERR_TLS_CERT_ALTNAME_INVALID|does not match certificate/i);
+  });
+
+  it('an IP-address host verifies against the IP SAN (the check is bound to the IP, not to "localhost")', async () => {
+    expect((await connectAndQuery(prodEnv(urlFor('127.0.0.1', ipFront.port), { PG_SSL_CA_CERT: caPem }))).authorized).toBe(true);
   });
 
   it('DENIAL: both CA variables set refuses before any connection is attempted', () => {

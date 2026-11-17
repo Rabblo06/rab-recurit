@@ -86,6 +86,36 @@ describe('PG_SSL_CA_CERT: a valid PEM is accepted and verifies exactly like PG_S
   });
 });
 
+describe('verify-full binds the host-name check to an IP-address host (pg + Node would otherwise check "localhost")', () => {
+  // A peer certificate as Node hands it to checkServerIdentity.
+  const peer = (subjectaltname: string) => ({ subject: { CN: 'x' }, subjectaltname }) as unknown as import('tls').PeerCertificate;
+  const ipUrl = (host: string) => `postgresql://crewflow_app:${SECRET}@${host}:5432/rab?sslmode=verify-full`;
+
+  it.each([
+    ['IPv4', '10.0.0.7', 'IP Address:10.0.0.7'],
+    ['IPv6', '[fd00::7]', 'IP Address:FD00:0:0:0:0:0:0:7'],
+  ])('%s: only a certificate naming that IP passes', (_n, host, san) => {
+    const r = resolvePgEnvironment({ ...prod, PG_DATABASE_URL: ipUrl(host), PG_SSL_CA_CERT: TEST_CA_A }, { processRole: 'api' });
+    const check = (r.primary.ssl as import('tls').ConnectionOptions).checkServerIdentity;
+    expect(typeof check).toBe('function');
+    // pg passes no name for an IP host; whatever Node passes in, the IP is what is checked.
+    expect((check?.('localhost', peer('DNS:localhost')) as { code?: string } | undefined)?.code).toBe('ERR_TLS_CERT_ALTNAME_INVALID');
+    expect((check?.('localhost', peer('DNS:db.example.com, IP Address:10.9.9.9')) as { code?: string } | undefined)?.code).toBe('ERR_TLS_CERT_ALTNAME_INVALID');
+    expect(check?.('localhost', peer(san))).toBeUndefined();
+  });
+
+  it('applies with the system store too (not only with a configured CA), and the string form refuses it', () => {
+    const r = resolvePgEnvironment({ ...prod, PG_DATABASE_URL: ipUrl('10.0.0.7') }, { processRole: 'worker' });
+    expect(typeof (r.primary.ssl as import('tls').ConnectionOptions).checkServerIdentity).toBe('function');
+    expect(() => pgConnectionString(r, { purpose: 'drift' })).toThrow(/cannot carry the host-name check for an IP-address host/);
+  });
+
+  it('a DNS host keeps Node default check (no override): pg sends that name as servername', () => {
+    const r = resolvePgEnvironment({ ...prod, PG_SSL_CA_CERT: TEST_CA_A }, { processRole: 'api' });
+    expect((r.primary.ssl as import('tls').ConnectionOptions).checkServerIdentity).toBeUndefined();
+  });
+});
+
 describe('PG_SSL_CA_CERT: a malformed value refuses to start (fail closed), naming the variable only', () => {
   const corruptBody = TEST_CA_A.replace(/^(-----BEGIN CERTIFICATE-----\n)MIIB/, '$1MIIC');
   it.each([

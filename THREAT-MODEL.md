@@ -8904,9 +8904,21 @@ Reversal:   Lower CLOCK_IN_CONFIRM_FLOOR_HOURS, or require a second approver (pa
   malformed refused (text, a path, missing END, truncated block, mismatched labels, empty, non-DER base64, corrupted
   certificate, public key, private key, oversize; the path's file too); both set refused; empty = unset; the CA text in
   no console line, warning, refusal message, env.validation message or admin viewer row.
-  `pg-tls-ca.integration.spec.ts` (8, real pg Client from the factory, production rules, a TLS-only PostgreSQL front with
+  `pg-tls-ca.integration.spec.ts` (9, real pg Client from the factory, production rules, a TLS-only PostgreSQL front with
   an openssl CA made like the bundled db's): private CA as text and as one `\n` line → verified TLS session; path →
-  identical; a self-hosted self-signed certificate → verified; DENIAL without the CA, with the wrong CA, and with the
-  right CA but a host the certificate does not name (127.0.0.1 vs DNS:localhost); both variables → refused before any
-  connection. `compose-owner-login.test.cjs`: the lint rules. `run-prestart-shell-tests.cjs` 11n: host `db` with
-  `PG_SSL_CA_CERT` set gets no path.
+  identical; a self-hosted self-signed certificate → verified; an IP host against an IP-SAN certificate → verified;
+  DENIAL without the CA, with the wrong CA, and with the right CA but a host the certificate does not name (127.0.0.1 vs
+  DNS:localhost); both variables → refused before any connection. `compose-owner-login.test.cjs`: the lint rules.
+  `run-prestart-shell-tests.cjs` 11n: host `db` with `PG_SSL_CA_CERT` set gets no path.
+- **Finding fixed in the same branch (found by the integration test): verify-full did not bind an IP-address host.**
+  For an IP-literal host, pg 8.23 sets neither `servername` nor `host` on `tls.connect`, and Node then checks the
+  certificate against the literal name `localhost` (reproduced on Node 24). So `postgresql://…@10.0.0.7/…?sslmode=verify-full`
+  accepted any certificate from a trusted CA that names `localhost`, not one naming 10.0.0.7. With the system store that
+  was harmless (public CAs do not issue `localhost`); with an operator CA (`PG_SSL_CA_CERT_PATH` already, and now
+  `PG_SSL_CA_CERT`) it was a host-name bypass: for example, every Railway instance certificate names `localhost`. Fix:
+  `buildPgSsl` takes the dialled host and, for an IP literal (IPv4 or IPv6), sets an explicit `checkServerIdentity`
+  bound to that IP; DNS hosts keep Node's default check (pg sends the name as SNI). `pgConnectionString` refuses an IP
+  host with verify-full (the string form cannot carry the check). Tests: unit (IPv4/IPv6: a `localhost` or other-IP
+  certificate refused with `ERR_TLS_CERT_ALTNAME_INVALID`, the right IP SAN accepted; system store too; DNS host
+  unchanged) and the integration denial above, which failed before the fix (the `localhost` certificate was accepted
+  for 127.0.0.1).

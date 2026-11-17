@@ -16,9 +16,11 @@
  *   no-verify        REFUSED                                      only with PG_SSL_ALLOW_SELF_SIGNED=true
  *
  * verify-full = `{ rejectUnauthorized: true }` with Node's default `checkServerIdentity` (certificate chain AND host name),
- * against the configured CA when there is one, otherwise the system store. pg sends SNI for a DNS host name; with an
- * IP-literal host the certificate must carry that IP as a SAN. PG_SSL_ALLOW_SELF_SIGNED=true (`rejectUnauthorized: false`)
- * is refused in production. Note `require` is deliberately STRONGER here than libpq's `require` (which does not verify):
+ * against the configured CA when there is one, otherwise the system store. pg sends SNI for a DNS host name, and Node
+ * checks that name. For an IP-literal host pg sets neither `servername` nor `host`, and Node then checks the certificate
+ * against the literal name "localhost" instead of the IP (reproduced with pg 8.23 / Node 24): so for an IP host the
+ * object carries an explicit `checkServerIdentity` bound to that IP, and the certificate must carry it as an IP SAN.
+ * PG_SSL_ALLOW_SELF_SIGNED=true (`rejectUnauthorized: false`) is refused in production. Note `require` is deliberately STRONGER here than libpq's `require` (which does not verify):
  * pg 8 already treats it as verify-full, and pg 9 announces it will weaken it, so the mapping is pinned here instead.
  *
  * The CA comes from ONE of two variables, never both (both set refuses to start):
@@ -32,7 +34,8 @@
  */
 import { X509Certificate } from 'crypto';
 import * as fs from 'fs';
-import type { ConnectionOptions } from 'tls';
+import { isIP } from 'net';
+import { checkServerIdentity, type ConnectionOptions } from 'tls';
 
 import { PgConfigError, PgSslMode } from './pg-url-policy';
 
@@ -123,10 +126,20 @@ export function resolvePgCaCertificate(
   return { caPem: null, caSource: null };
 }
 
-/** Builds the explicit `ssl` value for one connection string. Throws PgConfigError on any refused combination. */
-export function buildPgSsl(sslmode: PgSslMode | null, settings: PgTlsSettings, label: string): PgSsl {
+/**
+ * Builds the explicit `ssl` value for one connection string; `host` is the host that connection dials (the URL's).
+ * Throws PgConfigError on any refused combination.
+ */
+export function buildPgSsl(sslmode: PgSslMode | null, settings: PgTlsSettings, label: string, host: string): PgSsl {
   const { production, caPem, allowSelfSigned } = settings;
-  const verifyFull = (): ConnectionOptions => (caPem ? { rejectUnauthorized: true, ca: caPem } : { rejectUnauthorized: true });
+  const verifyFull = (): ConnectionOptions => {
+    const ssl: ConnectionOptions = caPem ? { rejectUnauthorized: true, ca: caPem } : { rejectUnauthorized: true };
+    // pg passes no name to Node for an IP host, and Node would then verify the certificate against "localhost" (see the
+    // header). Bind the check to the IP itself. A DNS host keeps Node's default check of pg's servername (no override).
+    const literal = host.replace(/^\[(.*)\]$/, '$1');
+    if (isIP(literal) !== 0) ssl.checkServerIdentity = (_name, cert) => checkServerIdentity(literal, cert);
+    return ssl;
+  };
 
   if (production) {
     if (allowSelfSigned) {

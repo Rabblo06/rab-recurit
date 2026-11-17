@@ -79,7 +79,7 @@ function selectEndpoint(resolved: ResolvedPgEnvironment, request: PgConnectionRe
   if (request.url !== undefined) {
     const label = request.urlLabel ?? 'the database URL';
     const target = parsePgUrl(request.url, label, { allowSessionRole: resolved.allowSessionRole });
-    return { source: label, target, ssl: buildPgSsl(target.sslmode, resolved.tls, label), deprecated: false };
+    return { source: label, target, ssl: buildPgSsl(target.sslmode, resolved.tls, label, target.host), deprecated: false };
   }
   const name = request.endpoint ?? 'primary';
   if (name === 'elevated') {
@@ -229,6 +229,10 @@ export function pgConnectionString(resolved: ResolvedPgEnvironment, request: PgC
     url.searchParams.set('sslmode', 'no-verify');
   } else {
     url.searchParams.set('sslmode', 'verify-full');
+    if (ssl.checkServerIdentity) {
+      // An IP-literal host: the string form would lose the IP-bound host-name check (pg-tls.ts), so refuse it.
+      throw new PgConfigError('A connection string cannot carry the host-name check for an IP-address host. This call site needs pgClientConfig. Refusing.');
+    }
     if (ssl.ca) {
       if (resolved.tls.caSource !== 'PG_SSL_CA_CERT_PATH' || !resolved.tls.caPath) {
         throw new PgConfigError(

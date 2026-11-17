@@ -317,7 +317,7 @@ export function resolvePgEnvironment(env: Env = process.env, options: ResolvePgO
   const allowSessionRole = processRole === 'migrate' && !production && (env.DB_TARGET === 'local' || env.DB_TARGET === 'test');
   const endpoint = (raw: string, source: string, deprecated: boolean): PgEndpoint => {
     const target = parsePgUrl(raw, source, { allowSessionRole });
-    return { source, target, ssl: buildPgSsl(target.sslmode, tls, source), deprecated };
+    return { source, target, ssl: buildPgSsl(target.sslmode, tls, source, target.host), deprecated };
   };
 
   let primary: PgEndpoint;
@@ -384,7 +384,7 @@ export function resolvePgEnvironment(env: Env = process.env, options: ResolvePgO
   if (replicaUrl) {
     // Never a session role on a replica, whatever the process: it is a read path of the runtime role only.
     const target = parsePgUrl(replicaUrl.value, replicaUrl.name, { allowSessionRole: false });
-    replica = { source: replicaUrl.name, target, ssl: buildPgSsl(target.sslmode, tls, replicaUrl.name), deprecated: false };
+    replica = { source: replicaUrl.name, target, ssl: buildPgSsl(target.sslmode, tls, replicaUrl.name, target.host), deprecated: false };
     if (sameTarget(primary.target, target)) {
       throw new PgConfigError('PG_DATABASE_REPLICA_URL names the primary (same user, host, port and database). Unset it, or point it at a standby. Refusing to start.');
     }
