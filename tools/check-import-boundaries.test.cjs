@@ -145,3 +145,16 @@ test('the committed baseline matches the tree, and a planted violation on top of
   assert.equal(grown.length, 1);
   assert.equal(grown[0].rule, 'engine-to-modules');
 });
+
+test('--base fails closed: an unknown ref or a non-ref argument throws; only a ref without the baseline file is "nothing to compare"', () => {
+  const root = path.resolve(__dirname, '..');
+  assert.throws(() => check.readBaselineAt('origin/does-not-exist-untangle', root), /--base: git show .* failed/);
+  assert.throws(() => check.readBaselineAt('--output=/tmp/x', root), /not a plain git ref/);
+  assert.throws(() => check.readBaselineAt('HEAD;rm -rf', root), /not a plain git ref/);
+  // The root commit predates the baseline file: a real ref without the file is the one "nothing to compare" case.
+  const { execFileSync } = require('node:child_process');
+  const firstCommit = execFileSync('git', ['rev-list', '--max-parents=0', 'HEAD'], { cwd: root, encoding: 'utf8' }).trim().split('\n')[0];
+  assert.equal(check.readBaselineAt(firstCommit, root), null);
+  // main() throws, and the CLI wrapper turns that into exit 1: never exit 0 on an unknown base.
+  assert.throws(() => check.main(['--base', 'origin/does-not-exist-untangle']), /--base: git show/);
+});

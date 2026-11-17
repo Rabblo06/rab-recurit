@@ -33,8 +33,8 @@
  *   node tools/check-import-boundaries.cjs --write-baseline   # rewrite the baseline; refuses to GROW any entry
  *   node tools/check-import-boundaries.cjs --base origin/main # the committed baseline only shrinks against that ref
  *
- * LIMITS (stated): a path computed at run time (`require(variable)`), a TS path alias (none is configured in these
- * packages today) and a Dart conditional import are not seen. Renaming a file that carries baseline debt shows as a new
+ * LIMITS (stated): a path computed at run time (`require(variable)`), a TS path alias or a bare `baseUrl` specifier (none
+ * is configured in these packages today) and a Dart conditional import are not seen. Renaming a file that carries baseline debt shows as a new
  * entry: clear the debt in that PR, or keep the old file name.
  */
 'use strict';
@@ -247,11 +247,16 @@ function readBaseline(file = BASELINE_FILE) {
 
 /** The baseline as committed at `ref` (git show, no shell), or null when that ref has no baseline file yet. */
 function readBaselineAt(ref, root = ROOT) {
+  if (typeof ref !== 'string' || !/^[A-Za-z0-9._/-]{1,200}$/.test(ref) || ref.startsWith('-')) throw new Error(`--base: not a plain git ref: ${JSON.stringify(ref)}`);
   let text;
   try {
-    text = execFileSync('git', ['-C', root, 'show', `${ref}:${BASELINE_REL}`], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
-  } catch {
-    return null;
+    text = execFileSync('git', ['show', `${ref}:${BASELINE_REL}`], { cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+  } catch (error) {
+    // Only "the ref exists but has no baseline file yet" means nothing to compare. Any other failure (an unknown ref, a
+    // shallow clone without the base branch, git missing) fails closed: the shrink-only rule must never pass unchecked.
+    const stderr = String(error.stderr ?? '');
+    if (/does not exist in|exists on disk, but not in/.test(stderr)) return null;
+    throw new Error(`--base: git show ${ref}:${BASELINE_REL} failed: ${stderr.trim().split('\n')[0]}`);
   }
   return parseBaseline(text, `${ref}:${BASELINE_REL}`);
 }
@@ -341,6 +346,6 @@ if (require.main === module) {
 }
 
 module.exports = {
-  RULES, WORKER_SURFACE, BASELINE_REL, isTestFile, specifiersOf, resolveSpecifier, classify, scanSource, scan, countsOf,
+  RULES, WORKER_SURFACE, BASELINE_REL, readBaselineAt, isTestFile, specifiersOf, resolveSpecifier, classify, scanSource, scan, countsOf,
   compare, compareToBase, parseBaseline, baselineDocument, loadTypeScript, main,
 };
