@@ -199,3 +199,42 @@ final class VMFinaliseGateTests: XCTestCase {
         XCTAssertEqual(Set(vmJSON(sent[0]).keys), ["signedOffName", "breakConfirmed"])
     }
 }
+
+/// The Teams countdown / review-sheet clock: last `serverNow` advanced by the
+/// same monotonic source as the staff shift timer (CLOCK_MONOTONIC keeps
+/// counting while the phone sleeps; `systemUptime`, used before, does not).
+final class VMServerClockTests: XCTestCase {
+    private let serverNow = Date(timeIntervalSince1970: 1_900_000_000) // far from the device clock on purpose
+    private let second: UInt64 = 1_000_000_000
+
+    func testNoServerNowMeansNoClock() {
+        XCTAssertNil(VMServerClock(serverNow: nil))
+    }
+
+    func testAdvancesByMonotonicTimeFromTheServerAnchor() throws {
+        let clock = try XCTUnwrap(VMServerClock(serverNow: serverNow, monotonicNanos: 10 * second))
+        XCTAssertEqual(clock.now(monotonicNanos: 10 * second), serverNow)
+        XCTAssertEqual(clock.now(monotonicNanos: 75 * second), serverNow.addingTimeInterval(65))
+        // A monotonic reading behind the anchor never runs the clock backwards.
+        XCTAssertEqual(clock.now(monotonicNanos: 5 * second), serverNow)
+    }
+
+    func testMatchesTheStaffShiftTimerClockForTheSameReadings() throws {
+        var staff = StaffServerClock()
+        staff.anchor(serverNow, monotonicNanos: 3 * second)
+        let vm = try XCTUnwrap(VMServerClock(serverNow: serverNow, monotonicNanos: 3 * second))
+        for reading in [3 * second, 4 * second + 250_000_000, 3_600 * second] {
+            XCTAssertEqual(vm.now(monotonicNanos: reading), staff.now(monotonicNanos: reading))
+        }
+    }
+
+    /// The defaults read CLOCK_MONOTONIC: an anchor taken 90 s ago on that clock (time that includes any sleep)
+    /// reads as serverNow + 90 s now, never the device wall clock.
+    func testDefaultReadingUsesTheMonotonicClockThatCountsSleep() throws {
+        let ninetySecondsAgo = StaffServerClock.systemMonotonicNanos() - 90 * second
+        let clock = try XCTUnwrap(VMServerClock(serverNow: serverNow, monotonicNanos: ninetySecondsAgo))
+        let elapsed = clock.now().timeIntervalSince(serverNow)
+        XCTAssertGreaterThanOrEqual(elapsed, 90)
+        XCTAssertLessThan(elapsed, 120)
+    }
+}
