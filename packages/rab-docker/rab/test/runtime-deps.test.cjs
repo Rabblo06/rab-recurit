@@ -161,8 +161,8 @@ function installed(packages, workspaces) {
   return { root, nm, dist, lockfile: path.join(root, 'yarn.lock') };
 }
 
-const runPrune = (t, extra = []) => {
-  const r = spawnSync(process.execPath, [CLI, 'prune', t.nm, '--lockfile', t.lockfile, ...extra], { encoding: 'utf8' });
+const runPrune = (t, extra = [], roots = ['--root', '@rab/worker', '@rab/server']) => {
+  const r = spawnSync(process.execPath, [CLI, 'prune', t.nm, '--lockfile', t.lockfile, ...roots, ...extra], { encoding: 'utf8' });
   return { code: r.status, out: `${r.stdout}${r.stderr}` };
 };
 const has = (t, rel) => fs.existsSync(path.join(t.nm, ...rel.split('/')));
@@ -333,15 +333,153 @@ test('the image prunes in BOTH dependency stages before they meet (RUNTIME_PRUNE
     assert.ok(start > 0, name);
     return dockerfile.slice(start, dockerfile.indexOf('\nFROM ', start));
   };
-  const prune = 'node /tmp/runtime-deps.cjs prune /app/node_modules --lockfile yarn.lock; ';
   const api = stage('runtime-modules');
-  assert.ok(api.indexOf('yarn workspaces focus @rab/server --production;') < api.indexOf(prune), 'API: prune after focus');
-  assert.ok(api.indexOf(prune) < api.indexOf('find node_modules ! -type l -perm /022'), 'API: prune before the mode normalisation');
+  const apiPrune = 'node /tmp/runtime-deps.cjs prune /app/node_modules --lockfile yarn.lock --root @rab/server; ';
+  assert.ok(api.indexOf(apiPrune) > 0, 'API: prune with the explicit root @rab/server');
+  assert.ok(api.indexOf('yarn workspaces focus @rab/server --production;') < api.indexOf(apiPrune), 'API: prune after focus');
+  assert.ok(api.indexOf(apiPrune) < api.indexOf('find node_modules ! -type l -perm /022'), 'API: prune before the mode normalisation');
   assert.match(api, /--mount=type=bind,source=packages\/rab-docker\/rab\/runtime-deps\.cjs,target=\/tmp\/runtime-deps\.cjs/);
   const worker = stage('worker-modules');
-  assert.ok(worker.indexOf('yarn workspaces focus @rab/worker --production;') < worker.indexOf(prune), 'Worker: prune after focus');
-  assert.ok(worker.indexOf(prune) > 0 && worker.indexOf(prune) < worker.indexOf('worker-delta /api/node_modules'), 'Worker: prune before the delta');
+  const workerPrune = 'node /tmp/runtime-deps.cjs prune /app/node_modules --lockfile yarn.lock --root @rab/worker @rab/server; ';
+  assert.ok(worker.indexOf(workerPrune) > 0, 'Worker: prune with the explicit roots @rab/worker and @rab/server');
+  assert.ok(worker.indexOf('yarn workspaces focus @rab/worker --production;') < worker.indexOf(workerPrune), 'Worker: prune after focus');
+  assert.ok(worker.indexOf(workerPrune) < worker.indexOf('worker-delta /api/node_modules'), 'Worker: prune before the delta');
+  assert.equal([...dockerfile.matchAll(/runtime-deps\.cjs prune /g)].length, 2, 'exactly the two prunes');
   assert.doesNotMatch(dockerfile, /runtime-deps\.cjs prune[^;]*--drop/, 'the image uses RUNTIME_PRUNE, the one exported list');
   const gate = dockerfile.slice(dockerfile.indexOf('node /tmp/runtime-deps.cjs check'), dockerfile.indexOf('test -f /app/node_modules/@react-pdf/renderer'));
   for (const name of [...RUNTIME_PRUNE, 'tinyglobby']) assert.ok(gate.includes(` ${name} `), `--forbid lacks ${name}`);
+});
+
+// Review L1: the undeclared-dependency scan has no blind spot for bin-as-main, bare side-effect imports or code behind a
+// comment; each refuses (exit 1) and removes nothing. Review L2: the roots are explicit and must exist.
+
+/** Runs prune on imageShape(overrides) and asserts it refused, named graceful-fs, and removed nothing. */
+function assertRefusesGracefulFs(overrides, pkg) {
+  const t = imageShape(overrides);
+  try {
+    const before = fs.readdirSync(t.nm).sort();
+    const r = runPrune(t);
+    assert.equal(r.code, 1, r.out);
+    assert.match(r.out, new RegExp(`kept package ${pkg.replace('.', '\\.')}@\\S+ loads graceful-fs .* which prune would remove`));
+    assert.deepEqual(fs.readdirSync(t.nm).sort(), before, 'nothing is removed when the prune refuses');
+    assert.equal(has(t, 'node-gyp'), true);
+    assert.equal(has(t, 'graceful-fs'), true);
+  } finally {
+    fs.rmSync(t.root, { recursive: true, force: true });
+  }
+}
+
+test('L1: a bin file that is ALSO the package main is runtime code: requiring graceful-fs refuses', () => {
+  assertRefusesGracefulFs(
+    {
+      jsonwebtoken: {
+        name: 'jsonwebtoken',
+        version: '9.0.2',
+        deps: { semver: '^7' },
+        bin: { jwt: './index.js' },
+        files: { 'index.js': "#!/usr/bin/env node\nconst g = require('graceful-fs');\nmodule.exports = g;\n" },
+      },
+    },
+    'jsonwebtoken',
+  );
+});
+
+test('L1: a bin file that is an exports target is runtime code too', () => {
+  const t = imageShape({
+    jsonwebtoken: { name: 'jsonwebtoken', version: '9.0.2', deps: { semver: '^7' }, bin: { jwt: './cli.js' }, files: { 'index.js': 'module.exports = 1;\n', 'cli.js': "require('graceful-fs');\n" } },
+  });
+  try {
+    const pj = path.join(t.nm, 'jsonwebtoken', 'package.json');
+    fs.writeFileSync(pj, JSON.stringify({ ...JSON.parse(fs.readFileSync(pj, 'utf8')), exports: { '.': './index.js', './cli': { require: './cli.js' } } }));
+    const r = runPrune(t);
+    assert.equal(r.code, 1, r.out);
+    assert.equal(has(t, 'graceful-fs'), true);
+  } finally {
+    fs.rmSync(t.root, { recursive: true, force: true });
+  }
+});
+
+test('L1: an install-time-only bin file is tolerated ONLY for a --drop name, never for anything else it would remove', () => {
+  // node-gyp-build's bin.js -> node-gyp (a --drop name): tolerated and reported.
+  const ok = imageShape();
+  try {
+    const r = runPrune(ok);
+    assert.equal(r.code, 0, r.out);
+    assert.match(r.out, /prune tolerates node_modules[\\/]node-gyp-build[\\/]bin\.js -> node-gyp\/package\.json/);
+    assert.match(r.out, /1 tolerated install-time bin hits/);
+  } finally {
+    fs.rmSync(ok.root, { recursive: true, force: true });
+  }
+  // The same bin-only file loading graceful-fs (pruned, but not a --drop name): refused.
+  assertRefusesGracefulFs(
+    {
+      'node-gyp-build': {
+        name: 'node-gyp-build',
+        version: '4.8.4',
+        bin: { 'node-gyp-build': './bin.js' },
+        files: { 'index.js': 'module.exports = 1;\n', 'bin.js': "require('graceful-fs');\n" },
+      },
+    },
+    'node-gyp-build',
+  );
+});
+
+test("L1: a bare side-effect import (import 'graceful-fs';) refuses", () => {
+  assertRefusesGracefulFs(
+    { jsonwebtoken: { name: 'jsonwebtoken', version: '9.0.2', deps: { semver: '^7' }, files: { 'index.mjs': "import 'graceful-fs';\nexport default 1;\n", 'index.js': 'module.exports = 1;\n' } } },
+    'jsonwebtoken',
+  );
+});
+
+test("L1: code on a line that starts with a comment (/*! x */ require('graceful-fs')) is scanned and refuses", () => {
+  assertRefusesGracefulFs(
+    { jsonwebtoken: { name: 'jsonwebtoken', version: '9.0.2', deps: { semver: '^7' }, files: { 'index.js': "/*! x */ require('graceful-fs')\n" } } },
+    'jsonwebtoken',
+  );
+});
+
+test('L2: --root is required, and a --root without its workspace link refuses and removes nothing', () => {
+  let t = imageShape();
+  try {
+    const none = runPrune(t, [], []);
+    assert.equal(none.code, 1, none.out);
+    assert.match(none.out, /prune needs at least one --root/);
+    assert.equal(has(t, 'node-gyp'), true);
+  } finally {
+    fs.rmSync(t.root, { recursive: true, force: true });
+  }
+  t = imageShape();
+  try {
+    fs.rmSync(path.join(t.nm, '@rab', 'server'), { recursive: false, force: true });
+    const before = fs.readdirSync(t.nm).sort();
+    const r = runPrune(t, [], ['--root', '@rab/server']);
+    assert.equal(r.code, 1, r.out);
+    assert.match(r.out, /--root @rab\/server is not a workspace link in .* \(missing\)/);
+    assert.deepEqual(fs.readdirSync(t.nm).sort(), before);
+    assert.equal(has(t, 'node-gyp'), true);
+  } finally {
+    fs.rmSync(t.root, { recursive: true, force: true });
+  }
+  t = imageShape();
+  try {
+    const r = runPrune(t, [], ['--root', 'argon2']);
+    assert.equal(r.code, 1, r.out);
+    assert.match(r.out, /--root argon2 is not a workspace link .*argon2@0\.41\.1/);
+    assert.equal(has(t, 'node-gyp'), true);
+  } finally {
+    fs.rmSync(t.root, { recursive: true, force: true });
+  }
+});
+
+test('L2: only the named roots count: the API root alone prunes what only the Worker reaches', () => {
+  const t = imageShape();
+  try {
+    const r = runPrune(t, [], ['--root', '@rab/server']);
+    assert.equal(r.code, 0, r.out);
+    for (const gone of ['bullmq', 'msgpackr', 'msgpackr-extract', 'node-gyp']) assert.equal(has(t, gone), false, `${gone}\n${r.out}`);
+    for (const kept of ['argon2', 'jsonwebtoken', 'semver']) assert.equal(has(t, kept), true, `${kept}\n${r.out}`);
+    assert.match(r.out, /roots: @rab\/server/);
+  } finally {
+    fs.rmSync(t.root, { recursive: true, force: true });
+  }
 });

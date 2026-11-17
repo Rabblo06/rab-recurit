@@ -91,8 +91,9 @@ RUN set -eu; \
 # node-addon-api, msgpackr-extract, fsevents), and `focus --production` keeps it. It is install-time only (argon2 loads its
 # prebuilt addon through node-gyp-build; this image compiles nothing and has no toolchain), and it drags in tar,
 # tinyglobby, picomatch 4, undici 8, ... `runtime-deps.cjs prune` cuts the edges to its RUNTIME_PRUNE list (node-gyp) and
-# removes every package then unreachable from the workspace roots, keeping anything a runtime package also reaches; it
-# refuses if kept code loads a package it would remove. The final stage's import scan and --forbid prove the result.
+# removes every package then unreachable from the named --root workspaces (explicit; a missing root refuses), keeping
+# anything a runtime package also reaches; it refuses if kept code loads a package it would remove. The final stage's
+# import scan, --forbid and the image gate's in-image native-addon smoke (argon2, msgpackr-extract) prove the result.
 FROM deps AS runtime-modules
 RUN --mount=type=bind,source=packages/rab-docker/rab/runtime-deps.cjs,target=/tmp/runtime-deps.cjs \
     set -eu; \
@@ -101,7 +102,7 @@ RUN --mount=type=bind,source=packages/rab-docker/rab/runtime-deps.cjs,target=/tm
     test "$(sha256sum yarn.lock)" = "$lock"; \
     nested="$(find packages -mindepth 2 -maxdepth 2 -name node_modules -print)"; \
     if [ -n "$nested" ]; then echo "FATAL: the production install put packages under a workspace, which the runtime stage does not copy:"; echo "$nested"; exit 1; fi; \
-    node /tmp/runtime-deps.cjs prune /app/node_modules --lockfile yarn.lock; \
+    node /tmp/runtime-deps.cjs prune /app/node_modules --lockfile yarn.lock --root @rab/server; \
     find node_modules ! -type l -perm /022 -exec chmod go-w {} +
 
 # H3 (O1 one image): the Worker's production dependency closure, resolved from the committed manifests and lockfile with
@@ -109,7 +110,8 @@ RUN --mount=type=bind,source=packages/rab-docker/rab/runtime-deps.cjs,target=/tm
 # not need building (runtime-deps.cjs worker-delta refuses one that does, and refuses unless every package of the API tree
 # is in the Worker tree at the same path and version). Only that DELTA (the native PDF renderer's closure, about 55
 # packages) reaches the final stage, on top of the API tree above. The Worker tree is pruned exactly like the API tree first
-# (node-gyp also reaches it through bullmq > msgpackr > msgpackr-extract), or the delta would carry node-gyp's tree back.
+# (node-gyp also reaches it through bullmq > msgpackr > msgpackr-extract), or the delta would carry node-gyp's tree back;
+# its roots are both processes this tree serves: @rab/worker and @rab/server.
 FROM node:24-alpine@sha256:8a32c8cf649a49915a66e81e7a609223c708d0adabf288ee3f4077d765542f85 AS worker-modules
 WORKDIR /app
 COPY package.json yarn.lock .yarnrc.yml ./
@@ -131,7 +133,7 @@ RUN --mount=type=bind,from=runtime-modules,source=/app/node_modules,target=/api/
     test "$(sha256sum yarn.lock)" = "$lock"; \
     nested="$(find packages -mindepth 2 -maxdepth 2 -name node_modules -print)"; \
     if [ -n "$nested" ]; then echo "FATAL: the production install put packages under a workspace:"; echo "$nested"; exit 1; fi; \
-    node /tmp/runtime-deps.cjs prune /app/node_modules --lockfile yarn.lock; \
+    node /tmp/runtime-deps.cjs prune /app/node_modules --lockfile yarn.lock --root @rab/worker @rab/server; \
     node /tmp/runtime-deps.cjs worker-delta /api/node_modules /app/node_modules /worker-delta; \
     test -d /worker-delta/node_modules; \
     find /worker-delta ! -type l -perm /022 -exec chmod go-w {} +

@@ -29,7 +29,7 @@
  *     only the added package directories (symlinks verbatim) into <out dir>, at the same relative paths. <out dir>/node_modules
  *     always exists afterwards, empty when the Worker adds nothing (the Dockerfile COPYs it unconditionally).
  *
- *   node runtime-deps.cjs prune <node_modules> --lockfile <yarn.lock> [--drop <name>...] [--dry-run]
+ *   node runtime-deps.cjs prune <node_modules> --lockfile <yarn.lock> --root <workspace>... [--drop <name>...] [--dry-run]
  *     Removes every installed package that is unreachable from the production roots once the dependency edges to the
  *     --drop names (default: RUNTIME_PRUNE, exported by this file) are cut. Exists for node-gyp: Yarn injects
  *     `node-gyp: npm:latest` into the lockfile entry of every package with a native build (argon2, node-addon-api,
@@ -37,19 +37,22 @@
  *     (tar, tinyglobby, picomatch 4, undici 8, ...) into an image that compiles nothing (argon2 loads its prebuilt addon
  *     through node-gyp-build). Deleting node_modules/node-gyp alone would leave that hoisted tree behind, so
  *     reachability is computed instead:
- *       - roots: every workspace link in <node_modules> (the focused workspaces), through their package.json
- *         `dependencies`, `optionalDependencies` and `peerDependencies` (never devDependencies);
+ *       - roots: exactly the --root workspaces (required, explicit; each must be a workspace link in <node_modules>),
+ *         and any workspace they depend on, through their package.json `dependencies`, `optionalDependencies` and
+ *         `peerDependencies` (never devDependencies);
  *       - edges of an installed package: its package.json `dependencies`/`optionalDependencies`/`peerDependencies`
  *         UNION the `dependencies`/`peerDependencies` of its lockfile entry (the lockfile also carries what Yarn injected
  *         or a packageExtension added), minus the --drop names; each edge is located with Node's lookup (the package's
  *         own node_modules, then each enclosing node_modules up to the root), so a nested copy is kept or pruned on its own;
  *       - a package any runtime package reaches is kept, whatever else also reaches it.
  *     Fails (and removes nothing) when an installed package has no lockfile entry (the tree is not this lockfile's
- *     install), when no workspace root exists, when a --drop name is not installed (a stale --drop), or when the code of
- *     a KEPT package literally requires/imports a package that would be removed (an undeclared dependency that only
- *     worked through hoisting; a package's `bin` files are install-time CLIs and are not scanned). Afterwards no copy
- *     of a --drop name may remain, and dangling .bin links into removed directories are deleted. --dry-run reports
- *     without removing.
+ *     install), when a --root is missing or not a workspace link, when a --drop name is not installed (a stale --drop),
+ *     or when the code of a KEPT package literally loads a package that would be removed (an undeclared dependency that
+ *     only worked through hoisting). That scan reads every .js/.cjs/.mjs file of every kept package, comments included,
+ *     for require()/import()/`import|export … from` and bare `import 'x'`; the one tolerated hit is a `bin` file that is
+ *     neither the main nor an exports target loading a --drop name itself (node-gyp-build's install-time bin.js).
+ *     Afterwards no copy of a --drop name may remain, and dangling .bin links into removed directories are deleted.
+ *     --dry-run reports without removing.
  */
 const fs = require('node:fs');
 const path = require('node:path');
@@ -302,16 +305,47 @@ function* packageCode(dir) {
   }
 }
 
-/** `prune <node_modules> --lockfile <yarn.lock> [--drop <name>...] [--dry-run]`: see the file header. */
+/** The bare side-effect import (`import 'x';`), which SPECIFIER (`... from 'x'`) does not cover. */
+const SIDE_EFFECT_IMPORT = /^\s*import\s*(['"])([^'"\n]+)\1/gm;
+
+/** Every literal specifier a source file loads: require()/import(), `import|export ... from`, bare `import 'x'`. */
+function importedSpecifiers(src) {
+  return [...[...src.matchAll(SPECIFIER)].map((m) => m[2] || m[4]), ...[...src.matchAll(SIDE_EFFECT_IMPORT)].map((m) => m[2])];
+}
+
+/**
+ * The package's `bin` files that are NOT also its main or any `exports` target (absolute paths): command-line entry
+ * points only. A file that is both a bin and a module entry is runtime code and gets no tolerance.
+ */
+function installTimeBinFiles(dir, j) {
+  const bin = typeof j.bin === 'string' ? { [j.name]: j.bin } : j.bin || {};
+  const entries = new Set();
+  const addEntry = (p) => {
+    const abs = path.resolve(dir, p);
+    for (const c of [abs, `${abs}.js`, `${abs}.cjs`, `${abs}.mjs`, path.join(abs, 'index.js')]) entries.add(c);
+  };
+  addEntry(j.main || 'index.js');
+  const walkExports = (e) => {
+    if (typeof e === 'string') addEntry(e);
+    else if (Array.isArray(e)) e.forEach(walkExports);
+    else if (e && typeof e === 'object') Object.values(e).forEach(walkExports);
+  };
+  walkExports(j.exports);
+  return new Set(Object.values(bin).map((b) => path.resolve(dir, b)).filter((b) => !entries.has(b)));
+}
+
+/** `prune <node_modules> --lockfile <yarn.lock> --root <workspace>... [--drop <name>...] [--dry-run]`: see the file header. */
 function prune(args) {
   const nm = path.resolve(args[0] || '');
   const drop = [];
+  const rootNames = [];
   let lockfile = null;
   let dryRun = false;
   let list = null;
   for (let i = 1; i < args.length; i += 1) {
     const a = args[i];
     if (a === '--drop') list = drop;
+    else if (a === '--root') list = rootNames;
     else if (a === '--lockfile') {
       lockfile = args[++i];
       list = null;
@@ -321,8 +355,10 @@ function prune(args) {
     } else if (list) list.push(a);
     else throw new Error(`unexpected argument ${a}`);
   }
-  if (!args[0] || !fs.existsSync(nm)) throw new Error(`usage: prune <node_modules> --lockfile <yarn.lock> [--drop <name>...] (${nm} does not exist)`);
+  if (!args[0] || !fs.existsSync(nm)) throw new Error(`usage: prune <node_modules> --lockfile <yarn.lock> --root <workspace>... [--drop <name>...] (${nm} does not exist)`);
   if (!lockfile) throw new Error('prune needs --lockfile');
+  if (rootNames.length === 0) throw new Error('prune needs at least one --root <workspace> (the production entry points; never implied)');
+  for (const r of rootNames) if (r.includes('*') || packageNameOf(r) !== r) throw new Error(`--root takes exact workspace names, not ${r}`);
   if (drop.length === 0) drop.push(...RUNTIME_PRUNE);
   for (const d of drop) if (d.includes('*') || packageNameOf(d) !== d) throw new Error(`--drop takes exact package names, not ${d}`);
 
@@ -336,20 +372,24 @@ function prune(args) {
     ...Object.keys(j.peerDependencies || {}),
   ];
 
-  // Roots: the workspace links (and, fail-safe, any directory that is not a package: it is kept, never pruned).
-  const roots = [];
+  // Roots: exactly the --root workspaces, each of which must be a workspace link at the top of <node_modules> (a
+  // directory that is not a package is kept as a fail-safe, never pruned).
   const kept = new Set();
   for (const [rel, value] of tree) {
-    if (value.startsWith('link:')) roots.push(rel);
-    else if (value.startsWith('dir:')) kept.add(rel);
-    else if (!lock.has(value)) fail(`${rel} (${value}) has no entry in ${lockfile}: the tree is not this lockfile's install`);
+    if (value.startsWith('dir:')) kept.add(rel);
+    else if (!value.startsWith('link:') && !lock.has(value)) fail(`${rel} (${value}) has no entry in ${lockfile}: the tree is not this lockfile's install`);
   }
-  if (roots.length === 0) fail(`no workspace link in ${nm}: nothing to compute production reachability from`);
+  const roots = rootNames.map((r) => `node_modules/${r}`);
+  for (const [i, rel] of roots.entries()) {
+    if (!(tree.get(rel) || '').startsWith('link:')) fail(`--root ${rootNames[i]} is not a workspace link in ${nm} (${tree.get(rel) || 'missing'})`);
+  }
   for (const d of drop) if (![...tree.values()].some((v) => nameOf(v) === d)) fail(`--drop ${d} is not installed (stale --drop)`);
   if (process.exitCode) return;
 
-  // Reachability, with the --drop edges cut. A workspace link resolves from the top level (its real path is under
-  // /app/packages, whose own node_modules the Dockerfile asserts do not exist).
+  // Reachability, with the --drop edges cut. A workspace link (a root, or a workspace a root depends on) contributes
+  // its package.json's production dependencies, resolved from the top level (its real path is under /app/packages,
+  // whose own node_modules the Dockerfile asserts do not exist); a workspace's lockfile entry also lists its
+  // devDependencies, so it is never used.
   const queue = [];
   const reach = (fromChain, name) => {
     if (drop.includes(name)) return;
@@ -361,50 +401,56 @@ function prune(args) {
   };
   for (const rel of roots) {
     kept.add(rel);
-    const target = path.resolve(path.dirname(path.join(base, rel)), fs.readlinkSync(path.join(base, rel)));
-    const j = JSON.parse(fs.readFileSync(path.join(target, 'package.json'), 'utf8'));
-    for (const d of declared(j)) reach([], d);
+    queue.push(rel);
   }
   while (queue.length) {
     const rel = queue.shift();
     const value = tree.get(rel);
-    if (value.startsWith('link:')) continue; // a workspace, already a root
+    if (value.startsWith('link:')) {
+      const target = path.resolve(path.dirname(path.join(base, rel)), fs.readlinkSync(path.join(base, rel)));
+      for (const d of declared(JSON.parse(fs.readFileSync(path.join(target, 'package.json'), 'utf8')))) reach([], d);
+      continue;
+    }
     const chain = chainOf(rel);
     for (const d of new Set([...declared(manifest(rel)), ...(lock.get(value) || [])])) reach(chain, d);
   }
 
-  // Remove the top-most unreachable directories (a nested one goes with its parent).
-  const doomed = [...tree.keys()].filter((rel) => !kept.has(rel)).sort();
+  // Remove the top-most unreachable package directories (a nested one goes with its parent). Workspace links are never
+  // removed, reached or not: they hold no third-party code, and deleting a link must never risk its target.
+  const doomed = [...tree.keys()].filter((rel) => !kept.has(rel) && !tree.get(rel).startsWith('link:')).sort();
   const doomedRoots = doomed.filter((rel) => !doomed.some((o) => o !== rel && rel.startsWith(`${o}/`)));
   const doomedSet = new Set(doomed);
   for (const d of drop) {
     for (const [rel, value] of tree) if (nameOf(value) === d && !doomedSet.has(rel)) fail(`${rel} (${value}) is a --drop package but stays reachable`);
   }
 
-  // Undeclared-dependency guard: kept code that literally loads a package being removed would break at runtime.
+  // Undeclared-dependency guard: kept code that literally loads a package being removed would break at runtime. Every
+  // .js/.cjs/.mjs file of every kept package is scanned, comments included (a false positive is a refusal: fail
+  // closed), for require()/import()/`import ... from`/`export ... from` and the bare side-effect `import 'x'`. The ONE
+  // tolerated hit: a `bin` file that is neither the package's main nor any of its exports targets, loading a --drop
+  // name itself (node-gyp-build's install-time bin.js runs `node-gyp rebuild`; runtime code never loads that file).
   const doomedNames = new Set(doomed.flatMap((rel) => [nameOf(tree.get(rel)), chainOf(rel).pop()]));
   let scanned = 0;
+  let tolerated = 0;
   for (const rel of kept) {
     const value = tree.get(rel);
     if (value.startsWith('link:') || value.startsWith('dir:')) continue;
     const chain = chainOf(rel);
-    // A package's `bin` files are install-time/command-line entry points (node-gyp-build's bin.js runs `node-gyp rebuild`
-    // during an install), never loaded by require() from runtime code: they are not scanned.
-    const bin = manifest(rel).bin;
-    const binFiles = new Set(Object.values(typeof bin === 'string' ? { bin } : bin || {}).map((b) => path.resolve(base, rel, b)));
+    const binOnly = installTimeBinFiles(path.join(base, rel), manifest(rel));
     for (const file of packageCode(path.join(base, rel))) {
-      if (binFiles.has(path.resolve(file))) continue;
       scanned += 1;
       const src = fs.readFileSync(file, 'utf8');
-      for (const m of src.matchAll(SPECIFIER)) {
-        const name = packageNameOf(m[2] || m[4]);
+      for (const spec of importedSpecifiers(src)) {
+        const name = packageNameOf(spec);
         if (!name || !doomedNames.has(name)) continue;
-        const lineStart = src.lastIndexOf('\n', m.index) + 1;
-        if (/^\s*(\*|\/\/|\/\*)/.test(src.slice(lineStart, m.index))) continue;
         const target = locate(tree, chain, name);
-        if (target && doomedSet.has(target)) {
-          fail(`kept package ${value} loads ${name} (${path.relative(base, file)}), which prune would remove (${target})`);
+        if (!target || !doomedSet.has(target)) continue;
+        if (drop.includes(name) && binOnly.has(path.resolve(file))) {
+          tolerated += 1;
+          console.log(`runtime-deps: prune tolerates ${path.relative(base, file)} -> ${spec} (an install-time bin file of ${value} loading --drop ${name})`);
+          continue;
         }
+        fail(`kept package ${value} loads ${name} (${path.relative(base, file)}), which prune would remove (${target})`);
       }
     }
   }
@@ -441,7 +487,7 @@ function prune(args) {
   console.log(
     `runtime-deps: prune ${dryRun ? '(dry run) ' : ''}dropped edges to ${drop.join(', ')}; ${tree.size} package directories, ` +
       `${kept.size} reachable, ${doomed.length} ${dryRun ? 'to remove' : 'removed'} (${doomedRoots.length} top-level), ${bins} .bin links removed; ` +
-      `undeclared-dependency scan: ${scanned} files`,
+      `undeclared-dependency scan: ${scanned} files, ${tolerated} tolerated install-time bin hits; roots: ${rootNames.join(', ')}`,
   );
 }
 
