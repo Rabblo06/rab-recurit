@@ -7,7 +7,7 @@ icon: "folder-tree"
 ```text
 packages/
 ├── rab-server/        API (NestJS): auth, permissions, business rules, migrations, CLI commands
-├── rab-worker/        Worker (BullMQ + interval jobs) and the separate workspace provisioner
+├── rab-worker/        Worker (BullMQ jobs, native PDF rendering, in-process workspace provisioning)
 ├── rab-front/         Web console (React + Vite)
 ├── rab-mobile/        Mobile app (Flutter) for staff and venue managers
 ├── rab-shared/        Types, permission flags, state machines, money and duration utilities
@@ -15,7 +15,7 @@ packages/
 ├── rab-emails/        React Email templates
 ├── rab-utils/         Small shared helpers
 ├── rab-e2e-testing/   Playwright web specs and a Maestro-style mobile flow
-├── rab-docker/        Dockerfile, start scripts, Compose files, Postgres init roles
+├── rab-docker/        Dockerfile, start scripts, Compose files, owner-login SQL, release runbooks
 ├── rab-readme/        README images
 ├── rab-website/       Separate marketing website (not part of the product)
 └── rab-docs/          This documentation site (Mintlify)
