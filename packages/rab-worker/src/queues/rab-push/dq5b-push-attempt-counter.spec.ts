@@ -69,6 +69,7 @@ function fakeDeps(f: Fake, send: jest.Mock): PushSendProcessorDeps {
     pushService: { send },
     secretEncryption: { decrypt: () => 'device-token' },
     pushDeviceService: { deactivateInvalidToken: jest.fn() },
+    auditService: { record: jest.fn(async () => undefined) },
   } as unknown as PushSendProcessorDeps;
 }
 
