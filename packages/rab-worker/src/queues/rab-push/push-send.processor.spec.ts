@@ -27,6 +27,8 @@ interface Fake {
   failAcceptedWrites: number;
   /** Throw from the device read (a database fault during revalidation). */
   failDeviceRead?: boolean;
+  /** The fenced provider-call marker write finds another claim owns the row (affected: 0). */
+  markerTokenLost?: boolean;
   /** attempt_count / max_attempts the claim's RETURNING reports (default 1 / 5). */
   claimed?: { attempt_count: number; max_attempts: number };
   audits?: Array<{ action: string; opts: Record<string, unknown> }>;
@@ -59,6 +61,7 @@ function fakeDeps(f: Fake, send: jest.Mock): PushSendProcessorDeps {
             f.failAcceptedWrites -= 1;
             throw new Error('connection terminated unexpectedly');
           }
+          if (f.markerTokenLost && typeof values.providerCallStartedAt === 'function') return { affected: 0, raw: [] };
           pending.push(values);
           // D-Q5b: the claim counts the attempt in SQL and returns the new count (RETURNING); first attempt by default.
           return { affected: 1, raw: [f.claimed ?? { attempt_count: 1, max_attempts: 5 }] };
@@ -225,5 +228,18 @@ describe('push send processor — revalidation outside the claim, failure audit'
     await createPushSendProcessor(fakeDeps(f, jest.fn(async () => ({ provider: 'fake-fcm' }))))(job);
     expect(statuses(f)).toEqual(['PROCESSING', 'ACCEPTED']);
     expect(f.audits ?? []).toEqual([]);
+  });
+
+  it('a lost token at the provider-call marker sends nothing and writes nothing more', async () => {
+    const send = jest.fn(async () => ({ provider: 'fake-fcm' }));
+    const f: Fake = { rows: visible(), writes: [], failAcceptedWrites: 0, markerTokenLost: true };
+    const deps = fakeDeps(f, send);
+    await expect(createPushSendProcessor(deps)(job)).resolves.toBeUndefined();
+    expect(send).not.toHaveBeenCalled();
+    // Only the claim committed: no marker, no RETRY/FAILED/ACCEPTED/CANCELLED, no audit.
+    expect(f.writes).toHaveLength(1);
+    expect(f.writes[0]).toMatchObject({ status: 'PROCESSING' });
+    expect(f.audits ?? []).toEqual([]);
+    expect((deps.pushDeviceService as unknown as { deactivateInvalidToken: jest.Mock }).deactivateInvalidToken).not.toHaveBeenCalled();
   });
 });

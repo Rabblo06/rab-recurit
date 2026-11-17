@@ -1,5 +1,5 @@
 import { Logger } from '@nestjs/common';
-import { DataSource } from 'typeorm';
+import { DataSource, EntityManager } from 'typeorm';
 import { organisationIds } from '@rab/server/engine/worker-shared/maintenance-catalogue';
 import { TenantContextService } from '@rab/server/engine/core-modules/tenant/tenant-context.service';
 import { shipAuditRowAfterCommit } from '@rab/server/engine/core-modules/audit-events/audit-event-shipping';
@@ -267,7 +267,7 @@ export async function dispatchPushScope(
  * nothing is queued for them). Metadata is the delivery id and the error code only.
  */
 async function writeAuditRow(
-  manager: import('typeorm').EntityManager,
+  manager: EntityManager,
   organisationId: string,
   pushDeliveryId: string,
   action: string,
