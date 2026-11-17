@@ -243,29 +243,39 @@ export class ManagerService {
 
   private async ensureRole(manager: EntityManager, organisationId: string, type: string): Promise<Role> {
     const def = ROLE_DEFS[type]!;
-    let role = await manager.findOne(Role, { where: { organisationId, key: def.key } });
-    if (role) {
-      if (type === ManagerType.VENUE && role.isSystem) {
+    const withVenueDefaults = async (found: Role): Promise<Role> => {
+      if (type === ManagerType.VENUE && found.isSystem) {
         const defaults = await loadSystemRoleDefaultPermissions(manager, def.key, def.permissions);
-        if (defaults.length) await manager.createQueryBuilder().insert().into(RolePermission).values(defaults.map(permission => ({ organisationId, roleId: role!.id, permissionId: permission.id }))).orIgnore().execute();
+        if (defaults.length) await manager.createQueryBuilder().insert().into(RolePermission).values(defaults.map(permission => ({ organisationId, roleId: found.id, permissionId: permission.id }))).orIgnore().execute();
       }
-      return role;
-    }
+      return found;
+    };
+    const found = await manager.findOne(Role, { where: { organisationId, key: def.key } });
+    if (found) return withVenueDefaults(found);
 
-    const result = await manager.insert(Role, {
-      organisationId,
-      key: def.key,
-      name: def.name,
-      isSystem: true,
-    });
-    role = await manager.findOneByOrFail(Role, { id: result.identifiers[0]!.id as string });
+    // Concurrency backstop, the same as StaffService.ensureStaffRole: two Managers creating the organisation's first
+    // Manager / Venue Manager / CEO of a type at the same instant can both miss the `findOne` above. A plain insert made
+    // the loser fail with 23505 (`role_organisation_id_key_key`) → 500. `ON CONFLICT DO NOTHING` never raises, so it
+    // needs no savepoint: the loser's statement waits for the winner's uncommitted insert, inserts nothing once the
+    // winner commits (its RolePermission rows below are committed and visible by then), and re-selects the winner's role.
+    const inserted: Array<{ id: string }> = await manager.query(
+      `INSERT INTO core.role (organisation_id, key, name, is_system)
+       VALUES ($1, $2, $3, true)
+       ON CONFLICT (organisation_id, key) DO NOTHING
+       RETURNING id`,
+      [organisationId, def.key, def.name],
+    );
+    if (inserted.length === 0) {
+      return withVenueDefaults(await manager.findOneByOrFail(Role, { organisationId, key: def.key }));
+    }
+    const role = await manager.findOneByOrFail(Role, { id: inserted[0]!.id });
 
     // Fail closed: never create a system role missing any of its defaults (see loadSystemRoleDefaultPermissions).
     const permissions = await loadSystemRoleDefaultPermissions(manager, def.key, def.permissions);
     if (permissions.length > 0) {
       await manager.insert(
         RolePermission,
-        permissions.map((permission) => ({ roleId: role!.id, permissionId: permission.id, organisationId })),
+        permissions.map((permission) => ({ roleId: role.id, permissionId: permission.id, organisationId })),
       );
     }
     return role;
