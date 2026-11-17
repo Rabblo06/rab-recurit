@@ -844,8 +844,10 @@ function renderModels(variantPath = VARIANT, productionPath = PRODUCTION) {
     };
     const variant = render([variantPath], { projectDirectory: dir, env, resolveEnvFiles: true });
     const rawFiles = render([variantPath], { projectDirectory: dir, env, resolveEnvFiles: false });
-    // Whether this Compose reports env_file under --no-env-resolution (rab-migrate declares one in the committed file).
-    const composeReportsEnvFiles = (rawFiles.services?.['rab-migrate']?.env_file ?? []).length > 0;
+    // Whether this Compose reports env_file under --no-env-resolution. The probe looks at the services that declare one in
+    // the committed file (rab-api, rab-worker, db-setup); it used to look at rab-migrate, which O3 removed, so on every
+    // Compose the preflight refused with "does not report env_file" before checking anything (found in the #189 review).
+    const composeReportsEnvFiles = ['rab-api', 'rab-worker', DB_SETUP_SERVICE].every((n) => (rawFiles.services?.[n]?.env_file ?? []).length > 0);
     const variantFiles = attachEnvFilesFromMarkers(rawFiles, variant, dir);
     // Resolved: production.yml names no env file, so only a re-added one (the retired .env.ops sentinel) adds values.
     const production = render([productionPath], { projectDirectory: dir, env, resolveEnvFiles: true });

@@ -199,6 +199,11 @@ for (const [name, mutate, pattern] of deployedWeakenings) {
 
 // CREWFLOW_BUNDLED_DB (Twenty's Helm db.enabled): the preflight accepts db with 0 replicas only for your own database.
 const EXTERNAL_ADMIN_URL = 'postgresql://doadmin:not-a-secret@db-direct.example.com:5432/crewflow?sslmode=verify-full'; // gitleaks:allow
+// #189 review: the env_file probe looked at the removed rab-migrate, so --environment refused on every Compose before
+// checking anything. It must report env_file for the services that declare one in the committed file.
+test('environment mode: the env_file probe sees the committed env files (rab-api, rab-worker, db-setup)', { skip }, () => {
+  assert.equal(fresh().composeReportsEnvFiles, true);
+});
 const bundledDb = (replicas, url) => (v) => {
   v.services.db.deploy = { ...v.services.db.deploy, replicas };
   if (url !== undefined) v.services['db-setup'].environment.PG_DATABASE_URL = url;
