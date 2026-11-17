@@ -245,6 +245,8 @@ export class VenueService {
     }
     this.assertGeofenceConfig({ ...dto, geofenceRadiusM: dto.geofenceRadiusM ?? 200 });
     return this.tenantContext.runInWorkspaceContext(ctx, async (manager) => {
+      // SF-2 layer 2: the route's venue.create, re-checked in the creating transaction (jobs / other services skip the guard).
+      await this.permissions.assertPermissionTx(manager, ctx, PermissionFlag.VENUE_CREATE, 'Creating venues is not permitted.');
       // .create()/.save() rather than .insert() — TypeORM's insert() query
       // builder types jsonb columns through _QueryDeepPartialEntity, which
       // doesn't accept a plain Record<string, unknown> object literal.
@@ -261,6 +263,8 @@ export class VenueService {
 
   async update(ctx: AuthContext, id: string, dto: UpdateVenueDto): Promise<Venue> {
     const result = await this.tenantContext.runInWorkspaceContext(ctx, async (manager) => {
+      // SF-2 layer 2: venue.edit first, 403 for any id (never an existence oracle); out of scope stays 404 below.
+      await this.assertCanEditVenueTx(manager, ctx);
       const venue = await manager.findOne(Venue, { where: { id } });
       if (!venue) throw new NotFoundException('Venue not found.');
       await this.assertVenueOwned(manager, ctx, venue);
@@ -460,6 +464,7 @@ export class VenueService {
    */
   async listRoleRates(ctx: AuthContext, venueId: string): Promise<VenueRoleRate[]> {
     return this.tenantContext.runInWorkspaceContext(ctx, async (manager) => {
+      await this.assertCanViewVenueTx(manager, ctx); // SF-2 layer 2: the route's venue.view
       await this.assertVenueAccessibleTx(manager, ctx, venueId);
       return manager.find(VenueRoleRate, { where: { venueId }, order: { createdAt: 'ASC' } });
     });
