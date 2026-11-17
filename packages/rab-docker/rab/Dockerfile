@@ -87,20 +87,29 @@ RUN set -eu; \
 # misclassify fails the BUILD.
 # H1: any group/other write bit a package tarball shipped with is cleared here (only the offending entries are touched,
 # so this stage does not rewrite the whole tree); the final stage then re-verifies the whole of /app.
+# node-gyp: Yarn injects `node-gyp: npm:latest` into the lockfile entry of every package with a native build (argon2,
+# node-addon-api, msgpackr-extract, fsevents), and `focus --production` keeps it. It is install-time only (argon2 loads its
+# prebuilt addon through node-gyp-build; this image compiles nothing and has no toolchain), and it drags in tar,
+# tinyglobby, picomatch 4, undici 8, ... `runtime-deps.cjs prune` cuts the edges to its RUNTIME_PRUNE list (node-gyp) and
+# removes every package then unreachable from the workspace roots, keeping anything a runtime package also reaches; it
+# refuses if kept code loads a package it would remove. The final stage's import scan and --forbid prove the result.
 FROM deps AS runtime-modules
-RUN set -eu; \
+RUN --mount=type=bind,source=packages/rab-docker/rab/runtime-deps.cjs,target=/tmp/runtime-deps.cjs \
+    set -eu; \
     lock="$(sha256sum yarn.lock)"; \
     yarn workspaces focus @rab/server --production; \
     test "$(sha256sum yarn.lock)" = "$lock"; \
     nested="$(find packages -mindepth 2 -maxdepth 2 -name node_modules -print)"; \
     if [ -n "$nested" ]; then echo "FATAL: the production install put packages under a workspace, which the runtime stage does not copy:"; echo "$nested"; exit 1; fi; \
+    node /tmp/runtime-deps.cjs prune /app/node_modules --lockfile yarn.lock; \
     find node_modules ! -type l -perm /022 -exec chmod go-w {} +
 
 # H3 (O1 one image): the Worker's production dependency closure, resolved from the committed manifests and lockfile with
 # the same pinned Node image. Lifecycle scripts are disabled: nothing is built here, and the packages the Worker adds must
 # not need building (runtime-deps.cjs worker-delta refuses one that does, and refuses unless every package of the API tree
 # is in the Worker tree at the same path and version). Only that DELTA (the native PDF renderer's closure, about 55
-# packages) reaches the final stage, on top of the API tree above.
+# packages) reaches the final stage, on top of the API tree above. The Worker tree is pruned exactly like the API tree first
+# (node-gyp also reaches it through bullmq > msgpackr > msgpackr-extract), or the delta would carry node-gyp's tree back.
 FROM node:24-alpine@sha256:8a32c8cf649a49915a66e81e7a609223c708d0adabf288ee3f4077d765542f85 AS worker-modules
 WORKDIR /app
 COPY package.json yarn.lock .yarnrc.yml ./
@@ -122,6 +131,7 @@ RUN --mount=type=bind,from=runtime-modules,source=/app/node_modules,target=/api/
     test "$(sha256sum yarn.lock)" = "$lock"; \
     nested="$(find packages -mindepth 2 -maxdepth 2 -name node_modules -print)"; \
     if [ -n "$nested" ]; then echo "FATAL: the production install put packages under a workspace:"; echo "$nested"; exit 1; fi; \
+    node /tmp/runtime-deps.cjs prune /app/node_modules --lockfile yarn.lock; \
     node /tmp/runtime-deps.cjs worker-delta /api/node_modules /app/node_modules /worker-delta; \
     test -d /worker-delta/node_modules; \
     find /worker-delta ! -type l -perm /022 -exec chmod go-w {} +
@@ -261,7 +271,8 @@ RUN set -eu; \
 # H3 runtime-dependency gate (packages/rab-docker/rab/runtime-deps.cjs, bind-mounted, never shipped), ONE check for the
 # one image (the union of the former API and Worker checks, so stricter for the API): every bare import in the code this
 # image runs (Worker, server, shared and emails dist) resolves with Node's own resolver, and no build or test tool, browser
-# driver (playwright, playwright-core, chromium-bidi) or SWC compiler is anywhere in node_modules. D5/T2 + review L-4: the
+# driver (playwright, playwright-core, chromium-bidi), SWC compiler or native-build tool (node-gyp and tinyglobby, removed
+# by the prune in runtime-modules and worker-modules) is anywhere in node_modules. D5/T2 + review L-4: the
 # whole '@swc/*' and '@swc-node/*' scopes stay banned with ONE exact exception, the runtime helper library @swc/helpers
 # (Apache-2.0, required by fontkit, a dependency of the native renderer), named by --allow. The native renderer and its
 # vendored fonts must be present (the fonts are copied next to the compiled native module by the rab-worker build), and
@@ -275,6 +286,7 @@ RUN --mount=type=bind,source=packages/rab-docker/rab/runtime-deps.cjs,target=/tm
         '@swc/*' '@swc-node/*' \
         webpack react-email @playwright/test supertest aws-sdk-client-mock @nestjs/testing concurrently wait-on \
         playwright playwright-core chromium-bidi \
+        node-gyp tinyglobby \
       --allow @swc/helpers; \
     test -f /app/node_modules/@react-pdf/renderer/package.json; \
     for f in LiberationSans-Regular.ttf LiberationSans-Bold.ttf OFL.txt fonts.sha256; do test -f "/app/packages/rab-worker/dist/queues/rab-reports/native/assets/fonts/$f"; done; \

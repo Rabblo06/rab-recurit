@@ -296,6 +296,18 @@ Docker Scout is not used.
 Until H3 merges, their presence is a HOLD. Once the images are free of them, move the list into `packages.block` in the
 same PR, so a regression fails every PR. `packages.block` (esbuild, vite) already fails today.
 
+**Install-time-only packages (node-gyp).** `yarn workspaces focus --production` keeps more than the runtime needs: Yarn
+injects `node-gyp: npm:latest` into the lockfile entry of every package with a native build (argon2, node-addon-api,
+msgpackr-extract, fsevents), and node-gyp brings tar, tinyglobby, fdir, picomatch 4 (GHSA-fc5q-39xc-vjpf, High, no fix),
+a nested undici 8, which, nopt, graceful-fs and a few more. None of it runs in the image: argon2 and msgpackr-extract load
+their prebuilt addons through node-gyp-build, and the final stage has no toolchain. Both dependency stages
+(`runtime-modules`, `worker-modules`) therefore run `runtime-deps.cjs prune` right after `focus`: it cuts the edges to
+the names in `RUNTIME_PRUNE` (exported by `runtime-deps.cjs`; today only `node-gyp`) and removes every package that is
+then unreachable from the workspace roots, keeping anything a runtime package also reaches. It removes nothing if a kept
+package's code loads a package it would remove. The final stage's import scan (every compiled import still resolves) and
+`--forbid node-gyp tinyglobby` prove the result on every build. An advisory in such a package is fixed by pruning it,
+never by a register entry (section 5): add a name to `RUNTIME_PRUNE` only when nothing at runtime loads it.
+
 ## 11. Proving a gate still fails
 
 `image_gate.py` runs locally against any image:

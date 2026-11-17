@@ -8865,3 +8865,34 @@ Reversal:   Lower CLOCK_IN_CONFIRM_FLOOR_HOURS, or require a second approver (pa
   `sc05-capabilities.integration.spec.ts` now expects the 19 keys including `staff.edit`, same booleans as one
   `userHasPermission` per flag. The mocked e2e fixture (`crewflow-fixtures.ts`) grants `staff.edit` so the existing bar
   specs keep their four actions.
+
+## Runtime image: node-gyp and its install-time-only tree pruned (branch chore/prune-node-gyp-runtime, 2026-11-17; no SQL)
+- **Context:** `yarn workspaces focus --production` kept node-gyp 13.0.1 in the one runtime image, because Yarn injects
+  `node-gyp: npm:latest` into the lockfile entries of argon2, node-addon-api, msgpackr-extract and fsevents. Two
+  production paths reached it: `@rab/server > argon2 > node-gyp` and `@rab/worker > bullmq > msgpackr > msgpackr-extract
+  > node-gyp`. With it came tar, tinyglobby, fdir, picomatch 4.0.5 (GHSA-fc5q-39xc-vjpf, High, unfixed), a nested
+  undici 8, which, isexe, nopt, abbrev, proc-log, env-paths, exponential-backoff, graceful-fs, minizlib, chownr, yallist
+  and @isaacs/fs-minipass. Nothing at runtime loads them (argon2 and msgpackr-extract use their prebuilt addons through
+  node-gyp-build; the image has no compiler), but they were attack surface and scanner noise that would HOLD every
+  release once the scanners ingest the GHSA, and the policy forbids an agent from adding a register entry for it.
+- **Control:** `runtime-deps.cjs prune` runs in both dependency stages right after `focus` (and before the Worker delta, so
+  the delta cannot carry the tree back). It cuts the edges to `RUNTIME_PRUNE` (`['node-gyp']`, exported for other gates)
+  and deletes every package then unreachable from the workspace roots. Edges are each package's declared
+  dependencies/optional/peer dependencies plus its lockfile entry (so injected or extended dependencies count), located
+  with Node's own lookup, so a package any runtime package reaches stays. Fail closed: it removes nothing when an
+  installed package has no lockfile entry, a drop name is not installed, or a kept package's code literally loads a
+  package it would remove (an undeclared dependency that only worked through hoisting); a package's `bin` CLI files are
+  not counted (node-gyp-build's install-time `bin.js` requires node-gyp). The final stage's existing import scan still
+  has to resolve every compiled import, and its `--forbid` now includes `node-gyp` and `tinyglobby`.
+- **Measured:** a local `focus --production` of this lockfile removes 18 package directories from the API tree (554 ->
+  536) and the same 18 from the Worker tree (610 -> 592); the undeclared-dependency scan read 12 427 / 13 743 kept files
+  with no hit. The image build numbers are in the PR.
+- **Residual risk:** a kept package that loads a pruned package by a computed (non-literal) specifier would only fail at
+  runtime. None of the pruned packages is a runtime library of the API or the Worker; the image gate's PDF render and the
+  compiled-import scan exercise the real image.
+- **Tests:** `packages/rab-docker/rab/test/runtime-deps.test.cjs` (ci-security `deployment-config`): an exclusive node-gyp
+  subtree (including the hoisted picomatch@4 and the nested undici@8) is pruned through both production paths; a
+  dependency shared with a runtime package (semver, picomatch@2, undici@6) is kept; lockfile-only edges keep a package;
+  a workspace devDependency is never a root; prune refuses on an undeclared dependency, a tree that is not the lockfile's
+  install, a stale or wildcard drop; the final `--forbid` fails if node-gyp or tinyglobby returns, top level or nested; the
+  Dockerfile prunes in both stages before the delta with the exported list.
