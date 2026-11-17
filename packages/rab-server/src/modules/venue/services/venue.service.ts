@@ -20,11 +20,26 @@ import { CreateVenueDto } from '../dto/create-venue.dto';
 import { CreateVenueRoleRateDto } from '../dto/create-venue-role-rate.dto';
 import { ListVenuesDto } from '../dto/list-venues.dto';
 import { UpdateVenueDto } from '../dto/update-venue.dto';
+import { pickFields } from '../../../engine/utils/pick-fields.util';
 import { UpdateVenueRoleRateDto } from '../dto/update-venue-role-rate.dto';
 import { Venue } from '../entities/venue.entity';
 import { MemberAccessPolicyService } from '../../identity/member-access/member-access-policy.service';
 
 /** Same allowlist-via-lookup-map pattern as `StaffService`'s `STAFF_SORT_COLUMNS` — see that file's comment. */
+/**
+ * SF-7: the venue fields `create()` and `update()` may write, mapped explicitly (never a spread or merge of the DTO).
+ * `status`, `createdBy`, `organisationId`, `workspaceId`, the archive columns and the photo are never writable here.
+ */
+export const VENUE_WRITE_FIELDS = [
+  'name', 'clientName', 'type', 'address', 'contact', 'lat', 'lng', 'geofenceRadiusM', 'enforceGeofence', 'instructions',
+  'uniform', 'checkInInstructions', 'parking', 'accessNotes', 'breakPaid', 'defaultBreakMinutes',
+] as const satisfies readonly (keyof CreateVenueDto & keyof UpdateVenueDto & keyof Venue)[];
+
+/** SF-7: the pay-rate fields `updateRoleRate()` may write (never `jobRoleId`, `venueId` or the tenant columns). */
+export const ROLE_RATE_UPDATE_FIELDS = [
+  'payRatePence', 'chargeRatePence', 'overtimeMultiplier', 'effectiveFrom', 'effectiveTo',
+] as const satisfies readonly (keyof UpdateVenueRoleRateDto & keyof VenueRoleRate)[];
+
 const VENUE_SORT_COLUMNS: Record<string, string> = {
   name: 'venue.name',
   createdAt: 'venue.createdAt',
@@ -213,14 +228,12 @@ export class VenueService {
   }
 
   /**
-   * `{ ...dto }`/`merge(venue, dto)` below are safe only because
-   * `CreateVenueDto`/`UpdateVenueDto` deliberately never declare `status`,
-   * `organisationId`, or `id` — the global `forbidNonWhitelisted` pipe is
-   * the actual gate. If either DTO ever grows one of those fields, this
-   * spread/merge would let a client with plain `VENUE_EDIT` set it
-   * directly, bypassing `archive()`'s dedicated transition-checked path
-   * below — switch to explicit field destructuring at that point (see
-   * `StaffService.update`/`ManagerService.update` for the pattern).
+   * SF-7: `create()` and `update()` write only `VENUE_WRITE_FIELDS` (`pickFields`), never a spread or merge of the DTO, so
+   * neither the global `forbidNonWhitelisted` pipe (HTTP only) nor the DTOs' shape is the gate: `status`, `createdBy`,
+   * `organisationId`, `workspaceId`, `id` and the archive columns can never be written here, even by a direct (non-HTTP)
+   * caller. Status changes go only through `archive()` / `restore()` and their transition checks. A new writable venue
+   * field must be added to `VENUE_WRITE_FIELDS` deliberately (`venue-write-fields.spec.ts` fails until it is listed or
+   * named as an exclusion).
    */
   create(ctx: AuthContext, dto: CreateVenueDto): Promise<Venue> {
     this.resourceScope.assertHasWorkspace(ctx);
@@ -235,11 +248,12 @@ export class VenueService {
       // .create()/.save() rather than .insert() — TypeORM's insert() query
       // builder types jsonb columns through _QueryDeepPartialEntity, which
       // doesn't accept a plain Record<string, unknown> object literal.
+      // SF-7: explicit field map, and the tenant/owner columns set last so nothing on the DTO can replace them.
       const venue = manager.create(Venue, {
+        ...pickFields(dto, VENUE_WRITE_FIELDS),
         organisationId: ctx.organisationId!,
         createdBy: ctx.userId,
         workspaceId: ctx.workspaceId ?? undefined,
-        ...dto,
       });
       return manager.save(venue);
     });
@@ -263,7 +277,7 @@ export class VenueService {
         enforceGeofence: dto.enforceGeofence ?? before.enforceGeofence,
       };
       this.assertGeofenceConfig(after);
-      manager.merge(Venue, venue, dto);
+      manager.merge(Venue, venue, pickFields(dto, VENUE_WRITE_FIELDS)); // SF-7: explicit field map, never the whole DTO
       await manager.save(venue);
       if (JSON.stringify(before) !== JSON.stringify(after)) {
         await this.auditService.record(manager, ctx, AuditAction.VENUE_GEOFENCE_UPDATED, {
@@ -492,7 +506,7 @@ export class VenueService {
       await this.assertVenueAccessibleTx(manager, ctx, venueId);
       const rate = await manager.findOne(VenueRoleRate, { where: { id: rateId, venueId } });
       if (!rate) throw new NotFoundException('Pay rate not found.');
-      manager.merge(VenueRoleRate, rate, dto);
+      manager.merge(VenueRoleRate, rate, pickFields(dto, ROLE_RATE_UPDATE_FIELDS)); // SF-7: never jobRoleId / venueId
       await manager.save(rate);
       const updated = await manager.findOneByOrFail(VenueRoleRate, { id: rateId });
       await this.auditService.record(manager, ctx, AuditAction.VENUE_ROLE_RATE_UPDATED, { entityType: 'venue_role_rate', entityId: rateId, metadata: roleRateAuditMetadata(updated) });
