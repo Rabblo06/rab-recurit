@@ -407,6 +407,36 @@ test('bundled database under the full contract: every combination has db; rab-ap
   }
 });
 
+// Twenty's Helm db.enabled: CREWFLOW_BUNDLED_DB (compose.env) is db's replica count, 1 by default, 0 only with your own
+// database. The dependency edges stay committed (Compose skips the wait on a 0-replica service).
+test('bundled db switch: one replica by default; 0 only with CREWFLOW_BUNDLED_DB=0 and PG_DATABASE_URL; the edges stay', { skip }, () => {
+  for (const c of [DEF, EXT, PT, 'staging']) assert.equal(fresh(c).services.db.deploy.replicas, 1, c);
+  for (const c of ['external-no-db', 'pass-through-no-db']) {
+    const m = fresh(c);
+    assert.equal(m.services.db.deploy.replicas, 0, c);
+    assert.equal(m.services[SETUP].depends_on.db.condition, 'service_healthy', c);
+    assert.equal(m.services['rab-api'].depends_on.db.condition, 'service_healthy', c);
+    assert.equal(m.services['rab-api'].depends_on[SETUP].condition, 'service_completed_successfully', c);
+    assert.equal(m.services[SETUP].environment.PG_DATABASE_URL, c === 'external-no-db' ? gate.SENTINEL_ADMIN_URL : gate.SENTINEL_URL, c);
+  }
+});
+
+test('DENIAL bundled db switch: 0 replicas with the bundled URL, 2 replicas, scale, a non-empty deploy section, 1 replica where 0 was set', { skip }, () => {
+  for (const c of [DEF, EXT, PT, 'staging']) {
+    assertRefused(problemsAfter(c, (s) => { s.db.deploy.replicas = 0; }), /db: deploy\.replicas is 0, expected 1/);
+    assertRefused(problemsAfter(c, (s) => { s.db.deploy.replicas = 2; }), /db: deploy\.replicas is 2, expected 1/);
+    assertRefused(problemsAfter(c, (s) => { delete s.db.deploy; }), /db: deploy\.replicas is unset, expected 1/);
+    assertRefused(problemsAfter(c, (s) => { s.db.scale = 1; }), /db: has scale/);
+    assertRefused(problemsAfter(c, (s) => { s.db.deploy.resources = { limits: { memory: '64g' } }; }), /db: deploy\.resources is set/);
+  }
+  for (const c of ['external-no-db', 'pass-through-no-db']) {
+    assertRefused(problemsAfter(c, (s) => { s.db.deploy.replicas = 1; }), /db: deploy\.replicas is 1, expected 0/);
+    // Everything else of db is still checked with 0 replicas (it starts again the day the switch goes back to 1).
+    assertRefused(problemsAfter(c, (s) => { s.db.read_only = false; }), /db: read_only root filesystem is not set/);
+    assertRefused(problemsAfter(c, (s) => { s[SETUP].restart = 'always'; }), /db-setup: restart is "always", expected "no"/);
+  }
+});
+
 // Phase X J2 (S0-J SJ-03): the committed compose files rendered with push / realtime switched ON in runtime.env.
 test('J2: push switched on in runtime.env against the committed compose is refused until 30 s is committed on both services', { skip }, () => {
   const on = renderModels(COMBOS, [], ['PUSH_ENABLED=true']);

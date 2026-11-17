@@ -7461,6 +7461,22 @@ Phase X Part 2 finding XA-08 (`docs/plans/PHASE-X-STAGE0-PART2.md` §2.6). Front
   the password. The gates refuse any other `pg_hba` content, a `POSTGRES_HOST_AUTH_METHOD`, initdb arguments other than
   SCRAM-only, and any db environment key outside an exact allow-list, in the committed AND the deployed model.
 - **Residual.** The superuser can log in over the internal network (needed by db-setup's bootstrap child; T-3).
+- **Your own database (2026-11-17, Twenty's Helm `db.enabled: false`).** `CREWFLOW_BUNDLED_DB=0` in compose.env renders
+  the bundled db with 0 replicas: no idle superuser server runs beside an external database any more (before, it ran idle
+  with its own superuser password). `PG_DATABASE_PASSWORD` stays required by the render (Compose interpolates every
+  service; the `:?` refusal stays fail-closed for the bundled default) but reaches no container. "Your own database" is
+  one predicate everywhere: a parseable `PG_DATABASE_URL` whose host is not the bundled `db`. Abuse cases:
+  - `0` without your own database (no `PG_DATABASE_URL`, or one that still names host `db`) is refused by the compose.env
+    lint and by the `--environment` preflight (`staging/verify-image-compose.cjs`: "db.deploy.replicas is 0 (only 1, or
+    0 with your own database in PG_DATABASE_URL)").
+  - If it is forced anyway, it fails closed at start: db-setup cannot use the bundled db, so rab-api never starts. On a
+    host where the db never ran, db-setup refuses with exit 64 because the CA file is missing (verified live
+    2026-11-17). Where an older `crewflow-db-ca` volume still holds a CA, it gets past that check and fails on connect
+    (no `db` to reach), which is still a non-zero exit before rab-api.
+  - Any value but `0` or `1` is refused by the lint.
+  - The gate (committed model) and the preflight (deployed model) refuse a db replica count other than 1 (0 only with
+    your own database), `scale`, or any other change to the `deploy` section.
+  db-setup, the target files and every other control are unchanged in that mode.
 
 ### Trade-offs applied (SECURITY TRADE-OFF blocks; T-1 to T-5 owner-accepted 2026-11-12; T-9 follows the owner's Helm-model decision 2026-11-13)
 - **T-1 — privileged URL in a container definition, db-setup's only.** The compose.env lint accepts a provider-admin login
@@ -8638,3 +8654,30 @@ Reversal:   Lower CLOCK_IN_CONFIRM_FLOOR_HOURS, or require a second approver (pa
   `BusinessTablesError('unbound')` for `advance` and `discover`. `tenant-context.service.spec.ts` and
   `workspace-execution-context.integration.spec.ts` pin the trap behaviour (`''` bound, the real schema still handed to the
   callback). Every server and worker suite passes under the trap.
+
+## CI gate — exact owner-approved growth for the import-boundary ratchet (branch ci/import-boundaries-approved-growth, 2026-11-17; owner approval 2026-11-17 for PR #204)
+- **Threat:** the import-boundary ratchet (`tools/check-import-boundaries.cjs`, PR #191) is a CI security gate: its `--base`
+  step refuses any growth of `tools/import-boundaries.baseline.json` against the PR's base branch, so a new Worker import of
+  rab-server internals (or engine -> modules, feature -> feature) cannot land unnoticed. It had no way to record an owner
+  approval, so an approved change could only pass by weakening the gate, bypassing it, or deleting the step. Any approval
+  mechanism is itself a way to widen the gate: a broad pattern, an open-ended count or a forgotten approval would let later
+  PRs add violations silently.
+- **Control:** `APPROVED_GROWTH` is a frozen list in the check itself. Each entry names one rule, one file, the exact base
+  count `from` (0 = no entry at the base), the exact head count `to`, an `approved: 'owner YYYY-MM-DD'` date and a reason;
+  `validateApprovedGrowth` refuses a malformed, undated, duplicate or non-growing entry (fail closed). `compareToBase`
+  accepts a growth only when rule and file match exactly, the base count equals `from` and the head count equals `to`;
+  one more edge, another file, another rule, or a different base count still fails. An entry whose `from` no longer equals
+  the base count is reported STALE and fails `--base`, so the entry must be deleted once the growth has merged and cannot be
+  reused. The tree check (counts equal the committed baseline) is unchanged. The first two entries are the owner-approved
+  (2026-11-17) Worker imports for PR #204: `push-dispatch.job.ts` 1 -> 2 (`audit-events/audit-event-shipping`) and
+  `push-send.processor.ts` 10 -> 11 (`audit/audit.service`), the same imports the email path already uses.
+- **Residual (accepted):** the approval lives in the repository, so whoever can merge a PR that edits the check can also add
+  an entry; the protection is review: an entry must arrive in its own PR, separate from the PR that uses it, with the owner's
+  date. Between the approval PR's merge and the using PR's merge, any PR may use the approved slot; the slot is one exact
+  count for one file and rule, and the stale rule closes it as soon as the base moves. Counts are per file, not per edge: an
+  approved `to` could be met by a different import in that file than the one approved; the reviewer of the using PR checks
+  the actual import (`--list`). `--write-baseline` still refuses any growth; the baseline is raised by hand in the using PR.
+- **Tests:** `check-import-boundaries.test.cjs`: an approved exact growth passes; the same file one above `to` fails; an
+  unlisted file growing fails; the same file under a different rule fails; a base count other than `from` fails and the
+  approval is reported stale (also once the growth has merged); `from: 0` matches a file absent at the base; malformed,
+  undated, duplicate and non-growing entries are refused; the shipped list is valid and frozen.
