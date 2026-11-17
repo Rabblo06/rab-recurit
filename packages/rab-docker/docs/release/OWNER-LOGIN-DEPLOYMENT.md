@@ -586,8 +586,8 @@ that row. The first start then refuses with `rab_owner: unexpected member <admin
    - It sets its own psql safety settings (`ON_ERROR_STOP` on, `ON_ERROR_ROLLBACK` off, `AUTOCOMMIT` on), so a
      `~/.psqlrc` cannot weaken them.
    - Everything that changes the database runs in ONE transaction: the read-only checks, `CREATE ROLE`, the GRANT, the
-     password and a final re-check. A refused check, a missing privilege or mismatched passwords roll everything back,
-     and nothing is left.
+     password and a final re-check. A refused check or a missing privilege rolls everything back, and nothing is left.
+     Mismatched passwords also roll everything back when the script is run as a file, as above.
    - psql's `\password` asks for the password twice. psql turns it into a SCRAM-SHA-256 verifier on your machine and
      sends only the verifier, never the password.
    - Without a terminal, psql reads the two password lines from standard input.

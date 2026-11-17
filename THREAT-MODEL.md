@@ -7564,7 +7564,8 @@ database, no setup step).
     proven: 0 verifier lines in a `log_statement=all` log. For a non-superuser admin Q1 is a no-op, and the log kept 1
     verifier line. Q1 does not affect pg_stat_statements or provider audit logs.
   - Control: the runbook requires `openssl rand -hex 32`. Not prevented: a weak password chosen by the admin.
-  - db-setup avoids all of this with bind parameters inside a DO block, which psql cannot do.
+  - db-setup avoids all of this with bind parameters inside a DO block, which psql cannot do. The exception is
+    `log_statement=all` with a non-superuser admin, where PostgreSQL logs the bound parameter.
 - **Residual M1: a partial or interactive run.** The script is meant to run as a file (`psql -X -v ON_ERROR_STOP=1 -f`).
   It also sets `ON_ERROR_STOP` on, `ON_ERROR_ROLLBACK` off and `AUTOCOMMIT` on itself, and every check runs inside the one
   transaction. A failed check therefore aborts the transaction even if psql keeps going, and COMMIT rolls back.
@@ -7572,9 +7573,11 @@ database, no setup step).
     `\set` lines removed all left no `crewflow_owner` on a cluster where `rab_owner` existed.
   - Not prevented: someone who pastes only some of the statements, or sets `ON_ERROR_ROLLBACK on` after the script's own
     `\set` lines. The runbook says never to paste it.
-- **Residual L1: an empty password entry.** `\password` runs inside the transaction, so mismatched entries stop psql and
-  roll everything back (proven). An empty entry (two empty lines, or end of input) is accepted by psql, and the server then
-  clears the password.
+- **Residual L1: an empty or failed password entry.** `\password` runs inside the transaction. When the script is run as
+  a file, mismatched entries stop psql and roll everything back (proven). An empty entry (two empty lines, or end of
+  input) is accepted by psql, and the server then clears the password.
+  - A failed `\password` in an interactive session (pasted, or `\i` then a manual COMMIT) can leave a role without a
+    password; step 3 catches it.
   - A superuser admin: the re-check reads `pg_authid` and rolls back (proven).
   - A non-superuser admin cannot read `pg_authid`. The script then commits a passwordless LOGIN CREATEROLE role. It
     cannot log in with a password (proven: 28P01), and db-setup refuses it (exit 64). The runbook's login check names

@@ -212,6 +212,8 @@ $verify$;
 
 COMMIT;
 
+\echo 'Next: run step 3 of runbook section 4a now (log in as crewflow_owner). If it fails, drop the role and run this file again.'
+
 -- (9) What you created (read-only). Expected: one row
 --       crewflow_owner | t | f | f | f | f | t | t | f | t
 --     Then check the login from where Crewflow will run (runbook section 4a, step 3).
