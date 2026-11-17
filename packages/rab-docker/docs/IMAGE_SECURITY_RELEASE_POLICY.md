@@ -1,8 +1,8 @@
 # Image security release policy (Docker hardening H5)
 
 This policy covers THE Crewflow image (`packages/rab-docker/rab/Dockerfile`, final stage `rab`). O1 (one image): the
-API and the Worker run the same image and differ only by command (default CMD `./api-prestart.sh`; the Worker runs
-`node packages/rab-worker/dist/main.js`); the former Worker bundle image (`Dockerfile.worker-bundle`, built FROM the API
+API and the Worker run the same image and differ only by command (default CMD `./api-prestart.sh`; the Worker's entrypoint is `./worker-start.sh`, which execs
+`node packages/rab-worker/dist/main.js` under `tini`); the former Worker bundle image (`Dockerfile.worker-bundle`, built FROM the API
 image) and its root launcher are retired. The gate's single policy role `image` is the merge of the former `api` and
 `worker` roles and keeps every Worker check. It says which checks block a release, how the version floors are raised,
 and how a finding that cannot be fixed gets an explicit owner decision.
