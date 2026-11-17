@@ -49,7 +49,7 @@ export class ShiftReportController {
   @UseGuards(PermissionGuard(PermissionFlag.REPORT_EXPORT))
   async finalise(@AuthUser() ctx: AuthContext, @Param('shiftId') shiftId: string, @Body() dto: FinaliseReportDto) {
     await this.shiftReportService.finalise(ctx, shiftId, dto);
-    return this.shiftReportService.getReport(ctx, shiftId);
+    return this.shiftReportService.getReport(ctx, shiftId, PermissionFlag.REPORT_EXPORT); // this route's own flag (SF-2)
   }
 
   /** Completes one seat's attendance review (resolved clock-out or confirmed no-show). `attendance.edit`, like corrections. */
