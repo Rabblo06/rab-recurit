@@ -8639,6 +8639,32 @@ Reversal:   Lower CLOCK_IN_CONFIRM_FLOOR_HOURS, or require a second approver (pa
   `workspace-execution-context.integration.spec.ts` pin the trap behaviour (`''` bound, the real schema still handed to the
   callback). Every server and worker suite passes under the trap.
 
+## SF-6 — global search uses each list's own scope, with an organisation pin (branch fix/sf6-search-scope, 2026-11-17; no SQL)
+- **Threat:** an owner-scope manager → `GET /rest/v1/search` → names of staff, venues, shifts and offers that their own
+  lists hide. `SearchService` keyed the owner scope on `workspace_id` alone (`created_by` only for restricted workspace
+  members), while `StaffService.list()` / `VenueService.list()` read `created_by` = the scope owner, `SchedulingService.list()`
+  reads `created_by` = the caller (or a pending-approval request) and `OfferService.list()` reads offers the caller sent.
+  Nothing in the database makes `manager_profile.workspace_id` unique per manager, so two owner-scope managers sharing a
+  workspace would find each other's records. A Venue Manager's staff search had no Venue Manager branch (every staff row in
+  the workspace, not their team), and `searchManagers` had no organisation predicate (RLS only).
+- **Control:** `search.service.ts` applies the list's own predicate per type, plus explicit `organisation_id` (all five
+  types) and `workspace_id` (owner scope) pins on top of RLS: staff = `created_by` = scope owner, and for a Venue Manager
+  `created_by` = caller OR their saved team at their assigned venues (active accounts), the union of `StaffService.list()`
+  and `venueDirectory()`; venues = assigned venues, or `created_by` = scope owner; shifts = `applyShiftReadScope` as
+  `list()` uses it (`created_by` = caller or `pending_manager_approval`; a workspace member: the owner's shifts and their
+  record filter); offers = `offerReadScopeCondition` itself (imported, not copied); managers = organisation-wide, as
+  `ManagerService.list()`. The custom-member record filters apply as before. Search can now only be tighter than a list.
+  Permission checks, hidden-field rules, ranking and the archived exclusion are unchanged.
+- **Tests:** `sf6-search-scope.integration.spec.ts`: a staff row, a venue, a shift and an offer in B's workspace whose
+  `created_by` is A are hidden from B's search (each was found before the change) and from B's lists, and A does not find
+  them either; a Venue Manager's direct `SearchService.search` returns their team member and not another staff member of
+  the same workspace (who was found before), matching `venueDirectory`; another organisation's manager with the same name
+  is never returned; no over-narrowing: an owner-scope manager still finds a Venue Manager's pending-approval request in
+  their workspace (as `list()` shows it). `search-managers-org-pin.spec.ts` pins the managers' organisation predicate
+  itself (RLS alone would hide another organisation's managers, so the integration case cannot tell the two layers apart).
+  `dashboard-search.integration.spec.ts`'s two cross-workspace tests used to assert the old
+  `workspace_id`-only search result; they now assert the row is hidden from both managers.
+
 ## SF-7 — explicit field maps instead of DTO spreads in staff and venue writes (branch fix/sf7-explicit-field-maps, 2026-11-17; no SQL)
 - **Threat:** a direct (non-HTTP) caller of `StaffService.update`, `VenueService.create`, `VenueService.update` or
   `VenueService.updateRoleRate` (a job, a CLI command, an AI tool, another service) → passes an object carrying fields the
