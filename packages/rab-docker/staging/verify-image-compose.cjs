@@ -221,8 +221,12 @@ function optionAProblems(services, where = '') {
     if (!svc) continue;
     // Option 2: pinned empty (the crewflow_owner URL comes from db-setup's target file); never a URL, crewflow_owner included.
     const url = envOf(svc).PG_DATABASE_URL;
-    // Owner requirement 2026-11-17: never PG_ADMIN_URL (no key at all, not even empty), nor the retired name.
-    for (const key of [ADMIN_URL_KEY, ...RETIRED_ADMIN_URL_KEYS]) if (Object.prototype.hasOwnProperty.call(envOf(svc), key)) out.push(`${name}: has ${key}${where} (the database admin URL reaches db-setup only; rab-api / rab-worker NEVER receive it)`);
+    // Owner requirement 2026-11-17 + owner decision L-2: PG_ADMIN_URL pinned to the literal empty string (any value refused),
+    // never the retired name nor db-setup's bundled-db URL.
+    const admin = envOf(svc)[ADMIN_URL_KEY];
+    if (admin === undefined) out.push(`${name}: ${ADMIN_URL_KEY} is not pinned to ""${where} (an env-file value would reach it; owner decision L-2)`);
+    else if (String(admin) !== '') out.push(`${name}: has ${ADMIN_URL_KEY} with a value${where} (the database admin URL reaches db-setup only; rab-api / rab-worker pin it to "")`);
+    for (const key of [...RETIRED_ADMIN_URL_KEYS, 'CREWFLOW_BUNDLED_DB_ADMIN_URL']) if (Object.prototype.hasOwnProperty.call(envOf(svc), key)) out.push(`${name}: has ${key}${where} (db-setup's input only)`);
     if (url === undefined) out.push(`${name}: PG_DATABASE_URL is not pinned to ""${where} (an env-file value would reach it)`);
     else if (String(url) !== '') out.push(`${name}: PG_DATABASE_URL is not empty${where} (option 2: only db-setup receives a database URL, in any form)`);
     if (isPgUrlText(JSON.stringify(svc))) out.push(`${name}: holds a postgres:// value somewhere in its definition${where} (option 2: never)`);

@@ -6,7 +6,8 @@
 #
 # DB-SETUP (Twenty Helm model, OWNER-DB-FINAL.md Part A): this container NEVER receives PG_DATABASE_URL, in any form; only the
 # one-shot db-setup service does. This script:
-#   1. refuses arguments, PG_DATABASE_PASSWORD, PG_ADMIN_URL and a non-empty PG_DATABASE_URL (any login; exit 64);
+#   1. refuses arguments, PG_DATABASE_PASSWORD, PG_ADMIN_URL (and its other names), any variable holding a postgres:// URL
+#      and a non-empty PG_DATABASE_URL (any login; exit 64);
 #   2. builds the crewflow_owner runtime URL with the same pure derive step as api-prestart.sh (never connects; the URL
 #      comes back on fd 4 through a command substitution: never a file, never argv, never the log), from db-setup's
 #      credential-free target file (CREWFLOW_DB_TARGET_FILE=/run/crewflow/db-target/target.json) and the crewflow_owner
@@ -36,10 +37,17 @@ if [ -n "${PG_DATABASE_PASSWORD:-}" ]; then
   refuse 'PG_DATABASE_PASSWORD must never be set on the worker service: only compose reads it (the bundled db and the default admin URL); the Worker connects only as crewflow_owner.'
 fi
 # PG_ADMIN_URL (owner decision 2026-11-17, Twenty's Helm model): the database admin URL belongs ONLY to the one-shot db-setup
-# service (never-in-runtime-env.ts; the in-process guard refuses it as well).
-if [ -n "${PG_ADMIN_URL:-}" ]; then
-  refuse 'PG_ADMIN_URL must never be set on the worker service: it is the database admin URL, read only by the one-shot db-setup service (which creates crewflow_owner). The Worker connects only as crewflow_owner. Value not shown.'
-fi
+# service (never-in-runtime-env.ts; the in-process guard refuses it as well), and so do its retired name and db-setup's
+# bundled-db URL. The compose files pin PG_ADMIN_URL to "" here (owner decision L-2): empty is allowed, any value refused.
+for name in PG_ADMIN_URL PG_DATABASE_ADMIN_URL CREWFLOW_BUNDLED_DB_ADMIN_URL; do
+  eval "value=\${$name:-}"
+  if [ -n "$value" ]; then refuse "$name must never be set on the worker service: it is a database admin URL, read only by the one-shot db-setup service (which creates crewflow_owner). The Worker connects only as crewflow_owner. Value not shown."; fi
+done
+# Security review of PR #230, L-1: an admin URL under ANY other name. No variable may hold a PostgreSQL URL here (the
+# Worker's own PG_DATABASE_URL is refused below unless empty, and is set by this script only after the derive step).
+for forbidden in $(env | grep -iE '^[A-Za-z_][A-Za-z0-9_]*=postgres(ql)?://' | grep -v '^PG_DATABASE_URL=' | cut -d= -f1 | sort -u); do
+  refuse "$forbidden holds a PostgreSQL URL: no database URL ever reaches the worker service (it builds the crewflow_owner URL from db-setup's files). Value not shown."
+done
 
 # BEGIN crewflow bundled-db CA
 # $1: the database URL this process connects with (db-setup: PG_ADMIN_URL or PG_DATABASE_URL; rab-api / rab-worker: the

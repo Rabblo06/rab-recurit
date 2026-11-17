@@ -114,6 +114,16 @@ export const NEVER_IN_RUNTIME_ENV: readonly NeverInRuntimeEnvEntry[] = Object.fr
     name: 'PG_ADMIN_URL',
     why: 'It is the database admin URL: only the one-shot db-setup service reads it, to create crewflow_owner. A runtime process connects only as crewflow_owner (PG_DATABASE_URL, built from the files db-setup writes). Remove it.',
   },
+  // Security review of PR #230, L-1: the admin URL under its other names. PG_DATABASE_ADMIN_URL is the retired name (db-setup
+  // refuses it too); CREWFLOW_BUNDLED_DB_ADMIN_URL is db-setup's compose-built bundled superuser URL.
+  {
+    name: 'PG_DATABASE_ADMIN_URL',
+    why: 'It is the retired name of PG_ADMIN_URL, the database admin URL (db-setup only, renamed 2026-11-17). A runtime process connects only as crewflow_owner. Remove it.',
+  },
+  {
+    name: 'CREWFLOW_BUNDLED_DB_ADMIN_URL',
+    why: "It is the bundled database's superuser URL, committed on the one-shot db-setup service only. A runtime process connects only as crewflow_owner. Remove it.",
+  },
 ]);
 
 /**

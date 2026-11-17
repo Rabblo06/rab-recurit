@@ -208,10 +208,18 @@ for name in DATABASE_URL DATABASE_DIRECT_URL PG_DATABASE_REPLICA_URL PG_WORKER_D
   if [ -n "$value" ]; then refuse "$name must never be set on the api service: the API, the Worker and the migrate child use ONE database URL, PG_DATABASE_URL (the crewflow_owner login), and no role password belongs in application configuration."; fi
 done
 # PG_ADMIN_URL (owner decision 2026-11-17, Twenty's Helm model): the database admin URL belongs ONLY to the one-shot db-setup
-# service; the API never receives it, in any form (not even unused: /proc/<pid>/environ).
-for name in PG_ADMIN_URL; do
+# service; the API never receives it, in any form (not even unused: /proc/<pid>/environ). The same for its retired name
+# (PG_DATABASE_ADMIN_URL) and for db-setup's bundled-db URL (CREWFLOW_BUNDLED_DB_ADMIN_URL). The compose files pin
+# PG_ADMIN_URL to "" on this service (owner decision L-2): empty is allowed, any value is refused.
+for name in PG_ADMIN_URL PG_DATABASE_ADMIN_URL CREWFLOW_BUNDLED_DB_ADMIN_URL; do
   eval "value=\${$name:-}"
   if [ -n "$value" ]; then refuse "$name must never be set on the api service: it is the database admin URL, read only by the one-shot db-setup service (which creates crewflow_owner). The API connects only as crewflow_owner. Value not shown."; fi
+done
+# Security review of PR #230, L-1: an admin URL under ANY other name. No variable of the API may hold a PostgreSQL URL here
+# (its own PG_DATABASE_URL is refused below unless empty, and is set by this script only after these checks): every name
+# whose value starts with postgres:// or postgresql:// (any case) is refused. Names only; the value is never printed.
+for forbidden in $(env | grep -iE '^[A-Za-z_][A-Za-z0-9_]*=postgres(ql)?://' | grep -v '^PG_DATABASE_URL=' | cut -d= -f1 | sort -u); do
+  refuse "$forbidden holds a PostgreSQL URL: no database URL ever reaches the api service (the API builds the crewflow_owner URL from db-setup's files; an admin URL belongs to db-setup's PG_ADMIN_URL only). Value not shown."
 done
 # Name prefixes — a literal copy of forbiddenRuntimeEnvPrefixes('api'): the separate provisioner's settings never belong here.
 for prefix in CREWFLOW_PROVISIONER_; do

@@ -487,6 +487,25 @@ describe('generateOwnerPassword and planDbSetup (the Twenty Helm model)', () => 
     expect(DB_SETUP_INPUT_MESSAGES.appUrlNotOwner).toMatch(/renamed to PG_ADMIN_URL/);
   });
 
+  it('I-4 (review of PR #230): a percent-encoded crewflow_owner login in PG_DATABASE_URL is the same login (decoded, accepted); a login smuggled in as ?user= is refused', () => {
+    const encoded = OWN.replace('crewflow_owner', 'crewflow%5Fowner');
+    const app = selectDbSetupInput({ PG_DATABASE_URL: encoded });
+    expect(app.name).toBe('PG_DATABASE_URL');
+    expect(app.plan.mode).toBe('owner-url');
+    expect(app.plan.urlTarget.user).toBe(OWNER_LOGIN);
+    // The admin login encoded: still an admin login, still refused in PG_DATABASE_URL.
+    expect(refusal(() => selectDbSetupInput({ PG_DATABASE_URL: ADMIN_URL.replace('doadmin', 'do%61dmin') }))).toBe(DB_SETUP_INPUT_MESSAGES.appUrlNotOwner);
+    // ?user= (or any target override) on either URL: refused by the URL policy, before any mode decision.
+    for (const [name, url] of [['PG_ADMIN_URL', ADMIN_URL], ['PG_DATABASE_URL', OWN]] as const) {
+      for (const param of ['user=crewflow_owner', 'user=postgres', 'password=x', 'host=elsewhere', 'dbname=other']) {
+        const message = refusal(() => selectDbSetupInput({ [name]: `${url}&${param}` }));
+        expect(message).toMatch(/as a query parameter, which would override the connection target/);
+        expect(message).toContain(name);
+        expect(message).not.toContain(ADMIN_PASSWORD);
+      }
+    }
+  });
+
   it('DENIAL selectDbSetupInput: crewflow_owner in PG_ADMIN_URL, both, neither, the retired name; refusals are value-free and name the variable', () => {
     expect(refusal(() => selectDbSetupInput({ PG_ADMIN_URL: OWN }))).toBe(DB_SETUP_INPUT_MESSAGES.adminUrlIsOwner);
     expect(refusal(() => selectDbSetupInput({ PG_ADMIN_URL: ADMIN_URL, PG_DATABASE_URL: OWN }))).toBe(DB_SETUP_INPUT_MESSAGES.both);

@@ -345,7 +345,7 @@ function environScan(p, service, sentinels) {
 
 /**
  * The rendered compose config (never written or printed): each app service's PG_DATABASE_URL and whether it has a
- * PG_ADMIN_URL key (owner decision 2026-11-17: never), and whether db-setup has a URL (PG_ADMIN_URL, PG_DATABASE_URL or,
+ * PG_ADMIN_URL pinned to "" (owner decision L-2), and whether db-setup has a URL (PG_ADMIN_URL, PG_DATABASE_URL or,
  * in the bundled mode, its bundled admin URL with a password).
  */
 function renderedUrls(p) {
@@ -359,7 +359,8 @@ function renderedUrls(p) {
   return {
     api: env('rab-api').PG_DATABASE_URL,
     worker: env('rab-worker').PG_DATABASE_URL,
-    adminKey: ['rab-api', 'rab-worker'].some((svc) => Object.prototype.hasOwnProperty.call(env(svc), 'PG_ADMIN_URL')),
+    // Owner decision L-2: PG_ADMIN_URL is pinned to "" on both (never absent, never a value).
+    adminPinned: ['rab-api', 'rab-worker'].every((svc) => env(svc).PG_ADMIN_URL === ''),
     setupSet: Boolean(s.PG_ADMIN_URL || s.PG_DATABASE_URL || bundledPassword),
   };
 }
@@ -385,10 +386,10 @@ function checkEnviron(p, check, n, label, sentinels, { services = ['rab-api', 'r
   }
   const ru = renderedUrls(p);
   check(ru.api === '' && ru.worker === '' && ru.setupSet, `${label}: the rendered compose config gives rab-api and rab-worker PG_DATABASE_URL="" (whatever compose.env holds) and db-setup a URL (api ${ru.api === '' ? 'empty' : ru.api === undefined ? 'absent' : 'SET'}, worker ${ru.worker === '' ? 'empty' : ru.worker === undefined ? 'absent' : 'SET'})`);
-  check(!ru.adminKey, `${label}: the rendered compose config gives rab-api and rab-worker NO PG_ADMIN_URL key (owner decision 2026-11-17)`);
+  check(ru.adminPinned, `${label}: the rendered compose config gives rab-api and rab-worker PG_ADMIN_URL="" (pinned; owner decision L-2)`);
   for (const svc of services) {
     const def = L.run('docker', ['inspect', '-f', '{{range .Config.Env}}{{println .}}{{end}}', p.container(svc)], { timeout: 180_000 }).stdout;
-    check(!/^PG_ADMIN_URL=/m.test(def), `${label}: ${svc}'s container definition (docker inspect Config.Env) has no PG_ADMIN_URL`);
+    check(!/^PG_ADMIN_URL=./m.test(def), `${label}: ${svc}'s container definition (docker inspect Config.Env) has no PG_ADMIN_URL value (pinned "")`);
   }
 }
 

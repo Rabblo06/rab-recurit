@@ -595,6 +595,33 @@ for (const [label, url] of [['the bundled admin URL', ADMIN_URL], ['an external 
   r = run(`worker-admin-url-${label.replace(/[^a-z]+/g, '-')}`, { ...W, PG_ADMIN_URL: url }, { entry: 'worker-start.sh', ctl: { 'derive-url': RUNTIME_URL } });
   check(`12s DENIAL PG_ADMIN_URL: ${label} on rab-worker -> refused (64) before the derive step; the Worker never starts; the value is never printed`, r.code === 64 && /PG_ADMIN_URL must never be set on the worker service/.test(r.out) && !line(r.out, 'derive') && !line(r.out, 'workermain') && !/STUB tini/.test(r.out) && !r.out.includes('ADMINSENTINEL'), r.out);
 }
+// Security review of PR #230, L-1: the admin URL under another name (the retired PG_DATABASE_ADMIN_URL, db-setup's
+// CREWFLOW_BUNDLED_DB_ADMIN_URL) or ANY variable holding a postgres:// URL, on the API, the one-off and the Worker: refused
+// (64) before anything runs; the value never appears in the output. PG_ADMIN_URL="" (the compose pin, L-2) is accepted.
+{
+  const L1_URL = 'postgresql://postgres:ADMINSENTINEL8@db:5432/crewflow?sslmode=verify-full';
+  const ONE_OFF = 'api-prestart.sh node /app/packages/rab-server/dist/command/main.js bootstrap-admin';
+  for (const [name, value, pattern] of [
+    ['PG_DATABASE_ADMIN_URL', L1_URL, /PG_DATABASE_ADMIN_URL must never be set on the (api|worker) service/],
+    ['CREWFLOW_BUNDLED_DB_ADMIN_URL', L1_URL, /CREWFLOW_BUNDLED_DB_ADMIN_URL must never be set on the (api|worker) service/],
+    ['X', L1_URL, /X holds a PostgreSQL URL/],
+    ['SOME_OTHER_DSN', 'POSTGRES://doadmin:ADMINSENTINEL9@db-direct.example:5432/d', /SOME_OTHER_DSN holds a PostgreSQL URL/],
+  ]) {
+    for (const [where, env, opts] of [
+      ['the API', { ...NOURL, [name]: value }, { ctl: DERIVED }],
+      ['the one-off (bootstrap-admin)', { ...NOURL, [name]: value }, { entry: ONE_OFF, ctl: DERIVED }],
+      ['the Worker', { ...W, [name]: value }, { entry: 'worker-start.sh', ctl: { 'derive-url': RUNTIME_URL } }],
+    ]) {
+      r = run(`l1-${name}-${where.replace(/[^a-z]+/gi, '-')}`, env, opts);
+      check(`12t DENIAL L-1: ${name}=<a postgres URL> on ${where} -> refused (64) before anything runs; the value is never printed`, r.code === 64 && pattern.test(r.out) &&
+        !line(r.out, 'derive') && !line(r.out, 'main') && !line(r.out, 'workermain') && !line(r.out, 'command') && !/STUB tini/.test(r.out) && !r.out.includes('ADMINSENTINEL'), r.out);
+    }
+  }
+  r = run('l2-admin-url-pinned-empty-api', { ...NOURL, PG_ADMIN_URL: '' }, { ctl: DERIVED });
+  check('12u L-2: PG_ADMIN_URL="" (the compose pin) on the API is accepted; main.js starts', r.code === 0 && Boolean(line(r.out, 'main')), r.out);
+  r = run('l2-admin-url-pinned-empty-worker', { ...W, PG_ADMIN_URL: '' }, { entry: 'worker-start.sh', ctl: { 'derive-url': RUNTIME_URL } });
+  check('12u2 L-2: PG_ADMIN_URL="" (the compose pin) on the Worker is accepted; the Worker starts', r.code === 0 && Boolean(line(r.out, 'workermain')), r.out);
+}
 r = run('worker-url-unset', { NODE_ENV: 'production', APP_SECRET: 'x'.repeat(40), DISABLE_DB_MIGRATIONS: 'true' }, { entry: 'worker-start.sh', ctl: { 'derive-url': RUNTIME_URL } });
 check('12j PG_DATABASE_URL unset (not just empty) -> the target-file path; the Worker gets the derived URL', r.code === 0 && field(line(r.out, 'derive'), 'mode') === 'target' && field(line(r.out, 'workermain'), 'url') === hash(RUNTIME_URL), r.out);
 r = run('worker-args', W, { entry: 'worker-start.sh node x.js', ctl: { 'derive-url': RUNTIME_URL } });

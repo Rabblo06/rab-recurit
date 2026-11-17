@@ -782,22 +782,91 @@ test('ADMIN_URL_PLACEMENT (owner requirement 2026-11-17): every committed compos
   }
 });
 
-test('DENIAL ADMIN_URL_PLACEMENT: PG_ADMIN_URL on rab-api / rab-worker (map or list form), in an x- anchor merged into them, or the old name, fails the static gate', () => {
+test('DENIAL ADMIN_URL_PLACEMENT: PG_ADMIN_URL with a value on rab-api / rab-worker (map, list or flow form), in an x- anchor merged into them, an anchor inside db-setup, or the old names, fails the static gate', () => {
   const setup = 'services:\n  db-setup:\n    environment:\n      PG_ADMIN_URL: ${PG_ADMIN_URL:-}\n';
+  const pinned = `${setup}  rab-api:\n    environment:\n      PG_ADMIN_URL: ""\n  rab-worker:\n    environment:\n      PG_ADMIN_URL: ''\n`;
   assert.deepEqual(gate.adminUrlPlacementProblems('ok.yml', setup), []);
+  // Owner decision L-2: the exact empty pin on rab-api / rab-worker is the one allowed occurrence outside db-setup.
+  assert.deepEqual(gate.adminUrlPlacementProblems('ok.yml', pinned), []);
+  // L-3: anchored, tagged and merge-key service headers are still read as service headers.
+  for (const header of ['rab-api: &api', 'rab-api: !override', 'rab-api: <<']) {
+    assert.deepEqual(gate.adminUrlPlacementProblems('ok.yml', `${setup}  ${header}\n    environment:\n      PG_ADMIN_URL: ""\n`), [], header);
+  }
   const cases = [
-    [`${setup}  rab-api:\n    environment:\n      PG_ADMIN_URL: ""\n`, /PG_ADMIN_URL in service rab-api/],
+    [`${setup}  rab-api:\n    environment:\n      PG_ADMIN_URL: x\n`, /PG_ADMIN_URL in service rab-api/],
     [`${setup}  rab-worker:\n    environment:\n      - PG_ADMIN_URL=postgres://a:b@h/d\n`, /PG_ADMIN_URL in service rab-worker/],
+    [`${setup}  rab-worker:\n    environment:\n      - PG_ADMIN_URL=\n`, /PG_ADMIN_URL in service rab-worker/],
     [`${setup}  rab-worker:\n    environment:\n      X: \${PG_ADMIN_URL:-}\n`, /interpolated in service rab-worker/],
+    // L-3: a flow mapping, the token anywhere on the line.
+    [`${setup}  rab-api:\n    environment: { NODE_ENV: production, PG_ADMIN_URL: x }\n`, /PG_ADMIN_URL in service rab-api/],
+    [`${setup}  rab-api:\n    environment: { PG_ADMIN_URL: "" }\n`, /PG_ADMIN_URL in service rab-api/],
+    // An x- anchor merged into rab-api (the empty pin is allowed only in the service itself).
     [`x-env: &e\n  PG_ADMIN_URL: \${PG_ADMIN_URL:-}\n${setup}  rab-api:\n    environment:\n      <<: *e\n`, /PG_ADMIN_URL in top-level x-env/],
-    [`${setup}  server:\n    environment:\n      PG_ADMIN_URL: x\n`, /PG_ADMIN_URL in service server/],
+    [`x-env: &e\n  PG_ADMIN_URL: ""\n${setup}  rab-api:\n    environment:\n      <<: *e\n`, /PG_ADMIN_URL in top-level x-env/],
+    // L-3: an anchor defined inside db-setup (its environment, or the service itself), aliased into rab-api.
+    [`services:\n  db-setup:\n    environment: &setupenv\n      PG_ADMIN_URL: \${PG_ADMIN_URL:-}\n  rab-api:\n    environment:\n      <<: *setupenv\n`, /an anchor defined inside the db-setup service/],
+    [`services:\n  db-setup: &setup\n    environment:\n      PG_ADMIN_URL: \${PG_ADMIN_URL:-}\n  rab-api:\n    <<: *setup\n`, /an anchor on the db-setup service/],
+    // L-3: anchored / tagged headers of OTHER services do not hide them.
+    [`${setup}  rab-api: &api\n    environment:\n      PG_ADMIN_URL: x\n`, /PG_ADMIN_URL in service rab-api/],
+    [`${setup}  rab-worker: !reset\n    environment: { PG_ADMIN_URL: x }\n`, /PG_ADMIN_URL in service rab-worker/],
+    [`${setup}  server:\n    environment:\n      PG_ADMIN_URL: ""\n`, /PG_ADMIN_URL in service server/],
     [`services:\n    db-setup:\n        environment:\n            PG_ADMIN_URL: x\n    rab-api:\n        environment:\n            PG_ADMIN_URL: x\n`, /PG_ADMIN_URL in service rab-api/],
     [`${setup}  db-setup2:\n    environment:\n      PG_DATABASE_ADMIN_URL: x\n`, /PG_DATABASE_ADMIN_URL \(renamed to PG_ADMIN_URL\)/],
+    [`${setup}  rab-api:\n    environment: { X: "\${PG_DATABASE_ADMIN_URL}" }\n`, /PG_DATABASE_ADMIN_URL \(renamed to PG_ADMIN_URL\)/],
+    [`${setup}  rab-api:\n    environment:\n      CREWFLOW_BUNDLED_DB_ADMIN_URL: x\n`, /CREWFLOW_BUNDLED_DB_ADMIN_URL in service rab-api/],
   ];
   for (const [text, pattern] of cases) assertRefused(gate.adminUrlPlacementProblems('bad.yml', text), pattern);
   // lintComposeText (the deploy files) runs the same rule, and refuses a `:?` on the bundled db's password.
   assertRefused(lintComposeText('bad.yml', `${setup}  rab-api:\n    environment:\n      PG_ADMIN_URL: x\n`), /PG_ADMIN_URL in service rab-api/);
   assertRefused(lintComposeText('bad.yml', 'services:\n  db:\n    environment:\n      POSTGRES_PASSWORD: ${PG_DATABASE_PASSWORD:?required}\n'), /demands the bundled db's password with your own database too/);
+});
+
+// Review of PR #230, I-2: the db entrypoint's password check, run for real (sh) from the committed production file.
+test('I-2: the db entrypoint refuses an empty password always, and a weak one only on a FIRST initialisation (empty PGDATA)', (t) => {
+  let sh = 'sh';
+  try { execFileSync(sh, ['-c', 'true']); } catch { t.skip('no POSIX sh'); return; }
+  const prod = fs.readFileSync(path.join(__dirname, '..', 'docker-compose.production.yml'), 'utf8');
+  const m = /# BEGIN crewflow-db password check\n([\s\S]*?)# END crewflow-db password check/.exec(prod);
+  assert.ok(m, 'the password-check block is in the db entrypoint');
+  const dir = fs.mkdtempSync(path.join(require('node:os').tmpdir(), 'crewflow-db-pw-'));
+  try {
+    const pgdata = path.join(dir, 'pgdata').split(path.sep).join('/');
+    fs.mkdirSync(pgdata);
+    // Compose's `$$` is a literal `$`; the data directory is moved into a temp dir.
+    const script = `set -eu\n${m[1].split('$$').join('$').split('/var/lib/postgresql/pgdata').join(pgdata)}echo CHECKED\n`;
+    const run = (password, existing) => {
+      if (existing) fs.writeFileSync(`${pgdata}/PG_VERSION`, '16\n'); else fs.rmSync(`${pgdata}/PG_VERSION`, { force: true });
+      try {
+        return { code: 0, out: execFileSync(sh, ['-c', script], { env: { ...process.env, POSTGRES_PASSWORD: password }, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }) };
+      } catch (e) {
+        return { code: e.status, out: `${e.stdout ?? ''}${e.stderr ?? ''}` };
+      }
+    };
+    const hex = 'a1'.repeat(32);
+    for (const [label, password, existing, code, pattern] of [
+      ['empty, fresh', '', false, 64, /is required for the bundled database/],
+      ['empty, existing volume', '', true, 64, /is required for the bundled database/],
+      ['64 hex, fresh', hex, false, 0, /CHECKED/],
+      ['32 of A-Z a-z 0-9 _ -, fresh', `Ab_-${'9'.repeat(28)}`, false, 0, /CHECKED/],
+      ['31 characters, fresh', 'a'.repeat(31), false, 64, /must be 32\+ characters/],
+      ['a URL-breaking character, fresh', `${'a'.repeat(40)}@x`, false, 64, /must be 32\+ characters/],
+      ['a dot and a tilde, fresh', `${'a'.repeat(40)}.~`, false, 64, /must be 32\+ characters/],
+      ['a short password on an EXISTING volume (never refused: the image ignores it)', 'short', true, 0, /CHECKED/],
+      ['an odd character on an EXISTING volume', `${'a'.repeat(40)}@x`, true, 0, /CHECKED/],
+    ]) {
+      const r = run(password, existing);
+      assert.equal(r.code, code, `${label}: ${r.out}`);
+      assert.match(r.out, pattern, label);
+      if (password.length > 3) assert.ok(!r.out.includes(password), `${label}: the value was printed`);
+    }
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+  // The four files that carry the bundled db have the same block (dev and QA are verbatim copies; their parity gate checks
+  // the rest of the service).
+  for (const f of ['docker-compose.image.yml', 'docker-compose.yml', 'docker-compose.qa.yml']) {
+    assert.equal(/# BEGIN crewflow-db password check\n[\s\S]*?# END crewflow-db password check/.exec(fs.readFileSync(path.join(__dirname, '..', f), 'utf8'))?.[0], m[0], f);
+  }
 });
 
 test('dbSettingsProblems: the shared rule of the compose.env lint and the --environment preflight', () => {
@@ -811,4 +880,11 @@ test('dbSettingsProblems: the shared rule of the compose.env lint and the --envi
   assertRefused(r({ bundled: '0', adminUrl: URL_OK }), /^PG_ADMIN_URL: logs in as crewflow_owner/);
   assertRefused(r({ bundled: '0', adminUrl: ADMIN_OK, appUrl: URL_OK }), /both set/);
   assertRefused(r({ bundled: '0', adminUrl: ADMIN_OK, passwordSet: true }), /remove it with CREWFLOW_BUNDLED_DB=0/);
+  // Review of PR #230, I-4: an encoded crewflow_owner login is the same login (decoded first); a login in a query parameter
+  // is refused.
+  assert.deepEqual(r({ bundled: '0', appUrl: URL_OK.replace('crewflow_owner', 'crewflow%5Fowner') }), []);
+  for (const param of ['user=crewflow_owner', 'user=postgres', 'password=x', 'host=elsewhere', 'dbname=other']) {
+    assertRefused(r({ bundled: '0', adminUrl: `${ADMIN_OK}&${param}` }), new RegExp(`^PG_ADMIN_URL: has a \\?${param.split('=')[0]}= query parameter`));
+    assertRefused(r({ bundled: '0', appUrl: `${URL_OK}&${param}` }), new RegExp(`^PG_DATABASE_URL: has a \\?${param.split('=')[0]}= query parameter`));
+  }
 });

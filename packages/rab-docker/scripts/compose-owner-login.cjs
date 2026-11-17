@@ -479,6 +479,9 @@ function dbSettingsProblems({ adminUrl, appUrl, bundled = '1', passwordSet = fal
     else if (key === URL_KEY && login !== OWNER_LOGIN) problems.push(`${URL_KEY}: is the app login and must log in as ${OWNER_LOGIN}; it is never an admin URL (the admin URL was renamed to ${ADMIN_URL_KEY}: move it there)`);
     else if (key === ADMIN_URL_KEY && login === OWNER_LOGIN) problems.push(`${ADMIN_URL_KEY}: logs in as ${OWNER_LOGIN}, the app login: put that URL in ${URL_KEY} instead (db-setup then only checks it) and remove ${ADMIN_URL_KEY}`);
     if (u.searchParams.get('sslmode') !== 'verify-full') problems.push(`${key}: sslmode is not verify-full`);
+    // Review of PR #230, I-4: the login is the URL's userinfo only; a `?user=` (or `password` / `host` / `dbname`) query
+    // parameter would change who logs in or where, behind the login rules above (the URL policy refuses it at start too).
+    for (const param of ['user', 'password', 'host', 'hostaddr', 'dbname']) if (u.searchParams.has(param)) problems.push(`${key}: has a ?${param}= query parameter (put the login in the URL's userinfo; never a query parameter)`);
     for (const [re, label] of POOLER_HINTS) if (re.test(String(url))) problems.push(`${key}: points at a transaction pooler (${label}); use the DIRECT host`);
     if (u.password === '') problems.push(`${key}: has no password`);
   }
@@ -486,12 +489,16 @@ function dbSettingsProblems({ adminUrl, appUrl, bundled = '1', passwordSet = fal
 }
 
 /**
- * ADMIN_URL_PLACEMENT (owner requirement 2026-11-17: rab-api and rab-worker must NEVER receive PG_ADMIN_URL). Raw-text rule
- * for EVERY compose file in the repository (ADMIN_URL_SCAN_ROOTS), before any rendering: a `PG_ADMIN_URL` key (map or list
- * form) may appear only inside the `db-setup` service block; in any other service (rab-api, rab-worker, server, worker,
- * ...) or in a top-level block (an `x-...` extension merged into a service with `<<:`), it fails. `${PG_ADMIN_URL...}` may be
- * interpolated only inside db-setup, once. The retired PG_DATABASE_ADMIN_URL may not appear as a key anywhere. The rendered
- * models (checkModel / appCredentialProblems) then prove the same for env files and overlays. Pure; never prints a value.
+ * ADMIN_URL_PLACEMENT (owner requirement 2026-11-17: rab-api and rab-worker must NEVER receive PG_ADMIN_URL; owner decision
+ * L-2: they pin it to the empty literal). Raw-text rule for EVERY compose file in the repository (ADMIN_URL_SCAN_ROOTS),
+ * before any rendering. Outside the `db-setup` service block, the token PG_ADMIN_URL may appear ANYWHERE on a line (map or
+ * list form, a flow mapping `{ PG_ADMIN_URL: x }`, an interpolation, a merged `x-...` block) only as the exact pin
+ * `PG_ADMIN_URL: ""` (or `''`) inside rab-api / rab-worker; any other occurrence fails. `${PG_ADMIN_URL...}` is interpolated
+ * only inside db-setup, once. The retired PG_DATABASE_ADMIN_URL appears nowhere, and db-setup's bundled-db URL
+ * (CREWFLOW_BUNDLED_DB_ADMIN_URL) nowhere outside db-setup. Security review of PR #230, L-3: service headers may carry an
+ * anchor, a tag or a merge (`name: &x`, `name: !tag`, `name: <<`), and NO anchor may be defined inside the db-setup block
+ * (its header included): an alias of it merged into another service would copy the admin URL there. The rendered models
+ * (checkModel / appCredentialProblems) then prove the same for env files and overlays. Pure; never prints a value.
  */
 function adminUrlPlacementProblems(rel, text) {
   const problems = [];
@@ -499,28 +506,34 @@ function adminUrlPlacementProblems(rel, text) {
   let service = null; // the current service under `services:`
   let serviceIndent = null; // the indentation of the service names (the first key under `services:`)
   let interpolations = 0;
+  const ANCHOR = /(?:^|[\s:[{,-])&[A-Za-z0-9_.-]+/;
+  const PIN = /^\s*PG_ADMIN_URL\s*:\s*(""|'')\s*$/;
   String(text).split(/\r?\n/).forEach((raw, i) => {
     if (/^\s*#/.test(raw) || raw.trim() === '') return;
     const topKey = /^([A-Za-z0-9_.-]+)\s*:/.exec(raw);
     if (topKey) { top = topKey[1]; service = null; serviceIndent = null; return; }
-    const svcKey = /^( +)([A-Za-z0-9_.-]+)\s*:\s*(#.*)?$/.exec(raw);
+    const svcKey = /^( +)([A-Za-z0-9_.-]+)\s*:\s*(&[A-Za-z0-9_.-]+|![A-Za-z0-9_.!/:-]+|<<)?\s*(#.*)?$/.exec(raw);
     if (top === 'services' && svcKey && (serviceIndent === null || svcKey[1].length === serviceIndent)) {
       serviceIndent = svcKey[1].length;
       service = svcKey[2];
+      if (service === DB_SETUP_SERVICE && /^&/.test(svcKey[3] ?? '')) problems.push(`${rel}:${i + 1}: an anchor on the ${DB_SETUP_SERVICE} service (an alias of it would copy ${ADMIN_URL_KEY} into another service)`);
       return;
     }
+    const inSetup = top === 'services' && service === DB_SETUP_SERVICE;
     const where = top === 'services' ? `service ${service ?? '?'}` : `top-level ${top ?? '?'}`;
     const line = raw.replace(/\s+#.*$/, '');
-    if (/^\s*-?\s*["']?PG_ADMIN_URL["']?\s*[:=]/.test(line) && !(top === 'services' && service === DB_SETUP_SERVICE)) {
-      problems.push(`${rel}:${i + 1}: ${ADMIN_URL_KEY} in ${where} (only the one-shot db-setup service may receive it; rab-api / rab-worker never)`);
+    if (inSetup && ANCHOR.test(line)) problems.push(`${rel}:${i + 1}: an anchor defined inside the ${DB_SETUP_SERVICE} service (an alias of it would copy ${ADMIN_URL_KEY} into another service)`);
+    if (!inSetup && /\bPG_ADMIN_URL\b/.test(line) && !(top === 'services' && APP_SERVICES.includes(service) && PIN.test(line))) {
+      problems.push(`${rel}:${i + 1}: ${ADMIN_URL_KEY} in ${where} (only the one-shot db-setup service may receive it; rab-api / rab-worker only pin it to "")`);
     }
     if (line.includes('${PG_ADMIN_URL')) {
-      if (!(top === 'services' && service === DB_SETUP_SERVICE)) problems.push(`${rel}:${i + 1}: \${PG_ADMIN_URL...} interpolated in ${where} (db-setup only)`);
+      if (!inSetup) problems.push(`${rel}:${i + 1}: \${PG_ADMIN_URL...} interpolated in ${where} (db-setup only)`);
       interpolations += 1;
     }
     for (const retired of RETIRED_ADMIN_URL_KEYS) {
-      if (new RegExp(`^\\s*-?\\s*["']?${retired}["']?\\s*[:=]`).test(line) || line.includes(`\${${retired}`)) problems.push(`${rel}:${i + 1}: ${retired} (renamed to ${ADMIN_URL_KEY})`);
+      if (new RegExp(`\\b${retired}\\b`).test(line)) problems.push(`${rel}:${i + 1}: ${retired} (renamed to ${ADMIN_URL_KEY})`);
     }
+    if (!inSetup && /\bCREWFLOW_BUNDLED_DB_ADMIN_URL\b/.test(line)) problems.push(`${rel}:${i + 1}: ${BUNDLED_ADMIN_URL_KEY} in ${where} (db-setup's bundled-db URL; db-setup only)`);
   });
   if (interpolations > 1) problems.push(`${rel}: interpolates \${PG_ADMIN_URL...} ${interpolations} times (db-setup's one line only)`);
   return problems;
@@ -784,6 +797,11 @@ function bundledDbProblems(services, model, p, { replicas: wantReplicas = 1, exp
   // Owner decision 2026-11-17 (no dummy password): POSTGRES_PASSWORD is ${PG_DATABASE_PASSWORD:-}, so the entrypoint itself
   // refuses an empty one (exit 64), FIRST: before the lock, the volume and postgres. Fail closed while the bundled db runs.
   const pwCheckAt = entry.search(/if \[ -z "\$\{POSTGRES_PASSWORD:-\}" \]; then\n[^\n]*PG_DATABASE_PASSWORD is required[^\n]*\n\s*exit 64\n\s*fi/);
+  // Review of PR #230, I-2: on a FIRST initialisation (no PG_VERSION in PGDATA yet) the password must be 32+ of A-Z a-z 0-9 _ -.
+  const shapeAt = entry.search(/if \[ ! -s \/var\/lib\/postgresql\/pgdata\/PG_VERSION \]; then\n\s*case "\$\{POSTGRES_PASSWORD\}" in\n\s*\*\[!A-Za-z0-9_-\]\*\) crewflow_pw_ok=no ;;\n[^\n]*-ge 32 \][^\n]*\n\s*esac\n[^\n]*\n[^\n]*must be 32\+ characters[^\n]*\n\s*exit 64/);
+  if (shapeAt < 0 || shapeAt > entry.indexOf('chmod') || (lockAt >= 0 && shapeAt > lockAt)) {
+    p(`${DB_SERVICE}: the entrypoint does not refuse a weak ${DB_PASSWORD_KEY} (32+ of A-Z a-z 0-9 _ -) on a first initialisation, before it touches the volume`);
+  }
   if (pwCheckAt < 0 || (lockAt >= 0 && pwCheckAt > lockAt) || pwCheckAt > entry.indexOf('chmod')) {
     p(`${DB_SERVICE}: the entrypoint does not refuse an empty POSTGRES_PASSWORD (${DB_PASSWORD_KEY}, exit 64) before it touches the volume (no compose \`:?\`: required only while the bundled db runs)`);
   }
@@ -870,9 +888,10 @@ function appCredentialProblems(services, p) {
     const s = services[name];
     if (!s) continue;
     const env = s.environment ?? {};
-    // Owner requirement 2026-11-17: NEVER PG_ADMIN_URL, in any form (not even empty: no key at all), nor the retired name, nor
-    // the bundled db's URL.
-    if (ADMIN_URL_KEY in env) p(`${name}: has ${ADMIN_URL_KEY} (the database admin URL reaches db-setup only; rab-api / rab-worker NEVER receive it)`);
+    // Owner requirement 2026-11-17 + owner decision L-2: PG_ADMIN_URL is pinned to the literal empty string (so an env-file
+    // value can never reach the service); any other value is refused. Never the retired name, nor the bundled db's URL.
+    if (!(ADMIN_URL_KEY in env)) p(`${name}: ${ADMIN_URL_KEY} is not pinned to "" (an env-file value would reach it; owner decision L-2)`);
+    else if (env[ADMIN_URL_KEY] !== '') p(`${name}: has ${ADMIN_URL_KEY} with a value (the database admin URL reaches db-setup only; rab-api / rab-worker pin it to "")`);
     for (const key of [...RETIRED_ADMIN_URL_KEYS, BUNDLED_ADMIN_URL_KEY, BUNDLED_DB_KEY]) if (key in env) p(`${name}: has ${key} (db-setup's input only)`);
     if (!(URL_KEY in env)) p(`${name}: ${URL_KEY} is not pinned to "" (an env-file value would reach it; option 2)`);
     else if (env[URL_KEY] !== '') p(`${name}: ${URL_KEY} is not empty (option 2: only db-setup receives a database URL, in any form; the entrypoint refuses it)`);
@@ -944,7 +963,7 @@ function checkModel(model, combo) {
       if (why) p(`${name}: environment has ${key} (${why})`);
       if (key !== URL_KEY && !setupKey && isPgUrl(value)) p(`${name}: environment ${key} holds a PostgreSQL URL (a second database identity)`);
     }
-    if (name !== DB_SETUP_SERVICE && ADMIN_URL_KEY in env) p(`${name}: has ${ADMIN_URL_KEY} (db-setup only)`);
+    if (name !== DB_SETUP_SERVICE && ADMIN_URL_KEY in env && !(appServices.includes(name) && env[ADMIN_URL_KEY] === '')) p(`${name}: has ${ADMIN_URL_KEY} (db-setup only; rab-api / rab-worker pin it to "")`);
     const values = Object.values(env).map(String);
     if (values.some((v) => v.includes(SENTINEL_LEGACY_PW))) p(`${name}: received a value from a separated-mode env file (.env.migrate / .env.ops / per-service staging files)`);
     if (name !== DB_SETUP_SERVICE && URL_KEY in env && !(appServices.includes(name) && env[URL_KEY] === '')) p(`${name}: has ${URL_KEY} (option 2: only db-setup; rab-api / rab-worker pin it empty)`);
@@ -1258,14 +1277,14 @@ const RUNTIME_ENV_TEXT = [`APP_SECRET=${SENTINEL_APP_SECRET}`, `REDIS_URL=redis:
 const LEGACY_ENV_TEXT = `PG_DATABASE_URL=postgresql://crewflow_migrator:${SENTINEL_LEGACY_PW}@db-direct.example:5432/rab?sslmode=verify-full\nLEGACY_MARKER=${SENTINEL_LEGACY_PW}\n`;
 
 /** Renders the given combos; returns { [comboName]: model }. Throws when docker compose fails. */
-function renderModels(combos = COMBOS, extraComposeEnv = [], extraRuntimeEnv = []) {
+function renderModels(combos = COMBOS, extraComposeEnv = [], extraRuntimeEnv = [], extraDatabaseEnv = []) {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'compose-owner-login-'));
   try {
     const secrets = path.join(tmp, 'secrets');
     const project = path.join(tmp, 'project');
     fs.mkdirSync(secrets);
     fs.mkdirSync(project);
-    fs.writeFileSync(path.join(secrets, 'database.env'), DATABASE_ENV_TEXT, { mode: 0o600 });
+    fs.writeFileSync(path.join(secrets, 'database.env'), DATABASE_ENV_TEXT + extraDatabaseEnv.map((l) => `${l}\n`).join(''), { mode: 0o600 });
     fs.writeFileSync(path.join(secrets, 'runtime.env'), RUNTIME_ENV_TEXT + extraRuntimeEnv.map((l) => `${l}\n`).join(''), { mode: 0o600 });
     // The separated-mode env files (project-relative .env.migrate, the retired .env.ops, per-service staging files) exist
     // only so a file that still names them renders; the gate then fails on their marker.

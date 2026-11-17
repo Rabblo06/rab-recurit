@@ -445,25 +445,45 @@ test('no dummy password: the own-database combinations render without PG_DATABAS
   assertRefused(problemsAfter(DEF, (s) => { s.db.entrypoint = s.db.entrypoint.map((x) => String(x).replace(/if \[ -z "\$\$?\{POSTGRES_PASSWORD:-\}" \][^]*?fi\n/, '')); }), /db: the entrypoint does not refuse an empty POSTGRES_PASSWORD/);
 });
 
-// Owner requirement 2026-11-17: rab-api and rab-worker NEVER receive PG_ADMIN_URL, in any combination, in any form.
-test('DENIAL PG_ADMIN_URL: rab-api / rab-worker never have the key (no combination renders it; any value, even empty, is refused)', { skip }, () => {
+// Owner requirement 2026-11-17 + owner decision L-2: rab-api and rab-worker NEVER receive a PG_ADMIN_URL value: the compose
+// files pin it to the empty literal, which overrides an env-file value; any non-empty value is refused.
+test('DENIAL PG_ADMIN_URL: rab-api / rab-worker render it pinned "" in every combination; any value, or no pin at all, is refused', { skip }, () => {
   for (const c of COMBOS) {
     const m = fresh(c.name);
-    for (const svc of APP) assert.equal('PG_ADMIN_URL' in (m.services[svc].environment ?? {}), false, `${c.name} ${svc}`);
+    for (const svc of APP) assert.equal(m.services[svc].environment.PG_ADMIN_URL, '', `${c.name} ${svc}`);
     for (const svc of APP) {
-      for (const value of [gate.SENTINEL_ADMIN_URL, gate.BUNDLED_URL, '', 'x']) {
-        assertRefused(problemsAfter(c.name, (s) => { s[svc].environment.PG_ADMIN_URL = value; }), new RegExp(`${svc}: has PG_ADMIN_URL`));
+      for (const value of [gate.SENTINEL_ADMIN_URL, gate.BUNDLED_URL, 'x', ' ']) {
+        assertRefused(problemsAfter(c.name, (s) => { s[svc].environment.PG_ADMIN_URL = value; }), new RegExp(`${svc}: has PG_ADMIN_URL with a value`));
       }
+      assertRefused(problemsAfter(c.name, (s) => { delete s[svc].environment.PG_ADMIN_URL; }), new RegExp(`${svc}: PG_ADMIN_URL is not pinned to ""`));
       for (const key of ['PG_DATABASE_ADMIN_URL', 'CREWFLOW_BUNDLED_DB_ADMIN_URL']) {
         assertRefused(problemsAfter(c.name, (s) => { s[svc].environment[key] = 'x'; }), new RegExp(`${svc}: (has|environment has) ${key}`));
       }
     }
-    // Nor any other service but db-setup.
+    // Nor any other service but db-setup (not even empty there).
     assertRefused(problemsAfter(c.name, (s) => { s['rab-redis'].environment = { PG_ADMIN_URL: '' }; }), /rab-redis: has PG_ADMIN_URL/);
   }
-  // A PG_ADMIN_URL placed in database.env / runtime.env reaches rab-api / rab-worker through env_file: rendered, refused.
-  const leaked = renderModels([COMBOS[0]], [], [`PG_ADMIN_URL=${gate.SENTINEL_ADMIN_URL}`]);
-  for (const svc of APP) assertRefused(checkModel(leaked.default, COMBOS[0]), new RegExp(`${svc}: has PG_ADMIN_URL`));
+});
+
+// Owner decision L-2, regression: a PG_ADMIN_URL planted in database.env (read by rab-api, rab-worker and db-setup through
+// env_file) or runtime.env never reaches rab-api / rab-worker: the committed empty pin wins over the env file.
+test('L-2 regression: image.yml rendered with PG_ADMIN_URL planted in database.env / runtime.env gives rab-api and rab-worker PG_ADMIN_URL=""', { skip }, () => {
+  const planted = `PG_ADMIN_URL=${gate.SENTINEL_ADMIN_URL}`;
+  for (const [label, models] of [
+    ['database.env', renderModels(COMBOS, [], [], [planted])],
+    ['runtime.env', renderModels(COMBOS, [], [planted])],
+  ]) {
+    for (const c of COMBOS) {
+      const m = models[c.name];
+      for (const svc of APP) {
+        assert.equal(m.services[svc].environment.PG_ADMIN_URL, '', `${label} ${c.name} ${svc}`);
+        assert.ok(!JSON.stringify(m.services[svc]).includes(gate.SENTINEL_ADMIN_PW), `${label} ${c.name} ${svc}: the admin password reached it`);
+      }
+      // db-setup's own committed ${PG_ADMIN_URL:-} (compose.env) also wins over an env-file value.
+      assert.equal(m.services[gate.DB_SETUP_SERVICE].environment.PG_ADMIN_URL, c.external === 'admin' ? gate.SENTINEL_ADMIN_URL : '', `${label} ${c.name} db-setup`);
+      assert.deepEqual(checkModel(m, c).filter((x) => /PG_ADMIN_URL/.test(x)), [], `${label} ${c.name}`);
+    }
+  }
 });
 
 test('DENIAL bundled db switch: 0 replicas with the bundled URL, 2 replicas, scale, a non-empty deploy section, 1 replica where 0 was set', { skip }, () => {

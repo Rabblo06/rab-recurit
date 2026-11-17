@@ -72,13 +72,29 @@ services:
       - -c
       - |
         set -eu
+        # BEGIN crewflow-db password check
         # PG_DATABASE_PASSWORD (this service's POSTGRES_PASSWORD) is REQUIRED while this bundled db runs. Checked here, at start,
         # not with a compose `:?` (that would demand it with your own database too, CREWFLOW_BUNDLED_DB=0, where this service
         # has 0 replicas and never starts: owner decision 2026-11-17, no dummy password). Before the volume is touched.
         if [ -z "$${POSTGRES_PASSWORD:-}" ]; then
-          echo 'crewflow-db: REFUSED - PG_DATABASE_PASSWORD is required for the bundled database (compose.env; 32+ random characters, e.g. 64 hex). With your own database set CREWFLOW_BUNDLED_DB=0 and PG_ADMIN_URL or PG_DATABASE_URL instead.' >&2
+          echo 'crewflow-db: REFUSED - PG_DATABASE_PASSWORD is required for the bundled database (compose.env; 32+ random characters, e.g. 64 hex). With your own database set CREWFLOW_BUNDLED_DB=0 and its URL instead (compose.env.example).' >&2
           exit 64
         fi
+        # Review of PR #230, I-2: on the FIRST initialisation only (no cluster in the data volume yet), the password must be 32+
+        # characters of A-Z a-z 0-9 _ - (it is interpolated unencoded into db-setup's bundled URL). An existing volume ignores
+        # the value (the image reads it only on an empty PGDATA), so it is never refused there.
+        if [ ! -s /var/lib/postgresql/pgdata/PG_VERSION ]; then
+          case "$${POSTGRES_PASSWORD}" in
+            *[!A-Za-z0-9_-]*) crewflow_pw_ok=no ;;
+            *) if [ "$${#POSTGRES_PASSWORD}" -ge 32 ]; then crewflow_pw_ok=yes; else crewflow_pw_ok=no; fi ;;
+          esac
+          if [ "$$crewflow_pw_ok" != yes ]; then
+            echo 'crewflow-db: REFUSED - PG_DATABASE_PASSWORD must be 32+ characters of A-Z a-z 0-9 _ - for a new bundled database (64 hex characters recommended). Value not shown.' >&2
+            exit 64
+          fi
+          unset crewflow_pw_ok
+        fi
+        # END crewflow-db password check
         # The data volume root arrives world-writable (copied from the image): only postgres may write it.
         chmod 0755 /var/lib/postgresql
         # ONE server per data volume (2026-10-15 incident: two postgres servers on one data directory corrupt it). A kernel

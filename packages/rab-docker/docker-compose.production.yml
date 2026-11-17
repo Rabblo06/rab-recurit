@@ -41,7 +41,7 @@
 #       provisioning. A PG_DATABASE_URL whose login is not crewflow_owner is REFUSED (never reinterpreted as an admin URL).
 # PR #125 option 2, kept in every mode: PG_ADMIN_URL and PG_DATABASE_URL are interpolated ONLY into the one-shot `db-setup`
 # service, which runs the bootstrap child (the ONLY connection with them), writes a credential-free target file to the
-# crewflow-db-target volume and exits. rab-api and rab-worker never receive PG_ADMIN_URL (they refuse it) nor an operator's
+# crewflow-db-target volume and exits. rab-api and rab-worker never receive a PG_ADMIN_URL value (pinned "", they refuse any other) nor an operator's
 # PG_DATABASE_URL (pinned ""): they build the crewflow_owner URL from that file and the crewflow_owner password file (a
 # random password db-setup stores and reuses, Twenty Helm model; APP_SECRET is never part of it; accepted risk TM-DB-1: the
 # URL is in db-setup's service definition, T-1). No manual SQL step. There is no migrator, provisioner, worker, ops or replica
@@ -106,7 +106,7 @@ x-crewflow-required-env: &required-env
   # enter a value here: the entrypoints refuse any non-empty value, exit 64). They build the crewflow_owner URL from
   # db-setup's target file and crewflow_owner password file. The database settings (PG_ADMIN_URL; PG_DATABASE_URL = an
   # existing crewflow_owner URL; or neither = the bundled db built from PG_DATABASE_PASSWORD, `openssl rand -hex 32`) are
-  # interpolation values that reach only the db-setup service below. PG_ADMIN_URL never appears on rab-api / rab-worker.
+  # interpolation values that reach only the db-setup service below. On rab-api / rab-worker PG_ADMIN_URL is pinned "" (L-2).
   PG_DATABASE_URL: ""
   # Root secret, 32+ random bytes. Changing it later breaks every session and stored encrypted secret.
   APP_SECRET: ${APP_SECRET:?APP_SECRET is required}
@@ -364,13 +364,29 @@ services:
       - -c
       - |
         set -eu
+        # BEGIN crewflow-db password check
         # PG_DATABASE_PASSWORD (this service's POSTGRES_PASSWORD) is REQUIRED while this bundled db runs. Checked here, at start,
         # not with a compose `:?` (that would demand it with your own database too, CREWFLOW_BUNDLED_DB=0, where this service
         # has 0 replicas and never starts: owner decision 2026-11-17, no dummy password). Before the volume is touched.
         if [ -z "$${POSTGRES_PASSWORD:-}" ]; then
-          echo 'crewflow-db: REFUSED - PG_DATABASE_PASSWORD is required for the bundled database (compose.env; 32+ random characters, e.g. 64 hex). With your own database set CREWFLOW_BUNDLED_DB=0 and PG_ADMIN_URL or PG_DATABASE_URL instead.' >&2
+          echo 'crewflow-db: REFUSED - PG_DATABASE_PASSWORD is required for the bundled database (compose.env; 32+ random characters, e.g. 64 hex). With your own database set CREWFLOW_BUNDLED_DB=0 and its URL instead (compose.env.example).' >&2
           exit 64
         fi
+        # Review of PR #230, I-2: on the FIRST initialisation only (no cluster in the data volume yet), the password must be 32+
+        # characters of A-Z a-z 0-9 _ - (it is interpolated unencoded into db-setup's bundled URL). An existing volume ignores
+        # the value (the image reads it only on an empty PGDATA), so it is never refused there.
+        if [ ! -s /var/lib/postgresql/pgdata/PG_VERSION ]; then
+          case "$${POSTGRES_PASSWORD}" in
+            *[!A-Za-z0-9_-]*) crewflow_pw_ok=no ;;
+            *) if [ "$${#POSTGRES_PASSWORD}" -ge 32 ]; then crewflow_pw_ok=yes; else crewflow_pw_ok=no; fi ;;
+          esac
+          if [ "$$crewflow_pw_ok" != yes ]; then
+            echo 'crewflow-db: REFUSED - PG_DATABASE_PASSWORD must be 32+ characters of A-Z a-z 0-9 _ - for a new bundled database (64 hex characters recommended). Value not shown.' >&2
+            exit 64
+          fi
+          unset crewflow_pw_ok
+        fi
+        # END crewflow-db password check
         # The data volume root arrives world-writable (copied from the image): only postgres may write it.
         chmod 0755 /var/lib/postgresql
         # ONE server per data volume (2026-10-15 incident: two postgres servers on one data directory corrupt it). A kernel
@@ -502,7 +518,7 @@ services:
   # secret-db-url.yaml:3-8), or (c) PG_DATABASE_URL, an existing crewflow_owner URL (read-only checks; its password is
   # copied into that file; the database is never written to; no provisioning). Plus the TLS CA; NOT APP_SECRET (never part
   # of a database credential; db-setup.sh refuses it). In every mode it writes the credential-free target file
-  # /run/crewflow/db-target/target.json. rab-api and rab-worker never receive PG_ADMIN_URL nor an operator's
+  # /run/crewflow/db-target/target.json. rab-api and rab-worker never receive a PG_ADMIN_URL value (pinned "") nor an operator's
   # PG_DATABASE_URL: they mount the volume read-only and build the crewflow_owner URL from the two files. It runs again on every `docker compose up` (it
   # removes the old target first, never the password file), then rab-api starts (depends_on:
   # service_completed_successfully). No port, no health check (it exits), never restarted.
@@ -558,7 +574,7 @@ services:
     image: ${CREWFLOW_IMAGE_REPOSITORY:-adhin007/adolphus}@${CREWFLOW_IMAGE_TAG:-sha256:6f360664ff3b5fecc6bce64ef76cce66aae435266ec06f6fbcfd29655b60b394}
     # DB-SETUP PID 1 (lead decision 2026-11-12, owner requirement #5): api-prestart.sh is the ENTRYPOINT (PID 1; no command,
     # no compose init). It runs the refusals, the runtime-isolation check, builds the crewflow_owner URL from db-setup's
-    # target file (option 2: this service never receives PG_ADMIN_URL or an operator's PG_DATABASE_URL), waits (bounded, 120 s) for a working login, runs
+    # target file (option 2: this service never receives a PG_ADMIN_URL value, pinned "", or an operator's PG_DATABASE_URL), waits (bounded, 120 s) for a working login, runs
     # the migrate child and the scheduler registration, then `exec /sbin/tini -s -- node packages/rab-server/dist/main.js`.
     # Owner CLI one-offs: `docker compose run --rm --no-deps rab-api node packages/rab-server/dist/command/main.js <command>`
     # (the script builds the same crewflow_owner URL and runs the command with it, nothing else).
@@ -574,6 +590,10 @@ services:
     environment:
       # REQUIRED and OPTIONAL: the shared lists above (identical on rab-worker).
       <<: [*required-env, *optional-env]
+      # Owner decision L-2 (review of PR #230): PINNED EMPTY, a literal, like PG_DATABASE_URL, so a PG_ADMIN_URL put in an env
+      # file or a platform UI can never reach this container. The entrypoint refuses any non-empty value (exit 64); the gates
+      # accept exactly this empty literal here and refuse any other value. The admin URL reaches db-setup only.
+      PG_ADMIN_URL: ""
       # OPTIONAL, rab-api only. Pool ceiling (code default 10; the Worker's 12 is pinned on rab-worker).
       PG_POOL_MAX_CONNECTIONS:
       # Seconds api-prestart.sh waits before exiting after a start-up failure (0-300).
@@ -645,7 +665,7 @@ services:
     # O1: the SAME image variable as rab-api (one release, one digest), a different command.
     image: ${CREWFLOW_IMAGE_REPOSITORY:-adhin007/adolphus}@${CREWFLOW_IMAGE_TAG:-sha256:6f360664ff3b5fecc6bce64ef76cce66aae435266ec06f6fbcfd29655b60b394}
     # DB-SETUP PID 1: worker-start.sh is the ENTRYPOINT (PID 1): it builds the crewflow_owner URL from db-setup's target
-    # file (option 2: this service never receives PG_ADMIN_URL or an operator's PG_DATABASE_URL), then `exec /sbin/tini -s -- node
+    # file (option 2: this service never receives a PG_ADMIN_URL value, pinned "", or an operator's PG_DATABASE_URL), then `exec /sbin/tini -s -- node
     # packages/rab-worker/dist/main.js`. tini is PID 1 (the Worker's watchdog SIGKILL, ignored by the kernel for PID 1, still
     # works). NO compose `init: true` (compose-owner-login.cjs refuses it).
     entrypoint: ["./worker-start.sh"]
@@ -672,6 +692,10 @@ services:
     environment:
       # REQUIRED and OPTIONAL: the shared lists above (identical on rab-api).
       <<: [*required-env, *optional-env]
+      # Owner decision L-2 (review of PR #230): PINNED EMPTY, a literal, like PG_DATABASE_URL, so a PG_ADMIN_URL put in an env
+      # file or a platform UI can never reach this container. The entrypoint refuses any non-empty value (exit 64); the gates
+      # accept exactly this empty literal here and refuse any other value. The admin URL reaches db-setup only.
+      PG_ADMIN_URL: ""
       # OPTIONAL, rab-worker only. Event-loop watchdog: a loop silent this long is a stall (30-900 s).
       CREWFLOW_WORKER_WATCHDOG_STALE_SECONDS: ${CREWFLOW_WORKER_WATCHDOG_STALE_SECONDS:-120}
       # Milliseconds the Worker waits for running jobs on shutdown: a plain integer from 1000 to 34000 (drain + 10 s

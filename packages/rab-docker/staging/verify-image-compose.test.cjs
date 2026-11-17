@@ -248,7 +248,10 @@ test('DENIAL environment mode (owner decision 2026-11-17): password rules, both 
   }
   // rab-api / rab-worker: PG_ADMIN_URL in their definition (any value, even empty) or from their env files is refused.
   for (const svc of ['rab-api', 'rab-worker']) {
-    for (const value of [EXTERNAL_ADMIN_URL, '']) assertRefused(deployed((v) => { v.services[svc].environment.PG_ADMIN_URL = value; }), new RegExp(`${svc}: has PG_ADMIN_URL in the deployed model`));
+    // Owner decision L-2: pinned "" (passes, as committed); any value is refused, and so is a missing pin.
+    assert.equal(fresh().variantFiles.services[svc].environment.PG_ADMIN_URL, '');
+    for (const value of [EXTERNAL_ADMIN_URL, 'x']) assertRefused(deployed((v) => { v.services[svc].environment.PG_ADMIN_URL = value; }), new RegExp(`${svc}: has PG_ADMIN_URL with a value in the deployed model`));
+    assertRefused(deployed((v) => { delete v.services[svc].environment.PG_ADMIN_URL; }), new RegExp(`${svc}: PG_ADMIN_URL is not pinned to "" in the deployed model`));
     const ok = { names: ['REDIS_URL', 'APP_SECRET'], unfilled: [], dbUsers: {} };
     const m = fresh();
     const keys = { 'rab-api': ok, 'rab-worker': ok, [svc]: { ...ok, names: [...ok.names, 'PG_ADMIN_URL'] } };
