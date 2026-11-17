@@ -1,0 +1,17 @@
+{
+  "_comment": "Last-resort owner exceptions for High/Critical `yarn npm audit` findings that NOTHING fixes (ci-security audit job, tools/check-npm-audit.cjs). The normal fix is an upgrade or a root package.json `resolutions` override documented in \"//resolutions\". NOT an ignore list: one GHSA id + one package per entry, accepted-risk only, owner decision linked, at most 30 days, lapses automatically when a fix ships (first_patched_version or a non-vulnerable release in any major), and fails if the package is in the production closure (dev/build dependencies only). An agent or CI job never adds an entry on its own initiative. Each entry has a THREAT-MODEL.md entry.",
+  "schema": 2,
+  "decisions": [
+    {
+      "id": "GHSA-fc5q-39xc-vjpf",
+      "package": "picomatch",
+      "decision": "accepted-risk",
+      "owner_decision_ref": "https://github.com/Rabblo06/rab-recurit/pull/229",
+      "decided_by": "repository owner, by approving and merging the PR in owner_decision_ref (proposed 2026-11-17, not decided before that merge)",
+      "decided_on": "2026-11-17",
+      "expires": "2026-12-17",
+      "reason": "picomatch ReDoS (CVE-2026-112366) via attacker-controlled single-branch repeated extglob PATTERNS (+(*), +(*a)). No fix exists anywhere: the advisory has no first_patched_version, every published picomatch release (latest 4.0.7, no prereleases) is in range <=4.0.7, upstream fix micromatch/picomatch#194 is unmerged, and every current release of each dependent (@nx/js 24, vite 8, jest 30, tinyglobby, anymatch, micromatch, node-gyp) still requires picomatch, so neither an upgrade nor a resolutions override removes it. Dev/build only: Nx, Jest, Vite, ts-node-dev/chokidar compile patterns from this repository's own build/test config; no first-party code imports a glob matcher. The only production-closure path is yarn's injected node-gyp (argon2 / msgpackr-extract > node-gyp > tinyglobby > picomatch@4.0.5), which the runtime image prunes (runtime-deps.cjs RUNTIME_PRUNE); this check fails while it does not.",
+      "drop_when": "Remove this entry (and upgrade with `yarn up -R picomatch` or a root `resolutions` override documented in \"//resolutions\") as soon as a fixed picomatch release exists in any major; the check fails on its own then. Otherwise it expires on 2026-12-17 and needs a new owner decision."
+    }
+  ]
+}
