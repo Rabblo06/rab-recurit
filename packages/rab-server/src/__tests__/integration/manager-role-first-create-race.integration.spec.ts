@@ -121,4 +121,42 @@ describe('Manager system role: concurrent first create (integration)', () => {
     const roles = await owner.query(`SELECT id FROM core.role WHERE organisation_id = $1 AND key = 'manager'`, [org.id]);
     expect(roles).toHaveLength(1);
   });
+
+  it('if the first create rolls back, the waiting create inserts the role itself, with its full default permissions', async () => {
+    const org = await factory.createOrganisation('role-rollback');
+    const ctx: AuthContext = { organisationId: org.id, workspaceId: null, userId: '', role: '' };
+    const def = ROLE_DEFS[ManagerType.INTERNAL]!;
+
+    let markInserted!: (pid: number) => void;
+    const inserted = new Promise<number>((resolve) => (markInserted = resolve));
+    let release!: () => void;
+    const released = new Promise<void>((resolve) => (release = resolve));
+
+    const first = tenant.runInTenantContext(ctx, async (m) => {
+      await ensureRole(m, org.id, ManagerType.INTERNAL);
+      const [{ pid }] = await m.query(`SELECT pg_backend_pid() AS pid`);
+      markInserted(Number(pid));
+      await released;
+      throw new Error('first create rolled back'); // e.g. a later step of that manager create failed
+    });
+    first.catch(() => undefined);
+    const winnerPid = await inserted;
+    const second = tenant.runInTenantContext(ctx, (m) => ensureRole(m, org.id, ManagerType.INTERNAL));
+    second.catch(() => undefined);
+    try {
+      await waitForBlockedRoleInsert(winnerPid);
+    } finally {
+      release();
+    }
+
+    await expect(first).rejects.toThrow('first create rolled back');
+    const role = await second;
+    const roles = await owner.query(`SELECT id FROM core.role WHERE organisation_id = $1 AND key = $2`, [org.id, def.key]);
+    expect(roles.map((r: { id: string }) => r.id)).toEqual([role.id]);
+    const granted: Array<{ key: string }> = await owner.query(
+      `SELECT p.key FROM core.role_permission rp JOIN core.permission p ON p.id = rp.permission_id WHERE rp.role_id = $1`,
+      [role.id],
+    );
+    expect(granted.map((g) => g.key).sort()).toEqual([...new Set(def.permissions)].sort());
+  });
 });

@@ -240,7 +240,7 @@ export class ManagerService {
 
   private async ensureRole(manager: EntityManager, organisationId: string, type: string): Promise<Role> {
     const def = ROLE_DEFS[type]!;
-    const existing = async (found: Role): Promise<Role> => {
+    const withVenueDefaults = async (found: Role): Promise<Role> => {
       if (type === ManagerType.VENUE && found.isSystem) {
         const defaults = await loadSystemRoleDefaultPermissions(manager, def.key, def.permissions);
         if (defaults.length) await manager.createQueryBuilder().insert().into(RolePermission).values(defaults.map(permission => ({ organisationId, roleId: found.id, permissionId: permission.id }))).orIgnore().execute();
@@ -248,7 +248,7 @@ export class ManagerService {
       return found;
     };
     const found = await manager.findOne(Role, { where: { organisationId, key: def.key } });
-    if (found) return existing(found);
+    if (found) return withVenueDefaults(found);
 
     // Concurrency backstop, the same as StaffService.ensureStaffRole: two Managers creating the organisation's first
     // Manager / Venue Manager / CEO of a type at the same instant can both miss the `findOne` above. A plain insert made
@@ -263,7 +263,7 @@ export class ManagerService {
       [organisationId, def.key, def.name],
     );
     if (inserted.length === 0) {
-      return existing(await manager.findOneByOrFail(Role, { organisationId, key: def.key }));
+      return withVenueDefaults(await manager.findOneByOrFail(Role, { organisationId, key: def.key }));
     }
     const role = await manager.findOneByOrFail(Role, { id: inserted[0]!.id });
 
