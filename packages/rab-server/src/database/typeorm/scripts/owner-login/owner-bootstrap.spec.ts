@@ -103,11 +103,23 @@ function refusalOf(fn: () => unknown): string {
 }
 
 describe('owner bootstrap: §3.3 decisions', () => {
-  it('refuses PostgreSQL below 16', () => {
-    expect(refusalOf(() => decideBeforeProbe({ ...base, serverVersionNum: 150008 }))).toBe(OWNER_BOOTSTRAP_MESSAGES.pgTooOld);
-    expect(refusalOf(() => decideBeforeProbe({ ...base, serverVersionNum: Number.NaN }))).toBe(OWNER_BOOTSTRAP_MESSAGES.pgTooOld);
+  it('refuses every PostgreSQL major outside 16-18 (14, 15, 19, 20, garbage), accepts 16, 17 and 18', () => {
+    expect(refusalOf(() => decideBeforeProbe({ ...base, serverVersionNum: 140011 }))).toBe(OWNER_BOOTSTRAP_MESSAGES.unsupportedPostgres(14));
+    expect(OWNER_BOOTSTRAP_MESSAGES.unsupportedPostgres(14)).toBe('PostgreSQL 14 is not supported; use 16-18 (PostgreSQL 16, 17 or 18). Nothing was created. Refusing.');
+    expect(refusalOf(() => decideBeforeProbe({ ...base, serverVersionNum: 150008 }))).toBe(OWNER_BOOTSTRAP_MESSAGES.unsupportedPostgres(15));
+    expect(refusalOf(() => decideBeforeProbe({ ...base, serverVersionNum: 190000 }))).toBe(OWNER_BOOTSTRAP_MESSAGES.unsupportedPostgres(19));
+    expect(OWNER_BOOTSTRAP_MESSAGES.unsupportedPostgres(19)).toMatch(/^PostgreSQL 19 is not supported; use 16-18/);
+    expect(refusalOf(() => decideBeforeProbe({ ...base, serverVersionNum: 200001 }))).toBe(OWNER_BOOTSTRAP_MESSAGES.unsupportedPostgres(20));
+    expect(refusalOf(() => decideBeforeProbe({ ...base, serverVersionNum: Number.NaN }))).toBe(OWNER_BOOTSTRAP_MESSAGES.unsupportedPostgres(null));
+    expect(decideBeforeProbe({ ...base, serverVersionNum: 160015 })).toEqual([]);
     expect(decideBeforeProbe({ ...base, serverVersionNum: 170000 })).toEqual([]);
     expect(decideBeforeProbe({ ...base, serverVersionNum: 180001 })).toEqual([]);
+  });
+
+  it('the owner-URL mode refuses the same majors', () => {
+    const self = { sessionLogin: 'crewflow_owner', currentLogin: 'crewflow_owner' };
+    expect(refusalOf(() => decideOwnerSelf(self, { ...existing, serverVersionNum: 140011 }))).toBe(OWNER_BOOTSTRAP_MESSAGES.unsupportedPostgres(14));
+    expect(refusalOf(() => decideOwnerSelf(self, { ...existing, serverVersionNum: 190002 }))).toBe(OWNER_BOOTSTRAP_MESSAGES.unsupportedPostgres(19));
   });
 
   it.each([
@@ -325,6 +337,21 @@ describe('owner bootstrap: the admin session', () => {
     };
     await expect(bootstrapOwnerWithIo(io)).rejects.toThrow(OWNER_BOOTSTRAP_MESSAGES.passwordFileRace);
     expect(sent.map((q) => q.text)).not.toContain(OWNER_BOOTSTRAP_BEGIN);
+  });
+
+  it.each([140011, 190000])('server_version_num %d: refused before anything is created (no password stored, no transaction, no write)', async (v) => {
+    const stored: string[] = [];
+    const { io, sent } = fakeIo([{ ...base, serverVersionNum: v }], [{ ok: true }]);
+    io.passwordSource = 'new';
+    io.persistPassword = () => void stored.push('x');
+    const error = await bootstrapOwnerWithIo(io).catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(OwnerBootstrapRefusal);
+    expect((error as Error).message).toBe(OWNER_BOOTSTRAP_MESSAGES.unsupportedPostgres(Math.floor(v / 10000)));
+    expect(stored).toEqual([]);
+    const texts = sent.map((q) => q.text);
+    expect(texts).not.toContain(OWNER_BOOTSTRAP_BEGIN);
+    expect(texts).not.toContain(OWNER_BOOTSTRAP_Q4C_DO);
+    expect(texts.filter((t) => /(CREATE|GRANT|ALTER)/i.test(t) && t !== OWNER_BOOTSTRAP_Q2_FACTS)).toEqual([]);
   });
 
   it('a refused run never stores a NEW password (refusals first)', async () => {
@@ -1032,6 +1059,14 @@ describe('owner bootstrap: an existing crewflow_owner URL (read-only; Twenty: no
       { session_login: 'postgres', current_login: 'crewflow_owner' },
     ]) {
       await expect(setupOwnerUrlWithIo(ownerIo({ who }).io, 0)).rejects.toThrow(OWNER_BOOTSTRAP_MESSAGES.ownerNotSelf);
+    }
+  });
+
+  it('mode (c) after the PG_ADMIN_URL merge: an unsupported major (15, 19) is refused by the owner-URL path before anything else; only the read-only statements were sent', async () => {
+    for (const v of [150008, 190000]) {
+      const f = ownerIo({ facts: { ...ownerFacts, serverVersionNum: v } });
+      await expect(setupOwnerUrlWithIo(f.io, 0)).rejects.toThrow(OWNER_BOOTSTRAP_MESSAGES.unsupportedPostgres(Math.floor(v / 10000)));
+      expect(f.sent.every((t) => OWNER_SELF_STATEMENTS.includes(t as (typeof OWNER_SELF_STATEMENTS)[number]))).toBe(true);
     }
   });
 

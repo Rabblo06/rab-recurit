@@ -16,8 +16,8 @@
 -- file. For a superuser session the server log is told to skip this session's statements; a non-superuser provider admin
 -- cannot change that setting, so check the provider's log retention for failed statements.
 --
--- PostgreSQL 16 or later only (on 15 and earlier CREATEROLE can grant predefined roles such as
--- pg_execute_server_program; the migration child refuses those servers). PostgreSQL 16, 17 and 18 are supported.
+-- PostgreSQL 16, 17 and 18 only: this script refuses any other major before it creates anything (on 15 and earlier
+-- CREATEROLE can grant predefined roles such as pg_execute_server_program; the migration child refuses those servers too).
 --
 -- DB-SETUP (database setup like Twenty): this file is now the FALLBACK for operators who create crewflow_owner by hand
 -- (then PG_DATABASE_URL names crewflow_owner and it is passed through). By default the stack does this itself on every
@@ -32,6 +32,16 @@
 -- Optional hardening AFTER the first successful install: ALTER ROLE crewflow_owner NOCREATEROLE;
 -- (an upgrade that still has role migrations pending then needs it back; the child says so).
 \set ON_ERROR_STOP on
+-- PR #227 (security review L2): only the supported PostgreSQL majors, 16-18 (database/postgres/supported-majors.ts; a spec
+-- keeps the two in step). Refused before anything is created: on 15 and earlier CREATEROLE can grant predefined roles such
+-- as pg_execute_server_program, and a newer major has no reviewed workspace fingerprints or posture goldens.
+SELECT pg_catalog.current_setting('server_version_num')::int / 10000 AS crewflow_pg_major,
+       pg_catalog.current_setting('server_version_num')::int / 10000 BETWEEN 16 AND 18 AS crewflow_pg_supported \gset
+\if :crewflow_pg_supported
+\else
+  \warn 'refused: PostgreSQL' :crewflow_pg_major 'is not supported; use 16-18 (PostgreSQL 16, 17 or 18). Nothing was created.'
+  SELECT 1 / 0 AS refused_unsupported_postgresql_version;
+\endif
 SELECT pg_catalog.set_config('log_min_error_statement', 'panic', false), pg_catalog.set_config('log_statement', 'none', false)
  WHERE (SELECT rolsuper FROM pg_catalog.pg_roles WHERE rolname = current_user);
 

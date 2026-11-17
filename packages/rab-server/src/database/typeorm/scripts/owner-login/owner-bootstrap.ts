@@ -54,6 +54,7 @@ import {
 } from '../../../owner-login/owner-credential';
 import { type OwnerPasswordRead, OwnerPasswordFileError, OwnerPasswordMismatchError } from '../../../owner-login/owner-password-file';
 import { pgClientConfig, PgConfigError, PgDriverConfig, resolvePgEnvironment, ResolvedPgEnvironment, sameTarget } from '../../../postgres';
+import { isSupportedPostgresMajor, postgresMajorFromVersionNum, unsupportedPostgresMessage } from '../../../postgres/supported-majors';
 import {
   OWNER_BOOTSTRAP_BEGIN,
   OWNER_BOOTSTRAP_COMMIT,
@@ -121,7 +122,11 @@ export const OWNER_BOOTSTRAP_MESSAGES = Object.freeze({
   testSeamOutsideTest: 'CREWFLOW_TEST_DB_SETUP_PERSIST_DELAY_MS is a test seam: it is allowed only with NODE_ENV=test (0-60000). Refusing.',
   passwordPromoteFailed: (code: string) =>
     `crewflow_owner now uses the new password, but making it the stored password failed (${code}); the next start completes it.`,
-  pgTooOld: 'PostgreSQL 16 or later is required.',
+  /**
+   * The server's major is not one of database/postgres/supported-majors.ts (15 and earlier, or a major above the newest
+   * reviewed one). Read from the Q2 facts, before the probe, the pending password file and any write: nothing is created.
+   */
+  unsupportedPostgres: (major: number | null) => `${unsupportedPostgresMessage(major)} Nothing was created. Refusing.`,
   ownerInOtherDatabase:
     'The crewflow_owner password file is missing, so its password would be reset, but crewflow_owner owns objects in, or holds a grant on, another database of this PostgreSQL cluster: another Crewflow deployment uses it, and the reset would break that deployment. Crewflow supports one deployment per PostgreSQL cluster when using an admin URL. Restore this deployment\'s password file, or put the crewflow_owner URL in PG_DATABASE_URL (and remove PG_ADMIN_URL). Refusing.',
   ownerOwnsDatabase:
@@ -279,12 +284,24 @@ export function privilegedAttributesOf(f: OwnerFacts): string[] {
 }
 
 /**
+ * The version gate of db-setup (both modes), first of every refusal: only a major in SUPPORTED_POSTGRES_MAJORS goes on.
+ * MIN_SERVER_VERSION_NUM stays the floor (below it the facts' PG16-only role semantics do not hold); the list is the ceiling
+ * too, so a PostgreSQL 19 is refused here, before crewflow_owner is created, instead of by the migrate child afterwards.
+ */
+export function assertSupportedServerVersion(f: Pick<OwnerFacts, 'serverVersionNum'>): void {
+  const major = postgresMajorFromVersionNum(f.serverVersionNum);
+  if (!(f.serverVersionNum >= MIN_SERVER_VERSION_NUM) || !isSupportedPostgresMajor(major)) {
+    throw new OwnerBootstrapRefusal(OWNER_BOOTSTRAP_MESSAGES.unsupportedPostgres(major));
+  }
+}
+
+/**
  * §3.3, the checks that need no probe, in the plan's order. Throws OwnerBootstrapRefusal; returns the notes to log
  * (D2: an existing NOCREATEROLE crewflow_owner is accepted — the documented hardening — with one line).
  */
 export function decideBeforeProbe(f: OwnerFacts): string[] {
   const notes: string[] = [];
-  if (!(f.serverVersionNum >= MIN_SERVER_VERSION_NUM)) throw new OwnerBootstrapRefusal(OWNER_BOOTSTRAP_MESSAGES.pgTooOld);
+  assertSupportedServerVersion(f);
   const privileged = privilegedAttributesOf(f);
   if (privileged.length > 0) throw new OwnerBootstrapRefusal(OWNER_BOOTSTRAP_MESSAGES.privilegedAttributes(privileged));
   // H1 (defence in depth beside the pinned search_path): the admin session never works in a database the app login owns,
@@ -627,7 +644,7 @@ export interface OwnerSessionFacts {
 /** The refusals of the owner-URL mode, on a session that should be crewflow_owner itself. Throws OwnerBootstrapRefusal; returns notes. */
 export function decideOwnerSelf(session: OwnerSessionFacts, f: OwnerFacts): string[] {
   const notes: string[] = [];
-  if (!(f.serverVersionNum >= MIN_SERVER_VERSION_NUM)) throw new OwnerBootstrapRefusal(OWNER_BOOTSTRAP_MESSAGES.pgTooOld);
+  assertSupportedServerVersion(f);
   if (session.sessionLogin !== OWNER_LOGIN || session.currentLogin !== session.sessionLogin) {
     throw new OwnerBootstrapRefusal(OWNER_BOOTSTRAP_MESSAGES.ownerNotSelf);
   }

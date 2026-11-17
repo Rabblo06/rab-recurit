@@ -14,6 +14,12 @@ describe('hardDeleteFallbackReason', () => {
     expect(hardDeleteFallbackReason(dbError({ code: '23503', constraint: 'shift_approved_by_fkey', table: 'shift' }))).toBe('foreign_key:shift_approved_by_fkey:shift');
   });
 
+  it('PostgreSQL 18: a RESTRICT key refusal (23001 restrict_violation) falls back the same way', () => {
+    expect(hardDeleteFallbackReason(dbError({ code: '23001', constraint: 'payroll_record_staff_workspace_fkey', table: 'payroll_record' }))).toBe(
+      'foreign_key:payroll_record_staff_workspace_fkey:payroll_record',
+    );
+  });
+
   it('lock-table exhaustion (53200, "out of shared memory") falls back', () => {
     expect(hardDeleteFallbackReason(dbError({ code: '53200' }))).toBe('locks:53200');
   });

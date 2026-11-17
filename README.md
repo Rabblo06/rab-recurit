@@ -192,7 +192,7 @@ One NestJS backend serves two clients: **`rab-front`**, the web console for Mana
 
 ### Database setup
 
-Crewflow needs an **empty PostgreSQL 16, 17 or 18 database**; versions 15 and earlier are refused.
+Crewflow needs an **empty PostgreSQL 16, 17 or 18 database**. Any other version is refused before anything is created ("PostgreSQL N is not supported; use 16-18"): 15 and earlier lack the PostgreSQL 16 role-membership model Crewflow's security relies on, and a newer major is added only after its workspace fingerprints and posture goldens are generated and reviewed.
 
 1. **One setting.** With Docker, the database is one value in `compose.env`, `PG_DATABASE_URL`: your PostgreSQL's admin URL (direct host, `sslmode=verify-full`), an existing `crewflow_owner` URL, or unset to use the bundled `db` service (then set only `PG_DATABASE_PASSWORD`). There is no SQL step: the one-shot `db-setup` service creates the `crewflow_owner` login (`NOSUPERUSER`, `NOBYPASSRLS`) if it is missing, with a random password it keeps on its own volume, and writes a credential-free target file. The API and the Worker never receive a database URL; they build the `crewflow_owner` URL from those two files. They refuse every other database setting at boot: `DATABASE_URL`, `DATABASE_URL_UNPOOLED`, the replica URL, the provisioner URL and the old role passwords.
 

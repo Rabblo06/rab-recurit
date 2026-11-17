@@ -13,7 +13,7 @@
  *     ts-node --transpile-only -P packages/rab-server/tsconfig.app.json \
  *       packages/rab-server/src/database/typeorm/scripts/owner-login/bootstrap-owner-login-check.ts [--source] [--report <file.json>]
  *
- * On a PostgreSQL 15 cluster it runs only B4(c) ("PostgreSQL 16 or later is required"); on 16+ every other scenario.
+ * On a PostgreSQL 15 cluster it runs only B4(c) ("PostgreSQL 15 is not supported; use 16-18"); on 16+ every other scenario.
  * crewflow_owner is CLUSTER-wide, so scenarios run one after another and each starts from no crewflow_owner. The harness
  * refuses a cluster that already has a crewflow_owner it did not create.
  *
@@ -1142,13 +1142,13 @@ const SCENARIOS: Scenario[] = [
 
 const PG15_SCENARIO: Scenario = {
   id: 'postgres-15-refused',
-  covers: 'B4(c): a PostgreSQL 15 server -> "PostgreSQL 16 or later is required."',
+  covers: 'B4(c): a PostgreSQL 15 server -> "PostgreSQL 15 is not supported; use 16-18 (PostgreSQL 16, 17 or 18). Nothing was created. Refusing."',
   async run(ctx) {
     const db = await createDb(ctx, 'pg15');
     const run = await runChild(suUrl(ctx, db));
     assertCleanOutput(run);
     expectResult(run, 64, 'refused', 'PG15');
-    expectLine(run, OWNER_BOOTSTRAP_MESSAGES.pgTooOld, 'PG15');
+    expectLine(run, OWNER_BOOTSTRAP_MESSAGES.unsupportedPostgres(15), 'PG15');
     expect(!(await ownerState(ctx.admin)).exists, 'PG15: crewflow_owner was created');
     return ['exit 64, fixed message, nothing created'];
   },
