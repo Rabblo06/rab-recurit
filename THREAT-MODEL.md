@@ -8866,7 +8866,7 @@ Reversal:   Lower CLOCK_IN_CONFIRM_FLOOR_HOURS, or require a second approver (pa
   `userHasPermission` per flag. The mocked e2e fixture (`crewflow-fixtures.ts`) grants `staff.edit` so the existing bar
   specs keep their four actions.
 
-## PostgreSQL majors: one supported list (16-18), refused everywhere else; every process uses its server's fingerprints (branch fix/pg-majors-15-18, 2026-11-17; no SQL, no migration)
+## PostgreSQL majors: one supported list (16-18), refused everywhere else; every process uses its server's fingerprints (branch fix/pg-majors-15-18, PR #227, 2026-11-17; no migration; a psql version guard in the two provider-admin scripts)
 - **Context:** the 0.6.0 deploy checklist warned that on PostgreSQL 17 / 18 new workspaces could not be created. Cause:
   only the migrate child and the workspace command runner selected the workspace fingerprints of the server's major
   (`selectWorkspaceFingerprintMajor`). The API, the Worker and the CLI never did, so `workspaceFingerprintMajor()` stayed
