@@ -10,6 +10,7 @@ import {
   stepsForVersion,
 } from './upgrade-sequence';
 import { upgradeStateOf } from './upgrade-status.service';
+import { compareVersions, CREWFLOW_PREVIOUS_VERSIONS, majorMinorKey, readAppVersion } from './upgrade-version';
 import { assertOnlyTargetSchema, cursorHasCompleted, increasedCounters, metadataWriteProblems, pendingWorkspaceSteps, WorkspaceCommandRunner, WorkspaceRunFault, structureLevels, WorkspaceStepRefused, workspaceSchemaOf } from './workspace-command-runner';
 import { LATEST_WORKSPACE_MODULE_VERSION, MIN_COMPATIBLE_WORKSPACE_MODULE_VERSION, WORKSPACE_SCHEMA_MODULES } from '../../../database/typeorm/workspace-schema/workspace-schema-modules';
 import { KNOWN_RAB_SETTINGS } from './workspace-step-checks-sql';
@@ -77,6 +78,22 @@ describe('Part D: workspace upgrade commands in the sequence (Twenty upgrade-seq
       }
     }
     expect(() => structureLevels(sequenceForVersions(['0.6.0']))).not.toThrow();
+  });
+
+  it('release guard: the SHIPPED version (root package.json) after CREWFLOW_PREVIOUS_VERSIONS is a sequence the runner can execute', () => {
+    // The exact sequence UpgradeRun / WorkspaceCommandRunner.run build on every start. The registry is keyed <major>-<minor>,
+    // so a patch release (0.6.1) re-lists its minor's commands under its own prefix; a structural command listed twice makes
+    // structureLevels throw inside afterApply, which refuses every start (exit 66).
+    const shipped = readAppVersion({});
+    expect(compareVersions(shipped, CREWFLOW_PREVIOUS_VERSIONS[CREWFLOW_PREVIOUS_VERSIONS.length - 1]!)).toBe(1);
+    const sequence = sequenceForVersions([...CREWFLOW_PREVIOUS_VERSIONS, shipped]);
+    expect(() => structureLevels(sequence)).not.toThrow();
+    // A workspace that completed the previous release must have no step to re-run from an earlier release's list.
+    const previous = CREWFLOW_PREVIOUS_VERSIONS[CREWFLOW_PREVIOUS_VERSIONS.length - 1]!;
+    const cursor = lastStepOfVersion(previous);
+    for (const step of pendingWorkspaceSteps(sequence, shipped, { name: cursor, status: 'completed' }) ?? []) {
+      expect(WORKSPACE_UPGRADE_COMMANDS[majorMinorKey(previous)] ?? []).not.toContain(step.command);
+    }
   });
 
   it('the workspace-module list is FROZEN at 20: new workspace DDL ships as a workspace upgrade command', () => {

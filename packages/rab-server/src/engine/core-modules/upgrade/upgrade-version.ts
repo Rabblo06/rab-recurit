@@ -17,7 +17,7 @@ export const CREWFLOW_APP_VERSION_VAR = 'CREWFLOW_APP_VERSION';
 export const VERSION_PATTERN = /^(0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})$/;
 
 /** Every published version before the current code's, oldest first (Twenty TWENTY_PREVIOUS_VERSIONS). Append only. */
-export const CREWFLOW_PREVIOUS_VERSIONS: readonly string[] = Object.freeze(['0.4.0', '0.5.0']);
+export const CREWFLOW_PREVIOUS_VERSIONS: readonly string[] = Object.freeze(['0.4.0', '0.5.0', '0.6.0']);
 
 /** The adoption release (B3): the one version that accepts an R254 or R256 history with no logbook rows. */
 export const ADOPTION_RELEASE_VERSION = '0.6.0';

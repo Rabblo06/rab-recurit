@@ -8,8 +8,8 @@ describe('upgrade-version (OWNER-DB-ULTIMATE Part B3)', () => {
     for (const bad of ['0.06.0', '1.2', 'v1.2.3', '1.2.3-rc1', '']) expect(() => compareVersions(bad, '0.1.0')).toThrow(AppVersionError);
   });
 
-  it('records R254 = 0.4.0 and R256 = 0.5.0 as the previous versions', () => {
-    expect(CREWFLOW_PREVIOUS_VERSIONS).toEqual(['0.4.0', '0.5.0']);
+  it('records R254 = 0.4.0, R256 = 0.5.0 and the adoption release 0.6.0 as the previous versions', () => {
+    expect(CREWFLOW_PREVIOUS_VERSIONS).toEqual(['0.4.0', '0.5.0', '0.6.0']);
     expect(ADOPTION_VERSION_BY_RELEASE).toEqual({ R254: '0.4.0', R256: '0.5.0' });
   });
 
