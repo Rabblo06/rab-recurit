@@ -28,6 +28,12 @@
  * In a pull request the baseline itself may only shrink against the base branch (--base). Counts are per file, so a
  * moved TARGET (e.g. an entity that moves from modules/ into engine/) does not churn the Worker's entries.
  *
+ * Approved growth: the ONLY way an entry may grow against the base branch is an owner-dated APPROVED_GROWTH entry below,
+ * added in its own PR (not in the PR that uses it). An entry { rule, file, from, to } lets exactly that rule and file go
+ * from exactly `from` (0 = the file has no entry at the base) to exactly `to`; any other count, file or rule still fails.
+ * The tree check (counts must equal the committed baseline) is unchanged. An entry whose `from` no longer equals the base
+ * branch's count is STALE and fails --base, so it must be deleted once the growth it allowed has merged.
+ *
  *   node tools/check-import-boundaries.cjs                    # exit 1 on a new violation or a stale baseline entry
  *   node tools/check-import-boundaries.cjs --list             # print every violating edge (for the fix PRs)
  *   node tools/check-import-boundaries.cjs --write-baseline   # rewrite the baseline; refuses to GROW any entry
@@ -212,18 +218,32 @@ function compare(current, baseline) {
   return { grown, stale };
 }
 
-/** The committed baseline vs the base branch's: an entry above the base, or a new entry, has grown (fail). */
-function compareToBase(base, head) {
+/**
+ * The committed baseline vs the base branch's: an entry above the base, or a new entry, has grown (fail), unless one
+ * APPROVED_GROWTH entry names that rule and file, the base count equals its `from` (absent = 0) and the head count equals
+ * its `to` exactly. `staleApproved` = approvals whose `from` no longer equals the base count (fail: delete them).
+ */
+function compareToBase(base, head, approved = APPROVED_GROWTH) {
+  validateApprovedGrowth(approved);
   const grown = [];
+  const staleApproved = [];
+  const approvalOf = (rule, file) => approved.find((a) => a.rule === rule && a.file === file);
   for (const rule of RULES) {
     const h = head[rule] ?? {};
     const b = base[rule] ?? {};
     for (const file of Object.keys(h)) {
-      if (!(file in b)) grown.push({ rule, file, base: 0, head: h[file], newKey: true });
-      else if (h[file] > b[file]) grown.push({ rule, file, base: b[file], head: h[file], newKey: false });
+      const baseCount = file in b ? b[file] : 0;
+      if (h[file] <= baseCount) continue;
+      const a = approvalOf(rule, file);
+      if (a && a.from === baseCount && a.to === h[file]) continue;
+      grown.push({ rule, file, base: baseCount, head: h[file], newKey: !(file in b) });
     }
   }
-  return { grown };
+  for (const a of approved) {
+    const baseCount = (base[a.rule] ?? {})[a.file] ?? 0;
+    if (baseCount !== a.from) staleApproved.push({ ...a, base: baseCount });
+  }
+  return { grown, staleApproved };
 }
 
 function parseBaseline(text, label) {
@@ -273,6 +293,47 @@ function baselineDocument(counts) {
   };
 }
 
+/**
+ * Owner-approved growth of the committed baseline against the base branch (see the header). Each entry is used by exactly
+ * one PR; delete it once that PR has merged (--base reports it STALE from then on). Never widen `to` in place: a new
+ * growth is a new entry in its own PR, with the owner's dated approval.
+ *
+ * Empty: the two PR #204 entries (push-dispatch.job.ts 1 -> 2, push-send.processor.ts 10 -> 11) were consumed when #204
+ * merged and are deleted here. To add one, append exactly this shape (every key required, nothing else allowed):
+ *
+ *   Object.freeze({
+ *     rule: 'worker-deep-import',                   // one of RULES
+ *     file: 'packages/rab-worker/src/<path>.ts',    // the importing file, repo-relative, exactly as in the baseline
+ *     from: 1,                                      // the base branch's count for that rule and file (0 = no entry)
+ *     to: 2,                                        // the exact head count the using PR commits (above `from`)
+ *     approved: 'owner YYYY-MM-DD',                 // the owner's approval date
+ *     reason: 'PR #NNN (...): imports <target>, because ...',
+ *   }),
+ */
+const APPROVED_GROWTH = Object.freeze([]);
+
+/** Refuses a malformed approval list (fail closed: a typo must never widen what --base accepts). */
+function validateApprovedGrowth(list) {
+  if (!Array.isArray(list)) throw new Error('APPROVED_GROWTH must be an array');
+  const seen = new Set();
+  for (const e of list) {
+    const where = `APPROVED_GROWTH ${JSON.stringify(e && e.file)}`;
+    if (!e || typeof e !== 'object') throw new Error('APPROVED_GROWTH: every entry must be an object');
+    const keys = Object.keys(e).sort().join(',');
+    if (keys !== 'approved,file,from,reason,rule,to') throw new Error(`${where}: keys must be exactly rule, file, from, to, approved, reason`);
+    if (!RULES.includes(e.rule)) throw new Error(`${where}: unknown rule "${e.rule}"`);
+    if (typeof e.file !== 'string' || !e.file) throw new Error(`${where}: file must be a repo-relative path`);
+    if (!Number.isInteger(e.from) || e.from < 0) throw new Error(`${where}: from must be a non-negative integer`);
+    if (!Number.isInteger(e.to) || e.to <= e.from) throw new Error(`${where}: to must be an integer above from`);
+    if (typeof e.approved !== 'string' || !/^owner \d{4}-\d{2}-\d{2}$/.test(e.approved)) throw new Error(`${where}: approved must read "owner YYYY-MM-DD"`);
+    if (typeof e.reason !== 'string' || !e.reason.trim()) throw new Error(`${where}: reason is required`);
+    const k = `${e.rule}\0${e.file}`;
+    if (seen.has(k)) throw new Error(`${where}: duplicate entry for ${e.rule}`);
+    seen.add(k);
+  }
+  return list;
+}
+
 const total = (counts) => Object.values(counts).reduce((n, files) => n + Object.values(files).reduce((a, b) => a + b, 0), 0);
 
 function main(argv) {
@@ -287,10 +348,11 @@ function main(argv) {
       console.log(`[import-boundaries] ${ref} has no ${BASELINE_REL} yet: nothing to compare.`);
       return 0;
     }
-    const { grown } = compareToBase(base, head);
-    for (const g of grown) console.log(`GROWN  ${g.rule.padEnd(25)} ${g.file}: ${g.newKey ? 'new entry' : `${g.base} ->`} ${g.head}. The baseline may only shrink against ${ref}.`);
-    console.log(`[import-boundaries] baseline vs ${ref}: ${grown.length} grown entr${grown.length === 1 ? 'y' : 'ies'}.`);
-    return grown.length ? 1 : 0;
+    const { grown, staleApproved } = compareToBase(base, head);
+    for (const g of grown) console.log(`GROWN  ${g.rule.padEnd(25)} ${g.file}: ${g.newKey ? 'new entry' : `${g.base} ->`} ${g.head}. The baseline may only shrink against ${ref} (growth needs an owner-dated APPROVED_GROWTH entry, in its own PR, for exactly this count).`);
+    for (const s of staleApproved) console.log(`STALE APPROVAL ${s.rule.padEnd(25)} ${s.file}: approved from ${s.from}, ${ref} has ${s.base}. Delete this APPROVED_GROWTH entry.`);
+    console.log(`[import-boundaries] baseline vs ${ref}: ${grown.length} grown entr${grown.length === 1 ? 'y' : 'ies'}, ${staleApproved.length} stale approval(s), ${APPROVED_GROWTH.length - staleApproved.length} approval(s) in force.`);
+    return grown.length || staleApproved.length ? 1 : 0;
   }
 
   const sites = scan();
@@ -347,5 +409,5 @@ if (require.main === module) {
 
 module.exports = {
   RULES, WORKER_SURFACE, BASELINE_REL, readBaselineAt, isTestFile, specifiersOf, resolveSpecifier, classify, scanSource, scan, countsOf,
-  compare, compareToBase, parseBaseline, baselineDocument, loadTypeScript, main,
+  compare, compareToBase, APPROVED_GROWTH, validateApprovedGrowth, parseBaseline, baselineDocument, loadTypeScript, main,
 };

@@ -1,6 +1,6 @@
 import { loadSystemRoleDefaultPermissions } from '../../identity/services/system-role-permissions';
 import { lockLiveUser } from '../../identity/services/live-user-lock';
-import { ARCHIVE_TRANSITIONS, ArchiveState, archiveStateOf, assertTransition, EmailOutboxJobType, EmailOutboxStatusType, ManagerType, ManagerTypeType, normalizeEmail, PermissionFlag, PermissionFlagType, USER_STATUS_TRANSITIONS, UserStatus } from '@rab/shared';
+import { ARCHIVE_TRANSITIONS, ArchiveState, archiveStateOf, assertTransition, EmailOutboxJobType, EmailOutboxStatusType, ManagerType, ManagerTypeType, normalizeEmail, PermissionFlag, USER_STATUS_TRANSITIONS, UserStatus } from '@rab/shared';
 import { BadRequestException, ConflictException, ForbiddenException, Inject, Injectable, NotFoundException } from '@nestjs/common';
 import { PermissionsService } from '../../../engine/core-modules/permissions/permissions.service';
 import { CoreEntityCacheService } from '../../../engine/core-modules/entity-cache/core-entity-cache.service';
@@ -47,6 +47,9 @@ const MANAGER_SORT_COLUMNS: Record<string, string> = {
   jobTitle: 'mp.jobTitle',
   createdAt: 'mp.createdAt',
 };
+
+/** The class flags of the two routes that reach the shared per-record ManagerService methods (SF-2 layer 2). */
+export type ManagerRouteFlag = typeof PermissionFlag.MANAGER_MANAGE | typeof PermissionFlag.VENUE_MANAGER_CREATE;
 
 /** Canonical Manager/Venue Manager/CEO role keys and permission sets. `applicationAllowed()` matches these keys exactly, so tests must build identities from them (see `__tests__/integration/helpers/test-identities.ts`). */
 export const ROLE_DEFS: Record<string, { key: string; name: string; permissions: string[] }> = {
@@ -240,29 +243,39 @@ export class ManagerService {
 
   private async ensureRole(manager: EntityManager, organisationId: string, type: string): Promise<Role> {
     const def = ROLE_DEFS[type]!;
-    let role = await manager.findOne(Role, { where: { organisationId, key: def.key } });
-    if (role) {
-      if (type === ManagerType.VENUE && role.isSystem) {
+    const withVenueDefaults = async (found: Role): Promise<Role> => {
+      if (type === ManagerType.VENUE && found.isSystem) {
         const defaults = await loadSystemRoleDefaultPermissions(manager, def.key, def.permissions);
-        if (defaults.length) await manager.createQueryBuilder().insert().into(RolePermission).values(defaults.map(permission => ({ organisationId, roleId: role!.id, permissionId: permission.id }))).orIgnore().execute();
+        if (defaults.length) await manager.createQueryBuilder().insert().into(RolePermission).values(defaults.map(permission => ({ organisationId, roleId: found.id, permissionId: permission.id }))).orIgnore().execute();
       }
-      return role;
-    }
+      return found;
+    };
+    const found = await manager.findOne(Role, { where: { organisationId, key: def.key } });
+    if (found) return withVenueDefaults(found);
 
-    const result = await manager.insert(Role, {
-      organisationId,
-      key: def.key,
-      name: def.name,
-      isSystem: true,
-    });
-    role = await manager.findOneByOrFail(Role, { id: result.identifiers[0]!.id as string });
+    // Concurrency backstop, the same as StaffService.ensureStaffRole: two Managers creating the organisation's first
+    // Manager / Venue Manager / CEO of a type at the same instant can both miss the `findOne` above. A plain insert made
+    // the loser fail with 23505 (`role_organisation_id_key_key`) → 500. `ON CONFLICT DO NOTHING` never raises, so it
+    // needs no savepoint: the loser's statement waits for the winner's uncommitted insert, inserts nothing once the
+    // winner commits (its RolePermission rows below are committed and visible by then), and re-selects the winner's role.
+    const inserted: Array<{ id: string }> = await manager.query(
+      `INSERT INTO core.role (organisation_id, key, name, is_system)
+       VALUES ($1, $2, $3, true)
+       ON CONFLICT (organisation_id, key) DO NOTHING
+       RETURNING id`,
+      [organisationId, def.key, def.name],
+    );
+    if (inserted.length === 0) {
+      return withVenueDefaults(await manager.findOneByOrFail(Role, { organisationId, key: def.key }));
+    }
+    const role = await manager.findOneByOrFail(Role, { id: inserted[0]!.id });
 
     // Fail closed: never create a system role missing any of its defaults (see loadSystemRoleDefaultPermissions).
     const permissions = await loadSystemRoleDefaultPermissions(manager, def.key, def.permissions);
     if (permissions.length > 0) {
       await manager.insert(
         RolePermission,
-        permissions.map((permission) => ({ roleId: role!.id, permissionId: permission.id, organisationId })),
+        permissions.map((permission) => ({ roleId: role.id, permissionId: permission.id, organisationId })),
       );
     }
     return role;
@@ -343,6 +356,26 @@ export class ManagerService {
   }
 
   /**
+   * SF-2 layer 2 for a method two routes reach with DIFFERENT class guards: `/managers` (`manager.manage`, the default)
+   * and `/venue-managers` (`venue_manager.create`, passed by VenueManagerService after its own-workspace gate). The flag
+   * of the caller's route is re-checked first, inside the action's own transaction (403 for any id, before a row is
+   * read). Anything but those two flags (e.g. through an `as never` cast) fails closed. `alsoRequires` adds a route's
+   * extra method guard (`user.reset_password` on reset / pending-email).
+   */
+  private async assertRouteFlagTx(
+    manager: EntityManager,
+    ctx: AuthContext,
+    requiredPermission: ManagerRouteFlag,
+    alsoRequires?: typeof PermissionFlag.USER_RESET_PASSWORD,
+  ): Promise<void> {
+    if (requiredPermission !== PermissionFlag.MANAGER_MANAGE && requiredPermission !== PermissionFlag.VENUE_MANAGER_CREATE) {
+      throw new ForbiddenException('Managing Manager accounts is not permitted.');
+    }
+    await this.permissions.assertPermissionTx(manager, ctx, requiredPermission, 'Managing Manager accounts is not permitted.');
+    if (alsoRequires) await this.permissions.assertPermissionTx(manager, ctx, alsoRequires, 'Resetting passwords is not permitted.');
+  }
+
+  /**
    * CEO accounts are meant to be small, rare, and powerful — mutating one
    * (edit/deactivate/reset-password), not just creating one, requires the
    * platform-admin claim, the same protection level as creation. Any other
@@ -363,14 +396,27 @@ export class ManagerService {
    */
   async get(ctx: AuthContext, id: string): Promise<ManagerSummary> {
     return this.tenantContext.runInTenantContext(ctx, async (manager) => {
-      const profile = await manager.findOne(ManagerProfile, { where: { id, organisationId: ctx.organisationId! }, relations: { user: true } });
-      if (!profile?.user) throw new NotFoundException('Manager not found.');
-      return this.toSummaryWithInvite(manager, profile);
+      // SF-2 layer 2: the route's manager.manage, first (403 for any id; jobs / other services skip the guard).
+      await this.assertRouteFlagTx(manager, ctx, PermissionFlag.MANAGER_MANAGE);
+      return this.getWithin(manager, ctx, id);
     });
+  }
+
+  /**
+   * `get`'s read inside a transaction the CALLER owns, with NO permission check — the caller has authorised already
+   * (same `xxxWithin` convention as `createWithin` / `cancelInviteWithin`). Today only the Admin Panel's
+   * `OrganisationOnboardingService.getOrganisation` uses it, behind its own platform-admin re-check, because a platform
+   * admin holds no role in the organisation it inspects. Organisation-pinned lookup; not found → 404.
+   */
+  async getWithin(manager: EntityManager, ctx: AuthContext, id: string): Promise<ManagerSummary> {
+    const profile = await manager.findOne(ManagerProfile, { where: { id, organisationId: ctx.organisationId! }, relations: { user: true } });
+    if (!profile?.user) throw new NotFoundException('Manager not found.');
+    return this.toSummaryWithInvite(manager, profile);
   }
 
   async list(ctx: AuthContext, dto: ListManagersDto = {}): Promise<{ data: ManagerSummary[]; total: number }> {
     return this.tenantContext.runInTenantContext(ctx, async (manager) => {
+      await this.assertRouteFlagTx(manager, ctx, PermissionFlag.MANAGER_MANAGE);
       const qb = manager
         .createQueryBuilder(ManagerProfile, 'mp')
         .innerJoinAndSelect('mp.user', 'user') // owner 0g: a soft-deleted account (deleted_at, filtered in the join) is not listed
@@ -514,7 +560,12 @@ export class ManagerService {
    * there. See `activateAccount()` on `AuthService`.
    */
   async create(ctx: AuthContext, dto: CreateManagerDto): Promise<ManagerSummary & { invite: { sendNumber: number; expiresAt: Date; queued: boolean } | null; emailQueued: boolean }> {
-    return this.tenantContext.runInTenantContext(ctx, (manager) => this.createWithin(manager, ctx, dto));
+    return this.tenantContext.runInTenantContext(ctx, async (manager) => {
+      // SF-2 layer 2: `POST /managers`'s manager.manage. `createWithin` stays check-free: its other callers (Venue
+      // Manager creation, Initial Manager and CEO invitation flows) each authorise with their own rule first.
+      await this.assertRouteFlagTx(manager, ctx, PermissionFlag.MANAGER_MANAGE);
+      return this.createWithin(manager, ctx, dto);
+    });
   }
 
   /**
@@ -679,9 +730,10 @@ export class ManagerService {
     return userId;
   }
 
-  async update(ctx: AuthContext, id: string, dto: UpdateManagerDto): Promise<ManagerSummary> {
+  async update(ctx: AuthContext, id: string, dto: UpdateManagerDto, requiredPermission: ManagerRouteFlag = PermissionFlag.MANAGER_MANAGE): Promise<ManagerSummary> {
     let displayChangedFor: string | null = null;
     const summary = await this.tenantContext.runInTenantContext(ctx, async (manager) => {
+      await this.assertRouteFlagTx(manager, ctx, requiredPermission);
       const profile = await manager.findOne(ManagerProfile, { where: { id }, relations: { user: true } });
       if (!profile?.user) throw new NotFoundException('Manager not found.');
       await lockLiveUser(manager, profile.userId, 'Manager not found.');
@@ -723,9 +775,10 @@ export class ManagerService {
    * invitation was sent" mistake this task explicitly forbids. Guarded here,
    * same message/shape as `resetPassword`'s pre-existing identical guard.
    */
-  async setActive(ctx: AuthContext, id: string, active: boolean): Promise<ManagerSummary> {
+  async setActive(ctx: AuthContext, id: string, active: boolean, requiredPermission: ManagerRouteFlag = PermissionFlag.MANAGER_MANAGE): Promise<ManagerSummary> {
     await this.stepUpReauth.assertRecentStepUp(ctx, active ? 'user.reactivate' : 'user.deactivate');
     return this.tenantContext.runInTenantContext(ctx, async (manager) => {
+      await this.assertRouteFlagTx(manager, ctx, requiredPermission);
       const profile = await manager.findOne(ManagerProfile, { where: { id }, relations: { user: true } });
       if (!profile?.user) throw new NotFoundException('Manager not found.');
       await lockLiveUser(manager, profile.userId, 'Manager not found.');
@@ -814,9 +867,11 @@ export class ManagerService {
   }
 
   /** Admin-triggered reset — see `StaffService.resetPassword` / `AccountLifecycleService.adminResetPassword`. */
-  async resetPassword(ctx: AuthContext, id: string): Promise<void> {
+  async resetPassword(ctx: AuthContext, id: string, requiredPermission: ManagerRouteFlag = PermissionFlag.MANAGER_MANAGE): Promise<void> {
     await this.stepUpReauth.assertRecentStepUp(ctx, 'user.password_reset');
     return this.tenantContext.runInTenantContext(ctx, async (manager) => {
+      // SF-2 layer 2: the route's class flag AND its method guard user.reset_password.
+      await this.assertRouteFlagTx(manager, ctx, requiredPermission, PermissionFlag.USER_RESET_PASSWORD);
       const profile = await manager.findOne(ManagerProfile, { where: { id }, relations: { user: true } });
       if (!profile?.user) throw new NotFoundException('Manager not found.');
       await lockLiveUser(manager, profile.userId, 'Manager not found.');
@@ -851,6 +906,11 @@ export class ManagerService {
    * `audit` (Admin Panel): extra, fixed audit metadata for a platform-admin resend — `via: 'platform_admin'` (lets the
    * admin timeline pick this row out of the tenant's own resends) and the admin's reason. Never caller-shaped metadata.
    */
+  // SF-2: NO service-level flag re-check here yet, on purpose (owner decision pending). The Admin Panel's platform-admin
+  // CEO resend (`OrganisationOnboardingService.resendCeoInvite`) calls this with a context that holds no role in the
+  // target organisation, so a plain `manager.manage` re-check would break it; it needs an explicit, audited authority
+  // path first. Callers: /managers (route guards), VenueManagerService (own-workspace gate + user.reset_password),
+  // the Initial Manager resend (own CEO / platform-admin rule).
   async resendInvite(ctx: AuthContext, id: string, audit?: { via: 'platform_admin'; reason?: string }): Promise<{ sendNumber: number; expiresAt: Date; queued: boolean }> {
     return this.tenantContext.runInTenantContext(ctx, async (manager) => {
       const profile = await this.findPendingProfileOrFail(manager, ctx, id);
@@ -877,11 +937,12 @@ export class ManagerService {
    * action either). The old email can never activate the account again —
    * every currently-active token is revoked before the email changes.
    */
-  async changePendingEmail(ctx: AuthContext, id: string, dto: ChangePendingEmailDto): Promise<{ sendNumber: number; expiresAt: Date; queued: boolean }> {
+  async changePendingEmail(ctx: AuthContext, id: string, dto: ChangePendingEmailDto, requiredPermission: ManagerRouteFlag = PermissionFlag.MANAGER_MANAGE): Promise<{ sendNumber: number; expiresAt: Date; queued: boolean }> {
     await this.stepUpReauth.assertRecentStepUp(ctx, 'user.pending_email.change');
     const newEmail = normalizeEmail(dto.email);
     let emailChangedFor: string | null = null;
     const invite = await this.tenantContext.runInTenantContext(ctx, async (manager) => {
+      await this.assertRouteFlagTx(manager, ctx, requiredPermission, PermissionFlag.USER_RESET_PASSWORD);
       const profile = await this.findPendingProfileOrFail(manager, ctx, id);
       if (newEmail === profile.user!.email) {
         throw new BadRequestException('This is already the pending email for this account.');
@@ -939,6 +1000,8 @@ export class ManagerService {
    * password avoids reintroducing the exact DEACTIVATED dead-end described
    * above — status stays untouched, Re-invite keeps working unchanged.
    */
+  // SF-2: NO service-level flag re-check here yet, on purpose (owner decision pending) — the platform-admin CEO revoke
+  // (`OrganisationOnboardingService.revokeCeoInvite`) has no role in the target organisation; see `resendInvite`.
   async cancelInvite(ctx: AuthContext, id: string): Promise<void> {
     return this.tenantContext.runInTenantContext(ctx, (manager) => this.cancelInviteWithin(manager, ctx, id));
   }
@@ -968,6 +1031,7 @@ export class ManagerService {
    */
   async assignVenue(ctx: AuthContext, managerId: string, venueId: string): Promise<void> {
     return this.tenantContext.runInTenantContext(ctx, async (manager) => {
+      await this.assertRouteFlagTx(manager, ctx, PermissionFlag.MANAGER_MANAGE);
       const profile = await manager.findOne(ManagerProfile, { where: { id: managerId } });
       if (!profile) throw new NotFoundException('Manager not found.');
       if (profile.type !== ManagerType.VENUE) {
@@ -1024,6 +1088,7 @@ export class ManagerService {
 
   async unassignVenue(ctx: AuthContext, managerId: string, venueId: string): Promise<void> {
     return this.tenantContext.runInTenantContext(ctx, async (manager) => {
+      await this.assertRouteFlagTx(manager, ctx, PermissionFlag.MANAGER_MANAGE);
       const t = businessTables(manager);
       await manager.query(`DELETE FROM ${t.manager_venue} WHERE manager_profile_id = $1 AND venue_id = $2`, [managerId, venueId]);
       await this.auditService.record(manager, ctx, AuditAction.MANAGER_VENUE_UNASSIGNED, {
@@ -1118,10 +1183,12 @@ export class ManagerService {
     ctx: AuthContext,
     id: string,
     dto: ChangeEmailDto,
-    requiredPermission: PermissionFlagType = PermissionFlag.MANAGER_MANAGE,
+    requiredPermission: ManagerRouteFlag = PermissionFlag.MANAGER_MANAGE,
   ): Promise<{ email: string } | EmailChangeRequestResult> {
     await this.stepUpReauth.assertRecentStepUp(ctx, 'user.email.change');
     const outcome = await this.tenantContext.runInTenantContext(ctx, async (manager) => {
+      // SF-2 layer 2: also for the direct (INVITED) correction; the verified path re-checks it in EmailChangeService.
+      await this.assertRouteFlagTx(manager, ctx, requiredPermission);
       const profile = await manager.findOne(ManagerProfile, { where: { id, organisationId: ctx.organisationId! }, relations: { user: true } });
       if (!profile?.user) throw new NotFoundException('Manager not found.');
       await lockLiveUser(manager, profile.userId, 'Manager not found.');
@@ -1155,8 +1222,9 @@ export class ManagerService {
   }
 
   /** Backs the detail panel's Timeline tab. */
-  async getTimeline(ctx: AuthContext, id: string): Promise<AuditLogListItem[]> {
+  async getTimeline(ctx: AuthContext, id: string, requiredPermission: ManagerRouteFlag = PermissionFlag.MANAGER_MANAGE): Promise<AuditLogListItem[]> {
     const profile = await this.tenantContext.runInTenantContext(ctx, async (manager) => {
+      await this.assertRouteFlagTx(manager, ctx, requiredPermission);
       const p = await manager.findOne(ManagerProfile, { where: { id, organisationId: ctx.organisationId! } });
       if (!p) throw new NotFoundException('Manager not found.');
       return p;
@@ -1165,8 +1233,9 @@ export class ManagerService {
   }
 
   /** Backs the detail panel's Note tab. */
-  async listNotes(ctx: AuthContext, id: string): Promise<UserNoteItem[]> {
+  async listNotes(ctx: AuthContext, id: string, requiredPermission: ManagerRouteFlag = PermissionFlag.MANAGER_MANAGE): Promise<UserNoteItem[]> {
     return this.tenantContext.runInTenantContext(ctx, async (manager) => {
+      await this.assertRouteFlagTx(manager, ctx, requiredPermission);
       const profile = await manager.findOne(ManagerProfile, { where: { id, organisationId: ctx.organisationId! } });
       if (!profile) throw new NotFoundException('Manager not found.');
       return this.userNote.list(manager, ctx, profile.userId);
@@ -1215,8 +1284,13 @@ export class ManagerService {
   }
 
   /** Backs the detail panel's Email tab — see StaffService.listEmails's identical doc comment. */
-  async listEmails(ctx: AuthContext, id: string): Promise<Array<{ id: string; subject: string; status: string; createdAt: Date; sentAt: Date | null }>> {
+  async listEmails(
+    ctx: AuthContext,
+    id: string,
+    requiredPermission: ManagerRouteFlag = PermissionFlag.MANAGER_MANAGE,
+  ): Promise<Array<{ id: string; subject: string; status: string; createdAt: Date; sentAt: Date | null }>> {
     return this.tenantContext.runInTenantContext(ctx, async (manager) => {
+      await this.assertRouteFlagTx(manager, ctx, requiredPermission);
       const profile = await manager.findOne(ManagerProfile, { where: { id, organisationId: ctx.organisationId! } });
       if (!profile) throw new NotFoundException('Manager not found.');
       const rows = await manager.find(EmailOutbox, {
@@ -1261,10 +1335,12 @@ export class ManagerService {
    */
   async deleteVenueManagerUser(ctx: AuthContext, id: string, currentPassword: string): Promise<void> {
     await this.stepUpReauth.assertCurrentPassword(ctx, currentPassword);
-    // The own-workspace Venue Manager scope is re-checked inside this transaction (the caller's check ran in its own).
-    const deletedUserId = await this.tenantContext.runInTenantContext(ctx, (manager) =>
-      this.deleteUserWithin(manager, ctx, id, { workspaceId: ctx.workspaceId ?? null, type: ManagerType.VENUE }),
-    );
+    // The own-workspace Venue Manager scope AND the route's venue_manager.create (SF-2 layer 2: no implicit call-order
+    // rule on the caller's earlier, separate check) are re-checked inside this transaction.
+    const deletedUserId = await this.tenantContext.runInTenantContext(ctx, async (manager) => {
+      await this.assertRouteFlagTx(manager, ctx, PermissionFlag.VENUE_MANAGER_CREATE);
+      return this.deleteUserWithin(manager, ctx, id, { workspaceId: ctx.workspaceId ?? null, type: ManagerType.VENUE });
+    });
     await this.invalidateUserDisplay(deletedUserId);
   }
 
