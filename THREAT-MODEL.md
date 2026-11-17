@@ -8638,3 +8638,26 @@ Reversal:   Lower CLOCK_IN_CONFIRM_FLOOR_HOURS, or require a second approver (pa
   `BusinessTablesError('unbound')` for `advance` and `discover`. `tenant-context.service.spec.ts` and
   `workspace-execution-context.integration.spec.ts` pin the trap behaviour (`''` bound, the real schema still handed to the
   callback). Every server and worker suite passes under the trap.
+
+## Staff same-shift Teams read: role membership instead of equality on the comma-joined role (branch fix/shift-team-multi-role, 2026-11-17; needs owner approval)
+- **Bug (failed closed):** `ShiftTeamService.list` refused anyone whose `ctx.role !== 'staff'`. `AuthContext.role` is
+  `security.roles.join(',')` (`jwt-auth.guard.ts`), so a staff user who also holds another role (for example
+  `manager,staff`) got 403 on `GET /rest/v1/attendance/me/shift/:shiftId/team` even with a confirmed assignment.
+- **Change (widens access, owner approval needed):** the service now tests role MEMBERSHIP on the request's
+  server-resolved `ctx.security.roles` (the list `applicationAllowed` and the MFA checks read), still together with the
+  `staff_app` target and `attendance.clock`. A caller with no security snapshot (one that never passed `JwtAuthGuard`)
+  has no roles and is refused (fail closed). Everything else is unchanged: self is resolved first, the caller's own
+  confirmed assignment is locked, the transaction-local capability GUCs, the minimal fields (first name, interval, You)
+  and 404 for an unrelated, unconfirmed or foreign shift.
+- **Not changed (flagged):** layer 4 still compares by equality. The additive RLS policy `staff_profile_shift_team_select`
+  (workspace-schema module `v1.002-shift-team-policy`, migration `1786718100000`) requires
+  `current_setting('rab.role') = 'staff'`, and `rab.role` is the same comma-joined value. So a multi-role staff user now
+  passes the service gate but the database still hides every teammate's profile: the roster lists only "You". Fixing that
+  is a new workspace-schema policy version (`'staff' = ANY(string_to_array(current_setting('rab.role', true), ','))`) plus
+  its migration and posture goldens, which needs owner review of the SQL. Until then the gap fails closed (fewer names,
+  never more).
+- **Tests:** `shift-team.integration.spec.ts`: a single-role staff caller gets the roster at the service layer; a caller
+  with `manager` or `manager,venue_manager` and no `staff` is refused at the service layer on the staff app; a caller with
+  no snapshot is refused; a manager signed in to the staff app gets 403; a `manager` + `staff` user gets 200 with their
+  own row (was 403); an `it.failing` case pins the RLS gap above (full team expected) so it turns red once the policy is
+  fixed.
