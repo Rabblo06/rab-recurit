@@ -145,18 +145,26 @@ enum VMDate {
 
 /// Server time anchored to a monotonic clock (CLAUDE.md: never device time
 /// for a running timer). `nil` when the server sent no `serverNow`.
+///
+/// The same trusted clock the staff shift timer uses (`StaffServerClock`:
+/// last `serverNow` + Darwin `CLOCK_MONOTONIC`). It used
+/// `ProcessInfo.systemUptime`, which stops while the phone sleeps, so the
+/// Teams countdown and the review sheet fell behind real time after a sleep
+/// until the next poll re-anchored them.
 struct VMServerClock: Equatable {
-    let anchor: Date
-    let uptimeAtAnchor: TimeInterval
+    private let trusted: StaffServerClock
 
-    init?(serverNow: Date?, uptime: TimeInterval = ProcessInfo.processInfo.systemUptime) {
+    init?(serverNow: Date?, monotonicNanos: UInt64 = StaffServerClock.systemMonotonicNanos()) {
         guard let serverNow else { return nil }
-        anchor = serverNow
-        uptimeAtAnchor = uptime
+        var clock = StaffServerClock()
+        clock.anchor(serverNow, monotonicNanos: monotonicNanos)
+        trusted = clock
     }
 
-    func now(uptime: TimeInterval = ProcessInfo.processInfo.systemUptime) -> Date {
-        anchor.addingTimeInterval(max(0, uptime - uptimeAtAnchor))
+    /// Never nil in practice (init refuses a nil `serverNow`); optional because
+    /// `StaffServerClock.now` is. Callers already read it as `clock?.now()`.
+    func now(monotonicNanos: UInt64 = StaffServerClock.systemMonotonicNanos()) -> Date? {
+        trusted.now(monotonicNanos: monotonicNanos)
     }
 }
 
