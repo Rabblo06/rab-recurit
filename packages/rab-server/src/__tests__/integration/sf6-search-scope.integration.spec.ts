@@ -60,6 +60,8 @@ describeIfDb('SF-6: search uses the same scope as the lists (integration)', () =
   async function staff(owner: TestIdentity, first: string, last: string): Promise<TestIdentity> {
     const s = await factory.createStaff({ id: owner.organisationId }, { owner, label: 'sf6s' });
     await admin.query(`UPDATE core."user" SET first_name = $2, last_name = $3 WHERE id = $1`, [s.userId, first, last]);
+    // Offer-eligible (an offer is only sent to an active employee), as the other offer suites set it.
+    await admin.query(`UPDATE ${businessTable(owner.workspaceId!, 'staff_profile')} SET employment_status = 'active' WHERE id = $1`, [s.profileId]);
     return s;
   }
 
@@ -123,7 +125,7 @@ describeIfDb('SF-6: search uses the same scope as the lists (integration)', () =
     expect((await http().post(`/rest/v1/shifts/${shift.body.id}/publish`).set(auth(tokenB))).status).toBe(201);
     const worker = await staff(b, `Offeree${tag}`, 'Person');
     const offer = await http().post(`/rest/v1/shifts/${shift.body.id}/offers`).set(auth(tokenB)).send({ staffProfileId: worker.profileId });
-    expect(offer.status).toBe(201);
+    expect({ status: offer.status, body: offer.body }).toMatchObject({ status: 201 });
 
     // Control: B finds all three by the venue name.
     const before = await search(tokenB, `sfsix venue ${tag}`);
