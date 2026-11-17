@@ -21,8 +21,16 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: ./.github/actions/yarn-install
-      - name: yarn npm audit (high+)
-        run: yarn npm audit --severity high --all --recursive
+      # Same `yarn npm audit --severity high --all --recursive`. A High/Critical advisory passes only with a valid entry
+      # in tools/npm-audit-decisions.json (one GHSA id + one package, owner decision, <= 30 days), only while NO fix
+      # exists (no first_patched_version, no non-vulnerable release in any major) and only while the package is not in
+      # the production closure (yarn.lock walk minus runtime-deps.cjs RUNTIME_PRUNE). Fails closed on a broken lookup.
+      - name: The check's own tests
+        run: node --test tools/check-npm-audit.test.cjs
+      - name: yarn npm audit (high+), dev/build-only owner exceptions applied
+        env:
+          GITHUB_TOKEN: ${{ github.token }} # the GitHub advisory lookup (first_patched_version)
+        run: node tools/check-npm-audit.cjs
 
   constraints-and-licenses:
     runs-on: ubuntu-latest
