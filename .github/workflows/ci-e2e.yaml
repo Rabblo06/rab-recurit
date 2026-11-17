@@ -202,7 +202,7 @@ jobs:
   # filter output(s) (front, server, e2e) said there was nothing to run; when the filter said run, every job must succeed.
   ci-e2e-gate:
     name: ci-e2e gate
-    needs: [changed, spec-coverage, web-mocked, web-live]
+    needs: [changed, spec-coverage, web-mocked, web-isolated, web-live]
     if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 5

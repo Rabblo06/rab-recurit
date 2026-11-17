@@ -308,7 +308,7 @@ jobs:
   # filter output(s) (worker) said there was nothing to run; when the filter said run, every job must succeed.
   ci-worker-gate:
     name: ci-worker gate
-    needs: [changed, test-hws-off, phase-d, test-search-path-trap]
+    needs: [changed, test, test-hws-off, phase-d, test-search-path-trap]
     if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 5
