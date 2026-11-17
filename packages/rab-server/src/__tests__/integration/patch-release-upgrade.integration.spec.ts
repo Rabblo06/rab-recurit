@@ -36,9 +36,12 @@ import { dropWorkspaceSchema, FROZEN_TEMPLATE_REGISTRY, provisionTypeScript, reg
  *   5. 0.6.1 → 0.7.0 still runs the 0.7 instance command and, per workspace, the 0.7 workspace command;
  *   6. a registry with a patch key refuses before anything is written (PatchReleaseCommandsError);
  *   7. abuse: a patch cannot skip an incomplete 0.6.0 (a READY workspace that never finished it): 65, nothing written.
- * The database's own release is 0.6.0 (a fresh 0.6.0 install, as ci-db builds it). Every row and workspace written here is
- * removed afterwards; newer instance rows (0.6.1 / 0.7.0) are removed even when a case fails, so later spec files on the same
- * database never see a "newer" logbook.
+ * Self-sufficient (shards share one database; an earlier spec file may have changed the instance logbook): beforeAll SEEDS
+ * the state the cases need (a completed `0.6.0_TypeOrmMigrations` instance row, added only when its latest attempt is not
+ * completed) and verifies that no instance row is newer than 0.6.0 (its own 0.6.1 / 0.7.0 rows are removed first). afterAll
+ * removes exactly the rows it seeded, every row and workspace written here, and the 0.6.1 / 0.7.0 instance rows (also when a
+ * case fails), so later spec files see the logbook as it was. /healthz-state assertions allow for workspace issues another
+ * spec file left behind (they turn behind / ok into failed, as the real status would); none may be one of this file's.
  */
 jest.setTimeout(300_000);
 
@@ -63,6 +66,8 @@ describeIfDb('patch releases through the upgrade runner (integration)', () => {
   const done: SeededWorkspace[] = [];
   let fresh: SeededWorkspace;
   let seq = 0;
+  /** Instance rows this file seeded in beforeAll (removed in afterAll by id). */
+  const seeded: string[] = [];
 
   const make = async (n: string, provision: 'frozen' | 'current' = 'frozen'): Promise<SeededWorkspace> => {
     seq += 1;
@@ -96,6 +101,19 @@ describeIfDb('patch releases through the upgrade runner (integration)', () => {
       await c.end();
     }
   };
+  /**
+   * The status of `version`, asserting `want` for this file's state. A workspace issue another spec file left on the shared
+   * database (a failed cursor, a READY workspace without a row) turns behind / ok into failed, exactly as /healthz would;
+   * none of the issues may be one of this file's workspaces.
+   */
+  const expectStatus = async (version: string, want: 'behind' | 'ok' | 'ahead') => {
+    const s = await status(version);
+    const mine = (s.workspaces ?? []).filter((w) => created.some((c) => c.id === w.workspaceId));
+    expect(mine).toEqual([]);
+    const foreign = (s.workspaces ?? []).length > 0;
+    expect(s.state).toBe(foreign && want !== 'ahead' ? 'failed' : want);
+    return s;
+  };
   const run061 = (ids: string[], over: Partial<ConstructorParameters<typeof UpgradeRun>[0]> = {}) =>
     new UpgradeRun({ codeVersion: '0.6.1', previousVersions: PREV_061, force: false, log: (l) => lines.push(l), workspaceRunner: { workspaceIds: ids }, ...over });
   const start = async (run: UpgradeRun, fresh = false) => {
@@ -116,10 +134,22 @@ describeIfDb('patch releases through the upgrade runner (integration)', () => {
     await app.query('SELECT pg_advisory_lock($1::bigint)', [LOCK]);
     session = upgradeSessionOf(app);
     await dropNewerInstanceRows();
+    // Seed: the database is a completed 0.6.0 (what a fresh 0.6.0 install records), whatever an earlier spec file left.
+    const [latest] = (
+      await admin.query(`SELECT status, attempt FROM core.upgrade_migration WHERE name = '0.6.0_TypeOrmMigrations' AND workspace_id IS NULL ORDER BY attempt DESC LIMIT 1`)
+    ).rows as Array<{ status: string; attempt: number }>;
+    if (latest?.status !== 'completed') {
+      const r = await admin.query(
+        `INSERT INTO core.upgrade_migration (name, status, attempt, executed_by_version, is_initial) VALUES ('0.6.0_TypeOrmMigrations', 'completed', $1, '0.6.0', false) RETURNING id`,
+        [(latest?.attempt ?? 0) + 1],
+      );
+      seeded.push(String(r.rows[0].id));
+    }
   });
 
   afterAll(async () => {
     await dropNewerInstanceRows().catch(() => undefined);
+    for (const id of seeded) await admin.query('DELETE FROM core.upgrade_migration WHERE id = $1', [id]).catch(() => undefined);
     await app?.query('SELECT pg_advisory_unlock($1::bigint)', [LOCK]).catch(() => undefined);
     for (const ws of created) {
       await admin.query('DELETE FROM core.upgrade_migration WHERE workspace_id = $1', [ws.id]).catch(() => undefined);
@@ -173,7 +203,7 @@ describeIfDb('patch releases through the upgrade runner (integration)', () => {
       expect((await registryOf(admin, w.id)).module_version).toBe(LEVEL);
       before.set(w.id, r);
     }
-    expect((await status('0.6.1')).state).toBe('behind');
+    await expectStatus('0.6.1', 'behind');
 
     const run = run061(ids);
     expect(await start(run)).toMatchObject({ kind: 'continue', from: '0.6.0' });
@@ -189,7 +219,7 @@ describeIfDb('patch releases through the upgrade runner (integration)', () => {
     }
     expect(Number((await admin.query(`SELECT count(*)::int AS n FROM core.upgrade_migration WHERE workspace_id = ANY($1::uuid[]) AND executed_by_version = '0.6.1'`, [ids])).rows[0].n)).toBe(0);
     expect(lines.some((l) => /structure level/.test(l))).toBe(false);
-    expect(await status('0.6.1')).toMatchObject({ state: 'ok', step: '0.6.1_TypeOrmMigrations', executedByVersion: '0.6.1', attempt: 1, forced: false });
+    expect(await expectStatus('0.6.1', 'ok')).toMatchObject({ step: '0.6.1_TypeOrmMigrations', executedByVersion: '0.6.1', attempt: 1, forced: false });
   });
 
   it('3. fresh-install cursor on 0.6.1: a workspace created on 0.6.1 (current template, is_initial 0.6.1_TypeOrmMigrations) has nothing pending', async () => {
@@ -222,7 +252,7 @@ describeIfDb('patch releases through the upgrade runner (integration)', () => {
       expect(run.report).toMatchObject({ recorded: [], workspaces: null, commandFailure: null });
     }
     expect(await allRowCount()).toBe(count);
-    expect((await status('0.6.0')).state).toBe('ahead');
+    await expectStatus('0.6.0', 'ahead');
   });
 
   it('5. 0.6.1 → 0.7.0 still runs the 0.7 commands: the instance command once, the workspace command once per workspace', async () => {

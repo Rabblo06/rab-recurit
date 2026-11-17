@@ -8914,4 +8914,5 @@ Reversal:   Lower CLOCK_IN_CONFIRM_FLOOR_HOURS, or require a second approver (pa
   written, `ahead`); 0.6.1 → 0.7.0 runs the 0.7 instance command once and the 0.7 workspace command once per workspace; a
   patch-keyed registry refused before any write, fresh start included; a patch cannot skip an incomplete 0.6.0 (65, nothing
   written); M-1: a forced 0.6.1 over a workspace short of 0.6.0 → unforced 0.7.0 refuses 65 with nothing written, then a
-  0.6.1 start catches the workspace up and 0.7.0 continues.
+  0.6.1 start catches the workspace up and 0.7.0 continues. The spec seeds the logbook state it needs (a completed 0.6.0
+  instance row) and removes exactly what it seeded, so it does not depend on what an earlier spec file left in a shard.
