@@ -8865,3 +8865,62 @@ Reversal:   Lower CLOCK_IN_CONFIRM_FLOOR_HOURS, or require a second approver (pa
   `sc05-capabilities.integration.spec.ts` now expects the 19 keys including `staff.edit`, same booleans as one
   `userHasPermission` per flag. The mocked e2e fixture (`crewflow-fixtures.ts`) grants `staff.edit` so the existing bar
   specs keep their four actions.
+
+## CI audit — owner risk decisions for `yarn npm audit`; picomatch GHSA-fc5q-39xc-vjpf proposed as accepted risk until 2026-12-17 (branch fix/picomatch-ghsa-fc5q, PR #__PR__, 2026-11-17; PROPOSAL: the owner's merge is the decision)
+- **Finding (HIGH per advisory, INFO for this repository):** GHSA-fc5q-39xc-vjpf / CVE-2026-112366 (CVSS 7.5,
+  AV:N/AC:L/PR:N/A:H): picomatch `<=4.0.7` compiles single-branch repeated extglobs (`+(*)`, `+(*a)`) into a regex with
+  exponential backtracking. Failure: *whoever controls a glob PATTERN* → passes it to picomatch and matches a short crafted
+  string → blocks the Node event loop. **No fixed release exists for any major** (latest 4.0.7; 2.3.2 and 3.0.2 are the
+  last 2.x/3.x; upstream fix micromatch/picomatch#194 unmerged), so no bump or in-major `resolutions` pin is possible.
+  The required ci-security `audit` job failed on every PR from the advisory's publication.
+- **Reachability (measured on origin/main 9618afc0):** tree versions 2.3.2 (anymatch, micromatch, readdirp, jest-util 29),
+  4.0.4 (@nx/js, @nx/workspace), 4.0.5 (vite, tinyglobby, jest 30). No first-party code imports picomatch or any glob
+  matcher. A yarn.lock walk of every workspace's `dependencies`/`optionalDependencies` finds ONE production path:
+  `@rab/server > argon2 > node-addon-api > node-gyp@13.0.1 (yarn's injected "node-gyp: latest") > tinyglobby >
+  picomatch@4.0.5` — node-gyp compiles native addons at install time and is never imported by the API or Worker, and its
+  patterns are its own. `yarn npm audit --environment production` also names anymatch (ts-node-dev > chokidar): that is a
+  devDependency yarn reaches through the workspace's lockfile entry, and ts-node-dev is `--forbid`den in the runtime
+  image by runtime-deps.cjs. The rab-front production bundle contains no picomatch (built and grepped). Every other
+  pattern comes from repository build/test configuration (Nx, Jest, Vite), i.e. from someone who can already run code
+  in CI. Not reachable by an API, Worker or browser caller.
+- **Control:** the audit job runs `tools/check-npm-audit.cjs` (same `yarn npm audit --severity high --all --recursive`)
+  against `tools/npm-audit-decisions.json`, which mirrors the image register (IMAGE_SECURITY_RELEASE_POLICY.md §5): one
+  GHSA id and exact package names per entry, owner_decision_ref (an issue/PR in this repo, not a placeholder),
+  decided_by, decided_on, justification, `expires` at most 180 days later. An expired, incomplete, over-long or duplicate
+  entry fails the job; there is no date override. A decision never covers a FIXABLE finding: if the registry has a newer
+  release in the same major as an installed version outside the vulnerable range, the job fails until upgraded, so this
+  entry lapses on its own the day picomatch ships a 2.x or 4.x fix. Matching is by GHSA id AND package, so any other or
+  new High/Critical advisory still fails exactly as before. Fail closed: a non-zero audit with no parseable report, an
+  unparseable line, a failed registry lookup or a range the check cannot evaluate all fail the job. Unused entries warn.
+  The only entry is this advisory, picomatch, accepted-risk, expiring 2026-12-17 (30 days).
+
+```
+SECURITY TRADE-OFF
+Decision:   The required ci-security audit passes with a known HIGH advisory (picomatch GHSA-fc5q-39xc-vjpf) in the
+            dependency tree, via a dated owner-decision register, for 30 days (to 2026-12-17).
+Reason:     No fixed picomatch release exists in any major, so the stricter option (keep the audit red) blocks every PR,
+            including security fixes, for an issue with no production reachability; disabling or `continue-on-error`
+            the audit, a permanent `npmAuditIgnoreAdvisories` in .yarnrc.yml, or dropping `--recursive` would each hide
+            it with no expiry and no owner record. Replacing @nx/js, Jest and Vite is out of proportion.
+Risk:       A developer/CI process that compiles an attacker-chosen glob pattern can be stalled (CPU DoS of a build or
+            test run, not of a deployed service). If a future change starts passing request input to picomatch (or to
+            micromatch/tinyglobby/anymatch) in the API, Worker or front end, this decision would hide a real,
+            remotely triggerable ReDoS until it expires. picomatch@4.0.5 is present (unused) in the runtime image under
+            node-gyp; the image gate reports it as an unfixed High HOLD, which blocks a release until decided there.
+Mitigation: Entry is GHSA- and package-exact, 30-day expiry, lapses automatically on an in-major fix, every other advisory
+            still fails; runtime-deps.cjs forbids the dev tools from the image; this THREAT-MODEL entry and review of
+            any new glob-matching dependency in API/Worker/front code.
+Reversal:   When picomatch publishes a fix: upgrade within each major (`yarn up -R picomatch`, or an in-major
+            `resolutions` pin), delete the register entry (the check warns when it is unused, and fails while a fix is
+            available). If no fix by 2026-12-17: re-decide (new owner decision) or replace the parent tools.
+```
+- **Open item (not changed here):** the image gate's own register (`packages/rab-docker/scripts/image-security/
+  vulnerability-decisions.json`) is untouched; picomatch@4.0.5 under node-gyp will show as an unfixed High HOLD on the
+  next image gate/release until the owner decides it there, or until node-gyp is kept out of the runtime closure.
+- **Tests:** `tools/check-npm-audit.test.cjs` (ci-security "The check's own tests"): range evaluation and refusal of
+  ranges it cannot evaluate; a same-major fix makes only that major fixable (a fix in another major does not); the
+  committed register is well formed; expired, >180-day, wildcard-package, missing/placeholder owner reference, wildcard
+  id, future decided_on, unknown decision and duplicate entries are refused, the expiry day itself is still valid; the
+  NDJSON parser fails closed on a non-report line; evaluate(): decided, undecided for another advisory / another package /
+  no GHSA id, FIXABLE, unevaluable range, registry failure, expired decision; unused reported. Manually: on this branch
+  the check exits 1 with the placeholder reference (decision refused, finding undecided) and 0 with a real one.

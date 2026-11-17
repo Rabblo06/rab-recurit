@@ -1,0 +1,16 @@
+{
+  "_comment": "Owner risk decisions for High/Critical `yarn npm audit` findings (ci-security audit job, tools/check-npm-audit.cjs). NOT an ignore list: an entry names exactly one GHSA id and exact package names, links the owner's written decision, expires at most 180 days after it, and never covers a finding that has a same-major fix on the registry. Expired, incomplete or over-long entries fail the job; an agent or CI job never adds one on its own initiative. Same rules as the image register: packages/rab-docker/docs/IMAGE_SECURITY_RELEASE_POLICY.md section 5. Each entry also has a THREAT-MODEL.md entry.",
+  "schema": 1,
+  "decisions": [
+    {
+      "id": "GHSA-fc5q-39xc-vjpf",
+      "packages": ["picomatch"],
+      "decision": "accepted-risk",
+      "owner_decision_ref": "https://github.com/Rabblo06/rab-recurit/pull/0",
+      "decided_by": "repository owner, by approving and merging the PR in owner_decision_ref (proposed 2026-11-17, not decided before that merge)",
+      "decided_on": "2026-11-17",
+      "expires": "2026-12-17",
+      "justification": "ReDoS (CVE-2026-112366, CVSS 7.5) needs an ATTACKER-CONTROLLED glob pattern (+(*), +(*a)) compiled by picomatch. No release fixes it: every published version (latest 4.0.7) is in range <=4.0.7, upstream fix micromatch/picomatch#194 is unmerged. Tree: 2.3.2 (anymatch, micromatch, readdirp, jest-util 29), 4.0.4 (@nx/js, @nx/workspace), 4.0.5 (vite, tinyglobby, jest 30). No first-party code imports picomatch or any glob matcher; all patterns come from build/test config in this repository. Production closure (yarn.lock walk of every workspace's dependencies): only @rab/server > argon2 > node-addon-api > node-gyp@13.0.1 (yarn-injected node-gyp: latest) > tinyglobby > picomatch@4.0.5, used only to compile native addons at install time, never imported by the API or Worker. The ts-node-dev > chokidar > anymatch path yarn's --environment production also reports is a devDependency (forbidden in the image by runtime-deps.cjs). rab-front ships a Vite bundle that does not include picomatch. Expiry 30 days: re-check for a release; the check fails earlier on its own once a same-major fix is published."
+    }
+  ]
+}

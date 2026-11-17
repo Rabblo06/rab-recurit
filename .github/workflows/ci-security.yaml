@@ -18,8 +18,13 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: ./.github/actions/yarn-install
-      - name: yarn npm audit (high+)
-        run: yarn npm audit --severity high --all --recursive
+      # Same `yarn npm audit --severity high --all --recursive`; a High/Critical advisory passes only with a valid,
+      # unexpired owner decision in tools/npm-audit-decisions.json for that GHSA id and package, and never while a
+      # same-major fix exists on the registry (rules in the script header). Fails closed on a broken audit or lookup.
+      - name: The check's own tests
+        run: node --test tools/check-npm-audit.test.cjs
+      - name: yarn npm audit (high+), owner decisions applied
+        run: node tools/check-npm-audit.cjs
 
   constraints-and-licenses:
     runs-on: ubuntu-latest
