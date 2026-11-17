@@ -8638,3 +8638,33 @@ Reversal:   Lower CLOCK_IN_CONFIRM_FLOOR_HOURS, or require a second approver (pa
   `BusinessTablesError('unbound')` for `advance` and `discover`. `tenant-context.service.spec.ts` and
   `workspace-execution-context.integration.spec.ts` pin the trap behaviour (`''` bound, the real schema still handed to the
   callback). Every server and worker suite passes under the trap.
+
+## SF-5 — core.notification is recipient-scoped by RLS (branch fix/sf5-notification-rls, 2026-11-17; NEW SQL, DRAFT, owner review first)
+- **Threat:** any code path running in an organisation's tenant context that forgets the `user_id` filter (a new query, a
+  report, an AI tool, a worker job) → reads, marks read or deletes another member's notifications. Rows carry names, venues
+  and pay amounts (the shift statement's "approved gross", offer messages). `core.notification` had one policy,
+  `notification_tenant` FOR ALL `organisation_id = core.current_org()` (`OfferBatchNotificationSchema1786666300000`,
+  unchanged since); `user_id = caller` existed only in `NotificationService`. Layer 5 (the tighter own-scope predicate) was
+  missing. Confirmed live by the abuse test: before the migration, a manager's raw SELECT returns both staff members' rows.
+- **Control (new migration `NotificationRecipientRls1786721590000`, FORCE kept):** INSERT WITH CHECK org-only (notify()
+  writes rows for other users; worker jobs have no uid); SELECT for the recipient (`user_id = core.current_uid()`), for the
+  server-set worker marker (`rab.actor_type = 'worker'`, the same marker `staff_profile_worker_scan` trusts), and for the
+  offer read-receipt definer only (`current_user = 'crewflow'` + a function-local flag + `type = 'offer_sent'`); UPDATE
+  USING + WITH CHECK recipient-only (a row cannot be re-pointed at someone else); no DELETE policy (no application path
+  deletes; user/organisation erasure uses the ON DELETE CASCADE foreign keys, which RLS does not apply to).
+  `core.offer_sent_notification_read_at(offer_id, recipient_user_id)` (SECURITY DEFINER, owner `crewflow`,
+  `search_path = pg_catalog, pg_temp`, EXECUTE for `crewflow_app` only) returns one timestamp for the venue offer
+  pipeline's "seen" state, which is a read of another user's row.
+- **Code that had to change with it:** `NotificationService.notify()` inserts without RETURNING (an INSERT ... RETURNING must
+  pass the SELECT policy, and the row is usually for someone else) with a server-generated id; the venue offer pipeline
+  calls the definer instead of reading `core.notification`; the push-send processor binds the worker marker (it reads the
+  notification it delivers with no uid).
+- **Residual (accepted, flagged for the owner):** the worker marker shows a system job every notification of the bound
+  organisation (needed by push send and the statement probe). The read-receipt definer answers any caller in the
+  organisation who supplies an (offer id, recipient user id) pair with that notification's read time, never its content.
+- **Tests:** `notification-recipient-rls.integration.spec.ts`: notify() for two staff members succeeds; each sees only their
+  own row; the manager who caused both and another organisation see neither; another user's UPDATE / DELETE / markRead
+  affect 0 rows and the recipient cannot re-point their row (WITH CHECK); an INSERT for another organisation is refused;
+  zero rows with no tenant context (and with the worker marker but no organisation); the worker reads its own
+  organisation's rows but cannot mark them read; the read-receipt definer returns the time only for the matching
+  (offer, recipient) pair inside the organisation and nothing without context.
