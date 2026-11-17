@@ -280,7 +280,7 @@ describe('D4: workspace fingerprints selected by server major; PG16 unchanged', 
     resetWorkspaceFingerprintSelectionForTests();
     expect(() => selectWorkspaceFingerprintMajor(19)).toThrow(UnsupportedPostgresVersionError);
     expect(() => selectWorkspaceFingerprintMajor(19)).toThrow(/not supported/);
-    expect(() => selectWorkspaceFingerprintMajor(15)).toThrow(/refused/);
+    expect(() => selectWorkspaceFingerprintMajor(15)).toThrow(/PostgreSQL 15 is not supported; use 16-18/);
   });
   it('DB-SETUP §6: 17 selects its own complete PG17 table, distinct from 16 and 18', () => {
     expect(SUPPORTED_FINGERPRINT_MAJORS).toEqual([16, 17, 18]);
@@ -301,7 +301,7 @@ describe('D4: workspace fingerprints selected by server major; PG16 unchanged', 
     expect(postgresMajorOf('160015')).toBe(16);
     expect(postgresMajorOf(180006)).toBe(18);
     expect(() => postgresMajorOf('16.4')).toThrow();
-    expect(() => selectFingerprintsForRun('150008', true, () => undefined)).toThrow(/refused/);
+    expect(() => selectFingerprintsForRun('150008', true, () => undefined)).toThrow(/PostgreSQL 15 is not supported; use 16-18/);
     // PG18 is supported, but until its fingerprints are generated and committed the owner login refuses it up front.
     if (missingFingerprintVersions(18).length) expect(() => selectFingerprintsForRun('180006', true, () => undefined)).toThrow(/no generated workspace fingerprints/);
     expect(missingFingerprintVersions(16)).toEqual([]);

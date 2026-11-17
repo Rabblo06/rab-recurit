@@ -8865,3 +8865,31 @@ Reversal:   Lower CLOCK_IN_CONFIRM_FLOOR_HOURS, or require a second approver (pa
   `sc05-capabilities.integration.spec.ts` now expects the 19 keys including `staff.edit`, same booleans as one
   `userHasPermission` per flag. The mocked e2e fixture (`crewflow-fixtures.ts`) grants `staff.edit` so the existing bar
   specs keep their four actions.
+
+## PostgreSQL majors: one supported list (16-18), refused everywhere else; every process uses its server's fingerprints (branch fix/pg-majors-15-18, 2026-11-17; no SQL, no migration)
+- **Context:** the 0.6.0 deploy checklist warned that on PostgreSQL 17 / 18 new workspaces could not be created. Cause:
+  only the migrate child and the workspace command runner selected the workspace fingerprints of the server's major
+  (`selectWorkspaceFingerprintMajor`). The API, the Worker and the CLI never did, so `workspaceFingerprintMajor()` stayed
+  at its default, 16. On 17 / 18 the Worker's in-process provisioner (`provisionWorkspaceSchema` → `recordProvisioned`)
+  compared every workspace it built with the PostgreSQL 16 structure-level-22 value and marked it FAILED; the daily drift
+  job reported READY module 14-20 workspaces as DRIFTED (alert only). The server path (`core.provision_workspace`, its
+  literal baked by the migrate child for the right major), the migrate child and the runner were already correct. It failed
+  closed (no wrong structure was accepted), so this was an availability defect, not an exposure.
+- **Second gap (fail-open on the upper bound):** db-setup and the API / Worker / CLI boot gate checked only `>= 16`. A
+  PostgreSQL 19 server got `crewflow_owner` created by db-setup before the migrate child refused it, and outside production
+  a process on 19 started with the PostgreSQL 16 fingerprints.
+- **Control:** `database/postgres/supported-majors.ts` is the one list (16, 17, 18) and the one refusal sentence
+  ("PostgreSQL N is not supported; use 16-18 (PostgreSQL 16, 17 or 18).") read by the db-setup bootstrap child (both
+  modes, from the Q2 facts, before the probe, the pending password file and any write), the migrate child
+  (`assertSupportedPostgresMajor`) and boot gate 2. After the gates pass, `runDatabaseBootGates` selects the server's
+  fingerprints for the process; `provisionWorkspaceSchema`, the Worker drift cycle and the two workspace CLIs also select on
+  their own session first. A second, different major in one process is refused (never a silent switch).
+- **Not supported, and why:** PostgreSQL 15 and earlier. The owner-login bootstrap grants `WITH INHERIT …, SET …`, merged
+  migrations call `pg_has_role(…, 'SET')` and refuse below 16 themselves, the boot gate reads `pg_auth_members.set_option`,
+  and on 15 a CREATEROLE login can grant `pg_execute_server_program` (M0 F-E1). Merged migrations are never edited.
+- **Tests:** `supported-majors.spec.ts` (the list is 16-18; each listed major has every module and structure-level
+  fingerprint, a semantic golden and a posture golden; 14, 15, 19, 20 refused with the range), `owner-bootstrap.spec.ts`
+  (14, 15, 19, 20 and garbage refused in both modes; 14 and 19 end to end: no password stored, no BEGIN, no write),
+  `database-boot-gate-rules.spec.ts` (14, 15, 19, 20 refused at gate `version`; 16.0, 16, 17, 18 pass), the
+  `bootstrap-owner-login-check.ts` PG15 scenario and the deploy-order db-setup PG15 block (new refusal text). Live: the
+  server and Worker suites on PostgreSQL 16, 17 and 18 and the db-setup child on 15-18 (InstaBox; results in the PR).
