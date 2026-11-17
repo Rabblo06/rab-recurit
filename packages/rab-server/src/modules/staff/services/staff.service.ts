@@ -52,6 +52,7 @@ import { CreateStaffDto } from '../dto/create-staff.dto';
 import { ListStaffDto } from '../dto/list-staff.dto';
 import { ListVenueStaffDto } from '../dto/list-venue-staff.dto';
 import { UpdateStaffDto } from '../dto/update-staff.dto';
+import { pickFields } from '../../../engine/utils/pick-fields.util';
 import { AvailabilityService } from '../../scheduling/services/availability.service';
 import { StaffProfile } from '../entities/staff-profile.entity';
 import { MemberAccessPolicyService } from '../../identity/member-access/member-access-policy.service';
@@ -81,6 +82,18 @@ const STAFF_SORT_COLUMNS: Record<string, string> = {
 export const STAFF_ROLE_KEY = 'staff';
 export const STAFF_ROLE_PERMISSIONS = [PermissionFlag.OFFER_RESPOND, PermissionFlag.PAYSLIP_VIEW_OWN, PermissionFlag.ATTENDANCE_CLOCK];
 const MAX_SEND_ATTEMPTS = 3;
+
+/**
+ * SF-7: the staff_profile fields `update()` may write, mapped explicitly (never the rest of the DTO). `firstName`,
+ * `lastName` and `phone` go to core."user" and are mapped separately; `staffRef`, `createdBy`, `organisationId`,
+ * `workspaceId`, `userId`, `employmentStatus` and the archive columns are never writable here.
+ */
+export const STAFF_PROFILE_UPDATE_FIELDS = [
+  'startDate', 'dateOfBirth', 'defaultPayRatePence', 'jobRoleId', 'emergencyContactName', 'emergencyContactRelationship',
+  'emergencyContactPhone', 'preferredName', 'employmentType', 'address', 'city', 'postcode', 'otherSkills',
+  'yearsExperience', 'availableDays', 'preferredShiftTimes', 'maxHoursPerWeek', 'rightToWorkStatus', 'documentType',
+  'expiryDate', 'languages', 'notes',
+] as const satisfies readonly (keyof UpdateStaffDto & keyof StaffProfile)[];
 
 export interface PendingInviteSummary {
   sendNumber: number;
@@ -359,10 +372,8 @@ export class StaffService {
 
   /** Explicit saved team; active accounts in currently assigned workspaces only. */
   async venueDirectory(ctx: AuthContext, dto: ListVenueStaffDto = {}) {
-    if (!(await this.directoryPermissions.userHasPermission(ctx, PermissionFlag.STAFF_VIEW))) {
-      throw new ForbiddenException('Staff viewing is not permitted.');
-    }
     return this.tenantContext.runInWorkspaceContext(ctx, async (manager) => {
+      await this.directoryPermissions.assertPermissionTx(manager, ctx, PermissionFlag.STAFF_VIEW, 'Staff viewing is not permitted.');
       const scope = await this.resourceScope.resolveTx(manager, ctx);
       if (scope.kind !== 'venue') throw new NotFoundException('Directory not found.');
       if (!scope.venueIds.length) return { data: [], total: 0 };
@@ -404,10 +415,8 @@ export class StaffService {
    * Venue Manager's, another workspace's, or not an active account) is 404.
    */
   async venueTeamMember(ctx: AuthContext, staffId: string) {
-    if (!(await this.directoryPermissions.userHasPermission(ctx, PermissionFlag.STAFF_VIEW))) {
-      throw new ForbiddenException('Staff viewing is not permitted.');
-    }
     return this.tenantContext.runInWorkspaceContext(ctx, async (manager) => {
+      await this.directoryPermissions.assertPermissionTx(manager, ctx, PermissionFlag.STAFF_VIEW, 'Staff viewing is not permitted.');
       const t = businessTables(manager);
       const [row] = await manager.query(
         `SELECT sp.id, u.first_name AS "firstName", u.last_name AS "lastName", jr.name AS "jobRoleName",
@@ -432,10 +441,8 @@ export class StaffService {
   /** The calling Venue Manager's own favourite / emergency-cover tags on one of their team rows. Not an assignment change. */
   async setVenueTeamTags(ctx: AuthContext, staffId: string, dto: { favourite?: boolean; emergency?: boolean }) {
     if (dto.favourite === undefined && dto.emergency === undefined) throw new BadRequestException('Nothing to update.');
-    if (!(await this.directoryPermissions.userHasPermission(ctx, PermissionFlag.STAFF_VIEW))) {
-      throw new ForbiddenException('Staff viewing is not permitted.');
-    }
     return this.tenantContext.runInWorkspaceContext(ctx, async (manager) => {
+      await this.directoryPermissions.assertPermissionTx(manager, ctx, PermissionFlag.STAFF_VIEW, 'Staff viewing is not permitted.');
       const t = businessTables(manager);
       const rows: Array<{ isFavourite: boolean; isEmergency: boolean }> = await manager.query(
         `UPDATE ${t.venue_manager_staff} t SET
@@ -478,6 +485,8 @@ export class StaffService {
 
   async list(ctx: AuthContext, dto: ListStaffDto = {}): Promise<{ data: StaffListSummary[]; total: number }> {
     return this.tenantContext.runInWorkspaceContext(ctx, async (manager) => {
+      // SF-2 layer 2: the route's staff.view, re-checked before any row is read (jobs / other services skip the guard).
+      await this.directoryPermissions.assertPermissionTx(manager, ctx, PermissionFlag.STAFF_VIEW, 'Staff viewing is not permitted.');
       // The caller's own staff — or, for a custom workspace-member only, their workspace owner's staff.
       const scope = await this.resourceScope.resolveTx(manager, ctx);
       const ownerUserId = scope.kind === 'owner' && scope.delegated ? scope.ownerUserId : ctx.userId;
@@ -586,6 +595,8 @@ export class StaffService {
 
   async get(ctx: AuthContext, id: string): Promise<StaffSummary> {
     return this.tenantContext.runInWorkspaceContext(ctx, async (manager) => {
+      // SF-2 layer 2: staff.view first, 403 for any id (never an existence oracle); out of scope stays 404 below.
+      await this.directoryPermissions.assertPermissionTx(manager, ctx, PermissionFlag.STAFF_VIEW, 'Staff viewing is not permitted.');
       const profile = await manager.findOne(StaffProfile, { where: { id }, relations: { user: true } });
       if (!profile?.user) throw new NotFoundException('Staff member not found.');
       // Read-only: a custom workspace-member may also read staff their workspace OWNER created (creator-based
@@ -655,6 +666,8 @@ export class StaffService {
 
     try {
       return await this.tenantContext.runInWorkspaceContext(ctx, async (manager) => {
+        // SF-2 layer 2: the route's staff.create, before the email lookup (no account-existence answer without it).
+        await this.directoryPermissions.assertPermissionTx(manager, ctx, PermissionFlag.STAFF_CREATE, 'Creating staff is not permitted.');
         const existingEmail = await manager.findOne(User, {
           where: { organisationId: ctx.organisationId!, email },
         });
@@ -844,6 +857,7 @@ export class StaffService {
   async update(ctx: AuthContext, id: string, dto: UpdateStaffDto): Promise<StaffSummary> {
     let displayChangedFor: string | null = null;
     const summary = await this.tenantContext.runInWorkspaceContext(ctx, async (manager) => {
+      await this.directoryPermissions.assertPermissionTx(manager, ctx, PermissionFlag.STAFF_EDIT, 'Editing staff is not permitted.');
       const profile = await manager.findOne(StaffProfile, { where: { id }, relations: { user: true } });
       if (!profile?.user) throw new NotFoundException('Staff member not found.');
       await lockLiveUser(manager, profile.userId, 'Staff member not found.');
@@ -857,7 +871,9 @@ export class StaffService {
       // immutable once generated by `create()` (see that method's own doc
       // comment). No raw-field path, named action, or client request can
       // change it here.
-      const { firstName, lastName, phone, ...profileFields } = dto;
+      // SF-7: explicit field maps, never `...rest` of the DTO (direct callers bypass the ValidationPipe).
+      const { firstName, lastName, phone } = dto;
+      const profileFields = pickFields(dto, STAFF_PROFILE_UPDATE_FIELDS);
       if (firstName !== undefined || lastName !== undefined) displayChangedFor = profile.userId;
       if (firstName !== undefined || lastName !== undefined || phone !== undefined) {
         await manager.update(User, profile.userId, {
@@ -926,6 +942,8 @@ export class StaffService {
     onTransitioned?: (manager: EntityManager, profile: StaffProfile) => Promise<void>,
   ): Promise<StaffSummary> {
     return this.tenantContext.runInWorkspaceContext(ctx, async (manager) => {
+      // SF-2 layer 2: deactivate and reactivate share the route flag staff.deactivate.
+      await this.directoryPermissions.assertPermissionTx(manager, ctx, PermissionFlag.STAFF_DEACTIVATE, 'Changing a staff member\'s status is not permitted.');
       const profile = await manager.findOne(StaffProfile, { where: { id }, relations: { user: true } });
       if (!profile?.user) throw new NotFoundException('Staff member not found.');
       await lockLiveUser(manager, profile.userId, 'Staff member not found.');
@@ -1057,6 +1075,7 @@ export class StaffService {
   async resetPassword(ctx: AuthContext, id: string): Promise<void> {
     await this.stepUpReauth.assertRecentStepUp(ctx, 'user.password_reset');
     return this.tenantContext.runInWorkspaceContext(ctx, async (manager) => {
+      await this.directoryPermissions.assertPermissionTx(manager, ctx, PermissionFlag.USER_RESET_PASSWORD, 'Resetting passwords is not permitted.');
       const profile = await manager.findOne(StaffProfile, { where: { id }, relations: { user: true } });
       if (!profile?.user) throw new NotFoundException('Staff member not found.');
       await lockLiveUser(manager, profile.userId, 'Staff member not found.');
@@ -1075,7 +1094,12 @@ export class StaffService {
     });
   }
 
+  /**
+   * Shared by resendInvite / changePendingEmail / cancelInvite, whose three routes all carry `user.reset_password`
+   * (SF-2 layer 2: re-checked here first, inside the caller's transaction, before the profile is read).
+   */
   private async findPendingProfileOrFail(manager: EntityManager, ctx: AuthContext, id: string): Promise<StaffProfile> {
+    await this.directoryPermissions.assertPermissionTx(manager, ctx, PermissionFlag.USER_RESET_PASSWORD, 'Managing invitations is not permitted.');
     const profile = await manager.findOne(StaffProfile, { where: { id }, relations: { user: true } });
     if (!profile?.user) throw new NotFoundException('Staff member not found.');
     await lockLiveUser(manager, profile.userId, 'Staff member not found.');
@@ -1200,6 +1224,8 @@ export class StaffService {
   async changeEmail(ctx: AuthContext, id: string, dto: ChangeEmailDto): Promise<{ email: string } | EmailChangeRequestResult> {
     await this.stepUpReauth.assertRecentStepUp(ctx, 'user.email.change');
     const outcome = await this.tenantContext.runInWorkspaceContext(ctx, async (manager) => {
+      // SF-2 layer 2: staff.edit for the direct (INVITED) correction too; the verified path re-checks it in EmailChangeService.
+      await this.directoryPermissions.assertPermissionTx(manager, ctx, PermissionFlag.STAFF_EDIT, 'Editing staff is not permitted.');
       const profile = await manager.findOne(StaffProfile, { where: { id }, relations: { user: true } });
       if (!profile?.user) throw new NotFoundException('Staff member not found.');
       await lockLiveUser(manager, profile.userId, 'Staff member not found.');
@@ -1235,6 +1261,7 @@ export class StaffService {
   /** Backs the detail panel's Timeline tab. */
   async getTimeline(ctx: AuthContext, id: string): Promise<AuditLogListItem[]> {
     const profile = await this.tenantContext.runInWorkspaceContext(ctx, async (manager) => {
+      await this.directoryPermissions.assertPermissionTx(manager, ctx, PermissionFlag.STAFF_VIEW, 'Staff viewing is not permitted.');
       const p = await manager.findOne(StaffProfile, { where: { id } });
       if (!p) throw new NotFoundException('Staff member not found.');
       this.assertOwned(ctx, p);
@@ -1246,6 +1273,7 @@ export class StaffService {
   /** Backs the detail panel's Note tab. */
   async listNotes(ctx: AuthContext, id: string): Promise<UserNoteItem[]> {
     return this.tenantContext.runInWorkspaceContext(ctx, async (manager) => {
+      await this.directoryPermissions.assertPermissionTx(manager, ctx, PermissionFlag.STAFF_VIEW, 'Staff viewing is not permitted.');
       const profile = await manager.findOne(StaffProfile, { where: { id } });
       if (!profile) throw new NotFoundException('Staff member not found.');
       this.assertOwned(ctx, profile);
@@ -1308,6 +1336,7 @@ export class StaffService {
    */
   async listEmails(ctx: AuthContext, id: string): Promise<EmailSummary[]> {
     return this.tenantContext.runInWorkspaceContext(ctx, async (manager) => {
+      await this.directoryPermissions.assertPermissionTx(manager, ctx, PermissionFlag.STAFF_VIEW, 'Staff viewing is not permitted.');
       const profile = await manager.findOne(StaffProfile, { where: { id } });
       if (!profile) throw new NotFoundException('Staff member not found.');
       this.assertOwned(ctx, profile);
@@ -1404,6 +1433,8 @@ export class StaffService {
   async uploadAvatar(ctx: AuthContext, id: string, buffer: Buffer): Promise<{ avatarKey: string }> {
     let avatarChangedFor: string | null = null;
     const result = await this.tenantContext.runInWorkspaceContext(ctx, async (manager) => {
+      // SF-2 layer 2: the route's staff.edit, before the profile is read or any file is stored.
+      await this.directoryPermissions.assertPermissionTx(manager, ctx, PermissionFlag.STAFF_EDIT, 'Editing staff is not permitted.');
       const profile = await manager.findOne(StaffProfile, { where: { id }, relations: { user: true } });
       if (!profile?.user) throw new NotFoundException('Staff member not found.');
       await lockLiveUser(manager, profile.userId, 'Staff member not found.');
@@ -1437,6 +1468,7 @@ export class StaffService {
   async removeAvatar(ctx: AuthContext, id: string): Promise<{ avatarKey: string | null }> {
     let avatarChangedFor: string | null = null;
     const result = await this.tenantContext.runInWorkspaceContext(ctx, async (manager) => {
+      await this.directoryPermissions.assertPermissionTx(manager, ctx, PermissionFlag.STAFF_EDIT, 'Editing staff is not permitted.');
       const profile = await manager.findOne(StaffProfile, { where: { id }, relations: { user: true } });
       if (!profile?.user) throw new NotFoundException('Staff member not found.');
       await lockLiveUser(manager, profile.userId, 'Staff member not found.');

@@ -237,9 +237,11 @@ describeIfDb('shift cancellation correctness (integration)', () => {
       const fx = await seedOrgFixture('cancelA5');
       const shift = await seedOpenShift(fx);
       const staff = await factory.createStaff(fx.organisation, { owner: fx.owner });
-      // Staff has no manager_venue/createdBy relationship to the shift and no SCHEDULE_CREATE permission at the guard layer;
-      // at the service layer (called directly here) the ownership check alone already denies it.
-      await expect(schedulingService.cancel(ctxOf(staff), shift.id)).rejects.toMatchObject({ status: 404 });
+      // Staff categorically lack schedule.create. Since SF-2 the service re-checks the route's flag first, so a direct call
+      // gets 403, as PermissionGuard(schedule.create) answers on the HTTP path (CLAUDE.md: 403 for a categorical lack).
+      await expect(schedulingService.cancel(ctxOf(staff), shift.id)).rejects.toMatchObject({ status: 403 });
+      expect((await getShift(fx, shift.id)).status).toBe(ShiftStatus.OPEN);
+      expect(await countAudit(fx, 'shift.cancelled', shift.id)).toBe(0);
     });
   });
 

@@ -8494,6 +8494,33 @@ Reversal:   Lower CLOCK_IN_CONFIRM_FLOOR_HOURS, or require a second approver (pa
   under test), `integration-test-database-gate.spec.ts` (no spec reads the blanked DATABASE_URL), `runtime-child-env.spec.ts`.
 - **Release 2 (S8):** the fallbacks are removed and the legacy names refused everywhere; the strip lists keep every name.
 
+## CI gate — exact owner-approved growth for the import-boundary ratchet (branch ci/import-boundaries-approved-growth, 2026-11-17; owner approval 2026-11-17 for PR #204)
+- **Threat:** the import-boundary ratchet (`tools/check-import-boundaries.cjs`, PR #191) is a CI security gate: its `--base`
+  step refuses any growth of `tools/import-boundaries.baseline.json` against the PR's base branch, so a new Worker import of
+  rab-server internals (or engine -> modules, feature -> feature) cannot land unnoticed. It had no way to record an owner
+  approval, so an approved change could only pass by weakening the gate, bypassing it, or deleting the step. Any approval
+  mechanism is itself a way to widen the gate: a broad pattern, an open-ended count or a forgotten approval would let later
+  PRs add violations silently.
+- **Control:** `APPROVED_GROWTH` is a frozen list in the check itself. Each entry names one rule, one file, the exact base
+  count `from` (0 = no entry at the base), the exact head count `to`, an `approved: 'owner YYYY-MM-DD'` date and a reason;
+  `validateApprovedGrowth` refuses a malformed, undated, duplicate or non-growing entry (fail closed). `compareToBase`
+  accepts a growth only when rule and file match exactly, the base count equals `from` and the head count equals `to`;
+  one more edge, another file, another rule, or a different base count still fails. An entry whose `from` no longer equals
+  the base count is reported STALE and fails `--base`, so the entry must be deleted once the growth has merged and cannot be
+  reused. The tree check (counts equal the committed baseline) is unchanged. The first two entries are the owner-approved
+  (2026-11-17) Worker imports for PR #204: `push-dispatch.job.ts` 1 -> 2 (`audit-events/audit-event-shipping`) and
+  `push-send.processor.ts` 10 -> 11 (`audit/audit.service`), the same imports the email path already uses.
+- **Residual (accepted):** the approval lives in the repository, so whoever can merge a PR that edits the check can also add
+  an entry; the protection is review: an entry must arrive in its own PR, separate from the PR that uses it, with the owner's
+  date. Between the approval PR's merge and the using PR's merge, any PR may use the approved slot; the slot is one exact
+  count for one file and rule, and the stale rule closes it as soon as the base moves. Counts are per file, not per edge: an
+  approved `to` could be met by a different import in that file than the one approved; the reviewer of the using PR checks
+  the actual import (`--list`). `--write-baseline` still refuses any growth; the baseline is raised by hand in the using PR.
+- **Tests:** `check-import-boundaries.test.cjs`: an approved exact growth passes; the same file one above `to` fails; an
+  unlisted file growing fails; the same file under a different rule fails; a base count other than `from` fails and the
+  approval is reported stale (also once the growth has merged); `from: 0` matches a file absent at the base; malformed,
+  undated, duplicate and non-growing entries are refused; the shipped list is valid and frozen.
+
 ## S-W1 — the Worker's member-invitation pre-send check also requires an active workspace (branch fix/s-w1-invitation-workspace-active, 2026-11-16)
 - **Finding (Low, `docs/plans/untangle/worker.md` §4):** a manager invites a member; the workspace is then suspended or
   archived while the invitation email is still queued. The Worker's pre-send revalidation
@@ -8584,6 +8611,45 @@ Reversal:   Lower CLOCK_IN_CONFIRM_FLOOR_HOURS, or require a second approver (pa
   message is stored escaped in `email_outbox.rendered_html` for both the staff and the manager route; a role with
   `staff.view` but not `staff.edit`, and one without `manager.manage`, get 403 and nothing is queued).
 
+## SF-2 (part 1 of 3) — staff, manager and venue-manager services re-check the route's flag (branch fix/sf2-service-perm-staff-manager, 2026-11-17)
+- **Threat:** a job, CLI command, AI tool or another service calls a StaffService / ManagerService / VenueManagerService
+  method directly. Those callers never pass a `PermissionGuard`, and these methods checked only scope or ownership, so a
+  caller without the route's flag could read the staff or manager directory, create, edit, suspend or reactivate an
+  account, reset a password, resend / correct / cancel an invitation, change an email, assign or unassign a venue, or delete
+  a Venue Manager (CLAUDE.md layer 2; `docs/plans/untangle/server-modules.md` M3, finding SF-2, Medium).
+- **Control:** one shared assert, `PermissionsService.assertPermissionTx(manager, ctx, flag)` (over `userHasPermissionTx`:
+  overrides win over roles, memoised per transaction), called FIRST inside the method's own tenant transaction, so it is a
+  403 for any id before a row is read (no existence oracle). Out-of-scope records keep their 404s. The flag is the one the
+  route guard already holds, so the HTTP path is unchanged.
+  - StaffService: `list`, `get`, `getTimeline`, `listNotes`, `listEmails` (`staff.view`); `create` (`staff.create`);
+    `update`, `uploadAvatar`, `removeAvatar`, `changeEmail` incl. the direct INVITED path (`staff.edit`); `deactivate`,
+    `reactivate` (`staff.deactivate`); `resetPassword`, `resendInvite`, `changePendingEmail`, `cancelInvite`
+    (`user.reset_password`). `venueDirectory`, `venueTeamMember`, `setVenueTeamTags` keep `staff.view` but now check it
+    inside their transaction instead of in a separate one.
+  - ManagerService: `get`, `list`, `create`, `assignVenue`, `unassignVenue` (`manager.manage`). `update`, `setActive`,
+    `resetPassword`, `changePendingEmail`, `changeEmail`, `getTimeline`, `listNotes`, `listEmails` take the caller's route
+    flag (`manager.manage` by default; `venue_manager.create` from `VenueManagerService`), the pattern `addNote` and
+    `bulkEmail` already use, and fail closed on any other flag. `resetPassword` and `changePendingEmail` also re-check the
+    route's `user.reset_password`. `deleteVenueManagerUser` re-checks `venue_manager.create` in its own transaction (the
+    implicit "caller checked first, in another transaction" rule is gone).
+  - VenueManagerService: `createInOwnWorkspace` (`venue_manager.create`, in the creating transaction); `resendInvite` and
+    `cancelInvite` also re-check `user.reset_password`.
+  - `ManagerService.getWithin` (no check; caller authorises, caller's transaction) serves the Admin Panel's
+    `OrganisationOnboardingService.getOrganisation`, which is authorised by its platform-admin re-check: a platform admin
+    holds no role in the organisation it inspects. Same result as before.
+- **Behaviour change:** saving a navigation shortcut to a Staff record now also needs `staff.view` (`StaffService.get`), the
+  same flag the record's own route needs.
+- **Not changed (owner decision pending):** `ManagerService.resendInvite` and `ManagerService.cancelInvite` have no flag
+  re-check. The platform-admin CEO resend / revoke (`OrganisationOnboardingService.resendCeoInvite` / `revokeCeoInvite`)
+  calls them with a context that holds no role in the target organisation, so a plain `manager.manage` re-check would break
+  them; they need an explicit, audited authority path first. Their `/managers` routes stay guarded by `manager.manage` +
+  `user.reset_password`; the Venue Manager route re-checks both in `VenueManagerService`.
+- **Tests:** `sf2-layer2-staff-manager.integration.spec.ts` (each method called directly with the flag revoked by a per-user
+  override: ForbiddenException, and the organisation's audit log, outbox, invites, files, accounts, staff profiles and venue
+  links are unchanged; step-up-gated methods use a real signed-in session so only the flag refuses; positive controls with
+  the flag; wrong-route-flag and fail-closed cases; the platform-admin `getOrganisation` read still works; HTTP 403/200
+  unchanged). `permissions.service.spec.ts` covers the helper.
+
 ## SF-3 — create-and-send uses the normal shift-creation checks and audit (branch fix/sf3-create-shift-and-send-scope, 2026-11-16)
 - **Threat:** a manager with `offer.send` → `POST /rest/v1/shifts/with-offers` (`OfferService.createShiftAndSend`) with the id
   of a job role that is RLS-visible but not theirs, or an archived venue or job role → a shift (OPEN, then OFFERED) and live
@@ -8606,6 +8672,37 @@ Reversal:   Lower CLOCK_IN_CONFIRM_FLOOR_HOURS, or require a second approver (pa
   but not `schedule.create` → 403, no shift; archived job role → 409 `JOB_ROLE_ARCHIVED`
   and archived venue → 409 `VENUE_ARCHIVED`, no shift; a successful create-and-send writes exactly one `shift.created`
   row (actor = caller, status `open`, no pay keys).
+
+## SF-2 (part 2 of 3) — offer, replacement-request, scheduling and attendance services re-check the route's flag (branch fix/sf2-service-perm-offer-scheduling-attendance, 2026-11-17)
+- **Threat:** a job, CLI command, AI tool or another service calls an OfferService / ReplacementRequestService /
+  SchedulingService / AttendanceService method directly, so no `PermissionGuard` runs. These methods checked only scope
+  or ownership: a caller without the flag could send, withdraw, confirm or reject offers, approve or decline shift
+  requests, change requested staff, cancel shifts, create job roles, read the organisation-wide request lists, or clock in
+  and out (CLAUDE.md layer 2; `docs/plans/untangle/server-modules.md` M3, finding SF-2, Medium). `listVenueOffers` and
+  `listPendingApprovals` matter most: they widen past the caller's own shifts. `ReplacementRequestService.approve` sends an
+  offer through `OfferService.sendOneWithManager`, whose contract leaves authorisation to the caller, and it checked none.
+- **Control:** the shared `PermissionsService.assertPermissionTx` (part 1) or SchedulingService's existing `assertFlagTx`
+  (same `userHasPermissionTx`), called FIRST inside the method's own tenant transaction: 403 for any id before a row is read
+  or locked. Scope 404s and 409 transitions are unchanged; the flag is the route guard's, so HTTP is unchanged.
+  - OfferService: `list`, `getBatch` (`schedule.view`); `listMine`, `staffAccept`, `decline` (`offer.respond`); `send`,
+    `sendBulk` (`offer.send`; the replacement mode already re-checked it); `withdraw` (`offer.withdraw`); `managerConfirm`,
+    `confirmAll`, `managerReject` (`offer.confirm`); `approveShiftRequest` (`staffing_request.approve`). A refused accept or
+    confirm never reaches the lazy expiry / deadline-withdrawal transactions.
+  - ReplacementRequestService: `list`, `get` (`schedule.view`); `approve`, `reject` (`offer.send`).
+  - SchedulingService: `list`, `get`, `listJobRoles`, `getRequestedStaff` (`schedule.view`); `createJobRole`, `cancel`
+    (`schedule.create`); `listVenueOffers`, `listPendingApprovals`, `declineRequest`, `addRequestedStaff`,
+    `removeRequestedStaff` (`staffing_request.approve`).
+  - AttendanceService: `checkIn`, `getCheckIn`, `clockIn`, `clockOut`, `autoClockOutOnGeofenceExit`, `getActive`,
+    `getHistory`, `getForShift` (`attendance.clock`); `list` (`attendance.view`).
+- **Behaviour change:** saving a navigation shortcut to a Shift, and the shift / offer timelines, now need `schedule.view` in
+  `SchedulingService.get` too (the same flag their routes already require).
+- **Not changed (owner items):** `cancel` stays on `schedule.create` (permission-matrix question open); no business rule,
+  transition or seat logic changed.
+- **Tests:** `sf2-layer2-offer-scheduling-attendance.integration.spec.ts` (each method called directly with the flag revoked
+  by a per-user override, on real records — a pending and an accepted offer, an open shift, a pending shift request — and
+  on unknown ids: ForbiddenException, and the organisation's audit log, notifications, realtime events, shifts, seats,
+  offers, attendance, requested staff and replacement requests are unchanged; positive controls with the flag; HTTP 403/200
+  unchanged).
 
 ## SF-4 — venue pay-rate creation checks job-role scope (branch fix/sf4-role-rate-job-role-scope, 2026-11-16)
 - **Threat:** a manager with `venue.edit` → `POST /rest/v1/venues/:id/role-rates` with the id of a job role that RLS shows
@@ -8631,6 +8728,29 @@ Reversal:   Lower CLOCK_IN_CONFIRM_FLOOR_HOURS, or require a second approver (pa
   another manager, and another workspace's job role → 404 with no `venue_role_rate` row; the caller's own role → 201 with
   the values as sent; create, update and delete each write exactly one audit row with exactly those four metadata keys.
 
+## SF-2 (part 3 of 3) — venue, shift-report and workspace-settings services re-check the route's flag (branch fix/sf2-service-perm-venue-reports-workspace, 2026-11-17)
+- **Threat:** a job, CLI command, AI tool or another service calls a VenueService / ShiftReportService / WorkspaceService
+  method directly, so no `PermissionGuard` runs. These checked only scope: a caller without the flag could create or edit
+  a venue (including its geofence), read a venue's pay and charge rates, read or list shift reports, finalise a report
+  (which triggers the worker PDF and email), or read the organisation's settings and sign-in methods (CLAUDE.md layer 2;
+  `docs/plans/untangle/server-modules.md` M3, finding SF-2, Medium).
+- **Control:** the shared `PermissionsService.assertPermissionTx` (part 1), or VenueService's existing
+  `assertCanViewVenueTx` / `assertCanEditVenueTx` (same `userHasPermissionTx`), called FIRST inside the method's own
+  tenant transaction: 403 for any id before a row is read or the finalise lock is taken. Scope 404s and transitions are
+  unchanged; the flag is the route guard's, so HTTP is unchanged.
+  - VenueService: `create` (`venue.create`); `update` (`venue.edit`); `listRoleRates` (`venue.view`). The role-rate writes
+    already re-checked `venue.edit` (SF-4).
+  - ShiftReportService: `listReports` (`report.view`); `finalise` (`report.export`); `getReport` takes the caller's route
+    flag — `report.view` by default, `report.export` for the report the finalise route returns (that route is guarded by
+    `report.export` alone, so a finalised report is never followed by a 403) — and fails closed on any other flag.
+    `getReportWithManager` stays check-free: it runs inside other authorised transactions (attendance review, on-behalf
+    punches, the offer pipeline).
+  - WorkspaceService: `get`, `getAuthProviders` (`settings.view`).
+- **Tests:** `sf2-layer2-venue-reports-workspace.integration.spec.ts` (each method called directly with the flag revoked by
+  a per-user override, on real records and unknown ids: ForbiddenException, and the organisation's audit log, outbox,
+  organisation row, venues, venue pay rates, shifts and shift reports are unchanged; the finalise route's report read works
+  under `report.export` alone; fail-closed flag; positive controls; HTTP 403/200 unchanged).
+
 ## Part C2 (C2-7) — every workspace business-table statement names its schema; the search_path trap is required (branch feat/hws-c2-7, PR #170, 2026-11-16; no SQL)
 - **Threat:** a statement that names a workspace business table (`shift`, `attendance`, `staff_profile`, …) without a schema
   is resolved by the transaction's `search_path`. A binder slip, a reused manager or a later code change that leaves the
@@ -8654,3 +8774,75 @@ Reversal:   Lower CLOCK_IN_CONFIRM_FLOOR_HOURS, or require a second approver (pa
   `BusinessTablesError('unbound')` for `advance` and `discover`. `tenant-context.service.spec.ts` and
   `workspace-execution-context.integration.spec.ts` pin the trap behaviour (`''` bound, the real schema still handed to the
   callback). Every server and worker suite passes under the trap.
+
+## SF-6 — global search uses each list's own scope, with an organisation pin (branch fix/sf6-search-scope, 2026-11-17; no SQL)
+- **Threat:** an owner-scope manager → `GET /rest/v1/search` → names of staff, venues, shifts and offers that their own
+  lists hide. `SearchService` keyed the owner scope on `workspace_id` alone (`created_by` only for restricted workspace
+  members), while `StaffService.list()` / `VenueService.list()` read `created_by` = the scope owner, `SchedulingService.list()`
+  reads `created_by` = the caller (or a pending-approval request) and `OfferService.list()` reads offers the caller sent.
+  Nothing in the database makes `manager_profile.workspace_id` unique per manager, so two owner-scope managers sharing a
+  workspace would find each other's records. A Venue Manager's staff search had no Venue Manager branch (every staff row in
+  the workspace, not their team), and `searchManagers` had no organisation predicate (RLS only).
+- **Control:** `search.service.ts` applies the list's own predicate per type, plus explicit `organisation_id` (all five
+  types) and `workspace_id` (owner scope) pins on top of RLS: staff = `created_by` = scope owner, and for a Venue Manager
+  `created_by` = caller OR their saved team at their assigned venues (active accounts), the union of `StaffService.list()`
+  and `venueDirectory()`; venues = assigned venues, or `created_by` = scope owner; shifts = `applyShiftReadScope` as
+  `list()` uses it (`created_by` = caller or `pending_manager_approval`; a workspace member: the owner's shifts and their
+  record filter); offers = `offerReadScopeCondition` itself (imported, not copied); managers = organisation-wide, as
+  `ManagerService.list()`. The custom-member record filters apply as before. Search can now only be tighter than a list.
+  Permission checks, hidden-field rules, ranking and the archived exclusion are unchanged.
+- **Tests:** `sf6-search-scope.integration.spec.ts`: a staff row, a venue, a shift and an offer in B's workspace whose
+  `created_by` is A are hidden from B's search (each was found before the change) and from B's lists, and A does not find
+  them either; a Venue Manager's direct `SearchService.search` returns their team member and not another staff member of
+  the same workspace (who was found before), matching `venueDirectory`; another organisation's manager with the same name
+  is never returned; no over-narrowing: an owner-scope manager still finds a Venue Manager's pending-approval request in
+  their workspace (as `list()` shows it). `search-managers-org-pin.spec.ts` pins the managers' organisation predicate
+  itself (RLS alone would hide another organisation's managers, so the integration case cannot tell the two layers apart).
+  `dashboard-search.integration.spec.ts`'s two cross-workspace tests used to assert the old
+  `workspace_id`-only search result; they now assert the row is hidden from both managers.
+
+## SF-7 — explicit field maps instead of DTO spreads in staff and venue writes (branch fix/sf7-explicit-field-maps, 2026-11-17; no SQL)
+- **Threat:** a direct (non-HTTP) caller of `StaffService.update`, `VenueService.create`, `VenueService.update` or
+  `VenueService.updateRoleRate` (a job, a CLI command, an AI tool, another service) → passes an object carrying fields the
+  DTO does not declare → they reached the row. `update()` spread the rest of the staff DTO into `staff_profile`
+  (`staffRef`, `createdBy`, `employmentStatus`...), `create()` spread the venue DTO AFTER `organisationId` / `createdBy` /
+  `workspaceId` (so the DTO could replace them), and the two `merge` calls copied the whole DTO (`status`, `createdBy`, a
+  rate's `jobRoleId` / `venueId`). The global ValidationPipe's `forbidNonWhitelisted` rejects these for HTTP callers only.
+- **Control:** `engine/utils/pick-fields.util.ts` `pickFields(dto, FIELDS)` copies only the named keys whose value is not
+  `undefined` (`null` kept for clearing) into a new object. Each site has its own allow-list, typed
+  `as const satisfies readonly (keyof Dto & keyof Entity)[]` (a field missing from the DTO or the entity is a compile
+  error): `STAFF_PROFILE_UPDATE_FIELDS` (the 22 profile fields of `UpdateStaffDto`; first name, last name and phone still
+  go to `core."user"` as before), `VENUE_WRITE_FIELDS` (the 16 fields both venue DTOs declare; `create()` now sets the
+  tenant and owner columns after the mapped fields) and `ROLE_RATE_UPDATE_FIELDS` (pay, charge, overtime, effective
+  dates). HTTP behaviour is unchanged: every declared field is still written. The staff `profile.updated` audit row now
+  lists only fields that were actually written (an explicit `undefined` key is no longer listed).
+- **Not changed:** `VenueManagerService` passes `{ ...dto, type }` / `{ ...dto, userIds }` to other service methods (not
+  entity writes; those methods map their own fields).
+- **Tests:** `pick-fields.util.spec.ts` (undeclared keys such as `organisationId`, `createdBy`, `status` are never
+  copied; `undefined` skipped, `null` and falsy kept; own properties only; source not mutated) and
+  `sf7-explicit-field-maps.integration.spec.ts`, one case per site, each a direct service call with undeclared fields:
+  staff `staffRef` / `createdBy` / `employmentStatus` not written and the audit lists only `preferredName`; venue create
+  `status` / `createdBy` / `archivedAt` not written, organisation, workspace and creator are the caller's; venue update
+  `status` / `createdBy` not merged; role-rate update `jobRoleId` / `venueId` cannot re-point the rate. In each case the
+  declared field in the same call is written.
+  `venue-write-fields.spec.ts` and `staff-profile-update-fields.spec.ts` compare each allow-list with the DTO's
+  class-validator metadata (minus the named `core."user"` fields for staff), so a new DTO field cannot be silently dropped.
+
+## Users page: bulk Send Email is offered only with the server's permission (branch fix/users-bulk-email-permission, 2026-11-17; no SQL)
+- **Context:** since owner decision batch 13 (SF-1) bulk email needs `staff.edit` for Staff and `manager.manage` for
+  Managers (route guard and service re-check). The web Users page still offered Send Email to every Staff-tab caller and
+  to every CEO / platform admin on the Managers tab, so a view-only role got a 403 toast. No data was exposed (the server
+  refused), but the UI advertised an action the caller does not hold.
+- **Control (presentation only):** `Users.tsx` reads the existing permission source, `GET /auth/capabilities`: Send Email
+  appears for Staff only with `staff.edit`, for Managers only with `manager.manage` (and the CEO / platform-admin tab
+  rule as before), for the caller's Venue Managers with `venue_manager.create` (unchanged). `staff.edit` is added to the
+  capability hints the endpoint returns (`auth.controller.ts`), computed from the same resolved permission set as every
+  other hint (overrides honoured). The server-side checks are unchanged and remain the enforcement.
+- **Not changed:** the user detail panel's own Send Email (single recipient, same endpoint) and its other actions are not
+  permission-gated in the UI either; the server still refuses them with 403. Separate follow-up.
+- **Tests:** `Users.spec.tsx` › "bulk Send Email follows the server permission": `staff.view` without `staff.edit` → no
+  Send Email in the bar (made after the capabilities have loaded); with `staff.edit` → offered and carries the selected id;
+  a CEO without `manager.manage` → not offered, with it → offered. Both denial cases fail on the previous code.
+  `sc05-capabilities.integration.spec.ts` now expects the 19 keys including `staff.edit`, same booleans as one
+  `userHasPermission` per flag. The mocked e2e fixture (`crewflow-fixtures.ts`) grants `staff.edit` so the existing bar
+  specs keep their four actions.

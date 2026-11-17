@@ -221,6 +221,8 @@ export class ShiftReportService {
    */
   async listReports(ctx: AuthContext, dto: ListShiftReportsDto): Promise<{ data: ShiftReportSummary[]; total: number; serverNow: string }> {
     return this.tenantContext.runInWorkspaceContext(ctx, async (manager) => {
+      // SF-2 layer 2: the route's report.view, before anything is read (jobs / other services skip the guard).
+      await this.permissions.assertPermissionTx(manager, ctx, PermissionFlag.REPORT_VIEW);
       const scope = await this.resourceScope.resolveTx(manager, ctx);
       const params: unknown[] = [ctx.organisationId];
       let scopeSql: string;
@@ -250,8 +252,24 @@ export class ShiftReportService {
     }, { useReplica: true });
   }
 
-  async getReport(ctx: AuthContext, shiftId: string): Promise<ShiftReportDetail> {
-    return this.tenantContext.runInWorkspaceContext(ctx, manager => this.getReportWithManager(manager, ctx, shiftId));
+  /**
+   * SF-2 layer 2: re-checks the flag of the caller's route first — `report.view` for `GET .../shift/:id` (the default),
+   * `report.export` for the report the finalise route returns after finalising (that route is guarded by report.export
+   * alone). Fails closed on any other flag. `getReportWithManager` stays check-free: it runs inside other authorised
+   * transactions (attendance review, on-behalf punches, the offer pipeline), each with its own route flag.
+   */
+  async getReport(
+    ctx: AuthContext,
+    shiftId: string,
+    requiredPermission: typeof PermissionFlag.REPORT_VIEW | typeof PermissionFlag.REPORT_EXPORT = PermissionFlag.REPORT_VIEW,
+  ): Promise<ShiftReportDetail> {
+    return this.tenantContext.runInWorkspaceContext(ctx, async (manager) => {
+      if (requiredPermission !== PermissionFlag.REPORT_VIEW && requiredPermission !== PermissionFlag.REPORT_EXPORT) {
+        throw new ForbiddenException('Permission required.');
+      }
+      await this.permissions.assertPermissionTx(manager, ctx, requiredPermission);
+      return this.getReportWithManager(manager, ctx, shiftId);
+    });
   }
 
   /** Existing report projection, batched and callable inside the pipeline transaction. */
@@ -504,6 +522,8 @@ export class ShiftReportService {
     const signedOffName = signOff.signedOffName?.trim();
     if (signOff.signedOffName !== undefined && (!signedOffName || signedOffName.length < 2)) throw new BadRequestException('Enter your full name to sign off.');
     return this.tenantContext.runInWorkspaceContext(ctx, async (manager) => {
+      // SF-2 layer 2: the route's report.export, before the shift is read or the finalise lock is taken.
+      await this.permissions.assertPermissionTx(manager, ctx, PermissionFlag.REPORT_EXPORT);
       const shift = await manager.findOne(Shift, { where: { id: shiftId } });
       if (!shift) throw new NotFoundException('Shift not found.');
       await this.assertShiftOwned(manager, ctx, shift);
