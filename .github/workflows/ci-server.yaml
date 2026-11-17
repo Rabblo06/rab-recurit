@@ -51,9 +51,9 @@ jobs:
           persist-credentials: false
       - uses: ./.github/actions/yarn-install
       - uses: ./.github/actions/restore-cache
-      # The lint target is `tsc --noEmit`, which resolves @rab/shared and @rab/emails through their built dist: build them
-      # first (on GitHub these jobs never got past checkout before, so the missing order was never visible).
-      - name: Build the workspace libraries (lint and the migration harness import them)
+      # lint and test get their library builds from Nx (nx.json: `dependsOn: ["^build"]`). This step stays because the
+      # test-database harness below runs on ts-node outside Nx and imports @rab/shared and @rab/emails through their built dist.
+      - name: Build the workspace libraries (the migration harness imports them)
         run: npx nx run-many -t build -p rab-shared,rab-emails
       - run: npx nx run-many -t lint -p rab-server,rab-shared
       - uses: ./.github/actions/disposable-postgres

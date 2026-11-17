@@ -45,6 +45,9 @@ jobs:
             # must re-run every suite on the new Node, so it counts as a change to every package below (and to e2e).
             toolchain: &toolchain
               - '.nvmrc'
+              # nx.json sets every project's task order (lint and test dependsOn ^build) and cache inputs: a change to it
+              # must re-run every Nx suite.
+              - 'nx.json'
             shared: &shared
               - *toolchain
               - 'packages/rab-shared/**'

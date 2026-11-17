@@ -27,10 +27,12 @@
       "cache": true
     },
     "lint": {
+      "dependsOn": ["^build"],
       "inputs": ["default", "{workspaceRoot}/.eslintrc.json"],
       "cache": true
     },
     "test": {
+      "dependsOn": ["^build"],
       "inputs": ["default", "{workspaceRoot}/jest.preset.js"],
       "cache": true
     }
