@@ -8638,3 +8638,28 @@ Reversal:   Lower CLOCK_IN_CONFIRM_FLOOR_HOURS, or require a second approver (pa
   `BusinessTablesError('unbound')` for `advance` and `discover`. `tenant-context.service.spec.ts` and
   `workspace-execution-context.integration.spec.ts` pin the trap behaviour (`''` bound, the real schema still handed to the
   callback). Every server and worker suite passes under the trap.
+
+## SF-7 — explicit field maps instead of DTO spreads in staff and venue writes (branch fix/sf7-explicit-field-maps, 2026-11-17; no SQL)
+- **Threat:** a direct (non-HTTP) caller of `StaffService.update`, `VenueService.create`, `VenueService.update` or
+  `VenueService.updateRoleRate` (a job, a CLI command, an AI tool, another service) → passes an object carrying fields the
+  DTO does not declare → they reached the row. `update()` spread the rest of the staff DTO into `staff_profile`
+  (`staffRef`, `createdBy`, `employmentStatus`...), `create()` spread the venue DTO AFTER `organisationId` / `createdBy` /
+  `workspaceId` (so the DTO could replace them), and the two `merge` calls copied the whole DTO (`status`, `createdBy`, a
+  rate's `jobRoleId` / `venueId`). The global ValidationPipe's `forbidNonWhitelisted` rejects these for HTTP callers only.
+- **Control:** `engine/utils/pick-fields.util.ts` `pickFields(dto, FIELDS)` copies only the named keys whose value is not
+  `undefined` (`null` kept for clearing) into a new object. Each site has its own allow-list, typed
+  `as const satisfies readonly (keyof Dto & keyof Entity)[]` (a field missing from the DTO or the entity is a compile
+  error): `STAFF_PROFILE_UPDATE_FIELDS` (the 22 profile fields of `UpdateStaffDto`; first name, last name and phone still
+  go to `core."user"` as before), `VENUE_WRITE_FIELDS` (the 16 fields both venue DTOs declare; `create()` now sets the
+  tenant and owner columns after the mapped fields) and `ROLE_RATE_UPDATE_FIELDS` (pay, charge, overtime, effective
+  dates). HTTP behaviour is unchanged: every declared field is still written. The staff `profile.updated` audit row now
+  lists only fields that were actually written (an explicit `undefined` key is no longer listed).
+- **Not changed:** `VenueManagerService` passes `{ ...dto, type }` / `{ ...dto, userIds }` to other service methods (not
+  entity writes; those methods map their own fields).
+- **Tests:** `pick-fields.util.spec.ts` (undeclared keys such as `organisationId`, `createdBy`, `status` are never
+  copied; `undefined` skipped, `null` and falsy kept; own properties only; source not mutated) and
+  `sf7-explicit-field-maps.integration.spec.ts`, one case per site, each a direct service call with undeclared fields:
+  staff `staffRef` / `createdBy` / `employmentStatus` not written and the audit lists only `preferredName`; venue create
+  `status` / `createdBy` / `archivedAt` not written, organisation, workspace and creator are the caller's; venue update
+  `status` / `createdBy` not merged; role-rate update `jobRoleId` / `venueId` cannot re-point the rate. In each case the
+  declared field in the same call is written.
