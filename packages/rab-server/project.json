@@ -21,7 +21,11 @@
     "lint": {
       "executor": "nx:run-commands",
       "options": {
-        "command": "tsc --noEmit -p packages/rab-server/tsconfig.app.json"
+        "commands": [
+          "tsc --noEmit -p packages/rab-server/tsconfig.app.json",
+          "tsc --noEmit -p packages/rab-server/tsconfig.spec.json"
+        ],
+        "parallel": false
       }
     },
     "test": {

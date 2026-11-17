@@ -1,14 +1,19 @@
 import 'reflect-metadata';
 import {
   EmploymentStatus,
+  EmploymentStatusType,
   ManagerType,
   NotificationType,
   OfferStatus,
+  OfferStatusType,
   ReplacementCandidateSnapshot,
   ReplacementRequestStatus,
+  ReplacementRequestStatusType,
   ShiftAssignmentStatus,
   ShiftStatus,
+  ShiftStatusType,
   UserStatus,
+  UserStatusType,
 } from '@rab/shared';
 import { ConflictException, NotFoundException } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
@@ -194,8 +199,8 @@ describeIfDb('replacement-staff workflow (integration)', () => {
     fx: OrgFixture,
     label: string,
     overrides?: {
-      employmentStatus?: string;
-      userStatus?: string;
+      employmentStatus?: EmploymentStatusType;
+      userStatus?: UserStatusType;
       jobRoleId?: string | null;
       availableDays?: string[] | null;
       otherSkills?: string | null;
@@ -243,7 +248,7 @@ describeIfDb('replacement-staff workflow (integration)', () => {
   async function seedDeclinedOfferShift(
     fx: OrgFixture,
     decliningStaff: StaffFixture,
-    opts?: { startsAt?: Date; endsAt?: Date; offerStatus?: string; requiredCount?: number; filledCount?: number; assignedBy?: string | null; shiftStatus?: string },
+    opts?: { startsAt?: Date; endsAt?: Date; offerStatus?: OfferStatusType; requiredCount?: number; filledCount?: number; assignedBy?: string | null; shiftStatus?: ShiftStatusType },
   ): Promise<DeclinedOfferFixture> {
     const startsAt = opts?.startsAt ?? new Date(Date.now() + 3 * 3600 * 1000);
     const endsAt = opts?.endsAt ?? new Date(startsAt.getTime() + 8 * 3600 * 1000);
@@ -292,7 +297,7 @@ describeIfDb('replacement-staff workflow (integration)', () => {
     fx: OrgFixture,
     fixture: DeclinedOfferFixture,
     candidates: ReplacementCandidateSnapshot[],
-    status: string = ReplacementRequestStatus.AWAITING_APPROVAL,
+    status: ReplacementRequestStatusType = ReplacementRequestStatus.AWAITING_APPROVAL,
   ): Promise<string> {
     return withContext({ organisationId: fx.organisationId, workspaceId: fx.workspaceId, userId: fx.managerUserId }, async (manager) => {
       const request = await manager.save(ReplacementRequest, {
@@ -301,7 +306,7 @@ describeIfDb('replacement-staff workflow (integration)', () => {
         shiftId: fixture.shiftId,
         declinedShiftAssignmentId: fixture.declinedAssignmentId,
         declinedOfferId: fixture.declinedOfferId,
-        status: status as never,
+        status,
         candidatesSnapshot: candidates,
       });
       return request.id;
@@ -733,7 +738,7 @@ describeIfDb('replacement-staff workflow (integration)', () => {
 
       const cancelShift = () => withContext({ organisationId: fx.organisationId, workspaceId: fx.workspaceId, userId: fx.managerUserId }, (m) => m.update(Shift, fixture.shiftId, { status: ShiftStatus.CANCELLED }));
       const approve = () => replacementRequestService.approve(authCtx(fx), requestId, { staffProfileId: candidate.staffProfileId });
-      await raceAndReport([approve, cancelShift]);
+      await raceAndReport<unknown>([approve, cancelShift]);
 
       const final = await getRequest(fx, requestId);
       const offerCount = await withContext({ organisationId: fx.organisationId, workspaceId: fx.workspaceId, userId: fx.managerUserId }, (m) =>
@@ -978,6 +983,14 @@ describeIfDb('replacement-staff workflow (integration)', () => {
           staffProfileId: candidate.staffProfileId,
         }),
       ).rejects.toBeInstanceOf(NotFoundException);
+      // The refused attempt must leave the row untouched (as G4 checks for the cross-organisation case).
+      const stillIntact = await getRequest(fx, requestId);
+      expect(stillIntact!.status).toBe(ReplacementRequestStatus.AWAITING_APPROVAL);
+      // ...and no offer reached the candidate.
+      const offerCount = await withContext({ organisationId: fx.organisationId, workspaceId: fx.workspaceId, userId: fx.managerUserId }, (m) =>
+        m.query<Array<{ count: string }>>(`SELECT count(*) FROM job_offer WHERE staff_profile_id = $1`, [candidate.staffProfileId]),
+      );
+      expect(Number(offerCount[0]!.count)).toBe(0);
     });
   });
 

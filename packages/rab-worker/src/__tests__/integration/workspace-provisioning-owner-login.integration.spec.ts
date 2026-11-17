@@ -247,8 +247,14 @@ describeIfDb('T4: in-process workspace provisioning on the owner login (integrat
     }
     expect(interrupted).toBe(true);
     expect((await registry(fx.workspaceId))?.status).not.toBe('READY');
-    // The terminated session's advisory lock is gone (the server released it with the session).
-    const [{ held }] = await admin.query(`SELECT count(*)::int AS held FROM pg_locks WHERE locktype = 'advisory' AND pid = $1`, [pid]);
+    // The terminated session's advisory lock is gone (the server released it with the session). pg_terminate_backend
+    // only signals the backend; on a loaded host it can take longer than the 200 ms above to exit and release, so the
+    // count is re-read for up to 10 s (the assertion is unchanged: it must reach 0).
+    let held = -1;
+    for (let i = 0; i < 100 && held !== 0; i += 1) {
+      if (i > 0) await new Promise((r) => setTimeout(r, 100));
+      [{ held }] = await admin.query(`SELECT count(*)::int AS held FROM pg_locks WHERE locktype = 'advisory' AND pid = $1`, [pid]);
+    }
     expect(held).toBe(0);
     let second: Client | null = null;
     for (let i = 0; i < 50 && !second; i += 1) {
