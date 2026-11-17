@@ -25,9 +25,11 @@ import {
   workspaceCommandsForVersion,
 } from './upgrade-sequence';
 import { upgradeStateOf } from './upgrade-status.service';
-import { decideUpgradeStart, UpgradeStartFacts, UpgradeVersionTooOldError, versionsToCheck } from './upgrade-version-check';
-import { AppVersionError, CREWFLOW_PREVIOUS_VERSIONS, isPatchRelease, minorReleaseOf, parseVersion, readAppVersion, upgradeFromVersions } from './upgrade-version';
+import { decideUpgradeStart, effectiveComplete, UpgradeStartFacts, UpgradeVersionTooOldError, versionsToCheck } from './upgrade-version-check';
+import { AppVersionError, assertPreviousVersions, CREWFLOW_PREVIOUS_VERSIONS, isPatchRelease, minorReleaseOf, parseVersion, readAppVersion, upgradeFromVersions } from './upgrade-version';
 import { cursorHasCompleted, pendingWorkspaceSteps, structureLevels } from './workspace-command-runner';
+import { UpgradeRun } from './upgrade-runner';
+import type { UpgradeSession } from './upgrade-migration.service';
 import { codeWorkspaceStructureLevel, structuralCommands } from './workspace-structure-level';
 
 const inst = (name: string, timestamp: number): UpgradeCommand => ({ name, timestamp, run: async () => undefined });
@@ -222,7 +224,7 @@ describe('0.6.1 → 0.7.0 still runs the 0.7 commands', () => {
   });
 
   it('accepted from 0.6.1; a workspace that finished 0.6.0, or was created on 0.6.1, runs exactly the 0.7.0 workspace commands', () => {
-    expect(decideUpgradeStart(facts({ codeVersion: '0.7.0', previousVersions: PREV_070, complete: { '0.6.1': true } }))).toMatchObject({ kind: 'continue', from: '0.6.1' });
+    expect(decideUpgradeStart(facts({ codeVersion: '0.7.0', previousVersions: PREV_070, complete: { '0.6.1': true, '0.6.0': true } }))).toMatchObject({ kind: 'continue', from: '0.6.1' });
     const want = ['0.7.0_Ws07Structural_1786900000100', '0.7.0_Ws07Data_1786900000200'];
     expect(names(pendingWorkspaceSteps(sequence, '0.7.0', { name: LAST_060, status: 'completed' }))).toEqual(want);
     expect(names(pendingWorkspaceSteps(sequence, '0.7.0', { name: '0.6.1_TypeOrmMigrations', status: 'completed' }))).toEqual(want);
@@ -268,6 +270,23 @@ describe('registering commands for a patch release fails (typed)', () => {
     expect(STARTUP_EXIT_CODES.config).toBe(64);
   });
 
+  it('L-1: UpgradeRun.beforeApply refuses a patch key FIRST, before any database read (fresh / no-ledger starts included)', async () => {
+    const queries: string[] = [];
+    const session: UpgradeSession = {
+      upgradeSession: true,
+      query: async (sql: string) => {
+        queries.push(sql);
+        throw new Error('no query expected');
+      },
+    };
+    const input = { fresh: true, attribution: null, unrestrictedTarget: true };
+    const viaWorkspace = new UpgradeRun({ codeVersion: '0.6.1', previousVersions: PREV_061, force: false, log: () => undefined, workspaceRegistry: { ...WORKSPACE_UPGRADE_COMMANDS, ...patchWorkspace } });
+    await expect(viaWorkspace.beforeApply(session, input)).rejects.toBeInstanceOf(PatchReleaseCommandsError);
+    const viaInstance = new UpgradeRun({ codeVersion: '0.6.0', force: false, log: () => undefined, registry: { ...UPGRADE_COMMANDS, ...patchInstance } });
+    await expect(viaInstance.beforeApply(session, input)).rejects.toBeInstanceOf(PatchReleaseCommandsError);
+    expect(queries).toEqual([]);
+  });
+
   it("this code's real registries pass the key check", () => {
     expect(() => assertRegistryKeys(UPGRADE_COMMANDS)).not.toThrow();
     expect(() => assertRegistryKeys(WORKSPACE_UPGRADE_COMMANDS)).not.toThrow();
@@ -277,5 +296,46 @@ describe('registering commands for a patch release fails (typed)', () => {
     const probe = inst('Probe', 1799999990000);
     expect(() => withProbeCommands(UPGRADE_COMMANDS, '0.6.1', [probe])).toThrow(PatchReleaseCommandsError);
     expect(withProbeCommands(UPGRADE_COMMANDS, '0.6.0', [probe])['0-6']).toEqual([...(UPGRADE_COMMANDS['0-6'] ?? []), probe]);
+  });
+});
+
+describe('security review of #219: M-1, L-2, I-2', () => {
+  it('M-1: a previous patch counts as complete only with its minor .0; 0.7.0 after a --force 0.6.1 that left 0.6.0 unfinished: 65', () => {
+    // The caller reads the .0 too (its instance step and every workspace's last 0.6.0 workspace command).
+    expect(versionsToCheck('0.7.0', PREV_070)).toEqual(['0.6.1', '0.6.0', '0.7.0']);
+    expect(versionsToCheck('0.6.2', [...PREV_070])).toEqual(['0.6.0', '0.6.1', '0.6.2']);
+    const at070 = (complete: Record<string, boolean>, force = false) => decideUpgradeStart(facts({ codeVersion: '0.7.0', previousVersions: PREV_070, complete, force }));
+    expect(() => at070({ '0.6.1': true, '0.6.0': false })).toThrow(UpgradeVersionTooOldError);
+    expect(() => at070({ '0.6.1': true })).toThrow(UpgradeVersionTooOldError); // the .0 not read = not complete
+    expect(at070({ '0.6.1': true, '0.6.0': true })).toMatchObject({ kind: 'continue', from: '0.6.1' });
+    expect(at070({ '0.6.1': true, '0.6.0': false }, true).kind).toBe('forced');
+    // 0.6.2 (accepts 0.6.0 and 0.6.1): the folded 0.6.1 no longer stands in for an unfinished 0.6.0.
+    expect(() => decideUpgradeStart(facts({ codeVersion: '0.6.2', previousVersions: PREV_070, complete: { '0.6.1': true, '0.6.0': false } }))).toThrow(UpgradeVersionTooOldError);
+  });
+
+  it("M-1: the code version's own entry is never folded: a repeated start of the patch itself still continues", () => {
+    expect(effectiveComplete('0.6.1', { '0.6.1': true, '0.6.0': false })).toEqual({ '0.6.1': true, '0.6.0': false });
+    expect(effectiveComplete('0.7.0', { '0.6.1': true, '0.6.0': false, '0.7.0': true })).toEqual({ '0.6.1': false, '0.6.0': false, '0.7.0': true });
+    expect(decideUpgradeStart(facts({ complete: { '0.6.0': false, '0.6.1': true } }))).toMatchObject({ kind: 'continue', from: '0.6.1' });
+    expect(decideUpgradeStart(facts({ codeVersion: '0.7.0', previousVersions: PREV_070, complete: { '0.6.1': false, '0.6.0': false, '0.7.0': true } }))).toMatchObject({
+      kind: 'continue',
+      from: '0.7.0',
+    });
+  });
+
+  it('L-2: the published list must be strictly ascending and duplicate-free (AppVersionError, 64), checked first', () => {
+    const bad = ['0.4.0', '0.5.0', '0.6.0', '0.7.0', '0.6.2'];
+    expect(() => assertPreviousVersions(bad)).toThrow(AppVersionError);
+    expect(() => decideUpgradeStart(facts({ codeVersion: '0.8.0', previousVersions: bad, fresh: true }))).toThrow(/strictly ascending/);
+    expect(() => versionsToCheck('0.8.0', bad)).toThrow(AppVersionError);
+    expect(() => assertPreviousVersions(['0.4.0', '0.5.0', '0.5.0'])).toThrow(AppVersionError);
+    expect(() => assertPreviousVersions(['0.4.0', 'x'])).toThrow(AppVersionError);
+    expect(() => assertPreviousVersions(CREWFLOW_PREVIOUS_VERSIONS)).not.toThrow();
+    expect(() => assertPreviousVersions(PREV_070)).not.toThrow();
+  });
+
+  it('I-2: a rollback onto a patch image whose .0 is unpublished refuses (AppVersionError), it is not a rollback', () => {
+    expect(() => decideUpgradeStart(facts({ previousVersions: ['0.4.0', '0.5.0'], newerVersions: ['0.7.0'] }))).toThrow(AppVersionError);
+    expect(decideUpgradeStart(facts({ newerVersions: ['0.7.0'] })).kind).toBe('rollback');
   });
 });

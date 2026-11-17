@@ -16,7 +16,11 @@ export const CREWFLOW_APP_VERSION_VAR = 'CREWFLOW_APP_VERSION';
 /** Strict MAJOR.MINOR.PATCH without leading zeros (the same rule as the table's CHECK). */
 export const VERSION_PATTERN = /^(0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})$/;
 
-/** Every published version before the current code's, oldest first (Twenty TWENTY_PREVIOUS_VERSIONS). Append only. */
+/**
+ * Every published version before the current code's, oldest first (Twenty TWENTY_PREVIOUS_VERSIONS). Append only, strictly
+ * ascending, no duplicate (assertPreviousVersions; checked by every start decision). A backport patch on an OLDER line (say
+ * 0.6.2 after 0.7.0) is never appended on main: it is built from that line's own branch, whose list ends at its own line.
+ */
 export const CREWFLOW_PREVIOUS_VERSIONS: readonly string[] = Object.freeze(['0.4.0', '0.5.0']);
 
 /** The adoption release (B3): the one version that accepts an R254 or R256 history with no logbook rows. */
@@ -56,6 +60,22 @@ export function compareVersions(a: string, b: string): number {
     if (x[k] !== y[k]) return x[k] < y[k] ? -1 : 1;
   }
   return 0;
+}
+
+/**
+ * Security review L-2: the published list must be valid versions, strictly ascending, with no duplicate. The upgrade-from
+ * rule reads its LAST entry and, for a patch, the entries of its own line; an out-of-order entry (a backport patch appended
+ * after a newer minor) would make either read the wrong version. Throws AppVersionError (config, 64).
+ */
+export function assertPreviousVersions(previous: readonly string[]): void {
+  for (let i = 0; i < previous.length; i += 1) {
+    parseVersion(previous[i]!);
+    if (i > 0 && compareVersions(previous[i - 1]!, previous[i]!) >= 0) {
+      throw new AppVersionError(
+        `CREWFLOW_PREVIOUS_VERSIONS must be strictly ascending with no duplicate: ${previous[i - 1]} is followed by ${previous[i]}. Refusing.`,
+      );
+    }
+  }
 }
 
 /** `<major>-<minor>`: the upgrade-commands folder of a version (Twenty `upgrade-version-command/<major-minor>/`). */

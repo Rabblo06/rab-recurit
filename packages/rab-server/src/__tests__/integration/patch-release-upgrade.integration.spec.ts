@@ -265,13 +265,16 @@ describeIfDb('patch releases through the upgrade runner (integration)', () => {
     }
   });
 
-  it('6. a registry with commands for a patch key refuses before anything is written (PatchReleaseCommandsError)', async () => {
+  it('6. a registry with commands for a patch key refuses before anything is written, fresh start included (PatchReleaseCommandsError)', async () => {
     const count = await allRowCount();
     const data: WorkspaceUpgradeCommand = { kind: 'workspace', name: 'PatchKey', timestamp: T0 + 2, run: async () => undefined };
     const viaWorkspace = run061([done[0]!.id], { workspaceRegistry: { ...WORKSPACE_UPGRADE_COMMANDS, '0-6-1': [data] } });
     await expect(viaWorkspace.beforeApply(session, { fresh: false, attribution: null, unrestrictedTarget: true })).rejects.toBeInstanceOf(PatchReleaseCommandsError);
     const viaInstance = run061([done[0]!.id], { registry: { ...UPGRADE_COMMANDS, '0-6-1': [{ name: 'PatchKey', timestamp: T0 + 2, run: async () => undefined }] } });
     await expect(viaInstance.beforeApply(session, { fresh: false, attribution: null, unrestrictedTarget: true })).rejects.toBeInstanceOf(PatchReleaseCommandsError);
+    // L-1: also on a fresh-install start (the check is the first thing beforeApply does, before any read or migration).
+    const viaFresh = run061([done[0]!.id], { workspaceRegistry: { ...WORKSPACE_UPGRADE_COMMANDS, '0-6-1': [data] } });
+    await expect(viaFresh.beforeApply(session, { fresh: true, attribution: null, unrestrictedTarget: true })).rejects.toBeInstanceOf(PatchReleaseCommandsError);
     await expect(
       new WorkspaceCommandRunner({
         codeVersion: '0.6.1',
@@ -300,6 +303,61 @@ describeIfDb('patch releases through the upgrade runner (integration)', () => {
     } finally {
       // A READY workspace without a logbook row reads as "failed" in every later status check on this database.
       await admin.query(`UPDATE core.workspace_schema_registry SET status = 'FAILED' WHERE workspace_id = $1`, [behind.id]);
+    }
+  });
+
+  it('8. M-1: a --force 0.6.1 over a workspace that never finished 0.6.0 does not let 0.7.0 through (65, nothing written); once 0.6.1 catches it up, 0.7.0 continues', async () => {
+    await dropNewerInstanceRows(); // the database is at 0.6.0
+    let fail = true;
+    const gate: WorkspaceUpgradeCommand = {
+      kind: 'workspace',
+      name: 'PatchSpecGate',
+      timestamp: T0 + 10,
+      run: async () => {
+        if (fail) throw new Error('gate not yet');
+      },
+    };
+    // 0.6.0 as this code has it plus a last data command that fails until released: a workspace that never finished 0.6.0.
+    const registry = { ...WORKSPACE_UPGRADE_COMMANDS, '0-6': [...(WORKSPACE_UPGRADE_COMMANDS['0-6'] ?? []), gate] };
+    const gateName = `0.6.0_PatchSpecGate_${T0 + 10}`;
+    const w = await make('gate');
+    const at070 = () =>
+      new UpgradeRun({ codeVersion: '0.7.0', previousVersions: PREV_070, force: false, log: (l) => lines.push(l), workspaceRegistry: registry, workspaceRunner: { workspaceIds: [w.id] } }).beforeApply(
+        session,
+        { fresh: false, attribution: null, unrestrictedTarget: true },
+      );
+    try {
+      const adopted = await new WorkspaceCommandRunner({
+        codeVersion: '0.6.0',
+        versions: ['0.4.0', '0.5.0'],
+        force: false,
+        adopt: true,
+        log: (l) => lines.push(l),
+        workspaceIds: [w.id],
+        workspaceRegistry: registry,
+      }).run(session);
+      expect(adopted.failures.map((f) => f.step)).toEqual([gateName]);
+
+      // A forced 0.6.1: its migrations step completes (forced), the workspace pass retries the gate, which fails again.
+      const forced = run061([w.id], { force: true, workspaceRegistry: registry });
+      expect((await start(forced)).kind).toBe('forced');
+      expect(await instanceRows('0.6.1')).toEqual([['0.6.1_TypeOrmMigrations', 'completed', 1, true]]);
+      expect(forced.report.workspaces?.failures.map((f) => f.step)).toEqual([gateName]);
+      expect((await rows(w)).slice(-1)[0]).toMatchObject({ name: gateName, status: 'failed', attempt: 2 });
+
+      // 0.6.1 is complete, 0.6.0 is not: an unforced 0.7.0 refuses (65) and writes nothing.
+      const count = await allRowCount();
+      await expect(at070()).rejects.toBeInstanceOf(UpgradeVersionTooOldError);
+      expect(await allRowCount()).toBe(count);
+
+      // A repeated (unforced) 0.6.1 start still continues (its own entry is not folded) and catches the workspace up.
+      fail = false;
+      const again = run061([w.id], { workspaceRegistry: registry });
+      expect(await start(again)).toMatchObject({ kind: 'continue', from: '0.6.1' });
+      expect((await rows(w)).slice(-1)[0]).toMatchObject({ name: gateName, status: 'completed', attempt: 3 });
+      expect(await at070()).toMatchObject({ kind: 'continue', from: '0.6.1' });
+    } finally {
+      await dropNewerInstanceRows();
     }
   });
 });

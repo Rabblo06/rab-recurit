@@ -19,7 +19,17 @@
  * Pure: the caller reads the facts on the locked session first.
  */
 import type { LedgerAttribution } from '../../../database/typeorm/scripts/migrate/owner-login/release-floor';
-import { ADOPTION_RELEASE_VERSION, ADOPTION_VERSION_BY_RELEASE, AppVersionError, compareVersions, CREWFLOW_PREVIOUS_VERSIONS, upgradeFromVersions } from './upgrade-version';
+import {
+  ADOPTION_RELEASE_VERSION,
+  ADOPTION_VERSION_BY_RELEASE,
+  AppVersionError,
+  assertPreviousVersions,
+  compareVersions,
+  CREWFLOW_PREVIOUS_VERSIONS,
+  isPatchRelease,
+  minorReleaseOf,
+  upgradeFromVersions,
+} from './upgrade-version';
 import { migrationsStepName } from './upgrade-sequence';
 
 /** Refused by the previous-version check. Mapped to outcome `behind` (exit 65) in migrate-on-start.ts outcomeOf. */
@@ -61,13 +71,35 @@ export type UpgradeStartDecision =
   | { kind: 'forced'; reason: string }
   | { kind: 'unchecked'; reason: string };
 
-/** The versions whose completeness the decision needs (the caller reads exactly these). */
+/**
+ * The versions whose completeness the decision needs (the caller reads exactly these). An accepted previous PATCH version
+ * also needs its minor release (`M.m.0`): the patch carries no step of the .0, so "the patch is complete" says nothing about
+ * the .0's commands (security review M-1, see effectiveComplete).
+ */
 export function versionsToCheck(codeVersion: string, previous: readonly string[] = CREWFLOW_PREVIOUS_VERSIONS): string[] {
-  return [...new Set([...upgradeFromVersions(codeVersion, previous), codeVersion])];
+  assertPreviousVersions(previous);
+  const from = upgradeFromVersions(codeVersion, previous);
+  return [...new Set([...from, ...from.filter((v) => isPatchRelease(v)).map((v) => minorReleaseOf(v)), codeVersion])];
+}
+
+/**
+ * Security review M-1: a PREVIOUS patch version counts as complete only when its minor release is complete too. A patch
+ * owns only its migrations step, so a `--force`d patch start completes it while a workspace may still be short of the .0's
+ * last workspace command; without this the next minor would accept the patch and never re-check the .0. The code version's
+ * own entry is never folded (a repeated start of the patch itself still continues). A missing .0 entry counts as false.
+ */
+export function effectiveComplete(codeVersion: string, complete: Readonly<Record<string, boolean>>): Record<string, boolean> {
+  const out: Record<string, boolean> = { ...complete };
+  for (const v of Object.keys(complete)) {
+    if (v !== codeVersion && isPatchRelease(v)) out[v] = complete[v] === true && complete[minorReleaseOf(v)] === true;
+  }
+  return out;
 }
 
 export function decideUpgradeStart(f: UpgradeStartFacts): UpgradeStartDecision {
   const previous = f.previousVersions ?? CREWFLOW_PREVIOUS_VERSIONS;
+  // L-2: the published list is strictly ascending and duplicate-free (AppVersionError, config 64), before anything else.
+  assertPreviousVersions(previous);
   const last = previous[previous.length - 1];
   if (last && compareVersions(f.codeVersion, last) <= 0) {
     throw new AppVersionError(
@@ -82,7 +114,8 @@ export function decideUpgradeStart(f: UpgradeStartFacts): UpgradeStartDecision {
   if (f.fresh) return { kind: 'fresh', reason: 'fresh install: no previous-version check' };
 
   if (f.ledgerExists && f.hasInstanceRows) {
-    const done = [...from, f.codeVersion].find((v) => f.complete[v] === true);
+    const complete = effectiveComplete(f.codeVersion, f.complete);
+    const done = [...from, f.codeVersion].find((v) => complete[v] === true);
     if (done) return { kind: 'continue', from: done, reason: done === f.codeVersion ? `${done} is already complete` : `previous version ${done} is complete` };
     if (f.codeVersionStarted) return { kind: 'continue', from: f.codeVersion, reason: `${f.codeVersion} was already started by an unforced run (past the previous-version check); retrying it` };
     if (f.force) return { kind: 'forced', reason: `--force: the previous-version check is skipped (none of ${from.join(', ')} is complete)` };
