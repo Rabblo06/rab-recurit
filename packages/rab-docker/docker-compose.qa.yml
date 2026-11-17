@@ -9,8 +9,8 @@ name: rab-qa
 # TOPOLOGY: mirrors docker-compose.production.yml, built from source:
 #   - db: the bundled PostgreSQL, a VERBATIM copy of production's `db` (own CA, TLS-only SCRAM logins, non-root, internal
 #     network only, never published). compose-credential-isolation.cjs fails if the two renders ever differ.
-#   - db-setup: the one-shot setup (./db-setup.sh). The ONLY service with a database URL, the bundled db's superuser,
-#     PINNED (QA has no external-database mode). It creates crewflow_owner with a random password stored in the
+#   - db-setup: the one-shot setup (./db-setup.sh). The ONLY service with a database URL, PG_ADMIN_URL = the bundled db's
+#     superuser, PINNED (QA has no external-database mode). It creates crewflow_owner with a random password stored in the
 #     crewflow-db-target volume and reused on every later start, and writes the credential-free target.json.
 #   - server (rab-api): ./api-prestart.sh (PID 1) builds the crewflow_owner URL from db-setup's two files (read-only),
 #     migrates on start under the migration lock (approval mode none), registers the BullMQ job schedulers, then serves.
@@ -72,6 +72,29 @@ services:
       - -c
       - |
         set -eu
+        # BEGIN crewflow-db password check
+        # PG_DATABASE_PASSWORD (this service's POSTGRES_PASSWORD) is REQUIRED while this bundled db runs. Checked here, at start,
+        # not with a compose `:?` (that would demand it with your own database too, CREWFLOW_BUNDLED_DB=0, where this service
+        # has 0 replicas and never starts: owner decision 2026-11-17, no dummy password). Before the volume is touched.
+        if [ -z "$${POSTGRES_PASSWORD:-}" ]; then
+          echo 'crewflow-db: REFUSED - PG_DATABASE_PASSWORD is required for the bundled database (compose.env; 32+ random characters, e.g. 64 hex). With your own database set CREWFLOW_BUNDLED_DB=0 and its URL instead (compose.env.example).' >&2
+          exit 64
+        fi
+        # Review of PR #230, I-2: on the FIRST initialisation only (no cluster in the data volume yet), the password must be 32+
+        # characters of A-Z a-z 0-9 _ - (it is interpolated unencoded into db-setup's bundled URL). An existing volume ignores
+        # the value (the image reads it only on an empty PGDATA), so it is never refused there.
+        if [ ! -s "$${PGDATA}/PG_VERSION" ]; then
+          case "$${POSTGRES_PASSWORD}" in
+            *[!A-Za-z0-9_-]*) crewflow_pw_ok=no ;;
+            *) if [ "$${#POSTGRES_PASSWORD}" -ge 32 ]; then crewflow_pw_ok=yes; else crewflow_pw_ok=no; fi ;;
+          esac
+          if [ "$$crewflow_pw_ok" != yes ]; then
+            echo 'crewflow-db: REFUSED - PG_DATABASE_PASSWORD must be 32+ characters of A-Z a-z 0-9 _ - for a new bundled database (64 hex characters recommended). Value not shown.' >&2
+            exit 64
+          fi
+          unset crewflow_pw_ok
+        fi
+        # END crewflow-db password check
         # The data volume root arrives world-writable (copied from the image): only postgres may write it.
         chmod 0755 /var/lib/postgresql
         # ONE server per data volume (2026-10-15 incident: two postgres servers on one data directory corrupt it). A kernel
@@ -128,6 +151,7 @@ services:
       POSTGRES_USER: postgres
       POSTGRES_DB: crewflow
       # T-2 (owner decision D4): an environment variable, like Twenty (OpenShip has no secret files).
+      # Required while this db runs (the entrypoint above refuses an empty value, exit 64); not with CREWFLOW_BUNDLED_DB=0.
       POSTGRES_PASSWORD: ${CREWFLOW_QA_DB_PASSWORD:?set CREWFLOW_QA_DB_PASSWORD in packages/rab-docker/.env.qa.local (hex only, openssl rand -hex 32)}
       # SCRAM for socket and TCP logins alike: no trust (the image default for loopback TCP) and no peer.
       POSTGRES_INITDB_ARGS: --auth-local=scram-sha-256 --auth-host=scram-sha-256 --data-checksums
@@ -148,11 +172,10 @@ services:
       retries: 30
       start_period: 60s
     # Twenty's Helm `db.enabled`: CREWFLOW_BUNDLED_DB (compose.env) 1 = run this bundled db (the default); 0 = your own
-    # database in PG_DATABASE_URL: no db container is created, and Compose skips the wait on a dependency that has 0
-    # replicas (db-setup and rab-api start without it). 0 without your own database fails closed: db-setup cannot use the
-    # bundled db (exit 64 when its CA file was never made; a connection failure when an older CA volume is still there) and
-    # rab-api never starts. The compose.env lint and the --environment preflight accept only 0 or 1, and 0 only with a
-    # PG_DATABASE_URL whose host is not `db`.
+    # database in PG_ADMIN_URL or PG_DATABASE_URL: no db container is created, and Compose skips the wait on a dependency
+    # that has 0 replicas (db-setup and rab-api start without it). 0 without your own database fails closed: db-setup refuses
+    # (exit 64: neither URL set) and rab-api never starts. The compose.env lint and the --environment preflight accept only
+    # 0 or 1, and 0 only with exactly one of PG_ADMIN_URL / PG_DATABASE_URL whose host is not `db`.
     # Development and QA never set it (they have no external database).
     deploy:
       replicas: ${CREWFLOW_BUNDLED_DB:-1}
@@ -236,7 +259,8 @@ services:
     image: crewflow-qa/rab:local
     entrypoint: ['./db-setup.sh']
     environment:
-      PG_DATABASE_URL: postgresql://postgres:${CREWFLOW_QA_DB_PASSWORD:?set CREWFLOW_QA_DB_PASSWORD (hex only; see the header of docker-compose.qa.yml)}@db:5432/crewflow?sslmode=verify-full
+      # The bundled db's superuser: db-setup's admin URL (PG_ADMIN_URL, this service only; mode a of production, pinned).
+      PG_ADMIN_URL: postgresql://postgres:${CREWFLOW_QA_DB_PASSWORD:?set CREWFLOW_QA_DB_PASSWORD (hex only; see the header of docker-compose.qa.yml)}@db:5432/crewflow?sslmode=verify-full
       NODE_ENV: development
       RAB_RUNTIME_ENV: development
     networks: [default, crewflow-db]
@@ -271,6 +295,8 @@ services:
       NODE_ENV: development
       RAB_RUNTIME_ENV: development
       PG_DATABASE_URL: ''
+      # PG_ADMIN_URL pinned "" as on production's rab-api / rab-worker (owner decision L-2, review of PR #230).
+      PG_ADMIN_URL: ''
       PG_EXPECTED_DATABASE_NAME: crewflow
       CREWFLOW_MIGRATE_ON_START: 'true'
       CREWFLOW_MIGRATION_APPROVAL_MODE: none
@@ -357,6 +383,8 @@ services:
       NODE_ENV: development
       RAB_RUNTIME_ENV: development
       PG_DATABASE_URL: ''
+      # PG_ADMIN_URL pinned "" as on production's rab-api / rab-worker (owner decision L-2, review of PR #230).
+      PG_ADMIN_URL: ''
       PG_EXPECTED_DATABASE_NAME: crewflow
       # Phase B (B5): the Worker runtime pool size, as in production.
       PG_POOL_MAX_CONNECTIONS: '12'

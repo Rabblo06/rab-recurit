@@ -7540,6 +7540,102 @@ Controls: the runbook's explicit upgrade step (3.2 step 0: move the line to `com
 makes every process refuse the bundled database. Residual: an operator who skips the lint and the preflight, with no
 `PG_EXPECTED_DATABASE_NAME` or one equal to `crewflow`.
 
+### TM-DB-5 (owner-approved 2026-11-17) — your own database, app login created by you (`own-database-app-login.sql`)
+
+A database admin creates `crewflow_owner` by hand with
+`packages/rab-docker/postgres-init/owner-login/own-database-app-login.sql`. Crewflow then receives only the
+`crewflow_owner` URL and never an admin credential (runbook OWNER-LOGIN-DEPLOYMENT.md section 4a; Twenty: an external
+database, no setup step).
+
+- **Owner decision 2026-11-17.** The SQL is approved, with two required steps:
+  - the login test (runbook 4a step 3) before any variable is set or anything is deployed;
+  - `ALTER ROLE crewflow_owner NOCREATEROLE` after the first start has completed: the rab-api log shows the migrate
+    result with serve=true, or a restart reports state CURRENT (step 6).
+
+  Owner 2026-11-17: both trade-offs accepted. The verifier can appear in logs (Twenty's Helm setup puts the plaintext
+  password in SQL, so ours is stricter). The empty-password risk is caught by the required login test.
+
+- **Result.** The role attributes and the database grant are identical to db-setup's Q4c. When a non-superuser admin
+  creates it, the admin keeps the PostgreSQL 16 ADMIN-only creator row on `crewflow_owner`, the same row the db-setup
+  admin path leaves. Rule 3 of the posture check accepts that row, and it gives the admin no INHERIT or SET.
+- **Reduces TM-DB-1, from admin to schema owner; removes TM-DB-3 for this install.** db-setup's definition holds the
+  `crewflow_owner` URL instead of an admin URL: whoever reads it gets the schema owner (with CREATEROLE until the
+  hardening below), not the provider admin. No bootstrap runs with admin rights on `up`; db-setup's owner-URL mode is
+  read-only.
+- **Residual L2: the SCRAM verifier.** `\password` sends `ALTER USER crewflow_owner PASSWORD '<SCRAM verifier>'` as
+  statement text. The verifier (not the password) can appear in server logs (log_statement ddl/all, or any failed
+  ALTER), pg_stat_statements and audit logs. With verify-full TLS it is only an offline-guessing target, which a 32-byte
+  random password defeats.
+  - Proven on PG16 (2026-11-17): `pg_stat_statements` (track_utility on, the default) stores the full statement text,
+    verifier included (`ALTER USER crewflow_owner PASSWORD 'SCRAM-SHA-256$4096:...'`). It is not normalised.
+  - Control: the script runs db-setup's Q1 first. For a superuser admin it turns off this session's statement logging;
+    proven: 0 verifier lines in a `log_statement=all` log. For a non-superuser admin Q1 is a no-op, and the log kept 1
+    verifier line. Q1 does not affect pg_stat_statements or provider audit logs.
+  - Control: the runbook requires `openssl rand -hex 32`. Not prevented: a weak password chosen by the admin.
+  - db-setup avoids all of this with bind parameters inside a DO block, which psql cannot do. The exception is
+    `log_statement=all` with a non-superuser admin, where PostgreSQL logs the bound parameter.
+- **Residual M1: a partial or interactive run.** The script is meant to run as a file (`psql -X -v ON_ERROR_STOP=1 -f`).
+  It also sets `ON_ERROR_STOP` on, `ON_ERROR_ROLLBACK` off and `AUTOCOMMIT` on itself, and every check runs inside the one
+  transaction. A failed check therefore aborts the transaction even if psql keeps going, and COMMIT rolls back.
+  - Proven: the file fed on stdin, a psqlrc with `ON_ERROR_ROLLBACK on` and `ON_ERROR_STOP off`, and the script with its
+    `\set` lines removed all left no `crewflow_owner` on a cluster where `rab_owner` existed.
+  - Not prevented: someone who pastes only some of the statements, or sets `ON_ERROR_ROLLBACK on` after the script's own
+    `\set` lines. The runbook says never to paste it.
+- **Residual L1: an empty or failed password entry.** `\password` runs inside the transaction. When the script is run as
+  a file, mismatched entries stop psql and roll everything back (proven). An empty entry (two empty lines, or end of
+  input) is accepted by psql, and the server then clears the password.
+  - A failed `\password` in an interactive session (pasted, or `\i` then a manual COMMIT) can leave a role without a
+    password; step 3 catches it.
+  - A superuser admin: the re-check reads `pg_authid` and rolls back (proven).
+  - A non-superuser admin cannot read `pg_authid`. The script then commits a passwordless LOGIN CREATEROLE role. It
+    cannot log in with a password (proven: 28P01), and db-setup refuses it (exit 64). The runbook's login check names
+    this state and its remedy (`REVOKE ... CASCADE; DROP ROLE crewflow_owner`, proven as the same admin).
+  - Residual: such a role is usable only through a `trust`, `peer` or `cert` rule in the provider's `pg_hba.conf`.
+- **CREATEROLE is REQUIRED to be removed after the first start has completed** (the rab-api log shows the migrate
+  result with serve=true, or a restart reports state CURRENT; `/healthz` 200 alone is a loose signal). This is runbook
+  4a step 6, owner decision 2026-11-17; Twenty's app user never has CREATEROLE. `crewflow_owner` needs CREATEROLE only on the first start: the bootstrap creates the schema
+  roles, and the role migrations up to 1786691000000 run. Until the admin runs `ALTER ROLE crewflow_owner NOCREATEROLE`,
+  a leaked URL is the schema owner with CREATEROLE (behaviour catalogue).
+  - No runtime path and no migration after 1786691000000 creates, alters or grants a role; the code was searched.
+  - The upgrade runner refuses a workspace step that writes the role catalogs.
+  - The API provisions workspaces through `core.provision_workspace` (SECURITY DEFINER, owned by `crewflow`). The
+    Worker provisions with `SET ROLE crewflow`.
+  - Proven on PG16 with NOCREATEROLE (2026-11-17, runbook 4a "Status"):
+    - a restart: db-setup, migrate, and the API / Worker boot gates;
+    - an upgrade that applied the 8 migrations after R256, the C3 cutover functions among them;
+    - the app's own provisioning and upgrade-runner integration specs: 112 passed, 0 failed. They cover the API
+      server path (`core.provision_workspace`), the Worker's `SET ROLE crewflow` path, the 0.6.0 workspace commands
+      and the locked start.
+  - Residual (flagged assumption): a future release with role migrations needs CREATEROLE back for that one upgrade.
+    The migration child refuses with exit 67 until it is granted.
+  - After NOCREATEROLE, `crewflow_owner` still holds the ADMIN option on the schema roles it created. It can still GRANT
+    them to existing roles. The posture check detects such a member at the next boot; it does not prevent the grant.
+- **Fail closed.** Every check runs inside the transaction, before anything is created:
+  - PostgreSQL 16 or later;
+  - an admin that can create roles and grant on the database;
+  - no existing Crewflow role on the cluster;
+  - no database-wide `search_path` default;
+  - SCRAM password encryption.
+
+  The script then re-checks the exact result before COMMIT. On a provider without CREATEROLE the install is refused,
+  either by the script or by the migrate child (exit 67), and nothing is created.
+- **Tests.** Disposable PostgreSQL 16.16 InstaBox runs on 2026-11-17 used a scratch harness, not committed (runbook
+  section 4a "Status"); the latest run had 36 checks and 0 failures. The script ran as a NOSUPERUSER CREATEROLE admin,
+  and after it these all passed:
+  - db-setup's owner-URL mode;
+  - the full migration chain as `crewflow_owner`;
+  - `owner-login-posture.ts` rules 1-4;
+  - `runDatabaseBootGates` for the API and the Worker;
+  - the PG16 posture golden.
+
+  These refusals were proven:
+  - an admin without CREATEROLE;
+  - a NOCREATEROLE `crewflow_owner` on a fresh install;
+  - a schema role pre-created by the admin;
+  - the M1 and L1 regressions above.
+
+  The password itself was never in a `log_statement=all` server log. No CI job runs this script yet.
+
 ### Rollback
 A rollback across this release needs the previous release's compose files (its image has no `worker-start.sh`,
 `db-setup.sh` or bootstrap child: under this release's files db-setup fails and rab-api never starts) and a
@@ -8978,6 +9074,148 @@ Reversal:   Upgrade / `resolutions` override (documented in "//resolutions") as 
   a bin-only file loading a non-drop package, `import 'graceful-fs';`, `/*! x */ require('graceful-fs')`, no `--root`,
   `--root @rab/server` without that link, a `--root` that is not a workspace. `tests/test_image_gate.py`
   (NativeAddonsSmoke): the smoke runs as 1000:1000 offline read-only, and a non-zero exit or a missing OK line fails.
+
+## PG_SSL_CA_CERT — the database CA as PEM text, for hosts that cannot mount a file (branch feat/pg-ssl-ca-cert-inline, 2026-11-17; no SQL)
+- **Context:** production requires TLS verify-full to PostgreSQL. A CA outside the system store (AWS RDS, DigitalOcean,
+  Aiven, Supabase, a self-hosted server's own CA or self-signed certificate) could only be given as a file
+  (`PG_SSL_CA_CERT_PATH`), which PaaS hosts such as OpenShip cannot mount. The tempting shortcut is Twenty's
+  `PG_SSL_ALLOW_SELF_SIGNED` (`rejectUnauthorized: false`): it accepts ANY certificate, so anyone on the path can
+  impersonate the database and read every credential and row. It stays refused in production (unchanged).
+- **Threats:** (1) an operator turns verification off to make a private CA work → database MITM; (2) a malformed or
+  wrong CA value is only discovered at first connect, or silently ignored; (3) a private key pasted into the CA variable
+  (a common copy/paste mistake with combined PEM files), with or without its PEM armour, is echoed into logs or the admin
+  viewer; (4) the CA and the path are both set and the process silently picks one; (5) a string-only call site drops the
+  inline CA and connects against the system store; (6) a CA "file" that is a FIFO or a device hangs the boot.
+- **Controls:** `PG_SSL_CA_CERT` holds the PEM text (real newlines or `\n` escapes, so one env-file line works). It only
+  changes WHICH root is trusted: verification stays verify-full, chain AND host name. The host-name check is Node's
+  default for a DNS host (pg sends the name as SNI); for an IP-literal host the `ssl` object carries an explicit
+  `checkServerIdentity` bound to that IP, which still calls `tls.checkServerIdentity` (see the finding below).
+  `pg-tls.ts validatePgCaPem` runs at boot for BOTH sources (the path's file is now held to the same rule): BEGIN/END
+  markers counted and balanced first; no base64 run of 64+ characters outside the blocks ("looks like key material"; a
+  run of only `=` or only hex digits, a comment banner or a fingerprint, is ignored); at least one PEM block, every block `CERTIFICATE` and parseable by `X509Certificate`, no mislabelled block, at most
+  256 KiB; a `PRIVATE KEY` block is refused with "treat that key as exposed"; any failure refuses to start. The CA file
+  is opened non-blocking and fstat-checked before it is read (a regular file of at most 256 KiB). Both variables set
+  refuses to start (before the file is read). Every message names the variable only, never the text; the admin
+  environment viewer lists `PG_SSL_CA_CERT` as a secret (Set / Not set). One resolver (`resolvePgEnvironment`) serves the
+  API, the Worker, db-setup's bootstrap child, the CLI and operator scripts (`createPgClientForUrl` passes
+  `PG_SSL_CA_CERT` through), so all of them verify identically. `pgConnectionString` refuses an inline CA instead of
+  dropping it (sslrootcert names a file). The bundled-db CA block in `api-prestart.sh` / `worker-start.sh` /
+  `db-setup.sh` no longer adds `PG_SSL_CA_CERT_PATH` when `PG_SSL_CA_CERT` is set. The operator tools apply the same
+  rules through `packages/rab-docker/scripts/pg-ca-pem.cjs` (a dependency-free port; `pg-ca-pem-parity.spec.ts` requires
+  the same verdict, reason and normalised PEM over one corpus): the env-file lint (`compose-owner-login.cjs`) checks
+  `PG_SSL_CA_CERT` in `database.env`, refuses it next to the path, and refuses either CA key in `runtime.env`; the
+  `--environment` preflight (`staging/verify-image-compose.cjs`) checks the `CREWFLOW_PG_CA_FILE` that is mounted as
+  `PG_SSL_CA_CERT_PATH`. Nothing is echoed.
+- **Upgrade notes (stricter than before):** a `PG_SSL_CA_CERT_PATH` file holding anything but CERTIFICATE blocks (an
+  `X509 CRL`, a `TRUSTED CERTIFICATE`, a bundled key), or larger than 256 KiB, or not a regular file, now refuses to
+  boot (it used to pass a loose pattern check); run the `--environment` preflight first. A database dialled by IP address
+  now needs that IP as an IP SAN in its certificate (before, a `localhost` certificate from the trusted CA passed).
+- **Not added (owner-gated):** no `verify-ca` / host-name-off mode, no "allow any certificate" mode in production, and
+  no expected-server-name option. A server whose certificate cannot name the host the client dials (Railway's TCP
+  proxy: a per-instance self-signed CA with SAN `localhost` only; Cloud SQL dialled by IP) still fails closed. The
+  security review recommends against a server-name option for now; if the owner ever approves one, it must come with an
+  SPKI pin. `verify-ca` is rejected outright: with a shared provider CA (an RDS regional CA, for example) it would accept
+  any other customer's certificate from the same CA.
+- **Residual:** the CA's authenticity is the operator's to establish (download it from the provider over HTTPS, never
+  from the server you are about to trust); a Linux environment string is capped at 128 KiB, so AWS's 170 KB global
+  bundle must be replaced by the regional bundle (about 4.5 KB).
+- **Tests:** `pg-tls-ca.spec.ts` (46): valid PEM accepted (multi-line, `\n`-escaped, CRLF, space-collapsed, bundles,
+  short explanatory text) and identical to the same PEM through the path; replica and operator-script client get it;
+  malformed refused (text, a path, missing END, extra END, truncated block, mismatched labels, empty, non-DER base64,
+  corrupted certificate, public key, private key, bare key material outside the blocks, oversize; a path file with a
+  CRL or TRUSTED CERTIFICATE block); the default file reader refuses a directory, an oversize file (from its size) and a
+  missing file without naming it; both set refused; empty = unset; the IP binding (IPv4, IPv6, system store, DNS host
+  unchanged); the CA text in no console line, warning, refusal message, env.validation message or admin viewer row.
+  `create-pg-pool.spec.ts`: the IP-bound `checkServerIdentity` survives the TypeORM driver config, `pgPoolConfig`,
+  `pgClientConfig` and pg's `ConnectionParameters` (IPv4 and IPv6). `pg-ca-pem-parity.spec.ts` (27): the TypeScript and
+  the operator-tool port agree on 21 inputs, and both give the expected verdict on the edge cases (a `=` comment banner
+  and a bare 64-hex SHA-256 fingerprint outside the blocks are accepted; real base64 key material is refused; a
+  lowercase `-----BEGIN private key-----` block, which the block pattern never parses, is refused through the balanced
+  marker count). A new rule needs a new parity corpus entry. `pg-tls-ca.integration.spec.ts` (11; a plain `describe` behind the
+  throwing gate, so it fails, never skips, without its database; real pg Client from the factory, production rules, a
+  TLS-only PostgreSQL front on 127.0.0.1 and ::1 with an openssl CA made like the bundled db's): private CA as text and
+  as one `\n` line → verified TLS session; path → identical; a self-hosted self-signed certificate → verified; an IP
+  host against an IP-SAN certificate (IPv4 and `[::1]`) → verified; leaf + intermediate against the root, and a
+  leaf-only server against a root + intermediate bundle → verified; DENIAL without the CA, with the wrong CA, with a
+  leaf-only server and the root alone, and with the right CA but a host the certificate does not name (127.0.0.1 and
+  [::1] vs DNS:localhost); both variables → refused before any connection. `compose-owner-login.test.cjs`: the lint
+  rules (real certificate, key, bare key material, runtime.env refusal). `verify-image-compose.test.cjs`: the preflight
+  refuses a CA file with a CRL / TRUSTED CERTIFICATE / key block, oversize, a directory or a missing file.
+  `run-prestart-shell-tests.cjs` 11n: host `db` with `PG_SSL_CA_CERT` set gets no path.
+- **Finding fixed in the same branch (found by the integration test): verify-full did not bind an IP-address host.**
+  For an IP-literal host, pg 8.23 sets neither `servername` nor `host` on `tls.connect`, and Node then checks the
+  certificate against the literal name `localhost` (reproduced on Node 24). So `postgresql://…@10.0.0.7/…?sslmode=verify-full`
+  accepted any certificate from a trusted CA that names `localhost`, not one naming 10.0.0.7. With the system store that
+  was harmless (public CAs do not issue `localhost`). With an operator CA (`PG_SSL_CA_CERT_PATH` already, and now
+  `PG_SSL_CA_CERT`) it was a host-name bypass whenever that CA had issued a `localhost` certificate: for example, an
+  operator who configured a Railway instance's own CA would have accepted that instance's certificate (SAN `localhost`)
+  for any IP. Fix: `buildPgSsl` takes the dialled host and, for an IP literal (IPv4 or IPv6), sets an explicit
+  `checkServerIdentity` bound to that IP, which calls `tls.checkServerIdentity(ip, cert)`; DNS hosts keep Node's default
+  check. `pgConnectionString` refuses an IP host with verify-full (the string form cannot carry the check). Tests: the
+  unit and integration cases above; the integration denial failed before the fix (the `localhost` certificate was
+  accepted for 127.0.0.1).
+
+## PG_ADMIN_URL — the database admin login reaches the one-shot setup step only (branch feat/pg-admin-url, 2026-11-17; owner decision 2026-11-17, Twenty's Helm model; one new SQL statement, below)
+
+- **Asset:** the database ADMIN credential (the bundled db's superuser, or a provider admin that can create roles); the
+  `crewflow_owner` app login and its password file; every tenant's data behind RLS (an admin login skips it).
+- **Change:** `PG_DATABASE_URL` used to mean "the admin URL, or an existing `crewflow_owner` URL", decided by the URL's login.
+  Now the admin URL is `PG_ADMIN_URL` and `PG_DATABASE_URL` ALWAYS means the app login (`crewflow_owner`). Three modes:
+  (a) bundled db (`CREWFLOW_BUNDLED_DB` unset/1, `PG_DATABASE_PASSWORD`); (b) `CREWFLOW_BUNDLED_DB=0` + `PG_ADMIN_URL`;
+  (c) `CREWFLOW_BUNDLED_DB=0` + a `crewflow_owner` `PG_DATABASE_URL`, no admin URL (db-setup only checks it, read-only).
+  rab-api and rab-worker are unchanged: they never receive a URL and build the `crewflow_owner` URL from db-setup's
+  credential-free target file and password file (PR #125 option 2), in every mode.
+- **Threats and controls:**
+  - *The admin URL reaching a long-running process* (readable from `/proc/<pid>/environ`, crash dumps, error reporters).
+    Compose: `PG_ADMIN_URL` is interpolated into `db-setup` only, and rab-api / rab-worker pin it to the literal `""`
+    (owner decision L-2, review of PR #230), so a value in `database.env` / `runtime.env` or a platform UI can never reach
+    them (regression test: image.yml rendered with it planted in either env file gives `""`). A raw-text gate
+    (`compose-owner-login.cjs` `adminUrlPlacementProblems`, over EVERY compose file in the repository) fails on the token
+    anywhere on a line outside db-setup (map, list or flow form, interpolations, `x-` anchors merged into a service) except
+    that exact empty pin on rab-api / rab-worker; it reads anchored / tagged / merge-key service headers and refuses any
+    anchor defined inside db-setup (L-3). The rendered-model gates (every combination) and the `--environment` preflight
+    accept exactly `""` there and refuse any value or a missing pin. Env files: the lint refuses it in `database.env` /
+    `runtime.env`; the preflight refuses it from an app env file. Process: `api-prestart.sh` (the one-off `bootstrap-admin`
+    path included) and `worker-start.sh` refuse a non-empty `PG_ADMIN_URL`, `PG_DATABASE_ADMIN_URL` or
+    `CREWFLOW_BUNDLED_DB_ADMIN_URL`, and ANY variable holding a database credential, other than their own `PG_DATABASE_URL`
+    (which has its own refusal): a postgres URL in any case, after leading blanks or quotes, with a driver prefix or suffix
+    (`jdbc:postgresql://`, `postgresql+psycopg://`), or a libpq keyword DSN with `password=` beside `host=` / `dbname=` /
+    `user=`; before they set the runtime URL (exit 64, the value never printed; L-1 and its follow-up). `never-in-runtime-env.ts` lists the three names for the in-process guard of the API, the Worker and
+    the provisioner. No legitimate variable of these services holds a PostgreSQL URL (checked: the compose files, the image
+    `ENV`, `database.env` / `runtime.env` templates). The dev compose's `server` / `worker` read a developer's
+    `../rab-server/.env`, so they blank its host-native URLs (`DATABASE_URL*`, `TEST_DATABASE_URL`, `TEST_DATABASE_ADMIN_URL`,
+    `TEST_DATABASE_URL_UNPOOLED`, `TEST_DATABASE_CREWFLOW_URL`, `MIGRATION_SECURITY_ADMIN_URL`) and pin `PG_ADMIN_URL` to `""`,
+    as QA's do; any other database URL left in that file stops them (exit 64), by design.
+  - *Silent reinterpretation* (an un-renamed deployment keeps its admin URL in `PG_DATABASE_URL`). Refused, never run as
+    the admin: the bootstrap child's `selectDbSetupInput` refuses a `PG_DATABASE_URL` whose login is not `crewflow_owner`
+    ("renamed to PG_ADMIN_URL", exit 64, nothing connects, nothing stored), and so do the lint and the preflight; the
+    retired `PG_DATABASE_ADMIN_URL` is refused by name; both URLs at once, neither, and `crewflow_owner` in `PG_ADMIN_URL`
+    are refused too. Live harness scenario `admin-url-in-pg-database-url` (CI ci-migration-security).
+  - *No dummy password* (owner requirement): `PG_DATABASE_PASSWORD` is no longer a compose `${...:?}` (that demanded it with
+    your own database too). It is required exactly while the bundled db runs: the `db` entrypoint refuses an empty
+    `POSTGRES_PASSWORD` (exit 64) before it touches the volume, `db-setup.sh` refuses the bundled mode with an empty password
+    (and `CREWFLOW_BUNDLED_DB=0` with no URL), and the lint / preflight refuse a bundled compose.env without it and an
+    own-database compose.env with a leftover one (it would sit unused in db-setup's definition).
+  - *An admin that inherits the app login* (lead review of PR #226): a non-superuser CREATEROLE admin on a provider that
+    defaults `createrole_self_grant` to `set, inherit` would receive SET / INHERIT on the new `crewflow_owner`. db-setup now
+    pins it empty for its write transaction before `CREATE ROLE` (new statement `OWNER_BOOTSTRAP_Q4B2_NO_SELF_GRANT`,
+    `SELECT pg_catalog.set_config('createrole_self_grant', '', true);`), unit-tested for order and live-tested
+    (`admin-createrole-self-grant`: an admin with that role default gets no SET / INHERIT membership).
+- **Kept unchanged:** verify-full, no transaction pooler, the owner-login posture shape, the URL policy (now relabelled with
+  the variable the operator set), the read-only owner-URL session, the one-shot / PID 1 / volume rules, the env-file
+  refusals (`DB_TARGET`, `ALLOW_PRODUCTION_DB_COMMANDS`, `BOOTSTRAP_ADMIN_*`).
+  - *A weak bundled password* (review I-2): on a FIRST initialisation only (no `PG_VERSION` in PGDATA yet) the `db` entrypoint
+    refuses a password that is not 32+ characters of `A-Z a-z 0-9 _ -` (exit 64, value never printed); an existing volume
+    is never refused (the image ignores the value there). Tested by running the committed block with `sh`.
+  - *A login hidden in the URL* (review I-4): a percent-encoded `crewflow%5Fowner` is decoded and is the same login
+    (accepted); `?user=`, `?password=`, `?host=`, `?dbname=` on either URL are refused (URL policy, the lint, the preflight).
+- **Residual:** the bundled db's superuser URL is still in db-setup's container definition (now as
+  `CREWFLOW_BUNDLED_DB_ADMIN_URL`; accepted risk TM-DB-1 / T-1, unchanged). `db-setup.sh` unsets it, but that only keeps it
+  out of the bootstrap child's environment: it stays in db-setup's PID 1 `/proc/1/environ` and in `docker inspect`, and the
+  child receives the same secret as `PG_ADMIN_URL`, so the net exposure is exactly TM-DB-1's (review I-1). An
+  OpenShip deploy without `PG_DATABASE_PASSWORD` now renders and fails at start (db / db-setup exit 64) instead of at
+  render. The live container suites (`run-db-setup-tests.cjs`, `run-prestart-shell-tests.cjs`) are updated but run in CI,
+  not locally.
 
 ## Upgrade runner — patch releases carry no upgrade commands (branch feat/runner-patch-releases, 2026-11-17; no SQL)
 - **Threat:** the upgrade-command registries are keyed `<major>-<minor>`, so a patch build (0.6.1) looked up `'0-6'` and

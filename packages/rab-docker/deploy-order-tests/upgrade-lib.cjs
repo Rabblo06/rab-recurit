@@ -472,10 +472,20 @@ function ownerUrl(password = secrets.owner) {
 
 /**
  * compose.env. `databaseUrl`: the database URL of the case (default: the pass-through crewflow_owner URL); `null` leaves it
- * out, i.e. the production default, the bundled db's admin URL built from PG_DATABASE_PASSWORD. PR #125: whatever
- * the login (an admin, crewflow_owner), it is written as PG_DATABASE_URL, the ONE database setting, which the compose
- * files interpolate into the one-shot db-setup only (there is no second, admin-only variable any more).
+ * out, i.e. the production default, the bundled db's admin URL built from PG_DATABASE_PASSWORD. PG_ADMIN_URL (owner
+ * decision 2026-11-17): a crewflow_owner URL is written as PG_DATABASE_URL (always the app login), any other login as
+ * PG_ADMIN_URL (db-setup only). The compose files interpolate both into the one-shot db-setup only. The bundled db keeps
+ * running in these suites (CREWFLOW_BUNDLED_DB unset), so PG_DATABASE_PASSWORD stays set.
  */
+/** The login of a database URL ('' when it is not a URL). */
+function urlLogin(url) {
+  try {
+    return decodeURIComponent(new URL(String(url)).username);
+  } catch {
+    return '';
+  }
+}
+
 function writeComposeEnv(project, { repository, digest, pgImage, redisImage, databaseUrl = ownerUrl() }) {
   const S = project.secretsDir.replace(/\\/g, '/');
   const lines = {
@@ -485,7 +495,7 @@ function writeComposeEnv(project, { repository, digest, pgImage, redisImage, dat
     CREWFLOW_POSTGRES_IMAGE: pgImage,
     CREWFLOW_SECRETS_DIR: S,
     PG_DATABASE_PASSWORD: secrets.dbPassword,
-    ...(databaseUrl ? { PG_DATABASE_URL: databaseUrl } : {}),
+    ...(databaseUrl ? { [urlLogin(databaseUrl) === 'crewflow_owner' ? 'PG_DATABASE_URL' : 'PG_ADMIN_URL']: databaseUrl } : {}),
     CREWFLOW_API_MEM_LIMIT: '1024m',
     CREWFLOW_API_CPUS: '2',
     CREWFLOW_WORKER_MEM_LIMIT: '1536m',
