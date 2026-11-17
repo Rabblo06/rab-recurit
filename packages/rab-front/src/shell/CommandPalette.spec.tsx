@@ -10,7 +10,7 @@ beforeAll(() => {
 
 function Where() {
   const location = useLocation();
-  return <output data-testid="where">{location.pathname + location.hash}</output>;
+  return <output data-testid="where">{location.pathname + location.search + location.hash}</output>;
 }
 
 function mount() {
@@ -30,7 +30,7 @@ describe('Command palette settings shortcuts', () => {
   it.each([
     ['Go to Account Settings', '/settings/account'],
     ['Go to General Settings', '/settings/my-workspace'],
-    ['Go to Role/Permission Settings', '/settings/workspace/roles'],
+    ['Go to Role/Permission Settings', '/settings/workspace/members?tab=roles'],
   ])('%s opens %s', (label, path) => {
     const { onClose } = mount();
     fireEvent.click(screen.getByRole('button', { name: label }));
