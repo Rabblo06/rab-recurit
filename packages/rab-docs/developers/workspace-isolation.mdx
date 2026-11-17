@@ -50,7 +50,7 @@ flowchart LR
 
 ## Per-workspace schemas (HWS)
 
-When `HWS_RUNTIME_ENABLED=true`, `search_path` points at `workspace_<uuid>`, resolved through `core.workspace_schema_registry`. There is no fallback to `core` for a workspace that is not `READY`. The provisioner process creates schemas; the runtime role cannot run DDL. HWS is built but not yet enabled in production.
+When `HWS_RUNTIME_ENABLED=true`, `search_path` points at `workspace_<uuid>`, resolved through `core.workspace_schema_registry`. There is no fallback to `core` for a workspace that is not `READY`. Schemas are built only by `core.provision_workspace`: by the API right after a workspace is created, or by the Worker's in-process provisioning loop for a workspace still `CREATING` or `FAILED`. HWS is built but not yet enabled in production.
 
 ## Background jobs
 

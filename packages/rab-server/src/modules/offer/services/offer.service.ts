@@ -350,6 +350,8 @@ export class OfferService {
    */
   list(ctx: AuthContext, dto: ListOffersDto = {}): Promise<{ data: OfferSummary[]; total: number }> {
     return this.tenantContext.runInWorkspaceContext(ctx, async (manager) => {
+      // SF-2 layer 2: the route's schedule.view, before any row is read (jobs / other services skip the guard).
+      await this.permissions.assertPermissionTx(manager, ctx, PermissionFlag.SCHEDULE_VIEW);
       const scope = await this.resourceScope.resolveTx(manager, ctx);
       if (scope.kind === 'venue' && scope.venueIds.length === 0) return { data: [], total: 0 };
 
@@ -463,6 +465,7 @@ export class OfferService {
   listMine(ctx: AuthContext, dto: ListMyOffersDto): Promise<OfferSummary[] | MyOffersPage>;
   listMine(ctx: AuthContext, dto: ListMyOffersDto = {}): Promise<OfferSummary[] | MyOffersPage> {
     return this.tenantContext.runInWorkspaceContext(ctx, async (manager) => {
+      await this.permissions.assertPermissionTx(manager, ctx, PermissionFlag.OFFER_RESPOND);
       const legacy = isLegacyUnpagedRequest(dto);
       // Validated before anything is read, so a malformed cursor is a 400 whoever calls (no staff profile included).
       const after = legacy ? null : decodeOptionalKeysetCursor(dto.cursor);
@@ -773,6 +776,7 @@ export class OfferService {
    */
   async send(ctx: AuthContext, shiftId: string, dto: SendOfferDto): Promise<JobOffer> {
     return this.tenantContext.runInWorkspaceContext(ctx, async (manager) => {
+      await this.permissions.assertPermissionTx(manager, ctx, PermissionFlag.OFFER_SEND);
       const shift = await this.loadSendableShift(manager, ctx, shiftId);
       const shiftLabel = await this.getShiftLabel(manager, shiftId);
       const batchId = randomUUID();
@@ -797,8 +801,9 @@ export class OfferService {
    * recipient can't poison a batch-mate's successful insert.
    */
   async sendBulk(ctx: AuthContext, shiftId: string, dto: SendBulkOfferDto): Promise<BulkOfferResult> {
-    if (dto.mode === 'replacement') return this.sendReplacementBulk(ctx, shiftId, dto);
+    if (dto.mode === 'replacement') return this.sendReplacementBulk(ctx, shiftId, dto); // re-checks offer.send itself
     return this.tenantContext.runInWorkspaceContext(ctx, async (manager) => {
+      await this.permissions.assertPermissionTx(manager, ctx, PermissionFlag.OFFER_SEND);
       const shift = await this.loadSendableShift(manager, ctx, shiftId);
       const shiftLabel = await this.getShiftLabel(manager, shiftId);
       const batchId = randomUUID();
@@ -1093,6 +1098,8 @@ export class OfferService {
     dto: ApproveShiftRequestDto,
   ): Promise<BulkOfferResult & { shiftId: string }> {
     return this.tenantContext.runInWorkspaceContext(ctx, async (manager) => {
+      // SF-2 layer 2: the route's staffing_request.approve, before the shift row is read or locked.
+      await this.permissions.assertPermissionTx(manager, ctx, PermissionFlag.STAFFING_REQUEST_APPROVE);
       const shift = await manager.findOne(Shift, { where: { id: shiftId }, lock: { mode: 'pessimistic_write' } });
       // Explicit org check alongside RLS — see SchedulingService
       // .assertShiftViewable's own comment on why a single enforcement
@@ -1248,6 +1255,7 @@ export class OfferService {
 
   async withdraw(ctx: AuthContext, offerId: string): Promise<JobOffer> {
     return this.tenantContext.runInWorkspaceContext(ctx, async (manager) => {
+      await this.permissions.assertPermissionTx(manager, ctx, PermissionFlag.OFFER_WITHDRAW);
       const offer = await manager.findOne(JobOffer, { where: { id: offerId } });
       if (!offer) throw new NotFoundException('Offer not found.');
       this.assertOfferOwned(ctx, offer);
@@ -1300,6 +1308,8 @@ export class OfferService {
    */
   async staffAccept(ctx: AuthContext, offerId: string): Promise<JobOffer> {
     const claim = await this.tenantContext.runInWorkspaceContext(ctx, async (manager) => {
+      // SF-2 layer 2: offer.respond first; a refusal here ends the call, so the lazy-expiry transaction below never runs.
+      await this.permissions.assertPermissionTx(manager, ctx, PermissionFlag.OFFER_RESPOND);
       const staffProfile = await manager.findOne(StaffProfile, { where: { userId: ctx.userId } });
       if (!staffProfile) throw new NotFoundException('Offer not found.');
 
@@ -1499,6 +1509,7 @@ export class OfferService {
 
   async decline(ctx: AuthContext, offerId: string, dto: DeclineOfferDto): Promise<JobOffer> {
     return this.tenantContext.runInWorkspaceContext(ctx, async (manager) => {
+      await this.permissions.assertPermissionTx(manager, ctx, PermissionFlag.OFFER_RESPOND);
       const staffProfile = await manager.findOne(StaffProfile, { where: { userId: ctx.userId } });
       if (!staffProfile) throw new NotFoundException('Offer not found.');
 
@@ -1587,7 +1598,11 @@ export class OfferService {
 
   async managerConfirm(ctx: AuthContext, offerId: string): Promise<JobOffer> {
     try {
-      return await this.tenantContext.runInWorkspaceContext(ctx, (manager) => this.confirmOne(manager, ctx, offerId));
+      return await this.tenantContext.runInWorkspaceContext(ctx, async (manager) => {
+        // SF-2 layer 2: the route's offer.confirm. A refusal is a ForbiddenException, so the deadline withdrawal below never runs.
+        await this.permissions.assertPermissionTx(manager, ctx, PermissionFlag.OFFER_CONFIRM);
+        return this.confirmOne(manager, ctx, offerId);
+      });
     } catch (error) {
       if (error instanceof ConfirmationDeadlinePassedException) await this.withdrawPastDeadline(ctx, [error.offerId]);
       throw error;
@@ -1628,6 +1643,7 @@ export class OfferService {
    */
   async confirmAll(ctx: AuthContext, batchId: string): Promise<BulkOfferResult> {
     return this.tenantContext.runInWorkspaceContext(ctx, async (manager) => {
+      await this.permissions.assertPermissionTx(manager, ctx, PermissionFlag.OFFER_CONFIRM);
       const offers = await manager.find(JobOffer, { where: { offerBatchId: batchId } });
       if (offers.length === 0) throw new NotFoundException('Offer batch not found.');
 
@@ -1656,6 +1672,7 @@ export class OfferService {
   /** Batch summary for `BatchOfferDrawer` — one shift, N recipients, counted by status. RLS scopes the org filter. */
   async getBatch(ctx: AuthContext, batchId: string): Promise<OfferBatchSummary> {
     return this.tenantContext.runInWorkspaceContext(ctx, async (manager) => {
+      await this.permissions.assertPermissionTx(manager, ctx, PermissionFlag.SCHEDULE_VIEW);
       const t = businessTables(manager);
       // sql-injection-reviewed: interpolates a module-level SQL constant / constant fragment; every request value is a bound $n parameter.
       const rows = await manager.query(`${offerSummarySelect(manager)} WHERE o.offer_batch_id = $1 ORDER BY u.first_name`, [
@@ -1697,6 +1714,7 @@ export class OfferService {
   /** The manager's alternative to confirming: decline the staff member's acceptance. Never claims a seat, so no capacity bookkeeping to undo. */
   async managerReject(ctx: AuthContext, offerId: string, dto: RejectOfferDto): Promise<JobOffer> {
     return this.tenantContext.runInWorkspaceContext(ctx, async (manager) => {
+      await this.permissions.assertPermissionTx(manager, ctx, PermissionFlag.OFFER_CONFIRM);
       const offer = await manager.findOne(JobOffer, { where: { id: offerId } });
       if (!offer) throw new NotFoundException('Offer not found.');
       this.assertOfferOwned(ctx, offer);

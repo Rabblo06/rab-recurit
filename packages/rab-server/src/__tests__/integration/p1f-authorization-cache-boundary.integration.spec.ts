@@ -130,9 +130,12 @@ describeIfDb('P1F authorization cache boundary (integration)', () => {
       const before = await snapshotService.build({ sid, sub: identity.userId, org: identity.organisationId });
       expect(before!.accountStatus).toBe('active');
 
-      const ctx = { organisationId: organisation.id, workspaceId: null, userId: identity.userId, role: '' };
+      // The organisation's CEO suspends them: since SF-2 ManagerService.setActive re-checks the /managers route's
+      // manager.manage, which the production `manager` role does not hold.
+      const ceo = await factory.createCeo(organisation);
+      const ctx = { organisationId: organisation.id, workspaceId: null, userId: ceo.userId, role: '' };
       // Lane D (M10-2): deactivation needs a recent step-up of the caller's REAL session (a fresh sign-in provides it).
-      await managerService.setActive({ ...ctx, sessionId: (await factory.signedInContext(identity)).sessionId }, identity.profileId!, false);
+      await managerService.setActive({ ...ctx, sessionId: (await factory.signedInContext(ceo)).sessionId }, identity.profileId!, false);
 
       // ManagerService.setActive(false) revokes every session for this user as part of suspension
       // — the same real-service call path a Manager Settings "Deactivate" button triggers, not a

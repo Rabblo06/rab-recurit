@@ -567,6 +567,7 @@ describeIfApproved('Phase D two-Worker concurrency and failure (integration — 
       pushService: { send, ambiguousDeliverySafeToRetry: false } as unknown as PushService,
       secretEncryption: app.get(SecretEncryptionService),
       pushDeviceService: app.get(PushDeviceService),
+      auditService: app.get(AuditService),
     });
     const job = (id: string) => ({ data: { pushDeliveryId: id, organisationId: o.organisationId }, attemptsMade: 0, opts: { attempts: 5 } }) as unknown as Job<PushQueueJobData>;
 

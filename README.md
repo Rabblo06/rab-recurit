@@ -192,9 +192,11 @@ One NestJS backend serves two clients: **`rab-front`**, the web console for Mana
 
 ### Database setup
 
-Crewflow needs an **empty PostgreSQL 16 database**; versions 15 and earlier are refused. A connection URL alone is not enough: the database administrator first runs one SQL file, once, and the application does everything after that.
+Crewflow needs an **empty PostgreSQL 16, 17 or 18 database**; versions 15 and earlier are refused.
 
-1. **One-time provider step.** As the PostgreSQL superuser or your provider's admin role, in SQL, over the direct (non-pooler) host, run [`01-crewflow-owner.sql`](./packages/rab-docker/postgres-init/owner-login/01-crewflow-owner.sql) against the empty database. It creates the `crewflow_owner` login (`NOSUPERUSER`, `NOBYPASSRLS`) and grants it `CONNECT`, `CREATE` and `TEMPORARY` on that database. The password is read from a file, so it never appears on a command line:
+1. **One setting.** With Docker, the database is one value in `compose.env`, `PG_DATABASE_URL`: your PostgreSQL's admin URL (direct host, `sslmode=verify-full`), an existing `crewflow_owner` URL, or unset to use the bundled `db` service (then set only `PG_DATABASE_PASSWORD`). There is no SQL step: the one-shot `db-setup` service creates the `crewflow_owner` login (`NOSUPERUSER`, `NOBYPASSRLS`) if it is missing, with a random password it keeps on its own volume, and writes a credential-free target file. The API and the Worker never receive a database URL; they build the `crewflow_owner` URL from those two files. They refuse every other database setting at boot: `DATABASE_URL`, `DATABASE_URL_UNPOOLED`, the replica URL, the provisioner URL and the old role passwords.
+
+2. **Without Docker** (for example local development), create `crewflow_owner` once by hand. As the PostgreSQL superuser or your provider's admin role, in SQL, over the direct (non-pooler) host, run [`01-crewflow-owner.sql`](./packages/rab-docker/postgres-init/owner-login/01-crewflow-owner.sql) against the empty database. It creates the login and grants it `CONNECT`, `CREATE` and `TEMPORARY` on that database. The password is read from a file, so it never appears on a command line:
 
    ```bash
    openssl rand -hex 32 > crewflow-owner-password   # secret: keep it outside the repository
@@ -203,9 +205,9 @@ Crewflow needs an **empty PostgreSQL 16 database**; versions 15 and earlier are 
      -f packages/rab-docker/postgres-init/owner-login/01-crewflow-owner.sql
    ```
 
-2. **One URL.** Every process (API, Worker and the migration step) uses the same `PG_DATABASE_URL`, logging in as `crewflow_owner`. There are no other database URLs or logins to configure: `DATABASE_URL`, `DATABASE_URL_UNPOOLED`, the replica URL, the provisioner URL and the old role passwords are refused at boot.
+   Each process then takes `PG_DATABASE_URL` naming `crewflow_owner`.
 
-3. **Migrations run on start.** On the first start the server installs the whole schema into the empty database; on later starts it applies only what is pending, under a migration lock, and runs its post-checks every time. In the API container this happens when `CREWFLOW_MIGRATE_ON_START=true`. Production can instead run the same step as a separate release job.
+3. **Migrations run on start.** On the first start the API installs the whole schema into the empty database; on later starts it applies only what is pending, under a migration lock, records each step in the upgrade logbook and runs its post-checks every time. In the API container this happens when `CREWFLOW_MIGRATE_ON_START=true`, which every deploy compose file sets. There is no separate release step, and the Worker never migrates.
 
 **Before every upgrade, take a backup or a restore point.** This is mandatory. The application login cannot take a complete logical backup (forced-RLS tables dump empty for it), so the backup is taken by the cluster superuser or by your provider. The supported rollback is to restore that backup and then deploy the previous image.
 
@@ -214,7 +216,7 @@ Crewflow needs an **empty PostgreSQL 16 database**; versions 15 and earlier are 
 
 ### Local development
 
-**Prerequisites:** Node.js 24, Yarn 4 via Corepack, PostgreSQL 16 and Redis 7 (Docker works for both), and the Flutter SDK for mobile.
+**Prerequisites:** Node.js 24, Yarn 4 via Corepack, PostgreSQL 16 (or 17, 18) and Redis 7 (Docker works for both), and the Flutter SDK for mobile.
 
 ```bash
 git clone https://github.com/Rabblo06/rab-recurit.git
@@ -225,7 +227,7 @@ npx nx run-many -t build -p rab-shared,rab-emails,rab-ui
 npx nx build rab-server
 ```
 
-Prepare an empty local database with the one-time provider step above. Then configure the API from the template, which documents every variable. Set `PG_DATABASE_URL` to `postgres://crewflow_owner:<password>@localhost:5432/<database>`, plus `REDIS_URL` and `APP_SECRET`. Never commit real values.
+Prepare an empty local database with the "Without Docker" step above. Then configure the API from the template, which documents every variable. Set `PG_DATABASE_URL` to `postgres://crewflow_owner:<password>@localhost:5432/<database>`, plus `REDIS_URL` and `APP_SECRET`. Never commit real values.
 
 ```bash
 cp packages/rab-server/.env.example packages/rab-server/.env
