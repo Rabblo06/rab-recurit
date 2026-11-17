@@ -16,7 +16,7 @@ const OUT = path.resolve(opt('--out', path.join(os.tmpdir(), 'untangle')));
 const MAXF = Number(opt('--max-files', 40));
 const MIN = Number(opt('--min', 5));
 
-const log = execFileSync('git', ['-C', ROOT, 'log', '--no-merges', '--name-only', '--pretty=format:@@%h %s'], { encoding: 'utf8', maxBuffer: 1 << 28 });
+const log = execFileSync('git', ['-C', ROOT, 'log', '--no-merges', '--name-only', '--pretty=format:%x00%h %s'], { encoding: 'utf8', maxBuffer: 1 << 28 });
 const skip = (f) => /(^|\/)(yarn\.lock|package-lock\.json|pubspec\.lock)$|\.(png|webp|jpg|svg|ttf|woff2?|mp4|vtt|ico)$|security-posture\.golden|\/docs\/HANDOFF\.md$|^docs\/HANDOFF|HANDOFF\.md$/.test(f);
 
 function unitOf(f) {
@@ -55,7 +55,8 @@ function unitOf(f) {
 const topOf = (f) => (f.startsWith('packages/') ? f.split('/')[1] : f.split('/')[0]);
 
 const commits = [];
-for (const block of log.split('@@').filter(Boolean)) {
+// Records start with a NUL (%x00) and pair keys join with NUL: neither can occur in a commit subject or a path.
+for (const block of log.split('\0').filter(Boolean)) {
   const [head, ...fl] = block.split('\n');
   const fs_ = [...new Set(fl.filter((x) => x && !skip(x)))];
   if (!fs_.length) continue;
@@ -74,16 +75,16 @@ for (const c of commits) {
     for (let j = i + 1; j < fsSorted.length; j++) {
       const a = fsSorted[i], b = fsSorted[j];
       if (unitOf(a) === unitOf(b)) continue;
-      inc(pairF, a + '\t' + b, c.head);
+      inc(pairF, a + '\0' + b, c.head);
     }
   const us = units.sort();
-  for (let i = 0; i < us.length; i++) for (let j = i + 1; j < us.length; j++) inc(pairU, us[i] + '\t' + us[j], c.head);
+  for (let i = 0; i < us.length; i++) for (let j = i + 1; j < us.length; j++) inc(pairU, us[i] + '\0' + us[j], c.head);
 }
 function rank(pairs, nMap, filter = () => true) {
   return [...pairs.entries()]
     .filter(([, v]) => v.n >= MIN)
     .map(([k, v]) => {
-      const [a, b] = k.split('\t');
+      const [a, b] = k.split('\0');
       const na = nMap.get(a), nb = nMap.get(b);
       return { a, b, co: v.n, na, nb, conf: v.n / Math.min(na, nb), jac: v.n / (na + nb - v.n), ex: v.ex };
     })

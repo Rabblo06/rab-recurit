@@ -9,7 +9,13 @@ const args = process.argv.slice(2);
 const ROOT = path.resolve(args[0] || '.');
 const OUT = path.resolve(args.includes('--out') ? args[args.indexOf('--out') + 1] : path.join(os.tmpdir(), 'untangle'));
 const files = execFileSync('git', ['-C', ROOT, 'ls-files'], { encoding: 'utf8' }).split('\n').filter(Boolean);
-const read = (f) => fs.readFileSync(path.join(ROOT, f), 'utf8');
+const read = (f) => {
+  try {
+    return fs.readFileSync(path.join(ROOT, f), 'utf8');
+  } catch {
+    return ''; // tracked but deleted in the working tree
+  }
+};
 const test = (f) => /(\.spec\.|\.test\.|_test\.dart|\/__tests__\/|\/test\/|Tests\/)/.test(f);
 
 // --- server routes

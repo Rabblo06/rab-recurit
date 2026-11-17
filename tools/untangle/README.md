@@ -1,11 +1,13 @@
 # tools/untangle: codebase analysis scripts
 
-These are the read-only scripts behind the whole-repo clean-up analysis in `docs/plans/untangle/` (cross-cutting.md §3).
-Rerun them to see how the structure has moved since that analysis, before and after an untangle PR.
+These are the read-only scripts behind the whole-repo clean-up analysis (the untangle plan, cross-cutting log §3). That
+plan lives in the lead's local `docs/plans/untangle/` folder and is not committed to this repository. Rerun the scripts
+to see how the structure has moved since that analysis, before and after an untangle PR.
 
 They only run `git ls-files` and `git log` and read tracked files. They never change the repository, install nothing
 and use no network. Each one writes its report to `--out`, which defaults to `<os tmpdir>/untangle`, never the repo.
-Node built-ins only. The CI gate is `tools/check-import-boundaries.cjs` (PR #191); these scripts are analysis, not a gate.
+Node built-ins only. They are analysis, not a CI gate: the boundary rules are enforced by the import-boundary ratchet
+(`tools/check-import-boundaries.cjs`).
 
 | Script | Rerun (from the repo root) | Output |
 |---|---|---|
