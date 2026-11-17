@@ -147,11 +147,18 @@ structural changes.
   (auth, permissions, secrets, audit, file storage, email, queue, tenant
   context). `modules/` is the staffing domain (staff, venue, scheduling,
   attendance, payroll). The dependency only flows one way.
-- **Money is always `bigint` pence.** Never a float, never a string used for
+- **Money is always integer pence.** The database column is `bigint`; in code
+  `Pence` is a JS `number` that must stay a safe integer (`assertSafePence`
+  refuses anything else, and the server's `bigintAsNumber` column transformer
+  calls it on every read and write). Never a float, never a string used for
   arithmetic. Use `@rab/shared`'s `money.ts`.
 - **Worked-minutes calculation lives in exactly one place**: `@rab/shared`'s
-  `duration.ts`. Mobile timer, attendance console and payroll engine all import
-  it. Do not reimplement it anywhere.
+  `duration.ts` (`computeWorkedMinutes`). Its callers are the server's
+  attendance and offer services, which store the result as `worked_minutes`;
+  payroll and the Worker's reports read that stored value, and the web and
+  iPhone clients display the server's `workedMinutes` (rab-mobile and
+  rab-iphone are Dart and Swift and cannot import it). Do not reimplement it
+  anywhere.
 - **Permissions are resolved server-side per request**, never read off the JWT.
   Use the `PermissionGuard(flag)` mixin factory declaratively on the
   handler — never an inline `if` check in a resolver/controller body.
