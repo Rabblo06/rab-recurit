@@ -1,5 +1,7 @@
 import { MigrationInterface, QueryRunner } from 'typeorm';
 
+import { withCrewflowCoreCreate } from '../core-schema-create-scope';
+
 /**
  * SF-5 (docs/plans/untangle/server-modules.md §3, M15): the layer-5 (per-recipient) predicate on `core.notification`.
  *
@@ -55,29 +57,33 @@ export class NotificationRecipientRls1786721590000 implements MigrationInterface
     );
     await runner.query(`CREATE POLICY notification_update_recipient ON ${TABLE} FOR UPDATE USING (${RECIPIENT}) WITH CHECK (${RECIPIENT});`);
 
-    await runner.query(`
-      CREATE FUNCTION core.offer_sent_notification_read_at(p_offer_id uuid, p_recipient_user_id uuid)
-      RETURNS timestamptz
-      LANGUAGE plpgsql
-      SECURITY DEFINER
-      SET search_path = pg_catalog, pg_temp
-      AS $fn$
-      DECLARE
-        v_read_at timestamptz;
-      BEGIN
-        PERFORM pg_catalog.set_config('rab.offer_read_receipt', 'on', true);
-        SELECT max(n.read_at) INTO v_read_at
-          FROM core.notification n
-         WHERE n.organisation_id = core.current_org()
-           AND n.type = 'offer_sent'
-           AND n.related_entity_id = p_offer_id
-           AND n.user_id = p_recipient_user_id;
-        PERFORM pg_catalog.set_config('rab.offer_read_receipt', '', true);
-        RETURN v_read_at;
-      END;
-      $fn$;
-    `);
-    await runner.query(`ALTER FUNCTION ${READ_AT_FN} OWNER TO crewflow;`);
+    // crewflow holds no CREATE on core (SecureOwnerCoreSchemaAndHelpers1786721100000): the create and the hand-over to
+    // crewflow run inside the scoped, savepointed CREATE window, as HwsCutoverCopyFunctions1786721540000 does.
+    await withCrewflowCoreCreate(runner, async () => {
+      await runner.query(`
+        CREATE FUNCTION core.offer_sent_notification_read_at(p_offer_id uuid, p_recipient_user_id uuid)
+        RETURNS timestamptz
+        LANGUAGE plpgsql
+        SECURITY DEFINER
+        SET search_path = pg_catalog, pg_temp
+        AS $fn$
+        DECLARE
+          v_read_at timestamptz;
+        BEGIN
+          PERFORM pg_catalog.set_config('rab.offer_read_receipt', 'on', true);
+          SELECT max(n.read_at) INTO v_read_at
+            FROM core.notification n
+           WHERE n.organisation_id = core.current_org()
+             AND n.type = 'offer_sent'
+             AND n.related_entity_id = p_offer_id
+             AND n.user_id = p_recipient_user_id;
+          PERFORM pg_catalog.set_config('rab.offer_read_receipt', '', true);
+          RETURN v_read_at;
+        END;
+        $fn$;
+      `);
+      await runner.query(`ALTER FUNCTION ${READ_AT_FN} OWNER TO crewflow;`);
+    });
     await runner.query(`REVOKE ALL ON FUNCTION ${READ_AT_FN} FROM PUBLIC;`);
     await runner.query(`GRANT EXECUTE ON FUNCTION ${READ_AT_FN} TO crewflow_app;`);
 
