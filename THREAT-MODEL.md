@@ -7540,6 +7540,102 @@ Controls: the runbook's explicit upgrade step (3.2 step 0: move the line to `com
 makes every process refuse the bundled database. Residual: an operator who skips the lint and the preflight, with no
 `PG_EXPECTED_DATABASE_NAME` or one equal to `crewflow`.
 
+### TM-DB-5 (owner-approved 2026-11-17) — your own database, app login created by you (`own-database-app-login.sql`)
+
+A database admin creates `crewflow_owner` by hand with
+`packages/rab-docker/postgres-init/owner-login/own-database-app-login.sql`. Crewflow then receives only the
+`crewflow_owner` URL and never an admin credential (runbook OWNER-LOGIN-DEPLOYMENT.md section 4a; Twenty: an external
+database, no setup step).
+
+- **Owner decision 2026-11-17.** The SQL is approved, with two required steps:
+  - the login test (runbook 4a step 3) before any variable is set or anything is deployed;
+  - `ALTER ROLE crewflow_owner NOCREATEROLE` after the first start has completed: the rab-api log shows the migrate
+    result with serve=true, or a restart reports state CURRENT (step 6).
+
+  Owner 2026-11-17: both trade-offs accepted. The verifier can appear in logs (Twenty's Helm setup puts the plaintext
+  password in SQL, so ours is stricter). The empty-password risk is caught by the required login test.
+
+- **Result.** The role attributes and the database grant are identical to db-setup's Q4c. When a non-superuser admin
+  creates it, the admin keeps the PostgreSQL 16 ADMIN-only creator row on `crewflow_owner`, the same row the db-setup
+  admin path leaves. Rule 3 of the posture check accepts that row, and it gives the admin no INHERIT or SET.
+- **Reduces TM-DB-1, from admin to schema owner; removes TM-DB-3 for this install.** db-setup's definition holds the
+  `crewflow_owner` URL instead of an admin URL: whoever reads it gets the schema owner (with CREATEROLE until the
+  hardening below), not the provider admin. No bootstrap runs with admin rights on `up`; db-setup's owner-URL mode is
+  read-only.
+- **Residual L2: the SCRAM verifier.** `\password` sends `ALTER USER crewflow_owner PASSWORD '<SCRAM verifier>'` as
+  statement text. The verifier (not the password) can appear in server logs (log_statement ddl/all, or any failed
+  ALTER), pg_stat_statements and audit logs. With verify-full TLS it is only an offline-guessing target, which a 32-byte
+  random password defeats.
+  - Proven on PG16 (2026-11-17): `pg_stat_statements` (track_utility on, the default) stores the full statement text,
+    verifier included (`ALTER USER crewflow_owner PASSWORD 'SCRAM-SHA-256$4096:...'`). It is not normalised.
+  - Control: the script runs db-setup's Q1 first. For a superuser admin it turns off this session's statement logging;
+    proven: 0 verifier lines in a `log_statement=all` log. For a non-superuser admin Q1 is a no-op, and the log kept 1
+    verifier line. Q1 does not affect pg_stat_statements or provider audit logs.
+  - Control: the runbook requires `openssl rand -hex 32`. Not prevented: a weak password chosen by the admin.
+  - db-setup avoids all of this with bind parameters inside a DO block, which psql cannot do. The exception is
+    `log_statement=all` with a non-superuser admin, where PostgreSQL logs the bound parameter.
+- **Residual M1: a partial or interactive run.** The script is meant to run as a file (`psql -X -v ON_ERROR_STOP=1 -f`).
+  It also sets `ON_ERROR_STOP` on, `ON_ERROR_ROLLBACK` off and `AUTOCOMMIT` on itself, and every check runs inside the one
+  transaction. A failed check therefore aborts the transaction even if psql keeps going, and COMMIT rolls back.
+  - Proven: the file fed on stdin, a psqlrc with `ON_ERROR_ROLLBACK on` and `ON_ERROR_STOP off`, and the script with its
+    `\set` lines removed all left no `crewflow_owner` on a cluster where `rab_owner` existed.
+  - Not prevented: someone who pastes only some of the statements, or sets `ON_ERROR_ROLLBACK on` after the script's own
+    `\set` lines. The runbook says never to paste it.
+- **Residual L1: an empty or failed password entry.** `\password` runs inside the transaction. When the script is run as
+  a file, mismatched entries stop psql and roll everything back (proven). An empty entry (two empty lines, or end of
+  input) is accepted by psql, and the server then clears the password.
+  - A failed `\password` in an interactive session (pasted, or `\i` then a manual COMMIT) can leave a role without a
+    password; step 3 catches it.
+  - A superuser admin: the re-check reads `pg_authid` and rolls back (proven).
+  - A non-superuser admin cannot read `pg_authid`. The script then commits a passwordless LOGIN CREATEROLE role. It
+    cannot log in with a password (proven: 28P01), and db-setup refuses it (exit 64). The runbook's login check names
+    this state and its remedy (`REVOKE ... CASCADE; DROP ROLE crewflow_owner`, proven as the same admin).
+  - Residual: such a role is usable only through a `trust`, `peer` or `cert` rule in the provider's `pg_hba.conf`.
+- **CREATEROLE is REQUIRED to be removed after the first start has completed** (the rab-api log shows the migrate
+  result with serve=true, or a restart reports state CURRENT; `/healthz` 200 alone is a loose signal). This is runbook
+  4a step 6, owner decision 2026-11-17; Twenty's app user never has CREATEROLE. `crewflow_owner` needs CREATEROLE only on the first start: the bootstrap creates the schema
+  roles, and the role migrations up to 1786691000000 run. Until the admin runs `ALTER ROLE crewflow_owner NOCREATEROLE`,
+  a leaked URL is the schema owner with CREATEROLE (behaviour catalogue).
+  - No runtime path and no migration after 1786691000000 creates, alters or grants a role; the code was searched.
+  - The upgrade runner refuses a workspace step that writes the role catalogs.
+  - The API provisions workspaces through `core.provision_workspace` (SECURITY DEFINER, owned by `crewflow`). The
+    Worker provisions with `SET ROLE crewflow`.
+  - Proven on PG16 with NOCREATEROLE (2026-11-17, runbook 4a "Status"):
+    - a restart: db-setup, migrate, and the API / Worker boot gates;
+    - an upgrade that applied the 8 migrations after R256, the C3 cutover functions among them;
+    - the app's own provisioning and upgrade-runner integration specs: 112 passed, 0 failed. They cover the API
+      server path (`core.provision_workspace`), the Worker's `SET ROLE crewflow` path, the 0.6.0 workspace commands
+      and the locked start.
+  - Residual (flagged assumption): a future release with role migrations needs CREATEROLE back for that one upgrade.
+    The migration child refuses with exit 67 until it is granted.
+  - After NOCREATEROLE, `crewflow_owner` still holds the ADMIN option on the schema roles it created. It can still GRANT
+    them to existing roles. The posture check detects such a member at the next boot; it does not prevent the grant.
+- **Fail closed.** Every check runs inside the transaction, before anything is created:
+  - PostgreSQL 16 or later;
+  - an admin that can create roles and grant on the database;
+  - no existing Crewflow role on the cluster;
+  - no database-wide `search_path` default;
+  - SCRAM password encryption.
+
+  The script then re-checks the exact result before COMMIT. On a provider without CREATEROLE the install is refused,
+  either by the script or by the migrate child (exit 67), and nothing is created.
+- **Tests.** Disposable PostgreSQL 16.16 InstaBox runs on 2026-11-17 used a scratch harness, not committed (runbook
+  section 4a "Status"); the latest run had 36 checks and 0 failures. The script ran as a NOSUPERUSER CREATEROLE admin,
+  and after it these all passed:
+  - db-setup's owner-URL mode;
+  - the full migration chain as `crewflow_owner`;
+  - `owner-login-posture.ts` rules 1-4;
+  - `runDatabaseBootGates` for the API and the Worker;
+  - the PG16 posture golden.
+
+  These refusals were proven:
+  - an admin without CREATEROLE;
+  - a NOCREATEROLE `crewflow_owner` on a fresh install;
+  - a schema role pre-created by the admin;
+  - the M1 and L1 regressions above.
+
+  The password itself was never in a `log_statement=all` server log. No CI job runs this script yet.
+
 ### Rollback
 A rollback across this release needs the previous release's compose files (its image has no `worker-start.sh`,
 `db-setup.sh` or bootstrap child: under this release's files db-setup fails and rab-api never starts) and a
