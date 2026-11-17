@@ -8615,6 +8615,29 @@ Reversal:   Lower CLOCK_IN_CONFIRM_FLOOR_HOURS, or require a second approver (pa
   another manager, and another workspace's job role → 404 with no `venue_role_rate` row; the caller's own role → 201 with
   the values as sent; create, update and delete each write exactly one audit row with exactly those four metadata keys.
 
+## SF-2 (part 3 of 3) — venue, shift-report and workspace-settings services re-check the route's flag (branch fix/sf2-service-perm-venue-reports-workspace, 2026-11-17)
+- **Threat:** a job, CLI command, AI tool or another service calls a VenueService / ShiftReportService / WorkspaceService
+  method directly, so no `PermissionGuard` runs. These checked only scope: a caller without the flag could create or edit
+  a venue (including its geofence), read a venue's pay and charge rates, read or list shift reports, finalise a report
+  (which triggers the worker PDF and email), or read the organisation's settings and sign-in methods (CLAUDE.md layer 2;
+  `docs/plans/untangle/server-modules.md` M3, finding SF-2, Medium).
+- **Control:** the shared `PermissionsService.assertPermissionTx` (part 1), or VenueService's existing
+  `assertCanViewVenueTx` / `assertCanEditVenueTx` (same `userHasPermissionTx`), called FIRST inside the method's own
+  tenant transaction: 403 for any id before a row is read or the finalise lock is taken. Scope 404s and transitions are
+  unchanged; the flag is the route guard's, so HTTP is unchanged.
+  - VenueService: `create` (`venue.create`); `update` (`venue.edit`); `listRoleRates` (`venue.view`). The role-rate writes
+    already re-checked `venue.edit` (SF-4).
+  - ShiftReportService: `listReports` (`report.view`); `finalise` (`report.export`); `getReport` takes the caller's route
+    flag — `report.view` by default, `report.export` for the report the finalise route returns (that route is guarded by
+    `report.export` alone, so a finalised report is never followed by a 403) — and fails closed on any other flag.
+    `getReportWithManager` stays check-free: it runs inside other authorised transactions (attendance review, on-behalf
+    punches, the offer pipeline).
+  - WorkspaceService: `get`, `getAuthProviders` (`settings.view`).
+- **Tests:** `sf2-layer2-venue-reports-workspace.integration.spec.ts` (each method called directly with the flag revoked by
+  a per-user override, on real records and unknown ids: ForbiddenException, and the organisation's audit log, outbox,
+  organisation row, venues, venue pay rates, shifts and shift reports are unchanged; the finalise route's report read works
+  under `report.export` alone; fail-closed flag; positive controls; HTTP 403/200 unchanged).
+
 ## Part C2 (C2-7) — every workspace business-table statement names its schema; the search_path trap is required (branch feat/hws-c2-7, PR #170, 2026-11-16; no SQL)
 - **Threat:** a statement that names a workspace business table (`shift`, `attendance`, `staff_profile`, …) without a schema
   is resolved by the transaction's `search_path`. A binder slip, a reused manager or a later code change that leaves the
