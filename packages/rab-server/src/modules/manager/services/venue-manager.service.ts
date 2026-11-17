@@ -68,9 +68,11 @@ export class VenueManagerService {
 
   async createInOwnWorkspace(ctx: AuthContext, dto: CreateVenueManagerDto) {
     this.resourceScope.assertHasWorkspace(ctx);
-    return this.tenantContext.runInWorkspaceContext(ctx, (manager) =>
-      this.managerService.createWithin(manager, ctx, { ...dto, type: ManagerType.VENUE }),
-    );
+    return this.tenantContext.runInWorkspaceContext(ctx, async (manager) => {
+      // SF-2 layer 2: the route's venue_manager.create, re-checked in the creating transaction before createWithin.
+      await this.permissions.assertPermissionTx(manager, ctx, PermissionFlag.VENUE_MANAGER_CREATE, 'Managing Venue Managers is not permitted.');
+      return this.managerService.createWithin(manager, ctx, { ...dto, type: ManagerType.VENUE });
+    });
   }
 
   /** Normal Manager flow: the Venue Managers of the caller's own workspace (with their venues), nothing else. */
@@ -89,46 +91,55 @@ export class VenueManagerService {
    * caller's server-derived workspace; anything else is 404. The delegated ManagerService methods then apply their own
    * existing rules (step-up for delete, deletion safety gates, invitation state machine, audit).
    */
-  private async assertOwnWorkspaceVenueManager(ctx: AuthContext, managerProfileId: string): Promise<void> {
+  private async assertOwnWorkspaceVenueManager(
+    ctx: AuthContext,
+    managerProfileId: string,
+    alsoRequires?: typeof PermissionFlag.USER_RESET_PASSWORD,
+  ): Promise<void> {
     this.resourceScope.assertHasWorkspace(ctx);
     if (!(await this.permissions.userHasPermission(ctx, PermissionFlag.VENUE_MANAGER_CREATE))) {
       throw new ForbiddenException('Managing Venue Managers is not permitted.');
     }
-    const found = await this.tenantContext.runInTenantContext(ctx, (manager) =>
-      manager.findOne(ManagerProfile, {
+    const found = await this.tenantContext.runInTenantContext(ctx, async (manager) => {
+      // SF-2 layer 2: the route's extra method guard (user.reset_password on resend / cancel invite), before the lookup.
+      if (alsoRequires) await this.permissions.assertPermissionTx(manager, ctx, alsoRequires, 'Resetting passwords is not permitted.');
+      return manager.findOne(ManagerProfile, {
         where: { id: managerProfileId, organisationId: ctx.organisationId!, workspaceId: ctx.workspaceId!, type: ManagerType.VENUE },
-      }),
-    );
+      });
+    });
     if (!found) throw new NotFoundException('Venue Manager not found.');
   }
 
   async update(ctx: AuthContext, id: string, dto: UpdateManagerDto) {
     await this.assertOwnWorkspaceVenueManager(ctx, id);
-    return this.managerService.update(ctx, id, dto);
+    return this.managerService.update(ctx, id, dto, PermissionFlag.VENUE_MANAGER_CREATE);
   }
 
   async setActive(ctx: AuthContext, id: string, active: boolean) {
     await this.assertOwnWorkspaceVenueManager(ctx, id);
-    return this.managerService.setActive(ctx, id, active);
+    return this.managerService.setActive(ctx, id, active, PermissionFlag.VENUE_MANAGER_CREATE);
   }
 
   async resetPassword(ctx: AuthContext, id: string) {
     await this.assertOwnWorkspaceVenueManager(ctx, id);
-    return this.managerService.resetPassword(ctx, id);
+    return this.managerService.resetPassword(ctx, id, PermissionFlag.VENUE_MANAGER_CREATE);
   }
 
   async resendInvite(ctx: AuthContext, id: string) {
-    await this.assertOwnWorkspaceVenueManager(ctx, id);
+    // ManagerService.resendInvite has no flag re-check yet (owner decision: platform-admin CEO path), so this route's
+    // user.reset_password is re-checked here.
+    await this.assertOwnWorkspaceVenueManager(ctx, id, PermissionFlag.USER_RESET_PASSWORD);
     return this.managerService.resendInvite(ctx, id);
   }
 
   async changePendingEmail(ctx: AuthContext, id: string, dto: ChangePendingEmailDto) {
     await this.assertOwnWorkspaceVenueManager(ctx, id);
-    return this.managerService.changePendingEmail(ctx, id, dto);
+    return this.managerService.changePendingEmail(ctx, id, dto, PermissionFlag.VENUE_MANAGER_CREATE);
   }
 
   async cancelInvite(ctx: AuthContext, id: string) {
-    await this.assertOwnWorkspaceVenueManager(ctx, id);
+    // Same as resendInvite: ManagerService.cancelInvite has no flag re-check yet (owner decision pending).
+    await this.assertOwnWorkspaceVenueManager(ctx, id, PermissionFlag.USER_RESET_PASSWORD);
     return this.managerService.cancelInvite(ctx, id);
   }
 
@@ -139,12 +150,12 @@ export class VenueManagerService {
 
   async getTimeline(ctx: AuthContext, id: string) {
     await this.assertOwnWorkspaceVenueManager(ctx, id);
-    return this.managerService.getTimeline(ctx, id);
+    return this.managerService.getTimeline(ctx, id, PermissionFlag.VENUE_MANAGER_CREATE);
   }
 
   async listNotes(ctx: AuthContext, id: string) {
     await this.assertOwnWorkspaceVenueManager(ctx, id);
-    return this.managerService.listNotes(ctx, id);
+    return this.managerService.listNotes(ctx, id, PermissionFlag.VENUE_MANAGER_CREATE);
   }
 
   async addNote(ctx: AuthContext, id: string, dto: AddNoteDto) {
@@ -155,7 +166,7 @@ export class VenueManagerService {
 
   async listEmails(ctx: AuthContext, id: string) {
     await this.assertOwnWorkspaceVenueManager(ctx, id);
-    return this.managerService.listEmails(ctx, id);
+    return this.managerService.listEmails(ctx, id, PermissionFlag.VENUE_MANAGER_CREATE);
   }
 
   async deleteUser(ctx: AuthContext, id: string, currentPassword: string) {
