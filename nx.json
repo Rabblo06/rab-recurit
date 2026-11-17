@@ -28,12 +28,12 @@
     },
     "lint": {
       "dependsOn": ["^build"],
-      "inputs": ["default", "{workspaceRoot}/.eslintrc.json"],
+      "inputs": ["default", "^production", "{workspaceRoot}/.eslintrc.json"],
       "cache": true
     },
     "test": {
       "dependsOn": ["^build"],
-      "inputs": ["default", "{workspaceRoot}/jest.preset.js"],
+      "inputs": ["default", "^production", "{workspaceRoot}/jest.preset.js"],
       "cache": true
     }
   },
