@@ -928,7 +928,7 @@ describeIfDb('venue manager scoping (integration)', () => {
       await request(app.getHttpServer()).get(seed.url).set('Authorization',`Bearer ${seed.vmToken}`).expect(403);
       const other=await seedOrg();const otherToken=await login(other.manager.email);
       await request(app.getHttpServer()).get(seed.url).set('Authorization',`Bearer ${otherToken}`).expect(404);
-      await tenantContext.runInTenantContext(seed.ctx,m=>m.query('UPDATE core.notification SET read_at=now() WHERE related_entity_id=$1 AND type=\'offer_sent\'',[offers[0].offerId]));
+      await adminDataSource.query('UPDATE core.notification SET read_at=now() WHERE related_entity_id=$1 AND type=\'offer_sent\'',[offers[0].offerId]); // SF-5: only the recipient may mark it read (the staff app in production); the fixture uses the owner role
       const read=await readPipeline(seed);expect(read.staff.find((r:any)=>r.offerId===offers[0].offerId).stage).toBe('waiting');
       const reloaded=await readPipeline(seed);expect(reloaded.staff.map((r:any)=>r.stage)).toEqual(read.staff.map((r:any)=>r.stage));
     });
