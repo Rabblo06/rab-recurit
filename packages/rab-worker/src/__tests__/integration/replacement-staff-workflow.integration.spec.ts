@@ -982,6 +982,9 @@ describeIfDb('replacement-staff workflow (integration)', () => {
           staffProfileId: candidate.staffProfileId,
         }),
       ).rejects.toBeInstanceOf(NotFoundException);
+      // The refused attempt must leave the row untouched (as G4 checks for the cross-organisation case).
+      const stillIntact = await getRequest(fx, requestId);
+      expect(stillIntact!.status).toBe(ReplacementRequestStatus.AWAITING_APPROVAL);
     });
   });
 
