@@ -30,6 +30,24 @@ refuse() {
   exit "${2:-64}"
 }
 
+# BEGIN crewflow database-URL refusal
+# Security review of PR #230, L-1 (+ follow-up): the names of every variable that holds a database credential in a form the
+# app or libpq would accept: a postgres URL (any case, after leading blanks or quotes, with a driver prefix or suffix such as
+# jdbc:postgresql:// or postgresql+psycopg://), or a libpq keyword DSN with a password (password=... beside host= / hostaddr=
+# / dbname= / user=). The caller's own PG_DATABASE_URL is left out (it has its own refusal). Names only, never a value. The
+# block is identical in api-prestart.sh and worker-start.sh (run-prestart-shell-tests.cjs compares them).
+crewflow_db_url_names() {
+  crewflow_re_url="^[A-Za-z_][A-Za-z0-9_]*=[[:space:]\"']*([a-z]+:)?postgres(ql)?(\\+[A-Za-z0-9]+)?://"
+  crewflow_re_pw="^[A-Za-z_][A-Za-z0-9_]*=(.*[[:space:]\"'])?password[[:space:]]*="
+  crewflow_re_kw="(^|[[:space:]\"'=])(host|hostaddr|dbname|user)[[:space:]]*="
+  {
+    env | grep -iE "$crewflow_re_url"
+    env | grep -iE "$crewflow_re_pw" | grep -iE "$crewflow_re_kw"
+  } | grep -v '^PG_DATABASE_URL=' | cut -d= -f1 | sort -u
+  unset crewflow_re_url crewflow_re_pw crewflow_re_kw
+}
+# END crewflow database-URL refusal
+
 if [ "$#" -ne 0 ]; then
   refuse 'worker-start.sh takes no arguments (it starts the Worker only; one-off commands run from rab-api).'
 fi
@@ -45,8 +63,8 @@ for name in PG_ADMIN_URL PG_DATABASE_ADMIN_URL CREWFLOW_BUNDLED_DB_ADMIN_URL; do
 done
 # Security review of PR #230, L-1: an admin URL under ANY other name. No variable may hold a PostgreSQL URL here (the
 # Worker's own PG_DATABASE_URL is refused below unless empty, and is set by this script only after the derive step).
-for forbidden in $(env | grep -iE '^[A-Za-z_][A-Za-z0-9_]*=postgres(ql)?://' | grep -v '^PG_DATABASE_URL=' | cut -d= -f1 | sort -u); do
-  refuse "$forbidden holds a PostgreSQL URL: no database URL ever reaches the worker service (it builds the crewflow_owner URL from db-setup's files). Value not shown."
+for forbidden in $(crewflow_db_url_names); do
+  refuse "$forbidden holds a PostgreSQL URL or a libpq password DSN: no database credential ever reaches the worker service (it builds the crewflow_owner URL from db-setup's files). Value not shown."
 done
 
 # BEGIN crewflow bundled-db CA

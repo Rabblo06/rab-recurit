@@ -176,7 +176,9 @@ describe('never-in-runtime-env (security review L-4): one list, two enforcers', 
     }
     // ... and both entrypoints refuse ANY variable holding a postgres:// URL (their own PG_DATABASE_URL has its own refusal).
     for (const file of ['api-prestart.sh', 'worker-start.sh']) {
-      expect(fs.readFileSync(path.join(DOCKER, file), 'utf8')).toContain("env | grep -iE '^[A-Za-z_][A-Za-z0-9_]*=postgres(ql)?://' | grep -v '^PG_DATABASE_URL='");
+      const source = fs.readFileSync(path.join(DOCKER, file), 'utf8');
+      expect(source).toContain('for forbidden in $(crewflow_db_url_names); do');
+      expect(source).toContain('# BEGIN crewflow database-URL refusal');
     }
   });
 

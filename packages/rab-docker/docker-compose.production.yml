@@ -375,7 +375,7 @@ services:
         # Review of PR #230, I-2: on the FIRST initialisation only (no cluster in the data volume yet), the password must be 32+
         # characters of A-Z a-z 0-9 _ - (it is interpolated unencoded into db-setup's bundled URL). An existing volume ignores
         # the value (the image reads it only on an empty PGDATA), so it is never refused there.
-        if [ ! -s /var/lib/postgresql/pgdata/PG_VERSION ]; then
+        if [ ! -s "$${PGDATA}/PG_VERSION" ]; then
           case "$${POSTGRES_PASSWORD}" in
             *[!A-Za-z0-9_-]*) crewflow_pw_ok=no ;;
             *) if [ "$${#POSTGRES_PASSWORD}" -ge 32 ]; then crewflow_pw_ok=yes; else crewflow_pw_ok=no; fi ;;

@@ -606,6 +606,11 @@ for (const [label, url] of [['the bundled admin URL', ADMIN_URL], ['an external 
     ['CREWFLOW_BUNDLED_DB_ADMIN_URL', L1_URL, /CREWFLOW_BUNDLED_DB_ADMIN_URL must never be set on the (api|worker) service/],
     ['X', L1_URL, /X holds a PostgreSQL URL/],
     ['SOME_OTHER_DSN', 'POSTGRES://doadmin:ADMINSENTINEL9@db-direct.example:5432/d', /SOME_OTHER_DSN holds a PostgreSQL URL/],
+    // Follow-up hardening: leading blanks / quotes, a driver prefix or suffix, a libpq keyword DSN with a password.
+    ['QUOTED_DSN', ' "postgresql://postgres:ADMINSENTINEL10@db:5432/crewflow"', /QUOTED_DSN holds a PostgreSQL URL/],
+    ['JDBC_DSN', 'jdbc:postgresql://db:5432/crewflow?user=postgres&password=ADMINSENTINEL11', /JDBC_DSN holds a PostgreSQL URL/],
+    ['DRIVER_DSN', 'postgresql+psycopg://postgres:ADMINSENTINEL12@db:5432/crewflow', /DRIVER_DSN holds a PostgreSQL URL/],
+    ['KEYWORD_DSN', 'host=db port=5432 dbname=crewflow user=postgres password=ADMINSENTINEL13 sslmode=verify-full', /KEYWORD_DSN holds a PostgreSQL URL or a libpq password DSN/],
   ]) {
     for (const [where, env, opts] of [
       ['the API', { ...NOURL, [name]: value }, { ctl: DERIVED }],
@@ -617,6 +622,12 @@ for (const [label, url] of [['the bundled admin URL', ADMIN_URL], ['an external 
         !line(r.out, 'derive') && !line(r.out, 'main') && !line(r.out, 'workermain') && !line(r.out, 'command') && !/STUB tini/.test(r.out) && !r.out.includes('ADMINSENTINEL'), r.out);
     }
   }
+  // Not a database credential: an https URL, a variable NAMED like a password, a password= with no host/dbname/user.
+  r = run('l1-not-a-dsn-api', { ...NOURL, SENTRY_DSN: 'https://k@o1.ingest.example/1', EMAIL_SMTP_PASSWORD: 'x'.repeat(20), NOTE_VALUE: 'password=1' }, { ctl: DERIVED });
+  check('12v L-1: an https DSN, a *_PASSWORD variable and a bare password= are not refused; the API starts', r.code === 0 && Boolean(line(r.out, 'main')), r.out);
+  // The refusal block is literally the same code in both entrypoints.
+  const dsnBlock = (file) => { const t = fs.readFileSync(file, 'utf8'); const a1 = t.indexOf('# BEGIN crewflow database-URL refusal'); const b1 = t.indexOf('# END crewflow database-URL refusal'); return a1 >= 0 && b1 > a1 ? t.slice(a1, b1) : null; };
+  check('12w the database-URL refusal block is identical in api-prestart.sh and worker-start.sh', dsnBlock(PRESTART) !== null && dsnBlock(PRESTART) === dsnBlock(WORKER_START), 'the BEGIN/END crewflow database-URL refusal blocks differ');
   r = run('l2-admin-url-pinned-empty-api', { ...NOURL, PG_ADMIN_URL: '' }, { ctl: DERIVED });
   check('12u L-2: PG_ADMIN_URL="" (the compose pin) on the API is accepted; main.js starts', r.code === 0 && Boolean(line(r.out, 'main')), r.out);
   r = run('l2-admin-url-pinned-empty-worker', { ...W, PG_ADMIN_URL: '' }, { entry: 'worker-start.sh', ctl: { 'derive-url': RUNTIME_URL } });

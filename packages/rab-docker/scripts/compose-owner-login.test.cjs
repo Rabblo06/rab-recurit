@@ -788,6 +788,17 @@ test('DENIAL ADMIN_URL_PLACEMENT: PG_ADMIN_URL with a value on rab-api / rab-wor
   assert.deepEqual(gate.adminUrlPlacementProblems('ok.yml', setup), []);
   // Owner decision L-2: the exact empty pin on rab-api / rab-worker is the one allowed occurrence outside db-setup.
   assert.deepEqual(gate.adminUrlPlacementProblems('ok.yml', pinned), []);
+  // ... and on the dev / QA stacks' server / worker (follow-up of the review: the same pin there).
+  assert.deepEqual(gate.adminUrlPlacementProblems('ok.yml', `${setup}  server:\n    environment:\n      PG_ADMIN_URL: ''\n  worker:\n    environment:\n      PG_ADMIN_URL: ""\n`), []);
+  for (const rel of ['docker-compose.yml', 'docker-compose.qa.yml']) {
+    const text = fs.readFileSync(path.join(__dirname, '..', rel), 'utf8');
+    assert.equal(text.split('\n').filter((l) => /^\s*PG_ADMIN_URL: ''\s*$/.test(l)).length, 2, `${rel}: server and worker pin PG_ADMIN_URL`);
+  }
+  // The dev stack blanks the host-native test / harness URLs its server and worker could read from ../rab-server/.env.
+  const dev = fs.readFileSync(path.join(__dirname, '..', 'docker-compose.yml'), 'utf8');
+  for (const name of ['TEST_DATABASE_URL', 'TEST_DATABASE_ADMIN_URL', 'TEST_DATABASE_URL_UNPOOLED', 'TEST_DATABASE_CREWFLOW_URL', 'MIGRATION_SECURITY_ADMIN_URL']) {
+    assert.equal(dev.split('\n').filter((l) => new RegExp(`^\\s*${name}: ''\\s*$`).test(l)).length, 2, `docker-compose.yml: ${name} blanked on server and worker`);
+  }
   // L-3: anchored, tagged and merge-key service headers are still read as service headers.
   for (const header of ['rab-api: &api', 'rab-api: !override', 'rab-api: <<']) {
     assert.deepEqual(gate.adminUrlPlacementProblems('ok.yml', `${setup}  ${header}\n    environment:\n      PG_ADMIN_URL: ""\n`), [], header);
@@ -809,7 +820,8 @@ test('DENIAL ADMIN_URL_PLACEMENT: PG_ADMIN_URL with a value on rab-api / rab-wor
     // L-3: anchored / tagged headers of OTHER services do not hide them.
     [`${setup}  rab-api: &api\n    environment:\n      PG_ADMIN_URL: x\n`, /PG_ADMIN_URL in service rab-api/],
     [`${setup}  rab-worker: !reset\n    environment: { PG_ADMIN_URL: x }\n`, /PG_ADMIN_URL in service rab-worker/],
-    [`${setup}  server:\n    environment:\n      PG_ADMIN_URL: ""\n`, /PG_ADMIN_URL in service server/],
+    [`${setup}  server:\n    environment:\n      PG_ADMIN_URL: x\n`, /PG_ADMIN_URL in service server/],
+    [`${setup}  front:\n    environment:\n      PG_ADMIN_URL: ""\n`, /PG_ADMIN_URL in service front/],
     [`services:\n    db-setup:\n        environment:\n            PG_ADMIN_URL: x\n    rab-api:\n        environment:\n            PG_ADMIN_URL: x\n`, /PG_ADMIN_URL in service rab-api/],
     [`${setup}  db-setup2:\n    environment:\n      PG_DATABASE_ADMIN_URL: x\n`, /PG_DATABASE_ADMIN_URL \(renamed to PG_ADMIN_URL\)/],
     [`${setup}  rab-api:\n    environment: { X: "\${PG_DATABASE_ADMIN_URL}" }\n`, /PG_DATABASE_ADMIN_URL \(renamed to PG_ADMIN_URL\)/],
@@ -832,12 +844,12 @@ test('I-2: the db entrypoint refuses an empty password always, and a weak one on
   try {
     const pgdata = path.join(dir, 'pgdata').split(path.sep).join('/');
     fs.mkdirSync(pgdata);
-    // Compose's `$$` is a literal `$`; the data directory is moved into a temp dir.
-    const script = `set -eu\n${m[1].split('$$').join('$').split('/var/lib/postgresql/pgdata').join(pgdata)}echo CHECKED\n`;
+    // Compose's `$$` is a literal `$`; PGDATA (the db service's environment) points at a temp dir.
+    const script = `set -eu\n${m[1].split('$$').join('$')}echo CHECKED\n`;
     const run = (password, existing) => {
       if (existing) fs.writeFileSync(`${pgdata}/PG_VERSION`, '16\n'); else fs.rmSync(`${pgdata}/PG_VERSION`, { force: true });
       try {
-        return { code: 0, out: execFileSync(sh, ['-c', script], { env: { ...process.env, POSTGRES_PASSWORD: password }, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }) };
+        return { code: 0, out: execFileSync(sh, ['-c', script], { env: { ...process.env, PGDATA: pgdata, POSTGRES_PASSWORD: password }, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }) };
       } catch (e) {
         return { code: e.status, out: `${e.stdout ?? ''}${e.stderr ?? ''}` };
       }

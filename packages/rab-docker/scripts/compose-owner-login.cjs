@@ -493,7 +493,7 @@ function dbSettingsProblems({ adminUrl, appUrl, bundled = '1', passwordSet = fal
  * L-2: they pin it to the empty literal). Raw-text rule for EVERY compose file in the repository (ADMIN_URL_SCAN_ROOTS),
  * before any rendering. Outside the `db-setup` service block, the token PG_ADMIN_URL may appear ANYWHERE on a line (map or
  * list form, a flow mapping `{ PG_ADMIN_URL: x }`, an interpolation, a merged `x-...` block) only as the exact pin
- * `PG_ADMIN_URL: ""` (or `''`) inside rab-api / rab-worker; any other occurrence fails. `${PG_ADMIN_URL...}` is interpolated
+ * `PG_ADMIN_URL: ""` (or `''`) inside rab-api / rab-worker (and the dev / QA `server` / `worker`); any other occurrence fails. `${PG_ADMIN_URL...}` is interpolated
  * only inside db-setup, once. The retired PG_DATABASE_ADMIN_URL appears nowhere, and db-setup's bundled-db URL
  * (CREWFLOW_BUNDLED_DB_ADMIN_URL) nowhere outside db-setup. Security review of PR #230, L-3: service headers may carry an
  * anchor, a tag or a merge (`name: &x`, `name: !tag`, `name: <<`), and NO anchor may be defined inside the db-setup block
@@ -508,6 +508,8 @@ function adminUrlPlacementProblems(rel, text) {
   let interpolations = 0;
   const ANCHOR = /(?:^|[\s:[{,-])&[A-Za-z0-9_.-]+/;
   const PIN = /^\s*PG_ADMIN_URL\s*:\s*(""|'')\s*$/;
+  // The services that may carry that pin: production's rab-api / rab-worker and the dev / QA stacks' server / worker.
+  const PIN_SERVICES = [...APP_SERVICES, 'server', 'worker'];
   String(text).split(/\r?\n/).forEach((raw, i) => {
     if (/^\s*#/.test(raw) || raw.trim() === '') return;
     const topKey = /^([A-Za-z0-9_.-]+)\s*:/.exec(raw);
@@ -523,7 +525,7 @@ function adminUrlPlacementProblems(rel, text) {
     const where = top === 'services' ? `service ${service ?? '?'}` : `top-level ${top ?? '?'}`;
     const line = raw.replace(/\s+#.*$/, '');
     if (inSetup && ANCHOR.test(line)) problems.push(`${rel}:${i + 1}: an anchor defined inside the ${DB_SETUP_SERVICE} service (an alias of it would copy ${ADMIN_URL_KEY} into another service)`);
-    if (!inSetup && /\bPG_ADMIN_URL\b/.test(line) && !(top === 'services' && APP_SERVICES.includes(service) && PIN.test(line))) {
+    if (!inSetup && /\bPG_ADMIN_URL\b/.test(line) && !(top === 'services' && PIN_SERVICES.includes(service) && PIN.test(line))) {
       problems.push(`${rel}:${i + 1}: ${ADMIN_URL_KEY} in ${where} (only the one-shot db-setup service may receive it; rab-api / rab-worker only pin it to "")`);
     }
     if (line.includes('${PG_ADMIN_URL')) {
@@ -798,7 +800,7 @@ function bundledDbProblems(services, model, p, { replicas: wantReplicas = 1, exp
   // refuses an empty one (exit 64), FIRST: before the lock, the volume and postgres. Fail closed while the bundled db runs.
   const pwCheckAt = entry.search(/if \[ -z "\$\{POSTGRES_PASSWORD:-\}" \]; then\n[^\n]*PG_DATABASE_PASSWORD is required[^\n]*\n\s*exit 64\n\s*fi/);
   // Review of PR #230, I-2: on a FIRST initialisation (no PG_VERSION in PGDATA yet) the password must be 32+ of A-Z a-z 0-9 _ -.
-  const shapeAt = entry.search(/if \[ ! -s \/var\/lib\/postgresql\/pgdata\/PG_VERSION \]; then\n\s*case "\$\{POSTGRES_PASSWORD\}" in\n\s*\*\[!A-Za-z0-9_-\]\*\) crewflow_pw_ok=no ;;\n[^\n]*-ge 32 \][^\n]*\n\s*esac\n[^\n]*\n[^\n]*must be 32\+ characters[^\n]*\n\s*exit 64/);
+  const shapeAt = entry.search(/if \[ ! -s "\$\{PGDATA\}\/PG_VERSION" \]; then\n\s*case "\$\{POSTGRES_PASSWORD\}" in\n\s*\*\[!A-Za-z0-9_-\]\*\) crewflow_pw_ok=no ;;\n[^\n]*-ge 32 \][^\n]*\n\s*esac\n[^\n]*\n[^\n]*must be 32\+ characters[^\n]*\n\s*exit 64/);
   if (shapeAt < 0 || shapeAt > entry.indexOf('chmod') || (lockAt >= 0 && shapeAt > lockAt)) {
     p(`${DB_SERVICE}: the entrypoint does not refuse a weak ${DB_PASSWORD_KEY} (32+ of A-Z a-z 0-9 _ -) on a first initialisation, before it touches the volume`);
   }

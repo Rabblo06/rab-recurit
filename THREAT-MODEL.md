@@ -8888,12 +8888,15 @@ Reversal:   Lower CLOCK_IN_CONFIRM_FLOOR_HOURS, or require a second approver (pa
     accept exactly `""` there and refuse any value or a missing pin. Env files: the lint refuses it in `database.env` /
     `runtime.env`; the preflight refuses it from an app env file. Process: `api-prestart.sh` (the one-off `bootstrap-admin`
     path included) and `worker-start.sh` refuse a non-empty `PG_ADMIN_URL`, `PG_DATABASE_ADMIN_URL` or
-    `CREWFLOW_BUNDLED_DB_ADMIN_URL`, and ANY variable whose value starts with `postgres://` / `postgresql://` (any case)
-    other than their own `PG_DATABASE_URL` (which has its own refusal), before they set the runtime URL (exit 64, the value
-    never printed; L-1). `never-in-runtime-env.ts` lists the three names for the in-process guard of the API, the Worker and
+    `CREWFLOW_BUNDLED_DB_ADMIN_URL`, and ANY variable holding a database credential, other than their own `PG_DATABASE_URL`
+    (which has its own refusal): a postgres URL in any case, after leading blanks or quotes, with a driver prefix or suffix
+    (`jdbc:postgresql://`, `postgresql+psycopg://`), or a libpq keyword DSN with `password=` beside `host=` / `dbname=` /
+    `user=`; before they set the runtime URL (exit 64, the value never printed; L-1 and its follow-up). `never-in-runtime-env.ts` lists the three names for the in-process guard of the API, the Worker and
     the provisioner. No legitimate variable of these services holds a PostgreSQL URL (checked: the compose files, the image
-    `ENV`, `database.env` / `runtime.env` templates; a developer `.env` read by the dev compose's `server` / `worker` must not
-    carry one either, other than the pinned-empty `PG_DATABASE_URL`).
+    `ENV`, `database.env` / `runtime.env` templates). The dev compose's `server` / `worker` read a developer's
+    `../rab-server/.env`, so they blank its host-native URLs (`DATABASE_URL*`, `TEST_DATABASE_URL`, `TEST_DATABASE_ADMIN_URL`,
+    `TEST_DATABASE_URL_UNPOOLED`, `TEST_DATABASE_CREWFLOW_URL`, `MIGRATION_SECURITY_ADMIN_URL`) and pin `PG_ADMIN_URL` to `""`,
+    as QA's do; any other database URL left in that file stops them (exit 64), by design.
   - *Silent reinterpretation* (an un-renamed deployment keeps its admin URL in `PG_DATABASE_URL`). Refused, never run as
     the admin: the bootstrap child's `selectDbSetupInput` refuses a `PG_DATABASE_URL` whose login is not `crewflow_owner`
     ("renamed to PG_ADMIN_URL", exit 64, nothing connects, nothing stored), and so do the lint and the preflight; the
