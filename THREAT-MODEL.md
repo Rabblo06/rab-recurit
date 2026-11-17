@@ -7549,7 +7549,8 @@ database, no setup step).
 
 - **Owner decision 2026-11-17.** The SQL is approved, with two required steps:
   - the login test (runbook 4a step 3) before any variable is set or anything is deployed;
-  - `ALTER ROLE crewflow_owner NOCREATEROLE` after the first successful start (step 6).
+  - `ALTER ROLE crewflow_owner NOCREATEROLE` after the first start has completed: the rab-api log shows the migrate
+    result with serve=true, or a restart reports state CURRENT (step 6).
 
   Owner 2026-11-17: both trade-offs accepted. The verifier can appear in logs (Twenty's Helm setup puts the plaintext
   password in SQL, so ours is stricter). The empty-password risk is caught by the required login test.
@@ -7590,8 +7591,9 @@ database, no setup step).
     cannot log in with a password (proven: 28P01), and db-setup refuses it (exit 64). The runbook's login check names
     this state and its remedy (`REVOKE ... CASCADE; DROP ROLE crewflow_owner`, proven as the same admin).
   - Residual: such a role is usable only through a `trust`, `peer` or `cert` rule in the provider's `pg_hba.conf`.
-- **CREATEROLE is REQUIRED to be removed after the first start** (runbook 4a step 6, owner decision 2026-11-17; Twenty's
-  app user never has it). `crewflow_owner` needs CREATEROLE only on the first start: the bootstrap creates the schema
+- **CREATEROLE is REQUIRED to be removed after the first start has completed** (the rab-api log shows the migrate
+  result with serve=true, or a restart reports state CURRENT; `/healthz` 200 alone is a loose signal). This is runbook
+  4a step 6, owner decision 2026-11-17; Twenty's app user never has CREATEROLE. `crewflow_owner` needs CREATEROLE only on the first start: the bootstrap creates the schema
   roles, and the role migrations up to 1786691000000 run. Until the admin runs `ALTER ROLE crewflow_owner NOCREATEROLE`,
   a leaked URL is the schema owner with CREATEROLE (behaviour catalogue).
   - No runtime path and no migration after 1786691000000 creates, alters or grants a role; the code was searched.

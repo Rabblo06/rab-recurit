@@ -646,8 +646,11 @@ user never has CREATEROLE).
    - rab-api then migrates as `crewflow_owner`. On this first start it creates the schema roles and the whole schema,
      which is the only time it needs CREATEROLE.
 
-6. **REQUIRED: remove CREATEROLE after the first successful start.** Wait until the first start has finished:
-   `/healthz` is 200 and the `core` schema exists. Then, as the same admin:
+6. **REQUIRED: remove CREATEROLE after the first start has completed.** "Completed" means one of these:
+   - the rab-api log shows the migrate result (`TWENTY_MIGRATE_RESULT`) with `"serve":true`;
+   - a restart reports state `CURRENT`.
+
+   `/healthz` 200 alone is a loose signal: do not rely on it. Then, as the same admin:
 
    ```sql
    ALTER ROLE crewflow_owner NOCREATEROLE;

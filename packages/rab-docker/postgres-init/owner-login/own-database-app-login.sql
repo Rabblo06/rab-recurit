@@ -29,7 +29,7 @@
 -- final re-check. Any failure (a refused check, a missing privilege, mismatched passwords) leaves nothing behind.
 -- psql asks for the new password twice (`\password`), turns it into a SCRAM-SHA-256 verifier on YOUR machine and sends
 -- only the verifier. Afterwards the runbook's login test (section 4a, step 3) is REQUIRED before you set any variable or
--- deploy; if it fails, drop the role (runbook section 4a) and run this file again. After the first successful start,
+-- deploy; if it fails, drop the role (runbook section 4a) and run this file again. After the first start has completed,
 -- removing CREATEROLE (step 10 below, runbook step 6) is REQUIRED too.
 --
 -- Every statement is annotated with:
@@ -131,7 +131,7 @@ $preflight$;
 --            NOREPLICATION, NOCREATEDB: not needed; the posture check refuses them.
 --            INHERIT: it uses the privileges of the schema roles it creates and so owns every table through them.
 --            CREATEROLE: on the FIRST start crewflow_owner creates its six schema roles, the role migrations set and then
---            remove their passwords (BC-17). After that first successful start you MUST remove it (step 10, REQUIRED).
+--            remove their passwords (BC-17). After that first start has completed you MUST remove it (step 10, REQUIRED).
 --     NO-CR  NO. Without CREATEROLE nothing can create a role. On a provider that does not allow CREATEROLE at all,
 --            Crewflow can not be installed (see the runbook, section 4a).
 CREATE ROLE crewflow_owner LOGIN NOSUPERUSER NOBYPASSRLS NOREPLICATION NOCREATEDB CREATEROLE INHERIT;
@@ -224,8 +224,9 @@ SELECT r.rolname, r.rolcanlogin AS login, r.rolsuper AS superuser, r.rolbypassrl
        pg_catalog.has_database_privilege(r.oid, pg_catalog.current_database(), 'CREATE WITH GRANT OPTION') AS db_grant
   FROM pg_catalog.pg_roles r WHERE r.rolname = 'crewflow_owner';
 
--- (10) REQUIRED, after the first successful start (the API has migrated: `core` exists and /healthz is 200), and not
---     before: the first start needs CREATEROLE to create the schema roles. Not run by this script (runbook section 4a,
+-- (10) REQUIRED, after the first start has completed: the rab-api log shows the migrate result with serve=true, or a
+--     restart reports state CURRENT (/healthz 200 alone is a loose signal). Not before: the first start needs
+--     CREATEROLE to create the schema roles. Not run by this script (runbook section 4a,
 --     step 6; owner decision 2026-11-17: like Twenty, the app login never keeps CREATEROLE). The boot posture check
 --     accepts it, db-setup logs one line about it, and restarts, upgrades and new workspaces run without it.
 --       ALTER ROLE crewflow_owner NOCREATEROLE;
