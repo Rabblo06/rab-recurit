@@ -48,6 +48,7 @@ RAB = os.path.join(REPO, 'packages', 'rab-docker', 'rab')
 FLOORS_ENV = os.path.join(RAB, 'security-floors.env')
 FLOORS_SH = os.path.join(RAB, 'security-floors.sh')
 MODULE_GATE = os.path.join(RAB, 'module-paths-gate.cjs')
+NATIVE_SMOKE = os.path.join(RAB, 'native-addons-smoke.cjs')
 POLICY_FILE = os.path.join(HERE, 'policy.json')
 DECISIONS_FILE = os.path.join(HERE, 'vulnerability-decisions.json')
 WATCHLIST_FILE = os.path.join(HERE, 'scanner-blind-advisories.json')
@@ -475,6 +476,18 @@ def cmd_container(a, c: Check) -> None:
             c.fail(f'module-paths-gate as {ident["user"]} failed (exit {p.returncode}): {out[-600:]}')
         else:
             c.info(out.splitlines()[-1])
+    # 3. Native-addon smoke (node-gyp prune, review I1): the image has no compiler and no node-gyp, so argon2 (argon2id
+    #    m=19456,t=2,p=1 hash + verify) and msgpackr-extract (msgpackr's native acceleration) must work from what ships,
+    #    as the runtime user, offline, on a read-only root. Fails closed: any non-zero exit or a missing OK line fails.
+    p = docker(*base, '--read-only', '--user', '1000:1000', '-e', 'HOME=/nonexistent', '--entrypoint', 'node',
+               *_mount(NATIVE_SMOKE, '/gate/native-addons-smoke.cjs'), a.image, '/gate/native-addons-smoke.cjs', '/app',
+               check=False, timeout=180)
+    out = (p.stdout + p.stderr).strip()
+    c.data['native_addons_smoke'] = out.splitlines()[-5:]
+    if p.returncode != 0 or 'native-addons-smoke: OK' not in out:
+        c.fail(f'native-addons-smoke as 1000:1000 failed (exit {p.returncode}): {out[-800:]}')
+    else:
+        c.info(out.splitlines()[-1])
 
 
 # ----------------------------------------------------------------------------------------------------------- fs
