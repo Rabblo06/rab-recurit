@@ -228,13 +228,15 @@ final class VMServerClockTests: XCTestCase {
         }
     }
 
-    /// The defaults read CLOCK_MONOTONIC: an anchor taken 90 s ago on that clock (time that includes any sleep)
-    /// reads as serverNow + 90 s now, never the device wall clock.
+    /// The defaults read CLOCK_MONOTONIC: an anchor taken up to 90 s ago on that clock (time that includes any sleep)
+    /// reads as serverNow + that much now, never the device wall clock. Capped at the clock's current reading, so a
+    /// host booted less than 90 s ago never underflows.
     func testDefaultReadingUsesTheMonotonicClockThatCountsSleep() throws {
-        let ninetySecondsAgo = StaffServerClock.systemMonotonicNanos() - 90 * second
-        let clock = try XCTUnwrap(VMServerClock(serverNow: serverNow, monotonicNanos: ninetySecondsAgo))
-        let elapsed = clock.now().timeIntervalSince(serverNow)
-        XCTAssertGreaterThanOrEqual(elapsed, 90)
-        XCTAssertLessThan(elapsed, 120)
+        let reading = StaffServerClock.systemMonotonicNanos()
+        let back = min(reading, 90 * second)
+        let clock = try XCTUnwrap(VMServerClock(serverNow: serverNow, monotonicNanos: reading - back))
+        let elapsed = try XCTUnwrap(clock.now()).timeIntervalSince(serverNow)
+        XCTAssertGreaterThanOrEqual(elapsed, Double(back) / 1_000_000_000)
+        XCTAssertLessThan(elapsed, Double(back) / 1_000_000_000 + 30)
     }
 }

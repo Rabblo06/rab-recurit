@@ -153,19 +153,18 @@ enum VMDate {
 /// until the next poll re-anchored them.
 struct VMServerClock: Equatable {
     private let trusted: StaffServerClock
-    private let anchor: Date
 
     init?(serverNow: Date?, monotonicNanos: UInt64 = StaffServerClock.systemMonotonicNanos()) {
         guard let serverNow else { return nil }
         var clock = StaffServerClock()
         clock.anchor(serverNow, monotonicNanos: monotonicNanos)
         trusted = clock
-        anchor = serverNow
     }
 
-    func now(monotonicNanos: UInt64 = StaffServerClock.systemMonotonicNanos()) -> Date {
-        // Always anchored (init refuses a nil serverNow); the fallback is never reached.
-        trusted.now(monotonicNanos: monotonicNanos) ?? anchor
+    /// Never nil in practice (init refuses a nil `serverNow`); optional because
+    /// `StaffServerClock.now` is. Callers already read it as `clock?.now()`.
+    func now(monotonicNanos: UInt64 = StaffServerClock.systemMonotonicNanos()) -> Date? {
+        trusted.now(monotonicNanos: monotonicNanos)
     }
 }
 
