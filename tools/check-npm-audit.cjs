@@ -127,8 +127,9 @@ function fixShipped(pkg, treeVersions, vulnerableRange, published, advisory) {
 // --- production closure from yarn.lock ---
 /**
  * Chains from a shipped workspace's production dependencies to `target` in yarn.lock (breadth-first: one shortest
- * chain per resolved version of `target`; empty = not in the production closure), not descending into `prune`d packages. `lock` is the parsed yarn.lock, `workspaces` maps package name -> manifest for
- * every workspace, `shipped` lists the shipped workspace names, `resolutions` is the root manifest's.
+ * chain per resolved version of `target`; empty = not in the production closure), not descending into `prune`d
+ * packages. `lock` is the parsed yarn.lock, `workspaces` maps package name -> manifest for every workspace, `shipped`
+ * lists the shipped workspace names, `resolutions` is the root manifest's.
  * Throws on a descriptor it cannot resolve (fail closed).
  */
 function productionPaths({
