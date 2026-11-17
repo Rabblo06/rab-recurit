@@ -148,7 +148,7 @@ export const OWNER_BOOTSTRAP_MESSAGES = Object.freeze({
     `The database refused the login of the database URL (PG_ADMIN_URL or PG_DATABASE_URL) (SQLSTATE ${sqlstate}: wrong password, or pg_hba.conf does not allow it). Refusing.`,
   adminNoDatabase:
     'The database named in the database URL (PG_ADMIN_URL or PG_DATABASE_URL) does not exist (SQLSTATE 3D000). db-setup never creates a database: create it at your provider (the bundled db creates its own), then start again. Refusing.',
-  adminTls: 'TLS to the database failed (certificate, host name, or the server has no TLS). Check sslmode in the database URL (PG_ADMIN_URL or PG_DATABASE_URL) and PG_SSL_CA_CERT_PATH. Refusing.',
+  adminTls: 'TLS to the database failed (certificate, host name, or the server has no TLS). Check sslmode in the database URL (PG_ADMIN_URL or PG_DATABASE_URL) and PG_SSL_CA_CERT / PG_SSL_CA_CERT_PATH. Refusing.',
   adminUnreachable: 'The database did not accept a connection within 60 s. Giving up (the restart policy retries).',
   adminConnectFailed: (code: string) => `Connecting with the database URL (PG_ADMIN_URL or PG_DATABASE_URL) failed (${code}).`,
   writeRefused: (sqlstate: string) =>

@@ -46,6 +46,7 @@ const path = require('node:path');
 const REPO = path.resolve(__dirname, '../../..');
 // The bundled db's environment rules, one definition for the committed and the deployed model (PR #125 review, finding 6).
 const { bundledDbEnvironmentProblems, credentialMountProblems, topLevelVolumeProblems, strictSwitchProblems, dbSettingsProblems, DB_SETUP_DB_KEYS, ADMIN_URL_KEY, RETIRED_ADMIN_URL_KEYS } = require('../scripts/compose-owner-login.cjs');
+const { pgCaFileProblem } = require('../scripts/pg-ca-pem.cjs');
 const VARIANT = path.join(REPO, 'packages/rab-docker/docker-compose.image.yml');
 const PRODUCTION = path.join(REPO, 'packages/rab-docker/docker-compose.production.yml');
 
@@ -881,6 +882,19 @@ function staticMode() {
   return checkVariant(variant, production, variantFiles);
 }
 
+/**
+ * The external database's CA file (CREWFLOW_PG_CA_FILE in compose.env, mounted read-only as /run/crewflow/pg-ca.crt and read
+ * through PG_SSL_CA_CERT_PATH): the app's own boot rules (pg-ca-pem.cjs, the parity-tested port of pg-tls.ts), checked here
+ * before a deploy instead of at the API's first boot. Unset or empty = nothing to check (the compose file mounts /dev/null).
+ * A relative path is resolved like Compose does, against the project directory. Names only, never the file's content.
+ */
+function pgCaFileEnvironmentProblems(env, projectDirectory) {
+  const file = String(env.CREWFLOW_PG_CA_FILE ?? '').trim();
+  if (!file) return [];
+  const problem = pgCaFileProblem(path.resolve(projectDirectory, file), 'CREWFLOW_PG_CA_FILE (mounted as PG_SSL_CA_CERT_PATH)');
+  return problem ? [`${problem} rab-api and rab-worker would refuse to start.`] : [];
+}
+
 function environmentMode(argv) {
   const many = (flag) => argv.flatMap((a, i) => (a === flag && argv[i + 1] ? [argv[i + 1]] : []));
   const files = [VARIANT, ...many('--compose').map((f) => path.resolve(f))];
@@ -938,7 +952,7 @@ function environmentMode(argv) {
     }
     envFileKeys[name] = entry;
   }
-  return { problems: [...images.problems, ...skippedEnvFiles, ...checkDeployment(model, production, envFileKeys, { dockerRoot: dockerRootDir() ?? '/var/lib/docker' })], lines: images.lines };
+  return { problems: [...images.problems, ...skippedEnvFiles, ...pgCaFileEnvironmentProblems(env, projectDirectory), ...checkDeployment(model, production, envFileKeys, { dockerRoot: dockerRootDir() ?? '/var/lib/docker' })], lines: images.lines };
 }
 
 if (require.main === module) {
@@ -966,4 +980,4 @@ if (require.main === module) {
 }
 
 module.exports = {
-  NOT_THE_APP_LOGIN, DB_SERVICE, DB_SETUP_SERVICE, optionAProblems, checkVariant, checkResolvedImages, checkDeployment, DIGEST_REF, RUNTIME_KEYS, NOTIFICATION_DELIVERY, PHASE_D_SWITCHES, PHASE_D_UNCHANGED, STATEMENT_DISPATCH, FEATURE_SWEEPS, SWITCH_VALUES, featureSweepProblems, composeEnvValue, readEnvFileKeys, SENTINEL_MIGRATOR_PW, SENTINEL_OPS_PW, SENTINEL_OWNER_PW, renderModels, staticMode };
+  NOT_THE_APP_LOGIN, DB_SERVICE, DB_SETUP_SERVICE, optionAProblems, checkVariant, checkResolvedImages, checkDeployment, DIGEST_REF, RUNTIME_KEYS, NOTIFICATION_DELIVERY, PHASE_D_SWITCHES, PHASE_D_UNCHANGED, STATEMENT_DISPATCH, FEATURE_SWEEPS, SWITCH_VALUES, featureSweepProblems, composeEnvValue, readEnvFileKeys, pgCaFileEnvironmentProblems, SENTINEL_MIGRATOR_PW, SENTINEL_OPS_PW, SENTINEL_OWNER_PW, renderModels, staticMode };

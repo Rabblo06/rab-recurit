@@ -124,7 +124,7 @@ crewflow_bundled_db_ca() {
   db_authority="${db_rest%%[/?#]*}"
   db_hostport="${db_authority##*@}"
   db_host="${db_hostport%%:*}"
-  if [ "$db_host" = db ] && [ -z "${PG_SSL_CA_CERT_PATH:-}" ]; then
+  if [ "$db_host" = db ] && [ -z "${PG_SSL_CA_CERT_PATH:-}" ] && [ -z "${PG_SSL_CA_CERT:-}" ]; then
     export PG_SSL_CA_CERT_PATH=/run/crewflow/db-ca/ca.crt
   fi
   unset db_rest db_authority db_hostport db_host

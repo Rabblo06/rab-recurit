@@ -11,6 +11,7 @@ import {
   pgTypeOrmConnectionOptions,
 } from '../create-pg-pool';
 import { PgConfigError } from '../pg-url-policy';
+import { TEST_CA_A } from './fixtures/pg-test-ca';
 
 // Phase B (B2): what pg ACTUALLY uses. Every assertion goes through pg's own ConnectionParameters (the object a pg Client
 // builds from its config), so a URL parameter that would override the factory's choice shows up here.
@@ -19,7 +20,8 @@ const ConnectionParameters = require('pg/lib/connection-parameters') as new (con
 const SECRET = 'Pw-s3cret-9f';
 const LOCAL = `postgres://crewflow_app:${SECRET}@localhost:5432/rab`;
 const DO = `postgresql://crewflow_app:${SECRET}@db-postgresql-lon1-1.db.ondigitalocean.com:25060/defaultdb?sslmode=require`;
-const PEM = '-----BEGIN CERTIFICATE-----\nMIIBfake\n-----END CERTIFICATE-----\n';
+// A real (public, test-only) CA certificate: the CA text is parsed at boot (pg-tls.ts validatePgCaPem).
+const PEM = TEST_CA_A;
 
 /** TypeORM 0.3.31 PostgresDriver.createPool: its own fields, then `extra` spread over them (no `url` from the factory). */
 function typeOrmDriverConfig(o: ReturnType<typeof pgTypeOrmConnectionOptions>) {
@@ -197,5 +199,37 @@ describe('pgConnectionString: the string form reproduces the explicit config exa
     const r = resolvePgEnvironment({ PG_DATABASE_URL: `postgres://crewflow_app:${encodeURIComponent(tricky)}@localhost:5432/rab` }, { processRole: 'worker' });
     expect(r.primary.target.password).toBe(tricky);
     expect(new ConnectionParameters(pgConnectionString(r, { purpose: 'drift' })).password).toBe(tricky);
+  });
+});
+
+describe('L-3: the IP-bound host-name check survives every factory output (pool, client, TypeORM)', () => {
+  // A function in the ssl object is easy to lose in a later spread or clone; pin it at every hand-off to the driver.
+  const ipUrl = (host: string) => `postgresql://crewflow_app:${SECRET}@${host}:5432/rab?sslmode=verify-full`;
+  const env = (host: string) => ({ NODE_ENV: 'production', PG_DATABASE_URL: ipUrl(host), PG_SSL_CA_CERT: PEM });
+  const peer = (subjectaltname: string) => ({ subject: { CN: 'x' }, subjectaltname }) as unknown as import('tls').PeerCertificate;
+  type Check = ((name: string, cert: import('tls').PeerCertificate) => Error | undefined) | undefined;
+  const assertBound = (ssl: unknown, ip: string) => {
+    const check = (ssl as { checkServerIdentity?: Check }).checkServerIdentity;
+    expect(typeof check).toBe('function');
+    expect((check?.('localhost', peer('DNS:localhost')) as { code?: string } | undefined)?.code).toBe('ERR_TLS_CERT_ALTNAME_INVALID');
+    expect(check?.('localhost', peer(`IP Address:${ip}`))).toBeUndefined();
+  };
+
+  it.each([
+    ['IPv4', '10.0.0.7', '10.0.0.7'],
+    ['IPv6', '[fd00::7]', 'FD00:0:0:0:0:0:0:7'],
+  ])('%s: TypeORM driver config, pgPoolConfig, pgClientConfig and pg ConnectionParameters all keep checkServerIdentity', (_n, host, san) => {
+    const r = resolvePgEnvironment(env(host), { processRole: 'api' });
+    assertBound(typeOrmDriverConfig(pgTypeOrmConnectionOptions(r, { purpose: 'runtime' })).ssl, san);
+    assertBound(pgPoolConfig(r, { purpose: 'runtime' }).ssl, san);
+    assertBound(pgClientConfig(r, { purpose: 'runtime' }).ssl, san);
+    assertBound(new ConnectionParameters(pgPoolConfig(r, { purpose: 'runtime' })).ssl, san);
+  });
+
+  it('a DNS host has no override in any of them (pg sends the name; Node checks it)', () => {
+    const r = resolvePgEnvironment({ NODE_ENV: 'production', PG_DATABASE_URL: DO, PG_SSL_CA_CERT: PEM }, { processRole: 'api' });
+    for (const ssl of [typeOrmDriverConfig(pgTypeOrmConnectionOptions(r, { purpose: 'runtime' })).ssl, pgPoolConfig(r, { purpose: 'runtime' }).ssl]) {
+      expect((ssl as { checkServerIdentity?: unknown }).checkServerIdentity).toBeUndefined();
+    }
   });
 });

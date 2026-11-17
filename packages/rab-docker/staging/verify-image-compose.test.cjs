@@ -779,3 +779,35 @@ test('DENIAL security review R3/R4/I4: uid parsing, Docker root binds, added-ser
   const ok = run((v) => extra(v, { volumes: [{ type: 'bind', source: '/srv/backups', target: '/b', read_only: true }] }), { dockerRoot: '/srv/docker-data' });
   assert.ok(!ok.some((p) => /^backup: (an added service|group_add|binds)|^volume /.test(p)), ok.join(' | '));
 });
+
+// L-2: the --environment preflight runs the app's CA rules (pg-ca-pem.cjs) on CREWFLOW_PG_CA_FILE before a deploy, so a CA
+// file the stricter boot validation now refuses (a CRL or TRUSTED CERTIFICATE block, a bundled key, over 256 KiB, not a
+// regular file) is caught on the host, not by a crash-looping API.
+test('environment preflight: CREWFLOW_PG_CA_FILE is held to the boot rules of PG_SSL_CA_CERT_PATH', () => {
+  const fs = require('node:fs');
+  const os = require('node:os');
+  const path = require('node:path');
+  const { pgCaFileEnvironmentProblems } = require('./verify-image-compose.cjs');
+  const ca = /export const TEST_CA_A = `([^`]+)`/.exec(fs.readFileSync(path.join(__dirname, '../../rab-server/src/database/postgres/__tests__/fixtures/pg-test-ca.ts'), 'utf8'))[1];
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pg-ca-preflight-'));
+  try {
+    const write = (name, text) => (fs.writeFileSync(path.join(dir, name), text), name);
+    const problems = (file) => pgCaFileEnvironmentProblems({ CREWFLOW_PG_CA_FILE: file }, dir);
+    assert.deepEqual(pgCaFileEnvironmentProblems({}, dir), []);
+    assert.deepEqual(pgCaFileEnvironmentProblems({ CREWFLOW_PG_CA_FILE: '' }, dir), []);
+    assert.deepEqual(problems(write('ok.pem', ca)), []);
+    assert.deepEqual(problems(path.join(dir, 'ok.pem')), [], 'an absolute path');
+    const crl = write('with-crl.pem', `${ca}-----BEGIN X509 CRL-----\nMIIBFjCBvQIBATAKBggqhkjOPQQDAjAiMSAwHgYDVQQDDBdjcmV3Zmxvdw==\n-----END X509 CRL-----\n`);
+    assert.match(problems(crl).join(' | '), /CREWFLOW_PG_CA_FILE \(mounted as PG_SSL_CA_CERT_PATH\) contains a "X509 CRL" PEM block; only CERTIFICATE blocks are accepted\. rab-api and rab-worker would refuse to start\./);
+    assert.match(problems(write('trusted.pem', ca.replace(/CERTIFICATE/g, 'TRUSTED CERTIFICATE'))).join(' | '), /"TRUSTED CERTIFICATE" PEM block/);
+    const KEY_LABEL = ['PRIVATE', 'KEY'].join(' '); // built, so no secret scanner mistakes the fixture for a key
+    assert.match(problems(write('key.pem', `${ca}-----BEGIN ${KEY_LABEL}-----\nMIGH\n-----END ${KEY_LABEL}-----\n`)).join(' | '), /contains a PRIVATE KEY block/);
+    assert.match(problems(write('big.pem', ca.repeat(500))).join(' | '), /larger than 256 KiB/);
+    fs.mkdirSync(path.join(dir, 'a-dir'));
+    assert.match(problems('a-dir').join(' | '), /is not a regular file/);
+    assert.match(problems('missing.pem').join(' | '), /cannot be read/);
+    for (const p of problems(crl)) assert.ok(!/MII/.test(p), 'never the file content');
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
