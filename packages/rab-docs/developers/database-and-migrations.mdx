@@ -9,7 +9,7 @@ icon: "database"
 | Schema | Contents |
 | --- | --- |
 | `core` | Identity, authentication, platform, workspace registry, messaging, audit and storage metadata. Also the 15 workspace business tables while per-workspace schemas are switched off. |
-| `workspace_<uuid>` | Per-workspace copies of the 15 business tables, used only when `HWS_RUNTIME_ENABLED=true`. Provisioned by the workspace provisioner. |
+| `workspace_<uuid>` | Per-workspace copies of the 15 business tables, used only when `HWS_RUNTIME_ENABLED=true`. Built by the API when the workspace is created, or by the Worker's in-process provisioning loop. |
 
 ## Tables by domain
 
@@ -43,14 +43,11 @@ erDiagram
 
 ## Roles and Row-Level Security
 
-- The runtime connects as a role that **does not own the tables** and has **no `BYPASSRLS`**. The API checks this at boot.
-- Tables use `ENABLE` and `FORCE ROW LEVEL SECURITY` with `USING` and `WITH CHECK` predicates, created in the **same migration** as the table.
-- A small, documented set of tables needed by pre-authentication lookups (for example `user`, `refresh_token`, `account_invite`, `login_handoff`) skip only `FORCE`. Their runtime access still goes through RLS.
-  - As of 2026-10-23 there are 15: the 13 in `NOT_FORCED_ALLOWLIST`, plus `organisation` and `platform_admin`.
-  - All 15 are owned by the NOLOGIN role `rab_secure_owner`. The runtime role `crewflow_app` owns nothing, so RLS binds it on every one of them.
-  - The authoritative list is `tools/check-rls-coverage.ts`.
-- Narrow `SECURITY DEFINER` functions handle lookups that must happen before a tenant is known.
-- `audit_log` has `UPDATE`, `DELETE` and `TRUNCATE` revoked.
+- The API, the Worker, the CLI and the migration child all connect as one login, `crewflow_owner`. It owns the schema through the owner roles (`rab_secure_owner`, `crewflow`), and it is not a superuser and has **no `BYPASSRLS`**. The boot gates and `tools/check-rls-coverage.ts` check its role and object posture. The owner accepted the consequences of one schema-owning login; they are recorded as **PT-01** in `THREAT-MODEL.md`.
+- Because the runtime login owns the tables, RLS binds it only where `FORCE` is set. Every table with an `organisation_id` therefore uses `ENABLE` and `FORCE ROW LEVEL SECURITY` with `USING` and `WITH CHECK` predicates, created in the **same migration** as the table.
+- The pre-authentication tables (for example `user`, `refresh_token`, `account_invite`, `login_handoff`) are `FORCE` too since migration `1786721400000` (`PreAuthTablesForceOwnerOnly`). Each carries one owner-only policy for `rab_secure_owner`, so the narrow `SECURITY DEFINER` lookups that run before a tenant is known still see their rows, while `crewflow_owner` is bound by the tenant policies like every other session.
+  - `NOT_FORCED_ALLOWLIST` in `tools/check-rls-coverage.ts` is empty; the list of pre-auth tables is `PREAUTH_FORCE_TABLES` (`src/database/typeorm/core/preauth-force-sql.ts`).
+- `audit_log` has `UPDATE`, `DELETE` and `TRUNCATE` revoked from the schema roles. Under the owner login this no longer stops the schema owner itself (PT-01); the only extra mitigation is a best-effort off-host copy of security events (X1.1).
 
 ## Migrations
 
@@ -59,12 +56,12 @@ npx nx run rab-server:migration:run        # apply pending migrations (never res
 npx nx run rab-server:migration:generate   # generate from entity changes, then review by hand
 ```
 
-Migrations live in `packages/rab-server/src/database/typeorm/core/migrations/` (about 160 files). Rules:
+Migrations live in `packages/rab-server/src/database/typeorm/core/migrations/` (about 260 files). Rules:
 
 - `synchronize: false`, always.
 - Never edit a migration after it is merged — add a new one.
 - Every new tenant table gets `organisation_id` and its RLS policy in the same migration.
-- Run migrations only with the migration identity, as that process's own `PG_DATABASE_URL` (the one-off `rab-migrate` step reads it from `packages/rab-docker/.env.migrate`); the runtime role cannot run DDL, and the API and the Worker never migrate.
+- Migrations run as the owner login `crewflow_owner`, under the migration lock: in a deployment the API's start-up migrate child applies them; locally, `migration:run` with `PG_DATABASE_URL` naming that login. The Worker never migrates.
 - `yarn check-rls` fails CI if a tenant table lacks RLS.
 
 In Docker (O3, owner decisions C1-C5, like Twenty), the API migrates on start: `api-prestart.sh` runs the migration child under the migration lock (approval mode `none`, no token), registers the job schedulers, then starts `main.js`. A failed migration never serves (exit 66; the next start retries it). Only a failed upgrade command, with every migration applied, serves, and `/healthz` then says `upgradeFailed: true` and nothing more; the step, versions and attempt are on the platform-admin health report. `CREWFLOW_UPGRADE_FAILURE` was removed and is refused. The Worker never migrates (`DISABLE_DB_MIGRATIONS=true`). There is no `rab-migrate` release step; take the backup before every upgrade (`packages/rab-docker/docs/release/OWNER-LOGIN-DEPLOYMENT.md` section 3).
@@ -77,11 +74,15 @@ In Docker (O3, owner decisions C1-C5, like Twenty), the API migrates on start: `
 
 From 0.6.0 every start records each upgrade step in `core.upgrade_migration`, like Twenty's upgrade log: `<version>_TypeOrmMigrations` for the migrations of a version, then one row per upgrade command, each `completed` or `failed` with its attempt number. A database older than the supported floor (R254 / R256) is refused with exit 65 and nothing is applied. `node packages/rab-server/dist/command upgrade --force` (a one-off `docker compose run --rm --no-deps rab-api ...`) skips only that version refusal, and every row it writes is marked `forced`. The application login adds steps only inside the locked upgrade run, and a new workspace's first row when the workspace is created; it can never change or delete a row.
 
+### Workspace upgrades
+
+Changes to the per-workspace schemas ship as workspace upgrade commands per release (`upgrade-commands/<major-minor>/`, registry `WORKSPACE_UPGRADE_COMMANDS`; 0.6 has none). The workspace command runner runs each command once per `READY` workspace, on the locked migration session after the release's instance commands, one transaction per workspace and command, and records each run in `core.upgrade_migration` with that workspace's id. A failed workspace gets its own `failed` row and stops only its own later steps; the other workspaces carry on.
+
 ### Schema-version compatibility
 
 Every process compares the database with its own code at start-up (`src/database/boot-checks/schema-compatibility.ts`):
 
-| Database state | API / Worker | CLI | Provisioner | `rab-migrate` |
+| Database state | API / Worker | CLI | Worker provisioning loop | Migrate run (API start or `deploy-prepare`) |
 |---|---|---|---|---|
 | Migrations pending | refuse | refuse | refuse | applies (approved) or exits 3 |
 | Ledger has newer migrations only (image rollback) | warn, run | warn, run | refuse | check: warn; apply: refuse |

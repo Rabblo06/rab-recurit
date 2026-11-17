@@ -946,7 +946,7 @@ There was no entry for P1C.1B (OAuth) or the `crewflow_session` cookie before th
 **Open:**
 - `CF-Connecting-IP` restricted to Cloudflare ranges.
 - Session-row retention (CF-46).
-- CF-02 for `PATCH /profile` and push-device routes.
+- ~~CF-02 for `PATCH /profile` and push-device routes.~~ Closed (X5.2 status update, no code change): `JwtAuthGuard` refuses every unsafe method that carries the Admin Inspect header with 403 `INSPECT_READ_ONLY` before any identity rewrite (`engine/core-modules/auth/guards/jwt-auth.guard.ts:306-309`), and `profile.service.ts` refuses session mutations while `inspectedBy` is set.
 - An optional browser-installation id.
 
 ## Custom-role backfill under the restricted migration role, and test-database isolation (2026-10-15)
@@ -1921,7 +1921,7 @@ lane DB5 `MfaTotpRecoveryCodes1786719900000` + `LoginHandoff1786719910000` (dev/
   security version and the source session; a brand-new session is issued (any session cookie the host presented is
   revoked), host-only cookies per A2's policy, and the source session is ended; no id or token in any response body.
 - **Residual:** login CSRF limited to the attacker's OWN workspace host (an attacker can hand a victim a fresh token for the
-  attacker's account on the attacker's host within the TTL); a peek/confirm step would need a DB5 function (requested).
+  attacker's account on the attacker's host within the TTL). The read-only peek/confirm step now exists (X5.2 status update): `POST peek` in `login-handoff.controller.ts:59-67`, test `lane-d-login-handoff-peek.integration.spec.ts`.
 
 ## Wave 5 Lane OPS: outbox retention + audited replay, L1 metadata cache, rotation coverage (2026-10-23)
 
@@ -5559,8 +5559,8 @@ writes a warning instead.
    (`scripts/migrate/owner-login/release-floor.ts`): an existing production database may be upgraded only when its
    `core.migrations` ledger contains every migration of a supported release (R254 = rab/v0.4.0 = cd7c7e32 = 4c38aa1a, or
    R256 = 0e0a6edd), with anything beyond it a contiguous run of the image's chain (a resumed partial upgrade). An older,
-   holed or unknown history refuses with `UnsupportedUpgradeStartError` (exit 65, fail closed under every
-   `CREWFLOW_UPGRADE_FAILURE` policy; nothing applied). No override exists. N1 still gates the legacy CF-41 path and the CLI
+   holed or unknown history refuses with `UnsupportedUpgradeStartError` (exit 65, fail closed; nothing applied; the
+   `CREWFLOW_UPGRADE_FAILURE` policies were later removed by OWNER-DB-ULTIMATE Part B3). No override exists. N1 still gates the legacy CF-41 path and the CLI
    until the separated-mode retirement (every separated database transitioned, MIX-1) retires them.
 6. **No logical backup by the app login.** Recovery is PITR only, and restore points taken after a compromise carry the
    backdoors. Accepted by the owner 2026-11-05 (BC-12).
@@ -6459,7 +6459,7 @@ completes) stays open and unchanged.
   `not_found` and untouched; C4 no actor / non-admin actor / bad ids file / both modes refused; C5 a superuser session is
   refused.
 
-## DEPLOY — exactly like Twenty: one image variable, one command, API first, Worker after (branch deploy/twenty-three-steps, 2026-11-11, not merged)
+## DEPLOY — exactly like Twenty: one image variable, one command, API first, Worker after (branch deploy/twenty-three-steps, 2026-11-11, merged as PR #90)
 
 **What changed.** Production deploys like Twenty's `packages/twenty-docker`: `docker compose pull && docker compose up -d`
 updates rab-api and rab-worker together from ONE variable, `CREWFLOW_IMAGE_TAG`. The API starts first, migrates
@@ -6503,7 +6503,9 @@ The `@` in the compose image reference makes Docker reject a plain tag, and the 
   (renamed variable, plain tag, per-role tag, missing `restart: true`, a 35 s API stop window), and the real-container
   deploy-order tests (`packages/rab-docker/deploy-order-tests/`, PostgreSQL 16 and 18, all four cases pass on both:
   fresh deploy API-healthy-then-Worker; new digest with the old Worker stopped before the new API started; rollback with
-  the AHEAD warning while serving; an unhealthy API never lets the Worker start). Run by hand, not in CI.
+  the AHEAD warning while serving; an unhealthy API never lets the Worker start). Run by hand, not in CI. (X5.2 status update: the
+  related upgrade-with-data and db-setup container cases now run nightly and on demand in `.github/workflows/upgrade-with-data.yaml`;
+  these four deploy-order cases are still run by hand.)
 
 ## UPGRADE — the upgrade floor replaces N1 on the owner-login path (Phase X U-1, PR #93, 2026-11-11)
 

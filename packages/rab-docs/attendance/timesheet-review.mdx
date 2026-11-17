@@ -96,6 +96,15 @@ Attendance cannot be created from the app for someone who never clocked in.
 
 A time in the future, or a change after the timesheet is finalised, is refused.
 
+### Unusually early clock-in
+
+A corrected clock-in that is earlier than the person's own scheduled start minus the normal allowance (`CLOCK_IN_EARLY_MINUTES`, 15 minutes by default) is not saved straight away. The app shows **Unusual clock-in time**, "This time is earlier than the normal allowance. Please check before continuing.", with the **Earliest allowed** and **Entered time**.
+
+- Tap **Edit** to go back to the correction unchanged.
+- Tap **Confirm** to save it. The confirmation is recorded with the correction in the audit log.
+
+A clock-in more than 12 hours before the scheduled start (`CLOCK_IN_CONFIRM_FLOOR_HOURS`) is always refused, even after **Confirm**: "The clock-in time cannot be more than 12 hours before the scheduled start."
+
 ## Rate staff (optional)
 
 The **Staff review** tab lets you rate the person from 1 (poor) to 5 (excellent) for **Grooming**, **Attitude**, **Skills**, **Attendance** and **Time keeping**, with optional **Feedback**, then **Save review**. All five ratings are needed to save a rating.

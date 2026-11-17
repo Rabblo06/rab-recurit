@@ -1,6 +1,6 @@
 ---
 title: "Background jobs"
-description: "The Worker's queues and interval jobs, worker-event idempotency, and the workspace provisioner."
+description: "The Worker's queues and scheduled jobs, worker-event idempotency, and in-process workspace provisioning."
 icon: "gears"
 ---
 
@@ -27,6 +27,8 @@ The Worker (`packages/rab-worker/src/main.ts`) is a NestJS application context w
 Email job IDs are `email-outbox.{id}.attempt.N`, so a re-dispatched outbox row cannot be queued twice for the same attempt.
 
 ## Interval jobs
+
+How the periodic jobs are scheduled depends on `WORKER_SCHEDULER`. With `bullmq` (the default when `NODE_ENV=production`, where `interval` refuses to boot), each job has one cluster-wide BullMQ job scheduler with a fixed id (`crewflow:<queue>:<jobName>`): the API registers them at start-up (`packages/rab-worker/src/register-schedulers.ts`, run by `api-prestart.sh` unless `DISABLE_CRON_JOBS_REGISTRATION=true`), each tick goes to one Worker replica, and a per-job advisory lock stops two replicas running the same job at once. In the deploy compose files the Worker is consume-only (`DISABLE_CRON_JOBS_REGISTRATION=true`): it never registers a scheduler and reports a missing one as an error. With `interval` (the default in development and test), every replica runs every job on its own process-local timer.
 
 | Job | Interval | Purpose |
 | --- | --- | --- |
