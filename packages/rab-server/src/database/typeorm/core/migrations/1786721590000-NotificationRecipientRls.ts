@@ -27,7 +27,9 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
  * `core.offer_sent_notification_read_at(offer_id, recipient_user_id)`: the venue offer pipeline shows "seen" when the staff
  * member has read the offer's notification (venue-offer-pipeline.service.ts). That is a read of ANOTHER user's row, so it
  * moves into this narrow SECURITY DEFINER function: owned by `crewflow` (the table owner, still bound by FORCE), search_path
- * pinned, the flag set by the function's own SET clause (restored on exit, even on error), the bound organisation only,
+ * pinned, the flag set transaction-locally around its one SELECT and cleared after it (a function-level SET of a custom
+ * parameter needs a privilege the owner login does not hold; a flag left on by an error is inert, because the policy also
+ * requires current_user = 'crewflow', which crewflow_app never is), the bound organisation only,
  * `offer_sent` rows only, and it returns one timestamp — never a title, a message or an id. EXECUTE for `crewflow_app` only.
  *
  * Post-condition (refuses to record the migration on drift): ENABLE + FORCE, exactly these five policies, the function's
@@ -56,18 +58,23 @@ export class NotificationRecipientRls1786721590000 implements MigrationInterface
     await runner.query(`
       CREATE FUNCTION core.offer_sent_notification_read_at(p_offer_id uuid, p_recipient_user_id uuid)
       RETURNS timestamptz
-      LANGUAGE sql
-      STABLE
+      LANGUAGE plpgsql
       SECURITY DEFINER
       SET search_path = pg_catalog, pg_temp
-      SET rab.offer_read_receipt = 'on'
       AS $fn$
-        SELECT max(n.read_at)
+      DECLARE
+        v_read_at timestamptz;
+      BEGIN
+        PERFORM pg_catalog.set_config('rab.offer_read_receipt', 'on', true);
+        SELECT max(n.read_at) INTO v_read_at
           FROM core.notification n
          WHERE n.organisation_id = core.current_org()
            AND n.type = 'offer_sent'
            AND n.related_entity_id = p_offer_id
-           AND n.user_id = p_recipient_user_id
+           AND n.user_id = p_recipient_user_id;
+        PERFORM pg_catalog.set_config('rab.offer_read_receipt', '', true);
+        RETURN v_read_at;
+      END;
       $fn$;
     `);
     await runner.query(`ALTER FUNCTION ${READ_AT_FN} OWNER TO crewflow;`);

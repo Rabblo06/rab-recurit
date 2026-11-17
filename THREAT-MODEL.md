@@ -8645,7 +8645,8 @@ Reversal:   Lower CLOCK_IN_CONFIRM_FLOOR_HOURS, or require a second approver (pa
   and pay amounts (the shift statement's "approved gross", offer messages). `core.notification` had one policy,
   `notification_tenant` FOR ALL `organisation_id = core.current_org()` (`OfferBatchNotificationSchema1786666300000`,
   unchanged since); `user_id = caller` existed only in `NotificationService`. Layer 5 (the tighter own-scope predicate) was
-  missing. Confirmed live by the abuse test: before the migration, a manager's raw SELECT returns both staff members' rows.
+  missing. Confirmed live (InstaBox, the new abuse test on main without the migration): staff member A's raw SELECT
+  returns staff member B's notification and A's raw UPDATE marks it read.
 - **Control (new migration `NotificationRecipientRls1786721590000`, FORCE kept):** INSERT WITH CHECK org-only (notify()
   writes rows for other users; worker jobs have no uid); SELECT for the recipient (`user_id = core.current_uid()`), for the
   server-set worker marker (`rab.actor_type = 'worker'`, the same marker `staff_profile_worker_scan` trusts), and for the
