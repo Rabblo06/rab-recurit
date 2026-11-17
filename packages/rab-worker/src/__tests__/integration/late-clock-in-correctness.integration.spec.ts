@@ -2,7 +2,7 @@ import 'reflect-metadata';
 import { formatLondonDateTime, ManagerType, NotificationType, ShiftAssignmentStatus, UserStatus } from '@rab/shared';
 import { Test } from '@nestjs/testing';
 import { randomUUID } from 'node:crypto';
-import { DataSource } from 'typeorm';
+import { DataSource, EntityManager } from 'typeorm';
 
 import { AppModule } from '@rab/server/app.module';
 import { Attendance } from '@rab/server/modules/attendance/entities/attendance.entity';
@@ -85,6 +85,15 @@ describeIfDb('late clock-in correctness (integration)', () => {
       await manager.query(`SELECT set_config('rab.role', '', true)`);
       return fn(manager);
     });
+  }
+
+  /**
+   * SF-5: core.notification is recipient-only for every human context, so a manager context no longer sees a staff member's
+   * notification. Notification assertions read through the server-set worker marker instead: every recipient's rows in the
+   * given organisation (never another organisation's), so "exactly one" and "none" checks keep their meaning.
+   */
+  function withNotificationReader<T>(ctx: { organisationId: string; workspaceId: string | null }, fn: (manager: EntityManager) => Promise<T>): Promise<T> {
+    return tenantContext.runInTenantContext({ organisationId: ctx.organisationId, workspaceId: ctx.workspaceId, userId: '', role: '', actorType: 'worker' }, fn);
   }
 
   async function createManager(organisationId: string, workspaceId: string, label: string): Promise<string> {
@@ -253,7 +262,7 @@ describeIfDb('late clock-in correctness (integration)', () => {
   }
 
   async function managerNotifications(fx: OrgFixture, userId: string, assignmentId: string): Promise<Notification[]> {
-    return withContext({ organisationId: fx.organisationId, workspaceId: fx.workspaceId, userId: fx.assigningManagerUserId }, (m) =>
+    return withNotificationReader({ organisationId: fx.organisationId, workspaceId: fx.workspaceId, userId: fx.assigningManagerUserId }, (m) =>
       m.find(Notification, { where: { userId, relatedEntityType: 'shift_assignment', relatedEntityId: assignmentId, type: NotificationType.LATE_CLOCK_IN } }),
     );
   }
@@ -347,7 +356,7 @@ describeIfDb('late clock-in correctness (integration)', () => {
       });
       await runLateClockInCycle(adminDataSource, tenantContext, notificationService, auditService, 10);
 
-      const wrongOrgNotifications = await withContext({ organisationId: otherOrg.organisationId, workspaceId: otherOrg.workspaceId, userId: otherOrg.assigningManagerUserId }, (m) =>
+      const wrongOrgNotifications = await withNotificationReader({ organisationId: otherOrg.organisationId, workspaceId: otherOrg.workspaceId, userId: otherOrg.assigningManagerUserId }, (m) =>
         m.find(Notification, { where: { userId: otherOrg.assigningManagerUserId, relatedEntityType: 'shift_assignment', relatedEntityId: assignmentId } }),
       );
       expect(wrongOrgNotifications).toHaveLength(0);
@@ -394,7 +403,7 @@ describeIfDb('late clock-in correctness (integration)', () => {
       });
       await runLateClockInCycle(adminDataSource, tenantContext, notificationService, auditService, 10);
 
-      const wrongWorkspaceNotifications = await withContext({ organisationId: fx.organisationId, workspaceId: fx.workspaceId, userId: fx.assigningManagerUserId }, (m) =>
+      const wrongWorkspaceNotifications = await withNotificationReader({ organisationId: fx.organisationId, workspaceId: fx.workspaceId, userId: fx.assigningManagerUserId }, (m) =>
         m.find(Notification, { where: { userId: otherWorkspaceManagerId, relatedEntityType: 'shift_assignment', relatedEntityId: assignmentId } }),
       );
       expect(wrongWorkspaceNotifications).toHaveLength(0);
@@ -430,7 +439,7 @@ describeIfDb('late clock-in correctness (integration)', () => {
       const ownerNotifications = await managerNotifications(fx, fx.ownerManagerUserId, assignmentId);
       expect(ownerNotifications).toHaveLength(0); // no silent fallback to staffProfile.createdBy either
 
-      const staffNotifications = await withContext({ organisationId: fx.organisationId, workspaceId: fx.workspaceId, userId: fx.assigningManagerUserId }, (m) =>
+      const staffNotifications = await withNotificationReader({ organisationId: fx.organisationId, workspaceId: fx.workspaceId, userId: fx.assigningManagerUserId }, (m) =>
         m.find(Notification, { where: { userId: fx.staffUserId, relatedEntityType: 'shift_assignment', relatedEntityId: assignmentId, type: NotificationType.LATE_CLOCK_IN } }),
       );
       expect(staffNotifications).toHaveLength(1); // the staff member's own notification is unaffected by manager resolution failing
@@ -553,7 +562,7 @@ describeIfDb('late clock-in correctness (integration)', () => {
       const eventStatus = await workerEventStatus(fx, `late-clock-in:${assignmentId}`);
       if (eventStatus) expect(eventStatus.status).not.toBe('completed');
       expect(await managerNotifications(fx, fx.assigningManagerUserId, assignmentId)).toHaveLength(0);
-      const staffNotifications = await withContext({ organisationId: fx.organisationId, workspaceId: fx.workspaceId, userId: fx.assigningManagerUserId }, (m) =>
+      const staffNotifications = await withNotificationReader({ organisationId: fx.organisationId, workspaceId: fx.workspaceId, userId: fx.assigningManagerUserId }, (m) =>
         m.find(Notification, { where: { userId: fx.staffUserId, relatedEntityType: 'shift_assignment', relatedEntityId: assignmentId, type: NotificationType.LATE_CLOCK_IN } }),
       );
       expect(staffNotifications).toHaveLength(0);

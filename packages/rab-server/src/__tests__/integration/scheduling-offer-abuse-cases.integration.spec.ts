@@ -1364,7 +1364,8 @@ describeIfDb('scheduling + offer abuse cases (integration)', () => {
         (manager) => manager.findOneByOrFail(StaffProfile, { id: staff.staffProfileId }),
       );
       const staffNotifications = await tenantContext.runInTenantContext(
-        { organisationId: organisation.id, workspaceId: null, userId: randomUUID(), role: '' },
+        // SF-5: core.notification is recipient-only, so the recipient's own context reads it.
+        { organisationId: organisation.id, workspaceId: null, userId: staffUserRow.userId, role: '' },
         (manager) => manager.find(Notification, { where: { userId: staffUserRow.userId, relatedEntityId: offer.body.id } }),
       );
       expect(staffNotifications.some((n) => n.type === 'offer_confirmed')).toBe(true);
@@ -1426,7 +1427,8 @@ describeIfDb('scheduling + offer abuse cases (integration)', () => {
         (manager) => manager.findOneByOrFail(StaffProfile, { id: staffA.staffProfileId }),
       );
       const notifications = await tenantContext.runInTenantContext(
-        { organisationId: organisation.id, workspaceId: null, userId: randomUUID(), role: '' },
+        // SF-5: core.notification is recipient-only, so the recipient's own context reads it.
+        { organisationId: organisation.id, workspaceId: null, userId: staffAUserRow.userId, role: '' },
         (manager) => manager.find(Notification, { where: { userId: staffAUserRow.userId } }),
       );
       expect(notifications.length).toBeGreaterThan(0);

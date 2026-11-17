@@ -2,7 +2,7 @@ import 'reflect-metadata';
 import { AttendanceStatus, ManagerType, NotificationType, ShiftAssignmentStatus, UserStatus } from '@rab/shared';
 import { Test } from '@nestjs/testing';
 import { randomUUID } from 'node:crypto';
-import { DataSource } from 'typeorm';
+import { DataSource, EntityManager } from 'typeorm';
 
 import { EnvironmentService } from '@rab/server/engine/core-modules/environment/environment.service';
 import { AppModule } from '@rab/server/app.module';
@@ -84,6 +84,15 @@ describeIfDb('worker event idempotency (integration)', () => {
       await manager.query(`SELECT set_config('rab.role', '', true)`);
       return fn(manager);
     });
+  }
+
+  /**
+   * SF-5: core.notification is recipient-only for every human context, so a manager context no longer sees a staff member's
+   * notification. Notification assertions read through the server-set worker marker instead: every recipient's rows in the
+   * given organisation (never another organisation's), so "exactly one" and "none" checks keep their meaning.
+   */
+  function withNotificationReader<T>(ctx: { organisationId: string; workspaceId: string | null }, fn: (manager: EntityManager) => Promise<T>): Promise<T> {
+    return tenantContext.runInTenantContext({ organisationId: ctx.organisationId, workspaceId: ctx.workspaceId, userId: '', role: '', actorType: 'worker' }, fn);
   }
 
   async function seedOrgFixture(label: string): Promise<OrgFixture> {
@@ -461,13 +470,13 @@ describeIfDb('worker event idempotency (integration)', () => {
       await runLateClockInCycle(adminDataSource, tenantContext, notificationService, auditService, 10);
       const afterFirst = await workerEventStatus(fx, `late-clock-in:${assignmentId}`);
       expect(afterFirst?.status).toBe('completed');
-      const notificationsAfterFirst = await withContext({ organisationId: fx.organisationId, workspaceId: fx.workspaceId, userId: fx.managerUserId }, (m) =>
+      const notificationsAfterFirst = await withNotificationReader({ organisationId: fx.organisationId, workspaceId: fx.workspaceId, userId: fx.managerUserId }, (m) =>
         m.find(Notification, { where: { relatedEntityType: 'shift_assignment', relatedEntityId: assignmentId, type: NotificationType.LATE_CLOCK_IN, userId: fx.staffUserId } }),
       );
       expect(notificationsAfterFirst).toHaveLength(1);
 
       await runLateClockInCycle(adminDataSource, tenantContext, notificationService, auditService, 10);
-      const notificationsAfterSecond = await withContext({ organisationId: fx.organisationId, workspaceId: fx.workspaceId, userId: fx.managerUserId }, (m) =>
+      const notificationsAfterSecond = await withNotificationReader({ organisationId: fx.organisationId, workspaceId: fx.workspaceId, userId: fx.managerUserId }, (m) =>
         m.find(Notification, { where: { relatedEntityType: 'shift_assignment', relatedEntityId: assignmentId, type: NotificationType.LATE_CLOCK_IN, userId: fx.staffUserId } }),
       );
       expect(notificationsAfterSecond).toHaveLength(1); // still exactly one — no duplicate
@@ -491,7 +500,7 @@ describeIfDb('worker event idempotency (integration)', () => {
 
       // Confirm zero Notification rows exist (both channels really were off) —
       // proving the ledger's completion is independent of any visible delivery.
-      const notifications = await withContext({ organisationId: fx.organisationId, workspaceId: fx.workspaceId, userId: fx.managerUserId }, (m) =>
+      const notifications = await withNotificationReader({ organisationId: fx.organisationId, workspaceId: fx.workspaceId, userId: fx.managerUserId }, (m) =>
         m.find(Notification, { where: { relatedEntityType: 'shift_assignment', relatedEntityId: assignmentId } }),
       );
       expect(notifications).toHaveLength(0);
@@ -525,7 +534,7 @@ describeIfDb('worker event idempotency (integration)', () => {
       const run = () => runLateClockInCycle(adminDataSource, tenantContext, notificationService, auditService, 10);
       await runConcurrentCycles([run, run, run, run, run]);
       expect((await workerEventStatus(fx, `late-clock-in:${assignmentId}`))?.status).toBe('completed');
-      const notifications = await withContext({ organisationId: fx.organisationId, workspaceId: fx.workspaceId, userId: fx.managerUserId }, (m) =>
+      const notifications = await withNotificationReader({ organisationId: fx.organisationId, workspaceId: fx.workspaceId, userId: fx.managerUserId }, (m) =>
         m.find(Notification, { where: { relatedEntityType: 'shift_assignment', relatedEntityId: assignmentId, userId: fx.staffUserId } }),
       );
       expect(notifications).toHaveLength(1); // exactly one, for THIS assignment, despite 5 concurrent attempts
@@ -575,7 +584,7 @@ describeIfDb('worker event idempotency (integration)', () => {
       );
       expect(assignment.status).toBe(ShiftAssignmentStatus.NO_SHOW);
 
-      const notifications = await withContext({ organisationId: fx.organisationId, workspaceId: fx.workspaceId, userId: fx.managerUserId }, (m) =>
+      const notifications = await withNotificationReader({ organisationId: fx.organisationId, workspaceId: fx.workspaceId, userId: fx.managerUserId }, (m) =>
         m.find(Notification, { where: { relatedEntityType: 'shift_assignment', relatedEntityId: assignmentId, type: NotificationType.SHIFT_ASSIGNMENT_NO_SHOW } }),
       );
       expect(notifications).toHaveLength(1);
@@ -600,15 +609,15 @@ describeIfDb('worker event idempotency (integration)', () => {
       await runShiftMonitorCycle(adminDataSource, tenantContext, notificationService, auditService, 0);
       expect((await workerEventStatus(fx, `no-show:${assignmentId}`))?.status).toBe('completed');
 
-      const ownerNotifications = await withContext({ organisationId: fx.organisationId, workspaceId: fx.workspaceId, userId: fx.managerUserId }, (m) =>
+      const ownerNotifications = await withNotificationReader({ organisationId: fx.organisationId, workspaceId: fx.workspaceId, userId: fx.managerUserId }, (m) =>
         m.find(Notification, { where: { userId: ownerManagerUserId, relatedEntityType: 'shift_assignment', relatedEntityId: assignmentId, type: NotificationType.SHIFT_ASSIGNMENT_NO_SHOW } }),
       );
       expect(ownerNotifications).toHaveLength(0); // never the onboarding owner
-      const staffAsRecipientNotifications = await withContext({ organisationId: fx.organisationId, workspaceId: fx.workspaceId, userId: fx.managerUserId }, (m) =>
+      const staffAsRecipientNotifications = await withNotificationReader({ organisationId: fx.organisationId, workspaceId: fx.workspaceId, userId: fx.managerUserId }, (m) =>
         m.find(Notification, { where: { userId: adversarialStaffUserId, relatedEntityType: 'shift_assignment', relatedEntityId: assignmentId, type: NotificationType.SHIFT_ASSIGNMENT_NO_SHOW } }),
       );
       expect(staffAsRecipientNotifications).toHaveLength(0); // never the staff member as a manager-notification recipient
-      const correctNotifications = await withContext({ organisationId: fx.organisationId, workspaceId: fx.workspaceId, userId: fx.managerUserId }, (m) =>
+      const correctNotifications = await withNotificationReader({ organisationId: fx.organisationId, workspaceId: fx.workspaceId, userId: fx.managerUserId }, (m) =>
         m.find(Notification, { where: { userId: fx.managerUserId, relatedEntityType: 'shift_assignment', relatedEntityId: assignmentId, type: NotificationType.SHIFT_ASSIGNMENT_NO_SHOW } }),
       );
       expect(correctNotifications).toHaveLength(1); // the ACTUAL responsible manager (assignedBy)
@@ -691,13 +700,13 @@ describeIfDb('worker event idempotency (integration)', () => {
 
       await runShiftMonitorCycle(adminDataSource, tenantContext, notificationService, auditService, 0);
       expect((await workerEventStatus(fx, `shift-reminder-24h:${assignmentId}`))?.status).toBe('completed');
-      const notifications = await withContext({ organisationId: fx.organisationId, workspaceId: fx.workspaceId, userId: fx.managerUserId }, (m) =>
+      const notifications = await withNotificationReader({ organisationId: fx.organisationId, workspaceId: fx.workspaceId, userId: fx.managerUserId }, (m) =>
         m.find(Notification, { where: { relatedEntityType: 'shift_assignment', relatedEntityId: assignmentId, type: NotificationType.SHIFT_REMINDER_24H } }),
       );
       expect(notifications).toHaveLength(0); // both channels off — nothing visible, but the ledger is still complete
 
       await runShiftMonitorCycle(adminDataSource, tenantContext, notificationService, auditService, 0);
-      const notificationsAfterSecond = await withContext({ organisationId: fx.organisationId, workspaceId: fx.workspaceId, userId: fx.managerUserId }, (m) =>
+      const notificationsAfterSecond = await withNotificationReader({ organisationId: fx.organisationId, workspaceId: fx.workspaceId, userId: fx.managerUserId }, (m) =>
         m.find(Notification, { where: { relatedEntityType: 'shift_assignment', relatedEntityId: assignmentId, type: NotificationType.SHIFT_REMINDER_24H } }),
       );
       expect(notificationsAfterSecond).toHaveLength(0); // still zero — a second scan did not re-claim this specific event
@@ -749,15 +758,15 @@ describeIfDb('worker event idempotency (integration)', () => {
       await runAttendanceMonitorCycle(adminDataSource, tenantContext, notificationService, auditService, app.get(EnvironmentService).get('QR_POST_SHIFT_GRACE_MINUTES'));
       expect((await workerEventStatus(fx, `missing-clock-out:${attendance.id}`))?.status).toBe('completed');
 
-      const ownerNotifications = await withContext(ctx, (m) =>
+      const ownerNotifications = await withNotificationReader(ctx, (m) =>
         m.find(Notification, { where: { userId: ownerManagerUserId, relatedEntityType: 'attendance', relatedEntityId: attendance.id, type: NotificationType.ATTENDANCE_MISSING_CLOCK_OUT } }),
       );
       expect(ownerNotifications).toHaveLength(0); // never the onboarding owner
-      const staffAsRecipientNotifications = await withContext(ctx, (m) =>
+      const staffAsRecipientNotifications = await withNotificationReader(ctx, (m) =>
         m.find(Notification, { where: { userId: adversarialStaffUserId, relatedEntityType: 'attendance', relatedEntityId: attendance.id, type: NotificationType.ATTENDANCE_MISSING_CLOCK_OUT } }),
       );
       expect(staffAsRecipientNotifications).toHaveLength(0); // never the staff member as a manager-notification recipient
-      const correctNotifications = await withContext(ctx, (m) =>
+      const correctNotifications = await withNotificationReader(ctx, (m) =>
         m.find(Notification, { where: { userId: fx.managerUserId, relatedEntityType: 'attendance', relatedEntityId: attendance.id, type: NotificationType.ATTENDANCE_MISSING_CLOCK_OUT } }),
       );
       expect(correctNotifications).toHaveLength(1); // the ACTUAL responsible manager (assignedBy)
