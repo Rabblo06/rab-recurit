@@ -8734,3 +8734,22 @@ Reversal:   Lower CLOCK_IN_CONFIRM_FLOOR_HOURS, or require a second approver (pa
   declared field in the same call is written.
   `venue-write-fields.spec.ts` and `staff-profile-update-fields.spec.ts` compare each allow-list with the DTO's
   class-validator metadata (minus the named `core."user"` fields for staff), so a new DTO field cannot be silently dropped.
+
+## Users page: bulk Send Email is offered only with the server's permission (branch fix/users-bulk-email-permission, 2026-11-17; no SQL)
+- **Context:** since owner decision batch 13 (SF-1) bulk email needs `staff.edit` for Staff and `manager.manage` for
+  Managers (route guard and service re-check). The web Users page still offered Send Email to every Staff-tab caller and
+  to every CEO / platform admin on the Managers tab, so a view-only role got a 403 toast. No data was exposed (the server
+  refused), but the UI advertised an action the caller does not hold.
+- **Control (presentation only):** `Users.tsx` reads the existing permission source, `GET /auth/capabilities`: Send Email
+  appears for Staff only with `staff.edit`, for Managers only with `manager.manage` (and the CEO / platform-admin tab
+  rule as before), for the caller's Venue Managers with `venue_manager.create` (unchanged). `staff.edit` is added to the
+  capability hints the endpoint returns (`auth.controller.ts`), computed from the same resolved permission set as every
+  other hint (overrides honoured). The server-side checks are unchanged and remain the enforcement.
+- **Not changed:** the user detail panel's own Send Email (single recipient, same endpoint) and its other actions are not
+  permission-gated in the UI either; the server still refuses them with 403. Separate follow-up.
+- **Tests:** `Users.spec.tsx` › "bulk Send Email follows the server permission": `staff.view` without `staff.edit` → no
+  Send Email in the bar (made after the capabilities have loaded); with `staff.edit` → offered and carries the selected id;
+  a CEO without `manager.manage` → not offered, with it → offered. Both denial cases fail on the previous code.
+  `sc05-capabilities.integration.spec.ts` now expects the 19 keys including `staff.edit`, same booleans as one
+  `userHasPermission` per flag. The mocked e2e fixture (`crewflow-fixtures.ts`) grants `staff.edit` so the existing bar
+  specs keep their four actions.
