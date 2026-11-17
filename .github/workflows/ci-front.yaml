@@ -24,7 +24,7 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: ./.github/actions/yarn-install
       - uses: ./.github/actions/restore-cache
-      - run: npx nx run-many -t build -p rab-shared,rab-ui
+      # No library pre-build: nx.json gives lint and test `dependsOn: ["^build"]`, so Nx builds rab-shared and rab-ui first.
       - run: npx nx run-many -t lint -p rab-front
       - run: npx nx run-many -t test -p rab-front
       - run: npx nx run rab-front:build
