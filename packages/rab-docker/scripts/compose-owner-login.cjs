@@ -377,7 +377,7 @@ function featureSweepProblems(apiEnv = {}, workerEnv = {}) {
 // DB-SETUP: PG_DATABASE_URL left database.env: it is an interpolation value of compose.env (rab-api's and rab-worker's
 // committed ${PG_DATABASE_URL:-<bundled db>} would silently override an env-file value).
 const DATABASE_ALLOWED = Object.freeze([
-  'PG_SSL_CA_CERT_PATH', 'PG_EXPECTED_DATABASE_NAME', 'CREWFLOW_DEPLOYMENT_ENVIRONMENT', 'CREWFLOW_DEPLOYMENT_ID',
+  'PG_SSL_CA_CERT_PATH', 'PG_SSL_CA_CERT', 'PG_EXPECTED_DATABASE_NAME', 'CREWFLOW_DEPLOYMENT_ENVIRONMENT', 'CREWFLOW_DEPLOYMENT_ID',
 ]);
 /** DB-SETUP: the only non-CREWFLOW_* names compose.env may hold (the one database setting and the bundled db's password). */
 const COMPOSE_DATABASE_KEYS = Object.freeze([URL_KEY, DB_PASSWORD_KEY]);
@@ -1043,6 +1043,20 @@ function lintEnvText(kind, text, { template = false } = {}) {
       if (key === BUNDLED_DB_KEY && !BUNDLED_DB_VALUES.includes(value)) problems.push(`${key}: must be exactly 0 or 1 (the bundled db off or on: one server per data volume)`);
     }
     if (key !== URL_KEY && isPgUrl(value)) problems.push(`${key}: holds a PostgreSQL URL (a second database identity)`);
+  }
+  // The database CA: PG_SSL_CA_CERT (PEM text; in an env file one line with \n escapes) or PG_SSL_CA_CERT_PATH, never both
+  // (pg-tls.ts refuses both at boot; the lint says so first). The app parses every certificate at boot; here only the
+  // shape is checked: a key, or anything but certificates, is refused. The value is never echoed.
+  const caInline = entries.find((e) => e.key === 'PG_SSL_CA_CERT' && e.value !== '');
+  if (caInline && entries.some((e) => e.key === 'PG_SSL_CA_CERT_PATH' && e.value !== '')) {
+    problems.push('PG_SSL_CA_CERT and PG_SSL_CA_CERT_PATH: set exactly one (the PEM text, or the path of a file holding it); both refuse to start');
+  }
+  if (caInline && !(template && isPlaceholder(caInline.value))) {
+    const v = caInline.value;
+    const labels = [...v.matchAll(/-----(?:BEGIN|END) ([A-Z0-9 ]+)-----/g)].map((m) => m[1]);
+    if (!v.includes('-----BEGIN CERTIFICATE-----') || !v.includes('-----END CERTIFICATE-----') || labels.some((l) => l !== 'CERTIFICATE')) {
+      problems.push('PG_SSL_CA_CERT: must hold only PEM CERTIFICATE block(s), on one line with \\n escapes (-----BEGIN CERTIFICATE-----\\n...\\n-----END CERTIFICATE-----); value not shown');
+    }
   }
   if (kind === 'runtime' && !entries.some((e) => e.key === AUDIT_SINK_KEY)) {
     problems.push(`${AUDIT_SINK_KEY}: missing (BC-07: production refuses to start without an external audit sink; set stdout with an off-host append-only log shipper)`);

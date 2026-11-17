@@ -317,6 +317,7 @@ services:
       # TLS to the bundled db: api-prestart.sh points PG_SSL_CA_CERT_PATH at the db's own CA (host `db`) when it is empty;
       # self-signed acceptance stays off (verify-full).
       PG_SSL_CA_CERT_PATH: ''
+      PG_SSL_CA_CERT: ''
       PG_SSL_ALLOW_SELF_SIGNED: 'false'
       PG_EXPECTED_DATABASE_NAME: crewflow
       # Deployment identity (BC-11): not used in dev; blanked so a host-native value in ../rab-server/.env never applies.
@@ -436,6 +437,7 @@ services:
       # ../rab-server/.env sets it.
       DB_TARGET: ''
       PG_SSL_CA_CERT_PATH: ''
+      PG_SSL_CA_CERT: ''
       PG_SSL_ALLOW_SELF_SIGNED: 'false'
       PG_EXPECTED_DATABASE_NAME: crewflow
       CREWFLOW_DEPLOYMENT_ENVIRONMENT: ''

@@ -212,7 +212,8 @@ export function pgTypeOrmConnectionOptions(
  * any more (Phase B A7: ScanLock.open() and the schema-drift job take pgClientConfig). Everything pg can read from a URL is encoded explicitly — sslmode (disable /
  * verify-full / no-verify) and sslrootcert (PG_SSL_CA_CERT_PATH), application_name and options — so pg-connection-string
  * reproduces the explicit `ssl` object exactly (asserted in the spec through pg's ConnectionParameters). Not expressible
- * in a URL: query_timeout and channel binding; the caller sets query_timeout itself. Prefer pgClientConfig().
+ * in a URL: query_timeout and channel binding; the caller sets query_timeout itself. An inline PG_SSL_CA_CERT is not
+ * expressible either (sslrootcert names a file): refused, never silently dropped. Prefer pgClientConfig().
  */
 export function pgConnectionString(resolved: ResolvedPgEnvironment, request: PgConnectionRequest): string {
   const prepared = prepare(resolved, request);
@@ -229,7 +230,11 @@ export function pgConnectionString(resolved: ResolvedPgEnvironment, request: PgC
   } else {
     url.searchParams.set('sslmode', 'verify-full');
     if (ssl.ca) {
-      if (!resolved.tls.caPath) throw new PgConfigError('internal: a CA is configured without PG_SSL_CA_CERT_PATH.');
+      if (resolved.tls.caSource !== 'PG_SSL_CA_CERT_PATH' || !resolved.tls.caPath) {
+        throw new PgConfigError(
+          'A connection string cannot carry the inline PG_SSL_CA_CERT (sslrootcert names a file). This call site needs pgClientConfig, or PG_SSL_CA_CERT_PATH. Refusing.',
+        );
+      }
       url.searchParams.set('sslrootcert', resolved.tls.caPath);
     }
   }
@@ -243,7 +248,7 @@ export function createPgClient(resolved: ResolvedPgEnvironment, request: PgConne
 }
 
 /** Settings an operator script's single-URL client takes from its environment (TLS and the production classification). */
-const OPERATOR_SETTING_NAMES = ['NODE_ENV', 'RAB_RUNTIME_ENV', 'DB_TARGET', 'PG_SSL_CA_CERT_PATH', 'PG_SSL_ALLOW_SELF_SIGNED'] as const;
+const OPERATOR_SETTING_NAMES = ['NODE_ENV', 'RAB_RUNTIME_ENV', 'DB_TARGET', 'PG_SSL_CA_CERT_PATH', 'PG_SSL_CA_CERT', 'PG_SSL_ALLOW_SELF_SIGNED'] as const;
 
 /**
  * Security review L-5: a client for an operator script or check that is handed ONE explicit URL in its own variable

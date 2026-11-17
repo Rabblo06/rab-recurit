@@ -7,7 +7,7 @@
  * object), so pg never falls back to `PGSSLMODE` either.
  *
  *   sslmode in URL   production                                   outside production
- *   (absent)         verify-full                                  no TLS, unless PG_SSL_CA_CERT_PATH is set (verify-full)
+ *   (absent)         verify-full                                  no TLS, unless a CA is configured (verify-full)
  *   disable          REFUSED                                      no TLS
  *   allow, prefer    REFUSED                                      REFUSED (pg cannot fall back between TLS and plaintext)
  *   require          verify-full                                  verify-full (self-signed accepted with the flag)
@@ -16,26 +16,84 @@
  *   no-verify        REFUSED                                      only with PG_SSL_ALLOW_SELF_SIGNED=true
  *
  * verify-full = `{ rejectUnauthorized: true }` with Node's default `checkServerIdentity` (certificate chain AND host name),
- * CA from PG_SSL_CA_CERT_PATH when set, otherwise the system store. pg sends SNI for a DNS host name; with an IP-literal
- * host the certificate must carry that IP as a SAN. PG_SSL_ALLOW_SELF_SIGNED=true (`rejectUnauthorized: false`) is
- * refused in production. Note `require` is deliberately STRONGER here than libpq's `require` (which does not verify):
+ * against the configured CA when there is one, otherwise the system store. pg sends SNI for a DNS host name; with an
+ * IP-literal host the certificate must carry that IP as a SAN. PG_SSL_ALLOW_SELF_SIGNED=true (`rejectUnauthorized: false`)
+ * is refused in production. Note `require` is deliberately STRONGER here than libpq's `require` (which does not verify):
  * pg 8 already treats it as verify-full, and pg 9 announces it will weaken it, so the mapping is pinned here instead.
+ *
+ * The CA comes from ONE of two variables, never both (both set refuses to start):
+ *   PG_SSL_CA_CERT_PATH   a file holding the PEM bundle (a mounted secret or volume);
+ *   PG_SSL_CA_CERT        the PEM text itself, for hosts that cannot mount a file (PaaS platforms such as OpenShip). Real
+ *                         newlines or `\n` escapes (one line, as env files and most platform UIs need) both work.
+ * Either way the text is validated at boot by the same function (validatePgCaPem): at least one PEM block, every block a
+ * CERTIFICATE that X509Certificate parses, nothing else (a pasted private key is refused). The text is never logged and
+ * never part of an error message: it is a public certificate, but an operator mistake (a key pasted into it) must not
+ * reach a log. A configured CA only changes WHICH root is trusted: verification stays verify-full, host name included.
  */
+import { X509Certificate } from 'crypto';
 import * as fs from 'fs';
 import type { ConnectionOptions } from 'tls';
 
 import { PgConfigError, PgSslMode } from './pg-url-policy';
 
+/** Which variable supplied the CA (named in refusals; the value never is). */
+export type PgCaSource = 'PG_SSL_CA_CERT' | 'PG_SSL_CA_CERT_PATH';
+
 export interface PgTlsSettings {
   production: boolean;
-  /** PEM text read from PG_SSL_CA_CERT_PATH at boot, or null for the system CA store. */
+  /** Validated PEM certificate text from PG_SSL_CA_CERT or from the file named by PG_SSL_CA_CERT_PATH; null = system store. */
   caPem: string | null;
+  /** The variable caPem came from, or null. */
+  caSource: PgCaSource | null;
   allowSelfSigned: boolean;
 }
 
 export type PgSsl = false | ConnectionOptions;
 
-/** Reads and sanity-checks PG_SSL_CA_CERT_PATH at boot, not at first connect. The path is not echoed. */
+/** Upper bound on the CA text (a regional provider bundle is a few KB; Linux caps one environment string at 128 KiB). */
+export const PG_CA_PEM_MAX_BYTES = 256 * 1024;
+
+const PEM_BLOCK = /-----BEGIN ([A-Z0-9 ]+)-----([\s\S]*?)-----END ([A-Z0-9 ]+)-----/g;
+
+/**
+ * Validates CA text from either source and returns it normalised: the CERTIFICATE blocks only, LF line ends (explanatory
+ * text between blocks, which RFC 7468 allows, is dropped). Throws PgConfigError naming `source` only, never the text.
+ */
+export function validatePgCaPem(raw: string, source: PgCaSource): string {
+  const refuse = (why: string): never => {
+    throw new PgConfigError(`${source} ${why} Refusing to start.`);
+  };
+  if (Buffer.byteLength(raw, 'utf8') > PG_CA_PEM_MAX_BYTES) refuse(`is larger than ${PG_CA_PEM_MAX_BYTES / 1024} KiB; use your provider's regional CA bundle.`);
+  // `\n` escapes (a one-line value) become real newlines; CRLF becomes LF. A PEM body never contains a backslash.
+  const text = raw.replace(/\\r\\n|\\n/g, '\n').replace(/\r\n?/g, '\n');
+  const certificates: string[] = [];
+  for (const [, beginLabel, body, endLabel] of text.matchAll(PEM_BLOCK)) {
+    if (beginLabel !== endLabel) refuse('contains a PEM block whose BEGIN and END labels differ.');
+    if (beginLabel !== 'CERTIFICATE') {
+      refuse(
+        /PRIVATE KEY/.test(beginLabel)
+          ? 'contains a PRIVATE KEY block. It must hold only CA certificate(s): remove the key, and treat that key as exposed.'
+          : `contains a "${beginLabel}" PEM block; only CERTIFICATE blocks are accepted.`,
+      );
+    }
+    const base64 = body.replace(/\s+/g, '');
+    if (!/^[A-Za-z0-9+/]+={0,2}$/.test(base64)) refuse(`certificate ${certificates.length + 1} is not valid base64.`);
+    const pem = `-----BEGIN CERTIFICATE-----\n${base64.replace(/(.{64})/g, '$1\n').replace(/\n$/, '')}\n-----END CERTIFICATE-----\n`;
+    try {
+      new X509Certificate(pem);
+    } catch {
+      refuse(`certificate ${certificates.length + 1} is not a parseable X.509 certificate.`);
+    }
+    certificates.push(pem);
+  }
+  if (certificates.length === 0) refuse('does not contain a PEM certificate (-----BEGIN CERTIFICATE----- ... -----END CERTIFICATE-----).');
+  const begins = text.split('-----BEGIN ').length - 1;
+  const ends = text.split('-----END ').length - 1;
+  if (begins !== certificates.length || ends !== certificates.length) refuse('contains an incomplete PEM block (a BEGIN line without its END line, or the reverse).');
+  return certificates.join('');
+}
+
+/** Reads and validates PG_SSL_CA_CERT_PATH at boot, not at first connect. The path is not echoed. */
 export function readPgCaCertificate(caPath: string, readFile: (p: string) => string = (p) => fs.readFileSync(p, 'utf8')): string {
   let pem: string;
   try {
@@ -43,10 +101,26 @@ export function readPgCaCertificate(caPath: string, readFile: (p: string) => str
   } catch {
     throw new PgConfigError('PG_SSL_CA_CERT_PATH is set but the file cannot be read. Refusing to start.');
   }
-  if (!/-----BEGIN CERTIFICATE-----[\s\S]+-----END CERTIFICATE-----/.test(pem)) {
-    throw new PgConfigError('PG_SSL_CA_CERT_PATH does not contain a PEM certificate. Refusing to start.');
+  return validatePgCaPem(pem, 'PG_SSL_CA_CERT_PATH');
+}
+
+/**
+ * The CA of this process, from its (trimmed; undefined = unset) PG_SSL_CA_CERT (inline PEM) or PG_SSL_CA_CERT_PATH (file),
+ * never both. Validated at boot. `caPem: null` = the system store.
+ */
+export function resolvePgCaCertificate(
+  inline: string | undefined,
+  caPath: string | undefined,
+  readFile?: (p: string) => string,
+): Pick<PgTlsSettings, 'caPem' | 'caSource'> {
+  if (inline !== undefined && caPath !== undefined) {
+    throw new PgConfigError(
+      'PG_SSL_CA_CERT and PG_SSL_CA_CERT_PATH are both set. Set exactly one: the PEM text itself, or the path of a file holding it. Refusing to start.',
+    );
   }
-  return pem;
+  if (inline !== undefined) return { caPem: validatePgCaPem(inline, 'PG_SSL_CA_CERT'), caSource: 'PG_SSL_CA_CERT' };
+  if (caPath !== undefined) return { caPem: readPgCaCertificate(caPath, readFile), caSource: 'PG_SSL_CA_CERT_PATH' };
+  return { caPem: null, caSource: null };
 }
 
 /** Builds the explicit `ssl` value for one connection string. Throws PgConfigError on any refused combination. */
@@ -66,7 +140,7 @@ export function buildPgSsl(sslmode: PgSslMode | null, settings: PgTlsSettings, l
 
   switch (sslmode) {
     case 'disable':
-      if (caPem) throw new PgConfigError(`${label} declares sslmode=disable while PG_SSL_CA_CERT_PATH is set. Remove one of them.`);
+      if (caPem) throw new PgConfigError(`${label} declares sslmode=disable while ${settings.caSource ?? 'a CA'} is set. Remove one of them.`);
       return false;
     case 'allow':
     case 'prefer':

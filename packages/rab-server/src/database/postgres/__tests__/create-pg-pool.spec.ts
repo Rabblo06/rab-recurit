@@ -11,6 +11,7 @@ import {
   pgTypeOrmConnectionOptions,
 } from '../create-pg-pool';
 import { PgConfigError } from '../pg-url-policy';
+import { TEST_CA_A } from './fixtures/pg-test-ca';
 
 // Phase B (B2): what pg ACTUALLY uses. Every assertion goes through pg's own ConnectionParameters (the object a pg Client
 // builds from its config), so a URL parameter that would override the factory's choice shows up here.
@@ -19,7 +20,8 @@ const ConnectionParameters = require('pg/lib/connection-parameters') as new (con
 const SECRET = 'Pw-s3cret-9f';
 const LOCAL = `postgres://crewflow_app:${SECRET}@localhost:5432/rab`;
 const DO = `postgresql://crewflow_app:${SECRET}@db-postgresql-lon1-1.db.ondigitalocean.com:25060/defaultdb?sslmode=require`;
-const PEM = '-----BEGIN CERTIFICATE-----\nMIIBfake\n-----END CERTIFICATE-----\n';
+// A real (public, test-only) CA certificate: the CA text is parsed at boot (pg-tls.ts validatePgCaPem).
+const PEM = TEST_CA_A;
 
 /** TypeORM 0.3.31 PostgresDriver.createPool: its own fields, then `extra` spread over them (no `url` from the factory). */
 function typeOrmDriverConfig(o: ReturnType<typeof pgTypeOrmConnectionOptions>) {

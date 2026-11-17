@@ -99,6 +99,21 @@ test('database env: a clean real file passes', () => {
   assert.deepEqual(lintEnvText('database', DATABASE_OK), []);
 });
 
+test('database env: the inline CA PG_SSL_CA_CERT (one line, \\n escapes) is accepted instead of the path, never beside it; only certificates', () => {
+  const inline = 'PG_SSL_CA_CERT=-----BEGIN CERTIFICATE-----\\nMIIBqzCCAVGgAwIBAgIU\\n-----END CERTIFICATE-----\\n';
+  const withoutPath = DATABASE_OK.split('\n').filter((l) => !l.startsWith('PG_SSL_CA_CERT_PATH=')).join('\n');
+  assert.deepEqual(lintEnvText('database', `${withoutPath}\n${inline}`), []);
+  assert.deepEqual(lintEnvText('database', `${withoutPath}\nPG_SSL_CA_CERT="-----BEGIN CERTIFICATE-----\\nMIIB\\n-----END CERTIFICATE-----"`), []);
+  const KEY_LABEL = ['PRIVATE', 'KEY'].join(' '); // built, so no secret scanner mistakes the fixture for a key
+  const both = lintEnvText('database', `${DATABASE_OK}\n${inline}`);
+  assertRefused(both, /PG_SSL_CA_CERT and PG_SSL_CA_CERT_PATH: set exactly one/);
+  const key = lintEnvText('database', `${withoutPath}\nPG_SSL_CA_CERT=-----BEGIN CERTIFICATE-----\\nMIIBqzCC\\n-----END CERTIFICATE-----\\n-----BEGIN ${KEY_LABEL}-----\\nMIGHAgEAMBMG\\n-----END ${KEY_LABEL}-----`);
+  assertRefused(key, /PG_SSL_CA_CERT: must hold only PEM CERTIFICATE block/);
+  assertRefused(lintEnvText('database', `${withoutPath}\nPG_SSL_CA_CERT=/run/crewflow/pg-ca.crt`), /PG_SSL_CA_CERT: must hold only PEM CERTIFICATE block/);
+  // The value is never echoed.
+  for (const p of [...both, ...key]) assert.ok(!/MIIB|MIGH/.test(p), p);
+});
+
 test('database env: the approval token is refused (O3: approval mode none, there is no token)', () => {
   assertRefused(lintEnvText('database', `${DATABASE_OK}\nCREWFLOW_MIGRATION_APPROVED=pending-1-${'a'.repeat(64)}`), /CREWFLOW_MIGRATION_APPROVED: .*no token/);
   assertRefused(lintEnvText('runtime', `export CREWFLOW_MIGRATION_APPROVED=pending-1-${'a'.repeat(64)}`), /CREWFLOW_MIGRATION_APPROVED/);

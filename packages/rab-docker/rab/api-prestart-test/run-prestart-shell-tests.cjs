@@ -536,6 +536,8 @@ const CA_CASES = [
   ['host db, CA unset -> the bundled CA', RUNTIME_URL, {}, DB_CA],
   ['host db with a port and userinfo, CA blank -> the bundled CA', 'postgresql://crewflow_owner:p@db:5432/crewflow?sslmode=verify-full', { PG_SSL_CA_CERT_PATH: '' }, DB_CA],
   ['host db, CA set -> kept', RUNTIME_URL, { PG_SSL_CA_CERT_PATH: '/run/crewflow/pg-ca.crt' }, '/run/crewflow/pg-ca.crt'],
+  // The inline CA (PEM text, one line with \n escapes) is the operator's choice: no path is added beside it (both set refuses).
+  ['host db, inline PG_SSL_CA_CERT set -> path not set', RUNTIME_URL, { PG_SSL_CA_CERT: '-----BEGIN CERTIFICATE-----\\nMIIB\\n-----END CERTIFICATE-----' }, '-'],
   ['external host -> not set', 'postgresql://crewflow_owner:p@db-direct.example:25060/defaultdb?sslmode=verify-full', {}, '-'],
   ['host db.example.com -> not set', 'postgresql://crewflow_owner:p@db.example.com:5432/d?sslmode=verify-full', {}, '-'],
   ['host dbx -> not set', 'postgresql://crewflow_owner:p@dbx:5432/d?sslmode=verify-full', {}, '-'],

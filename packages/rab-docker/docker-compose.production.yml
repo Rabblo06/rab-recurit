@@ -128,6 +128,8 @@ x-crewflow-optional-env: &optional-env
   # PEM CA bundle for verify-full. Unset = the bundled db's own CA when the URL's host is db (api-prestart.sh /
   # worker-start.sh), otherwise the system CA store; the file must exist in the container.
   PG_SSL_CA_CERT_PATH:
+  # Or the same CA as PEM text (no file mount needed; one line with \n escapes is fine). Never both: both set refuses.
+  PG_SSL_CA_CERT:
   # When set, must equal current_database().
   PG_EXPECTED_DATABASE_NAME:
   PG_POOL_IDLE_TIMEOUT_MS: ${PG_POOL_IDLE_TIMEOUT_MS:-600000}
@@ -503,6 +505,7 @@ services:
       # The TLS trust setting of rab-api / rab-worker (the shared optional list above): an external database's CA file.
       # Not PG_DATABASE_URL_IS_DIRECT: the bootstrap child refuses a transaction-pooler URL whatever that flag says.
       PG_SSL_CA_CERT_PATH:
+      PG_SSL_CA_CERT:
       NODE_ENV: production
       RAB_RUNTIME_ENV: production
     networks: [default, crewflow-db]

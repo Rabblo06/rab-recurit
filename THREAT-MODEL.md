@@ -8865,3 +8865,48 @@ Reversal:   Lower CLOCK_IN_CONFIRM_FLOOR_HOURS, or require a second approver (pa
   `sc05-capabilities.integration.spec.ts` now expects the 19 keys including `staff.edit`, same booleans as one
   `userHasPermission` per flag. The mocked e2e fixture (`crewflow-fixtures.ts`) grants `staff.edit` so the existing bar
   specs keep their four actions.
+
+## PG_SSL_CA_CERT — the database CA as PEM text, for hosts that cannot mount a file (branch feat/pg-ssl-ca-cert-inline, 2026-11-17; no SQL)
+- **Context:** production requires TLS verify-full to PostgreSQL. A CA outside the system store (AWS RDS, DigitalOcean,
+  Aiven, Supabase, a self-hosted server's own CA or self-signed certificate) could only be given as a file
+  (`PG_SSL_CA_CERT_PATH`), which PaaS hosts such as OpenShip cannot mount. The tempting shortcut is Twenty's
+  `PG_SSL_ALLOW_SELF_SIGNED` (`rejectUnauthorized: false`): it accepts ANY certificate, so anyone on the path can
+  impersonate the database and read every credential and row. It stays refused in production (unchanged).
+- **Threats:** (1) an operator turns verification off to make a private CA work → database MITM; (2) a malformed or
+  wrong CA value is only discovered at first connect, or silently ignored; (3) a private key pasted into the CA variable
+  (a common copy/paste mistake with combined PEM files) is echoed into logs or the admin viewer; (4) the CA and the path
+  are both set and the process silently picks one; (5) a string-only call site drops the inline CA and connects against
+  the system store.
+- **Controls:** `PG_SSL_CA_CERT` holds the PEM text (real newlines or `\n` escapes, so one env-file line works). It only
+  changes WHICH root is trusted: verification stays verify-full (chain AND host name, Node's default
+  `checkServerIdentity`, no override). `pg-tls.ts validatePgCaPem` runs at boot for BOTH sources (the path's file is now
+  held to the same rule): at least one PEM block, every block `CERTIFICATE` and parseable by `X509Certificate`, no
+  incomplete or mislabelled block, at most 256 KiB; a `PRIVATE KEY` block is refused with "treat that key as exposed";
+  any failure refuses to start. Both variables set refuses to start (before the file is read). Every message names the
+  variable only, never the text; the admin environment viewer lists `PG_SSL_CA_CERT` as a secret (Set / Not set). One
+  resolver (`resolvePgEnvironment`) serves the API, the Worker, db-setup's bootstrap child, the CLI and operator
+  scripts (`createPgClientForUrl` passes `PG_SSL_CA_CERT` through), so all of them verify identically.
+  `pgConnectionString` refuses an inline CA instead of dropping it (sslrootcert names a file). The bundled-db CA block in
+  `api-prestart.sh` / `worker-start.sh` / `db-setup.sh` no longer adds `PG_SSL_CA_CERT_PATH` when `PG_SSL_CA_CERT` is
+  set. The env-file lint (`compose-owner-login.cjs`) allows it in `database.env`, refuses it next to the path, and
+  refuses any non-certificate block, without echoing the value.
+- **Not added (owner decision pending, see the PR):** no `verify-ca` / host-name-off mode and no "allow any
+  certificate" mode in production. A server whose certificate cannot name the host the client dials (Railway's TCP
+  proxy: a per-instance self-signed CA with SAN `localhost` only; Cloud SQL dialled by IP) still fails closed. The PR
+  proposes, for the owner to veto, an expected-server-name option (verify the chain AND a configured name) rather than
+  `verify-ca`, because with a shared provider CA (an RDS regional CA, for example) `verify-ca` would accept any other
+  customer's certificate from the same CA.
+- **Residual:** the CA's authenticity is the operator's to establish (download it from the provider over HTTPS, never
+  from the server you are about to trust); a Linux environment string is capped at 128 KiB, so AWS's 170 KB global
+  bundle must be replaced by the regional bundle (about 4.5 KB).
+- **Tests:** `pg-tls-ca.spec.ts` (33): valid PEM accepted (multi-line, `\n`-escaped, CRLF, space-collapsed, bundles,
+  explanatory text) and identical to the same PEM through the path; replica and operator-script client get it;
+  malformed refused (text, a path, missing END, truncated block, mismatched labels, empty, non-DER base64, corrupted
+  certificate, public key, private key, oversize; the path's file too); both set refused; empty = unset; the CA text in
+  no console line, warning, refusal message, env.validation message or admin viewer row.
+  `pg-tls-ca.integration.spec.ts` (8, real pg Client from the factory, production rules, a TLS-only PostgreSQL front with
+  an openssl CA made like the bundled db's): private CA as text and as one `\n` line → verified TLS session; path →
+  identical; a self-hosted self-signed certificate → verified; DENIAL without the CA, with the wrong CA, and with the
+  right CA but a host the certificate does not name (127.0.0.1 vs DNS:localhost); both variables → refused before any
+  connection. `compose-owner-login.test.cjs`: the lint rules. `run-prestart-shell-tests.cjs` 11n: host `db` with
+  `PG_SSL_CA_CERT` set gets no path.
