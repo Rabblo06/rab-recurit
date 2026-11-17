@@ -22,6 +22,7 @@ import { AuthContext } from '@rab/server/engine/core-modules/tenant/auth-context
 import { TenantContextService } from '@rab/server/engine/core-modules/tenant/tenant-context.service';
 import { Organisation, Role, User, UserRole } from '@rab/server/modules/identity/entities/index';
 import { ManagerProfile } from '@rab/server/modules/manager/entities/manager-profile.entity';
+import { ROLE_DEFS } from '@rab/server/modules/manager/services/manager.service';
 import { ManagerWorkspace } from '@rab/server/modules/manager-workspace/entities/manager-workspace.entity';
 import { NotificationService } from '@rab/server/modules/notification/services/notification.service';
 import { JobOffer } from '@rab/server/modules/offer/entities/job-offer.entity';
@@ -101,6 +102,13 @@ describeIfDb('replacement-staff workflow (integration)', () => {
       if (!role) {
         const roleResult = await manager.insert(Role, { organisationId, key: 'manager', name: 'Manager', isSystem: true });
         role = await manager.findOneByOrFail(Role, { id: roleResult.identifiers[0]!.id as string });
+        // The production `manager` permission set (offer.send included): since SF-2, ReplacementRequestService.approve /
+        // reject re-check the route's offer.send in the service, so a role with no grants is refused before any race runs.
+        await manager.query(
+          `INSERT INTO core.role_permission (role_id, permission_id, organisation_id)
+           SELECT $1, p.id, $2 FROM core.permission p WHERE p.key = ANY($3::text[])`,
+          [role.id, organisationId, ROLE_DEFS[ManagerType.INTERNAL]!.permissions],
+        );
       }
       const hash = await passwordHashing.hash(FIXTURE_PASSWORD);
       const userResult = await manager.insert(User, {
@@ -131,6 +139,13 @@ describeIfDb('replacement-staff workflow (integration)', () => {
       if (!role) {
         const roleResult = await manager.insert(Role, { organisationId, key: 'manager', name: 'Manager', isSystem: true });
         role = await manager.findOneByOrFail(Role, { id: roleResult.identifiers[0]!.id as string });
+        // The production `manager` permission set (offer.send included): since SF-2, ReplacementRequestService.approve /
+        // reject re-check the route's offer.send in the service, so a role with no grants is refused before any race runs.
+        await manager.query(
+          `INSERT INTO core.role_permission (role_id, permission_id, organisation_id)
+           SELECT $1, p.id, $2 FROM core.permission p WHERE p.key = ANY($3::text[])`,
+          [role.id, organisationId, ROLE_DEFS[ManagerType.INTERNAL]!.permissions],
+        );
       }
       const managerHash = await passwordHashing.hash(FIXTURE_PASSWORD);
       const managerResult = await manager.insert(User, {
@@ -943,6 +958,10 @@ describeIfDb('replacement-staff workflow (integration)', () => {
         const hash = await passwordHashing.hash(FIXTURE_PASSWORD);
         const userResult = await manager.insert(User, { organisationId: fx.organisationId, email: `otherws-${randomUUID()}@example.test`, passwordHash: hash, firstName: 'Other', lastName: 'Workspace', status: UserStatus.ACTIVE });
         const userId = userResult.identifiers[0]!.id as string;
+        // The organisation's `manager` role (production set, offer.send included): the manager is authorised for the
+        // action, so the refusal under test is the workspace scope (404), not the SF-2 flag re-check (403).
+        const managerRole = await manager.findOneByOrFail(Role, { organisationId: fx.organisationId, key: 'manager' });
+        await manager.insert(UserRole, { userId, roleId: managerRole.id, organisationId: fx.organisationId });
         await manager.query(`SELECT set_config('rab.user_id', $1, true)`, [userId]);
         const workspace = await manager.save(ManagerWorkspace, { organisationId: fx.organisationId, ownerUserId: userId, name: `Other Workspace ${userId}`, subdomain: `otherws-${userId.slice(0, 8)}`, status: 'active' });
         await provisionFixtureWorkspace(manager, workspace.id); // Part C1: READY schema, as the product builds it
