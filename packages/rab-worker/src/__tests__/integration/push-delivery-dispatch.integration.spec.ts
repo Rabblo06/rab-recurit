@@ -18,6 +18,7 @@ import { PasswordHashingService } from '@rab/server/engine/core-modules/auth/ser
 import { TenantContextService } from '@rab/server/engine/core-modules/tenant/tenant-context.service';
 import { SecretEncryptionService } from '@rab/server/engine/core-modules/secret-encryption/secret-encryption.service';
 import { PushDeviceService } from '@rab/server/engine/core-modules/push/push-device.service';
+import { AuditService } from '@rab/server/engine/core-modules/audit/audit.service';
 import { PushDeliveryService } from '@rab/server/engine/core-modules/push/push-delivery.service';
 import { PushService } from '@rab/server/engine/core-modules/push/push.service';
 import { FakeFcmDriver } from '@rab/server/engine/core-modules/push/drivers/fake-fcm.driver';
@@ -48,6 +49,7 @@ describeIfDb('push dispatch — worker claim/send/retry/fail (integration)', () 
   let tenantContext: TenantContextService;
   let secretEncryption: SecretEncryptionService;
   let pushDeviceService: PushDeviceService;
+  let auditService: AuditService;
   let pushService: PushService;
   let notificationService: NotificationService;
   let factory: TestIdentityFactory;
@@ -61,6 +63,7 @@ describeIfDb('push dispatch — worker claim/send/retry/fail (integration)', () 
     tenantContext = moduleRef.get(TenantContextService);
     secretEncryption = moduleRef.get(SecretEncryptionService);
     pushDeviceService = moduleRef.get(PushDeviceService);
+    auditService = moduleRef.get(AuditService);
     pushService = moduleRef.get(PushService);
     notificationService = moduleRef.get(NotificationService);
     adminDataSource = createAdminDataSource();
@@ -97,7 +100,7 @@ describeIfDb('push dispatch — worker claim/send/retry/fail (integration)', () 
   }
 
   async function runProcessor(deliveryId: string, organisationId: string) {
-    const processor = createPushSendProcessor({ tenantContext, pushService, secretEncryption, pushDeviceService });
+    const processor = createPushSendProcessor({ tenantContext, pushService, secretEncryption, pushDeviceService, auditService });
     const job = { data: { pushDeliveryId: deliveryId, organisationId }, attemptsMade: 0 } as never;
     await processor(job);
   }
