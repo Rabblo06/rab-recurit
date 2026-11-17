@@ -334,7 +334,11 @@ async function runCommandEntry(db: string, args: string[], extra: Record<string,
 /** B1's code, when it is on the branch under test; null otherwise. */
 export function b1(): B1Interface | null {
   const version = load<{ readAppVersion(env: NodeJS.ProcessEnv): string; majorMinorKey(v: string): string }>('upgrade-version');
-  const sequence = load<{ stepsForVersion(v: string): (string | { name: string })[]; instanceStepsForVersion?(v: string): string[] }>('upgrade-sequence');
+  const sequence = load<{
+    stepsForVersion(v: string): (string | { name: string })[];
+    instanceStepsForVersion?(v: string): string[];
+    commandsForVersion?(v: string): { name: string; timestamp: number }[];
+  }>('upgrade-sequence');
   const service = load<{ isLastAttemptCompleted(q: Query, a: { name: string; workspaceId: string | null }): Promise<boolean> }>('upgrade-migration.service');
   if (!version || !sequence || !service || !LEDGER_MIGRATION_ON_BRANCH) return null;
   const check = load<{ decideUpgradeStart(f: UpgradeStartFactsLike): { kind: string; [k: string]: unknown } }>('upgrade-version-check');
@@ -342,6 +346,8 @@ export function b1(): B1Interface | null {
   const registry = load<{ UPGRADE_COMMANDS: Record<string, { name: string; timestamp: number }[]> }>(join('upgrade-commands', 'registry'));
   const migrateEntry = join(SERVER_SRC, 'database', 'typeorm', 'scripts', 'migrate', 'twenty', 'twenty-migrate.ts');
   const currentVersion = version.readAppVersion(process.env);
+  // The code version's own instance commands: none for a patch release (its minor's bundle belongs to the minor release).
+  const ownCommands = () => (sequence.commandsForVersion ? sequence.commandsForVersion(currentVersion) : (registry?.UPGRADE_COMMANDS[version.majorMinorKey(currentVersion)] ?? []));
   // Part D: a version's WORKSPACE steps (0.6.0_StaffProfileMemberSelect_…) are recorded per workspace, never as instance rows;
   // the instance logbook these specs read holds the migrations step and the instance commands only.
   const stepsOf = (v: string, probes: readonly string[] = []) => [
@@ -382,9 +388,9 @@ export function b1(): B1Interface | null {
     decide: (facts) => check.decideUpgradeStart(facts),
     upgradeCommand: (db, args, opts = {}) => runCommandEntry(db, args, opts.env),
     forceUpgrade: (db, opts = {}) => runCommandEntry(db, ['--force'], opts.env),
-    upgradeCommands: () => registry?.UPGRADE_COMMANDS[version.majorMinorKey(currentVersion)] ?? [],
+    upgradeCommands: () => ownCommands(),
     runCommand: async (db, name) => {
-      const cmd = (registry?.UPGRADE_COMMANDS[version.majorMinorKey(currentVersion)] ?? []).find((c) => c.name === name) as
+      const cmd = ownCommands().find((c) => c.name === name) as
         | { run(ctx: { query: Query; log: (l: string) => void }): Promise<void> }
         | undefined;
       if (!cmd) throw new InterfaceGap(`upgrade command ${name} is not in UPGRADE_COMMANDS`);

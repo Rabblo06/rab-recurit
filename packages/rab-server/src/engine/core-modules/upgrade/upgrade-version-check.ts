@@ -4,7 +4,8 @@
  *   - `--force` skips ONLY this check (:127-133) and the run records forced = true;
  *   - a fresh install skips it (:135-140, "no provisioned workspace");
  *   - the previous version is the last TWENTY_PREVIOUS_VERSIONS entry (:142-143); 0.6.0, the adoption release, accepts
- *     0.4.0 (R254) and 0.5.0 (R256) (upgrade-version.ts upgradeFromVersions);
+ *     0.4.0 (R254) and 0.5.0 (R256) (upgrade-version.ts upgradeFromVersions); a patch release (0.6.1) accepts the earlier
+ *     published versions of its own minor line (0.6.0) and refuses (64) when its minor .0 is not published;
  *   - Twenty skips the check when there is nothing recorded (:145-152); Crewflow's analogue is the ONE-TIME adoption of an
  *     R254 / R256 history (B3): one is_initial row at 0.4.0 / 0.5.0, then the upgrade in the same start; only 0.6.0 adopts;
  *   - otherwise "version X is complete" (the last step of X has a completed latest attempt) must hold for an accepted
@@ -73,12 +74,13 @@ export function decideUpgradeStart(f: UpgradeStartFacts): UpgradeStartDecision {
       `the code version ${f.codeVersion} is not newer than the last published version ${last}: the release version was not bumped. Refusing.`,
     );
   }
+  // Before any outcome (fresh and rollback included): a patch release whose minor .0 is not published refuses (config, 64).
+  const from = upgradeFromVersions(f.codeVersion, previous);
   if (f.newerVersions.length) {
     return { kind: 'rollback', newer: [...f.newerVersions], reason: `the logbook holds newer version(s) ${f.newerVersions.join(', ')} than this image (${f.codeVersion}): rollback, nothing recorded` };
   }
   if (f.fresh) return { kind: 'fresh', reason: 'fresh install: no previous-version check' };
 
-  const from = upgradeFromVersions(f.codeVersion, previous);
   if (f.ledgerExists && f.hasInstanceRows) {
     const done = [...from, f.codeVersion].find((v) => f.complete[v] === true);
     if (done) return { kind: 'continue', from: done, reason: done === f.codeVersion ? `${done} is already complete` : `previous version ${done} is complete` };

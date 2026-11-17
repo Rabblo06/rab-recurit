@@ -65,11 +65,41 @@ export function majorMinorKey(version: string): string {
 }
 
 /**
+ * A PATCH release (PATCH > 0, e.g. 0.6.1). Upgrade commands are per minor release and belong to its `.0` (Twenty: the
+ * commands live in `upgrade-version-command/<major-minor>/` and a patch runs none): a patch release carries NO upgrade
+ * command, NO workspace command and NO structure level. Throws AppVersionError on anything that is not MAJOR.MINOR.PATCH.
+ */
+export function isPatchRelease(version: string): boolean {
+  return parseVersion(version).patch > 0;
+}
+
+/** The minor release a version belongs to (`M.m.0`): the one release of that line that owns the `M-m` command bundle. */
+export function minorReleaseOf(version: string): string {
+  const v = parseVersion(version);
+  return `${v.major}.${v.minor}.0`;
+}
+
+/**
  * The versions the code may upgrade FROM (B3). 0.6.0 is the adoption release and accepts both R254 (0.4.0) and R256
  * (0.5.0); from 0.7.0 on, strict: only the immediately previous version (the last CREWFLOW_PREVIOUS_VERSIONS entry).
+ *
+ * A patch release M.m.p (p > 0) has no step of its own beyond its migrations step, so it accepts every EARLIER published
+ * version of its own minor line (M.m.0 … M.m.(p-1)); with an append-only list that set already holds the last entry. It
+ * never accepts another minor line: the minor release's own commands (and, for 0.6.x, the adoption) run only on the `.0`,
+ * so a jump from the previous minor straight to a patch would skip them. Fail closed: a patch whose `.0` is not a
+ * published previous version refuses (AppVersionError, config 64), like an unbumped version.
  */
 export function upgradeFromVersions(codeVersion: string, previous: readonly string[] = CREWFLOW_PREVIOUS_VERSIONS): string[] {
   if (codeVersion === ADOPTION_RELEASE_VERSION) return previous.filter((v) => Object.values(ADOPTION_VERSION_BY_RELEASE).includes(v));
+  if (isPatchRelease(codeVersion)) {
+    const line = minorReleaseOf(codeVersion);
+    if (!previous.includes(line)) {
+      throw new AppVersionError(
+        `the patch release ${codeVersion} needs its minor release ${line} in CREWFLOW_PREVIOUS_VERSIONS (a patch upgrades only from its own minor line). Refusing.`,
+      );
+    }
+    return previous.filter((v) => minorReleaseOf(v) === line && compareVersions(v, codeVersion) < 0);
+  }
   const last = previous[previous.length - 1];
   return last ? [last] : [];
 }
