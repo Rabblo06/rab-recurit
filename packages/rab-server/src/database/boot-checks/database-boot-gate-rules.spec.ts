@@ -1,6 +1,7 @@
 import { healthyOwnerLoginPosture, OwnerLoginPostureFixture, ownerLoginPostureAnswer } from '../../__tests__/helpers/owner-login-posture-fake';
 import { MARKER_PRESENT_SQL, MARKER_READ_SQL, Query } from '../deployment-identity/deployment-identity';
 import {
+  assertVersionGate,
   BOOT_FACTS_SQL,
   DISPATCH_NOTIFY_SESSION_SQL,
   DISPATCH_NOTIFY_STORED_SQL,
@@ -14,6 +15,7 @@ import {
   isDatabaseUnreachable,
   isProductionProcess,
   OWNER_LOGIN,
+  parseBootFacts,
   RLS_DISABLED_TENANT_TABLES_SQL,
   ROUTINE_GRANTS_SQL,
   withDatabaseRetry,
@@ -194,8 +196,21 @@ describe('database boot gates (fake connection)', () => {
     );
   });
 
-  it('version: below PostgreSQL 16 is refused', async () => {
-    await refusedAt(evaluateBootGates(input(healthy({}, { server_version_num: 150008 }))), 'version', /150008 is below the minimum 160000/);
+  it('version: only PostgreSQL 16, 17 and 18 start (14, 15, 19 and 20 are refused with the supported range)', async () => {
+    await refusedAt(evaluateBootGates(input(healthy({}, { server_version_num: 140011 }))), 'version', /refused: PostgreSQL 14 is not supported; use 16-18 \(PostgreSQL 16, 17 or 18\)\. \(server_version_num 140011\)$/);
+    await refusedAt(evaluateBootGates(input(healthy({}, { server_version_num: 150008 }))), 'version', /refused: PostgreSQL 15 is not supported; use 16-18/);
+    await refusedAt(evaluateBootGates(input(healthy({}, { server_version_num: 190000 }))), 'version', /refused: PostgreSQL 19 is not supported; use 16-18 \(PostgreSQL 16, 17 or 18\)\. \(server_version_num 190000\)$/);
+    await refusedAt(evaluateBootGates(input(healthy({}, { server_version_num: 200002 }))), 'version', /refused: PostgreSQL 20 is not supported; use 16-18/);
+    for (const v of [160000, 160015, 170006, 180001]) {
+      await expect(evaluateBootGates(input(healthy({}, { server_version_num: v })))).resolves.toMatchObject({ serverVersionNum: v });
+    }
+  });
+
+  it('version: assertVersionGate returns the supported major (runDatabaseBootGates selects its fingerprints)', () => {
+    expect(assertVersionGate(parseBootFacts(healthy({}, { server_version_num: 170006 }).facts))).toBe(17);
+    expect(assertVersionGate(parseBootFacts(healthy({}, { server_version_num: 180001 }).facts))).toBe(18);
+    expect(() => assertVersionGate(parseBootFacts(healthy({}, { server_version_num: 190001 }).facts))).toThrow(/PostgreSQL 19 is not supported; use 16-18/);
+    expect(() => assertVersionGate(parseBootFacts(healthy({}, { server_version_num: 140011 }).facts))).toThrow(/PostgreSQL 14 is not supported; use 16-18/);
   });
 
   it('extensions: each required extension must be installed (uuid-ossp is not required)', async () => {

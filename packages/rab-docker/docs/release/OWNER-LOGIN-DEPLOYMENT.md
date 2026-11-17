@@ -646,16 +646,15 @@ user never has CREATEROLE).
    | `CREWFLOW_BUNDLED_DB` | `0`. The bundled `db` never starts. |
    | `PG_DATABASE_URL` | `postgresql://crewflow_owner:<password>@<direct-host>:5432/<database>?sslmode=verify-full`, the **crewflow_owner** URL, never the admin URL. |
    | `PG_ADMIN_URL` | **Not set.** Crewflow never sees an admin credential. |
-   | `PG_DATABASE_PASSWORD` | As section 2 says for your own database. |
+   | `PG_DATABASE_PASSWORD` | **Not set** (mode c of section 2: with `CREWFLOW_BUNDLED_DB=0` the lint refuses a leftover one). |
 
-   **`PG_ADMIN_URL` requires the PG_ADMIN_URL release, PR #230** (the PR that renames the admin-URL setting; not merged
-   when this was written). In this release the admin URL setting is `PG_DATABASE_URL`, which also accepts an existing
-   `crewflow_owner` URL; put the `crewflow_owner` URL there and nothing else.
+   This is mode (c) of section 2. `PG_DATABASE_URL` is always the app login: db-setup refuses any other login there
+   ("renamed to PG_ADMIN_URL"), and refuses `PG_ADMIN_URL` and `PG_DATABASE_URL` set together.
 
 5. Deploy: `docker compose up -d`. What happens:
    - `db-setup` sees a `crewflow_owner` URL and runs only read-only checks (D5, DB-SETUP-PLAN §7.1). It refuses
      SUPERUSER, BYPASSRLS, REPLICATION, CREATEDB, NOLOGIN, NOINHERIT, an expired login, a privileged membership, a
-     missing database grant, and PostgreSQL below 16.
+     missing database grant, and a PostgreSQL major outside 16-18.
    - `db-setup` copies the URL's password into its password file: `/run/crewflow/db-target/owner-password`, mode 0400,
      on the `crewflow-db-target` volume. Protect that volume and its backups.
    - `db-setup` never writes to the database and never changes the password.

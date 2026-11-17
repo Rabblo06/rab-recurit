@@ -17,6 +17,7 @@ import 'dotenv/config';
 import { DataSource } from 'typeorm';
 
 import { assertDbTarget, readDotenvValues } from '../core/database-target';
+import { selectWorkspaceFingerprintsForServer } from '../workspace-schema/v1/expected-fingerprints';
 import { WorkspaceSchemaMigrator } from '../workspace-schema/workspace-schema-migrator';
 import { LATEST_WORKSPACE_MODULE_VERSION } from '../workspace-schema/workspace-schema-modules';
 import { migrationDataSourceOptions } from './migrate/locked-migration-runner';
@@ -34,6 +35,8 @@ async function main(): Promise<void> {
   const runner = dataSource.createQueryRunner();
   try {
     await runner.connect();
+    // PG17/18 fix: adopt / verify against this server's major (refuses a major without reviewed fingerprints).
+    await selectWorkspaceFingerprintsForServer((sql) => runner.query(sql) as Promise<Array<Record<string, unknown>>>);
     const outcomes = await new WorkspaceSchemaMigrator(runner).migrateAll({ throughVersion: through, txMode: 'own', appVersion: 'cli:migrate-workspace-schemas' });
     for (const o of outcomes) {
       // eslint-disable-next-line no-console

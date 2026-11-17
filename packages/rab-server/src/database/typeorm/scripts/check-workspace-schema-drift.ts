@@ -9,6 +9,7 @@
  * Exit 1 on any DRIFTED / MISSING / UNVERIFIED / ERROR finding (BEHIND alone exits 0 with a warning).
  */
 import { createPgClientForUrl } from '../../postgres';
+import { selectWorkspaceFingerprintsForServer } from '../workspace-schema/v1/expected-fingerprints';
 import { checkWorkspaceSchemaDrift } from '../workspace-schema/workspace-schema-drift';
 
 async function main(): Promise<void> {
@@ -18,6 +19,8 @@ async function main(): Promise<void> {
   const client = createPgClientForUrl(url, 'DRIFT_DATABASE_URL', { purpose: 'drift', sessionAffinity: true, statementTimeoutMs: 60_000 });
   await client.connect();
   try {
+    // PG17/18 fix: compare against this server's major (refuses a major without reviewed fingerprints).
+    await selectWorkspaceFingerprintsForServer(async (sql) => (await client.query(sql)).rows);
     const r = await checkWorkspaceSchemaDrift(client);
     for (const f of r.findings) console.log(`${f.status} workspace=${f.workspaceId} module=${f.moduleVersion ?? '?'} ${f.detail}`);
     console.log(`workspace schema drift: checked=${r.checked} ok=${r.ok} notReady=${r.notReady} findings=${r.findings.length}`);
