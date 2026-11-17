@@ -301,3 +301,46 @@ jobs:
       - name: Stop PostgreSQL
         if: always()
         run: docker rm -f disposable-postgres > /dev/null 2>&1 || true
+
+  # One always-reporting status for branch protection. A skipped matrix job never reports its expanded names
+  # ("test (1)", ...), so a PR the change filter skips could never satisfy those required checks. This job always runs:
+  # it fails if a required job failed or was cancelled, and accepts "skipped" only when `changed` succeeded and its
+  # filter output(s) (worker) said there was nothing to run; when the filter said run, every job must succeed.
+  ci-worker-gate:
+    name: ci-worker gate
+    needs: [changed, test-hws-off, phase-d, test-search-path-trap]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Every required ci-worker job succeeded, or was skipped by the change filter
+        env:
+          RESULTS: ${{ toJSON(needs) }}
+          # The changed-files outputs this workflow's `if:` conditions read: the suites run when any of them is 'true'.
+          FILTER_OUTPUTS: worker
+        run: |
+          python3 - <<'EOF'
+          import json, os, sys
+          needs = json.loads(os.environ['RESULTS'])
+          keys = os.environ['FILTER_OUTPUTS'].split()
+          for k, v in sorted(needs.items()):
+              print(f"{k}: {v['result']}")
+          changed = needs.get('changed') or {}
+          if changed.get('result') != 'success':
+              print(f"::error::change detection did not succeed ({changed.get('result')}): cannot tell a skip from a job that never ran")
+              sys.exit(1)
+          outputs = changed.get('outputs') or {}
+          flags = {k: outputs.get(k) for k in keys}
+          print(f"change filter outputs: {flags}")
+          if not flags or any(v not in ('true', 'false') for v in flags.values()):
+              print(f"::error::change filter outputs are missing or not 'true'/'false': {flags}")
+              sys.exit(1)
+          should_run = 'true' in flags.values()
+          allowed = ('success',) if should_run else ('success', 'skipped')
+          jobs = {k: v['result'] for k, v in needs.items() if k != 'changed'}
+          bad = {k: r for k, r in jobs.items() if r not in allowed}
+          if not jobs or bad:
+              print(f"::error::required jobs did not {'succeed' if should_run else 'succeed or skip'}: {bad}")
+              sys.exit(1)
+          print('the change filter ' + ('ran the suites and every one succeeded' if should_run else 'skipped the suites (no relevant change)'))
+          EOF
