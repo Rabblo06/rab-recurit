@@ -711,7 +711,35 @@ shape). Results:
   - `runDatabaseBootGates('api')` and `('worker')` reported `gates=ok`;
   - the security posture equals the committed PG16 golden (0 missing, 0 unexpected).
 - The second start passed: `db-setup` exit 0, migrate state CURRENT.
-- After `ALTER ROLE crewflow_owner NOCREATEROLE`, `db-setup`, migrate and the API boot gates still passed.
+- **Required step 6 (NOCREATEROLE), proven on 2026-11-17** (InstaBox ibox2, code at 1bcab071; same image and PG16.16).
+  The first start ran with CREATEROLE: the bootstrap and every R256 migration (256). Then the admin ran
+  `ALTER ROLE crewflow_owner NOCREATEROLE`, and everything below ran without CREATEROLE:
+  - (a) Restart: `db-setup` owner-URL mode exit 0, with its `NOCREATEROLE (hardened)` line. Migrate exit 0. The boot
+    gates for the API and the Worker reported `gates=ok`. `owner-login-posture.ts` found no problems, and the PG16
+    golden matched (0 missing, 0 unexpected).
+  - (c) An upgrade that applies new TypeORM migrations: the restart applied the 8 migrations after R256, exit 0,
+    `serve=true`. They include `UpgradeMigrationLedger`, `WorkspaceStaffMemberSelect` (re-creates
+    `core.provision_workspace`), `WorkspaceCoreForeignKeyRemoval`, `HwsCutoverCopyFunctions` (the C3 cutover functions)
+    and the metadata tables. A second restart was CURRENT.
+  - (b) New workspaces and (c) the workspace upgrade runner: the app's own integration specs ran against that database
+    as `crewflow_owner` without CREATEROLE. **112 tests passed, 0 failed.** The 4 skipped are the crewflow_app-only
+    negative controls, skipped on the owner login by design, as in CI.
+    - `server-path-provisioning-api`: 12. This is the real `POST /rest/v1/manager-workspaces` on two Nest replicas;
+      `core.provision_workspace`, a SECURITY DEFINER owned by `crewflow`, builds the schema; READY once.
+    - `server-path-provisioning-db`: 23. The server-path workspace is compared object by object with the TypeScript
+      provisioner's: tables, policies and grants.
+    - `workspace-provisioning-owner-flow`: 7.
+    - The Worker's `workspace-provisioning` (6) and `workspace-provisioning-owner-login` (12): `SET ROLE crewflow`
+      provisioning, as the Worker runs it.
+    - `workspace-command-runner`: 36. The 0.6.0 workspace commands and structural probes over workspaces left at an
+      earlier level.
+    - `workspace-command-runner-start`: 4. The workspace pass through the real locked start.
+    - `upgrade-migration-ledger`: 12.
+  - Afterwards `crewflow_owner` was still NOCREATEROLE. The specs had added 38 workspace schemas, and the cluster still
+    had 9 roles. The specs' own fixture roles are created and dropped by the cluster superuser, never by
+    `crewflow_owner`.
+  - The first run of the R256 install exits 68 by design of the test seam, not by CREATEROLE: the head code's post-check
+    calls R256's `core.provision_workspace` behind. The upgrade run then brings it to head.
 - The server log never contained the password.
 - The verifier and the logs:
   - with a non-superuser admin, the `log_statement=all` log held 1 verifier line;
@@ -733,7 +761,7 @@ shape). Results:
   - two empty lines from a non-superuser admin committed a passwordless role. Its login failed (28P01), db-setup
     refused it (exit 64), and the remedy above (`REVOKE ... CASCADE; DROP ROLE`) removed it.
 
-The harness was a scratch script, not committed; the latest run had 36 checks and 0 failures. **NOT TESTED:**
+The harness was a scratch script, not committed; the latest run had 34 checks and 0 failures, plus the 112 spec tests above. **NOT TESTED:**
 PostgreSQL 17 and 18, and every managed provider.
 
 ---
