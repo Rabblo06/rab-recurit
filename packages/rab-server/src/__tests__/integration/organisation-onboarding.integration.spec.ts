@@ -48,7 +48,12 @@ describeIfDb('organisation onboarding — CEO invitation (integration)', () => {
   async function legacyOrganisationWithPendingCeo(adminUserId: string, name: string): Promise<{ id: string; slug: string; ceoEmail: string; ceoUserId: string }> {
     const org = await factory.createOrganisation(name.toLowerCase().replace(/[^a-z0-9]+/g, '-').slice(0, 30));
     const ceoEmail = `ceo-${Date.now()}-${Math.random().toString(36).slice(2, 7)}@example.test`;
-    await managerService.create({ organisationId: org.id, workspaceId: null, userId: adminUserId, role: '' }, { email: ceoEmail, firstName: 'Cara', lastName: 'Executive', type: ManagerType.CEO });
+    // `createWithin` (the creation steps, including its own CEO platform-admin check): since SF-2 `create` itself also
+    // re-checks `manager.manage`, which a platform admin does not hold in an organisation it is not a member of.
+    const adminCtx = { organisationId: org.id, workspaceId: null, userId: adminUserId, role: '' };
+    await tenantContext.runInTenantContext(adminCtx, (m) =>
+      managerService.createWithin(m, adminCtx, { email: ceoEmail, firstName: 'Cara', lastName: 'Executive', type: ManagerType.CEO }),
+    );
     const [ceo] = await adminDataSource.manager.query(`SELECT id FROM core."user" WHERE organisation_id = $1 AND email = $2`, [org.id, ceoEmail]);
     return { id: org.id, slug: org.slug, ceoEmail, ceoUserId: ceo.id };
   }
