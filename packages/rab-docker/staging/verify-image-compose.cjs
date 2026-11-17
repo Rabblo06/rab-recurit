@@ -262,7 +262,8 @@ function pid1Problems(services, where = '') {
   }
   return out;
 }
-const DB_KEYS = [...RUNTIME_KEYS, 'image', 'environment', 'networks', 'ports', 'stop_signal', 'depends_on', 'profiles', 'env_file', 'build'];
+// deploy: the bundled db's replica count (CREWFLOW_BUNDLED_DB, Twenty's Helm db.enabled) must be the same in both files.
+const DB_KEYS = [...RUNTIME_KEYS, 'image', 'environment', 'networks', 'ports', 'stop_signal', 'depends_on', 'profiles', 'env_file', 'build', 'deploy', 'scale'];
 const OPS_ONLY = ['CREWFLOW_OPS_RUN', 'PG_OPS_APP_DATABASE_URL', 'CREWFLOW_OPS_ACTOR_SOURCE', 'CREWFLOW_OPS_ACTOR_ID', 'CREWFLOW_OPS_CHANGE_REF'];
 const LEGACY_DB = ['DATABASE_URL', 'DATABASE_DIRECT_URL', 'DB_POOL_MAX'];
 
@@ -670,6 +671,8 @@ function checkDeployment(merged, production, envFileKeys = {}, { dockerRoot = un
   for (const pr of topLevelVolumeProblems(merged, ' in the deployed model', { strict: true })) fail(pr);
   const setup = services[DB_SETUP_SERVICE];
   const pset = production?.services?.[DB_SETUP_SERVICE];
+  // db-setup's parsed PG_DATABASE_URL (null when missing or not a URL): also decides whether the bundled db may be off.
+  let parsed = null;
   if (setup) {
     const fromFiles = envFileKeys[DB_SETUP_SERVICE]?.names ?? [];
     if (fromFiles.includes('PG_DATABASE_URL')) fail(`${DB_SETUP_SERVICE}: PG_DATABASE_URL is set in an env file (set it in compose.env; the committed default would silently override it)`);
@@ -678,7 +681,6 @@ function checkDeployment(merged, production, envFileKeys = {}, { dockerRoot = un
     for (const [k, login] of Object.entries(envFileKeys[DB_SETUP_SERVICE]?.dbUsers ?? {})) {
       if (NOT_THE_APP_LOGIN.includes(login)) fail(`${DB_SETUP_SERVICE}: ${k} logs in as "${login}" (a former separated login)`);
     }
-    let parsed = null;
     try { parsed = new URL(String(envOf(setup).PG_DATABASE_URL ?? '')); } catch { /* reported below */ }
     if (!parsed) fail(`${DB_SETUP_SERVICE}: PG_DATABASE_URL is missing or not a URL in the deployed model`);
     else {
@@ -701,7 +703,14 @@ function checkDeployment(merged, production, envFileKeys = {}, { dockerRoot = un
   const pdb = production?.services?.[DB_SERVICE];
   if (!ddb) fail(`${DB_SERVICE}: missing in the deployed model`);
   else if (pdb) {
-    for (const key of DB_KEYS.filter((k) => k !== 'environment' && k !== 'image')) if (stable(ddb[key]) !== stable(pdb[key])) fail(`${DB_SERVICE}.${key} is overridden in the deployed model`);
+    for (const key of DB_KEYS.filter((k) => k !== 'environment' && k !== 'image' && k !== 'deploy')) if (stable(ddb[key]) !== stable(pdb[key])) fail(`${DB_SERVICE}.${key} is overridden in the deployed model`);
+    // CREWFLOW_BUNDLED_DB (Twenty's Helm db.enabled): the deploy section is the reference render's except replicas, which is
+    // 1, or 0 only when db-setup's PG_DATABASE_URL names your own database (any host but the bundled `db`).
+    const withoutReplicas = (d) => { const { replicas: _r, ...rest } = d ?? {}; return rest; };
+    if (stable(withoutReplicas(ddb.deploy)) !== stable(withoutReplicas(pdb.deploy))) fail(`${DB_SERVICE}.deploy is overridden in the deployed model (only deploy.replicas may differ)`);
+    const replicas = ddb.deploy?.replicas;
+    const ownDatabase = parsed !== null && parsed.hostname !== '' && parsed.hostname !== DB_SERVICE;
+    if (!(replicas === 1 || (replicas === 0 && ownDatabase))) fail(`${DB_SERVICE}.deploy.replicas is ${replicas === undefined ? 'unset' : replicas} (only 1, or 0 with your own database in PG_DATABASE_URL)`);
     // PR #125 review, finding 6: the deployed db's environment holds the real password, so it is not compared with the
     // reference render; it is checked against the same rules as the committed one (names and rules only, never a value).
     for (const msg of bundledDbEnvironmentProblems(ddb.environment ?? {})) fail(`${msg} in the deployed model`);
@@ -835,8 +844,10 @@ function renderModels(variantPath = VARIANT, productionPath = PRODUCTION) {
     };
     const variant = render([variantPath], { projectDirectory: dir, env, resolveEnvFiles: true });
     const rawFiles = render([variantPath], { projectDirectory: dir, env, resolveEnvFiles: false });
-    // Whether this Compose reports env_file under --no-env-resolution (rab-migrate declares one in the committed file).
-    const composeReportsEnvFiles = (rawFiles.services?.['rab-migrate']?.env_file ?? []).length > 0;
+    // Whether this Compose reports env_file under --no-env-resolution. The probe looks at the services that declare one in
+    // the committed file (rab-api, rab-worker, db-setup); it used to look at rab-migrate, which O3 removed, so on every
+    // Compose the preflight refused with "does not report env_file" before checking anything (found in the #189 review).
+    const composeReportsEnvFiles = ['rab-api', 'rab-worker', DB_SETUP_SERVICE].every((n) => (rawFiles.services?.[n]?.env_file ?? []).length > 0);
     const variantFiles = attachEnvFilesFromMarkers(rawFiles, variant, dir);
     // Resolved: production.yml names no env file, so only a re-added one (the retired .env.ops sentinel) adds values.
     const production = render([productionPath], { projectDirectory: dir, env, resolveEnvFiles: true });
