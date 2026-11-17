@@ -1052,7 +1052,7 @@ function lintEnvText(kind, text, { template = false } = {}) {
   // either way it reaches db-setup only. A former separated login, TLS below verify-full, a transaction pooler and a URL
   // without a password are refused.
   // Twenty's Helm db.enabled=false needs an external database: CREWFLOW_BUNDLED_DB=0 without PG_DATABASE_URL would leave
-  // db-setup pointed at a db that never starts (it fails closed at start, but the file is wrong, so the lint says so).
+  // db-setup pointed at a db that never starts (it refuses at start, exit 64: no bundled CA; the lint says so first).
   if (kind === 'compose' && entries.some((e) => e.key === BUNDLED_DB_KEY && e.value === '0')) {
     const url = entries.find((e) => e.key === URL_KEY)?.value;
     if (url === undefined || url === '') problems.push(`${BUNDLED_DB_KEY}: 0 (no bundled db) needs your own database in ${URL_KEY}`);
