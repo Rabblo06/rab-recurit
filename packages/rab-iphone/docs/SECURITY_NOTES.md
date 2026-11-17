@@ -148,8 +148,9 @@ Source only, NOT compiled or run. Server contract: `docs/account-security/STEP1_
 
 - **Assumption:** shift times display in Europe/London regardless of the
   device zone (Flutter uses the device zone; identical for UK devices).
-- **Parity quirk kept:** `Money.formatPence` loses the sign of a negative
-  amount under £1, exactly as Flutter does.
+- **Fixed (iPhone only):** `Money.formatPence` keeps the sign of a negative
+  amount under £1 (-50 → "£-0.50"). Flutter's `formatPence` still drops it
+  (and prints -199 as "£-1.01"); flagged, not changed.
 - Login in `reauthRequired` creates a new session family without revoking
   the previous one (Flutter parity); the old family ages out server-side.
   Consider a best-effort `/auth/logout` of the old family first.

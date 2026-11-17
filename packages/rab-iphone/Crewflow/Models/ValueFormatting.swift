@@ -6,15 +6,22 @@ import Foundation
 /// (packages/rab-mobile/lib/core/theme/money.dart): `£<pounds>.<pp>`, no
 /// thousands separator.
 ///
-/// PARITY NOTE (flagged, not invented): like Flutter, a NEGATIVE amount
-/// under £1 loses its sign (-50 → "£0.50") because pounds truncate toward
-/// zero. Kept identical deliberately for parity (not verified whether any
-/// mobile surface can receive a negative amount). Fix both apps together.
+/// A negative amount keeps its sign at every size: the sign is taken from
+/// `pence` itself, then pounds and pence are formatted from the magnitude.
+/// (Splitting a negative value into truncated pounds dropped the sign under
+/// £1: -50 used to print "£0.50".) The sign keeps this app's existing
+/// position, "£-1.50"; the web's shared `formatPence` prints "-£1.50".
+///
+/// PARITY NOTE (flagged): Flutter's `formatPence` still splits the signed
+/// value (Dart `~/` truncates, `%` is Euclidean), so it prints -50 as "£0.50"
+/// and -199 as "£-1.01". Not changed here.
 public enum Money {
     public static func formatPence(_ pence: Int64) -> String {
-        let pounds = pence / 100
-        let remainder = abs(Int(pence % 100))
-        return "£\(pounds)." + (remainder < 10 ? "0\(remainder)" : "\(remainder)")
+        let sign = pence < 0 ? "-" : ""
+        let magnitude = pence.magnitude // UInt64: also safe for Int64.min
+        let pounds = magnitude / 100
+        let remainder = magnitude % 100
+        return "£\(sign)\(pounds)." + (remainder < 10 ? "0\(remainder)" : "\(remainder)")
     }
 
     /// ASSUMPTION carried over from Flutter (display only, flagged to the
