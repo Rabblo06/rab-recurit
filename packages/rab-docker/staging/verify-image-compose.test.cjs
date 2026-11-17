@@ -204,22 +204,63 @@ const EXTERNAL_ADMIN_URL = 'postgresql://doadmin:not-a-secret@db-direct.example.
 test('environment mode: the env_file probe sees the committed env files (rab-api, rab-worker, db-setup)', { skip }, () => {
   assert.equal(fresh().composeReportsEnvFiles, true);
 });
-const bundledDb = (replicas, url) => (v) => {
+const EXTERNAL_OWNER_URL = 'postgresql://crewflow_owner:not-a-secret@db-direct.example.com:5432/crewflow?sslmode=verify-full'; // gitleaks:allow
+const NO_PASSWORD_BUNDLED_URL = 'postgresql://postgres:@db:5432/crewflow?sslmode=verify-full';
+/**
+ * The deployed db-setup / db as compose renders them for a compose.env (owner decision 2026-11-17): `replicas` =
+ * CREWFLOW_BUNDLED_DB; `admin` = PG_ADMIN_URL, `app` = PG_DATABASE_URL; `password: false` = no PG_DATABASE_PASSWORD (modes b
+ * and c: db's POSTGRES_PASSWORD and the bundled URL's password render empty).
+ */
+const bundledDb = (replicas, { admin, app, password = true } = {}) => (v) => {
   v.services.db.deploy = { ...v.services.db.deploy, replicas };
-  if (url !== undefined) v.services['db-setup'].environment.PG_DATABASE_URL = url;
+  const e = v.services['db-setup'].environment;
+  e.CREWFLOW_BUNDLED_DB = String(replicas);
+  if (admin !== undefined) e.PG_ADMIN_URL = admin;
+  if (app !== undefined) e.PG_DATABASE_URL = app;
+  if (!password) {
+    e.CREWFLOW_BUNDLED_DB_ADMIN_URL = NO_PASSWORD_BUNDLED_URL;
+    v.services.db.environment.POSTGRES_PASSWORD = '';
+  }
 };
-test('environment mode: CREWFLOW_BUNDLED_DB=0 with your own database in PG_DATABASE_URL passes; 1 passes as committed', { skip }, () => {
-  assert.equal(String(fresh().variantFiles.services['db-setup'].environment.PG_DATABASE_URL).includes('@db:5432/'), true);
-  assert.deepEqual(deployed(bundledDb(0, EXTERNAL_ADMIN_URL)), []);
-  assert.deepEqual(deployed(bundledDb(1, EXTERNAL_ADMIN_URL)), []);
+test('environment mode: the three modes pass (a bundled; b CREWFLOW_BUNDLED_DB=0 + PG_ADMIN_URL; c CREWFLOW_BUNDLED_DB=0 + crewflow_owner PG_DATABASE_URL), b and c without PG_DATABASE_PASSWORD', { skip }, () => {
+  const e = fresh().variantFiles.services['db-setup'].environment;
+  assert.equal(String(e.CREWFLOW_BUNDLED_DB_ADMIN_URL).includes('@db:5432/'), true);
+  assert.equal(e.PG_ADMIN_URL, '');
+  assert.equal(e.PG_DATABASE_URL, '');
   assert.deepEqual(deployed(bundledDb(1)), []);
+  assert.deepEqual(deployed(bundledDb(0, { admin: EXTERNAL_ADMIN_URL, password: false })), []);
+  assert.deepEqual(deployed(bundledDb(0, { app: EXTERNAL_OWNER_URL, password: false })), []);
+  // The bundled db running beside a URL (an existing deployment's crewflow_owner, the upgrade path) stays accepted.
+  assert.deepEqual(deployed(bundledDb(1, { admin: EXTERNAL_ADMIN_URL })), []);
+  assert.deepEqual(deployed(bundledDb(1, { app: EXTERNAL_OWNER_URL })), []);
+});
+test('DENIAL environment mode (owner decision 2026-11-17): password rules, both URLs, an admin URL in PG_DATABASE_URL, crewflow_owner in PG_ADMIN_URL', { skip }, () => {
+  assertRefused(deployed(bundledDb(1, { password: false })), /db-setup: PG_DATABASE_PASSWORD: required for the bundled database/);
+  assertRefused(deployed(bundledDb(1, { password: false })), /db: POSTGRES_PASSWORD is missing/);
+  assertRefused(deployed(bundledDb(0, { admin: EXTERNAL_ADMIN_URL })), /db-setup: PG_DATABASE_PASSWORD: remove it with CREWFLOW_BUNDLED_DB=0/);
+  assertRefused(deployed(bundledDb(0, { admin: EXTERNAL_ADMIN_URL, app: EXTERNAL_OWNER_URL, password: false })), /db-setup: PG_ADMIN_URL and PG_DATABASE_URL are both set/);
+  assertRefused(deployed(bundledDb(0, { app: EXTERNAL_ADMIN_URL, password: false })), /db-setup: PG_DATABASE_URL: is the app login and must log in as crewflow_owner; it is never an admin URL \(the admin URL was renamed to PG_ADMIN_URL/);
+  assertRefused(deployed(bundledDb(0, { admin: EXTERNAL_OWNER_URL, password: false })), /db-setup: PG_ADMIN_URL: logs in as crewflow_owner/);
+  assertRefused(deployed(bundledDb(1, { app: EXTERNAL_ADMIN_URL })), /db-setup: PG_DATABASE_URL: is the app login/);
+  assertRefused(deployed((v) => { v.services['db-setup'].environment.CREWFLOW_BUNDLED_DB = '0'; }), /db-setup: CREWFLOW_BUNDLED_DB differs from db's replica count/);
+  for (const key of ['PG_ADMIN_URL', 'PG_DATABASE_URL', 'CREWFLOW_BUNDLED_DB', 'CREWFLOW_BUNDLED_DB_ADMIN_URL']) {
+    assertRefused(deployed((v) => { delete v.services['db-setup'].environment[key]; }), new RegExp(`db-setup: ${key} is missing in the deployed model`));
+  }
+  // rab-api / rab-worker: PG_ADMIN_URL in their definition (any value, even empty) or from their env files is refused.
+  for (const svc of ['rab-api', 'rab-worker']) {
+    for (const value of [EXTERNAL_ADMIN_URL, '']) assertRefused(deployed((v) => { v.services[svc].environment.PG_ADMIN_URL = value; }), new RegExp(`${svc}: has PG_ADMIN_URL in the deployed model`));
+    const ok = { names: ['REDIS_URL', 'APP_SECRET'], unfilled: [], dbUsers: {} };
+    const m = fresh();
+    const keys = { 'rab-api': ok, 'rab-worker': ok, [svc]: { ...ok, names: [...ok.names, 'PG_ADMIN_URL'] } };
+    assertRefused(checkDeployment(m.variantFiles, m.production, keys), new RegExp(`${svc}: PG_ADMIN_URL is set in an env file`));
+  }
 });
 test('environment mode refuses: db with 0 replicas while db-setup still names the bundled db; 2 replicas; deploy.resources; scale', { skip }, () => {
-  const msg = /db\.deploy\.replicas is (0|2) \(only 1, or 0 with your own database in PG_DATABASE_URL\)/;
-  assertRefused(deployed(bundledDb(0)), msg);
-  assertRefused(deployed(bundledDb(0, 'postgresql://postgres:not-a-secret@db:5432/crewflow?sslmode=verify-full')), msg); // gitleaks:allow
-  assertRefused(deployed(bundledDb(2, EXTERNAL_ADMIN_URL)), msg);
-  assertRefused(deployed(bundledDb(0, 'not a url')), msg);
+  const msg = /db\.deploy\.replicas is (0|2) \(only 1, or 0 with your own database in PG_ADMIN_URL or PG_DATABASE_URL\)/;
+  assertRefused(deployed(bundledDb(0, { password: false })), msg);
+  assertRefused(deployed(bundledDb(0, { admin: 'postgresql://postgres:not-a-secret@db:5432/crewflow?sslmode=verify-full', password: false })), msg); // gitleaks:allow
+  assertRefused(deployed(bundledDb(2, { admin: EXTERNAL_ADMIN_URL })), msg);
+  assertRefused(deployed(bundledDb(0, { admin: 'not a url', password: false })), msg);
   assertRefused(deployed((v) => { v.services.db.deploy = { ...v.services.db.deploy, resources: { limits: { memory: '64g' } } }; }), /db\.deploy is overridden in the deployed model/);
   assertRefused(deployed((v) => { v.services.db.scale = 2; }), /db\.scale is overridden in the deployed model/);
 });
@@ -554,13 +595,18 @@ test('DENIAL DB-SETUP environment mode: PG_DATABASE_URL never from an env file, 
   assertRefused(run({ 'rab-api': ok, 'rab-worker': ok }, (v) => { v.services['rab-api'].environment.PG_DATABASE_PASSWORD = 'x'; }), /rab-api: PG_DATABASE_PASSWORD reaches the container/);
   // PR #125 option 2: db-setup alone carries the URL. T-1: a provider admin login is accepted there; a former separated
   // login, or TLS below verify-full, is not; an env-file value or the password is refused there too.
-  const setSetupUrl = (url) => (v) => { v.services['db-setup'].environment.PG_DATABASE_URL = url; };
+  const setSetupUrl = (url, key = /crewflow_owner/.test(url) ? 'PG_DATABASE_URL' : 'PG_ADMIN_URL') => (v) => { v.services['db-setup'].environment[key] = url; };
   assert.deepEqual(run({ 'rab-api': ok, 'rab-worker': ok }, setSetupUrl('postgresql://doadmin:x@db-direct.example:5432/d?sslmode=verify-full')), []);
   for (const login of ['crewflow_app', 'crewflow_migrator', 'crewflow']) {
-    assertRefused(run({ 'rab-api': ok, 'rab-worker': ok }, setSetupUrl(`postgresql://${login}:x@db-direct.example:5432/d?sslmode=verify-full`)), new RegExp(`db-setup: PG_DATABASE_URL logs in as "${login}"`));
+    for (const key of ['PG_ADMIN_URL', 'PG_DATABASE_URL']) {
+      assertRefused(run({ 'rab-api': ok, 'rab-worker': ok }, setSetupUrl(`postgresql://${login}:x@db-direct.example:5432/d?sslmode=verify-full`, key)), new RegExp(`db-setup: ${key}: logs in as a former separated login`));
+    }
   }
-  assertRefused(run({ 'rab-api': ok, 'rab-worker': ok }, setSetupUrl('postgresql://doadmin:x@db-direct.example:5432/d?sslmode=require')), /db-setup: PG_DATABASE_URL is not sslmode=verify-full/);
+  assertRefused(run({ 'rab-api': ok, 'rab-worker': ok }, setSetupUrl('postgresql://doadmin:x@db-direct.example:5432/d?sslmode=require')), /db-setup: PG_ADMIN_URL: sslmode is not verify-full/);
+  assertRefused(run({ 'rab-api': ok, 'rab-worker': ok }, setSetupUrl('postgresql://doadmin:x@ep-a-pooler.eu.aws.neon.tech:5432/d?sslmode=verify-full')), /db-setup: PG_ADMIN_URL: points at a transaction pooler/);
   assertRefused(run({ 'rab-api': ok, 'rab-worker': ok }, (v) => { delete v.services['db-setup'].environment.PG_DATABASE_URL; }), /db-setup: PG_DATABASE_URL is missing/);
+  assertRefused(run({ 'rab-api': ok, 'rab-worker': ok, 'db-setup': { ...ok, names: [...ok.names, 'PG_ADMIN_URL'] } }), /db-setup: PG_ADMIN_URL is set in an env file/);
+  assertRefused(run({ 'rab-api': ok, 'rab-worker': ok, 'db-setup': { ...ok, names: [...ok.names, 'PG_DATABASE_ADMIN_URL'] } }), /db-setup: PG_DATABASE_ADMIN_URL is set in an env file/);
   assertRefused(run({ 'rab-api': ok, 'rab-worker': ok, 'db-setup': { ...ok, names: [...ok.names, 'PG_DATABASE_URL'] } }), /db-setup: PG_DATABASE_URL is set in an env file/);
   assertRefused(run({ 'rab-api': ok, 'rab-worker': ok, 'db-setup': { ...ok, names: [...ok.names, 'PG_DATABASE_PASSWORD'] } }), /db-setup: PG_DATABASE_PASSWORD reaches the container/);
   // DENIAL option 2: an override that hands rab-api / rab-worker ANY database URL (admin, crewflow_owner, anything), drops

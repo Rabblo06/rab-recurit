@@ -8865,3 +8865,45 @@ Reversal:   Lower CLOCK_IN_CONFIRM_FLOOR_HOURS, or require a second approver (pa
   `sc05-capabilities.integration.spec.ts` now expects the 19 keys including `staff.edit`, same booleans as one
   `userHasPermission` per flag. The mocked e2e fixture (`crewflow-fixtures.ts`) grants `staff.edit` so the existing bar
   specs keep their four actions.
+
+## PG_ADMIN_URL — the database admin login reaches the one-shot setup step only (branch feat/pg-admin-url, 2026-11-17; owner decision 2026-11-17, Twenty's Helm model; one new SQL statement, below)
+
+- **Asset:** the database ADMIN credential (the bundled db's superuser, or a provider admin that can create roles); the
+  `crewflow_owner` app login and its password file; every tenant's data behind RLS (an admin login skips it).
+- **Change:** `PG_DATABASE_URL` used to mean "the admin URL, or an existing `crewflow_owner` URL", decided by the URL's login.
+  Now the admin URL is `PG_ADMIN_URL` and `PG_DATABASE_URL` ALWAYS means the app login (`crewflow_owner`). Three modes:
+  (a) bundled db (`CREWFLOW_BUNDLED_DB` unset/1, `PG_DATABASE_PASSWORD`); (b) `CREWFLOW_BUNDLED_DB=0` + `PG_ADMIN_URL`;
+  (c) `CREWFLOW_BUNDLED_DB=0` + a `crewflow_owner` `PG_DATABASE_URL`, no admin URL (db-setup only checks it, read-only).
+  rab-api and rab-worker are unchanged: they never receive a URL and build the `crewflow_owner` URL from db-setup's
+  credential-free target file and password file (PR #125 option 2), in every mode.
+- **Threats and controls:**
+  - *The admin URL reaching a long-running process* (readable from `/proc/<pid>/environ`, crash dumps, error reporters).
+    Compose: `PG_ADMIN_URL` is interpolated into `db-setup` only; a raw-text gate (`compose-owner-login.cjs`
+    `adminUrlPlacementProblems`, over EVERY compose file in the repository, `x-` anchors included) and the rendered-model
+    gates (every combination, and an env file that plants it) fail on a `PG_ADMIN_URL` key on rab-api / rab-worker, even an
+    empty one. Env files: the lint refuses it in `database.env` / `runtime.env`; the `--environment` preflight refuses it from
+    an app env file. Process: `api-prestart.sh` and `worker-start.sh` refuse a non-empty value (exit 64, value never
+    printed), and `never-in-runtime-env.ts` adds it to the in-process refusal list for the API, the Worker and the provisioner.
+  - *Silent reinterpretation* (an un-renamed deployment keeps its admin URL in `PG_DATABASE_URL`). Refused, never run as
+    the admin: the bootstrap child's `selectDbSetupInput` refuses a `PG_DATABASE_URL` whose login is not `crewflow_owner`
+    ("renamed to PG_ADMIN_URL", exit 64, nothing connects, nothing stored), and so do the lint and the preflight; the
+    retired `PG_DATABASE_ADMIN_URL` is refused by name; both URLs at once, neither, and `crewflow_owner` in `PG_ADMIN_URL`
+    are refused too. Live harness scenario `admin-url-in-pg-database-url` (CI ci-migration-security).
+  - *No dummy password* (owner requirement): `PG_DATABASE_PASSWORD` is no longer a compose `${...:?}` (that demanded it with
+    your own database too). It is required exactly while the bundled db runs: the `db` entrypoint refuses an empty
+    `POSTGRES_PASSWORD` (exit 64) before it touches the volume, `db-setup.sh` refuses the bundled mode with an empty password
+    (and `CREWFLOW_BUNDLED_DB=0` with no URL), and the lint / preflight refuse a bundled compose.env without it and an
+    own-database compose.env with a leftover one (it would sit unused in db-setup's definition).
+  - *An admin that inherits the app login* (lead review of PR #226): a non-superuser CREATEROLE admin on a provider that
+    defaults `createrole_self_grant` to `set, inherit` would receive SET / INHERIT on the new `crewflow_owner`. db-setup now
+    pins it empty for its write transaction before `CREATE ROLE` (new statement `OWNER_BOOTSTRAP_Q4B2_NO_SELF_GRANT`,
+    `SELECT pg_catalog.set_config('createrole_self_grant', '', true);`), unit-tested for order and live-tested
+    (`admin-createrole-self-grant`: an admin with that role default gets no SET / INHERIT membership).
+- **Kept unchanged:** verify-full, no transaction pooler, the owner-login posture shape, the URL policy (now relabelled with
+  the variable the operator set), the read-only owner-URL session, the one-shot / PID 1 / volume rules, the env-file
+  refusals (`DB_TARGET`, `ALLOW_PRODUCTION_DB_COMMANDS`, `BOOTSTRAP_ADMIN_*`).
+- **Residual:** the bundled db's superuser URL is still in db-setup's container definition (now as
+  `CREWFLOW_BUNDLED_DB_ADMIN_URL`, which db-setup.sh unsets before the child; accepted risk TM-DB-1 / T-1, unchanged). An
+  OpenShip deploy without `PG_DATABASE_PASSWORD` now renders and fails at start (db / db-setup exit 64) instead of at
+  render. The live container suites (`run-db-setup-tests.cjs`, `run-prestart-shell-tests.cjs`) are updated but run in CI,
+  not locally.

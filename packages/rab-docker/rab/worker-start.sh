@@ -6,7 +6,7 @@
 #
 # DB-SETUP (Twenty Helm model, OWNER-DB-FINAL.md Part A): this container NEVER receives PG_DATABASE_URL, in any form; only the
 # one-shot db-setup service does. This script:
-#   1. refuses arguments, PG_DATABASE_PASSWORD and a non-empty PG_DATABASE_URL (any login; exit 64);
+#   1. refuses arguments, PG_DATABASE_PASSWORD, PG_ADMIN_URL and a non-empty PG_DATABASE_URL (any login; exit 64);
 #   2. builds the crewflow_owner runtime URL with the same pure derive step as api-prestart.sh (never connects; the URL
 #      comes back on fd 4 through a command substitution: never a file, never argv, never the log), from db-setup's
 #      credential-free target file (CREWFLOW_DB_TARGET_FILE=/run/crewflow/db-target/target.json) and the crewflow_owner
@@ -35,10 +35,17 @@ fi
 if [ -n "${PG_DATABASE_PASSWORD:-}" ]; then
   refuse 'PG_DATABASE_PASSWORD must never be set on the worker service: only compose reads it (the bundled db and the default admin URL); the Worker connects only as crewflow_owner.'
 fi
+# PG_ADMIN_URL (owner decision 2026-11-17, Twenty's Helm model): the database admin URL belongs ONLY to the one-shot db-setup
+# service (never-in-runtime-env.ts; the in-process guard refuses it as well).
+if [ -n "${PG_ADMIN_URL:-}" ]; then
+  refuse 'PG_ADMIN_URL must never be set on the worker service: it is the database admin URL, read only by the one-shot db-setup service (which creates crewflow_owner). The Worker connects only as crewflow_owner. Value not shown.'
+fi
 
 # BEGIN crewflow bundled-db CA
+# $1: the database URL this process connects with (db-setup: PG_ADMIN_URL or PG_DATABASE_URL; rab-api / rab-worker: the
+# crewflow_owner URL they built). Only its host is read.
 crewflow_bundled_db_ca() {
-  db_rest="${PG_DATABASE_URL#*://}"
+  db_rest="${1#*://}"
   db_authority="${db_rest%%[/?#]*}"
   db_hostport="${db_authority##*@}"
   db_host="${db_hostport%%:*}"
@@ -66,7 +73,7 @@ if [ -n "${CREWFLOW_TEST_DB_SETUP_WAIT_SECONDS:-}" ]; then
 fi
 unset CREWFLOW_TEST_DB_SETUP_WAIT_SECONDS
 if [ -n "${PG_DATABASE_URL:-}" ]; then
-  refuse 'PG_DATABASE_URL must never be set on the worker service: it belongs only to the one-shot db-setup service (the admin URL, an existing crewflow_owner URL, or the bundled db). The Worker builds the crewflow_owner URL from the target and password files db-setup writes. Value not shown.'
+  refuse 'PG_DATABASE_URL must never be set on the worker service: an operator-given URL belongs only to the one-shot db-setup service (PG_ADMIN_URL, an existing crewflow_owner URL in PG_DATABASE_URL, or the bundled db). The Worker builds the crewflow_owner URL from the target and password files db-setup writes. Value not shown.'
 fi
 unset PG_DATABASE_URL
 export CREWFLOW_DB_TARGET_FILE="$DB_TARGET_FILE"
@@ -94,5 +101,5 @@ if [ -z "$RUNTIME_URL" ]; then
 fi
 export PG_DATABASE_URL="$RUNTIME_URL"
 unset RUNTIME_URL PG_DATABASE_PASSWORD CREWFLOW_DB_TARGET_FILE
-crewflow_bundled_db_ca
+crewflow_bundled_db_ca "$PG_DATABASE_URL"
 exec /sbin/tini -s -- node packages/rab-worker/dist/main.js

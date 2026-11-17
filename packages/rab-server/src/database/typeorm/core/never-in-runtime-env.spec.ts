@@ -45,6 +45,7 @@ describe('never-in-runtime-env (security review L-4): one list, two enforcers', 
       'ALLOW_PRODUCTION_DB_COMMANDS',
       'DB_TARGET',
       'CREWFLOW_DEPLOYMENT_IDENTITY_BOOTSTRAP',
+      'PG_ADMIN_URL',
       'CREWFLOW_OPS_RUN',
       'PG_OPS_APP_DATABASE_URL',
       'CREWFLOW_OPS_ACTOR_SOURCE',
@@ -140,6 +141,23 @@ describe('never-in-runtime-env (security review L-4): one list, two enforcers', 
     expect(prestartNames()).toContain('PG_DATABASE_PASSWORD');
     // The superseded provisioner process is left exactly as it was.
     expect(forbiddenRuntimeEnvNames('provisioner')).not.toContain('PG_DATABASE_PASSWORD');
+  });
+
+  it('DENIAL PG_ADMIN_URL (owner decision 2026-11-17): the database admin URL is refused in every runtime process, by both enforcers, value never echoed', () => {
+    const adminUrl = 'postgres://doadmin:S3cret-ADMIN-do-not-print@db.example:5432/crewflow?sslmode=verify-full';
+    for (const processName of ['api', 'worker', 'provisioner'] as const) {
+      expect(forbiddenRuntimeEnvNames(processName)).toContain('PG_ADMIN_URL');
+      for (const env of [{ NODE_ENV: 'development' }, { NODE_ENV: 'production', RAB_RUNTIME_ENV: 'production' }]) {
+        const refusal = runtimeEnvRefusal({ ...env, PG_ADMIN_URL: adminUrl }, processName);
+        expect(refusal?.name).toBe('PG_ADMIN_URL');
+        expect(refusal?.why).toMatch(/only the one-shot db-setup service reads it/);
+        expect(refusal?.why).not.toContain('S3cret-ADMIN-do-not-print');
+      }
+      expect(runtimeEnvRefusal({ PG_ADMIN_URL: ' ' }, processName)).toBeNull();
+    }
+    expect(prestartNames()).toContain('PG_ADMIN_URL');
+    // worker-start.sh refuses it by name as well (the Worker's own image enforcer).
+    expect(fs.readFileSync(path.join(DOCKER, 'worker-start.sh'), 'utf8')).toMatch(/\$\{PG_ADMIN_URL:-\}/);
   });
 
   it('owner-login architecture: CREWFLOW_PROVISIONER_* is refused on the API and the Worker by prefix (deterministic, blank = absent), and api-prestart.sh has the same prefixes', () => {

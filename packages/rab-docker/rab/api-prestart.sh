@@ -207,6 +207,12 @@ for name in DATABASE_URL DATABASE_DIRECT_URL PG_DATABASE_REPLICA_URL PG_WORKER_D
   eval "value=\${$name:-}"
   if [ -n "$value" ]; then refuse "$name must never be set on the api service: the API, the Worker and the migrate child use ONE database URL, PG_DATABASE_URL (the crewflow_owner login), and no role password belongs in application configuration."; fi
 done
+# PG_ADMIN_URL (owner decision 2026-11-17, Twenty's Helm model): the database admin URL belongs ONLY to the one-shot db-setup
+# service; the API never receives it, in any form (not even unused: /proc/<pid>/environ).
+for name in PG_ADMIN_URL; do
+  eval "value=\${$name:-}"
+  if [ -n "$value" ]; then refuse "$name must never be set on the api service: it is the database admin URL, read only by the one-shot db-setup service (which creates crewflow_owner). The API connects only as crewflow_owner. Value not shown."; fi
+done
 # Name prefixes — a literal copy of forbiddenRuntimeEnvPrefixes('api'): the separate provisioner's settings never belong here.
 for prefix in CREWFLOW_PROVISIONER_; do
   for forbidden in $(env | sed -n "s/^\(${prefix}[A-Za-z0-9_]*\)=..*/\1/p" | sort); do
@@ -279,8 +285,10 @@ isolation_report
 # bundled db's own CA (mounted read-only). The block below is identical in worker-start.sh and db-setup.sh
 # (run-prestart-shell-tests.cjs compares them).
 # BEGIN crewflow bundled-db CA
+# $1: the database URL this process connects with (db-setup: PG_ADMIN_URL or PG_DATABASE_URL; rab-api / rab-worker: the
+# crewflow_owner URL they built). Only its host is read.
 crewflow_bundled_db_ca() {
-  db_rest="${PG_DATABASE_URL#*://}"
+  db_rest="${1#*://}"
   db_authority="${db_rest%%[/?#]*}"
   db_hostport="${db_authority##*@}"
   db_host="${db_hostport%%:*}"
@@ -301,7 +309,7 @@ if [ -n "${CREWFLOW_TEST_DB_SETUP_WAIT_SECONDS:-}" ]; then
 fi
 unset CREWFLOW_TEST_DB_SETUP_WAIT_SECONDS
 if [ -n "${PG_DATABASE_URL:-}" ]; then
-  refuse 'PG_DATABASE_URL must never be set on the api service: it belongs only to the one-shot db-setup service (the admin URL, an existing crewflow_owner URL, or the bundled db). The API builds the crewflow_owner URL from the target and password files db-setup writes. Value not shown. Refusing to start.'
+  refuse 'PG_DATABASE_URL must never be set on the api service: an operator-given URL belongs only to the one-shot db-setup service (PG_ADMIN_URL, an existing crewflow_owner URL in PG_DATABASE_URL, or the bundled db). The API builds the crewflow_owner URL from the target and password files db-setup writes. Value not shown. Refusing to start.'
 fi
 unset PG_DATABASE_URL
 export CREWFLOW_DB_TARGET_FILE="$DB_TARGET_FILE"
@@ -329,7 +337,7 @@ if [ -z "$RUNTIME_URL" ]; then
 fi
 export PG_DATABASE_URL="$RUNTIME_URL"
 unset RUNTIME_URL PG_DATABASE_PASSWORD CREWFLOW_DB_TARGET_FILE
-crewflow_bundled_db_ca
+crewflow_bundled_db_ca "$PG_DATABASE_URL"
 # The owner CLI one-off: no migrate child, no scheduler registration, no API; the cleaned environment only.
 if [ "$#" -gt 0 ]; then
   trap - TERM INT

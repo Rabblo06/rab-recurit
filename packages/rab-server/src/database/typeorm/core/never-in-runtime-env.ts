@@ -106,6 +106,14 @@ export const NEVER_IN_RUNTIME_ENV: readonly NeverInRuntimeEnvEntry[] = Object.fr
     why: 'It is the bundled database admin password: only docker compose reads it, to build the admin URL; api-prestart.sh / worker-start.sh unset it, and a runtime process connects only as crewflow_owner. Remove it.',
     ...OWNER_LOGIN,
   },
+  // PG_ADMIN_URL (owner decision 2026-11-17, Twenty's Helm model): the database ADMIN URL, read ONLY by the one-shot db-setup
+  // service's bootstrap child (owner-credential.ts selectDbSetupInput). Never in the API, the Worker or the provisioner, not
+  // even unused (an admin credential in a long-running process's environment is readable: /proc/<pid>/environ, crash
+  // dumps, error reporters). The compose gates keep it off rab-api / rab-worker; this is the process-level refusal.
+  {
+    name: 'PG_ADMIN_URL',
+    why: 'It is the database admin URL: only the one-shot db-setup service reads it, to create crewflow_owner. A runtime process connects only as crewflow_owner (PG_DATABASE_URL, built from the files db-setup writes). Remove it.',
+  },
 ]);
 
 /**
