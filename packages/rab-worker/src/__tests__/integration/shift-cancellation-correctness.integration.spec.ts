@@ -470,7 +470,7 @@ describeIfDb('shift cancellation correctness (integration)', () => {
         `related_entity_type = 'offer' AND related_entity_id = $1 AND type = 'manager_confirmation_timeout'`,
         [offer.id],
       );
-      expect(timeoutNotifications).toHaveLength(0);
+      expect(timeoutNotifications).toHaveLength(1);
       await runShiftCancellationFollowupCycle(adminDataSource, tenantContext, notificationService, auditService);
       const closed = await withContext(ctxOf(fx.owner), (m) => m.findOneByOrFail(JobOffer, { id: offer.id }));
       expect(closed.status).toBe(OfferStatus.MANAGER_REJECTED);
