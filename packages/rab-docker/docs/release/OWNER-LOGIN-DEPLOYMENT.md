@@ -626,8 +626,8 @@ that row. The first start then refuses with `rab_owner: unexpected member <admin
    | `PG_ADMIN_URL` | **Not set.** Crewflow never sees an admin credential. |
    | `PG_DATABASE_PASSWORD` | As section 2 says for your own database. |
 
-   **`PG_ADMIN_URL` requires the PG_ADMIN_URL release** (the PR that renames the admin-URL setting; not merged when this
-   was written). In this release the admin URL setting is `PG_DATABASE_URL`, which also accepts an existing
+   **`PG_ADMIN_URL` requires the PG_ADMIN_URL release, PR #230** (the PR that renames the admin-URL setting; not merged
+   when this was written). In this release the admin URL setting is `PG_DATABASE_URL`, which also accepts an existing
    `crewflow_owner` URL; put the `crewflow_owner` URL there and nothing else.
 
 5. `docker compose up -d`. What happens:
