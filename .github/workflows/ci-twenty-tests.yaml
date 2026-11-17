@@ -12,6 +12,8 @@ on:
       - 'packages/rab-server/**'
       - 'packages/rab-worker/**'
       - 'packages/rab-shared/**'
+      # rab-server imports @rab/emails; the job builds it before the server.
+      - 'packages/rab-emails/**'
       - '.github/workflows/ci-twenty-tests.yaml'
   workflow_dispatch:
 
