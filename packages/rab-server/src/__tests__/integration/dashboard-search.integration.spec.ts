@@ -279,61 +279,17 @@ describeIfDb('dashboard summary + global search (integration)', () => {
     });
   });
 
-  // TEST-01 / dashboard-search investigation — this describe block's title
-  // and its first test used to read "Step 7 — workspace_id, not created_by,
-  // is the real boundary," and asserted a row is visible to whichever
-  // manager's workspace_id it carries, regardless of created_by. That
-  // framing is now ONLY true for `SearchService` — `DashboardService`'s
-  // later PHASE 5.5 change (see `dashboard.service.ts`'s own
-  // `OWNER_WORKSPACE_PREDICATE` doc comment) deliberately tightened its
-  // app-layer 'owner' scope to `workspace_id = $1 AND created_by = $2`,
-  // closing a real gap: nothing DB-enforces that `manager_profile.workspace_id`
-  // is unique per manager, so two owner-scope ManagerProfiles could in
-  // principle share one workspace_id, and `workspace_id` alone would then
-  // leak Manager A's counts to Manager B. `search.service.ts`'s own
-  // `ownerWorkspacePredicate`, however, still explicitly documents (and
-  // implements) "no created_by fallback" — it was never updated to match
-  // Phase 5.5, and its doc comment's claim that it mirrors
-  // "`dashboard.service.ts`'s identical constant" is now stale, confirmed
-  // live below: Dashboard and Search currently disagree on the 'owner'
-  // boundary for the exact same Venue row.
-  //
-  // The ORIGINAL failing assertion here was `dashB.body.venueCount).toBe(1)`
-  // — a genuinely stale expectation, superseded by Phase 5.5, now corrected
-  // to `0`. Its search assertions were NOT stale (search's behavior never
-  // changed) and are preserved as-is. A second, symmetric test is added to
-  // make the Dashboard/Search divergence explicit and independently proven
-  // in both directions, rather than leaving it as an implicit side-effect of
-  // one assertion change.
-  //
-  // SECURITY FINDING (flagged, not silently fixed here — see final report):
-  // Actor: any Manager holding VENUE_VIEW. Action: `GET /search?q=...`.
-  // Consequence: finds a Venue row whose `workspace_id` matches their own
-  // workspace but whose `created_by` belongs to a different manager — a row
-  // `GET /dashboard/summary`'s own venueCount already excludes as not
-  // theirs, via the identical `OWNER_WORKSPACE_PREDICATE` construct search
-  // claims to mirror. Root cause: `search.service.ts`'s
-  // `ownerWorkspacePredicate()` (checks `workspace_id` only) was not updated
-  // when `dashboard.service.ts`'s `OWNER_WORKSPACE_PREDICATE` gained the
-  // `created_by` conjunct in Phase 5.5. Today this requires a row shape the
-  // real app cannot produce (every creation path stamps the ACTING
-  // manager's own resolved workspace onto both columns together), so it is
-  // not currently reachable through ordinary use — but it is a real,
-  // confirmed inconsistency between two surfaces documented as mirroring
-  // the same rule, and would become live the moment the Phase 5.5 comment's
-  // own named risk (two owner-scope ManagerProfiles sharing one
-  // workspace_id) is ever true. Fix: add the same `created_by` conjunct to
-  // `ownerWorkspacePredicate()`'s Staff/Venue call sites (Shift/Offer need
-  // their own audit first — `scheduling.service.ts`/`offer.service.ts`'s
-  // real list() ownership predicate for each should be confirmed before
-  // assuming the same fix applies there). Deliberately left as a flagged,
-  // separately-scoped fix rather than made here: it touches `search.service.ts`
-  // production code across multiple entity types, each needing its own
-  // "does list() actually use created_by too" verification first — the same
-  // discipline this file's own history shows is necessary before tightening
-  // an ownership predicate.
-  describe('cross-workspace scoping (Dashboard: PHASE 5.5 workspace_id+created_by; Search: still workspace_id alone — a confirmed, flagged divergence)', () => {
-    it("a row with the RIGHT workspace_id but the WRONG created_by is invisible on Dashboard (both managers), but Search still finds it for the manager whose workspace_id matches — proving the two surfaces currently disagree", async () => {
+  // TEST-01 / SF-6. Dashboard tightened its 'owner' scope to `workspace_id AND created_by` in Phase 5.5; Search kept
+  // `workspace_id` alone (created_by only for restricted members), so the two tests below used to PROVE that Search found
+  // a row in the caller's workspace created by another manager, a row every list hides. Nothing DB-enforces that
+  // `manager_profile.workspace_id` is unique per manager, so two owner-scope managers sharing a workspace would have seen
+  // each other's names. SF-6 (search.service.ts) now applies each list's own predicate (created_by = the scope owner for
+  // venues and staff, list()'s shift read scope, `offerReadScopeCondition` for offers) plus explicit organisation and
+  // workspace pins, so both surfaces agree: these assertions are the SF-6 abuse cases (Search returns only list-visible
+  // rows). More SF-6 cases (staff, shifts, offers, Venue Manager team, managers' organisation pin) are in
+  // sf6-search-scope.integration.spec.ts.
+  describe('cross-workspace scoping (Dashboard and Search both: workspace_id AND created_by, SF-6)', () => {
+    it("a row with the RIGHT workspace_id but the WRONG created_by is invisible on Dashboard AND Search for both managers (SF-6)", async () => {
       // Index 0 is always the platform-admin claim (first-claimed, see
       // seedOrgWithManagers) — indexes 1/2 are the actual non-admin peer
       // pair this test needs, matching this file's own established
@@ -350,10 +306,8 @@ describeIfDb('dashboard summary + global search (integration)', () => {
       // B — structurally impossible via the real app (every creation path
       // stamps the ACTING manager's own resolved workspace), but exactly
       // the shape needed to prove which column each surface actually keys
-      // off. Dashboard (workspace_id AND created_by) must exclude it from
-      // BOTH managers. Search (workspace_id alone) must still find it for
-      // Manager B, whose workspace_id matches — this is the confirmed
-      // divergence, not a mistake in this test.
+      // off. Dashboard and Search (both workspace_id AND created_by since
+      // SF-6) must exclude it from BOTH managers.
       // `venue` is FORCE'd, so this needs a real bound tenant context
       // (matching Workspace B — the row's own workspace_id — for the
       // combined org+workspace WITH CHECK to pass); rab_owner's own
@@ -388,14 +342,12 @@ describeIfDb('dashboard summary + global search (integration)', () => {
       // A's own workspace_id doesn't match this row's workspace_id (B) —
       // excluded regardless of which predicate is used.
       expect(searchA.body.some((r: { name: string }) => r.name === impostorName)).toBe(false);
-      // Confirmed current behavior, not the desired end state — see the
-      // SECURITY FINDING above: `search.service.ts` has no created_by
-      // conjunct, so a workspace_id match alone is enough for Search, even
-      // though Dashboard (asserted above) already excludes this exact row.
-      expect(searchB.body.some((r: { name: string }) => r.name === impostorName)).toBe(true);
+      // SF-6: B's workspace_id matches, but created_by is A's: VenueService.list() hides it from B, so Search must too.
+      expect(searchB.status).toBe(200);
+      expect(searchB.body.some((r: { name: string }) => r.name === impostorName)).toBe(false);
     });
 
-    it("a row with the RIGHT created_by but the WRONG workspace_id is invisible everywhere — workspace_id is the one predicate both surfaces agree on", async () => {
+    it("a row with the RIGHT created_by but the WRONG workspace_id is invisible everywhere (SF-6: created_by in the caller's own workspace is not enough either)", async () => {
       const { organisation, managers } = await seedOrgWithManagers(3, [PermissionFlag.MANAGER_MANAGE]);
       const [, managerA, managerB] = managers;
       const [{ id: workspaceA }] = await adminDataSource.manager.query<[{ id: string }]>(
@@ -405,12 +357,9 @@ describeIfDb('dashboard summary + global search (integration)', () => {
 
       // The mirror image of the impostor row above: created_by = Manager B
       // (correct, matching B's own id), but workspace_id = Workspace A
-      // (wrong). Both surfaces filter on workspace_id (Dashboard ANDs
-      // created_by on top; Search doesn't), so both must exclude this row
-      // from Manager B regardless of the created_by match — workspace_id is
-      // the one dimension that's never optional on either surface. It's
-      // still visible to Manager A's search (workspace_id alone matches),
-      // for the same confirmed reason as the test above.
+      // (wrong). Both surfaces filter on workspace_id AND created_by
+      // (SF-6), so the row is excluded from Manager B (wrong workspace)
+      // and from Manager A (wrong creator).
       const impostorName = `Impostor2-${randomUUID()}`;
       await tenantContext.runInTenantContext(
         { organisationId: organisation.id, workspaceId: workspaceA, userId: managerA!.userId, role: '' },
@@ -438,10 +387,9 @@ describeIfDb('dashboard summary + global search (integration)', () => {
         .get('/rest/v1/search')
         .query({ q: impostorName })
         .set('Authorization', `Bearer ${tokenB}`);
-      // Confirmed current behavior (see SECURITY FINDING above): Search's
-      // workspace_id-only predicate matches Manager A's own workspace_id,
-      // so it finds this row despite created_by belonging to Manager B.
-      expect(searchA.body.some((r: { name: string }) => r.name === impostorName)).toBe(true);
+      // SF-6: A's workspace_id matches, but created_by is B's: hidden from A's list, so hidden from A's search.
+      expect(searchA.status).toBe(200);
+      expect(searchA.body.some((r: { name: string }) => r.name === impostorName)).toBe(false);
       expect(searchB.body.some((r: { name: string }) => r.name === impostorName)).toBe(false);
     });
 
