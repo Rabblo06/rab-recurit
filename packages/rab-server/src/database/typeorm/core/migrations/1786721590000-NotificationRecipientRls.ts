@@ -82,7 +82,7 @@ export class NotificationRecipientRls1786721590000 implements MigrationInterface
         END;
         $fn$;
       `);
-      await runner.query(`ALTER FUNCTION ${READ_AT_FN} OWNER TO crewflow;`);
+      await runner.query(`ALTER FUNCTION core.offer_sent_notification_read_at(uuid,uuid) OWNER TO crewflow;`);
     });
     await runner.query(`REVOKE ALL ON FUNCTION ${READ_AT_FN} FROM PUBLIC;`);
     await runner.query(`GRANT EXECUTE ON FUNCTION ${READ_AT_FN} TO crewflow_app;`);

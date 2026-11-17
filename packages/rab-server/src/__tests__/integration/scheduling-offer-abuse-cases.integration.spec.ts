@@ -1441,7 +1441,7 @@ describeIfDb('scheduling + offer abuse cases (integration)', () => {
       expect(res.status).toBe(404);
 
       const stillUnread = await tenantContext.runInTenantContext(
-        { organisationId: organisation.id, workspaceId: null, userId: randomUUID(), role: '' },
+        { organisationId: organisation.id, workspaceId: null, userId: staffAUserRow.userId, role: '' }, // SF-5: the recipient reads it
         (manager) => manager.findOneByOrFail(Notification, { id: staffANotificationId }),
       );
       expect(stillUnread.readAt).toBeFalsy();

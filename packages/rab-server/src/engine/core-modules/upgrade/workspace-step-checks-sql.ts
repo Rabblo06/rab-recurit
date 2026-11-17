@@ -15,6 +15,7 @@ export const KNOWN_RAB_SETTINGS = [
   'rab.ai_retention',
   'rab.ai_synthetic_marker',
   'rab.ai_usage_retention',
+  'rab.offer_read_receipt',
   'rab.organisation_id',
   'rab.role',
   'rab.team_shift_id',
