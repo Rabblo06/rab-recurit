@@ -226,6 +226,7 @@ export class SchedulingService {
    */
   listJobRoles(ctx: AuthContext): Promise<JobRole[]> {
     return this.tenantContext.runInWorkspaceContext(ctx, async (manager) => {
+      await this.assertFlagTx(manager, ctx, PermissionFlag.SCHEDULE_VIEW, 'Permission required.');
       const scope = await this.resourceScope.resolveTx(manager, ctx);
       if (scope.kind === 'venue') {
         return manager.find(JobRole, { order: { name: 'ASC' } });
@@ -245,6 +246,7 @@ export class SchedulingService {
     this.resourceScope.assertHasWorkspace(ctx);
     try {
       return await this.tenantContext.runInWorkspaceContext(ctx, async (manager) => {
+        await this.assertFlagTx(manager, ctx, PermissionFlag.SCHEDULE_CREATE, 'Managing job roles is not permitted.');
         const role = manager.create(JobRole, {
           organisationId: ctx.organisationId!,
           name: dto.name,
@@ -423,6 +425,7 @@ export class SchedulingService {
 
   list(ctx: AuthContext, dto: ListShiftsDto = {}): Promise<{ data: Shift[]; total: number }> {
     return this.tenantContext.runInWorkspaceContext(ctx, async (manager) => {
+      await this.assertFlagTx(manager, ctx, PermissionFlag.SCHEDULE_VIEW, 'Permission required.');
       const scope = await this.resourceScope.resolveTx(manager, ctx);
       if (scope.kind === 'venue' && scope.venueIds.length === 0) return { data: [], total: 0 };
       const policy = await this.memberAccess.resolveTx(manager, ctx, 'shift');
@@ -662,6 +665,8 @@ export class SchedulingService {
 
   async get(ctx: AuthContext, id: string): Promise<Shift> {
     return this.tenantContext.runInWorkspaceContext(ctx, async (manager) => {
+      // SF-2 layer 2: schedule.view first, 403 for any id (never an existence oracle); out of scope stays 404 below.
+      await this.assertFlagTx(manager, ctx, PermissionFlag.SCHEDULE_VIEW, 'Permission required.');
       const shift = await manager.findOne(Shift, { where: { id } });
       if (!shift) throw new NotFoundException('Shift not found.');
       await this.assertShiftViewable(manager, ctx, shift);
@@ -889,6 +894,8 @@ export class SchedulingService {
    */
   async cancel(ctx: AuthContext, id: string, reason?: string): Promise<Shift> {
     return this.tenantContext.runInWorkspaceContext(ctx, async (manager) => {
+      // The route's flag is schedule.create (the permission-matrix question about it stays with the owner).
+      await this.assertFlagTx(manager, ctx, PermissionFlag.SCHEDULE_CREATE, 'Managing shifts is not permitted.');
       const shift = await manager.findOne(Shift, { where: { id } });
       if (!shift) throw new NotFoundException('Shift not found.');
       await this.assertShiftOwned(manager, ctx, shift);
@@ -1135,6 +1142,7 @@ export class SchedulingService {
    */
   async getRequestedStaff(ctx: AuthContext, shiftId: string): Promise<{ staffProfileId: string; firstName: string; lastName: string; email: string; stillActive: boolean; available: boolean; startsAt: Date; endsAt: Date }[]> {
     return this.tenantContext.runInWorkspaceContext(ctx, async (manager) => {
+      await this.assertFlagTx(manager, ctx, PermissionFlag.SCHEDULE_VIEW, 'Permission required.');
       const shift = await manager.findOne(Shift, { where: { id: shiftId } });
       if (!shift) throw new NotFoundException('Shift not found.');
       await this.assertShiftViewable(manager, ctx, shift);
@@ -1183,6 +1191,7 @@ export class SchedulingService {
    */
   async removeRequestedStaff(ctx: AuthContext, shiftId: string, staffProfileId: string): Promise<void> {
     return this.tenantContext.runInWorkspaceContext(ctx, async (manager) => {
+      await this.assertFlagTx(manager, ctx, PermissionFlag.STAFFING_REQUEST_APPROVE, 'You cannot select staff for this request.');
       await this.removeRequestedStaffTx(manager, ctx, shiftId, staffProfileId);
       await this.emitRequestStaffChanged(manager, ctx, shiftId);
     });
@@ -1263,6 +1272,7 @@ export class SchedulingService {
    */
   async addRequestedStaff(ctx: AuthContext, shiftId: string, staffProfileId: string): Promise<void> {
     return this.tenantContext.runInWorkspaceContext(ctx, async (manager) => {
+      await this.assertFlagTx(manager, ctx, PermissionFlag.STAFFING_REQUEST_APPROVE, 'You cannot select staff for this request.');
       await this.addRequestedStaffTx(manager, ctx, shiftId, staffProfileId);
       await this.emitRequestStaffChanged(manager, ctx, shiftId);
     });
@@ -1418,6 +1428,9 @@ export class SchedulingService {
    */
   async listVenueOffers(ctx: AuthContext, dto: ListVenueOffersDto = {}): Promise<{ data: Record<string, unknown>[]; total: number; nextCursor: string | null }> {
     return this.tenantContext.runInWorkspaceContext(ctx, async (manager) => {
+      // SF-2 layer 2: this list widens beyond the caller's own shifts, so the route's staffing_request.approve is re-checked
+      // before anything is read (jobs / other services skip the guard).
+      await this.assertFlagTx(manager, ctx, PermissionFlag.STAFFING_REQUEST_APPROVE, 'Permission required.');
       // Phase C1: offset (`page`) or keyset (`cursor`) over `created_at DESC, id DESC` — `id` is the tie-breaker this
       // order lacked (two requests created in the same instant could repeat or vanish across offset pages).
       const after = decodeOptionalKeysetCursor(dto.cursor);
@@ -1529,6 +1542,8 @@ export class SchedulingService {
    */
   async listPendingApprovals(ctx: AuthContext, dto: PaginationDto = {}): Promise<{ data: Shift[]; total: number }> {
     return this.tenantContext.runInWorkspaceContext(ctx, async (manager) => {
+      // SF-2 layer 2: organisation-wide pending requests — the route's staffing_request.approve, before anything is read.
+      await this.assertFlagTx(manager, ctx, PermissionFlag.STAFFING_REQUEST_APPROVE, 'Permission required.');
       const { skip, take } = paginationSkipTake(dto);
       const [data, total] = await manager.findAndCount(Shift, {
         where: { organisationId: ctx.organisationId!, status: ShiftStatus.PENDING_MANAGER_APPROVAL },
@@ -1548,6 +1563,7 @@ export class SchedulingService {
    */
   async declineRequest(ctx: AuthContext, id: string, dto: DeclineShiftRequestDto): Promise<Shift> {
     return this.tenantContext.runInWorkspaceContext(ctx, async (manager) => {
+      await this.assertFlagTx(manager, ctx, PermissionFlag.STAFFING_REQUEST_APPROVE, 'Permission required.');
       const shift = await manager.findOne(Shift, { where: { id }, lock: { mode: 'pessimistic_write' } });
       // Explicit org check alongside RLS — see `assertShiftViewable`'s own
       // comment on why a single enforcement layer isn't enough here.

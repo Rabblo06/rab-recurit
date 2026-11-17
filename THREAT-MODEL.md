@@ -8591,6 +8591,37 @@ Reversal:   Lower CLOCK_IN_CONFIRM_FLOOR_HOURS, or require a second approver (pa
   and archived venue → 409 `VENUE_ARCHIVED`, no shift; a successful create-and-send writes exactly one `shift.created`
   row (actor = caller, status `open`, no pay keys).
 
+## SF-2 (part 2 of 3) — offer, replacement-request, scheduling and attendance services re-check the route's flag (branch fix/sf2-service-perm-offer-scheduling-attendance, 2026-11-17)
+- **Threat:** a job, CLI command, AI tool or another service calls an OfferService / ReplacementRequestService /
+  SchedulingService / AttendanceService method directly, so no `PermissionGuard` runs. These methods checked only scope
+  or ownership: a caller without the flag could send, withdraw, confirm or reject offers, approve or decline shift
+  requests, change requested staff, cancel shifts, create job roles, read the organisation-wide request lists, or clock in
+  and out (CLAUDE.md layer 2; `docs/plans/untangle/server-modules.md` M3, finding SF-2, Medium). `listVenueOffers` and
+  `listPendingApprovals` matter most: they widen past the caller's own shifts. `ReplacementRequestService.approve` sends an
+  offer through `OfferService.sendOneWithManager`, whose contract leaves authorisation to the caller, and it checked none.
+- **Control:** the shared `PermissionsService.assertPermissionTx` (part 1) or SchedulingService's existing `assertFlagTx`
+  (same `userHasPermissionTx`), called FIRST inside the method's own tenant transaction: 403 for any id before a row is read
+  or locked. Scope 404s and 409 transitions are unchanged; the flag is the route guard's, so HTTP is unchanged.
+  - OfferService: `list`, `getBatch` (`schedule.view`); `listMine`, `staffAccept`, `decline` (`offer.respond`); `send`,
+    `sendBulk` (`offer.send`; the replacement mode already re-checked it); `withdraw` (`offer.withdraw`); `managerConfirm`,
+    `confirmAll`, `managerReject` (`offer.confirm`); `approveShiftRequest` (`staffing_request.approve`). A refused accept or
+    confirm never reaches the lazy expiry / deadline-withdrawal transactions.
+  - ReplacementRequestService: `list`, `get` (`schedule.view`); `approve`, `reject` (`offer.send`).
+  - SchedulingService: `list`, `get`, `listJobRoles`, `getRequestedStaff` (`schedule.view`); `createJobRole`, `cancel`
+    (`schedule.create`); `listVenueOffers`, `listPendingApprovals`, `declineRequest`, `addRequestedStaff`,
+    `removeRequestedStaff` (`staffing_request.approve`).
+  - AttendanceService: `checkIn`, `getCheckIn`, `clockIn`, `clockOut`, `autoClockOutOnGeofenceExit`, `getActive`,
+    `getHistory`, `getForShift` (`attendance.clock`); `list` (`attendance.view`).
+- **Behaviour change:** saving a navigation shortcut to a Shift, and the shift / offer timelines, now need `schedule.view` in
+  `SchedulingService.get` too (the same flag their routes already require).
+- **Not changed (owner items):** `cancel` stays on `schedule.create` (permission-matrix question open); no business rule,
+  transition or seat logic changed.
+- **Tests:** `sf2-layer2-offer-scheduling-attendance.integration.spec.ts` (each method called directly with the flag revoked
+  by a per-user override, on real records — a pending and an accepted offer, an open shift, a pending shift request — and
+  on unknown ids: ForbiddenException, and the organisation's audit log, notifications, realtime events, shifts, seats,
+  offers, attendance, requested staff and replacement requests are unchanged; positive controls with the flag; HTTP 403/200
+  unchanged).
+
 ## SF-4 — venue pay-rate creation checks job-role scope (branch fix/sf4-role-rate-job-role-scope, 2026-11-16)
 - **Threat:** a manager with `venue.edit` → `POST /rest/v1/venues/:id/role-rates` with the id of a job role that RLS shows
   them (same organisation and workspace) but that is not theirs → a `venue_role_rate` row was written for it.
