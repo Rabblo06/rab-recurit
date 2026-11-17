@@ -7540,6 +7540,53 @@ Controls: the runbook's explicit upgrade step (3.2 step 0: move the line to `com
 makes every process refuse the bundled database. Residual: an operator who skips the lint and the preflight, with no
 `PG_EXPECTED_DATABASE_NAME` or one equal to `crewflow`.
 
+### TM-DB-5 (new, NEEDS OWNER REVIEW) — your own database, app login created by you (`own-database-app-login.sql`)
+
+A database admin creates `crewflow_owner` by hand with
+`packages/rab-docker/postgres-init/owner-login/own-database-app-login.sql`. Crewflow then receives only the
+`crewflow_owner` URL and never an admin credential (runbook OWNER-LOGIN-DEPLOYMENT.md section 4a; Twenty: an external
+database, no setup step).
+
+- **Result.** The role attributes and the database grant are identical to db-setup's Q4c. When a non-superuser admin
+  creates it, the admin keeps the PostgreSQL 16 ADMIN-only creator row on `crewflow_owner`, the same row the db-setup
+  admin path leaves. Rule 3 of the posture check accepts that row, and it gives the admin no INHERIT or SET.
+- **Removes TM-DB-1 and TM-DB-3 for this install.** No admin URL is in db-setup's definition, and no bootstrap runs with
+  admin rights on `up`. db-setup's owner-URL mode is read-only.
+- **New residual: the SCRAM verifier in the server log.** `\password` sends
+  `ALTER ROLE crewflow_owner PASSWORD '<SCRAM verifier>'` as statement text. With `log_statement = ddl` or `all`, the
+  provider's log keeps the verifier (never the password). db-setup avoids this with bind parameters inside a DO block,
+  which psql cannot do.
+  - Control: the runbook requires a 32-byte random password (`openssl rand -hex 32`); offline guessing against the
+    verifier of such a password is not practical.
+  - Not prevented: a weak password chosen by the admin.
+- **CREATEROLE stays on `crewflow_owner` until the admin removes it.** This is the same as every owner-login install
+  (behaviour catalogue: a leaked URL is the schema owner with CREATEROLE). The runbook's optional hardening
+  (`ALTER ROLE crewflow_owner NOCREATEROLE` after the first start) removes it. It was proven on PG16: db-setup, migrate
+  and the boot gates all still pass.
+- **Fail closed.** The script changes nothing until every check has passed:
+  - PostgreSQL 16 or later;
+  - an admin that can create roles and grant on the database;
+  - no existing Crewflow role on the cluster;
+  - no database-wide `search_path` default;
+  - SCRAM password encryption.
+
+  It then re-checks the exact result inside the transaction. On a provider without CREATEROLE the install is refused,
+  either by the script or by the migrate child (exit 67), and nothing is created.
+- **Tests.** A disposable PostgreSQL 16.16 InstaBox run on 2026-11-17 used a scratch harness, not committed (runbook
+  section 4a "Status"). The script ran as a NOSUPERUSER CREATEROLE admin, and after it these all passed:
+  - db-setup's owner-URL mode;
+  - the full migration chain as `crewflow_owner`;
+  - `owner-login-posture.ts` rules 1-4;
+  - `runDatabaseBootGates` for the API and the Worker;
+  - the PG16 posture golden.
+
+  These refusals were proven:
+  - an admin without CREATEROLE;
+  - a NOCREATEROLE `crewflow_owner` on a fresh install;
+  - a schema role pre-created by the admin.
+
+  The password was absent from a `log_statement=all` server log. No CI job runs this script yet.
+
 ### Rollback
 A rollback across this release needs the previous release's compose files (its image has no `worker-start.sh`,
 `db-setup.sh` or bootstrap child: under this release's files db-setup fails and rab-api never starts) and a
