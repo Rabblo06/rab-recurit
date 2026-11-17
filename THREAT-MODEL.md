@@ -7464,12 +7464,19 @@ Phase X Part 2 finding XA-08 (`docs/plans/PHASE-X-STAGE0-PART2.md` §2.6). Front
 - **Your own database (2026-11-17, Twenty's Helm `db.enabled: false`).** `CREWFLOW_BUNDLED_DB=0` in compose.env renders
   the bundled db with 0 replicas: no idle superuser server runs beside an external database any more (before, it ran idle
   with its own superuser password). `PG_DATABASE_PASSWORD` stays required by the render (Compose interpolates every
-  service; the `:?` refusal stays fail-closed for the bundled default) but reaches no container. Abuse cases: `0` without
-  `PG_DATABASE_URL` is refused by the compose.env lint and, if forced, fails closed at start (db-setup refuses with
-  exit 64 because the bundled db never made its CA file, and rab-api never starts; verified live 2026-11-17); any value
-  but `0` or `1` is refused by the lint; the gate refuses a rendered db with any replica count but 1 (0 only with an
-  external URL), `scale`, or a non-empty `deploy` section. db-setup, the target files and every other control are
-  unchanged in that mode.
+  service; the `:?` refusal stays fail-closed for the bundled default) but reaches no container. "Your own database" is
+  one predicate everywhere: a parseable `PG_DATABASE_URL` whose host is not the bundled `db`. Abuse cases:
+  - `0` without your own database (no `PG_DATABASE_URL`, or one that still names host `db`) is refused by the compose.env
+    lint and by the `--environment` preflight (`staging/verify-image-compose.cjs`: "db.deploy.replicas is 0 (only 1, or
+    0 with your own database in PG_DATABASE_URL)").
+  - If it is forced anyway, it fails closed at start: db-setup cannot use the bundled db, so rab-api never starts. On a
+    host where the db never ran, db-setup refuses with exit 64 because the CA file is missing (verified live
+    2026-11-17). Where an older `crewflow-db-ca` volume still holds a CA, it gets past that check and fails on connect
+    (no `db` to reach), which is still a non-zero exit before rab-api.
+  - Any value but `0` or `1` is refused by the lint.
+  - The gate (committed model) and the preflight (deployed model) refuse a db replica count other than 1 (0 only with
+    your own database), `scale`, or any other change to the `deploy` section.
+  db-setup, the target files and every other control are unchanged in that mode.
 
 ### Trade-offs applied (SECURITY TRADE-OFF blocks; T-1 to T-5 owner-accepted 2026-11-12; T-9 follows the owner's Helm-model decision 2026-11-13)
 - **T-1 — privileged URL in a container definition, db-setup's only.** The compose.env lint accepts a provider-admin login

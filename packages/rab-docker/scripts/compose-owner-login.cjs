@@ -71,8 +71,8 @@
  *     superuser never named crewflow_owner; rab-api waits for it healthy; rab-api and rab-worker mount only its CA volume,
  *     read-only; PG_DATABASE_PASSWORD reaches no container (only db's POSTGRES_PASSWORD and db-setup's default URL hold it).
  *     Exactly one db replica (deploy.replicas, never `scale`); 0 only in the -no-db combinations, i.e. compose.env's
- *     CREWFLOW_BUNDLED_DB=0 with PG_DATABASE_URL set (Twenty's Helm db.enabled=false; the env-file lint refuses 0 without
- *     PG_DATABASE_URL and any value but 0 or 1).
+ *     CREWFLOW_BUNDLED_DB=0 with PG_DATABASE_URL set (Twenty's Helm db.enabled=false; the env-file lint refuses 0 unless
+ *     PG_DATABASE_URL names a host other than db, and any value but 0 or 1).
  * STATIC mode lints the committed templates and renders docker-compose.image.yml, checking only the bundled-database rules.
  * Prints service names, variable NAMES and check results only, never a value.
  * Exit 0 = all checks passed, 1 = a check failed, 2 = usage error or docker compose unavailable.
@@ -1052,10 +1052,13 @@ function lintEnvText(kind, text, { template = false } = {}) {
   // either way it reaches db-setup only. A former separated login, TLS below verify-full, a transaction pooler and a URL
   // without a password are refused.
   // Twenty's Helm db.enabled=false needs an external database: CREWFLOW_BUNDLED_DB=0 without PG_DATABASE_URL would leave
-  // db-setup pointed at a db that never starts (it refuses at start, exit 64: no bundled CA; the lint says so first).
+  // db-setup pointed at a db that never starts (it fails closed at start; the lint says so first). The same predicate as
+  // staging/verify-image-compose.cjs: "your own database" = a parseable PG_DATABASE_URL whose host is not the bundled `db`.
   if (kind === 'compose' && entries.some((e) => e.key === BUNDLED_DB_KEY && e.value === '0')) {
     const url = entries.find((e) => e.key === URL_KEY)?.value;
-    if (url === undefined || url === '') problems.push(`${BUNDLED_DB_KEY}: 0 (no bundled db) needs your own database in ${URL_KEY}`);
+    let host = '';
+    try { host = new URL(String(url ?? '')).hostname; } catch { /* not a URL: refused here and by the URL rules below */ }
+    if (host === '' || host === DB_SERVICE) problems.push(`${BUNDLED_DB_KEY}: 0 (no bundled db) needs your own database in ${URL_KEY} (a host other than the bundled ${DB_SERVICE})`);
   }
   if (kind === 'compose') {
     for (const key of [URL_KEY]) {

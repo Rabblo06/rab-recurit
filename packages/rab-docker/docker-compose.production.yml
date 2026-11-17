@@ -431,9 +431,10 @@ services:
       start_period: 60s
     # Twenty's Helm `db.enabled`: CREWFLOW_BUNDLED_DB (compose.env) 1 = run this bundled db (the default); 0 = your own
     # database in PG_DATABASE_URL: no db container is created, and Compose skips the wait on a dependency that has 0
-    # replicas (db-setup and rab-api start without it). 0 without PG_DATABASE_URL fails closed: db-setup refuses (exit 64:
-    # the bundled db never made its CA file) and rab-api never starts. The compose.env lint accepts only 0 or 1, and 0 only
-    # with PG_DATABASE_URL.
+    # replicas (db-setup and rab-api start without it). 0 without your own database fails closed: db-setup cannot use the
+    # bundled db (exit 64 when its CA file was never made; a connection failure when an older CA volume is still there) and
+    # rab-api never starts. The compose.env lint and the --environment preflight accept only 0 or 1, and 0 only with a
+    # PG_DATABASE_URL whose host is not `db`.
     # Development and QA never set it (they have no external database).
     deploy:
       replicas: ${CREWFLOW_BUNDLED_DB:-1}

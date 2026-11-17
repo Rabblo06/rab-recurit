@@ -196,6 +196,28 @@ const deployedWeakenings = [
 for (const [name, mutate, pattern] of deployedWeakenings) {
   test(`environment mode refuses: ${name}`, { skip }, () => assertRefused(deployed(mutate), pattern));
 }
+
+// CREWFLOW_BUNDLED_DB (Twenty's Helm db.enabled): the preflight accepts db with 0 replicas only for your own database.
+const EXTERNAL_ADMIN_URL = 'postgresql://doadmin:not-a-secret@db-direct.example.com:5432/crewflow?sslmode=verify-full'; // gitleaks:allow
+const bundledDb = (replicas, url) => (v) => {
+  v.services.db.deploy = { ...v.services.db.deploy, replicas };
+  if (url !== undefined) v.services['db-setup'].environment.PG_DATABASE_URL = url;
+};
+test('environment mode: CREWFLOW_BUNDLED_DB=0 with your own database in PG_DATABASE_URL passes; 1 passes as committed', { skip }, () => {
+  assert.equal(String(fresh().variantFiles.services['db-setup'].environment.PG_DATABASE_URL).includes('@db:5432/'), true);
+  assert.deepEqual(deployed(bundledDb(0, EXTERNAL_ADMIN_URL)), []);
+  assert.deepEqual(deployed(bundledDb(1, EXTERNAL_ADMIN_URL)), []);
+  assert.deepEqual(deployed(bundledDb(1)), []);
+});
+test('environment mode refuses: db with 0 replicas while db-setup still names the bundled db; 2 replicas; deploy.resources; scale', { skip }, () => {
+  const msg = /db\.deploy\.replicas is (0|2) \(only 1, or 0 with your own database in PG_DATABASE_URL\)/;
+  assertRefused(deployed(bundledDb(0)), msg);
+  assertRefused(deployed(bundledDb(0, 'postgresql://postgres:not-a-secret@db:5432/crewflow?sslmode=verify-full')), msg); // gitleaks:allow
+  assertRefused(deployed(bundledDb(2, EXTERNAL_ADMIN_URL)), msg);
+  assertRefused(deployed(bundledDb(0, 'not a url')), msg);
+  assertRefused(deployed((v) => { v.services.db.deploy = { ...v.services.db.deploy, resources: { limits: { memory: '64g' } } }; }), /db\.deploy is overridden in the deployed model/);
+  assertRefused(deployed((v) => { v.services.db.scale = 2; }), /db\.scale is overridden in the deployed model/);
+});
 test('environment mode refuses a Redis without AOF, noeviction or the ACL file', { skip }, () => {
   const set = (flag, value) => (v) => { const c = v.services['rab-redis'].command; c[c.indexOf(flag) + 1] = value; };
   assertRefused(deployed(set('--aclfile', '/tmp/other.acl')), /command lacks --aclfile/);

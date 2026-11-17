@@ -142,6 +142,12 @@ test('bundled db switch: CREWFLOW_BUNDLED_DB=1 always, =0 with PG_DATABASE_URL',
 test('DENIAL bundled db switch: 0 without your own database, any value but 0 or 1', () => {
   assertRefused(lintEnvText('compose', `${COMPOSE_OK}\nCREWFLOW_BUNDLED_DB=0`), /^CREWFLOW_BUNDLED_DB: 0 \(no bundled db\) needs your own database in PG_DATABASE_URL/);
   assertRefused(lintEnvText('compose', `${COMPOSE_OK}\nPG_DATABASE_URL=\nCREWFLOW_BUNDLED_DB=0`), /^CREWFLOW_BUNDLED_DB: 0 \(no bundled db\) needs your own database/);
+  // Review F2: the bundled db's own host in PG_DATABASE_URL is not "your own database" (db would never start).
+  for (const login of ['postgres', 'crewflow_owner']) {
+    const dbUrl = URL_OK.replace('crewflow_owner', login).replace('db.internal.example', 'db');
+    assertRefused(lintEnvText('compose', `${COMPOSE_OK}\nPG_DATABASE_URL=${dbUrl}\nCREWFLOW_BUNDLED_DB=0`), /^CREWFLOW_BUNDLED_DB: 0 \(no bundled db\) needs your own database in PG_DATABASE_URL \(a host other than the bundled db\)/);
+    assert.deepEqual(lintEnvText('compose', `${COMPOSE_OK}\nPG_DATABASE_URL=${dbUrl}\nCREWFLOW_BUNDLED_DB=1`), [], login);
+  }
   for (const v of ['2', '', 'false', 'no', '00', '-1', 'true', '"0"x']) {
     assertRefused(lintEnvText('compose', `${COMPOSE_OK}\nPG_DATABASE_URL=${URL_OK}\nCREWFLOW_BUNDLED_DB=${v}`), /^CREWFLOW_BUNDLED_DB: must be exactly 0 or 1/);
   }
