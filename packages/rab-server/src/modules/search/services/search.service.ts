@@ -181,6 +181,7 @@ export class SearchService {
       const self = p.push(ctx.userId);
       const venues = p.push(scope.venueIds);
       const active = p.push(UserStatus.ACTIVE);
+      // sql-injection-reviewed: self / venues / active are $n placeholders returned by Params.push; the tables come from businessTables. Reviewed 2026-11-17.
       extra = ` AND (sp.created_by = ${self} OR (u.status = ${active} AND EXISTS (
             SELECT 1 FROM ${t.venue_manager_staff} vt
               JOIN core.manager_profile vmp ON vmp.id = vt.manager_profile_id
