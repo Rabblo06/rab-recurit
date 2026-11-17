@@ -115,7 +115,8 @@ const BOOTSTRAP_APP = 'crewflow-owner-bootstrap';
 const MSG = {
   // owner-bootstrap.ts OWNER_BOOTSTRAP_MESSAGES. The fixed refusal texts kept from #125 are compared exactly; the outcome
   // lines and the Helm-design refusals are matched loosely (their final wording is the CODE agent's).
-  pgTooOld: 'PostgreSQL 16 or later is required.',
+  // The supported-majors refusal (database/postgres/supported-majors.ts), for the PostgreSQL 15 block.
+  pgTooOld: 'PostgreSQL 15 is not supported; use 16-18 (PostgreSQL 16, 17 or 18). Nothing was created. Refusing.',
   privileged: (attrs) => `crewflow_owner exists with ${attrs}; Crewflow never runs as a privileged login.`,
   cannotCreateRoles: "The PG_DATABASE_URL login cannot create roles (needs CREATEROLE, or use the provider's admin login).",
   cannotGrantDb: 'The PG_DATABASE_URL login cannot grant CONNECT, CREATE, TEMPORARY on this database',

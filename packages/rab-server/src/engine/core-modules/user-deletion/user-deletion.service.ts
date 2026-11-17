@@ -15,6 +15,7 @@ import { WorkspaceMembershipService } from '../tenant/workspace-membership.servi
 import { bindBusinessSchema, boundBusinessSchema, businessSearchPath, businessTables, CORE_BUSINESS_SCHEMA, restoreBusinessSchema, snapshotBusinessSchema } from '../tenant/business-tables';
 import { SchemaResolverService, WorkspaceRoutingError, workspaceSchemaName } from '../tenant/schema-resolver.service';
 import { clearWorkspaceUserReferences, workspaceRestrictReference } from '../core-references/workspace-user-references';
+import { isForeignKeyRefusal } from '../../../database/postgres/sqlstate';
 
 /**
  * Codes the frontend maps to a specific, safe message — never the raw FK detail. Since owner decision 0g (2026-11-14) a
@@ -506,7 +507,8 @@ export function hardDeleteFallbackReason(error: unknown): string | null {
   if (error instanceof UnverifiableWorkspace) return 'unverifiable_workspace';
   if (error instanceof QueryFailedError) {
     const driver = error.driverError as { code?: string; constraint?: string; table?: string } | undefined;
-    if (driver?.code === '23503') return `foreign_key:${driver.constraint ?? 'unknown'}:${driver.table ?? 'unknown'}`;
+    // 23503, or 23001 on PostgreSQL 18 for the RESTRICT keys (payroll evidence, core."user" references): same meaning.
+    if (isForeignKeyRefusal(driver?.code)) return `foreign_key:${driver?.constraint ?? 'unknown'}:${driver?.table ?? 'unknown'}`;
     if (driver?.code === '53200' || driver?.code === '55P03') return `locks:${driver.code}`;
   }
   return null;

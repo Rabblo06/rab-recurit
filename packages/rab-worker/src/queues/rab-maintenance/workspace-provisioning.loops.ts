@@ -87,6 +87,28 @@ export async function assertProvisioningIdentity(client: Pick<Client, 'query'>):
   }
 }
 
+/**
+ * Security review I4 (PR #227): a PostgreSQL major the process cannot use (unsupported, or not the major the boot gates
+ * selected) makes every drift / provisioning cycle throw UnsupportedPostgresVersionError. That must not look like a routine
+ * failed cycle: one explicit ALERT error line names the cause and that nothing was checked or built, then the error is
+ * rethrown so the runtime counts it in the loop's failures stat (workspaceSchemaDriftFailures /
+ * workspaceProvisioningFailures, shown on the platform-admin queues page). Matched by name: the Worker does not deep-import
+ * the server's fingerprint module.
+ */
+export async function alertOnMajorMismatch<T>(logger: Pick<ProvisioningLoopsLogger, 'error'>, loop: string, run: () => Promise<T>): Promise<T> {
+  try {
+    return await run();
+  } catch (error) {
+    if (error instanceof Error && error.name === 'UnsupportedPostgresVersionError') {
+      logger.error(
+        `ALERT ${loop}: PostgreSQL version mismatch — ${error.message} Nothing was checked or built this cycle; every cycle fails until the ` +
+          'Worker runs against a supported PostgreSQL major (16, 17 or 18) and is restarted.',
+      );
+    }
+    throw error;
+  }
+}
+
 export interface ProvisioningLoopsLogger {
   log(message: string): void;
   warn(message: string): void;
@@ -167,7 +189,9 @@ export async function startWorkspaceProvisioningLoops(options: ProvisioningLoops
         }
       }
       if (!(await compatibleForThisCycle())) return false;
-      const result = await runWorkspaceProvisioningCycle(await provisioning.acquire(), undefined, { shouldAbort: () => runtime.isShuttingDown });
+      const result = await alertOnMajorMismatch(logger, 'workspace provisioning', async () =>
+        runWorkspaceProvisioningCycle(await provisioning.acquire(), undefined, { shouldAbort: () => runtime.isShuttingDown }),
+      );
       if (!result.lockAcquired) {
         logger.log('workspace provisioning: skipped — another provisioner held the provisioning lock for the whole bounded wait');
         return false;
@@ -182,7 +206,7 @@ export async function startWorkspaceProvisioningLoops(options: ProvisioningLoops
     intervalMs: options.driftIntervalMs ?? WORKSPACE_SCHEMA_DRIFT_INTERVAL_MS,
     statKeys: { lastRunAt: 'lastWorkspaceSchemaDriftAt', failures: 'workspaceSchemaDriftFailures' },
     run: async () => {
-      const drift = await runWorkspaceSchemaDriftCycle(driftConfig, onConnect);
+      const drift = await alertOnMajorMismatch(logger, 'workspace schema drift', () => runWorkspaceSchemaDriftCycle(driftConfig, onConnect));
       for (const f of drift.findings) {
         logger.warn(`workspace schema drift: workspace=${f.workspaceId} status=${f.status} module=${f.moduleVersion ?? '?'} ${f.detail}`);
       }

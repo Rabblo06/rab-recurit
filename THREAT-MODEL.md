@@ -9009,6 +9009,59 @@ Reversal:   Lower CLOCK_IN_CONFIRM_FLOOR_HOURS, or require a second approver (pa
   `userHasPermission` per flag. The mocked e2e fixture (`crewflow-fixtures.ts`) grants `staff.edit` so the existing bar
   specs keep their four actions.
 
+## PostgreSQL majors: one supported list (16-18), refused everywhere else; every process uses its server's fingerprints (branch fix/pg-majors-15-18, PR #227, 2026-11-17; no migration; a psql version guard in the two provider-admin scripts)
+- **Context:** the 0.6.0 deploy checklist warned that on PostgreSQL 17 / 18 new workspaces could not be created. Cause:
+  only the migrate child and the workspace command runner selected the workspace fingerprints of the server's major
+  (`selectWorkspaceFingerprintMajor`). The API, the Worker and the CLI never did, so `workspaceFingerprintMajor()` stayed
+  at its default, 16. On 17 / 18 the Worker's in-process provisioner (`provisionWorkspaceSchema` → `recordProvisioned`)
+  compared every workspace it built with the PostgreSQL 16 structure-level-22 value and marked it FAILED; the daily drift
+  job reported READY module 14-20 workspaces as DRIFTED (alert only). The server path (`core.provision_workspace`, its
+  literal baked by the migrate child for the right major), the migrate child and the runner were already correct. It failed
+  closed (no wrong structure was accepted), so this was an availability defect, not an exposure.
+- **Second gap (fail-open on the upper bound):** db-setup and the API / Worker / CLI boot gate checked only `>= 16`. A
+  PostgreSQL 19 server got `crewflow_owner` created by db-setup before the migrate child refused it, and outside production
+  a process on 19 started with the PostgreSQL 16 fingerprints.
+- **Control:** `database/postgres/supported-majors.ts` is the one list (16, 17, 18) and the one refusal sentence
+  ("PostgreSQL N is not supported; use 16-18 (PostgreSQL 16, 17 or 18).") read by the db-setup bootstrap child (both
+  modes, from the Q2 facts, before the probe, the pending password file and any write), the migrate child
+  (`assertSupportedPostgresMajor`) and boot gate 2. After the gates pass, `runDatabaseBootGates` selects the server's
+  fingerprints for the process; `provisionWorkspaceSchema`, the Worker drift cycle and the two workspace CLIs also select on
+  their own session first. A second, different major in one process is refused (never a silent switch).
+- **Security review of PR #227 (APPROVE, fixes applied):**
+  - L1: the legacy migrate path (separated layout, `setup-db.ts`, not the owner login) used to warn and migrate on an
+    unsupported major. `selectFingerprintsForRun` now refuses outside 16-18 on both paths before any migration; only the
+    fingerprint-completeness check stays owner-login only.
+  - L2: the provider-admin psql scripts (`01-crewflow-owner.sql`, `transition-from-separated.sql`) refuse any major outside
+    16-18 before `CREATE ROLE` (`\gset` / `\if`, then `1 / 0` under ON_ERROR_STOP): nothing is created. The harnesses that
+    replay only the scripts' `CREATE ROLE` / `GRANT` lines are unaffected, and no golden or fingerprint changes. The CI job
+    `owner-login (15, unsupported)` runs both scripts under psql on PostgreSQL 15: non-zero exit, no crewflow_owner.
+  - I3: `resetWorkspaceFingerprintSelectionForTests` throws outside NODE_ENV=test.
+  - I4: a major mismatch in the Worker's drift or provisioning loop logs one explicit `ALERT …` error line and still fails the
+    cycle (counted in workspaceSchemaDriftFailures / workspaceProvisioningFailures, shown on the admin queues page).
+  - L3: ci-twenty-tests runs the provisioning, payroll-evidence and invite-cleanup integration specs on 16, 17 and 18.
+  - Follow-ups, not in this PR: I2, an unselected read of EXPECTED_WORKSPACE_FINGERPRINTS should throw outside tests instead of
+    defaulting to PostgreSQL 16 (today every entrypoint selects; the default is a remaining fail-closed fallback); the
+    `core.worker_delete_expired_invited_user` `restrict_violation` handler (new migration, owner SQL review).
+- **Not supported, and why:** PostgreSQL 15 and earlier. The owner-login bootstrap grants `WITH INHERIT …, SET …`, merged
+  migrations call `pg_has_role(…, 'SET')` and refuse below 16 themselves, the boot gate reads `pg_auth_members.set_option`,
+  and on 15 a CREATEROLE login can grant `pg_execute_server_program` (M0 F-E1). Merged migrations are never edited.
+- **PostgreSQL 18 SQLSTATE change (found by the PG18 suite run):** PostgreSQL 18 reports a violated `RESTRICT` foreign key
+  as `23001` (restrict_violation) instead of `23503` (release notes, "Migration to Version 18"). Crewflow's RESTRICT keys
+  are the payroll-evidence keys and several `core."user"` references. On 18, `hardDeleteFallbackReason` treated that as a
+  genuine error: deleting a user that payroll evidence still references failed instead of falling back to a soft delete
+  (fail-closed: nothing was deleted). Fixed in code: `database/postgres/sqlstate.ts` `isForeignKeyRefusal` (23503 or
+  23001) in the user-deletion fallback, the invite-cleanup retain reason and the AI-agent role-FK mapping. The definer
+  `core.worker_delete_expired_invited_user` still catches only `foreign_key_violation`; on 18 its restrict_violation now
+  reaches the Worker's handler, which retains the invitee (nothing deleted; audit reason `workspace_referenced:<constraint>`
+  instead of `referenced`). Changing the function needs a new migration, new body hashes in the PG16/17/18 semantic
+  goldens and owner SQL review: proposed as a follow-up, not in this PR.
+- **Tests:** `supported-majors.spec.ts` (the list is 16-18; each listed major has every module and structure-level
+  fingerprint, a semantic golden and a posture golden; 14, 15, 19, 20 refused with the range), `owner-bootstrap.spec.ts`
+  (14, 15, 19, 20 and garbage refused in both modes; 14 and 19 end to end: no password stored, no BEGIN, no write),
+  `database-boot-gate-rules.spec.ts` (14, 15, 19, 20 refused at gate `version`; 16.0, 16, 17, 18 pass), the
+  `bootstrap-owner-login-check.ts` PG15 scenario and the deploy-order db-setup PG15 block (new refusal text). Live: the
+  server and Worker suites on PostgreSQL 16, 17 and 18 and the db-setup child on 15-18 (InstaBox; results in the PR).
+
 ## CI audit — picomatch GHSA-fc5q-39xc-vjpf: no fix exists anywhere, so a dev/build-only 30-day owner exception (branch fix/picomatch-ghsa-fc5q, PR #229, 2026-11-17; PROPOSAL: the owner's merge is the decision; merges after or with the node-gyp runtime prune PR)
 - **Advisory:** GHSA-fc5q-39xc-vjpf / CVE-2026-112366 (HIGH, CVSS 7.5): picomatch `<=4.0.7` compiles single-branch
   repeated extglobs (`+(*)`, `+(*a)`) into an exponentially backtracking regex. Failure: *whoever controls a glob

@@ -39,8 +39,10 @@ jest.mock('pg', () => ({
     }
   },
 }));
+const mockSelectDriftFingerprints = jest.fn(async () => 16);
 jest.mock('@rab/server/database/typeorm/workspace-schema/workspace-schema-drift', () => ({
   checkWorkspaceSchemaDrift: jest.fn(async () => ({ checked: 0, ok: 0, notReady: 0, findings: [] })),
+  selectDriftFingerprintsForServer: (...args: unknown[]) => mockSelectDriftFingerprints(...(args as [])),
 }));
 
 import { runWorkspaceSchemaDriftCycle } from '../../queues/rab-maintenance/workspace-schema-drift.job';
@@ -96,6 +98,8 @@ describe('runWorkspaceSchemaDriftCycle (Phase B: factory ClientConfig)', () => {
     driftClients.length = 0;
     const result = await runWorkspaceSchemaDriftCycle({ ...factoryConfig(), user: 'crewflow', application_name: 'crewflow-provisioner-drift' });
     expect(result).toEqual({ checked: 0, ok: 0, notReady: 0, findings: [] });
+    // PG17/18 fix: the cycle selects its server's workspace fingerprints on its own client before comparing.
+    expect(mockSelectDriftFingerprints).toHaveBeenCalledTimes(1);
     expect(driftClients).toHaveLength(1);
     expect(driftClients[0]).not.toHaveProperty('connectionString');
     expect(driftClients[0]).toMatchObject({ user: 'crewflow', application_name: 'crewflow-provisioner-drift', statement_timeout: 60_000, connectionTimeoutMillis: 10_000 });
