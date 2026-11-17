@@ -55,6 +55,8 @@ jobs:
               - 'yarn.config.cjs'
               - 'tsconfig.base.json'
               - 'jest.preset.js'
+              # nx.json sets every project's task order and cache inputs (#192 makes lint and test depend on ^build).
+              - 'nx.json'
             # CI wiring every Node job runs through (this filter and the composite actions: yarn-install, restore-cache,
             # disposable-postgres, ...): a change to it must run the suites it wires.
             ci-wiring: &ciwiring
@@ -78,8 +80,6 @@ jobs:
               - *shared
               - *emails
               - 'packages/rab-server/**'
-              # A change to the server CI itself must run the server CI (as ci-worker.yaml does for the Worker CI).
-              - '.github/workflows/ci-server.yaml'
             shared:
               - *shared
               - *node
@@ -94,6 +94,8 @@ jobs:
               - *server
               - *node
               - *ciwiring
+              # A change to the server CI itself must run the server CI (as ci-worker.yaml does for the Worker CI).
+              - '.github/workflows/ci-server.yaml'
             worker:
               - *server
               - 'packages/rab-worker/**'
@@ -101,6 +103,11 @@ jobs:
               - *ciwiring
               # X3.3: a change to the Worker CI itself (or to this filter) must run the Worker CI.
               - '.github/workflows/ci-worker.yaml'
+              # ci-pdf-equality runs on this output (FILTER_OUTPUTS: worker): an edit to it must run it, never skip to a
+              # passing gate. The Worker CI runs tools/check-no-browser-in-worker.cjs. #190 ran the Worker on ci-server.yaml.
+              - '.github/workflows/ci-pdf-equality.yaml'
+              - 'tools/check-no-browser-in-worker.cjs'
+              - '.github/workflows/ci-server.yaml'
             front:
               - *shared
               - *ui
@@ -112,6 +119,7 @@ jobs:
               - *shared
               - *ui
               - 'packages/rab-mobile/**'
+              - '.github/workflows/ci-mobile.yaml'
             # Root dependency manifests are copied into the image's install stage: a change there must also build and
             # gate linux/arm64 on the PR (CodeRabbit, PR #41).
             docker:
@@ -137,3 +145,4 @@ jobs:
               - '.github/actions/**'
               - 'package.json'
               - 'yarn.lock'
+              - 'nx.json'
