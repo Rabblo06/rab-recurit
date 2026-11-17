@@ -1,4 +1,7 @@
-import type { Job } from 'bullmq';
+import { type Job, UnrecoverableError } from 'bullmq';
+
+import { AuditAction } from '@rab/server/engine/core-modules/audit/audit.service';
+import { PushSendError } from '@rab/server/engine/core-modules/push/drivers/interfaces/push-driver.interface';
 
 import { PushDelivery } from '@rab/server/engine/core-modules/push/entities/push-delivery.entity';
 import { PushDevice } from '@rab/server/engine/core-modules/push/entities/push-device.entity';
@@ -22,12 +25,21 @@ interface Fake {
   rows: { delivery: Record<string, unknown> | null; device: Record<string, unknown> | null; notification: Record<string, unknown> | null };
   writes: Array<Record<string, unknown>>;
   failAcceptedWrites: number;
+  /** Throw from the device read (a database fault during revalidation). */
+  failDeviceRead?: boolean;
+  /** attempt_count / max_attempts the claim's RETURNING reports (default 1 / 5). */
+  claimed?: { attempt_count: number; max_attempts: number };
+  audits?: Array<{ action: string; opts: Record<string, unknown> }>;
 }
 
 function fakeDeps(f: Fake, send: jest.Mock): PushSendProcessorDeps {
+  // Each runInTenantContext call is one transaction: its writes reach `f.writes` only if the callback resolves (a throw
+  // rolls them back, as PostgreSQL would).
+  let pending: Array<Record<string, unknown>> = [];
   const manager = {
     findOne: async (entity: unknown) => {
       if (entity === PushDelivery) return f.rows.delivery;
+      if (entity === PushDevice && f.failDeviceRead) throw new Error('canceling statement due to statement timeout');
       if (entity === PushDevice) return f.rows.device;
       if (entity === Notification) return f.rows.notification;
       return null;
@@ -47,19 +59,32 @@ function fakeDeps(f: Fake, send: jest.Mock): PushSendProcessorDeps {
             f.failAcceptedWrites -= 1;
             throw new Error('connection terminated unexpectedly');
           }
-          f.writes.push(values);
-          // D-Q5b: the claim counts the attempt in SQL and returns the new count (RETURNING); first attempt here.
-          return { affected: 1, raw: [{ attempt_count: 1, max_attempts: 5 }] };
+          pending.push(values);
+          // D-Q5b: the claim counts the attempt in SQL and returns the new count (RETURNING); first attempt by default.
+          return { affected: 1, raw: [f.claimed ?? { attempt_count: 1, max_attempts: 5 }] };
         },
       };
       return qb;
     },
   };
   return {
-    tenantContext: { runInTenantContext: async (_ctx: unknown, fn: (m: unknown) => Promise<unknown>) => fn(manager) },
+    tenantContext: {
+      runInTenantContext: async (_ctx: unknown, fn: (m: unknown) => Promise<unknown>) => {
+        pending = [];
+        const result = await fn(manager);
+        f.writes.push(...pending);
+        pending = [];
+        return result;
+      },
+    },
     pushService: { send },
     secretEncryption: { decrypt: () => 'device-token' },
     pushDeviceService: { deactivateInvalidToken: jest.fn() },
+    auditService: {
+      record: jest.fn(async (_m: unknown, _ctx: unknown, action: string, opts: Record<string, unknown>) => {
+        (f.audits ??= []).push({ action, opts });
+      }),
+    },
   } as unknown as PushSendProcessorDeps;
 }
 
@@ -122,5 +147,83 @@ describe('push send processor — E8 visibility and completion correctness', () 
     const f: Fake = { rows: visible(), writes: [], failAcceptedWrites: 0 };
     await expect(createPushSendProcessor(fakeDeps(f, send))(job)).rejects.toThrow(/unavailable/);
     expect(f.writes.map((w) => w.status).filter(Boolean)).toEqual(['PROCESSING', 'RETRY']);
+  });
+});
+
+/**
+ * Mirrors email-send.processor.ts: revalidation runs in its own transaction after the counted claim committed, so a
+ * database fault there is a failed attempt (RETRY / FAILED at the cap) instead of rolling the claim back (the unbounded
+ * retry loop email fixed). A FAILED attempt is audited (PUSH_DELIVERY_FAILED), the way email audits EMAIL_DELIVERY_FAILED.
+ */
+describe('push send processor — revalidation outside the claim, failure audit', () => {
+  const statuses = (f: Fake) => f.writes.map((w) => w.status).filter(Boolean);
+
+  it("the claim clears the previous attempt's provider-call marker", async () => {
+    const f: Fake = { rows: visible(), writes: [], failAcceptedWrites: 0 };
+    await createPushSendProcessor(fakeDeps(f, jest.fn(async () => ({ provider: 'fake-fcm' }))))(job);
+    const claim = f.writes.find((w) => w.status === 'PROCESSING')!;
+    expect(claim).toHaveProperty('providerCallStartedAt', null);
+  });
+
+  it('a database fault during revalidation keeps the counted claim and ends the attempt RETRY, sending nothing', async () => {
+    const send = jest.fn();
+    const f: Fake = { rows: visible(), writes: [], failAcceptedWrites: 0, failDeviceRead: true };
+    const error = await createPushSendProcessor(fakeDeps(f, send))(job).catch((e: Error) => e);
+    expect(send).not.toHaveBeenCalled();
+    // Old code: the fault rolled the claim back with its count (no writes at all), so the row never reached its cap.
+    expect(statuses(f)).toEqual(['PROCESSING', 'RETRY']);
+    expect(f.writes.find((w) => w.status === 'RETRY')).toMatchObject({ attemptCount: 1, lastErrorCode: 'REVALIDATION_FAILED' });
+    expect(error).toBeInstanceOf(Error);
+    expect((error as Error).name).not.toBe('UnrecoverableError'); // BullMQ backoff applies
+    expect(f.audits ?? []).toEqual([]); // not final: no failure audit yet
+  });
+
+  it('a database fault during revalidation on the last allowed attempt ends FAILED and is audited', async () => {
+    const f: Fake = { rows: visible(), writes: [], failAcceptedWrites: 0, failDeviceRead: true, claimed: { attempt_count: 5, max_attempts: 5 } };
+    await expect(createPushSendProcessor(fakeDeps(f, jest.fn()))(job)).rejects.toBeInstanceOf(UnrecoverableError);
+    expect(statuses(f)).toEqual(['PROCESSING', 'FAILED']);
+    expect(f.audits).toEqual([
+      {
+        action: AuditAction.PUSH_DELIVERY_FAILED,
+        opts: expect.objectContaining({
+          entityType: 'push_delivery',
+          entityId: ID,
+          actorUserId: null,
+          metadata: { pushDeliveryId: ID, notificationId: 'n1', errorCode: 'REVALIDATION_FAILED', attempts: 5, retryable: true },
+        }),
+      },
+    ]);
+  });
+
+  it('a permanent provider failure ends FAILED with one audit row carrying no token or notification content', async () => {
+    const send = jest.fn(async () => {
+      throw new PushSendError('Requested entity was not found.', false, false, 'messaging/registration-token-not-registered');
+    });
+    const f: Fake = { rows: visible(), writes: [], failAcceptedWrites: 0 };
+    await expect(createPushSendProcessor(fakeDeps(f, send))(job)).rejects.toBeInstanceOf(UnrecoverableError);
+    expect(statuses(f)).toEqual(['PROCESSING', 'FAILED']);
+    expect(f.audits).toHaveLength(1);
+    expect(f.audits![0]!.action).toBe('push.delivery_failed');
+    expect(f.audits![0]!.opts.metadata).toEqual({
+      pushDeliveryId: ID, notificationId: 'n1', errorCode: 'messaging/registration-token-not-registered', attempts: 1, retryable: false,
+    });
+    expect(JSON.stringify(f.audits)).not.toContain('device-token');
+  });
+
+  it('a retryable provider failure below the cap is not audited (RETRY only)', async () => {
+    const send = jest.fn(async () => {
+      throw new PushSendError('unavailable', true);
+    });
+    const f: Fake = { rows: visible(), writes: [], failAcceptedWrites: 0 };
+    await expect(createPushSendProcessor(fakeDeps(f, send))(job)).rejects.toThrow(/unavailable/);
+    expect(statuses(f)).toEqual(['PROCESSING', 'RETRY']);
+    expect(f.audits ?? []).toEqual([]);
+  });
+
+  it('a successful send writes no failure audit', async () => {
+    const f: Fake = { rows: visible(), writes: [], failAcceptedWrites: 0 };
+    await createPushSendProcessor(fakeDeps(f, jest.fn(async () => ({ provider: 'fake-fcm' }))))(job);
+    expect(statuses(f)).toEqual(['PROCESSING', 'ACCEPTED']);
+    expect(f.audits ?? []).toEqual([]);
   });
 });

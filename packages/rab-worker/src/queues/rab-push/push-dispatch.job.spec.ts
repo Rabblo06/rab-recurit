@@ -263,3 +263,61 @@ describe('push dispatch — D-Q5b exhausted lease classification', () => {
     expect(await dispatchPushScope(tenant as never, ORG_A, [R1], jest.fn(), jest.fn(), false)).toMatchObject({ failedExhausted: 1, deliveryUncertain: 0 });
   });
 });
+
+/**
+ * The dispatcher's FAILED outcomes are audited in the same scoped transaction as the state change, the way
+ * email-dispatch.job.ts audits STUCK_LEASE_ATTEMPTS_EXHAUSTED (email.delivery_failed) and DELIVERY_UNCERTAIN
+ * (email.delivery_uncertain). Before, push wrote no audit row for either.
+ */
+describe('push dispatch — FAILED outcomes are audited', () => {
+  function failedResponder(rows: Array<Record<string, unknown>>) {
+    const orgs = catalogue([ORG_A]);
+    return (sql: string, params: unknown[]) => {
+      const page = orgs(sql, params);
+      if (page !== undefined) return page;
+      if (sql.includes('FROM core.push_delivery')) return rows;
+      if (sql.includes('INSERT INTO core.audit_log')) return [{ id: '00000000-0000-4000-8000-0000000000ad' }];
+      if (sql.includes('dispatch_generation = dispatch_generation + 1')) return [[{ dispatch_generation: 1 }], 1];
+      return [[], 1];
+    };
+  }
+  const audits = (statements: Array<{ sql: string; params: unknown[]; tx: number }>) =>
+    statements
+      .filter((s) => s.sql.includes('INSERT INTO core.audit_log'))
+      .map((s) => ({ org: s.params[0], action: s.params[1], metadata: JSON.parse(String(s.params[2])), tx: s.tx }));
+
+  it('the last allowed attempt died after the provider call: DELIVERY_UNCERTAIN + push.delivery_uncertain', async () => {
+    const { tenant, statements } = fakeTenant(failedResponder([row(R1, 'PROCESSING', { attempt_count: 5, provider_call_started_at: new Date() })]));
+    const result = await dispatchPushScope(tenant as never, ORG_A, undefined, jest.fn(), jest.fn(), false);
+    expect(result).toMatchObject({ deliveryUncertain: 1 });
+    const update = statements.find((s) => s.sql.includes("last_error_code = 'DELIVERY_UNCERTAIN'"))!;
+    expect(audits(statements)).toEqual([
+      { org: ORG_A, action: 'push.delivery_uncertain', metadata: { pushDeliveryId: R1, errorCode: 'DELIVERY_UNCERTAIN' }, tx: update.tx },
+    ]);
+  });
+
+  it('a stuck lease with no attempts left (no provider call): STUCK_LEASE_ATTEMPTS_EXHAUSTED + push.delivery_failed', async () => {
+    const { tenant, statements } = fakeTenant(failedResponder([row(R1, 'PROCESSING', { attempt_count: 5 })]));
+    const result = await dispatchPushScope(tenant as never, ORG_A, undefined, jest.fn(), jest.fn(), false);
+    expect(result).toMatchObject({ failedExhausted: 1 });
+    expect(audits(statements)).toEqual([
+      { org: ORG_A, action: 'push.delivery_failed', metadata: { pushDeliveryId: R1, errorCode: 'STUCK_LEASE_ATTEMPTS_EXHAUSTED' }, tx: expect.any(Number) },
+    ]);
+  });
+
+  it('a prior attempt reached the provider and the driver cannot safely retry: DELIVERY_UNCERTAIN + push.delivery_uncertain', async () => {
+    const { tenant, statements } = fakeTenant(failedResponder([row(R1, 'RETRY', { provider_call_started_at: new Date() })]));
+    const publish = jest.fn();
+    const republish = jest.fn();
+    await dispatchPushScope(tenant as never, ORG_A, undefined, publish, republish, false);
+    expect(audits(statements).map((a) => a.action)).toEqual(['push.delivery_uncertain']);
+    expect(publish).not.toHaveBeenCalled();
+    expect(republish).not.toHaveBeenCalled();
+  });
+
+  it('rows that are recovered or published write no audit row', async () => {
+    const { tenant, statements } = fakeTenant(failedResponder([row(R1, 'RETRY'), row(R2, 'PENDING', { attempt_count: 0, queued_at: null })]));
+    await dispatchPushScope(tenant as never, ORG_A, undefined, jest.fn(async () => undefined), jest.fn(async () => undefined), true);
+    expect(audits(statements)).toEqual([]);
+  });
+});
