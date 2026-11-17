@@ -8866,7 +8866,7 @@ Reversal:   Lower CLOCK_IN_CONFIRM_FLOOR_HOURS, or require a second approver (pa
   `userHasPermission` per flag. The mocked e2e fixture (`crewflow-fixtures.ts`) grants `staff.edit` so the existing bar
   specs keep their four actions.
 
-## CI audit — owner risk decisions for `yarn npm audit`; picomatch GHSA-fc5q-39xc-vjpf proposed as accepted risk until 2026-12-17 (branch fix/picomatch-ghsa-fc5q, PR #__PR__, 2026-11-17; PROPOSAL: the owner's merge is the decision)
+## CI audit — owner risk decisions for `yarn npm audit`; picomatch GHSA-fc5q-39xc-vjpf proposed as accepted risk until 2026-12-17 (branch fix/picomatch-ghsa-fc5q, PR #229, 2026-11-17; PROPOSAL: the owner's merge is the decision)
 - **Finding (HIGH per advisory, INFO for this repository):** GHSA-fc5q-39xc-vjpf / CVE-2026-112366 (CVSS 7.5,
   AV:N/AC:L/PR:N/A:H): picomatch `<=4.0.7` compiles single-branch repeated extglobs (`+(*)`, `+(*a)`) into a regex with
   exponential backtracking. Failure: *whoever controls a glob PATTERN* → passes it to picomatch and matches a short crafted

@@ -6,7 +6,7 @@
       "id": "GHSA-fc5q-39xc-vjpf",
       "packages": ["picomatch"],
       "decision": "accepted-risk",
-      "owner_decision_ref": "https://github.com/Rabblo06/rab-recurit/pull/0",
+      "owner_decision_ref": "https://github.com/Rabblo06/rab-recurit/pull/229",
       "decided_by": "repository owner, by approving and merging the PR in owner_decision_ref (proposed 2026-11-17, not decided before that merge)",
       "decided_on": "2026-11-17",
       "expires": "2026-12-17",
