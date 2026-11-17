@@ -7598,8 +7598,12 @@ database, no setup step).
   - The upgrade runner refuses a workspace step that writes the role catalogs.
   - The API provisions workspaces through `core.provision_workspace` (SECURITY DEFINER, owned by `crewflow`). The
     Worker provisions with `SET ROLE crewflow`.
-  - Proven on PG16 with NOCREATEROLE: a restart (db-setup, migrate, boot gates), an upgrade that applies new migrations,
-    workspace provisioning, and the workspace upgrade runner (runbook 4a "Status").
+  - Proven on PG16 with NOCREATEROLE (2026-11-17, runbook 4a "Status"):
+    - a restart: db-setup, migrate, and the API / Worker boot gates;
+    - an upgrade that applied the 8 migrations after R256, the C3 cutover functions among them;
+    - the app's own provisioning and upgrade-runner integration specs: 112 passed, 0 failed. They cover the API
+      server path (`core.provision_workspace`), the Worker's `SET ROLE crewflow` path, the 0.6.0 workspace commands
+      and the locked start.
   - Residual (flagged assumption): a future release with role migrations needs CREATEROLE back for that one upgrade.
     The migration child refuses with exit 67 until it is granted.
   - After NOCREATEROLE, `crewflow_owner` still holds the ADMIN option on the schema roles it created. It can still GRANT
