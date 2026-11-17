@@ -2,7 +2,8 @@
 # and needs only `contents: read`.
 #
 #   deployment-config  the gate's self-tests and the gate (packages/rab-docker/scripts/compose-owner-login.cjs) in FULL mode
-#                      (one identical PG_DATABASE_URL on rab-api / rab-worker, no second identity, no token, the H1-H6
+#                      (PG_DATABASE_URL pinned "" and NO PG_ADMIN_URL on rab-api / rab-worker: the admin URL reaches
+#                      db-setup only, owner decision 2026-11-17; no second identity, no token, the H1-H6
 #                      keys, the O3 lifecycle: the API migrates on start, no rab-migrate, one API, the Worker never
 #                      migrates and only consumes the job schedulers; the bundled database), plus
 #                      `docker compose config` of every supported combination, and the ONE-IMAGE check
