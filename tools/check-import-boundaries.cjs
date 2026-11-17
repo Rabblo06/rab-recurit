@@ -297,25 +297,20 @@ function baselineDocument(counts) {
  * Owner-approved growth of the committed baseline against the base branch (see the header). Each entry is used by exactly
  * one PR; delete it once that PR has merged (--base reports it STALE from then on). Never widen `to` in place: a new
  * growth is a new entry in its own PR, with the owner's dated approval.
+ *
+ * Empty: the two PR #204 entries (push-dispatch.job.ts 1 -> 2, push-send.processor.ts 10 -> 11) were consumed when #204
+ * merged and are deleted here. To add one, append exactly this shape (every key required, nothing else allowed):
+ *
+ *   Object.freeze({
+ *     rule: 'worker-deep-import',                   // one of RULES
+ *     file: 'packages/rab-worker/src/<path>.ts',    // the importing file, repo-relative, exactly as in the baseline
+ *     from: 1,                                      // the base branch's count for that rule and file (0 = no entry)
+ *     to: 2,                                        // the exact head count the using PR commits (above `from`)
+ *     approved: 'owner YYYY-MM-DD',                 // the owner's approval date
+ *     reason: 'PR #NNN (...): imports <target>, because ...',
+ *   }),
  */
-const APPROVED_GROWTH = Object.freeze([
-  Object.freeze({
-    rule: 'worker-deep-import',
-    file: 'packages/rab-worker/src/queues/rab-push/push-dispatch.job.ts',
-    from: 1,
-    to: 2,
-    approved: 'owner 2026-11-17',
-    reason: 'PR #204 (push retry fix): imports @rab/server/engine/core-modules/audit-events/audit-event-shipping, as the email path already does.',
-  }),
-  Object.freeze({
-    rule: 'worker-deep-import',
-    file: 'packages/rab-worker/src/queues/rab-push/push-send.processor.ts',
-    from: 10,
-    to: 11,
-    approved: 'owner 2026-11-17',
-    reason: 'PR #204 (push retry fix): imports @rab/server/engine/core-modules/audit/audit.service, as the email path already does.',
-  }),
-]);
+const APPROVED_GROWTH = Object.freeze([]);
 
 /** Refuses a malformed approval list (fail closed: a typo must never widen what --base accepts). */
 function validateApprovedGrowth(list) {

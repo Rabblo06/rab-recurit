@@ -946,7 +946,7 @@ There was no entry for P1C.1B (OAuth) or the `crewflow_session` cookie before th
 **Open:**
 - `CF-Connecting-IP` restricted to Cloudflare ranges.
 - Session-row retention (CF-46).
-- CF-02 for `PATCH /profile` and push-device routes.
+- ~~CF-02 for `PATCH /profile` and push-device routes.~~ Closed (X5.2 status update, no code change): `JwtAuthGuard` refuses every unsafe method that carries the Admin Inspect header with 403 `INSPECT_READ_ONLY` before any identity rewrite (`engine/core-modules/auth/guards/jwt-auth.guard.ts:306-309`), and `profile.service.ts` refuses session mutations while `inspectedBy` is set.
 - An optional browser-installation id.
 
 ## Custom-role backfill under the restricted migration role, and test-database isolation (2026-10-15)
@@ -1921,7 +1921,7 @@ lane DB5 `MfaTotpRecoveryCodes1786719900000` + `LoginHandoff1786719910000` (dev/
   security version and the source session; a brand-new session is issued (any session cookie the host presented is
   revoked), host-only cookies per A2's policy, and the source session is ended; no id or token in any response body.
 - **Residual:** login CSRF limited to the attacker's OWN workspace host (an attacker can hand a victim a fresh token for the
-  attacker's account on the attacker's host within the TTL); a peek/confirm step would need a DB5 function (requested).
+  attacker's account on the attacker's host within the TTL). The read-only peek/confirm step now exists (X5.2 status update): `POST peek` in `login-handoff.controller.ts:59-67`, test `lane-d-login-handoff-peek.integration.spec.ts`.
 
 ## Wave 5 Lane OPS: outbox retention + audited replay, L1 metadata cache, rotation coverage (2026-10-23)
 
@@ -5559,8 +5559,8 @@ writes a warning instead.
    (`scripts/migrate/owner-login/release-floor.ts`): an existing production database may be upgraded only when its
    `core.migrations` ledger contains every migration of a supported release (R254 = rab/v0.4.0 = cd7c7e32 = 4c38aa1a, or
    R256 = 0e0a6edd), with anything beyond it a contiguous run of the image's chain (a resumed partial upgrade). An older,
-   holed or unknown history refuses with `UnsupportedUpgradeStartError` (exit 65, fail closed under every
-   `CREWFLOW_UPGRADE_FAILURE` policy; nothing applied). No override exists. N1 still gates the legacy CF-41 path and the CLI
+   holed or unknown history refuses with `UnsupportedUpgradeStartError` (exit 65, fail closed; nothing applied; the
+   `CREWFLOW_UPGRADE_FAILURE` policies were later removed by OWNER-DB-ULTIMATE Part B3). No override exists. N1 still gates the legacy CF-41 path and the CLI
    until the separated-mode retirement (every separated database transitioned, MIX-1) retires them.
 6. **No logical backup by the app login.** Recovery is PITR only, and restore points taken after a compromise carry the
    backdoors. Accepted by the owner 2026-11-05 (BC-12).
@@ -6459,7 +6459,7 @@ completes) stays open and unchanged.
   `not_found` and untouched; C4 no actor / non-admin actor / bad ids file / both modes refused; C5 a superuser session is
   refused.
 
-## DEPLOY — exactly like Twenty: one image variable, one command, API first, Worker after (branch deploy/twenty-three-steps, 2026-11-11, not merged)
+## DEPLOY — exactly like Twenty: one image variable, one command, API first, Worker after (branch deploy/twenty-three-steps, 2026-11-11, merged as PR #90)
 
 **What changed.** Production deploys like Twenty's `packages/twenty-docker`: `docker compose pull && docker compose up -d`
 updates rab-api and rab-worker together from ONE variable, `CREWFLOW_IMAGE_TAG`. The API starts first, migrates
@@ -6503,7 +6503,9 @@ The `@` in the compose image reference makes Docker reject a plain tag, and the 
   (renamed variable, plain tag, per-role tag, missing `restart: true`, a 35 s API stop window), and the real-container
   deploy-order tests (`packages/rab-docker/deploy-order-tests/`, PostgreSQL 16 and 18, all four cases pass on both:
   fresh deploy API-healthy-then-Worker; new digest with the old Worker stopped before the new API started; rollback with
-  the AHEAD warning while serving; an unhealthy API never lets the Worker start). Run by hand, not in CI.
+  the AHEAD warning while serving; an unhealthy API never lets the Worker start). Run by hand, not in CI. (X5.2 status update: the
+  related upgrade-with-data and db-setup container cases now run nightly and on demand in `.github/workflows/upgrade-with-data.yaml`;
+  these four deploy-order cases are still run by hand.)
 
 ## UPGRADE — the upgrade floor replaces N1 on the owner-login path (Phase X U-1, PR #93, 2026-11-11)
 
@@ -8507,19 +8509,36 @@ Reversal:   Lower CLOCK_IN_CONFIRM_FLOOR_HOURS, or require a second approver (pa
   accepts a growth only when rule and file match exactly, the base count equals `from` and the head count equals `to`;
   one more edge, another file, another rule, or a different base count still fails. An entry whose `from` no longer equals
   the base count is reported STALE and fails `--base`, so the entry must be deleted once the growth has merged and cannot be
-  reused. The tree check (counts equal the committed baseline) is unchanged. The first two entries are the owner-approved
+  reused. The tree check (counts equal the committed baseline) is unchanged. The first two entries were the owner-approved
   (2026-11-17) Worker imports for PR #204: `push-dispatch.job.ts` 1 -> 2 (`audit-events/audit-event-shipping`) and
-  `push-send.processor.ts` 10 -> 11 (`audit/audit.service`), the same imports the email path already uses.
+  `push-send.processor.ts` 10 -> 11 (`audit/audit.service`), the same imports the email path already uses. Both are
+  deleted by the cleanup PR (branch ci/import-boundaries-approved-growth-cleanup), which merges immediately after #204;
+  the shipped list is empty from then on.
 - **Residual (accepted):** the approval lives in the repository, so whoever can merge a PR that edits the check can also add
-  an entry; the protection is review: an entry must arrive in its own PR, separate from the PR that uses it, with the owner's
-  date. Between the approval PR's merge and the using PR's merge, any PR may use the approved slot; the slot is one exact
-  count for one file and rule, and the stale rule closes it as soon as the base moves. Counts are per file, not per edge: an
-  approved `to` could be met by a different import in that file than the one approved; the reviewer of the using PR checks
-  the actual import (`--list`). `--write-baseline` still refuses any growth; the baseline is raised by hand in the using PR.
+  an entry. "An entry must arrive in its own PR, separate from the PR that uses it, with the owner's date" is enforced only
+  by review, not mechanically: the check reads `APPROVED_GROWTH` from the HEAD being checked, so a PR that adds an entry
+  and uses it in the same diff passes `--base`; only the date format is validated, not who approved it.
+  A slot closes only when the base COUNT for that rule and file changes, not when the PR it was approved for merges or is
+  closed: while the base still equals `from`, any PR may use the slot (the slot is one exact count for one file and rule),
+  and if the base later returns to `from` (the import is removed again) a forgotten entry would match once more. That is
+  why a stale entry fails `--base` and must be deleted. A push to main never runs `--base` (the step is
+  `if: github.event_name == 'pull_request'`), so a stale entry is caught only on the next pull request, not at merge time.
+  Consequence for the first two entries: between #204 merging and the cleanup PR merging, `--base` reports both entries
+  STALE and ci-security is red for every PR opened or updated in that window; the cleanup PR must merge straight after
+  #204 and before any other PR. Counts are per file, not per edge: an approved `to` could be met by a different import in
+  that file than the one approved; the reviewer of the using PR checks the actual import (`--list`). `--write-baseline`
+  still refuses any growth; the baseline is raised by hand in the using PR.
+- **Planned follow-ups:** read `APPROVED_GROWTH` from the base ref instead of the head (so an approval has to be on main
+  before any PR can use it, which makes "its own PR" mechanical), and add an optional `target` per entry (the exact import
+  target the growth is for, so a different import in the same file cannot use the slot).
 - **Tests:** `check-import-boundaries.test.cjs`: an approved exact growth passes; the same file one above `to` fails; an
   unlisted file growing fails; the same file under a different rule fails; a base count other than `from` fails and the
-  approval is reported stale (also once the growth has merged); `from: 0` matches a file absent at the base; malformed,
-  undated, duplicate and non-growing entries are refused; the shipped list is valid and frozen.
+  approval is reported stale (also once the growth has merged); a consumed entry (base already at `to`) is stale, and the
+  same entry matches again once the base returns to `from`, which is why stale must fail; partial use (from 10, to 12,
+  head 11) fails as grown; `from: 0` matches a file absent at the base; malformed, undated, duplicate and non-growing
+  entries are refused; the shipped list is valid and frozen. The CLI's exit 1 on a stale approval is not tested: `main()`
+  reads the module's own `APPROVED_GROWTH` (empty) and the base baseline through `git show`, so it cannot be driven with
+  fixture approvals without git refs; `compareToBase` carries that logic and is tested directly.
 
 ## S-W1 — the Worker's member-invitation pre-send check also requires an active workspace (branch fix/s-w1-invitation-workspace-active, 2026-11-16)
 - **Finding (Low, `docs/plans/untangle/worker.md` §4):** a manager invites a member; the workspace is then suspended or
@@ -8846,3 +8865,116 @@ Reversal:   Lower CLOCK_IN_CONFIRM_FLOOR_HOURS, or require a second approver (pa
   `sc05-capabilities.integration.spec.ts` now expects the 19 keys including `staff.edit`, same booleans as one
   `userHasPermission` per flag. The mocked e2e fixture (`crewflow-fixtures.ts`) grants `staff.edit` so the existing bar
   specs keep their four actions.
+
+## CI audit — picomatch GHSA-fc5q-39xc-vjpf: no fix exists anywhere, so a dev/build-only 30-day owner exception (branch fix/picomatch-ghsa-fc5q, PR #229, 2026-11-17; PROPOSAL: the owner's merge is the decision; merges after or with the node-gyp runtime prune PR)
+- **Advisory:** GHSA-fc5q-39xc-vjpf / CVE-2026-112366 (HIGH, CVSS 7.5): picomatch `<=4.0.7` compiles single-branch
+  repeated extglobs (`+(*)`, `+(*a)`) into an exponentially backtracking regex. Failure: *whoever controls a glob
+  PATTERN* → has picomatch compile it and match a short crafted string → blocks the Node event loop. For this
+  repository: INFO while the conditions below hold. The required ci-security `audit` failed on every PR.
+- **Why not the normal fix (Twenty's way: root `resolutions` documented in `"//resolutions"`):** there is nothing to
+  resolve to. The advisory has no `first_patched_version`; the registry's whole list (1.0.0 … 4.0.7, no prereleases,
+  dist-tag latest 4.0.7) is inside `<=4.0.7` in every major; the upstream fix micromatch/picomatch#194 is unmerged.
+  No dependent can drop it either: the current release of every one still requires picomatch (@nx/js and
+  @nx/workspace 24.0.6 `^4.0.7`, vite 8.3.8 `^4.0.7`, jest-util / jest-haste-map / jest-message-util 30.5.1 `^4.0.3`,
+  tinyglobby 0.2.17 `^4.0.4`, anymatch 3.1.3 `^2.0.4`, micromatch 4.0.8 `^2.3.1`; node-gyp 13.1.0 via tinyglobby).
+- **Paths (yarn.lock, 2.3.2 / 4.0.4 / 4.0.5):** PRODUCTION only through yarn's injected `node-gyp: latest`:
+  `@rab/server > argon2 > node-gyp@13.0.1 > tinyglobby > picomatch@4.0.5` and `@rab/worker > bullmq > msgpackr >
+  msgpackr-extract > node-gyp > tinyglobby > picomatch@4.0.5` (install-time native build tool, never imported at
+  runtime). Everything else is dev/build: root `@nx/jest`/`@nx/js` (4.0.4, 4.0.5), jest 29/30 via `@types/jest`,
+  `jest-environment-jsdom`, `jest-haste-map > anymatch` (2.3.2, 4.0.5), rab-front `vite` (4.0.5), rab-server/worker
+  `ts-node-dev > chokidar > anymatch/readdirp` (2.3.2). No first-party code imports a glob matcher; the rab-front
+  production bundle contains no picomatch (built and grepped).
+- **Control (`tools/check-npm-audit.cjs` + `tools/npm-audit-decisions.json`, schema 2):** same
+  `yarn npm audit --severity high --all --recursive`; a finding passes only with an entry that is
+  - *scoped:* exactly one GHSA id + one package (`package`, a `packages` list is refused), `accepted-risk` only;
+  - *owned and explained:* owner_decision_ref (issue/PR of this repo, no placeholder), decided_by, decided_on,
+    `reason`, `drop_when`;
+  - *time-boxed:* at most 30 days; expired / over-long / duplicate entries fail; no date override;
+  - *lapsing on a fix:* fails as soon as the GitHub advisory has a `first_patched_version` or the registry has a
+    release in ANY major outside the vulnerable range and newer than an installed version (prereleases are not fixes);
+  - *dev/build only:* fails while the package is in the production closure = yarn.lock reachable from the
+    `dependencies`/`optionalDependencies` of the shipped workspaces (the check-licences.mjs list), yarn-injected
+    dependencies included, minus `RUNTIME_PRUNE` exported by `packages/rab-docker/rab/runtime-deps.cjs` (a pruned
+    package and what is reachable only through it). No export = nothing excluded.
+  Every other advisory fails as before. Fails closed on an unparseable audit, a failed registry or advisory lookup,
+  an unresolvable lockfile descriptor or an unevaluable range.
+- **Dependency on the prune PR:** on origin/main runtime-deps.cjs exports no `RUNTIME_PRUNE`, so this check FAILS on
+  #229 today (picomatch@4.0.5 via node-gyp is in the production closure). The node-gyp prune PR must export
+  `RUNTIME_PRUNE` (e.g. `['node-gyp']`), keep its CLI under `require.main === module`, and remove node-gyp's
+  exclusive subtree (tinyglobby, picomatch@4.0.5) from the image. #229 merges after, or together with, that PR.
+  Verified locally by patching that export in: the check passes (1 decided) and the real yarn.lock closure minus
+  node-gyp contains no node-gyp, tinyglobby or picomatch.
+- **Drop condition (also in the entry):** remove the entry and upgrade (`yarn up -R picomatch`, or a root
+  `resolutions` override documented in `"//resolutions"`) as soon as a fixed picomatch exists in any major (the
+  check fails on its own then); otherwise it expires 2026-12-17 and needs a new owner decision.
+
+```
+SECURITY TRADE-OFF
+Decision:   The required ci-security audit passes with a known HIGH advisory (picomatch GHSA-fc5q-39xc-vjpf) in the
+            dev/build dependency tree, via one dated owner exception, for at most 30 days (to 2026-12-17).
+Reason:     No fixed picomatch exists in any major and no dependent release drops it, so neither an upgrade nor a
+            `resolutions` override is possible; keeping the audit red blocks every PR (security fixes included);
+            disabling the audit, `npmAuditIgnoreAdvisories` or dropping `--recursive` would hide it with no expiry,
+            no owner record and no production check. Replacing Nx, Jest and Vite is out of proportion.
+Risk:       A developer/CI process that compiles an attacker-chosen glob pattern can be stalled (CPU DoS of a build or
+            test, not of a deployed service). A pattern source would have to be repository config, i.e. someone who
+            can already change CI. If prune and lockfile drift put picomatch back in the runtime closure, the check
+            fails rather than hiding it.
+Mitigation: One advisory + one package; 30-day expiry; lapses automatically on any fix; fails while the package is
+            in the production closure (lockfile walk minus the image prune); every other advisory still fails;
+            runtime-deps.cjs forbids the dev tools in the image.
+Reversal:   Upgrade / `resolutions` override (documented in "//resolutions") as soon as a fix ships, then delete the
+            entry; or replace the parent tools.
+```
+- **Tests:** `tools/check-npm-audit.test.cjs` (ci-security "The check's own tests", 9 tests): range evaluation incl.
+  the advisory API's `<= 4.0.7` spacing; lapse on first_patched_version, on a same-major and on a NEW-major release,
+  not on a prerelease or an older unaffected release; production closure finds the injected node-gyp chain, ignores
+  devDependencies (also behind a `workspace:*` dependency whose lockfile entry merges devDependencies), excludes a
+  pruned package's exclusive subtree, applies `resolutions`, fails closed on an unresolvable descriptor; the committed
+  register is well formed; scope (wildcard, comma, `packages` list), decision, owner reference / placeholder, id,
+  future date, reason, drop_when, schema, duplicate, >30 days, expiry refused (expiry day valid); NDJSON parser fails
+  closed; evaluate(): decided, undecided for another advisory / package / no id, production path, fix (both kinds),
+  each lookup failing, unevaluable range, expired; unused reported.
+
+## Runtime image: node-gyp and its install-time-only tree pruned (branch chore/prune-node-gyp-runtime, 2026-11-17; no SQL)
+- **Context:** `yarn workspaces focus --production` kept node-gyp 13.0.1 in the one runtime image, because Yarn injects
+  `node-gyp: npm:latest` into the lockfile entries of argon2, node-addon-api, msgpackr-extract and fsevents. Two
+  production paths reached it: `@rab/server > argon2 > node-gyp` and `@rab/worker > bullmq > msgpackr > msgpackr-extract
+  > node-gyp`. With it came tar, tinyglobby, fdir, picomatch 4.0.5 (GHSA-fc5q-39xc-vjpf, High, unfixed), a nested
+  undici 8, which, isexe, nopt, abbrev, proc-log, env-paths, exponential-backoff, graceful-fs, minizlib, chownr, yallist
+  and @isaacs/fs-minipass. Nothing at runtime loads them (argon2 and msgpackr-extract use their prebuilt addons through
+  node-gyp-build; the image has no compiler), but they were attack surface and scanner noise that would HOLD every
+  release once the scanners ingest the GHSA, and the policy forbids an agent from adding a register entry for it.
+- **Control:** `runtime-deps.cjs prune` runs in both dependency stages right after `focus` (and before the Worker delta, so
+  the delta cannot carry the tree back). It cuts the edges to `RUNTIME_PRUNE` (`['node-gyp']`, exported for other gates)
+  and deletes every package then unreachable from the explicit `--root` workspaces (review L2: `@rab/server` in
+  runtime-modules, `@rab/worker @rab/server` in worker-modules; a missing root refuses). Edges are each package's
+  declared dependencies/optional/peer dependencies plus its lockfile entry (so injected or extended dependencies count),
+  located with Node's own lookup, so a package any runtime package reaches stays. Workspace links are never removed.
+  Fail closed: it removes nothing when an installed package has no lockfile entry, a drop name is not installed, or a
+  kept package's code literally loads a package it would remove (an undeclared dependency that only worked through
+  hoisting). Review L1: that scan reads every file of every kept package, comments included (a false positive is a
+  refusal), and also matches the bare side-effect `import 'x'`; the only tolerated hit is a `bin` file that is neither
+  the package's main nor an exports target loading a `RUNTIME_PRUNE` name itself (node-gyp-build's and
+  node-gyp-build-optional-packages' install-time `bin.js` require node-gyp). The final stage's existing import scan still
+  has to resolve every compiled import, and its `--forbid` now includes `node-gyp` and `tinyglobby`. Review I1: the image
+  gate's `container` check runs `native-addons-smoke.cjs` inside the finished image as 1000:1000, `--network none`,
+  read-only, on amd64 and arm64: argon2 (as the API resolves it) must hash and verify with argon2id m=19456,t=2,p=1 and
+  reject a wrong password, and msgpackr (as BullMQ resolves it) must report native acceleration with msgpackr-extract's
+  native `extractStrings` loaded; any other outcome fails the gate.
+- **Measured:** a local `focus --production` of this lockfile removes 18 package directories from the API tree (554 ->
+  536) and the same 18 from the Worker tree (610 -> 592); the undeclared-dependency scan read 12 427 / 13 743 kept files
+  with no hit. The image build numbers are in the PR.
+- **Residual risk:** a kept package that loads a pruned package by a computed (non-literal) specifier would only fail at
+  runtime. None of the pruned packages is a runtime library of the API or the Worker; the image gate's PDF render and the
+  compiled-import scan exercise the real image.
+- **Tests:** `packages/rab-docker/rab/test/runtime-deps.test.cjs` (ci-security `deployment-config`): an exclusive node-gyp
+  subtree (including the hoisted picomatch@4 and the nested undici@8) is pruned through both production paths; a
+  dependency shared with a runtime package (semver, picomatch@2, undici@6) is kept; lockfile-only edges keep a package;
+  a workspace devDependency is never a root; prune refuses on an undeclared dependency, a tree that is not the lockfile's
+  install, a stale or wildcard drop; the final `--forbid` fails if node-gyp or tinyglobby returns, top level or nested; the
+  Dockerfile prunes in both stages before the delta with the exported list and explicit roots. L1/L2 regressions (each
+  exits 1 and removes nothing): a bin that is also the main requiring graceful-fs, a bin that is an exports target,
+  a bin-only file loading a non-drop package, `import 'graceful-fs';`, `/*! x */ require('graceful-fs')`, no `--root`,
+  `--root @rab/server` without that link, a `--root` that is not a workspace. `tests/test_image_gate.py`
+  (NativeAddonsSmoke): the smoke runs as 1000:1000 offline read-only, and a non-zero exit or a missing OK line fails.

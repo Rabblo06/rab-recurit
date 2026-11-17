@@ -167,6 +167,23 @@ function describeApproved() {
     assert.equal(merged.staleApproved.length, 1);
   });
 
+  test('approved growth: a consumed entry comes back to life if the base count returns to `from`, which is why stale must fail', () => {
+    // Base already at `to` (the using PR merged): the approval no longer matches anything and is reported stale.
+    const atTo = check.compareToBase({ [W]: { [FILE]: 11, [OTHER]: 1 } }, { [W]: { [FILE]: 11, [OTHER]: 1 } }, approved);
+    assert.deepEqual(atTo, { grown: [], staleApproved: [{ ...approved[0], base: 11 }] });
+    // Base back at `from` (a later PR removed that import again): the same entry matches once more and would let
+    // another PR re-add the edge. Only failing STALE at the earlier step forces the entry out before that can happen.
+    const backAtFrom = check.compareToBase({ [W]: { [FILE]: 10, [OTHER]: 1 } }, { [W]: { [FILE]: 11, [OTHER]: 1 } }, approved);
+    assert.deepEqual(backAtFrom, { grown: [], staleApproved: [] });
+  });
+
+  test('approved growth: partial use fails (from 10, to 12, head 11 has grown)', () => {
+    const wide = [{ rule: W, file: FILE, from: 10, to: 12, approved: 'owner 2026-11-17', reason: 'test' }];
+    const r = check.compareToBase(base, { [W]: { [FILE]: 11, [OTHER]: 1 } }, wide);
+    assert.deepEqual(r.grown.map((g) => `${g.rule}:${g.file}:${g.base}->${g.head}`), [`${W}:${FILE}:10->11`]);
+    assert.deepEqual(r.staleApproved, []);
+  });
+
   test('approved growth: from 0 means the file has no entry at the base', () => {
     const NEW = 'packages/rab-worker/src/new.ts';
     const zero = [{ rule: W, file: NEW, from: 0, to: 1, approved: 'owner 2026-11-17', reason: 'test' }];
