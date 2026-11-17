@@ -8887,6 +8887,16 @@ Reversal:   Lower CLOCK_IN_CONFIRM_FLOOR_HOURS, or require a second approver (pa
 - **Not supported, and why:** PostgreSQL 15 and earlier. The owner-login bootstrap grants `WITH INHERIT …, SET …`, merged
   migrations call `pg_has_role(…, 'SET')` and refuse below 16 themselves, the boot gate reads `pg_auth_members.set_option`,
   and on 15 a CREATEROLE login can grant `pg_execute_server_program` (M0 F-E1). Merged migrations are never edited.
+- **PostgreSQL 18 SQLSTATE change (found by the PG18 suite run):** PostgreSQL 18 reports a violated `RESTRICT` foreign key
+  as `23001` (restrict_violation) instead of `23503` (release notes, "Migration to Version 18"). Crewflow's RESTRICT keys
+  are the payroll-evidence keys and several `core."user"` references. On 18, `hardDeleteFallbackReason` treated that as a
+  genuine error: deleting a user that payroll evidence still references failed instead of falling back to a soft delete
+  (fail-closed: nothing was deleted). Fixed in code: `database/postgres/sqlstate.ts` `isForeignKeyRefusal` (23503 or
+  23001) in the user-deletion fallback, the invite-cleanup retain reason and the AI-agent role-FK mapping. The definer
+  `core.worker_delete_expired_invited_user` still catches only `foreign_key_violation`; on 18 its restrict_violation now
+  reaches the Worker's handler, which retains the invitee (nothing deleted; audit reason `workspace_referenced:<constraint>`
+  instead of `referenced`). Changing the function needs a new migration, new body hashes in the PG16/17/18 semantic
+  goldens and owner SQL review: proposed as a follow-up, not in this PR.
 - **Tests:** `supported-majors.spec.ts` (the list is 16-18; each listed major has every module and structure-level
   fingerprint, a semantic golden and a posture golden; 14, 15, 19, 20 refused with the range), `owner-bootstrap.spec.ts`
   (14, 15, 19, 20 and garbage refused in both modes; 14 and 19 end to end: no password stored, no BEGIN, no write),
