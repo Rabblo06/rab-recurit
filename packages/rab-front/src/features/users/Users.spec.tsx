@@ -729,3 +729,65 @@ describe('Users — Phase C1 invitation settling (pending rows only, bounded bac
     qc.clear();
   });
 });
+
+/**
+ * Bulk Send Email needs the edit-level permission the server enforces (owner decision batch 13): `staff.edit` for Staff,
+ * `manager.manage` for Managers. A view-only role must not be offered an action that can only answer 403.
+ */
+describe('Users — bulk Send Email follows the server permission', () => {
+  function serve(me: { roles: string[]; isPlatformAdmin: boolean }, capabilities: Record<string, boolean>) {
+    mockApi.get.mockReset();
+    mockApi.get.mockImplementation((url: string) => {
+      if (url === '/auth/me') return Promise.resolve({ data: me });
+      if (url === '/auth/capabilities') return Promise.resolve({ data: capabilities });
+      if (url === '/job-roles') return Promise.resolve(EMPTY_JOB_ROLES);
+      if (url === '/staff') return Promise.resolve({ data: { data: [staffRow()], total: 1 } });
+      if (url === '/managers') return Promise.resolve({ data: { data: [managerRow()], total: 1 } });
+      return Promise.resolve({ data: [] });
+    });
+  }
+  const bar = () => screen.findByRole('toolbar', { name: 'Bulk actions for selected records' });
+  const offered = (toolbar: HTMLElement) =>
+    [...within(toolbar).queryAllByRole('button'), ...screen.queryAllByRole('menuitem')].some((el) => /Send Email/.test(el.textContent ?? ''));
+
+  it('Staff: a view-only role (staff.view, no staff.edit) is not offered Send Email', async () => {
+    // staff.deactivate is granted so the bar visibly reacts once capabilities have loaded (Activate appears): the
+    // assertion below is then made against the loaded permissions, not the empty first render.
+    serve({ roles: ['manager'], isPlatformAdmin: false }, { 'staff.view': true, 'staff.edit': false, 'staff.deactivate': true });
+    mount();
+    fireEvent.click(await screen.findByRole('checkbox', { name: 'Select Alice Example' }));
+    const toolbar = await bar();
+    expect(await within(toolbar).findByRole('button', { name: 'Activate' })).toBeInTheDocument();
+    expect(offered(toolbar)).toBe(false);
+  });
+
+  it('Staff: with staff.edit, Send Email is offered and carries the selected staff id', async () => {
+    serve({ roles: ['manager'], isPlatformAdmin: false }, { 'staff.view': true, 'staff.edit': true });
+    mount();
+    fireEvent.click(await screen.findByRole('checkbox', { name: 'Select Alice Example' }));
+    const toolbar = await bar();
+    const heard: unknown[] = [];
+    const listener = (e: Event) => heard.push((e as CustomEvent).detail);
+    document.addEventListener('open-bulk-email', listener);
+    fireEvent.click(await within(toolbar).findByRole('button', { name: 'Send Email' }));
+    document.removeEventListener('open-bulk-email', listener);
+    expect(heard).toEqual([{ role: 'staff', userIds: ['s1'], names: ['Alice Example'] }]);
+  });
+
+  it('Managers: a CEO without manager.manage is not offered Send Email; with it, it is', async () => {
+    serve({ roles: ['ceo'], isPlatformAdmin: false }, { 'manager.manage': false });
+    const first = mount();
+    fireEvent.click(await screen.findByRole('button', { name: /^Managers/ }));
+    fireEvent.click(await screen.findByRole('checkbox', { name: 'Select Bob Manager' }));
+    await waitFor(() => expect(mockApi.get).toHaveBeenCalledWith('/auth/capabilities'));
+    await act(async () => { await new Promise((r) => setTimeout(r, 50)); }); // let the capabilities answer apply
+    expect(offered(await bar())).toBe(false);
+    first.unmount();
+
+    serve({ roles: ['ceo'], isPlatformAdmin: false }, { 'manager.manage': true });
+    mount();
+    fireEvent.click(await screen.findByRole('button', { name: /^Managers/ }));
+    fireEvent.click(await screen.findByRole('checkbox', { name: 'Select Bob Manager' }));
+    expect(await within(await bar()).findByRole('button', { name: 'Send Email' })).toBeInTheDocument();
+  });
+});
