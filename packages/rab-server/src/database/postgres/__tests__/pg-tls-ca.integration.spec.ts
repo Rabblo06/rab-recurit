@@ -17,7 +17,11 @@ import { integrationTestDatabaseReady } from '../../typeorm/core/integration-tes
 // then forwards the decrypted stream to TEST_DATABASE_URL's server. So every assertion is about the CLIENT side, which is
 // what PG_SSL_CA_CERT changes: which root is trusted, with host-name verification still on.
 const appUrl = process.env.TEST_DATABASE_URL;
-const describeDb = integrationTestDatabaseReady() ? describe : describe.skip;
+// FAIL, never skip, without its database: the gate throws (TestDatabaseConfigError) instead of returning false, and the
+// suite is a plain describe. ci-server.yaml runs it in the job that owns the disposable PostgreSQL; a missing openssl
+// fails beforeAll the same way. The fronts listen on 127.0.0.1 AND ::1 on one port, so "localhost" works whichever address
+// family the resolver returns first (no reliance on net.connect's autoSelectFamily fallback).
+integrationTestDatabaseReady();
 
 const SSL_REQUEST_CODE = 80877103;
 
@@ -34,11 +38,14 @@ function openssl(args: string[], cwd: string): void {
   execFileSync('openssl', args, { cwd, stdio: 'pipe' });
 }
 
-/** A TLS-only PostgreSQL front: SSLRequest → 'S' → TLS (key/cert) → the real server, decrypted. */
+/**
+ * A TLS-only PostgreSQL front: SSLRequest → 'S' → TLS (key/cert; `cert` may carry the chain) → the real server, decrypted.
+ * Listens on 127.0.0.1 and on ::1, same port.
+ */
 function startTlsFront(key: string, cert: string, upstream: { host: string; port: number }): Promise<TlsFront> {
   const front: TlsFront = { port: 0, secured: 0, plaintext: 0, close: async () => undefined };
   const sockets = new Set<net.Socket>();
-  const server = net.createServer((socket) => {
+  const handler = (socket: net.Socket) => {
     sockets.add(socket);
     socket.on('close', () => sockets.delete(socket));
     socket.on('error', () => undefined);
@@ -60,21 +67,37 @@ function startTlsFront(key: string, cert: string, upstream: { host: string; port
         secure.pipe(db).pipe(secure);
       });
     });
-  });
-  return new Promise((resolve) => {
-    server.listen(0, '127.0.0.1', () => {
-      front.port = (server.address() as net.AddressInfo).port;
-      front.close = () =>
-        new Promise<void>((done) => {
-          for (const s of sockets) s.destroy();
-          server.close(() => done());
-        });
-      resolve(front);
+  };
+  const v4 = net.createServer(handler);
+  const v6 = net.createServer(handler);
+  const listen = (server: net.Server, port: number, host: string) =>
+    new Promise<void>((resolve, reject) => {
+      server.once('error', reject);
+      server.listen(port, host, () => resolve());
     });
-  });
+  front.close = () =>
+    new Promise<void>((done) => {
+      for (const s of sockets) s.destroy();
+      let open = 2;
+      const one = () => {
+        open -= 1;
+        if (open === 0) done();
+      };
+      for (const server of [v4, v6]) {
+        if (server.listening) server.close(one);
+        else one();
+      }
+    });
+  return (async () => {
+    await listen(v4, 0, '127.0.0.1');
+    front.port = (v4.address() as net.AddressInfo).port;
+    // ::1 on the same port. No IPv6 loopback on the runner fails the suite (it is never silently narrowed to IPv4).
+    await listen(v6, front.port, '::1');
+    return front;
+  })();
 }
 
-describeDb('PG_SSL_CA_CERT against a PostgreSQL behind a private / self-signed certificate (production rules)', () => {
+describe('PG_SSL_CA_CERT against a PostgreSQL behind a private / self-signed certificate (production rules)', () => {
   let dir: string;
   let caPem: string;
   let otherCaPem: string;
@@ -82,6 +105,10 @@ describeDb('PG_SSL_CA_CERT against a PostgreSQL behind a private / self-signed c
   let caFront: TlsFront;
   let selfSignedFront: TlsFront;
   let ipFront: TlsFront;
+  let ip6Front: TlsFront;
+  let chainFront: TlsFront;
+  let leafOnlyFront: TlsFront;
+  let intermediatePem: string;
   let creds: { user: string; password: string; database: string };
 
   beforeAll(async () => {
@@ -99,6 +126,16 @@ describeDb('PG_SSL_CA_CERT against a PostgreSQL behind a private / self-signed c
     openssl(['req', '-new', ...ec, '-keyout', 'server-ip.key', '-out', 'server-ip.csr', '-subj', '/CN=127.0.0.1'], dir);
     fs.writeFileSync(path.join(dir, 'server-ip.ext'), 'subjectAltName=IP:127.0.0.1\nbasicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature\nextendedKeyUsage=serverAuth\n');
     openssl(['x509', '-req', '-in', 'server-ip.csr', '-CA', 'ca.crt', '-CAkey', 'ca.key', '-CAcreateserial', '-out', 'server-ip.crt', '-days', '2', '-extfile', 'server-ip.ext'], dir);
+    // The same CA, a server certificate for the IPv6 loopback (IP SAN ::1 only).
+    openssl(['req', '-new', ...ec, '-keyout', 'server-ip6.key', '-out', 'server-ip6.csr', '-subj', '/CN=ip6'], dir);
+    fs.writeFileSync(path.join(dir, 'server-ip6.ext'), 'subjectAltName=IP:::1\nbasicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature\nextendedKeyUsage=serverAuth\n');
+    openssl(['x509', '-req', '-in', 'server-ip6.csr', '-CA', 'ca.crt', '-CAkey', 'ca.key', '-CAcreateserial', '-out', 'server-ip6.crt', '-days', '2', '-extfile', 'server-ip6.ext'], dir);
+    // A chain: the root CA signs an intermediate CA (pathlen 0), which signs the server certificate (DNS:localhost).
+    openssl(['req', '-new', ...ec, '-keyout', 'int.key', '-out', 'int.csr', '-subj', '/CN=crewflow test intermediate CA'], dir);
+    fs.writeFileSync(path.join(dir, 'int.ext'), 'basicConstraints=critical,CA:TRUE,pathlen:0\nkeyUsage=critical,keyCertSign,cRLSign\n');
+    openssl(['x509', '-req', '-in', 'int.csr', '-CA', 'ca.crt', '-CAkey', 'ca.key', '-CAcreateserial', '-out', 'int.crt', '-days', '2', '-extfile', 'int.ext'], dir);
+    openssl(['req', '-new', ...ec, '-keyout', 'leaf.key', '-out', 'leaf.csr', '-subj', '/CN=localhost'], dir);
+    openssl(['x509', '-req', '-in', 'leaf.csr', '-CA', 'int.crt', '-CAkey', 'int.key', '-CAcreateserial', '-out', 'leaf.crt', '-days', '2', '-extfile', 'server.ext'], dir);
     // An unrelated CA (the wrong root).
     openssl(['req', '-x509', '-new', ...ec, '-keyout', 'other.key', '-out', 'other.crt', '-days', '2', '-subj', '/CN=some other CA',
       '-addext', 'basicConstraints=critical,CA:TRUE'], dir);
@@ -113,12 +150,20 @@ describeDb('PG_SSL_CA_CERT against a PostgreSQL behind a private / self-signed c
     caFront = await startTlsFront(read('server.key'), read('server.crt'), upstream);
     selfSignedFront = await startTlsFront(read('self.key'), selfSignedPem, upstream);
     ipFront = await startTlsFront(read('server-ip.key'), read('server-ip.crt'), upstream);
+    ip6Front = await startTlsFront(read('server-ip6.key'), read('server-ip6.crt'), upstream);
+    intermediatePem = read('int.crt');
+    // The server sends leaf + intermediate (the usual deployment) / the leaf only (the client's bundle must hold the rest).
+    chainFront = await startTlsFront(read('leaf.key'), read('leaf.crt') + intermediatePem, upstream);
+    leafOnlyFront = await startTlsFront(read('leaf.key'), read('leaf.crt'), upstream);
   });
 
   afterAll(async () => {
     await caFront?.close();
     await selfSignedFront?.close();
     await ipFront?.close();
+    await ip6Front?.close();
+    await chainFront?.close();
+    await leafOnlyFront?.close();
     if (dir) fs.rmSync(dir, { recursive: true, force: true });
   });
 
@@ -193,6 +238,20 @@ describeDb('PG_SSL_CA_CERT against a PostgreSQL behind a private / self-signed c
 
   it('an IP-address host verifies against the IP SAN (the check is bound to the IP, not to "localhost")', async () => {
     expect((await connectAndQuery(prodEnv(urlFor('127.0.0.1', ipFront.port), { PG_SSL_CA_CERT: caPem }))).authorized).toBe(true);
+  });
+
+  it('IPv6: [::1] verifies against an IP SAN ::1, and a localhost-only certificate is refused for it', async () => {
+    expect((await connectAndQuery(prodEnv(urlFor('[::1]', ip6Front.port), { PG_SSL_CA_CERT: caPem }))).authorized).toBe(true);
+    const e = await connectError(prodEnv(urlFor('[::1]', caFront.port), { PG_SSL_CA_CERT: caPem }));
+    expect(e.code ?? e.message).toMatch(/ERR_TLS_CERT_ALTNAME_INVALID|does not match certificate/i);
+  });
+
+  it('a leaf + intermediate chain verifies against the root alone, and a leaf-only server against a root + intermediate bundle', async () => {
+    expect((await connectAndQuery(prodEnv(urlFor('localhost', chainFront.port), { PG_SSL_CA_CERT: caPem }))).authorized).toBe(true);
+    expect((await connectAndQuery(prodEnv(urlFor('localhost', leafOnlyFront.port), { PG_SSL_CA_CERT: caPem + intermediatePem }))).authorized).toBe(true);
+    // DENIAL: a leaf-only server and the root alone (the intermediate is missing on both sides).
+    const e = await connectError(prodEnv(urlFor('localhost', leafOnlyFront.port), { PG_SSL_CA_CERT: caPem }));
+    expect(e.code ?? e.message).toMatch(/UNABLE_TO_VERIFY_LEAF_SIGNATURE|UNABLE_TO_GET_ISSUER_CERT_LOCALLY|unable to (verify the first|get local issuer)/i);
   });
 
   it('DENIAL: both CA variables set refuses before any connection is attempted', () => {

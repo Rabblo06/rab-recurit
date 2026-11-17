@@ -201,3 +201,35 @@ describe('pgConnectionString: the string form reproduces the explicit config exa
     expect(new ConnectionParameters(pgConnectionString(r, { purpose: 'drift' })).password).toBe(tricky);
   });
 });
+
+describe('L-3: the IP-bound host-name check survives every factory output (pool, client, TypeORM)', () => {
+  // A function in the ssl object is easy to lose in a later spread or clone; pin it at every hand-off to the driver.
+  const ipUrl = (host: string) => `postgresql://crewflow_app:${SECRET}@${host}:5432/rab?sslmode=verify-full`;
+  const env = (host: string) => ({ NODE_ENV: 'production', PG_DATABASE_URL: ipUrl(host), PG_SSL_CA_CERT: PEM });
+  const peer = (subjectaltname: string) => ({ subject: { CN: 'x' }, subjectaltname }) as unknown as import('tls').PeerCertificate;
+  type Check = ((name: string, cert: import('tls').PeerCertificate) => Error | undefined) | undefined;
+  const assertBound = (ssl: unknown, ip: string) => {
+    const check = (ssl as { checkServerIdentity?: Check }).checkServerIdentity;
+    expect(typeof check).toBe('function');
+    expect((check?.('localhost', peer('DNS:localhost')) as { code?: string } | undefined)?.code).toBe('ERR_TLS_CERT_ALTNAME_INVALID');
+    expect(check?.('localhost', peer(`IP Address:${ip}`))).toBeUndefined();
+  };
+
+  it.each([
+    ['IPv4', '10.0.0.7', '10.0.0.7'],
+    ['IPv6', '[fd00::7]', 'FD00:0:0:0:0:0:0:7'],
+  ])('%s: TypeORM driver config, pgPoolConfig, pgClientConfig and pg ConnectionParameters all keep checkServerIdentity', (_n, host, san) => {
+    const r = resolvePgEnvironment(env(host), { processRole: 'api' });
+    assertBound(typeOrmDriverConfig(pgTypeOrmConnectionOptions(r, { purpose: 'runtime' })).ssl, san);
+    assertBound(pgPoolConfig(r, { purpose: 'runtime' }).ssl, san);
+    assertBound(pgClientConfig(r, { purpose: 'runtime' }).ssl, san);
+    assertBound(new ConnectionParameters(pgPoolConfig(r, { purpose: 'runtime' })).ssl, san);
+  });
+
+  it('a DNS host has no override in any of them (pg sends the name; Node checks it)', () => {
+    const r = resolvePgEnvironment({ NODE_ENV: 'production', PG_DATABASE_URL: DO, PG_SSL_CA_CERT: PEM }, { processRole: 'api' });
+    for (const ssl of [typeOrmDriverConfig(pgTypeOrmConnectionOptions(r, { purpose: 'runtime' })).ssl, pgPoolConfig(r, { purpose: 'runtime' }).ssl]) {
+      expect((ssl as { checkServerIdentity?: unknown }).checkServerIdentity).toBeUndefined();
+    }
+  });
+});

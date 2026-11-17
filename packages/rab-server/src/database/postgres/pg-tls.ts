@@ -20,15 +20,20 @@
  * checks that name. For an IP-literal host pg sets neither `servername` nor `host`, and Node then checks the certificate
  * against the literal name "localhost" instead of the IP (reproduced with pg 8.23 / Node 24): so for an IP host the
  * object carries an explicit `checkServerIdentity` bound to that IP, and the certificate must carry it as an IP SAN.
- * PG_SSL_ALLOW_SELF_SIGNED=true (`rejectUnauthorized: false`) is refused in production. Note `require` is deliberately STRONGER here than libpq's `require` (which does not verify):
- * pg 8 already treats it as verify-full, and pg 9 announces it will weaken it, so the mapping is pinned here instead.
+ * PG_SSL_ALLOW_SELF_SIGNED=true (`rejectUnauthorized: false`) is refused in production. Note `require` is deliberately
+ * STRONGER here than libpq's `require` (which does not verify): pg 8 already treats it as verify-full, and pg 9 announces it
+ * will weaken it, so the mapping is pinned here instead.
  *
  * The CA comes from ONE of two variables, never both (both set refuses to start):
  *   PG_SSL_CA_CERT_PATH   a file holding the PEM bundle (a mounted secret or volume);
  *   PG_SSL_CA_CERT        the PEM text itself, for hosts that cannot mount a file (PaaS platforms such as OpenShip). Real
  *                         newlines or `\n` escapes (one line, as env files and most platform UIs need) both work.
- * Either way the text is validated at boot by the same function (validatePgCaPem): at least one PEM block, every block a
- * CERTIFICATE that X509Certificate parses, nothing else (a pasted private key is refused). The text is never logged and
+ * Either way the text is validated at boot by the same function (validatePgCaPem): BEGIN/END markers balanced, at least one
+ * PEM block, every block a CERTIFICATE that X509Certificate parses, nothing else (a pasted private key is refused), and no
+ * long base64 run outside the blocks (key material pasted without its armour). A CA file is fstat-checked first: a regular
+ * file of at most PG_CA_PEM_MAX_BYTES, opened non-blocking (a FIFO or a device never hangs the boot). The same rules are
+ * ported to packages/rab-docker/scripts/pg-ca-pem.cjs for the env-file lint and the --environment preflight, and
+ * pg-ca-pem-parity.spec.ts runs both over one corpus. The text is never logged and
  * never part of an error message: it is a public certificate, but an operator mistake (a key pasted into it) must not
  * reach a log. A configured CA only changes WHICH root is trusted: verification stays verify-full, host name included.
  */
@@ -69,6 +74,14 @@ export function validatePgCaPem(raw: string, source: PgCaSource): string {
   if (Buffer.byteLength(raw, 'utf8') > PG_CA_PEM_MAX_BYTES) refuse(`is larger than ${PG_CA_PEM_MAX_BYTES / 1024} KiB; use your provider's regional CA bundle.`);
   // `\n` escapes (a one-line value) become real newlines; CRLF becomes LF. A PEM body never contains a backslash.
   const text = raw.replace(/\\r\\n|\\n/g, '\n').replace(/\r\n?/g, '\n');
+  // Markers first, before any block is matched: an unbalanced BEGIN/END is refused outright.
+  const begins = text.split('-----BEGIN ').length - 1;
+  const ends = text.split('-----END ').length - 1;
+  if (begins !== ends) refuse('contains an incomplete PEM block (a BEGIN line without its END line, or the reverse).');
+  // Key material pasted WITHOUT its PEM armour: a long base64 run outside every block.
+  if (/[A-Za-z0-9+/=]{64,}/.test(text.replace(PEM_BLOCK, ''))) {
+    refuse('holds a long base64 run outside the PEM blocks, which looks like key material. It must hold only CA certificate(s).');
+  }
   const certificates: string[] = [];
   for (const [, beginLabel, body, endLabel] of text.matchAll(PEM_BLOCK)) {
     if (beginLabel !== endLabel) refuse('contains a PEM block whose BEGIN and END labels differ.');
@@ -90,18 +103,45 @@ export function validatePgCaPem(raw: string, source: PgCaSource): string {
     certificates.push(pem);
   }
   if (certificates.length === 0) refuse('does not contain a PEM certificate (-----BEGIN CERTIFICATE----- ... -----END CERTIFICATE-----).');
-  const begins = text.split('-----BEGIN ').length - 1;
-  const ends = text.split('-----END ').length - 1;
-  if (begins !== certificates.length || ends !== certificates.length) refuse('contains an incomplete PEM block (a BEGIN line without its END line, or the reverse).');
+  if (begins !== certificates.length) refuse('contains an incomplete PEM block (a BEGIN line without its END line, or the reverse).');
   return certificates.join('');
 }
 
+/**
+ * The default reader of PG_SSL_CA_CERT_PATH: opened read-only and non-blocking, fstat-checked BEFORE reading (a regular
+ * file of at most PG_CA_PEM_MAX_BYTES; a directory, FIFO, socket or device is refused), then read from the same descriptor.
+ * Symbolic links are followed on purpose (Kubernetes mounts secrets through them). Throws PgConfigError; no path echoed.
+ */
+export function readPgCaFile(caPath: string): string {
+  const unreadable = () => new PgConfigError('PG_SSL_CA_CERT_PATH is set but the file cannot be read. Refusing to start.');
+  let fd: number;
+  try {
+    fd = fs.openSync(caPath, fs.constants.O_RDONLY | (fs.constants.O_NONBLOCK ?? 0));
+  } catch {
+    throw unreadable();
+  }
+  try {
+    const stat = fs.fstatSync(fd);
+    if (!stat.isFile()) throw new PgConfigError('PG_SSL_CA_CERT_PATH does not name a regular file. Refusing to start.');
+    if (stat.size > PG_CA_PEM_MAX_BYTES) {
+      throw new PgConfigError(`PG_SSL_CA_CERT_PATH is larger than ${PG_CA_PEM_MAX_BYTES / 1024} KiB; use your provider's regional CA bundle. Refusing to start.`);
+    }
+    return fs.readFileSync(fd, 'utf8');
+  } catch (error) {
+    if (error instanceof PgConfigError) throw error;
+    throw unreadable();
+  } finally {
+    fs.closeSync(fd);
+  }
+}
+
 /** Reads and validates PG_SSL_CA_CERT_PATH at boot, not at first connect. The path is not echoed. */
-export function readPgCaCertificate(caPath: string, readFile: (p: string) => string = (p) => fs.readFileSync(p, 'utf8')): string {
+export function readPgCaCertificate(caPath: string, readFile: (p: string) => string = readPgCaFile): string {
   let pem: string;
   try {
     pem = readFile(caPath);
-  } catch {
+  } catch (error) {
+    if (error instanceof PgConfigError) throw error;
     throw new PgConfigError('PG_SSL_CA_CERT_PATH is set but the file cannot be read. Refusing to start.');
   }
   return validatePgCaPem(pem, 'PG_SSL_CA_CERT_PATH');

@@ -8874,51 +8874,71 @@ Reversal:   Lower CLOCK_IN_CONFIRM_FLOOR_HOURS, or require a second approver (pa
   impersonate the database and read every credential and row. It stays refused in production (unchanged).
 - **Threats:** (1) an operator turns verification off to make a private CA work → database MITM; (2) a malformed or
   wrong CA value is only discovered at first connect, or silently ignored; (3) a private key pasted into the CA variable
-  (a common copy/paste mistake with combined PEM files) is echoed into logs or the admin viewer; (4) the CA and the path
-  are both set and the process silently picks one; (5) a string-only call site drops the inline CA and connects against
-  the system store.
+  (a common copy/paste mistake with combined PEM files), with or without its PEM armour, is echoed into logs or the admin
+  viewer; (4) the CA and the path are both set and the process silently picks one; (5) a string-only call site drops the
+  inline CA and connects against the system store; (6) a CA "file" that is a FIFO or a device hangs the boot.
 - **Controls:** `PG_SSL_CA_CERT` holds the PEM text (real newlines or `\n` escapes, so one env-file line works). It only
-  changes WHICH root is trusted: verification stays verify-full (chain AND host name, Node's default
-  `checkServerIdentity`, no override). `pg-tls.ts validatePgCaPem` runs at boot for BOTH sources (the path's file is now
-  held to the same rule): at least one PEM block, every block `CERTIFICATE` and parseable by `X509Certificate`, no
-  incomplete or mislabelled block, at most 256 KiB; a `PRIVATE KEY` block is refused with "treat that key as exposed";
-  any failure refuses to start. Both variables set refuses to start (before the file is read). Every message names the
-  variable only, never the text; the admin environment viewer lists `PG_SSL_CA_CERT` as a secret (Set / Not set). One
-  resolver (`resolvePgEnvironment`) serves the API, the Worker, db-setup's bootstrap child, the CLI and operator
-  scripts (`createPgClientForUrl` passes `PG_SSL_CA_CERT` through), so all of them verify identically.
-  `pgConnectionString` refuses an inline CA instead of dropping it (sslrootcert names a file). The bundled-db CA block in
-  `api-prestart.sh` / `worker-start.sh` / `db-setup.sh` no longer adds `PG_SSL_CA_CERT_PATH` when `PG_SSL_CA_CERT` is
-  set. The env-file lint (`compose-owner-login.cjs`) allows it in `database.env`, refuses it next to the path, and
-  refuses any non-certificate block, without echoing the value.
-- **Not added (owner decision pending, see the PR):** no `verify-ca` / host-name-off mode and no "allow any
-  certificate" mode in production. A server whose certificate cannot name the host the client dials (Railway's TCP
-  proxy: a per-instance self-signed CA with SAN `localhost` only; Cloud SQL dialled by IP) still fails closed. The PR
-  proposes, for the owner to veto, an expected-server-name option (verify the chain AND a configured name) rather than
-  `verify-ca`, because with a shared provider CA (an RDS regional CA, for example) `verify-ca` would accept any other
-  customer's certificate from the same CA.
+  changes WHICH root is trusted: verification stays verify-full, chain AND host name. The host-name check is Node's
+  default for a DNS host (pg sends the name as SNI); for an IP-literal host the `ssl` object carries an explicit
+  `checkServerIdentity` bound to that IP, which still calls `tls.checkServerIdentity` (see the finding below).
+  `pg-tls.ts validatePgCaPem` runs at boot for BOTH sources (the path's file is now held to the same rule): BEGIN/END
+  markers counted and balanced first; no base64 run of 64+ characters outside the blocks ("looks like key material");
+  at least one PEM block, every block `CERTIFICATE` and parseable by `X509Certificate`, no mislabelled block, at most
+  256 KiB; a `PRIVATE KEY` block is refused with "treat that key as exposed"; any failure refuses to start. The CA file
+  is opened non-blocking and fstat-checked before it is read (a regular file of at most 256 KiB). Both variables set
+  refuses to start (before the file is read). Every message names the variable only, never the text; the admin
+  environment viewer lists `PG_SSL_CA_CERT` as a secret (Set / Not set). One resolver (`resolvePgEnvironment`) serves the
+  API, the Worker, db-setup's bootstrap child, the CLI and operator scripts (`createPgClientForUrl` passes
+  `PG_SSL_CA_CERT` through), so all of them verify identically. `pgConnectionString` refuses an inline CA instead of
+  dropping it (sslrootcert names a file). The bundled-db CA block in `api-prestart.sh` / `worker-start.sh` /
+  `db-setup.sh` no longer adds `PG_SSL_CA_CERT_PATH` when `PG_SSL_CA_CERT` is set. The operator tools apply the same
+  rules through `packages/rab-docker/scripts/pg-ca-pem.cjs` (a dependency-free port; `pg-ca-pem-parity.spec.ts` requires
+  the same verdict, reason and normalised PEM over one corpus): the env-file lint (`compose-owner-login.cjs`) checks
+  `PG_SSL_CA_CERT` in `database.env`, refuses it next to the path, and refuses either CA key in `runtime.env`; the
+  `--environment` preflight (`staging/verify-image-compose.cjs`) checks the `CREWFLOW_PG_CA_FILE` that is mounted as
+  `PG_SSL_CA_CERT_PATH`. Nothing is echoed.
+- **Upgrade notes (stricter than before):** a `PG_SSL_CA_CERT_PATH` file holding anything but CERTIFICATE blocks (an
+  `X509 CRL`, a `TRUSTED CERTIFICATE`, a bundled key), or larger than 256 KiB, or not a regular file, now refuses to
+  boot (it used to pass a loose pattern check); run the `--environment` preflight first. A database dialled by IP address
+  now needs that IP as an IP SAN in its certificate (before, a `localhost` certificate from the trusted CA passed).
+- **Not added (owner-gated):** no `verify-ca` / host-name-off mode, no "allow any certificate" mode in production, and
+  no expected-server-name option. A server whose certificate cannot name the host the client dials (Railway's TCP
+  proxy: a per-instance self-signed CA with SAN `localhost` only; Cloud SQL dialled by IP) still fails closed. The
+  security review recommends against a server-name option for now; if the owner ever approves one, it must come with an
+  SPKI pin. `verify-ca` is rejected outright: with a shared provider CA (an RDS regional CA, for example) it would accept
+  any other customer's certificate from the same CA.
 - **Residual:** the CA's authenticity is the operator's to establish (download it from the provider over HTTPS, never
   from the server you are about to trust); a Linux environment string is capped at 128 KiB, so AWS's 170 KB global
   bundle must be replaced by the regional bundle (about 4.5 KB).
-- **Tests:** `pg-tls-ca.spec.ts` (33): valid PEM accepted (multi-line, `\n`-escaped, CRLF, space-collapsed, bundles,
-  explanatory text) and identical to the same PEM through the path; replica and operator-script client get it;
-  malformed refused (text, a path, missing END, truncated block, mismatched labels, empty, non-DER base64, corrupted
-  certificate, public key, private key, oversize; the path's file too); both set refused; empty = unset; the CA text in
-  no console line, warning, refusal message, env.validation message or admin viewer row.
-  `pg-tls-ca.integration.spec.ts` (9, real pg Client from the factory, production rules, a TLS-only PostgreSQL front with
-  an openssl CA made like the bundled db's): private CA as text and as one `\n` line → verified TLS session; path →
-  identical; a self-hosted self-signed certificate → verified; an IP host against an IP-SAN certificate → verified;
-  DENIAL without the CA, with the wrong CA, and with the right CA but a host the certificate does not name (127.0.0.1 vs
-  DNS:localhost); both variables → refused before any connection. `compose-owner-login.test.cjs`: the lint rules.
+- **Tests:** `pg-tls-ca.spec.ts` (46): valid PEM accepted (multi-line, `\n`-escaped, CRLF, space-collapsed, bundles,
+  short explanatory text) and identical to the same PEM through the path; replica and operator-script client get it;
+  malformed refused (text, a path, missing END, extra END, truncated block, mismatched labels, empty, non-DER base64,
+  corrupted certificate, public key, private key, bare key material outside the blocks, oversize; a path file with a
+  CRL or TRUSTED CERTIFICATE block); the default file reader refuses a directory, an oversize file (from its size) and a
+  missing file without naming it; both set refused; empty = unset; the IP binding (IPv4, IPv6, system store, DNS host
+  unchanged); the CA text in no console line, warning, refusal message, env.validation message or admin viewer row.
+  `create-pg-pool.spec.ts`: the IP-bound `checkServerIdentity` survives the TypeORM driver config, `pgPoolConfig`,
+  `pgClientConfig` and pg's `ConnectionParameters` (IPv4 and IPv6). `pg-ca-pem-parity.spec.ts` (20): the TypeScript and
+  the operator-tool port agree on 18 inputs. `pg-tls-ca.integration.spec.ts` (11; a plain `describe` behind the
+  throwing gate, so it fails, never skips, without its database; real pg Client from the factory, production rules, a
+  TLS-only PostgreSQL front on 127.0.0.1 and ::1 with an openssl CA made like the bundled db's): private CA as text and
+  as one `\n` line → verified TLS session; path → identical; a self-hosted self-signed certificate → verified; an IP
+  host against an IP-SAN certificate (IPv4 and `[::1]`) → verified; leaf + intermediate against the root, and a
+  leaf-only server against a root + intermediate bundle → verified; DENIAL without the CA, with the wrong CA, with a
+  leaf-only server and the root alone, and with the right CA but a host the certificate does not name (127.0.0.1 and
+  [::1] vs DNS:localhost); both variables → refused before any connection. `compose-owner-login.test.cjs`: the lint
+  rules (real certificate, key, bare key material, runtime.env refusal). `verify-image-compose.test.cjs`: the preflight
+  refuses a CA file with a CRL / TRUSTED CERTIFICATE / key block, oversize, a directory or a missing file.
   `run-prestart-shell-tests.cjs` 11n: host `db` with `PG_SSL_CA_CERT` set gets no path.
 - **Finding fixed in the same branch (found by the integration test): verify-full did not bind an IP-address host.**
   For an IP-literal host, pg 8.23 sets neither `servername` nor `host` on `tls.connect`, and Node then checks the
   certificate against the literal name `localhost` (reproduced on Node 24). So `postgresql://…@10.0.0.7/…?sslmode=verify-full`
   accepted any certificate from a trusted CA that names `localhost`, not one naming 10.0.0.7. With the system store that
-  was harmless (public CAs do not issue `localhost`); with an operator CA (`PG_SSL_CA_CERT_PATH` already, and now
-  `PG_SSL_CA_CERT`) it was a host-name bypass: for example, every Railway instance certificate names `localhost`. Fix:
-  `buildPgSsl` takes the dialled host and, for an IP literal (IPv4 or IPv6), sets an explicit `checkServerIdentity`
-  bound to that IP; DNS hosts keep Node's default check (pg sends the name as SNI). `pgConnectionString` refuses an IP
-  host with verify-full (the string form cannot carry the check). Tests: unit (IPv4/IPv6: a `localhost` or other-IP
-  certificate refused with `ERR_TLS_CERT_ALTNAME_INVALID`, the right IP SAN accepted; system store too; DNS host
-  unchanged) and the integration denial above, which failed before the fix (the `localhost` certificate was accepted
-  for 127.0.0.1).
+  was harmless (public CAs do not issue `localhost`). With an operator CA (`PG_SSL_CA_CERT_PATH` already, and now
+  `PG_SSL_CA_CERT`) it was a host-name bypass whenever that CA had issued a `localhost` certificate: for example, an
+  operator who configured a Railway instance's own CA would have accepted that instance's certificate (SAN `localhost`)
+  for any IP. Fix: `buildPgSsl` takes the dialled host and, for an IP literal (IPv4 or IPv6), sets an explicit
+  `checkServerIdentity` bound to that IP, which calls `tls.checkServerIdentity(ip, cert)`; DNS hosts keep Node's default
+  check. `pgConnectionString` refuses an IP host with verify-full (the string form cannot carry the check). Tests: the
+  unit and integration cases above; the integration denial failed before the fix (the `localhost` certificate was
+  accepted for 127.0.0.1).

@@ -1,3 +1,7 @@
+import * as fs from 'fs';
+import * as os from 'os';
+import * as path from 'path';
+
 import { createPgClientForUrl, pgClientConfig, pgConnectionString } from '../create-pg-pool';
 import { emitPgWarnings, PgConfigError, resolvePgEnvironment, resolvePgEnvironmentCached } from '../pg-config';
 import { describePgSsl, PG_CA_PEM_MAX_BYTES, validatePgCaPem } from '../pg-tls';
@@ -241,5 +245,61 @@ describe('PG_SSL_CA_CERT never appears in a log line, an error message or the ad
     const row = rows.find((r) => r.key === 'PG_SSL_CA_CERT');
     expect(row).toMatchObject({ state: 'set', value: null });
     assertNoCaText([JSON.stringify(rows)]);
+  });
+});
+
+describe('I-1 / I-2: key material outside the blocks, unbalanced markers, and the CA file itself', () => {
+  it('refuses a long base64 run outside every PEM block ("looks like key material"), without echoing it', () => {
+    const bare = 'MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgAAAAAAAAAAAAAAAAAAAAAAAAAAAA';
+    const message = refusal({ ...prod, PG_SSL_CA_CERT: `${TEST_CA_A}${bare}\n` });
+    expect(message).toMatch(/PG_SSL_CA_CERT holds a long base64 run outside the PEM blocks, which looks like key material/);
+    expect(message).not.toContain('MIGH');
+    // Short explanatory text (RFC 7468) stays accepted.
+    expect(resolvePgEnvironment({ ...prod, PG_SSL_CA_CERT: `Issuer: crewflow unit-test CA a (expires 2126)\n${TEST_CA_A}` }, { processRole: 'api' }).tls.caPem).toBe(TEST_CA_A);
+  });
+
+  it.each([
+    ['an END without a BEGIN', `${TEST_CA_A}-----END CERTIFICATE-----\n`],
+    ['two BEGINs, one END', `-----BEGIN CERTIFICATE-----\n${TEST_CA_A}`],
+  ])('counts BEGIN/END markers first and refuses %s', (_n, value) => {
+    expect(refusal({ ...prod, PG_SSL_CA_CERT: value })).toMatch(/contains an incomplete PEM block/);
+  });
+
+  it.each([
+    ['a CRL block', `${TEST_CA_A}-----BEGIN X509 CRL-----\nMIIBFjCBvQIBATAKBggqhkjOPQQDAjAi\n-----END X509 CRL-----\n`, /"X509 CRL" PEM block/],
+    ['a TRUSTED CERTIFICATE block', TEST_CA_A.replace(/CERTIFICATE/g, 'TRUSTED CERTIFICATE'), /"TRUSTED CERTIFICATE" PEM block/],
+  ])('PG_SSL_CA_CERT_PATH: a file with %s now refuses to boot (upgrade note)', (_n, content, expected) => {
+    expect(refusal({ ...prod, PG_SSL_CA_CERT_PATH: '/ca.pem' }, () => content)).toMatch(expected);
+  });
+
+  describe('the default reader (readPgCaFile): fstat before reading', () => {
+    let dir: string;
+    beforeAll(() => {
+      dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pg-ca-file-'));
+    });
+    afterAll(() => fs.rmSync(dir, { recursive: true, force: true }));
+    const fileEnv = (p: string) => ({ ...prod, PG_SSL_CA_CERT_PATH: p });
+
+    it('a regular file within the cap is read and validated', () => {
+      const p = path.join(dir, 'ca.pem');
+      fs.writeFileSync(p, TEST_CA_A);
+      expect(resolvePgEnvironment(fileEnv(p), { processRole: 'api' }).tls).toMatchObject({ caSource: 'PG_SSL_CA_CERT_PATH', caPem: TEST_CA_A });
+    });
+
+    it('a directory is refused as "not a regular file"', () => {
+      expect(refusal(fileEnv(dir))).toMatch(/PG_SSL_CA_CERT_PATH does not name a regular file/);
+    });
+
+    it('a file over 256 KiB is refused from its size, before it is read', () => {
+      const p = path.join(dir, 'big.pem');
+      fs.writeFileSync(p, Buffer.alloc(PG_CA_PEM_MAX_BYTES + 1, 0x41));
+      expect(refusal(fileEnv(p))).toMatch(/PG_SSL_CA_CERT_PATH is larger than 256 KiB/);
+    });
+
+    it('a missing file is refused without naming the path', () => {
+      const message = refusal(fileEnv(path.join(dir, 'missing.pem')));
+      expect(message).toMatch(/PG_SSL_CA_CERT_PATH is set but the file cannot be read/);
+      expect(message).not.toContain('missing.pem');
+    });
   });
 });
