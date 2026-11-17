@@ -340,8 +340,9 @@ services:
       # PG_ADMIN_URL pinned "" as on production's rab-api / rab-worker (owner decision L-2).
       PG_ADMIN_URL: ''
       TEST_DATABASE_URL: ''
+      # The deprecated test admin name (X3.5-S7) is deliberately NOT listed: a .env that still carries it holds a postgres
+      # URL, which the entrypoints' generic database-URL refusal stops (exit 64, value not shown). Rename it in the .env.
       TEST_DATABASE_ADMIN_URL: ''
-      TEST_DATABASE_URL_UNPOOLED: ''
       TEST_DATABASE_CREWFLOW_URL: ''
       MIGRATION_SECURITY_ADMIN_URL: ''
       # DB_TARGET is command authority (database-target.ts: migrations and CLI commands only); api-prestart.sh and the API
@@ -469,8 +470,9 @@ services:
       # PG_ADMIN_URL pinned "" as on production's rab-api / rab-worker (owner decision L-2).
       PG_ADMIN_URL: ''
       TEST_DATABASE_URL: ''
+      # The deprecated test admin name (X3.5-S7) is deliberately NOT listed: a .env that still carries it holds a postgres
+      # URL, which the entrypoints' generic database-URL refusal stops (exit 64, value not shown). Rename it in the .env.
       TEST_DATABASE_ADMIN_URL: ''
-      TEST_DATABASE_URL_UNPOOLED: ''
       TEST_DATABASE_CREWFLOW_URL: ''
       MIGRATION_SECURITY_ADMIN_URL: ''
       # O1: no provisioner credential (provisioning runs in-process); blanked in case ../rab-server/.env sets it.

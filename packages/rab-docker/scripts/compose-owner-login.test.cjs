@@ -823,7 +823,9 @@ test('DENIAL ADMIN_URL_PLACEMENT: PG_ADMIN_URL with a value on rab-api / rab-wor
   }
   // The dev stack blanks the host-native test / harness URLs its server and worker could read from ../rab-server/.env.
   const dev = fs.readFileSync(path.join(__dirname, '..', 'docker-compose.yml'), 'utf8');
-  for (const name of ['TEST_DATABASE_URL', 'TEST_DATABASE_ADMIN_URL', 'TEST_DATABASE_URL_UNPOOLED', 'TEST_DATABASE_CREWFLOW_URL', 'MIGRATION_SECURITY_ADMIN_URL']) {
+  // The deprecated test admin name is not blanked (X3.5-S7: no code line names only the old name); the entrypoints' generic
+  // database-URL refusal stops a .env that still carries it.
+  for (const name of ['TEST_DATABASE_URL', 'TEST_DATABASE_ADMIN_URL', 'TEST_DATABASE_CREWFLOW_URL', 'MIGRATION_SECURITY_ADMIN_URL']) {
     assert.equal(dev.split('\n').filter((l) => new RegExp(`^\\s*${name}: ''\\s*$`).test(l)).length, 2, `docker-compose.yml: ${name} blanked on server and worker`);
   }
   // L-3: anchored, tagged and merge-key service headers are still read as service headers.
