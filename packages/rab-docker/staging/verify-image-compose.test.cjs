@@ -500,6 +500,8 @@ test('DENIAL DB-SETUP static: the bundled db must be identical in both files, un
     ['db on the default network', (v) => { v.services.db.networks = { default: null, 'crewflow-db': null }; }, /db: must be on the internal crewflow-db network only|db\.networks differs/],
     ['db network not internal', (v) => { v.networks['crewflow-db'].internal = false; }, /crewflow-db is not internal/],
     ['db image by another digest', (v) => { v.services.db.image = `postgres@sha256:${'0'.repeat(64)}`; }, /db\.image differs/],
+    ['db replica count differs (CREWFLOW_BUNDLED_DB)', (v) => { v.services.db.deploy = { ...v.services.db.deploy, replicas: 2 }; }, /db\.deploy differs/],
+    ['db scaled another way', (v) => { v.services.db.scale = 2; }, /db\.scale differs/],
     ['the Worker started without worker-start.sh', (v) => { delete v.services['rab-worker'].entrypoint; v.services['rab-worker'].command = ['node', 'packages/rab-worker/dist/main.js']; }, /rab-worker: entrypoint is not exactly \.\/worker-start\.sh/],
     ['the API started without api-prestart.sh as PID 1', (v) => { v.services['rab-api'].entrypoint = ['/sbin/tini', '-s', '--']; v.services['rab-api'].command = ['./api-prestart.sh']; }, /rab-api: entrypoint is not exactly \.\/api-prestart\.sh/],
     ['compose init on the Worker (docker-init keeps the admin URL)', (v) => { v.services['rab-worker'].init = true; }, /rab-worker: init: true/],

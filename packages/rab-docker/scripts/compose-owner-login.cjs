@@ -14,6 +14,8 @@
  *   docker-compose.image.yml                                   (bundled db: compose.env sets only PG_DATABASE_PASSWORD)
  *   docker-compose.image.yml                                   (external: compose.env also sets PG_DATABASE_URL = an admin URL)
  *   docker-compose.image.yml                                   (pass-through: compose.env sets PG_DATABASE_URL = crewflow_owner)
+ *   docker-compose.image.yml                                   (external-no-db / pass-through-no-db: either URL plus
+ *                                                               CREWFLOW_BUNDLED_DB=0, Twenty's Helm db.enabled=false)
  *   docker-compose.image.yml + staging/docker-compose.staging.yml
  * from sentinel env files only (no real .env, compose.env or secret of this machine is read; CREWFLOW_* / COMPOSE_* /
  * PG_DATABASE_* are removed from the child environment because they would win over --env-file), and asserts on each
@@ -68,6 +70,9 @@
  *     POSTGRES_PASSWORD_FILE / trust / database URL, TLS on with the certificate it makes itself (verify-full kept), the
  *     superuser never named crewflow_owner; rab-api waits for it healthy; rab-api and rab-worker mount only its CA volume,
  *     read-only; PG_DATABASE_PASSWORD reaches no container (only db's POSTGRES_PASSWORD and db-setup's default URL hold it).
+ *     Exactly one db replica (deploy.replicas, never `scale`); 0 only in the -no-db combinations, i.e. compose.env's
+ *     CREWFLOW_BUNDLED_DB=0 with PG_DATABASE_URL set (Twenty's Helm db.enabled=false; the env-file lint refuses 0 without
+ *     PG_DATABASE_URL and any value but 0 or 1).
  * STATIC mode lints the committed templates and renders docker-compose.image.yml, checking only the bundled-database rules.
  * Prints service names, variable NAMES and check results only, never a value.
  * Exit 0 = all checks passed, 1 = a check failed, 2 = usage error or docker compose unavailable.
@@ -96,6 +101,10 @@ const COMBOS = Object.freeze([
   { name: 'default', files: ['image'], external: false, staging: false },
   { name: 'external', files: ['image'], external: 'admin', staging: false }, // compose.env: PG_DATABASE_URL = an admin URL
   { name: 'pass-through', files: ['image'], external: 'owner', staging: false },
+  // Twenty's Helm db.enabled=false: your own database (either URL) and CREWFLOW_BUNDLED_DB=0 in compose.env, so the bundled
+  // db renders with 0 replicas (never started; Compose skips the wait on it). Every other rule is unchanged.
+  { name: 'external-no-db', files: ['image'], external: 'admin', staging: false, bundledDb: 0 },
+  { name: 'pass-through-no-db', files: ['image'], external: 'owner', staging: false, bundledDb: 0 },
   { name: 'staging', files: ['image', 'staging'], external: false, staging: true },
 ]);
 const STATIC_COMBO = Object.freeze({ name: 'static:image', files: ['image'], external: false });
@@ -104,6 +113,9 @@ const OWNER_LOGIN = 'crewflow_owner';
 /** DB-SETUP: the bundled database service and the one compose-only variable that holds its superuser password. */
 const DB_SERVICE = 'db';
 const DB_PASSWORD_KEY = 'PG_DATABASE_PASSWORD';
+/** compose.env: the bundled db on (1, the default when unset) or off (0, only with PG_DATABASE_URL); its replica count. */
+const BUNDLED_DB_KEY = 'CREWFLOW_BUNDLED_DB';
+const BUNDLED_DB_VALUES = Object.freeze(['0', '1']);
 /** Where the app services mount the bundled db's CA volume (read-only), and the db's own volume targets. */
 const DB_CA_VOLUME = 'crewflow-db-ca';
 const DB_CA_TARGET = '/run/crewflow/db-ca';
@@ -607,9 +619,21 @@ function hardeningProblems(name, s, p, { longRunning }) {
  * H1-H6 hardening, digest, no port, internal network only, TLS on (verify-full clients), never trust, no database URL, the
  * superuser never crewflow_owner.
  */
-function bundledDbProblems(services, model, p) {
+function bundledDbProblems(services, model, p, { replicas: wantReplicas = 1 } = {}) {
   const db = services[DB_SERVICE];
   if (!db) { p(`${DB_SERVICE}: missing (the bundled database)`); return; }
+  // Twenty's Helm db.enabled: exactly ONE bundled server (one per data volume), or none (CREWFLOW_BUNDLED_DB=0 with your
+  // own database). Never `scale`, never another replica count, never 0 while db-setup's URL is the bundled db.
+  if ('scale' in db) p(`${DB_SERVICE}: has scale (its replica count is deploy.replicas, from ${BUNDLED_DB_KEY} only)`);
+  const replicas = db.deploy?.replicas;
+  if (replicas !== wantReplicas) {
+    const why = wantReplicas === 0 ? `${BUNDLED_DB_KEY}=0 with your own database` : `one bundled server; 0 only with ${BUNDLED_DB_KEY}=0 and PG_DATABASE_URL`;
+    p(`${DB_SERVICE}: deploy.replicas is ${replicas === undefined ? 'unset' : replicas}, expected ${wantReplicas} (${why})`);
+  }
+  // `docker compose config` renders empty deploy.resources / deploy.placement objects; anything in them is refused.
+  for (const [key, value] of Object.entries(db.deploy ?? {})) {
+    if (key !== 'replicas' && JSON.stringify(value) !== '{}') p(`${DB_SERVICE}: deploy.${key} is set (only deploy.replicas)`);
+  }
   hardeningProblems(DB_SERVICE, db, p, { longRunning: true });
   // PR #124's rule for every deploy service: no profile (a profile-gated db would not start with the stack, or would hide).
   if (Array.isArray(db.profiles) && db.profiles.length) p(`${DB_SERVICE}: has profiles (it would not start with the stack)`);
@@ -924,7 +948,7 @@ function checkModel(model, combo) {
     if (model?.name !== 'crewflow-staging') p(`project name is "${model?.name}", expected crewflow-staging`);
     for (const n of ['rab-api', 'rab-worker']) if (envOf(services[n]).STORAGE_KEY_PREFIX !== 'staging') p(`${n}: STORAGE_KEY_PREFIX is not staging`);
   }
-  bundledDbProblems(services, model, p);
+  bundledDbProblems(services, model, p, { replicas: combo.bundledDb ?? 1 });
   return problems;
 }
 
@@ -1016,6 +1040,7 @@ function lintEnvText(kind, text, { template = false } = {}) {
       // no API-only or Worker-only deploy path.
       if (/^CREWFLOW_(API|WORKER|OPS)_IMAGE_(DIGEST|REPOSITORY|TAG)$/.test(key)) problems.push(`${key}: retired (O2: one image); set CREWFLOW_IMAGE_${key.endsWith('REPOSITORY') ? 'REPOSITORY' : 'TAG'} instead`);
       if (key === 'CREWFLOW_API_BIND' && ['0.0.0.0', '::', ''].includes(value)) problems.push(`${key}: binds every interface`);
+      if (key === BUNDLED_DB_KEY && !BUNDLED_DB_VALUES.includes(value)) problems.push(`${key}: must be exactly 0 or 1 (the bundled db off or on: one server per data volume)`);
     }
     if (key !== URL_KEY && isPgUrl(value)) problems.push(`${key}: holds a PostgreSQL URL (a second database identity)`);
   }
@@ -1026,6 +1051,12 @@ function lintEnvText(kind, text, { template = false } = {}) {
   // your database's ADMIN URL (T-1 accepts a provider admin login) or an existing crewflow_owner URL (pass-through, D5);
   // either way it reaches db-setup only. A former separated login, TLS below verify-full, a transaction pooler and a URL
   // without a password are refused.
+  // Twenty's Helm db.enabled=false needs an external database: CREWFLOW_BUNDLED_DB=0 without PG_DATABASE_URL would leave
+  // db-setup pointed at a db that never starts (it fails closed at start, but the file is wrong, so the lint says so).
+  if (kind === 'compose' && entries.some((e) => e.key === BUNDLED_DB_KEY && e.value === '0')) {
+    const url = entries.find((e) => e.key === URL_KEY)?.value;
+    if (url === undefined || url === '') problems.push(`${BUNDLED_DB_KEY}: 0 (no bundled db) needs your own database in ${URL_KEY}`);
+  }
   if (kind === 'compose') {
     for (const key of [URL_KEY]) {
       const url = entries.find((e) => e.key === key)?.value;
@@ -1110,11 +1141,17 @@ function renderModels(combos = COMBOS, extraComposeEnv = [], extraRuntimeEnv = [
     const envFor = { admin: path.join(tmp, 'compose.external.env'), owner: path.join(tmp, 'compose.pass-through.env') };
     fs.writeFileSync(envFor.admin, `${fs.readFileSync(composeEnv, 'utf8')}${URL_KEY}=${SENTINEL_ADMIN_URL}\n`, { mode: 0o600 });
     fs.writeFileSync(envFor.owner, `${fs.readFileSync(composeEnv, 'utf8')}${URL_KEY}=${SENTINEL_URL}\n`, { mode: 0o600 });
+    // The same two with the bundled db switched off (CREWFLOW_BUNDLED_DB=0, like Twenty's Helm db.enabled=false).
+    for (const k of ['admin', 'owner']) {
+      envFor[`${k}-no-db`] = path.join(tmp, `compose.${k}-no-db.env`);
+      fs.writeFileSync(envFor[`${k}-no-db`], `${fs.readFileSync(envFor[k], 'utf8')}${BUNDLED_DB_KEY}=0\n`, { mode: 0o600 });
+    }
     const childEnv = Object.fromEntries(Object.entries(process.env).filter(([k]) => !/^(CREWFLOW_|COMPOSE_|PG_DATABASE_)/i.test(k)));
     const models = {};
     for (const combo of combos) {
       // --project-directory: relative env_file / bind paths resolve in the throw-away directory, never this checkout.
-      const args = ['compose', '--env-file', combo.external ? envFor[combo.external] : composeEnv, '--project-directory', project];
+      const envKey = combo.external ? `${combo.external}${combo.bundledDb === 0 ? '-no-db' : ''}` : null;
+      const args = ['compose', '--env-file', envKey ? envFor[envKey] : composeEnv, '--project-directory', project];
       // A combo names FILES keys; a test may pass a compose file path instead (a weakened copy of a committed file).
       for (const f of combo.files) args.push('-f', FILES[f] ?? f);
       // Every profile (security review of PR #124, MEDIUM): a profile-gated service is rendered, so the exact service list
@@ -1203,7 +1240,7 @@ function main(argv) {
 if (require.main === module) process.exitCode = main(process.argv.slice(2));
 
 module.exports = {
-  FILES, TEMPLATES, COMBOS, STATIC_COMBO, DB_SERVICE, DB_SETUP_SERVICE, DB_TARGET_VOLUME, DB_TARGET_DIR, SENTINEL_ADMIN_PW, SENTINEL_ADMIN_URL, dbSetupProblems, appCredentialProblems, credentialMountProblems, topLevelVolumeProblems, bundledDbEnvironmentProblems, DB_INITDB_ARGS, DB_ENV_KEYS, DB_PASSWORD_KEY, SENTINEL_DB_PW, BUNDLED_URL, NOT_THE_APP_LOGIN, NOTIFICATION_DELIVERY, PHASE_D_SWITCHES, PHASE_D_UNCHANGED, STATEMENT_DISPATCH, FEATURE_SWEEPS, SWITCH_VALUES, STRICT_SWITCHES, X31_SWITCHES, scanStrictSwitches, ENVIRONMENT_VARIABLES_TS, strictSwitchProblems, featureSweepProblems, composeEnvValue, AUDIT_SINK_MODES, AUDIT_SINK_PRODUCTION_MODES, AUDIT_SINK_FAILURES,
+  FILES, TEMPLATES, COMBOS, STATIC_COMBO, DB_SERVICE, DB_SETUP_SERVICE, DB_TARGET_VOLUME, DB_TARGET_DIR, SENTINEL_ADMIN_PW, SENTINEL_ADMIN_URL, dbSetupProblems, appCredentialProblems, credentialMountProblems, topLevelVolumeProblems, bundledDbEnvironmentProblems, DB_INITDB_ARGS, DB_ENV_KEYS, DB_PASSWORD_KEY, BUNDLED_DB_KEY, bundledDbProblems, SENTINEL_DB_PW, BUNDLED_URL, NOT_THE_APP_LOGIN, NOTIFICATION_DELIVERY, PHASE_D_SWITCHES, PHASE_D_UNCHANGED, STATEMENT_DISPATCH, FEATURE_SWEEPS, SWITCH_VALUES, STRICT_SWITCHES, X31_SWITCHES, scanStrictSwitches, ENVIRONMENT_VARIABLES_TS, strictSwitchProblems, featureSweepProblems, composeEnvValue, AUDIT_SINK_MODES, AUDIT_SINK_PRODUCTION_MODES, AUDIT_SINK_FAILURES,
   AUDIT_SINK_PRODUCTION_FAILURES, SENTINEL_URL, SENTINEL_OWNER_PW, SENTINEL_APP_SECRET,
   SENTINEL_REDIS_PW, SENTINEL_LEGACY_PW, forbiddenReason, durationSeconds, checkModel, checkStaticModel, parseEnvText,
   lintEnvText, lintComposeText, renderModels, staticProblems, main,

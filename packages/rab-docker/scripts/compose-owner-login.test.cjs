@@ -132,6 +132,21 @@ test('DB-SETUP compose env (option 2): the bundled db needs only PG_DATABASE_PAS
   }
 });
 
+// Twenty's Helm db.enabled: CREWFLOW_BUNDLED_DB is the bundled db's replica count, 1 (default) or 0 with your own database.
+test('bundled db switch: CREWFLOW_BUNDLED_DB=1 always, =0 with PG_DATABASE_URL', () => {
+  assert.deepEqual(lintEnvText('compose', `${COMPOSE_OK}\nCREWFLOW_BUNDLED_DB=1`), []);
+  assert.deepEqual(lintEnvText('compose', `${COMPOSE_OK}\nPG_DATABASE_URL=${URL_OK}\nCREWFLOW_BUNDLED_DB=0`), []);
+  assert.deepEqual(lintEnvText('compose', `${COMPOSE_OK}\nPG_DATABASE_URL=${URL_OK}\nCREWFLOW_BUNDLED_DB=1`), []);
+});
+
+test('DENIAL bundled db switch: 0 without your own database, any value but 0 or 1', () => {
+  assertRefused(lintEnvText('compose', `${COMPOSE_OK}\nCREWFLOW_BUNDLED_DB=0`), /^CREWFLOW_BUNDLED_DB: 0 \(no bundled db\) needs your own database in PG_DATABASE_URL/);
+  assertRefused(lintEnvText('compose', `${COMPOSE_OK}\nPG_DATABASE_URL=\nCREWFLOW_BUNDLED_DB=0`), /^CREWFLOW_BUNDLED_DB: 0 \(no bundled db\) needs your own database/);
+  for (const v of ['2', '', 'false', 'no', '00', '-1', 'true', '"0"x']) {
+    assertRefused(lintEnvText('compose', `${COMPOSE_OK}\nPG_DATABASE_URL=${URL_OK}\nCREWFLOW_BUNDLED_DB=${v}`), /^CREWFLOW_BUNDLED_DB: must be exactly 0 or 1/);
+  }
+});
+
 test('DENIAL L1: a CREWFLOW_TEST_* seam is refused in every env file and as a container variable', () => {
   for (const name of ['CREWFLOW_TEST_DB_SETUP_WAIT_SECONDS', 'CREWFLOW_TEST_OWNER_SETUP_ABORT', 'CREWFLOW_TEST_ANYTHING']) {
     assert.match(forbiddenReason(name), /a test seam/);

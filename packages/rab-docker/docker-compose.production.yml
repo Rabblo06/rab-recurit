@@ -32,7 +32,7 @@
 # APP_SECRET): the one database setting, PG_DATABASE_URL, then defaults to the bundled `db` service's superuser,
 # sslmode=verify-full (db makes its own CA; the app mounts it read-only). Your own database instead: set PG_DATABASE_URL to
 # its ADMIN URL (DIRECT host, sslmode=verify-full), or to an existing crewflow_owner URL (D5, DB-SETUP-PLAN §7.1: checked
-# read-only, used unchanged); `db` then runs idle. PR #125 option 2: PG_DATABASE_URL is
+# read-only, used unchanged), plus CREWFLOW_BUNDLED_DB=0 so `db` never starts. PR #125 option 2: PG_DATABASE_URL is
 # interpolated ONLY into the one-shot `db-setup` service, which runs the bootstrap child (the ONLY connection with it),
 # writes a credential-free target file to the crewflow-db-target volume and exits. rab-api and rab-worker never receive
 # PG_DATABASE_URL in any form: they build the crewflow_owner URL from that file and the crewflow_owner password file (a
@@ -328,8 +328,9 @@ services:
   # pg_isready (the health check) does not authenticate. The image reads the superuser password ONLY when the data volume is
   # empty (first start): changing PG_DATABASE_PASSWORD later does not change it (ALTER ROLE postgres PASSWORD ... first).
   # EXTERNAL DATABASE: set PG_DATABASE_URL to your database's admin URL (or an existing crewflow_owner URL; direct host,
-  # sslmode=verify-full); the app then ignores this service, which still runs idle and still needs a PG_DATABASE_PASSWORD
-  # (any strong value).
+  # sslmode=verify-full) and CREWFLOW_BUNDLED_DB=0 (like Twenty's Helm db.enabled=false): this service then gets 0 replicas
+  # and never starts. PG_DATABASE_PASSWORD must still be set to some strong value: Compose interpolates every service,
+  # including one with 0 replicas, and its ${PG_DATABASE_PASSWORD:?...} refusal stays fail-closed for the bundled default.
   # Image: postgres:16 (Debian, 16.15), by its multi-platform index digest. CREWFLOW_POSTGRES_IMAGE may name a Debian
   # postgres:16, :17 or :18 image by digest. VOLUME LAYOUT, the same for all three (a fresh named volume takes the ownership
   # of the image directory it is mounted on, and as uid 999 the db can only use volumes whose root it can write):
@@ -341,6 +342,11 @@ services:
   # A major upgrade is a dump/restore (or pg_upgrade) into a new volume, never a silent image change.
   # ---------------------------------------------------------------------------
   db:
+    # PostgreSQL 16 (checked 2026-11-17): this is the official library/postgres multi-platform INDEX digest of postgres:16.15
+    # (Debian trixie; amd64, arm64 and the other official platforms). On Docker Hub (registry-1.docker.io/v2/library/postgres)
+    # the tags 16.15 and 16.15-trixie resolve to exactly this digest, and its amd64 and arm64 image configs carry PG_MAJOR=16
+    # and PG_VERSION=16.15-1.pgdg13+2. The moving postgres:16 tag has since moved on to 16.16 (a different digest): a bump is
+    # a reviewed change of this line in every file that copies this service, never a tag.
     image: ${CREWFLOW_POSTGRES_IMAGE:-postgres@sha256:f9a7b9ebf6f56201f949db745e47bc423c0f0f8294bafe991cc10bf74b029657}
     entrypoint:
       - /bin/sh
@@ -422,6 +428,13 @@ services:
       timeout: 5s
       retries: 30
       start_period: 60s
+    # Twenty's Helm `db.enabled`: CREWFLOW_BUNDLED_DB (compose.env) 1 = run this bundled db (the default); 0 = your own
+    # database in PG_DATABASE_URL: no db container is created, and Compose skips the wait on a dependency that has 0
+    # replicas (db-setup and rab-api start without it). 0 without PG_DATABASE_URL fails closed: db-setup cannot reach `db`,
+    # exits non-zero, and rab-api never starts. The compose.env lint accepts only 0 or 1, and 0 only with PG_DATABASE_URL.
+    # Development and QA never set it (they have no external database).
+    deploy:
+      replicas: ${CREWFLOW_BUNDLED_DB:-1}
     restart: unless-stopped
     # SIGINT = PostgreSQL fast shutdown (checkpoint, then exit); give it time before SIGKILL.
     stop_signal: SIGINT
@@ -472,6 +485,10 @@ services:
   # volume read-only and build the crewflow_owner URL from the two files. It runs again on every `docker compose up` (it
   # removes the old target first, never the password file), then rab-api starts (depends_on:
   # service_completed_successfully). No port, no health check (it exits), never restarted.
+  # Running it again is safe: it only creates what is missing (role, grants, password file) and exits 0 when all exists.
+  # It also runs with CREWFLOW_BUNDLED_DB=0 (unlike Twenty's `if db.enabled` init containers): your own database still
+  # needs crewflow_owner created (admin URL) or checked (crewflow_owner URL), and db-setup's files are the only way the
+  # crewflow_owner credential reaches rab-api and rab-worker without a database URL in their environment.
   # ---------------------------------------------------------------------------
   db-setup:
     image: ${CREWFLOW_IMAGE_REPOSITORY:-adhin007/adolphus}@${CREWFLOW_IMAGE_TAG:-sha256:b2bd3bc40131df1245f60afb435e3b3d7eb8391168620e31e779078695d4b980}
@@ -480,9 +497,9 @@ services:
       # The ONE database setting, this service only: PG_DATABASE_URL (your own database's admin URL, or an existing
       # crewflow_owner URL; DIRECT host, sslmode=verify-full), else the bundled db's superuser built from PG_DATABASE_PASSWORD.
       PG_DATABASE_URL: ${PG_DATABASE_URL:-postgresql://postgres:${PG_DATABASE_PASSWORD:?PG_DATABASE_PASSWORD is required (the bundled db), or set PG_DATABASE_URL}@db:5432/crewflow?sslmode=verify-full}
-      # The same TLS settings as rab-api / rab-worker (the shared optional list above).
+      # The TLS trust setting of rab-api / rab-worker (the shared optional list above): an external database's CA file.
+      # Not PG_DATABASE_URL_IS_DIRECT: the bootstrap child refuses a transaction-pooler URL whatever that flag says.
       PG_SSL_CA_CERT_PATH:
-      PG_DATABASE_URL_IS_DIRECT:
       NODE_ENV: production
       RAB_RUNTIME_ENV: production
     networks: [default, crewflow-db]
@@ -563,7 +580,7 @@ services:
     depends_on:
       rab-redis:
         condition: service_healthy
-      # The bundled db (idle with your own database).
+      # The bundled db (with CREWFLOW_BUNDLED_DB=0 it has 0 replicas and Compose skips this wait).
       db:
         condition: service_healthy
       # Option A: db-setup (the only service with the admin URL) has created crewflow_owner and written the target file.

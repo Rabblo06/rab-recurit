@@ -60,6 +60,11 @@ services:
   # first, then copy it here and to docker-compose.yml: compose-credential-isolation.cjs compares the rendered services.
   # ---------------------------------------------------------------------------
   db:
+    # PostgreSQL 16 (checked 2026-11-17): this is the official library/postgres multi-platform INDEX digest of postgres:16.15
+    # (Debian trixie; amd64, arm64 and the other official platforms). On Docker Hub (registry-1.docker.io/v2/library/postgres)
+    # the tags 16.15 and 16.15-trixie resolve to exactly this digest, and its amd64 and arm64 image configs carry PG_MAJOR=16
+    # and PG_VERSION=16.15-1.pgdg13+2. The moving postgres:16 tag has since moved on to 16.16 (a different digest): a bump is
+    # a reviewed change of this line in every file that copies this service, never a tag.
     image: ${CREWFLOW_POSTGRES_IMAGE:-postgres@sha256:f9a7b9ebf6f56201f949db745e47bc423c0f0f8294bafe991cc10bf74b029657}
     entrypoint:
       - /bin/sh
@@ -141,6 +146,13 @@ services:
       timeout: 5s
       retries: 30
       start_period: 60s
+    # Twenty's Helm `db.enabled`: CREWFLOW_BUNDLED_DB (compose.env) 1 = run this bundled db (the default); 0 = your own
+    # database in PG_DATABASE_URL: no db container is created, and Compose skips the wait on a dependency that has 0
+    # replicas (db-setup and rab-api start without it). 0 without PG_DATABASE_URL fails closed: db-setup cannot reach `db`,
+    # exits non-zero, and rab-api never starts. The compose.env lint accepts only 0 or 1, and 0 only with PG_DATABASE_URL.
+    # Development and QA never set it (they have no external database).
+    deploy:
+      replicas: ${CREWFLOW_BUNDLED_DB:-1}
     restart: unless-stopped
     # SIGINT = PostgreSQL fast shutdown (checkpoint, then exit); give it time before SIGKILL.
     stop_signal: SIGINT
