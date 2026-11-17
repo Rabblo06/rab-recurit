@@ -1,9 +1,10 @@
-import { ReplacementRequestStatus, ShiftStatus } from '@rab/shared';
-import { ConflictException, Injectable, NotFoundException } from '@nestjs/common';
+import { PermissionFlag, ReplacementRequestStatus, ShiftStatus } from '@rab/shared';
+import { ConflictException, Inject, Injectable, NotFoundException } from '@nestjs/common';
 import { EntityManager } from 'typeorm';
 import { AvailabilityAcknowledgement } from '../../staff/services/staff-availability';
 
 import { AuditAction, AuditService } from '../../../engine/core-modules/audit/audit.service';
+import { PermissionsService } from '../../../engine/core-modules/permissions/permissions.service';
 import { ResourceScopeService } from '../../../engine/core-modules/resource-scope/resource-scope.service';
 import { AuthContext } from '../../../engine/core-modules/tenant/auth-context.interface';
 import { businessTables } from '../../../engine/core-modules/tenant/business-tables';
@@ -44,6 +45,10 @@ import { OfferService } from './offer.service';
  */
 @Injectable()
 export class ReplacementRequestService {
+  /** SF-2 layer 2 (each public method re-checks its route's flag). Property-injected so the constructor is unchanged. */
+  @Inject(PermissionsService)
+  private readonly permissions!: PermissionsService;
+
   constructor(
     private readonly tenantContext: TenantContextService,
     private readonly offerService: OfferService,
@@ -68,6 +73,7 @@ export class ReplacementRequestService {
 
   async list(ctx: AuthContext): Promise<ReplacementRequest[]> {
     return this.tenantContext.runInWorkspaceContext(ctx, async (manager) => {
+      await this.permissions.assertPermissionTx(manager, ctx, PermissionFlag.SCHEDULE_VIEW);
       const scope = await this.resourceScope.resolveTx(manager, ctx);
       if (scope.kind === 'venue' && scope.venueIds.length === 0) return [];
 
@@ -89,6 +95,7 @@ export class ReplacementRequestService {
 
   async get(ctx: AuthContext, id: string): Promise<ReplacementRequest> {
     return this.tenantContext.runInWorkspaceContext(ctx, async (manager) => {
+      await this.permissions.assertPermissionTx(manager, ctx, PermissionFlag.SCHEDULE_VIEW);
       const request = await manager.findOne(ReplacementRequest, { where: { id } });
       // 404, not 403 — RLS already made a cross-tenant row invisible; a
       // real row this manager's own scope can't see must look identical to
@@ -136,6 +143,9 @@ export class ReplacementRequestService {
    */
   async approve(ctx: AuthContext, id: string, dto: ApproveReplacementRequestDto): Promise<ReplacementRequest> {
     const outcome = await this.tenantContext.runInWorkspaceContext(ctx, async (manager) => {
+      // SF-2 layer 2: the route's offer.send, before the claim — this path sends an offer through sendOneWithManager,
+      // whose contract leaves the authorisation to its caller.
+      await this.permissions.assertPermissionTx(manager, ctx, PermissionFlag.OFFER_SEND);
       // PHASE 5.5 — ownership checked BEFORE the atomic claim below, never
       // after. An unauthorised same-org/workspace Manager B must never be
       // able to WIN the claim (even transiently, even if they'd fail a
@@ -254,6 +264,7 @@ export class ReplacementRequestService {
    */
   async reject(ctx: AuthContext, id: string): Promise<ReplacementRequest> {
     return this.tenantContext.runInWorkspaceContext(ctx, async (manager) => {
+      await this.permissions.assertPermissionTx(manager, ctx, PermissionFlag.OFFER_SEND);
       // PHASE 5.5 — same reasoning as approve()'s own pre-claim ownership
       // check: must happen before the atomic claim, never after.
       const preCheck = await manager.findOne(ReplacementRequest, { where: { id } });
