@@ -494,7 +494,7 @@ services:
   # crewflow_owner credential reaches rab-api and rab-worker without a database URL in their environment.
   # ---------------------------------------------------------------------------
   db-setup:
-    image: ${CREWFLOW_IMAGE_REPOSITORY:-adhin007/adolphus}@${CREWFLOW_IMAGE_TAG:-sha256:6f360664ff3b5fecc6bce64ef76cce66aae435266ec06f6fbcfd29655b60b394}
+    image: ${CREWFLOW_IMAGE_REPOSITORY:-adhin007/adolphus}@${CREWFLOW_IMAGE_TAG:-sha256:0a11d8c210609bcb0ed90dd2b8af85bdd970ea19d3af530f22b961971ea45b8d}
     entrypoint: ["./db-setup.sh"]
     environment:
       # The ONE database setting, this service only: PG_DATABASE_URL (your own database's admin URL, or an existing
@@ -526,7 +526,7 @@ services:
 
   # rab-api — the HTTP API. Migrates on start, registers the job schedulers, then serves (O3). ONE instance (C5).
   rab-api:
-    image: ${CREWFLOW_IMAGE_REPOSITORY:-adhin007/adolphus}@${CREWFLOW_IMAGE_TAG:-sha256:6f360664ff3b5fecc6bce64ef76cce66aae435266ec06f6fbcfd29655b60b394}
+    image: ${CREWFLOW_IMAGE_REPOSITORY:-adhin007/adolphus}@${CREWFLOW_IMAGE_TAG:-sha256:0a11d8c210609bcb0ed90dd2b8af85bdd970ea19d3af530f22b961971ea45b8d}
     # DB-SETUP PID 1 (lead decision 2026-11-12, owner requirement #5): api-prestart.sh is the ENTRYPOINT (PID 1; no command,
     # no compose init). It runs the refusals, the runtime-isolation check, builds the crewflow_owner URL from db-setup's
     # target file (option 2: this service never receives PG_DATABASE_URL, in any form), waits (bounded, 120 s) for a working login, runs
@@ -614,7 +614,7 @@ services:
   # provisioning). Never migrates, only consumes the job schedulers; starts after a healthy API and Redis.
   rab-worker:
     # O1: the SAME image variable as rab-api (one release, one digest), a different command.
-    image: ${CREWFLOW_IMAGE_REPOSITORY:-adhin007/adolphus}@${CREWFLOW_IMAGE_TAG:-sha256:6f360664ff3b5fecc6bce64ef76cce66aae435266ec06f6fbcfd29655b60b394}
+    image: ${CREWFLOW_IMAGE_REPOSITORY:-adhin007/adolphus}@${CREWFLOW_IMAGE_TAG:-sha256:0a11d8c210609bcb0ed90dd2b8af85bdd970ea19d3af530f22b961971ea45b8d}
     # DB-SETUP PID 1: worker-start.sh is the ENTRYPOINT (PID 1): it builds the crewflow_owner URL from db-setup's target
     # file (option 2: this service never receives PG_DATABASE_URL, in any form), then `exec /sbin/tini -s -- node
     # packages/rab-worker/dist/main.js`. tini is PID 1 (the Worker's watchdog SIGKILL, ignored by the kernel for PID 1, still
