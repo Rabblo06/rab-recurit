@@ -126,7 +126,7 @@ PT-01 pointers:
    - **Upgrade notes for the stricter CA checks.** (1) A `PG_SSL_CA_CERT_PATH` file is now validated at boot exactly like `PG_SSL_CA_CERT`: a file holding anything but CERTIFICATE blocks (an `X509 CRL`, a `TRUSTED CERTIFICATE`, a bundled key, or a long base64 run outside the blocks), larger than 256 KiB, or not a regular file now **refuses to boot**; before, a loose pattern check let it through. Check it before deploying: the `--environment` preflight (`node packages/rab-docker/staging/verify-image-compose.cjs --environment ...`) runs the same rules on `CREWFLOW_PG_CA_FILE`, and the env-file lint runs them on `PG_SSL_CA_CERT` in `database.env` (and refuses either CA key in `runtime.env`). (2) A database dialled by **IP address** (`…@10.0.0.7:5432/…`) now needs that IP as an **IP SAN** in its certificate. Before, a node-postgres quirk made Node check an IP host against the name `localhost`, so a `localhost` certificate from the trusted CA was accepted. A DNS host name is unaffected.
   - **Renamed (2026-11-17):** before this release `PG_DATABASE_URL` also carried the admin URL. That meaning is gone and is never reinterpreted: a `PG_DATABASE_URL` whose login is not `crewflow_owner` is REFUSED (`PG_DATABASE_URL is the app login and must log in as crewflow_owner ... the admin URL was renamed to PG_ADMIN_URL`) by the lint, the preflight and `db-setup` itself (exit 64), and so is the retired name `PG_DATABASE_ADMIN_URL`. Move an admin URL to `PG_ADMIN_URL` (section 3.2, step 0b).
    - On every `up`, the one-shot `db-setup` service (the same image, entrypoint `./db-setup.sh`) runs the bootstrap child, the only process that connects with `PG_ADMIN_URL` (or an operator's `PG_DATABASE_URL`). First start: it generates a random 32-byte password and stores it as the pending file `/run/crewflow/db-target/owner-password.next` on the `crewflow-db-target` volume (0400, owner 1000:1000) BEFORE it touches the database, then creates `crewflow_owner` if it is missing (`LOGIN NOSUPERUSER NOBYPASSRLS NOREPLICATION NOCREATEDB CREATEROLE INHERIT`) and grants it CONNECT, CREATE, TEMPORARY on the database; only after the COMMIT and a login with the new password is the pending file renamed to the password file `/run/crewflow/db-target/owner-password` (a run that fails in between leaves the password file as it was; the next start promotes the pending file if it logs in, deletes it only when it does not (28P01) or is not a usable file, and keeps it on any other error). Only one db-setup runs per volume at a time (a kernel lock on `.db-setup.flock` in the volume, plus a lock directory `.db-setup.lock`). Later starts: the file logs in, nothing changes. **One Crewflow deployment per PostgreSQL cluster when using an admin URL**: roles are cluster-wide, so a second deployment on the same cluster would share `crewflow_owner` and its password. It refuses an existing privileged `crewflow_owner`. It then writes a credential-free target file (`{"v":1,"host","port","database","params"}`: no login, no password) and exits 0. `db-setup` does not receive `APP_SECRET`: changing `APP_SECRET` never touches the database. rab-api starts only after that (`depends_on: condition: service_completed_successfully`). rab-api and rab-worker never receive `PG_ADMIN_URL` nor an operator's `PG_DATABASE_URL`: the compose files pin both `PG_DATABASE_URL` and `PG_ADMIN_URL` to `""` on both services (so an env-file value can never reach them; owner decision L-2), their entrypoints refuse any non-empty value of either, the other names of the admin URL, and any variable holding a `postgres://` URL (exit 64), and `api-prestart.sh` / `worker-start.sh` build the `crewflow_owner` URL from the target file and the password file (both mounted read-only), waiting (bounded, 120 s) for them and refusing with a fixed message (exit 75) after that.
-  - **An existing `crewflow_owner` URL** (mode c; for example one made by hand with `01-crewflow-owner.sql`, section 4) goes in `PG_DATABASE_URL`, with no `PG_ADMIN_URL`. `db-setup` logs in with it (a read-only session), runs the read-only refusals (SUPERUSER, BYPASSRLS, REPLICATION, CREATEDB, privileged memberships, missing grants, PostgreSQL below 16) and copies the URL's password into the password file. It never writes to the database and never changes the password: the URL keeps working for anything else that uses it. Keep `PG_DATABASE_URL` set afterwards (with `CREWFLOW_BUNDLED_DB=0`, unset is refused; with the bundled db on, unset means the bundled `db`). An existing deployment whose `crewflow_owner` lives on the bundled `db` (an upgrade from R254/R256) keeps the bundled db on, `PG_DATABASE_PASSWORD` set and its `crewflow_owner` URL in `PG_DATABASE_URL`.
+  - **An existing `crewflow_owner` URL** (mode c; for example one made by hand with `own-database-app-login.sql`, section 4a) goes in `PG_DATABASE_URL`, with no `PG_ADMIN_URL`. `db-setup` logs in with it (a read-only session), runs the read-only refusals (SUPERUSER, BYPASSRLS, REPLICATION, CREATEDB, privileged memberships, missing grants, PostgreSQL below 16) and copies the URL's password into the password file. It never writes to the database and never changes the password: the URL keeps working for anything else that uses it. Keep `PG_DATABASE_URL` set afterwards (with `CREWFLOW_BUNDLED_DB=0`, unset is refused; with the bundled db on, unset means the bundled `db`). An existing deployment whose `crewflow_owner` lives on the bundled `db` (an upgrade from R254/R256) keeps the bundled db on, `PG_DATABASE_PASSWORD` set and its `crewflow_owner` URL in `PG_DATABASE_URL`.
   - **Crewflow additions (not in Twenty's Helm chart).** (1) With your admin URL, `db-setup` creates `crewflow_owner`: Twenty would run the app as that admin login, but Crewflow's tenant isolation needs RLS, which a superuser or BYPASSRLS login skips. (2) If the password file is lost and `db-setup` has an admin URL (`PG_ADMIN_URL`, or the bundled `db`), `db-setup` sets a new random password (`ALTER ROLE crewflow_owner PASSWORD`); with Twenty a lost secret leaves the app unable to log in.
   - **Protect the setup volume and its backups:** the password file is the `crewflow_owner` password. Volume backups and snapshots contain it; encrypt them and restrict who can read them.
 - PostgreSQL 16, 17 and 18 are supported (v20 workspace fingerprints and a semantic posture golden for each). Below 16 is refused; a major above 18 is refused until its fingerprints and golden are generated and reviewed.
@@ -496,7 +496,8 @@ verification queries.
 
 | Situation | Script |
 |---|---|
-| Fresh, empty database | `packages/rab-docker/postgres-init/owner-login/01-crewflow-owner.sql`: creates `crewflow_owner` with the M0 §5.1 shape (`LOGIN NOSUPERUSER NOBYPASSRLS NOREPLICATION NOCREATEDB CREATEROLE INHERIT`) and grants `CONNECT, CREATE, TEMPORARY … WITH GRANT OPTION` on the database. Optional fallback (the bootstrap child does the same). |
+| Fresh, empty database, and you do not give Crewflow an admin URL | `packages/rab-docker/postgres-init/owner-login/own-database-app-login.sql`: section 4a. |
+| Fresh, empty database (older fallback: the password comes from a file and is sent in the statement) | `packages/rab-docker/postgres-init/owner-login/01-crewflow-owner.sql`: creates `crewflow_owner` with the M0 §5.1 shape (`LOGIN NOSUPERUSER NOBYPASSRLS NOREPLICATION NOCREATEDB CREATEROLE INHERIT`) and grants `CONNECT, CREATE, TEMPORARY … WITH GRANT OPTION` on the database. Optional fallback (the bootstrap child does the same). |
 | Existing separated database | `packages/rab-docker/postgres-init/owner-login/transition-from-separated.sql`: section 5. |
 
 **Provider extras** (M0 §5.1 and §8; EXPECTED unless marked):
@@ -514,10 +515,273 @@ verification queries.
 | Azure Flexible | `azure.extensions=BTREE_GIST,CITEXT,PG_TRGM,PGCRYPTO,UNACCENT`; `REVOKE CREATE ON SCHEMA public FROM PUBLIC`. Never `:6432`. | EXPECTED |
 | PostgreSQL ≤ 15 | Refused (CREATEROLE could grant `pg_execute_server_program`). | UNSUPPORTED |
 
-**Optional hardening after the install:** `ALTER ROLE crewflow_owner NOCREATEROLE;` (M0).
+**Hardening after the install:** `ALTER ROLE crewflow_owner NOCREATEROLE;` (M0). Optional with an admin URL; REQUIRED for section 4a (step 6).
 - **Flagged assumption:** a later release whose migrations create roles would need CREATEROLE again. Check pending lists for `CREATE ROLE` before each release.
 
 **Fresh install from an empty database is VERIFIED on self-hosted PostgreSQL 16, 17 and 18** (Agent 1; end to end on PG16 by Agent 2). It is EXPECTED on the managed providers above, and NOT TESTED on any of them.
+
+---
+
+## 4a. Your own database, app login created by you
+
+Use this when you run Crewflow on your own PostgreSQL and do **not** want to give Crewflow an admin URL. A database admin
+creates the app login `crewflow_owner` by hand, once. Crewflow then only ever receives the `crewflow_owner` URL. Twenty
+has the same option: an external database, no admin login, no setup step.
+
+**SQL file:** [`packages/rab-docker/postgres-init/owner-login/own-database-app-login.sql`](../../postgres-init/owner-login/own-database-app-login.sql).
+Every statement in it is annotated with the privilege it needs, why Crewflow needs it, and whether it works without
+CREATEROLE. Read it before you run it.
+
+### What the script creates, and what it does not
+
+It creates exactly what `db-setup` creates when you give it an admin URL
+(`OWNER_BOOTSTRAP_Q4C_DO` in `scripts/owner-login/owner-bootstrap-sql.ts`):
+
+- `CREATE ROLE crewflow_owner LOGIN NOSUPERUSER NOBYPASSRLS NOREPLICATION NOCREATEDB CREATEROLE INHERIT` and a SCRAM
+  password;
+- `GRANT CONNECT, CREATE, TEMPORARY ON DATABASE <this database> TO crewflow_owner WITH GRANT OPTION`.
+
+Nothing else. `db-setup` does not create the rest, and neither does this script. These are created by `crewflow_owner`
+itself on the first API start (migrate-on-start, `scripts/migrate/owner-login/bootstrap.ts`):
+
+- the schema roles `rab_owner`, `rab_app`, `rab_secure_owner`, `crewflow`, `crewflow_app` and `crewflow_worker`, with
+  their memberships;
+- the `core` schema;
+- the five extensions;
+- the default privileges.
+
+**Do not create the schema roles yourself.** On PostgreSQL 16+ the role that creates a role becomes its ADMIN member.
+The posture check allows no member of an owner role except `crewflow_owner`, and a non-superuser admin cannot remove
+that row. The first start then refuses with `rab_owner: unexpected member <admin>` (exit 67; proven below).
+
+### Prerequisites
+
+- **PostgreSQL:** one of the supported versions in section 2 (Prerequisites). The script itself refuses anything below
+  16, like the app.
+- **An empty database**, and no Crewflow roles anywhere on the cluster. Roles are cluster-wide: one Crewflow deployment
+  per PostgreSQL cluster. The script refuses if any Crewflow role already exists.
+- **An admin login that can create roles.** It must be a superuser, or a NOSUPERUSER role with **CREATEROLE** that holds
+  CONNECT, CREATE and TEMPORARY on the database WITH GRANT OPTION. That is normally the database owner: `neondb_owner`,
+  the RDS master user, `doadmin`, `avnadmin`, or `postgres` on Supabase / Cloud SQL / Azure.
+  - Use SQL in psql. Never use a console, CLI or API "create user" feature: those can add provider-superuser memberships
+    (F-E3).
+  - Never make `crewflow_owner` the database owner.
+  - The provider extras in the section 4 table still apply (extensions, ports, `rds.restrict_password_commands`).
+- **A direct (non-pooler) host.** Never a transaction pooler: Neon `-pooler`, Supabase `:6543`, DigitalOcean `:25061`,
+  RDS Proxy, PgBouncer `:6432`.
+- **TLS:** `sslmode=verify-full` on both the admin connection and `PG_DATABASE_URL`.
+  - For the admin's psql, add `sslrootcert=system` (libpq 16+) when the provider's certificate chains to a public CA:
+    libpq then verifies against the operating system's trust store instead of `~/.postgresql/root.crt`. Otherwise
+    point `sslrootcert=` at the provider's CA file.
+  - `PG_DATABASE_URL` takes `sslmode` only: the app's URL policy refuses every other `ssl*` parameter. If the
+    provider's CA is not in the system store, set `CREWFLOW_PG_CA_FILE` in `compose.env` and
+    `PG_SSL_CA_CERT_PATH=/run/crewflow/pg-ca.crt` in `database.env` (section 2).
+- **`password_encryption = scram-sha-256`.** This is the default on 14+. The script refuses otherwise; then run psql
+  with `PGOPTIONS='-c password_encryption=scram-sha-256'`.
+
+### Steps
+
+Follow them in this order. Steps 3 and 6 are **required**, not optional: do not set the variables or deploy before step 3
+passes, and do not leave `crewflow_owner` with CREATEROLE after step 6 (owner decision 2026-11-17, like Twenty, whose app
+user never has CREATEROLE).
+
+1. Generate the password and keep it in your secret store:
+
+   ```bash
+   openssl rand -hex 32
+   ```
+
+   Any 1-1024 characters without control characters works. 64 hex characters need no URL encoding.
+
+2. As the admin, connected to the empty target database, run the file:
+
+   ```bash
+   psql "postgresql://<admin>@<direct-host>:5432/<database>?sslmode=verify-full&sslrootcert=system" \
+     -X -v ON_ERROR_STOP=1 -f packages/rab-docker/postgres-init/owner-login/own-database-app-login.sql
+   ```
+
+   **Never paste it into an interactive session.** Run it as a file, as above.
+
+   The script works in this order:
+   - It sets its own psql safety settings (`ON_ERROR_STOP` on, `ON_ERROR_ROLLBACK` off, `AUTOCOMMIT` on), so a
+     `~/.psqlrc` cannot weaken them.
+   - Everything that changes the database runs in ONE transaction: the read-only checks, `CREATE ROLE`, the GRANT, the
+     password and a final re-check. A refused check or a missing privilege rolls everything back, and nothing is left.
+     Mismatched passwords also roll everything back when the script is run as a file, as above.
+   - psql's `\password` asks for the password twice. psql turns it into a SCRAM-SHA-256 verifier on your machine and
+     sends only the verifier, never the password.
+   - Without a terminal, psql reads the two password lines from standard input.
+
+   **The verifier and the logs.** The verifier (not the password) can appear in server logs (`log_statement` ddl/all,
+   or any failed ALTER), `pg_stat_statements` and audit logs. With verify-full TLS it is only an offline-guessing
+   target, which a 32-byte random password defeats. A superuser admin's session turns its own statement logging off
+   first (db-setup's Q1); a non-superuser admin cannot, so check your provider's log and audit retention.
+
+3. **REQUIRED: the login test.** It must pass before you go on. Run it from where Crewflow will run:
+
+   ```bash
+   psql "postgresql://crewflow_owner@<direct-host>:5432/<database>?sslmode=verify-full&sslrootcert=system" \
+     -X -c 'SELECT session_user'
+   ```
+
+   It must print `crewflow_owner`. **This step is what catches an empty password from a non-superuser admin.** psql
+   accepts an empty entry at `\password`, and the server then clears the password. A superuser admin is refused by the
+   script's own re-check, but a non-superuser admin cannot see whether a password is set, so the script commits a
+   `crewflow_owner` without one. Such a role cannot log in with a password, so this test fails.
+
+   **If the login test fails, drop the role and run the file again.** The same admin drops it with:
+
+   ```sql
+   REVOKE CONNECT, CREATE, TEMPORARY ON DATABASE <database> FROM crewflow_owner CASCADE;
+   DROP ROLE crewflow_owner;
+   ```
+
+   db-setup refuses a passwordless role too (exit 64). Such a role is only reachable through a `trust`, `peer` or
+   `cert` rule in the provider's `pg_hba.conf`.
+
+4. Only after step 3 passes, set these in `compose.env`:
+
+   | Setting | Value |
+   |---|---|
+   | `CREWFLOW_BUNDLED_DB` | `0`. The bundled `db` never starts. |
+   | `PG_DATABASE_URL` | `postgresql://crewflow_owner:<password>@<direct-host>:5432/<database>?sslmode=verify-full`, the **crewflow_owner** URL, never the admin URL. |
+   | `PG_ADMIN_URL` | **Not set.** Crewflow never sees an admin credential. |
+   | `PG_DATABASE_PASSWORD` | As section 2 says for your own database. |
+
+   **`PG_ADMIN_URL` requires the PG_ADMIN_URL release, PR #230** (the PR that renames the admin-URL setting; not merged
+   when this was written). In this release the admin URL setting is `PG_DATABASE_URL`, which also accepts an existing
+   `crewflow_owner` URL; put the `crewflow_owner` URL there and nothing else.
+
+5. Deploy: `docker compose up -d`. What happens:
+   - `db-setup` sees a `crewflow_owner` URL and runs only read-only checks (D5, DB-SETUP-PLAN §7.1). It refuses
+     SUPERUSER, BYPASSRLS, REPLICATION, CREATEDB, NOLOGIN, NOINHERIT, an expired login, a privileged membership, a
+     missing database grant, and PostgreSQL below 16.
+   - `db-setup` copies the URL's password into its password file: `/run/crewflow/db-target/owner-password`, mode 0400,
+     on the `crewflow-db-target` volume. Protect that volume and its backups.
+   - `db-setup` never writes to the database and never changes the password.
+   - rab-api then migrates as `crewflow_owner`. On this first start it creates the schema roles and the whole schema,
+     which is the only time it needs CREATEROLE.
+
+6. **REQUIRED: remove CREATEROLE after the first start has completed.** "Completed" means one of these:
+   - the rab-api log shows the migrate result (`TWENTY_MIGRATE_RESULT`) with `"serve":true`;
+   - a restart reports state `CURRENT`.
+
+   `/healthz` 200 alone is a loose signal: do not rely on it. Then, as the same admin:
+
+   ```sql
+   ALTER ROLE crewflow_owner NOCREATEROLE;
+   ```
+
+   - The creating admin has the ADMIN option this needs.
+   - No restart is needed. On its next start `db-setup` logs `crewflow_owner is NOCREATEROLE (hardened)`.
+   - Afterwards a leaked `crewflow_owner` URL can no longer create roles or reset the schema roles' passwords. It still
+     holds the ADMIN option on the schema roles it created, so it can still GRANT those roles to roles that already
+     exist. The posture check refuses any such extra member at the next boot, but it does not prevent the grant.
+   - Restarts, new workspaces and upgrades (new migrations and workspace upgrade commands) run without CREATEROLE.
+     This was proven on PG16; see Status.
+   - **Flagged assumption:** a later release whose migrations create or alter roles would need CREATEROLE again. Its
+     release notes must say so. The migration child then refuses with exit 67 and names it. The admin grants it for
+     that one upgrade and removes it again afterwards.
+
+**Password rotation.** rab-api and rab-worker read the password file only when they start, and `up -d` alone does not
+restart them. `$P` is the production compose shorthand defined at the top of this runbook.
+
+1. As the admin, in psql: `\password crewflow_owner`.
+2. Put the new password in `PG_DATABASE_URL` in `compose.env`.
+3. `$P stop rab-worker rab-api` (both together, the same stop as rollback (b) in section 3).
+4. `$P up -d`. `db-setup` runs again, copies the new password into the password file, and rab-api and rab-worker start
+   with it.
+
+Rotation is not remediation (G-04, section 1): a new password removes no role, membership or definer that someone with
+the old one may have added. After a suspected leak, follow the incident runbook, not only these steps.
+
+### CREATEROLE: who needs it, and when
+
+| Who | Needs CREATEROLE? | What uses it |
+|---|---|---|
+| The admin running the script | **Yes**, always. | `CREATE ROLE crewflow_owner ... CREATEROLE` (giving CREATEROLE needs CREATEROLE), `\password`, and step 6's `ALTER ROLE ... NOCREATEROLE`. Only the database GRANT works without it. |
+| `crewflow_owner`, first start (fresh install) | **Yes**, until step 6. | migrate-on-start's bootstrap creates the six schema roles (`crewflow_worker` through a throwaway `crewflow_rolemaker`, so that it has zero members). The four role migrations (up to 1786691000000) set their passwords. BC-17 then makes `crewflow` / `crewflow_app` NOLOGIN without a password (`legacy-logins.ts`). Without CREATEROLE the child refuses with exit 67 and creates nothing (`owner-login-identity.ts`). |
+| `crewflow_owner` after step 6: restarts, upgrades (new migrations, workspace upgrade commands), workspace provisioning, API, Worker, CLI | **No**, and it must not have it. | No migration after 1786691000000 and no runtime path creates, alters or grants a role. The upgrade runner refuses a workspace step that writes the role catalogs (`workspace-step-checks-sql.ts`, layer 4b). The API provisions a new workspace through `core.provision_workspace`, a SECURITY DEFINER function owned by `crewflow`. The Worker provisions with `SET ROLE crewflow`. The posture check, the boot gates and `db-setup` all accept NOCREATEROLE. |
+| `crewflow_owner` after step 6, residual | No. | It keeps the ADMIN option on the schema roles it created, so it can still GRANT them to existing roles. The posture check refuses that at the next boot. |
+| `crewflow_owner`, a future release with role migrations | Only for that upgrade (flagged assumption, step 6). | `needCreateRole` in `locked-migration-runner.ts` (any pending migration up to `LAST_ROLE_MIGRATION_TIMESTAMP` = 1786691000000). None exists in the current chain after the first install. |
+
+**A provider that does not allow CREATEROLE at all** (no role there can create roles) **is not supported.** The script
+refuses at its first check, and nothing is changed. There is no supported fallback:
+
+- CREATEROLE is needed only for the first start, and step 6 then removes it.
+- Creating the schema roles by hand fails the posture check, as shown above.
+
+Use the bundled `db`, or a provider that allows CREATEROLE.
+
+### Status
+
+**VERIFIED (2026-11-17)** on a disposable PostgreSQL 16.16 (InstaBox, `postgres:16-alpine`, `log_statement=all`), code at
+`origin/main` 9618afc0. The admin was a NOSUPERUSER CREATEROLE CREATEDB login that owned the database (the managed-provider
+shape). Results:
+
+- The script ran to the end. The result was `crewflow_owner` LOGIN NOSUPERUSER NOBYPASSRLS NOREPLICATION NOCREATEDB
+  CREATEROLE INHERIT, with no expiry, a SCRAM password, and CONNECT/CREATE/TEMPORARY WITH GRANT OPTION. Its only member
+  was the admin, as an ADMIN-only creator row, which is the row the `db-setup` admin path leaves too.
+- The `db-setup` child in owner-URL mode passed: exit 0, `pass-through`. It stored the password file, wrote a
+  credential-free `target.json`, and wrote nothing to the database.
+- The migrate child as `crewflow_owner` passed: exit 0, state EMPTY, 264 migrations applied, `serve=true`.
+- The posture checks passed:
+  - `owner-login-posture.ts` rules 1-4 found no problems;
+  - `runDatabaseBootGates('api')` and `('worker')` reported `gates=ok`;
+  - the security posture equals the committed PG16 golden (0 missing, 0 unexpected).
+- The second start passed: `db-setup` exit 0, migrate state CURRENT.
+- **Required step 6 (NOCREATEROLE), proven on 2026-11-17** (InstaBox ibox2, code at 1bcab071; same image and PG16.16).
+  The first start ran with CREATEROLE: the bootstrap and every R256 migration (256). Then the admin ran
+  `ALTER ROLE crewflow_owner NOCREATEROLE`, and everything below ran without CREATEROLE:
+  - (a) Restart: `db-setup` owner-URL mode exit 0, with its `NOCREATEROLE (hardened)` line. Migrate exit 0. The boot
+    gates for the API and the Worker reported `gates=ok`. `owner-login-posture.ts` found no problems, and the PG16
+    golden matched (0 missing, 0 unexpected).
+  - (c) An upgrade that applies new TypeORM migrations: the restart applied the 8 migrations after R256, exit 0,
+    `serve=true`. They include `UpgradeMigrationLedger`, `WorkspaceStaffMemberSelect` (re-creates
+    `core.provision_workspace`), `WorkspaceCoreForeignKeyRemoval`, `HwsCutoverCopyFunctions` (the C3 cutover functions)
+    and the metadata tables. A second restart was CURRENT.
+  - (b) New workspaces and (c) the workspace upgrade runner: the app's own integration specs ran against that database
+    as `crewflow_owner` without CREATEROLE. **112 tests passed, 0 failed.** The 4 skipped are the crewflow_app-only
+    negative controls, skipped on the owner login by design, as in CI.
+    - `server-path-provisioning-api`: 12. This is the real `POST /rest/v1/manager-workspaces` on two Nest replicas;
+      `core.provision_workspace`, a SECURITY DEFINER owned by `crewflow`, builds the schema; READY once.
+    - `server-path-provisioning-db`: 23. The server-path workspace is compared object by object with the TypeScript
+      provisioner's: tables, policies and grants.
+    - `workspace-provisioning-owner-flow`: 7.
+    - The Worker's `workspace-provisioning` (6) and `workspace-provisioning-owner-login` (12): `SET ROLE crewflow`
+      provisioning, as the Worker runs it.
+    - `workspace-command-runner`: 36. The 0.6.0 workspace commands and structural probes over workspaces left at an
+      earlier level.
+    - `workspace-command-runner-start`: 4. The workspace pass through the real locked start.
+    - `upgrade-migration-ledger`: 12.
+  - Afterwards `crewflow_owner` was still NOCREATEROLE. The specs had added 38 workspace schemas, and the cluster still
+    had 9 roles. The specs' own fixture roles are created and dropped by the cluster superuser, never by
+    `crewflow_owner`.
+  - The first run of the R256 install exits 68 by design of the test seam, not by CREATEROLE: the head code's post-check
+    calls R256's `core.provision_workspace` behind. The upgrade run then brings it to head.
+- The server log never contained the password.
+- The verifier and the logs:
+  - with a non-superuser admin, the `log_statement=all` log held 1 verifier line;
+  - with a superuser admin, Q1 left 0 verifier lines;
+  - `pg_stat_statements` stores the full `ALTER USER crewflow_owner PASSWORD 'SCRAM-SHA-256$...'` text (not
+    normalised). This was tested with the non-superuser admin; Q1 does not change what pg_stat_statements records.
+- The refusals behaved as designed:
+  - an admin without CREATEROLE was refused by the script, and nothing was created;
+  - a NOCREATEROLE `crewflow_owner` on a fresh install made migrate exit 67, with nothing created;
+  - a schema role created by the admin made migrate exit 67 with `rab_owner: unexpected member`, and the admin's
+    `REVOKE` of its own creator row was a no-op.
+- A refused check never commits. With `rab_owner` already present, none of these left a `crewflow_owner`:
+  - the file fed on stdin instead of `-f`;
+  - a psqlrc with `ON_ERROR_ROLLBACK on` and `ON_ERROR_STOP off`;
+  - the script with its `\set` lines removed (a partial paste).
+- The password step:
+  - mismatched passwords stopped psql and rolled everything back;
+  - two empty lines from a superuser admin were refused at the re-check and rolled back;
+  - two empty lines from a non-superuser admin committed a passwordless role. Its login failed (28P01), db-setup
+    refused it (exit 64), and the remedy above (`REVOKE ... CASCADE; DROP ROLE`) removed it.
+
+The harness was a scratch script, not committed; the latest run had 34 checks and 0 failures, plus the 112 spec tests above. **NOT TESTED:**
+PostgreSQL 17 and 18, and every managed provider.
 
 ---
 
