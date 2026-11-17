@@ -8494,6 +8494,33 @@ Reversal:   Lower CLOCK_IN_CONFIRM_FLOOR_HOURS, or require a second approver (pa
   under test), `integration-test-database-gate.spec.ts` (no spec reads the blanked DATABASE_URL), `runtime-child-env.spec.ts`.
 - **Release 2 (S8):** the fallbacks are removed and the legacy names refused everywhere; the strip lists keep every name.
 
+## CI gate — exact owner-approved growth for the import-boundary ratchet (branch ci/import-boundaries-approved-growth, 2026-11-17; owner approval 2026-11-17 for PR #204)
+- **Threat:** the import-boundary ratchet (`tools/check-import-boundaries.cjs`, PR #191) is a CI security gate: its `--base`
+  step refuses any growth of `tools/import-boundaries.baseline.json` against the PR's base branch, so a new Worker import of
+  rab-server internals (or engine -> modules, feature -> feature) cannot land unnoticed. It had no way to record an owner
+  approval, so an approved change could only pass by weakening the gate, bypassing it, or deleting the step. Any approval
+  mechanism is itself a way to widen the gate: a broad pattern, an open-ended count or a forgotten approval would let later
+  PRs add violations silently.
+- **Control:** `APPROVED_GROWTH` is a frozen list in the check itself. Each entry names one rule, one file, the exact base
+  count `from` (0 = no entry at the base), the exact head count `to`, an `approved: 'owner YYYY-MM-DD'` date and a reason;
+  `validateApprovedGrowth` refuses a malformed, undated, duplicate or non-growing entry (fail closed). `compareToBase`
+  accepts a growth only when rule and file match exactly, the base count equals `from` and the head count equals `to`;
+  one more edge, another file, another rule, or a different base count still fails. An entry whose `from` no longer equals
+  the base count is reported STALE and fails `--base`, so the entry must be deleted once the growth has merged and cannot be
+  reused. The tree check (counts equal the committed baseline) is unchanged. The first two entries are the owner-approved
+  (2026-11-17) Worker imports for PR #204: `push-dispatch.job.ts` 1 -> 2 (`audit-events/audit-event-shipping`) and
+  `push-send.processor.ts` 10 -> 11 (`audit/audit.service`), the same imports the email path already uses.
+- **Residual (accepted):** the approval lives in the repository, so whoever can merge a PR that edits the check can also add
+  an entry; the protection is review: an entry must arrive in its own PR, separate from the PR that uses it, with the owner's
+  date. Between the approval PR's merge and the using PR's merge, any PR may use the approved slot; the slot is one exact
+  count for one file and rule, and the stale rule closes it as soon as the base moves. Counts are per file, not per edge: an
+  approved `to` could be met by a different import in that file than the one approved; the reviewer of the using PR checks
+  the actual import (`--list`). `--write-baseline` still refuses any growth; the baseline is raised by hand in the using PR.
+- **Tests:** `check-import-boundaries.test.cjs`: an approved exact growth passes; the same file one above `to` fails; an
+  unlisted file growing fails; the same file under a different rule fails; a base count other than `from` fails and the
+  approval is reported stale (also once the growth has merged); `from: 0` matches a file absent at the base; malformed,
+  undated, duplicate and non-growing entries are refused; the shipped list is valid and frozen.
+
 ## S-W1 — the Worker's member-invitation pre-send check also requires an active workspace (branch fix/s-w1-invitation-workspace-active, 2026-11-16)
 - **Finding (Low, `docs/plans/untangle/worker.md` §4):** a manager invites a member; the workspace is then suspended or
   archived while the invitation email is still queued. The Worker's pre-send revalidation
@@ -8654,30 +8681,3 @@ Reversal:   Lower CLOCK_IN_CONFIRM_FLOOR_HOURS, or require a second approver (pa
   `BusinessTablesError('unbound')` for `advance` and `discover`. `tenant-context.service.spec.ts` and
   `workspace-execution-context.integration.spec.ts` pin the trap behaviour (`''` bound, the real schema still handed to the
   callback). Every server and worker suite passes under the trap.
-
-## CI gate — exact owner-approved growth for the import-boundary ratchet (branch ci/import-boundaries-approved-growth, 2026-11-17; owner approval 2026-11-17 for PR #204)
-- **Threat:** the import-boundary ratchet (`tools/check-import-boundaries.cjs`, PR #191) is a CI security gate: its `--base`
-  step refuses any growth of `tools/import-boundaries.baseline.json` against the PR's base branch, so a new Worker import of
-  rab-server internals (or engine -> modules, feature -> feature) cannot land unnoticed. It had no way to record an owner
-  approval, so an approved change could only pass by weakening the gate, bypassing it, or deleting the step. Any approval
-  mechanism is itself a way to widen the gate: a broad pattern, an open-ended count or a forgotten approval would let later
-  PRs add violations silently.
-- **Control:** `APPROVED_GROWTH` is a frozen list in the check itself. Each entry names one rule, one file, the exact base
-  count `from` (0 = no entry at the base), the exact head count `to`, an `approved: 'owner YYYY-MM-DD'` date and a reason;
-  `validateApprovedGrowth` refuses a malformed, undated, duplicate or non-growing entry (fail closed). `compareToBase`
-  accepts a growth only when rule and file match exactly, the base count equals `from` and the head count equals `to`;
-  one more edge, another file, another rule, or a different base count still fails. An entry whose `from` no longer equals
-  the base count is reported STALE and fails `--base`, so the entry must be deleted once the growth has merged and cannot be
-  reused. The tree check (counts equal the committed baseline) is unchanged. The first two entries are the owner-approved
-  (2026-11-17) Worker imports for PR #204: `push-dispatch.job.ts` 1 -> 2 (`audit-events/audit-event-shipping`) and
-  `push-send.processor.ts` 10 -> 11 (`audit/audit.service`), the same imports the email path already uses.
-- **Residual (accepted):** the approval lives in the repository, so whoever can merge a PR that edits the check can also add
-  an entry; the protection is review: an entry must arrive in its own PR, separate from the PR that uses it, with the owner's
-  date. Between the approval PR's merge and the using PR's merge, any PR may use the approved slot; the slot is one exact
-  count for one file and rule, and the stale rule closes it as soon as the base moves. Counts are per file, not per edge: an
-  approved `to` could be met by a different import in that file than the one approved; the reviewer of the using PR checks
-  the actual import (`--list`). `--write-baseline` still refuses any growth; the baseline is raised by hand in the using PR.
-- **Tests:** `check-import-boundaries.test.cjs`: an approved exact growth passes; the same file one above `to` fails; an
-  unlisted file growing fails; the same file under a different rule fails; a base count other than `from` fails and the
-  approval is reported stale (also once the growth has merged); `from: 0` matches a file absent at the base; malformed,
-  undated, duplicate and non-growing entries are refused; the shipped list is valid and frozen.
