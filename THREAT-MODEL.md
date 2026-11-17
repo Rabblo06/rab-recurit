@@ -8866,61 +8866,72 @@ Reversal:   Lower CLOCK_IN_CONFIRM_FLOOR_HOURS, or require a second approver (pa
   `userHasPermission` per flag. The mocked e2e fixture (`crewflow-fixtures.ts`) grants `staff.edit` so the existing bar
   specs keep their four actions.
 
-## CI audit — owner risk decisions for `yarn npm audit`; picomatch GHSA-fc5q-39xc-vjpf proposed as accepted risk until 2026-12-17 (branch fix/picomatch-ghsa-fc5q, PR #229, 2026-11-17; PROPOSAL: the owner's merge is the decision)
-- **Finding (HIGH per advisory, INFO for this repository):** GHSA-fc5q-39xc-vjpf / CVE-2026-112366 (CVSS 7.5,
-  AV:N/AC:L/PR:N/A:H): picomatch `<=4.0.7` compiles single-branch repeated extglobs (`+(*)`, `+(*a)`) into a regex with
-  exponential backtracking. Failure: *whoever controls a glob PATTERN* → passes it to picomatch and matches a short crafted
-  string → blocks the Node event loop. **No fixed release exists for any major** (latest 4.0.7; 2.3.2 and 3.0.2 are the
-  last 2.x/3.x; upstream fix micromatch/picomatch#194 unmerged), so no bump or in-major `resolutions` pin is possible.
-  The required ci-security `audit` job failed on every PR from the advisory's publication.
-- **Reachability (measured on origin/main 9618afc0):** tree versions 2.3.2 (anymatch, micromatch, readdirp, jest-util 29),
-  4.0.4 (@nx/js, @nx/workspace), 4.0.5 (vite, tinyglobby, jest 30). No first-party code imports picomatch or any glob
-  matcher. A yarn.lock walk of every workspace's `dependencies`/`optionalDependencies` finds ONE production path:
-  `@rab/server > argon2 > node-addon-api > node-gyp@13.0.1 (yarn's injected "node-gyp: latest") > tinyglobby >
-  picomatch@4.0.5` — node-gyp compiles native addons at install time and is never imported by the API or Worker, and its
-  patterns are its own. `yarn npm audit --environment production` also names anymatch (ts-node-dev > chokidar): that is a
-  devDependency yarn reaches through the workspace's lockfile entry, and ts-node-dev is `--forbid`den in the runtime
-  image by runtime-deps.cjs. The rab-front production bundle contains no picomatch (built and grepped). Every other
-  pattern comes from repository build/test configuration (Nx, Jest, Vite), i.e. from someone who can already run code
-  in CI. Not reachable by an API, Worker or browser caller.
-- **Control:** the audit job runs `tools/check-npm-audit.cjs` (same `yarn npm audit --severity high --all --recursive`)
-  against `tools/npm-audit-decisions.json`, which mirrors the image register (IMAGE_SECURITY_RELEASE_POLICY.md §5): one
-  GHSA id and exact package names per entry, owner_decision_ref (an issue/PR in this repo, not a placeholder),
-  decided_by, decided_on, justification, `expires` at most 180 days later. An expired, incomplete, over-long or duplicate
-  entry fails the job; there is no date override. A decision never covers a FIXABLE finding: if the registry has a newer
-  release in the same major as an installed version outside the vulnerable range, the job fails until upgraded, so this
-  entry lapses on its own the day picomatch ships a 2.x or 4.x fix. Matching is by GHSA id AND package, so any other or
-  new High/Critical advisory still fails exactly as before. Fail closed: a non-zero audit with no parseable report, an
-  unparseable line, a failed registry lookup or a range the check cannot evaluate all fail the job. Unused entries warn.
-  The only entry is this advisory, picomatch, accepted-risk, expiring 2026-12-17 (30 days).
+## CI audit — picomatch GHSA-fc5q-39xc-vjpf: no fix exists anywhere, so a dev/build-only 30-day owner exception (branch fix/picomatch-ghsa-fc5q, PR #229, 2026-11-17; PROPOSAL: the owner's merge is the decision; merges after or with the node-gyp runtime prune PR)
+- **Advisory:** GHSA-fc5q-39xc-vjpf / CVE-2026-112366 (HIGH, CVSS 7.5): picomatch `<=4.0.7` compiles single-branch
+  repeated extglobs (`+(*)`, `+(*a)`) into an exponentially backtracking regex. Failure: *whoever controls a glob
+  PATTERN* → has picomatch compile it and match a short crafted string → blocks the Node event loop. For this
+  repository: INFO while the conditions below hold. The required ci-security `audit` failed on every PR.
+- **Why not the normal fix (Twenty's way: root `resolutions` documented in `"//resolutions"`):** there is nothing to
+  resolve to. The advisory has no `first_patched_version`; the registry's whole list (1.0.0 … 4.0.7, no prereleases,
+  dist-tag latest 4.0.7) is inside `<=4.0.7` in every major; the upstream fix micromatch/picomatch#194 is unmerged.
+  No dependent can drop it either: the current release of every one still requires picomatch (@nx/js and
+  @nx/workspace 24.0.6 `^4.0.7`, vite 8.3.8 `^4.0.7`, jest-util / jest-haste-map / jest-message-util 30.5.1 `^4.0.3`,
+  tinyglobby 0.2.17 `^4.0.4`, anymatch 3.1.3 `^2.0.4`, micromatch 4.0.8 `^2.3.1`; node-gyp 13.1.0 via tinyglobby).
+- **Paths (yarn.lock, 2.3.2 / 4.0.4 / 4.0.5):** PRODUCTION only through yarn's injected `node-gyp: latest`:
+  `@rab/server > argon2 > node-gyp@13.0.1 > tinyglobby > picomatch@4.0.5` and `@rab/worker > bullmq > msgpackr >
+  msgpackr-extract > node-gyp > tinyglobby > picomatch@4.0.5` (install-time native build tool, never imported at
+  runtime). Everything else is dev/build: root `@nx/jest`/`@nx/js` (4.0.4, 4.0.5), jest 29/30 via `@types/jest`,
+  `jest-environment-jsdom`, `jest-haste-map > anymatch` (2.3.2, 4.0.5), rab-front `vite` (4.0.5), rab-server/worker
+  `ts-node-dev > chokidar > anymatch/readdirp` (2.3.2). No first-party code imports a glob matcher; the rab-front
+  production bundle contains no picomatch (built and grepped).
+- **Control (`tools/check-npm-audit.cjs` + `tools/npm-audit-decisions.json`, schema 2):** same
+  `yarn npm audit --severity high --all --recursive`; a finding passes only with an entry that is
+  - *scoped:* exactly one GHSA id + one package (`package`, a `packages` list is refused), `accepted-risk` only;
+  - *owned and explained:* owner_decision_ref (issue/PR of this repo, no placeholder), decided_by, decided_on,
+    `reason`, `drop_when`;
+  - *time-boxed:* at most 30 days; expired / over-long / duplicate entries fail; no date override;
+  - *lapsing on a fix:* fails as soon as the GitHub advisory has a `first_patched_version` or the registry has a
+    release in ANY major outside the vulnerable range and newer than an installed version (prereleases are not fixes);
+  - *dev/build only:* fails while the package is in the production closure = yarn.lock reachable from the
+    `dependencies`/`optionalDependencies` of the shipped workspaces (the check-licences.mjs list), yarn-injected
+    dependencies included, minus `RUNTIME_PRUNE` exported by `packages/rab-docker/rab/runtime-deps.cjs` (a pruned
+    package and what is reachable only through it). No export = nothing excluded.
+  Every other advisory fails as before. Fails closed on an unparseable audit, a failed registry or advisory lookup,
+  an unresolvable lockfile descriptor or an unevaluable range.
+- **Dependency on the prune PR:** on origin/main runtime-deps.cjs exports no `RUNTIME_PRUNE`, so this check FAILS on
+  #229 today (picomatch@4.0.5 via node-gyp is in the production closure). The node-gyp prune PR must export
+  `RUNTIME_PRUNE` (e.g. `['node-gyp']`), keep its CLI under `require.main === module`, and remove node-gyp's
+  exclusive subtree (tinyglobby, picomatch@4.0.5) from the image. #229 merges after, or together with, that PR.
+  Verified locally by patching that export in: the check passes (1 decided) and the real yarn.lock closure minus
+  node-gyp contains no node-gyp, tinyglobby or picomatch.
+- **Drop condition (also in the entry):** remove the entry and upgrade (`yarn up -R picomatch`, or a root
+  `resolutions` override documented in `"//resolutions"`) as soon as a fixed picomatch exists in any major (the
+  check fails on its own then); otherwise it expires 2026-12-17 and needs a new owner decision.
 
 ```
 SECURITY TRADE-OFF
 Decision:   The required ci-security audit passes with a known HIGH advisory (picomatch GHSA-fc5q-39xc-vjpf) in the
-            dependency tree, via a dated owner-decision register, for 30 days (to 2026-12-17).
-Reason:     No fixed picomatch release exists in any major, so the stricter option (keep the audit red) blocks every PR,
-            including security fixes, for an issue with no production reachability; disabling or `continue-on-error`
-            the audit, a permanent `npmAuditIgnoreAdvisories` in .yarnrc.yml, or dropping `--recursive` would each hide
-            it with no expiry and no owner record. Replacing @nx/js, Jest and Vite is out of proportion.
+            dev/build dependency tree, via one dated owner exception, for at most 30 days (to 2026-12-17).
+Reason:     No fixed picomatch exists in any major and no dependent release drops it, so neither an upgrade nor a
+            `resolutions` override is possible; keeping the audit red blocks every PR (security fixes included);
+            disabling the audit, `npmAuditIgnoreAdvisories` or dropping `--recursive` would hide it with no expiry,
+            no owner record and no production check. Replacing Nx, Jest and Vite is out of proportion.
 Risk:       A developer/CI process that compiles an attacker-chosen glob pattern can be stalled (CPU DoS of a build or
-            test run, not of a deployed service). If a future change starts passing request input to picomatch (or to
-            micromatch/tinyglobby/anymatch) in the API, Worker or front end, this decision would hide a real,
-            remotely triggerable ReDoS until it expires. picomatch@4.0.5 is present (unused) in the runtime image under
-            node-gyp; the image gate reports it as an unfixed High HOLD, which blocks a release until decided there.
-Mitigation: Entry is GHSA- and package-exact, 30-day expiry, lapses automatically on an in-major fix, every other advisory
-            still fails; runtime-deps.cjs forbids the dev tools from the image; this THREAT-MODEL entry and review of
-            any new glob-matching dependency in API/Worker/front code.
-Reversal:   When picomatch publishes a fix: upgrade within each major (`yarn up -R picomatch`, or an in-major
-            `resolutions` pin), delete the register entry (the check warns when it is unused, and fails while a fix is
-            available). If no fix by 2026-12-17: re-decide (new owner decision) or replace the parent tools.
+            test, not of a deployed service). A pattern source would have to be repository config, i.e. someone who
+            can already change CI. If prune and lockfile drift put picomatch back in the runtime closure, the check
+            fails rather than hiding it.
+Mitigation: One advisory + one package; 30-day expiry; lapses automatically on any fix; fails while the package is
+            in the production closure (lockfile walk minus the image prune); every other advisory still fails;
+            runtime-deps.cjs forbids the dev tools in the image.
+Reversal:   Upgrade / `resolutions` override (documented in "//resolutions") as soon as a fix ships, then delete the
+            entry; or replace the parent tools.
 ```
-- **Open item (not changed here):** the image gate's own register (`packages/rab-docker/scripts/image-security/
-  vulnerability-decisions.json`) is untouched; picomatch@4.0.5 under node-gyp will show as an unfixed High HOLD on the
-  next image gate/release until the owner decides it there, or until node-gyp is kept out of the runtime closure.
-- **Tests:** `tools/check-npm-audit.test.cjs` (ci-security "The check's own tests"): range evaluation and refusal of
-  ranges it cannot evaluate; a same-major fix makes only that major fixable (a fix in another major does not); the
-  committed register is well formed; expired, >180-day, wildcard-package, missing/placeholder owner reference, wildcard
-  id, future decided_on, unknown decision and duplicate entries are refused, the expiry day itself is still valid; the
-  NDJSON parser fails closed on a non-report line; evaluate(): decided, undecided for another advisory / another package /
-  no GHSA id, FIXABLE, unevaluable range, registry failure, expired decision; unused reported. Manually: on this branch
-  the check exits 1 with the placeholder reference (decision refused, finding undecided) and 0 with a real one.
+- **Tests:** `tools/check-npm-audit.test.cjs` (ci-security "The check's own tests", 9 tests): range evaluation incl.
+  the advisory API's `<= 4.0.7` spacing; lapse on first_patched_version, on a same-major and on a NEW-major release,
+  not on a prerelease or an older unaffected release; production closure finds the injected node-gyp chain, ignores
+  devDependencies (also behind a `workspace:*` dependency whose lockfile entry merges devDependencies), excludes a
+  pruned package's exclusive subtree, applies `resolutions`, fails closed on an unresolvable descriptor; the committed
+  register is well formed; scope (wildcard, comma, `packages` list), decision, owner reference / placeholder, id,
+  future date, reason, drop_when, schema, duplicate, >30 days, expiry refused (expiry day valid); NDJSON parser fails
+  closed; evaluate(): decided, undecided for another advisory / package / no id, production path, fix (both kinds),
+  each lookup failing, unevaluable range, expired; unused reported.

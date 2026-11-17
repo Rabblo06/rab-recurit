@@ -7,25 +7,28 @@ const { join } = require('node:path');
 
 const {
   inRange,
-  fixableTreeVersions,
+  fixShipped,
+  productionPaths,
   validateRegister,
   parseAudit,
   evaluate,
+  MAX_DAYS,
 } = require('./check-npm-audit.cjs');
 
-const decision = (over = {}) => ({
+const entry = (over = {}) => ({
   id: 'GHSA-fc5q-39xc-vjpf',
-  packages: ['picomatch'],
+  package: 'picomatch',
   decision: 'accepted-risk',
   owner_decision_ref: 'https://github.com/Rabblo06/rab-recurit/pull/123',
   decided_by: 'owner',
   decided_on: '2026-11-17',
   expires: '2026-12-17',
-  justification:
-    'Build tooling only; no attacker-controlled glob pattern reaches picomatch.',
+  reason:
+    'No fix in any major; build tooling only; not in the production closure.',
+  drop_when: 'When any picomatch release fixes it.',
   ...over,
 });
-const register = (...decisions) => ({ schema: 1, decisions });
+const register = (...decisions) => ({ schema: 2, decisions });
 const finding = (over = {}) => ({
   pkg: 'picomatch',
   id: 'GHSA-fc5q-39xc-vjpf',
@@ -36,10 +39,20 @@ const finding = (over = {}) => ({
   treeVersions: ['2.3.2', '4.0.5'],
   ...over,
 });
-const PUBLISHED = ['2.3.1', '2.3.2', '3.0.2', '4.0.5', '4.0.7'];
+const PUBLISHED = ['1.2.0', '2.3.1', '2.3.2', '3.0.2', '4.0.5', '4.0.7'];
+const advisory = (fixed = null) => ({
+  vulnerabilities: [
+    {
+      package: { name: 'picomatch' },
+      vulnerable_version_range: '<= 4.0.7',
+      first_patched_version: fixed,
+    },
+  ],
+});
 
-test('inRange evaluates comparator sets and alternatives; refuses what it cannot evaluate', () => {
+test('inRange evaluates comparator sets, alternatives and the advisory API spacing; refuses what it cannot evaluate', () => {
   assert.equal(inRange('4.0.7', '<=4.0.7'), true);
+  assert.equal(inRange('4.0.7', '<= 4.0.7'), true);
   assert.equal(inRange('4.0.8', '<=4.0.7'), false);
   assert.equal(inRange('2.3.2', '>=2.0.0 <2.3.2 || >=4.0.0 <4.0.4'), false);
   assert.equal(inRange('4.0.3', '>=2.0.0 <2.3.2 || >=4.0.0 <4.0.4'), true);
@@ -47,19 +60,162 @@ test('inRange evaluates comparator sets and alternatives; refuses what it cannot
   assert.throws(() => inRange('4.0.0-rc.1', '<=4.0.7'));
 });
 
-test('a same-major fix makes only that major fixable', () => {
-  assert.deepEqual(
-    fixableTreeVersions(['2.3.2', '4.0.5'], '<=4.0.7', PUBLISHED),
-    [],
+test('the exception lapses when a fix ships in ANY major or the advisory gets a first_patched_version', () => {
+  assert.equal(
+    fixShipped(
+      'picomatch',
+      ['2.3.2', '4.0.5'],
+      '<=4.0.7',
+      PUBLISHED,
+      advisory(),
+    ),
+    null,
   );
-  assert.deepEqual(
-    fixableTreeVersions(['2.3.2', '4.0.5'], '<=4.0.7', [...PUBLISHED, '4.0.8']),
-    ['4.0.5'],
+  assert.match(
+    fixShipped(
+      'picomatch',
+      ['2.3.2', '4.0.5'],
+      '<=4.0.7',
+      PUBLISHED,
+      advisory('4.0.8'),
+    ),
+    /first_patched_version 4\.0\.8/,
   );
-  // A fix in another major does not make 2.x fixable.
-  assert.deepEqual(
-    fixableTreeVersions(['2.3.2'], '<=4.0.7', [...PUBLISHED, '5.0.0']),
-    [],
+  assert.match(
+    fixShipped(
+      'picomatch',
+      ['2.3.2', '4.0.5'],
+      '<=4.0.7',
+      [...PUBLISHED, '4.0.8'],
+      advisory(),
+    ),
+    /4\.0\.8/,
+  );
+  // A fix only in a NEW major still lapses it (any major), even for the 2.x tree version.
+  assert.match(
+    fixShipped(
+      'picomatch',
+      ['2.3.2'],
+      '<=4.0.7',
+      [...PUBLISHED, '5.0.0'],
+      advisory(),
+    ),
+    /5\.0\.0/,
+  );
+  // A prerelease is not a fix; an older unaffected release is not a fix.
+  assert.equal(
+    fixShipped(
+      'picomatch',
+      ['2.3.2'],
+      '<=4.0.7',
+      [...PUBLISHED, '4.0.8-rc.1'],
+      advisory(),
+    ),
+    null,
+  );
+  assert.equal(
+    fixShipped(
+      'picomatch',
+      ['2.3.2'],
+      '>=2.0.0 <=4.0.7',
+      PUBLISHED,
+      advisory(),
+    ),
+    null,
+  );
+  assert.throws(() =>
+    fixShipped('picomatch', ['2.3.2'], '<=4.0.7', PUBLISHED, {
+      vulnerabilities: [{ package: { name: 'other' } }],
+    }),
+  );
+  assert.throws(() =>
+    fixShipped('picomatch', ['2.3.2'], '<=4.0.7', PUBLISHED, {}),
+  );
+});
+
+// A yarn.lock in miniature: a prod chain through an injected node-gyp, a dev-only chain, a workspace whose lockfile
+// entry would merge its devDependencies, and a resolutions override.
+const LOCK = {
+  __metadata: { version: 8 },
+  'argon2@npm:^0.41.1': {
+    resolution: 'argon2@npm:0.41.1',
+    dependencies: { 'node-gyp': 'npm:latest' },
+  },
+  'node-gyp@npm:latest': {
+    resolution: 'node-gyp@npm:13.0.1',
+    dependencies: { tinyglobby: 'npm:^0.2.12' },
+  },
+  'tinyglobby@npm:^0.2.12': {
+    resolution: 'tinyglobby@npm:0.2.17',
+    dependencies: { picomatch: 'npm:^4.0.4' },
+  },
+  'picomatch@npm:^4.0.4': { resolution: 'picomatch@npm:4.0.5' },
+  'ts-node-dev@npm:^2.0.0': {
+    resolution: 'ts-node-dev@npm:2.0.0',
+    dependencies: { anymatch: 'npm:~3.1.2' },
+  },
+  'anymatch@npm:~3.1.2': {
+    resolution: 'anymatch@npm:3.1.3',
+    dependencies: { picomatch: 'npm:^2.0.4' },
+  },
+  'picomatch@npm:^2.0.4': { resolution: 'picomatch@npm:2.3.2' },
+  'multer@npm:2.5.0': { resolution: 'multer@npm:2.5.0' },
+  'express@npm:^5.0.0': {
+    resolution: 'express@npm:5.0.0',
+    dependencies: { multer: 'npm:2.2.0' },
+  },
+};
+const WORKSPACES = new Map([
+  [
+    '@rab/server',
+    {
+      name: '@rab/server',
+      dependencies: {
+        argon2: '^0.41.1',
+        '@rab/shared': 'workspace:*',
+        express: '^5.0.0',
+      },
+      devDependencies: { 'ts-node-dev': '^2.0.0' },
+    },
+  ],
+  [
+    '@rab/worker',
+    {
+      name: '@rab/worker',
+      dependencies: { '@rab/server': 'workspace:*' },
+      devDependencies: { 'ts-node-dev': '^2.0.0' },
+    },
+  ],
+  ['@rab/shared', { name: '@rab/shared', dependencies: {} }],
+]);
+const walk = (over = {}) =>
+  productionPaths({
+    lock: LOCK,
+    workspaces: WORKSPACES,
+    shipped: ['@rab/worker'],
+    resolutions: { multer: '2.5.0' },
+    target: 'picomatch',
+    ...over,
+  });
+
+test('production closure: finds the injected node-gyp chain, ignores devDependencies (also through a workspace dep)', () => {
+  assert.deepEqual(walk(), [
+    '@rab/worker > @rab/server > argon2@0.41.1 > node-gyp@13.0.1 > tinyglobby@0.2.17 > picomatch@4.0.5',
+  ]);
+});
+
+test('production closure: a pruned package and what is reachable only through it are excluded', () => {
+  assert.deepEqual(walk({ prune: ['node-gyp'] }), []);
+});
+
+test('production closure fails closed on a descriptor yarn.lock cannot resolve, resolutions applied first', () => {
+  assert.throws(
+    () => walk({ resolutions: {} }),
+    /no entry for multer@npm:2\.2\.0/,
+  );
+  assert.throws(
+    () => walk({ shipped: ['@rab/nope'] }),
+    /workspace @rab\/nope not found/,
   );
 });
 
@@ -77,48 +233,43 @@ test('the committed register is well formed (as of its latest decision; expiry i
   assert.equal(valid.size, reg.decisions.length);
 });
 
-test('invalid decisions fail: expired, over 180 days, wildcard package, missing owner reference, placeholder PR', () => {
+test('invalid entries fail: scope, expiry, owner reference, reason and drop condition', () => {
   const errs = (d, today = '2026-11-20') =>
-    validateRegister(register(d), today).errors;
-  assert.match(errs(decision(), '2026-12-18').join(), /EXPIRED/);
+    validateRegister(register(d), today).errors.join();
+  assert.equal(MAX_DAYS, 30);
+  assert.match(errs(entry(), '2026-12-18'), /EXPIRED/);
+  assert.match(errs(entry({ expires: '2026-12-18' })), /more than 30 days/);
+  assert.match(errs(entry({ package: 'pico*' })), /exactly one exact package/);
   assert.match(
-    errs(decision({ expires: '2027-06-01' })).join(),
-    /more than 180 days/,
+    errs(entry({ package: 'picomatch,micromatch' })),
+    /exactly one exact package/,
   );
   assert.match(
-    errs(decision({ packages: ['pico*'] })).join(),
-    /exact package names/,
+    errs({ ...entry(), packages: ['picomatch', 'micromatch'] }),
+    /one package per entry/,
   );
-  assert.match(
-    errs(decision({ owner_decision_ref: '' })).join(),
-    /owner_decision_ref/,
-  );
+  assert.match(errs(entry({ decision: 'not-affected' })), /accepted-risk/);
   assert.match(
     errs(
-      decision({
+      entry({
         owner_decision_ref: 'https://github.com/Rabblo06/rab-recurit/pull/0',
       }),
-    ).join(),
+    ),
     /owner_decision_ref/,
   );
-  assert.match(errs(decision({ id: 'GHSA-*' })).join(), /GHSA/);
-  assert.match(errs(decision({ decided_on: '2026-11-21' })).join(), /future/);
+  assert.match(errs(entry({ id: 'GHSA-*' })), /GHSA/);
+  assert.match(errs(entry({ decided_on: '2026-11-21' })), /future/);
+  assert.match(errs(entry({ reason: 'short' })), /reason/);
+  assert.match(errs(entry({ drop_when: '' })), /drop_when/);
   assert.match(
-    errs(decision({ decision: 'ignore' })).join(),
-    /decision must be/,
-  );
-  assert.deepEqual(
-    validateRegister(register(decision(), decision()), '2026-11-20').errors
-      .length,
-    1,
+    validateRegister({ schema: 1, decisions: [] }, '2026-11-20').errors.join(),
+    /schema/,
   );
   assert.equal(
-    validateRegister(
-      register(decision({ expires: '2026-12-18' })),
-      '2026-12-18',
-    ).valid.size,
+    validateRegister(register(entry(), entry()), '2026-11-20').errors.length,
     1,
-  ); // last day valid
+  );
+  assert.equal(validateRegister(register(entry()), '2026-12-17').valid.size, 1); // the expiry day itself is valid
 });
 
 test('parseAudit reads yarn 4 NDJSON and fails closed on anything else', () => {
@@ -150,10 +301,14 @@ test('parseAudit reads yarn 4 NDJSON and fails closed on anything else', () => {
   assert.throws(() => parseAudit('{"foo":1}'));
 });
 
-test('evaluate: decided, undecided (other advisory, other package, fixable, unevaluable) and unused', () => {
-  const { valid } = validateRegister(register(decision()), '2026-11-20');
-  const pub = () => PUBLISHED;
-  let r = evaluate([finding()], valid, pub);
+test('evaluate: decided only when no fix, not in production, and the entry matches advisory AND package', () => {
+  const { valid } = validateRegister(register(entry()), '2026-11-20');
+  const ok = {
+    published: () => PUBLISHED,
+    advisory: () => advisory(),
+    production: () => [],
+  };
+  let r = evaluate([finding()], valid, ok);
   assert.equal(r.decided.length, 1);
   assert.equal(r.undecided.length, 0);
 
@@ -164,24 +319,53 @@ test('evaluate: decided, undecided (other advisory, other package, fixable, unev
       finding({ id: null }),
     ],
     valid,
-    pub,
+    ok,
   );
   assert.equal(r.undecided.length, 3);
-  assert.equal(r.decided.length, 0);
   assert.deepEqual(r.unused, ['GHSA-fc5q-39xc-vjpf']);
 
-  r = evaluate([finding()], valid, () => [...PUBLISHED, '4.0.8']);
-  assert.match(r.undecided[0].reason, /FIXABLE.*4\.0\.5/);
+  r = evaluate([finding()], valid, {
+    ...ok,
+    production: () => [
+      '@rab/server > argon2@0.41.1 > node-gyp@13.0.1 > tinyglobby@0.2.17 > picomatch@4.0.5',
+    ],
+  });
+  assert.match(r.undecided[0].reason, /PRODUCTION closure.*\n.*node-gyp/);
 
-  r = evaluate([finding({ range: '~4.0.0' })], valid, pub);
+  r = evaluate([finding()], valid, {
+    ...ok,
+    advisory: () => advisory('4.0.8'),
+  });
+  assert.match(r.undecided[0].reason, /FIX EXISTS/);
+  r = evaluate([finding()], valid, {
+    ...ok,
+    published: () => [...PUBLISHED, '5.0.0'],
+  });
+  assert.match(r.undecided[0].reason, /FIX EXISTS/);
+
+  for (const broken of [
+    {
+      published: () => {
+        throw new Error('registry down');
+      },
+    },
+    {
+      advisory: () => {
+        throw new Error('HTTP 503');
+      },
+    },
+    {
+      production: () => {
+        throw new Error('no entry for x');
+      },
+    },
+  ]) {
+    r = evaluate([finding()], valid, { ...ok, ...broken });
+    assert.match(r.undecided[0].reason, /cannot be applied/);
+  }
+  r = evaluate([finding({ range: '~4.0.0' })], valid, ok);
   assert.match(r.undecided[0].reason, /cannot be applied/);
 
-  r = evaluate([finding()], valid, () => {
-    throw new Error('registry down');
-  });
-  assert.match(r.undecided[0].reason, /registry down/);
-
-  // An expired decision is not valid, so the finding is undecided.
-  const expired = validateRegister(register(decision()), '2026-12-18').valid;
-  assert.equal(evaluate([finding()], expired, pub).undecided.length, 1);
+  const expired = validateRegister(register(entry()), '2026-12-18').valid;
+  assert.equal(evaluate([finding()], expired, ok).undecided.length, 1);
 });
