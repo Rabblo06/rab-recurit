@@ -1,5 +1,5 @@
 import 'reflect-metadata';
-import { NotificationType } from '@rab/shared';
+import { NotificationType, NotificationTypeType } from '@rab/shared';
 import { INestApplication, NotFoundException } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
 import { randomUUID } from 'node:crypto';
@@ -158,5 +158,52 @@ describeIfDb('SF-5: core.notification is recipient-scoped by RLS (integration)',
       return (await m.query(`SELECT core.offer_sent_notification_read_at($1, $2) AS t`, [offerA, staffA.userId]))[0].t;
     });
     expect(noContext).toBeNull();
+  });
+
+  it('abuse: the runtime role setting the read-receipt flag itself still cannot read another user\'s offer_sent notification', async () => {
+    // The read-receipt policy also requires current_user = 'crewflow'; crewflow_app setting rab.offer_read_receipt gains nothing.
+    const result = await as(manager, async (m) => {
+      const [{ flag }] = await m.query(`SELECT set_config('rab.offer_read_receipt', 'on', true) AS flag`);
+      const [{ who }] = await m.query(`SELECT current_user::text AS who`);
+      const rows = await m.query(`SELECT id, title, message, read_at FROM core.notification WHERE id = $1`, [idA]);
+      return { flag, who, rows };
+    });
+    expect(result.flag).toBe('on'); // the flag really was set in that transaction
+    expect(result.who).not.toBe('crewflow');
+    expect(result.rows).toEqual([]);
+    // The same flag, set by another staff member of the same organisation, does not expose staffA's row either.
+    const asStaffB = await as(staffB, async (m) => {
+      await m.query(`SELECT set_config('rab.offer_read_receipt', 'on', true)`);
+      return m.query(`SELECT id FROM core.notification WHERE id = $1`, [idA]);
+    });
+    expect(asStaffB).toEqual([]);
+  });
+
+  it('abuse: the read-receipt definer ignores a read notification of another type that points at the same offer', async () => {
+    const offerC = randomUUID();
+    const readAt = async () =>
+      as(manager, async (m) => (await m.query(`SELECT core.offer_sent_notification_read_at($1, $2) AS t`, [offerC, staffA.userId]))[0].t as Date | null);
+    const notifyStaffA = (type: NotificationTypeType) =>
+      as(manager, (m) => notifications.notify(m, {
+        organisationId: orgId, userId: staffA.userId, type, title: 'Offer update', message: 'Venue · 13 Dec', relatedEntityType: 'offer', relatedEntityId: offerC,
+      }));
+    const idFor = async (type: NotificationTypeType) =>
+      (await admin.query(`SELECT id FROM core.notification WHERE user_id = $1 AND related_entity_id = $2 AND type = $3`, [staffA.userId, offerC, type]))[0].id as string;
+
+    // A non-offer_sent row for the same offer and recipient, marked read by the recipient: not a read receipt.
+    await notifyStaffA(NotificationType.OFFER_CONFIRMED);
+    const otherId = await idFor(NotificationType.OFFER_CONFIRMED);
+    await notifications.markRead(ctxOf(staffA), otherId);
+    expect((await adminRow(otherId)).read_at).not.toBeNull();
+    expect(await readAt()).toBeNull();
+
+    // An unread offer_sent row for that offer: still no receipt.
+    await notifyStaffA(NotificationType.OFFER_SENT);
+    const sentId = await idFor(NotificationType.OFFER_SENT);
+    expect(await readAt()).toBeNull();
+
+    // Control: once the offer_sent row itself is read, the definer reports it (so the nulls above are not a broken query).
+    await notifications.markRead(ctxOf(staffA), sentId);
+    expect(await readAt()).toBeInstanceOf(Date);
   });
 });
