@@ -121,10 +121,88 @@ test('compare: more edges than the baseline is NEW, fewer is STALE, both fail', 
 
 test('compareToBase: a raised count or a new entry has grown; a lowered or deleted entry has not', () => {
   const base = { 'engine-to-modules': { a: 2, b: 1 } };
-  assert.deepEqual(check.compareToBase(base, { 'engine-to-modules': { a: 1 } }).grown, []);
-  const g = check.compareToBase(base, { 'engine-to-modules': { a: 3, b: 1 }, 'worker-deep-import': { w: 1 } }).grown;
+  assert.deepEqual(check.compareToBase(base, { 'engine-to-modules': { a: 1 } }, []).grown, []);
+  const g = check.compareToBase(base, { 'engine-to-modules': { a: 3, b: 1 }, 'worker-deep-import': { w: 1 } }, []).grown;
   assert.deepEqual(g.map((x) => [x.rule, x.file, x.newKey]), [['engine-to-modules', 'a', false], ['worker-deep-import', 'w', true]]);
 });
+
+describeApproved();
+
+function describeApproved() {
+  const W = 'worker-deep-import';
+  const FILE = 'packages/rab-worker/src/queues/rab-push/push-send.processor.ts';
+  const OTHER = 'packages/rab-worker/src/queues/rab-push/push.processors.ts';
+  const approved = Object.freeze([
+    Object.freeze({ rule: W, file: FILE, from: 10, to: 11, approved: 'owner 2026-11-17', reason: 'test' }),
+  ]);
+  const base = { [W]: { [FILE]: 10, [OTHER]: 1 } };
+  const grownOf = (head, list = approved) => check.compareToBase(base, head, list).grown.map((g) => `${g.rule}:${g.file}:${g.base}->${g.head}`);
+
+  test('approved growth: the exact approved count passes, with no stale approval', () => {
+    assert.deepEqual(check.compareToBase(base, { [W]: { [FILE]: 11, [OTHER]: 1 } }, approved), { grown: [], staleApproved: [] });
+  });
+
+  test('approved growth: one more than `to` fails', () => {
+    assert.deepEqual(grownOf({ [W]: { [FILE]: 12, [OTHER]: 1 } }), [`${W}:${FILE}:10->12`]);
+  });
+
+  test('approved growth: an unlisted file growing still fails', () => {
+    assert.deepEqual(grownOf({ [W]: { [FILE]: 11, [OTHER]: 2 } }), [`${W}:${OTHER}:1->2`]);
+    assert.deepEqual(grownOf({ [W]: { [FILE]: 10, [OTHER]: 1, 'packages/rab-worker/src/new.ts': 1 } }), [`${W}:packages/rab-worker/src/new.ts:0->1`]);
+  });
+
+  test('approved growth: the same file under a different rule still fails', () => {
+    const head = { 'engine-to-modules': { [FILE]: 1 }, [W]: { [FILE]: 10, [OTHER]: 1 } };
+    assert.deepEqual(grownOf(head), [`engine-to-modules:${FILE}:0->1`]);
+  });
+
+  test('approved growth: a base count other than `from` fails, and the approval is reported stale', () => {
+    const otherBase = { [W]: { [FILE]: 9, [OTHER]: 1 } };
+    const r = check.compareToBase(otherBase, { [W]: { [FILE]: 11, [OTHER]: 1 } }, approved);
+    assert.deepEqual(r.grown.map((g) => `${g.file}:${g.base}->${g.head}`), [`${FILE}:9->11`]);
+    assert.deepEqual(r.staleApproved.map((a) => `${a.file}:${a.from}:${a.base}`), [`${FILE}:10:9`]);
+    // Once the growth has merged (base == to), the approval is stale too: it must be deleted.
+    const merged = check.compareToBase({ [W]: { [FILE]: 11, [OTHER]: 1 } }, { [W]: { [FILE]: 11, [OTHER]: 1 } }, approved);
+    assert.deepEqual(merged.grown, []);
+    assert.equal(merged.staleApproved.length, 1);
+  });
+
+  test('approved growth: a consumed entry comes back to life if the base count returns to `from`, which is why stale must fail', () => {
+    // Base already at `to` (the using PR merged): the approval no longer matches anything and is reported stale.
+    const atTo = check.compareToBase({ [W]: { [FILE]: 11, [OTHER]: 1 } }, { [W]: { [FILE]: 11, [OTHER]: 1 } }, approved);
+    assert.deepEqual(atTo, { grown: [], staleApproved: [{ ...approved[0], base: 11 }] });
+    // Base back at `from` (a later PR removed that import again): the same entry matches once more and would let
+    // another PR re-add the edge. Only failing STALE at the earlier step forces the entry out before that can happen.
+    const backAtFrom = check.compareToBase({ [W]: { [FILE]: 10, [OTHER]: 1 } }, { [W]: { [FILE]: 11, [OTHER]: 1 } }, approved);
+    assert.deepEqual(backAtFrom, { grown: [], staleApproved: [] });
+  });
+
+  test('approved growth: partial use fails (from 10, to 12, head 11 has grown)', () => {
+    const wide = [{ rule: W, file: FILE, from: 10, to: 12, approved: 'owner 2026-11-17', reason: 'test' }];
+    const r = check.compareToBase(base, { [W]: { [FILE]: 11, [OTHER]: 1 } }, wide);
+    assert.deepEqual(r.grown.map((g) => `${g.rule}:${g.file}:${g.base}->${g.head}`), [`${W}:${FILE}:10->11`]);
+    assert.deepEqual(r.staleApproved, []);
+  });
+
+  test('approved growth: from 0 means the file has no entry at the base', () => {
+    const NEW = 'packages/rab-worker/src/new.ts';
+    const zero = [{ rule: W, file: NEW, from: 0, to: 1, approved: 'owner 2026-11-17', reason: 'test' }];
+    assert.deepEqual(check.compareToBase(base, { [W]: { [FILE]: 10, [OTHER]: 1, [NEW]: 1 } }, zero), { grown: [], staleApproved: [] });
+  });
+
+  test('validateApprovedGrowth refuses malformed or undated approvals; the shipped list is valid', () => {
+    const ok = { rule: W, file: FILE, from: 10, to: 11, approved: 'owner 2026-11-17', reason: 'r' };
+    assert.doesNotThrow(() => check.validateApprovedGrowth(check.APPROVED_GROWTH));
+    assert.ok(Object.isFrozen(check.APPROVED_GROWTH) && check.APPROVED_GROWTH.every((e) => Object.isFrozen(e)));
+    assert.throws(() => check.validateApprovedGrowth([{ ...ok, approved: 'owner' }]), /owner YYYY-MM-DD/);
+    assert.throws(() => check.validateApprovedGrowth([{ ...ok, rule: 'nope' }]), /unknown rule/);
+    assert.throws(() => check.validateApprovedGrowth([{ ...ok, to: 10 }]), /above from/);
+    assert.throws(() => check.validateApprovedGrowth([{ ...ok, reason: ' ' }]), /reason is required/);
+    assert.throws(() => check.validateApprovedGrowth([{ ...ok, extra: 1 }]), /keys must be exactly/);
+    assert.throws(() => check.validateApprovedGrowth([ok, ok]), /duplicate/);
+    assert.throws(() => check.compareToBase(base, base, [{ ...ok, to: 'x' }]), /above from/);
+  });
+}
 
 test('parseBaseline refuses unknown rules, zero or negative counts and malformed documents', () => {
   assert.throws(() => check.parseBaseline('{"files":{}}', 'x'), /"rules" object/);

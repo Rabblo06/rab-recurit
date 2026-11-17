@@ -59,6 +59,32 @@ describe('PermissionsService', () => {
   });
 });
 
+describe('PermissionsService.assertPermissionTx (SF-2 layer-2 assert)', () => {
+  it('resolves when the identity holds the flag in this transaction', async () => {
+    const service = new PermissionsService({} as TenantContextService);
+    await expect(service.assertPermissionTx(fakeManager(undefined, 1), ctx, 'staff.view')).resolves.toBeUndefined();
+  });
+
+  it('throws ForbiddenException (403) with the default message when the flag is missing', async () => {
+    const service = new PermissionsService({} as TenantContextService);
+    await expect(service.assertPermissionTx(fakeManager(undefined, 0), ctx, 'staff.view')).rejects.toMatchObject({ status: 403, message: 'Permission required.' });
+  });
+
+  it('a per-user revoke override denies even with a role grant, with the caller message', async () => {
+    const service = new PermissionsService({} as TenantContextService);
+    await expect(service.assertPermissionTx(fakeManager('revoke', 1), ctx, 'staff.edit', 'Editing staff is not permitted.')).rejects.toMatchObject({
+      status: 403,
+      message: 'Editing staff is not permitted.',
+    });
+  });
+
+  it('a failing lookup propagates (never a default allow)', async () => {
+    const manager = { createQueryBuilder: jest.fn(() => { throw new Error('db down'); }) } as unknown as EntityManager;
+    const service = new PermissionsService({} as TenantContextService);
+    await expect(service.assertPermissionTx(manager, ctx, 'staff.view')).rejects.toThrow('db down');
+  });
+});
+
 describe('PermissionsService.displayHints (SC-05, GET /auth/capabilities)', () => {
   const flags = ['staff.view', 'payroll.approve', 'offer.send'] as const;
   const snapshot = (over: Partial<{ userId: string; organisationId: string; workspaceId: string | null }> = {}) => ({

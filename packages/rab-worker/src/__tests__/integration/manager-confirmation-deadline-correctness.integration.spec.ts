@@ -8,7 +8,7 @@ import {
   ShiftAssignmentStatus,
   ShiftStatus,
 } from '@rab/shared';
-import { ConflictException, HttpException, NotFoundException } from '@nestjs/common';
+import { ConflictException, ForbiddenException, HttpException, NotFoundException } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
 import { randomUUID } from 'node:crypto';
 import { DataSource } from 'typeorm';
@@ -457,14 +457,16 @@ describeIfDb('manager confirmation deadline correctness (integration)', () => {
       expect(await asA(fx, `SELECT 1 FROM core.audit_log WHERE action = 'offer.rejected' AND entity_id = $1`, [withdrawn.id])).toHaveLength(0);
     });
 
-    it('C4 (T-X2/X3): another workspace’s manager and a Venue Manager get 404 (never 403) and nothing changes', async () => {
+    it('C4 (T-X2/X3): another workspace’s manager gets 404; a Venue Manager (no offer.confirm) gets 403 like the route guard; nothing changes', async () => {
       const fx = await seedFixture('dlIdor');
       const vm = await factory.createVenueManager(fx.organisation, { owner: fx.managerA, venueIds: [fx.venueId] });
       const staff = await factory.createStaff(fx.organisation, { owner: fx.managerA });
       const offer = await sendAndAccept(fx, await seedOpenShift(fx), staff);
       await setDeadline(fx, offer, -60_000);
       await expect(offerService.managerConfirm(ctxOf(fx.managerB), offer.id)).rejects.toBeInstanceOf(NotFoundException);
-      await expect(offerService.managerConfirm(ctxOf(vm), offer.id)).rejects.toBeInstanceOf(NotFoundException);
+      // SF-2: the service re-checks the route's offer.confirm first, which the Venue Manager role categorically lacks — 403,
+      // as PermissionGuard(offer.confirm) answers on the HTTP path (CLAUDE.md: 403 for a categorical permission lack).
+      await expect(offerService.managerConfirm(ctxOf(vm), offer.id)).rejects.toBeInstanceOf(ForbiddenException);
       // Neither a foreign confirm nor a VM confirm triggers the lazy withdrawal (only the owner's refused confirm does).
       expect((await reload(fx, offer.id)).status).toBe(OfferStatus.STAFF_ACCEPTED);
     });

@@ -237,6 +237,7 @@ export const NOT_SHIPPED_AUDIT_ACTIONS: readonly string[] = Object.freeze([
   'user.invite_cleanup_skipped',
   'email.sent',
   'email.delivery_failed',
+  'push.delivery_failed',
   'report.email_cancelled',
   'shift.reminder_sent',
   'shift_assignment.no_show',
@@ -300,8 +301,9 @@ export const NOT_SHIPPED_AUDIT_ACTIONS: readonly string[] = Object.freeze([
   'ai.agent_trigger_disabled',
   'ai.input_requested',
   'ai.input_answered',
-  // Written directly by the Worker (not AuditAction constants): e-mail dispatch and account-invite cleanup outcomes.
+  // Written directly by the Worker (not AuditAction constants): e-mail and push dispatch, and account-invite cleanup outcomes.
   'email.delivery_uncertain',
+  'push.delivery_uncertain',
   'user.invite_cleanup_failed',
   // Written only by the frozen one-off migration HwsHistoricalRowsPrivilegedCopy1786719520000 (privileged-copy.ts).
   'workspace.hws_backfill_privileged_copy',
