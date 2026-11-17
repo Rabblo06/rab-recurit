@@ -34,7 +34,7 @@ describe('Command palette settings shortcuts', () => {
   ])('%s opens %s', (label, path) => {
     const { onClose } = mount();
     fireEvent.click(screen.getByRole('button', { name: label }));
-    expect(screen.getByTestId('where')).toHaveTextContent(new RegExp(`^${path.replace(/\//g, '\\/')}$`));
+    expect(screen.getByTestId('where').textContent).toBe(path);
     expect(onClose).toHaveBeenCalled();
   });
 
