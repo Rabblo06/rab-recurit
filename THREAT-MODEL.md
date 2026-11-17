@@ -9184,8 +9184,8 @@ Reversal:   Upgrade / `resolutions` override (documented in "//resolutions") as 
     the provisioner. No legitimate variable of these services holds a PostgreSQL URL (checked: the compose files, the image
     `ENV`, `database.env` / `runtime.env` templates). The dev compose's `server` / `worker` read a developer's
     `../rab-server/.env`, so they blank its host-native URLs (`DATABASE_URL*`, `TEST_DATABASE_URL`, `TEST_DATABASE_ADMIN_URL`,
-    `TEST_DATABASE_URL_UNPOOLED`, `TEST_DATABASE_CREWFLOW_URL`, `MIGRATION_SECURITY_ADMIN_URL`) and pin `PG_ADMIN_URL` to `""`,
-    as QA's do; any other database URL left in that file stops them (exit 64), by design.
+    `TEST_DATABASE_CREWFLOW_URL`, `MIGRATION_SECURITY_ADMIN_URL`) and pin `PG_ADMIN_URL` to `""`, as QA's do; any other database
+    URL left in that file stops them (exit 64), by design, the deprecated test admin name included (renamed, X3.5-S7).
   - *Silent reinterpretation* (an un-renamed deployment keeps its admin URL in `PG_DATABASE_URL`). Refused, never run as
     the admin: the bootstrap child's `selectDbSetupInput` refuses a `PG_DATABASE_URL` whose login is not `crewflow_owner`
     ("renamed to PG_ADMIN_URL", exit 64, nothing connects, nothing stored), and so do the lint and the preflight; the
