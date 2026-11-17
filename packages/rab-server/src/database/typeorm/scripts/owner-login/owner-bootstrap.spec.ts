@@ -6,7 +6,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 
-import { OWNER_CREDENTIAL_MESSAGES } from '../../../owner-login/owner-credential';
+import { DB_SETUP_INPUT_MESSAGES, OWNER_CREDENTIAL_MESSAGES } from '../../../owner-login/owner-credential';
 import { type OwnerPasswordRead, OwnerPasswordFileError, OwnerPasswordMismatchError, OWNER_PASSWORD_FILE_MESSAGES } from '../../../owner-login/owner-password-file';
 import {
   bootstrapDriverConfigs,
@@ -39,6 +39,7 @@ import {
   OWNER_URL_SESSION_STARTUP_OPTIONS,
   OWNER_BOOTSTRAP_Q4A_LOCK,
   OWNER_BOOTSTRAP_Q4B_SET_INPUTS,
+  OWNER_BOOTSTRAP_Q4B2_NO_SELF_GRANT,
   OWNER_BOOTSTRAP_Q4C_DO,
   OWNER_BOOTSTRAP_Q4D_REVERIFY,
   OWNER_BOOTSTRAP_ROLLBACK,
@@ -288,6 +289,20 @@ describe('owner bootstrap: the admin session', () => {
     expect(bind?.values).toEqual(['SCRAM-SHA-256$4096:c2FsdA==$stored:server', 'true']);
     for (const s of sent) expect(s.text).not.toContain('SCRAM-SHA-256$');
     expect(sent.map((s) => s.text)).toContain(OWNER_BOOTSTRAP_Q4C_DO);
+  });
+
+  it('DENIAL createrole_self_grant: the admin never self-grants crewflow_owner (pinned empty, transaction-local, inside the write transaction, before CREATE ROLE)', async () => {
+    const { io, sent } = fakeIo([base, base, existing], [{ ok: true }]);
+    await bootstrapOwnerWithIo(io);
+    const texts = sent.map((s) => s.text);
+    const at = (t: string) => texts.indexOf(t);
+    expect(at(OWNER_BOOTSTRAP_Q4B2_NO_SELF_GRANT)).toBeGreaterThan(at(OWNER_BOOTSTRAP_Q4A_LOCK));
+    expect(at(OWNER_BOOTSTRAP_Q4B2_NO_SELF_GRANT)).toBeLessThan(at(OWNER_BOOTSTRAP_Q4C_DO));
+    expect(texts.filter((t) => t === OWNER_BOOTSTRAP_Q4B2_NO_SELF_GRANT)).toHaveLength(1);
+    expect(sent.find((s) => s.text === OWNER_BOOTSTRAP_Q4B2_NO_SELF_GRANT)?.values).toBeUndefined();
+    // Exactly the empty setting, local to the transaction (is_local = true), so it can never outlive the bootstrap.
+    expect(OWNER_BOOTSTRAP_Q4B2_NO_SELF_GRANT).toBe("SELECT pg_catalog.set_config('createrole_self_grant', '', true);");
+    expect(OWNER_BOOTSTRAP_ADMIN_STATEMENTS.indexOf(OWNER_BOOTSTRAP_Q4B2_NO_SELF_GRANT)).toBe(OWNER_BOOTSTRAP_ADMIN_STATEMENTS.indexOf(OWNER_BOOTSTRAP_Q4C_DO) - 1);
   });
 
   it('re-plans under the lock: with the stored password, a role another start created meanwhile that it cannot log in to is the stale-file refusal (rolled back)', async () => {
@@ -666,7 +681,7 @@ describe('owner bootstrap: the pending password file (security review L1)', () =
 
   it('the stale-file and race messages are neutral (no claim about who changed what)', () => {
     expect(OWNER_BOOTSTRAP_MESSAGES.passwordFileStale).toBe(
-      'The stored crewflow_owner password does not log in. Delete the password file and start again with the admin address in PG_DATABASE_URL. Refusing.',
+      'The stored crewflow_owner password does not log in. Delete the password file and start again with the admin address in PG_ADMIN_URL. Refusing.',
     );
     expect(OWNER_BOOTSTRAP_MESSAGES.passwordFileRace).not.toMatch(/stored a crewflow_owner password/);
   });
@@ -722,7 +737,7 @@ describe('owner bootstrap: the whole step without a database', () => {
 
   it('APP_SECRET plays no part: the same refusal / failure with or without it (db-setup does not receive it)', async () => {
     for (const env of [{}, { APP_SECRET: SECRET }, { APP_SECRET: 'short' }]) {
-      const { result, text } = await run({ PG_DATABASE_URL: 'postgres://dbadmin:adminpw0123456789@127.0.0.1:1/crewflow_unit', ...env });
+      const { result, text } = await run({ PG_ADMIN_URL: 'postgres://dbadmin:adminpw0123456789@127.0.0.1:1/crewflow_unit', ...env });
       expect(result).toMatchObject({ outcome: 'failed', exitCode: 70, code: 'ECONNREFUSED' });
       assertClean(text);
     }
@@ -740,24 +755,25 @@ describe('owner bootstrap: the whole step without a database', () => {
 
   it('a pooler-shaped URL (either login) is refused before connecting', async () => {
     for (const login of ['crewflow_owner', 'dbadmin']) {
-      const { result, text } = await run({ PG_DATABASE_URL: `postgres://${login}:ownerpw0123456789@ep-abc-pooler.eu-west-2.aws.neon.tech/crewflow_unit` });
+      const key = login === 'crewflow_owner' ? 'PG_DATABASE_URL' : 'PG_ADMIN_URL';
+      const { result, text } = await run({ [key]: `postgres://${login}:ownerpw0123456789@ep-abc-pooler.eu-west-2.aws.neon.tech/crewflow_unit` });
       expect(result).toMatchObject({ outcome: 'refused', exitCode: 64 });
-      expect(text).toContain(OWNER_CREDENTIAL_MESSAGES.transactionPooler);
+      expect(text).toContain(OWNER_CREDENTIAL_MESSAGES.transactionPooler.split('PG_DATABASE_URL').join(key));
     }
   });
 
   it('a refused or failed admin run never stores a new password (the file is written only before a real database write)', async () => {
     const written: string[] = [];
-    await run({ PG_DATABASE_URL: 'postgres://dbadmin:adminpw0123456789@127.0.0.1:1/crewflow_unit' }, written);
-    await run({ PG_DATABASE_URL: `${ADMIN_URL}?sslrootcert=/etc/x.pem` }, written);
+    await run({ PG_ADMIN_URL: 'postgres://dbadmin:adminpw0123456789@127.0.0.1:1/crewflow_unit' }, written);
+    await run({ PG_ADMIN_URL: `${ADMIN_URL}?sslrootcert=/etc/x.pem` }, written);
     expect(written).toEqual([]);
   });
 
   it('the persist-delay test seam is refused outside NODE_ENV=test, or out of range, before connecting (64)', async () => {
     for (const env of [
-      { PG_DATABASE_URL: ADMIN_URL, NODE_ENV: 'production', CREWFLOW_TEST_DB_SETUP_PERSIST_DELAY_MS: '10' },
-      { PG_DATABASE_URL: ADMIN_URL, NODE_ENV: 'test', CREWFLOW_TEST_DB_SETUP_PERSIST_DELAY_MS: '99999' },
-      { PG_DATABASE_URL: ADMIN_URL, NODE_ENV: 'test', CREWFLOW_TEST_DB_SETUP_PERSIST_DELAY_MS: '1e3' },
+      { PG_ADMIN_URL: ADMIN_URL, NODE_ENV: 'production', CREWFLOW_TEST_DB_SETUP_PERSIST_DELAY_MS: '10' },
+      { PG_ADMIN_URL: ADMIN_URL, NODE_ENV: 'test', CREWFLOW_TEST_DB_SETUP_PERSIST_DELAY_MS: '99999' },
+      { PG_ADMIN_URL: ADMIN_URL, NODE_ENV: 'test', CREWFLOW_TEST_DB_SETUP_PERSIST_DELAY_MS: '1e3' },
     ]) {
       const lines: string[] = [];
       const result = await runOwnerBootstrap(env, { log: (l) => lines.push(l), retryWindowMs: 0, passwordFiles: memFiles().files });
@@ -767,14 +783,14 @@ describe('owner bootstrap: the whole step without a database', () => {
   });
 
   it('without the password-file I/O the step fails closed (70)', async () => {
-    const result = await runOwnerBootstrap({ PG_DATABASE_URL: ADMIN_URL }, { retryWindowMs: 0 });
+    const result = await runOwnerBootstrap({ PG_ADMIN_URL: ADMIN_URL }, { retryWindowMs: 0 });
     expect(result).toMatchObject({ outcome: 'failed', exitCode: 70 });
   });
 
   it('an unreadable / invalid password file is a refusal (64) before connecting', async () => {
     const { OwnerPasswordFileError: E } = await import('../../../owner-login/owner-password-file');
     const result = await runOwnerBootstrap(
-      { PG_DATABASE_URL: 'postgres://dbadmin:adminpw0123456789@127.0.0.1:1/crewflow_unit' },
+      { PG_ADMIN_URL: 'postgres://dbadmin:adminpw0123456789@127.0.0.1:1/crewflow_unit' },
       { retryWindowMs: 0, passwordFiles: { ...memFiles().files, readMain: () => { throw new E('bad'); } } },
     );
     expect(result).toMatchObject({ outcome: 'refused', exitCode: 64 });
@@ -787,25 +803,70 @@ describe('owner bootstrap: the whole step without a database', () => {
       `postgres://dbadmin:${ADMIN_PW}@ep-abc-pooler.eu-west-2.aws.neon.tech/crewflow_unit`,
       'not a url with dbadmin and adminpw0123456789',
     ]) {
-      const { result, text } = await run({ PG_DATABASE_URL: url });
+      const { result, text } = await run({ PG_ADMIN_URL: url });
       expect(result).toMatchObject({ outcome: 'refused', exitCode: 64 });
       assertClean(text);
     }
   });
 
-  it('refuses when only the legacy DATABASE_URL is set (the step takes PG_DATABASE_URL only)', async () => {
+  // Owner decision 2026-11-17 (PG_ADMIN_URL): the input selection runs before anything connects or stores a file.
+  it('DENIAL PG_ADMIN_URL: an admin login in PG_DATABASE_URL is refused (64, "renamed to PG_ADMIN_URL"), never run as the admin; nothing stored', async () => {
+    for (const env of [
+      { PG_DATABASE_URL: 'postgres://dbadmin:adminpw0123456789@127.0.0.1:1/crewflow_unit' },
+      { PG_DATABASE_URL: 'postgres://postgres:adminpw0123456789@db:5432/crewflow_unit', NODE_ENV: 'test' },
+    ]) {
+      const written: string[] = [];
+      const { result, text } = await run(env, written);
+      expect(result).toMatchObject({ outcome: 'refused', exitCode: 64 });
+      expect(text).toContain(DB_SETUP_INPUT_MESSAGES.appUrlNotOwner);
+      expect(text).not.toContain(OWNER_BOOTSTRAP_MESSAGES.passThrough);
+      expect(written).toEqual([]);
+      assertClean(text);
+    }
+  });
+
+  it('DENIAL PG_ADMIN_URL: crewflow_owner in PG_ADMIN_URL, both variables, neither, and the retired PG_DATABASE_ADMIN_URL are refused (64) before connecting', async () => {
+    const owner = 'postgres://crewflow_owner:ownerpw0123456789@127.0.0.1:1/crewflow_unit';
+    const admin = 'postgres://dbadmin:adminpw0123456789@127.0.0.1:1/crewflow_unit';
+    const cases: Array<[Record<string, string>, string]> = [
+      [{ PG_ADMIN_URL: owner }, DB_SETUP_INPUT_MESSAGES.adminUrlIsOwner],
+      [{ PG_ADMIN_URL: admin, PG_DATABASE_URL: owner }, DB_SETUP_INPUT_MESSAGES.both],
+      [{}, DB_SETUP_INPUT_MESSAGES.neither],
+      [{ PG_ADMIN_URL: ' ', PG_DATABASE_URL: '' }, DB_SETUP_INPUT_MESSAGES.neither],
+      [{ PG_DATABASE_ADMIN_URL: admin }, DB_SETUP_INPUT_MESSAGES.retiredAdminName('PG_DATABASE_ADMIN_URL')],
+      [{ PG_DATABASE_ADMIN_URL: admin, PG_ADMIN_URL: admin }, DB_SETUP_INPUT_MESSAGES.retiredAdminName('PG_DATABASE_ADMIN_URL')],
+    ];
+    for (const [env, message] of cases) {
+      const written: string[] = [];
+      const { result, text } = await run(env, written);
+      expect(result).toMatchObject({ outcome: 'refused', exitCode: 64 });
+      expect(text).toContain(message);
+      expect(text).not.toContain('ownerpw0123456789');
+      expect(written).toEqual([]);
+      assertClean(text);
+    }
+  });
+
+  it('PG_ADMIN_URL: a URL-policy refusal names the variable the operator set (PG_ADMIN_URL), not PG_DATABASE_URL', async () => {
+    const { result, text } = await run({ PG_ADMIN_URL: `${ADMIN_URL}?sslmode=disable`, NODE_ENV: 'production' });
+    expect(result).toMatchObject({ outcome: 'refused', exitCode: 64 });
+    expect(text).toContain('PG_ADMIN_URL');
+    expect(text).not.toContain('PG_DATABASE_URL');
+  });
+
+  it('refuses when only the legacy DATABASE_URL is set (the step takes PG_ADMIN_URL / PG_DATABASE_URL only)', async () => {
     const { result } = await run({ DATABASE_URL: ADMIN_URL });
     expect(result).toMatchObject({ outcome: 'refused', exitCode: 64 });
   });
 
   it('production refuses a non-verify-full admin URL before connecting', async () => {
-    const { result, text } = await run({ PG_DATABASE_URL: `${ADMIN_URL}?sslmode=disable`, NODE_ENV: 'production' });
+    const { result, text } = await run({ PG_ADMIN_URL: `${ADMIN_URL}?sslmode=disable`, NODE_ENV: 'production' });
     expect(result).toMatchObject({ outcome: 'refused', exitCode: 64 });
     assertClean(text);
   });
 
   it('an unreachable admin target is exit 70 with fixed text', async () => {
-    const { result, text } = await run({ PG_DATABASE_URL: 'postgres://dbadmin:adminpw0123456789@127.0.0.1:1/crewflow_unit' });
+    const { result, text } = await run({ PG_ADMIN_URL: 'postgres://dbadmin:adminpw0123456789@127.0.0.1:1/crewflow_unit' });
     expect(result).toMatchObject({ outcome: 'failed', exitCode: 70, code: 'ECONNREFUSED' });
     assertClean(text);
   });
@@ -879,14 +940,14 @@ describe('owner bootstrap: option A target hooks (publish only after success, wi
 
   it('a refusal (a policy-refused URL) withdraws the stale target and never publishes', async () => {
     const h = hooks();
-    const result = await runOwnerBootstrap({ PG_DATABASE_URL: `${ADMIN_URL}?sslrootcert=/x` }, h.options);
+    const result = await runOwnerBootstrap({ PG_ADMIN_URL: `${ADMIN_URL}?sslrootcert=/x` }, h.options);
     expect(result.exitCode).toBe(64);
     expect(h.calls).toEqual(['withdraw']);
   });
 
   it('a failure (unreachable database) withdraws and never publishes', async () => {
     const h = hooks();
-    const result = await runOwnerBootstrap({ PG_DATABASE_URL: 'postgres://dbadmin:adminpw0123456789@127.0.0.1:1/crewflow_unit' }, h.options);
+    const result = await runOwnerBootstrap({ PG_ADMIN_URL: 'postgres://dbadmin:adminpw0123456789@127.0.0.1:1/crewflow_unit' }, h.options);
     expect(result.exitCode).toBe(70);
     expect(h.calls).toEqual(['withdraw']);
   });
@@ -894,7 +955,7 @@ describe('owner bootstrap: option A target hooks (publish only after success, wi
   it('a withdraw that fails is reported with a fixed line; the exit code is unchanged', async () => {
     const lines: string[] = [];
     const result = await runOwnerBootstrap(
-      { PG_DATABASE_URL: `${ADMIN_URL}?sslrootcert=/x` },
+      { PG_ADMIN_URL: `${ADMIN_URL}?sslrootcert=/x` },
       {
         log: (l) => lines.push(l),
         passwordFiles: memFiles().files,
@@ -998,6 +1059,14 @@ describe('owner bootstrap: an existing crewflow_owner URL (read-only; Twenty: no
       { session_login: 'postgres', current_login: 'crewflow_owner' },
     ]) {
       await expect(setupOwnerUrlWithIo(ownerIo({ who }).io, 0)).rejects.toThrow(OWNER_BOOTSTRAP_MESSAGES.ownerNotSelf);
+    }
+  });
+
+  it('mode (c) after the PG_ADMIN_URL merge: an unsupported major (15, 19) is refused by the owner-URL path before anything else; only the read-only statements were sent', async () => {
+    for (const v of [150008, 190000]) {
+      const f = ownerIo({ facts: { ...ownerFacts, serverVersionNum: v } });
+      await expect(setupOwnerUrlWithIo(f.io, 0)).rejects.toThrow(OWNER_BOOTSTRAP_MESSAGES.unsupportedPostgres(Math.floor(v / 10000)));
+      expect(f.sent.every((t) => OWNER_SELF_STATEMENTS.includes(t as (typeof OWNER_SELF_STATEMENTS)[number]))).toBe(true);
     }
   });
 

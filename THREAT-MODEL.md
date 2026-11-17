@@ -9254,3 +9254,67 @@ Reversal:   Upgrade / `resolutions` override (documented in "//resolutions") as 
   check. `pgConnectionString` refuses an IP host with verify-full (the string form cannot carry the check). Tests: the
   unit and integration cases above; the integration denial failed before the fix (the `localhost` certificate was
   accepted for 127.0.0.1).
+
+## PG_ADMIN_URL — the database admin login reaches the one-shot setup step only (branch feat/pg-admin-url, 2026-11-17; owner decision 2026-11-17, Twenty's Helm model; one new SQL statement, below)
+
+- **Asset:** the database ADMIN credential (the bundled db's superuser, or a provider admin that can create roles); the
+  `crewflow_owner` app login and its password file; every tenant's data behind RLS (an admin login skips it).
+- **Change:** `PG_DATABASE_URL` used to mean "the admin URL, or an existing `crewflow_owner` URL", decided by the URL's login.
+  Now the admin URL is `PG_ADMIN_URL` and `PG_DATABASE_URL` ALWAYS means the app login (`crewflow_owner`). Three modes:
+  (a) bundled db (`CREWFLOW_BUNDLED_DB` unset/1, `PG_DATABASE_PASSWORD`); (b) `CREWFLOW_BUNDLED_DB=0` + `PG_ADMIN_URL`;
+  (c) `CREWFLOW_BUNDLED_DB=0` + a `crewflow_owner` `PG_DATABASE_URL`, no admin URL (db-setup only checks it, read-only).
+  rab-api and rab-worker are unchanged: they never receive a URL and build the `crewflow_owner` URL from db-setup's
+  credential-free target file and password file (PR #125 option 2), in every mode.
+- **Threats and controls:**
+  - *The admin URL reaching a long-running process* (readable from `/proc/<pid>/environ`, crash dumps, error reporters).
+    Compose: `PG_ADMIN_URL` is interpolated into `db-setup` only, and rab-api / rab-worker pin it to the literal `""`
+    (owner decision L-2, review of PR #230), so a value in `database.env` / `runtime.env` or a platform UI can never reach
+    them (regression test: image.yml rendered with it planted in either env file gives `""`). A raw-text gate
+    (`compose-owner-login.cjs` `adminUrlPlacementProblems`, over EVERY compose file in the repository) fails on the token
+    anywhere on a line outside db-setup (map, list or flow form, interpolations, `x-` anchors merged into a service) except
+    that exact empty pin on rab-api / rab-worker; it reads anchored / tagged / merge-key service headers and refuses any
+    anchor defined inside db-setup (L-3). The rendered-model gates (every combination) and the `--environment` preflight
+    accept exactly `""` there and refuse any value or a missing pin. Env files: the lint refuses it in `database.env` /
+    `runtime.env`; the preflight refuses it from an app env file. Process: `api-prestart.sh` (the one-off `bootstrap-admin`
+    path included) and `worker-start.sh` refuse a non-empty `PG_ADMIN_URL`, `PG_DATABASE_ADMIN_URL` or
+    `CREWFLOW_BUNDLED_DB_ADMIN_URL`, and ANY variable holding a database credential, other than their own `PG_DATABASE_URL`
+    (which has its own refusal): a postgres URL in any case, after leading blanks or quotes, with a driver prefix or suffix
+    (`jdbc:postgresql://`, `postgresql+psycopg://`), or a libpq keyword DSN with `password=` beside `host=` / `dbname=` /
+    `user=`; before they set the runtime URL (exit 64, the value never printed; L-1 and its follow-up). `never-in-runtime-env.ts` lists the three names for the in-process guard of the API, the Worker and
+    the provisioner. No legitimate variable of these services holds a PostgreSQL URL (checked: the compose files, the image
+    `ENV`, `database.env` / `runtime.env` templates). The dev compose's `server` / `worker` read a developer's
+    `../rab-server/.env`, so they blank its host-native URLs (`DATABASE_URL*`, `TEST_DATABASE_URL`, `TEST_DATABASE_ADMIN_URL`,
+    `TEST_DATABASE_CREWFLOW_URL`, `MIGRATION_SECURITY_ADMIN_URL`) and pin `PG_ADMIN_URL` to `""`, as QA's do; any other database
+    URL left in that file stops them (exit 64), by design, the deprecated test admin name included (renamed, X3.5-S7).
+  - *Silent reinterpretation* (an un-renamed deployment keeps its admin URL in `PG_DATABASE_URL`). Refused, never run as
+    the admin: the bootstrap child's `selectDbSetupInput` refuses a `PG_DATABASE_URL` whose login is not `crewflow_owner`
+    ("renamed to PG_ADMIN_URL", exit 64, nothing connects, nothing stored), and so do the lint and the preflight; the
+    retired `PG_DATABASE_ADMIN_URL` is refused by name; both URLs at once, neither, and `crewflow_owner` in `PG_ADMIN_URL`
+    are refused too. Live harness scenario `admin-url-in-pg-database-url` (CI ci-migration-security).
+  - *No dummy password* (owner requirement): `PG_DATABASE_PASSWORD` is no longer a compose `${...:?}` (that demanded it with
+    your own database too). It is required exactly while the bundled db runs: the `db` entrypoint refuses an empty
+    `POSTGRES_PASSWORD` (exit 64) before it touches the volume, `db-setup.sh` refuses the bundled mode with an empty password
+    (and `CREWFLOW_BUNDLED_DB=0` with no URL), and the lint / preflight refuse a bundled compose.env without it and an
+    own-database compose.env with a leftover one (it would sit unused in db-setup's definition).
+  - *An admin that inherits the app login* (lead review of PR #226): a non-superuser CREATEROLE admin on a provider that
+    defaults `createrole_self_grant` to `set, inherit` would receive SET / INHERIT on the new `crewflow_owner`. db-setup now
+    pins it empty for its write transaction before `CREATE ROLE` (new statement `OWNER_BOOTSTRAP_Q4B2_NO_SELF_GRANT`,
+    `SELECT pg_catalog.set_config('createrole_self_grant', '', true);`), unit-tested for order and live-tested
+    (`admin-createrole-self-grant`: an admin with that role default gets no SET / INHERIT membership).
+- **Kept unchanged:** the 16-18 version gate of PR #227 (`assertSupportedServerVersion`), still the first refusal of both
+  db-setup paths, so it runs before any write or BEGIN in all three modes (owner-URL mode c included: unit-tested);
+  verify-full, no transaction pooler, the owner-login posture shape, the URL policy (now relabelled with
+  the variable the operator set), the read-only owner-URL session, the one-shot / PID 1 / volume rules, the env-file
+  refusals (`DB_TARGET`, `ALLOW_PRODUCTION_DB_COMMANDS`, `BOOTSTRAP_ADMIN_*`).
+  - *A weak bundled password* (review I-2): on a FIRST initialisation only (no `PG_VERSION` in PGDATA yet) the `db` entrypoint
+    refuses a password that is not 32+ characters of `A-Z a-z 0-9 _ -` (exit 64, value never printed); an existing volume
+    is never refused (the image ignores the value there). Tested by running the committed block with `sh`.
+  - *A login hidden in the URL* (review I-4): a percent-encoded `crewflow%5Fowner` is decoded and is the same login
+    (accepted); `?user=`, `?password=`, `?host=`, `?dbname=` on either URL are refused (URL policy, the lint, the preflight).
+- **Residual:** the bundled db's superuser URL is still in db-setup's container definition (now as
+  `CREWFLOW_BUNDLED_DB_ADMIN_URL`; accepted risk TM-DB-1 / T-1, unchanged). `db-setup.sh` unsets it, but that only keeps it
+  out of the bootstrap child's environment: it stays in db-setup's PID 1 `/proc/1/environ` and in `docker inspect`, and the
+  child receives the same secret as `PG_ADMIN_URL`, so the net exposure is exactly TM-DB-1's (review I-1). An
+  OpenShip deploy without `PG_DATABASE_PASSWORD` now renders and fails at start (db / db-setup exit 64) instead of at
+  render. The live container suites (`run-db-setup-tests.cjs`, `run-prestart-shell-tests.cjs`) are updated but run in CI,
+  not locally.

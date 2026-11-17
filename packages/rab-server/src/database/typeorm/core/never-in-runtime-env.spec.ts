@@ -45,6 +45,7 @@ describe('never-in-runtime-env (security review L-4): one list, two enforcers', 
       'ALLOW_PRODUCTION_DB_COMMANDS',
       'DB_TARGET',
       'CREWFLOW_DEPLOYMENT_IDENTITY_BOOTSTRAP',
+      'PG_ADMIN_URL',
       'CREWFLOW_OPS_RUN',
       'PG_OPS_APP_DATABASE_URL',
       'CREWFLOW_OPS_ACTOR_SOURCE',
@@ -140,6 +141,45 @@ describe('never-in-runtime-env (security review L-4): one list, two enforcers', 
     expect(prestartNames()).toContain('PG_DATABASE_PASSWORD');
     // The superseded provisioner process is left exactly as it was.
     expect(forbiddenRuntimeEnvNames('provisioner')).not.toContain('PG_DATABASE_PASSWORD');
+  });
+
+  it('DENIAL PG_ADMIN_URL (owner decision 2026-11-17): the database admin URL is refused in every runtime process, by both enforcers, value never echoed', () => {
+    const adminUrl = 'postgres://doadmin:S3cret-ADMIN-do-not-print@db.example:5432/crewflow?sslmode=verify-full';
+    for (const processName of ['api', 'worker', 'provisioner'] as const) {
+      expect(forbiddenRuntimeEnvNames(processName)).toContain('PG_ADMIN_URL');
+      for (const env of [{ NODE_ENV: 'development' }, { NODE_ENV: 'production', RAB_RUNTIME_ENV: 'production' }]) {
+        const refusal = runtimeEnvRefusal({ ...env, PG_ADMIN_URL: adminUrl }, processName);
+        expect(refusal?.name).toBe('PG_ADMIN_URL');
+        expect(refusal?.why).toMatch(/only the one-shot db-setup service reads it/);
+        expect(refusal?.why).not.toContain('S3cret-ADMIN-do-not-print');
+      }
+      expect(runtimeEnvRefusal({ PG_ADMIN_URL: ' ' }, processName)).toBeNull();
+    }
+    expect(prestartNames()).toContain('PG_ADMIN_URL');
+  });
+
+  it('DENIAL L-1 (review of PR #230): the admin URL under its other names (PG_DATABASE_ADMIN_URL, CREWFLOW_BUNDLED_DB_ADMIN_URL) is refused in every runtime process, by every enforcer', () => {
+    const url = 'postgresql://postgres:S3cret-ADMIN-do-not-print@db:5432/crewflow?sslmode=verify-full';
+    const workerSource = fs.readFileSync(path.join(DOCKER, 'worker-start.sh'), 'utf8');
+    const workerLoop = /^for name in ([^;]+); do/m.exec(workerSource)?.[1]?.trim().split(/\s+/) ?? [];
+    for (const name of ['PG_ADMIN_URL', 'PG_DATABASE_ADMIN_URL', 'CREWFLOW_BUNDLED_DB_ADMIN_URL']) {
+      for (const processName of ['api', 'worker', 'provisioner'] as const) {
+        expect(forbiddenRuntimeEnvNames(processName)).toContain(name);
+        const refusal = runtimeEnvRefusal({ NODE_ENV: 'production', RAB_RUNTIME_ENV: 'production', [name]: url }, processName);
+        expect(refusal?.name).toBe(name);
+        expect(refusal?.why).not.toContain('S3cret-ADMIN-do-not-print');
+        // The compose files pin PG_ADMIN_URL to "" on rab-api / rab-worker (owner decision L-2): empty counts as absent.
+        expect(runtimeEnvRefusal({ [name]: '' }, processName)).toBeNull();
+      }
+      expect(prestartNames()).toContain(name);
+      expect(workerLoop).toContain(name);
+    }
+    // ... and both entrypoints refuse ANY variable holding a postgres:// URL (their own PG_DATABASE_URL has its own refusal).
+    for (const file of ['api-prestart.sh', 'worker-start.sh']) {
+      const source = fs.readFileSync(path.join(DOCKER, file), 'utf8');
+      expect(source).toContain('for forbidden in $(crewflow_db_url_names); do');
+      expect(source).toContain('# BEGIN crewflow database-URL refusal');
+    }
   });
 
   it('owner-login architecture: CREWFLOW_PROVISIONER_* is refused on the API and the Worker by prefix (deterministic, blank = absent), and api-prestart.sh has the same prefixes', () => {
