@@ -60,7 +60,13 @@ services:
   # first, then copy it here and to docker-compose.yml: compose-credential-isolation.cjs compares the rendered services.
   # ---------------------------------------------------------------------------
   db:
-    image: ${CREWFLOW_POSTGRES_IMAGE:-postgres@sha256:f9a7b9ebf6f56201f949db745e47bc423c0f0f8294bafe991cc10bf74b029657}
+    # PostgreSQL 16.16 (checked 2026-11-17): this is the official library/postgres multi-platform INDEX digest of postgres:16
+    # (Debian trixie; amd64, arm64 and the other official platforms). On Docker Hub (registry-1.docker.io/v2/library/postgres)
+    # the tags 16, 16.16, 16-trixie and 16.16-trixie resolve to exactly this digest, and its amd64 and arm64 image configs
+    # carry PG_MAJOR=16 and PG_VERSION=16.16-1.pgdg13+1. A minor release (16.15 before): same data format, an existing data
+    # volume starts as-is. A bump is a reviewed change of this line in every file that copies this service (and of PG16_IMAGE
+    # in .github/workflows/upgrade-with-data.yaml), never a tag.
+    image: ${CREWFLOW_POSTGRES_IMAGE:-postgres@sha256:dd2bf3ce2dc83a81674cf7f217fcfd8a5009a4b325dda5b843bfee82a06cff6f}
     entrypoint:
       - /bin/sh
       - -c
@@ -141,6 +147,15 @@ services:
       timeout: 5s
       retries: 30
       start_period: 60s
+    # Twenty's Helm `db.enabled`: CREWFLOW_BUNDLED_DB (compose.env) 1 = run this bundled db (the default); 0 = your own
+    # database in PG_DATABASE_URL: no db container is created, and Compose skips the wait on a dependency that has 0
+    # replicas (db-setup and rab-api start without it). 0 without your own database fails closed: db-setup cannot use the
+    # bundled db (exit 64 when its CA file was never made; a connection failure when an older CA volume is still there) and
+    # rab-api never starts. The compose.env lint and the --environment preflight accept only 0 or 1, and 0 only with a
+    # PG_DATABASE_URL whose host is not `db`.
+    # Development and QA never set it (they have no external database).
+    deploy:
+      replicas: ${CREWFLOW_BUNDLED_DB:-1}
     restart: unless-stopped
     # SIGINT = PostgreSQL fast shutdown (checkpoint, then exit); give it time before SIGKILL.
     stop_signal: SIGINT
