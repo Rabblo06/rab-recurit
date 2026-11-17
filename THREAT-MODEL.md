@@ -8935,3 +8935,46 @@ Reversal:   Upgrade / `resolutions` override (documented in "//resolutions") as 
   future date, reason, drop_when, schema, duplicate, >30 days, expiry refused (expiry day valid); NDJSON parser fails
   closed; evaluate(): decided, undecided for another advisory / package / no id, production path, fix (both kinds),
   each lookup failing, unevaluable range, expired; unused reported.
+
+## Runtime image: node-gyp and its install-time-only tree pruned (branch chore/prune-node-gyp-runtime, 2026-11-17; no SQL)
+- **Context:** `yarn workspaces focus --production` kept node-gyp 13.0.1 in the one runtime image, because Yarn injects
+  `node-gyp: npm:latest` into the lockfile entries of argon2, node-addon-api, msgpackr-extract and fsevents. Two
+  production paths reached it: `@rab/server > argon2 > node-gyp` and `@rab/worker > bullmq > msgpackr > msgpackr-extract
+  > node-gyp`. With it came tar, tinyglobby, fdir, picomatch 4.0.5 (GHSA-fc5q-39xc-vjpf, High, unfixed), a nested
+  undici 8, which, isexe, nopt, abbrev, proc-log, env-paths, exponential-backoff, graceful-fs, minizlib, chownr, yallist
+  and @isaacs/fs-minipass. Nothing at runtime loads them (argon2 and msgpackr-extract use their prebuilt addons through
+  node-gyp-build; the image has no compiler), but they were attack surface and scanner noise that would HOLD every
+  release once the scanners ingest the GHSA, and the policy forbids an agent from adding a register entry for it.
+- **Control:** `runtime-deps.cjs prune` runs in both dependency stages right after `focus` (and before the Worker delta, so
+  the delta cannot carry the tree back). It cuts the edges to `RUNTIME_PRUNE` (`['node-gyp']`, exported for other gates)
+  and deletes every package then unreachable from the explicit `--root` workspaces (review L2: `@rab/server` in
+  runtime-modules, `@rab/worker @rab/server` in worker-modules; a missing root refuses). Edges are each package's
+  declared dependencies/optional/peer dependencies plus its lockfile entry (so injected or extended dependencies count),
+  located with Node's own lookup, so a package any runtime package reaches stays. Workspace links are never removed.
+  Fail closed: it removes nothing when an installed package has no lockfile entry, a drop name is not installed, or a
+  kept package's code literally loads a package it would remove (an undeclared dependency that only worked through
+  hoisting). Review L1: that scan reads every file of every kept package, comments included (a false positive is a
+  refusal), and also matches the bare side-effect `import 'x'`; the only tolerated hit is a `bin` file that is neither
+  the package's main nor an exports target loading a `RUNTIME_PRUNE` name itself (node-gyp-build's and
+  node-gyp-build-optional-packages' install-time `bin.js` require node-gyp). The final stage's existing import scan still
+  has to resolve every compiled import, and its `--forbid` now includes `node-gyp` and `tinyglobby`. Review I1: the image
+  gate's `container` check runs `native-addons-smoke.cjs` inside the finished image as 1000:1000, `--network none`,
+  read-only, on amd64 and arm64: argon2 (as the API resolves it) must hash and verify with argon2id m=19456,t=2,p=1 and
+  reject a wrong password, and msgpackr (as BullMQ resolves it) must report native acceleration with msgpackr-extract's
+  native `extractStrings` loaded; any other outcome fails the gate.
+- **Measured:** a local `focus --production` of this lockfile removes 18 package directories from the API tree (554 ->
+  536) and the same 18 from the Worker tree (610 -> 592); the undeclared-dependency scan read 12 427 / 13 743 kept files
+  with no hit. The image build numbers are in the PR.
+- **Residual risk:** a kept package that loads a pruned package by a computed (non-literal) specifier would only fail at
+  runtime. None of the pruned packages is a runtime library of the API or the Worker; the image gate's PDF render and the
+  compiled-import scan exercise the real image.
+- **Tests:** `packages/rab-docker/rab/test/runtime-deps.test.cjs` (ci-security `deployment-config`): an exclusive node-gyp
+  subtree (including the hoisted picomatch@4 and the nested undici@8) is pruned through both production paths; a
+  dependency shared with a runtime package (semver, picomatch@2, undici@6) is kept; lockfile-only edges keep a package;
+  a workspace devDependency is never a root; prune refuses on an undeclared dependency, a tree that is not the lockfile's
+  install, a stale or wildcard drop; the final `--forbid` fails if node-gyp or tinyglobby returns, top level or nested; the
+  Dockerfile prunes in both stages before the delta with the exported list and explicit roots. L1/L2 regressions (each
+  exits 1 and removes nothing): a bin that is also the main requiring graceful-fs, a bin that is an exports target,
+  a bin-only file loading a non-drop package, `import 'graceful-fs';`, `/*! x */ require('graceful-fs')`, no `--root`,
+  `--root @rab/server` without that link, a `--root` that is not a workspace. `tests/test_image_gate.py`
+  (NativeAddonsSmoke): the smoke runs as 1000:1000 offline read-only, and a non-zero exit or a missing OK line fails.
