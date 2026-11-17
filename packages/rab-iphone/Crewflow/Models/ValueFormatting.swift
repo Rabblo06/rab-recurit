@@ -12,9 +12,8 @@ import Foundation
 /// £1: -50 used to print "£0.50".) The sign keeps this app's existing
 /// position, "£-1.50"; the web's shared `formatPence` prints "-£1.50".
 ///
-/// PARITY NOTE (flagged): Flutter's `formatPence` still splits the signed
-/// value (Dart `~/` truncates, `%` is Euclidean), so it prints -50 as "£0.50"
-/// and -199 as "£-1.01". Not changed here.
+/// Flutter's `formatPence` (packages/rab-mobile/lib/core/theme/money.dart)
+/// uses the same sign-then-magnitude rule, so both apps print identically.
 public enum Money {
     public static func formatPence(_ pence: Int64) -> String {
         let sign = pence < 0 ? "-" : ""
