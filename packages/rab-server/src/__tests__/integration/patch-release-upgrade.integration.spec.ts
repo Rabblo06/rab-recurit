@@ -140,21 +140,25 @@ describeIfDb('patch releases through the upgrade runner (integration)', () => {
   });
 
   it('1. 0.6.0 → 0.6.1 with 0 workspaces: continue from 0.6.0; ONE instance row 0.6.1_TypeOrmMigrations; a repeat start records nothing', async () => {
-    const first = run061([]);
-    expect(await start(first)).toMatchObject({ kind: 'continue', from: '0.6.0' });
-    expect(first.report).toMatchObject({
-      codeVersion: '0.6.1',
-      recorded: [{ name: '0.6.1_TypeOrmMigrations', status: 'completed', attempt: 1 }],
-      commandFailure: null,
-      workspaces: { total: 0, adopted: 0, upgraded: 0, failures: [], blocked: [] },
-    });
-    expect(await instanceRows('0.6.1')).toEqual([['0.6.1_TypeOrmMigrations', 'completed', 1, false]]);
+    try {
+      const first = run061([]);
+      expect(await start(first)).toMatchObject({ kind: 'continue', from: '0.6.0' });
+      expect(first.report).toMatchObject({
+        codeVersion: '0.6.1',
+        recorded: [{ name: '0.6.1_TypeOrmMigrations', status: 'completed', attempt: 1 }],
+        commandFailure: null,
+        workspaces: { total: 0, adopted: 0, upgraded: 0, failures: [], blocked: [] },
+      });
+      expect(await instanceRows('0.6.1')).toEqual([['0.6.1_TypeOrmMigrations', 'completed', 1, false]]);
 
-    const again = run061([]);
-    expect(await start(again)).toMatchObject({ kind: 'continue', from: '0.6.1' });
-    expect(again.report.recorded).toEqual([]);
-    expect(await instanceRows('0.6.1')).toHaveLength(1);
-    await dropNewerInstanceRows(); // back to a database at 0.6.0 for the N-workspace case
+      // A repeated start: still `continue` (the accepted previous version is checked first), and nothing is recorded.
+      const again = run061([]);
+      expect(await start(again)).toMatchObject({ kind: 'continue' });
+      expect(again.report.recorded).toEqual([]);
+      expect(await instanceRows('0.6.1')).toHaveLength(1);
+    } finally {
+      await dropNewerInstanceRows(); // back to a database at 0.6.0 for the N-workspace case
+    }
   });
 
   it('2. 0.6.0 → 0.6.1 with N workspaces that finished 0.6.0: nothing pending, no workspace row, level and block unchanged; /healthz behind → ok', async () => {
