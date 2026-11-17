@@ -942,10 +942,12 @@ export default function Users() {
   };
 
   const selectionKind: SelectionKind | null = tab === 'staff' ? 'staff' : canCreateManager ? 'manager' : canManageVenueManagers ? 'venueManager' : null;
+  // Send Email follows the server's own gate (owner decision batch 13): staff.edit for Staff, manager.manage for Managers,
+  // venue_manager.create for the caller's Venue Managers. Presentation only: the server re-checks it (403 otherwise).
   const bulkPermissions = selectionKind === 'staff'
-    ? { lifecycle: capabilities?.['staff.deactivate'] === true, email: true }
+    ? { lifecycle: capabilities?.['staff.deactivate'] === true, email: capabilities?.['staff.edit'] === true }
     : selectionKind === 'manager'
-      ? { lifecycle: canCreateManager, email: canCreateManager }
+      ? { lifecycle: canCreateManager, email: canCreateManager && capabilities?.['manager.manage'] === true }
       : { lifecycle: canManageVenueManagers, email: canManageVenueManagers };
   const offPage = [...selected.keys()].filter((id) => !visibleIds.includes(id)).length;
 
