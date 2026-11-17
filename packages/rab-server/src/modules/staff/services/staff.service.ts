@@ -88,7 +88,7 @@ const MAX_SEND_ATTEMPTS = 3;
  * `lastName` and `phone` go to core."user" and are mapped separately; `staffRef`, `createdBy`, `organisationId`,
  * `workspaceId`, `userId`, `employmentStatus` and the archive columns are never writable here.
  */
-const STAFF_PROFILE_UPDATE_FIELDS = [
+export const STAFF_PROFILE_UPDATE_FIELDS = [
   'startDate', 'dateOfBirth', 'defaultPayRatePence', 'jobRoleId', 'emergencyContactName', 'emergencyContactRelationship',
   'emergencyContactPhone', 'preferredName', 'employmentType', 'address', 'city', 'postcode', 'otherSkills',
   'yearsExperience', 'availableDays', 'preferredShiftTimes', 'maxHoursPerWeek', 'rightToWorkStatus', 'documentType',

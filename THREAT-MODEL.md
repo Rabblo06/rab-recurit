@@ -8663,3 +8663,5 @@ Reversal:   Lower CLOCK_IN_CONFIRM_FLOOR_HOURS, or require a second approver (pa
   `status` / `createdBy` / `archivedAt` not written, organisation, workspace and creator are the caller's; venue update
   `status` / `createdBy` not merged; role-rate update `jobRoleId` / `venueId` cannot re-point the rate. In each case the
   declared field in the same call is written.
+  `venue-write-fields.spec.ts` and `staff-profile-update-fields.spec.ts` compare each allow-list with the DTO's
+  class-validator metadata (minus the named `core."user"` fields for staff), so a new DTO field cannot be silently dropped.

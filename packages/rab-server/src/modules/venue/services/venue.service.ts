@@ -30,13 +30,13 @@ import { MemberAccessPolicyService } from '../../identity/member-access/member-a
  * SF-7: the venue fields `create()` and `update()` may write, mapped explicitly (never a spread or merge of the DTO).
  * `status`, `createdBy`, `organisationId`, `workspaceId`, the archive columns and the photo are never writable here.
  */
-const VENUE_WRITE_FIELDS = [
+export const VENUE_WRITE_FIELDS = [
   'name', 'clientName', 'type', 'address', 'contact', 'lat', 'lng', 'geofenceRadiusM', 'enforceGeofence', 'instructions',
   'uniform', 'checkInInstructions', 'parking', 'accessNotes', 'breakPaid', 'defaultBreakMinutes',
 ] as const satisfies readonly (keyof CreateVenueDto & keyof UpdateVenueDto & keyof Venue)[];
 
 /** SF-7: the pay-rate fields `updateRoleRate()` may write (never `jobRoleId`, `venueId` or the tenant columns). */
-const ROLE_RATE_UPDATE_FIELDS = [
+export const ROLE_RATE_UPDATE_FIELDS = [
   'payRatePence', 'chargeRatePence', 'overtimeMultiplier', 'effectiveFrom', 'effectiveTo',
 ] as const satisfies readonly (keyof UpdateVenueRoleRateDto & keyof VenueRoleRate)[];
 
@@ -228,14 +228,12 @@ export class VenueService {
   }
 
   /**
-   * `{ ...dto }`/`merge(venue, dto)` below are safe only because
-   * `CreateVenueDto`/`UpdateVenueDto` deliberately never declare `status`,
-   * `organisationId`, or `id` — the global `forbidNonWhitelisted` pipe is
-   * the actual gate. If either DTO ever grows one of those fields, this
-   * spread/merge would let a client with plain `VENUE_EDIT` set it
-   * directly, bypassing `archive()`'s dedicated transition-checked path
-   * below — switch to explicit field destructuring at that point (see
-   * `StaffService.update`/`ManagerService.update` for the pattern).
+   * SF-7: `create()` and `update()` write only `VENUE_WRITE_FIELDS` (`pickFields`), never a spread or merge of the DTO, so
+   * neither the global `forbidNonWhitelisted` pipe (HTTP only) nor the DTOs' shape is the gate: `status`, `createdBy`,
+   * `organisationId`, `workspaceId`, `id` and the archive columns can never be written here, even by a direct (non-HTTP)
+   * caller. Status changes go only through `archive()` / `restore()` and their transition checks. A new writable venue
+   * field must be added to `VENUE_WRITE_FIELDS` deliberately (`venue-write-fields.spec.ts` fails until it is listed or
+   * named as an exclusion).
    */
   create(ctx: AuthContext, dto: CreateVenueDto): Promise<Venue> {
     this.resourceScope.assertHasWorkspace(ctx);
