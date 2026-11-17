@@ -62,11 +62,15 @@ describeIfDb('Core Entity Cache (integration)', () => {
     // their own clients and keep their short timeouts).
     if (redis.client.status !== 'ready') {
       await new Promise<void>((resolve, reject) => {
-        const timer = setTimeout(() => reject(new Error(`auth-cache Redis client not ready (status ${redis.client.status})`)), 20_000);
-        redis.client.once('ready', () => {
+        const onReady = () => {
           clearTimeout(timer);
           resolve();
-        });
+        };
+        const timer = setTimeout(() => {
+          redis.client.off('ready', onReady); // no listener left behind on a client that never became ready
+          reject(new Error(`auth-cache Redis client not ready (status ${redis.client.status})`));
+        }, 20_000);
+        redis.client.once('ready', onReady);
       });
     }
     redis.client.options.commandTimeout = 5_000;
