@@ -2,9 +2,9 @@ import { Client, ClientConfig } from 'pg';
 
 import {
   checkWorkspaceSchemaDrift,
+  selectDriftFingerprintsForServer,
   WorkspaceDriftCycleResult,
 } from '@rab/server/database/typeorm/workspace-schema/workspace-schema-drift';
-import { selectWorkspaceFingerprintsForServer } from '@rab/server/database/typeorm/workspace-schema/v1/expected-fingerprints';
 
 export type { WorkspaceDriftCycleResult, WorkspaceDriftFinding } from '@rab/server/database/typeorm/workspace-schema/workspace-schema-drift';
 
@@ -36,7 +36,7 @@ export async function runWorkspaceSchemaDriftCycle(
     if (onConnect) await onConnect(client);
     // PG17/18 fix: the second-opinion comparison reads the fingerprints of this server's major (the boot gates selected the
     // same one for this process; a different major throws, so the cycle fails instead of reporting false drift).
-    await selectWorkspaceFingerprintsForServer(async (sql) => (await client.query(sql)).rows);
+    await selectDriftFingerprintsForServer(client);
     return await checkWorkspaceSchemaDrift(client);
   } finally {
     await client.end().catch(() => undefined);
