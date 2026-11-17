@@ -1,0 +1,13 @@
+{
+  "_comment": [
+    "Owner-approved growth for the import-boundary ratchet (tools/check-import-boundaries.cjs --base). --base reads this file",
+    "from the BASE ref, never from the PR being checked: an entry takes effect only after it has merged to the base branch in",
+    "its own PR, and --base fails a PR that changes this file together with any tools/*.baseline.json. One entry lets exactly",
+    "one rule and file go from exactly `from` (the base count, 0 = no entry) to exactly `to`; delete it once the using PR has",
+    "merged (--base reports it STALE from then on). Never widen `to` in place. Shape (every key required except target):",
+    "{ \"rule\": \"worker-deep-import\", \"file\": \"packages/rab-worker/src/<path>.ts\", \"from\": 1, \"to\": 2,",
+    "  \"target\": \"packages/rab-server/src/<path>.ts\", \"approved\": \"owner YYYY-MM-DD\", \"reason\": \"PR #NNN: imports <target>, because ...\" }",
+    "`target` is the resolved import target exactly as --list prints it; with it, the growth must be edges to that target."
+  ],
+  "approved": []
+}

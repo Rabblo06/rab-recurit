@@ -158,7 +158,9 @@ jobs:
   # (engine/ -> modules/, Worker -> rab-server internals other than engine/worker-shared/, feature -> feature in rab-front
   # and rab-mobile). Today's violations are the per-file baseline (tools/import-boundaries.baseline.json); it must match
   # the tree exactly and may only shrink against the PR's base branch. The repo's `typescript` reads the TS imports.
-  # Growth against the base needs an owner-dated APPROVED_GROWTH entry in the check, added in its own PR (exact from -> to).
+  # Growth against the base needs an owner-dated entry (exact from -> to, optional target) in
+  # tools/import-boundaries.approved.json AS IT IS ON THE BASE BRANCH: --base reads it from the base ref, so an approval
+  # must merge in its own PR first, and --base fails a PR that changes that file together with any tools/*.baseline.json.
   import-boundaries:
     runs-on: ubuntu-latest
     timeout-minutes: 10
