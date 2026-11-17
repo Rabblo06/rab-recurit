@@ -81,6 +81,7 @@ const { execFileSync } = require('node:child_process');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
+const { pgCaPemProblem } = require('./pg-ca-pem.cjs');
 
 const DOCKER_DIR = path.resolve(__dirname, '..');
 const FILES = Object.freeze({
@@ -377,7 +378,7 @@ function featureSweepProblems(apiEnv = {}, workerEnv = {}) {
 // DB-SETUP: PG_DATABASE_URL left database.env: it is an interpolation value of compose.env (rab-api's and rab-worker's
 // committed ${PG_DATABASE_URL:-<bundled db>} would silently override an env-file value).
 const DATABASE_ALLOWED = Object.freeze([
-  'PG_SSL_CA_CERT_PATH', 'PG_EXPECTED_DATABASE_NAME', 'CREWFLOW_DEPLOYMENT_ENVIRONMENT', 'CREWFLOW_DEPLOYMENT_ID',
+  'PG_SSL_CA_CERT_PATH', 'PG_SSL_CA_CERT', 'PG_EXPECTED_DATABASE_NAME', 'CREWFLOW_DEPLOYMENT_ENVIRONMENT', 'CREWFLOW_DEPLOYMENT_ID',
 ]);
 /** DB-SETUP: the only non-CREWFLOW_* names compose.env may hold (the one database setting and the bundled db's password). */
 const COMPOSE_DATABASE_KEYS = Object.freeze([URL_KEY, DB_PASSWORD_KEY]);
@@ -386,6 +387,12 @@ const COMPOSE_DATABASE_KEYS = Object.freeze([URL_KEY, DB_PASSWORD_KEY]);
  * mode is no longer one of them (below).
  */
 const DATABASE_OPT_INS = Object.freeze(['CREWFLOW_DEPLOYMENT_ENVIRONMENT', 'CREWFLOW_DEPLOYMENT_ID']);
+/**
+ * Keys that belong in database.env only (read by db-setup, rab-api and rab-worker alike), so runtime.env refuses them: the
+ * opt-ins above plus the database CA. Kept apart from DATABASE_OPT_INS because the production compose file commits the CA
+ * keys as bare optional entries (no value), which the "never a compose value" model check on the opt-ins would refuse.
+ */
+const DATABASE_ENV_ONLY = Object.freeze([...DATABASE_OPT_INS, 'PG_SSL_CA_CERT', 'PG_SSL_CA_CERT_PATH']);
 /**
  * O3 + BC-11/C4: the approval mode is an INTERPOLATION value of compose.env (none by default, token an opt-in), committed on
  * rab-api as exactly this expression. In database.env / runtime.env it would be silently overridden by that line.
@@ -996,7 +1003,7 @@ function lintEnvText(kind, text, { template = false } = {}) {
     if (COMMITTED_KEYS.includes(key)) problems.push(`${key}: committed in the compose files; never re-enter it in an env file`);
     if (kind !== 'compose' && key === URL_KEY) problems.push(`${key}: set it in compose.env (the interpolation file): it belongs to db-setup only (its committed \${PG_DATABASE_URL:-...} would override a value here), and rab-api / rab-worker refuse it`);
     if (kind === 'database' && !why && key !== URL_KEY && !DATABASE_ALLOWED.includes(key)) problems.push(`${key}: does not belong in the shared database file (only ${DATABASE_ALLOWED.join(', ')})`);
-    if (kind === 'runtime' && DATABASE_OPT_INS.includes(key)) problems.push(`${key}: belongs in database.env only (so rab-api and rab-worker see the same value)`);
+    if (kind === 'runtime' && DATABASE_ENV_ONLY.includes(key)) problems.push(`${key}: belongs in database.env only (so rab-api and rab-worker see the same value)`);
     // Review J2-1 (fail closed): a feature switch is exactly true or false once read the way Compose reads it.
     if (Object.hasOwn(FEATURE_SWEEPS, key) && !SWITCH_VALUES.includes(value)) problems.push(`${key}: must be exactly true or false (quotes and an inline # comment are read as Compose reads them)`);
     // Phase X3.1: the strict on/off switches (FEATURE_SWEEPS keys already checked above, empty included).
@@ -1043,6 +1050,17 @@ function lintEnvText(kind, text, { template = false } = {}) {
       if (key === BUNDLED_DB_KEY && !BUNDLED_DB_VALUES.includes(value)) problems.push(`${key}: must be exactly 0 or 1 (the bundled db off or on: one server per data volume)`);
     }
     if (key !== URL_KEY && isPgUrl(value)) problems.push(`${key}: holds a PostgreSQL URL (a second database identity)`);
+  }
+  // The database CA: PG_SSL_CA_CERT (PEM text; in an env file one line with \n escapes) or PG_SSL_CA_CERT_PATH, never both
+  // (pg-tls.ts refuses both at boot; the lint says so first). The value goes through the app's own rules (pg-ca-pem.cjs, the
+  // parity-tested port of pg-tls.ts validatePgCaPem), so the lint refuses exactly what the boot would. Never echoed.
+  const caInline = entries.find((e) => e.key === 'PG_SSL_CA_CERT' && e.value !== '');
+  if (caInline && entries.some((e) => e.key === 'PG_SSL_CA_CERT_PATH' && e.value !== '')) {
+    problems.push('PG_SSL_CA_CERT and PG_SSL_CA_CERT_PATH: set exactly one (the PEM text, or the path of a file holding it); both refuse to start');
+  }
+  if (caInline && !(template && isPlaceholder(caInline.value))) {
+    const problem = pgCaPemProblem(caInline.value, 'PG_SSL_CA_CERT');
+    if (problem) problems.push(`${problem} (in an env file: the PEM text on one line with \\n escapes; value not shown)`);
   }
   if (kind === 'runtime' && !entries.some((e) => e.key === AUDIT_SINK_KEY)) {
     problems.push(`${AUDIT_SINK_KEY}: missing (BC-07: production refuses to start without an external audit sink; set stdout with an off-host append-only log shipper)`);

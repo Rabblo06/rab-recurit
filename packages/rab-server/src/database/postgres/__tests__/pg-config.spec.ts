@@ -14,6 +14,7 @@ import {
 } from '../pg-config';
 import { pgClientConfig } from '../create-pg-pool';
 import { NEVER_IN_RUNTIME_ENV } from '../../typeorm/core/never-in-runtime-env';
+import { TEST_CA_A } from './fixtures/pg-test-ca';
 
 // Phase B (B1): environment resolution — one primary variable, legacy names, conflicts, production rules, strict numbers,
 // pooler policy. Pure: every case passes its own env object.
@@ -21,7 +22,8 @@ const SECRET = 'Pw-s3cret-9f';
 const OTHER_SECRET = 'Other-s3cret-1a';
 const APP = `postgres://crewflow_app:${SECRET}@localhost:5432/rab`;
 const PROD = `postgresql://crewflow_app:${SECRET}@db-postgresql-lon1-1.db.ondigitalocean.com:25060/defaultdb?sslmode=verify-full`;
-const PEM = '-----BEGIN CERTIFICATE-----\nMIIBfake\n-----END CERTIFICATE-----\n';
+// A real (public, test-only) CA certificate: the CA text is parsed at boot (pg-tls.ts validatePgCaPem).
+const PEM = TEST_CA_A;
 
 function refusal(env: Record<string, string | undefined>, options?: ResolvePgOptions): string {
   try {

@@ -275,16 +275,16 @@ isolation_report
 #     0 s), and a slow cold start was killed. A hang is prevented inside the step instead: both files are opened
 #     O_NONBLOCK|O_NOFOLLOW and fstat-checked, so a FIFO, a symlink or a directory is refused at once (exit 64).
 # Then PG_DATABASE_URL = the runtime URL; PG_DATABASE_PASSWORD and CREWFLOW_DB_TARGET_FILE are unset.
-# TLS (D1 a): when the runtime URL's host is exactly `db` and PG_SSL_CA_CERT_PATH is unset (or blank), it is set to the
-# bundled db's own CA (mounted read-only). The block below is identical in worker-start.sh and db-setup.sh
-# (run-prestart-shell-tests.cjs compares them).
+# TLS (D1 a): when the runtime URL's host is exactly `db` and PG_SSL_CA_CERT_PATH and PG_SSL_CA_CERT are both unset (or
+# blank), PG_SSL_CA_CERT_PATH is set to the bundled db's own CA (mounted read-only). The block below is identical in
+# worker-start.sh and db-setup.sh (run-prestart-shell-tests.cjs compares them).
 # BEGIN crewflow bundled-db CA
 crewflow_bundled_db_ca() {
   db_rest="${PG_DATABASE_URL#*://}"
   db_authority="${db_rest%%[/?#]*}"
   db_hostport="${db_authority##*@}"
   db_host="${db_hostport%%:*}"
-  if [ "$db_host" = db ] && [ -z "${PG_SSL_CA_CERT_PATH:-}" ]; then
+  if [ "$db_host" = db ] && [ -z "${PG_SSL_CA_CERT_PATH:-}" ] && [ -z "${PG_SSL_CA_CERT:-}" ]; then
     export PG_SSL_CA_CERT_PATH=/run/crewflow/db-ca/ca.crt
   fi
   unset db_rest db_authority db_hostport db_host

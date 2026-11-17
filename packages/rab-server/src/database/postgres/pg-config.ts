@@ -1,6 +1,6 @@
 /**
  * Phase B (B1): resolves the database configuration of THIS process from its environment. Pure apart from reading the
- * CA file named by PG_SSL_CA_CERT_PATH; no connection is made here.
+ * CA file named by PG_SSL_CA_CERT_PATH (or validating the inline PG_SSL_CA_CERT); no connection is made here.
  *
  * One primary variable everywhere: `PG_DATABASE_URL`. Each process gets its own credential through its own environment
  * (API and Worker: the restricted `crewflow_app`; the migration step: its migration-only login), so the variable NAME
@@ -29,7 +29,7 @@
  * CLI get a warning. PG_DATABASE_URL_IS_DIRECT=true on a pooler-shaped URL is a contradiction and is refused. The flag
  * never skips the Worker's live session probe (pg-session-probe.ts).
  */
-import { buildPgSsl, PgSsl, PgTlsSettings, readPgCaCertificate } from './pg-tls';
+import { buildPgSsl, PgSsl, PgTlsSettings, resolvePgCaCertificate } from './pg-tls';
 import { parsePgUrl, PgConfigError, PgTarget, sameTarget } from './pg-url-policy';
 
 export { PgConfigError } from './pg-url-policy';
@@ -102,6 +102,7 @@ export const PG_ENV_NAMES = [
   'PG_DATABASE_PRIMARY_TIMEOUT_MS',
   'PG_SSL_ALLOW_SELF_SIGNED',
   'PG_SSL_CA_CERT_PATH',
+  'PG_SSL_CA_CERT',
   'PG_DATABASE_URL_IS_DIRECT',
   'PG_DATABASE_REPLICA_URL',
   'PG_DATABASE_REPLICA_TIMEOUT_MS',
@@ -209,7 +210,7 @@ export interface ResolvePgOptions {
    * role (ConfigModule validates at import time), so it checks everything else and leaves this rule to the process.
    */
   enforceProcessPolicy?: boolean;
-  /** Test seam for PG_SSL_CA_CERT_PATH. */
+  /** Test seam for reading the PG_SSL_CA_CERT_PATH file. */
   readFile?: (path: string) => string;
 }
 
@@ -305,17 +306,18 @@ export function resolvePgEnvironment(env: Env = process.env, options: ResolvePgO
     if (!pgUrl) throw new PgConfigError('PG_DATABASE_URL is required in production. Refusing to start.');
   }
 
+  // The CA: PG_SSL_CA_CERT (inline PEM) or PG_SSL_CA_CERT_PATH (a file), never both; validated here, at boot (pg-tls.ts).
   const caPath = present(env, 'PG_SSL_CA_CERT_PATH') ?? null;
   const tls: ResolvedPgEnvironment['tls'] = {
     production,
     caPath,
-    caPem: caPath ? readPgCaCertificate(caPath, options.readFile) : null,
+    ...resolvePgCaCertificate(present(env, 'PG_SSL_CA_CERT'), caPath ?? undefined, options.readFile),
     allowSelfSigned: boolSetting(env, 'PG_SSL_ALLOW_SELF_SIGNED'),
   };
   const allowSessionRole = processRole === 'migrate' && !production && (env.DB_TARGET === 'local' || env.DB_TARGET === 'test');
   const endpoint = (raw: string, source: string, deprecated: boolean): PgEndpoint => {
     const target = parsePgUrl(raw, source, { allowSessionRole });
-    return { source, target, ssl: buildPgSsl(target.sslmode, tls, source), deprecated };
+    return { source, target, ssl: buildPgSsl(target.sslmode, tls, source, target.host), deprecated };
   };
 
   let primary: PgEndpoint;
@@ -382,7 +384,7 @@ export function resolvePgEnvironment(env: Env = process.env, options: ResolvePgO
   if (replicaUrl) {
     // Never a session role on a replica, whatever the process: it is a read path of the runtime role only.
     const target = parsePgUrl(replicaUrl.value, replicaUrl.name, { allowSessionRole: false });
-    replica = { source: replicaUrl.name, target, ssl: buildPgSsl(target.sslmode, tls, replicaUrl.name), deprecated: false };
+    replica = { source: replicaUrl.name, target, ssl: buildPgSsl(target.sslmode, tls, replicaUrl.name, target.host), deprecated: false };
     if (sameTarget(primary.target, target)) {
       throw new PgConfigError('PG_DATABASE_REPLICA_URL names the primary (same user, host, port and database). Unset it, or point it at a standby. Refusing to start.');
     }

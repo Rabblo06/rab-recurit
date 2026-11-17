@@ -167,7 +167,7 @@ export function parsePgUrl(raw: string, label: string, parseOptions: ParsePgUrlO
     }
     if ((key.startsWith('ssl') && key !== 'sslmode') || key === 'uselibpqcompat') {
       throw new PgConfigError(
-        `${label} sets "${key}", which would override the TLS settings. TLS is configured only through sslmode (a declaration) and PG_SSL_CA_CERT_PATH / PG_SSL_ALLOW_SELF_SIGNED. Refusing.`,
+        `${label} sets "${key}", which would override the TLS settings. TLS is configured only through sslmode (a declaration) and PG_SSL_CA_CERT / PG_SSL_CA_CERT_PATH / PG_SSL_ALLOW_SELF_SIGNED. Refusing.`,
       );
     }
     if (!ALLOWED_PARAMS.has(key)) {

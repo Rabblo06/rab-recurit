@@ -15,8 +15,9 @@
 #      (60 attempts: bounded by a COUNT, never by the clock); the derive run is not wrapped in busybox `timeout` (its
 #      watcher keeps the command-substitution pipe open until the bound: every start paid it; see api-prestart.sh): a FIFO,
 #      a symlink or a directory in place of a file is refused at once by the step's O_NONBLOCK|O_NOFOLLOW open + fstat;
-#   3. sets PG_SSL_CA_CERT_PATH to the bundled db's CA when the runtime URL's host is exactly `db` and it is unset (the block
-#      below is identical in api-prestart.sh and db-setup.sh; run-prestart-shell-tests.cjs compares them);
+#   3. sets PG_SSL_CA_CERT_PATH to the bundled db's CA when the runtime URL's host is exactly `db` and neither it nor
+#      PG_SSL_CA_CERT is set (the block below is identical in api-prestart.sh and db-setup.sh;
+#      run-prestart-shell-tests.cjs compares them);
 #   4. exports the runtime URL as PG_DATABASE_URL and execs tini. The Worker itself retries a 28P01 first login (its
 #      password not set yet by db-setup) for up to 120 s (core/runtime/owner-password-wait.ts), and refuses, in production,
 #      any PG_DATABASE_URL that does not log in as crewflow_owner before connecting (runtime-db-config.ts checkRuntimeLogin).
@@ -42,7 +43,7 @@ crewflow_bundled_db_ca() {
   db_authority="${db_rest%%[/?#]*}"
   db_hostport="${db_authority##*@}"
   db_host="${db_hostport%%:*}"
-  if [ "$db_host" = db ] && [ -z "${PG_SSL_CA_CERT_PATH:-}" ]; then
+  if [ "$db_host" = db ] && [ -z "${PG_SSL_CA_CERT_PATH:-}" ] && [ -z "${PG_SSL_CA_CERT:-}" ]; then
     export PG_SSL_CA_CERT_PATH=/run/crewflow/db-ca/ca.crt
   fi
   unset db_rest db_authority db_hostport db_host
