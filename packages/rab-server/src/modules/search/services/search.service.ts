@@ -1,4 +1,4 @@
-import { PermissionFlag, VenueStatus } from '@rab/shared';
+import { PermissionFlag, ShiftStatus, UserStatus, VenueStatus } from '@rab/shared';
 import { Inject, Injectable } from '@nestjs/common';
 import { EntityManager } from 'typeorm';
 
@@ -10,6 +10,7 @@ import { businessTables } from '../../../engine/core-modules/tenant/business-tab
 import { TenantContextService } from '../../../engine/core-modules/tenant/tenant-context.service';
 import { SearchDto } from '../dto/search.dto';
 import { buildSearchQuery, SearchQuery } from './search-query';
+import { offerReadScopeCondition } from '../../offer/services/offer.service';
 
 export interface SearchResult {
   id: string;
@@ -42,11 +43,18 @@ const venueName = (v: string) => `core.immutable_unaccent(lower(${v}.name))`;
  */
 const PARAMS_ANCHOR = `($1::text IS NULL AND $2::text IS NULL AND $3::text IS NULL AND $4::text IS NULL) AS _params`;
 
-// Step 7 (Private Workspace migration): the `owner` scope's real boundary is `workspace_id`, matching the DB-level RLS
-// dimension exactly — see `dashboard.service.ts`'s identical constant for the full rationale.
-function ownerWorkspacePredicate(workspaceCol: string, paramIdx: number): string {
-  return `${workspaceCol} = $${paramIdx}`;
-}
+/*
+ * SF-6: every branch below applies the SAME scope predicate as the resource's own list (the list is the authority; search
+ * may only ever be tighter, never looser), plus explicit `organisation_id` / `workspace_id` pins on top of RLS:
+ *  - staff    - `StaffService.list()` (created_by = the scope owner) and, for a Venue Manager, `StaffService.venueDirectory()`
+ *               (their saved team at their assigned venues, active accounts only);
+ *  - managers - `ManagerService.list()` (organisation-wide);
+ *  - venues   - `VenueService.list()` (assigned venues, or created_by = the scope owner);
+ *  - shifts   - `SchedulingService.applyShiftReadScope()` with the pending-approval widening `list()` uses;
+ *  - offers   - `offerReadScopeCondition()` itself, the one shared offer read scope.
+ * Before SF-6 the owner branches keyed on `workspace_id` alone (created_by only for restricted members), so a row in the
+ * caller's workspace created by someone else was searchable although every list hid it.
+ */
 
 /** Positional parameters: the four search params first, then whatever a branch appends. */
 class Params {
@@ -119,7 +127,7 @@ export class SearchService {
 
       // Sequential on one connection (a transaction's queries are serialised anyway).
       const staff = canViewStaff && staffPolicy.canRead ? await this.searchStaff(manager, ctx, scope, query, limit, staffPolicy) : [];
-      const managers = canViewManagers ? await this.searchManagers(manager, query, limit) : [];
+      const managers = canViewManagers ? await this.searchManagers(manager, ctx, query, limit) : [];
       const shifts = canViewSchedule && shiftPolicy.canRead ? await this.searchShifts(manager, ctx, scope, query, limit, shiftPolicy, venuePolicy) : [];
       // Offers are not a workspace-member object (members' offer lists are empty too) — never searched for them.
       const offers = canViewSchedule && !delegated ? await this.searchOffers(manager, ctx, scope, query, limit) : [];
@@ -127,6 +135,14 @@ export class SearchService {
 
       return [...staff, ...managers, ...shifts, ...offers, ...venues];
     }, { useReplica: true });
+  }
+
+  /** The custom workspace-member record filter, as the lists apply it (nothing at all when the caller is unrestricted). */
+  private recordFilter(policy: ObjectAccessPolicy, alias: string, p: Params): string {
+    if (!policy.restricted) return '';
+    const filter = this.memberAccess.rawWhere(policy, alias, p.next);
+    filter.positional.forEach((v) => p.push(v));
+    return ` AND (${filter.sql})`;
   }
 
   private scopeVenueIds(scope: ResourceScope): string[] | null {
@@ -156,14 +172,26 @@ export class SearchService {
   ): Promise<SearchResult[]> {
     const t = businessTables(manager);
     const p = new Params(q);
+    const org = p.push(ctx.organisationId);
     const ws = p.push(ctx.workspaceId);
-    let extra = '';
-    if (policy.restricted && scope.kind === 'owner') {
-      extra += ` AND sp.created_by = ${p.push(scope.ownerUserId)}`;
-      const filter = this.memberAccess.rawWhere(policy, 'sp', p.next);
-      filter.positional.forEach((v) => p.push(v));
-      extra += ` AND (${filter.sql})`;
+    let extra: string;
+    if (scope.kind === 'venue') {
+      // StaffService.list() reads created_by = the caller for a Venue Manager; StaffService.venueDirectory() reads their
+      // saved team (venue_manager_staff) at their assigned venues, active accounts only. Search is the union of the two.
+      const self = p.push(ctx.userId);
+      const venues = p.push(scope.venueIds);
+      const active = p.push(UserStatus.ACTIVE);
+      extra = ` AND (sp.created_by = ${self} OR (u.status = ${active} AND EXISTS (
+            SELECT 1 FROM ${t.venue_manager_staff} vt
+              JOIN core.manager_profile vmp ON vmp.id = vt.manager_profile_id
+              JOIN ${t.venue} vv ON vv.workspace_id = vt.workspace_id
+             WHERE vt.staff_profile_id = sp.id AND vmp.user_id = ${self} AND vv.id = ANY(${venues}::uuid[]))))`;
+    } else {
+      // StaffService.list(): created_by = the caller, or (custom workspace-member) their workspace owner. Always, not
+      // only for restricted members.
+      extra = ` AND sp.created_by = ${p.push(scope.ownerUserId)}`;
     }
+    extra += this.recordFilter(policy, 'sp', p);
     const emailBranch =
       q.emailPrefix && this.memberAccess.isFieldVisible(policy, 'email')
         // sql-injection-reviewed: dynamic WHERE assembled only from literal fragments and $n / :named placeholders (values pushed to params); identifiers come from allow-lists. Reviewed 2026-11-04.
@@ -186,7 +214,7 @@ export class SearchService {
          JOIN ${t.staff_profile} sp ON sp.id = cand.id
          JOIN core."user" u ON u.id = sp.user_id AND u.deleted_at IS NULL
          CROSS JOIN LATERAL (SELECT ${userName('u')} AS full_name) n
-        WHERE sp.workspace_id = ${ws} AND sp.archived_at IS NULL${extra}
+        WHERE sp.organisation_id = ${org} AND sp.workspace_id = ${ws} AND sp.archived_at IS NULL${extra}
         ORDER BY exact DESC, rank DESC, sim DESC, u.first_name ASC, u.last_name ASC, sp.id
         LIMIT ${lim}`,
       p.values,
@@ -200,8 +228,10 @@ export class SearchService {
     }));
   }
 
-  private async searchManagers(manager: EntityManager, q: SearchQuery, limit: number): Promise<SearchResult[]> {
+  private async searchManagers(manager: EntityManager, ctx: AuthContext, q: SearchQuery, limit: number): Promise<SearchResult[]> {
     const p = new Params(q);
+    // ManagerService.list() is organisation-wide: the same explicit organisation pin (SF-6), RLS underneath.
+    const org = p.push(ctx.organisationId);
     // MANAGER_MANAGE holders already see managers' emails in the list; prefix-only, and only for an email-like query.
     const emailBranch = q.emailPrefix ? `OR u.email::text ILIKE ${p.push(q.emailPrefix)}` : '';
     const lim = p.push(limit);
@@ -213,7 +243,7 @@ export class SearchService {
               public.similarity(${userName('u')}, ${NORM_TEXT}) AS sim, ${PARAMS_ANCHOR}
          FROM core.manager_profile mp
          JOIN core."user" u ON u.id = mp.user_id AND u.deleted_at IS NULL
-        WHERE (${this.userMatch(q, 'u')} ${emailBranch}) AND mp.archived_at IS NULL
+        WHERE mp.organisation_id = ${org} AND (${this.userMatch(q, 'u')} ${emailBranch}) AND mp.archived_at IS NULL
         ORDER BY exact DESC, rank DESC, sim DESC, u.first_name ASC, u.last_name ASC, mp.id
         LIMIT ${lim}`,
       p.values,
@@ -242,17 +272,13 @@ export class SearchService {
     const p = new Params(q);
     let where = `${this.venueMatch(q, 'v', this.memberAccess.isFieldVisible(policy, 'clientName'))}`;
     where += ` AND v.status <> ${p.push(VenueStatus.ARCHIVED)} AND v.archived_at IS NULL`;
+    where += ` AND v.organisation_id = ${p.push(ctx.organisationId)}`;
     if (scope.kind === 'venue' && venueIds) {
       where += ` AND v.id = ANY(${p.push(venueIds)}::uuid[])`;
     } else if (scope.kind === 'owner') {
-      where += ` AND ${ownerWorkspacePredicate('v.workspace_id', p.next)}`;
-      p.push(ctx.workspaceId);
-      if (policy.restricted) {
-        where += ` AND v.created_by = ${p.push(scope.ownerUserId)}`;
-        const filter = this.memberAccess.rawWhere(policy, 'v', p.next);
-        filter.positional.forEach((v) => p.push(v));
-        where += ` AND (${filter.sql})`;
-      }
+      // VenueService.list(): created_by = the scope owner, always.
+      where += ` AND v.workspace_id = ${p.push(ctx.workspaceId)} AND v.created_by = ${p.push(scope.ownerUserId)}`;
+      where += this.recordFilter(policy, 'v', p);
     }
     const lim = p.push(limit);
     const rows = await manager.query(
@@ -293,17 +319,17 @@ export class SearchService {
     // A shift's own vector (address + notes) is NOT a global-search target: under RLS its GIN index is unusable for the
     // runtime role (`@@` is not LEAKPROOF) and the full scan cost 250–500 ms per keystroke at 50k shifts (benchmark).
     const clientNameVisible = this.memberAccess.isFieldVisible(venuePolicy, 'clientName');
-    let where = `s.archived_at IS NULL`;
+    let where = `s.archived_at IS NULL AND s.organisation_id = ${p.push(ctx.organisationId)}`;
     if (scope.kind === 'venue' && venueIds) {
       where += ` AND s.venue_id = ANY(${p.push(venueIds)}::uuid[])`;
     } else if (scope.kind === 'owner') {
-      where += ` AND ${ownerWorkspacePredicate('s.workspace_id', p.next)}`;
-      p.push(ctx.workspaceId);
-      if (policy.restricted) {
+      where += ` AND s.workspace_id = ${p.push(ctx.workspaceId)}`;
+      // SchedulingService.applyShiftReadScope() exactly as list() calls it (widenPendingApproval: true).
+      if (scope.delegated) {
         where += ` AND s.created_by = ${p.push(scope.ownerUserId)}`;
-        const filter = this.memberAccess.rawWhere(policy, 's', p.next);
-        filter.positional.forEach((v) => p.push(v));
-        where += ` AND (${filter.sql})`;
+        where += this.recordFilter(policy, 's', p);
+      } else {
+        where += ` AND (s.created_by = ${p.push(ctx.userId)} OR s.status = ${p.push(ShiftStatus.PENDING_MANAGER_APPROVAL)})`;
       }
     }
     const lim = p.push(limit);
@@ -346,13 +372,9 @@ export class SearchService {
 
     const t = businessTables(manager);
     const p = new Params(q);
-    let where = 'TRUE';
-    if (scope.kind === 'venue' && venueIds) {
-      where += ` AND s.venue_id = ANY(${p.push(venueIds)}::uuid[])`;
-    } else if (scope.kind === 'owner') {
-      where += ` AND ${ownerWorkspacePredicate('o.workspace_id', p.next)}`;
-      p.push(ctx.workspaceId);
-    }
+    // OfferService.list()'s own scope condition (assigned venues, or offers the caller sent), plus organisation / workspace pins.
+    let where = `o.organisation_id = ${p.push(ctx.organisationId)} AND ${offerReadScopeCondition(scope, ctx, (v) => p.push(v))}`;
+    if (scope.kind === 'owner') where += ` AND o.workspace_id = ${p.push(ctx.workspaceId)}`;
     const lim = p.push(limit);
     const rows = await manager.query(
       // sql-injection-reviewed: code-constant SQL fragment from a helper called with literal aliases; values are bound $n parameters.
