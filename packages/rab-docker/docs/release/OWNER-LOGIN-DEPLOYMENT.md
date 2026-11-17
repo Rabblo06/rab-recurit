@@ -499,7 +499,7 @@ verification queries.
 | Azure Flexible | `azure.extensions=BTREE_GIST,CITEXT,PG_TRGM,PGCRYPTO,UNACCENT`; `REVOKE CREATE ON SCHEMA public FROM PUBLIC`. Never `:6432`. | EXPECTED |
 | PostgreSQL ≤ 15 | Refused (CREATEROLE could grant `pg_execute_server_program`). | UNSUPPORTED |
 
-**Optional hardening after the install:** `ALTER ROLE crewflow_owner NOCREATEROLE;` (M0).
+**Hardening after the install:** `ALTER ROLE crewflow_owner NOCREATEROLE;` (M0). Optional with an admin URL; REQUIRED for section 4a (step 6).
 - **Flagged assumption:** a later release whose migrations create roles would need CREATEROLE again. Check pending lists for `CREATE ROLE` before each release.
 
 **Fresh install from an empty database is VERIFIED on self-hosted PostgreSQL 16, 17 and 18** (Agent 1; end to end on PG16 by Agent 2). It is EXPECTED on the managed providers above, and NOT TESTED on any of them.
@@ -565,6 +565,10 @@ that row. The first start then refuses with `rab_owner: unexpected member <admin
 
 ### Steps
 
+Follow them in this order. Steps 3 and 6 are **required**, not optional: do not set the variables or deploy before step 3
+passes, and do not leave `crewflow_owner` with CREATEROLE after step 6 (owner decision 2026-11-17, like Twenty, whose app
+user never has CREATEROLE).
+
 1. Generate the password and keep it in your secret store:
 
    ```bash
@@ -597,27 +601,29 @@ that row. The first start then refuses with `rab_owner: unexpected member <admin
    target, which a 32-byte random password defeats. A superuser admin's session turns its own statement logging off
    first (db-setup's Q1); a non-superuser admin cannot, so check your provider's log and audit retention.
 
-3. Check the login from where Crewflow will run:
+3. **REQUIRED: the login test.** It must pass before you go on. Run it from where Crewflow will run:
 
    ```bash
    psql "postgresql://crewflow_owner@<direct-host>:5432/<database>?sslmode=verify-full&sslrootcert=system" \
      -X -c 'SELECT session_user'
    ```
 
-   It must print `crewflow_owner`. **If the login check fails, drop the role and run the file again.** A non-superuser
-   admin cannot see whether a password is set, and an empty password entry leaves `crewflow_owner` without one. The
-   same admin drops it with:
+   It must print `crewflow_owner`. **This step is what catches an empty password from a non-superuser admin.** psql
+   accepts an empty entry at `\password`, and the server then clears the password. A superuser admin is refused by the
+   script's own re-check, but a non-superuser admin cannot see whether a password is set, so the script commits a
+   `crewflow_owner` without one. Such a role cannot log in with a password, so this test fails.
+
+   **If the login test fails, drop the role and run the file again.** The same admin drops it with:
 
    ```sql
    REVOKE CONNECT, CREATE, TEMPORARY ON DATABASE <database> FROM crewflow_owner CASCADE;
    DROP ROLE crewflow_owner;
    ```
 
-   A passwordless role cannot log in with a password, and db-setup refuses it too (exit 64). It is only reachable through
-   a `trust`, `peer` or `cert` rule in the provider's `pg_hba.conf`. A superuser admin is protected anyway: the script's
-   re-check refuses a role without a SCRAM password and rolls back.
+   db-setup refuses a passwordless role too (exit 64). Such a role is only reachable through a `trust`, `peer` or
+   `cert` rule in the provider's `pg_hba.conf`.
 
-4. Settings in `compose.env`:
+4. Only after step 3 passes, set these in `compose.env`:
 
    | Setting | Value |
    |---|---|
@@ -630,14 +636,33 @@ that row. The first start then refuses with `rab_owner: unexpected member <admin
    when this was written). In this release the admin URL setting is `PG_DATABASE_URL`, which also accepts an existing
    `crewflow_owner` URL; put the `crewflow_owner` URL there and nothing else.
 
-5. `docker compose up -d`. What happens:
+5. Deploy: `docker compose up -d`. What happens:
    - `db-setup` sees a `crewflow_owner` URL and runs only read-only checks (D5, DB-SETUP-PLAN §7.1). It refuses
      SUPERUSER, BYPASSRLS, REPLICATION, CREATEDB, NOLOGIN, NOINHERIT, an expired login, a privileged membership, a
      missing database grant, and PostgreSQL below 16.
    - `db-setup` copies the URL's password into its password file: `/run/crewflow/db-target/owner-password`, mode 0400,
      on the `crewflow-db-target` volume. Protect that volume and its backups.
    - `db-setup` never writes to the database and never changes the password.
-   - rab-api then migrates as `crewflow_owner`. On the first start this creates the schema roles and the whole schema.
+   - rab-api then migrates as `crewflow_owner`. On this first start it creates the schema roles and the whole schema,
+     which is the only time it needs CREATEROLE.
+
+6. **REQUIRED: remove CREATEROLE after the first successful start.** Wait until the first start has finished:
+   `/healthz` is 200 and the `core` schema exists. Then, as the same admin:
+
+   ```sql
+   ALTER ROLE crewflow_owner NOCREATEROLE;
+   ```
+
+   - The creating admin has the ADMIN option this needs.
+   - No restart is needed. On its next start `db-setup` logs `crewflow_owner is NOCREATEROLE (hardened)`.
+   - Afterwards a leaked `crewflow_owner` URL can no longer create roles or reset the schema roles' passwords. It still
+     holds the ADMIN option on the schema roles it created, so it can still GRANT those roles to roles that already
+     exist. The posture check refuses any such extra member at the next boot, but it does not prevent the grant.
+   - Restarts, new workspaces and upgrades (new migrations and workspace upgrade commands) run without CREATEROLE.
+     This was proven on PG16; see Status.
+   - **Flagged assumption:** a later release whose migrations create or alter roles would need CREATEROLE again. Its
+     release notes must say so. The migration child then refuses with exit 67 and names it. The admin grants it for
+     that one upgrade and removes it again afterwards.
 
 **Password rotation.** rab-api and rab-worker read the password file only when they start, and `up -d` alone does not
 restart them. `$P` is the production compose shorthand defined at the top of this runbook.
@@ -655,28 +680,16 @@ the old one may have added. After a suspected leak, follow the incident runbook,
 
 | Who | Needs CREATEROLE? | What uses it |
 |---|---|---|
-| The admin running the script | **Yes**, always. | `CREATE ROLE crewflow_owner ... CREATEROLE` (giving CREATEROLE needs CREATEROLE), and `\password`. Only the database GRANT works without it. |
-| `crewflow_owner` after `NOCREATEROLE` | No. | It keeps the ADMIN option on the schema roles it created, so it can still GRANT them to existing roles. The posture check refuses that at the next boot. |
-| `crewflow_owner`, first start (fresh install) | **Yes.** | migrate-on-start's bootstrap creates the six schema roles (`crewflow_worker` through a throwaway `crewflow_rolemaker`, so that it has zero members). The four role migrations (up to 1786691000000) set their passwords. BC-17 then makes `crewflow` / `crewflow_app` NOLOGIN without a password (`legacy-logins.ts`). Without CREATEROLE the child refuses with exit 67 and creates nothing (`owner-login-identity.ts`). |
-| `crewflow_owner`, an upgrade | Only if a pending migration is a role migration (timestamp up to 1786691000000; `locked-migration-runner.ts`, `needCreateRole`). | None in the current chain after the first install. **Flagged assumption:** a later release whose migrations create or alter roles needs it again. The child says so (exit 67). |
-| `crewflow_owner` at runtime (API, Worker, CLI, workspace provisioning) | **No.** | Workspace provisioning uses `SET ROLE crewflow`, never role DDL. The posture check, the boot gates and `db-setup` all accept NOCREATEROLE. `db-setup` logs one line about it. |
-
-**Optional hardening.** After the first successful start (`core` exists and `/healthz` is 200), the admin runs:
-
-```sql
-ALTER ROLE crewflow_owner NOCREATEROLE;
-```
-
-The creating admin has the ADMIN option needed for this. Afterwards a leaked `crewflow_owner` URL can no longer create
-roles or reset the schema roles' passwords. It still holds the ADMIN option on the schema roles it created, so it can
-still GRANT those roles to roles that already exist. The posture check refuses any such extra member at the next boot,
-but it does not prevent the grant.
+| The admin running the script | **Yes**, always. | `CREATE ROLE crewflow_owner ... CREATEROLE` (giving CREATEROLE needs CREATEROLE), `\password`, and step 6's `ALTER ROLE ... NOCREATEROLE`. Only the database GRANT works without it. |
+| `crewflow_owner`, first start (fresh install) | **Yes**, until step 6. | migrate-on-start's bootstrap creates the six schema roles (`crewflow_worker` through a throwaway `crewflow_rolemaker`, so that it has zero members). The four role migrations (up to 1786691000000) set their passwords. BC-17 then makes `crewflow` / `crewflow_app` NOLOGIN without a password (`legacy-logins.ts`). Without CREATEROLE the child refuses with exit 67 and creates nothing (`owner-login-identity.ts`). |
+| `crewflow_owner` after step 6: restarts, upgrades (new migrations, workspace upgrade commands), workspace provisioning, API, Worker, CLI | **No**, and it must not have it. | No migration after 1786691000000 and no runtime path creates, alters or grants a role. The upgrade runner refuses a workspace step that writes the role catalogs (`workspace-step-checks-sql.ts`, layer 4b). The API provisions a new workspace through `core.provision_workspace`, a SECURITY DEFINER function owned by `crewflow`. The Worker provisions with `SET ROLE crewflow`. The posture check, the boot gates and `db-setup` all accept NOCREATEROLE. |
+| `crewflow_owner` after step 6, residual | No. | It keeps the ADMIN option on the schema roles it created, so it can still GRANT them to existing roles. The posture check refuses that at the next boot. |
+| `crewflow_owner`, a future release with role migrations | Only for that upgrade (flagged assumption, step 6). | `needCreateRole` in `locked-migration-runner.ts` (any pending migration up to `LAST_ROLE_MIGRATION_TIMESTAMP` = 1786691000000). None exists in the current chain after the first install. |
 
 **A provider that does not allow CREATEROLE at all** (no role there can create roles) **is not supported.** The script
 refuses at its first check, and nothing is changed. There is no supported fallback:
 
-- Granting CREATEROLE only for the first start, then `NOCREATEROLE`, is the supported way to keep the app login without
-  CREATEROLE.
+- CREATEROLE is needed only for the first start, and step 6 then removes it.
 - Creating the schema roles by hand fails the posture check, as shown above.
 
 Use the bundled `db`, or a provider that allows CREATEROLE.

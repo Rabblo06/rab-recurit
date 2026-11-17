@@ -28,8 +28,9 @@
 -- Everything that changes the database runs in ONE transaction: the checks, CREATE ROLE, the GRANT, the password and the
 -- final re-check. Any failure (a refused check, a missing privilege, mismatched passwords) leaves nothing behind.
 -- psql asks for the new password twice (`\password`), turns it into a SCRAM-SHA-256 verifier on YOUR machine and sends
--- only the verifier. Afterwards, check that crewflow_owner logs in (step 3 of the runbook); if it does not, drop it
--- (runbook section 4a) and run this file again.
+-- only the verifier. Afterwards the runbook's login test (section 4a, step 3) is REQUIRED before you set any variable or
+-- deploy; if it fails, drop the role (runbook section 4a) and run this file again. After the first successful start,
+-- removing CREATEROLE (step 10 below, runbook step 6) is REQUIRED too.
 --
 -- Every statement is annotated with:
 --   NEEDS    the privilege the admin running it needs;
@@ -130,7 +131,7 @@ $preflight$;
 --            NOREPLICATION, NOCREATEDB: not needed; the posture check refuses them.
 --            INHERIT: it uses the privileges of the schema roles it creates and so owns every table through them.
 --            CREATEROLE: on the FIRST start crewflow_owner creates its six schema roles, the role migrations set and then
---            remove their passwords (BC-17). After that first successful start you may remove it (step 10, optional).
+--            remove their passwords (BC-17). After that first successful start you MUST remove it (step 10, REQUIRED).
 --     NO-CR  NO. Without CREATEROLE nothing can create a role. On a provider that does not allow CREATEROLE at all,
 --            Crewflow can not be installed (see the runbook, section 4a).
 CREATE ROLE crewflow_owner LOGIN NOSUPERUSER NOBYPASSRLS NOREPLICATION NOCREATEDB CREATEROLE INHERIT;
@@ -223,13 +224,15 @@ SELECT r.rolname, r.rolcanlogin AS login, r.rolsuper AS superuser, r.rolbypassrl
        pg_catalog.has_database_privilege(r.oid, pg_catalog.current_database(), 'CREATE WITH GRANT OPTION') AS db_grant
   FROM pg_catalog.pg_roles r WHERE r.rolname = 'crewflow_owner';
 
--- (10) OPTIONAL hardening, ONLY after the first successful start (the API has migrated: `core` exists and /healthz is 200).
---     Not run by this script. The boot posture check accepts it, and db-setup logs one line about it.
+-- (10) REQUIRED, after the first successful start (the API has migrated: `core` exists and /healthz is 200), and not
+--     before: the first start needs CREATEROLE to create the schema roles. Not run by this script (runbook section 4a,
+--     step 6; owner decision 2026-11-17: like Twenty, the app login never keeps CREATEROLE). The boot posture check
+--     accepts it, db-setup logs one line about it, and restarts, upgrades and new workspaces run without it.
 --       ALTER ROLE crewflow_owner NOCREATEROLE;
 --     NEEDS  SUPERUSER, or CREATEROLE plus the ADMIN option on crewflow_owner (the creating admin has it).
 --     WHY    afterwards a leaked crewflow_owner URL can no longer create roles or change the passwords of the schema roles.
 --            It still holds the ADMIN option on the schema roles it created, so it can still GRANT those roles to
 --            existing roles; the posture check refuses any such extra member at the next boot.
 --     NO-CR  NO.
---     A later release whose migrations create or alter roles would need CREATEROLE back: check the release notes first
---     (the migration child refuses with exit 67 and says so).
+--     A later release whose migrations create or alter roles would need CREATEROLE back for that one upgrade: its release
+--     notes must say so, the migration child refuses with exit 67 and names it, and the admin removes it again afterwards.

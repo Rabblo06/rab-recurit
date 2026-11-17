@@ -7540,12 +7540,19 @@ Controls: the runbook's explicit upgrade step (3.2 step 0: move the line to `com
 makes every process refuse the bundled database. Residual: an operator who skips the lint and the preflight, with no
 `PG_EXPECTED_DATABASE_NAME` or one equal to `crewflow`.
 
-### TM-DB-5 (new, NEEDS OWNER REVIEW) — your own database, app login created by you (`own-database-app-login.sql`)
+### TM-DB-5 (owner-approved 2026-11-17) — your own database, app login created by you (`own-database-app-login.sql`)
 
 A database admin creates `crewflow_owner` by hand with
 `packages/rab-docker/postgres-init/owner-login/own-database-app-login.sql`. Crewflow then receives only the
 `crewflow_owner` URL and never an admin credential (runbook OWNER-LOGIN-DEPLOYMENT.md section 4a; Twenty: an external
 database, no setup step).
+
+- **Owner decision 2026-11-17.** The SQL is approved, with two required steps:
+  - the login test (runbook 4a step 3) before any variable is set or anything is deployed;
+  - `ALTER ROLE crewflow_owner NOCREATEROLE` after the first successful start (step 6).
+
+  Owner 2026-11-17: both trade-offs accepted. The verifier can appear in logs (Twenty's Helm setup puts the plaintext
+  password in SQL, so ours is stricter). The empty-password risk is caught by the required login test.
 
 - **Result.** The role attributes and the database grant are identical to db-setup's Q4c. When a non-superuser admin
   creates it, the admin keeps the PostgreSQL 16 ADMIN-only creator row on `crewflow_owner`, the same row the db-setup
@@ -7583,10 +7590,18 @@ database, no setup step).
     cannot log in with a password (proven: 28P01), and db-setup refuses it (exit 64). The runbook's login check names
     this state and its remedy (`REVOKE ... CASCADE; DROP ROLE crewflow_owner`, proven as the same admin).
   - Residual: such a role is usable only through a `trust`, `peer` or `cert` rule in the provider's `pg_hba.conf`.
-- **CREATEROLE stays on `crewflow_owner` until the admin removes it.** This is the same as every owner-login install
-  (behaviour catalogue: a leaked URL is the schema owner with CREATEROLE). The runbook's optional hardening
-  (`ALTER ROLE crewflow_owner NOCREATEROLE` after the first start) removes it. It was proven on PG16: db-setup, migrate
-  and the boot gates all still pass.
+- **CREATEROLE is REQUIRED to be removed after the first start** (runbook 4a step 6, owner decision 2026-11-17; Twenty's
+  app user never has it). `crewflow_owner` needs CREATEROLE only on the first start: the bootstrap creates the schema
+  roles, and the role migrations up to 1786691000000 run. Until the admin runs `ALTER ROLE crewflow_owner NOCREATEROLE`,
+  a leaked URL is the schema owner with CREATEROLE (behaviour catalogue).
+  - No runtime path and no migration after 1786691000000 creates, alters or grants a role; the code was searched.
+  - The upgrade runner refuses a workspace step that writes the role catalogs.
+  - The API provisions workspaces through `core.provision_workspace` (SECURITY DEFINER, owned by `crewflow`). The
+    Worker provisions with `SET ROLE crewflow`.
+  - Proven on PG16 with NOCREATEROLE: a restart (db-setup, migrate, boot gates), an upgrade that applies new migrations,
+    workspace provisioning, and the workspace upgrade runner (runbook 4a "Status").
+  - Residual (flagged assumption): a future release with role migrations needs CREATEROLE back for that one upgrade.
+    The migration child refuses with exit 67 until it is granted.
   - After NOCREATEROLE, `crewflow_owner` still holds the ADMIN option on the schema roles it created. It can still GRANT
     them to existing roles. The posture check detects such a member at the next boot; it does not prevent the grant.
 - **Fail closed.** Every check runs inside the transaction, before anything is created:
