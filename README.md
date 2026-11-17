@@ -200,7 +200,9 @@ Crewflow needs an **empty PostgreSQL 16, 17 or 18 database**; versions 15 and ea
 
    ```bash
    openssl rand -hex 32 > crewflow-owner-password   # secret: keep it outside the repository
-   psql "<admin URL of the empty database>"      -v owner_password_file=./crewflow-owner-password      -f packages/rab-docker/postgres-init/owner-login/01-crewflow-owner.sql
+   psql "<admin URL of the empty database>" \
+     -v owner_password_file=./crewflow-owner-password \
+     -f packages/rab-docker/postgres-init/owner-login/01-crewflow-owner.sql
    ```
 
    Each process then takes `PG_DATABASE_URL` naming `crewflow_owner`.

@@ -23,7 +23,7 @@ flowchart TB
     vmMode -- "venue_manager_app<br/>bearer + refresh" --> api
     staffMode -- "staff_app<br/>bearer + refresh" --> api
     api["API · NestJS<br/>/rest/v1"]
-    api --> pg[("PostgreSQL 16<br/>RLS")]
+    api --> pg[("PostgreSQL 16<br/>(tested on 17/18)<br/>RLS")]
     api --> redis[("Redis 7")]
     redis --> worker["Worker<br/>BullMQ jobs + workspace provisioning"]
     worker --> pg

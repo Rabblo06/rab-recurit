@@ -8,8 +8,8 @@ icon: "database"
 
 | Schema | Contents |
 | --- | --- |
-| `core` | Identity, authentication, platform, workspace registry, messaging, audit and storage metadata. Also the 15 workspace business tables while per-workspace schemas are switched off. |
-| `workspace_<uuid>` | Per-workspace copies of the 15 business tables, used only when `HWS_RUNTIME_ENABLED=true`. Built by the API when the workspace is created, or by the Worker's in-process provisioning loop. |
+| `core` | Identity, authentication, platform, workspace registry, messaging, audit and storage metadata. Also the 21 workspace business tables while per-workspace schemas are switched off. |
+| `workspace_<uuid>` | Per-workspace copies of the 21 business tables, used only when `HWS_RUNTIME_ENABLED=true`. Built by the API when the workspace is created, or by the Worker's in-process provisioning loop. |
 
 ## Tables by domain
 
@@ -76,7 +76,7 @@ From 0.6.0 every start records each upgrade step in `core.upgrade_migration`, li
 
 ### Workspace upgrades
 
-Changes to the per-workspace schemas ship as workspace upgrade commands per release (`upgrade-commands/<major-minor>/`, registry `WORKSPACE_UPGRADE_COMMANDS`; 0.6 has none). The workspace command runner runs each command once per `READY` workspace, on the locked migration session after the release's instance commands, one transaction per workspace and command, and records each run in `core.upgrade_migration` with that workspace's id. A failed workspace gets its own `failed` row and stops only its own later steps; the other workspaces carry on.
+Changes to the per-workspace schemas ship as workspace upgrade commands per release (`upgrade-commands/<major-minor>/`, registry `WORKSPACE_UPGRADE_COMMANDS`; 0.6 has three workspace commands: `StaffProfileMemberSelect`, `DropWorkspaceCoreForeignKeys` and `SyncStandardObjects`, and no instance commands). The workspace command runner runs each command once per `READY` workspace, on the locked migration session after the release's instance commands, one transaction per workspace and command, and records each run in `core.upgrade_migration` with that workspace's id. A failed workspace gets its own `failed` row and stops only its own later steps; the other workspaces carry on.
 
 ### Schema-version compatibility
 
