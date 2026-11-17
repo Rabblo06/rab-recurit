@@ -57,6 +57,8 @@ jobs:
             server: &server
               - *shared
               - 'packages/rab-server/**'
+              # A change to the server CI itself must run the server CI (as ci-worker.yaml does for the Worker CI).
+              - '.github/workflows/ci-server.yaml'
             worker:
               - *shared
               - *server
