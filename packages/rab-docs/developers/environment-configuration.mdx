@@ -18,7 +18,7 @@ The API validates its environment when it starts (`packages/rab-server/src/engin
 
 | Variable | Purpose |
 | --- | --- |
-| `PG_DATABASE_URL` | The one database setting of a deployment (`compose.env`): your PostgreSQL's admin URL, an existing `crewflow_owner` URL, or unset for the bundled `db` (`PG_DATABASE_PASSWORD`). Only the one-shot `db-setup` service receives it; the API and the Worker refuse it and build the `crewflow_owner` URL from `db-setup`'s target file and its `crewflow_owner` password file (a random password, kept on `db-setup`'s volume). In local development a process reads it directly. Outside production the deprecated `DATABASE_URL` is still accepted with a warning; production refuses it. |
+| `PG_DATABASE_URL` | The one database setting of a deployment (`compose.env`): your PostgreSQL's admin URL, an existing `crewflow_owner` URL, or unset for the bundled `db` (`PG_DATABASE_PASSWORD`). Only the one-shot `db-setup` service receives it; the API and the Worker refuse it and build the `crewflow_owner` URL from `db-setup`'s target file and its `crewflow_owner` password file (a random password, kept on `db-setup`'s volume). In local development a process reads it directly. The deprecated `DATABASE_URL` is refused in production and by the API and the Worker in every environment; local CLI, migration and test runs outside production still accept it with a warning this release. |
 | `REDIS_URL` | Redis for queues, rate limiting and caches. |
 | `APP_SECRET` | Root secret; also used to derive the shift QR signing key. Never part of a database credential: changing it never touches the database. |
 
@@ -61,7 +61,7 @@ Boot fails if every provider is disabled, or if enabling a provider leaves its c
 | `CLOCK_IN_CONFIRM_FLOOR_HOURS` | 12 | Hard floor (1-48 hours before the staff member's start) for a manager-entered clock-in; between it and `CLOCK_IN_EARLY_MINUTES` the manager must confirm. |
 | `QR_POST_SHIFT_GRACE_MINUTES` | 120 | How long after the end clock-in/out stays open. |
 | `REPORT_AVAILABLE_BEFORE_MINUTES` | 180 | When the roster PDF is produced. |
-| `PDF_RENDERER` | `chromium` | How the Worker renders report PDFs that have a native layout (today the final timesheet): `chromium`, or `native` (pure JavaScript, no browser). Exactly one of the two; anything else refuses to boot. No automatic fallback between them. |
+| `PDF_RENDERER` | `native` | How the Worker renders report PDFs: `native` (pure JavaScript with `@react-pdf/renderer`, no browser) is the only accepted value. The Chromium renderer was retired (P5) and the Worker image contains no browser, so `chromium` or any other value refuses to boot. Leave it unset. |
 | `GEOFENCE_MAX_ACCURACY_M` | 100 | Worst acceptable GPS accuracy at enforced venues. |
 | `LATE_CLOCK_IN_GRACE_MINUTES` | 10 | When a confirmed person counts as late. |
 
@@ -101,8 +101,8 @@ A mock value refuses to boot outside tests, and the old key name refuses to boot
 | `PG_SSL_CA_CERT_PATH`, `PG_SSL_ALLOW_SELF_SIGNED`, `PG_DATABASE_URL_IS_DIRECT` | TLS (production: verify-full only) and the direct-connection declaration. |
 | `PG_DATABASE_REPLICA_URL`, `PG_DATABASE_REPLICA_TIMEOUT_MS`, `PG_DATABASE_REPLICA_MAX_LAG_MS` | Optional read replica. |
 | `CREWFLOW_DEPLOYMENT_ENVIRONMENT`, `CREWFLOW_DEPLOYMENT_ID`, `PG_EXPECTED_DATABASE_NAME` | Deployment identity, compared with the database's protected marker (required in production). |
-| `DATABASE_URL_UNPOOLED`, `DATABASE_DIRECT_URL`, `DB_POOL_MAX` | Deprecated; non-production only, refused in production. Migrations take their own `PG_DATABASE_URL` in the one-off `rab-migrate` step. |
-| `CREWFLOW_PROVISIONER_ENABLED`, `CREWFLOW_PROVISIONER_DATABASE_URL`, `WORKSPACE_PROVISIONER_INTERVAL_SECONDS` | The Worker's workspace provisioner. Set the switch explicitly to `true` or `false`. See [Deployment](/developers/deployment#environment). |
+| `DATABASE_URL_UNPOOLED`, `DATABASE_DIRECT_URL`, `DB_POOL_MAX` | Deprecated: use `PG_DATABASE_URL` and `PG_POOL_MAX_CONNECTIONS`. Refused in production; `DATABASE_URL_UNPOOLED` and `DATABASE_DIRECT_URL` are also refused by the API and the Worker in every environment. Local CLI and migration runs outside production still accept them with a warning this release (`PG_LEGACY_NAMES_STRICT=true` refuses them there too). |
+| `WORKSPACE_PROVISIONER_INTERVAL_SECONDS` | How often the Worker's in-process workspace provisioning polls (5 to 120, default 60). Every `CREWFLOW_PROVISIONER_*` name is refused on the API and the Worker. See [Deployment](/developers/deployment#environment). |
 | `BOOTSTRAP_ADMIN_EMAIL` | The `bootstrap-admin` command. |
 
 ## Clients
