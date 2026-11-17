@@ -17,6 +17,10 @@ const port = require(path.resolve(__dirname, '../../../../../rab-docker/scripts/
 
 const KEY_LABEL = ['PRIVATE', 'KEY'].join(' ');
 const oneLine = (pem: string) => pem.trim().split('\n').join('\\n');
+/** Real-looking base64 key material (not hex, not only `=`), 72 characters. */
+const BARE_KEY = 'MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgq1w2e3r4t5y6u7i8o9p0Zx+/';
+/** A SHA-256 fingerprint as 64 bare hex digits. */
+const HEX_FINGERPRINT = '9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08';
 
 const CORPUS: Array<[string, string]> = [
   ['one certificate', TEST_CA_A],
@@ -33,11 +37,26 @@ const CORPUS: Array<[string, string]> = [
   ['a CRL', `${TEST_CA_A}-----BEGIN X509 CRL-----\nMIIB\n-----END X509 CRL-----\n`],
   ['TRUSTED CERTIFICATE', TEST_CA_A.replace(/CERTIFICATE/g, 'TRUSTED CERTIFICATE')],
   ['a private key', `${TEST_CA_A}-----BEGIN ${KEY_LABEL}-----\nMIGH\n-----END ${KEY_LABEL}-----\n`],
-  ['bare key material', `${TEST_CA_A}${'A'.repeat(64)}\n`],
+  ['bare key material', `${TEST_CA_A}${BARE_KEY}\n`],
+  ['= banner', `${'='.repeat(72)}\n# DigitalOcean cluster CA\n${'='.repeat(72)}\n${TEST_CA_A}`],
+  ['hex fingerprint', `# SHA-256 ${HEX_FINGERPRINT}\n${TEST_CA_A}`],
+  ['lowercase key label, balanced markers', `${TEST_CA_A}-----BEGIN private key-----\nMIGH\n-----END private key-----\n`],
   ['invalid base64', TEST_CA_A.replace(/\n.{10}/, '\n!!!!!!!!!!')],
   ['not DER', '-----BEGIN CERTIFICATE-----\naGVsbG8gd29ybGQ=\n-----END CERTIFICATE-----'],
   ['oversize', TEST_CA_A.repeat(Math.ceil(PG_CA_PEM_MAX_BYTES / TEST_CA_A.length) + 1)],
 ];
+
+/**
+ * The verdict each I-5 / I-6 entry must get from BOTH sides (parity alone would let both drift the same wrong way).
+ * A new rule needs a new parity corpus entry, and an expected verdict here when it is about accept vs refuse.
+ */
+const EXPECTED: Record<string, RegExp | 'accepted'> = {
+  'bare key material': /holds a long base64 run outside the PEM blocks, which looks like key material/,
+  '= banner': 'accepted',
+  'hex fingerprint': 'accepted',
+  // PEM_BLOCK does not match a lowercase label, so the block is never parsed; the balanced marker count still exposes it.
+  'lowercase key label, balanced markers': /contains an incomplete PEM block/,
+};
 
 function verdict(run: () => string, strip: (m: string) => string): { ok: string } | { refused: string } {
   try {
@@ -62,6 +81,15 @@ describe('pg-ca-pem.cjs (operator tools) and pg-tls.ts validatePgCaPem (boot) ag
       (m) => m,
     );
     expect(tool).toEqual(boot);
+  });
+
+  it.each(Object.entries(EXPECTED))('%s: the expected verdict on both sides', (name, expected) => {
+    const value = CORPUS.find(([n]) => n === name)?.[1];
+    expect(value).toBeDefined();
+    for (const run of [() => validatePgCaPem(String(value), 'PG_SSL_CA_CERT'), () => port.validatePgCaPem(String(value), 'PG_SSL_CA_CERT')]) {
+      if (expected === 'accepted') expect(run()).toBe(TEST_CA_A);
+      else expect(run).toThrow(expected);
+    }
   });
 
   it('the boot side throws PgConfigError (fail closed at start)', () => {

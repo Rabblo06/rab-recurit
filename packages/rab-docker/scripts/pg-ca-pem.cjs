@@ -7,7 +7,8 @@
  *   - at most 256 KiB;
  *   - `\n` escapes become newlines, CRLF becomes LF;
  *   - BEGIN/END markers balanced (counted before any block is matched);
- *   - no base64 run of 64+ characters outside the PEM blocks (key material without its armour);
+ *   - no base64 run of 64+ characters outside the PEM blocks (key material without its armour); a run of only `=` or
+ *     only hex digits (a comment banner, a fingerprint) is ignored;
  *   - every block's BEGIN and END labels equal, every block a CERTIFICATE (a PRIVATE KEY is called out), valid base64 that
  *     X509Certificate parses; at least one block.
  * rab-server's pg-ca-pem-parity.spec.ts runs this port and the TypeScript over one corpus and requires the same verdict and
@@ -30,7 +31,10 @@ function validatePgCaPem(raw, label) {
   const begins = text.split('-----BEGIN ').length - 1;
   const ends = text.split('-----END ').length - 1;
   if (begins !== ends) refuse('contains an incomplete PEM block (a BEGIN line without its END line, or the reverse).');
-  if (/[A-Za-z0-9+/=]{64,}/.test(text.replace(PEM_BLOCK, ''))) {
+  // A run of only `=` (a comment banner) or only hex digits (a SHA-256 fingerprint in a comment) is not key material.
+  // Keep in step with pg-tls.ts: a new rule needs a new parity corpus entry (rab-server pg-ca-pem-parity.spec.ts).
+  const longRuns = text.replace(PEM_BLOCK, '').match(/[A-Za-z0-9+/=]{64,}/g) ?? [];
+  if (longRuns.some((run) => !/^=+$/.test(run) && !/^[0-9A-Fa-f]+$/.test(run))) {
     refuse('holds a long base64 run outside the PEM blocks, which looks like key material. It must hold only CA certificate(s).');
   }
   const certificates = [];

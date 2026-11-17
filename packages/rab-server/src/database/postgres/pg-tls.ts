@@ -78,8 +78,12 @@ export function validatePgCaPem(raw: string, source: PgCaSource): string {
   const begins = text.split('-----BEGIN ').length - 1;
   const ends = text.split('-----END ').length - 1;
   if (begins !== ends) refuse('contains an incomplete PEM block (a BEGIN line without its END line, or the reverse).');
-  // Key material pasted WITHOUT its PEM armour: a long base64 run outside every block.
-  if (/[A-Za-z0-9+/=]{64,}/.test(text.replace(PEM_BLOCK, ''))) {
+  // Key material pasted WITHOUT its PEM armour: a long base64 run outside every block. A run of only `=` (a comment
+  // banner) or only hex digits (a SHA-256 fingerprint in a comment) is not key material and is ignored.
+  // Keep in step with packages/rab-docker/scripts/pg-ca-pem.cjs: a new rule needs a new parity corpus entry
+  // (__tests__/pg-ca-pem-parity.spec.ts).
+  const longRuns = text.replace(PEM_BLOCK, '').match(/[A-Za-z0-9+/=]{64,}/g) ?? [];
+  if (longRuns.some((run) => !/^=+$/.test(run) && !/^[0-9A-Fa-f]+$/.test(run))) {
     refuse('holds a long base64 run outside the PEM blocks, which looks like key material. It must hold only CA certificate(s).');
   }
   const certificates: string[] = [];

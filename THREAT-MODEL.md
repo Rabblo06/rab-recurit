@@ -8882,8 +8882,8 @@ Reversal:   Lower CLOCK_IN_CONFIRM_FLOOR_HOURS, or require a second approver (pa
   default for a DNS host (pg sends the name as SNI); for an IP-literal host the `ssl` object carries an explicit
   `checkServerIdentity` bound to that IP, which still calls `tls.checkServerIdentity` (see the finding below).
   `pg-tls.ts validatePgCaPem` runs at boot for BOTH sources (the path's file is now held to the same rule): BEGIN/END
-  markers counted and balanced first; no base64 run of 64+ characters outside the blocks ("looks like key material");
-  at least one PEM block, every block `CERTIFICATE` and parseable by `X509Certificate`, no mislabelled block, at most
+  markers counted and balanced first; no base64 run of 64+ characters outside the blocks ("looks like key material"; a
+  run of only `=` or only hex digits, a comment banner or a fingerprint, is ignored); at least one PEM block, every block `CERTIFICATE` and parseable by `X509Certificate`, no mislabelled block, at most
   256 KiB; a `PRIVATE KEY` block is refused with "treat that key as exposed"; any failure refuses to start. The CA file
   is opened non-blocking and fstat-checked before it is read (a regular file of at most 256 KiB). Both variables set
   refuses to start (before the file is read). Every message names the variable only, never the text; the admin
@@ -8918,8 +8918,11 @@ Reversal:   Lower CLOCK_IN_CONFIRM_FLOOR_HOURS, or require a second approver (pa
   missing file without naming it; both set refused; empty = unset; the IP binding (IPv4, IPv6, system store, DNS host
   unchanged); the CA text in no console line, warning, refusal message, env.validation message or admin viewer row.
   `create-pg-pool.spec.ts`: the IP-bound `checkServerIdentity` survives the TypeORM driver config, `pgPoolConfig`,
-  `pgClientConfig` and pg's `ConnectionParameters` (IPv4 and IPv6). `pg-ca-pem-parity.spec.ts` (20): the TypeScript and
-  the operator-tool port agree on 18 inputs. `pg-tls-ca.integration.spec.ts` (11; a plain `describe` behind the
+  `pgClientConfig` and pg's `ConnectionParameters` (IPv4 and IPv6). `pg-ca-pem-parity.spec.ts` (27): the TypeScript and
+  the operator-tool port agree on 21 inputs, and both give the expected verdict on the edge cases (a `=` comment banner
+  and a bare 64-hex SHA-256 fingerprint outside the blocks are accepted; real base64 key material is refused; a
+  lowercase `-----BEGIN private key-----` block, which the block pattern never parses, is refused through the balanced
+  marker count). A new rule needs a new parity corpus entry. `pg-tls-ca.integration.spec.ts` (11; a plain `describe` behind the
   throwing gate, so it fails, never skips, without its database; real pg Client from the factory, production rules, a
   TLS-only PostgreSQL front on 127.0.0.1 and ::1 with an openssl CA made like the bundled db's): private CA as text and
   as one `\n` line → verified TLS session; path → identical; a self-hosted self-signed certificate → verified; an IP
