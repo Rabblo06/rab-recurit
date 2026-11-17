@@ -1,5 +1,5 @@
 import { PermissionFlagType } from '@rab/shared';
-import { Inject, Injectable, Optional } from '@nestjs/common';
+import { ForbiddenException, Inject, Injectable, Optional } from '@nestjs/common';
 import { DataSource, EntityManager } from 'typeorm';
 
 import { AuthContext } from '../tenant/auth-context.interface';
@@ -122,6 +122,23 @@ export class PermissionsService {
     const filled = await this.loadEffectivePermissionsTx(manager, ctx);
     if (filled.boundToThisIdentity) storeTxPermissions(runner, identity, filled.keys);
     return filled.keys.has(permission);
+  }
+
+  /**
+   * SF-2 / M3: THE layer-2 assert. A service method re-checks its route's own flag by calling this first, inside its own
+   * tenant transaction (the same `manager`), so jobs, CLI commands, AI tools and other services that call the method
+   * directly meet the same flag the route's `PermissionGuard` enforces. Same resolution as `userHasPermissionTx`
+   * (per-user overrides win over roles, memoised per transaction); a missing flag is a 403 `ForbiddenException`, thrown
+   * before the caller reads any row, so it never answers differently for a real id and an unknown one. Callers keep
+   * their own 404-not-403 scope rules after this check.
+   */
+  async assertPermissionTx(
+    manager: EntityManager,
+    ctx: AuthContext,
+    permission: PermissionFlagType,
+    message = 'Permission required.',
+  ): Promise<void> {
+    if (!(await this.userHasPermissionTx(manager, ctx, permission))) throw new ForbiddenException(message);
   }
 
   /** One statement: the identity's effective set plus the tenant this transaction is bound to (what role RLS reads). */

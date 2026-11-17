@@ -8584,6 +8584,45 @@ Reversal:   Lower CLOCK_IN_CONFIRM_FLOOR_HOURS, or require a second approver (pa
   message is stored escaped in `email_outbox.rendered_html` for both the staff and the manager route; a role with
   `staff.view` but not `staff.edit`, and one without `manager.manage`, get 403 and nothing is queued).
 
+## SF-2 (part 1 of 3) — staff, manager and venue-manager services re-check the route's flag (branch fix/sf2-service-perm-staff-manager, 2026-11-17)
+- **Threat:** a job, CLI command, AI tool or another service calls a StaffService / ManagerService / VenueManagerService
+  method directly. Those callers never pass a `PermissionGuard`, and these methods checked only scope or ownership, so a
+  caller without the route's flag could read the staff or manager directory, create, edit, suspend or reactivate an
+  account, reset a password, resend / correct / cancel an invitation, change an email, assign or unassign a venue, or delete
+  a Venue Manager (CLAUDE.md layer 2; `docs/plans/untangle/server-modules.md` M3, finding SF-2, Medium).
+- **Control:** one shared assert, `PermissionsService.assertPermissionTx(manager, ctx, flag)` (over `userHasPermissionTx`:
+  overrides win over roles, memoised per transaction), called FIRST inside the method's own tenant transaction, so it is a
+  403 for any id before a row is read (no existence oracle). Out-of-scope records keep their 404s. The flag is the one the
+  route guard already holds, so the HTTP path is unchanged.
+  - StaffService: `list`, `get`, `getTimeline`, `listNotes`, `listEmails` (`staff.view`); `create` (`staff.create`);
+    `update`, `uploadAvatar`, `removeAvatar`, `changeEmail` incl. the direct INVITED path (`staff.edit`); `deactivate`,
+    `reactivate` (`staff.deactivate`); `resetPassword`, `resendInvite`, `changePendingEmail`, `cancelInvite`
+    (`user.reset_password`). `venueDirectory`, `venueTeamMember`, `setVenueTeamTags` keep `staff.view` but now check it
+    inside their transaction instead of in a separate one.
+  - ManagerService: `get`, `list`, `create`, `assignVenue`, `unassignVenue` (`manager.manage`). `update`, `setActive`,
+    `resetPassword`, `changePendingEmail`, `changeEmail`, `getTimeline`, `listNotes`, `listEmails` take the caller's route
+    flag (`manager.manage` by default; `venue_manager.create` from `VenueManagerService`), the pattern `addNote` and
+    `bulkEmail` already use, and fail closed on any other flag. `resetPassword` and `changePendingEmail` also re-check the
+    route's `user.reset_password`. `deleteVenueManagerUser` re-checks `venue_manager.create` in its own transaction (the
+    implicit "caller checked first, in another transaction" rule is gone).
+  - VenueManagerService: `createInOwnWorkspace` (`venue_manager.create`, in the creating transaction); `resendInvite` and
+    `cancelInvite` also re-check `user.reset_password`.
+  - `ManagerService.getWithin` (no check; caller authorises, caller's transaction) serves the Admin Panel's
+    `OrganisationOnboardingService.getOrganisation`, which is authorised by its platform-admin re-check: a platform admin
+    holds no role in the organisation it inspects. Same result as before.
+- **Behaviour change:** saving a navigation shortcut to a Staff record now also needs `staff.view` (`StaffService.get`), the
+  same flag the record's own route needs.
+- **Not changed (owner decision pending):** `ManagerService.resendInvite` and `ManagerService.cancelInvite` have no flag
+  re-check. The platform-admin CEO resend / revoke (`OrganisationOnboardingService.resendCeoInvite` / `revokeCeoInvite`)
+  calls them with a context that holds no role in the target organisation, so a plain `manager.manage` re-check would break
+  them; they need an explicit, audited authority path first. Their `/managers` routes stay guarded by `manager.manage` +
+  `user.reset_password`; the Venue Manager route re-checks both in `VenueManagerService`.
+- **Tests:** `sf2-layer2-staff-manager.integration.spec.ts` (each method called directly with the flag revoked by a per-user
+  override: ForbiddenException, and the organisation's audit log, outbox, invites, files, accounts, staff profiles and venue
+  links are unchanged; step-up-gated methods use a real signed-in session so only the flag refuses; positive controls with
+  the flag; wrong-route-flag and fail-closed cases; the platform-admin `getOrganisation` read still works; HTTP 403/200
+  unchanged). `permissions.service.spec.ts` covers the helper.
+
 ## SF-3 — create-and-send uses the normal shift-creation checks and audit (branch fix/sf3-create-shift-and-send-scope, 2026-11-16)
 - **Threat:** a manager with `offer.send` → `POST /rest/v1/shifts/with-offers` (`OfferService.createShiftAndSend`) with the id
   of a job role that is RLS-visible but not theirs, or an archived venue or job role → a shift (OPEN, then OFFERED) and live
