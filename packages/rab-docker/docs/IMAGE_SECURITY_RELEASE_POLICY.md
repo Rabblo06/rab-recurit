@@ -46,7 +46,7 @@ succeeded. The default mode of `image_gate.py` is `release`, so forgetting the f
 |---|---|---|
 | `static` | Unpinned `FROM` / `COPY --from` / remote `ADD`; floors file malformed, or a `MIN_CHROMIUM_VERSION` line (retired in P5); a role without `forbidden_apk` / `forbidden_npm` / `sbom_must_not_include` or without `apk-absent:chromium`; decision register invalid or expired; scanner image not pinned by digest | Unpinned `# syntax=` frontend line |
 | `config` | Wrong platform, runtime user, entrypoint, cmd, exposed ports or healthcheck; `org.opencontainers.image.revision` ≠ the source commit; a secret-like env name or a URL with credentials in the image config | – |
-| `container` | `security-floors.sh` fails inside the image (Node or libexpat below the floor; Alpine branch or repositories wrong; Chromium present in either image); `module-paths-gate.cjs` finds a writable module path or a plantable `$HOME/.node_modules` for any runtime identity | – |
+| `container` | `security-floors.sh` fails inside the image (Node or libexpat below the floor; Alpine branch or repositories wrong; Chromium present in either image); `module-paths-gate.cjs` finds a writable module path or a plantable `$HOME/.node_modules` for any runtime identity; `native-addons-smoke.cjs` (as 1000:1000, `--network none`, read-only) cannot hash and verify with argon2id m=19456,t=2,p=1, or msgpackr's native extractor (msgpackr-extract) did not load | – |
 | `fs` (exported filesystem) | setuid/setgid file; file capability; world-writable file or a non-sticky world-writable directory; code under `/app`, `/opt/crewflow-bundle`, `/usr/local` not `0:0` or group/other-writable; **P5: any installed apk matching the role's `forbidden_apk` (Chromium and the 149 OS packages only it pulled in: ffmpeg and every codec, the X11/Wayland/Mesa/GTK stack, fonts, audio, `libxml2`, `glib`, `cups-libs`, `cjson`, ...), any npm package matching `forbidden_npm` (`playwright`, `playwright-core`, `chromium-bidi`, `@playwright/*`, `puppeteer*`), or a `/usr/lib/chromium` / `/usr/bin/chromium*` path**; HOME writable; extra uid 0 account; unapproved apk repository, drop-in, apk config or tag pin; test files, `.env*` files or `.git` in application code; esbuild/vite; an npm package below an `NPM_FLOOR` | Development-only packages (the H3 list in `policy.json`) |
 | `scan` | A scanner failed; the scanner version is not the pinned one; DB older than 72 h; the scanned image ID or layer chain is not the gated image | – |
 | `vulns` | **Fixable** High/Critical (either scanner knows a fixed version) without a valid owner decision | **Unfixed** High/Critical without a valid owner decision; a watch-list package whose version changed (re-verify) |
@@ -303,9 +303,12 @@ a nested undici 8, which, nopt, graceful-fs and a few more. None of it runs in t
 their prebuilt addons through node-gyp-build, and the final stage has no toolchain. Both dependency stages
 (`runtime-modules`, `worker-modules`) therefore run `runtime-deps.cjs prune` right after `focus`: it cuts the edges to
 the names in `RUNTIME_PRUNE` (exported by `runtime-deps.cjs`; today only `node-gyp`) and removes every package that is
-then unreachable from the workspace roots, keeping anything a runtime package also reaches. It removes nothing if a kept
-package's code loads a package it would remove. The final stage's import scan (every compiled import still resolves) and
-`--forbid node-gyp tinyglobby` prove the result on every build. An advisory in such a package is fixed by pruning it,
+then unreachable from the explicit `--root` workspaces (`@rab/server`; `@rab/worker @rab/server` for the Worker tree),
+keeping anything a runtime package also reaches. It removes nothing if a root is missing or if any kept package's code,
+comments included, loads a package it would remove (the one tolerated hit: an install-time-only `bin` file loading a
+`RUNTIME_PRUNE` name). The final stage's import scan (every compiled import still resolves), `--forbid node-gyp
+tinyglobby` and the `container` check's native-addon smoke (argon2id hash and verify, msgpackr's native extractor, as
+1000:1000 offline) prove the result on every build. An advisory in such a package is fixed by pruning it,
 never by a register entry (section 5): add a name to `RUNTIME_PRUNE` only when nothing at runtime loads it.
 
 ## 11. Proving a gate still fails
