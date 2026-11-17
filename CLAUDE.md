@@ -147,6 +147,17 @@ structural changes.
   (auth, permissions, secrets, audit, file storage, email, queue, tenant
   context). `modules/` is the staffing domain (staff, venue, scheduling,
   attendance, payroll). The dependency only flows one way.
+- **Import boundaries only shrink** (#191, `tools/check-import-boundaries.cjs`,
+  in the required ci-security gate). Four rules are counted per file:
+  engine→modules, Worker→rab-server outside `engine/worker-shared/`,
+  rab-front feature→feature and rab-mobile feature→feature. Today's
+  violations are `tools/import-boundaries.baseline.json`. It must match the
+  tree exactly and may only shrink against the PR's base branch. A new
+  violation means importing through the owning surface instead. Growth is
+  allowed only by an exact, owner-dated `APPROVED_GROWTH` entry
+  (rule, file, from, to) added in its own PR before the PR that uses it
+  (#213), and the entry is removed once it is used (#215). Never edit the
+  tool's logic to let a change through.
 - **Money is always integer pence.** The database column is `bigint`; in code
   `Pence` is a JS `number` that must stay a safe integer (`assertSafePence`
   refuses anything else, and the server's `bigintAsNumber` column transformer
@@ -162,6 +173,13 @@ structural changes.
 - **Permissions are resolved server-side per request**, never read off the JWT.
   Use the `PermissionGuard(flag)` mixin factory declaratively on the
   handler — never an inline `if` check in a resolver/controller body.
+- **Every service method that a guard protects re-checks the same flag
+  itself** (layer 2, SF-2): call `PermissionsService.assertPermissionTx(flag)`
+  inside the method's own transaction, before reading any row. It only ever
+  throws 403, so a missing permission never reveals whether a record exists.
+  Records outside the caller's scope still get 404 after the check. Jobs,
+  CLI commands and other services call services directly, so a check that
+  lives only in the guard is not implemented.
 - **`audit_log` is insert-only.**
   - No update or delete route may ever be added for it, at the application
     layer or in the database grants. `UPDATE`, `DELETE` and `TRUNCATE` are
@@ -182,6 +200,15 @@ structural changes.
   the account doesn't exist.
 - **Migrations only.** `synchronize: false` always. Every schema change is a
   versioned TypeORM migration, never edited after merge.
+- **Release versions are major.minor only, for now.** The upgrade runner keys
+  its upgrade commands by major-minor (`upgrade-commands/registry.ts`). A
+  patch version (0.6.1) re-lists the minor's commands under new names and
+  every start refuses (exit 66). Until the runner supports patch releases,
+  ship fixes as a rebuild of the same version or as the next minor (the
+  owner chose "rebuilt 0.6.0" on 2026-11-17). Images are published only by
+  `publish-image.yaml` (mode=publish), after the owner approves the
+  `release` environment, and are deployed by digest
+  (`CREWFLOW_IMAGE_TAG=sha256:…`), never by tag.
 - **Production upgrades need no deployment ID or approval token** (owner
   decision 2026-11-05, BC-11, like Twenty). Both stay available as an opt-in
   and are off by default. Do not reintroduce them as a requirement, and do
@@ -259,6 +286,18 @@ yarn test    # nx run-many test
   `emitDecoratorMetadata` reflects them as `Object`, and TypeORM rejects
   `Object` as an unsupported column type. Plain `string`/`boolean`/`Date`
   properties don't need this — only alias types.
+- **Nx in a git worktree writes to the MAIN checkout's cache.** Nx 22 points
+  the cache and task database of any git worktree at the main worktree
+  (`getMainWorktreeRoot`), whatever `NX_WORKSPACE_ROOT_PATH` says. In an
+  agent worktree, set all three of `NX_WORKSPACE_ROOT_PATH`,
+  `NX_CACHE_DIRECTORY` and `NX_WORKSPACE_DATA_DIRECTORY` to the worktree
+  before any `nx` command, or you will write into the owner's checkout.
+- **Required checks are the five gate jobs** (`ci-security gate`,
+  `ci-server gate`, `ci-worker gate`, `ci-e2e gate`, `ci-pdf-equality
+  gate`). They always report, even when the path filters skip the suites,
+  so a skipped suite counts as a pass only when its files did not change.
+  A green push run on main tests only the last push's diff. A batch of
+  merges is proven by the batch PR's run, not by the final main run.
 
 ## Conventions
 
@@ -297,7 +336,9 @@ yarn test    # nx run-many test
   wired in `main.ts`) — the anti-mass-assignment control. A body carrying
   `organisationId`, `status`, or any field the DTO doesn't declare gets a 400,
   not a silently-ignored or silently-applied field. Never spread a client
-  object into an entity update; map allowed fields explicitly.
+  object into an entity update; map allowed fields explicitly with
+  `pickFields(dto, ALLOW_LIST)` and a typed allow-list per site (SF-7), plus a
+  spec that keeps the allow-list in step with the DTO.
 
 ## Testing floor
 
