@@ -182,7 +182,8 @@ describeIfDb('replacement & standby offers vs manager-confirmation timeout (inte
     const [shift] = await read(fx, `SELECT filled_count, required_count FROM shift WHERE id = $1`, [fx.shift.id]);
     expect(Number(shift.filled_count)).toBe(1);
     expect(Number(shift.required_count)).toBe(1);
-    expect(await read(fx, `SELECT 1 FROM core.notification WHERE related_entity_id = $1 AND type = 'offer_confirmed'`, [fx.replacementOfferId])).toHaveLength(1);
+    // SF-5: the confirmation notification is the staff member's (recipient-only RLS): read it as the owner role.
+    expect(await adminDataSource.query(`SELECT 1 FROM core.notification WHERE related_entity_id = $1 AND type = 'offer_confirmed'`, [fx.replacementOfferId])).toHaveLength(1);
   });
 
   it('W3 (Q1b): a REPLACEMENT confirm after its window ended is the deadline 409 and the acceptance is withdrawn', async () => {

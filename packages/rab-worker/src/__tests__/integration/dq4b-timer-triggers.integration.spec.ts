@@ -167,13 +167,17 @@ describeIfDb('D-Q4b delayed timer triggers (WORKER_TIMER_TRIGGERS=on, integratio
     });
     return { organisationId: fx.manager.organisationId, workspaceId: fx.manager.workspaceId!, subjectId: offerId, dueAtEpochMs: await deadlineOf(fx, offerId) };
   }
-  const sideEffects = async (fx: Fx, entityId: string) =>
-    withManager(fx, async (m) => {
+  const sideEffects = async (fx: Fx, entityId: string) => {
+    const counts = await withManager(fx, async (m) => {
       const [a] = await m.query(`SELECT count(*)::int AS n FROM core.audit_log WHERE entity_id::text = $1 AND action = 'offer.expired_by_worker'`, [entityId]);
-      const [n] = await m.query(`SELECT count(*)::int AS n FROM core.notification WHERE related_entity_id::text = $1 AND type = 'offer_expired'`, [entityId]);
       const [r] = await m.query(`SELECT count(*)::int AS n FROM core.realtime_event WHERE event_key = $1`, [`offer.expired:${entityId}`]);
-      return { audits: a.n as number, notifications: n.n as number, realtime: r.n as number };
+      return { audits: a.n as number, realtime: r.n as number };
     });
+    // SF-5: core.notification is recipient-only for human contexts; count every recipient's rows through the worker marker.
+    const [n] = await tenantContext.runInTenantContext({ ...ctxOf(fx.manager), role: '', userId: '', actorType: 'worker' }, (m) =>
+      m.query(`SELECT count(*)::int AS n FROM core.notification WHERE related_entity_id::text = $1 AND type = 'offer_expired'`, [entityId]));
+    return { audits: counts.audits, notifications: n.n as number, realtime: counts.realtime };
+  };
   const jobsFor = async (subjectId: string) => (await triggers.getJobs(['delayed', 'waiting', 'active', 'completed', 'failed'])).filter((j) => j?.data?.subjectId === subjectId);
 
   beforeAll(async () => {

@@ -30,7 +30,6 @@ import { AttendanceQrService } from '@rab/server/modules/attendance/services/att
 import { QrImageService } from '@rab/server/modules/attendance/services/qr-image.service';
 import { EmailOutbox, Organisation } from '@rab/server/modules/identity/entities/index';
 import { NotificationService } from '@rab/server/modules/notification/services/notification.service';
-import { Notification } from '@rab/server/modules/notification/entities/notification.entity';
 import { JobOffer } from '@rab/server/modules/offer/entities/job-offer.entity';
 import { ReplacementRequest } from '@rab/server/modules/offer/entities/replacement-request.entity';
 import { OfferService } from '@rab/server/modules/offer/services/offer.service';
@@ -73,6 +72,12 @@ describeIfDb('shift cancellation correctness (integration)', () => {
   let app: import('@nestjs/common').INestApplication;
   let dataSource: DataSource;
   let adminDataSource: DataSource;
+  /**
+   * SF-5: core.notification is recipient-only under RLS, so the manager's context no longer sees a staff member's rows.
+   * Assertions (both "exists" and "none") read as the owner role, so a "0 rows" check still means the row was not written.
+   */
+  const notificationRows = (where: string, params: unknown[]) =>
+    adminDataSource.query<Array<{ id: string }>>(`SELECT id FROM core.notification WHERE ${where}`, params);
   let tenantContext: TenantContextService;
   let auditService: AuditService;
   let notificationService: NotificationService;
@@ -382,7 +387,7 @@ describeIfDb('shift cancellation correctness (integration)', () => {
       const { shiftId, assignmentId } = await seedConfirmedAssignment(fx, staff, startsAt, new Date(startsAt.getTime() + 8 * 3600 * 1000));
       await cancelDirect(fx, shiftId);
       await runShiftMonitorCycle(adminDataSource, tenantContext, notificationService, auditService, 0);
-      const notifications = await withContext(ctxOf(fx.owner), (m) => m.find(Notification, { where: { relatedEntityType: 'shift_assignment', relatedEntityId: assignmentId } }));
+      const notifications = await notificationRows(`related_entity_type = 'shift_assignment' AND related_entity_id = $1`, [assignmentId]);
       expect(notifications).toHaveLength(0);
       expect(await countAudit(fx, 'shift.reminder_sent', assignmentId)).toBe(0);
     });
@@ -393,7 +398,7 @@ describeIfDb('shift cancellation correctness (integration)', () => {
       const startsAt = new Date(Date.now() + 20 * 60 * 1000);
       const { assignmentId } = await seedConfirmedAssignment(fx, staff, startsAt, new Date(startsAt.getTime() + 8 * 3600 * 1000));
       await runShiftMonitorCycle(adminDataSource, tenantContext, notificationService, auditService, 0);
-      const notifications = await withContext(ctxOf(fx.owner), (m) => m.find(Notification, { where: { relatedEntityType: 'shift_assignment', relatedEntityId: assignmentId } }));
+      const notifications = await notificationRows(`related_entity_type = 'shift_assignment' AND related_entity_id = $1`, [assignmentId]);
       expect(notifications.length).toBeGreaterThanOrEqual(1);
     });
 
@@ -460,7 +465,7 @@ describeIfDb('shift cancellation correctness (integration)', () => {
       expect((await withContext(ctxOf(fx.owner), (m) => m.findOneByOrFail(JobOffer, { id: offer.id }))).status).toBe(OfferStatus.STAFF_ACCEPTED);
       const finalShift = await withContext(ctxOf(fx.owner), (m) => m.findOneByOrFail(Shift, { id: shift.id }));
       expect(finalShift.filledCount).toBe(0); // never claims a seat on a cancelled shift
-      const notifications = await withContext(ctxOf(fx.owner), (m) => m.find(Notification, { where: { relatedEntityType: 'offer', relatedEntityId: offer.id } }));
+      const notifications = await notificationRows(`related_entity_type = 'offer' AND related_entity_id = $1`, [offer.id]);
       expect(notifications.filter((n) => n.type === ('manager_confirmation_timeout' as never))).toHaveLength(0);
       await runShiftCancellationFollowupCycle(adminDataSource, tenantContext, notificationService, auditService);
       const closed = await withContext(ctxOf(fx.owner), (m) => m.findOneByOrFail(JobOffer, { id: offer.id }));
@@ -592,7 +597,7 @@ describeIfDb('shift cancellation correctness (integration)', () => {
       // THIS assignment specifically, checked below.
       await runAttendanceMonitorCycle(adminDataSource, tenantContext, notificationService, auditService, app.get(EnvironmentService).get('QR_POST_SHIFT_GRACE_MINUTES'));
       expect(await countAudit(fx, 'shift_assignment.missing_clock_out_flagged', assignmentId)).toBe(0);
-      const notifications = await withContext(ctxOf(fx.owner), (m) => m.query<Array<{ count: string }>>(`SELECT count(*) FROM core.notification WHERE related_entity_id = $1`, [assignmentId]));
+      const notifications = await adminDataSource.query<Array<{ count: string }>>(`SELECT count(*) FROM core.notification WHERE related_entity_id = $1`, [assignmentId]);
       expect(Number(notifications[0]!.count)).toBe(0);
     });
 
@@ -734,7 +739,7 @@ describeIfDb('shift cancellation correctness (integration)', () => {
       await schedulingService.cancel(ctxOf(fx.owner), shift.id);
       await runShiftCancellationFollowupCycle(adminDataSource, tenantContext, notificationService, auditService);
 
-      const notifications = await withContext(ctxOf(fx.owner), (m) => m.find(Notification, { where: { userId: staff.userId, type: 'shift_cancelled' as never } }));
+      const notifications = await notificationRows(`user_id = $1 AND type = 'shift_cancelled'`, [staff.userId]);
       expect(notifications.length).toBeGreaterThanOrEqual(1);
     });
   });
