@@ -18,11 +18,13 @@ import { stripComments } from '../helpers/strip-comments';
  *   2. the GUC is written directly — `set_config('rab.actor_type', ...)` (any schema prefix, either quote) or
  *      `SET [LOCAL|SESSION] rab.actor_type` / `"rab.actor_type"` — anywhere but TenantContextService, apart from the
  *      listed maintenance-tool sites that predate this spec.
- * Comments are stripped first with the TypeScript scanner (strings, templates and regexes are kept as code): several
+ * Comments are stripped first with the TypeScript parser (strings, templates and regexes are kept as code): several
  * files explain the rule by naming the forbidden form.
  *
- * This is a tripwire, not a proof: a GUC name passed as a bound parameter, or an object built by computed key, is not
- * seen. Review still applies; this catches the plain copy-paste case.
+ * This is a tripwire, not a proof. Known blind spots: a GUC name built at run time or passed as a bound parameter
+ * (`set_config($1, ...)`); the double-quoted identifier form `"rab"."actor_type"`; an object built by computed key
+ * (`{ [key]: 'worker' }`); and files other than `.ts` (e.g. `.cjs` helpers). Review still applies; this catches the
+ * plain copy-paste case.
  */
 const SERVER_SRC = path.resolve(__dirname, '../..');
 const WORKER_SRC = path.resolve(__dirname, '../../../../rab-worker/src');
@@ -36,10 +38,14 @@ function sources(root: string): string[] {
 }
 const count = (text: string, re: RegExp) => (text.match(new RegExp(re.source, re.flags.includes('g') ? re.flags : `${re.flags}g`)) ?? []).length;
 
-/** Any assignment to `actorType`, whatever the value (`===` / `!==` comparisons and `??` reads are not assignments). */
-const ACTOR_TYPE_ASSIGNMENT = /['"]?\bactorType['"]?\s*(?:\??\s*:|=(?!=)|\?\?=|\|\|=|&&=)/g;
-/** The same, with the literal value `'worker'`. */
-const ACTOR_TYPE_WORKER = /['"]?\bactorType['"]?\s*(?:\??\s*:|=(?!=)|\?\?=|\|\|=|&&=)\s*['"`]worker['"`]/g;
+/**
+ * Any assignment to `actorType`, whatever the value: `actorType:` / `?:` / quoted key / `ctx['actorType'] =` / `??=` /
+ * `||=` / `&&=`, and the shorthand property `{ organisationId, actorType }` (also inside `Object.assign(ctx, { actorType })`).
+ * `===` / `!==` comparisons, `??` reads and type positions such as `Pick<AuthContext, 'actorType'>` are not assignments.
+ */
+const ACTOR_TYPE_ASSIGNMENT = /['"]?\bactorType['"]?\s*\]?\s*(?:\??\s*:|=(?!=)|\?\?=|\|\|=|&&=)|[{,]\s*actorType\s*[,}]/g;
+/** An assignment of the literal value `'worker'`. A shorthand site has no literal, so it is counted above and never here. */
+const ACTOR_TYPE_WORKER = /['"]?\bactorType['"]?\s*\]?\s*(?:\??\s*:|=(?!=)|\?\?=|\|\|=|&&=)\s*['"`]worker['"`]/g;
 /** `set_config('rab.actor_type'` with any prefix (`pg_catalog.`) and either quote; `SET [LOCAL|SESSION] ["]rab.actor_type`. */
 const RAW_ACTOR_TYPE_GUC = /set_config\s*\(\s*['"]rab\.actor_type['"]|\bSET\s+(?:LOCAL\s+|SESSION\s+)?"?rab\.actor_type\b/gi;
 
@@ -163,11 +169,29 @@ describe("rab.actor_type = 'worker' is set only from trusted code (static)", () 
   });
 
   it('the patterns recognise every form they claim to, and nothing else', () => {
-    for (const form of [`actorType: 'worker'`, `actorType?: 'worker'`, `'actorType': "worker"`, 'ctx.actorType = `worker`', `{ role: '', actorType:'worker' }`]) {
+    for (const form of [`actorType: 'worker'`, `actorType?: 'worker'`, `'actorType': "worker"`, 'ctx.actorType = `worker`', `{ role: '', actorType:'worker' }`, `ctx['actorType'] = 'worker'`]) {
       expect([form, count(form, ACTOR_TYPE_WORKER)]).toEqual([form, 1]);
     }
-    for (const form of [`actorType: kind`, `actorType: ctx.actorType`, `ctx.actorType = role`, `c.actorType ??= x`, `c.actorType ||= x`, `c.actorType &&= x`, `actorType?: ActorType`]) {
+    for (const form of [
+      `actorType: kind`,
+      `actorType: ctx.actorType`,
+      `ctx.actorType = role`,
+      `c.actorType ??= x`,
+      `c.actorType ||= x`,
+      `c.actorType &&= x`,
+      `actorType?: ActorType`,
+      `{ organisationId, actorType }`,
+      `{ organisationId, actorType, userId }`,
+      `Object.assign(ctx, { actorType })`,
+      `ctx['actorType'] = 'worker'`,
+      `ctx["actorType"] ??= kind`,
+    ]) {
       expect([form, count(form, ACTOR_TYPE_ASSIGNMENT)]).toEqual([form, 1]);
+    }
+    // A shorthand site is an assignment with no literal: it can never satisfy the literal-'worker' check, so an
+    // allowlisted file that switched to `{ ..., actorType }` fails the comparison of the two patterns' exact counts.
+    for (const form of [`{ organisationId, actorType }`, `Object.assign(ctx, { actorType })`]) {
+      expect([form, count(form, ACTOR_TYPE_WORKER)]).toEqual([form, 0]);
     }
     for (const form of [`ctx.actorType === 'worker'`, `ctx.actorType == x`, `ctx.actorType ?? ''`, `ctx.actorType !== 'worker'`, `Pick<AuthContext, 'actorType'>`]) {
       expect([form, count(form, ACTOR_TYPE_ASSIGNMENT)]).toEqual([form, 0]);
@@ -206,6 +230,23 @@ describe("rab.actor_type = 'worker' is set only from trusted code (static)", () 
     // The defect this replaces: the old regex strip deleted everything from the glob's `/*` to the next `*/`, violation included.
     const oldStrip = source.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');
     expect(count(oldStrip, ACTOR_TYPE_WORKER)).toBe(0);
+  });
+
+  it.each([
+    // A regex literal after `)` / `}`: a bare scanner reads `/\/*/` as division followed by a `/*` comment.
+    ['a regex after `)`', String.raw`if (ok) /\/*/.test(s);`],
+    ['a regex after `}`', String.raw`if (ok) {} /\/*/.test(s);`],
+    // A division whose left operand is a keyword-named property: a bare scanner reads `/ 2; ... '/` as a regex.
+    ['a division after `.type`', `const h = row.type / 2; const g = '/migrations/*.ts';`],
+    ['a division after `.number`', `const h = row.number / 2; const g = '/migrations/*.ts';`],
+    ['a division after `.from`', `const h = range.from / 2; const g = '/migrations/*.ts';`],
+  ])('comment stripping is parser-exact: %s does not hide a later violation', (_what, line) => {
+    const source = [line, "export const ctx = { actorType: 'worker' };", '/* a later block comment */ const tail = 1;'].join('\n');
+    const stripped = stripComments(source);
+    expect(stripped.split('\n')[0]).toBe(line);
+    expect(count(stripped, ACTOR_TYPE_WORKER)).toBe(1);
+    expect(stripped).toContain('const tail = 1;');
+    expect(stripped).not.toContain('a later block comment');
   });
 
   it('rab-server: actorType is assigned only in the allowlisted files, exact counts, and only ever to the literal worker', () => {
