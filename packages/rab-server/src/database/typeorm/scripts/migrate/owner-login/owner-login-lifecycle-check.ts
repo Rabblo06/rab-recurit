@@ -23,7 +23,8 @@
  * transition  a database built in the SEPARATED layout (superuser + restricted phase-A migrator, tenant data seeded),
  *             4 migrations short of head; the provider admin runs postgres-init/owner-login/transition-from-separated.sql;
  *             the owner-login child applies ONLY those 4 (not fresh: no shim, N1 path), post-checks and golden posture.
- * unsupported the child refuses the server version before any change (run it on a PostgreSQL 15 or 17 cluster).
+ * unsupported the provider-admin psql scripts (01-crewflow-owner.sql, transition-from-separated.sql) refuse the major and create
+ *             nothing; then the child refuses it before any change (run it on a PostgreSQL 15 cluster).
  *
  * `--child`: one migrate-on-start run in THIS process for the subprocess scenarios (config from OWNER_LOGIN_CHILD_* vars);
  * prints the result line and exits with the startup exit code. Output: names, counts, states. Never a URL or password.
@@ -142,18 +143,25 @@ async function assertDisposableCluster(): Promise<number> {
  * disposable cluster's container), the REAL psql script runs inside it, the password in a 0600 file written over stdin;
  * otherwise its two statements are extracted and run with the variables substituted (the psql wrapper is then untested).
  */
-async function runAdminSql(db: string, sql: string, database: string): Promise<void> {
+/** The provider-admin psql script, run for real inside the cluster's container (as the provider admin would). */
+function runProviderPsql(container: string, db: string, sql: string): { status: number | null; out: string } {
+  const su = decodeURIComponent(adminBase().username);
+  const write = spawnSync('docker', ['exec', '-i', container, 'sh', '-c', 'umask 077; cat > /tmp/owl-owner-pw'], { input: OWNER_PASSWORD, encoding: 'utf8' });
+  if (write.status !== 0) throw new Error('could not write the password file in the container');
+  const r = spawnSync('docker', ['exec', '-i', container, 'psql', '-X', '-q', '-U', su, '-d', db, '-v', 'owner_password_file=/tmp/owl-owner-pw', '-f', '-'], {
+    input: sql,
+    encoding: 'utf8',
+  });
+  spawnSync('docker', ['exec', container, 'rm', '-f', '/tmp/owl-owner-pw']);
+  return { status: r.status, out: sanitise(`${r.stdout ?? ''}${r.stderr ?? ''}`) };
+}
+
+/** `psql: false`: the script's two statements only, never psql (its version guard is bypassed on purpose: PG15 scenario). */
+async function runAdminSql(db: string, sql: string, database: string, opts: { psql?: boolean } = {}): Promise<void> {
   const container = process.env.OWNER_LOGIN_CHECK_CONTAINER?.trim();
-  if (container) {
-    const su = decodeURIComponent(adminBase().username);
-    const write = spawnSync('docker', ['exec', '-i', container, 'sh', '-c', 'umask 077; cat > /tmp/owl-owner-pw'], { input: OWNER_PASSWORD, encoding: 'utf8' });
-    if (write.status !== 0) throw new Error('could not write the password file in the container');
-    const r = spawnSync('docker', ['exec', '-i', container, 'psql', '-X', '-q', '-U', su, '-d', db, '-v', 'owner_password_file=/tmp/owl-owner-pw', '-f', '-'], {
-      input: sql,
-      encoding: 'utf8',
-    });
-    spawnSync('docker', ['exec', container, 'rm', '-f', '/tmp/owl-owner-pw']);
-    if (r.status !== 0) throw new Error(`the provider-admin psql script failed: ${sanitise(`${r.stdout}${r.stderr}`).slice(0, 400)}`);
+  if (container && opts.psql !== false) {
+    const r = runProviderPsql(container, db, sql);
+    if (r.status !== 0) throw new Error(`the provider-admin psql script failed: ${r.out.slice(0, 400)}`);
     return;
   }
   const statements = sql
@@ -788,7 +796,29 @@ async function transitionScenario(): Promise<void> {
 
 async function unsupportedScenario(major: number): Promise<void> {
   const db = `owl_unsup_${RUN}`;
-  await providerAdminStep(db);
+  await createEmptyDatabase(db);
+  // PR #227 (security review L2): the provider-admin psql scripts refuse this major themselves and create nothing.
+  const container = process.env.OWNER_LOGIN_CHECK_CONTAINER?.trim();
+  if (!container && process.env.CI) check(false, 'OWNER_LOGIN_CHECK_CONTAINER is required in CI (the psql scripts run for real)');
+  if (container) {
+    for (const [name, sql] of [
+      ['01-crewflow-owner.sql', OWNER_SQL],
+      ['transition-from-separated.sql', TRANSITION_SQL],
+    ] as const) {
+      const r = runProviderPsql(container, db, sql);
+      const noOwner = !(await ownerRoleExists());
+      check(
+        r.status !== null && r.status !== 0 && r.out.includes(`PostgreSQL ${major} is not supported; use 16-18`) && noOwner,
+        `PostgreSQL ${major}: ${name} refuses under psql (exit ${r.status}) with the supported range; no crewflow_owner role`,
+        [r.out, `crewflow_owner exists: ${!noOwner}`],
+      );
+    }
+  } else {
+    log(`  NOT TESTED: the psql scripts on PostgreSQL ${major} (OWNER_LOGIN_CHECK_CONTAINER unset)`);
+  }
+  // The migrate child refuses this major too: crewflow_owner is made from the script's two statements alone (the psql
+  // guard bypassed on purpose, as a provider admin who ignored the refusal would).
+  await runAdminSql(db, OWNER_SQL, db, { psql: false });
   const r = await inProcess(db);
   const [untouched] = await rows(db, `SELECT NOT EXISTS (SELECT 1 FROM pg_namespace WHERE nspname = 'core') AS ok`);
   check(r.outcome === 'config' && untouched.ok === true, `PostgreSQL ${major}: refused before any change (exit 64), nothing created`, [r.reason]);

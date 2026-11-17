@@ -8884,6 +8884,21 @@ Reversal:   Lower CLOCK_IN_CONFIRM_FLOOR_HOURS, or require a second approver (pa
   (`assertSupportedPostgresMajor`) and boot gate 2. After the gates pass, `runDatabaseBootGates` selects the server's
   fingerprints for the process; `provisionWorkspaceSchema`, the Worker drift cycle and the two workspace CLIs also select on
   their own session first. A second, different major in one process is refused (never a silent switch).
+- **Security review of PR #227 (APPROVE, fixes applied):**
+  - L1: the legacy migrate path (separated layout, `setup-db.ts`, not the owner login) used to warn and migrate on an
+    unsupported major. `selectFingerprintsForRun` now refuses outside 16-18 on both paths before any migration; only the
+    fingerprint-completeness check stays owner-login only.
+  - L2: the provider-admin psql scripts (`01-crewflow-owner.sql`, `transition-from-separated.sql`) refuse any major outside
+    16-18 before `CREATE ROLE` (`\gset` / `\if`, then `1 / 0` under ON_ERROR_STOP): nothing is created. The harnesses that
+    replay only the scripts' `CREATE ROLE` / `GRANT` lines are unaffected, and no golden or fingerprint changes. The CI job
+    `owner-login (15, unsupported)` runs both scripts under psql on PostgreSQL 15: non-zero exit, no crewflow_owner.
+  - I3: `resetWorkspaceFingerprintSelectionForTests` throws outside NODE_ENV=test.
+  - I4: a major mismatch in the Worker's drift or provisioning loop logs one explicit `ALERT …` error line and still fails the
+    cycle (counted in workspaceSchemaDriftFailures / workspaceProvisioningFailures, shown on the admin queues page).
+  - L3: ci-twenty-tests runs the provisioning, payroll-evidence and invite-cleanup integration specs on 16, 17 and 18.
+  - Follow-ups, not in this PR: I2, an unselected read of EXPECTED_WORKSPACE_FINGERPRINTS should throw outside tests instead of
+    defaulting to PostgreSQL 16 (today every entrypoint selects; the default is a remaining fail-closed fallback); the
+    `core.worker_delete_expired_invited_user` `restrict_violation` handler (new migration, owner SQL review).
 - **Not supported, and why:** PostgreSQL 15 and earlier. The owner-login bootstrap grants `WITH INHERIT …, SET …`, merged
   migrations call `pg_has_role(…, 'SET')` and refuse below 16 themselves, the boot gate reads `pg_auth_members.set_option`,
   and on 15 a CREATEROLE login can grant `pg_execute_server_program` (M0 F-E1). Merged migrations are never edited.

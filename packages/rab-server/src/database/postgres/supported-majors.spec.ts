@@ -1,8 +1,12 @@
+import { readFileSync } from 'fs';
+import { join } from 'path';
+
 import { SEMANTIC_GOLDEN_BY_MAJOR } from '../posture-drift/semantic-golden';
 import { readSecurityPostureGoldens, selectSecurityPostureGolden } from '../typeorm/core/security-posture';
 import {
   assertSupportedPostgresMajor,
   missingFingerprintVersions,
+  resetWorkspaceFingerprintSelectionForTests,
   SUPPORTED_FINGERPRINT_MAJORS,
   UnsupportedPostgresVersionError,
 } from '../typeorm/workspace-schema/v1/expected-fingerprints';
@@ -45,5 +49,30 @@ describe('supported PostgreSQL majors: one list, every reviewed artefact present
     expect(postgresMajorFromVersionNum(180001)).toBe(18);
     expect(postgresMajorFromVersionNum(190000)).toBe(19);
     for (const bad of [Number.NaN, '', null, undefined, '16.4', 90624, 1.5e6 + 0.5]) expect(postgresMajorFromVersionNum(bad)).toBeNull();
+  });
+
+  it('I3: the selection reset is a test seam, refused outside NODE_ENV=test', () => {
+    const before = process.env.NODE_ENV;
+    try {
+      for (const env of ['production', 'development', '']) {
+        process.env.NODE_ENV = env;
+        expect(() => resetWorkspaceFingerprintSelectionForTests()).toThrow(/test seam: only NODE_ENV=test/);
+      }
+    } finally {
+      process.env.NODE_ENV = before;
+    }
+    expect(() => resetWorkspaceFingerprintSelectionForTests()).not.toThrow();
+  });
+
+  it('L2: both provider-admin psql scripts refuse outside the same range, before CREATE ROLE', () => {
+    const dir = join(__dirname, '..', '..', '..', '..', 'rab-docker', 'postgres-init', 'owner-login');
+    for (const file of ['01-crewflow-owner.sql', 'transition-from-separated.sql']) {
+      const sql = readFileSync(join(dir, file), 'utf8');
+      const guard = sql.indexOf(`/ 10000 BETWEEN ${SUPPORTED_POSTGRES_MAJORS[0]} AND ${SUPPORTED_POSTGRES_MAJORS[SUPPORTED_POSTGRES_MAJORS.length - 1]} AS crewflow_pg_supported \\gset`);
+      expect([file, guard > 0]).toEqual([file, true]);
+      expect(sql.indexOf('SELECT 1 / 0 AS refused_unsupported_postgresql_version')).toBeGreaterThan(guard);
+      expect(sql.indexOf('CREATE ROLE crewflow_owner')).toBeGreaterThan(sql.indexOf('refused_unsupported_postgresql_version'));
+      expect(sql).toContain(`is not supported; use ${SUPPORTED_POSTGRES_RANGE} (PostgreSQL 16, 17 or 18). Nothing was created.`);
+    }
   });
 });

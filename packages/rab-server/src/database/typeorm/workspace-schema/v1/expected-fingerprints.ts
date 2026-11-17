@@ -162,8 +162,15 @@ export async function selectWorkspaceFingerprintsForServer(
   return selectWorkspaceFingerprintMajor(postgresMajorOf(String(row?.num ?? '')));
 }
 
-/** Test seam only: forget the selection (unit specs that exercise both majors in one process). */
+/**
+ * Test seam only: forget the selection (unit specs that exercise both majors in one process). Refused outside NODE_ENV=test
+ * (security review I3, PR #227): a production process must never drop the major the boot gates selected, which would fall
+ * back to the PostgreSQL 16 table.
+ */
 export function resetWorkspaceFingerprintSelectionForTests(): void {
+  if (process.env.NODE_ENV !== 'test') {
+    throw new UnsupportedPostgresVersionError('resetWorkspaceFingerprintSelectionForTests is a test seam: only NODE_ENV=test.');
+  }
   selected = null;
 }
 
