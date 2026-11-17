@@ -5,29 +5,43 @@ const base = { REDIS_URL: 'redis://localhost:6379', APP_SECRET: 'a'.repeat(32) }
 const PG = 'postgres://crewflow_app:pg-secret@localhost:5432/rab';
 
 describe('env validation: database configuration (Phase B)', () => {
-  it('accepts PG_DATABASE_URL alone, and the legacy DATABASE_URL alone outside production', () => {
+  it('accepts PG_DATABASE_URL alone', () => {
     expect(() => validate({ ...base, PG_DATABASE_URL: PG })).not.toThrow();
-    expect(() => validate({ ...base, DATABASE_URL: PG })).not.toThrow();
   });
 
-  it('refuses a missing database URL, naming both variables', () => {
-    expect(() => validate(base)).toThrow(/PG_DATABASE_URL is required.*DATABASE_URL/);
-  });
-
-  it('refuses PG_DATABASE_URL and DATABASE_URL naming different targets, without echoing either', () => {
-    try {
-      validate({ ...base, PG_DATABASE_URL: PG, DATABASE_URL: 'postgres://crewflow_app:other-secret@localhost:5432/other' });
-      throw new Error('expected a refusal');
-    } catch (error) {
-      const message = (error as Error).message;
-      expect(message).toMatch(/name different targets/);
-      expect(message).not.toMatch(/pg-secret|other-secret|crewflow_app/);
+  it('X3.5-S8: refuses the legacy DATABASE_URL alone outside production, naming the replacement and never the value', () => {
+    for (const NODE_ENV of ['development', 'test', undefined]) {
+      try {
+        validate({ ...base, NODE_ENV, DATABASE_URL: PG });
+        throw new Error('expected a refusal');
+      } catch (error) {
+        const message = (error as Error).message;
+        expect(message).toMatch(/refuses the legacy database variable\(s\) DATABASE_URL: .*DATABASE_URL -> use PG_DATABASE_URL/);
+        expect(message).not.toMatch(/pg-secret|crewflow_app/);
+      }
     }
   });
 
-  it('refuses a non-numeric or out-of-range pool size instead of falling back (the old DB_POOL_MAX bug)', () => {
+  it('refuses a missing database URL', () => {
+    expect(() => validate(base)).toThrow(/PG_DATABASE_URL is required/);
+  });
+
+  it('X3.5-S8: refuses DATABASE_URL next to PG_DATABASE_URL even when both name the same target, without echoing either', () => {
+    for (const legacy of [PG, 'postgres://crewflow_app:other-secret@localhost:5432/other']) {
+      try {
+        validate({ ...base, PG_DATABASE_URL: PG, DATABASE_URL: legacy });
+        throw new Error('expected a refusal');
+      } catch (error) {
+        const message = (error as Error).message;
+        expect(message).toMatch(/refuses the legacy database variable\(s\) DATABASE_URL/);
+        expect(message).not.toMatch(/pg-secret|other-secret|crewflow_app/);
+      }
+    }
+  });
+
+  it('refuses a non-numeric or out-of-range pool size instead of falling back; the legacy DB_POOL_MAX is refused outright', () => {
     expect(() => validate({ ...base, PG_DATABASE_URL: PG, PG_POOL_MAX_CONNECTIONS: 'abc' })).toThrow(/PG_POOL_MAX_CONNECTIONS/);
-    expect(() => validate({ ...base, DATABASE_URL: PG, DB_POOL_MAX: '2.5' })).toThrow(/DB_POOL_MAX must be a whole number/);
+    expect(() => validate({ ...base, PG_DATABASE_URL: PG, DB_POOL_MAX: '5' })).toThrow(/DB_POOL_MAX -> use PG_POOL_MAX_CONNECTIONS/);
     expect(() => validate({ ...base, PG_DATABASE_URL: PG, PG_POOL_MAX_CONNECTIONS: '0' })).toThrow(/between 1 and 100/);
   });
 

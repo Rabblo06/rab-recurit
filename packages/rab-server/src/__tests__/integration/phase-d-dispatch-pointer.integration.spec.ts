@@ -167,7 +167,7 @@ describeIfApproved('Phase D dispatch pointer (integration; needs the approved Ph
     const appUrl = process.env.TEST_DATABASE_URL!;
     const adminUrl = integrationTestDatabase().adminUrl;
     // Same database as the application and admin URLs (never another one).
-    const target = describeDatabaseUrl(adminUrl, 'TEST_DATABASE_URL_UNPOOLED');
+    const target = describeDatabaseUrl(adminUrl, 'TEST_DATABASE_ADMIN_URL');
     const w = describeDatabaseUrl(WORKER_URL!, 'TEST_DATABASE_WORKER_URL');
     if (w.database !== target.database || w.host !== target.host || w.port !== target.port) throw new Error('TEST_DATABASE_WORKER_URL names another database. Refusing.');
     admin = await connect(adminUrl);

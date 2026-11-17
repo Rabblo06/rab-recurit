@@ -54,12 +54,12 @@ export function matchUnmarkedProductionEndpoint(endpoint: PgEndpoint): UnmarkedP
 }
 
 /**
- * Every endpoint the process could connect to (primary, session-lock, elevated, replica) checked against the deny list.
+ * Every endpoint the process could connect to (primary, session-lock, replica) checked against the deny list.
  * Returns a refusal message naming the variable, the endpoint key and the database only — never a URL or credential —
  * without the trailing "Refusing" (the caller adds its own), or null when none matches.
  */
 export function unmarkedProductionRefusal(pg: ResolvedPgEnvironment, processLabel: string): string | null {
-  const endpoints = [pg.primary, pg.lock, pg.elevated, pg.replica].filter((e): e is PgEndpoint => e !== null);
+  const endpoints = [pg.primary, pg.lock, pg.replica].filter((e): e is PgEndpoint => e !== null);
   for (const endpoint of endpoints) {
     const hit = matchUnmarkedProductionEndpoint(endpoint);
     if (hit) {

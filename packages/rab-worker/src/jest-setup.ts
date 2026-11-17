@@ -9,9 +9,9 @@ import 'reflect-metadata';
 process.env.RAB_DISABLE_RATE_LIMIT = 'true';
 
 // Test database routing: NODE_ENV must be test (any other value under Jest is refused, X1.2), TEST_DATABASE_URL and
-// TEST_DATABASE_ADMIN_URL (or its deprecated name TEST_DATABASE_URL_UNPOOLED, X3.5-S7) are required and validated, an inherited database URL that would redirect a connection is
-// refused, and PG_DATABASE_URL is pointed at the validated application URL (X3.5-S6: the legacy DATABASE_URL names are
-// blanked). The developer's .env is never a fallback. See rab-server's
+// TEST_DATABASE_ADMIN_URL are required and validated (X3.5-S8: the old name TEST_DATABASE_URL_UNPOOLED and the legacy
+// database names are refused), an inherited database URL that would redirect a connection is refused, and PG_DATABASE_URL
+// is pointed at the validated application URL (the legacy names are blanked). The developer's .env is never a fallback. See rab-server's
 // test-database-guard.ts (shared via the compiled @rab/server package).
 import { applyIntegrationTestDatabaseEnv } from '@rab/server/database/typeorm/core/test-database-guard';
 

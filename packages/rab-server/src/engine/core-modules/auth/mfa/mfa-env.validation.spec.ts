@@ -1,7 +1,7 @@
 import { validate } from '../../environment/env.validation';
 
 const validEnv = {
-  DATABASE_URL: 'postgres://rab:rab@localhost:5432/rab',
+  PG_DATABASE_URL: 'postgres://rab:rab@localhost:5432/rab',
   REDIS_URL: 'redis://localhost:6379',
   APP_SECRET: 'a'.repeat(32),
 };

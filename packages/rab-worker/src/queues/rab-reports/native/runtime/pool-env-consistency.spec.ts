@@ -8,7 +8,7 @@ import { pdfNativeConcurrency, pdfNativeMemoryPlan, pdfNativePrewarm } from './r
  * an empty value (`KEY=` in a .env file) as unset for every variable, so the parsers must too, or a Worker that booted
  * cleanly would fail its first native render. For every non-empty value both stay strict (fail closed).
  */
-const base = { DATABASE_URL: 'postgres://rab:rab@localhost:5432/rab', REDIS_URL: 'redis://localhost:6379', APP_SECRET: 'a'.repeat(32) };
+const base = { PG_DATABASE_URL: 'postgres://rab:rab@localhost:5432/rab', REDIS_URL: 'redis://localhost:6379', APP_SECRET: 'a'.repeat(32) };
 
 const accepts = (fn: () => unknown): boolean => {
   try {

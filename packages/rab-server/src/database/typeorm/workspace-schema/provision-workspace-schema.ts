@@ -13,7 +13,7 @@ import { codeWorkspaceStructureLevel, declaredFingerprint, structuralCommandsThr
 /**
  * Reusable provisioner for a physical workspace schema (Hyper Workspace, Workspace Schema Version 1).
  *
- * Runs as `crewflow` (the privileged provisioner credential, `DATABASE_URL_UNPOOLED`) only. Never
+ * Runs as `crewflow` (the owner login's SET ROLE crewflow provisioning session) only. Never
  * reachable from a request path, and never callable by the ordinary runtime role (`crewflow_app`).
  *
  * Lifecycle, fail closed:

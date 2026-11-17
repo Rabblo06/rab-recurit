@@ -1,7 +1,7 @@
 import { validate } from './env.validation';
 
 const validEnv = {
-  DATABASE_URL: 'postgres://rab:rab@localhost:5432/rab',
+  PG_DATABASE_URL: 'postgres://rab:rab@localhost:5432/rab',
   REDIS_URL: 'redis://localhost:6379',
   APP_SECRET: 'a'.repeat(32),
 };
@@ -21,9 +21,8 @@ const productionEnv = {
   TRUSTED_PROXY_CIDRS: '10.0.12.7/32',
   // Wave 2 lane A2: production refuses a weak APP_SECRET (the base fixture's 'a'.repeat(32) has one distinct character).
   APP_SECRET: 'Zk3q8LmW1xT0vB7nR5cY2pH9dF4sJ6gA',
-  // Phase B (B1): production takes PG_DATABASE_URL only and refuses the legacy DATABASE_URL.
+  // Phase B (B1): production takes PG_DATABASE_URL only (every environment refuses the legacy DATABASE_URL, X3.5-S8).
   PG_DATABASE_URL: 'postgres://rab:rab@db.example.com:5432/rab?sslmode=verify-full',
-  DATABASE_URL: undefined,
 };
 
 describe('validate', () => {
@@ -53,9 +52,9 @@ describe('validate', () => {
     expect(() => validate({ ...validEnv, APP_SECRET: 'too-short' })).toThrow(/APP_SECRET/);
   });
 
-  it('refuses to boot without DATABASE_URL', () => {
-    const { DATABASE_URL, ...rest } = validEnv;
-    expect(() => validate(rest)).toThrow(/DATABASE_URL/);
+  it('refuses to boot without PG_DATABASE_URL', () => {
+    const { PG_DATABASE_URL, ...rest } = validEnv;
+    expect(() => validate(rest)).toThrow(/PG_DATABASE_URL/);
   });
 
   it('refuses to boot without REDIS_URL', () => {
@@ -73,8 +72,8 @@ describe('validate', () => {
     expect(result.CORS_ORIGINS).toBe('http://localhost:5173');
   });
 
-  it('still refuses a required field left empty ("DATABASE_URL=")', () => {
-    expect(() => validate({ ...validEnv, DATABASE_URL: '' })).toThrow(/DATABASE_URL/);
+  it('still refuses a required field left empty ("PG_DATABASE_URL=")', () => {
+    expect(() => validate({ ...validEnv, PG_DATABASE_URL: '' })).toThrow(/PG_DATABASE_URL/);
   });
 
   it('APP_URL and ACCOUNTS_URL both default to the local dev server but are independently configurable', () => {

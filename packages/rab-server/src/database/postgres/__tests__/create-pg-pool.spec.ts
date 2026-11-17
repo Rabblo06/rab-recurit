@@ -135,11 +135,13 @@ describe('create-pg-pool: explicit target, TLS and session settings as pg sees t
     expect(() => pgClientConfig(r, { purpose: 'runtime' })).not.toThrow();
   });
 
-  it('the elevated endpoint is refused when it is not configured (always in production)', () => {
+  it('X3.5-S8: there is no elevated endpoint; the lock endpoint is the primary target (with session affinity)', () => {
     const r = resolvePgEnvironment({ PG_DATABASE_URL: LOCAL }, { processRole: 'cli' });
-    expect(() => pgClientConfig(r, { endpoint: 'elevated', purpose: 'backfill' })).toThrow(/set DATABASE_URL_UNPOOLED/);
-    const p = resolvePgEnvironment({ NODE_ENV: 'production', PG_DATABASE_URL: DO }, { processRole: 'cli' });
-    expect(() => pgClientConfig(p, { endpoint: 'elevated', purpose: 'backfill' })).toThrow(/production does not configure/);
+    expect('elevated' in r).toBe(false);
+    expect(r.lock).toBe(r.primary);
+    const lock = pgClientConfig(r, { endpoint: 'lock', purpose: 'storage-lock' });
+    const primary = pgClientConfig(r, { purpose: 'backfill' });
+    expect([lock.host, lock.port, lock.database, lock.user]).toEqual([primary.host, primary.port, primary.database, primary.user]);
   });
 
   it('pools always carry an explicit max (PG_POOL_MAX_CONNECTIONS or the caller\'s), idle timeout and exit-on-idle', () => {

@@ -12,18 +12,14 @@ import {
   resolveForJestGlobalSetup,
   routedTestDatabaseLegacyNames,
   TestDatabaseConfigError,
-  testDatabaseAdminNameNotice,
 } from './database/typeorm/core/test-database-guard';
 
 export default async function globalSetup(): Promise<void> {
   // X1.2: NODE_ENV=test, the TEST pair, and no inherited database URL / libpq variable that would redirect a connection.
+  // X3.5-S8: a legacy connection name or the old admin name TEST_DATABASE_URL_UNPOOLED (inherited or in .env) is refused here.
   const resolved = resolveForJestGlobalSetup(process.env);
-  // X3.5-S7: one name-only line when the admin URL came from the deprecated TEST_DATABASE_URL_UNPOOLED.
-  const notice = testDatabaseAdminNameNotice(resolved);
-  // eslint-disable-next-line no-console
-  if (notice) console.warn(notice);
-  // X3.5-S6 (DBR-08): setupFiles route every test file through PG_DATABASE_URL only. pg-config now prints its deprecation
-  // warnings under NODE_ENV=test too, so the routing itself must leave no legacy name behind (names only, never values).
+  // X3.5-S6 (DBR-08): setupFiles route every test file through PG_DATABASE_URL only; the routing itself must leave no legacy
+  // name behind (a regression guard on the routing; names only, never values).
   const legacy = routedTestDatabaseLegacyNames(process.env);
   if (legacy.length > 0) {
     throw new TestDatabaseConfigError(`the routed test environment still holds the legacy name(s) ${legacy.join(', ')}; it must use PG_DATABASE_URL only. Refusing to start.`);

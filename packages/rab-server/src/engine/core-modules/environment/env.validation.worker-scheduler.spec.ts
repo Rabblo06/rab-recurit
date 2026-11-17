@@ -4,7 +4,7 @@ import { validate } from './env.validation';
  * Lane A (BullMQ worker migration) flags: fail closed on a bad mode or prefix; interval is the default; the legacy
  * `bull` prefix can never be chosen for the scan queues (it holds rab-email/rab-push/rab-shift-statements).
  */
-const base = { DATABASE_URL: 'postgres://rab:rab@localhost:5432/rab', REDIS_URL: 'redis://localhost:6379', APP_SECRET: 'a'.repeat(32) };
+const base = { PG_DATABASE_URL: 'postgres://rab:rab@localhost:5432/rab', REDIS_URL: 'redis://localhost:6379', APP_SECRET: 'a'.repeat(32) };
 
 describe('worker scheduler environment variables', () => {
   it('defaults: interval mode, no explicit prefix (derived at runtime), 60 s reconcile', () => {

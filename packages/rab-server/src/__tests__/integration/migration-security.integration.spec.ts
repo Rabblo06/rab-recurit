@@ -44,7 +44,7 @@ describeIfDb('M2: catalog drift check catches unsafe migrations and passes safe 
     ds = createSlowCatalogAdminDataSource();
     await ds.initialize();
     const [me] = await ds.query('SELECT rolsuper FROM pg_roles WHERE rolname = current_user');
-    if (!me?.rolsuper) throw new Error('this suite needs the disposable database bootstrap superuser as TEST_DATABASE_URL_UNPOOLED');
+    if (!me?.rolsuper) throw new Error('this suite needs the disposable database bootstrap superuser as TEST_DATABASE_ADMIN_URL');
     const [core] = await ds.query(`SELECT pg_get_userbyid(nspowner) AS owner FROM pg_namespace WHERE nspname = 'core'`);
     if (core?.owner !== 'rab_secure_owner') throw new Error('this suite needs a database with Phase 0b applied');
   });

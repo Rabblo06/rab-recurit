@@ -115,7 +115,7 @@ describeIfDb('F3: payroll evidence is never deleted by cascade (core + workspace
     admin = new Client({ connectionString: adminUrl });
     await admin.connect();
     const [{ rolsuper }] = (await admin.query(`SELECT rolsuper FROM pg_roles WHERE rolname = current_user`)).rows;
-    if (!rolsuper) throw new Error('this suite needs the disposable database bootstrap superuser as TEST_DATABASE_URL_UNPOOLED');
+    if (!rolsuper) throw new Error('this suite needs the disposable database bootstrap superuser as TEST_DATABASE_ADMIN_URL');
 
     // Server path: core.provision_workspace as crewflow_app with the server-bound GUCs.
     ws = await seedWorkspace('srv');

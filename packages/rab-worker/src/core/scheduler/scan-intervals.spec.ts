@@ -9,7 +9,7 @@ import { isScanJobEnabled, resolveIntervalMs, SCAN_JOBS, ScanJobDefinition } fro
  * The defaults-unchanged proof against the hand-transcribed pre-migration table lives in scan-jobs.spec.ts; this file
  * covers the new surface: the key↔scan mapping, bounds (fail closed), the predicate and exactly-once registration.
  */
-const base = { DATABASE_URL: 'postgres://rab:rab@localhost:5432/rab', REDIS_URL: 'redis://localhost:6379', APP_SECRET: 'a'.repeat(32) };
+const base = { PG_DATABASE_URL: 'postgres://rab:rab@localhost:5432/rab', REDIS_URL: 'redis://localhost:6379', APP_SECRET: 'a'.repeat(32) };
 const envOf = (overrides: Record<string, string> = {}) => {
   const validated = validate({ ...base, ...overrides }) as unknown as Record<string, unknown>;
   return { get: (k: string) => validated[k] as never };

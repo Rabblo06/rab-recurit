@@ -5,7 +5,7 @@ import { validate } from './env.validation';
  * strings 'true' / 'false' are accepted, so a mistyped value refuses to boot instead of silently leaving the sweep off
  * while the operator believes it is on.
  */
-const base = { DATABASE_URL: 'postgres://rab:rab@localhost:5432/rab', REDIS_URL: 'redis://localhost:6379', APP_SECRET: 'a'.repeat(32) };
+const base = { PG_DATABASE_URL: 'postgres://rab:rab@localhost:5432/rab', REDIS_URL: 'redis://localhost:6379', APP_SECRET: 'a'.repeat(32) };
 
 describe('Phase D-Q2 AI stale-turn sweep environment variables', () => {
   it('unset (or `KEY=`, which env.validation treats as unset for every key): the sweep is off, threshold 15 min, interval 5 min', () => {

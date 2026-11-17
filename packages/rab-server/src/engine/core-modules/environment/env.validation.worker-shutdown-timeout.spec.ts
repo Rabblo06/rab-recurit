@@ -5,7 +5,7 @@ import { validate } from './env.validation';
  * shutdown and nothing validated it: garbage became NaN (the hard-exit timer fired at once, no drain) and a value above
  * 35 000 outlived the 45 s stop_grace_period (SIGKILL mid-drain). Now both processes refuse to boot on either.
  */
-const base = { DATABASE_URL: 'postgres://rab:rab@localhost:5432/rab', REDIS_URL: 'redis://localhost:6379', APP_SECRET: 'a'.repeat(32) };
+const base = { PG_DATABASE_URL: 'postgres://rab:rab@localhost:5432/rab', REDIS_URL: 'redis://localhost:6379', APP_SECRET: 'a'.repeat(32) };
 
 describe('env validation: WORKER_SHUTDOWN_TIMEOUT_MS (XR-10)', () => {
   it('unset or empty keeps booting (the Worker applies the unchanged 30 000 ms default)', () => {

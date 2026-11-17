@@ -46,10 +46,9 @@ export const ENVIRONMENT_ALLOWLIST: readonly EnvEntry[] = [
   { group: 'Secrets', key: 'APP_JWT_ACTIVE_KID', kind: 'value' },
   { group: 'Secrets', key: 'APP_AUTH_CACHE_HMAC_KEY', kind: 'secret' },
   { group: 'Secrets', key: 'SENTRY_DSN', kind: 'secret' },
-  // Phase B (B1): PG_DATABASE_URL is the primary variable; DATABASE_URL stays listed (deprecated, non-production) so an
-  // operator can see that a legacy value is still set. The CA path is shown as Set / Not set only (a file location).
+  // Phase B (B1): PG_DATABASE_URL is the one database variable (X3.5-S8: the legacy DATABASE_URL is refused at boot in
+  // every environment, so it is no longer listed). The CA path is shown as Set / Not set only (a file location).
   { group: 'Database', key: 'PG_DATABASE_URL', kind: 'secret' },
-  { group: 'Database', key: 'DATABASE_URL', kind: 'secret' },
   { group: 'Database', key: 'PG_POOL_MAX_CONNECTIONS', kind: 'value' },
   { group: 'Database', key: 'PG_POOL_IDLE_TIMEOUT_MS', kind: 'value' },
   { group: 'Database', key: 'PG_POOL_ALLOW_EXIT_ON_IDLE', kind: 'value' },

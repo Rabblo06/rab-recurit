@@ -7,7 +7,7 @@ import { WORKER_INVITE_AUTO_DELETE_PRODUCTION_APPROVED, productionConfigurationP
  * of the retention policy; until that approval is recorded in code, a production deployment with the flag on refuses to
  * boot. Test/development may switch it on for disposable tests. Strict boolean: a typo never becomes true.
  */
-const base = { DATABASE_URL: 'postgres://rab:rab@localhost:5432/rab', REDIS_URL: 'redis://localhost:6379', APP_SECRET: 'a'.repeat(32) };
+const base = { PG_DATABASE_URL: 'postgres://rab:rab@localhost:5432/rab', REDIS_URL: 'redis://localhost:6379', APP_SECRET: 'a'.repeat(32) };
 
 const SECURE_PRODUCTION: Partial<EnvironmentVariables> = {
   NODE_ENV: 'production',

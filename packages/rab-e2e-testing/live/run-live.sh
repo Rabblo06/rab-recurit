@@ -6,8 +6,8 @@
 # Needs in the environment (CI: .github/actions/disposable-postgres + the M2 harness fresh install +
 # migration-security-test-env.cjs; locally: the same harness on crewflow-test-db 127.0.0.1:15436):
 #   TEST_DATABASE_URL           crewflow_app (restricted runtime role, NOBYPASSRLS) — the ONLY URL the API processes get
-#   TEST_DATABASE_ADMIN_URL     the disposable cluster's bootstrap superuser — the seed's fixture connection only (X3.5-S7:
-#                               its deprecated name TEST_DATABASE_URL_UNPOOLED is still accepted; two different values are refused)
+#   TEST_DATABASE_ADMIN_URL     the disposable cluster's bootstrap superuser — the seed's fixture connection only (X3.5-S8:
+#                               the old name TEST_DATABASE_URL_UNPOOLED is refused)
 #   REDIS_URL                   a disposable Redis (CI: a service container; locally crewflow-test-redis 127.0.0.1:16391)
 #   APP_SECRET                  random per run
 #   E2E_DB_CONTAINER / E2E_DB_USER / E2E_DB_NAME  where devices-sessions-live reads session counts (docker exec psql, read-only)
@@ -33,13 +33,9 @@ ROOT="$(cd "$E2E_DIR/../.." && pwd)"
 win() { if command -v cygpath > /dev/null 2>&1; then cygpath -m "$1"; else printf '%s' "$1"; fi; }
 
 : "${E2E_LIVE_WORK:?set E2E_LIVE_WORK to a scratch directory (logs, seeded identities)}"
-# X3.5-S7 release 1: the admin URL comes from TEST_DATABASE_ADMIN_URL or its deprecated name TEST_DATABASE_URL_UNPOOLED, never two values.
-if [ -n "${TEST_DATABASE_ADMIN_URL:-}" ] && [ -n "${TEST_DATABASE_URL_UNPOOLED:-}" ] && [ "$TEST_DATABASE_ADMIN_URL" != "$TEST_DATABASE_URL_UNPOOLED" ]; then
-  echo "[e2e-live] refusing: TEST_DATABASE_ADMIN_URL and its deprecated name TEST_DATABASE_URL_UNPOOLED are set to different values"; exit 2
-fi
-if [ -z "${TEST_DATABASE_ADMIN_URL:-}" ] && [ -n "${TEST_DATABASE_URL_UNPOOLED:-}" ]; then
-  echo "[e2e-live] TEST_DATABASE_URL_UNPOOLED is deprecated: rename it to TEST_DATABASE_ADMIN_URL (same value)"
-  export TEST_DATABASE_ADMIN_URL="$TEST_DATABASE_URL_UNPOOLED"
+# X3.5-S8 (release 2): the admin URL comes from TEST_DATABASE_ADMIN_URL only; the old name is refused, never mapped.
+if [ -n "${TEST_DATABASE_URL_UNPOOLED:-}" ]; then  # the old name of TEST_DATABASE_ADMIN_URL
+  echo "[e2e-live] refusing: TEST_DATABASE_URL_UNPOOLED was renamed to TEST_DATABASE_ADMIN_URL (X3.5-S8); rename it (same value)"; exit 2
 fi
 for v in TEST_DATABASE_URL TEST_DATABASE_ADMIN_URL REDIS_URL APP_SECRET; do
   [ -n "${!v:-}" ] || { echo "[e2e-live] $v is required"; exit 2; }

@@ -20,9 +20,9 @@ export type AdvisoryLockResult<T> = { acquired: true; value: T } | { acquired: f
  *    dies, so a killed worker can never leave a report stuck behind a stale
  *    lease (no lease table, no TTL to tune, no migration);
  *  - requires a DIRECT connection: callers pass the jobs process's
- *    `directDataSource` (restricted crewflow_app, DATABASE_DIRECT_URL falling
- *    back to DATABASE_URL — never DATABASE_URL_UNPOOLED, which the jobs process
- *    refuses to hold). Behind a transaction-mode pooler session locks would not
+ *    `directDataSource` (the factory's lock endpoint: PG_DATABASE_URL, the
+ *    one owner login; the legacy DATABASE_DIRECT_URL / DATABASE_URL /
+ *    DATABASE_URL_UNPOOLED are refused, X3.5-S8). Behind a transaction-mode pooler session locks would not
  *    hold, so this must never be pointed at a pooled URL. (The BullMQ per-scan
  *    lock is separate: its own dedicated connection and key namespace, see
  *    scan-lock.ts.)

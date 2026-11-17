@@ -121,7 +121,7 @@ describeIfDb('workspace membership abuse cases (integration)', () => {
    * Runs a read/write as the ORDINARY RUNTIME role (`appDs` = crewflow, the same DataSource the real
    * application uses — never the `owner`/superuser bootstrap connection `asOwner`/`asOwnerIn` use for
    * fixture setup). Required to exercise `workspace_membership`'s own FORCE RLS policy directly: `owner`
-   * connects via the Postgres bootstrap SUPERUSER (`TEST_DATABASE_URL_UNPOOLED`), and a superuser bypasses
+   * connects via the Postgres bootstrap SUPERUSER (`TEST_DATABASE_ADMIN_URL`), and a superuser bypasses
    * every row security policy unconditionally, FORCE or not — testing an INSERT/UPDATE policy through that
    * connection proves nothing about whether the policy itself would reject the row.
    */

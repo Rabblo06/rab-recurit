@@ -234,19 +234,17 @@ describe('assertOpsRun (layer 2, every ops command body)', () => {
   it('X2.2: refuses the legacy second-endpoint variable DATABASE_URL_UNPOOLED in layer 2 (the environment rule)', () => {
     setPgProcessRole('cli');
     const withUnpooled = { ...OWNER_ENV, DATABASE_URL_UNPOOLED: 'postgres://postgres:pw-su-1@localhost:5432/rab' };
-    expect(() => assertOpsRun('user-session:backfill', 'apply', resolvePgEnvironment(withUnpooled, { processRole: 'cli' }), withUnpooled, FLAGS)).toThrow(
+    // Layer 2's own environment rule, with a `resolved` built from a clean environment.
+    expect(() => assertOpsRun('user-session:backfill', 'apply', resolvePgEnvironment(OWNER_ENV, { processRole: 'cli' }), withUnpooled, FLAGS)).toThrow(
       /remove the legacy database variable\(s\) DATABASE_URL_UNPOOLED/,
     );
   });
 
-  it('X2.2: refuses a resolved second endpoint even when the environment handed to layer 2 does not show it (defence in depth)', () => {
+  it('X3.5-S8: a second endpoint can no longer be resolved at all (the factory refuses DATABASE_URL_UNPOOLED in every environment)', () => {
     setPgProcessRole('cli');
     const withUnpooled = { ...OWNER_ENV, DATABASE_URL_UNPOOLED: 'postgres://postgres:pw-su-1@localhost:5432/rab' };
-    const resolved = resolvePgEnvironment(withUnpooled, { processRole: 'cli' });
-    expect(resolved.elevated).not.toBeNull();
-    expect(() => assertOpsRun('user-session:backfill', 'apply', resolved, OWNER_ENV, FLAGS)).toThrow(
-      /uses the one login only; a second database endpoint \(DATABASE_URL_UNPOOLED\) is refused/,
-    );
+    expect(() => resolvePgEnvironment(withUnpooled, { processRole: 'cli' })).toThrow(/refuses the legacy database variable\(s\) DATABASE_URL_UNPOOLED/);
+    expect(Object.keys(resolvePgEnvironment(OWNER_ENV, { processRole: 'cli' }))).not.toContain('elevated');
   });
 
   it('X2.2: accepts crewflow_owner with the label (every mode; no mode asks for a second credential)', () => {

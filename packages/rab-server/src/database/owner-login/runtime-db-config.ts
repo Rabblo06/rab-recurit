@@ -222,13 +222,14 @@ export interface RuntimeLoginCheck {
  * bootstrap child hold the ADMIN URL by design until the swap, and CLI commands validate their environment through
  * env.validation.ts. Callers: runtime-database-guard.ts resolveRuntimeDatabase (API and Worker, also run by
  * check-pending-migrations.ts) and the migrate child (twenty-migrate.ts). The superseded separate provisioner process is left
- * exactly as it was (the process itself was removed in X5.1; the role stays until the legacy names are refused, X3.5-S8).
+ * exactly as it was (the process itself was removed in X5.1; the role stays, and since X3.5-S8 it refuses the legacy names
+ * like every other process).
  *
- * An absent PG_DATABASE_URL is not this rule's business (pg-config.ts refuses it in production with its own message). A
+ * An absent PG_DATABASE_URL is not this rule's business (pg-config.ts refuses it with its own message). A
  * present but unparseable one is refused in production (fail closed) with the policy parser's value-free message.
  */
 export function checkRuntimeLogin(env: Env, processName: RuntimeLoginProcess): RuntimeLoginCheck {
-  // The factory's own reader (pg-config.ts): PG_DATABASE_URL, or outside production the deprecated DATABASE_URL; trimmed.
+  // The factory's own reader (pg-config.ts): PG_DATABASE_URL only (X3.5-S8); trimmed.
   const value = readPrimaryDatabaseUrl(env)?.value ?? '';
   if (value === '') return { warning: null };
   const production = looksLikeProduction(env);

@@ -35,6 +35,6 @@ describe('production configuration refusals (CF-40, CF-16, CF-34)', () => {
   });
 
   it('development keeps every local default (local Docker is not broken)', () => {
-    expect(() => validate({ NODE_ENV: 'development', APP_SECRET: 'x'.repeat(64), DATABASE_URL: 'postgres://u:p@localhost:5432/rab', REDIS_URL: 'redis://localhost:6379' })).not.toThrow(/for production/);
+    expect(() => validate({ NODE_ENV: 'development', APP_SECRET: 'x'.repeat(64), PG_DATABASE_URL: 'postgres://u:p@localhost:5432/rab', REDIS_URL: 'redis://localhost:6379' })).not.toThrow(/for production/);
   });
 });

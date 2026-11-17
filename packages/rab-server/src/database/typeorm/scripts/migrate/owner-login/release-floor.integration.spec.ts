@@ -16,7 +16,7 @@
  *   wrong database    the guard names another database                     67 identity (MigrationSessionDatabaseError)
  *   legacy login      the cluster superuser on an R254 database            N1 still refuses there (UnapprovedProduction…)
  *
- * GATED: TEST_DATABASE_URL must be crewflow_owner and TEST_DATABASE_URL_UNPOOLED the superuser of a loopback cluster marked
+ * GATED: TEST_DATABASE_URL must be crewflow_owner and TEST_DATABASE_ADMIN_URL the superuser of a loopback cluster marked
  * crewflow.disposable_cluster=on (ci-server's twenty-mode-check ci-db build). Databases are created per run and dropped.
  */
 import { randomBytes } from 'node:crypto';
@@ -123,7 +123,7 @@ describeIfOwnerCluster('the upgrade floor on real databases (production target s
       'postgres',
       `SELECT current_setting('crewflow.disposable_cluster', true) AS marker, (SELECT rolsuper FROM pg_roles WHERE rolname = current_user) AS superuser`,
     );
-    if (cluster?.marker !== 'on' || !cluster.superuser) throw new Error('refusing: TEST_DATABASE_URL_UNPOOLED is not the superuser of a disposable cluster');
+    if (cluster?.marker !== 'on' || !cluster.superuser) throw new Error('refusing: TEST_DATABASE_ADMIN_URL is not the superuser of a disposable cluster');
     // The R254 template: a fresh owner-login install of exactly the v0.4.0 migration set, then one tenant row (so it is an
     // EXISTING database: the fresh-install proof fails from here on, as on a real deployment).
     await createDatabase(TPL);

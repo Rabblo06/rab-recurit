@@ -1,8 +1,8 @@
 # shellcheck shell=bash
 # Sourced by run-ai-e2e.sh (and by run-ai-e2e-env.test.cjs, which runs these exact functions). Audit DBT-12 / X1.3 / X1.8.
 #
-# The env file run-ai-e2e.sh sources (`set -a`) holds the disposable cluster's test credentials: TEST_DATABASE_ADMIN_URL (or its
-# deprecated name TEST_DATABASE_URL_UNPOOLED, X3.5-S7) is its bootstrap SUPERUSER. The seed needs that admin connection (fixtures, the disposable-marker proof) and keeps it. Every
+# The env file run-ai-e2e.sh sources (`set -a`) holds the disposable cluster's test credentials: TEST_DATABASE_ADMIN_URL (its old
+# name TEST_DATABASE_URL_UNPOOLED is refused by the seed's guard since X3.5-S8, and still stripped below) is its bootstrap SUPERUSER. The seed needs that admin connection (fixtures, the disposable-marker proof) and keeps it. Every
 # long-running child (the API, the rab-ai consumer, Vite, Playwright) is started through one of the functions below, which
 # remove these names from that child's environment, so no superuser URL, role bootstrap password or command authority sits in
 # a runtime process (readable through /proc/<pid>/environ, crash dumps or anything the process spawns). The API and the

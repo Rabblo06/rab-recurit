@@ -3,7 +3,7 @@
  * Workspace Provisioner process, at boot.
  *
  * This is the third and separate boundary (see docs/security/INCIDENT-2026-10-05-TEST-DATABASE-ROUTING.md, section 17):
- *   TEST     -> test-database-guard.ts        TEST_DATABASE_URL / _UNPOOLED, NODE_ENV=test only
+ *   TEST     -> test-database-guard.ts        TEST_DATABASE_URL / TEST_DATABASE_ADMIN_URL, NODE_ENV=test only
  *   COMMAND  -> database-target.ts            DB_TARGET (+ ALLOW_PRODUCTION_DB_COMMANDS for production), CLI and migrations
  *   RUNTIME  -> this file                     RAB_RUNTIME_ENV, NODE_ENV=production, long-running API/Worker/Provisioner processes
  *
@@ -13,23 +13,23 @@
  * Phase B / B1: every process takes ONE variable, `PG_DATABASE_URL`, holding its OWN credential (API and Worker: the
  * restricted `crewflow_app`; the provisioner child: the provisioner credential the Worker bundle launcher hands it under
  * that name). Connections are resolved by the shared factory (src/database/postgres: URL policy, TLS, legacy names refused
- * in production) and the probe is a factory client opened read-only; this guard never reads a URL variable itself.
+ * in every environment since X3.5-S8) and the probe is a factory client opened read-only; this guard never reads a URL
+ * variable itself.
  *
- * Worker credential isolation checkpoint: the deprecated `DATABASE_URL_UNPOOLED` (the historical privileged name) is
- * `provisioner`-only and non-production-only. The ordinary API and Worker processes refuse to start if it is present in
- * their environment at all: a misconfigured deployment that hands the ordinary Worker (or API) that variable fails to
- * boot, rather than silently working with an unnecessarily privileged credential sitting unused in its environment.
+ * Worker credential isolation checkpoint: the historical privileged name `DATABASE_URL_UNPOOLED` is refused by every
+ * runtime process (never-in-runtime-env.ts; since X3.5-S8 the provisioner role too) and by the factory in every
+ * environment: a misconfigured deployment that hands a runtime process that variable fails to boot, rather than silently
+ * working with an unnecessarily privileged credential sitting unused in its environment.
  *
  * Rules:
  *   - NODE_ENV=production REQUIRES RAB_RUNTIME_ENV=production from the process/deployment environment. Refused otherwise.
  *   - Phase B / B3 (replaces the Neon endpoint pin): a production process must declare CREWFLOW_DEPLOYMENT_ENVIRONMENT=production
  *     and CREWFLOW_DEPLOYMENT_ID=<uuid> from the deployment environment, and the database's protected deployment identity
  *     marker (core.deployment_identity_check(), ../../deployment-identity/deployment-identity.ts) must be bound to exactly
- *     that. PG_EXPECTED_DATABASE_NAME, when set, must equal current_database(). Outside production a provisioner may still
- *     use the deprecated DATABASE_URL_UNPOOLED for its DDL connection, and a deprecated DATABASE_DIRECT_URL names the
- *     session-lock connection; both are probed. All connections must agree.
- *   - The ordinary API and Worker processes refuse to start if DATABASE_URL_UNPOOLED is present in their environment at
- *     all — a restricted process must never be ABLE to escalate, not merely choose not to.
+ *     that. PG_EXPECTED_DATABASE_NAME, when set, must equal current_database(). Every process has exactly one connection,
+ *     PG_DATABASE_URL (X3.5-S8 removed the provisioner's DATABASE_URL_UNPOOLED and the DATABASE_DIRECT_URL lock connection).
+ *   - Every runtime process refuses to start if DATABASE_URL_UNPOOLED is present in its environment at all — a restricted
+ *     process must never be ABLE to escalate, not merely choose not to.
  *   - Production values present in the working directory's .env or any dotenv file Nx loads for a rab-server / rab-worker
  *     target (final review F6: nx-dotenv-files.ts) are refused. A developer .env is never production authority.
  *   - A NON-production process (any NODE_ENV other than production) must NOT run against a database bound to production
@@ -112,18 +112,12 @@ export interface ResolvedRuntimeDb {
   runtimeEnvironment: 'production' | 'development' | 'non-production';
   /** LOCAL: a non-production runtime on a loopback or docker-service database. */
   classification: 'PRODUCTION' | 'LOCAL' | 'NON-PRODUCTION';
-  /** The process's own connection (factory endpoint 'primary': PG_DATABASE_URL, or legacy DATABASE_URL outside production). */
-  app: PgTargetIdentity;
-  /** Provisioner only, non-production only: the deprecated DATABASE_URL_UNPOOLED (factory endpoint 'elevated'). */
-  admin: PgTargetIdentity | null;
   /**
-   * P0.6-1B (FULL-ARCHITECTURE-UPGRADE-PLAN.md §8A.1 item 5): `rab-worker/src/main.ts`'s `directDataSource` (the session-lock
-   * pool) uses the factory's 'lock' endpoint: PG_DATABASE_URL itself, or outside production the deprecated
-   * DATABASE_DIRECT_URL. A lock URL pointing at a different cluster/database would run those jobs against the wrong
-   * database, so it is probed too. Non-null only when it names a different target from `app` (normally the lock endpoint
-   * IS the primary and needs no separate probe).
+   * The process's one connection (factory endpoint 'primary': PG_DATABASE_URL). P0.6-1B: `rab-worker/src/main.ts`'s
+   * `directDataSource` (the session-lock pool, factory endpoint 'lock') is the same target since X3.5-S8 removed the legacy
+   * DATABASE_DIRECT_URL, so the one probe covers it (resolveRuntimeDatabase refuses a lock endpoint that is not the primary).
    */
-  direct: PgTargetIdentity | null;
+  app: PgTargetIdentity;
   /** The factory resolution every connection of this process uses. */
   pg: ResolvedPgEnvironment;
   /** Phase B / B3: the declared deployment identity (required in production; checked live against the marker). */
@@ -145,10 +139,6 @@ function declaredOrRefuse(env: Record<string, string | undefined>, production: b
  */
 function isSet(env: Record<string, string | undefined>, name: string): boolean {
   return (env[name]?.trim() ?? '') !== '';
-}
-
-function sameEndpoint(a: PgTargetIdentity, b: PgTargetIdentity): boolean {
-  return a.database === b.database && a.endpointKey === b.endpointKey;
 }
 
 /**
@@ -210,8 +200,8 @@ function resolveRuntimeDatabaseUnchecked(input: RuntimeDbInput): ResolvedRuntime
     }
   }
 
-  // The connections exactly as this process's pools build them. The factory refuses legacy names and libpq variables in
-  // production, a URL that overrides its own target, TLS weaker than verify-full in production, and — for the worker and
+  // The connections exactly as this process's pools build them. The factory refuses legacy names in every environment and
+  // libpq variables in production, a URL that overrides its own target, TLS weaker than verify-full in production, and — for the worker and
   // the provisioner, which hold session advisory locks — a transaction-pooler URL shape.
   let pg: ResolvedPgEnvironment;
   try {
@@ -221,18 +211,10 @@ function resolveRuntimeDatabaseUnchecked(input: RuntimeDbInput): ResolvedRuntime
     throw error;
   }
   const app = describePgTarget(pg.primary.target);
-  const admin = pg.elevated ? describePgTarget(pg.elevated.target) : null;
-  if (admin && !sameEndpoint(admin, app)) {
-    throw new RuntimeDbError(
-      `${app.label} and ${admin.label} resolve to different databases or endpoints (${app.database}@${app.endpointKey} vs ${admin.database}@${admin.endpointKey}). Refusing to start.`,
-    );
-  }
-  // P0.6-1B: the session-lock endpoint is the primary unless a (deprecated) DATABASE_DIRECT_URL names another target.
-  const direct = pg.lock !== pg.primary && pg.lock.target.canonicalKey !== pg.primary.target.canonicalKey ? describePgTarget(pg.lock.target) : null;
-  if (direct && !sameEndpoint(direct, app)) {
-    throw new RuntimeDbError(
-      `${app.label} and ${direct.label} resolve to different databases or endpoints (${app.database}@${app.endpointKey} vs ${direct.database}@${direct.endpointKey}). Refusing to start.`,
-    );
+  // P0.6-1B: the session-lock endpoint must be the primary (the factory has no other source since X3.5-S8). Fail closed
+  // should that ever change without this guard learning to probe it.
+  if (pg.lock.target.canonicalKey !== pg.primary.target.canonicalKey) {
+    throw new RuntimeDbError(`The ${processName} process's session-lock endpoint (${pg.lock.source}) is not ${pg.primary.source}. Refusing to start.`);
   }
 
   // The bootstrap of an unbound production database is a migration-command action only; a runtime never honours it.
@@ -261,7 +243,7 @@ function resolveRuntimeDatabaseUnchecked(input: RuntimeDbInput): ResolvedRuntime
     const declaredIdentity = declaredOrRefuse(env, true, processName);
     // The production provisioner's privileged DDL connection is its own PG_DATABASE_URL (the factory requires it in
     // production; the Worker bundle launcher sets it from CREWFLOW_PROVISIONER_DATABASE_URL). Nothing else to require.
-    return { processName, runtimeEnvironment: 'production', classification: 'PRODUCTION', app, admin, direct, pg, declared: declaredIdentity };
+    return { processName, runtimeEnvironment: 'production', classification: 'PRODUCTION', app, pg, declared: declaredIdentity };
   }
 
   // Non-production process: may not declare production. Whether the DATABASE is production is decided live by the marker.
@@ -272,22 +254,20 @@ function resolveRuntimeDatabaseUnchecked(input: RuntimeDbInput): ResolvedRuntime
   const unmarkedProduction = unmarkedProductionRefusal(pg, `${processName} process`);
   if (unmarkedProduction) throw new RuntimeDbError(`${unmarkedProduction} Refusing to start.`);
   // development: a local-only runtime. It refuses any remote host, not only the production endpoint.
-  const localOnly = isLocalIdentity(app) && (admin === null || isLocalIdentity(admin)) && (direct === null || isLocalIdentity(direct));
+  const localOnly = isLocalIdentity(app);
   if (declared === 'development') {
     if (!localOnly) {
       throw new RuntimeDbError(
         `${RUNTIME_ENV_VAR}=development refuses a remote database ("${app.host}"). A development ${processName} uses a loopback or docker-service database only.`,
       );
     }
-    return { processName, runtimeEnvironment: 'development', classification: 'LOCAL', app, admin, direct, pg, declared: declaredIdentity };
+    return { processName, runtimeEnvironment: 'development', classification: 'LOCAL', app, pg, declared: declaredIdentity };
   }
   return {
     processName,
     runtimeEnvironment: 'non-production',
     classification: localOnly ? 'LOCAL' : 'NON-PRODUCTION',
     app,
-    admin,
-    direct,
     pg,
     declared: declaredIdentity,
   };
@@ -321,7 +301,7 @@ export async function probeRuntimeIdentity(
   endpoint: PgEndpointName,
   identity?: { env: Record<string, string | undefined>; production: boolean; processLabel: string },
 ): Promise<RuntimeIdentityProbe> {
-  const probed = endpoint === 'elevated' ? pg.elevated : endpoint === 'lock' ? pg.lock : pg.primary;
+  const probed = endpoint === 'lock' ? pg.lock : pg.primary;
   const label = probed?.source ?? endpoint;
   let client: ReturnType<typeof createPgClient>;
   try {
@@ -401,20 +381,6 @@ export async function assertRuntimeDatabaseIdentity(
   for (const warning of appProbe.warnings) {
     // eslint-disable-next-line no-console
     console.warn(`[runtime-db-guard] WARNING process=${processName}: ${warning}`);
-  }
-  if (resolved.admin) {
-    const adminProbe = await probeRuntimeIdentity(resolved.pg, 'elevated');
-    if (adminProbe.database !== appProbe.database || adminProbe.systemIdentifier !== appProbe.systemIdentifier) {
-      throw new RuntimeDbError(`runtime identity mismatch between ${resolved.app.label} and ${resolved.admin.label}. Refusing to start.`);
-    }
-  }
-  // P0.6-1B: the worker's directDataSource (the session-lock pool — see rab-worker/src/main.ts's own doc comment) is probed
-  // whenever its endpoint names a different target from the primary (resolveRuntimeDatabase leaves `direct` null otherwise).
-  if (resolved.direct) {
-    const directProbe = await probeRuntimeIdentity(resolved.pg, 'lock');
-    if (directProbe.database !== appProbe.database || directProbe.systemIdentifier !== appProbe.systemIdentifier) {
-      throw new RuntimeDbError(`runtime identity mismatch between ${resolved.app.label} and ${resolved.direct.label}. Refusing to start.`);
-    }
   }
   // Sanitised summary only: no URL, userinfo, password or username. The role is the connected role name, which is not a secret.
   // eslint-disable-next-line no-console

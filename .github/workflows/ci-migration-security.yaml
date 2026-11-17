@@ -66,8 +66,6 @@ jobs:
         run: |
           npx ts-node --transpile-only -P packages/rab-server/tsconfig.app.json             packages/rab-server/src/database/typeorm/scripts/migration-security-check.ts
         env:
-          # X3.5-S6 strict switch: the harness and its children never resolve a legacy database name (DATABASE_URL, ...).
-          PG_LEGACY_NAMES_STRICT: 'true'
           # Pinned: this job must run BOTH scenarios (the other workflows build their test database with `fresh` only).
           MIGRATION_SECURITY_SCENARIOS: fresh,upgrade
           MIGRATION_SECURITY_KEEP_DATABASES: 'true'
@@ -81,7 +79,7 @@ jobs:
           set -a; source "${RUNNER_TEMP}/m2-databases.env"; set +a
           test_env="$(node packages/rab-server/src/database/typeorm/scripts/migration-security-test-env.cjs "$FRESH_DB")"  # a helper refusal fails the step here, not later
           eval "$test_env"
-          out="$(DB_TARGET=test PG_DATABASE_URL="$TEST_DATABASE_URL_UNPOOLED"             npx ts-node --transpile-only -P packages/rab-server/tsconfig.app.json             packages/rab-server/src/database/typeorm/scripts/setup-db.ts 2>&1)" || { echo "$out" | tail -20; exit 1; }
+          out="$(DB_TARGET=test PG_DATABASE_URL="$TEST_DATABASE_ADMIN_URL"             npx ts-node --transpile-only -P packages/rab-server/tsconfig.app.json             packages/rab-server/src/database/typeorm/scripts/setup-db.ts 2>&1)" || { echo "$out" | tail -20; exit 1; }
           grep -v '^\[db-target\]' <<< "$out" | tail -3
           grep -q 'Migrations applied: none pending' <<< "$out"
 
@@ -176,8 +174,6 @@ jobs:
         run: |
           npx ts-node --transpile-only -P packages/rab-server/tsconfig.app.json             packages/rab-server/src/database/typeorm/scripts/migrate/owner-login/owner-login-lifecycle-check.ts
         env:
-          # X3.5-S6 strict switch: the lifecycle check and its children never resolve a legacy database name.
-          PG_LEGACY_NAMES_STRICT: 'true'
           OWNER_LOGIN_CHECK_SCENARIOS: ${{ matrix.scenarios }}
           # The provider-admin psql scripts run for real inside the container (postgres-init/owner-login/*.sql).
           OWNER_LOGIN_CHECK_CONTAINER: owner-login-postgres

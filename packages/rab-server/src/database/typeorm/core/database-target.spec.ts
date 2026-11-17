@@ -40,35 +40,36 @@ const PROD_ENV = (urls: { app: string }, extra: Record<string, string | undefine
 
 describe('database target guard (pure resolution)', () => {
   it('1. refuses when DB_TARGET is missing, and names the variable and the choices', () => {
-    expectRefused({ DATABASE_URL: LOCAL }, /DB_TARGET is required.*local, test, staging, production/);
+    expectRefused({ PG_DATABASE_URL: LOCAL }, /DB_TARGET is required.*local, test, staging, production/);
   });
 
   it('2. refuses an unrecognised DB_TARGET', () => {
-    expectRefused({ DB_TARGET: 'prod', DATABASE_URL: LOCAL }, /DB_TARGET "prod" is not recognised/);
+    expectRefused({ DB_TARGET: 'prod', PG_DATABASE_URL: LOCAL }, /DB_TARGET "prod" is not recognised/);
   });
 
   it('3. refuses staging, because no staging identity is configured (fail closed)', () => {
-    expectRefused({ DB_TARGET: 'staging', DATABASE_URL: LOCAL }, /staging is refused/);
+    expectRefused({ DB_TARGET: 'staging', PG_DATABASE_URL: LOCAL }, /staging is refused/);
   });
 
   it('4. production without ALLOW_PRODUCTION_DB_COMMANDS is refused, even with the right identity', () => {
     expectRefused(
-      { DB_TARGET: 'production', DATABASE_URL: NEON_POOLED, DATABASE_URL_UNPOOLED: NEON_DIRECT },
+      { DB_TARGET: 'production', PG_DATABASE_URL: NEON_DIRECT },
       /requires DB_TARGET=production AND ALLOW_PRODUCTION_DB_COMMANDS=true/,
     );
   });
 
   it('5. ALLOW_PRODUCTION_DB_COMMANDS grants nothing on its own: a local target stays local, a remote one stays refused', () => {
-    expect(run({ DB_TARGET: 'local', [ALLOW_PRODUCTION_DB_COMMANDS]: 'true', DATABASE_URL: LOCAL }).classification).toBe(
+    expect(run({ DB_TARGET: 'local', [ALLOW_PRODUCTION_DB_COMMANDS]: 'true', PG_DATABASE_URL: LOCAL }).classification).toBe(
       'NON-PRODUCTION',
     );
-    expectRefused({ DB_TARGET: 'local', [ALLOW_PRODUCTION_DB_COMMANDS]: 'true', DATABASE_URL: NEON_POOLED }, /refuses a remote host/);
+    expectRefused({ DB_TARGET: 'local', [ALLOW_PRODUCTION_DB_COMMANDS]: 'true', PG_DATABASE_URL: NEON_POOLED }, /refuses a remote host/);
   });
 
   it('6. production authority present in .env is refused, even if the process environment repeats it', () => {
     const env = PROD_ENV({ app: NEON_DIRECT });
     // Refused by the factory's migration-endpoint rule (selectMigrationEndpoint) before the guard's own .env check.
     expectRefused(env, /comes from the \.env file|present in packages\/rab-server\/\.env/, { PG_DATABASE_URL: NEON_DIRECT });
+    // X3.5-S8: a .env line under the legacy name is still file authority (the comparison keeps DATABASE_URL).
     expectRefused(env, /present in packages\/rab-server\/\.env/, { DATABASE_URL: NEON_DIRECT });
     expectRefused(env, /present in packages\/rab-server\/\.env/, { [ALLOW_PRODUCTION_DB_COMMANDS]: 'true' });
     expectRefused(env, /present in packages\/rab-server\/\.env/, { DB_TARGET: 'production' });
@@ -91,7 +92,7 @@ describe('database target guard (pure resolution)', () => {
     });
     expect(resolved.classification).toBe('PRODUCTION');
     expect(resolved.declared).toEqual({ environment: 'production', deploymentId: PROD_ID });
-    expect(resolved.admin).toBeNull();
+    expect('admin' in resolved).toBe(false);
     expect(resolved.migrationEndpoint).toBe('primary');
     expect(resolved.pg.processRole).toBe('migrate');
     expect(resolved.pg.primary.ssl).toEqual({ rejectUnauthorized: true });
@@ -111,7 +112,7 @@ describe('database target guard (pure resolution)', () => {
   it('8c. B3: the bootstrap flag is honoured only for DB_TARGET=production, and only with its exact value', () => {
     expect(run(PROD_ENV({ app: NEON_POOLED }, { ...DECLARED_PROD, CREWFLOW_DEPLOYMENT_IDENTITY_BOOTSTRAP: 'unbound-production-database' })).bootstrapRequested).toBe(true);
     expectRefused(PROD_ENV({ app: NEON_POOLED }, { ...DECLARED_PROD, CREWFLOW_DEPLOYMENT_IDENTITY_BOOTSTRAP: 'yes' }), /must be unset or exactly/);
-    expectRefused({ DB_TARGET: 'local', DATABASE_URL: LOCAL, CREWFLOW_DEPLOYMENT_IDENTITY_BOOTSTRAP: 'unbound-production-database' }, /honoured only with DB_TARGET=production/);
+    expectRefused({ DB_TARGET: 'local', PG_DATABASE_URL: LOCAL, CREWFLOW_DEPLOYMENT_IDENTITY_BOOTSTRAP: 'unbound-production-database' }, /honoured only with DB_TARGET=production/);
   });
 
   it('9. Phase B: production refuses the legacy names (and libpq variables) and TLS weaker than verify-full, before identity', () => {
@@ -120,57 +121,57 @@ describe('database target guard (pure resolution)', () => {
     }
     expectRefused({ ...PROD_ENV({ app: NEON_DIRECT }), PGPASSWORD: 'x' }, /libpq environment variable/);
     expectRefused(PROD_ENV({ app: NEON_DIRECT.replace('sslmode=require', 'sslmode=disable') }), /sslmode=disable, which production refuses/);
-    // Outside production an app/admin pair that disagrees on endpoint is still refused before identity.
-    expectRefused({ DB_TARGET: 'test', ALLOW_REMOTE_TEST_DATABASE: 'true', DATABASE_URL: NEON_POOLED, DATABASE_URL_UNPOOLED: OTHER_NEON_DIRECT }, /different databases or endpoints/);
+    // X3.5-S8: outside production too, every legacy name is refused before identity (there is no app/admin pair any more).
+    for (const name of ['DATABASE_URL', 'DATABASE_URL_UNPOOLED', 'DATABASE_DIRECT_URL', 'DB_POOL_MAX']) {
+      for (const DB_TARGET of ['local', 'test']) {
+        expectRefused({ DB_TARGET, PG_DATABASE_URL: LOCAL, [name]: name === 'DB_POOL_MAX' ? '5' : LOCAL }, new RegExp(`refuses the legacy database variable\\(s\\) ${name}: `));
+      }
+    }
   });
 
-  it('9b. Phase B: the migration endpoint is the factory rule (PG_DATABASE_URL, else the deprecated DATABASE_URL_UNPOOLED); the CLI uses the primary', () => {
+  it('9b. Phase B: the migration endpoint is the factory rule (PG_DATABASE_URL, the only endpoint since X3.5-S8); the CLI uses the primary', () => {
     expect(run({ DB_TARGET: 'local', PG_DATABASE_URL: LOCAL }).migrationEndpoint).toBe('primary');
-    const legacy = run({ DB_TARGET: 'local', DATABASE_URL: LOCAL.replace('rab_owner', 'crewflow_app'), DATABASE_URL_UNPOOLED: LOCAL });
-    expect(legacy.migrationEndpoint).toBe('elevated');
-    expect(legacy.admin?.label).toBe('DATABASE_URL_UNPOOLED');
-    expectRefused({ DB_TARGET: 'local', PG_DATABASE_URL: LOCAL, DATABASE_URL_UNPOOLED: LOCAL.replace('rab_owner', 'crewflow_app') }, /name different targets/);
-    const cli = resolveDbTarget({ purpose: 'command', env: { DB_TARGET: 'local', DATABASE_URL: LOCAL, DATABASE_URL_UNPOOLED: LOCAL }, dotenvValues: {} });
+    // X3.5-S8: the old elevated migration connection is refused, alone or next to PG_DATABASE_URL.
+    expectRefused({ DB_TARGET: 'local', DATABASE_URL: LOCAL.replace('rab_owner', 'crewflow_app'), DATABASE_URL_UNPOOLED: LOCAL }, /refuses the legacy database variable\(s\) DATABASE_URL, DATABASE_URL_UNPOOLED/);
+    expectRefused({ DB_TARGET: 'local', PG_DATABASE_URL: LOCAL, DATABASE_URL_UNPOOLED: LOCAL }, /DATABASE_URL_UNPOOLED -> use PG_DATABASE_URL/);
+    const cli = resolveDbTarget({ purpose: 'command', env: { DB_TARGET: 'local', PG_DATABASE_URL: LOCAL }, dotenvValues: {} });
     expect(cli.migrationEndpoint).toBe('primary');
     expect(cli.pg.processRole).toBe('cli');
     // The M2 harness's phase-A session role is accepted only for the migration identity against local/test.
     const withRole = `${LOCAL}?options=-c%20role%3Drab_owner`;
-    expect(run({ DB_TARGET: 'test', DATABASE_URL: withRole }).pg.primary.target.sessionRoleOption).toBe('-c role=rab_owner');
-    expect(() => resolveDbTarget({ purpose: 'command', env: { DB_TARGET: 'test', DATABASE_URL: withRole }, dotenvValues: {} })).toThrow(/sets "options"/);
+    expect(run({ DB_TARGET: 'test', PG_DATABASE_URL: withRole }).pg.primary.target.sessionRoleOption).toBe('-c role=rab_owner');
+    expect(() => resolveDbTarget({ purpose: 'command', env: { DB_TARGET: 'test', PG_DATABASE_URL: withRole }, dotenvValues: {} })).toThrow(/sets "options"/);
   });
 
   it('10. local accepts a loopback database and a docker-service hostname, classified NON-PRODUCTION', () => {
-    expect(run({ DB_TARGET: 'local', DATABASE_URL: LOCAL }).classification).toBe('NON-PRODUCTION');
-    expect(run({ DB_TARGET: 'local', DATABASE_URL: DOCKER_SERVICE }).classification).toBe('NON-PRODUCTION');
+    expect(run({ DB_TARGET: 'local', PG_DATABASE_URL: LOCAL }).classification).toBe('NON-PRODUCTION');
+    expect(run({ DB_TARGET: 'local', PG_DATABASE_URL: DOCKER_SERVICE }).classification).toBe('NON-PRODUCTION');
   });
 
   it('11. local refuses a dotted remote host such as Neon, and says so without the URL', () => {
-    expectRefused({ DB_TARGET: 'local', DATABASE_URL: NEON_POOLED }, /DB_TARGET=local refuses a remote host/);
+    expectRefused({ DB_TARGET: 'local', PG_DATABASE_URL: NEON_POOLED }, /DB_TARGET=local refuses a remote host/);
   });
 
-  it('12. local refuses a remote admin URL even when the app URL is local', () => {
-    expectRefused(
-      { DB_TARGET: 'local', DATABASE_URL: LOCAL, DATABASE_URL_UNPOOLED: NEON_DIRECT },
-      /different databases or endpoints|refuses a remote DATABASE_URL_UNPOOLED/,
-    );
+  it('12. X3.5-S8: a second (admin) URL is refused by name, remote or local, before any comparison', () => {
+    expectRefused({ DB_TARGET: 'local', PG_DATABASE_URL: LOCAL, DATABASE_URL_UNPOOLED: NEON_DIRECT }, /refuses the legacy database variable\(s\) DATABASE_URL_UNPOOLED/);
   });
 
-  it('13. app and admin URLs naming different local databases are refused', () => {
-    expectRefused({ DB_TARGET: 'local', DATABASE_URL: LOCAL, DATABASE_URL_UNPOOLED: LOCAL_OTHER_DB }, /different databases or endpoints/);
+  it('13. X3.5-S8: an admin URL naming another local database is refused by name', () => {
+    expectRefused({ DB_TARGET: 'local', PG_DATABASE_URL: LOCAL, DATABASE_URL_UNPOOLED: LOCAL_OTHER_DB }, /refuses the legacy database variable\(s\) DATABASE_URL_UNPOOLED/);
   });
 
   it('14. test target uses the same rule, and a remote host needs the explicit test override', () => {
-    expectRefused({ DB_TARGET: 'test', DATABASE_URL: NEON_POOLED }, /refuses a remote host/);
+    expectRefused({ DB_TARGET: 'test', PG_DATABASE_URL: NEON_POOLED }, /refuses a remote host/);
     expect(
-      run({ DB_TARGET: 'test', DATABASE_URL: OTHER_NEON_DIRECT, ALLOW_REMOTE_TEST_DATABASE: 'true' }).classification,
+      run({ DB_TARGET: 'test', PG_DATABASE_URL: OTHER_NEON_DIRECT, ALLOW_REMOTE_TEST_DATABASE: 'true' }).classification,
     ).toBe('NON-PRODUCTION');
     // B3: a non-production target may not declare production; whether the DATABASE is production is decided live by the
     // marker (a production-bound database is refused for every non-production target, whatever its host).
     expectRefused(
-      { DB_TARGET: 'test', DATABASE_URL: NEON_DIRECT, ALLOW_REMOTE_TEST_DATABASE: 'true', ...DECLARED_PROD },
+      { DB_TARGET: 'test', PG_DATABASE_URL: NEON_DIRECT, ALLOW_REMOTE_TEST_DATABASE: 'true', ...DECLARED_PROD },
       /non-production migrations command declares CREWFLOW_DEPLOYMENT_ENVIRONMENT=production/,
     );
-    expect(run({ DB_TARGET: 'test', DATABASE_URL: LOCAL, CREWFLOW_DEPLOYMENT_ENVIRONMENT: 'test', CREWFLOW_DEPLOYMENT_ID: PROD_ID }).declared).toEqual({
+    expect(run({ DB_TARGET: 'test', PG_DATABASE_URL: LOCAL, CREWFLOW_DEPLOYMENT_ENVIRONMENT: 'test', CREWFLOW_DEPLOYMENT_ID: PROD_ID }).declared).toEqual({
       environment: 'test',
       deploymentId: PROD_ID,
     });
@@ -181,7 +182,7 @@ describe('database target guard (pure resolution)', () => {
     for (const purpose of ['migrations', 'seed', 'bootstrap-admin', 'storage-reconcile', 'db:bind-identity']) {
       for (const env of [
         { DB_TARGET: 'test', ALLOW_REMOTE_TEST_DATABASE: 'true', PG_DATABASE_URL: NEON_DIRECT },
-        { DB_TARGET: 'test', ALLOW_REMOTE_TEST_DATABASE: 'true', DATABASE_URL: NEON_POOLED },
+        { DB_TARGET: 'test', ALLOW_REMOTE_TEST_DATABASE: 'true', PG_DATABASE_URL: NEON_POOLED },
         { DB_TARGET: 'test', ALLOW_REMOTE_TEST_DATABASE: 'true', PG_DATABASE_URL: NEON_DIRECT.replace('/neondb?', '/scratch?') },
         { DB_TARGET: 'test', ALLOW_REMOTE_TEST_DATABASE: 'true', PG_DATABASE_URL: NEON_DIRECT.replace('c-2.us-east-2', 'eu-central-1') },
       ]) {
@@ -217,10 +218,10 @@ describe('database target guard (pure resolution)', () => {
   });
 
   it('14b. F1: a query-string host/port/user override is refused (the guard would check one host while pg connects to another)', () => {
-    expectRefused({ DB_TARGET: 'local', DATABASE_URL: `${LOCAL}?host=db.attacker.example` }, /sets "host" as a query parameter/);
-    expectRefused({ DB_TARGET: 'local', DATABASE_URL: `${LOCAL}?port=6543` }, /sets "port" as a query parameter/);
-    expectRefused({ DB_TARGET: 'local', DATABASE_URL: `${LOCAL}?sslmode=disable&user=postgres` }, /sets "user" as a query parameter/);
-    expectRefused({ DB_TARGET: 'local', DATABASE_URL: LOCAL, DATABASE_URL_UNPOOLED: `${LOCAL}?hostaddr=10.0.0.9` }, /sets "hostaddr"/);
+    expectRefused({ DB_TARGET: 'local', PG_DATABASE_URL: `${LOCAL}?host=db.attacker.example` }, /sets "host" as a query parameter/);
+    expectRefused({ DB_TARGET: 'local', PG_DATABASE_URL: `${LOCAL}?port=6543` }, /sets "port" as a query parameter/);
+    expectRefused({ DB_TARGET: 'local', PG_DATABASE_URL: `${LOCAL}?sslmode=disable&user=postgres` }, /sets "user" as a query parameter/);
+    expectRefused({ DB_TARGET: 'local', PG_DATABASE_URL: `${LOCAL}?hostaddr=10.0.0.9` }, /sets "hostaddr"/);
     expectRefused(PROD_ENV({ app: `${NEON_DIRECT}&host=other.example` }), /sets "host" as a query parameter/);
   });
 
@@ -230,8 +231,8 @@ describe('database target guard (pure resolution)', () => {
   });
 
   it('16. no refusal message contains a credential, including for a malformed URL', () => {
-    expectRefused({ DB_TARGET: 'local', DATABASE_URL: `postgres://u:${SECRET}@[bad/db` }, /is not a parseable postgres URL/);
-    expectRefused({ DB_TARGET: 'local', DATABASE_URL: NEON_POOLED }, /refuses a remote host/);
+    expectRefused({ DB_TARGET: 'local', PG_DATABASE_URL: `postgres://u:${SECRET}@[bad/db` }, /is not a parseable postgres URL/);
+    expectRefused({ DB_TARGET: 'local', PG_DATABASE_URL: NEON_POOLED }, /refuses a remote host/);
     expectRefused(PROD_ENV({ app: OTHER_NEON_DIRECT }, { CREWFLOW_DEPLOYMENT_ENVIRONMENT: 'production' }), /must be set together/);
   });
 
@@ -255,7 +256,7 @@ describe('database target guard (pure resolution)', () => {
       expectRefused({ DB_TARGET, PG_DATABASE_URL: `postgres://rab_owner:${SECRET}@[2001:db8::1]/rab` }, /refuses a remote host/);
       expect(run({ DB_TARGET, PG_DATABASE_URL: `postgres://rab_owner:${SECRET}@[::1]:55462/rab` }).classification).toBe('NON-PRODUCTION');
     }
-    expectRefused({ DB_TARGET: 'local', DATABASE_URL: LOCAL, DATABASE_URL_UNPOOLED: `postgres://rab_owner:${SECRET}@[fd00::5]:55462/rab_crewflow_hws_phase3_validation` }, /refuses a remote|different databases or endpoints/);
+    expectRefused({ DB_TARGET: 'local', PG_DATABASE_URL: `postgres://rab_owner:${SECRET}@[fd00::5]:55462/rab_crewflow_hws_phase3_validation` }, /refuses a remote host/);
     // The explicit remote-test override still applies to an IPv6 test host.
     expect(run({ DB_TARGET: 'test', ALLOW_REMOTE_TEST_DATABASE: 'true', PG_DATABASE_URL: `postgres://rab_owner:${SECRET}@[fd00::5]/rab` }).classification).toBe('NON-PRODUCTION');
   });
@@ -277,6 +278,6 @@ describe('database target guard (pure resolution)', () => {
       CREWFLOW_MIGRATION_APPROVED: 'apply-pending-migrations',
     });
     // Outside production the file entry is irrelevant (local runs need no approval).
-    expect(run({ DB_TARGET: 'local', DATABASE_URL: LOCAL }, { CREWFLOW_MIGRATION_APPROVED: 'apply-pending-migrations' }).classification).toBe('NON-PRODUCTION');
+    expect(run({ DB_TARGET: 'local', PG_DATABASE_URL: LOCAL }, { CREWFLOW_MIGRATION_APPROVED: 'apply-pending-migrations' }).classification).toBe('NON-PRODUCTION');
   });
 });

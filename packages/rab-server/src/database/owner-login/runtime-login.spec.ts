@@ -170,7 +170,7 @@ describe('runtime-login rule in the in-process runtime guard (API, Worker; also 
     expect(refuse('api', { NODE_ENV: 'production', PG_DATABASE_URL: ADMIN_URL })).toMatch(/requires RAB_RUNTIME_ENV=production/);
     // Forbidden names (never-in-runtime-env), including the new PG_DATABASE_PASSWORD.
     expect(refuse('worker', PROD_ENV(ADMIN_URL, { PG_DATABASE_PASSWORD: SECRET }))).toMatch(/^PG_DATABASE_PASSWORD is present in the worker process's environment/);
-    expect(refuse('api', PROD_ENV(ADMIN_URL, { DATABASE_URL_UNPOOLED: ADMIN_URL }))).toMatch(/only the provisioner process may hold it/);
+    expect(refuse('api', PROD_ENV(ADMIN_URL, { DATABASE_URL_UNPOOLED: ADMIN_URL }))).toMatch(/^DATABASE_URL_UNPOOLED is present in the api process's environment\. It is a retired legacy database name \(X3\.5-S8\)/);
     // URL policy and TLS.
     expect(refuse('api', PROD_ENV(ADMIN_URL.replace('verify-full', 'disable')))).toMatch(/sslmode=disable, which production refuses/);
     // Worker: transaction pooler refused (session locks), even for crewflow_owner.

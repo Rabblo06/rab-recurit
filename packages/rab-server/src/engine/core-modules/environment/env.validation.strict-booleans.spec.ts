@@ -10,7 +10,7 @@ import { EnvironmentVariables } from './environment-variables';
  *   - anything else refuses to boot, naming the variable and never echoing a different variable's value.
  * AI_AGENTS_ENABLED stays loose on purpose (its own comment) and is pinned here too, so it is not tightened by accident.
  */
-const base = { DATABASE_URL: 'postgres://rab:rab@localhost:5432/rab', REDIS_URL: 'redis://localhost:6379', APP_SECRET: 'a'.repeat(32) };
+const base = { PG_DATABASE_URL: 'postgres://rab:rab@localhost:5432/rab', REDIS_URL: 'redis://localhost:6379', APP_SECRET: 'a'.repeat(32) };
 
 const GOOGLE = {
   AUTH_GOOGLE_CLIENT_ID: 'google-client-id',

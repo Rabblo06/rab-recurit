@@ -66,7 +66,7 @@ function defineConnectionGetters<T extends object>(options: T, build: () => PgCo
   return options;
 }
 
-/** Runtime pool: PG_DATABASE_URL (legacy DATABASE_URL outside production) as this process's role, with the runtime timeouts. */
+/** Runtime pool: PG_DATABASE_URL (the only name; the legacy names are refused, X3.5-S8) as this process's role, with the runtime timeouts. */
 function runtimeConnection(): PgConnectionFields {
   return pgTypeOrmConnectionOptions(resolvePgEnvironmentCached(process.env), { endpoint: 'primary', purpose: 'runtime' });
 }
@@ -85,8 +85,8 @@ function runtimeConnection(): PgConnectionFields {
  * `Organisation` class object than the one every service imports. Explicit
  * imports guarantee both call sites reference the exact same class.
  *
- * Connection (factory, see above): pool `max` = PG_POOL_MAX_CONNECTIONS (default 10; legacy DB_POOL_MAX outside
- * production). Each API request holds ONE connection for its whole tenant transaction, so this is the concurrency ceiling
+ * Connection (factory, see above): pool `max` = PG_POOL_MAX_CONNECTIONS (default 10; the legacy DB_POOL_MAX is refused,
+ * X3.5-S8). Each API request holds ONE connection for its whole tenant transaction, so this is the concurrency ceiling
  * of one API instance; keep (instances x max) below the database's max_connections. Timeouts are unchanged: a
  * silently-dropped connection (managed-Postgres idle disconnect, a network blip) otherwise leaves a query awaiting a
  * response that never arrives — confirmed in production, every rab-worker polling loop sharing one long-lived connection
@@ -162,11 +162,10 @@ if (MIGRATION_QUERY_TIMEOUT_MS <= MIGRATION_STATEMENT_TIMEOUT_MS) {
  * The migration connection: the process's own PG_DATABASE_URL, resolved as the `migrate` process (application_name
  * `crewflow-migrate`, transaction-pooler URL shapes refused). The migration step is handed its migration-only login
  * through its own environment, so "which credential" is decided by the deployment, never by an in-process switch.
- * Endpoint choice is `selectMigrationEndpoint` (pg-config.ts), the same rule the migrate runner applies: without
- * PG_DATABASE_URL, outside production, the deprecated DATABASE_URL_UNPOOLED still names the elevated connection the Jest
- * setup and older local setups provide next to the restricted DATABASE_URL (P2/P3 Checkpoint 2: `crewflow_app` cannot
- * run DDL); PG_DATABASE_URL next to a DATABASE_URL_UNPOOLED naming another target is refused, and so is a production
- * PG_DATABASE_URL taken from the .env file. Same pool settings as runtime, with the two timeouts raised.
+ * Endpoint choice is `selectMigrationEndpoint` (pg-config.ts), the same rule the migrate runner applies: the primary
+ * endpoint, PG_DATABASE_URL (X3.5-S8: the legacy DATABASE_URL / DATABASE_URL_UNPOOLED elevated fallback is gone and the
+ * factory refuses both in every environment); a production PG_DATABASE_URL taken from the .env file is refused. Same pool
+ * settings as runtime, with the two timeouts raised.
  */
 function migrationConnection(): PgConnectionFields {
   const resolved = resolvePgEnvironmentCached(process.env, { processRole: 'migrate' });

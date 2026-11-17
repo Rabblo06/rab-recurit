@@ -487,7 +487,7 @@ describeIfDb('realtime outbox publisher — Redis Pub/Sub distribution (integrat
     const { id } = await seedEvent(manager);
 
     // A SEPARATE DataSource, authenticated specifically as crewflow_app — never the superuser
-    // `TEST_DATABASE_URL_UNPOOLED` connection (that one powers `adminDataSource`, used ONLY for
+    // `TEST_DATABASE_ADMIN_URL` connection (that one powers `adminDataSource`, used ONLY for
     // fixture bootstrap in this file, never for the claim/publish operations under test here).
     const restrictedDataSource = new DataSource({ type: 'postgres', url: crewflowAppUrl, schema: 'core', entities: [], synchronize: false });
     await restrictedDataSource.initialize();

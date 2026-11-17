@@ -6,7 +6,7 @@ import { validate } from './env.validation';
  * (default 900; owner 2026-11-01: a longer interval needs separate approval, no override), claim batch 1–200 (default 100). event without global refuses to boot. The "global ⇒ the live role is
  * crewflow_worker" rule needs the database and lives in the boot gate (database-boot-gate-rules.ts).
  */
-const base = { DATABASE_URL: 'postgres://rab:rab@localhost:5432/rab', REDIS_URL: 'redis://localhost:6379', APP_SECRET: 'a'.repeat(32) };
+const base = { PG_DATABASE_URL: 'postgres://rab:rab@localhost:5432/rab', REDIS_URL: 'redis://localhost:6379', APP_SECRET: 'a'.repeat(32) };
 
 describe('worker dispatch environment variables (Phase D)', () => {
   it('defaults: per_scope claims, poll dispatch, 30 s backstop, 900 s reconciliation, batch 100 — other defaults unchanged', () => {

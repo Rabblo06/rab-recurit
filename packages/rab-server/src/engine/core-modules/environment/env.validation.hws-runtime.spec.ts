@@ -10,7 +10,7 @@ import { hwsRuntimeDefault, resolveHwsRuntimeEnabled } from './hws-runtime-defau
  * where unset means OFF (production must not route to the workspace schemas before the C3 cutover). "true"/"false" keep
  * working; any other value refuses to boot.
  */
-const base = { DATABASE_URL: 'postgres://rab:rab@localhost:5432/rab', REDIS_URL: 'redis://localhost:6379', APP_SECRET: 'a'.repeat(32) };
+const base = { PG_DATABASE_URL: 'postgres://rab:rab@localhost:5432/rab', REDIS_URL: 'redis://localhost:6379', APP_SECRET: 'a'.repeat(32) };
 
 /**
  * The class layer exactly as validate() runs it (same options), restricted to this property. Used for production, where the

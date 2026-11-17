@@ -67,7 +67,7 @@ interface BootstrapResult {
  * grant can only ever happen by writing directly as `rab_owner` (this
  * table is deliberately NOT FORCEd for exactly that reason) — this command
  * runs the same way (historically via the `DATABASE_URL_UNPOOLED`-as-`rab_owner`
- * convention; X3.5-S6: one PG_DATABASE_URL now). The "existing user by
+ * convention; one PG_DATABASE_URL since X3.5-S6, the old name refused since X3.5-S8). The "existing user by
  * email, refuse on cross-org ambiguity" lookup below is the same shape as
  * `grant-platform-admin.command.ts`'s, not a second, competing algorithm —
  * an email that already matches a real, already-activated account is

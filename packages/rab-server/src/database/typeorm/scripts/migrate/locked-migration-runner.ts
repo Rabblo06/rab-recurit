@@ -131,8 +131,7 @@ export interface GuardedTarget {
   target: DbTarget;
   /** host: the factory's parse (owner decision A: a bound marker must have been bound at this host). */
   app: { database: string; host?: string };
-  admin?: { host?: string } | null;
-  migrationEndpoint?: 'primary' | 'elevated';
+  migrationEndpoint?: 'primary';
   /**
    * The login may not read the deployment identity marker (42501). The runner then lets CF-41 refuse first and runs the
    * full marker check on the locked session itself (database-target.ts assertDeferredDeploymentIdentity). Never a pass.
@@ -469,8 +468,6 @@ export async function runLockedMigrations(options: LockedMigrationOptions): Prom
         purpose: 'migrations',
         target: guarded.target,
         app: guarded.app,
-        admin: guarded.admin,
-        migrationEndpoint: guarded.migrationEndpoint,
       }, lockedGuardEnv);
     }
     // 3b. Ledger compatibility: an interleaved foreign chain always refuses; a newer ledger refuses an apply run.

@@ -4,7 +4,7 @@ import { validate } from './env.validation';
  * PDF renderer P5 (D10): PDF_RENDERER is kept for one release and accepts only "native" (unset or empty = native).
  * "chromium" refuses to boot: the Worker has no browser, so it can never be a silent choice.
  */
-const base = { DATABASE_URL: 'postgres://rab:rab@localhost:5432/rab', REDIS_URL: 'redis://localhost:6379', APP_SECRET: 'a'.repeat(32) };
+const base = { PG_DATABASE_URL: 'postgres://rab:rab@localhost:5432/rab', REDIS_URL: 'redis://localhost:6379', APP_SECRET: 'a'.repeat(32) };
 
 describe('PDF_RENDERER environment variable', () => {
   it('defaults to native', () => {

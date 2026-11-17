@@ -73,7 +73,7 @@ describeIfDb('M2-F4: optimised secure-owner invariants report exactly what the P
     ds.setOptions({ extra: { ...extra, statement_timeout: 180_000, query_timeout: 200_000 } } as Partial<PostgresConnectionOptions>);
     await ds.initialize();
     const [me] = await ds.query('SELECT rolsuper FROM pg_roles WHERE rolname = current_user');
-    if (!me?.rolsuper) throw new Error('this suite needs the disposable database bootstrap superuser as TEST_DATABASE_URL_UNPOOLED');
+    if (!me?.rolsuper) throw new Error('this suite needs the disposable database bootstrap superuser as TEST_DATABASE_ADMIN_URL');
   });
 
   afterAll(async () => {

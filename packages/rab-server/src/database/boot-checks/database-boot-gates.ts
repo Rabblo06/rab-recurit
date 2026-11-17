@@ -6,7 +6,8 @@
  *   Worker     packages/rab-worker/src/main.ts (jobs)    runDatabaseBootGates('worker')
  *   CLI        packages/rab-server/src/command/main.ts   runDatabaseBootGates('cli', { cliCommand: <argv command> })
  *   Provisioner runDatabaseBootGates('provisioner') — the role the separate provisioner process used (that process,
- *              workspace-provisioner.main.ts, was removed in X5.1; the role and its guards stay until the legacy names go)
+ *              workspace-provisioner.main.ts, was removed in X5.1; the role and its guards stay; since X3.5-S8 it has no
+ *              second endpoint either)
  *
  * Gates, in order (each refusal names the gate and an action, never a URL, user name or password):
  *   1. role      (owner-login architecture, owner's final decision 2026-11-04) current_user AND session_user are the owner
@@ -86,11 +87,6 @@ export interface RunBootGatesOptions {
   /** Migrations the pending-migration gate compares with the ledger (default: coreDataSourceOptions.migrations). */
   migrations?: DataSourceOptions['migrations'];
   cliCommand?: string;
-  /**
-   * Which of the process's endpoints the gate connects to (default: 'primary'; the provisioner: its privileged
-   * provisioning endpoint — 'elevated' when one is configured, else 'primary').
-   */
-  endpoint?: 'primary' | 'elevated';
   retry?: RetryOptions;
   log?: (line: string) => void;
 }
@@ -113,9 +109,9 @@ export async function runDatabaseBootGates(processName: BootProcess, options: Ru
     if (error instanceof PgConfigError) throw new DatabaseBootGateError('connect', `${label}: ${error.message}`);
     throw error;
   }
-  const endpoint = options.endpoint ?? (processName === 'provisioner' && pg.elevated ? 'elevated' : 'primary');
-  const endpointTarget = endpoint === 'elevated' ? pg.elevated : pg.primary;
-  if (!endpointTarget) throw new DatabaseBootGateError('connect', `${label}: the ${endpoint} database endpoint is not configured.`);
+  // The process's one connection, PG_DATABASE_URL (X3.5-S8: the provisioner's legacy DATABASE_URL_UNPOOLED endpoint is gone).
+  const endpoint = 'primary' as const;
+  const endpointTarget = pg.primary;
 
   const report = await withDatabaseRetry(
     label,

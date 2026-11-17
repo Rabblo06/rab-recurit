@@ -165,43 +165,43 @@ describe('runtime database identity guard (API, worker and provisioner boot)', (
     expect(resolved.classification).toBe('PRODUCTION');
     expect(resolved.runtimeEnvironment).toBe('production');
     expect(resolved.app.endpointKey).toBe('neon:ep-round-rain-aess0njf');
-    expect(resolved.admin).toBeNull();
+    expect('admin' in resolved).toBe(false);
     expect(resolved.declared?.environment).toBe('production');
   });
 
   it('7b. a production WORKER with the expected identity and no DATABASE_URL_UNPOOLED is accepted — the ordinary worker never carries the privileged credential', () => {
     const resolved = resolve('worker', PROD_ENV());
     expect(resolved.classification).toBe('PRODUCTION');
-    expect(resolved.admin).toBeNull();
+    expect('admin' in resolved).toBe(false);
   });
 
   it('8. Phase B: a production provisioner takes its credential as PG_DATABASE_URL — DATABASE_URL_UNPOOLED is no longer required', () => {
     const resolved = resolve('provisioner', PROD_ENV({ PG_DATABASE_URL: PROD_PROVISIONER }));
     expect(resolved.classification).toBe('PRODUCTION');
-    expect(resolved.admin).toBeNull();
+    expect('admin' in resolved).toBe(false);
     expect(resolved.app.endpointKey).toBe('neon:ep-round-rain-aess0njf');
   });
 
   it('8b. a production API refuses to boot if DATABASE_URL_UNPOOLED is present in its environment at all, even when it matches DATABASE_URL\'s identity — a restricted process must never be ABLE to escalate', () => {
-    expectRefused('api', PROD_ENV({ DATABASE_URL_UNPOOLED: PROD_DIRECT }), /only the provisioner process may hold it/);
+    expectRefused('api', PROD_ENV({ DATABASE_URL_UNPOOLED: PROD_DIRECT }), /It is a retired legacy database name \(X3\.5-S8\)/);
   });
 
   it('8c. a production WORKER refuses to boot if DATABASE_URL_UNPOOLED is present in its environment at all, even when it matches DATABASE_URL\'s identity', () => {
-    expectRefused('worker', PROD_ENV({ DATABASE_URL_UNPOOLED: PROD_DIRECT }), /only the provisioner process may hold it/);
+    expectRefused('worker', PROD_ENV({ DATABASE_URL_UNPOOLED: PROD_DIRECT }), /It is a retired legacy database name \(X3\.5-S8\)/);
   });
 
   it('8d. a non-production WORKER also refuses to boot if DATABASE_URL_UNPOOLED is present at all — the restriction is not production-only', () => {
     expectRefused(
       'worker',
       { NODE_ENV: 'development', PG_DATABASE_URL: LOCAL, DATABASE_URL_UNPOOLED: LOCAL_OWNER },
-      /only the provisioner process may hold it/,
+      /It is a retired legacy database name \(X3\.5-S8\)/,
     );
   });
 
   it('8d2. API, worker AND provisioner refuse to boot if the retired provisioner credential CREWFLOW_PROVISIONER_DATABASE_URL reached them', () => {
     expectRefused('api', PROD_ENV({ CREWFLOW_PROVISIONER_DATABASE_URL: PROD_DIRECT }), /CREWFLOW_PROVISIONER_DATABASE_URL is present in the api process's environment/);
     expectRefused('worker', { NODE_ENV: 'development', PG_DATABASE_URL: LOCAL, CREWFLOW_PROVISIONER_DATABASE_URL: LOCAL_OWNER }, /there is no provisioner credential\. Remove it/);
-    expectRefused('provisioner', PROD_ENV({ DATABASE_URL_UNPOOLED: PROD_DIRECT, CREWFLOW_PROVISIONER_DATABASE_URL: PROD_DIRECT }), /CREWFLOW_PROVISIONER_DATABASE_URL is present in the provisioner/);
+    expectRefused('provisioner', PROD_ENV({ CREWFLOW_PROVISIONER_DATABASE_URL: PROD_DIRECT }), /CREWFLOW_PROVISIONER_DATABASE_URL is present in the provisioner/);
     // An empty value is treated as absent, like DATABASE_URL_UNPOOLED.
     expect(resolve('api', PROD_ENV({ CREWFLOW_PROVISIONER_DATABASE_URL: '' })).classification).toBe('PRODUCTION');
   });
@@ -213,15 +213,14 @@ describe('runtime database identity guard (API, worker and provisioner boot)', (
     expect(resolve('api', PROD_ENV({ CREWFLOW_PRESTART_MIGRATION_DATABASE_URL: ' ', CREWFLOW_MIGRATION_APPROVED: '' })).classification).toBe('PRODUCTION');
   });
 
-  it('8e. Phase B: a production provisioner WITH DATABASE_URL_UNPOOLED is refused (legacy name); outside production it is still its deprecated DDL connection', () => {
-    expectRefused('provisioner', PROD_ENV({ PG_DATABASE_URL: PROD_PROVISIONER, DATABASE_URL_UNPOOLED: PROD_DIRECT }), /refuses the legacy database variable\(s\) DATABASE_URL_UNPOOLED/);
-    const resolved = resolve('provisioner', { NODE_ENV: 'development', DATABASE_URL: LOCAL, DATABASE_URL_UNPOOLED: LOCAL_OWNER });
-    expect(resolved.admin?.endpointKey).toBe('127.0.0.1:55462');
-    expect(resolved.admin?.label).toBe('DATABASE_URL_UNPOOLED');
+  it('8e. X3.5-S8: the provisioner role refuses DATABASE_URL_UNPOOLED in production AND outside it (no deprecated DDL connection any more)', () => {
+    expectRefused('provisioner', PROD_ENV({ PG_DATABASE_URL: PROD_PROVISIONER, DATABASE_URL_UNPOOLED: PROD_DIRECT }), /^DATABASE_URL_UNPOOLED is present in the provisioner process's environment/);
+    expectRefused('provisioner', { NODE_ENV: 'development', PG_DATABASE_URL: LOCAL, DATABASE_URL_UNPOOLED: LOCAL_OWNER }, /It is a retired legacy database name \(X3\.5-S8\)/);
+    expectRefused('provisioner', { NODE_ENV: 'development', DATABASE_URL: LOCAL, DATABASE_URL_UNPOOLED: LOCAL_OWNER }, /is present in the provisioner process's environment/);
   });
 
-  it('9. a non-production provisioner whose unpooled URL is another endpoint is refused before identity', () => {
-    expectRefused('provisioner', { NODE_ENV: 'development', DATABASE_URL: LOCAL, DATABASE_URL_UNPOOLED: OTHER_NEON }, /different databases or endpoints/);
+  it('9. X3.5-S8: a non-production provisioner whose unpooled URL is another endpoint is refused by name, before any comparison or identity', () => {
+    expectRefused('provisioner', { NODE_ENV: 'development', PG_DATABASE_URL: LOCAL, DATABASE_URL_UNPOOLED: OTHER_NEON }, /^DATABASE_URL_UNPOOLED is present in the provisioner process's environment/);
   });
 
   it('10. B3: a NON-production process may not declare production (the dev .env incident path is now refused LIVE by the marker: a production-bound database refuses every non-production process, whatever the host)', () => {
@@ -340,7 +339,7 @@ describe('runtime database identity guard (API, worker and provisioner boot)', (
 
   it('12b. F1: a query-string host/port/user override is refused for every runtime URL', () => {
     expectRefused('api', { NODE_ENV: 'development', PG_DATABASE_URL: `${LOCAL}?host=db.attacker.example` }, /sets "host" as a query parameter/);
-    expectRefused('provisioner', { NODE_ENV: 'development', DATABASE_URL: LOCAL, DATABASE_DIRECT_URL: `${LOCAL}?port=6543` }, /DATABASE_DIRECT_URL sets "port"/);
+    expectRefused('provisioner', { NODE_ENV: 'development', PG_DATABASE_URL: `${LOCAL}?port=6543` }, /PG_DATABASE_URL sets "port"/);
     expectRefused('api', PROD_ENV({ PG_DATABASE_URL: `${PROD_APP}&user=postgres` }), /sets "user" as a query parameter/);
     // RAB_RUNTIME_ENV=development "local only" can no longer be satisfied by a loopback URL that pg would redirect elsewhere.
     expectRefused('api', { NODE_ENV: 'development', RAB_RUNTIME_ENV: 'development', PG_DATABASE_URL: `${LOCAL}?hostaddr=203.0.113.9` }, /sets "hostaddr"/);
@@ -351,7 +350,8 @@ describe('runtime database identity guard (API, worker and provisioner boot)', (
   });
 
   it('14. a missing PG_DATABASE_URL is refused, and never silently replaced by the elevated URL', () => {
-    expectRefused('provisioner', { NODE_ENV: 'development', DATABASE_URL_UNPOOLED: LOCAL_OWNER }, /PG_DATABASE_URL is required/);
+    expectRefused('provisioner', { NODE_ENV: 'development', DATABASE_URL_UNPOOLED: LOCAL_OWNER }, /DATABASE_URL_UNPOOLED is present in the provisioner process's environment/);
+    expectRefused('provisioner', { NODE_ENV: 'development' }, /PG_DATABASE_URL is required/);
     expectRefused('api', { NODE_ENV: 'development' }, /PG_DATABASE_URL is required/);
   });
 
@@ -372,8 +372,9 @@ describe('runtime database identity guard (API, worker and provisioner boot)', (
   // a direct (non-pgbouncer) connection string for session-level advisory locks — unrelated to the
   // provisioner's privileged-credential isolation, so the ordinary worker legitimately sets it.)
   // Owner-login architecture (behaviour change, catalogued): the API and the Worker take ONE URL, so the Worker now REFUSES
-  // DATABASE_DIRECT_URL by name (tests 16 and 16b). The lock-endpoint probe machinery below is retained only for the
-  // provisioner process role (the separate process was removed in X5.1; the role stays until X3.5-S8), so cases 17-22 exercise it there.
+  // DATABASE_DIRECT_URL by name (tests 16 and 16b). X3.5-S8: the provisioner role refuses it by name too, and the factory
+  // refuses it in every environment, so the lock endpoint is always the primary and the separate lock probe is gone
+  // (cases 17-22).
   describe('DATABASE_DIRECT_URL (rab-worker\'s directDataSource — the previously-unguarded path)', () => {
     it('16b. owner-login: a NON-production worker (and the API) refuse DATABASE_DIRECT_URL by name — one URL only', () => {
       for (const processName of ['api', 'worker'] as const) {
@@ -385,40 +386,35 @@ describe('runtime database identity guard (API, worker and provisioner boot)', (
       expectRefused('worker', PROD_ENV({ DATABASE_DIRECT_URL: PROD_DIRECT }), /^DATABASE_DIRECT_URL is present in the worker process's environment\. The API, the Worker and the migrate child use ONE database URL/);
     });
 
-    it('17. a non-production worker with a deprecated DATABASE_DIRECT_URL naming the same endpoint (another login) is accepted and probed', () => {
-      const resolved = resolve('provisioner', { NODE_ENV: 'development', DATABASE_URL: LOCAL, DATABASE_DIRECT_URL: LOCAL_DIRECT_USER });
-      expect(resolved.direct?.endpointKey).toBe('127.0.0.1:55462');
-      expect(resolved.direct?.label).toBe('DATABASE_DIRECT_URL');
+    it('17. X3.5-S8: the provisioner role refuses DATABASE_DIRECT_URL by name too, even naming the same endpoint (another login)', () => {
+      expectRefused('provisioner', { NODE_ENV: 'development', PG_DATABASE_URL: LOCAL, DATABASE_DIRECT_URL: LOCAL_DIRECT_USER }, /^DATABASE_DIRECT_URL is present in the provisioner process's environment/);
     });
 
-    it('18. DATABASE_DIRECT_URL unset (the real fallback-to-DATABASE_URL shape) needs no separate probe and is accepted normally', () => {
-      const resolved = resolve('worker', PROD_ENV());
-      expect(resolved.direct).toBeNull();
-      expect(resolved.pg.lock).toBe(resolved.pg.primary);
+    it('18. the lock endpoint is the primary (no separate probe) in every process', () => {
+      for (const processName of ['api', 'worker', 'provisioner'] as const) {
+        const resolved = resolve(processName, PROD_ENV());
+        expect('direct' in resolved).toBe(false);
+        expect(resolved.pg.lock).toBe(resolved.pg.primary);
+      }
     });
 
-    it('19. DATABASE_DIRECT_URL explicitly equal to DATABASE_URL (the literal fallback value) is also treated as a no-op, never double-probed', () => {
-      const resolved = resolve('provisioner', { NODE_ENV: 'development', DATABASE_URL: LOCAL, DATABASE_DIRECT_URL: LOCAL });
-      expect(resolved.direct).toBeNull();
+    it('19. X3.5-S8: DATABASE_DIRECT_URL equal to the primary (the old literal fallback value) is refused by name, never a no-op', () => {
+      expectRefused('provisioner', { NODE_ENV: 'development', PG_DATABASE_URL: LOCAL, DATABASE_DIRECT_URL: LOCAL }, /^DATABASE_DIRECT_URL is present in the provisioner process's environment/);
     });
 
-    it('20. a non-production worker whose DATABASE_DIRECT_URL points at the production database is refused — caught by the earlier cross-URL identity check, before the production/non-production branch even runs', () => {
-      expectRefused(
-        'provisioner',
-        { NODE_ENV: 'development', DATABASE_URL: LOCAL, DATABASE_DIRECT_URL: PROD_DIRECT },
-        /different databases/,
-      );
+    it('20. X3.5-S8: a DATABASE_DIRECT_URL pointing at the production database is refused by name before any comparison or classification', () => {
+      expectRefused('provisioner', { NODE_ENV: 'development', PG_DATABASE_URL: LOCAL, DATABASE_DIRECT_URL: PROD_DIRECT }, /^DATABASE_DIRECT_URL is present in the provisioner process's environment/);
     });
 
     it('21. a production worker is refused when DATABASE_DIRECT_URL also came from .env, same rule as the other two URLs', () => {
       expectRefused('worker', PROD_ENV(), /present in a \.env file/, { DATABASE_DIRECT_URL: PROD_APP });
     });
 
-    it('22. a DATABASE_DIRECT_URL at a different (even non-production) endpoint than DATABASE_URL is refused outright — any cross-URL identity mismatch is caught before any environment classification runs', () => {
+    it('22. X3.5-S8: a DATABASE_DIRECT_URL at a different (even non-production) endpoint is refused by name, before any classification', () => {
       expectRefused(
         'provisioner',
-        { NODE_ENV: 'development', RAB_RUNTIME_ENV: 'development', DATABASE_URL: LOCAL, DATABASE_DIRECT_URL: OTHER_NEON },
-        /different databases/,
+        { NODE_ENV: 'development', RAB_RUNTIME_ENV: 'development', PG_DATABASE_URL: LOCAL, DATABASE_DIRECT_URL: OTHER_NEON },
+        /^DATABASE_DIRECT_URL is present in the provisioner process's environment/,
       );
     });
   });

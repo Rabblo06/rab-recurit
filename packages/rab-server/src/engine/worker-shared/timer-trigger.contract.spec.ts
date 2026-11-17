@@ -15,7 +15,7 @@ import {
  * instead of silently leaving triggers off — or on — while the operator believes otherwise), the jobId is deterministic,
  * and the consumer-side payload check accepts ids only.
  */
-const base = { DATABASE_URL: 'postgres://rab:rab@localhost:5432/rab', REDIS_URL: 'redis://localhost:6379', APP_SECRET: 'a'.repeat(32) };
+const base = { PG_DATABASE_URL: 'postgres://rab:rab@localhost:5432/rab', REDIS_URL: 'redis://localhost:6379', APP_SECRET: 'a'.repeat(32) };
 const ORG = '11111111-1111-4111-8111-111111111111';
 const WS = '33333333-3333-4333-8333-333333333333';
 const SUBJECT = '44444444-4444-4444-8444-444444444444';

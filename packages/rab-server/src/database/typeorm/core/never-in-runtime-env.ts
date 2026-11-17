@@ -57,9 +57,12 @@ const ROLE_PASSWORD = 'Role passwords never belong in application configuration:
 const OWNER_LOGIN = { allowedIn: ['provisioner'] as const };
 
 export const NEVER_IN_RUNTIME_ENV: readonly NeverInRuntimeEnvEntry[] = Object.freeze([
-  // The historical privileged name: the provisioner's deprecated non-production DDL connection only (the factory refuses it
-  // everywhere in production).
-  { name: 'DATABASE_URL_UNPOOLED', why: 'Remove it: only the provisioner process may hold it (deprecated, non-production only).', allowedIn: ['provisioner'] },
+  // The historical privileged name. X3.5-S8: refused in every runtime process, the provisioner role included (it used to be
+  // the provisioner's deprecated non-production DDL connection), and by the connection factory in every environment.
+  {
+    name: 'DATABASE_URL_UNPOOLED',
+    why: 'It is a retired legacy database name (X3.5-S8). Every process has exactly one database URL, PG_DATABASE_URL (the crewflow_owner login). Remove it.',
+  },
   // The retired separated-mode provisioner credential (O1: no launcher holds it any more; provisioning runs in-process).
   {
     name: 'CREWFLOW_PROVISIONER_DATABASE_URL',
@@ -87,11 +90,12 @@ export const NEVER_IN_RUNTIME_ENV: readonly NeverInRuntimeEnvEntry[] = Object.fr
   { name: 'CREWFLOW_OPS_CHANGE_REF', why: RETIRED_OPS },
   // Owner-login architecture (PERMANENT-OWNER-LOGIN-ADDENDUM): one PG_DATABASE_URL. Legacy and second database URLs and role
   // passwords are refused in the API and Worker. (The removed CREWFLOW_DB_MODE is refused by runtime-db-config.ts, which the
-  // runtime guard also runs, with its own actionable message.) `allowedIn: ['provisioner']` leaves the
-  // provisioner process role exactly as it was (the separate process was removed in X5.1; the role stays until the legacy
-  // names are refused everywhere, X3.5-S8).
-  { name: 'DATABASE_URL', why: `It is the retired name of PG_DATABASE_URL. Rename it to PG_DATABASE_URL (the one owner-login URL).`, ...OWNER_LOGIN },
-  { name: 'DATABASE_DIRECT_URL', why: ONE_URL, ...OWNER_LOGIN },
+  // runtime guard also runs, with its own actionable message.) The two legacy names below are refused in every runtime
+  // process, the provisioner role included (X3.5-S8: the connection factory refuses them in every environment too). For the
+  // other entries `allowedIn: ['provisioner']` leaves the provisioner process role exactly as it was (the separate process
+  // was removed in X5.1).
+  { name: 'DATABASE_URL', why: `It is the retired name of PG_DATABASE_URL. Rename it to PG_DATABASE_URL (the one owner-login URL).` },
+  { name: 'DATABASE_DIRECT_URL', why: `${ONE_URL} (It is a retired legacy name, X3.5-S8: point PG_DATABASE_URL at a direct connection instead.)` },
   { name: 'PG_DATABASE_REPLICA_URL', why: ONE_URL, ...OWNER_LOGIN },
   { name: 'PG_WORKER_DATABASE_URL', why: ONE_URL, ...OWNER_LOGIN },
   { name: 'CREWFLOW_WORKER_BOOTSTRAP_PASSWORD', why: ROLE_PASSWORD, ...OWNER_LOGIN },

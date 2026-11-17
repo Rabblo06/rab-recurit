@@ -10,7 +10,7 @@ import { integrationTestDatabaseReady } from '../../database/typeorm/core/integr
 
 /**
  * M10 lane C — CrewflowAppCopiedWriteGrantRevoke1786720020000. Disposable database only (bootstrap superuser as
- * TEST_DATABASE_URL_UNPOOLED, crewflow_app as TEST_DATABASE_URL).
+ * TEST_DATABASE_ADMIN_URL, crewflow_app as TEST_DATABASE_URL).
  *
  * Abuse cases (CLAUDE.md testing floor — the denial, not just the happy path):
  *  - the runtime role, inside its OWN organisation's bound context where the row is visible, cannot INSERT/UPDATE/DELETE
@@ -65,7 +65,7 @@ describeIfDb('crewflow_app copied write grants revoked (1786720020000)', () => {
     admin = new Client({ connectionString: adminUrl });
     await admin.connect();
     if (!(await admin.query('SELECT rolsuper FROM pg_roles WHERE rolname = current_user')).rows[0].rolsuper) {
-      throw new Error('this suite needs the disposable database bootstrap superuser as TEST_DATABASE_URL_UNPOOLED');
+      throw new Error('this suite needs the disposable database bootstrap superuser as TEST_DATABASE_ADMIN_URL');
     }
     // P-class (owner-login architecture): crewflow_app is a SCHEMA ROLE now (no process connects as it). `app` acts as it
     // through a dedicated fixture-superuser connection with a session SET ROLE, so every grant assertion of this suite still

@@ -101,7 +101,7 @@ A mock value refuses to boot outside tests, and the old key name refuses to boot
 | `PG_SSL_CA_CERT_PATH`, `PG_SSL_ALLOW_SELF_SIGNED`, `PG_DATABASE_URL_IS_DIRECT` | TLS (production: verify-full only) and the direct-connection declaration. |
 | `PG_DATABASE_REPLICA_URL`, `PG_DATABASE_REPLICA_TIMEOUT_MS`, `PG_DATABASE_REPLICA_MAX_LAG_MS` | Optional read replica. |
 | `CREWFLOW_DEPLOYMENT_ENVIRONMENT`, `CREWFLOW_DEPLOYMENT_ID`, `PG_EXPECTED_DATABASE_NAME` | Deployment identity, compared with the database's protected marker (required in production). |
-| `DATABASE_URL_UNPOOLED`, `DATABASE_DIRECT_URL`, `DB_POOL_MAX` | Deprecated; non-production only, refused in production. Migrations take their own `PG_DATABASE_URL` in the one-off `rab-migrate` step. |
+| `DATABASE_URL`, `DATABASE_URL_UNPOOLED`, `DATABASE_DIRECT_URL`, `DB_POOL_MAX` | Removed. Refused in every environment and every process (API, Worker, CLI, migrations, Jest); the refusal names the replacement: `PG_DATABASE_URL` (a direct connection) and `PG_POOL_MAX_CONNECTIONS`. Integration tests use `TEST_DATABASE_ADMIN_URL`, not `TEST_DATABASE_URL_UNPOOLED`. |
 | `CREWFLOW_PROVISIONER_ENABLED`, `CREWFLOW_PROVISIONER_DATABASE_URL`, `WORKSPACE_PROVISIONER_INTERVAL_SECONDS` | The Worker's workspace provisioner. Set the switch explicitly to `true` or `false`. See [Deployment](/developers/deployment#environment). |
 | `BOOTSTRAP_ADMIN_EMAIL` | The `bootstrap-admin` command. |
 

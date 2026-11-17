@@ -39,73 +39,78 @@ function refusal(env: Record<string, string | undefined>, options?: ResolvePgOpt
   throw new Error('expected a refusal');
 }
 
-describe('pg-config: primary URL and legacy names (outside production)', () => {
-  it('PG_DATABASE_URL alone: the primary, the lock endpoint and no warning', () => {
+describe('pg-config: primary URL, and the legacy names refused in every environment (X3.5-S8)', () => {
+  const LEGACY_VALUES: Record<string, string> = {
+    DATABASE_URL: APP,
+    DATABASE_URL_UNPOOLED: `postgres://crewflow:${OTHER_SECRET}@localhost/rab`,
+    DATABASE_DIRECT_URL: APP,
+    DB_POOL_MAX: '12',
+  };
+  const REPLACEMENT: Record<string, RegExp> = {
+    DATABASE_URL: /DATABASE_URL -> use PG_DATABASE_URL/,
+    DATABASE_URL_UNPOOLED: /DATABASE_URL_UNPOOLED -> use PG_DATABASE_URL \(every process.*TEST_DATABASE_ADMIN_URL\)/,
+    DATABASE_DIRECT_URL: /DATABASE_DIRECT_URL -> use PG_DATABASE_URL pointed at a direct \(non-pooled\) connection/,
+    DB_POOL_MAX: /DB_POOL_MAX -> use PG_POOL_MAX_CONNECTIONS/,
+  };
+  const ALL_ROLES: PgProcessRole[] = ['api', 'worker', 'provisioner', 'cli', 'migrate'];
+
+  it('PG_DATABASE_URL alone: the primary, the lock endpoint and no warning; there is no elevated endpoint', () => {
     const r = resolvePgEnvironment({ PG_DATABASE_URL: APP });
     expect(r.production).toBe(false);
     expect(r.primary.source).toBe('PG_DATABASE_URL');
     expect(r.lock).toBe(r.primary);
-    expect(r.elevated).toBeNull();
+    expect('elevated' in r).toBe(false);
     expect(r.warnings).toEqual([]);
     expect(r.pool).toEqual({ max: 10, idleTimeoutMillis: 600_000, allowExitOnIdle: false });
     expect(r.queryTimeoutMs).toBe(30_000);
   });
 
-  it('legacy DATABASE_URL alone is accepted with a deprecation warning', () => {
-    const r = resolvePgEnvironment({ DATABASE_URL: APP });
-    expect(r.primary.source).toBe('DATABASE_URL');
-    expect(r.primary.deprecated).toBe(true);
-    expect(r.warnings.join('\n')).toMatch(/DATABASE_URL is deprecated; set PG_DATABASE_URL/);
+  it.each(Object.keys(LEGACY_VALUES))('%s is refused in every non-production environment and process role, naming its replacement (names only)', (name) => {
+    for (const extra of [{}, { NODE_ENV: 'development' }, { NODE_ENV: 'test' }, { DB_TARGET: 'local' }, { DB_TARGET: 'test' }]) {
+      for (const role of ALL_ROLES) {
+        // Alone (the old fallback), next to PG_DATABASE_URL naming the same target, and next to PG_DATABASE_URL naming another.
+        for (const env of [{ ...extra, [name]: LEGACY_VALUES[name] }, { ...extra, PG_DATABASE_URL: APP, [name]: LEGACY_VALUES[name] }]) {
+          const message = refusal(env, { processRole: role });
+          expect(message).toMatch(new RegExp(`^the ${role} process refuses the legacy database variable\\(s\\) ${name}: .*X3\\.5-S8.*every environment`));
+          expect(message).toMatch(REPLACEMENT[name]);
+          expect(message).toMatch(/Refusing to start\.$/);
+        }
+      }
+    }
   });
 
-  it('both set naming the same target (password not compared): accepted, the legacy one flagged as redundant', () => {
-    const r = resolvePgEnvironment({ PG_DATABASE_URL: APP, DATABASE_URL: `postgres://crewflow_app:${OTHER_SECRET}@LOCALHOST/rab` });
+  it('the env.validation path (enforceProcessPolicy=false) refuses them too, and every held name is listed', () => {
+    const message = refusal({ PG_DATABASE_URL: APP, ...LEGACY_VALUES }, { processRole: 'api', enforceProcessPolicy: false });
+    expect(message).toMatch(/refuses the legacy database variable\(s\) DATABASE_URL, DATABASE_URL_UNPOOLED, DATABASE_DIRECT_URL, DB_POOL_MAX:/);
+    for (const re of Object.values(REPLACEMENT)) expect(message).toMatch(re);
+  });
+
+  it('an empty or blank legacy value counts as unset (compose renders unset variables as empty; the Jest routing blanks them)', () => {
+    const r = resolvePgEnvironment({ PG_DATABASE_URL: APP, DATABASE_URL: '', DATABASE_URL_UNPOOLED: '  ', DATABASE_DIRECT_URL: '', DB_POOL_MAX: ' ' }, { processRole: 'cli' });
     expect(r.primary.source).toBe('PG_DATABASE_URL');
-    expect(r.primary.target.password).toBe(SECRET);
-    expect(r.warnings.join('\n')).toMatch(/redundant/);
+    expect(r.warnings).toEqual([]);
   });
 
-  it.each([
-    ['another database', `postgres://crewflow_app:${SECRET}@localhost:5432/other`],
-    ['another user', `postgres://crewflow:${SECRET}@localhost:5432/rab`],
-    ['another host', `postgres://crewflow_app:${SECRET}@db.example.com:5432/rab`],
-    ['another port', `postgres://crewflow_app:${SECRET}@localhost:5433/rab`],
-  ])('both set naming different targets (%s): refused', (_name, legacy) => {
-    expect(refusal({ PG_DATABASE_URL: APP, DATABASE_URL: legacy })).toMatch(/PG_DATABASE_URL and the legacy DATABASE_URL .* different targets/);
+  it('the legacy refusal comes before "PG_DATABASE_URL is required" (the operator learns the rename, not only that a name is missing)', () => {
+    expect(refusal({ DATABASE_URL: APP })).toMatch(/refuses the legacy database variable\(s\) DATABASE_URL: /);
   });
 
-  it('nothing set: refused, naming both variables', () => {
-    expect(refusal({})).toMatch(/PG_DATABASE_URL is required.*deprecated DATABASE_URL/);
+  it('nothing set: refused', () => {
+    expect(refusal({})).toMatch(/^PG_DATABASE_URL is required\. Refusing to start\.$/);
     expect(refusal({ PG_DATABASE_URL: '  ', DATABASE_URL: '' })).toMatch(/PG_DATABASE_URL is required/);
   });
 
-  it('DATABASE_DIRECT_URL next to PG_DATABASE_URL must name the same target', () => {
-    expect(refusal({ PG_DATABASE_URL: APP, DATABASE_DIRECT_URL: `postgres://crewflow_app:${SECRET}@db.example.com:5432/rab` })).toMatch(
-      /DATABASE_DIRECT_URL .* different targets/,
-    );
-    const r = resolvePgEnvironment({ PG_DATABASE_URL: APP, DATABASE_DIRECT_URL: APP });
-    expect(r.lock).toBe(r.primary);
+  it('the memoised resolution never hides a legacy name that appears after a clean hit', () => {
+    const clean = { PG_DATABASE_URL: APP, NODE_ENV: 'test' };
+    expect(resolvePgEnvironmentCached(clean, { processRole: 'cli' }).primary.source).toBe('PG_DATABASE_URL');
+    for (const name of Object.keys(LEGACY_VALUES)) {
+      expect(() => resolvePgEnvironmentCached({ ...clean, [name]: LEGACY_VALUES[name] }, { processRole: 'cli' })).toThrow(/refuses the legacy database variable/);
+    }
   });
 
-  it('legacy pair DATABASE_URL (pooled) + DATABASE_DIRECT_URL: the direct one becomes the lock endpoint (same database required)', () => {
-    const pooled = `postgres://crewflow_app:${SECRET}@ep-a-1-pooler.eu-west-2.aws.neon.tech/neondb?sslmode=require`;
-    const direct = `postgres://crewflow_app:${SECRET}@ep-a-1.eu-west-2.aws.neon.tech/neondb?sslmode=require`;
-    const r = resolvePgEnvironment({ DATABASE_URL: pooled, DATABASE_DIRECT_URL: direct }, { processRole: 'api' });
-    expect(r.lock.source).toBe('DATABASE_DIRECT_URL');
-    expect(r.lock.target.transactionPooler).toBeNull();
-    expect(refusal({ DATABASE_URL: APP, DATABASE_DIRECT_URL: `postgres://crewflow_app:${SECRET}@localhost/other` })).toMatch(/different databases/);
-  });
-
-  it('DATABASE_URL_UNPOOLED is the elevated endpoint (deprecated), never the primary', () => {
-    const r = resolvePgEnvironment({ DATABASE_URL: APP, DATABASE_URL_UNPOOLED: `postgres://crewflow:${OTHER_SECRET}@localhost/rab` });
-    expect(r.primary.target.user).toBe('crewflow_app');
-    expect(r.elevated?.target.user).toBe('crewflow');
-    expect(r.warnings.join('\n')).toMatch(/DATABASE_URL_UNPOOLED is deprecated/);
-  });
-
-  it('readPrimaryDatabaseUrl: PG_DATABASE_URL first, legacy only outside production', () => {
+  it('readPrimaryDatabaseUrl: PG_DATABASE_URL only, never the legacy DATABASE_URL', () => {
     expect(readPrimaryDatabaseUrl({ PG_DATABASE_URL: APP, DATABASE_URL: 'x' })?.name).toBe('PG_DATABASE_URL');
-    expect(readPrimaryDatabaseUrl({ DATABASE_URL: APP })?.name).toBe('DATABASE_URL');
+    expect(readPrimaryDatabaseUrl({ DATABASE_URL: APP })).toBeNull();
     expect(readPrimaryDatabaseUrl({ DATABASE_URL: APP, NODE_ENV: 'production' })).toBeNull();
   });
 });
@@ -177,10 +182,10 @@ describe('pg-config: strict numbers and booleans (the DB_POOL_MAX fallback bug)'
     expect(r.queryTimeoutMs).toBe(45_000);
   });
 
-  it('legacy DB_POOL_MAX: strictly validated, deprecated, and refused when it disagrees with PG_POOL_MAX_CONNECTIONS', () => {
-    expect(resolvePgEnvironment({ DATABASE_URL: APP, DB_POOL_MAX: '12' }).pool.max).toBe(12);
-    expect(refusal({ DATABASE_URL: APP, DB_POOL_MAX: 'abc' })).toMatch(/DB_POOL_MAX must be a whole number/);
-    expect(refusal({ PG_DATABASE_URL: APP, PG_POOL_MAX_CONNECTIONS: '10', DB_POOL_MAX: '20' })).toMatch(/both set and differ/);
+  it('X3.5-S8: the legacy DB_POOL_MAX is refused whatever its value, even when it agrees with PG_POOL_MAX_CONNECTIONS', () => {
+    for (const value of ['12', 'abc', '10']) {
+      expect(refusal({ PG_DATABASE_URL: APP, PG_POOL_MAX_CONNECTIONS: '10', DB_POOL_MAX: value })).toMatch(/DB_POOL_MAX -> use PG_POOL_MAX_CONNECTIONS/);
+    }
   });
 
   it('PG_DATABASE_PRIMARY_TIMEOUT_MS below the 30 s statement timeout is refused (the client must not give up first)', () => {
@@ -222,8 +227,8 @@ describe('pg-config: pooler policy (P4)', () => {
 
 describe('pg-config: warnings', () => {
   it('prints each warning once per process, names only, and is NOT silent under NODE_ENV=test (X3.5-S6, DBR-08)', () => {
-    const r = resolvePgEnvironment({ DATABASE_URL: APP });
-    expect(r.warnings.join('\n')).toMatch(/DATABASE_URL is deprecated/);
+    const r = resolvePgEnvironment({ PG_DATABASE_URL: `postgres://crewflow_app:${SECRET}@ep-a-1-pooler.eu-west-2.aws.neon.tech/neondb?sslmode=require` }, { processRole: 'api' });
+    expect(r.warnings.join('\n')).toMatch(/transaction-pooler shape/);
     expect(r.warnings.join('\n')).not.toContain(SECRET);
     // The once-per-process set is module-wide, so this case uses a warning no other case can have emitted already.
     const unique = { ...r, warnings: ['X3.5-S6 emit-once probe (pg-config.spec)'] };
@@ -235,23 +240,10 @@ describe('pg-config: warnings', () => {
     expect(lines).toHaveLength(1);
   });
 
-  it('X3.5-S6 CI strict switch: PG_LEGACY_NAMES_STRICT=true refuses every legacy name outside production too (names only)', () => {
-    for (const name of ['DATABASE_URL', 'DATABASE_URL_UNPOOLED', 'DATABASE_DIRECT_URL', 'DB_POOL_MAX']) {
-      const value = name === 'DB_POOL_MAX' ? '5' : APP;
-      const message = refusal({ PG_DATABASE_URL: APP, [name]: value, PG_LEGACY_NAMES_STRICT: 'true' }, { processRole: 'cli' });
-      expect(message).toMatch(new RegExp(`PG_LEGACY_NAMES_STRICT=true refuses the legacy database variable\\(s\\) ${name}\\.`));
-      expect(message).not.toContain(SECRET);
+  it('X3.5-S8: the release-1 strict switch is gone; the refusal no longer depends on PG_LEGACY_NAMES_STRICT', () => {
+    for (const strict of [undefined, 'false', 'true', '']) {
+      expect(refusal({ DATABASE_URL: APP, PG_LEGACY_NAMES_STRICT: strict }, { processRole: 'cli' })).toMatch(/refuses the legacy database variable\(s\) DATABASE_URL/);
     }
-    // Off (unset / false): release-1 behaviour, the legacy name is still accepted with a warning.
-    for (const strict of [undefined, 'false', '']) {
-      const r = resolvePgEnvironment({ DATABASE_URL: APP, PG_LEGACY_NAMES_STRICT: strict }, { processRole: 'cli' });
-      expect(r.primary.source).toBe('DATABASE_URL');
-      expect(r.warnings.join('\n')).toMatch(/DATABASE_URL is deprecated/);
-    }
-    // On with only PG_DATABASE_URL: nothing changes. An empty legacy value counts as unset (the routed Jest environment).
-    expect(resolvePgEnvironment({ PG_DATABASE_URL: APP, DATABASE_URL: '', PG_LEGACY_NAMES_STRICT: 'true' }, { processRole: 'cli' }).warnings).toEqual([]);
-    // Fail closed on a typo, never silently off.
-    expect(refusal({ PG_DATABASE_URL: APP, PG_LEGACY_NAMES_STRICT: 'yes' }, { processRole: 'cli' })).toMatch(/PG_LEGACY_NAMES_STRICT must be exactly true or false/);
   });
 
   it('presentLegacyPgEnvNames lists the legacy names that hold a value (empty counts as unset), names only', () => {
@@ -270,10 +262,10 @@ describe('pg-config: `options=-c role=…` (the M2 restricted-migrator harness) 
   const phaseA = `postgres://rab_ci_migrator:${SECRET}@127.0.0.1:15436/m2_db?options=-c+role%3Drab_owner`;
 
   it.each(['test', 'local'])('accepted for the migrate process with DB_TARGET=%s, and sent as a startup option', (target) => {
-    const r = resolvePgEnvironment({ DATABASE_URL: phaseA, DATABASE_URL_UNPOOLED: phaseA, DB_TARGET: target }, { processRole: 'migrate' });
+    const r = resolvePgEnvironment({ PG_DATABASE_URL: phaseA, DB_TARGET: target }, { processRole: 'migrate' });
     expect(r.allowSessionRole).toBe(true);
-    expect(r.elevated?.target.sessionRoleOption).toBe('-c role=rab_owner');
-    expect(pgClientConfig(r, { endpoint: 'elevated', purpose: 'runtime' }).options).toBe(
+    expect(r.primary.target.sessionRoleOption).toBe('-c role=rab_owner');
+    expect(pgClientConfig(r, { endpoint: 'primary', purpose: 'runtime' }).options).toBe(
       '-c role=rab_owner -c statement_timeout=30000 -c idle_in_transaction_session_timeout=60000',
     );
   });
@@ -303,21 +295,17 @@ describe('pg-config: selectMigrationEndpoint (shared with the migrate runner)', 
   const MIGRATOR = `postgres://crewflow_migrator:${SECRET}@localhost:5432/rab`;
   const OWNER = `postgres://crewflow:${OTHER_SECRET}@localhost:5432/rab`;
 
-  it('PG_DATABASE_URL alone → primary; legacy UNPOOLED without PG_DATABASE_URL → elevated', () => {
+  it('PG_DATABASE_URL → the primary endpoint, the only one', () => {
     const env1 = { PG_DATABASE_URL: MIGRATOR };
-    expect(selectMigrationEndpoint(resolvePgEnvironment(env1, { processRole: 'migrate' }), env1).name).toBe('primary');
-    const env2 = { DATABASE_URL: APP, DATABASE_URL_UNPOOLED: OWNER };
-    const chosen = selectMigrationEndpoint(resolvePgEnvironment(env2, { processRole: 'migrate' }), env2);
-    expect(chosen.name).toBe('elevated');
-    expect(chosen.endpoint.target.user).toBe('crewflow');
+    const chosen = selectMigrationEndpoint(resolvePgEnvironment(env1, { processRole: 'migrate' }), env1);
+    expect(chosen.name).toBe('primary');
+    expect(chosen.endpoint.target.user).toBe('crewflow_migrator');
   });
 
-  it('PG_DATABASE_URL with a DATABASE_URL_UNPOOLED naming another target is refused (no silent preference)', () => {
-    const env = { PG_DATABASE_URL: MIGRATOR, DATABASE_URL_UNPOOLED: OWNER };
-    const r = resolvePgEnvironment(env, { processRole: 'migrate' });
-    expect(() => selectMigrationEndpoint(r, env)).toThrow(/both set and name different targets/);
-    const same = { PG_DATABASE_URL: MIGRATOR, DATABASE_URL_UNPOOLED: MIGRATOR };
-    expect(selectMigrationEndpoint(resolvePgEnvironment(same, { processRole: 'migrate' }), same).name).toBe('primary');
+  it('X3.5-S8: the migrate process refuses DATABASE_URL_UNPOOLED (alone, or next to PG_DATABASE_URL with the same or another target)', () => {
+    for (const env of [{ DATABASE_URL: APP, DATABASE_URL_UNPOOLED: OWNER }, { PG_DATABASE_URL: MIGRATOR, DATABASE_URL_UNPOOLED: OWNER }, { PG_DATABASE_URL: MIGRATOR, DATABASE_URL_UNPOOLED: MIGRATOR }]) {
+      expect(refusal(env, { processRole: 'migrate' })).toMatch(/^the migrate process refuses the legacy database variable\(s\) .*DATABASE_URL_UNPOOLED/);
+    }
   });
 
   it('production refuses a PG_DATABASE_URL equal to the .env value', () => {
@@ -441,7 +429,7 @@ describe('pg-config: the retired operations-container variables (rab-ops removed
       const r = resolvePgEnvironment({ PG_DATABASE_URL: APP, CREWFLOW_OPS_RUN: '', PG_OPS_APP_DATABASE_URL: '  ' }, { processRole: role });
       expect(r.processRole).toBe(role);
       expect(r.primary.source).toBe('PG_DATABASE_URL');
-      expect(r.elevated).toBeNull();
+      expect('elevated' in r).toBe(false);
       expect('ops' in r).toBe(false);
     }
   });

@@ -87,7 +87,7 @@ describeIfDb('F4: workspace schemas are covered by check-rls-coverage and the po
     admin = new Client({ connectionString: adminUrl });
     await admin.connect();
     const [{ rolsuper }] = (await admin.query(`SELECT rolsuper FROM pg_roles WHERE rolname = current_user`)).rows;
-    if (!rolsuper) throw new Error('this suite needs the disposable database bootstrap superuser as TEST_DATABASE_URL_UNPOOLED');
+    if (!rolsuper) throw new Error('this suite needs the disposable database bootstrap superuser as TEST_DATABASE_ADMIN_URL');
     const [{ num }] = (await admin.query(`SELECT current_setting('server_version_num')::int AS num`)).rows;
     expect(selectSecurityPostureGolden(goldens, Math.floor(num / 10000)).filter((l) => l.startsWith('ws|')).length).toBeGreaterThan(300);
   });
