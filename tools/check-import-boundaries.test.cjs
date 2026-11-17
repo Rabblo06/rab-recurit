@@ -456,3 +456,117 @@ test('--base: a file that already imported the target at the base cannot fill th
   assert.equal(base.code, 1);
   assert.match(base.out, /WRONG TARGET .* adds 0 edge\(s\) to it/);
 });
+
+// ---- Review of #225, F1: a consumed approval must never deadlock the gate. ----
+
+const OTHER_APPROVAL = Object.freeze({ rule: 'worker-deep-import', file: 'packages/rab-worker/src/queues/q/y.job.ts', from: 0, to: 1, approved: 'owner 2026-11-17', reason: 'another fixture' });
+
+test('compareToBase: a stale base approval is reported only while the head still lists it (rule and file)', () => {
+  const base = { 'worker-deep-import': { [WF]: 2 } };
+  const r1 = check.compareToBase(base, base, [APPROVAL], [APPROVAL]);
+  assert.deepEqual(r1.staleApproved.map((s) => `${s.file}:${s.from}:${s.base}`), [`${WF}:1:2`]);
+  assert.deepEqual(check.compareToBase(base, base, [APPROVAL], []).staleApproved, []);
+  assert.deepEqual(check.compareToBase(base, base, [APPROVAL], [OTHER_APPROVAL]).staleApproved, []);
+  // Default (no head list given): every stale base entry is reported.
+  assert.equal(check.compareToBase(base, base, [APPROVAL]).staleApproved.length, 1);
+  // Growth is decided by the base list only: an approval present only in the head never accepts a growth.
+  const grown = check.compareToBase({ 'worker-deep-import': { [WF]: 1 } }, { 'worker-deep-import': { [WF]: 2 } }, [], [APPROVAL]).grown;
+  assert.deepEqual(grown.map((g) => `${g.file}:${g.base}->${g.head}`), [`${WF}:1->2`]);
+});
+
+test('--base: a branch that deletes a consumed approval (base count already at `to`) passes', (t) => {
+  const r = seed(t, [APPROVAL], [T_OLD, AUDIT]); // the using PR merged without deleting its entry
+  r.write(check.APPROVALS_REL, approvalsDoc([]));
+  r.commit('delete the consumed approval');
+  const { code, out } = run(['--base', 'main'], r.dir);
+  assert.equal(code, 0, out);
+  assert.match(out, /0 stale approval\(s\), 0 approval\(s\) in force on main/);
+});
+
+test('--base: an unrelated branch that still lists the consumed approval fails STALE', (t) => {
+  const r = seed(t, [APPROVAL], [T_OLD, AUDIT]);
+  r.write('README.md', 'unrelated\n');
+  r.commit('unrelated change');
+  const { code, out } = run(['--base', 'main'], r.dir);
+  assert.equal(code, 1);
+  assert.match(out, /STALE APPROVAL worker-deep-import\s+packages\/rab-worker\/src\/queues\/q\/x\.job\.ts: approved from 1, main has 2/);
+});
+
+test('--base: the using PR may delete exactly its own used entry in the same PR', (t) => {
+  const r = seed(t, [APPROVAL, OTHER_APPROVAL]);
+  r.write(WF, importOf(T_OLD) + importOf(AUDIT));
+  r.write(check.BASELINE_REL, baselineDoc(2));
+  r.write(check.APPROVALS_REL, approvalsDoc([OTHER_APPROVAL]));
+  r.commit('use and consume the approval');
+  const { code, out } = run(['--base', 'main'], r.dir);
+  assert.equal(code, 0, out);
+  assert.match(out, /CONSUMED worker-deep-import\s+packages\/rab-worker\/src\/queues\/q\/x\.job\.ts/);
+  assert.doesNotMatch(out, /CHANGED TOGETHER/);
+});
+
+test('--base: the using PR that also edits, adds or removes any other entry still fails CHANGED TOGETHER', (t) => {
+  const usingPr = (baseList, headList) => {
+    const r = seed(t, baseList);
+    r.write(WF, importOf(T_OLD) + importOf(AUDIT));
+    r.write(check.BASELINE_REL, baselineDoc(2));
+    r.write(check.APPROVALS_REL, approvalsDoc(headList));
+    r.commit('use, delete and change something else');
+    return run(['--base', 'main'], r.dir);
+  };
+  const cases = {
+    'edits another entry': usingPr([APPROVAL, OTHER_APPROVAL], [{ ...OTHER_APPROVAL, reason: 'edited' }]),
+    'adds another entry': usingPr([APPROVAL], [OTHER_APPROVAL]),
+    'removes another entry too': usingPr([APPROVAL, OTHER_APPROVAL], []),
+    'keeps its own entry but edits it': usingPr([APPROVAL], [{ ...APPROVAL, reason: 'edited' }]),
+  };
+  for (const [name, { code, out }] of Object.entries(cases)) {
+    assert.equal(code, 1, name);
+    assert.match(out, /CHANGED TOGETHER tools\/import-boundaries\.approved\.json and tools\/import-boundaries\.baseline\.json/, name);
+    assert.doesNotMatch(out, /CONSUMED/, name);
+  }
+  // A `_comment` edit next to the removal is not a pure removal either.
+  const r = seed(t, [APPROVAL]);
+  r.write(WF, importOf(T_OLD) + importOf(AUDIT));
+  r.write(check.BASELINE_REL, baselineDoc(2));
+  r.write(check.APPROVALS_REL, `${JSON.stringify({ _comment: ['edited'], approved: [] }, null, 2)}\n`);
+  r.commit('remove and edit the comment');
+  assert.equal(run(['--base', 'main'], r.dir).code, 1);
+});
+
+test('isRemovalOfUsedOnly: exactly the base list minus the used entries, nothing else', () => {
+  const baseDoc = { comment: ['c'], approved: [APPROVAL, OTHER_APPROVAL] };
+  assert.equal(check.isRemovalOfUsedOnly(baseDoc, { comment: ['c'], approved: [{ ...OTHER_APPROVAL }] }, [APPROVAL]), true);
+  assert.equal(check.isRemovalOfUsedOnly(baseDoc, { comment: ['c'], approved: [APPROVAL, OTHER_APPROVAL] }, []), false);
+  assert.equal(check.isRemovalOfUsedOnly(baseDoc, { comment: ['c'], approved: [] }, [APPROVAL]), false);
+  assert.equal(check.isRemovalOfUsedOnly(baseDoc, { comment: ['d'], approved: [OTHER_APPROVAL] }, [APPROVAL]), false);
+  assert.equal(check.isRemovalOfUsedOnly(baseDoc, { comment: ['c'], approved: [{ ...OTHER_APPROVAL, to: 2 }] }, [APPROVAL]), false);
+});
+
+// ---- Review of #225, F2: a base change reruns the gate; main without a baseline fails closed. ----
+
+test('ci-security reruns on a base-branch change (pull_request types include edited)', () => {
+  const yaml = fs.readFileSync(path.join(REPO, '.github/workflows/ci-security.yaml'), 'utf8');
+  const on = /^on:\n([\s\S]*?)^\S/m.exec(yaml);
+  assert.ok(on, 'an on: block');
+  assert.match(on[1], /^ {2}pull_request:\n(?: {4}#.*\n)* {4}types: \[opened, synchronize, reopened, edited\]\n/m);
+});
+
+test('--base: a main without the baseline fails closed; another base without it is "nothing to compare"', (t) => {
+  const r = fixtureRepo(t);
+  r.write('README.md', 'before the ratchet\n');
+  r.write(check.APPROVALS_REL, approvalsDoc([]));
+  r.commit('main before the baseline');
+  r.git('branch', 'release');
+  r.git('checkout', '-q', '-b', 'pr');
+  r.write(check.BASELINE_REL, baselineDoc(1));
+  r.write(WF, importOf(T_OLD));
+  r.commit('add the ratchet files');
+  const onMain = run(['--base', 'main'], r.dir);
+  assert.equal(onMain.code, 1);
+  assert.match(onMain.out, /main has no tools\/import-boundaries\.baseline\.json: refusing to pass/);
+  const onRelease = run(['--base', 'release'], r.dir);
+  assert.equal(onRelease.code, 0, onRelease.out);
+  assert.match(onRelease.out, /nothing to compare/);
+  for (const ref of ['main', 'origin/main', 'refs/heads/main', 'refs/remotes/origin/main']) assert.equal(check.isMainRef(ref), true, ref);
+  for (const ref of ['release', 'origin/release', 'main~1', 'mainline', 'feature/main']) assert.equal(check.isMainRef(ref), false, ref);
+});

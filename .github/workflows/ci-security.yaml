@@ -1,7 +1,10 @@
 name: ci-security
 
 on:
+  # `edited` is listed so that changing a PR's base branch reruns the gate: the --base ratchets (import boundaries,
+  # workspace-table-qualified) compare against the base, and a result computed against the old base must not stand.
   pull_request:
+    types: [opened, synchronize, reopened, edited]
   push:
     branches: [main]
 

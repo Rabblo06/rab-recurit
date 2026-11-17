@@ -8510,15 +8510,30 @@ Reversal:   Lower CLOCK_IN_CONFIRM_FLOOR_HOURS, or require a second approver (pa
   undated, duplicate or non-growing entry, a `file` the check does not scan, and a `target` that is not an edge of that rule
   from that file (fail closed). `compareToBase` accepts a growth only when rule and file match exactly, the base count
   equals `from` and the head count equals `to`; one more edge, another file, another rule, or a different base count still
-  fails. An entry whose `from` no longer equals the base count is reported STALE and fails `--base`, so the entry must be
-  deleted once the growth has merged and cannot be reused.
+  fails. An entry whose `from` no longer equals the base count is reported STALE and fails `--base` while the head still
+  lists it (by rule and file), so the entry must be deleted once the growth has merged and cannot be reused. Deleting it is
+  never blocked: a PR whose approvals file no longer lists a stale base entry is not failed for it (review of #225, F1:
+  before this, the stale loop read only the base list, so every PR failed, including the one deleting the entry, and the
+  using PR could not delete it either because that tripped CHANGED TOGETHER: a deadlock of a required gate). Growth is
+  still accepted only through the base list, so deleting an entry in the head can clear a hygiene failure but can never
+  accept a growth.
   - **Approvals come from the base ref.** `--base` reads the approvals file with `git show <base>:tools/import-boundaries.approved.json`
     (the same fail-closed reader as the base baseline: an unknown ref, a shallow clone or any git failure throws; only "path
     does not exist in <ref>" means no approvals) and validates it the same way. An entry added in the head is never used by
     the PR that adds it: an approval has to be merged to the base branch, in its own PR, before any PR can use it. The head
     copy is still validated, so a malformed file fails in the PR that introduces it.
   - **Not in the same diff.** `--base` fails (CHANGED TOGETHER) when the diff from the merge-base with the base ref to the
-    checkout changes the approvals file together with any `tools/*.baseline.json` (this ratchet's or another's).
+    checkout changes the approvals file together with any `tools/*.baseline.json` (this ratchet's or another's). The one
+    exception is the using PR consuming its own approval: when the head approvals document is exactly the base document
+    minus the entries this PR uses (deep equality: same `_comment`, the remaining entries unchanged and in order), `--base`
+    prints CONSUMED instead. Editing, adding or removing any other entry, or the comment, still fails CHANGED TOGETHER.
+    So the using PR deletes its entry in the same PR and no cleanup PR or red window is needed.
+  - **Base without a baseline.** When the base ref is `main` (`origin/main`, `refs/heads/main`, `refs/remotes/origin/main`)
+    and it has no `tools/import-boundaries.baseline.json`, `--base` fails closed (exit 1): main has had the baseline since
+    #191, so its absence means a broken checkout. Any other base without one is still "nothing to compare".
+  - **Base-branch change reruns the gate.** `ci-security.yaml` triggers on `pull_request` types `opened, synchronize,
+    reopened, edited`; `edited` covers a changed base branch, so a `--base` result computed against the old base does not
+    stand. (It also reruns on a title or body edit; the concurrency group cancels the older run.)
   - **Target.** With a `target`, `--base` requires the head file to have at least `to - from` more edges of that rule to
     `target` than the file at the base ref (WRONG TARGET otherwise), so a different import in the same file cannot fill the
     slot, even when the file already imported the target at the base. The tree check (no base available) requires, while
@@ -8542,7 +8557,9 @@ Reversal:   Lower CLOCK_IN_CONFIRM_FLOOR_HOURS, or require a second approver (pa
     closed: while the base still equals `from`, any PR may use the slot, and if the base later returns to `from` a forgotten
     entry would match once more. That is why a stale entry fails `--base` and must be deleted. A push to main never runs
     `--base` (the step is `if: github.event_name == 'pull_request'`), so a stale entry is caught only on the next pull
-    request; after a using PR merges, every PR is red until the cleanup PR deletes the entry.
+    request. If a using PR merges without deleting its entry (CONSUMED is allowed, not required), every later PR that still
+    lists the entry fails STALE until one of them deletes it; any PR may delete it, so this is a hygiene failure that the
+    next PR clears, not an outage.
   - `target` is optional. Without it, counts are per file, not per edge, and an approved `to` could be met by a different
     import in that file; the reviewer checks the actual import (`--list`). The tree check's target rule is presence only;
     the exact count of new edges to the target is enforced by `--base`.
@@ -8560,7 +8577,13 @@ Reversal:   Lower CLOCK_IN_CONFIRM_FLOOR_HOURS, or require a second approver (pa
   approval-only PR passes and its entry is not in force; approvals file plus a baseline in one diff fails (committed or
   uncommitted) even when the base approval matches; an approved count reached through a different import fails in
   `--base` (WRONG TARGET) and in the tree check (TARGET MISSING); a file that already imported the target at the base cannot
-  fill the slot with another import (`--base`); the tree check exits 1 when the baseline file is missing. `--base` refs:
+  fill the slot with another import (`--base`); the tree check exits 1 when the baseline file is missing. Review of #225:
+  a branch that deletes a consumed approval (base count already at `to`) exits 0, an unrelated branch that still lists it
+  exits 1 STALE; the using PR that deletes exactly its own used entry exits 0 (CONSUMED), and the same PR that also edits,
+  adds or removes another entry, keeps and edits its own, or edits `_comment` fails CHANGED TOGETHER; a stale entry is
+  reported only while the head lists it, and an approval only in the head never accepts a growth; `--base main` without a
+  baseline exits 1 while another base without one is "nothing to compare"; the `ci-security.yaml` `pull_request` trigger
+  lists `opened, synchronize, reopened, edited`. `--base` refs:
   `~N` / `^N` suffixes accepted, every other revision syntax refused, a step past the root commit throws. git's
   environment is `LC_ALL=C` without `LANGUAGE`, and a German locale in the caller still reads a missing path as absent.
 
