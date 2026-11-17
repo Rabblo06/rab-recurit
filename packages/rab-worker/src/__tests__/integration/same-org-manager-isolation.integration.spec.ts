@@ -9,6 +9,9 @@ import { AppModule } from '@rab/server/app.module';
 import { AuditService } from '@rab/server/engine/core-modules/audit/audit.service';
 import { PasswordHashingService } from '@rab/server/engine/core-modules/auth/services/password-hashing.service';
 import { AuthContext } from '@rab/server/engine/core-modules/tenant/auth-context.interface';
+
+/** AuthContext with a non-null organisationId: what these fixtures always build, and what `withContext` binds. */
+type OrgBoundContext = AuthContext & { organisationId: string };
 import { TenantContextService } from '@rab/server/engine/core-modules/tenant/tenant-context.service';
 import { AttendanceService } from '@rab/server/modules/attendance/services/attendance.service';
 import { ShiftReportService } from '@rab/server/modules/attendance/services/shift-report.service';
@@ -74,7 +77,7 @@ describeIfDb('same-organisation manager isolation (integration)', () => {
     managerB: TestIdentity;
   }
 
-  function ctxOf(identity: Pick<TestIdentity, 'organisationId' | 'workspaceId' | 'userId'>): AuthContext {
+  function ctxOf(identity: Pick<TestIdentity, 'organisationId' | 'workspaceId' | 'userId'>): OrgBoundContext {
     return { organisationId: identity.organisationId, workspaceId: identity.workspaceId, userId: identity.userId, role: 'manager' };
   }
 
@@ -338,7 +341,7 @@ describeIfDb('same-organisation manager isolation (integration)', () => {
       const request = await withContext(ctxOf(fx.managerA), (m) =>
         m.save(ReplacementRequest, {
           organisationId: fx.organisation.id,
-          workspaceId: fx.managerA.workspaceId,
+          workspaceId: fx.managerA.workspaceId!,
           shiftId: shift.id,
           declinedShiftAssignmentId: declinedAssignment.id,
           declinedOfferId: declinedOffer.id,
@@ -552,7 +555,7 @@ describeIfDb('same-organisation manager isolation (integration)', () => {
       const request = await withContext(ctxOf(fx.managerA), (m) =>
         m.save(ReplacementRequest, {
           organisationId: fx.organisation.id,
-          workspaceId: fx.managerA.workspaceId,
+          workspaceId: fx.managerA.workspaceId!,
           shiftId: shift.id,
           declinedShiftAssignmentId: declinedAssignment.id,
           declinedOfferId: declinedOffer.id,

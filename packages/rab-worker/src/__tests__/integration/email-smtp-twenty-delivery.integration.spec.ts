@@ -242,7 +242,7 @@ describeIfDb('email-twenty: SMTP delivery on the durable outbox + BullMQ (real S
     expect(sink.transmissionsTo(ADDR.temp)).toHaveLength(1);
     // The two failed attempts are kept on the job (stacktrace) — sanitized: the 451 reply with the mailbox redacted.
     expect(job.stacktrace).toHaveLength(2);
-    expect(job.stacktrace.join('\n')).toContain('451 4.7.1 <[address]>');
+    expect((job.stacktrace ?? []).join('\n')).toContain('451 4.7.1 <[address]>');
   });
 
   it('permanent rejection: 550 → FAILED after ONE attempt (UnrecoverableError), never retried, error and audit recorded', async () => {
@@ -267,7 +267,7 @@ describeIfDb('email-twenty: SMTP delivery on the durable outbox + BullMQ (real S
     expect(job.attemptsMade).toBe(2);
     expect(await rowOf(id)).toMatchObject({ status: EmailOutboxStatus.SENT, infrastructureAttemptCount: 2 });
     expect(sink.transmissionsTo(ADDR.drop).map((t) => t.outcome)).toEqual(['dropped', 'accepted']);
-    expect(job.stacktrace.join('\n')).toMatch(/\(ECONNECTION\), will retry/);
+    expect((job.stacktrace ?? []).join('\n')).toMatch(/\(ECONNECTION\), will retry/);
   });
 
   it('retry exhaustion: 451 on every attempt → FAILED at the cap of 5, the BullMQ job failed — and nothing ever retries it again', async () => {

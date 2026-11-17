@@ -1,14 +1,18 @@
 import 'reflect-metadata';
 import {
   EmploymentStatus,
+  EmploymentStatusType,
   ManagerType,
   NotificationType,
   OfferStatus,
+  OfferStatusType,
   ReplacementCandidateSnapshot,
   ReplacementRequestStatus,
   ShiftAssignmentStatus,
   ShiftStatus,
+  ShiftStatusType,
   UserStatus,
+  UserStatusType,
 } from '@rab/shared';
 import { ConflictException, NotFoundException } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
@@ -179,8 +183,8 @@ describeIfDb('replacement-staff workflow (integration)', () => {
     fx: OrgFixture,
     label: string,
     overrides?: {
-      employmentStatus?: string;
-      userStatus?: string;
+      employmentStatus?: EmploymentStatusType;
+      userStatus?: UserStatusType;
       jobRoleId?: string | null;
       availableDays?: string[] | null;
       otherSkills?: string | null;
@@ -228,7 +232,7 @@ describeIfDb('replacement-staff workflow (integration)', () => {
   async function seedDeclinedOfferShift(
     fx: OrgFixture,
     decliningStaff: StaffFixture,
-    opts?: { startsAt?: Date; endsAt?: Date; offerStatus?: string; requiredCount?: number; filledCount?: number; assignedBy?: string | null; shiftStatus?: string },
+    opts?: { startsAt?: Date; endsAt?: Date; offerStatus?: OfferStatusType; requiredCount?: number; filledCount?: number; assignedBy?: string | null; shiftStatus?: ShiftStatusType },
   ): Promise<DeclinedOfferFixture> {
     const startsAt = opts?.startsAt ?? new Date(Date.now() + 3 * 3600 * 1000);
     const endsAt = opts?.endsAt ?? new Date(startsAt.getTime() + 8 * 3600 * 1000);
@@ -718,7 +722,7 @@ describeIfDb('replacement-staff workflow (integration)', () => {
 
       const cancelShift = () => withContext({ organisationId: fx.organisationId, workspaceId: fx.workspaceId, userId: fx.managerUserId }, (m) => m.update(Shift, fixture.shiftId, { status: ShiftStatus.CANCELLED }));
       const approve = () => replacementRequestService.approve(authCtx(fx), requestId, { staffProfileId: candidate.staffProfileId });
-      await raceAndReport([approve, cancelShift]);
+      await raceAndReport<unknown>([approve, cancelShift]);
 
       const final = await getRequest(fx, requestId);
       const offerCount = await withContext({ organisationId: fx.organisationId, workspaceId: fx.workspaceId, userId: fx.managerUserId }, (m) =>
