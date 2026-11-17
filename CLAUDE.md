@@ -126,14 +126,15 @@ structural changes.
   refuses to boot (env is validated on process start). An unknown state
   transition is rejected, never silently accepted. A query run with no tenant
   context bound returns zero rows, never all rows.
-  - **Owner exception (2026-11-05, C3, like Twenty):** an upgrade migration
-    failure continues start-up by default. The API logs an ERROR naming the
-    failed migration and serves. The Worker also starts, and runs every job,
-    when the pending migrations are an in-order tail of its chain (decided
-    from the database alone). A first-install failure, and identity,
-    config and RLS failures, still fail closed. Do not widen this exception:
-    no other gate may be downgraded because of it (THREAT-MODEL consequence
-    item 13 lists the gates that still refuse).
+  - **Upgrade failures (OWNER-DB-ULTIMATE Part B3; replaces the earlier C3
+    "continue on migration failure" exception):** a failed migration, or a
+    version too old to upgrade from, refuses to start (exit 66 or 65) and
+    retries on the next start. Only a failed upgrade COMMAND, after every
+    migration applied and the post-checks passed, starts degraded (exit 70):
+    the API serves, `/healthz` shows `upgradeFailed: true`, and the affected
+    workspaces are blocked ("Workspace is being upgraded"). `--force` exists
+    only on the manual `upgrade` command. Do not widen this: no other gate
+    may be downgraded (`migrate-on-start.ts`, `api-prestart.sh`).
 - **404, not 403, for a record outside the caller's tenant, venue, or own
   scope.** A 403 confirms the row exists, which is itself a disclosure. 403 is
   reserved for "this exists and you may see it exists, but you categorically
