@@ -30,6 +30,7 @@ import { EnvironmentService } from '@rab/server/engine/core-modules/environment/
 import { FakeFcmDriver } from '@rab/server/engine/core-modules/push/drivers/fake-fcm.driver';
 import { PushDelivery } from '@rab/server/engine/core-modules/push/entities/push-delivery.entity';
 import { PushDeviceService } from '@rab/server/engine/core-modules/push/push-device.service';
+import { AuditService } from '@rab/server/engine/core-modules/audit/audit.service';
 import { PushService } from '@rab/server/engine/core-modules/push/push.service';
 import { realtimeUserChannel } from '@rab/server/engine/core-modules/realtime/realtime-envelope';
 import { SecretEncryptionService } from '@rab/server/engine/core-modules/secret-encryption/secret-encryption.service';
@@ -182,7 +183,7 @@ describeIfDb('Phase A gating — realtime publish / push dispatch adapters do no
     expect(deps.pushQueue.publish).toHaveBeenCalledWith(deliveryId, manager.organisationId);
     // ... and the real send processor delivers it through the FAKE provider (PUSH_PROVIDER=FAKE in tests).
     FakeFcmDriver.reset();
-    const send = createPushSendProcessor({ tenantContext, pushService: app.get(PushService), secretEncryption: app.get(SecretEncryptionService), pushDeviceService: app.get(PushDeviceService) });
+    const send = createPushSendProcessor({ tenantContext, pushService: app.get(PushService), secretEncryption: app.get(SecretEncryptionService), pushDeviceService: app.get(PushDeviceService), auditService: app.get(AuditService) });
     await send({ data: { pushDeliveryId: deliveryId, organisationId: manager.organisationId }, attemptsMade: 0 } as never);
     expect((await deliveryRow()).status).toBe('ACCEPTED');
   });
