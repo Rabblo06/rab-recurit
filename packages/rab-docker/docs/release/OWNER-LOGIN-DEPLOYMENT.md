@@ -553,10 +553,15 @@ that row. The first start then refuses with `rab_owner: unexpected member <admin
   - The provider extras in the section 4 table still apply (extensions, ports, `rds.restrict_password_commands`).
 - **A direct (non-pooler) host.** Never a transaction pooler: Neon `-pooler`, Supabase `:6543`, DigitalOcean `:25061`,
   RDS Proxy, PgBouncer `:6432`.
-- **TLS:** `sslmode=verify-full` on both the admin connection and `PG_DATABASE_URL`. If the provider's CA is not in the
-  system store, set `CREWFLOW_PG_CA_FILE` in `compose.env` and `PG_SSL_CA_CERT_PATH=/run/crewflow/pg-ca.crt` in
-  `database.env` (section 2).
-- **`password_encryption = scram-sha-256`.** This is the default on 14+. The script refuses otherwise.
+- **TLS:** `sslmode=verify-full` on both the admin connection and `PG_DATABASE_URL`.
+  - For the admin's psql, add `sslrootcert=system` (libpq 16+) when the provider's certificate chains to a public CA:
+    libpq then verifies against the operating system's trust store instead of `~/.postgresql/root.crt`. Otherwise
+    point `sslrootcert=` at the provider's CA file.
+  - `PG_DATABASE_URL` takes `sslmode` only: the app's URL policy refuses every other `ssl*` parameter. If the
+    provider's CA is not in the system store, set `CREWFLOW_PG_CA_FILE` in `compose.env` and
+    `PG_SSL_CA_CERT_PATH=/run/crewflow/pg-ca.crt` in `database.env` (section 2).
+- **`password_encryption = scram-sha-256`.** This is the default on 14+. The script refuses otherwise; then run psql
+  with `PGOPTIONS='-c password_encryption=scram-sha-256'`.
 
 ### Steps
 
@@ -568,27 +573,49 @@ that row. The first start then refuses with `rab_owner: unexpected member <admin
 
    Any 1-1024 characters without control characters works. 64 hex characters need no URL encoding.
 
-2. As the admin, connected to the empty target database, run:
+2. As the admin, connected to the empty target database, run the file:
 
    ```bash
-   psql "postgresql://<admin>@<direct-host>:5432/<database>?sslmode=verify-full" -X \
-     -f packages/rab-docker/postgres-init/owner-login/own-database-app-login.sql
+   psql "postgresql://<admin>@<direct-host>:5432/<database>?sslmode=verify-full&sslrootcert=system" \
+     -X -v ON_ERROR_STOP=1 -f packages/rab-docker/postgres-init/owner-login/own-database-app-login.sql
    ```
 
+   **Never paste it into an interactive session.** Run it as a file, as above.
+
    The script works in this order:
-   - It runs its read-only checks first. A failed check stops it before anything is changed.
-   - It creates the role and the grant in one transaction, re-checks the result, and commits.
+   - It sets its own psql safety settings (`ON_ERROR_STOP` on, `ON_ERROR_ROLLBACK` off, `AUTOCOMMIT` on), so a
+     `~/.psqlrc` cannot weaken them.
+   - Everything that changes the database runs in ONE transaction: the read-only checks, `CREATE ROLE`, the GRANT, the
+     password and a final re-check. A refused check, a missing privilege or mismatched passwords roll everything back,
+     and nothing is left.
    - psql's `\password` asks for the password twice. psql turns it into a SCRAM-SHA-256 verifier on your machine and
-     sends only the verifier, so the password never reaches the server or its log.
-   - With `log_statement = ddl` or `all`, the log records the verifier. Reversing the verifier of a 32-byte random
-     password is not practical.
+     sends only the verifier, never the password.
    - Without a terminal, psql reads the two password lines from standard input.
+
+   **The verifier and the logs.** The verifier (not the password) can appear in server logs (`log_statement` ddl/all,
+   or any failed ALTER), `pg_stat_statements` and audit logs. With verify-full TLS it is only an offline-guessing
+   target, which a 32-byte random password defeats. A superuser admin's session turns its own statement logging off
+   first (db-setup's Q1); a non-superuser admin cannot, so check your provider's log and audit retention.
 
 3. Check the login from where Crewflow will run:
 
    ```bash
-   psql "postgresql://crewflow_owner@<direct-host>:5432/<database>?sslmode=verify-full" -X -c 'SELECT session_user'
+   psql "postgresql://crewflow_owner@<direct-host>:5432/<database>?sslmode=verify-full&sslrootcert=system" \
+     -X -c 'SELECT session_user'
    ```
+
+   It must print `crewflow_owner`. **If the login check fails, drop the role and run the file again.** A non-superuser
+   admin cannot see whether a password is set, and an empty password entry leaves `crewflow_owner` without one. The
+   same admin drops it with:
+
+   ```sql
+   REVOKE CONNECT, CREATE, TEMPORARY ON DATABASE <database> FROM crewflow_owner CASCADE;
+   DROP ROLE crewflow_owner;
+   ```
+
+   A passwordless role cannot log in with a password, and db-setup refuses it too (exit 64). It is only reachable through
+   a `trust`, `peer` or `cert` rule in the provider's `pg_hba.conf`. A superuser admin is protected anyway: the script's
+   re-check refuses a role without a SCRAM password and rolls back.
 
 4. Settings in `compose.env`:
 
@@ -599,8 +626,9 @@ that row. The first start then refuses with `rab_owner: unexpected member <admin
    | `PG_ADMIN_URL` | **Not set.** Crewflow never sees an admin credential. |
    | `PG_DATABASE_PASSWORD` | As section 2 says for your own database. |
 
-   `PG_ADMIN_URL` is the new name of the admin-URL setting. Releases before that rename have no `PG_ADMIN_URL`, and
-   `PG_DATABASE_URL` already accepts an existing `crewflow_owner` URL there.
+   **`PG_ADMIN_URL` requires the PG_ADMIN_URL release** (the PR that renames the admin-URL setting; not merged when this
+   was written). In this release the admin URL setting is `PG_DATABASE_URL`, which also accepts an existing
+   `crewflow_owner` URL; put the `crewflow_owner` URL there and nothing else.
 
 5. `docker compose up -d`. What happens:
    - `db-setup` sees a `crewflow_owner` URL and runs only read-only checks (D5, DB-SETUP-PLAN §7.1). It refuses
@@ -611,14 +639,24 @@ that row. The first start then refuses with `rab_owner: unexpected member <admin
    - `db-setup` never writes to the database and never changes the password.
    - rab-api then migrates as `crewflow_owner`. On the first start this creates the schema roles and the whole schema.
 
-**Password rotation.** As the admin, run `\password crewflow_owner`. Then put the new password in `PG_DATABASE_URL` and run
-`docker compose up -d`: `db-setup` copies it into the password file, and rab-api and rab-worker restart with it.
+**Password rotation.** rab-api and rab-worker read the password file only when they start, and `up -d` alone does not
+restart them. `$P` is the production compose shorthand defined at the top of this runbook.
+
+1. As the admin, in psql: `\password crewflow_owner`.
+2. Put the new password in `PG_DATABASE_URL` in `compose.env`.
+3. `$P stop rab-worker rab-api` (both together, the same stop as rollback (b) in section 3).
+4. `$P up -d`. `db-setup` runs again, copies the new password into the password file, and rab-api and rab-worker start
+   with it.
+
+Rotation is not remediation (G-04, section 1): a new password removes no role, membership or definer that someone with
+the old one may have added. After a suspected leak, follow the incident runbook, not only these steps.
 
 ### CREATEROLE: who needs it, and when
 
 | Who | Needs CREATEROLE? | What uses it |
 |---|---|---|
 | The admin running the script | **Yes**, always. | `CREATE ROLE crewflow_owner ... CREATEROLE` (giving CREATEROLE needs CREATEROLE), and `\password`. Only the database GRANT works without it. |
+| `crewflow_owner` after `NOCREATEROLE` | No. | It keeps the ADMIN option on the schema roles it created, so it can still GRANT them to existing roles. The posture check refuses that at the next boot. |
 | `crewflow_owner`, first start (fresh install) | **Yes.** | migrate-on-start's bootstrap creates the six schema roles (`crewflow_worker` through a throwaway `crewflow_rolemaker`, so that it has zero members). The four role migrations (up to 1786691000000) set their passwords. BC-17 then makes `crewflow` / `crewflow_app` NOLOGIN without a password (`legacy-logins.ts`). Without CREATEROLE the child refuses with exit 67 and creates nothing (`owner-login-identity.ts`). |
 | `crewflow_owner`, an upgrade | Only if a pending migration is a role migration (timestamp up to 1786691000000; `locked-migration-runner.ts`, `needCreateRole`). | None in the current chain after the first install. **Flagged assumption:** a later release whose migrations create or alter roles needs it again. The child says so (exit 67). |
 | `crewflow_owner` at runtime (API, Worker, CLI, workspace provisioning) | **No.** | Workspace provisioning uses `SET ROLE crewflow`, never role DDL. The posture check, the boot gates and `db-setup` all accept NOCREATEROLE. `db-setup` logs one line about it. |
@@ -630,7 +668,9 @@ ALTER ROLE crewflow_owner NOCREATEROLE;
 ```
 
 The creating admin has the ADMIN option needed for this. Afterwards a leaked `crewflow_owner` URL can no longer create
-roles or reset the schema roles' passwords.
+roles or reset the schema roles' passwords. It still holds the ADMIN option on the schema roles it created, so it can
+still GRANT those roles to roles that already exist. The posture check refuses any such extra member at the next boot,
+but it does not prevent the grant.
 
 **A provider that does not allow CREATEROLE at all** (no role there can create roles) **is not supported.** The script
 refuses at its first check, and nothing is changed. There is no supported fallback:
@@ -660,13 +700,28 @@ shape). Results:
 - The second start passed: `db-setup` exit 0, migrate state CURRENT.
 - After `ALTER ROLE crewflow_owner NOCREATEROLE`, `db-setup`, migrate and the API boot gates still passed.
 - The server log never contained the password.
+- The verifier and the logs:
+  - with a non-superuser admin, the `log_statement=all` log held 1 verifier line;
+  - with a superuser admin, Q1 left 0 verifier lines;
+  - `pg_stat_statements` stores the full `ALTER USER crewflow_owner PASSWORD 'SCRAM-SHA-256$...'` text (not
+    normalised). This was tested with the non-superuser admin; Q1 does not change what pg_stat_statements records.
 - The refusals behaved as designed:
   - an admin without CREATEROLE was refused by the script, and nothing was created;
   - a NOCREATEROLE `crewflow_owner` on a fresh install made migrate exit 67, with nothing created;
   - a schema role created by the admin made migrate exit 67 with `rab_owner: unexpected member`, and the admin's
     `REVOKE` of its own creator row was a no-op.
+- A refused check never commits. With `rab_owner` already present, none of these left a `crewflow_owner`:
+  - the file fed on stdin instead of `-f`;
+  - a psqlrc with `ON_ERROR_ROLLBACK on` and `ON_ERROR_STOP off`;
+  - the script with its `\set` lines removed (a partial paste).
+- The password step:
+  - mismatched passwords stopped psql and rolled everything back;
+  - two empty lines from a superuser admin were refused at the re-check and rolled back;
+  - two empty lines from a non-superuser admin committed a passwordless role. Its login failed (28P01), db-setup
+    refused it (exit 64), and the remedy above (`REVOKE ... CASCADE; DROP ROLE`) removed it.
 
-The harness was a scratch script, not committed. **NOT TESTED:** PostgreSQL 17 and 18, and every managed provider.
+The harness was a scratch script, not committed; the latest run had 36 checks and 0 failures. **NOT TESTED:**
+PostgreSQL 17 and 18, and every managed provider.
 
 ---
 
