@@ -465,8 +465,12 @@ describeIfDb('shift cancellation correctness (integration)', () => {
       expect((await withContext(ctxOf(fx.owner), (m) => m.findOneByOrFail(JobOffer, { id: offer.id }))).status).toBe(OfferStatus.STAFF_ACCEPTED);
       const finalShift = await withContext(ctxOf(fx.owner), (m) => m.findOneByOrFail(Shift, { id: shift.id }));
       expect(finalShift.filledCount).toBe(0); // never claims a seat on a cancelled shift
-      const notifications = await notificationRows(`related_entity_type = 'offer' AND related_entity_id = $1`, [offer.id]);
-      expect(notifications.filter((n) => n.type === ('manager_confirmation_timeout' as never))).toHaveLength(0);
+      // The type filter is in the SQL: notificationRows returns only `id`, so filtering the result on `type` could never match.
+      const timeoutNotifications = await notificationRows(
+        `related_entity_type = 'offer' AND related_entity_id = $1 AND type = 'manager_confirmation_timeout'`,
+        [offer.id],
+      );
+      expect(timeoutNotifications).toHaveLength(0);
       await runShiftCancellationFollowupCycle(adminDataSource, tenantContext, notificationService, auditService);
       const closed = await withContext(ctxOf(fx.owner), (m) => m.findOneByOrFail(JobOffer, { id: offer.id }));
       expect(closed.status).toBe(OfferStatus.MANAGER_REJECTED);
