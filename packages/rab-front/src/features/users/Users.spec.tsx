@@ -775,12 +775,14 @@ describe('Users — bulk Send Email follows the server permission', () => {
   });
 
   it('Managers: a CEO without manager.manage is not offered Send Email; with it, it is', async () => {
-    serve({ roles: ['ceo'], isPlatformAdmin: false }, { 'manager.manage': false });
+    // staff.deactivate is granted only as a visible signal: the Staff bar's Activate proves the capabilities answer has
+    // reached the page before the Managers assertion (a capability-dependent element, not a timer).
+    serve({ roles: ['ceo'], isPlatformAdmin: false }, { 'manager.manage': false, 'staff.deactivate': true });
     const first = mount();
-    fireEvent.click(await screen.findByRole('button', { name: /^Managers/ }));
+    fireEvent.click(await screen.findByRole('checkbox', { name: 'Select Alice Example' }));
+    expect(await within(await bar()).findByRole('button', { name: 'Activate' })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: /^Managers/ })); // switching tabs clears the selection
     fireEvent.click(await screen.findByRole('checkbox', { name: 'Select Bob Manager' }));
-    await waitFor(() => expect(mockApi.get).toHaveBeenCalledWith('/auth/capabilities'));
-    await act(async () => { await new Promise((r) => setTimeout(r, 50)); }); // let the capabilities answer apply
     expect(offered(await bar())).toBe(false);
     first.unmount();
 
