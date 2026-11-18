@@ -9425,3 +9425,47 @@ Reversal:   Upgrade / `resolutions` override (documented in "//resolutions") as 
   copy with a pause between the two statements): two commits ended at version 1; with the fix, 2. Semantic goldens
   (PG16/17/18): only the `metadata_version_bump()` body hash changes (5f6076df… → ccfd284e…); security-posture golden and
   the restricted-migrator drift review unchanged (a function body is not a privilege line).
+
+## Organisation time zone: database validation of `core.organisation.timezone` (branch feat/organisation-time-zone, 2026-11-18; DRAFT, one new SQL migration waiting for the owner's review; phase 1 of the owner decision of 2026-11-18)
+- **Finding (security finding format, §5.8).** Severity: Low today, Medium once payroll periods use the zone (phase 2).
+  Actor: anyone who can write `core.organisation.timezone` (today only a platform administrator through
+  `OrganisationSettingsAdminService.update`; also any raw SQL, CLI command or future service). Action: stores a value that is
+  not an IANA zone name (`UpdateWorkspaceDto.timezone` is `@IsString()` only: `"Mars/X"`, `"UTC+3"`, `""`). Consequence:
+  every reader that formats or buckets by the zone fails or silently differs. `AT TIME ZONE $n` throws in the payroll month
+  view (`payroll.service.ts`) and the staff reviews (`staff-review-insights.service.ts`). `Intl.DateTimeFormat` throws in the
+  PDF view models. A POSIX string such as `UTC+3` is accepted by Postgres with the OPPOSITE sign convention to ISO, so it
+  would move every local day by six hours without an error. Once payroll period allocation reads this column (phase 2), the
+  last case decides which pay period a shift's money lands in.
+- **Root cause.** The column (IdentitySchema1786665800000) has `NOT NULL DEFAULT 'Europe/London'` and no validation at any
+  layer below the DTO.
+- **Fix (this migration, OrganisationTimeZoneGuard1786721610000; SQL in `organisation-time-zone-sql.ts`).** A BEFORE
+  INSERT OR UPDATE OF timezone trigger refuses (22023) any value that is not an exactly spelled IANA name listed in the
+  server's `pg_timezone_names`, at most 64 characters, `Area[/Location[/Sub]]`-shaped, and not a `posix/`, `right/`,
+  `posixrules`, `localtime` or `Factory` entry. It runs only when the zone is inserted or changed. A CHECK constraint was
+  rejected because it cannot read `pg_timezone_names`, and an IMMUTABLE wrapper would lie about immutability. That lie
+  would fail a pg_restore onto a server whose tz database dropped a zone. It would also block EVERY update of that
+  organisation row, including the security_version bumps on logout, password reset and role change. The function belongs to
+  rab_secure_owner (it is attached to a rab_secure_owner table), is SECURITY INVOKER with a pinned search_path, and has
+  EXECUTE revoked from PUBLIC. RLS (ENABLE + FORCE, organisation_self, organisation_secure_owner_definer) and every grant
+  are unchanged and re-checked by the migration. up() refuses (rolls back) if any stored zone is already invalid; it
+  counts them as rab_secure_owner and prints only the count.
+- **Residual (owner-accepted class, unchanged).** In the owner-login build the runtime login crewflow_owner inherits
+  rab_secure_owner, so an injected statement could DISABLE or DROP this trigger. That is the same G-02/G-03 class as
+  `ALTER TABLE ... NO FORCE` (preauth-force-sql.ts). The semantic posture monitor detects it afterwards, because the trigger
+  and function lines are pinned in the PG16/17/18 goldens. crewflow_app, the separated runtime, cannot (42501, tested).
+- **Not in this change (phase 2, after the owner approves the SQL).** Code paths moving to the organisation's zone. The
+  service-level IANA check (Intl must accept the name too). The rule for who may change the zone and what happens to open
+  payroll periods. The `payroll_calendar.timezone = 'Europe/London'` CHECK. See the PR body for the questions to the owner.
+- **Tests.** `organisation-time-zone.integration.spec.ts`:
+  - the default, on every insert path;
+  - valid names accepted;
+  - 15 invalid shapes refused on INSERT and UPDATE;
+  - NULL refused with 23502;
+  - no lock-out when a stored zone later disappears from the tz database;
+  - RLS: zero rows without tenant context, own row only, and no cross-tenant read or write, both as the CI runtime login
+    and as crewflow_app;
+  - the trigger binds the runtime role;
+  - crewflow_app cannot tamper;
+  - the down/up round trip, with the refusal over an invalid stored zone and zero posture drift.
+
+  `organisation-time-zone-sql.spec.ts` checks the SQL statically and checks the golden lines.
