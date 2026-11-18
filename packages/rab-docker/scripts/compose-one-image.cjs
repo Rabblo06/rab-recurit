@@ -166,7 +166,7 @@ function checkModel(model, label, { allowDefaultDigest = false } = {}) {
     if (!DB_IMAGE_REF.test(String(db.image ?? ''))) p(`db: image must be \${CREWFLOW_POSTGRES_IMAGE:-postgres@sha256:<64 hex>} (the official postgres repository by digest), got ${JSON.stringify(db.image)}`);
   }
   if (api.depends_on?.db?.condition !== 'service_healthy') p('rab-api: must depend on db with condition service_healthy');
-  if (api.depends_on?.['db-setup']?.condition !== 'service_completed_successfully') p('rab-api: must depend on db-setup with condition service_completed_successfully (option A: crewflow_owner exists and the target file is written)');
+  if (api.depends_on?.['db-setup']?.condition !== 'service_completed_successfully') p('rab-api: must depend on db-setup with condition service_completed_successfully (crewflow_owner exists, with the password in PG_DATABASE_URL)');
   if (services['db-setup'] && services['db-setup'].depends_on?.db?.condition !== 'service_healthy') p('db-setup: must depend on db with condition service_healthy');
   // DB-SETUP PID 1 (lead decision 2026-11-12): the cleaning scripts are the ENTRYPOINT (PID 1) and exec the image's tini only
   // once the environment is clean; no command, no compose init (docker-init would keep the admin URL at PID 1).
@@ -177,7 +177,37 @@ function checkModel(model, label, { allowDefaultDigest = false } = {}) {
     if (Array.isArray(s.command) ? s.command.length > 0 : (s.command !== undefined && s.command !== null)) p(`${name}: must have no command (${script}, the entrypoint, takes none)`);
     if (s.init === true) p(`${name}: init: true is refused (docker-init would be PID 1 with the admin URL)`);
   }
-  return problems.concat(checkRedisPrivate(model, label));
+  return problems.concat(retiredTargetVolumeProblems(model, label), checkRedisPrivate(model, label));
+}
+
+/**
+ * Owner decision 2026-11-18 (Twenty's way): rab-api and rab-worker read PG_DATABASE_URL from their environment, so the
+ * PR #125 option 2 setup volume (crewflow-db-target: db-setup's target and crewflow_owner password files) is retired. In
+ * every combination this gate renders (an overlay included), no top-level volume is (or names) it and no service mounts it
+ * or anything at /run/crewflow/db-target. The credential contract itself (one crewflow_owner PG_DATABASE_URL on db-setup,
+ * rab-api and rab-worker) is compose-credential-isolation.cjs / staging/verify-image-compose.cjs's. Pure.
+ */
+const RETIRED_TARGET_VOLUME = 'crewflow-db-target';
+const RETIRED_TARGET_DIR = '/run/crewflow/db-target';
+function retiredTargetVolumeProblems(model, label) {
+  const problems = [];
+  const under = (t) => {
+    const n = String(t ?? '').replace(/\\/g, '/').replace(/\/+$/, '');
+    return n === RETIRED_TARGET_DIR || n.startsWith(`${RETIRED_TARGET_DIR}/`);
+  };
+  for (const [key, v] of Object.entries(model?.volumes ?? {})) {
+    if (key === RETIRED_TARGET_VOLUME || String(v?.name ?? '').endsWith(RETIRED_TARGET_VOLUME)) problems.push(`${label}: volume ${key}: the retired ${RETIRED_TARGET_VOLUME} volume must not exist (no file carries a database credential)`);
+  }
+  for (const [name, s] of Object.entries(model?.services ?? {})) {
+    for (const v of Array.isArray(s?.volumes) ? s.volumes : []) {
+      const source = typeof v === 'string' ? v.split(':')[0] : v?.source;
+      const target = typeof v === 'string' ? v.split(':')[1] : v?.target;
+      if (source === RETIRED_TARGET_VOLUME || under(target)) problems.push(`${label}: ${name}: mounts ${source === RETIRED_TARGET_VOLUME ? RETIRED_TARGET_VOLUME : 'something'} at ${String(target ?? '')} (the retired setup volume: no file carries a database credential)`);
+    }
+    const tmpfs = s?.tmpfs === undefined || s?.tmpfs === null ? [] : Array.isArray(s.tmpfs) ? s.tmpfs : [s.tmpfs];
+    for (const t of tmpfs) if (under(String(t).split(':')[0])) problems.push(`${label}: ${name}: a tmpfs at ${String(t).split(':')[0]} (the retired setup path)`);
+  }
+  return problems;
 }
 
 /** X1.6: Redis is never reachable from the host (private Compose network only, as in Twenty). */
@@ -312,5 +342,5 @@ function main() {
   console.log(`[compose-one-image] OK: ${DEPLOY_COMBOS.length} deploy combinations use one image variable (${IMAGE_VAR}), API first, Worker after; no Redis port is reachable from the host in any of the ${DEPLOY_COMBOS.length + REDIS_ONLY_COMBOS.length} combinations`);
 }
 
-module.exports = { checkModel, checkRedisPrivate, redisHostExposureProblems, render, DEPLOY_COMBOS, REDIS_ONLY_COMBOS, ONE_IMAGE_REF, PINNED_DIGEST_IMAGE_REF, DB_IMAGE_REF, DEFAULT_DIGEST_COMBOS, allowsDefaultDigest };
+module.exports = { checkModel, checkRedisPrivate, retiredTargetVolumeProblems, redisHostExposureProblems, render, DEPLOY_COMBOS, REDIS_ONLY_COMBOS, ONE_IMAGE_REF, PINNED_DIGEST_IMAGE_REF, DB_IMAGE_REF, DEFAULT_DIGEST_COMBOS, allowsDefaultDigest };
 if (require.main === module) main();

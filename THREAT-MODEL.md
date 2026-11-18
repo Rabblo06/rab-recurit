@@ -9425,3 +9425,69 @@ Reversal:   Upgrade / `resolutions` override (documented in "//resolutions") as 
   copy with a pause between the two statements): two commits ended at version 1; with the fix, 2. Semantic goldens
   (PG16/17/18): only the `metadata_version_bump()` body hash changes (5f6076df… → ccfd284e…); security-posture golden and
   the restricted-migrator drift review unchanged (a function body is not a privilege line).
+
+## DB-SETUP the Twenty way: rab-api and rab-worker read PG_DATABASE_URL (crewflow_owner) from the environment (branch feat/twenty-style-db-url, owner instruction 2026-11-18)
+
+- **Change.** Replaces PR #125 option 2's credential files. rab-api and rab-worker now read `PG_DATABASE_URL`, always
+  the `crewflow_owner` URL (direct host, `sslmode=verify-full`), straight from their environment, as Twenty's server and
+  worker read the app user's URL (`twentyhq/twenty@eedb0a73` `helm/twenty/templates/deployment-server.yaml:148-155`,
+  `deployment-worker.yaml:81-88`). The target file, the `crewflow_owner` password file, the setup-volume flock and the
+  derive step are gone; the `crewflow-db-target` volume is removed from every compose file (`crewflow-db-ca` stays).
+  `PG_ADMIN_URL`, `DATABASE_URL` and the other legacy URLs stay refused on rab-api / rab-worker (never-in-runtime-env,
+  the entrypoints, the gates). Modes: (a) bundled db, `PG_DATABASE_PASSWORD` (superuser) + `PG_DATABASE_APP_PASSWORD`
+  (crewflow_owner), each `openssl rand -hex 32`; compose builds the same `crewflow_owner` URL for db-setup, rab-api and
+  rab-worker; (b) your database, `PG_ADMIN_URL` (db-setup only) + `PG_DATABASE_URL`, the same database; (c) your
+  database, `PG_DATABASE_URL` only, db-setup read-only.
+- **db-setup.** With an admin (a, b): creates `crewflow_owner` with the password inside `PG_DATABASE_URL` (SCRAM verifier
+  only); when the role exists and that password does not log in, SETS it, after the existing safety checks (Q2b: the role
+  is not used by another database of the cluster; ADMIN OPTION + CREATEROLE or superuser). Without an admin (c): a
+  password that does not log in is refused (64). Every write runs in a transaction under the existing advisory lock
+  (`OWNER_BOOTSTRAP_LOCK_KEY`), which replaces the flock (no shared file remains). Refused: a `PG_DATABASE_URL` that is
+  not `crewflow_owner`, a `PG_ADMIN_URL` that is, and two URLs naming different databases.
+- **CREATEROLE.** `crewflow_owner` is created CREATEROLE because the first start's migrate child creates the schema roles.
+  db-setup (a, b), as the admin, runs `ALTER ROLE crewflow_owner NOCREATEROLE` once every migration file of the image is
+  in the ledger (read on a read-only `crewflow_owner` session); while the schema is not complete it marks the role with
+  `COMMENT ON ROLE crewflow_owner IS 'crewflow:createrole-until-schema-current'` (only an admin can set or clear it;
+  `crewflow_owner` has no ADMIN OPTION on itself). The boot gate (API, Worker, CLI; production) refuses a CREATEROLE login
+  WITHOUT the mark, and warns with it. db-setup never grants CREATEROLE. Mode c refuses (db-setup) an unmarked CREATEROLE
+  role; `own-database-app-login.sql` / `01-crewflow-owner.sql` now set the mark.
+- **Boot refusals (exit 64, value never printed).** Entrypoints: empty `PG_DATABASE_URL`, empty password in it,
+  `PG_DATABASE_APP_PASSWORD` / `PG_DATABASE_PASSWORD` / `PG_ADMIN_URL` / any other postgres URL present. In process,
+  before connecting (`checkRuntimeLogin`, production): not `crewflow_owner`, a transaction-pooler shape (new). Once
+  connected (boot gates): SUPERUSER, BYPASSRLS, CREATEDB, REPLICATION, unmarked CREATEROLE (new), plus every existing RLS
+  and owner-login posture check, unchanged.
+
+```
+SECURITY TRADE-OFF (TM-DB-5, replaces TM-DB-2)
+Decision:   the crewflow_owner password is a platform environment value (compose.env / OpenShip variable), interpolated
+            into PG_DATABASE_URL of db-setup, rab-api and rab-worker, instead of a 0400 file on a volume only db-setup
+            could write and the apps read read-only.
+Reason:     owner instruction 2026-11-18 ("Twenty's way"): one setting, no volume, no derive step; the same model as
+            Twenty's compose (an env value, openssl rand -hex 32) and Helm chart (the app URL in the server's env).
+Risk:       anyone who can read the service definition (compose.env, `docker compose config`, `docker inspect` of
+            rab-api / rab-worker, the OpenShip variables page) or /proc/<pid>/environ of an app process, or an error
+            reporter that dumps the environment, obtains the schema-owner login (RLS is FORCED, but the owner can alter
+            policies). Before, the URL was assembled in the process and the password sat in a file; the definition held
+            no app credential.
+Mitigation: the password never reaches a container as its own variable (the entrypoints and never-in-runtime-env refuse
+            PG_DATABASE_APP_PASSWORD); no other database credential may sit beside it (the gates and the entrypoints refuse
+            any other postgres URL and PG_ADMIN_URL); logs never print a URL or password (fixed messages); the login is
+            NOSUPERUSER / NOBYPASSRLS / NOCREATEDB / NOREPLICATION and, after the bootstrap, NOCREATEROLE, checked at
+            every boot; rotation = change the env value and redeploy (db-setup sets the new password with the admin).
+Reversal:   a secret store mounted as a file per process (Docker secrets / Kubernetes Secret volume) with PG_DATABASE_URL
+            assembled in-process; the removed derive step showed the shape.
+```
+
+- **TM-DB-1 (updated).** The `crewflow_owner` URL now also sits in rab-api's and rab-worker's definitions (above);
+  `PG_ADMIN_URL` still sits only in db-setup's.
+- **Residual: CREATEROLE window.** After a fresh install the role keeps CREATEROLE (marked) until the next db-setup run
+  (the next `docker compose up -d`); in that window a compromised app login can create roles. A first hardening run
+  while the old API / Worker still run is a one-time role drift for their posture monitor (readiness false, one alert)
+  until they are replaced.
+- **Rollback.** The previous release reads the password file on the old `crewflow-db-target` volume; db-setup's password
+  set (when PG_DATABASE_APP_PASSWORD differs from the old file) makes that file stale, and the old db-setup refuses it
+  (64) until the file is deleted. Setting PG_DATABASE_APP_PASSWORD to the old file's value avoids the reset entirely.
+- **Tests.** Unit: owner-credential, owner-bootstrap (106), runtime-login, boot-gate CREATEROLE, never-in-runtime-env;
+  mutation proofs for every new boot refusal. Live (InstaBox, PG16/17/18 + PG15 refusal): bootstrap-owner-login-check
+  scenarios incl. the CREATEROLE lifecycle with the real migrate child. Docker suites (CI): run-prestart-shell-tests,
+  run-db-setup-tests (modes a/b/c, transition, PG15).

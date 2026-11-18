@@ -4,26 +4,21 @@
 # tini becomes PID 1 (signal forwarding, zombie reaping) and the Worker its child, so the Worker's watchdog SIGKILL (ignored
 # by the kernel for PID 1) still works without compose's `init: true`.
 #
-# DB-SETUP (Twenty Helm model, OWNER-DB-FINAL.md Part A): this container NEVER receives PG_DATABASE_URL, in any form; only the
-# one-shot db-setup service does. This script:
-#   1. refuses arguments, PG_DATABASE_PASSWORD, PG_ADMIN_URL (and its other names), any variable holding a postgres:// URL
-#      and a non-empty PG_DATABASE_URL (any login; exit 64);
-#   2. builds the crewflow_owner runtime URL with the same pure derive step as api-prestart.sh (never connects; the URL
-#      comes back on fd 4 through a command substitution: never a file, never argv, never the log), from db-setup's
-#      credential-free target file (CREWFLOW_DB_TARGET_FILE=/run/crewflow/db-target/target.json) and the crewflow_owner
-#      password file beside it (both mounted read-only; Twenty: the worker receives only the app user's URL,
-#      helm/twenty/templates/deployment-worker.yaml:76-90), waiting for both (derive exit 75) 2 s apart, at most 120 s
-#      (60 attempts: bounded by a COUNT, never by the clock); the derive run is not wrapped in busybox `timeout` (its
-#      watcher keeps the command-substitution pipe open until the bound: every start paid it; see api-prestart.sh): a FIFO,
-#      a symlink or a directory in place of a file is refused at once by the step's O_NONBLOCK|O_NOFOLLOW open + fstat;
-#   3. sets PG_SSL_CA_CERT_PATH to the bundled db's CA when the runtime URL's host is exactly `db` and neither it nor
+# DATABASE (owner decision 2026-11-18, "change PR #125 option 2 to Twenty's way"): the Worker reads PG_DATABASE_URL, the
+# crewflow_owner URL, straight from its environment, like Twenty's worker (twentyhq/twenty@eedb0a73
+# packages/twenty-docker/helm/twenty/templates/deployment-worker.yaml:81-88). There is no target file, no password file and
+# no derive step any more. This script:
+#   1. refuses arguments, PG_DATABASE_PASSWORD and PG_DATABASE_APP_PASSWORD (compose only interpolates them), PG_ADMIN_URL
+#      (and its other names), and any OTHER variable holding a postgres:// URL or a libpq password DSN (exit 64);
+#   2. refuses an empty PG_DATABASE_URL and one whose crewflow_owner password is empty (exit 64);
+#   3. sets PG_SSL_CA_CERT_PATH to the bundled db's CA when the URL's host is exactly `db` and neither it nor
 #      PG_SSL_CA_CERT is set (the block below is identical in api-prestart.sh and db-setup.sh;
 #      run-prestart-shell-tests.cjs compares them);
-#   4. exports the runtime URL as PG_DATABASE_URL and execs tini. The Worker itself retries a 28P01 first login (its
-#      password not set yet by db-setup) for up to 120 s (core/runtime/owner-password-wait.ts), and refuses, in production,
-#      any PG_DATABASE_URL that does not log in as crewflow_owner before connecting (runtime-db-config.ts checkRuntimeLogin).
-# Exit 64 = refusal (fixed message), 70 = unexpected, 75 = db-setup did not complete in time. Never prints a URL, a
-# password, a host or a database name.
+#   4. execs tini. The Worker itself retries a 28P01 first login (db-setup may still be setting the password) for up to
+#      120 s (core/runtime/owner-password-wait.ts), and refuses, in production, a PG_DATABASE_URL that does not log in as
+#      crewflow_owner or has a transaction-pooler shape before connecting (runtime-db-config.ts checkRuntimeLogin), and a
+#      SUPERUSER / BYPASSRLS / CREATEDB / REPLICATION / unmarked CREATEROLE login once connected (the boot gates).
+# Exit 64 = refusal (fixed message), 70 = unexpected. Never prints a URL, a password, a host or a database name.
 set -eu
 
 refuse() {
@@ -53,24 +48,28 @@ if [ "$#" -ne 0 ]; then
   refuse 'worker-start.sh takes no arguments (it starts the Worker only; one-off commands run from rab-api).'
 fi
 if [ -n "${PG_DATABASE_PASSWORD:-}" ]; then
-  refuse 'PG_DATABASE_PASSWORD must never be set on the worker service: only compose reads it (the bundled db and the default admin URL); the Worker connects only as crewflow_owner.'
+  refuse 'PG_DATABASE_PASSWORD must never be set on the worker service: only compose reads it (the bundled db and its superuser URL for db-setup); the Worker connects only as crewflow_owner.'
 fi
-# PG_ADMIN_URL (owner decision 2026-11-17, Twenty's Helm model): the database admin URL belongs ONLY to the one-shot db-setup
-# service (never-in-runtime-env.ts; the in-process guard refuses it as well), and so do its retired name and db-setup's
-# bundled-db URL. The compose files pin PG_ADMIN_URL to "" here (owner decision L-2): empty is allowed, any value refused.
+if [ -n "${PG_DATABASE_APP_PASSWORD:-}" ]; then
+  refuse 'PG_DATABASE_APP_PASSWORD must never be set on the worker service: compose interpolates it into PG_DATABASE_URL and never passes it on.'
+fi
+# PG_ADMIN_URL (owner decisions 2026-11-17 and 2026-11-18, Twenty's model): the database admin URL belongs ONLY to the
+# one-shot db-setup service (never-in-runtime-env.ts; the in-process guard refuses it as well), and so do its retired name
+# and db-setup's bundled-db superuser URL. The compose files pin PG_ADMIN_URL to "" here (owner decision L-2): empty is
+# allowed, any value refused.
 for name in PG_ADMIN_URL PG_DATABASE_ADMIN_URL CREWFLOW_BUNDLED_DB_ADMIN_URL; do
   eval "value=\${$name:-}"
   if [ -n "$value" ]; then refuse "$name must never be set on the worker service: it is a database admin URL, read only by the one-shot db-setup service (which creates crewflow_owner). The Worker connects only as crewflow_owner. Value not shown."; fi
 done
-# Security review of PR #230, L-1: an admin URL under ANY other name. No variable may hold a PostgreSQL URL here (the
-# Worker's own PG_DATABASE_URL is refused below unless empty, and is set by this script only after the derive step).
+# Security review of PR #230, L-1: an admin URL under ANY other name. No variable but the Worker's own PG_DATABASE_URL may
+# hold a PostgreSQL URL here.
 for forbidden in $(crewflow_db_url_names); do
-  refuse "$forbidden holds a PostgreSQL URL or a libpq password DSN: no database credential ever reaches the worker service (it builds the crewflow_owner URL from db-setup's files). Value not shown."
+  refuse "$forbidden holds a PostgreSQL URL or a libpq password DSN: the worker service holds exactly one database credential, PG_DATABASE_URL (the crewflow_owner URL). Value not shown."
 done
 
 # BEGIN crewflow bundled-db CA
-# $1: the database URL this process connects with (db-setup: PG_ADMIN_URL or PG_DATABASE_URL; rab-api / rab-worker: the
-# crewflow_owner URL they built). Only its host is read.
+# $1: the database URL this process connects with (db-setup: PG_ADMIN_URL or PG_DATABASE_URL; rab-api / rab-worker:
+# PG_DATABASE_URL, the crewflow_owner URL). Only its host is read.
 crewflow_bundled_db_ca() {
   db_rest="${1#*://}"
   db_authority="${db_rest%%[/?#]*}"
@@ -89,44 +88,13 @@ if [ "${NODE_ENV:-}" != test ] && [ -n "${CREWFLOW_TEST_SEARCH_PATH_TRAP:-}" ]; 
   refuse 'CREWFLOW_TEST_SEARCH_PATH_TRAP is a test seam: it is allowed only with NODE_ENV=test. Remove it.'
 fi
 
-DERIVE_RUNTIME_URL=packages/rab-server/dist/database/typeorm/scripts/owner-login/derive-runtime-url.js
-DB_TARGET_FILE=/run/crewflow/db-target/target.json
-WAIT_SECONDS=120
-# Test seam (NODE_ENV=test only, as in api-prestart.sh): a shorter bound for the shell tests.
-if [ -n "${CREWFLOW_TEST_DB_SETUP_WAIT_SECONDS:-}" ]; then
-  if [ "${NODE_ENV:-}" != test ]; then refuse 'CREWFLOW_TEST_DB_SETUP_WAIT_SECONDS is a test seam: it is allowed only with NODE_ENV=test. Remove it.'; fi
-  case "$CREWFLOW_TEST_DB_SETUP_WAIT_SECONDS" in ''|*[!0-9]*) refuse 'CREWFLOW_TEST_DB_SETUP_WAIT_SECONDS must be a whole number of seconds.' ;; esac
-  WAIT_SECONDS="$CREWFLOW_TEST_DB_SETUP_WAIT_SECONDS"
+if [ -z "${PG_DATABASE_URL:-}" ]; then
+  refuse 'PG_DATABASE_URL is empty: it is the crewflow_owner URL (bundled db: set PG_DATABASE_APP_PASSWORD, openssl rand -hex 32; your own database: your crewflow_owner URL, direct host, sslmode=verify-full).'
 fi
-unset CREWFLOW_TEST_DB_SETUP_WAIT_SECONDS
-if [ -n "${PG_DATABASE_URL:-}" ]; then
-  refuse 'PG_DATABASE_URL must never be set on the worker service: an operator-given URL belongs only to the one-shot db-setup service (PG_ADMIN_URL, an existing crewflow_owner URL in PG_DATABASE_URL, or the bundled db). The Worker builds the crewflow_owner URL from the target and password files db-setup writes. Value not shown.'
-fi
-unset PG_DATABASE_URL
-export CREWFLOW_DB_TARGET_FILE="$DB_TARGET_FILE"
-ATTEMPTS=$(( (WAIT_SECONDS + 1) / 2 ))
-if [ "$ATTEMPTS" -lt 1 ]; then ATTEMPTS=1; fi
-ATTEMPT=0
-while :; do
-  ATTEMPT=$((ATTEMPT + 1))
-  STATUS=0
-  RUNTIME_URL="$(CREWFLOW_RUNTIME_URL_FD=4 node "$DERIVE_RUNTIME_URL" 4>&1 1>&2)" || STATUS=$?
-  if [ "$STATUS" -ne 75 ]; then break; fi
-  RUNTIME_URL=""
-  if [ "$ATTEMPT" -ge "$ATTEMPTS" ]; then
-    refuse "the database target file did not appear within ${WAIT_SECONDS}s: db-setup (the only service with the admin URL) has not completed." 75
-  fi
-  echo "worker-start: waiting for db-setup: the database target file is not there yet (attempt ${ATTEMPT} of ${ATTEMPTS}, 2 s apart)" >&2
-  sleep 2
-done
-if [ "$STATUS" -ne 0 ]; then
-  RUNTIME_URL=""
-  refuse 'could not build the crewflow_owner connection (see the derive-runtime-url line above).' "$STATUS"
-fi
-if [ -z "$RUNTIME_URL" ]; then
-  refuse 'the derive step returned an empty crewflow_owner connection.' 70
-fi
-export PG_DATABASE_URL="$RUNTIME_URL"
-unset RUNTIME_URL PG_DATABASE_PASSWORD CREWFLOW_DB_TARGET_FILE
+case "$PG_DATABASE_URL" in
+  *://crewflow_owner:@*)
+    refuse 'PG_DATABASE_URL has an empty crewflow_owner password: for the bundled db set PG_DATABASE_APP_PASSWORD (openssl rand -hex 32); with your own database put the crewflow_owner password in PG_DATABASE_URL. Value not shown.' ;;
+esac
+export PG_DATABASE_URL
 crewflow_bundled_db_ca "$PG_DATABASE_URL"
 exec /sbin/tini -s -- node packages/rab-worker/dist/main.js

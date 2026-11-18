@@ -11,8 +11,9 @@
  *
  * What they prove (each a refusal, never a warning):
  *  1. login shape  — current_user = session_user = crewflow_owner; NOSUPERUSER, NOBYPASSRLS, NOREPLICATION, NOCREATEDB.
- *                    CREATEROLE is EXPECTED (the bootstrap creates the role layout); `ALTER ROLE crewflow_owner
- *                    NOCREATEROLE` after install is accepted (M0 §5.1 optional hardening).
+ *                    CREATEROLE is accepted HERE (the bootstrap creates the role layout); since owner decision 2026-11-18
+ *                    db-setup removes it once the schema is complete, and the boot gate refuses it in production unless
+ *                    the role carries OWNER_CREATEROLE_PENDING_COMMENT (database-boot-gate-rules.ts assertCreateRoleGate).
  *  2. reachability — a walk over pg_auth_members from the login with MEMBER semantics: every edge counts, whatever its
  *                    INHERIT / SET / ADMIN options (an ADMIN-only edge lets the login grant itself SET later: G-12), direct
  *                    and indirect. Cross-checked with pg_has_role(…, 'MEMBER') over every role (catches implicit
@@ -38,6 +39,16 @@
 import { PREAUTH_DEFINER_EXPRESSION, PREAUTH_FORCE_TABLES, preauthDefinerPolicyName } from '../typeorm/core/preauth-force-sql';
 
 export const OWNER_LOGIN_ROLE = 'crewflow_owner';
+
+/**
+ * CREATEROLE after the schema bootstrap (owner decision 2026-11-18): crewflow_owner needs CREATEROLE only for the first start
+ * (the migrate child creates the schema roles). db-setup, with the admin login, removes it once the schema is complete and,
+ * until then, marks the role with this exact COMMENT (COMMENT ON ROLE needs CREATEROLE + ADMIN OPTION on the role, or
+ * superuser: crewflow_owner cannot set or clear it on itself). The boot gate (database-boot-gate-rules.ts assertCreateRoleGate)
+ * refuses, in production, a CREATEROLE crewflow_owner WITHOUT this mark: one that was never meant to keep it, or one an admin
+ * re-granted after db-setup removed it. Fixed text, no quote character (it is interpolated into SQL text).
+ */
+export const OWNER_CREATEROLE_PENDING_COMMENT = 'crewflow:createrole-until-schema-current';
 
 /** The roles the Option A bootstrap creates (M0 §5.2). */
 export const OWNER_SCHEMA_ROLES: readonly string[] = ['rab_owner', 'rab_app', 'rab_secure_owner', 'crewflow'];

@@ -1,19 +1,21 @@
 /**
- * Database setup the Twenty Helm way (OWNER-DB-FINAL.md Part A, DB-SETUP-HELM-PLAN.md): the crewflow_owner credential.
+ * Database setup the Twenty way (owner decision 2026-11-18, "change PR #125 option 2 to Twenty's way"): the crewflow_owner
+ * credential.
  *
- * Twenty's Helm chart keeps the app user's password as a RANDOM value (`randAlphaNum 32`) in its own secret and reuses it
- * on every upgrade (`lookup`) — twentyhq/twenty@eedb0a73 `packages/twenty-docker/helm/twenty/templates/secret-db-url.yaml:3-8`.
- * Crewflow does the same: `generateOwnerPassword()` makes a crypto-random password ONCE; the bootstrap child stores it in
- * db-setup's password file (owner-password-file.ts) and later starts reuse it. APP_SECRET is never part of any database
- * credential (the former HKDF derivation is gone).
+ * Twenty passes PG_DATABASE_URL, the APP login's URL, to the server and the worker alike (twentyhq/twenty@eedb0a73
+ * packages/twenty-docker/helm/twenty/templates/deployment-server.yaml:148-155, deployment-worker.yaml:81-88); only its setup
+ * step (the `ensure-database-exists` init container) holds the admin login, and it creates the app user with the app user's
+ * own password (deployment-server.yaml:90-116). Crewflow does the same: rab-api and rab-worker read PG_DATABASE_URL = the
+ * crewflow_owner URL from their environment, and the one-shot db-setup creates crewflow_owner with the password INSIDE that
+ * URL (modes a and b) or only checks it (mode c). There is no password file and no generated password any more; APP_SECRET
+ * is never part of any database credential.
  *
- * PURE: no I/O, no logging, never imports `pg`. Every value this module returns that carries a secret (a password, a runtime
- * URL) is a non-enumerable property, so a stray `JSON.stringify` or a logged plan object never prints it. Every error
- * message is fixed text: it never contains a URL, a user, a host, a password or a verifier.
+ * PURE: no I/O, no logging, never imports `pg`. Every value this module returns that carries a secret (a password, a URL)
+ * is a non-enumerable property, so a stray `JSON.stringify` or a logged plan object never prints it. Every error message is
+ * fixed text: it never contains a URL, a user, a host, a password or a verifier.
  *
- * Consumers: the bootstrap child (`scripts/owner-login/owner-bootstrap.ts`), the derive step
- * (`scripts/owner-login/derive-runtime-url.ts`, used by api-prestart.sh and worker-start.sh so both build byte-identical
- * URLs), runtime-db-config (`OWNER_LOGIN`, `isOwnerLoginUrl`), db-target.ts, and twenty-mode-check (`scramSha256Verifier`).
+ * Consumers: the bootstrap child (`scripts/owner-login/owner-bootstrap.ts`), runtime-db-config (`OWNER_LOGIN`,
+ * `isOwnerLoginUrl`) and twenty-mode-check (`scramSha256Verifier`).
  */
 import { createHash, createHmac, pbkdf2Sync, randomBytes } from 'node:crypto';
 
@@ -22,9 +24,7 @@ import { parsePgUrl, PgConfigError, type PgTarget } from '../postgres/pg-url-pol
 /** The one runtime login. Every runtime process (API, Worker, migrate child, schedulers) connects as this role only. */
 export const OWNER_LOGIN = 'crewflow_owner' as const;
 
-/** Bytes of entropy of a generated crewflow_owner password (Twenty: 32 random characters). The password is their hex. */
-export const OWNER_PASSWORD_BYTES = 32;
-/** A stored password (generated, or copied from an existing crewflow_owner URL) is 1-1024 characters, no control characters. */
+/** A crewflow_owner password (the one inside PG_DATABASE_URL) is 1-1024 characters, no control characters. */
 export const OWNER_PASSWORD_MAX_LENGTH = 1024;
 /** SCRAM-SHA-256 parameters PostgreSQL itself uses by default (scram_iterations = 4096, 16-byte salt). */
 export const SCRAM_ITERATIONS = 4096;
@@ -35,7 +35,7 @@ const URL_LABEL = 'PG_DATABASE_URL';
 
 /**
  * Every refusal of this module (and of the URL policy it runs). Fixed, value-free text; safe to print. The bootstrap child
- * and the derive step map it to exit 64 (refusal); anything else thrown is unexpected (exit 70).
+ * maps it to exit 64 (refusal); anything else thrown is unexpected (exit 70).
  */
 export class OwnerCredentialError extends Error {
   constructor(message: string) {
@@ -48,25 +48,14 @@ export class OwnerCredentialError extends Error {
 export const OWNER_CREDENTIAL_MESSAGES = {
   databaseUrlMissing: `${URL_LABEL} is empty: a database URL is required.`,
   transactionPooler: `${URL_LABEL} names a transaction pooler. The database setup step needs a direct (session) connection: use the provider's direct host and port.`,
-  badOwnerPassword: `The crewflow_owner password must be 1-${OWNER_PASSWORD_MAX_LENGTH} characters with no control characters.`,
   emptyScramPassword: 'A SCRAM-SHA-256 verifier needs a non-empty password.',
   nonAsciiScramPassword:
     'A SCRAM-SHA-256 verifier is only computed for printable-ASCII passwords here (where SASLprep is the identity), so it always matches what the server derives.',
   badScramSalt: 'A SCRAM-SHA-256 salt must be a non-empty byte buffer.',
-  roundTrip: 'Internal error: the rebuilt crewflow_owner URL does not name the same database target. Refusing.',
-  unexpectedQuery: 'Internal error: the admin URL carries a query parameter the runtime URL does not know how to keep. Refusing.',
-  ownerUrlWithoutPassword: `${URL_LABEL} names crewflow_owner but carries no usable password. Refusing.`,
+  ownerUrlWithoutPassword: `${URL_LABEL} names crewflow_owner but carries no usable password (1-${OWNER_PASSWORD_MAX_LENGTH} characters, no control characters). Refusing.`,
 } as const;
 
-/**
- * A new crewflow_owner password: hex of 32 crypto-random bytes (64 lowercase hex characters: URL-safe in userinfo, SASLprep
- * neutral, shell safe). Twenty: `randAlphaNum 32` (secret-db-url.yaml:3-8). Called only when no password file exists.
- */
-export function generateOwnerPassword(): string {
-  return randomBytes(OWNER_PASSWORD_BYTES).toString('hex');
-}
-
-/** True when `password` can be stored and used as the crewflow_owner password (generated or copied from a URL). */
+/** True when `password` can be used as the crewflow_owner password (the one in PG_DATABASE_URL). */
 export function isValidOwnerPassword(password: unknown): password is string {
   return typeof password === 'string' && password.length >= 1 && password.length <= OWNER_PASSWORD_MAX_LENGTH && !/[\x00-\x1f\x7f]/.test(password);
 }
@@ -104,85 +93,20 @@ export function isOwnerLoginUrl(databaseUrl: string): boolean {
   return parseTarget(databaseUrl, URL_LABEL).user === OWNER_LOGIN;
 }
 
-/** Query parameters the runtime URL keeps (all already validated by parsePgUrl). `application_name` is dropped. */
-const KEPT_QUERY_PARAMS: ReadonlySet<string> = new Set([
-  'sslmode',
-  'channel_binding',
-  'target_session_attrs',
-  'options',
-  'connect_timeout',
-  'keepalives',
-  'keepalives_idle',
-  'keepalives_interval',
-  'keepalives_count',
-]);
-const DROPPED_QUERY_PARAMS: ReadonlySet<string> = new Set(['application_name']);
-
 /**
- * The crewflow_owner runtime URL for a database URL (any login) and the crewflow_owner password: (1) the URL passes the
- * same policy as every connection (parsePgUrl: no `?host=`, no `sslrootcert`/any ssl* but sslmode, no unknown parameter,
- * no `-c` options) and must not be a transaction pooler; (2) it is rebuilt from the parsed target, never by string surgery:
- * scheme, host, port, database and the validated query are kept, `application_name` is dropped; (3) the userinfo becomes
- * `crewflow_owner:<password, percent-encoded>`; (4) TLS is unchanged (sslmode from the URL, the CA from PG_SSL_CA_CERT_PATH);
- * (5) the result is re-parsed and must name the same target with exactly this password. Never connects. Returns a secret.
+ * The runtime-login facts of a (policy-valid) PG_DATABASE_URL, for runtime-db-config.ts checkRuntimeLogin: is its login
+ * crewflow_owner, and does it have a documented transaction-pooler shape. Refuses an invalid URL. Never returns a value.
  */
-export function buildRuntimeDatabaseUrl(databaseUrl: string, ownerPassword: string): string {
-  if (typeof databaseUrl !== 'string' || databaseUrl.trim() === '') throw new OwnerCredentialError(OWNER_CREDENTIAL_MESSAGES.databaseUrlMissing);
-  const source = parseTarget(databaseUrl, URL_LABEL);
-  if (source.transactionPooler !== null) throw new OwnerCredentialError(OWNER_CREDENTIAL_MESSAGES.transactionPooler);
-  if (!isValidOwnerPassword(ownerPassword)) throw new OwnerCredentialError(OWNER_CREDENTIAL_MESSAGES.badOwnerPassword);
-
-  // The URL already passed parsePgUrl, so `new URL` succeeds and every query parameter is allowed and validated.
-  const parsed = new URL(databaseUrl.trim());
-  const scheme = parsed.protocol.toLowerCase() === 'postgresql:' ? 'postgresql:' : 'postgres:';
-  const host = source.host.includes(':') ? `[${source.host}]` : source.host;
-  const query = new URLSearchParams();
-  for (const [key, value] of parsed.searchParams) {
-    if (DROPPED_QUERY_PARAMS.has(key)) continue;
-    if (!KEPT_QUERY_PARAMS.has(key)) throw new OwnerCredentialError(OWNER_CREDENTIAL_MESSAGES.unexpectedQuery);
-    if (key === 'sslmode') query.set(key, source.sslmode ?? value);
-    else if (key === 'options') {
-      // parsePgUrl accepted only a Neon endpoint token here (session `-c` options are refused without allowSessionRole).
-      if (source.providerOptions === null) throw new OwnerCredentialError(OWNER_CREDENTIAL_MESSAGES.unexpectedQuery);
-      query.set(key, source.providerOptions);
-    } else query.set(key, value);
-  }
-  const search = query.toString();
-  // The database keeps the URL's own encoded path: pg-connection-string decodes it with decodeURI, which is exactly how
-  // source.database was produced, so re-encoding it could only change its meaning (the round trip below proves it).
-  const runtimeUrl = `${scheme}//${OWNER_LOGIN}:${encodeURIComponent(ownerPassword)}@${host}:${source.port}${parsed.pathname}${search ? `?${search}` : ''}`;
-
-  const runtime = parseTarget(runtimeUrl, URL_LABEL);
-  if (
-    runtime.user !== OWNER_LOGIN ||
-    runtime.password !== ownerPassword ||
-    runtime.host !== source.host ||
-    runtime.port !== source.port ||
-    runtime.database !== source.database ||
-    runtime.sslmode !== source.sslmode ||
-    runtime.channelBinding !== source.channelBinding ||
-    runtime.providerOptions !== source.providerOptions ||
-    runtime.applicationName !== null ||
-    runtime.transactionPooler !== null
-  ) {
-    throw new OwnerCredentialError(OWNER_CREDENTIAL_MESSAGES.roundTrip);
-  }
-  return runtimeUrl;
+export function runtimeUrlFacts(databaseUrl: string): { owner: boolean; transactionPooler: boolean } {
+  const target = parseTarget(databaseUrl, URL_LABEL);
+  return { owner: target.user === OWNER_LOGIN, transactionPooler: target.transactionPooler !== null };
 }
 
 /**
- * What the one-shot db-setup step (the bootstrap child, the ONLY process that receives PG_ADMIN_URL, and the only one that
- * receives a database URL from the operator) does with its one input URL (selectDbSetupInput below picks it). Pure; never
- * connects; throws OwnerCredentialError.
- *   - `bootstrap` (PG_ADMIN_URL only): the URL's login is NOT crewflow_owner (the bundled db's superuser or a client's admin URL): crewflow_owner
- *     is created if missing, with the password from db-setup's password file (generated on the first start). Twenty: the
- *     `ensure-database-exists` init container, which alone holds the superuser secret and runs `CREATE USER … IF NOT
- *     EXISTS` without ever changing an existing user's password (deployment-server.yaml:81-130, :99-116). A client's admin
- *     URL is a Crewflow addition (Twenty would run the app as that login; RLS requires a separate owner login).
- *   - `owner-url` (PG_DATABASE_URL only): the URL's login IS crewflow_owner (an existing one, e.g. made by hand with 01-crewflow-owner.sql): only
- *     read-only checks; its password is copied into the password file; the database is never written to (Twenty: an
- *     external database gets no setup step, secret-db-url.yaml:24-30).
- * A transaction pooler is refused in both modes (the setup needs one real session).
+ * One database URL, parsed and classified by its login (pure; never connects; throws OwnerCredentialError):
+ *   - `bootstrap`  the login is NOT crewflow_owner (an admin login: the bundled db's superuser, or your database's admin);
+ *   - `owner-url`  the login IS crewflow_owner; its password is kept (non-enumerable).
+ * A transaction pooler is refused for both (the setup needs one real session). `label` names the variable in every refusal.
  */
 export type DbSetupPlan =
   | { mode: 'bootstrap'; readonly urlTarget: PgTarget }
@@ -190,7 +114,7 @@ export type DbSetupPlan =
       mode: 'owner-url';
       /** The validated crewflow_owner target (password non-enumerable). */
       readonly urlTarget: PgTarget;
-      /** The URL's own password (the existing crewflow_owner's). SECRET; non-enumerable. */
+      /** The URL's own password (crewflow_owner's). SECRET; non-enumerable. */
       readonly ownerPassword: string;
     };
 
@@ -201,11 +125,6 @@ function hide<T extends object>(target: T, key: string, value: string): void {
 /** A fixed message with the variable name it speaks about (the messages above name PG_DATABASE_URL). */
 const relabel = (message: string, label: string): string => (label === URL_LABEL ? message : message.split(URL_LABEL).join(label));
 
-/**
- * `label`: the variable the URL came from (PG_ADMIN_URL or PG_DATABASE_URL), named in every refusal. The mode is the URL's
- * login; selectDbSetupInput below then refuses a mode the variable does not allow (an admin login in PG_DATABASE_URL,
- * crewflow_owner in PG_ADMIN_URL), so the login can never silently re-route the URL to the other mode.
- */
 export function planDbSetup(databaseUrl: string | undefined | null, label: string = URL_LABEL): DbSetupPlan {
   if (typeof databaseUrl !== 'string' || databaseUrl.trim() === '') throw new OwnerCredentialError(relabel(OWNER_CREDENTIAL_MESSAGES.databaseUrlMissing, label));
   let parsed: PgTarget;
@@ -224,17 +143,19 @@ export function planDbSetup(databaseUrl: string | undefined | null, label: strin
 }
 
 /**
- * PG_ADMIN_URL (owner decision 2026-11-17, Twenty's Helm model: the admin login lives only in the setup step, through the
- * db-superuser secret; server and worker get only PG_DATABASE_URL = the app login). The ONE-SHOT db-setup service's two
- * inputs, and the ONLY place either is read:
- *   - PG_ADMIN_URL     a login that can create roles (your database's admin, or the bundled db's superuser, which db-setup.sh
- *                      sets from the compose-built bundled URL when neither variable is given): `bootstrap` mode, crewflow_owner
- *                      created if missing. Never crewflow_owner itself.
- *   - PG_DATABASE_URL  ALWAYS the app login, crewflow_owner, that you created yourself: `owner-url` mode, read-only checks
- *                      only. Any other login is REFUSED (never reinterpreted as an admin URL: before 2026-11-17 this
- *                      variable carried the admin URL, so an un-renamed deployment must fail closed, not run as admin).
- * Exactly one of the two; the retired PG_DATABASE_ADMIN_URL is refused by name. rab-api and rab-worker never receive
- * PG_ADMIN_URL (never-in-runtime-env.ts, api-prestart.sh, worker-start.sh, the compose gates).
+ * The ONE-SHOT db-setup service's two inputs, and the ONLY place either is read (owner decision 2026-11-18, Twenty's way):
+ *   - PG_DATABASE_URL  ALWAYS required, ALWAYS the app login crewflow_owner, at a direct host: the very URL rab-api and
+ *                      rab-worker receive (compose passes the same expression to all three). Any other login is REFUSED.
+ *   - PG_ADMIN_URL     optional: a login that can create roles (your database's admin, or the bundled db's superuser, which
+ *                      db-setup.sh sets from the compose-built bundled URL in mode a). With it (modes a and b) db-setup
+ *                      creates crewflow_owner with the password inside PG_DATABASE_URL (Twenty: `CREATE USER %I WITH
+ *                      PASSWORD %L` with the app user's own password, deployment-server.yaml:107-116), sets that password
+ *                      when the role exists and the password does not log in, and removes CREATEROLE once the schema
+ *                      bootstrap is complete. Never crewflow_owner itself, and it must name the SAME database as
+ *                      PG_DATABASE_URL (host, port, database).
+ *                      Without it (mode c) db-setup only checks crewflow_owner, read-only.
+ * The retired PG_DATABASE_ADMIN_URL is refused by name. rab-api and rab-worker never receive PG_ADMIN_URL
+ * (never-in-runtime-env.ts, api-prestart.sh, worker-start.sh, the compose gates).
  */
 export const ADMIN_URL_LABEL = 'PG_ADMIN_URL' as const;
 /** Earlier names of the admin URL: refused by name with a "renamed" message, never read. */
@@ -242,18 +163,29 @@ export const RETIRED_ADMIN_URL_NAMES: readonly string[] = Object.freeze(['PG_DAT
 
 export const DB_SETUP_INPUT_MESSAGES = Object.freeze({
   retiredAdminName: (name: string) => `${name} was renamed to ${ADMIN_URL_LABEL} (your database's admin URL; db-setup only). Rename it. Refusing.`,
-  both: `${ADMIN_URL_LABEL} and ${URL_LABEL} are both set. Set ${ADMIN_URL_LABEL} (db-setup creates crewflow_owner with your admin login) OR ${URL_LABEL} (the crewflow_owner login you created yourself), never both. Refusing.`,
-  neither: `No database setting reached db-setup: set ${ADMIN_URL_LABEL} (your database's admin URL: db-setup creates crewflow_owner) or ${URL_LABEL} (the crewflow_owner URL you created yourself), or use the bundled db (CREWFLOW_BUNDLED_DB unset or 1, with PG_DATABASE_PASSWORD). Refusing.`,
-  appUrlNotOwner: `${URL_LABEL} is the app login and must log in as crewflow_owner. It is never an admin URL: the admin URL was renamed to ${ADMIN_URL_LABEL} (db-setup only). Move your admin URL to ${ADMIN_URL_LABEL}, or put the crewflow_owner URL here. Refusing.`,
-  adminUrlIsOwner: `${ADMIN_URL_LABEL} logs in as crewflow_owner, the app login. Put the crewflow_owner URL in ${URL_LABEL} instead (db-setup then only checks it, read-only) and remove ${ADMIN_URL_LABEL}. Refusing.`,
+  appUrlMissing: `${URL_LABEL} is empty. It is always required: the crewflow_owner URL that rab-api and rab-worker use (bundled db: set PG_DATABASE_APP_PASSWORD; your own database: put the crewflow_owner URL in ${URL_LABEL}). Refusing.`,
+  appUrlNotOwner: `${URL_LABEL} is the app login and must log in as crewflow_owner. It is never an admin URL: an admin URL goes in ${ADMIN_URL_LABEL} (db-setup only). Refusing.`,
+  adminUrlIsOwner: `${ADMIN_URL_LABEL} logs in as crewflow_owner, the app login. ${ADMIN_URL_LABEL} is your database's admin login (db-setup creates crewflow_owner with it); remove it to have db-setup only check crewflow_owner. Refusing.`,
+  targetMismatch: `${ADMIN_URL_LABEL} and ${URL_LABEL} name different databases (host, port or database differ). Both must name the same database: db-setup creates crewflow_owner there, and rab-api / rab-worker connect there. Refusing.`,
 });
 
-/** The one URL db-setup works with, the variable it came from, and its plan. The URL is a SECRET (non-enumerable). */
+/**
+ * db-setup's input. `url` / `name` are the URL db-setup connects with FIRST (the admin URL in `bootstrap` mode, the app URL
+ * in `owner-url` mode); `appUrl` is always PG_DATABASE_URL. Every URL and the password are SECRET (non-enumerable).
+ */
 export interface DbSetupInput {
+  readonly mode: 'bootstrap' | 'owner-url';
   readonly name: typeof ADMIN_URL_LABEL | typeof URL_LABEL;
+  /** The connect URL's plan (bootstrap: the admin URL's; owner-url: the app URL's). */
   readonly plan: DbSetupPlan;
-  /** The URL itself. SECRET; non-enumerable. */
+  /** The app URL's validated target (crewflow_owner). */
+  readonly appTarget: PgTarget;
+  /** The connect URL. SECRET; non-enumerable. */
   readonly url: string;
+  /** PG_DATABASE_URL (crewflow_owner). SECRET; non-enumerable. */
+  readonly appUrl: string;
+  /** The crewflow_owner password inside PG_DATABASE_URL. SECRET; non-enumerable. */
+  readonly ownerPassword: string;
 }
 
 const presentValue = (env: Record<string, string | undefined>, name: string): string | undefined => {
@@ -261,19 +193,33 @@ const presentValue = (env: Record<string, string | undefined>, name: string): st
   return typeof value === 'string' && value.trim() !== '' ? value.trim() : undefined;
 };
 
+/** Host, port, database and the provider routing token: the database a URL connects to, whatever its login. */
+export function sameDatabase(a: PgTarget, b: PgTarget): boolean {
+  return a.host.toLowerCase() === b.host.toLowerCase() && a.port === b.port && a.database === b.database && a.providerOptions === b.providerOptions;
+}
+
 /** db-setup's input (see ADMIN_URL_LABEL). Pure; never connects; throws OwnerCredentialError (fixed, value-free text). */
 export function selectDbSetupInput(env: Record<string, string | undefined>): DbSetupInput {
   for (const name of RETIRED_ADMIN_URL_NAMES) if (presentValue(env, name) !== undefined) throw new OwnerCredentialError(DB_SETUP_INPUT_MESSAGES.retiredAdminName(name));
   const adminUrl = presentValue(env, ADMIN_URL_LABEL);
   const appUrl = presentValue(env, URL_LABEL);
-  if (adminUrl !== undefined && appUrl !== undefined) throw new OwnerCredentialError(DB_SETUP_INPUT_MESSAGES.both);
-  if (adminUrl === undefined && appUrl === undefined) throw new OwnerCredentialError(DB_SETUP_INPUT_MESSAGES.neither);
-  const name = adminUrl !== undefined ? ADMIN_URL_LABEL : URL_LABEL;
-  const url = (adminUrl ?? appUrl) as string;
-  const plan = planDbSetup(url, name);
-  if (name === URL_LABEL && plan.mode !== 'owner-url') throw new OwnerCredentialError(DB_SETUP_INPUT_MESSAGES.appUrlNotOwner);
-  if (name === ADMIN_URL_LABEL && plan.mode !== 'bootstrap') throw new OwnerCredentialError(DB_SETUP_INPUT_MESSAGES.adminUrlIsOwner);
-  const input = { name, plan } as DbSetupInput;
-  hide(input, 'url', url);
+  if (appUrl === undefined) throw new OwnerCredentialError(DB_SETUP_INPUT_MESSAGES.appUrlMissing);
+  const appPlan = planDbSetup(appUrl, URL_LABEL);
+  if (appPlan.mode !== 'owner-url') throw new OwnerCredentialError(DB_SETUP_INPUT_MESSAGES.appUrlNotOwner);
+  let adminPlan: DbSetupPlan | null = null;
+  if (adminUrl !== undefined) {
+    adminPlan = planDbSetup(adminUrl, ADMIN_URL_LABEL);
+    if (adminPlan.mode !== 'bootstrap') throw new OwnerCredentialError(DB_SETUP_INPUT_MESSAGES.adminUrlIsOwner);
+    if (!sameDatabase(adminPlan.urlTarget, appPlan.urlTarget)) throw new OwnerCredentialError(DB_SETUP_INPUT_MESSAGES.targetMismatch);
+  }
+  const input = {
+    mode: adminPlan ? ('bootstrap' as const) : ('owner-url' as const),
+    name: adminPlan ? ADMIN_URL_LABEL : URL_LABEL,
+    plan: adminPlan ?? appPlan,
+    appTarget: appPlan.urlTarget,
+  } as DbSetupInput;
+  hide(input, 'url', adminUrl ?? appUrl);
+  hide(input, 'appUrl', appUrl);
+  hide(input, 'ownerPassword', appPlan.ownerPassword);
   return input;
 }

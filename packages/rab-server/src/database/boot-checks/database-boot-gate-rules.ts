@@ -8,7 +8,7 @@ import { assertDeploymentIdentity, DeploymentIdentityError, Query } from '../dep
 import { dispatchNotifyFor } from '../postgres/pg-config';
 import { PgConfigError } from '../postgres/pg-url-policy';
 import { isSupportedPostgresMajor, postgresMajorFromVersionNum, SupportedPostgresMajor, unsupportedPostgresMessage } from '../postgres/supported-majors';
-import { OWNER_LOGIN_ROLE, ownerLoginObjectPostureProblems, ownerLoginRolePostureProblems } from './owner-login-posture';
+import { OWNER_CREATEROLE_PENDING_COMMENT, OWNER_LOGIN_ROLE, ownerLoginObjectPostureProblems, ownerLoginRolePostureProblems } from './owner-login-posture';
 import { SchemaCompatibilityError } from './schema-compatibility';
 
 export type BootProcess = 'api' | 'worker' | 'cli' | 'provisioner';
@@ -80,6 +80,10 @@ export interface BootGateFacts {
   loginPrivileged: boolean;
   /** The LOGIN role has REPLICATION or CREATEDB (owner-login shape: neither). */
   loginReplicationOrCreatedb: boolean;
+  /** The LOGIN role has CREATEROLE (owner decision 2026-11-18: refused in production unless db-setup marked it pending). */
+  loginCreateRole: boolean;
+  /** The LOGIN role carries OWNER_CREATEROLE_PENDING_COMMENT (db-setup: the schema bootstrap is not complete yet). */
+  loginCreateRolePending: boolean;
   /** Comma-separated owner roles the current role is a member of (other than itself), or null. */
   ownerRoles: string | null;
   serverVersionNum: number;
@@ -102,6 +106,7 @@ export interface BootGateFacts {
  * for crewflow_worker too: its expected crewflow_app membership (INHERIT TRUE, SET FALSE) is not an owner role, and any
  * path from it to crewflow / rab_owner / rab_secure_owner — whatever the grant options — is refused.
  */
+// sql-injection-reviewed: the only interpolation is OWNER_CREATEROLE_PENDING_COMMENT, a fixed code constant without quotes.
 export const BOOT_FACTS_SQL = `
 SELECT current_user::text AS who,
        session_user::text AS login,
@@ -109,6 +114,9 @@ SELECT current_user::text AS who,
        r.rolbypassrls AS bypassrls,
        (SELECT s.rolsuper OR s.rolbypassrls FROM pg_catalog.pg_roles s WHERE s.rolname = session_user) AS login_privileged,
        (SELECT s.rolreplication OR s.rolcreatedb FROM pg_catalog.pg_roles s WHERE s.rolname = session_user) AS login_repl_createdb,
+       (SELECT s.rolcreaterole FROM pg_catalog.pg_roles s WHERE s.rolname = session_user) AS login_createrole,
+       COALESCE((SELECT pg_catalog.shobj_description(s.oid, 'pg_authid') = '${OWNER_CREATEROLE_PENDING_COMMENT}'
+                   FROM pg_catalog.pg_roles s WHERE s.rolname = session_user), false) AS login_createrole_pending,
        (SELECT pg_catalog.string_agg(o.rolname::text, ',' ORDER BY o.rolname)
           FROM pg_catalog.pg_roles o
          WHERE o.rolname IN ('crewflow', 'rab_owner', 'rab_secure_owner') AND o.rolname <> current_user
@@ -168,6 +176,8 @@ export function parseBootFacts(row: Record<string, unknown> | undefined): BootGa
     bypassrls: row.bypassrls === true,
     loginPrivileged: row.login_privileged === true,
     loginReplicationOrCreatedb: row.login_repl_createdb === true,
+    loginCreateRole: row.login_createrole === true,
+    loginCreateRolePending: row.login_createrole_pending === true,
     ownerRoles: row.owner_roles ? String(row.owner_roles) : null,
     serverVersionNum: Number(row.server_version_num),
     database: String(row.database),
@@ -212,6 +222,32 @@ export function assertRoleGate(facts: BootGateFacts, expected: readonly BootRole
       `the ${label} login "${facts.who}" is a member of ${WORKER_ROLE}, which must have zero members. Revoke the membership (GRANT/REVOKE as the role's administrator).`,
     );
   }
+}
+
+/**
+ * Gate 1, CREATEROLE (owner decision 2026-11-18, "keep the protection as a boot check ... CREATEROLE (after the NOCREATEROLE
+ * step)"). crewflow_owner is created CREATEROLE because the FIRST start's migrate child creates the schema roles; db-setup
+ * (modes a and b, with the admin login) removes it once the schema is complete for the image, and until then marks the
+ * role with OWNER_CREATEROLE_PENDING_COMMENT, which only an admin can set or clear. In PRODUCTION:
+ *   CREATEROLE, not marked  -> REFUSED (a role that was never meant to keep it, or one re-granted after the NOCREATEROLE step);
+ *   CREATEROLE, marked      -> allowed with a WARNING: the first start (and the Worker that follows it); the next db-setup run
+ *                              (every `docker compose up -d`) removes it;
+ *   NOCREATEROLE            -> nothing to say.
+ * Outside production nothing is reported (test and development databases keep a CREATEROLE crewflow_owner). Runs after the
+ * schema-independent role checks; reaching the boot gates means the migrate child already finished (the API) or the API is
+ * healthy (the Worker), so the bootstrap no longer needs the attribute. Returns the warnings. Pure.
+ */
+export function assertCreateRoleGate(facts: Pick<BootGateFacts, 'who' | 'loginCreateRole' | 'loginCreateRolePending'>, production: boolean, label: string): string[] {
+  if (!production || !facts.loginCreateRole) return [];
+  if (!facts.loginCreateRolePending) {
+    throw new DatabaseBootGateError(
+      'role',
+      `the ${label} login "${facts.who}" has CREATEROLE after the schema bootstrap (it is not marked as waiting for it). db-setup removes it once the schema is current: run db-setup again with the admin login (docker compose up -d), or as your admin run ALTER ROLE ${facts.who} NOCREATEROLE. A release that needs it back says so in its notes.`,
+    );
+  }
+  return [
+    `the login "${facts.who}" still has CREATEROLE, marked by db-setup for the schema bootstrap; the next db-setup run (docker compose up -d) removes it once the schema is current.`,
+  ];
 }
 
 /**
@@ -509,6 +545,7 @@ export async function evaluateBootGates(input: EvaluateBootGatesInput): Promise<
   const [factsRow] = await query(BOOT_FACTS_SQL);
   const facts = parseBootFacts(factsRow);
   assertRoleGate(facts, expectedRolesFor(processName, input.cliCommand, claimMode), label);
+  const createRoleWarnings = assertCreateRoleGate(facts, production, label);
   assertVersionGate(facts);
   // After the version gate: the walk and the inventory read PG16-only pg_auth_members columns (D10: < 16 is refused).
   await assertOwnerLoginRoleGate(query, label);
@@ -569,7 +606,7 @@ export async function evaluateBootGates(input: EvaluateBootGatesInput): Promise<
     identity: identity.summary,
     tls: facts.ssl,
     forceRlsTables: FORCE_RLS_SPOT_CHECK_TABLES.length,
-    warnings: [...identity.warnings, ...compatibilityWarnings, ...grantWarnings],
+    warnings: [...createRoleWarnings, ...identity.warnings, ...compatibilityWarnings, ...grantWarnings],
   };
 }
 

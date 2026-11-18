@@ -1,6 +1,7 @@
 import { healthyOwnerLoginPosture, OwnerLoginPostureFixture, ownerLoginPostureAnswer } from '../../__tests__/helpers/owner-login-posture-fake';
 import { MARKER_PRESENT_SQL, MARKER_READ_SQL, Query } from '../deployment-identity/deployment-identity';
 import {
+  assertCreateRoleGate,
   assertVersionGate,
   BOOT_FACTS_SQL,
   DISPATCH_NOTIFY_SESSION_SQL,
@@ -20,6 +21,7 @@ import {
   ROUTINE_GRANTS_SQL,
   withDatabaseRetry,
 } from './database-boot-gate-rules';
+import { OWNER_CREATEROLE_PENDING_COMMENT } from './owner-login-posture';
 import { assertSchemaCompatible, assessSchemaCompatibility } from './schema-compatibility';
 
 const PROD_ID = '6f1c2d3e-4a5b-4c6d-8e7f-0a1b2c3d4e5f';
@@ -339,6 +341,71 @@ describe('database boot gates (fake connection)', () => {
   it('cliCommandFromArgv returns the first non-option argument after the script', () => {
     expect(cliCommandFromArgv(['node', 'main.js', 'bootstrap-admin', '--x'])).toBe('bootstrap-admin');
     expect(cliCommandFromArgv(['node', 'main.js', '--help'])).toBeUndefined();
+  });
+});
+
+describe('gate 1, CREATEROLE after the schema bootstrap (owner decision 2026-11-18)', () => {
+  const prodDb = (facts: Record<string, unknown>) =>
+    healthy({ markerPresent: true, markerRows: [{ environment: 'production', deployment_id: PROD_ID, bound_database: 'crewflow', bound_hosts: [GATE_HOST] }] }, { ssl: true, ...facts });
+
+  it('BOOT_FACTS_SQL reads the CREATEROLE attribute of the login and compares its COMMENT with the exact db-setup mark (session_user, pg_catalog-qualified)', () => {
+    expect(BOOT_FACTS_SQL).toContain('s.rolcreaterole FROM pg_catalog.pg_roles s WHERE s.rolname = session_user) AS login_createrole');
+    expect(BOOT_FACTS_SQL).toContain(`pg_catalog.shobj_description(s.oid, 'pg_authid') = '${OWNER_CREATEROLE_PENDING_COMMENT}'`);
+    expect(BOOT_FACTS_SQL).toContain('AS login_createrole_pending');
+    expect(OWNER_CREATEROLE_PENDING_COMMENT).toMatch(/^[a-z:-]+$/); // interpolated into SQL text: no quote, ever
+    expect(parseBootFacts({ who: 'crewflow_owner', login: 'crewflow_owner', login_createrole: true, login_createrole_pending: false })).toMatchObject({
+      loginCreateRole: true,
+      loginCreateRolePending: false,
+    });
+    // Fail closed on a missing column: absent = not CREATEROLE AND not marked (an unmarked CREATEROLE is never invented).
+    expect(parseBootFacts({ who: 'crewflow_owner', login: 'crewflow_owner' })).toMatchObject({ loginCreateRole: false, loginCreateRolePending: false });
+  });
+
+  it('assertCreateRoleGate (pure): production refuses an UNMARKED CREATEROLE login; a marked one passes with one warning; NOCREATEROLE says nothing', () => {
+    const facts = (loginCreateRole: boolean, loginCreateRolePending: boolean) => ({ who: 'crewflow_owner', loginCreateRole, loginCreateRolePending });
+    let thrown: unknown;
+    try {
+      assertCreateRoleGate(facts(true, false), true, 'api process');
+    } catch (error) {
+      thrown = error;
+    }
+    expect(thrown).toBeInstanceOf(DatabaseBootGateError);
+    expect((thrown as DatabaseBootGateError).gate).toBe('role');
+    expect((thrown as Error).message).toMatch(/the api process login "crewflow_owner" has CREATEROLE after the schema bootstrap/);
+    expect((thrown as Error).message).toMatch(/run db-setup again with the admin login \(docker compose up -d\), or as your admin run ALTER ROLE crewflow_owner NOCREATEROLE/);
+    const warnings = assertCreateRoleGate(facts(true, true), true, 'worker process');
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toMatch(/still has CREATEROLE, marked by db-setup for the schema bootstrap/);
+    expect(assertCreateRoleGate(facts(false, false), true, 'api process')).toEqual([]);
+    expect(assertCreateRoleGate(facts(false, true), true, 'api process')).toEqual([]);
+    // Outside production nothing is reported (test / development databases keep a CREATEROLE crewflow_owner).
+    expect(assertCreateRoleGate(facts(true, false), false, 'api process')).toEqual([]);
+  });
+
+  it.each([
+    ['api', undefined],
+    ['worker', undefined],
+    ['cli', 'bootstrap-admin'],
+  ] as const)('production %s: an unmarked CREATEROLE crewflow_owner is REFUSED at gate 1, before any other gate reads the database', async (processName, cliCommand) => {
+    const env = processName === 'cli' ? { ...PROD_ENV, DB_TARGET: 'production', ALLOW_PRODUCTION_DB_COMMANDS: 'true' } : PROD_ENV;
+    await refusedAt(
+      evaluateBootGates(input(prodDb({ login_createrole: true, login_createrole_pending: false }), { processName, cliCommand, env })),
+      'role',
+      /has CREATEROLE after the schema bootstrap/,
+    );
+  });
+
+  it('production: a MARKED CREATEROLE crewflow_owner (the first start) passes with exactly one warning; a NOCREATEROLE one with none', async () => {
+    const marked = await evaluateBootGates(input(prodDb({ login_createrole: true, login_createrole_pending: true }), { env: PROD_ENV }));
+    expect(marked.warnings).toEqual([expect.stringMatching(/still has CREATEROLE, marked by db-setup/)]);
+    const hardened = await evaluateBootGates(input(prodDb({ login_createrole: false, login_createrole_pending: false }), { env: PROD_ENV }));
+    expect(hardened.warnings).toEqual([]);
+  });
+
+  it('outside production a CREATEROLE crewflow_owner is neither refused nor reported (the existing warning count is unchanged)', async () => {
+    const report = await evaluateBootGates(input(healthy({}, { login_createrole: true, login_createrole_pending: false })));
+    expect(report.warnings).toHaveLength(1);
+    expect(report.warnings.join(' ')).not.toMatch(/CREATEROLE/);
   });
 });
 

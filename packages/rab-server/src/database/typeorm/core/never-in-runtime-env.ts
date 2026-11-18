@@ -103,7 +103,14 @@ export const NEVER_IN_RUNTIME_ENV: readonly NeverInRuntimeEnvEntry[] = Object.fr
   // before any runtime process starts. Refused in the API and the Worker (the provisioner is left as it was).
   {
     name: 'PG_DATABASE_PASSWORD',
-    why: 'It is the bundled database admin password: only docker compose reads it, to build the admin URL; api-prestart.sh / worker-start.sh unset it, and a runtime process connects only as crewflow_owner. Remove it.',
+    why: 'It is the bundled database admin password: only docker compose reads it, to build the admin URL; a runtime process connects only as crewflow_owner. Remove it.',
+    ...OWNER_LOGIN,
+  },
+  // Owner decision 2026-11-18 (Twenty's way): the bundled crewflow_owner password. Only docker compose reads it, to build
+  // PG_DATABASE_URL for the bundled db (mode a); it never reaches a container as a variable of its own.
+  {
+    name: 'PG_DATABASE_APP_PASSWORD',
+    why: 'It is the bundled crewflow_owner password: only docker compose reads it, to build PG_DATABASE_URL. A runtime process reads only PG_DATABASE_URL. Remove it.',
     ...OWNER_LOGIN,
   },
   // PG_ADMIN_URL (owner decision 2026-11-17, Twenty's Helm model): the database ADMIN URL, read ONLY by the one-shot db-setup
@@ -112,7 +119,7 @@ export const NEVER_IN_RUNTIME_ENV: readonly NeverInRuntimeEnvEntry[] = Object.fr
   // dumps, error reporters). The compose gates keep it off rab-api / rab-worker; this is the process-level refusal.
   {
     name: 'PG_ADMIN_URL',
-    why: 'It is the database admin URL: only the one-shot db-setup service reads it, to create crewflow_owner. A runtime process connects only as crewflow_owner (PG_DATABASE_URL, built from the files db-setup writes). Remove it.',
+    why: 'It is the database admin URL: only the one-shot db-setup service reads it, to create crewflow_owner. A runtime process connects only as crewflow_owner (PG_DATABASE_URL). Remove it.',
   },
   // Security review of PR #230, L-1: the admin URL under its other names. PG_DATABASE_ADMIN_URL is the retired name (db-setup
   // refuses it too); CREWFLOW_BUNDLED_DB_ADMIN_URL is db-setup's compose-built bundled superuser URL.

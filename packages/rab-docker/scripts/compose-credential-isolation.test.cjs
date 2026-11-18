@@ -90,13 +90,15 @@ test('with the real parser, the env_file names are read from the committed compo
   }
 });
 
-// ---- Part F2 (X2.3): the Part A contract (dbSetupContractChecks) and the bundled-db parity (bundledDbParityChecks).
+// ---- The database-setup contract (dbSetupContractChecks; owner decision 2026-11-18, Twenty's way) and the bundled-db
+// parity (bundledDbParityChecks).
 const failedLabels = (checks) => checks.filter(([ok]) => !ok).map(([, label]) => label);
 const refusedBy = (checks, re) => {
   const f = failedLabels(checks);
   assert.ok(f.some((l) => re.test(l)), `expected a failed check matching ${re}; failed: ${JSON.stringify(f)}`);
 };
 const vol = (source, target, readOnly) => ({ type: 'volume', source, target, ...(readOnly ? { read_only: true } : {}) });
+const OWNER_URL = 'postgresql://crewflow_owner:apppw@db:5432/crewflow?sslmode=verify-full'; // gitleaks:allow (test fixture)
 const partA = () => ({
   db: { image: 'postgres@sha256:x', environment: { POSTGRES_PASSWORD: 'p' } },
   'db-setup': {
@@ -105,22 +107,22 @@ const partA = () => ({
     restart: 'no',
     user: '1000:1000',
     read_only: true,
-    environment: { PG_DATABASE_URL: 'postgresql://postgres:p@db:5432/crewflow?sslmode=verify-full', NODE_ENV: 'development' },
-    volumes: [vol('crewflow-db-ca', '/run/crewflow/db-ca', true), vol('crewflow-db-target', '/run/crewflow/db-target', false)],
+    environment: { PG_ADMIN_URL: 'postgresql://postgres:p@db:5432/crewflow?sslmode=verify-full', PG_DATABASE_URL: OWNER_URL, NODE_ENV: 'development' },
+    volumes: [vol('crewflow-db-ca', '/run/crewflow/db-ca', true)],
     depends_on: { db: { condition: 'service_healthy' } },
   },
   server: {
     image: 'app@sha256:1',
     entrypoint: ['./api-prestart.sh'],
-    environment: { PG_DATABASE_URL: '', NODE_ENV: 'development' },
-    volumes: [vol('crewflow-db-ca', '/run/crewflow/db-ca', true), vol('crewflow-db-target', '/run/crewflow/db-target', true)],
+    environment: { PG_DATABASE_URL: OWNER_URL, PG_ADMIN_URL: '', NODE_ENV: 'development' },
+    volumes: [vol('crewflow-db-ca', '/run/crewflow/db-ca', true)],
     depends_on: { 'db-setup': { condition: 'service_completed_successfully' } },
   },
   worker: {
     image: 'app@sha256:1',
     entrypoint: ['./worker-start.sh'],
-    environment: { PG_DATABASE_URL: '' },
-    volumes: [vol('crewflow-db-target', '/run/crewflow/db-target', true)],
+    environment: { PG_DATABASE_URL: OWNER_URL, PG_ADMIN_URL: '' },
+    volumes: [vol('crewflow-db-ca', '/run/crewflow/db-ca', true)],
   },
 });
 const RUNTIME = ['server', 'worker'];
@@ -139,8 +141,13 @@ test('DENIAL (Part F2): a missing db-setup, or one that is not the one-shot ./db
     [(s) => { s['db-setup'].restart = 'unless-stopped'; }, /db-setup restart is "no"/],
     [(s) => { s['db-setup'].ports = [{ target: 5432 }]; }, /db-setup publishes no port/],
     [(s) => { delete s['db-setup'].depends_on; }, /db-setup starts after a healthy db/],
-    [(s) => { s['db-setup'].volumes[1].read_only = true; }, /db-setup mounts the target volume writable/],
     [(s) => { s['db-setup'].volumes[0].read_only = false; }, /db-setup mounts the db CA read-only/],
+    [(s) => { s['db-setup'].volumes = []; }, /db-setup mounts the db CA read-only/],
+    // Owner decision 2026-11-18: db-setup's PG_DATABASE_URL is always the crewflow_owner URL (never an admin URL, never empty).
+    [(s) => { s['db-setup'].environment.PG_DATABASE_URL = 'postgresql://postgres:p@db:5432/crewflow?sslmode=verify-full'; }, /db-setup's PG_DATABASE_URL is a crewflow_owner URL/],
+    [(s) => { delete s['db-setup'].environment.PG_DATABASE_URL; }, /db-setup's PG_DATABASE_URL is a crewflow_owner URL/],
+    [(s) => { s['db-setup'].environment.PG_DATABASE_URL = 'postgresql://crewflow_owner:@db:5432/crewflow?sslmode=verify-full'; }, /db-setup's PG_DATABASE_URL is a crewflow_owner URL with a password/],
+    [(s) => { s['db-setup'].environment.PG_DATABASE_URL = 'postgresql://crewflow_owner:x@db:5432/crewflow?sslmode=require'; }, /sslmode=verify-full/],
     [(s) => { s['db-setup'].environment.APP_SECRET = ''; }, /db-setup has no APP_SECRET/],
     [(s) => { s['db-setup'].user = '0:0'; }, /db-setup runs as 1000:1000/],
   ];
@@ -151,33 +158,88 @@ test('DENIAL (Part F2): a missing db-setup, or one that is not the one-shot ./db
   }
 });
 
-test('DENIAL (Part F2): an app service with a database URL, the wrong PID 1, compose init or a writable target fails', () => {
+test('DENIAL (owner decision 2026-11-18): an app service whose PG_DATABASE_URL is not db-setup\'s, a second database URL, an admin URL, the wrong PID 1, compose init or no read-only CA fails', () => {
   for (const name of RUNTIME) {
     for (const [edit, re] of [
-      [(s) => { s[name].environment.PG_DATABASE_URL = 'postgres://crewflow_owner:x@db:5432/crewflow'; }, new RegExp(`${name} has no PG_DATABASE_URL value`)],
-      [(s) => { s[name].environment.SOME_URL = 'postgresql://u:p@db/x'; }, new RegExp(`${name} carries no database URL in any variable \\(found in SOME_URL\\)`)],
+      [(s) => { s[name].environment.PG_DATABASE_URL = 'postgres://crewflow_owner:x@db:5432/crewflow'; }, new RegExp(`${name}'s PG_DATABASE_URL is exactly db-setup's`)],
+      [(s) => { s[name].environment.PG_DATABASE_URL = ''; }, new RegExp(`${name}'s PG_DATABASE_URL is exactly db-setup's`)],
+      [(s) => { delete s[name].environment.PG_DATABASE_URL; }, new RegExp(`${name}'s PG_DATABASE_URL is exactly db-setup's`)],
+      [(s) => { s[name].environment.SOME_URL = 'postgresql://u:p@db/x'; }, new RegExp(`${name} carries no other database URL in any variable \\(found in SOME_URL\\)`)],
+      [(s) => { s[name].environment.PG_ADMIN_URL = 'postgresql://postgres:p@db:5432/crewflow'; }, new RegExp(`${name} pins PG_ADMIN_URL to ""`)],
+      [(s) => { s[name].environment.PG_ADMIN_URL = 'postgresql://postgres:p@db:5432/crewflow'; }, /only db-setup has a PG_ADMIN_URL value \(found on/],
+      [(s) => { delete s[name].environment.PG_ADMIN_URL; }, new RegExp(`${name} pins PG_ADMIN_URL to ""`)],
       [(s) => { s[name].entrypoint = ['/sbin/tini', '--']; s[name].command = ['node', 'main.js']; }, new RegExp(`${name} runs \\./(api-prestart|worker-start)\\.sh as PID 1`)],
       [(s) => { s[name].init = true; }, new RegExp(`${name} has no compose init`)],
-      [(s) => { s[name].volumes = s[name].volumes.map((v) => (v.target === '/run/crewflow/db-target' ? { ...v, read_only: false } : v)); }, new RegExp(`${name} mounts db-setup's target volume read-only`)],
+      [(s) => { s[name].volumes = s[name].volumes.map((v) => ({ ...v, read_only: false })); }, new RegExp(`${name} mounts the db CA read-only`)],
+      [(s) => { s[name].volumes = []; }, new RegExp(`${name} mounts the db CA read-only`)],
     ]) {
       const s = partA();
       edit(s);
       const checks = isolation.dbSetupContractChecks('f.yml', s, RUNTIME);
       refusedBy(checks, re);
-      assert.ok(!JSON.stringify(failedLabels(checks)).includes('crewflow_owner:x'), 'a failed-check label never prints a value');
+      const labels = JSON.stringify(failedLabels(checks));
+      assert.ok(!labels.includes('crewflow_owner:x') && !labels.includes('apppw') && !labels.includes('postgres:p'), 'a failed-check label never prints a value');
     }
   }
   const s = partA();
   delete s.server.depends_on;
   refusedBy(isolation.dbSetupContractChecks('f.yml', s, RUNTIME), /server starts only after db-setup completed successfully/);
+  // Another service (not db-setup) with an admin URL value.
+  const a = partA();
+  a.front = { environment: { PG_ADMIN_URL: 'postgresql://postgres:p@db:5432/crewflow' } };
+  refusedBy(isolation.dbSetupContractChecks('f.yml', a, RUNTIME), /only db-setup has a PG_ADMIN_URL value \(found on front\)/);
 });
 
-// The rendered model shape bundledDbParityChecks compares: the db service, the crewflow-db network, the three db volumes.
+test('owner decision 2026-11-18: the bundled crewflow_owner password appears only inside PG_DATABASE_URL of db-setup, the API and the Worker', () => {
+  const W = isolation.APP_SENTINEL_PASSWORD;
+  const url = `postgresql://crewflow_owner:${W}@db:5432/crewflow?sslmode=verify-full`;
+  const ok = () => ({
+    'db-setup': { environment: { PG_DATABASE_URL: url } },
+    server: { environment: { PG_DATABASE_URL: url } },
+    worker: { environment: { PG_DATABASE_URL: url } },
+    db: { environment: { POSTGRES_PASSWORD: 'x' } },
+  });
+  assert.deepEqual(failedLabels(isolation.appPasswordChecks('f.yml', ok(), RUNTIME)), []);
+  for (const [edit, re] of [
+    [(s) => { s.server.environment.PG_DATABASE_APP_PASSWORD = W; }, /server has no crewflow_owner password variable .*\(found PG_DATABASE_APP_PASSWORD\)/],
+    [(s) => { s.worker.environment.CREWFLOW_DEV_DB_APP_PASSWORD = 'x'; }, /worker has no crewflow_owner password variable/],
+    [(s) => { s['db-setup'].environment.CREWFLOW_QA_DB_APP_PASSWORD = 'x'; }, /db-setup has no crewflow_owner password variable/],
+    [(s) => { s.db.environment.SOME = W; }, /db carries the crewflow_owner password only inside PG_DATABASE_URL/],
+    [(s) => { s.server.environment.OTHER_URL = url; }, /server carries the crewflow_owner password only inside PG_DATABASE_URL .*found in OTHER_URL/],
+    [(s) => { s.worker.healthcheck = { test: ['CMD', 'psql', url] }; }, /worker carries the crewflow_owner password nowhere outside its environment/],
+  ]) {
+    const s = ok();
+    edit(s);
+    const checks = isolation.appPasswordChecks('f.yml', s, RUNTIME);
+    refusedBy(checks, re);
+    assert.ok(!JSON.stringify(failedLabels(checks)).includes(W), 'a label never prints the password');
+  }
+});
+
+test('owner decision 2026-11-18: the retired crewflow-db-target volume is refused in every file, as a volume or any mount at /run/crewflow/db-target', () => {
+  const ok = { services: partA(), volumes: { 'crewflow-db-data': {}, 'crewflow-db-ca': {} } };
+  assert.deepEqual(failedLabels(isolation.retiredTargetVolumeChecks('f.yml', ok)), []);
+  for (const [edit, re] of [
+    [(m) => { m.volumes['crewflow-db-target'] = {}; }, /declares no crewflow-db-target volume \(retired/],
+    [(m) => { m.volumes.bk = { name: 'rab-production_crewflow-db-target', external: true }; }, /declares no crewflow-db-target volume .*found bk/],
+    [(m) => { m.services.server.volumes.push(vol('crewflow-db-target', '/run/crewflow/db-target', true)); }, /no service mounts anything at \/run\/crewflow\/db-target .*server mounts crewflow-db-target/],
+    [(m) => { m.services['db-setup'].volumes.push(vol('other', '/run/crewflow/db-target', false)); }, /db-setup mounts other at \/run\/crewflow\/db-target/],
+    [(m) => { m.services.worker.volumes.push({ type: 'bind', source: '/srv/x', target: '/run/crewflow/db-target/owner-password', read_only: true }); }, /worker mounts \/srv\/x at \/run\/crewflow\/db-target\/owner-password/],
+    [(m) => { m.services.worker.tmpfs = ['/run/crewflow/db-target:size=1m']; }, /worker has a tmpfs at \/run\/crewflow\/db-target/],
+    [(m) => { m.services.front = { volumes: [vol('crewflow-db-target', '/x', true)] }; }, /front mounts crewflow-db-target at \/x/],
+  ]) {
+    const m = structuredClone(ok);
+    edit(m);
+    refusedBy(isolation.retiredTargetVolumeChecks('f.yml', m), re);
+  }
+});
+
+// The rendered model shape bundledDbParityChecks compares: the db service, the crewflow-db network, the two db volumes.
 const P = 'compose-isolation-check';
 const dbModel = () => ({
   services: { db: { image: 'postgres@sha256:x', command: ['postgres', '-c', 'ssl=on'], user: '999:999', read_only: true } },
   networks: { 'crewflow-db': { name: `${P}_crewflow-db`, internal: true, ipam: {} } },
-  volumes: Object.fromEntries(['crewflow-db-data', 'crewflow-db-ca', 'crewflow-db-target'].map((k) => [k, { name: `${P}_${k}` }])),
+  volumes: Object.fromEntries(['crewflow-db-data', 'crewflow-db-ca'].map((k) => [k, { name: `${P}_${k}` }])),
 });
 
 test('DENIAL (Part F2): a dev/QA db that renders differently from production (or is missing) fails the parity check', () => {
@@ -204,7 +266,7 @@ test("DENIAL (security review L2-1): the crewflow-db network or a db volume that
     [(m) => { delete m.networks['crewflow-db']; }, /crewflow-db network is production's/],
     [(m) => { m.volumes['crewflow-db-data'] = { name: 'rab_devdb_data', external: true }; }, /crewflow-db-data volume is production's/],
     [(m) => { m.volumes['crewflow-db-ca'].name = 'some-other-ca'; }, /crewflow-db-ca volume is production's/],
-    [(m) => { delete m.volumes['crewflow-db-target']; }, /crewflow-db-target volume is production's/],
+    [(m) => { delete m.volumes['crewflow-db-ca']; }, /crewflow-db-ca volume is production's/],
   ]) {
     const m = dbModel();
     edit(m);
@@ -212,36 +274,57 @@ test("DENIAL (security review L2-1): the crewflow-db network or a db volume that
   }
 });
 
-test('DENIAL (security review L2-2): only db mounts the data volume; only db-setup and the API/Worker mount the setup volume', () => {
+test('DENIAL (security review L2-2): only db mounts the data volume', () => {
   const ok = { ...partA(), db: { volumes: [vol('crewflow-db-data', '/var/lib/postgresql')] } };
-  assert.deepEqual(failedLabels(isolation.dbVolumeMountChecks('f.yml', ok, RUNTIME)), []);
-  for (const [svc, source] of [['front', 'crewflow-db-target'], ['adminer', 'crewflow-db-data'], ['server', 'crewflow-db-data'], ['db', 'crewflow-db-target']]) {
+  assert.deepEqual(failedLabels(isolation.dbVolumeMountChecks('f.yml', ok)), []);
+  for (const svc of ['front', 'adminer', 'server', 'db-setup']) {
     const s = structuredClone(ok);
     s[svc] = s[svc] ?? {};
-    s[svc].volumes = [...(s[svc].volumes ?? []), vol(source, '/x', true)];
-    refusedBy(isolation.dbVolumeMountChecks('f.yml', s, RUNTIME), new RegExp(`${svc} mounts ${source}`));
+    s[svc].volumes = [...(s[svc].volumes ?? []), vol('crewflow-db-data', '/x', true)];
+    refusedBy(isolation.dbVolumeMountChecks('f.yml', s), new RegExp(`${svc} mounts crewflow-db-data`));
   }
 });
 
-test('DENIAL (security review L2-3, L4): dev/QA db-setup admin URL interpolating PG_ADMIN_URL / PG_DATABASE_URL or not on host db; a PG_DATABASE_URL on db-setup; a file interpolating PG_DATABASE_PASSWORD', () => {
-  const services = (url) => ({ 'db-setup': { environment: { PG_ADMIN_URL: url } } });
-  const raw = (url) => ({ services: { 'db-setup': { environment: { PG_ADMIN_URL: url } }, db: { environment: { POSTGRES_PASSWORD: '${CREWFLOW_DEV_DB_PASSWORD:?hex}' } } } });
-  const good = 'postgresql://postgres:${CREWFLOW_DEV_DB_PASSWORD:?hex}@db:5432/crewflow?sslmode=verify-full';
-  const rendered = 'postgresql://postgres:x@db:5432/crewflow';
-  assert.deepEqual(failedLabels(isolation.nonProductionDbSetupChecks('dev.yml', services(rendered), raw(good))), []);
-  for (const v of ['${PG_ADMIN_URL:-postgresql://postgres:x@db:5432/crewflow}', '${PG_DATABASE_URL:-postgresql://postgres:x@db:5432/crewflow}']) {
-    refusedBy(isolation.nonProductionDbSetupChecks('dev.yml', services(rendered), raw(v)), /db-setup's PG_ADMIN_URL is pinned/);
+test('DENIAL (security review L2-3, L4; owner decision 2026-11-18): dev/QA db-setup URLs interpolating PG_ADMIN_URL / PG_DATABASE_URL or not on host db, a non-crewflow_owner PG_DATABASE_URL, server/worker not on the same pinned URL, a file interpolating production\'s passwords', () => {
+  const goodAdmin = 'postgresql://postgres:${CREWFLOW_DEV_DB_PASSWORD:?hex}@db:5432/crewflow?sslmode=verify-full';
+  const goodApp = 'postgresql://crewflow_owner:${CREWFLOW_DEV_DB_APP_PASSWORD:?hex}@db:5432/crewflow?sslmode=verify-full';
+  const renderedAdmin = 'postgresql://postgres:x@db:5432/crewflow';
+  const renderedApp = 'postgresql://crewflow_owner:y@db:5432/crewflow';
+  const services = (admin = renderedAdmin, app = renderedApp) => ({ 'db-setup': { environment: { PG_ADMIN_URL: admin, PG_DATABASE_URL: app } } });
+  const raw = (admin = goodAdmin, app = goodApp) => ({
+    services: {
+      'db-setup': { environment: { PG_ADMIN_URL: admin, PG_DATABASE_URL: app } },
+      server: { environment: { PG_DATABASE_URL: goodApp } },
+      worker: { environment: { PG_DATABASE_URL: goodApp } },
+      db: { environment: { POSTGRES_PASSWORD: '${CREWFLOW_DEV_DB_PASSWORD:?hex}' } },
+    },
+  });
+  const check = (svc, doc) => isolation.nonProductionDbSetupChecks('dev.yml', svc, doc, RUNTIME);
+  assert.deepEqual(failedLabels(check(services(), raw())), []);
+  for (const v of ['${PG_ADMIN_URL:-postgresql://postgres:x@db:5432/crewflow}', '${PG_DATABASE_URL:-postgresql://postgres:x@db:5432/crewflow}', '']) {
+    refusedBy(check(services(), raw(v)), /db-setup's PG_ADMIN_URL is pinned/);
   }
-  const withAppUrl = raw(good);
-  withAppUrl.services['db-setup'].environment.PG_DATABASE_URL = '';
-  refusedBy(isolation.nonProductionDbSetupChecks('dev.yml', services(rendered), withAppUrl), /db-setup has no PG_DATABASE_URL/);
+  for (const v of ['${PG_DATABASE_URL:-postgresql://crewflow_owner:x@db:5432/crewflow}', '${PG_ADMIN_URL:-x}', '']) {
+    refusedBy(check(services(), raw(goodAdmin, v)), /db-setup's PG_DATABASE_URL is pinned/);
+  }
   for (const host of ['devdb', 'rab-devdb', 'db.example.com', '127.0.0.1']) {
-    refusedBy(isolation.nonProductionDbSetupChecks('dev.yml', services(`postgresql://postgres:x@${host}:5432/rab`), raw(good)), /host is exactly db/);
+    refusedBy(check(services(`postgresql://postgres:x@${host}:5432/rab`), raw()), /PG_ADMIN_URL host is exactly db/);
+    refusedBy(check(services(renderedAdmin, `postgresql://crewflow_owner:y@${host}:5432/rab`), raw()), /PG_DATABASE_URL is crewflow_owner at host db/);
   }
-  refusedBy(isolation.nonProductionDbSetupChecks('dev.yml', services('not a url'), raw(good)), /host is exactly db/);
-  const named = raw(good);
+  refusedBy(check(services('not a url'), raw()), /PG_ADMIN_URL host is exactly db/);
+  refusedBy(check(services(renderedAdmin, 'postgresql://postgres:y@db:5432/crewflow'), raw()), /PG_DATABASE_URL is crewflow_owner at host db/);
+  for (const name of RUNTIME) {
+    for (const v of ['', '${PG_DATABASE_URL:-x}', 'postgresql://crewflow_owner:${OTHER:?x}@db:5432/crewflow?sslmode=verify-full']) {
+      const doc = raw();
+      doc.services[name].environment.PG_DATABASE_URL = v;
+      refusedBy(check(services(), doc), new RegExp(`${name}'s committed PG_DATABASE_URL is db-setup's pinned crewflow_owner URL`));
+    }
+  }
+  const named = raw();
   named.services.db.environment.POSTGRES_PASSWORD = '${PG_DATABASE_PASSWORD:?x}';
-  refusedBy(isolation.nonProductionDbSetupChecks('dev.yml', services(rendered), named), /never interpolates PG_DATABASE_PASSWORD/);
+  refusedBy(check(services(), named), /never interpolates PG_DATABASE_PASSWORD/);
+  const namedApp = raw(goodAdmin, 'postgresql://crewflow_owner:${PG_DATABASE_APP_PASSWORD:?x}@db:5432/crewflow');
+  refusedBy(check(services(), namedApp), /never interpolates PG_DATABASE_APP_PASSWORD/);
 });
 
 test("DENIAL (security review L2-4): the committed db text must equal production's (after $$ -> $ and the password variable)", () => {
@@ -309,7 +392,7 @@ test('DENIAL (#136 b): the dev data volume project-scoped, external under anothe
 });
 
 test('DENIAL (#136 b): any OTHER db volume external in dev, or the data volume external in QA or production', () => {
-  for (const key of ['crewflow-db-ca', 'crewflow-db-target']) {
+  for (const key of ['crewflow-db-ca']) {
     const m = devModel();
     m.volumes[key] = { name: `shared_${key}`, external: true };
     refusedBy(isolation.bundledDbParityChecks('dev.yml', m, dbModel(), DEV_EXT), new RegExp(`${key} volume is production's`));
@@ -326,9 +409,14 @@ test('#136 b (static): the committed dev file declares exactly the external crew
   const vols = (rel) => YAML.parse(fs.readFileSync(path.join(REPO, rel), 'utf8'), { merge: true }).volumes ?? {};
   assert.deepEqual(vols('packages/rab-docker/docker-compose.yml')['crewflow-db-data'], { name: 'crewflow_dev_db_data', external: true });
   for (const rel of ['packages/rab-docker/docker-compose.qa.yml', isolation.PRODUCTION_FILE]) {
-    for (const key of ['crewflow-db-data', 'crewflow-db-ca', 'crewflow-db-target']) assert.equal(vols(rel)[key], null, `${rel}: ${key} is a plain project volume`);
+    for (const key of ['crewflow-db-data', 'crewflow-db-ca']) assert.equal(vols(rel)[key], null, `${rel}: ${key} is a plain project volume`);
   }
-  for (const key of ['crewflow-db-ca', 'crewflow-db-target']) assert.equal(vols('packages/rab-docker/docker-compose.yml')[key], null, `dev: ${key} stays project-scoped`);
+  assert.equal(vols('packages/rab-docker/docker-compose.yml')['crewflow-db-ca'], null, 'dev: crewflow-db-ca stays project-scoped');
+  // Owner decision 2026-11-18: the setup volume is retired in every committed compose file.
+  for (const rel of ['packages/rab-docker/docker-compose.yml', 'packages/rab-docker/docker-compose.qa.yml', isolation.PRODUCTION_FILE, 'packages/rab-docker/docker-compose.image.yml', 'packages/rab-docker/docker-compose.local-build.yml']) {
+    assert.ok(!Object.prototype.hasOwnProperty.call(vols(rel), 'crewflow-db-target'), `${rel}: declares no crewflow-db-target volume`);
+    assert.ok(!/crewflow-db-target:\/run|\/run\/crewflow\/db-target/.test(fs.readFileSync(path.join(REPO, rel), 'utf8').replace(/^\s*#.*$/gm, '')), `${rel}: mounts nothing at /run/crewflow/db-target`);
+  }
   assert.ok(!fs.readFileSync(path.join(REPO, 'packages/rab-docker/docker-compose.yml'), 'utf8').match(/^\s+name:\s*rab_devdb_data/m), 'dev never names rab_devdb_data as a volume');
 });
 

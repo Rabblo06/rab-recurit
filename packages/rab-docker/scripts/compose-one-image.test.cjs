@@ -644,3 +644,28 @@ test('DENIAL option A: db-setup missing, on another image, with another entrypoi
   delete m.services['db-setup'].depends_on;
   refused(m, /db-setup: must depend on db with condition service_healthy/);
 });
+
+// Owner decision 2026-11-18 (Twenty's way): the PR #125 option 2 setup volume is retired in every rendered combination.
+test('DENIAL owner decision 2026-11-18: the retired crewflow-db-target volume, or anything at /run/crewflow/db-target, is refused', () => {
+  const { retiredTargetVolumeProblems } = require('./compose-one-image.cjs');
+  assert.deepEqual(retiredTargetVolumeProblems(good(), 'fixture'), []);
+  for (const [edit, re] of [
+    [(m) => { m.volumes = { 'crewflow-db-target': {} }; }, /volume crewflow-db-target: the retired crewflow-db-target volume must not exist/],
+    [(m) => { m.volumes = { bk: { name: 'rab-production_crewflow-db-target', external: true } }; }, /volume bk: the retired crewflow-db-target volume must not exist/],
+    [(m) => { m.services['rab-api'].volumes = [{ type: 'volume', source: 'crewflow-db-target', target: '/run/crewflow/db-target', read_only: true }]; }, /rab-api: mounts crewflow-db-target at \/run\/crewflow\/db-target/],
+    [(m) => { m.services['db-setup'].volumes = ['crewflow-db-target:/run/crewflow/db-target']; }, /db-setup: mounts crewflow-db-target at \/run\/crewflow\/db-target/],
+    [(m) => { m.services['rab-redis'].volumes = [{ type: 'bind', source: '/srv/x', target: '/run/crewflow/db-target/owner-password' }]; }, /rab-redis: mounts something at \/run\/crewflow\/db-target\/owner-password/],
+    [(m) => { m.services['rab-worker'].tmpfs = ['/run/crewflow/db-target:size=1m']; }, /rab-worker: a tmpfs at \/run\/crewflow\/db-target/],
+  ]) {
+    const m = good();
+    edit(m);
+    refused(m, re);
+  }
+});
+
+test('owner decision 2026-11-18 (static): no committed compose file declares or mounts the retired crewflow-db-target volume', () => {
+  for (const f of ['docker-compose.production.yml', 'docker-compose.image.yml', 'docker-compose.local-build.yml', 'docker-compose.yml', 'docker-compose.qa.yml']) {
+    const text = fs.readFileSync(path.join(__dirname, '..', f), 'utf8').replace(/^\s*#.*$/gm, '');
+    assert.ok(!/crewflow-db-target|\/run\/crewflow\/db-target/.test(text), `${f}: names the retired setup volume outside a comment`);
+  }
+});
