@@ -734,6 +734,7 @@ export class ManagerService {
     let displayChangedFor: string | null = null;
     const summary = await this.tenantContext.runInTenantContext(ctx, async (manager) => {
       await this.assertRouteFlagTx(manager, ctx, requiredPermission);
+      await this.assertVenueRouteTargetTx(manager, ctx, id, requiredPermission);
       const profile = await manager.findOne(ManagerProfile, { where: { id }, relations: { user: true } });
       if (!profile?.user) throw new NotFoundException('Manager not found.');
       await lockLiveUser(manager, profile.userId, 'Manager not found.');
@@ -779,6 +780,7 @@ export class ManagerService {
     await this.stepUpReauth.assertRecentStepUp(ctx, active ? 'user.reactivate' : 'user.deactivate');
     return this.tenantContext.runInTenantContext(ctx, async (manager) => {
       await this.assertRouteFlagTx(manager, ctx, requiredPermission);
+      await this.assertVenueRouteTargetTx(manager, ctx, id, requiredPermission);
       const profile = await manager.findOne(ManagerProfile, { where: { id }, relations: { user: true } });
       if (!profile?.user) throw new NotFoundException('Manager not found.');
       await lockLiveUser(manager, profile.userId, 'Manager not found.');
@@ -872,6 +874,7 @@ export class ManagerService {
     return this.tenantContext.runInTenantContext(ctx, async (manager) => {
       // SF-2 layer 2: the route's class flag AND its method guard user.reset_password.
       await this.assertRouteFlagTx(manager, ctx, requiredPermission, PermissionFlag.USER_RESET_PASSWORD);
+      await this.assertVenueRouteTargetTx(manager, ctx, id, requiredPermission);
       const profile = await manager.findOne(ManagerProfile, { where: { id }, relations: { user: true } });
       if (!profile?.user) throw new NotFoundException('Manager not found.');
       await lockLiveUser(manager, profile.userId, 'Manager not found.');
@@ -925,6 +928,22 @@ export class ManagerService {
       });
       return invite;
     });
+  }
+
+  /**
+   * The Venue Manager route's flag (`venue_manager.create`) authorises Venue Manager records of the caller's own workspace
+   * only. `VenueManagerService` checks that before delegating; this repeats it in the action's own transaction so a direct
+   * caller passing that flag cannot reach an Internal Manager or CEO (or another workspace's Venue Manager): 404 otherwise.
+   * No-op for the `/managers` flag. (SF-2 review L-1: `update`, `setActive` and `resetPassword` call it after the
+   * route-flag check and before any other row read.)
+   */
+  private async assertVenueRouteTargetTx(manager: EntityManager, ctx: AuthContext, id: string, requiredPermission: ManagerRouteFlag): Promise<void> {
+    if (requiredPermission !== PermissionFlag.VENUE_MANAGER_CREATE) return;
+    if (!ctx.organisationId || !ctx.workspaceId) throw new NotFoundException('Venue Manager not found.');
+    const ownVenueManager = await manager.exists(ManagerProfile, {
+      where: { id, organisationId: ctx.organisationId, workspaceId: ctx.workspaceId, type: ManagerType.VENUE },
+    });
+    if (!ownVenueManager) throw new NotFoundException('Venue Manager not found.');
   }
 
   /**
