@@ -9425,3 +9425,37 @@ Reversal:   Upgrade / `resolutions` override (documented in "//resolutions") as 
   copy with a pause between the two statements): two commits ended at version 1; with the fix, 2. Semantic goldens
   (PG16/17/18): only the `metadata_version_bump()` body hash changes (5f6076df… → ccfd284e…); security-posture golden and
   the restricted-migrator drift review unchanged (a function body is not a privilege line).
+
+## Invite cleanup: PostgreSQL 18 RESTRICT refusal keeps the 'referenced' label (branch db/invite-cleanup-restrict-violation, 2026-11-18; one SQL change, DRAFT: owner SQL review pending; follow-up of PR #227)
+- **Finding (security finding format, §5.8).** Severity: Low (audit accuracy; fail-closed, nothing is ever deleted).
+  Actor: the Worker's account-invite cleanup on a PostgreSQL 18 server. Action: it hard-deletes an expired invitee through
+  `core.worker_delete_expired_invited_user(uuid)` while a RESTRICT foreign key still references the invitee (directly, or
+  through a CASCADE such as `core."user"` → `staff_profile` → approved `payroll_record`, PayrollEvidenceRestrict1786719700000).
+  Consequence: PostgreSQL 18 reports the refusal as 23001 (restrict_violation, release notes "Migration to Version 18"),
+  which the definer did not catch; the error left the definer, the Worker rolled the candidate back and audited it as
+  `workspace_referenced:<constraint>` instead of `referenced`. The invitee was retained either way. The audit trail then
+  says "a level-22 workspace still references this user" for a reference that is not in a workspace schema, and differs
+  between majors for the same data.
+- **Root cause.** InviteCleanupSkipsSoftDeleted1786721520000 (`migrations/1786721520000-InviteCleanupSkipsSoftDeleted.ts`,
+  the definer's `EXCEPTION WHEN foreign_key_violation THEN RETURN 'referenced';`) was written for 16, where every foreign
+  key refusal is 23503. PR #227 made the TypeScript side accept 23001 (`database/postgres/sqlstate.ts`) and listed this
+  handler as a follow-up because it needs a new migration and owner SQL review.
+- **Fix.** InviteDeleteRestrictViolation1786721580000: `CREATE OR REPLACE FUNCTION core.worker_delete_expired_invited_user`
+  with one changed handler, `EXCEPTION WHEN foreign_key_violation OR restrict_violation THEN RETURN 'referenced';` (SQL in
+  `invite-delete-restrict-violation-sql.ts`). 23001 exists on 16 and 17 too, where RESTRICT still raises 23503, so their
+  behaviour is unchanged. Same OID, owner `rab_secure_owner`, SECURITY DEFINER, pinned search_path, EXECUTE for
+  `crewflow_worker` only. The migration replaces only a known body (1786721520000's or its own, by semantic-golden body
+  hash) and refuses any other; before and after it checks the exact body hash, the definer's owner / definer / language /
+  volatility / return type / search_path / EXECUTE grantees / triggers (none), the state of all three invite-cleanup
+  definers, and the secure-owner invariants, and rolls back on any difference. down() restores the 1786721520000 body.
+- **What it does not change.** No grant, owner, policy or table changes; no new privilege for any login; the Worker's own
+  23001 mapping (`level22RetainReason`) stays, for level-22 workspace references the definer never sees.
+- **Tests.** `invite-delete-restrict-violation.integration.spec.ts` (server, every major): a real invitee with approved
+  payroll evidence on its core staff profile; deleting it directly is 23001 on 18 / 23503 on 16-17, the definer answers
+  `referenced` and deletes nothing, and a rolled-back down()/up() round trip shows the 1786721520000 body raising 23001
+  on 18 (fail-first), up() restoring `referenced`, an idempotent re-run, and an unknown body refused in both directions.
+  rab-worker `account-invite-cleanup.integration.spec.ts`: an invitee held by a RESTRICT key the Worker does not check is
+  retained and audited `referenced` (no `invite_cleanup_failed`) on every major. `invite-delete-restrict-violation-sql.spec.ts`:
+  the new SQL is the old one with exactly that handler changed, the body hashes match the SQL, and the PG16/17/18 semantic
+  goldens pin the new hash. Semantic goldens (PG16/17/18): only the `worker_delete_expired_invited_user(p_user_id uuid)` body
+  hash changes (002c0784… → 0f7179d7…); security-posture golden and the restricted-migrator drift review unchanged.
