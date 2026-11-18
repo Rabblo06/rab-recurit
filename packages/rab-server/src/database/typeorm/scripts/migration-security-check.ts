@@ -242,7 +242,7 @@ export const REVIEWED_MIGRATION_DRIFT: Readonly<Record<string, readonly string[]
   // new policy. The migration's own check replaces only a known USING expression. Lines as measured by this harness on
   // PostgreSQL 16 (fresh as the restricted migrator and upgrade as the bootstrap superuser: identical). The lines live in
   // structure-level-24.ts: they quote the deparsed policy, which names core.shift / core.shift_assignment.
-  '1786721590000-StaffShiftTeamMultiRole': CORE_SHIFT_TEAM_REVIEWED_DRIFT,
+  '1786721600000-StaffShiftTeamMultiRole': CORE_SHIFT_TEAM_REVIEWED_DRIFT,
 };
 
 type Identity = 'phaseA' | 'bootstrap' | 'restricted' | 'crewflow' | 'crewflow_app' | 'crewflow_worker';

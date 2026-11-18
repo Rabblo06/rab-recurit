@@ -26,9 +26,9 @@ import type { WorkspaceUpgradeCommand } from '../workspace-upgrade-command';
  *     place.
  *   - Lock: ACCESS EXCLUSIVE on this workspace's staff_profile for the catalog update only (no scan, no data change).
  * The same statement on `core.staff_profile` (the HWS-off copy) and in core.provision_workspace (new workspaces) is in
- * migration StaffShiftTeamMultiRole1786721590000.
+ * migration StaffShiftTeamMultiRole1786721600000.
  */
-export const STAFF_PROFILE_SHIFT_TEAM_MULTI_ROLE_TIMESTAMP = 1786721590000;
+export const STAFF_PROFILE_SHIFT_TEAM_MULTI_ROLE_TIMESTAMP = 1786721600000;
 
 export const SHIFT_TEAM_SELECT_POLICY = 'staff_profile_shift_team_select';
 
@@ -79,7 +79,7 @@ export function shiftTeamSelectSingleRoleSql(schema: string): string {
  * level-23 workspace + this command, a workspace built by the TypeScript provisioner and one built by the level-24
  * core.provision_workspace must all equal it (ws-shift-team-multi-role.integration.spec.ts `[l24-fp]`; the per-major
  * `generate-workspace-fingerprints.ts` ci run for 16 / 17 / 18). Measured 2026-11-18 on throwaway postgres:16/17/18-alpine
- * clusters (InstaBox): the level-23 -> 24 upgrade path, reproduced by the TypeScript provisioner and core.provision_workspace. An undeclared major makes StaffShiftTeamMultiRole1786721590000
+ * clusters (InstaBox): the level-23 -> 24 upgrade path, reproduced by the TypeScript provisioner and core.provision_workspace. An undeclared major makes StaffShiftTeamMultiRole1786721600000
  * refuse (exit 66): fail closed.
  */
 export const STAFF_PROFILE_SHIFT_TEAM_MULTI_ROLE_FINGERPRINTS_V2: Readonly<Partial<Record<16 | 17 | 18, string>>> = Object.freeze({
@@ -88,7 +88,7 @@ export const STAFF_PROFILE_SHIFT_TEAM_MULTI_ROLE_FINGERPRINTS_V2: Readonly<Parti
   18: '2c8d82028b7dc5e1820393cd599d30ca720c6a0ac2622ff0deaced7d8ec20487',
 });
 
-export const STAFF_PROFILE_SHIFT_TEAM_MULTI_ROLE_PROVISION_LITERAL = 'db:provision_workspace@StaffShiftTeamMultiRole1786721590000';
+export const STAFF_PROFILE_SHIFT_TEAM_MULTI_ROLE_PROVISION_LITERAL = 'db:provision_workspace@StaffShiftTeamMultiRole1786721600000';
 
 export const STAFF_PROFILE_SHIFT_TEAM_MULTI_ROLE: WorkspaceUpgradeCommand = Object.freeze({
   kind: 'workspace',

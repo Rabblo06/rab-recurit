@@ -30,7 +30,7 @@ const wsc = (name: string, timestamp: number, extra: Partial<WorkspaceUpgradeCom
 });
 
 const INSTANCE = { '0-7': [inst('InstA', 1786721480000)] };
-const WORKSPACE = { '0-7': [wsc('WsB', 1786721490100), wsc('WsA', 1786721490000)], '0-8': [wsc('WsC', 1786721590000)] };
+const WORKSPACE = { '0-7': [wsc('WsB', 1786721490100), wsc('WsA', 1786721490000)], '0-8': [wsc('WsC', 1786721600000)] };
 const VERSIONS = ['0.5.0', '0.6.0', '0.7.0', '0.8.0'];
 
 describe('Part D: workspace upgrade commands in the sequence (Twenty upgrade-sequence-reader.service.ts:39-60)', () => {
@@ -60,10 +60,10 @@ describe('Part D: workspace upgrade commands in the sequence (Twenty upgrade-seq
   it('0.7.0 has two workspace commands (level 23, C3 Q3 DRAFT; level 24, #205 DRAFT), after the instance command of the release (the HWS cutover)', () => {
     expect(WORKSPACE_UPGRADE_COMMANDS['0-7'].map((c) => [c.name, c.timestamp, c.structure?.level, c.structure?.mayDrop === true, Boolean(c.precheck)])).toEqual([
       ['ValidateStaffProfileWorkspaceRequired', 1786721570000, 23, false, false],
-      ['ShiftTeamSelectMultiRole', 1786721590000, 24, false, false],
+      ['ShiftTeamSelectMultiRole', 1786721600000, 24, false, false],
     ]);
     expect(lastInstanceStepOfVersion('0.7.0')).toBe('0.7.0_HwsCutover_1786721540100');
-    expect(lastStepOfVersion('0.7.0')).toBe('0.7.0_ShiftTeamSelectMultiRole_1786721590000');
+    expect(lastStepOfVersion('0.7.0')).toBe('0.7.0_ShiftTeamSelectMultiRole_1786721600000');
   });
 
   it('the level-21 to level-24 commands declare a v2 fingerprint for every supported PostgreSQL major (16, 17, 18)', () => {
@@ -122,9 +122,9 @@ describe('Part D: pending commands from the cursor (Twenty getPendingWorkspaceCo
     expect(names(pendingWorkspaceSteps(seq, '0.8.0', { name: '0.7.0_WsA_1786721490000', status: 'failed' }))).toEqual([
       '0.7.0_WsA_1786721490000',
       '0.7.0_WsB_1786721490100',
-      '0.8.0_WsC_1786721590000',
+      '0.8.0_WsC_1786721600000',
     ]);
-    expect(names(pendingWorkspaceSteps(seq, '0.8.0', { name: '0.7.0_WsB_1786721490100', status: 'completed' }))).toEqual(['0.8.0_WsC_1786721590000']);
+    expect(names(pendingWorkspaceSteps(seq, '0.8.0', { name: '0.7.0_WsB_1786721490100', status: 'completed' }))).toEqual(['0.8.0_WsC_1786721600000']);
   });
 
   it('a cursor this code does not know returns null (refused or rollback, decided by the runner)', () => {

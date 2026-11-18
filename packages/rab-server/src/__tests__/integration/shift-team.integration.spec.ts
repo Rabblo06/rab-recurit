@@ -150,7 +150,7 @@ describe('Staff same-shift Teams (real Postgres/RLS/HTTP)', () => {
       expect(result.status).toBe(200);
       expect(result.body.filter((r: { isYou: boolean }) => r.isYou)).toHaveLength(1);
     });
-    // Layer 4 (structure level 24, StaffShiftTeamMultiRole1786721590000; DRAFT SQL, owner review first): the RLS policy
+    // Layer 4 (structure level 24, StaffShiftTeamMultiRole1786721600000; DRAFT SQL, owner review first): the RLS policy
     // staff_profile_shift_team_select now tests `'staff' = ANY (string_to_array(rab.role, ','))` instead of equality, so the
     // database shows this caller every confirmed teammate, like a single-role staff user (was: only "You").
     it('sees the whole confirmed team, like a single-role staff user', async () => {

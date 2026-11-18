@@ -4,7 +4,7 @@ import { SERVER_PATH_SENTINEL_SCHEMA } from './v1/server-path-template';
 import { SHIFT_TEAM_SELECT_POLICY, shiftTeamSelectMultiRoleSql } from '../../../engine/core-modules/upgrade/upgrade-commands/0-7/staff-profile-shift-team-multi-role';
 
 /**
- * DRAFT — NEW SQL, owner SQL review FIRST (#205). FROZEN with migration StaffShiftTeamMultiRole1786721590000 once approved.
+ * DRAFT — NEW SQL, owner SQL review FIRST (#205). FROZEN with migration StaffShiftTeamMultiRole1786721600000 once approved.
  * Structure level 24 (the staff Teams list for a staff user who also holds another role):
  *  - `core.provision_workspace(uuid)`: the guarded v3 body over template(20) + level 21 + level 22 + level 23
  *    (structure-level-23.ts) with the level-24 command's ALTER POLICY appended, recording module_version 24 and checking the
@@ -44,7 +44,7 @@ export const LEVEL_24_WORKSPACES_SQL = `SELECT pg_catalog.count(*)::int AS n
    AND pg_catalog.strpos(pg_catalog.pg_get_expr(p.polqual, p.polrelid), 'string_to_array(current_setting(''rab.role''::text, true)') > 0`;
 
 /**
- * The two privilege-drift lines migration-security-check.ts reviews for StaffShiftTeamMultiRole1786721590000 (its
+ * The two privilege-drift lines migration-security-check.ts reviews for StaffShiftTeamMultiRole1786721600000 (its
  * REVIEWED_MIGRATION_DRIFT entry): the core policy before and after, as that harness prints it (pg_get_expr, whitespace
  * collapsed). Expected output of a check, not a query; kept here because it quotes the deparsed core.shift /
  * core.shift_assignment references, and workspace-schema/** is outside the workspace-table qualification ratchet.

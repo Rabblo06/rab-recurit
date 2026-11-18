@@ -25,7 +25,7 @@ const LEVEL = 24;
 
 /**
  * DRAFT — NEW SQL, owner SQL review FIRST (#205, release 0.7.0, structure level 24; depends on #175 and #177). The core half
- * of workspace structure level 24; the workspace half is `0.7.0_ShiftTeamSelectMultiRole_1786721590000`
+ * of workspace structure level 24; the workspace half is `0.7.0_ShiftTeamSelectMultiRole_1786721600000`
  * (upgrade-commands/0-7/staff-profile-shift-team-multi-role.ts), applied per existing READY workspace by the workspace command
  * runner after level 23, on the same locked start.
  *
@@ -41,8 +41,8 @@ const LEVEL = 24;
  * core.verify_workspace_schema_v1 is unchanged (it counts policies, not their expressions). No table changes.
  * down(): restores the level-23 provision body and the 1786718100000 core predicate; refused while any workspace is at level 24.
  */
-export class StaffShiftTeamMultiRole1786721590000 implements MigrationInterface {
-  name = 'StaffShiftTeamMultiRole1786721590000';
+export class StaffShiftTeamMultiRole1786721600000 implements MigrationInterface {
+  name = 'StaffShiftTeamMultiRole1786721600000';
 
   public async up(queryRunner: QueryRunner): Promise<void> {
     const structure = STAFF_PROFILE_SHIFT_TEAM_MULTI_ROLE.structure!;

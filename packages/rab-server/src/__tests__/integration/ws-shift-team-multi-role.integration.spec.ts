@@ -2,7 +2,7 @@ import 'reflect-metadata';
 import { randomUUID } from 'node:crypto';
 import { Client } from 'pg';
 
-import { StaffShiftTeamMultiRole1786721590000 } from '../../database/typeorm/core/migrations/1786721590000-StaffShiftTeamMultiRole';
+import { StaffShiftTeamMultiRole1786721600000 } from '../../database/typeorm/core/migrations/1786721600000-StaffShiftTeamMultiRole';
 import { integrationTestDatabase, integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
 import { MIGRATION_LOCK_KEY } from '../../database/typeorm/scripts/migrate/migration-lock';
 import {
@@ -24,8 +24,8 @@ import { codeWorkspaceStructureLevel, declaredFingerprint } from '../../engine/c
 import { dropWorkspaceSchema, provisionServerPath, provisionTypeScript, registryOf, SeededWorkspace, seedWorkspace } from './helpers/workspace-fixtures';
 
 /**
- * #205 layer 4 (DRAFT SQL, throwaway databases only): `0.7.0_ShiftTeamSelectMultiRole_1786721590000` (structure level 24) and
- * StaffShiftTeamMultiRole1786721590000. Proves:
+ * #205 layer 4 (DRAFT SQL, throwaway databases only): `0.7.0_ShiftTeamSelectMultiRole_1786721600000` (structure level 24) and
+ * StaffShiftTeamMultiRole1786721600000. Proves:
  *  - the runner moves existing workspaces to level 24 (declared v2), idempotently; new workspaces (TypeScript provisioner and
  *    core.provision_workspace) are built at level 24, identical to an upgraded one;
  *  - the policy (layer 4) admits a caller whose comma-joined `rab.role` CONTAINS `staff`, and nobody else: no `staff`
@@ -109,7 +109,7 @@ describeIfDb('#205: staff_profile_shift_team_select tests staff role membership,
 
   it('the command is level 24 of this code: one ALTER POLICY that changes only the role test; no pre-check, no drop; a v2 fingerprint declared for this major', async () => {
     expect(codeWorkspaceStructureLevel()).toBe(24);
-    expect(STAFF_PROFILE_SHIFT_TEAM_MULTI_ROLE.structure).toMatchObject({ level: 24, provisionFunctionLiteral: 'db:provision_workspace@StaffShiftTeamMultiRole1786721590000' });
+    expect(STAFF_PROFILE_SHIFT_TEAM_MULTI_ROLE.structure).toMatchObject({ level: 24, provisionFunctionLiteral: 'db:provision_workspace@StaffShiftTeamMultiRole1786721600000' });
     expect(STAFF_PROFILE_SHIFT_TEAM_MULTI_ROLE.structure?.mayDrop).toBeUndefined();
     expect(STAFF_PROFILE_SHIFT_TEAM_MULTI_ROLE.precheck).toBeUndefined();
     const s = 'workspace_00000000000000000000000000000000';
@@ -271,14 +271,14 @@ describeIfDb('#205: staff_profile_shift_team_select tests staff role membership,
     await admin.query('BEGIN');
     try {
       await admin.query(shiftTeamSelectMultiRoleSql('core').replace("AND s.status NOT IN ('cancelled', 'completed')", "AND s.status NOT IN ('cancelled')"));
-      await expect(new StaffShiftTeamMultiRole1786721590000().up(runnerOf(admin))).rejects.toThrow(/is not a known policy/);
+      await expect(new StaffShiftTeamMultiRole1786721600000().up(runnerOf(admin))).rejects.toThrow(/is not a known policy/);
     } finally {
       await admin.query('ROLLBACK');
     }
     expect((await admin.query(CORE_SHIFT_TEAM_POLICY_SQL)).rows[0].using_hash).toBe(CORE_SHIFT_TEAM_USING_HASH_MEMBERSHIP);
   });
 
-  it('down() of StaffShiftTeamMultiRole1786721590000 refuses while a level-24 workspace exists (nothing changed)', async () => {
+  it('down() of StaffShiftTeamMultiRole1786721600000 refuses while a level-24 workspace exists (nothing changed)', async () => {
     await make('down', 'ts');
     const state = async () => ({
       provision: (await admin.query(`SELECT md5(prosrc) AS h FROM pg_proc WHERE oid = 'core.provision_workspace(uuid)'::regprocedure`)).rows,
@@ -288,7 +288,7 @@ describeIfDb('#205: staff_profile_shift_team_select tests staff role membership,
     const runnerOf = (c: Client) => ({ isTransactionActive: true, query: async (sql: string, params?: unknown[]) => (await c.query(sql, params as unknown[])).rows }) as never;
     await admin.query('BEGIN');
     try {
-      await expect(new StaffShiftTeamMultiRole1786721590000().down(runnerOf(admin))).rejects.toThrow(/down\(\) refused: \d+ workspace schema\(s\) are at structure level 24/);
+      await expect(new StaffShiftTeamMultiRole1786721600000().down(runnerOf(admin))).rejects.toThrow(/down\(\) refused: \d+ workspace schema\(s\) are at structure level 24/);
     } finally {
       await admin.query('ROLLBACK');
     }

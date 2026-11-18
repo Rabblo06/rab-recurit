@@ -8735,7 +8735,7 @@ This entry covers only what release 0.7.0 adds to switch it on.
 - **Change (widens layer 4 to exactly the intended case).** `ALTER POLICY staff_profile_shift_team_select ... USING (...)`
   with ONLY the role test replaced by `'staff' = ANY (pg_catalog.string_to_array(current_setting('rab.role', true), ','))`:
   per workspace by the 0.7.0 workspace command `ShiftTeamSelectMultiRole` (structure level 24), on `core.staff_profile`
-  (the HWS-off copy) and in `core.provision_workspace` (new workspaces) by migration StaffShiftTeamMultiRole1786721590000.
+  (the HWS-off copy) and in `core.provision_workspace` (new workspaces) by migration StaffShiftTeamMultiRole1786721600000.
   Every other line of the predicate (tenant binding, the transaction-local capability GUCs `rab.team_shift_id` /
   `rab.team_staff_id`, both assignments confirmed, the shift not cancelled or completed) and FOR SELECT / PERMISSIVE /
   TO PUBLIC / no WITH CHECK are unchanged; no grant, no new policy, no data change.
