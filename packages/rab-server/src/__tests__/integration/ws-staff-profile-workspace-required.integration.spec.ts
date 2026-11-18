@@ -38,6 +38,8 @@ const STEP = `0.7.0_${STAFF_PROFILE_WORKSPACE_REQUIRED_VALIDATE.name}_${STAFF_PR
 const L22_STEP = `0.6.0_${WORKSPACE_CORE_FK_REMOVAL.name}_${WORKSPACE_CORE_FK_REMOVAL.timestamp}`;
 /** The registry through level 22 (0b + 0a): how a workspace created by 0.6.0 is built. */
 const L22 = { '0-6': [...(WORKSPACE_UPGRADE_COMMANDS['0-6'] ?? [])] };
+/** The registry through level 23 (this spec's command): later structural commands (#205's level 24) are proven by their own spec. */
+const L23 = { ...L22, '0-7': [STAFF_PROFILE_WORKSPACE_REQUIRED_VALIDATE] };
 
 describeIfDb('C3 Q3: staff_profile_workspace_required validated as structure level 23 (integration, throwaway database)', () => {
   const { adminUrl, appUrl } = RUN ? integrationTestDatabase() : ({} as never);
@@ -59,7 +61,7 @@ describeIfDb('C3 Q3: staff_profile_workspace_required validated as structure lev
         [L22_STEP, ws.id],
       );
     }
-    if (how === 'ts') expect(await provisionTypeScript(adminUrl, ws)).toBe('READY');
+    if (how === 'ts') expect(await provisionTypeScript(adminUrl, ws, { workspaceRegistry: L23 })).toBe('READY');
     if (how === 'sql') expect(await provisionServerPath(appUrl, ws)).toBe('READY');
     return ws;
   };
@@ -73,7 +75,7 @@ describeIfDb('C3 Q3: staff_profile_workspace_required validated as structure lev
     ).rows[0] as { validated: boolean; def: string };
   const v2 = async (ws: SeededWorkspace) => (await admin.query('SELECT core.workspace_schema_fingerprint_v2($1) AS f', [ws.id])).rows[0].f as string;
   const runner = (o: Partial<WorkspaceRunOptions> & Pick<WorkspaceRunOptions, 'workspaceIds'>) =>
-    new WorkspaceCommandRunner({ codeVersion: '0.7.0', versions: ['0.4.0', '0.5.0', '0.6.0'], force: false, adopt: false, log: () => undefined, ...o }).run(session);
+    new WorkspaceCommandRunner({ codeVersion: '0.7.0', versions: ['0.4.0', '0.5.0', '0.6.0'], force: false, adopt: false, log: () => undefined, workspaceRegistry: L23, ...o }).run(session);
 
   beforeAll(async () => {
     admin = new Client({ connectionString: adminUrl });
@@ -97,7 +99,7 @@ describeIfDb('C3 Q3: staff_profile_workspace_required validated as structure lev
   });
 
   it('the command is level 23 of this code: one VALIDATE statement, no pre-check, no drop, a v2 fingerprint declared for this major', async () => {
-    expect(codeWorkspaceStructureLevel()).toBe(23);
+    expect(codeWorkspaceStructureLevel()).toBeGreaterThanOrEqual(23);
     expect(STAFF_PROFILE_WORKSPACE_REQUIRED_VALIDATE.structure).toMatchObject({
       level: 23,
       provisionFunctionLiteral: 'db:provision_workspace@WorkspaceStaffProfileWorkspaceRequiredValidated1786721595000',
@@ -159,7 +161,10 @@ describeIfDb('C3 Q3: staff_profile_workspace_required validated as structure lev
     expect((await admin.query(`SELECT * FROM ${a.schema}.staff_profile ORDER BY id`)).rows).toEqual(rowsBefore);
     expect((await runner({ workspaceIds: [a.id, b.id] })).outcomes.map((o) => o.status)).toEqual(['up-to-date', 'up-to-date']);
     const [ts, sql] = [await make('nw-ts', 'ts'), await make('nw-sql', 'sql')];
-    for (const w of [ts, sql]) {
+    // core.provision_workspace builds THIS code's level (24 since #205): compared with the upgraded one only while that is 23.
+    expect(await constraintOf(sql)).toEqual({ validated: true, def: 'CHECK ((workspace_id IS NOT NULL))' });
+    expect((await registryOf(admin, sql.id)).module_version).toBe(codeWorkspaceStructureLevel());
+    for (const w of codeWorkspaceStructureLevel() === 23 ? [ts, sql] : [ts]) {
       expect(await constraintOf(w)).toEqual({ validated: true, def: 'CHECK ((workspace_id IS NOT NULL))' });
       expect((await registryOf(admin, w.id)).module_version).toBe(23);
       expect(await v2(w)).toBe(await v2(a));

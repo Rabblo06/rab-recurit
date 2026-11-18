@@ -9488,3 +9488,69 @@ This entry covers only what release 0.7.0 adds to switch it on.
   - `verify-image-compose.test.cjs` refuses HWS switched off in one file, and a writable backup mount.
   - `deployment-worker.test.cjs` (H6) allows only the exact read-only mount on rab-api, and none on rab-worker.
   - The B2 ledger, runner and release-floor suites start from a 0.6.0-complete database with a backup marker that passes the real checks. No seam skips the cutover.
+
+## Staff same-shift Teams read: role membership instead of equality on the comma-joined role (branch fix/shift-team-multi-role, 2026-11-17; needs owner approval)
+- **Bug (failed closed):** `ShiftTeamService.list` refused anyone whose `ctx.role !== 'staff'`. `AuthContext.role` is
+  `security.roles.join(',')` (`jwt-auth.guard.ts`), so a staff user who also holds another role (for example
+  `manager,staff`) got 403 on `GET /rest/v1/attendance/me/shift/:shiftId/team` even with a confirmed assignment.
+- **Change (widens access, owner approval needed):** the service now tests role MEMBERSHIP on the request's
+  server-resolved `ctx.security.roles` (the list `applicationAllowed` and the MFA checks read), still together with the
+  `staff_app` target and `attendance.clock`. A caller with no security snapshot (one that never passed `JwtAuthGuard`)
+  has no roles and is refused (fail closed). Everything else is unchanged: self is resolved first, the caller's own
+  confirmed assignment is locked, the transaction-local capability GUCs, the minimal fields (first name, interval, You)
+  and 404 for an unrelated, unconfirmed or foreign shift.
+- **Not changed (flagged):** layer 4 still compares by equality. The additive RLS policy `staff_profile_shift_team_select`
+  (workspace-schema module `v1.002-shift-team-policy`, migration `1786718100000`) requires
+  `current_setting('rab.role') = 'staff'`, and `rab.role` is the same comma-joined value. So a multi-role staff user now
+  passes the service gate but the database still hides every teammate's profile: the roster lists only "You". Fixing that
+  is a new workspace-schema policy version (`'staff' = ANY(string_to_array(current_setting('rab.role', true), ','))`) plus
+  its migration and posture goldens, which needs owner review of the SQL. Until then the gap fails closed (fewer names,
+  never more).
+- **Tests:** `shift-team.integration.spec.ts`: a single-role staff caller gets the roster at the service layer; a caller
+  with `manager` or `manager,venue_manager` and no `staff` is refused at the service layer on the staff app; a caller with
+  no snapshot is refused; a manager signed in to the staff app gets 403; a `manager` + `staff` user gets 200 with their
+  own row (was 403); an `it.failing` case pins the RLS gap above (full team expected) so it turns red once the policy is
+  fixed.
+
+## Staff same-shift Teams read, layer 4: the RLS policy tests staff role membership (branch db/shift-team-multi-role-level-24, 2026-11-18; release 0.7.0, structure level 24; DRAFT: new SQL, owner review first; depends on #175 and #177)
+- **Finding closed (security finding format, §5.8).** Severity: Low (availability of a roster, fail closed). Actor: a staff
+  user who also holds another role (for example `manager,staff`) and is confirmed on a live shift. Action: opens the
+  shift's team list on the staff app. Consequence before: the service gate (#205) let them in, but the policy
+  `staff_profile_shift_team_select` compared `current_setting('rab.role', true) = 'staff'`; `rab.role` is the roles joined
+  with commas, so the database hid every teammate and the roster showed only "You". Root cause: `v1/shift-team-policy.ts`
+  (frozen, ShiftTeamReadScope1786718100000) tests equality on a list value.
+- **Change (widens layer 4 to exactly the intended case).** `ALTER POLICY staff_profile_shift_team_select ... USING (...)`
+  with ONLY the role test replaced by `'staff' = ANY (pg_catalog.string_to_array(current_setting('rab.role', true), ','))`:
+  per workspace by the 0.7.0 workspace command `ShiftTeamSelectMultiRole` (structure level 24), on `core.staff_profile`
+  (the HWS-off copy) and in `core.provision_workspace` (new workspaces) by migration StaffShiftTeamMultiRole1786721600000.
+  Every other line of the predicate (tenant binding, the transaction-local capability GUCs `rab.team_shift_id` /
+  `rab.team_staff_id`, both assignments confirmed, the shift not cancelled or completed) and FOR SELECT / PERMISSIVE /
+  TO PUBLIC / no WITH CHECK are unchanged; no grant, no new policy, no data change.
+- **Why it cannot over-match.** `= ANY` compares whole elements, so `custom_staff`, `staffing`, ` staff` or `STAFF` never
+  match; role keys cannot contain a comma (system keys are fixed, custom keys are `custom_` + a `[a-z0-9_]` slug), so no
+  key can split into a fake `staff` element; an unset `rab.role` gives `string_to_array(NULL) = NULL` (no row) and an
+  empty one `'{}'` (no row). `rab.role` is bound only by TenantContextService from the server-resolved session, never
+  from a request.
+  **Stated premise (DB review of #243):** "no role key contains a comma" is enforced today ONLY in application code:
+  custom keys are `custom_` + `slugify(name, '_', 'role')` (`modules/identity/services/role.service.ts:193`,
+  `engine/utils/slug.util.ts`, which maps every run outside `[a-z0-9]` to `_`), and system keys are fixed. No database
+  CHECK forbids a comma in `core.role.key`; a key written by another path (SQL by hand, a future service) containing
+  `,staff` would make this predicate match. The coordinator is proposing that CHECK to the owner as a separate migration. The policy still admits a profile only when the caller's own confirmed assignment on that live shift is
+  the bound capability, so the widening is "multi-role staff see what single-role staff already see", nothing more.
+- **Fail closed in the migration and the runner.** The core ALTER replaces only a known expression (the 1786718100000 one
+  or its own, by semantic-golden USING hash) and re-checks PERMISSIVE / FOR SELECT / TO PUBLIC / no WITH CHECK before and
+  after; before any change, core.provision_workspace must be the expected predecessor body (#177's level-23 literal for
+  up(), this level-24 literal for down()); the workspace step is checked against the declared level-24 v2 fingerprint (a
+  workspace that does not reach it is blocked, 503); down() is refused while any workspace's shift-team policy is NOT the
+  level-23 equality form (canonicalised USING hash, so a different deparse on a future major also refuses: fail closed).
+- **Tests.** `ws-shift-team-multi-role.integration.spec.ts`: level-23 → 24 fingerprint measured and declared per major;
+  runner upgrade idempotent; both provisioners build the same level-24 structure; DB-level abuse cases as the runtime login
+  (single-role and multi-role staff see the confirmed team; `manager`, `custom_staff`, `staffing`, ` staff`, `STAFF`, `''`,
+  `manager;staff` and an unset role see nothing; a multi-role caller not confirmed on the shift, naming another shift, or
+  bound to another workspace / organisation sees nothing; zero rows with no tenant context); the core copy has the new
+  predicate; up() refuses a non-level-23 provision body; a cancelled or completed shift shows nobody; down() refused while a
+  level-24 workspace exists, and with none left (rolled back) down() restores the core equality predicate and #177's exact
+  level-23 body, refuses a second run, and up() then refuses an unknown core expression and restores level 24. `shift-team.integration.spec.ts`: the former
+  `it.failing` full-team case for a `manager` + `staff` user is now a normal `it`. `structure-level-24.spec.ts`: the
+  statement is the frozen predicate with only the role test changed, the level-24 template is level 23 + that statement,
+  and the goldens pin the new policy hash.

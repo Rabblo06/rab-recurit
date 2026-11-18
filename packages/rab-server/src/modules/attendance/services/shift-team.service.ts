@@ -15,7 +15,11 @@ export class ShiftTeamService {
   constructor(private readonly tenant: TenantContextService, private readonly permissions: PermissionsService) {}
 
   async list(ctx: AuthContext, shiftId: string) {
-    if (ctx.applicationTarget !== 'staff_app' || ctx.role !== 'staff' ||
+    // Role MEMBERSHIP from the request's server-resolved security snapshot (as applicationAllowed and the MFA checks read
+    // it), never equality on `ctx.role`: that is the roles joined with commas, so `ctx.role !== 'staff'` refused every
+    // staff user who also holds another role. No snapshot (a caller that never passed JwtAuthGuard) → no roles → denied.
+    const roles = ctx.security?.roles ?? [];
+    if (ctx.applicationTarget !== 'staff_app' || !roles.includes('staff') ||
         !(await this.permissions.userHasPermission(ctx, PermissionFlag.ATTENDANCE_CLOCK))) {
       throw new ForbiddenException('Staff attendance access required.');
     }
