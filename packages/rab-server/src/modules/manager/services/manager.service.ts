@@ -903,28 +903,109 @@ export class ManagerService {
 
   /** "Resend Invitation" — issues attempt N+1 (max 3 total, see AccountInviteService), revoking whatever was active. Never confused with the Resend *email provider* — this always sends through whichever provider is currently configured. */
   /**
-   * `audit` (Admin Panel): extra, fixed audit metadata for a platform-admin resend — `via: 'platform_admin'` (lets the
-   * admin timeline pick this row out of the tenant's own resends) and the admin's reason. Never caller-shaped metadata.
+   * SF-2 layer 2 (owner decision on PR #207): the caller's route flag is re-checked FIRST, inside this transaction (403
+   * for any id, before a row is read). `/managers` carries `manager.manage` + `user.reset_password` (the defaults);
+   * `VenueManagerService` passes `venue_manager.create` (+ `user.reset_password`); the Initial Manager resend route
+   * carries only its class flag `manager.manage`, so `OrganisationOnboardingService` passes `alsoRequires = null`.
+   * Anything but the two route flags fails closed (`assertRouteFlagTx`). A platform administrator, who holds no role in
+   * the organisation it acts on, never comes through here: it uses `resendInviteAsPlatformAdmin`.
    */
-  // SF-2: NO service-level flag re-check here yet, on purpose (owner decision pending). The Admin Panel's platform-admin
-  // CEO resend (`OrganisationOnboardingService.resendCeoInvite`) calls this with a context that holds no role in the
-  // target organisation, so a plain `manager.manage` re-check would break it; it needs an explicit, audited authority
-  // path first. Callers: /managers (route guards), VenueManagerService (own-workspace gate + user.reset_password),
-  // the Initial Manager resend (own CEO / platform-admin rule).
-  async resendInvite(ctx: AuthContext, id: string, audit?: { via: 'platform_admin'; reason?: string }): Promise<{ sendNumber: number; expiresAt: Date; queued: boolean }> {
+  async resendInvite(
+    ctx: AuthContext,
+    id: string,
+    requiredPermission: ManagerRouteFlag = PermissionFlag.MANAGER_MANAGE,
+    alsoRequires: typeof PermissionFlag.USER_RESET_PASSWORD | null = PermissionFlag.USER_RESET_PASSWORD,
+  ): Promise<{ sendNumber: number; expiresAt: Date; queued: boolean }> {
     return this.tenantContext.runInTenantContext(ctx, async (manager) => {
+      await this.assertRouteFlagTx(manager, ctx, requiredPermission, alsoRequires ?? undefined);
       const profile = await this.findPendingProfileOrFail(manager, ctx, id);
-      const invite = await this.accountLifecycle.sendAccountInvite(manager, ctx, {
-        userId: profile.userId,
-        email: profile.user!.email,
-        createdBy: ctx.userId,
-      });
-      await this.auditService.record(manager, ctx, AuditAction.INVITE_RESENT, {
+      const { invite } = await this.resendPendingProfileWithin(manager, ctx, profile);
+      return invite;
+    });
+  }
+
+  /**
+   * The platform administrator's CEO-invite resend (Admin Panel → organisation → Resend CEO invite; owner decision on PR
+   * #207). A platform administrator holds no role in the target organisation, so the route-flag check in `resendInvite`
+   * cannot authorise it; this is the separate, explicit authority path. Used ONLY by
+   * `OrganisationOnboardingService.resendCeoInvite`.
+   *
+   * In ONE transaction bound to the target organisation:
+   *  1. the caller must be an ACTIVE platform administrator (`core.is_active_platform_admin`, the same server-side check
+   *     every platform-admin path uses) and not in an Admin Inspect session → otherwise 403, before any row is read;
+   *  2. the reason is re-validated (3–500 characters; a direct caller has no DTO) → 400;
+   *  3. the target must be a pending CEO profile of THAT organisation (organisation-pinned lookup) → otherwise 404. The
+   *     platform-admin authority covers the CEO invitation only, never another Manager's (the same reach
+   *     `manager_profile`'s platform-admin RLS branch gives);
+   *  4. the ordinary resend steps run (new attempt; `user.invite_resent` with `via: platform_admin` + reason, which the
+   *     tenant's timeline and the Admin Panel's Audit tab already read), then
+   *  5. its OWN audit row, `platform_admin.invite_resent`, naming the target organisation, the CEO profile, the invite
+   *     and the reason. Both rows commit or roll back with the resend.
+   */
+  async resendInviteAsPlatformAdmin(ctx: AuthContext, id: string, opts: { reason: string }): Promise<{ sendNumber: number; expiresAt: Date; queued: boolean }> {
+    return this.tenantContext.runInTenantContext(ctx, async (manager) => {
+      await this.assertActivePlatformAdminTx(manager, ctx);
+      const reason = this.validatedPlatformAdminReason(opts?.reason);
+      const profile = await this.findPendingCeoProfileForPlatformAdminOrFail(manager, ctx, id);
+      const { invite, inviteId } = await this.resendPendingProfileWithin(manager, ctx, profile, { via: 'platform_admin', reason });
+      await this.auditService.record(manager, ctx, AuditAction.PLATFORM_ADMIN_INVITE_RESENT, {
         targetUserId: profile.userId,
-        metadata: { sendNumber: invite.sendNumber, ...(audit ? { via: audit.via, ...(audit.reason ? { reason: audit.reason } : {}) } : {}) },
+        entityType: inviteId ? 'account_invite' : undefined,
+        entityId: inviteId ?? undefined,
+        metadata: { organisationId: ctx.organisationId, managerProfileId: profile.id, inviteId, sendNumber: invite.sendNumber, reason },
       });
       return invite;
     });
+  }
+
+  /** The resend steps, after the caller has authorised and the pending profile is locked. Also returns the new invite's id. */
+  private async resendPendingProfileWithin(
+    manager: EntityManager,
+    ctx: AuthContext,
+    profile: ManagerProfile,
+    audit?: { via: 'platform_admin'; reason: string },
+  ): Promise<{ invite: { sendNumber: number; expiresAt: Date; queued: boolean }; inviteId: string | null }> {
+    const invite = await this.accountLifecycle.sendAccountInvite(manager, ctx, {
+      userId: profile.userId,
+      email: profile.user!.email,
+      createdBy: ctx.userId,
+    });
+    await this.auditService.record(manager, ctx, AuditAction.INVITE_RESENT, {
+      targetUserId: profile.userId,
+      metadata: { sendNumber: invite.sendNumber, ...(audit ? { via: audit.via, reason: audit.reason } : {}) },
+    });
+    return { invite, inviteId: await this.latestInviteIdTx(manager, profile.userId) };
+  }
+
+  /** The user's newest invitation row (the one just issued, or the one about to be revoked). */
+  private async latestInviteIdTx(manager: EntityManager, userId: string): Promise<string | null> {
+    const latest = await manager.findOne(AccountInvite, { where: { userId }, order: { sendNumber: 'DESC', createdAt: 'DESC' }, select: { id: true } });
+    return latest?.id ?? null;
+  }
+
+  /**
+   * Platform-admin path gate (layer 2): an ACTIVE platform administrator, re-verified in this transaction; refused in an
+   * Admin Inspect session (`ctx.userId` would then be the inspected user, not the administrator). 403 before any row is read.
+   */
+  private async assertActivePlatformAdminTx(manager: EntityManager, ctx: AuthContext): Promise<void> {
+    if (ctx.inspectedBy || !(await this.platformAdmin.isPlatformAdminTx(manager, ctx))) {
+      throw new ForbiddenException('Only a platform administrator can manage organisations.');
+    }
+  }
+
+  private validatedPlatformAdminReason(reason: unknown): string {
+    const trimmed = typeof reason === 'string' ? reason.trim() : '';
+    if (trimmed.length < 3 || trimmed.length > 500) {
+      throw new BadRequestException({ code: 'ADMIN_REASON_REQUIRED', message: 'Give a reason (3–500 characters). It is saved to the audit log.' });
+    }
+    return trimmed;
+  }
+
+  /** The platform-admin path reaches the target organisation's pending CEO invitation only; anything else is 404. */
+  private async findPendingCeoProfileForPlatformAdminOrFail(manager: EntityManager, ctx: AuthContext, id: string): Promise<ManagerProfile> {
+    const isCeoOfThisOrganisation = await manager.exists(ManagerProfile, { where: { id, organisationId: ctx.organisationId!, type: ManagerType.CEO } });
+    if (!isCeoOfThisOrganisation) throw new NotFoundException('Manager not found.');
+    return this.findPendingProfileOrFail(manager, ctx, id);
   }
 
   /**
@@ -1000,20 +1081,54 @@ export class ManagerService {
    * password avoids reintroducing the exact DEACTIVATED dead-end described
    * above — status stays untouched, Re-invite keeps working unchanged.
    */
-  // SF-2: NO service-level flag re-check here yet, on purpose (owner decision pending) — the platform-admin CEO revoke
-  // (`OrganisationOnboardingService.revokeCeoInvite`) has no role in the target organisation; see `resendInvite`.
-  async cancelInvite(ctx: AuthContext, id: string): Promise<void> {
-    return this.tenantContext.runInTenantContext(ctx, (manager) => this.cancelInviteWithin(manager, ctx, id));
+  // SF-2 layer 2: the same route-flag re-check as `resendInvite` (same defaults, same callers, same platform-admin split).
+  async cancelInvite(
+    ctx: AuthContext,
+    id: string,
+    requiredPermission: ManagerRouteFlag = PermissionFlag.MANAGER_MANAGE,
+    alsoRequires: typeof PermissionFlag.USER_RESET_PASSWORD | null = PermissionFlag.USER_RESET_PASSWORD,
+  ): Promise<void> {
+    return this.tenantContext.runInTenantContext(ctx, async (manager) => {
+      await this.assertRouteFlagTx(manager, ctx, requiredPermission, alsoRequires ?? undefined);
+      await this.cancelInviteWithin(manager, ctx, id);
+    });
+  }
+
+  /**
+   * The platform administrator's CEO-invite revoke (owner decision on PR #207), the counterpart of
+   * `resendInviteAsPlatformAdmin`: same gate (active platform admin, not inspecting → 403 before any row is read), same
+   * reach (the target organisation's pending CEO invitation only → otherwise 404). Runs the ordinary cancel steps
+   * (`user.invite_cancelled`), then writes its OWN `platform_admin.invite_cancelled` row naming the target organisation,
+   * the CEO profile and the revoked invite. Used ONLY by `OrganisationOnboardingService.revokeCeoInvite`.
+   */
+  async cancelInviteAsPlatformAdmin(ctx: AuthContext, id: string): Promise<void> {
+    return this.tenantContext.runInTenantContext(ctx, async (manager) => {
+      await this.assertActivePlatformAdminTx(manager, ctx);
+      const profile = await this.findPendingCeoProfileForPlatformAdminOrFail(manager, ctx, id);
+      const inviteId = await this.latestInviteIdTx(manager, profile.userId);
+      await this.cancelPendingProfileWithin(manager, ctx, profile);
+      await this.auditService.record(manager, ctx, AuditAction.PLATFORM_ADMIN_INVITE_CANCELLED, {
+        targetUserId: profile.userId,
+        entityType: inviteId ? 'account_invite' : undefined,
+        entityId: inviteId ?? undefined,
+        metadata: { organisationId: ctx.organisationId, managerProfileId: profile.id, inviteId },
+      });
+    });
   }
 
   /**
    * The inner steps, inside a transaction the CALLER owns — same `xxxWithin` split as
    * `createWithin`/`create`, needed so `OrganisationOnboardingService.replaceInitialManager`
    * (P2.9 gap review, item 2) can revoke a superseded Initial Manager's invitation from within
-   * its own larger transaction, rather than opening a second, separate one.
+   * its own larger transaction, rather than opening a second, separate one. No permission check: the caller has
+   * authorised already (`replaceInitialManager`: `assertActorCanManageOwnInitialManager`).
    */
   async cancelInviteWithin(manager: EntityManager, ctx: AuthContext, id: string): Promise<void> {
     const profile = await this.findPendingProfileOrFail(manager, ctx, id);
+    await this.cancelPendingProfileWithin(manager, ctx, profile);
+  }
+
+  private async cancelPendingProfileWithin(manager: EntityManager, ctx: AuthContext, profile: ManagerProfile): Promise<void> {
     await this.accountInvite.revokeActive(manager, profile.userId);
     // No "AND password_hash IS NOT NULL" guard — rab_app has zero SELECT
     // privilege on this column (RevokeUserPasswordHashSelectFromApp), so a

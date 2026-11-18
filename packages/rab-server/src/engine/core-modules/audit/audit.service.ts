@@ -175,6 +175,15 @@ export const AuditAction = {
   PLATFORM_ADMIN_GRANTED: 'platform_admin.granted',
   PLATFORM_ADMIN_REVOKED: 'platform_admin.revoked',
   PLATFORM_ADMIN_BOOTSTRAPPED: 'platform_admin.bootstrapped',
+  /**
+   * SF-2 platform-admin invite path (owner decision on PR #207): a platform administrator resent / revoked an organisation's
+   * pending CEO invitation through `ManagerService.resendInviteAsPlatformAdmin` / `cancelInviteAsPlatformAdmin`. Written in
+   * the TARGET organisation, beside the ordinary `user.invite_resent` / `user.invite_cancelled` row. `entityType`
+   * 'account_invite' + `entityId` = the invite; metadata: `organisationId`, `managerProfileId`, `inviteId` (+ `sendNumber`,
+   * `reason` on a resend). Never a token or token hash.
+   */
+  PLATFORM_ADMIN_INVITE_RESENT: 'platform_admin.invite_resent',
+  PLATFORM_ADMIN_INVITE_CANCELLED: 'platform_admin.invite_cancelled',
   /** P2.8 — reversible, platform-admin-controlled. `metadata.reason` carries the suspension reason text. */
   ORGANISATION_SUSPENDED: 'organisation.suspended',
   ORGANISATION_REACTIVATED: 'organisation.reactivated',

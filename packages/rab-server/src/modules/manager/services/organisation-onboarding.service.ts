@@ -499,17 +499,20 @@ export class OrganisationOnboardingService {
     }
     const ctx: AuthContext = { organisationId, workspaceId: null, userId: actorCtx.userId, role: '' };
     const ceoProfileId = await this.findCeoProfileIdOrFail(ctx);
-    // Reuses the generic template (not `renderCeoInvitationEmail`) — `ManagerService.resendInvite`
-    // doesn't take a template override today; documented as a known, deliberate scope limit (the
-    // first send already carries the CEO-specific subject) rather than extended further here.
-    return this.managerService.resendInvite(ctx, ceoProfileId, { via: 'platform_admin', reason: trimmed });
+    // Reuses the generic template (not `renderCeoInvitationEmail`) — the resend steps don't take a template override
+    // today; documented as a known, deliberate scope limit (the first send already carries the CEO-specific subject).
+    // SF-2 (owner decision on PR #207): the platform administrator holds no role in this organisation, so it goes through
+    // the separate, audited platform-admin path (re-checks the platform-admin claim in its own transaction, reaches the
+    // CEO invitation only, writes `platform_admin.invite_resent`), never the route-flag-checked `resendInvite`.
+    return this.managerService.resendInviteAsPlatformAdmin(ctx, ceoProfileId, { reason: trimmed });
   }
 
   async revokeCeoInvite(actorCtx: Pick<AuthContext, 'userId'>, organisationId: string): Promise<void> {
     await this.assertActorIsPlatformAdmin(actorCtx);
     const ctx: AuthContext = { organisationId, workspaceId: null, userId: actorCtx.userId, role: '' };
     const ceoProfileId = await this.findCeoProfileIdOrFail(ctx);
-    return this.managerService.cancelInvite(ctx, ceoProfileId);
+    // SF-2: the platform-admin path, as resendCeoInvite (writes `platform_admin.invite_cancelled`).
+    return this.managerService.cancelInviteAsPlatformAdmin(ctx, ceoProfileId);
   }
 
   /**
@@ -563,14 +566,16 @@ export class OrganisationOnboardingService {
     const organisationId = await this.assertActorCanManageOwnInitialManager(actorCtx);
     const ctx: AuthContext = { organisationId, workspaceId: null, userId: actorCtx.userId, role: '' };
     const profileId = await this.findInitialManagerProfileIdOrFail(ctx);
-    return this.managerService.resendInvite(ctx, profileId);
+    // SF-2 layer 2: this route's flag is its class guard `manager.manage` only (no `user.reset_password` method guard).
+    return this.managerService.resendInvite(ctx, profileId, PermissionFlag.MANAGER_MANAGE, null);
   }
 
   async revokeInitialManagerInvite(actorCtx: InitialManagerActor): Promise<void> {
     const organisationId = await this.assertActorCanManageOwnInitialManager(actorCtx);
     const ctx: AuthContext = { organisationId, workspaceId: null, userId: actorCtx.userId, role: '' };
     const profileId = await this.findInitialManagerProfileIdOrFail(ctx);
-    return this.managerService.cancelInvite(ctx, profileId);
+    // SF-2 layer 2: as resendInitialManagerInvite, the route's `manager.manage` only.
+    return this.managerService.cancelInvite(ctx, profileId, PermissionFlag.MANAGER_MANAGE, null);
   }
 
   /**
