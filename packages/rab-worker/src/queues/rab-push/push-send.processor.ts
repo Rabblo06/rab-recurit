@@ -1,8 +1,10 @@
 import { randomUUID } from 'node:crypto';
 
 import { Job, UnrecoverableError } from 'bullmq';
+import { EntityManager } from 'typeorm';
 
 import { Notification } from '@rab/server/modules/notification/entities/notification.entity';
+import { AuditAction, AuditService } from '@rab/server/engine/core-modules/audit/audit.service';
 import { PushDevice } from '@rab/server/engine/core-modules/push/entities/push-device.entity';
 import { PushDelivery } from '@rab/server/engine/core-modules/push/entities/push-delivery.entity';
 import { PushSendError, PushSendResult } from '@rab/server/engine/core-modules/push/drivers/interfaces/push-driver.interface';
@@ -12,7 +14,7 @@ import { SecretEncryptionService } from '@rab/server/engine/core-modules/secret-
 import { TenantContextService } from '@rab/server/engine/core-modules/tenant/tenant-context.service';
 import { AuthContext } from '@rab/server/engine/core-modules/tenant/auth-context.interface';
 import { PushQueueJobData } from '@rab/server/engine/core-modules/push/push-queue.constants';
-import { claimedAttemptFrom } from '../claimed-attempt';
+import { ClaimedAttempt, claimedAttemptFrom } from '../claimed-attempt';
 
 const MAX_ERROR_MESSAGE_LENGTH = 500;
 
@@ -21,6 +23,8 @@ export interface PushSendProcessorDeps {
   pushService: PushService;
   secretEncryption: SecretEncryptionService;
   pushDeviceService: PushDeviceService;
+  /** Records PUSH_DELIVERY_FAILED when an attempt ends FAILED (as email's EMAIL_DELIVERY_FAILED). */
+  auditService: AuditService;
 }
 
 function sanitizeErrorMessage(error: unknown): string {
@@ -64,49 +68,67 @@ export function createPushSendProcessor(deps: PushSendProcessorDeps) {
       const claim = await manager
         .createQueryBuilder()
         .update(PushDelivery)
-        .set({ status: 'PROCESSING', processingAt: () => 'now()', processingToken, attemptCount: () => 'attempt_count + 1' })
+        .set({
+          status: 'PROCESSING',
+          processingAt: () => 'now()',
+          processingToken,
+          attemptCount: () => 'attempt_count + 1',
+          // The marker describes THIS attempt only (as email-send.processor.ts, review I1): a marker left by an earlier
+          // attempt that ended RETRY must not make a crash before this attempt's own marker look like "the provider may
+          // have it" (DELIVERY_UNCERTAIN). It is written again, fenced, immediately before this attempt's provider call.
+          providerCallStartedAt: null,
+        })
         .where('id = :id AND status IN (:...open) AND attempt_count < max_attempts', { id: row.id, open: ['PENDING', 'RETRY'] })
         .returning(['attemptCount', 'maxAttempts'])
         .execute();
       if (!claim.affected) return { skip: true as const };
       const attempt = claimedAttemptFrom(claim.raw, 'attempt_count', 'max_attempts');
-
-      // Revalidate authoritative state immediately before sending (A9/A10-style, same discipline
-      // as email's own revalidate()): the device may have been deactivated, or the notification
-      // itself may have been superseded, in the window between creation and this claim.
-      const device = await manager.findOne(PushDevice, { where: { id: row.pushDeviceId }, select: ['id', 'active', 'pushTokenEncrypted', 'platform'] });
-      if (!device || !device.active) {
-        await manager
-          .createQueryBuilder()
-          .update(PushDelivery)
-          .set({ status: 'CANCELLED', cancelledAt: () => 'now()', lastErrorMessageSanitized: 'device no longer active' })
-          .where('id = :id AND status = :processing AND processing_token = :token', { id: row.id, processing: 'PROCESSING', token: processingToken })
-          .execute();
-        return { skip: true as const };
-      }
-      const notification = await manager.findOne(Notification, { where: { id: row.notificationId } });
-      if (!notification) {
-        await manager
-          .createQueryBuilder()
-          .update(PushDelivery)
-          .set({ status: 'CANCELLED', cancelledAt: () => 'now()', lastErrorMessageSanitized: 'notification no longer exists' })
-          .where('id = :id AND status = :processing AND processing_token = :token', { id: row.id, processing: 'PROCESSING', token: processingToken })
-          .execute();
-        return { skip: true as const };
-      }
-
-      await manager
-        .createQueryBuilder()
-        .update(PushDelivery)
-        .set({ providerCallStartedAt: () => 'now()' })
-        .where('id = :id AND status = :processing AND processing_token = :token', { id: row.id, processing: 'PROCESSING', token: processingToken })
-        .execute();
-
-      return { skip: false as const, row, device, notification, attempt };
+      return { skip: false as const, row, attempt };
     });
 
     if (outcome.skip) return;
-    const { row, device, notification, attempt } = outcome;
+    const { row, attempt } = outcome;
+
+    // Revalidation runs in its OWN transaction, after the counted claim committed — the fix email-send.processor.ts already
+    // has (email-twenty, owner requirement 11). It used to share the claim's transaction, so an error thrown here (a
+    // database fault in a revalidation query) rolled the claim back with its attempt count: BullMQ retried, the dispatcher
+    // republished the still-open row, and the cycle could repeat for ever without reaching the cap or FAILED. Now such an
+    // error is a failed attempt like any other: RETRY with the counted attempt, FAILED at the cap. Until the marker write
+    // below, the row is PROCESSING under our token with no provider-call marker, so a crash in between is a plain safe retry.
+    let prepared: { device: PushDevice; notification: Notification } | 'stop';
+    try {
+      prepared = await deps.tenantContext.runInTenantContext(ctx, async (manager) => {
+        // Revalidate authoritative state immediately before sending (A9/A10-style, same discipline
+        // as email's own revalidate()): the device may have been deactivated, or the notification
+        // itself may have been superseded, in the window between creation and this claim.
+        const device = await manager.findOne(PushDevice, { where: { id: row.pushDeviceId }, select: ['id', 'active', 'pushTokenEncrypted', 'platform'] });
+        if (!device || !device.active) {
+          await cancelClaimedRow(manager, row.id, processingToken, 'device no longer active');
+          return 'stop' as const;
+        }
+        const notification = await manager.findOne(Notification, { where: { id: row.notificationId } });
+        if (!notification) {
+          await cancelClaimedRow(manager, row.id, processingToken, 'notification no longer exists');
+          return 'stop' as const;
+        }
+        // Durable, committed BEFORE the provider is contacted. Fenced: 0 rows means another claim owns the row now, so this
+        // attempt sends nothing (as email's markProviderCallStarted).
+        const marker = await manager
+          .createQueryBuilder()
+          .update(PushDelivery)
+          .set({ providerCallStartedAt: () => 'now()' })
+          .where('id = :id AND status = :processing AND processing_token = :token', { id: row.id, processing: 'PROCESSING', token: processingToken })
+          .execute();
+        if (!marker.affected) return 'stop' as const;
+        return { device, notification };
+      });
+    } catch (error) {
+      // Nothing was sent (no provider call yet). Always throws (RETRY → BullMQ backoff, FAILED → UnrecoverableError).
+      const code = typeof (error as { code?: unknown })?.code === 'string' ? (error as { code: string }).code : 'REVALIDATION_FAILED';
+      return handleSendFailure(deps, ctx, row, processingToken, attempt, new PushSendError(sanitizeErrorMessage(error), true, false, code));
+    }
+    if (prepared === 'stop') return;
+    const { device, notification } = prepared;
 
     let result: PushSendResult;
     try {
@@ -122,30 +144,73 @@ export function createPushSendProcessor(deps: PushSendProcessorDeps) {
       if (pushError.invalidToken) {
         await deps.tenantContext.runInTenantContext(ctx, (manager) => deps.pushDeviceService.deactivateInvalidToken(manager, device.id));
       }
-      const isFinal = !pushError.retryable || attempt.count >= attempt.max;
-      const write = await deps.tenantContext.runInTenantContext(ctx, (manager) =>
-        manager
-          .createQueryBuilder()
-          .update(PushDelivery)
-          .set({
-            status: isFinal ? 'FAILED' : 'RETRY',
-            attemptCount: attempt.count,
-            lastErrorCode: pushError.code ?? null,
-            lastErrorMessageSanitized: sanitizeErrorMessage(pushError),
-            ...(isFinal ? { failedAt: () => 'now()' } : {}),
-          })
-          .where('id = :id AND status = :processing AND processing_token = :token', { id: row.id, processing: 'PROCESSING', token: processingToken })
-          .execute(),
-      );
-      if (!write.affected) return; // lease lost — nothing more to correctly write
-      if (isFinal) throw new UnrecoverableError(pushError.message);
-      throw pushError;
+      return handleSendFailure(deps, ctx, row, processingToken, attempt, pushError);
     }
 
     // Completion correctness: the provider ACCEPTED the push. A failure from here on is a persistence failure, never a
     // provider failure — classifying it as RETRY (as the single try/catch used to) would send a second real push.
     await persistAccepted(deps, ctx, row.id, processingToken, attempt.count, result);
   };
+}
+
+/** The CANCELLED write for a row this attempt claimed, fenced by its token. */
+async function cancelClaimedRow(manager: EntityManager, id: string, processingToken: string, reason: string): Promise<void> {
+  await manager
+    .createQueryBuilder()
+    .update(PushDelivery)
+    .set({ status: 'CANCELLED', cancelledAt: () => 'now()', lastErrorMessageSanitized: reason })
+    .where('id = :id AND status = :processing AND processing_token = :token', { id, processing: 'PROCESSING', token: processingToken })
+    .execute();
+}
+
+/**
+ * A failed attempt (revalidation fault or provider failure): RETRY below the cap for a retryable error, otherwise FAILED,
+ * fenced by this attempt's token. A FAILED write is audited in the same transaction, the way email-send.processor.ts
+ * audits EMAIL_DELIVERY_FAILED (ids, codes and counts only: never the device token or any notification content). Always
+ * throws unless the token was lost: UnrecoverableError when final, the PushSendError otherwise (BullMQ backoff).
+ */
+async function handleSendFailure(
+  deps: PushSendProcessorDeps,
+  ctx: AuthContext,
+  row: PushDelivery,
+  processingToken: string,
+  attempt: ClaimedAttempt,
+  pushError: PushSendError,
+): Promise<void> {
+  const isFinal = !pushError.retryable || attempt.count >= attempt.max;
+  const wroteAsOwner = await deps.tenantContext.runInTenantContext(ctx, async (manager) => {
+    const write = await manager
+      .createQueryBuilder()
+      .update(PushDelivery)
+      .set({
+        status: isFinal ? 'FAILED' : 'RETRY',
+        attemptCount: attempt.count,
+        lastErrorCode: pushError.code ?? null,
+        lastErrorMessageSanitized: sanitizeErrorMessage(pushError),
+        ...(isFinal ? { failedAt: () => 'now()' } : {}),
+      })
+      .where('id = :id AND status = :processing AND processing_token = :token', { id: row.id, processing: 'PROCESSING', token: processingToken })
+      .execute();
+    if (!write.affected) return false;
+    if (isFinal) {
+      await deps.auditService.record(manager, ctx, AuditAction.PUSH_DELIVERY_FAILED, {
+        entityType: 'push_delivery',
+        entityId: row.id,
+        metadata: {
+          pushDeliveryId: row.id,
+          notificationId: row.notificationId,
+          errorCode: pushError.code ?? null,
+          attempts: attempt.count,
+          retryable: pushError.retryable,
+        },
+        actorUserId: null, // background worker, no authenticated human
+      });
+    }
+    return true;
+  });
+  if (!wroteAsOwner) return; // lease lost — nothing more to correctly write
+  if (isFinal) throw new UnrecoverableError(pushError.message);
+  throw pushError;
 }
 
 /**

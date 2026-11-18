@@ -6,7 +6,9 @@ import { parsePgUrl } from '../postgres/pg-url-policy';
 import { scramVerifier } from '../typeorm/scripts/twenty-mode-check';
 
 import {
+  ADMIN_URL_LABEL,
   buildRuntimeDatabaseUrl,
+  DB_SETUP_INPUT_MESSAGES,
   generateOwnerPassword,
   isOwnerLoginUrl,
   isValidOwnerPassword,
@@ -14,7 +16,9 @@ import {
   OWNER_LOGIN,
   OwnerCredentialError,
   planDbSetup,
+  RETIRED_ADMIN_URL_NAMES,
   scramSha256Verifier,
+  selectDbSetupInput,
 } from './owner-credential';
 import { dbTargetFromRuntimeUrl, runtimeUrlFromDbTarget } from './db-target';
 
@@ -459,6 +463,63 @@ describe('generateOwnerPassword and planDbSetup (the Twenty Helm model)', () => 
       expect(refusal(() => planDbSetup(`postgres://${login}:${ADMIN_PASSWORD}@ep-abc-pooler.eu-west-2.aws.neon.tech/neondb?sslmode=require`))).toBe(
         OWNER_CREDENTIAL_MESSAGES.transactionPooler,
       );
+    }
+  });
+
+  // Owner decision 2026-11-17: PG_ADMIN_URL (db-setup only) vs PG_DATABASE_URL (ALWAYS the app login, crewflow_owner).
+  it('selectDbSetupInput: PG_ADMIN_URL = bootstrap, PG_DATABASE_URL (crewflow_owner) = owner-url; the URL is non-enumerable', () => {
+    const admin = selectDbSetupInput({ PG_ADMIN_URL: ADMIN_URL });
+    expect(admin.name).toBe(ADMIN_URL_LABEL);
+    expect(admin.plan.mode).toBe('bootstrap');
+    expect(admin.url).toBe(ADMIN_URL);
+    expect(JSON.stringify(admin)).not.toContain(ADMIN_PASSWORD);
+    const app = selectDbSetupInput({ PG_DATABASE_URL: OWN, PG_ADMIN_URL: '  ' });
+    expect(app.name).toBe('PG_DATABASE_URL');
+    expect(app.plan.mode).toBe('owner-url');
+    expect(JSON.stringify(app)).not.toContain(ADMIN_PASSWORD);
+  });
+
+  it('DENIAL selectDbSetupInput: an admin login in PG_DATABASE_URL is refused (renamed), never reinterpreted as the admin URL', () => {
+    for (const login of ['doadmin', 'postgres', 'neondb_owner', 'crewflow_owner_x', 'CREWFLOW_OWNER']) {
+      const url = ADMIN_URL.replace('doadmin', login);
+      expect(refusal(() => selectDbSetupInput({ PG_DATABASE_URL: url }))).toBe(DB_SETUP_INPUT_MESSAGES.appUrlNotOwner);
+    }
+    expect(DB_SETUP_INPUT_MESSAGES.appUrlNotOwner).toMatch(/renamed to PG_ADMIN_URL/);
+  });
+
+  it('I-4 (review of PR #230): a percent-encoded crewflow_owner login in PG_DATABASE_URL is the same login (decoded, accepted); a login smuggled in as ?user= is refused', () => {
+    const encoded = OWN.replace('crewflow_owner', 'crewflow%5Fowner');
+    const app = selectDbSetupInput({ PG_DATABASE_URL: encoded });
+    expect(app.name).toBe('PG_DATABASE_URL');
+    expect(app.plan.mode).toBe('owner-url');
+    expect(app.plan.urlTarget.user).toBe(OWNER_LOGIN);
+    // The admin login encoded: still an admin login, still refused in PG_DATABASE_URL.
+    expect(refusal(() => selectDbSetupInput({ PG_DATABASE_URL: ADMIN_URL.replace('doadmin', 'do%61dmin') }))).toBe(DB_SETUP_INPUT_MESSAGES.appUrlNotOwner);
+    // ?user= (or any target override) on either URL: refused by the URL policy, before any mode decision.
+    for (const [name, url] of [['PG_ADMIN_URL', ADMIN_URL], ['PG_DATABASE_URL', OWN]] as const) {
+      for (const param of ['user=crewflow_owner', 'user=postgres', 'password=x', 'host=elsewhere', 'dbname=other']) {
+        const message = refusal(() => selectDbSetupInput({ [name]: `${url}&${param}` }));
+        expect(message).toMatch(/as a query parameter, which would override the connection target/);
+        expect(message).toContain(name);
+        expect(message).not.toContain(ADMIN_PASSWORD);
+      }
+    }
+  });
+
+  it('DENIAL selectDbSetupInput: crewflow_owner in PG_ADMIN_URL, both, neither, the retired name; refusals are value-free and name the variable', () => {
+    expect(refusal(() => selectDbSetupInput({ PG_ADMIN_URL: OWN }))).toBe(DB_SETUP_INPUT_MESSAGES.adminUrlIsOwner);
+    expect(refusal(() => selectDbSetupInput({ PG_ADMIN_URL: ADMIN_URL, PG_DATABASE_URL: OWN }))).toBe(DB_SETUP_INPUT_MESSAGES.both);
+    expect(refusal(() => selectDbSetupInput({}))).toBe(DB_SETUP_INPUT_MESSAGES.neither);
+    expect(refusal(() => selectDbSetupInput({ DATABASE_URL: ADMIN_URL }))).toBe(DB_SETUP_INPUT_MESSAGES.neither);
+    expect(RETIRED_ADMIN_URL_NAMES).toEqual(['PG_DATABASE_ADMIN_URL']);
+    expect(refusal(() => selectDbSetupInput({ PG_DATABASE_ADMIN_URL: ADMIN_URL }))).toBe(DB_SETUP_INPUT_MESSAGES.retiredAdminName('PG_DATABASE_ADMIN_URL'));
+    expect(refusal(() => selectDbSetupInput({ PG_DATABASE_ADMIN_URL: ADMIN_URL, PG_DATABASE_URL: OWN }))).toBe(DB_SETUP_INPUT_MESSAGES.retiredAdminName('PG_DATABASE_ADMIN_URL'));
+    const pooler = refusal(() => selectDbSetupInput({ PG_ADMIN_URL: `postgres://doadmin:${ADMIN_PASSWORD}@ep-abc-pooler.eu-west-2.aws.neon.tech/neondb?sslmode=require` }));
+    expect(pooler).toBe(OWNER_CREDENTIAL_MESSAGES.transactionPooler.split('PG_DATABASE_URL').join('PG_ADMIN_URL'));
+    for (const m of Object.values(DB_SETUP_INPUT_MESSAGES)) {
+      const text = typeof m === 'function' ? m('PG_DATABASE_ADMIN_URL') : m;
+      expect(text).not.toContain(ADMIN_PASSWORD);
+      expect(text).not.toMatch(/postgres(ql)?:\/\//);
     }
   });
 

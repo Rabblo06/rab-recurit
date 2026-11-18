@@ -2,6 +2,8 @@
  * OWNER-DB-ULTIMATE Part B3 / Part D: the upgrade commands per release, keyed `<major>-<minor>` (Twenty
  * `upgrade-command-registry.service.ts:148-158` sorts each bundle by timestamp; a bundle holds instance AND workspace commands,
  * `:135-158`). A release with no folder has no commands. Append a folder per release; never edit a published release's list.
+ * A bundle belongs to the MINOR release (`M.m.0`): a patch release (e.g. 0.6.1) runs none of it and can never have a key of
+ * its own (`0-6-1` is refused, upgrade-registry-key.ts PatchReleaseCommandsError).
  */
 import type { UpgradeCommand } from './upgrade-command';
 import type { WorkspaceUpgradeCommand } from './workspace-upgrade-command';

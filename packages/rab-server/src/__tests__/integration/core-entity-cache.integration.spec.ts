@@ -54,6 +54,26 @@ describeIfDb('Core Entity Cache (integration)', () => {
     tenantContext = moduleRef.get(TenantContextService);
     redis = moduleRef.get(AuthCacheRedisClientProvider);
     env = moduleRef.get(EnvironmentService);
+    // Determinism (test only; production settings untouched): the cache is fail-soft by design. The shared client has no
+    // offline queue and a 150 ms command timeout, so a command sent before the connection is ready, or a SET slower than
+    // 150 ms on a loaded CI runner, silently becomes "not cached" and a HIT assertion flakes. Wait until this suite's
+    // client is ready, then give ITS commands a generous timeout. ioredis reads `options.commandTimeout` per command, so
+    // this changes only this test app's client instance, never the provider's defaults (the dead-Redis cases below build
+    // their own clients and keep their short timeouts).
+    if (redis.client.status !== 'ready') {
+      await new Promise<void>((resolve, reject) => {
+        const onReady = () => {
+          clearTimeout(timer);
+          resolve();
+        };
+        const timer = setTimeout(() => {
+          redis.client.off('ready', onReady); // no listener left behind on a client that never became ready
+          reject(new Error(`auth-cache Redis client not ready (status ${redis.client.status})`));
+        }, 20_000);
+        redis.client.once('ready', onReady);
+      });
+    }
+    redis.client.options.commandTimeout = 5_000;
     adminDataSource = createAdminDataSource();
     await adminDataSource.initialize();
     factory = new TestIdentityFactory({ app, dataSource, adminDataSource, tenantContext, passwordHashing: moduleRef.get(PasswordHashingService) });

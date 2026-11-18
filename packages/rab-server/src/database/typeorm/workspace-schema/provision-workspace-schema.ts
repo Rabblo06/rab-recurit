@@ -6,7 +6,7 @@ import { LATEST_WORKSPACE_MODULE_VERSION, WORKSPACE_SCHEMA_MODULES } from './wor
 import { expectedWorkspaceIndexCount, KNOWN_WORKSPACE_INDEX_COUNTS } from './v1/server-path-template-archive-search';
 import { expectedWorkspacePolicyCount, KNOWN_WORKSPACE_POLICY_COUNTS } from './v1/server-path-template-venue-team-admin';
 import { pgClientRunner, WorkspaceMigrationRefused, WorkspaceSchemaMigrator } from './workspace-schema-migrator';
-import { workspaceFingerprintMajor } from './v1/expected-fingerprints';
+import { selectWorkspaceFingerprintsForServer, workspaceFingerprintMajor } from './v1/expected-fingerprints';
 import type { WorkspaceUpgradeCommand } from '../../../engine/core-modules/upgrade/upgrade-commands/workspace-upgrade-command';
 import { codeWorkspaceStructureLevel, declaredFingerprint, structuralCommandsThrough } from '../../../engine/core-modules/upgrade/workspace-structure-level';
 
@@ -108,6 +108,11 @@ export async function provisionWorkspaceSchema(
   if (options.workspaceRegistry && process.env.NODE_ENV !== 'test') {
     throw new WorkspaceSchemaProvisioningError('the workspaceRegistry option is a test seam: only NODE_ENV=test', 'input');
   }
+  // PG17/18 fix: compare against the fingerprints of the server this session is on, whatever process calls this (the Worker's
+  // in-process provisioner never selected one, so on PostgreSQL 17 / 18 every workspace it built failed its fingerprint
+  // check against the PostgreSQL 16 table). Idempotent; an unsupported major, or a process that selected another major,
+  // throws here, before any write (fail closed).
+  await selectWorkspaceFingerprintsForServer(async (sql) => (await client.query(sql)).rows);
 
   // core.worker_resolve_workspace_organisation (WorkerResolveWorkspaceOrganisation1786695000000):
   // a raw `SELECT ... FROM core.manager_workspace` here is unsatisfiable by `crewflow` with no

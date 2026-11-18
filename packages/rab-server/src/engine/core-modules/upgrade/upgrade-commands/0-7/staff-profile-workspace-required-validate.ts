@@ -11,7 +11,7 @@ import type { WorkspaceUpgradeCommand } from '../workspace-upgrade-command';
  * workspace command it is a structure level of its own: release 0.7.0 runs it per workspace AFTER the release's instance
  * commands (the HwsCutover copy, Twenty's order: instance steps, then workspace steps), in the same start, and
  * core.provision_workspace is re-created through level 23 (migration
- * WorkspaceStaffProfileWorkspaceRequiredValidated1786721570000) so new workspaces are built at the same structure.
+ * WorkspaceStaffProfileWorkspaceRequiredValidated1786721595000) so new workspaces are built at the same structure.
  *
  * What it does: one `ALTER TABLE <schema>.staff_profile VALIDATE CONSTRAINT staff_profile_workspace_required`. The constraint
  * (`CHECK (workspace_id IS NOT NULL)`) comes NOT VALID from the frozen template (it mirrors core's
@@ -26,7 +26,7 @@ import type { WorkspaceUpgradeCommand } from '../workspace-upgrade-command';
  *     declared: it would run under FORCE RLS bound to this workspace and could never see a NULL workspace_id row.
  * Twenty has no equivalent (no RLS, no NOT VALID legacy constraints in workspace schemas): a Crewflow addition.
  */
-export const STAFF_PROFILE_WORKSPACE_REQUIRED_VALIDATE_TIMESTAMP = 1786721570000;
+export const STAFF_PROFILE_WORKSPACE_REQUIRED_VALIDATE_TIMESTAMP = 1786721595000;
 
 export const STAFF_PROFILE_WORKSPACE_REQUIRED_CONSTRAINT = 'staff_profile_workspace_required';
 
@@ -41,7 +41,7 @@ export function staffProfileWorkspaceRequiredValidateSql(schemaName: string): st
  * level-22 workspace + this command, a workspace built by the TypeScript provisioner and one built by the level-23
  * core.provision_workspace must all equal it (ws-staff-profile-workspace-required.integration.spec.ts; GitHub CI's
  * `owner-login (<major>, fingerprints)` jobs for 16 / 17 / 18). An undeclared major makes
- * WorkspaceStaffProfileWorkspaceRequiredValidated1786721570000 refuse (exit 66): fail closed.
+ * WorkspaceStaffProfileWorkspaceRequiredValidated1786721595000 refuse (exit 66): fail closed.
  */
 export const STAFF_PROFILE_WORKSPACE_REQUIRED_VALIDATE_FINGERPRINTS_V2: Readonly<Partial<Record<16 | 17 | 18, string>>> = Object.freeze({
   16: '8e71e2e04feb6d84f335e037baded18c20e36a7b429dff30df969499ea503143',
@@ -49,7 +49,7 @@ export const STAFF_PROFILE_WORKSPACE_REQUIRED_VALIDATE_FINGERPRINTS_V2: Readonly
   18: '2c34f05380590f559c432c27bb93a694aedcab6432c221f359c67e851bd06371',
 });
 
-export const STAFF_PROFILE_WORKSPACE_REQUIRED_VALIDATE_PROVISION_LITERAL = 'db:provision_workspace@WorkspaceStaffProfileWorkspaceRequiredValidated1786721570000';
+export const STAFF_PROFILE_WORKSPACE_REQUIRED_VALIDATE_PROVISION_LITERAL = 'db:provision_workspace@WorkspaceStaffProfileWorkspaceRequiredValidated1786721595000';
 
 export const STAFF_PROFILE_WORKSPACE_REQUIRED_VALIDATE: WorkspaceUpgradeCommand = Object.freeze({
   kind: 'workspace',

@@ -84,7 +84,6 @@ import {
   assertSupportedPostgresMajor,
   postgresMajorOf,
   selectWorkspaceFingerprintMajor,
-  SUPPORTED_FINGERPRINT_MAJORS,
 } from '../../workspace-schema/v1/expected-fingerprints';
 import { BootstrapResult, runOwnerLoginBootstrap } from './owner-login/bootstrap';
 import { disableLegacyLogins } from './owner-login/legacy-logins';
@@ -250,20 +249,17 @@ export interface LockedMigrationResult {
 }
 
 /**
- * D4: the workspace fingerprints of the server's major. The owner login refuses below 16 and any major without reviewed
- * fingerprints. The legacy path (until the separated-mode retirement) selects 16 or 18 when it is one of them and otherwise keeps today's
- * behaviour (the PG16 table, so a mismatch fails closed at the fingerprint comparison), with a warning.
+ * D4: the workspace fingerprints of the server's major. EVERY path (the owner login and the legacy separated-layout path)
+ * refuses a major outside SUPPORTED_POSTGRES_MAJORS (database/postgres/supported-majors.ts) before any migration is applied:
+ * 15 and earlier lack the PostgreSQL 16 role model, a newer major has no reviewed fingerprints or goldens (security review
+ * L1 of PR #227: the legacy path used to warn and migrate anyway). The completeness check of that major's fingerprint
+ * table stays owner-login only (`strict`), as before.
  */
-export function selectFingerprintsForRun(serverVersionNum: string, strict: boolean, log: (line: string) => void): number {
+export function selectFingerprintsForRun(serverVersionNum: string, strict: boolean, _log: (line: string) => void): number {
   const major = postgresMajorOf(serverVersionNum);
-  if (strict) {
-    const supported = assertSupportedPostgresMajor(major);
-    assertFingerprintsComplete(supported);
-    selectWorkspaceFingerprintMajor(supported);
-    return major;
-  }
-  if ((SUPPORTED_FINGERPRINT_MAJORS as readonly number[]).includes(major)) selectWorkspaceFingerprintMajor(major);
-  else log(`WARNING: PostgreSQL ${major} has no reviewed workspace fingerprints (${SUPPORTED_FINGERPRINT_MAJORS.join(', ')} only); workspace fingerprint checks will refuse`);
+  const supported = assertSupportedPostgresMajor(major);
+  if (strict) assertFingerprintsComplete(supported);
+  selectWorkspaceFingerprintMajor(supported);
   return major;
 }
 

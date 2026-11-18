@@ -7,7 +7,7 @@ import {
 } from '../../../engine/core-modules/upgrade/upgrade-commands/0-7/staff-profile-workspace-required-validate';
 
 /**
- * DRAFT — NEW SQL, owner SQL review FIRST (C3 Q3). FROZEN with migration WorkspaceStaffProfileWorkspaceRequiredValidated1786721570000
+ * DRAFT — NEW SQL, owner SQL review FIRST (C3 Q3). FROZEN with migration WorkspaceStaffProfileWorkspaceRequiredValidated1786721595000
  * once approved. Structure level 23 (C3 owner decision Q3: VALIDATE staff_profile_workspace_required):
  *  - `core.provision_workspace(uuid)`: the guarded v3 body over template(20) + level 21 + level 22 (structure-level-22.ts) with the
  *    level-23 command's statement appended, recording module_version 23 and checking the declared level-23 v2 fingerprint. In

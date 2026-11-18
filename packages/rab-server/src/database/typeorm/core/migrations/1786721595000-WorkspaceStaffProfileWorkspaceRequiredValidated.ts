@@ -16,7 +16,7 @@ const LEVEL = 23;
 /**
  * DRAFT — NEW SQL, owner SQL review FIRST (OWNER-DB-ULTIMATE Part C3, owner decision Q3, 2026-11-15; SQL-DRAFTS.md §6.7 and
  * the Q3 draft PR). The core half of workspace structure level 23; the workspace half is
- * `0.7.0_ValidateStaffProfileWorkspaceRequired_1786721570000` (upgrade-commands/0-7/staff-profile-workspace-required-validate.ts),
+ * `0.7.0_ValidateStaffProfileWorkspaceRequired_1786721595000` (upgrade-commands/0-7/staff-profile-workspace-required-validate.ts),
  * applied per existing READY workspace by the workspace command runner after this release's instance commands (the HWS
  * cutover), on the same locked start.
  *
@@ -27,8 +27,8 @@ const LEVEL = 23;
  * core.verify_workspace_schema_v1 is unchanged (it never reads convalidated). No core table changes.
  * down(): restores the level-22 provision body; refused while any workspace is at level 23 (its constraint already VALID).
  */
-export class WorkspaceStaffProfileWorkspaceRequiredValidated1786721570000 implements MigrationInterface {
-  name = 'WorkspaceStaffProfileWorkspaceRequiredValidated1786721570000';
+export class WorkspaceStaffProfileWorkspaceRequiredValidated1786721595000 implements MigrationInterface {
+  name = 'WorkspaceStaffProfileWorkspaceRequiredValidated1786721595000';
 
   public async up(queryRunner: QueryRunner): Promise<void> {
     const structure = STAFF_PROFILE_WORKSPACE_REQUIRED_VALIDATE.structure!;

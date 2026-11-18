@@ -59,7 +59,7 @@ describe('Part D: workspace upgrade commands in the sequence (Twenty upgrade-seq
 
   it('0.7.0 has two workspace commands (level 23, C3 Q3 DRAFT; level 24, #205 DRAFT), after the instance command of the release (the HWS cutover)', () => {
     expect(WORKSPACE_UPGRADE_COMMANDS['0-7'].map((c) => [c.name, c.timestamp, c.structure?.level, c.structure?.mayDrop === true, Boolean(c.precheck)])).toEqual([
-      ['ValidateStaffProfileWorkspaceRequired', 1786721570000, 23, false, false],
+      ['ValidateStaffProfileWorkspaceRequired', 1786721595000, 23, false, false],
       ['ShiftTeamSelectMultiRole', 1786721600000, 24, false, false],
     ]);
     expect(lastInstanceStepOfVersion('0.7.0')).toBe('0.7.0_HwsCutover_1786721540100');

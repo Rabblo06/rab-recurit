@@ -181,6 +181,18 @@ final class MoneyTests: XCTestCase {
         XCTAssertEqual(Money.formatPence(-150), "£-1.50")
     }
 
+    /// A negative amount under £1 used to lose its sign (pounds truncate to 0).
+    func testFormatPenceKeepsTheSignOfNegativeAmounts() {
+        XCTAssertEqual(Money.formatPence(-50), "£-0.50")
+        XCTAssertEqual(Money.formatPence(-5), "£-0.05")
+        XCTAssertEqual(Money.formatPence(-1), "£-0.01")
+        XCTAssertEqual(Money.formatPence(-99), "£-0.99")
+        XCTAssertEqual(Money.formatPence(-100), "£-1.00")
+        XCTAssertEqual(Money.formatPence(-199), "£-1.99")
+        XCTAssertEqual(Money.formatPence(-123_456), "£-1234.56")
+        XCTAssertEqual(Money.formatPence(Int64.min), "£-92233720368547758.08")
+    }
+
     func testPayRateLabel() {
         XCTAssertEqual(Money.payRateLabel(0), "Rate not set")
         XCTAssertEqual(Money.payRateLabel(-1), "Rate not set")

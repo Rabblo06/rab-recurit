@@ -27,7 +27,11 @@
       "executor": "nx:run-commands",
       "dependsOn": ["^build"],
       "options": {
-        "command": "tsc --noEmit -p packages/rab-worker/tsconfig.app.json"
+        "commands": [
+          "tsc --noEmit -p packages/rab-worker/tsconfig.app.json",
+          "tsc --noEmit -p packages/rab-worker/tsconfig.spec.json"
+        ],
+        "parallel": false
       }
     },
     "test-pdf-equality": {

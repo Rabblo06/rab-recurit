@@ -41,6 +41,7 @@ import {
   withUpgradeScope,
 } from './upgrade-migration.service';
 import { commandsForVersion, commandStepName, lastInstanceStepOfVersion, lastWorkspaceStepOfVersion, migrationsStepName, sequenceForVersions } from './upgrade-sequence';
+import { assertRegistryKeys } from './upgrade-registry-key';
 import { decideUpgradeStart, UpgradeStartDecision, versionsToCheck } from './upgrade-version-check';
 import { ADOPTION_RELEASE_VERSION, compareVersions, CREWFLOW_PREVIOUS_VERSIONS } from './upgrade-version';
 import { cursorHasCompleted, listReadyWorkspaces, WorkspaceCommandRunner, WorkspaceOutcome, WorkspaceRunOptions } from './workspace-command-runner';
@@ -149,6 +150,12 @@ export class UpgradeRun {
   /** Step 1. Throws UpgradeVersionTooOldError (65) or AppVersionError (64) before anything is applied. */
   async beforeApply(session: UpgradeSession, input: { fresh: boolean; attribution: LedgerAttribution | null; unrestrictedTarget: boolean }): Promise<UpgradeStartDecision> {
     const { codeVersion, force, log } = this.options;
+    // Security review L-1: the registry keys are checked first, unconditionally (a fresh or no-ledger start reads no registry
+    // before the migrations): a patch key refuses here (config, 64), before any migration is applied.
+    assertRegistryKeys(this.registry);
+    assertRegistryKeys(this.workspaceRegistry);
+    // M-1: versionsToCheck also lists the minor release of an accepted previous patch; its workspace half is read below and
+    // decideUpgradeStart folds it into the patch's entry (effectiveComplete).
     const ledgerExists = await upgradeLedgerExists(session.query);
     const facts = ledgerExists
       ? await withUpgradeScope(session, 'status', async (q) => {

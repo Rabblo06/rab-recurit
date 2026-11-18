@@ -1,6 +1,6 @@
 import { Client } from 'pg';
 
-import { EXPECTED_WORKSPACE_FINGERPRINTS } from './v1/expected-fingerprints';
+import { EXPECTED_WORKSPACE_FINGERPRINTS, FingerprintMajor, selectWorkspaceFingerprintsForServer } from './v1/expected-fingerprints';
 import { codeWorkspaceStructureLevel } from '../../../engine/core-modules/upgrade/workspace-structure-level';
 
 /**
@@ -39,6 +39,15 @@ export interface WorkspaceDriftCycleResult {
 }
 
 const PAGE = 100;
+
+/**
+ * PG17/18 fix: selects the workspace fingerprints of the server `client` is on, before checkWorkspaceSchemaDrift compares
+ * with them (the Worker drift cycle and the CLI call it first). Idempotent; an unsupported major or a process that selected
+ * another major throws, so the check fails instead of reporting false drift.
+ */
+export async function selectDriftFingerprintsForServer(client: Pick<Client, 'query'>): Promise<FingerprintMajor> {
+  return selectWorkspaceFingerprintsForServer(async (sql) => (await client.query(sql)).rows);
+}
 
 /** One pass over every workspace on an already-connected client (the caller owns the connection). */
 export async function checkWorkspaceSchemaDrift(client: Client): Promise<WorkspaceDriftCycleResult> {

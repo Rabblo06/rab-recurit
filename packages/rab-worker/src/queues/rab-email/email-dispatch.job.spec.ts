@@ -248,7 +248,7 @@ describe('email dispatch — email-twenty Decision 2: re-queue cap', () => {
     const { tenant, statements } = fakeTenant(responder([ROW(R2, 'QUEUED', { dispatch_generation: 0 })]));
     const errorSpy = jest.spyOn(console, 'error').mockImplementation(() => undefined);
     const refused = jest.fn(async () => {
-      throw new QueueEnqueueRefusedError('refused');
+      throw new QueueEnqueueRefusedError('rab-email', 'refused');
     });
     await dispatchEmailScope(tenant as never, ORG_A, [R2], jest.fn(), refused, false);
     errorSpy.mockRestore();

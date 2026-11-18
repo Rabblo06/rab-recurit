@@ -8,7 +8,6 @@ import { DataSource } from 'typeorm';
 import { AppModule } from '@rab/server/app.module';
 import { AuditService } from '@rab/server/engine/core-modules/audit/audit.service';
 import { PasswordHashingService } from '@rab/server/engine/core-modules/auth/services/password-hashing.service';
-import { AuthContext } from '@rab/server/engine/core-modules/tenant/auth-context.interface';
 import { TenantContextService } from '@rab/server/engine/core-modules/tenant/tenant-context.service';
 import { AttendanceService } from '@rab/server/modules/attendance/services/attendance.service';
 import { ShiftReportService } from '@rab/server/modules/attendance/services/shift-report.service';
@@ -31,7 +30,7 @@ import { VenueService } from '@rab/server/modules/venue/services/venue.service';
 import { Venue } from '@rab/server/modules/venue/entities/venue.entity';
 import { runLateClockInCycle } from '../../queues/rab-shifts/late-clock-in.job';
 import { createAdminDataSource } from './helpers/admin-datasource';
-import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
+import { OrgBoundContext, TestIdentity, TestIdentityFactory } from './helpers/test-identities';
 import { integrationTestDatabaseReady } from '@rab/server/database/typeorm/core/integration-test-database-gate';
 import { businessSchema, businessTableOf } from './helpers/hws-fixtures';
 
@@ -74,7 +73,7 @@ describeIfDb('same-organisation manager isolation (integration)', () => {
     managerB: TestIdentity;
   }
 
-  function ctxOf(identity: Pick<TestIdentity, 'organisationId' | 'workspaceId' | 'userId'>): AuthContext {
+  function ctxOf(identity: Pick<TestIdentity, 'organisationId' | 'workspaceId' | 'userId'>): OrgBoundContext {
     return { organisationId: identity.organisationId, workspaceId: identity.workspaceId, userId: identity.userId, role: 'manager' };
   }
 
@@ -338,7 +337,7 @@ describeIfDb('same-organisation manager isolation (integration)', () => {
       const request = await withContext(ctxOf(fx.managerA), (m) =>
         m.save(ReplacementRequest, {
           organisationId: fx.organisation.id,
-          workspaceId: fx.managerA.workspaceId,
+          workspaceId: fx.managerA.workspaceId!,
           shiftId: shift.id,
           declinedShiftAssignmentId: declinedAssignment.id,
           declinedOfferId: declinedOffer.id,
@@ -552,7 +551,7 @@ describeIfDb('same-organisation manager isolation (integration)', () => {
       const request = await withContext(ctxOf(fx.managerA), (m) =>
         m.save(ReplacementRequest, {
           organisationId: fx.organisation.id,
-          workspaceId: fx.managerA.workspaceId,
+          workspaceId: fx.managerA.workspaceId!,
           shiftId: shift.id,
           declinedShiftAssignmentId: declinedAssignment.id,
           declinedOfferId: declinedOffer.id,

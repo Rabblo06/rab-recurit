@@ -1,3 +1,4 @@
+import { SUPPORTED_POSTGRES_MAJORS, unsupportedPostgresMessage } from '../../../postgres/supported-majors';
 import { EXPECTED_WORKSPACE_FINGERPRINTS_PG17 } from './expected-fingerprints-pg17';
 import { EXPECTED_WORKSPACE_FINGERPRINTS_PG18 } from './expected-fingerprints-pg18';
 
@@ -60,7 +61,8 @@ export const PENDING_FINGERPRINT_VERSIONS: readonly number[] = [];
  * major. A wrong selection fails closed: the fingerprint comparison refuses (FINGERPRINT_MISMATCH), it never passes.
  */
 export { EXPECTED_WORKSPACE_FINGERPRINTS_PG17, EXPECTED_WORKSPACE_FINGERPRINTS_PG18 };
-export const SUPPORTED_FINGERPRINT_MAJORS = [16, 17, 18] as const;
+/** The supported PostgreSQL majors (database/postgres/supported-majors.ts, the one list every version gate reads). */
+export const SUPPORTED_FINGERPRINT_MAJORS = SUPPORTED_POSTGRES_MAJORS;
 export type FingerprintMajor = (typeof SUPPORTED_FINGERPRINT_MAJORS)[number];
 /** Below this, Twenty Mode refuses the server outright (M0 F-E1: CREATEROLE can grant pg_execute_server_program on <= 15). */
 export const MINIMUM_POSTGRES_MAJOR = 16;
@@ -108,13 +110,13 @@ export function postgresMajorOf(serverVersionNum: string | number): number {
 export function assertSupportedPostgresMajor(major: number): FingerprintMajor {
   if (major < MINIMUM_POSTGRES_MAJOR) {
     throw new UnsupportedPostgresVersionError(
-      `PostgreSQL ${major} is refused: Crewflow needs PostgreSQL ${MINIMUM_POSTGRES_MAJOR} or later (on 15 and earlier a CREATEROLE login can grant ` +
+      `${unsupportedPostgresMessage(major)} Crewflow needs PostgreSQL ${MINIMUM_POSTGRES_MAJOR} or later (on 15 and earlier a CREATEROLE login can grant ` +
         'predefined roles such as pg_execute_server_program).',
     );
   }
   if (!(SUPPORTED_FINGERPRINT_MAJORS as readonly number[]).includes(major)) {
     throw new UnsupportedPostgresVersionError(
-      `PostgreSQL ${major} is not supported: workspace fingerprints are generated for ${SUPPORTED_FINGERPRINT_MAJORS.join(', ')} only ` +
+      `${unsupportedPostgresMessage(major)} Workspace fingerprints are generated for ${SUPPORTED_FINGERPRINT_MAJORS.join(', ')} only ` +
         '(workspace-schema/v1/expected-fingerprints*.ts). Generate and review them on that major first.',
     );
   }
@@ -160,8 +162,15 @@ export async function selectWorkspaceFingerprintsForServer(
   return selectWorkspaceFingerprintMajor(postgresMajorOf(String(row?.num ?? '')));
 }
 
-/** Test seam only: forget the selection (unit specs that exercise both majors in one process). */
+/**
+ * Test seam only: forget the selection (unit specs that exercise both majors in one process). Refused outside NODE_ENV=test
+ * (security review I3, PR #227): a production process must never drop the major the boot gates selected, which would fall
+ * back to the PostgreSQL 16 table.
+ */
 export function resetWorkspaceFingerprintSelectionForTests(): void {
+  if (process.env.NODE_ENV !== 'test') {
+    throw new UnsupportedPostgresVersionError('resetWorkspaceFingerprintSelectionForTests is a test seam: only NODE_ENV=test.');
+  }
   selected = null;
 }
 

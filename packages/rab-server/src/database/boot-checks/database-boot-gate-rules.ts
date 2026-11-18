@@ -7,6 +7,7 @@
 import { assertDeploymentIdentity, DeploymentIdentityError, Query } from '../deployment-identity/deployment-identity';
 import { dispatchNotifyFor } from '../postgres/pg-config';
 import { PgConfigError } from '../postgres/pg-url-policy';
+import { isSupportedPostgresMajor, postgresMajorFromVersionNum, SupportedPostgresMajor, unsupportedPostgresMessage } from '../postgres/supported-majors';
 import { OWNER_LOGIN_ROLE, ownerLoginObjectPostureProblems, ownerLoginRolePostureProblems } from './owner-login-posture';
 import { SchemaCompatibilityError } from './schema-compatibility';
 
@@ -412,11 +413,18 @@ export function ownerLoginGrantWarnings(rows: Array<Record<string, unknown>>, in
   ];
 }
 
-/** Gate 2. */
-export function assertVersionGate(facts: BootGateFacts): void {
-  if (!Number.isFinite(facts.serverVersionNum) || facts.serverVersionNum < MIN_SERVER_VERSION_NUM) {
-    throw new DatabaseBootGateError('version', `PostgreSQL server_version_num ${facts.serverVersionNum} is below the minimum ${MIN_SERVER_VERSION_NUM} (PostgreSQL 16).`);
+/**
+ * Gate 2: the server's major is one of SUPPORTED_POSTGRES_MAJORS (database/postgres/supported-majors.ts), the same list the
+ * db-setup bootstrap child and the migrate child refuse with. Below 16 the role-membership semantics every later gate reads
+ * do not exist; above the newest reviewed major there are no workspace fingerprints or posture goldens, so every workspace
+ * would fail its fingerprint check. Returns the major (runDatabaseBootGates selects that major's workspace fingerprints).
+ */
+export function assertVersionGate(facts: BootGateFacts): SupportedPostgresMajor {
+  const major = postgresMajorFromVersionNum(facts.serverVersionNum);
+  if (!Number.isFinite(facts.serverVersionNum) || facts.serverVersionNum < MIN_SERVER_VERSION_NUM || !isSupportedPostgresMajor(major)) {
+    throw new DatabaseBootGateError('version', `${unsupportedPostgresMessage(major)} (server_version_num ${facts.serverVersionNum})`);
   }
+  return major;
 }
 
 /** Gate 3. */

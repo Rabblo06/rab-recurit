@@ -440,8 +440,9 @@ describeIfDb('email delivery reliability (Phase 9)', () => {
   // ================================================================================================ C. Dispatcher ambiguous-delivery classification
   describe('C. email-dispatch.job.ts ambiguous-delivery classification', () => {
     async function dispatch(ambiguousDeliverySafeToRetry: boolean) {
-      const publishSpy = jest.fn(async () => undefined);
-      const republishSpy = jest.fn(async () => undefined);
+      // Typed with the dispatcher's own callback parameters so `mock.calls[n][0]` is the outbox id, not an empty tuple.
+      const publishSpy = jest.fn<Promise<void>, Parameters<Parameters<typeof runEmailDispatchCycle>[2]>>(async () => undefined);
+      const republishSpy = jest.fn<Promise<void>, Parameters<Parameters<typeof runEmailDispatchCycle>[3]>>(async () => undefined);
       const result = await runEmailDispatchCycle(
         adminDataSource,
         tenantContext,

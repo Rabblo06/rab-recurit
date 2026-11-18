@@ -25,6 +25,7 @@ import { PasswordHashingService } from '@rab/server/engine/core-modules/auth/ser
 import { TenantContextService } from '@rab/server/engine/core-modules/tenant/tenant-context.service';
 import { SecretEncryptionService } from '@rab/server/engine/core-modules/secret-encryption/secret-encryption.service';
 import { PushDeviceService } from '@rab/server/engine/core-modules/push/push-device.service';
+import { AuditService } from '@rab/server/engine/core-modules/audit/audit.service';
 import { PushService } from '@rab/server/engine/core-modules/push/push.service';
 import { FakeFcmDriver } from '@rab/server/engine/core-modules/push/drivers/fake-fcm.driver';
 import { NotificationService } from '@rab/server/modules/notification/services/notification.service';
@@ -47,6 +48,7 @@ describeIfDb('D-Q5b push: cumulative attempt cap (integration)', () => {
   let tenantContext: TenantContextService;
   let secretEncryption: SecretEncryptionService;
   let pushDeviceService: PushDeviceService;
+  let auditService: AuditService;
   let pushService: PushService;
   let notificationService: NotificationService;
   let factory: TestIdentityFactory;
@@ -59,6 +61,7 @@ describeIfDb('D-Q5b push: cumulative attempt cap (integration)', () => {
     tenantContext = moduleRef.get(TenantContextService);
     secretEncryption = moduleRef.get(SecretEncryptionService);
     pushDeviceService = moduleRef.get(PushDeviceService);
+    auditService = moduleRef.get(AuditService);
     pushService = moduleRef.get(PushService);
     notificationService = moduleRef.get(NotificationService);
     adminDataSource = createAdminDataSource();
@@ -104,7 +107,7 @@ describeIfDb('D-Q5b push: cumulative attempt cap (integration)', () => {
   };
   const setRow = (id: string, sql: string) => adminDataSource.query(`UPDATE core.push_delivery SET ${sql} WHERE id = $1`, [id]);
   const sends = (token: string) => FakeFcmDriver.sentMessages.filter((m) => m.token === token).length;
-  const processor = () => createPushSendProcessor({ tenantContext, pushService, secretEncryption, pushDeviceService });
+  const processor = () => createPushSendProcessor({ tenantContext, pushService, secretEncryption, pushDeviceService, auditService });
   const jobOf = (id: string, organisationId: string, attemptsMade: number) => ({ data: { pushDeliveryId: id, organisationId }, attemptsMade }) as never;
   const dispatch = async (organisationId: string) => {
     const publish = jest.fn(async () => undefined);
@@ -276,7 +279,7 @@ describeIfDb('D-Q5b push: cumulative attempt cap (integration)', () => {
   it('V1: Worker crash mid-send — a restart redelivery inside the lease is a no-op; lease expiry → DELIVERY_UNCERTAIN with the cumulative count, never a second push; the dead Worker\'s late acceptance is fenced', async () => {
     const { org, token, deliveryId } = await seed('dq5bpv1');
     const hanging = hangingPushService();
-    const deps = { tenantContext, pushService: hanging.service, secretEncryption, pushDeviceService };
+    const deps = { tenantContext, pushService: hanging.service, secretEncryption, pushDeviceService, auditService };
     const zombie = createPushSendProcessor(deps)(jobOf(deliveryId, org.id, 0)).catch(() => undefined);
     await waitFor(() => hanging.pending.length === 1, 'the provider call');
     expect(await rowOf(deliveryId)).toMatchObject({ status: 'PROCESSING', count: 1 });
@@ -310,7 +313,7 @@ describeIfDb('D-Q5b push: cumulative attempt cap (integration)', () => {
     const errors = jest.spyOn(console, 'error').mockImplementation(() => undefined);
     try {
       await expect(
-        createPushSendProcessor({ tenantContext: acceptedWriteFails(tenantContext), pushService, secretEncryption, pushDeviceService })(jobOf(deliveryId, org.id, 0)),
+        createPushSendProcessor({ tenantContext: acceptedWriteFails(tenantContext), pushService, secretEncryption, pushDeviceService, auditService })(jobOf(deliveryId, org.id, 0)),
       ).rejects.toThrow(/persisting ACCEPTED/);
     } finally {
       errors.mockRestore();

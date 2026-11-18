@@ -34,7 +34,7 @@ const CAPABILITY_FLAGS: readonly PermissionFlagType[] = [
   PermissionFlag.STAFF_VIEW, PermissionFlag.SCHEDULE_VIEW, PermissionFlag.VENUE_VIEW, PermissionFlag.OFFER_SEND,
   PermissionFlag.REPORT_VIEW, PermissionFlag.STAFFING_REQUEST_CREATE, PermissionFlag.ATTENDANCE_VIEW, PermissionFlag.VENUE_MANAGER_CREATE,
   PermissionFlag.REPORT_EXPORT, PermissionFlag.ATTENDANCE_EDIT, PermissionFlag.REVIEW_CREATE, PermissionFlag.STAFF_CREATE,
-  PermissionFlag.STAFF_DEACTIVATE, PermissionFlag.PAYROLL_VIEW, PermissionFlag.PAYROLL_APPROVE, PermissionFlag.PAYROLL_CALCULATE,
+  PermissionFlag.STAFF_DEACTIVATE, PermissionFlag.STAFF_EDIT, PermissionFlag.PAYROLL_VIEW, PermissionFlag.PAYROLL_APPROVE, PermissionFlag.PAYROLL_CALCULATE,
   PermissionFlag.PAYROLL_MARK_PAID, PermissionFlag.MANAGER_MANAGE,
 ];
 const ALL_FLAGS = Object.values(PermissionFlag) as PermissionFlagType[];
@@ -123,7 +123,7 @@ describeIfDb('SC-05 GET /auth/capabilities answers from the resolved permission 
     await app?.close();
   });
 
-  it('every identity shape: the response is identical to one userHasPermission per flag (same 18 keys, same booleans)', async () => {
+  it('every identity shape: the response is identical to one userHasPermission per flag (same 19 keys, same booleans)', async () => {
     for (const identity of [admin, manager, staff, venueManager, overridden]) {
       const body = await capabilities(identity);
       expect(Object.keys(body)).toEqual([...CAPABILITY_FLAGS]);
