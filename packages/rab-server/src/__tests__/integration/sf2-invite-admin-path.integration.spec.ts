@@ -49,6 +49,7 @@ describeIfDb('SF-2 invite resend / cancel: route-flag re-check and the platform-
   let ceoA: TestIdentity; // CEO: manager.manage + user.reset_password
   let mgrA: TestIdentity; // Internal Manager, production permissions (no manager.manage)
   let pendingA: TestIdentity; // never-activated Internal Manager
+  let pendingVmA: TestIdentity; // never-activated Venue Manager in ceoA's own workspace
 
   // Organisation B: another organisation (scope checks).
   let pendingB: TestIdentity;
@@ -72,6 +73,26 @@ describeIfDb('SF-2 invite resend / cancel: route-flag re-check and the platform-
     const inserted = (await admin.query(
       `INSERT INTO core.user_permission_override (user_id, permission_id, organisation_id, effect)
        SELECT $1, id, $2, 'revoke' FROM core.permission WHERE key = $3 RETURNING user_id`,
+      [identity.userId, identity.organisationId, flag],
+    )) as unknown[];
+    if (inserted.length !== 1) throw new Error(`test setup: permission ${flag} is not in the catalogue`);
+    await bumpSecurityVersion(identity);
+    try {
+      return await fn();
+    } finally {
+      await admin.query(
+        `DELETE FROM core.user_permission_override WHERE user_id = $1 AND permission_id = (SELECT id FROM core.permission WHERE key = $2)`,
+        [identity.userId, flag],
+      );
+      await bumpSecurityVersion(identity);
+    }
+  }
+
+  /** Runs `fn` while `flag` is GRANTED to `identity` by a per-user override (removed afterwards, whatever happens). */
+  async function withGranted<T>(identity: TestIdentity, flag: PermissionFlagType, fn: () => Promise<T>): Promise<T> {
+    const inserted = (await admin.query(
+      `INSERT INTO core.user_permission_override (user_id, permission_id, organisation_id, effect)
+       SELECT $1, id, $2, 'grant' FROM core.permission WHERE key = $3 RETURNING user_id`,
       [identity.userId, identity.organisationId, flag],
     )) as unknown[];
     if (inserted.length !== 1) throw new Error(`test setup: permission ${flag} is not in the catalogue`);
@@ -147,6 +168,8 @@ describeIfDb('SF-2 invite resend / cancel: route-flag re-check and the platform-
     ceoA = await factory.createCeo(seededA.organisation);
     pendingA = await factory.createInternalManager(seededA.organisation, { label: 'sf2inv-a-pending' });
     await setInvited(pendingA);
+    pendingVmA = await factory.createVenueManager(seededA.organisation, { owner: ceoA, label: 'sf2inv-a-pending-vm' });
+    await setInvited(pendingVmA);
 
     const orgB = await factory.createOrganisation('sf2inv-b');
     pendingB = await factory.createInternalManager(orgB, { label: 'sf2inv-b-pending' });
@@ -222,10 +245,24 @@ describeIfDb('SF-2 invite resend / cancel: route-flag re-check and the platform-
       expect(await snapshot(platformAdmin.organisationId)).toEqual(beforeOwn);
     });
 
-    it('the Venue Manager route flag is pinned to the caller\'s own Venue Managers: venue_manager.create on an Internal Manager id → 404, inert', async () => {
-      // mgrA holds venue_manager.create + user.reset_password, so only the target pin can refuse.
-      await expectNotFoundAndInert(orgA, () => managers.resendInvite(ctxOf(mgrA), pendingA.profileId!, PermissionFlag.VENUE_MANAGER_CREATE));
-      await expectNotFoundAndInert(orgA, () => managers.cancelInvite(ctxOf(mgrA), pendingA.profileId!, PermissionFlag.VENUE_MANAGER_CREATE));
+    it('the Venue Manager route flag is pinned to the caller\'s own Venue Managers: venue_manager.create on an Internal Manager it CAN see → 404, inert', async () => {
+      // ceoA sees pendingA under RLS (the /managers positive control below resends and cancels it) and here also holds
+      // venue_manager.create (per-user grant) + user.reset_password, with a workspace: without the pin this call succeeds.
+      await withGranted(ceoA, PermissionFlag.VENUE_MANAGER_CREATE, async () => {
+        await expectNotFoundAndInert(orgA, () => managers.resendInvite(ctxOf(ceoA), pendingA.profileId!, PermissionFlag.VENUE_MANAGER_CREATE));
+        await expectNotFoundAndInert(orgA, () => managers.cancelInvite(ctxOf(ceoA), pendingA.profileId!, PermissionFlag.VENUE_MANAGER_CREATE));
+      });
+    });
+
+    it('positive control for the pin: the same caller with venue_manager.create resends and cancels a pending Venue Manager of its own workspace', async () => {
+      await withGranted(ceoA, PermissionFlag.VENUE_MANAGER_CREATE, async () => {
+        const resent = await managers.resendInvite(ctxOf(ceoA), pendingVmA.profileId!, PermissionFlag.VENUE_MANAGER_CREATE);
+        expect(resent.sendNumber).toBe(1);
+        await managers.cancelInvite(ctxOf(ceoA), pendingVmA.profileId!, PermissionFlag.VENUE_MANAGER_CREATE);
+      });
+      const rows = await auditRows(orgA, pendingVmA.userId, ['user.invite_resent', 'user.invite_cancelled']);
+      expect(rows.map((r) => r.action)).toEqual(['user.invite_resent', 'user.invite_cancelled']);
+      expect(rows[0]!.actor_user_id).toBe(ceoA.userId);
     });
 
     it('a record outside the caller\'s scope → 404 with the flags held: another organisation\'s pending Manager, or an unknown id', async () => {
