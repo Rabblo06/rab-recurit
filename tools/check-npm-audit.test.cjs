@@ -1325,7 +1325,7 @@ test('plugin sources: a plugins key in the project, an ancestor or the home .yar
     problems({ YARN_RC_FILENAME: '.evilrc.yml' }),
     /YARN_RC_FILENAME is set/,
   );
-  // A .yarnrc.yml the parser rejects fails closed.
+  // Without the `yaml` library the check fails closed (a problem, never a silent pass).
   assert.match(
     check
       .pluginSourceProblems(
@@ -1333,14 +1333,95 @@ test('plugin sources: a plugins key in the project, an ancestor or the home .yar
         {},
         {
           home,
-          parseYaml: () => {
-            throw new Error('boom');
+          loadYaml: () => {
+            throw new Error("Cannot find module 'yaml'");
           },
         },
       )
       .join(),
+    /cannot load the yaml parser to read \.yarnrc\.yml \(Cannot find module 'yaml'\)/,
+  );
+});
+
+// ---- Final check of #238 at 6d5365da: key allowlist, no prototype keys, no legacy header ----
+
+test('rc allowlist: __proto__ hiding plugins, the legacy header, unknown keys, merge keys and duplicates are refused', () => {
+  const yaml = require('yaml');
+  const problems = (text) => check.rcFileProblems('rc', text, yaml).join('\n');
+  // Every key the repository's .yarnrc.yml uses is allowed (the real file passes).
+  const real = readFileSync(join(__dirname, '..', '.yarnrc.yml'), 'utf8');
+  assert.equal(problems(real), '');
+  for (const k of yaml
+    .parseDocument(real)
+    .contents.items.map((p) => p.key.value))
+    assert.ok(check.RC_ALLOWED_KEYS.has(k), k);
+  assert.equal(problems(''), '');
+  assert.match(
+    problems('__proto__:\n  plugins: [./evil.cjs]\n'),
+    /"__proto__" is not on the allowlist[\s\S]*"__proto__" is refused at any depth/,
+  );
+  assert.match(
+    problems('# yarn lockfile v1\nplugins:\n  - ./evil.cjs\n'),
+    /legacy "# yarn lockfile v1" header/,
+  );
+  assert.match(
+    problems(
+      '# a comment\r\n#   Yarn  Lockfile  V1\r\nnodeLinker: node-modules\r\n',
+    ),
+    /legacy/,
+  );
+  assert.match(
+    problems('nodeLinker: node-modules\nfoo: 1\n'),
+    /"foo" is not on the allowlist/,
+  );
+  assert.match(
+    problems('<<: {plugins: [x]}\n'),
+    /"<<" is not on the allowlist/,
+  );
+  assert.match(problems('"plugins": []\n'), /has a plugins key/);
+  assert.match(
+    problems('nodeLinker: a\nnodeLinker: b\n'),
     /cannot be read as YAML/,
   );
+  assert.match(
+    problems('networkSettings:\n  "*":\n    constructor: 1\n'),
+    /"constructor" is refused at any depth/,
+  );
+  assert.match(
+    problems('networkSettings:\n  "*":\n    prototype: 1\n'),
+    /"prototype" is refused at any depth/,
+  );
+  assert.match(problems('- a\n- b\n'), /top level must be a mapping/);
+  assert.match(problems('? [a, b]\n: 1\n'), /not a plain name/);
+});
+
+test('rc allowlist (end to end): the __proto__ impostor, the legacy header and an unknown key each exit 1 before auditing', async (t) => {
+  for (const [rc, re] of [
+    [
+      '__proto__:\n  plugins:\n    - path: .yarn/plugins/npm-cli.cjs\n',
+      /"__proto__" is refused at any depth/,
+    ],
+    [
+      '# yarn lockfile v1\nplugins:\n  - path .yarn/plugins/npm-cli.cjs\n',
+      /legacy "# yarn lockfile v1" header/,
+    ],
+    [
+      'nodeLinker: node-modules\nunknownSetting: true\n',
+      /"unknownSetting" is not on the allowlist/,
+    ],
+  ]) {
+    const r = seed(t, registerDoc(prEntry()));
+    r.write('.yarnrc.yml', rc);
+    let audited = false;
+    const yarn = (args) => {
+      if (args[1] === 'audit') audited = true;
+      return fakeYarn()(args);
+    };
+    const { code, out } = await run([], r, { env: {}, yarn });
+    assert.equal(code, 1, rc);
+    assert.match(out, re, rc);
+    assert.equal(audited, false, rc);
+  }
 });
 
 test('plugin sources: the repository itself passes (its .yarnrc.yml has no plugins key, no .yarn/plugins/)', (t) => {

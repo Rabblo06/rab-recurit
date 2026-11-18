@@ -49,9 +49,11 @@
  * and no YARN_NPM_AUDIT_* or YARN_NPM_REGISTRY_SERVER variable is set (an audit pointed at a server that reports
  * nothing would pass). The connection is pinned too: httpsProxy, httpProxy and httpsCaFilePath unset, enableStrictSsl
  * true, networkSettings empty, no YARN_HTTPS_PROXY, YARN_HTTP_PROXY, NODE_EXTRA_CA_CERTS, NODE_OPTIONS, SSL_CERT_FILE,
- * SSL_CERT_DIR or NODE_TLS_REJECT_UNAUTHORIZED=0, and no yarn plugin: no `plugins` key in any .yarnrc.yml yarn reads
- * (project folder, ancestors, home), no YARN_RC_FILENAME, and `.yarn/plugins/` absent or empty (yarn's runtime list
- * marks `builtin` by name, so it is only a supplementary check). `caFilePath` is not a yarn 4 setting: yarn itself
+ * SSL_CERT_DIR or NODE_TLS_REJECT_UNAUTHORIZED=0, and no yarn plugin: every .yarnrc.yml yarn reads (project folder,
+ * ancestors, home) may only have allowlisted top-level keys (RC_ALLOWED_KEYS; `plugins` and unknown keys fail), no
+ * `__proto__` / `constructor` / `prototype` at any depth and no legacy "# yarn lockfile v1" header; no
+ * YARN_RC_FILENAME; `.yarn/plugins/` absent or empty (yarn's runtime list marks `builtin` by name, so it is only a
+ * supplementary check). `caFilePath` is not a yarn 4 setting: yarn itself
  * refuses to run when it is set, which fails these checks. Any argument other than --base <ref> / --fail-on-expiring
  * exits 1. `--fail-on-expiring` (the weekly run) also fails when an entry has 7 days or fewer left.
  * Fails closed: yarn that cannot be spawned, is killed by a signal or exits outside {0, 1} for the audit; an audit
@@ -879,15 +881,98 @@ function yarnrcCandidates(root, home) {
 }
 
 /**
- * Where yarn plugins come from (re-review of #238): yarn marks a plugin `builtin` by its declared name, so the runtime
- * list cannot tell a plugin named "@yarnpkg/plugin-npm-cli" from the real one. Instead: no `plugins` key in any
- * .yarnrc.yml yarn reads (the project folder, every ancestor, the home folder), no YARN_RC_FILENAME (another rc name),
- * and `.yarn/plugins/` absent or empty. `parseYaml` defaults to the repository's `yaml` (fail closed without it).
+ * Top-level keys a .yarnrc.yml may have (fail closed, final check of #238): the keys this repository uses today plus
+ * the ones the audit-config checks read (their VALUES are checked there). Anything else fails, `plugins` included, so
+ * a parser trick cannot smuggle in a setting this file does not know about.
+ */
+const RC_ALLOWED_KEYS = new Set([
+  // used by the repository's .yarnrc.yml today
+  'enableConstraintsChecks',
+  'enableHardenedMode',
+  'enableInlineHunks',
+  'nodeLinker',
+  'yarnPath',
+  'networkConcurrency',
+  'httpRetry',
+  // read and value-checked by auditConfigProblems
+  'npmAuditIgnoreAdvisories',
+  'npmAuditExcludePackages',
+  'npmAuditRegistry',
+  'npmRegistryServer',
+  'httpsProxy',
+  'httpProxy',
+  'httpsCaFilePath',
+  'enableStrictSsl',
+  'networkSettings',
+]);
+/** Keys refused at ANY depth: yarn's js-yaml turns `__proto__:` into a prototype assignment (a hidden `plugins`). */
+const RC_FORBIDDEN_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
+/** yarn parses a file with this header with its legacy (yarn v1 lockfile) parser, not js-yaml. */
+const LEGACY_RC_HEADER = /^(#.*\r?\n)*?#\s+yarn\s+lockfile\s+v1\r?\n/i;
+
+/**
+ * Problems with one .yarnrc.yml, read as a YAML DOCUMENT (keys as written, never through a JS object, so `__proto__`,
+ * merge keys and duplicates cannot hide anything): the legacy header, a parse error or warning (duplicate keys
+ * included), a top level that is not a mapping, a top-level key not in RC_ALLOWED_KEYS, a non-scalar key, and
+ * `__proto__` / `constructor` / `prototype` at any depth.
+ */
+function rcFileProblems(file, text, yaml) {
+  if (LEGACY_RC_HEADER.test(text))
+    return [
+      `${file} starts with the legacy "# yarn lockfile v1" header: yarn would read it with another parser; refused`,
+    ];
+  let doc;
+  try {
+    doc = yaml.parseDocument(text);
+  } catch (e) {
+    return [`${file}: cannot be read as YAML (${e.message})`];
+  }
+  const issues = [...(doc.errors || []), ...(doc.warnings || [])];
+  if (issues.length)
+    return [`${file}: cannot be read as YAML (${issues[0].message})`];
+  const top = doc.contents;
+  if (top === null || top === undefined) return [];
+  if (!yaml.isMap(top))
+    return [`${file}: the top level must be a mapping of settings`];
+  const problems = [];
+  const keyName = (pair) =>
+    yaml.isScalar(pair.key) ? String(pair.key.value) : null;
+  for (const pair of top.items) {
+    const k = keyName(pair);
+    if (k === null)
+      problems.push(`${file}: a top-level key that is not a plain name`);
+    else if (k === 'plugins')
+      problems.push(
+        `${file} has a plugins key: no yarn plugin may load during the audit (a plugin runs inside yarn and can change what it asks or reports, whatever name it declares)`,
+      );
+    else if (!RC_ALLOWED_KEYS.has(k))
+      problems.push(
+        `${file}: top-level key ${JSON.stringify(k)} is not on the allowlist (tools/check-npm-audit.cjs RC_ALLOWED_KEYS); an unknown setting could change what the audit asks or reports`,
+      );
+  }
+  yaml.visit(doc, {
+    Pair(_, pair) {
+      const k = keyName(pair);
+      if (k !== null && RC_FORBIDDEN_KEYS.has(k))
+        problems.push(
+          `${file}: key ${JSON.stringify(k)} is refused at any depth`,
+        );
+    },
+  });
+  return problems;
+}
+
+/**
+ * Where yarn plugins and settings come from (re-review and final check of #238): yarn marks a plugin `builtin` by its
+ * declared name, so the runtime list cannot tell a plugin named "@yarnpkg/plugin-npm-cli" from the real one. Instead,
+ * every .yarnrc.yml yarn reads (the project folder, every ancestor, the home folder) must pass rcFileProblems (key
+ * allowlist, no `plugins`, no `__proto__`, no legacy header), YARN_RC_FILENAME must be unset, and `.yarn/plugins/` must
+ * be absent or empty. `loadYaml` defaults to requiring the repository's `yaml`; without it the check fails closed.
  */
 function pluginSourceProblems(
   root,
   env,
-  { home = os.homedir(), parseYaml } = {},
+  { home = os.homedir(), loadYaml = () => require('yaml') } = {},
 ) {
   const problems = [];
   for (const k of Object.keys(env)) {
@@ -896,35 +981,18 @@ function pluginSourceProblems(
         `environment variable ${k} is set: yarn would read another rc file than .yarnrc.yml`,
       );
   }
-  let parse = parseYaml;
-  if (!parse) {
-    try {
-      parse = require('yaml').parse;
-    } catch (e) {
-      problems.push(
-        `cannot load the yaml parser to read .yarnrc.yml (${e.message}): run after yarn install`,
-      );
-    }
+  let yaml = null;
+  try {
+    yaml = loadYaml();
+  } catch (e) {
+    problems.push(
+      `cannot load the yaml parser to read .yarnrc.yml (${e.message}): run after yarn install`,
+    );
   }
-  if (parse) {
+  if (yaml) {
     for (const file of yarnrcCandidates(root, home)) {
       if (!existsSync(file)) continue;
-      let doc;
-      try {
-        doc = parse(readFileSync(file, 'utf8'));
-      } catch (e) {
-        problems.push(`${file}: cannot be read as YAML (${e.message})`);
-        continue;
-      }
-      if (
-        doc &&
-        typeof doc === 'object' &&
-        Object.prototype.hasOwnProperty.call(doc, 'plugins')
-      ) {
-        problems.push(
-          `${file} has a plugins key: no yarn plugin may load during the audit (a plugin runs inside yarn and can change what it asks or reports, whatever name it declares)`,
-        );
-      }
+      problems.push(...rcFileProblems(file, readFileSync(file, 'utf8'), yaml));
     }
   }
   const pluginDir = join(root, '.yarn', 'plugins');
@@ -1236,6 +1304,8 @@ module.exports = {
   spawnFailure,
   auditConfigProblems,
   yarnrcCandidates,
+  rcFileProblems,
+  RC_ALLOWED_KEYS,
   pluginSourceProblems,
   main,
   MAX_DAYS,

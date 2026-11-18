@@ -9493,7 +9493,19 @@ Reversal:   Upgrade / `resolutions` override (documented in "//resolutions") as 
     yarn while the runtime list looked identical to a clean run (reproduced locally with yarn 4.13). The control now
     checks where plugins come from: no `plugins` key (even `[]`) in any `.yarnrc.yml` yarn reads (the project folder,
     every ancestor folder, the home folder), no `YARN_RC_FILENAME`, and `.yarn/plugins/` absent or empty; the runtime
-    list stays as a supplementary check only. `caFilePath` is not a yarn 4 setting: yarn
+    list stays as a supplementary check only. **Key allowlist (final check at 6d5365da, Low):** a `plugins` key
+    hidden under `__proto__:` (yarn's js-yaml makes it a prototype assignment, so yarn loads the plugin, while a
+    JS-object view of the file shows no `plugins` key), or the same under the legacy `# yarn lockfile v1` header (yarn
+    then uses its v1 parser), still loaded a plugin. Instead of chasing parser tricks the rc check is now fail-closed:
+    each `.yarnrc.yml` is read as a YAML DOCUMENT (keys as written, never through a JS object); its top-level keys must
+    all be in `RC_ALLOWED_KEYS` (the seven the repository uses today: `enableConstraintsChecks`, `enableHardenedMode`,
+    `enableInlineHunks`, `nodeLinker`, `yarnPath`, `networkConcurrency`, `httpRetry`, plus the nine whose values the
+    audit-config checks verify); `plugins`, `<<` merge keys and any other key fail; `__proto__`, `constructor` and
+    `prototype` fail at any depth; a non-mapping top level, a non-scalar key, a duplicate key or any YAML error or
+    warning fails; a file starting with the legacy header (`/^(#.*\r?\n)*?#\s+yarn\s+lockfile\s+v1\r?\n/i`) fails;
+    without the `yaml` library the check reports a problem. Adding a setting to `.yarnrc.yml` now needs the allowlist
+    extended in the tool (a CHANGED TOGETHER path when it comes with a register entry, a review item otherwise). The
+    repository's real `.yarnrc.yml` passes. `caFilePath` is not a yarn 4 setting: yarn
     refuses to start ("Unrecognized or legacy configuration settings") when it is in .yarnrc.yml or the environment,
     which already fails the check, so it is not queried. The repository's real effective config passes every check.
     Not covered: generic `HTTP(S)_PROXY` variables (yarn 4 does not read them). (3) Any argument other than
@@ -9514,7 +9526,7 @@ Reversal:   Upgrade / `resolutions` override (documented in "//resolutions") as 
   them, and CHANGED TOGETHER catches a `.yarnrc.yml` / `.yarn/**` change only when the same PR also adds or changes a
   register entry; otherwise it is a review control. Generic `HTTP(S)_PROXY` variables are not checked (yarn 4 does
   not read them).
-- **Tests:** `tools/check-npm-audit.test.cjs` (41). End to end in throwaway git repositories (`main(argv, deps)`): a
+- **Tests:** `tools/check-npm-audit.test.cjs` (43). End to end in throwaway git repositories (`main(argv, deps)`): a
   head-only entry does not cover the finding on a non-decision PR, the same entry on the base does; a decision-only PR
   passes, one citing another PR fails, a renewal keeping the old reference fails, a missing event payload fails, a
   removal needs no reference; register + yarn.lock / package.json / the tool / ci-security.yaml fail CHANGED TOGETHER
@@ -9532,5 +9544,10 @@ Reversal:   Upgrade / `resolutions` override (documented in "//resolutions") as 
   `plugins` key in the project, an ancestor or the home `.yarnrc.yml` (also `plugins: []`), a file in `.yarn/plugins/`,
   `YARN_RC_FILENAME` and an unparseable `.yarnrc.yml` are refused; the repository itself passes; end to end, an
   impostor plugin named `@yarnpkg/plugin-npm-cli` listed in `.yarnrc.yml` exits 1 before auditing even though the
-  runtime list looks clean. `NODE_OPTIONS`, `SSL_CERT_FILE`, `SSL_CERT_DIR` refused. Mutation check: 41 hand-made
-  mutants of the tool (one per control), each killed by at least one test.
+  runtime list looks clean. `NODE_OPTIONS`, `SSL_CERT_FILE`, `SSL_CERT_DIR` refused. Allowlist: the real
+  `.yarnrc.yml` passes and each of its keys is allowlisted; `__proto__` hiding `plugins`, the legacy header (also with
+  CRLF and a leading comment), an unknown key, a `<<` merge key, a quoted `"plugins"`, a duplicate key, `constructor` /
+  `prototype` nested under `networkSettings`, a list top level and a non-scalar key are refused; end to end, the
+  `__proto__` impostor, the legacy-header file and an unknown key each exit 1 before auditing; without the `yaml`
+  library a problem is reported. Mutation check: 48 hand-made mutants of the tool (one per control), each killed by at
+  least one test.
