@@ -110,7 +110,7 @@ test('a release that already exists (published by a person, or a draft) is left 
     const r = run({ ...ENV, FAKE_VIEW: state, GITHUB_STEP_SUMMARY: summary }, gh.dir);
     assert.equal(r.status, 0, r.stderr);
     assert.deepEqual(gh.calls(), [VIEW], state);
-    assert.match(r.stdout, new RegExp(`a ${word} release for rab/v1\\.2\\.3 already exists \\(${URL.replace(/[./]/g, '\\$&')}\\)`));
+    assert.ok(r.stdout.includes(`a ${word} release for rab/v1.2.3 already exists (${URL}); nothing to do`), r.stdout);
     assert.match(fs.readFileSync(summary, 'utf8'), new RegExp(`a ${word} release already exists`));
   }
 });
