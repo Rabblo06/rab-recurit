@@ -43,6 +43,7 @@
  * MIGRATION_SECURITY_KEEP_DATABASES=true keeps the databases (marked disposable) so the integration suites can run on them;
  * their names are written to MIGRATION_SECURITY_DB_FILE when that is set.
  */
+import { CORE_SHIFT_TEAM_REVIEWED_DRIFT } from '../workspace-schema/structure-level-24';
 import { spawnSync } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import { readdirSync, writeFileSync } from 'node:fs';
@@ -239,11 +240,9 @@ export const REVIEWED_MIGRATION_DRIFT: Readonly<Record<string, readonly string[]
   // team read policy changes ONLY its role test, from equality on the comma-joined rab.role to membership ('staff' = ANY
   // (string_to_array(rab.role, ','))). Same table, name, command (SELECT), PERMISSIVE, TO PUBLIC, no WITH CHECK; no grant, no
   // new policy. The migration's own check replaces only a known USING expression. Lines as measured by this harness on
-  // PostgreSQL 16 (fresh as the restricted migrator and upgrade as the bootstrap superuser: identical).
-  '1786721590000-StaffShiftTeamMultiRole': [
-    "- policy|staff_profile|staff_profile_shift_team_select|r|permissive=true|roles=public|using=((organisation_id = core.current_org()) AND (workspace_id = core.current_workspace()) AND (current_setting('rab.role'::text, true) = 'staff'::text) AND (EXISTS ( SELECT 1 FROM ((core.shift_assignment peer JOIN core.shift_assignment own ON (((own.shift_id = peer.shift_id) AND (own.organisation_id = peer.organisation_id) AND (own.workspace_id = peer.workspace_id)))) JOIN core.shift s ON (((s.id = peer.shift_id) AND (s.organisation_id = peer.organisation_id) AND (s.workspace_id = peer.workspace_id)))) WHERE ((peer.staff_profile_id = staff_profile.id) AND (peer.organisation_id = core.current_org()) AND (peer.workspace_id = core.current_workspace()) AND (peer.shift_id = (NULLIF(current_setting('rab.team_shift_id'::text, true), ''::text))::uuid) AND (own.staff_profile_id = (NULLIF(current_setting('rab.team_staff_id'::text, true), ''::text))::uuid) AND (own.status = 'confirmed'::text) AND (peer.status = 'confirmed'::text) AND (s.status <> ALL (ARRAY['cancelled'::text, 'completed'::text]))))))|check=",
-    "+ policy|staff_profile|staff_profile_shift_team_select|r|permissive=true|roles=public|using=((organisation_id = core.current_org()) AND (workspace_id = core.current_workspace()) AND ('staff'::text = ANY (string_to_array(current_setting('rab.role'::text, true), ','::text))) AND (EXISTS ( SELECT 1 FROM ((core.shift_assignment peer JOIN core.shift_assignment own ON (((own.shift_id = peer.shift_id) AND (own.organisation_id = peer.organisation_id) AND (own.workspace_id = peer.workspace_id)))) JOIN core.shift s ON (((s.id = peer.shift_id) AND (s.organisation_id = peer.organisation_id) AND (s.workspace_id = peer.workspace_id)))) WHERE ((peer.staff_profile_id = staff_profile.id) AND (peer.organisation_id = core.current_org()) AND (peer.workspace_id = core.current_workspace()) AND (peer.shift_id = (NULLIF(current_setting('rab.team_shift_id'::text, true), ''::text))::uuid) AND (own.staff_profile_id = (NULLIF(current_setting('rab.team_staff_id'::text, true), ''::text))::uuid) AND (own.status = 'confirmed'::text) AND (peer.status = 'confirmed'::text) AND (s.status <> ALL (ARRAY['cancelled'::text, 'completed'::text]))))))|check=",
-  ],
+  // PostgreSQL 16 (fresh as the restricted migrator and upgrade as the bootstrap superuser: identical). The lines live in
+  // structure-level-24.ts: they quote the deparsed policy, which names core.shift / core.shift_assignment.
+  '1786721590000-StaffShiftTeamMultiRole': CORE_SHIFT_TEAM_REVIEWED_DRIFT,
 };
 
 type Identity = 'phaseA' | 'bootstrap' | 'restricted' | 'crewflow' | 'crewflow_app' | 'crewflow_worker';

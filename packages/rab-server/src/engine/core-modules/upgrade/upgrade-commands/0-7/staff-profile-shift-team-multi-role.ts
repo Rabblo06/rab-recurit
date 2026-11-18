@@ -43,8 +43,8 @@ function checkedSchema(schema: string): string {
 
 /** ALTER POLICY with the given role test; every other line is the frozen v1/shift-team-policy.ts predicate. */
 function shiftTeamSelectAlterSql(schema: string, roleTest: string): string {
-  // sql-injection-reviewed: schema is 'core' or a regex-validated `workspace_<32 hex>` name; roleTest is one of the two constants above.
   const s = checkedSchema(schema);
+  // sql-injection-reviewed: s is 'core' or a regex-validated `workspace_<32 hex>` name; roleTest is one of the two constants above; the policy name is a constant.
   return `ALTER POLICY ${SHIFT_TEAM_SELECT_POLICY} ON "${s}".staff_profile USING (
     organisation_id = core.current_org() AND workspace_id = core.current_workspace()
     AND ${roleTest}
