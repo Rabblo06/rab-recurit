@@ -22,7 +22,7 @@ const ALLOWED_RUNTIME_REEXPORTS: Record<string, { reexports: string[]; why: stri
     reexports: ['bindMaintenanceSessionGucs from ../core-modules/tenant/tenant-context.service'],
     why:
       "the account-invite cleanup's level-22 pass binds the worker marker through the one binding statement; the callers of " +
-      'the function are pinned in maintenance-session-binder-callers.spec.ts',
+      'the function are pinned in tenant-binder-callers.spec.ts',
   },
 };
 

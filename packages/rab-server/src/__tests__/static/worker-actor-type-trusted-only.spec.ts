@@ -50,14 +50,15 @@ const ACTOR_TYPE_ASSIGNMENT = /['"]?\bactorType['"]?\s*\]?\s*(?:\??\s*:|=(?!=)|\
 const ACTOR_TYPE_WORKER = /['"]?\bactorType['"]?\s*\]?\s*(?:\??\s*:|=(?!=)|\?\?=|\|\|=|&&=)\s*['"`]worker['"`]/g;
 /**
  * A write of the GUC, in any of these forms:
- *   - `set_config('rab.actor_type'` with any prefix (`pg_catalog.`), either quote, an escape-string `E'...'`, and the name
- *     wrapped in any number of parentheses (`set_config(('rab.actor_type'), ...)`);
+ *   - `set_config('rab.actor_type'` with any prefix (`pg_catalog.`), either quote, an escape-string `E'...'`, a dollar-quoted
+ *     string (`$$rab.actor_type$$`, `$tag$rab.actor_type$tag$`), and the name wrapped in any number of parentheses
+ *     (`set_config(('rab.actor_type'), ...)`);
  *   - `SET [LOCAL|SESSION] ["]rab.actor_type`;
  *   - `UPDATE [pg_catalog.]pg_settings ... rab.actor_type` within one statement (no `;` in between): the pg_settings view's
  *     UPDATE rule is a set_config call.
  */
 const RAW_ACTOR_TYPE_GUC =
-  /set_config\s*\(\s*(?:\(\s*)*E?['"]rab\.actor_type['"]|\bSET\s+(?:LOCAL\s+|SESSION\s+)?"?rab\.actor_type\b|\bUPDATE\s+(?:"?pg_catalog"?\.)?"?pg_settings"?(?![\w])[^;]{0,400}?rab\.actor_type/gi;
+  /set_config\s*\(\s*(?:\(\s*)*(?:E?['"]rab\.actor_type['"]|\$\w*\$rab\.actor_type\$\w*\$)|\bSET\s+(?:LOCAL\s+|SESSION\s+)?"?rab\.actor_type\b|\bUPDATE\s+(?:"?pg_catalog"?\.)?"?pg_settings"?(?![\w])[^;]{0,400}?rab\.actor_type/gi;
 
 type Allowlist = Record<string, { sites: number; why: string }>;
 
@@ -221,6 +222,10 @@ describe("rab.actor_type = 'worker' is set only from trusted code (static)", () 
       `SELECT pg_catalog.set_config( e'rab.actor_type', $1, true)`,
       `SELECT set_config(('rab.actor_type'), 'worker', true)`,
       `SELECT set_config( ( ( E'rab.actor_type' ) )::text, 'worker', true)`,
+      // Recheck follow-up: dollar quoting, plain and tagged.
+      'SELECT set_config($$rab.actor_type$$, $$worker$$, true)',
+      'SELECT pg_catalog.set_config( ($q$rab.actor_type$q$), $1, true)',
+      `UPDATE pg_settings SET setting = 'worker' WHERE name = $n$rab.actor_type$n$`,
       `UPDATE pg_settings SET setting = 'worker' WHERE name = 'rab.actor_type'`,
       `update pg_catalog.pg_settings set setting = $1 where name = 'rab.actor_type'`,
       `UPDATE "pg_catalog"."pg_settings"\n   SET setting = 'worker'\n WHERE name = E'rab.actor_type'`,
@@ -232,6 +237,7 @@ describe("rab.actor_type = 'worker' is set only from trusted code (static)", () 
       `current_setting('rab.actor_type'::text, true) = 'worker'::text`,
       `current_setting(E'rab.actor_type', true)`,
       `current_setting(('rab.actor_type'), true)`,
+      'current_setting($$rab.actor_type$$, true)',
       `SELECT setting FROM pg_settings WHERE name = 'rab.actor_type'`,
       // An UPDATE of pg_settings for another name, then a later statement that only reads the marker.
       `UPDATE pg_settings SET setting = 'x' WHERE name = 'rab.role'; SELECT current_setting('rab.actor_type', true)`,

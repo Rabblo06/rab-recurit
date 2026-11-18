@@ -9459,15 +9459,23 @@ Reversal:   Upgrade / `resolutions` override (documented in "//resolutions") as 
     `worker-actor-type-trusted-only.spec.ts`, which review sees.
   - *Skipping RESET ROLE* needs NO such literal: a request path could call it with an ordinary context and lose the pool
     safety layer of TenantContextService's binder (a session-level SET ROLE left on a pooled connection would survive).
-    `maintenance-session-binder-callers.spec.ts` pins its callers to exactly the orphan check, the account-invite cleanup
+    `tenant-binder-callers.spec.ts` pins its callers to exactly the orphan check, the account-invite cleanup
     and the Worker re-export; any other file that names the function fails CI.
   - The Worker reaches it through `engine/worker-shared/maintenance-session-binder.ts`, a runtime re-export the
     import-boundary checker cannot see through. `worker-shared-reexports.spec.ts` lists the runtime re-exports allowed in
     that folder (today only this one), so a new one fails CI and needs an explicit entry (owner asked to accept the pattern).
-  - Known blind spots, unchanged: a run-time GUC name, a bound-parameter name, computed keys or property access by a
-    computed name, non-`.ts` files. The raw-GUC pattern now also catches `E'rab.actor_type'`, a parenthesised
-    `('rab.actor_type')` and `UPDATE pg_settings … rab.actor_type`.
+  - *Running the binding statement by hand* (`manager.query(bindGucsSql(), [..., 'worker'])`) needs neither a raw
+    set_config nor an `actorType` literal. `tenant-binder-callers.spec.ts` pins `bindGucsSql` too, with an EMPTY external
+    allow-list: only tenant-context.service.ts may name it outside tests.
+  - The raw-GUC pattern also catches `E'rab.actor_type'`, dollar quoting (`$$rab.actor_type$$`, `$tag$…$tag$`), a
+    parenthesised `('rab.actor_type')` and `UPDATE pg_settings … rab.actor_type`.
+  - **Known limits of these static fences (covered by review, deliberately not detected):**
+    - a wrapper exported from an allow-listed file (`export const g = bindMaintenanceSessionGucs`, or an exported function
+      that calls it or `bindGucsSql`) and then called elsewhere under its own name;
+    - a re-export under another name beyond its first hop, outside `engine/worker-shared/`;
+    - a run-time GUC name or a GUC name passed as a bound parameter, computed keys, access by a computed property name;
+    - non-`.ts` files.
 - **Tests.** `worker-actor-type-trusted-only.spec.ts` (empty raw allowlists; a raw site appended to any Worker file fails
-  it; the extended forms each tested), `maintenance-session-binder-callers.spec.ts`, `worker-shared-reexports.spec.ts`; `hws-backfill.integration.spec.ts`, `ws-core-fk-removal` / `hws-c1-org-level-workspace-paths` (orphan check),
+  it; the extended forms each tested), `tenant-binder-callers.spec.ts`, `worker-shared-reexports.spec.ts`; `hws-backfill.integration.spec.ts`, `ws-core-fk-removal` / `hws-c1-org-level-workspace-paths` (orphan check),
   `account-invite-cleanup*.integration.spec.ts` and `phase-d-account-invite-cleanup-worker.integration.spec.ts` (level-22
   pass), `tenant-context.service.spec.ts` (binding statement text unchanged).
