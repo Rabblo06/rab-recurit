@@ -21,6 +21,14 @@
  * workspace without a logbook row is adopted (one is_initial row). A failed workspace step is reported like a failed command
  * (warn and serve, exit 70); the other workspaces are not affected. The previous-version check also needs every workspace to
  * have completed the previous version's last workspace command (Twenty run-instance-commands.command.ts:124-168).
+ *
+ * PATCH releases (owner decision 2026-11-18, Twenty upgrade-sequence-runner.service.ts:98-247 "Rerun the upgrade to resume
+ * from this step" + resumeWorkspaceCommandsFromCursors): a patch carries no command of its own, so afterApply first resumes
+ * its minor .0: every .0 instance step whose latest attempt is not completed runs again under the .0's own step name (the
+ * .0's migrations step is recorded completed: this start applied every migration of the code, the .0's included), recorded
+ * with executed_by_version = the patch, in sequence order; then the patch's own migrations step. The workspace pass walks
+ * each workspace's sequence from its cursor, so a failed .0 WORKSPACE step runs again the same way (that workspace stays
+ * blocked until it passes). Every command must be safe to run twice (upgrade-command.ts / workspace-upgrade-command.ts).
  */
 import type { LedgerAttribution } from '../../../database/typeorm/scripts/migrate/owner-login/release-floor';
 import { UpgradeCommand, UpgradeCommandHost } from './upgrade-commands/upgrade-command';
@@ -40,10 +48,26 @@ import {
   versionStartedUnforced,
   withUpgradeScope,
 } from './upgrade-migration.service';
-import { commandsForVersion, commandStepName, lastInstanceStepOfVersion, lastWorkspaceStepOfVersion, migrationsStepName, sequenceForVersions } from './upgrade-sequence';
+import {
+  commandsForVersion,
+  commandStepName,
+  instanceVersionsOfStart,
+  lastInstanceStepOfVersion,
+  lastWorkspaceStepOfVersion,
+  migrationsStepName,
+  sequenceForVersions,
+} from './upgrade-sequence';
 import { assertRegistryKeys } from './upgrade-registry-key';
 import { decideUpgradeStart, UpgradeStartDecision, versionsToCheck } from './upgrade-version-check';
-import { ADOPTION_RELEASE_VERSION, compareVersions, CREWFLOW_PREVIOUS_VERSIONS } from './upgrade-version';
+import {
+  ADOPTION_RELEASE_VERSION,
+  compareVersions,
+  CREWFLOW_PREVIOUS_VERSIONS,
+  CREWFLOW_UPGRADE_FROM_VERSIONS,
+  isPatchRelease,
+  minorReleaseOf,
+  UpgradeFromVersions,
+} from './upgrade-version';
 import { cursorHasCompleted, listReadyWorkspaces, WorkspaceCommandRunner, WorkspaceOutcome, WorkspaceRunOptions } from './workspace-command-runner';
 
 export interface RecordedStep {
@@ -86,6 +110,8 @@ export interface UpgradeRunOptions {
   workspaceRunner?: Pick<WorkspaceRunOptions, 'lockTimeoutMs' | 'workspaceIds' | 'expectedFingerprint'>;
   /** The published versions before this one (default CREWFLOW_PREVIOUS_VERSIONS). */
   previousVersions?: readonly string[];
+  /** The reviewed upgrade-from list per minor release (default CREWFLOW_UPGRADE_FROM_VERSIONS). */
+  upgradeFrom?: UpgradeFromVersions;
   /** Test seam (NODE_ENV=test + disposable database only; validated by the caller): this command name fails. */
   testFailCommand?: string | null;
   /** Part C3: the host facts lent to instance commands (default: the real process, upgrade-command-host.ts). */
@@ -115,6 +141,10 @@ export class UpgradeRun {
     return this.options.previousVersions ?? CREWFLOW_PREVIOUS_VERSIONS;
   }
 
+  private get upgradeFrom(): UpgradeFromVersions {
+    return this.options.upgradeFrom ?? CREWFLOW_UPGRADE_FROM_VERSIONS;
+  }
+
   private get versions(): string[] {
     return [...this.previousVersions, this.options.codeVersion];
   }
@@ -129,12 +159,18 @@ export class UpgradeRun {
       .map((v) => [v, lastWorkspaceStepOfVersion(v, this.workspaceRegistry)] as const)
       .filter((e): e is readonly [string, string] => e[1] !== null);
     if (!lastSteps.length) return {};
-    const workspaces = await listReadyWorkspaces(session.query, this.options.workspaceRunner?.workspaceIds);
-    const cursors = await withUpgradeScope(session, 'status', (q) => getWorkspaceCursors(q, workspaces.map((w) => w.workspaceId)));
+    const { workspaces, cursors } = await this.readyCursors(session);
     const sequence = sequenceForVersions(this.versions, this.registry, this.workspaceRegistry);
     const out: Record<string, boolean> = {};
     for (const [v, step] of lastSteps) out[v] = workspaces.every((w) => cursorHasCompleted(sequence, this.options.codeVersion, cursors.get(w.workspaceId), step));
     return out;
+  }
+
+  /** READY workspaces (the test filter applied) and their cursors (the newest logbook row of each), read in 'status' scope. */
+  private async readyCursors(session: UpgradeSession) {
+    const workspaces = await listReadyWorkspaces(session.query, this.options.workspaceRunner?.workspaceIds);
+    const cursors = await withUpgradeScope(session, 'status', (q) => getWorkspaceCursors(q, workspaces.map((w) => w.workspaceId)));
+    return { workspaces, cursors };
   }
 
   /** Twenty checks the PREVIOUS version's workspace segment only: the code version's own workspace steps are this run's job. */
@@ -152,22 +188,34 @@ export class UpgradeRun {
     // M-1: versionsToCheck also lists the minor release of an accepted previous patch; its workspace half is read below and
     // decideUpgradeStart folds it into the patch's entry (effectiveComplete).
     const ledgerExists = await upgradeLedgerExists(session.query);
+    const toCheck = versionsToCheck(codeVersion, this.previousVersions, this.upgradeFrom);
+    const minor = isPatchRelease(codeVersion) ? minorReleaseOf(codeVersion) : null;
     const facts = ledgerExists
       ? await withUpgradeScope(session, 'status', async (q) => {
           const instance = await hasInstanceRows(q);
           const complete: Record<string, boolean> = {};
-          for (const v of versionsToCheck(codeVersion, this.previousVersions)) complete[v] = await isLastAttemptCompleted(q, { name: lastInstanceStepOfVersion(v, this.registry), workspaceId: null });
+          for (const v of toCheck) complete[v] = await isLastAttemptCompleted(q, { name: lastInstanceStepOfVersion(v, this.registry), workspaceId: null });
           const newer = (await instanceVersions(q)).filter((v) => compareVersions(v, codeVersion) > 0);
           const started = await versionStartedUnforced(q, codeVersion);
-          return { instance, complete, newer, started };
+          const minorStarted = minor !== null && (await versionStartedUnforced(q, minor));
+          return { instance, complete, newer, started, minorStarted };
         })
-      : { instance: false, complete: {} as Record<string, boolean>, newer: [] as string[], started: false };
+      : { instance: false, complete: {} as Record<string, boolean>, newer: [] as string[], started: false, minorStarted: false };
+    let minorReleaseResumable = false;
     if (ledgerExists) {
-      const ws = await this.workspacesComplete(session, this.previousOnly(versionsToCheck(codeVersion, this.previousVersions)));
+      const ws = await this.workspacesComplete(session, this.previousOnly(toCheck));
       for (const [v, done] of Object.entries(ws)) facts.complete[v] = facts.complete[v] === true && done;
+      // (b) a patch resumes its .0 only when every READY workspace has a logbook row: a patch never adopts (only 0.6.0 does),
+      // so a workspace without one could not be resumed and would only be refused; the start is refused (65) instead.
+      if (facts.minorStarted) {
+        const { workspaces, cursors } = await this.readyCursors(session);
+        minorReleaseResumable = workspaces.every((w) => cursors.has(w.workspaceId));
+      }
     }
     const decision = decideUpgradeStart({
       previousVersions: this.previousVersions,
+      upgradeFrom: this.upgradeFrom,
+      minorReleaseResumable,
       codeVersion,
       fresh: input.fresh,
       force,
@@ -189,7 +237,7 @@ export class UpgradeRun {
 
   /** Step 3, after the migrations applied and the post-checks passed. Never throws for a failed COMMAND (reported instead). */
   async afterApply(session: UpgradeSession): Promise<void> {
-    const { codeVersion, force, log } = this.options;
+    const { codeVersion, log } = this.options;
     const decision = this.decision;
     if (!decision) throw new Error('upgrade run: afterApply before beforeApply');
     if (decision.kind === 'rollback') return;
@@ -199,10 +247,33 @@ export class UpgradeRun {
         log(`adopted: is_initial row ${decision.initialName}`);
       }
     });
-    const migrationsStep = migrationsStepName(codeVersion);
-    await this.recordIfIncomplete(session, migrationsStep, 'completed');
-    for (const command of commandsForVersion(codeVersion, this.registry)) {
-      const name = commandStepName(codeVersion, command);
+    // A minor release: its own instance steps. A PATCH release: first its minor .0's incomplete instance steps, under the .0's
+    // own names (owner decision 2026-11-18), then its own migrations step. A failed command stops the start (warn and serve).
+    for (const version of instanceVersionsOfStart(codeVersion)) {
+      if (!(await this.runInstanceSteps(session, version))) return;
+    }
+    await this.runWorkspacePass(session);
+    if (!this.report.commandFailure) log(`upgrade logbook: ${codeVersion} complete`);
+  }
+
+  /**
+   * The instance steps of `version` (the code version, or a patch's minor .0), each recorded under `version`'s own step name
+   * with executed_by_version = the CODE version: the migrations step completed (this start applied every migration of the
+   * code), then each command whose latest attempt is not completed: run it, record completed or failed. Returns false when a
+   * command failed (recorded and reported: warn and serve, exit 70; the next start retries it).
+   */
+  private async runInstanceSteps(session: UpgradeSession, version: string): Promise<boolean> {
+    const { codeVersion, force, log } = this.options;
+    if (version !== codeVersion) {
+      const pending = [];
+      for (const name of [migrationsStepName(version), ...commandsForVersion(version, this.registry).map((c) => commandStepName(version, c))]) {
+        if (!(await withUpgradeScope(session, 'upgrade', (q) => isLastAttemptCompleted(q, { name, workspaceId: null })))) pending.push(name);
+      }
+      if (pending.length) log(`upgrade ${codeVersion}: resuming ${version}: ${pending.length} incomplete instance step(s) re-run under their own names (${pending.join(', ')})`);
+    }
+    await this.recordIfIncomplete(session, migrationsStepName(version), 'completed');
+    for (const command of commandsForVersion(version, this.registry)) {
+      const name = commandStepName(version, command);
       const done = await withUpgradeScope(session, 'upgrade', (q) => isLastAttemptCompleted(q, { name, workspaceId: null }));
       if (done) continue;
       try {
@@ -222,13 +293,12 @@ export class UpgradeRun {
         this.report.recorded.push({ name, status: 'failed', attempt });
         this.report.commandFailure = { name, errorName: error instanceof Error ? error.name : 'Error' };
         log(`ERROR: upgrade command ${name} FAILED (attempt ${attempt}); the schema matches this code, so the API serves with upgradeFailed:true (exit 70). The next start retries it.`);
-        return;
+        return false;
       }
       const attempt = await withUpgradeScope(session, 'upgrade', (q) => recordUpgradeMigration(q, { name, status: 'completed', executedByVersion: codeVersion, forced: force }));
       this.report.recorded.push({ name, status: 'completed', attempt });
     }
-    await this.runWorkspacePass(session);
-    if (!this.report.commandFailure) log(`upgrade logbook: ${codeVersion} complete`);
+    return true;
   }
 
   /** Part D: adoption (adoption release) + the code version's workspace commands, per workspace. Never throws for one workspace. */

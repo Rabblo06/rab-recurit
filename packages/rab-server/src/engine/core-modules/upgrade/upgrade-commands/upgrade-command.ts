@@ -3,7 +3,12 @@
  * `upgrade-command-registry.service.ts:209-215` names it `<version>_<Class>_<timestamp>`). Re-implemented, not copied.
  *
  * Rules every command must follow (B3 / C2):
- *   - IDEMPOTENT: a crash leaves no logbook row, so the next start runs the command again (test: run it twice);
+ *   - IDEMPOTENT, and safe to run again after it FAILED part-way: a crash leaves no logbook row, so the next start runs the
+ *     command again; a failed attempt is retried by the next start of the same release AND by its patch releases, under this
+ *     release's step name (owner decision 2026-11-18, upgrade-runner.ts). It keeps its progress in the database and re-checks
+ *     it (test: run it twice, and once more after a failure). Audit 2026-11-18: 0.6.0 has no instance command; 0.7.0's
+ *     HwsCutover (not registered yet) is resumable by design (state table started → verified, ON CONFLICT DO NOTHING copies,
+ *     already-verified workspaces skipped, the activation sentinel inserted ON CONFLICT DO NOTHING; hws-c3-cutover spec);
  *   - tenant data only inside its tenant context (FORCE RLS stays on; the command binds the tenant itself);
  *   - it never touches core.upgrade_migration (the runner records the result).
  */

@@ -13,7 +13,7 @@ import type { UpgradeCommand } from './upgrade-commands/upgrade-command';
 import type { WorkspaceUpgradeCommand } from './upgrade-commands/workspace-upgrade-command';
 import { UPGRADE_COMMANDS, WORKSPACE_UPGRADE_COMMANDS } from './upgrade-commands/registry';
 import { assertRegistryKeys } from './upgrade-registry-key';
-import { compareVersions, isPatchRelease, majorMinorKey, parseVersion } from './upgrade-version';
+import { compareVersions, isPatchRelease, majorMinorKey, minorReleaseOf, parseVersion } from './upgrade-version';
 
 export const MIGRATIONS_STEP = 'TypeOrmMigrations';
 export const STEP_NAME_PATTERN = /^(0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})_[A-Za-z][A-Za-z0-9]{0,150}(_[0-9]{13})?$/;
@@ -58,6 +58,21 @@ export function workspaceCommandsForVersion(version: string, registry: Workspace
 /** The instance steps of a version (Part B): migrations, then the instance commands. */
 export function instanceStepsForVersion(version: string, registry: InstanceRegistry = UPGRADE_COMMANDS): string[] {
   return [migrationsStepName(version), ...commandsForVersion(version, registry).map((c) => commandStepName(version, c))];
+}
+
+/**
+ * The versions whose INSTANCE steps one start of `version` runs, in sequence order: a minor release only its own; a PATCH
+ * release first its minor `.0`'s (owner decision 2026-11-18: any `.0` instance step whose latest attempt is not completed is
+ * re-run under the `.0`'s own step name, recorded with executed_by_version = the patch; Twenty upgrade-sequence-runner
+ * .service.ts:98-247 resumes from the failed step), then its own migrations step. Pure.
+ */
+export function instanceVersionsOfStart(version: string): string[] {
+  return isPatchRelease(version) ? [minorReleaseOf(version), version] : [version];
+}
+
+/** Every instance step one start of `version` runs, in order (instanceVersionsOfStart): what /healthz reads for the app version. */
+export function instanceStepsOfStart(version: string, registry: InstanceRegistry = UPGRADE_COMMANDS): string[] {
+  return instanceVersionsOfStart(version).flatMap((v) => instanceStepsForVersion(v, registry));
 }
 
 /** Every step of a version: the instance steps, then the workspace commands (Part D). */

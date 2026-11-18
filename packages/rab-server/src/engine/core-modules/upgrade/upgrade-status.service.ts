@@ -23,7 +23,7 @@ import {
   UpgradeSession,
   withUpgradeScope,
 } from './upgrade-migration.service';
-import { instanceStepsForVersion, lastInstanceStepOfVersion } from './upgrade-sequence';
+import { instanceStepsOfStart, instanceVersionsOfStart, lastInstanceStepOfVersion } from './upgrade-sequence';
 import { compareVersions, readAppVersion } from './upgrade-version';
 import { listReadyWorkspaces } from './workspace-command-runner';
 import { parseUpgradeBlock } from './workspace-upgrade-block';
@@ -96,10 +96,15 @@ export async function readUpgradeStatus(session: UpgradeSession, appVersion: str
   return withUpgradeScope(session, 'status', async (q) => {
     const last = await getLastAttemptedInstanceStep(q);
     const versions = await instanceVersions(q);
-    const appComplete = await isLastAttemptCompleted(q, { name: lastInstanceStepOfVersion(appVersion), workspaceId: null });
+    // A patch release also resumes its minor .0's instance steps (upgrade-runner.ts): it is complete only when the .0's last
+    // instance step is completed too, and a failed .0 step (a cutover retried by the patch) reads as failed, not ok.
+    let appComplete = true;
+    for (const v of instanceVersionsOfStart(appVersion)) {
+      if (!(await isLastAttemptCompleted(q, { name: lastInstanceStepOfVersion(v), workspaceId: null }))) appComplete = false;
+    }
     const workspaceStepFailed = (await countFailedWorkspaceCursors(q)) > 0 || readyWithoutCursor > 0;
     let appStepFailed = false;
-    for (const name of instanceStepsForVersion(appVersion)) {
+    for (const name of instanceStepsOfStart(appVersion)) {
       const rows = (await q(`SELECT m.status FROM core.upgrade_migration m WHERE m.name = $1 AND m.workspace_id IS NULL ORDER BY m.attempt DESC LIMIT 1`, [name])) as Array<{ status: string }>;
       if (rows[0]?.status === 'failed') appStepFailed = true;
     }

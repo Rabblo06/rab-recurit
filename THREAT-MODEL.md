@@ -9425,3 +9425,56 @@ Reversal:   Upgrade / `resolutions` override (documented in "//resolutions") as 
   copy with a pause between the two statements): two commits ended at version 1; with the fix, 2. Semantic goldens
   (PG16/17/18): only the `metadata_version_bump()` body hash changes (5f6076df… → ccfd284e…); security-posture golden and
   the restricted-migrator drift review unchanged (a function body is not a privilege line).
+
+## Upgrade runner — reviewed upgrade-from lists, and a patch resumes its failed `.0` step (branch feat/runner-cross-upgrade, 2026-11-18; owner decisions 2026-11-18; no SQL)
+- **Threat:** (1) after #219, a minor release accepted only the LAST published version. Once 0.6.1 is published, a database
+  still at 0.6.0 is refused by 0.7.0 (65), so the operator's only way forward is an extra hop or `--force`, which skips the
+  previous-version check for everything. (2) A wider "accept anything older" rule would let a database two minors behind
+  skip the commands of the minor in between (0.5.0 → 0.7.0 would never run 0.6.0's workspace commands or the adoption).
+  (3) When a minor's instance command fails (the HWS switch-on: 0.7.0's cutover refuses without a verified backup), the
+  workspaces it blocked stay blocked (503) and a fixed patch (0.7.1) could not take over: it refused 65 because 0.7.0 was
+  not complete. The only way out was `--force`, and a forced patch skipped the `.0`'s instance commands, so the one-way
+  cutover sentinel and the copy never ran. (4) A retried step that is not idempotent could duplicate or corrupt data when
+  it runs a second time after a partial failure. (5) A patch that "resumes" a `.0` it cannot actually finish (a workspace
+  with no logbook row: only 0.6.0 adopts) would block that workspace forever instead of refusing the start.
+- **Control (a), Twenty's model (TWENTY_PREVIOUS_VERSIONS + TWENTY_CROSS_UPGRADE_SUPPORTED_VERSIONS @ eedb0a73,
+  re-implemented, not copied):** `CREWFLOW_UPGRADE_FROM_VERSIONS` (`upgrade-version.ts`) is an explicit list per MINOR release,
+  reviewed with that release. A minor release accepts exactly the versions on its list (0.7.0: every published 0.6.x it
+  lists); anything else is refused 65 with a message that names the list. Fail closed (`AppVersionError`, config 64, before
+  any outcome, fresh and rollback included): a missing or empty list, an unsorted or duplicate entry, an entry that is not
+  published (`CREWFLOW_PREVIOUS_VERSIONS`) or not older than the release, an inherited (prototype) key, and any entry that is
+  not on the PREVIOUS minor line (it would skip that line's commands, threat 2). The adoption release 0.6.0 must list exactly
+  0.4.0 and 0.5.0. Patches keep their own-line rule (no entry). The M-1 fold (a patch counts as complete only with its `.0`)
+  and the L-2 ascending check are unchanged. `crossUpgradeSupportedVersions` = list + code version, as Twenty.
+- **Control (b), Twenty's resume (upgrade-sequence-runner.service.ts:98-247 "Rerun the upgrade to resume from this step",
+  resumeWorkspaceCommandsFromCursors):** a patch start resumes its minor `.0`. `decideUpgradeStart` continues a patch when an
+  earlier UNFORCED start recorded an instance row of the `.0` (that start passed the previous-version check) AND every READY
+  workspace has a logbook row; otherwise it still refuses 65 (threat 5; forced rows never count). `afterApply` then runs,
+  in sequence order, every `.0` instance step whose latest attempt is not completed, under the `.0`'s own step name with
+  `executed_by_version` = the patch (the `.0`'s migrations step is recorded completed: the patch's start applied every
+  migration, the `.0`'s included), and only then the patch's own migrations step. A command that fails again is recorded
+  failed (attempt + 1) and stops the start (warn and serve, 70). Failed `.0` workspace steps are retried by the workspace pass
+  under their `.0` names (it walks each cursor's sequence). A blocked workspace stays blocked (503 "Workspace is being
+  upgraded.") until its step passes. `/healthz` reads the `.0`'s instance steps for a patch too, so a still-failed `.0` step
+  is not reported `ok`. The same resume also runs on a forced or fresh patch start (rows marked forced on a forced start):
+  a fresh 0.7.1 install now runs 0.7.0's instance commands, as a fresh 0.7.0 install does.
+- **Idempotency audit (threat 4):** 0.6.0 has no instance command. Its workspace commands re-run as no-ops:
+  StaffProfileMemberSelect (CREATE POLICY guarded by IF NOT EXISTS; ws-staff-member-select spec, crash after COMMIT),
+  DropWorkspaceCoreForeignKeys (DROP CONSTRAINT IF EXISTS; ws-core-fk-removal spec, second run up-to-date) and
+  SyncStandardObjects (plans nothing on a re-run; standard-objects-catalog spec). Every workspace step is one transaction,
+  rolled back whole on failure. 0.7.0 (not registered, #175 / #177): HwsCutover is resumable by design (it blocks first,
+  keeps per-workspace state started → verified, copies with ON CONFLICT DO NOTHING, skips verified workspaces, inserts the
+  activation sentinel ON CONFLICT DO NOTHING; hws-c3-cutover spec: kill and resume, second run copies nothing, failed then
+  completed through the logbook). #177's Q3 `VALIDATE CONSTRAINT` is a no-op on a validated constraint and the runner skips
+  the level bump at or past its level. The rule is written into `upgrade-command.ts` / `workspace-upgrade-command.ts`.
+- **Not changed:** no SQL, no migration, no grant. The shipped version stays 0.6.0; the shipped map holds only 0.6.0's
+  adoption entry. 0.7.0's release PR (#175) must add `CREWFLOW_UPGRADE_FROM_VERSIONS['0.7.0']` next to the version bump (a
+  release guard test refuses a minor code version without a valid entry).
+- **Tests:** `upgrade-cross-upgrade.spec.ts` (pure): the list rules and every fail-closed case (64), a refusal names the
+  list (65), M-1 and L-2 kept, the patch resume decision (resumable / not / forced / minor never resumes), the instance steps
+  of a start, a release guard on the shipped version. `cross-upgrade-resume.integration.spec.ts` (UpgradeRun on the locked
+  runtime login, a probe instance command shaped like the C3 cutover): 0.7.1 before 0.7.0 refuses 65; 0.7.0 from 0.6.0, the
+  cutover fails, workspace blocked (resolver 'upgrading'); a READY workspace with no logbook row stops the resume (65);
+  0.7.1 retries `0.7.0_ProbeHwsCutover` (attempt 2 by 0.7.1, still blocked, `/healthz` not ok); 0.7.1 again succeeds
+  (attempt 3), then 0.7.1_TypeOrmMigrations, unblocked, `/healthz` ok, a further start records nothing; a failed 0.7.0
+  workspace step is retried by 0.7.1 under its 0.7.0 name. Existing patch / ledger / C3 specs updated for the list.
