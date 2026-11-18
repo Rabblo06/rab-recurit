@@ -12,9 +12,12 @@
 //   2. .github/ci-images/<name>/image.yaml holds exactly one top-level `image: <repo>:<tag>@sha256:<64 hex>` (the tag is
 //      required there: Dependabot needs it to find the next digest of the same tag), read by .github/ci-images/ref.sh.
 //   3. Every `docker run|create|pull` (also `docker container run|create`, `docker image pull`) in a `run:` script names
-//      its image as either a pinned literal, a "$VAR" whose value is set in the same script from
+//      its image as either a pinned literal, a "$VAR" set exactly once in the same script, before the command, from
 //      `.github/ci-images/ref.sh <name>` (and <name> exists), or a "$VAR" from a workflow/job/step `env:` whose literal
-//      value is pinned. Anything this check cannot read (an unknown docker option, an expression) fails.
+//      value is pinned and which the script never redefines. `docker` is found wherever it is a command word: in $( ),
+//      backticks, a subshell, by path (/usr/bin/docker), quoted ("docker"), inside sh -c "..." / bash -c '...'. docker
+//      reached through a variable, an alias or `$(command -v docker)` is refused, as is anything else this check cannot
+//      place (an unknown docker option, a global option before the subcommand, unbalanced quotes, an expression).
 //   4. One tag, one digest: two different digests for the same `<repo>:<tag>` across .github/ fail (a partial update).
 //
 // `uses: docker://...` is tools/check-action-pins.cjs's job (#236). Dependencies: Node built-ins and the root devDependency
