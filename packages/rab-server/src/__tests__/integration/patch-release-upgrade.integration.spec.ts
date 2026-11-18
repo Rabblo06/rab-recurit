@@ -54,7 +54,13 @@ const PREV_061 = ['0.4.0', '0.5.0', '0.6.0'];
 const PREV_070 = [...PREV_061, '0.6.1'];
 /** This code's real 0.6.0 workspace steps (an adopted workspace runs them right after its is_initial row). */
 const REAL = (WORKSPACE_UPGRADE_COMMANDS['0-6'] ?? []).map((c) => `0.6.0_${c.name}_${c.timestamp}`);
-const LEVEL = codeWorkspaceStructureLevel();
+/**
+ * The 0.6 line's workspace registry: this code's registry without the 0.7 release's commands. A 0.6.x image never knows
+ * 0.7.0's structural workspace commands (level 23+), so the 0.6.0 / 0.6.1 runs, the "current template" workspace and LEVEL
+ * use this; the 0.7.0 cases pass their own registries.
+ */
+const W06: Record<string, readonly WorkspaceUpgradeCommand[]> = Object.fromEntries(Object.entries(WORKSPACE_UPGRADE_COMMANDS).filter(([key]) => key !== '0-7'));
+const LEVEL = codeWorkspaceStructureLevel(W06);
 
 describeIfDb('patch releases through the upgrade runner (integration)', () => {
   const { adminUrl, appUrl } = RUN ? integrationTestDatabase() : ({} as never);
@@ -73,7 +79,7 @@ describeIfDb('patch releases through the upgrade runner (integration)', () => {
     seq += 1;
     const ws = await seedWorkspace(admin, `pr-${n}-${SFX}-${String.fromCharCode(97 + seq)}`);
     created.push(ws);
-    expect(await provisionTypeScript(adminUrl, ws, provision === 'frozen' ? { workspaceRegistry: FROZEN_TEMPLATE_REGISTRY } : {})).toBe('READY');
+    expect(await provisionTypeScript(adminUrl, ws, provision === 'frozen' ? { workspaceRegistry: FROZEN_TEMPLATE_REGISTRY } : { workspaceRegistry: W06 })).toBe('READY');
     return ws;
   };
   const rows = async (ws: SeededWorkspace) =>
@@ -115,7 +121,7 @@ describeIfDb('patch releases through the upgrade runner (integration)', () => {
     return s;
   };
   const run061 = (ids: string[], over: Partial<ConstructorParameters<typeof UpgradeRun>[0]> = {}) =>
-    new UpgradeRun({ codeVersion: '0.6.1', previousVersions: PREV_061, force: false, log: (l) => lines.push(l), workspaceRunner: { workspaceIds: ids }, ...over });
+    new UpgradeRun({ codeVersion: '0.6.1', previousVersions: PREV_061, force: false, log: (l) => lines.push(l), workspaceRegistry: W06, workspaceRunner: { workspaceIds: ids }, ...over });
   const start = async (run: UpgradeRun, fresh = false) => {
     const decision = await run.beforeApply(session, { fresh, attribution: null, unrestrictedTarget: true });
     await run.afterApply(session);
@@ -123,7 +129,7 @@ describeIfDb('patch releases through the upgrade runner (integration)', () => {
   };
   /** Adoption on 0.6.0 + this code's real 0.6.0 workspace commands: the workspace has finished 0.6.0 (level LEVEL). */
   const finish060 = (ids: string[]) =>
-    new WorkspaceCommandRunner({ codeVersion: '0.6.0', versions: ['0.4.0', '0.5.0'], force: false, adopt: true, log: (l) => lines.push(l), workspaceIds: ids }).run(session);
+    new WorkspaceCommandRunner({ codeVersion: '0.6.0', versions: ['0.4.0', '0.5.0'], force: false, adopt: true, log: (l) => lines.push(l), workspaceRegistry: W06, workspaceIds: ids }).run(session);
 
   beforeAll(async () => {
     admin = new Client({ connectionString: adminUrl });
@@ -246,7 +252,7 @@ describeIfDb('patch releases through the upgrade runner (integration)', () => {
     const count = await allRowCount();
     for (const force of [false, true]) {
       // The 0.6.0 image as published: its own previous-versions list (CREWFLOW_PREVIOUS_VERSIONS gained 0.6.0 with 0.7.0).
-      const run = new UpgradeRun({ codeVersion: '0.6.0', previousVersions: ['0.4.0', '0.5.0'], force, log: (l) => lines.push(l), workspaceRunner: { workspaceIds: ids } });
+      const run = new UpgradeRun({ codeVersion: '0.6.0', previousVersions: ['0.4.0', '0.5.0'], force, log: (l) => lines.push(l), workspaceRegistry: W06, workspaceRunner: { workspaceIds: ids } });
       const decision = await start(run);
       expect(decision).toMatchObject({ kind: 'rollback' });
       expect((decision as { newer: string[] }).newer).toContain('0.6.1');
