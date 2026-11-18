@@ -5,7 +5,6 @@ import { join } from 'node:path';
 import { SEMANTIC_GOLDEN_PG16 } from '../../posture-drift/semantic-golden.pg16';
 import { SEMANTIC_GOLDEN_PG17 } from '../../posture-drift/semantic-golden.pg17';
 import { SEMANTIC_GOLDEN_PG18 } from '../../posture-drift/semantic-golden.pg18';
-import { SEMANTIC_OBJECT_SQL } from '../../posture-drift/semantic-posture';
 import {
   functionBodyOf,
   ORGANISATION_TIME_ZONE_DOWN_SQL,
@@ -86,8 +85,9 @@ describe('organisation time zone guard SQL (1786721610000)', () => {
     const fnLine =
       'function|organisation_timezone_guard()|owner=rab_secure_owner|definer=false|lang=plpgsql|vol=v|strict=false|leakproof=false|' +
       `config=search_path=pg_catalog, pg_temp|body=${bodyHash}`;
-    // DB review F5: the trigger line carries the hash of its definition (timing, events, UPDATE OF columns, WHEN, arguments).
-    const trgLine = /^trigger\|organisation\|organisation_timezone_guard\|enabled=O\|core\.organisation_timezone_guard\(\)\|def=[0-9a-f]{32}$/;
+    // The optional `|def=` suffix is the trigger definition hash of the separate posture PR (review F5, split out of this
+    // PR); the line matches in either format, so this test holds before and after that PR lands.
+    const trgLine = /^trigger\|organisation\|organisation_timezone_guard\|enabled=O\|core\.organisation_timezone_guard\(\)(\|def=[0-9a-f]{32})?$/;
     const trgLines = [SEMANTIC_GOLDEN_PG16, SEMANTIC_GOLDEN_PG17, SEMANTIC_GOLDEN_PG18].map((golden) => {
       expect(golden).toContain(fnLine);
       const lines = golden.filter((l) => trgLine.test(l));
@@ -95,13 +95,6 @@ describe('organisation time zone guard SQL (1786721610000)', () => {
       return lines[0];
     });
     expect(new Set(trgLines).size).toBe(1); // same definition on every major
-    // The hash covers the definition, never the table or schema name (workspace copies stay comparable).
-    for (const part of ['t.tgtype::text', 't.tgattr::pg_catalog.int2[]', 't.tgqual IS NULL', 'pg_catalog.pg_get_triggerdef(t.oid)', 't.tgdeferrable', 't.tginitdeferred', "pg_catalog.encode(t.tgargs, 'hex')", 't.tgoldtable', 't.tgnewtable']) {
-      expect(SEMANTIC_OBJECT_SQL).toContain(part);
-    }
-    // Only the WHEN text is cut out of pg_get_triggerdef (it carries the table name), and this schema's prefix is removed.
-    expect(SEMANTIC_OBJECT_SQL).toContain(`pg_catalog.pg_get_triggerdef(t.oid), ' WHEN \\((.*)\\) EXECUTE (FUNCTION|PROCEDURE) '`);
-    expect(SEMANTIC_OBJECT_SQL).toContain(`s.nspname::text || '.', ''`);
     expect(organisationTimeZoneExpectedState(bodyHash).function_state).toContain(`body=${bodyHash}`);
   });
 

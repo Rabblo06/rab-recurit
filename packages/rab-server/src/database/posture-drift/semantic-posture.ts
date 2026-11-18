@@ -14,12 +14,7 @@ import { createHash } from 'node:crypto';
  *             (whitespace-normalised pg_get_expr text) — ALTER POLICY … USING (true) changes the hash, FORCE does not hide it;
  *   function  every core function (extension members excluded): signature, owner, SECURITY DEFINER, language, volatility,
  *             strictness, leakproof, proconfig (search_path), md5 of the body — a trojaned definer changes the hash;
- *   trigger   every non-internal core trigger: table, name, enabled state (O/D/R/A), function — DISABLE TRIGGER shows —
- *             and `def=`, the md5 of its definition without the table or schema name (tgtype = BEFORE/AFTER/INSTEAD OF, ROW or
- *             STATEMENT, the events; the UPDATE OF column names; the whitespace-normalised WHEN expression; DEFERRABLE /
- *             INITIALLY DEFERRED; the arguments; transition-table names): a trigger re-created as AFTER, with another
- *             column list, a WHEN clause or other arguments keeps its name and function but changes this hash (DB review
- *             F5 on PR #251, 2026-11-18);
+ *   trigger   every non-internal core trigger: table, name, enabled state (O/D/R/A), function — DISABLE TRIGGER shows;
  *   rls       ENABLE / FORCE per core table;
  *   acl       the full raw ACL of every append-only core table in ACL_WATCHED_TABLES — core.audit_log and (OWNER-DB-ULTIMATE
  *             Part B, security review L6) core.upgrade_migration — table and columns, grantee:privilege:grantable: a
@@ -80,16 +75,6 @@ SELECT schema, line FROM (
    WHERE p.pronamespace = 'core'::regnamespace AND p.oid NOT IN (SELECT objid FROM ext)
   UNION ALL
   SELECT s.nspname, 'trigger|' || c.relname || '|' || t.tgname || '|enabled=' || t.tgenabled::text || '|' || t.tgfoid::regprocedure::text
-         || '|def=' || pg_catalog.md5(t.tgtype::text
-              || '|' || coalesce((SELECT pg_catalog.string_agg(a.attname::text, ',' ORDER BY a.attname::text) FROM pg_catalog.pg_attribute a
-                                   WHERE a.attrelid = t.tgrelid AND a.attnum = ANY (t.tgattr::pg_catalog.int2[])), '-')
-              -- WHEN: pg_get_expr cannot deparse it (OLD and NEW are two relations), so it is cut out of pg_get_triggerdef,
-              -- whitespace-normalised, with this schema's own prefix removed (workspace copies stay comparable).
-              || '|' || CASE WHEN t.tgqual IS NULL THEN '-' ELSE coalesce(pg_catalog.replace(pg_catalog.regexp_replace(
-                   pg_catalog.substring(pg_catalog.pg_get_triggerdef(t.oid), ' WHEN \\((.*)\\) EXECUTE (FUNCTION|PROCEDURE) '),
-                   '\\s+', ' ', 'g'), s.nspname::text || '.', ''), '?') END
-              || '|' || t.tgdeferrable::text || '|' || t.tginitdeferred::text || '|' || pg_catalog.encode(t.tgargs, 'hex')
-              || '|' || coalesce(t.tgoldtable::text, '-') || '|' || coalesce(t.tgnewtable::text, '-'))
     FROM pg_catalog.pg_trigger t JOIN pg_catalog.pg_class c ON c.oid = t.tgrelid JOIN sch s ON s.oid = c.relnamespace
    WHERE NOT t.tgisinternal
   UNION ALL
