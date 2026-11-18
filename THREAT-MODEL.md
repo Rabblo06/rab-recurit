@@ -9369,3 +9369,59 @@ Reversal:   Upgrade / `resolutions` override (documented in "//resolutions") as 
   written); M-1: a forced 0.6.1 over a workspace short of 0.6.0 → unforced 0.7.0 refuses 65 with nothing written, then a
   0.6.1 start catches the workspace up and 0.7.0 continues. The spec seeds the logbook state it needs (a completed 0.6.0
   instance row) and removes exactly what it seeded, so it does not depend on what an earlier spec file left in a shard.
+
+## Metadata version bump: lost step on concurrent first changes (branch fix/metadata-version-bump-own-xact, 2026-11-18; one SQL change, owner-approved 2026-11-18)
+- **Finding (security finding format, §5.8).** Severity: Medium, latent (no consumer in 0.6.0). Actor: any two
+  uncoordinated transactions that write metadata of the same workspace while its `core.workspace_metadata_state` row is
+  absent or being created (the E2 standard-object sync, the 0.6.0 SyncStandardObjects upgrade step, a future M2 custom-object
+  write that does not take `lockExpectedVersion`). Action: both commit. Consequence: one of them commits with NO version
+  step, so `metadata_version` says nothing changed although committed metadata did; once the E5 cache is wired into a
+  request path, an entry cached under that version stays current and serves stale metadata (which columns are money /
+  sensitive / read-only) until the next change. Found as a CI flake: the E5 test "six uncoordinated concurrent first
+  changes … version = 6" received 5 (5 times in a day on unrelated PRs, once on main, run 44208294567).
+- **Root cause.** `core.metadata_version_bump()` (MetadataVersionState1786721560000; `metadata-version-sql.ts:86-90`) is
+  VOLATILE plpgsql, so under READ COMMITTED each statement takes a fresh snapshot. Its "Already bumped by this
+  transaction?" check was a bare existence test (`PERFORM 1 … WHERE workspace_id = v_workspace AND organisation_id =
+  v_organisation`). When the step-1 UPDATE saw no committed row and a concurrent first change committed the row before the
+  PERFORM ran, the PERFORM saw THAT transaction's row, took it for this transaction's bump and returned. No advisory lock is
+  taken in the trigger (`LOCK_WORKSPACE_METADATA_SQL` is used only by `MetadataCacheService.lockExpectedVersion`, the M2
+  path, whose writers are serialised and safe), and the E5 contract is that plain writes are uncoordinated.
+- **Impact in release 0.6.0.** The trigger is live in 0.6.0 databases, but nothing reads `metadata_version`:
+  `MetadataCacheModule` / `MetadataCacheService` (engine/metadata/cache) is imported by no application module, only by its
+  integration spec. The writers in 0.6.0 are the new-workspace path (one transaction on a brand-new workspace: cannot race)
+  and the SyncStandardObjects upgrade command (CLI). So no lost step is observable today; it had to be fixed before the
+  cache is wired or custom objects are exposed (M2). Pre-0.6.0 workspaces have no version row (no back-fill), so their
+  first writes take exactly this path.
+- **Fix.** MetadataVersionBumpOwnTransaction1786721570000: `CREATE OR REPLACE FUNCTION core.metadata_version_bump()` with
+  one changed predicate, `PERFORM 1 FROM core.workspace_metadata_state s WHERE s.workspace_id = v_workspace AND
+  s.organisation_id = v_organisation AND s.last_bump_xact = v_xact;` (SQL in `metadata-version-bump-own-xact-sql.ts`). A
+  row another transaction created or bumped now falls through to the existing INSERT … ON CONFLICT DO NOTHING (conflict)
+  and the final UPDATE, which steps +1 on the newest row version (row lock and re-check); a row this transaction already
+  bumped still returns early, so "at most once per transaction and workspace" and "never backwards" are unchanged, and no
+  lock is added. Same OID (the five triggers stay attached), owner `crewflow`, SECURITY INVOKER, pinned search_path, no
+  EXECUTE for PUBLIC / crewflow_app; the migration re-checks the full METADATA_VERSION_EXPECTED_STATE, the exact body (body
+  hash) and the secure-owner invariants before commit, in both directions. Before the replace it accepts only a KNOWN
+  current body (review L-1; semantic-golden body hash): up() replaces the 1786721560000 body (5f6076df…) or re-installs
+  its own (ccfd284e…, idempotent re-run), down() replaces its own or re-installs the 1786721560000 one; any other body
+  (hand-altered, a later fix) is refused, never silently overwritten. down() restores the 1786721560000 body. The merged
+  migration and its constants are unchanged.
+- **Residual (review I-2; exists before this PR, unchanged by it).** A metadata DELETE never creates the version row (by
+  design: re-inserting it during a workspace-delete cascade would fail the foreign key). So while a workspace's row is
+  ABSENT, a DELETE does not step, and a concurrent first INSERT / UPDATE that creates the row can commit version 1 before
+  the DELETE commits; a cache fill between the two commits would hold the deleted row under version 1 until the next
+  change. Reachable only if the state row is removed out of band (an operator TRUNCATE, a restore without it, the guard
+  trigger disabled): every metadata write path in 0.6.0 is an INSERT that creates the row (new workspace, the 0.6.0
+  SyncStandardObjects step), so a workspace that has metadata has a row. Closing it fully would mean back-filling a
+  version row when a workspace is created (and for existing workspaces), so the row always exists and every DELETE
+  steps; that is an owner decision for M2 (the 1786721560000 design chose no back-fill: a missing row is read through
+  uncached).
+- **Tests.** `metadata-cache.integration.spec.ts`: "uncoordinated first changes never lose a step: 150 workspaces x 6
+  writers on two instances" (the old function lost a step in 11 of 150 workspaces on a throwaway database, so it fails in
+  practically every run; the existing six-writer test caught it about once in 60) and "a bump rolled back to a savepoint
+  does not suppress the next change of the same transaction" (review I-1; +1, for a workspace with no version row and for
+  one with a row). `metadata-version-bump-own-xact-sql.spec.ts`:
+  the short-circuit carries `last_bump_xact = v_xact`, the new SQL is the old one with exactly that change, down() restores
+  the old body, the semantic golden pins the new body hash, and only the two known bodies are replaceable. Evidence before the fix (throwaway database, instrumented
+  copy with a pause between the two statements): two commits ended at version 1; with the fix, 2. Semantic goldens
+  (PG16/17/18): only the `metadata_version_bump()` body hash changes (5f6076df… → ccfd284e…); security-posture golden and
+  the restricted-migrator drift review unchanged (a function body is not a privilege line).
