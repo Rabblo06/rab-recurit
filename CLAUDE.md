@@ -45,6 +45,24 @@ structural changes.
   keep is in the reviewed behaviour-change catalogue
   (`owner-login-behaviour-catalogue.ts`), with a severity and a reproducing
   test. A catalogue difference is never "fixed" by flipping a test to pass.
+- **Database versions, URLs and TLS** (#227, #228, #230).
+  - Supported PostgreSQL is **16–18**: one list, `SUPPORTED_POSTGRES_MAJORS`
+    (`database/postgres/supported-majors.ts`), read by db-setup, the migrate
+    child and boot gate 2. 15 cannot be added (the role model needs 16);
+    19+ only once its fingerprints and goldens exist and are reviewed.
+  - `PG_ADMIN_URL` is the database admin URL, and only the one-shot
+    `db-setup` reads it. `PG_DATABASE_URL` always means `crewflow_owner`;
+    any other login there is refused, never treated as an admin URL.
+  - rab-api and rab-worker receive no database URL at all. Compose pins
+    `PG_DATABASE_URL` and `PG_ADMIN_URL` to `""` on both, and both
+    entrypoints refuse (exit 64) a non-empty `PG_DATABASE_URL`, `PG_ADMIN_URL`
+    or its old names, and any variable whose value is a `postgres://` URL.
+    They build the `crewflow_owner` URL from db-setup's target and password
+    files (`api-prestart.sh`, `worker-start.sh`, `never-in-runtime-env.ts`).
+  - Production TLS is `sslmode=verify-full` only. A private CA is given as
+    PEM text in `PG_SSL_CA_CERT` or as a file in `PG_SSL_CA_CERT_PATH`, never
+    both. It is validated at boot (`validatePgCaPem`) and never logged; it
+    only picks the trusted root, and the chain and host-name checks stay on.
 - **Every tenant-scoped table gets `organisation_id` + an RLS policy
   (`ENABLE ROW LEVEL SECURITY` + `FORCE ROW LEVEL SECURITY` + `USING` +
   `WITH CHECK`) in the *same* migration that creates it.** No exceptions, no
@@ -155,10 +173,12 @@ structural changes.
   violations are `tools/import-boundaries.baseline.json`. It must match the
   tree exactly and may only shrink against the PR's base branch. A new
   violation means importing through the owning surface instead. Growth is
-  allowed only by an exact, owner-dated `APPROVED_GROWTH` entry
-  (rule, file, from, to) added in its own PR before the PR that uses it
-  (#213), and the entry is removed once it is used (#215). Never edit the
-  tool's logic to let a change through.
+  allowed only by an exact, owner-dated entry in
+  `tools/import-boundaries.approved.json` (rule, file, from, to, optional
+  target). CI reads that file **from the base branch (main)** (#225), so an
+  approval works only after it has merged in its own PR, and a diff that
+  changes it together with any `tools/*.baseline.json` fails. Remove the
+  entry once it is used. Never edit the tool's logic to let a change through.
 - **Money is always integer pence.** The database column is `bigint`; in code
   `Pence` is a JS `number` that must stay a safe integer (`assertSafePence`
   refuses anything else, and the server's `bigintAsNumber` column transformer
@@ -201,12 +221,16 @@ structural changes.
   the account doesn't exist.
 - **Migrations only.** `synchronize: false` always. Every schema change is a
   versioned TypeORM migration, never edited after merge.
-- **Release versions are major.minor only, for now.** The upgrade runner keys
-  its upgrade commands by major-minor (`upgrade-commands/registry.ts`). A
-  patch version (0.6.1) re-lists the minor's commands under new names and
-  every start refuses (exit 66). Until the runner supports patch releases,
-  ship fixes as a rebuild of the same version or as the next minor (the
-  owner chose "rebuilt 0.6.0" on 2026-11-17). Images are published only by
+- **Upgrade commands and structure levels belong to a minor release only**
+  (#219). The registries stay keyed by major-minor
+  (`upgrade-commands/registry.ts`). A patch release (0.6.1) carries no
+  upgrade command, workspace command or structure level: its only step is
+  its TypeORM migrations, and a patch-keyed registry entry is refused
+  (exit 64, `upgrade-registry-key.ts`). A patch upgrades only from earlier
+  published versions of its own minor line, whose `.0` must be in
+  `CREWFLOW_PREVIOUS_VERSIONS`; any other jump is refused (exit 65,
+  `upgrade-version.ts`). A fix that needs an upgrade command or a structure
+  change ships as the next minor. Images are published only by
   `publish-image.yaml` (mode=publish), after the owner approves the
   `release` environment, and are deployed by digest
   (`CREWFLOW_IMAGE_TAG=sha256:…`), never by tag.
@@ -352,3 +376,15 @@ and asserts zero rows back. Run as the owner login, this proves FORCE; run as
 a non-owner, it proves nothing.
 `THREAT-MODEL.md` gets a new entry, in the same PR, for any feature touching
 auth, money, or another person's data — not written after the fact.
+
+- **Spec files are type-checked** (#217). `rab-server:lint` and
+  `rab-worker:lint` also run `tsc --noEmit -p tsconfig.spec.json`, because
+  ts-jest with `isolatedModules` reports no type errors. Fix a spec type
+  error properly, never with `any` or `@ts-ignore`.
+- **The `rab.actor_type = 'worker'` marker opens the `*_worker_*` RLS
+  policies**, so only trusted server code may set it.
+  `__tests__/static/worker-actor-type-trusted-only.spec.ts` pins the exact
+  sites per file in rab-server and rab-worker (any `actorType` assignment,
+  any raw `set_config('rab.actor_type'` / `SET rab.actor_type` outside
+  `TenantContextService`). A new site needs review and a spec change in the
+  same PR; never set it from a JWT, request body, queue payload or Redis.
