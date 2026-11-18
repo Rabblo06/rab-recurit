@@ -9073,16 +9073,22 @@ Reversal:   Lower CLOCK_IN_CONFIRM_FLOOR_HOURS, or require a second approver (pa
   No dependent can drop it either: the current release of every one still requires picomatch (@nx/js and
   @nx/workspace 24.0.6 `^4.0.7`, vite 8.3.8 `^4.0.7`, jest-util / jest-haste-map / jest-message-util 30.5.1 `^4.0.3`,
   tinyglobby 0.2.17 `^4.0.4`, anymatch 3.1.3 `^2.0.4`, micromatch 4.0.8 `^2.3.1`; node-gyp 13.1.0 via tinyglobby).
-- **Paths (yarn.lock, 2.3.2 / 4.0.4 / 4.0.5):** PRODUCTION only through yarn's injected `node-gyp: latest`:
-  `@rab/server > argon2 > node-gyp@13.0.1 > tinyglobby > picomatch@4.0.5` and `@rab/worker > bullmq > msgpackr >
-  msgpackr-extract > node-gyp > tinyglobby > picomatch@4.0.5` (install-time native build tool, never imported at
-  runtime). Everything else is dev/build: root `@nx/jest`/`@nx/js` (4.0.4, 4.0.5), jest 29/30 via `@types/jest`,
+- **Paths (yarn.lock, 2.3.2 / 4.0.4 / 4.0.5):** PRODUCTION only through yarn's injected `node-gyp: latest`
+  (node-gyp@13.0.1, an install-time native build tool, never imported at runtime). node-gyp has THREE production
+  parents, each with an injected `node-gyp: npm:latest` edge: `argon2` directly (`@rab/server > argon2`),
+  `node-addon-api` (`@rab/server > argon2 > node-addon-api`) and `msgpackr-extract` (`@rab/worker > bullmq > msgpackr >
+  msgpackr-extract`). Below node-gyp there is exactly ONE picomatch chain: `node-gyp > tinyglobby > picomatch@4.0.5`.
+  (Corrected on branch fix/npm-audit-register-severity, 2026-11-18: the text above previously listed only the argon2
+  and msgpackr-extract parents.) Everything else is dev/build: root `@nx/jest`/`@nx/js` (4.0.4, 4.0.5), jest 29/30 via `@types/jest`,
   `jest-environment-jsdom`, `jest-haste-map > anymatch` (2.3.2, 4.0.5), rab-front `vite` (4.0.5), rab-server/worker
   `ts-node-dev > chokidar > anymatch/readdirp` (2.3.2). No first-party code imports a glob matcher; the rab-front
   production bundle contains no picomatch (built and grepped).
 - **Control (`tools/check-npm-audit.cjs` + `tools/npm-audit-decisions.json`, schema 2):** same
   `yarn npm audit --severity high --all --recursive`; a finding passes only with an entry that is
   - *scoped:* exactly one GHSA id + one package (`package`, a `packages` list is refused), `accepted-risk` only;
+    the entry also records the advisory `severity` it decided (`high` for this one, added on branch
+    fix/npm-audit-register-severity; the check binds it from the follow-up hardening PR on: a finding rated above
+    the recorded severity is not covered, so a re-scored advisory needs a new owner decision);
   - *owned and explained:* owner_decision_ref (issue/PR of this repo, no placeholder), decided_by, decided_on,
     `reason`, `drop_when`;
   - *time-boxed:* at most 30 days; expired / over-long / duplicate entries fail; no date override;
