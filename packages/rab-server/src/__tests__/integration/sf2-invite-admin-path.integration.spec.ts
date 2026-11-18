@@ -164,9 +164,10 @@ describeIfDb('SF-2 invite resend / cancel: route-flag re-check and the platform-
     );
     const [ceoUser] = (await admin.query(`SELECT id FROM core."user" WHERE organisation_id = $1 AND email = $2`, [orgT, ceoEmail])) as Array<{ id: string }>;
     pendingCeoT = { profileId: created.id, userId: ceoUser!.id };
-    pendingMgrT = await factory.createInternalManager(orgTRow, { label: 'sf2inv-t-pending', workspace: false });
-    await setInvited(pendingMgrT);
+    // Both share T's canonical `manager` role, so both carry its (here: full) permission set; the pending one's flags never matter.
     mgrAllT = await factory.createInternalManager(orgTRow, { permissions: 'all', label: 'sf2inv-t-all' });
+    pendingMgrT = await factory.createInternalManager(orgTRow, { permissions: 'all', label: 'sf2inv-t-pending', workspace: false });
+    await setInvited(pendingMgrT);
   });
 
   afterAll(async () => {
