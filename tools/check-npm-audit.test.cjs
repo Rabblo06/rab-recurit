@@ -673,6 +673,7 @@ async function run(argv, r, over = {}) {
   try {
     const code = await check.main(argv, {
       root: r.dir,
+      home: r.dir, // never the developer's real ~/.yarnrc.yml
       env: { GITHUB_EVENT_NAME: 'pull_request', GITHUB_EVENT_PATH: r.event },
       today: '2026-11-20',
       yarn: fakeYarn(),
@@ -1269,4 +1270,110 @@ test('G3: the weekly workflow runs with --fail-on-expiring', () => {
     weekly,
     /run: node tools\/check-npm-audit\.cjs --fail-on-expiring\n/,
   );
+});
+
+// ---- Re-review of #238 at 22487db0: plugins are checked where they come from, not by their declared name ----
+
+/** A plugin that DECLARES a built-in name: yarn's runtime list shows it as builtin, so only its source can catch it. */
+const IMPOSTOR_PLUGIN =
+  'module.exports = { name: "@yarnpkg/plugin-npm-cli", factory: () => ({ default: {} }) };\n';
+
+test('plugin sources: a plugins key in the project, an ancestor or the home .yarnrc.yml is refused, whatever its name', (t) => {
+  const tmp = fs.mkdtempSync(join(os.tmpdir(), 'npm-audit-plugins-'));
+  t.after(() => fs.rmSync(tmp, { recursive: true, force: true }));
+  const root = join(tmp, 'a', 'repo');
+  const home = join(tmp, 'home');
+  fs.mkdirSync(root, { recursive: true });
+  fs.mkdirSync(home, { recursive: true });
+  const problems = (env = {}) =>
+    check.pluginSourceProblems(root, env, { home }).join('\n');
+  assert.equal(problems(), '');
+  // The candidates are exactly yarn's: the folder, every ancestor, then home.
+  const c = check.yarnrcCandidates(root, home);
+  assert.equal(c[0], join(root, '.yarnrc.yml'));
+  assert.ok(c.includes(join(tmp, 'a', '.yarnrc.yml')));
+  assert.equal(c[c.length - 1], join(home, '.yarnrc.yml'));
+  const pluginsRc =
+    'nodeLinker: node-modules\nplugins:\n  - path: .yarn/plugins/npm-cli.cjs\n';
+  for (const where of [root, join(tmp, 'a'), home]) {
+    fs.writeFileSync(join(where, '.yarnrc.yml'), pluginsRc);
+    assert.match(problems(), /has a plugins key/, where);
+    fs.rmSync(join(where, '.yarnrc.yml'));
+  }
+  // An empty plugins list is still a plugins key (refused: nothing to gain from allowing it).
+  fs.writeFileSync(join(root, '.yarnrc.yml'), 'plugins: []\n');
+  assert.match(problems(), /has a plugins key/);
+  fs.writeFileSync(join(root, '.yarnrc.yml'), 'nodeLinker: node-modules\n');
+  assert.equal(problems(), '');
+  fs.writeFileSync(join(root, '.yarnrc.yml'), 'a: [\n');
+  assert.match(problems(), /cannot be read as YAML/);
+  fs.writeFileSync(join(root, '.yarnrc.yml'), 'nodeLinker: node-modules\n');
+  // .yarn/plugins/: absent or empty is fine; any file in it (the impostor) is refused.
+  fs.mkdirSync(join(root, '.yarn', 'plugins'), { recursive: true });
+  assert.equal(problems(), '');
+  fs.writeFileSync(
+    join(root, '.yarn', 'plugins', 'npm-cli.cjs'),
+    IMPOSTOR_PLUGIN,
+  );
+  assert.match(
+    problems(),
+    /\.yarn\/plugins\/ must be absent or empty, has npm-cli\.cjs/,
+  );
+  fs.rmSync(join(root, '.yarn', 'plugins', 'npm-cli.cjs'));
+  // YARN_RC_FILENAME would make yarn read another file.
+  assert.match(
+    problems({ YARN_RC_FILENAME: '.evilrc.yml' }),
+    /YARN_RC_FILENAME is set/,
+  );
+  // A .yarnrc.yml the parser rejects fails closed.
+  assert.match(
+    check
+      .pluginSourceProblems(
+        root,
+        {},
+        {
+          home,
+          parseYaml: () => {
+            throw new Error('boom');
+          },
+        },
+      )
+      .join(),
+    /cannot be read as YAML/,
+  );
+});
+
+test('plugin sources: the repository itself passes (its .yarnrc.yml has no plugins key, no .yarn/plugins/)', (t) => {
+  const home = fs.mkdtempSync(join(os.tmpdir(), 'npm-audit-home-'));
+  t.after(() => fs.rmSync(home, { recursive: true, force: true }));
+  assert.deepEqual(
+    check.pluginSourceProblems(join(__dirname, '..'), {}, { home }),
+    [],
+  );
+});
+
+test('plugin sources (end to end): an impostor plugin listed in .yarnrc.yml exits 1 before auditing', async (t) => {
+  const r = seed(t, registerDoc(prEntry()));
+  r.write('.yarnrc.yml', 'plugins:\n  - path: .yarn/plugins/npm-cli.cjs\n');
+  r.write('.yarn/plugins/npm-cli.cjs', IMPOSTOR_PLUGIN);
+  let audited = false;
+  const yarn = (args) => {
+    if (args[1] === 'audit') audited = true;
+    return fakeYarn()(args); // the runtime list looks clean, exactly as with the real impostor
+  };
+  const { code, out } = await run([], r, { env: {}, yarn });
+  assert.equal(code, 1);
+  assert.match(out, /\.yarnrc\.yml has a plugins key/);
+  assert.match(out, /\.yarn\/plugins\/ must be absent or empty/);
+  assert.equal(audited, false);
+});
+
+test('NODE_OPTIONS, SSL_CERT_FILE and SSL_CERT_DIR are refused like NODE_EXTRA_CA_CERTS', () => {
+  for (const k of ['NODE_OPTIONS', 'SSL_CERT_FILE', 'SSL_CERT_DIR']) {
+    assert.match(
+      check.auditConfigProblems(configYarn({}), { [k]: 'x' }).join(),
+      new RegExp(`${k} is set`),
+      k,
+    );
+  }
 });

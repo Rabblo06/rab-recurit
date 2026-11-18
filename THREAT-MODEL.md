@@ -9485,9 +9485,15 @@ Reversal:   Upgrade / `resolutions` override (documented in "//resolutions") as 
     changes: a pure removal may go with yarn.lock / package.json / anything (the upgrade PR that drops an entry, as its
     `drop_when` says); an addition next to yarn.lock still fails. (2) The audit's connection is pinned as well as its
     URL: `httpsProxy`, `httpProxy`, `httpsCaFilePath` unset, `enableStrictSsl` true, `networkSettings` empty (yarn
-    prints `undefined` when unset), no plugin beyond yarn's built-ins (`yarn plugin runtime --json`: built-ins and
-    `@@core` only; `plugins` cannot be read with `config get`), and `YARN_HTTPS_PROXY`, `YARN_HTTP_PROXY`,
-    `NODE_EXTRA_CA_CERTS` and `NODE_TLS_REJECT_UNAUTHORIZED=0` refused. `caFilePath` is not a yarn 4 setting: yarn
+    prints `undefined` when unset), and `YARN_HTTPS_PROXY`, `YARN_HTTP_PROXY`, `NODE_EXTRA_CA_CERTS`, `NODE_OPTIONS`,
+    `SSL_CERT_FILE`, `SSL_CERT_DIR` and `NODE_TLS_REJECT_UNAUTHORIZED=0` refused (the last three variables since the
+    22487db0 spot-check). **Plugins (corrected after the 22487db0 spot-check, Low):** the first version trusted
+    `yarn plugin runtime --json`, but yarn marks `builtin` by the plugin's DECLARED name, so a `.yarn/plugins/x.cjs`
+    that calls itself `@yarnpkg/plugin-npm-cli` (or `@@core`) and is listed under `plugins:` ran its `factory` inside
+    yarn while the runtime list looked identical to a clean run (reproduced locally with yarn 4.13). The control now
+    checks where plugins come from: no `plugins` key (even `[]`) in any `.yarnrc.yml` yarn reads (the project folder,
+    every ancestor folder, the home folder), no `YARN_RC_FILENAME`, and `.yarn/plugins/` absent or empty; the runtime
+    list stays as a supplementary check only. `caFilePath` is not a yarn 4 setting: yarn
     refuses to start ("Unrecognized or legacy configuration settings") when it is in .yarnrc.yml or the environment,
     which already fails the check, so it is not queried. The repository's real effective config passes every check.
     Not covered: generic `HTTP(S)_PROXY` variables (yarn 4 does not read them). (3) Any argument other than
@@ -9502,8 +9508,13 @@ Reversal:   Upgrade / `resolutions` override (documented in "//resolutions") as 
   change the rules for itself (CHANGED TOGETHER makes it also impossible to touch the register in that PR, but the tool
   edit itself is a review control: owner review, no CODEOWNERS file). The register on the base is trusted as reviewed.
   A decision-only PR's owner reference proves only that this PR is the record, not who approved it; the owner's merge
-  is the decision. A push to main runs without `--base`, so a register that landed on main is used as is.
-- **Tests:** `tools/check-npm-audit.test.cjs` (37). End to end in throwaway git repositories (`main(argv, deps)`): a
+  is the decision. A push to main runs without `--base`, so a register that landed on main is used as is. Every
+  yarn-side check (ignore lists, registry, transport, plugins, the audit's own output) trusts the yarn binary:
+  `.yarnrc.yml`'s `yarnPath` pointing at a modified yarn release (or a modified `.yarn/releases/*.cjs`) defeats all of
+  them, and CHANGED TOGETHER catches a `.yarnrc.yml` / `.yarn/**` change only when the same PR also adds or changes a
+  register entry; otherwise it is a review control. Generic `HTTP(S)_PROXY` variables are not checked (yarn 4 does
+  not read them).
+- **Tests:** `tools/check-npm-audit.test.cjs` (41). End to end in throwaway git repositories (`main(argv, deps)`): a
   head-only entry does not cover the finding on a non-decision PR, the same entry on the base does; a decision-only PR
   passes, one citing another PR fails, a renewal keeping the old reference fails, a missing event payload fails, a
   removal needs no reference; register + yarn.lock / package.json / the tool / ci-security.yaml fail CHANGED TOGETHER
@@ -9517,5 +9528,9 @@ Reversal:   Upgrade / `resolutions` override (documented in "//resolutions") as 
   weekly workflow passes it. G4: a non-default `npmAuditRegistry` / `npmRegistryServer` and both env variables are
   refused (end to end: exit 1, not audited). Follow-ups: a removal plus yarn.lock exits 0 and an addition plus
   yarn.lock exits 1; each transport setting, a non-built-in plugin, a failing `plugin runtime` and each env variable is
-  refused (`NODE_TLS_REJECT_UNAUTHORIZED=1` is not); unknown arguments exit 1 before auditing. Mutation check: 34
-  hand-made mutants of the tool (one per control), each killed by at least one test.
+  refused (`NODE_TLS_REJECT_UNAUTHORIZED=1` is not); unknown arguments exit 1 before auditing. Plugin sources: a
+  `plugins` key in the project, an ancestor or the home `.yarnrc.yml` (also `plugins: []`), a file in `.yarn/plugins/`,
+  `YARN_RC_FILENAME` and an unparseable `.yarnrc.yml` are refused; the repository itself passes; end to end, an
+  impostor plugin named `@yarnpkg/plugin-npm-cli` listed in `.yarnrc.yml` exits 1 before auditing even though the
+  runtime list looks clean. `NODE_OPTIONS`, `SSL_CERT_FILE`, `SSL_CERT_DIR` refused. Mutation check: 41 hand-made
+  mutants of the tool (one per control), each killed by at least one test.

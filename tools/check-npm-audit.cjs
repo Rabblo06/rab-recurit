@@ -48,9 +48,12 @@
  * no scope and no expiry), `npmAuditRegistry` is unset and `npmRegistryServer` is yarn's or npm's default registry,
  * and no YARN_NPM_AUDIT_* or YARN_NPM_REGISTRY_SERVER variable is set (an audit pointed at a server that reports
  * nothing would pass). The connection is pinned too: httpsProxy, httpProxy and httpsCaFilePath unset, enableStrictSsl
- * true, networkSettings empty, no plugin beyond yarn's built-ins, and no YARN_HTTPS_PROXY, YARN_HTTP_PROXY,
- * NODE_EXTRA_CA_CERTS or NODE_TLS_REJECT_UNAUTHORIZED=0. (`caFilePath` is not a yarn 4 setting: yarn itself refuses
- * to run when it is set, which fails these checks.) Any argument other than --base <ref> / --fail-on-expiring exits 1. `--fail-on-expiring` (the weekly run) also fails when an entry has 7 days or fewer left.
+ * true, networkSettings empty, no YARN_HTTPS_PROXY, YARN_HTTP_PROXY, NODE_EXTRA_CA_CERTS, NODE_OPTIONS, SSL_CERT_FILE,
+ * SSL_CERT_DIR or NODE_TLS_REJECT_UNAUTHORIZED=0, and no yarn plugin: no `plugins` key in any .yarnrc.yml yarn reads
+ * (project folder, ancestors, home), no YARN_RC_FILENAME, and `.yarn/plugins/` absent or empty (yarn's runtime list
+ * marks `builtin` by name, so it is only a supplementary check). `caFilePath` is not a yarn 4 setting: yarn itself
+ * refuses to run when it is set, which fails these checks. Any argument other than --base <ref> / --fail-on-expiring
+ * exits 1. `--fail-on-expiring` (the weekly run) also fails when an entry has 7 days or fewer left.
  * Fails closed: yarn that cannot be spawned, is killed by a signal or exits outside {0, 1} for the audit; an audit
  * that exits non-zero without a parseable report; an unparseable line; a failed registry or advisory lookup; an
  * unresolvable yarn.lock descriptor or a range this file cannot evaluate. There is no date override. Set GITHUB_TOKEN
@@ -62,8 +65,9 @@
  *   node --test tools/check-npm-audit.test.cjs
  */
 const { spawnSync, execFileSync } = require('node:child_process');
-const { readFileSync, existsSync } = require('node:fs');
-const { join } = require('node:path');
+const { readFileSync, existsSync, readdirSync } = require('node:fs');
+const { join, dirname, resolve } = require('node:path');
+const os = require('node:os');
 
 const ROOT = join(__dirname, '..');
 const REGISTER_REL = 'tools/npm-audit-decisions.json';
@@ -742,7 +746,7 @@ function auditConfigProblems(yarn, env) {
   for (const k of Object.keys(env)) {
     if (
       /^YARN_NPM_AUDIT_/i.test(k) ||
-      /^(YARN_NPM_REGISTRY_SERVER|YARN_HTTPS_PROXY|YARN_HTTP_PROXY|NODE_EXTRA_CA_CERTS)$/i.test(
+      /^(YARN_NPM_REGISTRY_SERVER|YARN_HTTPS_PROXY|YARN_HTTP_PROXY|NODE_EXTRA_CA_CERTS|NODE_OPTIONS|SSL_CERT_FILE|SSL_CERT_DIR)$/i.test(
         k,
       )
     )
@@ -818,7 +822,8 @@ function auditConfigProblems(yarn, env) {
     problems.push(
       `networkSettings must be empty, is ${JSON.stringify(network.value)}: no per-host proxy, CA or network override`,
     );
-  // `plugins` is not readable with `config get`; the runtime list is: only yarn's built-ins and its core.
+  // Supplementary only: yarn marks `builtin` by NAME, so a plugin that calls itself "@yarnpkg/plugin-npm-cli" or
+  // "@@core" looks built-in here. The real control is pluginSourceProblems (where plugins come from).
   const plugins = yarn(['plugin', 'runtime', '--json']);
   const pluginsFailed = spawnFailure(plugins, [0]);
   if (pluginsFailed) {
@@ -852,6 +857,88 @@ function auditConfigProblems(yarn, env) {
         `${key} must be empty, is ${JSON.stringify(value)}: an ignore list hides advisories with no owner decision, scope or expiry (use tools/npm-audit-decisions.json)`,
       );
     }
+  }
+  return problems;
+}
+
+/** Every .yarnrc.yml yarn reads: the project folder and each ancestor up to the filesystem root, then the home folder. */
+function yarnrcCandidates(root, home) {
+  const out = [];
+  let dir = resolve(root);
+  for (;;) {
+    out.push(join(dir, '.yarnrc.yml'));
+    const up = dirname(dir);
+    if (up === dir) break;
+    dir = up;
+  }
+  if (home) {
+    const h = join(resolve(home), '.yarnrc.yml');
+    if (!out.includes(h)) out.push(h);
+  }
+  return out;
+}
+
+/**
+ * Where yarn plugins come from (re-review of #238): yarn marks a plugin `builtin` by its declared name, so the runtime
+ * list cannot tell a plugin named "@yarnpkg/plugin-npm-cli" from the real one. Instead: no `plugins` key in any
+ * .yarnrc.yml yarn reads (the project folder, every ancestor, the home folder), no YARN_RC_FILENAME (another rc name),
+ * and `.yarn/plugins/` absent or empty. `parseYaml` defaults to the repository's `yaml` (fail closed without it).
+ */
+function pluginSourceProblems(
+  root,
+  env,
+  { home = os.homedir(), parseYaml } = {},
+) {
+  const problems = [];
+  for (const k of Object.keys(env)) {
+    if (/^YARN_RC_FILENAME$/i.test(k))
+      problems.push(
+        `environment variable ${k} is set: yarn would read another rc file than .yarnrc.yml`,
+      );
+  }
+  let parse = parseYaml;
+  if (!parse) {
+    try {
+      parse = require('yaml').parse;
+    } catch (e) {
+      problems.push(
+        `cannot load the yaml parser to read .yarnrc.yml (${e.message}): run after yarn install`,
+      );
+    }
+  }
+  if (parse) {
+    for (const file of yarnrcCandidates(root, home)) {
+      if (!existsSync(file)) continue;
+      let doc;
+      try {
+        doc = parse(readFileSync(file, 'utf8'));
+      } catch (e) {
+        problems.push(`${file}: cannot be read as YAML (${e.message})`);
+        continue;
+      }
+      if (
+        doc &&
+        typeof doc === 'object' &&
+        Object.prototype.hasOwnProperty.call(doc, 'plugins')
+      ) {
+        problems.push(
+          `${file} has a plugins key: no yarn plugin may load during the audit (a plugin runs inside yarn and can change what it asks or reports, whatever name it declares)`,
+        );
+      }
+    }
+  }
+  const pluginDir = join(root, '.yarn', 'plugins');
+  if (existsSync(pluginDir)) {
+    let entries;
+    try {
+      entries = readdirSync(pluginDir, { recursive: true });
+    } catch (e) {
+      entries = [`(unreadable: ${e.message})`];
+    }
+    if (entries.length)
+      problems.push(
+        `.yarn/plugins/ must be absent or empty, has ${entries.slice(0, 5).join(', ')}${entries.length > 5 ? ', ...' : ''}`,
+      );
   }
   return problems;
 }
@@ -1025,7 +1112,10 @@ async function main(argv = [], deps = {}) {
       );
   }
 
-  const config = auditConfigProblems(yarn, env);
+  const config = [
+    ...auditConfigProblems(yarn, env),
+    ...pluginSourceProblems(root, env, { home: deps.home }),
+  ];
   if (config.length) {
     for (const p of config) console.error(`::error::${p}`);
     for (const e of errors)
@@ -1145,6 +1235,8 @@ module.exports = {
   selectRegister,
   spawnFailure,
   auditConfigProblems,
+  yarnrcCandidates,
+  pluginSourceProblems,
   main,
   MAX_DAYS,
   WARN_DAYS,
