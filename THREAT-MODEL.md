@@ -9318,3 +9318,54 @@ Reversal:   Upgrade / `resolutions` override (documented in "//resolutions") as 
   OpenShip deploy without `PG_DATABASE_PASSWORD` now renders and fails at start (db / db-setup exit 64) instead of at
   render. The live container suites (`run-db-setup-tests.cjs`, `run-prestart-shell-tests.cjs`) are updated but run in CI,
   not locally.
+
+## Upgrade runner — patch releases carry no upgrade commands (branch feat/runner-patch-releases, 2026-11-17; no SQL)
+- **Threat:** the upgrade-command registries are keyed `<major>-<minor>`, so a patch build (0.6.1) looked up `'0-6'` and
+  re-listed 0.6.0's workspace commands as `0.6.1_…` (found on closed draft PR #216). Consequences: (1) every start of a
+  patch image refuses (`structureLevels()`: "structure level 21, expected 23", exit 66), so a patch can never ship; (2) if
+  the level check were relaxed instead, a patch would re-run its minor's DDL / data commands on every workspace under new
+  step names, and a structural command could claim a level twice; (3) a patch whose `.0` is not in
+  `CREWFLOW_PREVIOUS_VERSIONS` would accept only the previous minor, so a database at the patch's own `.0` is refused (65)
+  and every workspace cursor of that `.0` is UNKNOWN_CURSOR (blocked, 503); (4) accepting the previous minor (0.5.0 → 0.6.1)
+  would skip the minor's own commands and, for 0.6.x, the one-time adoption; (5) (security review M-1) a `--force`d patch
+  completes its own migrations step while a workspace is still short of the `.0`'s last workspace command, so the next
+  minor, which accepts the patch, would never re-check the `.0`; (6) (L-2) an out-of-order published list (a backport patch
+  appended after a newer minor) makes the upgrade-from rule read the wrong version.
+- **Control:** a patch release (PATCH > 0) owns no bundle. `commandsForVersion` / `workspaceCommandsForVersion`
+  (`upgrade-sequence.ts`) return none for it, so its only step is `<v>_TypeOrmMigrations`. It never adds a structure level
+  (the code level stays 20 + the minor releases' structural commands). A new workspace created on it gets the cursor
+  `<v>_TypeOrmMigrations`, with nothing pending.
+  - **Typed refusals:** every registry read checks the keys first (`upgrade-registry-key.ts`). A patch key (`0-6-1`) is
+    `PatchReleaseCommandsError`, any other shape `UpgradeRegistryError`. `structuralCommands` checks every key itself, so a
+    lone key cannot slip past a sort comparator. The test-probe seam refuses a patch code version. Both errors map to
+    `config` (exit 64) in `outcomeOf`. `UpgradeRun.beforeApply` checks both registries first, unconditionally (review
+    L-1), so the refusal comes before any database read or migration, on fresh and no-ledger starts too.
+  - **Upgrade-from rule:** a patch accepts only the earlier published versions of its own minor line (0.6.2 ← 0.6.0 /
+    0.6.1). It never accepts another minor and never adopts an R254 / R256 history (only 0.6.0 does). Its `.0` must be in
+    `CREWFLOW_PREVIOUS_VERSIONS`, else `AppVersionError` (64), also on a fresh install. "Version X complete" is unchanged:
+    0.6.1 still refuses 65 while any READY workspace has not finished 0.6.0's last workspace command (`--force` skips only
+    that, as before). Minor releases keep the existing rule; 0.7.0 accepts the last published version only.
+  - **A previous patch is complete only with its `.0` (review M-1):** `versionsToCheck` also reads the minor release of an
+    accepted previous patch (instance step + every workspace at its last workspace command), and `decideUpgradeStart`
+    folds it in (`effectiveComplete`: `complete[0.6.1] = complete[0.6.1] && complete[0.6.0]`). After a forced 0.6.1 that
+    left a workspace short of 0.6.0, an unforced 0.7.0 refuses 65 and writes nothing, until a 0.6.1 start catches the
+    workspace up. The code version's own entry is never folded: a repeated start of the patch itself still continues.
+  - **Published list (review L-2):** `assertPreviousVersions` requires `CREWFLOW_PREVIOUS_VERSIONS` strictly ascending and
+    duplicate-free, first thing in every start decision (`AppVersionError`, 64). A backport patch on an older line is never
+    appended on main. A rollback onto a patch image whose `.0` is unpublished is refused (64), not treated as a rollback.
+  - **Rollback:** a 0.6.0 image on a logbook with 0.6.1 rows is the existing image-rollback rule (decision `rollback`, nothing
+    recorded, no workspace pass, also under `--force`; `/healthz` `ahead`).
+- **Not changed:** no SQL, no migration, no new table or grant. The shipped version stays 0.6.0 and 0.6.1 is not registered
+  (`CREWFLOW_PREVIOUS_VERSIONS` unchanged). The release PR appends `0.6.0` there and bumps the root `package.json`.
+- **Open for the owner:** with the strict rule, once a patch is published the next minor (0.7.0) accepts only the last
+  published version (0.6.1). A database still at 0.6.0 must take 0.6.1 first, or `--force`. Accepting the whole previous
+  minor line there is safe (patches carry no commands), but it changes an existing rule, so it is not done here.
+- **Tests:** `upgrade-patch-release.spec.ts` (pure, 26, incl. M-1, L-1 (no query before the refusal), L-2, I-2; the PR #216 regression fails on the old lookup with exactly "structure
+  level 21, expected 23"), `upgrade-version.spec.ts` (+1). `patch-release-upgrade.integration.spec.ts` drives UpgradeRun on
+  the locked runtime login: 0.6.0 → 0.6.1 with 0 and with 3 workspaces (one instance row, no workspace row, levels and
+  blocks unchanged, `/healthz` behind → ok); a workspace created on 0.6.1; downgrade 0.6.1 → 0.6.0 (rollback, nothing
+  written, `ahead`); 0.6.1 → 0.7.0 runs the 0.7 instance command once and the 0.7 workspace command once per workspace; a
+  patch-keyed registry refused before any write, fresh start included; a patch cannot skip an incomplete 0.6.0 (65, nothing
+  written); M-1: a forced 0.6.1 over a workspace short of 0.6.0 → unforced 0.7.0 refuses 65 with nothing written, then a
+  0.6.1 start catches the workspace up and 0.7.0 continues. The spec seeds the logbook state it needs (a completed 0.6.0
+  instance row) and removes exactly what it seeded, so it does not depend on what an earlier spec file left in a shard.
