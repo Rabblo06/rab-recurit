@@ -7,8 +7,13 @@ import { integrationTestDatabase, integrationTestDatabaseReady } from '../../dat
 import { MIGRATION_LOCK_KEY } from '../../database/typeorm/scripts/migrate/migration-lock';
 import {
   CORE_SHIFT_TEAM_POLICY_SQL,
+  CORE_SHIFT_TEAM_USING_HASH_EQUALITY,
   CORE_SHIFT_TEAM_USING_HASH_MEMBERSHIP,
+  LEVEL_24_WORKSPACES_SQL,
 } from '../../database/typeorm/workspace-schema/structure-level-24';
+import { provisionWorkspaceFunctionLevelSql } from '../../database/typeorm/workspace-schema/structure-level-21';
+import { composeServerPathTemplateLevel23 } from '../../database/typeorm/workspace-schema/structure-level-23';
+import { moduleChecksum, modulesThrough } from '../../database/typeorm/workspace-schema/workspace-schema-modules';
 import { selectWorkspaceFingerprintsForServer, workspaceFingerprintMajor } from '../../database/typeorm/workspace-schema/v1/expected-fingerprints';
 import { WORKSPACE_CORE_FK_REMOVAL } from '../../engine/core-modules/upgrade/upgrade-commands/0-6/workspace-core-fk-removal';
 import {
@@ -252,6 +257,18 @@ describeIfDb('#205: staff_profile_shift_team_select tests staff role membership,
       expect(await visible({ role: 'manager,staff', teamShift: randomUUID() })).toEqual([]);
     });
 
+    it.each(['cancelled', 'completed'])('a %s shift shows nobody, even to a confirmed multi-role caller (the shift-status line of the predicate)', async (status) => {
+      expect(await visible({ role: 'manager,staff' })).toEqual(team());
+      await admin.query(`UPDATE ${w.schema}.shift SET status = $1 WHERE id = $2`, [status, shiftId]);
+      try {
+        expect(await visible({ role: 'manager,staff' })).toEqual([]);
+        expect(await visible({ role: 'staff' })).toEqual([]);
+      } finally {
+        await admin.query(`UPDATE ${w.schema}.shift SET status = 'confirmed' WHERE id = $1`, [shiftId]);
+      }
+      expect(await visible({ role: 'manager,staff' })).toEqual(team());
+    });
+
     it('tenant binding is still required: another workspace or organisation bound sees nothing', async () => {
       expect(await visible({ role: 'manager,staff', workspace: other.id })).toEqual([]);
       expect(await visible({ role: 'manager,staff', org: other.org, workspace: other.id })).toEqual([]);
@@ -263,15 +280,15 @@ describeIfDb('#205: staff_profile_shift_team_select tests staff role membership,
     });
   });
 
-  it('core.staff_profile (HWS off) carries the same predicate; the migration replaces only a known expression (rolled back)', async () => {
+  it('core.staff_profile (HWS off) carries the same predicate; up() refuses a provision body that is not the level-23 predecessor (rolled back)', async () => {
     const [core] = (await admin.query(CORE_SHIFT_TEAM_POLICY_SQL)).rows;
     expect(core).toMatchObject({ using_hash: CORE_SHIFT_TEAM_USING_HASH_MEMBERSHIP, permissive: true, cmd: 'r', to_public: true, no_check: true });
     expect((await policyOf('core')).using).toContain(MEMBERSHIP_DEPARSED);
     const runnerOf = (c: Client) => ({ isTransactionActive: true, query: async (sql: string, params?: unknown[]) => (await c.query(sql, params as unknown[])).rows }) as never;
     await admin.query('BEGIN');
     try {
-      await admin.query(shiftTeamSelectMultiRoleSql('core').replace("AND s.status NOT IN ('cancelled', 'completed')", "AND s.status NOT IN ('cancelled')"));
-      await expect(new StaffShiftTeamMultiRole1786721600000().up(runnerOf(admin))).rejects.toThrow(/is not a known policy/);
+      // Installed body = level 24, not #177's level 23: up() refuses before changing anything.
+      await expect(new StaffShiftTeamMultiRole1786721600000().up(runnerOf(admin))).rejects.toThrow(/is not the expected predecessor body/);
     } finally {
       await admin.query('ROLLBACK');
     }
@@ -293,5 +310,54 @@ describeIfDb('#205: staff_profile_shift_team_select tests staff role membership,
       await admin.query('ROLLBACK');
     }
     expect(await state()).toEqual(before);
+  });
+
+  it('down() with no level-24 workspace left (rolled back): the core policy reverts, the level-23 body is restored; up() needs a known core policy and restores level 24', async () => {
+    const migration = new StaffShiftTeamMultiRole1786721600000();
+    const runnerOf = (c: Client) => ({ isTransactionActive: true, query: async (sql: string, params?: unknown[]) => (await c.query(sql, params as unknown[])).rows }) as never;
+    const prosrc = async () => (await admin.query(`SELECT prosrc FROM pg_proc WHERE oid = 'core.provision_workspace(uuid)'::regprocedure`)).rows[0].prosrc as string;
+    const coreHash = async () => (await admin.query(CORE_SHIFT_TEAM_POLICY_SQL)).rows[0].using_hash as string;
+    const s23 = STAFF_PROFILE_WORKSPACE_REQUIRED_VALIDATE.structure!;
+    const s24 = STAFF_PROFILE_SHIFT_TEAM_MULTI_ROLE.structure!;
+    const level23Body = (() => {
+      const modules = modulesThrough(20).map((m) => ({ id: m.id, version: m.version, checksum: moduleChecksum(m) }));
+      const sql = provisionWorkspaceFunctionLevelSql(composeServerPathTemplateLevel23(), modules, 23, s23.fingerprints[workspaceFingerprintMajor()]!, s23.provisionFunctionLiteral!);
+      return sql.slice(sql.indexOf('AS $provision$') + 'AS $provision$'.length, sql.lastIndexOf('$provision$'));
+    })();
+    const before = { body: await prosrc(), core: await coreHash() };
+    await admin.query('BEGIN');
+    try {
+      // "No level-24 workspace": every workspace policy that is not the level-23 form goes back to it (rolled back below).
+      const { rows } = await admin.query(
+        `SELECT DISTINCT n.nspname FROM pg_policy p JOIN pg_class c ON c.oid = p.polrelid JOIN pg_namespace n ON n.oid = c.relnamespace
+          WHERE n.nspname ~ '^workspace_[0-9a-f]{32}$' AND c.relname = 'staff_profile' AND p.polname = 'staff_profile_shift_team_select'`,
+      );
+      for (const r of rows as Array<{ nspname: string }>) await admin.query(shiftTeamSelectSingleRoleSql(r.nspname));
+      // The fail-closed guard recognises the level-23 form on this major (else it would count these and refuse).
+      expect((await admin.query(LEVEL_24_WORKSPACES_SQL)).rows[0].n).toBe(0);
+
+      await migration.down(runnerOf(admin));
+      expect(await coreHash()).toBe(CORE_SHIFT_TEAM_USING_HASH_EQUALITY);
+      expect((await policyOf('core')).using).toContain(EQUALITY_DEPARSED);
+      expect(await prosrc()).toBe(level23Body);
+      // down() again: the installed body is no longer level 24, so it refuses before changing anything.
+      await admin.query('SAVEPOINT again');
+      await expect(migration.down(runnerOf(admin))).rejects.toThrow(/is not the expected predecessor body/);
+      await admin.query('ROLLBACK TO SAVEPOINT again');
+
+      // up() after down(): an unknown core expression is refused before any change ...
+      await admin.query('SAVEPOINT tamper');
+      await admin.query(shiftTeamSelectSingleRoleSql('core').replace("AND s.status NOT IN ('cancelled', 'completed')", "AND s.status NOT IN ('cancelled')"));
+      await expect(migration.up(runnerOf(admin))).rejects.toThrow(/is not a known policy/);
+      await admin.query('ROLLBACK TO SAVEPOINT tamper');
+      expect(await prosrc()).toBe(level23Body);
+      // ... and the known one is moved to level 24 again.
+      await migration.up(runnerOf(admin));
+      expect(await coreHash()).toBe(CORE_SHIFT_TEAM_USING_HASH_MEMBERSHIP);
+      expect((await prosrc()).includes(s24.provisionFunctionLiteral!)).toBe(true);
+    } finally {
+      await admin.query('ROLLBACK');
+    }
+    expect({ body: await prosrc(), core: await coreHash() }).toEqual(before);
   });
 });

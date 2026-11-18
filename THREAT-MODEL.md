@@ -8743,18 +8743,27 @@ This entry covers only what release 0.7.0 adds to switch it on.
   match; role keys cannot contain a comma (system keys are fixed, custom keys are `custom_` + a `[a-z0-9_]` slug), so no
   key can split into a fake `staff` element; an unset `rab.role` gives `string_to_array(NULL) = NULL` (no row) and an
   empty one `'{}'` (no row). `rab.role` is bound only by TenantContextService from the server-resolved session, never
-  from a request. The policy still admits a profile only when the caller's own confirmed assignment on that live shift is
+  from a request.
+  **Stated premise (DB review of #243):** "no role key contains a comma" is enforced today ONLY in application code:
+  custom keys are `custom_` + `slugify(name, '_', 'role')` (`modules/identity/services/role.service.ts:193`,
+  `engine/utils/slug.util.ts`, which maps every run outside `[a-z0-9]` to `_`), and system keys are fixed. No database
+  CHECK forbids a comma in `core.role.key`; a key written by another path (SQL by hand, a future service) containing
+  `,staff` would make this predicate match. The coordinator is proposing that CHECK to the owner as a separate migration. The policy still admits a profile only when the caller's own confirmed assignment on that live shift is
   the bound capability, so the widening is "multi-role staff see what single-role staff already see", nothing more.
 - **Fail closed in the migration and the runner.** The core ALTER replaces only a known expression (the 1786718100000 one
   or its own, by semantic-golden USING hash) and re-checks PERMISSIVE / FOR SELECT / TO PUBLIC / no WITH CHECK before and
-  after; the workspace step is checked against the declared level-24 v2 fingerprint (a workspace that does not reach it
-  is blocked, 503); down() is refused while any workspace is at level 24.
+  after; before any change, core.provision_workspace must be the expected predecessor body (#177's level-23 literal for
+  up(), this level-24 literal for down()); the workspace step is checked against the declared level-24 v2 fingerprint (a
+  workspace that does not reach it is blocked, 503); down() is refused while any workspace's shift-team policy is NOT the
+  level-23 equality form (canonicalised USING hash, so a different deparse on a future major also refuses: fail closed).
 - **Tests.** `ws-shift-team-multi-role.integration.spec.ts`: level-23 → 24 fingerprint measured and declared per major;
   runner upgrade idempotent; both provisioners build the same level-24 structure; DB-level abuse cases as the runtime login
   (single-role and multi-role staff see the confirmed team; `manager`, `custom_staff`, `staffing`, ` staff`, `STAFF`, `''`,
   `manager;staff` and an unset role see nothing; a multi-role caller not confirmed on the shift, naming another shift, or
   bound to another workspace / organisation sees nothing; zero rows with no tenant context); the core copy has the new
-  predicate and an unknown core expression is refused; down() refused. `shift-team.integration.spec.ts`: the former
+  predicate; up() refuses a non-level-23 provision body; a cancelled or completed shift shows nobody; down() refused while a
+  level-24 workspace exists, and with none left (rolled back) down() restores the core equality predicate and #177's exact
+  level-23 body, refuses a second run, and up() then refuses an unknown core expression and restores level 24. `shift-team.integration.spec.ts`: the former
   `it.failing` full-team case for a `manager` + `staff` user is now a normal `it`. `structure-level-24.spec.ts`: the
   statement is the frozen predicate with only the role test changed, the level-24 template is level 23 + that statement,
   and the goldens pin the new policy hash.

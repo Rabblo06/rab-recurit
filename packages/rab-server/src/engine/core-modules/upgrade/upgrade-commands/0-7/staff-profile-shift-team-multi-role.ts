@@ -17,7 +17,9 @@ import type { WorkspaceUpgradeCommand } from '../workspace-upgrade-command';
  *   `'staff' = ANY (pg_catalog.string_to_array(current_setting('rab.role', true), ','))`
  *   - an unset `rab.role` → string_to_array(NULL) = NULL → no row (fail closed); '' → '{}' → false;
  *   - role keys cannot contain a comma (system keys are fixed; custom keys are `custom_` + a [a-z0-9_] slug), so no key can
- *     fake membership, and `= ANY` compares whole elements (`custom_staff`, `staffing` never match `staff`);
+ *     fake membership, and `= ANY` compares whole elements (`custom_staff`, `staffing` never match `staff`). PREMISE: the
+ *     comma-free key is enforced today only by RoleService's slugify (no database CHECK on core.role.key; proposed to the
+ *     owner as a separate migration);
  *   - every other line of the predicate (tenant binding, the confirmed-assignment capability GUCs, shift status) is copied
  *     unchanged; FOR SELECT, PERMISSIVE, TO PUBLIC and the absent WITH CHECK are unchanged (ALTER POLICY ... USING changes
  *     only the USING expression).

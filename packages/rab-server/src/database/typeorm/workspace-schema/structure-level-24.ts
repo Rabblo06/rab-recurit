@@ -32,16 +32,34 @@ export const CORE_SHIFT_TEAM_USING_HASH_EQUALITY = '97bbab50a17fb6dd93b9322440df
 export const CORE_SHIFT_TEAM_USING_HASH_MEMBERSHIP = 'c582fe8de552fdc3c359dd8ae1d4e4bc';
 
 /**
- * down() guard (same rule as levels 21-23): the workspace schemas whose shift-team policy already tests role membership
- * (catalog only). down() refuses while any remains: a level-23 provision body (expecting the equality fingerprint) next to
- * level-24 workspaces would make the fleet's structure inconsistent.
+ * USING hash of the 1786718100000 workspace-schema policy (`rab.role = 'staff'`), with the schema name canonicalised to
+ * `workspace_*` (the security-posture golden's workspace-template form) and runs of whitespace collapsed.
+ */
+export const WORKSPACE_SHIFT_TEAM_USING_HASH_EQUALITY = 'bf70e2e8af36d08d7cf2b69b0cf89218';
+
+/**
+ * down() guard (same rule as levels 21-23), FAIL CLOSED (DB review of #243): counts the workspace schemas whose shift-team
+ * policy is NOT the known level-23 equality form, whatever it is instead (the level-24 membership predicate, a hand-altered
+ * one, or the same predicate deparsed differently by a future major). down() refuses while any remains: a level-23
+ * provision body (expecting the equality fingerprint) next to such workspaces would make the fleet's structure
+ * inconsistent. Catalog only. Not the registry's module_version: core.workspace_schema_registry is FORCE RLS with a tenant
+ * policy, so a non-superuser migrator with no tenant bound would always count 0 there (a check that cannot fire).
  */
 export const LEVEL_24_WORKSPACES_SQL = `SELECT pg_catalog.count(*)::int AS n
   FROM pg_catalog.pg_policy p
   JOIN pg_catalog.pg_class c ON c.oid = p.polrelid
   JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
  WHERE n.nspname ~ '^workspace_[0-9a-f]{32}$' AND c.relname = 'staff_profile' AND p.polname = '${SHIFT_TEAM_SELECT_POLICY}'
-   AND pg_catalog.strpos(pg_catalog.pg_get_expr(p.polqual, p.polrelid), 'string_to_array(current_setting(''rab.role''::text, true)') > 0`;
+   AND pg_catalog.md5(pg_catalog.regexp_replace(pg_catalog.replace(pg_catalog.pg_get_expr(p.polqual, p.polrelid), n.nspname, 'workspace_*'), '\\s+', ' ', 'g'))
+       IS DISTINCT FROM '${WORKSPACE_SHIFT_TEAM_USING_HASH_EQUALITY}'`;
+
+/**
+ * The provision_workspace body a direction may replace (DB review of #243): up() only the level-23 body (#177's literal),
+ * down() only this migration's level-24 body. `$1` = the literal that must be present, `$2` = the one that must be absent.
+ */
+export const PROVISION_PREDECESSOR_SQL = `SELECT pg_catalog.strpos(p.prosrc, $1) > 0 AND pg_catalog.strpos(p.prosrc, $2) = 0 AS ok
+  FROM pg_catalog.pg_proc p
+ WHERE p.oid = 'core.provision_workspace(uuid)'::pg_catalog.regprocedure`;
 
 /**
  * The two privilege-drift lines migration-security-check.ts reviews for StaffShiftTeamMultiRole1786721600000 (its

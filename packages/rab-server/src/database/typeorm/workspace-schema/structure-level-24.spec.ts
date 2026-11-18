@@ -9,6 +9,8 @@ import {
   CORE_SHIFT_TEAM_USING_HASH_EQUALITY,
   CORE_SHIFT_TEAM_USING_HASH_MEMBERSHIP,
   LEVEL_24_WORKSPACES_SQL,
+  PROVISION_PREDECESSOR_SQL,
+  WORKSPACE_SHIFT_TEAM_USING_HASH_EQUALITY,
 } from './structure-level-24';
 import { SERVER_PATH_SENTINEL_SCHEMA } from './v1/server-path-template';
 import { shiftTeamPolicy } from './v1/shift-team-policy';
@@ -81,6 +83,11 @@ describe('#205: staff_profile_shift_team_select tests staff role membership (str
           .replace("('staff'::text = ANY (string_to_array(current_setting('rab.role'::text, true), ','::text)))", "(current_setting('rab.role'::text, true) = 'staff'::text)"),
       ),
     ).toBe(CORE_SHIFT_TEAM_USING_HASH_EQUALITY);
+    // The fail-closed down() guard compares with the level-23 workspace form (schema canonicalised to workspace_*).
+    expect(
+      md5(deparsed.replace("('staff'::text = ANY (string_to_array(current_setting('rab.role'::text, true), ','::text)))", "(current_setting('rab.role'::text, true) = 'staff'::text)")),
+    ).toBe(WORKSPACE_SHIFT_TEAM_USING_HASH_EQUALITY);
+    expect(LEVEL_24_WORKSPACES_SQL).toContain(`IS DISTINCT FROM '${WORKSPACE_SHIFT_TEAM_USING_HASH_EQUALITY}'`);
     for (const g of [SEMANTIC_GOLDEN_PG16, SEMANTIC_GOLDEN_PG17, SEMANTIC_GOLDEN_PG18]) {
       expect(g.filter((l) => l.startsWith('policy|staff_profile|staff_profile_shift_team_select|'))).toEqual([
         `policy|staff_profile|staff_profile_shift_team_select|PERMISSIVE|public|r|using=${CORE_SHIFT_TEAM_USING_HASH_MEMBERSHIP}|check=-`,
@@ -89,7 +96,7 @@ describe('#205: staff_profile_shift_team_select tests staff role membership (str
   });
 
   it('the migration guards read the catalog only', () => {
-    for (const sql of [CORE_SHIFT_TEAM_POLICY_SQL, LEVEL_24_WORKSPACES_SQL]) {
+    for (const sql of [CORE_SHIFT_TEAM_POLICY_SQL, LEVEL_24_WORKSPACES_SQL, PROVISION_PREDECESSOR_SQL]) {
       expect(sql).toMatch(/^SELECT /);
       expect(sql).not.toMatch(/\b(INSERT|UPDATE|DELETE|ALTER|DROP|CREATE)\b/);
     }

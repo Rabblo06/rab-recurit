@@ -12,6 +12,7 @@ import {
   CORE_SHIFT_TEAM_USING_HASH_EQUALITY,
   CORE_SHIFT_TEAM_USING_HASH_MEMBERSHIP,
   LEVEL_24_WORKSPACES_SQL,
+  PROVISION_PREDECESSOR_SQL,
 } from '../../workspace-schema/structure-level-24';
 import { moduleChecksum, modulesThrough } from '../../workspace-schema/workspace-schema-modules';
 import { STAFF_PROFILE_WORKSPACE_REQUIRED_VALIDATE } from '../../../../engine/core-modules/upgrade/upgrade-commands/0-7/staff-profile-workspace-required-validate';
@@ -38,6 +39,7 @@ const LEVEL = 24;
  *  2. core.provision_workspace re-created (guarded v3 body) over template(20) + level 21 + level 22 + level 23 + the level-24
  *     ALTER POLICY, recording module_version 24 and checking the declared level-24 v2 fingerprint of this server's major;
  *  3. privilege shape, body literal and the secure-owner invariants re-verified.
+ * Before any change (DB review): core.provision_workspace must be #177's level-23 body (up) or this level-24 body (down).
  * core.verify_workspace_schema_v1 is unchanged (it counts policies, not their expressions). No table changes.
  * down(): restores the level-23 provision body and the 1786718100000 core predicate; refused while any workspace is at level 24.
  */
@@ -55,6 +57,8 @@ export class StaffShiftTeamMultiRole1786721600000 implements MigrationInterface 
     try {
       await pinSearchPath(queryRunner);
       await this.preflight(queryRunner);
+      // Before any change: the provision body replaced must be #177's level-23 one (never a later or hand-altered body).
+      await this.assertProvisionPredecessor(queryRunner, 'up', STAFF_PROFILE_WORKSPACE_REQUIRED_VALIDATE.structure!.provisionFunctionLiteral!, structure.provisionFunctionLiteral!);
       await this.alterCorePolicy(queryRunner, 'up');
       await queryRunner.query(provisionWorkspaceFunctionLevelSql(composeServerPathTemplateLevel24(), modules20(), LEVEL, expected, structure.provisionFunctionLiteral));
       await this.verifyProvisionFunction(queryRunner, structure.provisionFunctionLiteral);
@@ -76,13 +80,15 @@ export class StaffShiftTeamMultiRole1786721600000 implements MigrationInterface 
       const [{ n }] = (await queryRunner.query(LEVEL_24_WORKSPACES_SQL)) as Array<{ n: number }>;
       if (Number(n) > 0) {
         throw new Error(
-          `${this.name}: down() refused: ${Number(n)} workspace schema(s) are at structure level 24 (staff_profile_shift_team_select tests role membership). ` +
+          `${this.name}: down() refused: ${Number(n)} workspace schema(s) are at structure level 24 (their staff_profile_shift_team_select is not the level-23 equality predicate). ` +
             'Nothing was changed. To roll back, first (owner-run, per workspace) restore the 1786718100000 predicate with ALTER POLICY and set ' +
             'core.workspace_schema_registry.module_version back to 23, then run down() again.',
         );
       }
-      await this.alterCorePolicy(queryRunner, 'down');
       const s23 = STAFF_PROFILE_WORKSPACE_REQUIRED_VALIDATE.structure!;
+      // Before any change: the provision body replaced must be this migration's level-24 one.
+      await this.assertProvisionPredecessor(queryRunner, 'down', STAFF_PROFILE_SHIFT_TEAM_MULTI_ROLE.structure!.provisionFunctionLiteral!, s23.provisionFunctionLiteral!);
+      await this.alterCorePolicy(queryRunner, 'down');
       const fp23 = s23.fingerprints[workspaceFingerprintMajor()];
       if (!fp23) throw new Error(`${this.name}: no level-23 fingerprint for this major`);
       await queryRunner.query(provisionWorkspaceFunctionLevelSql(composeServerPathTemplateLevel23(), modules20(), 23, fp23, s23.provisionFunctionLiteral!));
@@ -91,6 +97,16 @@ export class StaffShiftTeamMultiRole1786721600000 implements MigrationInterface 
     } catch (error) {
       if (!outer) await queryRunner.query('ROLLBACK');
       throw error;
+    }
+  }
+
+  /** `present` must be in core.provision_workspace's body and `absent` must not; anything else is refused before any change. */
+  private async assertProvisionPredecessor(queryRunner: QueryRunner, direction: 'up' | 'down', present: string, absent: string): Promise<void> {
+    const [row] = (await queryRunner.query(PROVISION_PREDECESSOR_SQL, [present, absent])) as Array<{ ok: boolean }>;
+    if (row?.ok !== true) {
+      throw new Error(
+        `${this.name}: refusing to run ${direction}: core.provision_workspace is not the expected predecessor body (want ${present}, not ${absent}). Nothing was changed.`,
+      );
     }
   }
 
