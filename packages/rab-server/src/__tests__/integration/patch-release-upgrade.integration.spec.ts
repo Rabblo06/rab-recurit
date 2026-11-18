@@ -245,7 +245,8 @@ describeIfDb('patch releases through the upgrade runner (integration)', () => {
     const ids = [fresh.id, ...done.map((w) => w.id)];
     const count = await allRowCount();
     for (const force of [false, true]) {
-      const run = new UpgradeRun({ codeVersion: '0.6.0', force, log: (l) => lines.push(l), workspaceRunner: { workspaceIds: ids } });
+      // The 0.6.0 image as published: its own previous-versions list (CREWFLOW_PREVIOUS_VERSIONS gained 0.6.0 with 0.7.0).
+      const run = new UpgradeRun({ codeVersion: '0.6.0', previousVersions: ['0.4.0', '0.5.0'], force, log: (l) => lines.push(l), workspaceRunner: { workspaceIds: ids } });
       const decision = await start(run);
       expect(decision).toMatchObject({ kind: 'rollback' });
       expect((decision as { newer: string[] }).newer).toContain('0.6.1');
