@@ -9434,9 +9434,14 @@ Reversal:   Upgrade / `resolutions` override (documented in "//resolutions") as 
   was pinned to `15192bc0…`, the annotated **tag object** `v3`, not a commit (it resolved to the v3.0.4 commit
   `0e4a8c6e…`, which is now the pin; same code).
 - **Control (`tools/check-action-pins.cjs`, ci-security `action-pins`, in the gate's `needs`):** every `uses:` under
-  `.github/workflows/**` and `.github/actions/**` must be `owner/repo[/path]@<40 lowercase hex> # vX.Y.Z`; `./` local
-  actions exempt; `docker://` needs `@sha256:<64 hex>`. Forms the line scanner cannot read (flow mappings, aliases, a value
-  on the next line) fail; `uses:` text inside `run: |` blocks and comments is ignored. `--remote` (GITHUB_TOKEN) asks the
+  `.github/workflows/**` and `.github/actions/**` must be `owner/repo[/path]@<40 lowercase hex> # vX.Y.Z`; only
+  `./.github/actions/` and `./.github/workflows/` local references are exempt (any other `./` path fails); `docker://`
+  needs `@sha256:<64 hex>`. Two readings must agree (independent review of #236: an escaped quoted key `"uses"`, an
+  explicit `? uses` key and a fake block scalar inside an open `{` each hid an unpinned `uses` from a line scanner
+  alone): (1) a line scanner, which also refuses those three forms, flow mappings, aliases and a value on the next
+  line, and ignores `uses:` text inside `run: |` blocks and comments; (2) the real YAML parser (root devDependency
+  `yaml`; missing = fail): every mapping key `uses`, aliases and `<<` merges resolved, duplicate keys and parse errors
+  fail. The multiset of `uses` values must be identical. `--remote` (GITHUB_TOKEN) asks the
   API, per distinct repository@SHA: `git/commits/<sha>` must exist (else `git/tags/<sha>` tells a tag object apart and the
   error names the commit to pin), and the comment's tag (`git/ref/tags/<tag>`, through tag objects) must resolve to
   exactly that commit — this also refuses a fork-only "impostor" commit, which no tag of the parent points at. Any

@@ -173,3 +173,52 @@ test('remote: an API failure fails closed; each distinct pin is looked up once',
 test('remote: no token is an error, never a silent skip', () => {
   assert.throws(() => makeApi({ token: '' }), /GITHUB_TOKEN/);
 });
+
+// --- review of PR #236: forms that YAML decodes as `uses` but a line scanner alone would miss ----------------------
+
+const BS = String.fromCharCode(92);
+const allMsgs = (src) => scanSource('w.yaml', src).problems.map((p) => p.message);
+
+test('an escaped quoted key that decodes to "uses" is refused (x73 and u0075 escapes, with and without a dash)', () => {
+  for (const src of [
+    `steps:\n  - "u${BS}x73es": actions/checkout@v4\n`,
+    `steps:\n  - "${BS}u0075ses": actions/checkout@v4\n`,
+    `jobs:\n  x:\n    "u${BS}x73es": o/r/.github/workflows/x.yml@main\n`,
+  ]) {
+    const m = allMsgs(src);
+    assert.ok(m.some((x) => /quoted key with an escape sequence/.test(x)), src);
+    assert.ok(m.some((x) => /YAML parser reads a "uses: .*@(v4|main)"/.test(x)), `cross-check also catches it: ${src}`);
+  }
+});
+
+test('an explicit "? uses" key is refused', () => {
+  const m = allMsgs('steps:\n  - ? uses\n    : actions/checkout@v4\n');
+  assert.ok(m.some((x) => /explicit "\? key"/.test(x)));
+  assert.ok(m.some((x) => /YAML parser reads a "uses: actions\/checkout@v4"/.test(x)));
+});
+
+test('a block-scalar indicator inside an open flow collection does not hide the next lines', () => {
+  for (const src of [
+    'jobs:\n  b:\n    runs-on: x\n    steps:\n      - {name: x:|\n         , uses: evil/act@main}\n',
+    'jobs:\n  b:\n    runs-on: x\n    steps:\n      - name: a\n        with: {k: v:>\n          }\n        uses: evil/act@main\n',
+  ]) {
+    const m = allMsgs(src);
+    assert.ok(m.some((x) => /block-scalar indicator inside an open/.test(x)), src);
+    assert.ok(m.some((x) => /evil\/act@main/.test(x)), src);
+  }
+});
+
+test('YAML cross-check: aliases, << merges, escaped values and unparseable files fail', () => {
+  assert.ok(allMsgs(`x: &s\n  uses: a/b@${SHA}\nsteps:\n  - <<: *s\n`).some((x) => /YAML parser reads a "uses: a\/b@/.test(x)), 'merge');
+  assert.ok(allMsgs(`a: &s {uses: a/b@main}\nsteps:\n  - *s\n`).some((x) => /YAML parser reads/.test(x)), 'alias');
+  assert.ok(allMsgs(`steps:\n  - uses: "actions/checkout@${BS}x764"\n`).some((x) => /value with an escape sequence/.test(x)));
+  assert.ok(allMsgs('steps:\n  - uses: a/b@main\n bad: [\n').some((x) => /YAML does not parse/.test(x)));
+  assert.ok(allMsgs(`a:\n  uses: x/y@${SHA} # v1.0.0\n  uses: x/y@main\n`).some((x) => /YAML does not parse/.test(x)), 'duplicate key');
+});
+
+test('local actions: only ./.github/actions/ and ./.github/workflows/ are exempt', () => {
+  assert.deepEqual(msgs('- uses: ./.github/actions/yarn-install\n- uses: ./.github/workflows/changed-files.yaml'), []);
+  for (const v of ['./node_modules/evil', './tools/x', './.github/actions/../../node_modules/x', './.github/other/a']) {
+    assert.match(msgs(`- uses: ${v}`)[0], /local reference outside/, v);
+  }
+});

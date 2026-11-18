@@ -209,14 +209,16 @@ jobs:
   # `# vX.Y.Z` comment (local ./ actions exempt; docker:// needs a digest). --remote asks the GitHub API that each SHA is a
   # COMMIT of that repository (not an annotated tag object, not a fork-only commit) and that the comment's tag resolves to
   # exactly it. Also runs cd-deploy-tag's `gh release create` (dry run, a recording gh, the real gh's flag list), which
-  # otherwise would first run on a real tag. Node built-ins only.
+  # otherwise would first run on a real tag. Every file is also read by the real YAML parser (the root devDependency
+  # `yaml`), and both readings must find the same `uses:` values.
   action-pins:
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           persist-credentials: false
+      - uses: ./.github/actions/yarn-install
       - name: The checks' own tests (pin scanner, cd-deploy-tag release command)
         run: node --test tools/check-action-pins.test.cjs tools/create-github-release.test.cjs
       - name: Every action is pinned to a commit SHA that matches its version tag

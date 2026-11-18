@@ -7,9 +7,16 @@
 //   owner/repo[/path]@<ref>   <ref> is a full 40-character lowercase commit SHA, and the line carries a `# vX.Y.Z`
 //                             comment naming the release it is (Dependabot reads and updates that comment).
 //   docker://image@sha256:... a digest; a tag alone is mutable.
-//   ./local                   exempt: it is this repository's own code at the checked-out commit.
-// Anything the scanner cannot read as one of those (a flow mapping, an alias, a value on the next line) fails: a gate that
-// skips what it does not understand is no gate.
+//   ./.github/actions/...     exempt: this repository's own composite actions / reusable workflows at the checked-out
+//   ./.github/workflows/...   commit. Any OTHER local path (./node_modules/x, ./tools/x) is refused: it is code this
+//                             check does not cover.
+// Two independent readings must agree, so a form one of them misreads cannot hide a reference:
+//   1. a line scanner (gives the line and the `# vX.Y.Z` comment). Anything it cannot read as one of the forms above (a
+//      flow mapping, an alias, a value on the next line, an explicit `? uses` key, an escaped quoted key, a block-scalar
+//      indicator inside an open flow collection) fails;
+//   2. the real YAML parser (the repo's `yaml`, installed by yarn-install): every mapping key equal to `uses`, aliases and
+//      `<<` merges resolved, in every document. The multiset of those values must equal the scanner's, and a file that
+//      does not parse fails. A gate that skips what it does not understand is no gate.
 //
 // --remote additionally asks the GitHub API, for every distinct (repository, SHA):
 //   - is the SHA a COMMIT of that repository? An annotated TAG OBJECT's SHA is also 40 hex characters and Actions accepts
@@ -19,7 +26,8 @@
 //   - does the comment's tag exist in THAT repository and resolve (through any tag objects) to exactly the pinned commit?
 //     This also rejects an "impostor" commit: a SHA that only exists in a fork is still served through the parent
 //     repository's API and runnable by Actions, but no tag of the parent points at it.
-// The remote half needs GITHUB_TOKEN (or GH_TOKEN) and fails closed on any lookup it cannot complete. Node built-ins only.
+// The remote half needs GITHUB_TOKEN (or GH_TOKEN) and fails closed on any lookup it cannot complete. Dependencies: Node
+// built-ins and `yaml` (a root devDependency); without `yaml` the check fails, never skips.
 
 const fs = require('node:fs');
 const path = require('node:path');
@@ -37,6 +45,11 @@ const USES_LINE_RE = /^(\s*)(?:-\s+)?uses\s*:\s*('[^']*'|"[^"]*"|[^\s'"#][^\s#]*
 const USES_KEY_RE = /(?:^|[\s{,[-])["']?uses["']?\s*:/;
 // A key whose value is a block scalar (`run: |`, `script: >-`, `- run: |2`): the following more-indented lines are text.
 const BLOCK_SCALAR_RE = /^(\s*)(?:-\s+)?[^\s#][^#]*?:\s*[|>][-+0-9]*\s*(?:#.*)?$/;
+// An explicit mapping key (`? key` then `: value`), possibly as a sequence entry.
+const EXPLICIT_KEY_RE = /^\s*(?:-\s+)*\?(?:\s|$)/;
+// A double-quoted KEY containing an escape (`"u\x73es":` decodes to `uses`).
+const ESCAPED_KEY_RE = /"[^"\n]*\\[^"\n]*"\s*:(?:\s|$)/;
+const LOCAL_PREFIXES = ['./.github/actions/', './.github/workflows/'];
 
 function listYamlFiles(root) {
   const out = [];
@@ -62,7 +75,11 @@ const unquote = (v) => (/^(['"]).*\1$/.test(v) ? v.slice(1, -1) : v);
 
 // Classify one `uses:` value (offline). Returns { kind, problem?, repo?, sha?, tag? }.
 function classify(value, comment) {
-  if (value.startsWith('./')) return { kind: 'local' };
+  if (value.startsWith('./')) {
+    return LOCAL_PREFIXES.some((p) => value.startsWith(p) && !value.slice(p.length).split('/').includes('..'))
+      ? { kind: 'local' }
+      : { kind: 'local', problem: `local reference outside ./.github/actions/ and ./.github/workflows/ is not allowed: ${value}` };
+  }
   if (value.startsWith('docker://')) {
     return DOCKER_DIGEST_RE.test(value)
       ? { kind: 'docker' }
@@ -81,8 +98,14 @@ function classify(value, comment) {
   return out;
 }
 
-// Scan one file's text. Returns { refs: [{file,line,value,...classify}], problems: [{file,line,message}] }.
-function scanSource(file, text) {
+// Count of unclosed `{` / `[` on a line, outside quoted scalars (approximate; only used to refuse, never to accept).
+function openFlowDepth(code) {
+  const bare = code.replace(/"(?:[^"\\]|\\.)*"|'(?:[^']|'')*'/g, '');
+  return (bare.match(/[{[]/g) || []).length - (bare.match(/[}\]]/g) || []).length;
+}
+
+// Reading 1: the line scanner.
+function lineScan(file, text) {
   const refs = [];
   const problems = [];
   const lines = text.split(/\r?\n/);
@@ -95,12 +118,23 @@ function scanSource(file, text) {
       blockIndent = -1;
     }
     if (/^\s*#/.test(line) || line.trim() === '') continue;
-    const block = BLOCK_SCALAR_RE.exec(line);
-    if (block) {
+    const codePart = line.replace(/\s#.*$/, '');
+    if (EXPLICIT_KEY_RE.test(codePart)) {
+      problems.push({ file, line: lineNo, message: `explicit "? key" mappings are not allowed in workflows (they can hide a uses:): ${line.trim()}` });
+      continue;
+    }
+    if (ESCAPED_KEY_RE.test(codePart)) {
+      problems.push({ file, line: lineNo, message: `a quoted key with an escape sequence is not allowed (it can spell "uses"): ${line.trim()}` });
+      continue;
+    }
+    if (BLOCK_SCALAR_RE.test(line)) {
+      if (openFlowDepth(codePart) > 0) {
+        problems.push({ file, line: lineNo, message: `a block-scalar indicator inside an open { or [ is not a block scalar; not allowed: ${line.trim()}` });
+        continue;
+      }
       const lead = line.match(/^(\s*)(-\s+)?/);
       blockIndent = lead[1].length + (lead[2] ? lead[2].length : 0);
     }
-    const codePart = line.replace(/\s#.*$/, '');
     if (!USES_KEY_RE.test(codePart)) continue;
     const m = USES_LINE_RE.exec(line);
     if (!m) {
@@ -112,9 +146,84 @@ function scanSource(file, text) {
       problems.push({ file, line: lineNo, message: `"uses:" must be a literal reference, not a YAML alias/anchor/tag: ${line.trim()}` });
       continue;
     }
+    if (m[2].startsWith('"') && m[2].includes('\\')) {
+      problems.push({ file, line: lineNo, message: `"uses:" value with an escape sequence is not allowed: ${line.trim()}` });
+      continue;
+    }
     const c = classify(value, (m[3] || '').trim());
     refs.push({ file, line: lineNo, value, ...c });
     if (c.problem) problems.push({ file, line: lineNo, message: c.problem });
+  }
+  return { refs, problems };
+}
+
+function loadYaml() {
+  try {
+    return require('yaml');
+  } catch (e) {
+    throw new Error(`the YAML parser (root devDependency "yaml") is not installed; run yarn install (${e.message})`);
+  }
+}
+
+// Reading 2: every value of a mapping key `uses`, as the YAML parser decodes the file (aliases and << merges resolved,
+// every document). Returns { values: [...], errors: [...] }.
+function yamlUses(text) {
+  const YAML = loadYaml();
+  const values = [];
+  const errors = [];
+  const docs = YAML.parseAllDocuments(text, { merge: true, uniqueKeys: true, prettyErrors: false });
+  const walk = (node, depth) => {
+    if (depth > 200) throw new Error('nesting deeper than 200');
+    if (Array.isArray(node)) node.forEach((n) => walk(n, depth + 1));
+    else if (node && typeof node === 'object') {
+      for (const [k, v] of Object.entries(node)) {
+        if (k === 'uses') values.push(typeof v === 'string' ? v : `<non-string ${JSON.stringify(v)}>`);
+        walk(v, depth + 1);
+      }
+    }
+  };
+  for (const doc of docs) {
+    const errs = doc.errors || [];
+    for (const e of errs) errors.push(String(e.message).split('\n')[0]);
+    if (errs.length) continue;
+    try {
+      walk(doc.toJS({ maxAliasCount: 10000 }), 0);
+    } catch (e) {
+      errors.push(e.message);
+    }
+  }
+  return { values, errors };
+}
+
+// Scan one file's text with both readings. Returns { refs: [{file,line,value,...classify}], problems: [{file,line,message}] }.
+function scanSource(file, text) {
+  const { refs, problems } = lineScan(file, text);
+  let parsed;
+  try {
+    parsed = yamlUses(text);
+  } catch (e) {
+    problems.push({ file, line: 0, message: `YAML cross-check could not run (fail closed): ${e.message}` });
+    return { refs, problems };
+  }
+  for (const e of parsed.errors) problems.push({ file, line: 0, message: `YAML does not parse (fail closed): ${e}` });
+  if (parsed.errors.length) return { refs, problems };
+  // The two readings must give the same multiset of `uses` values.
+  const scanned = new Map();
+  for (const r of refs) scanned.set(r.value, (scanned.get(r.value) || 0) + 1);
+  for (const v of parsed.values) {
+    if (scanned.get(v)) scanned.set(v, scanned.get(v) - 1);
+    else
+      problems.push({
+        file,
+        line: 0,
+        message: `the YAML parser reads a "uses: ${v}" that the line scanner did not (an escaped, explicit, flow, merged or aliased key?)`,
+      });
+  }
+  for (const [v, n] of scanned) {
+    if (n > 0) {
+      const r = refs.find((x) => x.value === v);
+      problems.push({ file, line: r.line, message: `the line scanner reads "uses: ${v}" but the YAML parser does not (fail closed)` });
+    }
   }
   return { refs, problems };
 }
@@ -255,7 +364,7 @@ async function main(argv) {
   return 0;
 }
 
-module.exports = { scan, scanSource, classify, listYamlFiles, makeApi, resolveTag, verifyRemote };
+module.exports = { scan, scanSource, lineScan, yamlUses, classify, listYamlFiles, makeApi, resolveTag, verifyRemote };
 
 if (require.main === module) {
   main(process.argv.slice(2)).then(

@@ -287,7 +287,9 @@ jobs:
       - name: A one-platform download keeps the path/<artifact name>/ layout
         run: |
           set -euo pipefail
-          mapfile -t archs < <(python3 -c 'import json,os; [print(p.split("/", 1)[1]) for p in json.loads(os.environ["PLATFORMS"])]')
+          # A command substitution, not `< <(...)`: under set -e a python failure stops the step here.
+          list="$(python3 -c 'import json,os; [print(p.split("/", 1)[1]) for p in json.loads(os.environ["PLATFORMS"])]')"
+          mapfile -t archs <<< "$list"
           if [ "${#archs[@]}" -ne 1 ]; then echo "${#archs[@]} platforms: already path/<artifact name>/"; exit 0; fi
           a="${archs[0]}"
           for pair in "meta:image-layout-meta-$a" "full:image-layout-image-$a" "evidence:image-gate-evidence-$a"; do
