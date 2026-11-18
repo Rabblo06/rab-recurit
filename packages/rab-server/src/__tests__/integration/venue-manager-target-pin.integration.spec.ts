@@ -219,13 +219,22 @@ describeIfDb('Venue Manager route flag pins the target in every ManagerService m
     });
   });
 
-  it('getTimeline, listNotes and listEmails with venue_manager.create on an Internal Manager → 404, no data returned', async () => {
-    await withGranted(ceoA, PermissionFlag.VENUE_MANAGER_CREATE, async () => {
-      const ctx = ctxOf(ceoA);
-      await expectNotFoundNoDataAndInert(() => managers.getTimeline(ctx, internalA.profileId!, PermissionFlag.VENUE_MANAGER_CREATE));
-      await expectNotFoundNoDataAndInert(() => managers.listNotes(ctx, internalA.profileId!, PermissionFlag.VENUE_MANAGER_CREATE));
-      await expectNotFoundNoDataAndInert(() => managers.listEmails(ctx, internalA.profileId!, PermissionFlag.VENUE_MANAGER_CREATE));
-    });
+  it('getTimeline with venue_manager.create on an Internal Manager → 404, no data returned', async () => {
+    await withGranted(ceoA, PermissionFlag.VENUE_MANAGER_CREATE, () =>
+      expectNotFoundNoDataAndInert(() => managers.getTimeline(ctxOf(ceoA), internalA.profileId!, PermissionFlag.VENUE_MANAGER_CREATE)),
+    );
+  });
+
+  it('listNotes with venue_manager.create on an Internal Manager → 404, no data returned', async () => {
+    await withGranted(ceoA, PermissionFlag.VENUE_MANAGER_CREATE, () =>
+      expectNotFoundNoDataAndInert(() => managers.listNotes(ctxOf(ceoA), internalA.profileId!, PermissionFlag.VENUE_MANAGER_CREATE)),
+    );
+  });
+
+  it('listEmails with venue_manager.create on an Internal Manager → 404, no data returned', async () => {
+    await withGranted(ceoA, PermissionFlag.VENUE_MANAGER_CREATE, () =>
+      expectNotFoundNoDataAndInert(() => managers.listEmails(ctxOf(ceoA), internalA.profileId!, PermissionFlag.VENUE_MANAGER_CREATE)),
+    );
   });
 
   it('addNote with venue_manager.create on an Internal Manager → 404, no note and no audit row', async () => {
