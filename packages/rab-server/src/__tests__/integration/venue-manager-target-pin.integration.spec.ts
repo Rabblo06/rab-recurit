@@ -2,6 +2,7 @@ import 'reflect-metadata';
 import { PermissionFlag, PermissionFlagType, UserStatus } from '@rab/shared';
 import { INestApplication, NotFoundException } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
+import { randomUUID } from 'node:crypto';
 import { DataSource } from 'typeorm';
 
 import { AppModule } from '../../app.module';
@@ -11,14 +12,16 @@ import { AuthContext } from '../../engine/core-modules/tenant/auth-context.inter
 import { TenantContextService } from '../../engine/core-modules/tenant/tenant-context.service';
 import { ManagerService } from '../../modules/manager/services/manager.service';
 import { createAdminDataSource } from './helpers/admin-datasource';
+import { businessTable } from './helpers/hws-fixtures';
 import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
 import { applyGlobalValidationPipe } from '../../engine/utils/global-validation-pipe';
 import { integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
 
 /**
- * SF-2 review L-1 follow-up: `ManagerService.update`, `setActive` and `resetPassword` called with the Venue Manager route's
- * flag (`venue_manager.create`) pin the target, in the action's own transaction, to a `type: venue` profile of the caller's
- * own workspace. Anything else is 404 and nothing changes.
+ * SF-2 review L-1 follow-up: every ManagerService method that accepts the Venue Manager route's flag
+ * (`venue_manager.create`) pins the target, in the action's own transaction, to a `type: venue` profile of the caller's own
+ * workspace: `update`, `setActive`, `resetPassword`, `changePendingEmail`, `changeEmail`, `getTimeline`, `listNotes`,
+ * `addNote`, `listEmails`. Anything else is 404, nothing changes, and a read returns no data.
  *
  * The caller is a CEO that CAN see the Internal Manager target under RLS and holds `venue_manager.create` through a real
  * per-user grant override (plus `user.reset_password`), with a workspace: without the pin every refused call below would
@@ -29,7 +32,7 @@ import { integrationTestDatabaseReady } from '../../database/typeorm/core/integr
 const RUN = integrationTestDatabaseReady();
 const describeIfDb = RUN ? describe : describe.skip;
 
-describeIfDb('Venue Manager route flag pins the target: update / setActive / resetPassword (integration)', () => {
+describeIfDb('Venue Manager route flag pins the target in every ManagerService method that accepts it (integration)', () => {
   jest.setTimeout(300_000);
 
   let app: INestApplication;
@@ -43,6 +46,8 @@ describeIfDb('Venue Manager route flag pins the target: update / setActive / res
   let internalA: TestIdentity; // ACTIVE Internal Manager: the target the Venue Manager flag must never reach
   let ownVmA: TestIdentity; // ACTIVE Venue Manager in ceoA's own workspace (positive control)
   let otherVmA: TestIdentity; // ACTIVE Venue Manager in mgrA's workspace (another workspace)
+  let pendingInternalA: TestIdentity; // INVITED Internal Manager (pending-email / direct change-email target)
+  let pendingOwnVmA: TestIdentity; // INVITED Venue Manager in ceoA's own workspace (positive control)
 
   const ctxOf = (identity: TestIdentity): AuthContext => ({ organisationId: identity.organisationId, workspaceId: identity.workspaceId, userId: identity.userId, role: 'manager' });
 
@@ -69,7 +74,7 @@ describeIfDb('Venue Manager route flag pins the target: update / setActive / res
     }
   }
 
-  /** Everything update / setActive / resetPassword could write in the organisation, read as the fixture superuser (not narrowed by RLS). */
+  /** Everything the pinned methods could write in the organisation, read as the fixture superuser (not narrowed by RLS). */
   async function snapshot(): Promise<Record<string, unknown>> {
     const [row] = (await admin.query(
       `SELECT
@@ -77,7 +82,11 @@ describeIfDb('Venue Manager route flag pins the target: update / setActive / res
          (SELECT count(*) FROM core.email_outbox WHERE organisation_id = $1)::int AS outbox,
          (SELECT count(*) FROM core.password_reset_token WHERE organisation_id = $1)::int AS reset_tokens,
          (SELECT count(*) FROM core.refresh_token WHERE organisation_id = $1 AND revoked_at IS NOT NULL)::int AS revoked_refresh_tokens,
-         (SELECT json_agg(json_build_object('id', id, 'first', first_name, 'last', last_name, 'phone', phone, 'status', status,
+         (SELECT count(*) FROM core.account_invite WHERE organisation_id = $1)::int AS invites,
+         (SELECT count(*) FROM core.account_invite WHERE organisation_id = $1 AND revoked_at IS NULL)::int AS live_invites,
+         (SELECT count(*) FROM core.email_change_request WHERE organisation_id = $1)::int AS email_change_requests,
+         (SELECT count(*) FROM ${businessTable(ceoA.workspaceId!, 'user_note')} WHERE organisation_id = $1)::int AS notes,
+         (SELECT json_agg(json_build_object('id', id, 'email', email, 'first', first_name, 'last', last_name, 'phone', phone, 'status', status,
                                             'mustReset', must_reset_password, 'securityVersion', security_version) ORDER BY id)
             FROM core."user" WHERE organisation_id = $1) AS users,
          (SELECT json_agg(json_build_object('id', id, 'jobTitle', job_title, 'archived', archived_at) ORDER BY id)
@@ -92,6 +101,24 @@ describeIfDb('Venue Manager route flag pins the target: update / setActive / res
     await expect(call()).rejects.toBeInstanceOf(NotFoundException);
     expect(await snapshot()).toEqual(before);
   }
+
+  /** A read refused by the pin: 404, nothing returned, nothing written. */
+  async function expectNotFoundNoDataAndInert(call: () => Promise<unknown>): Promise<void> {
+    const before = await snapshot();
+    let returned: unknown = undefined;
+    let error: unknown = undefined;
+    try {
+      returned = await call();
+    } catch (e) {
+      error = e;
+    }
+    expect(returned).toBeUndefined();
+    expect(error).toBeInstanceOf(NotFoundException);
+    expect(await snapshot()).toEqual(before);
+  }
+
+  const setInvited = (identity: TestIdentity) => admin.query(`UPDATE core."user" SET status = $2 WHERE id = $1`, [identity.userId, UserStatus.INVITED]);
+  const newEmail = (label: string) => `vmpin-${label}-${randomUUID()}@example.test`;
 
   async function auditActions(targetUserId: string, actions: string[]): Promise<string[]> {
     const rows = (await admin.query(
@@ -119,6 +146,13 @@ describeIfDb('Venue Manager route flag pins the target: update / setActive / res
     internalA = await factory.createInternalManager(seeded.organisation, { label: 'vmpin-a-internal' });
     ownVmA = await factory.createVenueManager(seeded.organisation, { owner: ceoA, label: 'vmpin-a-own-vm' });
     otherVmA = await factory.createVenueManager(seeded.organisation, { owner: mgrA, label: 'vmpin-a-other-vm' });
+    pendingInternalA = await factory.createInternalManager(seeded.organisation, { label: 'vmpin-a-pending-internal', workspace: false });
+    await setInvited(pendingInternalA);
+    pendingOwnVmA = await factory.createVenueManager(seeded.organisation, { owner: ceoA, label: 'vmpin-a-pending-own-vm' });
+    await setInvited(pendingOwnVmA);
+    // Data the reads would return without the pin: a note on the Internal Manager (and its manager.note_added audit row),
+    // written through the /managers flag.
+    await managers.addNote(ctxOf(ceoA), internalA.profileId!, { body: 'Internal Manager note' } as never);
   });
 
   afterAll(async () => {
@@ -129,6 +163,9 @@ describeIfDb('Venue Manager route flag pins the target: update / setActive / res
   it('precondition: the caller CAN see the Internal Manager under RLS (the /managers route reads it), so only the pin can refuse below', async () => {
     expect(ceoA.workspaceId).toBeTruthy();
     expect((await managers.get(ctxOf(ceoA), internalA.profileId!)).id).toBe(internalA.profileId);
+    expect((await managers.get(ctxOf(ceoA), pendingInternalA.profileId!)).id).toBe(pendingInternalA.profileId);
+    expect((await managers.listNotes(ctxOf(ceoA), internalA.profileId!)).map((n) => n.body)).toContain('Internal Manager note');
+    await expect(managers.getTimeline(ctxOf(ceoA), internalA.profileId!)).resolves.toEqual(expect.any(Array));
   });
 
   it('update with venue_manager.create on an Internal Manager → 404, nothing changes', async () => {
@@ -162,6 +199,62 @@ describeIfDb('Venue Manager route flag pins the target: update / setActive / res
         await expectNotFoundAndInert(() => managers.setActive(signedIn, id, false, PermissionFlag.VENUE_MANAGER_CREATE));
         await expectNotFoundAndInert(() => managers.resetPassword(signedIn, id, PermissionFlag.VENUE_MANAGER_CREATE));
       }
+    });
+  });
+
+  it('changePendingEmail with venue_manager.create on a pending Internal Manager → 404: no email change, invite or outbox row', async () => {
+    await withGranted(ceoA, PermissionFlag.VENUE_MANAGER_CREATE, async () => {
+      const signedIn = await factory.signedInContext(ceoA);
+      await expectNotFoundAndInert(() => managers.changePendingEmail(signedIn, pendingInternalA.profileId!, { email: newEmail('cpe') }, PermissionFlag.VENUE_MANAGER_CREATE));
+    });
+  });
+
+  it('changeEmail with venue_manager.create on an Internal Manager → 404, both the direct (invited) and the verified (active) path', async () => {
+    await withGranted(ceoA, PermissionFlag.VENUE_MANAGER_CREATE, async () => {
+      const signedIn = await factory.signedInContext(ceoA);
+      await expectNotFoundAndInert(() => managers.changeEmail(signedIn, pendingInternalA.profileId!, { email: newEmail('ce-direct') } as never, PermissionFlag.VENUE_MANAGER_CREATE));
+      await expectNotFoundAndInert(() =>
+        managers.changeEmail(signedIn, internalA.profileId!, { email: newEmail('ce-verified'), currentPassword: ceoA.password } as never, PermissionFlag.VENUE_MANAGER_CREATE),
+      );
+    });
+  });
+
+  it('getTimeline, listNotes and listEmails with venue_manager.create on an Internal Manager → 404, no data returned', async () => {
+    await withGranted(ceoA, PermissionFlag.VENUE_MANAGER_CREATE, async () => {
+      const ctx = ctxOf(ceoA);
+      await expectNotFoundNoDataAndInert(() => managers.getTimeline(ctx, internalA.profileId!, PermissionFlag.VENUE_MANAGER_CREATE));
+      await expectNotFoundNoDataAndInert(() => managers.listNotes(ctx, internalA.profileId!, PermissionFlag.VENUE_MANAGER_CREATE));
+      await expectNotFoundNoDataAndInert(() => managers.listEmails(ctx, internalA.profileId!, PermissionFlag.VENUE_MANAGER_CREATE));
+    });
+  });
+
+  it('addNote with venue_manager.create on an Internal Manager → 404, no note and no audit row', async () => {
+    await withGranted(ceoA, PermissionFlag.VENUE_MANAGER_CREATE, async () => {
+      await expectNotFoundAndInert(() => managers.addNote(ctxOf(ceoA), internalA.profileId!, { body: 'Should not land' } as never, PermissionFlag.VENUE_MANAGER_CREATE));
+    });
+  });
+
+  it('positive control: with venue_manager.create the same caller corrects and changes a pending own-workspace Venue Manager email', async () => {
+    const corrected = newEmail('own-cpe');
+    const changed = newEmail('own-ce');
+    await withGranted(ceoA, PermissionFlag.VENUE_MANAGER_CREATE, async () => {
+      const signedIn = await factory.signedInContext(ceoA);
+      const sent = await managers.changePendingEmail(signedIn, pendingOwnVmA.profileId!, { email: corrected }, PermissionFlag.VENUE_MANAGER_CREATE);
+      expect(sent.sendNumber).toBe(1);
+      expect(await managers.changeEmail(signedIn, pendingOwnVmA.profileId!, { email: changed } as never, PermissionFlag.VENUE_MANAGER_CREATE)).toEqual({ email: changed });
+    });
+    const [user] = (await admin.query(`SELECT email FROM core."user" WHERE id = $1`, [pendingOwnVmA.userId])) as Array<{ email: string }>;
+    expect(user!.email).toBe(changed);
+  });
+
+  it('positive control: with venue_manager.create the same caller adds a note to, and reads the timeline, notes and emails of, an own-workspace Venue Manager', async () => {
+    await withGranted(ceoA, PermissionFlag.VENUE_MANAGER_CREATE, async () => {
+      const ctx = ctxOf(ceoA);
+      const note = await managers.addNote(ctx, ownVmA.profileId!, { body: 'Own Venue Manager note' } as never, PermissionFlag.VENUE_MANAGER_CREATE);
+      expect(note.body).toBe('Own Venue Manager note');
+      expect((await managers.listNotes(ctx, ownVmA.profileId!, PermissionFlag.VENUE_MANAGER_CREATE)).map((n) => n.id)).toContain(note.id);
+      await expect(managers.getTimeline(ctx, ownVmA.profileId!, PermissionFlag.VENUE_MANAGER_CREATE)).resolves.toEqual(expect.any(Array));
+      await expect(managers.listEmails(ctx, ownVmA.profileId!, PermissionFlag.VENUE_MANAGER_CREATE)).resolves.toEqual(expect.any(Array));
     });
   });
 
