@@ -76,6 +76,10 @@ targets:
     platform: iOS
     sources:
       - path: CrewflowTests
+      # Money-display cases shared with the web and Flutter test suites
+      # (MoneyTests reads it as the "money-format-cases" fixture).
+      - path: ../rab-shared/src/utils/money-format-cases.json
+        buildPhase: resources
     dependencies:
       - target: Crewflow
     settings:

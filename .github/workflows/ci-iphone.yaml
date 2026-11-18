@@ -9,10 +9,14 @@ on:
   push:
     paths:
       - 'packages/rab-iphone/**'
+      # Shared money-display cases, bundled into the unit tests (project.yml).
+      - 'packages/rab-shared/src/utils/money-format-cases.json'
       - '.github/workflows/ci-iphone.yaml'
   pull_request:
     paths:
       - 'packages/rab-iphone/**'
+      # Shared money-display cases, bundled into the unit tests (project.yml).
+      - 'packages/rab-shared/src/utils/money-format-cases.json'
       - '.github/workflows/ci-iphone.yaml'
 
 concurrency:
