@@ -817,11 +817,47 @@ test('environment preflight: CREWFLOW_PG_CA_FILE is held to the boot rules of PG
 // unset; WORKSPACE_BASE_DOMAIN is the one documented exception (GET /auth/config would answer "" instead of null).
 const BARE_OPTIONAL_ALLOWED = Object.freeze(['WORKSPACE_BASE_DOMAIN']);
 
+/**
+ * Every environment key with NO value in a parsed compose document, in every form Compose accepts: `KEY:`, `KEY:  # note`,
+ * `KEY: null`, `KEY: ~` (all YAML null) in a mapping, and `- KEY` (no `=`) in a list. Walks every top-level `x-*`
+ * extension mapping and every service's `environment` (after YAML merge keys). Returns sorted unique names.
+ */
+function bareEnvKeys(doc) {
+  const out = new Set();
+  const scan = (env) => {
+    if (Array.isArray(env)) {
+      for (const item of env) if (item === null || (typeof item === 'string' && !item.includes('='))) out.add(String(item ?? '(null)'));
+    } else if (env && typeof env === 'object') {
+      for (const [k, v] of Object.entries(env)) if (k !== '<<' && v === null) out.add(k);
+    }
+  };
+  for (const [k, v] of Object.entries(doc ?? {})) if (k.startsWith('x-')) scan(v);
+  for (const svc of Object.values(doc?.services ?? {})) scan(svc?.environment);
+  return [...out].sort();
+}
+const parseCompose = (text) => require('yaml').parse(text, { merge: true });
+
+test('bareEnvKeys catches every bare form: KEY:, KEY: # comment, KEY: null, KEY: ~, - KEY (mapping, list, x-* anchor)', () => {
+  const ok = 'services:\n  a:\n    environment:\n      A: ${A:-}\n      B: "x"\n';
+  assert.deepEqual(bareEnvKeys(parseCompose(ok)), []);
+  for (const [form, text] of [
+    ['KEY:', 'services:\n  a:\n    environment:\n      A: ${A:-}\n      K:\n'],
+    ['KEY:  # comment', 'services:\n  a:\n    environment:\n      K:  # leave empty\n'],
+    ['KEY: null', 'services:\n  a:\n    environment:\n      K: null\n'],
+    ['KEY: ~', 'services:\n  a:\n    environment:\n      K: ~\n'],
+    ['- KEY', 'services:\n  a:\n    environment:\n      - A=1\n      - K\n'],
+    ['x-* anchor KEY:', 'x-env: &e\n  K:\nservices:\n  a:\n    environment:\n      <<: *e\n'],
+  ]) {
+    assert.deepEqual(bareEnvKeys(parseCompose(text)), ['K'], `the ${form} form is caught`);
+  }
+});
+
 test('docker-compose.production.yml: no bare optional key except WORKSPACE_BASE_DOMAIN (OpenShip shows the rest as "fallback default")', () => {
   const fsx = require('node:fs');
   const pathx = require('node:path');
   const text = fsx.readFileSync(pathx.resolve(__dirname, '../docker-compose.production.yml'), 'utf8');
-  const bare = [...text.matchAll(/^\s+([A-Z][A-Z0-9_]*):[ \t]*$/gm)].map((m) => m[1]);
+  assert.deepEqual(bareEnvKeys(parseCompose(text)), [...BARE_OPTIONAL_ALLOWED], 'parsed: keys with no value');
+  const bare = [...text.matchAll(/^\s+([A-Z][A-Z0-9_]*):[ \t]*(#.*)?$/gm)].map((m) => m[1]);
   assert.deepEqual(bare, [...BARE_OPTIONAL_ALLOWED], `bare keys: ${bare.join(', ')}`);
   // The empty-default keys keep their own name inside the interpolation (never another variable's value), except the
   // bundled db's POSTGRES_PASSWORD, which is ${PG_DATABASE_PASSWORD:-} by design (owner decision 2026-11-17).
@@ -834,6 +870,17 @@ test('docker-compose.production.yml: no bare optional key except WORKSPACE_BASE_
   // Never touched: rab-api / rab-worker keep PG_ADMIN_URL and PG_DATABASE_URL pinned to the literal "".
   assert.equal([...text.matchAll(/^\s+PG_ADMIN_URL: ""$/gm)].length, 2, 'PG_ADMIN_URL: "" on rab-api and rab-worker');
   assert.equal([...text.matchAll(/^\s+PG_DATABASE_URL: ""$/gm)].length, 1, 'PG_DATABASE_URL: "" in the shared required list');
+});
+
+test('rendered docker-compose.production.yml: no service gets a null (no-value) variable except WORKSPACE_BASE_DOMAIN', { skip }, () => {
+  const m = fresh();
+  const nulls = new Set();
+  for (const svc of Object.values(m.production.services ?? {})) {
+    for (const [k, v] of Object.entries(svc?.environment ?? {})) if (v === null || v === undefined) nulls.add(k);
+  }
+  for (const k of nulls) assert.ok(BARE_OPTIONAL_ALLOWED.includes(k), `${k} renders with no value`);
+  // The empty defaults render as "" (a value), e.g. db-setup's CA settings.
+  for (const k of ['PG_SSL_CA_CERT_PATH', 'PG_SSL_CA_CERT']) assert.equal(m.production.services['db-setup'].environment[k], '', `db-setup ${k}`);
 });
 
 test('pinnedEnvValue: "" equals "not set" only for rab-api\'s optional PG_POOL_MAX_CONNECTIONS; any other value or key is exact', () => {
