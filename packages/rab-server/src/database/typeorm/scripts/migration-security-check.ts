@@ -235,6 +235,15 @@ export const REVIEWED_MIGRATION_DRIFT: Readonly<Record<string, readonly string[]
   '1786721560000-MetadataVersionState': [
     "+ policy|workspace_metadata_state|workspace_metadata_state_tenant|*|permissive=true|roles=public|using=((organisation_id = core.current_org()) AND (workspace_id = core.current_workspace()))|check=((organisation_id = core.current_org()) AND (workspace_id = core.current_workspace()))",
   ],
+  // #205 layer 4 (DRAFT, owner SQL review pending; release 0.7.0, structure level 24): the core copy of the staff same-shift
+  // team read policy changes ONLY its role test, from equality on the comma-joined rab.role to membership ('staff' = ANY
+  // (string_to_array(rab.role, ','))). Same table, name, command (SELECT), PERMISSIVE, TO PUBLIC, no WITH CHECK; no grant, no
+  // new policy. The migration's own check replaces only a known USING expression. Lines as measured by this harness on
+  // PostgreSQL 16 (fresh as the restricted migrator and upgrade as the bootstrap superuser: identical).
+  '1786721590000-StaffShiftTeamMultiRole': [
+    "- policy|staff_profile|staff_profile_shift_team_select|r|permissive=true|roles=public|using=((organisation_id = core.current_org()) AND (workspace_id = core.current_workspace()) AND (current_setting('rab.role'::text, true) = 'staff'::text) AND (EXISTS ( SELECT 1",
+    "+ policy|staff_profile|staff_profile_shift_team_select|r|permissive=true|roles=public|using=((organisation_id = core.current_org()) AND (workspace_id = core.current_workspace()) AND ('staff'::text = ANY (string_to_array(current_setting('rab.role'::text, true), ','::text))) AND (EXISTS ( SELECT 1",
+  ],
 };
 
 type Identity = 'phaseA' | 'bootstrap' | 'restricted' | 'crewflow' | 'crewflow_app' | 'crewflow_worker';
