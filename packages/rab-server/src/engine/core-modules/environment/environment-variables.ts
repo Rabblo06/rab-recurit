@@ -99,6 +99,14 @@ export class EnvironmentVariables {
   @IsString()
   PG_SSL_CA_CERT_PATH?: string;
 
+  /**
+   * The same CA as PEM TEXT, for hosts that cannot mount a file (a PaaS). Real newlines or `\n` escapes. Mutually exclusive
+   * with PG_SSL_CA_CERT_PATH; validated at boot (pg-tls.ts validatePgCaPem: certificates only, each parseable). Never logged.
+   */
+  @IsOptional()
+  @IsString()
+  PG_SSL_CA_CERT?: string;
+
   /** Declares PG_DATABASE_URL a direct (non-pooled) connection. Never skips the Worker's session probe. */
   @IsOptional()
   @Type(() => String)

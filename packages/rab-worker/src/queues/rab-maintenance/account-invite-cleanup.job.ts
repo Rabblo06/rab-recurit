@@ -638,7 +638,8 @@ class Level22Retain extends Error {
 function level22RetainReason(error: unknown): string | null {
   if (error instanceof Level22Retain) return error.reason;
   const driver = (error as { driverError?: { code?: string; constraint?: string } } | null)?.driverError;
-  return driver?.code === '23503' ? `workspace_referenced:${driver.constraint ?? 'unknown'}` : null;
+  // 23503, or 23001 (restrict_violation) on PostgreSQL 18 for a RESTRICT key: the same "still referenced".
+  return driver?.code === '23503' || driver?.code === '23001' ? `workspace_referenced:${driver.constraint ?? 'unknown'}` : null;
 }
 
 /**

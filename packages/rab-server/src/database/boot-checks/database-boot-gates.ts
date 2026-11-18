@@ -16,7 +16,9 @@
  *                walk (INHERIT, SET and ADMIN-only edges, indirect, predefined and provider-admin roles) reaches nothing
  *                SUPERUSER / BYPASSRLS / CREATEDB / REPLICATION or dangerous, and the role layout is exactly the reviewed
  *                owner-login inventory (owner-login-posture.ts). Membership of the owner roles is expected (catalogue BC-01).
- *   2. version   server_version_num >= 160000 (PostgreSQL 16; PG16 role-membership semantics are relied on).
+ *   2. version   the server major is one of database/postgres/supported-majors.ts (16, 17, 18): below 16 the PG16
+ *                role-membership semantics are missing, above 18 no reviewed workspace fingerprints / goldens exist.
+ *                After the gates pass, the workspace fingerprints of that major are selected for this process.
  *   3. extensions  the extensions the migrations create are installed: btree_gist, citext, pg_trgm, pgcrypto, unaccent.
  *                (uuid-ossp is NOT required: no column default uses it — verified on a migrations-only database.)
  *   4. identity  the deployment identity marker (deployment-identity.ts): declared env vs the protected marker, and
@@ -56,6 +58,7 @@
 import { DataSourceOptions } from 'typeorm';
 
 import { createPgDataSource, PgConfigError, resolvePgEnvironmentCached } from '../postgres';
+import { selectWorkspaceFingerprintMajor, UnsupportedPostgresVersionError } from '../typeorm/workspace-schema/v1/expected-fingerprints';
 import { coreDataSourceOptions } from '../typeorm/core/core.datasource';
 import {
   BootGateReport,
@@ -175,6 +178,19 @@ export async function runDatabaseBootGates(processName: BootProcess, options: Ru
     },
     { log, ...options.retry },
   );
+
+  // PG17/18 fix: the workspace fingerprints of THIS server's major for the rest of the process (the Worker's in-process
+  // provisioner and drift loop, the CLI, anything that reads EXPECTED_WORKSPACE_FINGERPRINTS / declaredFingerprint). Before
+  // this, every API / Worker / CLI process kept the PostgreSQL 16 table on 17 and 18, so the Worker's provisioner refused
+  // every workspace it built (fingerprint mismatch, workspace FAILED) and the drift job reported READY module 14-20 ones as
+  // DRIFTED. Gate 2 already refused any other major; a process that selected another major before is refused here (never a
+  // silent switch).
+  try {
+    selectWorkspaceFingerprintMajor(Math.floor(report.serverVersionNum / 10000));
+  } catch (error) {
+    if (error instanceof UnsupportedPostgresVersionError) throw new DatabaseBootGateError('version', `${label}: ${error.message}`);
+    throw error;
+  }
 
   for (const w of report.warnings) log(`[db-boot-gates] WARNING ${label}: ${w}`);
   log(

@@ -7540,6 +7540,102 @@ Controls: the runbook's explicit upgrade step (3.2 step 0: move the line to `com
 makes every process refuse the bundled database. Residual: an operator who skips the lint and the preflight, with no
 `PG_EXPECTED_DATABASE_NAME` or one equal to `crewflow`.
 
+### TM-DB-5 (owner-approved 2026-11-17) — your own database, app login created by you (`own-database-app-login.sql`)
+
+A database admin creates `crewflow_owner` by hand with
+`packages/rab-docker/postgres-init/owner-login/own-database-app-login.sql`. Crewflow then receives only the
+`crewflow_owner` URL and never an admin credential (runbook OWNER-LOGIN-DEPLOYMENT.md section 4a; Twenty: an external
+database, no setup step).
+
+- **Owner decision 2026-11-17.** The SQL is approved, with two required steps:
+  - the login test (runbook 4a step 3) before any variable is set or anything is deployed;
+  - `ALTER ROLE crewflow_owner NOCREATEROLE` after the first start has completed: the rab-api log shows the migrate
+    result with serve=true, or a restart reports state CURRENT (step 6).
+
+  Owner 2026-11-17: both trade-offs accepted. The verifier can appear in logs (Twenty's Helm setup puts the plaintext
+  password in SQL, so ours is stricter). The empty-password risk is caught by the required login test.
+
+- **Result.** The role attributes and the database grant are identical to db-setup's Q4c. When a non-superuser admin
+  creates it, the admin keeps the PostgreSQL 16 ADMIN-only creator row on `crewflow_owner`, the same row the db-setup
+  admin path leaves. Rule 3 of the posture check accepts that row, and it gives the admin no INHERIT or SET.
+- **Reduces TM-DB-1, from admin to schema owner; removes TM-DB-3 for this install.** db-setup's definition holds the
+  `crewflow_owner` URL instead of an admin URL: whoever reads it gets the schema owner (with CREATEROLE until the
+  hardening below), not the provider admin. No bootstrap runs with admin rights on `up`; db-setup's owner-URL mode is
+  read-only.
+- **Residual L2: the SCRAM verifier.** `\password` sends `ALTER USER crewflow_owner PASSWORD '<SCRAM verifier>'` as
+  statement text. The verifier (not the password) can appear in server logs (log_statement ddl/all, or any failed
+  ALTER), pg_stat_statements and audit logs. With verify-full TLS it is only an offline-guessing target, which a 32-byte
+  random password defeats.
+  - Proven on PG16 (2026-11-17): `pg_stat_statements` (track_utility on, the default) stores the full statement text,
+    verifier included (`ALTER USER crewflow_owner PASSWORD 'SCRAM-SHA-256$4096:...'`). It is not normalised.
+  - Control: the script runs db-setup's Q1 first. For a superuser admin it turns off this session's statement logging;
+    proven: 0 verifier lines in a `log_statement=all` log. For a non-superuser admin Q1 is a no-op, and the log kept 1
+    verifier line. Q1 does not affect pg_stat_statements or provider audit logs.
+  - Control: the runbook requires `openssl rand -hex 32`. Not prevented: a weak password chosen by the admin.
+  - db-setup avoids all of this with bind parameters inside a DO block, which psql cannot do. The exception is
+    `log_statement=all` with a non-superuser admin, where PostgreSQL logs the bound parameter.
+- **Residual M1: a partial or interactive run.** The script is meant to run as a file (`psql -X -v ON_ERROR_STOP=1 -f`).
+  It also sets `ON_ERROR_STOP` on, `ON_ERROR_ROLLBACK` off and `AUTOCOMMIT` on itself, and every check runs inside the one
+  transaction. A failed check therefore aborts the transaction even if psql keeps going, and COMMIT rolls back.
+  - Proven: the file fed on stdin, a psqlrc with `ON_ERROR_ROLLBACK on` and `ON_ERROR_STOP off`, and the script with its
+    `\set` lines removed all left no `crewflow_owner` on a cluster where `rab_owner` existed.
+  - Not prevented: someone who pastes only some of the statements, or sets `ON_ERROR_ROLLBACK on` after the script's own
+    `\set` lines. The runbook says never to paste it.
+- **Residual L1: an empty or failed password entry.** `\password` runs inside the transaction. When the script is run as
+  a file, mismatched entries stop psql and roll everything back (proven). An empty entry (two empty lines, or end of
+  input) is accepted by psql, and the server then clears the password.
+  - A failed `\password` in an interactive session (pasted, or `\i` then a manual COMMIT) can leave a role without a
+    password; step 3 catches it.
+  - A superuser admin: the re-check reads `pg_authid` and rolls back (proven).
+  - A non-superuser admin cannot read `pg_authid`. The script then commits a passwordless LOGIN CREATEROLE role. It
+    cannot log in with a password (proven: 28P01), and db-setup refuses it (exit 64). The runbook's login check names
+    this state and its remedy (`REVOKE ... CASCADE; DROP ROLE crewflow_owner`, proven as the same admin).
+  - Residual: such a role is usable only through a `trust`, `peer` or `cert` rule in the provider's `pg_hba.conf`.
+- **CREATEROLE is REQUIRED to be removed after the first start has completed** (the rab-api log shows the migrate
+  result with serve=true, or a restart reports state CURRENT; `/healthz` 200 alone is a loose signal). This is runbook
+  4a step 6, owner decision 2026-11-17; Twenty's app user never has CREATEROLE. `crewflow_owner` needs CREATEROLE only on the first start: the bootstrap creates the schema
+  roles, and the role migrations up to 1786691000000 run. Until the admin runs `ALTER ROLE crewflow_owner NOCREATEROLE`,
+  a leaked URL is the schema owner with CREATEROLE (behaviour catalogue).
+  - No runtime path and no migration after 1786691000000 creates, alters or grants a role; the code was searched.
+  - The upgrade runner refuses a workspace step that writes the role catalogs.
+  - The API provisions workspaces through `core.provision_workspace` (SECURITY DEFINER, owned by `crewflow`). The
+    Worker provisions with `SET ROLE crewflow`.
+  - Proven on PG16 with NOCREATEROLE (2026-11-17, runbook 4a "Status"):
+    - a restart: db-setup, migrate, and the API / Worker boot gates;
+    - an upgrade that applied the 8 migrations after R256, the C3 cutover functions among them;
+    - the app's own provisioning and upgrade-runner integration specs: 112 passed, 0 failed. They cover the API
+      server path (`core.provision_workspace`), the Worker's `SET ROLE crewflow` path, the 0.6.0 workspace commands
+      and the locked start.
+  - Residual (flagged assumption): a future release with role migrations needs CREATEROLE back for that one upgrade.
+    The migration child refuses with exit 67 until it is granted.
+  - After NOCREATEROLE, `crewflow_owner` still holds the ADMIN option on the schema roles it created. It can still GRANT
+    them to existing roles. The posture check detects such a member at the next boot; it does not prevent the grant.
+- **Fail closed.** Every check runs inside the transaction, before anything is created:
+  - PostgreSQL 16 or later;
+  - an admin that can create roles and grant on the database;
+  - no existing Crewflow role on the cluster;
+  - no database-wide `search_path` default;
+  - SCRAM password encryption.
+
+  The script then re-checks the exact result before COMMIT. On a provider without CREATEROLE the install is refused,
+  either by the script or by the migrate child (exit 67), and nothing is created.
+- **Tests.** Disposable PostgreSQL 16.16 InstaBox runs on 2026-11-17 used a scratch harness, not committed (runbook
+  section 4a "Status"); the latest run had 36 checks and 0 failures. The script ran as a NOSUPERUSER CREATEROLE admin,
+  and after it these all passed:
+  - db-setup's owner-URL mode;
+  - the full migration chain as `crewflow_owner`;
+  - `owner-login-posture.ts` rules 1-4;
+  - `runDatabaseBootGates` for the API and the Worker;
+  - the PG16 posture golden.
+
+  These refusals were proven:
+  - an admin without CREATEROLE;
+  - a NOCREATEROLE `crewflow_owner` on a fresh install;
+  - a schema role pre-created by the admin;
+  - the M1 and L1 regressions above.
+
+  The password itself was never in a `log_statement=all` server log. No CI job runs this script yet.
+
 ### Rollback
 A rollback across this release needs the previous release's compose files (its image has no `worker-start.sh`,
 `db-setup.sh` or bootstrap child: under this release's files db-setup fails and rab-api never starts) and a
@@ -8496,49 +8592,96 @@ Reversal:   Lower CLOCK_IN_CONFIRM_FLOOR_HOURS, or require a second approver (pa
   under test), `integration-test-database-gate.spec.ts` (no spec reads the blanked DATABASE_URL), `runtime-child-env.spec.ts`.
 - **Release 2 (S8):** the fallbacks are removed and the legacy names refused everywhere; the strip lists keep every name.
 
-## CI gate — exact owner-approved growth for the import-boundary ratchet (branch ci/import-boundaries-approved-growth, 2026-11-17; owner approval 2026-11-17 for PR #204)
+## CI gate — exact owner-approved growth for the import-boundary ratchet (branch ci/import-boundaries-approved-growth, 2026-11-17; owner approval 2026-11-17 for PR #204; approvals read from the base ref since branch ci/import-boundaries-approvals-from-base, 2026-11-17)
 - **Threat:** the import-boundary ratchet (`tools/check-import-boundaries.cjs`, PR #191) is a CI security gate: its `--base`
   step refuses any growth of `tools/import-boundaries.baseline.json` against the PR's base branch, so a new Worker import of
   rab-server internals (or engine -> modules, feature -> feature) cannot land unnoticed. It had no way to record an owner
   approval, so an approved change could only pass by weakening the gate, bypassing it, or deleting the step. Any approval
-  mechanism is itself a way to widen the gate: a broad pattern, an open-ended count or a forgotten approval would let later
-  PRs add violations silently.
-- **Control:** `APPROVED_GROWTH` is a frozen list in the check itself. Each entry names one rule, one file, the exact base
-  count `from` (0 = no entry at the base), the exact head count `to`, an `approved: 'owner YYYY-MM-DD'` date and a reason;
-  `validateApprovedGrowth` refuses a malformed, undated, duplicate or non-growing entry (fail closed). `compareToBase`
-  accepts a growth only when rule and file match exactly, the base count equals `from` and the head count equals `to`;
-  one more edge, another file, another rule, or a different base count still fails. An entry whose `from` no longer equals
-  the base count is reported STALE and fails `--base`, so the entry must be deleted once the growth has merged and cannot be
-  reused. The tree check (counts equal the committed baseline) is unchanged. The first two entries were the owner-approved
-  (2026-11-17) Worker imports for PR #204: `push-dispatch.job.ts` 1 -> 2 (`audit-events/audit-event-shipping`) and
-  `push-send.processor.ts` 10 -> 11 (`audit/audit.service`), the same imports the email path already uses. Both are
-  deleted by the cleanup PR (branch ci/import-boundaries-approved-growth-cleanup), which merges immediately after #204;
-  the shipped list is empty from then on.
-- **Residual (accepted):** the approval lives in the repository, so whoever can merge a PR that edits the check can also add
-  an entry. "An entry must arrive in its own PR, separate from the PR that uses it, with the owner's date" is enforced only
-  by review, not mechanically: the check reads `APPROVED_GROWTH` from the HEAD being checked, so a PR that adds an entry
-  and uses it in the same diff passes `--base`; only the date format is validated, not who approved it.
-  A slot closes only when the base COUNT for that rule and file changes, not when the PR it was approved for merges or is
-  closed: while the base still equals `from`, any PR may use the slot (the slot is one exact count for one file and rule),
-  and if the base later returns to `from` (the import is removed again) a forgotten entry would match once more. That is
-  why a stale entry fails `--base` and must be deleted. A push to main never runs `--base` (the step is
-  `if: github.event_name == 'pull_request'`), so a stale entry is caught only on the next pull request, not at merge time.
-  Consequence for the first two entries: between #204 merging and the cleanup PR merging, `--base` reports both entries
-  STALE and ci-security is red for every PR opened or updated in that window; the cleanup PR must merge straight after
-  #204 and before any other PR. Counts are per file, not per edge: an approved `to` could be met by a different import in
-  that file than the one approved; the reviewer of the using PR checks the actual import (`--list`). `--write-baseline`
-  still refuses any growth; the baseline is raised by hand in the using PR.
-- **Planned follow-ups:** read `APPROVED_GROWTH` from the base ref instead of the head (so an approval has to be on main
-  before any PR can use it, which makes "its own PR" mechanical), and add an optional `target` per entry (the exact import
-  target the growth is for, so a different import in the same file cannot use the slot).
+  mechanism is itself a way to widen the gate: a broad pattern, an open-ended count, a forgotten approval or an approval
+  written by the PR that uses it would let PRs add violations silently.
+- **Control:** approvals are data in `tools/import-boundaries.approved.json` (`{ "approved": [...] }`; until the follow-up
+  branch they were the `APPROVED_GROWTH` constant in the check). Each entry names one rule, one file, the exact base count
+  `from` (0 = no entry at the base), the exact head count `to`, an `approved: "owner YYYY-MM-DD"` date, a reason and an
+  optional `target` (the resolved import target as `--list` prints it). `validateApprovedGrowth` refuses a malformed,
+  undated, duplicate or non-growing entry, a `file` the check does not scan, and a `target` that is not an edge of that rule
+  from that file (fail closed). `compareToBase` accepts a growth only when rule and file match exactly, the base count
+  equals `from` and the head count equals `to`; one more edge, another file, another rule, or a different base count still
+  fails. An entry whose `from` no longer equals the base count is reported STALE and fails `--base` while the head still
+  lists it (by rule and file), so the entry must be deleted once the growth has merged and cannot be reused. Deleting it is
+  never blocked: a PR whose approvals file no longer lists a stale base entry is not failed for it (review of #225, F1:
+  before this, the stale loop read only the base list, so every PR failed, including the one deleting the entry, and the
+  using PR could not delete it either because that tripped CHANGED TOGETHER: a deadlock of a required gate). Growth is
+  still accepted only through the base list, so deleting an entry in the head can clear a hygiene failure but can never
+  accept a growth.
+  - **Approvals come from the base ref.** `--base` reads the approvals file with `git show <base>:tools/import-boundaries.approved.json`
+    (the same fail-closed reader as the base baseline: an unknown ref, a shallow clone or any git failure throws; only "path
+    does not exist in <ref>" means no approvals) and validates it the same way. An entry added in the head is never used by
+    the PR that adds it: an approval has to be merged to the base branch, in its own PR, before any PR can use it. The head
+    copy is still validated, so a malformed file fails in the PR that introduces it.
+  - **Not in the same diff.** `--base` fails (CHANGED TOGETHER) when the diff from the merge-base with the base ref to the
+    checkout changes the approvals file together with any `tools/*.baseline.json` (this ratchet's or another's). The one
+    exception is the using PR consuming its own approval: when the head approvals document is exactly the base document
+    minus the entries this PR uses (deep equality: same `_comment`, the remaining entries unchanged and in order), `--base`
+    prints CONSUMED instead. Editing, adding or removing any other entry, or the comment, still fails CHANGED TOGETHER.
+    So the using PR deletes its entry in the same PR and no cleanup PR or red window is needed.
+  - **Base without a baseline.** When the base ref is `main` (`origin/main`, `refs/heads/main`, `refs/remotes/origin/main`)
+    and it has no `tools/import-boundaries.baseline.json`, `--base` fails closed (exit 1): main has had the baseline since
+    #191, so its absence means a broken checkout. Any other base without one is still "nothing to compare".
+  - **Base-branch change reruns the gate.** `ci-security.yaml` triggers on `pull_request` types `opened, synchronize,
+    reopened, edited`; `edited` covers a changed base branch, so a `--base` result computed against the old base does not
+    stand. (It also reruns on a title or body edit; the concurrency group cancels the older run.)
+  - **Target.** With a `target`, `--base` requires the head file to have at least `to - from` more edges of that rule to
+    `target` than the file at the base ref (WRONG TARGET otherwise), so a different import in the same file cannot fill the
+    slot, even when the file already imported the target at the base. The tree check (no base available) requires, while
+    the file's count is above `from`, at least one edge of that rule from the file to `target` (TARGET MISSING).
+  - git runs with `LC_ALL=C` and without `LANGUAGE`, so the "does not exist in" match does not depend on the runner's
+    locale. `--base` accepts a plain ref name plus `~N` / `^N` ancestry suffixes only (no `@{...}`, `^{...}`, `:`, ranges,
+    leading `^` or `-`); git runs without a shell.
+  - The first two entries were the owner-approved (2026-11-17) Worker imports for PR #204: `push-dispatch.job.ts` 1 -> 2
+    (`audit-events/audit-event-shipping`) and `push-send.processor.ts` 10 -> 11 (`audit/audit.service`), the same imports
+    the email path already uses. Both were deleted by the cleanup PR (branch ci/import-boundaries-approved-growth-cleanup,
+    #215), which merged straight after #204; the shipped list is empty.
+- **Residual (accepted):**
+  - Self-approval through the data list is now mechanically blocked: the using PR cannot add or edit its own approval.
+    Editing the TOOL is not: CI runs the PR's own copy of `check-import-boundaries.cjs` and `ci-security.yaml`, so a PR that
+    changes the check (for example to read approvals from the head again, or to drop the CHANGED TOGETHER rule) can pass
+    its own gate. Changes to the tool and the workflow remain a review control (the owner's PR review; the repository has
+    no CODEOWNERS file today), not a mechanical one.
+  - The approval PR itself is reviewed like any PR: only the date format is validated, not who approved it. Two PRs from the
+    same author (approval first, use second) both go through review.
+  - A slot closes only when the base COUNT for that rule and file changes, not when the PR it was approved for merges or is
+    closed: while the base still equals `from`, any PR may use the slot, and if the base later returns to `from` a forgotten
+    entry would match once more. That is why a stale entry fails `--base` and must be deleted. A push to main never runs
+    `--base` (the step is `if: github.event_name == 'pull_request'`), so a stale entry is caught only on the next pull
+    request. If a using PR merges without deleting its entry (CONSUMED is allowed, not required), every later PR that still
+    lists the entry fails STALE until one of them deletes it; any PR may delete it, so this is a hygiene failure that the
+    next PR clears, not an outage.
+  - `target` is optional. Without it, counts are per file, not per edge, and an approved `to` could be met by a different
+    import in that file; the reviewer checks the actual import (`--list`). The tree check's target rule is presence only;
+    the exact count of new edges to the target is enforced by `--base`.
+  - The CHANGED TOGETHER diff covers committed and uncommitted changes to tracked files; an untracked file is not in it
+    (irrelevant in CI, where the checkout is a commit). `--write-baseline` still refuses any growth; the baseline is raised
+    by hand in the using PR.
 - **Tests:** `check-import-boundaries.test.cjs`: an approved exact growth passes; the same file one above `to` fails; an
   unlisted file growing fails; the same file under a different rule fails; a base count other than `from` fails and the
   approval is reported stale (also once the growth has merged); a consumed entry (base already at `to`) is stale, and the
   same entry matches again once the base returns to `from`, which is why stale must fail; partial use (from 10, to 12,
-  head 11) fails as grown; `from: 0` matches a file absent at the base; malformed, undated, duplicate and non-growing
-  entries are refused; the shipped list is valid and frozen. The CLI's exit 1 on a stale approval is not tested: `main()`
-  reads the module's own `APPROVED_GROWTH` (empty) and the base baseline through `git show`, so it cannot be driven with
-  fixture approvals without git refs; `compareToBase` carries that logic and is tested directly.
+  head 11) fails as grown; `from: 0` matches a file absent at the base; malformed, undated, duplicate, non-growing,
+  unscanned-file and wrong-target entries and malformed approval documents are refused; the shipped approvals file is
+  valid and frozen. End to end in a throwaway git repository (`main(argv, { root })`): an approval present only in the
+  head does not let the growth through (GROWN, exit 1), the same approval present on the base does (exit 0); an
+  approval-only PR passes and its entry is not in force; approvals file plus a baseline in one diff fails (committed or
+  uncommitted) even when the base approval matches; an approved count reached through a different import fails in
+  `--base` (WRONG TARGET) and in the tree check (TARGET MISSING); a file that already imported the target at the base cannot
+  fill the slot with another import (`--base`); the tree check exits 1 when the baseline file is missing. Review of #225:
+  a branch that deletes a consumed approval (base count already at `to`) exits 0, an unrelated branch that still lists it
+  exits 1 STALE; the using PR that deletes exactly its own used entry exits 0 (CONSUMED), and the same PR that also edits,
+  adds or removes another entry, keeps and edits its own, or edits `_comment` fails CHANGED TOGETHER; a stale entry is
+  reported only while the head lists it, and an approval only in the head never accepts a growth; `--base main` without a
+  baseline exits 1 while another base without one is "nothing to compare"; the `ci-security.yaml` `pull_request` trigger
+  lists `opened, synchronize, reopened, edited`. `--base` refs:
+  `~N` / `^N` suffixes accepted, every other revision syntax refused, a step past the root commit throws. git's
+  environment is `LC_ALL=C` without `LANGUAGE`, and a German locale in the caller still reads a missing path as absent.
 
 ## S-W1 — the Worker's member-invitation pre-send check also requires an active workspace (branch fix/s-w1-invitation-workspace-active, 2026-11-16)
 - **Finding (Low, `docs/plans/untangle/worker.md` §4):** a manager invites a member; the workspace is then suspended or
@@ -8865,3 +9008,420 @@ Reversal:   Lower CLOCK_IN_CONFIRM_FLOOR_HOURS, or require a second approver (pa
   `sc05-capabilities.integration.spec.ts` now expects the 19 keys including `staff.edit`, same booleans as one
   `userHasPermission` per flag. The mocked e2e fixture (`crewflow-fixtures.ts`) grants `staff.edit` so the existing bar
   specs keep their four actions.
+
+## PostgreSQL majors: one supported list (16-18), refused everywhere else; every process uses its server's fingerprints (branch fix/pg-majors-15-18, PR #227, 2026-11-17; no migration; a psql version guard in the two provider-admin scripts)
+- **Context:** the 0.6.0 deploy checklist warned that on PostgreSQL 17 / 18 new workspaces could not be created. Cause:
+  only the migrate child and the workspace command runner selected the workspace fingerprints of the server's major
+  (`selectWorkspaceFingerprintMajor`). The API, the Worker and the CLI never did, so `workspaceFingerprintMajor()` stayed
+  at its default, 16. On 17 / 18 the Worker's in-process provisioner (`provisionWorkspaceSchema` → `recordProvisioned`)
+  compared every workspace it built with the PostgreSQL 16 structure-level-22 value and marked it FAILED; the daily drift
+  job reported READY module 14-20 workspaces as DRIFTED (alert only). The server path (`core.provision_workspace`, its
+  literal baked by the migrate child for the right major), the migrate child and the runner were already correct. It failed
+  closed (no wrong structure was accepted), so this was an availability defect, not an exposure.
+- **Second gap (fail-open on the upper bound):** db-setup and the API / Worker / CLI boot gate checked only `>= 16`. A
+  PostgreSQL 19 server got `crewflow_owner` created by db-setup before the migrate child refused it, and outside production
+  a process on 19 started with the PostgreSQL 16 fingerprints.
+- **Control:** `database/postgres/supported-majors.ts` is the one list (16, 17, 18) and the one refusal sentence
+  ("PostgreSQL N is not supported; use 16-18 (PostgreSQL 16, 17 or 18).") read by the db-setup bootstrap child (both
+  modes, from the Q2 facts, before the probe, the pending password file and any write), the migrate child
+  (`assertSupportedPostgresMajor`) and boot gate 2. After the gates pass, `runDatabaseBootGates` selects the server's
+  fingerprints for the process; `provisionWorkspaceSchema`, the Worker drift cycle and the two workspace CLIs also select on
+  their own session first. A second, different major in one process is refused (never a silent switch).
+- **Security review of PR #227 (APPROVE, fixes applied):**
+  - L1: the legacy migrate path (separated layout, `setup-db.ts`, not the owner login) used to warn and migrate on an
+    unsupported major. `selectFingerprintsForRun` now refuses outside 16-18 on both paths before any migration; only the
+    fingerprint-completeness check stays owner-login only.
+  - L2: the provider-admin psql scripts (`01-crewflow-owner.sql`, `transition-from-separated.sql`) refuse any major outside
+    16-18 before `CREATE ROLE` (`\gset` / `\if`, then `1 / 0` under ON_ERROR_STOP): nothing is created. The harnesses that
+    replay only the scripts' `CREATE ROLE` / `GRANT` lines are unaffected, and no golden or fingerprint changes. The CI job
+    `owner-login (15, unsupported)` runs both scripts under psql on PostgreSQL 15: non-zero exit, no crewflow_owner.
+  - I3: `resetWorkspaceFingerprintSelectionForTests` throws outside NODE_ENV=test.
+  - I4: a major mismatch in the Worker's drift or provisioning loop logs one explicit `ALERT …` error line and still fails the
+    cycle (counted in workspaceSchemaDriftFailures / workspaceProvisioningFailures, shown on the admin queues page).
+  - L3: ci-twenty-tests runs the provisioning, payroll-evidence and invite-cleanup integration specs on 16, 17 and 18.
+  - Follow-ups, not in this PR: I2, an unselected read of EXPECTED_WORKSPACE_FINGERPRINTS should throw outside tests instead of
+    defaulting to PostgreSQL 16 (today every entrypoint selects; the default is a remaining fail-closed fallback); the
+    `core.worker_delete_expired_invited_user` `restrict_violation` handler (new migration, owner SQL review).
+- **Not supported, and why:** PostgreSQL 15 and earlier. The owner-login bootstrap grants `WITH INHERIT …, SET …`, merged
+  migrations call `pg_has_role(…, 'SET')` and refuse below 16 themselves, the boot gate reads `pg_auth_members.set_option`,
+  and on 15 a CREATEROLE login can grant `pg_execute_server_program` (M0 F-E1). Merged migrations are never edited.
+- **PostgreSQL 18 SQLSTATE change (found by the PG18 suite run):** PostgreSQL 18 reports a violated `RESTRICT` foreign key
+  as `23001` (restrict_violation) instead of `23503` (release notes, "Migration to Version 18"). Crewflow's RESTRICT keys
+  are the payroll-evidence keys and several `core."user"` references. On 18, `hardDeleteFallbackReason` treated that as a
+  genuine error: deleting a user that payroll evidence still references failed instead of falling back to a soft delete
+  (fail-closed: nothing was deleted). Fixed in code: `database/postgres/sqlstate.ts` `isForeignKeyRefusal` (23503 or
+  23001) in the user-deletion fallback, the invite-cleanup retain reason and the AI-agent role-FK mapping. The definer
+  `core.worker_delete_expired_invited_user` still catches only `foreign_key_violation`; on 18 its restrict_violation now
+  reaches the Worker's handler, which retains the invitee (nothing deleted; audit reason `workspace_referenced:<constraint>`
+  instead of `referenced`). Changing the function needs a new migration, new body hashes in the PG16/17/18 semantic
+  goldens and owner SQL review: proposed as a follow-up, not in this PR.
+- **Tests:** `supported-majors.spec.ts` (the list is 16-18; each listed major has every module and structure-level
+  fingerprint, a semantic golden and a posture golden; 14, 15, 19, 20 refused with the range), `owner-bootstrap.spec.ts`
+  (14, 15, 19, 20 and garbage refused in both modes; 14 and 19 end to end: no password stored, no BEGIN, no write),
+  `database-boot-gate-rules.spec.ts` (14, 15, 19, 20 refused at gate `version`; 16.0, 16, 17, 18 pass), the
+  `bootstrap-owner-login-check.ts` PG15 scenario and the deploy-order db-setup PG15 block (new refusal text). Live: the
+  server and Worker suites on PostgreSQL 16, 17 and 18 and the db-setup child on 15-18 (InstaBox; results in the PR).
+
+## CI audit — picomatch GHSA-fc5q-39xc-vjpf: no fix exists anywhere, so a dev/build-only 30-day owner exception (branch fix/picomatch-ghsa-fc5q, PR #229, 2026-11-17; PROPOSAL: the owner's merge is the decision; merges after or with the node-gyp runtime prune PR)
+- **Advisory:** GHSA-fc5q-39xc-vjpf / CVE-2026-112366 (HIGH, CVSS 7.5): picomatch `<=4.0.7` compiles single-branch
+  repeated extglobs (`+(*)`, `+(*a)`) into an exponentially backtracking regex. Failure: *whoever controls a glob
+  PATTERN* → has picomatch compile it and match a short crafted string → blocks the Node event loop. For this
+  repository: INFO while the conditions below hold. The required ci-security `audit` failed on every PR.
+- **Why not the normal fix (Twenty's way: root `resolutions` documented in `"//resolutions"`):** there is nothing to
+  resolve to. The advisory has no `first_patched_version`; the registry's whole list (1.0.0 … 4.0.7, no prereleases,
+  dist-tag latest 4.0.7) is inside `<=4.0.7` in every major; the upstream fix micromatch/picomatch#194 is unmerged.
+  No dependent can drop it either: the current release of every one still requires picomatch (@nx/js and
+  @nx/workspace 24.0.6 `^4.0.7`, vite 8.3.8 `^4.0.7`, jest-util / jest-haste-map / jest-message-util 30.5.1 `^4.0.3`,
+  tinyglobby 0.2.17 `^4.0.4`, anymatch 3.1.3 `^2.0.4`, micromatch 4.0.8 `^2.3.1`; node-gyp 13.1.0 via tinyglobby).
+- **Paths (yarn.lock, 2.3.2 / 4.0.4 / 4.0.5):** PRODUCTION only through yarn's injected `node-gyp: latest`:
+  `@rab/server > argon2 > node-gyp@13.0.1 > tinyglobby > picomatch@4.0.5` and `@rab/worker > bullmq > msgpackr >
+  msgpackr-extract > node-gyp > tinyglobby > picomatch@4.0.5` (install-time native build tool, never imported at
+  runtime). Everything else is dev/build: root `@nx/jest`/`@nx/js` (4.0.4, 4.0.5), jest 29/30 via `@types/jest`,
+  `jest-environment-jsdom`, `jest-haste-map > anymatch` (2.3.2, 4.0.5), rab-front `vite` (4.0.5), rab-server/worker
+  `ts-node-dev > chokidar > anymatch/readdirp` (2.3.2). No first-party code imports a glob matcher; the rab-front
+  production bundle contains no picomatch (built and grepped).
+- **Control (`tools/check-npm-audit.cjs` + `tools/npm-audit-decisions.json`, schema 2):** same
+  `yarn npm audit --severity high --all --recursive`; a finding passes only with an entry that is
+  - *scoped:* exactly one GHSA id + one package (`package`, a `packages` list is refused), `accepted-risk` only;
+  - *owned and explained:* owner_decision_ref (issue/PR of this repo, no placeholder), decided_by, decided_on,
+    `reason`, `drop_when`;
+  - *time-boxed:* at most 30 days; expired / over-long / duplicate entries fail; no date override;
+  - *lapsing on a fix:* fails as soon as the GitHub advisory has a `first_patched_version` or the registry has a
+    release in ANY major outside the vulnerable range and newer than an installed version (prereleases are not fixes);
+  - *dev/build only:* fails while the package is in the production closure = yarn.lock reachable from the
+    `dependencies`/`optionalDependencies` of the shipped workspaces (the check-licences.mjs list), yarn-injected
+    dependencies included, minus `RUNTIME_PRUNE` exported by `packages/rab-docker/rab/runtime-deps.cjs` (a pruned
+    package and what is reachable only through it). No export = nothing excluded.
+  Every other advisory fails as before. Fails closed on an unparseable audit, a failed registry or advisory lookup,
+  an unresolvable lockfile descriptor or an unevaluable range.
+- **Dependency on the prune PR:** on origin/main runtime-deps.cjs exports no `RUNTIME_PRUNE`, so this check FAILS on
+  #229 today (picomatch@4.0.5 via node-gyp is in the production closure). The node-gyp prune PR must export
+  `RUNTIME_PRUNE` (e.g. `['node-gyp']`), keep its CLI under `require.main === module`, and remove node-gyp's
+  exclusive subtree (tinyglobby, picomatch@4.0.5) from the image. #229 merges after, or together with, that PR.
+  Verified locally by patching that export in: the check passes (1 decided) and the real yarn.lock closure minus
+  node-gyp contains no node-gyp, tinyglobby or picomatch.
+- **Drop condition (also in the entry):** remove the entry and upgrade (`yarn up -R picomatch`, or a root
+  `resolutions` override documented in `"//resolutions"`) as soon as a fixed picomatch exists in any major (the
+  check fails on its own then); otherwise it expires 2026-12-17 and needs a new owner decision.
+
+```
+SECURITY TRADE-OFF
+Decision:   The required ci-security audit passes with a known HIGH advisory (picomatch GHSA-fc5q-39xc-vjpf) in the
+            dev/build dependency tree, via one dated owner exception, for at most 30 days (to 2026-12-17).
+Reason:     No fixed picomatch exists in any major and no dependent release drops it, so neither an upgrade nor a
+            `resolutions` override is possible; keeping the audit red blocks every PR (security fixes included);
+            disabling the audit, `npmAuditIgnoreAdvisories` or dropping `--recursive` would hide it with no expiry,
+            no owner record and no production check. Replacing Nx, Jest and Vite is out of proportion.
+Risk:       A developer/CI process that compiles an attacker-chosen glob pattern can be stalled (CPU DoS of a build or
+            test, not of a deployed service). A pattern source would have to be repository config, i.e. someone who
+            can already change CI. If prune and lockfile drift put picomatch back in the runtime closure, the check
+            fails rather than hiding it.
+Mitigation: One advisory + one package; 30-day expiry; lapses automatically on any fix; fails while the package is
+            in the production closure (lockfile walk minus the image prune); every other advisory still fails;
+            runtime-deps.cjs forbids the dev tools in the image.
+Reversal:   Upgrade / `resolutions` override (documented in "//resolutions") as soon as a fix ships, then delete the
+            entry; or replace the parent tools.
+```
+- **Tests:** `tools/check-npm-audit.test.cjs` (ci-security "The check's own tests", 9 tests): range evaluation incl.
+  the advisory API's `<= 4.0.7` spacing; lapse on first_patched_version, on a same-major and on a NEW-major release,
+  not on a prerelease or an older unaffected release; production closure finds the injected node-gyp chain, ignores
+  devDependencies (also behind a `workspace:*` dependency whose lockfile entry merges devDependencies), excludes a
+  pruned package's exclusive subtree, applies `resolutions`, fails closed on an unresolvable descriptor; the committed
+  register is well formed; scope (wildcard, comma, `packages` list), decision, owner reference / placeholder, id,
+  future date, reason, drop_when, schema, duplicate, >30 days, expiry refused (expiry day valid); NDJSON parser fails
+  closed; evaluate(): decided, undecided for another advisory / package / no id, production path, fix (both kinds),
+  each lookup failing, unevaluable range, expired; unused reported.
+
+## Runtime image: node-gyp and its install-time-only tree pruned (branch chore/prune-node-gyp-runtime, 2026-11-17; no SQL)
+- **Context:** `yarn workspaces focus --production` kept node-gyp 13.0.1 in the one runtime image, because Yarn injects
+  `node-gyp: npm:latest` into the lockfile entries of argon2, node-addon-api, msgpackr-extract and fsevents. Two
+  production paths reached it: `@rab/server > argon2 > node-gyp` and `@rab/worker > bullmq > msgpackr > msgpackr-extract
+  > node-gyp`. With it came tar, tinyglobby, fdir, picomatch 4.0.5 (GHSA-fc5q-39xc-vjpf, High, unfixed), a nested
+  undici 8, which, isexe, nopt, abbrev, proc-log, env-paths, exponential-backoff, graceful-fs, minizlib, chownr, yallist
+  and @isaacs/fs-minipass. Nothing at runtime loads them (argon2 and msgpackr-extract use their prebuilt addons through
+  node-gyp-build; the image has no compiler), but they were attack surface and scanner noise that would HOLD every
+  release once the scanners ingest the GHSA, and the policy forbids an agent from adding a register entry for it.
+- **Control:** `runtime-deps.cjs prune` runs in both dependency stages right after `focus` (and before the Worker delta, so
+  the delta cannot carry the tree back). It cuts the edges to `RUNTIME_PRUNE` (`['node-gyp']`, exported for other gates)
+  and deletes every package then unreachable from the explicit `--root` workspaces (review L2: `@rab/server` in
+  runtime-modules, `@rab/worker @rab/server` in worker-modules; a missing root refuses). Edges are each package's
+  declared dependencies/optional/peer dependencies plus its lockfile entry (so injected or extended dependencies count),
+  located with Node's own lookup, so a package any runtime package reaches stays. Workspace links are never removed.
+  Fail closed: it removes nothing when an installed package has no lockfile entry, a drop name is not installed, or a
+  kept package's code literally loads a package it would remove (an undeclared dependency that only worked through
+  hoisting). Review L1: that scan reads every file of every kept package, comments included (a false positive is a
+  refusal), and also matches the bare side-effect `import 'x'`; the only tolerated hit is a `bin` file that is neither
+  the package's main nor an exports target loading a `RUNTIME_PRUNE` name itself (node-gyp-build's and
+  node-gyp-build-optional-packages' install-time `bin.js` require node-gyp). The final stage's existing import scan still
+  has to resolve every compiled import, and its `--forbid` now includes `node-gyp` and `tinyglobby`. Review I1: the image
+  gate's `container` check runs `native-addons-smoke.cjs` inside the finished image as 1000:1000, `--network none`,
+  read-only, on amd64 and arm64: argon2 (as the API resolves it) must hash and verify with argon2id m=19456,t=2,p=1 and
+  reject a wrong password, and msgpackr (as BullMQ resolves it) must report native acceleration with msgpackr-extract's
+  native `extractStrings` loaded; any other outcome fails the gate.
+- **Measured:** a local `focus --production` of this lockfile removes 18 package directories from the API tree (554 ->
+  536) and the same 18 from the Worker tree (610 -> 592); the undeclared-dependency scan read 12 427 / 13 743 kept files
+  with no hit. The image build numbers are in the PR.
+- **Residual risk:** a kept package that loads a pruned package by a computed (non-literal) specifier would only fail at
+  runtime. None of the pruned packages is a runtime library of the API or the Worker; the image gate's PDF render and the
+  compiled-import scan exercise the real image.
+- **Tests:** `packages/rab-docker/rab/test/runtime-deps.test.cjs` (ci-security `deployment-config`): an exclusive node-gyp
+  subtree (including the hoisted picomatch@4 and the nested undici@8) is pruned through both production paths; a
+  dependency shared with a runtime package (semver, picomatch@2, undici@6) is kept; lockfile-only edges keep a package;
+  a workspace devDependency is never a root; prune refuses on an undeclared dependency, a tree that is not the lockfile's
+  install, a stale or wildcard drop; the final `--forbid` fails if node-gyp or tinyglobby returns, top level or nested; the
+  Dockerfile prunes in both stages before the delta with the exported list and explicit roots. L1/L2 regressions (each
+  exits 1 and removes nothing): a bin that is also the main requiring graceful-fs, a bin that is an exports target,
+  a bin-only file loading a non-drop package, `import 'graceful-fs';`, `/*! x */ require('graceful-fs')`, no `--root`,
+  `--root @rab/server` without that link, a `--root` that is not a workspace. `tests/test_image_gate.py`
+  (NativeAddonsSmoke): the smoke runs as 1000:1000 offline read-only, and a non-zero exit or a missing OK line fails.
+
+## PG_SSL_CA_CERT — the database CA as PEM text, for hosts that cannot mount a file (branch feat/pg-ssl-ca-cert-inline, 2026-11-17; no SQL)
+- **Context:** production requires TLS verify-full to PostgreSQL. A CA outside the system store (AWS RDS, DigitalOcean,
+  Aiven, Supabase, a self-hosted server's own CA or self-signed certificate) could only be given as a file
+  (`PG_SSL_CA_CERT_PATH`), which PaaS hosts such as OpenShip cannot mount. The tempting shortcut is Twenty's
+  `PG_SSL_ALLOW_SELF_SIGNED` (`rejectUnauthorized: false`): it accepts ANY certificate, so anyone on the path can
+  impersonate the database and read every credential and row. It stays refused in production (unchanged).
+- **Threats:** (1) an operator turns verification off to make a private CA work → database MITM; (2) a malformed or
+  wrong CA value is only discovered at first connect, or silently ignored; (3) a private key pasted into the CA variable
+  (a common copy/paste mistake with combined PEM files), with or without its PEM armour, is echoed into logs or the admin
+  viewer; (4) the CA and the path are both set and the process silently picks one; (5) a string-only call site drops the
+  inline CA and connects against the system store; (6) a CA "file" that is a FIFO or a device hangs the boot.
+- **Controls:** `PG_SSL_CA_CERT` holds the PEM text (real newlines or `\n` escapes, so one env-file line works). It only
+  changes WHICH root is trusted: verification stays verify-full, chain AND host name. The host-name check is Node's
+  default for a DNS host (pg sends the name as SNI); for an IP-literal host the `ssl` object carries an explicit
+  `checkServerIdentity` bound to that IP, which still calls `tls.checkServerIdentity` (see the finding below).
+  `pg-tls.ts validatePgCaPem` runs at boot for BOTH sources (the path's file is now held to the same rule): BEGIN/END
+  markers counted and balanced first; no base64 run of 64+ characters outside the blocks ("looks like key material"; a
+  run of only `=` or only hex digits, a comment banner or a fingerprint, is ignored); at least one PEM block, every block `CERTIFICATE` and parseable by `X509Certificate`, no mislabelled block, at most
+  256 KiB; a `PRIVATE KEY` block is refused with "treat that key as exposed"; any failure refuses to start. The CA file
+  is opened non-blocking and fstat-checked before it is read (a regular file of at most 256 KiB). Both variables set
+  refuses to start (before the file is read). Every message names the variable only, never the text; the admin
+  environment viewer lists `PG_SSL_CA_CERT` as a secret (Set / Not set). One resolver (`resolvePgEnvironment`) serves the
+  API, the Worker, db-setup's bootstrap child, the CLI and operator scripts (`createPgClientForUrl` passes
+  `PG_SSL_CA_CERT` through), so all of them verify identically. `pgConnectionString` refuses an inline CA instead of
+  dropping it (sslrootcert names a file). The bundled-db CA block in `api-prestart.sh` / `worker-start.sh` /
+  `db-setup.sh` no longer adds `PG_SSL_CA_CERT_PATH` when `PG_SSL_CA_CERT` is set. The operator tools apply the same
+  rules through `packages/rab-docker/scripts/pg-ca-pem.cjs` (a dependency-free port; `pg-ca-pem-parity.spec.ts` requires
+  the same verdict, reason and normalised PEM over one corpus): the env-file lint (`compose-owner-login.cjs`) checks
+  `PG_SSL_CA_CERT` in `database.env`, refuses it next to the path, and refuses either CA key in `runtime.env`; the
+  `--environment` preflight (`staging/verify-image-compose.cjs`) checks the `CREWFLOW_PG_CA_FILE` that is mounted as
+  `PG_SSL_CA_CERT_PATH`. Nothing is echoed.
+- **Upgrade notes (stricter than before):** a `PG_SSL_CA_CERT_PATH` file holding anything but CERTIFICATE blocks (an
+  `X509 CRL`, a `TRUSTED CERTIFICATE`, a bundled key), or larger than 256 KiB, or not a regular file, now refuses to
+  boot (it used to pass a loose pattern check); run the `--environment` preflight first. A database dialled by IP address
+  now needs that IP as an IP SAN in its certificate (before, a `localhost` certificate from the trusted CA passed).
+- **Not added (owner-gated):** no `verify-ca` / host-name-off mode, no "allow any certificate" mode in production, and
+  no expected-server-name option. A server whose certificate cannot name the host the client dials (Railway's TCP
+  proxy: a per-instance self-signed CA with SAN `localhost` only; Cloud SQL dialled by IP) still fails closed. The
+  security review recommends against a server-name option for now; if the owner ever approves one, it must come with an
+  SPKI pin. `verify-ca` is rejected outright: with a shared provider CA (an RDS regional CA, for example) it would accept
+  any other customer's certificate from the same CA.
+- **Residual:** the CA's authenticity is the operator's to establish (download it from the provider over HTTPS, never
+  from the server you are about to trust); a Linux environment string is capped at 128 KiB, so AWS's 170 KB global
+  bundle must be replaced by the regional bundle (about 4.5 KB).
+- **Tests:** `pg-tls-ca.spec.ts` (46): valid PEM accepted (multi-line, `\n`-escaped, CRLF, space-collapsed, bundles,
+  short explanatory text) and identical to the same PEM through the path; replica and operator-script client get it;
+  malformed refused (text, a path, missing END, extra END, truncated block, mismatched labels, empty, non-DER base64,
+  corrupted certificate, public key, private key, bare key material outside the blocks, oversize; a path file with a
+  CRL or TRUSTED CERTIFICATE block); the default file reader refuses a directory, an oversize file (from its size) and a
+  missing file without naming it; both set refused; empty = unset; the IP binding (IPv4, IPv6, system store, DNS host
+  unchanged); the CA text in no console line, warning, refusal message, env.validation message or admin viewer row.
+  `create-pg-pool.spec.ts`: the IP-bound `checkServerIdentity` survives the TypeORM driver config, `pgPoolConfig`,
+  `pgClientConfig` and pg's `ConnectionParameters` (IPv4 and IPv6). `pg-ca-pem-parity.spec.ts` (27): the TypeScript and
+  the operator-tool port agree on 21 inputs, and both give the expected verdict on the edge cases (a `=` comment banner
+  and a bare 64-hex SHA-256 fingerprint outside the blocks are accepted; real base64 key material is refused; a
+  lowercase `-----BEGIN private key-----` block, which the block pattern never parses, is refused through the balanced
+  marker count). A new rule needs a new parity corpus entry. `pg-tls-ca.integration.spec.ts` (11; a plain `describe` behind the
+  throwing gate, so it fails, never skips, without its database; real pg Client from the factory, production rules, a
+  TLS-only PostgreSQL front on 127.0.0.1 and ::1 with an openssl CA made like the bundled db's): private CA as text and
+  as one `\n` line → verified TLS session; path → identical; a self-hosted self-signed certificate → verified; an IP
+  host against an IP-SAN certificate (IPv4 and `[::1]`) → verified; leaf + intermediate against the root, and a
+  leaf-only server against a root + intermediate bundle → verified; DENIAL without the CA, with the wrong CA, with a
+  leaf-only server and the root alone, and with the right CA but a host the certificate does not name (127.0.0.1 and
+  [::1] vs DNS:localhost); both variables → refused before any connection. `compose-owner-login.test.cjs`: the lint
+  rules (real certificate, key, bare key material, runtime.env refusal). `verify-image-compose.test.cjs`: the preflight
+  refuses a CA file with a CRL / TRUSTED CERTIFICATE / key block, oversize, a directory or a missing file.
+  `run-prestart-shell-tests.cjs` 11n: host `db` with `PG_SSL_CA_CERT` set gets no path.
+- **Finding fixed in the same branch (found by the integration test): verify-full did not bind an IP-address host.**
+  For an IP-literal host, pg 8.23 sets neither `servername` nor `host` on `tls.connect`, and Node then checks the
+  certificate against the literal name `localhost` (reproduced on Node 24). So `postgresql://…@10.0.0.7/…?sslmode=verify-full`
+  accepted any certificate from a trusted CA that names `localhost`, not one naming 10.0.0.7. With the system store that
+  was harmless (public CAs do not issue `localhost`). With an operator CA (`PG_SSL_CA_CERT_PATH` already, and now
+  `PG_SSL_CA_CERT`) it was a host-name bypass whenever that CA had issued a `localhost` certificate: for example, an
+  operator who configured a Railway instance's own CA would have accepted that instance's certificate (SAN `localhost`)
+  for any IP. Fix: `buildPgSsl` takes the dialled host and, for an IP literal (IPv4 or IPv6), sets an explicit
+  `checkServerIdentity` bound to that IP, which calls `tls.checkServerIdentity(ip, cert)`; DNS hosts keep Node's default
+  check. `pgConnectionString` refuses an IP host with verify-full (the string form cannot carry the check). Tests: the
+  unit and integration cases above; the integration denial failed before the fix (the `localhost` certificate was
+  accepted for 127.0.0.1).
+
+## PG_ADMIN_URL — the database admin login reaches the one-shot setup step only (branch feat/pg-admin-url, 2026-11-17; owner decision 2026-11-17, Twenty's Helm model; one new SQL statement, below)
+
+- **Asset:** the database ADMIN credential (the bundled db's superuser, or a provider admin that can create roles); the
+  `crewflow_owner` app login and its password file; every tenant's data behind RLS (an admin login skips it).
+- **Change:** `PG_DATABASE_URL` used to mean "the admin URL, or an existing `crewflow_owner` URL", decided by the URL's login.
+  Now the admin URL is `PG_ADMIN_URL` and `PG_DATABASE_URL` ALWAYS means the app login (`crewflow_owner`). Three modes:
+  (a) bundled db (`CREWFLOW_BUNDLED_DB` unset/1, `PG_DATABASE_PASSWORD`); (b) `CREWFLOW_BUNDLED_DB=0` + `PG_ADMIN_URL`;
+  (c) `CREWFLOW_BUNDLED_DB=0` + a `crewflow_owner` `PG_DATABASE_URL`, no admin URL (db-setup only checks it, read-only).
+  rab-api and rab-worker are unchanged: they never receive a URL and build the `crewflow_owner` URL from db-setup's
+  credential-free target file and password file (PR #125 option 2), in every mode.
+- **Threats and controls:**
+  - *The admin URL reaching a long-running process* (readable from `/proc/<pid>/environ`, crash dumps, error reporters).
+    Compose: `PG_ADMIN_URL` is interpolated into `db-setup` only, and rab-api / rab-worker pin it to the literal `""`
+    (owner decision L-2, review of PR #230), so a value in `database.env` / `runtime.env` or a platform UI can never reach
+    them (regression test: image.yml rendered with it planted in either env file gives `""`). A raw-text gate
+    (`compose-owner-login.cjs` `adminUrlPlacementProblems`, over EVERY compose file in the repository) fails on the token
+    anywhere on a line outside db-setup (map, list or flow form, interpolations, `x-` anchors merged into a service) except
+    that exact empty pin on rab-api / rab-worker; it reads anchored / tagged / merge-key service headers and refuses any
+    anchor defined inside db-setup (L-3). The rendered-model gates (every combination) and the `--environment` preflight
+    accept exactly `""` there and refuse any value or a missing pin. Env files: the lint refuses it in `database.env` /
+    `runtime.env`; the preflight refuses it from an app env file. Process: `api-prestart.sh` (the one-off `bootstrap-admin`
+    path included) and `worker-start.sh` refuse a non-empty `PG_ADMIN_URL`, `PG_DATABASE_ADMIN_URL` or
+    `CREWFLOW_BUNDLED_DB_ADMIN_URL`, and ANY variable holding a database credential, other than their own `PG_DATABASE_URL`
+    (which has its own refusal): a postgres URL in any case, after leading blanks or quotes, with a driver prefix or suffix
+    (`jdbc:postgresql://`, `postgresql+psycopg://`), or a libpq keyword DSN with `password=` beside `host=` / `dbname=` /
+    `user=`; before they set the runtime URL (exit 64, the value never printed; L-1 and its follow-up). `never-in-runtime-env.ts` lists the three names for the in-process guard of the API, the Worker and
+    the provisioner. No legitimate variable of these services holds a PostgreSQL URL (checked: the compose files, the image
+    `ENV`, `database.env` / `runtime.env` templates). The dev compose's `server` / `worker` read a developer's
+    `../rab-server/.env`, so they blank its host-native URLs (`DATABASE_URL*`, `TEST_DATABASE_URL`, `TEST_DATABASE_ADMIN_URL`,
+    `TEST_DATABASE_CREWFLOW_URL`, `MIGRATION_SECURITY_ADMIN_URL`) and pin `PG_ADMIN_URL` to `""`, as QA's do; any other database
+    URL left in that file stops them (exit 64), by design, the deprecated test admin name included (renamed, X3.5-S7).
+  - *Silent reinterpretation* (an un-renamed deployment keeps its admin URL in `PG_DATABASE_URL`). Refused, never run as
+    the admin: the bootstrap child's `selectDbSetupInput` refuses a `PG_DATABASE_URL` whose login is not `crewflow_owner`
+    ("renamed to PG_ADMIN_URL", exit 64, nothing connects, nothing stored), and so do the lint and the preflight; the
+    retired `PG_DATABASE_ADMIN_URL` is refused by name; both URLs at once, neither, and `crewflow_owner` in `PG_ADMIN_URL`
+    are refused too. Live harness scenario `admin-url-in-pg-database-url` (CI ci-migration-security).
+  - *No dummy password* (owner requirement): `PG_DATABASE_PASSWORD` is no longer a compose `${...:?}` (that demanded it with
+    your own database too). It is required exactly while the bundled db runs: the `db` entrypoint refuses an empty
+    `POSTGRES_PASSWORD` (exit 64) before it touches the volume, `db-setup.sh` refuses the bundled mode with an empty password
+    (and `CREWFLOW_BUNDLED_DB=0` with no URL), and the lint / preflight refuse a bundled compose.env without it and an
+    own-database compose.env with a leftover one (it would sit unused in db-setup's definition).
+  - *An admin that inherits the app login* (lead review of PR #226): a non-superuser CREATEROLE admin on a provider that
+    defaults `createrole_self_grant` to `set, inherit` would receive SET / INHERIT on the new `crewflow_owner`. db-setup now
+    pins it empty for its write transaction before `CREATE ROLE` (new statement `OWNER_BOOTSTRAP_Q4B2_NO_SELF_GRANT`,
+    `SELECT pg_catalog.set_config('createrole_self_grant', '', true);`), unit-tested for order and live-tested
+    (`admin-createrole-self-grant`: an admin with that role default gets no SET / INHERIT membership).
+- **Kept unchanged:** the 16-18 version gate of PR #227 (`assertSupportedServerVersion`), still the first refusal of both
+  db-setup paths, so it runs before any write or BEGIN in all three modes (owner-URL mode c included: unit-tested);
+  verify-full, no transaction pooler, the owner-login posture shape, the URL policy (now relabelled with
+  the variable the operator set), the read-only owner-URL session, the one-shot / PID 1 / volume rules, the env-file
+  refusals (`DB_TARGET`, `ALLOW_PRODUCTION_DB_COMMANDS`, `BOOTSTRAP_ADMIN_*`).
+  - *A weak bundled password* (review I-2): on a FIRST initialisation only (no `PG_VERSION` in PGDATA yet) the `db` entrypoint
+    refuses a password that is not 32+ characters of `A-Z a-z 0-9 _ -` (exit 64, value never printed); an existing volume
+    is never refused (the image ignores the value there). Tested by running the committed block with `sh`.
+  - *A login hidden in the URL* (review I-4): a percent-encoded `crewflow%5Fowner` is decoded and is the same login
+    (accepted); `?user=`, `?password=`, `?host=`, `?dbname=` on either URL are refused (URL policy, the lint, the preflight).
+- **Residual:** the bundled db's superuser URL is still in db-setup's container definition (now as
+  `CREWFLOW_BUNDLED_DB_ADMIN_URL`; accepted risk TM-DB-1 / T-1, unchanged). `db-setup.sh` unsets it, but that only keeps it
+  out of the bootstrap child's environment: it stays in db-setup's PID 1 `/proc/1/environ` and in `docker inspect`, and the
+  child receives the same secret as `PG_ADMIN_URL`, so the net exposure is exactly TM-DB-1's (review I-1). An
+  OpenShip deploy without `PG_DATABASE_PASSWORD` now renders and fails at start (db / db-setup exit 64) instead of at
+  render. The live container suites (`run-db-setup-tests.cjs`, `run-prestart-shell-tests.cjs`) are updated but run in CI,
+  not locally.
+
+## Upgrade runner — patch releases carry no upgrade commands (branch feat/runner-patch-releases, 2026-11-17; no SQL)
+- **Threat:** the upgrade-command registries are keyed `<major>-<minor>`, so a patch build (0.6.1) looked up `'0-6'` and
+  re-listed 0.6.0's workspace commands as `0.6.1_…` (found on closed draft PR #216). Consequences: (1) every start of a
+  patch image refuses (`structureLevels()`: "structure level 21, expected 23", exit 66), so a patch can never ship; (2) if
+  the level check were relaxed instead, a patch would re-run its minor's DDL / data commands on every workspace under new
+  step names, and a structural command could claim a level twice; (3) a patch whose `.0` is not in
+  `CREWFLOW_PREVIOUS_VERSIONS` would accept only the previous minor, so a database at the patch's own `.0` is refused (65)
+  and every workspace cursor of that `.0` is UNKNOWN_CURSOR (blocked, 503); (4) accepting the previous minor (0.5.0 → 0.6.1)
+  would skip the minor's own commands and, for 0.6.x, the one-time adoption; (5) (security review M-1) a `--force`d patch
+  completes its own migrations step while a workspace is still short of the `.0`'s last workspace command, so the next
+  minor, which accepts the patch, would never re-check the `.0`; (6) (L-2) an out-of-order published list (a backport patch
+  appended after a newer minor) makes the upgrade-from rule read the wrong version.
+- **Control:** a patch release (PATCH > 0) owns no bundle. `commandsForVersion` / `workspaceCommandsForVersion`
+  (`upgrade-sequence.ts`) return none for it, so its only step is `<v>_TypeOrmMigrations`. It never adds a structure level
+  (the code level stays 20 + the minor releases' structural commands). A new workspace created on it gets the cursor
+  `<v>_TypeOrmMigrations`, with nothing pending.
+  - **Typed refusals:** every registry read checks the keys first (`upgrade-registry-key.ts`). A patch key (`0-6-1`) is
+    `PatchReleaseCommandsError`, any other shape `UpgradeRegistryError`. `structuralCommands` checks every key itself, so a
+    lone key cannot slip past a sort comparator. The test-probe seam refuses a patch code version. Both errors map to
+    `config` (exit 64) in `outcomeOf`. `UpgradeRun.beforeApply` checks both registries first, unconditionally (review
+    L-1), so the refusal comes before any database read or migration, on fresh and no-ledger starts too.
+  - **Upgrade-from rule:** a patch accepts only the earlier published versions of its own minor line (0.6.2 ← 0.6.0 /
+    0.6.1). It never accepts another minor and never adopts an R254 / R256 history (only 0.6.0 does). Its `.0` must be in
+    `CREWFLOW_PREVIOUS_VERSIONS`, else `AppVersionError` (64), also on a fresh install. "Version X complete" is unchanged:
+    0.6.1 still refuses 65 while any READY workspace has not finished 0.6.0's last workspace command (`--force` skips only
+    that, as before). Minor releases keep the existing rule; 0.7.0 accepts the last published version only.
+  - **A previous patch is complete only with its `.0` (review M-1):** `versionsToCheck` also reads the minor release of an
+    accepted previous patch (instance step + every workspace at its last workspace command), and `decideUpgradeStart`
+    folds it in (`effectiveComplete`: `complete[0.6.1] = complete[0.6.1] && complete[0.6.0]`). After a forced 0.6.1 that
+    left a workspace short of 0.6.0, an unforced 0.7.0 refuses 65 and writes nothing, until a 0.6.1 start catches the
+    workspace up. The code version's own entry is never folded: a repeated start of the patch itself still continues.
+  - **Published list (review L-2):** `assertPreviousVersions` requires `CREWFLOW_PREVIOUS_VERSIONS` strictly ascending and
+    duplicate-free, first thing in every start decision (`AppVersionError`, 64). A backport patch on an older line is never
+    appended on main. A rollback onto a patch image whose `.0` is unpublished is refused (64), not treated as a rollback.
+  - **Rollback:** a 0.6.0 image on a logbook with 0.6.1 rows is the existing image-rollback rule (decision `rollback`, nothing
+    recorded, no workspace pass, also under `--force`; `/healthz` `ahead`).
+- **Not changed:** no SQL, no migration, no new table or grant. The shipped version stays 0.6.0 and 0.6.1 is not registered
+  (`CREWFLOW_PREVIOUS_VERSIONS` unchanged). The release PR appends `0.6.0` there and bumps the root `package.json`.
+- **Open for the owner:** with the strict rule, once a patch is published the next minor (0.7.0) accepts only the last
+  published version (0.6.1). A database still at 0.6.0 must take 0.6.1 first, or `--force`. Accepting the whole previous
+  minor line there is safe (patches carry no commands), but it changes an existing rule, so it is not done here.
+- **Tests:** `upgrade-patch-release.spec.ts` (pure, 26, incl. M-1, L-1 (no query before the refusal), L-2, I-2; the PR #216 regression fails on the old lookup with exactly "structure
+  level 21, expected 23"), `upgrade-version.spec.ts` (+1). `patch-release-upgrade.integration.spec.ts` drives UpgradeRun on
+  the locked runtime login: 0.6.0 → 0.6.1 with 0 and with 3 workspaces (one instance row, no workspace row, levels and
+  blocks unchanged, `/healthz` behind → ok); a workspace created on 0.6.1; downgrade 0.6.1 → 0.6.0 (rollback, nothing
+  written, `ahead`); 0.6.1 → 0.7.0 runs the 0.7 instance command once and the 0.7 workspace command once per workspace; a
+  patch-keyed registry refused before any write, fresh start included; a patch cannot skip an incomplete 0.6.0 (65, nothing
+  written); M-1: a forced 0.6.1 over a workspace short of 0.6.0 → unforced 0.7.0 refuses 65 with nothing written, then a
+  0.6.1 start catches the workspace up and 0.7.0 continues. The spec seeds the logbook state it needs (a completed 0.6.0
+  instance row) and removes exactly what it seeded, so it does not depend on what an earlier spec file left in a shard.
+
+## Metadata version bump: lost step on concurrent first changes (branch fix/metadata-version-bump-own-xact, 2026-11-18; one SQL change, owner-approved 2026-11-18)
+- **Finding (security finding format, §5.8).** Severity: Medium, latent (no consumer in 0.6.0). Actor: any two
+  uncoordinated transactions that write metadata of the same workspace while its `core.workspace_metadata_state` row is
+  absent or being created (the E2 standard-object sync, the 0.6.0 SyncStandardObjects upgrade step, a future M2 custom-object
+  write that does not take `lockExpectedVersion`). Action: both commit. Consequence: one of them commits with NO version
+  step, so `metadata_version` says nothing changed although committed metadata did; once the E5 cache is wired into a
+  request path, an entry cached under that version stays current and serves stale metadata (which columns are money /
+  sensitive / read-only) until the next change. Found as a CI flake: the E5 test "six uncoordinated concurrent first
+  changes … version = 6" received 5 (5 times in a day on unrelated PRs, once on main, run 44208294567).
+- **Root cause.** `core.metadata_version_bump()` (MetadataVersionState1786721560000; `metadata-version-sql.ts:86-90`) is
+  VOLATILE plpgsql, so under READ COMMITTED each statement takes a fresh snapshot. Its "Already bumped by this
+  transaction?" check was a bare existence test (`PERFORM 1 … WHERE workspace_id = v_workspace AND organisation_id =
+  v_organisation`). When the step-1 UPDATE saw no committed row and a concurrent first change committed the row before the
+  PERFORM ran, the PERFORM saw THAT transaction's row, took it for this transaction's bump and returned. No advisory lock is
+  taken in the trigger (`LOCK_WORKSPACE_METADATA_SQL` is used only by `MetadataCacheService.lockExpectedVersion`, the M2
+  path, whose writers are serialised and safe), and the E5 contract is that plain writes are uncoordinated.
+- **Impact in release 0.6.0.** The trigger is live in 0.6.0 databases, but nothing reads `metadata_version`:
+  `MetadataCacheModule` / `MetadataCacheService` (engine/metadata/cache) is imported by no application module, only by its
+  integration spec. The writers in 0.6.0 are the new-workspace path (one transaction on a brand-new workspace: cannot race)
+  and the SyncStandardObjects upgrade command (CLI). So no lost step is observable today; it had to be fixed before the
+  cache is wired or custom objects are exposed (M2). Pre-0.6.0 workspaces have no version row (no back-fill), so their
+  first writes take exactly this path.
+- **Fix.** MetadataVersionBumpOwnTransaction1786721570000: `CREATE OR REPLACE FUNCTION core.metadata_version_bump()` with
+  one changed predicate, `PERFORM 1 FROM core.workspace_metadata_state s WHERE s.workspace_id = v_workspace AND
+  s.organisation_id = v_organisation AND s.last_bump_xact = v_xact;` (SQL in `metadata-version-bump-own-xact-sql.ts`). A
+  row another transaction created or bumped now falls through to the existing INSERT … ON CONFLICT DO NOTHING (conflict)
+  and the final UPDATE, which steps +1 on the newest row version (row lock and re-check); a row this transaction already
+  bumped still returns early, so "at most once per transaction and workspace" and "never backwards" are unchanged, and no
+  lock is added. Same OID (the five triggers stay attached), owner `crewflow`, SECURITY INVOKER, pinned search_path, no
+  EXECUTE for PUBLIC / crewflow_app; the migration re-checks the full METADATA_VERSION_EXPECTED_STATE, the exact body (body
+  hash) and the secure-owner invariants before commit, in both directions. Before the replace it accepts only a KNOWN
+  current body (review L-1; semantic-golden body hash): up() replaces the 1786721560000 body (5f6076df…) or re-installs
+  its own (ccfd284e…, idempotent re-run), down() replaces its own or re-installs the 1786721560000 one; any other body
+  (hand-altered, a later fix) is refused, never silently overwritten. down() restores the 1786721560000 body. The merged
+  migration and its constants are unchanged.
+- **Residual (review I-2; exists before this PR, unchanged by it).** A metadata DELETE never creates the version row (by
+  design: re-inserting it during a workspace-delete cascade would fail the foreign key). So while a workspace's row is
+  ABSENT, a DELETE does not step, and a concurrent first INSERT / UPDATE that creates the row can commit version 1 before
+  the DELETE commits; a cache fill between the two commits would hold the deleted row under version 1 until the next
+  change. Reachable only if the state row is removed out of band (an operator TRUNCATE, a restore without it, the guard
+  trigger disabled): every metadata write path in 0.6.0 is an INSERT that creates the row (new workspace, the 0.6.0
+  SyncStandardObjects step), so a workspace that has metadata has a row. Closing it fully would mean back-filling a
+  version row when a workspace is created (and for existing workspaces), so the row always exists and every DELETE
+  steps; that is an owner decision for M2 (the 1786721560000 design chose no back-fill: a missing row is read through
+  uncached).
+- **Tests.** `metadata-cache.integration.spec.ts`: "uncoordinated first changes never lose a step: 150 workspaces x 6
+  writers on two instances" (the old function lost a step in 11 of 150 workspaces on a throwaway database, so it fails in
+  practically every run; the existing six-writer test caught it about once in 60) and "a bump rolled back to a savepoint
+  does not suppress the next change of the same transaction" (review I-1; +1, for a workspace with no version row and for
+  one with a row). `metadata-version-bump-own-xact-sql.spec.ts`:
+  the short-circuit carries `last_bump_xact = v_xact`, the new SQL is the old one with exactly that change, down() restores
+  the old body, the semantic golden pins the new body hash, and only the two known bodies are replaceable. Evidence before the fix (throwaway database, instrumented
+  copy with a pause between the two statements): two commits ended at version 1; with the fix, 2. Semantic goldens
+  (PG16/17/18): only the `metadata_version_bump()` body hash changes (5f6076df… → ccfd284e…); security-posture golden and
+  the restricted-migrator drift review unchanged (a function body is not a privilege line).

@@ -120,6 +120,9 @@ jobs:
               - *ui
               - 'packages/rab-mobile/**'
               - '.github/workflows/ci-mobile.yaml'
+              # This filter file itself: an edit to it (including to this mobile filter) must run ci-mobile, never skip it.
+              # Not *node or *ciwiring: the app is Flutter-only and ci-mobile uses none of the Node composite actions.
+              - '.github/workflows/changed-files.yaml'
             # Root dependency manifests are copied into the image's install stage: a change there must also build and
             # gate linux/arm64 on the PR (CodeRabbit, PR #41).
             docker:

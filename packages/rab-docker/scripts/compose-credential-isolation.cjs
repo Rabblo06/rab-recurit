@@ -190,9 +190,11 @@ function dbPasswordChecks(rel, services) {
   for (const [name, svc] of Object.entries(services)) {
     const env = envOf(svc ?? {});
     out.push([!Object.prototype.hasOwnProperty.call(env, 'PG_DATABASE_PASSWORD'), `${rel}: ${name} has no PG_DATABASE_PASSWORD variable (a compose interpolation value only)`]);
-    const allowedKey = name === 'db' ? 'POSTGRES_PASSWORD' : name === 'db-setup' ? 'PG_DATABASE_URL' : null;
-    const holders = Object.entries(env).filter(([k, v]) => String(v ?? '').includes(DB_SENTINEL_PASSWORD) && k !== allowedKey).map(([k]) => k);
-    out.push([holders.length === 0, `${rel}: ${name} carries the bundled db's password only as db's POSTGRES_PASSWORD or db-setup's PG_DATABASE_URL${holders.length ? ` (found in ${holders.join(', ')})` : ''}`]);
+    // db-setup: production's bundled URL (CREWFLOW_BUNDLED_DB_ADMIN_URL), or dev / QA's pinned PG_ADMIN_URL (owner decision
+    // 2026-11-17: the admin URL is PG_ADMIN_URL; PG_DATABASE_URL is only ever crewflow_owner).
+    const allowedKeys = name === 'db' ? ['POSTGRES_PASSWORD'] : name === 'db-setup' ? ['CREWFLOW_BUNDLED_DB_ADMIN_URL', 'PG_ADMIN_URL'] : [];
+    const holders = Object.entries(env).filter(([k, v]) => String(v ?? '').includes(DB_SENTINEL_PASSWORD) && !allowedKeys.includes(k)).map(([k]) => k);
+    out.push([holders.length === 0, `${rel}: ${name} carries the bundled db's password only as db's POSTGRES_PASSWORD or db-setup's bundled admin URL${holders.length ? ` (found in ${holders.join(', ')})` : ''}`]);
     // Outside the environment (health check, command, entrypoint, labels): never, in any service.
     const rest = { ...(svc ?? {}) };
     delete rest.environment;
@@ -311,7 +313,8 @@ function bundledDbParityChecks(rel, model, productionModel, externalVolumes = {}
 /**
  * Part F2 security review, L2-4: the committed TEXT of a file's `db` service (from `  db:` to the next service or top-level
  * key), normalised: `$$` -> `$`, and the POSTGRES_PASSWORD interpolation (dev and QA use their own variable name, L4)
- * replaced by a placeholder. Returns null when the file has no `db` service.
+ * replaced by a placeholder (production's `${PG_DATABASE_PASSWORD:-}` since 2026-11-17, dev / QA's `${..._DB_PASSWORD:?...}`).
+ * Returns null when the file has no `db` service.
  */
 function rawDbServiceText(text) {
   const lines = text.split(/\r?\n/);
@@ -325,7 +328,7 @@ function rawDbServiceText(text) {
     .join('\n')
     .split('$$')
     .join('$')
-    .replace(/^(\s*POSTGRES_PASSWORD: )\$\{[A-Z0-9_]+:\?[^}\n]*\}$/m, '$1${PASSWORD}');
+    .replace(/^(\s*POSTGRES_PASSWORD: )\$\{[A-Z0-9_]+:[?-][^}\n]*\}$/m, '$1${PASSWORD}');
 }
 
 /** Pure: [ok, label] comparing two committed `db` texts (rawDbServiceText of each). */
@@ -352,23 +355,26 @@ function dbVolumeMountChecks(rel, services, runtimeNames) {
 }
 
 /**
- * Part F2 security review, L2-3 and L4: in a NON-production file db-setup's URL is pinned to the bundled db (never the
- * `${PG_DATABASE_URL...}` interpolation production offers for an external database; rendered host exactly `db`), and the
- * file never names PG_DATABASE_PASSWORD (dev and QA have their own hex-only variable). `rawDoc` is the parsed, uninterpolated
+ * Part F2 security review, L2-3 and L4: in a NON-production file db-setup's admin URL (PG_ADMIN_URL) is pinned to the
+ * bundled db (never the `${PG_ADMIN_URL...}` / `${PG_DATABASE_URL...}` interpolation production offers for your own
+ * database; rendered host exactly `db`; no PG_DATABASE_URL on db-setup), and the file never interpolates
+ * PG_DATABASE_PASSWORD (dev and QA have their own hex-only variable; the db entrypoint's refusal text names it). `rawDoc` is the parsed, uninterpolated
  * YAML (comments are not part of it). Pure; labels never print a value.
  */
 function nonProductionDbSetupChecks(rel, services, rawDoc) {
   const out = [];
-  const rawUrl = String(rawDoc?.services?.['db-setup']?.environment?.PG_DATABASE_URL ?? '');
-  out.push([rawUrl !== '' && !rawUrl.includes('${PG_DATABASE_URL'), `${rel}: db-setup's PG_DATABASE_URL is pinned (no \${PG_DATABASE_URL} interpolation: no external-database mode)`]);
+  const rawEnv = rawDoc?.services?.['db-setup']?.environment ?? {};
+  const rawUrl = String(rawEnv.PG_ADMIN_URL ?? '');
+  out.push([rawUrl !== '' && !rawUrl.includes('${PG_ADMIN_URL') && !rawUrl.includes('${PG_DATABASE_URL'), `${rel}: db-setup's PG_ADMIN_URL is pinned (no \${PG_ADMIN_URL} / \${PG_DATABASE_URL} interpolation: no external-database mode)`]);
+  out.push([!Object.prototype.hasOwnProperty.call(rawEnv, 'PG_DATABASE_URL'), `${rel}: db-setup has no PG_DATABASE_URL (no pass-through mode outside production)`]);
   let host = null;
   try {
-    host = new URL(String(services['db-setup']?.environment?.PG_DATABASE_URL ?? '')).hostname;
+    host = new URL(String(services['db-setup']?.environment?.PG_ADMIN_URL ?? '')).hostname;
   } catch {
     host = null;
   }
-  out.push([host === 'db', `${rel}: db-setup's rendered PG_DATABASE_URL host is exactly db (the bundled database)`]);
-  out.push([!JSON.stringify(rawDoc ?? {}).includes('PG_DATABASE_PASSWORD'), `${rel}: never names PG_DATABASE_PASSWORD (production's variable; this file has its own)`]);
+  out.push([host === 'db', `${rel}: db-setup's rendered PG_ADMIN_URL host is exactly db (the bundled database)`]);
+  out.push([!JSON.stringify(rawDoc ?? {}).includes('${PG_DATABASE_PASSWORD'), `${rel}: never interpolates PG_DATABASE_PASSWORD (production's variable; this file has its own)`]);
   return out;
 }
 

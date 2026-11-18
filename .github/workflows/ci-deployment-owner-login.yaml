@@ -2,7 +2,8 @@
 # and needs only `contents: read`.
 #
 #   deployment-config  the gate's self-tests and the gate (packages/rab-docker/scripts/compose-owner-login.cjs) in FULL mode
-#                      (one identical PG_DATABASE_URL on rab-api / rab-worker, no second identity, no token, the H1-H6
+#                      (PG_DATABASE_URL pinned "" and NO PG_ADMIN_URL on rab-api / rab-worker: the admin URL reaches
+#                      db-setup only, owner decision 2026-11-17; no second identity, no token, the H1-H6
 #                      keys, the O3 lifecycle: the API migrates on start, no rab-migrate, one API, the Worker never
 #                      migrates and only consumes the job schedulers; the bundled database), plus
 #                      `docker compose config` of every supported combination, and the ONE-IMAGE check
@@ -99,8 +100,25 @@ jobs:
             echo "docker compose config: $combo"
             docker compose --env-file "$t/compose.env" --project-directory "$t/project" "${args[@]}" config -q
           done
-          # Fail closed: a missing required interpolation value must refuse to render.
-          for var in CREWFLOW_IMAGE_TAG CREWFLOW_SECRETS_DIR PG_DATABASE_PASSWORD; do
+          # Owner decision 2026-11-17 (PG_ADMIN_URL, no dummy password): your own database renders WITHOUT
+          # PG_DATABASE_PASSWORD, in both modes: (b) CREWFLOW_BUNDLED_DB=0 + PG_ADMIN_URL, (c) CREWFLOW_BUNDLED_DB=0 + a
+          # crewflow_owner PG_DATABASE_URL.
+          own="$(grep -v '^PG_DATABASE_PASSWORD=' "$t/compose.env")"
+          printf '%s\nCREWFLOW_BUNDLED_DB=0\nPG_ADMIN_URL=postgresql://doadmin:x@db-direct.example:5432/crewflow?sslmode=verify-full\n' "$own" > "$t/compose-own-admin.env"
+          printf '%s\nCREWFLOW_BUNDLED_DB=0\nPG_DATABASE_URL=postgresql://crewflow_owner:x@db-direct.example:5432/crewflow?sslmode=verify-full\n' "$own" > "$t/compose-own-owner.env"
+          for e in compose-own-admin.env compose-own-owner.env; do
+            echo "docker compose config: $I ($e, no PG_DATABASE_PASSWORD)"
+            docker compose --env-file "$t/$e" --project-directory "$t/project" -f "$I" config -q
+          done
+          # Fail closed: a missing required interpolation value must refuse to render. PG_DATABASE_PASSWORD is no longer a
+          # compose `:?` (it is required only while the bundled db runs): the db entrypoint, db-setup and the compose.env lint
+          # refuse it instead, and the lint is checked here on a bundled compose.env without it.
+          grep -v '^PG_DATABASE_PASSWORD=' "$t/compose.env" > "$t/compose-bundled-no-password.env"
+          if node packages/rab-docker/scripts/compose-owner-login.cjs --lint-env-file compose "$t/compose-bundled-no-password.env"; then
+            echo "::error::the compose.env lint accepted the bundled db without PG_DATABASE_PASSWORD"
+            exit 1
+          fi
+          for var in CREWFLOW_IMAGE_TAG CREWFLOW_SECRETS_DIR; do
             grep -v "^$var=" "$t/compose.env" > "$t/compose-missing.env"
             if docker compose --env-file "$t/compose-missing.env" --project-directory "$t/project" -f "$I" config -q 2>/dev/null; then
               echo "::error::docker-compose.image.yml rendered without $var"

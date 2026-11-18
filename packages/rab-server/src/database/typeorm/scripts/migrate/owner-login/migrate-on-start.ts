@@ -67,7 +67,8 @@ import { upgradeSessionOf } from '../../../../../engine/core-modules/upgrade/upg
 import { UPGRADE_COMMANDS } from '../../../../../engine/core-modules/upgrade/upgrade-commands/registry';
 import type { UpgradeCommand } from '../../../../../engine/core-modules/upgrade/upgrade-commands/upgrade-command';
 import type { WorkspaceUpgradeCommand } from '../../../../../engine/core-modules/upgrade/upgrade-commands/workspace-upgrade-command';
-import { majorMinorKey, readAppVersion } from '../../../../../engine/core-modules/upgrade/upgrade-version';
+import { isPatchRelease, majorMinorKey, readAppVersion } from '../../../../../engine/core-modules/upgrade/upgrade-version';
+import { PatchReleaseCommandsError } from '../../../../../engine/core-modules/upgrade/upgrade-registry-key';
 import { attributeLedger } from './release-floor';
 import { LATEST_WORKSPACE_MODULE_VERSION } from '../../../workspace-schema/workspace-schema-modules';
 
@@ -178,7 +179,7 @@ export function assertWorkspaceBlockCacheBumped(blockSensitive: boolean, bump: A
 /** Error → outcome, by error name (the classes live in many modules; a name never carries a value). Unknown = migration failure. */
 export function outcomeOf(error: unknown): StartupOutcome {
   const name = error instanceof Error ? error.name : '';
-  if (['RuntimeDbConfigError', 'UnsupportedPostgresVersionError', 'MigrationDatabaseUrlError', 'PgConfigError', 'TestSeamRefusal', 'AppVersionError'].includes(name)) return 'config';
+  if (['RuntimeDbConfigError', 'UnsupportedPostgresVersionError', 'MigrationDatabaseUrlError', 'PgConfigError', 'TestSeamRefusal', 'AppVersionError', 'UpgradeRegistryError', 'PatchReleaseCommandsError'].includes(name)) return 'config';
   if (name === 'MigrationLockError') return 'lockTimeout';
   if (
     ['MigrationIdentityError', 'OwnerLoginIdentityError', 'DbTargetError', 'DeploymentIdentityError', 'BindIdentityError', 'DatabaseStateError', 'BootstrapRefusal'].includes(name)
@@ -579,12 +580,18 @@ export function readTestUpgradeCommands(env: Record<string, string | undefined>,
   return names.map((name, i) => ({ name, timestamp: 1799999990000 + i, run: async ({ log }) => log(`test probe upgrade command ${name}: no-op`) }));
 }
 
-/** Pure: the registry with the probe commands appended to the code version's release. */
+/**
+ * Pure: the registry with the probe commands appended to the code version's release. A patch release owns no commands
+ * (upgrade-sequence.ts): probes there would silently land in the minor release's bundle, so they refuse instead.
+ */
 export function withProbeCommands(
   registry: Readonly<Record<string, readonly UpgradeCommand[]>>,
   codeVersion: string,
   probes: readonly UpgradeCommand[],
 ): Record<string, readonly UpgradeCommand[]> {
+  if (isPatchRelease(codeVersion)) {
+    throw new PatchReleaseCommandsError(`${TEST_UPGRADE_COMMANDS_VAR}: ${codeVersion} is a patch release, which carries no upgrade commands. Refusing.`);
+  }
   const key = majorMinorKey(codeVersion);
   return { ...registry, [key]: [...(registry[key] ?? []), ...probes] };
 }

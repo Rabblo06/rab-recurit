@@ -49,3 +49,8 @@ ecca38cfd0e21cbcbc239963368db49f26fc54f1:packages/rab-server/src/engine/core-mod
 # receive role passwords. Not credentials. Commit 496a424c builds every sentinel at run time (tag + randomUUID()), so the
 # current file holds no literal; this entry covers only the earlier commit that introduced the literal. Reviewed 2026-11-13.
 42287a242e935be9d2928a7457139e0855b1c76b:packages/rab-worker/src/__tests__/integration/helpers/runtime-child-env.spec.ts:generic-api-key:31
+
+# PG_SSL_CA_CERT parity spec (PR #228): a made-up 72-character base64 run that proves the CA validator refuses key material
+# pasted without its PEM armour. Not a credential (no key behind it). The line is now built from parts under a neutral
+# name; this entry covers the commit that introduced the literal. Reviewed 2026-11-17.
+e07f065b3e932dff42c9f5110672f5adf21d2f55:packages/rab-server/src/database/postgres/__tests__/pg-ca-pem-parity.spec.ts:generic-api-key:21

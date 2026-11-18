@@ -3,7 +3,10 @@ export default {
   preset: '../../jest.preset.js',
   transform: {
     // `isolatedModules: true` — type-safety is `rab-worker:lint`'s job (plain
-    // `tsc --noEmit`, which already passes cleanly); ts-jest's own
+    // `tsc --noEmit` over BOTH tsconfig.app.json and tsconfig.spec.json: the
+    // app config excludes *.spec.ts, so without the second pass a type error
+    // in a spec, e.g. reading a column the query never selected, was never
+    // reported by anything); ts-jest's own
     // full-program type-checking does not correctly follow this package's
     // `NodeNext` + `@rab/server` package.json `exports`-map resolution (a
     // known ts-jest limitation with the newer module-resolution modes,
