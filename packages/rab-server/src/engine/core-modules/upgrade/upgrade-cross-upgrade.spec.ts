@@ -12,6 +12,7 @@
 import { outcomeOf } from '../../../database/typeorm/scripts/migrate/owner-login/migrate-on-start';
 import type { UpgradeCommand } from './upgrade-commands/upgrade-command';
 import { UPGRADE_COMMANDS } from './upgrade-commands/registry';
+import { MinorReleaseResumeFailedError } from './upgrade-runner';
 import { instanceStepsOfStart, instanceVersionsOfStart } from './upgrade-sequence';
 import { upgradeStateOf } from './upgrade-status.service';
 import { decideUpgradeStart, UpgradeStartFacts, UpgradeVersionTooOldError, versionsToCheck } from './upgrade-version-check';
@@ -19,6 +20,7 @@ import {
   AppVersionError,
   assertUpgradeFromList,
   CREWFLOW_PREVIOUS_VERSIONS,
+  compareVersions,
   CREWFLOW_UPGRADE_FROM_VERSIONS,
   crossUpgradeSupportedVersions,
   isPatchRelease,
@@ -124,11 +126,16 @@ describe('(a) a minor release upgrades from its reviewed list (CREWFLOW_UPGRADE_
     expect(() => decideUpgradeStart(facts({ previousVersions: ['0.4.0', '0.6.0', '0.5.0'], fresh: true }))).toThrow(/CREWFLOW_PREVIOUS_VERSIONS must be strictly ascending/);
   });
 
-  it("release guard: this code's own version validates against the shipped lists", () => {
+  it("release guard: this code's own version, and EVERY entry of the shipped map, validate against the shipped lists", () => {
     const shipped = readAppVersion({});
     expect(() => upgradeFromVersions(shipped, CREWFLOW_PREVIOUS_VERSIONS, CREWFLOW_UPGRADE_FROM_VERSIONS)).not.toThrow();
     if (!isPatchRelease(shipped)) expect(Object.keys(CREWFLOW_UPGRADE_FROM_VERSIONS)).toContain(shipped);
-    for (const key of Object.keys(CREWFLOW_UPGRADE_FROM_VERSIONS)) expect(isPatchRelease(key)).toBe(false);
+    for (const [key, list] of Object.entries(CREWFLOW_UPGRADE_FROM_VERSIONS)) {
+      expect(isPatchRelease(key)).toBe(false);
+      // Each entry against the versions published before its release (what that release's own start saw).
+      const before = [...CREWFLOW_PREVIOUS_VERSIONS, shipped].filter((v) => compareVersions(v, key) < 0);
+      expect(() => assertUpgradeFromList(key, list, before)).not.toThrow();
+    }
   });
 });
 
@@ -145,6 +152,10 @@ describe('(b) a patch release resumes its minor .0 (decideUpgradeStart)', () => 
     expect(() => at071({ complete: { '0.7.0': false } })).toThrow(UpgradeVersionTooOldError);
     expect(() => at071({ complete: { '0.7.0': false }, minorReleaseResumable: false })).toThrow(/a patch upgrades only from its own minor line/);
     expect(at071({ complete: { '0.7.0': false }, force: true }).kind).toBe('forced');
+  });
+
+  it('a failed .0 command retried before pending patch migrations refuses the start as a migration failure (66)', () => {
+    expect(outcomeOf(new MinorReleaseResumeFailedError('x'))).toBe('migrationFailed');
   });
 
   it('a MINOR release never uses the resume rule (it is not a patch of anything)', () => {

@@ -23,12 +23,21 @@
  * have completed the previous version's last workspace command (Twenty run-instance-commands.command.ts:124-168).
  *
  * PATCH releases (owner decision 2026-11-18, Twenty upgrade-sequence-runner.service.ts:98-247 "Rerun the upgrade to resume
- * from this step" + resumeWorkspaceCommandsFromCursors): a patch carries no command of its own, so afterApply first resumes
- * its minor .0: every .0 instance step whose latest attempt is not completed runs again under the .0's own step name (the
- * .0's migrations step is recorded completed: this start applied every migration of the code, the .0's included), recorded
- * with executed_by_version = the patch, in sequence order; then the patch's own migrations step. The workspace pass walks
- * each workspace's sequence from its cursor, so a failed .0 WORKSPACE step runs again the same way (that workspace stays
- * blocked until it passes). Every command must be safe to run twice (upgrade-command.ts / workspace-upgrade-command.ts).
+ * from this step" + resumeWorkspaceCommandsFromCursors): a patch carries no command of its own; it resumes its minor .0. Every
+ * .0 instance COMMAND whose latest attempt is not completed runs again under the .0's own step name, recorded with
+ * executed_by_version = the patch. ORDER INVARIANT (review R1 of #240; Twenty runs migrations as steps of the sequence): the
+ * .0's commands run in beforeApply, BEFORE any migration of this start is applied (so before the patch's own migrations),
+ * and only when the .0's migrations step is completed (every migration the .0 ships was applied by its own start; nothing
+ * maps a migration to a release, so that step is the proof). Then the migrations apply, then (afterApply) the patch's own
+ * migrations step is recorded and the workspace pass runs. If a .0 command fails again: with migrations pending the start is
+ * refused (MinorReleaseResumeFailedError, exit 66: the patch's migrations are NOT applied, the image cannot serve on the
+ * .0 schema); with none pending it serves degraded (exit 70) without recording the patch's step. A .0 command left with its
+ * migrations step incomplete refuses 65 ("Nothing was applied") unless --force. Two documented exceptions run the .0's
+ * commands AFTER every migration (afterApply): a start with no instance row yet (fresh install, or an unchecked local / test
+ * history: nothing of the .0 has run) and that --force start (logged as a WARNING).
+ * The workspace pass walks each workspace's sequence from its cursor, so a failed .0 WORKSPACE step runs again the same way
+ * (that workspace stays blocked until it passes). Every command must be safe to run twice (upgrade-command.ts /
+ * workspace-upgrade-command.ts).
  */
 import type { LedgerAttribution } from '../../../database/typeorm/scripts/migrate/owner-login/release-floor';
 import { UpgradeCommand, UpgradeCommandHost } from './upgrade-commands/upgrade-command';
@@ -47,6 +56,7 @@ import {
   upgradeLedgerExists,
   versionStartedUnforced,
   withUpgradeScope,
+  unforcedInstanceVersions,
 } from './upgrade-migration.service';
 import {
   commandsForVersion,
@@ -58,17 +68,30 @@ import {
   sequenceForVersions,
 } from './upgrade-sequence';
 import { assertRegistryKeys } from './upgrade-registry-key';
-import { decideUpgradeStart, UpgradeStartDecision, versionsToCheck } from './upgrade-version-check';
+import { decideUpgradeStart, UpgradeStartDecision, UpgradeVersionTooOldError, versionsToCheck } from './upgrade-version-check';
 import {
   ADOPTION_RELEASE_VERSION,
   compareVersions,
   CREWFLOW_PREVIOUS_VERSIONS,
   CREWFLOW_UPGRADE_FROM_VERSIONS,
   isPatchRelease,
+  isVersion as isVersionOf,
   minorReleaseOf,
   UpgradeFromVersions,
 } from './upgrade-version';
 import { cursorHasCompleted, listReadyWorkspaces, WorkspaceCommandRunner, WorkspaceOutcome, WorkspaceRunOptions } from './workspace-command-runner';
+
+/**
+ * A PATCH start resumed its minor .0's failed instance command before the migrations (owner decision 2026-11-18, review R1
+ * of #240) and the command failed again while migrations of this code are pending: the start is refused (exit 66, outcomeOf
+ * default 'migrationFailed'); the patch's migrations are NOT applied and the failed attempt is recorded. The next start retries.
+ */
+export class MinorReleaseResumeFailedError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'MinorReleaseResumeFailedError';
+  }
+}
 
 export interface RecordedStep {
   name: string;
@@ -124,6 +147,8 @@ export interface UpgradeRunOptions {
 export class UpgradeRun {
   readonly report: UpgradeRunReport;
   private decision: UpgradeStartDecision | null = null;
+  /** A patch start already resumed its minor .0's instance commands in beforeApply: 'ok' or 'failed' (null: not done there). */
+  private minorResumed: 'ok' | 'failed' | null = null;
 
   constructor(private readonly options: UpgradeRunOptions) {
     this.report = { codeVersion: options.codeVersion, forced: options.force, decision: null, adoptedFrom: null, recorded: [], commandFailure: null, commandBlockChanged: false, workspaces: null };
@@ -179,7 +204,16 @@ export class UpgradeRun {
   }
 
   /** Step 1. Throws UpgradeVersionTooOldError (65) or AppVersionError (64) before anything is applied. */
-  async beforeApply(session: UpgradeSession, input: { fresh: boolean; attribution: LedgerAttribution | null; unrestrictedTarget: boolean }): Promise<UpgradeStartDecision> {
+  async beforeApply(
+    session: UpgradeSession,
+    input: {
+      fresh: boolean;
+      attribution: LedgerAttribution | null;
+      unrestrictedTarget: boolean;
+      /** The migrations this start will apply (the locked runner's pendingBefore). Default none. */
+      pendingMigrations?: readonly string[];
+    },
+  ): Promise<UpgradeStartDecision> {
     const { codeVersion, force, log } = this.options;
     // Security review L-1: the registry keys are checked first, unconditionally (a fresh or no-ledger start reads no registry
     // before the migrations): a patch key refuses here (config, 64), before any migration is applied.
@@ -197,7 +231,10 @@ export class UpgradeRun {
           for (const v of toCheck) complete[v] = await isLastAttemptCompleted(q, { name: lastInstanceStepOfVersion(v, this.registry), workspaceId: null });
           const newer = (await instanceVersions(q)).filter((v) => compareVersions(v, codeVersion) > 0);
           const started = await versionStartedUnforced(q, codeVersion);
-          const minorStarted = minor !== null && (await versionStartedUnforced(q, minor));
+          // Review O3 of #240: the .0 counts as started when an unforced, non-initial instance row was executed by the .0 OR by
+          // an earlier patch of its line (a fresh 0.7.1 whose 0.7.0 retry failed wrote rows as 0.7.1 only).
+          const minorStarted =
+            minor !== null && (await unforcedInstanceVersions(q)).some((v) => isVersionOf(v) && minorReleaseOf(v) === minor && compareVersions(v, codeVersion) < 0);
           return { instance, complete, newer, started, minorStarted };
         })
       : { instance: false, complete: {} as Record<string, boolean>, newer: [] as string[], started: false, minorStarted: false };
@@ -232,7 +269,43 @@ export class UpgradeRun {
     if (decision.kind === 'adopt') this.report.adoptedFrom = decision.initialVersion;
     log(`upgrade check (${codeVersion}${force ? ', --force' : ''}): ${decision.kind}: ${decision.reason}`);
     if (force) log('WARNING: upgrade --force: the previous-version check is skipped; every logbook row of this run is marked forced');
+    if (minor !== null && ledgerExists && (decision.kind === 'continue' || decision.kind === 'forced')) await this.resumeMinorBeforeMigrations(session, minor, input.pendingMigrations ?? []);
     return decision;
+  }
+
+  /**
+   * The ORDER INVARIANT of a patch start (see the header): the minor .0's incomplete instance commands run now, before any
+   * migration of this start, and only on the .0's own schema (its migrations step completed). Throws before anything is
+   * applied: UpgradeVersionTooOldError (65) when the .0's migrations step is not completed (unless --force: then they run in
+   * afterApply, after every migration, with a WARNING); MinorReleaseResumeFailedError (66) when a command fails again while
+   * migrations are pending.
+   */
+  private async resumeMinorBeforeMigrations(session: UpgradeSession, minor: string, pendingMigrations: readonly string[]): Promise<void> {
+    const { codeVersion, force, log } = this.options;
+    const incomplete: string[] = [];
+    for (const c of commandsForVersion(minor, this.registry)) {
+      const name = commandStepName(minor, c);
+      if (!(await withUpgradeScope(session, 'status', (q) => isLastAttemptCompleted(q, { name, workspaceId: null })))) incomplete.push(name);
+    }
+    if (!incomplete.length) return;
+    const migrationsDone = await withUpgradeScope(session, 'status', (q) => isLastAttemptCompleted(q, { name: migrationsStepName(minor), workspaceId: null }));
+    if (!migrationsDone) {
+      if (!force) {
+        throw new UpgradeVersionTooOldError(
+          `${codeVersion} must re-run ${minor}'s incomplete command(s) ${incomplete.join(', ')} on ${minor}'s schema, before its own migrations, but ${migrationsStepName(minor)} is not completed, so migrations of ${minor} may still be pending. Start ${minor} again first, or run the manual command \`upgrade --force\` (not recommended: the commands then run after every migration). Nothing was applied.`,
+        );
+      }
+      log(`WARNING: upgrade --force: ${migrationsStepName(minor)} is not completed, so ${minor}'s command(s) ${incomplete.join(', ')} run AFTER every migration of this start (not before ${codeVersion}'s own)`);
+      return;
+    }
+    log(`upgrade ${codeVersion}: resuming ${minor} before any migration: ${incomplete.length} incomplete instance command(s) re-run under their own names (${incomplete.join(', ')})`);
+    const ok = await this.runInstanceSteps(session, minor);
+    this.minorResumed = ok ? 'ok' : 'failed';
+    if (!ok && pendingMigrations.length) {
+      throw new MinorReleaseResumeFailedError(
+        `${minor}'s command ${this.report.commandFailure?.name ?? ''} failed again (recorded); ${codeVersion}'s ${pendingMigrations.length} pending migration(s) were NOT applied, so this image cannot serve. Fix the cause and start again.`,
+      );
+    }
   }
 
   /** Step 3, after the migrations applied and the post-checks passed. Never throws for a failed COMMAND (reported instead). */
@@ -247,9 +320,12 @@ export class UpgradeRun {
         log(`adopted: is_initial row ${decision.initialName}`);
       }
     });
-    // A minor release: its own instance steps. A PATCH release: first its minor .0's incomplete instance steps, under the .0's
-    // own names (owner decision 2026-11-18), then its own migrations step. A failed command stops the start (warn and serve).
+    // A minor release: its own instance steps. A PATCH release: its minor .0's incomplete instance steps (already run in
+    // beforeApply, before the migrations, unless this is a fresh install or a --force start whose .0 migrations step was
+    // incomplete; see the header), then its own migrations step. A failed command stops the start (warn and serve).
+    if (this.minorResumed === 'failed') return;
     for (const version of instanceVersionsOfStart(codeVersion)) {
+      if (version !== codeVersion && this.minorResumed === 'ok') continue;
       if (!(await this.runInstanceSteps(session, version))) return;
     }
     await this.runWorkspacePass(session);
@@ -264,18 +340,12 @@ export class UpgradeRun {
    */
   private async runInstanceSteps(session: UpgradeSession, version: string): Promise<boolean> {
     const { codeVersion, force, log } = this.options;
-    if (version !== codeVersion) {
-      const pending = [];
-      for (const name of [migrationsStepName(version), ...commandsForVersion(version, this.registry).map((c) => commandStepName(version, c))]) {
-        if (!(await withUpgradeScope(session, 'upgrade', (q) => isLastAttemptCompleted(q, { name, workspaceId: null })))) pending.push(name);
-      }
-      if (pending.length) log(`upgrade ${codeVersion}: resuming ${version}: ${pending.length} incomplete instance step(s) re-run under their own names (${pending.join(', ')})`);
-    }
     await this.recordIfIncomplete(session, migrationsStepName(version), 'completed');
     for (const command of commandsForVersion(version, this.registry)) {
       const name = commandStepName(version, command);
       const done = await withUpgradeScope(session, 'upgrade', (q) => isLastAttemptCompleted(q, { name, workspaceId: null }));
       if (done) continue;
+      if (version !== codeVersion) log(`upgrade ${codeVersion}: re-running ${name} (an incomplete step of ${version}) under its own name`);
       try {
         if (this.options.testFailCommand && this.options.testFailCommand === command.name) throw Object.assign(new Error('test seam: forced command failure'), { name: 'TestCommandFailure' });
         log(`upgrade command ${name}: running`);

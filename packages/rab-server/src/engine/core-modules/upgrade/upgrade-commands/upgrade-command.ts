@@ -6,7 +6,9 @@
  *   - IDEMPOTENT, and safe to run again after it FAILED part-way: a crash leaves no logbook row, so the next start runs the
  *     command again; a failed attempt is retried by the next start of the same release AND by its patch releases, under this
  *     release's step name (owner decision 2026-11-18, upgrade-runner.ts). It keeps its progress in the database and re-checks
- *     it (test: run it twice, and once more after a failure). Audit 2026-11-18: 0.6.0 has no instance command; 0.7.0's
+ *     it (test: run it twice, and once more after a failure). It runs on its OWN release's schema: when a patch retries it,
+ *     the retry happens before any migration of the patch (review R1 of #240; exceptions: a start with no instance row, and
+ *     a --force start whose release's migrations step is incomplete, run it after every migration). Audit 2026-11-18: 0.6.0 has no instance command; 0.7.0's
  *     HwsCutover (not registered yet) is resumable by design (state table started → verified, ON CONFLICT DO NOTHING copies,
  *     already-verified workspaces skipped, the activation sentinel inserted ON CONFLICT DO NOTHING; hws-c3-cutover spec);
  *   - tenant data only inside its tenant context (FORCE RLS stays on; the command binds the tenant itself);

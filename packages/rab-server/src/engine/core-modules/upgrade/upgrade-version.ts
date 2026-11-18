@@ -7,6 +7,12 @@
  * The version is `MAJOR.MINOR.PATCH`, one per release, from the root `package.json` and baked into the image as
  * `CREWFLOW_APP_VERSION` (Dockerfile ARG → ENV). R254 = 0.4.0, R256 = 0.5.0, the first release with the logbook = 0.6.0.
  *
+ * Patch releases (owner decision 2026-11-18): a patch carries no command and resumes its minor .0's incomplete instance
+ * commands under the .0's own step names. ORDER INVARIANT (review R1 of #240): those commands run BEFORE any migration of
+ * the patch's start, on the .0's schema (its migrations step completed), never after the patch's own migrations; otherwise
+ * the start refuses (65, nothing applied) unless --force. Exceptions (after every migration): a start with no instance row
+ * (fresh install / unchecked local history) and that --force start. Implemented in upgrade-runner.ts.
+ *
  * Pure apart from readAppVersion's file read; no side effects on import.
  */
 import { existsSync, readFileSync } from 'node:fs';

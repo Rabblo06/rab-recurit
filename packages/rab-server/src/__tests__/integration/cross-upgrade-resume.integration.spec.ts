@@ -1,8 +1,13 @@
 import 'reflect-metadata';
+import { join } from 'node:path';
 import { Client } from 'pg';
+import type { MigrationInterface, QueryRunner } from 'typeorm';
 
 import { integrationTestDatabase, integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
+import { STARTUP_EXIT_CODES } from '../../database/owner-login/runtime-db-config';
+import { runLockedMigrations } from '../../database/typeorm/scripts/migrate/locked-migration-runner';
 import { MIGRATION_LOCK_KEY } from '../../database/typeorm/scripts/migrate/migration-lock';
+import { runMigrateOnStart } from '../../database/typeorm/scripts/migrate/owner-login/migrate-on-start';
 import { selectWorkspaceFingerprintsForServer } from '../../database/typeorm/workspace-schema/v1/expected-fingerprints';
 import type { WorkspaceMetadataCacheService } from '../../engine/core-modules/entity-cache/workspace-metadata-cache.service';
 import { SchemaResolverService, WorkspaceRoutingError } from '../../engine/core-modules/tenant/schema-resolver.service';
@@ -32,10 +37,16 @@ import { dropWorkspaceSchema, FROZEN_TEMPLATE_REGISTRY, provisionTypeScript, reg
  *   2. 0.7.0 (from 0.6.0, on its list): the cutover fails (attempt 1) → the workspace is BLOCKED (resolver 'upgrading');
  *   3. abuse: a READY workspace with no logbook row (a patch never adopts) → 0.7.1 still refuses 65, nothing written;
  *   4. 0.7.1, still no backup: resumes 0.7.0 (decision continue from 0.7.0), the cutover fails again under its 0.7.0 name
- *      (attempt 2, executed_by 0.7.1), 0.7.1_TypeOrmMigrations not recorded, the workspace stays BLOCKED; /healthz not ok;
+ *      (attempt 2, executed_by 0.7.1), 0.7.1_TypeOrmMigrations not recorded, the workspace stays BLOCKED; /healthz 'failed'
+ *      (and 'failed' too when the patch's own last step is completed but the .0 step's latest attempt failed);
  *   5. 0.7.1 again, backup present: the cutover completes (attempt 3, executed_by 0.7.1), then 0.7.1_TypeOrmMigrations; the
  *      workspace is UNBLOCKED (resolver → its schema); /healthz ok; a further start records nothing;
- *   6. a failed 0.7.0 WORKSPACE step is retried by 0.7.1 under its 0.7.0 name too (the workspace pass walks from the cursor).
+ *   6. a failed 0.7.0 WORKSPACE step is retried by 0.7.1 under its 0.7.0 name too (the workspace pass walks from the cursor);
+ *   7. ORDER (review R1 of #240), through the REAL locked start (runMigrateOnStart → runLockedMigrations) with a REAL
+ *      patch-only migration (a test migration class added to this code's chain): the 0.7.0 cutover is retried BEFORE the
+ *      0.7.1 migration applies; if it fails again the start refuses (66) and the migration is NOT applied; when 0.7.0's
+ *      migrations step is not completed the start refuses (65) and nothing is applied;
+ *   8. review O3: after a FRESH 0.7.1 whose 0.7.0 retry failed (rows executed by 0.7.1 only), 0.7.2 resumes 0.7.0 (not 65).
  * Self-sufficient on the shared database: beforeAll seeds a completed `0.6.0_TypeOrmMigrations` row when needed; afterAll
  * removes every row and workspace written here (the 0.7.0 / 0.7.1 instance rows included).
  */
@@ -50,6 +61,12 @@ const PREV_070 = ['0.4.0', '0.5.0', '0.6.0'];
 const PREV_071 = [...PREV_070, '0.7.0'];
 const UF = { '0.7.0': ['0.6.0'] };
 const CUTOVER = `0.7.0_ProbeHwsCutover_${T0}`;
+const PREV_072 = [...PREV_071, '0.7.1'];
+/** The real patch-only migration of case 7 (newer than every migration of this code; removed from core.migrations afterwards). */
+const PATCH_MIGRATION = 'CrossUpgradePatchProbe1799999990001';
+const MIGRATIONS_GLOB = join(__dirname, '..', '..', 'database', 'typeorm', 'core', 'migrations', '*.{ts,js}');
+/** What ran, in order, across the cutover probe and the patch migration (case 7). */
+const events: string[] = [];
 
 describeIfDb('cross-upgrade lists and patch resume of a failed .0 step (integration)', () => {
   const { adminUrl, appUrl } = RUN ? integrationTestDatabase() : ({} as never);
@@ -87,6 +104,8 @@ describeIfDb('cross-upgrade lists and patch resume of a failed .0 step (integrat
     timestamp: T0,
     run: async (ctx) => {
       cutoverRuns += 1;
+      const [m] = (await ctx.query('SELECT EXISTS (SELECT 1 FROM core.migrations WHERE name = $1) AS applied', [PATCH_MIGRATION])) as Array<{ applied: boolean }>;
+      events.push(`cutover(patch migration applied=${m?.applied === true})`);
       const ws = target();
       await inTenant(ctx.query, ws, 'UPDATE core.workspace_schema_registry SET migration_error = $2 WHERE workspace_id = $1', [ws.id, PENDING]);
       ctx.markBlockChanged?.();
@@ -111,20 +130,22 @@ describeIfDb('cross-upgrade lists and patch resume of a failed .0 step (integrat
       await admin.query(`SELECT status, attempt, executed_by_version AS v, forced FROM core.upgrade_migration WHERE workspace_id IS NULL AND name = $1 ORDER BY attempt`, [name])
     ).rows as Array<{ status: string; attempt: number; v: string; forced: boolean }>;
   const allRowCount = async () => Number((await admin.query('SELECT count(*)::int AS n FROM core.upgrade_migration')).rows[0].n);
-  const dropNewerInstanceRows = () => admin.query(`DELETE FROM core.upgrade_migration WHERE workspace_id IS NULL AND (name LIKE '0.7.0\\_%' OR name LIKE '0.7.1\\_%')`);
-  const run = (codeVersion: '0.7.0' | '0.7.1', ids: string[], extra: { workspaceRegistry?: Record<string, readonly WorkspaceUpgradeCommand[]> } = {}) =>
+  const dropNewerInstanceRows = () =>
+    admin.query(`DELETE FROM core.upgrade_migration WHERE workspace_id IS NULL AND (name LIKE '0.7.0\\_%' OR name LIKE '0.7.1\\_%' OR name LIKE '0.7.2\\_%')`);
+  const REGISTRY = () => ({ ...UPGRADE_COMMANDS, '0-7': [probe(() => w)] });
+  const run = (codeVersion: '0.7.0' | '0.7.1' | '0.7.2', ids: string[], extra: { workspaceRegistry?: Record<string, readonly WorkspaceUpgradeCommand[]> } = {}) =>
     new UpgradeRun({
       codeVersion,
-      previousVersions: codeVersion === '0.7.0' ? PREV_070 : PREV_071,
+      previousVersions: codeVersion === '0.7.0' ? PREV_070 : codeVersion === '0.7.1' ? PREV_071 : PREV_072,
       upgradeFrom: UF,
       force: false,
       log: (l) => lines.push(l),
-      registry: { ...UPGRADE_COMMANDS, '0-7': [probe(() => w)] },
+      registry: REGISTRY(),
       workspaceRegistry: extra.workspaceRegistry ?? WORKSPACE_UPGRADE_COMMANDS,
       workspaceRunner: { workspaceIds: ids },
     });
-  const start = async (r: UpgradeRun) => {
-    const decision = await r.beforeApply(session, { fresh: false, attribution: null, unrestrictedTarget: true });
+  const start = async (r: UpgradeRun, fresh = false) => {
+    const decision = await r.beforeApply(session, { fresh, attribution: null, unrestrictedTarget: true });
     await r.afterApply(session);
     return decision;
   };
@@ -147,11 +168,17 @@ describeIfDb('cross-upgrade lists and patch resume of a failed .0 step (integrat
       await c.end();
     }
   };
+  /** The /healthz state for this file's state: another spec file's workspace issue turns ok / behind into failed (ignored here). */
+  const ownState = async (version: string) => {
+    const s = await statusOf(version);
+    expect((s.workspaces ?? []).filter((x) => created.some((c) => c.id === x.workspaceId))).toEqual([]);
+    return s.state;
+  };
   const statusOf = async (version: string) => {
     const c = new Client({ connectionString: appUrl });
     await c.connect();
     try {
-      return await readUpgradeStatus(upgradeSessionOf(c), version);
+      return await readUpgradeStatus(upgradeSessionOf(c), version, REGISTRY());
     } finally {
       await c.end();
     }
@@ -242,12 +269,26 @@ describeIfDb('cross-upgrade lists and patch resume of a failed .0 step (integrat
       { status: 'failed', attempt: 1, v: '0.7.0', forced: false },
       { status: 'failed', attempt: 2, v: '0.7.1', forced: false },
     ]);
-    // The patch's own migrations step waits until its .0 is resumed (sequence order); 0.7.0's migrations step is not re-recorded.
+    // The patch's own migrations step is not recorded while its .0 is not resumed (the .0's commands run before the patch's
+    // migrations, order invariant; case 7 proves it with a real migration); 0.7.0's migrations step is not re-recorded.
     expect(await instanceRows('0.7.1_TypeOrmMigrations')).toEqual([]);
     expect(await instanceRows('0.7.0_TypeOrmMigrations')).toHaveLength(1);
     expect((await registryOf(admin, w.id)).migration_error).toBe(PENDING);
     expect(await resolveAs(w)).toBe('refused:upgrading');
-    expect((await statusOf('0.7.1')).state).not.toBe('ok');
+    // Review R2: exactly 'failed' (the .0's failed step is read for the patch; without it this state reads 'behind').
+    expect(await ownState('0.7.1')).toBe('failed');
+  });
+
+  it("4b. /healthz: the patch's own last step completed but a .0 step's latest attempt failed → 'failed' (not 'ok')", async () => {
+    const seededRow = await admin.query(
+      `INSERT INTO core.upgrade_migration (name, status, attempt, executed_by_version, is_initial) VALUES ('0.7.1_TypeOrmMigrations', 'completed', 1, '0.7.1', false) RETURNING id`,
+    );
+    try {
+      expect(await instanceRows(CUTOVER)).toHaveLength(2);
+      expect(await ownState('0.7.1')).toBe('failed');
+    } finally {
+      await admin.query('DELETE FROM core.upgrade_migration WHERE id = $1', [seededRow.rows[0].id]);
+    }
   });
 
   it('5. 0.7.1 with the backup: the cutover completes (attempt 3, by 0.7.1), then 0.7.1_TypeOrmMigrations; UNBLOCKED; /healthz ok', async () => {
@@ -319,6 +360,138 @@ describeIfDb('cross-upgrade lists and patch resume of a failed .0 step (integrat
       expect(await resolveAs(v)).toBe(v.schema);
     } finally {
       w = target;
+      await dropNewerInstanceRows();
+    }
+  });
+
+  describe('7. the order invariant through the real locked start, with a real patch-only migration (review R1)', () => {
+    class PatchProbeMigration implements MigrationInterface {
+      name = PATCH_MIGRATION;
+      async up(queryRunner: QueryRunner): Promise<void> {
+        events.push('patch migration');
+        await queryRunner.query('SELECT 1');
+      }
+      async down(): Promise<void> {
+        // nothing to undo
+      }
+    }
+    /** The real migrate-on-start child with this code's migration chain + the patch migration, driving a 0.7.1 UpgradeRun. */
+    const startPatch = async () => {
+      const r = run('0.7.1', [w.id]);
+      const env: NodeJS.ProcessEnv = { PATH: process.env.PATH, NODE_ENV: 'test', PG_DATABASE_URL: appUrl, CREWFLOW_MIGRATE_ON_START: 'true' };
+      if (process.platform === 'win32' && process.env.SystemRoot) env.SystemRoot = process.env.SystemRoot;
+      const result = await runMigrateOnStart(
+        { migrationApprovalMode: 'none' },
+        {
+          env,
+          log: (l) => lines.push(l),
+          cacheFlush: async () => undefined,
+          runner: (options) =>
+            runLockedMigrations({
+              ...options,
+              dataSourceOverrides: { ...options.dataSourceOverrides, migrations: [MIGRATIONS_GLOB, PatchProbeMigration] },
+              beforeApply: async (ctx) => {
+                await r.beforeApply(upgradeSessionOf(ctx.queryRunner), { fresh: false, attribution: null, unrestrictedTarget: true, pendingMigrations: ctx.pendingBefore });
+              },
+              onApplyFailure: (ctx) => r.onApplyFailure(upgradeSessionOf(ctx.queryRunner), ctx.error),
+              afterMigrations: async (ctx) => {
+                await r.afterApply(upgradeSessionOf(ctx.queryRunner));
+              },
+            }),
+        },
+      );
+      return { result, run: r };
+    };
+    const patchApplied = async () => Number((await admin.query('SELECT count(*)::int AS n FROM core.migrations WHERE name = $1', [PATCH_MIGRATION])).rows[0].n) === 1;
+
+    beforeAll(async () => {
+      await dropNewerInstanceRows();
+      backup = false;
+      // 0.7.0 (on the plain session, as before): its cutover fails, the workspace is blocked.
+      const at070 = run('0.7.0', [w.id]);
+      expect(await start(at070)).toMatchObject({ kind: 'continue', from: '0.6.0' });
+      expect(await instanceRows(CUTOVER)).toEqual([{ status: 'failed', attempt: 1, v: '0.7.0', forced: false }]);
+      // The real locked start takes the migration lock itself.
+      await app.query('SELECT pg_advisory_unlock($1::bigint)', [LOCK]);
+    });
+    afterAll(async () => {
+      await admin.query('DELETE FROM core.migrations WHERE name = $1', [PATCH_MIGRATION]).catch(() => undefined);
+      await app.query('SELECT pg_advisory_lock($1::bigint)', [LOCK]);
+      await dropNewerInstanceRows();
+    });
+
+    it('7a. 0.7.0 migrations step not completed → 65, nothing applied (no migration, no logbook row, cutover not run)', async () => {
+      const seededRow = await admin.query(
+        `INSERT INTO core.upgrade_migration (name, status, attempt, executed_by_version, is_initial) VALUES ('0.7.0_TypeOrmMigrations', 'failed', 2, '0.7.0', false) RETURNING id`,
+      );
+      try {
+        const count = await allRowCount();
+        const runs = cutoverRuns;
+        const { result } = await startPatch();
+        expect([result.outcome, STARTUP_EXIT_CODES[result.outcome]]).toEqual(['behind', 65]);
+        expect(lines.some((l) => /FAILED \(behind\): UpgradeVersionTooOldError: .*0\.7\.0_TypeOrmMigrations is not completed/.test(l))).toBe(true);
+        expect(await patchApplied()).toBe(false);
+        expect(await allRowCount()).toBe(count);
+        expect(cutoverRuns).toBe(runs);
+      } finally {
+        await admin.query('DELETE FROM core.upgrade_migration WHERE id = $1', [seededRow.rows[0].id]);
+      }
+    });
+
+    it('7b. the cutover fails again BEFORE the patch migration → 66, the patch migration is NOT applied, the workspace stays blocked', async () => {
+      events.length = 0;
+      const { result, run: r } = await startPatch();
+      expect([result.outcome, STARTUP_EXIT_CODES[result.outcome]]).toEqual(['migrationFailed', 66]);
+      expect(lines.some((l) => /FAILED \(migrationFailed\): MinorReleaseResumeFailedError: /.test(l))).toBe(true);
+      expect(events).toEqual(['cutover(patch migration applied=false)']);
+      expect(r.report.recorded).toEqual([{ name: CUTOVER, status: 'failed', attempt: 2 }]);
+      expect(await patchApplied()).toBe(false);
+      expect(await instanceRows('0.7.1_TypeOrmMigrations')).toEqual([]);
+      expect(await resolveAs(w)).toBe('refused:upgrading');
+    });
+
+    it('7c. with the backup: the cutover completes BEFORE the patch migration applies; then 0.7.1_TypeOrmMigrations; unblocked', async () => {
+      backup = true;
+      events.length = 0;
+      const { result, run: r } = await startPatch();
+      expect([result.outcome, STARTUP_EXIT_CODES[result.outcome]]).toEqual(['ok', 0]);
+      expect(events).toEqual(['cutover(patch migration applied=false)', 'patch migration']);
+      expect(await patchApplied()).toBe(true);
+      expect(r.report.recorded).toEqual([
+        { name: CUTOVER, status: 'completed', attempt: 3 },
+        { name: '0.7.1_TypeOrmMigrations', status: 'completed', attempt: 1 },
+      ]);
+      expect(await instanceRows(CUTOVER)).toEqual([
+        { status: 'failed', attempt: 1, v: '0.7.0', forced: false },
+        { status: 'failed', attempt: 2, v: '0.7.1', forced: false },
+        { status: 'completed', attempt: 3, v: '0.7.1', forced: false },
+      ]);
+      expect(await resolveAs(w)).toBe(w.schema);
+    });
+  });
+
+  it('8. review O3: after a FRESH 0.7.1 whose 0.7.0 retry failed (rows by 0.7.1 only), 0.7.2 resumes 0.7.0 instead of refusing 65', async () => {
+    await dropNewerInstanceRows();
+    backup = false;
+    await admin.query(`UPDATE core.workspace_schema_registry SET migration_error = NULL WHERE workspace_id = $1`, [w.id]);
+    try {
+      // A fresh-install decision on 0.7.1 (no previous-version check): 0.7.0's steps run after every migration, as 0.7.1.
+      const fresh = run('0.7.1', [w.id]);
+      expect((await start(fresh, true)).kind).toBe('fresh');
+      expect(await instanceRows('0.7.0_TypeOrmMigrations')).toEqual([{ status: 'completed', attempt: 1, v: '0.7.1', forced: false }]);
+      expect(await instanceRows(CUTOVER)).toEqual([{ status: 'failed', attempt: 1, v: '0.7.1', forced: false }]);
+      expect(Number((await admin.query(`SELECT count(*)::int AS n FROM core.upgrade_migration WHERE workspace_id IS NULL AND executed_by_version = '0.7.0'`)).rows[0].n)).toBe(0);
+      expect(await resolveAs(w)).toBe('refused:upgrading');
+
+      backup = true;
+      const at072 = run('0.7.2', [w.id]);
+      expect(await start(at072)).toMatchObject({ kind: 'continue', from: '0.7.0' });
+      expect(at072.report.recorded).toEqual([
+        { name: CUTOVER, status: 'completed', attempt: 2 },
+        { name: '0.7.2_TypeOrmMigrations', status: 'completed', attempt: 1 },
+      ]);
+      expect(await resolveAs(w)).toBe(w.schema);
+    } finally {
       await dropNewerInstanceRows();
     }
   });

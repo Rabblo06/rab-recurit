@@ -171,6 +171,18 @@ export async function versionStartedUnforced(query: Query, version: string): Pro
   return rows.length > 0;
 }
 
+/**
+ * The versions that executed an UNFORCED, non-initial instance row (completed or failed): a start of each passed the
+ * previous-version check. Review O3 of #240: a patch reads it to see whether its .0's line was started. Needs scope
+ * 'upgrade' or 'status'.
+ */
+export async function unforcedInstanceVersions(query: Query): Promise<string[]> {
+  const rows = (await query(
+    `SELECT DISTINCT m.executed_by_version AS v FROM core.upgrade_migration m WHERE m.workspace_id IS NULL AND NOT m.is_initial AND NOT m.forced`,
+  )) as Array<{ v: string }>;
+  return rows.map((r) => r.v);
+}
+
 /** Every version that appears on an instance row (completed or not). */
 export async function instanceVersions(query: Query): Promise<string[]> {
   const rows = (await query(`SELECT DISTINCT m.executed_by_version AS v FROM core.upgrade_migration m WHERE m.workspace_id IS NULL`)) as Array<{ v: string }>;

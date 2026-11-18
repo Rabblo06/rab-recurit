@@ -61,10 +61,12 @@ export function instanceStepsForVersion(version: string, registry: InstanceRegis
 }
 
 /**
- * The versions whose INSTANCE steps one start of `version` runs, in sequence order: a minor release only its own; a PATCH
+ * The versions whose INSTANCE steps one start of `version` records, in logbook order: a minor release only its own; a PATCH
  * release first its minor `.0`'s (owner decision 2026-11-18: any `.0` instance step whose latest attempt is not completed is
  * re-run under the `.0`'s own step name, recorded with executed_by_version = the patch; Twenty upgrade-sequence-runner
- * .service.ts:98-247 resumes from the failed step), then its own migrations step. Pure.
+ * .service.ts:98-247 resumes from the failed step), then its own migrations step. When the `.0`'s commands actually RUN
+ * relative to the migrations (before them, except on a start with no instance row or a --force start whose `.0` migrations
+ * step is incomplete) is the runner's order invariant, upgrade-runner.ts. Pure.
  */
 export function instanceVersionsOfStart(version: string): string[] {
   return isPatchRelease(version) ? [minorReleaseOf(version), version] : [version];

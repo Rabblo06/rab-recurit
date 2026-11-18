@@ -23,7 +23,8 @@ import {
   UpgradeSession,
   withUpgradeScope,
 } from './upgrade-migration.service';
-import { instanceStepsOfStart, instanceVersionsOfStart, lastInstanceStepOfVersion } from './upgrade-sequence';
+import { UPGRADE_COMMANDS } from './upgrade-commands/registry';
+import { InstanceRegistry, instanceStepsOfStart, instanceVersionsOfStart, lastInstanceStepOfVersion } from './upgrade-sequence';
 import { compareVersions, readAppVersion } from './upgrade-version';
 import { listReadyWorkspaces } from './workspace-command-runner';
 import { parseUpgradeBlock } from './workspace-upgrade-block';
@@ -74,7 +75,8 @@ export function upgradeStateOf(f: { ledgerExists: boolean; appComplete: boolean;
   return 'behind';
 }
 
-export async function readUpgradeStatus(session: UpgradeSession, appVersion: string): Promise<UpgradeStatus> {
+/** `registry`: the instance commands per release (default UPGRADE_COMMANDS; integration specs pass their test registry). */
+export async function readUpgradeStatus(session: UpgradeSession, appVersion: string, registry: InstanceRegistry = UPGRADE_COMMANDS): Promise<UpgradeStatus> {
   const empty: UpgradeStatus = { appVersion, state: 'none', step: null, executedByVersion: null, attempt: null, forced: null, at: null };
   if (!(await upgradeLedgerExists(session.query))) return empty;
   // L3: workspaces with no logbook row at all (cheap in steady state: after adoption every workspace has one); only those are
@@ -100,11 +102,11 @@ export async function readUpgradeStatus(session: UpgradeSession, appVersion: str
     // instance step is completed too, and a failed .0 step (a cutover retried by the patch) reads as failed, not ok.
     let appComplete = true;
     for (const v of instanceVersionsOfStart(appVersion)) {
-      if (!(await isLastAttemptCompleted(q, { name: lastInstanceStepOfVersion(v), workspaceId: null }))) appComplete = false;
+      if (!(await isLastAttemptCompleted(q, { name: lastInstanceStepOfVersion(v, registry), workspaceId: null }))) appComplete = false;
     }
     const workspaceStepFailed = (await countFailedWorkspaceCursors(q)) > 0 || readyWithoutCursor > 0;
     let appStepFailed = false;
-    for (const name of instanceStepsOfStart(appVersion)) {
+    for (const name of instanceStepsOfStart(appVersion, registry)) {
       const rows = (await q(`SELECT m.status FROM core.upgrade_migration m WHERE m.name = $1 AND m.workspace_id IS NULL ORDER BY m.attempt DESC LIMIT 1`, [name])) as Array<{ status: string }>;
       if (rows[0]?.status === 'failed') appStepFailed = true;
     }

@@ -473,12 +473,14 @@ export async function runMigrateOnStart(config: MigrateOnStartConfig, deps: Migr
       },
       approvePending: approval === null ? undefined : (pending) => assertMigrationApproval(approval, pending),
       // OWNER-DB-ULTIMATE Part B: the upgrade logbook (engine/core-modules/upgrade/upgrade-runner.ts), hook calls only.
-      beforeApply: async ({ queryRunner: locked, classification: c, proof: p, code, guarded }) => {
+      beforeApply: async ({ queryRunner: locked, classification: c, proof: p, code, guarded, pendingBefore }) => {
         const fresh = c.state === 'EMPTY' || c.state === 'BOOTSTRAP-PARTIAL' || p.fresh;
         await run.beforeApply(upgradeSessionOf(locked), {
           fresh,
           attribution: fresh ? null : attributeLedger(c.applied, code),
           unrestrictedTarget: guarded.target === 'local' || guarded.target === 'test',
+          // A patch start resumes its .0's failed commands BEFORE these apply (upgrade-runner.ts, order invariant).
+          pendingMigrations: pendingBefore,
         });
       },
       onApplyFailure: ({ queryRunner: locked, error }) => run.onApplyFailure(upgradeSessionOf(locked), error),
