@@ -78,13 +78,14 @@ export function shiftTeamSelectSingleRoleSql(schema: string): string {
  * Expected `core.workspace_schema_fingerprint_v2` of a level-24 workspace per PostgreSQL major. Measured (not derived): a
  * level-23 workspace + this command, a workspace built by the TypeScript provisioner and one built by the level-24
  * core.provision_workspace must all equal it (ws-shift-team-multi-role.integration.spec.ts `[l24-fp]`; the per-major
- * `generate-workspace-fingerprints.ts` ci run for 16 / 17 / 18). An undeclared major makes StaffShiftTeamMultiRole1786721590000
+ * `generate-workspace-fingerprints.ts` ci run for 16 / 17 / 18). Measured 2026-11-18 on throwaway postgres:16/17/18-alpine
+ * clusters (InstaBox): the level-23 -> 24 upgrade path, reproduced by the TypeScript provisioner and core.provision_workspace. An undeclared major makes StaffShiftTeamMultiRole1786721590000
  * refuse (exit 66): fail closed.
  */
 export const STAFF_PROFILE_SHIFT_TEAM_MULTI_ROLE_FINGERPRINTS_V2: Readonly<Partial<Record<16 | 17 | 18, string>>> = Object.freeze({
-  16: '0000000000000000000000000000000000000000000000000000000000000016',
-  17: '0000000000000000000000000000000000000000000000000000000000000017',
-  18: '0000000000000000000000000000000000000000000000000000000000000018',
+  16: '9a0a761d355fd4731ac4f163b441e7fd1dda27c6f6e1c6435e581d5eea4bedfc',
+  17: '022cf67bc6a967d0a32705cb92968e39e8c37f5ab1c93e8cc6f77ad48721c440',
+  18: '2c8d82028b7dc5e1820393cd599d30ca720c6a0ac2622ff0deaced7d8ec20487',
 });
 
 export const STAFF_PROFILE_SHIFT_TEAM_MULTI_ROLE_PROVISION_LITERAL = 'db:provision_workspace@StaffShiftTeamMultiRole1786721590000';

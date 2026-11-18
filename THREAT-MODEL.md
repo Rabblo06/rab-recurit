@@ -8724,3 +8724,37 @@ This entry covers only what release 0.7.0 adds to switch it on.
   no snapshot is refused; a manager signed in to the staff app gets 403; a `manager` + `staff` user gets 200 with their
   own row (was 403); an `it.failing` case pins the RLS gap above (full team expected) so it turns red once the policy is
   fixed.
+
+## Staff same-shift Teams read, layer 4: the RLS policy tests staff role membership (branch db/shift-team-multi-role-level-24, 2026-11-18; release 0.7.0, structure level 24; DRAFT: new SQL, owner review first; depends on #175 and #177)
+- **Finding closed (security finding format, §5.8).** Severity: Low (availability of a roster, fail closed). Actor: a staff
+  user who also holds another role (for example `manager,staff`) and is confirmed on a live shift. Action: opens the
+  shift's team list on the staff app. Consequence before: the service gate (#205) let them in, but the policy
+  `staff_profile_shift_team_select` compared `current_setting('rab.role', true) = 'staff'`; `rab.role` is the roles joined
+  with commas, so the database hid every teammate and the roster showed only "You". Root cause: `v1/shift-team-policy.ts`
+  (frozen, ShiftTeamReadScope1786718100000) tests equality on a list value.
+- **Change (widens layer 4 to exactly the intended case).** `ALTER POLICY staff_profile_shift_team_select ... USING (...)`
+  with ONLY the role test replaced by `'staff' = ANY (pg_catalog.string_to_array(current_setting('rab.role', true), ','))`:
+  per workspace by the 0.7.0 workspace command `ShiftTeamSelectMultiRole` (structure level 24), on `core.staff_profile`
+  (the HWS-off copy) and in `core.provision_workspace` (new workspaces) by migration StaffShiftTeamMultiRole1786721590000.
+  Every other line of the predicate (tenant binding, the transaction-local capability GUCs `rab.team_shift_id` /
+  `rab.team_staff_id`, both assignments confirmed, the shift not cancelled or completed) and FOR SELECT / PERMISSIVE /
+  TO PUBLIC / no WITH CHECK are unchanged; no grant, no new policy, no data change.
+- **Why it cannot over-match.** `= ANY` compares whole elements, so `custom_staff`, `staffing`, ` staff` or `STAFF` never
+  match; role keys cannot contain a comma (system keys are fixed, custom keys are `custom_` + a `[a-z0-9_]` slug), so no
+  key can split into a fake `staff` element; an unset `rab.role` gives `string_to_array(NULL) = NULL` (no row) and an
+  empty one `'{}'` (no row). `rab.role` is bound only by TenantContextService from the server-resolved session, never
+  from a request. The policy still admits a profile only when the caller's own confirmed assignment on that live shift is
+  the bound capability, so the widening is "multi-role staff see what single-role staff already see", nothing more.
+- **Fail closed in the migration and the runner.** The core ALTER replaces only a known expression (the 1786718100000 one
+  or its own, by semantic-golden USING hash) and re-checks PERMISSIVE / FOR SELECT / TO PUBLIC / no WITH CHECK before and
+  after; the workspace step is checked against the declared level-24 v2 fingerprint (a workspace that does not reach it
+  is blocked, 503); down() is refused while any workspace is at level 24.
+- **Tests.** `ws-shift-team-multi-role.integration.spec.ts`: level-23 → 24 fingerprint measured and declared per major;
+  runner upgrade idempotent; both provisioners build the same level-24 structure; DB-level abuse cases as the runtime login
+  (single-role and multi-role staff see the confirmed team; `manager`, `custom_staff`, `staffing`, ` staff`, `STAFF`, `''`,
+  `manager;staff` and an unset role see nothing; a multi-role caller not confirmed on the shift, naming another shift, or
+  bound to another workspace / organisation sees nothing; zero rows with no tenant context); the core copy has the new
+  predicate and an unknown core expression is refused; down() refused. `shift-team.integration.spec.ts`: the former
+  `it.failing` full-team case for a `manager` + `staff` user is now a normal `it`. `structure-level-24.spec.ts`: the
+  statement is the frozen predicate with only the role test changed, the level-24 template is level 23 + that statement,
+  and the goldens pin the new policy hash.
