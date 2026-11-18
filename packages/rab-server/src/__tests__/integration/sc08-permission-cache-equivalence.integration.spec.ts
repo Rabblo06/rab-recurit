@@ -204,8 +204,8 @@ describeIfDb('SC-08 cached ≡ uncached for all 46 permissions, every identity s
     await app?.close();
   });
 
-  it('there are 46 flags and every identity shape is covered', () => {
-    expect(ALL_FLAGS).toHaveLength(46);
+  it('there are 47 flags and every identity shape is covered', () => {
+    expect(ALL_FLAGS).toHaveLength(47); // 47 since data_model.manage (M2 phase 1)
     expect(shapes.map((s) => s.name)).toHaveLength(7);
   });
 
