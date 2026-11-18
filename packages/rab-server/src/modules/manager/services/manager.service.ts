@@ -935,9 +935,9 @@ export class ManagerService {
    *  1. the caller must be an ACTIVE platform administrator (`core.is_active_platform_admin`, the same server-side check
    *     every platform-admin path uses) and not in an Admin Inspect session → otherwise 403, before any row is read;
    *  2. the reason is re-validated (3–500 characters; a direct caller has no DTO) → 400;
-   *  3. the target must be a pending CEO profile of THAT organisation (organisation-pinned lookup) → otherwise 404. The
-   *     platform-admin authority covers the CEO invitation only, never another Manager's (the same reach
-   *     `manager_profile`'s platform-admin RLS branch gives);
+   *  3. the target must be a CEO profile of THAT organisation (organisation- and type-pinned lookup) → otherwise 404; a
+   *     CEO that is no longer pending → 409. The platform-admin authority covers the CEO invitation only, never another
+   *     Manager's (the same reach `manager_profile`'s platform-admin RLS branch gives);
    *  4. the ordinary resend steps run (new attempt; `user.invite_resent` with `via: platform_admin` + reason, which the
    *     tenant's timeline and the Admin Panel's Audit tab already read), then
    *  5. its OWN audit row, `platform_admin.invite_resent`, naming the target organisation, the CEO profile, the invite
