@@ -158,11 +158,16 @@ function lineScan(file, text) {
 }
 
 function loadYaml() {
+  let YAML;
+  let version;
   try {
-    return require('yaml');
+    YAML = require('yaml');
+    version = require('yaml/package.json').version;
   } catch (e) {
     throw new Error(`the YAML parser (root devDependency "yaml") is not installed; run yarn install (${e.message})`);
   }
+  if (!/^2\./.test(version)) throw new Error(`the YAML parser must be yaml 2.x (parseAllDocuments, merge, uniqueKeys); found ${version}`);
+  return YAML;
 }
 
 // Reading 2: every value of a mapping key `uses`, as the YAML parser decodes the file (aliases and << merges resolved,
@@ -195,8 +200,28 @@ function yamlUses(text) {
   return { values, errors };
 }
 
+// Characters some YAML parsers treat as a line break (YAML 1.1 / libyaml family: NEL, LS, PS, a bare CR) or that have no
+// business in a workflow (other C0 controls). A line scanner and a YAML 1.2 parser would both read past them, while the
+// parser GitHub uses might start a new line there: `# c<LS>      - uses: evil/act@main` would be a comment to us and a
+// step to Actions. Refused before either reading runs.
+const AMBIGUOUS_BREAKS = [
+  { re: /[\u0085\u2028\u2029]/, what: 'a NEL (U+0085), LINE SEPARATOR (U+2028) or PARAGRAPH SEPARATOR (U+2029)' },
+  { re: /\r(?!\n)/, what: 'a bare carriage return (\\r not followed by \\n)' },
+  { re: /[\u0000-\u0008\u000b\u000c\u000e-\u001f]/, what: 'a control character other than tab, LF and CR' },
+];
+
+function lineOf(text, index) {
+  return text.slice(0, index).split('\n').length;
+}
+
 // Scan one file's text with both readings. Returns { refs: [{file,line,value,...classify}], problems: [{file,line,message}] }.
 function scanSource(file, text) {
+  const breaks = [];
+  for (const { re, what } of AMBIGUOUS_BREAKS) {
+    const m = re.exec(text);
+    if (m) breaks.push({ file, line: lineOf(text, m.index), message: `${what} is not allowed: parsers disagree on where its line ends` });
+  }
+  if (breaks.length) return { refs: [], problems: breaks };
   const { refs, problems } = lineScan(file, text);
   let parsed;
   try {

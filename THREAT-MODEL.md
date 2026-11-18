@@ -9441,7 +9441,10 @@ Reversal:   Upgrade / `resolutions` override (documented in "//resolutions") as 
   alone): (1) a line scanner, which also refuses those three forms, flow mappings, aliases and a value on the next
   line, and ignores `uses:` text inside `run: |` blocks and comments; (2) the real YAML parser (root devDependency
   `yaml`; missing = fail): every mapping key `uses`, aliases and `<<` merges resolved, duplicate keys and parse errors
-  fail. The multiset of `uses` values must be identical. `--remote` (GITHUB_TOKEN) asks the
+  fail. The multiset of `uses` values must be identical. Before either reading, a file containing NEL / U+2028 /
+  U+2029, a bare CR or any other C0 control character (tab, LF, CR excepted) is refused: YAML 1.1 / libyaml-family
+  parsers may break a line there (`# c<U+2028>      - uses: evil/act@main` is a comment to a 1.2 parser, possibly a
+  step to Actions; re-review of #236). The parser must be yaml 2.x. `--remote` (GITHUB_TOKEN) asks the
   API, per distinct repository@SHA: `git/commits/<sha>` must exist (else `git/tags/<sha>` tells a tag object apart and the
   error names the commit to pin), and the comment's tag (`git/ref/tags/<tag>`, through tag objects) must resolve to
   exactly that commit — this also refuses a fork-only "impostor" commit, which no tag of the parent points at. Any

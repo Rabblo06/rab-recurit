@@ -222,3 +222,42 @@ test('local actions: only ./.github/actions/ and ./.github/workflows/ are exempt
     assert.match(msgs(`- uses: ${v}`)[0], /local reference outside/, v);
   }
 });
+
+// --- re-review of PR #236: characters some parsers (YAML 1.1 / libyaml family) treat as a line break ---------------
+
+const PINNED = `a/b@${SHA} # v1.0.0`;
+const HEAD = 'jobs:\n  b:\n    runs-on: x\n    steps:\n';
+const breakMsgs = (src) => scanSource('w.yaml', src).problems.map((p) => `${p.line}:${p.message}`);
+
+test('NEL, LINE SEPARATOR and PARAGRAPH SEPARATOR anywhere (even in a comment) refuse the file', () => {
+  for (const cp of [0x85, 0x2028, 0x2029]) {
+    const c = String.fromCodePoint(cp);
+    for (const [line, src] of [
+      [6, `${HEAD}      - uses: ${PINNED}\n      # c${c}      - uses: evil/act@main\n`],
+      [5, `${HEAD}      - uses: ${PINNED}${c}      - uses: evil/act@main\n`],
+    ]) {
+      const p = breakMsgs(src);
+      assert.equal(p.length, 1, cp.toString(16));
+      assert.ok(p[0].startsWith(`${line}:`), p[0]);
+      assert.match(p[0], /^\d+:a NEL \(U\+0085\), LINE SEPARATOR \(U\+2028\) or PARAGRAPH SEPARATOR \(U\+2029\) is not allowed/);
+    }
+  }
+});
+
+test('a bare CR refuses the file; CRLF line endings are fine', () => {
+  assert.match(breakMsgs(`${HEAD}      - uses: ${PINNED}\r      - uses: evil/act@main\n`)[0], /bare carriage return/);
+  assert.deepEqual(breakMsgs(`${HEAD}      - uses: ${PINNED}\n`.replace(/\n/g, '\r\n')), []);
+});
+
+test('C0 control characters other than tab, LF and CR refuse the file', () => {
+  for (const cp of [0x00, 0x01, 0x08, 0x0b, 0x0c, 0x0e, 0x1b, 0x1f]) {
+    const p = breakMsgs(`${HEAD}      - uses: ${PINNED} ${String.fromCharCode(cp)}\n`);
+    assert.equal(p.length, 1, cp.toString(16));
+    assert.match(p[0], /^5:a control character other than tab, LF and CR is not allowed/, cp.toString(16));
+  }
+  assert.deepEqual(breakMsgs(`${HEAD}      - uses: ${PINNED}\t\n`), [], 'a tab is fine');
+});
+
+test('the YAML parser is yaml 2.x', () => {
+  assert.match(require('yaml/package.json').version, /^2\./);
+});
