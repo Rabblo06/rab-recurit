@@ -124,7 +124,8 @@ jobs:
       # PR #227 (security review L3): the suites that broke, or would break, on a PostgreSQL major other than 16, on every
       # supported major. Before #227 the Worker's in-process provisioner compared new workspaces with the PostgreSQL 16
       # fingerprints (FAILED on 17 / 18), and PostgreSQL 18 reports RESTRICT foreign keys as 23001. ci-server / ci-worker run
-      # these on 16 only. Four files, in band; each must run and pass (a renamed file fails the step, never a silent skip).
+      # these on 16 only. Five files, in band (the fifth, invite-delete-restrict-violation, is the definer's PG18 23001 handler,
+      # InviteDeleteRestrictViolation1786721580000); each must run and pass (a renamed file fails the step, never a silent skip).
       - name: PostgreSQL-major regressions (provisioning, payroll evidence, invite cleanup) on PostgreSQL ${{ matrix.pg }}
         if: success() || failure()
         run: |
@@ -133,7 +134,7 @@ jobs:
           eval "$(node packages/rab-server/src/database/typeorm/scripts/twenty-test-env.cjs "$OWNER_DB" --source bootstrap)"
           unset TWENTY_MODE_TESTS CREWFLOW_OWNER_BOOTSTRAP_PASSWORD CREWFLOW_WORKER_BOOTSTRAP_PASSWORD CREWFLOW_APP_BOOTSTRAP_PASSWORD CREWFLOW_BOOTSTRAP_PASSWORD
           status=0
-          npx jest -c packages/rab-server/jest.config.ts --runInBand --testTimeout=180000             packages/rab-server/src/__tests__/integration/payroll-evidence-restrict.integration.spec.ts             --json "--outputFile=${RUNNER_TEMP}/majors-server-pg${{ matrix.pg }}.json" || status=$?
+          npx jest -c packages/rab-server/jest.config.ts --runInBand --testTimeout=180000             packages/rab-server/src/__tests__/integration/payroll-evidence-restrict.integration.spec.ts             packages/rab-server/src/__tests__/integration/invite-delete-restrict-violation.integration.spec.ts             --json "--outputFile=${RUNNER_TEMP}/majors-server-pg${{ matrix.pg }}.json" || status=$?
           EMAIL_DRIVER=LOGGER WORKER_SCHEDULER=bullmq npx jest -c packages/rab-worker/jest.config.ts --runInBand --testTimeout=180000             packages/rab-worker/src/__tests__/integration/workspace-provisioning-owner-login.integration.spec.ts             packages/rab-worker/src/__tests__/integration/workspace-provisioning.integration.spec.ts             packages/rab-worker/src/__tests__/integration/account-invite-cleanup.integration.spec.ts             --json "--outputFile=${RUNNER_TEMP}/majors-worker-pg${{ matrix.pg }}.json" || status=$?
           node -e '
             const fs = require("fs"); let bad = 0, files = 0;
@@ -147,7 +148,7 @@ jobs:
                 if (n("passed") === 0 || n("failed") > 0 || t.status !== "passed") bad = 1;
               }
             }
-            if (files !== 4) { console.error(`expected 4 spec files, ran ${files}`); bad = 1; }
+            if (files !== 5) { console.error(`expected 5 spec files, ran ${files}`); bad = 1; }
             process.exit(bad);' "${RUNNER_TEMP}/majors-server-pg${{ matrix.pg }}.json" "${RUNNER_TEMP}/majors-worker-pg${{ matrix.pg }}.json" || status=1
           exit $status
       - name: Lifecycle scenarios (owner login, the real migrate child; transition is covered by ci-migration-security owner-login)
