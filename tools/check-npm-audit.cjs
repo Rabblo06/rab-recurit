@@ -7,9 +7,12 @@
  * is a last resort for an advisory NOTHING fixes (the normal fix is an upgrade or a root package.json `resolutions`
  * override documented in its "//resolutions" note). It is NOT an ignore list:
  *   - scope: exactly ONE GHSA id and ONE exact package name; decision `accepted-risk` only;
+ *   - severity: the entry records the advisory severity it decided (`high` or `critical`); a finding rated ABOVE it
+ *     is not covered (a re-scored advisory needs a new owner decision);
  *   - it links the owner's written decision (owner_decision_ref = an issue/PR of this repository, decided_by,
  *     decided_on) and states the reason and the drop condition (`reason`, `drop_when`);
  *   - expiry: at most 30 days after decided_on; an expired, incomplete, over-long or duplicate entry fails the job;
+ *     a date must be a real calendar day (2026-02-30 is refused); 7 days or fewer left prints a warning;
  *   - it lapses the day a fix ships: the job fails if the GitHub advisory has a `first_patched_version`, or if the
  *     registry has a release in ANY major that is outside the vulnerable range and newer than an installed version;
  *   - dev/build dependencies only: the job fails if the package is in the PRODUCTION closure, i.e. reachable in
@@ -17,21 +20,45 @@
  *     tools/check-licences.mjs), including yarn-injected dependencies such as `node-gyp: latest`, minus the packages
  *     the runtime image prunes (`RUNTIME_PRUNE` exported by packages/rab-docker/rab/runtime-deps.cjs; a pruned package
  *     and everything reachable only through it are not in the image). No such export = nothing excluded;
+ *   - a finding whose report has no `Tree Versions` cannot be evaluated and is never covered;
  *   - an unused entry is reported (warning) so it can be removed.
- * Fails closed: an audit that exits non-zero without a parseable report, an unparseable line, a failed registry or
- * advisory lookup, an unresolvable yarn.lock descriptor or a range this file cannot evaluate all fail the job. There is
- * no date override. Set GITHUB_TOKEN for the advisory lookup in CI (rate limit).
  *
- *   node tools/check-npm-audit.cjs        # exit 1 on any undecided High/Critical advisory or invalid entry
+ * Which register decides (review F1 of #229, the pattern of tools/check-import-boundaries.cjs since #225):
+ *   - `--base <ref>` (every pull request): the decisions are read FROM THE BASE REF with
+ *     `git show <ref>:tools/npm-audit-decisions.json`, never from the PR's own copy, so a PR cannot approve itself.
+ *     Fail closed: an unknown ref, a shallow clone or any other git failure throws; only "path does not exist in
+ *     <ref>" means "no decisions". The head copy is validated too (a malformed file fails the PR that introduces it).
+ *   - Decision-only PR: when the diff from the merge-base with <ref> touches the register and nothing else except
+ *     THREAT-MODEL.md, the HEAD decisions are used (that is how an entry is added, renewed or removed), and every
+ *     entry that is new or changed against <ref> must have owner_decision_ref equal to this PR's URL
+ *     (pull_request.html_url in $GITHUB_EVENT_PATH): the owner's merge of that PR is the decision.
+ *   - CHANGED TOGETHER: --base fails when that diff changes the register together with yarn.lock, any package.json,
+ *     .yarnrc.yml, anything under .yarn/, this tool, packages/rab-docker/rab/runtime-deps.cjs (RUNTIME_PRUNE),
+ *     .github/workflows/ci-security.yaml or .github/workflows/npm-audit-weekly.yaml.
+ *   - No --base (push to main, the weekly schedule, a local run): the checked-out register decides. In a
+ *     `pull_request` event (GITHUB_EVENT_NAME) running without --base is refused.
+ *   - git runs with LC_ALL=C (LANGUAGE unset) so "does not exist in" is matched in English; --base takes a plain ref
+ *     plus `~N` / `^N` suffixes only, and git runs without a shell.
+ *
+ * Before auditing, the job fails unless `yarn config get npmAuditIgnoreAdvisories --json` and
+ * `yarn config get npmAuditExcludePackages --json` are both `[]` and no YARN_NPM_AUDIT_* variable is set (an ignore
+ * list would hide advisories with no owner, no scope and no expiry).
+ * Fails closed: yarn that cannot be spawned, is killed by a signal or exits outside {0, 1} for the audit; an audit
+ * that exits non-zero without a parseable report; an unparseable line; a failed registry or advisory lookup; an
+ * unresolvable yarn.lock descriptor or a range this file cannot evaluate. There is no date override. Set GITHUB_TOKEN
+ * for the advisory lookup in CI (rate limit).
+ *
+ *   node tools/check-npm-audit.cjs                     # the checked-out register (push to main, schedule, local)
+ *   node tools/check-npm-audit.cjs --base origin/main  # a pull request: decisions from the base ref
  *   node --test tools/check-npm-audit.test.cjs
  */
-const { spawnSync } = require('node:child_process');
-const { readFileSync } = require('node:fs');
+const { spawnSync, execFileSync } = require('node:child_process');
+const { readFileSync, existsSync } = require('node:fs');
 const { join } = require('node:path');
 
 const ROOT = join(__dirname, '..');
-const REGISTER = join(__dirname, 'npm-audit-decisions.json');
-const RUNTIME_DEPS = join(ROOT, 'packages/rab-docker/rab/runtime-deps.cjs');
+const REGISTER_REL = 'tools/npm-audit-decisions.json';
+const RUNTIME_DEPS_REL = 'packages/rab-docker/rab/runtime-deps.cjs';
 const AUDIT_ARGS = [
   'npm',
   'audit',
@@ -40,6 +67,11 @@ const AUDIT_ARGS = [
   '--all',
   '--recursive',
   '--json',
+];
+/** yarn settings that would silently drop advisories from the audit: both must be empty. */
+const AUDIT_IGNORE_SETTINGS = [
+  'npmAuditIgnoreAdvisories',
+  'npmAuditExcludePackages',
 ];
 /** First-party workspaces whose production dependencies ship (same list as tools/check-licences.mjs SHIPPED). */
 const SHIPPED = [
@@ -52,10 +84,34 @@ const SHIPPED = [
   'rab-utils',
 ];
 const MAX_DAYS = 30;
+const WARN_DAYS = 7;
+/** Severity order of yarn's audit report; an entry may decide `high` or `critical` (the audit runs at high+). */
+const SEVERITY_RANK = Object.freeze({
+  info: 0,
+  low: 1,
+  moderate: 2,
+  high: 3,
+  critical: 4,
+});
+const ENTRY_SEVERITIES = ['high', 'critical'];
 const GHSA = /^GHSA(-[23456789cfghjmpqrvwx]{4}){3}$/;
 const REF =
   /^https:\/\/github\.com\/Rabblo06\/rab-recurit\/(issues|pull)\/[1-9]\d*($|[/#?])/;
+const PR_URL = /^https:\/\/github\.com\/Rabblo06\/rab-recurit\/pull\/[1-9]\d*$/;
 const DAY_MS = 86_400_000;
+/** A decision-only PR may change these and nothing else (the register must be among them). */
+const DECISION_ONLY_PATHS = new Set([REGISTER_REL, 'THREAT-MODEL.md']);
+/** Paths that may never change in the same PR as the register. */
+const isChangedTogetherPath = (p) =>
+  p === 'yarn.lock' ||
+  p === 'package.json' ||
+  p.endsWith('/package.json') ||
+  p === '.yarnrc.yml' ||
+  p.startsWith('.yarn/') ||
+  p === 'tools/check-npm-audit.cjs' ||
+  p === RUNTIME_DEPS_REL ||
+  p === '.github/workflows/ci-security.yaml' ||
+  p === '.github/workflows/npm-audit-weekly.yaml';
 
 // --- minimal semver (x.y.z release versions and comparator ranges; anything else is "cannot evaluate") ---
 const parseVersion = (v) => {
@@ -196,10 +252,14 @@ function productionPaths({
 }
 
 // --- register ---
-const isoDate = (s) =>
-  /^\d{4}-\d{2}-\d{2}$/.test(s) && !Number.isNaN(Date.parse(`${s}T00:00:00Z`))
-    ? Date.parse(`${s}T00:00:00Z`)
+/** Epoch ms of a real calendar day YYYY-MM-DD (UTC), or null. Round-trips, so 2026-02-30 is refused (review F7). */
+const isoDate = (s) => {
+  if (typeof s !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(s)) return null;
+  const ms = Date.parse(`${s}T00:00:00Z`);
+  return !Number.isNaN(ms) && new Date(ms).toISOString().slice(0, 10) === s
+    ? ms
     : null;
+};
 const text = (s, min = 1) => typeof s === 'string' && s.trim().length >= min;
 
 /** Returns { valid: Map<id, entry>, errors: string[] }. `today` is a YYYY-MM-DD string (UTC). */
@@ -219,11 +279,12 @@ function validateRegister(register, today) {
     };
   }
   const now = isoDate(today);
+  if (now === null) throw new Error(`today is not YYYY-MM-DD: ${today}`);
   const ids = new Set();
   for (const [i, d] of register.decisions.entries()) {
     const where = `decision[${i}] ${d && d.id ? d.id : '(no id)'}`;
     const bad = (msg) => errors.push(`${where}: ${msg}`);
-    if (!d || typeof d !== 'object') {
+    if (!d || typeof d !== 'object' || Array.isArray(d)) {
       bad('not an object');
       continue;
     }
@@ -236,6 +297,10 @@ function validateRegister(register, today) {
       bad('one package per entry: use "package", not "packages"');
     if (!text(d.package) || /[\s*?,]/.test(d.package))
       bad('package must be exactly one exact package name');
+    if (!ENTRY_SEVERITIES.includes(d.severity))
+      bad(
+        `severity (the advisory severity the owner decided) must be one of ${ENTRY_SEVERITIES.join(', ')}`,
+      );
     if (d.decision !== 'accepted-risk') bad('decision must be accepted-risk');
     if (!text(d.owner_decision_ref) || !REF.test(d.owner_decision_ref)) {
       bad(
@@ -251,8 +316,8 @@ function validateRegister(register, today) {
       bad('drop_when (the condition to remove the entry) is required');
     const on = isoDate(d.decided_on);
     const exp = isoDate(d.expires);
-    if (on === null) bad('decided_on must be YYYY-MM-DD');
-    if (exp === null) bad('expires must be YYYY-MM-DD');
+    if (on === null) bad('decided_on must be a real date, YYYY-MM-DD');
+    if (exp === null) bad('expires must be a real date, YYYY-MM-DD');
     if (on !== null && exp !== null) {
       if (exp <= on) bad('expires must be after decided_on');
       if ((exp - on) / DAY_MS > MAX_DAYS)
@@ -264,6 +329,17 @@ function validateRegister(register, today) {
     if (errors.length === before) valid.set(d.id, d);
   }
   return { valid, errors };
+}
+
+/** Valid entries with WARN_DAYS or fewer days left (the expiry day itself counts as 0). */
+function expiringSoon(valid, today) {
+  const now = isoDate(today);
+  const out = [];
+  for (const d of valid.values()) {
+    const left = Math.round((isoDate(d.expires) - now) / DAY_MS);
+    if (left <= WARN_DAYS) out.push({ id: d.id, expires: d.expires, left });
+  }
+  return out;
 }
 
 /** Parses `yarn npm audit --json` NDJSON. Throws on a line that is not a report object (fail closed). */
@@ -320,6 +396,29 @@ function evaluate(findings, valid, ctx) {
       continue;
     }
     used.add(d.id);
+    if (!f.treeVersions.length) {
+      undecided.push({
+        ...f,
+        reason:
+          'cannot evaluate: the audit report has no Tree Versions (no installed version to check a fix against)',
+      });
+      continue;
+    }
+    const rank = SEVERITY_RANK[String(f.severity).toLowerCase()];
+    if (rank === undefined) {
+      undecided.push({
+        ...f,
+        reason: `cannot evaluate: unknown severity "${f.severity}"`,
+      });
+      continue;
+    }
+    if (rank > SEVERITY_RANK[d.severity]) {
+      undecided.push({
+        ...f,
+        reason: `severity ${f.severity} is above the ${d.severity} the owner decided: a re-scored advisory needs a new owner decision`,
+      });
+      continue;
+    }
     let fix;
     let prod;
     try {
@@ -358,49 +457,314 @@ function evaluate(findings, valid, ctx) {
   return { undecided, decided, unused };
 }
 
-function yarn(args) {
-  return spawnSync('yarn', args, {
+// --- git (fail closed; the same reader as tools/check-import-boundaries.cjs) ---
+/** git's environment: LC_ALL=C and no LANGUAGE, so its messages are English whatever the caller's locale. */
+function gitEnv(env = process.env) {
+  const out = { ...env, LC_ALL: 'C' };
+  delete out.LANGUAGE;
+  return out;
+}
+
+function git(args, root) {
+  return execFileSync('git', args, {
+    cwd: root,
     encoding: 'utf8',
-    shell: process.platform === 'win32',
-    maxBuffer: 64 * 1024 * 1024,
-    cwd: ROOT,
+    env: gitEnv(),
+    stdio: ['ignore', 'pipe', 'pipe'],
+    maxBuffer: 1 << 28,
   });
 }
 
-function publishedVersions(pkg) {
-  const r = yarn(['npm', 'info', pkg, '--fields', 'versions', '--json']);
-  if (r.status !== 0)
+/** A plain ref name plus optional `~N` / `^N` ancestry suffixes; every other revision syntax is refused. */
+const PLAIN_REF = /^[A-Za-z0-9._/-]{1,200}(?:[~^][0-9]{0,4}){0,20}$/;
+function assertPlainRef(ref) {
+  if (
+    typeof ref !== 'string' ||
+    !PLAIN_REF.test(ref) ||
+    ref.startsWith('-') ||
+    ref.includes('..')
+  ) {
+    throw new Error(`--base: not a plain git ref: ${JSON.stringify(ref)}`);
+  }
+  return ref;
+}
+
+/** `rel` as committed at `ref`, or null ONLY when the ref exists but has no such path. Any other failure throws. */
+function gitShowAt(ref, rel, root = ROOT) {
+  assertPlainRef(ref);
+  try {
+    return git(['show', `${ref}:${rel}`], root);
+  } catch (error) {
+    const stderr = String(error.stderr ?? '');
+    if (/does not exist in|exists on disk, but not in/.test(stderr))
+      return null;
     throw new Error(
-      `yarn npm info ${pkg} failed: ${(r.stderr || r.stdout || '').slice(0, 500)}`,
+      `--base: git show ${ref}:${rel} failed: ${stderr.trim().split('\n')[0] || error.message}`,
     );
-  const versions = JSON.parse(r.stdout).versions;
-  if (!Array.isArray(versions) || !versions.length)
-    throw new Error(`yarn npm info ${pkg}: no versions`);
-  return versions;
+  }
 }
 
-async function fetchAdvisory(id) {
-  const headers = {
-    Accept: 'application/vnd.github+json',
-    'User-Agent': 'ci-security-audit',
+/** Paths the checkout (working tree included) changes since its merge-base with `ref`; a rename is a delete + an add. */
+function changedSinceBase(ref, root = ROOT) {
+  assertPlainRef(ref);
+  let mergeBase;
+  try {
+    mergeBase = git(['merge-base', ref, 'HEAD'], root).trim();
+  } catch (error) {
+    throw new Error(
+      `--base: git merge-base ${ref} HEAD failed: ${
+        String(error.stderr ?? '')
+          .trim()
+          .split('\n')[0] || error.message
+      }`,
+    );
+  }
+  return git(
+    ['diff', '--name-only', '--no-renames', '-z', mergeBase, '--'],
+    root,
+  )
+    .split('\0')
+    .filter(Boolean);
+}
+
+function parseRegisterText(raw, label) {
+  try {
+    return JSON.parse(raw);
+  } catch (e) {
+    throw new Error(`${label}: not valid JSON (${e.message})`);
+  }
+}
+
+/** The register as committed at `ref`; an empty register when that ref has no register file. */
+function readRegisterAt(ref, root = ROOT) {
+  const raw = gitShowAt(ref, REGISTER_REL, root);
+  return raw === null
+    ? { schema: 2, decisions: [] }
+    : parseRegisterText(raw, `${ref}:${REGISTER_REL}`);
+}
+
+/** The register changed in the same diff as a CHANGED TOGETHER path ([] when the register is unchanged). */
+function registerChangedWith(changed) {
+  if (!changed.includes(REGISTER_REL)) return [];
+  return changed.filter(isChangedTogetherPath);
+}
+
+/** True when the diff changes the register and nothing else except THREAT-MODEL.md. */
+const isDecisionOnly = (changed) =>
+  changed.includes(REGISTER_REL) &&
+  changed.every((p) => DECISION_ONLY_PATHS.has(p));
+
+/** Deterministic JSON (object keys sorted at every level), for deep equality of entries. */
+const canonical = (v) =>
+  JSON.stringify(v, (_k, x) =>
+    x && typeof x === 'object' && !Array.isArray(x)
+      ? Object.fromEntries(
+          Object.keys(x)
+            .sort()
+            .map((k) => [k, x[k]]),
+        )
+      : x,
+  );
+
+/** Head entries that are new, or differ in any field, against the base register (by id). */
+function newOrChangedEntries(baseRegister, headRegister) {
+  const base = new Map(
+    (Array.isArray(baseRegister && baseRegister.decisions)
+      ? baseRegister.decisions
+      : []
+    ).map((d) => [d && d.id, canonical(d)]),
+  );
+  return (
+    Array.isArray(headRegister && headRegister.decisions)
+      ? headRegister.decisions
+      : []
+  ).filter((d) => base.get(d && d.id) !== canonical(d));
+}
+
+/** This pull request's URL from the event payload ($GITHUB_EVENT_PATH); throws when it cannot be established. */
+function pullRequestUrl(env) {
+  const file = env.GITHUB_EVENT_PATH;
+  if (!file)
+    throw new Error('GITHUB_EVENT_PATH is not set, so the PR URL is unknown');
+  let url;
+  try {
+    const event = JSON.parse(readFileSync(file, 'utf8'));
+    url = event && event.pull_request && event.pull_request.html_url;
+  } catch (e) {
+    throw new Error(`cannot read the event payload ${file}: ${e.message}`);
+  }
+  if (typeof url !== 'string' || !PR_URL.test(url))
+    throw new Error(
+      `the event payload has no pull_request.html_url of this repository (${JSON.stringify(url)})`,
+    );
+  return url;
+}
+
+/**
+ * Which register decides, and every register error. Returns { register, source, errors }.
+ * `headRaw` is the checkout's register text (null = missing).
+ */
+function selectRegister({ ref, root, env, today, headRaw }) {
+  const errors = [];
+  let head = null;
+  if (headRaw === null)
+    errors.push(`${REGISTER_REL} is missing in the checkout`);
+  else {
+    try {
+      head = parseRegisterText(headRaw, REGISTER_REL);
+    } catch (e) {
+      errors.push(e.message);
+    }
+  }
+  const headErrors = head
+    ? validateRegister(head, today).errors.map((e) => `(head) ${e}`)
+    : [];
+  if (!ref) {
+    return {
+      register: head,
+      source: 'the checkout (no --base)',
+      errors: [...errors, ...headErrors],
+    };
+  }
+  const changed = changedSinceBase(ref, root);
+  const base = readRegisterAt(ref, root);
+  for (const p of registerChangedWith(changed)) {
+    errors.push(
+      `CHANGED TOGETHER ${REGISTER_REL} and ${p}: an owner decision merges in its own PR (register and THREAT-MODEL.md only), never with a dependency, yarn config, tool or workflow change`,
+    );
+  }
+  if (isDecisionOnly(changed)) {
+    const fresh = newOrChangedEntries(base, head);
+    if (fresh.length) {
+      let url = null;
+      try {
+        url = pullRequestUrl(env);
+      } catch (e) {
+        errors.push(
+          `decision-only PR adds or changes ${fresh.map((d) => (d && d.id) || '(no id)').join(', ')} but ${e.message}: cannot verify owner_decision_ref`,
+        );
+      }
+      if (url) {
+        for (const d of fresh) {
+          if (!d || d.owner_decision_ref !== url) {
+            errors.push(
+              `decision-only PR: new or changed entry ${(d && d.id) || '(no id)'} must have owner_decision_ref ${url} (this PR; its merge is the owner decision), has ${JSON.stringify(d && d.owner_decision_ref)}`,
+            );
+          }
+        }
+      }
+    }
+    return {
+      register: head,
+      source: `the head (decision-only PR against ${ref})`,
+      errors: [...errors, ...headErrors],
+    };
+  }
+  const baseErrors =
+    headRaw !== null && canonical(base) === canonical(head)
+      ? [] // identical: reported once, as (head)
+      : validateRegister(base, today).errors.map((e) => `(${ref}) ${e}`);
+  return {
+    register: base,
+    source: `${ref} (base ref; the PR's own copy is not in force)`,
+    errors: [...errors, ...baseErrors, ...headErrors],
   };
-  if (process.env.GITHUB_TOKEN)
-    headers.Authorization = `Bearer ${process.env.GITHUB_TOKEN}`;
-  const res = await fetch(`https://api.github.com/advisories/${id}`, {
-    headers,
-  });
-  if (!res.ok) throw new Error(`GitHub advisory ${id}: HTTP ${res.status}`);
-  return res.json();
+}
+
+// --- yarn ---
+function defaultYarn(root) {
+  return (args) =>
+    spawnSync('yarn', args, {
+      encoding: 'utf8',
+      shell: process.platform === 'win32',
+      maxBuffer: 64 * 1024 * 1024,
+      cwd: root,
+    });
+}
+
+/** Why a spawnSync result is a failure (could not run, killed, unexpected exit), or null. */
+function spawnFailure(r, okStatuses) {
+  if (!r) return 'returned no result';
+  if (r.error) return `could not run (${r.error.message || r.error})`;
+  if (r.signal) return `was killed by ${r.signal}`;
+  if (!okStatuses.includes(r.status)) return `exited ${r.status}`;
+  return null;
+}
+
+/** Problems with the audit's own configuration: any ignore list or YARN_NPM_AUDIT_* variable (review F3). */
+function auditConfigProblems(yarn, env) {
+  const problems = [];
+  for (const k of Object.keys(env)) {
+    if (/^YARN_NPM_AUDIT_/i.test(k))
+      problems.push(
+        `environment variable ${k} is set: the audit must run with yarn's defaults`,
+      );
+  }
+  for (const key of AUDIT_IGNORE_SETTINGS) {
+    const r = yarn(['config', 'get', key, '--json']);
+    const failed = spawnFailure(r, [0]);
+    if (failed) {
+      problems.push(
+        `yarn config get ${key} ${failed}: ${String(r && (r.stderr || r.stdout)).slice(0, 300)}`,
+      );
+      continue;
+    }
+    let value;
+    try {
+      value = JSON.parse(String(r.stdout).trim());
+    } catch {
+      problems.push(
+        `yarn config get ${key}: unparseable output ${String(r.stdout).slice(0, 200)}`,
+      );
+      continue;
+    }
+    if (!Array.isArray(value) || value.length) {
+      problems.push(
+        `${key} must be empty, is ${JSON.stringify(value)}: an ignore list hides advisories with no owner decision, scope or expiry (use tools/npm-audit-decisions.json)`,
+      );
+    }
+  }
+  return problems;
+}
+
+function publishedVersionsWith(yarn) {
+  return (pkg) => {
+    const r = yarn(['npm', 'info', pkg, '--fields', 'versions', '--json']);
+    const failed = spawnFailure(r, [0]);
+    if (failed)
+      throw new Error(
+        `yarn npm info ${pkg} ${failed}: ${String((r && (r.stderr || r.stdout)) || '').slice(0, 500)}`,
+      );
+    const versions = JSON.parse(r.stdout).versions;
+    if (!Array.isArray(versions) || !versions.length)
+      throw new Error(`yarn npm info ${pkg}: no versions`);
+    return versions;
+  };
+}
+
+function fetchAdvisoryWith(env) {
+  return async (id) => {
+    const headers = {
+      Accept: 'application/vnd.github+json',
+      'User-Agent': 'ci-security-audit',
+    };
+    if (env.GITHUB_TOKEN) headers.Authorization = `Bearer ${env.GITHUB_TOKEN}`;
+    const res = await fetch(`https://api.github.com/advisories/${id}`, {
+      headers,
+    });
+    if (!res.ok) throw new Error(`GitHub advisory ${id}: HTTP ${res.status}`);
+    return res.json();
+  };
 }
 
 /** RUNTIME_PRUNE from runtime-deps.cjs, read in a child process (requiring it must not run its CLI here). */
-function runtimePrune() {
+function runtimePrune(root) {
   const r = spawnSync(
     process.execPath,
     [
       '-e',
       'const m=require(process.argv[1]);process.stdout.write(JSON.stringify(m&&m.RUNTIME_PRUNE))',
-      RUNTIME_DEPS,
+      join(root, RUNTIME_DEPS_REL),
     ],
     { encoding: 'utf8' },
   );
@@ -418,100 +782,166 @@ function runtimePrune() {
   };
 }
 
-async function main() {
-  const today = new Date().toISOString().slice(0, 10);
-  const { valid, errors } = validateRegister(
-    JSON.parse(readFileSync(REGISTER, 'utf8')),
-    today,
-  );
-
-  const r = yarn(AUDIT_ARGS);
-  let findings;
-  try {
-    findings = parseAudit(r.stdout);
-  } catch (e) {
-    console.error(`::error::${e.message}`);
-    process.exit(1);
-  }
-  if (r.status !== 0 && findings.length === 0) {
-    console.error(
-      `::error::yarn npm audit exited ${r.status} without a report:\n${r.stdout}\n${r.stderr}`,
-    );
-    process.exit(1);
-  }
-
-  // Lookups are done only for findings that have an entry; each failure is kept and fails that finding.
-  const memo = (fn) => {
-    const cache = new Map();
-    return (k) => {
-      if (!cache.has(k)) {
-        try {
-          cache.set(k, { v: fn(k) });
-        } catch (e) {
-          cache.set(k, { e });
-        }
-      }
-      const c = cache.get(k);
-      if (c.e) throw c.e;
-      return c.v;
-    };
-  };
-  const advisories = new Map();
-  for (const f of findings) {
-    if (f.id && valid.has(f.id) && !advisories.has(f.id)) {
-      advisories.set(
-        f.id,
-        await fetchAdvisory(f.id).then(
-          (v) => ({ v }),
-          (e) => ({ e }),
-        ),
-      );
-    }
-  }
-  const prune = runtimePrune();
-  if (prune.note && findings.some((f) => f.id && valid.has(f.id)))
-    console.log(`note: ${prune.note}`);
-  const production = memo((pkg) => {
+function productionWith(root, prune) {
+  return (pkg) => {
     const { parse } = require('yaml');
     const rootManifest = JSON.parse(
-      readFileSync(join(ROOT, 'package.json'), 'utf8'),
+      readFileSync(join(root, 'package.json'), 'utf8'),
     );
     const workspaces = new Map();
     for (const ws of rootManifest.workspaces.packages) {
       const m = JSON.parse(
-        readFileSync(join(ROOT, ws, 'package.json'), 'utf8'),
+        readFileSync(join(root, ws, 'package.json'), 'utf8'),
       );
       workspaces.set(m.name, m);
     }
     const shipped = SHIPPED.map(
       (dir) =>
         JSON.parse(
-          readFileSync(join(ROOT, 'packages', dir, 'package.json'), 'utf8'),
+          readFileSync(join(root, 'packages', dir, 'package.json'), 'utf8'),
         ).name,
     );
     return productionPaths({
-      lock: parse(readFileSync(join(ROOT, 'yarn.lock'), 'utf8')),
+      lock: parse(readFileSync(join(root, 'yarn.lock'), 'utf8')),
       workspaces,
       shipped,
       resolutions: rootManifest.resolutions || {},
-      prune: prune.list,
+      prune,
       target: pkg,
     });
+  };
+}
+
+/** Lookups run once per key; a failure is kept and fails every finding that needs it. */
+const memo = (fn) => {
+  const cache = new Map();
+  return (k) => {
+    if (!cache.has(k)) {
+      try {
+        cache.set(k, { v: fn(k) });
+      } catch (e) {
+        cache.set(k, { e });
+      }
+    }
+    const c = cache.get(k);
+    if (c.e) throw c.e;
+    return c.v;
+  };
+};
+
+/**
+ * Returns the exit code (0 pass, 1 fail); throws on a fail-closed git error (the CLI turns that into exit 1).
+ * Every outside dependency is injectable for the tests: `root`, `env`, `today` (YYYY-MM-DD), `yarn(args)` (a
+ * spawnSync-shaped result), `fetchAdvisory(id)` (async), `production(pkg)` (chains) and `prune` (RUNTIME_PRUNE).
+ */
+async function main(argv = [], deps = {}) {
+  const root = deps.root || ROOT;
+  const env = deps.env || process.env;
+  const today = deps.today || new Date().toISOString().slice(0, 10);
+  const yarn = deps.yarn || defaultYarn(root);
+  const fetchAdvisory = deps.fetchAdvisory || fetchAdvisoryWith(env);
+
+  const baseIdx = argv.indexOf('--base');
+  let ref = null;
+  if (baseIdx !== -1) {
+    ref = argv[baseIdx + 1];
+    if (!ref) throw new Error('--base needs a git ref');
+    assertPlainRef(ref);
+  } else if (String(env.GITHUB_EVENT_NAME || '').startsWith('pull_request')) {
+    console.error(
+      `::error::a pull_request run must pass --base <ref>: the decisions are read from the base ref, never from the PR's own ${REGISTER_REL}`,
+    );
+    return 1;
+  }
+
+  const registerFile = join(root, REGISTER_REL);
+  const headRaw = existsSync(registerFile)
+    ? readFileSync(registerFile, 'utf8')
+    : null;
+  const { register, source, errors } = selectRegister({
+    ref,
+    root,
+    env,
+    today,
+    headRaw,
   });
+  console.log(`decisions in force: ${REGISTER_REL} from ${source}`);
+  const { valid } = register
+    ? validateRegister(register, today)
+    : { valid: new Map() };
+  for (const s of expiringSoon(valid, today)) {
+    console.log(
+      `::warning::npm-audit-decisions.json: ${s.id} expires ${s.expires} (${s.left} day(s) left): re-check for a fix, or the owner re-decides in a decision-only PR`,
+    );
+  }
+
+  const config = auditConfigProblems(yarn, env);
+  if (config.length) {
+    for (const p of config) console.error(`::error::${p}`);
+    for (const e of errors)
+      console.error(`::error::npm-audit-decisions.json ${e}`);
+    return 1;
+  }
+
+  const r = yarn(AUDIT_ARGS);
+  const failed = spawnFailure(r, [0, 1]);
+  if (failed) {
+    console.error(
+      `::error::yarn npm audit ${failed}:\n${String((r && r.stdout) || '')}\n${String((r && r.stderr) || '')}`,
+    );
+    return 1;
+  }
+  let findings;
+  try {
+    findings = parseAudit(r.stdout);
+  } catch (e) {
+    console.error(`::error::${e.message}`);
+    return 1;
+  }
+  if (r.status !== 0 && findings.length === 0) {
+    console.error(
+      `::error::yarn npm audit exited ${r.status} without a report:\n${r.stdout}\n${r.stderr}`,
+    );
+    return 1;
+  }
+
+  const needed = findings.filter((f) => f.id && valid.has(f.id));
+  const advisories = new Map();
+  for (const f of needed) {
+    if (!advisories.has(f.id)) {
+      advisories.set(
+        f.id,
+        await Promise.resolve()
+          .then(() => fetchAdvisory(f.id))
+          .then(
+            (v) => ({ v }),
+            (e) => ({ e }),
+          ),
+      );
+    }
+  }
+  let production = deps.production;
+  if (!production) {
+    const prune = deps.prune
+      ? { list: deps.prune, note: null }
+      : runtimePrune(root);
+    if (prune.note && needed.length) console.log(`note: ${prune.note}`);
+    production = productionWith(root, prune.list);
+  }
   const { undecided, decided, unused } = evaluate(findings, valid, {
-    published: memo(publishedVersions),
+    published: memo(publishedVersionsWith(yarn)),
     advisory: (id) => {
       const a = advisories.get(id);
       if (!a) throw new Error(`advisory ${id} was not looked up`);
       if (a.e) throw a.e;
       return a.v;
     },
-    production,
+    production: memo(production),
   });
 
   for (const f of decided) {
     console.log(
-      `decided (accepted-risk, dev/build only, expires ${f.decision.expires}): ${f.id} ${f.pkg} ${f.treeVersions.join(', ')} [${f.severity}] ${f.issue}`,
+      `decided (accepted-risk up to ${f.decision.severity}, dev/build only, expires ${f.decision.expires}): ${f.id} ${f.pkg} ${f.treeVersions.join(', ')} [${f.severity}] ${f.issue}`,
     );
   }
   for (const id of unused)
@@ -528,22 +958,42 @@ async function main() {
   console.log(
     `${findings.length} High/Critical finding(s): ${decided.length} decided, ${undecided.length} undecided; ${errors.length} register error(s)`,
   );
-  process.exit(undecided.length || errors.length ? 1 : 0);
+  return undecided.length || errors.length ? 1 : 0;
 }
 
 if (require.main === module) {
-  main().catch((e) => {
-    console.error(`::error::${e.stack || e.message}`);
-    process.exit(1);
-  });
+  main(process.argv.slice(2)).then(
+    (code) => process.exit(code),
+    (e) => {
+      console.error(`::error::${e.stack || e.message}`);
+      process.exit(1);
+    },
+  );
 }
 
 module.exports = {
+  REGISTER_REL,
   inRange,
   fixShipped,
   productionPaths,
+  isoDate,
   validateRegister,
+  expiringSoon,
   parseAudit,
   evaluate,
+  gitEnv,
+  assertPlainRef,
+  gitShowAt,
+  changedSinceBase,
+  readRegisterAt,
+  registerChangedWith,
+  isDecisionOnly,
+  newOrChangedEntries,
+  pullRequestUrl,
+  selectRegister,
+  spawnFailure,
+  auditConfigProblems,
+  main,
   MAX_DAYS,
+  WARN_DAYS,
 };

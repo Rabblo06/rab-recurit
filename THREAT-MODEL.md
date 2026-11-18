@@ -9431,3 +9431,58 @@ Reversal:   Upgrade / `resolutions` override (documented in "//resolutions") as 
   copy with a pause between the two statements): two commits ended at version 1; with the fix, 2. Semantic goldens
   (PG16/17/18): only the `metadata_version_bump()` body hash changes (5f6076df… → ccfd284e…); security-posture golden and
   the restricted-migrator drift review unchanged (a function body is not a privilege line).
+
+## CI audit — owner exceptions read from the base ref; audit ignore lists, broken yarn, missing tree versions and re-scored advisories fail (branch ci/npm-audit-decisions-harden, 2026-11-18; review F1, F3-F8 of #229; register prerequisite: branch fix/npm-audit-register-severity)
+- **Re-checked first (2026-11-18), so the exception is still the only option:** GHSA-fc5q-39xc-vjpf has
+  `first_patched_version: null` (range `<= 4.0.7`); the registry's picomatch list ends at 4.0.7 with no prerelease ever
+  published; micromatch/picomatch#194 is open; the latest tinyglobby 0.2.17, anymatch 3.1.3, micromatch 4.0.8, jest-util
+  30.5.1, vite 8.3.8 and @nx/js / @nx/workspace 24.0.6 all still require picomatch. No `resolutions` target exists.
+- **F1 (Medium) — a PR could approve itself:** CI ran the PR's own `tools/npm-audit-decisions.json`, so a PR could add
+  an entry and the dependency it covers in one diff. Actor: anyone opening a PR → adds a register entry next to a
+  vulnerable dependency → the required audit passes on that PR's say-so. Fix (the #225 import-boundary pattern):
+  - `--base <ref>` (ci-security passes `origin/${GITHUB_BASE_REF}` on every PR) reads the decisions with
+    `git show <ref>:tools/npm-audit-decisions.json`. Fail closed: an unknown ref, a shallow clone (no merge-base) or any
+    git failure throws (exit 1); only git's "path does not exist in <ref>" means "no decisions". git runs without a
+    shell with `LC_ALL=C` and no `LANGUAGE`; `--base` accepts a plain ref plus `~N` / `^N` only. The head copy is
+    validated as well. The audit job checks out with `fetch-depth: 0`.
+  - Decision-only PR: when the merge-base diff touches only the register and THREAT-MODEL.md, the head decisions are
+    used, and every entry that is NEW OR CHANGED against the base (deep equality by id) must have `owner_decision_ref`
+    equal to this PR's `pull_request.html_url` from `$GITHUB_EVENT_PATH` (unreadable payload = fail). Removing an entry
+    needs no reference. **Owner to confirm:** the review asked for this on NEW entries; it is applied to CHANGED ones
+    too, because otherwise a register-only PR could move `decided_on` / `expires` of an existing entry (a renewal)
+    while still citing the old PR.
+  - CHANGED TOGETHER: `--base` fails when the register changes in the same diff as `yarn.lock`, any `package.json`,
+    `.yarnrc.yml`, anything under `.yarn/`, `tools/check-npm-audit.cjs`, `packages/rab-docker/rab/runtime-deps.cjs`
+    (its `RUNTIME_PRUNE` decides the production-closure condition), `ci-security.yaml` or `npm-audit-weekly.yaml`
+    (the last three beyond the review's list).
+  - No `--base` (push to main, the weekly run, local): the checked-out register decides; a `pull_request` event without
+    `--base` is refused.
+- **F3 (Low):** before auditing, `yarn config get npmAuditIgnoreAdvisories --json` and `npmAuditExcludePackages` must
+  both be `[]` and no `YARN_NPM_AUDIT_*` variable may be set; otherwise exit 1 without auditing.
+- **F4 (Low):** a yarn that cannot be spawned (`error`), is killed (`signal`) or exits outside {0, 1} for the audit
+  (outside {0} for `config get` / `npm info`) fails. `main(argv, deps)` takes `yarn`, `env`, `root`, `today`,
+  `fetchAdvisory` and `production` so this is tested.
+- **F5 (Low):** a finding with an empty `Tree Versions` cannot be checked for a fix: undecided ("cannot evaluate").
+- **F6 (Low):** each entry records the decided `severity` (`high` | `critical`); a finding rated above it is undecided
+  (a re-scored advisory needs a new owner decision); unknown severities are undecided. The picomatch entry records
+  `high` (prerequisite branch, merged first because CHANGED TOGETHER refuses register + tool in one PR).
+- **F7 (Info):** `decided_on` / `expires` must round-trip through `Date` (2026-02-30, 2026-11-31 refused).
+- **F8 (Info):** `.github/workflows/npm-audit-weekly.yaml` runs the same check every Monday 06:17 UTC (and on demand)
+  against main; any run prints `::warning::` when an in-force entry has 7 days or fewer left (expiry day = 0).
+- **F9 (Info):** wording corrected on the prerequisite branch (node-gyp@13.0.1 has three production parents — argon2,
+  node-addon-api, msgpackr-extract — and one picomatch chain, node-gyp > tinyglobby > picomatch@4.0.5).
+- **Residual (accepted):** CI still runs the PR's own copy of the tool and workflow, so a PR that edits the tool can
+  change the rules for itself (CHANGED TOGETHER makes it also impossible to touch the register in that PR, but the tool
+  edit itself is a review control: owner review, no CODEOWNERS file). The register on the base is trusted as reviewed.
+  A decision-only PR's owner reference proves only that this PR is the record, not who approved it; the owner's merge
+  is the decision. A push to main runs without `--base`, so a register that landed on main is used as is.
+- **Tests:** `tools/check-npm-audit.test.cjs` (28). End to end in throwaway git repositories (`main(argv, deps)`): a
+  head-only entry does not cover the finding on a non-decision PR, the same entry on the base does; a decision-only PR
+  passes, one citing another PR fails, a renewal keeping the old reference fails, a missing event payload fails, a
+  removal needs no reference; register + yarn.lock / package.json / the tool / ci-security.yaml fail CHANGED TOGETHER
+  (also uncommitted); an unknown ref, a non-ref argument, a missing `--base` value and a depth-1 clone throw; a base
+  without the register means no decisions; a German locale still reads a missing path as absent; the checkout decides
+  without `--base`, and a pull_request run without it exits 1; F3 ignore list (not audited) and env var exit 1; F4
+  `{error, status: null}`, a signal and exit 2 exit 1; F5 / F6 / F8 end to end; F7 dates; the workflows (`fetch-depth:
+  0`, `--base` on PRs, the weekly schedule); an invalid (expired) base entry fails a non-decision PR that drops it. Mutation
+  check: 17 hand-made mutants of the tool (one per control), each killed by at least one test.

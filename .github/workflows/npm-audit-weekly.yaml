@@ -1,0 +1,33 @@
+name: npm-audit-weekly
+
+# Review F8 of #229: the ci-security audit only runs when something is pushed, so an owner exception could expire, or
+# a fix could ship (which lapses the exception), with nobody noticing until the next PR goes red. This runs the same
+# check every week against main's checked-out register (no --base: there is no PR) and prints a ::warning:: when an
+# entry has 7 days or fewer left. Same tool, same rules as ci-security's `audit` job.
+on:
+  schedule:
+    - cron: '17 6 * * 1' # Mondays 06:17 UTC
+  workflow_dispatch:
+
+concurrency:
+  group: npm-audit-weekly
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/yarn-install
+      - name: The check's own tests
+        run: node --test tools/check-npm-audit.test.cjs
+      - name: yarn npm audit (high+), owner exceptions from main
+        env:
+          GITHUB_TOKEN: ${{ github.token }} # the GitHub advisory lookup (first_patched_version)
+        run: node tools/check-npm-audit.cjs
