@@ -42,7 +42,7 @@ jobs:
       REDIS_IMAGE: redis@sha256:57e4255cc971b1c8d6f8a6ca283ac01bc3ecdd914273ef6bfaede87aaecd6541
       REPO: 127.0.0.1:5055/adolphus
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           persist-credentials: false
           ref: ${{ inputs.ref || github.ref }}
@@ -109,7 +109,7 @@ jobs:
         run: |
           cat "$RUNNER_TEMP/dou-pg${{ matrix.pg }}/SUMMARY.md" >> "$GITHUB_STEP_SUMMARY" || true
           cat "$RUNNER_TEMP/dbs-pg${{ matrix.pg }}/SUMMARY.md" >> "$GITHUB_STEP_SUMMARY" || true
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always()
         with:
           name: upgrade-with-data-pg${{ matrix.pg }}
