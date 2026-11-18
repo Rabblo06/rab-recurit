@@ -1180,10 +1180,16 @@ async function main(argv = [], deps = {}) {
       );
   }
 
-  const config = [
-    ...auditConfigProblems(yarn, env),
-    ...pluginSourceProblems(root, env, { home: deps.home }),
-  ];
+  // Plugin sources FIRST, without spawning yarn: every yarn invocation (config get, plugin runtime, the audit) loads
+  // the configured plugins, so a planted plugin must be refused before any of its code can run.
+  const sources = pluginSourceProblems(root, env, { home: deps.home });
+  if (sources.length) {
+    for (const p of sources) console.error(`::error::${p}`);
+    for (const e of errors)
+      console.error(`::error::npm-audit-decisions.json ${e}`);
+    return 1;
+  }
+  const config = auditConfigProblems(yarn, env);
   if (config.length) {
     for (const p of config) console.error(`::error::${p}`);
     for (const e of errors)

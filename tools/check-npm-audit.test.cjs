@@ -1458,3 +1458,48 @@ test('NODE_OPTIONS, SSL_CERT_FILE and SSL_CERT_DIR are refused like NODE_EXTRA_C
     );
   }
 });
+
+// ---- Final review of #238 at bcff7c21 ----
+
+const AUDIT_CMD = 'npm audit --severity high --all --recursive --json';
+
+test('order: a planted plugin is refused before yarn is spawned at all (any yarn call would load it)', async (t) => {
+  const r = seed(t, registerDoc(prEntry()));
+  r.write('.yarnrc.yml', 'plugins:\n  - path: .yarn/plugins/npm-cli.cjs\n');
+  r.write('.yarn/plugins/npm-cli.cjs', IMPOSTOR_PLUGIN);
+  const calls = [];
+  const yarn = (args) => {
+    calls.push(args.join(' '));
+    return fakeYarn()(args);
+  };
+  const { code, out } = await run([], r, { env: {}, yarn });
+  assert.equal(code, 1);
+  assert.match(out, /has a plugins key/);
+  assert.deepEqual(calls, []); // not even `yarn config get`
+  // A clean checkout does reach yarn (config checks first, then the audit).
+  const clean = seed(t, registerDoc(prEntry()));
+  const cleanCalls = [];
+  const res = await run([], clean, {
+    env: {},
+    yarn: (args) => {
+      cleanCalls.push(args.join(' '));
+      return fakeYarn()(args);
+    },
+  });
+  assert.equal(res.code, 0, res.out);
+  assert.match(cleanCalls[0], /^config get /);
+  assert.ok(cleanCalls.includes(AUDIT_CMD));
+});
+
+test('rc allowlist: a YAML warning (an unresolved tag) fails, even on an allowed key', () => {
+  const yaml = require('yaml');
+  const problems = (text) => check.rcFileProblems('rc', text, yaml).join('\n');
+  assert.match(
+    problems('nodeLinker: !foo node-modules\n'),
+    /cannot be read as YAML \(Unresolved tag: !foo/,
+  );
+  assert.match(
+    problems('!foo x: 1\n'),
+    /cannot be read as YAML \(Unresolved tag: !foo/,
+  );
+});
