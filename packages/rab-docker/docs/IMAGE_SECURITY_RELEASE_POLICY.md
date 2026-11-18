@@ -241,6 +241,20 @@ and update `verified_on`.
   After the push, the publish job adds the published tag and the GitHub attestation URL, and uploads it as
   `release-manifest` (retained 90 days).
 
+- **Cutting a release.** Release tags are `rab/vX.Y.Z` (optionally `-suffix`, e.g. `rab/v0.2.0-beta`), the only form
+  `release_guard.py` and the `release` environment's tag policy accept. A release created or published with a
+  workflow's `GITHUB_TOKEN` starts no other workflow, so no workflow publishes a release on the owner's behalf:
+  - **Usual path:** the owner publishes the release in GitHub (Releases -> Draft a new release -> new tag
+    `rab/vX.Y.Z` on `main` -> Publish, or `gh release create` with their own login). That `release: published` event
+    starts `publish-image` on the tag; approve the `release` environment after the gate. If the new tag also starts
+    `cd-deploy-tag`, it finds the release and changes nothing.
+  - **Tag pushed with git:** `cd-deploy-tag` creates a **draft** release with the deploy notes
+    (`tools/create-github-release.sh`; it never publishes). The owner reviews it and clicks **Publish release**; that
+    starts `publish-image` as above.
+  - **Image already published by a dispatch from `main`** (as for v0.6.0: dispatch on the release commit, then the
+    release): the release-event run will reach the `release` approval for an image that already exists. Reject it (the
+    push refuses an existing `<commit>` tag anyway) and deploy the digest from the dispatch run's `release-manifest`.
+
 ## 9. Credentials
 
 | Need | Credential | Where it is available |
