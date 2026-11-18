@@ -377,6 +377,14 @@ test('evaluate: decided only when no fix, not in production, and the entry match
 
 // ---- Review of #229: F5, F6, F7, F8, F3, F4 (pure functions) ----
 
+/** `yarn config get <key> --json` as yarn 4.13 prints it with this repository's .yarnrc.yml. */
+const CONFIG_DEFAULTS = {
+  npmAuditIgnoreAdvisories: '[]',
+  npmAuditExcludePackages: '[]',
+  npmAuditRegistry: 'null',
+  npmRegistryServer: '"https://registry.yarnpkg.com"',
+};
+
 test('F7: a date must round-trip, so 2026-02-30 is refused', () => {
   assert.equal(check.isoDate('2026-02-28'), Date.parse('2026-02-28T00:00:00Z'));
   assert.equal(check.isoDate('2026-02-30'), null);
@@ -464,7 +472,7 @@ test('F4: spawnFailure refuses a spawn error, a signal and an exit status outsid
 test('F3: an ignore list in yarn config or any YARN_NPM_AUDIT_* variable is a problem', () => {
   const yarnWith = (values) => (args) => ({
     status: 0,
-    stdout: `${values[args[2]] ?? '[]'}\n`,
+    stdout: `${values[args[2]] ?? CONFIG_DEFAULTS[args[2]]}\n`,
     stderr: '',
   });
   assert.deepEqual(check.auditConfigProblems(yarnWith({}), {}), []);
@@ -576,7 +584,11 @@ const fakeYarn =
   ({ config = {}, audit } = {}) =>
   (args) => {
     if (args[0] === 'config')
-      return { status: 0, stdout: `${config[args[2]] ?? '[]'}\n`, stderr: '' };
+      return {
+        status: 0,
+        stdout: `${config[args[2]] ?? CONFIG_DEFAULTS[args[2]]}\n`,
+        stderr: '',
+      };
     if (args[0] === 'npm' && args[1] === 'audit')
       return audit || { status: 1, stdout: `${auditLine()}\n`, stderr: '' };
     if (args[0] === 'npm' && args[1] === 'info')
@@ -956,7 +968,10 @@ test('workflows: the PR audit reads the base with full history; a weekly schedul
     'utf8',
   );
   assert.match(weekly, /schedule:\n\s+- cron: '[^']+'/);
-  assert.match(weekly, /run: node tools\/check-npm-audit\.cjs\n/);
+  assert.match(
+    weekly,
+    /run: node tools\/check-npm-audit\.cjs --fail-on-expiring\n/,
+  );
 });
 
 test('F1: an invalid entry in the base register fails a non-decision PR, even when the PR drops it', async (t) => {
@@ -974,4 +989,155 @@ test('F1: an invalid entry in the base register fails a non-decision PR, even wh
   assert.equal(code, 1, out);
   assert.match(out, /\(main\) decision\[1\] GHSA-2222-3333-4444: EXPIRED/);
   assert.match(out, /1 decided, 0 undecided; 1 register error/);
+});
+
+// ---- Security review of #238: G1, G3, G4 ----
+
+test('G1: adding an entry together with a src/x.ts change exits 1 (it would be in force from the next PR on)', async (t) => {
+  const r = seed(t, registerDoc(prEntry()));
+  const other = entry({
+    id: 'GHSA-2222-3333-4444',
+    package: 'other',
+    owner_decision_ref: PR_URL,
+  });
+  r.write(check.REGISTER_REL, registerDoc(prEntry(), other));
+  r.write('src/x.ts', 'export const x = 1;\n');
+  r.commit('adds an entry next to code');
+  const { code, out } = await run(['--base', 'main'], r);
+  assert.equal(code, 1, out);
+  assert.match(
+    out,
+    /GHSA-2222-3333-4444 added or changed outside a decision-only PR/,
+  );
+  // The finding itself is still decided by the base entry: the only failure is the smuggled entry.
+  assert.match(out, /1 decided, 0 undecided; 1 register error/);
+  // Changing an existing entry next to code is refused the same way.
+  const c = seed(t, registerDoc(prEntry()));
+  c.write(
+    check.REGISTER_REL,
+    registerDoc(
+      prEntry({ reason: 'A reworded reason, still long enough to pass.' }),
+    ),
+  );
+  c.write('src/x.ts', 'export const x = 1;\n');
+  c.commit('edits an entry next to code');
+  const changed = await run(['--base', 'main'], c);
+  assert.equal(changed.code, 1, changed.out);
+  assert.match(changed.out, /GHSA-fc5q-39xc-vjpf added or changed outside/);
+});
+
+test('G1: removing an entry together with a src/x.ts change exits 0', async (t) => {
+  const other = entry({ id: 'GHSA-2222-3333-4444', package: 'other' });
+  const r = seed(t, registerDoc(prEntry(), other));
+  r.write(check.REGISTER_REL, registerDoc(prEntry()));
+  r.write('src/x.ts', 'export const x = 1;\n');
+  r.commit('removes an unused entry next to code');
+  const { code, out } = await run(['--base', 'main'], r);
+  assert.equal(code, 0, out);
+  assert.doesNotMatch(out, /added or changed outside/);
+});
+
+test('G1: entries are compared with the merge-base, so a base that moved on does not flag an untouched entry', async (t) => {
+  const other = entry({ id: 'GHSA-2222-3333-4444', package: 'other' });
+  const r = seed(t, registerDoc(prEntry(), other));
+  // main moves on: the other entry is removed there.
+  r.git('checkout', '-q', 'main');
+  r.write(check.REGISTER_REL, registerDoc(prEntry()));
+  r.commit('main removes the other entry');
+  r.git('checkout', '-q', 'pr');
+  // The PR touches the register (drops nothing new, edits nothing) only by keeping an older copy plus code.
+  r.write(
+    check.REGISTER_REL,
+    registerDoc(prEntry(), other).replace(/\n$/, '\n\n'),
+  );
+  r.write('src/x.ts', 'export const x = 1;\n');
+  r.commit('whitespace in the register next to code');
+  const { code, out } = await run(['--base', 'main'], r);
+  assert.doesNotMatch(out, /added or changed outside/);
+  assert.equal(code, 0, out);
+});
+
+test('G3: --fail-on-expiring (the weekly run) exits 1 at 7 days or fewer left; without it, only a warning', async (t) => {
+  const r = seed(t, registerDoc(prEntry()));
+  const env = { GITHUB_EVENT_NAME: 'schedule' };
+  const warnOnly = await run([], r, { env, today: '2026-12-10' });
+  assert.equal(warnOnly.code, 0, warnOnly.out);
+  assert.match(warnOnly.out, /::warning::.*7 day\(s\) left/);
+  const weekly = await run(['--fail-on-expiring'], r, {
+    env,
+    today: '2026-12-10',
+  });
+  assert.equal(weekly.code, 1, weekly.out);
+  assert.match(
+    weekly.out,
+    /::error::.*expires 2026-12-17, 7 day\(s\) left \(--fail-on-expiring/,
+  );
+  const early = await run(['--fail-on-expiring'], r, {
+    env,
+    today: '2026-12-09',
+  });
+  assert.equal(early.code, 0, early.out);
+});
+
+test('G4: the audit registry must be the default; YARN_NPM_REGISTRY_SERVER / YARN_NPM_AUDIT_REGISTRY are refused', async (t) => {
+  const yarnWith = (values) => (args) => ({
+    status: 0,
+    stdout: `${values[args[2]] ?? CONFIG_DEFAULTS[args[2]]}\n`,
+    stderr: '',
+  });
+  assert.deepEqual(check.auditConfigProblems(yarnWith({}), {}), []);
+  assert.deepEqual(
+    check.auditConfigProblems(
+      yarnWith({ npmRegistryServer: '"https://registry.npmjs.org"' }),
+      {},
+    ),
+    [],
+  );
+  assert.match(
+    check
+      .auditConfigProblems(
+        yarnWith({ npmAuditRegistry: '"https://audit.example.invalid"' }),
+        {},
+      )
+      .join(),
+    /npmAuditRegistry must be unset/,
+  );
+  assert.match(
+    check
+      .auditConfigProblems(
+        yarnWith({ npmRegistryServer: '"https://mirror.example.invalid"' }),
+        {},
+      )
+      .join(),
+    /npmRegistryServer must be https:\/\/registry\.yarnpkg\.com or https:\/\/registry\.npmjs\.org/,
+  );
+  for (const k of ['YARN_NPM_REGISTRY_SERVER', 'YARN_NPM_AUDIT_REGISTRY']) {
+    assert.match(
+      check.auditConfigProblems(yarnWith({}), { [k]: 'https://x' }).join(),
+      new RegExp(`${k} is set`),
+    );
+  }
+  // End to end: a non-default registry exits 1 before auditing.
+  const r = seed(t, registerDoc(prEntry()));
+  let audited = false;
+  const yarn = (args) => {
+    if (args[1] === 'audit') audited = true;
+    return fakeYarn({
+      config: { npmRegistryServer: '"https://mirror.example.invalid"' },
+    })(args);
+  };
+  const res = await run([], r, { env: {}, yarn });
+  assert.equal(res.code, 1);
+  assert.equal(audited, false);
+});
+
+test('G3: the weekly workflow runs with --fail-on-expiring', () => {
+  const weekly = readFileSync(
+    join(__dirname, '..', '.github/workflows/npm-audit-weekly.yaml'),
+    'utf8',
+  );
+  assert.match(
+    weekly,
+    /run: node tools\/check-npm-audit\.cjs --fail-on-expiring\n/,
+  );
 });

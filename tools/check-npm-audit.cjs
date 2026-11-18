@@ -35,14 +35,18 @@
  *   - CHANGED TOGETHER: --base fails when that diff changes the register together with yarn.lock, any package.json,
  *     .yarnrc.yml, anything under .yarn/, this tool, packages/rab-docker/rab/runtime-deps.cjs (RUNTIME_PRUNE),
  *     .github/workflows/ci-security.yaml or .github/workflows/npm-audit-weekly.yaml.
+ *   - Outside a decision-only PR, a register entry that is new or changed against the merge-base fails (it would be
+ *     in force from the next PR on without having been decided in its own PR); removing an entry is allowed anywhere.
  *   - No --base (push to main, the weekly schedule, a local run): the checked-out register decides. In a
  *     `pull_request` event (GITHUB_EVENT_NAME) running without --base is refused.
  *   - git runs with LC_ALL=C (LANGUAGE unset) so "does not exist in" is matched in English; --base takes a plain ref
  *     plus `~N` / `^N` suffixes only, and git runs without a shell.
  *
  * Before auditing, the job fails unless `yarn config get npmAuditIgnoreAdvisories --json` and
- * `yarn config get npmAuditExcludePackages --json` are both `[]` and no YARN_NPM_AUDIT_* variable is set (an ignore
- * list would hide advisories with no owner, no scope and no expiry).
+ * `yarn config get npmAuditExcludePackages --json` are both `[]` (an ignore list would hide advisories with no owner,
+ * no scope and no expiry), `npmAuditRegistry` is unset and `npmRegistryServer` is yarn's or npm's default registry,
+ * and no YARN_NPM_AUDIT_* or YARN_NPM_REGISTRY_SERVER variable is set (an audit pointed at a server that reports
+ * nothing would pass). `--fail-on-expiring` (the weekly run) also fails when an entry has 7 days or fewer left.
  * Fails closed: yarn that cannot be spawned, is killed by a signal or exits outside {0, 1} for the audit; an audit
  * that exits non-zero without a parseable report; an unparseable line; a failed registry or advisory lookup; an
  * unresolvable yarn.lock descriptor or a range this file cannot evaluate. There is no date override. Set GITHUB_TOKEN
@@ -50,6 +54,7 @@
  *
  *   node tools/check-npm-audit.cjs                     # the checked-out register (push to main, schedule, local)
  *   node tools/check-npm-audit.cjs --base origin/main  # a pull request: decisions from the base ref
+ *   node tools/check-npm-audit.cjs --fail-on-expiring  # the weekly run: 7 days or fewer left also fails
  *   node --test tools/check-npm-audit.test.cjs
  */
 const { spawnSync, execFileSync } = require('node:child_process');
@@ -69,6 +74,11 @@ const AUDIT_ARGS = [
   '--json',
 ];
 /** yarn settings that would silently drop advisories from the audit: both must be empty. */
+/** The audit's registry must be yarn's default (an audit pointed at a server that reports nothing passes): G4. */
+const DEFAULT_REGISTRIES = [
+  'https://registry.yarnpkg.com',
+  'https://registry.npmjs.org',
+];
 const AUDIT_IGNORE_SETTINGS = [
   'npmAuditIgnoreAdvisories',
   'npmAuditExcludePackages',
@@ -504,12 +514,11 @@ function gitShowAt(ref, rel, root = ROOT) {
   }
 }
 
-/** Paths the checkout (working tree included) changes since its merge-base with `ref`; a rename is a delete + an add. */
-function changedSinceBase(ref, root = ROOT) {
+/** The merge-base of `ref` and HEAD (a commit id); throws when there is none (unknown ref, shallow clone). */
+function mergeBaseOf(ref, root = ROOT) {
   assertPlainRef(ref);
-  let mergeBase;
   try {
-    mergeBase = git(['merge-base', ref, 'HEAD'], root).trim();
+    return git(['merge-base', ref, 'HEAD'], root).trim();
   } catch (error) {
     throw new Error(
       `--base: git merge-base ${ref} HEAD failed: ${
@@ -519,6 +528,11 @@ function changedSinceBase(ref, root = ROOT) {
       }`,
     );
   }
+}
+
+/** Paths the checkout (working tree included) changes since its merge-base with `ref`; a rename is a delete + an add. */
+function changedSinceBase(ref, root = ROOT) {
+  const mergeBase = mergeBaseOf(ref, root);
   return git(
     ['diff', '--name-only', '--no-renames', '-z', mergeBase, '--'],
     root,
@@ -660,6 +674,20 @@ function selectRegister({ ref, root, env, today, headRaw }) {
       errors: [...errors, ...headErrors],
     };
   }
+  // G1: outside a decision-only PR the head's new or changed entries are not in force here, but they WOULD be from
+  // the next PR on, once merged. So they may only arrive in a decision-only PR (register + THREAT-MODEL.md), where
+  // they must cite that PR. Compared with the merge-base (what this PR itself changed); pure removals stay allowed.
+  if (head && changed.includes(REGISTER_REL)) {
+    const added = newOrChangedEntries(
+      readRegisterAt(mergeBaseOf(ref, root), root),
+      head,
+    );
+    if (added.length) {
+      errors.push(
+        `${added.map((d) => (d && d.id) || '(no id)').join(', ')} added or changed outside a decision-only PR: a new or changed entry must merge in its own PR (${REGISTER_REL} + THREAT-MODEL.md only) whose owner_decision_ref is that PR; removing an entry is allowed anywhere`,
+      );
+    }
+  }
   const baseErrors =
     headRaw !== null && canonical(base) === canonical(head)
       ? [] // identical: reported once, as (head)
@@ -691,33 +719,54 @@ function spawnFailure(r, okStatuses) {
   return null;
 }
 
-/** Problems with the audit's own configuration: any ignore list or YARN_NPM_AUDIT_* variable (review F3). */
+/**
+ * Problems with the audit's own configuration (review F3, G4): any ignore list, a registry other than yarn's default
+ * (an audit pointed at a server that reports nothing would pass), or a YARN_NPM_AUDIT_* / YARN_NPM_REGISTRY_SERVER
+ * variable.
+ */
 function auditConfigProblems(yarn, env) {
   const problems = [];
   for (const k of Object.keys(env)) {
-    if (/^YARN_NPM_AUDIT_/i.test(k))
+    if (/^YARN_NPM_AUDIT_/i.test(k) || /^YARN_NPM_REGISTRY_SERVER$/i.test(k))
       problems.push(
         `environment variable ${k} is set: the audit must run with yarn's defaults`,
       );
   }
-  for (const key of AUDIT_IGNORE_SETTINGS) {
+  /** `yarn config get key --json` parsed as { value }, or undefined after recording a problem. */
+  const configGet = (key) => {
     const r = yarn(['config', 'get', key, '--json']);
     const failed = spawnFailure(r, [0]);
     if (failed) {
       problems.push(
         `yarn config get ${key} ${failed}: ${String(r && (r.stderr || r.stdout)).slice(0, 300)}`,
       );
-      continue;
+      return undefined;
     }
-    let value;
     try {
-      value = JSON.parse(String(r.stdout).trim());
+      return { value: JSON.parse(String(r.stdout).trim()) };
     } catch {
       problems.push(
         `yarn config get ${key}: unparseable output ${String(r.stdout).slice(0, 200)}`,
       );
-      continue;
+      return undefined;
     }
+  };
+  const auditRegistry = configGet('npmAuditRegistry');
+  if (auditRegistry && auditRegistry.value !== null) {
+    problems.push(
+      `npmAuditRegistry must be unset (yarn's default), is ${JSON.stringify(auditRegistry.value)}: the audit must ask the default registry`,
+    );
+  }
+  const server = configGet('npmRegistryServer');
+  if (server && !DEFAULT_REGISTRIES.includes(server.value)) {
+    problems.push(
+      `npmRegistryServer must be ${DEFAULT_REGISTRIES.join(' or ')}, is ${JSON.stringify(server.value)}: the audit must ask the default registry`,
+    );
+  }
+  for (const key of AUDIT_IGNORE_SETTINGS) {
+    const got = configGet(key);
+    if (!got) continue;
+    const value = got.value;
     if (!Array.isArray(value) || value.length) {
       problems.push(
         `${key} must be empty, is ${JSON.stringify(value)}: an ignore list hides advisories with no owner decision, scope or expiry (use tools/npm-audit-decisions.json)`,
@@ -869,10 +918,16 @@ async function main(argv = [], deps = {}) {
   const { valid } = register
     ? validateRegister(register, today)
     : { valid: new Map() };
+  const failOnExpiring = argv.includes('--fail-on-expiring');
   for (const s of expiringSoon(valid, today)) {
     console.log(
       `::warning::npm-audit-decisions.json: ${s.id} expires ${s.expires} (${s.left} day(s) left): re-check for a fix, or the owner re-decides in a decision-only PR`,
     );
+    // G3: the weekly run fails, so the expiry is noticed before every PR turns red.
+    if (failOnExpiring)
+      errors.push(
+        `${s.id} expires ${s.expires}, ${s.left} day(s) left (--fail-on-expiring, the weekly run)`,
+      );
   }
 
   const config = auditConfigProblems(yarn, env);
@@ -984,6 +1039,7 @@ module.exports = {
   gitEnv,
   assertPlainRef,
   gitShowAt,
+  mergeBaseOf,
   changedSinceBase,
   readRegisterAt,
   registerChangedWith,

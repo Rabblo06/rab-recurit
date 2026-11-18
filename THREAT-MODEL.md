@@ -9469,6 +9469,19 @@ Reversal:   Upgrade / `resolutions` override (documented in "//resolutions") as 
 - **F7 (Info):** `decided_on` / `expires` must round-trip through `Date` (2026-02-30, 2026-11-31 refused).
 - **F8 (Info):** `.github/workflows/npm-audit-weekly.yaml` runs the same check every Monday 06:17 UTC (and on demand)
   against main; any run prints `::warning::` when an in-force entry has 7 days or fewer left (expiry day = 0).
+- **Security review of #238 (2026-11-18):**
+  - **G1 (Low):** a register change mixed with a path that is NOT on the CHANGED TOGETHER list (e.g. `src/x.ts`) was
+    neither CHANGED TOGETHER nor decision-only: the base decided for that PR, but the new entry merged unbound and was
+    in force from the next PR on. Fix: outside a decision-only PR, `selectRegister` fails when the head has entries that
+    are new or changed against the MERGE-BASE (what this PR itself changed, so a base that moved on does not flag an
+    untouched entry); pure removals stay allowed anywhere.
+  - **G3:** the weekly run passes `--fail-on-expiring`, so it fails (and notifies) at 7 days or fewer left instead of
+    only warning; ci-security still only warns, so PRs stay green until the real expiry. Read-only token, no issue.
+  - **G4:** `npmAuditRegistry` must be unset (`null`) and `npmRegistryServer` `https://registry.yarnpkg.com` or
+    `https://registry.npmjs.org`; `YARN_NPM_REGISTRY_SERVER` is refused like every `YARN_NPM_AUDIT_*` variable. An audit
+    pointed at a server that reports nothing can no longer pass.
+  - **G2 (owner decision, not built):** there is no cap on the total time an advisory may be excepted across
+    renewals; each renewal is a new decision-only PR citing itself, at most 30 days each.
 - **F9 (Info):** wording corrected on the prerequisite branch (node-gyp@13.0.1 has three production parents — argon2,
   node-addon-api, msgpackr-extract — and one picomatch chain, node-gyp > tinyglobby > picomatch@4.0.5).
 - **Residual (accepted):** CI still runs the PR's own copy of the tool and workflow, so a PR that edits the tool can
@@ -9476,7 +9489,7 @@ Reversal:   Upgrade / `resolutions` override (documented in "//resolutions") as 
   edit itself is a review control: owner review, no CODEOWNERS file). The register on the base is trusted as reviewed.
   A decision-only PR's owner reference proves only that this PR is the record, not who approved it; the owner's merge
   is the decision. A push to main runs without `--base`, so a register that landed on main is used as is.
-- **Tests:** `tools/check-npm-audit.test.cjs` (28). End to end in throwaway git repositories (`main(argv, deps)`): a
+- **Tests:** `tools/check-npm-audit.test.cjs` (34). End to end in throwaway git repositories (`main(argv, deps)`): a
   head-only entry does not cover the finding on a non-decision PR, the same entry on the base does; a decision-only PR
   passes, one citing another PR fails, a renewal keeping the old reference fails, a missing event payload fails, a
   removal needs no reference; register + yarn.lock / package.json / the tool / ci-security.yaml fail CHANGED TOGETHER
@@ -9484,5 +9497,9 @@ Reversal:   Upgrade / `resolutions` override (documented in "//resolutions") as 
   without the register means no decisions; a German locale still reads a missing path as absent; the checkout decides
   without `--base`, and a pull_request run without it exits 1; F3 ignore list (not audited) and env var exit 1; F4
   `{error, status: null}`, a signal and exit 2 exit 1; F5 / F6 / F8 end to end; F7 dates; the workflows (`fetch-depth:
-  0`, `--base` on PRs, the weekly schedule); an invalid (expired) base entry fails a non-decision PR that drops it. Mutation
-  check: 17 hand-made mutants of the tool (one per control), each killed by at least one test.
+  0`, `--base` on PRs, the weekly schedule); an invalid (expired) base entry fails a non-decision PR that drops it. G1:
+  adding or editing an entry next to `src/x.ts` exits 1, removing one next to it exits 0, an untouched entry is not
+  flagged when the base moved on. G3: `--fail-on-expiring` exits 1 at 7 days left, 0 at 8, warning only without it; the
+  weekly workflow passes it. G4: a non-default `npmAuditRegistry` / `npmRegistryServer` and both env variables are
+  refused (end to end: exit 1, not audited). Mutation check: 23 hand-made mutants of the tool (one per control), each
+  killed by at least one test.
