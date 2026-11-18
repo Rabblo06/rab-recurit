@@ -9453,11 +9453,21 @@ Reversal:   Upgrade / `resolutions` override (documented in "//resolutions") as 
   `''` instead of leaving the session value. None of these jobs sets those GUCs, and on a reused connection they already
   read `''`, so the RLS outcome is unchanged; the HWS backfill gains RESET ROLE + the identity check (a no-op on its
   connection, which never sets a role).
-- **Residual.** `bindMaintenanceSessionGucs` does not RESET ROLE or check the role (by design, see above). It is exported
-  for maintenance sessions only; a request path calling it would still need an `actorType: 'worker'` literal in a file on
-  the spec's allowlist, which review sees. The spec's known blind spots (a run-time GUC name, a bound-parameter name,
-  computed keys, non-`.ts` files) are unchanged.
+- **Residual.** `bindMaintenanceSessionGucs` does not RESET ROLE or check the role (by design, see above). Two separate
+  misuses, two separate controls:
+  - *Setting the marker* through it needs an `actorType: 'worker'` literal in a file on the `actorType` allowlist of
+    `worker-actor-type-trusted-only.spec.ts`, which review sees.
+  - *Skipping RESET ROLE* needs NO such literal: a request path could call it with an ordinary context and lose the pool
+    safety layer of TenantContextService's binder (a session-level SET ROLE left on a pooled connection would survive).
+    `maintenance-session-binder-callers.spec.ts` pins its callers to exactly the orphan check, the account-invite cleanup
+    and the Worker re-export; any other file that names the function fails CI.
+  - The Worker reaches it through `engine/worker-shared/maintenance-session-binder.ts`, a runtime re-export the
+    import-boundary checker cannot see through. `worker-shared-reexports.spec.ts` lists the runtime re-exports allowed in
+    that folder (today only this one), so a new one fails CI and needs an explicit entry (owner asked to accept the pattern).
+  - Known blind spots, unchanged: a run-time GUC name, a bound-parameter name, computed keys or property access by a
+    computed name, non-`.ts` files. The raw-GUC pattern now also catches `E'rab.actor_type'`, a parenthesised
+    `('rab.actor_type')` and `UPDATE pg_settings … rab.actor_type`.
 - **Tests.** `worker-actor-type-trusted-only.spec.ts` (empty raw allowlists; a raw site appended to any Worker file fails
-  it); `hws-backfill.integration.spec.ts`, `ws-core-fk-removal` / `hws-c1-org-level-workspace-paths` (orphan check),
+  it; the extended forms each tested), `maintenance-session-binder-callers.spec.ts`, `worker-shared-reexports.spec.ts`; `hws-backfill.integration.spec.ts`, `ws-core-fk-removal` / `hws-c1-org-level-workspace-paths` (orphan check),
   `account-invite-cleanup*.integration.spec.ts` and `phase-d-account-invite-cleanup-worker.integration.spec.ts` (level-22
   pass), `tenant-context.service.spec.ts` (binding statement text unchanged).

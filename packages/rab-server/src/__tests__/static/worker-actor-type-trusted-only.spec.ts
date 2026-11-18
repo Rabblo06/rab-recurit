@@ -48,8 +48,16 @@ const count = (text: string, re: RegExp) => (text.match(new RegExp(re.source, re
 const ACTOR_TYPE_ASSIGNMENT = /['"]?\bactorType['"]?\s*\]?\s*(?:\??\s*:|=(?!=)|\?\?=|\|\|=|&&=)|[{,]\s*actorType\s*[,}]/g;
 /** An assignment of the literal value `'worker'`. A shorthand site has no literal, so it is counted above and never here. */
 const ACTOR_TYPE_WORKER = /['"]?\bactorType['"]?\s*\]?\s*(?:\??\s*:|=(?!=)|\?\?=|\|\|=|&&=)\s*['"`]worker['"`]/g;
-/** `set_config('rab.actor_type'` with any prefix (`pg_catalog.`) and either quote; `SET [LOCAL|SESSION] ["]rab.actor_type`. */
-const RAW_ACTOR_TYPE_GUC = /set_config\s*\(\s*['"]rab\.actor_type['"]|\bSET\s+(?:LOCAL\s+|SESSION\s+)?"?rab\.actor_type\b/gi;
+/**
+ * A write of the GUC, in any of these forms:
+ *   - `set_config('rab.actor_type'` with any prefix (`pg_catalog.`), either quote, an escape-string `E'...'`, and the name
+ *     wrapped in any number of parentheses (`set_config(('rab.actor_type'), ...)`);
+ *   - `SET [LOCAL|SESSION] ["]rab.actor_type`;
+ *   - `UPDATE [pg_catalog.]pg_settings ... rab.actor_type` within one statement (no `;` in between): the pg_settings view's
+ *     UPDATE rule is a set_config call.
+ */
+const RAW_ACTOR_TYPE_GUC =
+  /set_config\s*\(\s*(?:\(\s*)*E?['"]rab\.actor_type['"]|\bSET\s+(?:LOCAL\s+|SESSION\s+)?"?rab\.actor_type\b|\bUPDATE\s+(?:"?pg_catalog"?\.)?"?pg_settings"?(?![\w])[^;]{0,400}?rab\.actor_type/gi;
 
 type Allowlist = Record<string, { sites: number; why: string }>;
 
@@ -208,11 +216,28 @@ describe("rab.actor_type = 'worker' is set only from trusted code (static)", () 
       `SET LOCAL "rab.actor_type" = 'worker'`,
       `set session rab.actor_type to 'worker'`,
       `SET rab.actor_type = 'worker'`,
+      // Security review follow-ups (#241): an escape string, a parenthesised name, and the pg_settings view.
+      `SELECT set_config(E'rab.actor_type', 'worker', true)`,
+      `SELECT pg_catalog.set_config( e'rab.actor_type', $1, true)`,
+      `SELECT set_config(('rab.actor_type'), 'worker', true)`,
+      `SELECT set_config( ( ( E'rab.actor_type' ) )::text, 'worker', true)`,
+      `UPDATE pg_settings SET setting = 'worker' WHERE name = 'rab.actor_type'`,
+      `update pg_catalog.pg_settings set setting = $1 where name = 'rab.actor_type'`,
+      `UPDATE "pg_catalog"."pg_settings"\n   SET setting = 'worker'\n WHERE name = E'rab.actor_type'`,
     ]) {
       expect([form, count(form, RAW_ACTOR_TYPE_GUC)]).toEqual([form, 1]);
     }
     // Reading the marker is what the policies do; it is not a write.
-    expect(count(`current_setting('rab.actor_type'::text, true) = 'worker'::text`, RAW_ACTOR_TYPE_GUC)).toBe(0);
+    for (const read of [
+      `current_setting('rab.actor_type'::text, true) = 'worker'::text`,
+      `current_setting(E'rab.actor_type', true)`,
+      `current_setting(('rab.actor_type'), true)`,
+      `SELECT setting FROM pg_settings WHERE name = 'rab.actor_type'`,
+      // An UPDATE of pg_settings for another name, then a later statement that only reads the marker.
+      `UPDATE pg_settings SET setting = 'x' WHERE name = 'rab.role'; SELECT current_setting('rab.actor_type', true)`,
+    ]) {
+      expect([read, count(read, RAW_ACTOR_TYPE_GUC)]).toEqual([read, 0]);
+    }
   });
 
   it('comment stripping keeps strings: a "/*" inside a string or template cannot hide a later violation', () => {
