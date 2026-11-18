@@ -42,9 +42,11 @@ const PINNED_RE = new RegExp(`^${REPO}(?:${TAG})?${DIGEST}$`);
 const PINNED_WITH_TAG_RE = new RegExp(`^${REPO}${TAG}${DIGEST}$`);
 const NAME_RE = /^[a-z0-9][a-z0-9-]*$/;
 
-// docker run/create options that take a value as the NEXT word (when not written --opt=value). Anything else that starts
-// with '-' must be a known flag, or the command is refused: guessing would let an image hide behind an option.
-const VALUE_OPTS = new Set([
+// Per subcommand: options that take a value as the NEXT word (when not written --opt=value), and flags. Anything else that
+// starts with '-' is refused: guessing would let an image hide behind an option.
+const RUN_VALUE_OPTS = new Set([
+  '-a',
+  '--attach',
   '--name',
   '-p',
   '--publish',
@@ -100,7 +102,7 @@ const VALUE_OPTS = new Set([
   '--userns',
   '--uts',
 ]);
-const FLAG_OPTS = new Set([
+const RUN_FLAGS = new Set([
   '-d',
   '--detach',
   '-i',
@@ -121,9 +123,20 @@ const FLAG_OPTS = new Set([
   '--quiet',
   '--no-healthcheck',
   '--disable-content-trust',
+]);
+const PULL_VALUE_OPTS = new Set(['--platform']);
+const PULL_FLAGS = new Set([
   '-a',
   '--all-tags',
+  '-q',
+  '--quiet',
+  '--disable-content-trust',
 ]);
+const OPTS = {
+  run: [RUN_VALUE_OPTS, RUN_FLAGS],
+  create: [RUN_VALUE_OPTS, RUN_FLAGS],
+  pull: [PULL_VALUE_OPTS, PULL_FLAGS],
+};
 
 function listYamlFiles(root) {
   const out = [];
@@ -185,63 +198,211 @@ function words(line) {
   return out;
 }
 
-// The image word of every docker run/create/pull in a script: [{ image, command }], or { problem }.
+// `docker` as a command word: after start of line, whitespace, ; & | ( $ " ' ` or / (so `$(docker`, `"docker"`,
+// `/usr/bin/docker`, `sh -c "docker`, `bash -c 'docker` are all found), and followed by whitespace (after an optional
+// closing quote). `rab-docker`, `dockerfile`, `docker-compose` are not command words.
+const DOCKER_WORD_RE = /(^|[\s;&|($"'`/])docker(?=["']?(?:[ \t]|$))/gm;
+// docker reached through a variable or an alias: refused, because the check cannot see what such a command runs.
+const DOCKER_INDIRECT_RES = [
+  /(?:^|[\s;&|(`])(?:alias\s+|export\s+|local\s+|readonly\s+|typeset\s+|declare\s+(?:-\w+\s+)*)?[A-Za-z_][A-Za-z0-9_]*=["']?(?:[^\s"';|&()]*\/)?docker["']?(?=[\s;&|)`]|$)/m,
+  /\$\(\s*(?:command\s+-v|which|type\s+-[pP])\s+docker\s*\)/,
+  /\$\{?[A-Za-z_][A-Za-z0-9_]*(?::-[^}]*)?\}?["']?\s+(?:(?:container|image)\s+)?(?:run|create|pull)(?=[\s;&|)`"']|$)/m,
+];
+
+// Quote context at index p: the quote of the innermost $( ) / backtick frame ('"', "'" or null).
+function enclosingQuote(text, p) {
+  const stack = [{ q: null, tick: false }];
+  for (let i = 0; i < p; i++) {
+    const f = stack[stack.length - 1];
+    const c = text[i];
+    if (f.q === "'") {
+      if (c === "'") f.q = null;
+      continue;
+    }
+    if (c === '\\') {
+      i++;
+      continue;
+    }
+    if (c === '$' && text[i + 1] === '(') {
+      stack.push({ q: null, tick: false });
+      i++;
+    } else if (c === '`') {
+      if (f.tick && f.q === null) stack.pop();
+      else stack.push({ q: null, tick: true });
+    } else if (c === ')' && f.q === null && !f.tick && stack.length > 1) {
+      stack.pop();
+    } else if (c === '"') {
+      f.q = f.q === '"' ? null : '"';
+    } else if (c === "'" && f.q === null) {
+      f.q = "'";
+    }
+  }
+  return stack[stack.length - 1].q;
+}
+
+// End of the simple command that starts at `from`, inside an enclosing quote `enc` (or none): an unquoted ; & | newline
+// backtick, a ) closing an outer $( , or the quote that closes `enc`. -1 when a quote of its own never closes.
+function commandEnd(text, from, enc) {
+  const stack = [{ q: null }];
+  for (let i = from; i < text.length; i++) {
+    const f = stack[stack.length - 1];
+    const c = text[i];
+    if (f.q === "'") {
+      if (c === "'") f.q = null;
+      continue;
+    }
+    if (f.q === '"') {
+      if (c === '\\') i++;
+      else if (c === '$' && text[i + 1] === '(') {
+        stack.push({ q: null });
+        i++;
+      } else if (c === '"') f.q = null;
+      continue;
+    }
+    if (c === '\\') {
+      // \" inside an enclosing "..." opens a quote of the inner shell
+      if (enc === '"' && text[i + 1] === '"') f.q = '"';
+      i++;
+      continue;
+    }
+    if (stack.length === 1 && c === enc) return i;
+    if (c === '"' || c === "'") f.q = c;
+    else if (c === '$' && text[i + 1] === '(') {
+      stack.push({ q: null });
+      i++;
+    } else if (c === ')') {
+      if (stack.length === 1) return i;
+      stack.pop();
+    } else if (stack.length === 1 && /[;&|\n`]/.test(c)) return i;
+  }
+  return stack.length === 1 && stack[0].q === null ? text.length : -1;
+}
+
+// Every docker run/create/pull in a script: [{ index, command, image }] or [{ index, command, problem }]. A form the
+// parser cannot place is a problem, never skipped.
 function dockerImages(script) {
   const out = [];
-  const joined = script.replace(/\\\r?\n/g, ' ');
-  for (const raw of joined.split(/\r?\n/)) {
-    const line = raw.replace(/^\s+/, '');
-    if (line === '' || line.startsWith('#')) continue;
-    for (const seg of line.split(/&&|\|\||;|\|/)) {
-      const m =
-        /(?:^|\s)docker\s+(?:(container)\s+(run|create)|(image)\s+(pull)|(run|create|pull))(?=\s|$)(.*)$/.exec(
-          seg,
-        );
-      if (!m) continue;
-      const sub = m[2] || m[4] || m[5];
-      const command = seg.trim();
-      const w = words(m[6]);
-      if (!w) {
-        out.push({ command, problem: 'unbalanced quotes' });
-        continue;
+  const text = script
+    .replace(/\\\r?\n/g, ' ')
+    .split(/\r?\n/)
+    .map((l) => (/^\s*#/.test(l) ? '' : l))
+    .join('\n');
+  for (const re of DOCKER_INDIRECT_RES) {
+    const m = re.exec(text);
+    if (m) {
+      out.push({
+        index: m.index,
+        command: m[0].trim(),
+        problem:
+          'docker invoked through a variable, alias or lookup cannot be checked; call docker directly',
+      });
+    }
+  }
+  for (const m of text.matchAll(DOCKER_WORD_RE)) {
+    const at = m.index + m[1].length;
+    let i = at + 'docker'.length;
+    if (text[i] === '"' || text[i] === "'") i++;
+    const enc = enclosingQuote(text, at);
+    const sm =
+      /^[ \t]+(?:(container)[ \t]+)?(?:(image)[ \t]+)?([^\s"';&|)`]+)/.exec(
+        text.slice(i),
+      );
+    if (!sm) continue;
+    const sub = sm[3];
+    if (sub.startsWith('-')) {
+      // docker --context x run ...: global options are not parsed; refused when a run/create/pull follows.
+      const end0 = commandEnd(text, i, enc);
+      const tail = text.slice(i, end0 < 0 ? text.length : end0);
+      if (/(?:^|\s)(?:run|create|pull)(?=\s|$)/.test(tail)) {
+        out.push({
+          index: at,
+          command: `docker${tail}`.trim(),
+          problem: `docker global option ${sub} before the subcommand is not supported by this check`,
+        });
       }
-      let image = null;
-      let problem = null;
-      for (let i = 0; i < w.length; i++) {
-        const t = w[i];
-        if (t === '--') {
-          image = w[i + 1] || null;
-          break;
-        }
-        if (!t.startsWith('-') || t === '-') {
-          image = t;
-          break;
-        }
-        if (t.startsWith('--') && t.includes('=')) continue;
-        if (VALUE_OPTS.has(t)) {
-          i++;
-          continue;
-        }
-        if (FLAG_OPTS.has(t)) continue;
-        problem = `docker ${sub} option ${t} is not known to this check (add it to VALUE_OPTS or FLAG_OPTS)`;
+      continue;
+    }
+    if (sm[1] && !['run', 'create'].includes(sub)) continue;
+    if (sm[2] && sub !== 'pull') continue;
+    if (!['run', 'create', 'pull'].includes(sub)) continue;
+    const argsFrom = i + sm[0].length;
+    const end = commandEnd(text, argsFrom, enc);
+    const command = text.slice(at, end < 0 ? text.length : end).trim();
+    if (end < 0) {
+      out.push({ index: at, command, problem: 'unbalanced quotes' });
+      continue;
+    }
+    let args = text.slice(argsFrom, end);
+    if (enc === '"') args = args.replace(/\\(["\\$`])/g, '$1');
+    const w = words(args);
+    if (!w) {
+      out.push({ index: at, command, problem: 'unbalanced quotes' });
+      continue;
+    }
+    const [valueOpts, flags] = OPTS[sub];
+    let image = null;
+    let problem = null;
+    for (let k = 0; k < w.length; k++) {
+      const t = w[k];
+      if (t === '--') {
+        image = w[k + 1] || null;
         break;
       }
-      if (!problem && !image) problem = `no image found in: docker ${sub}`;
-      out.push(problem ? { command, problem } : { command, image });
+      if (!t.startsWith('-') || t === '-') {
+        image = t;
+        break;
+      }
+      if (t.startsWith('--') && t.includes('=')) continue;
+      if (valueOpts.has(t)) {
+        k++;
+        continue;
+      }
+      if (flags.has(t)) continue;
+      problem = `docker ${sub} option ${t} is not known to this check (add it to the option tables)`;
+      break;
     }
+    if (!problem && !image) problem = `no image found in: docker ${sub}`;
+    out.push(
+      problem ? { index: at, command, problem } : { index: at, command, image },
+    );
   }
   return out;
 }
 
-// Variables a script assigns from ref.sh: { VAR: '<name>' }. The name may be built from `${{ matrix.pg }}` or a shell
-// variable; ref.sh itself refuses at run time a name with no pinned manifest, and a LITERAL name is checked here too.
+// Variables a script assigns from ref.sh: { VAR: { name: '<image name>', index } }. The name may be built from
+// `${{ matrix.pg }}` or a shell variable; ref.sh itself refuses at run time a name with no pinned manifest, and a LITERAL
+// name is checked here too.
 function refShAssignments(script) {
   const out = {};
   const re =
     /(?:^|[\s;])([A-Za-z_][A-Za-z0-9_]*)="\$\(bash\s+"?(?:\$\{GITHUB_WORKSPACE\}\/|\$GITHUB_WORKSPACE\/)?\.github\/ci-images\/ref\.sh"?\s+(?:"([^"]*)"|([^\s")]+))\s*\)"/g;
-  for (const m of script.matchAll(re))
-    out[m[1]] = m[2] !== undefined ? m[2] : m[3];
+  for (const m of script.matchAll(re)) {
+    out[m[1]] = { name: m[2] !== undefined ? m[2] : m[3], index: m.index };
+  }
   return out;
+}
+
+// How many times a script (re)defines a variable: plain, export/local/declare/readonly/typeset assignments, read /
+// mapfile / printf -v / for ... in targets, ${VAR=..} / ${VAR:=..}, unset, and any nameref (declare -n) at all. A
+// variable the script defines more than once (ref.sh) or at all (env) is not trusted to hold the pinned image.
+function definitions(script, name) {
+  const n = name.replace(/[^A-Za-z0-9_]/g, '');
+  const res = [
+    new RegExp(
+      `(?:^|[\\s;&|(\`])(?:export\\s+|local\\s+|readonly\\s+|typeset\\s+|declare\\s+(?:-\\w+\\s+)*)?${n}(?:\\[[^\\]]*\\])?\\+?=`,
+      'gm',
+    ),
+    new RegExp(
+      `\\b(?:read|mapfile|readarray)\\b[^;&|\\n]*\\s${n}(?=[\\s;&|)]|$)`,
+      'gm',
+    ),
+    new RegExp(`\\bprintf\\s+-v\\s*${n}\\b`, 'g'),
+    new RegExp(`\\bfor\\s+${n}\\s+in\\b`, 'g'),
+    new RegExp(`\\$\\{${n}:?=`, 'g'),
+    new RegExp(`\\bunset\\s+(?:-v\\s+)?${n}\\b`, 'g'),
+    /\b(?:declare|typeset|local)\s+-\w*n\w*\b/g,
+  ];
+  return res.reduce((a, r) => a + [...script.matchAll(r)].length, 0);
 }
 
 // Line of the next occurrence of `needle` in `text` (successive calls with the same needle walk forward, so repeated
@@ -390,9 +551,18 @@ function check(root) {
         if (varM) {
           const name = varM[1] || varM[2];
           if (Object.prototype.hasOwnProperty.call(assigned, name)) {
-            if (!assigned[name].includes('$') && !ciImages.has(assigned[name]))
+            const a = assigned[name];
+            if (definitions(script, name) !== 1)
               problems.push(
-                `${at}: ref.sh ${assigned[name]} has no .github/ci-images/${assigned[name]}/image.yaml`,
+                `${at}: docker image $${name} is set from ref.sh but redefined elsewhere in the script; it is not trusted`,
+              );
+            else if (a.index > d.index)
+              problems.push(
+                `${at}: docker image $${name} is used before it is set from ref.sh`,
+              );
+            else if (!a.name.includes('$') && !ciImages.has(a.name))
+              problems.push(
+                `${at}: ref.sh ${a.name} has no .github/ci-images/${a.name}/image.yaml`,
               );
             continue;
           }
@@ -402,13 +572,14 @@ function check(root) {
           if (
             typeof ev === 'string' &&
             !ev.includes('${{') &&
-            PINNED_RE.test(ev.trim())
+            PINNED_RE.test(ev.trim()) &&
+            definitions(script, name) === 0
           ) {
             recordPin(ev.trim());
             continue;
           }
           problems.push(
-            `${at}: docker image $${name} is neither set from .github/ci-images/ref.sh in this script nor a pinned literal env value`,
+            `${at}: docker image $${name} is neither set once from .github/ci-images/ref.sh in this script nor a pinned literal env value the script leaves alone`,
           );
           continue;
         }
@@ -433,7 +604,14 @@ function check(root) {
   return { problems, files: files.length, images, dockerCmds };
 }
 
-module.exports = { check, dockerImages, words, refShAssignments, PINNED_RE };
+module.exports = {
+  check,
+  dockerImages,
+  words,
+  refShAssignments,
+  definitions,
+  PINNED_RE,
+};
 
 if (require.main === module) {
   const i = process.argv.indexOf('--root');

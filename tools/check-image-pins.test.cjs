@@ -173,7 +173,7 @@ test('"$VAR" from ref.sh in the same script passes; a literal name must exist', 
       ...files,
       '.github/workflows/a.yaml': wf(runStep(otherScript)),
     })[0],
-    /neither set from \.github\/ci-images\/ref\.sh/,
+    /neither set once from \.github\/ci-images\/ref\.sh/,
   );
 });
 
@@ -285,6 +285,129 @@ test('ref.sh prints the pinned reference and refuses bad names, missing and unpi
     const r = ref(name);
     assert.notEqual(r.status, 0, name);
     assert.equal(r.stdout, '', name);
+  }
+});
+
+// Review of #249: every way of reaching `docker` that the first line-and-segment parser missed. Each must be refused.
+test('docker in a substitution, subshell, by path, quoted, through sh -c / bash -c, or via a variable is refused', () => {
+  const forms = [
+    'cid=$(docker run -d redis:7-alpine)',
+    'cid="$(docker run -d redis:7-alpine)"',
+    '(docker run redis:7-alpine)',
+    '/usr/bin/docker run -d redis:7-alpine',
+    '"docker" run redis:7-alpine',
+    "'docker' pull redis:7-alpine",
+    'sh -c "docker run redis:7-alpine"',
+    "bash -c 'docker pull redis:7-alpine'",
+    'sh -c "docker run -e \\"A=b c\\" redis:7-alpine"',
+    'D=docker; $D run redis:7-alpine',
+    'DOCKER=/usr/bin/docker\n"$DOCKER" pull redis:7-alpine',
+    '${DOCKER:-docker} run redis:7-alpine',
+    'alias d=docker',
+    '"$(command -v docker)" run redis:7-alpine',
+    'cid=`docker run -d redis:7-alpine`',
+    'sudo docker run redis:7-alpine',
+    'if docker run redis:7-alpine; then :; fi',
+    '{ docker run redis:7-alpine; }',
+    'docker  run redis:7-alpine',
+    'docker --context x run redis:7-alpine',
+    'docker run "unclosed redis:7-alpine',
+  ];
+  for (const s of forms) {
+    const p = problems({ '.github/workflows/a.yaml': wf(runStep(s)) });
+    assert.ok(p.length >= 1, `not refused: ${s}`);
+  }
+  // the same forms with a pinned image pass (the parser places the image, it does not just refuse docker)
+  for (const s of [
+    `cid=$(docker run -d ${REDIS})`,
+    `sh -c "docker run ${REDIS}"`,
+    `bash -c 'docker pull ${REDIS}'`,
+    `/usr/bin/docker run ${REDIS}`,
+    `"docker" run ${REDIS}`,
+  ]) {
+    assert.deepEqual(
+      problems({ '.github/workflows/a.yaml': wf(runStep(s)) }),
+      [],
+      s,
+    );
+  }
+  assert.deepEqual(
+    dockerImages(
+      'docker compose run redis\necho rab-docker run x\nls dockerfile',
+    ),
+    [],
+  );
+});
+
+test('-a/--attach takes a value for docker run; -a/--all-tags is a flag for docker pull', () => {
+  assert.equal(dockerImages(`docker run -a stdout ${REDIS}`)[0].image, REDIS);
+  assert.equal(
+    dockerImages('docker run -a stdout redis:7-alpine')[0].image,
+    'redis:7-alpine',
+  );
+  assert.equal(dockerImages(`docker pull -a ${REDIS}`)[0].image, REDIS);
+  assert.deepEqual(
+    problems({
+      '.github/workflows/a.yaml': wf(runStep(`docker run -a stdout ${REDIS}`)),
+    }),
+    [],
+  );
+  assert.equal(
+    problems({
+      '.github/workflows/a.yaml': wf(
+        runStep('docker run -a stdout redis:7-alpine'),
+      ),
+    }).length,
+    1,
+  );
+});
+
+test('a ref.sh variable redefined later, or used before it is set, is not trusted; nor is a redefined env variable', () => {
+  const files = { '.github/ci-images/redis/image.yaml': manifest(REDIS) };
+  const set = 'img="$(bash .github/ci-images/ref.sh redis)"';
+  for (const redefine of [
+    'img=redis:7-alpine',
+    'export img=redis:7-alpine',
+    'read -r img < /tmp/x',
+    'img+=x',
+    ': "${img:=redis}"',
+    'for img in redis:7; do :; done',
+    'printf -v img %s redis',
+    'declare -n alias_ref=other',
+    'unset img',
+  ]) {
+    const p = problems({
+      ...files,
+      '.github/workflows/a.yaml': wf(
+        runStep(`${set}\n${redefine}\ndocker run -d "$img"`),
+      ),
+    });
+    assert.equal(p.length, 1, redefine);
+    assert.match(p[0], /redefined elsewhere in the script/, redefine);
+  }
+  const before = problems({
+    ...files,
+    '.github/workflows/a.yaml': wf(runStep(`docker run -d "$img"\n${set}`)),
+  });
+  assert.match(before[0], /used before it is set from ref\.sh/);
+  const env = `    env:\n      IMG: ${REDIS}\n`;
+  assert.deepEqual(
+    problems({
+      '.github/workflows/a.yaml': wf(`${env}${runStep('docker pull "$IMG"')}`),
+    }),
+    [],
+  );
+  for (const redefine of [
+    'IMG=redis:7-alpine',
+    'export IMG=redis',
+    'read IMG',
+  ]) {
+    const p = problems({
+      '.github/workflows/a.yaml': wf(
+        `${env}${runStep(`${redefine}\ndocker pull "$IMG"`)}`,
+      ),
+    });
+    assert.equal(p.length, 1, redefine);
   }
 });
 
