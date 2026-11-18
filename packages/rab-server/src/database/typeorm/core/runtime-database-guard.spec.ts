@@ -85,10 +85,10 @@ describe('runtime database identity guard (API, worker and provisioner boot)', (
     expectRefused('api', PROD_ENV({ PG_DATABASE_URL: PROD_APP.replace('sslmode=require', 'sslmode=disable') }), /sslmode=disable, which production refuses/);
   });
 
-  it('4c. Phase B: the Worker and the provisioner (session locks) refuse a transaction-pooler URL; the API only warns', () => {
+  it('4c. Phase B: the Worker and the provisioner (session locks) refuse a transaction-pooler URL; since owner decision 2026-11-18 the production API refuses it too (runtime-db-config.ts checkRuntimeLogin)', () => {
     expectRefused('worker', PROD_ENV({ PG_DATABASE_URL: PROD_POOLED }), /transaction-pooler shape/);
     expectRefused('provisioner', PROD_ENV({ PG_DATABASE_URL: PROD_POOLED.replace('rab_app', 'crewflow') }), /transaction-pooler shape/);
-    expect(resolve('api', PROD_ENV({ PG_DATABASE_URL: PROD_POOLED.replace('rab_app', 'crewflow_owner') })).classification).toBe('PRODUCTION');
+    expectRefused('api', PROD_ENV({ PG_DATABASE_URL: PROD_POOLED.replace('rab_app', 'crewflow_owner') }), /transaction-pooler shape/);
   });
 
   it('5. BC-11: the production runtime declaration is optional; a partial or wrong one is refused; the marker check is live (deployment-identity.spec)', () => {

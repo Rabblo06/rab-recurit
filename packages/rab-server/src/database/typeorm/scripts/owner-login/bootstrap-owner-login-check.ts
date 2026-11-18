@@ -228,9 +228,14 @@ function spawnNode(argv: string[], env: Record<string, string>): Promise<{ code:
 
 async function runChild(inputs: Inputs): Promise<ChildRun> {
   // No APP_SECRET: db-setup does not receive it. No file path either: db-setup writes no file.
-  const env: Record<string, string> = { ...baseEnv(), NODE_ENV: 'test', ...(inputs.extra ?? {}) };
-  if (inputs.app !== undefined) env.PG_DATABASE_URL = inputs.app;
-  if (inputs.admin !== undefined) env.PG_ADMIN_URL = inputs.admin;
+  // The child's two database inputs are WRITTEN into its environment (an object literal: never read from this process's).
+  const env: Record<string, string> = {
+    ...baseEnv(),
+    NODE_ENV: 'test',
+    ...(inputs.extra ?? {}),
+    ...(inputs.app !== undefined ? { PG_DATABASE_URL: inputs.app } : {}),
+    ...(inputs.admin !== undefined ? { PG_ADMIN_URL: inputs.admin } : {}),
+  };
   const argv = ENTRY.endsWith('.ts') ? [require.resolve('ts-node/dist/bin.js'), '--transpile-only', '-P', TSCONFIG_APP, ENTRY] : [ENTRY];
   const { code, out } = await spawnNode(argv, env);
   const line = out.split('\n').find((l) => l.startsWith(`${OWNER_BOOTSTRAP_RESULT_PREFIX} `));
