@@ -473,6 +473,15 @@ provider's uptime monitor (or any external HTTP checker) at the API through the 
 
   Never run an old image's migrations against a newer schema. Never `down -v` production.
 - **(c) A partial apply.** Migrations commit one by one. A failed migration never serves (OWNER-DB-ULTIMATE Part B: exit 66, the API restarts and retries it; the logbook records `<version>_TypeOrmMigrations` failed with its attempt). A failed upgrade COMMAND, with every migration applied, serves with `upgradeFailed: true` and is retried on the next start. Either fix forward with a corrected image (its migration child resumes CHAIN-PARTIAL), after review, or do (b).
+- **(d) A patch release over a failed `.0` command (e.g. 0.7.1 after 0.7.0's HWS cutover failed).** The patch re-runs the
+  `.0`'s failed command first, before any of its own migrations. If it fails again and the patch carries migrations, the start
+  refuses (exit 66; the log names the command and its attempt, and no migration was applied). On a single-instance deploy
+  that takes the API down. Ways out: fix the cause (for the cutover: the backup marker) and start again; run the manual
+  `upgrade --force` command (the patch's migrations apply and the API serves degraded, `upgradeFailed: true`, the blocked
+  workspaces keep answering 503 until the command passes); or redeploy the `.0` image. **Hotfix case:** if a `.0` MIGRATION
+  failed and the patch ships its fix while the `.0` also has instance commands, the patch start refuses 65 ("Nothing was
+  applied"): the `.0`'s commands may only run on a schema with all `.0` migrations applied, and the patch cannot apply them
+  without its own. Use `upgrade --force` (every migration, then the `.0`'s commands; rows marked forced), after review.
 
 **3.7 One API (C5).** Rolling and blue-green deploys are not supported, and the gate refuses more than one rab-api replica or a start-first update:
 - two versions race for the migration lock, and a waiter can block for up to 600 s;

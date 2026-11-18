@@ -9453,12 +9453,21 @@ Reversal:   Upgrade / `resolutions` override (documented in "//resolutions") as 
   row; otherwise it still refuses 65 (threat 5; forced rows never count). Every `.0` instance COMMAND whose latest attempt
   is not completed runs again under the `.0`'s own step name with `executed_by_version` = the patch.
   - **Order invariant (review R1):** the locked runner applies every pending migration between `beforeApply` and
-    `afterApply`, so the retry runs in `beforeApply`: BEFORE any migration of the patch's start, on the `.0`'s schema, and
-    only when the `.0`'s migrations step is completed (nothing maps a migration to a release, so that step proves every
-    migration the `.0` ships was applied). A `.0` command with its migrations step incomplete refuses 65 ("Nothing was
-    applied") unless `--force`. A command that fails again is recorded failed (attempt + 1): with migrations pending the
-    start refuses (`MinorReleaseResumeFailedError`, 66) and the patch's migrations are NOT applied; with none pending it serves
-    degraded (70). Only after the `.0` is resumed are the migrations applied and the patch's own migrations step recorded.
+    `afterApply`, so the retry runs in `beforeApply`: BEFORE any migration of the patch's start (never after this start's
+    migrations; on the `.0` schema unless an earlier `--force` or fresh patch start applied later ones), and only when the
+    `.0`'s migrations step is completed (nothing maps a migration to a release, so that step proves every migration the `.0`
+    ships was applied). A `.0` command with its migrations step incomplete refuses 65 ("Nothing was applied") unless
+    `--force`. A command that fails again is recorded failed (attempt + 1): with migrations pending an unforced start refuses
+    (`MinorReleaseResumeFailedError`, 66, fail closed: the code cannot serve with its migrations unapplied); the patch's
+    migrations are NOT applied, and the log names the `.0` command and its attempt, never a migration (review A). Under
+    `--force` the start goes on (review B): the migrations apply and it serves degraded (70), every row forced, the blocked
+    workspaces stay 503. With nothing pending it serves degraded (70). Only after the `.0` is resumed is the patch's own
+    migrations step recorded.
+  - **Hotfix case:** when a `.0` MIGRATION failed and the patch ships the fix, and the `.0` has instance commands, the patch
+    start refuses 65 unless `--force`: the `.0`'s commands must never run on a schema whose `.0` migrations are not all
+    applied, and the patch cannot apply them without also applying its own, so there is no order that runs the commands
+    first. `--force` applies every migration, then runs the `.0`'s commands (WARNING; rows forced). A `.0` with no instance
+    command has no such conflict (its migrations step alone is recorded).
     Exceptions, which run the `.0`'s commands after every migration: a start with no instance row (fresh install or an
     unchecked local / test history: no data of the `.0` exists) and a `--force` start whose `.0` migrations step is
     incomplete (logged as a WARNING). The invariant is stated in `upgrade-runner.ts`, `upgrade-version.ts` and

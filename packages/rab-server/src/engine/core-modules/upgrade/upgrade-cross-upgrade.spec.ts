@@ -155,7 +155,7 @@ describe('(b) a patch release resumes its minor .0 (decideUpgradeStart)', () => 
   });
 
   it('a failed .0 command retried before pending patch migrations refuses the start as a migration failure (66)', () => {
-    expect(outcomeOf(new MinorReleaseResumeFailedError('x'))).toBe('migrationFailed');
+    expect(outcomeOf(new MinorReleaseResumeFailedError('x', '0.7.0_HwsCutover_1786721540100', 2))).toBe('migrationFailed');
   });
 
   it('a MINOR release never uses the resume rule (it is not a patch of anything)', () => {

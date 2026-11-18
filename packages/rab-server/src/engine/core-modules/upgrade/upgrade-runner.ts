@@ -26,13 +26,17 @@
  * from this step" + resumeWorkspaceCommandsFromCursors): a patch carries no command of its own; it resumes its minor .0. Every
  * .0 instance COMMAND whose latest attempt is not completed runs again under the .0's own step name, recorded with
  * executed_by_version = the patch. ORDER INVARIANT (review R1 of #240; Twenty runs migrations as steps of the sequence): the
- * .0's commands run in beforeApply, BEFORE any migration of this start is applied (so before the patch's own migrations),
- * and only when the .0's migrations step is completed (every migration the .0 ships was applied by its own start; nothing
- * maps a migration to a release, so that step is the proof). Then the migrations apply, then (afterApply) the patch's own
- * migrations step is recorded and the workspace pass runs. If a .0 command fails again: with migrations pending the start is
- * refused (MinorReleaseResumeFailedError, exit 66: the patch's migrations are NOT applied, the image cannot serve on the
- * .0 schema); with none pending it serves degraded (exit 70) without recording the patch's step. A .0 command left with its
- * migrations step incomplete refuses 65 ("Nothing was applied") unless --force. Two documented exceptions run the .0's
+ * .0's commands run in beforeApply, BEFORE any migration of this start is applied (never after this start's migrations; on
+ * the .0 schema unless an earlier --force or fresh patch start applied later ones), and only when the .0's migrations step
+ * is completed (nothing maps a migration to a release, so that step is the proof that every migration the .0 ships is
+ * applied). Then the migrations apply, then (afterApply) the patch's own migrations step is recorded and the workspace pass
+ * runs. If a .0 command fails again with migrations pending: an unforced start is refused (MinorReleaseResumeFailedError,
+ * exit 66, fail closed: this code cannot serve with its migrations unapplied); a --force start goes on (review B of #240:
+ * the migrations apply and it serves degraded, exit 70, every row forced; the blocked workspace stays 503). With nothing
+ * pending it serves degraded (exit 70). A degraded start does not record the patch's own step. A .0 command left with its
+ * migrations step incomplete refuses 65 ("Nothing was applied") unless --force: the hotfix case (a .0 migration failed and
+ * the patch ships the fix) therefore needs --force when the .0 has instance commands, because the .0's commands must not
+ * run on a schema whose .0 migrations are not all applied, and the patch can only apply them together with its own. Two documented exceptions run the .0's
  * commands AFTER every migration (afterApply): a start with no instance row yet (fresh install, or an unchecked local / test
  * history: nothing of the .0 has run) and that --force start (logged as a WARNING).
  * The workspace pass walks each workspace's sequence from its cursor, so a failed .0 WORKSPACE step runs again the same way
@@ -87,7 +91,12 @@ import { cursorHasCompleted, listReadyWorkspaces, WorkspaceCommandRunner, Worksp
  * default 'migrationFailed'); the patch's migrations are NOT applied and the failed attempt is recorded. The next start retries.
  */
 export class MinorReleaseResumeFailedError extends Error {
-  constructor(message: string) {
+  constructor(
+    message: string,
+    /** The .0 step that failed again (a step name, never a message) and the attempt recorded for it. */
+    readonly step: string,
+    readonly attempt: number | null,
+  ) {
     super(message);
     this.name = 'MinorReleaseResumeFailedError';
   }
@@ -275,10 +284,10 @@ export class UpgradeRun {
 
   /**
    * The ORDER INVARIANT of a patch start (see the header): the minor .0's incomplete instance commands run now, before any
-   * migration of this start, and only on the .0's own schema (its migrations step completed). Throws before anything is
-   * applied: UpgradeVersionTooOldError (65) when the .0's migrations step is not completed (unless --force: then they run in
+   * migration of this start, and only when the .0's migrations step is completed. Throws before anything is applied:
+   * UpgradeVersionTooOldError (65) when the .0's migrations step is not completed (unless --force: then they run in
    * afterApply, after every migration, with a WARNING); MinorReleaseResumeFailedError (66) when a command fails again while
-   * migrations are pending.
+   * migrations are pending, unless --force (review B: then the migrations apply and the start serves degraded, 70).
    */
   private async resumeMinorBeforeMigrations(session: UpgradeSession, minor: string, pendingMigrations: readonly string[]): Promise<void> {
     const { codeVersion, force, log } = this.options;
@@ -292,7 +301,7 @@ export class UpgradeRun {
     if (!migrationsDone) {
       if (!force) {
         throw new UpgradeVersionTooOldError(
-          `${codeVersion} must re-run ${minor}'s incomplete command(s) ${incomplete.join(', ')} on ${minor}'s schema, before its own migrations, but ${migrationsStepName(minor)} is not completed, so migrations of ${minor} may still be pending. Start ${minor} again first, or run the manual command \`upgrade --force\` (not recommended: the commands then run after every migration). Nothing was applied.`,
+          `${codeVersion} must re-run ${minor}'s incomplete command(s) ${incomplete.join(', ')} before any of its own migrations, but ${migrationsStepName(minor)} is not completed, so migrations of ${minor} may still be pending. Start ${minor} again first, or run the manual command \`upgrade --force\` (not recommended: the commands then run after every migration). Nothing was applied.`,
         );
       }
       log(`WARNING: upgrade --force: ${migrationsStepName(minor)} is not completed, so ${minor}'s command(s) ${incomplete.join(', ')} run AFTER every migration of this start (not before ${codeVersion}'s own)`);
@@ -302,8 +311,18 @@ export class UpgradeRun {
     const ok = await this.runInstanceSteps(session, minor);
     this.minorResumed = ok ? 'ok' : 'failed';
     if (!ok && pendingMigrations.length) {
+      const failed = this.report.recorded.filter((r) => r.status === 'failed').slice(-1)[0];
+      const step = this.report.commandFailure?.name ?? failed?.name ?? minor;
+      if (force) {
+        log(
+          `WARNING: upgrade --force: ${step} failed again (attempt ${failed?.attempt ?? '?'}); applying ${codeVersion}'s ${pendingMigrations.length} pending migration(s) anyway. The start serves degraded (exit 70), every row is marked forced, and the workspaces that step blocked stay blocked (503).`,
+        );
+        return;
+      }
       throw new MinorReleaseResumeFailedError(
-        `${minor}'s command ${this.report.commandFailure?.name ?? ''} failed again (recorded); ${codeVersion}'s ${pendingMigrations.length} pending migration(s) were NOT applied, so this image cannot serve. Fix the cause and start again.`,
+        `${step} failed again (attempt ${failed?.attempt ?? '?'}, recorded) before any migration of this start; ${codeVersion}'s ${pendingMigrations.length} pending migration(s) were NOT applied, so this image cannot serve. Fix the cause and start again, run the manual command \`upgrade --force\` (serves degraded; the blocked workspaces stay 503), or redeploy the ${minor} image.`,
+        step,
+        failed?.attempt ?? null,
       );
     }
   }
