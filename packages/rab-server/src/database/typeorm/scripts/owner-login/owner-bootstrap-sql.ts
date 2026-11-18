@@ -1,6 +1,6 @@
 /**
  * DB setup like Twenty (DB-SETUP-PLAN §3): the bootstrap SQL, VERBATIM. Run only by the bootstrap child
- * (bootstrap-owner-login.ts), connected as the database ADMIN named in PG_DATABASE_URL. Fixed text only: no identifier or
+ * (bootstrap-owner-login.ts), connected as the database ADMIN named in PG_ADMIN_URL. Fixed text only: no identifier or
  * value from input reaches a statement's text. The two inputs travel as BIND PARAMETERS of OWNER_BOOTSTRAP_Q4B_SET_INPUTS
  * (the SCRAM verifier — never the password — and whether the password must be set); inside the DO block the database
  * name reaches the EXECUTEd GRANT through %I and the verifier through %L.
@@ -133,6 +133,17 @@ export const OWNER_BOOTSTRAP_Q4A_LOCK = `SELECT pg_catalog.pg_advisory_xact_lock
 export const OWNER_BOOTSTRAP_Q4B_SET_INPUTS = `SELECT pg_catalog.set_config('crewflow_bootstrap.verifier', $1, true),
        pg_catalog.set_config('crewflow_bootstrap.need_password', $2, true);`;
 
+/**
+ * Q4b2 (lead review of PR #226's own-login script, 2026-11-17): `createrole_self_grant` (PostgreSQL 16+, user-settable) makes
+ * a NON-superuser CREATEROLE login that runs CREATE ROLE also grant ITSELF the new role with the listed options; a provider
+ * that defaults it to `set, inherit` would let the admin login act as crewflow_owner (SET ROLE, or inherit its privileges).
+ * Pinned to the empty string (no self-grant, the PostgreSQL default) for this transaction only, before Q4c's CREATE ROLE.
+ * The creator still gets the ADMIN OPTION PostgreSQL 16 always records for a non-superuser creator (needed for the A4
+ * password reset), never INHERIT or SET. The boot posture check (owner-login posture shape) refuses an inheriting admin
+ * membership as well: this keeps db-setup from creating one. Fixed text, no input.
+ */
+export const OWNER_BOOTSTRAP_Q4B2_NO_SELF_GRANT = `SELECT pg_catalog.set_config('createrole_self_grant', '', true);`;
+
 /** Q4c (REVISED, security re-review N3: the verifier shape check before CREATE / ALTER ROLE). */
 export const OWNER_BOOTSTRAP_Q4C_DO = `DO $bootstrap$
 DECLARE
@@ -209,6 +220,7 @@ export const OWNER_BOOTSTRAP_ADMIN_STATEMENTS = [
   OWNER_BOOTSTRAP_BEGIN,
   OWNER_BOOTSTRAP_Q4A_LOCK,
   OWNER_BOOTSTRAP_Q4B_SET_INPUTS,
+  OWNER_BOOTSTRAP_Q4B2_NO_SELF_GRANT,
   OWNER_BOOTSTRAP_Q4C_DO,
   OWNER_BOOTSTRAP_Q4D_REVERIFY,
   OWNER_BOOTSTRAP_COMMIT,

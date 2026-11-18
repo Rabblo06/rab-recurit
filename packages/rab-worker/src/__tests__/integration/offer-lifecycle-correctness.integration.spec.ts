@@ -10,7 +10,6 @@ import { AuditService } from '@rab/server/engine/core-modules/audit/audit.servic
 import { EnvironmentService } from '@rab/server/engine/core-modules/environment/environment.service';
 import { RealtimeEventService } from '@rab/server/engine/core-modules/realtime/realtime-event.service';
 import { PasswordHashingService } from '@rab/server/engine/core-modules/auth/services/password-hashing.service';
-import { AuthContext } from '@rab/server/engine/core-modules/tenant/auth-context.interface';
 import { TenantContextService } from '@rab/server/engine/core-modules/tenant/tenant-context.service';
 import { Organisation } from '@rab/server/modules/identity/entities/index';
 import { NotificationService } from '@rab/server/modules/notification/services/notification.service';
@@ -26,7 +25,7 @@ import { Venue } from '@rab/server/modules/venue/entities/venue.entity';
 import { runOfferExpiryCycle } from '../../queues/rab-offers/offer-expiry.job';
 import { runReplacementStaffCycle } from '../../queues/rab-offers/replacement-staff.job';
 import { createAdminDataSource } from './helpers/admin-datasource';
-import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
+import { OrgBoundContext, TestIdentity, TestIdentityFactory } from './helpers/test-identities';
 import { integrationTestDatabaseReady } from '@rab/server/database/typeorm/core/integration-test-database-gate';
 import { businessSchema, businessTable } from './helpers/hws-fixtures';
 
@@ -64,11 +63,11 @@ describeIfDb('offer lifecycle correctness (integration)', () => {
     jobRoleId: string;
   }
 
-  function ctxOf(identity: Pick<TestIdentity, 'organisationId' | 'workspaceId' | 'userId'>): AuthContext {
+  function ctxOf(identity: Pick<TestIdentity, 'organisationId' | 'workspaceId' | 'userId'>): OrgBoundContext {
     return { organisationId: identity.organisationId, workspaceId: identity.workspaceId, userId: identity.userId, role: 'manager' };
   }
 
-  function staffCtxOf(fx: Fixture, staff: TestIdentity): AuthContext {
+  function staffCtxOf(fx: Fixture, staff: TestIdentity): OrgBoundContext {
     return { organisationId: fx.organisation.id, workspaceId: fx.managerA.workspaceId, userId: staff.userId, role: 'staff' };
   }
 
@@ -383,7 +382,7 @@ describeIfDb('offer lifecycle correctness (integration)', () => {
       const shift = await seedOpenShift(fx);
       const offer = await sendOfferAndBackdate(fx, shift.id, staff.profileId!, new Date(Date.now() - 2_000));
 
-      const results = await raceAndReport([
+      const results = await raceAndReport<unknown>([
         () => offerService.staffAccept(staffCtxOf(fx, staff), offer.id),
         () => runOfferExpiryCycle(adminDataSource, tenantContext, notificationService, auditService),
       ]);
@@ -401,7 +400,7 @@ describeIfDb('offer lifecycle correctness (integration)', () => {
       const shift = await seedOpenShift(fx);
       const offer = await sendOfferAndBackdate(fx, shift.id, staff.profileId!, new Date(Date.now() - 2_000));
 
-      await raceAndReport([
+      await raceAndReport<unknown>([
         () => offerService.decline(staffCtxOf(fx, staff), offer.id, {}),
         () => runOfferExpiryCycle(adminDataSource, tenantContext, notificationService, auditService),
       ]);

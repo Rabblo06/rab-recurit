@@ -8,6 +8,7 @@
  */
 import type { WorkspaceStructureDeclaration, WorkspaceUpgradeCommand } from './upgrade-commands/workspace-upgrade-command';
 import { WORKSPACE_UPGRADE_COMMANDS } from './upgrade-commands/registry';
+import { assertRegistryKeys, registryKeyRelease } from './upgrade-registry-key';
 import { compareVersions } from './upgrade-version';
 import { LATEST_WORKSPACE_MODULE_VERSION } from '../../../database/typeorm/workspace-schema/workspace-schema-modules';
 
@@ -19,15 +20,14 @@ export interface StructuralCommand {
   structure: WorkspaceStructureDeclaration;
 }
 
-const keyVersion = (key: string) => {
-  const m = /^(\d+)-(\d+)$/.exec(key);
-  if (!m) throw new Error(`workspace upgrade registry key ${JSON.stringify(key)} is not <major>-<minor>`);
-  return `${m[1]}.${m[2]}.0`;
-};
-
-/** Every structural command of the registry in release then timestamp order; levels validated (21, 22, … with no gap). */
+/**
+ * Every structural command of the registry in release then timestamp order; levels validated (21, 22, … with no gap). The
+ * keys are checked first, every one (a sort comparator never sees a lone key): only a minor release owns commands, so a
+ * patch key is a PatchReleaseCommandsError and a patch release can never add a structure level.
+ */
 export function structuralCommands(registry: WorkspaceRegistryInput = WORKSPACE_UPGRADE_COMMANDS): StructuralCommand[] {
-  const keys = Object.keys(registry).sort((a, b) => compareVersions(keyVersion(a), keyVersion(b)));
+  assertRegistryKeys(registry);
+  const keys = Object.keys(registry).sort((a, b) => compareVersions(registryKeyRelease(a), registryKeyRelease(b)));
   const out: StructuralCommand[] = [];
   let level = LATEST_WORKSPACE_MODULE_VERSION;
   for (const key of keys) {

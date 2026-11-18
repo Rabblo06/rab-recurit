@@ -6,6 +6,7 @@ import { DataSource, EntityManager } from 'typeorm';
 
 import { ApplicationTarget } from '@rab/server/engine/core-modules/auth/application-access';
 import { PasswordHashingService } from '@rab/server/engine/core-modules/auth/services/password-hashing.service';
+import { AuthContext } from '@rab/server/engine/core-modules/tenant/auth-context.interface';
 import { businessTables } from '@rab/server/engine/core-modules/tenant/business-tables';
 import { TenantContextService } from '@rab/server/engine/core-modules/tenant/tenant-context.service';
 import { Organisation, Permission, Role, RolePermission, User, UserRole } from '@rab/server/modules/identity/entities/index';
@@ -73,6 +74,9 @@ export class TestSetupError extends Error {
     this.name = 'TestSetupError';
   }
 }
+
+/** AuthContext with a non-null organisationId: what fixture contexts always carry, and what a spec's `withContext` binds. */
+export type OrgBoundContext = AuthContext & { organisationId: string };
 
 export type TestIdentityKind = 'internal_manager' | 'ceo' | 'venue_manager' | 'staff' | 'org_admin';
 

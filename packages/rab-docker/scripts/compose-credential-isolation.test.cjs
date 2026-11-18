@@ -223,20 +223,25 @@ test('DENIAL (security review L2-2): only db mounts the data volume; only db-set
   }
 });
 
-test('DENIAL (security review L2-3, L4): dev/QA db-setup URL interpolating PG_DATABASE_URL or not on host db; a file naming PG_DATABASE_PASSWORD', () => {
-  const services = (url) => ({ 'db-setup': { environment: { PG_DATABASE_URL: url } } });
-  const raw = (url) => ({ services: { 'db-setup': { environment: { PG_DATABASE_URL: url } }, db: { environment: { POSTGRES_PASSWORD: '${CREWFLOW_DEV_DB_PASSWORD:?hex}' } } } });
+test('DENIAL (security review L2-3, L4): dev/QA db-setup admin URL interpolating PG_ADMIN_URL / PG_DATABASE_URL or not on host db; a PG_DATABASE_URL on db-setup; a file interpolating PG_DATABASE_PASSWORD', () => {
+  const services = (url) => ({ 'db-setup': { environment: { PG_ADMIN_URL: url } } });
+  const raw = (url) => ({ services: { 'db-setup': { environment: { PG_ADMIN_URL: url } }, db: { environment: { POSTGRES_PASSWORD: '${CREWFLOW_DEV_DB_PASSWORD:?hex}' } } } });
   const good = 'postgresql://postgres:${CREWFLOW_DEV_DB_PASSWORD:?hex}@db:5432/crewflow?sslmode=verify-full';
   const rendered = 'postgresql://postgres:x@db:5432/crewflow';
   assert.deepEqual(failedLabels(isolation.nonProductionDbSetupChecks('dev.yml', services(rendered), raw(good))), []);
-  refusedBy(isolation.nonProductionDbSetupChecks('dev.yml', services(rendered), raw('${PG_DATABASE_URL:-postgresql://postgres:x@db:5432/crewflow}')), /db-setup's PG_DATABASE_URL is pinned/);
+  for (const v of ['${PG_ADMIN_URL:-postgresql://postgres:x@db:5432/crewflow}', '${PG_DATABASE_URL:-postgresql://postgres:x@db:5432/crewflow}']) {
+    refusedBy(isolation.nonProductionDbSetupChecks('dev.yml', services(rendered), raw(v)), /db-setup's PG_ADMIN_URL is pinned/);
+  }
+  const withAppUrl = raw(good);
+  withAppUrl.services['db-setup'].environment.PG_DATABASE_URL = '';
+  refusedBy(isolation.nonProductionDbSetupChecks('dev.yml', services(rendered), withAppUrl), /db-setup has no PG_DATABASE_URL/);
   for (const host of ['devdb', 'rab-devdb', 'db.example.com', '127.0.0.1']) {
     refusedBy(isolation.nonProductionDbSetupChecks('dev.yml', services(`postgresql://postgres:x@${host}:5432/rab`), raw(good)), /host is exactly db/);
   }
   refusedBy(isolation.nonProductionDbSetupChecks('dev.yml', services('not a url'), raw(good)), /host is exactly db/);
   const named = raw(good);
   named.services.db.environment.POSTGRES_PASSWORD = '${PG_DATABASE_PASSWORD:?x}';
-  refusedBy(isolation.nonProductionDbSetupChecks('dev.yml', services(rendered), named), /never names PG_DATABASE_PASSWORD/);
+  refusedBy(isolation.nonProductionDbSetupChecks('dev.yml', services(rendered), named), /never interpolates PG_DATABASE_PASSWORD/);
 });
 
 test("DENIAL (security review L2-4): the committed db text must equal production's (after $$ -> $ and the password variable)", () => {

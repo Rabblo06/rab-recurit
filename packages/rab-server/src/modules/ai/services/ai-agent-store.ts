@@ -180,6 +180,7 @@ export function mapAgentWriteError(error: unknown): unknown {
       if (driver.constraint?.startsWith('ai_agent_trigger_')) return new AiAgentInvalidException('trigger');
       return new AiAgentContentRefusedException(['length']);
     case '23503':
+    case '23001': // PostgreSQL 18 reports a RESTRICT key as restrict_violation (database/postgres/sqlstate.ts).
       // The composite role FK refused a role that is not an agent role of this workspace (the service checks first).
       return new AiAgentInvalidException('roleId');
     case '42501':

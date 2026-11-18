@@ -85,9 +85,12 @@ export default function CommandPalette({ open, onClose, onOpenSearch, onOpenTime
     { id: 'import',        label: 'Import Data',              section: 'Admin', Icon: IconFileImport,     run: () => go('/settings') },
     { id: 'export',        label: 'Export View',              section: 'Admin', Icon: IconFileExport,     run: () => go('/settings') },
     { id: 'deleted',       label: 'See Deleted Records',      section: 'Admin', Icon: IconTrash,          run: () => go('/users') },
-    { id: 'set-account',   label: 'Go to Account Settings',   section: 'Admin', Icon: IconUser,           run: () => go('/settings#account') },
-    { id: 'set-general',   label: 'Go to General Settings',   section: 'Admin', Icon: IconSettings,       run: () => go('/settings#general') },
-    { id: 'set-roles',     label: 'Go to Role/Permission Settings', section: 'Admin', Icon: IconShieldLock, run: () => go('/settings#roles') },
+    // Real settings routes (App.tsx). A `/settings#…` fragment is ignored by the router and lands on Profile.
+    // "General" is the page Settings → Workspace → General opens (SettingsSidebar), not the read-only org page; roles live
+    // on Settings → Workspace → Members → Roles (the sidebar links nothing to the standalone roles route).
+    { id: 'set-account',   label: 'Go to Account Settings',   section: 'Admin', Icon: IconUser,           run: () => go('/settings/account') },
+    { id: 'set-general',   label: 'Go to General Settings',   section: 'Admin', Icon: IconSettings,       run: () => go('/settings/my-workspace') },
+    { id: 'set-roles',     label: 'Go to Role/Permission Settings', section: 'Admin', Icon: IconShieldLock, run: () => go('/settings/workspace/members?tab=roles') },
   // eslint-disable-next-line react-hooks/exhaustive-deps
   ], [onClose, onOpenSearch, onOpenTimeline, onAskAi]);
 

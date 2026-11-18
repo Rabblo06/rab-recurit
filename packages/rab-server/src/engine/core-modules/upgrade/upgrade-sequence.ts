@@ -6,12 +6,14 @@
  * INSTANCE step of X has a completed latest attempt, and, when X has workspace commands, every provisioned workspace's latest
  * attempt of X's last workspace command is completed. Step names follow Twenty's `<version>_<Class>_<timestamp>`
  * (`upgrade-command-registry.service.ts:209-215`); the TypeORM migrations of a version are one step,
- * `<version>_TypeOrmMigrations`. Pure.
+ * `<version>_TypeOrmMigrations`. A patch release (e.g. 0.6.1) has that one step only: commands belong to the minor release.
+ * Pure.
  */
 import type { UpgradeCommand } from './upgrade-commands/upgrade-command';
 import type { WorkspaceUpgradeCommand } from './upgrade-commands/workspace-upgrade-command';
 import { UPGRADE_COMMANDS, WORKSPACE_UPGRADE_COMMANDS } from './upgrade-commands/registry';
-import { compareVersions, majorMinorKey, parseVersion } from './upgrade-version';
+import { assertRegistryKeys } from './upgrade-registry-key';
+import { compareVersions, isPatchRelease, majorMinorKey, parseVersion } from './upgrade-version';
 
 export const MIGRATIONS_STEP = 'TypeOrmMigrations';
 export const STEP_NAME_PATTERN = /^(0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})\.(0|[1-9][0-9]{0,3})_[A-Za-z][A-Za-z0-9]{0,150}(_[0-9]{13})?$/;
@@ -32,13 +34,25 @@ export function commandStepName(version: string, command: Pick<UpgradeCommand, '
   return `${version}_${command.name}_${command.timestamp}`;
 }
 
-export function commandsForVersion(version: string, registry: InstanceRegistry = UPGRADE_COMMANDS): UpgradeCommand[] {
-  return [...(registry[majorMinorKey(version)] ?? [])].sort((a, b) => a.timestamp - b.timestamp);
+/**
+ * The `M-m` bundle a version owns. Only the minor release `M.m.0` owns it: a PATCH release (`M.m.p`, p > 0) owns nothing, so
+ * it never re-lists its minor's commands under its own prefix (re-listed structural commands would claim levels already
+ * taken and every start would refuse). The registry keys are checked first (upgrade-registry-key.ts, typed errors), and the
+ * version's shape too (AppVersionError).
+ */
+function bundleOf<T>(version: string, registry: Readonly<Record<string, readonly T[]>>): readonly T[] {
+  assertRegistryKeys(registry);
+  if (isPatchRelease(version)) return [];
+  return registry[majorMinorKey(version)] ?? [];
 }
 
-/** Part D: the workspace commands of a version, by timestamp. */
+export function commandsForVersion(version: string, registry: InstanceRegistry = UPGRADE_COMMANDS): UpgradeCommand[] {
+  return [...bundleOf(version, registry)].sort((a, b) => a.timestamp - b.timestamp);
+}
+
+/** Part D: the workspace commands of a version, by timestamp (none for a patch release). */
 export function workspaceCommandsForVersion(version: string, registry: WorkspaceRegistry = WORKSPACE_UPGRADE_COMMANDS): WorkspaceUpgradeCommand[] {
-  return [...(registry[majorMinorKey(version)] ?? [])].sort((a, b) => a.timestamp - b.timestamp);
+  return [...bundleOf(version, registry)].sort((a, b) => a.timestamp - b.timestamp);
 }
 
 /** The instance steps of a version (Part B): migrations, then the instance commands. */

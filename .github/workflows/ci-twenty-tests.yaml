@@ -12,6 +12,8 @@ on:
       - 'packages/rab-server/**'
       - 'packages/rab-worker/**'
       - 'packages/rab-shared/**'
+      # rab-server imports @rab/emails; the job builds it before the server.
+      - 'packages/rab-emails/**'
       - '.github/workflows/ci-twenty-tests.yaml'
   workflow_dispatch:
 
@@ -119,6 +121,35 @@ jobs:
             --json "--outputFile=${RUNNER_TEMP}/x22-pg${{ matrix.pg }}.json"
           # Prove it ran (not skipped): at least one passed, none failed.
           node -e 'const r=require(process.argv[1]);const t=r.testResults[0];const n=(s)=>t?t.assertionResults.filter((a)=>a.status===s).length:0;console.log(`ops-owner-login (PG${process.argv[2]}): passed=${n("passed")} failed=${n("failed")}`);process.exit(!t||n("passed")===0||n("failed")>0||n("pending")>0?1:0)' "${RUNNER_TEMP}/x22-pg${{ matrix.pg }}.json" "${{ matrix.pg }}"
+      # PR #227 (security review L3): the suites that broke, or would break, on a PostgreSQL major other than 16, on every
+      # supported major. Before #227 the Worker's in-process provisioner compared new workspaces with the PostgreSQL 16
+      # fingerprints (FAILED on 17 / 18), and PostgreSQL 18 reports RESTRICT foreign keys as 23001. ci-server / ci-worker run
+      # these on 16 only. Four files, in band; each must run and pass (a renamed file fails the step, never a silent skip).
+      - name: PostgreSQL-major regressions (provisioning, payroll evidence, invite cleanup) on PostgreSQL ${{ matrix.pg }}
+        if: success() || failure()
+        run: |
+          set -euo pipefail
+          set -a; source "${RUNNER_TEMP}/test-database.env"; set +a
+          eval "$(node packages/rab-server/src/database/typeorm/scripts/twenty-test-env.cjs "$OWNER_DB" --source bootstrap)"
+          unset TWENTY_MODE_TESTS CREWFLOW_OWNER_BOOTSTRAP_PASSWORD CREWFLOW_WORKER_BOOTSTRAP_PASSWORD CREWFLOW_APP_BOOTSTRAP_PASSWORD CREWFLOW_BOOTSTRAP_PASSWORD
+          status=0
+          npx jest -c packages/rab-server/jest.config.ts --runInBand --testTimeout=180000             packages/rab-server/src/__tests__/integration/payroll-evidence-restrict.integration.spec.ts             --json "--outputFile=${RUNNER_TEMP}/majors-server-pg${{ matrix.pg }}.json" || status=$?
+          EMAIL_DRIVER=LOGGER WORKER_SCHEDULER=bullmq npx jest -c packages/rab-worker/jest.config.ts --runInBand --testTimeout=180000             packages/rab-worker/src/__tests__/integration/workspace-provisioning-owner-login.integration.spec.ts             packages/rab-worker/src/__tests__/integration/workspace-provisioning.integration.spec.ts             packages/rab-worker/src/__tests__/integration/account-invite-cleanup.integration.spec.ts             --json "--outputFile=${RUNNER_TEMP}/majors-worker-pg${{ matrix.pg }}.json" || status=$?
+          node -e '
+            const fs = require("fs"); let bad = 0, files = 0;
+            for (const f of process.argv.slice(1)) {
+              if (!fs.existsSync(f)) { console.error(`no jest result: ${f}`); bad = 1; continue; }
+              for (const t of JSON.parse(fs.readFileSync(f, "utf8")).testResults) {
+                files += 1;
+                const n = (s) => t.assertionResults.filter((a) => a.status === s).length;
+                const name = t.name.split(/[\\/]/).pop();
+                console.log(`${name}: passed=${n("passed")} failed=${n("failed")} pending=${n("pending")}`);
+                if (n("passed") === 0 || n("failed") > 0 || t.status !== "passed") bad = 1;
+              }
+            }
+            if (files !== 4) { console.error(`expected 4 spec files, ran ${files}`); bad = 1; }
+            process.exit(bad);' "${RUNNER_TEMP}/majors-server-pg${{ matrix.pg }}.json" "${RUNNER_TEMP}/majors-worker-pg${{ matrix.pg }}.json" || status=1
+          exit $status
       - name: Lifecycle scenarios (owner login, the real migrate child; transition is covered by ci-migration-security owner-login)
         if: success() || failure()
         run: |

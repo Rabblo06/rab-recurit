@@ -5,7 +5,7 @@
  * (read-only), the H1/N1/N2 refusals, and log hygiene). The Twenty Helm model (OWNER-DB-FINAL.md Part A): a random stored
  * password, never derived from APP_SECRET. Disposable loopback
  * PostgreSQL ONLY (crewflow.disposable_cluster=on). It spawns the REAL child (bootstrap-owner-login, dist when built, else
- * the source through ts-node) as a separate process with only PG_DATABASE_URL (no APP_SECRET), and asserts the database state
+ * the source through ts-node) as a separate process with only its one database URL (no APP_SECRET), and asserts the database state
  * read as the cluster superuser, never the exit code alone.
  *
  *   MIGRATION_SECURITY_ADMIN_URL=<superuser of a DISPOSABLE loopback cluster> \
@@ -13,7 +13,7 @@
  *     ts-node --transpile-only -P packages/rab-server/tsconfig.app.json \
  *       packages/rab-server/src/database/typeorm/scripts/owner-login/bootstrap-owner-login-check.ts [--source] [--report <file.json>]
  *
- * On a PostgreSQL 15 cluster it runs only B4(c) ("PostgreSQL 16 or later is required"); on 16+ every other scenario.
+ * On a PostgreSQL 15 cluster it runs only B4(c) ("PostgreSQL 15 is not supported; use 16-18"); on 16+ every other scenario.
  * crewflow_owner is CLUSTER-wide, so scenarios run one after another and each starts from no crewflow_owner. The harness
  * refuses a cluster that already has a crewflow_owner it did not create.
  *
@@ -32,7 +32,7 @@ import { DB_SETUP_LOCK_MESSAGES, dbSetupLockPath } from '../../../owner-login/db
 import { type DbTarget } from '../../../owner-login/db-target';
 import { readDbTargetFile, writeDbTargetFile } from '../../../owner-login/db-target-file';
 
-import { buildRuntimeDatabaseUrl, scramSha256Verifier } from '../../../owner-login/owner-credential';
+import { buildRuntimeDatabaseUrl, DB_SETUP_INPUT_MESSAGES, scramSha256Verifier } from '../../../owner-login/owner-credential';
 import { ownerPasswordFilePath, ownerPasswordNextFilePath, readOwnerPasswordFile, writeOwnerPasswordFile } from '../../../owner-login/owner-password-file';
 import { createPgClientForUrl, resolvePgEnvironment } from '../../../postgres';
 import { DERIVE_EXIT, runDeriveRuntimeUrl } from './derive-runtime-url';
@@ -210,9 +210,23 @@ interface ChildRun {
 
 let ENTRY = existsSync(DIST_ENTRY) ? DIST_ENTRY : SOURCE_ENTRY;
 
-function runChild(databaseUrl: string, extraEnv: Record<string, string> = {}): Promise<ChildRun> {
+/**
+ * PG_ADMIN_URL (owner decision 2026-11-17): db-setup's two inputs. A URL whose login is crewflow_owner is the pass-through
+ * PG_DATABASE_URL; any other login is the admin, PG_ADMIN_URL. `asVariable` overrides the choice (the refusal scenarios).
+ */
+function inputVariable(databaseUrl: string): 'PG_ADMIN_URL' | 'PG_DATABASE_URL' {
+  let login = '';
+  try {
+    login = decodeURIComponent(new URL(databaseUrl).username);
+  } catch {
+    login = '';
+  }
+  return login === OWNER ? 'PG_DATABASE_URL' : 'PG_ADMIN_URL';
+}
+
+function runChild(databaseUrl: string, extraEnv: Record<string, string> = {}, asVariable?: 'PG_ADMIN_URL' | 'PG_DATABASE_URL'): Promise<ChildRun> {
   // No APP_SECRET: db-setup does not receive it (Part A).
-  const env: Record<string, string> = { PG_DATABASE_URL: databaseUrl, NODE_ENV: 'test', CREWFLOW_DB_TARGET_FILE: TARGET_FILE, ...extraEnv };
+  const env: Record<string, string> = { [asVariable ?? inputVariable(databaseUrl)]: databaseUrl, NODE_ENV: 'test', CREWFLOW_DB_TARGET_FILE: TARGET_FILE, ...extraEnv };
   for (const k of ['PATH', 'Path', 'SystemRoot', 'SYSTEMROOT', 'TEMP', 'TMP', 'HOME', 'USERPROFILE']) if (process.env[k]) env[k] = process.env[k]!;
   const argv = ENTRY.endsWith('.ts') ? [require.resolve('ts-node/dist/bin.js'), '--transpile-only', '-P', TSCONFIG_APP, ENTRY] : [ENTRY];
   return new Promise((done) => {
@@ -680,6 +694,48 @@ const SCENARIOS: Scenario[] = [
     },
   },
   {
+    id: 'admin-createrole-self-grant',
+    covers:
+      'PG_ADMIN_URL review (PR #226 input): a NOSUPERUSER CREATEROLE admin whose createrole_self_grant default is "set, inherit" creates crewflow_owner WITHOUT a SET or INHERIT membership in it (only the ADMIN OPTION PostgreSQL 16+ records for the creator)',
+    async run(ctx) {
+      const adm = await createAdminRole(ctx, 'selfgrant', 'LOGIN NOSUPERUSER CREATEROLE');
+      // The provider-style default: every CREATE ROLE by this login would grant the new role to it with SET and INHERIT.
+      await sql(ctx.admin, 'postgres', `ALTER ROLE ${ident(adm.name)} SET createrole_self_grant = 'set, inherit'`);
+      const db = await createDb(ctx, 'selfgrant', adm.name);
+      const run = await runChild(urlFor(ctx.admin, adm.name, adm.password, db));
+      assertCleanOutput(run);
+      expectResult(run, 0, 'created', 'createrole_self_grant');
+      const rows = await sql(
+        ctx.admin,
+        'postgres',
+        `SELECT m.admin_option, m.inherit_option, m.set_option
+           FROM pg_catalog.pg_auth_members m
+           JOIN pg_catalog.pg_roles r ON r.oid = m.roleid
+           JOIN pg_catalog.pg_roles u ON u.oid = m.member
+          WHERE r.rolname = 'crewflow_owner' AND u.rolname = $1`,
+        [adm.name],
+      );
+      expect(rows.length <= 1, 'createrole_self_grant: more than one membership row');
+      expect(rows.every((r) => r.inherit_option !== true && r.set_option !== true), 'createrole_self_grant: the admin login got SET or INHERIT on crewflow_owner (db-setup must pin createrole_self_grant to empty)');
+      return [`created; the admin's membership in crewflow_owner: ${rows.length ? `admin_option=${rows[0]?.admin_option}, inherit=false, set=false` : 'none'}`];
+    },
+  },
+  {
+    id: 'admin-url-in-pg-database-url',
+    covers:
+      'PG_ADMIN_URL (owner decision 2026-11-17): an admin URL left in PG_DATABASE_URL (its pre-rename meaning) is REFUSED, never reinterpreted: exit 64, the "renamed to PG_ADMIN_URL" message, nothing created, no file',
+    async run(ctx) {
+      const db = await createDb(ctx, 'renamed');
+      const run = await runChild(suUrl(ctx, db), {}, 'PG_DATABASE_URL');
+      assertCleanOutput(run);
+      expectResult(run, 64, 'refused', 'admin URL in PG_DATABASE_URL');
+      expectLine(run, DB_SETUP_INPUT_MESSAGES.appUrlNotOwner, 'admin URL in PG_DATABASE_URL');
+      expect(!(await ownerState(ctx.admin)).exists, 'admin URL in PG_DATABASE_URL: crewflow_owner was created');
+      expect(!existsSync(PASSWORD_FILE), 'admin URL in PG_DATABASE_URL: a password file was stored');
+      return ['exit 64 ("renamed to PG_ADMIN_URL"), nothing created, no file'];
+    },
+  },
+  {
     id: 'admin-url-missing-database',
     covers: 'A3.2: a client admin URL naming a database that does not exist -> refused 64 with a clear message; nothing created (no CREATE DATABASE)',
     async run(ctx) {
@@ -1086,13 +1142,13 @@ const SCENARIOS: Scenario[] = [
 
 const PG15_SCENARIO: Scenario = {
   id: 'postgres-15-refused',
-  covers: 'B4(c): a PostgreSQL 15 server -> "PostgreSQL 16 or later is required."',
+  covers: 'B4(c): a PostgreSQL 15 server -> "PostgreSQL 15 is not supported; use 16-18 (PostgreSQL 16, 17 or 18). Nothing was created. Refusing."',
   async run(ctx) {
     const db = await createDb(ctx, 'pg15');
     const run = await runChild(suUrl(ctx, db));
     assertCleanOutput(run);
     expectResult(run, 64, 'refused', 'PG15');
-    expectLine(run, OWNER_BOOTSTRAP_MESSAGES.pgTooOld, 'PG15');
+    expectLine(run, OWNER_BOOTSTRAP_MESSAGES.unsupportedPostgres(15), 'PG15');
     expect(!(await ownerState(ctx.admin)).exists, 'PG15: crewflow_owner was created');
     return ['exit 64, fixed message, nothing created'];
   },

@@ -214,6 +214,9 @@ export const AuditAction = {
   // assertions) resolves through this pair; `metadata.jobType` disambiguates.
   EMAIL_SENT: 'email.sent',
   EMAIL_DELIVERY_FAILED: 'email.delivery_failed',
+  /** A push delivery attempt ended FAILED (worker push-send processor). `entityType` = 'push_delivery'; metadata is ids, the
+   * error code, the attempt count and whether it was retryable: never the device token or notification content. */
+  PUSH_DELIVERY_FAILED: 'push.delivery_failed',
   /**
    * Phase 0 S-6 (owner decision): a report email (pre-shift roster + Shift QR, final timesheet) was NOT delivered because
    * its recipient was not eligible — the organisation is suspended, or the recipient lost access. Recorded when a queued

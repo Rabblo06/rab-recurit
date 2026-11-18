@@ -24,11 +24,16 @@ yarn install
 
 ## 2. Start PostgreSQL and Redis
 
+**The whole stack in Docker.** `packages/rab-docker/docker-compose.yml` runs production's database setup and lifecycle, built from source: the bundled `db`, the one-shot `db-setup` (creates `crewflow_owner` with a random password kept in a volume), the API (migrates on start), a consume-only Worker, Redis and the hot-reload web console. Put `CREWFLOW_DEV_DB_PASSWORD=<openssl rand -hex 32>` in the git-ignored `packages/rab-docker/.env`, then create the database volume once and start:
+
 ```bash
-docker compose -f packages/rab-docker/docker-compose.yml up -d postgres redis
+docker volume create crewflow_dev_db_data
+docker compose -f packages/rab-docker/docker-compose.yml up -d --build
 ```
 
-The database container creates its roles on first start (`packages/rab-docker/postgres-init/`).
+The database is not published to the host. With this stack you can skip steps 4 and 5.
+
+**Host-native (`yarn start`).** Use your own PostgreSQL 16, 17 or 18 and Redis 7. Create the `crewflow_owner` login once with `packages/rab-docker/postgres-init/owner-login/01-crewflow-owner.sql` (see the repository README, "Database setup").
 
 ## 3. Configure the API
 
@@ -36,7 +41,7 @@ The database container creates its roles on first start (`packages/rab-docker/po
 cp packages/rab-server/.env.example packages/rab-server/.env
 ```
 
-The template documents every variable. At minimum the API needs `PG_DATABASE_URL` (the `crewflow_app` login), `REDIS_URL` and `APP_SECRET`; it refuses to boot if required configuration is missing. See [Environment configuration](/developers/environment-configuration).
+The template documents every variable. At minimum the API needs `PG_DATABASE_URL` (the `crewflow_owner` login), `REDIS_URL` and `APP_SECRET`; it refuses to boot if required configuration is missing. See [Environment configuration](/developers/environment-configuration).
 
 <Warning>
   Never commit a real `.env`. `.env*` files are ignored by Git.
@@ -56,7 +61,7 @@ This applies pending migrations only. It never resets data.
 yarn start
 ```
 
-This starts the API (port 3000) and the web console (Vite, port 5173), then the Worker and the workspace provisioner once the API is healthy.
+This starts the API (port 3000) and the web console (Vite, port 5173), then the Worker (which also provisions workspace schemas, in-process) once the API is listening.
 
 <Tip>
   Open the console at **http://127.0.0.1:5173**. The browser and API must use the same host style (`127.0.0.1` vs `localhost`) or the session cookie will not be sent.
