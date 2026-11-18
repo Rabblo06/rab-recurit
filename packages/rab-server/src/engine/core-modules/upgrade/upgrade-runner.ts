@@ -23,7 +23,7 @@
  * have completed the previous version's last workspace command (Twenty run-instance-commands.command.ts:124-168).
  */
 import type { LedgerAttribution } from '../../../database/typeorm/scripts/migrate/owner-login/release-floor';
-import { UpgradeCommand, UpgradeCommandHost } from './upgrade-commands/upgrade-command';
+import { UpgradeCommand, UpgradeCommandHost, UpgradeCommandResult } from './upgrade-commands/upgrade-command';
 import { createUpgradeCommandHost } from './upgrade-command-host';
 import type { WorkspaceUpgradeCommand } from './upgrade-commands/workspace-upgrade-command';
 import { UPGRADE_COMMANDS, WORKSPACE_UPGRADE_COMMANDS } from './upgrade-commands/registry';
@@ -62,6 +62,11 @@ export interface UpgradeRunReport {
   commandFailure: { name: string; errorName: string; workspaceId?: string } | null;
   /** Part C3: an instance command wrote, kept or lifted a workspace block marker (the resolver cache epoch must be bumped). */
   commandBlockChanged: boolean;
+  /**
+   * Release 0.7.0: instance commands that returned `{ deferred }` this start (step names only). Not recorded in the logbook:
+   * the step stays incomplete and runs again at the next start (upgrade-command.ts UpgradeCommandResult).
+   */
+  deferred: string[];
   /** Part D: the workspace pass (null when it did not run). Workspace ids and step names only, never a message. */
   workspaces: {
     total: number;
@@ -100,7 +105,7 @@ export class UpgradeRun {
   private decision: UpgradeStartDecision | null = null;
 
   constructor(private readonly options: UpgradeRunOptions) {
-    this.report = { codeVersion: options.codeVersion, forced: options.force, decision: null, adoptedFrom: null, recorded: [], commandFailure: null, commandBlockChanged: false, workspaces: null };
+    this.report = { codeVersion: options.codeVersion, forced: options.force, decision: null, adoptedFrom: null, recorded: [], commandFailure: null, commandBlockChanged: false, deferred: [], workspaces: null };
   }
 
   private get registry() {
@@ -205,10 +210,11 @@ export class UpgradeRun {
       const name = commandStepName(codeVersion, command);
       const done = await withUpgradeScope(session, 'upgrade', (q) => isLastAttemptCompleted(q, { name, workspaceId: null }));
       if (done) continue;
+      let result: void | UpgradeCommandResult;
       try {
         if (this.options.testFailCommand && this.options.testFailCommand === command.name) throw Object.assign(new Error('test seam: forced command failure'), { name: 'TestCommandFailure' });
         log(`upgrade command ${name}: running`);
-        await command.run({
+        result = await command.run({
           query: session.query,
           log,
           host: this.options.host ?? createUpgradeCommandHost(),
@@ -224,11 +230,19 @@ export class UpgradeRun {
         log(`ERROR: upgrade command ${name} FAILED (attempt ${attempt}); the schema matches this code, so the API serves with upgradeFailed:true (exit 70). The next start retries it.`);
         return;
       }
+      if (result && typeof result.deferred === 'string') {
+        // Release 0.7.0 (C3 no-op fix; security review L1): NOT recorded, and the release STOPS here: no later instance
+        // command and no workspace pass run, so no later step can be recorded completed and make the version look complete.
+        // The next start runs this step again; the next release's strict previous-version check refuses (65) until it has.
+        this.report.deferred.push(name);
+        log(`WARNING: upgrade command ${name} DEFERRED, not recorded: ${result.deferred.slice(0, 300)}. ${codeVersion} stops here and stays incomplete (no later step runs); the next start runs it again.`);
+        return;
+      }
       const attempt = await withUpgradeScope(session, 'upgrade', (q) => recordUpgradeMigration(q, { name, status: 'completed', executedByVersion: codeVersion, forced: force }));
       this.report.recorded.push({ name, status: 'completed', attempt });
     }
     await this.runWorkspacePass(session);
-    if (!this.report.commandFailure) log(`upgrade logbook: ${codeVersion} complete`);
+    if (!this.report.commandFailure && !this.report.deferred.length) log(`upgrade logbook: ${codeVersion} complete`);
   }
 
   /** Part D: adoption (adoption release) + the code version's workspace commands, per workspace. Never throws for one workspace. */

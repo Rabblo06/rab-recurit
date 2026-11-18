@@ -1,5 +1,9 @@
 import 'reflect-metadata';
+import { randomBytes } from 'node:crypto';
 import { Client } from 'pg';
+
+import { withDatabase } from '../upgrade-ledger/ledger-contract';
+import { Cluster, V060_LAST } from '../upgrade-ledger/ledger-fixtures';
 
 import { integrationTestDatabase, integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
 import { MIGRATION_LOCK_KEY } from '../../database/typeorm/scripts/migrate/migration-lock';
@@ -7,7 +11,7 @@ import { EXPECTED_WORKSPACE_FINGERPRINTS, selectWorkspaceFingerprintsForServer, 
 import { LATEST_WORKSPACE_MODULE_VERSION } from '../../database/typeorm/workspace-schema/workspace-schema-modules';
 import type { WorkspaceUpgradeCommand } from '../../engine/core-modules/upgrade/upgrade-commands/workspace-upgrade-command';
 import { WORKSPACE_UPGRADE_COMMANDS } from '../../engine/core-modules/upgrade/upgrade-commands/registry';
-import { codeWorkspaceStructureLevel, declaredFingerprint } from '../../engine/core-modules/upgrade/workspace-structure-level';
+import { declaredFingerprint } from '../../engine/core-modules/upgrade/workspace-structure-level';
 import { countFailedWorkspaceCursors, upgradeSessionOf, UpgradeSession, withUpgradeScope } from '../../engine/core-modules/upgrade/upgrade-migration.service';
 import { TARGET_EXTRA_STRUCTURE_SQL } from '../../engine/core-modules/upgrade/workspace-step-checks-sql';
 import { SchemaResolverService } from '../../engine/core-modules/tenant/schema-resolver.service';
@@ -42,11 +46,18 @@ const SFX = Math.random().toString(36).replace(/[^a-z]/g, '').slice(0, 6) || 'x'
 const LOCK = MIGRATION_LOCK_KEY.toString();
 const T0 = 1786800000000;
 /** Part D: this code's structure level (21 since StaffProfileMemberSelect) and the probes' level above it. */
-const L = codeWorkspaceStructureLevel();
+/** The structure level this code's real 0.6.0 workspace commands reach (an adopted workspace's level before the probes). */
+const L = Math.max(LATEST_WORKSPACE_MODULE_VERSION, ...(WORKSPACE_UPGRADE_COMMANDS['0-6'] ?? []).map((c) => c.structure?.level ?? 0));
 const P = L + 1;
 /** This code's real 0.6.0 workspace steps: an adopted workspace runs them right after its is_initial row. */
 const REAL = (WORKSPACE_UPGRADE_COMMANDS['0-6'] ?? []).map((c) => `0.6.0_${c.name}_${c.timestamp}`);
+/** The structure level 0.6.0's own workspace commands reach (an adopted 0.6.0 workspace ends there). */
+const L06 = Math.max(LATEST_WORKSPACE_MODULE_VERSION, ...(WORKSPACE_UPGRADE_COMMANDS['0-6'] ?? []).map((c) => c.structure?.level ?? 0));
 /** A test registry ON TOP of this code's real one (the sequence must keep the real steps an adopted cursor points at). */
+/**
+ * The test's commands STAND IN for release 0.7.0's workspace commands (a real 0.7.0 workspace command, e.g. C3 Q3's level 23,
+ * is proven by its own spec): the real releases up to 0.6.0 stay, the keys the test gives replace the real ones.
+ */
 const withReal = (extra: Readonly<Record<string, readonly WorkspaceUpgradeCommand[]>>): Record<string, readonly WorkspaceUpgradeCommand[]> => ({ ...WORKSPACE_UPGRADE_COMMANDS, ...extra });
 
 describeIfDb('Part D workspace command runner (integration)', () => {
@@ -95,7 +106,8 @@ describeIfDb('Part D workspace command runner (integration)', () => {
       log: (l) => lines.push(l),
       expectedFingerprint: (level, major) => (level === P ? level21 : level > 20 ? declaredFingerprint(level, major) : EXPECTED_WORKSPACE_FINGERPRINTS[level]),
       ...o,
-      workspaceRegistry: o.workspaceRegistry ? withReal(o.workspaceRegistry) : undefined,
+      // 0.7.0's real workspace commands are replaced by the test's (none when the case gives none).
+      workspaceRegistry: withReal(o.workspaceRegistry ?? { '0-7': [] }),
     }).run(session);
   const adopt = (ids: string[]) => runner({ codeVersion: '0.6.0', versions: ['0.4.0', '0.5.0'], adopt: true, workspaceIds: ids });
   const cmd = (name: string, i: number, body: Partial<WorkspaceUpgradeCommand>): WorkspaceUpgradeCommand => ({ kind: 'workspace', name, timestamp: T0 + i, ...body });
@@ -106,6 +118,7 @@ describeIfDb('Part D workspace command runner (integration)', () => {
   /** Hex digits of a schema name reversed, so the static scan cannot see the name (the dynamic-SQL abuse cases). */
   const hidden = (ws: SeededWorkspace) => `'workspace_' || reverse('${ws.schema.slice('workspace_'.length).split('').reverse().join('')}')`;
 
+  let instanceBaseline: string[] = [];
   beforeAll(async () => {
     admin = new Client({ connectionString: adminUrl });
     app = new Client({ connectionString: appUrl });
@@ -114,6 +127,9 @@ describeIfDb('Part D workspace command runner (integration)', () => {
     await selectWorkspaceFingerprintsForServer(async (sql) => (await admin.query(sql)).rows);
     await app.query('SELECT pg_advisory_lock($1::bigint)', [LOCK]);
     session = upgradeSessionOf(app);
+    // Release 0.7.0: this CI database was built by a 0.7.0 start, so it already holds real 0.7.0 instance rows. Only the
+    // rows this spec adds are removed afterwards.
+    instanceBaseline = (await admin.query(`SELECT id FROM core.upgrade_migration WHERE workspace_id IS NULL`)).rows.map((r) => String(r.id));
     // The expected structure level P = the frozen template + this code's real structural commands + the probe column (v2),
     // measured on a reference workspace and rolled back.
     const ref = await make('ref');
@@ -134,7 +150,9 @@ describeIfDb('Part D workspace command runner (integration)', () => {
       await admin.query(`UPDATE core.workspace_schema_registry SET status = 'FAILED', module_version = LEAST(module_version, 20) WHERE workspace_id = $1`, [ws.id]).catch(() => undefined);
       await admin.query('DELETE FROM core.manager_workspace WHERE id = $1', [ws.id]).catch(() => undefined);
     }
-    await admin.query(`DELETE FROM core.upgrade_migration WHERE workspace_id IS NULL AND name LIKE '0.7.0_%' AND executed_by_version = '0.7.0'`).catch(() => undefined);
+    await admin
+      .query(`DELETE FROM core.upgrade_migration WHERE workspace_id IS NULL AND name LIKE '0.7.0_%' AND executed_by_version = '0.7.0' AND NOT (id::text = ANY ($1::text[]))`, [instanceBaseline])
+      .catch(() => undefined);
     await app?.end();
     await admin?.end();
   });
@@ -143,37 +161,78 @@ describeIfDb('Part D workspace command runner (integration)', () => {
     expect((await app.query('SELECT current_user::text AS u')).rows[0].u).toBe('crewflow_owner');
   });
 
-  it('adoption (0.6.0): READY workspaces at module 20 get ONE is_initial row; behind / drifted get none; a re-run writes nothing', async () => {
-    const a = await make('ad-a');
-    const b = await make('ad-b');
-    const drift = await make('ad-drift');
-    const legacy = await make('ad-v14', 'v14');
-    await admin.query(`DROP POLICY job_role_tenant ON ${drift.schema}.job_role`);
+  it('adoption (0.6.0), on a database 0.6.0 built: READY workspaces at module 20 get ONE is_initial row; behind / drifted get none; a re-run writes nothing', async () => {
+    // Release 0.7.0: the shared CI database was built by 0.7.0 (its logbook holds 0.7.0 rows, so a 0.6.0 run there is a
+    // rollback). The adoption release is tested where it runs: its own disposable database with every 0.6.0 migration
+    // applied and an empty logbook, i.e. what 0.6.0's migrations step leaves on an R254 / R256 database before its
+    // adoption pass.
+    const cl = new Cluster(appUrl, adminUrl, randomBytes(4).toString('hex'));
+    const db = cl.dbName('runner060');
+    await cl.buildRelease(db, V060_LAST);
+    const adminUrl060 = withDatabase(adminUrl, db);
+    const admin060 = new Client({ connectionString: adminUrl060 });
+    const app060 = new Client({ connectionString: withDatabase(appUrl, db) });
+    await admin060.connect();
+    await app060.connect();
+    try {
+      await app060.query('SELECT pg_advisory_lock($1::bigint)', [LOCK]);
+      const session060 = upgradeSessionOf(app060);
+      const rows060 = async (ws: SeededWorkspace) =>
+        (
+          await admin060.query(
+            `SELECT name, status, attempt, is_initial, forced, executed_by_version FROM core.upgrade_migration WHERE workspace_id = $1 ORDER BY created_at, attempt`,
+            [ws.id],
+          )
+        ).rows;
+      let n = 0;
+      const make060 = async (label: string, provision: 'ts' | 'v14' = 'ts') => {
+        n += 1;
+        const ws = await seedWorkspace(admin060, `dr6-${label}-${SFX}-${n}`);
+        if (provision === 'ts') expect(await provisionTypeScript(adminUrl060, ws, { workspaceRegistry: FROZEN_TEMPLATE_REGISTRY })).toBe('READY');
+        else await provisionLegacyV14(adminUrl060, ws);
+        return ws;
+      };
+      const a = await make060('ad-a');
+      const b = await make060('ad-b');
+      const drift = await make060('ad-drift');
+      const legacy = await make060('ad-v14', 'v14');
+      await admin060.query(`DROP POLICY job_role_tenant ON ${drift.schema}.job_role`);
 
-    // Through UpgradeRun (the migrate child's hooks): the previous-version check, then afterApply's workspace pass.
-    const run = new UpgradeRun({ codeVersion: '0.6.0', force: false, log: (l) => lines.push(l), workspaceRunner: { workspaceIds: [a.id, b.id, drift.id, legacy.id] } });
-    await run.beforeApply(session, { fresh: false, attribution: null, unrestrictedTarget: true });
-    await run.afterApply(session);
-    for (const ws of [a, b]) {
-      expect(await rows(ws)).toEqual([
-        { name: '0.6.0_TypeOrmMigrations', status: 'completed', attempt: 1, is_initial: true, forced: false, executed_by_version: '0.6.0' },
-        // Part D: the adopted cursor is the last INSTANCE step, so this code's real 0.6.0 workspace commands run right after.
-        ...REAL.map((name) => ({ name, status: 'completed', attempt: 1, is_initial: false, forced: false, executed_by_version: '0.6.0' })),
-      ]);
-      expect((await registryOf(admin, ws.id)).module_version).toBe(L);
+      // Through UpgradeRun (the migrate child's hooks): the previous-version check, then afterApply's workspace pass.
+      // The 0.6.0 adoption release, with the previous-versions list it shipped with (0.7.0 appended 0.6.0).
+      // 0.6.0's own registry (this code also knows 0.7.0's workspace commands; 0.6.0 did not).
+      const r06 = { '0-6': [...(WORKSPACE_UPGRADE_COMMANDS['0-6'] ?? [])] };
+      const run = new UpgradeRun({ codeVersion: '0.6.0', previousVersions: ['0.4.0', '0.5.0'], force: false, log: (l) => lines.push(l), workspaceRegistry: r06, workspaceRunner: { workspaceIds: [a.id, b.id, drift.id, legacy.id] } });
+      await run.beforeApply(session060, { fresh: false, attribution: null, unrestrictedTarget: true });
+      await run.afterApply(session060);
+      for (const ws of [a, b]) {
+        expect(await rows060(ws)).toEqual([
+          { name: '0.6.0_TypeOrmMigrations', status: 'completed', attempt: 1, is_initial: true, forced: false, executed_by_version: '0.6.0' },
+          // Part D: the adopted cursor is the last INSTANCE step, so this code's real 0.6.0 workspace commands run right after.
+          ...REAL.map((name) => ({ name, status: 'completed', attempt: 1, is_initial: false, forced: false, executed_by_version: '0.6.0' })),
+        ]);
+        expect((await registryOf(admin060, ws.id)).module_version).toBe(L06);
+      }
+      expect(await rows060(drift)).toEqual([]);
+      expect(await rows060(legacy)).toEqual([]);
+      const failures = Object.fromEntries(run.report.workspaces!.failures.map((f) => [f.workspaceId, f.errorClass]));
+      // eslint-disable-next-line no-console
+      if (run.report.workspaces?.adopted !== 2) console.log(`[adoption-060] ${JSON.stringify({ failures, report: run.report.workspaces, lines: lines.slice(-30) })}`);
+      expect(run.report.workspaces).toMatchObject({ total: 4, adopted: 2 });
+      expect(['VERIFY_FAILED', 'FINGERPRINT_MISMATCH']).toContain(failures[drift.id]);
+      expect(failures[legacy.id]).toBe('BEHIND');
+      expect(run.report.commandFailure).toMatchObject({ name: '0.6.0_WorkspaceAdoption' });
+
+      const again = await new WorkspaceCommandRunner({ codeVersion: '0.6.0', versions: ['0.4.0', '0.5.0'], force: false, adopt: true, log: (l) => lines.push(l), workspaceRegistry: r06, workspaceIds: [a.id, b.id, drift.id] }).run(session060);
+      expect(again.outcomes.find((o) => o.workspaceId === a.id)!.status).toBe('up-to-date');
+      expect((await rows060(a)).length).toBe(1 + REAL.length);
+      expect(again.failures.map((f) => f.workspaceId)).toEqual([drift.id]);
+    } finally {
+      await app060.query('SELECT pg_advisory_unlock_all()').catch(() => undefined);
+      await app060.end();
+      await admin060.end();
+      await cl.dropAll();
     }
-    expect(await rows(drift)).toEqual([]);
-    expect(await rows(legacy)).toEqual([]);
-    expect(run.report.workspaces).toMatchObject({ total: 4, adopted: 2 });
-    const failures = Object.fromEntries(run.report.workspaces!.failures.map((f) => [f.workspaceId, f.errorClass]));
-    expect(['VERIFY_FAILED', 'FINGERPRINT_MISMATCH']).toContain(failures[drift.id]);
-    expect(failures[legacy.id]).toBe('BEHIND');
-    expect(run.report.commandFailure).toMatchObject({ name: '0.6.0_WorkspaceAdoption' });
-
-    const again = await adopt([a.id, b.id, drift.id]);
-    expect(again.outcomes.find((o) => o.workspaceId === a.id)!.status).toBe('up-to-date');
-    expect((await rows(a)).length).toBe(1 + REAL.length);
-    expect(again.failures.map((f) => f.workspaceId)).toEqual([drift.id]);
   });
 
   it('0.7.0: a structural and a data command run once per workspace, ONE row each, level P; a failed workspace does not mark the others', async () => {
@@ -736,7 +795,12 @@ describeIfDb('Part D workspace command runner (integration)', () => {
     let fail = true;
     const registry = withReal({ '0-7': [probeColumn, cmd('Last07', 1, { run: async ({ workspaceId }) => { if (fail && workspaceId === b.id) throw new Error('b not yet'); } })] });
     await runner({ workspaceRegistry: registry, workspaceIds: [a.id, b.id] });
-    await admin.query(`INSERT INTO core.upgrade_migration (name, status, attempt, executed_by_version) VALUES ('0.7.0_TypeOrmMigrations', 'completed', 1, '0.7.0')`);
+    // A 0.7.0-built database already holds these rows (release 0.7.0): kept as they are. On a database built with HWS off the
+    // cutover step is DEFERRED (not recorded), so its completion is seeded here: this case is about workspace steps.
+    await admin.query(`INSERT INTO core.upgrade_migration (name, status, attempt, executed_by_version) VALUES ('0.7.0_TypeOrmMigrations', 'completed', 1, '0.7.0') ON CONFLICT DO NOTHING`);
+    if (!(await admin.query(`SELECT 1 FROM core.upgrade_migration WHERE workspace_id IS NULL AND name = '0.7.0_HwsCutover_1786721540100' AND status = 'completed'`)).rows.length) {
+      await admin.query(`INSERT INTO core.upgrade_migration (name, status, attempt, executed_by_version) VALUES ('0.7.0_HwsCutover_1786721540100', 'completed', 1, '0.7.0') ON CONFLICT DO NOTHING`);
+    }
     const at = (force: boolean) =>
       new UpgradeRun({ codeVersion: '0.8.0', previousVersions: ['0.6.0', '0.7.0'], force, log: (l) => lines.push(l), workspaceRegistry: registry, workspaceRunner: { workspaceIds: [a.id, b.id] } }).beforeApply(session, {
         fresh: false,

@@ -3,10 +3,10 @@ import type { WorkspaceUpgradeCommand } from '../workspace-upgrade-command';
 import { createHwsCutoverCommand } from './hws-cutover';
 
 /**
- * Release 0.7.0's upgrade commands — PROVISIONAL (OWNER-DB-ULTIMATE Part C3). NOT registered in ../registry.ts yet: the
- * release that carries the HWS cutover, the version bump and the activation are the lead's / owner's call, after the owner
- * chooses A′ vs B′ and approves the SQL (SQL-DRAFTS.md "FOR OWNER REVIEW — C3"). Activation = one registry line
- * (`'0-7': UPGRADE_COMMANDS_0_7`) + the root package.json version + CREWFLOW_PREVIOUS_VERSIONS.
+ * Release 0.7.0's upgrade commands (OWNER-DB-ULTIMATE Part C3). Registered in ../registry.ts by the 0.7.0 release PR
+ * ("switch C3 on"; owner decision 2026-11-15: C3 ships in its own release, Q8), together with the root package.json version
+ * 0.7.0, CREWFLOW_PREVIOUS_VERSIONS + 0.6.0 and HWS_RUNTIME_ENABLED=true in the production compose files. The command's SQL
+ * (migration HwsCutoverCopyFunctions1786721540000) was approved by the owner 2026-11-15 (SQL-DRAFTS.md §6).
  */
 export const UPGRADE_COMMANDS_0_7: readonly UpgradeCommand[] = Object.freeze([createHwsCutoverCommand()]);
 
