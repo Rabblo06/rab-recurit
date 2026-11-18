@@ -6,10 +6,20 @@ updates:
   # of staying safe. Dependabot opens a PR (never auto-merges) whenever a
   # pinned action/image has a newer release, keeping the pin fresh without
   # reopening the "arbitrary mutable tag" gap it was meant to close.
+  #
+  # '/' covers .github/workflows; the composite actions under .github/actions/* pin actions too (yarn-install pins
+  # setup-node and cache) and are only scanned when listed. tools/check-action-pins.cjs (ci-security) refuses any
+  # `uses:` that is not a full commit SHA with a `# vX.Y.Z` comment, so a Dependabot PR must keep that shape.
+  # Cooldown: a version-update PR is opened only once a release is 14 days old, so a hijacked or broken release has time
+  # to be noticed and yanked first. Security updates are not delayed by it.
   - package-ecosystem: 'github-actions'
-    directory: '/'
+    directories:
+      - '/'
+      - '/.github/actions/*'
     schedule:
       interval: 'weekly'
+    cooldown:
+      default-days: 14
 
   - package-ecosystem: 'docker'
     directory: '/packages/rab-docker/rab'

@@ -9425,3 +9425,35 @@ Reversal:   Upgrade / `resolutions` override (documented in "//resolutions") as 
   copy with a pause between the two statements): two commits ended at version 1; with the fix, 2. Semantic goldens
   (PG16/17/18): only the `metadata_version_bump()` body hash changes (5f6076df… → ccfd284e…); security-posture golden and
   the restricted-migrator drift review unchanged (a function body is not a privilege line).
+
+## CI supply chain — actions pinned to verified commit SHAs, release via gh, Dependabot covers composite actions (branch ci/actions-pins-sha, 2026-11-18; replaces Dependabot #222, #223, #224; no SQL, no runtime code)
+- **Threat:** *whoever can move a tag or push to an action's repository* (a compromised maintainer, a hijacked release, a
+  fork commit served through the parent's API) → has their code run in our jobs with the job's GITHUB_TOKEN and secrets
+  → for cd-deploy-tag that token held `contents: write` on the whole workflow and was handed to a third-party action
+  (softprops/action-gh-release). A SHA pin only helps if the SHA is a commit of the named repository: dorny/paths-filter
+  was pinned to `15192bc0…`, the annotated **tag object** `v3`, not a commit (it resolved to the v3.0.4 commit
+  `0e4a8c6e…`, which is now the pin; same code).
+- **Control (`tools/check-action-pins.cjs`, ci-security `action-pins`, in the gate's `needs`):** every `uses:` under
+  `.github/workflows/**` and `.github/actions/**` must be `owner/repo[/path]@<40 lowercase hex> # vX.Y.Z`; `./` local
+  actions exempt; `docker://` needs `@sha256:<64 hex>`. Forms the line scanner cannot read (flow mappings, aliases, a value
+  on the next line) fail; `uses:` text inside `run: |` blocks and comments is ignored. `--remote` (GITHUB_TOKEN) asks the
+  API, per distinct repository@SHA: `git/commits/<sha>` must exist (else `git/tags/<sha>` tells a tag object apart and the
+  error names the commit to pin), and the comment's tag (`git/ref/tags/<tag>`, through tag objects) must resolve to
+  exactly that commit — this also refuses a fork-only "impostor" commit, which no tag of the parent points at. Any
+  lookup that cannot complete fails the job (fail closed). Limitation: the check proves the pin matches the named release
+  today; it does not review what that release does (Dependabot's 14-day cooldown and code review do).
+- **Release path:** cd-deploy-tag now runs `tools/create-github-release.sh` (`gh release create <tag> --repo …
+  --verify-tag --title <tag> --generate-notes --notes-file <our notes>`); workflow `permissions: {}`, the job
+  `contents: write` only, checkout `persist-credentials: false`. Behaviour changes, both fail closed: a tag that does not
+  exist on GitHub is never created, and an existing release for the tag is an error (softprops updated it silently).
+  The workflow only runs on a tag, so `tools/create-github-release.test.cjs` runs the script on every PR: exact argv
+  and notes through a recording `gh`, a dry run, refused inputs (no gh call), the installed gh's own flag list, and the
+  workflow's permissions/checkout wiring.
+- **Bumps:** actions/upload-artifact v4.6.2 → v7.0.2 (`cf430e03…`), actions/download-artifact v4.3.0 → v8.0.2
+  (`9000827c…`) together (v8 fails on an artifact digest mismatch instead of warning), actions/setup-node v4.4.0 →
+  v7.1.0 (`949feb24…`, also in the yarn-install composite action; v5's automatic cache applies only to npm since v6, so
+  nothing changes for Yarn). Every SHA checked against `gh api repos/<owner>/<repo>/tags`. Version comments of the
+  unchanged checkout/cache pins corrected from `# v4` to the exact release (`v4.4.0`, `v4.3.0`).
+- **Dependabot:** `directories: ['/', '/.github/actions/*']` (composite actions were never scanned, so yarn-install's
+  setup-node pin could not be renewed) and `cooldown: default-days: 14` for github-actions; security updates are not
+  delayed by it. The docker ecosystem entry is unchanged.
