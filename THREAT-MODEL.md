@@ -9425,3 +9425,39 @@ Reversal:   Upgrade / `resolutions` override (documented in "//resolutions") as 
   copy with a pause between the two statements): two commits ended at version 1; with the fix, 2. Semantic goldens
   (PG16/17/18): only the `metadata_version_bump()` body hash changes (5f6076df… → ccfd284e…); security-posture golden and
   the restricted-migrator drift review unchanged (a function body is not a privilege line).
+
+## Worker marker bound only through the tenant-context binder (2026-11-18)
+
+- **Asset.** `rab.actor_type = 'worker'`: the RLS marker that opens the `*_worker_scan` / `*_worker_select` /
+  `*_worker_update` policies (staff_profile, payroll_record, payroll_run, payroll_run_line, shift_staff_review, ...).
+- **Threat.** A new code path writes the marker directly (a copied `set_config('rab.actor_type', 'worker', true)`), so a
+  wider read/write path opens outside the reviewed binder, without the binder's pool-safety checks and without anyone
+  noticing in review. Before this change `worker-actor-type-trusted-only.spec.ts` (#217) allowlisted three raw sites (HWS
+  backfill, the workspace -> core orphan check, the account-invite cleanup's level-22 pass), so a fourth raw site in one of
+  those files, or a moved one, was a matter of updating counts.
+- **Control.** All three now bind through `tenant-context.service.ts`, the one statement that writes the identity GUCs
+  (`bindGucsSql`, `rab.actor_type` from `ctx.actorType` only):
+  - HWS backfill read identity: `TenantContextService.bindCoreIdentityGucs` (RESET ROLE, then current_user = session_user,
+    then the binding statement), owner lookup, then the same binding with the owner as `rab.user_id`.
+  - Orphan check and level-22 pass: `bindMaintenanceSessionGucs`, the same statement and parameter mapping but no RESET
+    ROLE: the orphan connection acts as `crewflow` through a session-level SET ROLE on the owner login, which RESET ROLE
+    would drop for the rest of the connection (the check would then read as `crewflow_owner`). The orphan check stays
+    `BEGIN READ ONLY`. The level-22 pass re-binds the organisation, workspace and role in force, then binds them back with
+    the previous user and no marker, and refuses (the candidate is retained) if the marker or an optional scope GUC is
+    already set.
+  - The static spec's raw-GUC allowlists are now empty in rab-server and rab-worker: any direct `set_config` / `SET` of
+    `rab.actor_type` outside TenantContextService fails CI. The three files moved to the `actorType` allowlists (exactly one
+    literal `'worker'` site each).
+- **Behaviour change (none intended).** The binding statement also resets `rab.team_shift_id`, `rab.team_staff_id`,
+  `rab.admin_scope` and `rab.upgrade_scope` to `''`, and the orphan check's first binding sets `rab.user_id` / `rab.role` to
+  `''` instead of leaving the session value. None of these jobs sets those GUCs, and on a reused connection they already
+  read `''`, so the RLS outcome is unchanged; the HWS backfill gains RESET ROLE + the identity check (a no-op on its
+  connection, which never sets a role).
+- **Residual.** `bindMaintenanceSessionGucs` does not RESET ROLE or check the role (by design, see above). It is exported
+  for maintenance sessions only; a request path calling it would still need an `actorType: 'worker'` literal in a file on
+  the spec's allowlist, which review sees. The spec's known blind spots (a run-time GUC name, a bound-parameter name,
+  computed keys, non-`.ts` files) are unchanged.
+- **Tests.** `worker-actor-type-trusted-only.spec.ts` (empty raw allowlists; a raw site appended to any Worker file fails
+  it); `hws-backfill.integration.spec.ts`, `ws-core-fk-removal` / `hws-c1-org-level-workspace-paths` (orphan check),
+  `account-invite-cleanup*.integration.spec.ts` and `phase-d-account-invite-cleanup-worker.integration.spec.ts` (level-22
+  pass), `tenant-context.service.spec.ts` (binding statement text unchanged).
