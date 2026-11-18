@@ -409,7 +409,7 @@ const inOrder = (out, ...who) => who.every((w) => tOf(out, w) > 0n) && who.slice
 const NO_FILES = (l) => !['CREWFLOW_DB_TARGET_FILE', 'PG_DATABASE_PASSWORD', 'PG_DATABASE_APP_PASSWORD', 'RUNTIME_URL', 'CREWFLOW_DB_SETUP_LOCK_TOKEN', 'CREWFLOW_DB_SETUP_FLOCK_FD'].some((k) => keysOf(l, 'self').includes(k));
 r = run('url-order', MIGRATE_ON, { ctl: { 'migrate-seq': '0' } });
 check('11a the migrate child, the registration and main.js (under tini) run in that order; the bootstrap child never ran', r.code === 0 &&
-  inOrder(r.out, 'twentymigrate', 'register', 'main') && underTini(r.out, 'main') && !line(r.out, 'bootstrap'), r.out);
+  before(r.out, 'STUB twentymigrate ', 'STUB register ') && inOrder(r.out, 'register', 'main') && underTini(r.out, 'main') && !line(r.out, 'bootstrap'), r.out);
 check('11b every process (the registration, main.js, tini) holds exactly the given crewflow_owner URL; no admin credential anywhere', /STUB tini pid=1 admin=absent pgpw=absent /.test(r.out) &&
   ['register', 'main'].every((w) => field(line(r.out, w), 'admin') === 'absent' && field(line(r.out, w), 'url') === hash(RUNTIME_URL)), r.out);
 check('11c main.js gets PG_DATABASE_URL and no target-file, lock or password variable; the password is never printed', keysOf(line(r.out, 'main'), 'self').includes('PG_DATABASE_URL') &&
