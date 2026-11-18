@@ -164,12 +164,15 @@ const sortedUnique = (lines: string[]) => [...new Set(lines)].sort();
 export async function readSemanticPosture(query: SemanticQuery, options: { ownTransaction?: boolean } = {}): Promise<SemanticPosture> {
   const own = options.ownTransaction !== false;
   if (own) await query('BEGIN READ ONLY');
-  // Rendered names (regprocedure, pg_get_expr, pg_get_triggerdef) are qualified relative to the session search_path, so the
-  // read pins it: a role- or database-level search_path (or a caller's SET) can never change a line. Transaction-local, and
-  // restored in `finally` for a caller that passed its own transaction.
+  // Rendered names (regprocedure, pg_get_function_identity_arguments, pg_get_expr, pg_get_triggerdef) are qualified relative
+  // to the session search_path, so the read pins it: a role- or database-level search_path (or a caller's SET) can never
+  // change a line. The pinned value renders exactly as the goldens were generated (a default session: `public` visible, so
+  // extension types such as citext print unqualified; `core` and workspace schemas not visible, so they print qualified);
+  // pg_catalog first, pg_temp last, so nothing in public can shadow a catalog function the read calls unqualified.
+  // Transaction-local, and restored in `finally` for a caller that passed its own transaction.
   const [{ sp }] = (await query(`SELECT pg_catalog.current_setting('search_path') AS sp`)) as Array<{ sp: string }>;
   try {
-    await query(`SELECT pg_catalog.set_config('search_path', 'pg_catalog, pg_temp', true)`);
+    await query(`SELECT pg_catalog.set_config('search_path', 'pg_catalog, public, pg_temp', true)`);
     const [{ v }] = (await query(`SELECT pg_catalog.current_setting('server_version_num')::int AS v`)) as Array<{ v: number }>;
     const objects = await query(SEMANTIC_OBJECT_SQL);
     const roles = sortedUnique((await query(SEMANTIC_ROLE_SQL)).map((r) => String(r.line)));

@@ -49,12 +49,12 @@ describe('semantic posture: trigger def= hash and pinned search_path', () => {
     return { calls, query };
   }
 
-  it('own transaction: pins search_path to pg_catalog, pg_temp right after BEGIN READ ONLY, before any catalog read', async () => {
+  it('own transaction: pins search_path to pg_catalog, public, pg_temp right after BEGIN READ ONLY, before any catalog read', async () => {
     const { calls, query } = recorder();
     await readSemanticPosture(query);
     const sqls = calls.map((c) => c.sql);
     expect(sqls[0]).toBe('BEGIN READ ONLY');
-    const pin = sqls.findIndex((s) => s.includes(`set_config('search_path', 'pg_catalog, pg_temp', true)`));
+    const pin = sqls.findIndex((s) => s.includes(`set_config('search_path', 'pg_catalog, public, pg_temp', true)`));
     expect(pin).toBeGreaterThan(0);
     expect(sqls.findIndex((s) => s === SEMANTIC_OBJECT_SQL)).toBeGreaterThan(pin);
     expect(sqls[sqls.length - 1]).toBe('ROLLBACK');
