@@ -14,7 +14,10 @@ import {
   EXPECTED_WORKSPACE_FINGERPRINTS_PG16,
   EXPECTED_WORKSPACE_FINGERPRINTS_PG17,
   EXPECTED_WORKSPACE_FINGERPRINTS_PG18,
+  resetWorkspaceFingerprintSelectionForTests,
+  WorkspaceFingerprintMajorNotSelectedError,
 } from './expected-fingerprints';
+import { selectWorkspaceFingerprintMajorForUnitTests } from '../../../../__tests__/helpers/workspace-fingerprint-major';
 
 const h = (c: string) => c.repeat(64);
 const COMMITTED = { 14: h('a'), 15: h('b'), 16: h('c'), 17: h('d'), 18: h('e'), 19: h('f') };
@@ -81,6 +84,17 @@ describe('fingerprint "only missing versions" mode (PAY-1 module 20 on PostgreSQ
 });
 
 describe('regression found by the v20 append run: the selected view reads the LIVE table', () => {
+  beforeEach(() => selectWorkspaceFingerprintMajorForUnitTests(16));
+  afterAll(() => resetWorkspaceFingerprintSelectionForTests());
+
+  it('with nothing selected every read of the view throws (no PostgreSQL 16 default), keys and entries included', () => {
+    resetWorkspaceFingerprintSelectionForTests();
+    expect(() => EXPECTED_WORKSPACE_FINGERPRINTS[19]).toThrow(WorkspaceFingerprintMajorNotSelectedError);
+    expect(() => Object.keys(EXPECTED_WORKSPACE_FINGERPRINTS)).toThrow(WorkspaceFingerprintMajorNotSelectedError);
+    expect(() => Object.entries(EXPECTED_WORKSPACE_FINGERPRINTS)).toThrow(WorkspaceFingerprintMajorNotSelectedError);
+    expect(() => 19 in EXPECTED_WORKSPACE_FINGERPRINTS).toThrow(WorkspaceFingerprintMajorNotSelectedError);
+  });
+
   it('a version added to the selected table later is visible through EXPECTED_WORKSPACE_FINGERPRINTS (keys, entries, reads), and the view is read-only', () => {
     const t = EXPECTED_WORKSPACE_FINGERPRINTS_PG16 as Record<number, string>;
     expect(EXPECTED_WORKSPACE_FINGERPRINTS[99]).toBeUndefined();
