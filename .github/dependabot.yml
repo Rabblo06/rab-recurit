@@ -15,3 +15,28 @@ updates:
     directory: '/packages/rab-docker/rab'
     schedule:
       interval: 'weekly'
+
+  # CI service images, pinned by digest: the `image:` keys in workflow files (redis `services:`, the Playwright
+  # `container:`) and .github/ci-images/<name>/image.yaml (read by ref.sh for the `docker run`s and disposable-postgres).
+  # Dependabot's docker ecosystem reads every `image:` key in the YAML files of these directories. One directory per
+  # postgres major, because Dependabot merges every pin of one image name in a directory into a single dependency.
+  # Majors are ignored: redis stays 7 and each postgres-<major> directory stays on its major (the CI matrix tests
+  # 15/16/17/18 on purpose); what Dependabot proposes is the new digest of the same tag. The Playwright image is ignored:
+  # the AI visual baselines were captured in that exact image, and it moves with @playwright/test, by hand.
+  # One grouped PR, so the inline redis copies and .github/ci-images/redis move together (tools/check-image-pins.cjs
+  # refuses two digests for one tag).
+  - package-ecosystem: 'docker'
+    directories:
+      - '/.github/workflows'
+      - '/.github/ci-images/*'
+    schedule:
+      interval: 'weekly'
+    ignore:
+      - dependency-name: 'postgres'
+        update-types: ['version-update:semver-major']
+      - dependency-name: 'redis'
+        update-types: ['version-update:semver-major']
+      - dependency-name: '*playwright*'
+    groups:
+      ci-service-images:
+        patterns: ['*']

@@ -74,7 +74,8 @@ jobs:
           set -euo pipefail
           npx jest -c packages/rab-worker/src/__tests__/pdf-equality/jest.config.ts --runInBand pdf-render.load
           mv "${PDF_EQUALITY_OUT}/load" "${PDF_EQUALITY_OUT}/load-direct"
-          docker run -d --name pdf-load-redis -p 127.0.0.1:6390:6379 redis:7-alpine redis-server --save "" --appendonly no
+          redis_image="$(bash .github/ci-images/ref.sh redis)" # redis:7-alpine by index digest, Dependabot-renewed
+          docker run -d --name pdf-load-redis -p 127.0.0.1:6390:6379 "${redis_image}" redis-server --save "" --appendonly no
           for i in $(seq 1 30); do docker exec pdf-load-redis redis-cli ping | grep -q PONG && break; sleep 1; done
           PDF_LOAD_VIA=bullmq PDF_LOAD_REDIS_URL=redis://127.0.0.1:6390 PDF_LOAD_ROWS=40 \
             npx jest -c packages/rab-worker/src/__tests__/pdf-equality/jest.config.ts --runInBand pdf-render.load

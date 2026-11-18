@@ -32,6 +32,7 @@ on:
       - 'yarn.lock'
       - '.github/actions/yarn-install/**'
       - '.github/actions/disposable-postgres/**'
+      - '.github/ci-images/**'
       - '.github/workflows/ci-migration-security.yaml'
       - 'packages/rab-docker/postgres-init/owner-login/**'
   push:
@@ -150,7 +151,8 @@ jobs:
           mkdir -p "${RUNNER_TEMP}/owl-pg"
           printf '%s' "${su_pass}" > "${RUNNER_TEMP}/owl-pg/su_pass"
           chmod 644 "${RUNNER_TEMP}/owl-pg/su_pass"
-          docker run -d --name owner-login-postgres -p 127.0.0.1:5432:5432             -v "${RUNNER_TEMP}/owl-pg/su_pass:/run/disposable/su_pass:ro"             -e POSTGRES_USER=ci_bootstrap -e POSTGRES_PASSWORD_FILE=/run/disposable/su_pass -e POSTGRES_DB=postgres             "postgres:${{ matrix.pg }}-alpine" -c crewflow.disposable_cluster=on > /dev/null
+          pg_image="$(bash .github/ci-images/ref.sh "postgres-${{ matrix.pg }}")" # index digest, Dependabot-renewed
+          docker run -d --name owner-login-postgres -p 127.0.0.1:5432:5432             -v "${RUNNER_TEMP}/owl-pg/su_pass:/run/disposable/su_pass:ro"             -e POSTGRES_USER=ci_bootstrap -e POSTGRES_PASSWORD_FILE=/run/disposable/su_pass -e POSTGRES_DB=postgres             "${pg_image}" -c crewflow.disposable_cluster=on > /dev/null
           for i in $(seq 1 90); do
             docker exec owner-login-postgres pg_isready -h 127.0.0.1 -U ci_bootstrap -d postgres > /dev/null 2>&1 && break
             sleep 1
@@ -215,10 +217,11 @@ jobs:
           mkdir -p "${RUNNER_TEMP}/obc-pg"
           printf '%s' "${su_pass}" > "${RUNNER_TEMP}/obc-pg/su_pass"
           chmod 644 "${RUNNER_TEMP}/obc-pg/su_pass"
+          pg_image="$(bash .github/ci-images/ref.sh "postgres-${{ matrix.pg }}")" # index digest, Dependabot-renewed
           docker run -d --name owner-bootstrap-postgres -p 127.0.0.1:5432:5432 \
             -v "${RUNNER_TEMP}/obc-pg/su_pass:/run/disposable/su_pass:ro" \
             -e POSTGRES_USER=ci_bootstrap -e POSTGRES_PASSWORD_FILE=/run/disposable/su_pass -e POSTGRES_DB=postgres \
-            "postgres:${{ matrix.pg }}-alpine" \
+            "${pg_image}" \
             -c crewflow.disposable_cluster=on -c log_statement=all -c log_connections=on > /dev/null
           for i in $(seq 1 90); do
             docker exec owner-bootstrap-postgres pg_isready -h 127.0.0.1 -U ci_bootstrap -d postgres > /dev/null 2>&1 && break

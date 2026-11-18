@@ -1,0 +1,7 @@
+# CI image, pinned by digest. Read through ../ref.sh by .github/actions/disposable-postgres (postgres-major 18),
+# ci-migration-security and ci-twenty-tests.
+# postgres:18-alpine: OCI image index (multi-arch) digest read from registry-1.docker.io on 2026-11-18 (PostgreSQL 18.7).
+# Dependabot (docker ecosystem, .github/dependabot.yml) renews the digest within this tag; the date above is when it was
+# first pinned. tools/check-image-pins.cjs (ci-security) refuses a tag without a digest and any two different digests
+# for the same tag across .github/ (an inline copy, such as a workflow `services:` image, must move with this file).
+image: postgres:18-alpine@sha256:b6972e1115a4ff8eba5d7f7d19184926d1e16d7d1136ae1e1a7ebf286da0f015

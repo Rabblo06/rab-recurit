@@ -23,7 +23,8 @@ jobs:
     timeout-minutes: 90
     services:
       redis:
-        image: redis:7-alpine
+        # redis:7-alpine index digest, read 2026-11-18 (7.4.12); equal to .github/ci-images/redis (Dependabot renews both)
+        image: redis:7-alpine@sha256:7f7d30b7fdd09467bac58198a1f166dd69789d348d4fe859cccb20e0cf287fbe
         ports: ['6379:6379']
         options: >-
           --health-cmd "redis-cli ping" --health-interval 5s --health-timeout 5s --health-retries 10
@@ -121,7 +122,8 @@ jobs:
     timeout-minutes: 90
     services:
       redis:
-        image: redis:7-alpine
+        # redis:7-alpine index digest, read 2026-11-18 (7.4.12); equal to .github/ci-images/redis (Dependabot renews both)
+        image: redis:7-alpine@sha256:7f7d30b7fdd09467bac58198a1f166dd69789d348d4fe859cccb20e0cf287fbe
         ports: ['6379:6379']
         options: >-
           --health-cmd "redis-cli ping" --health-interval 5s --health-timeout 5s --health-retries 10
@@ -209,7 +211,8 @@ jobs:
     timeout-minutes: 90
     services:
       redis:
-        image: redis:7-alpine
+        # redis:7-alpine index digest, read 2026-11-18 (7.4.12); equal to .github/ci-images/redis (Dependabot renews both)
+        image: redis:7-alpine@sha256:7f7d30b7fdd09467bac58198a1f166dd69789d348d4fe859cccb20e0cf287fbe
         ports: ['6379:6379']
         options: >-
           --health-cmd "redis-cli ping" --health-interval 5s --health-timeout 5s --health-retries 10
@@ -261,7 +264,8 @@ jobs:
     timeout-minutes: 90
     services:
       redis:
-        image: redis:7-alpine
+        # redis:7-alpine index digest, read 2026-11-18 (7.4.12); equal to .github/ci-images/redis (Dependabot renews both)
+        image: redis:7-alpine@sha256:7f7d30b7fdd09467bac58198a1f166dd69789d348d4fe859cccb20e0cf287fbe
         ports: ['6379:6379']
         options: >-
           --health-cmd "redis-cli ping" --health-interval 5s --health-timeout 5s --health-retries 10
