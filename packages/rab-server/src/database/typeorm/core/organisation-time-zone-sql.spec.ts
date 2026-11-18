@@ -100,7 +100,7 @@ describe('organisation time zone guard SQL (1786721610000)', () => {
       expect(SEMANTIC_OBJECT_SQL).toContain(part);
     }
     // Only the WHEN text is cut out of pg_get_triggerdef (it carries the table name), and this schema's prefix is removed.
-    expect(SEMANTIC_OBJECT_SQL).toContain(`FROM ' WHEN \\((.*)\\) EXECUTE (FUNCTION|PROCEDURE) '`);
+    expect(SEMANTIC_OBJECT_SQL).toContain(`pg_catalog.pg_get_triggerdef(t.oid), ' WHEN \\((.*)\\) EXECUTE (FUNCTION|PROCEDURE) '`);
     expect(SEMANTIC_OBJECT_SQL).toContain(`s.nspname::text || '.', ''`);
     expect(organisationTimeZoneExpectedState(bodyHash).function_state).toContain(`body=${bodyHash}`);
   });

@@ -86,7 +86,7 @@ SELECT schema, line FROM (
               -- WHEN: pg_get_expr cannot deparse it (OLD and NEW are two relations), so it is cut out of pg_get_triggerdef,
               -- whitespace-normalised, with this schema's own prefix removed (workspace copies stay comparable).
               || '|' || CASE WHEN t.tgqual IS NULL THEN '-' ELSE coalesce(pg_catalog.replace(pg_catalog.regexp_replace(
-                   pg_catalog.substring(pg_catalog.pg_get_triggerdef(t.oid) FROM ' WHEN \\((.*)\\) EXECUTE (FUNCTION|PROCEDURE) '),
+                   pg_catalog.substring(pg_catalog.pg_get_triggerdef(t.oid), ' WHEN \\((.*)\\) EXECUTE (FUNCTION|PROCEDURE) '),
                    '\\s+', ' ', 'g'), s.nspname::text || '.', ''), '?') END
               || '|' || t.tgdeferrable::text || '|' || t.tginitdeferred::text || '|' || pg_catalog.encode(t.tgargs, 'hex')
               || '|' || coalesce(t.tgoldtable::text, '-') || '|' || coalesce(t.tgnewtable::text, '-'))
