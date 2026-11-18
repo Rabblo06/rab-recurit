@@ -294,47 +294,69 @@ describeIfDb('Venue Manager route flag pins the target in every ManagerService m
     ]);
   });
 
-  it('the other six methods also refuse a CEO profile and another workspace\'s Venue Manager → 404 (reads return nothing), nothing changes', async () => {
-    await withGranted(ceoA, PermissionFlag.VENUE_MANAGER_CREATE, async () => {
-      const signedIn = await factory.signedInContext(ceoA);
-      for (const id of [ceoA.profileId!, otherVmA.profileId!]) {
-        await expectNotFoundAndInert(() => managers.changePendingEmail(signedIn, id, { email: newEmail('cpe-out') }, PermissionFlag.VENUE_MANAGER_CREATE));
-        await expectNotFoundAndInert(() => managers.changeEmail(signedIn, id, { email: newEmail('ce-out'), currentPassword: ceoA.password } as never, PermissionFlag.VENUE_MANAGER_CREATE));
-        await expectNotFoundAndInert(() => managers.addNote(signedIn, id, { body: 'Out of scope' } as never, PermissionFlag.VENUE_MANAGER_CREATE));
-        await expectNotFoundNoDataAndInert(() => managers.getTimeline(signedIn, id, PermissionFlag.VENUE_MANAGER_CREATE));
-        await expectNotFoundNoDataAndInert(() => managers.listNotes(signedIn, id, PermissionFlag.VENUE_MANAGER_CREATE));
-        await expectNotFoundNoDataAndInert(() => managers.listEmails(signedIn, id, PermissionFlag.VENUE_MANAGER_CREATE));
-      }
-    });
-  });
+  // One test per (target, method), so each refusal is shown to fail on its own without the pin.
+  const outOfScopeTargets = [
+    ['the caller\'s own CEO profile', () => ceoA.profileId!],
+    ['another workspace\'s Venue Manager', () => otherVmA.profileId!],
+  ] as const;
+  const sixMethods = [
+    ['changePendingEmail', 'write', (ctx: AuthContext, id: string) => managers.changePendingEmail(ctx, id, { email: newEmail('cpe-out') }, PermissionFlag.VENUE_MANAGER_CREATE)],
+    ['changeEmail', 'write', (ctx: AuthContext, id: string) => managers.changeEmail(ctx, id, { email: newEmail('ce-out'), currentPassword: ceoA.password } as never, PermissionFlag.VENUE_MANAGER_CREATE)],
+    ['addNote', 'write', (ctx: AuthContext, id: string) => managers.addNote(ctx, id, { body: 'Out of scope' } as never, PermissionFlag.VENUE_MANAGER_CREATE)],
+    ['getTimeline', 'read', (ctx: AuthContext, id: string) => managers.getTimeline(ctx, id, PermissionFlag.VENUE_MANAGER_CREATE)],
+    ['listNotes', 'read', (ctx: AuthContext, id: string) => managers.listNotes(ctx, id, PermissionFlag.VENUE_MANAGER_CREATE)],
+    ['listEmails', 'read', (ctx: AuthContext, id: string) => managers.listEmails(ctx, id, PermissionFlag.VENUE_MANAGER_CREATE)],
+  ] as const;
+  for (const [targetLabel, targetId] of outOfScopeTargets) {
+    for (const [method, kind, call] of sixMethods) {
+      it(`${method} with venue_manager.create on ${targetLabel} → 404${kind === 'read' ? ', no data returned' : ''}, nothing changes`, async () => {
+        await withGranted(ceoA, PermissionFlag.VENUE_MANAGER_CREATE, async () => {
+          const signedIn = await factory.signedInContext(ceoA);
+          if (kind === 'read') await expectNotFoundNoDataAndInert(() => call(signedIn, targetId()));
+          else await expectNotFoundAndInert(() => call(signedIn, targetId()));
+        });
+      });
+    }
+  }
 
-  it('a context with no workspace gets 404 with the Venue Manager flag, even for the caller\'s own Venue Manager, nothing changes', async () => {
-    await withGranted(ceoA, PermissionFlag.VENUE_MANAGER_CREATE, async () => {
-      const noWorkspace: AuthContext = { ...ctxOf(ceoA), workspaceId: null };
-      await expectNotFoundAndInert(() => managers.update(noWorkspace, ownVmA.profileId!, { jobTitle: 'No workspace' } as never, PermissionFlag.VENUE_MANAGER_CREATE));
-      await expectNotFoundAndInert(() => managers.addNote(noWorkspace, ownVmA.profileId!, { body: 'No workspace' } as never, PermissionFlag.VENUE_MANAGER_CREATE));
-      await expectNotFoundNoDataAndInert(() => managers.getTimeline(noWorkspace, ownVmA.profileId!, PermissionFlag.VENUE_MANAGER_CREATE));
-      const signedIn = { ...(await factory.signedInContext(ceoA)), workspaceId: null };
-      await expectNotFoundAndInert(() =>
-        emailChange.request(signedIn, { targetUserId: ownVmA.userId, newEmail: newEmail('req-nows'), currentPassword: ceoA.password, targetScope: 'venue_manager' }),
-      );
+  // A context with no workspace: the Venue Manager flag reaches nothing, not even the caller's own Venue Manager.
+  const noWorkspaceCases = [
+    ['update', (ctx: AuthContext) => managers.update(ctx, ownVmA.profileId!, { jobTitle: 'No workspace' } as never, PermissionFlag.VENUE_MANAGER_CREATE), 'write'],
+    ['addNote', (ctx: AuthContext) => managers.addNote(ctx, ownVmA.profileId!, { body: 'No workspace' } as never, PermissionFlag.VENUE_MANAGER_CREATE), 'write'],
+    ['getTimeline', (ctx: AuthContext) => managers.getTimeline(ctx, ownVmA.profileId!, PermissionFlag.VENUE_MANAGER_CREATE), 'read'],
+    [
+      'EmailChangeService.request (venue_manager scope)',
+      (ctx: AuthContext) => emailChange.request(ctx, { targetUserId: ownVmA.userId, newEmail: newEmail('req-nows'), currentPassword: ceoA.password, targetScope: 'venue_manager' }),
+      'write',
+    ],
+  ] as const;
+  for (const [label, call, kind] of noWorkspaceCases) {
+    it(`${label} with venue_manager.create and no workspace in the context → 404 even for the caller's own Venue Manager, nothing changes`, async () => {
+      await withGranted(ceoA, PermissionFlag.VENUE_MANAGER_CREATE, async () => {
+        const noWorkspace: AuthContext = { ...(await factory.signedInContext(ceoA)), workspaceId: null };
+        if (kind === 'read') await expectNotFoundNoDataAndInert(() => call(noWorkspace));
+        else await expectNotFoundAndInert(() => call(noWorkspace));
+      });
     });
-  });
+  }
 
-  it('EmailChangeService.request with the Venue Manager scope on an Internal Manager or a CEO → 404: no request, email or audit row', async () => {
-    await withGranted(ceoA, PermissionFlag.VENUE_MANAGER_CREATE, async () => {
-      const signedIn = await factory.signedInContext(ceoA);
-      for (const target of [internalA, ceoA]) {
+  // EmailChangeService.request called directly with the Venue Manager scope: an Internal Manager, a CEO and another
+  // workspace's Venue Manager are all out of reach (the caller can see each one's core.user row under RLS).
+  const venueScopeOutOfReach = [
+    ['an Internal Manager', () => internalA.userId],
+    ['a CEO', () => ceoA.userId],
+    ["another workspace's Venue Manager", () => otherVmA.userId],
+  ] as const;
+  for (const [label, targetUserId] of venueScopeOutOfReach) {
+    it(`EmailChangeService.request with the Venue Manager scope on ${label} → 404: no request, email or audit row`, async () => {
+      await withGranted(ceoA, PermissionFlag.VENUE_MANAGER_CREATE, async () => {
+        const signedIn = await factory.signedInContext(ceoA);
         await expectNotFoundAndInert(() =>
-          emailChange.request(signedIn, { targetUserId: target.userId, newEmail: newEmail('req-vm'), currentPassword: ceoA.password, targetScope: 'venue_manager' }),
+          emailChange.request(signedIn, { targetUserId: targetUserId(), newEmail: newEmail('req-vm'), currentPassword: ceoA.password, targetScope: 'venue_manager' }),
         );
-      }
-      // The other workspace's Venue Manager is out of scope too.
-      await expectNotFoundAndInert(() =>
-        emailChange.request(signedIn, { targetUserId: otherVmA.userId, newEmail: newEmail('req-vm-other'), currentPassword: ceoA.password, targetScope: 'venue_manager' }),
-      );
+      });
     });
-  });
+  }
 
   it('EmailChangeService.request with the staff scope on a staff member another Manager created → 404, nothing changes', async () => {
     await withGranted(mgrB, PermissionFlag.STAFF_EDIT, async () => {
