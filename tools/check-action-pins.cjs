@@ -260,7 +260,16 @@ function scan(root = ROOT) {
   if (files.length === 0) problems.push({ file: root, line: 0, message: 'no workflow or action files found (wrong root?)' });
   for (const f of files) {
     const rel = path.relative(root, f).split(path.sep).join('/');
-    const r = scanSource(rel, fs.readFileSync(f, 'utf8'));
+    // Strict UTF-8: readFileSync(f, 'utf8') would turn an invalid byte (a raw 0x85, a NEL in Latin-1) into U+FFFD and
+    // hide it from the line-break guard; a parser decoding the bytes differently might not.
+    let text;
+    try {
+      text = new TextDecoder('utf-8', { fatal: true }).decode(fs.readFileSync(f));
+    } catch (e) {
+      problems.push({ file: rel, line: 0, message: `not valid UTF-8 (fail closed): ${e.message}` });
+      continue;
+    }
+    const r = scanSource(rel, text);
     refs.push(...r.refs);
     problems.push(...r.problems);
   }

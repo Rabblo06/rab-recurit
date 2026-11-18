@@ -261,3 +261,17 @@ test('C0 control characters other than tab, LF and CR refuse the file', () => {
 test('the YAML parser is yaml 2.x', () => {
   assert.match(require('yaml/package.json').version, /^2\./);
 });
+
+test('a file that is not valid UTF-8 (a raw 0x85 byte in a comment) is refused, not silently replaced', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'pins-bytes-'));
+  fs.mkdirSync(path.join(root, '.github/workflows'), { recursive: true });
+  const head = Buffer.from(`${HEAD}      - uses: ${PINNED}\n      # c`, 'utf8');
+  const tail = Buffer.from('      - uses: evil/act@main\n', 'utf8');
+  fs.writeFileSync(path.join(root, '.github/workflows/w.yml'), Buffer.concat([head, Buffer.from([0x85]), tail]));
+  const r = scan(root);
+  assert.deepEqual(r.problems.map((p) => `${p.file}:${p.message.replace(/: .*$/, '')}`), ['.github/workflows/w.yml:not valid UTF-8 (fail closed)']);
+  assert.equal(r.refs.length, 0);
+  // The same file in valid UTF-8 without the byte passes.
+  fs.writeFileSync(path.join(root, '.github/workflows/w.yml'), Buffer.concat([head, Buffer.from('\n'), Buffer.from(`      - uses: ${PINNED}\n`)]));
+  assert.deepEqual(scan(root).problems, []);
+});
