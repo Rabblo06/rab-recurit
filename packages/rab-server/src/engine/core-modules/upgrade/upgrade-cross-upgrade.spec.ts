@@ -9,7 +9,7 @@
  *       workspace has a logbook row, the patch continues and re-runs the .0's incomplete steps under their own names (Twenty
  *       upgrade-sequence-runner.service.ts:98-247, "Rerun the upgrade to resume from this step").
  */
-import { outcomeOf } from '../../../database/typeorm/scripts/migrate/owner-login/migrate-on-start';
+import { assertTestUpgradeSeam, outcomeOf, runMigrateOnStart } from '../../../database/typeorm/scripts/migrate/owner-login/migrate-on-start';
 import type { UpgradeCommand } from './upgrade-commands/upgrade-command';
 import { UPGRADE_COMMANDS } from './upgrade-commands/registry';
 import { MinorReleaseResumeFailedError } from './upgrade-runner';
@@ -156,6 +156,28 @@ describe('(b) a patch release resumes its minor .0 (decideUpgradeStart)', () => 
 
   it('a failed .0 command retried before pending patch migrations refuses the start as a migration failure (66)', () => {
     expect(outcomeOf(new MinorReleaseResumeFailedError('x', '0.7.0_HwsCutover_1786721540100', 2))).toBe('migrationFailed');
+  });
+
+  it('the testUpgrade seam is refused unless NODE_ENV=test on a disposable, non-production database (64)', async () => {
+    const seam = { codeVersion: '0.7.1', previousVersions: PREV_071 };
+    const ok = { production: false, disposableTestDatabase: true };
+    expect(() => assertTestUpgradeSeam(seam, { NODE_ENV: 'test' }, ok)).not.toThrow();
+    expect(() => assertTestUpgradeSeam(undefined, { NODE_ENV: 'production' }, { production: true, disposableTestDatabase: false })).not.toThrow();
+    for (const [env, ctx] of [
+      [{ NODE_ENV: 'production' }, ok],
+      [{}, ok],
+      [{ NODE_ENV: 'test' }, { production: true, disposableTestDatabase: true }],
+      [{ NODE_ENV: 'test' }, { production: false, disposableTestDatabase: false }],
+    ] as const) {
+      const error = thrown(() => assertTestUpgradeSeam(seam, env, ctx));
+      expect(error?.name).toBe('TestSeamRefusal');
+      expect(outcomeOf(error)).toBe('config');
+    }
+    // Through the start itself: refused before any connection (exit 64).
+    const lines: string[] = [];
+    const result = await runMigrateOnStart({ migrationApprovalMode: 'none' }, { env: { NODE_ENV: 'production' }, log: (l) => lines.push(l), testUpgrade: seam });
+    expect(result.outcome).toBe('config');
+    expect(lines.join('\n')).toMatch(/testUpgrade hook is a test seam/);
   });
 
   it('a MINOR release never uses the resume rule (it is not a patch of anything)', () => {

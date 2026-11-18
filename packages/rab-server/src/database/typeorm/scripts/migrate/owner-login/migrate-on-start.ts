@@ -433,7 +433,7 @@ export async function runMigrateOnStart(config: MigrateOnStartConfig, deps: Migr
       throw new TestSeamRefusal('the testWorkspace hook is a test seam: only NODE_ENV=test. Refusing.');
     }
     if (deps.testUpgrade && env.NODE_ENV !== 'test') {
-      throw new TestSeamRefusal('the testUpgrade hook is a test seam: only NODE_ENV=test. Refusing.');
+      throw new TestSeamRefusal('the testUpgrade hook is a test seam: only NODE_ENV=test on a disposable test database, never production. Refusing.');
     }
     const pre = await readMarkerState(env);
     const first = synthesiseGuardEnv(env, pre.marker, pre.database, generatedId);
@@ -443,6 +443,8 @@ export async function runMigrateOnStart(config: MigrateOnStartConfig, deps: Migr
     const seams = readTestSeams(env, { production, disposableTestDatabase: pre.disposableTestDatabase });
     if (seams.failAt || seams.stopBefore) log(`TEST SEAMS ACTIVE: failAt=${seams.failAt ?? '-'} stopBefore=${seams.stopBefore ?? '-'}`);
     const seamCtx = { production, disposableTestDatabase: pre.disposableTestDatabase };
+    // Final review of #240: like readTestFailCommand, the upgrade-runner seam needs a disposable test database too.
+    assertTestUpgradeSeam(deps.testUpgrade, env, seamCtx);
     const testFailCommand = readTestFailCommand(env, seamCtx);
     const tu = deps.testUpgrade;
     const codeVersion = tu?.codeVersion ?? readAppVersion(env);
@@ -617,6 +619,18 @@ export function withProbeCommands(
   }
   const key = majorMinorKey(codeVersion);
   return { ...registry, [key]: [...(registry[key] ?? []), ...probes] };
+}
+
+/** The testUpgrade hook: only NODE_ENV=test on a disposable test database, never production (TestSeamRefusal, 64). Pure. */
+export function assertTestUpgradeSeam(
+  testUpgrade: MigrateOnStartDeps['testUpgrade'],
+  env: Record<string, string | undefined>,
+  ctx: { production: boolean; disposableTestDatabase: boolean },
+): void {
+  if (testUpgrade === undefined) return;
+  if (env.NODE_ENV !== 'test' || ctx.production || !ctx.disposableTestDatabase) {
+    throw new TestSeamRefusal('the testUpgrade hook is a test seam: only NODE_ENV=test on a disposable test database, never production. Refusing.');
+  }
 }
 
 export function readTestFailCommand(env: Record<string, string | undefined>, ctx: { production: boolean; disposableTestDatabase: boolean }): string | null {

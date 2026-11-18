@@ -463,16 +463,17 @@ describeIfDb('cross-upgrade lists and patch resume of a failed .0 step (integrat
       // A degraded start does not record the patch's own step; the blocked workspace stays 503.
       expect(await instanceRows('0.7.1_TypeOrmMigrations')).toEqual([]);
       expect(await resolveAs(w)).toBe('refused:upgrading');
-      // Un-apply the (no-op) patch migration so 7c proves the order on a pending migration again.
-      await admin.query('DELETE FROM core.migrations WHERE name = $1', [PATCH_MIGRATION]);
     });
 
-    it('7c. with the backup: the cutover completes BEFORE the patch migration applies; then 0.7.1_TypeOrmMigrations; unblocked', async () => {
+    it('7c. with the backup, after the --force start applied the migration: the retry runs (forced, WARNING), then 0.7.1_TypeOrmMigrations; unblocked', async () => {
       backup = true;
       events.length = 0;
+      const from = lines.length;
       const result = await startPatch();
       expect([result.outcome, STARTUP_EXIT_CODES[result.outcome]]).toEqual(['ok', 0]);
-      expect(events).toEqual(['cutover(patch migration applied=false)', 'patch migration']);
+      // Nothing pending: 7b2's --force start already applied the patch migration, so the retry runs on that schema.
+      expect(events).toEqual(['cutover(patch migration applied=true)']);
+      expect(lines.slice(from).some((l) => l.includes(`WARNING: ${CUTOVER} runs on a schema that an earlier --force start moved past 0.7.0`))).toBe(true);
       expect(await patchApplied()).toBe(true);
       expect(result.upgrade?.recorded).toEqual([
         { name: CUTOVER, status: 'completed', attempt: 4 },
@@ -482,8 +483,10 @@ describeIfDb('cross-upgrade lists and patch resume of a failed .0 step (integrat
         { status: 'failed', attempt: 1, v: '0.7.0', forced: false },
         { status: 'failed', attempt: 2, v: '0.7.1', forced: false },
         { status: 'failed', attempt: 3, v: '0.7.1', forced: true },
-        { status: 'completed', attempt: 4, v: '0.7.1', forced: false },
+        // Final review: an earlier attempt was forced and nothing was pending → this retry is recorded forced too.
+        { status: 'completed', attempt: 4, v: '0.7.1', forced: true },
       ]);
+      expect(await instanceRows('0.7.1_TypeOrmMigrations')).toEqual([{ status: 'completed', attempt: 1, v: '0.7.1', forced: false }]);
       expect(await resolveAs(w)).toBe(w.schema);
     });
   });

@@ -61,6 +61,7 @@ import {
   versionStartedUnforced,
   withUpgradeScope,
   unforcedInstanceVersions,
+  anyForcedInstanceAttempt,
 } from './upgrade-migration.service';
 import {
   commandsForVersion,
@@ -308,7 +309,20 @@ export class UpgradeRun {
       return;
     }
     log(`upgrade ${codeVersion}: resuming ${minor} before any migration: ${incomplete.length} incomplete instance command(s) re-run under their own names (${incomplete.join(', ')})`);
-    const ok = await this.runInstanceSteps(session, minor);
+    // Final review of #240: nothing pending, and an earlier attempt of the step was forced: an earlier --force start already
+    // applied this code's migrations, so the retry runs on a schema that start moved past the .0. Recorded forced = true.
+    const forcedSteps = new Set<string>();
+    if (!pendingMigrations.length) {
+      for (const name of incomplete) {
+        if (await withUpgradeScope(session, 'status', (q) => anyForcedInstanceAttempt(q, name))) {
+          forcedSteps.add(name);
+          log(
+            `WARNING: ${name} runs on a schema that an earlier --force start moved past ${minor} (this code's migrations are already applied); its attempt is recorded forced`,
+          );
+        }
+      }
+    }
+    const ok = await this.runInstanceSteps(session, minor, forcedSteps);
     this.minorResumed = ok ? 'ok' : 'failed';
     if (!ok && pendingMigrations.length) {
       const failed = this.report.recorded.filter((r) => r.status === 'failed').slice(-1)[0];
@@ -357,7 +371,7 @@ export class UpgradeRun {
    * code), then each command whose latest attempt is not completed: run it, record completed or failed. Returns false when a
    * command failed (recorded and reported: warn and serve, exit 70; the next start retries it).
    */
-  private async runInstanceSteps(session: UpgradeSession, version: string): Promise<boolean> {
+  private async runInstanceSteps(session: UpgradeSession, version: string, forcedSteps: ReadonlySet<string> = new Set()): Promise<boolean> {
     const { codeVersion, force, log } = this.options;
     await this.recordIfIncomplete(session, migrationsStepName(version), 'completed');
     for (const command of commandsForVersion(version, this.registry)) {
@@ -378,13 +392,17 @@ export class UpgradeRun {
           flushBlockCache: this.options.flushBlockCache,
         });
       } catch (error) {
-        const attempt = await withUpgradeScope(session, 'upgrade', (q) => recordUpgradeMigration(q, { name, status: 'failed', executedByVersion: codeVersion, forced: force, error }));
+        const attempt = await withUpgradeScope(session, 'upgrade', (q) =>
+          recordUpgradeMigration(q, { name, status: 'failed', executedByVersion: codeVersion, forced: force || forcedSteps.has(name), error }),
+        );
         this.report.recorded.push({ name, status: 'failed', attempt });
         this.report.commandFailure = { name, errorName: error instanceof Error ? error.name : 'Error' };
         log(`ERROR: upgrade command ${name} FAILED (attempt ${attempt}); the schema matches this code, so the API serves with upgradeFailed:true (exit 70). The next start retries it.`);
         return false;
       }
-      const attempt = await withUpgradeScope(session, 'upgrade', (q) => recordUpgradeMigration(q, { name, status: 'completed', executedByVersion: codeVersion, forced: force }));
+      const attempt = await withUpgradeScope(session, 'upgrade', (q) =>
+        recordUpgradeMigration(q, { name, status: 'completed', executedByVersion: codeVersion, forced: force || forcedSteps.has(name) }),
+      );
       this.report.recorded.push({ name, status: 'completed', attempt });
     }
     return true;

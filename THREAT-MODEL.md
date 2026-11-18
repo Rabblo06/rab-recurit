@@ -9473,7 +9473,11 @@ Reversal:   Upgrade / `resolutions` override (documented in "//resolutions") as 
     incomplete (logged as a WARNING). The invariant is stated in `upgrade-runner.ts`, `upgrade-version.ts` and
     `upgrade-command.ts`.
   - **`--force` (review O4):** a `--force` patch start that is resumable reports decision `continue`, not `forced` (the resume
-    check comes first); every logbook row it writes is still marked `forced = true`.
+    check comes first); every logbook row it writes is still marked `forced = true`. A later retry of a `.0` step that an
+    earlier `--force` start attempted, run when nothing is pending (that start already applied this code's migrations), is
+    recorded `forced = true` too, with a WARNING that it runs on a schema the forced start moved past the `.0`. The
+    in-process `testUpgrade` seam is refused unless NODE_ENV=test on a disposable, non-production database (like
+    `readTestFailCommand`).
   - Failed `.0` workspace steps are retried by the workspace pass under their `.0` names (it walks each cursor's sequence). A
     blocked workspace stays blocked (503 "Workspace is being upgraded.") until its step passes. `/healthz` reads the `.0`'s
     instance steps for a patch too, so a still-failed `.0` step reads `failed`, also when the patch's own step is completed

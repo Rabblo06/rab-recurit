@@ -183,6 +183,12 @@ export async function unforcedInstanceVersions(query: Query): Promise<string[]> 
   return rows.map((r) => r.v);
 }
 
+/** Whether any earlier instance attempt of this step was written by a --force run. Needs scope 'upgrade' or 'status'. */
+export async function anyForcedInstanceAttempt(query: Query, name: string): Promise<boolean> {
+  const rows = (await query(`SELECT 1 FROM core.upgrade_migration m WHERE m.name = $1 AND m.workspace_id IS NULL AND m.forced LIMIT 1`, [name])) as unknown[];
+  return rows.length > 0;
+}
+
 /** Every version that appears on an instance row (completed or not). */
 export async function instanceVersions(query: Query): Promise<string[]> {
   const rows = (await query(`SELECT DISTINCT m.executed_by_version AS v FROM core.upgrade_migration m WHERE m.workspace_id IS NULL`)) as Array<{ v: string }>;
