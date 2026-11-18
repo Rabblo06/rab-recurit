@@ -9469,3 +9469,9 @@ Reversal:   Upgrade / `resolutions` override (documented in "//resolutions") as 
   - the down/up round trip, with the refusal over an invalid stored zone and zero posture drift.
 
   `organisation-time-zone-sql.spec.ts` checks the SQL statically and checks the golden lines.
+- **Review round 1 (independent DB review, 2026-11-18).**
+  - **F1 (blocking).** On a server with no usable tz database, `pg_timezone_names` is empty. The trigger would then refuse every new organisation, including the default. up() now refuses first: `ORGANISATION_TIME_ZONE_TZDATA_SQL` must accept 'Europe/London' and 'UTC'.
+  - **F2.** The pre-check counts distinct stored zones.
+  - **F3.** Aliases are accepted exactly when the server lists them. Production's Debian trixie postgres images have no `tzdata-legacy`, so `GB` and `US/Eastern` are refused there; `UTC` and `Etc/UTC` are present.
+  - **F5.** Every semantic-posture trigger line now carries `def=`, an md5 of the definition: timing and events, the UPDATE OF columns, the WHEN text, deferrable, arguments and transition tables. A trigger re-created as AFTER, or with another column list, WHEN or arguments, under the same name and function, is now detected. Before this it was invisible: the line pinned only the name, enabled state and function.
+  - **F6.** INSERT without tenant context is refused (42501) for both runtime identities. In the owner-login build, `crewflow_owner` inherits `rab_secure_owner`, but the owner-only policy tests `CURRENT_USER = 'rab_secure_owner'`, so it never applies to crewflow_owner (confirmed green on InstaBox with crewflow_owner as the login).
