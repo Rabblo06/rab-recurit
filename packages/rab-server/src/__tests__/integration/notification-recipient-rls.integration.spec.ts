@@ -116,6 +116,52 @@ describeIfDb('SF-5: core.notification is recipient-scoped by RLS (integration)',
     expect((await adminRow(idB)).read_at).not.toBeNull();
   });
 
+  it('owner test (a): a colleague in the SAME organisation, raw SQL on the runtime login with their own tenant context bound, reads 0 of a colleague\'s notifications and updates 0', async () => {
+    const before = await admin.query(`SELECT user_id, title, read_at FROM core.notification WHERE id = $1`, [idB]);
+    expect(before).toHaveLength(1); // control: staff member B's row exists, so every 0 below is the policy, not absence
+    expect(before[0].user_id).toBe(staffB.userId);
+
+    // Two colleagues of B in B's organisation: another staff member, and the manager whose action created B's row.
+    for (const colleague of [staffA, manager]) {
+      const seen = await as(colleague, async (m) => {
+        const [session] = await m.query(
+          `SELECT current_user::text AS cu, session_user::text AS su,
+                  r.rolsuper AS super, r.rolbypassrls AS bypass,
+                  current_setting('rab.organisation_id', true) AS org, current_setting('rab.user_id', true) AS uid,
+                  coalesce(current_setting('rab.actor_type', true), '') AS actor
+             FROM pg_roles r WHERE r.rolname = current_user`,
+        );
+        const byId = await m.query(`SELECT id, title, message FROM core.notification WHERE id = $1`, [idB]);
+        const all = await m.query(`SELECT id, user_id FROM core.notification`); // no filter at all
+        const allOfB = await m.query(`SELECT id FROM core.notification WHERE user_id = $1`, [staffB.userId]);
+        const updById = await m.query(`UPDATE core.notification SET title = 'tampered', read_at = now() WHERE id = $1`, [idB]);
+        const updAllOfB = await m.query(`UPDATE core.notification SET title = 'tampered' WHERE user_id = $1`, [staffB.userId]);
+        return { session, byId, all, allOfB, updById: affected(updById), updAllOfB: affected(updAllOfB) };
+      });
+
+      // The runtime login itself (not an elevated role), bound to the colleague's own organisation and user, no worker marker.
+      expect(seen.session.cu).toBe(seen.session.su);
+      expect(seen.session.cu).not.toBe('crewflow');
+      expect(seen.session.super).toBe(false);
+      expect(seen.session.bypass).toBe(false);
+      expect(seen.session.org).toBe(orgId);
+      expect(seen.session.uid).toBe(colleague.userId);
+      expect(seen.session.actor).toBe('');
+
+      expect(seen.byId).toEqual([]); // SELECT by id
+      expect(seen.allOfB).toEqual([]); // SELECT by recipient
+      expect(seen.all.map((r: { id: string }) => r.id)).not.toContain(idB); // SELECT all
+      expect(seen.all.every((r: { user_id: string }) => r.user_id === colleague.userId)).toBe(true); // only their own, if any
+      expect(seen.updById).toBe(0); // UPDATE by id
+      expect(seen.updAllOfB).toBe(0); // UPDATE by recipient
+    }
+
+    // Positive control: the recipient runs the identical SELECT by id and sees the row.
+    expect(await as(staffB, (m) => m.query(`SELECT id FROM core.notification WHERE id = $1`, [idB]))).toEqual([{ id: idB }]);
+    // Nothing changed on B's row.
+    expect(await admin.query(`SELECT user_id, title, read_at FROM core.notification WHERE id = $1`, [idB])).toEqual(before);
+  });
+
   it('insert stays organisation-bound: a row for another organisation is refused', async () => {
     await expect(
       as(manager, (m) => m.query(`INSERT INTO core.notification (organisation_id, user_id, type, title, message) VALUES ($1, $2, 'TEST', 't', 'm')`, [otherOrgManager.organisationId, otherOrgManager.userId])),
@@ -134,12 +180,57 @@ describeIfDb('SF-5: core.notification is recipient-scoped by RLS (integration)',
     expect(await count({ 'rab.organisation_id': '', 'rab.user_id': '', 'rab.actor_type': 'worker' })).toBe(0);
   });
 
-  it('worker marker: a system job reads its organisation\'s notifications (push send, statement probe), never another organisation\'s', async () => {
-    const seen = await asWorker(orgId, (m) => m.query(`SELECT id FROM core.notification WHERE id = ANY($1::uuid[])`, [[idA, idB]]));
-    expect(seen.map((r: { id: string }) => r.id).sort()).toEqual([idA, idB].sort());
+  it('owner test (b): with the worker marker the Worker gets only what sending pushes needs: SELECT in its own organisation, no UPDATE, no DELETE, nothing of another organisation', async () => {
+    // A notification in the OTHER organisation, written there by its own member.
+    const otherOffer = randomUUID();
+    await as(otherOrgManager, (m) => notifications.notify(m, {
+      organisationId: otherOrgManager.organisationId, userId: otherOrgManager.userId, type: NotificationType.OFFER_SENT,
+      title: 'Other organisation', message: 'Elsewhere · £50.00', relatedEntityType: 'offer', relatedEntityId: otherOffer,
+    }));
+    const [{ id: idOther }] = await admin.query(`SELECT id FROM core.notification WHERE related_entity_id = $1`, [otherOffer]);
+    const snapshot = () => admin.query(`SELECT id, user_id, title, read_at FROM core.notification WHERE id = ANY($1::uuid[]) ORDER BY id`, [[idA, idB, idOther]]);
+    const before = await snapshot();
+    expect(before).toHaveLength(3);
+
+    const run = await asWorker(orgId, async (m) => {
+      const [session] = await m.query(
+        `SELECT current_setting('rab.actor_type', true) AS actor, current_setting('rab.organisation_id', true) AS org,
+                coalesce(current_setting('rab.user_id', true), '') AS uid`,
+      );
+      // What push send reads: the notification its delivery row names, by id (push-send.processor.ts revalidation).
+      const pushRead = await m.query(`SELECT id, type FROM core.notification WHERE id = $1`, [idA]);
+      const ownOrg = await m.query(`SELECT id FROM core.notification WHERE id = ANY($1::uuid[])`, [[idA, idB]]);
+      const all = await m.query(`SELECT id, organisation_id FROM core.notification`); // no filter at all
+      const otherById = await m.query(`SELECT id FROM core.notification WHERE id = $1`, [idOther]);
+      const updOne = affected(await m.query(`UPDATE core.notification SET read_at = now(), title = 'tampered' WHERE id = $1`, [idA]));
+      const updOrg = affected(await m.query(`UPDATE core.notification SET title = 'tampered' WHERE organisation_id = $1`, [orgId]));
+      const updOther = affected(await m.query(`UPDATE core.notification SET title = 'tampered' WHERE id = $1`, [idOther]));
+      const delOne = affected(await m.query(`DELETE FROM core.notification WHERE id = $1`, [idA]));
+      const delOrg = affected(await m.query(`DELETE FROM core.notification WHERE organisation_id = $1`, [orgId]));
+      const delOther = affected(await m.query(`DELETE FROM core.notification WHERE id = $1`, [idOther]));
+      return { session, pushRead, ownOrg, all, otherById, updOne, updOrg, updOther, delOne, delOrg, delOther };
+    });
+
+    // The marker really is the only thing that differs from a no-user context: no uid, bound organisation.
+    expect(run.session).toEqual({ actor: 'worker', org: orgId, uid: '' });
+    // SELECT in its own organisation: yes (push send can read the row it delivers, whoever the recipient is).
+    expect(run.pushRead).toEqual([{ id: idA, type: NotificationType.OFFER_SENT }]);
+    expect(run.ownOrg.map((r: { id: string }) => r.id).sort()).toEqual([idA, idB].sort());
+    // Another organisation's notification: never, by id or in an unfiltered SELECT.
+    expect(run.otherById).toEqual([]);
+    expect(run.all.map((r: { id: string }) => r.id)).not.toContain(idOther);
+    expect(run.all.every((r: { organisation_id: string }) => r.organisation_id === orgId)).toBe(true);
+    // UPDATE and DELETE: 0 rows, in its own organisation and in the other one.
+    expect([run.updOne, run.updOrg, run.updOther, run.delOne, run.delOrg, run.delOther]).toEqual([0, 0, 0, 0, 0, 0]);
+    expect(await snapshot()).toEqual(before); // nothing changed, nothing removed
+
+    // The same marker bound to the other organisation does not reach this organisation's rows either.
     expect(await asWorker(otherOrgManager.organisationId, (m) => m.query(`SELECT id FROM core.notification WHERE id = ANY($1::uuid[])`, [[idA, idB]]))).toEqual([]);
-    // The worker can read but not mark someone's notification as read (UPDATE is recipient-only).
-    expect(affected(await asWorker(orgId, (m) => m.query(`UPDATE core.notification SET read_at = now() WHERE id = $1`, [idA])))).toBe(0);
+    // Control: without the marker, the same no-user context (what push send bound before SF-5) reads nothing at all.
+    const noMarker = await tenantContext.runInTenantContext({ organisationId: orgId, workspaceId: null, userId: '', role: '' } as AuthContext, (m) =>
+      m.query(`SELECT id FROM core.notification WHERE id = ANY($1::uuid[])`, [[idA, idB]]),
+    );
+    expect(noMarker).toEqual([]);
   });
 
   it('offer read receipt: the definer returns only the read time of that offer\'s notification for that recipient, inside the organisation', async () => {
