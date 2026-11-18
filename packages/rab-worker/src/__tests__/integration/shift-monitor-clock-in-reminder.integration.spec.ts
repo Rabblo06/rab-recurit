@@ -198,7 +198,7 @@ describeIfDb('shift monitor — clock-in window open reminder (integration)', ()
   }
 
   async function clockInReminders(fx: OrgFixture, assignmentId: string): Promise<Notification[]> {
-    return withNotificationReader({ organisationId: fx.organisationId, workspaceId: fx.workspaceId, userId: fx.managerUserId }, (m) =>
+    return withNotificationReader({ organisationId: fx.organisationId, workspaceId: fx.workspaceId }, (m) =>
       m.find(Notification, { where: { relatedEntityType: 'shift_assignment', relatedEntityId: assignmentId, type: NotificationType.CLOCK_IN_WINDOW_OPEN } }),
     );
   }
@@ -399,7 +399,7 @@ describeIfDb('shift monitor — clock-in window open reminder (integration)', ()
 
     await runShiftMonitorCycle(adminDataSource, tenantContext, notificationService, auditService, 15);
     expect(await clockInReminders(fxA, assignmentId)).toHaveLength(1);
-    const crossOrgRead = await withNotificationReader({ organisationId: fxB.organisationId, workspaceId: fxB.workspaceId, userId: fxB.managerUserId }, (m) =>
+    const crossOrgRead = await withNotificationReader({ organisationId: fxB.organisationId, workspaceId: fxB.workspaceId }, (m) =>
       m.find(Notification, { where: { relatedEntityType: 'shift_assignment', relatedEntityId: assignmentId } }),
     );
     expect(crossOrgRead).toHaveLength(0); // RLS: org B's tenant context sees zero rows for org A's assignment
@@ -476,7 +476,7 @@ describeIfDb('shift monitor — clock-in window open reminder (integration)', ()
 
     await runShiftMonitorCycle(adminDataSource, tenantContext, notificationService, auditService, 45);
     expect(await clockInReminders(fx, assignmentId)).toHaveLength(1);
-    const shift30mReminder = await withNotificationReader({ organisationId: fx.organisationId, workspaceId: fx.workspaceId, userId: fx.managerUserId }, (m) =>
+    const shift30mReminder = await withNotificationReader({ organisationId: fx.organisationId, workspaceId: fx.workspaceId }, (m) =>
       m.find(Notification, { where: { relatedEntityType: 'shift_assignment', relatedEntityId: assignmentId, type: NotificationType.SHIFT_REMINDER_30M } }),
     );
     expect(shift30mReminder).toHaveLength(0); // not yet within 30 minutes of start
@@ -489,7 +489,7 @@ describeIfDb('shift monitor — clock-in window open reminder (integration)', ()
 
     await runShiftMonitorCycle(adminDataSource, tenantContext, notificationService, auditService, 30);
     expect(await clockInReminders(fx, assignmentId)).toHaveLength(0); // suppressed: the 30m reminder already covers this moment
-    const shift30mReminder = await withNotificationReader({ organisationId: fx.organisationId, workspaceId: fx.workspaceId, userId: fx.managerUserId }, (m) =>
+    const shift30mReminder = await withNotificationReader({ organisationId: fx.organisationId, workspaceId: fx.workspaceId }, (m) =>
       m.find(Notification, { where: { relatedEntityType: 'shift_assignment', relatedEntityId: assignmentId, type: NotificationType.SHIFT_REMINDER_30M } }),
     );
     expect(shift30mReminder).toHaveLength(1); // the pre-existing window's own behaviour is NEVER changed by the collision rule
