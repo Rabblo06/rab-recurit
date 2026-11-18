@@ -4,7 +4,7 @@ import { ARCHIVE_TRANSITIONS, ArchiveState, archiveStateOf, assertTransition, Em
 import { BadRequestException, ConflictException, ForbiddenException, Inject, Injectable, NotFoundException } from '@nestjs/common';
 import { PermissionsService } from '../../../engine/core-modules/permissions/permissions.service';
 import { CoreEntityCacheService } from '../../../engine/core-modules/entity-cache/core-entity-cache.service';
-import { EntityManager, In } from 'typeorm';
+import { EntityManager, In, IsNull } from 'typeorm';
 
 import { AccountInvite, EmailOutbox, Organisation, OrganisationMember, Permission, Role, RolePermission, User, UserRole } from '../../identity/entities';
 import { AuthContext } from '../../../engine/core-modules/tenant/auth-context.interface';
@@ -918,6 +918,7 @@ export class ManagerService {
   ): Promise<{ sendNumber: number; expiresAt: Date; queued: boolean }> {
     return this.tenantContext.runInTenantContext(ctx, async (manager) => {
       await this.assertRouteFlagTx(manager, ctx, requiredPermission, alsoRequires ?? undefined);
+      await this.assertVenueRouteTargetTx(manager, ctx, id, requiredPermission);
       const profile = await this.findPendingProfileOrFail(manager, ctx, id);
       const { invite } = await this.resendPendingProfileWithin(manager, ctx, profile);
       return invite;
@@ -1001,9 +1002,25 @@ export class ManagerService {
     return trimmed;
   }
 
+  /**
+   * The Venue Manager route's flag (`venue_manager.create`) authorises Venue Manager records of the caller's own workspace
+   * only. `VenueManagerService` checks that before delegating; this repeats it in the action's own transaction so a direct
+   * caller passing that flag cannot reach an Internal Manager or CEO (or another workspace's Venue Manager): 404 otherwise.
+   * No-op for the `/managers` flag. (SF-2 review L-1: resend / cancel only; see the PR for the remaining methods.)
+   */
+  private async assertVenueRouteTargetTx(manager: EntityManager, ctx: AuthContext, id: string, requiredPermission: ManagerRouteFlag): Promise<void> {
+    if (requiredPermission !== PermissionFlag.VENUE_MANAGER_CREATE) return;
+    if (!ctx.organisationId || !ctx.workspaceId) throw new NotFoundException('Venue Manager not found.');
+    const ownVenueManager = await manager.exists(ManagerProfile, {
+      where: { id, organisationId: ctx.organisationId, workspaceId: ctx.workspaceId, type: ManagerType.VENUE },
+    });
+    if (!ownVenueManager) throw new NotFoundException('Venue Manager not found.');
+  }
+
   /** The platform-admin path reaches the target organisation's pending CEO invitation only; anything else is 404. */
   private async findPendingCeoProfileForPlatformAdminOrFail(manager: EntityManager, ctx: AuthContext, id: string): Promise<ManagerProfile> {
-    const isCeoOfThisOrganisation = await manager.exists(ManagerProfile, { where: { id, organisationId: ctx.organisationId!, type: ManagerType.CEO } });
+    if (!ctx.organisationId) throw new NotFoundException('Manager not found.');
+    const isCeoOfThisOrganisation = await manager.exists(ManagerProfile, { where: { id, organisationId: ctx.organisationId, type: ManagerType.CEO } });
     if (!isCeoOfThisOrganisation) throw new NotFoundException('Manager not found.');
     return this.findPendingProfileOrFail(manager, ctx, id);
   }
@@ -1090,6 +1107,7 @@ export class ManagerService {
   ): Promise<void> {
     return this.tenantContext.runInTenantContext(ctx, async (manager) => {
       await this.assertRouteFlagTx(manager, ctx, requiredPermission, alsoRequires ?? undefined);
+      await this.assertVenueRouteTargetTx(manager, ctx, id, requiredPermission);
       await this.cancelInviteWithin(manager, ctx, id);
     });
   }
@@ -1105,7 +1123,14 @@ export class ManagerService {
     return this.tenantContext.runInTenantContext(ctx, async (manager) => {
       await this.assertActivePlatformAdminTx(manager, ctx);
       const profile = await this.findPendingCeoProfileForPlatformAdminOrFail(manager, ctx, id);
-      const inviteId = await this.latestInviteIdTx(manager, profile.userId);
+      // The invitation THIS action revokes: the live one (not accepted, not revoked), read under the profile's user lock
+      // before revokeActive (the same rows revokeActive revokes). null when nothing was unrevoked (e.g. already cancelled).
+      const live = await manager.findOne(AccountInvite, {
+        where: { userId: profile.userId, acceptedAt: IsNull(), revokedAt: IsNull() },
+        order: { sendNumber: 'DESC', createdAt: 'DESC' },
+        select: { id: true },
+      });
+      const inviteId = live?.id ?? null;
       await this.cancelPendingProfileWithin(manager, ctx, profile);
       await this.auditService.record(manager, ctx, AuditAction.PLATFORM_ADMIN_INVITE_CANCELLED, {
         targetUserId: profile.userId,

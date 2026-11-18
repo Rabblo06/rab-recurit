@@ -59,7 +59,7 @@ describeIfDb('SF-2 invite resend / cancel: route-flag re-check and the platform-
   let pendingMgrT: TestIdentity; // a pending non-CEO Manager in T (outside the platform-admin reach)
   let mgrAllT: TestIdentity; // a Manager of T holding every flag, but not a platform admin
 
-  let platformAdmin: TestIdentity; // platform admin of ANOTHER organisation (no role in A or T)
+  let platformAdmin: TestIdentity; // platform admin of ANOTHER organisation: every flag there, no role in A or T
 
   const ctxOf = (identity: TestIdentity): AuthContext => ({ organisationId: identity.organisationId, workspaceId: identity.workspaceId, userId: identity.userId, role: 'manager' });
   /** The context the Admin Panel builds for a platform administrator acting on another organisation (no role there). */
@@ -152,7 +152,8 @@ describeIfDb('SF-2 invite resend / cancel: route-flag re-check and the platform-
     pendingB = await factory.createInternalManager(orgB, { label: 'sf2inv-b-pending' });
     await setInvited(pendingB);
 
-    const padminOrg = await factory.createOrganisationWithManagers(1, { firstIsPlatformAdmin: true, label: 'sf2inv-padmin' });
+    // Every flag in its OWN organisation (incl. manager.manage + user.reset_password), so a refusal elsewhere is never just a missing flag at home.
+    const padminOrg = await factory.createOrganisationWithManagers(1, { firstIsPlatformAdmin: true, permissions: 'all', label: 'sf2inv-padmin' });
     platformAdmin = padminOrg.managers[0]!;
 
     // Organisation T with a pending CEO, created the way the Admin Panel's legacy flow does (`createWithin`, behind its own
@@ -212,6 +213,21 @@ describeIfDb('SF-2 invite resend / cancel: route-flag re-check and the platform-
       await expectRefusedAndInert(orgT, () => managers.cancelInvite(adminCtxIn(orgT), pendingCeoT.profileId));
     });
 
+    it('a platform administrator acting in its OWN organisation (manager.manage + user.reset_password held there) gets 404 for another organisation\'s pending CEO, both organisations inert', async () => {
+      const own = ctxOf(platformAdmin);
+      const beforeOwn = await snapshot(platformAdmin.organisationId);
+      // The flags pass (bound to its own organisation); the lookup then cannot see the CEO's core.user row (org-scoped RLS) → 404.
+      await expectNotFoundAndInert(orgT, () => managers.resendInvite(own, pendingCeoT.profileId));
+      await expectNotFoundAndInert(orgT, () => managers.cancelInvite(own, pendingCeoT.profileId));
+      expect(await snapshot(platformAdmin.organisationId)).toEqual(beforeOwn);
+    });
+
+    it('the Venue Manager route flag is pinned to the caller\'s own Venue Managers: venue_manager.create on an Internal Manager id → 404, inert', async () => {
+      // mgrA holds venue_manager.create + user.reset_password, so only the target pin can refuse.
+      await expectNotFoundAndInert(orgA, () => managers.resendInvite(ctxOf(mgrA), pendingA.profileId!, PermissionFlag.VENUE_MANAGER_CREATE));
+      await expectNotFoundAndInert(orgA, () => managers.cancelInvite(ctxOf(mgrA), pendingA.profileId!, PermissionFlag.VENUE_MANAGER_CREATE));
+    });
+
     it('a record outside the caller\'s scope → 404 with the flags held: another organisation\'s pending Manager, or an unknown id', async () => {
       for (const id of [pendingB.profileId!, randomUUID()]) {
         await expectNotFoundAndInert(orgA, () => managers.resendInvite(ctxOf(ceoA), id));
@@ -240,6 +256,7 @@ describeIfDb('SF-2 invite resend / cancel: route-flag re-check and the platform-
       await expectRefusedAndInert(orgT, () => managers.cancelInviteAsPlatformAdmin(ctx, pendingCeoT.profileId));
       // The same 403 for an unknown id: the platform-admin check comes before any row is read.
       await expectRefusedAndInert(orgT, () => managers.resendInviteAsPlatformAdmin(ctx, randomUUID(), { reason: 'not an admin' }));
+      await expectRefusedAndInert(orgT, () => managers.cancelInviteAsPlatformAdmin(ctx, randomUUID()));
     });
 
     it('a non-admin is refused through OrganisationOnboardingService too (resendCeoInvite / revokeCeoInvite)', async () => {
@@ -247,10 +264,14 @@ describeIfDb('SF-2 invite resend / cancel: route-flag re-check and the platform-
       await expectRefusedAndInert(orgT, () => onboarding.revokeCeoInvite({ userId: mgrAllT.userId }, orgT));
     });
 
-    it('a platform administrator inside an Admin Inspect session is refused on the admin path → 403', async () => {
-      const inspecting: AuthContext = { ...adminCtxIn(orgT), userId: pendingCeoT.userId, inspectedBy: platformAdmin.userId };
+    it('an ACTIVE platform administrator inside an Admin Inspect session is refused on the admin path → 403, inert (service and OrganisationOnboardingService)', async () => {
+      // userId is the active platform admin itself, so only the inspectedBy refusal can stop it.
+      const inspectedBy = mgrAllT.userId;
+      const inspecting: AuthContext = { ...adminCtxIn(orgT), inspectedBy };
       await expectRefusedAndInert(orgT, () => managers.resendInviteAsPlatformAdmin(inspecting, pendingCeoT.profileId, { reason: 'inspecting' }));
       await expectRefusedAndInert(orgT, () => managers.cancelInviteAsPlatformAdmin(inspecting, pendingCeoT.profileId));
+      await expectRefusedAndInert(orgT, () => onboarding.resendCeoInvite({ userId: platformAdmin.userId, inspectedBy }, orgT, 'inspecting'));
+      await expectRefusedAndInert(orgT, () => onboarding.revokeCeoInvite({ userId: platformAdmin.userId, inspectedBy }, orgT));
     });
 
     it('a revoked platform administrator is refused → 403, nothing changes', async () => {
@@ -301,14 +322,15 @@ describeIfDb('SF-2 invite resend / cancel: route-flag re-check and the platform-
       expect(JSON.stringify(rows[1]!.metadata)).not.toMatch(/token/i);
     });
 
-    it('a platform administrator revokes through the admin path: invite revoked, password cleared, and its own platform_admin.invite_cancelled row', async () => {
-      const [latest] = (await admin.query(
-        `SELECT id FROM core.account_invite WHERE user_id = $1 ORDER BY send_number DESC, created_at DESC LIMIT 1`,
+    it('a platform administrator revokes through the admin path: the live invite revoked, password cleared, and platform_admin.invite_cancelled names that invite', async () => {
+      const live = (await admin.query(
+        `SELECT id FROM core.account_invite WHERE user_id = $1 AND accepted_at IS NULL AND revoked_at IS NULL`,
         [pendingCeoT.userId],
       )) as Array<{ id: string }>;
+      expect(live).toHaveLength(1);
       await onboarding.revokeCeoInvite({ userId: platformAdmin.userId }, orgT);
 
-      const [invite] = (await admin.query(`SELECT revoked_at FROM core.account_invite WHERE id = $1`, [latest!.id])) as Array<{ revoked_at: Date | null }>;
+      const [invite] = (await admin.query(`SELECT revoked_at FROM core.account_invite WHERE id = $1`, [live[0]!.id])) as Array<{ revoked_at: Date | null }>;
       expect(invite!.revoked_at).not.toBeNull();
       const [user] = (await admin.query(`SELECT status, password_hash IS NULL AS no_password FROM core."user" WHERE id = $1`, [pendingCeoT.userId])) as Array<{ status: string; no_password: boolean }>;
       expect(user).toEqual({ status: UserStatus.INVITED, no_password: true });
@@ -318,9 +340,18 @@ describeIfDb('SF-2 invite resend / cancel: route-flag re-check and the platform-
       expect(rows[1]).toMatchObject({
         actor_user_id: platformAdmin.userId,
         entity_type: 'account_invite',
-        entity_id: latest!.id,
-        metadata: { organisationId: orgT, managerProfileId: pendingCeoT.profileId, inviteId: latest!.id },
+        entity_id: live[0]!.id,
+        metadata: { organisationId: orgT, managerProfileId: pendingCeoT.profileId, inviteId: live[0]!.id },
       });
+    });
+
+    it('a second revoke with nothing live records inviteId null (never an already-revoked invite)', async () => {
+      await onboarding.revokeCeoInvite({ userId: platformAdmin.userId }, orgT);
+      const rows = await auditRows(orgT, pendingCeoT.userId, ['platform_admin.invite_cancelled']);
+      expect(rows).toHaveLength(2);
+      const nulls = rows.filter((r) => (r.metadata as { inviteId: unknown }).inviteId === null);
+      expect(nulls).toHaveLength(1);
+      expect(nulls[0]).toMatchObject({ entity_type: null, entity_id: null });
     });
   });
 });
