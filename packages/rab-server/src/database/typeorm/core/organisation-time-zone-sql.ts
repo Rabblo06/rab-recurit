@@ -28,8 +28,20 @@
  * `+`, `-`), and not one of the tz database's non-zone entries: the `posix/` and `right/` copies (`right/` zones count
  * leap seconds and Intl does not know them), `posixrules`, `localtime` and `Factory`. POSIX offset strings such as
  * `UTC+3` or `<+03>-3`, which `AT TIME ZONE` would also accept, are refused: they have no daylight-saving rules a person
- * can audit. Legacy IANA aliases (`GB`, `US/Eastern`, `Etc/GMT+5`) are accepted (they are IANA names); whether the
- * settings screen should offer only canonical names is an owner question for phase 2.
+ * can audit. Legacy IANA aliases (`GB`, `US/Eastern`, `Etc/GMT+5`) are accepted WHEN the server's tz database lists them
+ * (they are IANA names): that depends on the image (Debian's tzdata / tzdata-legacy split drops the `backward` aliases
+ * from some images), so the same name can be accepted on one server and refused on another; the integration spec pins
+ * "accepted exactly when pg_timezone_names lists it". `Etc/GMT+N` is the POSIX sign trap: `Etc/GMT+5` is UTC-05:00.
+ * Phase 2's settings screen offers canonical `Area/Location` names only (owner question Q10).
+ *
+ * WHEN IT FIRES. `UPDATE OF timezone` fires only when `timezone` is a target of the UPDATE's SET list (whatever the value):
+ * an UPDATE that does not name the column never runs the check. That is intended (other writes are never blocked); it also
+ * means a BEFORE UPDATE trigger of another name that rewrote NEW.timezone would not be re-checked - there is none on
+ * core.organisation, and the semantic posture golden pins every trigger on the table with its definition hash.
+ *
+ * NO USABLE TZ DATABASE. If the server has no tz data, pg_timezone_names is empty: the pre-check over an empty table would
+ * pass and then every INSERT, even the default 'Europe/London', would fail. up() therefore first asserts the rule accepts
+ * 'Europe/London' and 'UTC' on this server (ORGANISATION_TIME_ZONE_TZDATA_SQL) and refuses otherwise (DB review F1).
  *
  * RLS AND GRANTS: UNCHANGED. core.organisation stays ENABLE + FORCE (PreAuthTablesForceOwnerOnly1786721400000; it is no
  * longer on a NOT-FORCED list), with its two policies organisation_self (id = core.current_org()) and
@@ -101,14 +113,24 @@ SELECT a.atttypid = 'pg_catalog.text'::pg_catalog.regtype AS is_text,
 export const ORGANISATION_TIME_ZONE_EXPECTED_DEFAULT_EXPR = `'Europe/London'::text`;
 
 /**
- * Pre-check (read-only, run as rab_secure_owner, whose owner-only policy shows every organisation): how many stored zones
- * the new rule would refuse. Any > 0 refuses the migration (fail closed; the operator fixes those rows first). Only the
- * count is read, never a value.
+ * Pre-check (read-only, run as rab_secure_owner, whose owner-only policy shows every organisation): how many DISTINCT stored
+ * zones the new rule would refuse (distinct first, so the tz directory is read once per zone, not once per organisation;
+ * DB review F2). Any > 0 refuses the migration (fail closed; the operator fixes those rows first). Only the count is read,
+ * never a value.
  */
 export const ORGANISATION_TIME_ZONE_INVALID_ROWS_SQL = `
 SELECT pg_catalog.count(*)::integer AS invalid
-  FROM core.organisation o
+  FROM (SELECT DISTINCT d.timezone FROM core.organisation d) o
  WHERE NOT ${validTimeZonePredicate('o.timezone')}`;
+
+/**
+ * Pre-check (read-only, no table read): the rule accepts the default and UTC on THIS server. Both false means the server has
+ * no usable tz database (pg_timezone_names empty), and the trigger would refuse every new organisation (DB review F1).
+ * The two literals are code constants.
+ */
+export const ORGANISATION_TIME_ZONE_TZDATA_SQL = `
+SELECT ${validTimeZonePredicate(`'Europe/London'::text`)} AS london,
+       ${validTimeZonePredicate(`'UTC'::text`)} AS utc`;
 
 /** Self-check (read-only): the function, its trigger and the table's RLS, as one row of text facts. */
 export const ORGANISATION_TIME_ZONE_STATE_SQL = `

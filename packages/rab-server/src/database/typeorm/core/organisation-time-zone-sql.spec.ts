@@ -5,11 +5,13 @@ import { join } from 'node:path';
 import { SEMANTIC_GOLDEN_PG16 } from '../../posture-drift/semantic-golden.pg16';
 import { SEMANTIC_GOLDEN_PG17 } from '../../posture-drift/semantic-golden.pg17';
 import { SEMANTIC_GOLDEN_PG18 } from '../../posture-drift/semantic-golden.pg18';
+import { SEMANTIC_OBJECT_SQL } from '../../posture-drift/semantic-posture';
 import {
   functionBodyOf,
   ORGANISATION_TIME_ZONE_DOWN_SQL,
   ORGANISATION_TIME_ZONE_FUNCTION_SQL,
   ORGANISATION_TIME_ZONE_INVALID_ROWS_SQL,
+  ORGANISATION_TIME_ZONE_TZDATA_SQL,
   ORGANISATION_TIME_ZONE_UP_SQL,
   organisationTimeZoneExpectedState,
   validTimeZonePredicate,
@@ -21,7 +23,13 @@ import {
  */
 describe('organisation time zone guard SQL (1786721610000)', () => {
   const bodyHash = createHash('md5').update(`${functionBodyOf(ORGANISATION_TIME_ZONE_FUNCTION_SQL)}|`).digest('hex');
-  const all = [ORGANISATION_TIME_ZONE_FUNCTION_SQL, ...ORGANISATION_TIME_ZONE_UP_SQL, ...ORGANISATION_TIME_ZONE_DOWN_SQL, ORGANISATION_TIME_ZONE_INVALID_ROWS_SQL];
+  const all = [
+    ORGANISATION_TIME_ZONE_FUNCTION_SQL,
+    ...ORGANISATION_TIME_ZONE_UP_SQL,
+    ...ORGANISATION_TIME_ZONE_DOWN_SQL,
+    ORGANISATION_TIME_ZONE_INVALID_ROWS_SQL,
+    ORGANISATION_TIME_ZONE_TZDATA_SQL,
+  ];
 
   it('adds no column, policy or grant, and never touches RLS', () => {
     for (const sql of all) {
@@ -46,6 +54,24 @@ describe('organisation time zone guard SQL (1786721610000)', () => {
   it('the trigger and the pre-check use the same rule text (one source)', () => {
     expect(ORGANISATION_TIME_ZONE_FUNCTION_SQL).toContain(`IF NOT ${validTimeZonePredicate('NEW.timezone')} THEN`);
     expect(ORGANISATION_TIME_ZONE_INVALID_ROWS_SQL).toContain(`WHERE NOT ${validTimeZonePredicate('o.timezone')}`);
+    expect(ORGANISATION_TIME_ZONE_TZDATA_SQL).toContain(`SELECT ${validTimeZonePredicate(`'Europe/London'::text`)} AS london`);
+    expect(ORGANISATION_TIME_ZONE_TZDATA_SQL).toContain(`${validTimeZonePredicate(`'UTC'::text`)} AS utc`);
+    expect(ORGANISATION_TIME_ZONE_TZDATA_SQL).not.toMatch(/FROM\s+core\./); // reads no table
+  });
+
+  it('the invalid-zone pre-check counts DISTINCT zones (the tz directory is read once per zone, not per organisation)', () => {
+    expect(ORGANISATION_TIME_ZONE_INVALID_ROWS_SQL).toContain('FROM (SELECT DISTINCT d.timezone FROM core.organisation d) o');
+    expect(ORGANISATION_TIME_ZONE_INVALID_ROWS_SQL.match(/core\.organisation/g)).toHaveLength(1);
+  });
+
+  it('up() runs the tz-database check before the role switch and before anything is created (DB review F1)', () => {
+    const source = readFileSync(join(__dirname, 'migrations', '1786721610000-OrganisationTimeZoneGuard.ts'), 'utf8');
+    const up = source.slice(source.indexOf('public async up('), source.indexOf('public async down('));
+    const at = (needle: string) => up.indexOf(needle);
+    expect(at('ORGANISATION_TIME_ZONE_TZDATA_SQL')).toBeGreaterThan(0);
+    expect(at('ORGANISATION_TIME_ZONE_TZDATA_SQL')).toBeLessThan(at("'SET LOCAL ROLE rab_secure_owner'"));
+    expect(at("'SET LOCAL ROLE rab_secure_owner'")).toBeLessThan(at('ORGANISATION_TIME_ZONE_FUNCTION_SQL'));
+    expect(up).toMatch(/tz\?\.london !== true \|\| tz\?\.utc !== true/);
     expect(validTimeZonePredicate('x')).toContain('pg_catalog.pg_timezone_names');
   });
 
@@ -60,11 +86,20 @@ describe('organisation time zone guard SQL (1786721610000)', () => {
     const fnLine =
       'function|organisation_timezone_guard()|owner=rab_secure_owner|definer=false|lang=plpgsql|vol=v|strict=false|leakproof=false|' +
       `config=search_path=pg_catalog, pg_temp|body=${bodyHash}`;
-    const trgLine = 'trigger|organisation|organisation_timezone_guard|enabled=O|core.organisation_timezone_guard()';
-    for (const golden of [SEMANTIC_GOLDEN_PG16, SEMANTIC_GOLDEN_PG17, SEMANTIC_GOLDEN_PG18]) {
+    // DB review F5: the trigger line carries the hash of its definition (timing, events, UPDATE OF columns, WHEN, arguments).
+    const trgLine = /^trigger\|organisation\|organisation_timezone_guard\|enabled=O\|core\.organisation_timezone_guard\(\)\|def=[0-9a-f]{32}$/;
+    const trgLines = [SEMANTIC_GOLDEN_PG16, SEMANTIC_GOLDEN_PG17, SEMANTIC_GOLDEN_PG18].map((golden) => {
       expect(golden).toContain(fnLine);
-      expect(golden).toContain(trgLine);
+      const lines = golden.filter((l) => trgLine.test(l));
+      expect(lines).toHaveLength(1);
+      return lines[0];
+    });
+    expect(new Set(trgLines).size).toBe(1); // same definition on every major
+    // The hash covers the definition, never the table or schema name (workspace copies stay comparable).
+    for (const part of ['t.tgtype::text', 't.tgattr::pg_catalog.int2[]', 'pg_catalog.pg_get_expr(t.tgqual, t.tgrelid)', 't.tgdeferrable', 't.tginitdeferred', "pg_catalog.encode(t.tgargs, 'hex')", 't.tgoldtable', 't.tgnewtable']) {
+      expect(SEMANTIC_OBJECT_SQL).toContain(part);
     }
+    expect(SEMANTIC_OBJECT_SQL).not.toContain('pg_get_triggerdef');
     expect(organisationTimeZoneExpectedState(bodyHash).function_state).toContain(`body=${bodyHash}`);
   });
 

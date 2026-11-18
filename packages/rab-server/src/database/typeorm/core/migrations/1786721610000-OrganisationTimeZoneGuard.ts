@@ -10,6 +10,7 @@ import {
   ORGANISATION_TIME_ZONE_FUNCTION_SQL,
   ORGANISATION_TIME_ZONE_INVALID_ROWS_SQL,
   ORGANISATION_TIME_ZONE_STATE_SQL,
+  ORGANISATION_TIME_ZONE_TZDATA_SQL,
   ORGANISATION_TIME_ZONE_UP_SQL,
   OrganisationTimeZoneState,
   organisationTimeZoneExpectedState,
@@ -31,7 +32,8 @@ import { BOOTSTRAP_IDENTITY_SQL, BootstrapIdentityFacts, bootstrapIdentityProble
  * rab_secure_owner and crewflow and SET ROLE rab_secure_owner). Everything runs as rab_secure_owner (SET LOCAL ROLE): it
  * owns core.organisation and schema core, and its owner-only policy is what lets the pre-check count every organisation.
  *
- * up(): column pre-check; refuse if any stored zone is invalid (count only); create the function, owner, revoke, trigger;
+ * up(): column pre-check; refuse unless this server's tz database accepts 'Europe/London' and 'UTC' (DB review F1); refuse
+ * if any distinct stored zone is invalid (count only); create the function, owner, revoke, trigger;
  * self-check (function owner / INVOKER / search_path / EXECUTE / exact body, trigger definition and enabled state, RLS
  * ENABLE + FORCE and the two policies unchanged) and secure-owner invariants. Any problem raises and rolls back.
  * down(): drops the trigger and the function; the column and its default stay; same self-check for the absent state.
@@ -49,12 +51,21 @@ export class OrganisationTimeZoneGuard1786721610000 implements MigrationInterfac
       throw new Error(`${this.name}: core.organisation.timezone is not text NOT NULL DEFAULT 'Europe/London' (rolled back): ${JSON.stringify(column ?? null)}`);
     }
 
+    // DB review F1: on a server with no usable tz database the rule would refuse even the default; refuse instead.
+    const [tz] = (await queryRunner.query(ORGANISATION_TIME_ZONE_TZDATA_SQL)) as Array<{ london: boolean; utc: boolean }>;
+    if (tz?.london !== true || tz?.utc !== true) {
+      throw new Error(
+        `${this.name}: this server's tz database does not list 'Europe/London' and 'UTC' (pg_timezone_names; rolled back, nothing applied). ` +
+          'Install the PostgreSQL time zone data first: without it every new organisation would be refused.',
+      );
+    }
+
     await queryRunner.query('SET LOCAL ROLE rab_secure_owner');
     const [{ invalid }] = (await queryRunner.query(ORGANISATION_TIME_ZONE_INVALID_ROWS_SQL)) as Array<{ invalid: number }>;
     if (invalid !== 0) {
       throw new Error(
-        `${this.name}: ${invalid} organisation(s) store a time zone that is not a valid IANA name (rolled back, nothing applied). ` +
-          'Correct those rows first (core.organisation.timezone), then re-run.',
+        `${this.name}: ${invalid} distinct invalid zone(s) stored in core.organisation.timezone (not a valid IANA name on this server; ` +
+          'rolled back, nothing applied). Correct those rows first, then re-run.',
       );
     }
     await queryRunner.query(ORGANISATION_TIME_ZONE_FUNCTION_SQL);

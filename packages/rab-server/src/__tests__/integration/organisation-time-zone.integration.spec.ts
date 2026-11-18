@@ -9,6 +9,7 @@ import {
   ORGANISATION_TIME_ZONE_ABSENT_STATE,
   ORGANISATION_TIME_ZONE_FUNCTION_SQL,
   ORGANISATION_TIME_ZONE_STATE_SQL,
+  ORGANISATION_TIME_ZONE_TZDATA_SQL,
   functionBodyOf,
   organisationTimeZoneExpectedState,
 } from '../../database/typeorm/core/organisation-time-zone-sql';
@@ -25,7 +26,13 @@ import { resolveIntegrationTestDatabase } from '../../database/typeorm/core/test
 const RUN = integrationTestDatabaseReady();
 const describeIfDb = RUN ? describe : describe.skip;
 
-const VALID = ['Europe/London', 'America/New_York', 'Asia/Kolkata', 'America/Argentina/Buenos_Aires', 'Australia/Lord_Howe', 'UTC', 'Etc/GMT+5'];
+const VALID = ['Europe/London', 'America/New_York', 'Asia/Kolkata', 'America/Argentina/Buenos_Aires', 'Australia/Lord_Howe', 'Etc/UTC'];
+/**
+ * IANA aliases (the tz `backward` / `etcetera` links). Whether the server lists them depends on its tz database (Debian's
+ * tzdata / tzdata-legacy split drops some), so the rule is pinned as "accepted exactly when pg_timezone_names lists it"
+ * (DB review F3). `Etc/GMT+5` is UTC-05:00 (POSIX sign): accepted, but phase 2's settings screen offers canonical names only.
+ */
+const ALIASES = ['GB', 'US/Eastern', 'Etc/GMT+5', 'UTC'];
 const INVALID = [
   'Mars/Olympus_Mons', // not in the tz database
   'europe/london', // wrong case (the stored spelling must be canonical)
@@ -174,6 +181,37 @@ describeIfDb('organisation time zone (integration, OrganisationTimeZoneGuard1786
       }
     });
 
+    it.each(ALIASES)("alias %s is accepted exactly when this server's tz database lists it", async (zone) => {
+      const listed = ((await admin.query(`SELECT EXISTS (SELECT 1 FROM pg_timezone_names WHERE name = $1) AS listed`, [zone])).rows[0] as { listed: boolean }).listed;
+      await admin.query('BEGIN');
+      let accepted: boolean;
+      try {
+        await admin.query('SAVEPOINT alias');
+        try {
+          await admin.query(`UPDATE core.organisation SET timezone = $2 WHERE id = $1`, [orgA, zone]);
+          accepted = true;
+        } catch (e) {
+          expect((e as { code?: string }).code).toBe('22023');
+          accepted = false;
+          await admin.query('ROLLBACK TO SAVEPOINT alias');
+        }
+      } finally {
+        await admin.query('ROLLBACK');
+      }
+      expect({ zone, accepted }).toEqual({ zone, accepted: listed });
+      expect(await zoneOf(orgA)).toBe('Europe/London');
+    });
+
+    it("this server lists the default and UTC, so up()'s tz-database check passes here (DB review F1)", async () => {
+      await admin.query('BEGIN');
+      try {
+        await admin.query(`SELECT pg_catalog.set_config('search_path', 'pg_catalog, pg_temp', true)`);
+        expect((await admin.query(ORGANISATION_TIME_ZONE_TZDATA_SQL)).rows[0]).toEqual({ london: true, utc: true });
+      } finally {
+        await admin.query('ROLLBACK');
+      }
+    });
+
     it('refuses every non-IANA value with 22023, on UPDATE and on INSERT, and stores nothing', async () => {
       await admin.query('BEGIN');
       try {
@@ -225,6 +263,34 @@ describeIfDb('organisation time zone (integration, OrganisationTimeZoneGuard1786
         expect((await c.query(`UPDATE core.organisation SET timezone = 'America/New_York'`)).rowCount).toBe(0);
       });
       expect(await zoneOf(orgA)).toBe('Europe/London');
+    });
+
+    it.each(RUNTIMES)('runtime %s with NO tenant context cannot INSERT an organisation (RLS WITH CHECK, 42501)', async (runtime) => {
+      await asRuntime(runtime, null, async (c) => {
+        const slug = `tz-noctx-${randomUUID().slice(0, 8)}`;
+        await expectSqlState(c, `INSERT INTO core.organisation (name, slug) VALUES ($1, $2)`, [slug, slug], '42501');
+      });
+    });
+
+    it.each(RUNTIMES)('runtime %s bound to tenant A cannot INSERT an organisation with another id (RLS WITH CHECK, 42501)', async (runtime) => {
+      await asRuntime(runtime, orgA, async (c) => {
+        const slug = `tz-ctx-${randomUUID().slice(0, 8)}`;
+        await expectSqlState(c, `INSERT INTO core.organisation (name, slug, timezone) VALUES ($1, $2, 'Asia/Tokyo')`, [slug, slug], '42501');
+      });
+    });
+
+    it('records which logins ran the RLS cases (DB review F6): the CI login, and crewflow_app; neither is bound by the owner-only policy', async () => {
+      // organisation_secure_owner_definer is TO rab_secure_owner USING (CURRENT_USER = 'rab_secure_owner'): a login that merely
+      // INHERITS rab_secure_owner (crewflow_owner, owner-login build) still has CURRENT_USER = itself, so the policy is false for it.
+      const c = await connect(appUrl);
+      try {
+        const [row] = (await c.query(`SELECT current_user::text AS u, pg_has_role(current_user, 'rab_secure_owner', 'USAGE') AS inherits_owner`)).rows as Array<{ u: string; inherits_owner: boolean }>;
+        process.stdout.write(`organisation-time-zone: CI runtime login = ${row!.u}, inherits rab_secure_owner = ${row!.inherits_owner}\n`);
+        expect(row!.u).not.toBe('rab_secure_owner');
+        expect(['crewflow_owner', 'crewflow_app']).toContain(row!.u);
+      } finally {
+        await c.end();
+      }
     });
 
     it.each(RUNTIMES)('runtime %s bound to its own organisation sees exactly that row, even reading every row', async (runtime) => {
@@ -317,9 +383,24 @@ describeIfDb('organisation time zone (integration, OrganisationTimeZoneGuard1786
         await qr.query(`UPDATE core.organisation SET timezone = 'Mars/Olympus_Mons' WHERE id = $1`, [orgB]);
         // ... and up() then refuses to install it over an invalid stored zone (fail closed, nothing applied).
         await qr.query('SAVEPOINT up_refused');
-        await expect(migration.up(qr)).rejects.toThrow(/1 organisation\(s\) store a time zone that is not a valid IANA name/);
+        await expect(migration.up(qr)).rejects.toThrow(/1 distinct invalid zone\(s\) stored in core\.organisation\.timezone/);
         await qr.query('ROLLBACK TO SAVEPOINT up_refused');
         await qr.query(`UPDATE core.organisation SET timezone = 'Europe/London' WHERE id = $1`, [orgB]);
+        // DB review F1: a server whose tz database lacks the default makes up() refuse BEFORE anything is created. Simulated by
+        // answering only the tz-database check with "not listed" (removing the server's tz files is not possible here).
+        const noTzData = new Proxy(qr, {
+          get(target, prop, receiver) {
+            if (prop === 'query') {
+              return (sql: string, params?: unknown[]) =>
+                sql === ORGANISATION_TIME_ZONE_TZDATA_SQL ? Promise.resolve([{ london: false, utc: true }]) : target.query(sql, params);
+            }
+            const v = Reflect.get(target, prop, receiver) as unknown;
+            return typeof v === 'function' ? (v as (...a: unknown[]) => unknown).bind(target) : v;
+          },
+        });
+        await expect(migration.up(noTzData)).rejects.toThrow(/tz database does not list 'Europe\/London' and 'UTC'/);
+        await qr.query(`SELECT pg_catalog.set_config('search_path', 'pg_catalog, pg_temp', true)`);
+        expect((await qr.query(ORGANISATION_TIME_ZONE_STATE_SQL))[0]).toEqual(ORGANISATION_TIME_ZONE_ABSENT_STATE);
         await migration.up(qr);
         const bodyHash = createHash('md5').update(`${functionBodyOf(ORGANISATION_TIME_ZONE_FUNCTION_SQL)}|`).digest('hex');
         await qr.query(`SELECT pg_catalog.set_config('search_path', 'pg_catalog, pg_temp', true)`);
