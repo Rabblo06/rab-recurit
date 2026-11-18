@@ -96,10 +96,12 @@ describe('organisation time zone guard SQL (1786721610000)', () => {
     });
     expect(new Set(trgLines).size).toBe(1); // same definition on every major
     // The hash covers the definition, never the table or schema name (workspace copies stay comparable).
-    for (const part of ['t.tgtype::text', 't.tgattr::pg_catalog.int2[]', 'pg_catalog.pg_get_expr(t.tgqual, t.tgrelid)', 't.tgdeferrable', 't.tginitdeferred', "pg_catalog.encode(t.tgargs, 'hex')", 't.tgoldtable', 't.tgnewtable']) {
+    for (const part of ['t.tgtype::text', 't.tgattr::pg_catalog.int2[]', 't.tgqual IS NULL', 'pg_catalog.pg_get_triggerdef(t.oid)', 't.tgdeferrable', 't.tginitdeferred', "pg_catalog.encode(t.tgargs, 'hex')", 't.tgoldtable', 't.tgnewtable']) {
       expect(SEMANTIC_OBJECT_SQL).toContain(part);
     }
-    expect(SEMANTIC_OBJECT_SQL).not.toContain('pg_get_triggerdef');
+    // Only the WHEN text is cut out of pg_get_triggerdef (it carries the table name), and this schema's prefix is removed.
+    expect(SEMANTIC_OBJECT_SQL).toContain(`FROM ' WHEN \((.*)\) EXECUTE (FUNCTION|PROCEDURE) '`);
+    expect(SEMANTIC_OBJECT_SQL).toContain(`s.nspname::text || '.', ''`);
     expect(organisationTimeZoneExpectedState(bodyHash).function_state).toContain(`body=${bodyHash}`);
   });
 
