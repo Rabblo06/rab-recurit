@@ -654,18 +654,19 @@ function level22RetainReason(error: unknown): string | null {
  * statement, never a raw set_config of rab.actor_type — worker-actor-type-trusted-only.spec.ts). That statement writes all
  * nine identity GUCs, so the organisation, workspace and role in force are re-bound unchanged, and on the way out everything
  * is bound back with the previous user and no marker. Fail closed if the marker or an optional scope GUC (team_shift_id,
- * team_staff_id, admin_scope, upgrade_scope) is already set: this job never sets them, and the binder resets them to ''.
+ * team_staff_id, admin_scope) is already set: this job never sets them, and the binder resets them to ''. (The binder also
+ * clears the upgrade logbook scope; a Worker job is never inside one, and only the upgrade paths may name it, ledger ST-5.)
  */
 async function withLevel22Visibility<T>(manager: EntityManager, workspaceId: string, run: () => Promise<T>): Promise<T> {
   const [owner] = await manager.query<Array<{ owner_user_id: string | null }>>(`SELECT owner_user_id FROM core.manager_workspace WHERE id = $1`, [workspaceId]);
   if (!owner?.owner_user_id) throw new Level22Retain('workspace_unverifiable');
-  const [previous] = await manager.query<Array<Record<'org' | 'workspace' | 'uid' | 'role' | 'actor' | 'team_shift' | 'team_staff' | 'admin_scope' | 'upgrade_scope', string | null>>>(
+  const [previous] = await manager.query<Array<Record<'org' | 'workspace' | 'uid' | 'role' | 'actor' | 'team_shift' | 'team_staff' | 'admin_scope', string | null>>>(
     `SELECT current_setting('rab.organisation_id', true) AS org, current_setting('rab.workspace_id', true) AS workspace,
             current_setting('rab.user_id', true) AS uid, current_setting('rab.role', true) AS role, current_setting('rab.actor_type', true) AS actor,
             current_setting('rab.team_shift_id', true) AS team_shift, current_setting('rab.team_staff_id', true) AS team_staff,
-            current_setting('rab.admin_scope', true) AS admin_scope, current_setting('rab.upgrade_scope', true) AS upgrade_scope`,
+            current_setting('rab.admin_scope', true) AS admin_scope`,
   );
-  if (previous?.actor || previous?.team_shift || previous?.team_staff || previous?.admin_scope || previous?.upgrade_scope) {
+  if (previous?.actor || previous?.team_shift || previous?.team_staff || previous?.admin_scope) {
     throw new Error('level-22 visibility: the transaction already carries the worker marker or an optional scope; refusing to re-bind it');
   }
   const query = (sql: string, params: unknown[]) => manager.query(sql, params);
