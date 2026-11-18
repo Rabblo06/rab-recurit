@@ -19,7 +19,8 @@
  * their behaviour is unchanged. Everything else is byte-for-byte the 1786721520000 text.
  *
  * CREATE OR REPLACE keeps the function's OID, its owner rab_secure_owner, SECURITY DEFINER, search_path and its ACL
- * (EXECUTE for crewflow_worker only); the migration re-checks all of that after the replace.
+ * (EXECUTE for crewflow_worker and the owner rab_secure_owner, neither with the grant option); the migration re-checks all of
+ * that after the replace.
  */
 import { INVITE_DELETE_SKIP_SOFT_DELETED_SQL } from './migrations/1786721520000-InviteCleanupSkipsSoftDeleted';
 
@@ -108,8 +109,9 @@ export const INVITE_DELETE_REPLACEABLE_BODY_HASHES: Readonly<Record<'up' | 'down
 
 /**
  * Everything about the definer except its body, in one line: owner, SECURITY DEFINER, language, volatility, return type,
- * strictness, leakproof, pinned search_path, EXECUTE grantees, and how many triggers call it (none: it is not a trigger
- * function, and a trigger attached to it would be an anomaly). Must equal INVITE_DELETE_EXPECTED_STATE before and after.
+ * strictness, leakproof, pinned search_path, EXECUTE grantees (each marked `(grantable)` when it holds the grant option, so
+ * an EXECUTE ... WITH GRANT OPTION is caught), and how many triggers call it (none: it is not a trigger function, and a
+ * trigger attached to it would be an anomaly). Must equal INVITE_DELETE_EXPECTED_STATE before and after.
  */
 export const INVITE_DELETE_STATE_SQL = `SELECT pg_catalog.pg_get_userbyid(p.proowner)
        || '|definer=' || p.prosecdef::text
@@ -119,7 +121,8 @@ export const INVITE_DELETE_STATE_SQL = `SELECT pg_catalog.pg_get_userbyid(p.proo
        || '|strict=' || p.proisstrict::text
        || '|leakproof=' || p.proleakproof::text
        || '|config=' || COALESCE(pg_catalog.array_to_string(p.proconfig, ';'), '')
-       || '|execute=' || COALESCE((SELECT pg_catalog.string_agg(CASE WHEN a.grantee = 0 THEN 'PUBLIC' ELSE pg_catalog.pg_get_userbyid(a.grantee)::text END, '+'
+       || '|execute=' || COALESCE((SELECT pg_catalog.string_agg(CASE WHEN a.grantee = 0 THEN 'PUBLIC' ELSE pg_catalog.pg_get_userbyid(a.grantee)::text END
+                                                                || CASE WHEN a.is_grantable THEN '(grantable)' ELSE '' END, '+'
                                                                 ORDER BY CASE WHEN a.grantee = 0 THEN 'PUBLIC' ELSE pg_catalog.pg_get_userbyid(a.grantee)::text END)
                                      FROM pg_catalog.aclexplode(p.proacl) a WHERE a.privilege_type = 'EXECUTE'), '')
        || '|triggers=' || (SELECT pg_catalog.count(*) FROM pg_catalog.pg_trigger t WHERE t.tgfoid = p.oid)::text AS state
@@ -127,7 +130,10 @@ export const INVITE_DELETE_STATE_SQL = `SELECT pg_catalog.pg_get_userbyid(p.proo
   JOIN pg_catalog.pg_language l ON l.oid = p.prolang
  WHERE p.oid = pg_catalog.to_regprocedure('${INVITE_DELETE_SIGNATURE}')`;
 
-/** The state 1786721340000 / 1786721520000 left, which this migration preserves exactly. */
+/**
+ * The state 1786721340000 / 1786721520000 left, which this migration preserves exactly: EXECUTE for crewflow_worker and the
+ * owner rab_secure_owner, neither grantable.
+ */
 export const INVITE_DELETE_EXPECTED_STATE =
   'rab_secure_owner|definer=true|lang=plpgsql|vol=v|returns=text|strict=false|leakproof=false|config=search_path=pg_catalog, pg_temp|execute=crewflow_worker+rab_secure_owner|triggers=0';
 

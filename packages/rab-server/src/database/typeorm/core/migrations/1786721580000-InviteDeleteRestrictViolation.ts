@@ -33,7 +33,7 @@ import { INVITE_CLEANUP_EXPECTED, INVITE_CLEANUP_STATE_SQL } from '../worker-dis
  *
  * Self-check before commit, both directions: the exact body installed (the same body hash), INVITE_DELETE_EXPECTED_STATE
  * (owner rab_secure_owner, SECURITY DEFINER, plpgsql, VOLATILE, returns text, pinned search_path, EXECUTE for
- * crewflow_worker only, no trigger calls it), INVITE_CLEANUP_EXPECTED for all three definers, and
+ * crewflow_worker and the owner rab_secure_owner, neither with the grant option, no trigger calls it), INVITE_CLEANUP_EXPECTED for all three definers, and
  * secureOwnerInvariantViolations() empty; anything else raises and rolls back.
  */
 export class InviteDeleteRestrictViolation1786721580000 implements MigrationInterface {

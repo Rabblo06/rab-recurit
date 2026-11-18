@@ -9444,13 +9444,14 @@ Reversal:   Upgrade / `resolutions` override (documented in "//resolutions") as 
   with one changed handler, `EXCEPTION WHEN foreign_key_violation OR restrict_violation THEN RETURN 'referenced';` (SQL in
   `invite-delete-restrict-violation-sql.ts`). 23001 exists on 16 and 17 too, where RESTRICT still raises 23503, so their
   behaviour is unchanged. Same OID, owner `rab_secure_owner`, SECURITY DEFINER, pinned search_path, EXECUTE for
-  `crewflow_worker` only. The migration replaces only a known body (1786721520000's or its own, by semantic-golden body
+  `crewflow_worker` and the owner `rab_secure_owner` (neither with the grant option). The migration replaces only a known body (1786721520000's or its own, by semantic-golden body
   hash) and refuses any other; before and after it checks the exact body hash, the definer's owner / definer / language /
-  volatility / return type / search_path / EXECUTE grantees / triggers (none), the state of all three invite-cleanup
+  volatility / return type / search_path / EXECUTE grantees and their grant option / triggers (none), the state of all three invite-cleanup
   definers, and the secure-owner invariants, and rolls back on any difference. down() restores the 1786721520000 body.
 - **What it does not change.** No grant, owner, policy or table changes; no new privilege for any login; the Worker's own
   23001 mapping (`level22RetainReason`) stays, for level-22 workspace references the definer never sees.
-- **Tests.** `invite-delete-restrict-violation.integration.spec.ts` (server, every major): a real invitee with approved
+- **Tests.** `invite-delete-restrict-violation.integration.spec.ts` (server; GitHub CI runs it on 16 in ci-server and on
+  16/17/18 in ci-twenty-tests' PostgreSQL-major regressions step): a real invitee with approved
   payroll evidence on its core staff profile; deleting it directly is 23001 on 18 / 23503 on 16-17, the definer answers
   `referenced` and deletes nothing, and a rolled-back down()/up() round trip shows the 1786721520000 body raising 23001
   on 18 (fail-first), up() restoring `referenced`, an idempotent re-run, and an unknown body refused in both directions.

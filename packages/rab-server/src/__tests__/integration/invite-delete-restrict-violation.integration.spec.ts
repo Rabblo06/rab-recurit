@@ -21,8 +21,8 @@ import { integrationTestDatabaseReady } from '../../database/typeorm/core/integr
  * the staff profile, and the payroll_record parent keys are ON DELETE RESTRICT (PayrollEvidenceRestrict1786719700000), so
  * the delete is refused — 23503 on 16/17, 23001 on 18. The definer must answer 'referenced' on every major and delete nothing.
  *
- * Direct SQL as the bootstrap SUPERUSER (the definer runs as its owner rab_secure_owner either way). Not opt-in: it runs in
- * every server job, so the per-major CI jobs (16/17/18) cover it. The migration's down()/up() round trip runs inside a
+ * Direct SQL as the bootstrap SUPERUSER (the definer runs as its owner rab_secure_owner either way). Not opt-in: ci-server runs
+ * it on 16, and ci-twenty-tests' "PostgreSQL-major regressions" step runs it on 16, 17 and 18. The migration's down()/up() round trip runs inside a
  * rolled-back transaction and doubles as the fail-first proof: with the 1786721520000 body PostgreSQL 18 raises 23001.
  */
 const RUN = integrationTestDatabaseReady();
@@ -122,6 +122,8 @@ describeIfDb('invite cleanup definer: a RESTRICT refusal is "referenced" on ever
   });
 
   it('the scenario really is a RESTRICT refusal: deleting the invitee directly fails with 23001 on 18 and 23503 on 16/17', async () => {
+    // Intentional hard failure on any other major: the expected SQLSTATE below is only known for the supported 16-18
+    // (database/postgres/supported-majors.ts); a new major must be looked at, never silently treated like 16/17.
     expect([16, 17, 18]).toContain(major);
     expect(await codeOf(admin.query(`DELETE FROM core."user" WHERE id = $1`, [invitee]))).toBe(major >= 18 ? '23001' : '23503');
     await intact();
@@ -155,6 +157,14 @@ describeIfDb('invite cleanup definer: a RESTRICT refusal is "referenced" on ever
       expect(await callDefiner()).toBe('referenced');
       await migration.up(runner); // idempotent re-run on its own body
       expect(await bodyHash()).toBe(INVITE_DELETE_BODY_HASH_RESTRICT);
+
+      // A grant with the grant option (review): the state line marks it `(grantable)`, so the migration refuses before the
+      // replace. In a savepoint, so the transaction goes on.
+      await admin.query('SAVEPOINT grant_option');
+      await admin.query('GRANT EXECUTE ON FUNCTION core.worker_delete_expired_invited_user(uuid) TO crewflow_worker WITH GRANT OPTION');
+      expect((await admin.query(INVITE_DELETE_STATE_SQL)).rows[0].state).toContain('crewflow_worker(grantable)');
+      await expect(migration.up(runner)).rejects.toThrow(/unexpected state before the replace/);
+      await admin.query('ROLLBACK TO SAVEPOINT grant_option');
 
       // A body the migration does not know (hand-altered) is refused before any replace, in both directions.
       await admin.query(INVITE_DELETE_RESTRICT_VIOLATION_SQL.replace("RETURN 'deleted';", "RETURN 'deleted'; -- altered"));
