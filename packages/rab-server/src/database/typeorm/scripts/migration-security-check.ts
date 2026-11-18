@@ -151,7 +151,7 @@ export const PHASE_0B_EXPECTED_DRIFT = [
  *   post-condition; no runtime login gains a table privilege.
  */
 export const REVIEWED_MIGRATION_DRIFT: Readonly<Record<string, readonly string[]>> = {
-  // SF-5 (NEW SQL, owner review pending; THREAT-MODEL "SF-5 — core.notification is recipient-scoped by RLS"): the org-only
+  // SF-5 (NEW SQL, owner-approved in PR #210; THREAT-MODEL "SF-5 — core.notification is recipient-scoped by RLS"): the org-only
   // FOR ALL policy replaced by five per-command policies (INSERT org-only; SELECT recipient / worker marker / read-receipt
   // definer; UPDATE recipient with WITH CHECK). FORCE and the table grants are unchanged; the definer's owner and EXECUTE
   // are pinned by the golden posture snapshot and the migration's own post-condition.

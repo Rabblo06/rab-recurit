@@ -44,8 +44,8 @@ export class PushSendConsumer {
   @Process(CONSUMER_QUEUES.push.jobName)
   async send(job: Job<PushQueueJobData>): Promise<void> {
     if (!this.processor) {
-      const { tenantContext, pushService, secretEncryptionService, pushDeviceService } = this.deps.get();
-      this.processor = createPushSendProcessor({ tenantContext, pushService, secretEncryption: secretEncryptionService, pushDeviceService });
+      const { tenantContext, pushService, secretEncryptionService, pushDeviceService, auditService } = this.deps.get();
+      this.processor = createPushSendProcessor({ tenantContext, pushService, secretEncryption: secretEncryptionService, pushDeviceService, auditService });
     }
     return this.processor(job);
   }

@@ -207,6 +207,23 @@ describeIfDb('Metadata cache E5: versioned per-workspace cache, PostgreSQL autho
       expect(await objectCount(w)).toBe(6);
     });
 
+    // Regression (THREAT-MODEL "Metadata version bump: lost step on concurrent first changes", fixed by
+    // MetadataVersionBumpOwnTransaction1786721570000): before the fix, the trigger's "already bumped?" check matched a row
+    // another transaction had committed between its two statements and skipped the step. Measured on a throwaway database:
+    // 11 of 150 workspaces lost a step with six uncoordinated first writers, so 150 workspaces fail the old function in
+    // practically every run; the single six-writer test above caught it only about once in 60 runs.
+    it('uncoordinated first changes never lose a step: 150 workspaces x 6 writers on two instances, version = commits', async () => {
+      const lost: string[] = [];
+      for (let k = 0; k < 150; k++) {
+        const w = await seedWorkspace();
+        const results = await Promise.allSettled([0, 1, 2, 3, 4, 5].map((i) => commitObject(i % 2 ? dsB : dsA, w, `herd${i}`)));
+        expect(results.filter((r) => r.status === 'rejected').map((r) => String((r as PromiseRejectedResult).reason))).toEqual([]);
+        const version = await versionOf(w);
+        if (version !== '6') lost.push(`workspace ${k}: version ${version} after 6 commits`);
+      }
+      expect(lost).toEqual([]);
+    });
+
     it('a rolled-back change leaves the version unchanged', async () => {
       const w = await seedWorkspace();
       await commitObject(dsA, w, 'alpha');
@@ -231,6 +248,32 @@ describeIfDb('Metadata cache E5: versioned per-workspace cache, PostgreSQL autho
         await m.query(`DELETE FROM core.object_metadata WHERE name_singular = 'gamma'`);
       });
       expect(await versionOf(w)).toBe('2');
+    });
+
+    // Review I-1 (1786721570000): the bump's own-transaction marker (last_bump_xact) is written inside the savepoint, so
+    // ROLLBACK TO SAVEPOINT removes it with the change; the next change of the same transaction must step again (exactly
+    // once), whether the rolled-back bump had CREATED the version row or stepped an existing one.
+    it('a bump rolled back to a savepoint does not suppress the next change of the same transaction: +1 (no row yet / existing row)', async () => {
+      const savepointThenInsert = (w: Ws) =>
+        inTenant(dsA, w, async (m) => {
+          await m.query('SAVEPOINT s1');
+          await insertObject(m, w, 'undone'); // bumps (creates the row, or steps it), inside the savepoint
+          await m.query('ROLLBACK TO SAVEPOINT s1'); // the change and its bump are gone
+          await insertObject(m, w, 'kept'); // must bump again
+        });
+      const fresh = await seedWorkspace();
+      expect(await versionOf(fresh)).toBeNull();
+      await savepointThenInsert(fresh);
+      expect(await versionOf(fresh)).toBe('1');
+      expect(await objectCount(fresh)).toBe(1);
+
+      const existing = await seedWorkspace();
+      await commitObject(dsA, existing, 'alpha');
+      await commitObject(dsA, existing, 'beta');
+      expect(await versionOf(existing)).toBe('2');
+      await savepointThenInsert(existing);
+      expect(await versionOf(existing)).toBe('3');
+      expect(await objectCount(existing)).toBe(3);
     });
 
     it('the version can never decrease, and the app cannot delete the version row', async () => {

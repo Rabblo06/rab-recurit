@@ -42,8 +42,8 @@ describe('worker schema wait', () => {
 
   it('anything but pending-only is NOT a wait: refused at once (unknown / interleaved migration, unreadable ledger, other errors)', async () => {
     const cases = [
-      new SchemaCompatibilityError('schema-compatibility', ['pending', 'unknown-interleaved'], 'mixed'),
-      new SchemaCompatibilityError('schema-compatibility', ['ledger-ahead' as never], 'ahead'),
+      new SchemaCompatibilityError('schema-compatibility', ['pending', 'ledger-interleaved'], 'mixed'),
+      new SchemaCompatibilityError('schema-compatibility', ['ledger-ahead'], 'ahead'),
       new SchemaCompatibilityError('pending-migrations', [], 'the migration ledger could not be read'),
       new Error('connection refused'),
     ];

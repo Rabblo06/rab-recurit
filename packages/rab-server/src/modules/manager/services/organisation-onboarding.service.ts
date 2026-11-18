@@ -438,7 +438,9 @@ export class OrganisationOnboardingService {
       const org = await manager.findOneBy(Organisation, { id: organisationId });
       if (!org) throw new NotFoundException('Organisation not found.');
       const ceoProfile = await manager.findOne(ManagerProfile, { where: { organisationId, type: ManagerType.CEO } });
-      const ceo = ceoProfile ? await this.managerService.get(ctx, ceoProfile.id) : null;
+      // getWithin, not get: a platform admin holds no role in the organisation it inspects, so `get`'s manager.manage
+      // re-check (SF-2) would refuse; this read is authorised by assertActorIsPlatformAdmin above, in this transaction.
+      const ceo = ceoProfile ? await this.managerService.getWithin(manager, ctx, ceoProfile.id) : null;
       return this.toOrganisationSummary(org.id, org.name, org.slug, org.suspendedAt != null, org.createdAt, ceo);
     });
   }

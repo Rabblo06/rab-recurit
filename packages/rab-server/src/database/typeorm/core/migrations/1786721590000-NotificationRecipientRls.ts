@@ -37,7 +37,7 @@ import { withCrewflowCoreCreate } from '../core-schema-create-scope';
  * Post-condition (refuses to record the migration on drift): ENABLE + FORCE, exactly these five policies, the function's
  * definer / owner / search_path / EXECUTE, and `crewflow_app` without BYPASSRLS.
  *
- * NEW SQL — owner review required before merge (M15 / SF-5). Not production-approved (N1, production-migration-approval.ts).
+ * NEW SQL, owner-approved (PR #210, M15 / SF-5). Not production-approved (N1, production-migration-approval.ts): that is a separate owner gate.
  */
 const TABLE = 'core.notification';
 const READ_AT_FN = 'core.offer_sent_notification_read_at(uuid,uuid)';

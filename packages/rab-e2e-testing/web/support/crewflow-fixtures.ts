@@ -108,7 +108,7 @@ export async function fixtures(page: Page, opts: FixtureOptions = {}): Promise<F
     }
     if (p === '/auth/me') return send(identity);
     if (p === '/auth/config') return send({ authProviders: { password: true } });
-    if (p === '/auth/capabilities') return send({ 'staff.view': true, 'staff.create': true, 'staff.deactivate': true, 'venue_manager.create': true });
+    if (p === '/auth/capabilities') return send({ 'staff.view': true, 'staff.create': true, 'staff.edit': true, 'staff.deactivate': true, 'venue_manager.create': true });
     if (p === '/manager-workspaces/me') return send({ id: 'w-1', name: 'Crewflow', status: 'active', subdomain: 'test', schemaStatus: 'READY', onboardingCompletedAt: '2026-10-01T00:00:00Z' });
     if (p === '/leadership/capabilities') return send({ leadership: { canCreateOrganisation: false, initialManagerScope: 'own' } });
     if (p === '/profile') return send({ ...identity, avatarKey: null });

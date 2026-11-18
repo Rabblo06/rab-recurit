@@ -238,88 +238,100 @@ describeIf('Crewflow BullMQ scheduler lifecycle (integration, real Redis)', () =
         runsBy.set(`${replica}:${job}`, (runsBy.get(`${replica}:${job}`) ?? 0) + 1);
       };
       const leave = (job: string) => active.set(job, active.get(job)! - 1);
-      const replicas: Array<{ name: string; redis: Redis; runtime: WorkerRuntime; scheduler: BullmqScheduler }> = [];
-      for (const name of ['A', 'B']) {
-        const conn = new Redis(REDIS_URL!, { maxRetriesPerRequest: null });
-        const runtime = new WorkerRuntime(conn, { statsKey: `${prefix}:stats`, statsWrite: 'fields', metricsLogMs: 0 });
-        jest.spyOn((runtime as unknown as { logger: Logger }).logger, 'warn').mockImplementation(() => undefined);
-        jest.spyOn((runtime as unknown as { logger: Logger }).logger, 'error').mockImplementation(() => undefined);
-        const handler = (job: string, ms: number) => async () => {
-          enter(job, name);
-          await new Promise((r) => setTimeout(r, ms));
-          leave(job);
-          return true;
-        };
-        const registry = buildHandlerRegistry([
-          { queue: defs[0]!.queue, jobName: defs[0]!.jobName, source: 'fast', handler: handler('email-dispatch', 50) },
-          { queue: defs[1]!.queue, jobName: defs[1]!.jobName, source: 'slow', handler: handler('shift-monitor', 2_500) },
-          { queue: defs[2]!.queue, jobName: defs[2]!.jobName, source: 'failing', handler: async () => Promise.reject(new Error('boom: row value x@y')) },
-        ]);
-        // D-Q4a Lane A: onScanLock hands main.ts the scan lock (combined-scan member locks) once, the same one returned.
-        const lockSeen: unknown[] = [];
-        const scheduler = await startBullmqScheduler({
-          redis: conn, redisUrl: REDIS_URL!, lockConnection: { connectionString: DB_URL! }, prefix, reconcileMs: 2_000, runtime, registry, jobs: defs, intervalOf: fastInterval, logger: quietLogger,
-          onScanLock: (lock) => lockSeen.push(lock),
-        });
-        expect(lockSeen).toHaveLength(1);
-        expect(lockSeen[0]).toBe(scheduler.scanLock);
-        replicas.push({ name, redis: conn, runtime, scheduler });
-      }
-      await new Promise((r) => setTimeout(r, 12_000));
+      const replicas: Array<{ name: string; redis: Redis; runtime: WorkerRuntime; scheduler: BullmqScheduler; stopped: boolean }> = [];
+      const conns: Redis[] = [];
+      // Stops a replica the way shutdown does (stop reconcile, bounded close, release locks). Idempotent.
+      const stopReplica = async (r: (typeof replicas)[number]) => {
+        if (r.stopped) return;
+        r.stopped = true;
+        r.runtime.beginShutdown();
+        r.scheduler.manager.stop();
+        await closeWorkersBounded(r.scheduler.scanWorkers, 10_000, quietLogger);
+        await r.scheduler.manager.close();
+        await r.scheduler.scanLock.close();
+      };
+      try {
+        for (const name of ['A', 'B']) {
+          const conn = new Redis(REDIS_URL!, { maxRetriesPerRequest: null });
+          conns.push(conn);
+          const runtime = new WorkerRuntime(conn, { statsKey: `${prefix}:stats`, statsWrite: 'fields', metricsLogMs: 0 });
+          jest.spyOn((runtime as unknown as { logger: Logger }).logger, 'warn').mockImplementation(() => undefined);
+          jest.spyOn((runtime as unknown as { logger: Logger }).logger, 'error').mockImplementation(() => undefined);
+          const handler = (job: string, ms: number) => async () => {
+            enter(job, name);
+            await new Promise((r) => setTimeout(r, ms));
+            leave(job);
+            return true;
+          };
+          const registry = buildHandlerRegistry([
+            { queue: defs[0]!.queue, jobName: defs[0]!.jobName, source: 'fast', handler: handler('email-dispatch', 50) },
+            { queue: defs[1]!.queue, jobName: defs[1]!.jobName, source: 'slow', handler: handler('shift-monitor', 2_500) },
+            { queue: defs[2]!.queue, jobName: defs[2]!.jobName, source: 'failing', handler: async () => Promise.reject(new Error('boom: row value x@y')) },
+          ]);
+          // D-Q4a Lane A: onScanLock hands main.ts the scan lock (combined-scan member locks) once, the same one returned.
+          const lockSeen: unknown[] = [];
+          const scheduler = await startBullmqScheduler({
+            redis: conn, redisUrl: REDIS_URL!, lockConnection: { connectionString: DB_URL! }, prefix, reconcileMs: 2_000, runtime, registry, jobs: defs, intervalOf: fastInterval, logger: quietLogger,
+            onScanLock: (lock) => lockSeen.push(lock),
+          });
+          replicas.push({ name, redis: conn, runtime, scheduler, stopped: false });
+          expect(lockSeen).toHaveLength(1);
+          expect(lockSeen[0]).toBe(scheduler.scanLock);
+        }
+        await new Promise((r) => setTimeout(r, 12_000));
 
-      // One scheduler per scan (two replicas reconciling every 2 s).
-      for (const def of defs) {
-        const q = new Queue(def.queue, { connection: redis, prefix });
-        expect((await q.getJobSchedulers()).map((s) => s.key)).toEqual([schedulerIdOf(def)]);
+        // One scheduler per scan (two replicas reconciling every 2 s).
+        for (const def of defs) {
+          const q = new Queue(def.queue, { connection: redis, prefix });
+          expect((await q.getJobSchedulers()).map((s) => s.key)).toEqual([schedulerIdOf(def)]);
+          await q.close();
+        }
+        // Never the same scan on two replicas (or twice on one) at the same time — even the 2.5 s scan on a 1 s schedule.
+        expect(maxActive.get('email-dispatch')).toBe(1);
+        expect(maxActive.get('shift-monitor')).toBe(1);
+        // Not N× the ticks: ~1 run/s cluster-wide for the fast scan (12 s window, generous bounds), not ~2/s.
+        const fastRuns = (runsBy.get('A:email-dispatch') ?? 0) + (runsBy.get('B:email-dispatch') ?? 0);
+        expect(fastRuns).toBeGreaterThanOrEqual(6);
+        expect(fastRuns).toBeLessThanOrEqual(16);
+        // Distribution: both replicas won work. Which replica's worker fetches a job first is a race, and on a loaded host
+        // one replica can win every job of the 12 s window; the bounds above are checked on that window, and this check
+        // gets up to 20 s more for the other replica to win one (the assertion itself is unchanged).
+        const byReplica = (r: string) => [...runsBy.entries()].filter(([k]) => k.startsWith(`${r}:`)).reduce((s, [, n]) => s + n, 0);
+        for (let i = 0; i < 40 && (byReplica('A') === 0 || byReplica('B') === 0); i += 1) await new Promise((r) => setTimeout(r, 500));
+        expect(byReplica('A')).toBeGreaterThan(0);
+        expect(byReplica('B')).toBeGreaterThan(0);
+        // Failure accounting: a failing scan fails its BullMQ job with a fixed message (no row values in Redis).
+        const offersQ = new Queue('crewflow-scan-offers', { connection: redis, prefix });
+        const failed = await offersQ.getJobs(['failed']);
+        expect(failed.length).toBeGreaterThan(0);
+        for (const job of failed) {
+          expect(job.failedReason).toBe('offer expiry cycle failed (details in the worker log)');
+          expect(JSON.stringify(job.stacktrace)).not.toContain('x@y');
+        }
+        await offersQ.close();
+        const stats = await redis.hgetall(`${prefix}:stats`);
+        expect(Number(stats.offerExpiryFailures)).toBeGreaterThan(0);
+        expect(stats.lastOfferExpiryAt).toBeUndefined(); // a failing scan is never shown successful
+        expect(Number(stats.lastEmailDispatchAt)).toBeGreaterThan(0);
+
+        // Stop replica A the way shutdown does (stop reconcile, bounded close, release locks) — scheduling continues on B.
+        await stopReplica(replicas[0]!);
+        const bBefore = runsBy.get('B:email-dispatch') ?? 0;
+        await new Promise((r) => setTimeout(r, 5_000));
+        expect((runsBy.get('B:email-dispatch') ?? 0) - bBefore).toBeGreaterThanOrEqual(3);
+        // Schedulers were NOT removed by A's shutdown.
+        const q = new Queue(defs[0]!.queue, { connection: redis, prefix });
+        expect((await q.getJobSchedulers()).map((s) => s.key)).toEqual([schedulerIdOf(defs[0]!)]);
         await q.close();
-      }
-      // Never the same scan on two replicas (or twice on one) at the same time — even the 2.5 s scan on a 1 s schedule.
-      expect(maxActive.get('email-dispatch')).toBe(1);
-      expect(maxActive.get('shift-monitor')).toBe(1);
-      // Not N× the ticks: ~1 run/s cluster-wide for the fast scan (12 s window, generous bounds), not ~2/s.
-      const fastRuns = (runsBy.get('A:email-dispatch') ?? 0) + (runsBy.get('B:email-dispatch') ?? 0);
-      expect(fastRuns).toBeGreaterThanOrEqual(6);
-      expect(fastRuns).toBeLessThanOrEqual(16);
-      // Distribution: both replicas won work.
-      const byReplica = (r: string) => [...runsBy.entries()].filter(([k]) => k.startsWith(`${r}:`)).reduce((s, [, n]) => s + n, 0);
-      expect(byReplica('A')).toBeGreaterThan(0);
-      expect(byReplica('B')).toBeGreaterThan(0);
-      // Failure accounting: a failing scan fails its BullMQ job with a fixed message (no row values in Redis).
-      const offersQ = new Queue('crewflow-scan-offers', { connection: redis, prefix });
-      const failed = await offersQ.getJobs(['failed']);
-      expect(failed.length).toBeGreaterThan(0);
-      for (const job of failed) {
-        expect(job.failedReason).toBe('offer expiry cycle failed (details in the worker log)');
-        expect(JSON.stringify(job.stacktrace)).not.toContain('x@y');
-      }
-      await offersQ.close();
-      const stats = await redis.hgetall(`${prefix}:stats`);
-      expect(Number(stats.offerExpiryFailures)).toBeGreaterThan(0);
-      expect(stats.lastOfferExpiryAt).toBeUndefined(); // a failing scan is never shown successful
-      expect(Number(stats.lastEmailDispatchAt)).toBeGreaterThan(0);
 
-      // Stop replica A the way shutdown does (stop reconcile, bounded close, release locks) — scheduling continues on B.
-      const a = replicas[0]!;
-      a.runtime.beginShutdown();
-      a.scheduler.manager.stop();
-      await closeWorkersBounded(a.scheduler.scanWorkers, 10_000, quietLogger);
-      await a.scheduler.manager.close();
-      await a.scheduler.scanLock.close();
-      const bBefore = runsBy.get('B:email-dispatch') ?? 0;
-      await new Promise((r) => setTimeout(r, 5_000));
-      expect((runsBy.get('B:email-dispatch') ?? 0) - bBefore).toBeGreaterThanOrEqual(3);
-      // Schedulers were NOT removed by A's shutdown.
-      const q = new Queue(defs[0]!.queue, { connection: redis, prefix });
-      expect((await q.getJobSchedulers()).map((s) => s.key)).toEqual([schedulerIdOf(defs[0]!)]);
-      await q.close();
-
-      const b = replicas[1]!;
-      b.runtime.beginShutdown();
-      b.scheduler.manager.stop();
-      await closeWorkersBounded(b.scheduler.scanWorkers, 10_000, quietLogger);
-      await b.scheduler.manager.close();
-      await b.scheduler.scanLock.close();
-      await Promise.all(replicas.map((r) => r.redis.quit()));
+        await stopReplica(replicas[1]!);
+      } finally {
+        // A failed assertion above must not leave a replica running: under --runInBand its scan workers would keep
+        // scheduling scans and holding the real scan lock (crewflow:crewflow-scan-shifts:shift-monitor, the id
+        // scan-lock.integration.spec uses) for every later file in the same process.
+        for (const r of replicas) await stopReplica(r).catch(() => undefined);
+        await Promise.all(conns.map((c) => c.quit().catch(() => undefined)));
+      }
     });
   });
 });

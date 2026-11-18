@@ -17,6 +17,7 @@ import { EmailOutbox, NotificationPreference, Organisation, RefreshToken, Role, 
 import { EmailService } from '@rab/server/engine/core-modules/email/email.service';
 import { createEmailSendProcessor } from '../../queues/rab-email/email-send.processor';
 import { ManagerProfile } from '@rab/server/modules/manager/entities/manager-profile.entity';
+import { STAFF_ROLE_PERMISSIONS } from '@rab/server/modules/staff/services/staff.service';
 import { ManagerWorkspace } from '@rab/server/modules/manager-workspace/entities/manager-workspace.entity';
 import { Notification } from '@rab/server/modules/notification/entities/notification.entity';
 import { NotificationService } from '@rab/server/modules/notification/services/notification.service';
@@ -167,6 +168,13 @@ describeIfDb('worker operations abuse cases (integration)', () => {
       if (!staffRole) {
         const staffRoleResult = await manager.insert(Role, { organisationId, key: 'staff', name: 'Staff', isSystem: true });
         staffRole = await manager.findOneByOrFail(Role, { id: staffRoleResult.identifiers[0]!.id as string });
+        // The production `staff` permission set (attendance.clock included): since SF-2, AttendanceService's staff-app
+        // methods re-check the route's attendance.clock, so a role with no grants is refused before the clock window.
+        await manager.query(
+          `INSERT INTO core.role_permission (role_id, permission_id, organisation_id)
+           SELECT $1, p.id, $2 FROM core.permission p WHERE p.key = ANY($3::text[])`,
+          [staffRole.id, organisationId, STAFF_ROLE_PERMISSIONS],
+        );
       }
       await manager.insert(UserRole, { userId: staffUserId, roleId: staffRole.id, organisationId });
       const staffProfile = await manager.save(StaffProfile, {

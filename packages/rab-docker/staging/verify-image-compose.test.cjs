@@ -196,6 +196,77 @@ const deployedWeakenings = [
 for (const [name, mutate, pattern] of deployedWeakenings) {
   test(`environment mode refuses: ${name}`, { skip }, () => assertRefused(deployed(mutate), pattern));
 }
+
+// CREWFLOW_BUNDLED_DB (Twenty's Helm db.enabled): the preflight accepts db with 0 replicas only for your own database.
+const EXTERNAL_ADMIN_URL = 'postgresql://doadmin:not-a-secret@db-direct.example.com:5432/crewflow?sslmode=verify-full'; // gitleaks:allow
+// #189 review: the env_file probe looked at the removed rab-migrate, so --environment refused on every Compose before
+// checking anything. It must report env_file for the services that declare one in the committed file.
+test('environment mode: the env_file probe sees the committed env files (rab-api, rab-worker, db-setup)', { skip }, () => {
+  assert.equal(fresh().composeReportsEnvFiles, true);
+});
+const EXTERNAL_OWNER_URL = 'postgresql://crewflow_owner:not-a-secret@db-direct.example.com:5432/crewflow?sslmode=verify-full'; // gitleaks:allow
+const NO_PASSWORD_BUNDLED_URL = 'postgresql://postgres:@db:5432/crewflow?sslmode=verify-full';
+/**
+ * The deployed db-setup / db as compose renders them for a compose.env (owner decision 2026-11-17): `replicas` =
+ * CREWFLOW_BUNDLED_DB; `admin` = PG_ADMIN_URL, `app` = PG_DATABASE_URL; `password: false` = no PG_DATABASE_PASSWORD (modes b
+ * and c: db's POSTGRES_PASSWORD and the bundled URL's password render empty).
+ */
+const bundledDb = (replicas, { admin, app, password = true } = {}) => (v) => {
+  v.services.db.deploy = { ...v.services.db.deploy, replicas };
+  const e = v.services['db-setup'].environment;
+  e.CREWFLOW_BUNDLED_DB = String(replicas);
+  if (admin !== undefined) e.PG_ADMIN_URL = admin;
+  if (app !== undefined) e.PG_DATABASE_URL = app;
+  if (!password) {
+    e.CREWFLOW_BUNDLED_DB_ADMIN_URL = NO_PASSWORD_BUNDLED_URL;
+    v.services.db.environment.POSTGRES_PASSWORD = '';
+  }
+};
+test('environment mode: the three modes pass (a bundled; b CREWFLOW_BUNDLED_DB=0 + PG_ADMIN_URL; c CREWFLOW_BUNDLED_DB=0 + crewflow_owner PG_DATABASE_URL), b and c without PG_DATABASE_PASSWORD', { skip }, () => {
+  const e = fresh().variantFiles.services['db-setup'].environment;
+  assert.equal(String(e.CREWFLOW_BUNDLED_DB_ADMIN_URL).includes('@db:5432/'), true);
+  assert.equal(e.PG_ADMIN_URL, '');
+  assert.equal(e.PG_DATABASE_URL, '');
+  assert.deepEqual(deployed(bundledDb(1)), []);
+  assert.deepEqual(deployed(bundledDb(0, { admin: EXTERNAL_ADMIN_URL, password: false })), []);
+  assert.deepEqual(deployed(bundledDb(0, { app: EXTERNAL_OWNER_URL, password: false })), []);
+  // The bundled db running beside a URL (an existing deployment's crewflow_owner, the upgrade path) stays accepted.
+  assert.deepEqual(deployed(bundledDb(1, { admin: EXTERNAL_ADMIN_URL })), []);
+  assert.deepEqual(deployed(bundledDb(1, { app: EXTERNAL_OWNER_URL })), []);
+});
+test('DENIAL environment mode (owner decision 2026-11-17): password rules, both URLs, an admin URL in PG_DATABASE_URL, crewflow_owner in PG_ADMIN_URL', { skip }, () => {
+  assertRefused(deployed(bundledDb(1, { password: false })), /db-setup: PG_DATABASE_PASSWORD: required for the bundled database/);
+  assertRefused(deployed(bundledDb(1, { password: false })), /db: POSTGRES_PASSWORD is missing/);
+  assertRefused(deployed(bundledDb(0, { admin: EXTERNAL_ADMIN_URL })), /db-setup: PG_DATABASE_PASSWORD: remove it with CREWFLOW_BUNDLED_DB=0/);
+  assertRefused(deployed(bundledDb(0, { admin: EXTERNAL_ADMIN_URL, app: EXTERNAL_OWNER_URL, password: false })), /db-setup: PG_ADMIN_URL and PG_DATABASE_URL are both set/);
+  assertRefused(deployed(bundledDb(0, { app: EXTERNAL_ADMIN_URL, password: false })), /db-setup: PG_DATABASE_URL: is the app login and must log in as crewflow_owner; it is never an admin URL \(the admin URL was renamed to PG_ADMIN_URL/);
+  assertRefused(deployed(bundledDb(0, { admin: EXTERNAL_OWNER_URL, password: false })), /db-setup: PG_ADMIN_URL: logs in as crewflow_owner/);
+  assertRefused(deployed(bundledDb(1, { app: EXTERNAL_ADMIN_URL })), /db-setup: PG_DATABASE_URL: is the app login/);
+  assertRefused(deployed((v) => { v.services['db-setup'].environment.CREWFLOW_BUNDLED_DB = '0'; }), /db-setup: CREWFLOW_BUNDLED_DB differs from db's replica count/);
+  for (const key of ['PG_ADMIN_URL', 'PG_DATABASE_URL', 'CREWFLOW_BUNDLED_DB', 'CREWFLOW_BUNDLED_DB_ADMIN_URL']) {
+    assertRefused(deployed((v) => { delete v.services['db-setup'].environment[key]; }), new RegExp(`db-setup: ${key} is missing in the deployed model`));
+  }
+  // rab-api / rab-worker: PG_ADMIN_URL in their definition (any value, even empty) or from their env files is refused.
+  for (const svc of ['rab-api', 'rab-worker']) {
+    // Owner decision L-2: pinned "" (passes, as committed); any value is refused, and so is a missing pin.
+    assert.equal(fresh().variantFiles.services[svc].environment.PG_ADMIN_URL, '');
+    for (const value of [EXTERNAL_ADMIN_URL, 'x']) assertRefused(deployed((v) => { v.services[svc].environment.PG_ADMIN_URL = value; }), new RegExp(`${svc}: has PG_ADMIN_URL with a value in the deployed model`));
+    assertRefused(deployed((v) => { delete v.services[svc].environment.PG_ADMIN_URL; }), new RegExp(`${svc}: PG_ADMIN_URL is not pinned to "" in the deployed model`));
+    const ok = { names: ['REDIS_URL', 'APP_SECRET'], unfilled: [], dbUsers: {} };
+    const m = fresh();
+    const keys = { 'rab-api': ok, 'rab-worker': ok, [svc]: { ...ok, names: [...ok.names, 'PG_ADMIN_URL'] } };
+    assertRefused(checkDeployment(m.variantFiles, m.production, keys), new RegExp(`${svc}: PG_ADMIN_URL is set in an env file`));
+  }
+});
+test('environment mode refuses: db with 0 replicas while db-setup still names the bundled db; 2 replicas; deploy.resources; scale', { skip }, () => {
+  const msg = /db\.deploy\.replicas is (0|2) \(only 1, or 0 with your own database in PG_ADMIN_URL or PG_DATABASE_URL\)/;
+  assertRefused(deployed(bundledDb(0, { password: false })), msg);
+  assertRefused(deployed(bundledDb(0, { admin: 'postgresql://postgres:not-a-secret@db:5432/crewflow?sslmode=verify-full', password: false })), msg); // gitleaks:allow
+  assertRefused(deployed(bundledDb(2, { admin: EXTERNAL_ADMIN_URL })), msg);
+  assertRefused(deployed(bundledDb(0, { admin: 'not a url', password: false })), msg);
+  assertRefused(deployed((v) => { v.services.db.deploy = { ...v.services.db.deploy, resources: { limits: { memory: '64g' } } }; }), /db\.deploy is overridden in the deployed model/);
+  assertRefused(deployed((v) => { v.services.db.scale = 2; }), /db\.scale is overridden in the deployed model/);
+});
 test('environment mode refuses a Redis without AOF, noeviction or the ACL file', { skip }, () => {
   const set = (flag, value) => (v) => { const c = v.services['rab-redis'].command; c[c.indexOf(flag) + 1] = value; };
   assertRefused(deployed(set('--aclfile', '/tmp/other.acl')), /command lacks --aclfile/);
@@ -500,6 +571,8 @@ test('DENIAL DB-SETUP static: the bundled db must be identical in both files, un
     ['db on the default network', (v) => { v.services.db.networks = { default: null, 'crewflow-db': null }; }, /db: must be on the internal crewflow-db network only|db\.networks differs/],
     ['db network not internal', (v) => { v.networks['crewflow-db'].internal = false; }, /crewflow-db is not internal/],
     ['db image by another digest', (v) => { v.services.db.image = `postgres@sha256:${'0'.repeat(64)}`; }, /db\.image differs/],
+    ['db replica count differs (CREWFLOW_BUNDLED_DB)', (v) => { v.services.db.deploy = { ...v.services.db.deploy, replicas: 2 }; }, /db\.deploy differs/],
+    ['db scaled another way', (v) => { v.services.db.scale = 2; }, /db\.scale differs/],
     ['the Worker started without worker-start.sh', (v) => { delete v.services['rab-worker'].entrypoint; v.services['rab-worker'].command = ['node', 'packages/rab-worker/dist/main.js']; }, /rab-worker: entrypoint is not exactly \.\/worker-start\.sh/],
     ['the API started without api-prestart.sh as PID 1', (v) => { v.services['rab-api'].entrypoint = ['/sbin/tini', '-s', '--']; v.services['rab-api'].command = ['./api-prestart.sh']; }, /rab-api: entrypoint is not exactly \.\/api-prestart\.sh/],
     ['compose init on the Worker (docker-init keeps the admin URL)', (v) => { v.services['rab-worker'].init = true; }, /rab-worker: init: true/],
@@ -525,13 +598,18 @@ test('DENIAL DB-SETUP environment mode: PG_DATABASE_URL never from an env file, 
   assertRefused(run({ 'rab-api': ok, 'rab-worker': ok }, (v) => { v.services['rab-api'].environment.PG_DATABASE_PASSWORD = 'x'; }), /rab-api: PG_DATABASE_PASSWORD reaches the container/);
   // PR #125 option 2: db-setup alone carries the URL. T-1: a provider admin login is accepted there; a former separated
   // login, or TLS below verify-full, is not; an env-file value or the password is refused there too.
-  const setSetupUrl = (url) => (v) => { v.services['db-setup'].environment.PG_DATABASE_URL = url; };
+  const setSetupUrl = (url, key = /crewflow_owner/.test(url) ? 'PG_DATABASE_URL' : 'PG_ADMIN_URL') => (v) => { v.services['db-setup'].environment[key] = url; };
   assert.deepEqual(run({ 'rab-api': ok, 'rab-worker': ok }, setSetupUrl('postgresql://doadmin:x@db-direct.example:5432/d?sslmode=verify-full')), []);
   for (const login of ['crewflow_app', 'crewflow_migrator', 'crewflow']) {
-    assertRefused(run({ 'rab-api': ok, 'rab-worker': ok }, setSetupUrl(`postgresql://${login}:x@db-direct.example:5432/d?sslmode=verify-full`)), new RegExp(`db-setup: PG_DATABASE_URL logs in as "${login}"`));
+    for (const key of ['PG_ADMIN_URL', 'PG_DATABASE_URL']) {
+      assertRefused(run({ 'rab-api': ok, 'rab-worker': ok }, setSetupUrl(`postgresql://${login}:x@db-direct.example:5432/d?sslmode=verify-full`, key)), new RegExp(`db-setup: ${key}: logs in as a former separated login`));
+    }
   }
-  assertRefused(run({ 'rab-api': ok, 'rab-worker': ok }, setSetupUrl('postgresql://doadmin:x@db-direct.example:5432/d?sslmode=require')), /db-setup: PG_DATABASE_URL is not sslmode=verify-full/);
+  assertRefused(run({ 'rab-api': ok, 'rab-worker': ok }, setSetupUrl('postgresql://doadmin:x@db-direct.example:5432/d?sslmode=require')), /db-setup: PG_ADMIN_URL: sslmode is not verify-full/);
+  assertRefused(run({ 'rab-api': ok, 'rab-worker': ok }, setSetupUrl('postgresql://doadmin:x@ep-a-pooler.eu.aws.neon.tech:5432/d?sslmode=verify-full')), /db-setup: PG_ADMIN_URL: points at a transaction pooler/);
   assertRefused(run({ 'rab-api': ok, 'rab-worker': ok }, (v) => { delete v.services['db-setup'].environment.PG_DATABASE_URL; }), /db-setup: PG_DATABASE_URL is missing/);
+  assertRefused(run({ 'rab-api': ok, 'rab-worker': ok, 'db-setup': { ...ok, names: [...ok.names, 'PG_ADMIN_URL'] } }), /db-setup: PG_ADMIN_URL is set in an env file/);
+  assertRefused(run({ 'rab-api': ok, 'rab-worker': ok, 'db-setup': { ...ok, names: [...ok.names, 'PG_DATABASE_ADMIN_URL'] } }), /db-setup: PG_DATABASE_ADMIN_URL is set in an env file/);
   assertRefused(run({ 'rab-api': ok, 'rab-worker': ok, 'db-setup': { ...ok, names: [...ok.names, 'PG_DATABASE_URL'] } }), /db-setup: PG_DATABASE_URL is set in an env file/);
   assertRefused(run({ 'rab-api': ok, 'rab-worker': ok, 'db-setup': { ...ok, names: [...ok.names, 'PG_DATABASE_PASSWORD'] } }), /db-setup: PG_DATABASE_PASSWORD reaches the container/);
   // DENIAL option 2: an override that hands rab-api / rab-worker ANY database URL (admin, crewflow_owner, anything), drops
@@ -700,4 +778,36 @@ test('DENIAL security review R3/R4/I4: uid parsing, Docker root binds, added-ser
   // A fully hardened added service with an unrelated bind passes these rules.
   const ok = run((v) => extra(v, { volumes: [{ type: 'bind', source: '/srv/backups', target: '/b', read_only: true }] }), { dockerRoot: '/srv/docker-data' });
   assert.ok(!ok.some((p) => /^backup: (an added service|group_add|binds)|^volume /.test(p)), ok.join(' | '));
+});
+
+// L-2: the --environment preflight runs the app's CA rules (pg-ca-pem.cjs) on CREWFLOW_PG_CA_FILE before a deploy, so a CA
+// file the stricter boot validation now refuses (a CRL or TRUSTED CERTIFICATE block, a bundled key, over 256 KiB, not a
+// regular file) is caught on the host, not by a crash-looping API.
+test('environment preflight: CREWFLOW_PG_CA_FILE is held to the boot rules of PG_SSL_CA_CERT_PATH', () => {
+  const fs = require('node:fs');
+  const os = require('node:os');
+  const path = require('node:path');
+  const { pgCaFileEnvironmentProblems } = require('./verify-image-compose.cjs');
+  const ca = /export const TEST_CA_A = `([^`]+)`/.exec(fs.readFileSync(path.join(__dirname, '../../rab-server/src/database/postgres/__tests__/fixtures/pg-test-ca.ts'), 'utf8'))[1];
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pg-ca-preflight-'));
+  try {
+    const write = (name, text) => (fs.writeFileSync(path.join(dir, name), text), name);
+    const problems = (file) => pgCaFileEnvironmentProblems({ CREWFLOW_PG_CA_FILE: file }, dir);
+    assert.deepEqual(pgCaFileEnvironmentProblems({}, dir), []);
+    assert.deepEqual(pgCaFileEnvironmentProblems({ CREWFLOW_PG_CA_FILE: '' }, dir), []);
+    assert.deepEqual(problems(write('ok.pem', ca)), []);
+    assert.deepEqual(problems(path.join(dir, 'ok.pem')), [], 'an absolute path');
+    const crl = write('with-crl.pem', `${ca}-----BEGIN X509 CRL-----\nMIIBFjCBvQIBATAKBggqhkjOPQQDAjAiMSAwHgYDVQQDDBdjcmV3Zmxvdw==\n-----END X509 CRL-----\n`);
+    assert.match(problems(crl).join(' | '), /CREWFLOW_PG_CA_FILE \(mounted as PG_SSL_CA_CERT_PATH\) contains a "X509 CRL" PEM block; only CERTIFICATE blocks are accepted\. rab-api and rab-worker would refuse to start\./);
+    assert.match(problems(write('trusted.pem', ca.replace(/CERTIFICATE/g, 'TRUSTED CERTIFICATE'))).join(' | '), /"TRUSTED CERTIFICATE" PEM block/);
+    const KEY_LABEL = ['PRIVATE', 'KEY'].join(' '); // built, so no secret scanner mistakes the fixture for a key
+    assert.match(problems(write('key.pem', `${ca}-----BEGIN ${KEY_LABEL}-----\nMIGH\n-----END ${KEY_LABEL}-----\n`)).join(' | '), /contains a PRIVATE KEY block/);
+    assert.match(problems(write('big.pem', ca.repeat(500))).join(' | '), /larger than 256 KiB/);
+    fs.mkdirSync(path.join(dir, 'a-dir'));
+    assert.match(problems('a-dir').join(' | '), /is not a regular file/);
+    assert.match(problems('missing.pem').join(' | '), /cannot be read/);
+    for (const p of problems(crl)) assert.ok(!/MII/.test(p), 'never the file content');
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
 });

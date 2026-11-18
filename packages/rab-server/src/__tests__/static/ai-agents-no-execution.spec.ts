@@ -2,6 +2,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 
 import { AI_AGENT_EXECUTION_APPROVED } from '../../modules/ai/contracts/agents';
+import { stripComments } from '../helpers/strip-comments';
 
 /**
  * Phase 6a — NO EXECUTION PATH EXISTS (owner decision 2026-10-25: EX-3 deferred; docs/ai/PHASE6_TWENTY_PLAN.md §5 / T6-P3).
@@ -29,8 +30,8 @@ function sources(root: string): string[] {
     .filter((f) => !/[\\/]__tests__[\\/]/.test(f));
 }
 const rel = (f: string) => path.relative(path.resolve(SERVER_SRC, '../..'), f).replace(/\\/g, '/');
-/** Code only: comments may (and do) explain the rule by naming what is forbidden. */
-const code = (f: string) => fs.readFileSync(f, 'utf8').replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');
+/** Code only: comments may (and do) explain the rule by naming what is forbidden. Scanner-based, so strings are kept. */
+const code = (f: string) => stripComments(fs.readFileSync(f, 'utf8'));
 
 const ALL = [...sources(SERVER_SRC), ...sources(WORKER_SRC)];
 const NON_MIGRATION = ALL.filter((f) => !/[\\/]migrations[\\/]/.test(f));
