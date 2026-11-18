@@ -589,6 +589,46 @@ describeIfDb('account invite cleanup job (integration)', () => {
     expect(stillThere.status).toBe('invite_expired'); // retained, not silently reverted to active or deleted
   });
 
+  // InviteDeleteRestrictViolation1786721580000 (PR #227 follow-up): PostgreSQL 18 reports a RESTRICT key as 23001
+  // (restrict_violation). The definer used to catch 23503 only, so on 18 the refusal left the definer and the candidate was
+  // audited `workspace_referenced:<constraint>`; on 16/17 the same invitee is audited `referenced`. Every real RESTRICT path
+  // to an invitee (payroll evidence on its staff profile) is caught by the Worker's own history checks before the definer is
+  // called, so this case attaches a RESTRICT key the Worker does not know about (a throwaway table, dropped afterwards): only
+  // the definer's DELETE can find it. Must be `referenced` on every major, with nothing deleted.
+  it('PG18 23001: an invitee still referenced through a RESTRICT key is retained and audited "referenced" (every major)', async () => {
+    const { userId } = await expiredStaffInvite();
+    const probeSchema = `invite_restrict_probe_${randomUUID().replace(/-/g, '').slice(0, 12)}`;
+    const [{ major }] = await adminDataSource.manager.query<[{ major: number }]>(`SELECT current_setting('server_version_num')::int / 10000 AS major`);
+    await adminDataSource.manager.query(`CREATE SCHEMA ${probeSchema}`);
+    try {
+      await adminDataSource.manager.query(`CREATE TABLE ${probeSchema}.holder (user_id uuid NOT NULL CONSTRAINT holder_user_restrict REFERENCES core."user"(id) ON DELETE RESTRICT)`);
+      await adminDataSource.manager.query(`INSERT INTO ${probeSchema}.holder (user_id) VALUES ($1)`, [userId]);
+      // The key really is RESTRICT on this major: 23001 on 18, 23503 on 16/17 (a failed DELETE deletes nothing).
+      const code = await adminDataSource
+        .query(`DELETE FROM core."user" WHERE id = $1`, [userId])
+        .then(() => 'ACCEPTED')
+        .catch((e: { driverError?: { code?: string } }) => e.driverError?.code ?? 'NO-CODE');
+      expect(code).toBe(Number(major) >= 18 ? '23001' : '23503');
+
+      const result = await runCleanupCycleUntilExamined(userId);
+      expect(result.retained).toBeGreaterThanOrEqual(1);
+      const reasons = (
+        await adminDataSource.manager.query<Array<{ reason: string }>>(
+          `SELECT metadata->>'reason' AS reason FROM core.audit_log WHERE action = 'user.invite_cleanup_skipped' AND target_user_id = $1`,
+          [userId],
+        )
+      ).map((r) => r.reason);
+      expect(reasons.length).toBeGreaterThanOrEqual(1);
+      expect([...new Set(reasons)]).toEqual(['referenced']);
+      const failed = await adminDataSource.manager.query(`SELECT 1 FROM core.audit_log WHERE action = 'user.invite_cleanup_failed' AND target_user_id = $1`, [userId]);
+      expect(failed).toHaveLength(0);
+      expect((await adminDataSource.manager.findOneByOrFail(User, { id: userId })).status).toBe('invite_expired');
+      expect((await adminDataSource.manager.query(`SELECT count(*)::int AS n FROM ${probeSchema}.holder WHERE user_id = $1`, [userId]))[0].n).toBe(1);
+    } finally {
+      await adminDataSource.manager.query(`DROP SCHEMA ${probeSchema} CASCADE`);
+    }
+  });
+
   it('never touches an already-ACTIVE user, even one whose status happens to look similar', async () => {
     const { organisation, ownerEmail } = await seedOrgWithOwner();
     // The org owner itself is ACTIVE, has no account_invite row at all — the
