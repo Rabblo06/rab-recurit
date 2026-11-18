@@ -207,6 +207,23 @@ describeIfDb('Metadata cache E5: versioned per-workspace cache, PostgreSQL autho
       expect(await objectCount(w)).toBe(6);
     });
 
+    // Regression (THREAT-MODEL "Metadata version bump: lost step on concurrent first changes", fixed by
+    // MetadataVersionBumpOwnTransaction1786721570000): before the fix, the trigger's "already bumped?" check matched a row
+    // another transaction had committed between its two statements and skipped the step. Measured on a throwaway database:
+    // 11 of 150 workspaces lost a step with six uncoordinated first writers, so 150 workspaces fail the old function in
+    // practically every run; the single six-writer test above caught it only about once in 60 runs.
+    it('uncoordinated first changes never lose a step: 150 workspaces x 6 writers on two instances, version = commits', async () => {
+      const lost: string[] = [];
+      for (let k = 0; k < 150; k++) {
+        const w = await seedWorkspace();
+        const results = await Promise.allSettled([0, 1, 2, 3, 4, 5].map((i) => commitObject(i % 2 ? dsB : dsA, w, `herd${i}`)));
+        expect(results.filter((r) => r.status === 'rejected').map((r) => String((r as PromiseRejectedResult).reason))).toEqual([]);
+        const version = await versionOf(w);
+        if (version !== '6') lost.push(`workspace ${k}: version ${version} after 6 commits`);
+      }
+      expect(lost).toEqual([]);
+    });
+
     it('a rolled-back change leaves the version unchanged', async () => {
       const w = await seedWorkspace();
       await commitObject(dsA, w, 'alpha');
