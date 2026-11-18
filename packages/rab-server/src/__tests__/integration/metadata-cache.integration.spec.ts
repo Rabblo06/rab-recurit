@@ -250,6 +250,32 @@ describeIfDb('Metadata cache E5: versioned per-workspace cache, PostgreSQL autho
       expect(await versionOf(w)).toBe('2');
     });
 
+    // Review I-1 (1786721570000): the bump's own-transaction marker (last_bump_xact) is written inside the savepoint, so
+    // ROLLBACK TO SAVEPOINT removes it with the change; the next change of the same transaction must step again (exactly
+    // once), whether the rolled-back bump had CREATED the version row or stepped an existing one.
+    it('a bump rolled back to a savepoint does not suppress the next change of the same transaction: +1 (no row yet / existing row)', async () => {
+      const savepointThenInsert = (w: Ws) =>
+        inTenant(dsA, w, async (m) => {
+          await m.query('SAVEPOINT s1');
+          await insertObject(m, w, 'undone'); // bumps (creates the row, or steps it), inside the savepoint
+          await m.query('ROLLBACK TO SAVEPOINT s1'); // the change and its bump are gone
+          await insertObject(m, w, 'kept'); // must bump again
+        });
+      const fresh = await seedWorkspace();
+      expect(await versionOf(fresh)).toBeNull();
+      await savepointThenInsert(fresh);
+      expect(await versionOf(fresh)).toBe('1');
+      expect(await objectCount(fresh)).toBe(1);
+
+      const existing = await seedWorkspace();
+      await commitObject(dsA, existing, 'alpha');
+      await commitObject(dsA, existing, 'beta');
+      expect(await versionOf(existing)).toBe('2');
+      await savepointThenInsert(existing);
+      expect(await versionOf(existing)).toBe('3');
+      expect(await objectCount(existing)).toBe(3);
+    });
+
     it('the version can never decrease, and the app cannot delete the version row', async () => {
       const w = await seedWorkspace();
       await commitObject(dsA, w, 'alpha');

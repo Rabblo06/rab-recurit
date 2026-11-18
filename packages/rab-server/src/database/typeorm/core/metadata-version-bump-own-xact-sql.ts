@@ -100,10 +100,29 @@ export const METADATA_VERSION_BUMP_RESTORE_FUNCTION_SQL = METADATA_VERSION_BUMP_
   'CREATE OR REPLACE FUNCTION core.metadata_version_bump()',
 );
 
-/** md5 of the installed bump function's source (pg_proc.prosrc), or NULL when it does not exist. */
-export const METADATA_VERSION_BUMP_PROSRC_MD5_SQL = `SELECT pg_catalog.md5(p.prosrc) AS body_md5
+/**
+ * Body hash of the installed bump function, the same formula as the semantic posture golden (posture-drift/semantic-posture.ts:
+ * md5 of `prosrc || '|' || pg_get_function_sqlbody`), so the values below are the ones the goldens carry. NULL when the
+ * function does not exist.
+ */
+export const METADATA_VERSION_BUMP_BODY_HASH_SQL = `SELECT pg_catalog.md5(coalesce(p.prosrc, '') || '|' || coalesce(pg_catalog.pg_get_function_sqlbody(p.oid), '')) AS body_hash
   FROM pg_catalog.pg_proc p
  WHERE p.oid = pg_catalog.to_regprocedure('core.metadata_version_bump()')`;
+
+/** Body hash of the 1786721560000 function (METADATA_VERSION_BUMP_FUNCTION_SQL); pinned by the spec against the SQL. */
+export const METADATA_VERSION_BUMP_BODY_HASH_ANY_ROW = '5f6076dfd94a06cecc78005a3cf86337';
+/** Body hash of this fix (METADATA_VERSION_BUMP_OWN_XACT_FUNCTION_SQL); pinned by the spec against the SQL and the goldens. */
+export const METADATA_VERSION_BUMP_BODY_HASH_OWN_XACT = 'ccfd284e6f0299d37d04aab415502a50';
+
+/**
+ * The only bodies the migration replaces (review L-1): up() replaces the 1786721560000 body, or re-installs its own (an
+ * idempotent re-run); down() replaces its own body, or re-installs the 1786721560000 one. Any other body (hand-altered,
+ * a later fix, a trojaned definer) is refused BEFORE the replace, so the migration never silently overwrites it.
+ */
+export const METADATA_VERSION_BUMP_REPLACEABLE_BODY_HASHES: Readonly<Record<'up' | 'down', readonly string[]>> = Object.freeze({
+  up: Object.freeze([METADATA_VERSION_BUMP_BODY_HASH_ANY_ROW, METADATA_VERSION_BUMP_BODY_HASH_OWN_XACT]),
+  down: Object.freeze([METADATA_VERSION_BUMP_BODY_HASH_OWN_XACT, METADATA_VERSION_BUMP_BODY_HASH_ANY_ROW]),
+});
 
 /** The source text PostgreSQL stores in pg_proc.prosrc for one of the CREATE statements above (between the $fn$ tags). */
 export function functionBodyOf(createSql: string): string {

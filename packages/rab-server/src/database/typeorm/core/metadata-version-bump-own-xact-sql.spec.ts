@@ -3,6 +3,9 @@ import { createHash } from 'node:crypto';
 import {
   functionBodyOf,
   METADATA_VERSION_ANY_ROW_CHECK,
+  METADATA_VERSION_BUMP_BODY_HASH_ANY_ROW,
+  METADATA_VERSION_BUMP_BODY_HASH_OWN_XACT,
+  METADATA_VERSION_BUMP_REPLACEABLE_BODY_HASHES,
   METADATA_VERSION_BUMP_OWN_XACT_FUNCTION_SQL,
   METADATA_VERSION_BUMP_RESTORE_FUNCTION_SQL,
   METADATA_VERSION_OWN_BUMP_CHECK,
@@ -40,6 +43,20 @@ describe('metadata version bump: own-transaction short-circuit (1786721570000)',
     expect(METADATA_VERSION_BUMP_OWN_XACT_FUNCTION_SQL).toContain('SET search_path = pg_catalog, pg_temp');
     expect(METADATA_VERSION_BUMP_RESTORE_FUNCTION_SQL).toBe(METADATA_VERSION_BUMP_FUNCTION_SQL.replace(/^CREATE FUNCTION /, 'CREATE OR REPLACE FUNCTION '));
     expect(functionBodyOf(METADATA_VERSION_BUMP_RESTORE_FUNCTION_SQL)).toBe(functionBodyOf(METADATA_VERSION_BUMP_FUNCTION_SQL));
+  });
+
+  it('the body hashes the migration checks are exactly those of the two SQL bodies (semantic-golden formula)', () => {
+    expect(goldenBodyHash(METADATA_VERSION_BUMP_FUNCTION_SQL)).toBe(METADATA_VERSION_BUMP_BODY_HASH_ANY_ROW);
+    expect(goldenBodyHash(METADATA_VERSION_BUMP_OWN_XACT_FUNCTION_SQL)).toBe(METADATA_VERSION_BUMP_BODY_HASH_OWN_XACT);
+    expect(goldenBodyHash(METADATA_VERSION_BUMP_RESTORE_FUNCTION_SQL)).toBe(METADATA_VERSION_BUMP_BODY_HASH_ANY_ROW);
+  });
+
+  it('L-1: only the two known bodies are replaceable, in either direction; nothing else', () => {
+    expect([...METADATA_VERSION_BUMP_REPLACEABLE_BODY_HASHES.up].sort()).toEqual([METADATA_VERSION_BUMP_BODY_HASH_ANY_ROW, METADATA_VERSION_BUMP_BODY_HASH_OWN_XACT].sort());
+    expect([...METADATA_VERSION_BUMP_REPLACEABLE_BODY_HASHES.down].sort()).toEqual([METADATA_VERSION_BUMP_BODY_HASH_ANY_ROW, METADATA_VERSION_BUMP_BODY_HASH_OWN_XACT].sort());
+    const altered = METADATA_VERSION_BUMP_OWN_XACT_FUNCTION_SQL.replace('RETURN NULL;\nEND', 'RETURN NULL; -- altered\nEND');
+    expect(altered).not.toBe(METADATA_VERSION_BUMP_OWN_XACT_FUNCTION_SQL);
+    expect(METADATA_VERSION_BUMP_REPLACEABLE_BODY_HASHES.up).not.toContain(goldenBodyHash(altered));
   });
 
   it('the semantic posture golden pins the fixed body, not the 1786721560000 one', () => {

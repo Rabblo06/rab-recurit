@@ -9399,14 +9399,29 @@ Reversal:   Upgrade / `resolutions` override (documented in "//resolutions") as 
   and the final UPDATE, which steps +1 on the newest row version (row lock and re-check); a row this transaction already
   bumped still returns early, so "at most once per transaction and workspace" and "never backwards" are unchanged, and no
   lock is added. Same OID (the five triggers stay attached), owner `crewflow`, SECURITY INVOKER, pinned search_path, no
-  EXECUTE for PUBLIC / crewflow_app; the migration re-checks the full METADATA_VERSION_EXPECTED_STATE, the exact body (md5
-  of prosrc) and the secure-owner invariants before commit, in both directions. down() restores the 1786721560000 body.
-  The merged migration and its constants are unchanged.
+  EXECUTE for PUBLIC / crewflow_app; the migration re-checks the full METADATA_VERSION_EXPECTED_STATE, the exact body (body
+  hash) and the secure-owner invariants before commit, in both directions. Before the replace it accepts only a KNOWN
+  current body (review L-1; semantic-golden body hash): up() replaces the 1786721560000 body (5f6076df…) or re-installs
+  its own (ccfd284e…, idempotent re-run), down() replaces its own or re-installs the 1786721560000 one; any other body
+  (hand-altered, a later fix) is refused, never silently overwritten. down() restores the 1786721560000 body. The merged
+  migration and its constants are unchanged.
+- **Residual (review I-2; exists before this PR, unchanged by it).** A metadata DELETE never creates the version row (by
+  design: re-inserting it during a workspace-delete cascade would fail the foreign key). So while a workspace's row is
+  ABSENT, a DELETE does not step, and a concurrent first INSERT / UPDATE that creates the row can commit version 1 before
+  the DELETE commits; a cache fill between the two commits would hold the deleted row under version 1 until the next
+  change. Reachable only if the state row is removed out of band (an operator TRUNCATE, a restore without it, the guard
+  trigger disabled): every metadata write path in 0.6.0 is an INSERT that creates the row (new workspace, the 0.6.0
+  SyncStandardObjects step), so a workspace that has metadata has a row. Closing it fully would mean back-filling a
+  version row when a workspace is created (and for existing workspaces), so the row always exists and every DELETE
+  steps; that is an owner decision for M2 (the 1786721560000 design chose no back-fill: a missing row is read through
+  uncached).
 - **Tests.** `metadata-cache.integration.spec.ts`: "uncoordinated first changes never lose a step: 150 workspaces x 6
   writers on two instances" (the old function lost a step in 11 of 150 workspaces on a throwaway database, so it fails in
-  practically every run; the existing six-writer test caught it about once in 60). `metadata-version-bump-own-xact-sql.spec.ts`:
+  practically every run; the existing six-writer test caught it about once in 60) and "a bump rolled back to a savepoint
+  does not suppress the next change of the same transaction" (review I-1; +1, for a workspace with no version row and for
+  one with a row). `metadata-version-bump-own-xact-sql.spec.ts`:
   the short-circuit carries `last_bump_xact = v_xact`, the new SQL is the old one with exactly that change, down() restores
-  the old body, and the semantic golden pins the new body hash. Evidence before the fix (throwaway database, instrumented
+  the old body, the semantic golden pins the new body hash, and only the two known bodies are replaceable. Evidence before the fix (throwaway database, instrumented
   copy with a pause between the two statements): two commits ended at version 1; with the fix, 2. Semantic goldens
   (PG16/17/18): only the `metadata_version_bump()` body hash changes (5f6076df… → ccfd284e…); security-posture golden and
   the restricted-migrator drift review unchanged (a function body is not a privilege line).
