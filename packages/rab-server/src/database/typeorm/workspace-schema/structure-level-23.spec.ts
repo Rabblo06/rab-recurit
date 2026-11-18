@@ -33,7 +33,7 @@ describe('C3 Q3: staff_profile_workspace_required VALIDATE (structure level 23)'
   it('release 0.7.0 registers it as level 23 (after 0b = 21 and 0a = 22), with its provision literal mapped to 23', () => {
     expect(WORKSPACE_UPGRADE_COMMANDS['0-7']).toContain(STAFF_PROFILE_WORKSPACE_REQUIRED_VALIDATE);
     expect(codeWorkspaceStructureLevel()).toBe(23);
-    expect(declaredProvisionLiterals()['db:provision_workspace@WorkspaceStaffProfileWorkspaceRequiredValidated1786721570000']).toBe(23);
+    expect(declaredProvisionLiterals()['db:provision_workspace@WorkspaceStaffProfileWorkspaceRequiredValidated1786721595000']).toBe(23);
   });
 
   it('the down() guard reads the catalog only (workspace schemas whose constraint is already VALID)', () => {

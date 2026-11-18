@@ -59,10 +59,10 @@ describe('Part D: workspace upgrade commands in the sequence (Twenty upgrade-seq
 
   it('0.7.0 has one workspace command (level 23, C3 Q3 DRAFT), after the instance command of the release (the HWS cutover)', () => {
     expect(WORKSPACE_UPGRADE_COMMANDS['0-7'].map((c) => [c.name, c.timestamp, c.structure?.level, c.structure?.mayDrop === true, Boolean(c.precheck)])).toEqual([
-      ['ValidateStaffProfileWorkspaceRequired', 1786721570000, 23, false, false],
+      ['ValidateStaffProfileWorkspaceRequired', 1786721595000, 23, false, false],
     ]);
     expect(lastInstanceStepOfVersion('0.7.0')).toBe('0.7.0_HwsCutover_1786721540100');
-    expect(lastStepOfVersion('0.7.0')).toBe('0.7.0_ValidateStaffProfileWorkspaceRequired_1786721570000');
+    expect(lastStepOfVersion('0.7.0')).toBe('0.7.0_ValidateStaffProfileWorkspaceRequired_1786721595000');
   });
 
   it('the level-21, level-22 and level-23 commands declare a v2 fingerprint for every supported PostgreSQL major (16, 17, 18)', () => {

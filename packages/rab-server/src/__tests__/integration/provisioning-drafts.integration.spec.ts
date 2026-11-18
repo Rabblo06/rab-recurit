@@ -64,7 +64,7 @@ const { appUrl } = resolveIntegrationTestDatabase(process.env);
  *        body plus exactly the module-20 grant-parity statements (and its own literal, checksum and fingerprint).
  */
 function approvedProvisionBody(through: 19 | 20 | 21 | 22 | 23): string {
-  // C3 Q3 structure level 23 (WorkspaceStaffProfileWorkspaceRequiredValidated1786721570000; DRAFT SQL, owner review first): the
+  // C3 Q3 structure level 23 (WorkspaceStaffProfileWorkspaceRequiredValidated1786721595000; DRAFT SQL, owner review first): the
   // same guarded v3 body over template(22) + the VALIDATE, derived exactly as that migration derives it.
   if (through === 23) {
     const structure = STAFF_PROFILE_WORKSPACE_REQUIRED_VALIDATE.structure!;
@@ -200,7 +200,7 @@ describe('Phase B P8 provisioning guards + counts-only health (migrations 178672
       const l21 = await admin.query(`SELECT 1 FROM core.migrations WHERE name = 'WorkspaceStaffMemberSelect1786721480000'`);
       const [{ prosrc }] = await admin.query(`SELECT p.prosrc FROM pg_catalog.pg_proc p WHERE p.oid = 'core.provision_workspace(uuid)'::pg_catalog.regprocedure`);
       const l22 = await admin.query(`SELECT 1 FROM core.migrations WHERE name = 'WorkspaceCoreForeignKeyRemoval1786721530000'`);
-      const l23 = await admin.query(`SELECT 1 FROM core.migrations WHERE name = 'WorkspaceStaffProfileWorkspaceRequiredValidated1786721570000'`);
+      const l23 = await admin.query(`SELECT 1 FROM core.migrations WHERE name = 'WorkspaceStaffProfileWorkspaceRequiredValidated1786721595000'`);
       expect(prosrc).toBe(approvedProvisionBody(l23.length === 1 ? 23 : l22.length === 1 ? 22 : l21.length === 1 ? 21 : v20.length === 1 ? 20 : 19));
     }
     expect(await admin.query(PROVISIONING_HEALTH_STATE_SQL)).toEqual([...PROVISIONING_HEALTH_EXPECTED_STATE]);

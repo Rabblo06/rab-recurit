@@ -1,7 +1,7 @@
 import 'reflect-metadata';
 import { Client } from 'pg';
 
-import { WorkspaceStaffProfileWorkspaceRequiredValidated1786721570000 } from '../../database/typeorm/core/migrations/1786721570000-WorkspaceStaffProfileWorkspaceRequiredValidated';
+import { WorkspaceStaffProfileWorkspaceRequiredValidated1786721595000 } from '../../database/typeorm/core/migrations/1786721595000-WorkspaceStaffProfileWorkspaceRequiredValidated';
 import { integrationTestDatabase, integrationTestDatabaseReady } from '../../database/typeorm/core/integration-test-database-gate';
 import { MIGRATION_LOCK_KEY } from '../../database/typeorm/scripts/migrate/migration-lock';
 import { selectWorkspaceFingerprintsForServer, workspaceFingerprintMajor } from '../../database/typeorm/workspace-schema/v1/expected-fingerprints';
@@ -17,8 +17,8 @@ import { codeWorkspaceStructureLevel, declaredFingerprint } from '../../engine/c
 import { dropWorkspaceSchema, provisionServerPath, provisionTypeScript, registryOf, SeededWorkspace, seedWorkspace } from './helpers/workspace-fixtures';
 
 /**
- * OWNER-DB-ULTIMATE Part C3, owner decision Q3 (DRAFT SQL, throwaway databases only): `0.7.0_ValidateStaffProfileWorkspaceRequired_1786721570000`
- * (structure level 23) and WorkspaceStaffProfileWorkspaceRequiredValidated1786721570000. Proves:
+ * OWNER-DB-ULTIMATE Part C3, owner decision Q3 (DRAFT SQL, throwaway databases only): `0.7.0_ValidateStaffProfileWorkspaceRequired_1786721595000`
+ * (structure level 23) and WorkspaceStaffProfileWorkspaceRequiredValidated1786721595000. Proves:
  *  - the runner validates `staff_profile_workspace_required` on existing level-22 workspaces (level 23, declared v2),
  *    idempotently, and nothing else changes (constraint definition, row data);
  *  - new workspaces (TypeScript provisioner and core.provision_workspace) are built at level 23, identical to an upgraded one;
@@ -100,7 +100,7 @@ describeIfDb('C3 Q3: staff_profile_workspace_required validated as structure lev
     expect(codeWorkspaceStructureLevel()).toBe(23);
     expect(STAFF_PROFILE_WORKSPACE_REQUIRED_VALIDATE.structure).toMatchObject({
       level: 23,
-      provisionFunctionLiteral: 'db:provision_workspace@WorkspaceStaffProfileWorkspaceRequiredValidated1786721570000',
+      provisionFunctionLiteral: 'db:provision_workspace@WorkspaceStaffProfileWorkspaceRequiredValidated1786721595000',
     });
     expect(STAFF_PROFILE_WORKSPACE_REQUIRED_VALIDATE.structure?.mayDrop).toBeUndefined();
     expect(STAFF_PROFILE_WORKSPACE_REQUIRED_VALIDATE.precheck).toBeUndefined();
@@ -206,14 +206,14 @@ describeIfDb('C3 Q3: staff_profile_workspace_required validated as structure lev
     expect(Number(rows[0].n)).toBe(0);
   });
 
-  it('down() of WorkspaceStaffProfileWorkspaceRequiredValidated1786721570000 refuses while a level-23 workspace exists (nothing changed)', async () => {
+  it('down() of WorkspaceStaffProfileWorkspaceRequiredValidated1786721595000 refuses while a level-23 workspace exists (nothing changed)', async () => {
     await make('down', 'ts');
     const bodies = async () => (await admin.query(`SELECT md5(prosrc) AS h FROM pg_proc WHERE oid = 'core.provision_workspace(uuid)'::regprocedure`)).rows;
     const before = await bodies();
     const runnerOf = (c: Client) => ({ isTransactionActive: true, query: async (sql: string, params?: unknown[]) => (await c.query(sql, params as unknown[])).rows }) as never;
     await admin.query('BEGIN');
     try {
-      await expect(new WorkspaceStaffProfileWorkspaceRequiredValidated1786721570000().down(runnerOf(admin))).rejects.toThrow(
+      await expect(new WorkspaceStaffProfileWorkspaceRequiredValidated1786721595000().down(runnerOf(admin))).rejects.toThrow(
         /down\(\) refused: \d+ workspace schema\(s\) are at structure level 23/,
       );
     } finally {
