@@ -9450,7 +9450,9 @@ Reversal:   Upgrade / `resolutions` override (documented in "//resolutions") as 
   and notes through a recording `gh`, a dry run, refused inputs (no gh call), the installed gh's own flag list, and the
   workflow's permissions/checkout wiring.
 - **Bumps:** actions/upload-artifact v4.6.2 → v7.0.2 (`cf430e03…`), actions/download-artifact v4.3.0 → v8.0.2
-  (`9000827c…`) together (v8 fails on an artifact digest mismatch instead of warning), actions/setup-node v4.4.0 →
+  (`9000827c…`) together (v8 fails on an artifact digest mismatch instead of warning; since v5 a `pattern:` download
+  that matches ONE artifact lands in `path/` instead of `path/<name>/`, so image-security-gate's manifest job puts a
+  one-platform download back under its name before the merge; caught by this PR's own PR-mode gate), actions/setup-node v4.4.0 →
   v7.1.0 (`949feb24…`, also in the yarn-install composite action; v5's automatic cache applies only to npm since v6, so
   nothing changes for Yarn). Every SHA checked against `gh api repos/<owner>/<repo>/tags`. Version comments of the
   unchanged checkout/cache pins corrected from `# v4` to the exact release (`v4.4.0`, `v4.3.0`).
