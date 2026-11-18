@@ -1,6 +1,7 @@
 /**
  * Database setup the Twenty Helm way (OWNER-DB-FINAL.md Part A, DB-SETUP-HELM-PLAN.md): the core of the bootstrap child,
- * run by the one-shot db-setup service, the ONLY holder of PG_DATABASE_URL. It makes sure `crewflow_owner` exists with
+ * run by the one-shot db-setup service, the ONLY holder of PG_ADMIN_URL (and of an operator-given PG_DATABASE_URL). It makes
+ * sure `crewflow_owner` exists with
  * exactly the 01-crewflow-owner.sql attributes and `CONNECT, CREATE, TEMPORARY ... WITH GRANT OPTION` on the current
  * database, that db-setup's password file holds its password, and publishes the credential-free target. Entry:
  * bootstrap-owner-login.ts.
@@ -13,8 +14,8 @@
  *   - an external database gets no setup step at all (secret-db-url.yaml:24-30, _helpers.tpl:56-83);
  *   - APP_SECRET is never part of any database credential.
  *
- * Modes (owner-credential.ts planDbSetup):
- *   - BOOTSTRAP (the bundled db's superuser, or a client's admin URL — the latter a Crewflow addition, required by RLS):
+ * Modes (owner-credential.ts selectDbSetupInput / planDbSetup):
+ *   - BOOTSTRAP, PG_ADMIN_URL (the bundled db's superuser, or a client's admin URL — the latter a Crewflow addition, required by RLS):
  *       password file present  -> its password; crewflow_owner created only if missing; an existing crewflow_owner must log
  *                                 in with it (else REFUSED 64: delete the password file and start again with the admin
  *                                 address; never an automatic reset); only a missing grant is added;
@@ -23,8 +24,8 @@
  *                                 password reset through Q4c (Crewflow addition A4; Twenty would leave the app unable to log
  *                                 in); the pending file becomes `owner-password` only after the COMMIT and a login with it
  *                                 (security review L1: a run that fails in between never leaves a file the role rejects).
- *   - OWNER-URL (an existing crewflow_owner URL): O1 + Q2 and the read-only refusals only, on a session logged in with the
- *     URL's own password; that password is copied into the file. Never a write to the database, never a password change.
+ *   - OWNER-URL, PG_DATABASE_URL (an existing crewflow_owner URL; any other login there is refused, never reinterpreted):
+ *     O1 + Q2 and the read-only refusals only, on a session logged in with the URL's own password; that password is copied into the file. Never a write to the database, never a password change.
  *
  * Admin session: application_name crewflow-owner-bootstrap, retried for up to 60 s on connection-refused / 57P03; every
  * connection pinned (H1: search_path=pg_catalog,pg_temp). Q0, Q1, Q2, the refusals (§3.3 + H1/N1/N2), the probe (Q3) with
@@ -41,16 +42,19 @@ import { Client } from 'pg';
 
 import { type DbTarget, DbTargetError, dbTargetFromRuntimeUrl } from '../../../owner-login/db-target';
 import {
+  ADMIN_URL_LABEL,
   buildRuntimeDatabaseUrl,
+  type DbSetupInput,
   type DbSetupPlan,
   generateOwnerPassword,
   OWNER_LOGIN,
   OwnerCredentialError,
-  planDbSetup,
   scramSha256Verifier,
+  selectDbSetupInput,
 } from '../../../owner-login/owner-credential';
 import { type OwnerPasswordRead, OwnerPasswordFileError, OwnerPasswordMismatchError } from '../../../owner-login/owner-password-file';
-import { pgClientConfig, PgConfigError, PgDriverConfig, readPrimaryDatabaseUrl, resolvePgEnvironment, ResolvedPgEnvironment, sameTarget } from '../../../postgres';
+import { pgClientConfig, PgConfigError, PgDriverConfig, resolvePgEnvironment, ResolvedPgEnvironment, sameTarget } from '../../../postgres';
+import { isSupportedPostgresMajor, postgresMajorFromVersionNum, unsupportedPostgresMessage } from '../../../postgres/supported-majors';
 import {
   OWNER_BOOTSTRAP_BEGIN,
   OWNER_BOOTSTRAP_COMMIT,
@@ -61,6 +65,7 @@ import {
   OWNER_BOOTSTRAP_Q3_PROBE,
   OWNER_BOOTSTRAP_Q4A_LOCK,
   OWNER_BOOTSTRAP_Q4B_SET_INPUTS,
+  OWNER_BOOTSTRAP_Q4B2_NO_SELF_GRANT,
   OWNER_BOOTSTRAP_Q4C_DO,
   OWNER_BOOTSTRAP_Q4D_REVERIFY,
   OWNER_BOOTSTRAP_ROLLBACK,
@@ -98,9 +103,9 @@ export const OWNER_BOOTSTRAP_MESSAGES = Object.freeze({
   passThrough: 'PG_DATABASE_URL is the crewflow_owner login: checking it (read-only) and storing its password for the API and the Worker; the database is not changed.',
   ownerNotSelf: 'The PG_DATABASE_URL session is not crewflow_owner itself (session_user and current_user must both be crewflow_owner). Refusing.',
   ownerNoDbGrant:
-    'crewflow_owner lacks CONNECT, CREATE, TEMPORARY WITH GRANT OPTION on this database (01-crewflow-owner.sql grants it). Grant it as the database owner, or put the database admin URL in PG_DATABASE_URL. Refusing.',
+    'crewflow_owner lacks CONNECT, CREATE, TEMPORARY WITH GRANT OPTION on this database (01-crewflow-owner.sql grants it). Grant it as the database owner, or put the database admin URL in PG_ADMIN_URL (and remove PG_DATABASE_URL). Refusing.',
   passwordFileStale:
-    'The stored crewflow_owner password does not log in. Delete the password file and start again with the admin address in PG_DATABASE_URL. Refusing.',
+    'The stored crewflow_owner password does not log in. Delete the password file and start again with the admin address in PG_ADMIN_URL. Refusing.',
   passwordFileLost:
     'No crewflow_owner password file: a new random password is stored as a pending file before any database change, and becomes the password file only after it logs in.',
   passwordFileWriteFailed: (code: string) => `Storing the crewflow_owner password file failed (${code}); nothing was changed in the database.`,
@@ -117,11 +122,15 @@ export const OWNER_BOOTSTRAP_MESSAGES = Object.freeze({
   testSeamOutsideTest: 'CREWFLOW_TEST_DB_SETUP_PERSIST_DELAY_MS is a test seam: it is allowed only with NODE_ENV=test (0-60000). Refusing.',
   passwordPromoteFailed: (code: string) =>
     `crewflow_owner now uses the new password, but making it the stored password failed (${code}); the next start completes it.`,
-  pgTooOld: 'PostgreSQL 16 or later is required.',
+  /**
+   * The server's major is not one of database/postgres/supported-majors.ts (15 and earlier, or a major above the newest
+   * reviewed one). Read from the Q2 facts, before the probe, the pending password file and any write: nothing is created.
+   */
+  unsupportedPostgres: (major: number | null) => `${unsupportedPostgresMessage(major)} Nothing was created. Refusing.`,
   ownerInOtherDatabase:
-    'The crewflow_owner password file is missing, so its password would be reset, but crewflow_owner owns objects in, or holds a grant on, another database of this PostgreSQL cluster: another Crewflow deployment uses it, and the reset would break that deployment. Crewflow supports one deployment per PostgreSQL cluster when using an admin URL. Restore this deployment\'s password file, or put the crewflow_owner URL in PG_DATABASE_URL. Refusing.',
+    'The crewflow_owner password file is missing, so its password would be reset, but crewflow_owner owns objects in, or holds a grant on, another database of this PostgreSQL cluster: another Crewflow deployment uses it, and the reset would break that deployment. Crewflow supports one deployment per PostgreSQL cluster when using an admin URL. Restore this deployment\'s password file, or put the crewflow_owner URL in PG_DATABASE_URL (and remove PG_ADMIN_URL). Refusing.',
   ownerOwnsDatabase:
-    'crewflow_owner owns this database (directly or through a role it is a member of, e.g. rab_owner after transition-from-separated.sql). The database setup step never runs as the admin in a database the app login owns (it could plant objects the admin session would run). Put the crewflow_owner URL in PG_DATABASE_URL instead of the admin URL (db-setup then runs as crewflow_owner itself). Refusing.',
+    'crewflow_owner owns this database (directly or through a role it is a member of, e.g. rab_owner after transition-from-separated.sql). The database setup step never runs as the admin in a database the app login owns (it could plant objects the admin session would run). Put the crewflow_owner URL in PG_DATABASE_URL instead of the admin URL in PG_ADMIN_URL (db-setup then runs as crewflow_owner itself). Refusing.',
   searchPathDefault:
     'A database-wide or crewflow_owner search_path default is set (ALTER DATABASE ... SET search_path / ALTER ROLE crewflow_owner SET search_path). Remove it (ALTER DATABASE ... RESET search_path / ALTER ROLE crewflow_owner RESET search_path). Refusing.',
   privilegedAttributes: (attributes: readonly string[]) =>
@@ -130,25 +139,25 @@ export const OWNER_BOOTSTRAP_MESSAGES = Object.freeze({
   noCreateRoleHardened: "crewflow_owner is NOCREATEROLE (hardened); a release that creates roles will need it back.",
   privilegedMembership: 'crewflow_owner is a member of a superuser, BYPASSRLS or predefined privileged role.',
   expired: "crewflow_owner's VALID UNTIL has passed; clear it (ALTER ROLE crewflow_owner VALID UNTIL 'infinity').",
-  adminCannotCreateRoles: "The PG_DATABASE_URL login cannot create roles (needs CREATEROLE, or use the provider's admin login).",
+  adminCannotCreateRoles: "The PG_ADMIN_URL login cannot create roles (needs CREATEROLE, or use the provider's admin login).",
   adminCannotGrantDb:
-    'The PG_DATABASE_URL login cannot grant CONNECT, CREATE, TEMPORARY on this database (it must own the database or hold those privileges WITH GRANT OPTION).',
+    'The PG_ADMIN_URL login cannot grant CONNECT, CREATE, TEMPORARY on this database (it must own the database or hold those privileges WITH GRANT OPTION).',
   adminNoAdminOption:
-    "The crewflow_owner password file is missing, so its password must be reset, but the PG_DATABASE_URL login has no ADMIN OPTION on crewflow_owner (it was created by another login). Run, as that login or a superuser: GRANT crewflow_owner TO <your admin> WITH ADMIN OPTION; or put the crewflow_owner URL in PG_DATABASE_URL. Refusing.",
+    "The crewflow_owner password file is missing, so its password must be reset, but the PG_ADMIN_URL login has no ADMIN OPTION on crewflow_owner (it was created by another login). Run, as that login or a superuser: GRANT crewflow_owner TO <your admin> WITH ADMIN OPTION; or put the crewflow_owner URL in PG_DATABASE_URL (and remove PG_ADMIN_URL). Refusing.",
   adminCannotResetPassword:
-    "The crewflow_owner password file is missing, so its password must be reset, but the PG_DATABASE_URL login cannot change another role's password (it needs CREATEROLE and ADMIN OPTION on crewflow_owner, or superuser); or put the crewflow_owner URL in PG_DATABASE_URL. Refusing.",
+    "The crewflow_owner password file is missing, so its password must be reset, but the PG_ADMIN_URL login cannot change another role's password (it needs CREATEROLE and ADMIN OPTION on crewflow_owner, or superuser); or put the crewflow_owner URL in PG_DATABASE_URL (and remove PG_ADMIN_URL). Refusing.",
   probeFailed: (sqlstateClass: string) =>
     `crewflow_owner could not log in for a reason other than its password (SQLSTATE class ${sqlstateClass}); check pg_hba.conf and the role. Refusing.`,
-  sessionRoleOption: 'PG_DATABASE_URL carries options=-c role=...; the database setup step connects as the URL login itself. Remove it. Refusing.',
+  sessionRoleOption: 'The database URL (PG_ADMIN_URL or PG_DATABASE_URL) carries options=-c role=...; the database setup step connects as the URL login itself. Remove it. Refusing.',
   adminAuth: (sqlstate: string) =>
-    `The database refused the PG_DATABASE_URL login (SQLSTATE ${sqlstate}: wrong password, or pg_hba.conf does not allow it). Refusing.`,
+    `The database refused the login of the database URL (PG_ADMIN_URL or PG_DATABASE_URL) (SQLSTATE ${sqlstate}: wrong password, or pg_hba.conf does not allow it). Refusing.`,
   adminNoDatabase:
-    'The database named in PG_DATABASE_URL does not exist (SQLSTATE 3D000). db-setup never creates a database: create it at your provider (the bundled db creates its own), then start again. Refusing.',
-  adminTls: 'TLS to the database failed (certificate, host name, or the server has no TLS). Check sslmode in PG_DATABASE_URL and PG_SSL_CA_CERT_PATH. Refusing.',
+    'The database named in the database URL (PG_ADMIN_URL or PG_DATABASE_URL) does not exist (SQLSTATE 3D000). db-setup never creates a database: create it at your provider (the bundled db creates its own), then start again. Refusing.',
+  adminTls: 'TLS to the database failed (certificate, host name, or the server has no TLS). Check sslmode in the database URL (PG_ADMIN_URL or PG_DATABASE_URL) and PG_SSL_CA_CERT / PG_SSL_CA_CERT_PATH. Refusing.',
   adminUnreachable: 'The database did not accept a connection within 60 s. Giving up (the restart policy retries).',
-  adminConnectFailed: (code: string) => `Connecting with PG_DATABASE_URL failed (${code}).`,
+  adminConnectFailed: (code: string) => `Connecting with the database URL (PG_ADMIN_URL or PG_DATABASE_URL) failed (${code}).`,
   writeRefused: (sqlstate: string) =>
-    `The database refused to create or update crewflow_owner (SQLSTATE ${sqlstate}): the PG_DATABASE_URL login lacks a needed right, or the provider refuses pre-hashed passwords. ${PREHASHED_REFUSED_UNSUPPORTED} Refusing.`,
+    `The database refused to create or update crewflow_owner (SQLSTATE ${sqlstate}): the PG_ADMIN_URL login lacks a needed right, or the provider refuses pre-hashed passwords. ${PREHASHED_REFUSED_UNSUPPORTED} Refusing.`,
   writeFailed: (sqlstate: string) => `Setting up crewflow_owner failed (SQLSTATE ${sqlstate}). Nothing was committed.`,
   reverifyFailed: 'crewflow_owner is not exactly as required after the setup step (attributes, grant or login). Refusing to continue.',
   raceRetry: 'crewflow_owner was being created by another start at the same moment; reading the facts again.',
@@ -275,12 +284,24 @@ export function privilegedAttributesOf(f: OwnerFacts): string[] {
 }
 
 /**
+ * The version gate of db-setup (both modes), first of every refusal: only a major in SUPPORTED_POSTGRES_MAJORS goes on.
+ * MIN_SERVER_VERSION_NUM stays the floor (below it the facts' PG16-only role semantics do not hold); the list is the ceiling
+ * too, so a PostgreSQL 19 is refused here, before crewflow_owner is created, instead of by the migrate child afterwards.
+ */
+export function assertSupportedServerVersion(f: Pick<OwnerFacts, 'serverVersionNum'>): void {
+  const major = postgresMajorFromVersionNum(f.serverVersionNum);
+  if (!(f.serverVersionNum >= MIN_SERVER_VERSION_NUM) || !isSupportedPostgresMajor(major)) {
+    throw new OwnerBootstrapRefusal(OWNER_BOOTSTRAP_MESSAGES.unsupportedPostgres(major));
+  }
+}
+
+/**
  * §3.3, the checks that need no probe, in the plan's order. Throws OwnerBootstrapRefusal; returns the notes to log
  * (D2: an existing NOCREATEROLE crewflow_owner is accepted — the documented hardening — with one line).
  */
 export function decideBeforeProbe(f: OwnerFacts): string[] {
   const notes: string[] = [];
-  if (!(f.serverVersionNum >= MIN_SERVER_VERSION_NUM)) throw new OwnerBootstrapRefusal(OWNER_BOOTSTRAP_MESSAGES.pgTooOld);
+  assertSupportedServerVersion(f);
   const privileged = privilegedAttributesOf(f);
   if (privileged.length > 0) throw new OwnerBootstrapRefusal(OWNER_BOOTSTRAP_MESSAGES.privilegedAttributes(privileged));
   // H1 (defence in depth beside the pinned search_path): the admin session never works in a database the app login owns,
@@ -542,6 +563,8 @@ async function attempt(session: SqlSession, io: OwnerBootstrapIo): Promise<Owner
     // Only computed when it is needed; never sent when the password stays (an empty value, unused by the DO block).
     const verifier = plan.needPassword ? io.verifier() : '';
     await session.query(OWNER_BOOTSTRAP_Q4B_SET_INPUTS, [verifier, plan.needPassword ? 'true' : 'false']);
+    // No self-grant of crewflow_owner to the admin login (createrole_self_grant), transaction-local, before CREATE ROLE.
+    await session.query(OWNER_BOOTSTRAP_Q4B2_NO_SELF_GRANT);
     await session.query(OWNER_BOOTSTRAP_Q4C_DO);
     const { rows } = await session.query(OWNER_BOOTSTRAP_Q4D_REVERIFY);
     if (rows.length !== 1 || rows[0]?.ok !== true) throw new OwnerBootstrapFailure(OWNER_BOOTSTRAP_MESSAGES.reverifyFailed);
@@ -621,7 +644,7 @@ export interface OwnerSessionFacts {
 /** The refusals of the owner-URL mode, on a session that should be crewflow_owner itself. Throws OwnerBootstrapRefusal; returns notes. */
 export function decideOwnerSelf(session: OwnerSessionFacts, f: OwnerFacts): string[] {
   const notes: string[] = [];
-  if (!(f.serverVersionNum >= MIN_SERVER_VERSION_NUM)) throw new OwnerBootstrapRefusal(OWNER_BOOTSTRAP_MESSAGES.pgTooOld);
+  assertSupportedServerVersion(f);
   if (session.sessionLogin !== OWNER_LOGIN || session.currentLogin !== session.sessionLogin) {
     throw new OwnerBootstrapRefusal(OWNER_BOOTSTRAP_MESSAGES.ownerNotSelf);
   }
@@ -880,7 +903,8 @@ export interface RunOwnerBootstrapOptions {
 
 /**
  * The whole step for one environment (the child passes process.env). Never throws: every failure becomes a result with
- * exit code 64 or 70, and the one printed line for it is fixed text. Reads ONLY PG_DATABASE_URL (and the TLS settings);
+ * exit code 64 or 70, and the one printed line for it is fixed text. Reads ONLY PG_ADMIN_URL / PG_DATABASE_URL (exactly one;
+ * owner-credential.ts selectDbSetupInput) and the TLS settings;
  * APP_SECRET plays no part.
  */
 export async function runOwnerBootstrap(env: Record<string, string | undefined>, options: RunOwnerBootstrapOptions = {}): Promise<OwnerBootstrapResult> {
@@ -888,30 +912,37 @@ export async function runOwnerBootstrap(env: Record<string, string | undefined>,
   try {
     const files = options.passwordFiles;
     if (!files) throw new OwnerBootstrapFailure(OWNER_BOOTSTRAP_MESSAGES.unexpected('no password file I/O'));
-    // The single decision (owner-credential.ts), refused (fixed text) BEFORE anything connects. Only PG_DATABASE_URL.
-    const primary = readPrimaryDatabaseUrl(env);
-    let plan: DbSetupPlan;
+    // The single decision (owner-credential.ts selectDbSetupInput), refused (fixed text) BEFORE anything connects:
+    // PG_ADMIN_URL (an admin login: bootstrap) XOR PG_DATABASE_URL (crewflow_owner only: the read-only owner-URL mode).
+    let input: DbSetupInput;
     try {
-      plan = planDbSetup(primary?.name === 'PG_DATABASE_URL' ? primary.value : undefined);
+      input = selectDbSetupInput(env);
     } catch (error) {
       if (error instanceof OwnerCredentialError) throw new OwnerBootstrapRefusal(error.message);
       throw error;
     }
+    const plan: DbSetupPlan = input.plan;
     if (plan.mode === 'owner-url') log(OWNER_BOOTSTRAP_MESSAGES.passThrough);
 
     let resolved: ResolvedPgEnvironment;
     try {
       // The migrate process role: the same URL policy and TLS as every process, and a transaction-pooler shape is refused
-      // (the bootstrap needs one real session). The runtime login check does not apply to this step.
-      resolved = resolvePgEnvironment(env, { processRole: 'migrate' });
+      // (the bootstrap needs one real session). The runtime login check does not apply to this step. The policy reads the
+      // one URL under PG_DATABASE_URL, so the chosen input is handed to it under that name in a COPY of the environment
+      // (PG_ADMIN_URL removed); a refusal names the variable the operator actually set.
+      const pgEnv: Record<string, string | undefined> = { ...env, PG_DATABASE_URL: input.url };
+      delete pgEnv[ADMIN_URL_LABEL];
+      resolved = resolvePgEnvironment(pgEnv, { processRole: 'migrate' });
     } catch (error) {
-      if (error instanceof PgConfigError) throw new OwnerBootstrapRefusal(error.message);
+      if (error instanceof PgConfigError) {
+        throw new OwnerBootstrapRefusal(input.name === ADMIN_URL_LABEL ? error.message.split('PG_DATABASE_URL').join(ADMIN_URL_LABEL) : error.message);
+      }
       throw error;
     }
     if (resolved.primary.target.sessionRoleOption) throw new OwnerBootstrapRefusal(OWNER_BOOTSTRAP_MESSAGES.sessionRoleOption);
     if (!sameTarget(resolved.primary.target, plan.urlTarget)) throw new OwnerBootstrapFailure(OWNER_BOOTSTRAP_MESSAGES.unexpected('admin target mismatch'));
 
-    const databaseUrl = primary?.value as string;
+    const databaseUrl = input.url;
     const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
     // Test seam (the live same-volume race test): a pause between storing the pending password and BEGIN. NODE_ENV=test only.
     let afterPersist: (() => Promise<void>) | undefined;

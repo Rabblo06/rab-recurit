@@ -91,6 +91,8 @@ describeIfDb('F3: payroll evidence is never deleted by cascade (core + workspace
     return { staffUser, sp, shift, sa, att, pr };
   };
 
+  /** The SQLSTATE of a refused RESTRICT delete on this server's major (set in beforeAll). */
+  let RESTRICT_REFUSED = '23503';
   const codeOf = async (p: Promise<unknown>): Promise<string> => {
     try {
       await p;
@@ -116,6 +118,9 @@ describeIfDb('F3: payroll evidence is never deleted by cascade (core + workspace
     await admin.connect();
     const [{ rolsuper }] = (await admin.query(`SELECT rolsuper FROM pg_roles WHERE rolname = current_user`)).rows;
     if (!rolsuper) throw new Error('this suite needs the disposable database bootstrap superuser as TEST_DATABASE_URL_UNPOOLED');
+    // PostgreSQL 18 reports a RESTRICT key as 23001 (restrict_violation), earlier majors as 23503 (database/postgres/sqlstate.ts).
+    const [{ num }] = (await admin.query(`SELECT current_setting('server_version_num')::int AS num`)).rows;
+    RESTRICT_REFUSED = Number(num) >= 180000 ? '23001' : '23503';
 
     // Server path: core.provision_workspace as crewflow_app with the server-bound GUCs.
     ws = await seedWorkspace('srv');
@@ -183,14 +188,14 @@ describeIfDb('F3: payroll evidence is never deleted by cascade (core + workspace
       };
 
       it('deleting the staff profile of approved payroll fails with 23503 and deletes nothing', async () => {
-        expect(await codeOf(admin.query(`DELETE FROM ${q}.staff_profile WHERE id = $1`, [paid.sp]))).toBe('23503');
+        expect(await codeOf(admin.query(`DELETE FROM ${q}.staff_profile WHERE id = $1`, [paid.sp]))).toBe(RESTRICT_REFUSED);
         await evidenceIntact();
       });
 
       it('deleting the staff member\'s user account (core."user" → staff_profile CASCADE) fails with 23503', async () => {
         const level = where === 'core' ? 0 : (await admin.query(`SELECT module_version FROM core.workspace_schema_registry WHERE workspace_id = $1`, [w.id])).rows[0].module_version;
         if (level < 22) {
-          expect(await codeOf(admin.query(`DELETE FROM core."user" WHERE id = $1`, [paid.staffUser]))).toBe('23503');
+          expect(await codeOf(admin.query(`DELETE FROM core."user" WHERE id = $1`, [paid.staffUser]))).toBe(RESTRICT_REFUSED);
           await evidenceIntact();
           return;
         }
@@ -209,17 +214,17 @@ describeIfDb('F3: payroll evidence is never deleted by cascade (core + workspace
       });
 
       it('deleting the shift fails with 23503 and deletes nothing', async () => {
-        expect(await codeOf(admin.query(`DELETE FROM ${q}.shift WHERE id = $1`, [paid.shift]))).toBe('23503');
+        expect(await codeOf(admin.query(`DELETE FROM ${q}.shift WHERE id = $1`, [paid.shift]))).toBe(RESTRICT_REFUSED);
         await evidenceIntact();
       });
 
       it('deleting the booking (shift_assignment → attendance CASCADE) fails with 23503', async () => {
-        expect(await codeOf(admin.query(`DELETE FROM ${q}.shift_assignment WHERE id = $1`, [paid.sa]))).toBe('23503');
+        expect(await codeOf(admin.query(`DELETE FROM ${q}.shift_assignment WHERE id = $1`, [paid.sa]))).toBe(RESTRICT_REFUSED);
         await evidenceIntact();
       });
 
       it('deleting the attendance row fails with 23503 and deletes nothing', async () => {
-        expect(await codeOf(admin.query(`DELETE FROM ${q}.attendance WHERE id = $1`, [paid.att]))).toBe('23503');
+        expect(await codeOf(admin.query(`DELETE FROM ${q}.attendance WHERE id = $1`, [paid.att]))).toBe(RESTRICT_REFUSED);
         await evidenceIntact();
       });
 

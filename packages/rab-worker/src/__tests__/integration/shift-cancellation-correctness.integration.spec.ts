@@ -22,7 +22,6 @@ import { EmailService } from '@rab/server/engine/core-modules/email/email.servic
 import { EnvironmentService } from '@rab/server/engine/core-modules/environment/environment.service';
 import { PasswordHashingService } from '@rab/server/engine/core-modules/auth/services/password-hashing.service';
 import { FileService } from '@rab/server/engine/core-modules/storage/file.service';
-import { AuthContext } from '@rab/server/engine/core-modules/tenant/auth-context.interface';
 import { TenantContextService } from '@rab/server/engine/core-modules/tenant/tenant-context.service';
 import { Attendance } from '@rab/server/modules/attendance/entities/attendance.entity';
 import { ShiftReport } from '@rab/server/modules/attendance/entities/shift-report.entity';
@@ -51,7 +50,7 @@ import { runShiftReportSchedulerCycle } from '../../queues/rab-reports/shift-rep
 import { runShiftCancellationFollowupCycle } from '../../queues/rab-shifts/shift-cancellation-followup.job';
 import { runShiftMonitorCycle } from '../../queues/rab-shifts/shift-monitor.job';
 import { createAdminDataSource } from './helpers/admin-datasource';
-import { TestIdentity, TestIdentityFactory } from './helpers/test-identities';
+import { OrgBoundContext, TestIdentity, TestIdentityFactory } from './helpers/test-identities';
 import { integrationTestDatabaseReady } from '@rab/server/database/typeorm/core/integration-test-database-gate';
 import { businessSchema } from './helpers/hws-fixtures';
 
@@ -94,7 +93,7 @@ describeIfDb('shift cancellation correctness (integration)', () => {
     jobRoleId: string;
   }
 
-  function ctxOf(identity: Pick<TestIdentity, 'organisationId' | 'workspaceId' | 'userId'>): AuthContext {
+  function ctxOf(identity: Pick<TestIdentity, 'organisationId' | 'workspaceId' | 'userId'>): OrgBoundContext {
     return { organisationId: identity.organisationId, workspaceId: identity.workspaceId, userId: identity.userId, role: 'manager' };
   }
 
@@ -234,9 +233,11 @@ describeIfDb('shift cancellation correctness (integration)', () => {
       const fx = await seedOrgFixture('cancelA5');
       const shift = await seedOpenShift(fx);
       const staff = await factory.createStaff(fx.organisation, { owner: fx.owner });
-      // Staff has no manager_venue/createdBy relationship to the shift and no SCHEDULE_CREATE permission at the guard layer;
-      // at the service layer (called directly here) the ownership check alone already denies it.
-      await expect(schedulingService.cancel(ctxOf(staff), shift.id)).rejects.toMatchObject({ status: 404 });
+      // Staff categorically lack schedule.create. Since SF-2 the service re-checks the route's flag first, so a direct call
+      // gets 403, as PermissionGuard(schedule.create) answers on the HTTP path (CLAUDE.md: 403 for a categorical lack).
+      await expect(schedulingService.cancel(ctxOf(staff), shift.id)).rejects.toMatchObject({ status: 403 });
+      expect((await getShift(fx, shift.id)).status).toBe(ShiftStatus.OPEN);
+      expect(await countAudit(fx, 'shift.cancelled', shift.id)).toBe(0);
     });
   });
 
@@ -271,7 +272,7 @@ describeIfDb('shift cancellation correctness (integration)', () => {
       const shift = await seedOpenShift(fx);
       const offer = await offerService.send(ctxOf(fx.owner), shift.id, { staffProfileId: staff.profileId! });
 
-      await raceAndReport([() => offerService.staffAccept(ctxOf(staff), offer.id), () => schedulingService.cancel(ctxOf(fx.owner), shift.id)]);
+      await raceAndReport<unknown>([() => offerService.staffAccept(ctxOf(staff), offer.id), () => schedulingService.cancel(ctxOf(fx.owner), shift.id)]);
 
       const finalShift = await getShift(fx, shift.id);
       const finalOffer = await withContext(ctxOf(fx.owner), (m) => m.findOneByOrFail(JobOffer, { id: offer.id }));
@@ -309,7 +310,7 @@ describeIfDb('shift cancellation correctness (integration)', () => {
       const offer = await offerService.send(ctxOf(fx.owner), shift.id, { staffProfileId: staff.profileId! });
       await offerService.staffAccept(ctxOf(staff), offer.id);
 
-      await raceAndReport([() => offerService.managerConfirm(ctxOf(fx.owner), offer.id), () => schedulingService.cancel(ctxOf(fx.owner), shift.id)]);
+      await raceAndReport<unknown>([() => offerService.managerConfirm(ctxOf(fx.owner), offer.id), () => schedulingService.cancel(ctxOf(fx.owner), shift.id)]);
 
       const finalOffer = await withContext(ctxOf(fx.owner), (m) => m.findOneByOrFail(JobOffer, { id: offer.id }));
       const finalShift = await getShift(fx, shift.id);
@@ -414,7 +415,7 @@ describeIfDb('shift cancellation correctness (integration)', () => {
       const staff = await factory.createStaff(fx.organisation, { owner: fx.owner });
       const startsAt = new Date(Date.now() - 45 * 60 * 1000);
       const { shiftId, assignmentId } = await seedConfirmedAssignment(fx, staff, startsAt, new Date(Date.now() + 4 * 3600 * 1000));
-      await raceAndReport([() => runShiftMonitorCycle(adminDataSource, tenantContext, notificationService, auditService, 0), () => cancelDirect(fx, shiftId)]);
+      await raceAndReport<unknown>([() => runShiftMonitorCycle(adminDataSource, tenantContext, notificationService, auditService, 0), () => cancelDirect(fx, shiftId)]);
       const assignment = await withContext(ctxOf(fx.owner), (m) => m.findOneByOrFail(ShiftAssignment, { id: assignmentId }));
       expect(assignment.status).not.toBe(ShiftAssignmentStatus.NO_SHOW);
     });
@@ -518,7 +519,7 @@ describeIfDb('shift cancellation correctness (integration)', () => {
       const request = await withContext(ctxOf(fx.owner), (m) =>
         m.save(ReplacementRequest, {
           organisationId: fx.organisation.id,
-          workspaceId: fx.owner.workspaceId,
+          workspaceId: fx.owner.workspaceId!,
           shiftId: shift.id,
           declinedShiftAssignmentId: declinedAssignment.id,
           declinedOfferId: declinedOffer.id,
@@ -527,7 +528,7 @@ describeIfDb('shift cancellation correctness (integration)', () => {
         }),
       );
 
-      await raceAndReport([
+      await raceAndReport<unknown>([
         () => replacementRequestService.approve(ctxOf(fx.owner), request.id, { staffProfileId: candidate.profileId! }),
         () => schedulingService.cancel(ctxOf(fx.owner), shift.id),
       ]);
@@ -553,7 +554,7 @@ describeIfDb('shift cancellation correctness (integration)', () => {
       const request = await withContext(ctxOf(fx.owner), (m) =>
         m.save(ReplacementRequest, {
           organisationId: fx.organisation.id,
-          workspaceId: fx.owner.workspaceId,
+          workspaceId: fx.owner.workspaceId!,
           shiftId: shift.id,
           declinedShiftAssignmentId: declinedAssignment.id,
           declinedOfferId: declinedOffer.id,

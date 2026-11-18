@@ -452,6 +452,7 @@ export class AttendanceService {
    */
   async checkIn(ctx: AuthContext, dto: CheckInDto): Promise<CheckInState> {
     return this.tenantContext.runInWorkspaceContext(ctx, async (manager) => {
+      await this.permissions.assertPermissionTx(manager, ctx, PermissionFlag.ATTENDANCE_CLOCK);
       const staffProfile = await this.ownStaffProfile(manager, ctx);
       const assignment = await manager.findOne(ShiftAssignment, {
         where: { shiftId: dto.shiftId, staffProfileId: staffProfile.id },
@@ -512,6 +513,7 @@ export class AttendanceService {
   /** Staff-facing read of one booking's Check In state (404 for a shift that is not the caller's). */
   async getCheckIn(ctx: AuthContext, shiftId: string): Promise<CheckInState> {
     return this.tenantContext.runInWorkspaceContext(ctx, async (manager) => {
+      await this.permissions.assertPermissionTx(manager, ctx, PermissionFlag.ATTENDANCE_CLOCK);
       const staffProfile = await this.ownStaffProfile(manager, ctx);
       const assignment = await manager.findOne(ShiftAssignment, { where: { shiftId, staffProfileId: staffProfile.id } });
       if (!assignment) throw new NotFoundException('Shift not found.');
@@ -532,6 +534,7 @@ export class AttendanceService {
    */
   async clockIn(ctx: AuthContext, dto: ClockInDto): Promise<AttendanceSummary> {
     return this.tenantContext.runInWorkspaceContext(ctx, async (manager) => {
+      await this.permissions.assertPermissionTx(manager, ctx, PermissionFlag.ATTENDANCE_CLOCK);
       const staffProfile = await this.ownStaffProfile(manager, ctx);
 
       // Same parent-first lock order as offer confirmation/cancellation. Re-read assignment after the lock.
@@ -619,6 +622,7 @@ export class AttendanceService {
    */
   async clockOut(ctx: AuthContext, dto: ClockOutDto): Promise<AttendanceSummary> {
     return this.tenantContext.runInWorkspaceContext(ctx, async (manager) => {
+      await this.permissions.assertPermissionTx(manager, ctx, PermissionFlag.ATTENDANCE_CLOCK);
       const staffProfile = await this.ownStaffProfile(manager, ctx);
 
       const attendance = await manager.findOne(Attendance, {
@@ -651,6 +655,7 @@ export class AttendanceService {
    */
   async autoClockOutOnGeofenceExit(ctx: AuthContext, dto: GeofenceExitDto): Promise<AttendanceSummary> {
     return this.tenantContext.runInWorkspaceContext(ctx, async (manager) => {
+      await this.permissions.assertPermissionTx(manager, ctx, PermissionFlag.ATTENDANCE_CLOCK);
       const staffProfile = await this.ownStaffProfile(manager, ctx);
 
       const attendance = await manager.findOne(Attendance, {
@@ -942,6 +947,8 @@ export class AttendanceService {
     locationEvidence: { maxAccuracyM: number; maxAgeSeconds: number; maxFutureSkewSeconds: number };
   }> {
     return this.tenantContext.runInWorkspaceContext(ctx, async (manager) => {
+      // SF-2 layer 2: the staff app's attendance.clock, re-checked like every other /attendance/me read.
+      await this.permissions.assertPermissionTx(manager, ctx, PermissionFlag.ATTENDANCE_CLOCK);
       const serverNow = new Date().toISOString();
       const clockInEarlyMinutes = this.env.get('CLOCK_IN_EARLY_MINUTES');
       const locationEvidence = {
@@ -976,6 +983,7 @@ export class AttendanceService {
   getHistory(ctx: AuthContext, dto: KeysetPaginationDto): Promise<AttendanceSummary[] | AttendanceHistoryPage>;
   getHistory(ctx: AuthContext, dto: KeysetPaginationDto = {}): Promise<AttendanceSummary[] | AttendanceHistoryPage> {
     return this.tenantContext.runInWorkspaceContext(ctx, async (manager) => {
+      await this.permissions.assertPermissionTx(manager, ctx, PermissionFlag.ATTENDANCE_CLOCK);
       const legacy = isLegacyUnpagedRequest(dto);
       const after = legacy ? null : decodeOptionalKeysetCursor(dto.cursor);
       const paging = legacy ? null : keysetSkipTake(dto);
@@ -1028,6 +1036,7 @@ export class AttendanceService {
   /** Staff-facing: the caller's own attendance for one shift (any status), or null — "have I already clocked in for this one?" */
   async getForShift(ctx: AuthContext, shiftId: string): Promise<AttendanceSummary | null> {
     return this.tenantContext.runInWorkspaceContext(ctx, async (manager) => {
+      await this.permissions.assertPermissionTx(manager, ctx, PermissionFlag.ATTENDANCE_CLOCK);
       const staffProfile = await manager.findOne(StaffProfile, { where: { userId: ctx.userId } });
       if (!staffProfile) return null;
       // sql-injection-reviewed: interpolates a module-level SQL constant / constant fragment; every request value is a bound $n parameter.
@@ -1050,6 +1059,7 @@ export class AttendanceService {
    */
   list(ctx: AuthContext, dto: ListAttendanceDto = {}): Promise<{ data: AttendanceSummary[]; total: number }> {
     return this.tenantContext.runInWorkspaceContext(ctx, async (manager) => {
+      await this.permissions.assertPermissionTx(manager, ctx, PermissionFlag.ATTENDANCE_VIEW);
       const scope = await this.resourceScope.resolveTx(manager, ctx);
       if (scope.kind === 'venue' && scope.venueIds.length === 0) return { data: [], total: 0 };
 

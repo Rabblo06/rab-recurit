@@ -75,19 +75,28 @@ test('DENIAL option A: a database credential anywhere in rab-api / rab-worker (h
   }
 });
 
-test('option 2: db-setup alone receives the database URL: the bundled admin URL by default, compose.env\'s admin URL, or the crewflow_owner URL (pass-through)', { skip }, () => {
-  assert.equal(fresh(REL).services[SETUP].environment.PG_DATABASE_URL, gate.BUNDLED_URL);
-  assert.equal(fresh('staging').services[SETUP].environment.PG_DATABASE_URL, gate.BUNDLED_URL);
-  assert.equal(fresh(EXT).services[SETUP].environment.PG_DATABASE_URL, gate.SENTINEL_ADMIN_URL);
-  assert.equal(fresh(PT).services[SETUP].environment.PG_DATABASE_URL, gate.SENTINEL_URL);
+test('option 2: db-setup alone receives the database URLs: the bundled admin URL by default, compose.env\'s PG_ADMIN_URL, or the crewflow_owner PG_DATABASE_URL (pass-through)', { skip }, () => {
+  const env = (c) => fresh(c).services[SETUP].environment;
+  for (const c of [REL, 'staging']) {
+    assert.equal(env(c).CREWFLOW_BUNDLED_DB_ADMIN_URL, gate.BUNDLED_URL, c);
+    assert.equal(env(c).PG_ADMIN_URL, '', c);
+    assert.equal(env(c).PG_DATABASE_URL, '', c);
+    assert.equal(env(c).CREWFLOW_BUNDLED_DB, '1', c);
+  }
+  assert.equal(env(EXT).PG_ADMIN_URL, gate.SENTINEL_ADMIN_URL);
+  assert.equal(env(EXT).PG_DATABASE_URL, '');
+  assert.equal(env(PT).PG_DATABASE_URL, gate.SENTINEL_URL);
+  assert.equal(env(PT).PG_ADMIN_URL, '');
   // Option 2: rab-api / rab-worker render the literal empty pin in every combination, pass-through included.
   for (const c of [REL, EXT, PT, 'staging']) for (const svc of APP) assert.equal(fresh(c).services[svc].environment.PG_DATABASE_URL, '', `${c} ${svc}`);
   // The bundled default with TLS below verify-full, another host, or a URL that is not the compose.env value: each refused.
   for (const url of [gate.BUNDLED_URL.replace('verify-full', 'disable'), gate.BUNDLED_URL.replace('@db:', '@db.evil.example:'), gate.BUNDLED_URL.replace('postgres:', 'crewflow_owner:')]) {
-    assertRefused(problemsAfter(REL, (s) => { s[SETUP].environment.PG_DATABASE_URL = url; }), /db-setup: PG_DATABASE_URL is not the committed/);
+    assertRefused(problemsAfter(REL, (s) => { s[SETUP].environment.CREWFLOW_BUNDLED_DB_ADMIN_URL = url; }), /db-setup: CREWFLOW_BUNDLED_DB_ADMIN_URL is not the committed/);
   }
-  assertRefused(problemsAfter(EXT, (s) => { s[SETUP].environment.PG_DATABASE_URL = gate.BUNDLED_URL; }), /db-setup: PG_DATABASE_URL is not the committed/);
-  assertRefused(problemsAfter(PT, (s) => { s[SETUP].environment.PG_DATABASE_URL = gate.SENTINEL_ADMIN_URL; }), /db-setup: PG_DATABASE_URL is not the committed/);
+  assertRefused(problemsAfter(EXT, (s) => { s[SETUP].environment.PG_DATABASE_URL = gate.SENTINEL_ADMIN_URL; }), /db-setup: PG_DATABASE_URL is not the committed/);
+  assertRefused(problemsAfter(PT, (s) => { s[SETUP].environment.PG_ADMIN_URL = gate.SENTINEL_ADMIN_URL; }), /db-setup: PG_ADMIN_URL is not the committed/);
+  for (const key of gate.DB_SETUP_DB_KEYS) assertRefused(problemsAfter(REL, (s) => { delete s[SETUP].environment[key]; }), new RegExp(`db-setup: ${key} is missing`));
+  assertRefused(problemsAfter(EXT, (s) => { s[SETUP].environment.PG_DATABASE_ADMIN_URL = gate.SENTINEL_ADMIN_URL; }), /db-setup: (has PG_DATABASE_ADMIN_URL|environment has PG_DATABASE_ADMIN_URL \(renamed to PG_ADMIN_URL)/);
   // Another service with a database URL, or the admin password under another key of db-setup: refused.
   assertRefused(problemsAfter(REL, (s) => { s['rab-redis'].environment = { PG_DATABASE_URL: gate.BUNDLED_URL }; }), /rab-redis: has PG_DATABASE_URL/);
   assertRefused(problemsAfter(EXT, (s) => { s[SETUP].environment.OTHER = gate.SENTINEL_ADMIN_PW; }), /db-setup: received the database admin credential \(OTHER\)/);
@@ -404,6 +413,92 @@ test('bundled database under the full contract: every combination has db; rab-ap
     assertRefused(problemsAfter(c, (s) => { delete s.db; }), /services are .*expected/);
     assertRefused(problemsAfter(c, (s) => { s['rab-api'].depends_on.db.condition = 'service_started'; }), /rab-api: does not wait for a healthy db/);
     assertRefused(problemsAfter(c, (s) => { s['rab-postgres'] = structuredClone(s.db); }), /services are .*expected/);
+  }
+});
+
+// Twenty's Helm db.enabled: CREWFLOW_BUNDLED_DB (compose.env) is db's replica count, 1 by default, 0 only with your own
+// database. The dependency edges stay committed (Compose skips the wait on a 0-replica service).
+test('bundled db switch: one replica by default; 0 only with CREWFLOW_BUNDLED_DB=0 and PG_ADMIN_URL or PG_DATABASE_URL; the edges stay', { skip }, () => {
+  for (const c of [DEF, EXT, PT, 'staging']) assert.equal(fresh(c).services.db.deploy.replicas, 1, c);
+  for (const c of ['external-no-db', 'pass-through-no-db']) {
+    const m = fresh(c);
+    assert.equal(m.services.db.deploy.replicas, 0, c);
+    assert.equal(m.services[SETUP].depends_on.db.condition, 'service_healthy', c);
+    assert.equal(m.services['rab-api'].depends_on.db.condition, 'service_healthy', c);
+    assert.equal(m.services['rab-api'].depends_on[SETUP].condition, 'service_completed_successfully', c);
+    const key = c === 'external-no-db' ? 'PG_ADMIN_URL' : 'PG_DATABASE_URL';
+    assert.equal(m.services[SETUP].environment[key], c === 'external-no-db' ? gate.SENTINEL_ADMIN_URL : gate.SENTINEL_URL, c);
+    assert.equal(m.services[SETUP].environment.CREWFLOW_BUNDLED_DB, '0', c);
+  }
+});
+
+// Owner decision 2026-11-17 (no dummy password): modes (b) and (c) render from a compose.env WITHOUT PG_DATABASE_PASSWORD.
+test('no dummy password: the own-database combinations render without PG_DATABASE_PASSWORD; the bundled db and db-setup then carry no password', { skip }, () => {
+  for (const c of ['external-no-db', 'pass-through-no-db']) {
+    const m = fresh(c);
+    assert.equal(m.services.db.environment.POSTGRES_PASSWORD, '', c);
+    assert.equal(m.services[SETUP].environment.CREWFLOW_BUNDLED_DB_ADMIN_URL, gate.BUNDLED_URL_NO_PASSWORD, c);
+    assert.ok(!JSON.stringify(m).includes(gate.SENTINEL_DB_PW), `${c}: the bundled db's password is nowhere`);
+  }
+  // The bundled combos still require it exactly (POSTGRES_PASSWORD = the value), and the db entrypoint's refusal is required.
+  assertRefused(problemsAfter(DEF, (s) => { s.db.environment.POSTGRES_PASSWORD = ''; }), /db: POSTGRES_PASSWORD must be exactly/);
+  assertRefused(problemsAfter(DEF, (s) => { s.db.entrypoint = s.db.entrypoint.map((x) => String(x).replace(/if \[ -z "\$\$?\{POSTGRES_PASSWORD:-\}" \][^]*?fi\n/, '')); }), /db: the entrypoint does not refuse an empty POSTGRES_PASSWORD/);
+});
+
+// Owner requirement 2026-11-17 + owner decision L-2: rab-api and rab-worker NEVER receive a PG_ADMIN_URL value: the compose
+// files pin it to the empty literal, which overrides an env-file value; any non-empty value is refused.
+test('DENIAL PG_ADMIN_URL: rab-api / rab-worker render it pinned "" in every combination; any value, or no pin at all, is refused', { skip }, () => {
+  for (const c of COMBOS) {
+    const m = fresh(c.name);
+    for (const svc of APP) assert.equal(m.services[svc].environment.PG_ADMIN_URL, '', `${c.name} ${svc}`);
+    for (const svc of APP) {
+      for (const value of [gate.SENTINEL_ADMIN_URL, gate.BUNDLED_URL, 'x', ' ']) {
+        assertRefused(problemsAfter(c.name, (s) => { s[svc].environment.PG_ADMIN_URL = value; }), new RegExp(`${svc}: has PG_ADMIN_URL with a value`));
+      }
+      assertRefused(problemsAfter(c.name, (s) => { delete s[svc].environment.PG_ADMIN_URL; }), new RegExp(`${svc}: PG_ADMIN_URL is not pinned to ""`));
+      for (const key of ['PG_DATABASE_ADMIN_URL', 'CREWFLOW_BUNDLED_DB_ADMIN_URL']) {
+        assertRefused(problemsAfter(c.name, (s) => { s[svc].environment[key] = 'x'; }), new RegExp(`${svc}: (has|environment has) ${key}`));
+      }
+    }
+    // Nor any other service but db-setup (not even empty there).
+    assertRefused(problemsAfter(c.name, (s) => { s['rab-redis'].environment = { PG_ADMIN_URL: '' }; }), /rab-redis: has PG_ADMIN_URL/);
+  }
+});
+
+// Owner decision L-2, regression: a PG_ADMIN_URL planted in database.env (read by rab-api, rab-worker and db-setup through
+// env_file) or runtime.env never reaches rab-api / rab-worker: the committed empty pin wins over the env file.
+test('L-2 regression: image.yml rendered with PG_ADMIN_URL planted in database.env / runtime.env gives rab-api and rab-worker PG_ADMIN_URL=""', { skip }, () => {
+  const planted = `PG_ADMIN_URL=${gate.SENTINEL_ADMIN_URL}`;
+  for (const [label, models] of [
+    ['database.env', renderModels(COMBOS, [], [], [planted])],
+    ['runtime.env', renderModels(COMBOS, [], [planted])],
+  ]) {
+    for (const c of COMBOS) {
+      const m = models[c.name];
+      for (const svc of APP) {
+        assert.equal(m.services[svc].environment.PG_ADMIN_URL, '', `${label} ${c.name} ${svc}`);
+        assert.ok(!JSON.stringify(m.services[svc]).includes(gate.SENTINEL_ADMIN_PW), `${label} ${c.name} ${svc}: the admin password reached it`);
+      }
+      // db-setup's own committed ${PG_ADMIN_URL:-} (compose.env) also wins over an env-file value.
+      assert.equal(m.services[gate.DB_SETUP_SERVICE].environment.PG_ADMIN_URL, c.external === 'admin' ? gate.SENTINEL_ADMIN_URL : '', `${label} ${c.name} db-setup`);
+      assert.deepEqual(checkModel(m, c).filter((x) => /PG_ADMIN_URL/.test(x)), [], `${label} ${c.name}`);
+    }
+  }
+});
+
+test('DENIAL bundled db switch: 0 replicas with the bundled URL, 2 replicas, scale, a non-empty deploy section, 1 replica where 0 was set', { skip }, () => {
+  for (const c of [DEF, EXT, PT, 'staging']) {
+    assertRefused(problemsAfter(c, (s) => { s.db.deploy.replicas = 0; }), /db: deploy\.replicas is 0, expected 1/);
+    assertRefused(problemsAfter(c, (s) => { s.db.deploy.replicas = 2; }), /db: deploy\.replicas is 2, expected 1/);
+    assertRefused(problemsAfter(c, (s) => { delete s.db.deploy; }), /db: deploy\.replicas is unset, expected 1/);
+    assertRefused(problemsAfter(c, (s) => { s.db.scale = 1; }), /db: has scale/);
+    assertRefused(problemsAfter(c, (s) => { s.db.deploy.resources = { limits: { memory: '64g' } }; }), /db: deploy\.resources is set/);
+  }
+  for (const c of ['external-no-db', 'pass-through-no-db']) {
+    assertRefused(problemsAfter(c, (s) => { s.db.deploy.replicas = 1; }), /db: deploy\.replicas is 1, expected 0/);
+    // Everything else of db is still checked with 0 replicas (it starts again the day the switch goes back to 1).
+    assertRefused(problemsAfter(c, (s) => { s.db.read_only = false; }), /db: read_only root filesystem is not set/);
+    assertRefused(problemsAfter(c, (s) => { s[SETUP].restart = 'always'; }), /db-setup: restart is "always", expected "no"/);
   }
 });
 

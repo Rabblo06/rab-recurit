@@ -5,8 +5,9 @@
  * bundled `db`, the one-shot `db-setup`, rab-api with api-prestart.sh, rab-worker with worker-start.sh) plus the test-only
  * overlays of this folder, deployed with THE documented command `docker compose pull && docker compose up -d`.
  *
- * The design under test: PG_DATABASE_URL (compose.env) is the ONE database setting and reaches db-setup ONLY (rab-api /
- * rab-worker pin it to "" and refuse any non-empty value). db-setup keeps crewflow_owner's password in a file on its setup
+ * The design under test: the database settings of compose.env (PG_ADMIN_URL = an admin URL; PG_DATABASE_URL = only ever a
+ * crewflow_owner URL, owner decision 2026-11-17; upgrade-lib.cjs writeComposeEnv picks the variable by login) reach db-setup
+ * ONLY (rab-api / rab-worker pin PG_DATABASE_URL to "", have no PG_ADMIN_URL, and refuse any non-empty value of either). db-setup keeps crewflow_owner's password in a file on its setup
  * volume (0400, 1000:1000): for the bundled db or a client's admin URL a random 32-byte password, written before the
  * transaction, crewflow_owner created only if missing (01-crewflow-owner.sql attributes and grants), later starts change
  * nothing; for an existing crewflow_owner URL only O1 + the read-only refusals, that URL's password copied into the file,
@@ -115,11 +116,12 @@ const BOOTSTRAP_APP = 'crewflow-owner-bootstrap';
 const MSG = {
   // owner-bootstrap.ts OWNER_BOOTSTRAP_MESSAGES. The fixed refusal texts kept from #125 are compared exactly; the outcome
   // lines and the Helm-design refusals are matched loosely (their final wording is the CODE agent's).
-  pgTooOld: 'PostgreSQL 16 or later is required.',
+  // The supported-majors refusal (database/postgres/supported-majors.ts), for the PostgreSQL 15 block.
+  pgTooOld: 'PostgreSQL 15 is not supported; use 16-18 (PostgreSQL 16, 17 or 18). Nothing was created. Refusing.',
   privileged: (attrs) => `crewflow_owner exists with ${attrs}; Crewflow never runs as a privileged login.`,
-  cannotCreateRoles: "The PG_DATABASE_URL login cannot create roles (needs CREATEROLE, or use the provider's admin login).",
-  cannotGrantDb: 'The PG_DATABASE_URL login cannot grant CONNECT, CREATE, TEMPORARY on this database',
-  noAdminOption: /must be reset, but the PG_DATABASE_URL login has no ADMIN OPTION on crewflow_owner|must be reset but the PG_DATABASE_URL login has no ADMIN OPTION on it/,
+  cannotCreateRoles: "The PG_ADMIN_URL login cannot create roles (needs CREATEROLE, or use the provider's admin login).",
+  cannotGrantDb: 'The PG_ADMIN_URL login cannot grant CONNECT, CREATE, TEMPORARY on this database',
+  noAdminOption: /must be reset, but the PG_ADMIN_URL login has no ADMIN OPTION on crewflow_owner|must be reset but the PG_ADMIN_URL login has no ADMIN OPTION on it/,
   ownerOwnsDatabase: /crewflow_owner owns this database/,
   searchPathDefault: /search_path default is set/,
   missingDb: /does not exist/,
@@ -342,13 +344,26 @@ function environScan(p, service, sentinels) {
   return { rows, probe, probeUrl };
 }
 
-/** The rendered compose config (never written or printed): each app service's PG_DATABASE_URL, and whether db-setup has one. */
+/**
+ * The rendered compose config (never written or printed): each app service's PG_DATABASE_URL and whether it has a
+ * PG_ADMIN_URL pinned to "" (owner decision L-2), and whether db-setup has a URL (PG_ADMIN_URL, PG_DATABASE_URL or,
+ * in the bundled mode, its bundled admin URL with a password).
+ */
 function renderedUrls(p) {
   const r = p.compose(['config', '--format', 'json'], { timeout: 120_000 });
   if (r.code !== 0) throw new Error(`compose config failed (${r.code})`);
   const cfg = JSON.parse(r.stdout);
   const env = (svc) => (cfg.services && cfg.services[svc] && cfg.services[svc].environment) || {};
-  return { api: env('rab-api').PG_DATABASE_URL, worker: env('rab-worker').PG_DATABASE_URL, setupSet: Boolean(env('db-setup').PG_DATABASE_URL) };
+  const s = env('db-setup');
+  let bundledPassword = false;
+  try { bundledPassword = new URL(String(s.CREWFLOW_BUNDLED_DB_ADMIN_URL || '')).password !== ''; } catch { bundledPassword = false; }
+  return {
+    api: env('rab-api').PG_DATABASE_URL,
+    worker: env('rab-worker').PG_DATABASE_URL,
+    // Owner decision L-2: PG_ADMIN_URL is pinned to "" on both (never absent, never a value).
+    adminPinned: ['rab-api', 'rab-worker'].every((svc) => env(svc).PG_ADMIN_URL === ''),
+    setupSet: Boolean(s.PG_ADMIN_URL || s.PG_DATABASE_URL || bundledPassword),
+  };
 }
 function checkEnviron(p, check, n, label, sentinels, { services = ['rab-api', 'rab-worker'] } = {}) {
   for (const svc of services) {
@@ -372,6 +387,11 @@ function checkEnviron(p, check, n, label, sentinels, { services = ['rab-api', 'r
   }
   const ru = renderedUrls(p);
   check(ru.api === '' && ru.worker === '' && ru.setupSet, `${label}: the rendered compose config gives rab-api and rab-worker PG_DATABASE_URL="" (whatever compose.env holds) and db-setup a URL (api ${ru.api === '' ? 'empty' : ru.api === undefined ? 'absent' : 'SET'}, worker ${ru.worker === '' ? 'empty' : ru.worker === undefined ? 'absent' : 'SET'})`);
+  check(ru.adminPinned, `${label}: the rendered compose config gives rab-api and rab-worker PG_ADMIN_URL="" (pinned; owner decision L-2)`);
+  for (const svc of services) {
+    const def = L.run('docker', ['inspect', '-f', '{{range .Config.Env}}{{println .}}{{end}}', p.container(svc)], { timeout: 180_000 }).stdout;
+    check(!/^PG_ADMIN_URL=./m.test(def), `${label}: ${svc}'s container definition (docker inspect Config.Env) has no PG_ADMIN_URL value (pinned "")`);
+  }
 }
 
 /**
@@ -848,6 +868,11 @@ async function blockBundled() {
       const r = oneOff(p, svc, label, { env: ADMIN, timeout: 180_000 });
       check(r.code === 64 && MSG.entrypointRefusal.test(r.out), `${label.slice(5)} with an admin PG_DATABASE_URL: exit ${r.code}, refused`);
     }
+    // Owner decision 2026-11-17: PG_ADMIN_URL forced into rab-api / rab-worker is refused by the entrypoints as well.
+    for (const [svc, label] of [['rab-api', 'S10A-api-prestart-admin-url'], ['rab-worker', 'S10A-worker-start-admin-url']]) {
+      const r = oneOff(p, svc, label, { env: { PG_ADMIN_URL: L.dbUrl('postgres', s.dbPassword) }, timeout: 180_000 });
+      check(r.code === 64 && /PG_ADMIN_URL must never be set on the (api|worker) service/.test(r.out), `${label.slice(5)} with PG_ADMIN_URL: exit ${r.code}, refused`);
+    }
     const cases = [
       ['rab-worker', 'S10A-worker-main', ['packages/rab-worker/dist/main.js']],
       ['rab-api', 'S10A-api-main', ['packages/rab-server/dist/main.js']],
@@ -978,7 +1003,7 @@ async function blockExternal() {
     p.psql(`CREATE ROLE ext_admin LOGIN CREATEROLE NOSUPERUSER NOBYPASSRLS PASSWORD '${pw.admin}'; ALTER DATABASE crewflow OWNER TO ext_admin; ALTER SCHEMA public OWNER TO ext_admin;`);
     use(p, { databaseUrl: url('ext_admin', pw.admin) });
     const d = deploy(p, 'S3-deploy');
-    check(d.code === 0, `external admin (NOSUPERUSER CREATEROLE, owns the database) in PG_DATABASE_URL, the documented command: exit ${d.code}`);
+    check(d.code === 0, `external admin (NOSUPERUSER CREATEROLE, owns the database) in PG_ADMIN_URL, the documented command: exit ${d.code}`);
     if (d.code !== 0) throw new Error('the external-admin deploy failed');
     await waitApp(p);
     const sl = setupLog(p);

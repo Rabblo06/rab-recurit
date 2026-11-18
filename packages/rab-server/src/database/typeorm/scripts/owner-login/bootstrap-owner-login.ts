@@ -1,8 +1,9 @@
 /**
  * Database setup the Twenty Helm way (OWNER-DB-FINAL.md Part A): the process entry of the bootstrap child.
  *   node packages/rab-server/dist/database/typeorm/scripts/owner-login/bootstrap-owner-login.js
- * Run ONLY by the one-shot `db-setup` service (db-setup.sh), the only holder of PG_DATABASE_URL (the bundled db's superuser,
- * a client's admin URL, or an existing crewflow_owner URL). It does NOT read APP_SECRET (Twenty: APP_SECRET is never part
+ * Run ONLY by the one-shot `db-setup` service (db-setup.sh), the only holder of PG_ADMIN_URL (the bundled db's superuser or a
+ * client's admin URL) and of an operator-given PG_DATABASE_URL (an existing crewflow_owner URL, never an admin login; exactly
+ * one of the two, owner-credential.ts selectDbSetupInput). It does NOT read APP_SECRET (Twenty: APP_SECRET is never part
  * of any database credential). Core: owner-bootstrap.ts.
  *
  * Files, on db-setup's volume (rab-api and rab-worker mount it read-only):

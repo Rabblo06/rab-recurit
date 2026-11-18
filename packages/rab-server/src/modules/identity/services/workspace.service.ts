@@ -1,7 +1,9 @@
-import { Injectable } from '@nestjs/common';
+import { PermissionFlag } from '@rab/shared';
+import { Inject, Injectable } from '@nestjs/common';
 
 import { EffectiveAuthProviders, OrganisationAuthProvidersService } from '../../../engine/core-modules/auth/services/organisation-auth-providers.service';
 import { CoreEntityCacheService } from '../../../engine/core-modules/entity-cache/core-entity-cache.service';
+import { PermissionsService } from '../../../engine/core-modules/permissions/permissions.service';
 import { AuthContext } from '../../../engine/core-modules/tenant/auth-context.interface';
 import { TenantContextService } from '../../../engine/core-modules/tenant/tenant-context.service';
 import { Organisation } from '../entities';
@@ -27,6 +29,10 @@ export type AuthProvidersView = Record<keyof EffectiveAuthProviders, { organisat
  */
 @Injectable()
 export class WorkspaceService {
+  /** SF-2 layer 2: both reads re-check the routes' `settings.view`. Property-injected so the constructor is unchanged. */
+  @Inject(PermissionsService)
+  private readonly permissions!: PermissionsService;
+
   constructor(
     private readonly tenantContext: TenantContextService,
     private readonly organisationAuthProviders: OrganisationAuthProvidersService,
@@ -36,6 +42,7 @@ export class WorkspaceService {
   /** Redis checkpoint — Core Entity Cache: display-only, see CoreEntityCacheService's own doc comment. */
   async get(ctx: AuthContext): Promise<WorkspaceResponse> {
     return this.tenantContext.runInTenantContext(ctx, async (manager) => {
+      await this.permissions.assertPermissionTx(manager, ctx, PermissionFlag.SETTINGS_VIEW);
       const cached = await this.entityCache.getOrganisationDisplay(manager, ctx.organisationId!);
       if (cached) return { id: cached.id, name: cached.name, slug: cached.slug, logoKey: cached.logoFileId, timezone: cached.timezone };
       const org = await manager.findOneOrFail(Organisation, { where: { id: ctx.organisationId! } });
@@ -49,7 +56,10 @@ export class WorkspaceService {
    * this deployment" instead of implying a provider is usable when the system has it disabled.
    */
   async getAuthProviders(ctx: AuthContext): Promise<AuthProvidersView> {
-    const org = await this.tenantContext.runInTenantContext(ctx, (manager) => manager.findOneOrFail(Organisation, { where: { id: ctx.organisationId! } }));
+    const org = await this.tenantContext.runInTenantContext(ctx, async (manager) => {
+      await this.permissions.assertPermissionTx(manager, ctx, PermissionFlag.SETTINGS_VIEW);
+      return manager.findOneOrFail(Organisation, { where: { id: ctx.organisationId! } });
+    });
     return this.authProvidersView(org);
   }
 

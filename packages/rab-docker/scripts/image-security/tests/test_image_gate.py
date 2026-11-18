@@ -681,3 +681,50 @@ class CredentialMountDir(unittest.TestCase):
                                               '/run/crewflow/db-target-other/x': None}, dirs)
         self.assertEqual(len(problems), 1)
         self.assertIn('/run/crewflow/db-target/owner-password', problems[0])
+
+
+class NativeAddonsSmoke(unittest.TestCase):
+    """container: the native-addon smoke (argon2id hash+verify, msgpackr native acceleration) runs in the image as
+    1000:1000, offline, read-only, and fails closed on a non-zero exit or a missing OK line."""
+
+    def run_container(self, smoke):
+        calls = []
+
+        def fake_docker(*args, check=True, timeout=None):
+            calls.append(args)
+            if '/gate/security-floors.sh' in args:
+                out = 'security-floor: OK\n' * 4
+                return mock.Mock(returncode=0, stdout=out, stderr='')
+            if '/gate/module-paths-gate.cjs' in args:
+                return mock.Mock(returncode=0, stdout='module-paths-gate: OK\n', stderr='')
+            if '/gate/native-addons-smoke.cjs' in args:
+                return mock.Mock(returncode=smoke[0], stdout=smoke[1], stderr='')
+            raise AssertionError(f'unexpected docker call {args}')
+
+        c = g.Check('image-container', 'release', None)
+        with mock.patch.object(g, 'docker', fake_docker):
+            g.cmd_container(mock.Mock(role='image', image='img@sha256:' + '0' * 64), c)
+        smoke_calls = [a for a in calls if '/gate/native-addons-smoke.cjs' in a]
+        self.assertEqual(len(smoke_calls), 1, calls)
+        return c, smoke_calls[0]
+
+    def test_ok_passes_and_runs_as_runtime_user_offline_read_only(self):
+        c, args = self.run_container((0, 'native-addons-smoke: OK argon2id m=19456,t=2,p=1 hash+verify; msgpackr native\n'))
+        self.assertEqual(c.fails, [])
+        self.assertEqual(c.status, 'PASS')
+        a = list(args)
+        self.assertEqual(a[a.index('--network') + 1], 'none')
+        self.assertEqual(a[a.index('--user') + 1], '1000:1000')
+        self.assertIn('--read-only', a)
+        self.assertIn('--cap-drop', a)
+        self.assertTrue(any(x.startswith('type=bind,source=') and x.endswith('target=/gate/native-addons-smoke.cjs,readonly') for x in a))
+        self.assertTrue(os.path.isfile(g.NATIVE_SMOKE))
+
+    def test_nonzero_exit_fails(self):
+        c, _ = self.run_container((1, 'native-addons-smoke: FAIL: msgpackr native acceleration is not enabled\n'))
+        self.assertEqual(c.status, 'FAIL')
+        self.assertTrue(any('native-addons-smoke' in f for f in c.fails), c.fails)
+
+    def test_exit_zero_without_ok_line_fails(self):
+        c, _ = self.run_container((0, '\n'))
+        self.assertEqual(c.status, 'FAIL')

@@ -1,7 +1,8 @@
 import { Logger } from '@nestjs/common';
-import { DataSource } from 'typeorm';
+import { DataSource, EntityManager } from 'typeorm';
 import { organisationIds } from '@rab/server/engine/worker-shared/maintenance-catalogue';
 import { TenantContextService } from '@rab/server/engine/core-modules/tenant/tenant-context.service';
+import { shipAuditRowAfterCommit } from '@rab/server/engine/core-modules/audit-events/audit-event-shipping';
 import { noteLegacyBatchLimitReached } from '../../core/wake/legacy-batch-limit';
 
 const BATCH_SIZE = 50;
@@ -173,15 +174,18 @@ export async function dispatchPushScope(
           // as a plain exhausted failure. Without the marker nothing was sent: exhausted, unchanged.
           if (row.status === 'PROCESSING' && row.provider_call_started_at) {
             await manager.query(`UPDATE core.push_delivery SET status = 'FAILED', failed_at = now(), last_error_code = 'DELIVERY_UNCERTAIN' WHERE id = $1`, [row.id]);
+            await writeAuditRow(manager, organisationId, row.id, 'push.delivery_uncertain', { errorCode: 'DELIVERY_UNCERTAIN' });
             uncertainCount++;
             continue;
           }
           await manager.query(`UPDATE core.push_delivery SET status = 'FAILED', failed_at = now(), last_error_code = 'STUCK_LEASE_ATTEMPTS_EXHAUSTED' WHERE id = $1`, [row.id]);
+          await writeAuditRow(manager, organisationId, row.id, 'push.delivery_failed', { errorCode: 'STUCK_LEASE_ATTEMPTS_EXHAUSTED' });
           exhaustedCount++;
           continue;
         }
         if (hadPriorAttempt && row.provider_call_started_at && !ambiguousDeliverySafeToRetry) {
           await manager.query(`UPDATE core.push_delivery SET status = 'FAILED', failed_at = now(), last_error_code = 'DELIVERY_UNCERTAIN' WHERE id = $1`, [row.id]);
+          await writeAuditRow(manager, organisationId, row.id, 'push.delivery_uncertain', { errorCode: 'DELIVERY_UNCERTAIN' });
           uncertainCount++;
           continue;
         }
@@ -254,4 +258,27 @@ export async function dispatchPushScope(
   }
 
   return total;
+}
+
+/**
+ * The dispatcher's own FAILED outcomes (stuck lease at the cap, DELIVERY_UNCERTAIN) are audited in the same scoped
+ * transaction as the state change — the same raw insert and off-host routing as email-dispatch.job.ts's writeAuditRow
+ * (shipAuditRowAfterCommit: queued after commit, never awaited; these actions are not in the security catalogue, so
+ * nothing is queued for them). Metadata is the delivery id and the error code only.
+ */
+async function writeAuditRow(
+  manager: EntityManager,
+  organisationId: string,
+  pushDeliveryId: string,
+  action: string,
+  extraMetadata: Record<string, unknown>,
+): Promise<void> {
+  const inserted = await manager.query<Array<{ id?: string }> | undefined>(
+    `INSERT INTO core.audit_log (organisation_id, actor_user_id, action, metadata)
+     VALUES ($1, NULL, $2, $3::jsonb)
+     RETURNING id`,
+    [organisationId, action, JSON.stringify({ pushDeliveryId, ...extraMetadata })],
+  );
+  const auditLogId = Array.isArray(inserted) ? inserted[0]?.id : undefined;
+  if (typeof auditLogId === 'string') shipAuditRowAfterCommit(manager, { organisationId, auditLogId, action });
 }

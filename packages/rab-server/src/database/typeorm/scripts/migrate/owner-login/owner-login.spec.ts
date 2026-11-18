@@ -17,6 +17,7 @@ import {
   SUPPORTED_FINGERPRINT_MAJORS,
   UnsupportedPostgresVersionError,
   workspaceFingerprintMajor,
+  workspaceFingerprintMajorSelected,
 } from '../../../workspace-schema/v1/expected-fingerprints';
 import { approvalDecision, selectFingerprintsForRun } from '../locked-migration-runner';
 import { BOOTSTRAP_ROLES, isRoleRace, OWNER_LOGIN, RoleFacts, roleShapeProblems } from './bootstrap';
@@ -280,7 +281,7 @@ describe('D4: workspace fingerprints selected by server major; PG16 unchanged', 
     resetWorkspaceFingerprintSelectionForTests();
     expect(() => selectWorkspaceFingerprintMajor(19)).toThrow(UnsupportedPostgresVersionError);
     expect(() => selectWorkspaceFingerprintMajor(19)).toThrow(/not supported/);
-    expect(() => selectWorkspaceFingerprintMajor(15)).toThrow(/refused/);
+    expect(() => selectWorkspaceFingerprintMajor(15)).toThrow(/PostgreSQL 15 is not supported; use 16-18/);
   });
   it('DB-SETUP §6: 17 selects its own complete PG17 table, distinct from 16 and 18', () => {
     expect(SUPPORTED_FINGERPRINT_MAJORS).toEqual([16, 17, 18]);
@@ -301,16 +302,20 @@ describe('D4: workspace fingerprints selected by server major; PG16 unchanged', 
     expect(postgresMajorOf('160015')).toBe(16);
     expect(postgresMajorOf(180006)).toBe(18);
     expect(() => postgresMajorOf('16.4')).toThrow();
-    expect(() => selectFingerprintsForRun('150008', true, () => undefined)).toThrow(/refused/);
+    expect(() => selectFingerprintsForRun('150008', true, () => undefined)).toThrow(/PostgreSQL 15 is not supported; use 16-18/);
     // PG18 is supported, but until its fingerprints are generated and committed the owner login refuses it up front.
     if (missingFingerprintVersions(18).length) expect(() => selectFingerprintsForRun('180006', true, () => undefined)).toThrow(/no generated workspace fingerprints/);
     expect(missingFingerprintVersions(16)).toEqual([]);
     resetWorkspaceFingerprintSelectionForTests();
-    const lines: string[] = [];
-    // DB-SETUP §6: 17 is supported now, so the lenient path's "no reviewed fingerprints" warning is shown with 19.
-    expect(selectFingerprintsForRun('190001', false, (l) => lines.push(l))).toBe(19);
-    expect(lines.join()).toMatch(/no reviewed workspace fingerprints/);
-    expect(workspaceFingerprintMajor()).toBe(16);
+    // Security review L1 (PR #227): the legacy (non-strict) path refuses an unsupported major too, before any migration,
+    // and selects nothing; a supported major is selected exactly like the owner-login path.
+    for (const num of ['190000', '150008']) {
+      expect(() => selectFingerprintsForRun(num, false, () => undefined)).toThrow(UnsupportedPostgresVersionError);
+      expect(() => selectFingerprintsForRun(num, false, () => undefined)).toThrow(/is not supported; use 16-18/);
+      expect(workspaceFingerprintMajorSelected()).toBe(false);
+    }
+    expect(selectFingerprintsForRun('170006', false, () => undefined)).toBe(17);
+    expect(workspaceFingerprintMajor()).toBe(17);
   });
 });
 

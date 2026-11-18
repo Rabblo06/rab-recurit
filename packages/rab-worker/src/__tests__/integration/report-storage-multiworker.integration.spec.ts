@@ -305,8 +305,8 @@ describeIf('report storage — multi-worker and failure injection (S3)', () => {
       expect(await storedFiles(f)).toHaveLength(0);
 
       const reportFile = join(mkdtempSync(join(tmpdir(), 'rab-reconcile-')), 'report.json');
-      const command = new StorageReconcileCommand(a.dataSource, a.drivers, a.env);
-      command.catalogueDataSource = adminDataSource;
+      // The command takes the runtime TenantContextService and has no separate catalogue connection any more.
+      const command = new StorageReconcileCommand(a.dataSource, a.drivers, a.env, a.tenantContext);
       const log = jest.spyOn(console, 'log').mockImplementation(() => undefined);
       await command.run([], { reportFile });
       log.mockRestore();

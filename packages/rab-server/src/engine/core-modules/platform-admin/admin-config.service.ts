@@ -56,6 +56,8 @@ export const ENVIRONMENT_ALLOWLIST: readonly EnvEntry[] = [
   { group: 'Database', key: 'PG_DATABASE_PRIMARY_TIMEOUT_MS', kind: 'value' },
   { group: 'Database', key: 'PG_SSL_ALLOW_SELF_SIGNED', kind: 'value' },
   { group: 'Database', key: 'PG_SSL_CA_CERT_PATH', kind: 'url' },
+  // The inline CA (PEM text): Set / Not set only, like a secret; the text itself is never shown.
+  { group: 'Database', key: 'PG_SSL_CA_CERT', kind: 'secret' },
   { group: 'Database', key: 'PG_DATABASE_URL_IS_DIRECT', kind: 'value' },
   { group: 'Database', key: 'PG_DATABASE_REPLICA_URL', kind: 'secret' },
   { group: 'Database', key: 'PG_DATABASE_REPLICA_TIMEOUT_MS', kind: 'value' },

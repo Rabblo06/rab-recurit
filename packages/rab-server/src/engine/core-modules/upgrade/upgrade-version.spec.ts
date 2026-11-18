@@ -1,4 +1,4 @@
-import { ADOPTION_VERSION_BY_RELEASE, AppVersionError, compareVersions, CREWFLOW_PREVIOUS_VERSIONS, majorMinorKey, readAppVersion, upgradeFromVersions } from './upgrade-version';
+import { ADOPTION_VERSION_BY_RELEASE, AppVersionError, compareVersions, CREWFLOW_PREVIOUS_VERSIONS, isPatchRelease, majorMinorKey, minorReleaseOf, readAppVersion, upgradeFromVersions } from './upgrade-version';
 
 describe('upgrade-version (OWNER-DB-ULTIMATE Part B3)', () => {
   it('compares MAJOR.MINOR.PATCH numerically and refuses anything else', () => {
@@ -19,6 +19,13 @@ describe('upgrade-version (OWNER-DB-ULTIMATE Part B3)', () => {
   it('0.6.0 (adoption) upgrades from 0.4.0 or 0.5.0; later releases only from the immediately previous one', () => {
     expect(upgradeFromVersions('0.6.0', ['0.4.0', '0.5.0'])).toEqual(['0.4.0', '0.5.0']);
     expect(upgradeFromVersions('0.7.0', ['0.4.0', '0.5.0', '0.6.0'])).toEqual(['0.6.0']);
+  });
+
+  it('a patch release (0.6.1) upgrades from the earlier published versions of its own minor line only; its .0 must be published', () => {
+    expect(upgradeFromVersions('0.6.1', ['0.4.0', '0.5.0', '0.6.0'])).toEqual(['0.6.0']);
+    expect(upgradeFromVersions('0.6.2', ['0.4.0', '0.5.0', '0.6.0', '0.6.1'])).toEqual(['0.6.0', '0.6.1']);
+    expect(() => upgradeFromVersions('0.6.1', ['0.4.0', '0.5.0'])).toThrow(AppVersionError);
+    expect([isPatchRelease('0.6.1'), isPatchRelease('0.7.0'), minorReleaseOf('0.6.1')]).toEqual([true, false, '0.6.0']);
   });
 
   it('majorMinorKey names the upgrade-commands folder', () => {

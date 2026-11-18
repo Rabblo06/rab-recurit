@@ -9,15 +9,15 @@ icon: "layer-group"
 | **Web console** | React 18, TypeScript 5.9, Vite 6, React Router 7, TanStack Query 5, Framer Motion |
 | **Mobile app** | Flutter (Dart 3.10), `local_auth` for biometrics, `mobile_scanner` for QR codes, Firebase Messaging (Android push, not yet configured) |
 | **API** | NestJS 11, TypeORM 0.3, class-validator, Argon2id password hashing |
-| **Background work** | BullMQ 5 on Redis, plus interval jobs with advisory locks; native PDF rendering (`@react-pdf/renderer`, no browser) |
-| **Database** | PostgreSQL 16 with Row-Level Security |
+| **Background work** | BullMQ 5 on Redis: queues plus cluster-wide job schedulers with per-job advisory locks (process-local interval timers in development); native PDF rendering (`@react-pdf/renderer`, no browser) |
+| **Database** | PostgreSQL 16 (17 and 18 also supported) with Row-Level Security |
 | **Cache and queues** | Redis 7 |
 | **File storage** | Local disk or S3-compatible storage (Cloudflare R2 in production) |
 | **Email** | React Email templates; drivers for logging, SMTP and Resend |
 | **Tooling** | Nx 22, Yarn 4 (Corepack), Node.js 24 |
 | **Testing** | Jest (unit and integration), Playwright (web end-to-end), `flutter_test` (goldens and widget tests) |
 | **Security tooling** | Gitleaks, CodeQL, Trivy, `yarn npm audit`, an RLS-coverage gate |
-| **Delivery** | One Docker image for API and Worker, Render services, GitHub Container Registry |
+| **Delivery** | One Docker image for API and Worker, published by digest to a private Docker Hub repository after the image security gate; deployed with Docker Compose (`docker compose pull && docker compose up -d`) |
 
 ## Notable decisions
 

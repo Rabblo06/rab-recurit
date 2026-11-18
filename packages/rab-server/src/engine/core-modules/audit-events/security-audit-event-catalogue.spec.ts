@@ -39,6 +39,7 @@ const RAW_AUDIT_INSERT = /insert\s+into\s+(?:"?core"?\s*\.\s*)?"?audit_log"?/i;
  */
 const DIRECT_WRITERS: Record<string, { shippedBy: string | null }> = {
   'packages/rab-worker/src/queues/rab-email/email-dispatch.job.ts': { shippedBy: 'packages/rab-worker/src/queues/rab-email/email-dispatch.job.ts' },
+  'packages/rab-worker/src/queues/rab-push/push-dispatch.job.ts': { shippedBy: 'packages/rab-worker/src/queues/rab-push/push-dispatch.job.ts' },
   'packages/rab-worker/src/queues/rab-maintenance/account-invite-cleanup.job.ts': { shippedBy: 'packages/rab-worker/src/queues/rab-maintenance/account-invite-cleanup.job.ts' },
   // core.replay_failed_email (frozen with its migration): its caller ships the row it wrote.
   'packages/rab-server/src/database/typeorm/core/outbox-retention-sql.ts': { shippedBy: 'packages/rab-server/src/engine/core-modules/platform-admin/outbox-operations.service.ts' },
@@ -76,7 +77,7 @@ describe('security audit event catalogue (X1.1)', () => {
 
   it('the actions the Worker and SQL write directly (not AuditAction constants) are classified too', () => {
     const direct = new Set<string>();
-    for (const file of ['packages/rab-worker/src/queues/rab-email/email-dispatch.job.ts', 'packages/rab-worker/src/queues/rab-maintenance/account-invite-cleanup.job.ts']) {
+    for (const file of ['packages/rab-worker/src/queues/rab-email/email-dispatch.job.ts', 'packages/rab-worker/src/queues/rab-push/push-dispatch.job.ts', 'packages/rab-worker/src/queues/rab-maintenance/account-invite-cleanup.job.ts']) {
       const src = repoFile(file);
       // writeAuditRow(manager, org, id, 'action', ...) — possibly across lines.
       for (const m of src.matchAll(/writeAuditRow\(\s*[^;]*?'([a-z_]+\.[a-z_]+)'/g)) direct.add(m[1]!);
