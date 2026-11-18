@@ -937,6 +937,10 @@ export class ManagerService {
    * No-op for the `/managers` flag. (SF-2 review L-1: every method here that accepts the Venue Manager flag calls it after
    * the route-flag check and before any row read: `update`, `setActive`, `resetPassword`, `changePendingEmail`,
    * `changeEmail`, `getTimeline`, `listNotes`, `addNote`, `listEmails`.)
+   *
+   * Relies on two invariants of `manager_profile`: `type` never changes after creation, and `workspace_id` only ever goes
+   * from NULL to a value. A future feature that moves a Venue Manager between workspaces (or changes a profile's type) must
+   * revisit this pin and `EmailChangeService`'s `venue_manager` scope.
    */
   private async assertVenueRouteTargetTx(manager: EntityManager, ctx: AuthContext, id: string, requiredPermission: ManagerRouteFlag): Promise<void> {
     if (requiredPermission !== PermissionFlag.VENUE_MANAGER_CREATE) return;
@@ -1237,7 +1241,12 @@ export class ManagerService {
     });
     if (outcome.verify) {
       // The verified path changes nothing yet; EmailChangeService.confirm() clears the entry when it does.
-      return this.emailChange.request(ctx, { targetUserId: outcome.userId, newEmail: dto.email, currentPassword: dto.currentPassword, requiredPermission });
+      return this.emailChange.request(ctx, {
+        targetUserId: outcome.userId,
+        newEmail: dto.email,
+        currentPassword: dto.currentPassword,
+        targetScope: requiredPermission === PermissionFlag.VENUE_MANAGER_CREATE ? 'venue_manager' : 'manager',
+      });
     }
     await this.invalidateUserDisplay(outcome.userId);
     return { email: outcome.email };

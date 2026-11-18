@@ -1252,7 +1252,7 @@ export class StaffService {
     });
     if (outcome.verify) {
       // The verified path changes nothing yet; EmailChangeService.confirm() clears the entry when it does.
-      return this.emailChange.request(ctx, { targetUserId: outcome.userId, newEmail: dto.email, currentPassword: dto.currentPassword, requiredPermission: PermissionFlag.STAFF_EDIT });
+      return this.emailChange.request(ctx, { targetUserId: outcome.userId, newEmail: dto.email, currentPassword: dto.currentPassword, targetScope: 'staff' });
     }
     await this.invalidateUserDisplay(outcome.userId);
     return { email: outcome.email };
