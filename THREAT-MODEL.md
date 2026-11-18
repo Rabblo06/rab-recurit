@@ -8863,7 +8863,9 @@ Reversal:   Lower CLOCK_IN_CONFIRM_FLOOR_HOURS, or require a second approver (pa
   and an unknown id, and the organisation's audit log, outbox, invites and accounts (status, password) are unchanged; a
   production-permission Manager and a wrong-flag cast are refused; a platform admin (every flag in its own organisation)
   bound to the target organisation is refused, and bound to its own organisation gets 404 for the other organisation's
-  pending CEO with both organisations inert; `venue_manager.create` on an Internal Manager id → 404; out of scope (another
+  pending CEO with both organisations inert; `venue_manager.create` used by a caller that can see the Internal Manager
+  under RLS (and would succeed without the pin, shown fail-first) → 404, while the same caller on its own workspace's pending
+  Venue Manager succeeds; out of scope (another
   organisation, unknown id) → 404; positive control keeps the tenant rows only. Admin path: a non-admin Manager holding
   every flag → 403 for resend and cancel, real and unknown id (service and `OrganisationOnboardingService`); an ACTIVE
   platform admin in an Admin Inspect session → 403 through both services (shown to fail with the checks removed); a
