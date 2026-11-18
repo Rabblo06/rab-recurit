@@ -1,0 +1,29 @@
+# Code owners: a change to any path below asks the owner for review.
+#
+# This file only REQUESTS review. It enforces nothing until branch protection on `main` turns on "Require a pull request
+# before merging" -> "Require review from Code Owners" (an owner setting; no workflow or agent changes it). Read the
+# caveat in the PR that added this file before turning it on: a pull request cannot be approved by its own author.
+#
+# Syntax is .gitignore-style; for a path matched by several lines the LAST matching line wins, so keep every line
+# naming the same owner, or put a narrower rule after a broader one on purpose.
+
+# CI, release and supply-chain configuration: every workflow, composite action, Dependabot, this file itself.
+/.github/ @Rabblo06
+
+# The gates those workflows run: check-* scripts (RLS coverage, import boundaries, protected-table writes, SQL injection,
+# licences, npm audit, ...) and their tests.
+/tools/check-* @Rabblo06
+# npm audit decisions register and any other audit tool.
+/tools/*audit* @Rabblo06
+# The GitHub release script cd-deploy-tag runs, and its test.
+/tools/create-github-release* @Rabblo06
+
+# The image security gate and its decision registers (IMAGE_SECURITY_RELEASE_POLICY.md section 9 recommends owning them).
+/packages/rab-docker/scripts/image-security/ @Rabblo06
+
+# Threat model.
+/THREAT-MODEL.md @Rabblo06
+
+# Every TypeORM migration directory, today core/migrations and any added later (migrations are never edited after
+# merge, and each one carries RLS policies).
+/packages/rab-server/src/database/typeorm/**/migrations/ @Rabblo06
