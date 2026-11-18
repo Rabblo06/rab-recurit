@@ -30,11 +30,12 @@
  *     <ref>" means "no decisions". The head copy is validated too (a malformed file fails the PR that introduces it).
  *   - Decision-only PR: when the diff from the merge-base with <ref> touches the register and nothing else except
  *     THREAT-MODEL.md, the HEAD decisions are used (that is how an entry is added, renewed or removed), and every
- *     entry that is new or changed against <ref> must have owner_decision_ref equal to this PR's URL
+ *     entry that is new or changed against the merge-base with <ref> must have owner_decision_ref equal to this PR's URL
  *     (pull_request.html_url in $GITHUB_EVENT_PATH): the owner's merge of that PR is the decision.
- *   - CHANGED TOGETHER: --base fails when that diff changes the register together with yarn.lock, any package.json,
- *     .yarnrc.yml, anything under .yarn/, this tool, packages/rab-docker/rab/runtime-deps.cjs (RUNTIME_PRUNE),
- *     .github/workflows/ci-security.yaml or .github/workflows/npm-audit-weekly.yaml.
+ *   - CHANGED TOGETHER: --base fails when that diff ADDS OR CHANGES a register entry together with yarn.lock, any
+ *     package.json, .yarnrc.yml, anything under .yarn/ or .github/actions/yarn-install/, this tool,
+ *     packages/rab-docker/rab/runtime-deps.cjs (RUNTIME_PRUNE), .github/workflows/ci-security.yaml or
+ *     .github/workflows/npm-audit-weekly.yaml. A pure removal may go with anything (e.g. the upgrade that fixes it).
  *   - Outside a decision-only PR, a register entry that is new or changed against the merge-base fails (it would be
  *     in force from the next PR on without having been decided in its own PR); removing an entry is allowed anywhere.
  *   - No --base (push to main, the weekly schedule, a local run): the checked-out register decides. In a
@@ -46,7 +47,10 @@
  * `yarn config get npmAuditExcludePackages --json` are both `[]` (an ignore list would hide advisories with no owner,
  * no scope and no expiry), `npmAuditRegistry` is unset and `npmRegistryServer` is yarn's or npm's default registry,
  * and no YARN_NPM_AUDIT_* or YARN_NPM_REGISTRY_SERVER variable is set (an audit pointed at a server that reports
- * nothing would pass). `--fail-on-expiring` (the weekly run) also fails when an entry has 7 days or fewer left.
+ * nothing would pass). The connection is pinned too: httpsProxy, httpProxy and httpsCaFilePath unset, enableStrictSsl
+ * true, networkSettings empty, no plugin beyond yarn's built-ins, and no YARN_HTTPS_PROXY, YARN_HTTP_PROXY,
+ * NODE_EXTRA_CA_CERTS or NODE_TLS_REJECT_UNAUTHORIZED=0. (`caFilePath` is not a yarn 4 setting: yarn itself refuses
+ * to run when it is set, which fails these checks.) Any argument other than --base <ref> / --fail-on-expiring exits 1. `--fail-on-expiring` (the weekly run) also fails when an entry has 7 days or fewer left.
  * Fails closed: yarn that cannot be spawned, is killed by a signal or exits outside {0, 1} for the audit; an audit
  * that exits non-zero without a parseable report; an unparseable line; a failed registry or advisory lookup; an
  * unresolvable yarn.lock descriptor or a range this file cannot evaluate. There is no date override. Set GITHUB_TOKEN
@@ -118,6 +122,7 @@ const isChangedTogetherPath = (p) =>
   p.endsWith('/package.json') ||
   p === '.yarnrc.yml' ||
   p.startsWith('.yarn/') ||
+  p.startsWith('.github/actions/yarn-install/') ||
   p === 'tools/check-npm-audit.cjs' ||
   p === RUNTIME_DEPS_REL ||
   p === '.github/workflows/ci-security.yaml' ||
@@ -532,7 +537,11 @@ function mergeBaseOf(ref, root = ROOT) {
 
 /** Paths the checkout (working tree included) changes since its merge-base with `ref`; a rename is a delete + an add. */
 function changedSinceBase(ref, root = ROOT) {
-  const mergeBase = mergeBaseOf(ref, root);
+  return changedSince(mergeBaseOf(ref, root), root);
+}
+
+/** Paths the checkout (working tree included) changes since commit `mergeBase`. */
+function changedSince(mergeBase, root = ROOT) {
   return git(
     ['diff', '--name-only', '--no-renames', '-z', mergeBase, '--'],
     root,
@@ -640,15 +649,25 @@ function selectRegister({ ref, root, env, today, headRaw }) {
       errors: [...errors, ...headErrors],
     };
   }
-  const changed = changedSinceBase(ref, root);
+  const mergeBase = mergeBaseOf(ref, root); // once: the diff and "what this PR added" both use it
+  const changed = changedSince(mergeBase, root);
   const base = readRegisterAt(ref, root);
-  for (const p of registerChangedWith(changed)) {
-    errors.push(
-      `CHANGED TOGETHER ${REGISTER_REL} and ${p}: an owner decision merges in its own PR (register and THREAT-MODEL.md only), never with a dependency, yarn config, tool or workflow change`,
-    );
+  // The entries this PR itself adds or changes (against the merge-base). A pure removal is never one of them.
+  const added =
+    head && changed.includes(REGISTER_REL)
+      ? newOrChangedEntries(readRegisterAt(mergeBase, root), head)
+      : [];
+  // CHANGED TOGETHER binds additions and changes only: removing an entry (e.g. in the PR that upgrades the fix in,
+  // as drop_when says) may go with yarn.lock, package.json or anything else.
+  if (added.length) {
+    for (const p of registerChangedWith(changed)) {
+      errors.push(
+        `CHANGED TOGETHER ${REGISTER_REL} and ${p}: an owner decision (a new or changed entry) merges in its own PR (register and THREAT-MODEL.md only), never with a dependency, yarn config, tool or workflow change; removing an entry is allowed anywhere`,
+      );
+    }
   }
   if (isDecisionOnly(changed)) {
-    const fresh = newOrChangedEntries(base, head);
+    const fresh = added;
     if (fresh.length) {
       let url = null;
       try {
@@ -677,16 +696,10 @@ function selectRegister({ ref, root, env, today, headRaw }) {
   // G1: outside a decision-only PR the head's new or changed entries are not in force here, but they WOULD be from
   // the next PR on, once merged. So they may only arrive in a decision-only PR (register + THREAT-MODEL.md), where
   // they must cite that PR. Compared with the merge-base (what this PR itself changed); pure removals stay allowed.
-  if (head && changed.includes(REGISTER_REL)) {
-    const added = newOrChangedEntries(
-      readRegisterAt(mergeBaseOf(ref, root), root),
-      head,
+  if (added.length) {
+    errors.push(
+      `${added.map((d) => (d && d.id) || '(no id)').join(', ')} added or changed outside a decision-only PR: a new or changed entry must merge in its own PR (${REGISTER_REL} + THREAT-MODEL.md only) whose owner_decision_ref is that PR; removing an entry is allowed anywhere`,
     );
-    if (added.length) {
-      errors.push(
-        `${added.map((d) => (d && d.id) || '(no id)').join(', ')} added or changed outside a decision-only PR: a new or changed entry must merge in its own PR (${REGISTER_REL} + THREAT-MODEL.md only) whose owner_decision_ref is that PR; removing an entry is allowed anywhere`,
-      );
-    }
   }
   const baseErrors =
     headRaw !== null && canonical(base) === canonical(head)
@@ -727,9 +740,21 @@ function spawnFailure(r, okStatuses) {
 function auditConfigProblems(yarn, env) {
   const problems = [];
   for (const k of Object.keys(env)) {
-    if (/^YARN_NPM_AUDIT_/i.test(k) || /^YARN_NPM_REGISTRY_SERVER$/i.test(k))
+    if (
+      /^YARN_NPM_AUDIT_/i.test(k) ||
+      /^(YARN_NPM_REGISTRY_SERVER|YARN_HTTPS_PROXY|YARN_HTTP_PROXY|NODE_EXTRA_CA_CERTS)$/i.test(
+        k,
+      )
+    )
       problems.push(
-        `environment variable ${k} is set: the audit must run with yarn's defaults`,
+        `environment variable ${k} is set: the audit must run with yarn's defaults (registry, proxy and CAs)`,
+      );
+    if (
+      /^NODE_TLS_REJECT_UNAUTHORIZED$/i.test(k) &&
+      String(env[k]).trim() === '0'
+    )
+      problems.push(
+        `environment variable ${k}=0 disables TLS certificate checks: the audit's registry answer could be forged`,
       );
   }
   /** `yarn config get key --json` parsed as { value }, or undefined after recording a problem. */
@@ -742,8 +767,10 @@ function auditConfigProblems(yarn, env) {
       );
       return undefined;
     }
+    const out = String(r.stdout).trim();
+    if (out === 'undefined') return { value: undefined }; // yarn prints this for an unset MAP (networkSettings)
     try {
-      return { value: JSON.parse(String(r.stdout).trim()) };
+      return { value: JSON.parse(out) };
     } catch {
       problems.push(
         `yarn config get ${key}: unparseable output ${String(r.stdout).slice(0, 200)}`,
@@ -762,6 +789,59 @@ function auditConfigProblems(yarn, env) {
     problems.push(
       `npmRegistryServer must be ${DEFAULT_REGISTRIES.join(' or ')}, is ${JSON.stringify(server.value)}: the audit must ask the default registry`,
     );
+  }
+  // Transport (follow-up to G4): the pinned registry URL is only worth something if the connection to it cannot be
+  // redirected or intercepted (a proxy, an extra or replaced CA, TLS checks off, per-host overrides, a plugin).
+  for (const key of ['httpsProxy', 'httpProxy', 'httpsCaFilePath']) {
+    const got = configGet(key);
+    if (got && got.value !== null)
+      problems.push(
+        `${key} must be unset (yarn's default), is ${JSON.stringify(got.value)}: the audit's connection must not be redirected or re-rooted`,
+      );
+  }
+  const strict = configGet('enableStrictSsl');
+  if (strict && strict.value !== true)
+    problems.push(
+      `enableStrictSsl must be true, is ${JSON.stringify(strict.value)}: the audit's TLS must be verified`,
+    );
+  const network = configGet('networkSettings');
+  if (
+    network &&
+    network.value !== undefined &&
+    !(
+      network.value &&
+      typeof network.value === 'object' &&
+      !Array.isArray(network.value) &&
+      Object.keys(network.value).length === 0
+    )
+  )
+    problems.push(
+      `networkSettings must be empty, is ${JSON.stringify(network.value)}: no per-host proxy, CA or network override`,
+    );
+  // `plugins` is not readable with `config get`; the runtime list is: only yarn's built-ins and its core.
+  const plugins = yarn(['plugin', 'runtime', '--json']);
+  const pluginsFailed = spawnFailure(plugins, [0]);
+  if (pluginsFailed) {
+    problems.push(
+      `yarn plugin runtime ${pluginsFailed}: ${String(plugins && (plugins.stderr || plugins.stdout)).slice(0, 300)}`,
+    );
+  } else {
+    try {
+      const extra = String(plugins.stdout)
+        .split(/\r?\n/)
+        .filter((l) => l.trim())
+        .map((l) => JSON.parse(l))
+        .filter((pl) => !(pl && (pl.builtin === true || pl.name === '@@core')))
+        .map((pl) => (pl && pl.name) || JSON.stringify(pl));
+      if (extra.length)
+        problems.push(
+          `plugins must be [] (built-ins only), found ${extra.join(', ')}: a plugin can change what the audit asks or reports`,
+        );
+    } catch {
+      problems.push(
+        `yarn plugin runtime: unparseable output ${String(plugins.stdout).slice(0, 200)}`,
+      );
+    }
   }
   for (const key of AUDIT_IGNORE_SETTINGS) {
     const got = configGet(key);
@@ -890,6 +970,21 @@ async function main(argv = [], deps = {}) {
   const yarn = deps.yarn || defaultYarn(root);
   const fetchAdvisory = deps.fetchAdvisory || fetchAdvisoryWith(env);
 
+  // A typo (e.g. --fail-on-expire) must not silently turn a control off: only these arguments exist.
+  const unknown = argv.filter(
+    (a, i) =>
+      !(
+        a === '--base' ||
+        a === '--fail-on-expiring' ||
+        argv[i - 1] === '--base'
+      ),
+  );
+  if (unknown.length) {
+    console.error(
+      `::error::unknown argument(s) ${unknown.map((a) => JSON.stringify(a)).join(', ')}: the only arguments are --base <ref> and --fail-on-expiring`,
+    );
+    return 1;
+  }
   const baseIdx = argv.indexOf('--base');
   let ref = null;
   if (baseIdx !== -1) {
@@ -1040,6 +1135,7 @@ module.exports = {
   assertPlainRef,
   gitShowAt,
   mergeBaseOf,
+  changedSince,
   changedSinceBase,
   readRegisterAt,
   registerChangedWith,

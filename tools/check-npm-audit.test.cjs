@@ -383,7 +383,27 @@ const CONFIG_DEFAULTS = {
   npmAuditExcludePackages: '[]',
   npmAuditRegistry: 'null',
   npmRegistryServer: '"https://registry.yarnpkg.com"',
+  httpsProxy: 'null',
+  httpProxy: 'null',
+  httpsCaFilePath: 'null',
+  enableStrictSsl: 'true',
+  networkSettings: 'undefined', // what yarn 4.13 prints for the unset MAP
 };
+/** `yarn plugin runtime --json` as yarn 4.13 prints it here (abridged): the core plus built-ins only. */
+const PLUGINS_DEFAULT = [
+  '{"name":"@@core","builtin":false}',
+  '{"name":"@yarnpkg/plugin-essentials","builtin":true}',
+  '{"name":"@yarnpkg/plugin-npm-cli","builtin":true}',
+].join('\n');
+/** A spawnSync-shaped yarn for `config get` and `plugin runtime`; `values` overrides keys (and `__plugins`). */
+const configYarn = (values) => (args) => ({
+  status: 0,
+  stdout:
+    args[0] === 'plugin'
+      ? `${values.__plugins ?? PLUGINS_DEFAULT}\n`
+      : `${values[args[2]] ?? CONFIG_DEFAULTS[args[2]]}\n`,
+  stderr: '',
+});
 
 test('F7: a date must round-trip, so 2026-02-30 is refused', () => {
   assert.equal(check.isoDate('2026-02-28'), Date.parse('2026-02-28T00:00:00Z'));
@@ -470,11 +490,7 @@ test('F4: spawnFailure refuses a spawn error, a signal and an exit status outsid
 });
 
 test('F3: an ignore list in yarn config or any YARN_NPM_AUDIT_* variable is a problem', () => {
-  const yarnWith = (values) => (args) => ({
-    status: 0,
-    stdout: `${values[args[2]] ?? CONFIG_DEFAULTS[args[2]]}\n`,
-    stderr: '',
-  });
+  const yarnWith = configYarn;
   assert.deepEqual(check.auditConfigProblems(yarnWith({}), {}), []);
   assert.match(
     check
@@ -583,12 +599,8 @@ const auditLine = (over = {}) =>
 const fakeYarn =
   ({ config = {}, audit } = {}) =>
   (args) => {
-    if (args[0] === 'config')
-      return {
-        status: 0,
-        stdout: `${config[args[2]] ?? CONFIG_DEFAULTS[args[2]]}\n`,
-        stderr: '',
-      };
+    if (args[0] === 'config' || args[0] === 'plugin')
+      return configYarn(config)(args);
     if (args[0] === 'npm' && args[1] === 'audit')
       return audit || { status: 1, stdout: `${auditLine()}\n`, stderr: '' };
     if (args[0] === 'npm' && args[1] === 'info')
@@ -772,12 +784,133 @@ test('F1: the register changed together with yarn.lock (or a package.json, the t
     );
   }
   // Uncommitted edits to tracked files count too.
-  const u = seed(t, registerDoc(prEntry()));
-  u.write(check.REGISTER_REL, registerDoc());
+  const u = seed(t, registerDoc());
+  u.write(check.REGISTER_REL, registerDoc(prEntry()));
   u.write('yarn.lock', '# uncommitted\n');
   const { code, out } = await run(['--base', 'main'], u);
   assert.equal(code, 1);
   assert.match(out, /CHANGED TOGETHER/);
+});
+
+test('follow-up 1: a pure removal may go with yarn.lock (exit 0); an addition with yarn.lock still fails', async (t) => {
+  const other = entry({ id: 'GHSA-2222-3333-4444', package: 'other' });
+  const removal = seed(t, registerDoc(prEntry(), other));
+  removal.write(check.REGISTER_REL, registerDoc(prEntry()));
+  removal.write('yarn.lock', '# upgraded\n');
+  removal.commit('removes an entry in the upgrade PR');
+  const rm = await run(['--base', 'main'], removal);
+  assert.equal(rm.code, 0, rm.out);
+  assert.doesNotMatch(rm.out, /CHANGED TOGETHER/);
+  const addition = seed(t, registerDoc(prEntry()));
+  addition.write(
+    check.REGISTER_REL,
+    registerDoc(prEntry(), { ...other, owner_decision_ref: PR_URL }),
+  );
+  addition.write('yarn.lock', '# changed\n');
+  addition.commit('adds an entry in a lockfile PR');
+  const add = await run(['--base', 'main'], addition);
+  assert.equal(add.code, 1);
+  assert.match(
+    add.out,
+    /CHANGED TOGETHER tools\/npm-audit-decisions\.json and yarn\.lock/,
+  );
+  // The yarn-install action is on the list (follow-up 4).
+  assert.deepEqual(
+    check.registerChangedWith([
+      check.REGISTER_REL,
+      '.github/actions/yarn-install/action.yml',
+    ]),
+    ['.github/actions/yarn-install/action.yml'],
+  );
+});
+
+test('follow-up 2: the audit connection is pinned (proxy, CA, TLS, per-host settings, plugins, env)', () => {
+  const problems = (values, env = {}) =>
+    check.auditConfigProblems(configYarn(values), env).join('\n');
+  assert.equal(problems({}), '');
+  assert.equal(problems({ networkSettings: '{}' }), '');
+  const cases = [
+    [{ httpsProxy: '"http://proxy.invalid:3128"' }, /httpsProxy must be unset/],
+    [{ httpProxy: '"http://proxy.invalid:3128"' }, /httpProxy must be unset/],
+    [
+      { httpsCaFilePath: '"/tmp/evil-ca.pem"' },
+      /httpsCaFilePath must be unset/,
+    ],
+    [{ enableStrictSsl: 'false' }, /enableStrictSsl must be true/],
+    [
+      {
+        networkSettings:
+          '{"registry.yarnpkg.com":{"httpsProxy":"http://proxy.invalid:3128"}}',
+      },
+      /networkSettings must be empty/,
+    ],
+    [{ networkSettings: 'nope' }, /networkSettings: unparseable/],
+    [
+      {
+        __plugins: `${PLUGINS_DEFAULT}\n{"name":"plugin-evil","builtin":false}`,
+      },
+      /plugins must be \[\] \(built-ins only\), found plugin-evil/,
+    ],
+    [{ __plugins: 'not json' }, /yarn plugin runtime: unparseable/],
+  ];
+  for (const [values, re] of cases)
+    assert.match(problems(values), re, JSON.stringify(values));
+  for (const k of [
+    'YARN_HTTPS_PROXY',
+    'YARN_HTTP_PROXY',
+    'NODE_EXTRA_CA_CERTS',
+  ]) {
+    assert.match(problems({}, { [k]: 'x' }), new RegExp(`${k} is set`), k);
+  }
+  assert.match(
+    problems({}, { NODE_TLS_REJECT_UNAUTHORIZED: '0' }),
+    /NODE_TLS_REJECT_UNAUTHORIZED=0 disables TLS/,
+  );
+  assert.equal(problems({}, { NODE_TLS_REJECT_UNAUTHORIZED: '1' }), '');
+  // `plugin runtime` failing is a problem too (fail closed).
+  assert.match(
+    check
+      .auditConfigProblems(
+        (args) =>
+          args[0] === 'plugin'
+            ? { status: 1, stdout: '', stderr: 'boom' }
+            : configYarn({})(args),
+        {},
+      )
+      .join(),
+    /yarn plugin runtime exited 1/,
+  );
+});
+
+test('follow-up 3: an unknown argument exits 1, so a typo cannot turn --fail-on-expiring off', async (t) => {
+  const r = seed(t, registerDoc(prEntry()));
+  let audited = false;
+  const yarn = (args) => {
+    if (args[1] === 'audit') audited = true;
+    return fakeYarn()(args);
+  };
+  for (const argv of [
+    ['--fail-on-expire'],
+    ['--fail-on-expiring', '--verbose'],
+    ['extra'],
+  ]) {
+    const { code, out } = await run(argv, r, {
+      env: { GITHUB_EVENT_NAME: 'schedule' },
+      yarn,
+    });
+    assert.equal(code, 1, argv.join(' '));
+    assert.match(out, /unknown argument/);
+  }
+  assert.equal(audited, false);
+  // The known arguments still work.
+  assert.equal(
+    (
+      await run(['--fail-on-expiring'], r, {
+        env: { GITHUB_EVENT_NAME: 'schedule' },
+      })
+    ).code,
+    0,
+  );
 });
 
 test('F1: an unknown ref, a non-ref argument or a shallow clone fails closed (throws, never passes)', async (t) => {
@@ -1080,11 +1213,7 @@ test('G3: --fail-on-expiring (the weekly run) exits 1 at 7 days or fewer left; w
 });
 
 test('G4: the audit registry must be the default; YARN_NPM_REGISTRY_SERVER / YARN_NPM_AUDIT_REGISTRY are refused', async (t) => {
-  const yarnWith = (values) => (args) => ({
-    status: 0,
-    stdout: `${values[args[2]] ?? CONFIG_DEFAULTS[args[2]]}\n`,
-    stderr: '',
-  });
+  const yarnWith = configYarn;
   assert.deepEqual(check.auditConfigProblems(yarnWith({}), {}), []);
   assert.deepEqual(
     check.auditConfigProblems(

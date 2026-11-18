@@ -9451,10 +9451,11 @@ Reversal:   Upgrade / `resolutions` override (documented in "//resolutions") as 
     needs no reference. **Owner to confirm:** the review asked for this on NEW entries; it is applied to CHANGED ones
     too, because otherwise a register-only PR could move `decided_on` / `expires` of an existing entry (a renewal)
     while still citing the old PR.
-  - CHANGED TOGETHER: `--base` fails when the register changes in the same diff as `yarn.lock`, any `package.json`,
-    `.yarnrc.yml`, anything under `.yarn/`, `tools/check-npm-audit.cjs`, `packages/rab-docker/rab/runtime-deps.cjs`
-    (its `RUNTIME_PRUNE` decides the production-closure condition), `ci-security.yaml` or `npm-audit-weekly.yaml`
-    (the last three beyond the review's list).
+  - CHANGED TOGETHER: `--base` fails when the diff adds or changes a register entry together with `yarn.lock`, any
+    `package.json`, `.yarnrc.yml`, anything under `.yarn/` or `.github/actions/yarn-install/`,
+    `tools/check-npm-audit.cjs`, `packages/rab-docker/rab/runtime-deps.cjs` (its `RUNTIME_PRUNE` decides the
+    production-closure condition), `ci-security.yaml` or `npm-audit-weekly.yaml` (the last four beyond the review's
+    list). A pure removal may go with any of them.
   - No `--base` (push to main, the weekly run, local): the checked-out register decides; a `pull_request` event without
     `--base` is refused.
 - **F3 (Low):** before auditing, `yarn config get npmAuditIgnoreAdvisories --json` and `npmAuditExcludePackages` must
@@ -9480,6 +9481,19 @@ Reversal:   Upgrade / `resolutions` override (documented in "//resolutions") as 
   - **G4:** `npmAuditRegistry` must be unset (`null`) and `npmRegistryServer` `https://registry.yarnpkg.com` or
     `https://registry.npmjs.org`; `YARN_NPM_REGISTRY_SERVER` is refused like every `YARN_NPM_AUDIT_*` variable. An audit
     pointed at a server that reports nothing can no longer pass.
+  - **Re-review follow-ups (2026-11-18, approved at 11f52617):** (1) CHANGED TOGETHER binds only additions and
+    changes: a pure removal may go with yarn.lock / package.json / anything (the upgrade PR that drops an entry, as its
+    `drop_when` says); an addition next to yarn.lock still fails. (2) The audit's connection is pinned as well as its
+    URL: `httpsProxy`, `httpProxy`, `httpsCaFilePath` unset, `enableStrictSsl` true, `networkSettings` empty (yarn
+    prints `undefined` when unset), no plugin beyond yarn's built-ins (`yarn plugin runtime --json`: built-ins and
+    `@@core` only; `plugins` cannot be read with `config get`), and `YARN_HTTPS_PROXY`, `YARN_HTTP_PROXY`,
+    `NODE_EXTRA_CA_CERTS` and `NODE_TLS_REJECT_UNAUTHORIZED=0` refused. `caFilePath` is not a yarn 4 setting: yarn
+    refuses to start ("Unrecognized or legacy configuration settings") when it is in .yarnrc.yml or the environment,
+    which already fails the check, so it is not queried. The repository's real effective config passes every check.
+    Not covered: generic `HTTP(S)_PROXY` variables (yarn 4 does not read them). (3) Any argument other than
+    `--base <ref>` / `--fail-on-expiring` exits 1, so a typo cannot turn the weekly expiry failure off. (4)
+    `.github/actions/yarn-install/**` is on the CHANGED TOGETHER list. Nits: the decision-only path compares with the
+    merge-base like G1, and the merge-base is computed once.
   - **G2 (owner decision, not built):** there is no cap on the total time an advisory may be excepted across
     renewals; each renewal is a new decision-only PR citing itself, at most 30 days each.
 - **F9 (Info):** wording corrected on the prerequisite branch (node-gyp@13.0.1 has three production parents — argon2,
@@ -9489,7 +9503,7 @@ Reversal:   Upgrade / `resolutions` override (documented in "//resolutions") as 
   edit itself is a review control: owner review, no CODEOWNERS file). The register on the base is trusted as reviewed.
   A decision-only PR's owner reference proves only that this PR is the record, not who approved it; the owner's merge
   is the decision. A push to main runs without `--base`, so a register that landed on main is used as is.
-- **Tests:** `tools/check-npm-audit.test.cjs` (34). End to end in throwaway git repositories (`main(argv, deps)`): a
+- **Tests:** `tools/check-npm-audit.test.cjs` (37). End to end in throwaway git repositories (`main(argv, deps)`): a
   head-only entry does not cover the finding on a non-decision PR, the same entry on the base does; a decision-only PR
   passes, one citing another PR fails, a renewal keeping the old reference fails, a missing event payload fails, a
   removal needs no reference; register + yarn.lock / package.json / the tool / ci-security.yaml fail CHANGED TOGETHER
@@ -9501,5 +9515,7 @@ Reversal:   Upgrade / `resolutions` override (documented in "//resolutions") as 
   adding or editing an entry next to `src/x.ts` exits 1, removing one next to it exits 0, an untouched entry is not
   flagged when the base moved on. G3: `--fail-on-expiring` exits 1 at 7 days left, 0 at 8, warning only without it; the
   weekly workflow passes it. G4: a non-default `npmAuditRegistry` / `npmRegistryServer` and both env variables are
-  refused (end to end: exit 1, not audited). Mutation check: 23 hand-made mutants of the tool (one per control), each
-  killed by at least one test.
+  refused (end to end: exit 1, not audited). Follow-ups: a removal plus yarn.lock exits 0 and an addition plus
+  yarn.lock exits 1; each transport setting, a non-built-in plugin, a failing `plugin runtime` and each env variable is
+  refused (`NODE_TLS_REJECT_UNAUTHORIZED=1` is not); unknown arguments exit 1 before auditing. Mutation check: 34
+  hand-made mutants of the tool (one per control), each killed by at least one test.
