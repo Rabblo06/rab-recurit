@@ -811,3 +811,49 @@ test('environment preflight: CREWFLOW_PG_CA_FILE is held to the boot rules of PG
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });
+
+// ---- OpenShip "fallback default" (owner request 2026-11-18): an optional key with no code default is committed as
+// ${KEY:-} (an EMPTY default), never as a bare `KEY:` (which OpenShip shows as "needs value"). Every reader treats "" as
+// unset; WORKSPACE_BASE_DOMAIN is the one documented exception (GET /auth/config would answer "" instead of null).
+const BARE_OPTIONAL_ALLOWED = Object.freeze(['WORKSPACE_BASE_DOMAIN']);
+
+test('docker-compose.production.yml: no bare optional key except WORKSPACE_BASE_DOMAIN (OpenShip shows the rest as "fallback default")', () => {
+  const fsx = require('node:fs');
+  const pathx = require('node:path');
+  const text = fsx.readFileSync(pathx.resolve(__dirname, '../docker-compose.production.yml'), 'utf8');
+  const bare = [...text.matchAll(/^\s+([A-Z][A-Z0-9_]*):[ \t]*$/gm)].map((m) => m[1]);
+  assert.deepEqual(bare, [...BARE_OPTIONAL_ALLOWED], `bare keys: ${bare.join(', ')}`);
+  // The empty-default keys keep their own name inside the interpolation (never another variable's value), except the
+  // bundled db's POSTGRES_PASSWORD, which is ${PG_DATABASE_PASSWORD:-} by design (owner decision 2026-11-17).
+  const renamed = { POSTGRES_PASSWORD: 'PG_DATABASE_PASSWORD' };
+  for (const m of text.matchAll(/^\s+([A-Z][A-Z0-9_]*): \$\{([A-Z][A-Z0-9_]*):-\}[ \t]*$/gm)) assert.equal(m[2], renamed[m[1]] ?? m[1], `${m[1]} interpolates ${m[2]}`);
+  // db-setup's CA settings, rab-api's optional pool size and the shared CA settings are among them.
+  for (const key of ['PG_SSL_CA_CERT_PATH', 'PG_SSL_CA_CERT', 'PG_POOL_MAX_CONNECTIONS']) {
+    assert.ok(text.split('\n').some((line) => line.trim() === `${key}: \${${key}:-}`), `${key} is \${${key}:-}`);
+  }
+  // Never touched: rab-api / rab-worker keep PG_ADMIN_URL and PG_DATABASE_URL pinned to the literal "".
+  assert.equal([...text.matchAll(/^\s+PG_ADMIN_URL: ""$/gm)].length, 2, 'PG_ADMIN_URL: "" on rab-api and rab-worker');
+  assert.equal([...text.matchAll(/^\s+PG_DATABASE_URL: ""$/gm)].length, 1, 'PG_DATABASE_URL: "" in the shared required list');
+});
+
+test('pinnedEnvValue: "" equals "not set" only for rab-api\'s optional PG_POOL_MAX_CONNECTIONS; any other value or key is exact', () => {
+  const { PINNED_ENV, BLANK_IS_UNSET_PINNED_ENV, pinnedEnvValue } = require('./verify-image-compose.cjs');
+  assert.deepEqual([...BLANK_IS_UNSET_PINNED_ENV], ['PG_POOL_MAX_CONNECTIONS']);
+  for (const key of BLANK_IS_UNSET_PINNED_ENV) assert.ok(PINNED_ENV.includes(key), `${key} is a PINNED_ENV key`);
+  assert.equal(pinnedEnvValue({ PG_POOL_MAX_CONNECTIONS: '' }, 'PG_POOL_MAX_CONNECTIONS'), undefined);
+  assert.equal(pinnedEnvValue({}, 'PG_POOL_MAX_CONNECTIONS'), undefined);
+  assert.equal(pinnedEnvValue({ PG_POOL_MAX_CONNECTIONS: '12' }, 'PG_POOL_MAX_CONNECTIONS'), '12');
+  assert.equal(pinnedEnvValue({ PG_POOL_MAX_CONNECTIONS: ' ' }, 'PG_POOL_MAX_CONNECTIONS'), ' ');
+  // Every other pinned key: "" stays "" (so "" against "not set" still differs).
+  assert.equal(pinnedEnvValue({ NODE_ENV: '' }, 'NODE_ENV'), '');
+});
+
+test('DENIAL (rendered): rab-api\'s empty ${PG_POOL_MAX_CONNECTIONS:-} matches the image file, but a committed pool size in either file still fails', { skip }, () => {
+  const m = fresh();
+  assert.equal(m.production.services['rab-api'].environment.PG_POOL_MAX_CONNECTIONS, '', 'production renders the empty default');
+  assert.equal(m.production.services['rab-worker'].environment.PG_POOL_MAX_CONNECTIONS, '12', 'the Worker keeps its pin');
+  assert.deepEqual(checkVariant(m.variant, m.production, m.variantFiles).filter((p) => /PG_POOL_MAX_CONNECTIONS/.test(p)), []);
+  assertRefused(problemsAfter((v) => { v.services['rab-api'].environment.PG_POOL_MAX_CONNECTIONS = '20'; }), /rab-api\.environment\.PG_POOL_MAX_CONNECTIONS differs/);
+  assertRefused(problemsAfter((_v, _f, p) => { p.services['rab-api'].environment.PG_POOL_MAX_CONNECTIONS = '20'; }), /rab-api\.environment\.PG_POOL_MAX_CONNECTIONS differs/);
+  assertRefused(problemsAfter((v) => { v.services['rab-worker'].environment.PG_POOL_MAX_CONNECTIONS = ''; }), /rab-worker\.environment\.PG_POOL_MAX_CONNECTIONS differs/);
+});

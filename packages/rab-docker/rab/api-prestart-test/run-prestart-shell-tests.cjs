@@ -544,6 +544,8 @@ const DB_CA = '/run/crewflow/db-ca/ca.crt';
 const CA_CASES = [
   ['host db, CA unset -> the bundled CA', RUNTIME_URL, {}, DB_CA],
   ['host db with a port and userinfo, CA blank -> the bundled CA', 'postgresql://crewflow_owner:p@db:5432/crewflow?sslmode=verify-full', { PG_SSL_CA_CERT_PATH: '' }, DB_CA],
+  // docker-compose.production.yml's ${PG_SSL_CA_CERT_PATH:-} / ${PG_SSL_CA_CERT:-}: both present and EMPTY = both unset.
+  ['host db, both CA settings blank (the production compose default) -> the bundled CA', RUNTIME_URL, { PG_SSL_CA_CERT_PATH: '', PG_SSL_CA_CERT: '' }, DB_CA],
   ['host db, CA set -> kept', RUNTIME_URL, { PG_SSL_CA_CERT_PATH: '/run/crewflow/pg-ca.crt' }, '/run/crewflow/pg-ca.crt'],
   // The inline CA (PEM text, one line with \n escapes) is the operator's choice: no path is added beside it (both set refuses).
   ['host db, inline PG_SSL_CA_CERT set -> path not set', RUNTIME_URL, { PG_SSL_CA_CERT: '-----BEGIN CERTIFICATE-----\\nMIIB\\n-----END CERTIFICATE-----' }, '-'],
@@ -567,6 +569,9 @@ check('12a worker-start.sh: derive (from the target file), then tini (PID 1, cle
   !line(r.out, 'bootstrap') && !line(r.out, 'main') && field(wm, 'admin') === 'absent' && field(wm, 'admin1') === 'absent' && field(wm, 'url') === hash(RUNTIME_URL) && field(wm, 'ca') === DB_CA, r.out);
 check('12b the Worker keeps PG_DATABASE_URL and gets no CREWFLOW_DB_TARGET_FILE / admin credential variable; nothing secret is printed', keysOf(wm, 'self').includes('PG_DATABASE_URL') &&
   !['CREWFLOW_DB_TARGET_FILE', 'PG_DATABASE_PASSWORD', 'RUNTIME_URL'].some((k) => keysOf(wm, 'self').includes(k)) && !r.out.includes('derived0123'), r.out);
+// docker-compose.production.yml's ${PG_SSL_CA_CERT_PATH:-} / ${PG_SSL_CA_CERT:-}: both present and EMPTY = both unset.
+r = run('worker-ca-blank', { ...W, PG_SSL_CA_CERT_PATH: '', PG_SSL_CA_CERT: '' }, { entry: 'worker-start.sh', ctl: { 'derive-url': RUNTIME_URL } });
+check('12a2 worker-start.sh: both CA settings present and blank (the production compose default) -> the bundled CA', r.code === 0 && field(line(r.out, 'workermain'), 'ca') === DB_CA, r.out);
 r = run('worker-readonly', W, { entry: 'worker-start.sh', ctl: { 'derive-url': RUNTIME_URL }, dockerArgs: ['--read-only', '--user', '1000:1000'] });
 check('12c read-only root, uid 1000, target read-only (as shipped): the same URL', r.code === 0 && field(line(r.out, 'workermain'), 'url') === hash(RUNTIME_URL) && field(line(r.out, 'workermain'), 'admin') === 'absent', r.out);
 r = run('worker-password', { ...W, PG_DATABASE_PASSWORD: 'x'.repeat(64) }, { entry: 'worker-start.sh', ctl: { 'derive-url': RUNTIME_URL } });
@@ -729,6 +734,8 @@ for (const [label, env, entry, pattern] of [
 }
 for (const [label, url, extra, want] of [
   ['host db, CA unset -> the bundled CA', ADMIN_URL, {}, DB_CA],
+  // docker-compose.production.yml's db-setup: ${PG_SSL_CA_CERT_PATH:-} / ${PG_SSL_CA_CERT:-}, both present and EMPTY.
+  ['host db, both CA settings blank -> the bundled CA', ADMIN_URL, { PG_SSL_CA_CERT_PATH: '', PG_SSL_CA_CERT: '' }, DB_CA],
   ['host db, CA set -> kept', ADMIN_URL, { PG_SSL_CA_CERT_PATH: '/run/crewflow/pg-ca.crt' }, '/run/crewflow/pg-ca.crt'],
   ['external host -> not set', 'postgresql://doadmin:p@db-direct.example:25060/defaultdb?sslmode=verify-full', {}, '-'],
 ]) {
