@@ -150,14 +150,14 @@ describe('Staff same-shift Teams (real Postgres/RLS/HTTP)', () => {
       expect(result.status).toBe(200);
       expect(result.body.filter((r: { isYou: boolean }) => r.isYou)).toHaveLength(1);
     });
-    // KNOWN GAP, flagged for the owner (not changed here): the additive RLS policy staff_profile_shift_team_select
-    // (workspace-schema module v1.002-shift-team-policy) still tests `current_setting('rab.role') = 'staff'` by equality,
-    // so for this caller the database hides every teammate's profile and the roster lists only "You". Fixing it is a new
-    // workspace-schema policy version + migration, which needs owner review. `it.failing` flips red once that lands.
-    it.failing('sees the whole confirmed team, like a single-role staff user', async () => {
+    // Layer 4 (structure level 24, StaffShiftTeamMultiRole1786721590000; DRAFT SQL, owner review first): the RLS policy
+    // staff_profile_shift_team_select now tests `'staff' = ANY (string_to_array(rab.role, ','))` instead of equality, so the
+    // database shows this caller every confirmed teammate, like a single-role staff user (was: only "You").
+    it('sees the whole confirmed team, like a single-role staff user', async () => {
       const result = await roster(multiToken, multiShift);
       expect(result.status).toBe(200);
       expect(result.body).toHaveLength(2);
+      expect(result.body.filter((r: { isYou: boolean }) => r.isYou)).toHaveLength(1);
     });
   });
   it('does not widen ordinary Staff profile visibility, including after a pooled roster read', async () => {

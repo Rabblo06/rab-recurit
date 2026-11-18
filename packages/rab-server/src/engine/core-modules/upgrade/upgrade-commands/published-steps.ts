@@ -14,5 +14,10 @@ export const PUBLISHED_VERSION_STEPS: Readonly<Record<string, readonly string[]>
     '0.6.0_DropWorkspaceCoreForeignKeys_1786721530000',
     '0.6.0_SyncStandardObjects_1786721900000',
   ]),
-  '0.7.0': Object.freeze(['0.7.0_TypeOrmMigrations', '0.7.0_HwsCutover_1786721540100', '0.7.0_ValidateStaffProfileWorkspaceRequired_1786721570000']),
+  '0.7.0': Object.freeze([
+    '0.7.0_TypeOrmMigrations',
+    '0.7.0_HwsCutover_1786721540100',
+    '0.7.0_ValidateStaffProfileWorkspaceRequired_1786721570000',
+    '0.7.0_ShiftTeamSelectMultiRole_1786721590000',
+  ]),
 });

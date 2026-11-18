@@ -443,7 +443,7 @@ export const SEMANTIC_GOLDEN_PG16: readonly string[] = Object.freeze([
   "policy|staff_profile|staff_profile_member_select|PERMISSIVE|public|r|using=c3158b15489a2747f93b673fbbfd68b6|check=-",
   "policy|staff_profile|staff_profile_org_admin_picker|PERMISSIVE|public|r|using=75dfd2246b85fad090f20789166b03ca|check=-",
   "policy|staff_profile|staff_profile_select|PERMISSIVE|public|r|using=493a81d55f5fce7055c66cbf5b055341|check=-",
-  "policy|staff_profile|staff_profile_shift_team_select|PERMISSIVE|public|r|using=97bbab50a17fb6dd93b9322440dfda19|check=-",
+  "policy|staff_profile|staff_profile_shift_team_select|PERMISSIVE|public|r|using=c582fe8de552fdc3c359dd8ae1d4e4bc|check=-",
   "policy|staff_profile|staff_profile_update|PERMISSIVE|public|w|using=f5f5566469897fe7897616870a3f007f|check=f5f5566469897fe7897616870a3f007f",
   "policy|staff_profile|staff_profile_worker_scan|PERMISSIVE|public|r|using=8334af25ac25f0ab4a1e472ad2f7057b|check=-",
   "policy|stored_file|stored_file_tenant|PERMISSIVE|public|*|using=feef11e85a0653aaeaf89502a9e49b4e|check=feef11e85a0653aaeaf89502a9e49b4e",
