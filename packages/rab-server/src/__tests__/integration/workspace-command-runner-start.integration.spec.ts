@@ -14,19 +14,21 @@ import { readUpgradeStatus } from '../../engine/core-modules/upgrade/upgrade-sta
 import { upgradeSessionOf } from '../../engine/core-modules/upgrade/upgrade-migration.service';
 import { lastStepOfVersion } from '../../engine/core-modules/upgrade/upgrade-sequence';
 import { dropWorkspaceSchema, FROZEN_TEMPLATE_REGISTRY, provisionTypeScript, registryOf, SeededWorkspace, seedWorkspace } from './helpers/workspace-fixtures';
+import { hwsRuntimeOn } from './helpers/hws-fixtures';
 
 /**
  * OWNER-DB-ULTIMATE Part D, security review M3 / L3: the workspace pass through the REAL locked start (runMigrateOnStart,
- * in-process, as the migrate child runs it), with this code's real 0.6.0 workspace commands (StaffProfileMemberSelect, level
- * L = 21) plus a STRUCTURAL probe command (level P = L + 1) in a test registry (the deps seam `testWorkspace`, unreachable
- * from the environment). The workspaces are built from the FROZEN module-20 template, as every workspace was before Part D's
- * first structural command. Proves:
- *  - first start: the pre-Part-D workspaces are adopted (is_initial at the last instance step), the real command and the
- *    probe bring them to level P, the deploy post-checks (code level P) pass, exit 0;
+ * in-process, as the migrate child runs it), with this code's real workspace commands plus a STRUCTURAL probe command
+ * (level P = code level + 1, in release 0.7.0) in a test registry (the deps seam `testWorkspace`, unreachable from the
+ * environment). Release 0.7.0 (this code; strict upgrade from 0.6.0, no adoption): the workspaces are 0.6.0-COMPLETE, i.e.
+ * built as 0.6.0 builds them (its workspace commands) with 0.6.0's creation cursor. The 0.6.0 adoption pass itself is proven
+ * on a 0.6.0-built database (workspace-command-runner.integration.spec.ts). Proves:
+ *  - first start: the 0.6.0-complete workspaces get 0.7.0's real workspace steps and the probe, level P, the deploy
+ *    post-checks (code level P) pass, exit 0;
  *  - second start: nothing to do, exit 0;
  *  - a workspace provisioned AFTERWARDS by the TypeScript provisioner from the level-P template starts at the probe's cursor and
  *    passes a later data step; exit 0;
- *  - a drifted, unadopted workspace: adoption refused, the start serves with exit 70, and the status says failed.
+ *  - a workspace with no cursor (0.7.0 never adopts): refused and blocked, the start serves with exit 70, the status says failed.
  *
  * The SQL provisioner's level-P template does not exist (re-creating core.provision_workspace is owner-reviewed SQL). It is
  * SIMULATED here by relabelling the throwaway database's function body: its app_version literal (the real level-21 one) is
@@ -36,14 +38,23 @@ import { dropWorkspaceSchema, FROZEN_TEMPLATE_REGISTRY, provisionTypeScript, reg
 jest.setTimeout(600_000);
 
 const RUN = integrationTestDatabaseReady();
-const describeIfDb = RUN ? describe : describe.skip;
+// Release 0.7.0: the start path gets past the HWS cutover (an instance step of 0.7.0) only with HWS on; with HWS off the
+// release stops at the deferred / refused cutover by design (security review L1), so the workspace pass this spec proves never
+// runs there. The HWS-off CI job therefore skips it; the HWS-on jobs run it (the cutover completed when the database was built).
+const describeIfDb = RUN && hwsRuntimeOn() ? describe : describe.skip;
 const SFX = Math.random().toString(36).replace(/[^a-z]/g, '').slice(0, 6) || 'x';
 const L = codeWorkspaceStructureLevel();
 const P = L + 1;
-const REAL_CMDS = WORKSPACE_UPGRADE_COMMANDS['0-6'] ?? [];
+const REAL_06 = WORKSPACE_UPGRADE_COMMANDS['0-6'] ?? [];
+const REAL_07 = WORKSPACE_UPGRADE_COMMANDS['0-7'] ?? [];
+const REAL_CMDS = [...REAL_06, ...REAL_07];
 /** The literal of the SQL provisioner this code's migrations installed: the newest structural command's (structure level L). */
 const FROZEN_LITERAL = [...REAL_CMDS].reverse().find((c) => c.structure?.provisionFunctionLiteral)!.structure!.provisionFunctionLiteral!;
-const REAL = REAL_CMDS.map((c) => `0.6.0_${c.name}_${c.timestamp}`);
+/** 0.7.0's real workspace steps: what a 0.6.0-complete workspace runs at this code's start (before the probe). */
+const REAL = REAL_07.map((c) => `0.7.0_${c.name}_${c.timestamp}`);
+const R06 = { '0-6': REAL_06 };
+/** 0.6.0's creation cursor (the last step of 0.6.0 with its own workspace commands). */
+const CURSOR_060 = lastStepOfVersion('0.6.0', UPGRADE_COMMANDS, R06);
 const PROBE_LITERAL = 'db:provision_workspace@DrunnerProbeLevel1799999999991';
 const T0 = 1786900000000;
 
@@ -66,12 +77,17 @@ describeIfDb('Part D through the locked start (runMigrateOnStart)', () => {
     (await admin.query(`SELECT name, status, attempt, is_initial FROM core.upgrade_migration WHERE workspace_id = $1 ORDER BY created_at, attempt`, [ws.id])).rows;
   const fingerprint = async (ws: SeededWorkspace) => (await admin.query('SELECT core.workspace_schema_fingerprint_v2($1) AS f', [ws.id])).rows[0].f as string;
   const frozen = (ws: SeededWorkspace) => provisionTypeScript(adminUrl, ws, { workspaceRegistry: FROZEN_TEMPLATE_REGISTRY });
+  /** A workspace as 0.6.0 left it: built by 0.6.0's workspace commands, with 0.6.0's creation cursor. */
+  const complete060 = async (ws: SeededWorkspace) => {
+    expect(await provisionTypeScript(adminUrl, ws, { workspaceRegistry: R06 })).toBe('READY');
+    await admin.query(`INSERT INTO core.upgrade_migration (name, status, attempt, executed_by_version, is_initial, workspace_id) VALUES ($1, 'completed', 1, '0.6.0', true, $2)`, [CURSOR_060, ws.id]);
+  };
   const start = (
     registry: Record<string, readonly WorkspaceUpgradeCommand[]>,
     ids: string[],
     cache: { redis?: boolean; flush?: (ns: string) => Promise<void> } = {},
   ) => {
-    const env: NodeJS.ProcessEnv = { PATH: process.env.PATH, NODE_ENV: 'test', PG_DATABASE_URL: appUrl, CREWFLOW_MIGRATE_ON_START: 'true' };
+    const env: NodeJS.ProcessEnv = { PATH: process.env.PATH, NODE_ENV: 'test', PG_DATABASE_URL: appUrl, CREWFLOW_MIGRATE_ON_START: 'true', HWS_RUNTIME_ENABLED: 'true' };
     if (cache.redis) env.REDIS_URL = 'redis://127.0.0.1:1';
     if (process.platform === 'win32' && process.env.SystemRoot) env.SystemRoot = process.env.SystemRoot;
     return runMigrateOnStart(
@@ -110,22 +126,22 @@ describeIfDb('Part D through the locked start (runMigrateOnStart)', () => {
     await admin?.end();
   });
 
-  it('start 1 adopts and brings the fleet to level P (exit 0); start 2 does nothing (exit 0); a later-provisioned level-P workspace passes a data step', async () => {
+  it('start 1 brings a 0.6.0-complete fleet to level P (exit 0); start 2 does nothing (exit 0); a later-provisioned level-P workspace passes a data step', async () => {
     const [w1, w2] = [await make('w1'), await make('w2')];
-    for (const w of [w1, w2]) expect(await frozen(w)).toBe('READY');
-    const r1 = { '0-6': [...REAL_CMDS, probe] };
+    for (const w of [w1, w2]) await complete060(w);
+    const r1 = { '0-6': REAL_06, '0-7': [...REAL_07, probe] };
     await relabel(true);
     try {
 
     const first = await start(r1, [w1.id, w2.id]);
     expect({ outcome: first.outcome, exit: exitOf(first) }).toEqual({ outcome: 'ok', exit: 0 });
-    expect(first.upgrade?.workspaces).toMatchObject({ total: 2, adopted: 2, upgraded: 2, failures: [] });
+    expect(first.upgrade?.workspaces).toMatchObject({ total: 2, adopted: 0, upgraded: 2, failures: [] });
     for (const w of [w1, w2]) {
       expect((await registryOf(admin, w.id)).module_version).toBe(P);
       expect((await rows(w)).map((r: { name: string; status: string; is_initial: boolean }) => [r.name, r.status, r.is_initial])).toEqual([
-        ['0.6.0_TypeOrmMigrations', 'completed', true],
+        [CURSOR_060, 'completed', true],
         ...REAL.map((name) => [name, 'completed', false]),
-        [`0.6.0_StartProbe_${T0}`, 'completed', false],
+        [`0.7.0_StartProbe_${T0}`, 'completed', false],
       ]);
     }
 
@@ -145,38 +161,38 @@ describeIfDb('Part D through the locked start (runMigrateOnStart)', () => {
       await c.end();
     }
     expect((await registryOf(admin, w3.id)).module_version).toBe(P);
-    await admin.query(`INSERT INTO core.upgrade_migration (name, status, attempt, executed_by_version, is_initial, workspace_id) VALUES ($1, 'completed', 1, '0.6.0', true, $2)`, [
-      lastStepOfVersion('0.6.0', UPGRADE_COMMANDS, r1),
+    await admin.query(`INSERT INTO core.upgrade_migration (name, status, attempt, executed_by_version, is_initial, workspace_id) VALUES ($1, 'completed', 1, '0.7.0', true, $2)`, [
+      lastStepOfVersion('0.7.0', UPGRADE_COMMANDS, r1),
       w3.id,
     ]);
 
     const data: WorkspaceUpgradeCommand = { kind: 'workspace', name: 'StartData', timestamp: T0 + 1, run: async ({ query, schemaName }) => void (await query(`SELECT count(*) FROM ${schemaName}.venue`)) };
-    const third = await start({ '0-6': [...REAL_CMDS, probe, data] }, [w1.id, w2.id, w3.id]);
+    const third = await start({ '0-6': REAL_06, '0-7': [...REAL_07, probe, data] }, [w1.id, w2.id, w3.id]);
     expect({ outcome: third.outcome, exit: exitOf(third) }).toEqual({ outcome: 'ok', exit: 0 });
-    for (const w of [w1, w2, w3]) expect((await rows(w)).slice(-1)[0]).toMatchObject({ name: `0.6.0_StartData_${T0 + 1}`, status: 'completed' });
+    for (const w of [w1, w2, w3]) expect((await rows(w)).slice(-1)[0]).toMatchObject({ name: `0.7.0_StartData_${T0 + 1}`, status: 'completed' });
     } finally {
       await relabel(false);
     }
   });
 
-  it('a drifted, unadopted workspace: adoption refused, the start serves with exit 70, and the status says failed (L3)', async () => {
-    const [ok, drift] = [await make('a-ok'), await make('a-drift')];
-    for (const w of [ok, drift]) expect(await frozen(w)).toBe('READY');
-    await admin.query(`DROP POLICY job_role_tenant ON ${drift.schema}.job_role`);
-    const r = await start({ '0-6': REAL_CMDS }, [ok.id, drift.id]);
+  it('a workspace with no cursor (0.7.0 never adopts): refused and blocked, the start serves with exit 70, and the status says failed (L3)', async () => {
+    const [ok, orphan] = [await make('a-ok'), await make('a-nocursor')];
+    await complete060(ok);
+    expect(await frozen(orphan)).toBe('READY');
+    const r = await start({ '0-6': REAL_06, '0-7': REAL_07 }, [ok.id, orphan.id]);
     expect({ outcome: r.outcome, exit: exitOf(r), serve: r.serve }).toEqual({ outcome: 'degradedContinue', exit: 70, serve: true });
-    expect(r.upgrade?.commandFailure).toMatchObject({ name: '0.6.0_WorkspaceAdoption', workspaceId: drift.id });
-    expect(await rows(drift)).toEqual([]);
+    expect(r.upgrade?.commandFailure).toMatchObject({ name: '0.7.0_WorkspaceCursor', workspaceId: orphan.id });
+    expect(await rows(orphan)).toEqual([]);
     expect((await rows(ok)).length).toBe(1 + REAL.length);
-    // Owner D3: the drifted workspace is blocked (registry marker → 503); the adopted one is not.
-    expect((await registryOf(admin, drift.id)).migration_error).toMatch(/^upgrade-blocked: 0\.6\.0_WorkspaceAdoption \(/);
+    // Owner D3: the refused workspace is blocked (registry marker → 503); the 0.6.0-complete one is not.
+    expect((await registryOf(admin, orphan.id)).migration_error).toMatch(/^upgrade-blocked: 0\.7\.0_WorkspaceCursor \(/);
     expect((await registryOf(admin, ok.id)).migration_error).toBeNull();
-    expect(r.upgrade?.workspaces?.blocked).toEqual([drift.id]);
+    expect(r.upgrade?.workspaces?.blocked).toEqual([orphan.id]);
 
     const c = new Client({ connectionString: appUrl });
     await c.connect();
     try {
-      expect((await readUpgradeStatus(upgradeSessionOf(c), '0.6.0')).state).toBe('failed');
+      expect((await readUpgradeStatus(upgradeSessionOf(c), '0.7.0')).state).toBe('failed');
     } finally {
       await c.end();
     }

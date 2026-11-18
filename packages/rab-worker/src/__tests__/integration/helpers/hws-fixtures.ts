@@ -1,5 +1,6 @@
 import { resolveHwsRuntimeEnabled } from '@rab/server/engine/core-modules/environment/hws-runtime-default';
 import { workspaceSchemaName } from '@rab/server/engine/core-modules/tenant/schema-resolver.service';
+import { assertJestNodeEnv, DISPOSABLE_TEST_DATABASE_SETTING, probeDatabaseIdentity, resolveIntegrationTestDatabase, TestDatabaseConfigError } from '@rab/server/database/typeorm/core/test-database-guard';
 
 /**
  * Part C1 fixture helpers: HWS runtime routing is ON by default outside production, so a business row a suite seeds must land
@@ -64,4 +65,42 @@ export function siblingTable(qualified: string, table: string): string {
   const m = /^"(core|workspace_[0-9a-f]{32})"\."[a-z_]+"$/.exec(qualified);
   if (!m) throw new Error('siblingTable: not a qualified business table');
   return `"${m[1]}"."${table}"`;
+}
+
+/**
+ * Release 0.7.0: a spec that needs the PRE-cutover world (core copies writable, workspaces not marked verified at creation).
+ * The in-band CI database was built by a 0.7.0 start with HWS on, which wrote the one-way activation sentinel; this removes
+ * it as the cluster superuser (test-only: production never removes it) for the calling spec, and the returned function puts
+ * back exactly what was there. Call it in beforeAll BEFORE creating the spec's workspaces, and the restore in afterAll.
+ */
+/**
+ * The guard every test-only touch of the activation sentinel goes through (withCutoverInactive, the C3 spec's deactivate):
+ * NODE_ENV=test, the validated TEST pair (the existing test-database guard), and the connection must be on that TEST database
+ * — the same database NAME and the same CLUSTER (system_identifier, probed through the TEST app URL: the endpoint, not only
+ * the name) — carrying the database-level disposable marker (read from the catalog, as the Jest globalSetup reads it).
+ * Anything else throws before the sentinel is touched, so a real deployment's sentinel can never be removed.
+ */
+export async function assertCutoverFixtureDatabase(admin: FixtureQueryable): Promise<void> {
+  assertJestNodeEnv(process.env);
+  const resolved = resolveIntegrationTestDatabase(process.env);
+  const [id] = (await admin.query(
+    `SELECT current_database() AS db, (SELECT system_identifier::text FROM pg_control_system()) AS sid,
+            (SELECT split_part(cfg, '=', 2) FROM pg_db_role_setting s JOIN pg_database d ON d.oid = s.setdatabase, unnest(s.setconfig) cfg
+              WHERE d.datname = current_database() AND s.setrole = 0 AND split_part(cfg, '=', 1) = $1 LIMIT 1) AS marker`,
+    [DISPOSABLE_TEST_DATABASE_SETTING],
+  )) as Array<{ db: string; sid: string | null; marker: string | null }>;
+  const app = await probeDatabaseIdentity(resolved.appUrl, 'TEST_DATABASE_URL');
+  if (!id || id.db !== resolved.app.database || id.db !== app.database || !id.sid || id.sid !== app.systemIdentifier || id.marker !== 'true') {
+    throw new TestDatabaseConfigError('the activation sentinel may be touched only on the marked disposable TEST database (name, cluster and marker checked); nothing was changed. Refusing.');
+  }
+}
+
+export async function withCutoverInactive(admin: FixtureQueryable): Promise<() => Promise<void>> {
+  await assertCutoverFixtureDatabase(admin);
+  const rows = (await admin.query('SELECT count(*)::int AS n FROM core.hws_cutover_activation')) as Array<{ n: number }>;
+  const wasActive = Number(rows[0]?.n ?? 0) > 0;
+  await admin.query('DELETE FROM core.hws_cutover_activation');
+  return async () => {
+    if (wasActive) await admin.query('INSERT INTO core.hws_cutover_activation DEFAULT VALUES ON CONFLICT DO NOTHING');
+  };
 }
