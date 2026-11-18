@@ -15,7 +15,8 @@ name: cd-deploy-tag
 # How this hands over to publish-image (IMAGE_SECURITY_RELEASE_POLICY.md "Cutting a release"): a release created or
 # published with this workflow's GITHUB_TOKEN triggers NO workflow, so this job never publishes. If the owner already
 # published the release (UI / their own gh), it changes nothing: publish-image started from that event. If the tag was
-# pushed with git, it creates a DRAFT; the owner publishes the draft by hand, and that event starts publish-image.
+# pushed with git, it creates a DRAFT; the owner publishes the draft by hand, and that event starts publish-image. A tag
+# whose commit is not on origin/main is refused first, as release_guard.py would refuse to publish it.
 on:
   push:
     tags:
@@ -32,14 +33,17 @@ jobs:
   release:
     runs-on: ubuntu-latest
     timeout-minutes: 10
-    environment: production
+    # No `environment:`: this job deploys nothing, and an environment would only record a misleading deployment.
     permissions:
       contents: write # gh release view (drafts too) / gh release create --draft; nothing else
     steps:
-      # Only to read tools/create-github-release.sh; nothing pushes, so no credential is left in .git/config.
+      # tools/create-github-release.sh, and the history to decide that the tagged commit is on origin/main (the script
+      # fetches main and runs git merge-base --is-ancestor). Nothing pushes, so no credential is left in .git/config;
+      # the public repository is fetched anonymously.
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           persist-credentials: false
+          fetch-depth: 0
       # The preinstalled gh CLI instead of a third-party release action. The commands are exercised on every PR by
       # ci-security's action-pins job (tools/create-github-release.test.cjs: dry run, a recording gh for the existing /
       # missing / failed lookup, and the installed gh's own flag list), because this workflow only runs on a tag.

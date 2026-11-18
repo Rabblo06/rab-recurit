@@ -249,7 +249,8 @@ and update `verified_on`.
     starts `publish-image` on the tag; approve the `release` environment after the gate. If the new tag also starts
     `cd-deploy-tag`, it finds the release and changes nothing.
   - **Tag pushed with git:** `cd-deploy-tag` creates a **draft** release with the deploy notes
-    (`tools/create-github-release.sh`; it never publishes). The owner reviews it and clicks **Publish release**; that
+    (`tools/create-github-release.sh`; it never publishes), only if the tagged commit is on `origin/main`; a tag on
+    any other commit is refused and gets no release record. The owner reviews it and clicks **Publish release**; that
     starts `publish-image` as above.
   - **Image already published by a dispatch from `main`** (as for v0.6.0: dispatch on the release commit, then the
     release): the release-event run will reach the `release` approval for an image that already exists. Reject it (the

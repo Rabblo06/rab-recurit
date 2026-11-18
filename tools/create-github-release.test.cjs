@@ -51,28 +51,83 @@ function fakeGh() {
     ].join('\n'),
     { mode: 0o755 },
   );
-  const read = () =>
+  // A `git` next to it, recording into gitcalls/<n>.
+  //   fetch                      -> FAKE_GIT=fetch-fail: exit 128; otherwise 0
+  //   merge-base --is-ancestor   -> FAKE_GIT=on-main (default): 0 | off-main: 1 | error: 128
+  const gitCalls = path.join(dir, 'gitcalls');
+  fs.mkdirSync(gitCalls);
+  fs.writeFileSync(
+    path.join(dir, 'git'),
+    [
+      '#!/usr/bin/env bash',
+      `n=$(ls '${toPosix(gitCalls)}' | wc -l)`,
+      `printf '%s\\n' "$@" > '${toPosix(gitCalls)}'/$((n + 1))`,
+      'case "$1:${FAKE_GIT:-on-main}" in',
+      '  fetch:fetch-fail) echo "fatal: unable to access origin" >&2; exit 128 ;;',
+      '  fetch:*) exit 0 ;;',
+      '  merge-base:off-main) exit 1 ;;',
+      '  merge-base:error) echo "fatal: Not a valid commit name" >&2; exit 128 ;;',
+      '  merge-base:*) exit 0 ;;',
+      'esac',
+      'exit 99',
+      '',
+    ].join('\n'),
+    { mode: 0o755 },
+  );
+  const readDir = (d) => () =>
     fs
-      .readdirSync(calls)
+      .readdirSync(d)
       .sort((a, b) => a - b)
-      .map((f) => fs.readFileSync(path.join(calls, f), 'utf8').trimEnd().split('\n'));
-  return { dir, notes, calls: read };
+      .map((f) => fs.readFileSync(path.join(d, f), 'utf8').trimEnd().split('\n'));
+  return { dir, notes, calls: readDir(calls), gitCalls: readDir(gitCalls) };
 }
 
 function run(env, extraPath) {
   const base = { ...process.env };
-  for (const k of ['DRY_RUN', 'FAKE_VIEW', 'GITHUB_STEP_SUMMARY', ...Object.keys(ENV)]) delete base[k];
+  for (const k of ['DRY_RUN', 'FAKE_VIEW', 'FAKE_GIT', 'GITHUB_STEP_SUMMARY', ...Object.keys(ENV)]) delete base[k];
   if (extraPath) base.PATH = `${extraPath}${path.delimiter}${base.PATH}`;
   return spawnSync('bash', [toPosix(SCRIPT)], { env: { ...base, ...env }, encoding: 'utf8' });
 }
 
 const VIEW = ['release', 'view', 'rab/v1.2.3', '--repo', 'Owner/repo', '--json', 'isDraft,url', '--jq', '"\\(.isDraft) \\(.url)"'];
+const GIT_CALLS = [
+  ['fetch', '--no-tags', '--quiet', 'origin', 'main'],
+  ['merge-base', '--is-ancestor', SHA, 'FETCH_HEAD'],
+];
+
+// Review of #250: the tagged commit must be on origin/main before anything is drafted (as release_guard.py requires
+// before publishing). A tag on a branch-only commit gets no release record at all.
+test('a tag whose commit is not on origin/main is refused before any gh call', () => {
+  const gh = fakeGh();
+  const summary = path.join(gh.dir, 'summary.md');
+  const r = run({ ...ENV, FAKE_GIT: 'off-main', FAKE_VIEW: 'missing', GITHUB_STEP_SUMMARY: summary }, gh.dir);
+  assert.notEqual(r.status, 0);
+  assert.ok(r.stdout.includes(`::error::rab/v1.2.3 points at ${SHA}, which is not on origin/main`), r.stdout);
+  assert.deepEqual(gh.gitCalls(), GIT_CALLS);
+  assert.deepEqual(gh.calls(), [], 'no lookup, no draft');
+  assert.ok(fs.readFileSync(summary, 'utf8').includes('### rab/v1.2.3: refused'));
+});
+
+test('a failed fetch of main or a failed merge-base fails closed before any gh call', () => {
+  for (const [mode, msg, gitN] of [
+    ['fetch-fail', '::error::git fetch origin main failed', 1],
+    ['error', '::error::git merge-base failed (exit 128)', 2],
+  ]) {
+    const gh = fakeGh();
+    const r = run({ ...ENV, FAKE_GIT: mode, FAKE_VIEW: 'missing' }, gh.dir);
+    assert.notEqual(r.status, 0, mode);
+    assert.ok(r.stdout.includes(msg), `${mode}: ${r.stdout}`);
+    assert.deepEqual(gh.gitCalls(), GIT_CALLS.slice(0, gitN), mode);
+    assert.deepEqual(gh.calls(), [], mode);
+  }
+});
 
 test('no release yet: one lookup, then gh release create --draft with the tag, title "Crewflow vX.Y.Z" and our notes', () => {
   const gh = fakeGh();
   const summary = path.join(gh.dir, 'summary.md');
   const r = run({ ...ENV, FAKE_VIEW: 'missing', GITHUB_STEP_SUMMARY: summary }, gh.dir);
   assert.equal(r.status, 0, r.stderr);
+  assert.deepEqual(gh.gitCalls(), GIT_CALLS, 'main ancestry checked first');
   const [view, create, ...rest] = gh.calls();
   assert.deepEqual(rest, []);
   assert.deepEqual(view, VIEW);
@@ -127,6 +182,8 @@ test('DRY_RUN=1 prints both commands and the notes and never calls gh', () => {
   const gh = fakeGh();
   const r = run({ ...ENV, DRY_RUN: '1' }, gh.dir);
   assert.equal(r.status, 0, r.stderr);
+  assert.ok(r.stdout.includes('dry run: git fetch --no-tags --quiet origin main\n'), r.stdout);
+  assert.ok(r.stdout.includes(`dry run: git merge-base --is-ancestor ${SHA} FETCH_HEAD\n`), r.stdout);
   assert.match(r.stdout, /^dry run: gh release view rab\/v1\.2\.3 --repo Owner\/repo --json isDraft,url --jq /m);
   assert.match(
     r.stdout,
@@ -134,6 +191,7 @@ test('DRY_RUN=1 prints both commands and the notes and never calls gh', () => {
   );
   assert.match(r.stdout, new RegExp(`adolphus:${SHA}`));
   assert.deepEqual(gh.calls(), []);
+  assert.deepEqual(gh.gitCalls(), []);
 });
 
 test('bad or missing inputs are refused before gh runs (a bare vX.Y.Z tag included)', () => {
@@ -157,17 +215,36 @@ test('bad or missing inputs are refused before gh runs (a bare vX.Y.Z tag includ
   }
 });
 
-test("the script accepts exactly the tags publish-image's release guard accepts (RELEASE_TAG)", () => {
+test("the script accepts exactly the tags publish-image's release guard accepts (RELEASE_TAG)", (t) => {
   const src = fs.readFileSync(GUARD, 'utf8');
   const m = /^RELEASE_TAG = re\.compile\(r'([^']+)'\)$/m.exec(src);
   assert.ok(m, 'release_guard.py RELEASE_TAG not found');
   const guard = new RegExp(`^(?:${m[1]})$`); // Python fullmatch
-  const samples = ['rab/v0.6.0', 'rab/v0.2.0-beta', 'rab/v0.1.0-beta.1', 'rab/v10.20.30-rc.1', 'v0.6.0', 'rab/v0.6', 'rab/v0.6.0+b', 'rab/v0.6.0-', 'rab/vx.y.z', 'rab/v0.6.0/x'];
+  // Unicode digits (U+0661 Arabic-Indic one, U+FF12 fullwidth two): Python's \d would accept them; the guard uses [0-9].
+  const samples = ['rab/v0.6.0', 'rab/v0.2.0-beta', 'rab/v0.1.0-beta.1', 'rab/v10.20.30-rc.1', 'v0.6.0', 'rab/v0.6', 'rab/v0.6.0+b', 'rab/v0.6.0-', 'rab/vx.y.z', 'rab/v0.6.0/x', 'rab/v\u0661.2.3', 'rab/v1.\uff12.0'];
+  const accepted = {};
   for (const tag of samples) {
     const gh = fakeGh();
-    const ok = run({ ...ENV, TAG: tag, DRY_RUN: '1' }, gh.dir).status === 0;
-    assert.equal(ok, guard.test(tag), tag);
+    accepted[tag] = run({ ...ENV, TAG: tag, DRY_RUN: '1' }, gh.dir).status === 0;
+    assert.equal(accepted[tag], guard.test(tag), tag);
   }
+  assert.equal(accepted['rab/v\u0661.2.3'], false);
+  assert.equal(accepted['rab/v1.\uff12.0'], false);
+  // A JS RegExp reads \d as ASCII only, so also ask the real Python module, where \d would match Unicode digits.
+  const pyCode = [
+    'import importlib.util, json, sys',
+    'spec = importlib.util.spec_from_file_location("g", sys.argv[1])',
+    'g = importlib.util.module_from_spec(spec)',
+    'spec.loader.exec_module(g)',
+    'print(json.dumps({t: bool(g.RELEASE_TAG.fullmatch(t)) for t in json.loads(sys.argv[2])}))',
+  ].join('\n');
+  const py = spawnSync('python3', ['-B', '-c', pyCode, GUARD, JSON.stringify(samples)], { encoding: 'utf8' });
+  if (py.error || py.status !== 0) {
+    if (process.env.CI) assert.fail(`python3 must load release_guard.py here: ${py.stderr || py.error}`);
+    t.skip('python3 not available');
+    return;
+  }
+  assert.deepEqual(JSON.parse(py.stdout), accepted, 'release_guard.py RELEASE_TAG (Python) agrees with the script');
 });
 
 test('the installed gh knows every flag the script passes (static check of the real CLI)', (t) => {
@@ -194,7 +271,8 @@ test('cd-deploy-tag: rab/v tags, no third-party release action, least privilege,
   assert.match(y, /^permissions: \{\}$/m, 'nothing at the workflow level');
   const perms = [...y.matchAll(/^ {4}permissions:\n((?: {6}.*\n)+)/gm)].map((m) => m[1].replace(/\s*#.*$/gm, '').trim());
   assert.deepEqual(perms, ['contents: write'], 'the release job writes contents and nothing else (no actions: write)');
-  assert.match(y, /uses: actions\/checkout@[0-9a-f]{40} # v\S+\n\s+with:\n\s+persist-credentials: false\n/);
+  assert.match(y, /uses: actions\/checkout@[0-9a-f]{40} # v\S+\n\s+with:\n\s+persist-credentials: false\n\s+fetch-depth: 0\n/, 'full history for the main-ancestry check');
+  assert.doesNotMatch(y, /^\s+environment:/m, 'no environment: the job deploys nothing');
   assert.match(y, /GH_TOKEN: \$\{\{ github\.token \}\}\n\s+TAG: \$\{\{ github\.ref_name \}\}\n\s+run: bash tools\/create-github-release\.sh\n/);
   assert.doesNotMatch(y, /DRY_RUN/);
 });

@@ -17,7 +17,11 @@
 #       GITHUB_SHA          the tagged commit (names the one release image)
 #       GH_TOKEN            contents:write (gh reads it)
 #       GITHUB_STEP_SUMMARY optional; the outcome and the next step are appended to it
-#       DRY_RUN=1           print the gh command lines and the notes; call nothing (no token needed)
+#       DRY_RUN=1           print the git and gh command lines and the notes; call nothing (no token needed)
+#
+# The tagged commit must be on origin/main (git fetch --no-tags origin main; git merge-base --is-ancestor), the same
+# rule release_guard.py applies before publishing: a rab/v* tag on an unreviewed branch commit gets no release record,
+# not even a draft. cd-deploy-tag checks out full history (fetch-depth: 0) so the ancestry is decidable.
 #
 # Fail-closed: --verify-tag refuses to create a tag that does not already exist on GitHub, a lookup error other than
 # "release not found" stops the job, and a release created between the lookup and the create makes `gh release create`
@@ -56,12 +60,34 @@ create=(release create "$TAG" --repo "$GITHUB_REPOSITORY" --verify-tag --draft -
   --generate-notes --notes-file "$notes")
 if [ -n "$prerelease" ]; then create+=(--prerelease); fi
 
+fetch=(fetch --no-tags --quiet origin main)
+ancestor=(merge-base --is-ancestor "$GITHUB_SHA" FETCH_HEAD)
+
 if [ "${DRY_RUN:-}" = 1 ]; then
+  echo "dry run: git ${fetch[*]}"
+  echo "dry run: git ${ancestor[*]}"
   echo "dry run: gh ${view[*]}"
   echo "dry run: gh ${create[*]}"
   printf '%s\n' '--- notes ---'
   cat "$notes"
   exit 0
+fi
+
+if ! git "${fetch[@]}"; then
+  echo "::error::git fetch origin main failed; cannot tell whether $GITHUB_SHA is on main"
+  exit 1
+fi
+rc=0
+git "${ancestor[@]}" || rc=$?
+if [ "$rc" -eq 1 ]; then
+  echo "::error::$TAG points at $GITHUB_SHA, which is not on origin/main; no release record is drafted for it"
+  summary "### $TAG: refused" "" \
+    "\`$GITHUB_SHA\` is not on \`origin/main\`. Release tags go on reviewed commits of \`main\` only;" \
+    "publish-image's release guard would refuse this tag too. Delete the tag and tag a commit on \`main\`."
+  exit 1
+elif [ "$rc" -ne 0 ]; then
+  echo "::error::git merge-base failed (exit $rc); cannot tell whether $GITHUB_SHA is on main"
+  exit 1
 fi
 
 if existing="$(gh "${view[@]}" 2> "$err")"; then
