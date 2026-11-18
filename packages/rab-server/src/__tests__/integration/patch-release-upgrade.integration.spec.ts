@@ -371,9 +371,11 @@ describeIfDb('patch releases through the upgrade runner (integration)', () => {
       }).run(session);
       expect(adopted.failures.map((f) => f.step)).toEqual([gateName]);
 
-      // A forced 0.6.1: its migrations step completes (forced), the workspace pass retries the gate, which fails again.
+      // A forced 0.6.1: its migrations step completes (forced), the workspace pass retries the gate, which fails again. Since
+      // the owner's decision (b) (2026-11-18) the start resumes 0.6.0 (started unforced, every workspace has a logbook row)
+      // before --force is consulted, so the decision is `continue`; every row of the run is still marked forced.
       const forced = run061([w.id], { force: true, workspaceRegistry: registry });
-      expect((await start(forced)).kind).toBe('forced');
+      expect(await start(forced)).toMatchObject({ kind: 'continue', from: '0.6.0' });
       expect(await instanceRows('0.6.1')).toEqual([['0.6.1_TypeOrmMigrations', 'completed', 1, true]]);
       expect(forced.report.workspaces?.failures.map((f) => f.step)).toEqual([gateName]);
       expect((await rows(w)).slice(-1)[0]).toMatchObject({ name: gateName, status: 'failed', attempt: 2 });
