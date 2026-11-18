@@ -111,10 +111,11 @@ describeIfDb('SF-2 invite resend / cancel: route-flag re-check and the platform-
   const expectRefusedAndInert = (organisationId: string, call: () => Promise<unknown>) => expectRejectedAndInert(organisationId, call, ForbiddenException);
   const expectNotFoundAndInert = (organisationId: string, call: () => Promise<unknown>) => expectRejectedAndInert(organisationId, call, NotFoundException);
 
+  /** Rows written in one transaction share created_at (now()), so they are returned in the order of `actions`, not by time. */
   async function auditRows(organisationId: string, userId: string, actions: string[]): Promise<Array<Record<string, unknown>>> {
     return (await admin.query(
       `SELECT action, actor_user_id, target_user_id, entity_type, entity_id, metadata FROM core.audit_log
-        WHERE organisation_id = $1 AND target_user_id = $2 AND action = ANY($3) ORDER BY created_at, id`,
+        WHERE organisation_id = $1 AND target_user_id = $2 AND action = ANY($3) ORDER BY array_position($3, action), created_at, id`,
       [organisationId, userId, actions],
     )) as Array<Record<string, unknown>>;
   }
