@@ -9425,3 +9425,51 @@ Reversal:   Upgrade / `resolutions` override (documented in "//resolutions") as 
   copy with a pause between the two statements): two commits ended at version 1; with the fix, 2. Semantic goldens
   (PG16/17/18): only the `metadata_version_bump()` body hash changes (5f6076df… → ccfd284e…); security-posture golden and
   the restricted-migrator drift review unchanged (a function body is not a privilege line).
+
+## Metadata engine M2, phase 1 — `data_model.manage` role permission and the insert-only change log `core.metadata_migration` (branch feat/m2-phase-1, 2026-11-18; DRAFT, new SQL for owner review; release 1, metadata API off)
+- **Scope.** Owner decision 2026-11-18 ("M2: accept all 15 as in M2-PLAN.md §11. DATA_MODEL as a role permission checked in
+  the service. SET NULL on delete. Two releases. Payroll/attendance objects locked."). Phase 1 = M2-PLAN PR-1 subset + PR-2
+  (S-2) + PR-3 (S-1). Nothing in release 1 can change a data model: no route, job or command reaches the new service or
+  writes the new table; the executor (DDL) is a later phase.
+- **Assets.** Who may change a workspace's data model (later: create tables / columns in the workspace schema); the
+  auditable history of those changes (who, when, which version).
+- **Threats and controls.**
+  - *Escalation to data-model authority by a Venue Manager, Staff, a custom role or an Admin Inspect session.* The flag
+    `data_model.manage` is a ROLE permission resolved server-side per request (never the JWT). Default holders: the system
+    roles `ceo` and `manager` only (DataModelManagePermission1786721630000 for existing organisations, ROLE_DEFS for new
+    ones; `permission-catalogue.spec` pins it). A custom workspace-member role can never carry it: the member allowlist
+    trigger (WorkspaceMemberRoles1786714500000) is unchanged and refuses it even to the superuser (DP-4). Layer 2:
+    `DataModelAuthorityService.assertCanManageDataModelTx` re-reads the flag in the caller's transaction and refuses (403
+    PERMISSION_DENIED) with no organisation / workspace / user bound, under Admin Inspect, for a worker context, without
+    the flag or with a per-user revoke; a failing lookup propagates (fail closed). Layer 1 (`PermissionGuard`) comes with
+    the release-2 API.
+  - *A data-model change aimed at payroll / attendance.* `assertObjectNotLocked` refuses (403 OBJECT_SYSTEM_LOCKED) by
+    physical table name, before any metadata flag: the seven payroll / attendance tables, the junctions, D1 and D4
+    (`NO_CUSTOM_FIELD_TABLES`, 15 tables), and any name that is not a plain identifier. The database already pins the seven
+    payroll / attendance objects to system with no custom fields (M1). The executor's own deny-list comes with it.
+  - *Tampering with, or forging, the change history.* `core.metadata_migration` is ENABLE + FORCE RLS with one tenant
+    policy (no tenant bound → zero rows, ML-2), crewflow_app SELECT + INSERT only, and a guard that refuses every direct
+    UPDATE / DELETE for every identity (superuser included) and TRUNCATE for the request path. An INSERT is accepted only
+    for a version THIS transaction created (the M1 version row's `last_bump_xact`), with the bound user as actor and the
+    insert time as `created_at`; versions step by exactly one and are unique per workspace; content is bounded (closed
+    change kinds, ≤ 32 action objects / 8 KiB, a 64-character plain request id).
+  - *Retention / erasure.* Owner decisions: the log is deleted with its workspace (ON DELETE CASCADE); deleting a user is
+    never blocked by it — the rows stay and lose only `actor_user_id` (ON DELETE SET NULL, the only UPDATE the guard admits).
+- **SECURITY TRADE-OFF M2-P1-T1.** Decision: the permission migration lists organisations through the existing SECURITY
+  DEFINER `core.worker_list_organisations` (EmailOutboxSecretBodyScrub1786719710000 precedent). Reason: since M-T1
+  `core.organisation` is FORCE RLS, so the owner-login migration identity reads zero organisations and a plain loop would
+  silently grant nothing to existing ones (DP-2 shows the zero). Risk: none new (the function is EXECUTE crewflow /
+  crewflow_app already and returns ids only). Every write and post-condition still runs per organisation under the real
+  `role` / `role_permission` policies.
+- **Residual / open for the owner.** (1) A per-user GRANT override (`core.user_permission_override`, effect `grant`) still
+  gives the flag to any user, including a Venue Manager or Staff, exactly as for every other flag; only a platform-level
+  path can write overrides today. Phase 1 does not change override precedence. (2) BC-01 (accepted, as M1): crewflow_owner
+  can, through its crewflow membership, DISABLE TRIGGER or DROP the guard. (3) The AI permission migrations
+  (AiUsePermissionDefault1786720210000, AiSettingsPermission1786720240000, AiAgentsPermission1786721030000) loop over
+  `core.organisation` directly; they predate M-T1 and ran before it on every database, so they are not affected, but the
+  pattern must not be copied after M-T1.
+- **Tests.** `data-model-authority.service.spec.ts` (DM-1…DM-7: every denial, fail closed, the lock list = the engine list);
+  `metadata-migration-log-sql.spec.ts` (static SQL review); `data-model-permission.integration.spec.ts` (DP-1…DP-4);
+  `metadata-migration-log.integration.spec.ts` (ML-1…ML-9, including zero rows with no tenant bound, cross-tenant refusal,
+  insert-only for the superuser, SET NULL, CASCADE, down() refusal). Posture goldens and the restricted-migrator drift
+  review gain the new table's lines; no existing line changes.

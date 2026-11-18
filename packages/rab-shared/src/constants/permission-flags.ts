@@ -66,6 +66,16 @@ export const PermissionFlag = {
    * predicate `core.ai_agent_writer()` (AiAgentSchema1786721050000) also require the bound user to be the organisation's CEO.
    */
   AI_AGENTS_MANAGE: 'ai.agents.manage',
+  /**
+   * Metadata engine M2 (docs/plans/phase-x4/M2-PLAN.md PR-1 / PR-2; owner decision 2026-11-18 — the owner's "DATA_MODEL"):
+   * change the workspace's data model (custom objects, custom fields, options, indexes). A ROLE permission, re-checked in
+   * the service (layer 2, `DataModelAuthorityService`) and, from release 2, by `PermissionGuard` on the metadata API.
+   * Default holders: the system roles `ceo` and `manager` (Internal and Initial Managers; DataModelManagePermission
+   * 1786721630000); never `venue_manager` or `staff`. A custom workspace-member role can never carry it (the member
+   * allowlist trigger of WorkspaceMemberRoles1786714500000, unchanged). Payroll and attendance objects stay locked whatever
+   * the caller holds.
+   */
+  DATA_MODEL_MANAGE: 'data_model.manage',
 } as const;
 
 export type PermissionFlagType = (typeof PermissionFlag)[keyof typeof PermissionFlag];

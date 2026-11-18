@@ -235,6 +235,14 @@ export const REVIEWED_MIGRATION_DRIFT: Readonly<Record<string, readonly string[]
   '1786721560000-MetadataVersionState': [
     "+ policy|workspace_metadata_state|workspace_metadata_state_tenant|*|permissive=true|roles=public|using=((organisation_id = core.current_org()) AND (workspace_id = core.current_workspace()))|check=((organisation_id = core.current_org()) AND (workspace_id = core.current_workspace()))",
   ],
+  // Metadata engine M2 phase 1 (DRAFT, owner SQL review pending; docs/plans/phase-x4/M2-PLAN.md §10 S-1): the same plain
+  // tenant policy on the insert-only change log core.metadata_migration, added only. Owner, FORCE RLS, grants (crewflow_app
+  // SELECT + INSERT only), foreign-key actions and triggers are pinned by the golden posture snapshot and the migration's own
+  // post-condition; no runtime login gains a privilege it did not have. DataModelManagePermission1786721630000 changes rows
+  // only (catalogue + role grants): no drift line.
+  '1786721640000-MetadataMigrationLog': [
+    "+ policy|metadata_migration|metadata_migration_tenant|*|permissive=true|roles=public|using=((organisation_id = core.current_org()) AND (workspace_id = core.current_workspace()))|check=((organisation_id = core.current_org()) AND (workspace_id = core.current_workspace()))",
+  ],
 };
 
 type Identity = 'phaseA' | 'bootstrap' | 'restricted' | 'crewflow' | 'crewflow_app' | 'crewflow_worker';

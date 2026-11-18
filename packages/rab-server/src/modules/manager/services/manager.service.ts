@@ -103,6 +103,9 @@ export const ROLE_DEFS: Record<string, { key: string; name: string; permissions:
       // stays withheld from every tenant role and guards no tenant route.
       PermissionFlag.SETTINGS_VIEW,
       PermissionFlag.AI_USE,
+      // Metadata engine M2 (owner decision 2026-11-18, DataModelManagePermission1786721630000): change the workspace's data
+      // model. Payroll / attendance objects stay locked whatever the role holds (DataModelAuthorityService).
+      PermissionFlag.DATA_MODEL_MANAGE,
     ],
   },
   [ManagerType.VENUE]: {
@@ -178,6 +181,8 @@ export const ROLE_DEFS: Record<string, { key: string; name: string; permissions:
       // AI Phase 6a (AiAgentsPermission1786721030000, P6-D12): define AI agents (storage only until EX-3). CEO only — the
       // service and the RLS writer predicate `core.ai_agent_writer()` also require the CEO, whatever role carries the flag.
       PermissionFlag.AI_AGENTS_MANAGE,
+      // Metadata engine M2 (owner decision 2026-11-18, DataModelManagePermission1786721630000): see the `manager` entry.
+      PermissionFlag.DATA_MODEL_MANAGE,
     ],
   },
 };
