@@ -1,7 +1,7 @@
 import { DataSource, EntityManager } from 'typeorm';
 
 import { SUPPORTED_WORKSPACE_SCHEMA_VERSIONS, workspaceSchemaName } from '@rab/server/engine/core-modules/tenant/schema-resolver.service';
-import { bindMaintenanceSessionGucs } from '@rab/server/engine/core-modules/tenant/tenant-context.service';
+import { bindMaintenanceSessionGucs } from '@rab/server/engine/worker-shared/maintenance-session-binder';
 import { shipAuditRowAfterCommit } from '@rab/server/engine/core-modules/audit-events/audit-event-shipping';
 import { isUpgradeBlocked } from '@rab/server/engine/core-modules/upgrade/workspace-upgrade-block';
 import {
