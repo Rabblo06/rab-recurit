@@ -113,7 +113,9 @@ describe('patch releases carry no upgrade commands and no structure levels', () 
     expect(sequence.filter((s) => s.version === '0.6.1').map((s) => [s.name, s.kind])).toEqual([['0.6.1_TypeOrmMigrations', 'instance']]);
     expect(sequence.filter((s) => s.kind === 'workspace').every((s) => s.version === '0.6.0')).toBe(true);
     // The code structure level does not depend on the version: a 0.6.1 image provisions and expects level 22, as 0.6.0 does.
-    expect(codeWorkspaceStructureLevel()).toBe(22);
+    // A 0.6.x image knows only the 0.6 line's commands: this code's registry without the 0.7 release (which adds level 23).
+    const line06 = Object.fromEntries(Object.entries(WORKSPACE_UPGRADE_COMMANDS).filter(([key]) => key !== '0-7'));
+    expect(codeWorkspaceStructureLevel(line06)).toBe(22);
   });
 
   it('release guard: the next patch of the SHIPPED version validates and leaves nothing pending for a workspace that finished it', () => {
