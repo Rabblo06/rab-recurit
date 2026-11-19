@@ -157,7 +157,8 @@ modes are at the top of `docker-compose.production.yml`.
 | Name | What it does | Default | Services | Secret |
 |---|---|---|---|---|
 | `AUTH_MFA_ENROLMENT_ENABLED` | Users may enrol TOTP. | true | api | no |
-| `AUTH_MFA_ENFORCE_PLATFORM_ADMIN`, `_ORGANISATION_OWNER`, `_INITIAL_MANAGER`, `_OTHER_WEB_USERS` | Require a second factor for that group. | false | api | no |
+| `AUTH_MFA_ENFORCE_PLATFORM_ADMIN` | Require a second factor for platform admins. **REQUIRED `true` in production whenever a platform admin is created** (for example by `BOOTSTRAP_ADMIN_EMAIL`): #264 refuses to bootstrap without it. | false | both | no |
+| `AUTH_MFA_ENFORCE_ORGANISATION_OWNER`, `_INITIAL_MANAGER`, `_OTHER_WEB_USERS` | Require a second factor for that group. | false | api | no |
 | `AUTH_MFA_MOBILE_POLICY` | Second-factor policy for the phone apps. | exempt | api | no |
 | `AUTH_MFA_CHALLENGE_TTL_SECONDS` / `_MAX_ATTEMPTS` | Challenge lifetime and tries. | 300 / 5 | api | no |
 | `AUTH_MFA_USER_ATTEMPTS_BURST` / `_WINDOW_SECONDS` | Second-factor tries per user per window. | 10 / 900 | api | no |
@@ -267,11 +268,11 @@ The concurrency times 384 MB must fit the memory budget. Set them together.
 | `CREWFLOW_MIGRATION_APPROVAL_MODE` | `token` makes the API's migration need `CREWFLOW_MIGRATION_APPROVED`. Listed (pinned interpolation) on rab-api. | none | api | no |
 | `CREWFLOW_LOG_FIRST_PEER` | One-time diagnostic: log the first request's socket peer address. See below. | false | api | no |
 
-### Bootstrap admin (pending)
+### Bootstrap admin (PR #264, `feat/bootstrap-admin-at-boot`)
 
 | Name | What it does | Default | Services | Secret |
 |---|---|---|---|---|
-| `BOOTSTRAP_ADMIN_EMAIL` | **Pending** branch `feat/bootstrap-admin-at-boot` (create the first platform admin at boot). Today the gates and the `runtime.env` lint refuse every `BOOTSTRAP_ADMIN_*` name on rab-api. That branch owns those rules and will add the compose line. Until then: the one-off `bootstrap-admin` command. | unset | api (pending) | no |
+| `BOOTSTRAP_ADMIN_EMAIL` and the other optional `BOOTSTRAP_ADMIN_*` settings | Create the first platform admin at boot. PR #264 adds these lines to rab-api in both compose files and owns their refusal rules: see that PR for the exact names and rules. **Needs `AUTH_MFA_ENFORCE_PLATFORM_ADMIN=true`** (see above): #264 refuses to bootstrap without it. Until #264 merges, the gates refuse every `BOOTSTRAP_ADMIN_*` name on rab-api, so use the one-off `bootstrap-admin` command. | unset | api | no |
 
 ### AI (inert: `AI_ENABLED` is pinned `false`)
 
