@@ -9615,6 +9615,25 @@ Mitigation: only a socket Node verified (chain + host name) under a verify-full 
 Reversal:   drop the client-side branch of assertTlsGate (database-boot-gate-rules.ts).
 ```
 
+- **Driver versions TLS-1 / TLS-2 and the sslmode mapping were proved against (recorded 2026-11-19, main 760938c2).**
+  `pg` 8.23.0, `pg-pool` 3.14.0, `pg-connection-string` 2.14.0, `pg-protocol` 1.16.0, as resolved in yarn.lock. Why they
+  matter: `pg-connection-string` decides how `sslmode` and every other URL parameter become config keys, and `pg` merges the
+  parsed URL LAST, so URL ssl parameters would replace a code-built `ssl` object wholesale (pg-url-policy.ts); pg's own
+  `sslmode` handling (pg 8 treats `require` as verify-full, pg 9 announces it will weaken it) and its SNI / channel-binding
+  behaviour (TLS-1) are version-specific too. The code does not rely on that parsing for the security decision: pg-tls.ts
+  builds the verify-full `ssl` object explicitly from configuration and the factory never passes the URL to pg. But the
+  proof that this holds is a real handshake against these versions: pg-tls-ca.integration.spec.ts "DENIAL: a WRONG CA is
+  refused" and "DENIAL: the right CA but a host name the certificate does not carry is refused", for `sslmode=require` and
+  `verify-ca`, each with and without `channel_binding=require`. They run in ci-server.yaml's `test` job (the full rab-server
+  suite, shards 1-3, against the job's disposable PostgreSQL; the suite fails, never skips, without it), which the required
+  `ci-server gate` check needs; a yarn.lock change triggers ci-server through the change filter. **Any upgrade of these
+  packages must re-run those denial tests and update this record.** pg-dependency-versions.spec.ts fails when an installed
+  version differs from the record (each read from the package's own package.json, pg's dependencies resolved from pg's
+  directory as pg-url-policy.ts resolves them). Pinning: yarn.lock already fixes the resolution and CI installs with
+  `--immutable`; the only direct declaration (`"pg": "^8.13.1"` in package.json, packages/rab-server, packages/rab-worker)
+  stays a caret because an exact `8.23.0` rewrites the lockfile's descriptor lines (`yarn install --immutable` refuses it);
+  `pg-pool`, `pg-connection-string` and `pg-protocol` are transitive (pg 8.23.0 declares `^3.14.0`, `^2.14.0`, `^1.16.0`).
+
 - **Boot refusals added (API, Worker, CLI; production; read-only catalog queries).** The login (crewflow_owner) must not own
   the current database: directly (`datdba`), through any role it is a member of (`pg_has_role(..., 'MEMBER')`, whatever the
   INHERIT / SET / ADMIN options), or as a member of `pg_database_owner`. Refused in gate 1 (BOOT_FACTS_SQL, fail closed: a
