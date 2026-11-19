@@ -654,7 +654,7 @@ for (const [label, env, want] of [
   const ENCODED = RUNTIME_URL.replace('crewflow_owner:', 'crewflow%5Fowner:');
   r = run('l2-encoded-api', { ...BASE, PG_DATABASE_URL: ENCODED });
   check('16b the percent-encoded crewflow%5Fowner login is crewflow_owner: rab-api starts with it unchanged', r.code === 0 && field(line(r.out, 'main'), 'url') === hash(ENCODED), r.out);
-  const ENCODED_LOWER = ENCODED.replace('%5F', '%5f');
+  const ENCODED_LOWER = RUNTIME_URL.replace('crewflow_owner:', 'crewflow%5fowner:');
   r = run('l2-encoded-worker', { ...W, PG_DATABASE_URL: ENCODED_LOWER }, { entry: 'worker-start.sh' });
   check('16b ... and rab-worker (lower-case %5f)', r.code === 0 && field(line(r.out, 'workermain'), 'url') === hash(ENCODED_LOWER), r.out);
   r = run('l2-encoded-setup', { ...MODE_C, PG_DATABASE_URL: EXT_OWNER.replace('crewflow_owner:', 'crewflow%5Fowner:') }, { entry: 'db-setup.sh' });

@@ -83,7 +83,7 @@ test('DENIAL Twenty way: rab-api / rab-worker with no URL, an empty one, an admi
       }
     }
     // Any other service with PG_DATABASE_URL.
-    assertRefused(problemsAfter(c, (s) => { s['rab-redis'].environment = { PG_DATABASE_URL: appUrlOf(c) }; }), /rab-redis: has PG_DATABASE_URL \(only db-setup, rab-api and rab-worker/);
+    assertRefused(problemsAfter(c, (s) => { s['rab-redis'].environment = { PG_DATABASE_URL: appUrlOf(c) }; }), /rab-redis: has PG_DATABASE_URL \(only db-setup, db-harden, rab-api and rab-worker/);
   }
 });
 
@@ -716,7 +716,7 @@ test('DENIAL (rendered): docker-compose.image.yml with a "maint"-profile service
     fs.writeFileSync(copy, weakened);
     const c = { name: 'maint', files: [copy], localDb: false, staging: false };
     const problems = checkModel(renderModels([c])[c.name], c);
-    assertRefused(problems, /services are \[.*rab-maint.*\], expected \[db, db-setup, rab-api, rab-redis, rab-worker\]/);
+    assertRefused(problems, /services are \[.*rab-maint.*\], expected \[db, db-harden, db-setup, rab-api, rab-redis, rab-worker\]/);
     assertRefused(problems, /rab-maint: has profiles/);
     assertRefused(problems, /rab-maint: received a value from a separated-mode env file/);
   } finally {

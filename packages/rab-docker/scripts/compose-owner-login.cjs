@@ -1114,7 +1114,7 @@ function checkModel(model, combo) {
     if (!appServices.includes(name) && values.some((v) => v.includes(SENTINEL_APP_SECRET) || v.includes(SENTINEL_REDIS_PW))) {
       p(`${name}: received a runtime secret (only rab-api and rab-worker read runtime.env; db-setup never)`);
     }
-    // The crewflow_owner password: only db-setup, rab-api and rab-worker, only inside their PG_DATABASE_URL, never another
+    // The crewflow_owner password: only db-setup, db-harden, rab-api and rab-worker, only inside their PG_DATABASE_URL, never another
     // key. The admin password: only db-setup, only in its PG_ADMIN_URL.
     for (const [key, value] of Object.entries(env)) {
       if (OWNER_PASSWORD_SENTINELS.some((v) => String(value ?? '').includes(v)) && !((ADMIN_SERVICES.includes(name) || appServices.includes(name)) && key === URL_KEY)) p(`${name}: received the database credential (${key})`);
