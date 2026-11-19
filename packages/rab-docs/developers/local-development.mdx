@@ -24,7 +24,7 @@ yarn install
 
 ## 2. Start PostgreSQL and Redis
 
-**The whole stack in Docker.** `packages/rab-docker/docker-compose.yml` runs production's database setup and lifecycle, built from source: the bundled `db`, the one-shot `db-setup` (creates `crewflow_owner` with a random password kept in a volume), the API (migrates on start), a consume-only Worker, Redis and the hot-reload web console. Put `CREWFLOW_DEV_DB_PASSWORD=<openssl rand -hex 32>` in the git-ignored `packages/rab-docker/.env`, then create the database volume once and start:
+**The whole stack in Docker.** `packages/rab-docker/docker-compose.yml` runs production's database setup and lifecycle, built from source: the bundled `db`, the one-shot `db-setup` (creates `crewflow_owner`), the API (migrates on start), a consume-only Worker, Redis and the hot-reload web console. Put `CREWFLOW_DEV_DB_PASSWORD=<openssl rand -hex 32>` in the git-ignored `packages/rab-docker/.env`, then create the database volume once and start:
 
 ```bash
 docker volume create crewflow_dev_db_data
