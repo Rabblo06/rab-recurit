@@ -7,22 +7,33 @@
  * object), so pg never falls back to `PGSSLMODE` either.
  *
  *   sslmode in URL   production                                   outside production
- *   (absent)         verify-full                                  no TLS, unless a CA is configured (verify-full)
+ *   (absent)         REFUSED                                      no TLS, unless a CA is configured (verify-full)
  *   disable          REFUSED                                      no TLS
  *   allow, prefer    REFUSED                                      REFUSED (pg cannot fall back between TLS and plaintext)
  *   require          verify-full                                  verify-full (self-signed accepted with the flag)
- *   verify-ca        REFUSED (weaker than verify-full)            verify-full (self-signed accepted with the flag)
+ *   verify-ca        verify-full                                  verify-full (self-signed accepted with the flag)
  *   verify-full      verify-full                                  verify-full (self-signed accepted with the flag)
  *   no-verify        REFUSED                                      only with PG_SSL_ALLOW_SELF_SIGNED=true
+ *
+ * Owner decision 2026-11-19 ("SSL like Twenty"): production accepts exactly sslmode=require, verify-ca and verify-full, and all
+ * three mean the SAME full verification (verify-full below); everything else, an absent sslmode included, is refused with
+ * one fixed message (PG_SSLMODE_PRODUCTION_REFUSAL). Neon and most providers print `sslmode=require&channel_binding=require`,
+ * so that string works as pasted, and it is verified like verify-full, never like libpq's unverified `require`.
  *
  * verify-full = `{ rejectUnauthorized: true }` with Node's default `checkServerIdentity` (certificate chain AND host name),
  * against the configured CA when there is one, otherwise the system store. pg sends SNI for a DNS host name, and Node
  * checks that name. For an IP-literal host pg sets neither `servername` nor `host`, and Node then checks the certificate
  * against the literal name "localhost" instead of the IP (reproduced with pg 8.23 / Node 24): so for an IP host the
  * object carries an explicit `checkServerIdentity` bound to that IP, and the certificate must carry it as an IP SAN.
- * PG_SSL_ALLOW_SELF_SIGNED=true (`rejectUnauthorized: false`) is refused in production. Note `require` is deliberately
- * STRONGER here than libpq's `require` (which does not verify): pg 8 already treats it as verify-full, and pg 9 announces it
- * will weaken it, so the mapping is pinned here instead.
+ * PG_SSL_ALLOW_SELF_SIGNED=true (`rejectUnauthorized: false`) is refused in production. Note `require` and `verify-ca` are
+ * deliberately STRONGER here than libpq's (`require` does not verify at all, `verify-ca` skips the host name): pg 8 already
+ * treats `require` as verify-full, and pg 9 announces it will weaken it, so the mapping is pinned here instead.
+ *
+ * channel_binding (pg-url-policy.ts): `require` (and `prefer`) set pg's `enableChannelBinding`, so pg 8.23 authenticates with
+ * SCRAM-SHA-256-PLUS whenever the server offers it. pg 8.23 cannot REQUIRE it (it falls back to SCRAM-SHA-256 when the server
+ * does not offer -PLUS); what authenticates the server is the verified TLS above, which every accepted production URL has.
+ * `channel_binding=require` on a connection without TLS (outside production: sslmode=disable, or no sslmode and no CA) is
+ * refused: channel binding is a property of a TLS connection, and libpq refuses that combination too.
  *
  * The CA comes from ONE of two variables, never both (both set refuses to start):
  *   PG_SSL_CA_CERT_PATH   a file holding the PEM bundle (a mounted secret or volume);
@@ -170,18 +181,61 @@ export function resolvePgCaCertificate(
   return { caPem: null, caSource: null };
 }
 
+/** The host-name checks this module installs (IP-bound, still checking); anything else on an ssl object is not ours. */
+const PG_TLS_IDENTITY_CHECKS = new WeakSet<object>();
+
 /**
- * Builds the explicit `ssl` value for one connection string; `host` is the host that connection dials (the URL's).
- * Throws PgConfigError on any refused combination.
+ * True when an `ssl` value demands chain AND host-name verification exactly as this module builds verify-full:
+ * `rejectUnauthorized: true` and either Node's default host-name check or this module's IP-bound one. Gate 6 trusts the
+ * client side of a connection only under such a config (database-boot-gate-rules.ts assertTlsGate).
  */
-export function buildPgSsl(sslmode: PgSslMode | null, settings: PgTlsSettings, label: string, host: string): PgSsl {
+export function isVerifyFullSsl(ssl: PgSsl): boolean {
+  if (ssl === false || ssl.rejectUnauthorized !== true) return false;
+  return ssl.checkServerIdentity === undefined || PG_TLS_IDENTITY_CHECKS.has(ssl.checkServerIdentity);
+}
+
+/** The sslmodes production accepts. All three map to the same verify-full (see the header). */
+export const PG_PRODUCTION_SSLMODES: readonly PgSslMode[] = Object.freeze(['require', 'verify-ca', 'verify-full'] as const);
+
+/**
+ * The ONE production refusal for an sslmode (disable, allow, prefer, no-verify, or none at all). Fixed text apart from the
+ * variable name: the sslmode value is not echoed, so a typo never reaches a log.
+ */
+export const PG_SSLMODE_PRODUCTION_REFUSAL = (label: string): string =>
+  `${label} must set sslmode=require, verify-ca or verify-full in production (all three are enforced as full verification: the certificate chain and the host name). sslmode=disable, allow, prefer, no-verify and a missing sslmode are refused. Refusing to start.`;
+
+/** The refusal for channel_binding=require on a connection that would not use TLS. Fixed text apart from the variable name. */
+export const PG_CHANNEL_BINDING_WITHOUT_TLS_REFUSAL = (label: string): string =>
+  `${label} sets channel_binding=require on a connection without TLS. Channel binding needs TLS: use sslmode=require, verify-ca or verify-full, or remove channel_binding. Refusing.`;
+
+/**
+ * Builds the explicit `ssl` value for one connection string; `host` is the host that connection dials (the URL's), and
+ * `channelBinding` the URL's channel_binding value (null when absent). Throws PgConfigError on any refused combination.
+ */
+export function buildPgSsl(
+  sslmode: PgSslMode | null,
+  settings: PgTlsSettings,
+  label: string,
+  host: string,
+  channelBinding: 'require' | 'prefer' | 'disable' | null = null,
+): PgSsl {
+  const ssl = decidePgSsl(sslmode, settings, label, host);
+  if (ssl === false && channelBinding === 'require') throw new PgConfigError(PG_CHANNEL_BINDING_WITHOUT_TLS_REFUSAL(label));
+  return ssl;
+}
+
+function decidePgSsl(sslmode: PgSslMode | null, settings: PgTlsSettings, label: string, host: string): PgSsl {
   const { production, caPem, allowSelfSigned } = settings;
   const verifyFull = (): ConnectionOptions => {
     const ssl: ConnectionOptions = caPem ? { rejectUnauthorized: true, ca: caPem } : { rejectUnauthorized: true };
     // pg passes no name to Node for an IP host, and Node would then verify the certificate against "localhost" (see the
     // header). Bind the check to the IP itself. A DNS host keeps Node's default check of pg's servername (no override).
     const literal = host.replace(/^\[(.*)\]$/, '$1');
-    if (isIP(literal) !== 0) ssl.checkServerIdentity = (_name, cert) => checkServerIdentity(literal, cert);
+    if (isIP(literal) !== 0) {
+      const check = (_name: string, cert: Parameters<typeof checkServerIdentity>[1]) => checkServerIdentity(literal, cert);
+      PG_TLS_IDENTITY_CHECKS.add(check);
+      ssl.checkServerIdentity = check;
+    }
     return ssl;
   };
 
@@ -189,10 +243,9 @@ export function buildPgSsl(sslmode: PgSslMode | null, settings: PgTlsSettings, l
     if (allowSelfSigned) {
       throw new PgConfigError('PG_SSL_ALLOW_SELF_SIGNED=true is refused in production: the server certificate must be verified.');
     }
-    if (sslmode === null || sslmode === 'require' || sslmode === 'verify-full') return verifyFull();
-    throw new PgConfigError(
-      `${label} declares sslmode=${sslmode}, which production refuses. Use sslmode=verify-full (or require, treated as verify-full); TLS with certificate and host-name verification is required.`,
-    );
+    // require, verify-ca and verify-full: the same full verification (owner decision 2026-11-19). Anything else, none included.
+    if (sslmode !== null && PG_PRODUCTION_SSLMODES.includes(sslmode)) return verifyFull();
+    throw new PgConfigError(PG_SSLMODE_PRODUCTION_REFUSAL(label));
   }
 
   switch (sslmode) {

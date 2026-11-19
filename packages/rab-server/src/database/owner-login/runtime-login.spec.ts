@@ -212,7 +212,7 @@ describe('runtime-login rule in the in-process runtime guard (API, Worker; also 
     expect(refuse('worker', PROD_ENV(ADMIN_URL, { PG_DATABASE_PASSWORD: SECRET }))).toMatch(/^PG_DATABASE_PASSWORD is present in the worker process's environment/);
     expect(refuse('api', PROD_ENV(ADMIN_URL, { DATABASE_URL_UNPOOLED: ADMIN_URL }))).toMatch(/only the provisioner process may hold it/);
     // URL policy and TLS.
-    expect(refuse('api', PROD_ENV(ADMIN_URL.replace('verify-full', 'disable')))).toMatch(/sslmode=disable, which production refuses/);
+    expect(refuse('api', PROD_ENV(ADMIN_URL.replace('verify-full', 'disable')))).toMatch(/must set sslmode=require, verify-ca or verify-full in production/);
     // Worker: transaction pooler refused (session locks), even for crewflow_owner.
     expect(refuse('worker', PROD_ENV(`postgres://crewflow_owner:${SECRET}@ep-x-pooler.c-2.us-east-2.aws.neon.tech/neondb?sslmode=verify-full`))).toMatch(/transaction-pooler shape/);
     // Deployment identity declaration.
