@@ -9563,3 +9563,62 @@ Reversal:   a secret store mounted as a file per process (Docker secrets / Kuber
   every new refusal. Live (InstaBox, PG16/17/18 + PG15 refusal): the harness incl. M2, L1, L4, the expiry, db-harden happy /
   already / timeout / other-database / mode c, and the CREATEROLE lifecycle with the real migrate child. Docker suites (CI):
   run-prestart-shell-tests (L2, harden mode), the compose gates (db-harden).
+
+## db-setup, provider-neutral: the password form and a pooled admin URL decided by capability (branch feat/twenty-neon-setup, owner decisions 2026-11-19; SQL listed in the PR)
+
+Trigger: the published 0.6.0 db-setup, against a managed PostgreSQL that refuses pre-hashed role passwords, looped "crewflow_owner
+was being created by another start" three times and exited 70. The server refused the SCRAM verifier at COMMIT with SQLSTATE
+XX000, and XX000 was in the race set. Owner rules: no provider-specific code (no host matching, no provider flag), decide by
+capability at run time, the same code everywhere.
+
+- **Who can call this?** Only the one-shot db-setup / db-harden services (they alone hold `PG_ADMIN_URL` and the new
+  `PG_ADMIN_DIRECT_URL`; rab-api / rab-worker refuse any second PostgreSQL URL by value, and the compose placement rule
+  refuses `PG_ADMIN_DIRECT_URL` outside the admin services).
+- **Whose data?** The crewflow_owner credential (the schema owner of every tenant) and the admin login.
+- **Plain-text fallback.** The verifier is always sent first. Only a refusal of the password FORM switches, once, to the
+  plain text: a 22023 / 28P01 / 0A000 / XX000 (not "tuple concurrently updated") from the CREATE / ALTER ROLE step (fixed
+  DO-block HINT `crewflow-stage=role`) or from the COMMIT of a transaction that set a password. Never 42501, never the
+  DO block's own shape check, never a grant-only transaction. Preconditions, each refused (64) when missing, before the
+  password is sent: the admin connection verifies TLS (certificate and host name; `rejectUnauthorized` true); G1 switches the
+  session's statement / parameter logging off where the admin may, and G2 must then prove that no log or statistics view
+  (log_statement=all, log_duration, duration thresholds and sampling, auto_explain, pgaudit.log_parameter,
+  pg_stat_statements.track=all with track_utility) can record the bind parameter; password_encryption is pinned to
+  scram-sha-256 for the transaction; the DO block refuses anything that PostgreSQL would store as pre-hashed. The password
+  travels as a bind parameter into a transaction-local setting and reaches CREATE / ALTER ROLE through `%L`; the DO block
+  re-raises without the inner statement (no CONTEXT with the literal). Exactly one plain-text attempt; a second refusal is
+  reported as such.
+- **Tampering / a hostile server.** A server that lies about refusing the verifier gets the plain text over a verified TLS
+  connection, i.e. only the server the operator named, whose certificate verified. That server could already read every row
+  as the admin; it learns crewflow_owner's password, which it could set itself.
+- **A pooled admin URL.** Refused by behaviour, before any read or write: the startup options db-setup sends are refused
+  (08P01), or the two-connection session-affinity probe (pg-session-probe.ts) fails, or the URL has a documented pooler shape.
+  `PG_ADMIN_DIRECT_URL` must parse and name the same login and database as `PG_ADMIN_URL`; host names are never derived.
+- **Races.** The genuine concurrent-update race is still retried (PostgreSQL's fixed text, compared, never printed); every
+  retry and exhaustion line now names the SQLSTATE and the stage.
+- **Failure halfway.** Every write runs in one transaction under the advisory lock; a refusal at COMMIT rolls everything back,
+  the fallback re-reads the facts under the lock.
+- **Mode c** now also refuses a crewflow_owner that owns the database (lead audit item 6).
+
+```
+SECURITY TRADE-OFF
+Decision:   when the server refuses a pre-hashed password, db-setup sends crewflow_owner's password ONCE in plain text
+            (CREATE/ALTER ROLE ... PASSWORD '<plain>') to that server.
+Reason:     some managed PostgreSQL services accept ONLY plain-text role passwords (they hash it themselves, and some forward
+            it to their own control plane); the pre-hashed-only rule (D6) made db-setup unusable there and produced a
+            misleading exit 70. Detection is by the server's own refusal, so every other server keeps the pre-hashed path.
+Risk:       the password exists in the server process's memory and, on such a service, in the provider's own systems; a
+            server log, an extension or a statistics view that the guard does not know could record the literal; a server
+            that falsely refuses the verifier obtains the plain text (only after TLS verified it is the named server).
+Mitigation: verified TLS (CA + host name) or no fallback; G1/G2 log guard or no fallback; one attempt only; bind parameter +
+            transaction-local setting + %L inside a DO block that strips CONTEXT; password_encryption pinned to
+            scram-sha-256; no provider names in code; InstaBox proof that the password is in no server log line even with
+            log_statement=all and log_min_duration_statement=0.
+Reversal:   the operator creates crewflow_owner by hand at the provider (own-database-app-login.sql, mode c), so db-setup
+            never sends a password; or a provider that accepts SCRAM verifiers.
+```
+
+- **Shared password ("You set one shared password").** compose builds `PG_DATABASE_URL` from `PG_DATABASE_APP_PASSWORD` and
+  `PG_DATABASE_HOST` / `_PORT` / `_NAME` for db-setup, rab-api and rab-worker alike; an explicit `PG_DATABASE_URL` is the
+  documented alternative, and the compose.env lint refuses both together. db-setup refuses an app URL that names another
+  host, port or database than the admin (direct) URL, and a password below the M2 floor. Residual: `PG_DATABASE_APP_PASSWORD`
+  is interpolated unencoded into the URL (the lint requires 32+ of A-Z a-z 0-9 _ -).
