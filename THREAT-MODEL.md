@@ -9849,3 +9849,55 @@ Reversal:   refuse GRANTED_EXISTING in the boot path only (PlatformAdminBootstra
   compose-owner-login.test.cjs, run-prestart-shell-tests.cjs (cases 1d/1e/3/13b). PostgreSQL:
   bootstrap-admin-at-boot.integration.spec (fresh, existing admin no-op, four concurrent boots, password refused,
   crewflow_app refused, malformed email, CLOSED). The existing bootstrap-admin integration suites run the CLI unchanged.
+
+---
+
+## First platform administrator at API boot: independent security review of #264 fixed (2026-11-19)
+
+This entry supersedes these parts of the entry above: its MFA bullet ("unchanged ... the boot logs a warning"), trade-off
+BOOT-3, and the "Residual" bullet.
+
+- **F1 (HIGH), MFA at first sign-in is now required by the boot path.** `PlatformAdminBootstrapOnBoot.runOnce` refuses before
+  the bootstrap runs when `AUTH_MFA_ENFORCE_PLATFORM_ADMIN` is not true. Nothing runs: no transaction, no write, no email. With
+  the switch on, `LoginSecondFactorPolicyService` answers `enroll` for a platform admin without a factor, so the
+  boot-created admin gets the enrolment challenge at its first sign-in and never a session. Proved through the HTTP app:
+  activate, then `POST /auth/login` returns 409 `SECOND_FACTOR_REQUIRED` with `requirement: 'enroll'`. The CLI is unchanged.
+- **F2 (MEDIUM), an existing account is granted at boot only when its email ownership was proven.** Boot policy
+  (`requireProvenExistingAccount`): GRANTED_EXISTING requires `status = 'active'`, `email_verified_at IS NOT NULL`, a
+  non-deleted row and a manager-tier profile. Anything else rolls the whole transaction back (the function's
+  `platform_admin` row included) and is reported as REFUSED_EXISTING_ACCOUNT_UNVERIFIED or REFUSED_EXISTING_ACCOUNT_NOT_MANAGER
+  (staff-only, F3). The check runs on the row the database function resolved, in the same transaction, under its advisory
+  lock and `FOR UPDATE`. That makes it atomic, unlike a separate pre-lookup. The migration and the function are unchanged.
+  The CLI keeps its rule.
+- **F2, defence in depth (all actors, all paths).** `assertPlatformAdminTargetAllowed` (engine/core-modules/platform-admin)
+  answers 404 when the target holds an active platform-admin claim and the actor does not. It is wired into
+  `ManagerService.findPendingProfileOrFail` (resend, re-point and cancel of a pending invitation; before the CEO rule's 403),
+  `ManagerService.changeEmail`, `StaffService.findPendingProfileOrFail` and `StaffService.changeEmail`, and
+  `UserDeletionService.assertCanDelete` (a tenant actor now gets 404 instead of 409 `CANNOT_DELETE_PLATFORM_ADMIN`; another
+  platform admin still gets the 409). The Admin Panel's platform-admin resend keeps working (the actor is an admin).
+- **F5, an existing admin that never activated.** On every later boot, when the existing admin is still invited and holds no
+  unexpired, unused invite, the boot logs a distinct warning (`activationExpired`) and re-sends nothing. **Supported recovery:
+  none exists today.** No command re-sends the bootstrap invite. `grant-platform-admin` needs an existing account and does not
+  send invites. Forgot-password serves ACTIVE accounts only. The tenant resend paths are closed to this account by F2. Do not
+  improvise SQL. A supported path (for example an audited `resend-bootstrap-invite` command) is an owner decision.
+- **F4.** `BOOTSTRAP_ADMIN_PASSWORD` must not exist in any platform environment before this deploys. rab-api and rab-worker
+  refuse to start with it (exit 64 / runtime guard).
+- **I1.** The deploy-file lint (`bootstrapAdminComposeTextProblems`, in the owner-login gate) allows `BOOTSTRAP_ADMIN_*` only
+  under rab-api, only the five inputs, and only as `KEY: ${KEY:-}`. The two compose files themselves are not edited in this PR
+  (see the PR body).
+
+```
+SECURITY TRADE-OFF (BOOT-3, revised): boot grants an existing account only if active, verified and manager-tier
+Decision:   the boot path refuses (rolls back) any other existing account; the operator uses grant-platform-admin for those.
+Reason:     security review F2/F3: an INVITED manager's address can be re-pointed by a tenant manager before activation.
+Risk:       none new; a legitimate existing account that is not manager-tier must be granted with the CLI.
+Mitigation: named refusal lines; nothing is written.
+Reversal:   drop requireProvenExistingAccount from PlatformAdminBootstrapOnBoot.runOnce.
+```
+
+- **Tests added.** Unit: the F1 refusal (bootstrap.run never called), the F2/F3 refusals and rollback, F5 activation states,
+  `assertPlatformAdminTargetAllowed`. PostgreSQL: MFA off is refused with no rows; the INVITED-manager email is refused with no
+  `platform_admin` or outbox row; ambiguous email and ambiguous organisation; a boot racing the CLI gives one admin and one
+  email; the activation token is absent from every log line and from `audit_log.metadata`; F5. HTTP app: F1 activate gives
+  the enrol challenge; a tenant CEO resend or cancel on the pending bootstrap admin gives 404; resend or delete on a granted
+  account gives 404; staff-only email refused. `user-deletion-abuse-cases` expects 404 for a tenant actor.
