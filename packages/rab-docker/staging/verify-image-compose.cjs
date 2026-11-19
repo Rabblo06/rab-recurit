@@ -35,8 +35,9 @@
  * anywhere in their definition. No file carries a credential: the retired crewflow-db-target volume (and any mount at
  * /run/crewflow/db-target) is refused everywhere. Neither URL may come from an env file, and PG_DATABASE_APP_PASSWORD never
  * reaches a container; in the deployed model the --environment preflight applies compose-owner-login.cjs
- * dbSettingsProblems (the three modes, PG_DATABASE_PASSWORD exactly while the bundled db runs, verify-full, no pooler, the
- * login rules). Only the login part of a URL is ever read.
+ * dbSettingsProblems (the three modes, PG_DATABASE_PASSWORD exactly while the bundled db runs, sslmode require / verify-ca /
+ * verify-full (all full verification), the login rules). A connection pooler is refused by db-setup's capability checks, never
+ * by its address. Only the login part of a URL is ever read.
  *
  * Exit 0 = every check passed, 1 = a check failed, 2 = usage error or docker compose unavailable.
  * Never prints an environment value other than image references (which are not secrets).
@@ -782,7 +783,8 @@ function checkDeployment(merged, production, envFileKeys = {}, { dockerRoot = un
       if (NOT_THE_APP_LOGIN.includes(login)) fail(`${DB_SETUP_SERVICE}: ${k} logs in as "${login}" (a former separated login)`);
     }
     // The three modes (owner decision 2026-11-18), the SAME rule as the compose.env lint (dbSettingsProblems): PG_DATABASE_URL
-    // only crewflow_owner; PG_ADMIN_URL never crewflow_owner; verify-full; no pooler; PG_DATABASE_PASSWORD (inside
+    // only crewflow_owner; PG_ADMIN_URL never crewflow_owner; sslmode require / verify-ca / verify-full (a pooler is refused by
+    // db-setup's capability checks, never by address); PG_DATABASE_PASSWORD (inside
     // db-setup's bundled URL) exactly while the bundled db runs.
     const senv = envOf(setup);
     for (const key of DB_SETUP_DB_KEYS) if (!Object.prototype.hasOwnProperty.call(senv, key)) fail(`${DB_SETUP_SERVICE}: ${key} is missing in the deployed model`);

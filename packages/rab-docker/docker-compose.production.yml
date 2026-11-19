@@ -29,7 +29,7 @@
 # environment keys) with per-service environment instead of env_file. Where the two differ, docker-compose.image.yml wins.
 #
 # DATABASE SETTINGS, LIKE TWENTY (owner decision 2026-11-18, "change PR #125 option 2 to Twenty's way"): rab-api and
-# rab-worker read PG_DATABASE_URL, ALWAYS the crewflow_owner URL (direct host, sslmode=verify-full), straight from their
+# rab-worker read PG_DATABASE_URL, ALWAYS the crewflow_owner URL (direct host, sslmode require / verify-ca / verify-full), straight from their
 # environment, exactly as Twenty's server and worker read the app user's PG_DATABASE_URL (twentyhq/twenty@eedb0a73
 # helm/twenty/templates/deployment-server.yaml:148-155, deployment-worker.yaml:81-88). Only the one-shot db-setup holds an
 # admin login. Three modes:
@@ -39,14 +39,22 @@
 #       db-setup, rab-api and rab-worker alike, and db-setup creates crewflow_owner with that password, as the bundled db's
 #       superuser (Twenty's compose: the password is an env value, `openssl rand -hex 32`). db makes its own CA; the app
 #       mounts it read-only.
-#   (b) YOUR OWN database, with an admin login: CREWFLOW_BUNDLED_DB=0 + PG_ADMIN_URL (its admin URL; db-setup ONLY) +
-#       PG_DATABASE_URL (the crewflow_owner URL, password of your choice): db-setup creates crewflow_owner with the password
-#       inside PG_DATABASE_URL (and sets it when crewflow_owner exists and the password does not log in). Both on the
-#       DIRECT host, sslmode=verify-full, the same database. No PG_DATABASE_PASSWORD / PG_DATABASE_APP_PASSWORD.
+#   (b) YOUR OWN database, with an admin login (owner decision 2026-11-19, "You set one shared password"): CREWFLOW_BUNDLED_DB=0
+#       + PG_ADMIN_URL (its admin URL pasted as-is; db-setup ONLY) + PG_DATABASE_APP_PASSWORD (`openssl rand -hex 32`) +
+#       PG_DATABASE_HOST / PG_DATABASE_PORT / PG_DATABASE_NAME (the database's DIRECT address, copied from the admin URL):
+#       compose builds the crewflow_owner URL from them for db-setup, rab-api and rab-worker alike; or set the whole
+#       PG_DATABASE_URL yourself instead (never both). db-setup creates crewflow_owner with that password (pre-hashed; a
+#       server that refuses pre-hashed passwords gets crewflow_owner WITHOUT a password, NOLOGIN, and db-setup stops with fixed steps:
+#       set the password once in the provider's SQL editor with the printed DO block, then redeploy; Crewflow never sends
+#       a plain-text password; the typed value can stay in server logs, pg_stat_statements, pg_stat_activity, provider logs)
+#       and sets it when the password does not log in. A pooled PG_ADMIN_URL is refused by what it does; then
+#       add PG_ADMIN_DIRECT_URL (the direct address of the same login and database; db-setup and db-harden only).
+#       sslmode require, verify-ca or verify-full (all full verification). No PG_DATABASE_PASSWORD.
 #   (c) YOUR OWN database, where you created crewflow_owner yourself: CREWFLOW_BUNDLED_DB=0 + PG_DATABASE_URL only:
 #       db-setup only checks it (read-only).
 # A PG_DATABASE_URL whose login is not crewflow_owner, or a PG_ADMIN_URL that logs in as crewflow_owner, is REFUSED.
-# PG_ADMIN_URL is interpolated ONLY into db-setup; rab-api and rab-worker pin it to "" and refuse any value (L-2).
+# PG_ADMIN_URL and PG_ADMIN_DIRECT_URL are interpolated ONLY into db-setup / db-harden; rab-api and rab-worker pin both to ""
+# and refuse any value (L-2; security review F2 of #259).
 # CREATEROLE: crewflow_owner is created CREATEROLE for the first start's schema bootstrap; in modes a and b db-setup removes
 # it (as the admin) at its first run after the schema is complete, i.e. the next `docker compose up -d`, and the API / Worker
 # refuse it at boot unless db-setup marked it as waiting for that bootstrap.
@@ -116,7 +124,7 @@ x-crewflow-required-env: &required-env
   # URL or an empty password refuses to start (exit 64). On rab-api / rab-worker PG_ADMIN_URL is pinned "" (L-2).
   # Nested interpolation (OpenShip: NOT VERIFIED, docs/release/OPENSHIP-COMPATIBILITY.md): if a platform mishandles the
   # default, enter PG_DATABASE_URL explicitly; a wrong value fails closed (refused, or no login).
-  PG_DATABASE_URL: ${PG_DATABASE_URL:-postgresql://crewflow_owner:${PG_DATABASE_APP_PASSWORD:-}@db:5432/crewflow?sslmode=verify-full}
+  PG_DATABASE_URL: ${PG_DATABASE_URL:-postgresql://crewflow_owner:${PG_DATABASE_APP_PASSWORD:-}@${PG_DATABASE_HOST:-db}:${PG_DATABASE_PORT:-5432}/${PG_DATABASE_NAME:-crewflow}?sslmode=verify-full}
   # Root secret, 32+ random bytes. Changing it later breaks every session and stored encrypted secret.
   APP_SECRET: ${APP_SECRET:?APP_SECRET is required}
   # https:// and not localhost (refused otherwise).
@@ -704,9 +712,11 @@ services:
       #   (b) PG_ADMIN_URL: your own database's admin URL (DIRECT host, sslmode=verify-full; CREWFLOW_BUNDLED_DB=0), THIS
       #       SERVICE ONLY: db-setup creates crewflow_owner with it. rab-api and rab-worker NEVER receive it (pinned "").
       PG_ADMIN_URL: ${PG_ADMIN_URL:-}
+      PG_ADMIN_DIRECT_URL: ${PG_ADMIN_DIRECT_URL:-}
+      PG_DATABASE_HOST: ${PG_DATABASE_HOST:-}
       #   ALWAYS: the crewflow_owner URL, the very expression rab-api and rab-worker receive (x-crewflow-required-env): your
       #   crewflow_owner URL (b, c), or the bundled db's built from PG_DATABASE_APP_PASSWORD (a).
-      PG_DATABASE_URL: ${PG_DATABASE_URL:-postgresql://crewflow_owner:${PG_DATABASE_APP_PASSWORD:-}@db:5432/crewflow?sslmode=verify-full}
+      PG_DATABASE_URL: ${PG_DATABASE_URL:-postgresql://crewflow_owner:${PG_DATABASE_APP_PASSWORD:-}@${PG_DATABASE_HOST:-db}:${PG_DATABASE_PORT:-5432}/${PG_DATABASE_NAME:-crewflow}?sslmode=verify-full}
       #   (a) no PG_ADMIN_URL and CREWFLOW_BUNDLED_DB 1 (the default): the admin is the bundled db's superuser, built here from
       #       PG_DATABASE_PASSWORD; db-setup.sh refuses an empty password (no `:?` here: PG_DATABASE_PASSWORD is not required
       #       with your own database). (c) CREWFLOW_BUNDLED_DB=0 and no PG_ADMIN_URL: read-only checks.
@@ -763,7 +773,9 @@ services:
       # db-setup's database settings, exactly (the same modes and refusals): PG_ADMIN_URL (b), the crewflow_owner URL,
       # the bundled db switch and its superuser URL (a). rab-api and rab-worker NEVER receive the admin login.
       PG_ADMIN_URL: ${PG_ADMIN_URL:-}
-      PG_DATABASE_URL: ${PG_DATABASE_URL:-postgresql://crewflow_owner:${PG_DATABASE_APP_PASSWORD:-}@db:5432/crewflow?sslmode=verify-full}
+      PG_ADMIN_DIRECT_URL: ${PG_ADMIN_DIRECT_URL:-}
+      PG_DATABASE_HOST: ${PG_DATABASE_HOST:-}
+      PG_DATABASE_URL: ${PG_DATABASE_URL:-postgresql://crewflow_owner:${PG_DATABASE_APP_PASSWORD:-}@${PG_DATABASE_HOST:-db}:${PG_DATABASE_PORT:-5432}/${PG_DATABASE_NAME:-crewflow}?sslmode=verify-full}
       CREWFLOW_BUNDLED_DB: ${CREWFLOW_BUNDLED_DB:-1}
       CREWFLOW_BUNDLED_DB_ADMIN_URL: postgresql://postgres:${PG_DATABASE_PASSWORD:-}@db:5432/crewflow?sslmode=verify-full
       PG_SSL_CA_CERT_PATH:
@@ -812,6 +824,7 @@ services:
       # file or a platform UI can never reach this container. The entrypoint refuses any non-empty value (exit 64); the gates
       # accept exactly this empty literal here and refuse any other value. The admin URL reaches db-setup only.
       PG_ADMIN_URL: ""
+      PG_ADMIN_DIRECT_URL: ""
       # OPTIONAL, rab-api only. Pool ceiling (code default 10; the Worker's 12 is pinned on rab-worker).
       PG_POOL_MAX_CONNECTIONS:
       # Seconds api-prestart.sh waits before exiting after a start-up failure (0-300).
@@ -911,6 +924,7 @@ services:
       # file or a platform UI can never reach this container. The entrypoint refuses any non-empty value (exit 64); the gates
       # accept exactly this empty literal here and refuse any other value. The admin URL reaches db-setup only.
       PG_ADMIN_URL: ""
+      PG_ADMIN_DIRECT_URL: ""
       # OPTIONAL, rab-worker only. Event-loop watchdog: a loop silent this long is a stall (30-900 s).
       CREWFLOW_WORKER_WATCHDOG_STALE_SECONDS: ${CREWFLOW_WORKER_WATCHDOG_STALE_SECONDS:-120}
       # Milliseconds the Worker waits for running jobs on shutdown: a plain integer from 1000 to 34000 (drain + 10 s

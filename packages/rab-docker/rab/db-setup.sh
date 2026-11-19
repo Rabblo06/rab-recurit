@@ -12,9 +12,15 @@
 #      superuser, whose URL compose builds from PG_DATABASE_PASSWORD into CREWFLOW_BUNDLED_DB_ADMIN_URL; this script hands
 #      it to the child as PG_ADMIN_URL. Refused (64) when either password is empty, or the app password is not 32+
 #      characters of A-Z a-z 0-9 _ - (it is interpolated unencoded into the URL);
-#   b. YOUR OWN database with an admin login: PG_ADMIN_URL (its admin URL, the same database) + PG_DATABASE_URL (the
-#      crewflow_owner URL you chose the password of): crewflow_owner is created with that password if missing, and its
-#      password is SET to it when it does not log in;
+#   b. YOUR OWN database with an admin login: PG_ADMIN_URL (its admin URL, the same database, pasted as-is) + the crewflow_owner
+#      URL, which compose builds (owner decision 2026-11-19, "You set one shared password") from PG_DATABASE_APP_PASSWORD
+#      (openssl rand -hex 32) and PG_DATABASE_HOST / PG_DATABASE_PORT / PG_DATABASE_NAME (copied from the admin URL), or
+#      which you set as PG_DATABASE_URL yourself (never both): crewflow_owner is created with that password if missing,
+#      and its password is SET to it when it does not log in. Only the SCRAM verifier is ever sent; a server that refuses
+#      pre-hashed passwords gets crewflow_owner WITHOUT a password and NOLOGIN, and db-setup exits 64 with fixed steps (set the password
+#      once in the provider's SQL editor; owner decision 2026-11-19, option 1; owner-bootstrap.ts). A pooled
+#      PG_ADMIN_URL is refused by capability; PG_ADMIN_DIRECT_URL (the direct address of the same login and database,
+#      db-setup and db-harden only) is then used instead of it;
 #   c. YOUR OWN database, crewflow_owner created by hand: PG_DATABASE_URL only (CREWFLOW_BUNDLED_DB=0): read-only checks.
 # In modes a and b, once the schema bootstrap is complete for this image, the child also removes CREATEROLE from
 # crewflow_owner (and marks it while the bootstrap is still to come); see owner-bootstrap.ts.
@@ -137,6 +143,21 @@ fi
 if [ -n "${PG_ADMIN_URL:-}" ] && crewflow_is_owner_login "$PG_ADMIN_URL"; then
   refuse 'PG_ADMIN_URL logs in as crewflow_owner, the app login: PG_ADMIN_URL is your database admin login (db-setup creates crewflow_owner with it). Remove it to have db-setup only check crewflow_owner. Value not shown.'
 fi
+# PR #258: PG_DATABASE_SESSION_URL, the session address of the crewflow_owner login (the child checks the same login,
+# password and database as PG_DATABASE_URL and uses it for its crewflow_owner sessions).
+if [ -n "${PG_DATABASE_SESSION_URL:-}" ] && ! crewflow_is_owner_login "$PG_DATABASE_SESSION_URL"; then
+  refuse 'PG_DATABASE_SESSION_URL does not log in as crewflow_owner: it is the session address of PG_DATABASE_URL (the same login and database). Value not shown.'
+fi
+# Owner decision 2026-11-19: PG_ADMIN_DIRECT_URL, the direct address of the PG_ADMIN_URL login (the child checks it names the
+# same login and database). Only beside PG_ADMIN_URL, and never the app login.
+if [ -n "${PG_ADMIN_DIRECT_URL:-}" ]; then
+  if [ -z "${PG_ADMIN_URL:-}" ]; then
+    refuse 'PG_ADMIN_DIRECT_URL is set without PG_ADMIN_URL: it is only the direct address of the PG_ADMIN_URL login. Set both, or put the direct address in PG_ADMIN_URL. Value not shown.'
+  fi
+  if crewflow_is_owner_login "$PG_ADMIN_DIRECT_URL"; then
+    refuse 'PG_ADMIN_DIRECT_URL logs in as crewflow_owner, the app login: it is the direct address of your database admin login (PG_ADMIN_URL). Value not shown.'
+  fi
+fi
 
 if [ -n "${PG_ADMIN_URL:-}" ]; then
   # b. Your own database's admin URL (CREWFLOW_BUNDLED_DB=0; with 1 the bundled db simply runs unused).
@@ -170,8 +191,36 @@ else
   # c. Your own database, crewflow_owner created by hand: read-only checks only.
   MODE=owner
 fi
+# Security review F6 of #259: the crewflow_owner URL compose BUILT from PG_DATABASE_APP_PASSWORD and PG_DATABASE_HOST / PORT /
+# NAME (PG_DATABASE_HOST is set; the lint refuses it beside an explicit PG_DATABASE_URL). Its parts are interpolated
+# unencoded, so they are checked here at run time too: the password 32+ characters of A-Z a-z 0-9 _ -, and the host, port and
+# database name free of $ { } @ # / ? and whitespace (the port 1 to 5 digits). Values are never printed.
+if [ -n "${PG_DATABASE_HOST:-}" ]; then
+  built_rest="${PG_DATABASE_URL#*://crewflow_owner:}"
+  built_pw="${built_rest%@*}"
+  built_after="${built_rest##*@}"
+  built_hostport="${built_after%%/*}"
+  built_tail="${built_after#*/}"
+  built_db="${built_tail%%\?*}"
+  built_host="${built_hostport%:*}"
+  built_port="${built_hostport##*:}"
+  built_ok=yes
+  case "$built_pw" in '' | *[!A-Za-z0-9_-]*) built_ok=no ;; esac
+  if [ "${#built_pw}" -lt 32 ]; then built_ok=no; fi
+  for part in "$built_host" "$built_db"; do
+    case "$part" in '' | *[\$\{\}@#/\?\ ]*) built_ok=no ;; esac
+  done
+  # Independent review I4 of #259: the port is ^[0-9]{1,5}$ only (1 to 5 digits).
+  case "$built_port" in '' | *[!0-9]*) built_ok=no ;; esac
+  if [ "${#built_port}" -gt 5 ]; then built_ok=no; fi
+  unset built_rest built_pw built_after built_hostport built_tail built_db built_host built_port part
+  if [ "$built_ok" != yes ]; then
+    refuse 'the crewflow_owner URL built from PG_DATABASE_APP_PASSWORD and PG_DATABASE_HOST / PG_DATABASE_PORT / PG_DATABASE_NAME is malformed: the password must be 32+ characters of A-Z a-z 0-9 _ - (openssl rand -hex 32), the host and database name must not contain $ { } @ # / ? or spaces, and the port must be 1 to 5 digits. Values not shown.'
+  fi
+  unset built_ok
+fi
 if [ "${CREWFLOW_BUNDLED_DB:-1}" = 0 ] && [ "$(url_host "$PG_DATABASE_URL")" = db ]; then
-  refuse 'CREWFLOW_BUNDLED_DB=0 (your own database) but PG_DATABASE_URL still names the bundled host db: put your crewflow_owner URL in PG_DATABASE_URL (direct host, sslmode=verify-full), plus PG_ADMIN_URL to have db-setup create crewflow_owner.'
+  refuse 'CREWFLOW_BUNDLED_DB=0 (your own database) but PG_DATABASE_URL still names the bundled host db: set PG_DATABASE_HOST (and PG_DATABASE_NAME / PG_DATABASE_PORT) to your database, copied from PG_ADMIN_URL, with PG_DATABASE_APP_PASSWORD; or put your crewflow_owner URL in PG_DATABASE_URL (direct host, sslmode=verify-full).'
 fi
 # The bundled superuser URL is never needed again; the child reads PG_ADMIN_URL / PG_DATABASE_URL only.
 unset CREWFLOW_BUNDLED_DB_ADMIN_URL
@@ -344,7 +393,7 @@ crewflow_bundled_db_ca() {
   unset db_rest db_authority db_hostport db_host
 }
 # END crewflow bundled-db CA
-crewflow_bundled_db_ca "${PG_ADMIN_URL:-$PG_DATABASE_URL}"
+crewflow_bundled_db_ca "${PG_ADMIN_DIRECT_URL:-${PG_ADMIN_URL:-$PG_DATABASE_URL}}"
 
 STATUS=0
 # The child runs in the background so a stop (TERM/INT to this PID 1) reaches it. A transaction it had open is rolled back
