@@ -32,13 +32,13 @@
  * A refusal names the variable and the allowed values and never echoes the value.
  *
  * checkRuntimeLogin is the runtime-login rule — in production the API, the Worker and the migrate child refuse a
- * PG_DATABASE_URL whose login is not crewflow_owner, or whose host has a transaction-pooler shape, BEFORE connecting. It
+ * PG_DATABASE_URL (or PG_DATABASE_SESSION_URL) whose login is not crewflow_owner BEFORE connecting. It
  * parses the URL with the policy parser (owner-credential.ts runtimeUrlFacts) but is still pure: no I/O, no connection, no
  * logging. It is a separate function on purpose: the prestart shell copy does not parse URLs, and the bootstrap child
  * legitimately holds the admin URL.
  */
 
-import { readPrimaryDatabaseUrl } from '../postgres/pg-config';
+import { readPrimaryDatabaseUrl, readSessionDatabaseUrl } from '../postgres/pg-config';
 import { OWNER_LOGIN, OWNER_PASSWORD_MIN_DISTINCT, OWNER_PASSWORD_MIN_LENGTH, OwnerCredentialError, runtimeUrlFacts } from './owner-credential';
 
 export type MigrationApprovalMode = 'none' | 'token';
@@ -209,14 +209,16 @@ function looksLikeProduction(env: Env): boolean {
 }
 
 export interface RuntimeLoginCheck {
-  /** Outside production only: a non-crewflow_owner login or a pooler shape is allowed (dev and test suites) but reported. */
+  /** Outside production only: a non-crewflow_owner login is allowed (dev and test suites) but reported. */
   warning: string | null;
 }
 
 /**
- * In production, a runtime process whose PG_DATABASE_URL (1) logs in as anything other than crewflow_owner, or (2) has a
- * documented transaction-pooler shape (the API takes session advisory locks through its migrate child and its storage lock;
- * the URL must name the provider's DIRECT host), is refused (RuntimeDbConfigError, exit 64) BEFORE any connection is opened.
+ * In production, a runtime process whose PG_DATABASE_URL, or PG_DATABASE_SESSION_URL when set, logs in as anything other than
+ * crewflow_owner (or carries a weak password) is refused (RuntimeDbConfigError, exit 64) BEFORE any connection is opened.
+ * A transaction pooler is NOT recognised from the URL any more (owner instruction 2026-11-19, "decide by capability"): with
+ * PG_DATABASE_SESSION_URL set, PG_DATABASE_URL may be a transaction pooler (pg-config.ts); without it, the live session probe
+ * refuses a PG_DATABASE_URL that behaves like one (pg-session-probe.ts).
  * Pure: it parses the URL with the same policy parser every connection uses (owner-credential.ts runtimeUrlFacts ->
  * pg-url-policy.ts parsePgUrl) and never connects, logs, or echoes a value (not the URL, not the login, not the host).
  * Outside production it returns a warning instead. A superuser / BYPASSRLS / CREATEDB / REPLICATION / CREATEROLE login is
@@ -232,7 +234,7 @@ export function checkRuntimeLogin(env: Env, processName: RuntimeLoginProcess): R
   const value = readPrimaryDatabaseUrl(env)?.value ?? '';
   if (value === '') return { warning: null };
   const production = looksLikeProduction(env);
-  let facts: { owner: boolean; transactionPooler: boolean; strongPassword: boolean };
+  let facts: { owner: boolean; strongPassword: boolean };
   try {
     facts = runtimeUrlFacts(value);
   } catch (error) {
@@ -250,13 +252,23 @@ export function checkRuntimeLogin(env: Env, processName: RuntimeLoginProcess): R
       warning: `The ${processName} process: PG_DATABASE_URL does not log in as ${OWNER_LOGIN} (login not shown). Allowed outside production only; production refuses it before connecting.`,
     };
   }
-  if (facts.transactionPooler) {
-    if (production) {
+  // PG_DATABASE_SESSION_URL (the direct session connection next to a transaction-pooled PG_DATABASE_URL): the same login
+  // rule. Its login and database must also equal PG_DATABASE_URL's (pg-config.ts refuses otherwise).
+  const session = readSessionDatabaseUrl(env)?.value ?? '';
+  if (session !== '') {
+    let sessionFacts: { owner: boolean; strongPassword: boolean };
+    try {
+      sessionFacts = runtimeUrlFacts(session);
+    } catch (error) {
+      if (!(error instanceof OwnerCredentialError)) throw error;
+      if (production) throw new RuntimeDbConfigError(`The ${processName} process: ${error.message.split('PG_DATABASE_URL').join('PG_DATABASE_SESSION_URL')}`);
+      return { warning: null };
+    }
+    if (production && (!sessionFacts.owner || !sessionFacts.strongPassword)) {
       throw new RuntimeDbConfigError(
-        `The ${processName} process: PG_DATABASE_URL has a documented transaction-pooler shape. In production PG_DATABASE_URL must name the database's DIRECT host and port (session advisory locks and per-session settings do not survive a transaction pooler). Host not shown. Refusing to start before connecting.`,
+        `The ${processName} process: PG_DATABASE_SESSION_URL must log in as ${OWNER_LOGIN} with a strong password, exactly like PG_DATABASE_URL (the same login and database; only the host and port differ). Value not shown. Refusing to start before connecting.`,
       );
     }
-    return { warning: `The ${processName} process: PG_DATABASE_URL has a transaction-pooler shape. Allowed outside production only; production refuses it before connecting.` };
   }
   // Re-review (info): the M2 floor at the runtime too, so a weak mode-c password is refused even when a platform starts the
   // API before db-setup (OpenShip ignores depends_on conditions). Production only: test and development databases use short ones.

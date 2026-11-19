@@ -24,10 +24,20 @@
  *   Every number is validated strictly (digits only, bounded); a bad value refuses to start instead of falling back
  *   (the old `Number(DB_POOL_MAX) > 0 ? … : 10` silently ignored typos).
  *
- * Pooler policy (P4): a documented transaction-pooler URL shape is refused for the processes that take session
- * advisory locks (worker, provisioner, migrate) and for any connection requested with session affinity; the API and the
- * CLI get a warning. PG_DATABASE_URL_IS_DIRECT=true on a pooler-shaped URL is a contradiction and is refused. The flag
- * never skips the Worker's live session probe (pg-session-probe.ts).
+ * Pooler policy (owner instruction 2026-11-19, "decide by capability": no provider-specific code, no host matching):
+ *   - PG_DATABASE_SESSION_URL set: PG_DATABASE_URL may be ANY transaction-mode pooler (PgBouncer pool_mode=transaction,
+ *     Supavisor, RDS Proxy, ...). PG_DATABASE_SESSION_URL is the direct (session) connection of the SAME login and database
+ *     (refused otherwise). Only the API / Worker RUNTIME pool (endpoint 'runtime') uses PG_DATABASE_URL, through the
+ *     transaction-scoped client (transaction-scoped-client.ts: per-transaction RESET ROLE + role assertion + settings);
+ *     every other connection (the session-lock endpoint, boot gates, identity probes, migrations, the CLI, the
+ *     provisioner) uses PG_DATABASE_SESSION_URL. WORKER_DISPATCH_MODE=event is refused in this mode (its NOTIFY switch is a
+ *     startup setting); poll, the default, is unaffected.
+ *   - PG_DATABASE_SESSION_URL unset: PG_DATABASE_URL must itself be a direct connection. That is decided by CAPABILITY, not
+ *     by its host name: the live session-affinity probe (pg-session-probe.ts) runs on it before the API, the Worker or a
+ *     migration relies on a session, and refuses to start when it behaves like a pooler. (A PgBouncer in its default
+ *     configuration also refuses the startup `-c` settings, so it is refused at connect time as well.)
+ *   - PG_DATABASE_URL_IS_DIRECT=true together with PG_DATABASE_SESSION_URL is a contradiction and is refused. The flag never
+ *     skips the session probe.
  */
 import { buildPgSsl, PgSsl, PgTlsSettings, resolvePgCaCertificate } from './pg-tls';
 import { parsePgUrl, PgConfigError, PgTarget, sameTarget } from './pg-url-policy';
@@ -36,8 +46,15 @@ export { PgConfigError } from './pg-url-policy';
 
 export type PgProcessRole = 'api' | 'worker' | 'provisioner' | 'cli' | 'migrate';
 
-/** Which configured connection a caller wants. */
-export type PgEndpointName = 'primary' | 'lock' | 'elevated';
+/**
+ * Which configured connection a caller wants:
+ *   'runtime'  the API / Worker request pool: PG_DATABASE_URL, which MAY be a transaction pooler when PG_DATABASE_SESSION_URL
+ *              is set (then served by the transaction-scoped client). Only core.datasource.ts's runtime pool asks for it.
+ *   'primary'  a direct session of the process's login: PG_DATABASE_SESSION_URL when set, else PG_DATABASE_URL.
+ *   'lock'     session advisory locks: the same direct connection (or a legacy DATABASE_DIRECT_URL outside production).
+ *   'elevated' the legacy DATABASE_URL_UNPOOLED (non-production only).
+ */
+export type PgEndpointName = 'runtime' | 'primary' | 'lock' | 'elevated';
 
 /** Server-side statement timeout every runtime session gets (unchanged from the previous `extra.statement_timeout`). */
 export const PG_RUNTIME_STATEMENT_TIMEOUT_MS = 30_000;
@@ -104,6 +121,7 @@ export const PG_ENV_NAMES = [
   'PG_SSL_CA_CERT_PATH',
   'PG_SSL_CA_CERT',
   'PG_DATABASE_URL_IS_DIRECT',
+  'PG_DATABASE_SESSION_URL',
   'PG_DATABASE_REPLICA_URL',
   'PG_DATABASE_REPLICA_TIMEOUT_MS',
   'PG_DATABASE_REPLICA_MAX_LAG_MS',
@@ -142,8 +160,8 @@ export function assertNoRetiredOpsEnv(env: Env, processRole: PgProcessRole): voi
   }
 }
 
-/** Processes that hold session advisory locks: a transaction pooler is refused for them. */
-const SESSION_LOCK_PROCESSES: ReadonlySet<PgProcessRole> = new Set(['worker', 'provisioner', 'migrate']);
+/** The only processes whose runtime pool may go through a transaction pooler (with PG_DATABASE_SESSION_URL set). */
+const POOLED_RUNTIME_PROCESSES: ReadonlySet<PgProcessRole> = new Set(['api', 'worker']);
 
 export interface PgEndpoint {
   /** Variable the URL came from. */
@@ -152,15 +170,31 @@ export interface PgEndpoint {
   ssl: PgSsl;
   /** True when it came from a legacy variable name. */
   deprecated: boolean;
+  /**
+   * True only for the API / Worker runtime endpoint behind a transaction pooler (PG_DATABASE_URL with PG_DATABASE_SESSION_URL
+   * set). The factory then serves it with the transaction-scoped client, sends no startup `-c` settings, and refuses it for
+   * any session-affine use.
+   */
+  transactionScoped?: boolean;
 }
 
 export interface ResolvedPgEnvironment {
   production: boolean;
   processRole: PgProcessRole;
-  /** The process's own connection (PG_DATABASE_URL, or legacy DATABASE_URL). */
+  /**
+   * The process's own connection (PG_DATABASE_URL, or legacy DATABASE_URL). For the migrate / CLI / provisioner processes
+   * with PG_DATABASE_SESSION_URL set, this IS the direct endpoint (they never use the pooler).
+   */
   primary: PgEndpoint;
-  /** Session advisory locks (Worker direct pool, scan lock, storage lock). The primary unless a legacy DIRECT URL is set. */
+  /** Session advisory locks (Worker direct pool, scan lock, storage lock): the direct endpoint. */
   lock: PgEndpoint;
+  /** PG_DATABASE_SESSION_URL (same login and database as PG_DATABASE_URL), or null when unset. */
+  direct: PgEndpoint | null;
+  /**
+   * The transaction-pooler runtime endpoint (PG_DATABASE_URL, transactionScoped) of the API / Worker when
+   * PG_DATABASE_SESSION_URL is set; null otherwise (the 'runtime' endpoint is then the primary).
+   */
+  pooled: PgEndpoint | null;
   /** The legacy DATABASE_URL_UNPOOLED (non-production only), or null. */
   elevated: PgEndpoint | null;
   /**
@@ -191,6 +225,15 @@ export interface ResolvedPgEnvironment {
   dispatchNotify: boolean;
   /** Deprecation and pooler warnings. Names only, never values. */
   warnings: string[];
+}
+
+/**
+ * True when an endpoint came from this process's own owner-login URL: PG_DATABASE_URL, or PG_DATABASE_SESSION_URL (the
+ * direct session connection of the same login and database, which the CLI and migrations use instead of a pooled
+ * PG_DATABASE_URL). Never a legacy name.
+ */
+export function isOwnPgDatabaseUrlSource(source: string): boolean {
+  return source === 'PG_DATABASE_URL' || source === 'PG_DATABASE_SESSION_URL';
 }
 
 /** WORKER_DISPATCH_MODE as the connection factory reads it (same values as environment-variables.ts; fail closed). */
@@ -262,6 +305,12 @@ export function readPrimaryDatabaseUrl(env: Env = process.env): { name: 'PG_DATA
   const legacy = present(env, 'DATABASE_URL');
   if (legacy && !isPgProductionEnvironment(env)) return { name: 'DATABASE_URL', value: legacy };
   return null;
+}
+
+/** PG_DATABASE_SESSION_URL (trimmed), or null when unset. Validation is resolvePgEnvironment's. */
+export function readSessionDatabaseUrl(env: Env = process.env): { name: 'PG_DATABASE_SESSION_URL'; value: string } | null {
+  const value = present(env, 'PG_DATABASE_SESSION_URL');
+  return value ? { name: 'PG_DATABASE_SESSION_URL', value } : null;
 }
 
 /** The optional read-replica URL (trimmed), or null when unset. Validation is resolvePgEnvironment's. */
@@ -340,6 +389,10 @@ export function resolvePgEnvironment(env: Env = process.env, options: ResolvePgO
   }
 
   let lock = primary;
+  const directUrl = present(env, 'PG_DATABASE_SESSION_URL');
+  if (directUrl && legacy.DATABASE_DIRECT_URL) {
+    throw new PgConfigError('PG_DATABASE_SESSION_URL and the legacy DATABASE_DIRECT_URL are both set. Remove DATABASE_DIRECT_URL. Refusing to start.');
+  }
   if (legacy.DATABASE_DIRECT_URL) {
     const direct = endpoint(legacy.DATABASE_DIRECT_URL, 'DATABASE_DIRECT_URL', true);
     if (pgUrl) {
@@ -390,28 +443,41 @@ export function resolvePgEnvironment(env: Env = process.env, options: ResolvePgO
     }
   }
   const declaredDirect = boolSetting(env, 'PG_DATABASE_URL_IS_DIRECT');
+  const dispatchNotify = dispatchNotifyFor(env, processRole);
 
-  for (const ep of lock === primary ? [primary] : [primary, lock]) {
-    const pooler = ep.target.transactionPooler;
-    if (pooler) {
-      if (declaredDirect) {
-        throw new PgConfigError(
-          `PG_DATABASE_URL_IS_DIRECT=true, but ${ep.source} has a documented transaction-pooler shape (${pooler.reason}). Refusing to start.`,
-        );
-      }
-      // Any OTHER process asking for a session-affine connection (the CLI's storage lock) is refused when it asks for it
-      // (create-pg-pool.ts, sessionAffinity).
-      if (enforceProcessPolicy && SESSION_LOCK_PROCESSES.has(processRole)) {
-        throw new PgConfigError(
-          `${ep.source} has a documented transaction-pooler shape (${pooler.reason}). The ${processRole} process holds session advisory locks, which a transaction pooler cannot keep. Use a direct connection. Refusing to start.`,
-        );
-      }
-      warnings.push(
-        `${ep.source} has a transaction-pooler shape (${pooler.reason}). Session state is not kept across transactions, and PgBouncer-style poolers may reject the per-session startup options (statement_timeout, idle_in_transaction_session_timeout).`,
+  // Transaction pooler support (see the header): decided by the explicit PG_DATABASE_SESSION_URL, never by a host name.
+  let direct: PgEndpoint | null = null;
+  let pooled: PgEndpoint | null = null;
+  if (directUrl) {
+    if (declaredDirect) {
+      throw new PgConfigError(
+        'PG_DATABASE_URL_IS_DIRECT=true contradicts PG_DATABASE_SESSION_URL (which says PG_DATABASE_URL is a pooler). Remove one of them. Refusing to start.',
       );
-    } else if (ep.target.poolerSuspicion) {
-      warnings.push(`${ep.source} may point at a connection pooler (${ep.target.poolerSuspicion}); the Worker's session probe decides.`);
     }
+    direct = endpoint(directUrl, 'PG_DATABASE_SESSION_URL', false);
+    if (direct.target.user !== primary.target.user || direct.target.database !== primary.target.database) {
+      throw new PgConfigError(
+        'PG_DATABASE_SESSION_URL must name the same login and database as PG_DATABASE_URL (only the host and port may differ: the direct connection of the same database). Values not shown. Refusing to start.',
+      );
+    }
+    if (sameTarget(primary.target, direct.target)) {
+      throw new PgConfigError(
+        'PG_DATABASE_SESSION_URL names the same host, port, login and database as PG_DATABASE_URL. Unset it: PG_DATABASE_URL is then the direct connection. Refusing to start.',
+      );
+    }
+    if (POOLED_RUNTIME_PROCESSES.has(processRole)) {
+      if (dispatchNotify) {
+        throw new PgConfigError(
+          'WORKER_DISPATCH_MODE=event is refused with PG_DATABASE_SESSION_URL (a transaction-pooled runtime): its NOTIFY switch is a per-session startup setting, which a transaction pooler does not keep. Use WORKER_DISPATCH_MODE=poll (the default). Refusing to start.',
+        );
+      }
+      pooled = { ...primary, transactionScoped: true };
+      primary = pooled;
+    } else {
+      // Migrations, the CLI and the provisioner never use the pooler: their primary IS the direct connection.
+      primary = direct;
+    }
+    lock = direct;
   }
 
   return {
@@ -419,6 +485,8 @@ export function resolvePgEnvironment(env: Env = process.env, options: ResolvePgO
     processRole,
     primary,
     lock,
+    direct,
+    pooled,
     elevated,
     replica,
     replicaQueryTimeoutMs,
@@ -432,7 +500,7 @@ export function resolvePgEnvironment(env: Env = process.env, options: ResolvePgO
     tls,
     declaredDirect,
     allowSessionRole,
-    dispatchNotify: dispatchNotifyFor(env, processRole),
+    dispatchNotify,
     warnings,
   };
 }

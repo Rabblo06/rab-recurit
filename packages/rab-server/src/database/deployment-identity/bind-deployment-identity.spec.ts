@@ -52,9 +52,9 @@ describe('db:bind-identity arguments', () => {
     refused(() => parseConfirmHosts([]), /--confirm-host is required/);
   });
 
-  it('--confirm-host refuses documented transaction-pooler host names (they cannot hold session state)', () => {
-    refused(() => args(['--confirm-host', 'ep-round-rain-aess0njf-pooler.c-2.eu-central-1.aws.neon.tech']), /transaction-pooler shape \(Neon pooled host/);
-    refused(() => args(['--confirm-host', 'app.proxy-abc123.eu-west-1.rds.amazonaws.com']), /transaction-pooler shape \(AWS RDS Proxy/);
+  it('--confirm-host accepts a transaction pooler host name (PG_DATABASE_URL with PG_DATABASE_SESSION_URL set; no host-name classification)', () => {
+    expect(() => args(['--confirm-host', 'ep-round-rain-aess0njf-pooler.c-2.eu-central-1.aws.neon.tech'])).not.toThrow();
+    expect(() => args(['--confirm-host', 'app.proxy-abc123.eu-west-1.rds.amazonaws.com'])).not.toThrow();
     // The direct Neon host of the same endpoint is fine.
     expect(args(['--confirm-host', 'ep-round-rain-aess0njf.c-2.eu-central-1.aws.neon.tech']).confirmHosts).toHaveLength(2);
   });

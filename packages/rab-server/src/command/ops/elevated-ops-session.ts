@@ -40,7 +40,7 @@ import { DataSource, EntityManager } from 'typeorm';
 import { isProductionProcess } from '../../database/boot-checks/database-boot-gate-rules';
 import { OWNER_LOGIN_ROLE } from '../../database/boot-checks/owner-login-posture';
 import { assertDeploymentIdentity, Query } from '../../database/deployment-identity/deployment-identity';
-import { createPgDataSource, ResolvedPgEnvironment } from '../../database/postgres';
+import { createPgDataSource, isOwnPgDatabaseUrlSource, ResolvedPgEnvironment } from '../../database/postgres';
 import type { OpsRunPath } from './ops-run';
 import { OPS_STATEMENTS, OpsElevatedPlan, OpsStatementName } from './ops-statements';
 
@@ -220,7 +220,7 @@ export async function verifyOpsAppSession(
     if (login !== OWNER_LOGIN_ROLE || String(row.acting) !== OWNER_LOGIN_ROLE) {
       refuse(`the ops commands run only under the owner login ${OWNER_LOGIN_ROLE} (session_user "${login}", current_user "${String(row.acting)}").`);
     }
-    if (resolved.primary.source !== 'PG_DATABASE_URL' || login !== resolved.primary.target.user) refuse('session_user is not the login named by PG_DATABASE_URL.');
+    if (!isOwnPgDatabaseUrlSource(resolved.primary.source) || login !== resolved.primary.target.user) refuse('session_user is not the login named by PG_DATABASE_URL.');
     if (row.exempt === true) refuse(`${OWNER_LOGIN_ROLE} is SUPERUSER or BYPASSRLS.`);
     if (Number(row.server_version_num) < MIN_OPS_SERVER_VERSION_NUM) refuse('PostgreSQL 16 or later is required.');
     const database = String(row.database);
@@ -273,7 +273,7 @@ export class ElevatedOpsSession {
     if (app.path !== 'owner-login') throw new ElevatedOpsSessionError('the narrowed session exists only on the owner-login path.');
     if (resolved.processRole !== 'cli') throw new ElevatedOpsSessionError('the owner-login elevated session exists only in a one-off CLI process.');
     if (resolved.elevated !== null) throw new ElevatedOpsSessionError('the owner-login path uses the one login only; a second database endpoint is refused.');
-    if (resolved.primary.source !== 'PG_DATABASE_URL' || resolved.primary.target.user !== OWNER_LOGIN_ROLE || app.login !== OWNER_LOGIN_ROLE) {
+    if (!isOwnPgDatabaseUrlSource(resolved.primary.source) || resolved.primary.target.user !== OWNER_LOGIN_ROLE || app.login !== OWNER_LOGIN_ROLE) {
       throw new ElevatedOpsSessionError(`the owner-login elevated session needs PG_DATABASE_URL naming ${OWNER_LOGIN_ROLE}.`);
     }
     const dataSource = createPgDataSource(

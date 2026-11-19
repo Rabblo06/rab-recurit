@@ -7,7 +7,7 @@ import { PgConfigError } from '../pg-url-policy';
 // Phase B (B1): coreDataSourceOptions / coreMigrationDataSourceOptions take their connection from the factory, lazily,
 // and a refused configuration is deferred to the first connection attempt (fail closed), never thrown at import.
 const SECRET = 'Pw-s3cret-9f';
-const KEYS = ['PG_DATABASE_URL', 'DATABASE_URL', 'DATABASE_URL_UNPOOLED', 'DATABASE_DIRECT_URL', 'DB_POOL_MAX', 'PG_POOL_MAX_CONNECTIONS', 'DB_TARGET'] as const;
+const KEYS = ['PG_DATABASE_URL', 'PG_DATABASE_SESSION_URL', 'DATABASE_URL', 'DATABASE_URL_UNPOOLED', 'DATABASE_DIRECT_URL', 'DB_POOL_MAX', 'PG_POOL_MAX_CONNECTIONS', 'DB_TARGET'] as const;
 
 describe('core.datasource connection fields (factory)', () => {
   const saved: Record<string, string | undefined> = {};
@@ -76,8 +76,11 @@ describe('core.datasource connection fields (factory)', () => {
     await expect(coreMigrationDataSource.initialize()).rejects.toBeInstanceOf(PgConfigError);
   });
 
-  it('a transaction-pooler URL is refused for the migration connection', async () => {
-    process.env.PG_DATABASE_URL = `postgres://crewflow_migrator:${SECRET}@ep-a-1-pooler.eu-west-2.aws.neon.tech/neondb`;
-    await expect(coreMigrationDataSource.initialize()).rejects.toThrow(/The migrate process holds session advisory locks/);
+  it('with PG_DATABASE_SESSION_URL the migration connection is the session URL, never the pooler (no host matching)', () => {
+    process.env.PG_DATABASE_URL = `postgres://crewflow_owner:${SECRET}@pgbouncer.internal:6432/rab`;
+    process.env.PG_DATABASE_SESSION_URL = `postgres://crewflow_owner:${SECRET}@db.internal:5432/rab`;
+    const m = { ...coreMigrationDataSourceOptions } as PostgresConnectionOptions;
+    expect({ host: m.host, port: m.port }).toEqual({ host: 'db.internal', port: 5432 });
+    expect((m.extra as Record<string, unknown>).Client).toBeUndefined();
   });
 });

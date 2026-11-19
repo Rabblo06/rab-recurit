@@ -16,6 +16,14 @@
  *   - pool: an explicit `max` always (PG_POOL_MAX_CONNECTIONS unless the caller sets its own), idle timeout and
  *     allowExitOnIdle from PG_POOL_IDLE_TIMEOUT_MS / PG_POOL_ALLOW_EXIT_ON_IDLE.
  *
+ * Transaction pooler (pg-config.ts, PG_DATABASE_SESSION_URL): the 'runtime' endpoint of the API / Worker may then be a
+ * transaction pooler. It is served ONLY by TransactionScopedClient (transaction-scoped-client.ts): no startup `-c` settings
+ * (a pooler drops or refuses them); the same values are set per transaction by its preamble, which also runs RESET ROLE and
+ * asserts current_user = session_user at the start of EVERY transaction (and wraps every statement sent outside one). Such
+ * an endpoint is refused for any session-affine use, and pgClientConfig / pgConnectionString refuse it (a caller building
+ * its own plain Client would lose the preamble): createPgClient, createPgPool and TypeORM (extra.Client) are the only ways
+ * to it.
+ *
  * Roles: 'primary' is every connection today. 'replica' is accepted so a read-replica pool can be added later (wave 2)
  * without a second factory; it only changes the application_name and makes the session read-only.
  */
@@ -37,6 +45,7 @@ import {
 import { buildPgSsl } from './pg-tls';
 import { parsePgUrl, PgConfigError } from './pg-url-policy';
 import { installSessionRoleResetOnAcquire, installSessionRoleResetOnDataSource } from './session-role-reset';
+import { TRANSACTION_SCOPE_CONFIG_KEY, TransactionScopedClient, TransactionScopeSettings } from './transaction-scoped-client';
 
 export type PgServerRole = 'primary' | 'replica';
 
@@ -58,8 +67,18 @@ export interface PgConnectionRequest {
   idleInTransactionTimeoutMs?: number;
   /** Connect timeout, also pg-pool's wait for a free connection (default PG_CONNECT_TIMEOUT_MS, 10 s); e.g. ~2 s for a replica. */
   connectTimeoutMs?: number;
-  /** Refuse a transaction-pooler URL shape (session advisory locks). Default: true for the 'lock' endpoint. */
+  /**
+   * The caller needs one real database session (session advisory locks, SET ROLE across statements, LISTEN). Refused on
+   * the transaction-pooled 'runtime' endpoint. Default: true for the 'lock' endpoint. A pooler cannot be told from its URL;
+   * callers that hold a session lock also run the live session probe (pg-session-probe.ts).
+   */
   sessionAffinity?: boolean;
+  /**
+   * false: send no startup `-c` settings (statement_timeout, idle_in_transaction_session_timeout, read-only, NOTIFY switch).
+   * Only for the session-affinity probe, so that it can CONNECT through a pooler that refuses startup settings and report
+   * the pooler clearly; it runs fixed SQL only and relies on the client-side query timeout. Default true.
+   */
+  sessionSettings?: boolean;
   /**
    * A read-only session (`-c default_transaction_read_only=on`): the identity guards' probes. Implied by role 'replica'.
    * It does not change the application_name.
@@ -73,7 +92,7 @@ export interface PgPoolRequest extends PgConnectionRequest {
 }
 
 /** The pg-level settings, also what TypeORM's `extra` carries (TypeORM spreads `extra` over its own pool options). */
-export type PgDriverConfig = ClientConfig & { enableChannelBinding?: boolean };
+export type PgDriverConfig = ClientConfig & { enableChannelBinding?: boolean; [TRANSACTION_SCOPE_CONFIG_KEY]?: TransactionScopeSettings };
 
 function selectEndpoint(resolved: ResolvedPgEnvironment, request: PgConnectionRequest): PgEndpoint {
   if (request.url !== undefined) {
@@ -82,6 +101,7 @@ function selectEndpoint(resolved: ResolvedPgEnvironment, request: PgConnectionRe
     return { source: label, target, ssl: buildPgSsl(target.sslmode, resolved.tls, label, target.host), deprecated: false };
   }
   const name = request.endpoint ?? 'primary';
+  if (name === 'runtime') return resolved.pooled ?? resolved.primary;
   if (name === 'elevated') {
     if (!resolved.elevated) {
       throw new PgConfigError(
@@ -92,7 +112,8 @@ function selectEndpoint(resolved: ResolvedPgEnvironment, request: PgConnectionRe
     }
     return resolved.elevated;
   }
-  return name === 'lock' ? resolved.lock : resolved.primary;
+  // 'primary' is always a direct session: PG_DATABASE_SESSION_URL when set (pg-config.ts), never the transaction pooler.
+  return name === 'lock' ? resolved.lock : (resolved.direct ?? resolved.primary);
 }
 
 function assertTimeout(name: string, value: number): number {
@@ -116,6 +137,9 @@ export function pgStartupOptions(endpoint: PgEndpoint, request: PgConnectionRequ
   const parts: string[] = [];
   if (endpoint.target.providerOptions) parts.push(endpoint.target.providerOptions);
   if (endpoint.target.sessionRoleOption) parts.push(endpoint.target.sessionRoleOption);
+  // A transaction pooler drops or refuses session startup settings: the transaction-scoped client's preamble sets the same
+  // values per transaction (transactionScopeSettings below). The probe asks for none (sessionSettings: false).
+  if (endpoint.transactionScoped || request.sessionSettings === false) return parts.join(' ');
   parts.push(`-c statement_timeout=${statement}`, `-c idle_in_transaction_session_timeout=${idle}`);
   const readOnly = request.role === 'replica' || request.readOnly === true;
   if (readOnly) parts.push('-c default_transaction_read_only=on');
@@ -124,13 +148,21 @@ export function pgStartupOptions(endpoint: PgEndpoint, request: PgConnectionRequ
   return parts.join(' ');
 }
 
+/** The per-transaction settings of a transaction-scoped endpoint: the values pgStartupOptions would have sent. */
+export function transactionScopeSettings(request: PgConnectionRequest): TransactionScopeSettings {
+  return {
+    statementTimeoutMs: assertTimeout('statementTimeoutMs', request.statementTimeoutMs ?? PG_RUNTIME_STATEMENT_TIMEOUT_MS),
+    idleInTransactionTimeoutMs: assertTimeout('idleInTransactionTimeoutMs', request.idleInTransactionTimeoutMs ?? PG_IDLE_IN_TRANSACTION_TIMEOUT_MS),
+    readOnly: request.role === 'replica' || request.readOnly === true,
+  };
+}
+
 function prepare(resolved: ResolvedPgEnvironment, request: PgConnectionRequest) {
   const endpoint = selectEndpoint(resolved, request);
   const sessionAffinity = request.sessionAffinity ?? (request.url === undefined && request.endpoint === 'lock');
-  const pooler = endpoint.target.transactionPooler;
-  if (sessionAffinity && pooler) {
+  if (sessionAffinity && endpoint.transactionScoped) {
     throw new PgConfigError(
-      `${endpoint.source} has a documented transaction-pooler shape (${pooler.reason}); a session advisory lock needs a direct (non-pooled) connection. Refusing.`,
+      `${endpoint.source} is the transaction-pooled runtime connection; a session advisory lock (or any session state) needs the direct connection (PG_DATABASE_SESSION_URL). Refusing.`,
     );
   }
   const queryTimeout = assertTimeout('queryTimeoutMs', request.queryTimeoutMs ?? resolved.queryTimeoutMs);
@@ -142,15 +174,17 @@ function prepare(resolved: ResolvedPgEnvironment, request: PgConnectionRequest) 
     connectTimeout,
     options: pgStartupOptions(endpoint, request, resolved.dispatchNotify === true),
     applicationName: applicationNameFor(resolved, endpoint, request),
+    transactionScope: endpoint.transactionScoped ? transactionScopeSettings(request) : null,
   };
 }
 
 /** Connection-level settings shared by Client, Pool and TypeORM (no target). */
 function driverSettings(prepared: ReturnType<typeof prepare>): PgDriverConfig {
-  const { endpoint, queryTimeout, connectTimeout, options, applicationName } = prepared;
+  const { endpoint, queryTimeout, connectTimeout, options, applicationName, transactionScope } = prepared;
   return {
     ssl: endpoint.ssl,
-    options,
+    ...(options !== '' ? { options } : {}),
+    ...(transactionScope ? { [TRANSACTION_SCOPE_CONFIG_KEY]: transactionScope } : {}),
     application_name: applicationName,
     ...(queryTimeout > 0 ? { query_timeout: queryTimeout } : {}),
     connectionTimeoutMillis: connectTimeout,
@@ -160,9 +194,7 @@ function driverSettings(prepared: ReturnType<typeof prepare>): PgDriverConfig {
   };
 }
 
-/** A complete pg ClientConfig: explicit target + explicit ssl, no connectionString. */
-export function pgClientConfig(resolved: ResolvedPgEnvironment, request: PgConnectionRequest): PgDriverConfig {
-  const prepared = prepare(resolved, request);
+function clientConfigOf(prepared: ReturnType<typeof prepare>): PgDriverConfig {
   const { target } = prepared.endpoint;
   return {
     host: target.host,
@@ -174,6 +206,19 @@ export function pgClientConfig(resolved: ResolvedPgEnvironment, request: PgConne
   };
 }
 
+const TRANSACTION_SCOPED_REFUSAL =
+  'is the transaction-pooled runtime connection: it is reachable only through createPgClient, createPgPool or a TypeORM DataSource from this factory (the transaction-scoped client). Refusing.';
+
+/**
+ * A complete pg ClientConfig: explicit target + explicit ssl, no connectionString. Refused for the transaction-pooled
+ * runtime endpoint: a caller that builds its own `new Client(config)` would bypass the per-transaction preamble.
+ */
+export function pgClientConfig(resolved: ResolvedPgEnvironment, request: PgConnectionRequest): PgDriverConfig {
+  const prepared = prepare(resolved, request);
+  if (prepared.transactionScope) throw new PgConfigError(`${prepared.endpoint.source} ${TRANSACTION_SCOPED_REFUSAL}`);
+  return clientConfigOf(prepared);
+}
+
 function poolSettings(resolved: ResolvedPgEnvironment, request: PgPoolRequest): Pick<PoolConfig, 'max' | 'idleTimeoutMillis' | 'allowExitOnIdle'> {
   const max = request.max ?? resolved.pool.max;
   if (!Number.isInteger(max) || max < 1 || max > PG_POOL_MAX_LIMIT) throw new PgConfigError(`pool max must be between 1 and ${PG_POOL_MAX_LIMIT}.`);
@@ -181,7 +226,12 @@ function poolSettings(resolved: ResolvedPgEnvironment, request: PgPoolRequest): 
 }
 
 export function pgPoolConfig(resolved: ResolvedPgEnvironment, request: PgPoolRequest): PoolConfig & PgDriverConfig {
-  return { ...pgClientConfig(resolved, request), ...poolSettings(resolved, request) };
+  const prepared = prepare(resolved, request);
+  return {
+    ...clientConfigOf(prepared),
+    ...poolSettings(resolved, request),
+    ...(prepared.transactionScope ? { Client: TransactionScopedClient as unknown as PoolConfig['Client'] } : {}),
+  };
 }
 
 /**
@@ -203,7 +253,12 @@ export function pgTypeOrmConnectionOptions(
     database: target.database,
     // Only rejectUnauthorized / ca are ever set (pg-tls.ts), which TypeORM's TlsOptions type also accepts.
     ssl: prepared.endpoint.ssl as PostgresConnectionOptions['ssl'],
-    extra: { ...driverSettings(prepared), ...poolSettings(resolved, request) },
+    extra: {
+      ...driverSettings(prepared),
+      ...poolSettings(resolved, request),
+      // TypeORM passes `extra` to pg-pool, which builds every connection with `new Client(config)`.
+      ...(prepared.transactionScope ? { Client: TransactionScopedClient } : {}),
+    },
   };
 }
 
@@ -217,6 +272,7 @@ export function pgTypeOrmConnectionOptions(
  */
 export function pgConnectionString(resolved: ResolvedPgEnvironment, request: PgConnectionRequest): string {
   const prepared = prepare(resolved, request);
+  if (prepared.transactionScope) throw new PgConfigError(`${prepared.endpoint.source} ${TRANSACTION_SCOPED_REFUSAL}`);
   const { target, ssl } = prepared.endpoint;
   const host = target.host.includes(':') ? `[${target.host}]` : target.host;
   const url = new URL(`postgresql://${host}:${target.port}`);
@@ -243,12 +299,14 @@ export function pgConnectionString(resolved: ResolvedPgEnvironment, request: PgC
     }
   }
   url.searchParams.set('application_name', prepared.applicationName);
-  url.searchParams.set('options', prepared.options);
+  if (prepared.options !== '') url.searchParams.set('options', prepared.options);
   return url.toString();
 }
 
 export function createPgClient(resolved: ResolvedPgEnvironment, request: PgConnectionRequest): Client {
-  return new Client(pgClientConfig(resolved, request));
+  const prepared = prepare(resolved, request);
+  const config = clientConfigOf(prepared);
+  return prepared.transactionScope ? new TransactionScopedClient(config) : new Client(config);
 }
 
 /** Settings an operator script's single-URL client takes from its environment (TLS and the production classification). */
@@ -282,7 +340,8 @@ export function createPgClientForUrl(
 /** `createPgPool({ url?, role, purpose, max })` — a plain pg Pool with every setting explicit. */
 export function createPgPool(resolved: ResolvedPgEnvironment, request: PgPoolRequest): Pool {
   const pool = new Pool(pgPoolConfig(resolved, request));
-  // Owner login: a session-level SET ROLE must never reach the next checkout (session-role-reset.ts).
+  // Owner login: a session-level SET ROLE must never reach the next checkout (session-role-reset.ts). A transaction-scoped
+  // pool is skipped there: its client resets the role inside every transaction instead.
   installSessionRoleResetOnAcquire(pool);
   return pool;
 }

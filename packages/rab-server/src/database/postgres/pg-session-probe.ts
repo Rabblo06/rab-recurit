@@ -1,12 +1,16 @@
 /**
- * Phase B (P4): live check that a connection is SESSION-stable, run by the Worker at boot before it takes any session
- * advisory lock. PG_DATABASE_URL_IS_DIRECT=true does not skip it.
+ * Phase B (P4): live check that a connection is SESSION-stable, run at boot by the API (its session connection), the Worker
+ * (its session-lock connection), the migration runner and the provisioner before any of them relies on a session.
+ * PG_DATABASE_URL_IS_DIRECT=true does not skip it. Since the owner instruction of 2026-11-19 ("decide by capability") it is
+ * THE pooler check: no host name is matched anywhere; a pooler is supported only as PG_DATABASE_URL with
+ * PG_DATABASE_SESSION_URL set (pg-config.ts).
  *
  * Why: a session advisory lock belongs to one server backend. Behind a transaction-mode pooler (PgBouncer, Supavisor
  * :6543, Neon -pooler, a DigitalOcean pool, RDS Proxy) one client connection is served by different backends from one
  * transaction to the next, so a lock can be taken on one backend, "released" on another (a no-op plus a warning) and
- * leaked, or re-entered by a second client that happens to land on the holder's backend. The URL denylist
- * (pg-url-policy.ts) catches documented shapes; this probe catches the rest by behaviour.
+ * leaked, or re-entered by a second client that happens to land on the holder's backend. This probe decides by behaviour.
+ * Callers build its connections with `sessionSettings: false` (no startup `-c` settings), so it can connect through a pooler
+ * that refuses them and report the pooler clearly.
  *
  * Steps, on two dedicated connections A and B (never pool connections):
  *   1. A reports pg_backend_pid() in two separate transactions: it must be the same backend both times;
@@ -79,7 +83,7 @@ export async function probePgSessionAffinity(config: ClientConfig, options: PgSe
   const key = (BigInt(high) << 32n) | BigInt(low);
   const refuse = (why: string): never => {
     throw new PgSessionProbeError(
-      `${label} is not session-stable (${why}). Session advisory locks need a direct connection, not a transaction pooler. Refusing to start.`,
+      `${label} is not session-stable (${why}). Session advisory locks need a direct connection, not a transaction pooler. If PG_DATABASE_URL is a transaction pooler, set PG_DATABASE_SESSION_URL to the direct (session) connection of the same login and database. Refusing to start.`,
     );
   };
   const holders = async (client: PgProbeClient): Promise<number[]> =>

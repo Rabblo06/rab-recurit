@@ -47,7 +47,6 @@ export class OwnerCredentialError extends Error {
 /** The fixed messages, exported so consumers and tests compare text exactly. */
 export const OWNER_CREDENTIAL_MESSAGES = {
   databaseUrlMissing: `${URL_LABEL} is empty: a database URL is required.`,
-  transactionPooler: `${URL_LABEL} names a transaction pooler. The database setup step needs a direct (session) connection: use the provider's direct host and port.`,
   emptyScramPassword: 'A SCRAM-SHA-256 verifier needs a non-empty password.',
   nonAsciiScramPassword:
     'A SCRAM-SHA-256 verifier is only computed for printable-ASCII passwords here (where SASLprep is the identity), so it always matches what the server derives.',
@@ -116,13 +115,13 @@ export function isOwnerLoginUrl(databaseUrl: string): boolean {
 
 /**
  * The runtime-login facts of a (policy-valid) PG_DATABASE_URL, for runtime-db-config.ts checkRuntimeLogin: is its login
- * crewflow_owner, and does it have a documented transaction-pooler shape. Refuses an invalid URL. Never returns a value.
+ * crewflow_owner, and is its password strong. Refuses an invalid URL. Never returns a value. (Whether it is a transaction pooler
+ * is not decided from the URL any more: owner instruction 2026-11-19, capability detection, pg-session-probe.ts.)
  */
-export function runtimeUrlFacts(databaseUrl: string): { owner: boolean; transactionPooler: boolean; strongPassword: boolean } {
+export function runtimeUrlFacts(databaseUrl: string): { owner: boolean; strongPassword: boolean } {
   const target = parseTarget(databaseUrl, URL_LABEL);
   return {
     owner: target.user === OWNER_LOGIN,
-    transactionPooler: target.transactionPooler !== null,
     strongPassword: typeof target.password === 'string' && isStrongOwnerPassword(target.password),
   };
 }
@@ -131,7 +130,9 @@ export function runtimeUrlFacts(databaseUrl: string): { owner: boolean; transact
  * One database URL, parsed and classified by its login (pure; never connects; throws OwnerCredentialError):
  *   - `bootstrap`  the login is NOT crewflow_owner (an admin login: the bundled db's superuser, or your database's admin);
  *   - `owner-url`  the login IS crewflow_owner; its password is kept (non-enumerable).
- * A transaction pooler is refused for both (the setup needs one real session). `label` names the variable in every refusal.
+ * The setup needs one real session; a transaction pooler is no longer recognised by its host name here (owner instruction
+ * 2026-11-19, capability detection): the setup step connects to PG_DATABASE_SESSION_URL when set. `label` names the variable
+ * in every refusal.
  */
 export type DbSetupPlan =
   | { mode: 'bootstrap'; readonly urlTarget: PgTarget }
@@ -159,7 +160,6 @@ export function planDbSetup(databaseUrl: string | undefined | null, label: strin
     if (error instanceof OwnerCredentialError) throw new OwnerCredentialError(relabel(error.message, label));
     throw error;
   }
-  if (parsed.transactionPooler !== null) throw new OwnerCredentialError(relabel(OWNER_CREDENTIAL_MESSAGES.transactionPooler, label));
   if (parsed.user !== OWNER_LOGIN) return { mode: 'bootstrap', urlTarget: parsed };
   if (!isValidOwnerPassword(parsed.password)) throw new OwnerCredentialError(relabel(OWNER_CREDENTIAL_MESSAGES.ownerUrlWithoutPassword, label));
   const plan = { mode: 'owner-url' as const, urlTarget: parsed } as Extract<DbSetupPlan, { mode: 'owner-url' }>;

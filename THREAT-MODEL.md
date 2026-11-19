@@ -9563,3 +9563,78 @@ Reversal:   a secret store mounted as a file per process (Docker secrets / Kuber
   every new refusal. Live (InstaBox, PG16/17/18 + PG15 refusal): the harness incl. M2, L1, L4, the expiry, db-harden happy /
   already / timeout / other-database / mode c, and the CREATEROLE lifecycle with the real migrate child. Docker suites (CI):
   run-prestart-shell-tests (L2, harden mode), the compose gates (db-harden).
+
+## Transaction pooler for rab-api / rab-worker, decided by capability (branch feat/twenty-pooler, owner instructions 2026-11-19 "Pooler like Twenty, only if it's safe" and "decide by capability, no provider-specific code"; no SQL, no migration)
+
+- **Change.** `PG_DATABASE_SESSION_URL` (new, optional) is the DIRECT session connection of the SAME `crewflow_owner` login and
+  database as `PG_DATABASE_URL`. When it is set, `PG_DATABASE_URL` may be ANY transaction-mode pooler (PgBouncer
+  `pool_mode=transaction`, Supavisor, RDS Proxy, ...): ONLY the API / Worker request pool (endpoint `runtime`,
+  core.datasource.ts) uses it, through `TransactionScopedClient` (database/postgres/transaction-scoped-client.ts). Everything
+  that needs a session uses `PG_DATABASE_SESSION_URL`: the Worker lock endpoint (session advisory locks, the scan lock, the
+  provisioning `SET ROLE crewflow` connection, LISTEN), the boot gates, the identity probes, `api-prestart`'s migrate child,
+  the upgrade runner and every CLI command (their `primary` IS the session URL). Named `PG_DATABASE_SESSION_URL`, not
+  `PG_DATABASE_DIRECT_URL`, so it can never be confused with the legacy `DATABASE_DIRECT_URL` that production refuses.
+- **No host matching any more.** The documented-shape pooler list (Neon `-pooler`, Supabase `:6543`, DigitalOcean `:25061`,
+  RDS Proxy) and the `:6432` suspicion are removed from pg-url-policy.ts, pg-config.ts, create-pg-pool.ts,
+  runtime-db-config.ts (checkRuntimeLogin), owner-credential.ts (planDbSetup / runtimeUrlFacts) and `db:bind-identity
+  --confirm-host`. Whether a connection is a real session is decided by the live two-connection probe (pg-session-probe.ts),
+  now run by the API too (its session connection, at boot), besides the Worker (lock endpoint), the migration runner and the
+  provisioner; the probe connects with NO startup `-c` settings so it can report a pooler clearly. Without
+  `PG_DATABASE_SESSION_URL`, a `PG_DATABASE_URL` that is a pooler is refused by that probe (and, for a default PgBouncer, at
+  connect time: it rejects the startup `options`).
+- **What the transaction-scoped client guarantees (audit items A1 and A2).** Every statement on the pooled runtime pool runs
+  inside a transaction whose FIRST statement is one fixed preamble (constants and integers only):
+  `RESET ROLE; SET LOCAL statement_timeout = <ms>; SET LOCAL idle_in_transaction_session_timeout = <ms>; [SET LOCAL
+  transaction_read_only = on;] SET LOCAL search_path TO DEFAULT; DO $crewflow_scope$ ... current_user <> session_user -> RAISE
+  42501; every rab.* setting present on the backend -> set_config(name, '', true) ... $crewflow_scope$`. A caller transaction
+  gets it right before its first real statement (after `SET TRANSACTION ...`); a statement outside a transaction is sent as
+  `BEGIN; preamble; statement; COMMIT` and its result is handed out after COMMIT. So the session startup settings become
+  per-transaction settings (A1: per transaction, not role defaults: no SQL, nothing leaks into migrations or ops sessions, any
+  pooler), and a backend poisoned by a session-level `SET ROLE rab_secure_owner`, `set_config('rab.*', ..., false)` or
+  `search_path` (the G-09 injection model, now shared by every client of the pooler) is neutralised for every later
+  transaction, fail closed (the assertion aborts the transaction; nothing runs). The pooled endpoint is refused for any
+  session-affine request; `pgClientConfig` / `pgConnectionString` refuse it (a hand-built plain Client would skip the preamble);
+  the checkout `RESET ROLE` is not installed on it (it would be its own statement, possibly on another backend); the Worker's
+  `withAdvisoryLock` refuses a transaction-scoped DataSource.
+- **Identity.** With `PG_DATABASE_SESSION_URL` set, the runtime guard probes BOTH connections (read-only; the pooled one through
+  the transaction-scoped client) and refuses unless they reach the same `current_database()`, cluster system identifier and
+  login; the deployment marker's host check runs on each, so BOTH hosts must be bound (`db:bind-identity --confirm-host` now
+  accepts a pooler host). pg-config.ts refuses a session URL with another login or database, one naming the same target as
+  `PG_DATABASE_URL`, one beside `PG_DATABASE_URL_IS_DIRECT=true` or the legacy `DATABASE_DIRECT_URL`; in production it must be
+  `crewflow_owner` with a strong password (checkRuntimeLogin) and verify-full TLS like every URL. api-prestart.sh and
+  worker-start.sh allow exactly this one extra URL name and apply the same shell owner-login refusal to it.
+- **Abuse-case tests.** `transaction-pooler.integration.spec.ts` (a real PgBouncer in transaction mode, 2 server connections
+  for 12 clients, as crewflow_owner): two organisations, 120 interleaved concurrent tenant transactions sharing backends see
+  only their own rows and GUC; bare statements interleaved with them see no tenant and zero tenant rows; after every backend is
+  poisoned (session `SET ROLE rab_secure_owner`, session `rab.organisation_id` of the OTHER organisation, session
+  `search_path`) a plain client still runs as `rab_secure_owner` (the control) while every runtime transaction runs as
+  `crewflow_owner`, isolated, with no inherited GUC; the probe refuses the PgBouncer URL. Fail-first: with `RESET ROLE`
+  removed from the preamble the poisoned-backend case fails. `transaction-scoped-client.spec.ts` pins the routing (statement
+  order, SET TRANSACTION first, savepoints, callbacks, refusals, a failed control statement closes the connection).
+
+```
+SECURITY TRADE-OFF (TX-POOL-1)
+Decision:   allow a transaction pooler in front of the API / Worker request pool (only with PG_DATABASE_SESSION_URL), and
+            replace every host-name pooler refusal by capability detection (the live session probe).
+Reason:     owner instructions 2026-11-19 ("Pooler like Twenty, only if it's safe"; "no provider-specific code, decide by
+            capability").
+Risk:       (1) a poisoned backend is now SHARED by every client of the pooler (API and Worker replicas), not one pool
+            connection: the preamble neutralises the role, the rab.* GUCs and search_path per transaction, but any OTHER
+            session-level setting an injected statement leaves behind (a session lock_timeout, work_mem, a temporary object)
+            reaches later transactions of other clients. (2) A multi-statement string whose later part is `ROLLBACK; <more
+            SQL>` reverts the preamble's RESET ROLE for that tail; no code sends one, only injected SQL could, which can
+            already act in its own transaction. (3) Without PG_DATABASE_SESSION_URL, a pooler that SILENTLY drops startup
+            options (PgBouncer `ignore_startup_parameters = options`) behind PG_DATABASE_URL is caught only by the boot probe
+            (strong evidence, not proof). (4) Cost on the pooled pool only: a statement outside a transaction becomes 3 round
+            trips (BEGIN + preamble, statement, COMMIT) and every transaction 1 more.
+Mitigation: role assertion fail-closed in the same transaction; GUC / search_path neutralisation; event dispatch refused with a
+            pooler; session-affine use of the pooled endpoint refused at the factory, at withAdvisoryLock and by the probe;
+            both connections' identity compared at boot; the integration test above runs the poisoned-backend case.
+Reversal:   unset PG_DATABASE_SESSION_URL and point PG_DATABASE_URL at the direct host (the probe then enforces it).
+```
+
+- **Not changed / follow-ups (coordinated with other branches).** `WORKER_DISPATCH_MODE=event` stays refused with a pooler (its
+  NOTIFY switch is a startup setting; boot gate 1c, `feat/twenty-ssl-boot`). db-setup / db-harden (`owner-bootstrap*`,
+  `db-setup.sh`, `feat/twenty-neon-setup`) still connect with `PG_DATABASE_URL`: they must use `PG_DATABASE_SESSION_URL` when
+  set and run the session probe, since planDbSetup no longer recognises a pooler host. The compose files do not pass
+  `PG_DATABASE_SESSION_URL` to rab-api / rab-worker yet (a deployment sets it in the platform environment).

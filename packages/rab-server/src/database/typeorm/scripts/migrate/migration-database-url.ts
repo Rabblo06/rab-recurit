@@ -6,8 +6,10 @@
  * Resolution is the shared factory's (src/database/postgres, `resolvePgEnvironment` with processRole `migrate`): production
  * (NODE_ENV, RAB_RUNTIME_ENV or DB_TARGET = production) requires PG_DATABASE_URL and refuses every legacy name and libpq
  * variable; outside production PG_DATABASE_URL wins over the deprecated DATABASE_URL, and the deprecated
- * DATABASE_URL_UNPOOLED still names the elevated (migration) connection, with warnings; a transaction-pooler URL shape is
- * refused (the migration lock is a session advisory lock); TLS follows pg-tls.ts. The migration endpoint is the elevated
+ * DATABASE_URL_UNPOOLED still names the elevated (migration) connection, with warnings; with PG_DATABASE_SESSION_URL set
+ * (PG_DATABASE_URL is then a transaction pooler for the API / Worker) the migration connects to PG_DATABASE_SESSION_URL, and
+ * the live session probe refuses a connection that is not a real session (the migration lock is a session advisory lock);
+ * TLS follows pg-tls.ts. The migration endpoint is the elevated
  * one when configured, else the primary one, exactly as core.datasource.ts's migration options choose it.
  *
  * Two rules on top of the factory, both refusals:
@@ -72,5 +74,6 @@ export function resolveMigrationConnection(
  * production accepts), with every legacy name removed, and probes it once.
  */
 export function targetGuardEnv(env: Record<string, string | undefined>, url: string): Record<string, string | undefined> {
-  return { ...env, PG_DATABASE_URL: url, DATABASE_URL: undefined, DATABASE_URL_UNPOOLED: undefined, DATABASE_DIRECT_URL: undefined };
+  // PG_DATABASE_SESSION_URL is removed too: when set, `url` IS that session URL (the migration process's primary).
+  return { ...env, PG_DATABASE_URL: url, PG_DATABASE_SESSION_URL: undefined, DATABASE_URL: undefined, DATABASE_URL_UNPOOLED: undefined, DATABASE_DIRECT_URL: undefined };
 }

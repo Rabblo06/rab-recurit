@@ -66,9 +66,13 @@ function defineConnectionGetters<T extends object>(options: T, build: () => PgCo
   return options;
 }
 
-/** Runtime pool: PG_DATABASE_URL (legacy DATABASE_URL outside production) as this process's role, with the runtime timeouts. */
+/**
+ * Runtime pool: PG_DATABASE_URL (legacy DATABASE_URL outside production) as this process's role, with the runtime timeouts.
+ * The 'runtime' endpoint: for the API / Worker with PG_DATABASE_SESSION_URL set it may be a transaction pooler, served by the
+ * transaction-scoped client (pg-config.ts); for every other process (CLI, migrate) it is the direct session connection.
+ */
 function runtimeConnection(): PgConnectionFields {
-  return pgTypeOrmConnectionOptions(resolvePgEnvironmentCached(process.env), { endpoint: 'primary', purpose: 'runtime' });
+  return pgTypeOrmConnectionOptions(resolvePgEnvironmentCached(process.env), { endpoint: 'runtime', purpose: 'runtime' });
 }
 
 /**

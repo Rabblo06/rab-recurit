@@ -369,7 +369,7 @@ export async function runLockedMigrations(options: LockedMigrationOptions): Prom
   // self-hosted transaction-mode PgBouncer on 5432/6432 passes it. The same live two-connection probe the Worker runs
   // (pg-session-probe.ts), on the migration endpoint itself, before any migration session or lock exists. Refuses on failure.
   await (options.sessionProbe ?? probePgSessionAffinity)(
-    pgClientConfig(connection.resolved, { endpoint: connection.endpoint, purpose: 'probe', sessionAffinity: true, statementTimeoutMs: 5_000, queryTimeoutMs: 5_000 }),
+    pgClientConfig(connection.resolved, { endpoint: connection.endpoint, purpose: 'probe', sessionAffinity: true, sessionSettings: false, statementTimeoutMs: 5_000, queryTimeoutMs: 5_000 }),
     { label: 'the migration session connection' },
   );
 

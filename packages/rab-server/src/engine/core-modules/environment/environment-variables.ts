@@ -114,6 +114,16 @@ export class EnvironmentVariables {
   PG_DATABASE_URL_IS_DIRECT?: string;
 
   /**
+   * Transaction pooler support (owner instruction 2026-11-19): the DIRECT (session) connection of the same crewflow_owner
+   * login and database as PG_DATABASE_URL. When set, PG_DATABASE_URL may be any transaction-mode pooler: only the API /
+   * Worker request pool uses it (transaction-scoped client); session locks, boot gates, migrations and the CLI use this one.
+   * Validated in pg-config.ts (same login and database, not the same target) and by a live identity comparison at boot.
+   */
+  @IsOptional()
+  @IsString()
+  PG_DATABASE_SESSION_URL?: string;
+
+  /**
    * Phase B (B4): optional read replica (a physical standby). Validated in pg-config.ts by the primary's URL policy and TLS
    * rules (verify-full in production) and refused when it names the primary. Reads opt in explicitly (src/database/replica).
    */

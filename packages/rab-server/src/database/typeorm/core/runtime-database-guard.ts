@@ -229,7 +229,11 @@ function resolveRuntimeDatabaseUnchecked(input: RuntimeDbInput): ResolvedRuntime
   }
   // P0.6-1B: the session-lock endpoint is the primary unless a (deprecated) DATABASE_DIRECT_URL names another target.
   const direct = pg.lock !== pg.primary && pg.lock.target.canonicalKey !== pg.primary.target.canonicalKey ? describePgTarget(pg.lock.target) : null;
-  if (direct && !sameEndpoint(direct, app)) {
+  // PG_DATABASE_SESSION_URL (transaction pooler support): the session connection legitimately has another host and port than
+  // the pooler in PG_DATABASE_URL, so the host-based comparison cannot apply. pg-config.ts already requires the same login and
+  // database; that both reach the SAME database is decided by capability below (assertRuntimeDatabaseIdentity probes both and
+  // compares current_database() and the cluster's system identifier, and checks the deployment marker's host on each).
+  if (direct && !pg.direct && !sameEndpoint(direct, app)) {
     throw new RuntimeDbError(
       `${app.label} and ${direct.label} resolve to different databases or endpoints (${app.database}@${app.endpointKey} vs ${direct.database}@${direct.endpointKey}). Refusing to start.`,
     );
@@ -321,7 +325,10 @@ export async function probeRuntimeIdentity(
   endpoint: PgEndpointName,
   identity?: { env: Record<string, string | undefined>; production: boolean; processLabel: string },
 ): Promise<RuntimeIdentityProbe> {
-  const probed = endpoint === 'elevated' ? pg.elevated : endpoint === 'lock' ? pg.lock : pg.primary;
+  // The endpoint the factory actually connects to (create-pg-pool.ts selectEndpoint): 'primary' is the session connection
+  // (PG_DATABASE_SESSION_URL when set), 'runtime' the (possibly transaction-pooled) PG_DATABASE_URL.
+  const probed =
+    endpoint === 'elevated' ? pg.elevated : endpoint === 'lock' ? pg.lock : endpoint === 'runtime' ? (pg.pooled ?? pg.primary) : (pg.direct ?? pg.primary);
   const label = probed?.source ?? endpoint;
   let client: ReturnType<typeof createPgClient>;
   try {
@@ -410,6 +417,23 @@ export async function assertRuntimeDatabaseIdentity(
   }
   // P0.6-1B: the worker's directDataSource (the session-lock pool — see rab-worker/src/main.ts's own doc comment) is probed
   // whenever its endpoint names a different target from the primary (resolveRuntimeDatabase leaves `direct` null otherwise).
+  // Transaction pooler (PG_DATABASE_SESSION_URL set): the pooled runtime connection is probed too, through the transaction-scoped
+  // client, with the deployment marker checked against the POOLER's host (bind both hosts), and must reach the same database
+  // and cluster as the session connection, as the same login.
+  if (resolved.pg.pooled) {
+    const runtimeProbe = await probeRuntimeIdentity(resolved.pg, 'runtime', {
+      env,
+      production: resolved.classification === 'PRODUCTION',
+      processLabel: `${processName} process (transaction-pooled runtime connection)`,
+    });
+    if (
+      runtimeProbe.database !== appProbe.database ||
+      runtimeProbe.systemIdentifier !== appProbe.systemIdentifier ||
+      runtimeProbe.currentUser !== appProbe.currentUser
+    ) {
+      throw new RuntimeDbError('runtime identity mismatch between PG_DATABASE_URL (the transaction pooler) and PG_DATABASE_SESSION_URL. Refusing to start.');
+    }
+  }
   if (resolved.direct) {
     const directProbe = await probeRuntimeIdentity(resolved.pg, 'lock');
     if (directProbe.database !== appProbe.database || directProbe.systemIdentifier !== appProbe.systemIdentifier) {

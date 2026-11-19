@@ -85,10 +85,17 @@ describe('runtime database identity guard (API, worker and provisioner boot)', (
     expectRefused('api', PROD_ENV({ PG_DATABASE_URL: PROD_APP.replace('sslmode=require', 'sslmode=disable') }), /sslmode=disable, which production refuses/);
   });
 
-  it('4c. Phase B: the Worker and the provisioner (session locks) refuse a transaction-pooler URL; since owner decision 2026-11-18 the production API refuses it too (runtime-db-config.ts checkRuntimeLogin)', () => {
-    expectRefused('worker', PROD_ENV({ PG_DATABASE_URL: PROD_POOLED }), /transaction-pooler shape/);
-    expectRefused('provisioner', PROD_ENV({ PG_DATABASE_URL: PROD_POOLED.replace('rab_app', 'crewflow') }), /transaction-pooler shape/);
-    expectRefused('api', PROD_ENV({ PG_DATABASE_URL: PROD_POOLED.replace('rab_app', 'crewflow_owner') }), /transaction-pooler shape/);
+  it('4c. owner instruction 2026-11-19 (capability, not host names): a pooler-looking URL is not refused by name; PG_DATABASE_SESSION_URL gives the API / Worker a pooled runtime and a session endpoint on another host', () => {
+    const pooled = PROD_POOLED.replace('rab_app', 'crewflow_owner');
+    for (const processName of ['api', 'worker'] as const) {
+      expect(resolve(processName, PROD_ENV({ PG_DATABASE_URL: pooled })).classification).toBe('PRODUCTION');
+      const r = resolve(processName, PROD_ENV({ PG_DATABASE_URL: pooled, PG_DATABASE_SESSION_URL: PROD_APP }));
+      expect(r.classification).toBe('PRODUCTION');
+      expect(r.pg.pooled?.transactionScoped).toBe(true);
+      expect(r.direct?.label).toBe('PG_DATABASE_SESSION_URL');
+    }
+    // The session URL must be the same login and database (pg-config.ts), whatever its host.
+    expectRefused('api', PROD_ENV({ PG_DATABASE_URL: pooled, PG_DATABASE_SESSION_URL: PROD_APP.replace('/neondb?', '/other?') }), /must name the same login and database/);
   });
 
   it('5. BC-11: the production runtime declaration is optional; a partial or wrong one is refused; the marker check is live (deployment-identity.spec)', () => {
@@ -238,8 +245,8 @@ describe('runtime database identity guard (API, worker and provisioner boot)', (
     for (const processName of ['api', 'worker', 'provisioner'] as const) {
       for (const NODE_ENV of ['development', 'test', undefined]) {
         expectRefused(processName, { NODE_ENV, PG_DATABASE_URL: PROD_APP }, pattern);
-        // The -pooler host (the API's shape; the Worker and provisioner already refuse a transaction pooler first).
-        if (processName === 'api') expectRefused(processName, { NODE_ENV, PG_DATABASE_URL: PROD_POOLED }, pattern);
+        // The -pooler host (no process refuses a pooler by its host name any more; the deny list still names the endpoint).
+        expectRefused(processName, { NODE_ENV, PG_DATABASE_URL: PROD_POOLED }, pattern);
         expectRefused(processName, { NODE_ENV, PG_DATABASE_URL: otherRegion }, pattern);
         expectRefused(processName, { NODE_ENV, PG_DATABASE_URL: otherDatabase }, pattern);
       }

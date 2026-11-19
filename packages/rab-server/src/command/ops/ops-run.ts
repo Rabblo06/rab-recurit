@@ -30,6 +30,7 @@ import { randomUUID } from 'node:crypto';
 
 import { OWNER_LOGIN_ROLE } from '../../database/boot-checks/owner-login-posture';
 import { parsePgUrl } from '../../database/postgres/pg-url-policy';
+import { isOwnPgDatabaseUrlSource } from '../../database/postgres/pg-config';
 import {
   currentPgProcessRole,
   LEGACY_PG_ENV_NAMES,
@@ -253,7 +254,7 @@ export function assertOpsRun(
     throw new OpsRunError(`"${command}" runs only as a one-off CLI command (dist/command/main.js), never inside the ${resolved.processRole} process.`);
   }
   assertOwnerLoginOpsEnvironment(command, env);
-  if (resolved.primary.source !== 'PG_DATABASE_URL' || resolved.primary.target.user !== OWNER_LOGIN_ROLE) {
+  if (!isOwnPgDatabaseUrlSource(resolved.primary.source) || resolved.primary.target.user !== OWNER_LOGIN_ROLE) {
     throw new OpsRunError(`"${command}" runs only under the owner login ${OWNER_LOGIN_ROLE} named by PG_DATABASE_URL. Refusing.`);
   }
   // Defence in depth: the only source of `resolved.elevated` is DATABASE_URL_UNPOOLED, which
