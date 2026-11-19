@@ -55,5 +55,5 @@ the service refuses to start if it is set (exit 64); **—** = not given.
 - **Mode (b):** `PG_ADMIN_URL` and `PG_DATABASE_URL` (or their direct endpoints) name the same host, port and
   database.
 - **Passwords:** `db-setup` only ever sends a SCRAM verifier, never plain text. A server that refuses it gets option 1
-  (the login created without a password; you run `ALTER ROLE crewflow_owner PASSWORD '...'` in its SQL editor) or option
+  (the login created NOLOGIN without a password; you run `ALTER ROLE crewflow_owner LOGIN PASSWORD '...'` in its SQL editor) or option
   2 (you run the printed CREATE ROLE SQL). Provider notes: `OWNER-LOGIN-DEPLOYMENT.md` section 2, "Known provider quirks".
