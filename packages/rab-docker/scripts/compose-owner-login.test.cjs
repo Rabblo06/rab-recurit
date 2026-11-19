@@ -182,7 +182,8 @@ test('DENIAL database modes: an admin login in PG_DATABASE_URL, crewflow_owner i
   }
   assertRefused(lintEnvText('compose', `${OWN}\nPG_ADMIN_URL=${URL_OK}\nPG_DATABASE_URL=${URL_OK}`), /^PG_ADMIN_URL: logs in as crewflow_owner, the app login: put that URL in PG_DATABASE_URL/);
   // PG_ADMIN_URL alone: db-setup would have no crewflow_owner URL (and the bundled default names another database).
-  for (const base of [OWN, COMPOSE_OK]) assertRefused(lintEnvText('compose', `${base}\nPG_ADMIN_URL=${ADMIN_OK}`), /^PG_ADMIN_URL needs PG_DATABASE_URL/);
+  // Owner decision 2026-11-19: PG_ADMIN_URL needs the crewflow_owner password: PG_DATABASE_APP_PASSWORD (+ PG_DATABASE_HOST), or PG_DATABASE_URL.
+  assertRefused(lintEnvText('compose', `${OWN}\nPG_ADMIN_URL=${ADMIN_OK}`), /^PG_ADMIN_URL needs PG_DATABASE_APP_PASSWORD \(openssl rand -hex 32\) and PG_DATABASE_HOST, or PG_DATABASE_URL/);
   // The two URLs must name the same database (db-setup refuses it too: targetMismatch).
   for (const other of [URL_OK.replace('db.internal.example', 'db2.internal.example'), URL_OK.replace(':5432', ':5433'), URL_OK.replace('/crewflow?', '/other?')]) {
     assertRefused(lintEnvText('compose', `${OWN}\nPG_ADMIN_URL=${ADMIN_OK}\nPG_DATABASE_URL=${other}`), /^PG_ADMIN_URL and PG_DATABASE_URL name different databases/);
@@ -203,10 +204,10 @@ test('DENIAL no dummy password: both bundled passwords are required with the bun
   assertRefused(lintEnvText('compose', `${COMPOSE_DB_PW}\nPG_DATABASE_APP_PASSWORD=`), /^PG_DATABASE_APP_PASSWORD: required for the bundled database/);
   for (const urls of [`PG_ADMIN_URL=${ADMIN_OK}\nPG_DATABASE_URL=${URL_OK}`, `PG_DATABASE_URL=${URL_OK}`]) {
     assertRefused(lintEnvText('compose', `${COMPOSE_DB_PW}\nCREWFLOW_BUNDLED_DB=0\n${urls}`), /^PG_DATABASE_PASSWORD: remove it with CREWFLOW_BUNDLED_DB=0/);
-    assertRefused(lintEnvText('compose', `${OWN}\nPG_DATABASE_APP_PASSWORD=${APP_PW}\n${urls}`), /^PG_DATABASE_APP_PASSWORD: remove it with CREWFLOW_BUNDLED_DB=0/);
+    assertRefused(lintEnvText('compose', `${OWN}\nPG_DATABASE_APP_PASSWORD=${APP_PW}\n${urls}`), /^PG_DATABASE_APP_PASSWORD: set it OR PG_DATABASE_URL, never both/);
   }
   // Beside an explicit PG_DATABASE_URL the app password would never be used.
-  assertRefused(lintEnvText('compose', `${COMPOSE_OK}\nPG_ADMIN_URL=${ADMIN_OK}\nPG_DATABASE_URL=${URL_OK}`), /^PG_DATABASE_APP_PASSWORD: remove it: PG_DATABASE_URL is set, so it is never used/);
+  assertRefused(lintEnvText('compose', `${COMPOSE_OK}\nPG_ADMIN_URL=${ADMIN_OK}\nPG_DATABASE_URL=${URL_OK}`), /^PG_DATABASE_APP_PASSWORD: set it OR PG_DATABASE_URL, never both/);
 });
 
 test('DENIAL PG_DATABASE_APP_PASSWORD: compose.env only, 32+ of A-Z a-z 0-9 _ -; never an env file or container variable', () => {
@@ -315,10 +316,19 @@ test('DENIAL DB-SETUP compose env: the URL still needs verify-full, the direct h
   }
   for (const login of ['doadmin', 'crewflow_owner']) {
     const withUrl = (url) => `${OWN}\n${login === 'doadmin' ? 'PG_ADMIN_URL' : 'PG_DATABASE_URL'}=${url.replace('crewflow_owner', login)}`;
-    assertRefused(lintEnvText('compose', withUrl(URL_OK.replace('verify-full', 'require'))), /sslmode is not verify-full/);
-    assertRefused(lintEnvText('compose', withUrl(URL_OK.replace('?sslmode=verify-full', ''))), /sslmode is not verify-full/);
-    assertRefused(lintEnvText('compose', withUrl(URL_OK.replace('db.internal.example', 'ep-x-pooler.eu.aws.neon.tech'))), /transaction pooler/);
-    assertRefused(lintEnvText('compose', withUrl(URL_OK.replace(':5432', ':6543'))), /transaction pooler/);
+    // Owner rule 2026-11-19: require / verify-ca / verify-full everywhere (all mean full verification), with or without
+    // channel_binding=require; disable / allow / prefer / no-verify / none refused.
+    for (const mode of ['require', 'verify-ca', 'verify-full', 'require&channel_binding=require', 'verify-full&channel_binding=require']) {
+      assert.ok(!lintEnvText('compose', withUrl(URL_OK.replace('verify-full', mode))).some((p) => /sslmode|channel_binding/.test(p)), `${login} ${mode}`);
+    }
+    for (const mode of ['disable', 'allow', 'prefer', 'no-verify']) {
+      assertRefused(lintEnvText('compose', withUrl(URL_OK.replace('verify-full', mode))), /sslmode must be require, verify-ca or verify-full/);
+    }
+    assertRefused(lintEnvText('compose', withUrl(URL_OK.replace('?sslmode=verify-full', ''))), /sslmode must be require, verify-ca or verify-full/);
+    // No host-name or port rule for a pooler (provider-neutral; db-setup decides by capability).
+    for (const address of ['pool-a.internal.example:6432', 'db.internal.example:6543']) {
+      assert.ok(!lintEnvText('compose', withUrl(URL_OK.replace('db.internal.example:5432', address))).some((p) => /pooler/.test(p)));
+    }
     assertRefused(lintEnvText('compose', withUrl('postgresql://crewflow_owner@db.internal.example:5432/crewflow?sslmode=verify-full')), /no password/);
     assertRefused(lintEnvText('compose', withUrl('mysql://root:x@db.internal.example:3306/crewflow?sslmode=verify-full')), /not a postgres:\/\/ URL/);
     assertRefused(lintEnvText('compose', withUrl('not a url')), /not a parseable URL/);
@@ -590,7 +600,7 @@ test('raw compose text: build, a committed token, the mode switch and privileged
 // expression, and the retired setup volume never comes back.
 test('raw compose text: PG_DATABASE_URL only as the committed crewflow_owner expression; the retired setup volume is refused', () => {
   const expr = gate.APP_URL_EXPR;
-  assert.equal(expr, '${PG_DATABASE_URL:-postgresql://crewflow_owner:${PG_DATABASE_APP_PASSWORD:-}@db:5432/crewflow?sslmode=verify-full}');
+  assert.equal(expr, '${PG_DATABASE_URL:-postgresql://crewflow_owner:${PG_DATABASE_APP_PASSWORD:-}@${PG_DATABASE_HOST:-db}:${PG_DATABASE_PORT:-5432}/${PG_DATABASE_NAME:-crewflow}?sslmode=verify-full}');
   const svc = (line) => `services:\n  rab-api:\n    environment:\n      ${line}\n`;
   assert.deepEqual(lintComposeText('x.yml', svc(`PG_DATABASE_URL: ${expr}`)), []);
   assert.deepEqual(lintComposeText('x.yml', `${svc(`PG_DATABASE_URL: ${expr}`)}  rab-worker:\n    environment:\n      PG_DATABASE_URL: ${expr}\n`), []);
@@ -599,7 +609,7 @@ test('raw compose text: PG_DATABASE_URL only as the committed crewflow_owner exp
     'PG_DATABASE_URL: ${PG_DATABASE_URL}',
     'PG_DATABASE_URL: ${PG_DATABASE_URL:-postgresql://postgres:${PG_DATABASE_PASSWORD:-}@db:5432/crewflow?sslmode=verify-full}', // the superuser
     `PG_DATABASE_URL: ${expr.replace('verify-full', 'require')}`,
-    `PG_DATABASE_URL: ${expr.replace('@db:', '@db.evil.example:')}`,
+    `PG_DATABASE_URL: ${expr.replace('${PG_DATABASE_HOST:-db}', 'db.evil.example')}`,
     `OTHER_URL: ${expr}`,
     'X: ${PG_DATABASE_APP_PASSWORD:-}',
     'PG_DATABASE_URL: postgresql://crewflow_owner:${PG_DATABASE_APP_PASSWORD}@db:5432/crewflow?sslmode=verify-full',
@@ -1022,6 +1032,8 @@ function hardenModel() {
   const image = `adhin007/adolphus@sha256:${'0'.repeat(64)}`;
   const want = {
     PG_ADMIN_URL: '',
+    PG_ADMIN_DIRECT_URL: '',
+    PG_DATABASE_HOST: '',
     PG_DATABASE_URL: gate.BUNDLED_APP_URL,
     CREWFLOW_BUNDLED_DB: '1',
     CREWFLOW_BUNDLED_DB_ADMIN_URL: gate.BUNDLED_URL,
@@ -1168,12 +1180,30 @@ test('dbSettingsProblems: the shared rule of the compose.env lint and the --envi
   // Fail closed: a caller that does not say the app password is set gets it reported missing in the bundled mode.
   assertRefused(r({ bundled: '1', passwordSet: true }), /^PG_DATABASE_APP_PASSWORD: required for the bundled database/);
   assertRefused(r({ bundled: '0' }), /^CREWFLOW_BUNDLED_DB: 0 \(no bundled db\) needs your own database/);
-  assertRefused(r({ bundled: '0', adminUrl: ADMIN_OK }), /^PG_ADMIN_URL needs PG_DATABASE_URL/);
+  assertRefused(r({ bundled: '0', adminUrl: ADMIN_OK }), /^PG_ADMIN_URL needs PG_DATABASE_APP_PASSWORD/);
   assertRefused(r({ bundled: '0', appUrl: ADMIN_OK }), /^PG_DATABASE_URL: is the app login/);
   assertRefused(r({ bundled: '0', adminUrl: URL_OK, appUrl: URL_OK }), /^PG_ADMIN_URL: logs in as crewflow_owner/);
   assertRefused(r({ bundled: '0', adminUrl: ADMIN_OK, appUrl: URL_OK.replace('/crewflow?', '/other?') }), /name different databases/);
   assertRefused(r({ bundled: '0', adminUrl: ADMIN_OK, appUrl: URL_OK, passwordSet: true }), /PG_DATABASE_PASSWORD: remove it with CREWFLOW_BUNDLED_DB=0/);
-  assertRefused(r({ bundled: '0', appUrl: URL_OK, appPasswordSet: true }), /PG_DATABASE_APP_PASSWORD: remove it with CREWFLOW_BUNDLED_DB=0/);
+  assertRefused(r({ bundled: '0', appUrl: URL_OK, appPasswordSet: true }), /PG_DATABASE_APP_PASSWORD: set it OR PG_DATABASE_URL, never both/);
+  // Owner decision 2026-11-19 ("You set one shared password"): PG_ADMIN_URL + PG_DATABASE_APP_PASSWORD + the address.
+  assert.deepEqual(r({ bundled: '0', adminUrl: ADMIN_OK, appPasswordSet: true, dbHost: 'db.internal.example', dbName: 'crewflow' }), []);
+  assert.deepEqual(r({ bundled: '0', adminUrl: ADMIN_OK, appPasswordSet: true, dbHost: 'DB.internal.example', dbPort: '5432' }), []);
+  assertRefused(r({ bundled: '0', adminUrl: ADMIN_OK, appPasswordSet: true }), /^PG_DATABASE_HOST: required with CREWFLOW_BUNDLED_DB=0 and PG_DATABASE_APP_PASSWORD/);
+  assertRefused(r({ bundled: '0', adminUrl: ADMIN_OK, appPasswordSet: true, dbHost: 'db2.internal.example' }), /^PG_ADMIN_URL and PG_DATABASE_HOST \/ PG_DATABASE_PORT \/ PG_DATABASE_NAME name different databases/);
+  assertRefused(r({ bundled: '0', adminUrl: ADMIN_OK, appPasswordSet: true, dbHost: 'db.internal.example', dbName: 'other' }), /name different databases/);
+  assertRefused(r({ bundled: '0', adminUrl: ADMIN_OK, appPasswordSet: true, dbHost: 'db.internal.example', dbPort: '6432' }), /name different databases/);
+  assertRefused(r({ bundled: '0', adminUrl: ADMIN_OK, appPasswordSet: true, dbHost: 'db' }), /names the bundled host db/);
+  assertRefused(r({ bundled: '0', adminUrl: ADMIN_OK, appPasswordSet: true, dbHost: 'x@evil:1/db' }), /^PG_DATABASE_HOST: a host name only/);
+  assertRefused(r({ bundled: '0', adminUrl: ADMIN_OK, appUrl: URL_OK, dbHost: 'db.internal.example' }), /PG_DATABASE_HOST \/ PG_DATABASE_PORT \/ PG_DATABASE_NAME: remove them/);
+  assertRefused(r({ bundled: '1', passwordSet: true, appPasswordSet: true, dbHost: 'db.internal.example' }), /only for your own database/);
+  // PG_ADMIN_DIRECT_URL: the pooled PG_ADMIN_URL pasted as-is, the direct address beside it (same login and database).
+  const pooled = ADMIN_OK.replace('db.internal.example:5432', 'pool.internal.example:6432').replace('verify-full', 'require');
+  assert.deepEqual(r({ bundled: '0', adminUrl: pooled, adminDirectUrl: ADMIN_OK, appPasswordSet: true, dbHost: 'db.internal.example' }), []);
+  assertRefused(r({ bundled: '0', adminUrl: pooled, adminDirectUrl: ADMIN_OK.replace('doadmin', 'other'), appPasswordSet: true, dbHost: 'db.internal.example' }), /^PG_ADMIN_DIRECT_URL: must name the same login and database/);
+  assertRefused(r({ bundled: '0', adminDirectUrl: ADMIN_OK, appUrl: URL_OK }), /^PG_ADMIN_DIRECT_URL: needs PG_ADMIN_URL/);
+  // No address rule for a pooler: PG_ADMIN_DIRECT_URL is checked by db-setup's capability probe, not by its host or port.
+  assert.ok(!r({ bundled: '0', adminUrl: pooled, adminDirectUrl: pooled, appPasswordSet: true, dbHost: 'pool.internal.example', dbPort: '6432' }).some((p) => /pooler/.test(p)));
   // Owner decision 2026-11-18: both URLs set is no longer a refusal.
   assert.ok(!r({ bundled: '0', adminUrl: ADMIN_OK, appUrl: URL_OK }).some((p) => /both set/.test(p)));
   // Review of PR #230, I-4: an encoded crewflow_owner login is the same login (decoded first); a login in a query parameter
@@ -1183,4 +1213,39 @@ test('dbSettingsProblems: the shared rule of the compose.env lint and the --envi
     assertRefused(r({ bundled: '0', adminUrl: `${ADMIN_OK}&${param}`, appUrl: URL_OK }), new RegExp(`^PG_ADMIN_URL: has a \\?${param.split('=')[0]}= query parameter`));
     assertRefused(r({ bundled: '0', appUrl: `${URL_OK}&${param}` }), new RegExp(`^PG_DATABASE_URL: has a \\?${param.split('=')[0]}= query parameter`));
   }
+});
+
+test('owner decision 2026-11-19: compose.env holds PG_ADMIN_DIRECT_URL and PG_DATABASE_HOST / PORT / NAME; no other env file does', () => {
+  const direct = ADMIN_OK;
+  const pooled = ADMIN_OK.replace('db.internal.example:5432', 'pool.internal.example:6432').replace('verify-full', 'require');
+  const canonical = `${OWN}\nPG_ADMIN_URL=${pooled}\nPG_ADMIN_DIRECT_URL=${direct}\nPG_DATABASE_APP_PASSWORD=${APP_PW}\nPG_DATABASE_HOST=db.internal.example\nPG_DATABASE_PORT=5432\nPG_DATABASE_NAME=crewflow`;
+  assert.deepEqual(lintEnvText('compose', canonical), []);
+  assert.deepEqual(lintEnvText('compose', `${OWN}\nPG_ADMIN_URL=${ADMIN_OK}\nPG_DATABASE_APP_PASSWORD=${APP_PW}\nPG_DATABASE_HOST=db.internal.example`), []);
+  for (const kind of ['database', 'runtime']) {
+    const base = kind === 'database' ? `${DATABASE_OK}\n` : 'CREWFLOW_AUDIT_SINK=stdout\n';
+    assertRefused(lintEnvText(kind, `${base}PG_ADMIN_DIRECT_URL=${direct}`), /^PG_ADMIN_DIRECT_URL: set it in compose\.env/);
+    assertRefused(lintEnvText(kind, `${base}PG_DATABASE_HOST=db.internal.example`), /^PG_DATABASE_HOST: set it in compose\.env/);
+  }
+  // Security review F2 of #259: rab-api / rab-worker may only PIN it to "" (like PG_ADMIN_URL); any value, or any other
+  // service, is refused.
+  assert.ok(!lintComposeText('x.yml', 'services:\n  rab-api:\n    environment:\n      PG_ADMIN_DIRECT_URL: ""\n').some((p) => /PG_ADMIN_DIRECT_URL in/.test(p)));
+  assertRefused(lintComposeText('x.yml', 'services:\n  rab-api:\n    environment:\n      PG_ADMIN_DIRECT_URL: ${PG_ADMIN_DIRECT_URL:-}\n'), /PG_ADMIN_DIRECT_URL in service rab-api/);
+  assertRefused(lintComposeText('x.yml', 'services:\n  other:\n    environment:\n      PG_ADMIN_DIRECT_URL: ""\n'), /PG_ADMIN_DIRECT_URL in service other/);
+  // Both committed files pin it on rab-api and rab-worker.
+  for (const file of ['docker-compose.production.yml', 'docker-compose.image.yml']) {
+    const text = fs.readFileSync(path.join(__dirname, '..', file), 'utf8');
+    assert.equal((text.match(/^ {6}PG_ADMIN_DIRECT_URL: ""$/gm) ?? []).length >= 2, true, `${file}: PG_ADMIN_DIRECT_URL pinned on rab-api and rab-worker`);
+  }
+});
+
+test('owner rule 2026-11-19: one sslmode rule for every database URL (PG_DATABASE_URL, PG_DATABASE_SESSION_URL, PG_ADMIN_URL, PG_ADMIN_DIRECT_URL)', () => {
+  assert.deepEqual([...gate.ACCEPTED_SSLMODES], ['require', 'verify-ca', 'verify-full']);
+  for (const key of ['PG_DATABASE_URL', 'PG_DATABASE_SESSION_URL', 'PG_ADMIN_URL', 'PG_ADMIN_DIRECT_URL']) {
+    for (const mode of ['require', 'verify-ca', 'verify-full']) assert.equal(gate.sslmodeProblem(key, new URL(URL_OK.replace('verify-full', mode))), null);
+    for (const mode of ['disable', 'allow', 'prefer', 'no-verify']) assert.match(gate.sslmodeProblem(key, new URL(URL_OK.replace('verify-full', mode))), new RegExp(`^${key}: sslmode must be`));
+    assert.match(gate.sslmodeProblem(key, new URL(URL_OK.replace('?sslmode=verify-full', ''))), /sslmode must be/);
+  }
+  const r = gate.dbSettingsProblems;
+  assert.deepEqual(r({ bundled: '0', adminUrl: ADMIN_OK.replace('verify-full', 'verify-ca'), adminDirectUrl: ADMIN_OK.replace('verify-full', 'require&channel_binding=require'), appUrl: URL_OK.replace('verify-full', 'require') }), []);
+  assertRefused(r({ bundled: '0', adminUrl: ADMIN_OK, adminDirectUrl: ADMIN_OK.replace('verify-full', 'prefer'), appPasswordSet: true, dbHost: 'db.internal.example' }), /^PG_ADMIN_DIRECT_URL: sslmode must be/);
 });

@@ -25,11 +25,11 @@ services:
     entrypoint: ["/sbin/tini", "-s", "--"]
     command: ["./api-prestart.sh"]
     environment:
-      PG_DATABASE_URL: ${PG_DATABASE_URL:-postgresql://crewflow_owner:${PG_DATABASE_APP_PASSWORD:-}@db:5432/crewflow?sslmode=verify-full}
+      PG_DATABASE_URL: ${PG_DATABASE_URL:-postgresql://crewflow_owner:${PG_DATABASE_APP_PASSWORD:-}@${PG_DATABASE_HOST:-db}:${PG_DATABASE_PORT:-5432}/${PG_DATABASE_NAME:-crewflow}?sslmode=verify-full}
 
   rab-worker:
     entrypoint: ["/sbin/tini", "-s", "--"]
     command: ["node", "packages/rab-worker/dist/main.js"]
     init: true
     environment:
-      PG_DATABASE_URL: ${PG_DATABASE_URL:-postgresql://crewflow_owner:${PG_DATABASE_APP_PASSWORD:-}@db:5432/crewflow?sslmode=verify-full}
+      PG_DATABASE_URL: ${PG_DATABASE_URL:-postgresql://crewflow_owner:${PG_DATABASE_APP_PASSWORD:-}@${PG_DATABASE_HOST:-db}:${PG_DATABASE_PORT:-5432}/${PG_DATABASE_NAME:-crewflow}?sslmode=verify-full}

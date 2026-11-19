@@ -25,7 +25,7 @@
  * each rendered model:
  *   - DATABASE, the Twenty way (owner decision 2026-11-18, "change PR #125 option 2 to Twenty's way"): rab-api, rab-worker
  *     and db-setup receive PG_DATABASE_URL, ALWAYS the crewflow_owner URL, as the ONE committed expression
- *     ${PG_DATABASE_URL:-postgresql://crewflow_owner:${PG_DATABASE_APP_PASSWORD:-}@db:5432/crewflow?sslmode=verify-full}
+ *     ${PG_DATABASE_URL:-postgresql://crewflow_owner:${PG_DATABASE_APP_PASSWORD:-}@${PG_DATABASE_HOST:-db}:${PG_DATABASE_PORT:-5432}/${PG_DATABASE_NAME:-crewflow}?sslmode=verify-full}
  *     (APP_URL_EXPR; compose.env's URL, or the bundled db's crewflow_owner URL built from PG_DATABASE_APP_PASSWORD), the
  *     SAME rendered value on all three, never from an env file. The admin login reaches ONLY db-setup: compose.env's
  *     PG_ADMIN_URL (`${PG_ADMIN_URL:-}`) and the bundled db's superuser URL built from `${PG_DATABASE_PASSWORD:-}`
@@ -142,7 +142,7 @@ const APP_PASSWORD_KEY = 'PG_DATABASE_APP_PASSWORD';
  * The ONE committed PG_DATABASE_URL expression, on db-setup, rab-api and rab-worker alike: compose.env's crewflow_owner URL
  * (modes b and c), or the bundled db's crewflow_owner URL built from PG_DATABASE_APP_PASSWORD (mode a).
  */
-const APP_URL_EXPR = '${PG_DATABASE_URL:-postgresql://crewflow_owner:${PG_DATABASE_APP_PASSWORD:-}@db:5432/crewflow?sslmode=verify-full}';
+const APP_URL_EXPR = '${PG_DATABASE_URL:-postgresql://crewflow_owner:${PG_DATABASE_APP_PASSWORD:-}@${PG_DATABASE_HOST:-db}:${PG_DATABASE_PORT:-5432}/${PG_DATABASE_NAME:-crewflow}?sslmode=verify-full}';
 /** compose.env: the bundled db on (1, the default when unset) or off (0, only with PG_DATABASE_URL, plus any PG_ADMIN_URL). */
 const BUNDLED_DB_KEY = 'CREWFLOW_BUNDLED_DB';
 const BUNDLED_DB_VALUES = Object.freeze(['0', '1']);
@@ -151,12 +151,26 @@ const BUNDLED_DB_VALUES = Object.freeze(['0', '1']);
  * (never rab-api / rab-worker, never an env file). PG_DATABASE_URL is then ALWAYS the app login (crewflow_owner).
  */
 const ADMIN_URL_KEY = 'PG_ADMIN_URL';
+/**
+ * PG_ADMIN_DIRECT_URL (owner decision 2026-11-19): the DIRECT address of the PG_ADMIN_URL login, for an operator who pastes a
+ * pooled admin URL as-is. db-setup / db-harden only, under exactly PG_ADMIN_URL's placement rule (never rab-api / rab-worker,
+ * not even pinned); the same login and database as PG_ADMIN_URL (db-setup refuses otherwise).
+ */
+const ADMIN_DIRECT_URL_KEY = 'PG_ADMIN_DIRECT_URL';
+/**
+ * Owner decision 2026-11-19 ("You set one shared password"): the non-secret address of your own database, copied from
+ * PG_ADMIN_URL, from which compose builds PG_DATABASE_URL together with PG_DATABASE_APP_PASSWORD (APP_URL_EXPR). Unset =
+ * the bundled db (db:5432/crewflow).
+ */
+const DB_HOST_KEY = 'PG_DATABASE_HOST';
+const DB_PORT_KEY = 'PG_DATABASE_PORT';
+const DB_NAME_KEY = 'PG_DATABASE_NAME';
 /** The retired name(s) of the admin URL: refused everywhere with a "renamed" message (never read, never reinterpreted). */
 const RETIRED_ADMIN_URL_KEYS = Object.freeze(['PG_DATABASE_ADMIN_URL']);
 /** db-setup's committed bundled-db superuser URL, built from ${PG_DATABASE_PASSWORD:-}; used only when neither URL is set. */
 const BUNDLED_ADMIN_URL_KEY = 'CREWFLOW_BUNDLED_DB_ADMIN_URL';
 /** db-setup's whole database environment, exactly (names). */
-const DB_SETUP_DB_KEYS = Object.freeze([ADMIN_URL_KEY, 'PG_DATABASE_URL', BUNDLED_DB_KEY, BUNDLED_ADMIN_URL_KEY]);
+const DB_SETUP_DB_KEYS = Object.freeze([ADMIN_URL_KEY, ADMIN_DIRECT_URL_KEY, DB_HOST_KEY, 'PG_DATABASE_URL', BUNDLED_DB_KEY, BUNDLED_ADMIN_URL_KEY]);
 /** Where the app services mount the bundled db's CA volume (read-only), and the db's own volume targets. */
 const DB_CA_VOLUME = 'crewflow-db-ca';
 const DB_CA_TARGET = '/run/crewflow/db-ca';
@@ -450,7 +464,7 @@ const DATABASE_ALLOWED = Object.freeze([
   'PG_SSL_CA_CERT_PATH', 'PG_SSL_CA_CERT', 'PG_EXPECTED_DATABASE_NAME', 'CREWFLOW_DEPLOYMENT_ENVIRONMENT', 'CREWFLOW_DEPLOYMENT_ID',
 ]);
 /** DB-SETUP: the only non-CREWFLOW_* names compose.env may hold (the two URLs and the bundled db's two passwords). */
-const COMPOSE_DATABASE_KEYS = Object.freeze([ADMIN_URL_KEY, URL_KEY, DB_PASSWORD_KEY, APP_PASSWORD_KEY]);
+const COMPOSE_DATABASE_KEYS = Object.freeze([ADMIN_URL_KEY, ADMIN_DIRECT_URL_KEY, URL_KEY, DB_PASSWORD_KEY, APP_PASSWORD_KEY, DB_HOST_KEY, DB_PORT_KEY, DB_NAME_KEY]);
 /**
  * BC-11 opt-ins: database.env only (so rab-api and rab-worker see one value), never committed in compose. O3: the approval
  * mode is no longer one of them (below).
@@ -484,8 +498,8 @@ const AUDIT_SINK_FAILURES = Object.freeze(['refuse', 'log']);
 const AUDIT_SINK_PRODUCTION_FAILURES = Object.freeze(['refuse']);
 /**
  * The former separated runtime logins and schema roles: never a db-setup URL login (they are NOLOGIN schema roles or cannot
- * create roles, so they are neither crewflow_owner nor an admin). DB-SETUP T-1 relaxes ONLY the provider admin logins
- * (postgres, neondb_owner, doadmin, the RDS master, ...), and only in PG_ADMIN_URL.
+ * create roles, so they are neither crewflow_owner nor an admin). DB-SETUP T-1 relaxes ONLY the database admin login (any
+ * login that can create roles, e.g. the cluster superuser or a managed service's admin), and only in PG_ADMIN_URL.
  */
 const NOT_THE_APP_LOGIN = Object.freeze([
   'crewflow', 'crewflow_app', 'crewflow_worker', 'crewflow_migrator', 'rab_owner', 'rab_secure_owner', 'rab_app',
@@ -494,8 +508,20 @@ const NOT_THE_APP_LOGIN = Object.freeze([
 const DB_PASSWORD_SHAPE = /^[A-Za-z0-9._~-]{32,}$/;
 /** The bundled crewflow_owner password: interpolated unencoded into PG_DATABASE_URL; db-setup.sh refuses anything else. */
 const APP_PASSWORD_SHAPE = /^[A-Za-z0-9_-]{32,}$/;
-const POOLER_HINTS = Object.freeze([[/-pooler\./i, 'Neon -pooler host'], [/:6543(\/|$)/, 'port 6543 (Supabase pooler)'],
-  [/:25061(\/|$)/, 'port 25061 (DigitalOcean pool)'], [/:6432(\/|$)/, 'port 6432 (PgBouncer)'], [/\.proxy-[a-z0-9]+\.rds\.amazonaws\.com/i, 'RDS Proxy']]);
+/**
+ * Owner decision 2026-11-19 (provider-neutral, by capability): no host-name or port rule for a connection pooler. db-setup
+ * refuses a pooled admin connection by what it does (08P01 for its session settings, or the session-affinity probe).
+ * sslmode (owner rule 2026-11-19, the same at runtime, #257): require, verify-ca and verify-full are accepted for EVERY database
+ * URL (PG_DATABASE_URL, PG_DATABASE_SESSION_URL, PG_ADMIN_URL, PG_ADMIN_DIRECT_URL) and all mean FULL verification (certificate
+ * and host name); disable, allow, prefer, no-verify and a missing sslmode are refused. channel_binding=require is accepted.
+ */
+const ACCEPTED_SSLMODES = Object.freeze(['require', 'verify-ca', 'verify-full']);
+/** The sslmode rule above for one parsed URL (null = fine). Exported for the PG_DATABASE_SESSION_URL rule of PR #258. */
+function sslmodeProblem(key, u) {
+  return ACCEPTED_SSLMODES.includes(u.searchParams.get('sslmode') ?? '')
+    ? null
+    : `${key}: sslmode must be require, verify-ca or verify-full (all mean full verification); disable, allow, prefer, no-verify or none are refused`;
+}
 const DIGEST_REF = /^[^@\s]+@sha256:[0-9a-f]{64}$/;
 
 /**
@@ -517,7 +543,18 @@ const DIGEST_REF = /^[^@\s]+@sha256:[0-9a-f]{64}$/;
  *   a former separated login.
  * `appPasswordSet` must be passed (fail closed: unset = not set, so the bundled mode then reports it missing).
  */
-function dbSettingsProblems({ adminUrl, appUrl, bundled = '1', passwordSet = false, appPasswordSet = false, template = false } = {}) {
+function dbSettingsProblems({
+  adminUrl,
+  adminDirectUrl,
+  appUrl,
+  dbHost,
+  dbPort,
+  dbName,
+  bundled = '1',
+  passwordSet = false,
+  appPasswordSet = false,
+  template = false,
+} = {}) {
   const problems = [];
   const has = (v) => v !== undefined && v !== null && String(v) !== '';
   const own = String(bundled) === '0';
@@ -530,28 +567,54 @@ function dbSettingsProblems({ adminUrl, appUrl, bundled = '1', passwordSet = fal
       return { host: u.hostname.toLowerCase(), port: u.port || '5432', database: decodeURIComponent(u.pathname.replace(/^\//, '')) };
     } catch { return null; }
   };
-  const admin = target(adminUrl);
-  const app = target(appUrl);
+  // Owner decision 2026-11-19: with PG_ADMIN_DIRECT_URL, db-setup connects there; PG_ADMIN_URL then only has to name the same
+  // login and database (it may be a pooled address pasted as-is).
+  const admin = target(has(adminDirectUrl) ? adminDirectUrl : adminUrl);
+  // Owner decision 2026-11-19 ("You set one shared password"): without PG_DATABASE_URL, compose builds the crewflow_owner URL
+  // from PG_DATABASE_APP_PASSWORD and PG_DATABASE_HOST / PG_DATABASE_PORT / PG_DATABASE_NAME (APP_URL_EXPR).
+  const built = !has(appUrl) && appPasswordSet;
+  const addressSet = has(dbHost) || has(dbPort) || has(dbName);
+  const app = built
+    ? { host: String(has(dbHost) ? dbHost : DB_SERVICE).toLowerCase(), port: String(has(dbPort) ? dbPort : '5432'), database: String(has(dbName) ? dbName : 'crewflow') }
+    : target(appUrl);
+  if (has(adminDirectUrl) && !has(adminUrl)) problems.push(`${ADMIN_DIRECT_URL_KEY}: needs ${ADMIN_URL_KEY} (it is only the direct address of that login)`);
+  if (has(adminDirectUrl) && has(adminUrl) && !placeholder(adminUrl) && !placeholder(adminDirectUrl)) {
+    try {
+      const a = new URL(String(adminUrl));
+      const d = new URL(String(adminDirectUrl));
+      if (a.username !== d.username || a.pathname !== d.pathname) problems.push(`${ADMIN_DIRECT_URL_KEY}: must name the same login and database as ${ADMIN_URL_KEY} (only the address may differ)`);
+    } catch { /* the per-URL rules below report an unparseable URL */ }
+  }
+  if (has(dbPort) && !/^[0-9]{1,5}$/.test(String(dbPort))) problems.push(`${DB_PORT_KEY}: a port number`);
+  if (has(dbHost) && !/^[A-Za-z0-9.-]+$/.test(String(dbHost)) && !placeholder(dbHost)) problems.push(`${DB_HOST_KEY}: a host name only (no scheme, port, login or path)`);
+  if (has(dbName) && !/^[A-Za-z0-9_-]+$/.test(String(dbName)) && !placeholder(dbName)) problems.push(`${DB_NAME_KEY}: a database name only`);
+  if (has(appUrl) && addressSet) problems.push(`${DB_HOST_KEY} / ${DB_PORT_KEY} / ${DB_NAME_KEY}: remove them: ${URL_KEY} is set, so they are never used`);
   if (!own && !passwordSet) problems.push(`${DB_PASSWORD_KEY}: required for the bundled database (${BUNDLED_DB_KEY} unset or 1; openssl rand -hex 32). With your own database set ${BUNDLED_DB_KEY}=0 and ${URL_KEY} (plus ${ADMIN_URL_KEY}) instead`);
   if (own && passwordSet) problems.push(`${DB_PASSWORD_KEY}: remove it with ${BUNDLED_DB_KEY}=0 (there is no bundled database; it would only sit unused in db-setup's definition)`);
-  if (own && appPasswordSet) problems.push(`${APP_PASSWORD_KEY}: remove it with ${BUNDLED_DB_KEY}=0 (your crewflow_owner password is inside ${URL_KEY})`);
-  else if (has(appUrl) && appPasswordSet) problems.push(`${APP_PASSWORD_KEY}: remove it: ${URL_KEY} is set, so it is never used (the crewflow_owner password is the one inside ${URL_KEY})`);
+  if (has(appUrl) && appPasswordSet) {
+    problems.push(`${APP_PASSWORD_KEY}: set it OR ${URL_KEY}, never both (two sources of the crewflow_owner password could disagree; with ${URL_KEY} set, ${APP_PASSWORD_KEY} is never used)`);
+  }
+  if (own && built && !has(dbHost)) problems.push(`${DB_HOST_KEY}: required with ${BUNDLED_DB_KEY}=0 and ${APP_PASSWORD_KEY} (copy the host, and ${DB_NAME_KEY} / ${DB_PORT_KEY}, from your database's direct address)`);
+  if (!own && addressSet && !has(adminUrl)) problems.push(`${DB_HOST_KEY} / ${DB_PORT_KEY} / ${DB_NAME_KEY}: only for your own database (${BUNDLED_DB_KEY}=0 and ${ADMIN_URL_KEY}); the bundled db is db:5432/crewflow`);
   if (!own && !has(adminUrl) && !has(appUrl) && !appPasswordSet) {
     problems.push(`${APP_PASSWORD_KEY}: required for the bundled database (the crewflow_owner password; openssl rand -hex 32): compose builds ${URL_KEY} from it for db-setup, rab-api and rab-worker`);
   }
-  if (has(adminUrl) && !has(appUrl)) problems.push(`${ADMIN_URL_KEY} needs ${URL_KEY}: the crewflow_owner URL (a password of your choice) that db-setup creates crewflow_owner with, and that rab-api and rab-worker use`);
+  if (has(adminUrl) && !has(appUrl) && !appPasswordSet) problems.push(`${ADMIN_URL_KEY} needs ${APP_PASSWORD_KEY} (openssl rand -hex 32) and ${DB_HOST_KEY}, or ${URL_KEY}: the crewflow_owner password db-setup creates crewflow_owner with, and that rab-api and rab-worker use`);
   if (own) {
-    if (!has(appUrl)) problems.push(`${BUNDLED_DB_KEY}: 0 (no bundled db) needs your own database's crewflow_owner URL in ${URL_KEY} (a host other than the bundled ${DB_SERVICE}), plus ${ADMIN_URL_KEY} to have db-setup create crewflow_owner`);
-    for (const [key, t] of [[ADMIN_URL_KEY, admin], [URL_KEY, app]]) {
+    if (!has(appUrl) && !appPasswordSet) problems.push(`${BUNDLED_DB_KEY}: 0 (no bundled db) needs your own database's crewflow_owner URL in ${URL_KEY} (a host other than the bundled ${DB_SERVICE}), plus ${ADMIN_URL_KEY} to have db-setup create crewflow_owner`);
+    for (const [key, t] of [[has(adminDirectUrl) ? ADMIN_DIRECT_URL_KEY : ADMIN_URL_KEY, admin], [built ? DB_HOST_KEY : URL_KEY, app]]) {
       if (t && t.host === DB_SERVICE) problems.push(`${BUNDLED_DB_KEY}: 0 (no bundled db), but ${key} names the bundled host ${DB_SERVICE}: use your own database's host`);
     }
   } else if (!has(adminUrl) && app && app.host !== DB_SERVICE) {
     problems.push(`${URL_KEY}: with the bundled db (${BUNDLED_DB_KEY} unset or 1) and no ${ADMIN_URL_KEY}, db-setup creates crewflow_owner in the bundled db, so ${URL_KEY} must name it (host ${DB_SERVICE}) or stay unset (then set ${APP_PASSWORD_KEY}); your own database: ${BUNDLED_DB_KEY}=0`);
   }
   if (admin && app && (admin.host !== app.host || admin.port !== app.port || admin.database !== app.database)) {
-    problems.push(`${ADMIN_URL_KEY} and ${URL_KEY} name different databases (host, port or database differ): both must name the same database (db-setup creates crewflow_owner there; rab-api and rab-worker connect there)`);
+    problems.push(
+      `${has(adminDirectUrl) ? ADMIN_DIRECT_URL_KEY : ADMIN_URL_KEY} and ${built ? `${DB_HOST_KEY} / ${DB_PORT_KEY} / ${DB_NAME_KEY}` : URL_KEY} name different databases (host, port or database differ): both must name the same database (db-setup creates crewflow_owner there; rab-api and rab-worker connect there)`,
+    );
   }
-  for (const [key, url] of [[ADMIN_URL_KEY, adminUrl], [URL_KEY, appUrl]]) {
+  // With PG_ADMIN_DIRECT_URL, PG_ADMIN_URL is never connected to: only its login and database matter (checked above).
+  for (const [key, url] of [has(adminDirectUrl) ? [ADMIN_DIRECT_URL_KEY, adminDirectUrl] : [ADMIN_URL_KEY, adminUrl], [URL_KEY, appUrl]]) {
     if (!has(url) || placeholder(url)) continue;
     let u = null;
     try { u = new URL(String(url)); } catch { problems.push(`${key}: not a parseable URL`); }
@@ -561,12 +624,12 @@ function dbSettingsProblems({ adminUrl, appUrl, bundled = '1', passwordSet = fal
     if (login === '') problems.push(`${key}: has no login`);
     else if (NOT_THE_APP_LOGIN.includes(login)) problems.push(`${key}: logs in as a former separated login or schema role (use ${key === ADMIN_URL_KEY ? 'the database admin login' : OWNER_LOGIN})`);
     else if (key === URL_KEY && login !== OWNER_LOGIN) problems.push(`${URL_KEY}: is the app login and must log in as ${OWNER_LOGIN}; it is never an admin URL (an admin URL goes in ${ADMIN_URL_KEY}, db-setup only)`);
-    else if (key === ADMIN_URL_KEY && login === OWNER_LOGIN) problems.push(`${ADMIN_URL_KEY}: logs in as ${OWNER_LOGIN}, the app login: put that URL in ${URL_KEY} instead and remove ${ADMIN_URL_KEY} (db-setup then only checks it)`);
-    if (u.searchParams.get('sslmode') !== 'verify-full') problems.push(`${key}: sslmode is not verify-full`);
+    else if (key !== URL_KEY && login === OWNER_LOGIN) problems.push(`${key}: logs in as ${OWNER_LOGIN}, the app login: put that URL in ${URL_KEY} instead and remove ${key} (db-setup then only checks it)`);
+    const sslProblem = sslmodeProblem(key, u);
+    if (sslProblem) problems.push(sslProblem);
     // Review of PR #230, I-4: the login is the URL's userinfo only; a `?user=` (or `password` / `host` / `dbname`) query
     // parameter would change who logs in or where, behind the login rules above (the URL policy refuses it at start too).
     for (const param of ['user', 'password', 'host', 'hostaddr', 'dbname']) if (u.searchParams.has(param)) problems.push(`${key}: has a ?${param}= query parameter (put the login in the URL's userinfo; never a query parameter)`);
-    for (const [re, label] of POOLER_HINTS) if (re.test(String(url))) problems.push(`${key}: points at a transaction pooler (${label}); use the DIRECT host`);
     if (u.password === '') problems.push(`${key}: has no password`);
   }
   return problems;
@@ -592,6 +655,7 @@ function adminUrlPlacementProblems(rel, text) {
   const perService = new Map(); // ${PG_ADMIN_URL...} interpolations per admin service (at most one each)
   const ANCHOR = /(?:^|[\s:[{,-])&[A-Za-z0-9_.-]+/;
   const PIN = /^\s*PG_ADMIN_URL\s*:\s*(""|'')\s*$/;
+  const DIRECT_PIN = /^\s*PG_ADMIN_DIRECT_URL\s*:\s*(""|'')\s*$/;
   // The services that may carry that pin: production's rab-api / rab-worker and the dev / QA stacks' server / worker.
   const PIN_SERVICES = [...APP_SERVICES, 'server', 'worker'];
   String(text).split(/\r?\n/).forEach((raw, i) => {
@@ -621,6 +685,9 @@ function adminUrlPlacementProblems(rel, text) {
     }
     for (const retired of RETIRED_ADMIN_URL_KEYS) {
       if (new RegExp(`\\b${retired}\\b`).test(line)) problems.push(`${rel}:${i + 1}: ${retired} (renamed to ${ADMIN_URL_KEY})`);
+    }
+    if (!inSetup && /\bPG_ADMIN_DIRECT_URL\b/.test(line) && !(top === 'services' && PIN_SERVICES.includes(service) && DIRECT_PIN.test(line))) {
+      problems.push(`${rel}:${i + 1}: ${ADMIN_DIRECT_URL_KEY} in ${where} (the direct admin address; db-setup and db-harden only; rab-api / rab-worker only pin it to "")`);
     }
     if (!inSetup && /\bCREWFLOW_BUNDLED_DB_ADMIN_URL\b/.test(line)) problems.push(`${rel}:${i + 1}: ${BUNDLED_ADMIN_URL_KEY} in ${where} (the bundled db's superuser URL; db-setup and db-harden only)`);
   });
@@ -1328,6 +1395,8 @@ function lintEnvText(kind, text, { template = false } = {}) {
     const why = kind === 'compose' && (key === DB_PASSWORD_KEY || key === APP_PASSWORD_KEY) ? null : forbiddenReason(key);
     if (why) problems.push(`${key}: ${why}`);
     if (kind !== 'compose' && key === HARDEN_TIMEOUT_KEY) problems.push(`${key}: set it in compose.env (the interpolation file): db-harden's committed ${HARDEN_TIMEOUT_EXPR} would silently override a value here`);
+    if (kind !== 'compose' && key === ADMIN_DIRECT_URL_KEY) problems.push(`${key}: set it in compose.env (the interpolation file): it belongs to db-setup and db-harden only`);
+    if (kind !== 'compose' && [DB_HOST_KEY, DB_PORT_KEY, DB_NAME_KEY].includes(key)) problems.push(`${key}: set it in compose.env (the interpolation file): compose builds PG_DATABASE_URL from it`);
     if (kind !== 'compose' && key === ADMIN_URL_KEY) problems.push(`${key}: set it in compose.env (the interpolation file): it belongs to db-setup only, and rab-api / rab-worker refuse it (an env file here would hand the admin URL to them)`);
     if (COMMITTED_KEYS.includes(key)) problems.push(`${key}: committed in the compose files; never re-enter it in an env file`);
     if (kind !== 'compose' && key === WAIT_SECONDS_KEY) problems.push(`${key}: set it in compose.env (the interpolation file): db-setup's committed \${${WAIT_SECONDS_KEY}:-170} would silently override a value here`);
@@ -1385,7 +1454,7 @@ function lintEnvText(kind, text, { template = false } = {}) {
       // Owner decision 2026-11-18 (M1): db-harden's bounded wait for the ledger; unset = 1200.
       if (key === HARDEN_TIMEOUT_KEY && value !== '' && !(template && isPlaceholder(value)) && !hardenTimeoutOk(value)) problems.push(`${key}: must be a whole number of seconds from ${HARDEN_TIMEOUT_MIN_S} to ${HARDEN_TIMEOUT_MAX_S} (db-harden's wait for the ledger; unset = 1200)`);
     }
-    if (key !== URL_KEY && !(kind === 'compose' && key === ADMIN_URL_KEY) && isPgUrl(value)) problems.push(`${key}: holds a PostgreSQL URL (a second database identity)`);
+    if (key !== URL_KEY && !(kind === 'compose' && (key === ADMIN_URL_KEY || key === ADMIN_DIRECT_URL_KEY)) && isPgUrl(value)) problems.push(`${key}: holds a PostgreSQL URL (a second database identity)`);
   }
   // The database CA: PG_SSL_CA_CERT (PEM text; in an env file one line with \n escapes) or PG_SSL_CA_CERT_PATH, never both
   // (pg-tls.ts refuses both at boot; the lint says so first). The value goes through the app's own rules (pg-ca-pem.cjs, the
@@ -1409,7 +1478,11 @@ function lintEnvText(kind, text, { template = false } = {}) {
     const bundled = value(BUNDLED_DB_KEY) ?? '1';
     problems.push(...dbSettingsProblems({
       adminUrl: value(ADMIN_URL_KEY),
+      adminDirectUrl: value(ADMIN_DIRECT_URL_KEY),
       appUrl: value(URL_KEY),
+      dbHost: value(DB_HOST_KEY),
+      dbPort: value(DB_PORT_KEY),
+      dbName: value(DB_NAME_KEY),
       bundled: BUNDLED_DB_VALUES.includes(bundled) ? bundled : '1',
       passwordSet: (value(DB_PASSWORD_KEY) ?? '') !== '',
       appPasswordSet: (value(APP_PASSWORD_KEY) ?? '') !== '',
@@ -1625,7 +1698,7 @@ function main(argv) {
 if (require.main === module) process.exitCode = main(process.argv.slice(2));
 
 module.exports = {
-  ADMIN_URL_KEY, RETIRED_ADMIN_URL_KEYS, BUNDLED_ADMIN_URL_KEY, BUNDLED_URL_NO_PASSWORD, DB_SETUP_DB_KEYS, dbSettingsProblems,
+  ACCEPTED_SSLMODES, sslmodeProblem, ADMIN_URL_KEY, ADMIN_DIRECT_URL_KEY, DB_HOST_KEY, DB_PORT_KEY, DB_NAME_KEY, RETIRED_ADMIN_URL_KEYS, BUNDLED_ADMIN_URL_KEY, BUNDLED_URL_NO_PASSWORD, DB_SETUP_DB_KEYS, dbSettingsProblems,
   APP_PASSWORD_KEY, APP_URL_EXPR, APP_PASSWORD_SHAPE, SENTINEL_APP_PW, BUNDLED_APP_URL, OWNER_PASSWORD_SENTINELS,
   adminUrlPlacementProblems, composeFilesInRepo, ADMIN_URL_SCAN_ROOTS,
   DB_HARDEN_SERVICE, ADMIN_SERVICES, HARDEN_TIMEOUT_KEY, HARDEN_TIMEOUT_EXPR, HARDEN_ENTRYPOINT, dbHardenProblems, hardenTimeoutOk,

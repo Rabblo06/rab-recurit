@@ -11,6 +11,13 @@
 #                      deploy compose gives rab-api and rab-worker the SAME image variable (CREWFLOW_IMAGE_TAG, a digest),
 #                      no build, and the Worker starts after a healthy API (restart: true). ci-security.yaml's deployment-config job
 #                      keeps running verify-image-compose.cjs and compose-credential-isolation.cjs.
+#   db-setup-capability  (NOT a required check yet; owner decision pending on making it one) the live harness of the
+#                      bootstrap child against disposable PostgreSQL 16 containers, one at a time, memory-capped
+#                      (scripts/owner-login/fallback-check/run-fallback-check.sh): the pre-hashed path (P1, P2), a server
+#                      that refuses pre-hashed passwords (a test-only C extension built here: N1 passwordless NOLOGIN role +
+#                      steps, N2 the printed SQL), PgBouncer in transaction mode refused by capability (B1, B2) and
+#                      PG_ADMIN_DIRECT_URL (B3), and a pg_hba that trusts crewflow_owner refused (T1). Secrets are generated
+#                      per run and never printed.
 # The owner-login integration suites (packages/rab-server/src/database/typeorm/scripts/twenty-mode-check.ts, lifecycle /
 # transition) run in ci-twenty-tests.yaml (Agent 5), not here: this workflow never reports a suite it does not run.
 name: CI owner-login deployment
@@ -32,6 +39,8 @@ on:
       - packages/rab-docker/staging/verify-image-compose*.cjs
       - .github/workflows/ci-deployment-owner-login.yaml
       - .nvmrc
+      - packages/rab-docker/rab/db-setup.sh
+      - packages/rab-server/src/database/typeorm/scripts/owner-login/**
   push:
     branches: [main, deploy/twenty-mode-a]
     paths:
@@ -49,6 +58,8 @@ on:
       - packages/rab-docker/staging/verify-image-compose*.cjs
       - .github/workflows/ci-deployment-owner-login.yaml
       - .nvmrc
+      - packages/rab-docker/rab/db-setup.sh
+      - packages/rab-server/src/database/typeorm/scripts/owner-login/**
   workflow_dispatch:
 
 permissions:
@@ -140,3 +151,18 @@ jobs:
         run: |
           node --test packages/rab-docker/scripts/compose-one-image.test.cjs
           node packages/rab-docker/scripts/compose-one-image.cjs
+
+  db-setup-capability:
+    name: db-setup by capability (live PostgreSQL 16; not required)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/yarn-install
+      - uses: ./.github/actions/restore-cache
+      - name: Build the workspace libraries (the harness imports them)
+        run: npx nx run-many -t build -p rab-shared,rab-emails
+      - name: db-setup capability harness (P1, P2, N1, N2, B1-B3, T1)
+        run: bash packages/rab-server/src/database/typeorm/scripts/owner-login/fallback-check/run-fallback-check.sh "$GITHUB_WORKSPACE" "$RUNNER_TEMP/fbc"
