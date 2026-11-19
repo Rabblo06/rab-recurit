@@ -641,6 +641,9 @@ test('DENIAL option A: db-setup missing, on another image, with another entrypoi
   m.services['db-setup'].entrypoint[2] = m.services['db-setup'].entrypoint[2].replace('exec ./db-setup.sh', 'exec ./api-prestart.sh');
   refused(m, /db-setup: entrypoint is neither/);
   m = good();
+  m.services['db-setup'].entrypoint[2] = waitWrapperScript();
+  refused(m, /db-setup: entrypoint is neither/); // security review L3: a single `$` would be interpolated by Compose
+  m = good();
   m.services['db-setup'].environment.CREWFLOW_DB_WAIT_SECONDS = '${CREWFLOW_DB_WAIT_SECONDS:-5}';
   refused(m, /db-setup: CREWFLOW_DB_WAIT_SECONDS is not the committed/);
   m = good();

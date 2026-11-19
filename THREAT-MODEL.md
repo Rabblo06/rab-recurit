@@ -9430,7 +9430,7 @@ Reversal:   Upgrade / `resolutions` override (documented in "//resolutions") as 
 - **What changed.** `docker-compose.production.yml` / `docker-compose.image.yml`: db-setup has no `depends_on`, rab-api no
   longer depends on `db` (it keeps db-setup `service_completed_successfully` and rab-redis `service_healthy`). OpenShip
   (v0.9.12+) skipped db-setup when `db` had no container (`CREWFLOW_BUNDLED_DB=0`). db-setup now waits, bounded
-  (`CREWFLOW_DB_WAIT_SECONDS`, default 300, 0-900), for the database it uses: Twenty's Helm wait-for-db init container,
+  (`CREWFLOW_DB_WAIT_SECONDS`, default 170, 0-900), for the database it uses: Twenty's Helm wait-for-db init container,
   re-implemented. The block lives in `rab/db-setup.sh` and, byte-identical, in a compose wrapper (`/bin/sh -c '<block>;
   exec ./db-setup.sh'`) because the published 0.6.0 image has no wait. Gates: `scripts/db-setup-wait.cjs` (shared by
   compose-owner-login, compose-credential-isolation, compose-one-image, verify-image-compose).
@@ -9447,12 +9447,23 @@ Reversal:   Upgrade / `resolutions` override (documented in "//resolutions") as 
   `no pg_hba.conf entry ... crewflow_wait_for_db ... no encryption` FATAL (bundled db: hostssl only) or an authentication
   start per successful probe; nothing is authorised, so the admin-connection audit (run-db-setup-tests.cjs) is unchanged.
 - **Fail closed.** Timeout: one fixed line, exit 70, nothing changed (the child never ran; rab-api is not started).
-  An invalid bound: exit 64 before anything connects. A setting db-setup.sh refuses (both URLs, neither with
-  CREWFLOW_BUNDLED_DB=0, the bundled db without its password, an unparseable URL) is not waited for: the refusal is
-  immediate. TERM during the wait exits 143 at once. The wrapper is checked exactly (any edit fails the gates).
+  An invalid bound: exit 64 before anything connects. Not waited for: a bad CREWFLOW_BUNDLED_DB, both URLs, neither with
+  CREWFLOW_BUNDLED_DB=0, the bundled db without its password, an unparseable URL. Correction (review L2): in the compose
+  wrapper ONLY those CREWFLOW_BUNDLED_DB / URL-presence checks come before the wait; db-setup.sh's own preamble refusals
+  (arguments, PG_DATABASE_PASSWORD or APP_SECRET present, the run lock) run after it, so with an unreachable database
+  such a setting is reported only after the bound. TERM during the wait exits 143 at once. The wrapper is checked
+  exactly (any edit fails the gates), and as Compose text every `$` must be doubled (review L3: a single `$` would be
+  interpolated by Compose).
 - **Residual (OpenShip).** OpenShip waits at most 180 s (db-setup has no health check) for db-setup to complete before it
-  fails rab-api; a database slower than that means a redeploy (api-prestart.sh's own 120 s wait for db-setup's files is
-  unchanged). OpenShip ignores `deploy.replicas`, so `CREWFLOW_BUNDLED_DB=0` there needs the db service switched off in
+  fails rab-api. The default bound is therefore 170 s (review L1): on a dead database db-setup exits 70 with its own fixed
+  line inside that window, so the operator sees the cause, not only OpenShip's timeout; a slower database means a
+  redeploy (api-prestart.sh's own 120 s wait for db-setup's files is unchanged). A larger CREWFLOW_DB_WAIT_SECONDS gives
+  that up on OpenShip.
+- **Follow-up (review L2, not in this PR).** db-setup removes the previous `target.json` only once its child holds the run
+  lock, i.e. AFTER the wait. While db-setup waits, a platform that does not honour service_completed_successfully could
+  start rab-api, whose api-prestart.sh would read the PREVIOUS run's target and password files. They describe the last
+  good setup (same login, no admin URL), so nothing leaks, but api-prestart.sh should check that the target is fresh
+  (written by the current db-setup run) before it uses it. OpenShip ignores `deploy.replicas`, so `CREWFLOW_BUNDLED_DB=0` there needs the db service switched off in
   OpenShip; otherwise the bundled db starts without a password, refuses (exit 64) and restarts, while db-setup and the app
   use your database regardless.
 - **Tests.** run-prestart-shell-tests.cjs section 15 (slow database 57P03 then ready, unreachable timeout, 28000 counts as

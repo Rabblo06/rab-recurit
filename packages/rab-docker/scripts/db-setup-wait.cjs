@@ -18,8 +18,10 @@ const path = require('node:path');
 const DB_SETUP_SH = path.resolve(__dirname, '..', 'rab', 'db-setup.sh');
 const WAIT_BLOCK = /# BEGIN crewflow wait-for-db\n[\s\S]*?# END crewflow wait-for-db\n/;
 const WAIT_SECONDS_KEY = 'CREWFLOW_DB_WAIT_SECONDS';
-const WAIT_SECONDS_EXPR = '${CREWFLOW_DB_WAIT_SECONDS:-300}';
-const WAIT_SECONDS_DEFAULT = '300';
+const WAIT_SECONDS_EXPR = '${CREWFLOW_DB_WAIT_SECONDS:-170}';
+// Security review L1: below OpenShip's 180 s window for a service_completed_successfully dependency without a health check.
+const WAIT_SECONDS_DEFAULT = '170';
+const OPENSHIP_DEPENDENCY_WINDOW_SECONDS = 180;
 const WAIT_SECONDS_MAX = 900;
 
 /** The wait block of a shell text (BEGIN line through END line), or null. */
@@ -42,6 +44,11 @@ function waitWrapperScript() {
 
 /** Compose writes a literal `$` as `$$` (in the file and in `docker compose config`); the block has no `$$` of its own. */
 const unescapeCompose = (s) => String(s ?? '').split('$$').join('$');
+/**
+ * Security review L3: the wrapper as Compose text has EVERY `$` doubled. A single `$` there would be an interpolation
+ * (Compose substitutes it before the container starts), so such a wrapper is refused even if its unescaped text matched.
+ */
+const allDollarsEscaped = (s) => !String(s ?? '').split('$$').join('').includes('$');
 
 /**
  * Which start a db-setup entrypoint is: 'plain' = exactly ["./db-setup.sh"] (dev and QA, which keep depends_on: db and
@@ -51,14 +58,14 @@ function dbSetupEntrypointForm(entrypoint) {
   if (!Array.isArray(entrypoint)) return null;
   if (entrypoint.length === 1 && entrypoint[0] === './db-setup.sh') return 'plain';
   if (entrypoint.length === 4 && entrypoint[0] === '/bin/sh' && entrypoint[1] === '-c' && entrypoint[3] === 'db-setup'
-    && unescapeCompose(entrypoint[2]) === waitWrapperScript()) return 'wait';
+    && allDollarsEscaped(entrypoint[2]) && unescapeCompose(entrypoint[2]) === waitWrapperScript()) return 'wait';
   return null;
 }
 
 /**
  * db-setup's start and dependencies in one rendered (or parsed) model. Pure; returns problem texts (service and key names
  * only). `requireWait`: the file must use the wrapper (production and image: no dependency on a db that may not exist).
- *   - 'wait': no depends_on at all, and CREWFLOW_DB_WAIT_SECONDS committed exactly as ${CREWFLOW_DB_WAIT_SECONDS:-300}
+ *   - 'wait': no depends_on at all, and CREWFLOW_DB_WAIT_SECONDS committed exactly as ${CREWFLOW_DB_WAIT_SECONDS:-170}
  *     (rendered: `renderedWait`, the value expected after interpolation; undefined = the raw expression; null = any value
  *     db-setup.sh accepts, for a deployed model rendered with the operator's compose.env);
  *   - 'plain': depends_on exactly a healthy db (the file's own ordering; allowed only without requireWait);
@@ -90,7 +97,7 @@ function dbSetupStartProblems(services, { requireWait = false, renderedWait, whe
   return out;
 }
 
-/** compose.env's CREWFLOW_DB_WAIT_SECONDS: empty (= 300) or a whole number 0-900, as db-setup.sh accepts it. */
+/** compose.env's CREWFLOW_DB_WAIT_SECONDS: empty (= 170) or a whole number 0-900, as db-setup.sh accepts it. */
 function waitSecondsProblem(value) {
   const v = String(value ?? '');
   if (v === '') return null;
@@ -103,10 +110,12 @@ module.exports = {
   WAIT_SECONDS_KEY,
   WAIT_SECONDS_EXPR,
   WAIT_SECONDS_DEFAULT,
+  OPENSHIP_DEPENDENCY_WINDOW_SECONDS,
   waitBlock,
   committedWaitBlock,
   waitWrapperScript,
   unescapeCompose,
+  allDollarsEscaped,
   dbSetupEntrypointForm,
   dbSetupStartProblems,
   waitSecondsProblem,

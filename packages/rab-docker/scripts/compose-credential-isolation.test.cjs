@@ -158,7 +158,7 @@ test('db-setup wait-for-db: the wrapper with no depends_on passes; with depends_
   const wrapped = () => {
     const s = partA();
     s['db-setup'].entrypoint = ['/bin/sh', '-c', wait.waitWrapperScript().split('$').join('$$'), 'db-setup'];
-    s['db-setup'].environment.CREWFLOW_DB_WAIT_SECONDS = '300';
+    s['db-setup'].environment.CREWFLOW_DB_WAIT_SECONDS = wait.WAIT_SECONDS_DEFAULT;
     delete s['db-setup'].depends_on;
     return s;
   };
@@ -171,6 +171,11 @@ test('db-setup wait-for-db: the wrapper with no depends_on passes; with depends_
     [(s) => { s['db-setup'].entrypoint[2] = s['db-setup'].entrypoint[2].replace('exec ./db-setup.sh', 'exec ./db-setup.sh; true'); }, /db-setup runs exactly/],
     [(s) => { s['rab-api'] = { depends_on: { db: { condition: 'service_healthy' } } }; }, /rab-api: depends on db/],
     [(s) => { delete s['db-setup'].environment.CREWFLOW_DB_WAIT_SECONDS; }, /CREWFLOW_DB_WAIT_SECONDS is missing/],
+    // Security review L3: as Compose text every `$` of the wrapper is doubled; a single `$` (which Compose would interpolate)
+    // is refused even though its unescaped text equals the block.
+    [(s) => { s['db-setup'].entrypoint[2] = wait.waitWrapperScript(); }, /db-setup runs exactly \.\/db-setup\.sh or exactly the wait-for-db wrapper/],
+    [(s) => { s['db-setup'].entrypoint[2] = s['db-setup'].entrypoint[2].replace('$$', '$'); }, /db-setup runs exactly/],
+    [(s) => { s['db-setup'].entrypoint[2] = s['db-setup'].entrypoint[2].replace('$$', () => '$$$'); }, /db-setup runs exactly/],
   ]) {
     const s = wrapped();
     edit(s);

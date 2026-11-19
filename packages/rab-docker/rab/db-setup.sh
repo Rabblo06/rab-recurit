@@ -31,7 +31,7 @@
 # target file and the temp files a killed run left. This script releases the directory on exit, only when the owner token
 # in it is its own; the kernel releases the flock however the processes end. The password file is
 # never removed here (it is the credential of an existing role). Before the child, it waits (bounded, CREWFLOW_DB_WAIT_SECONDS,
-# default 300 s) until the database accepts connections (BEGIN crewflow wait-for-db below; db-setup has no depends_on: db).
+# default 170 s) until the database accepts connections (BEGIN crewflow wait-for-db below; db-setup has no depends_on: db).
 # Exit 0 = done; 64 = refusal; anything else = failure (70 among them: the database did not accept connections in time)
 # (rab-api is not started: depends_on service_completed_successfully, and its own bounded wait).
 # Prints fixed lines only (the child's): never a URL, a password, a host or a database name. Never traces the shell.
@@ -96,12 +96,16 @@ fi
 # placeholder login (crewflow_wait_for_db), no TLS and no password; an authentication request or any error other than 57P03
 # (starting up / shutting down) means the server accepts connections. It never authenticates, never runs a query and reads
 # nothing but the URL's host and port; the bootstrap child then makes the real verify-full connection. Bounded by
-# CREWFLOW_DB_WAIT_SECONDS (unset or empty = 300; 0 = do not wait; at most 900) on the monotonic clock; a progress line
+# CREWFLOW_DB_WAIT_SECONDS (unset or empty = 170; 0 = do not wait; at most 900) on the monotonic clock; a progress line
 # whenever the result changes and every 10 s; on timeout ONE fixed line and exit 70 (a failure, like the bootstrap child's own
 # "did not accept a connection" 70; 64 stays for settings the operator must change, such as an invalid
-# CREWFLOW_DB_WAIT_SECONDS). Prints no URL, host, login, password or database name. A setting db-setup.sh refuses (both URLs,
-# neither with CREWFLOW_BUNDLED_DB=0, the bundled db without its password, an unparseable URL) is not waited for: the refusal
-# comes at once. Safe to run twice: the same block runs in docker-compose.production.yml / docker-compose.image.yml (the
+# CREWFLOW_DB_WAIT_SECONDS). The default 170 s stays inside OpenShip's 180 s window for a service_completed_successfully
+# dependency without a health check (security review L1), so on a dead database db-setup fails with its own line first.
+# Prints no URL, host, login, password or database name. Not waited for (the refusal or the child's check comes at once):
+# a bad CREWFLOW_BUNDLED_DB, both URLs, neither with CREWFLOW_BUNDLED_DB=0, the bundled db without its password, an
+# unparseable URL. In the compose wrapper ONLY those come before the wait: db-setup.sh's own preamble refusals (arguments,
+# PG_DATABASE_PASSWORD or APP_SECRET present, the run lock) run after it (review L2). Safe to run twice: the same block
+# runs in docker-compose.production.yml / docker-compose.image.yml (the
 # published image's db-setup.sh has no wait) and again here (run-prestart-shell-tests.cjs and compose-owner-login.cjs
 # require the copies to be identical).
 crewflow_wait_for_db() {
@@ -113,12 +117,12 @@ crewflow_wait_for_db() {
     crewflow_wait_url="${CREWFLOW_BUNDLED_DB_ADMIN_URL:-}"
     case "$crewflow_wait_url" in '' | postgresql://postgres:@*) crewflow_wait_url=''; return 0 ;; esac
   fi
-  case "${CREWFLOW_DB_WAIT_SECONDS:-300}" in
+  case "${CREWFLOW_DB_WAIT_SECONDS:-170}" in
     *[!0-9]* | ????*) crewflow_wait_limit=invalid ;;
-    *) crewflow_wait_limit="${CREWFLOW_DB_WAIT_SECONDS:-300}" ;;
+    *) crewflow_wait_limit="${CREWFLOW_DB_WAIT_SECONDS:-170}" ;;
   esac
   if [ "$crewflow_wait_limit" = invalid ] || [ "$crewflow_wait_limit" -gt 900 ]; then
-    echo 'db-setup: REFUSED - CREWFLOW_DB_WAIT_SECONDS must be a whole number of seconds from 0 to 900 (unset = 300; 0 = do not wait). Value not shown.' >&2
+    echo 'db-setup: REFUSED - CREWFLOW_DB_WAIT_SECONDS must be a whole number of seconds from 0 to 900 (unset = 170; 0 = do not wait). Value not shown.' >&2
     exit 64
   fi
   if [ "$crewflow_wait_limit" -eq 0 ]; then crewflow_wait_url=''; return 0; fi
