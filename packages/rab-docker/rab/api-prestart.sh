@@ -319,7 +319,7 @@ crewflow_bundled_db_ca() {
 }
 # END crewflow bundled-db CA
 if [ -z "${PG_DATABASE_URL:-}" ]; then
-  refuse 'PG_DATABASE_URL is empty: it is the crewflow_owner URL (bundled db: set PG_DATABASE_APP_PASSWORD, openssl rand -hex 32; your own database: your crewflow_owner URL, direct host, sslmode=verify-full). Refusing to start.'
+  refuse 'PG_DATABASE_URL is empty: it is the crewflow_owner URL (bundled db: set PG_DATABASE_APP_PASSWORD, openssl rand -hex 32; your own database: your crewflow_owner URL, direct host, sslmode require, verify-ca or verify-full (all verified fully)). Refusing to start.'
 fi
 case "$PG_DATABASE_URL" in
   *://crewflow_owner:@*)

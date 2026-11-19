@@ -19,7 +19,7 @@ import {
   bootstrapDriverConfigs,
   bootstrapOwnerWithIo,
   PASSWORD_REQUIRED_SQLSTATES,
-  wrongPasswordCheckDue,
+  OWNER_APP_PASSWORD_PATTERN,
   doBlockStage,
   isPasswordFormRefusal,
   PASSWORD_FORM_REFUSAL_SQLSTATES,
@@ -72,6 +72,7 @@ import {
   OWNER_BOOTSTRAP_L1_LOCK_TIMEOUT,
   OWNER_AWAITING_PASSWORD_MARK,
   OWNER_SET_PASSWORD_SQL,
+  OWNER_RESET_PASSWORD_SQL,
   awaitingMarkShapeSql,
   awaitingMarkValidSql,
   OWNER_BOOTSTRAP_NO_PASSWORD_STATEMENTS,
@@ -822,6 +823,33 @@ describe('owner bootstrap: the whole step without a database', () => {
     expect(text).not.toMatch(/postgres(ql)?:\/\/[^\s)]*@/i);
   };
 
+  it('SQL audit of #259: the mode-c weak-password refusal (production) prints the safe password step, never a top-level ALTER ROLE ... PASSWORD', async () => {
+    const lines: string[] = [];
+    const result = await runOwnerBootstrap(
+      { PG_DATABASE_URL: 'postgres://crewflow_owner:changeme@db.internal.example:5432/crewflow_unit', NODE_ENV: 'production' },
+      { log: (l) => lines.push(l), retryWindowMs: 0 },
+    );
+    expect(result.exitCode).toBe(64);
+    expect(lines).toEqual([
+      DB_SETUP_INPUT_MESSAGES.weakPasswordProduction,
+      OWNER_BOOTSTRAP_MESSAGES.resetPasswordStep,
+      ...OWNER_RESET_PASSWORD_SQL.flatMap((st) => st.split('\n')).map((l) => `  ${l}`),
+      OWNER_BOOTSTRAP_MESSAGES.passwordVisibilityStep,
+    ]);
+    expect(DB_SETUP_INPUT_MESSAGES.weakPasswordProduction).toBe(
+      'The crewflow_owner password inside PG_DATABASE_URL is too weak for production: it must be at least 32 characters with at least 10 different characters. As your admin, set a strong one (openssl rand -hex 32) with the SQL db-setup prints below (never a top-level ALTER ROLE ... PASSWORD, which a server log can quote) and put it in PG_DATABASE_URL, or set PG_ADMIN_URL so db-setup sets it. Refusing.',
+    );
+    expect(OWNER_RESET_PASSWORD_SQL[0]).toBe('BEGIN;');
+    expect(OWNER_RESET_PASSWORD_SQL[1]).toBe("SELECT pg_catalog.set_config('crewflow.pw', '<PG_DATABASE_APP_PASSWORD>', true);");
+    expect(OWNER_RESET_PASSWORD_SQL[2]).toBe(OWNER_SET_PASSWORD_SQL[2].replace(
+      "    EXECUTE pg_catalog.format('ALTER ROLE crewflow_owner LOGIN PASSWORD %L', v_pw);\n    COMMENT ON ROLE crewflow_owner IS NULL;",
+      "    EXECUTE pg_catalog.format('ALTER ROLE crewflow_owner PASSWORD %L', v_pw);",
+    ));
+    expect(OWNER_RESET_PASSWORD_SQL[2]).not.toContain('<PG_DATABASE_APP_PASSWORD>');
+    expect(OWNER_RESET_PASSWORD_SQL[3]).toBe('COMMIT;');
+    expect(lines.filter((l) => /^\s*ALTER ROLE/.test(l))).toEqual([]);
+  });
+
   it('DENIAL: every input refusal is exit 64 BEFORE any connection, createRole "not-run", no secret in the log or the result line', async () => {
     const other = `postgres://dbadmin:${ADMIN_PW}@db.internal.example:5432/another_db`;
     const cases: Array<[string, Record<string, string>, string]> = [
@@ -878,6 +906,12 @@ describe('owner bootstrap: the whole step without a database', () => {
         DB_SETUP_INPUT_MESSAGES.weakPasswordProduction,
       ],
       ['only the legacy DATABASE_URL', { DATABASE_URL: APP_URL }, DB_SETUP_INPUT_MESSAGES.appUrlMissing],
+      // Re-review (a) of #259: modes a and b create or set this password, so only A-Z a-z 0-9 _ - (decoded), refused before connecting.
+      ...(["'", '$$', '%27', '%5C'] as const).map((bad): [string, Record<string, string>, string] => [
+        `an admin URL and a crewflow_owner password holding ${bad}`,
+        { PG_DATABASE_URL: `postgres://crewflow_owner:${OWNER_PW}${bad}@db.internal.example:5432/crewflow_unit`, PG_ADMIN_URL: ADMIN_URL },
+        OWNER_BOOTSTRAP_MESSAGES.appPasswordCharset,
+      ]),
     ];
     for (const [label, env, message] of cases) {
       const { result, text } = await run(env);
@@ -1714,25 +1748,53 @@ describe('owner decision 2026-11-19, option 1 "Create login, you set password": 
     expect(OWNER_BOOTSTRAP_MESSAGES.verifierRefused('commit', 'XX000')).toBe(
       'The server refused a pre-hashed password (SQLSTATE XX000 at COMMIT). Crewflow never sends a plain-text password.',
     );
-    // Independent review M1 of #259: the step is one DO block (LOGIN + password + the mark removed), pinned here exactly.
-    expect(OWNER_SET_PASSWORD_SQL).toBe(
-      "DO $$BEGIN EXECUTE pg_catalog.format('ALTER ROLE crewflow_owner LOGIN PASSWORD %L', '<PG_DATABASE_APP_PASSWORD>'); COMMENT ON ROLE crewflow_owner IS NULL; END$$;",
-    );
-    expect(OWNER_BOOTSTRAP_MESSAGES.setPasswordStep).toBe(
-      "Set crewflow_owner's password once in your database provider's SQL editor, connected to this database as your admin login, with exactly this statement, replacing <PG_DATABASE_APP_PASSWORD> with that value (32+ characters, openssl rand -hex 32; if you set PG_DATABASE_URL yourself, the password inside it; never a console password reset, which generates a different, shorter password): DO $$BEGIN EXECUTE pg_catalog.format('ALTER ROLE crewflow_owner LOGIN PASSWORD %L', '<PG_DATABASE_APP_PASSWORD>'); COMMENT ON ROLE crewflow_owner IS NULL; END$$; Then redeploy: db-setup checks the login and continues.",
-    );
-    expect(OWNER_BOOTSTRAP_MESSAGES.passwordVisibilityStep).toBe(
-      "The value you type can remain in the server log (log_statement = all), in pg_stat_statements, in pg_stat_activity while it runs, and in your provider's own logs and SQL-editor history. If pg_stat_statements is installed, run SELECT pg_stat_statements_reset(); afterwards where you are permitted to; otherwise treat the value as visible to anyone who can read query statistics.",
-    );
-    // The SET log_statement advice is gone (it needs superuser).
-    for (const step of [OWNER_BOOTSTRAP_MESSAGES.setPasswordStep, OWNER_BOOTSTRAP_MESSAGES.manualRoleStep]) expect(step).not.toContain('SET log_statement');
+    // Re-review N1 of #259: the value only in the set_config line; the DO block reads it from the setting. Pinned exactly.
+    const doHead = `DO $$
+DECLARE
+  v_pw text := pg_catalog.current_setting('crewflow.pw', true);
+BEGIN
+  IF v_pw IS NULL OR v_pw = '' THEN
+    RAISE EXCEPTION 'crewflow password step: run all lines together in one go, inside one transaction';
+  END IF;
+  BEGIN
+`;
+    const doTail = `  EXCEPTION WHEN OTHERS THEN
+    RAISE EXCEPTION 'crewflow password step failed (%)', SQLSTATE;
+  END;
+END$$;`;
+    expect([...OWNER_SET_PASSWORD_SQL]).toEqual([
+      'BEGIN;',
+      "SELECT pg_catalog.set_config('crewflow.pw', '<PG_DATABASE_APP_PASSWORD>', true);",
+      `${doHead}    EXECUTE pg_catalog.format('ALTER ROLE crewflow_owner LOGIN PASSWORD %L', v_pw);
+    COMMENT ON ROLE crewflow_owner IS NULL;
+${doTail}`,
+      'COMMIT;',
+    ]);
     expect([...OWNER_MANUAL_ROLE_SQL]).toEqual([
       'BEGIN;',
       "SET LOCAL createrole_self_grant = '';",
-      "DO $$BEGIN EXECUTE pg_catalog.format('CREATE ROLE crewflow_owner LOGIN NOSUPERUSER NOBYPASSRLS NOREPLICATION NOCREATEDB CREATEROLE INHERIT PASSWORD %L', '<PG_DATABASE_APP_PASSWORD>'); END$$;",
+      "SELECT pg_catalog.set_config('crewflow.pw', '<PG_DATABASE_APP_PASSWORD>', true);",
+      `${doHead}    EXECUTE pg_catalog.format('CREATE ROLE crewflow_owner LOGIN NOSUPERUSER NOBYPASSRLS NOREPLICATION NOCREATEDB CREATEROLE INHERIT PASSWORD %L', v_pw);
+${doTail}`,
       "DO $grant$ BEGIN EXECUTE pg_catalog.format('GRANT CONNECT, CREATE, TEMPORARY ON DATABASE %I TO crewflow_owner WITH GRANT OPTION', pg_catalog.current_database()); END $grant$;",
       'COMMIT;',
     ]);
+    // No DO block holds the placeholder (so never the value): only the one set_config line of each step does.
+    for (const steps of [OWNER_SET_PASSWORD_SQL, OWNER_MANUAL_ROLE_SQL]) {
+      for (const st of steps.filter((x) => x.startsWith('DO '))) expect(st).not.toContain('<PG_DATABASE_APP_PASSWORD>');
+      expect(steps.filter((x) => x.includes('<PG_DATABASE_APP_PASSWORD>'))).toEqual(["SELECT pg_catalog.set_config('crewflow.pw', '<PG_DATABASE_APP_PASSWORD>', true);"]);
+    }
+    expect(OWNER_BOOTSTRAP_MESSAGES.setPasswordStep).toBe(
+      "Set crewflow_owner's password once in your database provider's SQL editor (or psql), connected to this database as your admin login, with exactly the SQL below, replacing <PG_DATABASE_APP_PASSWORD> with that value (32+ characters of A-Z a-z 0-9 _ -, openssl rand -hex 32; if you set PG_DATABASE_URL yourself, the password inside it; never a console password reset, which generates a different, shorter password). Run all the lines below together in one go, in one session (they are one transaction; psql sends each statement on its own). If your SQL editor runs lines one at a time, each in its own transaction, use psql instead. Then redeploy: db-setup checks the login and continues.",
+    );
+    expect(OWNER_BOOTSTRAP_MESSAGES.manualRoleStep).toBe(
+      "Create crewflow_owner once in your database provider's SQL editor (or psql), connected to this database as your admin login, with exactly the SQL below; replace <PG_DATABASE_APP_PASSWORD> with that value (32+ characters of A-Z a-z 0-9 _ -, openssl rand -hex 32; if you set PG_DATABASE_URL yourself, the password inside it). Run all the lines below together in one go, in one session (they are one transaction; psql sends each statement on its own). If your SQL editor runs lines one at a time, each in its own transaction, use psql instead. Then redeploy: db-setup then only checks the login and handles CREATEROLE.",
+    );
+    expect(OWNER_BOOTSTRAP_MESSAGES.passwordVisibilityStep).toBe(
+      "The value you type is only in the set_config line. It can remain in the server log (log_statement = all, or any error on these statements: an editor that sends all lines as one message has all of them quoted), in pg_stat_statements when pg_stat_statements.track = all (the ALTER / CREATE ROLE run inside the DO block; the default, top, records it without the value), in pg_stat_activity while it runs, and in your provider's own logs and SQL-editor history. If pg_stat_statements is installed, run SELECT pg_stat_statements_reset(); afterwards where you are permitted to; otherwise treat the value as visible to anyone who can read query statistics.",
+    );
+    // The SET log_statement advice is gone (it needs superuser).
+    for (const step of [OWNER_BOOTSTRAP_MESSAGES.setPasswordStep, OWNER_BOOTSTRAP_MESSAGES.manualRoleStep]) expect(step).not.toContain('SET log_statement');
     // The printed SQL creates exactly OWNER_BOOTSTRAP_Q4C_DO's attributes and grant.
     expect(OWNER_BOOTSTRAP_Q4C_DO).toContain('CREATE ROLE crewflow_owner LOGIN NOSUPERUSER NOBYPASSRLS NOREPLICATION NOCREATEDB CREATEROLE INHERIT PASSWORD %L');
     expect(OWNER_BOOTSTRAP_Q4C_DO).toContain('GRANT CONNECT, CREATE, TEMPORARY ON DATABASE %I TO crewflow_owner WITH GRANT OPTION');
@@ -1753,6 +1815,7 @@ describe('owner decision 2026-11-19, option 1 "Create login, you set password": 
       OWNER_BOOTSTRAP_MESSAGES.verifierRefused('commit', 'XX000'),
       OWNER_BOOTSTRAP_MESSAGES.passwordlessCreated,
       OWNER_BOOTSTRAP_MESSAGES.setPasswordStep,
+      ...OWNER_SET_PASSWORD_SQL.flatMap((st) => st.split('\n')).map((l) => `  ${l}`),
       OWNER_BOOTSTRAP_MESSAGES.passwordVisibilityStep,
       OWNER_BOOTSTRAP_MESSAGES.awaitingPassword,
     ]);
@@ -1800,7 +1863,7 @@ describe('owner decision 2026-11-19, option 1 "Create login, you set password": 
       OWNER_BOOTSTRAP_MESSAGES.verifierRefused('commit', 'XX000'),
       OWNER_BOOTSTRAP_MESSAGES.passwordlessRefused('commit', 'XX000'),
       OWNER_BOOTSTRAP_MESSAGES.manualRoleStep,
-      ...OWNER_MANUAL_ROLE_SQL.map((l) => `  ${l}`),
+      ...OWNER_MANUAL_ROLE_SQL.flatMap((st) => st.split('\n')).map((l) => `  ${l}`),
       OWNER_BOOTSTRAP_MESSAGES.passwordVisibilityStep,
       OWNER_BOOTSTRAP_MESSAGES.awaitingManualRole,
     ]);
@@ -1966,7 +2029,7 @@ describe('security re-review N1 / N2 of #259', () => {
 });
 
 
-describe('independent review of #259 (L1, L2, L3, L4, I5)', () => {
+describe('independent review of #259 (L1, L2, L3, I5) and its re-review (N2, N5, a)', () => {
   it('the mark SQL: shape by regex, expiry compared with the SERVER clock, nothing cast before the shape matches', () => {
     expect(awaitingMarkShapeSql('c')).toBe("COALESCE(c OPERATOR(pg_catalog.~) '^crewflow:awaiting-password:[0-9]{1,12}$', false)");
     expect(awaitingMarkValidSql('c')).toContain('CASE WHEN');
@@ -2025,29 +2088,37 @@ describe('independent review of #259 (L1, L2, L3, L4, I5)', () => {
     expect(typeof io.verifier).toBe('function');
   });
 
-  it('L4: a run with nothing to change (a marked or hardened role that logs in) makes ZERO wrong-password probes and says so', async () => {
+  it('re-review N2: every run that logs in runs the wrong-password check right after the successful login (marked or hardened role)', async () => {
     for (const facts of [{ ...existing, oCreateRolePending: true }, { ...existing, oCreateRole: false }]) {
-      let wrong = 0;
-      const { io, lines, texts } = fakeIo([facts], [{ ok: true }]);
+      const order: string[] = [];
+      const { io, texts } = fakeIo([facts], [{ ok: true }]);
+      const real = io.probeOwner;
+      io.probeOwner = async () => {
+        order.push('real');
+        return real();
+      };
       io.probeWrongPassword = async () => {
-        wrong += 1;
+        order.push('wrong');
         return { ok: false, code: '28P01' };
       };
       expect(await bootstrapOwnerWithIo(io)).toMatchObject({ outcome: 'unchanged', exitCode: 0 });
-      expect(wrong).toBe(0);
-      expect(lines).toContain(OWNER_BOOTSTRAP_MESSAGES.wrongPasswordProbeSkipped);
+      expect(order).toEqual(['real', 'wrong']);
       expect(texts()).not.toContain(OWNER_BOOTSTRAP_BEGIN);
     }
   });
 
-  it('L4: the check is due while the schema bootstrap is pending (CREATEROLE unmarked: new, adopted, or just made LOGIN) or a stale mark is left; never otherwise', () => {
-    expect(wrongPasswordCheckDue({ oCreateRole: true, oCreateRolePending: false, oStaleAwaitingMark: false })).toBe(true);
-    expect(wrongPasswordCheckDue({ oCreateRole: false, oCreateRolePending: false, oStaleAwaitingMark: true })).toBe(true);
-    expect(wrongPasswordCheckDue({ oCreateRole: true, oCreateRolePending: true, oStaleAwaitingMark: false })).toBe(false);
-    expect(wrongPasswordCheckDue({ oCreateRole: false, oCreateRolePending: false, oStaleAwaitingMark: false })).toBe(false);
+  it('re-review N2: a hardened, unmarked role that logs in while a WRONG password also logs in is refused (64, serverIgnoresPassword), zero writes', async () => {
+    const hardened: OwnerFacts = { ...existing, oCreateRole: false, oCreateRolePending: false };
+    const { io, texts } = fakeIo([hardened], [{ ok: true }]);
+    io.probeWrongPassword = async () => ({ ok: true });
+    const error = await bootstrapOwnerWithIo(io).catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(OwnerBootstrapRefusal);
+    expect((error as Error).message).toBe(OWNER_BOOTSTRAP_MESSAGES.serverIgnoresPassword);
+    expect(texts()).not.toContain(OWNER_BOOTSTRAP_BEGIN);
+    expect(texts().filter((x) => /\b(ALTER|CREATE|GRANT|COMMENT)\b/.test(x) && x !== OWNER_BOOTSTRAP_Q2_FACTS)).toEqual([]);
   });
 
-  it('L4: after a creation the check runs once (post-commit); after a grant-only transaction it does not', async () => {
+  it('after a creation the check runs once more (post-commit, after the new login works); after a grant-only transaction only the pre-lock one', async () => {
     let wrong = 0;
     const created = fakeIo([base, base, { ...existing, oCreateRolePending: true }], [{ ok: true }]);
     created.io.probeWrongPassword = async () => {
@@ -2058,13 +2129,51 @@ describe('independent review of #259 (L1, L2, L3, L4, I5)', () => {
     expect(wrong).toBe(1);
     wrong = 0;
     const noGrant: OwnerFacts = { ...existing, oCreateRolePending: true, oHasDbGrant: false };
-    const grantOnly = fakeIo([noGrant, noGrant, { ...existing, oCreateRolePending: true }], [{ ok: false, code: '42501' }, { ok: false, code: '42501' }, { ok: true }]);
+    const grantOnly = fakeIo([noGrant, noGrant, { ...existing, oCreateRolePending: true }], [{ ok: true }, { ok: true }, { ok: true }]);
     grantOnly.io.probeWrongPassword = async () => {
       wrong += 1;
       return { ok: false, code: '28P01' };
     };
     await bootstrapOwnerWithIo(grantOnly.io);
-    expect(wrong).toBe(0);
+    expect(wrong).toBe(1);
+  });
+
+  it('re-review N5: the expired-mark refusal prints the password step and where the value can remain', async () => {
+    const { io, lines } = fakeIo([{ ...existing, oLogin: false, oAwaitingMarkExpired: true }], [{ ok: true }]);
+    await expect(bootstrapOwnerWithIo(io)).rejects.toThrow(OWNER_BOOTSTRAP_MESSAGES.awaitingMarkExpired);
+    expect(lines).toEqual([
+      OWNER_BOOTSTRAP_MESSAGES.setPasswordStep,
+      ...OWNER_SET_PASSWORD_SQL.flatMap((st) => st.split('\n')).map((l) => `  ${l}`),
+      OWNER_BOOTSTRAP_MESSAGES.passwordVisibilityStep,
+    ]);
+    expect(OWNER_BOOTSTRAP_MESSAGES.foreignMembers).toContain('REVOKE crewflow_owner FROM <your admin login>');
+    expect(OWNER_BOOTSTRAP_MESSAGES.foreignMembers).toContain('SET or INHERIT');
+  });
+
+  it('re-review (a): the crewflow_owner password db-setup creates or sets is ^[A-Za-z0-9_-]{32,}$ only', () => {
+    expect(OWNER_APP_PASSWORD_PATTERN.source).toBe('^[A-Za-z0-9_-]{32,}$');
+    expect(OWNER_APP_PASSWORD_PATTERN.test('a'.repeat(31))).toBe(false);
+    expect(OWNER_APP_PASSWORD_PATTERN.test('0123456789abcdef0123456789abcdef')).toBe(true);
+    for (const bad of ["'", '$$', '\\', '%', ' ']) expect(OWNER_APP_PASSWORD_PATTERN.test(`ownerpw-0123456789-abcdefghij-KLMNOPQR${bad}`)).toBe(false);
+  });
+
+  it('owner SQL review (a): every printed admin-grant hint reads exactly the INHERIT FALSE, SET FALSE form; (b) a password change is logged once, no value', async () => {
+    const hint = 'GRANT crewflow_owner TO <admin> WITH ADMIN OPTION, INHERIT FALSE, SET FALSE;';
+    for (const text of [OWNER_BOOTSTRAP_MESSAGES.adminNoAdminOption, OWNER_BOOTSTRAP_MESSAGES.createRoleNoRights]) expect(text).toContain(hint);
+    for (const text of Object.values(OWNER_BOOTSTRAP_MESSAGES)) {
+      if (typeof text !== 'string') continue;
+      // Any other GRANT crewflow_owner TO in a printed text is the hint above, verbatim.
+      for (const m of text.match(/GRANT crewflow_owner TO [^;]*;/g) ?? []) expect(m).toBe(hint);
+    }
+    expect(OWNER_BOOTSTRAP_MESSAGES.passwordSet).toBe(
+      'db-setup CHANGED the crewflow_owner password: the password inside PG_DATABASE_URL did not log in, so crewflow_owner now uses it (set with the admin login, PG_ADMIN_URL). Anything else that used the old password no longer logs in. Value not shown.',
+    );
+    const { io, lines } = fakeIo([existing, existing, existing], [{ ok: false, code: '28P01' }, { ok: false, code: '28P01' }, { ok: true }]);
+    expect(await bootstrapOwnerWithIo(io)).toMatchObject({ outcome: 'updated', passwordSet: true, created: false });
+    expect(lines.filter((l) => l === OWNER_BOOTSTRAP_MESSAGES.passwordSet)).toHaveLength(1);
+    const created = fakeIo([base, base, { ...existing, oCreateRolePending: true }], [{ ok: true }]);
+    await bootstrapOwnerWithIo(created.io);
+    expect(created.lines).not.toContain(OWNER_BOOTSTRAP_MESSAGES.passwordSet);
   });
 
   it('I5: the "waiting for its password" branch of the DO block has its own SQLSTATE (55000) and message', () => {

@@ -14,7 +14,7 @@
 #   FBC_PORT_BASE    first host port, published on 127.0.0.1 only [47440]
 #
 # One PostgreSQL runs at a time. Groups, each from a fresh container:
-#   plain  PostgreSQL 16 with TLS (a per-run CA; server certificate for IP 127.0.0.1): P1, P2, Q1; then PgBouncer (transaction
+#   plain  PostgreSQL 16 with TLS (a per-run CA; server certificate for IP 127.0.0.1): P1, P2, Q1, H1; then PgBouncer (transaction
 #          pooling, defaults) in front of it: B1; then PgBouncer with ignore_startup_parameters=options: B2, B3
 #   sim    the same + refuse_prehashed.c (refuses pre-hashed role passwords at COMMIT, XX000, and, when switched on, any
 #          role without a password), EVERY statement logged with its parameters: N1, N2
@@ -48,7 +48,12 @@ STATUS=0
 cleanup() {
   docker rm -f "$PG_NAME" "$PGB_NAME" "$BUILD_NAME" >/dev/null 2>&1 || true
   docker network rm "$NET" >/dev/null 2>&1 || true
-  rm -rf "$W/certs" "$W/pgb" "$W/ext" "$W/pgbroot" "$W/hba"
+  # Files the build container wrote are handed back to this user (below); if a run stopped before that, remove them through
+  # a throwaway container of the same image (they belong to its root), never with sudo.
+  if ! rm -rf "$W/certs" "$W/pgb" "$W/ext" "$W/pgbroot" "$W/hba" 2>/dev/null; then
+    docker run --rm --name "${P}clean" --memory=64m -v "$WD:/w" --entrypoint rm "$PG_IMAGE" -rf /w/certs /w/pgb /w/ext /w/pgbroot /w/hba >/dev/null 2>&1 || true
+    rm -rf "$W/certs" "$W/pgb" "$W/ext" "$W/pgbroot" "$W/hba"
+  fi
 }
 trap cleanup EXIT
 cleanup
@@ -66,7 +71,7 @@ mkdir -p "$W/certs" "$W/ext" "$W/pgbroot" "$W/hba" "$W/pgb"
 printf 'local all all trust\nhostssl all crewflow_owner 0.0.0.0/0 trust\nhost all crewflow_owner 0.0.0.0/0 trust\nhost all all 0.0.0.0/0 scram-sha-256\nhost all all ::0/0 scram-sha-256\n' > "$W/hba/pg_hba.conf"
 
 # The test extension and PgBouncer, built / unpacked in a throwaway container of the same image (pgdg apt packages).
-docker run --rm --name "$BUILD_NAME" --memory="$PG_MEM" --memory-swap="$PG_MEM" \
+docker run --rm --name "$BUILD_NAME" --memory="$PG_MEM" --memory-swap="$PG_MEM" -e HOST_IDS="$(id -u):$(id -g)" \
   -v "$HD/refuse_prehashed.c:/src/refuse_prehashed.c:ro" -v "$WD/ext:/out" -v "$WD/pgbroot:/pgb" --entrypoint bash "$PG_IMAGE" -c '
   set -e
   major="$(pg_config --version | sed -E "s/^PostgreSQL ([0-9]+).*/\1/")"
@@ -78,7 +83,9 @@ docker run --rm --name "$BUILD_NAME" --memory="$PG_MEM" --memory-swap="$PG_MEM" 
   dpkg -x /tmp/deb/postgresql-server-dev-*.deb /tmp/dev
   gcc -O2 -fPIC -shared -I"/tmp/dev/usr/include/postgresql/$major/server" -o /out/refuse_prehashed.so /src/refuse_prehashed.c
   for deb in /tmp/deb/pgbouncer_*.deb /tmp/deb/libevent-*.deb /tmp/deb/libcares2_*.deb; do dpkg -x "$deb" /pgb; done
-  chmod -R a+rX /out /pgb'
+  chmod -R a+rX /out /pgb
+  # Hand the files back to the user running this script (the CI runner), so its own cleanup can remove them.
+  chown -R "$HOST_IDS" /out /pgb 2>/dev/null || true'
 docker network create "$NET" >/dev/null
 SUPW="$(openssl rand -hex 24)"
 PGPORT=$((PORT + 1))
@@ -129,7 +136,7 @@ SU="postgresql://postgres:$SUPW@127.0.0.1:$PGPORT/postgres"
 
 # plain: P1, P2, then B1 (PgBouncer defaults), then B2 / B3 (options ignored).
 start_pg
-harness FBC_PLAIN_SU_URL="$SU" -- P1 P2 Q1
+harness FBC_PLAIN_SU_URL="$SU" -- P1 P2 Q1 H1
 start_pgbouncer 1
 harness FBC_PLAIN_SU_URL="$SU" FBC_BOUNCER1_HOSTPORT="127.0.0.1:$PGBPORT" -- B1
 stop_pgbouncer
@@ -139,7 +146,7 @@ stop_pgbouncer
 stop_pg
 
 # sim: N1, N2 (every statement logged with its parameters).
-start_pg -c shared_preload_libraries=refuse_prehashed -c log_statement=all -c log_min_duration_statement=0
+start_pg -c shared_preload_libraries=refuse_prehashed,pg_stat_statements -c pg_stat_statements.track=all -c log_statement=all -c log_min_duration_statement=0
 harness FBC_SIM_SU_URL="$SU" FBC_SIM_CONTAINER="$PG_NAME" -- N1 N2
 refusals="$(docker logs "$PG_NAME" 2>&1 | grep -c 'simulated refusal: role passwords must be supplied in plain text' || true)"
 echo "[fallback-check] simulator refusals of a pre-hashed password in the server log: $refusals"

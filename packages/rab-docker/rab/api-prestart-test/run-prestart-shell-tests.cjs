@@ -638,6 +638,7 @@ for (const [label, env, entry, pattern] of [
   ['a built URL whose host carries a brace', { ...MODE_B, PG_DATABASE_HOST: 'db{x}', PG_DATABASE_URL: `postgresql://crewflow_owner:${'a'.repeat(40)}@db{x}:25060/d?sslmode=verify-full` }, 'db-setup.sh', /is malformed/],
   ['a built URL whose port is not digits', { ...MODE_B, PG_DATABASE_HOST: 'db-direct.example', PG_DATABASE_URL: `postgresql://crewflow_owner:${'a'.repeat(40)}@db-direct.example:25x/d?sslmode=verify-full` }, 'db-setup.sh', /is malformed/],
   ['a built URL whose port has more than 5 digits', { ...MODE_B, PG_DATABASE_HOST: 'db-direct.example', PG_DATABASE_URL: `postgresql://crewflow_owner:${'a'.repeat(40)}@db-direct.example:250600/d?sslmode=verify-full` }, 'db-setup.sh', /is malformed/],
+  ['a built URL whose port smuggles its own query (PG_DATABASE_PORT=5432/x?sslmode=disable&y=)', { ...MODE_B, PG_DATABASE_HOST: 'db-direct.example', PG_DATABASE_PORT: '5432/x?sslmode=disable&y=', PG_DATABASE_URL: `postgresql://crewflow_owner:${'a'.repeat(40)}@db-direct.example:5432/x?sslmode=disable&y=/d?sslmode=verify-full` }, 'db-setup.sh', /is malformed/],
   ['PG_ADMIN_DIRECT_URL without PG_ADMIN_URL', { ...MODE_C, PG_ADMIN_DIRECT_URL: EXT_ADMIN }, 'db-setup.sh', /PG_ADMIN_DIRECT_URL is set without PG_ADMIN_URL/],
   ['a PG_ADMIN_DIRECT_URL that logs in as crewflow_owner', { ...MODE_B, PG_ADMIN_DIRECT_URL: EXT_OWNER }, 'db-setup.sh', /PG_ADMIN_DIRECT_URL logs in as crewflow_owner/],
   ['a PG_DATABASE_SESSION_URL that is not crewflow_owner', { ...MODE_B, PG_DATABASE_SESSION_URL: EXT_ADMIN }, 'db-setup.sh', /PG_DATABASE_SESSION_URL does not log in as crewflow_owner/],
@@ -646,6 +647,9 @@ for (const [label, env, entry, pattern] of [
   check(`14g db-setup.sh refuses ${label} (64) before the child runs; nothing is printed of the value`, r.code === 64 && pattern.test(r.out) && !boot(r.out) &&
     !r.out.includes('y'.repeat(64)) && !r.out.includes('ADMINSENTINEL') && !r.out.includes(OWNER_PW), r.out);
 }
+// Re-review N3 of #259: a well-formed built URL (exactly /<name>?sslmode=verify-full after the port) still passes.
+r = run('setup-built-ok', { ...MODE_B, PG_DATABASE_HOST: 'db-direct.example', PG_DATABASE_PORT: '25060', PG_DATABASE_NAME: 'd', PG_DATABASE_URL: `postgresql://crewflow_owner:${'a'.repeat(40)}@db-direct.example:25060/d?sslmode=verify-full` }, { entry: 'db-setup.sh' });
+check('14g2 db-setup.sh accepts a well-formed built URL (the child runs)', r.code === 0 && !/is malformed/.test(r.out) && !!boot(r.out), r.out);
 for (const [label, env, want] of [
   ['mode b, admin on host db, CA unset -> the bundled CA', { ...MODE_B, CREWFLOW_BUNDLED_DB: '1', PG_ADMIN_URL: ADMIN_URL, PG_DATABASE_URL: RUNTIME_URL }, DB_CA],
   ['mode b, admin on host db, CA set -> kept', { ...MODE_B, CREWFLOW_BUNDLED_DB: '1', PG_ADMIN_URL: ADMIN_URL, PG_DATABASE_URL: RUNTIME_URL, PG_SSL_CA_CERT_PATH: '/run/crewflow/pg-ca.crt' }, '/run/crewflow/pg-ca.crt'],

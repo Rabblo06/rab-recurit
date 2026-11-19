@@ -90,7 +90,7 @@ if [ "${NODE_ENV:-}" != test ] && [ -n "${CREWFLOW_TEST_SEARCH_PATH_TRAP:-}" ]; 
 fi
 
 if [ -z "${PG_DATABASE_URL:-}" ]; then
-  refuse 'PG_DATABASE_URL is empty: it is the crewflow_owner URL (bundled db: set PG_DATABASE_APP_PASSWORD, openssl rand -hex 32; your own database: your crewflow_owner URL, direct host, sslmode=verify-full).'
+  refuse 'PG_DATABASE_URL is empty: it is the crewflow_owner URL (bundled db: set PG_DATABASE_APP_PASSWORD, openssl rand -hex 32; your own database: your crewflow_owner URL, direct host, sslmode require, verify-ca or verify-full (all verified fully)).'
 fi
 case "$PG_DATABASE_URL" in
   *://crewflow_owner:@*)

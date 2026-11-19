@@ -9589,36 +9589,51 @@ plain-text password.
     ROLE (an admin may have disabled it on purpose), and any other NOLOGIN crewflow_owner stays refused;
   - an existing role's password is never written;
   - the grant is added;
-  - exit 64 with fixed steps. The operator runs, once in the provider's SQL editor as the admin login, exactly
-    `DO $$BEGIN EXECUTE pg_catalog.format('ALTER ROLE crewflow_owner LOGIN PASSWORD %L', '<PG_DATABASE_APP_PASSWORD>'); COMMENT ON ROLE crewflow_owner IS NULL; END$$;`
-    with the placeholder replaced by that value (the 32-character floor; never a console reset). format(%L) quotes the value,
-    and the same statement removes the mark (independent review M1).
+  - exit 64 with fixed steps. The operator runs, once, as the admin login, all the printed lines together in one go
+    (one session, one transaction; psql if the SQL editor runs lines separately): `BEGIN;`, then
+    `SELECT pg_catalog.set_config('crewflow.pw', '<PG_DATABASE_APP_PASSWORD>', true);` with the placeholder replaced by that
+    value, then a DO block that reads the value from that setting (never from its own text), runs
+    `ALTER ROLE crewflow_owner LOGIN PASSWORD %L` through format() and removes the mark, re-raising any inner error with its
+    SQLSTATE only, then `COMMIT;` (re-review N1). An empty setting (lines run separately) is refused with
+    "run all lines together in one go, inside one transaction". Option 2's CREATE ROLE uses the same shape.
   The next run's login probe decides: it logs in, so no write and setup continues; or it still does not, so the steps again,
   with no password write, so never a loop.
   If the server refuses the passwordless login role too, nothing is created and the reviewed CREATE ROLE + GRANT is printed
   with a placeholder (option 2).
-- **Residual: the operator's statement** (independent review M1). The plain value typed in the provider's SQL editor (inside
-  the DO block's literal, so `log_statement = ddl` does not log it but `all` does) can remain in: the server log
-  (`log_statement = all`, or any error that quotes the statement), `pg_stat_statements` (the full DO text), `pg_stat_activity`
-  while it runs (visible to the admin's own role and to pg_read_all_stats members), and the provider's own logs, audit and
-  SQL-editor history. The printed steps say exactly that, and: if pg_stat_statements is installed, run
-  `SELECT pg_stat_statements_reset();` afterwards where permitted, otherwise treat the value as visible to anyone who can read
-  query statistics. The earlier advice to run `SET log_statement = 'none'` first is removed (a non-superuser cannot set it on
+- **Residual: the operator's statement** (independent review M1, re-review N1). The value is only in the set_config line.
+  The DO block that uses it holds no value, so a failing ALTER ROLE (a password-check hook, a typo) is quoted in the server
+  log (log_min_error_statement) without it, and pg_stat_statements stores the SELECT normalised (constants replaced) and the
+  DO block without a value. Proven on the pinned PostgreSQL 16 (harness N1): a refused first value and the real value, run
+  statement by statement, appear in no server log line and in no top-level pg_stat_statements row. What remains: the server
+  log at `log_statement = all`; any error when the editor sends ALL lines as ONE message (the whole message is quoted,
+  set_config line included); pg_stat_statements with `track = all`, which records the ALTER / CREATE ROLE run inside the DO
+  block WITH the value (seen live: one nested row; the default `track = top` does not record it); `pg_stat_activity` while
+  it runs; the provider's own logs, audit and SQL-editor history. The
+  printed steps say so, and: if pg_stat_statements is installed, `SELECT pg_stat_statements_reset();` where permitted,
+  otherwise treat the value as visible to anyone who can read query statistics. The earlier advice to run `SET log_statement = 'none'` first is removed (a non-superuser cannot set it on
   most providers, and it never covered pg_stat_statements or pg_stat_activity). A provider-generated password is NOT accepted
   instead (owner decision). That is the provider's tool, outside Crewflow; the same as `own-database-app-login.sql`'s manual
   path. The plain-text trade-off of the earlier draft (a plain-text fallback sent
   by db-setup, G1/G2/L1 log guards) is REMOVED.
 - **Between the two runs the role is NOLOGIN** (re-review R1), so no pg_hba rule can let anyone log in as it. Independently, a
   login probe that succeeds is trusted only if a deliberately WRONG password fails too; otherwise db-setup refuses (64) "the
-  server lets crewflow_owner log in WITHOUT its password" (trust / peer / cert / similar). Independent review L4: that
-  wrong-password login runs only when it can matter: after this run created the role or changed its password (after COMMIT),
-  or, for an existing role that logs in, while the schema bootstrap is pending (CREATEROLE without its pending mark: a role
-  just created, adopted, or just made LOGIN by the operator) or a stale awaiting mark is left. Otherwise it is skipped and
-  logged, so repeated deploys never add failed logins toward a provider's lockout.
+  server lets crewflow_owner log in WITHOUT its password" (trust / peer / cert / similar). Re-review N2: that wrong-password
+  login runs on EVERY run that logs in, right after the successful real login (and once more after a creation or a password
+  change, after COMMIT), so a failure counter that a successful login resets never exceeds 1. **Residual:** a lockout that
+  counts total failed logins over a time window can still be reached by many deploys in that window (one failed login each).
+- **The app password's characters** (re-review a). In modes a and b (db-setup creates or sets it) the decoded password,
+  built or inside an explicit PG_DATABASE_URL, must be `^[A-Za-z0-9_-]{32,}$`, refused (64) before connecting; it is what
+  the operator types into the printed SQL, so no quote, `$$` or backslash can break or reshape it.
 - **Role squatting** (independent review L2). Q2 counts the members OF crewflow_owner other than this admin's own ADMIN-only
   grant (admin_option, no inherit, no set: createrole_self_grant is emptied in the same transaction). Any such member is
   refused (64) before any probe or write, and again under the advisory lock (Q4 facts), because whoever holds that membership
-  could reset or use the app login. Fix: `REVOKE crewflow_owner FROM <that role>`, or drop crewflow_owner.
+  could reset or use the app login. Fix: `REVOKE crewflow_owner FROM <that role>`, or drop crewflow_owner; the member may be
+  the admin's own self-grant with SET or INHERIT (createrole_self_grant), removed with `REVOKE crewflow_owner FROM <admin>`.
+  Owner SQL review 1.17: every printed hint to give the admin rights on crewflow_owner reads exactly
+  `GRANT crewflow_owner TO <admin> WITH ADMIN OPTION, INHERIT FALSE, SET FALSE;` (a plain WITH ADMIN OPTION defaults INHERIT
+  and SET to true on PG16, and this check would refuse the admin). Harness H1 runs the hint as printed, then db-setup: 0.
+  createrole_self_grant applies to CREATE ROLE only, so it plays no part in this GRANT. Owner SQL review 1.12: a password
+  change by db-setup is logged as one fixed line (`passwordSet`), never the value.
   Re-review N1/N2: only a 28P01 / 28000 refusal of the wrong-password login counts as "password required" (any other
   failure exits 70, never a pass), and a LOGIN crewflow_owner never keeps the awaiting-password mark (removed under the lock
   in the CREATEROLE step), so a later NOLOGIN can never count as "awaiting its password".
@@ -9641,4 +9656,4 @@ plain-text password.
   documented alternative, and the compose.env lint refuses both together. db-setup refuses an app URL that names another
   host, port or database than the admin (direct) URL, and a password below the M2 floor. db-setup.sh checks a built URL's
   parts at run time (`[A-Za-z0-9_-]{32,}` password; no `$ { } @ # / ?` in host or database; a port of 1 to 5 digits,
-  independent review I4).
+  independent review I4; nothing after the database name but `?sslmode=verify-full`, re-review N3).

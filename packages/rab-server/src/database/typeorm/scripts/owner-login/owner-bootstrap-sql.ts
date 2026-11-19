@@ -58,14 +58,62 @@ export function awaitingMarkValidSql(comment: string): string {
               ELSE false END)`;
 }
 
+/** The transaction-local setting that carries the operator's value into the printed DO blocks (never their text). */
+export const OWNER_PASSWORD_STEP_SETTING = 'crewflow.pw';
+
+/** The printed line that puts the operator's value into OWNER_PASSWORD_STEP_SETTING (the ONLY line holding the value). */
+const PASSWORD_STEP_SET_LINE = "SELECT pg_catalog.set_config('crewflow.pw', '<PG_DATABASE_APP_PASSWORD>', true);";
+
 /**
- * The step db-setup PRINTS (never executes) for the operator, option 1 (independent review M1 of #259): one DO block, so the
- * literal is not a top-level ALTER ROLE (log_statement = ddl / mod would log that), it becomes LOGIN with the password, and
- * the awaiting mark is removed in the same statement (review L1). The literal still travels inside the DO text: the steps say
- * where it can remain (server log at log_statement = all, pg_stat_statements, pg_stat_activity, the provider's logs).
+ * A printed DO block that runs `body` (statements that read the value as v_pw) with the value from the setting, never from
+ * its own text. Re-review N1 of #259: a failing statement is quoted in the server log (log_min_error_statement) and a DO
+ * block is kept verbatim in pg_stat_statements, so the value must not be in the DO text; the inner error (a password-check
+ * hook, a quote, ...) is re-raised with its SQLSTATE only, so no CONTEXT can quote the EXECUTEd text either. An empty
+ * setting means the lines were not run together in one transaction: a clean refusal, nothing changed.
  */
-export const OWNER_SET_PASSWORD_SQL =
-  "DO $$BEGIN EXECUTE pg_catalog.format('ALTER ROLE crewflow_owner LOGIN PASSWORD %L', '<PG_DATABASE_APP_PASSWORD>'); COMMENT ON ROLE crewflow_owner IS NULL; END$$;";
+function passwordStepDo(body: string): string {
+  // sql-injection-reviewed: PRINTED for the operator, never executed by db-setup; body is one of three fixed code literals in this file.
+  return `DO $$
+DECLARE
+  v_pw text := pg_catalog.current_setting('crewflow.pw', true);
+BEGIN
+  IF v_pw IS NULL OR v_pw = '' THEN
+    RAISE EXCEPTION 'crewflow password step: run all lines together in one go, inside one transaction';
+  END IF;
+  BEGIN
+${body}
+  EXCEPTION WHEN OTHERS THEN
+    RAISE EXCEPTION 'crewflow password step failed (%)', SQLSTATE;
+  END;
+END$$;`;
+}
+
+/**
+ * The step db-setup PRINTS (never executes) for the operator, option 1 (independent review M1 + re-review N1 of #259), as
+ * statements to run together in one go, in one session and one transaction. The value appears ONLY in the set_config line
+ * (pg_stat_statements stores that SELECT normalised, its constants replaced; it is in the server log only at
+ * log_statement = all); the DO block reads it from the setting, makes crewflow_owner LOGIN with it and removes the awaiting
+ * mark (review L1). Fixed text; a spec pins it.
+ */
+export const OWNER_SET_PASSWORD_SQL: readonly string[] = Object.freeze([
+  'BEGIN;',
+  PASSWORD_STEP_SET_LINE,
+  passwordStepDo(`    EXECUTE pg_catalog.format('ALTER ROLE crewflow_owner LOGIN PASSWORD %L', v_pw);
+    COMMENT ON ROLE crewflow_owner IS NULL;`),
+  'COMMIT;',
+]);
+
+/**
+ * The step db-setup PRINTS (never executes) when mode c (no admin URL) refuses a weak crewflow_owner password in production
+ * (owner-credential.ts weakPasswordProduction): the same safe shape as OWNER_SET_PASSWORD_SQL (the value only in the
+ * set_config line), changing the password only: no LOGIN, no comment touched (SQL audit of #259).
+ */
+export const OWNER_RESET_PASSWORD_SQL: readonly string[] = Object.freeze([
+  'BEGIN;',
+  PASSWORD_STEP_SET_LINE,
+  passwordStepDo(`    EXECUTE pg_catalog.format('ALTER ROLE crewflow_owner PASSWORD %L', v_pw);`),
+  'COMMIT;',
+]);
 
 /**
  * Q0 (REVISED, security review H1): first pin the session's search_path to pg_catalog (then pg_temp, which is never searched
@@ -113,10 +161,10 @@ export const OWNER_BOOTSTRAP_Q1_SUPERUSER_LOGGING = `SELECT pg_catalog.set_confi
  * TODO(lead, 2026-11-19): switch the privileged-membership list below (o_privileged_memberships) to
  * database/owner-login/privileged-roles.ts once it lands (one constant shared with the boot posture check).
  */
-// sql-injection-reviewed: the interpolations are createRoleMarkColumnsSql / awaitingMark*Sql over fixed column expressions and quote-free code constants.
 // o_foreign_members (independent review L2 of #259) reads inherit_option / set_option through to_jsonb(m): those columns
 // exist from PostgreSQL 16 only, and naming them directly would make Q2 itself fail (exit 70) on a 15 server instead of the
 // clean "PostgreSQL below 16" refusal (64) that assertSupportedServerVersion gives from this same row.
+// sql-injection-reviewed: the interpolations are createRoleMarkColumnsSql / awaitingMark*Sql over fixed column expressions and quote-free code constants.
 export const OWNER_BOOTSTRAP_Q2_FACTS = `SELECT pg_catalog.current_setting('server_version_num')::int                      AS server_version_num,
        current_user::text                                                         AS admin,
        a.rolsuper                                                                 AS admin_super,
@@ -347,12 +395,14 @@ $bootstrap$;`;
  * password (owner decision 2026-11-19, option 2 steps): the reviewed statements of own-database-app-login.sql, steps 5 and
  * 6 (the same attributes and grant as OWNER_BOOTSTRAP_Q4C_DO), with the password as a placeholder the operator replaces with
  * PG_DATABASE_APP_PASSWORD in the provider's SQL editor, connected to this database as the admin login. No value, no host,
- * no database name: the grant names the database through current_database(). Fixed text; a spec pins it.
+ * no database name: the grant names the database through current_database(). The value only in the set_config line, the
+ * same way as OWNER_SET_PASSWORD_SQL (re-review N1). Statements, run together in one go. Fixed text; a spec pins it.
  */
 export const OWNER_MANUAL_ROLE_SQL: readonly string[] = Object.freeze([
   'BEGIN;',
   "SET LOCAL createrole_self_grant = '';",
-  "DO $$BEGIN EXECUTE pg_catalog.format('CREATE ROLE crewflow_owner LOGIN NOSUPERUSER NOBYPASSRLS NOREPLICATION NOCREATEDB CREATEROLE INHERIT PASSWORD %L', '<PG_DATABASE_APP_PASSWORD>'); END$$;",
+  PASSWORD_STEP_SET_LINE,
+  passwordStepDo(`    EXECUTE pg_catalog.format('CREATE ROLE crewflow_owner LOGIN NOSUPERUSER NOBYPASSRLS NOREPLICATION NOCREATEDB CREATEROLE INHERIT PASSWORD %L', v_pw);`),
   "DO $grant$ BEGIN EXECUTE pg_catalog.format('GRANT CONNECT, CREATE, TEMPORARY ON DATABASE %I TO crewflow_owner WITH GRANT OPTION', pg_catalog.current_database()); END $grant$;",
   'COMMIT;',
 ]);

@@ -28,6 +28,8 @@
  *   B3  PG_ADMIN_URL through PgBouncer 2 + PG_ADMIN_DIRECT_URL (the cluster, verify-full): created (0).
  *   Q1  role squatting (independent review L2): crewflow_owner already exists and another role is a member of it: refused
  *       (64) before anything is written.
+ *   H1  the printed admin-grant hint (owner SQL review): a plain WITH ADMIN OPTION is refused as another member; the hint,
+ *       run as written, lets db-setup set the password (0).
  *   T1  a PostgreSQL 16 whose pg_hba TRUSTS crewflow_owner (FBC_TRUST_SU_URL): db-setup creates crewflow_owner, then its
  *       deliberately-wrong-password login succeeds, so it refuses (64) with "the server lets crewflow_owner log in WITHOUT
  *       its password"; the second run refuses before any write. (Security re-review R1 of #259.)
@@ -43,8 +45,8 @@ import { Client } from 'pg';
 import { OWNER_BOOTSTRAP_MESSAGES, OWNER_BOOTSTRAP_RESULT_PREFIX, OwnerBootstrapResult } from '../owner-bootstrap';
 import { OWNER_AWAITING_PASSWORD_MARK, OWNER_MANUAL_ROLE_SQL, OWNER_SET_PASSWORD_SQL } from '../owner-bootstrap-sql';
 
-/** A printed operator statement with its placeholder replaced by the transaction-local setting fbc.pw (never a literal). */
-const withSecretSetting = (statement: string): string => statement.split("'<PG_DATABASE_APP_PASSWORD>'").join("pg_catalog.current_setting('fbc.pw')");
+/** A printed operator statement with its placeholder replaced LITERALLY by `value` (what the operator types). */
+const typed = (statement: string, value: string): string => statement.split('<PG_DATABASE_APP_PASSWORD>').join(value);
 
 const REPO_ROOT = resolve(__dirname, '..', '..', '..', '..', '..', '..', '..', '..');
 const TSCONFIG_APP = join(REPO_ROOT, 'packages', 'rab-server', 'tsconfig.app.json');
@@ -210,6 +212,65 @@ async function superuserSecret(base: URL, statement: string, secret: string, db 
   }
 }
 
+/**
+ * Re-review N1 of #259: runs printed statements LITERALLY (the placeholder replaced by `value`), one at a time on one session,
+ * as psql sends them. `quiet` turns statement logging off for this session (a superuser only: how a provider with the
+ * default log_statement behaves); log_min_error_statement stays at its default, so a failing statement IS quoted in the log.
+ * Returns the error message of the first failing statement (after a ROLLBACK), or null.
+ */
+async function runTyped(base: URL, user: string, password: string, db: string, statements: readonly string[], value: string, quiet: boolean): Promise<string | null> {
+  const c = new Client({ host: base.hostname, port: Number(base.port), user, password, database: db, ssl: { ca: CA, rejectUnauthorized: true } });
+  await c.connect();
+  try {
+    if (quiet) {
+      await c.query(`SET log_statement = 'none'`);
+      await c.query(`SET log_min_duration_statement = -1`);
+    }
+    for (const st of statements) {
+      try {
+        await c.query(typed(st, value));
+      } catch (error) {
+        await c.query('ROLLBACK').catch(() => undefined);
+        return error instanceof Error ? error.message : 'error';
+      }
+    }
+    return null;
+  } finally {
+    await c.end();
+  }
+}
+
+/**
+ * pg_stat_statements rows holding any of `secrets`, read with statement logging off; null when unavailable. `top` counts
+ * top-level statements (what the operator sent); `nested` counts statements run INSIDE them (recorded only with
+ * pg_stat_statements.track = all). Matching rows are printed with every secret replaced by <value> (the value never).
+ */
+async function pgssHits(base: URL, secrets: string[]): Promise<{ top: number; nested: number } | null> {
+  const c = new Client({ host: base.hostname, port: Number(base.port), user: decodeURIComponent(base.username), password: decodeURIComponent(base.password), database: 'postgres', ssl: { ca: CA, rejectUnauthorized: true } });
+  await c.connect();
+  try {
+    await c.query(`SET log_statement = 'none'`);
+    await c.query(`SET log_min_duration_statement = -1`);
+    // The statistics are collected from the start (shared_preload_libraries); the view needs the extension in this database.
+    try {
+      await c.query(`CREATE EXTENSION IF NOT EXISTS pg_stat_statements`);
+    } catch {
+      return null;
+    }
+    const { rows } = await c.query(`SELECT query, toplevel FROM pg_stat_statements`);
+    if (rows.length === 0) throw new Failed('pg_stat_statements is empty (cannot prove anything)');
+    const hits = rows.filter((r) => secrets.some((x) => x && String(r.query).includes(x)));
+    for (const r of hits) {
+      let q = String(r.query);
+      for (const x of secrets) if (x) q = q.split(x).join('<value>');
+      console.log(`[fallback-check] note | pg_stat_statements (${r.toplevel ? 'top-level' : 'nested'}): ${q.replace(/\s+/g, ' ').slice(0, 200)}`);
+    }
+    return { top: hits.filter((r) => r.toplevel === true).length, nested: hits.filter((r) => r.toplevel !== true).length };
+  } finally {
+    await c.end();
+  }
+}
+
 async function ownerCanLoginAttr(base: URL): Promise<boolean | null> {
   const rows = await sql(base, 'postgres', `SELECT rolcanlogin FROM pg_catalog.pg_roles WHERE rolname = 'crewflow_owner'`);
   return rows[0] ? rows[0].rolcanlogin === true : null;
@@ -329,6 +390,8 @@ const scenarios: Array<[string, () => Promise<void>]> = [
         OWNER_BOOTSTRAP_MESSAGES.verifierRefused('commit', 'XX000'),
         OWNER_BOOTSTRAP_MESSAGES.passwordlessCreated,
         OWNER_BOOTSTRAP_MESSAGES.setPasswordStep,
+        ...OWNER_SET_PASSWORD_SQL.flatMap((st) => st.split('\n')).map((l) => `  ${l}`),
+        OWNER_BOOTSTRAP_MESSAGES.passwordVisibilityStep,
         OWNER_BOOTSTRAP_MESSAGES.awaitingPassword,
       ]) {
         expect(run1.out.includes(line), 'N1 run 1: a fixed line is missing');
@@ -344,9 +407,29 @@ const scenarios: Array<[string, () => Promise<void>]> = [
       expect((await ownerCanLoginAttr(clusters.SIM)) === false, 'N1 run 2: crewflow_owner became LOGIN without a password');
       assertClean(run2);
       expect(logHits(process.env.FBC_SIM_CONTAINER, [f.ownerPassword]) === 0, 'N1: the crewflow_owner password appears in the server log');
-      // The operator's one step in the provider's SQL editor (ALTER ROLE ... PASSWORD '<value>').
-      // Exactly the printed step (OWNER_SET_PASSWORD_SQL), the value through a transaction-local setting.
-      await superuserSecret(clusters.SIM, withSecretSetting(OWNER_SET_PASSWORD_SQL), f.ownerPassword, f.db);
+      // The operator's step: exactly the printed statements, typed LITERALLY, one at a time (re-review N1 of #259).
+      const su = [clusters.SIM, decodeURIComponent(clusters.SIM.username), decodeURIComponent(clusters.SIM.password), f.db] as const;
+      // (i) the DO block run on its own (an editor that runs each line in its own transaction): the clean refusal.
+      const alone = await runTyped(...su, OWNER_SET_PASSWORD_SQL.filter((st) => st.startsWith('DO ')), f.ownerPassword, true);
+      expect(alone !== null && alone.includes('run all lines together in one go'), `N1 step: the DO block alone was not refused cleanly (${alone ?? 'no error'})`);
+      // (ii) a first value the server refuses (the simulator's password-check hook: plain text under 12 characters).
+      const typo = `Typo${RUN}`.slice(0, 11);
+      const refused = await runTyped(...su, OWNER_SET_PASSWORD_SQL, typo, true);
+      expect(refused !== null && /^crewflow password step failed \(22023\)$/.test(refused), `N1 step: the refused value did not fail as expected (${refused ?? 'no error'})`);
+      expect((await ownerCanLoginAttr(clusters.SIM)) === false, 'N1 step: a refused value changed crewflow_owner');
+      // (iii) the real value.
+      const ok = await runTyped(...su, OWNER_SET_PASSWORD_SQL, f.ownerPassword, true);
+      expect(ok === null, `N1 step: the printed statements failed (${ok})`);
+      // Neither value in the server log (log_min_error_statement quoted the failing DO block) nor in pg_stat_statements.
+      expect(logHits(process.env.FBC_SIM_CONTAINER, [typo, f.ownerPassword]) === 0, 'N1 step: a typed value appears in the server log');
+      const pgss = await pgssHits(clusters.SIM, [typo, f.ownerPassword]);
+      if (pgss === null) console.log('[fallback-check] note | pg_stat_statements is not available in this image: not checked');
+      else {
+        // What the operator sends is never recorded with the value; a statement run INSIDE the DO block is recorded only with
+        // pg_stat_statements.track = all (this cluster's setting; the default is top): reported, documented as residual.
+        expect(pgss.top === 0, `N1 step: a typed value appears in a top-level pg_stat_statements row (${pgss.top})`);
+        console.log(`[fallback-check] note | pg_stat_statements.track = all: ${pgss.nested} nested row(s) hold a typed value`);
+      }
       const run3 = await runChild(env);
       expect(run3.code === 0 && run3.result?.outcome === 'unchanged' && run3.result?.createRole === 'marked', `N1 run 3: exit ${run3.code}, outcome ${run3.result?.outcome ?? 'none'} ${run3.result?.createRole ?? ''}`);
       expect(await canLogin(clusters.SIM, 'crewflow_owner', f.ownerPassword, f.db), 'N1 run 3: crewflow_owner cannot log in');
@@ -373,7 +456,8 @@ const scenarios: Array<[string, () => Promise<void>]> = [
           OWNER_BOOTSTRAP_MESSAGES.verifierRefused('commit', 'XX000'),
           OWNER_BOOTSTRAP_MESSAGES.passwordlessRefused('commit', 'XX000'),
           OWNER_BOOTSTRAP_MESSAGES.manualRoleStep,
-          ...OWNER_MANUAL_ROLE_SQL.map((l) => `  ${l}`),
+          ...OWNER_MANUAL_ROLE_SQL.flatMap((st) => st.split('\n')).map((l) => `  ${l}`),
+          OWNER_BOOTSTRAP_MESSAGES.passwordVisibilityStep,
           OWNER_BOOTSTRAP_MESSAGES.awaitingManualRole,
         ]) {
           expect(run1.out.includes(line), 'N2 run 1: a fixed line is missing');
@@ -381,19 +465,10 @@ const scenarios: Array<[string, () => Promise<void>]> = [
         expect((await ownerPasswordState(clusters.SIM)) === 'missing', 'N2 run 1: crewflow_owner was created');
         assertClean(run1);
         expect(logHits(process.env.FBC_SIM_CONTAINER, [f.ownerPassword]) === 0, 'N2: the crewflow_owner password appears in the server log');
-        // The operator runs the printed SQL in the provider's SQL editor, as the admin, the placeholder replaced (simulated
-        // with the password in a transaction-local setting so the test log stays clean; the statements are the printed ones).
-        const statements = OWNER_MANUAL_ROLE_SQL.filter((l) => l !== 'BEGIN;' && l !== 'COMMIT;').map(withSecretSetting);
-        const admin = new Client({ host: clusters.SIM.hostname, port: Number(clusters.SIM.port), user: f.admin, password: f.adminPassword, database: f.db, ssl: { ca: CA, rejectUnauthorized: true } });
-        await admin.connect();
-        try {
-          await admin.query('BEGIN');
-          await admin.query(`SELECT pg_catalog.set_config('fbc.pw', $1, true) IS NOT NULL`, [f.ownerPassword]);
-          for (const st of statements) await admin.query(st);
-          await admin.query('COMMIT');
-        } finally {
-          await admin.end();
-        }
+        // The operator runs exactly the printed SQL, typed literally, as the admin login (a non-superuser: it cannot turn
+        // statement logging off, so this cluster's log_statement = all logs the set_config line, as the steps say).
+        const manual = await runTyped(clusters.SIM, f.admin, f.adminPassword, f.db, OWNER_MANUAL_ROLE_SQL, f.ownerPassword, false);
+        expect(manual === null, `N2: the printed SQL failed (${manual})`);
         const run2 = await runChild(env);
         expect(run2.code === 0 && run2.result?.createRole === 'marked', `N2 run 2: exit ${run2.code}, outcome ${run2.result?.outcome ?? 'none'} ${run2.result?.createRole ?? ''}`);
         expect(await canLogin(clusters.SIM, 'crewflow_owner', f.ownerPassword, f.db), 'N2 run 2: crewflow_owner cannot log in');
@@ -419,6 +494,38 @@ const scenarios: Array<[string, () => Promise<void>]> = [
       expect(run.code === 64 && run.out.includes(OWNER_BOOTSTRAP_MESSAGES.foreignMembers), `Q1: exit ${run.code}, expected the role-squatting refusal`);
       expect((await ownerPasswordState(clusters.PLAIN)) === 'none', 'Q1: a password was written to the squatted crewflow_owner');
       assertClean(run);
+    },
+  ],
+  [
+    'H1 the printed admin-grant hint, run as written (PG16): a plain WITH ADMIN OPTION is refused as another member; the hint works',
+    async () => {
+      const f = await fixture(clusters.PLAIN, 'h1');
+      // crewflow_owner made by the superuser (no membership rows), without a password: the admin has no ADMIN OPTION on it.
+      await sql(clusters.PLAIN, 'postgres', `CREATE ROLE crewflow_owner LOGIN NOSUPERUSER NOBYPASSRLS NOREPLICATION NOCREATEDB CREATEROLE INHERIT`);
+      const env = {
+        PG_ADMIN_URL: urlFor(clusters.PLAIN, f.admin, f.adminPassword, f.db),
+        PG_DATABASE_URL: urlFor(clusters.PLAIN, 'crewflow_owner', f.ownerPassword, f.db),
+        PG_SSL_CA_CERT_PATH: CA_PATH,
+      };
+      const run1 = await runChild(env);
+      expect(run1.code === 64 && run1.out.includes(OWNER_BOOTSTRAP_MESSAGES.adminNoAdminOption), `H1 run 1: exit ${run1.code}, expected the no-ADMIN-OPTION refusal`);
+      const printed = /GRANT crewflow_owner TO <admin>[^;]*;/.exec(run1.out)?.[0];
+      expect(printed === 'GRANT crewflow_owner TO <admin> WITH ADMIN OPTION, INHERIT FALSE, SET FALSE;', `H1: the printed hint is not the reviewed text (${printed ?? 'none'})`);
+      assertClean(run1);
+      // A plain WITH ADMIN OPTION (PostgreSQL 16 defaults INHERIT / SET to true) is refused as another member.
+      await sql(clusters.PLAIN, 'postgres', `GRANT crewflow_owner TO ${ident(f.admin)} WITH ADMIN OPTION`);
+      const run2 = await runChild(env);
+      expect(run2.code === 64 && run2.out.includes(OWNER_BOOTSTRAP_MESSAGES.foreignMembers), `H1 run 2: exit ${run2.code}, expected the another-member refusal for a plain WITH ADMIN OPTION`);
+      expect((await ownerPasswordState(clusters.PLAIN)) === 'none', 'H1 run 2: a password was written');
+      await sql(clusters.PLAIN, 'postgres', `REVOKE crewflow_owner FROM ${ident(f.admin)}`);
+      // The printed hint, exactly as written, <admin> replaced; run as the superuser (createrole_self_grant plays no part:
+      // it applies to CREATE ROLE only).
+      await sql(clusters.PLAIN, 'postgres', printed!.replace('<admin>', ident(f.admin)));
+      const run3 = await runChild(env);
+      expect(run3.code === 0 && run3.result?.outcome === 'updated' && run3.result?.passwordSet === true, `H1 run 3: exit ${run3.code}, outcome ${run3.result?.outcome ?? 'none'}`);
+      expect(run3.out.includes(OWNER_BOOTSTRAP_MESSAGES.passwordSet), 'H1 run 3: the password-changed line is missing');
+      expect(await canLogin(clusters.PLAIN, 'crewflow_owner', f.ownerPassword, f.db), 'H1 run 3: crewflow_owner cannot log in');
+      assertClean(run3);
     },
   ],
   [

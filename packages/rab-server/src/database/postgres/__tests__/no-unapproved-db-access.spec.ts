@@ -86,6 +86,14 @@ const BASELINE: Record<string, { hits: number; why: string }> = {
     hits: 1,
     why: 'bootstrap child: new Client(config) on the factory pgClientConfig, only to fix application_name',
   },
+  // PR #259: the db-setup capability harness (run-fallback-check.sh; CI job db-setup-capability and the owner's laptop under
+  // the shared lock). It runs only against throwaway PostgreSQL containers it starts itself, as their bootstrap superuser,
+  // plus the per-run admin it creates; it plays the operator's printed SQL and reads the evidence (logs, catalogs,
+  // pg_stat_statements), so it connects with raw clients on purpose, never through the factory.
+  'packages/rab-server/src/database/typeorm/scripts/owner-login/fallback-check/bootstrap-owner-login-fallback-check.ts': {
+    hits: 5,
+    why: 'db-setup capability harness on throwaway clusters: superuser / per-run admin / operator-step / evidence Clients only',
+  },
   'packages/rab-server/src/database/typeorm/scripts/generate-workspace-fingerprints.ts': {
     hits: 1,
     why: 'developer fingerprint generator: one Client per throwaway database it creates and drops on a disposable cluster',

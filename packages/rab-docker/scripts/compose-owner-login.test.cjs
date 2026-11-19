@@ -1244,6 +1244,9 @@ test('owner rule 2026-11-19: one sslmode rule for every database URL (PG_DATABAS
     for (const mode of ['require', 'verify-ca', 'verify-full']) assert.equal(gate.sslmodeProblem(key, new URL(URL_OK.replace('verify-full', mode))), null);
     for (const mode of ['disable', 'allow', 'prefer', 'no-verify']) assert.match(gate.sslmodeProblem(key, new URL(URL_OK.replace('verify-full', mode))), new RegExp(`^${key}: sslmode must be`));
     assert.match(gate.sslmodeProblem(key, new URL(URL_OK.replace('?sslmode=verify-full', ''))), /sslmode must be/);
+    // channel_binding: the runtime parser's three values only (pg-url-policy.ts).
+    for (const cb of ['require', 'prefer', 'disable']) assert.equal(gate.sslmodeProblem(key, new URL(`${URL_OK}&channel_binding=${cb}`)), null);
+    for (const cb of ['', 'required', 'on', 'REQUIRE']) assert.equal(gate.sslmodeProblem(key, new URL(`${URL_OK}&channel_binding=${cb}`)), `${key}: channel_binding must be require, prefer or disable (value not shown)`);
   }
   const r = gate.dbSettingsProblems;
   assert.deepEqual(r({ bundled: '0', adminUrl: ADMIN_OK.replace('verify-full', 'verify-ca'), adminDirectUrl: ADMIN_OK.replace('verify-full', 'require&channel_binding=require'), appUrl: URL_OK.replace('verify-full', 'require') }), []);

@@ -6,8 +6,9 @@
  *
  * What it does, and nothing else:
  *   - check_password_hook: remembers, for the current transaction, that a role password arrived PRE-HASHED (a SCRAM-SHA-256
- *     verifier or an md5 hash: password_type is not PASSWORD_TYPE_PLAINTEXT), or arrived in plain text shorter than 12
- *     characters (a crude strength rule);
+ *     verifier or an md5 hash: password_type is not PASSWORD_TYPE_PLAINTEXT); a plain-text password shorter than 12
+ *     characters is refused AT ONCE (ERROR 22023, like contrib/passwordcheck: a crude strength rule; it plays an operator's
+ *     typo in the printed password step);
  *   - with refuse_prehashed.refuse_passwordless_role = on (SIGHUP; off by default): ProcessUtility_hook remembers a
  *     CREATE ROLE / CREATE USER WITHOUT a PASSWORD option, LOGIN or NOLOGIN (a provider that refuses passwordless roles
  *     altogether: db-setup's option-2 path);
@@ -36,7 +37,6 @@ static check_password_hook_type prev_check_password_hook = NULL;
 static ProcessUtility_hook_type prev_process_utility = NULL;
 static bool refuse_passwordless_role = false;
 static bool prehashed_seen = false;
-static bool weak_seen = false;
 static bool passwordless_seen = false;
 
 static void
@@ -48,7 +48,7 @@ refuse_prehashed_check_password(const char *username, const char *shadow_pass, P
 	if (password_type != PASSWORD_TYPE_PLAINTEXT)
 		prehashed_seen = true;
 	else if (strlen(shadow_pass) < 12)
-		weak_seen = true;
+		ereport(ERROR, (errcode(ERRCODE_INVALID_PARAMETER_VALUE), errmsg("simulated refusal: the role password is too weak")));
 }
 
 static void
@@ -84,14 +84,12 @@ refuse_prehashed_xact(XactEvent event, void *arg)
 {
 	if (event == XACT_EVENT_PRE_COMMIT || event == XACT_EVENT_PARALLEL_PRE_COMMIT)
 	{
-		if (prehashed_seen || weak_seen || passwordless_seen)
+		if (prehashed_seen || passwordless_seen)
 		{
 			const char *why = prehashed_seen ? "simulated refusal: role passwords must be supplied in plain text"
-				: passwordless_seen ? "simulated refusal: a role needs a password"
-				: "simulated refusal: the role password is too weak";
+				: "simulated refusal: a role needs a password";
 
 			prehashed_seen = false;
-			weak_seen = false;
 			passwordless_seen = false;
 			elog(ERROR, "%s", why);
 		}
@@ -100,7 +98,6 @@ refuse_prehashed_xact(XactEvent event, void *arg)
 			 event == XACT_EVENT_PARALLEL_ABORT)
 	{
 		prehashed_seen = false;
-		weak_seen = false;
 		passwordless_seen = false;
 	}
 }

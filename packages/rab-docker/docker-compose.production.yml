@@ -45,8 +45,8 @@
 #       compose builds the crewflow_owner URL from them for db-setup, rab-api and rab-worker alike; or set the whole
 #       PG_DATABASE_URL yourself instead (never both). db-setup creates crewflow_owner with that password (pre-hashed; a
 #       server that refuses pre-hashed passwords gets crewflow_owner WITHOUT a password, NOLOGIN, and db-setup stops with fixed steps:
-#       set the password once in the provider's SQL editor with the printed DO block, then redeploy; Crewflow never sends
-#       a plain-text password; the typed value can stay in server logs, pg_stat_statements, pg_stat_activity, provider logs)
+#       run the printed SQL once, all lines together, then redeploy; Crewflow never sends a plain-text password; the
+#       typed value can stay in server logs and provider logs). PG_DATABASE_APP_PASSWORD: 32+ of A-Z a-z 0-9 _ - only
 #       and sets it when the password does not log in. A pooled PG_ADMIN_URL is refused by what it does; then
 #       add PG_ADMIN_DIRECT_URL (the direct address of the same login and database; db-setup and db-harden only).
 #       sslmode require, verify-ca or verify-full (all full verification). No PG_DATABASE_PASSWORD.

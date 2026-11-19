@@ -131,7 +131,7 @@ crewflow_is_owner_login() {
 # END crewflow owner-login check
 
 if [ -z "${PG_DATABASE_URL:-}" ]; then
-  refuse 'PG_DATABASE_URL is empty: it is always required, the crewflow_owner URL rab-api and rab-worker use (bundled db: set PG_DATABASE_APP_PASSWORD; your own database: your crewflow_owner URL, direct host, sslmode=verify-full).'
+  refuse 'PG_DATABASE_URL is empty: it is always required, the crewflow_owner URL rab-api and rab-worker use (bundled db: set PG_DATABASE_APP_PASSWORD; your own database: your crewflow_owner URL, direct host, sslmode require, verify-ca or verify-full (all verified fully)).'
 fi
 case "$PG_DATABASE_URL" in
   *://crewflow_owner:@*)
@@ -194,7 +194,8 @@ fi
 # Security review F6 of #259: the crewflow_owner URL compose BUILT from PG_DATABASE_APP_PASSWORD and PG_DATABASE_HOST / PORT /
 # NAME (PG_DATABASE_HOST is set; the lint refuses it beside an explicit PG_DATABASE_URL). Its parts are interpolated
 # unencoded, so they are checked here at run time too: the password 32+ characters of A-Z a-z 0-9 _ -, and the host, port and
-# database name free of $ { } @ # / ? and whitespace (the port 1 to 5 digits). Values are never printed.
+# database name free of $ { } @ # / ? and whitespace (the port 1 to 5 digits), nothing after the name but ?sslmode=verify-full.
+# Values are never printed.
 if [ -n "${PG_DATABASE_HOST:-}" ]; then
   built_rest="${PG_DATABASE_URL#*://crewflow_owner:}"
   built_pw="${built_rest%@*}"
@@ -213,6 +214,9 @@ if [ -n "${PG_DATABASE_HOST:-}" ]; then
   # Independent review I4 of #259: the port is ^[0-9]{1,5}$ only (1 to 5 digits).
   case "$built_port" in '' | *[!0-9]*) built_ok=no ;; esac
   if [ "${#built_port}" -gt 5 ]; then built_ok=no; fi
+  # Re-review N3 of #259: compose appends exactly /<name>?sslmode=verify-full, so anything after the database name (a port or
+  # name smuggling its own query, e.g. PG_DATABASE_PORT=5432/x?sslmode=disable&y=) is refused.
+  if [ "$built_tail" != "$built_db?sslmode=verify-full" ]; then built_ok=no; fi
   unset built_rest built_pw built_after built_hostport built_tail built_db built_host built_port part
   if [ "$built_ok" != yes ]; then
     refuse 'the crewflow_owner URL built from PG_DATABASE_APP_PASSWORD and PG_DATABASE_HOST / PG_DATABASE_PORT / PG_DATABASE_NAME is malformed: the password must be 32+ characters of A-Z a-z 0-9 _ - (openssl rand -hex 32), the host and database name must not contain $ { } @ # / ? or spaces, and the port must be 1 to 5 digits. Values not shown.'
@@ -220,7 +224,7 @@ if [ -n "${PG_DATABASE_HOST:-}" ]; then
   unset built_ok
 fi
 if [ "${CREWFLOW_BUNDLED_DB:-1}" = 0 ] && [ "$(url_host "$PG_DATABASE_URL")" = db ]; then
-  refuse 'CREWFLOW_BUNDLED_DB=0 (your own database) but PG_DATABASE_URL still names the bundled host db: set PG_DATABASE_HOST (and PG_DATABASE_NAME / PG_DATABASE_PORT) to your database, copied from PG_ADMIN_URL, with PG_DATABASE_APP_PASSWORD; or put your crewflow_owner URL in PG_DATABASE_URL (direct host, sslmode=verify-full).'
+  refuse 'CREWFLOW_BUNDLED_DB=0 (your own database) but PG_DATABASE_URL still names the bundled host db: set PG_DATABASE_HOST (and PG_DATABASE_NAME / PG_DATABASE_PORT) to your database, copied from PG_ADMIN_URL, with PG_DATABASE_APP_PASSWORD; or put your crewflow_owner URL in PG_DATABASE_URL (direct host, sslmode require, verify-ca or verify-full, all verified fully).'
 fi
 # The bundled superuser URL is never needed again; the child reads PG_ADMIN_URL / PG_DATABASE_URL only.
 unset CREWFLOW_BUNDLED_DB_ADMIN_URL

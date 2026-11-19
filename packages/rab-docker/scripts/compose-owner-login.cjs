@@ -513,14 +513,19 @@ const APP_PASSWORD_SHAPE = /^[A-Za-z0-9_-]{32,}$/;
  * refuses a pooled admin connection by what it does (08P01 for its session settings, or the session-affinity probe).
  * sslmode (owner rule 2026-11-19, the same at runtime, #257): require, verify-ca and verify-full are accepted for EVERY database
  * URL (PG_DATABASE_URL, PG_DATABASE_SESSION_URL, PG_ADMIN_URL, PG_ADMIN_DIRECT_URL) and all mean FULL verification (certificate
- * and host name); disable, allow, prefer, no-verify and a missing sslmode are refused. channel_binding=require is accepted.
+ * and host name); disable, allow, prefer, no-verify and a missing sslmode are refused. channel_binding, when present, must be
+ * require, prefer or disable (the runtime parser's rule, pg-url-policy.ts); any other value is refused.
  */
 const ACCEPTED_SSLMODES = Object.freeze(['require', 'verify-ca', 'verify-full']);
 /** The sslmode rule above for one parsed URL (null = fine). Exported for the PG_DATABASE_SESSION_URL rule of PR #258. */
+const ACCEPTED_CHANNEL_BINDINGS = Object.freeze(['require', 'prefer', 'disable']);
 function sslmodeProblem(key, u) {
-  return ACCEPTED_SSLMODES.includes(u.searchParams.get('sslmode') ?? '')
-    ? null
-    : `${key}: sslmode must be require, verify-ca or verify-full (all mean full verification); disable, allow, prefer, no-verify or none are refused`;
+  if (!ACCEPTED_SSLMODES.includes(u.searchParams.get('sslmode') ?? '')) {
+    return `${key}: sslmode must be require, verify-ca or verify-full (all mean full verification); disable, allow, prefer, no-verify or none are refused`;
+  }
+  const binding = u.searchParams.get('channel_binding');
+  if (binding !== null && !ACCEPTED_CHANNEL_BINDINGS.includes(binding)) return `${key}: channel_binding must be require, prefer or disable (value not shown)`;
+  return null;
 }
 const DIGEST_REF = /^[^@\s]+@sha256:[0-9a-f]{64}$/;
 
