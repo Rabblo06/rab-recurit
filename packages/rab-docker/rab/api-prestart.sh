@@ -234,7 +234,7 @@ done
 # one-shot db-setup service; the API never receives it, in any form (not even unused: /proc/<pid>/environ). The same for its retired name
 # (PG_DATABASE_ADMIN_URL) and for db-setup's bundled-db URL (CREWFLOW_BUNDLED_DB_ADMIN_URL). The compose files pin
 # PG_ADMIN_URL to "" on this service (owner decision L-2): empty is allowed, any value is refused.
-for name in PG_ADMIN_URL PG_DATABASE_ADMIN_URL CREWFLOW_BUNDLED_DB_ADMIN_URL; do
+for name in PG_ADMIN_URL PG_ADMIN_DIRECT_URL PG_DATABASE_ADMIN_URL CREWFLOW_BUNDLED_DB_ADMIN_URL; do
   eval "value=\${$name:-}"
   if [ -n "$value" ]; then refuse "$name must never be set on the api service: it is the database admin URL, read only by the one-shot db-setup service (which creates crewflow_owner). The API connects only as crewflow_owner. Value not shown."; fi
 done
