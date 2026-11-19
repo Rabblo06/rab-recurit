@@ -144,7 +144,7 @@ test('DB-SETUP: the bundled db password may appear only as db POSTGRES_PASSWORD 
   for (const [svc, key] of [['rab-api', 'PG_DATABASE_URL'], ['rab-worker', 'PG_DATABASE_URL'], ['rab-api', 'PG_ADMIN_URL'], ['rab-worker', 'PG_ADMIN_URL'], ['rab-worker', 'X'], ['rab-redis', 'Y'], ['db', 'OTHER'], ['db-setup', 'OTHER'], ['db-setup', 'PG_DATABASE_URL']]) {
     const m = structuredClone(ok);
     m[svc].environment = { ...(m[svc].environment ?? {}), [key]: adminUrl };
-    refused(dbPasswordChecks(REL, m), new RegExp(`${svc} carries the bundled db's password only as db's POSTGRES_PASSWORD or db-setup's bundled admin URL \\(found in ${key}\\)`));
+    refused(dbPasswordChecks(REL, m), new RegExp(`${svc} carries the bundled db's password only as db's POSTGRES_PASSWORD or the bundled admin URL of db-setup \\/ db-harden \\(found in ${key}\\)`));
   }
   // Outside the environment (a health check, a label): refused in every service, db-setup included.
   for (const svc of ['rab-api', 'rab-worker', 'db-setup']) {

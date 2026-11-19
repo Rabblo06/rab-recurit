@@ -30,6 +30,11 @@ function good() {
         entrypoint: ['/bin/sh', '-c', waitWrapperScript().split('$').join('$$'), 'db-setup'],
         environment: { CREWFLOW_DB_WAIT_SECONDS: WAIT_SECONDS_EXPR },
       },
+      // Owner decision 2026-11-18 (M1): the one-shot CREATEROLE hardening; no depends_on.
+      'db-harden': {
+        image: IMG,
+        entrypoint: ['./db-setup.sh', 'harden'],
+      },
       'rab-worker': {
         image: IMG,
         entrypoint: ['./worker-start.sh'],
@@ -431,7 +436,7 @@ const { allowsDefaultDigest, PINNED_DIGEST_IMAGE_REF } = require('./compose-one-
 const DIGEST = `sha256:${'d7'.repeat(32)}`;
 const withDefault = (value) => `\${CREWFLOW_IMAGE_REPOSITORY:-adhin007/adolphus}@\${CREWFLOW_IMAGE_TAG:-${value}}`;
 const allImages = (m, image) => {
-  for (const n of ['rab-api', 'rab-worker', 'db-setup']) m.services[n].image = image;
+  for (const n of ['rab-api', 'rab-worker', 'db-setup', 'db-harden']) m.services[n].image = image;
   return m;
 };
 const PROD = { allowDefaultDigest: true };
@@ -499,7 +504,7 @@ test('committed files: production.yml pins one full digest on every app service;
   const read = (f) => fs.readFileSync(path.join(__dirname, '..', f), 'utf8');
   const imageLines = (text) => [...text.matchAll(/^\s+image:\s*(\S+@\$\{CREWFLOW_IMAGE_TAG[^}]*\})\s*$/gm)].map((m) => m[1]);
   const prod = imageLines(read('docker-compose.production.yml'));
-  assert.equal(prod.length, 3, 'rab-api, rab-worker and db-setup (rab-ops was removed)');
+  assert.equal(prod.length, 4, 'rab-api, rab-worker, db-setup and db-harden (rab-ops was removed)');
   assert.equal(new Set(prod).size, 1, 'the same expression on every app service');
   assert.ok(PINNED_DIGEST_IMAGE_REF.test(prod[0]), prod[0]);
   const image = imageLines(read('docker-compose.image.yml'));
@@ -658,4 +663,73 @@ test('DENIAL option A: db-setup missing, on another image, with another entrypoi
   m = good();
   m.services['db-setup'].depends_on = { 'rab-redis': { condition: 'service_healthy' } };
   refused(m, /db-setup: has depends_on \(rab-redis\)/);
+});
+
+// Owner decision 2026-11-18 (security review of PR #246, M1): the one-shot db-harden runs the one image, never waits and is
+// never waited for.
+test('DENIAL M1: db-harden missing, on another image, with another entrypoint, with depends_on, or waited for', () => {
+  let m = good();
+  assert.deepEqual(checkModel(m, 'fixture'), []);
+  delete m.services['db-harden'];
+  refused(m, /db-harden is missing/);
+  m = good();
+  m.services['db-harden'].image = IMG.replace('CREWFLOW_IMAGE_TAG', 'CREWFLOW_HARDEN_TAG');
+  refused(m, /db-harden: image/);
+  m = good();
+  m.services['db-harden'].image = '${CREWFLOW_IMAGE_REPOSITORY:-adhin007/adolphus}@${CREWFLOW_IMAGE_TAG:?x}';
+  refused(m, /db-harden: image differs from rab-api/);
+  m = good();
+  m.services['db-harden'].build = { context: '.' };
+  refused(m, /db-harden: has a build section/);
+  for (const ep of [['./db-setup.sh'], ['./db-setup.sh', 'setup'], ['./api-prestart.sh']]) {
+    m = good();
+    m.services['db-harden'].entrypoint = ep;
+    refused(m, /db-harden: entrypoint must be exactly \["\.\/db-setup\.sh","harden"\]/);
+  }
+  m = good();
+  m.services['db-harden'].command = ['harden'];
+  refused(m, /db-harden: must have no command/);
+  m = good();
+  m.services['db-harden'].init = true;
+  refused(m, /db-harden: init: true is refused/);
+  m = good();
+  m.services['db-harden'].depends_on = { db: { condition: 'service_healthy' } };
+  refused(m, /db-harden: must have no depends_on/);
+  m = good();
+  m.services['db-harden'].depends_on = ['db'];
+  refused(m, /db-harden: must have no depends_on/);
+  m = good();
+  m.services['rab-api'].depends_on['db-harden'] = { condition: 'service_completed_successfully' };
+  refused(m, /rab-api: must not depend on db-harden/);
+  m = good();
+  m.services['rab-worker'].depends_on['db-harden'] = { condition: 'service_started' };
+  refused(m, /rab-worker: must not depend on db-harden/);
+  m = good();
+  m.services['rab-redis'].depends_on = ['db-harden'];
+  refused(m, /rab-redis: must not depend on db-harden/);
+});
+
+// Owner decision 2026-11-18 (Twenty's way): the PR #125 option 2 setup volume is retired in every rendered combination.
+test('DENIAL owner decision 2026-11-18: the retired crewflow-db-target volume, or anything at /run/crewflow/db-target, is refused', () => {
+  const { retiredTargetVolumeProblems } = require('./compose-one-image.cjs');
+  assert.deepEqual(retiredTargetVolumeProblems(good(), 'fixture'), []);
+  for (const [edit, re] of [
+    [(m) => { m.volumes = { 'crewflow-db-target': {} }; }, /volume crewflow-db-target: the retired crewflow-db-target volume must not exist/],
+    [(m) => { m.volumes = { bk: { name: 'rab-production_crewflow-db-target', external: true } }; }, /volume bk: the retired crewflow-db-target volume must not exist/],
+    [(m) => { m.services['rab-api'].volumes = [{ type: 'volume', source: 'crewflow-db-target', target: '/run/crewflow/db-target', read_only: true }]; }, /rab-api: mounts crewflow-db-target at \/run\/crewflow\/db-target/],
+    [(m) => { m.services['db-setup'].volumes = ['crewflow-db-target:/run/crewflow/db-target']; }, /db-setup: mounts crewflow-db-target at \/run\/crewflow\/db-target/],
+    [(m) => { m.services['rab-redis'].volumes = [{ type: 'bind', source: '/srv/x', target: '/run/crewflow/db-target/owner-password' }]; }, /rab-redis: mounts something at \/run\/crewflow\/db-target\/owner-password/],
+    [(m) => { m.services['rab-worker'].tmpfs = ['/run/crewflow/db-target:size=1m']; }, /rab-worker: a tmpfs at \/run\/crewflow\/db-target/],
+  ]) {
+    const m = good();
+    edit(m);
+    refused(m, re);
+  }
+});
+
+test('owner decision 2026-11-18 (static): no committed compose file declares or mounts the retired crewflow-db-target volume', () => {
+  for (const f of ['docker-compose.production.yml', 'docker-compose.image.yml', 'docker-compose.local-build.yml', 'docker-compose.yml', 'docker-compose.qa.yml']) {
+    const text = fs.readFileSync(path.join(__dirname, '..', f), 'utf8').replace(/^\s*#.*$/gm, '');
+    assert.ok(!/crewflow-db-target|\/run\/crewflow\/db-target/.test(text), `${f}: names the retired setup volume outside a comment`);
+  }
 });
