@@ -9744,3 +9744,36 @@ plain-text password.
   host, port or database than the admin (direct) URL, and a password below the M2 floor. db-setup.sh checks a built URL's
   parts at run time (`[A-Za-z0-9_-]{32,}` password; no `$ { } @ # / ?` in host or database; a port of 1 to 5 digits,
   independent review I4; nothing after the database name but `?sslmode=verify-full`, re-review N3).
+
+## Production env lists only what each service needs; CREWFLOW_LOG_FIRST_PEER for TRUSTED_PROXY_CIDRS (branch chore/env-cleanup, owner request 2026-11-19; no SQL)
+- **Context:** `docker-compose.production.yml` listed every optional setting on rab-api and rab-worker (the 2026-11-12
+  "every variable as a field" request). OpenShip showed the bare `KEY:` lines as "missing". The file now lists, like
+  Twenty's compose, only what each service requires, the image variables, the database / Redis settings and the
+  owner pins; every optional setting is documented in `packages/rab-docker/docs/release/ENV-REFERENCE.md`. Separately,
+  production refuses to boot without `TRUSTED_PROXY_CIDRS`, and on hosted OpenShip there is no shell to find the edge
+  proxy's address.
+- **Threats:** (1) a removed `${KEY:-default}` silently changes a security default (MFA, cookies, key separation, rate
+  limits, legacy JWT verification); (2) a security pin is lost with the clean-up; (3) the diagnostic logs request data
+  (headers, `X-Forwarded-For`, path, query, tokens) or keeps logging; (4) the logged value is trusted blindly and a
+  too-broad or wrong `TRUSTED_PROXY_CIDRS` lets a client spoof its IP (rate limits, login history, audit); (5) with no
+  proxy in front, the logged address is a real visitor's IP (personal data).
+- **Controls:** (1) `production-compose-defaults.spec.ts` proves, for each of the 120 removed keys, with the code's real
+  readers (`validate()` in production mode, `resolvePgEnvironment`, `readDeploymentShape`, the Worker shutdown
+  contract, and the exact default expressions in `api-prestart.sh` and rab-worker's runtime files), that unset equals the
+  old compose value; it also fails if a removed key comes back on rab-api / rab-worker. (2) No pin changed: `PG_ADMIN_URL`
+  / `PG_ADMIN_DIRECT_URL` stay `""` on rab-api and rab-worker, `NODE_ENV` / `RAB_RUNTIME_ENV` production, `AI_ENABLED`
+  false, the storage, scheduler and Phase D pins, rab-worker's `PG_POOL_MAX_CONNECTIONS` 12; `docker-compose.image.yml`
+  is unchanged (its `CREWFLOW_RUNTIME_ISOLATION: enforce` stays). Every compose gate and self-test passes unchanged.
+  (3) `CREWFLOW_LOG_FIRST_PEER` is a strict boolean (X3.1), off by default. `FirstPeerLogMiddleware`
+  (`engine/core-modules/trusted-proxy/`, not main.ts) logs ONE line per process: `req.socket.remoteAddress` (the TCP
+  peer, which a client cannot choose) and the /32 or /128 built from it; it skips loopback peers (the in-container health
+  check); a value that does not look like an address is not echoed. No header, method, path, query, body, user or
+  configuration value is read or logged (unit test with every one of them marked). (4) The value still has to pass the
+  existing production rule (IPv4 /16, IPv6 /48 or narrower; whole private ranges refused); the runbook says to use the
+  /32 or the provider's documented range, never a guess, and to keep the loopback value when nothing proxies.
+  (5) Opt-in for one deploy; the runbook says to remove it, and the admin environment view shows it while it is on.
+- **Residual:** an operator who leaves the flag on gets one IP line per container start. OpenShip gives a project-scoped
+  variable to every container (read from its source): the runbook tells operators to scope runtime settings to the
+  service.
+- **Tests:** `first-peer-log.middleware.spec.ts` (9), `production-compose-defaults.spec.ts` (118), the compose gates and
+  their self-tests (453), `docker compose config` of the production file.
