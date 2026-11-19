@@ -1671,6 +1671,20 @@ describe('a pooler in PG_ADMIN_URL, detected by capability', () => {
   });
 });
 
+describe('#257 + #259 combined: sslmode=require (OpenShip) in production', () => {
+  it('PG_ADMIN_URL and PG_DATABASE_URL at sslmode=require pass every input check and db-setup connects (unreachable here: 70); prefer is refused (64)', async () => {
+    const urls = (mode: string) => ({
+      NODE_ENV: 'production',
+      PG_ADMIN_URL: `postgres://dbadmin:${ADMIN_PW}@127.0.0.1:1/crewflow_unit?sslmode=${mode}`,
+      PG_DATABASE_URL: `postgres://crewflow_owner:${OWNER_PW}@127.0.0.1:1/crewflow_unit?sslmode=${mode}`,
+    });
+    const ok = await runOwnerBootstrap(urls('require'), { log: () => undefined, retryWindowMs: 0 });
+    expect(ok).toMatchObject({ outcome: 'failed', exitCode: 70, code: 'ECONNREFUSED' });
+    const refused = await runOwnerBootstrap(urls('prefer'), { log: () => undefined, retryWindowMs: 0 });
+    expect(refused.exitCode).toBe(64);
+  });
+});
+
 describe('lead audit 2026-11-19 item 6 (NOT applied, owner decision): mode c keeps the reviewed N1 rule', () => {
   it('decideOwnerSelf accepts a crewflow_owner that owns the database through a role (the transition-shaped database)', () => {
     const self = { sessionLogin: 'crewflow_owner', currentLogin: 'crewflow_owner' };

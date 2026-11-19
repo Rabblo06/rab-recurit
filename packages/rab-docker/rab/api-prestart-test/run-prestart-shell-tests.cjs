@@ -650,6 +650,9 @@ for (const [label, env, entry, pattern] of [
 // Re-review N3 of #259: a well-formed built URL (exactly /<name>?sslmode=verify-full after the port) still passes.
 r = run('setup-built-ok', { ...MODE_B, PG_DATABASE_HOST: 'db-direct.example', PG_DATABASE_PORT: '25060', PG_DATABASE_NAME: 'd', PG_DATABASE_URL: `postgresql://crewflow_owner:${'a'.repeat(40)}@db-direct.example:25060/d?sslmode=verify-full` }, { entry: 'db-setup.sh' });
 check('14g2 db-setup.sh accepts a well-formed built URL (the child runs)', r.code === 0 && !/is malformed/.test(r.out) && !!boot(r.out), r.out);
+// #257 + #259 combined (OpenShip): PG_ADMIN_URL with sslmode=require and the built crewflow_owner URL reach the child.
+r = run('setup-admin-require', { ...MODE_B, PG_ADMIN_URL: EXT_ADMIN.replace('verify-full', 'require'), PG_DATABASE_HOST: 'db-direct.example', PG_DATABASE_PORT: '25060', PG_DATABASE_NAME: 'd', PG_DATABASE_URL: `postgresql://crewflow_owner:${'a'.repeat(40)}@db-direct.example:25060/d?sslmode=verify-full` }, { entry: 'db-setup.sh' });
+check('14g3 db-setup.sh accepts PG_ADMIN_URL with sslmode=require (the child runs)', r.code === 0 && !!boot(r.out), r.out);
 for (const [label, env, want] of [
   ['mode b, admin on host db, CA unset -> the bundled CA', { ...MODE_B, CREWFLOW_BUNDLED_DB: '1', PG_ADMIN_URL: ADMIN_URL, PG_DATABASE_URL: RUNTIME_URL }, DB_CA],
   ['mode b, admin on host db, CA set -> kept', { ...MODE_B, CREWFLOW_BUNDLED_DB: '1', PG_ADMIN_URL: ADMIN_URL, PG_DATABASE_URL: RUNTIME_URL, PG_SSL_CA_CERT_PATH: '/run/crewflow/pg-ca.crt' }, '/run/crewflow/pg-ca.crt'],

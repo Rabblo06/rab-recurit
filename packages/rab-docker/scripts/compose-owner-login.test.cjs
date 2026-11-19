@@ -1251,4 +1251,9 @@ test('owner rule 2026-11-19: one sslmode rule for every database URL (PG_DATABAS
   const r = gate.dbSettingsProblems;
   assert.deepEqual(r({ bundled: '0', adminUrl: ADMIN_OK.replace('verify-full', 'verify-ca'), adminDirectUrl: ADMIN_OK.replace('verify-full', 'require&channel_binding=require'), appUrl: URL_OK.replace('verify-full', 'require') }), []);
   assertRefused(r({ bundled: '0', adminUrl: ADMIN_OK, adminDirectUrl: ADMIN_OK.replace('verify-full', 'prefer'), appPasswordSet: true, dbHost: 'db.internal.example' }), /^PG_ADMIN_DIRECT_URL: sslmode must be/);
+  // #257 + #259 combined: an operator's compose.env with PG_ADMIN_URL at sslmode=require (mode b, the shared password) passes
+  // the env-file lint and the deployed-model rule; no check anywhere demands verify-full of an operator-supplied URL.
+  const requireAdmin = ADMIN_OK.replace('verify-full', 'require');
+  assert.deepEqual(r({ bundled: '0', adminUrl: requireAdmin, appPasswordSet: true, dbHost: 'db.internal.example', dbPort: '5432', dbName: 'crewflow' }), []);
+  assert.deepEqual(lintEnvText('compose', `CREWFLOW_BUNDLED_DB=0\nPG_ADMIN_URL=${requireAdmin}\nPG_DATABASE_APP_PASSWORD=${'a1'.repeat(20)}\nPG_DATABASE_HOST=db.internal.example\nPG_DATABASE_PORT=5432\nPG_DATABASE_NAME=crewflow`).filter((p) => /sslmode|PG_ADMIN_URL/.test(p)), []);
 });
