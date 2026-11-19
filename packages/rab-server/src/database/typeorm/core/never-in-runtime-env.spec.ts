@@ -56,6 +56,27 @@ describe('never-in-runtime-env (security review L-4): one list, two enforcers', 
     }
   });
 
+  it('first platform admin at boot (2026-11-19): BOOTSTRAP_ADMIN_PASSWORD is refused in every runtime process by both enforcers; the five inputs rab-api reads are not', () => {
+    for (const processName of ['api', 'worker', 'provisioner'] as const) {
+      expect(forbiddenRuntimeEnvNames(processName)).toContain('BOOTSTRAP_ADMIN_PASSWORD');
+      const refusal = runtimeEnvRefusal({ NODE_ENV: 'production', RAB_RUNTIME_ENV: 'production', BOOTSTRAP_ADMIN_PASSWORD: 'S3cret-PW-do-not-print' }, processName);
+      expect(refusal?.name).toBe('BOOTSTRAP_ADMIN_PASSWORD');
+      expect(refusal?.why).not.toContain('S3cret-PW-do-not-print');
+      expect(runtimeEnvRefusal({ BOOTSTRAP_ADMIN_PASSWORD: ' ' }, processName)).toBeNull();
+    }
+    expect(prestartNames()).toContain('BOOTSTRAP_ADMIN_PASSWORD');
+    for (const name of ['BOOTSTRAP_ADMIN_EMAIL', 'BOOTSTRAP_ADMIN_FIRST_NAME', 'BOOTSTRAP_ADMIN_LAST_NAME', 'BOOTSTRAP_ADMIN_ORG_SLUG', 'BOOTSTRAP_ADMIN_ORG_NAME']) {
+      expect(forbiddenRuntimeEnvNames('api')).not.toContain(name);
+      expect(prestartNames()).not.toContain(name);
+      expect(runtimeEnvRefusal({ NODE_ENV: 'production', RAB_RUNTIME_ENV: 'production', [name]: 'admin@example.test' }, 'api')).toBeNull();
+    }
+    // The command authority stays refused on the API start.
+    for (const name of ['DB_TARGET', 'ALLOW_PRODUCTION_DB_COMMANDS']) {
+      expect(runtimeEnvRefusal({ NODE_ENV: 'production', [name]: 'production' }, 'api')?.name).toBe(name);
+      expect(prestartNames()).toContain(name);
+    }
+  });
+
   it('api-prestart.sh refuses exactly the API list (parity with the shared constant)', () => {
     const names = prestartNames();
     expect(new Set(names).size).toBe(names.length);
