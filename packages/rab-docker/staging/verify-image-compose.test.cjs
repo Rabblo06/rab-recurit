@@ -665,7 +665,7 @@ test('DENIAL DB-SETUP environment mode: PG_DATABASE_URL never from an env file, 
   assertRefused(run({ 'rab-api': ok, 'rab-worker': ok }, (v) => { ownPooled(v); setSession(session.replace('crewflow_owner:', 'doadmin:'), ['rab-api'])(v); }), /rab-api: PG_DATABASE_SESSION_URL does not log in as crewflow_owner in the deployed model/);
   assertRefused(run({ 'rab-api': ok, 'rab-worker': ok }, (v) => { ownPooled(v); setSession(session.replace('crewflow_owner:', 'doadmin:'))(v); }), /db-setup: PG_DATABASE_SESSION_URL: must log in as crewflow_owner/);
   assertRefused(run({ 'rab-api': ok, 'rab-worker': ok }, (v) => { ownPooled(v); setSession(session.replace('/d?', '/other?'))(v); }), /db-setup: PG_DATABASE_SESSION_URL and PG_DATABASE_URL name different databases/);
-  assertRefused(run({ 'rab-api': ok, 'rab-worker': ok }, (v) => { ownPooled(v); setSession(session, ['db-setup'])(v); }), /db-harden: PG_DATABASE_SESSION_URL is not db-setup's/);
+  assertRefused(run({ 'rab-api': ok, 'rab-worker': ok }, (v) => { ownPooled(v); setSession('', ['db-harden'])(v); }), /db-harden: PG_DATABASE_SESSION_URL is not db-setup's/);
   assertRefused(run({ 'rab-api': ok, 'rab-worker': ok }, (v) => { v.services['rab-redis'].environment = { PG_DATABASE_SESSION_URL: '' }; }), /rab-redis: has PG_DATABASE_SESSION_URL in the deployed model/);
   assertRefused(run({ 'rab-api': ok, 'rab-worker': ok }, (v) => { delete v.services['db-setup'].environment.PG_DATABASE_SESSION_URL; }), /db-setup: PG_DATABASE_SESSION_URL is missing in the deployed model/);
   for (const svc of ['rab-api', 'rab-worker', 'db-setup', 'db-harden']) {
