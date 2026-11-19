@@ -1283,3 +1283,21 @@ test('owner rule 2026-11-19: one sslmode rule for every database URL (PG_DATABAS
   assert.deepEqual(r({ bundled: '0', adminUrl: requireAdmin, appPasswordSet: true, dbHost: 'db.internal.example', dbPort: '5432', dbName: 'crewflow' }), []);
   assert.deepEqual(lintEnvText('compose', `CREWFLOW_BUNDLED_DB=0\nPG_ADMIN_URL=${requireAdmin}\nPG_DATABASE_APP_PASSWORD=${'a1'.repeat(20)}\nPG_DATABASE_HOST=db.internal.example\nPG_DATABASE_PORT=5432\nPG_DATABASE_NAME=crewflow`).filter((p) => /sslmode|PG_ADMIN_URL/.test(p)), []);
 });
+
+test('first platform admin at boot (#264 I1): deploy compose files pass BOOTSTRAP_ADMIN_* through on rab-api only, never a value', () => {
+  const lint = gate.bootstrapAdminComposeTextProblems;
+  const pass = (key) => `      ${key}: \${${key}:-}`;
+  const doc = (apiLines, workerLines = []) =>
+    ['services:', '  rab-api:', '    environment:', ...apiLines, '  rab-worker:', '    environment:', '      APP_SECRET: x', ...workerLines, 'volumes: {}'].join('\n');
+  assert.deepEqual(lint('t', doc(gate.RAB_API_BOOTSTRAP_ADMIN_KEYS.map(pass))), []);
+  assert.deepEqual(lint('t', doc([])), []); // absent is fine: a platform may set them as rab-api variables
+  assert.deepEqual(lint('t', doc(['      # BOOTSTRAP_ADMIN_PASSWORD: never'])), []); // comments are ignored
+  assertRefused(lint('t', doc([], [pass('BOOTSTRAP_ADMIN_EMAIL')])), /service rab-worker sets BOOTSTRAP_ADMIN_EMAIL \(rab-api only\)/);
+  assertRefused(lint('t', doc(['      BOOTSTRAP_ADMIN_EMAIL: admin@example.test'])), /must pass BOOTSTRAP_ADMIN_EMAIL through/);
+  assertRefused(lint('t', doc([pass('BOOTSTRAP_ADMIN_PASSWORD')])), /sets BOOTSTRAP_ADMIN_PASSWORD \(a bootstrap password/);
+  assertRefused(lint('t', doc(['      - BOOTSTRAP_ADMIN_ROLE=x'])), /sets BOOTSTRAP_ADMIN_ROLE \(an unknown bootstrap-admin input/);
+  // The committed deploy files themselves.
+  for (const file of [gate.FILES.image, gate.PRODUCTION_FILE]) {
+    assert.deepEqual(lint(path.basename(file), fs.readFileSync(file, 'utf8')), [], file);
+  }
+});

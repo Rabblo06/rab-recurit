@@ -1550,6 +1550,47 @@ function databaseExpressionProblems(rel, text) {
   return problems;
 }
 
+/**
+ * First platform administrator at start (security review of #264, I1), on the raw text of a deploy compose file: a
+ * BOOTSTRAP_ADMIN_* key may appear only under the rab-api service, only as one of RAB_API_BOOTSTRAP_ADMIN_KEYS, and only as
+ * the plain pass-through `KEY: ${KEY:-}` (no committed value: the email is the operator's, set once and removed). Comments
+ * are ignored. Absent keys are fine (a platform may also set them as rab-api variables).
+ */
+function bootstrapAdminComposeTextProblems(rel, text) {
+  const problems = [];
+  let inServices = false;
+  let service = null;
+  for (const line of String(text).split(/\r?\n/)) {
+    if (/^\S/.test(line)) {
+      inServices = /^services:\s*$/.test(line);
+      service = null;
+      continue;
+    }
+    const top = /^ {2}([A-Za-z0-9_.-]+):\s*$/.exec(line);
+    if (inServices && top) {
+      service = top[1];
+      continue;
+    }
+    if (/^\s*#/.test(line)) continue;
+    const m = /^\s*-?\s*(BOOTSTRAP_ADMIN_[A-Za-z0-9_]*)\s*[:=]\s*(.*?)\s*$/.exec(line);
+    if (!m) continue;
+    const key = m[1];
+    const where = service ? `service ${service}` : 'outside any service';
+    if (!RAB_API_BOOTSTRAP_ADMIN_KEYS.includes(key)) {
+      problems.push(`${rel}: ${where} sets ${key} (${forbiddenReason(key) ?? 'not a bootstrap input'})`);
+      continue;
+    }
+    if (service !== 'rab-api') {
+      problems.push(`${rel}: ${where} sets ${key} (rab-api only)`);
+      continue;
+    }
+    const value = m[2].replace(/^(['"])(.*)\1$/, '$2');
+    const passThrough = '${' + key + ':-}';
+    if (value !== passThrough) problems.push(`${rel}: rab-api must pass ${key} through as ${key}: ${passThrough} (no committed value)`);
+  }
+  return problems;
+}
+
 /** Problems in raw compose text that rendering cannot show. */
 function lintComposeText(rel, text) {
   const problems = [];
@@ -1557,6 +1598,7 @@ function lintComposeText(rel, text) {
   if (/^\s*-?\s*CREWFLOW_MIGRATION_APPROVED\s*[:=]/m.test(text)) problems.push(`${rel}: sets CREWFLOW_MIGRATION_APPROVED`);
   if (/^\s*-?\s*CREWFLOW_DB_MODE\s*[:=]/m.test(text)) problems.push(`${rel}: sets CREWFLOW_DB_MODE (there is no mode switch)`);
   problems.push(...databaseExpressionProblems(rel, text));
+  problems.push(...bootstrapAdminComposeTextProblems(rel, text));
   // Owner decision 2026-11-17: no compose `:?` on PG_DATABASE_PASSWORD (it would demand it with your own database too);
   // db, db-setup and the lints require it exactly while the bundled db runs. The same for PG_DATABASE_APP_PASSWORD.
   if (/\$\{PG_DATABASE_PASSWORD:\?/.test(text)) problems.push(`${rel}: \${PG_DATABASE_PASSWORD:?...} demands the bundled db's password with your own database too (use \${PG_DATABASE_PASSWORD:-}; the db entrypoint and db-setup refuse an empty one)`);
@@ -1664,6 +1706,7 @@ function staticProblems() {
   // The database expression and the retired setup volume on docker-compose.production.yml too (its other rules are
   // compose-one-image.cjs's and compose-credential-isolation.cjs's).
   if (fs.existsSync(PRODUCTION_FILE)) problems.push(...databaseExpressionProblems('docker-compose.production.yml', fs.readFileSync(PRODUCTION_FILE, 'utf8')));
+  if (fs.existsSync(PRODUCTION_FILE)) problems.push(...bootstrapAdminComposeTextProblems('docker-compose.production.yml', fs.readFileSync(PRODUCTION_FILE, 'utf8')));
   // ADMIN_URL_PLACEMENT, every compose file of the repository (dev, QA, test overlays included), not only the deploy files.
   for (const file of composeFilesInRepo()) {
     problems.push(...adminUrlPlacementProblems(path.relative(path.resolve(DOCKER_DIR, '../..'), file).split(path.sep).join('/'), fs.readFileSync(file, 'utf8')));
@@ -1738,6 +1781,6 @@ module.exports = {
   DB_HARDEN_SERVICE, ADMIN_SERVICES, HARDEN_TIMEOUT_KEY, HARDEN_TIMEOUT_EXPR, HARDEN_ENTRYPOINT, dbHardenProblems, hardenTimeoutOk,
   FILES, TEMPLATES, COMBOS, STATIC_COMBO, DB_SERVICE, DB_SETUP_SERVICE, DB_TARGET_VOLUME, DB_TARGET_DIR, SENTINEL_ADMIN_PW, SENTINEL_ADMIN_URL, dbSetupProblems, appCredentialProblems, credentialMountProblems, topLevelVolumeProblems, bundledDbEnvironmentProblems, DB_INITDB_ARGS, DB_ENV_KEYS, DB_PASSWORD_KEY, BUNDLED_DB_KEY, bundledDbProblems, SENTINEL_DB_PW, BUNDLED_URL, NOT_THE_APP_LOGIN, NOTIFICATION_DELIVERY, PHASE_D_SWITCHES, PHASE_D_UNCHANGED, STATEMENT_DISPATCH, FEATURE_SWEEPS, SWITCH_VALUES, STRICT_SWITCHES, X31_SWITCHES, scanStrictSwitches, ENVIRONMENT_VARIABLES_TS, strictSwitchProblems, featureSweepProblems, composeEnvValue, AUDIT_SINK_MODES, AUDIT_SINK_PRODUCTION_MODES, AUDIT_SINK_FAILURES,
   AUDIT_SINK_PRODUCTION_FAILURES, SENTINEL_URL, SENTINEL_OWNER_PW, SENTINEL_APP_SECRET,
-  SENTINEL_REDIS_PW, SENTINEL_LEGACY_PW, forbiddenReason, RAB_API_BOOTSTRAP_ADMIN_KEYS, bootstrapAdminPlacementProblem, durationSeconds, checkModel, checkStaticModel, parseEnvText,
+  SENTINEL_REDIS_PW, SENTINEL_LEGACY_PW, forbiddenReason, RAB_API_BOOTSTRAP_ADMIN_KEYS, bootstrapAdminPlacementProblem, bootstrapAdminComposeTextProblems, durationSeconds, checkModel, checkStaticModel, parseEnvText,
   lintEnvText, lintComposeText, databaseExpressionProblems, PRODUCTION_FILE, renderModels, staticProblems, main,
 };
