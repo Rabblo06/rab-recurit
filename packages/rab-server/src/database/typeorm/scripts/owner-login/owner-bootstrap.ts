@@ -149,6 +149,11 @@ export const CONCURRENT_UPDATE_MESSAGE = 'tuple concurrently updated';
 export const PASSWORD_FORM_REFUSAL_SQLSTATES: ReadonlySet<string> = new Set(['22023', '28P01', '0A000', 'XX000']);
 /** The name of the optional direct admin address (db-setup and db-harden only). */
 export const ADMIN_DIRECT_URL_LABEL = 'PG_ADMIN_DIRECT_URL' as const;
+/**
+ * PR #258 (feat/twenty-pooler): the crewflow_owner SESSION address, set when PG_DATABASE_URL is a pooled address: the same
+ * login, password and database as PG_DATABASE_URL, a real session. db-setup's crewflow_owner sessions use it.
+ */
+export const APP_SESSION_URL_LABEL = 'PG_DATABASE_SESSION_URL' as const;
 
 /** The two password forms: the SCRAM verifier (always first), or the plain-text fallback. */
 export type PasswordForm = 'scram-verifier' | 'plaintext';
@@ -211,6 +216,10 @@ export const OWNER_BOOTSTRAP_MESSAGES = Object.freeze({
     'PG_ADMIN_URL has the address shape of a documented transaction pooler, and db-setup needs one real database session. Put the database\'s direct address in PG_ADMIN_URL, or keep PG_ADMIN_URL and set PG_ADMIN_DIRECT_URL to the direct address (the same login and database). Refusing.',
   adminTargetMismatch: `${DB_SETUP_INPUT_MESSAGES.targetMismatch} If PG_ADMIN_URL is a pooled address of the same database, keep it as it is and set PG_ADMIN_DIRECT_URL to the direct address (the same login and database).`,
   adminDirectUsed: 'PG_ADMIN_DIRECT_URL is set: db-setup connects with it instead of PG_ADMIN_URL (the same login and database, checked).',
+  appSessionWithoutApp: 'PG_DATABASE_SESSION_URL is set without PG_DATABASE_URL. It is only the session address of the PG_DATABASE_URL login: set both. Refusing.',
+  appSessionMismatch:
+    'PG_DATABASE_SESSION_URL must log in as the same user, with the same password, to the same database as PG_DATABASE_URL (only the address may differ). Values not shown. Refusing.',
+  appSessionUsed: 'PG_DATABASE_SESSION_URL is set: db-setup\'s crewflow_owner sessions use it instead of PG_DATABASE_URL (the same login, password and database, checked).',
   adminDirectWithoutAdmin: 'PG_ADMIN_DIRECT_URL is set without PG_ADMIN_URL. It is only the direct address of the PG_ADMIN_URL login: set both, or put the direct address in PG_ADMIN_URL. Refusing.',
   adminDirectMismatch:
     'PG_ADMIN_DIRECT_URL must log in as the same user, to the same database, as PG_ADMIN_URL (only the address may differ). Values not shown. Refusing.',
@@ -1267,6 +1276,37 @@ export function applyAdminDirectUrl(env: Record<string, string | undefined>): { 
   return { env: copy, used: true };
 }
 
+/**
+ * PG_DATABASE_SESSION_URL (PR #258): when set, db-setup's crewflow_owner sessions (the probe, the ledger read, mode c) use
+ * it instead of PG_DATABASE_URL, and the "same database as the admin" rule compares the admin address with it. It must parse
+ * and name the same user, password and database as PG_DATABASE_URL (otherwise the password db-setup sets would not be the
+ * one rab-api / rab-worker log in with). The copy of the environment returned has PG_DATABASE_URL = the session URL;
+ * process.env is never changed. Throws OwnerBootstrapRefusal (fixed text).
+ */
+export function applyAppSessionUrl(env: Record<string, string | undefined>): { env: Record<string, string | undefined>; used: boolean } {
+  const value = (name: string): string | undefined => {
+    const v = env[name];
+    return typeof v === 'string' && v.trim() !== '' ? v.trim() : undefined;
+  };
+  const session = value(APP_SESSION_URL_LABEL);
+  if (session === undefined) return { env, used: false };
+  const app = value('PG_DATABASE_URL');
+  if (app === undefined) throw new OwnerBootstrapRefusal(OWNER_BOOTSTRAP_MESSAGES.appSessionWithoutApp);
+  let a;
+  let d;
+  try {
+    a = parsePgUrl(app, 'PG_DATABASE_URL');
+    d = parsePgUrl(session, APP_SESSION_URL_LABEL);
+  } catch (error) {
+    if (error instanceof PgConfigError) throw new OwnerBootstrapRefusal(error.message);
+    throw error;
+  }
+  if (a.user !== d.user || a.database !== d.database || a.password !== d.password) throw new OwnerBootstrapRefusal(OWNER_BOOTSTRAP_MESSAGES.appSessionMismatch);
+  const copy: Record<string, string | undefined> = { ...env, PG_DATABASE_URL: session };
+  delete copy[APP_SESSION_URL_LABEL];
+  return { env: copy, used: true };
+}
+
 /** selectDbSetupInput, with a documented-pooler-shape refusal of PG_ADMIN_URL worded with the direct-address options. */
 function selectInput(env: Record<string, string | undefined>, directUsed: boolean): DbSetupInput {
   try {
@@ -1313,6 +1353,9 @@ export async function runOwnerBootstrap(env: Record<string, string | undefined>,
     const direct = applyAdminDirectUrl(env);
     env = direct.env;
     if (direct.used) log(OWNER_BOOTSTRAP_MESSAGES.adminDirectUsed);
+    const appSession = applyAppSessionUrl(env);
+    env = appSession.env;
+    if (appSession.used) log(OWNER_BOOTSTRAP_MESSAGES.appSessionUsed);
     const input = selectInput(env, direct.used);
     if (input.mode === 'owner-url') log(OWNER_BOOTSTRAP_MESSAGES.passThrough);
     // A password the SCRAM computation refuses (non-ASCII) is refused here, before anything connects (OwnerCredentialError).
@@ -1490,6 +1533,9 @@ export async function runOwnerHarden(env: Record<string, string | undefined>, op
     const direct = applyAdminDirectUrl(env);
     env = direct.env;
     if (direct.used) log(OWNER_BOOTSTRAP_MESSAGES.adminDirectUsed);
+    const appSession = applyAppSessionUrl(env);
+    env = appSession.env;
+    if (appSession.used) log(OWNER_BOOTSTRAP_MESSAGES.appSessionUsed);
     const input = selectInput(env, direct.used);
     if (input.mode === 'owner-url') {
       log(OWNER_BOOTSTRAP_MESSAGES.hardenNoAdmin);

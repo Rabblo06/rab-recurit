@@ -142,6 +142,11 @@ fi
 if [ -n "${PG_ADMIN_URL:-}" ] && crewflow_is_owner_login "$PG_ADMIN_URL"; then
   refuse 'PG_ADMIN_URL logs in as crewflow_owner, the app login: PG_ADMIN_URL is your database admin login (db-setup creates crewflow_owner with it). Remove it to have db-setup only check crewflow_owner. Value not shown.'
 fi
+# PR #258: PG_DATABASE_SESSION_URL, the session address of the crewflow_owner login (the child checks the same login,
+# password and database as PG_DATABASE_URL and uses it for its crewflow_owner sessions).
+if [ -n "${PG_DATABASE_SESSION_URL:-}" ] && ! crewflow_is_owner_login "$PG_DATABASE_SESSION_URL"; then
+  refuse 'PG_DATABASE_SESSION_URL does not log in as crewflow_owner: it is the session address of PG_DATABASE_URL (the same login and database). Value not shown.'
+fi
 # Owner decision 2026-11-19: PG_ADMIN_DIRECT_URL, the direct address of the PG_ADMIN_URL login (the child checks it names the
 # same login and database). Only beside PG_ADMIN_URL, and never the app login.
 if [ -n "${PG_ADMIN_DIRECT_URL:-}" ]; then

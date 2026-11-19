@@ -15,6 +15,7 @@ import { OWNER_CREATEROLE_GRACE_SECONDS, OWNER_CREATEROLE_MARK_PREFIX, OWNER_CRE
 import {
   ADMIN_DIRECT_URL_LABEL,
   applyAdminDirectUrl,
+  applyAppSessionUrl,
   bootstrapDriverConfigs,
   bootstrapOwnerWithIo,
   doBlockStage,
@@ -1720,5 +1721,32 @@ describe('lead audit 2026-11-19 item 6: mode c refuses a crewflow_owner that own
     const self = { sessionLogin: 'crewflow_owner', currentLogin: 'crewflow_owner' };
     expect(() => decideOwnerSelf(self, { ...existing, oOwnsDb: true })).toThrow(OWNER_BOOTSTRAP_MESSAGES.ownerUrlOwnsDatabase);
     expect(decideOwnerSelf(self, existing)).toEqual([]);
+  });
+});
+
+describe('PR #258: PG_DATABASE_SESSION_URL (the crewflow_owner session address) in db-setup', () => {
+  const pooledApp = `postgres://crewflow_owner:${OWNER_PW}@pool.internal.example:6432/crewflow_unit`;
+  const sessionApp = `postgres://crewflow_owner:${OWNER_PW}@127.0.0.1:1/crewflow_unit`;
+
+  it('applyAppSessionUrl: the same login, password and database as PG_DATABASE_URL, or refused; then it replaces PG_DATABASE_URL in db-setup\'s copy only', () => {
+    const env = { PG_DATABASE_URL: pooledApp, PG_DATABASE_SESSION_URL: sessionApp };
+    expect(applyAppSessionUrl(env)).toEqual({ env: { PG_DATABASE_URL: sessionApp }, used: true });
+    expect(env.PG_DATABASE_URL).toBe(pooledApp);
+    expect(applyAppSessionUrl({ PG_DATABASE_URL: pooledApp })).toEqual({ env: { PG_DATABASE_URL: pooledApp }, used: false });
+    expect(() => applyAppSessionUrl({ PG_DATABASE_SESSION_URL: sessionApp })).toThrow(OWNER_BOOTSTRAP_MESSAGES.appSessionWithoutApp);
+    for (const bad of [sessionApp.replace('crewflow_owner', 'other'), sessionApp.replace(OWNER_PW, `${OWNER_PW}x`), sessionApp.replace('/crewflow_unit', '/other')]) {
+      expect(() => applyAppSessionUrl({ PG_DATABASE_URL: pooledApp, PG_DATABASE_SESSION_URL: bad })).toThrow(OWNER_BOOTSTRAP_MESSAGES.appSessionMismatch);
+    }
+  });
+
+  it('runOwnerBootstrap: logs that the session address is used and connects there (unreachable here: 70); no value printed', async () => {
+    const lines: string[] = [];
+    const result = await runOwnerBootstrap(
+      { PG_ADMIN_URL: `postgres://dbadmin:${ADMIN_PW}@127.0.0.1:1/crewflow_unit`, PG_DATABASE_URL: pooledApp, PG_DATABASE_SESSION_URL: sessionApp },
+      { log: (l) => lines.push(l), retryWindowMs: 0 },
+    );
+    expect(result).toMatchObject({ outcome: 'failed', exitCode: 70, code: 'ECONNREFUSED' });
+    expect(lines).toContain(OWNER_BOOTSTRAP_MESSAGES.appSessionUsed);
+    for (const forbidden of [ADMIN_PW, OWNER_PW, 'pool.internal.example', 'crewflow_unit']) expect(lines.join('\n')).not.toContain(forbidden);
   });
 });
