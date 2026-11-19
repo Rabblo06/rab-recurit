@@ -68,7 +68,8 @@ describe('M2 phase 1 SQL: core.metadata_migration (S-1)', () => {
     expect(METADATA_MIGRATION_TABLE_SQL).toContain('pg_catalog.octet_length(actions::text) <= 8192');
     // strict mode: lax mode would unwrap a nested array and accept [[{...}]] (review #252); silent, so a non-array is refused
     // by the jsonb_typeof test whatever the evaluation order.
-    expect(METADATA_MIGRATION_TABLE_SQL).toContain(`NOT pg_catalog.jsonb_path_exists(actions, 'strict $[*] ? (@.type() != "object")', '{}'::jsonb, true)`);
+    // COALESCE(…, true): a NULL (suppressed error) result refuses the row instead of passing it (re-review #252).
+    expect(METADATA_MIGRATION_TABLE_SQL).toContain(`NOT COALESCE(pg_catalog.jsonb_path_exists(actions, 'strict $[*] ? (@.type() != "object")', '{}'::jsonb, true), true)`);
     expect(METADATA_MIGRATION_TABLE_SQL).toContain("CHECK (request_id IS NULL OR request_id ~ '^[A-Za-z0-9._:-]{1,64}$')");
     expect(METADATA_MIGRATION_TABLE_SQL).toContain('CONSTRAINT metadata_migration_version_uq UNIQUE (workspace_id, metadata_version)');
   });

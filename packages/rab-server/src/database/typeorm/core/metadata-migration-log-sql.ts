@@ -103,7 +103,7 @@ export const METADATA_MIGRATION_TABLE_SQL = `CREATE TABLE core.metadata_migratio
     pg_catalog.jsonb_typeof(actions) = 'array'
     AND pg_catalog.jsonb_array_length(actions) <= ${METADATA_MIGRATION_ACTIONS_MAX_ITEMS}
     AND pg_catalog.octet_length(actions::text) <= ${METADATA_MIGRATION_ACTIONS_MAX_BYTES}
-    AND NOT pg_catalog.jsonb_path_exists(actions, 'strict $[*] ? (@.type() != "object")', '{}'::jsonb, true)
+    AND NOT COALESCE(pg_catalog.jsonb_path_exists(actions, 'strict $[*] ? (@.type() != "object")', '{}'::jsonb, true), true)
   ),
   CONSTRAINT metadata_migration_request_id_ck CHECK (request_id IS NULL OR request_id ~ '${METADATA_MIGRATION_REQUEST_ID_PATTERN}'),
   CONSTRAINT metadata_migration_executor_version_ck CHECK (executor_version >= 1),

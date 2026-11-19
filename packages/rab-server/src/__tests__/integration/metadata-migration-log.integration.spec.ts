@@ -510,7 +510,7 @@ describeIfLog('metadata engine M2 phase 1: core.metadata_migration, insert-only,
       await c2.query(BIND_SQL, [B1.org, B1.workspace, B1.owner]);
       const v1 = await change(c1, B1);
       const second = change(c2, B1); // blocks on c1's row locks (the object row it relabelled, the version row it bumped)
-      const raced = await Promise.race([second.then(() => 'not blocked'), new Promise((resolve) => setTimeout(() => resolve('blocked'), 1500))]);
+      const raced = await Promise.race([second.then(() => 'not blocked'), new Promise((resolve) => setTimeout(() => resolve('blocked'), 5000))]);
       await c1.query(INSERT_LOG, logParams(B1, v1.previous, v1.current));
       await c1.query('COMMIT');
       const v2 = await second;
