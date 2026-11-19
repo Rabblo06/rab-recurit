@@ -9901,3 +9901,17 @@ Reversal:   drop requireProvenExistingAccount from PlatformAdminBootstrapOnBoot.
   email; the activation token is absent from every log line and from `audit_log.metadata`; F5. HTTP app: F1 activate gives
   the enrol challenge; a tenant CEO resend or cancel on the pending bootstrap admin gives 404; resend or delete on a granted
   account gives 404; staff-only email refused. `user-deletion-abuse-cases` expects 404 for a tenant actor.
+
+- **Re-review follow-up (N1, Low) and CF-04 wording (2026-11-19).** `assertPlatformAdminTargetAllowed` (404 unless the actor is
+  an active platform admin) now also guards `ManagerService.update` (PATCH /managers/:id) and `ManagerService.resetPassword`,
+  `StaffService.resetPassword` and the staff status change (deactivate / reactivate), and `MembersService`'s member lookup
+  (suspend, reinstate, role change). Each check runs after the tenant-scoped lookup and before any permission-specific 403.
+  **CF-04 wording, superseded:** "a platform administrator's email cannot be changed through this path (403
+  PROTECTED_ACCOUNT)" is no longer what a tenant actor sees. A tenant actor now gets **404**, and the email stays
+  unchanged. `EmailChangeService`'s 403 `PROTECTED_ACCOUNT` stays as the inner layer, and a platform-admin actor still
+  receives it (tested). In the same way, a tenant actor deleting a platform admin gets 404, while another platform admin
+  still gets 409 `CANNOT_DELETE_PLATFORM_ADMIN`.
+- **REFUSED_AMBIGUOUS_EMAIL test seeding.** The database now refuses a second account with an email that already exists
+  ("This email address is not available for a new account"). So the integration test plants that legacy state with
+  triggers off (`SET LOCAL session_replication_role = replica`, fixture superuser, its own transaction). The function's
+  refusal of the state is still exercised.

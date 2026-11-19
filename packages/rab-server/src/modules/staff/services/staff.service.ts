@@ -948,6 +948,7 @@ export class StaffService {
       const profile = await manager.findOne(StaffProfile, { where: { id }, relations: { user: true } });
       if (!profile?.user) throw new NotFoundException('Staff member not found.');
       await lockLiveUser(manager, profile.userId, 'Staff member not found.');
+      await assertPlatformAdminTargetAllowed(manager, ctx.userId, profile.userId, 'Staff member not found.'); // #264 N1
       this.assertOwned(ctx, profile);
       if (profile.user!.status === UserStatus.INVITED || profile.user!.status === UserStatus.INVITE_EXPIRED) {
         throw new ConflictException('This account has not been activated yet — use Cancel Invitation or Resend Invitation instead.');
@@ -1080,6 +1081,7 @@ export class StaffService {
       const profile = await manager.findOne(StaffProfile, { where: { id }, relations: { user: true } });
       if (!profile?.user) throw new NotFoundException('Staff member not found.');
       await lockLiveUser(manager, profile.userId, 'Staff member not found.');
+      await assertPlatformAdminTargetAllowed(manager, ctx.userId, profile.userId, 'Staff member not found.'); // #264 N1
       this.assertOwned(ctx, profile);
       if (profile.user!.status === UserStatus.INVITED || profile.user!.status === UserStatus.INVITE_EXPIRED) {
         throw new ConflictException('This account has not been activated yet — use Resend Invitation instead.');

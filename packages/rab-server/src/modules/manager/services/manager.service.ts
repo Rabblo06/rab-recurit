@@ -738,6 +738,7 @@ export class ManagerService {
       const profile = await manager.findOne(ManagerProfile, { where: { id }, relations: { user: true } });
       if (!profile?.user) throw new NotFoundException('Manager not found.');
       await lockLiveUser(manager, profile.userId, 'Manager not found.');
+      await assertPlatformAdminTargetAllowed(manager, ctx.userId, profile.userId, 'Manager not found.'); // #264 N1
       await this.assertCeoMutationAllowed(manager, ctx, profile);
 
       const { firstName, lastName, phone, jobTitle } = dto;
@@ -876,6 +877,7 @@ export class ManagerService {
       const profile = await manager.findOne(ManagerProfile, { where: { id }, relations: { user: true } });
       if (!profile?.user) throw new NotFoundException('Manager not found.');
       await lockLiveUser(manager, profile.userId, 'Manager not found.');
+      await assertPlatformAdminTargetAllowed(manager, ctx.userId, profile.userId, 'Manager not found.'); // #264 N1
       await this.assertCeoMutationAllowed(manager, ctx, profile);
       if (profile.user!.status === UserStatus.INVITED || profile.user!.status === UserStatus.INVITE_EXPIRED) {
         throw new ConflictException('This account has not been activated yet — use Resend Invitation instead.');

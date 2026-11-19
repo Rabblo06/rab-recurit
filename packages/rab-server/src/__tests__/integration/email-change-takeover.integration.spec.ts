@@ -201,6 +201,16 @@ describeIfDb('CF-04 email change cannot take over an account (integration)', () 
     expect(await userRow(target.userId)).toMatchObject({ email: target.email });
   });
 
+  it('...and a platform-admin actor reaches the inner layer: 403 PROTECTED_ACCOUNT, the email is unchanged', async () => {
+    const adminCeo = await factory.createCeo({ id: organisationId } as never, { permissions: 'production', platformAdmin: true });
+    const adminToken = await factory.login(adminCeo);
+    const target = await factory.createInternalManager({ id: organisationId } as never, { permissions: 'production', platformAdmin: true, label: 'cf04pa2' });
+    const res = await http().patch(`/rest/v1/managers/${target.profileId}/email`).set(as(adminToken)).send({ email: freshEmail('pa2'), currentPassword: adminCeo.password });
+    expect(res.status).toBe(403);
+    expect(res.body.code).toBe('PROTECTED_ACCOUNT');
+    expect(await userRow(target.userId)).toMatchObject({ email: target.email });
+  });
+
   it('an actor who signs in without a password cannot step up (403 STEP_UP_UNAVAILABLE, nothing invented)', async () => {
     const actor = await factory.createInternalManager({ id: organisationId } as never, { permissions: 'production', label: 'cf04oauth' });
     const token = await factory.login(actor);

@@ -173,4 +173,32 @@ describeIfDb('first platform admin at API boot, through the HTTP app (integratio
     expect(await owner.query(`SELECT id FROM core.manager_profile WHERE user_id = $1`, [staff.userId])).toHaveLength(0);
     expect(await owner.query(`SELECT id FROM core.account_invite WHERE user_id = $1 AND created_at > now() - interval '1 minute'`, [staff.userId])).toHaveLength(0);
   });
+
+  it('N1 DENIAL: a tenant actor\'s reset-password, profile update and member suspend on an ACTIVE platform admin each return 404, rows unchanged', async () => {
+    const { organisation, managers } = await factory.createOrganisationWithManagers(1, { permissions: 'all', workspace: true, label: 'bootn1' });
+    const workspaceOwner = managers[0]!;
+    const ceo = await factory.createCeo(organisation, { permissions: 'production' });
+    const target = await factory.createInternalManager(organisation, { permissions: 'production', platformAdmin: true, label: 'bootn1pa' });
+    grantedUserIds.push(target.userId);
+    await owner.query(
+      `INSERT INTO core.workspace_membership (organisation_id, user_id, workspace_id, status, source) VALUES ($1, $2, $3, 'active', 'write_path') ON CONFLICT DO NOTHING`,
+      [organisation.id, target.userId, workspaceOwner.workspaceId],
+    );
+    const [before] = await owner.query(`SELECT first_name, password_hash, security_version FROM core."user" WHERE id = $1`, [target.userId]);
+    const ceoToken = await accessToken(ceo);
+    const ownerToken = await accessToken(workspaceOwner);
+
+    const reset = await http().post(`/rest/v1/managers/${target.profileId}/reset-password`).set('Authorization', `Bearer ${ceoToken}`).send({});
+    expect(reset.status).toBe(404);
+    const patch = await http().patch(`/rest/v1/managers/${target.profileId}`).set('Authorization', `Bearer ${ceoToken}`).send({ firstName: 'Renamed' });
+    expect(patch.status).toBe(404);
+    const suspend = await http().post(`/rest/v1/members/${target.userId}/suspend`).set('Authorization', `Bearer ${ownerToken}`).send({});
+    expect(suspend.status).toBe(404);
+
+    const [after] = await owner.query(`SELECT first_name, password_hash, security_version FROM core."user" WHERE id = $1`, [target.userId]);
+    expect(after).toEqual(before);
+    const [membership] = await owner.query(`SELECT status FROM core.workspace_membership WHERE user_id = $1 AND workspace_id = $2`, [target.userId, workspaceOwner.workspaceId]);
+    expect(membership.status).toBe('active');
+    expect(await owner.query(`SELECT id FROM core.password_reset_token WHERE user_id = $1`, [target.userId])).toHaveLength(0);
+  });
 });
