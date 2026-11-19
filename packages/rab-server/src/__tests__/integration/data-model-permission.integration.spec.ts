@@ -6,7 +6,9 @@
  *   DP-2   the migration's grant block, run as the owner-login migration identity (crewflow_owner, no tenant bound):
  *          organisations are found through the definer keyset function although core.organisation is FORCE RLS; the
  *          ceo and manager system roles get the flag (permission_version bumped); venue_manager, staff and every other
- *          role do not; idempotent; the revoke block (down) removes it again.
+ *          role do not; idempotent; the revoke block (down) removes it again and bumps every role of an affected
+ *          organisation; the loop saw the organisations (never a silent zero), and a lister that returns nothing while
+ *          organisations exist makes both directions fail (review #252).
  *   DP-3   layer 2 against PostgreSQL (DataModelAuthorityService + PermissionsService.userHasPermissionTx, the runtime
  *          login, FORCE RLS): CEO and Manager allowed; Venue Manager, Staff, a user with no role, a Manager with a per-user
  *          revoke, a CEO bound to another organisation and an Admin Inspect session refused with 403 PERMISSION_DENIED.
@@ -210,8 +212,10 @@ describeIfDm('metadata engine M2 phase 1: data_model.manage, a role permission (
   });
 
   it('DP-2 the grant block as the owner-login migration identity: ceo + manager of an existing organisation get it, nobody else; idempotent; down removes it', async () => {
+    const notices: string[] = [];
     const r = await asOwner((c) =>
       rolledBack(c, async () => {
+        c.on('notice', (n) => notices.push(String(n.message)));
         const bind = (org: string) => c.query("SELECT set_config('rab.organisation_id', $1, true), set_config('rab.workspace_id', '', true)", [org]);
         // Start from the state the migration meets in production: nobody holds the brand-new flag. The test database also
         // holds other spec files' organisations whose fixture roles were built with every PermissionFlag ('all'), so the
@@ -234,7 +238,8 @@ describeIfDm('metadata engine M2 phase 1: data_model.manage, a role permission (
         await c.query(DATA_MODEL_MANAGE_REVOKE_SQL);
         await bind(Q.org);
         const reverted = await holders(c, Q.org);
-        return { before, after: after.map((h) => h.key), v0, v1, v2, pHolders, reverted };
+        const v3 = await versions();
+        return { before, after: after.map((h) => h.key), v0, v1, v2, pHolders, reverted, v3 };
       }),
     );
     expect(r.before).toEqual([]);
@@ -246,6 +251,37 @@ describeIfDm('metadata engine M2 phase 1: data_model.manage, a role permission (
     expect(r.v2).toEqual(r.v1);
     expect(r.pHolders).toEqual(['ceo', 'manager']);
     expect(r.reverted).toEqual([]);
+    // down() bumps EVERY role of an affected organisation (cached snapshots of override holders die too).
+    for (const key of Object.keys(r.v2)) expect([key, Number(r.v3[key]) - Number(r.v2[key])]).toEqual([key, 1]);
+    // Review #252: the loop really saw organisations (P and Q at least) as the owner login — never a silent zero.
+    const counts = notices.map((m) => /: (\d+) organisation\(s\) checked/.exec(m)?.[1]).filter(Boolean).map(Number);
+    expect(counts).toHaveLength(2);
+    for (const n of counts) expect(n).toBeGreaterThanOrEqual(2);
+  });
+
+  it('DP-2 ABUSE (review #252): a lister that returns no organisation while organisations exist makes up() AND down() fail, never a silent zero-organisation run', async () => {
+    const r = await asAdmin((c) =>
+      rolledBack(c, async () => {
+        // Simulate the failure mode (rolled back): the definer lister returns nothing although core.organisation has rows.
+        await c.query(
+          "CREATE OR REPLACE FUNCTION core.worker_list_organisations(p_after uuid, p_limit integer) RETURNS TABLE (organisation_id uuid) LANGUAGE sql STABLE SECURITY DEFINER SET search_path = core, pg_catalog AS $f$ SELECT NULL::uuid WHERE false $f$",
+        );
+        const errorOf = async (sql: string) => {
+          await c.query('SAVEPOINT zero_org');
+          try {
+            await c.query(sql);
+            return null;
+          } catch (e) {
+            return (e as Error).message;
+          } finally {
+            await c.query('ROLLBACK TO SAVEPOINT zero_org');
+          }
+        };
+        return { up: await errorOf(DATA_MODEL_MANAGE_GRANT_SQL), down: await errorOf(DATA_MODEL_MANAGE_REVOKE_SQL) };
+      }),
+    );
+    expect(r.up).toMatch(/DataModelManagePermission1786721630000: the organisation lister returned no organisation, but core\.organisation has rows/);
+    expect(r.down).toMatch(/DataModelManagePermission1786721630000 down\(\): the organisation lister returned no organisation, but core\.organisation has rows/);
   });
 
   // ------------------------------------------------------------------------------------------------------------ DP-3

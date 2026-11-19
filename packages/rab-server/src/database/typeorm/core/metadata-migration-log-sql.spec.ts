@@ -137,6 +137,20 @@ describe('M2 phase 1 SQL: data_model.manage (S-2)', () => {
     }
   });
 
+  it('review #252: both directions refuse a zero-organisation run while a second source says organisations exist', () => {
+    for (const sql of [DATA_MODEL_MANAGE_GRANT_SQL, DATA_MODEL_MANAGE_REVOKE_SQL]) {
+      expect(sql).toContain("IF v_orgs = 0 AND (pg_catalog.pg_stat_get_live_tuples('core.organisation'::pg_catalog.regclass) > 0");
+      expect(sql).toContain('OR EXISTS (SELECT 1 FROM core.worker_list_workspaces(NULL, 1))) THEN');
+      expect(sql).toMatch(/RAISE EXCEPTION 'DataModelManagePermission1786721630000( down\(\))?: the organisation lister returned no organisation/);
+    }
+  });
+
+  it('review #252: down() bumps every role of an organisation that had a grant or a per-user override of the flag', () => {
+    expect(DATA_MODEL_MANAGE_REVOKE_SQL).toContain('IF v_rows > 0 OR v_override THEN');
+    expect(DATA_MODEL_MANAGE_REVOKE_SQL).toContain('UPDATE core.role SET permission_version = permission_version + 1 WHERE organisation_id = o.organisation_id;');
+    expect(DATA_MODEL_MANAGE_REVOKE_SQL).toContain('FROM core.user_permission_override upo');
+  });
+
   it('a per-organisation post-condition: every ceo / manager holds it and no other role does, else the migration fails', () => {
     expect(DATA_MODEL_MANAGE_GRANT_SQL).toContain('IF v_missing <> 0 OR v_other <> 0 THEN');
     expect(DATA_MODEL_MANAGE_GRANT_SQL).toMatch(/RAISE EXCEPTION 'DataModelManagePermission1786721630000: post-condition failed/);

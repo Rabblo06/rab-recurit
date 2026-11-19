@@ -15,11 +15,14 @@
  *          created_at = the insert time whatever the writer sends.
  *   ML-5   abuse: a row without a change in this transaction, a stale / skipped / repeated version, a forged or missing
  *          actor, an unknown change kind, malformed actions, a request id carrying control characters.
- *   ML-6   insert-only: UPDATE / DELETE refused for the runtime login AND the superuser (42501); TRUNCATE refused to the
+ *   ML-6   insert-only while the guard trigger is enabled: a plain UPDATE / DELETE refused for the runtime login AND the
+ *          superuser (42501); TRUNCATE refused to the
  *          request path (also through TRUNCATE core.manager_workspace CASCADE), allowed to the superuser.
  *   ML-7   owner decision: deleting the actor user keeps the row and sets only actor_user_id to NULL.
  *   ML-8   owner decision: deleting a workspace deletes exactly its log rows.
  *   ML-9   down() refuses while a row exists (rolled back; FORCE stays on).
+ *   ML-10  release-2 dependency: the 0 → 1 change of a workspace cannot be logged (E2 sync must seed version 1 first).
+ *   ML-11  two concurrent changes of one workspace: serialised on the version row, consecutive versions, both logged.
  */
 import { randomBytes, randomUUID } from 'node:crypto';
 import { existsSync } from 'node:fs';
@@ -340,6 +343,45 @@ describeIfLog('metadata engine M2 phase 1: core.metadata_migration, insert-only,
     expect(r).toEqual({ other: '42501', foreign: '42501', none: '42501' });
   });
 
+  it('ML-5 a context with NO user bound (a future job) records a NULL actor, and only NULL', async () => {
+    const r = await bound(A1, '', async (c) => {
+      const v = await change(c, A1);
+      const forged = (await attempt(c, INSERT_LOG, logParams(A1, v.previous, v.current, { actor: A1.owner }))).code;
+      const nullActor = (await attempt(c, INSERT_LOG, logParams(A1, v.previous, v.current, { actor: null }))).code;
+      const stored = (await c.query<{ a: string | null }>('SELECT actor_user_id::text AS a FROM core.metadata_migration WHERE workspace_id = $1 AND metadata_version = $2', [A1.workspace, v.current])).rows;
+      return { forged, nullActor, stored };
+    });
+    expect(r).toEqual({ forged: '42501', nullActor: null, stored: [{ a: null }] });
+  });
+
+  it('ML-10 release-2 dependency: a workspace first-ever change (version 0 → 1) can never be logged (23514); E2 sync must seed version 1 first', async () => {
+    const bare = await asAdmin(async (c) => {
+      const workspace = (
+        await c.query<{ id: string }>("INSERT INTO core.manager_workspace (organisation_id, owner_user_id, name, subdomain, status) VALUES ($1, $2, $3, $4, 'active') RETURNING id::text", [
+          A1.org,
+          A1.owner,
+          'ML bare',
+          `ml-${RUN_ID}-bare`,
+        ])
+      ).rows[0]!.id;
+      return workspace;
+    });
+    const r = await bound({ org: A1.org, workspace: bare }, A1.owner, async (c) => {
+      const before = (await c.query('SELECT 1 FROM core.workspace_metadata_state WHERE workspace_id = $1', [bare])).rowCount;
+      const object = (
+        await c.query<{ id: string }>(
+          `INSERT INTO core.object_metadata (organisation_id, workspace_id, name_singular, name_plural, label_singular, label_plural, physical_table, is_custom, allows_custom_fields)
+           VALUES ($1, $2, 'asset', 'assets', 'Asset', 'Assets', $3, true, true) RETURNING id::text`,
+          [A1.org, bare, `c_${randomBytes(6).toString('hex')}`],
+        )
+      ).rows[0]!.id;
+      const v = (await c.query<{ v: string }>('SELECT metadata_version::text AS v FROM core.workspace_metadata_state WHERE workspace_id = $1', [bare])).rows[0]!.v;
+      const out = await attempt(c, INSERT_LOG, logParams({ tag: 'bare', org: A1.org, owner: A1.owner, workspace: bare, object }, '0', '1'));
+      return { before, v, code: out.code, constraint: out.constraint };
+    });
+    expect(r).toEqual({ before: 0, v: '1', code: '23514', constraint: 'metadata_migration_version_step_ck' });
+  });
+
   it('ML-5 abuse: unknown change kind, malformed actions and an unsafe request id are refused (23514)', async () => {
     const tooMany = JSON.stringify(Array.from({ length: 33 }, () => ({ action: 'rename_label', object_id: randomUUID() })));
     const tooBig = JSON.stringify([{ action: 'rename_label', note: 'x'.repeat(9000) }]);
@@ -348,6 +390,7 @@ describeIfLog('metadata engine M2 phase 1: core.metadata_migration, insert-only,
       ['kind-status', { kind: 'PUBLISHED' }],
       ['actions-object', { actions: JSON.stringify({ action: 'rename_label' }) }],
       ['actions-scalar', { actions: JSON.stringify(['DROP TABLE core.user']) }],
+      ['actions-nested', { actions: JSON.stringify([[{ action: 'rename_label' }]]) }],
       ['actions-many', { actions: tooMany }],
       ['actions-big', { actions: tooBig }],
       ['request-newline', { request: 'req\nInjected: yes' }],
@@ -375,7 +418,7 @@ describeIfLog('metadata engine M2 phase 1: core.metadata_migration, insert-only,
     expect(await countFor(A1.workspace)).toBe(2);
   });
 
-  it('ML-6 insert-only for every identity: the superuser cannot UPDATE or DELETE a row directly either (42501)', async () => {
+  it('ML-6 while the guard trigger is enabled, a plain superuser UPDATE or DELETE is refused too (42501)', async () => {
     const r = await asAdmin((c) =>
       rolledBack(c, async () => ({
         update: (await attempt(c, "UPDATE core.metadata_migration SET request_id = 'x' WHERE workspace_id = $1", [B1.workspace])).code,
@@ -450,5 +493,39 @@ describeIfLog('metadata engine M2 phase 1: core.metadata_migration, insert-only,
     expect(await countFor(A2.workspace)).toBe(0);
     expect(await countFor(A1.workspace)).toBe(a1);
     expect(await countFor(B1.workspace)).toBe(b1);
+  });
+
+  // ----------------------------------------------------------------------------------------------------------- ML-11
+  it('ML-11 two concurrent changes of one workspace: the second waits for the first, then logs the next version; both commit', async () => {
+    const before = await countFor(B1.workspace);
+    const c1 = new Client({ connectionString: OWNER_URL, application_name: 'metadata-migration-log-spec-1' });
+    const c2 = new Client({ connectionString: OWNER_URL, application_name: 'metadata-migration-log-spec-2' });
+    await c1.connect();
+    await c2.connect();
+    try {
+      await c1.query('BEGIN');
+      await c2.query('BEGIN');
+      await c1.query(BIND_SQL, [B1.org, B1.workspace, B1.owner]);
+      await c2.query(BIND_SQL, [B1.org, B1.workspace, B1.owner]);
+      const v1 = await change(c1, B1);
+      const second = change(c2, B1); // blocks on c1's row locks (the object row it relabelled, the version row it bumped)
+      const raced = await Promise.race([second.then(() => 'not blocked'), new Promise((resolve) => setTimeout(() => resolve('blocked'), 1500))]);
+      await c1.query(INSERT_LOG, logParams(B1, v1.previous, v1.current));
+      await c1.query('COMMIT');
+      const v2 = await second;
+      await c2.query(INSERT_LOG, logParams(B1, v2.previous, v2.current));
+      await c2.query('COMMIT');
+      expect(raced).toBe('blocked');
+      expect(BigInt(v2.previous)).toBe(BigInt(v1.current));
+      expect(BigInt(v2.current)).toBe(BigInt(v1.current) + 1n);
+    } finally {
+      await c1.query('ROLLBACK').catch(() => undefined);
+      await c2.query('ROLLBACK').catch(() => undefined);
+      await c1.end();
+      await c2.end();
+    }
+    expect(await countFor(B1.workspace)).toBe(before + 2);
+    const versions = await asAdmin(async (c) => (await c.query<{ v: string }>('SELECT metadata_version::text AS v FROM core.metadata_migration WHERE workspace_id = $1 ORDER BY 1', [B1.workspace])).rows.map((x) => x.v));
+    expect(new Set(versions).size).toBe(versions.length);
   });
 });

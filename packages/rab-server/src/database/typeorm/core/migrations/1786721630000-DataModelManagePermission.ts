@@ -19,7 +19,11 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
  * EmailOutboxSecretBodyScrub1786719710000 pattern), NOT `SELECT id FROM core.organisation`: since M-T1
  * (PreAuthTablesForceOwnerOnly1786721400000) `core.organisation` is FORCE RLS, so the owner-login migration identity
  * (crewflow_owner, no tenant bound) would read zero organisations and silently grant nothing to existing ones. Writes and
- * checks then run per organisation under the real `role` / `role_permission` policies.
+ * checks then run per organisation under the real `role` / `role_permission` policies. Review #252 (M): a lister that
+ * returns NOTHING while organisations exist would still be a silent zero-organisation grant, so both directions refuse
+ * when they saw zero organisations but a second source says rows exist (the zero-organisation guard: the
+ * statistics' live-tuple count of core.organisation, or any workspace from the separate definer lister
+ * core.worker_list_workspaces). A fresh, empty database is the only legitimate zero.
  *
  * The flag alone grants nothing in release 1: no route or job uses it until the metadata API (release 2). The service
  * re-check is `DataModelAuthorityService` (layer 2); payroll and attendance objects stay locked whatever a role holds.
@@ -82,6 +86,11 @@ BEGIN
     END LOOP;
     EXIT WHEN v_page < 100;
   END LOOP;
+  -- Review #252 (M): never a silent zero-organisation run. Zero organisations is legitimate only on an empty database.
+  IF v_orgs = 0 AND (pg_catalog.pg_stat_get_live_tuples('core.organisation'::pg_catalog.regclass) > 0
+                     OR EXISTS (SELECT 1 FROM core.worker_list_workspaces(NULL, 1))) THEN
+    RAISE EXCEPTION 'DataModelManagePermission1786721630000: the organisation lister returned no organisation, but core.organisation has rows (refusing a silent zero-organisation run)';
+  END IF;
   PERFORM pg_catalog.set_config('rab.organisation_id', '', true);
   PERFORM pg_catalog.set_config('rab.workspace_id', '', true);
   RAISE NOTICE 'DataModelManagePermission1786721630000: % organisation(s) checked, % system role(s) granted data_model.manage', v_orgs, v_granted;
@@ -91,16 +100,27 @@ $grant$`;
 export const DATA_MODEL_MANAGE_CATALOGUE_CHECK_SQL =
   "SELECT pg_catalog.count(*)::int AS perm FROM core.permission WHERE key = 'data_model.manage' AND resource = 'data_model' AND action = 'manage'";
 
+/**
+ * down(): per organisation, delete every role grant of the flag and, when the organisation had any grant OR any per-user
+ * override of it, bump the permission_version of every role visible under its binding (system and organisation-level roles),
+ * so no cached authorisation snapshot keeps the flag. The override rows themselves are deleted afterwards by the
+ * `user_permission_override.permission_id → core.permission ON DELETE CASCADE` foreign key when the catalogue row goes
+ * (DATA_MODEL_MANAGE_CATALOGUE_DELETE_SQL). The same zero-organisation guard as up().
+ */
 export const DATA_MODEL_MANAGE_REVOKE_SQL = `DO $revoke$
 DECLARE
   o record;
   v_after uuid := NULL;
   v_page integer;
+  v_orgs integer := 0;
+  v_rows integer;
+  v_override boolean;
 BEGIN
   LOOP
     v_page := 0;
     FOR o IN SELECT l.organisation_id FROM core.worker_list_organisations(v_after, 100) l LOOP
       v_page := v_page + 1;
+      v_orgs := v_orgs + 1;
       v_after := o.organisation_id;
       PERFORM pg_catalog.set_config('rab.organisation_id', o.organisation_id::text, true);
       PERFORM pg_catalog.set_config('rab.workspace_id', '', true);
@@ -109,16 +129,29 @@ BEGIN
          WHERE rp.role_id = r.id AND rp.permission_id = p.id AND p.key = 'data_model.manage' AND r.organisation_id = o.organisation_id
         RETURNING rp.role_id
       )
-      UPDATE core.role SET permission_version = permission_version + 1 WHERE id IN (SELECT del.role_id FROM del);
+      SELECT pg_catalog.count(*)::int INTO v_rows FROM del;
+      SELECT EXISTS (SELECT 1 FROM core.user_permission_override upo JOIN core.permission p ON p.id = upo.permission_id
+                      WHERE p.key = 'data_model.manage' AND upo.organisation_id = o.organisation_id) INTO v_override;
+      IF v_rows > 0 OR v_override THEN
+        UPDATE core.role SET permission_version = permission_version + 1 WHERE organisation_id = o.organisation_id;
+      END IF;
     END LOOP;
     EXIT WHEN v_page < 100;
   END LOOP;
+  -- Review #252 (M): never a silent zero-organisation run. Zero organisations is legitimate only on an empty database.
+  IF v_orgs = 0 AND (pg_catalog.pg_stat_get_live_tuples('core.organisation'::pg_catalog.regclass) > 0
+                     OR EXISTS (SELECT 1 FROM core.worker_list_workspaces(NULL, 1))) THEN
+    RAISE EXCEPTION 'DataModelManagePermission1786721630000 down(): the organisation lister returned no organisation, but core.organisation has rows (refusing a silent zero-organisation run)';
+  END IF;
   PERFORM pg_catalog.set_config('rab.organisation_id', '', true);
   PERFORM pg_catalog.set_config('rab.workspace_id', '', true);
 END
 $revoke$`;
 
-/** user_permission_override rows (if any) cascade from core.permission (IdentitySchema1786665800000). */
+/**
+ * down(), last: the catalogue row. Its per-user overrides (`core.user_permission_override` rows for data_model.manage) are
+ * deleted with it by the existing ON DELETE CASCADE foreign key (IdentitySchema1786665800000).
+ */
 export const DATA_MODEL_MANAGE_CATALOGUE_DELETE_SQL = "DELETE FROM core.permission WHERE key = 'data_model.manage'";
 
 export class DataModelManagePermission1786721630000 implements MigrationInterface {

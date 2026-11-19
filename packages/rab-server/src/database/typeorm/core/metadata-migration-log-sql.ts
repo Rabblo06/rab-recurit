@@ -17,14 +17,19 @@
  *   - `actor_user_id → core."user"` ON DELETE SET NULL: deleting (erasing) a user is never blocked by the log; the rows stay
  *     and lose only the actor id.
  *
- * Integrity (all in the database, so no writer can skip them):
+ * What the log is (review #252): an ATTESTED record — who (the bound user), when (the insert time), which version (the
+ * version this transaction created), written by the single change runner — NOT a tamper-proof or provably complete one.
+ * The guard keeps normal code paths honest; it does not stop the table owner (see ACCESS below).
+ *
+ * Integrity (in the database, so no normal code path can skip it):
  *   - ENABLE + FORCE RLS, one tenant policy (USING = WITH CHECK on the bound organisation AND workspace), same text as the
  *     five M1 metadata tables; no tenant bound → zero rows;
- *   - insert-only: crewflow_app holds SELECT, INSERT and nothing else; `core.metadata_migration_guard()` refuses every
- *     direct UPDATE / DELETE (trigger depth 1) for every identity, superuser included. The two foreign-key actions above
- *     arrive at depth >= 2 and are the only changes ever applied: a cascade DELETE, and an UPDATE that sets
- *     actor_user_id to NULL and changes nothing else. TRUNCATE (which ignores RLS) is refused to the request path, allowed
- *     to crewflow / rab_secure_owner / a superuser (operators, test teardowns), the M1 rule;
+ *   - insert-only on normal code paths: crewflow_app holds SELECT, INSERT and nothing else; while the guard trigger is
+ *     enabled, `core.metadata_migration_guard()` refuses a direct UPDATE / DELETE (trigger depth 1) whoever issues it, a
+ *     superuser's plain statement included. The two foreign-key actions above arrive at depth >= 2 and are the only changes
+ *     it lets through: a cascade DELETE, and an UPDATE that sets actor_user_id to NULL and changes nothing else. TRUNCATE
+ *     (which ignores RLS) is refused to the request path, allowed to crewflow / rab_secure_owner / a superuser (operators,
+ *     test teardowns), the M1 rule;
  *   - an INSERT records only a change made in THIS transaction: `metadata_version` must be the workspace's current version
  *     and that version must have been bumped by this transaction (`last_bump_xact = pg_current_xact_id()`, the M1 trigger's
  *     own marker); with `previous_version >= 1 AND metadata_version = previous_version + 1` (CHECK) a log row can never
@@ -35,10 +40,19 @@
  *   - bounded content: change_kind from a closed list, actions a JSON array of at most 32 objects and 8 KiB, request_id at
  *     most 64 characters of [A-Za-z0-9._:-] (no control characters into logs), executor_version >= 1.
  *
+ * RELEASE-2 DEPENDENCY (review #252): a workspace's first-ever metadata change (version 0 → 1, the transaction that creates
+ * its `workspace_metadata_state` row) can never be logged — `previous_version >= 1` refuses it (23514). So the E2 standard
+ * sync must have seeded every workspace (version >= 1) before the PR-8 change runner writes here; the runner's ready gate
+ * (M2-PLAN §2.2 step 4) must check that and fail with a clear error otherwise. Pinned by an integration test.
+ *
  * ACCESS: table and guard function owned by crewflow (handed over inside withCrewflowCoreCreate, like the M1 tables: no
  * LOGIN role owns a core object). The guard is SECURITY INVOKER with a pinned search_path and no EXECUTE for PUBLIC
- * (PostgreSQL does not check EXECUTE when it fires a trigger). BC-01 (accepted, as for M1): crewflow_owner can, through its
- * crewflow membership, DISABLE TRIGGER or DROP these; the triggers guard normal code paths, not injected SQL.
+ * (PostgreSQL does not check EXECUTE when it fires a trigger). In the owner-login build the guard trigger is the ONLY layer
+ * between the table owner and the rows: the runtime login crewflow_owner inherits crewflow, the owner. BC-01 (accepted, as
+ * for M1) — crewflow_owner (through crewflow) can bypass it by DISABLE TRIGGER, CREATE OR REPLACE of the guard function,
+ * NO FORCE ROW LEVEL SECURITY / DROP POLICY, SET ROLE crewflow then TRUNCATE (the guard admits crewflow), a trigger of its
+ * own that writes at depth 2, or DROP; a superuser additionally by `session_replication_role = replica` (ordinary triggers
+ * do not fire). The guard and the grants protect normal code paths, not injected SQL running as the owner.
  */
 
 export const METADATA_MIGRATION_TABLE = 'core.metadata_migration';
@@ -135,7 +149,7 @@ BEGIN
     RETURN NEW;
   END IF;
 
-  -- Insert-only. A direct UPDATE or DELETE runs this guard at trigger depth 1 and is refused for every identity; the two
+  -- Insert-only while this trigger is enabled: a direct UPDATE or DELETE runs it at trigger depth 1 and is refused; the two
   -- foreign-key actions (workspace ON DELETE CASCADE, actor ON DELETE SET NULL) arrive at depth 2 or more.
   IF pg_catalog.pg_trigger_depth() < 2 THEN
     RAISE EXCEPTION 'core.metadata_migration is insert-only' USING ERRCODE = '42501';

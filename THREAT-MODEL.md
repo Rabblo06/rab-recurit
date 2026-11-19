@@ -9447,9 +9447,12 @@ Reversal:   Upgrade / `resolutions` override (documented in "//resolutions") as 
     physical table name, before any metadata flag: the seven payroll / attendance tables, the junctions, D1 and D4
     (`NO_CUSTOM_FIELD_TABLES`, 15 tables), and any name that is not a plain identifier. The database already pins the seven
     payroll / attendance objects to system with no custom fields (M1). The executor's own deny-list comes with it.
-  - *Tampering with, or forging, the change history.* `core.metadata_migration` is ENABLE + FORCE RLS with one tenant
-    policy (no tenant bound → zero rows, ML-2), crewflow_app SELECT + INSERT only, and a guard that refuses every direct
-    UPDATE / DELETE for every identity (superuser included) and TRUNCATE for the request path. An INSERT is accepted only
+  - *Tampering with, or forging, the change history.* What the log is: an ATTESTED record (who = the bound user, when =
+    the insert time, which version = the one this transaction created, written by the single change runner), NOT a
+    tamper-proof or provably complete record. `core.metadata_migration` is ENABLE + FORCE RLS with one tenant policy (no
+    tenant bound → zero rows, ML-2), crewflow_app SELECT + INSERT only, and a guard trigger that, while enabled, refuses a
+    direct UPDATE / DELETE whoever issues it (a plain superuser statement included) and TRUNCATE for the request path; it
+    does not stop the table owner (residual 2). An INSERT is accepted only
     for a version THIS transaction created (the M1 version row's `last_bump_xact`), with the bound user as actor and the
     insert time as `created_at`; versions step by exactly one and are unique per workspace; content is bounded (closed
     change kinds, ≤ 32 action objects / 8 KiB, a 64-character plain request id).
@@ -9460,16 +9463,30 @@ Reversal:   Upgrade / `resolutions` override (documented in "//resolutions") as 
   `core.organisation` is FORCE RLS, so the owner-login migration identity reads zero organisations and a plain loop would
   silently grant nothing to existing ones (DP-2 shows the zero). Risk: none new (the function is EXECUTE crewflow /
   crewflow_app already and returns ids only). Every write and post-condition still runs per organisation under the real
-  `role` / `role_permission` policies.
+  `role` / `role_permission` policies. Review #252: a lister that returned NOTHING would still be a silent
+  zero-organisation grant, so up() and down() both raise when they saw zero organisations while the statistics'
+  live-tuple count of `core.organisation` or the separate definer `core.worker_list_workspaces` says rows exist (DP-2).
+  down() bumps `permission_version` of every role of an organisation that had a grant or a per-user override of the flag;
+  the override rows go with the catalogue row through the existing ON DELETE CASCADE.
+- **Release-2 dependency.** A workspace's first-ever metadata change (version 0 → 1) cannot be logged
+  (`previous_version >= 1`, ML-10): the E2 standard sync must have seeded every workspace before the PR-8 change runner
+  writes the log, and the runner's ready gate must fail with a clear error otherwise.
 - **Residual / open for the owner.** (1) A per-user GRANT override (`core.user_permission_override`, effect `grant`) still
   gives the flag to any user, including a Venue Manager or Staff, exactly as for every other flag; only a platform-level
-  path can write overrides today. Phase 1 does not change override precedence. (2) BC-01 (accepted, as M1): crewflow_owner
-  can, through its crewflow membership, DISABLE TRIGGER or DROP the guard. (3) The AI permission migrations
+  path can write overrides today. Phase 1 does not change override precedence. (2) BC-01 (accepted, as M1): in the owner-login build
+  the guard trigger is the ONLY layer between the table owner and the rows (crewflow_owner inherits the owner crewflow).
+  crewflow_owner can bypass it by DISABLE TRIGGER, CREATE OR REPLACE of the guard function, NO FORCE ROW LEVEL SECURITY /
+  DROP POLICY, SET ROLE crewflow then TRUNCATE (the guard admits crewflow), a trigger of its own that writes at depth 2,
+  or DROP; a superuser additionally by `session_replication_role = replica`. The guard protects normal code paths, not
+  injected SQL running as the owner. (3) The AI permission migrations
   (AiUsePermissionDefault1786720210000, AiSettingsPermission1786720240000, AiAgentsPermission1786721030000) loop over
   `core.organisation` directly; they predate M-T1 and ran before it on every database, so they are not affected, but the
   pattern must not be copied after M-T1.
+- **Ordering.** Migration ids 1786721630000 / 1786721640000 sort after five open PRs (#177, #239, #210, #243, #251): this
+  branch merges after them or is renumbered at merge time (the Worker boot gate refuses out-of-order pending migrations).
 - **Tests.** `data-model-authority.service.spec.ts` (DM-1…DM-7: every denial, fail closed, the lock list = the engine list);
   `metadata-migration-log-sql.spec.ts` (static SQL review); `data-model-permission.integration.spec.ts` (DP-1…DP-4);
   `metadata-migration-log.integration.spec.ts` (ML-1…ML-9, including zero rows with no tenant bound, cross-tenant refusal,
-  insert-only for the superuser, SET NULL, CASCADE, down() refusal). Posture goldens and the restricted-migrator drift
+  a plain superuser UPDATE / DELETE refused, SET NULL, CASCADE, down() refusal, the 0 → 1 refusal (ML-10) and two
+  concurrent changes (ML-11)). Posture goldens and the restricted-migrator drift
   review gain the new table's lines; no existing line changes.
