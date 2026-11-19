@@ -82,7 +82,8 @@ export const OWNER_BOOTSTRAP_Q1_SUPERUSER_LOGGING = `SELECT pg_catalog.set_confi
  * search_path default exists in pg_db_role_setting). And (owner decisions 2026-11-18) o_createrole_pending / o_createrole_mark_expired:
  * crewflow_owner carries a valid "CREATEROLE until the schema is current" mark (owner-login-posture.ts), and it has expired by
  * the server clock (both false when the role or the mark is missing). Security re-review R1 of #259: o_awaiting_password,
- * crewflow_owner is NOLOGIN and carries exactly OWNER_AWAITING_PASSWORD_MARK (db-setup's passwordless role, option 1).
+ * crewflow_owner is NOLOGIN and carries exactly OWNER_AWAITING_PASSWORD_MARK (db-setup's passwordless role, option 1);
+ * o_stale_awaiting_mark, crewflow_owner is LOGIN (the operator's ALTER ROLE ... LOGIN PASSWORD ran) and still carries it.
  * TODO(lead, 2026-11-19): switch the privileged-membership list below (o_privileged_memberships) to
  * database/owner-login/privileged-roles.ts once it lands (one constant shared with the boot posture check).
  */
@@ -125,6 +126,9 @@ export const OWNER_BOOTSTRAP_Q2_FACTS = `SELECT pg_catalog.current_setting('serv
        (o.oid IS NOT NULL AND NOT o.rolcanlogin
         AND pg_catalog.shobj_description(o.oid, 'pg_authid') IS NOT DISTINCT FROM '${OWNER_AWAITING_PASSWORD_MARK}')
                                                                                   AS o_awaiting_password,
+       (o.oid IS NOT NULL AND o.rolcanlogin
+        AND pg_catalog.shobj_description(o.oid, 'pg_authid') IS NOT DISTINCT FROM '${OWNER_AWAITING_PASSWORD_MARK}')
+                                                                                  AS o_stale_awaiting_mark,
        EXISTS (SELECT 1
                  FROM pg_catalog.pg_db_role_setting s
                  CROSS JOIN LATERAL pg_catalog.unnest(s.setconfig) AS c(setting)
@@ -380,6 +384,22 @@ export const OWNER_HARDEN_M2_RELEASE_MIGRATION_LOCK = `SELECT pg_catalog.pg_advi
 export const OWNER_HARDEN_R1_LEGACY_LOGINS = `SELECT r.rolname::text AS name FROM pg_catalog.pg_roles r
  WHERE r.rolname IN ('crewflow', 'crewflow_app') AND r.rolcanlogin ORDER BY 1;`;
 
+/**
+ * H4 (security re-review N2 of #259; admin, in the CREATEROLE step's transaction under the lock): a LOGIN crewflow_owner never
+ * keeps OWNER_AWAITING_PASSWORD_MARK (after the operator's ALTER ROLE ... LOGIN PASSWORD), so a later NOLOGIN can never count
+ * as "awaiting its password". Only that exact comment is removed (a CREATEROLE mark is never touched here).
+ */
+// sql-injection-reviewed: the only interpolation is OWNER_AWAITING_PASSWORD_MARK, a quote-free code constant.
+export const OWNER_HARDEN_H4_CLEAR_STALE_AWAITING_MARK = `DO $clear$
+BEGIN
+  IF EXISTS (SELECT 1 FROM pg_catalog.pg_roles r
+              WHERE r.rolname = 'crewflow_owner' AND r.rolcanlogin
+                AND pg_catalog.shobj_description(r.oid, 'pg_authid') IS NOT DISTINCT FROM '${OWNER_AWAITING_PASSWORD_MARK}') THEN
+    COMMENT ON ROLE crewflow_owner IS NULL;
+  END IF;
+END
+$clear$;`;
+
 /** H1 (admin, in a transaction under OWNER_BOOTSTRAP_Q4A_LOCK): the hardening itself. */
 export const OWNER_HARDEN_H1_NOCREATEROLE = `ALTER ROLE crewflow_owner NOCREATEROLE;`;
 
@@ -412,6 +432,7 @@ export const OWNER_HARDEN_ADMIN_STATEMENTS = [
   OWNER_HARDEN_H1_NOCREATEROLE,
   OWNER_HARDEN_H2_CLEAR_MARK,
   OWNER_HARDEN_H3_MARK_PENDING,
+  OWNER_HARDEN_H4_CLEAR_STALE_AWAITING_MARK,
   OWNER_BOOTSTRAP_COMMIT,
   OWNER_BOOTSTRAP_ROLLBACK,
   OWNER_HARDEN_M2_RELEASE_MIGRATION_LOCK,

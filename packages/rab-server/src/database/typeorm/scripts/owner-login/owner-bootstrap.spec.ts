@@ -18,6 +18,7 @@ import {
   applyAppSessionUrl,
   bootstrapDriverConfigs,
   bootstrapOwnerWithIo,
+  PASSWORD_REQUIRED_SQLSTATES,
   doBlockStage,
   isPasswordFormRefusal,
   PASSWORD_FORM_REFUSAL_SQLSTATES,
@@ -77,6 +78,7 @@ import {
   OWNER_HARDEN_H1_NOCREATEROLE,
   OWNER_HARDEN_H2_CLEAR_MARK,
   OWNER_HARDEN_H3_MARK_PENDING,
+  OWNER_HARDEN_H4_CLEAR_STALE_AWAITING_MARK,
   OWNER_HARDEN_M1_TRY_MIGRATION_LOCK,
   OWNER_HARDEN_M2_RELEASE_MIGRATION_LOCK,
   OWNER_HARDEN_R1_LEGACY_LOGINS,
@@ -118,6 +120,7 @@ const base: OwnerFacts = {
   oCreateRoleMarkExpired: false,
   searchPathDefaultSet: false,
   oAwaitingPassword: false,
+  oStaleAwaitingMark: false,
 };
 const existing: OwnerFacts = {
   ...base,
@@ -169,6 +172,7 @@ const factsRow = (f: OwnerFacts) => ({
   o_createrole_mark_expired: f.oCreateRoleMarkExpired,
   search_path_default_set: f.searchPathDefaultSet,
   o_awaiting_password: f.oAwaitingPassword,
+  o_stale_awaiting_mark: f.oStaleAwaitingMark,
 });
 
 describe('owner bootstrap: §3.3 decisions', () => {
@@ -1886,5 +1890,57 @@ describe('security re-review R1 of #259: the passwordless role is NOLOGIN; a ser
     await bootstrapOwnerWithIo(grantOnly.io);
     expect(grantOnly.texts()).toContain(OWNER_BOOTSTRAP_Q4C_DO);
     expect(grantOnly.texts()).not.toContain(OWNER_BOOTSTRAP_L1_LOCK_TIMEOUT);
+  });
+});
+
+
+describe('security re-review N1 / N2 of #259', () => {
+  it('N1: only 28P01 / 28000 on the wrong-password login count as "a password is required"; anything else is a failure (70), never a pass', async () => {
+    expect([...PASSWORD_REQUIRED_SQLSTATES].sort()).toEqual(['28000', '28P01']);
+    for (const code of ['28P01', '28000']) {
+      const { io } = fakeIo([existing], [{ ok: true }]);
+      io.probeWrongPassword = async () => ({ ok: false, code });
+      expect(await bootstrapOwnerWithIo(io)).toMatchObject({ exitCode: 0 });
+    }
+    for (const code of ['TLS', 'ECONNREFUSED', '53300', '57P03', '3D000', 'no-code']) {
+      const { io, texts } = fakeIo([existing], [{ ok: true }]);
+      io.probeWrongPassword = async () => ({ ok: false, code });
+      const error = await bootstrapOwnerWithIo(io).catch((e: unknown) => e);
+      expect({ code, failure: error instanceof OwnerBootstrapFailure }).toEqual({ code, failure: true });
+      expect((error as Error).message).toBe(OWNER_BOOTSTRAP_MESSAGES.wrongPasswordProbeUnclear(code));
+      expect(texts()).not.toContain(OWNER_BOOTSTRAP_BEGIN);
+    }
+  });
+
+  it('N2: a LOGIN crewflow_owner that still carries the awaiting mark loses it in the CREATEROLE transaction, under the lock, even when nothing else changes', async () => {
+    const stale: OwnerFacts = { ...existing, oCreateRole: false, oStaleAwaitingMark: true };
+    const clean: OwnerFacts = { ...existing, oCreateRole: false };
+    const { io, texts, lines } = fakeIo([stale, stale, stale, clean], [{ ok: true }], { schemaComplete: true });
+    expect(await bootstrapOwnerWithIo(io)).toMatchObject({ exitCode: 0, createRole: 'none' });
+    const t = texts();
+    expect(t).toContain(OWNER_HARDEN_H4_CLEAR_STALE_AWAITING_MARK);
+    expect(t.indexOf(OWNER_HARDEN_H4_CLEAR_STALE_AWAITING_MARK)).toBeGreaterThan(t.lastIndexOf(OWNER_BOOTSTRAP_Q4A_LOCK));
+    expect(t.indexOf(OWNER_HARDEN_H4_CLEAR_STALE_AWAITING_MARK)).toBeGreaterThan(t.lastIndexOf(OWNER_BOOTSTRAP_Q2B_OTHER_DATABASES));
+    expect(lastTx(t)).toBe(OWNER_BOOTSTRAP_COMMIT);
+    expect(lines).toContain(OWNER_BOOTSTRAP_MESSAGES.awaitingMarkCleared);
+    // The statement removes ONLY that exact comment, and only on a LOGIN role (never a CREATEROLE mark).
+    expect(OWNER_HARDEN_H4_CLEAR_STALE_AWAITING_MARK).toContain("r.rolcanlogin");
+    expect(OWNER_HARDEN_H4_CLEAR_STALE_AWAITING_MARK).toContain("IS NOT DISTINCT FROM 'crewflow:awaiting-password'");
+    expect(OWNER_BOOTSTRAP_Q2_FACTS).toContain('AS o_stale_awaiting_mark');
+  });
+
+  it('N2: with the stale mark and a CREATEROLE mark to set, both happen in the same transaction (H4 before H3)', async () => {
+    const stale: OwnerFacts = { ...existing, oStaleAwaitingMark: true };
+    const marked2: OwnerFacts = { ...existing, oCreateRolePending: true };
+    const { io, texts } = fakeIo([stale, stale, stale, marked2], [{ ok: true }], { schemaComplete: false });
+    expect(await bootstrapOwnerWithIo(io)).toMatchObject({ exitCode: 0, createRole: 'marked' });
+    const t = texts();
+    expect(t.indexOf(OWNER_HARDEN_H4_CLEAR_STALE_AWAITING_MARK)).toBeLessThan(t.indexOf(OWNER_HARDEN_H3_MARK_PENDING));
+  });
+
+  it('N2: a re-check that still shows the stale mark after H4 fails closed (70)', async () => {
+    const stale: OwnerFacts = { ...existing, oCreateRole: false, oStaleAwaitingMark: true };
+    const { io } = fakeIo([stale], [{ ok: true }], { schemaComplete: true });
+    await expect(bootstrapOwnerWithIo(io)).rejects.toThrow(OWNER_BOOTSTRAP_MESSAGES.reverifyFailed);
   });
 });

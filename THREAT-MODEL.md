@@ -9601,6 +9601,9 @@ plain-text password.
   login probe that succeeds is trusted only if a deliberately WRONG password fails too; otherwise db-setup refuses (64) "the
   server lets crewflow_owner log in WITHOUT its password" (trust / peer / cert / similar). The operator's steps also say to
   run `SET log_statement = 'none';` first where the provider allows it, and to clear the SQL editor's history.
+  Re-review N1/N2: only a 28P01 / 28000 refusal of the wrong-password login counts as "password required" (any other
+  failure exits 70, never a pass), and a LOGIN crewflow_owner never keeps the awaiting-password mark (removed under the lock
+  in the CREATEROLE step), so a later NOLOGIN can never count as "awaiting its password".
 - **Verifier and lock waits (re-review F1 remainder).** Before the verifier DO block sets a password, the transaction's
   lock_timeout is set below deadlock_timeout, so a blocked ALTER ROLE fails (55P03, caught) before `log_lock_waits` could
   quote the EXECUTEd text with the verifier.

@@ -344,6 +344,9 @@ const scenarios: Array<[string, () => Promise<void>]> = [
       const run3 = await runChild(env);
       expect(run3.code === 0 && run3.result?.outcome === 'unchanged' && run3.result?.createRole === 'marked', `N1 run 3: exit ${run3.code}, outcome ${run3.result?.outcome ?? 'none'} ${run3.result?.createRole ?? ''}`);
       expect(await canLogin(clusters.SIM, 'crewflow_owner', f.ownerPassword, f.db), 'N1 run 3: crewflow_owner cannot log in');
+      // Security re-review N2: the awaiting-password mark is gone once crewflow_owner is LOGIN.
+      const comment = await sql(clusters.SIM, 'postgres', `SELECT pg_catalog.shobj_description(oid, 'pg_authid') AS c FROM pg_catalog.pg_roles WHERE rolname = 'crewflow_owner'`);
+      expect(comment[0] && comment[0].c !== 'crewflow:awaiting-password', 'N1 run 3: the awaiting-password mark is still on the LOGIN crewflow_owner');
       assertClean(run3);
     },
   ],

@@ -112,6 +112,7 @@ import {
   OWNER_MANUAL_ROLE_SQL,
   OWNER_HARDEN_M2_RELEASE_MIGRATION_LOCK,
   OWNER_HARDEN_H3_MARK_PENDING,
+  OWNER_HARDEN_H4_CLEAR_STALE_AWAITING_MARK,
   OWNER_SCHEMA_S1_HAS_LEDGER,
   OWNER_SCHEMA_S2_LEDGER,
   OWNER_SELF_O1_SESSION,
@@ -244,6 +245,9 @@ export const OWNER_BOOTSTRAP_MESSAGES = Object.freeze({
     "Create crewflow_owner once in your database provider's SQL editor, connected to this database as your admin login, with exactly the SQL below; replace <PG_DATABASE_APP_PASSWORD> with that value (32+ characters, openssl rand -hex 32; if you set PG_DATABASE_URL yourself, the password inside it). If your provider allows it, run SET log_statement = 'none'; first, and clear the SQL editor's history afterwards. Then redeploy: db-setup then only checks the login and handles CREATEROLE.",
   serverIgnoresPassword:
     'The server lets crewflow_owner log in WITHOUT its password (a deliberately wrong password was accepted): a pg_hba trust, peer, cert or similar rule applies to it. Crewflow never runs on a login that needs no password: require password authentication (scram-sha-256) for crewflow_owner, then start again. Refusing.',
+  wrongPasswordProbeUnclear: (code: string) =>
+    `The check that crewflow_owner needs its password (a login with a deliberately wrong password) failed for another reason (${code}), so it proves nothing. Giving up (the restart policy retries).`,
+  awaitingMarkCleared: "crewflow_owner is LOGIN: its leftover 'waiting for its password' mark was removed.",
   awaitingManualRole: 'crewflow_owner does not exist yet: db-setup exits 64 until you create it with the SQL above. Refusing.',
   reverifyFailed: 'crewflow_owner is not exactly as required after the setup step (attributes, grant or login). Refusing to continue.',
   raceRetry: (stage: WriteStage, sqlstate: string) =>
@@ -375,6 +379,8 @@ export interface OwnerFacts {
    * without a password; the operator's ALTER ROLE ... LOGIN PASSWORD is pending). The only NOLOGIN state accepted.
    */
   oAwaitingPassword: boolean;
+  /** Security re-review N2 of #259: crewflow_owner is LOGIN and still carries OWNER_AWAITING_PASSWORD_MARK (cleared by H4). */
+  oStaleAwaitingMark: boolean;
 }
 
 type Row = Record<string, unknown>;
@@ -425,6 +431,7 @@ export function factsFromRow(row: Row | undefined): OwnerFacts {
     oCreateRoleMarkExpired: strictBool(row, 'o_createrole_mark_expired'),
     searchPathDefaultSet: strictBool(row, 'search_path_default_set'),
     oAwaitingPassword: strictBool(row, 'o_awaiting_password'),
+    oStaleAwaitingMark: strictBool(row, 'o_stale_awaiting_mark'),
   };
 }
 
@@ -733,7 +740,13 @@ async function assertPasswordRequired(io: OwnerBootstrapIo): Promise<void> {
   if (!io.probeWrongPassword) return;
   const wrong = await io.probeWrongPassword();
   if (wrong.ok) throw new OwnerBootstrapRefusal(OWNER_BOOTSTRAP_MESSAGES.serverIgnoresPassword);
+  // Security re-review N1 of #259: only an authentication refusal proves a password is required; any other failure (TLS,
+  // network, too many connections, ...) proves nothing, so a trust server can never slip through on an unrelated error.
+  if (!PASSWORD_REQUIRED_SQLSTATES.has(wrong.code)) throw new OwnerBootstrapFailure(OWNER_BOOTSTRAP_MESSAGES.wrongPasswordProbeUnclear(wrong.code), wrong.code);
 }
+
+/** The SQLSTATEs of a login refused for its password (28P01 invalid_password, 28000 invalid_authorization_specification). */
+export const PASSWORD_REQUIRED_SQLSTATES: ReadonlySet<string> = new Set(['28P01', '28000']);
 
 async function planFromDatabase(session: SqlSession, io: OwnerBootstrapIo, logNotes: boolean): Promise<WritePlan> {
   const facts = await readFacts(session);
@@ -888,7 +901,7 @@ export async function readLedgerNames(session: SqlSession): Promise<string[] | n
 async function applyCreateRoleStep(session: SqlSession, io: OwnerBootstrapIo, schemaComplete: boolean): Promise<CreateRoleOutcome | { race: WriteFailureInfo } | 'busy'> {
   const before = await readFacts(session);
   const preview = decideCreateRole(before, schemaComplete);
-  if (preview === 'none') {
+  if (preview === 'none' && !before.oStaleAwaitingMark) {
     if (before.ownerExists && before.oCreateRole === true) io.log(OWNER_BOOTSTRAP_MESSAGES.createRoleKeptMarked);
     return before.ownerExists && before.oCreateRole === true ? 'kept' : 'none';
   }
@@ -908,12 +921,16 @@ async function applyCreateRoleStep(session: SqlSession, io: OwnerBootstrapIo, sc
 
 async function applyCreateRoleTransaction(session: SqlSession, io: OwnerBootstrapIo, schemaComplete: boolean): Promise<CreateRoleOutcome | { race: WriteFailureInfo }> {
   let action: CreateRoleAction;
+  let staleMark = false;
+  let createRoleBefore: boolean | null = null;
   await session.query(OWNER_BOOTSTRAP_BEGIN);
   try {
     await session.query(OWNER_BOOTSTRAP_Q4A_LOCK);
     const f = await readFacts(session);
     action = decideCreateRole(f, schemaComplete);
-    if (action === 'none') {
+    staleMark = f.oStaleAwaitingMark;
+    createRoleBefore = f.oCreateRole;
+    if (action === 'none' && !staleMark) {
       await session.query(OWNER_BOOTSTRAP_ROLLBACK);
       return f.oCreateRole === true ? 'kept' : 'none';
     }
@@ -921,6 +938,8 @@ async function applyCreateRoleTransaction(session: SqlSession, io: OwnerBootstra
     // Security review of PR #246, L1: the role is cluster-wide, so a change another database's deployment would feel (its
     // CREATEROLE, its mark) runs only when no other database of the cluster uses crewflow_owner (Q2b, under the lock).
     await assertNoOtherDatabase(session, OWNER_BOOTSTRAP_MESSAGES.createRoleOtherDatabase);
+    // Security re-review N2 of #259: a LOGIN crewflow_owner loses a leftover awaiting-password mark (before H1-H3).
+    if (staleMark) await session.query(OWNER_HARDEN_H4_CLEAR_STALE_AWAITING_MARK);
     if (action === 'remove') {
       // Re-review R1: the legacy logins first (crewflow_owner could make them NOLOGIN only while it has CREATEROLE).
       const legacy = (await session.query(OWNER_HARDEN_R1_LEGACY_LOGINS)).rows.map((r) => String(r.name));
@@ -940,14 +959,17 @@ async function applyCreateRoleTransaction(session: SqlSession, io: OwnerBootstra
       if (f.oCreateRolePending) await session.query(OWNER_HARDEN_H2_CLEAR_MARK);
     } else if (action === 'clear-mark') {
       await session.query(OWNER_HARDEN_H2_CLEAR_MARK);
-    } else {
+    } else if (action === 'mark') {
       await session.query(OWNER_HARDEN_H3_MARK_PENDING);
     }
     const after = await readFacts(session);
     const ok =
-      action === 'mark'
-        ? after.oCreateRole === true && after.oCreateRolePending && !after.oCreateRoleMarkExpired
-        : after.oCreateRole === false && !after.oCreateRolePending;
+      !after.oStaleAwaitingMark &&
+      (action === 'none'
+        ? after.oCreateRole === f.oCreateRole && after.oCreateRolePending === f.oCreateRolePending
+        : action === 'mark'
+          ? after.oCreateRole === true && after.oCreateRolePending && !after.oCreateRoleMarkExpired
+          : after.oCreateRole === false && !after.oCreateRolePending);
     if (!ok) throw new OwnerBootstrapFailure(OWNER_BOOTSTRAP_MESSAGES.reverifyFailed);
     await commitTagged(session);
   } catch (error) {
@@ -959,6 +981,8 @@ async function applyCreateRoleTransaction(session: SqlSession, io: OwnerBootstra
     if (classified === 'verifier-refused') throw new OwnerBootstrapFailure(OWNER_BOOTSTRAP_MESSAGES.unexpected('password refusal without a password'));
     throw classified;
   }
+  if (staleMark) io.log(OWNER_BOOTSTRAP_MESSAGES.awaitingMarkCleared);
+  if (action === 'none') return createRoleBefore === true ? 'kept' : 'none';
   if (action === 'remove') {
     io.log(OWNER_BOOTSTRAP_MESSAGES.createRoleRemoved);
     return 'removed';
