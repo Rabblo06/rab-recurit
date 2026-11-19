@@ -13,7 +13,7 @@ the service refuses to start if it is set (exit 64); **—** = not given.
 | Variable | Set in | db | db-setup | db-harden | rab-api | rab-worker | What it is |
 |---|---|---|---|---|---|---|---|
 | `PG_DATABASE_URL` | `compose.env` (modes b, c); built from `PG_DATABASE_APP_PASSWORD` in mode a | — | yes | yes | yes | yes | The app login, always `crewflow_owner`, at the direct host. On OpenShip, enter it explicitly. |
-| `PG_DATABASE_APP_PASSWORD` | `compose.env` (mode a) | — | built | built | built | built | The bundled db's `crewflow_owner` password (`openssl rand -hex 32`), inside `PG_DATABASE_URL` only. Refused as a variable of its own. |
+| `PG_DATABASE_APP_PASSWORD` | `compose.env` (mode a; planned for the own-database general flow too<!-- VERIFY -->) | — | built | built | built | built | The bundled db's `crewflow_owner` password (`openssl rand -hex 32`), inside `PG_DATABASE_URL` only. Refused as a variable of its own. |
 | `PG_DATABASE_PASSWORD` | `compose.env` (mode a) | yes (superuser) | built | built | refused | refused | The bundled db's superuser password. Read on the volume's first start only. |
 | `PG_ADMIN_URL` | `compose.env` (mode b) | — | yes | yes | refused | refused | Your database's admin connection string, as your provider shows it. |
 | `PG_ADMIN_DIRECT_URL`<!-- VERIFY --> | `compose.env`, only when `PG_ADMIN_URL` is a pooler | — | yes | yes | refused | refused | The admin login's direct (session) endpoint. |
