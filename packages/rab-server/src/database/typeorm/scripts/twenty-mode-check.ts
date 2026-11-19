@@ -459,6 +459,16 @@ function checksSummary(c: ChildResult): string {
 
 const dbName = (id: string) => `twa_tw_${id.toLowerCase().replace(/[^a-z0-9]/g, '')}_${RUN_ID}`;
 const ownerUrl = (ctx: Ctx, db: string) => withDb(ctx.admin, db, 'crewflow_owner', ctx.ownerPassword);
+/**
+ * The owner URL with sslmode=verify-full, for a child that declares production: since the 2026-11-19 SSL policy a production
+ * URL without sslmode is refused at config (64) before the scenario's own refusal is reached. verify-full is what an absent
+ * sslmode meant in production before, so these scenarios keep their exact behaviour.
+ */
+const ownerUrlVerifyFull = (ctx: Ctx, db: string) => {
+  const u = new URL(ownerUrl(ctx, db));
+  u.searchParams.set('sslmode', 'verify-full');
+  return u.toString();
+};
 
 /**
  * BC-17 (owner decision 2026-11-05, MITIGATE; Agent 1 80686512 / f91f1038): after a fresh install or the transition,
@@ -646,7 +656,7 @@ async function lifecycle(ctx: Ctx, major: number): Promise<ScenarioReport[]> {
     try {
       const noneProd = await child(head, {});
       expect(r, noneProd.exitCode === EXIT.identity && noneProd.result?.serve === false, `NON-production process, no declaration, PRODUCTION-bound marker: exit 67, serve=false (${summary(noneProd)})`);
-      const missingProd = await child(head, { CREWFLOW_DEPLOYMENT_ENVIRONMENT: 'production' });
+      const missingProd = await child(head, { CREWFLOW_DEPLOYMENT_ENVIRONMENT: 'production', PG_DATABASE_URL: ownerUrlVerifyFull(ctx, head) });
       expect(r, missingProd.exitCode === EXIT.identity && missingProd.result?.serve === false, `NON-production process declaring production without CREWFLOW_DEPLOYMENT_ID: exit 67 (${summary(missingProd)})`);
     } finally {
       await withClient(withDb(ctx.admin, head), (c) => c.query(bindSql, ['test', deploymentId, 'ID-2 probe restores the test binding', 'twenty-mode-check', productionId, hosts]));
@@ -773,7 +783,7 @@ async function lifecycle(ctx: Ctx, major: number): Promise<ScenarioReport[]> {
     // BC-11 (owner decision 2026-11-05, Agent 2 d27a371a): production without an explicit approval mode is no longer a
     // configuration refusal; the mode defaults to `none`. This disposable database has no TLS, so a production child stops
     // later (N1/TLS, not config): asserted as "not refused at config (exit != 64)". The invalid-mode pin above stays.
-    const prodNoMode = await child(empty, { NODE_ENV: 'production' });
+    const prodNoMode = await child(empty, { NODE_ENV: 'production', PG_DATABASE_URL: ownerUrlVerifyFull(ctx, empty) });
     expect(r, prodNoMode.exitCode !== EXIT.config, `production without an explicit approval mode: NOT a config refusal (exit != 64) (${summary(prodNoMode)})`);
     const missing = await runChild(ctx.entrypoint, childEnvironment(ownerUrl(ctx, empty), { PG_DATABASE_URL: undefined }));
     expect(r, missing.exitCode === EXIT.config, `PG_DATABASE_URL missing: exit 64 (${summary(missing)})`);
