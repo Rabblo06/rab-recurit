@@ -289,10 +289,16 @@ describeIfDb('first platform admin at API boot (integration)', () => {
   it('DENIAL (e): an email matching accounts in two organisations -> REFUSED_AMBIGUOUS_EMAIL, nothing written', async () => {
     const since = await dbNow();
     const email = mail('ambiguous');
-    for (const n of [1, 2]) {
-      const [org] = await admin.query(`INSERT INTO core.organisation (name, slug) VALUES ('Ambiguous', $1) RETURNING id`, [`boot-amb-${n}-${Date.now()}`]);
-      await admin.query(`INSERT INTO core."user" (organisation_id, email, first_name, last_name, status, email_verified_at) VALUES ($1, $2, 'A', 'B', 'active', now())`, [org.id, email]);
-    }
+    // The database now refuses a second account with an existing email (a global-uniqueness trigger), so this legacy state
+    // (accounts created before that rule) is planted with triggers off, by the fixture superuser, in its own transaction.
+    // The bootstrap function still has to refuse it rather than guess.
+    await admin.transaction(async (m) => {
+      await m.query(`SET LOCAL session_replication_role = replica`);
+      for (const n of [1, 2]) {
+        const [org] = await m.query(`INSERT INTO core.organisation (name, slug) VALUES ('Ambiguous', $1) RETURNING id`, [`boot-amb-${n}-${Date.now()}`]);
+        await m.query(`INSERT INTO core."user" (organisation_id, email, first_name, last_name, status, email_verified_at) VALUES ($1, $2, 'A', 'B', 'active', now())`, [org.id, email]);
+      }
+    });
     expect(await bootOn(replicaA).runOnce({ BOOTSTRAP_ADMIN_EMAIL: email })).toBe('REFUSED_AMBIGUOUS_EMAIL');
     expect(logs).toEqual([{ level: 'error', message: PLATFORM_ADMIN_BOOT_LOG.ambiguousEmail }]);
     expect(await platformAdmins()).toHaveLength(0);
