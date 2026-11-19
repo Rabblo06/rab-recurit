@@ -39,15 +39,19 @@
  * Exit codes: 0 ok, 64 refusal (configuration / rights / a privileged crewflow_owner / a password that does not log in
  * without an admin), 70 unexpected. Output: fixed strings plus a SQLSTATE at most. Never a URL, a password, a verifier, a
  * host, a database or a login name, and never a driver error's message / detail / where. The plaintext password exists only
- * in this process's memory (it came from the environment); the server receives the SCRAM verifier (§3.6), unless it refuses
- * that form (below).
+ * in this process's memory (it came from the environment); the server only ever receives the SCRAM verifier (§3.6): Crewflow
+ * NEVER sends a plain-text password (owner decision 2026-11-19).
  *
  * Provider-neutral by rule (owner decision 2026-11-19: "no provider-specific code ... Decide by capability, detected at run
  * time"): no host-name matching, no provider flag. What differs between servers is detected by what the server does:
- *   - the password FORM: the SCRAM verifier is always tried first; when the server refuses it (isVerifierRefusal: the
- *     SQLSTATE of the CREATE / ALTER ROLE step, or of the COMMIT, which is where some managed servers check a password),
- *     db-setup retries ONCE with the plain-text password, only over a connection that verifies TLS (certificate and host
- *     name) and only when no server log would record it (G1 / G2). The log line names the reason, never a provider;
+ *   - the password FORM (owner decision 2026-11-19, option 1 "Create login, you set password"): the SCRAM verifier is always
+ *     tried first; when the server refuses it (isPasswordFormRefusal: the SQLSTATE of the CREATE / ALTER ROLE step, or of
+ *     the COMMIT, which is where some managed servers check a password), db-setup creates crewflow_owner WITHOUT a password
+ *     (an existing role's password is left alone), adds the grant, and stops (64) with fixed steps: the operator sets the
+ *     password once in the provider's SQL editor, to PG_DATABASE_APP_PASSWORD, and redeploys; the next run's login probe
+ *     then succeeds and setup continues. When the server refuses a login role without a password too, nothing is created and
+ *     the steps print the reviewed SQL (OWNER_MANUAL_ROLE_SQL) with a placeholder. Never a loop on a password write: one
+ *     verifier attempt and at most one passwordless transaction per run. The log names the reason, never a provider;
  *   - a connection POOLER in PG_ADMIN_URL: refused when the admin session is not session-stable (pg-session-probe.ts, before
  *     any write) or when the server refuses the session settings sent at connect (08P01); never by its address. The refusal
  *     says to put the direct address in PG_ADMIN_URL or in PG_ADMIN_DIRECT_URL (db-setup and
@@ -86,9 +90,6 @@ import { LEGACY_NOLOGIN_SQL } from '../migrate/owner-login/legacy-logins';
 import {
   OWNER_BOOTSTRAP_BEGIN,
   OWNER_BOOTSTRAP_COMMIT,
-  OWNER_BOOTSTRAP_G1_QUIET_LOGS,
-  OWNER_BOOTSTRAP_G2_LOG_SAFE,
-  OWNER_BOOTSTRAP_L1_LOCK_TIMEOUT,
   OWNER_BOOTSTRAP_Q0_SESSION,
   OWNER_BOOTSTRAP_Q1_SUPERUSER_LOGGING,
   OWNER_BOOTSTRAP_Q2_FACTS,
@@ -97,16 +98,15 @@ import {
   OWNER_BOOTSTRAP_Q4A_LOCK,
   OWNER_BOOTSTRAP_Q4B_SET_INPUTS,
   OWNER_BOOTSTRAP_Q4B2_NO_SELF_GRANT,
-  OWNER_BOOTSTRAP_Q4B3_SCRAM_ONLY,
-  OWNER_BOOTSTRAP_Q4B_PLAINTEXT_SET_INPUTS,
   OWNER_BOOTSTRAP_Q4C_DO,
-  OWNER_BOOTSTRAP_Q4C_DO_PLAINTEXT,
+  OWNER_BOOTSTRAP_Q4C_DO_NO_PASSWORD,
   OWNER_BOOTSTRAP_Q4D_REVERIFY,
   OWNER_BOOTSTRAP_ROLLBACK,
   OWNER_HARDEN_H1_NOCREATEROLE,
   OWNER_HARDEN_H2_CLEAR_MARK,
   OWNER_HARDEN_R1_LEGACY_LOGINS,
   OWNER_HARDEN_M1_TRY_MIGRATION_LOCK,
+  OWNER_MANUAL_ROLE_SQL,
   OWNER_HARDEN_M2_RELEASE_MIGRATION_LOCK,
   OWNER_HARDEN_H3_MARK_PENDING,
   OWNER_SCHEMA_S1_HAS_LEDGER,
@@ -155,8 +155,6 @@ export const ADMIN_DIRECT_URL_LABEL = 'PG_ADMIN_DIRECT_URL' as const;
  */
 export const APP_SESSION_URL_LABEL = 'PG_DATABASE_SESSION_URL' as const;
 
-/** The two password forms: the SCRAM verifier (always first), or the plain-text fallback. */
-export type PasswordForm = 'scram-verifier' | 'plaintext';
 /** Where a write failed: a statement of the transaction, or its COMMIT. */
 export type WriteStage = 'statement' | 'commit';
 export interface WriteFailureInfo {
@@ -229,16 +227,19 @@ export const OWNER_BOOTSTRAP_MESSAGES = Object.freeze({
   commitInternalError: (sqlstate: string) =>
     `The database refused to COMMIT the crewflow_owner setup with an internal error (SQLSTATE ${sqlstate}), typically a server extension refusing the role change. Nothing was committed. Refusing.`,
   commitFailed: (sqlstate: string) => `Committing the crewflow_owner setup failed (SQLSTATE ${sqlstate}). Nothing was committed.`,
-  // ---- the password form (owner decision 2026-11-19) ----
-  verifierRefusedFallback: (stage: WriteStage, sqlstate: string) =>
-    `The server refused a pre-hashed password (SQLSTATE ${sqlstate} ${stageText(stage)}); retrying once with a plain-text password over verified TLS.`,
-  plaintextUsed: 'The server refused a pre-hashed password; used a plain-text password over verified TLS (never logged).',
-  fallbackNeedsVerifiedTls: (stage: WriteStage, sqlstate: string) =>
-    `The server refused a pre-hashed password (SQLSTATE ${sqlstate} ${stageText(stage)}). db-setup sends a plain-text password only over TLS that verifies the server certificate and its host name, and this connection does not (sslmode, PG_SSL_ALLOW_SELF_SIGNED, or no TLS). Nothing was sent or committed. Use sslmode=verify-full (or require) with the right CA. Refusing.`,
-  bothFormsRefused: (stage: WriteStage, sqlstate: string) =>
-    `The server refused the pre-hashed password and then the plain-text one too (SQLSTATE ${sqlstate} ${stageText(stage)}): it may require a stronger password (put a longer random one in PG_DATABASE_URL: openssl rand -hex 32), or the PG_ADMIN_URL login may lack a right. Nothing was committed. Refusing.`,
-  plaintextLogRisk:
-    "The server refused a pre-hashed password, and it could record a plain-text one in a log or statistics view (log_statement=all, log_duration, a log_min_duration_* threshold or sampling with parameter logging on, auto_explain, pgaudit.log_parameter, or pg_stat_statements.track=all with track_utility), which the PG_ADMIN_URL login cannot switch off for its own transaction (or a setting could not be read). Nothing was sent. Turn those settings off, or grant the admin login SET on log_statement and log_parameter_max_length, then start again. Refusing.",
+  // ---- a server that refuses pre-hashed passwords (owner decision 2026-11-19, option 1) ----
+  verifierRefused: (stage: WriteStage, sqlstate: string) =>
+    `The server refused a pre-hashed password (SQLSTATE ${sqlstate} ${stageText(stage)}). Crewflow never sends a plain-text password.`,
+  passwordlessCreated: 'crewflow_owner was created WITHOUT a password (it cannot log in yet), with its database grant.',
+  passwordlessKept: 'crewflow_owner exists and does not log in with PG_DATABASE_APP_PASSWORD; its password was left unchanged.',
+  setPasswordStep:
+    "Set crewflow_owner's password once in your database provider's SQL editor: ALTER ROLE crewflow_owner PASSWORD '<the value of PG_DATABASE_APP_PASSWORD>'; then redeploy. Use exactly that value (32+ characters, openssl rand -hex 32; if you set PG_DATABASE_URL yourself, the password inside it), never a console password reset (it generates a different, shorter password). db-setup then checks the login and continues.",
+  awaitingPassword: 'crewflow_owner has no usable password yet: db-setup exits 64 until crewflow_owner logs in with PG_DATABASE_APP_PASSWORD. Refusing.',
+  passwordlessRefused: (stage: WriteStage, sqlstate: string) =>
+    `The server also refused to create crewflow_owner without a password (SQLSTATE ${sqlstate} ${stageText(stage)}). Nothing was created.`,
+  manualRoleStep:
+    "Create crewflow_owner once in your database provider's SQL editor, connected to this database as your admin login, with exactly the SQL below; replace <PG_DATABASE_APP_PASSWORD> with that value (32+ characters, openssl rand -hex 32; if you set PG_DATABASE_URL yourself, the password inside it). Then redeploy: db-setup then only checks the login and handles CREATEROLE.",
+  awaitingManualRole: 'crewflow_owner does not exist yet: db-setup exits 64 until you create it with the SQL above. Refusing.',
   reverifyFailed: 'crewflow_owner is not exactly as required after the setup step (attributes, grant or login). Refusing to continue.',
   raceRetry: (stage: WriteStage, sqlstate: string) =>
     `crewflow_owner changed in another start at the same moment (SQLSTATE ${sqlstate} ${stageText(stage)}: a concurrent CREATE ROLE, ALTER ROLE or GRANT); reading the facts again.`,
@@ -290,7 +291,20 @@ function stageText(stage: WriteStage): string {
   return stage === 'commit' ? 'at COMMIT' : 'in the write transaction';
 }
 
-export type OwnerBootstrapOutcome = 'pass-through' | 'unchanged' | 'created' | 'updated' | 'refused' | 'failed';
+/**
+ * Owner decision 2026-11-19 (option 1), both exit 64: `awaiting-password` (crewflow_owner exists, created now without a
+ * password or kept, and does not log in yet: the operator sets the password), `awaiting-manual-role` (the server refused a
+ * passwordless login role too; nothing was created: the operator runs the printed SQL).
+ */
+export type OwnerBootstrapOutcome =
+  | 'pass-through'
+  | 'unchanged'
+  | 'created'
+  | 'updated'
+  | 'refused'
+  | 'failed'
+  | 'awaiting-password'
+  | 'awaiting-manual-role';
 
 /**
  * What the CREATEROLE step did: `removed` (NOCREATEROLE now), `marked` (kept and marked: bootstrap pending), `kept` (kept,
@@ -594,21 +608,19 @@ export function isPasswordFormRefusal(error: unknown, passwordSent: boolean): bo
 }
 
 /**
- * The write transaction's failure: 'verifier-refused' (the server refused the SCRAM verifier: the caller may fall back once to
- * the plain text), a race (retried by the caller), a refusal (64) or a failure (70). `form` is the password form the
- * transaction used, `passwordSent` whether it sent a password at all.
+ * The write transaction's failure: 'verifier-refused' (the server refused the SCRAM verifier, or, for the passwordless
+ * transaction, the passwordless login role: the caller takes the owner's option-1 / option-2 path), a race (retried by the
+ * caller), a refusal (64) or a failure (70). `passwordSent`: the transaction set a password (or created the passwordless
+ * login role), so a refusal of its role step or COMMIT is a refusal of that form.
  */
 export function classifyWriteError(
   error: unknown,
-  ctx: { form?: PasswordForm; passwordSent?: boolean } = {},
+  ctx: { passwordSent?: boolean } = {},
 ): OwnerBootstrapRefusal | OwnerBootstrapFailure | 'race' | 'verifier-refused' {
   // A decision taken under the lock (it may carry a probe SQLSTATE such as 42501) keeps its own message.
   if (error instanceof OwnerBootstrapRefusal || error instanceof OwnerBootstrapFailure) return error;
-  const { stage, code } = writeFailureInfo(error);
-  if (isPasswordFormRefusal(error, ctx.passwordSent === true)) {
-    if ((ctx.form ?? 'scram-verifier') === 'scram-verifier') return 'verifier-refused';
-    return new OwnerBootstrapRefusal(OWNER_BOOTSTRAP_MESSAGES.bothFormsRefused(stage, code), code);
-  }
+  const { code } = writeFailureInfo(error);
+  if (isPasswordFormRefusal(error, ctx.passwordSent === true)) return 'verifier-refused';
   if (error instanceof WriteCommitError) {
     // A serialization failure or deadlock can surface at COMMIT; XX000 there is never a race.
     if (code === '40001' || code === '40P01') return 'race';
@@ -630,23 +642,6 @@ async function commitTagged(session: SqlSession): Promise<void> {
   }
 }
 
-/**
- * Does this driver config verify TLS fully (pg-tls.ts verify-full: certificate chain AND host name, `rejectUnauthorized`
- * true; for an IP host pg-tls binds the name check to the IP)? The plain-text fallback is sent only on such a connection.
- */
-export function isVerifiedTls(config: Pick<PgDriverConfig, 'ssl'>): boolean {
-  const ssl = config.ssl as unknown;
-  return !!ssl && typeof ssl === 'object' && (ssl as { rejectUnauthorized?: unknown }).rejectUnauthorized === true;
-}
-
-/** G1 + L1 + G2 (plain-text fallback, in the write transaction): refused (64) unless no server log would record the password. */
-async function assertPlaintextLogSafe(session: SqlSession): Promise<void> {
-  await session.query(OWNER_BOOTSTRAP_G1_QUIET_LOGS);
-  await session.query(OWNER_BOOTSTRAP_L1_LOCK_TIMEOUT);
-  const { rows } = await session.query(OWNER_BOOTSTRAP_G2_LOG_SAFE);
-  const safe = rows.length === 1 ? rows[0]?.safe : undefined;
-  if (safe !== true) throw new OwnerBootstrapRefusal(OWNER_BOOTSTRAP_MESSAGES.plaintextLogRisk);
-}
 
 export interface SqlSession {
   query(text: string, values?: unknown[]): Promise<{ rows: Row[] }>;
@@ -660,13 +655,6 @@ export interface OwnerBootstrapIo {
   probeOwner(): Promise<ProbeResult>;
   /** A fresh SCRAM verifier of that password. */
   verifier(): string;
-  /**
-   * The plain-text fallback (owner decision 2026-11-19): the password itself, used ONLY after the server refused the
-   * verifier, and only when `verifiedTls` is true. Absent = no fallback (a refused verifier is then reported as such).
-   */
-  plaintextPassword?(): string;
-  /** The admin connection verifies TLS fully (isVerifiedTls of its driver config). */
-  verifiedTls?: boolean;
   /**
    * The capability check of PG_ADMIN_URL: throws PgSessionProbeError when the admin connection is not session-stable (a
    * pooler). Run once after the session pin, before any read or write. Absent = skipped (unit tests).
@@ -744,7 +732,7 @@ const UNCHANGED: OwnerBootstrapResult = { outcome: 'unchanged', exitCode: 0, cre
  */
 type AttemptOutcome = OwnerBootstrapResult | 'recheck' | { race: WriteFailureInfo } | { verifierRefused: WriteFailureInfo };
 
-async function attempt(session: SqlSession, io: OwnerBootstrapIo, form: PasswordForm = 'scram-verifier'): Promise<AttemptOutcome> {
+async function attempt(session: SqlSession, io: OwnerBootstrapIo): Promise<AttemptOutcome> {
   const preLock = await planFromDatabase(session, io, true);
   if (!preLock.write) return { ...UNCHANGED };
 
@@ -757,25 +745,18 @@ async function attempt(session: SqlSession, io: OwnerBootstrapIo, form: Password
       await session.query(OWNER_BOOTSTRAP_ROLLBACK);
       return { ...UNCHANGED };
     }
-    if (form === 'plaintext') {
-      // The fallback: the log guard first (nothing secret is sent unless it passes), scram-sha-256 pinned, then the password.
-      if (plan.needPassword) await assertPlaintextLogSafe(session);
-      await session.query(OWNER_BOOTSTRAP_Q4B3_SCRAM_ONLY);
-      await session.query(OWNER_BOOTSTRAP_Q4B_PLAINTEXT_SET_INPUTS, [plan.needPassword ? io.plaintextPassword!() : '', plan.needPassword ? 'true' : 'false']);
-    } else {
-      // Only computed when it is needed; never sent when the password stays (an empty value, unused by the DO block).
-      const verifier = plan.needPassword ? io.verifier() : '';
-      await session.query(OWNER_BOOTSTRAP_Q4B_SET_INPUTS, [verifier, plan.needPassword ? 'true' : 'false']);
-    }
+    // Only computed when it is needed; never sent when the password stays (an empty value, unused by the DO block).
+    const verifier = plan.needPassword ? io.verifier() : '';
+    await session.query(OWNER_BOOTSTRAP_Q4B_SET_INPUTS, [verifier, plan.needPassword ? 'true' : 'false']);
     // No self-grant of crewflow_owner to the admin login (createrole_self_grant), transaction-local, before CREATE ROLE.
     await session.query(OWNER_BOOTSTRAP_Q4B2_NO_SELF_GRANT);
-    await session.query(form === 'plaintext' ? OWNER_BOOTSTRAP_Q4C_DO_PLAINTEXT : OWNER_BOOTSTRAP_Q4C_DO);
+    await session.query(OWNER_BOOTSTRAP_Q4C_DO);
     const { rows } = await session.query(OWNER_BOOTSTRAP_Q4D_REVERIFY);
     if (rows.length !== 1 || rows[0]?.ok !== true) throw new OwnerBootstrapFailure(OWNER_BOOTSTRAP_MESSAGES.reverifyFailed);
     await commitTagged(session);
   } catch (error) {
     await session.query(OWNER_BOOTSTRAP_ROLLBACK).catch(() => undefined);
-    const classified = classifyWriteError(error, { form, passwordSent: plan.needPassword });
+    const classified = classifyWriteError(error, { passwordSent: plan.needPassword });
     if (classified === 'race') return { race: writeFailureInfo(error) };
     if (classified === 'verifier-refused') return { verifierRefused: writeFailureInfo(error) };
     throw classified;
@@ -961,6 +942,64 @@ async function applyCreateRoleTransaction(session: SqlSession, io: OwnerBootstra
   return 'marked';
 }
 
+/**
+ * Owner decision 2026-11-19, option 1 ("Create login, you set password"): the server refused the pre-hashed password. Under
+ * the advisory lock and the same refusals: a missing crewflow_owner is created WITHOUT a password, an existing one is left
+ * exactly as it is (its password is never written here), and the grant is added when missing; then the fixed steps and
+ * exit 64 (`awaiting-password`). When the server refuses the passwordless login role as well (the same classification),
+ * nothing is created: the reviewed SQL with a placeholder is printed (option 2) and exit 64 (`awaiting-manual-role`).
+ * One transaction (race retries aside); never a password write. Exported through bootstrapOwnerWithIo only.
+ */
+async function passwordlessSetup(session: SqlSession, io: OwnerBootstrapIo, refusedCode: string): Promise<OwnerBootstrapResult> {
+  let lastRace: WriteFailureInfo | null = null;
+  for (let i = 1; i <= MAX_ATTEMPTS; i += 1) {
+    let existed = false;
+    let needGrant = false;
+    await session.query(OWNER_BOOTSTRAP_BEGIN);
+    try {
+      await session.query(OWNER_BOOTSTRAP_Q4A_LOCK);
+      const f = await readFacts(session);
+      decideBeforeProbe(f);
+      existed = f.ownerExists;
+      needGrant = !f.oHasDbGrant;
+      if (existed && !needGrant) {
+        await session.query(OWNER_BOOTSTRAP_ROLLBACK);
+      } else {
+        await session.query(OWNER_BOOTSTRAP_Q4B2_NO_SELF_GRANT);
+        await session.query(OWNER_BOOTSTRAP_Q4C_DO_NO_PASSWORD);
+        const { rows } = await session.query(OWNER_BOOTSTRAP_Q4D_REVERIFY);
+        if (rows.length !== 1 || rows[0]?.ok !== true) throw new OwnerBootstrapFailure(OWNER_BOOTSTRAP_MESSAGES.reverifyFailed);
+        await commitTagged(session);
+      }
+    } catch (error) {
+      await session.query(OWNER_BOOTSTRAP_ROLLBACK).catch(() => undefined);
+      // Only a transaction that CREATED the passwordless login role can be a refusal of that form.
+      const classified = classifyWriteError(error, { passwordSent: !existed });
+      if (classified === 'verifier-refused') {
+        const { stage, code } = writeFailureInfo(error);
+        io.log(OWNER_BOOTSTRAP_MESSAGES.passwordlessRefused(stage, code));
+        io.log(OWNER_BOOTSTRAP_MESSAGES.manualRoleStep);
+        for (const line of OWNER_MANUAL_ROLE_SQL) io.log(`  ${line}`);
+        io.log(OWNER_BOOTSTRAP_MESSAGES.awaitingManualRole);
+        return { outcome: 'awaiting-manual-role', exitCode: 64, created: false, passwordSet: false, grantAdded: false, createRole: 'not-run', code };
+      }
+      if (classified !== 'race') throw classified;
+      lastRace = writeFailureInfo(error);
+      if (i < MAX_ATTEMPTS) {
+        io.log(OWNER_BOOTSTRAP_MESSAGES.raceRetry(lastRace.stage, lastRace.code));
+        await io.sleep(200 + Math.floor(Math.random() * 500));
+      }
+      continue;
+    }
+    assertFactsExact(await readFacts(session));
+    io.log(existed ? OWNER_BOOTSTRAP_MESSAGES.passwordlessKept : OWNER_BOOTSTRAP_MESSAGES.passwordlessCreated);
+    io.log(OWNER_BOOTSTRAP_MESSAGES.setPasswordStep);
+    io.log(OWNER_BOOTSTRAP_MESSAGES.awaitingPassword);
+    return { outcome: 'awaiting-password', exitCode: 64, created: !existed, passwordSet: false, grantAdded: needGrant, createRole: 'not-run', code: refusedCode };
+  }
+  throw new OwnerBootstrapFailure(raceExhaustedMessage(lastRace), lastRace?.code ?? null);
+}
+
 /** The race-exhausted line with the last race's stage and SQLSTATE (a re-check loop has none). */
 function raceExhaustedMessage(race: WriteFailureInfo | null): string {
   return OWNER_BOOTSTRAP_MESSAGES.raceExhausted(race?.stage ?? 'statement', race?.code ?? 'none');
@@ -984,20 +1023,13 @@ export async function bootstrapOwnerWithIo(io: OwnerBootstrapIo, retryWindowMs =
     }
     let result: OwnerBootstrapResult | null = null;
     let lastRace: WriteFailureInfo | null = null;
-    let form: PasswordForm = 'scram-verifier';
-    // MAX_ATTEMPTS race / re-check rounds, plus at most ONE switch to the plain-text form (it does not use up a round).
     for (let i = 1; i <= MAX_ATTEMPTS; i += 1) {
-      const r = await attempt(session, io, form);
+      const r = await attempt(session, io);
       if (r !== 'recheck' && 'verifierRefused' in r) {
+        // Owner decision 2026-11-19, option 1: never a plain-text password; a passwordless crewflow_owner and fixed steps.
         const { stage, code } = r.verifierRefused;
-        if (!io.plaintextPassword) {
-          throw new OwnerBootstrapRefusal(stage === 'commit' ? OWNER_BOOTSTRAP_MESSAGES.commitInternalError(code) : OWNER_BOOTSTRAP_MESSAGES.writeInternalError(code), code);
-        }
-        if (io.verifiedTls !== true) throw new OwnerBootstrapRefusal(OWNER_BOOTSTRAP_MESSAGES.fallbackNeedsVerifiedTls(stage, code), code);
-        io.log(OWNER_BOOTSTRAP_MESSAGES.verifierRefusedFallback(stage, code));
-        form = 'plaintext';
-        i -= 1;
-        continue;
+        io.log(OWNER_BOOTSTRAP_MESSAGES.verifierRefused(stage, code));
+        return await passwordlessSetup(session, io, code);
       }
       if (r !== 'recheck' && !('race' in r)) {
         result = r;
@@ -1010,7 +1042,6 @@ export async function bootstrapOwnerWithIo(io: OwnerBootstrapIo, retryWindowMs =
       }
     }
     if (!result) throw new OwnerBootstrapFailure(raceExhaustedMessage(lastRace), lastRace?.code ?? null);
-    if (form === 'plaintext' && result.passwordSet) io.log(OWNER_BOOTSTRAP_MESSAGES.plaintextUsed);
     if (!io.schemaComplete) return result;
     const complete = await io.schemaComplete();
     lastRace = null;
@@ -1380,9 +1411,6 @@ export async function runOwnerBootstrap(env: Record<string, string | undefined>,
         openAdmin: () => connectSession(adminConfig),
         probeOwner: () => probeOwnerOnce(probeConfig),
         verifier: () => scramSha256Verifier(ownerPassword),
-        // The plain-text fallback: the same password, only if the server refuses the verifier and TLS is verified.
-        plaintextPassword: () => ownerPassword,
-        verifiedTls: isVerifiedTls(adminConfig),
         sessionProbe: async () => {
           await probePgSessionAffinity(adminConfig, { label: 'PG_ADMIN_URL connection' });
         },
@@ -1393,7 +1421,7 @@ export async function runOwnerBootstrap(env: Record<string, string | undefined>,
       };
       result = await bootstrapOwnerWithIo(io, retryWindowMs);
     }
-    log(OWNER_BOOTSTRAP_MESSAGES.ready(describeReady(result)));
+    if (result.exitCode === 0) log(OWNER_BOOTSTRAP_MESSAGES.ready(describeReady(result)));
     return result;
   } catch (error) {
     if (error instanceof OwnerBootstrapRefusal || error instanceof OwnerBootstrapFailure) log(error.message);

@@ -16,8 +16,9 @@
 #      URL, which compose builds (owner decision 2026-11-19, "You set one shared password") from PG_DATABASE_APP_PASSWORD
 #      (openssl rand -hex 32) and PG_DATABASE_HOST / PG_DATABASE_PORT / PG_DATABASE_NAME (copied from the admin URL), or
 #      which you set as PG_DATABASE_URL yourself (never both): crewflow_owner is created with that password if missing,
-#      and its password is SET to it when it does not log in. The SCRAM verifier is sent first; a server that refuses
-#      pre-hashed passwords gets the plain-text password ONCE, only over verified TLS (owner-bootstrap.ts). A pooled
+#      and its password is SET to it when it does not log in. Only the SCRAM verifier is ever sent; a server that refuses
+#      pre-hashed passwords gets crewflow_owner WITHOUT a password and db-setup exits 64 with fixed steps (set the password
+#      once in the provider's SQL editor; owner decision 2026-11-19, option 1; owner-bootstrap.ts). A pooled
 #      PG_ADMIN_URL is refused by capability; PG_ADMIN_DIRECT_URL (the direct address of the same login and database,
 #      db-setup and db-harden only) is then used instead of it;
 #   c. YOUR OWN database, crewflow_owner created by hand: PG_DATABASE_URL only (CREWFLOW_BUNDLED_DB=0): read-only checks.
