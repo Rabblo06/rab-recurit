@@ -1,6 +1,7 @@
 import { SecurityAuditSink } from '../../engine/core-modules/audit-sink/security-audit-sink';
 import {
   describeSemanticDrift,
+  isCreateRoleHardeningOnly,
   readSemanticPosture,
   SemanticDrift,
   semanticDriftFromGolden,
@@ -9,7 +10,7 @@ import {
   SemanticQuery,
 } from './semantic-posture';
 import { SEMANTIC_GOLDEN_BY_MAJOR } from './semantic-golden';
-import { ownerLoginRolePostureProblems } from '../boot-checks/owner-login-posture';
+import { OWNER_LOGIN_CREATEROLE_MARK_SQL, ownerLoginCreateRoleExpiryProblems, ownerLoginRolePostureProblems } from '../boot-checks/owner-login-posture';
 
 /**
  * The semantic posture check at boot and on a timer (M0 §6.4 control 4). READ ONLY: it never rewrites, re-grants or
@@ -92,7 +93,12 @@ export class SemanticPostureMonitor {
   private running = false;
   private readonly state: SemanticMonitorState = { ready: true, lastCheckAt: null, lastDrift: [], lastRoleProblems: [], checks: 0 };
 
-  constructor(private readonly options: SemanticMonitorOptions) {}
+  /** The comparison baseline: the boot snapshot, re-taken only after the one expected change (isCreateRoleHardeningOnly). */
+  private baseline: SemanticPosture;
+
+  constructor(private readonly options: SemanticMonitorOptions) {
+    this.baseline = options.baseline;
+  }
 
   ready(): boolean {
     return this.state.ready;
@@ -123,22 +129,30 @@ export class SemanticPostureMonitor {
     try {
       session = await this.options.session();
       const now = await readSemanticPosture(session.query);
-      const drift = semanticDriftFromSnapshot(this.options.baseline, now);
-      const roleProblems = await ownerLoginRolePostureProblems(session.query);
+      const drift = semanticDriftFromSnapshot(this.baseline, now);
+      // Re-review R3: an expired CREATEROLE grace period is a role problem too (readiness false, one alert, one event).
+      const roleProblems = [
+        ...(await ownerLoginRolePostureProblems(session.query)),
+        ...ownerLoginCreateRoleExpiryProblems((await session.query(OWNER_LOGIN_CREATEROLE_MARK_SQL))[0]),
+      ];
       this.state.lastCheckAt = new Date();
       this.state.checks += 1;
-      if (drift.length || roleProblems.length) {
+      if (!roleProblems.length && isCreateRoleHardeningOnly(drift)) {
+        // Owner decision M1: db-harden removed CREATEROLE after the first migrate. Expected; never a 503, no restart needed.
+        log(`[posture-monitor] ${this.options.processLabel}: crewflow_owner lost CREATEROLE (the expected hardening after the schema bootstrap); the baseline is re-taken (sha256 ${this.baseline.sha256.slice(0, 12)} -> ${now.sha256.slice(0, 12)}). Readiness unchanged.`);
+        this.baseline = now;
+      } else if (drift.length || roleProblems.length) {
         this.state.ready = false;
         this.state.lastDrift = drift;
         this.state.lastRoleProblems = roleProblems;
         const detail = [describeSemanticDrift(drift), ...roleProblems].filter(Boolean).join('; ');
-        log(`[posture-monitor] SECURITY ALERT ${this.options.processLabel}: the database security posture changed since boot (sha256 ${this.options.baseline.sha256.slice(0, 12)} -> ${now.sha256.slice(0, 12)}): ${detail}. Readiness is now FALSE; nothing was changed back.`);
+        log(`[posture-monitor] SECURITY ALERT ${this.options.processLabel}: the database security posture changed since boot (sha256 ${this.baseline.sha256.slice(0, 12)} -> ${now.sha256.slice(0, 12)}): ${detail}. Readiness is now FALSE; nothing was changed back.`);
         await this.options.sink
           ?.emit({
             type: 'security.posture.drift',
             severity: 'critical',
             process: this.options.processLabel,
-            detail: { baseline: this.options.baseline.sha256, current: now.sha256, sections: drift.map((d) => d.section), roleProblems: roleProblems.length },
+            detail: { baseline: this.baseline.sha256, current: now.sha256, sections: drift.map((d) => d.section), roleProblems: roleProblems.length },
           })
           .catch(() => undefined);
       }
