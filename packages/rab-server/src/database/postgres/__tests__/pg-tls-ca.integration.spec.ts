@@ -5,6 +5,8 @@ import * as os from 'os';
 import * as path from 'path';
 import * as tls from 'tls';
 
+import { assertTlsGate, BOOT_FACTS_SQL, DatabaseBootGateError, parseBootFacts } from '../../boot-checks/database-boot-gate-rules';
+import { clientTlsOf } from '../../boot-checks/database-boot-gates';
 import { createPgClient } from '../create-pg-pool';
 import { resolvePgEnvironment } from '../pg-config';
 import { integrationTestDatabaseReady } from '../../typeorm/core/integration-test-database-gate';
@@ -167,8 +169,8 @@ describe('PG_SSL_CA_CERT against a PostgreSQL behind a private / self-signed cer
     if (dir) fs.rmSync(dir, { recursive: true, force: true });
   });
 
-  const urlFor = (host: string, port: number) =>
-    `postgresql://${encodeURIComponent(creds.user)}:${encodeURIComponent(creds.password)}@${host}:${port}/${encodeURIComponent(creds.database)}?sslmode=verify-full`;
+  const urlFor = (host: string, port: number, query = 'sslmode=verify-full') =>
+    `postgresql://${encodeURIComponent(creds.user)}:${encodeURIComponent(creds.password)}@${host}:${port}/${encodeURIComponent(creds.database)}?${query}`;
   const prodEnv = (url: string, extra: Record<string, string>) => ({ NODE_ENV: 'production', PG_DATABASE_URL: url, ...extra });
 
   async function connectAndQuery(env: Record<string, string>): Promise<{ user: string; encrypted: boolean; authorized: boolean }> {
@@ -252,6 +254,88 @@ describe('PG_SSL_CA_CERT against a PostgreSQL behind a private / self-signed cer
     // DENIAL: a leaf-only server and the root alone (the intermediate is missing on both sides).
     const e = await connectError(prodEnv(urlFor('localhost', leafOnlyFront.port), { PG_SSL_CA_CERT: caPem }));
     expect(e.code ?? e.message).toMatch(/UNABLE_TO_VERIFY_LEAF_SIGNATURE|UNABLE_TO_GET_ISSUER_CERT_LOCALLY|unable to (verify the first|get local issuer)/i);
+  });
+
+  // Owner decision 2026-11-19 ("SSL like Twenty"): production accepts sslmode=require and verify-ca as well, and enforces them
+  // EXACTLY like verify-full (certificate chain AND host name), as node-pg treats require. Proved through a real handshake:
+  // libpq's `require` would accept every one of the DENIAL cases below (it does not verify), and libpq's `verify-ca` would
+  // accept the wrong-host one.
+  describe.each([
+    ['sslmode=require'],
+    ['sslmode=verify-ca'],
+    ['sslmode=require&channel_binding=require'],
+    ['sslmode=verify-ca&channel_binding=require'],
+  ])('%s is full verification, like verify-full', (query) => {
+    it('the right CA and a host the certificate names: connects, and the session is TLS, verified', async () => {
+      const before = caFront.secured;
+      const r = await connectAndQuery(prodEnv(urlFor('localhost', caFront.port, query), { PG_SSL_CA_CERT: caPem }));
+      expect(r).toEqual({ user: creds.user, encrypted: true, authorized: true });
+      expect(caFront.secured).toBe(before + 1);
+      expect(caFront.plaintext).toBe(0);
+    });
+
+    it('DENIAL: a WRONG CA is refused (an unrelated root; a self-signed server against the private CA; the system store only)', async () => {
+      const wrong = await connectError(prodEnv(urlFor('localhost', caFront.port, query), { PG_SSL_CA_CERT: otherCaPem }));
+      expect(wrong.code ?? wrong.message).toMatch(/UNABLE_TO_VERIFY_LEAF_SIGNATURE|UNABLE_TO_GET_ISSUER_CERT_LOCALLY|unable to (verify the first|get local issuer)/i);
+      const self = await connectError(prodEnv(urlFor('localhost', selfSignedFront.port, query), { PG_SSL_CA_CERT: caPem }));
+      expect(self.code ?? self.message).toMatch(/DEPTH_ZERO_SELF_SIGNED_CERT|self[- ]signed/i);
+      const none = await connectError(prodEnv(urlFor('localhost', caFront.port, query), {}));
+      expect(none.code ?? none.message).toMatch(/UNABLE_TO_VERIFY_LEAF_SIGNATURE|UNABLE_TO_GET_ISSUER_CERT_LOCALLY|SELF_SIGNED_CERT_IN_CHAIN|unable to (verify the first|get local issuer)/i);
+    });
+
+    it('DENIAL: the right CA but a host name the certificate does not carry is refused (127.0.0.1 and ::1 vs DNS:localhost)', async () => {
+      const v4 = await connectError(prodEnv(urlFor('127.0.0.1', caFront.port, query), { PG_SSL_CA_CERT: caPem }));
+      expect(v4.code ?? v4.message).toMatch(/ERR_TLS_CERT_ALTNAME_INVALID|does not match certificate/i);
+      const v6 = await connectError(prodEnv(urlFor('[::1]', caFront.port, query), { PG_SSL_CA_CERT: caPem }));
+      expect(v6.code ?? v6.message).toMatch(/ERR_TLS_CERT_ALTNAME_INVALID|does not match certificate/i);
+    });
+  });
+
+  it('DENIAL: production refuses sslmode=disable, allow, prefer, no-verify and a missing sslmode before any connection is attempted', () => {
+    const before = caFront.secured + caFront.plaintext;
+    for (const query of ['sslmode=disable', 'sslmode=allow', 'sslmode=prefer', 'sslmode=no-verify', 'application_name=no-sslmode']) {
+      expect(() => resolvePgEnvironment(prodEnv(urlFor('localhost', caFront.port, query), { PG_SSL_CA_CERT: caPem }), { processRole: 'api' })).toThrow(
+        /must set sslmode=require, verify-ca or verify-full in production/,
+      );
+    }
+    expect(caFront.secured + caFront.plaintext).toBe(before);
+  });
+
+  // Gate 6, provider-neutral (owner instruction 2026-11-19: "trust our side of the connection"). The TLS front above is
+  // exactly a TLS-terminating proxy in front of plain PostgreSQL: the backend's pg_stat_ssl says ssl=false. The gate's
+  // decision is taken here on the real facts of a real session: the BOOT_FACTS_SQL row and the pg client's own socket.
+  async function gate6On(env: Record<string, string>, production: boolean): Promise<{ ssl: unknown; warnings?: string[]; refusal?: string }> {
+    const resolved = resolvePgEnvironment(env, { processRole: 'api' });
+    const client = createPgClient(resolved, { purpose: 'tls-check', statementTimeoutMs: 5_000, connectTimeoutMs: 5_000 });
+    await client.connect();
+    try {
+      const [row] = (await client.query(BOOT_FACTS_SQL)).rows as Array<Record<string, unknown>>;
+      const facts = parseBootFacts(row);
+      try {
+        return { ssl: facts.ssl, warnings: assertTlsGate(facts, production, { clientTls: clientTlsOf(client, resolved.primary.ssl) }) };
+      } catch (error) {
+        if (!(error instanceof DatabaseBootGateError)) throw error;
+        return { ssl: facts.ssl, refusal: error.message };
+      }
+    } finally {
+      await client.end();
+    }
+  }
+
+  it('gate 6: behind a TLS-terminating proxy (backend pg_stat_ssl.ssl=false), verified client TLS is accepted in production', async () => {
+    for (const query of ['sslmode=require', 'sslmode=verify-ca', 'sslmode=verify-full']) {
+      const r = await gate6On(prodEnv(urlFor('localhost', caFront.port, query), { PG_SSL_CA_CERT: caPem }), true);
+      expect(r.ssl).toBe(false);
+      expect(r.refusal).toBeUndefined();
+      expect((r.warnings ?? []).join(' ')).toMatch(/verified TLS on the client side/);
+    }
+  });
+
+  it('gate 6 DENIAL: the same proxy with UNVERIFIED client TLS (self-signed accepted, outside production) is refused by the production rule', async () => {
+    const env = { NODE_ENV: 'test', PG_DATABASE_URL: urlFor('localhost', selfSignedFront.port, 'sslmode=require'), PG_SSL_ALLOW_SELF_SIGNED: 'true' };
+    const r = await gate6On(env, true);
+    expect(r.ssl).toBe(false);
+    expect(r.refusal).toMatch(/not using TLS/);
   });
 
   it('DENIAL: both CA variables set refuses before any connection is attempted', () => {

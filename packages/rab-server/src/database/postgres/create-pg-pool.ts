@@ -79,7 +79,7 @@ function selectEndpoint(resolved: ResolvedPgEnvironment, request: PgConnectionRe
   if (request.url !== undefined) {
     const label = request.urlLabel ?? 'the database URL';
     const target = parsePgUrl(request.url, label, { allowSessionRole: resolved.allowSessionRole });
-    return { source: label, target, ssl: buildPgSsl(target.sslmode, resolved.tls, label, target.host), deprecated: false };
+    return { source: label, target, ssl: buildPgSsl(target.sslmode, resolved.tls, label, target.host, target.channelBindingMode), deprecated: false };
   }
   const name = request.endpoint ?? 'primary';
   if (name === 'elevated') {
