@@ -365,12 +365,15 @@ describe('planDbSetup and selectDbSetupInput (the Twenty way)', () => {
   });
 
   it('runtimeUrlFacts: the login and the pooler shape, never a value', () => {
-    expect(runtimeUrlFacts(OWN)).toEqual({ owner: true, transactionPooler: false });
-    expect(runtimeUrlFacts(ADMIN_URL)).toEqual({ owner: false, transactionPooler: false });
+    expect(runtimeUrlFacts(OWN)).toEqual({ owner: true, transactionPooler: false, strongPassword: true });
+    expect(runtimeUrlFacts(ADMIN_URL)).toEqual({ owner: false, transactionPooler: false, strongPassword: true });
     expect(runtimeUrlFacts(`postgres://crewflow_owner:${ADMIN_PASSWORD}@ep-abc-pooler.eu-west-2.aws.neon.tech/neondb?sslmode=require`)).toEqual({
       owner: true,
       transactionPooler: true,
+      strongPassword: true,
     });
+    // Info (re-review): the password floor as a boolean only; the value is never returned.
+    expect(runtimeUrlFacts('postgresql://crewflow_owner:short@db.example.internal/crewflow?sslmode=verify-full').strongPassword).toBe(false);
     const message = refusal(() => runtimeUrlFacts(`mysql://u:${ADMIN_PASSWORD}@h/d`));
     expect(message).not.toContain(ADMIN_PASSWORD);
   });
