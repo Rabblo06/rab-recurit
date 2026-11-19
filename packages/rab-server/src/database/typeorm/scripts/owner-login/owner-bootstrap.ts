@@ -49,8 +49,8 @@
  *     db-setup retries ONCE with the plain-text password, only over a connection that verifies TLS (certificate and host
  *     name) and only when no server log would record it (G1 / G2). The log line names the reason, never a provider;
  *   - a connection POOLER in PG_ADMIN_URL: refused when the admin session is not session-stable (pg-session-probe.ts, before
- *     any write), when the server refuses the session settings sent at connect (08P01), or when the URL has a documented
- *     pooler shape; the refusal says to put the direct address in PG_ADMIN_URL or in PG_ADMIN_DIRECT_URL (db-setup and
+ *     any write) or when the server refuses the session settings sent at connect (08P01); never by its address. The refusal
+ *     says to put the direct address in PG_ADMIN_URL or in PG_ADMIN_DIRECT_URL (db-setup and
  *     db-harden only; the same login and database as PG_ADMIN_URL). Host names are never guessed;
  *   - every refusal is reported as what it is: its SQLSTATE and its stage (write statement or COMMIT). XX000 is a race only
  *     for PostgreSQL's fixed "tuple concurrently updated", never at COMMIT.
@@ -64,7 +64,6 @@ import {
   ADMIN_URL_LABEL,
   DB_SETUP_INPUT_MESSAGES,
   type DbSetupInput,
-  OWNER_CREDENTIAL_MESSAGES,
   OWNER_LOGIN,
   OwnerCredentialError,
   scramSha256Verifier,
@@ -212,8 +211,6 @@ export const OWNER_BOOTSTRAP_MESSAGES = Object.freeze({
     `The database refused the session settings db-setup sends when it connects (SQLSTATE ${code}). PG_ADMIN_URL looks like a connection pooler, and db-setup needs one real database session. Put the database's direct address in PG_ADMIN_URL, or keep PG_ADMIN_URL and set PG_ADMIN_DIRECT_URL to the direct address (the same login and database). Refusing.`,
   adminNotSessionStable:
     'The PG_ADMIN_URL connection is not session-stable (two transactions or two connections did not behave like separate real database sessions with their own session locks): it looks like a connection pooler, and db-setup needs one real database session. Put the database\'s direct address in PG_ADMIN_URL, or keep PG_ADMIN_URL and set PG_ADMIN_DIRECT_URL to the direct address (the same login and database). Nothing was changed. Refusing.',
-  adminPoolerShape:
-    'PG_ADMIN_URL has the address shape of a documented transaction pooler, and db-setup needs one real database session. Put the database\'s direct address in PG_ADMIN_URL, or keep PG_ADMIN_URL and set PG_ADMIN_DIRECT_URL to the direct address (the same login and database). Refusing.',
   adminTargetMismatch: `${DB_SETUP_INPUT_MESSAGES.targetMismatch} If PG_ADMIN_URL is a pooled address of the same database, keep it as it is and set PG_ADMIN_DIRECT_URL to the direct address (the same login and database).`,
   adminDirectUsed: 'PG_ADMIN_DIRECT_URL is set: db-setup connects with it instead of PG_ADMIN_URL (the same login and database, checked).',
   appSessionWithoutApp: 'PG_DATABASE_SESSION_URL is set without PG_DATABASE_URL. It is only the session address of the PG_DATABASE_URL login: set both. Refusing.',
@@ -1306,15 +1303,12 @@ export function applyAppSessionUrl(env: Record<string, string | undefined>): { e
   return { env: copy, used: true };
 }
 
-/** selectDbSetupInput, with a documented-pooler-shape refusal of PG_ADMIN_URL worded with the direct-address options. */
+/** selectDbSetupInput, with a host / port / database mismatch worded with the direct-address option. */
 function selectInput(env: Record<string, string | undefined>, directUsed: boolean): DbSetupInput {
   try {
     return selectDbSetupInput(env);
   } catch (error) {
     if (error instanceof OwnerCredentialError) {
-      if (error.message === OWNER_CREDENTIAL_MESSAGES.transactionPooler.split('PG_DATABASE_URL').join(ADMIN_URL_LABEL)) {
-        throw new OwnerBootstrapRefusal(OWNER_BOOTSTRAP_MESSAGES.adminPoolerShape);
-      }
       if (error.message === DB_SETUP_INPUT_MESSAGES.targetMismatch && !directUsed) {
         throw new OwnerBootstrapRefusal(OWNER_BOOTSTRAP_MESSAGES.adminTargetMismatch);
       }

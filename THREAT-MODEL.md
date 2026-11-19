@@ -9591,7 +9591,8 @@ capability at run time, the same code everywhere.
   connection, i.e. only the server the operator named, whose certificate verified. That server could already read every row
   as the admin; it learns crewflow_owner's password, which it could set itself.
 - **A pooled admin URL.** Refused by behaviour, before any read or write: the startup options db-setup sends are refused
-  (08P01), or the two-connection session-affinity probe (pg-session-probe.ts) fails, or the URL has a documented pooler shape.
+  (08P01), or the two-connection session-affinity probe (pg-session-probe.ts) fails; never by its address (no host-name or
+  port rule, in db-setup or the compose.env lint; the admin URLs may say sslmode=require, which db-setup treats as verify-full).
   `PG_ADMIN_DIRECT_URL` must parse and name the same login and database as `PG_ADMIN_URL`; host names are never derived.
 - **Races.** The genuine concurrent-update race is still retried (PostgreSQL's fixed text, compared, never printed); every
   retry and exhaustion line now names the SQLSTATE and the stage.

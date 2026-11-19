@@ -316,10 +316,15 @@ test('DENIAL DB-SETUP compose env: the URL still needs verify-full, the direct h
   }
   for (const login of ['doadmin', 'crewflow_owner']) {
     const withUrl = (url) => `${OWN}\n${login === 'doadmin' ? 'PG_ADMIN_URL' : 'PG_DATABASE_URL'}=${url.replace('crewflow_owner', login)}`;
-    assertRefused(lintEnvText('compose', withUrl(URL_OK.replace('verify-full', 'require'))), /sslmode is not verify-full/);
+    // Owner decision 2026-11-19: the admin URL may say require (treated as verify-full); PG_DATABASE_URL keeps verify-full.
+    if (login === 'doadmin') assert.ok(!lintEnvText('compose', withUrl(URL_OK.replace('verify-full', 'require'))).some((p) => /sslmode/.test(p)));
+    else assertRefused(lintEnvText('compose', withUrl(URL_OK.replace('verify-full', 'require'))), /sslmode is not verify-full/);
+    assertRefused(lintEnvText('compose', withUrl(URL_OK.replace('verify-full', 'disable'))), /sslmode is not verify-full/);
     assertRefused(lintEnvText('compose', withUrl(URL_OK.replace('?sslmode=verify-full', ''))), /sslmode is not verify-full/);
-    assertRefused(lintEnvText('compose', withUrl(URL_OK.replace('db.internal.example', 'ep-x-pooler.eu.aws.neon.tech'))), /transaction pooler/);
-    assertRefused(lintEnvText('compose', withUrl(URL_OK.replace(':5432', ':6543'))), /transaction pooler/);
+    // No host-name or port rule for a pooler (provider-neutral; db-setup decides by capability).
+    for (const address of ['pool-a.internal.example:6432', 'db.internal.example:6543']) {
+      assert.ok(!lintEnvText('compose', withUrl(URL_OK.replace('db.internal.example:5432', address))).some((p) => /pooler/.test(p)));
+    }
     assertRefused(lintEnvText('compose', withUrl('postgresql://crewflow_owner@db.internal.example:5432/crewflow?sslmode=verify-full')), /no password/);
     assertRefused(lintEnvText('compose', withUrl('mysql://root:x@db.internal.example:3306/crewflow?sslmode=verify-full')), /not a postgres:\/\/ URL/);
     assertRefused(lintEnvText('compose', withUrl('not a url')), /not a parseable URL/);
@@ -1192,7 +1197,8 @@ test('dbSettingsProblems: the shared rule of the compose.env lint and the --envi
   assert.deepEqual(r({ bundled: '0', adminUrl: pooled, adminDirectUrl: ADMIN_OK, appPasswordSet: true, dbHost: 'db.internal.example' }), []);
   assertRefused(r({ bundled: '0', adminUrl: pooled, adminDirectUrl: ADMIN_OK.replace('doadmin', 'other'), appPasswordSet: true, dbHost: 'db.internal.example' }), /^PG_ADMIN_DIRECT_URL: must name the same login and database/);
   assertRefused(r({ bundled: '0', adminDirectUrl: ADMIN_OK, appUrl: URL_OK }), /^PG_ADMIN_DIRECT_URL: needs PG_ADMIN_URL/);
-  assertRefused(r({ bundled: '0', adminUrl: pooled, adminDirectUrl: pooled, appPasswordSet: true, dbHost: 'pool.internal.example', dbPort: '6432' }), /^PG_ADMIN_DIRECT_URL: points at a transaction pooler/);
+  // No address rule for a pooler: PG_ADMIN_DIRECT_URL is checked by db-setup's capability probe, not by its host or port.
+  assert.ok(!r({ bundled: '0', adminUrl: pooled, adminDirectUrl: pooled, appPasswordSet: true, dbHost: 'pool.internal.example', dbPort: '6432' }).some((p) => /pooler/.test(p)));
   // Owner decision 2026-11-18: both URLs set is no longer a refusal.
   assert.ok(!r({ bundled: '0', adminUrl: ADMIN_OK, appUrl: URL_OK }).some((p) => /both set/.test(p)));
   // Review of PR #230, I-4: an encoded crewflow_owner login is the same login (decoded first); a login in a query parameter

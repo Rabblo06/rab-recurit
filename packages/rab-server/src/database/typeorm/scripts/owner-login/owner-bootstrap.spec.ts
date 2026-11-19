@@ -828,10 +828,11 @@ describe('owner bootstrap: the whole step without a database', () => {
         OWNER_CREDENTIAL_MESSAGES.transactionPooler,
       ],
       [
-        // Owner decision 2026-11-19: the refusal of a documented pooler shape names the two direct-address options.
+        // owner-credential.ts planDbSetup still refuses a documented pooler shape on this base (PR #258 removes that rule);
+        // db-setup itself adds no address rule (owner decision 2026-11-19: by capability only).
         'a pooler-shaped admin URL',
         { PG_DATABASE_URL: APP_URL, PG_ADMIN_URL: `postgres://dbadmin:${ADMIN_PW}@ep-abc-pooler.eu-west-2.aws.neon.tech/crewflow_unit` },
-        OWNER_BOOTSTRAP_MESSAGES.adminPoolerShape,
+        OWNER_CREDENTIAL_MESSAGES.transactionPooler.split('PG_DATABASE_URL').join('PG_ADMIN_URL'),
       ],
       ['PG_ADMIN_DIRECT_URL without PG_ADMIN_URL', { PG_DATABASE_URL: APP_URL, PG_ADMIN_DIRECT_URL: ADMIN_URL }, OWNER_BOOTSTRAP_MESSAGES.adminDirectWithoutAdmin],
       [

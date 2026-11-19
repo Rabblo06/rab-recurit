@@ -498,8 +498,8 @@ const AUDIT_SINK_FAILURES = Object.freeze(['refuse', 'log']);
 const AUDIT_SINK_PRODUCTION_FAILURES = Object.freeze(['refuse']);
 /**
  * The former separated runtime logins and schema roles: never a db-setup URL login (they are NOLOGIN schema roles or cannot
- * create roles, so they are neither crewflow_owner nor an admin). DB-SETUP T-1 relaxes ONLY the provider admin logins
- * (postgres, neondb_owner, doadmin, the RDS master, ...), and only in PG_ADMIN_URL.
+ * create roles, so they are neither crewflow_owner nor an admin). DB-SETUP T-1 relaxes ONLY the database admin login (any
+ * login that can create roles, e.g. the cluster superuser or a managed service's admin), and only in PG_ADMIN_URL.
  */
 const NOT_THE_APP_LOGIN = Object.freeze([
   'crewflow', 'crewflow_app', 'crewflow_worker', 'crewflow_migrator', 'rab_owner', 'rab_secure_owner', 'rab_app',
@@ -508,8 +508,13 @@ const NOT_THE_APP_LOGIN = Object.freeze([
 const DB_PASSWORD_SHAPE = /^[A-Za-z0-9._~-]{32,}$/;
 /** The bundled crewflow_owner password: interpolated unencoded into PG_DATABASE_URL; db-setup.sh refuses anything else. */
 const APP_PASSWORD_SHAPE = /^[A-Za-z0-9_-]{32,}$/;
-const POOLER_HINTS = Object.freeze([[/-pooler\./i, 'Neon -pooler host'], [/:6543(\/|$)/, 'port 6543 (Supabase pooler)'],
-  [/:25061(\/|$)/, 'port 25061 (DigitalOcean pool)'], [/:6432(\/|$)/, 'port 6432 (PgBouncer)'], [/\.proxy-[a-z0-9]+\.rds\.amazonaws\.com/i, 'RDS Proxy']]);
+/**
+ * Owner decision 2026-11-19 (provider-neutral, by capability): no host-name or port rule for a connection pooler. db-setup
+ * refuses a pooled admin connection by what it does (08P01 for its session settings, or the session-affinity probe).
+ * sslmode: the admin URLs accept require as well as verify-full (pg-tls.ts treats require as verify-full), so a provider's
+ * admin URL can be pasted as-is; PG_DATABASE_URL keeps verify-full.
+ */
+const ADMIN_SSLMODES = Object.freeze(['verify-full', 'require']);
 const DIGEST_REF = /^[^@\s]+@sha256:[0-9a-f]{64}$/;
 
 /**
@@ -613,11 +618,12 @@ function dbSettingsProblems({
     else if (NOT_THE_APP_LOGIN.includes(login)) problems.push(`${key}: logs in as a former separated login or schema role (use ${key === ADMIN_URL_KEY ? 'the database admin login' : OWNER_LOGIN})`);
     else if (key === URL_KEY && login !== OWNER_LOGIN) problems.push(`${URL_KEY}: is the app login and must log in as ${OWNER_LOGIN}; it is never an admin URL (an admin URL goes in ${ADMIN_URL_KEY}, db-setup only)`);
     else if (key !== URL_KEY && login === OWNER_LOGIN) problems.push(`${key}: logs in as ${OWNER_LOGIN}, the app login: put that URL in ${URL_KEY} instead and remove ${key} (db-setup then only checks it)`);
-    if (u.searchParams.get('sslmode') !== 'verify-full') problems.push(`${key}: sslmode is not verify-full`);
+    if (key === URL_KEY ? u.searchParams.get('sslmode') !== 'verify-full' : !ADMIN_SSLMODES.includes(u.searchParams.get('sslmode') ?? '')) {
+      problems.push(`${key}: sslmode is not verify-full${key === URL_KEY ? '' : ' (or require, which db-setup treats as verify-full)'}`);
+    }
     // Review of PR #230, I-4: the login is the URL's userinfo only; a `?user=` (or `password` / `host` / `dbname`) query
     // parameter would change who logs in or where, behind the login rules above (the URL policy refuses it at start too).
     for (const param of ['user', 'password', 'host', 'hostaddr', 'dbname']) if (u.searchParams.has(param)) problems.push(`${key}: has a ?${param}= query parameter (put the login in the URL's userinfo; never a query parameter)`);
-    for (const [re, label] of POOLER_HINTS) if (re.test(String(url))) problems.push(`${key}: points at a transaction pooler (${label}); use the DIRECT host`);
     if (u.password === '') problems.push(`${key}: has no password`);
   }
   return problems;
