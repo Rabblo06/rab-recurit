@@ -1207,7 +1207,17 @@ test('DENIAL PG_DATABASE_SESSION_URL: another login, another database, the same 
   assertRefused(with_(SESSION.replace('/crewflow?', '/other?')), /PG_DATABASE_SESSION_URL and PG_DATABASE_URL name different databases/);
   assertRefused(with_(POOLER), /PG_DATABASE_SESSION_URL names the same host and port as PG_DATABASE_URL/);
   assertRefused(with_(SESSION, 'CREWFLOW_IMAGE_TAG_UNUSED='), /PG_DATABASE_SESSION_URL needs PG_DATABASE_URL/);
-  assertRefused(with_(SESSION.replace('verify-full', 'require')), /PG_DATABASE_SESSION_URL: sslmode is not verify-full/);
+  // #259's one sslmode rule (mirrored): require, verify-ca, verify-full (with or without channel_binding=require) pass.
+  for (const mode of ['require', 'verify-ca', 'verify-full']) {
+    for (const extra of ['', '&channel_binding=require']) {
+      assert.ok(!with_(`${SESSION.replace('verify-full', mode)}${extra}`).some((m) => /sslmode/.test(m)), `${mode}${extra}`);
+    }
+  }
+  for (const mode of ['disable', 'allow', 'prefer', 'no-verify']) {
+    assertRefused(with_(SESSION.replace('verify-full', mode)), /^PG_DATABASE_SESSION_URL: sslmode must be require, verify-ca or verify-full/);
+  }
+  assertRefused(with_(SESSION.replace('?sslmode=verify-full', '')), /^PG_DATABASE_SESSION_URL: sslmode must be require, verify-ca or verify-full/);
+  assert.deepEqual([...gate.ACCEPTED_SSLMODES], ['require', 'verify-ca', 'verify-full']);
   assertRefused(with_('postgresql://crewflow_owner@db.internal.example:5432/crewflow?sslmode=verify-full'), /PG_DATABASE_SESSION_URL: has no password/);
   assertRefused(with_(`${SESSION}&user=doadmin`), /PG_DATABASE_SESSION_URL: has a \?user= query parameter/);
   assertRefused(lintEnvText('compose', `${COMPOSE_OK}\nPG_DATABASE_SESSION_URL=${SESSION}`), /PG_DATABASE_SESSION_URL: only with your own database/);

@@ -508,6 +508,19 @@ const DB_PASSWORD_SHAPE = /^[A-Za-z0-9._~-]{32,}$/;
 const APP_PASSWORD_SHAPE = /^[A-Za-z0-9_-]{32,}$/;
 // No host-name pooler hints any more (owner instruction 2026-11-19, "decide by capability"): a pooler in PG_DATABASE_URL is
 // valid with PG_DATABASE_SESSION_URL, and without it the processes' live session probe refuses one.
+/**
+ * sslmode (owner rule 2026-11-19, the same at runtime, #257): require, verify-ca and verify-full are accepted for EVERY database
+ * URL and all mean FULL verification (certificate and host name); disable, allow, prefer, no-verify and a missing sslmode are
+ * refused. channel_binding=require is accepted. MIRRORED VERBATIM from #259 (feat/twenty-neon-setup @ a0693ff1), which applies
+ * it to every URL; on this branch it covers PG_DATABASE_SESSION_URL only. The two definitions must be merged into one.
+ */
+const ACCEPTED_SSLMODES = Object.freeze(['require', 'verify-ca', 'verify-full']);
+/** The sslmode rule above for one parsed URL (null = fine). Exported for the PG_DATABASE_SESSION_URL rule of PR #258. */
+function sslmodeProblem(key, u) {
+  return ACCEPTED_SSLMODES.includes(u.searchParams.get('sslmode') ?? '')
+    ? null
+    : `${key}: sslmode must be require, verify-ca or verify-full (all mean full verification); disable, allow, prefer, no-verify or none are refused`;
+}
 const DIGEST_REF = /^[^@\s]+@sha256:[0-9a-f]{64}$/;
 
 /**
@@ -586,7 +599,10 @@ function dbSettingsProblems({ adminUrl, appUrl, sessionUrl, bundled = '1', passw
     else if (key === SESSION_URL_KEY && login !== OWNER_LOGIN) problems.push(`${SESSION_URL_KEY}: must log in as ${OWNER_LOGIN}, exactly like ${URL_KEY} (the same login; only the host and port differ)`);
     else if (key === URL_KEY && login !== OWNER_LOGIN) problems.push(`${URL_KEY}: is the app login and must log in as ${OWNER_LOGIN}; it is never an admin URL (an admin URL goes in ${ADMIN_URL_KEY}, db-setup only)`);
     else if (key === ADMIN_URL_KEY && login === OWNER_LOGIN) problems.push(`${ADMIN_URL_KEY}: logs in as ${OWNER_LOGIN}, the app login: put that URL in ${URL_KEY} instead and remove ${ADMIN_URL_KEY} (db-setup then only checks it)`);
-    if (u.searchParams.get('sslmode') !== 'verify-full') problems.push(`${key}: sslmode is not verify-full`);
+    if (key === SESSION_URL_KEY) {
+      const sslProblem = sslmodeProblem(key, u);
+      if (sslProblem) problems.push(sslProblem);
+    } else if (u.searchParams.get('sslmode') !== 'verify-full') problems.push(`${key}: sslmode is not verify-full`);
     // Review of PR #230, I-4: the login is the URL's userinfo only; a `?user=` (or `password` / `host` / `dbname`) query
     // parameter would change who logs in or where, behind the login rules above (the URL policy refuses it at start too).
     for (const param of ['user', 'password', 'host', 'hostaddr', 'dbname']) if (u.searchParams.has(param)) problems.push(`${key}: has a ?${param}= query parameter (put the login in the URL's userinfo; never a query parameter)`);
@@ -1684,7 +1700,7 @@ module.exports = {
   adminUrlPlacementProblems, composeFilesInRepo, ADMIN_URL_SCAN_ROOTS,
   DB_HARDEN_SERVICE, ADMIN_SERVICES, HARDEN_TIMEOUT_KEY, HARDEN_TIMEOUT_EXPR, HARDEN_ENTRYPOINT, dbHardenProblems, hardenTimeoutOk,
   FILES, TEMPLATES, COMBOS, STATIC_COMBO, DB_SERVICE, DB_SETUP_SERVICE, DB_TARGET_VOLUME, DB_TARGET_DIR, SENTINEL_ADMIN_PW, SENTINEL_ADMIN_URL, dbSetupProblems, appCredentialProblems, credentialMountProblems, topLevelVolumeProblems, bundledDbEnvironmentProblems, DB_INITDB_ARGS, DB_ENV_KEYS, DB_PASSWORD_KEY, BUNDLED_DB_KEY, bundledDbProblems, SENTINEL_DB_PW, BUNDLED_URL, NOT_THE_APP_LOGIN, NOTIFICATION_DELIVERY, PHASE_D_SWITCHES, PHASE_D_UNCHANGED, STATEMENT_DISPATCH, FEATURE_SWEEPS, SWITCH_VALUES, STRICT_SWITCHES, X31_SWITCHES, scanStrictSwitches, ENVIRONMENT_VARIABLES_TS, strictSwitchProblems, featureSweepProblems, composeEnvValue, AUDIT_SINK_MODES, AUDIT_SINK_PRODUCTION_MODES, AUDIT_SINK_FAILURES,
-  AUDIT_SINK_PRODUCTION_FAILURES, SENTINEL_URL, SENTINEL_OWNER_PW, SENTINEL_APP_SECRET, SESSION_URL_KEY, SESSION_URL_EXPR, SENTINEL_SESSION_URL,
+  ACCEPTED_SSLMODES, sslmodeProblem, AUDIT_SINK_PRODUCTION_FAILURES, SENTINEL_URL, SENTINEL_OWNER_PW, SENTINEL_APP_SECRET, SESSION_URL_KEY, SESSION_URL_EXPR, SENTINEL_SESSION_URL,
   SENTINEL_REDIS_PW, SENTINEL_LEGACY_PW, forbiddenReason, durationSeconds, checkModel, checkStaticModel, parseEnvText,
   lintEnvText, lintComposeText, databaseExpressionProblems, PRODUCTION_FILE, renderModels, staticProblems, main,
 };
