@@ -1571,13 +1571,15 @@ describe('the password form: which refusals mean "the server refused the verifie
     for (const ssl of [false, true, undefined, { rejectUnauthorized: false }, {}]) expect(isVerifiedTls({ ssl: ssl as never })).toBe(false);
   });
 
-  it('the plain-text DO block\'s shape check: printable ASCII 32-1024, never a verifier or an md5 hash', () => {
-    const match = /OPERATOR\(pg_catalog\.~\) '(\^\[ -~\]\{32,1024\}\$)'/.exec(OWNER_BOOTSTRAP_Q4C_DO_PLAINTEXT);
+  it('the plain-text DO block\'s shape check: printable ASCII, 32-1024 by length (no regex bound over 255), never a verifier or an md5 hash', () => {
+    expect(OWNER_BOOTSTRAP_Q4C_DO_PLAINTEXT).toContain('pg_catalog.length(v_pw) < 32 OR pg_catalog.length(v_pw) > 1024');
+    // PostgreSQL rejects a regex bound above 255 (2201B): the bug the InstaBox run of 2026-11-19 found in the first draft.
+    for (const m of OWNER_BOOTSTRAP_Q4C_DO_PLAINTEXT.matchAll(/\{(\d+)(?:,(\d+))?\}/g)) expect(Number(m[2] ?? m[1])).toBeLessThanOrEqual(255);
+    const match = /OPERATOR\(pg_catalog\.~\) '(\^\[ -~\]\+\$)'/.exec(OWNER_BOOTSTRAP_Q4C_DO_PLAINTEXT);
     expect(match).not.toBeNull();
     const ok = new RegExp(match![1]!);
     const hashed = /^(scram-sha-256[$]|md5[0-9a-f]{32}$)/i;
     expect(ok.test('a'.repeat(64)) && !hashed.test('a'.repeat(64))).toBe(true);
-    expect(ok.test('a'.repeat(31))).toBe(false);
     expect(ok.test(`${'a'.repeat(40)}é`)).toBe(false);
     expect(ok.test(`${'a'.repeat(40)}\n`)).toBe(false);
     expect(hashed.test(scramSha256Verifier('a'.repeat(64)))).toBe(true);

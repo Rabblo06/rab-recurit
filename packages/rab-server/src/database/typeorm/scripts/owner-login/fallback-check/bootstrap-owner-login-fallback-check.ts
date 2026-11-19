@@ -126,11 +126,17 @@ interface Fixture {
 async function reset(base: URL): Promise<void> {
   const dbs = await sql(base, 'postgres', `SELECT datname FROM pg_catalog.pg_database WHERE datname LIKE 'fbc\\_%'`);
   for (const r of dbs) await sql(base, 'postgres', `DROP DATABASE IF EXISTS ${ident(String(r.datname))} WITH (FORCE)`);
-  for (const role of ['crewflow_worker', 'crewflow_app', 'crewflow', 'rab_app', 'rab_owner', 'rab_secure_owner', 'crewflow_owner']) {
-    await sql(base, 'postgres', `DROP ROLE IF EXISTS ${ident(role)}`);
-  }
+  // DROP OWNED BY first: it also revokes privileges on shared objects (the GRANT SET ON PARAMETER of S1), which DROP ROLE
+  // alone refuses with 2BP01.
+  const dropRole = async (role: string) => {
+    const exists = await sql(base, 'postgres', `SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = $1`, [role]);
+    if (exists.length === 0) return;
+    await sql(base, 'postgres', `DROP OWNED BY ${ident(role)}`);
+    await sql(base, 'postgres', `DROP ROLE ${ident(role)}`);
+  };
+  for (const role of ['crewflow_worker', 'crewflow_app', 'crewflow', 'rab_app', 'rab_owner', 'rab_secure_owner', 'crewflow_owner']) await dropRole(role);
   const roles = await sql(base, 'postgres', `SELECT rolname FROM pg_catalog.pg_roles WHERE rolname LIKE 'fbc\\_%'`);
-  for (const r of roles) await sql(base, 'postgres', `DROP ROLE IF EXISTS ${ident(String(r.rolname))}`);
+  for (const r of roles) await dropRole(String(r.rolname));
 }
 
 /** A database owned by a NON-superuser CREATEROLE admin (the shape of a managed provider's admin login). */

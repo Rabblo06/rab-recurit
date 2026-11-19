@@ -297,8 +297,8 @@ export const OWNER_BOOTSTRAP_G2_LOG_SAFE = `SELECT COALESCE(
 
 /**
  * Q4c (plain-text fallback): the same role, attributes and grant as OWNER_BOOTSTRAP_Q4C_DO, with the plain-text password.
- * Shape check before CREATE / ALTER ROLE: 32-1024 printable ASCII characters (the strength floor is checked before anything
- * connects), never a string PostgreSQL would store as pre-hashed (a SCRAM-SHA-256 verifier or an md5 hash), and
+ * Shape check before CREATE / ALTER ROLE: 32-1024 printable ASCII characters (lengths compared directly: a PostgreSQL regex
+ * bound stops at 255; the strength floor is checked before anything connects), never a string PostgreSQL would store as pre-hashed (a SCRAM-SHA-256 verifier or an md5 hash), and
  * password_encryption must be scram-sha-256; anything else is 22023 at the check step. The same stage HINT and
  * CONTEXT-stripping re-raise as OWNER_BOOTSTRAP_Q4C_DO (the EXECUTEd text holds the password).
  */
@@ -316,7 +316,8 @@ BEGIN
       INTO r FROM pg_catalog.pg_roles WHERE rolname = 'crewflow_owner';
     IF (NOT FOUND OR v_set_pw)
        AND (v_pw IS NULL
-            OR NOT (v_pw OPERATOR(pg_catalog.~) '^[ -~]{32,1024}$')
+            OR pg_catalog.length(v_pw) < 32 OR pg_catalog.length(v_pw) > 1024
+            OR NOT (v_pw OPERATOR(pg_catalog.~) '^[ -~]+$')
             OR v_pw OPERATOR(pg_catalog.~*) '^(scram-sha-256[$]|md5[0-9a-f]{32}$)'
             OR pg_catalog.current_setting('password_encryption') OPERATOR(pg_catalog.<>) 'scram-sha-256') THEN
       RAISE EXCEPTION 'not an acceptable plain-text password' USING ERRCODE = '22023';
