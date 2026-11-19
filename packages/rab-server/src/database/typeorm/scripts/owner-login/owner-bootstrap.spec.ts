@@ -1771,7 +1771,7 @@ describe('owner decision 2026-11-19, option 1 "Create login, you set password": 
     expect(texts()).not.toContain(OWNER_BOOTSTRAP_BEGIN);
   });
 
-  it('the server refuses the passwordless login role too (XX000 at its COMMIT): nothing created, the reviewed SQL with the placeholder, 64 (awaiting-manual-role)', async () => {
+  it('the server refuses the passwordless (NOLOGIN) role too (XX000 at its COMMIT): nothing created, the reviewed SQL with the placeholder, 64 (awaiting-manual-role)', async () => {
     const { io, sent, lines } = fakeIo([base], [{ ok: false, code: '28P01' }], { failOn: OWNER_BOOTSTRAP_COMMIT, failCode: 'XX000' });
     const result = await bootstrapOwnerWithIo(io);
     expect(result).toEqual({ outcome: 'awaiting-manual-role', exitCode: 64, created: false, passwordSet: false, grantAdded: false, createRole: 'not-run', code: 'XX000' });

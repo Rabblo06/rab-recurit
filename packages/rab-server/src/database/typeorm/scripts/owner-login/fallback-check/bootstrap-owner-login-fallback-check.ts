@@ -6,7 +6,7 @@
  *
  *   FBC_PLAIN_SU_URL   the superuser of a plain PostgreSQL 16 with TLS (server certificate for 127.0.0.1 from FBC's CA)
  *   FBC_SIM_SU_URL     the superuser of a PostgreSQL 16 that loads refuse_prehashed.c: it refuses pre-hashed role passwords at
- *                      COMMIT (XX000) and, with refuse_prehashed.refuse_passwordless_login=on (SIGHUP), a LOGIN role created
+ *                      COMMIT (XX000) and, with refuse_prehashed.refuse_passwordless_role=on (SIGHUP), a LOGIN role created
  *                      without a password too; it logs EVERY statement with its parameters
  *   FBC_BOUNCER1_HOSTPORT / FBC_BOUNCER2_HOSTPORT   PgBouncer (transaction pooling) in front of the plain cluster: 1 with
  *                      its defaults (refuses the startup option db-setup sends), 2 with ignore_startup_parameters=options
@@ -21,7 +21,7 @@
  *       (no loop); the operator's ALTER ROLE ... PASSWORD (simulated, as the provider's SQL editor would); the third run
  *       logs in, continues (CREATEROLE marked), 0. The crewflow_owner password is in no db-setup output and no server log
  *       line written before the operator's own statement.
- *   N2  the refusing server that also refuses a passwordless login role: nothing created, the reviewed SQL with the
+ *   N2  the refusing server that also refuses a passwordless (NOLOGIN) role: nothing created, the reviewed SQL with the
  *       placeholder printed, 64; the operator runs that SQL (simulated); the next run checks the login and continues, 0.
  *   B1  PG_ADMIN_URL through PgBouncer 1: refused (64), "refused the session settings" + PG_ADMIN_DIRECT_URL.
  *   B2  PG_ADMIN_URL through PgBouncer 2: refused (64), "not session-stable" + PG_ADMIN_DIRECT_URL; nothing created.
@@ -219,7 +219,7 @@ async function ownerPasswordState(base: URL): Promise<'missing' | 'none' | 'scra
 }
 
 async function setSimPasswordlessRefusal(on: boolean): Promise<void> {
-  await sql(clusters.SIM, 'postgres', `ALTER SYSTEM SET refuse_prehashed.refuse_passwordless_login = ${on ? 'on' : 'off'}`);
+  await sql(clusters.SIM, 'postgres', `ALTER SYSTEM SET refuse_prehashed.refuse_passwordless_role = ${on ? 'on' : 'off'}`);
   await sql(clusters.SIM, 'postgres', `SELECT pg_catalog.pg_reload_conf()`);
   await new Promise((r) => setTimeout(r, 500));
 }
@@ -348,7 +348,7 @@ const scenarios: Array<[string, () => Promise<void>]> = [
     },
   ],
   [
-    'N2 refusing server that also refuses a passwordless login role: nothing created, the reviewed SQL printed (64); after the operator runs it, 0',
+    'N2 refusing server that also refuses a passwordless role: nothing created, the reviewed SQL printed (64); after the operator runs it, 0',
     async () => {
       const f = await fixture(clusters.SIM, 'n2');
       await setSimPasswordlessRefusal(true);

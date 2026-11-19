@@ -299,7 +299,7 @@ function stageText(stage: WriteStage): string {
 /**
  * Owner decision 2026-11-19 (option 1), both exit 64: `awaiting-password` (crewflow_owner exists, created now without a
  * password or kept, and does not log in yet: the operator sets the password), `awaiting-manual-role` (the server refused a
- * passwordless login role too; nothing was created: the operator runs the printed SQL).
+ * passwordless (NOLOGIN) role too; nothing was created: the operator runs the printed SQL).
  */
 export type OwnerBootstrapOutcome =
   | 'pass-through'
@@ -621,7 +621,7 @@ export function isPasswordFormRefusal(error: unknown, passwordSent: boolean): bo
 
 /**
  * The write transaction's failure: 'verifier-refused' (the server refused the SCRAM verifier, or, for the passwordless
- * transaction, the passwordless login role: the caller takes the owner's option-1 / option-2 path), a race (retried by the
+ * transaction, the passwordless (NOLOGIN) role: the caller takes the owner's option-1 / option-2 path), a race (retried by the
  * caller), a refusal (64) or a failure (70). `passwordSent`: the transaction set a password (or created the passwordless
  * login role), so a refusal of its role step or COMMIT is a refusal of that form.
  */
@@ -975,7 +975,7 @@ async function applyCreateRoleTransaction(session: SqlSession, io: OwnerBootstra
  * Owner decision 2026-11-19, option 1 ("Create login, you set password"): the server refused the pre-hashed password. Under
  * the advisory lock and the same refusals: a missing crewflow_owner is created WITHOUT a password, an existing one is left
  * exactly as it is (its password is never written here), and the grant is added when missing; then the fixed steps and
- * exit 64 (`awaiting-password`). When the server refuses the passwordless login role as well (the same classification),
+ * exit 64 (`awaiting-password`). When the server refuses the passwordless (NOLOGIN) role as well (the same classification),
  * nothing is created: the reviewed SQL with a placeholder is printed (option 2) and exit 64 (`awaiting-manual-role`).
  * One transaction (race retries aside); never a password write. Exported through bootstrapOwnerWithIo only.
  */
@@ -1002,7 +1002,7 @@ async function passwordlessSetup(session: SqlSession, io: OwnerBootstrapIo, refu
       }
     } catch (error) {
       await session.query(OWNER_BOOTSTRAP_ROLLBACK).catch(() => undefined);
-      // Only a transaction that CREATED the passwordless login role can be a refusal of that form.
+      // Only a transaction that CREATED the passwordless (NOLOGIN) role can be a refusal of that form.
       const classified = classifyWriteError(error, { passwordSent: !existed });
       if (classified === 'verifier-refused') {
         const { stage, code } = writeFailureInfo(error);

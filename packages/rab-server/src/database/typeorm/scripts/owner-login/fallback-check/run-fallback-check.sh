@@ -16,7 +16,7 @@
 # One PostgreSQL runs at a time. Groups, each from a fresh container:
 #   plain  PostgreSQL 16 with TLS (a per-run CA; server certificate for IP 127.0.0.1): P1, P2; then PgBouncer (transaction
 #          pooling, defaults) in front of it: B1; then PgBouncer with ignore_startup_parameters=options: B2, B3
-#   sim    the same + refuse_prehashed.c (refuses pre-hashed role passwords at COMMIT, XX000, and, when switched on, a LOGIN
+#   sim    the same + refuse_prehashed.c (refuses pre-hashed role passwords at COMMIT, XX000, and, when switched on, any
 #          role without a password), EVERY statement logged with its parameters: N1, N2
 #   trust  a pg_hba that TRUSTS crewflow_owner (and only it): T1
 # The extension and PgBouncer are built / unpacked in a throwaway container of the same image (apt; nothing installed on the

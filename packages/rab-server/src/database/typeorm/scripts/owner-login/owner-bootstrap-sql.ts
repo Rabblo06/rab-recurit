@@ -259,7 +259,7 @@ $bootstrap$;`;
  * attributes. The operator's `ALTER ROLE crewflow_owner LOGIN PASSWORD ...` makes it a login. When it exists it is left
  * exactly as it is (its password and LOGIN are never touched here; NOLOGIN accepted only with the mark); then the same
  * database grant. No input at all: fixed text, no EXECUTE of a value. The
- * same stage HINT and CONTEXT-stripping re-raise as OWNER_BOOTSTRAP_Q4C_DO, so a refusal of the passwordless login role
+ * same stage HINT and CONTEXT-stripping re-raise as OWNER_BOOTSTRAP_Q4C_DO, so a refusal of the passwordless (NOLOGIN) role
  * itself (the role step, or its COMMIT) is told apart.
  */
 // sql-injection-reviewed: the only interpolation is OWNER_AWAITING_PASSWORD_MARK, a quote-free code constant.
