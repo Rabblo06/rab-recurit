@@ -656,8 +656,17 @@ async function lifecycle(ctx: Ctx, major: number): Promise<ScenarioReport[]> {
     try {
       const noneProd = await child(head, {});
       expect(r, noneProd.exitCode === EXIT.identity && noneProd.result?.serve === false, `NON-production process, no declaration, PRODUCTION-bound marker: exit 67, serve=false (${summary(noneProd)})`);
-      const missingProd = await child(head, { CREWFLOW_DEPLOYMENT_ENVIRONMENT: 'production', PG_DATABASE_URL: ownerUrlVerifyFull(ctx, head) });
-      expect(r, missingProd.exitCode === EXIT.identity && missingProd.result?.serve === false, `NON-production process declaring production without CREWFLOW_DEPLOYMENT_ID: exit 67 (${summary(missingProd)})`);
+      // SSL policy (2026-11-19): a declared production run resolves its connection under DB_TARGET=production, which refuses a
+      // URL without sslmode (64) BEFORE the identity rule; and this disposable database has no TLS, so a URL WITH sslmode
+      // cannot reach the identity rule either (the non-production probe connection would need TLS). The earliest refusal is
+      // therefore the sslmode one, asserted exactly; the identity rule itself ("must be set together", 67) stays covered by
+      // deployment-identity.spec.ts, database-target.spec.ts and owner-login.spec.ts.
+      const missingProd = await child(head, { CREWFLOW_DEPLOYMENT_ENVIRONMENT: 'production' });
+      expect(
+        r,
+        missingProd.exitCode === EXIT.config && missingProd.result?.serve === false && /must set sslmode=require, verify-ca or verify-full in production/.test(missingProd.result?.reason ?? ''),
+        `NON-production process declaring production without CREWFLOW_DEPLOYMENT_ID and without sslmode: exit 64, the production sslmode refusal, serve=false (${summary(missingProd)})`,
+      );
     } finally {
       await withClient(withDb(ctx.admin, head), (c) => c.query(bindSql, ['test', deploymentId, 'ID-2 probe restores the test binding', 'twenty-mode-check', productionId, hosts]));
     }
