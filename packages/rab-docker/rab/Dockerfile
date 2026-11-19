@@ -219,9 +219,9 @@ COPY --from=build /app/packages/rab-emails/dist ./packages/rab-emails/dist
 COPY --from=build --chmod=0644 /app/packages/rab-emails/package.json ./packages/rab-emails/package.json
 # Entry scripts are read+execute only (0555) and set in the COPY itself (no separate chmod layer). The API's command is
 # api-prestart.sh; start.sh is kept only as a forwarder to it. DB-SETUP: the deploy compose files make api-prestart.sh and
-# worker-start.sh the ENTRYPOINT of rab-api / rab-worker (PID 1), then `/sbin/tini -s -- node ...`. Those two services never
-# receive PG_DATABASE_URL; each builds the crewflow_owner runtime URL from the one-shot db-setup service's target file and
-# crewflow_owner password file (/run/crewflow/db-target, a named volume they mount read-only; never part of this image).
+# worker-start.sh the ENTRYPOINT of rab-api / rab-worker (PID 1), then `/sbin/tini -s -- node ...`. Owner decision
+# 2026-11-18 (Twenty's way): both read PG_DATABASE_URL, the crewflow_owner URL, from their environment; no credential file
+# or volume exists any more.
 COPY --chmod=0555 packages/rab-docker/rab/api-prestart.sh ./api-prestart.sh
 COPY --chmod=0555 packages/rab-docker/rab/worker-start.sh ./worker-start.sh
 # PR #125 option A: the one-shot db-setup service's entrypoint (the only app-image service with the database admin URL).
@@ -248,14 +248,15 @@ RUN set -eu; \
     chmod 0755 /opt/crewflow-bundle && test "$(stat -c %a /opt/crewflow-bundle/worker-bundle-health.cjs)" = 444; \
     test "$(id -u node)" = 1000; test "$(id -g node)" = 1000; \
     mkdir -p /tmp/crewflow-jobs /run/crewflow-health/jobs; \
-    mkdir -p /run/crewflow/db-target && chown 1000:1000 /run/crewflow/db-target && chmod 0755 /run/crewflow/db-target; \
+\
     chown 1000:1000 /tmp/crewflow-jobs /run/crewflow-health/jobs; \
     chmod 0700 /tmp/crewflow-jobs; chmod 0755 /run/crewflow-health /run/crewflow-health/jobs; \
     test -f /app/packages/rab-server/dist/main.js; \
     test -f /app/packages/rab-worker/dist/main.js; \
     test -f /app/packages/rab-server/dist/database/typeorm/workspace-schema/provision-workspace-schema.js; \
     test -f /app/packages/rab-server/dist/database/typeorm/scripts/owner-login/bootstrap-owner-login.js; \
-    test -f /app/packages/rab-server/dist/database/typeorm/scripts/owner-login/derive-runtime-url.js; \
+    test ! -e /app/packages/rab-server/dist/database/typeorm/scripts/owner-login/derive-runtime-url.js; \
+    ls /app/packages/rab-server/dist/database/typeorm/core/migrations/ | grep -Eq '^[0-9]{13}-[A-Za-z0-9]+\.js$'; \
     test "$(stat -c %a /app/db-setup.sh)" = 555; \
     test "$(stat -c %a /app/api-prestart.sh)" = 555; test "$(stat -c %a /app/worker-start.sh)" = 555; \
     test -d /app/packages/rab-shared/dist-cjs; test -d /app/packages/rab-emails/dist; \

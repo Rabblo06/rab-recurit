@@ -1,60 +1,63 @@
 /**
- * Database setup the Twenty Helm way (OWNER-DB-FINAL.md Part A, DB-SETUP-HELM-PLAN.md): the core of the bootstrap child,
- * run by the one-shot db-setup service, the ONLY holder of PG_ADMIN_URL (and of an operator-given PG_DATABASE_URL). It makes
- * sure `crewflow_owner` exists with
- * exactly the 01-crewflow-owner.sql attributes and `CONNECT, CREATE, TEMPORARY ... WITH GRANT OPTION` on the current
- * database, that db-setup's password file holds its password, and publishes the credential-free target. Entry:
- * bootstrap-owner-login.ts.
+ * Database setup the Twenty way (owner decision 2026-11-18, "change PR #125 option 2 to Twenty's way"): the core of the
+ * bootstrap child, run by the one-shot db-setup service, the ONLY holder of PG_ADMIN_URL. Entry: bootstrap-owner-login.ts.
  *
- * Twenty's Helm chart (twentyhq/twenty@eedb0a73, packages/twenty-docker/helm/twenty/templates/):
- *   - the `ensure-database-exists` init container alone holds the superuser secret (deployment-server.yaml:81-130) and runs
- *     `CREATE USER … IF NOT EXISTS`, never changing an existing user's password (:99-116);
- *   - the app user's password is random (`randAlphaNum 32`), kept in its own secret and reused on every upgrade
- *     (secret-db-url.yaml:3-8);
- *   - an external database gets no setup step at all (secret-db-url.yaml:24-30, _helpers.tpl:56-83);
+ * Twenty (twentyhq/twenty@eedb0a73, packages/twenty-docker/helm/twenty/templates/):
+ *   - server and worker receive PG_DATABASE_URL, the APP user's URL (deployment-server.yaml:148-155,
+ *     deployment-worker.yaml:81-88);
+ *   - the `ensure-database-exists` init container alone holds the superuser secret and creates the app user WITH THE APP
+ *     USER'S OWN PASSWORD (`CREATE USER %I WITH PASSWORD %L`, only if it does not exist; deployment-server.yaml:82-128);
+ *   - an external database gets no setup step at all (secret-db-url.yaml:24-45);
  *   - APP_SECRET is never part of any database credential.
  *
- * Modes (owner-credential.ts selectDbSetupInput / planDbSetup):
- *   - BOOTSTRAP, PG_ADMIN_URL (the bundled db's superuser, or a client's admin URL — the latter a Crewflow addition, required by RLS):
- *       password file present  -> its password; crewflow_owner created only if missing; an existing crewflow_owner must log
- *                                 in with it (else REFUSED 64: delete the password file and start again with the admin
- *                                 address; never an automatic reset); only a missing grant is added;
- *       password file missing  -> a NEW crypto-random password, stored exclusively as the pending `owner-password.next`
- *                                 BEFORE the transaction; then crewflow_owner created, or (it exists: the file was lost) its
- *                                 password reset through Q4c (Crewflow addition A4; Twenty would leave the app unable to log
- *                                 in); the pending file becomes `owner-password` only after the COMMIT and a login with it
- *                                 (security review L1: a run that fails in between never leaves a file the role rejects).
- *   - OWNER-URL, PG_DATABASE_URL (an existing crewflow_owner URL; any other login there is refused, never reinterpreted):
- *     O1 + Q2 and the read-only refusals only, on a session logged in with the URL's own password; that password is copied into the file. Never a write to the database, never a password change.
+ * Modes (owner-credential.ts selectDbSetupInput). PG_DATABASE_URL (crewflow_owner) is ALWAYS given: it is the very URL
+ * rab-api and rab-worker use.
+ *   - BOOTSTRAP, PG_ADMIN_URL + PG_DATABASE_URL (a: the bundled db's superuser; b: your database's admin):
+ *       crewflow_owner missing                   -> created with the password inside PG_DATABASE_URL (SCRAM verifier only);
+ *       exists, that password logs in            -> never touched (only a missing database grant is added);
+ *       exists, that password does not log in    -> (28P01) the password is SET to it with the admin login, after the same
+ *                                                   safety checks as before: not used by another database of the cluster
+ *                                                   (Q2b), the admin holds ADMIN OPTION and CREATEROLE (or is superuser);
+ *       then the CREATEROLE step (below).
+ *   - OWNER-URL, PG_DATABASE_URL only (c): O1 + Q2 + the ledger and the read-only refusals only, logged in with the URL's own
+ *     password. Never a write to the database, never a password change; a password that does not log in is refused.
+ *
+ * The CREATEROLE step (modes a and b; owner decision 2026-11-18): crewflow_owner needs CREATEROLE only for the schema
+ * bootstrap (the first start's migrate child creates the schema roles). On a read-only crewflow_owner session the ledger is
+ * compared with this image's migration files: when every one of them is applied (the schema is complete: CURRENT, or
+ * AHEAD after a rollback), the admin runs ALTER ROLE crewflow_owner NOCREATEROLE (and removes the pending mark); while it is
+ * not complete, a CREATEROLE crewflow_owner is MARKED (COMMENT ON ROLE, an expiring mark: owner-login-posture.ts) so the boot gate
+ * accepts it for that first start. db-setup never grants CREATEROLE. Mode c applies the same rule read-only: it refuses
+ * what the boot gate would refuse.
+ *
+ * Every write runs in a transaction that first takes the advisory lock OWNER_BOOTSTRAP_LOCK_KEY and re-reads the facts under
+ * it (two db-setup runs on one database never interleave); there is no file and no file lock any more.
  *
  * Admin session: application_name crewflow-owner-bootstrap, retried for up to 60 s on connection-refused / 57P03; every
- * connection pinned (H1: search_path=pg_catalog,pg_temp). Q0, Q1, Q2, the refusals (§3.3 + H1/N1/N2), the probe (Q3) with
- * the stored password, and only when something is missing the write transaction (Q4a lock; facts + probe again under the
- * lock; Q4b inputs as bind parameters; Q4c DO block, text unchanged; Q4d re-verify), COMMIT, the probe again (must succeed)
- * and Q2 again (must be exact), else exit 70.
+ * connection pinned (H1: search_path=pg_catalog,pg_temp).
  *
- * Exit codes: 0 ok, 64 refusal (configuration / rights / a privileged crewflow_owner / a stale password file), 70 unexpected.
- * Output: fixed strings plus a SQLSTATE at most. Never a URL, a password, a verifier, a host, a database or a login name,
- * and never a driver error's message / detail / where. The plaintext password exists only in this process's memory and in
- * the password file; the server only ever receives the SCRAM verifier (§3.6).
+ * Exit codes: 0 ok, 64 refusal (configuration / rights / a privileged crewflow_owner / a password that does not log in
+ * without an admin), 70 unexpected. Output: fixed strings plus a SQLSTATE at most. Never a URL, a password, a verifier, a
+ * host, a database or a login name, and never a driver error's message / detail / where. The plaintext password exists only
+ * in this process's memory (it came from the environment); the server only ever receives the SCRAM verifier (§3.6).
  */
+import { readdirSync } from 'node:fs';
+import { join } from 'node:path';
+
 import { Client } from 'pg';
 
-import { type DbTarget, DbTargetError, dbTargetFromRuntimeUrl } from '../../../owner-login/db-target';
 import {
   ADMIN_URL_LABEL,
-  buildRuntimeDatabaseUrl,
   type DbSetupInput,
-  type DbSetupPlan,
-  generateOwnerPassword,
   OWNER_LOGIN,
   OwnerCredentialError,
   scramSha256Verifier,
   selectDbSetupInput,
 } from '../../../owner-login/owner-credential';
-import { type OwnerPasswordRead, OwnerPasswordFileError, OwnerPasswordMismatchError } from '../../../owner-login/owner-password-file';
 import { pgClientConfig, PgConfigError, PgDriverConfig, resolvePgEnvironment, ResolvedPgEnvironment, sameTarget } from '../../../postgres';
 import { isSupportedPostgresMajor, postgresMajorFromVersionNum, unsupportedPostgresMessage } from '../../../postgres/supported-majors';
+import { OWNER_CREATEROLE_MARK_PREFIX } from '../../../boot-checks/owner-login-posture';
+import { LEGACY_NOLOGIN_SQL } from '../migrate/owner-login/legacy-logins';
 import {
   OWNER_BOOTSTRAP_BEGIN,
   OWNER_BOOTSTRAP_COMMIT,
@@ -69,6 +72,14 @@ import {
   OWNER_BOOTSTRAP_Q4C_DO,
   OWNER_BOOTSTRAP_Q4D_REVERIFY,
   OWNER_BOOTSTRAP_ROLLBACK,
+  OWNER_HARDEN_H1_NOCREATEROLE,
+  OWNER_HARDEN_H2_CLEAR_MARK,
+  OWNER_HARDEN_R1_LEGACY_LOGINS,
+  OWNER_HARDEN_M1_TRY_MIGRATION_LOCK,
+  OWNER_HARDEN_M2_RELEASE_MIGRATION_LOCK,
+  OWNER_HARDEN_H3_MARK_PENDING,
+  OWNER_SCHEMA_S1_HAS_LEDGER,
+  OWNER_SCHEMA_S2_LEDGER,
   OWNER_SELF_O1_SESSION,
   BOOTSTRAP_SESSION_STARTUP_OPTIONS,
   OWNER_URL_SESSION_STARTUP_OPTIONS,
@@ -88,6 +99,7 @@ export const ADMIN_CONNECT_RETRY_INTERVAL_MS = 2_000;
  * CREATE ROLE (42710 / 23505), a concurrent ALTER ROLE / GRANT on the same catalog row ("tuple concurrently updated",
  * XX000: the DO block keeps only the SQLSTATE), a serialization failure or deadlock (40001 / 40P01). The transaction is
  * rolled back and the attempt re-runs from the facts and the probe, so a role another start just finished needs nothing.
+ * The same re-run handles a crewflow_owner whose password still does not log in after a grant-only transaction.
  */
 export const MAX_ATTEMPTS = 3;
 export const RACE_SQLSTATES: ReadonlySet<string> = new Set(['42710', '23505', 'XX000', '40001', '40P01']);
@@ -100,37 +112,22 @@ const PREHASHED_REFUSED_UNSUPPORTED = 'If this provider refuses pre-hashed passw
 
 /** Every fixed line this module can print (tests assert them exactly). */
 export const OWNER_BOOTSTRAP_MESSAGES = Object.freeze({
-  passThrough: 'PG_DATABASE_URL is the crewflow_owner login: checking it (read-only) and storing its password for the API and the Worker; the database is not changed.',
+  passThrough: 'PG_DATABASE_URL is the crewflow_owner login and there is no PG_ADMIN_URL: checking it (read-only); the database is not changed.',
   ownerNotSelf: 'The PG_DATABASE_URL session is not crewflow_owner itself (session_user and current_user must both be crewflow_owner). Refusing.',
   ownerNoDbGrant:
-    'crewflow_owner lacks CONNECT, CREATE, TEMPORARY WITH GRANT OPTION on this database (01-crewflow-owner.sql grants it). Grant it as the database owner, or put the database admin URL in PG_ADMIN_URL (and remove PG_DATABASE_URL). Refusing.',
-  passwordFileStale:
-    'The stored crewflow_owner password does not log in. Delete the password file and start again with the admin address in PG_ADMIN_URL. Refusing.',
-  passwordFileLost:
-    'No crewflow_owner password file: a new random password is stored as a pending file before any database change, and becomes the password file only after it logs in.',
-  passwordFileWriteFailed: (code: string) => `Storing the crewflow_owner password file failed (${code}); nothing was changed in the database.`,
-  passwordFileRace:
-    'A pending crewflow_owner password file appeared while this run was starting (another db-setup at the same moment?); nothing was changed in the database. Start again.',
-  pendingPromoted: 'A pending new crewflow_owner password from an earlier run logs in; it is now the stored password.',
-  pendingDiscarded: 'A pending new crewflow_owner password from an earlier run that did not complete does not log in; it was deleted.',
-  pendingUnusable: 'A pending crewflow_owner password file was not usable; it was deleted.',
-  pendingProbeFailed: (sqlstateClass: string) =>
-    `Checking a pending new crewflow_owner password failed (SQLSTATE class ${sqlstateClass}); it is kept. Giving up (the restart policy retries).`,
-  pendingRemoveFailed: (code: string) => `Deleting a pending crewflow_owner password file failed (${code}); nothing was changed in the database.`,
-  pendingNotThisRun:
-    "crewflow_owner now uses this run's new password, but the pending password file no longer holds it (another db-setup changed it); it was not made the stored password. Start again (the next start settles the pending file).",
-  testSeamOutsideTest: 'CREWFLOW_TEST_DB_SETUP_PERSIST_DELAY_MS is a test seam: it is allowed only with NODE_ENV=test (0-60000). Refusing.',
-  passwordPromoteFailed: (code: string) =>
-    `crewflow_owner now uses the new password, but making it the stored password failed (${code}); the next start completes it.`,
+    'crewflow_owner lacks CONNECT, CREATE, TEMPORARY WITH GRANT OPTION on this database (01-crewflow-owner.sql grants it). Grant it as the database owner, or put the database admin URL in PG_ADMIN_URL. Refusing.',
+  ownerUrlAuth: (sqlstate: string) =>
+    `The database refused the crewflow_owner login of PG_DATABASE_URL (SQLSTATE ${sqlstate}: wrong password, or pg_hba.conf does not allow it). Without PG_ADMIN_URL db-setup never changes the password: put crewflow_owner's real password in PG_DATABASE_URL, or set PG_ADMIN_URL (your admin URL) so db-setup sets it. Refusing.`,
+  passwordSet: 'The crewflow_owner password inside PG_DATABASE_URL did not log in: it is now set with the admin login (PG_ADMIN_URL).',
   /**
    * The server's major is not one of database/postgres/supported-majors.ts (15 and earlier, or a major above the newest
-   * reviewed one). Read from the Q2 facts, before the probe, the pending password file and any write: nothing is created.
+   * reviewed one). Read from the Q2 facts, before the probe and any write: nothing is created.
    */
   unsupportedPostgres: (major: number | null) => `${unsupportedPostgresMessage(major)} Nothing was created. Refusing.`,
   ownerInOtherDatabase:
-    'The crewflow_owner password file is missing, so its password would be reset, but crewflow_owner owns objects in, or holds a grant on, another database of this PostgreSQL cluster: another Crewflow deployment uses it, and the reset would break that deployment. Crewflow supports one deployment per PostgreSQL cluster when using an admin URL. Restore this deployment\'s password file, or put the crewflow_owner URL in PG_DATABASE_URL (and remove PG_ADMIN_URL). Refusing.',
+    'The crewflow_owner password inside PG_DATABASE_URL does not log in, so it would be set, but crewflow_owner owns objects in, or holds a grant on, another database of this PostgreSQL cluster: another Crewflow deployment uses it, and the change would break that deployment. Crewflow supports one deployment per PostgreSQL cluster when using an admin URL. Put crewflow_owner\'s real password in PG_DATABASE_URL. Refusing.',
   ownerOwnsDatabase:
-    'crewflow_owner owns this database (directly or through a role it is a member of, e.g. rab_owner after transition-from-separated.sql). The database setup step never runs as the admin in a database the app login owns (it could plant objects the admin session would run). Put the crewflow_owner URL in PG_DATABASE_URL instead of the admin URL in PG_ADMIN_URL (db-setup then runs as crewflow_owner itself). Refusing.',
+    'crewflow_owner owns this database (directly or through a role it is a member of, e.g. rab_owner after transition-from-separated.sql). The database setup step never runs as the admin in a database the app login owns (it could plant objects the admin session would run). Remove PG_ADMIN_URL (db-setup then only checks crewflow_owner, read-only). Refusing.',
   searchPathDefault:
     'A database-wide or crewflow_owner search_path default is set (ALTER DATABASE ... SET search_path / ALTER ROLE crewflow_owner SET search_path). Remove it (ALTER DATABASE ... RESET search_path / ALTER ROLE crewflow_owner RESET search_path). Refusing.',
   privilegedAttributes: (attributes: readonly string[]) =>
@@ -143,14 +140,14 @@ export const OWNER_BOOTSTRAP_MESSAGES = Object.freeze({
   adminCannotGrantDb:
     'The PG_ADMIN_URL login cannot grant CONNECT, CREATE, TEMPORARY on this database (it must own the database or hold those privileges WITH GRANT OPTION).',
   adminNoAdminOption:
-    "The crewflow_owner password file is missing, so its password must be reset, but the PG_ADMIN_URL login has no ADMIN OPTION on crewflow_owner (it was created by another login). Run, as that login or a superuser: GRANT crewflow_owner TO <your admin> WITH ADMIN OPTION; or put the crewflow_owner URL in PG_DATABASE_URL (and remove PG_ADMIN_URL). Refusing.",
+    "The crewflow_owner password inside PG_DATABASE_URL does not log in, so it must be set, but the PG_ADMIN_URL login has no ADMIN OPTION on crewflow_owner (it was created by another login). Run, as that login or a superuser: GRANT crewflow_owner TO <your admin> WITH ADMIN OPTION; or put crewflow_owner's real password in PG_DATABASE_URL. Refusing.",
   adminCannotResetPassword:
-    "The crewflow_owner password file is missing, so its password must be reset, but the PG_ADMIN_URL login cannot change another role's password (it needs CREATEROLE and ADMIN OPTION on crewflow_owner, or superuser); or put the crewflow_owner URL in PG_DATABASE_URL (and remove PG_ADMIN_URL). Refusing.",
+    "The crewflow_owner password inside PG_DATABASE_URL does not log in, so it must be set, but the PG_ADMIN_URL login cannot change another role's password (it needs CREATEROLE and ADMIN OPTION on crewflow_owner, or superuser); or put crewflow_owner's real password in PG_DATABASE_URL. Refusing.",
   probeFailed: (sqlstateClass: string) =>
     `crewflow_owner could not log in for a reason other than its password (SQLSTATE class ${sqlstateClass}); check pg_hba.conf and the role. Refusing.`,
   sessionRoleOption: 'The database URL (PG_ADMIN_URL or PG_DATABASE_URL) carries options=-c role=...; the database setup step connects as the URL login itself. Remove it. Refusing.',
   adminAuth: (sqlstate: string) =>
-    `The database refused the login of the database URL (PG_ADMIN_URL or PG_DATABASE_URL) (SQLSTATE ${sqlstate}: wrong password, or pg_hba.conf does not allow it). Refusing.`,
+    `The database refused the login of PG_ADMIN_URL (SQLSTATE ${sqlstate}: wrong password, or pg_hba.conf does not allow it). Refusing.`,
   adminNoDatabase:
     'The database named in the database URL (PG_ADMIN_URL or PG_DATABASE_URL) does not exist (SQLSTATE 3D000). db-setup never creates a database: create it at your provider (the bundled db creates its own), then start again. Refusing.',
   adminTls: 'TLS to the database failed (certificate, host name, or the server has no TLS). Check sslmode in the database URL (PG_ADMIN_URL or PG_DATABASE_URL) and PG_SSL_CA_CERT / PG_SSL_CA_CERT_PATH. Refusing.',
@@ -161,15 +158,56 @@ export const OWNER_BOOTSTRAP_MESSAGES = Object.freeze({
   writeFailed: (sqlstate: string) => `Setting up crewflow_owner failed (SQLSTATE ${sqlstate}). Nothing was committed.`,
   reverifyFailed: 'crewflow_owner is not exactly as required after the setup step (attributes, grant or login). Refusing to continue.',
   raceRetry: 'crewflow_owner was being created by another start at the same moment; reading the facts again.',
+  passwordRecheck: 'The database grant was added, and the crewflow_owner password inside PG_DATABASE_URL still does not log in: reading the facts again to set it.',
   raceExhausted: 'crewflow_owner kept changing while this start tried to set it up. Giving up (the restart policy retries).',
   unexpected: (code: string) => `Unexpected failure (${code}). Nothing secret is printed; see the database log for the SQLSTATE.`,
   ready: (what: string) => `crewflow_owner is ready (${what}).`,
-  targetPublished: 'The database target (host, port, database, TLS parameters; no credential) was published for the API and the Worker.',
-  targetPublishFailed: (code: string) => `Publishing the database target failed (${code}); the API and the Worker keep waiting.`,
-  targetWithdrawFailed: (code: string) => `Removing the previous database target failed (${code}); the API and the Worker may start on it.`,
+  // ---- the CREATEROLE step (owner decision 2026-11-18) ----
+  migrationsUnlisted: 'Could not list this image\'s migration files, so the schema bootstrap cannot be judged complete or not. Refusing to continue.',
+  createRoleRemoved: 'The schema is complete for this image: CREATEROLE was removed from crewflow_owner (ALTER ROLE crewflow_owner NOCREATEROLE).',
+  createRoleMarked:
+    'The schema bootstrap is not complete yet: crewflow_owner keeps CREATEROLE for it and is marked, so the first start may use it; the next db-setup run (docker compose up -d) removes it once the schema is current.',
+  createRoleKeptMarked: 'The schema bootstrap is not complete yet: crewflow_owner keeps CREATEROLE (already marked) until the schema is current.',
+  createRoleMarkCleared: 'crewflow_owner is NOCREATEROLE; its leftover CREATEROLE mark was removed.',
+  createRoleOtherDatabase:
+    'The CREATEROLE step would change crewflow_owner (remove CREATEROLE, or set or clear its mark), but crewflow_owner owns objects in, or holds a grant on, another database of this PostgreSQL cluster: another Crewflow deployment uses it, and roles are cluster-wide. Crewflow supports one deployment per PostgreSQL cluster when using an admin URL. Nothing was changed. Refusing.',
+  createRoleNoRights:
+    "The CREATEROLE step needs to change crewflow_owner (remove CREATEROLE once the schema is complete, or mark it while it is not), but the PG_ADMIN_URL login cannot: it needs superuser, or CREATEROLE and ADMIN OPTION on crewflow_owner (GRANT crewflow_owner TO <your admin> WITH ADMIN OPTION, as the login that created it). Refusing.",
+  ownerUrlCreateRoleComplete:
+    "crewflow_owner has CREATEROLE although the schema is complete, and it is not marked as waiting for the bootstrap: rab-api and rab-worker refuse it in production. Without PG_ADMIN_URL db-setup never changes the role: as your admin run ALTER ROLE crewflow_owner NOCREATEROLE (or set PG_ADMIN_URL so db-setup removes it). Refusing.",
+  ownerUrlCreateRolePendingUnmarked:
+    "crewflow_owner has CREATEROLE for the schema bootstrap, but no admin marked it, so rab-api would refuse it in production once the bootstrap ran. Without PG_ADMIN_URL db-setup never changes the role: as your admin run step 5b of own-database-app-login.sql (the COMMENT ON ROLE mark, valid 24 h), or set PG_ADMIN_URL. Refusing.",
+  ownerUrlCreateRoleExpired:
+    'crewflow_owner still has CREATEROLE and its grace period (the admin\'s mark) has expired; the schema is complete, so rab-api and rab-worker refuse it in production. Without PG_ADMIN_URL db-setup never changes the role: as your admin run ALTER ROLE crewflow_owner NOCREATEROLE; COMMENT ON ROLE crewflow_owner IS NULL; (or set PG_ADMIN_URL so db-setup removes it). Refusing.',
+  ownerUrlCreateRoleExpiredBeforeStart:
+    "crewflow_owner's CREATEROLE mark expired before the schema bootstrap ran. Without PG_ADMIN_URL db-setup never changes the role: as your admin renew it (step 5b of own-database-app-login.sql, valid 24 h) right before the first start, or set PG_ADMIN_URL. Refusing.",
+  ownerUrlCreateRoleCompleteMarked:
+    'crewflow_owner still has CREATEROLE (marked for the bootstrap) although the schema is complete. Without PG_ADMIN_URL db-setup never changes the role: as your admin run ALTER ROLE crewflow_owner NOCREATEROLE; COMMENT ON ROLE crewflow_owner IS NULL; before the mark expires (24 h after it was set), or rab-api and rab-worker refuse to start.',
+  // ---- db-harden (owner decision M1) ----
+  hardenNoAdmin: 'No admin login (mode c, PG_DATABASE_URL only): nothing to harden; the operator removes CREATEROLE (own-database-app-login.sql step 10).',
+  hardenTimeoutSetting: 'CREWFLOW_DB_HARDEN_TIMEOUT_SECONDS must be whole seconds from 60 to 7200 (unset = 1200; 1-7200 only with NODE_ENV=test). Refusing.',
+  hardenWaitingForRole: 'Waiting for db-setup: crewflow_owner does not exist yet.',
+  hardenWaitingForSchema: 'Waiting for the schema bootstrap: the ledger does not hold every migration of this image yet (read-only, polled).',
+  hardenAlready: 'crewflow_owner is already NOCREATEROLE and unmarked: nothing to harden.',
+  legacyLoginsDisabled: (count: number) =>
+    `${count} legacy login(s) (crewflow / crewflow_app) were still LOGIN: made NOLOGIN, password removed, as the admin, before removing CREATEROLE (BC-17).`,
+  legacyLoginsNoRights:
+    "crewflow / crewflow_app are still LOGIN, and once CREATEROLE is removed crewflow_owner can no longer change that, but the PG_ADMIN_URL login cannot make them NOLOGIN (it needs superuser, or CREATEROLE and ADMIN OPTION on them). Nothing was changed; CREATEROLE stays. As a superuser run: ALTER ROLE crewflow NOLOGIN PASSWORD NULL; ALTER ROLE crewflow_app NOLOGIN PASSWORD NULL; Refusing.",
+  hardenWaitingForMigration: 'Waiting for the running migration to finish (its lock is held): CREATEROLE is removed only after the migrate child has finished.',
+  createRoleBusyKept:
+    'The schema is complete, but a migration is running right now (its lock is held), so CREATEROLE is kept this time; db-harden (or the next db-setup run) removes it.',
+  hardenTimeout: (seconds: number) =>
+    // sql-injection-reviewed: an error MESSAGE (printed, never executed); seconds is a validated integer.
+    `The schema was not complete within ${seconds} s (CREWFLOW_DB_HARDEN_TIMEOUT_SECONDS), so CREATEROLE was NOT removed; nothing was changed. The next db-setup or db-harden run removes it once the schema is complete (or, as your admin: ALTER ROLE crewflow_owner NOCREATEROLE; COMMENT ON ROLE crewflow_owner IS NULL;).`,
 });
 
 export type OwnerBootstrapOutcome = 'pass-through' | 'unchanged' | 'created' | 'updated' | 'refused' | 'failed';
+
+/**
+ * What the CREATEROLE step did: `removed` (NOCREATEROLE now), `marked` (kept and marked: bootstrap pending), `kept` (kept,
+ * already marked), `mark-cleared` (NOCREATEROLE, leftover mark removed), `none` (nothing to do, or mode c), `not-run`.
+ */
+export type CreateRoleOutcome = 'removed' | 'marked' | 'kept' | 'mark-cleared' | 'none' | 'not-run';
 
 export interface OwnerBootstrapResult {
   outcome: OwnerBootstrapOutcome;
@@ -177,6 +215,7 @@ export interface OwnerBootstrapResult {
   created: boolean;
   passwordSet: boolean;
   grantAdded: boolean;
+  createRole: CreateRoleOutcome;
   /** Only a SQLSTATE (or a Node error code); never a message. */
   code: string | null;
 }
@@ -217,12 +256,15 @@ export interface OwnerFacts {
   oHasDbGrant: boolean;
   /** H1 / N2: crewflow_owner owns the current database, directly or through any role membership (MEMBER). */
   oOwnsDb: boolean;
+  /** crewflow_owner carries a valid CREATEROLE mark (owner-login-posture.ts; false when the role or the mark is missing). */
+  oCreateRolePending: boolean;
+  /** That mark's expiry has passed, by the server clock (false without a valid mark). */
+  oCreateRoleMarkExpired: boolean;
   /** H1: a database-wide or crewflow_owner-level search_path default exists. */
   searchPathDefaultSet: boolean;
 }
 
 type Row = Record<string, unknown>;
-
 
 /** Security re-review N4: a fact column that is not a boolean is a failure (70), never silently `false`. */
 function strictBool(row: Row, column: string): boolean {
@@ -266,6 +308,8 @@ export function factsFromRow(row: Row | undefined): OwnerFacts {
     oPrivilegedMemberships: count === null ? null : Number(count),
     oHasDbGrant: strictBool(row, 'o_has_db_grant'),
     oOwnsDb: strictBool(row, 'o_owns_db'),
+    oCreateRolePending: strictBool(row, 'o_createrole_pending'),
+    oCreateRoleMarkExpired: strictBool(row, 'o_createrole_mark_expired'),
     searchPathDefaultSet: strictBool(row, 'search_path_default_set'),
   };
 }
@@ -328,34 +372,25 @@ export interface WritePlan {
 }
 
 /**
- * Where this run's crewflow_owner password comes from: `file` = db-setup's password file (the normal start); `new` = the file
- * was missing, so a fresh random password was generated (it is stored before any database write).
+ * §3.4, the Twenty way. `probe` (Q3: a login as crewflow_owner with the password inside PG_DATABASE_URL) is null when the
+ * role does not exist.
+ *   role missing                          => CREATE ROLE with that password (Twenty: CREATE USER ... WITH PASSWORD);
+ *   probe ok                              => the password is right; never touched (Twenty: an existing user is skipped);
+ *   28P01                                 => the password does not log in: SET it to the one in PG_DATABASE_URL (needs
+ *                                            superuser, or CREATEROLE + ADMIN OPTION; the caller has already run the
+ *                                            other-database check Q2b);
+ *   42501 while the grant is missing      => CONNECT is not granted yet: add only the grant (the probe after COMMIT
+ *                                            decides; a 28P01 then re-runs the attempt, which sets the password);
+ *   anything else                         => refused with the SQLSTATE class only.
  */
-export type PasswordSource = 'file' | 'new';
-
-/**
- * §3.4 + the last row of §3.3, the Helm way. `probe` (Q3 with this run's password) is null when the role does not exist, or
- * when the password is `new` (nothing to probe: it cannot match yet).
- *   role missing                              => CREATE ROLE with this run's password;
- *   `file`, probe ok                          => the password is right; never touched (Twenty: an existing user is skipped);
- *   `file`, 28P01                             => REFUSED (64): the stored password no longer logs in; never an automatic reset;
- *   `file`, 42501 while the grant is missing  => CONNECT is not granted yet: add only the grant (the probe after COMMIT
- *                                                decides; a 28P01 then is the same refusal);
- *   `file`, anything else                     => refused with the SQLSTATE class only;
- *   `new`, role exists                        => A4 (Crewflow addition): reset its password to the new one (needs superuser,
- *                                                or CREATEROLE + ADMIN OPTION).
- */
-export function planWrite(f: OwnerFacts, probe: ProbeResult | null, source: PasswordSource = 'file'): WritePlan {
+export function planWrite(f: OwnerFacts, probe: ProbeResult | null): WritePlan {
   const create = !f.ownerExists;
   let needPassword = create;
   if (!create) {
-    if (source === 'new') needPassword = true;
-    else {
-      if (!probe) throw new OwnerBootstrapFailure(OWNER_BOOTSTRAP_MESSAGES.unexpected('no probe for an existing role'));
-      if (!probe.ok) {
-        if (probe.code === '28P01') throw new OwnerBootstrapRefusal(OWNER_BOOTSTRAP_MESSAGES.passwordFileStale, probe.code);
-        if (!(probe.code === '42501' && !f.oHasDbGrant)) throw new OwnerBootstrapRefusal(OWNER_BOOTSTRAP_MESSAGES.probeFailed(sqlstateClass(probe.code)), probe.code);
-      }
+    if (!probe) throw new OwnerBootstrapFailure(OWNER_BOOTSTRAP_MESSAGES.unexpected('no probe for an existing role'));
+    if (!probe.ok) {
+      if (probe.code === '28P01') needPassword = true;
+      else if (!(probe.code === '42501' && !f.oHasDbGrant)) throw new OwnerBootstrapRefusal(OWNER_BOOTSTRAP_MESSAGES.probeFailed(sqlstateClass(probe.code)), probe.code);
     }
     if (needPassword) {
       if (!f.adminHasAdminOption) throw new OwnerBootstrapRefusal(OWNER_BOOTSTRAP_MESSAGES.adminNoAdminOption);
@@ -421,6 +456,13 @@ export function classifyAdminConnectError(error: unknown, retriesExhausted: bool
   return new OwnerBootstrapFailure(OWNER_BOOTSTRAP_MESSAGES.adminConnectFailed(code), code);
 }
 
+/** The same for the crewflow_owner session of mode c: a login refusal names PG_DATABASE_URL and the no-admin rule. */
+export function classifyOwnerUrlConnectError(error: unknown, retriesExhausted: boolean): OwnerBootstrapRefusal | OwnerBootstrapFailure {
+  const code = errorCode(error);
+  if (code === '28P01' || code === '28000') return new OwnerBootstrapRefusal(OWNER_BOOTSTRAP_MESSAGES.ownerUrlAuth(code), code);
+  return classifyAdminConnectError(error, retriesExhausted);
+}
+
 /** The write transaction's failure: a privilege / provider refusal (64), a race (retried by the caller), else 70. */
 export function classifyWriteError(error: unknown): OwnerBootstrapRefusal | OwnerBootstrapFailure | 'race' {
   // A decision taken under the lock (it may carry a probe SQLSTATE such as 42501) keeps its own message.
@@ -439,30 +481,16 @@ export interface SqlSession {
 export interface OwnerBootstrapIo {
   /** Opens one admin session (one attempt; the runner retries). */
   openAdmin(): Promise<SqlSession>;
-  /** Q3 as crewflow_owner with this run's password; resolves to ok, or the error code. */
+  /** Q3 as crewflow_owner with the password inside PG_DATABASE_URL; resolves to ok, or the error code. */
   probeOwner(): Promise<ProbeResult>;
-  /** A fresh SCRAM verifier of this run's password. */
+  /** A fresh SCRAM verifier of that password. */
   verifier(): string;
-  /** Where this run's password comes from (default `file`). */
-  passwordSource?: PasswordSource;
   /**
-   * `new` only: stores this run's NEW password exclusively as the PENDING file `owner-password.next` (never over
-   * `owner-password`; EEXIST when one is already there). Called once the refusals passed and a write is needed, always BEFORE
-   * the transaction. A crash or failure after it leaves `owner-password` untouched; the role keeps its old password (nothing
-   * committed) or already has the new one (committed). The next start tells the two apart by logging in with the pending
-   * password: it logs in -> promoted; it does not (28P01) -> deleted (resolveStoredPassword). A throw stops the run with
-   * nothing changed in the database.
+   * The CREATEROLE step's input: is the schema complete for this image (every migration file of the image in the ledger)?
+   * Read on a READ-ONLY crewflow_owner session (schemaCompleteOn). A throw is a failure (70). Absent = the step is skipped
+   * (unit tests of the role transaction only).
    */
-  persistPassword?(): void;
-  /** Set by attempt() once persistPassword succeeded (race retries do not store it again). */
-  passwordPersisted?: boolean;
-  /** Test seam (NODE_ENV=test only): awaited right after persistPassword, before the transaction (the live race test). */
-  afterPersist?(): Promise<void>;
-  /**
-   * `new` only: renames the pending file over `owner-password` (security review L1). Called only after the COMMIT and a
-   * successful post-commit login with the new password. A throw is exit 70; the next start promotes it.
-   */
-  promotePassword?(): void;
+  schemaComplete?(): Promise<boolean>;
   log(line: string): void;
   sleep(ms: number): Promise<void>;
   now(): number;
@@ -496,23 +524,15 @@ async function readFacts(session: SqlSession): Promise<OwnerFacts> {
   return factsFromRow(rows[0]);
 }
 
-/** A failed promotion: the pending file is not this run's (F1), or the rename failed. Exit 70 either way. */
-function promoteFailure(error: unknown): OwnerBootstrapFailure {
-  if (error instanceof OwnerPasswordMismatchError || error instanceof OwnerPasswordFileError) {
-    return new OwnerBootstrapFailure(OWNER_BOOTSTRAP_MESSAGES.pendingNotThisRun, 'MISMATCH');
-  }
-  return new OwnerBootstrapFailure(OWNER_BOOTSTRAP_MESSAGES.passwordPromoteFailed(errorCode(error)), errorCode(error));
-}
-
 /**
- * Security review L4 (owner-approved, read-only): before an A4 reset, Q2b. Refused (64) when crewflow_owner is used by
- * another database of the cluster. Strict: anything but one boolean row is a failure (70).
+ * Security review L4 (owner-approved, read-only): before the password of an EXISTING crewflow_owner is set, Q2b. Refused
+ * (64) when crewflow_owner is used by another database of the cluster. Strict: anything but one boolean row is a failure (70).
  */
-async function assertNoOtherDatabase(session: SqlSession): Promise<void> {
+async function assertNoOtherDatabase(session: SqlSession, refusal: string = OWNER_BOOTSTRAP_MESSAGES.ownerInOtherDatabase): Promise<void> {
   const { rows } = await session.query(OWNER_BOOTSTRAP_Q2B_OTHER_DATABASES);
   const v = rows.length === 1 ? rows[0]?.o_other_database : undefined;
   if (typeof v !== 'boolean') throw new OwnerBootstrapFailure(OWNER_BOOTSTRAP_MESSAGES.unexpected('other-database fact'));
-  if (v) throw new OwnerBootstrapRefusal(OWNER_BOOTSTRAP_MESSAGES.ownerInOtherDatabase);
+  if (v) throw new OwnerBootstrapRefusal(refusal);
 }
 
 /** The facts, the decisions and the probe, in that order: one plan of what the write transaction must do. */
@@ -520,36 +540,24 @@ async function planFromDatabase(session: SqlSession, io: OwnerBootstrapIo, logNo
   const facts = await readFacts(session);
   const notes = decideBeforeProbe(facts);
   if (logNotes) for (const note of notes) io.log(note);
-  const source = io.passwordSource ?? 'file';
-  // L4: an A4 reset (a new password for an existing role) never runs while another database of the cluster uses the role.
-  if (source === 'new' && facts.ownerExists) await assertNoOtherDatabase(session);
-  const probe = facts.ownerExists && source === 'file' ? await io.probeOwner() : null;
-  return planWrite(facts, probe, source);
+  const probe = facts.ownerExists ? await io.probeOwner() : null;
+  const plan = planWrite(facts, probe);
+  // L4: the password of an existing role is never set while another database of the cluster uses the role.
+  if (plan.needPassword && !plan.create) await assertNoOtherDatabase(session);
+  return plan;
 }
 
-const UNCHANGED: OwnerBootstrapResult = { outcome: 'unchanged', exitCode: 0, created: false, passwordSet: false, grantAdded: false, code: null };
+const UNCHANGED: OwnerBootstrapResult = { outcome: 'unchanged', exitCode: 0, created: false, passwordSet: false, grantAdded: false, createRole: 'not-run', code: null };
 
 /**
  * One attempt. The facts are read twice: once WITHOUT the lock (a restart with everything in place opens no transaction at
  * all), and again UNDER the advisory lock, after any concurrent start on this database has committed. Only the post-lock
- * plan decides what is written AND the outcome reported: a second replica that started at the same moment as the first
- * reports what it really did ("unchanged", or "password set"), never the "created" its pre-lock read suggested.
- * Returns 'race' when a concurrent start on another database of the cluster collided (re-run from the facts).
+ * plan decides what is written AND the outcome reported. Returns 'race' when a concurrent start on another database of the
+ * cluster collided, or when a grant-only transaction still leaves a password that does not log in (re-run from the facts).
  */
-async function attempt(session: SqlSession, io: OwnerBootstrapIo): Promise<OwnerBootstrapResult | 'race'> {
+async function attempt(session: SqlSession, io: OwnerBootstrapIo): Promise<OwnerBootstrapResult | 'race' | 'recheck'> {
   const preLock = await planFromDatabase(session, io, true);
   if (!preLock.write) return { ...UNCHANGED };
-  // A new password reaches the file BEFORE anything is written to the database, once per run (race retries reuse it).
-  if ((io.passwordSource ?? 'file') === 'new' && io.persistPassword && !io.passwordPersisted) {
-    try {
-      io.persistPassword();
-      io.passwordPersisted = true;
-      if (io.afterPersist) await io.afterPersist();
-    } catch (error) {
-      if (errorCode(error) === 'EEXIST') throw new OwnerBootstrapFailure(OWNER_BOOTSTRAP_MESSAGES.passwordFileRace, 'EEXIST');
-      throw new OwnerBootstrapFailure(OWNER_BOOTSTRAP_MESSAGES.passwordFileWriteFailed(errorCode(error)), errorCode(error));
-    }
-  }
 
   let plan: WritePlan;
   await session.query(OWNER_BOOTSTRAP_BEGIN);
@@ -578,42 +586,215 @@ async function attempt(session: SqlSession, io: OwnerBootstrapIo): Promise<Owner
 
   const after = await io.probeOwner();
   if (!after.ok) {
-    // Only the grant was added (the stored password could not be checked before): a wrong stored password is the refusal.
-    if (after.code === '28P01' && !plan.needPassword) throw new OwnerBootstrapRefusal(OWNER_BOOTSTRAP_MESSAGES.passwordFileStale, after.code);
+    // Only the grant was added (the password could not be checked before): a wrong password is set by the next attempt.
+    if (after.code === '28P01' && !plan.needPassword) return 'recheck';
     throw new OwnerBootstrapFailure(OWNER_BOOTSTRAP_MESSAGES.reverifyFailed, after.code);
   }
   assertFactsExact(await readFacts(session));
-  // Security review L1: only now (COMMIT + a login with it) does the new password become the stored password.
-  if (io.passwordPersisted && io.promotePassword) {
-    try {
-      io.promotePassword();
-    } catch (error) {
-      throw promoteFailure(error);
-    }
-  }
+  if (plan.needPassword && !plan.create) io.log(OWNER_BOOTSTRAP_MESSAGES.passwordSet);
   return {
     outcome: plan.create ? 'created' : 'updated',
     exitCode: 0,
     created: plan.create,
     passwordSet: plan.needPassword,
     grantAdded: plan.needGrant,
+    createRole: 'not-run',
     code: null,
   };
 }
 
-/** The admin / bundled mode on an already-known password. Exported for the integration harness and the unit tests. */
+// ---------------------------------------------------------------------------------------------------------------------
+// The CREATEROLE step (owner decision 2026-11-18).
+// ---------------------------------------------------------------------------------------------------------------------
+
+/** The CREATEROLE decision over the facts and the schema state. Pure. */
+export type CreateRoleAction = 'remove' | 'mark' | 'clear-mark' | 'none';
+
+export function decideCreateRole(
+  f: Pick<OwnerFacts, 'ownerExists' | 'oCreateRole' | 'oCreateRolePending' | 'oCreateRoleMarkExpired'>,
+  schemaComplete: boolean,
+): CreateRoleAction {
+  if (!f.ownerExists) return 'none';
+  if (f.oCreateRole === true) {
+    if (schemaComplete) return 'remove';
+    // Not complete yet: mark it (again, when an earlier mark expired: a first migrate that failed for a day).
+    return f.oCreateRolePending && !f.oCreateRoleMarkExpired ? 'none' : 'mark';
+  }
+  return f.oCreateRolePending ? 'clear-mark' : 'none';
+}
+
+/**
+ * Mode c (no admin): the same rule, read-only. Refuses (64) what the boot gate would refuse in production; returns the
+ * notes to log otherwise.
+ */
+export function decideOwnerUrlCreateRole(
+  f: Pick<OwnerFacts, 'oCreateRole' | 'oCreateRolePending' | 'oCreateRoleMarkExpired'>,
+  schemaComplete: boolean,
+): string[] {
+  if (f.oCreateRole !== true) return [];
+  if (schemaComplete) {
+    if (!f.oCreateRolePending) throw new OwnerBootstrapRefusal(OWNER_BOOTSTRAP_MESSAGES.ownerUrlCreateRoleComplete);
+    if (f.oCreateRoleMarkExpired) throw new OwnerBootstrapRefusal(OWNER_BOOTSTRAP_MESSAGES.ownerUrlCreateRoleExpired);
+    return [OWNER_BOOTSTRAP_MESSAGES.ownerUrlCreateRoleCompleteMarked];
+  }
+  if (!f.oCreateRolePending) throw new OwnerBootstrapRefusal(OWNER_BOOTSTRAP_MESSAGES.ownerUrlCreateRolePendingUnmarked);
+  if (f.oCreateRoleMarkExpired) throw new OwnerBootstrapRefusal(OWNER_BOOTSTRAP_MESSAGES.ownerUrlCreateRoleExpiredBeforeStart);
+  return [OWNER_BOOTSTRAP_MESSAGES.createRoleKeptMarked];
+}
+
+/**
+ * This image's migration names, from the migration FILES (`<13-digit timestamp>-<Name>.(ts|js)` → `<Name><timestamp>`, the
+ * class name TypeORM records in core.migrations; owner-bootstrap.spec.ts proves the two agree for every file). Read with
+ * readdirSync, never by loading the migrations (db-setup stays small: no TypeORM, no entities). Empty = cannot judge.
+ */
+export function imageMigrationNames(dir: string = join(__dirname, '..', '..', 'core', 'migrations')): string[] {
+  const names = new Set<string>();
+  for (const file of readdirSync(dir)) {
+    const m = /^(\d{13})-([A-Za-z0-9]+)\.(ts|js)$/.exec(file);
+    if (m) names.add(`${m[2]}${m[1]}`);
+  }
+  return [...names].sort();
+}
+
+/** Complete = every migration of this image is in the ledger (CURRENT, or AHEAD after a rollback). Pure. */
+export function isSchemaComplete(expected: readonly string[], ledger: readonly string[] | null): boolean {
+  if (expected.length === 0) throw new OwnerBootstrapFailure(OWNER_BOOTSTRAP_MESSAGES.migrationsUnlisted);
+  if (ledger === null) return false;
+  const applied = new Set(ledger);
+  return expected.every((name) => applied.has(name));
+}
+
+/** S1 + S2 on a (read-only, pinned) crewflow_owner session: the ledger's names, or null when there is no ledger. */
+export async function readLedgerNames(session: SqlSession): Promise<string[] | null> {
+  const { rows } = await session.query(OWNER_SCHEMA_S1_HAS_LEDGER);
+  const has = rows.length === 1 ? rows[0]?.has_ledger : undefined;
+  if (typeof has !== 'boolean') throw new OwnerBootstrapFailure(OWNER_BOOTSTRAP_MESSAGES.unexpected('ledger fact'));
+  if (!has) return null;
+  return (await session.query(OWNER_SCHEMA_S2_LEDGER)).rows.map((r) => String(r.name));
+}
+
+/**
+ * The CREATEROLE step's transaction, on the admin session: BEGIN, the advisory lock, the facts again UNDER the lock, the
+ * decision, the statement(s), the facts again (must show the result), COMMIT. Needs superuser, or CREATEROLE + ADMIN OPTION
+ * on crewflow_owner (refused, 64, otherwise; nothing changed).
+ */
+async function applyCreateRoleStep(session: SqlSession, io: OwnerBootstrapIo, schemaComplete: boolean): Promise<CreateRoleOutcome | 'race' | 'busy'> {
+  const before = await readFacts(session);
+  const preview = decideCreateRole(before, schemaComplete);
+  if (preview === 'none') {
+    if (before.ownerExists && before.oCreateRole === true) io.log(OWNER_BOOTSTRAP_MESSAGES.createRoleKeptMarked);
+    return before.ownerExists && before.oCreateRole === true ? 'kept' : 'none';
+  }
+  // A removal never runs while a migrate child holds the migration lock (see OWNER_HARDEN_M1_TRY_MIGRATION_LOCK).
+  let migrationLock = false;
+  if (preview === 'remove') {
+    const { rows } = await session.query(OWNER_HARDEN_M1_TRY_MIGRATION_LOCK);
+    if (rows.length !== 1 || rows[0]?.got !== true) return 'busy';
+    migrationLock = true;
+  }
+  try {
+    return await applyCreateRoleTransaction(session, io, schemaComplete);
+  } finally {
+    if (migrationLock) await session.query(OWNER_HARDEN_M2_RELEASE_MIGRATION_LOCK).catch(() => undefined);
+  }
+}
+
+async function applyCreateRoleTransaction(session: SqlSession, io: OwnerBootstrapIo, schemaComplete: boolean): Promise<CreateRoleOutcome | 'race'> {
+  let action: CreateRoleAction;
+  await session.query(OWNER_BOOTSTRAP_BEGIN);
+  try {
+    await session.query(OWNER_BOOTSTRAP_Q4A_LOCK);
+    const f = await readFacts(session);
+    action = decideCreateRole(f, schemaComplete);
+    if (action === 'none') {
+      await session.query(OWNER_BOOTSTRAP_ROLLBACK);
+      return f.oCreateRole === true ? 'kept' : 'none';
+    }
+    if (!(f.adminSuper || (f.adminCreateRole && f.adminHasAdminOption))) throw new OwnerBootstrapRefusal(OWNER_BOOTSTRAP_MESSAGES.createRoleNoRights);
+    // Security review of PR #246, L1: the role is cluster-wide, so a change another database's deployment would feel (its
+    // CREATEROLE, its mark) runs only when no other database of the cluster uses crewflow_owner (Q2b, under the lock).
+    await assertNoOtherDatabase(session, OWNER_BOOTSTRAP_MESSAGES.createRoleOtherDatabase);
+    if (action === 'remove') {
+      // Re-review R1: the legacy logins first (crewflow_owner could make them NOLOGIN only while it has CREATEROLE).
+      const legacy = (await session.query(OWNER_HARDEN_R1_LEGACY_LOGINS)).rows.map((r) => String(r.name));
+      for (const name of legacy) {
+        const statement = LEGACY_NOLOGIN_SQL[name];
+        if (!statement) throw new OwnerBootstrapFailure(OWNER_BOOTSTRAP_MESSAGES.unexpected('legacy login'));
+        try {
+          await session.query(statement);
+        } catch (error) {
+          if (errorCode(error) === '42501') throw new OwnerBootstrapRefusal(OWNER_BOOTSTRAP_MESSAGES.legacyLoginsNoRights, '42501');
+          throw error;
+        }
+      }
+      if ((await session.query(OWNER_HARDEN_R1_LEGACY_LOGINS)).rows.length !== 0) throw new OwnerBootstrapFailure(OWNER_BOOTSTRAP_MESSAGES.reverifyFailed);
+      if (legacy.length) io.log(OWNER_BOOTSTRAP_MESSAGES.legacyLoginsDisabled(legacy.length));
+      await session.query(OWNER_HARDEN_H1_NOCREATEROLE);
+      if (f.oCreateRolePending) await session.query(OWNER_HARDEN_H2_CLEAR_MARK);
+    } else if (action === 'clear-mark') {
+      await session.query(OWNER_HARDEN_H2_CLEAR_MARK);
+    } else {
+      await session.query(OWNER_HARDEN_H3_MARK_PENDING);
+    }
+    const after = await readFacts(session);
+    const ok =
+      action === 'mark'
+        ? after.oCreateRole === true && after.oCreateRolePending && !after.oCreateRoleMarkExpired
+        : after.oCreateRole === false && !after.oCreateRolePending;
+    if (!ok) throw new OwnerBootstrapFailure(OWNER_BOOTSTRAP_MESSAGES.reverifyFailed);
+    await session.query(OWNER_BOOTSTRAP_COMMIT);
+  } catch (error) {
+    await session.query(OWNER_BOOTSTRAP_ROLLBACK).catch(() => undefined);
+    const classified = classifyWriteError(error);
+    // A concurrent db-setup on ANOTHER database of the cluster changed the same role row (roles are cluster-wide, the
+    // advisory lock is per database): the caller re-runs the step from the facts, as attempt() does.
+    if (classified === 'race') return 'race';
+    throw classified;
+  }
+  if (action === 'remove') {
+    io.log(OWNER_BOOTSTRAP_MESSAGES.createRoleRemoved);
+    return 'removed';
+  }
+  if (action === 'clear-mark') {
+    io.log(OWNER_BOOTSTRAP_MESSAGES.createRoleMarkCleared);
+    return 'mark-cleared';
+  }
+  io.log(OWNER_BOOTSTRAP_MESSAGES.createRoleMarked);
+  return 'marked';
+}
+
+/** Modes a and b on the admin login. Exported for the integration harness and the unit tests. */
 export async function bootstrapOwnerWithIo(io: OwnerBootstrapIo, retryWindowMs = ADMIN_CONNECT_RETRY_WINDOW_MS): Promise<OwnerBootstrapResult> {
   let session: SqlSession | null = null;
   try {
     session = await connectAdminWithRetry(io, retryWindowMs);
     await session.query(OWNER_BOOTSTRAP_Q0_SESSION);
     await session.query(OWNER_BOOTSTRAP_Q1_SUPERUSER_LOGGING);
+    let result: OwnerBootstrapResult | null = null;
     for (let i = 1; i <= MAX_ATTEMPTS; i += 1) {
-      const result = await attempt(session, io);
-      if (result !== 'race') return result;
+      const r = await attempt(session, io);
+      if (r !== 'race' && r !== 'recheck') {
+        result = r;
+        break;
+      }
+      if (i < MAX_ATTEMPTS) {
+        io.log(r === 'recheck' ? OWNER_BOOTSTRAP_MESSAGES.passwordRecheck : OWNER_BOOTSTRAP_MESSAGES.raceRetry);
+        await io.sleep(200 + Math.floor(Math.random() * 500)); // jitter, so two colliding starts do not collide again
+      }
+    }
+    if (!result) throw new OwnerBootstrapFailure(OWNER_BOOTSTRAP_MESSAGES.raceExhausted);
+    if (!io.schemaComplete) return result;
+    const complete = await io.schemaComplete();
+    for (let i = 1; i <= MAX_ATTEMPTS; i += 1) {
+      const createRole = await applyCreateRoleStep(session, io, complete);
+      if (createRole === 'busy') {
+        io.log(OWNER_BOOTSTRAP_MESSAGES.createRoleBusyKept);
+        return { ...result, createRole: 'kept' };
+      }
+      if (createRole !== 'race') return { ...result, createRole };
       if (i < MAX_ATTEMPTS) {
         io.log(OWNER_BOOTSTRAP_MESSAGES.raceRetry);
-        await io.sleep(200 + Math.floor(Math.random() * 500)); // jitter, so two colliding starts do not collide again
+        await io.sleep(200 + Math.floor(Math.random() * 500));
       }
     }
     throw new OwnerBootstrapFailure(OWNER_BOOTSTRAP_MESSAGES.raceExhausted);
@@ -623,14 +804,16 @@ export async function bootstrapOwnerWithIo(io: OwnerBootstrapIo, retryWindowMs =
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
-// The OWNER-URL mode: PG_DATABASE_URL names an existing crewflow_owner. Twenty runs no setup step for an external database
-// (secret-db-url.yaml:24-30); Crewflow keeps the read-only RLS refusals: log in with the URL's own password, pin the
-// session (Q0), O1 + Q2, refuse anything privileged. NEVER a write to the database, never a password change.
+// The OWNER-URL mode (c): PG_DATABASE_URL only. Twenty runs no setup step for an external database (secret-db-url.yaml:
+// 24-45); Crewflow keeps the read-only RLS refusals: log in with the URL's own password, pin the session (Q0), O1 + Q2 +
+// the ledger, refuse anything privileged. NEVER a write to the database, never a password change.
 // ---------------------------------------------------------------------------------------------------------------------
 
 export interface OwnerUrlIo {
   /** A session as crewflow_owner with the URL's own password (one attempt). */
   openUrl(): Promise<SqlSession>;
+  /** This image's migration names (imageMigrationNames). Absent = the CREATEROLE rule is skipped (unit tests). */
+  expectedMigrations?(): string[];
   log(line: string): void;
   sleep(ms: number): Promise<void>;
   now(): number;
@@ -678,20 +861,24 @@ async function connectWithRetry(open: () => Promise<SqlSession>, io: Pick<OwnerU
   }
 }
 
-const OWNER_URL_UNCHANGED: OwnerBootstrapResult = { outcome: 'pass-through', exitCode: 0, created: false, passwordSet: false, grantAdded: false, code: null };
+const OWNER_URL_UNCHANGED: OwnerBootstrapResult = { outcome: 'pass-through', exitCode: 0, created: false, passwordSet: false, grantAdded: false, createRole: 'none', code: null };
 
-/** The owner-URL mode: read-only. Q0, O1, Q2, the refusals. Exported for the unit tests. */
+/** The owner-URL mode: read-only. Q0, O1, Q2, the ledger, the refusals. Exported for the unit tests. */
 export async function setupOwnerUrlWithIo(io: OwnerUrlIo, retryWindowMs = ADMIN_CONNECT_RETRY_WINDOW_MS): Promise<OwnerBootstrapResult> {
   let session: SqlSession | null = null;
   try {
     try {
       session = await connectWithRetry(() => io.openUrl(), io, retryWindowMs);
     } catch (error) {
-      throw classifyAdminConnectError(error, RETRYABLE_CONNECT_CODES.has(errorCode(error)));
+      throw classifyOwnerUrlConnectError(error, RETRYABLE_CONNECT_CODES.has(errorCode(error)));
     }
     await session.query(OWNER_BOOTSTRAP_Q0_SESSION);
     const { who, facts } = await readOwnerSelf(session);
     for (const note of decideOwnerSelf(who, facts)) io.log(note);
+    if (io.expectedMigrations) {
+      const complete = isSchemaComplete(io.expectedMigrations(), await readLedgerNames(session));
+      for (const note of decideOwnerUrlCreateRole(facts, complete)) io.log(note);
+    }
     return { ...OWNER_URL_UNCHANGED };
   } finally {
     await closeQuietly(session);
@@ -699,20 +886,20 @@ export async function setupOwnerUrlWithIo(io: OwnerUrlIo, retryWindowMs = ADMIN_
 }
 
 function describeReady(result: OwnerBootstrapResult): string {
-  if (result.outcome === 'pass-through') return 'existing crewflow_owner URL, unchanged; its password stored';
-  if (result.created) return 'created';
+  if (result.outcome === 'pass-through') return 'existing crewflow_owner, checked read-only, unchanged';
+  if (result.created) return 'created with the password inside PG_DATABASE_URL';
   const parts: string[] = [];
-  if (result.passwordSet) parts.push('password reset because the password file was missing (Crewflow addition)');
+  if (result.passwordSet) parts.push('password set to the one inside PG_DATABASE_URL');
   if (result.grantAdded) parts.push('database grant added');
   return parts.length > 0 ? parts.join(', ') : 'unchanged';
 }
 
 export function failureResult(error: unknown): OwnerBootstrapResult {
   if (error instanceof OwnerBootstrapRefusal) {
-    return { outcome: 'refused', exitCode: 64, created: false, passwordSet: false, grantAdded: false, code: error.code };
+    return { outcome: 'refused', exitCode: 64, created: false, passwordSet: false, grantAdded: false, createRole: 'not-run', code: error.code };
   }
   const code = error instanceof OwnerBootstrapFailure ? error.code : errorCode(error);
-  return { outcome: 'failed', exitCode: 70, created: false, passwordSet: false, grantAdded: false, code };
+  return { outcome: 'failed', exitCode: 70, created: false, passwordSet: false, grantAdded: false, createRole: 'not-run', code };
 }
 
 /** The one place a connection is constructed here: the factory's explicit config, with this step's fixed application_name. */
@@ -722,8 +909,8 @@ function openClient(config: PgDriverConfig): Client {
 
 /**
  * H1: every bootstrap connection carries a fixed session pin as startup options: search_path=pg_catalog,pg_temp always;
- * read-write for the admin and probe sessions (BOOTSTRAP_SESSION_STARTUP_OPTIONS), read-only for the owner-URL mode's
- * crewflow_owner session (OWNER_URL_SESSION_STARTUP_OPTIONS, I1).
+ * read-write for the admin and probe sessions (BOOTSTRAP_SESSION_STARTUP_OPTIONS), read-only for the crewflow_owner
+ * session that only reads (OWNER_URL_SESSION_STARTUP_OPTIONS, I1).
  */
 function pinned(config: PgDriverConfig, startupOptions: string = BOOTSTRAP_SESSION_STARTUP_OPTIONS): PgDriverConfig {
   const options = [config.options, startupOptions].filter((o) => typeof o === 'string' && o !== '').join(' ');
@@ -731,13 +918,14 @@ function pinned(config: PgDriverConfig, startupOptions: string = BOOTSTRAP_SESSI
 }
 
 /**
- * Every driver config the bootstrap child uses: the URL's own login as the admin (bootstrap mode), the same login as
- * crewflow_owner in the owner-URL mode (`ownerUrl`: READ-ONLY, security review I1), and the crewflow_owner probe with this
- * run's password, each pinned (H1). Exported for the spec that asserts the pin is on all of them.
+ * Every driver config the bootstrap child uses: the connect URL's own login (`admin`: the admin in modes a and b), the
+ * crewflow_owner READ-ONLY session (`ownerUrl`: mode c's checks, and the ledger read of the CREATEROLE step; security review
+ * I1), and the crewflow_owner probe (`probe`), each pinned (H1). `appUrl` is PG_DATABASE_URL. Exported for the spec that
+ * asserts the pin is on all of them.
  */
 export function bootstrapDriverConfigs(
   resolved: ResolvedPgEnvironment,
-  runtimeUrl: string,
+  appUrl: string,
 ): { admin: PgDriverConfig; ownerUrl: PgDriverConfig; probe: PgDriverConfig } {
   const urlLogin: PgDriverConfig = {
     ...pgClientConfig(resolved, {
@@ -751,20 +939,21 @@ export function bootstrapDriverConfigs(
     }),
     application_name: OWNER_BOOTSTRAP_APPLICATION_NAME,
   };
-  const admin = pinned(urlLogin);
-  const ownerUrl = pinned(urlLogin, OWNER_URL_SESSION_STARTUP_OPTIONS);
-  const probe = pinned({
+  const ownerLogin = (purpose: 'owner-probe', applicationName: string): PgDriverConfig => ({
     ...pgClientConfig(resolved, {
-      url: runtimeUrl,
-      urlLabel: 'the crewflow_owner connection',
-      purpose: 'owner-probe',
+      url: appUrl,
+      urlLabel: 'PG_DATABASE_URL',
+      purpose,
       sessionAffinity: true,
       statementTimeoutMs: 10_000,
       queryTimeoutMs: 15_000,
       connectTimeoutMs: 10_000,
     }),
-    application_name: OWNER_PROBE_APPLICATION_NAME,
+    application_name: applicationName,
   });
+  const admin = pinned(urlLogin);
+  const ownerUrl = pinned(ownerLogin('owner-probe', OWNER_BOOTSTRAP_APPLICATION_NAME), OWNER_URL_SESSION_STARTUP_OPTIONS);
+  const probe = pinned(ownerLogin('owner-probe', OWNER_PROBE_APPLICATION_NAME));
   return { admin, ownerUrl, probe };
 }
 
@@ -779,96 +968,6 @@ export async function connectSession(config: PgDriverConfig): Promise<SqlSession
     throw error;
   }
   return client as unknown as SqlSession;
-}
-
-/**
- * db-setup's two password files (owner-password-file.ts on the entry's paths; security review L1): `owner-password` (main)
- * and the pending `owner-password.next`. None of them logs.
- */
-export interface OwnerPasswordFiles {
-  readMain(): OwnerPasswordRead;
-  readNext(): OwnerPasswordRead;
-  /** Atomically replaces `owner-password` (owner-URL mode only). */
-  writeMain(password: string): void;
-  /** Creates `owner-password.next` exclusively (EEXIST when it exists). */
-  writeNextExclusive(password: string): void;
-  /**
-   * Renames `owner-password.next` over `owner-password`, only when it holds exactly `expected` (strict read, constant-time
-   * compare; F1). Otherwise OwnerPasswordMismatchError / OwnerPasswordFileError and nothing is renamed.
-   */
-  promoteNext(expected: string): void;
-  /** Deletes `owner-password.next` (no error when it is gone). */
-  removeNext(): void;
-}
-
-export type StoredPassword = { source: 'file'; readonly password: string } | { source: 'new' };
-
-function storedFromFile(password: string): StoredPassword {
-  const out = { source: 'file' as const } as Extract<StoredPassword, { source: 'file' }>;
-  Object.defineProperty(out, 'password', { value: password, enumerable: false });
-  return out;
-}
-
-/**
- * The bootstrap mode's start (security review L1): settle a pending `owner-password.next` left by an earlier run, then read
- * `owner-password`.
- *   pending file not usable (empty, symlink, FIFO, ...)        -> deleted (it was never the stored password);
- *   pending password authenticates (ok, or 42501: no CONNECT)  -> promoted over `owner-password`; it is this run's password;
- *   pending password does not log in (28P01)                   -> deleted; `owner-password` decides as before;
- *   anything else (unreachable, TLS, pg_hba, ...)              -> failure 70, the pending file is kept for the next start.
- * Then `owner-password`: ready -> `file`; missing -> `new`; anything else wrong -> refusal 64. Exported for the unit tests.
- */
-export async function resolveStoredPassword(
-  files: OwnerPasswordFiles,
-  probeWith: (password: string) => Promise<ProbeResult>,
-  io: Pick<OwnerBootstrapIo, 'log' | 'sleep' | 'now'>,
-  retryWindowMs = ADMIN_CONNECT_RETRY_WINDOW_MS,
-): Promise<StoredPassword> {
-  const removeNext = () => {
-    try {
-      files.removeNext();
-    } catch (error) {
-      throw new OwnerBootstrapFailure(OWNER_BOOTSTRAP_MESSAGES.pendingRemoveFailed(errorCode(error)), errorCode(error));
-    }
-  };
-  let pending: OwnerPasswordRead;
-  try {
-    pending = files.readNext();
-  } catch (error) {
-    if (!(error instanceof OwnerPasswordFileError)) throw error;
-    removeNext();
-    io.log(OWNER_BOOTSTRAP_MESSAGES.pendingUnusable);
-    pending = { state: 'missing' };
-  }
-  if (pending.state === 'ready') {
-    const deadline = io.now() + retryWindowMs;
-    let probe: ProbeResult;
-    for (;;) {
-      probe = await probeWith(pending.password);
-      if (probe.ok || !RETRYABLE_CONNECT_CODES.has(probe.code) || io.now() + ADMIN_CONNECT_RETRY_INTERVAL_MS > deadline) break;
-      await io.sleep(ADMIN_CONNECT_RETRY_INTERVAL_MS);
-    }
-    if (probe.ok || probe.code === '42501') {
-      try {
-        files.promoteNext(pending.password);
-      } catch (error) {
-        throw promoteFailure(error);
-      }
-      io.log(OWNER_BOOTSTRAP_MESSAGES.pendingPromoted);
-      return storedFromFile(pending.password);
-    }
-    if (probe.code !== '28P01') throw new OwnerBootstrapFailure(OWNER_BOOTSTRAP_MESSAGES.pendingProbeFailed(sqlstateClass(probe.code)), probe.code);
-    removeNext();
-    io.log(OWNER_BOOTSTRAP_MESSAGES.pendingDiscarded);
-  }
-  let stored: OwnerPasswordRead;
-  try {
-    stored = files.readMain();
-  } catch (error) {
-    if (error instanceof OwnerPasswordFileError) throw new OwnerBootstrapRefusal(error.message);
-    throw error;
-  }
-  return stored.state === 'missing' ? { source: 'new' } : storedFromFile(stored.password);
 }
 
 /** Q3 as crewflow_owner on `config`: ok, or the error code ('TLS' for a TLS failure). One attempt. */
@@ -886,34 +985,54 @@ async function probeOwnerOnce(config: PgDriverConfig): Promise<ProbeResult> {
   }
 }
 
+/** Is the schema complete for this image? On a fresh READ-ONLY crewflow_owner session (S1 + S2). */
+async function schemaCompleteOn(config: PgDriverConfig, expected: () => string[]): Promise<boolean> {
+  const names = expected();
+  let session: SqlSession | null = null;
+  try {
+    session = await connectSession(config);
+    await session.query(OWNER_BOOTSTRAP_Q0_SESSION);
+    return isSchemaComplete(names, await readLedgerNames(session));
+  } catch (error) {
+    if (error instanceof OwnerBootstrapRefusal || error instanceof OwnerBootstrapFailure) throw error;
+    throw new OwnerBootstrapFailure(OWNER_BOOTSTRAP_MESSAGES.unexpected(`ledger read ${errorCode(error)}`), errorCode(error));
+  } finally {
+    await closeQuietly(session);
+  }
+}
+
 export interface RunOwnerBootstrapOptions {
   log?: (line: string) => void;
-  /** db-setup's password files. Required. */
-  passwordFiles?: OwnerPasswordFiles;
-  /**
-   * Publishes the credential-free database target after a SUCCESSFUL run (the entry writes CREWFLOW_DB_TARGET_FILE
-   * atomically). A throw turns the run into a failure (exit 70) and the target is withdrawn.
-   */
-  publishTarget?: (target: DbTarget) => void;
-  /** Removes any stale target after a refusal or failure, so the apps keep waiting. The password file is never removed. */
-  withdrawTarget?: () => void;
   /** Test seam (integration harness): a shorter connect-retry window. */
   retryWindowMs?: number;
+  /** Test seam: this image's migration names (default: imageMigrationNames(), the migration files beside this script). */
+  expectedMigrations?: () => string[];
+}
+
+/** Fails closed when the URL policy refuses: the message names the variable the operator actually set. */
+function resolveFor(env: Record<string, string | undefined>, url: string, label: string): ResolvedPgEnvironment {
+  try {
+    // The migrate process role: the same URL policy and TLS as every process, and a transaction-pooler shape is refused
+    // (the bootstrap needs one real session). The policy reads the one URL under PG_DATABASE_URL, so the URL is handed to
+    // it under that name in a COPY of the environment (PG_ADMIN_URL removed).
+    const pgEnv: Record<string, string | undefined> = { ...env, PG_DATABASE_URL: url };
+    delete pgEnv[ADMIN_URL_LABEL];
+    return resolvePgEnvironment(pgEnv, { processRole: 'migrate' });
+  } catch (error) {
+    if (error instanceof PgConfigError) throw new OwnerBootstrapRefusal(label === ADMIN_URL_LABEL ? error.message.split('PG_DATABASE_URL').join(ADMIN_URL_LABEL) : error.message);
+    throw error;
+  }
 }
 
 /**
  * The whole step for one environment (the child passes process.env). Never throws: every failure becomes a result with
- * exit code 64 or 70, and the one printed line for it is fixed text. Reads ONLY PG_ADMIN_URL / PG_DATABASE_URL (exactly one;
- * owner-credential.ts selectDbSetupInput) and the TLS settings;
- * APP_SECRET plays no part.
+ * exit code 64 or 70, and the one printed line for it is fixed text. Reads ONLY PG_ADMIN_URL / PG_DATABASE_URL
+ * (owner-credential.ts selectDbSetupInput) and the TLS settings; APP_SECRET plays no part.
  */
 export async function runOwnerBootstrap(env: Record<string, string | undefined>, options: RunOwnerBootstrapOptions = {}): Promise<OwnerBootstrapResult> {
   const log = options.log ?? (() => undefined);
   try {
-    const files = options.passwordFiles;
-    if (!files) throw new OwnerBootstrapFailure(OWNER_BOOTSTRAP_MESSAGES.unexpected('no password file I/O'));
-    // The single decision (owner-credential.ts selectDbSetupInput), refused (fixed text) BEFORE anything connects:
-    // PG_ADMIN_URL (an admin login: bootstrap) XOR PG_DATABASE_URL (crewflow_owner only: the read-only owner-URL mode).
+    // The single decision (owner-credential.ts selectDbSetupInput), refused (fixed text) BEFORE anything connects.
     let input: DbSetupInput;
     try {
       input = selectDbSetupInput(env);
@@ -921,129 +1040,48 @@ export async function runOwnerBootstrap(env: Record<string, string | undefined>,
       if (error instanceof OwnerCredentialError) throw new OwnerBootstrapRefusal(error.message);
       throw error;
     }
-    const plan: DbSetupPlan = input.plan;
-    if (plan.mode === 'owner-url') log(OWNER_BOOTSTRAP_MESSAGES.passThrough);
+    if (input.mode === 'owner-url') log(OWNER_BOOTSTRAP_MESSAGES.passThrough);
+    // A password the SCRAM computation refuses (non-ASCII) is refused here, before anything connects (OwnerCredentialError).
+    if (input.mode === 'bootstrap') scramSha256Verifier(input.ownerPassword);
 
-    let resolved: ResolvedPgEnvironment;
-    try {
-      // The migrate process role: the same URL policy and TLS as every process, and a transaction-pooler shape is refused
-      // (the bootstrap needs one real session). The runtime login check does not apply to this step. The policy reads the
-      // one URL under PG_DATABASE_URL, so the chosen input is handed to it under that name in a COPY of the environment
-      // (PG_ADMIN_URL removed); a refusal names the variable the operator actually set.
-      const pgEnv: Record<string, string | undefined> = { ...env, PG_DATABASE_URL: input.url };
-      delete pgEnv[ADMIN_URL_LABEL];
-      resolved = resolvePgEnvironment(pgEnv, { processRole: 'migrate' });
-    } catch (error) {
-      if (error instanceof PgConfigError) {
-        throw new OwnerBootstrapRefusal(input.name === ADMIN_URL_LABEL ? error.message.split('PG_DATABASE_URL').join(ADMIN_URL_LABEL) : error.message);
-      }
-      throw error;
+    const resolved = resolveFor(env, input.url, input.name);
+    // The app URL passes the same policy (pooler, TLS, parameters) before anything connects.
+    const appResolved = input.mode === 'bootstrap' ? resolveFor(env, input.appUrl, 'PG_DATABASE_URL') : resolved;
+    if (resolved.primary.target.sessionRoleOption || appResolved.primary.target.sessionRoleOption) {
+      throw new OwnerBootstrapRefusal(OWNER_BOOTSTRAP_MESSAGES.sessionRoleOption);
     }
-    if (resolved.primary.target.sessionRoleOption) throw new OwnerBootstrapRefusal(OWNER_BOOTSTRAP_MESSAGES.sessionRoleOption);
-    if (!sameTarget(resolved.primary.target, plan.urlTarget)) throw new OwnerBootstrapFailure(OWNER_BOOTSTRAP_MESSAGES.unexpected('admin target mismatch'));
+    if (!sameTarget(resolved.primary.target, input.plan.urlTarget)) throw new OwnerBootstrapFailure(OWNER_BOOTSTRAP_MESSAGES.unexpected('admin target mismatch'));
 
-    const databaseUrl = input.url;
     const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
-    // Test seam (the live same-volume race test): a pause between storing the pending password and BEGIN. NODE_ENV=test only.
-    let afterPersist: (() => Promise<void>) | undefined;
-    const seam = env.CREWFLOW_TEST_DB_SETUP_PERSIST_DELAY_MS;
-    if (seam !== undefined && seam !== '') {
-      if (env.NODE_ENV !== 'test' || !/^\d{1,5}$/.test(seam) || Number(seam) > 60_000) throw new OwnerBootstrapRefusal(OWNER_BOOTSTRAP_MESSAGES.testSeamOutsideTest);
-      const ms = Number(seam);
-      afterPersist = () => sleep(ms);
-    }
     const now = () => Date.now();
     const retryWindowMs = options.retryWindowMs ?? ADMIN_CONNECT_RETRY_WINDOW_MS;
+    const expectedMigrations = options.expectedMigrations ?? (() => imageMigrationNames());
+    const ownerPassword = input.ownerPassword;
 
-    // This run's crewflow_owner password: the URL's own (owner-URL mode), the stored one (a pending one from an earlier run
-    // settled first: L1), or a new random one (file missing).
-    let source: PasswordSource = 'file';
-    let ownerPassword: string;
-    if (plan.mode === 'owner-url') ownerPassword = plan.ownerPassword;
-    else {
-      const probeWith = (password: string): Promise<ProbeResult> => {
-        let url: string;
-        try {
-          url = buildRuntimeDatabaseUrl(databaseUrl, password);
-        } catch (error) {
-          if (error instanceof OwnerCredentialError) throw new OwnerBootstrapRefusal(error.message);
-          throw error;
-        }
-        return probeOwnerOnce(bootstrapDriverConfigs(resolved, url).probe);
-      };
-      const stored = await resolveStoredPassword(files, probeWith, { log, sleep, now }, retryWindowMs);
-      if (stored.source === 'file') ownerPassword = stored.password;
-      else {
-        source = 'new';
-        ownerPassword = generateOwnerPassword();
-      }
-    }
-    let runtimeUrl: string;
-    let target: DbTarget;
-    try {
-      runtimeUrl = buildRuntimeDatabaseUrl(databaseUrl, ownerPassword);
-      // Computed BEFORE anything connects: a target that cannot be described credential-free refuses here.
-      target = dbTargetFromRuntimeUrl(runtimeUrl, ownerPassword);
-    } catch (error) {
-      if (error instanceof DbTargetError || error instanceof OwnerCredentialError) throw new OwnerBootstrapRefusal(error.message);
-      throw error;
-    }
-
-    const { admin: adminConfig, ownerUrl: ownerUrlConfig, probe: probeConfig } = bootstrapDriverConfigs(resolved, runtimeUrl);
+    const { admin: adminConfig, ownerUrl: ownerUrlConfig, probe: probeConfig } = bootstrapDriverConfigs(resolved, input.appUrl);
     let result: OwnerBootstrapResult;
-    if (plan.mode === 'owner-url') {
+    if (input.mode === 'owner-url') {
       // I1: the crewflow_owner session is read-only (default_transaction_read_only=on as a startup option).
-      result = await setupOwnerUrlWithIo({ openUrl: () => connectSession(ownerUrlConfig), log, sleep, now }, retryWindowMs);
-      // Only after every read-only refusal passed: the URL's password becomes the stored password (the apps read it), and a
-      // pending file of the bootstrap mode is dropped. Unchanged when the file already holds it (a restart writes nothing).
-      try {
-        files.removeNext();
-        let current: OwnerPasswordRead = { state: 'missing' };
-        try {
-          current = files.readMain();
-        } catch {
-          current = { state: 'missing' }; // an unreadable / invalid file is simply replaced by the URL's password
-        }
-        if (!(current.state === 'ready' && current.password === ownerPassword)) files.writeMain(ownerPassword);
-      } catch (error) {
-        throw new OwnerBootstrapFailure(OWNER_BOOTSTRAP_MESSAGES.passwordFileWriteFailed(errorCode(error)), errorCode(error));
-      }
+      result = await setupOwnerUrlWithIo({ openUrl: () => connectSession(ownerUrlConfig), expectedMigrations, log, sleep, now }, retryWindowMs);
     } else {
-      if (source === 'new') log(OWNER_BOOTSTRAP_MESSAGES.passwordFileLost);
       const io: OwnerBootstrapIo = {
         openAdmin: () => connectSession(adminConfig),
         probeOwner: () => probeOwnerOnce(probeConfig),
         verifier: () => scramSha256Verifier(ownerPassword),
-        passwordSource: source,
-        persistPassword: () => files.writeNextExclusive(ownerPassword),
-        promotePassword: () => files.promoteNext(ownerPassword),
-        afterPersist,
+        schemaComplete: () => schemaCompleteOn(ownerUrlConfig, expectedMigrations),
         log,
         sleep,
         now,
       };
       result = await bootstrapOwnerWithIo(io, retryWindowMs);
     }
-    if (options.publishTarget) {
-      try {
-        options.publishTarget(target);
-      } catch (error) {
-        throw new OwnerBootstrapFailure(OWNER_BOOTSTRAP_MESSAGES.targetPublishFailed(errorCode(error)), errorCode(error));
-      }
-      log(OWNER_BOOTSTRAP_MESSAGES.targetPublished);
-    }
     log(OWNER_BOOTSTRAP_MESSAGES.ready(describeReady(result)));
     return result;
   } catch (error) {
     if (error instanceof OwnerBootstrapRefusal || error instanceof OwnerBootstrapFailure) log(error.message);
+    else if (error instanceof OwnerCredentialError) log(error.message);
     else log(OWNER_BOOTSTRAP_MESSAGES.unexpected(errorCode(error)));
-    if (options.withdrawTarget) {
-      try {
-        options.withdrawTarget();
-      } catch (removeError) {
-        log(OWNER_BOOTSTRAP_MESSAGES.targetWithdrawFailed(errorCode(removeError)));
-      }
-    }
+    if (error instanceof OwnerCredentialError) return failureResult(new OwnerBootstrapRefusal(error.message));
     return failureResult(error);
   }
 }
@@ -1051,4 +1089,153 @@ export async function runOwnerBootstrap(env: Record<string, string | undefined>,
 /** The one machine-readable line (enums, booleans and a SQLSTATE only). */
 export function resultLine(result: OwnerBootstrapResult): string {
   return `${OWNER_BOOTSTRAP_RESULT_PREFIX} ${JSON.stringify(result)}`;
+}
+
+/** Re-exported for the specs and the harness: the prefix of the mark db-setup writes (`<prefix><unix expiry>`). */
+export { OWNER_CREATEROLE_MARK_PREFIX };
+
+// ---------------------------------------------------------------------------------------------------------------------
+// db-harden (owner decision M1, "auto-close plus a grace period"): the one-shot service that removes CREATEROLE in the SAME
+// deploy as the first migrate. Same code path as db-setup's CREATEROLE step (applyCreateRoleStep: the advisory lock, the facts
+// again under it, the Q2b other-database refusal, the statements, the re-check). It never creates a role, never sets a
+// password, never touches a grant. It polls by itself (OpenShip may ignore depends_on conditions) and nothing waits for it.
+// ---------------------------------------------------------------------------------------------------------------------
+
+export const HARDEN_DEFAULT_TIMEOUT_SECONDS = 1200;
+export const HARDEN_POLL_INTERVAL_MS = 10_000;
+/** Connect / login errors that only mean "not ready yet" while polling (the db starting, db-setup still running). */
+const HARDEN_NOT_READY_CODES = new Set(['ECONNREFUSED', 'EAI_AGAIN', 'ENOTFOUND', '57P03', '28P01', '28000', '3D000']);
+
+/** CREWFLOW_DB_HARDEN_TIMEOUT_SECONDS: unset = 1200; whole seconds 60-7200 (1-7200 with NODE_ENV=test). Throws a refusal. */
+export function hardenTimeoutSeconds(env: Record<string, string | undefined>): number {
+  const raw = env.CREWFLOW_DB_HARDEN_TIMEOUT_SECONDS;
+  if (raw === undefined || raw.trim() === '') return HARDEN_DEFAULT_TIMEOUT_SECONDS;
+  const min = env.NODE_ENV === 'test' ? 1 : 60;
+  if (!/^[0-9]{1,5}$/.test(raw) || Number(raw) < min || Number(raw) > 7200) throw new OwnerBootstrapRefusal(OWNER_BOOTSTRAP_MESSAGES.hardenTimeoutSetting);
+  return Number(raw);
+}
+
+export interface HardenIo {
+  /** One admin session (one attempt; a not-ready error is retried by the poll loop). */
+  openAdmin(): Promise<SqlSession>;
+  /** Is the schema complete for this image? null = not readable yet (crewflow_owner cannot log in yet, db starting). */
+  schemaComplete(): Promise<boolean | null>;
+  log(line: string): void;
+  sleep(ms: number): Promise<void>;
+  now(): number;
+  timeoutSeconds: number;
+  pollIntervalMs?: number;
+}
+
+/**
+ * The db-harden loop. Each round: open the admin session (a not-ready error waits), read the facts: no crewflow_owner yet ->
+ * wait (db-setup has not run yet); NOCREATEROLE and unmarked -> "already hardened", exit 0 at once; otherwise ask whether the
+ * schema is complete (read-only, as crewflow_owner): yes -> the CREATEROLE step (remove, or clear a leftover mark) and exit 0;
+ * no -> wait. Past the deadline -> failure 70, nothing changed. A refusal (rights, Q2b, a privileged role) stops at once.
+ */
+export async function hardenOwnerWithIo(io: HardenIo): Promise<OwnerBootstrapResult> {
+  const deadline = io.now() + io.timeoutSeconds * 1000;
+  const pollMs = io.pollIntervalMs ?? HARDEN_POLL_INTERVAL_MS;
+  let waitingLogged: string | null = null;
+  const waiting = (line: string) => {
+    if (waitingLogged !== line) io.log(line);
+    waitingLogged = line;
+  };
+  const base: OwnerBootstrapResult = { outcome: 'unchanged', exitCode: 0, created: false, passwordSet: false, grantAdded: false, createRole: 'none', code: null };
+  for (;;) {
+    let session: SqlSession | null = null;
+    try {
+      try {
+        session = await io.openAdmin();
+      } catch (error) {
+        const code = errorCode(error);
+        if (!RETRYABLE_CONNECT_CODES.has(code) && !['ENOTFOUND'].includes(code)) throw classifyAdminConnectError(error, false);
+      }
+      if (session) {
+        await session.query(OWNER_BOOTSTRAP_Q0_SESSION);
+        await session.query(OWNER_BOOTSTRAP_Q1_SUPERUSER_LOGGING);
+        const f = await readFacts(session);
+        if (!f.ownerExists) waiting(OWNER_BOOTSTRAP_MESSAGES.hardenWaitingForRole);
+        else if (f.oCreateRole !== true && !f.oCreateRolePending) {
+          io.log(OWNER_BOOTSTRAP_MESSAGES.hardenAlready);
+          return { ...base };
+        } else {
+          const complete = await io.schemaComplete();
+          if (complete === true) {
+            const stepIo: OwnerBootstrapIo = { openAdmin: io.openAdmin, probeOwner: async () => ({ ok: true }), verifier: () => '', log: io.log, sleep: io.sleep, now: io.now };
+            let busy = false;
+            for (let i = 1; i <= MAX_ATTEMPTS && !busy; i += 1) {
+              const createRole = await applyCreateRoleStep(session, stepIo, true);
+              if (createRole === 'busy') busy = true;
+              else if (createRole !== 'race') return { ...base, createRole };
+              else if (i < MAX_ATTEMPTS) await io.sleep(200 + Math.floor(Math.random() * 500));
+            }
+            if (!busy) throw new OwnerBootstrapFailure(OWNER_BOOTSTRAP_MESSAGES.raceExhausted);
+            waiting(OWNER_BOOTSTRAP_MESSAGES.hardenWaitingForMigration);
+          } else waiting(OWNER_BOOTSTRAP_MESSAGES.hardenWaitingForSchema);
+        }
+      }
+    } finally {
+      await closeQuietly(session);
+    }
+    if (io.now() + pollMs > deadline) throw new OwnerBootstrapFailure(OWNER_BOOTSTRAP_MESSAGES.hardenTimeout(io.timeoutSeconds), 'TIMEOUT');
+    await io.sleep(pollMs);
+  }
+}
+
+/** Is the schema complete? null when the crewflow_owner session cannot be opened yet (HARDEN_NOT_READY_CODES). */
+async function schemaCompleteOrNotReady(config: PgDriverConfig, expected: () => string[]): Promise<boolean | null> {
+  try {
+    return await schemaCompleteOn(config, expected);
+  } catch (error) {
+    if (error instanceof OwnerBootstrapFailure && error.code && HARDEN_NOT_READY_CODES.has(error.code)) return null;
+    throw error;
+  }
+}
+
+export interface RunOwnerHardenOptions extends RunOwnerBootstrapOptions {
+  /** Test seam: the poll interval (default 10 s). */
+  pollIntervalMs?: number;
+}
+
+/** db-harden for one environment (the child passes process.env with `--harden`). Never throws; exit 0, 64 or 70. */
+export async function runOwnerHarden(env: Record<string, string | undefined>, options: RunOwnerHardenOptions = {}): Promise<OwnerBootstrapResult> {
+  const log = options.log ?? (() => undefined);
+  try {
+    const timeoutSeconds = hardenTimeoutSeconds(env);
+    let input: DbSetupInput;
+    try {
+      input = selectDbSetupInput(env);
+    } catch (error) {
+      if (error instanceof OwnerCredentialError) throw new OwnerBootstrapRefusal(error.message);
+      throw error;
+    }
+    if (input.mode === 'owner-url') {
+      log(OWNER_BOOTSTRAP_MESSAGES.hardenNoAdmin);
+      return { outcome: 'unchanged', exitCode: 0, created: false, passwordSet: false, grantAdded: false, createRole: 'not-run', code: null };
+    }
+    const resolved = resolveFor(env, input.url, input.name);
+    const appResolved = resolveFor(env, input.appUrl, 'PG_DATABASE_URL');
+    if (resolved.primary.target.sessionRoleOption || appResolved.primary.target.sessionRoleOption) {
+      throw new OwnerBootstrapRefusal(OWNER_BOOTSTRAP_MESSAGES.sessionRoleOption);
+    }
+    const expectedMigrations = options.expectedMigrations ?? (() => imageMigrationNames());
+    const { admin: adminConfig, ownerUrl: ownerUrlConfig } = bootstrapDriverConfigs(resolved, input.appUrl);
+    const result = await hardenOwnerWithIo({
+      openAdmin: () => connectSession(adminConfig),
+      schemaComplete: () => schemaCompleteOrNotReady(ownerUrlConfig, expectedMigrations),
+      log,
+      sleep: (ms: number) => new Promise<void>((r) => setTimeout(r, ms)),
+      now: () => Date.now(),
+      timeoutSeconds,
+      pollIntervalMs: options.pollIntervalMs,
+    });
+    return result;
+  } catch (error) {
+    if (error instanceof OwnerBootstrapRefusal || error instanceof OwnerBootstrapFailure) log(error.message);
+    else if (error instanceof OwnerCredentialError) log(error.message);
+    else log(OWNER_BOOTSTRAP_MESSAGES.unexpected(errorCode(error)));
+    if (error instanceof OwnerCredentialError) return failureResult(new OwnerBootstrapRefusal(error.message));
+    return failureResult(error);
+  }
 }
