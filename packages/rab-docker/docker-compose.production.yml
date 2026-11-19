@@ -96,10 +96,15 @@
 # CREWFLOW_PROVISIONER_DATABASE_URL, CREWFLOW_MIGRATION_DATABASE_URL, PG_DATABASE_REPLICA_*, PG_OPS_APP_DATABASE_URL,
 # CREWFLOW_*_BOOTSTRAP_PASSWORD, CREWFLOW_MIGRATOR_PASSWORD, CREWFLOW_MIGRATION_PHASE, CREWFLOW_DEPLOYMENT_IDENTITY_BOOTSTRAP,
 # ALLOW_PRODUCTION_DB_COMMANDS, DB_TARGET, CREWFLOW_DB_MODE, CREWFLOW_PROVISIONER_ENABLED, libpq PG* variables, NODE_OPTIONS,
-# BOOTSTRAP_ADMIN_*, TEST_*, ALLOW_REMOTE_TEST_DATABASE, AUTH_*_ISSUER_URL, WORKER_CLAIM_MODE, WORKER_DISPATCH_MODE,
+# BOOTSTRAP_ADMIN_PASSWORD (always refused) and any other BOOTSTRAP_ADMIN_* name than the five below, TEST_*,
+# ALLOW_REMOTE_TEST_DATABASE, AUTH_*_ISSUER_URL, WORKER_CLAIM_MODE, WORKER_DISPATCH_MODE,
 # WORKER_INVITE_AUTO_DELETE_ENABLED, WORKSPACE_SUBDOMAIN_ORIGIN_TRUST_ENABLED, CREWFLOW_MIGRATION_APPROVED,
 # CREWFLOW_UPGRADE_INCOMPLETE (retired), WORKER_SCHEDULER=interval; and any override of the keys
 # committed below.
+# FIRST PLATFORM ADMIN AT BOOT (#264): only BOOTSTRAP_ADMIN_EMAIL and the four optional BOOTSTRAP_ADMIN_FIRST_NAME,
+# BOOTSTRAP_ADMIN_LAST_NAME, BOOTSTRAP_ADMIN_ORG_SLUG and BOOTSTRAP_ADMIN_ORG_NAME may be set, on rab-api ONLY (passed
+# through below as `${KEY:-}`, no committed value). There is no bootstrap password: BOOTSTRAP_ADMIN_PASSWORD is always
+# refused; the admin activates through an emailed, expiring link.
 #
 # SECURITY POSTURE: PT-01 (runbook section 1, THREAT-MODEL.md). There is no operations service: the owner CLI commands run
 # as one-off commands of the rab-api image under crewflow_owner (X2.2). O1: the Worker bundle launcher and its separate
@@ -826,6 +831,11 @@ services:
       # accept exactly this empty literal here and refuse any other value. The admin URL reaches db-setup only.
       PG_ADMIN_URL: ""
       PG_ADMIN_DIRECT_URL: ""
+      BOOTSTRAP_ADMIN_EMAIL: ${BOOTSTRAP_ADMIN_EMAIL:-}
+      BOOTSTRAP_ADMIN_FIRST_NAME: ${BOOTSTRAP_ADMIN_FIRST_NAME:-}
+      BOOTSTRAP_ADMIN_LAST_NAME: ${BOOTSTRAP_ADMIN_LAST_NAME:-}
+      BOOTSTRAP_ADMIN_ORG_SLUG: ${BOOTSTRAP_ADMIN_ORG_SLUG:-}
+      BOOTSTRAP_ADMIN_ORG_NAME: ${BOOTSTRAP_ADMIN_ORG_NAME:-}
       # OPTIONAL, rab-api only. Pool ceiling (code default 10; the Worker's 12 is pinned on rab-worker).
       PG_POOL_MAX_CONNECTIONS:
       # Seconds api-prestart.sh waits before exiting after a start-up failure (0-300).

@@ -652,6 +652,11 @@ services:
       # accept exactly this empty literal here and refuse any other value. The admin URL reaches db-setup only.
       PG_ADMIN_URL: ""
       PG_ADMIN_DIRECT_URL: ""
+      BOOTSTRAP_ADMIN_EMAIL: ${BOOTSTRAP_ADMIN_EMAIL:-}
+      BOOTSTRAP_ADMIN_FIRST_NAME: ${BOOTSTRAP_ADMIN_FIRST_NAME:-}
+      BOOTSTRAP_ADMIN_LAST_NAME: ${BOOTSTRAP_ADMIN_LAST_NAME:-}
+      BOOTSTRAP_ADMIN_ORG_SLUG: ${BOOTSTRAP_ADMIN_ORG_SLUG:-}
+      BOOTSTRAP_ADMIN_ORG_NAME: ${BOOTSTRAP_ADMIN_ORG_NAME:-}
       NODE_ENV: production
       RAB_RUNTIME_ENV: production
       AI_ENABLED: 'false'
