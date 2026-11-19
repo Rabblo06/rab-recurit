@@ -22,7 +22,7 @@ import { integrationTestDatabaseReady } from '../../database/typeorm/core/integr
 /**
  * Phase X C5 (S0-C-caches.md §C5, XP-04): the layer-2 service checks of ONE transaction share a transaction-local
  * effective-permission set (one query per identity instead of two per flag). Real PostgreSQL (FORCE RLS, owner login),
- * real HTTP. Proves: the same answers as the per-flag lookup for all 46 flags; never across transactions; keyed by
+ * real HTTP. Proves: the same answers as the per-flag lookup for all 47 flags; never across transactions; keyed by
  * identity and tenant binding; cleared by in-transaction authority writes (ORM, raw SQL + version bump, a rolled-back
  * savepoint); and the query count before/after on a real endpoint.
  */
@@ -75,8 +75,8 @@ describeIfDb('C5 transaction-local effective-permission set (integration)', () =
     await app?.close();
   });
 
-  it('answers exactly like the per-flag lookup for all 46 flags, with ONE fill per identity per transaction', async () => {
-    expect(ALL_FLAGS).toHaveLength(46);
+  it('answers exactly like the per-flag lookup for all 47 flags, with ONE fill per identity per transaction', async () => {
+    expect(ALL_FLAGS).toHaveLength(47); // 47 since data_model.manage (M2 phase 1)
     for (const identity of [manager, staff]) {
       const spy = fills();
       try {

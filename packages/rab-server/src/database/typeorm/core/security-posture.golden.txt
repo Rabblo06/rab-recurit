@@ -364,6 +364,8 @@ execute|member_holds_workspace_permission(uuid,text)|crewflow_app|true
 execute|member_holds_workspace_permission(uuid,text)|crewflow|true
 execute|metadata_guard()|crewflow_app|false
 execute|metadata_guard()|crewflow|true
+execute|metadata_migration_guard()|crewflow_app|false
+execute|metadata_migration_guard()|crewflow|true
 execute|metadata_version_bump()|crewflow_app|false
 execute|metadata_version_bump()|crewflow|true
 execute|mfa_accept_totp_step(uuid,bigint)|PUBLIC|false
@@ -662,6 +664,7 @@ owner|function|mark_workspace_schema_ready(uuid,integer)|rab_secure_owner|define
 owner|function|mark_workspace_schema_superseded(uuid,text)|rab_secure_owner|definer=true|search_path=pg_catalog, pg_temp
 owner|function|member_holds_workspace_permission(uuid,text)|crewflow|definer=false
 owner|function|metadata_guard()|crewflow|definer=false
+owner|function|metadata_migration_guard()|crewflow|definer=false
 owner|function|metadata_version_bump()|crewflow|definer=false
 owner|function|mfa_accept_totp_step(uuid,bigint)|rab_secure_owner|definer=true|search_path=pg_catalog, pg_temp
 owner|function|mfa_consume_recovery_code(uuid,text)|rab_secure_owner|definer=true|search_path=pg_catalog, pg_temp
@@ -772,6 +775,7 @@ owner|table|manager_profile|crewflow
 owner|table|manager_venue|crewflow
 owner|table|manager_workspace|rab_secure_owner
 owner|table|member_invitation|rab_secure_owner
+owner|table|metadata_migration|crewflow
 owner|table|migrations_id_seq|crewflow
 owner|table|migrations|crewflow
 owner|table|navigation_layout|crewflow
@@ -870,6 +874,7 @@ rls|manager_profile|enable=true|force=true
 rls|manager_venue|enable=true|force=true
 rls|manager_workspace|enable=true|force=true
 rls|member_invitation|enable=true|force=true
+rls|metadata_migration|enable=true|force=true
 rls|migrations|enable=false|force=false
 rls|navigation_layout|enable=true|force=true
 rls|notification_preference|enable=true|force=true
@@ -1008,6 +1013,8 @@ table|manager_workspace|crewflow_app|S,I,U,D
 table|manager_workspace|crewflow|S,I,U,D,R
 table|member_invitation|crewflow_app|S,I,U
 table|member_invitation|crewflow|S,I,U
+table|metadata_migration|crewflow_app|S,I
+table|metadata_migration|crewflow|S,I,U,D,T,R,G
 table|migrations_id_seq|crewflow_app|
 table|migrations_id_seq|crewflow|S,U
 table|migrations|crewflow_app|S

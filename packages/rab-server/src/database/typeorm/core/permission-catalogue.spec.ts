@@ -12,10 +12,11 @@ import { SYSTEM_ROLE_DEFAULT_ADDITIONS_1786720000000 } from './migrations/178672
 import { SYSTEM_ROLE_DEFAULT_ADDITIONS_1786720210000 } from './migrations/1786720210000-AiUsePermissionDefault';
 import { SYSTEM_ROLE_DEFAULT_ADDITIONS_1786720240000 } from './migrations/1786720240000-AiSettingsPermission';
 import { SYSTEM_ROLE_DEFAULT_ADDITIONS_1786721030000 } from './migrations/1786721030000-AiAgentsPermission';
+import { SYSTEM_ROLE_DEFAULT_ADDITIONS_1786721630000 } from './migrations/1786721630000-DataModelManagePermission';
 
 /** The 1786718000000 snapshot plus every later default-adding migration (frozen migrations are never edited). */
 const MIGRATED_SYSTEM_ROLE_DEFAULTS: Record<string, readonly string[]> = Object.fromEntries(
-  Object.entries(SYSTEM_ROLE_DEFAULTS_1786718000000).map(([role, flags]) => [role, [...flags, ...(SYSTEM_ROLE_DEFAULT_ADDITIONS_1786718900000[role] ?? []), ...(SYSTEM_ROLE_DEFAULT_ADDITIONS_1786719300000[role] ?? []), ...(SYSTEM_ROLE_DEFAULT_ADDITIONS_1786720000000[role] ?? []), ...(SYSTEM_ROLE_DEFAULT_ADDITIONS_1786720210000[role] ?? []), ...(SYSTEM_ROLE_DEFAULT_ADDITIONS_1786720240000[role] ?? []), ...(SYSTEM_ROLE_DEFAULT_ADDITIONS_1786721030000[role] ?? [])]]),
+  Object.entries(SYSTEM_ROLE_DEFAULTS_1786718000000).map(([role, flags]) => [role, [...flags, ...(SYSTEM_ROLE_DEFAULT_ADDITIONS_1786718900000[role] ?? []), ...(SYSTEM_ROLE_DEFAULT_ADDITIONS_1786719300000[role] ?? []), ...(SYSTEM_ROLE_DEFAULT_ADDITIONS_1786720000000[role] ?? []), ...(SYSTEM_ROLE_DEFAULT_ADDITIONS_1786720210000[role] ?? []), ...(SYSTEM_ROLE_DEFAULT_ADDITIONS_1786720240000[role] ?? []), ...(SYSTEM_ROLE_DEFAULT_ADDITIONS_1786721030000[role] ?? []), ...(SYSTEM_ROLE_DEFAULT_ADDITIONS_1786721630000[role] ?? [])]]),
 );
 
 /**
@@ -26,7 +27,7 @@ const MIGRATED_SYSTEM_ROLE_DEFAULTS: Record<string, readonly string[]> = Object.
 describe('permission catalogue is created by migrations, not by seed scripts', () => {
   it('the migration catalogue covers every PermissionFlag (add a migration when you add a flag)', () => {
     // Flags added after the 1786718000000 snapshot, each by its own migration.
-    const LATER_FLAGS = ['ai.use', 'ai.settings', 'ai.agents.manage']; // AiUsePermissionDefault1786720210000, AiSettingsPermission1786720240000, AiAgentsPermission1786721030000
+    const LATER_FLAGS = ['ai.use', 'ai.settings', 'ai.agents.manage', 'data_model.manage']; // AiUsePermissionDefault1786720210000, AiSettingsPermission1786720240000, AiAgentsPermission1786721030000, DataModelManagePermission1786721630000
     expect([...PERMISSION_CATALOGUE_1786718000000, ...LATER_FLAGS].sort()).toEqual(Object.values(PermissionFlag).sort());
   });
 
@@ -52,6 +53,12 @@ describe('permission catalogue is created by migrations, not by seed scripts', (
     expect(fromMigration).toEqual(fromCode);
   });
 
+  it('data_model.manage is a default of the CEO and Manager system roles only; never Venue Manager or Staff (metadata engine M2, owner decision 2026-11-18)', () => {
+    const holders = Object.entries(MIGRATED_SYSTEM_ROLE_DEFAULTS).filter(([, flags]) => flags.includes(PermissionFlag.DATA_MODEL_MANAGE)).map(([role]) => role).sort();
+    expect(holders).toEqual(['ceo', 'manager']);
+    expect(PermissionFlag.DATA_MODEL_MANAGE).toBe('data_model.manage');
+  });
+
   it('payroll.approve is a default of the Manager role only — never Venue Manager, Staff or CEO (owner decision 2026-10-20)', () => {
     const holders = Object.entries(MIGRATED_SYSTEM_ROLE_DEFAULTS).filter(([, flags]) => flags.includes(PermissionFlag.PAYROLL_APPROVE)).map(([role]) => role);
     expect(holders).toEqual(['manager']);
@@ -73,7 +80,7 @@ describe('permission catalogue is created by migrations, not by seed scripts', (
   });
 
   it('every system-role default is itself in the catalogue', () => {
-    const catalogue = new Set([...PERMISSION_CATALOGUE_1786718000000, 'ai.use', 'ai.settings', 'ai.agents.manage']);
+    const catalogue = new Set([...PERMISSION_CATALOGUE_1786718000000, 'ai.use', 'ai.settings', 'ai.agents.manage', 'data_model.manage']);
     for (const [role, flags] of Object.entries(MIGRATED_SYSTEM_ROLE_DEFAULTS)) {
       expect([role, flags.filter((f) => !catalogue.has(f))]).toEqual([role, []]);
     }
