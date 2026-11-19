@@ -9636,5 +9636,6 @@ Reversal:   unset PG_DATABASE_SESSION_URL and point PG_DATABASE_URL at the direc
 - **Not changed / follow-ups (coordinated with other branches).** `WORKER_DISPATCH_MODE=event` stays refused with a pooler (its
   NOTIFY switch is a startup setting; boot gate 1c, `feat/twenty-ssl-boot`). db-setup / db-harden (`owner-bootstrap*`,
   `db-setup.sh`, `feat/twenty-neon-setup`) still connect with `PG_DATABASE_URL`: they must use `PG_DATABASE_SESSION_URL` when
-  set and run the session probe, since planDbSetup no longer recognises a pooler host. The compose files do not pass
-  `PG_DATABASE_SESSION_URL` to rab-api / rab-worker yet (a deployment sets it in the platform environment).
+  set and run the session probe, since planDbSetup no longer recognises a pooler host. Compose: both deploy files pass
+  `${PG_DATABASE_SESSION_URL:-}` (a compose.env value) to rab-api, rab-worker, db-setup and db-harden only; the compose gates
+  refuse it anywhere else, from an env file, or with another login or database (sslmode: #259's one rule, mirrored here).
