@@ -9582,25 +9582,43 @@ plain-text password.
   transaction that set a password. Never 42501, never the DO block's own shape check, never a grant-only transaction.
   The passwordless path runs under the same advisory lock and the same refusals:
   - a missing crewflow_owner is created WITHOUT a password and NOLOGIN (`CREATE ROLE crewflow_owner NOLOGIN ...` with no
-    PASSWORD), marked `crewflow:awaiting-password` (security re-review R1: a pg_hba trust / peer / cert / ldap rule could
-    otherwise let anyone in as a passwordless CREATEROLE login). No secret leaves db-setup. Q2, both DO blocks and the
-    re-checks accept a NOLOGIN crewflow_owner ONLY with that mark; any other NOLOGIN crewflow_owner stays refused;
+    PASSWORD), marked `crewflow:awaiting-password:<unix expiry>` (security re-review R1: a pg_hba trust / peer / cert / ldap
+    rule could otherwise let anyone in as a passwordless CREATEROLE login). The mark expires after 24 h (server clock, like the
+    CREATEROLE mark; independent review L1). No secret leaves db-setup. Q2, both DO blocks and the re-checks accept a NOLOGIN
+    crewflow_owner ONLY with an unexpired mark; a NOLOGIN crewflow_owner with an expired mark is refused (64) with no ALTER
+    ROLE (an admin may have disabled it on purpose), and any other NOLOGIN crewflow_owner stays refused;
   - an existing role's password is never written;
   - the grant is added;
-  - exit 64 with fixed steps. The operator runs `ALTER ROLE crewflow_owner LOGIN PASSWORD '<PG_DATABASE_APP_PASSWORD>'` once in
-    the provider's SQL editor, with exactly that value (the 32-character floor; never a console reset).
+  - exit 64 with fixed steps. The operator runs, once in the provider's SQL editor as the admin login, exactly
+    `DO $$BEGIN EXECUTE pg_catalog.format('ALTER ROLE crewflow_owner LOGIN PASSWORD %L', '<PG_DATABASE_APP_PASSWORD>'); COMMENT ON ROLE crewflow_owner IS NULL; END$$;`
+    with the placeholder replaced by that value (the 32-character floor; never a console reset). format(%L) quotes the value,
+    and the same statement removes the mark (independent review M1).
   The next run's login probe decides: it logs in, so no write and setup continues; or it still does not, so the steps again,
   with no password write, so never a loop.
   If the server refuses the passwordless login role too, nothing is created and the reviewed CREATE ROLE + GRANT is printed
   with a placeholder (option 2).
-- **Residual: the operator's statement.** `ALTER ROLE ... PASSWORD '<plain>'` typed in the provider's SQL editor reaches that
-  provider's logs and audit (if any) under the provider's own policy. That is the provider's tool, outside Crewflow; the same
-  as `own-database-app-login.sql`'s manual path. The plain-text trade-off of the earlier draft (a plain-text fallback sent
+- **Residual: the operator's statement** (independent review M1). The plain value typed in the provider's SQL editor (inside
+  the DO block's literal, so `log_statement = ddl` does not log it but `all` does) can remain in: the server log
+  (`log_statement = all`, or any error that quotes the statement), `pg_stat_statements` (the full DO text), `pg_stat_activity`
+  while it runs (visible to the admin's own role and to pg_read_all_stats members), and the provider's own logs, audit and
+  SQL-editor history. The printed steps say exactly that, and: if pg_stat_statements is installed, run
+  `SELECT pg_stat_statements_reset();` afterwards where permitted, otherwise treat the value as visible to anyone who can read
+  query statistics. The earlier advice to run `SET log_statement = 'none'` first is removed (a non-superuser cannot set it on
+  most providers, and it never covered pg_stat_statements or pg_stat_activity). A provider-generated password is NOT accepted
+  instead (owner decision). That is the provider's tool, outside Crewflow; the same as `own-database-app-login.sql`'s manual
+  path. The plain-text trade-off of the earlier draft (a plain-text fallback sent
   by db-setup, G1/G2/L1 log guards) is REMOVED.
 - **Between the two runs the role is NOLOGIN** (re-review R1), so no pg_hba rule can let anyone log in as it. Independently, a
   login probe that succeeds is trusted only if a deliberately WRONG password fails too; otherwise db-setup refuses (64) "the
-  server lets crewflow_owner log in WITHOUT its password" (trust / peer / cert / similar). The operator's steps also say to
-  run `SET log_statement = 'none';` first where the provider allows it, and to clear the SQL editor's history.
+  server lets crewflow_owner log in WITHOUT its password" (trust / peer / cert / similar). Independent review L4: that
+  wrong-password login runs only when it can matter: after this run created the role or changed its password (after COMMIT),
+  or, for an existing role that logs in, while the schema bootstrap is pending (CREATEROLE without its pending mark: a role
+  just created, adopted, or just made LOGIN by the operator) or a stale awaiting mark is left. Otherwise it is skipped and
+  logged, so repeated deploys never add failed logins toward a provider's lockout.
+- **Role squatting** (independent review L2). Q2 counts the members OF crewflow_owner other than this admin's own ADMIN-only
+  grant (admin_option, no inherit, no set: createrole_self_grant is emptied in the same transaction). Any such member is
+  refused (64) before any probe or write, and again under the advisory lock (Q4 facts), because whoever holds that membership
+  could reset or use the app login. Fix: `REVOKE crewflow_owner FROM <that role>`, or drop crewflow_owner.
   Re-review N1/N2: only a 28P01 / 28000 refusal of the wrong-password login counts as "password required" (any other
   failure exits 70, never a pass), and a LOGIN crewflow_owner never keeps the awaiting-password mark (removed under the lock
   in the CREATEROLE step), so a later NOLOGIN can never count as "awaiting its password".
@@ -9622,4 +9640,5 @@ plain-text password.
   `PG_DATABASE_HOST` / `_PORT` / `_NAME` for db-setup, rab-api and rab-worker alike; an explicit `PG_DATABASE_URL` is the
   documented alternative, and the compose.env lint refuses both together. db-setup refuses an app URL that names another
   host, port or database than the admin (direct) URL, and a password below the M2 floor. db-setup.sh checks a built URL's
-  parts at run time (`[A-Za-z0-9_-]{32,}` password; no `$ { } @ # / ?` in host or database; a numeric port).
+  parts at run time (`[A-Za-z0-9_-]{32,}` password; no `$ { } @ # / ?` in host or database; a port of 1 to 5 digits,
+  independent review I4).

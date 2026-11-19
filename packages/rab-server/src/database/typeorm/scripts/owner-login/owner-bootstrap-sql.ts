@@ -37,11 +37,35 @@ export const OWNER_BOOTSTRAP_LOCK_KEY = '7165901520526864244';
 
 /**
  * Security re-review R1 of #259 (owner decision 2026-11-19, option 1): the role comment that marks crewflow_owner as created
- * by db-setup WITHOUT a password and NOLOGIN, waiting for the operator's `ALTER ROLE crewflow_owner LOGIN PASSWORD ...`. Only
- * a NOLOGIN crewflow_owner carrying exactly this comment is accepted (the awaiting-password state); any other NOLOGIN
- * crewflow_owner stays refused. Quote-free constant.
+ * by db-setup WITHOUT a password and NOLOGIN, waiting for the operator's step (OWNER_SET_PASSWORD_SQL). The comment is
+ * `<prefix><unix expiry>`, by the SERVER clock (independent review L1 of #259, the same shape as the CREATEROLE mark): only a
+ * NOLOGIN crewflow_owner carrying an UNEXPIRED mark is in the awaiting-password state. An expired mark is refused (64) and
+ * never written over, so an admin's later NOLOGIN (a kill switch) can never be undone by db-setup; any other NOLOGIN
+ * crewflow_owner stays refused. Quote-free constants.
  */
-export const OWNER_AWAITING_PASSWORD_MARK = 'crewflow:awaiting-password';
+export const OWNER_AWAITING_PASSWORD_MARK = 'crewflow:awaiting-password:';
+/** How long the awaiting-password mark is honoured (24 h, like the CREATEROLE mark). */
+export const OWNER_AWAITING_PASSWORD_GRACE_SECONDS = 86400;
+
+/** SQL: `comment` is an awaiting-password mark of any expiry (shape only; CASE, so nothing is cast before the shape matches). */
+export function awaitingMarkShapeSql(comment: string): string {
+  return `COALESCE(${comment} OPERATOR(pg_catalog.~) '^${OWNER_AWAITING_PASSWORD_MARK}[0-9]{1,12}$', false)`;
+}
+/** SQL: `comment` is an awaiting-password mark that has NOT expired by the server clock. */
+export function awaitingMarkValidSql(comment: string): string {
+  return `(CASE WHEN ${awaitingMarkShapeSql(comment)}
+              THEN pg_catalog.split_part(${comment}, ':', 3)::bigint > pg_catalog.date_part('epoch', pg_catalog.now())::bigint
+              ELSE false END)`;
+}
+
+/**
+ * The step db-setup PRINTS (never executes) for the operator, option 1 (independent review M1 of #259): one DO block, so the
+ * literal is not a top-level ALTER ROLE (log_statement = ddl / mod would log that), it becomes LOGIN with the password, and
+ * the awaiting mark is removed in the same statement (review L1). The literal still travels inside the DO text: the steps say
+ * where it can remain (server log at log_statement = all, pg_stat_statements, pg_stat_activity, the provider's logs).
+ */
+export const OWNER_SET_PASSWORD_SQL =
+  "DO $$BEGIN EXECUTE pg_catalog.format('ALTER ROLE crewflow_owner LOGIN PASSWORD %L', '<PG_DATABASE_APP_PASSWORD>'); COMMENT ON ROLE crewflow_owner IS NULL; END$$;";
 
 /**
  * Q0 (REVISED, security review H1): first pin the session's search_path to pg_catalog (then pg_temp, which is never searched
@@ -84,10 +108,15 @@ export const OWNER_BOOTSTRAP_Q1_SUPERUSER_LOGGING = `SELECT pg_catalog.set_confi
  * the server clock (both false when the role or the mark is missing). Security re-review R1 of #259: o_awaiting_password,
  * crewflow_owner is NOLOGIN and carries exactly OWNER_AWAITING_PASSWORD_MARK (db-setup's passwordless role, option 1);
  * o_stale_awaiting_mark, crewflow_owner is LOGIN (the operator's ALTER ROLE ... LOGIN PASSWORD ran) and still carries it.
+ * Independent review of #259: o_awaiting_mark_expired (L1: NOLOGIN with an expired mark, refused, never re-enabled) and
+ * o_foreign_members (L2: members OF crewflow_owner other than this admin's own ADMIN-only grant, refused before any write).
  * TODO(lead, 2026-11-19): switch the privileged-membership list below (o_privileged_memberships) to
  * database/owner-login/privileged-roles.ts once it lands (one constant shared with the boot posture check).
  */
-// sql-injection-reviewed: the interpolations are createRoleMarkColumnsSql over a fixed column expression and quote-free code constants (OWNER_AWAITING_PASSWORD_MARK).
+// sql-injection-reviewed: the interpolations are createRoleMarkColumnsSql / awaitingMark*Sql over fixed column expressions and quote-free code constants.
+// o_foreign_members (independent review L2 of #259) reads inherit_option / set_option through to_jsonb(m): those columns
+// exist from PostgreSQL 16 only, and naming them directly would make Q2 itself fail (exit 70) on a 15 server instead of the
+// clean "PostgreSQL below 16" refusal (64) that assertSupportedServerVersion gives from this same row.
 export const OWNER_BOOTSTRAP_Q2_FACTS = `SELECT pg_catalog.current_setting('server_version_num')::int                      AS server_version_num,
        current_user::text                                                         AS admin,
        a.rolsuper                                                                 AS admin_super,
@@ -124,11 +153,22 @@ export const OWNER_BOOTSTRAP_Q2_FACTS = `SELECT pg_catalog.current_setting('serv
        (o.oid IS NOT NULL AND pg_catalog.pg_has_role(o.oid, d.datdba, 'MEMBER')) AS o_owns_db,
        ${createRoleMarkColumnsSql("pg_catalog.shobj_description(o.oid, 'pg_authid')", 'o_createrole_pending', 'o_createrole_mark_expired')},
        (o.oid IS NOT NULL AND NOT o.rolcanlogin
-        AND pg_catalog.shobj_description(o.oid, 'pg_authid') IS NOT DISTINCT FROM '${OWNER_AWAITING_PASSWORD_MARK}')
+        AND ${awaitingMarkValidSql("pg_catalog.shobj_description(o.oid, 'pg_authid')")})
                                                                                   AS o_awaiting_password,
+       (o.oid IS NOT NULL AND NOT o.rolcanlogin
+        AND ${awaitingMarkShapeSql("pg_catalog.shobj_description(o.oid, 'pg_authid')")}
+        AND NOT ${awaitingMarkValidSql("pg_catalog.shobj_description(o.oid, 'pg_authid')")})
+                                                                                  AS o_awaiting_mark_expired,
        (o.oid IS NOT NULL AND o.rolcanlogin
-        AND pg_catalog.shobj_description(o.oid, 'pg_authid') IS NOT DISTINCT FROM '${OWNER_AWAITING_PASSWORD_MARK}')
+        AND ${awaitingMarkShapeSql("pg_catalog.shobj_description(o.oid, 'pg_authid')")})
                                                                                   AS o_stale_awaiting_mark,
+       CASE WHEN o.oid IS NULL THEN NULL ELSE (
+         SELECT pg_catalog.count(*) FROM pg_catalog.pg_auth_members m
+          WHERE m.roleid = o.oid
+            AND NOT (m.member = a.oid AND m.admin_option
+                     AND (pg_catalog.to_jsonb(m) OPERATOR(pg_catalog.->>) 'inherit_option') IS DISTINCT FROM 'true'
+                     AND (pg_catalog.to_jsonb(m) OPERATOR(pg_catalog.->>) 'set_option') IS DISTINCT FROM 'true')) END
+                                                                                  AS o_foreign_members,
        EXISTS (SELECT 1
                  FROM pg_catalog.pg_db_role_setting s
                  CROSS JOIN LATERAL pg_catalog.unnest(s.setconfig) AS c(setting)
@@ -190,7 +230,7 @@ export const OWNER_BOOTSTRAP_Q4B2_NO_SELF_GRANT = `SELECT pg_catalog.set_config(
  * an existing NOLOGIN crewflow_owner is accepted ONLY in the awaiting-password state, and then becomes LOGIN with the
  * verifier and loses the mark in the same statement pair.
  */
-// sql-injection-reviewed: the only interpolation is OWNER_AWAITING_PASSWORD_MARK, a quote-free code constant.
+// sql-injection-reviewed: the only interpolation is awaitingMarkValidSql over a fixed expression (quote-free code constants).
 export const OWNER_BOOTSTRAP_Q4C_DO = `DO $bootstrap$
 DECLARE
   v_db       text := pg_catalog.current_database();
@@ -203,7 +243,7 @@ DECLARE
 BEGIN
   BEGIN
     SELECT oid, rolsuper, rolbypassrls, rolreplication, rolcreatedb, rolcanlogin, rolinherit,
-           pg_catalog.shobj_description(oid, 'pg_authid') IS NOT DISTINCT FROM '${OWNER_AWAITING_PASSWORD_MARK}' AS awaiting
+           ${awaitingMarkValidSql("pg_catalog.shobj_description(oid, 'pg_authid')")} AS awaiting
       INTO r FROM pg_catalog.pg_roles WHERE rolname = 'crewflow_owner';
     -- REVISED (security re-review N3): a password is only ever set from the exact pre-hashed SCRAM-SHA-256 shape (the same
     -- pattern as OWNER_SELF_O4C_DO; dollar signs spelled [$]); anything else is 22023 before CREATE / ALTER ROLE.
@@ -224,7 +264,7 @@ BEGIN
         RAISE EXCEPTION 'crewflow_owner has privileged or wrong attributes' USING ERRCODE = '42501';
       END IF;
       IF v_awaiting AND NOT v_set_pw THEN
-        RAISE EXCEPTION 'crewflow_owner is waiting for its password' USING ERRCODE = '42501';
+        RAISE EXCEPTION 'crewflow_owner is waiting for its password' USING ERRCODE = '55000';
       END IF;
       IF v_set_pw THEN
         v_stage := 'role';
@@ -266,7 +306,7 @@ $bootstrap$;`;
  * same stage HINT and CONTEXT-stripping re-raise as OWNER_BOOTSTRAP_Q4C_DO, so a refusal of the passwordless (NOLOGIN) role
  * itself (the role step, or its COMMIT) is told apart.
  */
-// sql-injection-reviewed: the only interpolation is OWNER_AWAITING_PASSWORD_MARK, a quote-free code constant.
+// sql-injection-reviewed: the interpolations are OWNER_AWAITING_PASSWORD_MARK / _GRACE_SECONDS and awaitingMarkValidSql (quote-free code constants).
 export const OWNER_BOOTSTRAP_Q4C_DO_NO_PASSWORD = `DO $bootstrap$
 DECLARE
   v_db       text := pg_catalog.current_database();
@@ -276,12 +316,13 @@ DECLARE
 BEGIN
   BEGIN
     SELECT oid, rolsuper, rolbypassrls, rolreplication, rolcreatedb, rolcanlogin, rolinherit,
-           pg_catalog.shobj_description(oid, 'pg_authid') IS NOT DISTINCT FROM '${OWNER_AWAITING_PASSWORD_MARK}' AS awaiting
+           ${awaitingMarkValidSql("pg_catalog.shobj_description(oid, 'pg_authid')")} AS awaiting
       INTO r FROM pg_catalog.pg_roles WHERE rolname = 'crewflow_owner';
     IF NOT FOUND THEN
       v_stage := 'role';
       CREATE ROLE crewflow_owner NOLOGIN NOSUPERUSER NOBYPASSRLS NOREPLICATION NOCREATEDB CREATEROLE INHERIT;
-      COMMENT ON ROLE crewflow_owner IS '${OWNER_AWAITING_PASSWORD_MARK}';
+      EXECUTE pg_catalog.format('COMMENT ON ROLE crewflow_owner IS %L',
+        '${OWNER_AWAITING_PASSWORD_MARK}' || (pg_catalog.date_part('epoch', pg_catalog.now())::bigint + ${OWNER_AWAITING_PASSWORD_GRACE_SECONDS})::text);
     ELSIF r.rolsuper OR r.rolbypassrls OR r.rolreplication OR r.rolcreatedb OR (NOT r.rolcanlogin AND NOT r.awaiting) OR NOT r.rolinherit THEN
       RAISE EXCEPTION 'crewflow_owner has privileged or wrong attributes' USING ERRCODE = '42501';
     END IF;
@@ -311,7 +352,7 @@ $bootstrap$;`;
 export const OWNER_MANUAL_ROLE_SQL: readonly string[] = Object.freeze([
   'BEGIN;',
   "SET LOCAL createrole_self_grant = '';",
-  "CREATE ROLE crewflow_owner LOGIN NOSUPERUSER NOBYPASSRLS NOREPLICATION NOCREATEDB CREATEROLE INHERIT PASSWORD '<PG_DATABASE_APP_PASSWORD>';",
+  "DO $$BEGIN EXECUTE pg_catalog.format('CREATE ROLE crewflow_owner LOGIN NOSUPERUSER NOBYPASSRLS NOREPLICATION NOCREATEDB CREATEROLE INHERIT PASSWORD %L', '<PG_DATABASE_APP_PASSWORD>'); END$$;",
   "DO $grant$ BEGIN EXECUTE pg_catalog.format('GRANT CONNECT, CREATE, TEMPORARY ON DATABASE %I TO crewflow_owner WITH GRANT OPTION', pg_catalog.current_database()); END $grant$;",
   'COMMIT;',
 ]);
@@ -319,8 +360,8 @@ export const OWNER_MANUAL_ROLE_SQL: readonly string[] = Object.freeze([
 /**
  * Q4d (no-password path): the same exact re-check, LOGIN or the awaiting-password state (NOLOGIN with the mark).
  */
-// sql-injection-reviewed: the only interpolation is OWNER_AWAITING_PASSWORD_MARK, a quote-free code constant.
-export const OWNER_BOOTSTRAP_Q4D_NO_PASSWORD_REVERIFY = `SELECT (rolcanlogin OR pg_catalog.shobj_description(oid, 'pg_authid') IS NOT DISTINCT FROM '${OWNER_AWAITING_PASSWORD_MARK}')
+// sql-injection-reviewed: the only interpolation is awaitingMarkValidSql over a fixed expression (quote-free code constants).
+export const OWNER_BOOTSTRAP_Q4D_NO_PASSWORD_REVERIFY = `SELECT (rolcanlogin OR ${awaitingMarkValidSql("pg_catalog.shobj_description(oid, 'pg_authid')")})
        AND NOT rolsuper AND NOT rolbypassrls AND NOT rolreplication AND NOT rolcreatedb AND rolinherit
        AND pg_catalog.has_database_privilege(oid, pg_catalog.current_database(), 'CREATE WITH GRANT OPTION') AS ok
   FROM pg_catalog.pg_roles WHERE rolname = 'crewflow_owner';`;
@@ -389,12 +430,12 @@ export const OWNER_HARDEN_R1_LEGACY_LOGINS = `SELECT r.rolname::text AS name FRO
  * keeps OWNER_AWAITING_PASSWORD_MARK (after the operator's ALTER ROLE ... LOGIN PASSWORD), so a later NOLOGIN can never count
  * as "awaiting its password". Only that exact comment is removed (a CREATEROLE mark is never touched here).
  */
-// sql-injection-reviewed: the only interpolation is OWNER_AWAITING_PASSWORD_MARK, a quote-free code constant.
+// sql-injection-reviewed: the only interpolation is awaitingMarkShapeSql over a fixed expression (quote-free code constants).
 export const OWNER_HARDEN_H4_CLEAR_STALE_AWAITING_MARK = `DO $clear$
 BEGIN
   IF EXISTS (SELECT 1 FROM pg_catalog.pg_roles r
               WHERE r.rolname = 'crewflow_owner' AND r.rolcanlogin
-                AND pg_catalog.shobj_description(r.oid, 'pg_authid') IS NOT DISTINCT FROM '${OWNER_AWAITING_PASSWORD_MARK}') THEN
+                AND ${awaitingMarkShapeSql("pg_catalog.shobj_description(r.oid, 'pg_authid')")}) THEN
     COMMENT ON ROLE crewflow_owner IS NULL;
   END IF;
 END

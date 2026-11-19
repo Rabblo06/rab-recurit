@@ -26,6 +26,8 @@
  *   B1  PG_ADMIN_URL through PgBouncer 1: refused (64), "refused the session settings" + PG_ADMIN_DIRECT_URL.
  *   B2  PG_ADMIN_URL through PgBouncer 2: refused (64), "not session-stable" + PG_ADMIN_DIRECT_URL; nothing created.
  *   B3  PG_ADMIN_URL through PgBouncer 2 + PG_ADMIN_DIRECT_URL (the cluster, verify-full): created (0).
+ *   Q1  role squatting (independent review L2): crewflow_owner already exists and another role is a member of it: refused
+ *       (64) before anything is written.
  *   T1  a PostgreSQL 16 whose pg_hba TRUSTS crewflow_owner (FBC_TRUST_SU_URL): db-setup creates crewflow_owner, then its
  *       deliberately-wrong-password login succeeds, so it refuses (64) with "the server lets crewflow_owner log in WITHOUT
  *       its password"; the second run refuses before any write. (Security re-review R1 of #259.)
@@ -39,7 +41,10 @@ import { join, resolve } from 'node:path';
 import { Client } from 'pg';
 
 import { OWNER_BOOTSTRAP_MESSAGES, OWNER_BOOTSTRAP_RESULT_PREFIX, OwnerBootstrapResult } from '../owner-bootstrap';
-import { OWNER_MANUAL_ROLE_SQL } from '../owner-bootstrap-sql';
+import { OWNER_AWAITING_PASSWORD_MARK, OWNER_MANUAL_ROLE_SQL, OWNER_SET_PASSWORD_SQL } from '../owner-bootstrap-sql';
+
+/** A printed operator statement with its placeholder replaced by the transaction-local setting fbc.pw (never a literal). */
+const withSecretSetting = (statement: string): string => statement.split("'<PG_DATABASE_APP_PASSWORD>'").join("pg_catalog.current_setting('fbc.pw')");
 
 const REPO_ROOT = resolve(__dirname, '..', '..', '..', '..', '..', '..', '..', '..');
 const TSCONFIG_APP = join(REPO_ROOT, 'packages', 'rab-server', 'tsconfig.app.json');
@@ -340,13 +345,14 @@ const scenarios: Array<[string, () => Promise<void>]> = [
       assertClean(run2);
       expect(logHits(process.env.FBC_SIM_CONTAINER, [f.ownerPassword]) === 0, 'N1: the crewflow_owner password appears in the server log');
       // The operator's one step in the provider's SQL editor (ALTER ROLE ... PASSWORD '<value>').
-      await superuserSecret(clusters.SIM, `DO $$ BEGIN EXECUTE pg_catalog.format('ALTER ROLE crewflow_owner LOGIN PASSWORD %L', pg_catalog.current_setting('fbc.pw')); END $$`, f.ownerPassword);
+      // Exactly the printed step (OWNER_SET_PASSWORD_SQL), the value through a transaction-local setting.
+      await superuserSecret(clusters.SIM, withSecretSetting(OWNER_SET_PASSWORD_SQL), f.ownerPassword, f.db);
       const run3 = await runChild(env);
       expect(run3.code === 0 && run3.result?.outcome === 'unchanged' && run3.result?.createRole === 'marked', `N1 run 3: exit ${run3.code}, outcome ${run3.result?.outcome ?? 'none'} ${run3.result?.createRole ?? ''}`);
       expect(await canLogin(clusters.SIM, 'crewflow_owner', f.ownerPassword, f.db), 'N1 run 3: crewflow_owner cannot log in');
       // Security re-review N2: the awaiting-password mark is gone once crewflow_owner is LOGIN.
       const comment = await sql(clusters.SIM, 'postgres', `SELECT pg_catalog.shobj_description(oid, 'pg_authid') AS c FROM pg_catalog.pg_roles WHERE rolname = 'crewflow_owner'`);
-      expect(comment[0] && comment[0].c !== 'crewflow:awaiting-password', 'N1 run 3: the awaiting-password mark is still on the LOGIN crewflow_owner');
+      expect(comment[0] && !String(comment[0].c ?? '').startsWith(OWNER_AWAITING_PASSWORD_MARK), 'N1 run 3: the awaiting-password mark is still on the LOGIN crewflow_owner');
       assertClean(run3);
     },
   ],
@@ -377,11 +383,7 @@ const scenarios: Array<[string, () => Promise<void>]> = [
         expect(logHits(process.env.FBC_SIM_CONTAINER, [f.ownerPassword]) === 0, 'N2: the crewflow_owner password appears in the server log');
         // The operator runs the printed SQL in the provider's SQL editor, as the admin, the placeholder replaced (simulated
         // with the password in a transaction-local setting so the test log stays clean; the statements are the printed ones).
-        const statements = OWNER_MANUAL_ROLE_SQL.filter((l) => l !== 'BEGIN;' && l !== 'COMMIT;').map((l) =>
-          l.includes('<PG_DATABASE_APP_PASSWORD>')
-            ? `DO $$ BEGIN EXECUTE pg_catalog.format(${"'"}${l.replace(" PASSWORD '<PG_DATABASE_APP_PASSWORD>';", ' PASSWORD %L').replace(/'/g, "''")}${"'"}, pg_catalog.current_setting('fbc.pw')); END $$`
-            : l,
-        );
+        const statements = OWNER_MANUAL_ROLE_SQL.filter((l) => l !== 'BEGIN;' && l !== 'COMMIT;').map(withSecretSetting);
         const admin = new Client({ host: clusters.SIM.hostname, port: Number(clusters.SIM.port), user: f.admin, password: f.adminPassword, database: f.db, ssl: { ca: CA, rejectUnauthorized: true } });
         await admin.connect();
         try {
@@ -399,6 +401,24 @@ const scenarios: Array<[string, () => Promise<void>]> = [
       } finally {
         await setSimPasswordlessRefusal(false);
       }
+    },
+  ],
+  [
+    'Q1 role squatting: another role is a member of an existing crewflow_owner: refused (64) before any write',
+    async () => {
+      const f = await fixture(clusters.PLAIN, 'q1');
+      const squat = `fbc_squat_${RUN}`;
+      await sql(clusters.PLAIN, 'postgres', `CREATE ROLE crewflow_owner LOGIN NOSUPERUSER NOBYPASSRLS NOREPLICATION NOCREATEDB CREATEROLE INHERIT`);
+      await sql(clusters.PLAIN, 'postgres', `CREATE ROLE ${ident(squat)} NOLOGIN`);
+      await sql(clusters.PLAIN, 'postgres', `GRANT crewflow_owner TO ${ident(squat)}`);
+      const run = await runChild({
+        PG_ADMIN_URL: urlFor(clusters.PLAIN, decodeURIComponent(clusters.PLAIN.username), decodeURIComponent(clusters.PLAIN.password), f.db),
+        PG_DATABASE_URL: urlFor(clusters.PLAIN, 'crewflow_owner', f.ownerPassword, f.db),
+        PG_SSL_CA_CERT_PATH: CA_PATH,
+      });
+      expect(run.code === 64 && run.out.includes(OWNER_BOOTSTRAP_MESSAGES.foreignMembers), `Q1: exit ${run.code}, expected the role-squatting refusal`);
+      expect((await ownerPasswordState(clusters.PLAIN)) === 'none', 'Q1: a password was written to the squatted crewflow_owner');
+      assertClean(run);
     },
   ],
   [

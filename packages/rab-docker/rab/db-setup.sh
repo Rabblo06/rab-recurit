@@ -194,7 +194,7 @@ fi
 # Security review F6 of #259: the crewflow_owner URL compose BUILT from PG_DATABASE_APP_PASSWORD and PG_DATABASE_HOST / PORT /
 # NAME (PG_DATABASE_HOST is set; the lint refuses it beside an explicit PG_DATABASE_URL). Its parts are interpolated
 # unencoded, so they are checked here at run time too: the password 32+ characters of A-Z a-z 0-9 _ -, and the host, port and
-# database name free of $ { } @ # / ? and whitespace (the port digits only). Values are never printed.
+# database name free of $ { } @ # / ? and whitespace (the port 1 to 5 digits). Values are never printed.
 if [ -n "${PG_DATABASE_HOST:-}" ]; then
   built_rest="${PG_DATABASE_URL#*://crewflow_owner:}"
   built_pw="${built_rest%@*}"
@@ -210,10 +210,12 @@ if [ -n "${PG_DATABASE_HOST:-}" ]; then
   for part in "$built_host" "$built_db"; do
     case "$part" in '' | *[\$\{\}@#/\?\ ]*) built_ok=no ;; esac
   done
+  # Independent review I4 of #259: the port is ^[0-9]{1,5}$ only (1 to 5 digits).
   case "$built_port" in '' | *[!0-9]*) built_ok=no ;; esac
+  if [ "${#built_port}" -gt 5 ]; then built_ok=no; fi
   unset built_rest built_pw built_after built_hostport built_tail built_db built_host built_port part
   if [ "$built_ok" != yes ]; then
-    refuse 'the crewflow_owner URL built from PG_DATABASE_APP_PASSWORD and PG_DATABASE_HOST / PG_DATABASE_PORT / PG_DATABASE_NAME is malformed: the password must be 32+ characters of A-Z a-z 0-9 _ - (openssl rand -hex 32), the host and database name must not contain $ { } @ # / ? or spaces, and the port must be digits. Values not shown.'
+    refuse 'the crewflow_owner URL built from PG_DATABASE_APP_PASSWORD and PG_DATABASE_HOST / PG_DATABASE_PORT / PG_DATABASE_NAME is malformed: the password must be 32+ characters of A-Z a-z 0-9 _ - (openssl rand -hex 32), the host and database name must not contain $ { } @ # / ? or spaces, and the port must be 1 to 5 digits. Values not shown.'
   fi
   unset built_ok
 fi

@@ -110,6 +110,7 @@ import {
   OWNER_HARDEN_R1_LEGACY_LOGINS,
   OWNER_HARDEN_M1_TRY_MIGRATION_LOCK,
   OWNER_MANUAL_ROLE_SQL,
+  OWNER_SET_PASSWORD_SQL,
   OWNER_HARDEN_M2_RELEASE_MIGRATION_LOCK,
   OWNER_HARDEN_H3_MARK_PENDING,
   OWNER_HARDEN_H4_CLEAR_STALE_AWAITING_MARK,
@@ -236,15 +237,23 @@ export const OWNER_BOOTSTRAP_MESSAGES = Object.freeze({
     `The server refused a pre-hashed password (SQLSTATE ${sqlstate} ${stageText(stage)}). Crewflow never sends a plain-text password.`,
   passwordlessCreated: 'crewflow_owner was created WITHOUT a password and NOLOGIN (nothing can log in as it yet), with its database grant.',
   passwordlessKept: 'crewflow_owner exists and does not log in with PG_DATABASE_APP_PASSWORD; its password and LOGIN were left unchanged.',
-  setPasswordStep:
-    "Set crewflow_owner's password once in your database provider's SQL editor: ALTER ROLE crewflow_owner LOGIN PASSWORD '<the value of PG_DATABASE_APP_PASSWORD>'; then redeploy. Use exactly that value (32+ characters, openssl rand -hex 32; if you set PG_DATABASE_URL yourself, the password inside it), never a console password reset (it generates a different, shorter password). If your provider allows it, run SET log_statement = 'none'; first, and clear the SQL editor's history afterwards. db-setup then checks the login and continues.",
+  setPasswordStep: `Set crewflow_owner's password once in your database provider's SQL editor, connected to this database as your admin login, with exactly this statement, replacing <PG_DATABASE_APP_PASSWORD> with that value (32+ characters, openssl rand -hex 32; if you set PG_DATABASE_URL yourself, the password inside it; never a console password reset, which generates a different, shorter password): ${OWNER_SET_PASSWORD_SQL} Then redeploy: db-setup checks the login and continues.`,
+  passwordVisibilityStep:
+    "The value you type can remain in the server log (log_statement = all), in pg_stat_statements, in pg_stat_activity while it runs, and in your provider's own logs and SQL-editor history. If pg_stat_statements is installed, run SELECT pg_stat_statements_reset(); afterwards where you are permitted to; otherwise treat the value as visible to anyone who can read query statistics.",
   awaitingPassword: 'crewflow_owner has no usable password yet: db-setup exits 64 until crewflow_owner logs in with PG_DATABASE_APP_PASSWORD. Refusing.',
   passwordlessRefused: (stage: WriteStage, sqlstate: string) =>
     `The server also refused to create crewflow_owner without a password (SQLSTATE ${sqlstate} ${stageText(stage)}). Nothing was created.`,
   manualRoleStep:
-    "Create crewflow_owner once in your database provider's SQL editor, connected to this database as your admin login, with exactly the SQL below; replace <PG_DATABASE_APP_PASSWORD> with that value (32+ characters, openssl rand -hex 32; if you set PG_DATABASE_URL yourself, the password inside it). If your provider allows it, run SET log_statement = 'none'; first, and clear the SQL editor's history afterwards. Then redeploy: db-setup then only checks the login and handles CREATEROLE.",
+    "Create crewflow_owner once in your database provider's SQL editor, connected to this database as your admin login, with exactly the SQL below; replace <PG_DATABASE_APP_PASSWORD> with that value (32+ characters, openssl rand -hex 32; if you set PG_DATABASE_URL yourself, the password inside it). Then redeploy: db-setup then only checks the login and handles CREATEROLE.",
   serverIgnoresPassword:
     'The server lets crewflow_owner log in WITHOUT its password (a deliberately wrong password was accepted): a pg_hba trust, peer, cert or similar rule applies to it. Crewflow never runs on a login that needs no password: require password authentication (scram-sha-256) for crewflow_owner, then start again. Refusing.',
+  awaitingMarkExpired:
+    "crewflow_owner is NOLOGIN and its 'waiting for its password' mark has expired (24 h). db-setup never re-enables a login an admin may have disabled on purpose. If you do want it, run the printed password step yourself (it also makes crewflow_owner LOGIN), or drop the role, then redeploy. Refusing.",
+  foreignMembers:
+    'Another role is a member of crewflow_owner (beyond this admin login\'s own grant to manage it): whoever holds that membership could reset or use the app login. Revoke it (REVOKE crewflow_owner FROM <that role>) or drop crewflow_owner, then start again. Refusing.',
+  awaitingNotWritable:
+    'crewflow_owner is waiting for its password, and this step would not set one. Nothing was committed. Refusing.',
+  wrongPasswordProbeSkipped: 'crewflow_owner logs in and nothing changed this run: the wrong-password check is skipped (it runs after a creation or a password change, and while the schema bootstrap is pending).',
   wrongPasswordProbeUnclear: (code: string) =>
     `The check that crewflow_owner needs its password (a login with a deliberately wrong password) failed for another reason (${code}), so it proves nothing. Giving up (the restart policy retries).`,
   awaitingMarkCleared: "crewflow_owner is LOGIN: its leftover 'waiting for its password' mark was removed.",
@@ -381,6 +390,10 @@ export interface OwnerFacts {
   oAwaitingPassword: boolean;
   /** Security re-review N2 of #259: crewflow_owner is LOGIN and still carries OWNER_AWAITING_PASSWORD_MARK (cleared by H4). */
   oStaleAwaitingMark: boolean;
+  /** Independent review L1 of #259: crewflow_owner is NOLOGIN with an EXPIRED awaiting mark (refused; never re-enabled). */
+  oAwaitingMarkExpired: boolean;
+  /** Independent review L2 of #259: members OF crewflow_owner other than this admin's own ADMIN-only grant (null: no role). */
+  oForeignMembers: number | null;
 }
 
 type Row = Record<string, unknown>;
@@ -405,6 +418,10 @@ export function factsFromRow(row: Row | undefined): OwnerFacts {
   const count = row.o_privileged_memberships;
   if (!(count === null || (typeof count === 'string' && /^[0-9]+$/.test(count)) || (typeof count === 'number' && Number.isInteger(count) && count >= 0))) {
     throw new OwnerBootstrapFailure(OWNER_BOOTSTRAP_MESSAGES.unexpected('facts column o_privileged_memberships is not a count'));
+  }
+  const foreign = row.o_foreign_members;
+  if (!(foreign === null || (typeof foreign === 'string' && /^[0-9]+$/.test(foreign)) || (typeof foreign === 'number' && Number.isInteger(foreign) && foreign >= 0))) {
+    throw new OwnerBootstrapFailure(OWNER_BOOTSTRAP_MESSAGES.unexpected('facts column o_foreign_members is not a count'));
   }
   const version = Number(row.server_version_num);
   if (!Number.isInteger(version) || version <= 0) throw new OwnerBootstrapFailure(OWNER_BOOTSTRAP_MESSAGES.unexpected('facts column server_version_num is not a number'));
@@ -432,6 +449,8 @@ export function factsFromRow(row: Row | undefined): OwnerFacts {
     searchPathDefaultSet: strictBool(row, 'search_path_default_set'),
     oAwaitingPassword: strictBool(row, 'o_awaiting_password'),
     oStaleAwaitingMark: strictBool(row, 'o_stale_awaiting_mark'),
+    oAwaitingMarkExpired: strictBool(row, 'o_awaiting_mark_expired'),
+    oForeignMembers: foreign === null ? null : Number(foreign),
   };
 }
 
@@ -468,8 +487,13 @@ export function assertSupportedServerVersion(f: Pick<OwnerFacts, 'serverVersionN
 export function decideBeforeProbe(f: OwnerFacts): string[] {
   const notes: string[] = [];
   assertSupportedServerVersion(f);
+  // Independent review L1 of #259: an expired awaiting mark on a NOLOGIN role is never acted on (an admin may have disabled it).
+  if (f.ownerExists && f.oAwaitingMarkExpired) throw new OwnerBootstrapRefusal(OWNER_BOOTSTRAP_MESSAGES.awaitingMarkExpired);
   const privileged = privilegedAttributesOf(f);
   if (privileged.length > 0) throw new OwnerBootstrapRefusal(OWNER_BOOTSTRAP_MESSAGES.privilegedAttributes(privileged));
+  // Independent review L2 of #259: nobody but this admin's own ADMIN-only grant may be a member OF crewflow_owner (a squatted
+  // role could be reset or used by whoever holds that membership). Before any probe or write, and again under the lock.
+  if (f.ownerExists && (f.oForeignMembers ?? 0) > 0) throw new OwnerBootstrapRefusal(OWNER_BOOTSTRAP_MESSAGES.foreignMembers);
   // H1 (defence in depth beside the pinned search_path): the admin session never works in a database the app login owns,
   // nor under a planted search_path default. After the attribute refusal, so a SUPERUSER crewflow_owner (a member of every
   // role, the owner included) is named as such.
@@ -529,6 +553,7 @@ export function assertFactsExact(f: OwnerFacts): void {
     f.ownerExists &&
     privilegedAttributesOf(f).length === 0 &&
     (f.oPrivilegedMemberships ?? 0) === 0 &&
+    (f.oForeignMembers ?? 0) === 0 &&
     f.oExpired !== true &&
     f.oHasDbGrant;
   if (!ok) throw new OwnerBootstrapFailure(OWNER_BOOTSTRAP_MESSAGES.reverifyFailed);
@@ -647,6 +672,7 @@ export function classifyWriteError(
     return new OwnerBootstrapFailure(OWNER_BOOTSTRAP_MESSAGES.commitFailed(code), code);
   }
   if (RACE_SQLSTATES.has(code) || isConcurrentUpdate(error)) return 'race';
+  if (code === '55000') return new OwnerBootstrapRefusal(OWNER_BOOTSTRAP_MESSAGES.awaitingNotWritable, code);
   if (code === '42501' || code === '22023' || code === '28P01') return new OwnerBootstrapRefusal(OWNER_BOOTSTRAP_MESSAGES.writeRefused(code), code);
   if (code === 'XX000') return new OwnerBootstrapRefusal(OWNER_BOOTSTRAP_MESSAGES.writeInternalError(code), code);
   return new OwnerBootstrapFailure(OWNER_BOOTSTRAP_MESSAGES.writeFailed(code), code);
@@ -678,12 +704,12 @@ export interface OwnerBootstrapIo {
    * Security re-review R1 of #259: Q3 as crewflow_owner with a deliberately WRONG password. `ok` means the server does not
    * check the password for crewflow_owner (trust / peer / cert / ...): refused. Absent = skipped (unit tests of other steps).
    */
-  probeWrongPassword?(): Promise<ProbeResult>;
+  probeWrongPassword(): Promise<ProbeResult>;
   /**
    * The capability check of PG_ADMIN_URL: throws PgSessionProbeError when the admin connection is not session-stable (a
-   * pooler). Run once after the session pin, before any read or write. Absent = skipped (unit tests).
+   * pooler). Run once after the session pin, before any read or write. Required (independent review L3 of #259).
    */
-  sessionProbe?(): Promise<void>;
+  sessionProbe(): Promise<void>;
   /**
    * The CREATEROLE step's input: is the schema complete for this image (every migration file of the image in the ledger)?
    * Read on a READ-ONLY crewflow_owner session (schemaCompleteOn). A throw is a failure (70). Absent = the step is skipped
@@ -735,9 +761,13 @@ async function assertNoOtherDatabase(session: SqlSession, refusal: string = OWNE
 }
 
 /** The facts, the decisions and the probe, in that order: one plan of what the write transaction must do. */
+/** Independent review L4 of #259: is the wrong-password check due for an existing role that logs in? Pure. */
+export function wrongPasswordCheckDue(f: Pick<OwnerFacts, 'oCreateRole' | 'oCreateRolePending' | 'oStaleAwaitingMark'>): boolean {
+  return f.oStaleAwaitingMark || (f.oCreateRole === true && !f.oCreateRolePending);
+}
+
 /** Security re-review R1 of #259: refused (64) when crewflow_owner can log in with a deliberately wrong password. */
 async function assertPasswordRequired(io: OwnerBootstrapIo): Promise<void> {
-  if (!io.probeWrongPassword) return;
   const wrong = await io.probeWrongPassword();
   if (wrong.ok) throw new OwnerBootstrapRefusal(OWNER_BOOTSTRAP_MESSAGES.serverIgnoresPassword);
   // Security re-review N1 of #259: only an authentication refusal proves a password is required; any other failure (TLS,
@@ -753,8 +783,15 @@ async function planFromDatabase(session: SqlSession, io: OwnerBootstrapIo, logNo
   const notes = decideBeforeProbe(facts);
   if (logNotes) for (const note of notes) io.log(note);
   const probe = facts.ownerExists ? await io.probeOwner() : null;
-  // A login that works is trusted only if a wrong password does NOT work (checked once per run, before the lock).
-  if (logNotes && probe?.ok) await assertPasswordRequired(io);
+  // A login that works is trusted only if a wrong password does NOT work. Independent review L4 of #259: checked (before the
+  // lock) only while the role is new to this deployment: the schema bootstrap is pending (CREATEROLE without a valid mark,
+  // i.e. a role just created, adopted, or just made LOGIN by the operator) or a stale awaiting mark is left; after a
+  // creation or a password change it is checked after COMMIT. Otherwise it is skipped, so repeated runs never add failed
+  // logins (a provider's lockout).
+  if (logNotes && probe?.ok) {
+    if (wrongPasswordCheckDue(facts)) await assertPasswordRequired(io);
+    else io.log(OWNER_BOOTSTRAP_MESSAGES.wrongPasswordProbeSkipped);
+  }
   const plan = planWrite(facts, probe);
   // L4: the password of an existing role is never set while another database of the cluster uses the role.
   if (plan.needPassword && !plan.create) await assertNoOtherDatabase(session);
@@ -809,7 +846,8 @@ async function attempt(session: SqlSession, io: OwnerBootstrapIo): Promise<Attem
     if (after.code === '28P01' && !plan.needPassword) return 'recheck';
     throw new OwnerBootstrapFailure(OWNER_BOOTSTRAP_MESSAGES.reverifyFailed, after.code);
   }
-  await assertPasswordRequired(io);
+  // After a creation or a password change only (review L4); a grant-only transaction changed no login.
+  if (plan.create || plan.needPassword) await assertPasswordRequired(io);
   assertFactsExact(await readFacts(session));
   if (plan.needPassword && !plan.create) io.log(OWNER_BOOTSTRAP_MESSAGES.passwordSet);
   return {
@@ -1033,6 +1071,7 @@ async function passwordlessSetup(session: SqlSession, io: OwnerBootstrapIo, refu
         io.log(OWNER_BOOTSTRAP_MESSAGES.passwordlessRefused(stage, code));
         io.log(OWNER_BOOTSTRAP_MESSAGES.manualRoleStep);
         for (const line of OWNER_MANUAL_ROLE_SQL) io.log(`  ${line}`);
+        io.log(OWNER_BOOTSTRAP_MESSAGES.passwordVisibilityStep);
         io.log(OWNER_BOOTSTRAP_MESSAGES.awaitingManualRole);
         return { outcome: 'awaiting-manual-role', exitCode: 64, created: false, passwordSet: false, grantAdded: false, createRole: 'not-run', code };
       }
@@ -1047,6 +1086,7 @@ async function passwordlessSetup(session: SqlSession, io: OwnerBootstrapIo, refu
     assertFactsExact(await readFacts(session));
     io.log(existed ? OWNER_BOOTSTRAP_MESSAGES.passwordlessKept : OWNER_BOOTSTRAP_MESSAGES.passwordlessCreated);
     io.log(OWNER_BOOTSTRAP_MESSAGES.setPasswordStep);
+    io.log(OWNER_BOOTSTRAP_MESSAGES.passwordVisibilityStep);
     io.log(OWNER_BOOTSTRAP_MESSAGES.awaitingPassword);
     return { outcome: 'awaiting-password', exitCode: 64, created: !existed, passwordSet: false, grantAdded: needGrant, createRole: 'not-run', code: refusedCode };
   }
@@ -1066,13 +1106,11 @@ export async function bootstrapOwnerWithIo(io: OwnerBootstrapIo, retryWindowMs =
     await session.query(OWNER_BOOTSTRAP_Q0_SESSION);
     await session.query(OWNER_BOOTSTRAP_Q1_SUPERUSER_LOGGING);
     // Capability, not a host name: a PG_ADMIN_URL that is not session-stable is a pooler (refused before any read or write).
-    if (io.sessionProbe) {
-      try {
-        await io.sessionProbe();
-      } catch (error) {
-        if (error instanceof PgSessionProbeError) throw new OwnerBootstrapRefusal(OWNER_BOOTSTRAP_MESSAGES.adminNotSessionStable);
-        throw error;
-      }
+    try {
+      await io.sessionProbe();
+    } catch (error) {
+      if (error instanceof PgSessionProbeError) throw new OwnerBootstrapRefusal(OWNER_BOOTSTRAP_MESSAGES.adminNotSessionStable);
+      throw error;
     }
     let result: OwnerBootstrapResult | null = null;
     let lastRace: WriteFailureInfo | null = null;
@@ -1578,7 +1616,17 @@ export async function hardenOwnerWithIo(io: HardenIo): Promise<OwnerBootstrapRes
         } else {
           const complete = await io.schemaComplete();
           if (complete === true) {
-            const stepIo: OwnerBootstrapIo = { openAdmin: io.openAdmin, probeOwner: async () => ({ ok: true }), verifier: () => '', log: io.log, sleep: io.sleep, now: io.now };
+            // The CREATEROLE step's io: no login probes (db-harden never touches a password), its own session probe ran above.
+            const stepIo: OwnerBootstrapIo = {
+              openAdmin: io.openAdmin,
+              probeOwner: async () => ({ ok: true }),
+              probeWrongPassword: async () => ({ ok: false, code: '28P01' }),
+              sessionProbe: async () => undefined,
+              verifier: () => '',
+              log: io.log,
+              sleep: io.sleep,
+              now: io.now,
+            };
             let busy = false;
             let lastRace: WriteFailureInfo | null = null;
             for (let i = 1; i <= MAX_ATTEMPTS && !busy; i += 1) {

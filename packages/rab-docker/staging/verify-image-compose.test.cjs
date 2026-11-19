@@ -646,8 +646,8 @@ test('DENIAL DB-SETUP environment mode: PG_DATABASE_URL never from an env file, 
   // Owner rule 2026-11-19: require / verify-ca / verify-full all mean full verification; disable / prefer / none are refused.
   assertRefused(run({ 'rab-api': ok, 'rab-worker': ok }, setUrls({ admin: 'postgresql://doadmin:x@db-direct.example:5432/d?sslmode=prefer' })), /db-setup: PG_ADMIN_URL: sslmode must be require, verify-ca or verify-full/);
   assertRefused(run({ 'rab-api': ok, 'rab-worker': ok }, setUrls({ app: 'postgresql://crewflow_owner:x@db-direct.example:5432/d?sslmode=disable' })), /db-setup: PG_DATABASE_URL: sslmode must be require, verify-ca or verify-full/);
-  assertRefused(run({ 'rab-api': ok, 'rab-worker': ok }, setUrls({ admin: 'postgresql://doadmin:x@ep-a-pooler.eu.aws.neon.tech:5432/d?sslmode=verify-full', app: 'postgresql://crewflow_owner:x@ep-a-pooler.eu.aws.neon.tech:5432/d?sslmode=verify-full' })), /db-setup: PG_ADMIN_URL: points at a transaction pooler/);
-  assertRefused(run({ 'rab-api': ok, 'rab-worker': ok }, setUrls({ app: 'postgresql://crewflow_owner:x@ep-a-pooler.eu.aws.neon.tech:5432/d?sslmode=verify-full' })), /db-setup: PG_DATABASE_URL: points at a transaction pooler/);
+  // Owner rule 2026-11-19 (provider-neutral): no address rule for a pooler here; db-setup refuses one by its capability checks.
+  assert.ok(!run({ 'rab-api': ok, 'rab-worker': ok }, setUrls({ admin: 'postgresql://doadmin:x@pool.internal.example:6432/d?sslmode=verify-full', app: 'postgresql://crewflow_owner:x@pool.internal.example:6432/d?sslmode=verify-full' })).some((p) => /pooler/.test(p)));
   assertRefused(run({ 'rab-api': ok, 'rab-worker': ok }, (v) => { delete v.services['db-setup'].environment.PG_DATABASE_URL; }), /db-setup: PG_DATABASE_URL is missing/);
   assertRefused(run({ 'rab-api': ok, 'rab-worker': ok }, (v) => { delete v.services['db-setup'].environment.PG_DATABASE_URL; }), /db-setup: PG_DATABASE_URL is not set in the deployed model/);
   assertRefused(run({ 'rab-api': ok, 'rab-worker': ok, 'db-setup': { ...ok, names: [...ok.names, 'PG_ADMIN_URL'] } }), /db-setup: PG_ADMIN_URL is set in an env file/);

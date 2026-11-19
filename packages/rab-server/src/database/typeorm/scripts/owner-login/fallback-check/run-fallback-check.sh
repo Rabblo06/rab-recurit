@@ -14,7 +14,7 @@
 #   FBC_PORT_BASE    first host port, published on 127.0.0.1 only [47440]
 #
 # One PostgreSQL runs at a time. Groups, each from a fresh container:
-#   plain  PostgreSQL 16 with TLS (a per-run CA; server certificate for IP 127.0.0.1): P1, P2; then PgBouncer (transaction
+#   plain  PostgreSQL 16 with TLS (a per-run CA; server certificate for IP 127.0.0.1): P1, P2, Q1; then PgBouncer (transaction
 #          pooling, defaults) in front of it: B1; then PgBouncer with ignore_startup_parameters=options: B2, B3
 #   sim    the same + refuse_prehashed.c (refuses pre-hashed role passwords at COMMIT, XX000, and, when switched on, any
 #          role without a password), EVERY statement logged with its parameters: N1, N2
@@ -129,7 +129,7 @@ SU="postgresql://postgres:$SUPW@127.0.0.1:$PGPORT/postgres"
 
 # plain: P1, P2, then B1 (PgBouncer defaults), then B2 / B3 (options ignored).
 start_pg
-harness FBC_PLAIN_SU_URL="$SU" -- P1 P2
+harness FBC_PLAIN_SU_URL="$SU" -- P1 P2 Q1
 start_pgbouncer 1
 harness FBC_PLAIN_SU_URL="$SU" FBC_BOUNCER1_HOSTPORT="127.0.0.1:$PGBPORT" -- B1
 stop_pgbouncer
