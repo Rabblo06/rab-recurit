@@ -39,7 +39,21 @@
  * Exit codes: 0 ok, 64 refusal (configuration / rights / a privileged crewflow_owner / a password that does not log in
  * without an admin), 70 unexpected. Output: fixed strings plus a SQLSTATE at most. Never a URL, a password, a verifier, a
  * host, a database or a login name, and never a driver error's message / detail / where. The plaintext password exists only
- * in this process's memory (it came from the environment); the server only ever receives the SCRAM verifier (§3.6).
+ * in this process's memory (it came from the environment); the server receives the SCRAM verifier (§3.6), unless it refuses
+ * that form (below).
+ *
+ * Provider-neutral by rule (owner decision 2026-11-19: "no provider-specific code ... Decide by capability, detected at run
+ * time"): no host-name matching, no provider flag. What differs between servers is detected by what the server does:
+ *   - the password FORM: the SCRAM verifier is always tried first; when the server refuses it (isVerifierRefusal: the
+ *     SQLSTATE of the CREATE / ALTER ROLE step, or of the COMMIT, which is where some managed servers check a password),
+ *     db-setup retries ONCE with the plain-text password, only over a connection that verifies TLS (certificate and host
+ *     name) and only when no server log would record it (G1 / G2). The log line names the reason, never a provider;
+ *   - a connection POOLER in PG_ADMIN_URL: refused when the admin session is not session-stable (pg-session-probe.ts, before
+ *     any write), when the server refuses the session settings sent at connect (08P01), or when the URL has a documented
+ *     pooler shape; the refusal says to put the direct address in PG_ADMIN_URL or in PG_ADMIN_DIRECT_URL (db-setup and
+ *     db-harden only; the same login and database as PG_ADMIN_URL). Host names are never guessed;
+ *   - every refusal is reported as what it is: its SQLSTATE and its stage (write statement or COMMIT). XX000 is a race only
+ *     for PostgreSQL's fixed "tuple concurrently updated", never at COMMIT.
  */
 import { readdirSync } from 'node:fs';
 import { join } from 'node:path';
@@ -48,19 +62,33 @@ import { Client } from 'pg';
 
 import {
   ADMIN_URL_LABEL,
+  DB_SETUP_INPUT_MESSAGES,
   type DbSetupInput,
+  OWNER_CREDENTIAL_MESSAGES,
   OWNER_LOGIN,
   OwnerCredentialError,
   scramSha256Verifier,
   selectDbSetupInput,
 } from '../../../owner-login/owner-credential';
-import { pgClientConfig, PgConfigError, PgDriverConfig, resolvePgEnvironment, ResolvedPgEnvironment, sameTarget } from '../../../postgres';
+import {
+  parsePgUrl,
+  pgClientConfig,
+  PgConfigError,
+  PgDriverConfig,
+  PgSessionProbeError,
+  probePgSessionAffinity,
+  resolvePgEnvironment,
+  ResolvedPgEnvironment,
+  sameTarget,
+} from '../../../postgres';
 import { isSupportedPostgresMajor, postgresMajorFromVersionNum, unsupportedPostgresMessage } from '../../../postgres/supported-majors';
 import { OWNER_CREATEROLE_MARK_PREFIX } from '../../../boot-checks/owner-login-posture';
 import { LEGACY_NOLOGIN_SQL } from '../migrate/owner-login/legacy-logins';
 import {
   OWNER_BOOTSTRAP_BEGIN,
   OWNER_BOOTSTRAP_COMMIT,
+  OWNER_BOOTSTRAP_G1_QUIET_LOGS,
+  OWNER_BOOTSTRAP_G2_LOG_SAFE,
   OWNER_BOOTSTRAP_Q0_SESSION,
   OWNER_BOOTSTRAP_Q1_SUPERUSER_LOGGING,
   OWNER_BOOTSTRAP_Q2_FACTS,
@@ -69,7 +97,10 @@ import {
   OWNER_BOOTSTRAP_Q4A_LOCK,
   OWNER_BOOTSTRAP_Q4B_SET_INPUTS,
   OWNER_BOOTSTRAP_Q4B2_NO_SELF_GRANT,
+  OWNER_BOOTSTRAP_Q4B3_SCRAM_ONLY,
+  OWNER_BOOTSTRAP_Q4B_PLAINTEXT_SET_INPUTS,
   OWNER_BOOTSTRAP_Q4C_DO,
+  OWNER_BOOTSTRAP_Q4C_DO_PLAINTEXT,
   OWNER_BOOTSTRAP_Q4D_REVERIFY,
   OWNER_BOOTSTRAP_ROLLBACK,
   OWNER_HARDEN_H1_NOCREATEROLE,
@@ -96,19 +127,37 @@ export const ADMIN_CONNECT_RETRY_WINDOW_MS = 60_000;
 export const ADMIN_CONNECT_RETRY_INTERVAL_MS = 2_000;
 /**
  * Races between two DATABASES of one cluster (the advisory lock is per database, roles are cluster-wide): a concurrent
- * CREATE ROLE (42710 / 23505), a concurrent ALTER ROLE / GRANT on the same catalog row ("tuple concurrently updated",
- * XX000: the DO block keeps only the SQLSTATE), a serialization failure or deadlock (40001 / 40P01). The transaction is
- * rolled back and the attempt re-runs from the facts and the probe, so a role another start just finished needs nothing.
- * The same re-run handles a crewflow_owner whose password still does not log in after a grant-only transaction.
+ * CREATE ROLE (42710 / 23505), a serialization failure or deadlock (40001 / 40P01), and a concurrent ALTER ROLE / GRANT on
+ * the same catalog row, which PostgreSQL reports as XX000 with its fixed text "tuple concurrently updated" (the DO blocks keep
+ * exactly that text: isConcurrentUpdate). Owner decision 2026-11-19: XX000 itself is NOT a race. A server that refuses a
+ * pre-hashed password at COMMIT raises XX000 there, and the earlier rule turned that refusal into three "being created by
+ * another start" retries and exit 70 (production, 0.6.0). The transaction is rolled back and the attempt re-runs from the
+ * facts and the probe, so a role another start just finished needs nothing. The same re-run handles a crewflow_owner whose
+ * password still does not log in after a grant-only transaction.
  */
 export const MAX_ATTEMPTS = 3;
-export const RACE_SQLSTATES: ReadonlySet<string> = new Set(['42710', '23505', 'XX000', '40001', '40P01']);
-
+export const RACE_SQLSTATES: ReadonlySet<string> = new Set(['42710', '23505', '40001', '40P01']);
+/** PostgreSQL's fixed primary message for a concurrent update of the same catalog row (SQLSTATE XX000). */
+export const CONCURRENT_UPDATE_MESSAGE = 'tuple concurrently updated';
 /**
- * Security review M2: a provider that refuses a pre-hashed (SCRAM verifier) password, the only form the bootstrap ever sends,
- * is NOT supported (D6: no plaintext path). The refusal says so and offers no workaround.
+ * The SQLSTATEs that mean "the server refused the password FORM" when they come from the CREATE / ALTER ROLE step of a
+ * transaction that set a password (DO-block HINT crewflow-stage=role), or from that transaction's COMMIT: 22023
+ * invalid_parameter_value and 28P01 invalid_password (a check_password_hook refusing it), 0A000 feature_not_supported, and
+ * XX000 internal_error (an extension's elog(ERROR), including a check made at COMMIT), except the concurrent-update race.
+ * Never 42501 (a missing right is not a password form) and never the DO block's own shape check (stage `check`).
  */
-const PREHASHED_REFUSED_UNSUPPORTED = 'If this provider refuses pre-hashed passwords, this configuration is not supported.';
+export const PASSWORD_FORM_REFUSAL_SQLSTATES: ReadonlySet<string> = new Set(['22023', '28P01', '0A000', 'XX000']);
+/** The name of the optional direct admin address (db-setup and db-harden only). */
+export const ADMIN_DIRECT_URL_LABEL = 'PG_ADMIN_DIRECT_URL' as const;
+
+/** The two password forms: the SCRAM verifier (always first), or the plain-text fallback. */
+export type PasswordForm = 'scram-verifier' | 'plaintext';
+/** Where a write failed: a statement of the transaction, or its COMMIT. */
+export type WriteStage = 'statement' | 'commit';
+export interface WriteFailureInfo {
+  stage: WriteStage;
+  code: string;
+}
 
 /** Every fixed line this module can print (tests assert them exactly). */
 export const OWNER_BOOTSTRAP_MESSAGES = Object.freeze({
@@ -153,13 +202,44 @@ export const OWNER_BOOTSTRAP_MESSAGES = Object.freeze({
   adminTls: 'TLS to the database failed (certificate, host name, or the server has no TLS). Check sslmode in the database URL (PG_ADMIN_URL or PG_DATABASE_URL) and PG_SSL_CA_CERT / PG_SSL_CA_CERT_PATH. Refusing.',
   adminUnreachable: 'The database did not accept a connection within 60 s. Giving up (the restart policy retries).',
   adminConnectFailed: (code: string) => `Connecting with the database URL (PG_ADMIN_URL or PG_DATABASE_URL) failed (${code}).`,
+  // ---- a connection pooler in PG_ADMIN_URL, detected by capability (owner decision 2026-11-19) ----
+  adminStartupRefused: (code: string) =>
+    `The database refused the session settings db-setup sends when it connects (SQLSTATE ${code}). PG_ADMIN_URL looks like a connection pooler, and db-setup needs one real database session. Put the database's direct address in PG_ADMIN_URL, or keep PG_ADMIN_URL and set PG_ADMIN_DIRECT_URL to the direct address (the same login and database). Refusing.`,
+  adminNotSessionStable:
+    'The PG_ADMIN_URL connection is not session-stable (two transactions or two connections did not behave like separate real database sessions with their own session locks): it looks like a connection pooler, and db-setup needs one real database session. Put the database\'s direct address in PG_ADMIN_URL, or keep PG_ADMIN_URL and set PG_ADMIN_DIRECT_URL to the direct address (the same login and database). Nothing was changed. Refusing.',
+  adminPoolerShape:
+    'PG_ADMIN_URL has the address shape of a documented transaction pooler, and db-setup needs one real database session. Put the database\'s direct address in PG_ADMIN_URL, or keep PG_ADMIN_URL and set PG_ADMIN_DIRECT_URL to the direct address (the same login and database). Refusing.',
+  adminTargetMismatch: `${DB_SETUP_INPUT_MESSAGES.targetMismatch} If PG_ADMIN_URL is a pooled address of the same database, keep it as it is and set PG_ADMIN_DIRECT_URL to the direct address (the same login and database).`,
+  adminDirectUsed: 'PG_ADMIN_DIRECT_URL is set: db-setup connects with it instead of PG_ADMIN_URL (the same login and database, checked).',
+  adminDirectWithoutAdmin: 'PG_ADMIN_DIRECT_URL is set without PG_ADMIN_URL. It is only the direct address of the PG_ADMIN_URL login: set both, or put the direct address in PG_ADMIN_URL. Refusing.',
+  adminDirectMismatch:
+    'PG_ADMIN_DIRECT_URL must log in as the same user, to the same database, as PG_ADMIN_URL (only the address may differ). Values not shown. Refusing.',
   writeRefused: (sqlstate: string) =>
-    `The database refused to create or update crewflow_owner (SQLSTATE ${sqlstate}): the PG_ADMIN_URL login lacks a needed right, or the provider refuses pre-hashed passwords. ${PREHASHED_REFUSED_UNSUPPORTED} Refusing.`,
+    `The database refused to create or update crewflow_owner (SQLSTATE ${sqlstate}): the PG_ADMIN_URL login lacks a needed right. Nothing was committed. Refusing.`,
   writeFailed: (sqlstate: string) => `Setting up crewflow_owner failed (SQLSTATE ${sqlstate}). Nothing was committed.`,
+  writeInternalError: (sqlstate: string) =>
+    `Creating or updating crewflow_owner failed with an internal error (SQLSTATE ${sqlstate}) that is not a concurrent update, typically a server extension refusing the operation. Nothing was committed. Refusing.`,
+  commitInternalError: (sqlstate: string) =>
+    `The database refused to COMMIT the crewflow_owner setup with an internal error (SQLSTATE ${sqlstate}), typically a server extension refusing the role change. Nothing was committed. Refusing.`,
+  commitFailed: (sqlstate: string) => `Committing the crewflow_owner setup failed (SQLSTATE ${sqlstate}). Nothing was committed.`,
+  // ---- the password form (owner decision 2026-11-19) ----
+  verifierRefusedFallback: (stage: WriteStage, sqlstate: string) =>
+    `The server refused a pre-hashed password (SQLSTATE ${sqlstate} ${stageText(stage)}); retrying once with a plain-text password over verified TLS.`,
+  plaintextUsed: 'The server refused a pre-hashed password; used a plain-text password over verified TLS (never logged).',
+  fallbackNeedsVerifiedTls: (stage: WriteStage, sqlstate: string) =>
+    `The server refused a pre-hashed password (SQLSTATE ${sqlstate} ${stageText(stage)}). db-setup sends a plain-text password only over TLS that verifies the server certificate and its host name, and this connection does not (sslmode, PG_SSL_ALLOW_SELF_SIGNED, or no TLS). Nothing was sent or committed. Use sslmode=verify-full (or require) with the right CA. Refusing.`,
+  bothFormsRefused: (stage: WriteStage, sqlstate: string) =>
+    `The server refused the pre-hashed password and then the plain-text one too (SQLSTATE ${sqlstate} ${stageText(stage)}): it may require a stronger password (put a longer random one in PG_DATABASE_URL: openssl rand -hex 32), or the PG_ADMIN_URL login may lack a right. Nothing was committed. Refusing.`,
+  plaintextLogRisk:
+    "The server refused a pre-hashed password, and it could record a plain-text one in a log or statistics view (log_statement=all, log_duration, a log_min_duration_* threshold or sampling with parameter logging on, auto_explain, pgaudit.log_parameter, or pg_stat_statements.track=all with track_utility), which the PG_ADMIN_URL login cannot switch off for its own transaction (or a setting could not be read). Nothing was sent. Turn those settings off, or grant the admin login SET on log_statement and log_parameter_max_length, then start again. Refusing.",
   reverifyFailed: 'crewflow_owner is not exactly as required after the setup step (attributes, grant or login). Refusing to continue.',
-  raceRetry: 'crewflow_owner was being created by another start at the same moment; reading the facts again.',
+  raceRetry: (stage: WriteStage, sqlstate: string) =>
+    `crewflow_owner changed in another start at the same moment (SQLSTATE ${sqlstate} ${stageText(stage)}: a concurrent CREATE ROLE, ALTER ROLE or GRANT); reading the facts again.`,
   passwordRecheck: 'The database grant was added, and the crewflow_owner password inside PG_DATABASE_URL still does not log in: reading the facts again to set it.',
-  raceExhausted: 'crewflow_owner kept changing while this start tried to set it up. Giving up (the restart policy retries).',
+  raceExhausted: (stage: WriteStage, sqlstate: string) =>
+    `crewflow_owner kept changing while this start tried to set it up (last: SQLSTATE ${sqlstate} ${stageText(stage)}). Giving up (the restart policy retries).`,
+  ownerUrlOwnsDatabase:
+    'The PG_DATABASE_URL login crewflow_owner owns this database (directly or through a role it is a member of). Crewflow needs the database owned by your admin login, never by the app login (own-database-app-login.sql). As the current owner run: ALTER DATABASE <this database> OWNER TO <your admin>; Refusing.',
   unexpected: (code: string) => `Unexpected failure (${code}). Nothing secret is printed; see the database log for the SQLSTATE.`,
   ready: (what: string) => `crewflow_owner is ready (${what}).`,
   // ---- the CREATEROLE step (owner decision 2026-11-18) ----
@@ -200,6 +280,10 @@ export const OWNER_BOOTSTRAP_MESSAGES = Object.freeze({
     // sql-injection-reviewed: an error MESSAGE (printed, never executed); seconds is a validated integer.
     `The schema was not complete within ${seconds} s (CREWFLOW_DB_HARDEN_TIMEOUT_SECONDS), so CREATEROLE was NOT removed; nothing was changed. The next db-setup or db-harden run removes it once the schema is complete (or, as your admin: ALTER ROLE crewflow_owner NOCREATEROLE; COMMENT ON ROLE crewflow_owner IS NULL;).`,
 });
+
+function stageText(stage: WriteStage): string {
+  return stage === 'commit' ? 'at COMMIT' : 'in the write transaction';
+}
 
 export type OwnerBootstrapOutcome = 'pass-through' | 'unchanged' | 'created' | 'updated' | 'refused' | 'failed';
 
@@ -451,6 +535,8 @@ export function classifyAdminConnectError(error: unknown, retriesExhausted: bool
   const code = errorCode(error);
   if (code === '28P01' || code === '28000') return new OwnerBootstrapRefusal(OWNER_BOOTSTRAP_MESSAGES.adminAuth(code), code);
   if (code === '3D000') return new OwnerBootstrapRefusal(OWNER_BOOTSTRAP_MESSAGES.adminNoDatabase, code);
+  // A transaction pooler refuses the startup options every bootstrap connection carries (the search_path pin) with 08P01.
+  if (code === '08P01') return new OwnerBootstrapRefusal(OWNER_BOOTSTRAP_MESSAGES.adminStartupRefused(code), code);
   if (isTlsError(error)) return new OwnerBootstrapRefusal(OWNER_BOOTSTRAP_MESSAGES.adminTls, code);
   if (retriesExhausted && RETRYABLE_CONNECT_CODES.has(code)) return new OwnerBootstrapFailure(OWNER_BOOTSTRAP_MESSAGES.adminUnreachable, code);
   return new OwnerBootstrapFailure(OWNER_BOOTSTRAP_MESSAGES.adminConnectFailed(code), code);
@@ -463,14 +549,97 @@ export function classifyOwnerUrlConnectError(error: unknown, retriesExhausted: b
   return classifyAdminConnectError(error, retriesExhausted);
 }
 
-/** The write transaction's failure: a privilege / provider refusal (64), a race (retried by the caller), else 70. */
-export function classifyWriteError(error: unknown): OwnerBootstrapRefusal | OwnerBootstrapFailure | 'race' {
+/** A failure of the write transaction's COMMIT (some servers check a role's password only there). */
+export class WriteCommitError extends Error {
+  constructor(readonly original: unknown) {
+    super('commit failed');
+    this.name = 'WriteCommitError';
+  }
+}
+
+/** PostgreSQL's genuine concurrent-update race: XX000 with its fixed text (compared, never printed). */
+export function isConcurrentUpdate(error: unknown): boolean {
+  return errorCode(error) === 'XX000' && error instanceof Error && error.message === CONCURRENT_UPDATE_MESSAGE;
+}
+
+/** The DO blocks' fixed HINT `crewflow-stage=<check|role|grant>`, or null (any other hint, or none). */
+export function doBlockStage(error: unknown): 'check' | 'role' | 'grant' | null {
+  const hint = (error as { hint?: unknown } | null)?.hint;
+  const m = typeof hint === 'string' ? /^crewflow-stage=(check|role|grant)$/.exec(hint) : null;
+  return m ? (m[1] as 'check' | 'role' | 'grant') : null;
+}
+
+/** Where a write failure happened, and its SQLSTATE (never a message). */
+export function writeFailureInfo(error: unknown): WriteFailureInfo {
+  const commit = error instanceof WriteCommitError;
+  return { stage: commit ? 'commit' : 'statement', code: errorCode(commit ? error.original : error) };
+}
+
+/**
+ * Did the server refuse the password FORM? Only for a transaction that sent a password (`passwordSent`): a
+ * PASSWORD_FORM_REFUSAL_SQLSTATES error from the CREATE / ALTER ROLE step (DO-block HINT crewflow-stage=role) or from the
+ * COMMIT, never the concurrent-update race. Pure; reads the SQLSTATE and the fixed hint only.
+ */
+export function isPasswordFormRefusal(error: unknown, passwordSent: boolean): boolean {
+  if (!passwordSent) return false;
+  const commit = error instanceof WriteCommitError;
+  const original = commit ? error.original : error;
+  if (isConcurrentUpdate(original) || !PASSWORD_FORM_REFUSAL_SQLSTATES.has(errorCode(original))) return false;
+  return commit || doBlockStage(original) === 'role';
+}
+
+/**
+ * The write transaction's failure: 'verifier-refused' (the server refused the SCRAM verifier: the caller may fall back once to
+ * the plain text), a race (retried by the caller), a refusal (64) or a failure (70). `form` is the password form the
+ * transaction used, `passwordSent` whether it sent a password at all.
+ */
+export function classifyWriteError(
+  error: unknown,
+  ctx: { form?: PasswordForm; passwordSent?: boolean } = {},
+): OwnerBootstrapRefusal | OwnerBootstrapFailure | 'race' | 'verifier-refused' {
   // A decision taken under the lock (it may carry a probe SQLSTATE such as 42501) keeps its own message.
   if (error instanceof OwnerBootstrapRefusal || error instanceof OwnerBootstrapFailure) return error;
-  const code = errorCode(error);
-  if (RACE_SQLSTATES.has(code)) return 'race';
+  const { stage, code } = writeFailureInfo(error);
+  if (isPasswordFormRefusal(error, ctx.passwordSent === true)) {
+    if ((ctx.form ?? 'scram-verifier') === 'scram-verifier') return 'verifier-refused';
+    return new OwnerBootstrapRefusal(OWNER_BOOTSTRAP_MESSAGES.bothFormsRefused(stage, code), code);
+  }
+  if (error instanceof WriteCommitError) {
+    // A serialization failure or deadlock can surface at COMMIT; XX000 there is never a race.
+    if (code === '40001' || code === '40P01') return 'race';
+    if (code === 'XX000') return new OwnerBootstrapRefusal(OWNER_BOOTSTRAP_MESSAGES.commitInternalError(code), code);
+    return new OwnerBootstrapFailure(OWNER_BOOTSTRAP_MESSAGES.commitFailed(code), code);
+  }
+  if (RACE_SQLSTATES.has(code) || isConcurrentUpdate(error)) return 'race';
   if (code === '42501' || code === '22023' || code === '28P01') return new OwnerBootstrapRefusal(OWNER_BOOTSTRAP_MESSAGES.writeRefused(code), code);
+  if (code === 'XX000') return new OwnerBootstrapRefusal(OWNER_BOOTSTRAP_MESSAGES.writeInternalError(code), code);
   return new OwnerBootstrapFailure(OWNER_BOOTSTRAP_MESSAGES.writeFailed(code), code);
+}
+
+/** COMMIT, with a failure tagged as such (classifyWriteError tells a COMMIT refusal from a statement's). */
+async function commitTagged(session: SqlSession): Promise<void> {
+  try {
+    await session.query(OWNER_BOOTSTRAP_COMMIT);
+  } catch (error) {
+    throw new WriteCommitError(error);
+  }
+}
+
+/**
+ * Does this driver config verify TLS fully (pg-tls.ts verify-full: certificate chain AND host name, `rejectUnauthorized`
+ * true; for an IP host pg-tls binds the name check to the IP)? The plain-text fallback is sent only on such a connection.
+ */
+export function isVerifiedTls(config: Pick<PgDriverConfig, 'ssl'>): boolean {
+  const ssl = config.ssl as unknown;
+  return !!ssl && typeof ssl === 'object' && (ssl as { rejectUnauthorized?: unknown }).rejectUnauthorized === true;
+}
+
+/** G1 + G2 (plain-text fallback, in the write transaction): refused (64) unless no server log would record the password. */
+async function assertPlaintextLogSafe(session: SqlSession): Promise<void> {
+  await session.query(OWNER_BOOTSTRAP_G1_QUIET_LOGS);
+  const { rows } = await session.query(OWNER_BOOTSTRAP_G2_LOG_SAFE);
+  const safe = rows.length === 1 ? rows[0]?.safe : undefined;
+  if (safe !== true) throw new OwnerBootstrapRefusal(OWNER_BOOTSTRAP_MESSAGES.plaintextLogRisk);
 }
 
 export interface SqlSession {
@@ -485,6 +654,18 @@ export interface OwnerBootstrapIo {
   probeOwner(): Promise<ProbeResult>;
   /** A fresh SCRAM verifier of that password. */
   verifier(): string;
+  /**
+   * The plain-text fallback (owner decision 2026-11-19): the password itself, used ONLY after the server refused the
+   * verifier, and only when `verifiedTls` is true. Absent = no fallback (a refused verifier is then reported as such).
+   */
+  plaintextPassword?(): string;
+  /** The admin connection verifies TLS fully (isVerifiedTls of its driver config). */
+  verifiedTls?: boolean;
+  /**
+   * The capability check of PG_ADMIN_URL: throws PgSessionProbeError when the admin connection is not session-stable (a
+   * pooler). Run once after the session pin, before any read or write. Absent = skipped (unit tests).
+   */
+  sessionProbe?(): Promise<void>;
   /**
    * The CREATEROLE step's input: is the schema complete for this image (every migration file of the image in the ledger)?
    * Read on a READ-ONLY crewflow_owner session (schemaCompleteOn). A throw is a failure (70). Absent = the step is skipped
@@ -555,11 +736,13 @@ const UNCHANGED: OwnerBootstrapResult = { outcome: 'unchanged', exitCode: 0, cre
  * plan decides what is written AND the outcome reported. Returns 'race' when a concurrent start on another database of the
  * cluster collided, or when a grant-only transaction still leaves a password that does not log in (re-run from the facts).
  */
-async function attempt(session: SqlSession, io: OwnerBootstrapIo): Promise<OwnerBootstrapResult | 'race' | 'recheck'> {
+type AttemptOutcome = OwnerBootstrapResult | 'recheck' | { race: WriteFailureInfo } | { verifierRefused: WriteFailureInfo };
+
+async function attempt(session: SqlSession, io: OwnerBootstrapIo, form: PasswordForm = 'scram-verifier'): Promise<AttemptOutcome> {
   const preLock = await planFromDatabase(session, io, true);
   if (!preLock.write) return { ...UNCHANGED };
 
-  let plan: WritePlan;
+  let plan: WritePlan = preLock;
   await session.query(OWNER_BOOTSTRAP_BEGIN);
   try {
     await session.query(OWNER_BOOTSTRAP_Q4A_LOCK);
@@ -568,19 +751,27 @@ async function attempt(session: SqlSession, io: OwnerBootstrapIo): Promise<Owner
       await session.query(OWNER_BOOTSTRAP_ROLLBACK);
       return { ...UNCHANGED };
     }
-    // Only computed when it is needed; never sent when the password stays (an empty value, unused by the DO block).
-    const verifier = plan.needPassword ? io.verifier() : '';
-    await session.query(OWNER_BOOTSTRAP_Q4B_SET_INPUTS, [verifier, plan.needPassword ? 'true' : 'false']);
+    if (form === 'plaintext') {
+      // The fallback: the log guard first (nothing secret is sent unless it passes), scram-sha-256 pinned, then the password.
+      if (plan.needPassword) await assertPlaintextLogSafe(session);
+      await session.query(OWNER_BOOTSTRAP_Q4B3_SCRAM_ONLY);
+      await session.query(OWNER_BOOTSTRAP_Q4B_PLAINTEXT_SET_INPUTS, [plan.needPassword ? io.plaintextPassword!() : '', plan.needPassword ? 'true' : 'false']);
+    } else {
+      // Only computed when it is needed; never sent when the password stays (an empty value, unused by the DO block).
+      const verifier = plan.needPassword ? io.verifier() : '';
+      await session.query(OWNER_BOOTSTRAP_Q4B_SET_INPUTS, [verifier, plan.needPassword ? 'true' : 'false']);
+    }
     // No self-grant of crewflow_owner to the admin login (createrole_self_grant), transaction-local, before CREATE ROLE.
     await session.query(OWNER_BOOTSTRAP_Q4B2_NO_SELF_GRANT);
-    await session.query(OWNER_BOOTSTRAP_Q4C_DO);
+    await session.query(form === 'plaintext' ? OWNER_BOOTSTRAP_Q4C_DO_PLAINTEXT : OWNER_BOOTSTRAP_Q4C_DO);
     const { rows } = await session.query(OWNER_BOOTSTRAP_Q4D_REVERIFY);
     if (rows.length !== 1 || rows[0]?.ok !== true) throw new OwnerBootstrapFailure(OWNER_BOOTSTRAP_MESSAGES.reverifyFailed);
-    await session.query(OWNER_BOOTSTRAP_COMMIT);
+    await commitTagged(session);
   } catch (error) {
     await session.query(OWNER_BOOTSTRAP_ROLLBACK).catch(() => undefined);
-    const classified = classifyWriteError(error);
-    if (classified === 'race') return 'race';
+    const classified = classifyWriteError(error, { form, passwordSent: plan.needPassword });
+    if (classified === 'race') return { race: writeFailureInfo(error) };
+    if (classified === 'verifier-refused') return { verifierRefused: writeFailureInfo(error) };
     throw classified;
   }
 
@@ -678,7 +869,7 @@ export async function readLedgerNames(session: SqlSession): Promise<string[] | n
  * decision, the statement(s), the facts again (must show the result), COMMIT. Needs superuser, or CREATEROLE + ADMIN OPTION
  * on crewflow_owner (refused, 64, otherwise; nothing changed).
  */
-async function applyCreateRoleStep(session: SqlSession, io: OwnerBootstrapIo, schemaComplete: boolean): Promise<CreateRoleOutcome | 'race' | 'busy'> {
+async function applyCreateRoleStep(session: SqlSession, io: OwnerBootstrapIo, schemaComplete: boolean): Promise<CreateRoleOutcome | { race: WriteFailureInfo } | 'busy'> {
   const before = await readFacts(session);
   const preview = decideCreateRole(before, schemaComplete);
   if (preview === 'none') {
@@ -699,7 +890,7 @@ async function applyCreateRoleStep(session: SqlSession, io: OwnerBootstrapIo, sc
   }
 }
 
-async function applyCreateRoleTransaction(session: SqlSession, io: OwnerBootstrapIo, schemaComplete: boolean): Promise<CreateRoleOutcome | 'race'> {
+async function applyCreateRoleTransaction(session: SqlSession, io: OwnerBootstrapIo, schemaComplete: boolean): Promise<CreateRoleOutcome | { race: WriteFailureInfo }> {
   let action: CreateRoleAction;
   await session.query(OWNER_BOOTSTRAP_BEGIN);
   try {
@@ -742,13 +933,14 @@ async function applyCreateRoleTransaction(session: SqlSession, io: OwnerBootstra
         ? after.oCreateRole === true && after.oCreateRolePending && !after.oCreateRoleMarkExpired
         : after.oCreateRole === false && !after.oCreateRolePending;
     if (!ok) throw new OwnerBootstrapFailure(OWNER_BOOTSTRAP_MESSAGES.reverifyFailed);
-    await session.query(OWNER_BOOTSTRAP_COMMIT);
+    await commitTagged(session);
   } catch (error) {
     await session.query(OWNER_BOOTSTRAP_ROLLBACK).catch(() => undefined);
     const classified = classifyWriteError(error);
     // A concurrent db-setup on ANOTHER database of the cluster changed the same role row (roles are cluster-wide, the
     // advisory lock is per database): the caller re-runs the step from the facts, as attempt() does.
-    if (classified === 'race') return 'race';
+    if (classified === 'race') return { race: writeFailureInfo(error) };
+    if (classified === 'verifier-refused') throw new OwnerBootstrapFailure(OWNER_BOOTSTRAP_MESSAGES.unexpected('password refusal without a password'));
     throw classified;
   }
   if (action === 'remove') {
@@ -763,6 +955,11 @@ async function applyCreateRoleTransaction(session: SqlSession, io: OwnerBootstra
   return 'marked';
 }
 
+/** The race-exhausted line with the last race's stage and SQLSTATE (a re-check loop has none). */
+function raceExhaustedMessage(race: WriteFailureInfo | null): string {
+  return OWNER_BOOTSTRAP_MESSAGES.raceExhausted(race?.stage ?? 'statement', race?.code ?? 'none');
+}
+
 /** Modes a and b on the admin login. Exported for the integration harness and the unit tests. */
 export async function bootstrapOwnerWithIo(io: OwnerBootstrapIo, retryWindowMs = ADMIN_CONNECT_RETRY_WINDOW_MS): Promise<OwnerBootstrapResult> {
   let session: SqlSession | null = null;
@@ -770,34 +967,61 @@ export async function bootstrapOwnerWithIo(io: OwnerBootstrapIo, retryWindowMs =
     session = await connectAdminWithRetry(io, retryWindowMs);
     await session.query(OWNER_BOOTSTRAP_Q0_SESSION);
     await session.query(OWNER_BOOTSTRAP_Q1_SUPERUSER_LOGGING);
+    // Capability, not a host name: a PG_ADMIN_URL that is not session-stable is a pooler (refused before any read or write).
+    if (io.sessionProbe) {
+      try {
+        await io.sessionProbe();
+      } catch (error) {
+        if (error instanceof PgSessionProbeError) throw new OwnerBootstrapRefusal(OWNER_BOOTSTRAP_MESSAGES.adminNotSessionStable);
+        throw error;
+      }
+    }
     let result: OwnerBootstrapResult | null = null;
+    let lastRace: WriteFailureInfo | null = null;
+    let form: PasswordForm = 'scram-verifier';
+    // MAX_ATTEMPTS race / re-check rounds, plus at most ONE switch to the plain-text form (it does not use up a round).
     for (let i = 1; i <= MAX_ATTEMPTS; i += 1) {
-      const r = await attempt(session, io);
-      if (r !== 'race' && r !== 'recheck') {
+      const r = await attempt(session, io, form);
+      if (r !== 'recheck' && 'verifierRefused' in r) {
+        const { stage, code } = r.verifierRefused;
+        if (!io.plaintextPassword) {
+          throw new OwnerBootstrapRefusal(stage === 'commit' ? OWNER_BOOTSTRAP_MESSAGES.commitInternalError(code) : OWNER_BOOTSTRAP_MESSAGES.writeInternalError(code), code);
+        }
+        if (io.verifiedTls !== true) throw new OwnerBootstrapRefusal(OWNER_BOOTSTRAP_MESSAGES.fallbackNeedsVerifiedTls(stage, code), code);
+        io.log(OWNER_BOOTSTRAP_MESSAGES.verifierRefusedFallback(stage, code));
+        form = 'plaintext';
+        i -= 1;
+        continue;
+      }
+      if (r !== 'recheck' && !('race' in r)) {
         result = r;
         break;
       }
+      if (r !== 'recheck') lastRace = r.race;
       if (i < MAX_ATTEMPTS) {
-        io.log(r === 'recheck' ? OWNER_BOOTSTRAP_MESSAGES.passwordRecheck : OWNER_BOOTSTRAP_MESSAGES.raceRetry);
+        io.log(r === 'recheck' ? OWNER_BOOTSTRAP_MESSAGES.passwordRecheck : OWNER_BOOTSTRAP_MESSAGES.raceRetry(r.race.stage, r.race.code));
         await io.sleep(200 + Math.floor(Math.random() * 500)); // jitter, so two colliding starts do not collide again
       }
     }
-    if (!result) throw new OwnerBootstrapFailure(OWNER_BOOTSTRAP_MESSAGES.raceExhausted);
+    if (!result) throw new OwnerBootstrapFailure(raceExhaustedMessage(lastRace), lastRace?.code ?? null);
+    if (form === 'plaintext' && result.passwordSet) io.log(OWNER_BOOTSTRAP_MESSAGES.plaintextUsed);
     if (!io.schemaComplete) return result;
     const complete = await io.schemaComplete();
+    lastRace = null;
     for (let i = 1; i <= MAX_ATTEMPTS; i += 1) {
       const createRole = await applyCreateRoleStep(session, io, complete);
       if (createRole === 'busy') {
         io.log(OWNER_BOOTSTRAP_MESSAGES.createRoleBusyKept);
         return { ...result, createRole: 'kept' };
       }
-      if (createRole !== 'race') return { ...result, createRole };
+      if (typeof createRole === 'string') return { ...result, createRole };
+      lastRace = createRole.race;
       if (i < MAX_ATTEMPTS) {
-        io.log(OWNER_BOOTSTRAP_MESSAGES.raceRetry);
+        io.log(OWNER_BOOTSTRAP_MESSAGES.raceRetry(createRole.race.stage, createRole.race.code));
         await io.sleep(200 + Math.floor(Math.random() * 500));
       }
     }
-    throw new OwnerBootstrapFailure(OWNER_BOOTSTRAP_MESSAGES.raceExhausted);
+    throw new OwnerBootstrapFailure(raceExhaustedMessage(lastRace), lastRace?.code ?? null);
   } finally {
     await closeQuietly(session);
   }
@@ -834,6 +1058,9 @@ export function decideOwnerSelf(session: OwnerSessionFacts, f: OwnerFacts): stri
   if (!f.ownerExists) throw new OwnerBootstrapFailure(OWNER_BOOTSTRAP_MESSAGES.unexpected('crewflow_owner session without a crewflow_owner role'));
   const privileged = privilegedAttributesOf(f);
   if (privileged.length > 0) throw new OwnerBootstrapRefusal(OWNER_BOOTSTRAP_MESSAGES.privilegedAttributes(privileged));
+  // Lead audit 2026-11-19 (item 6): the admin path refuses an app login that owns the database (H1); mode c now does too.
+  // o_owns_db is pg_has_role(crewflow_owner, datdba, 'MEMBER'), and O1 has just proved session_user is crewflow_owner.
+  if (f.oOwnsDb) throw new OwnerBootstrapRefusal(OWNER_BOOTSTRAP_MESSAGES.ownerUrlOwnsDatabase);
   if (f.oCreateRole === false) notes.push(OWNER_BOOTSTRAP_MESSAGES.noCreateRoleHardened);
   if ((f.oPrivilegedMemberships ?? 0) > 0) throw new OwnerBootstrapRefusal(OWNER_BOOTSTRAP_MESSAGES.privilegedMembership);
   if (f.oExpired === true) throw new OwnerBootstrapRefusal(OWNER_BOOTSTRAP_MESSAGES.expired);
@@ -1009,6 +1236,55 @@ export interface RunOwnerBootstrapOptions {
   expectedMigrations?: () => string[];
 }
 
+/**
+ * PG_ADMIN_DIRECT_URL (owner decision 2026-11-19; db-setup and db-harden only): the direct address of the PG_ADMIN_URL login,
+ * for an operator who pastes a pooled admin URL as-is. Both must parse and name the SAME user and database (only the address
+ * may differ; host names are never derived). When set, db-setup connects with it: the copy of the environment it returns has
+ * PG_ADMIN_URL = PG_ADMIN_DIRECT_URL (the rest of db-setup, including selectDbSetupInput, sees only the direct address).
+ * process.env is never changed. Throws OwnerBootstrapRefusal (fixed text, values never shown).
+ */
+export function applyAdminDirectUrl(env: Record<string, string | undefined>): { env: Record<string, string | undefined>; used: boolean } {
+  const value = (name: string): string | undefined => {
+    const v = env[name];
+    return typeof v === 'string' && v.trim() !== '' ? v.trim() : undefined;
+  };
+  const direct = value(ADMIN_DIRECT_URL_LABEL);
+  if (direct === undefined) return { env, used: false };
+  const admin = value(ADMIN_URL_LABEL);
+  if (admin === undefined) throw new OwnerBootstrapRefusal(OWNER_BOOTSTRAP_MESSAGES.adminDirectWithoutAdmin);
+  let a;
+  let d;
+  try {
+    a = parsePgUrl(admin, ADMIN_URL_LABEL);
+    d = parsePgUrl(direct, ADMIN_DIRECT_URL_LABEL);
+  } catch (error) {
+    if (error instanceof PgConfigError) throw new OwnerBootstrapRefusal(error.message);
+    throw error;
+  }
+  if (a.user !== d.user || a.database !== d.database) throw new OwnerBootstrapRefusal(OWNER_BOOTSTRAP_MESSAGES.adminDirectMismatch);
+  const copy: Record<string, string | undefined> = { ...env, [ADMIN_URL_LABEL]: direct };
+  delete copy[ADMIN_DIRECT_URL_LABEL];
+  return { env: copy, used: true };
+}
+
+/** selectDbSetupInput, with a documented-pooler-shape refusal of PG_ADMIN_URL worded with the direct-address options. */
+function selectInput(env: Record<string, string | undefined>, directUsed: boolean): DbSetupInput {
+  try {
+    return selectDbSetupInput(env);
+  } catch (error) {
+    if (error instanceof OwnerCredentialError) {
+      if (error.message === OWNER_CREDENTIAL_MESSAGES.transactionPooler.split('PG_DATABASE_URL').join(ADMIN_URL_LABEL)) {
+        throw new OwnerBootstrapRefusal(OWNER_BOOTSTRAP_MESSAGES.adminPoolerShape);
+      }
+      if (error.message === DB_SETUP_INPUT_MESSAGES.targetMismatch && !directUsed) {
+        throw new OwnerBootstrapRefusal(OWNER_BOOTSTRAP_MESSAGES.adminTargetMismatch);
+      }
+      throw new OwnerBootstrapRefusal(error.message);
+    }
+    throw error;
+  }
+}
+
 /** Fails closed when the URL policy refuses: the message names the variable the operator actually set. */
 function resolveFor(env: Record<string, string | undefined>, url: string, label: string): ResolvedPgEnvironment {
   try {
@@ -1032,14 +1308,12 @@ function resolveFor(env: Record<string, string | undefined>, url: string, label:
 export async function runOwnerBootstrap(env: Record<string, string | undefined>, options: RunOwnerBootstrapOptions = {}): Promise<OwnerBootstrapResult> {
   const log = options.log ?? (() => undefined);
   try {
-    // The single decision (owner-credential.ts selectDbSetupInput), refused (fixed text) BEFORE anything connects.
-    let input: DbSetupInput;
-    try {
-      input = selectDbSetupInput(env);
-    } catch (error) {
-      if (error instanceof OwnerCredentialError) throw new OwnerBootstrapRefusal(error.message);
-      throw error;
-    }
+    // PG_ADMIN_DIRECT_URL first (db-setup's own copy of the environment), then the single decision (owner-credential.ts
+    // selectDbSetupInput), refused (fixed text) BEFORE anything connects.
+    const direct = applyAdminDirectUrl(env);
+    env = direct.env;
+    if (direct.used) log(OWNER_BOOTSTRAP_MESSAGES.adminDirectUsed);
+    const input = selectInput(env, direct.used);
     if (input.mode === 'owner-url') log(OWNER_BOOTSTRAP_MESSAGES.passThrough);
     // A password the SCRAM computation refuses (non-ASCII) is refused here, before anything connects (OwnerCredentialError).
     if (input.mode === 'bootstrap') scramSha256Verifier(input.ownerPassword);
@@ -1068,6 +1342,12 @@ export async function runOwnerBootstrap(env: Record<string, string | undefined>,
         openAdmin: () => connectSession(adminConfig),
         probeOwner: () => probeOwnerOnce(probeConfig),
         verifier: () => scramSha256Verifier(ownerPassword),
+        // The plain-text fallback: the same password, only if the server refuses the verifier and TLS is verified.
+        plaintextPassword: () => ownerPassword,
+        verifiedTls: isVerifiedTls(adminConfig),
+        sessionProbe: async () => {
+          await probePgSessionAffinity(adminConfig, { label: 'PG_ADMIN_URL connection' });
+        },
         schemaComplete: () => schemaCompleteOn(ownerUrlConfig, expectedMigrations),
         log,
         sleep,
@@ -1164,13 +1444,17 @@ export async function hardenOwnerWithIo(io: HardenIo): Promise<OwnerBootstrapRes
           if (complete === true) {
             const stepIo: OwnerBootstrapIo = { openAdmin: io.openAdmin, probeOwner: async () => ({ ok: true }), verifier: () => '', log: io.log, sleep: io.sleep, now: io.now };
             let busy = false;
+            let lastRace: WriteFailureInfo | null = null;
             for (let i = 1; i <= MAX_ATTEMPTS && !busy; i += 1) {
               const createRole = await applyCreateRoleStep(session, stepIo, true);
               if (createRole === 'busy') busy = true;
-              else if (createRole !== 'race') return { ...base, createRole };
-              else if (i < MAX_ATTEMPTS) await io.sleep(200 + Math.floor(Math.random() * 500));
+              else if (typeof createRole === 'string') return { ...base, createRole };
+              else {
+                lastRace = createRole.race;
+                if (i < MAX_ATTEMPTS) await io.sleep(200 + Math.floor(Math.random() * 500));
+              }
             }
-            if (!busy) throw new OwnerBootstrapFailure(OWNER_BOOTSTRAP_MESSAGES.raceExhausted);
+            if (!busy) throw new OwnerBootstrapFailure(raceExhaustedMessage(lastRace), lastRace?.code ?? null);
             waiting(OWNER_BOOTSTRAP_MESSAGES.hardenWaitingForMigration);
           } else waiting(OWNER_BOOTSTRAP_MESSAGES.hardenWaitingForSchema);
         }
@@ -1203,13 +1487,10 @@ export async function runOwnerHarden(env: Record<string, string | undefined>, op
   const log = options.log ?? (() => undefined);
   try {
     const timeoutSeconds = hardenTimeoutSeconds(env);
-    let input: DbSetupInput;
-    try {
-      input = selectDbSetupInput(env);
-    } catch (error) {
-      if (error instanceof OwnerCredentialError) throw new OwnerBootstrapRefusal(error.message);
-      throw error;
-    }
+    const direct = applyAdminDirectUrl(env);
+    env = direct.env;
+    if (direct.used) log(OWNER_BOOTSTRAP_MESSAGES.adminDirectUsed);
+    const input = selectInput(env, direct.used);
     if (input.mode === 'owner-url') {
       log(OWNER_BOOTSTRAP_MESSAGES.hardenNoAdmin);
       return { outcome: 'unchanged', exitCode: 0, created: false, passwordSet: false, grantAdded: false, createRole: 'not-run', code: null };

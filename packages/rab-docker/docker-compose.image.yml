@@ -501,9 +501,10 @@ services:
       #   (b) PG_ADMIN_URL: your own database's admin URL (DIRECT host, sslmode=verify-full; CREWFLOW_BUNDLED_DB=0), THIS
       #       SERVICE ONLY: db-setup creates crewflow_owner with it. rab-api and rab-worker NEVER receive it (pinned "").
       PG_ADMIN_URL: ${PG_ADMIN_URL:-}
+      PG_ADMIN_DIRECT_URL: ${PG_ADMIN_DIRECT_URL:-}
       #   ALWAYS: the crewflow_owner URL, the very expression rab-api and rab-worker receive: your crewflow_owner URL (b, c),
       #   or the bundled db's built from PG_DATABASE_APP_PASSWORD (a).
-      PG_DATABASE_URL: ${PG_DATABASE_URL:-postgresql://crewflow_owner:${PG_DATABASE_APP_PASSWORD:-}@db:5432/crewflow?sslmode=verify-full}
+      PG_DATABASE_URL: ${PG_DATABASE_URL:-postgresql://crewflow_owner:${PG_DATABASE_APP_PASSWORD:-}@${PG_DATABASE_HOST:-db}:${PG_DATABASE_PORT:-5432}/${PG_DATABASE_NAME:-crewflow}?sslmode=verify-full}
       #   (a) no PG_ADMIN_URL and CREWFLOW_BUNDLED_DB 1 (the default): the admin is the bundled db's superuser, built here from
       #       PG_DATABASE_PASSWORD; db-setup.sh refuses an empty password (no `:?` here: PG_DATABASE_PASSWORD is not required
       #       with your own database). (c) CREWFLOW_BUNDLED_DB=0 and no PG_ADMIN_URL: read-only checks.
@@ -561,7 +562,8 @@ services:
       # db-setup's database settings, exactly (the same modes and refusals). rab-api and rab-worker NEVER receive the admin
       # login.
       PG_ADMIN_URL: ${PG_ADMIN_URL:-}
-      PG_DATABASE_URL: ${PG_DATABASE_URL:-postgresql://crewflow_owner:${PG_DATABASE_APP_PASSWORD:-}@db:5432/crewflow?sslmode=verify-full}
+      PG_ADMIN_DIRECT_URL: ${PG_ADMIN_DIRECT_URL:-}
+      PG_DATABASE_URL: ${PG_DATABASE_URL:-postgresql://crewflow_owner:${PG_DATABASE_APP_PASSWORD:-}@${PG_DATABASE_HOST:-db}:${PG_DATABASE_PORT:-5432}/${PG_DATABASE_NAME:-crewflow}?sslmode=verify-full}
       CREWFLOW_BUNDLED_DB: ${CREWFLOW_BUNDLED_DB:-1}
       CREWFLOW_BUNDLED_DB_ADMIN_URL: postgresql://postgres:${PG_DATABASE_PASSWORD:-}@db:5432/crewflow?sslmode=verify-full
       # How long it waits (read-only polls) for the ledger to hold every migration of this image: 60-7200 s.
@@ -635,7 +637,7 @@ services:
       # rab-worker, from compose.env: your crewflow_owner URL (modes b and c), or, unset, the bundled db's built from
       # PG_DATABASE_APP_PASSWORD (mode a). Set here, so a PG_DATABASE_URL in database.env / runtime.env can never win (the
       # gate refuses it there too). An empty URL or password refuses to start (exit 64).
-      PG_DATABASE_URL: ${PG_DATABASE_URL:-postgresql://crewflow_owner:${PG_DATABASE_APP_PASSWORD:-}@db:5432/crewflow?sslmode=verify-full}
+      PG_DATABASE_URL: ${PG_DATABASE_URL:-postgresql://crewflow_owner:${PG_DATABASE_APP_PASSWORD:-}@${PG_DATABASE_HOST:-db}:${PG_DATABASE_PORT:-5432}/${PG_DATABASE_NAME:-crewflow}?sslmode=verify-full}
       # Owner decision L-2 (review of PR #230): PINNED EMPTY, a literal, like PG_DATABASE_URL, so a PG_ADMIN_URL put in an env
       # file or a platform UI can never reach this container. The entrypoint refuses any non-empty value (exit 64); the gates
       # accept exactly this empty literal here and refuse any other value. The admin URL reaches db-setup only.
@@ -769,7 +771,7 @@ services:
       # rab-worker, from compose.env: your crewflow_owner URL (modes b and c), or, unset, the bundled db's built from
       # PG_DATABASE_APP_PASSWORD (mode a). Set here, so a PG_DATABASE_URL in database.env / runtime.env can never win (the
       # gate refuses it there too). An empty URL or password refuses to start (exit 64).
-      PG_DATABASE_URL: ${PG_DATABASE_URL:-postgresql://crewflow_owner:${PG_DATABASE_APP_PASSWORD:-}@db:5432/crewflow?sslmode=verify-full}
+      PG_DATABASE_URL: ${PG_DATABASE_URL:-postgresql://crewflow_owner:${PG_DATABASE_APP_PASSWORD:-}@${PG_DATABASE_HOST:-db}:${PG_DATABASE_PORT:-5432}/${PG_DATABASE_NAME:-crewflow}?sslmode=verify-full}
       # Owner decision L-2 (review of PR #230): PINNED EMPTY, a literal, like PG_DATABASE_URL, so a PG_ADMIN_URL put in an env
       # file or a platform UI can never reach this container. The entrypoint refuses any non-empty value (exit 64); the gates
       # accept exactly this empty literal here and refuse any other value. The admin URL reaches db-setup only.

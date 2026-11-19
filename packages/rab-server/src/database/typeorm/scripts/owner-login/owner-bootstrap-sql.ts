@@ -5,6 +5,19 @@
  * (the SCRAM verifier — never the password — and whether the password must be set); inside the DO block the database
  * name reaches the EXECUTEd GRANT through %I and the verifier through %L.
  *
+ * The PLAIN-TEXT fallback (owner decision 2026-11-19: provider-neutral, decided by capability at run time, never by provider
+ * name): some managed servers refuse a pre-hashed password (they may need the password itself, and may refuse it only at
+ * COMMIT). db-setup always tries the SCRAM verifier first; only when the server refuses it (owner-bootstrap.ts
+ * isVerifierRefusal: the SQLSTATE of the role statement or of the COMMIT) does it retry ONCE with the plain-text password,
+ * and only over a connection that verifies TLS (certificate and host name). The plain text travels as the verifier does (a
+ * bind parameter of OWNER_BOOTSTRAP_Q4B_PLAINTEXT_SET_INPUTS, then %L inside OWNER_BOOTSTRAP_Q4C_DO_PLAINTEXT), and only after
+ * the log guard (OWNER_BOOTSTRAP_G1_QUIET_LOGS, then OWNER_BOOTSTRAP_G2_LOG_SAFE must say true) and with password_encryption
+ * pinned to scram-sha-256 (OWNER_BOOTSTRAP_Q4B3_SCRAM_ONLY).
+ *
+ * Both DO blocks tag a failure with a fixed HINT, `crewflow-stage=<check|role|grant>` (which step failed: the input shape
+ * check, the CREATE / ALTER ROLE, or the GRANT), so owner-bootstrap.ts can tell a server refusing the password form (the role
+ * step) from its own shape check (the check step, a bug) without ever reading a server message.
+ *
  * The only change from the plan text: §3.5 marks the advisory key as a placeholder ("the PR fixes the constant"). It is
  * fixed here as OWNER_BOOTSTRAP_LOCK_KEY, the ASCII bytes "crewboot" as one 64-bit integer, the same convention as the
  * migration lock ("crewmigr", migration-lock.ts) and the platform-admin lock ("crewpa01", platform-admin.service.ts);
@@ -62,6 +75,8 @@ export const OWNER_BOOTSTRAP_Q1_SUPERUSER_LOGGING = `SELECT pg_catalog.set_confi
  * search_path default exists in pg_db_role_setting). And (owner decisions 2026-11-18) o_createrole_pending / o_createrole_mark_expired:
  * crewflow_owner carries a valid "CREATEROLE until the schema is current" mark (owner-login-posture.ts), and it has expired by
  * the server clock (both false when the role or the mark is missing).
+ * TODO(lead, 2026-11-19): switch the privileged-membership list below (o_privileged_memberships) to
+ * database/owner-login/privileged-roles.ts once it lands (one constant shared with the boot posture check).
  */
 // sql-injection-reviewed: the only interpolation is createRoleMarkColumnsSql over a fixed column expression and quote-free code constants.
 export const OWNER_BOOTSTRAP_Q2_FACTS = `SELECT pg_catalog.current_setting('server_version_num')::int                      AS server_version_num,
@@ -161,6 +176,8 @@ DECLARE
   v_db       text := pg_catalog.current_database();
   v_verifier text := pg_catalog.current_setting('crewflow_bootstrap.verifier');
   v_set_pw   boolean := pg_catalog.current_setting('crewflow_bootstrap.need_password')::boolean;
+  v_stage    text := 'check';
+  v_msg      text;
   r          record;
 BEGIN
   BEGIN
@@ -173,6 +190,7 @@ BEGIN
       RAISE EXCEPTION 'not a pre-hashed verifier' USING ERRCODE = '22023';
     END IF;
     IF NOT FOUND THEN
+      v_stage := 'role';
       EXECUTE pg_catalog.format(
         'CREATE ROLE crewflow_owner LOGIN NOSUPERUSER NOBYPASSRLS NOREPLICATION NOCREATEDB CREATEROLE INHERIT PASSWORD %L',
         v_verifier);
@@ -182,17 +200,154 @@ BEGIN
         RAISE EXCEPTION 'crewflow_owner has privileged or wrong attributes' USING ERRCODE = '42501';
       END IF;
       IF v_set_pw THEN
+        v_stage := 'role';
         EXECUTE pg_catalog.format('ALTER ROLE crewflow_owner PASSWORD %L', v_verifier);
       END IF;
     END IF;
+    v_stage := 'grant';
     IF NOT (pg_catalog.has_database_privilege('crewflow_owner', v_db, 'CONNECT WITH GRANT OPTION')
         AND pg_catalog.has_database_privilege('crewflow_owner', v_db, 'CREATE WITH GRANT OPTION')
         AND pg_catalog.has_database_privilege('crewflow_owner', v_db, 'TEMPORARY WITH GRANT OPTION')) THEN
       EXECUTE pg_catalog.format('GRANT CONNECT, CREATE, TEMPORARY ON DATABASE %I TO crewflow_owner WITH GRANT OPTION', v_db);
     END IF;
   EXCEPTION WHEN OTHERS THEN
+    -- Owner decision 2026-11-19: exactly ONE inner message is kept, PostgreSQL's fixed "tuple concurrently updated" (XX000:
+    -- a concurrent ALTER ROLE / GRANT on the same catalog row from another database of the cluster), so the genuine race is
+    -- told apart from any other XX000; every other error keeps only its SQLSTATE. The HINT names the failing step (fixed text).
+    GET STACKED DIAGNOSTICS v_msg = MESSAGE_TEXT;
+    IF SQLSTATE = 'XX000' AND v_msg = 'tuple concurrently updated' THEN
+      RAISE EXCEPTION 'tuple concurrently updated' USING ERRCODE = 'XX000', HINT = 'crewflow-stage=' || v_stage;
+    END IF;
     -- Re-raise WITHOUT the inner statement: an error's CONTEXT would otherwise quote the EXECUTEd text (the verifier).
-    RAISE EXCEPTION 'crewflow_owner bootstrap failed (%)', SQLSTATE USING ERRCODE = SQLSTATE;
+    RAISE EXCEPTION 'crewflow_owner bootstrap failed (%)', SQLSTATE USING ERRCODE = SQLSTATE, HINT = 'crewflow-stage=' || v_stage;
+  END;
+END
+$bootstrap$;`;
+
+/**
+ * Q4b (plain-text fallback): the plain-text password and "must be set", as transaction-local custom settings sent as BIND
+ * PARAMETERS ($1, $2): never in a statement text, pg_stat_activity.query or pg_stat_statements; custom settings are
+ * per-backend (no other session can read them) and `true` drops them at the end of the transaction. A bind parameter IS
+ * logged with a logged statement, hence G1 / G2 first.
+ */
+export const OWNER_BOOTSTRAP_Q4B_PLAINTEXT_SET_INPUTS = `SELECT pg_catalog.set_config('crewflow_bootstrap.password', $1, true),
+       pg_catalog.set_config('crewflow_bootstrap.need_password', $2, true);`;
+
+/**
+ * Q4b3 (plain-text fallback, before Q4c): the server hashes a plain-text password with password_encryption, so it is pinned
+ * to scram-sha-256 for this transaction (never md5). User-settable; fixed text; the DO block re-checks it.
+ */
+export const OWNER_BOOTSTRAP_Q4B3_SCRAM_ONLY = `SELECT pg_catalog.set_config('password_encryption', 'scram-sha-256', true);`;
+
+/**
+ * G1 (plain-text fallback, in the write transaction, before the password is sent): switch off, for THIS transaction, every
+ * server log path that could record a bind parameter, wherever the admin login may (superuser, or GRANT SET ON PARAMETER,
+ * PostgreSQL 15+; a managed-service admin usually cannot). Best effort by design: G2 decides. Only parameters that exist on
+ * every supported major are named (has_parameter_privilege errors on an unknown name).
+ */
+export const OWNER_BOOTSTRAP_G1_QUIET_LOGS = `SELECT pg_catalog.set_config(s.name, s.value, true)
+  FROM (VALUES ('log_statement', 'none'),
+               ('log_min_duration_statement', '-1'),
+               ('log_min_duration_sample', '-1'),
+               ('log_transaction_sample_rate', '0'),
+               ('log_duration', 'off'),
+               ('log_parameter_max_length', '0'),
+               ('log_min_error_statement', 'panic')) AS s(name, value)
+ WHERE pg_catalog.has_parameter_privilege(s.name, 'SET');`;
+
+/**
+ * G2 (plain-text fallback, right after G1): may the plain-text password be sent? True only when no log or statistics view
+ * of this session can record it:
+ *   - a failing statement's parameters are never logged (log_parameter_max_length_on_error = 0, set by Q0);
+ *   - no statement of this session is logged (log_statement is not 'all', log_min_duration_statement = -1, log_duration
+ *     off, no sampled statement or transaction), OR parameters are never logged with a logged statement
+ *     (log_parameter_max_length = 0);
+ *   - auto_explain, when loaded, logs no plan or no parameters;
+ *   - pgaudit, when loaded, does not log parameters (it redacts the PASSWORD of CREATE / ALTER ROLE itself);
+ *   - pg_stat_statements, when loaded, does not record nested utility statements (track = 'all' with track_utility on would
+ *     store the EXECUTEd CREATE ROLE ... PASSWORD text with its literal).
+ * A setting that cannot be read is NULL, and anything but true is "unsafe": owner-bootstrap.ts then refuses (64) and the
+ * password is never sent. SELECT only; fixed text.
+ */
+export const OWNER_BOOTSTRAP_G2_LOG_SAFE = `SELECT COALESCE(
+         pg_catalog.current_setting('log_parameter_max_length_on_error') = '0'
+         AND (   s.max_len = '0'
+              OR (    s.stmt <> 'all'
+                  AND s.min_dur = '-1'
+                  AND s.duration = 'off'
+                  AND (s.min_dur_sample = '-1' OR s.sample_rate::float8 = 0)
+                  AND s.xact_rate::float8 = 0))
+         AND (s.ae_min_dur IS NULL OR s.ae_min_dur = '-1' OR s.ae_max_len = '0')
+         AND (s.pga_param IS NULL OR s.pga_param = 'off')
+         AND (s.pgss_track IS NULL OR s.pgss_track <> 'all' OR s.pgss_utility = 'off'),
+         false) AS safe
+  FROM (SELECT pg_catalog.max(setting) FILTER (WHERE name = 'log_parameter_max_length')               AS max_len,
+               pg_catalog.max(setting) FILTER (WHERE name = 'log_statement')                          AS stmt,
+               pg_catalog.max(setting) FILTER (WHERE name = 'log_min_duration_statement')             AS min_dur,
+               pg_catalog.max(setting) FILTER (WHERE name = 'log_duration')                           AS duration,
+               pg_catalog.max(setting) FILTER (WHERE name = 'log_min_duration_sample')                AS min_dur_sample,
+               pg_catalog.max(setting) FILTER (WHERE name = 'log_statement_sample_rate')              AS sample_rate,
+               pg_catalog.max(setting) FILTER (WHERE name = 'log_transaction_sample_rate')            AS xact_rate,
+               pg_catalog.max(setting) FILTER (WHERE name = 'auto_explain.log_min_duration')          AS ae_min_dur,
+               pg_catalog.max(setting) FILTER (WHERE name = 'auto_explain.log_parameter_max_length')  AS ae_max_len,
+               pg_catalog.max(setting) FILTER (WHERE name = 'pgaudit.log_parameter')                  AS pga_param,
+               pg_catalog.max(setting) FILTER (WHERE name = 'pg_stat_statements.track')               AS pgss_track,
+               pg_catalog.max(setting) FILTER (WHERE name = 'pg_stat_statements.track_utility')       AS pgss_utility
+          FROM pg_catalog.pg_settings) AS s;`;
+
+/**
+ * Q4c (plain-text fallback): the same role, attributes and grant as OWNER_BOOTSTRAP_Q4C_DO, with the plain-text password.
+ * Shape check before CREATE / ALTER ROLE: 32-1024 printable ASCII characters (the strength floor is checked before anything
+ * connects), never a string PostgreSQL would store as pre-hashed (a SCRAM-SHA-256 verifier or an md5 hash), and
+ * password_encryption must be scram-sha-256; anything else is 22023 at the check step. The same stage HINT and
+ * CONTEXT-stripping re-raise as OWNER_BOOTSTRAP_Q4C_DO (the EXECUTEd text holds the password).
+ */
+export const OWNER_BOOTSTRAP_Q4C_DO_PLAINTEXT = `DO $bootstrap$
+DECLARE
+  v_db       text := pg_catalog.current_database();
+  v_pw       text := pg_catalog.current_setting('crewflow_bootstrap.password');
+  v_set_pw   boolean := pg_catalog.current_setting('crewflow_bootstrap.need_password')::boolean;
+  v_stage    text := 'check';
+  v_msg      text;
+  r          record;
+BEGIN
+  BEGIN
+    SELECT oid, rolsuper, rolbypassrls, rolreplication, rolcreatedb, rolcanlogin, rolinherit
+      INTO r FROM pg_catalog.pg_roles WHERE rolname = 'crewflow_owner';
+    IF (NOT FOUND OR v_set_pw)
+       AND (v_pw IS NULL
+            OR NOT (v_pw OPERATOR(pg_catalog.~) '^[ -~]{32,1024}$')
+            OR v_pw OPERATOR(pg_catalog.~*) '^(scram-sha-256[$]|md5[0-9a-f]{32}$)'
+            OR pg_catalog.current_setting('password_encryption') OPERATOR(pg_catalog.<>) 'scram-sha-256') THEN
+      RAISE EXCEPTION 'not an acceptable plain-text password' USING ERRCODE = '22023';
+    END IF;
+    IF NOT FOUND THEN
+      v_stage := 'role';
+      EXECUTE pg_catalog.format(
+        'CREATE ROLE crewflow_owner LOGIN NOSUPERUSER NOBYPASSRLS NOREPLICATION NOCREATEDB CREATEROLE INHERIT PASSWORD %L',
+        v_pw);
+    ELSE
+      IF r.rolsuper OR r.rolbypassrls OR r.rolreplication OR r.rolcreatedb OR NOT r.rolcanlogin OR NOT r.rolinherit THEN
+        RAISE EXCEPTION 'crewflow_owner has privileged or wrong attributes' USING ERRCODE = '42501';
+      END IF;
+      IF v_set_pw THEN
+        v_stage := 'role';
+        EXECUTE pg_catalog.format('ALTER ROLE crewflow_owner PASSWORD %L', v_pw);
+      END IF;
+    END IF;
+    v_stage := 'grant';
+    IF NOT (pg_catalog.has_database_privilege('crewflow_owner', v_db, 'CONNECT WITH GRANT OPTION')
+        AND pg_catalog.has_database_privilege('crewflow_owner', v_db, 'CREATE WITH GRANT OPTION')
+        AND pg_catalog.has_database_privilege('crewflow_owner', v_db, 'TEMPORARY WITH GRANT OPTION')) THEN
+      EXECUTE pg_catalog.format('GRANT CONNECT, CREATE, TEMPORARY ON DATABASE %I TO crewflow_owner WITH GRANT OPTION', v_db);
+    END IF;
+  EXCEPTION WHEN OTHERS THEN
+    GET STACKED DIAGNOSTICS v_msg = MESSAGE_TEXT;
+    IF SQLSTATE = 'XX000' AND v_msg = 'tuple concurrently updated' THEN
+      RAISE EXCEPTION 'tuple concurrently updated' USING ERRCODE = 'XX000', HINT = 'crewflow-stage=' || v_stage;
+    END IF;
+    -- Re-raise WITHOUT the inner statement: an error's CONTEXT would otherwise quote the EXECUTEd text (the password).
+    RAISE EXCEPTION 'crewflow_owner bootstrap failed (%)', SQLSTATE USING ERRCODE = SQLSTATE, HINT = 'crewflow-stage=' || v_stage;
   END;
 END
 $bootstrap$;`;
@@ -319,4 +474,13 @@ export const OWNER_BOOTSTRAP_ADMIN_STATEMENTS = [
   OWNER_BOOTSTRAP_Q4D_REVERIFY,
   OWNER_BOOTSTRAP_COMMIT,
   OWNER_BOOTSTRAP_ROLLBACK,
+] as const;
+
+/** The statements the plain-text fallback adds to the admin session, in order (the spec checks none carries a secret). */
+export const OWNER_BOOTSTRAP_PLAINTEXT_STATEMENTS = [
+  OWNER_BOOTSTRAP_G1_QUIET_LOGS,
+  OWNER_BOOTSTRAP_G2_LOG_SAFE,
+  OWNER_BOOTSTRAP_Q4B3_SCRAM_ONLY,
+  OWNER_BOOTSTRAP_Q4B_PLAINTEXT_SET_INPUTS,
+  OWNER_BOOTSTRAP_Q4C_DO_PLAINTEXT,
 ] as const;
