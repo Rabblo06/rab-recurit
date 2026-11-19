@@ -205,9 +205,10 @@ function dbPasswordChecks(rel, services) {
     out.push([!Object.prototype.hasOwnProperty.call(env, 'PG_DATABASE_PASSWORD'), `${rel}: ${name} has no PG_DATABASE_PASSWORD variable (a compose interpolation value only)`]);
     // db-setup: production's bundled URL (CREWFLOW_BUNDLED_DB_ADMIN_URL), or dev / QA's pinned PG_ADMIN_URL (owner decision
     // 2026-11-17: the admin URL is PG_ADMIN_URL; PG_DATABASE_URL is only ever crewflow_owner).
-    const allowedKeys = name === 'db' ? ['POSTGRES_PASSWORD'] : name === 'db-setup' ? ['CREWFLOW_BUNDLED_DB_ADMIN_URL', 'PG_ADMIN_URL'] : [];
+    // db-harden (owner decision 2026-11-18, M1) holds exactly db-setup's database settings.
+    const allowedKeys = name === 'db' ? ['POSTGRES_PASSWORD'] : ADMIN_SERVICES.includes(name) ? ['CREWFLOW_BUNDLED_DB_ADMIN_URL', 'PG_ADMIN_URL'] : [];
     const holders = Object.entries(env).filter(([k, v]) => String(v ?? '').includes(DB_SENTINEL_PASSWORD) && !allowedKeys.includes(k)).map(([k]) => k);
-    out.push([holders.length === 0, `${rel}: ${name} carries the bundled db's password only as db's POSTGRES_PASSWORD or db-setup's bundled admin URL${holders.length ? ` (found in ${holders.join(', ')})` : ''}`]);
+    out.push([holders.length === 0, `${rel}: ${name} carries the bundled db's password only as db's POSTGRES_PASSWORD or the bundled admin URL of db-setup / db-harden${holders.length ? ` (found in ${holders.join(', ')})` : ''}`]);
     // Outside the environment (health check, command, entrypoint, labels): never, in any service.
     const rest = { ...(svc ?? {}) };
     delete rest.environment;
@@ -215,6 +216,14 @@ function dbPasswordChecks(rel, services) {
   }
   return out;
 }
+
+/**
+ * The services that may hold the admin login: the one-shot db-setup, and the one-shot CREATEROLE hardening db-harden (owner
+ * decision 2026-11-18, security review of PR #246, M1: the same image, entrypoint `./db-setup.sh harden`, db-setup's database
+ * settings, NO depends_on, and nothing depends on it).
+ */
+const ADMIN_SERVICES = Object.freeze(['db-setup', 'db-harden']);
+const HARDEN_ENTRYPOINT = Object.freeze(['./db-setup.sh', 'harden']);
 
 /** The retired setup volume (PR #125 option 2): db-setup's target file and crewflow_owner password file. Never again. */
 const RETIRED_TARGET_VOLUME = 'crewflow-db-target';
@@ -245,14 +254,14 @@ function urlFacts(value) {
  */
 function appPasswordChecks(rel, services, runtimeNames) {
   const out = [];
-  const holdersAllowed = ['db-setup', ...runtimeNames];
+  const holdersAllowed = [...ADMIN_SERVICES, ...runtimeNames];
   for (const [name, svc] of Object.entries(services)) {
     const env = envOf(svc ?? {});
     const keys = ['PG_DATABASE_APP_PASSWORD', 'CREWFLOW_DEV_DB_APP_PASSWORD', 'CREWFLOW_QA_DB_APP_PASSWORD'].filter((k) => Object.prototype.hasOwnProperty.call(env, k));
     out.push([keys.length === 0, `${rel}: ${name} has no crewflow_owner password variable (a compose interpolation value only)${keys.length ? ` (found ${keys.join(', ')})` : ''}`]);
     const allowedKeys = holdersAllowed.includes(name) ? ['PG_DATABASE_URL'] : [];
     const holders = Object.entries(env).filter(([k, v]) => String(v ?? '').includes(APP_SENTINEL_PASSWORD) && !allowedKeys.includes(k)).map(([k]) => k);
-    out.push([holders.length === 0, `${rel}: ${name} carries the crewflow_owner password only inside PG_DATABASE_URL of db-setup, ${runtimeNames.join(', ')}${holders.length ? ` (found in ${holders.join(', ')})` : ''}`]);
+    out.push([holders.length === 0, `${rel}: ${name} carries the crewflow_owner password only inside PG_DATABASE_URL of db-setup, db-harden, ${runtimeNames.join(', ')}${holders.length ? ` (found in ${holders.join(', ')})` : ''}`]);
     const rest = { ...(svc ?? {}) };
     delete rest.environment;
     out.push([!JSON.stringify(rest).includes(APP_SENTINEL_PASSWORD), `${rel}: ${name} carries the crewflow_owner password nowhere outside its environment (health check, command, labels)`]);
@@ -287,7 +296,7 @@ function retiredTargetVolumeChecks(rel, model) {
  * helm/twenty/templates/deployment-server.yaml:82-155, deployment-worker.yaml:81-88). Pure: [ok, label] pairs.
  * `runtimeNames` = [api, worker]. Labels name services and variables only, never a value.
  */
-function dbSetupContractChecks(rel, services, [apiName, workerName]) {
+function dbSetupContractChecks(rel, services, [apiName, workerName], { requireHarden = false } = {}) {
   const out = [];
   const setup = services['db-setup'];
   out.push([Boolean(setup), `${rel}: has the one-shot db-setup service`]);
@@ -319,12 +328,50 @@ function dbSetupContractChecks(rel, services, [apiName, workerName]) {
   if (services[apiName]) {
     out.push([services[apiName].depends_on?.['db-setup']?.condition === 'service_completed_successfully', `${rel}: ${apiName} starts only after db-setup completed successfully`]);
   }
-  // PG_ADMIN_URL with a value: db-setup only.
-  const admins = Object.entries(services).filter(([n, svc]) => n !== 'db-setup' && String(envOf(svc ?? {}).PG_ADMIN_URL ?? '') !== '').map(([n]) => n);
-  out.push([admins.length === 0, `${rel}: only db-setup has a PG_ADMIN_URL value${admins.length ? ` (found on ${admins.join(', ')})` : ''}`]);
+  // PG_ADMIN_URL with a value: db-setup and db-harden only.
+  const admins = Object.entries(services).filter(([n, svc]) => !ADMIN_SERVICES.includes(n) && String(envOf(svc ?? {}).PG_ADMIN_URL ?? '') !== '').map(([n]) => n);
+  out.push([admins.length === 0, `${rel}: only db-setup / db-harden have a PG_ADMIN_URL value${admins.length ? ` (found on ${admins.join(', ')})` : ''}`]);
+  out.push(...dbHardenContractChecks(rel, services, apiName, { required: requireHarden }));
   // Security review I6: db-setup, the API and the Worker run ONE image (they cannot drift apart).
   const images = [setup, services[apiName], services[workerName]].map((s) => String(s?.image ?? ''));
   out.push([images[0] !== '' && images.every((i) => i === images[0]), `${rel}: db-setup, ${apiName} and ${workerName} run the same image`]);
+  return out;
+}
+
+/**
+ * Owner decision 2026-11-18 (security review of PR #246, M1): the one-shot db-harden service in one rendered model. Pure:
+ * [ok, label] pairs. `required`: the production file must have it; the dev / QA files may omit it (when present, the same
+ * rules). It runs `./db-setup.sh harden` on db-setup's image, with EXACTLY db-setup's database settings (PG_ADMIN_URL,
+ * PG_DATABASE_URL, CREWFLOW_BUNDLED_DB_ADMIN_URL), restart "no", no port, the CA read-only, no APP_SECRET, 1000:1000 with a
+ * read-only root, and NO depends_on (it polls by itself; OpenShip drops conditions). No service may depend on it.
+ */
+function dbHardenContractChecks(rel, services, apiName, { required = false } = {}) {
+  const out = [];
+  const waiters = Object.entries(services).filter(([, svc]) => {
+    const deps = svc?.depends_on;
+    return (Array.isArray(deps) ? deps : Object.keys(deps ?? {})).includes('db-harden');
+  }).map(([n]) => n);
+  out.push([waiters.length === 0, `${rel}: no service depends on db-harden (it never blocks ${apiName} or the Worker)${waiters.length ? ` (found on ${waiters.join(', ')})` : ''}`]);
+  const h = services['db-harden'];
+  if (!h) {
+    if (required) out.push([false, `${rel}: has the one-shot db-harden service (owner decision 2026-11-18, M1)`]);
+    return out;
+  }
+  const setup = services['db-setup'] ?? {};
+  const env = envOf(h);
+  const setupEnv = envOf(setup);
+  out.push([JSON.stringify(h.entrypoint ?? null) === JSON.stringify(HARDEN_ENTRYPOINT) && !h.command, `${rel}: db-harden runs exactly ./db-setup.sh harden (entrypoint, no command)`]);
+  out.push([String(h.image ?? '') !== '' && String(h.image) === String(setup.image ?? ''), `${rel}: db-harden runs db-setup's image`]);
+  out.push([String(h.restart ?? 'no') === 'no', `${rel}: db-harden restart is "no" (one-shot)`]);
+  out.push([!(h.ports ?? []).length, `${rel}: db-harden publishes no port`]);
+  const deps = h.depends_on;
+  out.push([!deps || (Array.isArray(deps) ? deps.length === 0 : Object.keys(deps).length === 0), `${rel}: db-harden has no depends_on (it waits for the database and the ledger by itself)`]);
+  out.push([mountAt(h, DB_CA_DIR)?.read_only === true, `${rel}: db-harden mounts the db CA read-only`]);
+  out.push([!Object.prototype.hasOwnProperty.call(env, 'APP_SECRET'), `${rel}: db-harden has no APP_SECRET`]);
+  out.push([String(h.user ?? '') === '1000:1000' && h.read_only === true, `${rel}: db-harden runs as 1000:1000 with a read-only root`]);
+  for (const key of ['PG_ADMIN_URL', 'PG_DATABASE_URL', 'CREWFLOW_BUNDLED_DB_ADMIN_URL']) {
+    out.push([Object.prototype.hasOwnProperty.call(env, key) === Object.prototype.hasOwnProperty.call(setupEnv, key) && String(env[key] ?? '') === String(setupEnv[key] ?? ''), `${rel}: db-harden's ${key} is exactly db-setup's`]);
+  }
   return out;
 }
 
@@ -550,7 +597,7 @@ function main(options = {}) {
     for (const [ok, label] of appPasswordChecks(rel, services, runtimeNames)) check(ok, label);
     for (const [ok, label] of retiredTargetVolumeChecks(rel, model)) check(ok, label);
     if (dbSetup) {
-      for (const [ok, label] of dbSetupContractChecks(rel, services, runtimeNames)) check(ok, label);
+      for (const [ok, label] of dbSetupContractChecks(rel, services, runtimeNames, { requireHarden: rel === PRODUCTION_FILE })) check(ok, label);
       for (const [ok, label] of dbVolumeMountChecks(rel, services)) check(ok, label);
       for (const [ok, label] of dbServerLockChecks(rel, services)) check(ok, label);
       const text = fs.readFileSync(path.join(REPO, rel), 'utf8');
@@ -632,6 +679,8 @@ module.exports = {
   appPasswordChecks,
   retiredTargetVolumeChecks,
   dbSetupContractChecks,
+  dbHardenContractChecks,
+  ADMIN_SERVICES,
   bundledDbParityChecks,
   DEV_DB_DATA_VOLUME,
   EXTERNAL_DB_VOLUMES,

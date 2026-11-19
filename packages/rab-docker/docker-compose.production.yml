@@ -573,6 +573,52 @@ services:
     cpus: 1
     stop_grace_period: 40s
 
+  # ---------------------------------------------------------------------------
+  # db-harden — the ONE-SHOT CREATEROLE hardening (owner decision 2026-11-18, security review of PR #246, M1: "auto-close
+  # plus a grace period"). crewflow_owner is created CREATEROLE because the first start's migrate child creates the schema
+  # roles. This service closes that window in the SAME deploy: the same image and code path as db-setup (db-setup.sh
+  # harden -> the bootstrap child's CREATEROLE step), the same database settings. It polls READ-ONLY (a crewflow_owner
+  # session reads the migration ledger) until the ledger holds every migration of this image, bounded by
+  # CREWFLOW_DB_HARDEN_TIMEOUT_SECONDS (default 1200, 60-7200), then, as the admin, under the advisory lock and after the
+  # other-database check, removes CREATEROLE and the mark (ALTER ROLE crewflow_owner NOCREATEROLE; COMMENT ON ROLE
+  # crewflow_owner IS NULL) and exits 0. Already hardened: no-op, exit 0. Timeout: a clear error, a non-zero exit,
+  # nothing changed (the next `docker compose up -d` retries; db-setup also removes it once the schema is complete).
+  # Mode c (no PG_ADMIN_URL, CREWFLOW_BUNDLED_DB=0): nothing to do, exit 0 (the operator removes CREATEROLE by hand within
+  # the mark's grace period). NO depends_on at all, and NOTHING depends on it: it never blocks rab-api or rab-worker, and
+  # it does not rely on depends_on conditions (OpenShip drops them): it waits for the database and the ledger by itself.
+  # The only other service besides db-setup that receives the admin login (compose-owner-login.cjs enforces the shape).
+  # ---------------------------------------------------------------------------
+  db-harden:
+    image: ${CREWFLOW_IMAGE_REPOSITORY:-adhin007/adolphus}@${CREWFLOW_IMAGE_TAG:-sha256:1a561e4becec32861338311d0d6857b10d9d84581c53061fc7c1d3df4af09b6b}
+    entrypoint: ["./db-setup.sh", "harden"]
+    environment:
+      # db-setup's database settings, exactly (the same modes and refusals): PG_ADMIN_URL (b), the crewflow_owner URL,
+      # the bundled db switch and its superuser URL (a). rab-api and rab-worker NEVER receive the admin login.
+      PG_ADMIN_URL: ${PG_ADMIN_URL:-}
+      PG_DATABASE_URL: ${PG_DATABASE_URL:-postgresql://crewflow_owner:${PG_DATABASE_APP_PASSWORD:-}@db:5432/crewflow?sslmode=verify-full}
+      CREWFLOW_BUNDLED_DB: ${CREWFLOW_BUNDLED_DB:-1}
+      CREWFLOW_BUNDLED_DB_ADMIN_URL: postgresql://postgres:${PG_DATABASE_PASSWORD:-}@db:5432/crewflow?sslmode=verify-full
+      PG_SSL_CA_CERT_PATH:
+      PG_SSL_CA_CERT:
+      # How long it waits (read-only polls) for the ledger to hold every migration of this image: 60-7200 s.
+      CREWFLOW_DB_HARDEN_TIMEOUT_SECONDS: ${CREWFLOW_DB_HARDEN_TIMEOUT_SECONDS:-1200}
+      NODE_ENV: production
+      RAB_RUNTIME_ENV: production
+    networks: [default, crewflow-db]
+    volumes:
+      # The bundled db's own CA (read-only; db-setup.sh sets PG_SSL_CA_CERT_PATH for host db).
+      - crewflow-db-ca:/run/crewflow/db-ca:ro
+    restart: "no"
+    logging: *logging
+    user: "1000:1000"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    pids_limit: 64
+    mem_limit: 256m
+    cpus: 1
+    stop_grace_period: 30s
+
   # rab-api — the HTTP API. Migrates on start, registers the job schedulers, then serves (O3). ONE instance (C5).
   rab-api:
     image: ${CREWFLOW_IMAGE_REPOSITORY:-adhin007/adolphus}@${CREWFLOW_IMAGE_TAG:-sha256:1a561e4becec32861338311d0d6857b10d9d84581c53061fc7c1d3df4af09b6b}

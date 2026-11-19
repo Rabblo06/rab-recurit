@@ -41,14 +41,38 @@ import { PREAUTH_DEFINER_EXPRESSION, PREAUTH_FORCE_TABLES, preauthDefinerPolicyN
 export const OWNER_LOGIN_ROLE = 'crewflow_owner';
 
 /**
- * CREATEROLE after the schema bootstrap (owner decision 2026-11-18): crewflow_owner needs CREATEROLE only for the first start
- * (the migrate child creates the schema roles). db-setup, with the admin login, removes it once the schema is complete and,
- * until then, marks the role with this exact COMMENT (COMMENT ON ROLE needs CREATEROLE + ADMIN OPTION on the role, or
- * superuser: crewflow_owner cannot set or clear it on itself). The boot gate (database-boot-gate-rules.ts assertCreateRoleGate)
- * refuses, in production, a CREATEROLE crewflow_owner WITHOUT this mark: one that was never meant to keep it, or one an admin
- * re-granted after db-setup removed it. Fixed text, no quote character (it is interpolated into SQL text).
+ * CREATEROLE after the schema bootstrap (owner decisions 2026-11-18, incl. M1 "auto-close plus a grace period"):
+ * crewflow_owner needs CREATEROLE only for the first start (the migrate child creates the schema roles). An ADMIN marks the
+ * role with the COMMENT `crewflow:createrole-until-schema-current:<unix expiry>` (db-setup, or by hand in mode c), the
+ * expiry computed by the SERVER as now + OWNER_CREATEROLE_GRACE_SECONDS. COMMENT ON ROLE needs superuser, or CREATEROLE + ADMIN
+ * OPTION on the role: crewflow_owner can neither set, clear nor extend it on itself (proved live, harness L4). db-harden (modes
+ * a and b) removes CREATEROLE and the mark as soon as the schema is complete; in mode c the operator does. The boot gate
+ * (database-boot-gate-rules.ts assertCreateRoleGate) refuses, in production, a CREATEROLE crewflow_owner WITHOUT a valid mark
+ * (one never meant to keep it, or re-granted after the NOCREATEROLE step) and one whose mark has EXPIRED (by the server clock);
+ * an unexpired mark is a warning. Fixed text, no quote character (interpolated into SQL text).
  */
-export const OWNER_CREATEROLE_PENDING_COMMENT = 'crewflow:createrole-until-schema-current';
+export const OWNER_CREATEROLE_MARK_PREFIX = 'crewflow:createrole-until-schema-current:';
+/** The grace period an admin's mark grants (24 h, owner decision M1). */
+export const OWNER_CREATEROLE_GRACE_SECONDS = 86400;
+/** A valid mark, as a POSIX regular expression for SQL (no quote character): the prefix and a 1-12 digit unix expiry. */
+export const OWNER_CREATEROLE_MARK_SQL_RE = '^crewflow:createrole-until-schema-current:[0-9]{1,12}$';
+
+/**
+ * Two SQL column expressions over a role's COMMENT expression (`comment` is SQL text such as
+ * `pg_catalog.shobj_description(o.oid, 'pg_authid')`, a code constant): is it a valid mark, and has it expired (server clock).
+ * Both are never NULL. The expiry is parsed only when the mark matches, so a foreign comment never fails the cast.
+ */
+export function createRoleMarkColumnsSql(comment: string, pendingAlias: string, expiredAlias: string): string {
+  return (
+    `COALESCE(${comment} OPERATOR(pg_catalog.~) '${OWNER_CREATEROLE_MARK_SQL_RE}', false) AS ${pendingAlias},
+` +
+    `       COALESCE(CASE WHEN ${comment} OPERATOR(pg_catalog.~) '${OWNER_CREATEROLE_MARK_SQL_RE}'
+` +
+    `                     THEN pg_catalog.split_part(${comment}, ':', 3)::bigint <= pg_catalog.date_part('epoch', pg_catalog.now())::bigint END,
+` +
+    `                false) AS ${expiredAlias}`
+  );
+}
 
 /** The roles the Option A bootstrap creates (M0 §5.2). */
 export const OWNER_SCHEMA_ROLES: readonly string[] = ['rab_owner', 'rab_app', 'rab_secure_owner', 'crewflow'];

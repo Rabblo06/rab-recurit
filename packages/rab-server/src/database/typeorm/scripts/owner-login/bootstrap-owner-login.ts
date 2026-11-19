@@ -15,11 +15,20 @@
  * {...}` line (enums, booleans, a SQLSTATE). Never a URL, a password, a verifier, a host, a database, a login name or a
  * file path. Deliberately does NOT import dotenv: the deployment environment is the only source.
  */
-import { OWNER_BOOTSTRAP_LOG_PREFIX, resultLine, runOwnerBootstrap } from './owner-bootstrap';
+import { OWNER_BOOTSTRAP_LOG_PREFIX, resultLine, runOwnerBootstrap, runOwnerHarden } from './owner-bootstrap';
 
+/**
+ * Arguments: none (db-setup) or exactly `--harden` (db-harden, owner decision M1: wait read-only until the schema is complete,
+ * then remove CREATEROLE and the mark; `db-setup.sh harden`). Anything else is refused (64) before anything runs.
+ */
 async function main(): Promise<number> {
   const log = (line: string) => process.stdout.write(`${OWNER_BOOTSTRAP_LOG_PREFIX} ${line}\n`);
-  const result = await runOwnerBootstrap(process.env, { log });
+  const args = process.argv.slice(2);
+  if (args.length > 1 || (args.length === 1 && args[0] !== '--harden')) {
+    log('The bootstrap child takes no argument, or exactly --harden. Refusing.');
+    return 64;
+  }
+  const result = args[0] === '--harden' ? await runOwnerHarden(process.env, { log }) : await runOwnerBootstrap(process.env, { log });
   process.stdout.write(`${resultLine(result)}\n`);
   return result.exitCode;
 }

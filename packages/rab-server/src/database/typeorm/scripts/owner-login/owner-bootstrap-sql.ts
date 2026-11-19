@@ -13,7 +13,7 @@
  * Changing ANY of these strings is a security-reviewed change: the plan's §3.6 log/visibility analysis depends on them.
  */
 
-import { OWNER_CREATEROLE_PENDING_COMMENT } from '../../../boot-checks/owner-login-posture';
+import { createRoleMarkColumnsSql, OWNER_CREATEROLE_GRACE_SECONDS, OWNER_CREATEROLE_MARK_PREFIX } from '../../../boot-checks/owner-login-posture';
 
 /**
  * "crewboot" (0x63726577626f6f74). Transaction-scoped: every db-setup write (the role, its password, the grant, the
@@ -59,10 +59,11 @@ export const OWNER_BOOTSTRAP_Q1_SUPERUSER_LOGGING = `SELECT pg_catalog.set_confi
  * Q2 (REVISED, security review H1): the facts, one read, no writes. (`pg_maintain` exists only on PG17+; naming a missing
  * role in IN (...) is harmless.) Two new facts for the admin path's refusal: o_owns_db (crewflow_owner owns the current
  * database, directly or through any role membership: MEMBER, re-review N2) and search_path_default_set (a database-wide or crewflow_owner-level
- * search_path default exists in pg_db_role_setting). And (owner decision 2026-11-18) o_createrole_pending: crewflow_owner carries
- * db-setup's "CREATEROLE until the schema is current" comment (OWNER_CREATEROLE_PENDING_COMMENT; false when it is missing).
+ * search_path default exists in pg_db_role_setting). And (owner decisions 2026-11-18) o_createrole_pending / o_createrole_mark_expired:
+ * crewflow_owner carries a valid "CREATEROLE until the schema is current" mark (owner-login-posture.ts), and it has expired by
+ * the server clock (both false when the role or the mark is missing).
  */
-// sql-injection-reviewed: the only interpolation is OWNER_CREATEROLE_PENDING_COMMENT, a fixed code constant without quotes.
+// sql-injection-reviewed: the only interpolation is createRoleMarkColumnsSql over a fixed column expression and quote-free code constants.
 export const OWNER_BOOTSTRAP_Q2_FACTS = `SELECT pg_catalog.current_setting('server_version_num')::int                      AS server_version_num,
        current_user::text                                                         AS admin,
        a.rolsuper                                                                 AS admin_super,
@@ -97,8 +98,7 @@ export const OWNER_BOOTSTRAP_Q2_FACTS = `SELECT pg_catalog.current_setting('serv
         AND pg_catalog.has_database_privilege(o.oid, pg_catalog.current_database(), 'TEMPORARY WITH GRANT OPTION'))
                                                                                   AS o_has_db_grant,
        (o.oid IS NOT NULL AND pg_catalog.pg_has_role(o.oid, d.datdba, 'MEMBER')) AS o_owns_db,
-       COALESCE(pg_catalog.shobj_description(o.oid, 'pg_authid') = '${OWNER_CREATEROLE_PENDING_COMMENT}', false)
-                                                                                  AS o_createrole_pending,
+       ${createRoleMarkColumnsSql("pg_catalog.shobj_description(o.oid, 'pg_authid')", 'o_createrole_pending', 'o_createrole_mark_expired')},
        EXISTS (SELECT 1
                  FROM pg_catalog.pg_db_role_setting s
                  CROSS JOIN LATERAL pg_catalog.unnest(s.setconfig) AS c(setting)
@@ -222,26 +222,52 @@ export const OWNER_SCHEMA_S1_HAS_LEDGER = `SELECT pg_catalog.to_regclass('core.m
 /** S2 (read-only, on the crewflow_owner session, only when S1 is true): the migration names in the ledger (as install-state.ts reads them). */
 export const OWNER_SCHEMA_S2_LEDGER = `SELECT name FROM core.migrations;`;
 
+/**
+ * The migration lock ("crewmigr", migration-lock.ts MIGRATION_LOCK_KEY, the same 64-bit value): the CREATEROLE removal runs only
+ * while NO migrate child holds it. Fresh-install race found in review: after the ledger is complete, the migrate child still
+ * runs disableLegacyLogins (ALTER ROLE crewflow NOLOGIN PASSWORD NULL ...), which needs crewflow_owner's CREATEROLE; a removal
+ * in that gap would leave the legacy logins LOGIN (BC-17) with only a warning. Session-level try-lock (never blocks), taken
+ * right before the removal transaction and released after it; owner-bootstrap.spec.ts proves the value equals
+ * MIGRATION_LOCK_KEY.
+ */
+export const MIGRATION_LOCK_KEY_DECIMAL = '7165901520711018354';
+// sql-injection-reviewed: MIGRATION_LOCK_KEY_DECIMAL is this module's numeric string constant, never input.
+export const OWNER_HARDEN_M1_TRY_MIGRATION_LOCK = `SELECT pg_catalog.pg_try_advisory_lock(${MIGRATION_LOCK_KEY_DECIMAL}) AS got;`;
+// sql-injection-reviewed: MIGRATION_LOCK_KEY_DECIMAL is this module's numeric string constant, never input.
+export const OWNER_HARDEN_M2_RELEASE_MIGRATION_LOCK = `SELECT pg_catalog.pg_advisory_unlock(${MIGRATION_LOCK_KEY_DECIMAL}) AS released;`;
+
 /** H1 (admin, in a transaction under OWNER_BOOTSTRAP_Q4A_LOCK): the hardening itself. */
 export const OWNER_HARDEN_H1_NOCREATEROLE = `ALTER ROLE crewflow_owner NOCREATEROLE;`;
 
 /** H2 (admin, same transaction): the pending mark is removed with the attribute (only when it is there). */
 export const OWNER_HARDEN_H2_CLEAR_MARK = `COMMENT ON ROLE crewflow_owner IS NULL;`;
 
-/** H3 (admin, in a transaction under the lock): the schema is not complete yet and crewflow_owner is CREATEROLE: mark it. */
-// sql-injection-reviewed: the only interpolation is OWNER_CREATEROLE_PENDING_COMMENT, a fixed code constant without quotes.
-export const OWNER_HARDEN_H3_MARK_PENDING = `COMMENT ON ROLE crewflow_owner IS '${OWNER_CREATEROLE_PENDING_COMMENT}';`;
+/**
+ * H3 (admin, in a transaction under the lock): the schema is not complete yet and crewflow_owner is CREATEROLE, unmarked or with
+ * an expired mark: mark it until now + the grace period, by the SERVER clock (COMMENT takes only a literal, hence the DO block;
+ * the text is fixed: the prefix and an integer, no input).
+ */
+// sql-injection-reviewed: the only interpolations are OWNER_CREATEROLE_MARK_PREFIX (a quote-free code constant) and OWNER_CREATEROLE_GRACE_SECONDS (a code integer).
+export const OWNER_HARDEN_H3_MARK_PENDING = `DO $mark$
+BEGIN
+  EXECUTE pg_catalog.format('COMMENT ON ROLE crewflow_owner IS %L',
+    '${OWNER_CREATEROLE_MARK_PREFIX}' || (pg_catalog.date_part('epoch', pg_catalog.now())::bigint + ${OWNER_CREATEROLE_GRACE_SECONDS})::text);
+END
+$mark$;`;
 
 /** Every statement the CREATEROLE step's admin session may send, in order (the spec checks none can carry a secret). */
 export const OWNER_HARDEN_ADMIN_STATEMENTS = [
+  OWNER_HARDEN_M1_TRY_MIGRATION_LOCK,
   OWNER_BOOTSTRAP_BEGIN,
   OWNER_BOOTSTRAP_Q4A_LOCK,
   OWNER_BOOTSTRAP_Q2_FACTS,
+  OWNER_BOOTSTRAP_Q2B_OTHER_DATABASES,
   OWNER_HARDEN_H1_NOCREATEROLE,
   OWNER_HARDEN_H2_CLEAR_MARK,
   OWNER_HARDEN_H3_MARK_PENDING,
   OWNER_BOOTSTRAP_COMMIT,
   OWNER_BOOTSTRAP_ROLLBACK,
+  OWNER_HARDEN_M2_RELEASE_MIGRATION_LOCK,
 ] as const;
 
 /*

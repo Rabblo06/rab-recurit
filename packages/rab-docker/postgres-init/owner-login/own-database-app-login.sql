@@ -137,14 +137,20 @@ $preflight$;
 CREATE ROLE crewflow_owner LOGIN NOSUPERUSER NOBYPASSRLS NOREPLICATION NOCREATEDB CREATEROLE INHERIT;
 -- (5b) Owner decision 2026-11-18: the CREATEROLE mark, the same statement db-setup sends (OWNER_HARDEN_H3_MARK_PENDING). In
 --     production rab-api, rab-worker and the CLI refuse a CREATEROLE crewflow_owner at boot UNLESS it carries exactly this
---     comment, which says "CREATEROLE until the schema is current" (database-boot-gate-rules.ts assertCreateRoleGate), and
+--     comment, which says "CREATEROLE until the schema is current" until an expiry 24 h from now, by the SERVER clock
+--     (owner decision M1; database-boot-gate-rules.ts assertCreateRoleGate), and
 --     db-setup (without PG_ADMIN_URL) refuses an unmarked CREATEROLE crewflow_owner before the first start for the same
 --     reason. Step 10 removes the attribute and the mark together.
 --     NEEDS  SUPERUSER, or CREATEROLE plus the ADMIN option on crewflow_owner (step 5 gave the creating admin that).
 --     WHY    crewflow_owner itself can not set or clear it (it has no ADMIN option on itself), so the mark records the
 --            admin's intent: an admin who later re-grants CREATEROLE without it is refused at the next boot.
 --     NO-CR  NO.
-COMMENT ON ROLE crewflow_owner IS 'crewflow:createrole-until-schema-current';
+DO $mark$
+BEGIN
+  EXECUTE pg_catalog.format('COMMENT ON ROLE crewflow_owner IS %L',
+    'crewflow:createrole-until-schema-current:' || (pg_catalog.date_part('epoch', pg_catalog.now())::bigint + 86400)::text);
+END
+$mark$;
 
 -- (6) Its database rights, on THIS database only (the one psql is connected to; the name comes from the server, never
 --     typed by you). The same statement as db-setup's.

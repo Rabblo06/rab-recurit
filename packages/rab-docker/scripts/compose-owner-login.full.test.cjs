@@ -48,6 +48,7 @@ test('every committed combination passes every check', { skip }, () => {
 
 const PT = 'pass-through';
 const SETUP = gate.DB_SETUP_SERVICE;
+const HARDEN = gate.DB_HARDEN_SERVICE;
 
 // Owner decision 2026-11-18 (Twenty's way): rab-api and rab-worker receive PG_DATABASE_URL = the crewflow_owner URL, the
 // SAME rendered value as db-setup's, from the one committed expression.
@@ -132,7 +133,7 @@ test('the admin login reaches db-setup alone: the bundled superuser URL by defau
   const m = fresh(REL);
   for (const [name, svc] of Object.entries(m.services)) {
     for (const [key, value] of Object.entries(svc.environment ?? {})) {
-      if (String(value).includes(gate.SENTINEL_APP_PW)) assert.ok([...APP, SETUP].includes(name) && key === 'PG_DATABASE_URL', `${name} ${key}`);
+      if (String(value).includes(gate.SENTINEL_APP_PW)) assert.ok([...APP, SETUP, HARDEN].includes(name) && key === 'PG_DATABASE_URL', `${name} ${key}`);
     }
   }
   // With your own database's URL the bundled crewflow_owner password is used nowhere at all.
@@ -182,6 +183,49 @@ test('DENIAL option A: db-setup must keep exactly its one-shot shape', { skip },
     ];
     for (const [mutate, pattern] of cases) assertRefused(problemsAfter(c, mutate), pattern);
   }
+});
+
+// Owner decision 2026-11-18 (security review of PR #246, M1): the one-shot db-harden service, rendered.
+test('db-harden renders with exactly db-setup\'s database settings, its own entrypoint and timeout, no depends_on; nothing depends on it', { skip }, () => {
+  for (const c of COMBOS) {
+    const m = fresh(c.name);
+    const h = m.services[HARDEN];
+    assert.ok(h, `${c.name}: db-harden`);
+    assert.deepEqual(h.entrypoint, ['./db-setup.sh', 'harden'], c.name);
+    for (const key of gate.DB_SETUP_DB_KEYS) assert.equal(h.environment[key], m.services[SETUP].environment[key], `${c.name} ${key}`);
+    assert.equal(h.environment[gate.HARDEN_TIMEOUT_KEY], '1200', c.name);
+    assert.equal(h.depends_on, undefined, `${c.name}: db-harden has no depends_on`);
+    for (const [name, svc] of Object.entries(m.services)) assert.ok(!Object.keys(svc.depends_on ?? {}).includes(HARDEN), `${c.name}: ${name} depends on db-harden`);
+  }
+  // compose.env's value reaches it (bounded by the lint and the child).
+  const custom = renderModels([combo(DEF)], [`${gate.HARDEN_TIMEOUT_KEY}=600`]);
+  assert.equal(custom[DEF].services[HARDEN].environment[gate.HARDEN_TIMEOUT_KEY], '600');
+});
+
+test('DENIAL db-harden (rendered): its shape, its database settings, any depends_on, and any service that waits for it', { skip }, () => {
+  for (const c of [REL, EXT, PT, 'staging']) {
+    const cases = [
+      [(s) => { delete s[HARDEN]; }, /services are .*expected/],
+      [(s) => { s[HARDEN].depends_on = { db: { condition: 'service_healthy' } }; }, /db-harden: has depends_on/],
+      [(s) => { s['rab-api'].depends_on[HARDEN] = { condition: 'service_completed_successfully', required: true }; }, /rab-api: depends on db-harden/],
+      [(s) => { s['rab-worker'].depends_on[HARDEN] = { condition: 'service_started', required: true }; }, /rab-worker: depends on db-harden/],
+      [(s) => { s[HARDEN].entrypoint = ['./db-setup.sh']; }, /db-harden: entrypoint is not exactly \.\/db-setup\.sh harden/],
+      [(s) => { s[HARDEN].image = s[HARDEN].image.replace(/sha256:0/, 'sha256:1'); }, /db-harden: image differs from rab-api/],
+      [(s) => { s[HARDEN].restart = 'unless-stopped'; }, /db-harden: restart is "unless-stopped", expected "no"/],
+      [(s) => { s[HARDEN].environment.PG_DATABASE_URL = gate.SENTINEL_ADMIN_URL; }, /db-harden: PG_DATABASE_URL is not db-setup's committed value/],
+      [(s) => { s[HARDEN].environment[gate.HARDEN_TIMEOUT_KEY] = '30'; }, /db-harden: CREWFLOW_DB_HARDEN_TIMEOUT_SECONDS is "30"/],
+      [(s) => { s[HARDEN].environment.APP_SECRET = gate.SENTINEL_APP_SECRET; }, /db-harden: has APP_SECRET/],
+      [(s) => { s[HARDEN].user = '0:0'; }, /db-harden: user "0:0" is root/],
+      [(s) => { s[HARDEN].cap_drop = []; }, /db-harden: cap_drop ALL is missing/],
+      [(s) => { s[HARDEN].volumes = s[HARDEN].volumes.filter((v) => v.source !== 'crewflow-db-ca'); }, /db-harden: does not mount the bundled db's CA read-only/],
+      // The timeout belongs to db-harden only.
+      [(s) => { s['rab-api'].environment[gate.HARDEN_TIMEOUT_KEY] = '1200'; }, /rab-api: has CREWFLOW_DB_HARDEN_TIMEOUT_SECONDS/],
+    ];
+    for (const [mutate, pattern] of cases) assertRefused(problemsAfter(c, mutate), pattern);
+  }
+  // The admin password reaches db-harden only in its PG_ADMIN_URL (mode b), the bundled db's only in its superuser URL.
+  assertRefused(problemsAfter(EXT, (s) => { s[HARDEN].environment.OTHER = gate.SENTINEL_ADMIN_PW; }), /db-harden: received the database admin credential \(OTHER\)/);
+  assertRefused(problemsAfter(REL, (s) => { s[HARDEN].environment.OTHER = gate.SENTINEL_DB_PW; }), /db-harden: OTHER carries the bundled db's password/);
 });
 
 test('DENIAL DB-SETUP: the bundled db password reaches no container except db (POSTGRES_PASSWORD) and db-setup\'s bundled superuser URL', { skip }, () => {

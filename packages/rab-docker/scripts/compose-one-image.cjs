@@ -116,9 +116,12 @@ function checkModel(model, label, { allowDefaultDigest = false } = {}) {
     if (Array.isArray(s?.profiles) && s.profiles.length) p(`${name}: has profiles ${JSON.stringify(s.profiles)} (a deploy file has no profile-gated service; every service starts with the stack)`);
   }
 
-  // PR #125 option A: the one-shot db-setup runs the SAME image (the bootstrap child ships in it).
-  const appServices = ['rab-api', 'rab-worker', 'db-setup'].filter((n) => n !== 'db-setup' || services[n]);
-  if (!services['db-setup']) p('db-setup is missing (PR #125 option A: the one-shot database setup, the only service with the admin URL)');
+  // PR #125 option A: the one-shot db-setup runs the SAME image (the bootstrap child ships in it); so does the one-shot
+  // db-harden (owner decision 2026-11-18, security review of PR #246, M1: `./db-setup.sh harden`, the same child).
+  const oneShots = ['db-setup', 'db-harden'];
+  const appServices = ['rab-api', 'rab-worker', ...oneShots].filter((n) => !oneShots.includes(n) || services[n]);
+  if (!services['db-setup']) p('db-setup is missing (PR #125 option A: the one-shot database setup, with db-harden the only service with the admin URL)');
+  if (!services['db-harden']) p('db-harden is missing (owner decision 2026-11-18, M1: the one-shot CREATEROLE hardening)');
   for (const name of appServices) {
     const s = services[name];
     if (s.build !== undefined) p(`${name}: has a build section (a server never builds; use the gated image)`);
@@ -168,12 +171,20 @@ function checkModel(model, label, { allowDefaultDigest = false } = {}) {
   if (api.depends_on?.db?.condition !== 'service_healthy') p('rab-api: must depend on db with condition service_healthy');
   if (api.depends_on?.['db-setup']?.condition !== 'service_completed_successfully') p('rab-api: must depend on db-setup with condition service_completed_successfully (crewflow_owner exists, with the password in PG_DATABASE_URL)');
   if (services['db-setup'] && services['db-setup'].depends_on?.db?.condition !== 'service_healthy') p('db-setup: must depend on db with condition service_healthy');
+  // Owner decision 2026-11-18 (M1): db-harden has NO depends_on (it polls for the database and the ledger by itself; OpenShip
+  // drops conditions anyway), and no service waits for it (it never blocks rab-api or the Worker).
+  const depNames = (s) => (Array.isArray(s?.depends_on) ? s.depends_on : Object.keys(s?.depends_on ?? {}));
+  if (services['db-harden'] && depNames(services['db-harden']).length) p('db-harden: must have no depends_on (it waits for the database and the ledger by itself)');
+  for (const [name, s] of Object.entries(services)) {
+    if (depNames(s).includes('db-harden')) p(`${name}: must not depend on db-harden (nothing waits for it; it never blocks rab-api or the Worker)`);
+  }
   // DB-SETUP PID 1 (lead decision 2026-11-12): the cleaning scripts are the ENTRYPOINT (PID 1) and exec the image's tini only
   // once the environment is clean; no command, no compose init (docker-init would keep the admin URL at PID 1).
-  for (const [name, script] of [['rab-api', './api-prestart.sh'], ['rab-worker', './worker-start.sh'], ['db-setup', './db-setup.sh']]) {
+  for (const [name, entrypoint] of [['rab-api', ['./api-prestart.sh']], ['rab-worker', ['./worker-start.sh']], ['db-setup', ['./db-setup.sh']], ['db-harden', ['./db-setup.sh', 'harden']]]) {
     const s = services[name];
     if (!s) continue;
-    if (JSON.stringify(s.entrypoint ?? null) !== JSON.stringify([script])) p(`${name}: entrypoint must be exactly ["${script}"] (DB-SETUP: PID 1 cleans the environment before the init starts)`);
+    const script = entrypoint[0];
+    if (JSON.stringify(s.entrypoint ?? null) !== JSON.stringify(entrypoint)) p(`${name}: entrypoint must be exactly ${JSON.stringify(entrypoint)} (DB-SETUP: PID 1 cleans the environment before the init starts)`);
     if (Array.isArray(s.command) ? s.command.length > 0 : (s.command !== undefined && s.command !== null)) p(`${name}: must have no command (${script}, the entrypoint, takes none)`);
     if (s.init === true) p(`${name}: init: true is refused (docker-init would be PID 1 with the admin URL)`);
   }

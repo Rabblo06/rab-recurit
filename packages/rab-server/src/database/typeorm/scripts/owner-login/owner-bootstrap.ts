@@ -26,7 +26,7 @@
  * bootstrap (the first start's migrate child creates the schema roles). On a read-only crewflow_owner session the ledger is
  * compared with this image's migration files: when every one of them is applied (the schema is complete: CURRENT, or
  * AHEAD after a rollback), the admin runs ALTER ROLE crewflow_owner NOCREATEROLE (and removes the pending mark); while it is
- * not complete, a CREATEROLE crewflow_owner is MARKED (COMMENT ON ROLE, OWNER_CREATEROLE_PENDING_COMMENT) so the boot gate
+ * not complete, a CREATEROLE crewflow_owner is MARKED (COMMENT ON ROLE, an expiring mark: owner-login-posture.ts) so the boot gate
  * accepts it for that first start. db-setup never grants CREATEROLE. Mode c applies the same rule read-only: it refuses
  * what the boot gate would refuse.
  *
@@ -56,7 +56,7 @@ import {
 } from '../../../owner-login/owner-credential';
 import { pgClientConfig, PgConfigError, PgDriverConfig, resolvePgEnvironment, ResolvedPgEnvironment, sameTarget } from '../../../postgres';
 import { isSupportedPostgresMajor, postgresMajorFromVersionNum, unsupportedPostgresMessage } from '../../../postgres/supported-majors';
-import { OWNER_CREATEROLE_PENDING_COMMENT } from '../../../boot-checks/owner-login-posture';
+import { OWNER_CREATEROLE_MARK_PREFIX } from '../../../boot-checks/owner-login-posture';
 import {
   OWNER_BOOTSTRAP_BEGIN,
   OWNER_BOOTSTRAP_COMMIT,
@@ -73,6 +73,8 @@ import {
   OWNER_BOOTSTRAP_ROLLBACK,
   OWNER_HARDEN_H1_NOCREATEROLE,
   OWNER_HARDEN_H2_CLEAR_MARK,
+  OWNER_HARDEN_M1_TRY_MIGRATION_LOCK,
+  OWNER_HARDEN_M2_RELEASE_MIGRATION_LOCK,
   OWNER_HARDEN_H3_MARK_PENDING,
   OWNER_SCHEMA_S1_HAS_LEDGER,
   OWNER_SCHEMA_S2_LEDGER,
@@ -165,14 +167,32 @@ export const OWNER_BOOTSTRAP_MESSAGES = Object.freeze({
     'The schema bootstrap is not complete yet: crewflow_owner keeps CREATEROLE for it and is marked, so the first start may use it; the next db-setup run (docker compose up -d) removes it once the schema is current.',
   createRoleKeptMarked: 'The schema bootstrap is not complete yet: crewflow_owner keeps CREATEROLE (already marked) until the schema is current.',
   createRoleMarkCleared: 'crewflow_owner is NOCREATEROLE; its leftover CREATEROLE mark was removed.',
+  createRoleOtherDatabase:
+    'The CREATEROLE step would change crewflow_owner (remove CREATEROLE, or set or clear its mark), but crewflow_owner owns objects in, or holds a grant on, another database of this PostgreSQL cluster: another Crewflow deployment uses it, and roles are cluster-wide. Crewflow supports one deployment per PostgreSQL cluster when using an admin URL. Nothing was changed. Refusing.',
   createRoleNoRights:
     "The CREATEROLE step needs to change crewflow_owner (remove CREATEROLE once the schema is complete, or mark it while it is not), but the PG_ADMIN_URL login cannot: it needs superuser, or CREATEROLE and ADMIN OPTION on crewflow_owner (GRANT crewflow_owner TO <your admin> WITH ADMIN OPTION, as the login that created it). Refusing.",
   ownerUrlCreateRoleComplete:
     "crewflow_owner has CREATEROLE although the schema is complete, and it is not marked as waiting for the bootstrap: rab-api and rab-worker refuse it in production. Without PG_ADMIN_URL db-setup never changes the role: as your admin run ALTER ROLE crewflow_owner NOCREATEROLE (or set PG_ADMIN_URL so db-setup removes it). Refusing.",
   ownerUrlCreateRolePendingUnmarked:
-    "crewflow_owner has CREATEROLE for the schema bootstrap, but it is not marked, so rab-api would refuse it in production once the bootstrap ran. Without PG_ADMIN_URL db-setup never changes the role: as your admin run COMMENT ON ROLE crewflow_owner IS 'crewflow:createrole-until-schema-current' (own-database-app-login.sql does it), or set PG_ADMIN_URL. Refusing.",
+    "crewflow_owner has CREATEROLE for the schema bootstrap, but no admin marked it, so rab-api would refuse it in production once the bootstrap ran. Without PG_ADMIN_URL db-setup never changes the role: as your admin run step 5b of own-database-app-login.sql (the COMMENT ON ROLE mark, valid 24 h), or set PG_ADMIN_URL. Refusing.",
+  ownerUrlCreateRoleExpired:
+    'crewflow_owner still has CREATEROLE and its grace period (the admin\'s mark) has expired; the schema is complete, so rab-api and rab-worker refuse it in production. Without PG_ADMIN_URL db-setup never changes the role: as your admin run ALTER ROLE crewflow_owner NOCREATEROLE; COMMENT ON ROLE crewflow_owner IS NULL; (or set PG_ADMIN_URL so db-setup removes it). Refusing.',
+  ownerUrlCreateRoleExpiredBeforeStart:
+    "crewflow_owner's CREATEROLE mark expired before the schema bootstrap ran. Without PG_ADMIN_URL db-setup never changes the role: as your admin renew it (step 5b of own-database-app-login.sql, valid 24 h) right before the first start, or set PG_ADMIN_URL. Refusing.",
   ownerUrlCreateRoleCompleteMarked:
-    'crewflow_owner still has CREATEROLE (marked for the bootstrap) although the schema is complete. Without PG_ADMIN_URL db-setup never changes the role: as your admin run ALTER ROLE crewflow_owner NOCREATEROLE; COMMENT ON ROLE crewflow_owner IS NULL.',
+    'crewflow_owner still has CREATEROLE (marked for the bootstrap) although the schema is complete. Without PG_ADMIN_URL db-setup never changes the role: as your admin run ALTER ROLE crewflow_owner NOCREATEROLE; COMMENT ON ROLE crewflow_owner IS NULL; before the mark expires (24 h after it was set), or rab-api and rab-worker refuse to start.',
+  // ---- db-harden (owner decision M1) ----
+  hardenNoAdmin: 'No admin login (mode c, PG_DATABASE_URL only): nothing to harden; the operator removes CREATEROLE (own-database-app-login.sql step 10).',
+  hardenTimeoutSetting: 'CREWFLOW_DB_HARDEN_TIMEOUT_SECONDS must be whole seconds from 60 to 7200 (unset = 1200; 1-7200 only with NODE_ENV=test). Refusing.',
+  hardenWaitingForRole: 'Waiting for db-setup: crewflow_owner does not exist yet.',
+  hardenWaitingForSchema: 'Waiting for the schema bootstrap: the ledger does not hold every migration of this image yet (read-only, polled).',
+  hardenAlready: 'crewflow_owner is already NOCREATEROLE and unmarked: nothing to harden.',
+  hardenWaitingForMigration: 'Waiting for the running migration to finish (its lock is held): CREATEROLE is removed only after the migrate child has finished.',
+  createRoleBusyKept:
+    'The schema is complete, but a migration is running right now (its lock is held), so CREATEROLE is kept this time; db-harden (or the next db-setup run) removes it.',
+  hardenTimeout: (seconds: number) =>
+    // sql-injection-reviewed: an error MESSAGE (printed, never executed); seconds is a validated integer.
+    `The schema was not complete within ${seconds} s (CREWFLOW_DB_HARDEN_TIMEOUT_SECONDS), so CREATEROLE was NOT removed; nothing was changed. The next db-setup or db-harden run removes it once the schema is complete (or, as your admin: ALTER ROLE crewflow_owner NOCREATEROLE; COMMENT ON ROLE crewflow_owner IS NULL;).`,
 });
 
 export type OwnerBootstrapOutcome = 'pass-through' | 'unchanged' | 'created' | 'updated' | 'refused' | 'failed';
@@ -230,8 +250,10 @@ export interface OwnerFacts {
   oHasDbGrant: boolean;
   /** H1 / N2: crewflow_owner owns the current database, directly or through any role membership (MEMBER). */
   oOwnsDb: boolean;
-  /** crewflow_owner carries OWNER_CREATEROLE_PENDING_COMMENT (false when it does not exist). */
+  /** crewflow_owner carries a valid CREATEROLE mark (owner-login-posture.ts; false when the role or the mark is missing). */
   oCreateRolePending: boolean;
+  /** That mark's expiry has passed, by the server clock (false without a valid mark). */
+  oCreateRoleMarkExpired: boolean;
   /** H1: a database-wide or crewflow_owner-level search_path default exists. */
   searchPathDefaultSet: boolean;
 }
@@ -281,6 +303,7 @@ export function factsFromRow(row: Row | undefined): OwnerFacts {
     oHasDbGrant: strictBool(row, 'o_has_db_grant'),
     oOwnsDb: strictBool(row, 'o_owns_db'),
     oCreateRolePending: strictBool(row, 'o_createrole_pending'),
+    oCreateRoleMarkExpired: strictBool(row, 'o_createrole_mark_expired'),
     searchPathDefaultSet: strictBool(row, 'search_path_default_set'),
   };
 }
@@ -499,11 +522,11 @@ async function readFacts(session: SqlSession): Promise<OwnerFacts> {
  * Security review L4 (owner-approved, read-only): before the password of an EXISTING crewflow_owner is set, Q2b. Refused
  * (64) when crewflow_owner is used by another database of the cluster. Strict: anything but one boolean row is a failure (70).
  */
-async function assertNoOtherDatabase(session: SqlSession): Promise<void> {
+async function assertNoOtherDatabase(session: SqlSession, refusal: string = OWNER_BOOTSTRAP_MESSAGES.ownerInOtherDatabase): Promise<void> {
   const { rows } = await session.query(OWNER_BOOTSTRAP_Q2B_OTHER_DATABASES);
   const v = rows.length === 1 ? rows[0]?.o_other_database : undefined;
   if (typeof v !== 'boolean') throw new OwnerBootstrapFailure(OWNER_BOOTSTRAP_MESSAGES.unexpected('other-database fact'));
-  if (v) throw new OwnerBootstrapRefusal(OWNER_BOOTSTRAP_MESSAGES.ownerInOtherDatabase);
+  if (v) throw new OwnerBootstrapRefusal(refusal);
 }
 
 /** The facts, the decisions and the probe, in that order: one plan of what the write transaction must do. */
@@ -581,11 +604,15 @@ async function attempt(session: SqlSession, io: OwnerBootstrapIo): Promise<Owner
 /** The CREATEROLE decision over the facts and the schema state. Pure. */
 export type CreateRoleAction = 'remove' | 'mark' | 'clear-mark' | 'none';
 
-export function decideCreateRole(f: Pick<OwnerFacts, 'ownerExists' | 'oCreateRole' | 'oCreateRolePending'>, schemaComplete: boolean): CreateRoleAction {
+export function decideCreateRole(
+  f: Pick<OwnerFacts, 'ownerExists' | 'oCreateRole' | 'oCreateRolePending' | 'oCreateRoleMarkExpired'>,
+  schemaComplete: boolean,
+): CreateRoleAction {
   if (!f.ownerExists) return 'none';
   if (f.oCreateRole === true) {
     if (schemaComplete) return 'remove';
-    return f.oCreateRolePending ? 'none' : 'mark';
+    // Not complete yet: mark it (again, when an earlier mark expired: a first migrate that failed for a day).
+    return f.oCreateRolePending && !f.oCreateRoleMarkExpired ? 'none' : 'mark';
   }
   return f.oCreateRolePending ? 'clear-mark' : 'none';
 }
@@ -594,13 +621,18 @@ export function decideCreateRole(f: Pick<OwnerFacts, 'ownerExists' | 'oCreateRol
  * Mode c (no admin): the same rule, read-only. Refuses (64) what the boot gate would refuse in production; returns the
  * notes to log otherwise.
  */
-export function decideOwnerUrlCreateRole(f: Pick<OwnerFacts, 'oCreateRole' | 'oCreateRolePending'>, schemaComplete: boolean): string[] {
+export function decideOwnerUrlCreateRole(
+  f: Pick<OwnerFacts, 'oCreateRole' | 'oCreateRolePending' | 'oCreateRoleMarkExpired'>,
+  schemaComplete: boolean,
+): string[] {
   if (f.oCreateRole !== true) return [];
   if (schemaComplete) {
     if (!f.oCreateRolePending) throw new OwnerBootstrapRefusal(OWNER_BOOTSTRAP_MESSAGES.ownerUrlCreateRoleComplete);
+    if (f.oCreateRoleMarkExpired) throw new OwnerBootstrapRefusal(OWNER_BOOTSTRAP_MESSAGES.ownerUrlCreateRoleExpired);
     return [OWNER_BOOTSTRAP_MESSAGES.ownerUrlCreateRoleCompleteMarked];
   }
   if (!f.oCreateRolePending) throw new OwnerBootstrapRefusal(OWNER_BOOTSTRAP_MESSAGES.ownerUrlCreateRolePendingUnmarked);
+  if (f.oCreateRoleMarkExpired) throw new OwnerBootstrapRefusal(OWNER_BOOTSTRAP_MESSAGES.ownerUrlCreateRoleExpiredBeforeStart);
   return [OWNER_BOOTSTRAP_MESSAGES.createRoleKeptMarked];
 }
 
@@ -640,13 +672,28 @@ export async function readLedgerNames(session: SqlSession): Promise<string[] | n
  * decision, the statement(s), the facts again (must show the result), COMMIT. Needs superuser, or CREATEROLE + ADMIN OPTION
  * on crewflow_owner (refused, 64, otherwise; nothing changed).
  */
-async function applyCreateRoleStep(session: SqlSession, io: OwnerBootstrapIo, schemaComplete: boolean): Promise<CreateRoleOutcome | 'race'> {
+async function applyCreateRoleStep(session: SqlSession, io: OwnerBootstrapIo, schemaComplete: boolean): Promise<CreateRoleOutcome | 'race' | 'busy'> {
   const before = await readFacts(session);
   const preview = decideCreateRole(before, schemaComplete);
   if (preview === 'none') {
     if (before.ownerExists && before.oCreateRole === true) io.log(OWNER_BOOTSTRAP_MESSAGES.createRoleKeptMarked);
     return before.ownerExists && before.oCreateRole === true ? 'kept' : 'none';
   }
+  // A removal never runs while a migrate child holds the migration lock (see OWNER_HARDEN_M1_TRY_MIGRATION_LOCK).
+  let migrationLock = false;
+  if (preview === 'remove') {
+    const { rows } = await session.query(OWNER_HARDEN_M1_TRY_MIGRATION_LOCK);
+    if (rows.length !== 1 || rows[0]?.got !== true) return 'busy';
+    migrationLock = true;
+  }
+  try {
+    return await applyCreateRoleTransaction(session, io, schemaComplete);
+  } finally {
+    if (migrationLock) await session.query(OWNER_HARDEN_M2_RELEASE_MIGRATION_LOCK).catch(() => undefined);
+  }
+}
+
+async function applyCreateRoleTransaction(session: SqlSession, io: OwnerBootstrapIo, schemaComplete: boolean): Promise<CreateRoleOutcome | 'race'> {
   let action: CreateRoleAction;
   await session.query(OWNER_BOOTSTRAP_BEGIN);
   try {
@@ -658,6 +705,9 @@ async function applyCreateRoleStep(session: SqlSession, io: OwnerBootstrapIo, sc
       return f.oCreateRole === true ? 'kept' : 'none';
     }
     if (!(f.adminSuper || (f.adminCreateRole && f.adminHasAdminOption))) throw new OwnerBootstrapRefusal(OWNER_BOOTSTRAP_MESSAGES.createRoleNoRights);
+    // Security review of PR #246, L1: the role is cluster-wide, so a change another database's deployment would feel (its
+    // CREATEROLE, its mark) runs only when no other database of the cluster uses crewflow_owner (Q2b, under the lock).
+    await assertNoOtherDatabase(session, OWNER_BOOTSTRAP_MESSAGES.createRoleOtherDatabase);
     if (action === 'remove') {
       await session.query(OWNER_HARDEN_H1_NOCREATEROLE);
       if (f.oCreateRolePending) await session.query(OWNER_HARDEN_H2_CLEAR_MARK);
@@ -668,7 +718,9 @@ async function applyCreateRoleStep(session: SqlSession, io: OwnerBootstrapIo, sc
     }
     const after = await readFacts(session);
     const ok =
-      action === 'mark' ? after.oCreateRole === true && after.oCreateRolePending : after.oCreateRole === false && !after.oCreateRolePending;
+      action === 'mark'
+        ? after.oCreateRole === true && after.oCreateRolePending && !after.oCreateRoleMarkExpired
+        : after.oCreateRole === false && !after.oCreateRolePending;
     if (!ok) throw new OwnerBootstrapFailure(OWNER_BOOTSTRAP_MESSAGES.reverifyFailed);
     await session.query(OWNER_BOOTSTRAP_COMMIT);
   } catch (error) {
@@ -715,6 +767,10 @@ export async function bootstrapOwnerWithIo(io: OwnerBootstrapIo, retryWindowMs =
     const complete = await io.schemaComplete();
     for (let i = 1; i <= MAX_ATTEMPTS; i += 1) {
       const createRole = await applyCreateRoleStep(session, io, complete);
+      if (createRole === 'busy') {
+        io.log(OWNER_BOOTSTRAP_MESSAGES.createRoleBusyKept);
+        return { ...result, createRole: 'kept' };
+      }
       if (createRole !== 'race') return { ...result, createRole };
       if (i < MAX_ATTEMPTS) {
         io.log(OWNER_BOOTSTRAP_MESSAGES.raceRetry);
@@ -1015,5 +1071,151 @@ export function resultLine(result: OwnerBootstrapResult): string {
   return `${OWNER_BOOTSTRAP_RESULT_PREFIX} ${JSON.stringify(result)}`;
 }
 
-/** Re-exported for the boot gate spec and the harness: the exact mark db-setup writes. */
-export { OWNER_CREATEROLE_PENDING_COMMENT };
+/** Re-exported for the specs and the harness: the prefix of the mark db-setup writes (`<prefix><unix expiry>`). */
+export { OWNER_CREATEROLE_MARK_PREFIX };
+
+// ---------------------------------------------------------------------------------------------------------------------
+// db-harden (owner decision M1, "auto-close plus a grace period"): the one-shot service that removes CREATEROLE in the SAME
+// deploy as the first migrate. Same code path as db-setup's CREATEROLE step (applyCreateRoleStep: the advisory lock, the facts
+// again under it, the Q2b other-database refusal, the statements, the re-check). It never creates a role, never sets a
+// password, never touches a grant. It polls by itself (OpenShip may ignore depends_on conditions) and nothing waits for it.
+// ---------------------------------------------------------------------------------------------------------------------
+
+export const HARDEN_DEFAULT_TIMEOUT_SECONDS = 1200;
+export const HARDEN_POLL_INTERVAL_MS = 10_000;
+/** Connect / login errors that only mean "not ready yet" while polling (the db starting, db-setup still running). */
+const HARDEN_NOT_READY_CODES = new Set(['ECONNREFUSED', 'EAI_AGAIN', 'ENOTFOUND', '57P03', '28P01', '28000', '3D000']);
+
+/** CREWFLOW_DB_HARDEN_TIMEOUT_SECONDS: unset = 1200; whole seconds 60-7200 (1-7200 with NODE_ENV=test). Throws a refusal. */
+export function hardenTimeoutSeconds(env: Record<string, string | undefined>): number {
+  const raw = env.CREWFLOW_DB_HARDEN_TIMEOUT_SECONDS;
+  if (raw === undefined || raw.trim() === '') return HARDEN_DEFAULT_TIMEOUT_SECONDS;
+  const min = env.NODE_ENV === 'test' ? 1 : 60;
+  if (!/^[0-9]{1,5}$/.test(raw) || Number(raw) < min || Number(raw) > 7200) throw new OwnerBootstrapRefusal(OWNER_BOOTSTRAP_MESSAGES.hardenTimeoutSetting);
+  return Number(raw);
+}
+
+export interface HardenIo {
+  /** One admin session (one attempt; a not-ready error is retried by the poll loop). */
+  openAdmin(): Promise<SqlSession>;
+  /** Is the schema complete for this image? null = not readable yet (crewflow_owner cannot log in yet, db starting). */
+  schemaComplete(): Promise<boolean | null>;
+  log(line: string): void;
+  sleep(ms: number): Promise<void>;
+  now(): number;
+  timeoutSeconds: number;
+  pollIntervalMs?: number;
+}
+
+/**
+ * The db-harden loop. Each round: open the admin session (a not-ready error waits), read the facts: no crewflow_owner yet ->
+ * wait (db-setup has not run yet); NOCREATEROLE and unmarked -> "already hardened", exit 0 at once; otherwise ask whether the
+ * schema is complete (read-only, as crewflow_owner): yes -> the CREATEROLE step (remove, or clear a leftover mark) and exit 0;
+ * no -> wait. Past the deadline -> failure 70, nothing changed. A refusal (rights, Q2b, a privileged role) stops at once.
+ */
+export async function hardenOwnerWithIo(io: HardenIo): Promise<OwnerBootstrapResult> {
+  const deadline = io.now() + io.timeoutSeconds * 1000;
+  const pollMs = io.pollIntervalMs ?? HARDEN_POLL_INTERVAL_MS;
+  let waitingLogged: string | null = null;
+  const waiting = (line: string) => {
+    if (waitingLogged !== line) io.log(line);
+    waitingLogged = line;
+  };
+  const base: OwnerBootstrapResult = { outcome: 'unchanged', exitCode: 0, created: false, passwordSet: false, grantAdded: false, createRole: 'none', code: null };
+  for (;;) {
+    let session: SqlSession | null = null;
+    try {
+      try {
+        session = await io.openAdmin();
+      } catch (error) {
+        const code = errorCode(error);
+        if (!RETRYABLE_CONNECT_CODES.has(code) && !['ENOTFOUND'].includes(code)) throw classifyAdminConnectError(error, false);
+      }
+      if (session) {
+        await session.query(OWNER_BOOTSTRAP_Q0_SESSION);
+        await session.query(OWNER_BOOTSTRAP_Q1_SUPERUSER_LOGGING);
+        const f = await readFacts(session);
+        if (!f.ownerExists) waiting(OWNER_BOOTSTRAP_MESSAGES.hardenWaitingForRole);
+        else if (f.oCreateRole !== true && !f.oCreateRolePending) {
+          io.log(OWNER_BOOTSTRAP_MESSAGES.hardenAlready);
+          return { ...base };
+        } else {
+          const complete = await io.schemaComplete();
+          if (complete === true) {
+            const stepIo: OwnerBootstrapIo = { openAdmin: io.openAdmin, probeOwner: async () => ({ ok: true }), verifier: () => '', log: io.log, sleep: io.sleep, now: io.now };
+            let busy = false;
+            for (let i = 1; i <= MAX_ATTEMPTS && !busy; i += 1) {
+              const createRole = await applyCreateRoleStep(session, stepIo, true);
+              if (createRole === 'busy') busy = true;
+              else if (createRole !== 'race') return { ...base, createRole };
+              else if (i < MAX_ATTEMPTS) await io.sleep(200 + Math.floor(Math.random() * 500));
+            }
+            if (!busy) throw new OwnerBootstrapFailure(OWNER_BOOTSTRAP_MESSAGES.raceExhausted);
+            waiting(OWNER_BOOTSTRAP_MESSAGES.hardenWaitingForMigration);
+          } else waiting(OWNER_BOOTSTRAP_MESSAGES.hardenWaitingForSchema);
+        }
+      }
+    } finally {
+      await closeQuietly(session);
+    }
+    if (io.now() + pollMs > deadline) throw new OwnerBootstrapFailure(OWNER_BOOTSTRAP_MESSAGES.hardenTimeout(io.timeoutSeconds), 'TIMEOUT');
+    await io.sleep(pollMs);
+  }
+}
+
+/** Is the schema complete? null when the crewflow_owner session cannot be opened yet (HARDEN_NOT_READY_CODES). */
+async function schemaCompleteOrNotReady(config: PgDriverConfig, expected: () => string[]): Promise<boolean | null> {
+  try {
+    return await schemaCompleteOn(config, expected);
+  } catch (error) {
+    if (error instanceof OwnerBootstrapFailure && error.code && HARDEN_NOT_READY_CODES.has(error.code)) return null;
+    throw error;
+  }
+}
+
+export interface RunOwnerHardenOptions extends RunOwnerBootstrapOptions {
+  /** Test seam: the poll interval (default 10 s). */
+  pollIntervalMs?: number;
+}
+
+/** db-harden for one environment (the child passes process.env with `--harden`). Never throws; exit 0, 64 or 70. */
+export async function runOwnerHarden(env: Record<string, string | undefined>, options: RunOwnerHardenOptions = {}): Promise<OwnerBootstrapResult> {
+  const log = options.log ?? (() => undefined);
+  try {
+    const timeoutSeconds = hardenTimeoutSeconds(env);
+    let input: DbSetupInput;
+    try {
+      input = selectDbSetupInput(env);
+    } catch (error) {
+      if (error instanceof OwnerCredentialError) throw new OwnerBootstrapRefusal(error.message);
+      throw error;
+    }
+    if (input.mode === 'owner-url') {
+      log(OWNER_BOOTSTRAP_MESSAGES.hardenNoAdmin);
+      return { outcome: 'unchanged', exitCode: 0, created: false, passwordSet: false, grantAdded: false, createRole: 'not-run', code: null };
+    }
+    const resolved = resolveFor(env, input.url, input.name);
+    const appResolved = resolveFor(env, input.appUrl, 'PG_DATABASE_URL');
+    if (resolved.primary.target.sessionRoleOption || appResolved.primary.target.sessionRoleOption) {
+      throw new OwnerBootstrapRefusal(OWNER_BOOTSTRAP_MESSAGES.sessionRoleOption);
+    }
+    const expectedMigrations = options.expectedMigrations ?? (() => imageMigrationNames());
+    const { admin: adminConfig, ownerUrl: ownerUrlConfig } = bootstrapDriverConfigs(resolved, input.appUrl);
+    const result = await hardenOwnerWithIo({
+      openAdmin: () => connectSession(adminConfig),
+      schemaComplete: () => schemaCompleteOrNotReady(ownerUrlConfig, expectedMigrations),
+      log,
+      sleep: (ms: number) => new Promise<void>((r) => setTimeout(r, ms)),
+      now: () => Date.now(),
+      timeoutSeconds,
+      pollIntervalMs: options.pollIntervalMs,
+    });
+    return result;
+  } catch (error) {
+    if (error instanceof OwnerBootstrapRefusal || error instanceof OwnerBootstrapFailure) log(error.message);
+    else if (error instanceof OwnerCredentialError) log(error.message);
+    else log(OWNER_BOOTSTRAP_MESSAGES.unexpected(errorCode(error)));
+    if (error instanceof OwnerCredentialError) return failureResult(new OwnerBootstrapRefusal(error.message));
+    return failureResult(error);
+  }
+}

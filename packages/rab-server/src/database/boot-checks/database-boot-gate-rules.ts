@@ -8,7 +8,7 @@ import { assertDeploymentIdentity, DeploymentIdentityError, Query } from '../dep
 import { dispatchNotifyFor } from '../postgres/pg-config';
 import { PgConfigError } from '../postgres/pg-url-policy';
 import { isSupportedPostgresMajor, postgresMajorFromVersionNum, SupportedPostgresMajor, unsupportedPostgresMessage } from '../postgres/supported-majors';
-import { OWNER_CREATEROLE_PENDING_COMMENT, OWNER_LOGIN_ROLE, ownerLoginObjectPostureProblems, ownerLoginRolePostureProblems } from './owner-login-posture';
+import { createRoleMarkColumnsSql, OWNER_LOGIN_ROLE, ownerLoginObjectPostureProblems, ownerLoginRolePostureProblems } from './owner-login-posture';
 import { SchemaCompatibilityError } from './schema-compatibility';
 
 export type BootProcess = 'api' | 'worker' | 'cli' | 'provisioner';
@@ -82,8 +82,10 @@ export interface BootGateFacts {
   loginReplicationOrCreatedb: boolean;
   /** The LOGIN role has CREATEROLE (owner decision 2026-11-18: refused in production unless db-setup marked it pending). */
   loginCreateRole: boolean;
-  /** The LOGIN role carries OWNER_CREATEROLE_PENDING_COMMENT (db-setup: the schema bootstrap is not complete yet). */
+  /** The LOGIN role carries a valid CREATEROLE mark (owner-login-posture.ts: an admin's "until the schema is current"). */
   loginCreateRolePending: boolean;
+  /** That mark's expiry has passed, by the server clock (owner decision M1: the 24 h grace period). */
+  loginCreateRoleMarkExpired: boolean;
   /** Comma-separated owner roles the current role is a member of (other than itself), or null. */
   ownerRoles: string | null;
   serverVersionNum: number;
@@ -106,7 +108,7 @@ export interface BootGateFacts {
  * for crewflow_worker too: its expected crewflow_app membership (INHERIT TRUE, SET FALSE) is not an owner role, and any
  * path from it to crewflow / rab_owner / rab_secure_owner — whatever the grant options — is refused.
  */
-// sql-injection-reviewed: the only interpolation is OWNER_CREATEROLE_PENDING_COMMENT, a fixed code constant without quotes.
+// sql-injection-reviewed: the only interpolation is createRoleMarkColumnsSql over a fixed column expression and quote-free code constants.
 export const BOOT_FACTS_SQL = `
 SELECT current_user::text AS who,
        session_user::text AS login,
@@ -115,8 +117,7 @@ SELECT current_user::text AS who,
        (SELECT s.rolsuper OR s.rolbypassrls FROM pg_catalog.pg_roles s WHERE s.rolname = session_user) AS login_privileged,
        (SELECT s.rolreplication OR s.rolcreatedb FROM pg_catalog.pg_roles s WHERE s.rolname = session_user) AS login_repl_createdb,
        (SELECT s.rolcreaterole FROM pg_catalog.pg_roles s WHERE s.rolname = session_user) AS login_createrole,
-       COALESCE((SELECT pg_catalog.shobj_description(s.oid, 'pg_authid') = '${OWNER_CREATEROLE_PENDING_COMMENT}'
-                   FROM pg_catalog.pg_roles s WHERE s.rolname = session_user), false) AS login_createrole_pending,
+       ${createRoleMarkColumnsSql("(SELECT pg_catalog.shobj_description(s.oid, 'pg_authid') FROM pg_catalog.pg_roles s WHERE s.rolname = session_user)", 'login_createrole_pending', 'login_createrole_mark_expired')},
        (SELECT pg_catalog.string_agg(o.rolname::text, ',' ORDER BY o.rolname)
           FROM pg_catalog.pg_roles o
          WHERE o.rolname IN ('crewflow', 'rab_owner', 'rab_secure_owner') AND o.rolname <> current_user
@@ -178,6 +179,7 @@ export function parseBootFacts(row: Record<string, unknown> | undefined): BootGa
     loginReplicationOrCreatedb: row.login_repl_createdb === true,
     loginCreateRole: row.login_createrole === true,
     loginCreateRolePending: row.login_createrole_pending === true,
+    loginCreateRoleMarkExpired: row.login_createrole_mark_expired === true,
     ownerRoles: row.owner_roles ? String(row.owner_roles) : null,
     serverVersionNum: Number(row.server_version_num),
     database: String(row.database),
@@ -225,28 +227,42 @@ export function assertRoleGate(facts: BootGateFacts, expected: readonly BootRole
 }
 
 /**
- * Gate 1, CREATEROLE (owner decision 2026-11-18, "keep the protection as a boot check ... CREATEROLE (after the NOCREATEROLE
- * step)"). crewflow_owner is created CREATEROLE because the FIRST start's migrate child creates the schema roles; db-setup
- * (modes a and b, with the admin login) removes it once the schema is complete for the image, and until then marks the
- * role with OWNER_CREATEROLE_PENDING_COMMENT, which only an admin can set or clear. In PRODUCTION:
- *   CREATEROLE, not marked  -> REFUSED (a role that was never meant to keep it, or one re-granted after the NOCREATEROLE step);
- *   CREATEROLE, marked      -> allowed with a WARNING: the first start (and the Worker that follows it); the next db-setup run
- *                              (every `docker compose up -d`) removes it;
- *   NOCREATEROLE            -> nothing to say.
- * Outside production nothing is reported (test and development databases keep a CREATEROLE crewflow_owner). Runs after the
- * schema-independent role checks; reaching the boot gates means the migrate child already finished (the API) or the API is
- * healthy (the Worker), so the bootstrap no longer needs the attribute. Returns the warnings. Pure.
+ * Gate 1, CREATEROLE (owner decisions 2026-11-18: "keep the protection as a boot check ... CREATEROLE (after the NOCREATEROLE
+ * step)", and M1 "auto-close plus a grace period"). crewflow_owner is created CREATEROLE because the FIRST start's migrate
+ * child creates the schema roles. An admin marks it `crewflow:createrole-until-schema-current:<unix expiry>` (db-setup in modes
+ * a and b, the SQL files in mode c; now + 24 h by the server clock); db-harden (modes a and b) removes CREATEROLE and the mark
+ * as soon as the ledger holds every migration of the image, in the same deploy. In PRODUCTION:
+ *   CREATEROLE, no valid mark      -> REFUSED (never meant to keep it, or re-granted after the NOCREATEROLE step);
+ *   CREATEROLE, mark expired       -> REFUSED (mode c: the operator did not run the NOCREATEROLE step within the grace period;
+ *                                     modes a and b: db-harden did not run or timed out), naming the two statements;
+ *   CREATEROLE, mark not expired   -> allowed with a WARNING (the first start, before db-harden or the operator closes it);
+ *   NOCREATEROLE                   -> nothing to say.
+ * The Worker gets the same rule, NOT a stricter one: it starts once the API is healthy, while db-harden may still be in its
+ * transaction (a strict Worker would crash-loop for those seconds), and in mode c there is no db-harden at all, so a strict
+ * Worker would refuse for the whole grace period. The expiry bounds the window for both processes.
+ * Outside production nothing is reported (test and development databases keep a CREATEROLE crewflow_owner). Returns the
+ * warnings. Pure.
  */
-export function assertCreateRoleGate(facts: Pick<BootGateFacts, 'who' | 'loginCreateRole' | 'loginCreateRolePending'>, production: boolean, label: string): string[] {
+export function assertCreateRoleGate(
+  facts: Pick<BootGateFacts, 'who' | 'loginCreateRole' | 'loginCreateRolePending' | 'loginCreateRoleMarkExpired'>,
+  production: boolean,
+  label: string,
+): string[] {
   if (!production || !facts.loginCreateRole) return [];
   if (!facts.loginCreateRolePending) {
     throw new DatabaseBootGateError(
       'role',
-      `the ${label} login "${facts.who}" has CREATEROLE after the schema bootstrap (it is not marked as waiting for it). db-setup removes it once the schema is current: run db-setup again with the admin login (docker compose up -d), or as your admin run ALTER ROLE ${facts.who} NOCREATEROLE. A release that needs it back says so in its notes.`,
+      `the ${label} login "${facts.who}" has CREATEROLE after the schema bootstrap, and no admin marked it as waiting for it. Remove it as your admin: ALTER ROLE ${facts.who} NOCREATEROLE; COMMENT ON ROLE ${facts.who} IS NULL; (with an admin login, db-harden / db-setup do it: docker compose up -d). A release that needs it back says so in its notes.`,
+    );
+  }
+  if (facts.loginCreateRoleMarkExpired) {
+    throw new DatabaseBootGateError(
+      'role',
+      `the ${label} login "${facts.who}" still has CREATEROLE and its grace period (the admin's mark) has expired. The schema bootstrap is complete: as your admin run ALTER ROLE ${facts.who} NOCREATEROLE; COMMENT ON ROLE ${facts.who} IS NULL; then start again (with an admin login, db-harden / db-setup do it: docker compose up -d).`,
     );
   }
   return [
-    `the login "${facts.who}" still has CREATEROLE, marked by db-setup for the schema bootstrap; the next db-setup run (docker compose up -d) removes it once the schema is current.`,
+    `the login "${facts.who}" still has CREATEROLE, marked by an admin for the schema bootstrap; db-harden removes it once the schema is complete (mode c: run ALTER ROLE ${facts.who} NOCREATEROLE; COMMENT ON ROLE ${facts.who} IS NULL; before the mark expires, or the next start is refused).`,
   ];
 }
 

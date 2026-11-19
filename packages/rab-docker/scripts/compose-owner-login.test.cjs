@@ -875,10 +875,10 @@ test('ADMIN_URL_PLACEMENT (owner requirement 2026-11-17): every committed compos
     assert.ok(files.some((f) => f.endsWith(path.join('rab-docker', rel))), rel);
   }
   for (const file of files) assert.deepEqual(gate.adminUrlPlacementProblems(file, fs.readFileSync(file, 'utf8')), [], file);
-  // The deploy files do interpolate it, on db-setup, exactly once.
+  // The deploy files do interpolate it, once on db-setup and once on db-harden (owner decision 2026-11-18, M1).
   for (const rel of ['docker-compose.production.yml', 'docker-compose.image.yml']) {
     const text = fs.readFileSync(path.join(__dirname, '..', rel), 'utf8');
-    assert.equal(text.split('\n').filter((l) => !/^\s*#/.test(l) && l.includes('${PG_ADMIN_URL')).length, 1, rel);
+    assert.equal(text.split('\n').filter((l) => !/^\s*#/.test(l) && l.includes('${PG_ADMIN_URL')).length, 2, rel);
   }
 });
 
@@ -933,6 +933,145 @@ test('DENIAL ADMIN_URL_PLACEMENT: PG_ADMIN_URL with a value on rab-api / rab-wor
   // lintComposeText (the deploy files) runs the same rule, and refuses a `:?` on the bundled db's password.
   assertRefused(lintComposeText('bad.yml', `${setup}  rab-api:\n    environment:\n      PG_ADMIN_URL: x\n`), /PG_ADMIN_URL in service rab-api/);
   assertRefused(lintComposeText('bad.yml', 'services:\n  db:\n    environment:\n      POSTGRES_PASSWORD: ${PG_DATABASE_PASSWORD:?required}\n'), /demands the bundled db's password with your own database too/);
+});
+
+// ------------------------------------------------------------------------------------------------ db-harden (M1)
+// Owner decision 2026-11-18 (security review of PR #246, M1): the one-shot CREATEROLE hardening service. These cases need no
+// rendering: the raw-text rules, the env lint and dbHardenProblems on a hand-built model of the committed shape.
+
+test('db-harden: both deploy files commit it with db-setup\'s database settings, its own entrypoint and timeout, no depends_on', () => {
+  for (const rel of ['docker-compose.production.yml', 'docker-compose.image.yml']) {
+    const text = fs.readFileSync(path.join(__dirname, '..', rel), 'utf8');
+    const block = text.split(/\n(?=  [a-z][a-z0-9-]*:\n)/).find((b) => b.startsWith('  db-harden:\n'));
+    assert.ok(block, `${rel}: db-harden is committed`);
+    const code = block.split('\n').filter((l) => !/^\s*#/.test(l)).join('\n');
+    assert.match(code, /entrypoint: \["\.\/db-setup\.sh", "harden"\]/, rel);
+    assert.match(code, /PG_ADMIN_URL: \$\{PG_ADMIN_URL:-\}/, rel);
+    assert.ok(code.includes(`PG_DATABASE_URL: ${gate.APP_URL_EXPR}`), rel);
+    assert.match(code, /CREWFLOW_BUNDLED_DB_ADMIN_URL: postgresql:\/\/postgres:\$\{PG_DATABASE_PASSWORD:-\}@db:5432\/crewflow\?sslmode=verify-full/, rel);
+    assert.ok(code.includes(`${gate.HARDEN_TIMEOUT_KEY}: ${gate.HARDEN_TIMEOUT_EXPR}`), rel);
+    assert.match(code, /restart: "no"/, rel);
+    assert.doesNotMatch(code, /depends_on/, `${rel}: db-harden has no depends_on`);
+    assert.doesNotMatch(code, /runtime\.env/, `${rel}: db-harden never reads runtime.env`);
+    // Nothing waits for it: no depends_on entry anywhere names it.
+    // (Services sit at two spaces; a depends_on entry naming db-harden would sit deeper, or be a list item.)
+    const lines = text.split('\n').filter((l) => !/^\s*#/.test(l));
+    assert.ok(!lines.some((l) => /^ {4,}db-harden:\s*$/.test(l) || /^\s*-\s*db-harden\s*$/.test(l)), `${rel}: no service depends on db-harden`);
+  }
+});
+
+test('DENIAL ADMIN_URL_PLACEMENT (M1): db-harden may hold the admin login under db-setup\'s rules; one interpolation per admin service; no anchor on it', () => {
+  const both = 'services:\n  db-setup:\n    environment:\n      PG_ADMIN_URL: ${PG_ADMIN_URL:-}\n      CREWFLOW_BUNDLED_DB_ADMIN_URL: x\n  db-harden:\n    environment:\n      PG_ADMIN_URL: ${PG_ADMIN_URL:-}\n      CREWFLOW_BUNDLED_DB_ADMIN_URL: x\n';
+  assert.deepEqual(gate.adminUrlPlacementProblems('ok.yml', both), []);
+  const cases = [
+    [`${both}      X: \${PG_ADMIN_URL:-}\n`, /interpolates \$\{PG_ADMIN_URL\.\.\.\} 2 times in db-harden/],
+    ['services:\n  db-harden: &h\n    environment:\n      PG_ADMIN_URL: ${PG_ADMIN_URL:-}\n  rab-api:\n    <<: *h\n', /an anchor on the db-harden service/],
+    ['services:\n  db-harden:\n    environment: &henv\n      PG_ADMIN_URL: ${PG_ADMIN_URL:-}\n  rab-api:\n    environment:\n      <<: *henv\n', /an anchor defined inside the db-harden service/],
+    // Any other name is still refused (db-harden2, a renamed copy).
+    ['services:\n  db-harden2:\n    environment:\n      PG_ADMIN_URL: ${PG_ADMIN_URL:-}\n', /interpolated in service db-harden2/],
+    ['services:\n  db-harden2:\n    environment:\n      CREWFLOW_BUNDLED_DB_ADMIN_URL: x\n', /CREWFLOW_BUNDLED_DB_ADMIN_URL in service db-harden2/],
+  ];
+  for (const [text, pattern] of cases) assertRefused(gate.adminUrlPlacementProblems('bad.yml', text), pattern);
+});
+
+test('DENIAL db-harden timeout: committed only as ${CREWFLOW_DB_HARDEN_TIMEOUT_SECONDS:-1200}; compose.env only, 60-7200', () => {
+  assert.deepEqual(lintComposeText('ok.yml', `services:\n  db-harden:\n    environment:\n      ${gate.HARDEN_TIMEOUT_KEY}: ${gate.HARDEN_TIMEOUT_EXPR}\n`), []);
+  assertRefused(lintComposeText('bad.yml', `services:\n  db-harden:\n    environment:\n      ${gate.HARDEN_TIMEOUT_KEY}: "30"\n`), /CREWFLOW_DB_HARDEN_TIMEOUT_SECONDS must be exactly/);
+  for (const ok of ['60', '1200', '7200']) assert.deepEqual(lintEnvText('compose', `${gate.HARDEN_TIMEOUT_KEY}=${ok}\n`).filter((x) => x.startsWith(gate.HARDEN_TIMEOUT_KEY)), [], ok);
+  for (const bad of ['59', '7201', '20m', '-1', '1e3']) assertRefused(lintEnvText('compose', `${gate.HARDEN_TIMEOUT_KEY}=${bad}\n`), /CREWFLOW_DB_HARDEN_TIMEOUT_SECONDS: must be a whole number of seconds from 60 to 7200/);
+  for (const kind of ['database', 'runtime']) assertRefused(lintEnvText(kind, `${gate.HARDEN_TIMEOUT_KEY}=1200\n`), /CREWFLOW_DB_HARDEN_TIMEOUT_SECONDS: set it in compose\.env/);
+  assert.equal(gate.hardenTimeoutOk('1200'), true);
+  assert.equal(gate.hardenTimeoutOk('7201'), false);
+});
+
+/** A hand-built model of the committed db-setup / db-harden / rab-api shapes (what `docker compose config` renders). */
+function hardenModel() {
+  const image = `adhin007/adolphus@sha256:${'0'.repeat(64)}`;
+  const want = {
+    PG_ADMIN_URL: '',
+    PG_DATABASE_URL: gate.BUNDLED_APP_URL,
+    CREWFLOW_BUNDLED_DB: '1',
+    CREWFLOW_BUNDLED_DB_ADMIN_URL: gate.BUNDLED_URL,
+  };
+  const oneShot = (entrypoint, extraEnv) => ({
+    image,
+    entrypoint,
+    environment: { ...want, ...extraEnv, NODE_ENV: 'production', RAB_RUNTIME_ENV: 'production' },
+    networks: { default: null, 'crewflow-db': null },
+    volumes: [{ type: 'volume', source: 'crewflow-db-ca', target: '/run/crewflow/db-ca', read_only: true }],
+    restart: 'no',
+    logging: { driver: 'json-file', options: { 'max-size': '10m', 'max-file': '5' } },
+    user: '1000:1000',
+    read_only: true,
+    cap_drop: ['ALL'],
+    security_opt: ['no-new-privileges:true'],
+    pids_limit: 64,
+    mem_limit: '268435456',
+    cpus: 1,
+    stop_grace_period: '30s',
+  });
+  const services = {
+    'rab-api': { image, depends_on: { 'db-setup': { condition: 'service_completed_successfully' } } },
+    'rab-worker': { image, depends_on: { 'rab-api': { condition: 'service_healthy' } } },
+    'db-setup': { ...oneShot(['./db-setup.sh'], {}), depends_on: { db: { condition: 'service_healthy' } }, stop_grace_period: '40s' },
+    'db-harden': oneShot(['./db-setup.sh', 'harden'], { [gate.HARDEN_TIMEOUT_KEY]: '1200' }),
+  };
+  return { services, want };
+}
+const hardenProblems = (mutate, timeout = '1200') => {
+  const { services, want } = hardenModel();
+  if (mutate) mutate(services);
+  const out = [];
+  gate.dbHardenProblems(services, (m) => out.push(m), want, timeout);
+  return out;
+};
+
+test('dbHardenProblems: the committed shape passes', () => {
+  assert.deepEqual(hardenProblems(), []);
+});
+
+test('DENIAL dbHardenProblems: missing, any depends_on, a service depending on it, another entrypoint or image, a different database setting, the timeout, runtime.env', () => {
+  const cases = [
+    [(s) => { delete s['db-harden']; }, /db-harden: missing/],
+    [(s) => { s['db-harden'].depends_on = { db: { condition: 'service_healthy' } }; }, /db-harden: has depends_on/],
+    [(s) => { s['db-harden'].depends_on = { 'rab-api': { condition: 'service_started' } }; }, /db-harden: has depends_on/],
+    [(s) => { s['rab-api'].depends_on['db-harden'] = { condition: 'service_completed_successfully' }; }, /rab-api: depends on db-harden/],
+    [(s) => { s['rab-worker'].depends_on['db-harden'] = { condition: 'service_started' }; }, /rab-worker: depends on db-harden/],
+    [(s) => { s['rab-worker'].depends_on = ['db-harden']; }, /rab-worker: depends on db-harden/],
+    [(s) => { s['db-harden'].entrypoint = ['./db-setup.sh']; }, /entrypoint is not exactly \.\/db-setup\.sh harden/],
+    [(s) => { s['db-harden'].entrypoint = ['./api-prestart.sh']; }, /entrypoint is not exactly \.\/db-setup\.sh harden/],
+    [(s) => { s['db-harden'].command = ['harden']; }, /db-harden: has a command/],
+    [(s) => { s['db-harden'].image = `adhin007/adolphus@sha256:${'1'.repeat(64)}`; }, /db-harden: image differs from rab-api/],
+    [(s) => { s['db-harden'].environment.PG_ADMIN_URL = 'postgresql://x:y@elsewhere:5432/crewflow'; }, /db-harden: PG_ADMIN_URL is not db-setup's committed value/],
+    [(s) => { delete s['db-harden'].environment.CREWFLOW_BUNDLED_DB_ADMIN_URL; }, /db-harden: CREWFLOW_BUNDLED_DB_ADMIN_URL is missing/],
+    [(s) => { delete s['db-harden'].environment[gate.HARDEN_TIMEOUT_KEY]; }, /CREWFLOW_DB_HARDEN_TIMEOUT_SECONDS is missing/],
+    [(s) => { s['db-harden'].environment[gate.HARDEN_TIMEOUT_KEY] = '30'; }, /CREWFLOW_DB_HARDEN_TIMEOUT_SECONDS is "30"/],
+    [(s) => { s['db-harden'].restart = 'on-failure'; }, /db-harden: restart is "on-failure", expected "no"/],
+    [(s) => { s['db-harden'].profiles = ['harden']; }, /db-harden: has profiles/],
+    [(s) => { s['db-harden'].env_file = [{ path: '/secrets/runtime.env' }]; }, /db-harden: reads runtime\.env/],
+    [(s) => { s['db-harden'].environment.APP_SECRET = 'x'; }, /db-harden: has APP_SECRET/],
+    [(s) => { s['db-harden'].user = '0:0'; }, /db-harden: user is "0:0"/],
+    [(s) => { s['db-harden'].volumes = []; }, /db-harden: does not mount the bundled db's CA read-only/],
+    [(s) => { s['db-harden'].networks = { default: null }; }, /db-harden: is not on the crewflow-db network/],
+    [(s) => { s['db-harden'].environment.NODE_ENV = 'development'; }, /db-harden: NODE_ENV is not production/],
+    [(s) => { s['db-harden'].environment.RAB_RUNTIME_ENV = 'staging'; }, /db-harden: RAB_RUNTIME_ENV is not production/],
+    [(s) => { s['db-harden'].environment.PG_DATABASE_ADMIN_URL = ''; }, /db-harden: has PG_DATABASE_ADMIN_URL \(renamed to PG_ADMIN_URL\)/],
+    [(s) => { s['db-harden'].depends_on = ['db']; }, /db-harden: has depends_on/],
+    [(s) => { s['db-harden'].init = true; }, /db-harden: init: true/],
+    // Its own rule (exact message), beside the shared hardening rule that also refuses any port off rab-api.
+    [(s) => { s['db-harden'].ports = [{ target: 5432, published: '5432' }]; }, /^db-harden: publishes a port$/],
+    [(s) => { s['db-harden'].deploy = { replicas: 2 }; }, /db-harden: 2 replicas/],
+    // db-setup's container hardening (stop_grace_period aside).
+    [(s) => { s['db-harden'].read_only = false; }, /db-harden: read_only root filesystem is not set/],
+    [(s) => { s['db-harden'].cap_drop = []; }, /db-harden: cap_drop ALL is missing/],
+    [(s) => { s['db-harden'].security_opt = []; }, /db-harden: security_opt no-new-privileges:true is missing/],
+    [(s) => { delete s['db-harden'].pids_limit; }, /db-harden: pids_limit is missing/],
+    [(s) => { delete s['db-harden'].mem_limit; }, /db-harden: mem_limit is missing/],
+  ];
+  for (const [mutate, pattern] of cases) assertRefused(hardenProblems(mutate), pattern);
+  // A rendered compose.env value outside the child's bounds (the lint refuses it too).
+  for (const v of ['30', '7201', '99999']) assertRefused(hardenProblems((s) => { s['db-harden'].environment[gate.HARDEN_TIMEOUT_KEY] = v; }, v), /db-harden: CREWFLOW_DB_HARDEN_TIMEOUT_SECONDS must be a whole number of seconds from 60 to 7200/);
+  assert.deepEqual(hardenProblems((s) => { s['db-harden'].environment[gate.HARDEN_TIMEOUT_KEY] = '600'; }, '600'), []);
 });
 
 // Review of PR #230, I-2: the db entrypoint's password check, run for real (sh) from the committed production file.

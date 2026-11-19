@@ -166,7 +166,7 @@ test('DENIAL (owner decision 2026-11-18): an app service whose PG_DATABASE_URL i
       [(s) => { delete s[name].environment.PG_DATABASE_URL; }, new RegExp(`${name}'s PG_DATABASE_URL is exactly db-setup's`)],
       [(s) => { s[name].environment.SOME_URL = 'postgresql://u:p@db/x'; }, new RegExp(`${name} carries no other database URL in any variable \\(found in SOME_URL\\)`)],
       [(s) => { s[name].environment.PG_ADMIN_URL = 'postgresql://postgres:p@db:5432/crewflow'; }, new RegExp(`${name} pins PG_ADMIN_URL to ""`)],
-      [(s) => { s[name].environment.PG_ADMIN_URL = 'postgresql://postgres:p@db:5432/crewflow'; }, /only db-setup has a PG_ADMIN_URL value \(found on/],
+      [(s) => { s[name].environment.PG_ADMIN_URL = 'postgresql://postgres:p@db:5432/crewflow'; }, /only db-setup \/ db-harden have a PG_ADMIN_URL value \(found on/],
       [(s) => { delete s[name].environment.PG_ADMIN_URL; }, new RegExp(`${name} pins PG_ADMIN_URL to ""`)],
       [(s) => { s[name].entrypoint = ['/sbin/tini', '--']; s[name].command = ['node', 'main.js']; }, new RegExp(`${name} runs \\./(api-prestart|worker-start)\\.sh as PID 1`)],
       [(s) => { s[name].init = true; }, new RegExp(`${name} has no compose init`)],
@@ -187,7 +187,67 @@ test('DENIAL (owner decision 2026-11-18): an app service whose PG_DATABASE_URL i
   // Another service (not db-setup) with an admin URL value.
   const a = partA();
   a.front = { environment: { PG_ADMIN_URL: 'postgresql://postgres:p@db:5432/crewflow' } };
-  refusedBy(isolation.dbSetupContractChecks('f.yml', a, RUNTIME), /only db-setup has a PG_ADMIN_URL value \(found on front\)/);
+  refusedBy(isolation.dbSetupContractChecks('f.yml', a, RUNTIME), /only db-setup \/ db-harden have a PG_ADMIN_URL value \(found on front\)/);
+});
+
+// ---- db-harden (owner decision 2026-11-18, security review of PR #246, M1): the one-shot CREATEROLE hardening.
+const withHarden = () => {
+  const s = partA();
+  const setup = s['db-setup'];
+  s['db-harden'] = {
+    image: setup.image,
+    entrypoint: ['./db-setup.sh', 'harden'],
+    restart: 'no',
+    user: '1000:1000',
+    read_only: true,
+    environment: { PG_ADMIN_URL: setup.environment.PG_ADMIN_URL, PG_DATABASE_URL: setup.environment.PG_DATABASE_URL, CREWFLOW_DB_HARDEN_TIMEOUT_SECONDS: '1200' },
+    volumes: [vol('crewflow-db-ca', '/run/crewflow/db-ca', true)],
+  };
+  return s;
+};
+
+test('M1: db-harden with db-setup\'s settings and no depends_on passes; it is required only where asked (production)', () => {
+  assert.deepEqual(failedLabels(isolation.dbSetupContractChecks('f.yml', withHarden(), RUNTIME, { requireHarden: true })), []);
+  assert.deepEqual(failedLabels(isolation.dbSetupContractChecks('f.yml', partA(), RUNTIME)), []);
+  refusedBy(isolation.dbSetupContractChecks('f.yml', partA(), RUNTIME, { requireHarden: true }), /has the one-shot db-harden service/);
+  assert.deepEqual(isolation.ADMIN_SERVICES, ['db-setup', 'db-harden']);
+});
+
+test('DENIAL M1: db-harden with any depends_on, another entrypoint or image, other database settings, APP_SECRET; or anything waiting for it', () => {
+  for (const [edit, re] of [
+    [(s) => { s['db-harden'].depends_on = { db: { condition: 'service_healthy' } }; }, /db-harden has no depends_on/],
+    [(s) => { s['db-harden'].entrypoint = ['./db-setup.sh']; }, /db-harden runs exactly \.\/db-setup\.sh harden/],
+    [(s) => { s['db-harden'].command = ['harden']; }, /db-harden runs exactly \.\/db-setup\.sh harden/],
+    [(s) => { s['db-harden'].image = 'app@sha256:2'; }, /db-harden runs db-setup's image/],
+    [(s) => { s['db-harden'].restart = 'on-failure'; }, /db-harden restart is "no"/],
+    [(s) => { s['db-harden'].ports = [{ target: 1 }]; }, /db-harden publishes no port/],
+    [(s) => { s['db-harden'].volumes = []; }, /db-harden mounts the db CA read-only/],
+    [(s) => { s['db-harden'].environment.APP_SECRET = 'x'; }, /db-harden has no APP_SECRET/],
+    [(s) => { s['db-harden'].user = '0:0'; }, /db-harden runs as 1000:1000/],
+    [(s) => { s['db-harden'].environment.PG_ADMIN_URL = 'postgresql://doadmin:x@elsewhere:5432/crewflow?sslmode=verify-full'; }, /db-harden's PG_ADMIN_URL is exactly db-setup's/],
+    [(s) => { delete s['db-harden'].environment.PG_DATABASE_URL; }, /db-harden's PG_DATABASE_URL is exactly db-setup's/],
+    [(s) => { s.server.depends_on['db-harden'] = { condition: 'service_completed_successfully' }; }, /no service depends on db-harden .*\(found on server\)/],
+    [(s) => { s.worker.depends_on = ['db-harden']; }, /no service depends on db-harden .*\(found on worker\)/],
+  ]) {
+    const s = withHarden();
+    edit(s);
+    refusedBy(isolation.dbSetupContractChecks('f.yml', s, RUNTIME, { requireHarden: true }), re);
+  }
+  // Only db-setup and db-harden may hold an admin URL value; the bundled passwords only in their database settings.
+  const s = withHarden();
+  s.server.environment.PG_ADMIN_URL = 'x';
+  refusedBy(isolation.dbSetupContractChecks('f.yml', s, RUNTIME, { requireHarden: true }), /only db-setup \/ db-harden have a PG_ADMIN_URL value \(found on server\)/);
+  const W = isolation.APP_SENTINEL_PASSWORD;
+  const url = `postgresql://crewflow_owner:${W}@db:5432/crewflow?sslmode=verify-full`;
+  const app = { 'db-setup': { environment: { PG_DATABASE_URL: url } }, 'db-harden': { environment: { PG_DATABASE_URL: url } }, server: { environment: { PG_DATABASE_URL: url } }, worker: { environment: { PG_DATABASE_URL: url } } };
+  assert.deepEqual(failedLabels(isolation.appPasswordChecks('f.yml', app, RUNTIME)), []);
+  app['db-harden'].environment.OTHER = W;
+  refusedBy(isolation.appPasswordChecks('f.yml', app, RUNTIME), /db-harden carries the crewflow_owner password only inside PG_DATABASE_URL .*found in OTHER/);
+  const D = isolation.DB_SENTINEL_PASSWORD;
+  const dbpw = { db: { environment: { POSTGRES_PASSWORD: D } }, 'db-harden': { environment: { CREWFLOW_BUNDLED_DB_ADMIN_URL: `postgresql://postgres:${D}@db:5432/crewflow` } } };
+  assert.deepEqual(failedLabels(isolation.dbPasswordChecks('f.yml', dbpw)), []);
+  dbpw['db-harden'].environment.OTHER = D;
+  refusedBy(isolation.dbPasswordChecks('f.yml', dbpw), /db-harden carries the bundled db's password only as .*\(found in OTHER\)/);
 });
 
 test('owner decision 2026-11-18: the bundled crewflow_owner password appears only inside PG_DATABASE_URL of db-setup, the API and the Worker', () => {

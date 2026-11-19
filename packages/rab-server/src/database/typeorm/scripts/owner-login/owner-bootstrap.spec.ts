@@ -10,7 +10,8 @@ import * as path from 'path';
 
 import { DB_SETUP_INPUT_MESSAGES, OWNER_CREDENTIAL_MESSAGES, scramSha256Verifier } from '../../../owner-login/owner-credential';
 import { resolvePgEnvironment } from '../../../postgres';
-import { OWNER_CREATEROLE_PENDING_COMMENT } from '../../../boot-checks/owner-login-posture';
+import { MIGRATION_LOCK_KEY } from '../migrate/migration-lock';
+import { OWNER_CREATEROLE_GRACE_SECONDS, OWNER_CREATEROLE_MARK_PREFIX, OWNER_CREATEROLE_MARK_SQL_RE } from '../../../boot-checks/owner-login-posture';
 import {
   bootstrapDriverConfigs,
   bootstrapOwnerWithIo,
@@ -22,6 +23,10 @@ import {
   decideOwnerSelf,
   decideOwnerUrlCreateRole,
   factsFromRow,
+  HARDEN_DEFAULT_TIMEOUT_SECONDS,
+  HardenIo,
+  hardenOwnerWithIo,
+  hardenTimeoutSeconds,
   imageMigrationNames,
   isSchemaComplete,
   OWNER_BOOTSTRAP_APPLICATION_NAME,
@@ -36,6 +41,7 @@ import {
   readLedgerNames,
   resultLine,
   runOwnerBootstrap,
+  runOwnerHarden,
   setupOwnerUrlWithIo,
   SqlSession,
 } from './owner-bootstrap';
@@ -57,6 +63,9 @@ import {
   OWNER_HARDEN_H1_NOCREATEROLE,
   OWNER_HARDEN_H2_CLEAR_MARK,
   OWNER_HARDEN_H3_MARK_PENDING,
+  OWNER_HARDEN_M1_TRY_MIGRATION_LOCK,
+  OWNER_HARDEN_M2_RELEASE_MIGRATION_LOCK,
+  MIGRATION_LOCK_KEY_DECIMAL,
   OWNER_SCHEMA_S1_HAS_LEDGER,
   OWNER_SCHEMA_S2_LEDGER,
   OWNER_SELF_O1_SESSION,
@@ -67,7 +76,7 @@ import {
 
 const SECRET = 'a'.repeat(16) + 'B'.repeat(16) + 'unit-test-only-secret';
 const ADMIN_PW = 'adminpw0123456789';
-const OWNER_PW = 'ownerpw0123456789';
+const OWNER_PW = 'ownerpw-0123456789-abcdefghij-KLMNOPQR';
 const ADMIN_URL = `postgres://dbadmin:${ADMIN_PW}@db.internal.example:5432/crewflow_unit`;
 const APP_URL = `postgres://crewflow_owner:${OWNER_PW}@db.internal.example:5432/crewflow_unit`;
 const H_STATEMENTS: string[] = [OWNER_HARDEN_H1_NOCREATEROLE, OWNER_HARDEN_H2_CLEAR_MARK, OWNER_HARDEN_H3_MARK_PENDING];
@@ -91,6 +100,7 @@ const base: OwnerFacts = {
   oHasDbGrant: false,
   oOwnsDb: false,
   oCreateRolePending: false,
+  oCreateRoleMarkExpired: false,
   searchPathDefaultSet: false,
 };
 const existing: OwnerFacts = {
@@ -140,6 +150,7 @@ const factsRow = (f: OwnerFacts) => ({
   o_has_db_grant: f.oHasDbGrant,
   o_owns_db: f.oOwnsDb,
   o_createrole_pending: f.oCreateRolePending,
+  o_createrole_mark_expired: f.oCreateRoleMarkExpired,
   search_path_default_set: f.searchPathDefaultSet,
 });
 
@@ -260,13 +271,16 @@ describe('owner bootstrap: error mapping', () => {
   });
 });
 
+/** The last statement of a run, ignoring the migration-lock release that follows a removal's COMMIT / ROLLBACK. */
+const lastTx = (t: readonly string[]): string | undefined => t.filter((x) => x !== OWNER_HARDEN_M2_RELEASE_MIGRATION_LOCK).slice(-1)[0];
+
 type Probe = { ok: true } | { ok: false; code: string };
 
 /** A fake admin session + probe recording every statement and its bind values. */
 function fakeIo(
   facts: OwnerFacts[],
   probes: Probe[],
-  opts: { failOn?: string; failCode?: string; failTimes?: number; openErrors?: string[]; otherDatabase?: unknown; schemaComplete?: boolean } = {},
+  opts: { failOn?: string; failCode?: string; failTimes?: number; openErrors?: string[]; otherDatabase?: unknown; schemaComplete?: boolean; migrationBusy?: boolean } = {},
 ) {
   const sent: Array<{ text: string; values?: unknown[] }> = [];
   const lines: string[] = [];
@@ -286,6 +300,8 @@ function fakeIo(
       }
       if (text === OWNER_BOOTSTRAP_Q4D_REVERIFY) return { rows: [{ ok: true }] };
       if (text === OWNER_BOOTSTRAP_Q2B_OTHER_DATABASES) return { rows: [{ o_other_database: 'otherDatabase' in opts ? opts.otherDatabase : false }] };
+      if (text === OWNER_HARDEN_M1_TRY_MIGRATION_LOCK) return { rows: [{ got: !opts.migrationBusy }] };
+      if (text === OWNER_HARDEN_M2_RELEASE_MIGRATION_LOCK) return { rows: [{ released: true }] };
       return { rows: [] };
     },
     async end() {
@@ -402,7 +418,7 @@ describe('owner bootstrap: the admin session', () => {
     expect(await bootstrapOwnerWithIo(io)).toEqual({ outcome: 'unchanged', exitCode: 0, created: false, passwordSet: false, grantAdded: false, createRole: 'not-run', code: null });
     expect(texts()).toContain(OWNER_BOOTSTRAP_Q4A_LOCK);
     expect(texts()).not.toContain(OWNER_BOOTSTRAP_Q4C_DO);
-    expect(texts()[texts().length - 1]).toBe(OWNER_BOOTSTRAP_ROLLBACK);
+    expect(lastTx(texts())).toBe(OWNER_BOOTSTRAP_ROLLBACK);
   });
 
   it('re-plans under the lock: a refusal decided under the lock keeps its own message and rolls back', async () => {
@@ -456,6 +472,11 @@ describe('owner bootstrap: the CREATEROLE decisions (owner decision 2026-11-18)'
     ['CREATEROLE, complete, marked', { oCreateRole: true, oCreateRolePending: true }, true, 'remove'],
     ['CREATEROLE, incomplete, unmarked', { oCreateRole: true }, false, 'mark'],
     ['CREATEROLE, incomplete, marked', { oCreateRole: true, oCreateRolePending: true }, false, 'none'],
+    // Owner decision M1: an EXPIRED mark while the schema is still incomplete is marked again (a first migrate that failed
+    // for a day); complete + expired is still 'remove'.
+    ['CREATEROLE, incomplete, marked but EXPIRED', { oCreateRole: true, oCreateRolePending: true, oCreateRoleMarkExpired: true }, false, 'mark'],
+    ['CREATEROLE, complete, marked but EXPIRED', { oCreateRole: true, oCreateRolePending: true, oCreateRoleMarkExpired: true }, true, 'remove'],
+    ['NOCREATEROLE, marked but EXPIRED', { oCreateRole: false, oCreateRolePending: true, oCreateRoleMarkExpired: true }, true, 'clear-mark'],
     ['NOCREATEROLE, marked (complete)', { oCreateRole: false, oCreateRolePending: true }, true, 'clear-mark'],
     ['NOCREATEROLE, marked (incomplete)', { oCreateRole: false, oCreateRolePending: true }, false, 'clear-mark'],
     ['NOCREATEROLE, unmarked', { oCreateRole: false }, true, 'none'],
@@ -465,15 +486,19 @@ describe('owner bootstrap: the CREATEROLE decisions (owner decision 2026-11-18)'
   });
 
   it('decideOwnerUrlCreateRole (mode c, read-only): refuses what the boot gate would refuse, notes the rest', () => {
-    expect(decideOwnerUrlCreateRole({ oCreateRole: false, oCreateRolePending: false }, true)).toEqual([]);
-    expect(decideOwnerUrlCreateRole({ oCreateRole: false, oCreateRolePending: true }, false)).toEqual([]);
-    expect(refusalOf(() => decideOwnerUrlCreateRole({ oCreateRole: true, oCreateRolePending: false }, true))).toBe(OWNER_BOOTSTRAP_MESSAGES.ownerUrlCreateRoleComplete);
-    expect(refusalOf(() => decideOwnerUrlCreateRole({ oCreateRole: true, oCreateRolePending: false }, false))).toBe(
-      OWNER_BOOTSTRAP_MESSAGES.ownerUrlCreateRolePendingUnmarked,
-    );
-    expect(decideOwnerUrlCreateRole({ oCreateRole: true, oCreateRolePending: true }, true)).toEqual([OWNER_BOOTSTRAP_MESSAGES.ownerUrlCreateRoleCompleteMarked]);
-    expect(decideOwnerUrlCreateRole({ oCreateRole: true, oCreateRolePending: true }, false)).toEqual([OWNER_BOOTSTRAP_MESSAGES.createRoleKeptMarked]);
-    expect(OWNER_BOOTSTRAP_MESSAGES.ownerUrlCreateRolePendingUnmarked).toContain(`'${OWNER_CREATEROLE_PENDING_COMMENT}'`);
+    const f = (oCreateRole: boolean, oCreateRolePending: boolean, oCreateRoleMarkExpired = false) => ({ oCreateRole, oCreateRolePending, oCreateRoleMarkExpired });
+    expect(decideOwnerUrlCreateRole(f(false, false), true)).toEqual([]);
+    expect(decideOwnerUrlCreateRole(f(false, true), false)).toEqual([]);
+    expect(decideOwnerUrlCreateRole(f(false, true, true), true)).toEqual([]);
+    expect(refusalOf(() => decideOwnerUrlCreateRole(f(true, false), true))).toBe(OWNER_BOOTSTRAP_MESSAGES.ownerUrlCreateRoleComplete);
+    expect(refusalOf(() => decideOwnerUrlCreateRole(f(true, false), false))).toBe(OWNER_BOOTSTRAP_MESSAGES.ownerUrlCreateRolePendingUnmarked);
+    expect(decideOwnerUrlCreateRole(f(true, true), true)).toEqual([OWNER_BOOTSTRAP_MESSAGES.ownerUrlCreateRoleCompleteMarked]);
+    expect(decideOwnerUrlCreateRole(f(true, true), false)).toEqual([OWNER_BOOTSTRAP_MESSAGES.createRoleKeptMarked]);
+    // Owner decision M1, the 24 h grace period: an EXPIRED mark is refused (what the boot gate refuses once complete).
+    expect(refusalOf(() => decideOwnerUrlCreateRole(f(true, true, true), true))).toBe(OWNER_BOOTSTRAP_MESSAGES.ownerUrlCreateRoleExpired);
+    expect(refusalOf(() => decideOwnerUrlCreateRole(f(true, true, true), false))).toBe(OWNER_BOOTSTRAP_MESSAGES.ownerUrlCreateRoleExpiredBeforeStart);
+    expect(OWNER_BOOTSTRAP_MESSAGES.ownerUrlCreateRoleExpired).toContain('ALTER ROLE crewflow_owner NOCREATEROLE; COMMENT ON ROLE crewflow_owner IS NULL;');
+    expect(OWNER_BOOTSTRAP_MESSAGES.ownerUrlCreateRolePendingUnmarked).toContain('step 5b of own-database-app-login.sql');
   });
 
   it('isSchemaComplete: every migration of the image in the ledger (CURRENT or AHEAD); no ledger = incomplete; an empty image list fails closed (70)', () => {
@@ -568,7 +593,7 @@ describe('owner bootstrap: the CREATEROLE step through bootstrapOwnerWithIo (sch
     expect(t.filter((x) => x === OWNER_HARDEN_H1_NOCREATEROLE)).toHaveLength(1);
     expect(t).not.toContain(OWNER_HARDEN_H2_CLEAR_MARK);
     expect(t).not.toContain(OWNER_HARDEN_H3_MARK_PENDING);
-    expect(t[t.length - 1]).toBe(OWNER_BOOTSTRAP_COMMIT);
+    expect(lastTx(t)).toBe(OWNER_BOOTSTRAP_COMMIT);
     assertInsideLockedTransaction(t);
     expect(lines).toContain(OWNER_BOOTSTRAP_MESSAGES.createRoleRemoved);
   });
@@ -626,7 +651,7 @@ describe('owner bootstrap: the CREATEROLE step through bootstrapOwnerWithIo (sch
     const { io, texts } = fakeIo([existing, existing, hardened], [{ ok: true }], { schemaComplete: true });
     expect(await bootstrapOwnerWithIo(io)).toMatchObject({ createRole: 'none' });
     expect(texts().filter((x) => H_STATEMENTS.includes(x))).toEqual([]);
-    expect(texts()[texts().length - 1]).toBe(OWNER_BOOTSTRAP_ROLLBACK);
+    expect(lastTx(texts())).toBe(OWNER_BOOTSTRAP_ROLLBACK);
   });
 
   it.each<[string, boolean]>([
@@ -639,7 +664,22 @@ describe('owner bootstrap: the CREATEROLE step through bootstrapOwnerWithIo (sch
     expect(error).toBeInstanceOf(OwnerBootstrapRefusal);
     expect((error as Error).message).toBe(OWNER_BOOTSTRAP_MESSAGES.createRoleNoRights);
     expect(texts().filter((x) => H_STATEMENTS.includes(x))).toEqual([]);
-    expect(texts()[texts().length - 1]).toBe(OWNER_BOOTSTRAP_ROLLBACK);
+    expect(lastTx(texts())).toBe(OWNER_BOOTSTRAP_ROLLBACK);
+  });
+
+  it.each<[string, boolean]>([
+    ['remove', true],
+    ['mark', false],
+  ])('DENIAL review L1 (%s): crewflow_owner is used by another database of the cluster -> refusal 64, ROLLBACK, no ALTER ROLE / COMMENT sent', async (_label, complete) => {
+    const { io, texts } = fakeIo([existing], [{ ok: true }], { schemaComplete: complete, otherDatabase: true });
+    const error = await bootstrapOwnerWithIo(io).catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(OwnerBootstrapRefusal);
+    expect((error as Error).message).toBe(OWNER_BOOTSTRAP_MESSAGES.createRoleOtherDatabase);
+    const t = texts();
+    expect(t.filter((x) => H_STATEMENTS.includes(x))).toEqual([]);
+    // Q2b ran under the lock, inside the transaction, before any H statement could be sent.
+    expect(t.indexOf(OWNER_BOOTSTRAP_Q2B_OTHER_DATABASES)).toBeGreaterThan(t.lastIndexOf(OWNER_BOOTSTRAP_Q4A_LOCK));
+    expect(lastTx(t)).toBe(OWNER_BOOTSTRAP_ROLLBACK);
   });
 
   it('no rights also without CREATEROLE (ADMIN OPTION alone is not enough); superuser alone is enough', async () => {
@@ -657,7 +697,7 @@ describe('owner bootstrap: the CREATEROLE step through bootstrapOwnerWithIo (sch
     expect(error).toBeInstanceOf(OwnerBootstrapFailure);
     expect((error as Error).message).toBe(OWNER_BOOTSTRAP_MESSAGES.reverifyFailed);
     expect(texts()).not.toContain(OWNER_BOOTSTRAP_COMMIT);
-    expect(texts()[texts().length - 1]).toBe(OWNER_BOOTSTRAP_ROLLBACK);
+    expect(lastTx(texts())).toBe(OWNER_BOOTSTRAP_ROLLBACK);
   });
 
   it('fail closed: a mark that does not show after H3 -> failure 70', async () => {
@@ -750,10 +790,21 @@ describe('owner bootstrap: the whole step without a database', () => {
       ],
       [
         'a non-ASCII crewflow_owner password with an admin (no SCRAM verifier)',
-        { PG_DATABASE_URL: 'postgres://crewflow_owner:p%C3%A9ssword0123@db.internal.example:5432/crewflow_unit', PG_ADMIN_URL: ADMIN_URL },
+        { PG_DATABASE_URL: 'postgres://crewflow_owner:p%C3%A9ssword-0123456789-abcdefghij-KLMNOP@db.internal.example:5432/crewflow_unit', PG_ADMIN_URL: ADMIN_URL },
         OWNER_CREDENTIAL_MESSAGES.nonAsciiScramPassword,
       ],
       ['the retired admin name', { PG_DATABASE_URL: APP_URL, PG_DATABASE_ADMIN_URL: ADMIN_URL }, DB_SETUP_INPUT_MESSAGES.retiredAdminName('PG_DATABASE_ADMIN_URL')],
+      // Security review of PR #246, M2: db-setup never creates or sets a weak schema-owner password (9 characters here).
+      [
+        'an admin URL and a 9-character crewflow_owner password',
+        { PG_DATABASE_URL: 'postgres://crewflow_owner:Short9pw1@db.internal.example:5432/crewflow_unit', PG_ADMIN_URL: ADMIN_URL },
+        DB_SETUP_INPUT_MESSAGES.weakPassword,
+      ],
+      [
+        'mode c in production with a weak crewflow_owner password',
+        { PG_DATABASE_URL: 'postgres://crewflow_owner:changeme@db.internal.example:5432/crewflow_unit', NODE_ENV: 'production' },
+        DB_SETUP_INPUT_MESSAGES.weakPasswordProduction,
+      ],
       ['only the legacy DATABASE_URL', { DATABASE_URL: APP_URL }, DB_SETUP_INPUT_MESSAGES.appUrlMissing],
     ];
     for (const [label, env, message] of cases) {
@@ -823,12 +874,27 @@ describe('owner bootstrap: statements and the advisory key', () => {
   it('the CREATEROLE statements are exactly the reviewed text; db-setup never grants CREATEROLE to an existing role', () => {
     expect(OWNER_HARDEN_H1_NOCREATEROLE).toBe('ALTER ROLE crewflow_owner NOCREATEROLE;');
     expect(OWNER_HARDEN_H2_CLEAR_MARK).toBe('COMMENT ON ROLE crewflow_owner IS NULL;');
-    expect(OWNER_HARDEN_H3_MARK_PENDING).toBe("COMMENT ON ROLE crewflow_owner IS 'crewflow:createrole-until-schema-current';");
-    expect(OWNER_CREATEROLE_PENDING_COMMENT).not.toMatch(/['\\]/);
+    // Owner decision M1: the mark carries a unix expiry, now + 24 h by the SERVER clock (COMMENT takes only a literal: a DO block).
+    expect(OWNER_HARDEN_H3_MARK_PENDING).toBe(`DO $mark$
+BEGIN
+  EXECUTE pg_catalog.format('COMMENT ON ROLE crewflow_owner IS %L',
+    'crewflow:createrole-until-schema-current:' || (pg_catalog.date_part('epoch', pg_catalog.now())::bigint + 86400)::text);
+END
+$mark$;`);
+    expect(OWNER_CREATEROLE_MARK_PREFIX).toBe('crewflow:createrole-until-schema-current:');
+    expect(OWNER_CREATEROLE_GRACE_SECONDS).toBe(86400);
+    for (const constant of [OWNER_CREATEROLE_MARK_PREFIX, OWNER_CREATEROLE_MARK_SQL_RE]) expect(constant).not.toMatch(/['\\]/);
     for (const text of [...OWNER_BOOTSTRAP_ADMIN_STATEMENTS, ...OWNER_HARDEN_ADMIN_STATEMENTS]) {
       expect(text).not.toMatch(/ALTER ROLE crewflow_owner (WITH )?CREATEROLE/);
     }
-    expect(OWNER_BOOTSTRAP_Q2_FACTS).toContain(`COALESCE(pg_catalog.shobj_description(o.oid, 'pg_authid') = '${OWNER_CREATEROLE_PENDING_COMMENT}', false)`);
+    expect(OWNER_BOOTSTRAP_Q2_FACTS).toContain(
+      `COALESCE(pg_catalog.shobj_description(o.oid, 'pg_authid') OPERATOR(pg_catalog.~) '${OWNER_CREATEROLE_MARK_SQL_RE}', false) AS o_createrole_pending`,
+    );
+    // The expiry is parsed only for a matching mark, and compared with the SERVER clock (never the client's).
+    expect(OWNER_BOOTSTRAP_Q2_FACTS).toContain(
+      "pg_catalog.split_part(pg_catalog.shobj_description(o.oid, 'pg_authid'), ':', 3)::bigint <= pg_catalog.date_part('epoch', pg_catalog.now())::bigint",
+    );
+    expect(OWNER_BOOTSTRAP_Q2_FACTS).toContain('AS o_createrole_mark_expired');
   });
 
   it('the lock key is "crewboot", 64-bit (never an int4 hashtext key), and differs from every other numeric advisory key', () => {
@@ -1067,10 +1133,273 @@ describe('owner bootstrap: security re-review N2 / N4', () => {
       ['o_createrole_pending', null],
       ['o_createrole_pending', undefined],
       ['o_createrole_pending', 'true'],
+      ['o_createrole_mark_expired', null],
+      ['o_createrole_mark_expired', 'false'],
     ] as const) {
       expect(() => factsFromRow({ ...row, [column]: value })).toThrow(OwnerBootstrapFailure);
     }
     expect(factsFromRow({ ...row, owner_exists: false, o_login: null, o_super: null, o_privileged_memberships: null }).oSuper).toBeNull();
     expect(() => factsFromRow({ ...row, o_owns_db: null })).toThrow(OwnerBootstrapFailure);
+  });
+});
+
+/**
+ * db-harden (owner decision M1): a fake admin session per round. `rounds` is the facts each round reads (the last one
+ * repeats); inside the CREATEROLE step's transaction the facts come from `stepFacts` (under the lock, then the re-check).
+ */
+function hardenFake(opts: {
+  rounds: OwnerFacts[];
+  stepFacts?: OwnerFacts[];
+  complete?: Array<boolean | null>;
+  openErrors?: string[];
+  otherDatabase?: boolean;
+  timeoutSeconds?: number;
+  pollIntervalMs?: number;
+  /** Answers of the migration try-lock, one per removal attempt (true = a migrate child holds it). */
+  migrationBusy?: boolean[];
+}) {
+  const migrationBusy = [...(opts.migrationBusy ?? [false])];
+  const sent: string[] = [];
+  const lines: string[] = [];
+  let clock = 0;
+  let opens = 0;
+  let completeAsked = 0;
+  const rounds = [...opts.rounds];
+  const stepFacts = [...(opts.stepFacts ?? [])];
+  const completes = [...(opts.complete ?? [true])];
+  const openErrors = [...(opts.openErrors ?? [])];
+  let inStep = false;
+  const nextFacts = (): OwnerFacts => {
+    if (inStep && stepFacts.length) return stepFacts.length > 1 ? stepFacts.shift()! : stepFacts[0]!;
+    return rounds.length > 1 ? rounds.shift()! : rounds[0]!;
+  };
+  const session: SqlSession = {
+    async query(text) {
+      sent.push(text);
+      if (text === OWNER_BOOTSTRAP_BEGIN) inStep = true;
+      if (text === OWNER_BOOTSTRAP_COMMIT || text === OWNER_BOOTSTRAP_ROLLBACK) inStep = false;
+      if (text === OWNER_BOOTSTRAP_Q2_FACTS) return { rows: [factsRow(nextFacts())] };
+      if (text === OWNER_BOOTSTRAP_Q2B_OTHER_DATABASES) return { rows: [{ o_other_database: opts.otherDatabase ?? false }] };
+      if (text === OWNER_HARDEN_M1_TRY_MIGRATION_LOCK) {
+        const busy = migrationBusy.length > 1 ? migrationBusy.shift()! : (migrationBusy[0] ?? false);
+        return { rows: [{ got: !busy }] };
+      }
+      if (text === OWNER_HARDEN_M2_RELEASE_MIGRATION_LOCK) return { rows: [{ released: true }] };
+      return { rows: [] };
+    },
+    async end() {
+      /* closed */
+    },
+  };
+  const io: HardenIo = {
+    async openAdmin() {
+      opens += 1;
+      const code = openErrors.shift();
+      if (code) throw Object.assign(new Error('connect failed'), { code });
+      return session;
+    },
+    async schemaComplete() {
+      completeAsked += 1;
+      return completes.length > 1 ? completes.shift()! : completes[0]!;
+    },
+    log: (l) => lines.push(l),
+    sleep: async (ms) => {
+      clock += ms;
+    },
+    now: () => clock,
+    timeoutSeconds: opts.timeoutSeconds ?? 60,
+    pollIntervalMs: opts.pollIntervalMs ?? 10_000,
+  };
+  return { io, sent, lines, opens: () => opens, completeAsked: () => completeAsked, clock: () => clock };
+}
+
+describe('db-harden (owner decision M1): hardenOwnerWithIo', () => {
+  const markedFacts: OwnerFacts = { ...existing, oCreateRolePending: true };
+  const removedFacts: OwnerFacts = { ...existing, oCreateRole: false, oCreateRolePending: false };
+  const H = [OWNER_HARDEN_H1_NOCREATEROLE, OWNER_HARDEN_H2_CLEAR_MARK, OWNER_HARDEN_H3_MARK_PENDING];
+
+  it('happy path: polls (not readable, then incomplete, then complete), then H1 + H2 under the lock, "removed", exit 0; each waiting line once', async () => {
+    const f = hardenFake({ rounds: [markedFacts], stepFacts: [markedFacts, removedFacts], complete: [null, false, false, true] });
+    const result = await hardenOwnerWithIo(f.io);
+    expect(result).toMatchObject({ outcome: 'unchanged', exitCode: 0, createRole: 'removed', created: false, passwordSet: false, grantAdded: false });
+    expect(f.completeAsked()).toBe(4);
+    const lock = f.sent.indexOf(OWNER_BOOTSTRAP_Q4A_LOCK);
+    expect(lock).toBeGreaterThan(f.sent.indexOf(OWNER_BOOTSTRAP_BEGIN));
+    expect(f.sent.indexOf(OWNER_BOOTSTRAP_Q2B_OTHER_DATABASES)).toBeGreaterThan(lock);
+    expect(f.sent.indexOf(OWNER_HARDEN_H1_NOCREATEROLE)).toBeGreaterThan(f.sent.indexOf(OWNER_BOOTSTRAP_Q2B_OTHER_DATABASES));
+    expect(f.sent.indexOf(OWNER_HARDEN_H2_CLEAR_MARK)).toBeGreaterThan(f.sent.indexOf(OWNER_HARDEN_H1_NOCREATEROLE));
+    expect(lastTx(f.sent)).toBe(OWNER_BOOTSTRAP_COMMIT);
+    expect(f.sent).not.toContain(OWNER_HARDEN_H3_MARK_PENDING);
+    // db-harden never creates a role, never sets a password, never touches a grant.
+    for (const never of [OWNER_BOOTSTRAP_Q4B_SET_INPUTS, OWNER_BOOTSTRAP_Q4C_DO, OWNER_BOOTSTRAP_Q4D_REVERIFY]) expect(f.sent).not.toContain(never);
+    expect(f.lines.filter((l) => l === OWNER_BOOTSTRAP_MESSAGES.hardenWaitingForSchema)).toHaveLength(1);
+    expect(f.lines).toContain(OWNER_BOOTSTRAP_MESSAGES.createRoleRemoved);
+  });
+
+  it('crewflow_owner missing at first (db-setup not run yet): waits, then hardens once it appears', async () => {
+    const f = hardenFake({ rounds: [base, base, markedFacts], stepFacts: [markedFacts, removedFacts], complete: [true] });
+    expect(await hardenOwnerWithIo(f.io)).toMatchObject({ exitCode: 0, createRole: 'removed' });
+    expect(f.lines.filter((l) => l === OWNER_BOOTSTRAP_MESSAGES.hardenWaitingForRole)).toHaveLength(1);
+    expect(f.opens()).toBe(3);
+  });
+
+  it('already hardened (NOCREATEROLE, unmarked): no transaction, no schema read, "none", exit 0 at once', async () => {
+    const f = hardenFake({ rounds: [removedFacts] });
+    expect(await hardenOwnerWithIo(f.io)).toMatchObject({ exitCode: 0, createRole: 'none' });
+    expect(f.sent).not.toContain(OWNER_BOOTSTRAP_BEGIN);
+    expect(f.completeAsked()).toBe(0);
+    expect(f.lines).toContain(OWNER_BOOTSTRAP_MESSAGES.hardenAlready);
+    expect(f.clock()).toBe(0);
+  });
+
+  it('a leftover mark only (NOCREATEROLE, marked): H2 alone, "mark-cleared"', async () => {
+    const leftover = { ...removedFacts, oCreateRolePending: true };
+    const f = hardenFake({ rounds: [leftover], stepFacts: [leftover, removedFacts], complete: [true] });
+    expect(await hardenOwnerWithIo(f.io)).toMatchObject({ exitCode: 0, createRole: 'mark-cleared' });
+    expect(f.sent.filter((t) => H.includes(t))).toEqual([OWNER_HARDEN_H2_CLEAR_MARK]);
+  });
+
+  it('timeout: the schema never completes -> failure (code TIMEOUT, the hardenTimeout message), no H statement ever sent, CREATEROLE untouched', async () => {
+    const f = hardenFake({ rounds: [markedFacts], complete: [false], timeoutSeconds: 60, pollIntervalMs: 10_000 });
+    const error = await hardenOwnerWithIo(f.io).catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(OwnerBootstrapFailure);
+    expect((error as OwnerBootstrapFailure).code).toBe('TIMEOUT');
+    expect((error as Error).message).toBe(OWNER_BOOTSTRAP_MESSAGES.hardenTimeout(60));
+    expect(f.sent.filter((t) => H.includes(t))).toEqual([]);
+    expect(f.sent).not.toContain(OWNER_BOOTSTRAP_BEGIN);
+    // Bounded: it polled at the interval until the deadline (60 s / 10 s), never beyond it.
+    expect(f.clock()).toBeLessThanOrEqual(60_000);
+    expect(f.completeAsked()).toBeGreaterThanOrEqual(5);
+  });
+
+  it('DENIAL review L1: crewflow_owner used by another database of the cluster -> createRoleOtherDatabase, ROLLBACK, no H statement', async () => {
+    const f = hardenFake({ rounds: [markedFacts], stepFacts: [markedFacts], complete: [true], otherDatabase: true });
+    const error = await hardenOwnerWithIo(f.io).catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(OwnerBootstrapRefusal);
+    expect((error as Error).message).toBe(OWNER_BOOTSTRAP_MESSAGES.createRoleOtherDatabase);
+    expect(f.sent.filter((t) => H.includes(t))).toEqual([]);
+    expect(lastTx(f.sent)).toBe(OWNER_BOOTSTRAP_ROLLBACK);
+  });
+
+  it('an admin login refusal (28P01) is a refusal at once: no polling', async () => {
+    const f = hardenFake({ rounds: [markedFacts], openErrors: ['28P01'] });
+    const error = await hardenOwnerWithIo(f.io).catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(OwnerBootstrapRefusal);
+    expect((error as Error).message).toBe(OWNER_BOOTSTRAP_MESSAGES.adminAuth('28P01'));
+    expect(f.opens()).toBe(1);
+    expect(f.clock()).toBe(0);
+  });
+
+  it('a not-ready connect error (ECONNREFUSED: the db starting) is polled, then it hardens', async () => {
+    const f = hardenFake({ rounds: [markedFacts], stepFacts: [markedFacts, removedFacts], openErrors: ['ECONNREFUSED', 'ECONNREFUSED'], complete: [true] });
+    expect(await hardenOwnerWithIo(f.io)).toMatchObject({ exitCode: 0, createRole: 'removed' });
+    expect(f.opens()).toBe(3);
+    expect(f.clock()).toBe(20_000);
+  });
+
+  it('hardenTimeoutSeconds: unset / blank = 1200; whole seconds 60-7200; 1-59 only with NODE_ENV=test; anything else refused', () => {
+    expect(HARDEN_DEFAULT_TIMEOUT_SECONDS).toBe(1200);
+    expect(hardenTimeoutSeconds({})).toBe(1200);
+    expect(hardenTimeoutSeconds({ CREWFLOW_DB_HARDEN_TIMEOUT_SECONDS: ' ' })).toBe(1200);
+    expect(hardenTimeoutSeconds({ CREWFLOW_DB_HARDEN_TIMEOUT_SECONDS: '60' })).toBe(60);
+    expect(hardenTimeoutSeconds({ CREWFLOW_DB_HARDEN_TIMEOUT_SECONDS: '7200' })).toBe(7200);
+    expect(hardenTimeoutSeconds({ CREWFLOW_DB_HARDEN_TIMEOUT_SECONDS: '1', NODE_ENV: 'test' })).toBe(1);
+    for (const bad of ['59', '7201', '20m', '1'.repeat(20), '-5', '1.5', '0']) {
+      expect(refusalOf(() => hardenTimeoutSeconds({ CREWFLOW_DB_HARDEN_TIMEOUT_SECONDS: bad }))).toBe(OWNER_BOOTSTRAP_MESSAGES.hardenTimeoutSetting);
+    }
+    expect(refusalOf(() => hardenTimeoutSeconds({ CREWFLOW_DB_HARDEN_TIMEOUT_SECONDS: '1', NODE_ENV: 'production' }))).toBe(OWNER_BOOTSTRAP_MESSAGES.hardenTimeoutSetting);
+    expect(refusalOf(() => hardenTimeoutSeconds({ CREWFLOW_DB_HARDEN_TIMEOUT_SECONDS: '0', NODE_ENV: 'test' }))).toBe(OWNER_BOOTSTRAP_MESSAGES.hardenTimeoutSetting);
+  });
+
+  it('runOwnerHarden, mode c (PG_DATABASE_URL only, no admin): exit 0, createRole "not-run", the no-admin line, and no connection at all', async () => {
+    const lines: string[] = [];
+    const result = await runOwnerHarden(
+      { PG_DATABASE_URL: `postgres://crewflow_owner:${OWNER_PW}@127.0.0.1:1/crewflow_unit` },
+      {
+        log: (l) => lines.push(l),
+        expectedMigrations: () => {
+          throw new Error('mode c must not read the migration list');
+        },
+      },
+    );
+    expect(result).toEqual({ outcome: 'unchanged', exitCode: 0, created: false, passwordSet: false, grantAdded: false, createRole: 'not-run', code: null });
+    expect(lines).toEqual([OWNER_BOOTSTRAP_MESSAGES.hardenNoAdmin]);
+  });
+
+  it('runOwnerHarden refuses a bad timeout and a weak password before anything connects (exit 64, fixed text only)', async () => {
+    const lines: string[] = [];
+    const bad = await runOwnerHarden({ PG_ADMIN_URL: ADMIN_URL, PG_DATABASE_URL: APP_URL, CREWFLOW_DB_HARDEN_TIMEOUT_SECONDS: '20m' }, { log: (l) => lines.push(l) });
+    expect(bad).toMatchObject({ outcome: 'refused', exitCode: 64, createRole: 'not-run' });
+    const weak = await runOwnerHarden(
+      { PG_ADMIN_URL: ADMIN_URL, PG_DATABASE_URL: 'postgres://crewflow_owner:Short9pw1@db.internal.example:5432/crewflow_unit' },
+      { log: (l) => lines.push(l) },
+    );
+    expect(weak).toMatchObject({ outcome: 'refused', exitCode: 64 });
+    expect(lines).toEqual([OWNER_BOOTSTRAP_MESSAGES.hardenTimeoutSetting, DB_SETUP_INPUT_MESSAGES.weakPassword]);
+    for (const l of lines) for (const leak of [ADMIN_PW, OWNER_PW, 'Short9pw1', 'db.internal.example']) expect(l).not.toContain(leak);
+  });
+});
+
+describe('the CREATEROLE mark re-check after H3 requires a valid, UNEXPIRED mark (owner decision M1)', () => {
+  it('a mark that shows as expired right after H3 -> failure 70, rolled back', async () => {
+    const expiredMark = { ...existing, oCreateRolePending: true, oCreateRoleMarkExpired: true };
+    const { io, texts } = fakeIo([existing, existing, existing, expiredMark], [{ ok: true }], { schemaComplete: false });
+    await expect(bootstrapOwnerWithIo(io)).rejects.toThrow(OWNER_BOOTSTRAP_MESSAGES.reverifyFailed);
+    expect(texts()).toContain(OWNER_HARDEN_H3_MARK_PENDING);
+    expect(lastTx(texts())).toBe(OWNER_BOOTSTRAP_ROLLBACK);
+  });
+
+  it('an expired mark on an incomplete schema is marked again (H3), "marked"', async () => {
+    const expiredMark = { ...existing, oCreateRolePending: true, oCreateRoleMarkExpired: true };
+    const fresh = { ...existing, oCreateRolePending: true };
+    const { io, texts } = fakeIo([expiredMark, expiredMark, expiredMark, fresh], [{ ok: true }], { schemaComplete: false });
+    expect(await bootstrapOwnerWithIo(io)).toMatchObject({ createRole: 'marked' });
+    expect(texts().filter((t) => t === OWNER_HARDEN_H3_MARK_PENDING)).toHaveLength(1);
+  });
+});
+
+describe('the CREATEROLE removal waits for a running migration (review race: disableLegacyLogins needs CREATEROLE)', () => {
+  const markedFacts: OwnerFacts = { ...existing, oCreateRolePending: true };
+  const removedFacts: OwnerFacts = { ...existing, oCreateRole: false, oCreateRolePending: false };
+
+  it('the try-lock key is the migration lock key ("crewmigr", migration-lock.ts MIGRATION_LOCK_KEY)', () => {
+    expect(BigInt(MIGRATION_LOCK_KEY_DECIMAL)).toBe(MIGRATION_LOCK_KEY);
+    expect(OWNER_HARDEN_M1_TRY_MIGRATION_LOCK).toBe(`SELECT pg_catalog.pg_try_advisory_lock(${MIGRATION_LOCK_KEY_DECIMAL}) AS got;`);
+  });
+
+  it('db-harden: the migration lock is held -> no transaction, waits, then removes once it is free; the lock is released after the removal', async () => {
+    const f = hardenFake({ rounds: [markedFacts], stepFacts: [markedFacts, removedFacts], complete: [true], migrationBusy: [true, true, false] });
+    const result = await hardenOwnerWithIo(f.io);
+    expect(result).toMatchObject({ exitCode: 0, createRole: 'removed' });
+    expect(f.lines.filter((l) => l === OWNER_BOOTSTRAP_MESSAGES.hardenWaitingForMigration)).toHaveLength(1);
+    const tries = f.sent.filter((t) => t === OWNER_HARDEN_M1_TRY_MIGRATION_LOCK).length;
+    expect(tries).toBe(3);
+    // No H statement before the try-lock that succeeded; the release comes after COMMIT.
+    const lastTry = f.sent.lastIndexOf(OWNER_HARDEN_M1_TRY_MIGRATION_LOCK);
+    expect(f.sent.indexOf(OWNER_HARDEN_H1_NOCREATEROLE)).toBeGreaterThan(lastTry);
+    expect(f.sent.lastIndexOf(OWNER_HARDEN_M2_RELEASE_MIGRATION_LOCK)).toBeGreaterThan(f.sent.lastIndexOf(OWNER_BOOTSTRAP_COMMIT));
+    expect(f.sent.filter((t) => t === OWNER_HARDEN_M2_RELEASE_MIGRATION_LOCK)).toHaveLength(1);
+  });
+
+  it('db-harden: a migration that never finishes -> the timeout, no H statement ever sent', async () => {
+    const f = hardenFake({ rounds: [markedFacts], complete: [true], migrationBusy: [true], timeoutSeconds: 60, pollIntervalMs: 10_000 });
+    const error = await hardenOwnerWithIo(f.io).catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(OwnerBootstrapFailure);
+    expect(f.sent).not.toContain(OWNER_HARDEN_H1_NOCREATEROLE);
+    expect(f.sent).not.toContain(OWNER_BOOTSTRAP_BEGIN);
+  });
+
+  it('db-setup: the migration lock is held -> CREATEROLE kept this time ("kept", one log line), no transaction, no release', async () => {
+    const { io, texts, lines } = fakeIo([existing], [{ ok: true }], { schemaComplete: true, migrationBusy: true });
+    expect(await bootstrapOwnerWithIo(io)).toMatchObject({ exitCode: 0, createRole: 'kept' });
+    expect(lines).toContain(OWNER_BOOTSTRAP_MESSAGES.createRoleBusyKept);
+    expect(texts()).not.toContain(OWNER_HARDEN_H1_NOCREATEROLE);
+    expect(texts()).not.toContain(OWNER_HARDEN_M2_RELEASE_MIGRATION_LOCK);
+  });
+
+  it('marking (an incomplete schema) never takes the migration lock: the first start marks while the migrate child may run later', async () => {
+    const { io, texts } = fakeIo([existing, existing, existing, { ...existing, oCreateRolePending: true }], [{ ok: true }], { schemaComplete: false, migrationBusy: true });
+    expect(await bootstrapOwnerWithIo(io)).toMatchObject({ createRole: 'marked' });
+    expect(texts()).not.toContain(OWNER_HARDEN_M1_TRY_MIGRATION_LOCK);
   });
 });

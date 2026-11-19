@@ -62,8 +62,14 @@ SELECT length(:'owner_pw') >= 24 AS crewflow_owner_password_ok \gset
 CREATE ROLE crewflow_owner LOGIN PASSWORD :'owner_pw' NOSUPERUSER NOBYPASSRLS NOREPLICATION NOCREATEDB CREATEROLE INHERIT;
 -- Owner decision 2026-11-18: the CREATEROLE mark (db-setup's OWNER_HARDEN_H3_MARK_PENDING). In production rab-api,
 -- rab-worker and the CLI refuse a CREATEROLE crewflow_owner at boot unless it carries exactly this comment
--- (database-boot-gate-rules.ts assertCreateRoleGate); only an admin can set or clear it. Remove both after the first start.
-COMMENT ON ROLE crewflow_owner IS 'crewflow:createrole-until-schema-current';
+-- (database-boot-gate-rules.ts assertCreateRoleGate), valid 24 h by the SERVER clock (owner decision M1: an expired mark is
+-- refused at boot once the schema is complete); only an admin can set, clear or renew it. Remove both after the first start.
+DO $mark$
+BEGIN
+  EXECUTE pg_catalog.format('COMMENT ON ROLE crewflow_owner IS %L',
+    'crewflow:createrole-until-schema-current:' || (pg_catalog.date_part('epoch', pg_catalog.now())::bigint + 86400)::text);
+END
+$mark$;
 -- WITH GRANT OPTION: the bootstrap re-grants CREATE on the database to rab_owner, and later migrations re-grant it to
 -- rab_secure_owner (Phase 0b preflight).
 GRANT CONNECT, CREATE, TEMPORARY ON DATABASE :"DBNAME" TO crewflow_owner WITH GRANT OPTION;

@@ -55,6 +55,27 @@ export const OWNER_CREDENTIAL_MESSAGES = {
   ownerUrlWithoutPassword: `${URL_LABEL} names crewflow_owner but carries no usable password (1-${OWNER_PASSWORD_MAX_LENGTH} characters, no control characters). Refusing.`,
 } as const;
 
+/**
+ * Security review of PR #246, M2: the strength floor for a crewflow_owner password db-setup CREATES or SETS (modes a and b),
+ * and, in production, for the one mode c only checks. The operator chooses it now (Twenty's way), so "changeme" must never
+ * become the schema owner's password. Floor: 32+ characters, 10+ different characters, and not one short block repeated
+ * (`openssl rand -hex 32` is 64 characters over 16). A heuristic floor, not an entropy measurement.
+ */
+export const OWNER_PASSWORD_MIN_LENGTH = 32;
+export const OWNER_PASSWORD_MIN_DISTINCT = 10;
+
+/** True when `password` passes the strength floor above. Pure; never logs. */
+export function isStrongOwnerPassword(password: string): boolean {
+  if (typeof password !== 'string' || password.length < OWNER_PASSWORD_MIN_LENGTH) return false;
+  if (new Set(password).size < OWNER_PASSWORD_MIN_DISTINCT) return false;
+  // One short block repeated ("abcdefghij" x 4): the smallest period of the string is less than half its length.
+  for (let period = 1; period <= password.length / 2; period += 1) {
+    if (password.length % period !== 0) continue;
+    if (password.slice(0, period).repeat(password.length / period) === password) return false;
+  }
+  return true;
+}
+
 /** True when `password` can be used as the crewflow_owner password (the one in PG_DATABASE_URL). */
 export function isValidOwnerPassword(password: unknown): password is string {
   return typeof password === 'string' && password.length >= 1 && password.length <= OWNER_PASSWORD_MAX_LENGTH && !/[\x00-\x1f\x7f]/.test(password);
@@ -167,7 +188,15 @@ export const DB_SETUP_INPUT_MESSAGES = Object.freeze({
   appUrlNotOwner: `${URL_LABEL} is the app login and must log in as crewflow_owner. It is never an admin URL: an admin URL goes in ${ADMIN_URL_LABEL} (db-setup only). Refusing.`,
   adminUrlIsOwner: `${ADMIN_URL_LABEL} logs in as crewflow_owner, the app login. ${ADMIN_URL_LABEL} is your database's admin login (db-setup creates crewflow_owner with it); remove it to have db-setup only check crewflow_owner. Refusing.`,
   targetMismatch: `${ADMIN_URL_LABEL} and ${URL_LABEL} name different databases (host, port or database differ). Both must name the same database: db-setup creates crewflow_owner there, and rab-api / rab-worker connect there. Refusing.`,
+  weakPassword: `The crewflow_owner password inside ${URL_LABEL} is too weak to become the schema owner's password: it must be at least ${OWNER_PASSWORD_MIN_LENGTH} characters with at least ${OWNER_PASSWORD_MIN_DISTINCT} different characters (openssl rand -hex 32). Nothing was created or changed. Refusing.`,
+  // sql-injection-reviewed: an error MESSAGE (printed, never executed); the interpolations are this module's label constants.
+  weakPasswordProduction: `The crewflow_owner password inside ${URL_LABEL} is too weak for production: it must be at least ${OWNER_PASSWORD_MIN_LENGTH} characters with at least ${OWNER_PASSWORD_MIN_DISTINCT} different characters. As your admin set a strong one (openssl rand -hex 32; ALTER ROLE crewflow_owner PASSWORD ...) and put it in ${URL_LABEL}, or set ${ADMIN_URL_LABEL} so db-setup sets it. Refusing.`,
 });
+
+/** Production, fail closed: NODE_ENV, RAB_RUNTIME_ENV or DB_TARGET says production (trimmed, any case). Same rule as runtime-db-config.ts. */
+function looksLikeProduction(env: Record<string, string | undefined>): boolean {
+  return ['NODE_ENV', 'RAB_RUNTIME_ENV', 'DB_TARGET'].some((name) => env[name]?.trim().toLowerCase() === 'production');
+}
 
 /**
  * db-setup's input. `url` / `name` are the URL db-setup connects with FIRST (the admin URL in `bootstrap` mode, the app URL
@@ -211,6 +240,11 @@ export function selectDbSetupInput(env: Record<string, string | undefined>): DbS
     adminPlan = planDbSetup(adminUrl, ADMIN_URL_LABEL);
     if (adminPlan.mode !== 'bootstrap') throw new OwnerCredentialError(DB_SETUP_INPUT_MESSAGES.adminUrlIsOwner);
     if (!sameDatabase(adminPlan.urlTarget, appPlan.urlTarget)) throw new OwnerCredentialError(DB_SETUP_INPUT_MESSAGES.targetMismatch);
+    // M2: db-setup creates or sets this password: never a weak one, in any environment.
+    if (!isStrongOwnerPassword(appPlan.ownerPassword)) throw new OwnerCredentialError(DB_SETUP_INPUT_MESSAGES.weakPassword);
+  } else if (looksLikeProduction(env) && !isStrongOwnerPassword(appPlan.ownerPassword)) {
+    // M2, mode c: db-setup only checks it, but production never runs on a weak schema-owner password.
+    throw new OwnerCredentialError(DB_SETUP_INPUT_MESSAGES.weakPasswordProduction);
   }
   const input = {
     mode: adminPlan ? ('bootstrap' as const) : ('owner-url' as const),

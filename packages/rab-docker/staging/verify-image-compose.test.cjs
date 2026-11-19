@@ -223,14 +223,15 @@ const NO_PASSWORD_BUNDLED_URL = 'postgresql://postgres:@db:5432/crewflow?sslmode
  */
 const bundledDb = (replicas, { admin, app, password = true } = {}) => (v) => {
   v.services.db.deploy = { ...v.services.db.deploy, replicas };
-  const e = v.services['db-setup'].environment;
-  e.CREWFLOW_BUNDLED_DB = String(replicas);
-  if (admin !== undefined) e.PG_ADMIN_URL = admin;
-  if (app !== undefined) for (const n of ['db-setup', 'rab-api', 'rab-worker']) v.services[n].environment.PG_DATABASE_URL = app;
-  if (!password) {
-    e.CREWFLOW_BUNDLED_DB_ADMIN_URL = NO_PASSWORD_BUNDLED_URL;
-    v.services.db.environment.POSTGRES_PASSWORD = '';
+  // db-harden (owner decision 2026-11-18, M1) renders db-setup's database settings from the same compose.env variables.
+  for (const admin_ of ['db-setup', 'db-harden']) {
+    const e = v.services[admin_].environment;
+    e.CREWFLOW_BUNDLED_DB = String(replicas);
+    if (admin !== undefined) e.PG_ADMIN_URL = admin;
+    if (!password) e.CREWFLOW_BUNDLED_DB_ADMIN_URL = NO_PASSWORD_BUNDLED_URL;
   }
+  if (app !== undefined) for (const n of ['db-setup', 'db-harden', 'rab-api', 'rab-worker']) v.services[n].environment.PG_DATABASE_URL = app;
+  if (!password) v.services.db.environment.POSTGRES_PASSWORD = '';
 };
 test('environment mode (owner decision 2026-11-18): the three modes pass (a bundled; b CREWFLOW_BUNDLED_DB=0 + PG_ADMIN_URL + PG_DATABASE_URL; c CREWFLOW_BUNDLED_DB=0 + PG_DATABASE_URL), b and c without PG_DATABASE_PASSWORD', { skip }, () => {
   const m = fresh();
@@ -403,7 +404,7 @@ const addMaint = (src) => src.replace(/\nnetworks:\n/, [
 test('DENIAL (rendered): docker-compose.image.yml with a "maint"-profile service reading .env.ops fails', { skip }, () => {
   renderWeakened(addMaint, (m) => {
     const problems = checkVariant(m.variant, m.production, m.variantFiles);
-    assertRefused(problems, /services are .*rab-maint.*; expected exactly db,db-setup,rab-api,rab-redis,rab-worker/);
+    assertRefused(problems, /services are .*rab-maint.*; expected exactly db,db-harden,db-setup,rab-api,rab-redis,rab-worker/);
     assertRefused(problems, /rab-maint: has profiles \["maint"\]/);
     assertRefused(problems, /rab-maint: carries a value of the retired \.env\.ops/);
     assertRefused(problems, /rab-maint: sets the retired CREWFLOW_OPS_RUN/);
@@ -455,7 +456,7 @@ test('a variant file that adds rab-ops back (ops profile, .env.ops) fails, stati
     ].join('\n')),
     (m) => {
       const problems = checkVariant(m.variant, m.production, m.variantFiles);
-      assertRefused(problems, /services are .*rab-ops.*; expected exactly db,db-setup,rab-api,rab-redis,rab-worker/);
+      assertRefused(problems, /services are .*rab-ops.*; expected exactly db,db-harden,db-setup,rab-api,rab-redis,rab-worker/);
       assertRefused(problems, /rab-ops: present \(removed/);
       assertRefused(problems, /rab-ops: has the "ops" profile/);
       assertRefused(problems, /rab-ops: names \.env\.ops/);
@@ -587,7 +588,7 @@ test('J2-3: with push on the verifier refuses a 2 s push sweep on either service
 // DB-SETUP (owner decisions D1 a / D3 / D4 / D5, T-1 / T-2 / T-5).
 test('DENIAL DB-SETUP static: the bundled db must be identical in both files, unpublished, internal; the Worker runs worker-start.sh', { skip }, () => {
   for (const [label, mutate, pattern] of [
-    ['db missing in the variant', (v) => { delete v.services.db; }, /services are .*expected exactly db,db-setup,rab-api,rab-redis,rab-worker|db: missing in the variant/],
+    ['db missing in the variant', (v) => { delete v.services.db; }, /services are .*expected exactly db,db-harden,db-setup,rab-api,rab-redis,rab-worker|db: missing in the variant/],
     ['db read-only root dropped', (v) => { v.services.db.read_only = false; }, /db\.read_only differs from docker-compose\.production\.yml/],
     ['db published', (v) => { v.services.db.ports = [{ target: 5432, host_ip: '127.0.0.1', published: '5432' }]; }, /db: publishes a port|db\.ports differs/],
     ['db password from somewhere else', (v) => { v.services.db.environment.POSTGRES_PASSWORD = 'postgres'; }, /db\.environment differs/],
@@ -627,8 +628,8 @@ test('DENIAL DB-SETUP environment mode: PG_DATABASE_URL never from an env file, 
   // an env-file value or the password is refused there too.
   const owner = 'postgresql://crewflow_owner:x@db-direct.example:5432/d?sslmode=verify-full';
   const setUrls = ({ admin, app = owner }) => (v) => {
-    if (admin !== undefined) v.services['db-setup'].environment.PG_ADMIN_URL = admin;
-    for (const n of ['db-setup', 'rab-api', 'rab-worker']) v.services[n].environment.PG_DATABASE_URL = app;
+    if (admin !== undefined) for (const n of ['db-setup', 'db-harden']) v.services[n].environment.PG_ADMIN_URL = admin;
+    for (const n of ['db-setup', 'db-harden', 'rab-api', 'rab-worker']) v.services[n].environment.PG_DATABASE_URL = app;
   };
   assert.deepEqual(run({ 'rab-api': ok, 'rab-worker': ok }, setUrls({ admin: 'postgresql://doadmin:x@db-direct.example:5432/d?sslmode=verify-full' })), []);
   for (const login of ['crewflow_app', 'crewflow_migrator', 'crewflow']) {
@@ -686,6 +687,102 @@ test('DENIAL DB-SETUP environment mode: PG_DATABASE_URL never from an env file, 
   assert.deepEqual(checkResolvedImages({ services: { db: { image: `postgres@${d}` } } }).problems, []);
   assert.match(checkResolvedImages({ services: { db: { image: `evil/postgres@${d}` } } }).problems.join(), /not the official postgres image/);
   assert.match(checkResolvedImages({ services: { db: { image: 'postgres:16' } } }).problems.join(), /not repository@sha256/);
+});
+
+// ---- db-harden (owner decision 2026-11-18, security review of PR #246, M1): the one-shot CREATEROLE hardening.
+const verifierRules = require('./verify-image-compose.cjs');
+const H_IMG = `adhin007/adolphus@sha256:${'a'.repeat(64)}`;
+const H_OWNER = 'postgresql://crewflow_owner:not-a-secret@db:5432/crewflow?sslmode=verify-full'; // gitleaks:allow
+const H_BUNDLED = 'postgresql://postgres:not-a-secret@db:5432/crewflow?sslmode=verify-full'; // gitleaks:allow
+const H_TIMEOUT = 'CREWFLOW_DB_HARDEN_TIMEOUT_SECONDS';
+const hDbEnv = () => ({ PG_ADMIN_URL: '', PG_DATABASE_URL: H_OWNER, CREWFLOW_BUNDLED_DB: '1', CREWFLOW_BUNDLED_DB_ADMIN_URL: H_BUNDLED, NODE_ENV: 'production', RAB_RUNTIME_ENV: 'production' });
+/** A hand-built model of the four services the rules look at (no rendering): the committed shape. */
+const hardenModel = () => ({
+  'db-setup': { image: H_IMG, entrypoint: ['./db-setup.sh'], restart: 'no', user: '1000:1000', read_only: true, depends_on: { db: { condition: 'service_healthy' } }, environment: hDbEnv() },
+  'db-harden': { image: H_IMG, entrypoint: ['./db-setup.sh', 'harden'], restart: 'no', user: '1000:1000', read_only: true, environment: { ...hDbEnv(), [H_TIMEOUT]: '1200' } },
+  'rab-api': { image: H_IMG, entrypoint: ['./api-prestart.sh'], depends_on: { 'db-setup': { condition: 'service_completed_successfully' } }, environment: { PG_ADMIN_URL: '', PG_DATABASE_URL: H_OWNER } },
+  'rab-worker': { image: H_IMG, entrypoint: ['./worker-start.sh'], environment: { PG_ADMIN_URL: '', PG_DATABASE_URL: H_OWNER } },
+});
+const hardenRules = (mutate = () => {}) => {
+  const s = hardenModel();
+  mutate(s);
+  return [...verifierRules.optionAProblems(s), ...verifierRules.pid1Problems(s)];
+};
+
+test('M1: the hand-built committed shape passes; db-harden is a known service and the second admin service', () => {
+  assert.deepEqual(hardenRules(), []);
+  assert.deepEqual([...verifierRules.ADMIN_SERVICES], ['db-setup', 'db-harden']);
+  assert.deepEqual(verifierRules.PID1_ENTRYPOINTS['db-harden'], ['./db-setup.sh', 'harden']);
+  // Its admin URL may carry a value, the same as db-setup's (mode b); nothing else gets one.
+  const ext = 'postgresql://doadmin:not-a-secret@db-direct.example.com:5432/crewflow?sslmode=verify-full'; // gitleaks:allow
+  assert.deepEqual(hardenRules((s) => { s['db-setup'].environment.PG_ADMIN_URL = ext; s['db-harden'].environment.PG_ADMIN_URL = ext; }), []);
+  assert.match(hardenRules((s) => { s.backup = { environment: { PG_ADMIN_URL: ext } }; }).join(' | '), /backup: has PG_ADMIN_URL \(only db-setup and db-harden\)/);
+  assert.match(hardenRules((s) => { s.backup = { environment: { PG_DATABASE_URL: H_OWNER } }; }).join(' | '), /backup: has PG_DATABASE_URL \(only db-setup, db-harden, rab-api and rab-worker\)/);
+});
+
+test('DENIAL M1 (no rendering): db-harden missing, with depends_on, waited for, another entrypoint/image/shape, other database settings, a bad timeout', () => {
+  const cases = [
+    [(s) => { delete s['db-harden']; }, /db-harden: missing/],
+    [(s) => { s['db-harden'].depends_on = { db: { condition: 'service_healthy' } }; }, /db-harden: has depends_on/],
+    [(s) => { s['db-harden'].depends_on = ['db']; }, /db-harden: has depends_on/],
+    [(s) => { s['rab-api'].depends_on['db-harden'] = { condition: 'service_completed_successfully' }; }, /rab-api: depends on db-harden/],
+    [(s) => { s['rab-worker'].depends_on = ['db-harden']; }, /rab-worker: depends on db-harden/],
+    [(s) => { s['db-harden'].entrypoint = ['./db-setup.sh']; }, /db-harden: entrypoint is not exactly \.\/db-setup\.sh harden/],
+    [(s) => { s['db-harden'].command = ['harden']; }, /db-harden: has a command/],
+    [(s) => { s['db-harden'].init = true; }, /db-harden: init: true/],
+    [(s) => { s['db-harden'].image = `adhin007/adolphus@sha256:${'b'.repeat(64)}`; }, /db-harden: image differs from db-setup's or rab-api's/],
+    [(s) => { s['db-harden'].restart = 'unless-stopped'; }, /db-harden: restart is not "no"/],
+    [(s) => { s['db-harden'].ports = [{ target: 5432 }]; }, /db-harden: publishes a port/],
+    [(s) => { s['db-harden'].profiles = ['ops']; }, /db-harden: has a profile/],
+    [(s) => { s['db-harden'].user = '0:0'; }, /db-harden: does not run as 1000:1000 with a read-only root/],
+    [(s) => { s['db-harden'].read_only = false; }, /db-harden: does not run as 1000:1000 with a read-only root/],
+    [(s) => { delete s['db-harden'].environment[H_TIMEOUT]; }, /db-harden: CREWFLOW_DB_HARDEN_TIMEOUT_SECONDS is not set/],
+    [(s) => { s['db-harden'].environment[H_TIMEOUT] = '30'; }, /db-harden: CREWFLOW_DB_HARDEN_TIMEOUT_SECONDS is not a whole number of seconds from 60 to 7200/],
+    [(s) => { s['db-harden'].environment[H_TIMEOUT] = '7201'; }, /db-harden: CREWFLOW_DB_HARDEN_TIMEOUT_SECONDS is not a whole number/],
+    [(s) => { s['db-harden'].environment[H_TIMEOUT] = '1200s'; }, /db-harden: CREWFLOW_DB_HARDEN_TIMEOUT_SECONDS is not a whole number/],
+    [(s) => { s['rab-api'].environment[H_TIMEOUT] = '1200'; }, /rab-api: has CREWFLOW_DB_HARDEN_TIMEOUT_SECONDS/],
+    [(s) => { s['db-harden'].environment.APP_SECRET = 'x'; }, /db-harden: has APP_SECRET/],
+    [(s) => { s['db-harden'].environment.PG_DATABASE_APP_PASSWORD = 'x'; }, /db-harden: has PG_DATABASE_APP_PASSWORD/],
+    [(s) => { s['db-harden'].environment.NODE_ENV = 'development'; }, /db-harden: NODE_ENV is not "production"/],
+    [(s) => { delete s['db-harden'].environment.RAB_RUNTIME_ENV; }, /db-harden: RAB_RUNTIME_ENV is not "production"/],
+    // EXACTLY db-setup's database settings: another value, a missing key, an admin URL db-setup does not have.
+    [(s) => { s['db-harden'].environment.PG_ADMIN_URL = 'postgresql://doadmin:x@elsewhere:5432/crewflow?sslmode=verify-full'; }, /db-harden: PG_ADMIN_URL is not db-setup's/],
+    [(s) => { s['db-harden'].environment.PG_DATABASE_URL = 'postgresql://crewflow_owner:x@other:5432/crewflow?sslmode=verify-full'; }, /db-harden: PG_DATABASE_URL is not db-setup's/],
+    [(s) => { delete s['db-harden'].environment.CREWFLOW_BUNDLED_DB; }, /db-harden: CREWFLOW_BUNDLED_DB is not db-setup's/],
+    [(s) => { s['db-harden'].environment.CREWFLOW_BUNDLED_DB_ADMIN_URL = 'postgresql://postgres:z@db:5432/crewflow?sslmode=verify-full'; }, /db-harden: CREWFLOW_BUNDLED_DB_ADMIN_URL is not db-setup's/],
+  ];
+  for (const [mutate, pattern] of cases) assertRefused(hardenRules(mutate), pattern);
+});
+
+// Rendered (docker compose): the committed files and an override, held to the same rules.
+test('DENIAL M1 (rendered): db-harden is the same one-shot in both files, reads database.env only, and an override cannot reshape it', { skip }, () => {
+  const m0 = fresh();
+  for (const model of [m0.variant, m0.production]) {
+    assert.deepEqual(model.services['db-harden'].entrypoint, ['./db-setup.sh', 'harden']);
+    assert.equal(model.services['db-harden'].depends_on, undefined);
+  }
+  for (const [mutate, pattern] of [
+    [(v) => { delete v.services['db-harden']; }, /services are .*expected exactly db,db-harden,db-setup/],
+    [(_v, _f, p) => { delete p.services['db-harden']; }, /db-harden: missing in docker-compose\.production\.yml/],
+    [(v) => { v.services['db-harden'].stop_grace_period = '10s'; }, /db-harden\.stop_grace_period differs from docker-compose\.production\.yml/],
+    [(v) => { v.services['db-harden'].environment[H_TIMEOUT] = '600'; }, /db-harden\.environment\.CREWFLOW_DB_HARDEN_TIMEOUT_SECONDS differs from docker-compose\.production\.yml/],
+    [(v) => { v.services['db-harden'].depends_on = { db: { condition: 'service_healthy', required: true } }; }, /db-harden\.depends_on differs from docker-compose\.production\.yml/],
+    [(_v, f) => { f.services['db-harden'].env_file = [{ path: '/x/database.env' }, { path: '/x/runtime.env' }]; }, /db-harden: must read database\.env only/],
+    [(v) => { v.services['rab-api'].depends_on['db-harden'] = { condition: 'service_completed_successfully', required: true }; }, /rab-api: depends on db-harden/],
+  ]) assertRefused(problemsAfter(mutate), pattern);
+  const ok = { names: ['REDIS_URL', 'APP_SECRET'], unfilled: [], dbUsers: {} };
+  const dep = (keys, mutate = () => {}) => {
+    const m = fresh();
+    mutate(m.variantFiles);
+    return checkDeployment(m.variantFiles, m.production, { 'rab-api': ok, 'rab-worker': ok, ...keys });
+  };
+  assert.deepEqual(dep({ 'db-harden': { names: [], unfilled: [], dbUsers: {} } }), []);
+  for (const key of ['PG_ADMIN_URL', 'PG_DATABASE_URL', H_TIMEOUT]) assertRefused(dep({ 'db-harden': { names: [key], unfilled: [], dbUsers: {} } }), new RegExp(`db-harden: ${key} is set in an env file`));
+  assertRefused(dep({ 'db-harden': { names: ['APP_SECRET'], unfilled: [], dbUsers: {} } }), /db-harden: APP_SECRET reaches the container from an env file/);
+  assertRefused(dep({ 'db-harden': { names: ['PG_DATABASE_APP_PASSWORD'], unfilled: [], dbUsers: {} } }), /db-harden: PG_DATABASE_APP_PASSWORD reaches the container from an env file/);
+  assertRefused(dep({}, (v) => { v.services['db-harden'].read_only = false; }), /db-harden\.read_only differs from docker-compose\.production\.yml in the deployed model/);
+  assertRefused(dep({}, (v) => { v.services['db-harden'].depends_on = { db: { condition: 'service_healthy', required: true } }; }), /db-harden\.depends_on is added in the deployed model/);
+  assertRefused(dep({}, (v) => { v.services['rab-worker'].depends_on['db-harden'] = { condition: 'service_started', required: true }; }), /rab-worker: depends on db-harden in the deployed model/);
 });
 
 test('DB-SETUP: the verifier and the owner-login gate refuse the same former separated logins', () => {

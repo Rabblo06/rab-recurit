@@ -27,8 +27,9 @@
 #      reached the API's environment (exit 64). The one exception is the per-release approval token
 #      (CREWFLOW_MIGRATION_APPROVED) when CREWFLOW_MIGRATE_ON_START=true AND CREWFLOW_MIGRATION_APPROVAL_MODE=token: it is
 #      taken out of this shell's environment first, handed ONLY to the short-lived migrate child, and never reaches main.js;
-#   2b. requires PG_DATABASE_URL (the crewflow_owner URL; exit 64 when it is empty or its password is empty) and points
-#      PG_SSL_CA_CERT_PATH at the bundled db's CA when its host is `db` (details below);
+#   2b. requires PG_DATABASE_URL (the crewflow_owner URL; exit 64 when it is empty, its password is empty, or its login is not
+#      crewflow_owner by a pure userinfo parse: security review of PR #246, L2) and points PG_SSL_CA_CERT_PATH at the
+#      bundled db's CA when its host is `db` (details below);
 #   3. CREWFLOW_MIGRATE_ON_START=true (and DISABLE_DB_MIGRATIONS not true): runs the short-lived migrate child (Agent 1:
 #      migration lock, fresh-install classifier, post-checks, the upgrade logbook). Exit 0 = current / applied / ledger
 #      ahead; 70 = every migration applied but an upgrade COMMAND failed (OWNER-DB-ULTIMATE Part B3: serve, loud WARNING,
@@ -324,6 +325,37 @@ case "$PG_DATABASE_URL" in
   *://crewflow_owner:@*)
     refuse 'PG_DATABASE_URL has an empty crewflow_owner password: for the bundled db set PG_DATABASE_APP_PASSWORD (openssl rand -hex 32); with your own database put the crewflow_owner password in PG_DATABASE_URL. Value not shown. Refusing to start.' ;;
 esac
+# BEGIN crewflow owner-login check
+# Security review of PR #246, L2: a pure userinfo parse of a database URL ($1), before any node process runs. Returns 0 only
+# when the URL's login is crewflow_owner (or its percent-encoded underscore form, crewflow%5Fowner / crewflow%5fowner); a URL
+# without userinfo is not crewflow_owner. Never connects, never prints or keeps the value. The block is identical in
+# api-prestart.sh, worker-start.sh and db-setup.sh (run-prestart-shell-tests.cjs compares them).
+crewflow_is_owner_login() {
+  ol_rest="${1#*://}"
+  ol_authority="${ol_rest%%[/?#]*}"
+  case "$ol_authority" in
+    *@*)
+      ol_login="${ol_authority%@*}"
+      ol_login="${ol_login%%:*}"
+      ;;
+    *) ol_login='' ;;
+  esac
+  case "$ol_login" in
+    crewflow_owner | crewflow%5Fowner | crewflow%5fowner) ol_rc=0 ;;
+    *) ol_rc=1 ;;
+  esac
+  unset ol_rest ol_authority ol_login
+  if [ "$ol_rc" = 0 ]; then
+    unset ol_rc
+    return 0
+  fi
+  unset ol_rc
+  return 1
+}
+# END crewflow owner-login check
+if ! crewflow_is_owner_login "$PG_DATABASE_URL"; then
+  refuse 'PG_DATABASE_URL does not log in as crewflow_owner: it is always the crewflow_owner URL. An admin URL belongs only in PG_ADMIN_URL of db-setup (a compose.env from before 2026-11-18 had the admin URL in PG_DATABASE_URL: move it to PG_ADMIN_URL and put the crewflow_owner URL in PG_DATABASE_URL). Value not shown. Refusing to start.'
+fi
 export PG_DATABASE_URL
 crewflow_bundled_db_ca "$PG_DATABASE_URL"
 # The owner CLI one-off: no migrate child, no scheduler registration, no API; the cleaned environment only.

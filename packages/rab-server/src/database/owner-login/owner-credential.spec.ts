@@ -9,6 +9,7 @@ import {
   ADMIN_URL_LABEL,
   DB_SETUP_INPUT_MESSAGES,
   isOwnerLoginUrl,
+  isStrongOwnerPassword,
   isValidOwnerPassword,
   OWNER_CREDENTIAL_MESSAGES,
   OWNER_LOGIN,
@@ -24,7 +25,8 @@ import {
 /**
  * The Twenty way (owner decision 2026-11-18). Every secret below is a generated test value; no assertion message prints one.
  */
-const ADMIN_PASSWORD = 'adminSentinel7f3a';
+/** Strong enough for the M2 floor (32+ characters, 10+ distinct): it is also used as the crewflow_owner password below. */
+const ADMIN_PASSWORD = 'adminSentinel7f3a-0123456789-bcdeghjklm';
 /** A crewflow_owner password as the operator sets it (`openssl rand -hex 32`, PG_DATABASE_APP_PASSWORD). */
 const DERIVED = randomBytes(32).toString('hex');
 
@@ -332,6 +334,34 @@ describe('planDbSetup and selectDbSetupInput (the Twenty way)', () => {
     const a = parsePgUrl(SAME_DB_ADMIN, 'PG_ADMIN_URL');
     expect(sameDatabase(a, parsePgUrl(OWN, 'PG_DATABASE_URL'))).toBe(true);
     expect(sameDatabase(a, parsePgUrl(OWN.replace('/crewflow?', '/other?'), 'PG_DATABASE_URL'))).toBe(false);
+  });
+
+  it('DENIAL review M2: an admin URL with a weak crewflow_owner password is refused before anything connects (nothing can be created or set)', () => {
+    // Too short, too few distinct characters, one short block repeated (the floor's three rules).
+    for (const weak of ['Short9pw1', 'changeme', 'a'.repeat(40), 'ab'.repeat(20), 'abcdefghij'.repeat(4)]) {
+      const app = `postgres://crewflow_owner:${encodeURIComponent(weak)}@db.example.internal:5432/crewflow?sslmode=verify-full`;
+      let thrown: unknown;
+      try {
+        selectDbSetupInput({ PG_ADMIN_URL: SAME_DB_ADMIN, PG_DATABASE_URL: app });
+      } catch (error) {
+        thrown = error;
+      }
+      expect(thrown).toBeInstanceOf(OwnerCredentialError);
+      expect((thrown as Error).message).toBe(DB_SETUP_INPUT_MESSAGES.weakPassword);
+      expect((thrown as Error).message).not.toContain(weak);
+    }
+    // The bundled shape (openssl rand -hex 32) and a 32-character hex value pass.
+    expect(isStrongOwnerPassword(DERIVED)).toBe(true);
+    expect(isStrongOwnerPassword(randomBytes(16).toString('hex'))).toBe(true);
+  });
+
+  it('review M2, mode c: a weak crewflow_owner password is refused in production (any production marker), accepted outside it', () => {
+    const weakApp = 'postgres://crewflow_owner:changeme@db.example.internal:5432/crewflow?sslmode=verify-full';
+    for (const env of [{ NODE_ENV: 'production' }, { RAB_RUNTIME_ENV: ' Production ' }, { DB_TARGET: 'PRODUCTION' }]) {
+      expect(refusal(() => selectDbSetupInput({ ...env, PG_DATABASE_URL: weakApp }))).toBe(DB_SETUP_INPUT_MESSAGES.weakPasswordProduction);
+    }
+    expect(selectDbSetupInput({ NODE_ENV: 'development', PG_DATABASE_URL: weakApp }).mode).toBe('owner-url');
+    expect(selectDbSetupInput({ NODE_ENV: 'production', PG_DATABASE_URL: OWN }).mode).toBe('owner-url');
   });
 
   it('runtimeUrlFacts: the login and the pooler shape, never a value', () => {

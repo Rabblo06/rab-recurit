@@ -52,7 +52,7 @@ const admin = raw('/proc/self/environ').includes('ADMINSENTINEL') ? 'present' : 
 const admin1 = raw('/proc/1/environ').includes('ADMINSENTINEL') ? 'present' : 'absent';
 const url = require('crypto').createHash('sha256').update(process.env.PG_DATABASE_URL || '').digest('hex').slice(0, 12);
 const aurl = require('crypto').createHash('sha256').update(process.env.PG_ADMIN_URL || '').digest('hex').slice(0, 12);
-console.log('STUB ${name} tf=' + (process.env.CREWFLOW_DB_TARGET_FILE ? 'set' : '-') + ' pid=' + process.pid + ' ppid=' + process.ppid + ' t=' + process.hrtime.bigint() + ' upgrade=' + (process.env.CREWFLOW_UPGRADE_INCOMPLETE || '-') + ' ca=' + (process.env.PG_SSL_CA_CERT_PATH || '-') + ' admin=' + admin + ' admin1=' + admin1 + ' url=' + url + ' aurl=' + aurl + ' self=' + keys('/proc/self/environ').join(',') + ' pid1=' + keys('/proc/1/environ').join(','));
+console.log('STUB ${name} tf=' + (process.env.CREWFLOW_DB_TARGET_FILE ? 'set' : '-') + ' pid=' + process.pid + ' ppid=' + process.ppid + ' t=' + process.hrtime.bigint() + ' upgrade=' + (process.env.CREWFLOW_UPGRADE_INCOMPLETE || '-') + ' ca=' + (process.env.PG_SSL_CA_CERT_PATH || '-') + ' admin=' + admin + ' admin1=' + admin1 + ' url=' + url + ' aurl=' + aurl + ' argv=' + (process.argv.slice(2).join('|') || '-') + ' self=' + keys('/proc/self/environ').join(',') + ' pid1=' + keys('/proc/1/environ').join(','));
 process.exit(code);
 `;
 const STUBS = {
@@ -590,7 +590,22 @@ for (const code of [64, 70, 1]) {
   check(`14f the bootstrap child exits ${code} -> db-setup exits ${code} with a fixed line`, r.code === code && /the database setup step (refused|failed)/.test(r.out) && !/db-setup: done/.test(r.out), r.out);
 }
 for (const [label, env, entry, pattern] of [
-  ['arguments', MODE_B, 'db-setup.sh sh', /takes no arguments/],
+  ['an unknown argument', MODE_B, 'db-setup.sh sh', /takes no argument, or exactly one: harden/],
+  ['harden plus another argument', MODE_B, 'db-setup.sh harden now', /takes no argument, or exactly one: harden/],
+  // Security review of PR #246, L2: an old compose.env with the admin URL in PG_DATABASE_URL, refused in shell before node.
+  ['an admin login in PG_DATABASE_URL (mode b; an old compose.env)', { ...MODE_B, PG_DATABASE_URL: EXT_ADMIN }, 'db-setup.sh', /PG_DATABASE_URL does not log in as crewflow_owner: it is always the crewflow_owner URL/],
+  ['an admin login in PG_DATABASE_URL (mode c)', { ...MODE_C, PG_DATABASE_URL: EXT_ADMIN }, 'db-setup.sh', /PG_DATABASE_URL does not log in as crewflow_owner/],
+  ['an admin login in PG_DATABASE_URL (bundled)', { ...BUNDLED, PG_DATABASE_URL: ADMIN_URL }, 'db-setup.sh', /PG_DATABASE_URL does not log in as crewflow_owner/],
+  ['a look-alike login (crewflow_owner2) in PG_DATABASE_URL', { ...MODE_C, PG_DATABASE_URL: EXT_OWNER.replace('crewflow_owner:', 'crewflow_owner2:') }, 'db-setup.sh', /PG_DATABASE_URL does not log in as crewflow_owner/],
+  ['a PG_DATABASE_URL without userinfo', { ...MODE_C, PG_DATABASE_URL: 'postgresql://db-direct.example:25060/d?sslmode=verify-full' }, 'db-setup.sh', /PG_DATABASE_URL does not log in as crewflow_owner/],
+  ['a PG_ADMIN_URL that logs in as crewflow_owner', { ...MODE_B, PG_ADMIN_URL: EXT_OWNER }, 'db-setup.sh', /PG_ADMIN_URL logs in as crewflow_owner, the app login/],
+  ['an admin login in PG_DATABASE_URL (db-harden)', { ...MODE_B, PG_DATABASE_URL: EXT_ADMIN }, 'db-setup.sh harden', /db-harden: REFUSED - PG_DATABASE_URL does not log in as crewflow_owner/],
+  // Owner decision M1: db-harden's bounded wait, validated in shell.
+  ['a non-numeric harden timeout', { ...MODE_B, CREWFLOW_DB_HARDEN_TIMEOUT_SECONDS: '20m' }, 'db-setup.sh harden', /CREWFLOW_DB_HARDEN_TIMEOUT_SECONDS must be a whole number of seconds from 60 to 7200/],
+  ['a harden timeout below 60 in production', { ...MODE_B, CREWFLOW_DB_HARDEN_TIMEOUT_SECONDS: '59' }, 'db-setup.sh harden', /from 60 to 7200/],
+  ['a harden timeout above 7200', { ...MODE_B, CREWFLOW_DB_HARDEN_TIMEOUT_SECONDS: '7201' }, 'db-setup.sh harden', /from 60 to 7200/],
+  ['a huge harden timeout', { ...MODE_B, CREWFLOW_DB_HARDEN_TIMEOUT_SECONDS: '99999999999999999999' }, 'db-setup.sh harden', /from 60 to 7200/],
+  ['a zero harden timeout under NODE_ENV=test', { ...MODE_B, NODE_ENV: 'test', CREWFLOW_DB_HARDEN_TIMEOUT_SECONDS: '0' }, 'db-setup.sh harden', /from 1 to 7200/],
   ['PG_DATABASE_PASSWORD', { ...MODE_B, PG_DATABASE_PASSWORD: 'y'.repeat(64) }, 'db-setup.sh', /PG_DATABASE_PASSWORD must never reach a container but the bundled db/],
   ['PG_DATABASE_APP_PASSWORD', { ...MODE_B, PG_DATABASE_APP_PASSWORD: 'y'.repeat(64) }, 'db-setup.sh', /PG_DATABASE_APP_PASSWORD must never reach a container/],
   ['APP_SECRET (never part of a database credential)', { ...MODE_B, APP_SECRET: 'y'.repeat(64) }, 'db-setup.sh', /APP_SECRET must never reach db-setup/],
@@ -618,6 +633,56 @@ for (const [label, env, want] of [
   check(`14h db-setup.sh CA: ${label} (the bootstrap child gets it)`, r.code === 0 && field(boot(r.out), 'ca') === want, r.out);
 }
 
+// 16. Security review of PR #246, L2: rab-api, the owner CLI one-off and rab-worker refuse a PG_DATABASE_URL whose login is
+// not crewflow_owner (a pure shell userinfo parse; an old compose.env with the admin URL there) with exit 64 BEFORE any node
+// process runs. The percent-encoded underscore form of crewflow_owner is the same login and is accepted.
+{
+  const L2_ADMIN = 'postgresql://doadmin:ADMINSENTINEL9@db-direct.example:25060/d?sslmode=verify-full';
+  const NODE_STUBS = ['check', 'main', 'register', 'command', 'workermain', 'bootstrap', 'twentymigrate'];
+  const noNode = (out) => NODE_STUBS.every((n) => !line(out, n)) && !/STUB tini/.test(out);
+  for (const [label, entry, env] of [
+    ['rab-api', 'api-prestart.sh', { ...BASE, PG_DATABASE_URL: L2_ADMIN }],
+    ['rab-api (the bundled superuser URL)', 'api-prestart.sh', { ...BASE, PG_DATABASE_URL: ADMIN_URL }],
+    ['the owner CLI one-off', 'api-prestart.sh node /app/packages/rab-server/dist/command/main.js bootstrap-admin', { ...BASE, PG_DATABASE_URL: L2_ADMIN }],
+    ['rab-worker', 'worker-start.sh', { ...W, PG_DATABASE_URL: L2_ADMIN }],
+    ['rab-worker (no userinfo)', 'worker-start.sh', { ...W, PG_DATABASE_URL: 'postgresql://db-direct.example:25060/d?sslmode=verify-full' }],
+  ]) {
+    r = run(`l2-${label.replace(/[^a-z]+/gi, '-')}`, env, { entry });
+    check(`16a DENIAL L2: an admin login in PG_DATABASE_URL on ${label} -> refused (64) before any node process ran; the value is never printed`,
+      r.code === 64 && /PG_DATABASE_URL does not log in as crewflow_owner: it is always the crewflow_owner URL/.test(r.out) && noNode(r.out) && !r.out.includes('ADMINSENTINEL'), r.out);
+  }
+  const ENCODED = RUNTIME_URL.replace('crewflow_owner:', 'crewflow%5Fowner:');
+  r = run('l2-encoded-api', { ...BASE, PG_DATABASE_URL: ENCODED });
+  check('16b the percent-encoded crewflow%5Fowner login is crewflow_owner: rab-api starts with it unchanged', r.code === 0 && field(line(r.out, 'main'), 'url') === hash(ENCODED), r.out);
+  const ENCODED_LOWER = ENCODED.replace('%5F', '%5f');
+  r = run('l2-encoded-worker', { ...W, PG_DATABASE_URL: ENCODED_LOWER }, { entry: 'worker-start.sh' });
+  check('16b ... and rab-worker (lower-case %5f)', r.code === 0 && field(line(r.out, 'workermain'), 'url') === hash(ENCODED_LOWER), r.out);
+  r = run('l2-encoded-setup', { ...MODE_C, PG_DATABASE_URL: EXT_OWNER.replace('crewflow_owner:', 'crewflow%5Fowner:') }, { entry: 'db-setup.sh' });
+  check('16b ... and db-setup (the child decides the rest)', r.code === 0 && Boolean(boot(r.out)), r.out);
+}
+
+// 17. Owner decision M1: `db-setup.sh harden` is the one-shot db-harden service. It runs the same refusals and mode
+// selection, then the child with --harden (bundled / admin modes) and the validated, exported harden timeout; mode c has no
+// admin login and exits 0 without any node process; a child failure (e.g. its bounded wait timed out) is that exit code.
+{
+  r = run('harden-bundled', BUNDLED, { entry: 'db-setup.sh harden', dockerArgs: SETUP_RO });
+  check('17a db-harden, bundled: the child runs with --harden, the bundled admin as PG_ADMIN_URL, the default timeout exported; exit 0',
+    r.code === 0 && /db-harden: mode bundled/.test(r.out) && field(boot(r.out), 'argv') === '--harden' && field(boot(r.out), 'aurl') === hash(ADMIN_URL) &&
+    keysOf(boot(r.out), 'self').includes('CREWFLOW_DB_HARDEN_TIMEOUT_SECONDS') && /db-harden: done/.test(r.out) && !r.out.includes('ADMINSENTINEL') && !r.out.includes(OWNER_PW), r.out);
+  r = run('harden-mode-b', { ...MODE_B, CREWFLOW_DB_HARDEN_TIMEOUT_SECONDS: '300' }, { entry: 'db-setup.sh harden' });
+  check('17b db-harden, mode b with a valid timeout: the child runs with --harden and your admin URL; exit 0', r.code === 0 && field(boot(r.out), 'argv') === '--harden' && field(boot(r.out), 'aurl') === hash(EXT_ADMIN), r.out);
+  r = run('harden-mode-c', MODE_C, { entry: 'db-setup.sh harden' });
+  check('17c db-harden, mode c (no admin login): one fixed line, exit 0, NO node process', r.code === 0 && /db-harden: no admin login \(mode c\): nothing to harden/.test(r.out) && !boot(r.out), r.out);
+  r = run('setup-no-harden-argv', MODE_B, { entry: 'db-setup.sh' });
+  check('17d plain db-setup runs the child WITHOUT --harden and needs no harden timeout', r.code === 0 && field(boot(r.out), 'argv') === '-', r.out);
+  for (const code of [64, 75]) {
+    r = run(`harden-child-${code}`, MODE_B, { entry: 'db-setup.sh harden', ctl: { bootstrap: code } });
+    check(`17e db-harden: the child exits ${code} -> exit ${code}, a fixed line, nothing claimed done`, r.code === code && /db-harden: REFUSED - the CREATEROLE hardening step (refused|failed or timed out)/.test(r.out) && !/db-harden: done/.test(r.out), r.out);
+  }
+  r = run('harden-test-timeout', { ...MODE_B, NODE_ENV: 'test', CREWFLOW_DB_HARDEN_TIMEOUT_SECONDS: '5' }, { entry: 'db-setup.sh harden' });
+  check('17f under NODE_ENV=test a short harden timeout (5 s) is accepted', r.code === 0 && field(boot(r.out), 'argv') === '--harden', r.out);
+}
+
 // The bundled-db CA block is literally the same code in all three scripts.
 const block = (file) => {
   const t = fs.readFileSync(file, 'utf8');
@@ -625,6 +690,14 @@ const block = (file) => {
   const b = t.indexOf('# END crewflow bundled-db CA');
   return a >= 0 && b > a ? t.slice(a, b) : null;
 };
+const ownerBlock = (file) => {
+  const t = fs.readFileSync(file, 'utf8');
+  const a = t.indexOf('# BEGIN crewflow owner-login check');
+  const b = t.indexOf('# END crewflow owner-login check');
+  return a >= 0 && b > a ? t.slice(a, b) : null;
+};
+check('15a2 the owner-login check block (security review of PR #246, L2) is identical in api-prestart.sh, worker-start.sh and db-setup.sh',
+  ownerBlock(PRESTART) !== null && ownerBlock(PRESTART) === ownerBlock(WORKER_START) && ownerBlock(PRESTART) === ownerBlock(DB_SETUP), 'the BEGIN/END crewflow owner-login check blocks differ');
 check('15a the bundled-db CA block is identical in api-prestart.sh, worker-start.sh and db-setup.sh', block(PRESTART) !== null && block(PRESTART) === block(WORKER_START) && block(PRESTART) === block(DB_SETUP), 'the BEGIN/END crewflow bundled-db CA blocks differ');
 const workerSource = fs.readFileSync(WORKER_START, 'utf8');
 const setupSource = fs.readFileSync(DB_SETUP, 'utf8');
