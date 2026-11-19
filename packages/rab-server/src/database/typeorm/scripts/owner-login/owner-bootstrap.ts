@@ -59,6 +59,7 @@
  *   - every refusal is reported as what it is: its SQLSTATE and its stage (write statement or COMMIT). XX000 is a race only
  *     for PostgreSQL's fixed "tuple concurrently updated", never at COMMIT.
  */
+import { randomBytes } from 'node:crypto';
 import { readdirSync } from 'node:fs';
 import { join } from 'node:path';
 
@@ -100,6 +101,8 @@ import {
   OWNER_BOOTSTRAP_Q4B2_NO_SELF_GRANT,
   OWNER_BOOTSTRAP_Q4C_DO,
   OWNER_BOOTSTRAP_Q4C_DO_NO_PASSWORD,
+  OWNER_BOOTSTRAP_Q4D_NO_PASSWORD_REVERIFY,
+  OWNER_BOOTSTRAP_L1_LOCK_TIMEOUT,
   OWNER_BOOTSTRAP_Q4D_REVERIFY,
   OWNER_BOOTSTRAP_ROLLBACK,
   OWNER_HARDEN_H1_NOCREATEROLE,
@@ -230,15 +233,17 @@ export const OWNER_BOOTSTRAP_MESSAGES = Object.freeze({
   // ---- a server that refuses pre-hashed passwords (owner decision 2026-11-19, option 1) ----
   verifierRefused: (stage: WriteStage, sqlstate: string) =>
     `The server refused a pre-hashed password (SQLSTATE ${sqlstate} ${stageText(stage)}). Crewflow never sends a plain-text password.`,
-  passwordlessCreated: 'crewflow_owner was created WITHOUT a password (it cannot log in yet), with its database grant.',
-  passwordlessKept: 'crewflow_owner exists and does not log in with PG_DATABASE_APP_PASSWORD; its password was left unchanged.',
+  passwordlessCreated: 'crewflow_owner was created WITHOUT a password and NOLOGIN (nothing can log in as it yet), with its database grant.',
+  passwordlessKept: 'crewflow_owner exists and does not log in with PG_DATABASE_APP_PASSWORD; its password and LOGIN were left unchanged.',
   setPasswordStep:
-    "Set crewflow_owner's password once in your database provider's SQL editor: ALTER ROLE crewflow_owner PASSWORD '<the value of PG_DATABASE_APP_PASSWORD>'; then redeploy. Use exactly that value (32+ characters, openssl rand -hex 32; if you set PG_DATABASE_URL yourself, the password inside it), never a console password reset (it generates a different, shorter password). db-setup then checks the login and continues.",
+    "Set crewflow_owner's password once in your database provider's SQL editor: ALTER ROLE crewflow_owner LOGIN PASSWORD '<the value of PG_DATABASE_APP_PASSWORD>'; then redeploy. Use exactly that value (32+ characters, openssl rand -hex 32; if you set PG_DATABASE_URL yourself, the password inside it), never a console password reset (it generates a different, shorter password). If your provider allows it, run SET log_statement = 'none'; first, and clear the SQL editor's history afterwards. db-setup then checks the login and continues.",
   awaitingPassword: 'crewflow_owner has no usable password yet: db-setup exits 64 until crewflow_owner logs in with PG_DATABASE_APP_PASSWORD. Refusing.',
   passwordlessRefused: (stage: WriteStage, sqlstate: string) =>
     `The server also refused to create crewflow_owner without a password (SQLSTATE ${sqlstate} ${stageText(stage)}). Nothing was created.`,
   manualRoleStep:
-    "Create crewflow_owner once in your database provider's SQL editor, connected to this database as your admin login, with exactly the SQL below; replace <PG_DATABASE_APP_PASSWORD> with that value (32+ characters, openssl rand -hex 32; if you set PG_DATABASE_URL yourself, the password inside it). Then redeploy: db-setup then only checks the login and handles CREATEROLE.",
+    "Create crewflow_owner once in your database provider's SQL editor, connected to this database as your admin login, with exactly the SQL below; replace <PG_DATABASE_APP_PASSWORD> with that value (32+ characters, openssl rand -hex 32; if you set PG_DATABASE_URL yourself, the password inside it). If your provider allows it, run SET log_statement = 'none'; first, and clear the SQL editor's history afterwards. Then redeploy: db-setup then only checks the login and handles CREATEROLE.",
+  serverIgnoresPassword:
+    'The server lets crewflow_owner log in WITHOUT its password (a deliberately wrong password was accepted): a pg_hba trust, peer, cert or similar rule applies to it. Crewflow never runs on a login that needs no password: require password authentication (scram-sha-256) for crewflow_owner, then start again. Refusing.',
   awaitingManualRole: 'crewflow_owner does not exist yet: db-setup exits 64 until you create it with the SQL above. Refusing.',
   reverifyFailed: 'crewflow_owner is not exactly as required after the setup step (attributes, grant or login). Refusing to continue.',
   raceRetry: (stage: WriteStage, sqlstate: string) =>
@@ -365,6 +370,11 @@ export interface OwnerFacts {
   oCreateRoleMarkExpired: boolean;
   /** H1: a database-wide or crewflow_owner-level search_path default exists. */
   searchPathDefaultSet: boolean;
+  /**
+   * Security re-review R1 of #259: crewflow_owner is NOLOGIN and carries OWNER_AWAITING_PASSWORD_MARK (db-setup created it
+   * without a password; the operator's ALTER ROLE ... LOGIN PASSWORD is pending). The only NOLOGIN state accepted.
+   */
+  oAwaitingPassword: boolean;
 }
 
 type Row = Record<string, unknown>;
@@ -414,6 +424,7 @@ export function factsFromRow(row: Row | undefined): OwnerFacts {
     oCreateRolePending: strictBool(row, 'o_createrole_pending'),
     oCreateRoleMarkExpired: strictBool(row, 'o_createrole_mark_expired'),
     searchPathDefaultSet: strictBool(row, 'search_path_default_set'),
+    oAwaitingPassword: strictBool(row, 'o_awaiting_password'),
   };
 }
 
@@ -425,7 +436,8 @@ export function privilegedAttributesOf(f: OwnerFacts): string[] {
   if (f.oBypassRls) out.push('BYPASSRLS');
   if (f.oReplication) out.push('REPLICATION');
   if (f.oCreateDb) out.push('CREATEDB');
-  if (f.oLogin === false) out.push('NOLOGIN');
+  // Security re-review R1 of #259: NOLOGIN is accepted ONLY in the awaiting-password state (db-setup's passwordless role).
+  if (f.oLogin === false && !f.oAwaitingPassword) out.push('NOLOGIN');
   if (f.oInherit === false) out.push('NOINHERIT');
   return out;
 }
@@ -656,6 +668,11 @@ export interface OwnerBootstrapIo {
   /** A fresh SCRAM verifier of that password. */
   verifier(): string;
   /**
+   * Security re-review R1 of #259: Q3 as crewflow_owner with a deliberately WRONG password. `ok` means the server does not
+   * check the password for crewflow_owner (trust / peer / cert / ...): refused. Absent = skipped (unit tests of other steps).
+   */
+  probeWrongPassword?(): Promise<ProbeResult>;
+  /**
    * The capability check of PG_ADMIN_URL: throws PgSessionProbeError when the admin connection is not session-stable (a
    * pooler). Run once after the session pin, before any read or write. Absent = skipped (unit tests).
    */
@@ -711,11 +728,20 @@ async function assertNoOtherDatabase(session: SqlSession, refusal: string = OWNE
 }
 
 /** The facts, the decisions and the probe, in that order: one plan of what the write transaction must do. */
+/** Security re-review R1 of #259: refused (64) when crewflow_owner can log in with a deliberately wrong password. */
+async function assertPasswordRequired(io: OwnerBootstrapIo): Promise<void> {
+  if (!io.probeWrongPassword) return;
+  const wrong = await io.probeWrongPassword();
+  if (wrong.ok) throw new OwnerBootstrapRefusal(OWNER_BOOTSTRAP_MESSAGES.serverIgnoresPassword);
+}
+
 async function planFromDatabase(session: SqlSession, io: OwnerBootstrapIo, logNotes: boolean): Promise<WritePlan> {
   const facts = await readFacts(session);
   const notes = decideBeforeProbe(facts);
   if (logNotes) for (const note of notes) io.log(note);
   const probe = facts.ownerExists ? await io.probeOwner() : null;
+  // A login that works is trusted only if a wrong password does NOT work (checked once per run, before the lock).
+  if (logNotes && probe?.ok) await assertPasswordRequired(io);
   const plan = planWrite(facts, probe);
   // L4: the password of an existing role is never set while another database of the cluster uses the role.
   if (plan.needPassword && !plan.create) await assertNoOtherDatabase(session);
@@ -750,6 +776,8 @@ async function attempt(session: SqlSession, io: OwnerBootstrapIo): Promise<Attem
     await session.query(OWNER_BOOTSTRAP_Q4B_SET_INPUTS, [verifier, plan.needPassword ? 'true' : 'false']);
     // No self-grant of crewflow_owner to the admin login (createrole_self_grant), transaction-local, before CREATE ROLE.
     await session.query(OWNER_BOOTSTRAP_Q4B2_NO_SELF_GRANT);
+    // Re-review F1 remainder: a blocked ALTER / CREATE ROLE fails (55P03) before log_lock_waits could quote the verifier.
+    if (plan.needPassword) await session.query(OWNER_BOOTSTRAP_L1_LOCK_TIMEOUT);
     await session.query(OWNER_BOOTSTRAP_Q4C_DO);
     const { rows } = await session.query(OWNER_BOOTSTRAP_Q4D_REVERIFY);
     if (rows.length !== 1 || rows[0]?.ok !== true) throw new OwnerBootstrapFailure(OWNER_BOOTSTRAP_MESSAGES.reverifyFailed);
@@ -768,6 +796,7 @@ async function attempt(session: SqlSession, io: OwnerBootstrapIo): Promise<Attem
     if (after.code === '28P01' && !plan.needPassword) return 'recheck';
     throw new OwnerBootstrapFailure(OWNER_BOOTSTRAP_MESSAGES.reverifyFailed, after.code);
   }
+  await assertPasswordRequired(io);
   assertFactsExact(await readFacts(session));
   if (plan.needPassword && !plan.create) io.log(OWNER_BOOTSTRAP_MESSAGES.passwordSet);
   return {
@@ -967,7 +996,7 @@ async function passwordlessSetup(session: SqlSession, io: OwnerBootstrapIo, refu
       } else {
         await session.query(OWNER_BOOTSTRAP_Q4B2_NO_SELF_GRANT);
         await session.query(OWNER_BOOTSTRAP_Q4C_DO_NO_PASSWORD);
-        const { rows } = await session.query(OWNER_BOOTSTRAP_Q4D_REVERIFY);
+        const { rows } = await session.query(OWNER_BOOTSTRAP_Q4D_NO_PASSWORD_REVERIFY);
         if (rows.length !== 1 || rows[0]?.ok !== true) throw new OwnerBootstrapFailure(OWNER_BOOTSTRAP_MESSAGES.reverifyFailed);
         await commitTagged(session);
       }
@@ -1402,6 +1431,10 @@ export async function runOwnerBootstrap(env: Record<string, string | undefined>,
     const ownerPassword = input.ownerPassword;
 
     const { admin: adminConfig, ownerUrl: ownerUrlConfig, probe: probeConfig } = bootstrapDriverConfigs(resolved, input.appUrl);
+    // Security re-review R1 of #259: the same crewflow_owner login with a random WRONG password (never a real secret).
+    const wrongUrl = new URL(input.appUrl);
+    wrongUrl.password = randomBytes(24).toString('hex');
+    const { probe: wrongProbeConfig } = bootstrapDriverConfigs(resolved, wrongUrl.toString());
     let result: OwnerBootstrapResult;
     if (input.mode === 'owner-url') {
       // I1: the crewflow_owner session is read-only (default_transaction_read_only=on as a startup option).
@@ -1411,6 +1444,7 @@ export async function runOwnerBootstrap(env: Record<string, string | undefined>,
         openAdmin: () => connectSession(adminConfig),
         probeOwner: () => probeOwnerOnce(probeConfig),
         verifier: () => scramSha256Verifier(ownerPassword),
+        probeWrongPassword: () => probeOwnerOnce(wrongProbeConfig),
         sessionProbe: async () => {
           await probePgSessionAffinity(adminConfig, { label: 'PG_ADMIN_URL connection' });
         },

@@ -36,6 +36,14 @@ import { createRoleMarkColumnsSql, OWNER_CREATEROLE_GRACE_SECONDS, OWNER_CREATER
 export const OWNER_BOOTSTRAP_LOCK_KEY = '7165901520526864244';
 
 /**
+ * Security re-review R1 of #259 (owner decision 2026-11-19, option 1): the role comment that marks crewflow_owner as created
+ * by db-setup WITHOUT a password and NOLOGIN, waiting for the operator's `ALTER ROLE crewflow_owner LOGIN PASSWORD ...`. Only
+ * a NOLOGIN crewflow_owner carrying exactly this comment is accepted (the awaiting-password state); any other NOLOGIN
+ * crewflow_owner stays refused. Quote-free constant.
+ */
+export const OWNER_AWAITING_PASSWORD_MARK = 'crewflow:awaiting-password';
+
+/**
  * Q0 (REVISED, security review H1): first pin the session's search_path to pg_catalog (then pg_temp, which is never searched
  * for functions or operators), so no unqualified operator or function in Q1 / Q2 / the DO blocks can resolve to an object
  * a schema owner planted (CVE-2018-1058 class: e.g. a database-level `search_path = x, pg_catalog` and an `x.=` operator).
@@ -73,11 +81,12 @@ export const OWNER_BOOTSTRAP_Q1_SUPERUSER_LOGGING = `SELECT pg_catalog.set_confi
  * database, directly or through any role membership: MEMBER, re-review N2) and search_path_default_set (a database-wide or crewflow_owner-level
  * search_path default exists in pg_db_role_setting). And (owner decisions 2026-11-18) o_createrole_pending / o_createrole_mark_expired:
  * crewflow_owner carries a valid "CREATEROLE until the schema is current" mark (owner-login-posture.ts), and it has expired by
- * the server clock (both false when the role or the mark is missing).
+ * the server clock (both false when the role or the mark is missing). Security re-review R1 of #259: o_awaiting_password,
+ * crewflow_owner is NOLOGIN and carries exactly OWNER_AWAITING_PASSWORD_MARK (db-setup's passwordless role, option 1).
  * TODO(lead, 2026-11-19): switch the privileged-membership list below (o_privileged_memberships) to
  * database/owner-login/privileged-roles.ts once it lands (one constant shared with the boot posture check).
  */
-// sql-injection-reviewed: the only interpolation is createRoleMarkColumnsSql over a fixed column expression and quote-free code constants.
+// sql-injection-reviewed: the interpolations are createRoleMarkColumnsSql over a fixed column expression and quote-free code constants (OWNER_AWAITING_PASSWORD_MARK).
 export const OWNER_BOOTSTRAP_Q2_FACTS = `SELECT pg_catalog.current_setting('server_version_num')::int                      AS server_version_num,
        current_user::text                                                         AS admin,
        a.rolsuper                                                                 AS admin_super,
@@ -113,6 +122,9 @@ export const OWNER_BOOTSTRAP_Q2_FACTS = `SELECT pg_catalog.current_setting('serv
                                                                                   AS o_has_db_grant,
        (o.oid IS NOT NULL AND pg_catalog.pg_has_role(o.oid, d.datdba, 'MEMBER')) AS o_owns_db,
        ${createRoleMarkColumnsSql("pg_catalog.shobj_description(o.oid, 'pg_authid')", 'o_createrole_pending', 'o_createrole_mark_expired')},
+       (o.oid IS NOT NULL AND NOT o.rolcanlogin
+        AND pg_catalog.shobj_description(o.oid, 'pg_authid') IS NOT DISTINCT FROM '${OWNER_AWAITING_PASSWORD_MARK}')
+                                                                                  AS o_awaiting_password,
        EXISTS (SELECT 1
                  FROM pg_catalog.pg_db_role_setting s
                  CROSS JOIN LATERAL pg_catalog.unnest(s.setconfig) AS c(setting)
@@ -169,7 +181,12 @@ export const OWNER_BOOTSTRAP_Q4B_SET_INPUTS = `SELECT pg_catalog.set_config('cre
  */
 export const OWNER_BOOTSTRAP_Q4B2_NO_SELF_GRANT = `SELECT pg_catalog.set_config('createrole_self_grant', '', true);`;
 
-/** Q4c (REVISED, security re-review N3: the verifier shape check before CREATE / ALTER ROLE). */
+/**
+ * Q4c (REVISED, security re-review N3: the verifier shape check before CREATE / ALTER ROLE). Security re-review R1 of #259:
+ * an existing NOLOGIN crewflow_owner is accepted ONLY in the awaiting-password state, and then becomes LOGIN with the
+ * verifier and loses the mark in the same statement pair.
+ */
+// sql-injection-reviewed: the only interpolation is OWNER_AWAITING_PASSWORD_MARK, a quote-free code constant.
 export const OWNER_BOOTSTRAP_Q4C_DO = `DO $bootstrap$
 DECLARE
   v_db       text := pg_catalog.current_database();
@@ -177,10 +194,12 @@ DECLARE
   v_set_pw   boolean := pg_catalog.current_setting('crewflow_bootstrap.need_password')::boolean;
   v_stage    text := 'check';
   v_msg      text;
+  v_awaiting boolean := false;
   r          record;
 BEGIN
   BEGIN
-    SELECT oid, rolsuper, rolbypassrls, rolreplication, rolcreatedb, rolcanlogin, rolinherit
+    SELECT oid, rolsuper, rolbypassrls, rolreplication, rolcreatedb, rolcanlogin, rolinherit,
+           pg_catalog.shobj_description(oid, 'pg_authid') IS NOT DISTINCT FROM '${OWNER_AWAITING_PASSWORD_MARK}' AS awaiting
       INTO r FROM pg_catalog.pg_roles WHERE rolname = 'crewflow_owner';
     -- REVISED (security re-review N3): a password is only ever set from the exact pre-hashed SCRAM-SHA-256 shape (the same
     -- pattern as OWNER_SELF_O4C_DO; dollar signs spelled [$]); anything else is 22023 before CREATE / ALTER ROLE.
@@ -194,13 +213,23 @@ BEGIN
         'CREATE ROLE crewflow_owner LOGIN NOSUPERUSER NOBYPASSRLS NOREPLICATION NOCREATEDB CREATEROLE INHERIT PASSWORD %L',
         v_verifier);
     ELSE
-      -- Re-check under the lock: another start may have changed it since Q2.
-      IF r.rolsuper OR r.rolbypassrls OR r.rolreplication OR r.rolcreatedb OR NOT r.rolcanlogin OR NOT r.rolinherit THEN
+      -- Re-check under the lock: another start may have changed it since Q2. NOLOGIN only in the awaiting-password state
+      -- (security re-review R1 of #259: db-setup's own passwordless role, OWNER_AWAITING_PASSWORD_MARK).
+      v_awaiting := NOT r.rolcanlogin AND r.awaiting;
+      IF r.rolsuper OR r.rolbypassrls OR r.rolreplication OR r.rolcreatedb OR (NOT r.rolcanlogin AND NOT v_awaiting) OR NOT r.rolinherit THEN
         RAISE EXCEPTION 'crewflow_owner has privileged or wrong attributes' USING ERRCODE = '42501';
+      END IF;
+      IF v_awaiting AND NOT v_set_pw THEN
+        RAISE EXCEPTION 'crewflow_owner is waiting for its password' USING ERRCODE = '42501';
       END IF;
       IF v_set_pw THEN
         v_stage := 'role';
-        EXECUTE pg_catalog.format('ALTER ROLE crewflow_owner PASSWORD %L', v_verifier);
+        IF v_awaiting THEN
+          EXECUTE pg_catalog.format('ALTER ROLE crewflow_owner LOGIN PASSWORD %L', v_verifier);
+          COMMENT ON ROLE crewflow_owner IS NULL;
+        ELSE
+          EXECUTE pg_catalog.format('ALTER ROLE crewflow_owner PASSWORD %L', v_verifier);
+        END IF;
       END IF;
     END IF;
     v_stage := 'grant';
@@ -225,12 +254,15 @@ $bootstrap$;`;
 
 /**
  * Q4c (no password; owner decision 2026-11-19, option 1): the server refused the pre-hashed password, so crewflow_owner is
- * created WITHOUT one (it cannot log in until the operator sets it in the provider's SQL editor), with exactly
- * OWNER_BOOTSTRAP_Q4C_DO's attributes, or, when it exists, left exactly as it is (its password is never touched here; the
- * same attribute re-check as Q4c); then the same database grant. No input at all: fixed text, no EXECUTE of a value. The
+ * created WITHOUT one and NOLOGIN (security re-review R1 of #259: a pg_hba trust / peer / cert / ldap rule must never let
+ * anyone in as a passwordless CREATEROLE login), marked OWNER_AWAITING_PASSWORD_MARK; otherwise OWNER_BOOTSTRAP_Q4C_DO's
+ * attributes. The operator's `ALTER ROLE crewflow_owner LOGIN PASSWORD ...` makes it a login. When it exists it is left
+ * exactly as it is (its password and LOGIN are never touched here; NOLOGIN accepted only with the mark); then the same
+ * database grant. No input at all: fixed text, no EXECUTE of a value. The
  * same stage HINT and CONTEXT-stripping re-raise as OWNER_BOOTSTRAP_Q4C_DO, so a refusal of the passwordless login role
  * itself (the role step, or its COMMIT) is told apart.
  */
+// sql-injection-reviewed: the only interpolation is OWNER_AWAITING_PASSWORD_MARK, a quote-free code constant.
 export const OWNER_BOOTSTRAP_Q4C_DO_NO_PASSWORD = `DO $bootstrap$
 DECLARE
   v_db       text := pg_catalog.current_database();
@@ -239,12 +271,14 @@ DECLARE
   r          record;
 BEGIN
   BEGIN
-    SELECT oid, rolsuper, rolbypassrls, rolreplication, rolcreatedb, rolcanlogin, rolinherit
+    SELECT oid, rolsuper, rolbypassrls, rolreplication, rolcreatedb, rolcanlogin, rolinherit,
+           pg_catalog.shobj_description(oid, 'pg_authid') IS NOT DISTINCT FROM '${OWNER_AWAITING_PASSWORD_MARK}' AS awaiting
       INTO r FROM pg_catalog.pg_roles WHERE rolname = 'crewflow_owner';
     IF NOT FOUND THEN
       v_stage := 'role';
-      CREATE ROLE crewflow_owner LOGIN NOSUPERUSER NOBYPASSRLS NOREPLICATION NOCREATEDB CREATEROLE INHERIT;
-    ELSIF r.rolsuper OR r.rolbypassrls OR r.rolreplication OR r.rolcreatedb OR NOT r.rolcanlogin OR NOT r.rolinherit THEN
+      CREATE ROLE crewflow_owner NOLOGIN NOSUPERUSER NOBYPASSRLS NOREPLICATION NOCREATEDB CREATEROLE INHERIT;
+      COMMENT ON ROLE crewflow_owner IS '${OWNER_AWAITING_PASSWORD_MARK}';
+    ELSIF r.rolsuper OR r.rolbypassrls OR r.rolreplication OR r.rolcreatedb OR (NOT r.rolcanlogin AND NOT r.awaiting) OR NOT r.rolinherit THEN
       RAISE EXCEPTION 'crewflow_owner has privileged or wrong attributes' USING ERRCODE = '42501';
     END IF;
     v_stage := 'grant';
@@ -277,6 +311,25 @@ export const OWNER_MANUAL_ROLE_SQL: readonly string[] = Object.freeze([
   "DO $grant$ BEGIN EXECUTE pg_catalog.format('GRANT CONNECT, CREATE, TEMPORARY ON DATABASE %I TO crewflow_owner WITH GRANT OPTION', pg_catalog.current_database()); END $grant$;",
   'COMMIT;',
 ]);
+
+/**
+ * Q4d (no-password path): the same exact re-check, LOGIN or the awaiting-password state (NOLOGIN with the mark).
+ */
+// sql-injection-reviewed: the only interpolation is OWNER_AWAITING_PASSWORD_MARK, a quote-free code constant.
+export const OWNER_BOOTSTRAP_Q4D_NO_PASSWORD_REVERIFY = `SELECT (rolcanlogin OR pg_catalog.shobj_description(oid, 'pg_authid') IS NOT DISTINCT FROM '${OWNER_AWAITING_PASSWORD_MARK}')
+       AND NOT rolsuper AND NOT rolbypassrls AND NOT rolreplication AND NOT rolcreatedb AND rolinherit
+       AND pg_catalog.has_database_privilege(oid, pg_catalog.current_database(), 'CREATE WITH GRANT OPTION') AS ok
+  FROM pg_catalog.pg_roles WHERE rolname = 'crewflow_owner';`;
+
+/**
+ * L1 (security re-review of #259, F1 remainder; before the verifier DO block whenever it sets a password): log_lock_waits
+ * reports a backend waiting longer than deadlock_timeout WITH its context stack, which would quote the EXECUTEd
+ * ALTER ROLE ... PASSWORD '<verifier>' text. The transaction's lock_timeout is set to half of deadlock_timeout (at least 1 ms),
+ * so a blocked statement fails with 55P03 (caught by the DO block, re-raised without context) first. User-settable; one
+ * boolean, never a value.
+ */
+export const OWNER_BOOTSTRAP_L1_LOCK_TIMEOUT = `SELECT pg_catalog.set_config('lock_timeout', GREATEST(1, s.setting::bigint / 2)::text || 'ms', true) IS NOT NULL AS done
+  FROM pg_catalog.pg_settings s WHERE s.name = 'deadlock_timeout';`;
 
 /** Q4d: re-verify the result exactly (attributes + grant), fail closed if not exact. */
 export const OWNER_BOOTSTRAP_Q4D_REVERIFY = `SELECT rolcanlogin AND NOT rolsuper AND NOT rolbypassrls AND NOT rolreplication AND NOT rolcreatedb AND rolinherit
@@ -396,6 +449,7 @@ export const OWNER_BOOTSTRAP_ADMIN_STATEMENTS = [
   OWNER_BOOTSTRAP_Q4A_LOCK,
   OWNER_BOOTSTRAP_Q4B_SET_INPUTS,
   OWNER_BOOTSTRAP_Q4B2_NO_SELF_GRANT,
+  OWNER_BOOTSTRAP_L1_LOCK_TIMEOUT,
   OWNER_BOOTSTRAP_Q4C_DO,
   OWNER_BOOTSTRAP_Q4D_REVERIFY,
   OWNER_BOOTSTRAP_COMMIT,
@@ -409,7 +463,7 @@ export const OWNER_BOOTSTRAP_NO_PASSWORD_STATEMENTS = [
   OWNER_BOOTSTRAP_Q2_FACTS,
   OWNER_BOOTSTRAP_Q4B2_NO_SELF_GRANT,
   OWNER_BOOTSTRAP_Q4C_DO_NO_PASSWORD,
-  OWNER_BOOTSTRAP_Q4D_REVERIFY,
+  OWNER_BOOTSTRAP_Q4D_NO_PASSWORD_REVERIFY,
   OWNER_BOOTSTRAP_COMMIT,
   OWNER_BOOTSTRAP_ROLLBACK,
 ] as const;

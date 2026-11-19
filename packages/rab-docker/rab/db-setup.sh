@@ -17,7 +17,7 @@
 #      (openssl rand -hex 32) and PG_DATABASE_HOST / PG_DATABASE_PORT / PG_DATABASE_NAME (copied from the admin URL), or
 #      which you set as PG_DATABASE_URL yourself (never both): crewflow_owner is created with that password if missing,
 #      and its password is SET to it when it does not log in. Only the SCRAM verifier is ever sent; a server that refuses
-#      pre-hashed passwords gets crewflow_owner WITHOUT a password and db-setup exits 64 with fixed steps (set the password
+#      pre-hashed passwords gets crewflow_owner WITHOUT a password and NOLOGIN, and db-setup exits 64 with fixed steps (set the password
 #      once in the provider's SQL editor; owner decision 2026-11-19, option 1; owner-bootstrap.ts). A pooled
 #      PG_ADMIN_URL is refused by capability; PG_ADMIN_DIRECT_URL (the direct address of the same login and database,
 #      db-setup and db-harden only) is then used instead of it;

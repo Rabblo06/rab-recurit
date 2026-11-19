@@ -38,7 +38,7 @@
 #       PG_DATABASE_HOST / PG_DATABASE_PORT / PG_DATABASE_NAME (the database's DIRECT address, copied from the admin URL):
 #       compose builds the crewflow_owner URL from them for db-setup, rab-api and rab-worker alike; or set the whole
 #       PG_DATABASE_URL yourself instead (never both). db-setup creates crewflow_owner with that password (pre-hashed; a
-#       server that refuses pre-hashed passwords gets crewflow_owner WITHOUT a password and db-setup stops with fixed steps:
+#       server that refuses pre-hashed passwords gets crewflow_owner WITHOUT a password, NOLOGIN, and db-setup stops with fixed steps:
 #       set the password once in the provider's SQL editor, then redeploy; Crewflow never sends a plain-text password)
 #       and sets it when the password does not log in. A pooled PG_ADMIN_URL is refused by what it does; then
 #       add PG_ADMIN_DIRECT_URL (the direct address of the same login and database; db-setup and db-harden only).

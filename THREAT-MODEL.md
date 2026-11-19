@@ -9581,11 +9581,13 @@ plain-text password.
   updated") from the CREATE / ALTER ROLE step (fixed DO-block HINT `crewflow-stage=role`) or from the COMMIT of a
   transaction that set a password. Never 42501, never the DO block's own shape check, never a grant-only transaction.
   The passwordless path runs under the same advisory lock and the same refusals:
-  - a missing crewflow_owner is created WITHOUT a password (`CREATE ROLE crewflow_owner LOGIN ...` with no PASSWORD: no
-    secret leaves db-setup, and the role cannot log in until the operator sets one);
+  - a missing crewflow_owner is created WITHOUT a password and NOLOGIN (`CREATE ROLE crewflow_owner NOLOGIN ...` with no
+    PASSWORD), marked `crewflow:awaiting-password` (security re-review R1: a pg_hba trust / peer / cert / ldap rule could
+    otherwise let anyone in as a passwordless CREATEROLE login). No secret leaves db-setup. Q2, both DO blocks and the
+    re-checks accept a NOLOGIN crewflow_owner ONLY with that mark; any other NOLOGIN crewflow_owner stays refused;
   - an existing role's password is never written;
   - the grant is added;
-  - exit 64 with fixed steps. The operator runs `ALTER ROLE crewflow_owner PASSWORD '<PG_DATABASE_APP_PASSWORD>'` once in
+  - exit 64 with fixed steps. The operator runs `ALTER ROLE crewflow_owner LOGIN PASSWORD '<PG_DATABASE_APP_PASSWORD>'` once in
     the provider's SQL editor, with exactly that value (the 32-character floor; never a console reset).
   The next run's login probe decides: it logs in, so no write and setup continues; or it still does not, so the steps again,
   with no password write, so never a loop.
@@ -9595,9 +9597,13 @@ plain-text password.
   provider's logs and audit (if any) under the provider's own policy. That is the provider's tool, outside Crewflow; the same
   as `own-database-app-login.sql`'s manual path. The plain-text trade-off of the earlier draft (a plain-text fallback sent
   by db-setup, G1/G2/L1 log guards) is REMOVED.
-- **Residual: a passwordless LOGIN role exists between the two runs.** It cannot authenticate with a password. Where a server
-  allows `trust` / peer authentication for it, it could log in without one; managed services do not offer that to tenants,
-  and the bundled db uses scram-sha-256.
+- **Between the two runs the role is NOLOGIN** (re-review R1), so no pg_hba rule can let anyone log in as it. Independently, a
+  login probe that succeeds is trusted only if a deliberately WRONG password fails too; otherwise db-setup refuses (64) "the
+  server lets crewflow_owner log in WITHOUT its password" (trust / peer / cert / similar). The operator's steps also say to
+  run `SET log_statement = 'none';` first where the provider allows it, and to clear the SQL editor's history.
+- **Verifier and lock waits (re-review F1 remainder).** Before the verifier DO block sets a password, the transaction's
+  lock_timeout is set below deadlock_timeout, so a blocked ALTER ROLE fails (55P03, caught) before `log_lock_waits` could
+  quote the EXECUTEd text with the verifier.
 - **Tampering / a hostile server.** A server that falsely refuses the verifier gains nothing: no password is sent.
 - **A pooled admin URL.** Refused by behaviour, before any read or write, in db-setup AND db-harden: the startup options
   db-setup sends are refused (08P01), or the two-connection session-affinity probe (pg-session-probe.ts) fails. Never by its

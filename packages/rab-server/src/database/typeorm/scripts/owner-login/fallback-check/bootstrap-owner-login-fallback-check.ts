@@ -17,7 +17,7 @@
  *   P1  plain PG16, verify-full, a non-superuser CREATEROLE admin: the pre-hashed path; created, the login works.
  *   P2  plain PG16, the cluster superuser as the admin over verify-full (the bundled db's mode a): the same.
  *   N1  the refusing server: the verifier is refused at COMMIT (XX000, never "another start"); crewflow_owner is created
- *       WITHOUT a password, the fixed steps, 64; a second run before the operator acts writes nothing and repeats the steps
+ *       WITHOUT a password and NOLOGIN (rolcanlogin = false, the awaiting mark), the fixed steps, 64; a second run before the operator acts writes nothing and repeats the steps
  *       (no loop); the operator's ALTER ROLE ... PASSWORD (simulated, as the provider's SQL editor would); the third run
  *       logs in, continues (CREATEROLE marked), 0. The crewflow_owner password is in no db-setup output and no server log
  *       line written before the operator's own statement.
@@ -26,6 +26,9 @@
  *   B1  PG_ADMIN_URL through PgBouncer 1: refused (64), "refused the session settings" + PG_ADMIN_DIRECT_URL.
  *   B2  PG_ADMIN_URL through PgBouncer 2: refused (64), "not session-stable" + PG_ADMIN_DIRECT_URL; nothing created.
  *   B3  PG_ADMIN_URL through PgBouncer 2 + PG_ADMIN_DIRECT_URL (the cluster, verify-full): created (0).
+ *   T1  a PostgreSQL 16 whose pg_hba TRUSTS crewflow_owner (FBC_TRUST_SU_URL): db-setup creates crewflow_owner, then its
+ *       deliberately-wrong-password login succeeds, so it refuses (64) with "the server lets crewflow_owner log in WITHOUT
+ *       its password"; the second run refuses before any write. (Security re-review R1 of #259.)
  * Output: scenario ids, PASS / FAIL, never a value.
  */
 import { execFileSync, spawn } from 'node:child_process';
@@ -62,12 +65,34 @@ function need(name: string): string {
 
 const CA_PATH = need('PG_SSL_CA_CERT_PATH');
 const CA = readFileSync(CA_PATH, 'utf8');
-const PLAIN = new URL(need('FBC_PLAIN_SU_URL'));
-const SIM = new URL(need('FBC_SIM_SU_URL'));
-for (const u of [PLAIN, SIM]) {
+/** The runner starts one PostgreSQL at a time (the laptop's memory rule), so each cluster URL is optional per run. */
+const optionalCluster = (name: string): URL | null => {
+  const v = process.env[name];
+  if (!v) return null;
+  const u = new URL(v);
   if (u.hostname !== '127.0.0.1') throw new Error('loopback disposable clusters only');
   remember(decodeURIComponent(u.password));
-}
+  return u;
+};
+const PLAIN_OR_NULL = optionalCluster('FBC_PLAIN_SU_URL');
+const SIM_OR_NULL = optionalCluster('FBC_SIM_SU_URL');
+const TRUST_OR_NULL = optionalCluster('FBC_TRUST_SU_URL');
+const cluster = (u: URL | null, name: string): URL => {
+  if (!u) throw new Failed(`${name} is not set for this run`);
+  return u;
+};
+// Accessed lazily by each scenario (a scenario of another group never touches an unset cluster).
+const clusters = {
+  get PLAIN() {
+    return cluster(PLAIN_OR_NULL, 'FBC_PLAIN_SU_URL');
+  },
+  get SIM() {
+    return cluster(SIM_OR_NULL, 'FBC_SIM_SU_URL');
+  },
+  get TRUST() {
+    return cluster(TRUST_OR_NULL, 'FBC_TRUST_SU_URL');
+  },
+};
 
 function ident(name: string): string {
   if (!/^[a-z_][a-z0-9_]{0,62}$/.test(name)) throw new Error('not a plain identifier');
@@ -180,6 +205,11 @@ async function superuserSecret(base: URL, statement: string, secret: string, db 
   }
 }
 
+async function ownerCanLoginAttr(base: URL): Promise<boolean | null> {
+  const rows = await sql(base, 'postgres', `SELECT rolcanlogin FROM pg_catalog.pg_roles WHERE rolname = 'crewflow_owner'`);
+  return rows[0] ? rows[0].rolcanlogin === true : null;
+}
+
 async function ownerPasswordState(base: URL): Promise<'missing' | 'none' | 'scram' | 'other'> {
   const rows = await sql(base, 'postgres', `SELECT rolpassword FROM pg_catalog.pg_authid WHERE rolname = 'crewflow_owner'`);
   if (!rows[0]) return 'missing';
@@ -189,8 +219,8 @@ async function ownerPasswordState(base: URL): Promise<'missing' | 'none' | 'scra
 }
 
 async function setSimPasswordlessRefusal(on: boolean): Promise<void> {
-  await sql(SIM, 'postgres', `ALTER SYSTEM SET refuse_prehashed.refuse_passwordless_login = ${on ? 'on' : 'off'}`);
-  await sql(SIM, 'postgres', `SELECT pg_catalog.pg_reload_conf()`);
+  await sql(clusters.SIM, 'postgres', `ALTER SYSTEM SET refuse_prehashed.refuse_passwordless_login = ${on ? 'on' : 'off'}`);
+  await sql(clusters.SIM, 'postgres', `SELECT pg_catalog.pg_reload_conf()`);
   await new Promise((r) => setTimeout(r, 500));
 }
 
@@ -203,7 +233,8 @@ interface ChildRun {
 function runChild(env: Record<string, string>): Promise<ChildRun> {
   const base: Record<string, string> = {};
   for (const k of ['PATH', 'HOME', 'TMPDIR']) if (process.env[k]) base[k] = process.env[k]!;
-  const argv = [require.resolve('ts-node/dist/bin.js'), '--transpile-only', '-P', TSCONFIG_APP, ENTRY];
+  const heap = /^[0-9]{2,5}$/.test(process.env.FBC_CHILD_HEAP ?? '') ? [`--max-old-space-size=${process.env.FBC_CHILD_HEAP}`] : [];
+  const argv = [...heap, require.resolve('ts-node/dist/bin.js'), '--transpile-only', '-P', TSCONFIG_APP, ENTRY];
   return new Promise((done) => {
     const child = spawn(process.execPath, argv, { env: { ...base, NODE_ENV: 'test', ...env }, stdio: ['ignore', 'pipe', 'pipe'], cwd: REPO_ROOT });
     let out = '';
@@ -253,13 +284,13 @@ const scenarios: Array<[string, () => Promise<void>]> = [
   [
     'P1 plain PG16, verify-full, non-superuser admin: pre-hashed path, no fallback',
     async () => {
-      const f = await fixture(PLAIN, 'p1');
+      const f = await fixture(clusters.PLAIN, 'p1');
       const run = await runChild({
-        PG_ADMIN_URL: urlFor(PLAIN, f.admin, f.adminPassword, f.db),
-        PG_DATABASE_URL: urlFor(PLAIN, 'crewflow_owner', f.ownerPassword, f.db),
+        PG_ADMIN_URL: urlFor(clusters.PLAIN, f.admin, f.adminPassword, f.db),
+        PG_DATABASE_URL: urlFor(clusters.PLAIN, 'crewflow_owner', f.ownerPassword, f.db),
         PG_SSL_CA_CERT_PATH: CA_PATH,
       });
-      await created(PLAIN, f, run, 'P1');
+      await created(clusters.PLAIN, f, run, 'P1');
       expect(!run.out.includes('pre-hashed'), 'P1: a fallback line on a server that accepts the verifier');
       assertClean(run);
     },
@@ -267,13 +298,13 @@ const scenarios: Array<[string, () => Promise<void>]> = [
   [
     'P2 plain PG16, the cluster superuser as admin over verify-full (the bundled db shape): pre-hashed path',
     async () => {
-      const f = await fixture(PLAIN, 'p2');
+      const f = await fixture(clusters.PLAIN, 'p2');
       const run = await runChild({
-        PG_ADMIN_URL: urlFor(PLAIN, decodeURIComponent(PLAIN.username), decodeURIComponent(PLAIN.password), f.db),
-        PG_DATABASE_URL: urlFor(PLAIN, 'crewflow_owner', f.ownerPassword, f.db),
+        PG_ADMIN_URL: urlFor(clusters.PLAIN, decodeURIComponent(clusters.PLAIN.username), decodeURIComponent(clusters.PLAIN.password), f.db),
+        PG_DATABASE_URL: urlFor(clusters.PLAIN, 'crewflow_owner', f.ownerPassword, f.db),
         PG_SSL_CA_CERT_PATH: CA_PATH,
       });
-      await created(PLAIN, f, run, 'P2');
+      await created(clusters.PLAIN, f, run, 'P2');
       expect(!run.out.includes('pre-hashed'), 'P2: a fallback line on a server that accepts the verifier');
       assertClean(run);
     },
@@ -281,10 +312,10 @@ const scenarios: Array<[string, () => Promise<void>]> = [
   [
     'N1 refusing server: passwordless crewflow_owner + steps (64); no loop; operator sets the password; redeploy continues (0)',
     async () => {
-      const f = await fixture(SIM, 'n1');
+      const f = await fixture(clusters.SIM, 'n1');
       const env = {
-        PG_ADMIN_URL: urlFor(SIM, f.admin, f.adminPassword, f.db),
-        PG_DATABASE_URL: urlFor(SIM, 'crewflow_owner', f.ownerPassword, f.db),
+        PG_ADMIN_URL: urlFor(clusters.SIM, f.admin, f.adminPassword, f.db),
+        PG_DATABASE_URL: urlFor(clusters.SIM, 'crewflow_owner', f.ownerPassword, f.db),
         PG_SSL_CA_CERT_PATH: CA_PATH,
       };
       const run1 = await runChild(env);
@@ -298,31 +329,33 @@ const scenarios: Array<[string, () => Promise<void>]> = [
         expect(run1.out.includes(line), 'N1 run 1: a fixed line is missing');
       }
       expect(!/another start/.test(run1.out), 'N1 run 1: the refusal was reported as a race');
-      expect((await ownerPasswordState(SIM)) === 'none', 'N1 run 1: crewflow_owner is missing or has a password');
+      expect((await ownerPasswordState(clusters.SIM)) === 'none', 'N1 run 1: crewflow_owner is missing or has a password');
+      expect((await ownerCanLoginAttr(clusters.SIM)) === false, 'N1 run 1: the passwordless crewflow_owner is not NOLOGIN');
       assertClean(run1);
       const run2 = await runChild(env);
       expect(run2.code === 64 && run2.result?.outcome === 'awaiting-password' && run2.result?.created === false, `N1 run 2: exit ${run2.code}, outcome ${run2.result?.outcome ?? 'none'}`);
       expect(run2.out.includes(OWNER_BOOTSTRAP_MESSAGES.passwordlessKept), 'N1 run 2: the "left unchanged" line is missing');
-      expect((await ownerPasswordState(SIM)) === 'none', 'N1 run 2: the password was written');
+      expect((await ownerPasswordState(clusters.SIM)) === 'none', 'N1 run 2: the password was written');
+      expect((await ownerCanLoginAttr(clusters.SIM)) === false, 'N1 run 2: crewflow_owner became LOGIN without a password');
       assertClean(run2);
       expect(logHits(process.env.FBC_SIM_CONTAINER, [f.ownerPassword]) === 0, 'N1: the crewflow_owner password appears in the server log');
       // The operator's one step in the provider's SQL editor (ALTER ROLE ... PASSWORD '<value>').
-      await superuserSecret(SIM, `DO $$ BEGIN EXECUTE pg_catalog.format('ALTER ROLE crewflow_owner PASSWORD %L', pg_catalog.current_setting('fbc.pw')); END $$`, f.ownerPassword);
+      await superuserSecret(clusters.SIM, `DO $$ BEGIN EXECUTE pg_catalog.format('ALTER ROLE crewflow_owner LOGIN PASSWORD %L', pg_catalog.current_setting('fbc.pw')); END $$`, f.ownerPassword);
       const run3 = await runChild(env);
       expect(run3.code === 0 && run3.result?.outcome === 'unchanged' && run3.result?.createRole === 'marked', `N1 run 3: exit ${run3.code}, outcome ${run3.result?.outcome ?? 'none'} ${run3.result?.createRole ?? ''}`);
-      expect(await canLogin(SIM, 'crewflow_owner', f.ownerPassword, f.db), 'N1 run 3: crewflow_owner cannot log in');
+      expect(await canLogin(clusters.SIM, 'crewflow_owner', f.ownerPassword, f.db), 'N1 run 3: crewflow_owner cannot log in');
       assertClean(run3);
     },
   ],
   [
     'N2 refusing server that also refuses a passwordless login role: nothing created, the reviewed SQL printed (64); after the operator runs it, 0',
     async () => {
-      const f = await fixture(SIM, 'n2');
+      const f = await fixture(clusters.SIM, 'n2');
       await setSimPasswordlessRefusal(true);
       try {
         const env = {
-          PG_ADMIN_URL: urlFor(SIM, f.admin, f.adminPassword, f.db),
-          PG_DATABASE_URL: urlFor(SIM, 'crewflow_owner', f.ownerPassword, f.db),
+          PG_ADMIN_URL: urlFor(clusters.SIM, f.admin, f.adminPassword, f.db),
+          PG_DATABASE_URL: urlFor(clusters.SIM, 'crewflow_owner', f.ownerPassword, f.db),
           PG_SSL_CA_CERT_PATH: CA_PATH,
         };
         const run1 = await runChild(env);
@@ -336,7 +369,7 @@ const scenarios: Array<[string, () => Promise<void>]> = [
         ]) {
           expect(run1.out.includes(line), 'N2 run 1: a fixed line is missing');
         }
-        expect((await ownerPasswordState(SIM)) === 'missing', 'N2 run 1: crewflow_owner was created');
+        expect((await ownerPasswordState(clusters.SIM)) === 'missing', 'N2 run 1: crewflow_owner was created');
         assertClean(run1);
         expect(logHits(process.env.FBC_SIM_CONTAINER, [f.ownerPassword]) === 0, 'N2: the crewflow_owner password appears in the server log');
         // The operator runs the printed SQL in the provider's SQL editor, as the admin, the placeholder replaced (simulated
@@ -346,7 +379,7 @@ const scenarios: Array<[string, () => Promise<void>]> = [
             ? `DO $$ BEGIN EXECUTE pg_catalog.format(${"'"}${l.replace(" PASSWORD '<PG_DATABASE_APP_PASSWORD>';", ' PASSWORD %L').replace(/'/g, "''")}${"'"}, pg_catalog.current_setting('fbc.pw')); END $$`
             : l,
         );
-        const admin = new Client({ host: SIM.hostname, port: Number(SIM.port), user: f.admin, password: f.adminPassword, database: f.db, ssl: { ca: CA, rejectUnauthorized: true } });
+        const admin = new Client({ host: clusters.SIM.hostname, port: Number(clusters.SIM.port), user: f.admin, password: f.adminPassword, database: f.db, ssl: { ca: CA, rejectUnauthorized: true } });
         await admin.connect();
         try {
           await admin.query('BEGIN');
@@ -358,7 +391,7 @@ const scenarios: Array<[string, () => Promise<void>]> = [
         }
         const run2 = await runChild(env);
         expect(run2.code === 0 && run2.result?.createRole === 'marked', `N2 run 2: exit ${run2.code}, outcome ${run2.result?.outcome ?? 'none'} ${run2.result?.createRole ?? ''}`);
-        expect(await canLogin(SIM, 'crewflow_owner', f.ownerPassword, f.db), 'N2 run 2: crewflow_owner cannot log in');
+        expect(await canLogin(clusters.SIM, 'crewflow_owner', f.ownerPassword, f.db), 'N2 run 2: crewflow_owner cannot log in');
         assertClean(run2);
       } finally {
         await setSimPasswordlessRefusal(false);
@@ -368,47 +401,65 @@ const scenarios: Array<[string, () => Promise<void>]> = [
   [
     'B1 PG_ADMIN_URL through PgBouncer (defaults): refused 64, session settings refused, PG_ADMIN_DIRECT_URL named',
     async () => {
-      const f = await fixture(PLAIN, 'b1');
+      const f = await fixture(clusters.PLAIN, 'b1');
       const hp = need('FBC_BOUNCER1_HOSTPORT');
       const run = await runChild({
-        PG_ADMIN_URL: urlFor(PLAIN, f.admin, f.adminPassword, f.db, 'sslmode=disable', hp),
-        PG_DATABASE_URL: urlFor(PLAIN, 'crewflow_owner', f.ownerPassword, f.db, 'sslmode=disable', hp),
+        PG_ADMIN_URL: urlFor(clusters.PLAIN, f.admin, f.adminPassword, f.db, 'sslmode=disable', hp),
+        PG_DATABASE_URL: urlFor(clusters.PLAIN, 'crewflow_owner', f.ownerPassword, f.db, 'sslmode=disable', hp),
       });
       expect(run.code === 64, `B1: exit ${run.code} (${run.result?.code ?? ''})`);
       expect(run.out.includes('refused the session settings') && run.out.includes('PG_ADMIN_DIRECT_URL'), 'B1: the pooler refusal (session settings) is missing');
-      expect(!(await ownerState(PLAIN)).exists, 'B1: crewflow_owner was created');
+      expect(!(await ownerState(clusters.PLAIN)).exists, 'B1: crewflow_owner was created');
       assertClean(run);
     },
   ],
   [
     'B2 PG_ADMIN_URL through PgBouncer (options ignored): refused 64 by the session probe, nothing created',
     async () => {
-      const f = await fixture(PLAIN, 'b2');
+      const f = await fixture(clusters.PLAIN, 'b2');
       const hp = need('FBC_BOUNCER2_HOSTPORT');
       const run = await runChild({
-        PG_ADMIN_URL: urlFor(PLAIN, f.admin, f.adminPassword, f.db, 'sslmode=disable', hp),
-        PG_DATABASE_URL: urlFor(PLAIN, 'crewflow_owner', f.ownerPassword, f.db, 'sslmode=disable', hp),
+        PG_ADMIN_URL: urlFor(clusters.PLAIN, f.admin, f.adminPassword, f.db, 'sslmode=disable', hp),
+        PG_DATABASE_URL: urlFor(clusters.PLAIN, 'crewflow_owner', f.ownerPassword, f.db, 'sslmode=disable', hp),
       });
       expect(run.code === 64, `B2: exit ${run.code} (${run.result?.code ?? ''})`);
       expect(run.out.includes(OWNER_BOOTSTRAP_MESSAGES.adminNotSessionStable), 'B2: the not-session-stable refusal is missing');
-      expect(!(await ownerState(PLAIN)).exists, 'B2: crewflow_owner was created');
+      expect(!(await ownerState(clusters.PLAIN)).exists, 'B2: crewflow_owner was created');
       assertClean(run);
     },
   ],
   [
     'B3 PG_ADMIN_URL through PgBouncer + PG_ADMIN_DIRECT_URL: created over the direct address',
     async () => {
-      const f = await fixture(PLAIN, 'b3');
+      const f = await fixture(clusters.PLAIN, 'b3');
       const hp = need('FBC_BOUNCER2_HOSTPORT');
       const run = await runChild({
-        PG_ADMIN_URL: urlFor(PLAIN, f.admin, f.adminPassword, f.db, 'sslmode=disable', hp),
-        PG_ADMIN_DIRECT_URL: urlFor(PLAIN, f.admin, f.adminPassword, f.db),
-        PG_DATABASE_URL: urlFor(PLAIN, 'crewflow_owner', f.ownerPassword, f.db),
+        PG_ADMIN_URL: urlFor(clusters.PLAIN, f.admin, f.adminPassword, f.db, 'sslmode=disable', hp),
+        PG_ADMIN_DIRECT_URL: urlFor(clusters.PLAIN, f.admin, f.adminPassword, f.db),
+        PG_DATABASE_URL: urlFor(clusters.PLAIN, 'crewflow_owner', f.ownerPassword, f.db),
         PG_SSL_CA_CERT_PATH: CA_PATH,
       });
-      await created(PLAIN, f, run, 'B3');
+      await created(clusters.PLAIN, f, run, 'B3');
       expect(run.out.includes(OWNER_BOOTSTRAP_MESSAGES.adminDirectUsed), 'B3: the PG_ADMIN_DIRECT_URL line is missing');
       assertClean(run);
+    },
+  ],
+  [
+    'T1 a server whose pg_hba trusts crewflow_owner: refused (64) because a deliberately wrong password logs in',
+    async () => {
+      const f = await fixture(clusters.TRUST, 't1');
+      const env = {
+        PG_ADMIN_URL: urlFor(clusters.TRUST, f.admin, f.adminPassword, f.db),
+        PG_DATABASE_URL: urlFor(clusters.TRUST, 'crewflow_owner', f.ownerPassword, f.db),
+        PG_SSL_CA_CERT_PATH: CA_PATH,
+      };
+      const run1 = await runChild(env);
+      expect(run1.code === 64 && run1.out.includes(OWNER_BOOTSTRAP_MESSAGES.serverIgnoresPassword), `T1 run 1: exit ${run1.code}, expected the "no password needed" refusal`);
+      assertClean(run1);
+      const run2 = await runChild(env);
+      expect(run2.code === 64 && run2.out.includes(OWNER_BOOTSTRAP_MESSAGES.serverIgnoresPassword), `T1 run 2: exit ${run2.code}`);
+      expect(!/crewflow_owner is ready/.test(run2.out), 'T1 run 2: reported ready');
+      assertClean(run2);
     },
   ],
 ];
@@ -427,8 +478,7 @@ async function main(): Promise<number> {
       log(`FAIL | ${name} | ${why}`);
     }
   }
-  await reset(PLAIN).catch(() => undefined);
-  await reset(SIM).catch(() => undefined);
+  for (const u of [PLAIN_OR_NULL, SIM_OR_NULL, TRUST_OR_NULL]) if (u) await reset(u).catch(() => undefined);
   log(failed ? `${failed} FAILED` : 'ALL PASS');
   return failed ? 1 : 0;
 }
