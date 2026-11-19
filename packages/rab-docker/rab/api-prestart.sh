@@ -2,13 +2,17 @@
 # API start: rab-api's ENTRYPOINT in every deploy compose file (DB-SETUP; also the image's default command). Runs from /app
 # (the image WORKDIR).
 #
-# DB-SETUP (Twenty Helm model, OWNER-DB-FINAL.md Part A): this container NEVER receives PG_DATABASE_URL, in any form (only the
-# one-shot db-setup service does: the admin URL, an existing crewflow_owner URL, or the bundled db's). This script is PID 1
-# (compose `entrypoint: ["./api-prestart.sh"]`, no compose init), refuses a PG_DATABASE_URL in its environment (exit 64),
-# builds the crewflow_owner URL from the credential-free target file and the crewflow_owner password file db-setup wrote
-# (both read-only), then execs the init: `exec /sbin/tini -s -- node packages/rab-server/dist/main.js`. Run with arguments (the owner CLI
-# one-off: `docker compose run --rm --no-deps rab-api node packages/rab-server/dist/command/main.js <command>`), it does
-# the same refusals and builds the same crewflow_owner URL, then `exec /sbin/tini -s -- "$@"`: nothing migrates or registers.
+# DATABASE (owner decision 2026-11-18, "change PR #125 option 2 to Twenty's way"): this container reads PG_DATABASE_URL, the
+# crewflow_owner URL, straight from its environment, like Twenty's server (twentyhq/twenty@eedb0a73
+# packages/twenty-docker/helm/twenty/templates/deployment-server.yaml:148-155). There is no target file, no password file and
+# no derive step any more. This script is PID 1 (compose `entrypoint: ["./api-prestart.sh"]`, no compose init); it refuses
+# an empty PG_DATABASE_URL or one with an empty password, every OTHER database URL or credential (PG_ADMIN_URL above all: the
+# admin login belongs only to the one-shot db-setup service), then execs the init: `exec /sbin/tini -s -- node
+# packages/rab-server/dist/main.js`. Run with arguments (the owner CLI one-off: `docker compose run --rm --no-deps rab-api
+# node packages/rab-server/dist/command/main.js <command>`), it does the same refusals with the same PG_DATABASE_URL, then
+# `exec /sbin/tini -s -- "$@"`: nothing migrates or registers. A wrong login (not crewflow_owner), a transaction-pooler host,
+# or a SUPERUSER / BYPASSRLS / CREATEDB / REPLICATION / (after the bootstrap, unmarked) CREATEROLE login is refused by the
+# processes themselves (runtime-db-config.ts checkRuntimeLogin before connecting; the boot gates once connected).
 #
 # Owner-login architecture (owner's FINAL decision 2026-11-04; M0 §7): the API, the Worker and the migrate child all use the
 # ONE database URL, PG_DATABASE_URL (the schema-owning crewflow_owner login). This script:
@@ -23,8 +27,9 @@
 #      reached the API's environment (exit 64). The one exception is the per-release approval token
 #      (CREWFLOW_MIGRATION_APPROVED) when CREWFLOW_MIGRATE_ON_START=true AND CREWFLOW_MIGRATION_APPROVAL_MODE=token: it is
 #      taken out of this shell's environment first, handed ONLY to the short-lived migrate child, and never reaches main.js;
-#   2b. DB-SETUP (Twenty Helm model): refuses any PG_DATABASE_URL (64); builds the crewflow_owner runtime URL from db-setup's
-#      credential-free target file and its crewflow_owner password file, waiting (bounded) for both (details below);
+#   2b. requires PG_DATABASE_URL (the crewflow_owner URL; exit 64 when it is empty, its password is empty, or its login is not
+#      crewflow_owner by a pure userinfo parse: security review of PR #246, L2) and points PG_SSL_CA_CERT_PATH at the
+#      bundled db's CA when its host is `db` (details below);
 #   3. CREWFLOW_MIGRATE_ON_START=true (and DISABLE_DB_MIGRATIONS not true): runs the short-lived migrate child (Agent 1:
 #      migration lock, fresh-install classifier, post-checks, the upgrade logbook). Exit 0 = current / applied / ledger
 #      ahead; 70 = every migration applied but an upgrade COMMAND failed (OWNER-DB-ULTIMATE Part B3: serve, loud WARNING,
@@ -40,7 +45,7 @@
 #      and the relay below vetoes a 70 result that names one, names a failed migration, or names no failed command.
 # Every failure other than a configuration refusal waits CREWFLOW_STARTUP_FAILURE_DELAY_SECONDS (default 15, 0-300) before
 # exiting, so a restart policy cannot turn a broken release into a tight restart storm against the database.
-# The Worker never runs this, and never migrates: its entrypoint is worker-start.sh (derive + swap only, never the admin).
+# The Worker never runs this, and never migrates: its entrypoint is worker-start.sh (the same refusals, never the admin).
 set -eu
 
 SCRIPTS=packages/rab-server/dist/database/typeorm/scripts
@@ -221,23 +226,23 @@ done
 # Owner-login architecture: ONE database URL (PG_DATABASE_URL). Legacy and second database URLs and role passwords never
 # belong here. (The removed CREWFLOW_DB_MODE is refused above by the runtime-db-config copy, with its own message.)
 for name in DATABASE_URL DATABASE_DIRECT_URL PG_DATABASE_REPLICA_URL PG_WORKER_DATABASE_URL CREWFLOW_WORKER_BOOTSTRAP_PASSWORD \
-    CREWFLOW_OWNER_PASSWORD CREWFLOW_OWNER_BOOTSTRAP_PASSWORD PG_DATABASE_PASSWORD; do
+    CREWFLOW_OWNER_PASSWORD CREWFLOW_OWNER_BOOTSTRAP_PASSWORD PG_DATABASE_PASSWORD PG_DATABASE_APP_PASSWORD; do
   eval "value=\${$name:-}"
-  if [ -n "$value" ]; then refuse "$name must never be set on the api service: the API, the Worker and the migrate child use ONE database URL, PG_DATABASE_URL (the crewflow_owner login), and no role password belongs in application configuration."; fi
+  if [ -n "$value" ]; then refuse "$name must never be set on the api service: the API, the Worker and the migrate child use ONE database URL, PG_DATABASE_URL (the crewflow_owner login), and no role password belongs in application configuration (compose interpolates PG_DATABASE_APP_PASSWORD into PG_DATABASE_URL; it never passes it on)."; fi
 done
-# PG_ADMIN_URL (owner decision 2026-11-17, Twenty's Helm model): the database admin URL belongs ONLY to the one-shot db-setup
-# service; the API never receives it, in any form (not even unused: /proc/<pid>/environ). The same for its retired name
+# PG_ADMIN_URL (owner decisions 2026-11-17 and 2026-11-18, Twenty's model): the database admin URL belongs ONLY to the
+# one-shot db-setup service; the API never receives it, in any form (not even unused: /proc/<pid>/environ). The same for its retired name
 # (PG_DATABASE_ADMIN_URL) and for db-setup's bundled-db URL (CREWFLOW_BUNDLED_DB_ADMIN_URL). The compose files pin
 # PG_ADMIN_URL to "" on this service (owner decision L-2): empty is allowed, any value is refused.
 for name in PG_ADMIN_URL PG_DATABASE_ADMIN_URL CREWFLOW_BUNDLED_DB_ADMIN_URL; do
   eval "value=\${$name:-}"
   if [ -n "$value" ]; then refuse "$name must never be set on the api service: it is the database admin URL, read only by the one-shot db-setup service (which creates crewflow_owner). The API connects only as crewflow_owner. Value not shown."; fi
 done
-# Security review of PR #230, L-1: an admin URL under ANY other name. No variable of the API may hold a PostgreSQL URL here
-# (its own PG_DATABASE_URL is refused below unless empty, and is set by this script only after these checks): every name
-# whose value starts with postgres:// or postgresql:// (any case) is refused. Names only; the value is never printed.
+# Security review of PR #230, L-1: an admin URL under ANY other name. No variable of the API but its own PG_DATABASE_URL may
+# hold a PostgreSQL URL: every other name whose value starts with postgres:// or postgresql:// (any case) is refused. Names
+# only; the value is never printed.
 for forbidden in $(crewflow_db_url_names); do
-  refuse "$forbidden holds a PostgreSQL URL or a libpq password DSN: no database credential ever reaches the api service (the API builds the crewflow_owner URL from db-setup's files; an admin URL belongs to db-setup's PG_ADMIN_URL only). Value not shown."
+  refuse "$forbidden holds a PostgreSQL URL or a libpq password DSN: no database credential ever reaches the api service (the api service holds exactly one, PG_DATABASE_URL, the crewflow_owner URL; an admin URL belongs to db-setup's PG_ADMIN_URL only). Value not shown."
 done
 # Name prefixes — a literal copy of forbiddenRuntimeEnvPrefixes('api'): the separate provisioner's settings never belong here.
 for prefix in CREWFLOW_PROVISIONER_; do
@@ -290,29 +295,18 @@ isolation_report() {
 }
 isolation_report
 
-# DB-SETUP (Twenty Helm model, OWNER-DB-FINAL.md Part A): rab-api NEVER receives PG_DATABASE_URL (admin URL, crewflow_owner
-# URL, anything). Only the one-shot db-setup service does; its bootstrap child creates crewflow_owner if missing (random
-# password, stored in /run/crewflow/db-target/owner-password, 0400; for an existing crewflow_owner URL, that URL's
-# password) and writes the CREDENTIAL-FREE target file /run/crewflow/db-target/target.json
-# ({"v":1,"host","port","database","params"}: no user, no password); both are mounted read-only here. Twenty: the server
-# receives only the app user's URL (helm/twenty/templates/deployment-server.yaml:142-156). This shell builds the crewflow_owner runtime URL with the pure derive step (never connects; the URL comes back on
-# fd 4 through a command substitution: never a file, never argv, never the log):
-#   - PG_DATABASE_URL set (non-empty) here, any login: refused (64) before anything runs. An empty value is unset.
-#   - CREWFLOW_DB_TARGET_FILE=<that file> -> the URL from the target and the password file. A file that is not there yet
-#     (derive exit 75) is waited for, 2 s apart, at most 120 s (60 attempts: bounded by a COUNT, never by the clock, so a
-#     clock step cannot stretch or end the wait), with a fixed message, because a platform may not honour depends_on:
-#     condition: service_completed_successfully (OpenShip: NOT VERIFIED); then exit 75. There is no other path. The derive
-#     run is NOT wrapped in busybox `timeout`: its watcher process inherits the command-substitution pipe (fd 4) and keeps it
-#     open until the bound expires, so every start paid the full bound (measured: 20 s with `timeout 20` for a step that takes
-#     0 s), and a slow cold start was killed. A hang is prevented inside the step instead: both files are opened
-#     O_NONBLOCK|O_NOFOLLOW and fstat-checked, so a FIFO, a symlink or a directory is refused at once (exit 64).
-# Then PG_DATABASE_URL = the runtime URL; PG_DATABASE_PASSWORD and CREWFLOW_DB_TARGET_FILE are unset.
-# TLS (D1 a): when the runtime URL's host is exactly `db` and PG_SSL_CA_CERT_PATH and PG_SSL_CA_CERT are both unset (or
-# blank), PG_SSL_CA_CERT_PATH is set to the bundled db's own CA (mounted read-only). The block below is identical in
+# DATABASE (owner decision 2026-11-18, Twenty's way): PG_DATABASE_URL is the crewflow_owner URL, from the environment. The
+# compose files give rab-api, rab-worker and db-setup the SAME expression: your crewflow_owner URL (modes b and c), or for the
+# bundled db (mode a) postgresql://crewflow_owner:<PG_DATABASE_APP_PASSWORD>@db:5432/crewflow?sslmode=verify-full, so what
+# db-setup created or checked is exactly what this process uses. Refused here (exit 64, value never shown): an empty
+# PG_DATABASE_URL, and an empty crewflow_owner password in it (PG_DATABASE_APP_PASSWORD unset for the bundled db). Its login,
+# its host shape and its role attributes are refused by the processes (checkRuntimeLogin; the boot gates).
+# TLS (D1 a): when the URL's host is exactly `db` and PG_SSL_CA_CERT_PATH and PG_SSL_CA_CERT are both unset (or blank),
+# PG_SSL_CA_CERT_PATH is set to the bundled db's own CA (mounted read-only). The block below is identical in
 # worker-start.sh and db-setup.sh (run-prestart-shell-tests.cjs compares them).
 # BEGIN crewflow bundled-db CA
-# $1: the database URL this process connects with (db-setup: PG_ADMIN_URL or PG_DATABASE_URL; rab-api / rab-worker: the
-# crewflow_owner URL they built). Only its host is read.
+# $1: the database URL this process connects with (db-setup: PG_ADMIN_URL or PG_DATABASE_URL; rab-api / rab-worker:
+# PG_DATABASE_URL, the crewflow_owner URL). Only its host is read.
 crewflow_bundled_db_ca() {
   db_rest="${1#*://}"
   db_authority="${db_rest%%[/?#]*}"
@@ -324,45 +318,45 @@ crewflow_bundled_db_ca() {
   unset db_rest db_authority db_hostport db_host
 }
 # END crewflow bundled-db CA
-DERIVE_RUNTIME_URL="$SCRIPTS/owner-login/derive-runtime-url.js"
-DB_TARGET_FILE=/run/crewflow/db-target/target.json
-DB_SETUP_WAIT_SECONDS=120
-# Test seam (NODE_ENV=test only, like the migration seams above): a shorter bound for the shell tests.
-if [ -n "${CREWFLOW_TEST_DB_SETUP_WAIT_SECONDS:-}" ]; then
-  if [ "${NODE_ENV:-}" != test ]; then refuse 'CREWFLOW_TEST_DB_SETUP_WAIT_SECONDS is a test seam: it is allowed only with NODE_ENV=test. Remove it. Refusing to start.'; fi
-  case "$CREWFLOW_TEST_DB_SETUP_WAIT_SECONDS" in ''|*[!0-9]*) refuse 'CREWFLOW_TEST_DB_SETUP_WAIT_SECONDS must be a whole number of seconds.' ;; esac
-  DB_SETUP_WAIT_SECONDS="$CREWFLOW_TEST_DB_SETUP_WAIT_SECONDS"
+if [ -z "${PG_DATABASE_URL:-}" ]; then
+  refuse 'PG_DATABASE_URL is empty: it is the crewflow_owner URL (bundled db: set PG_DATABASE_APP_PASSWORD, openssl rand -hex 32; your own database: your crewflow_owner URL, direct host, sslmode=verify-full). Refusing to start.'
 fi
-unset CREWFLOW_TEST_DB_SETUP_WAIT_SECONDS
-if [ -n "${PG_DATABASE_URL:-}" ]; then
-  refuse 'PG_DATABASE_URL must never be set on the api service: an operator-given URL belongs only to the one-shot db-setup service (PG_ADMIN_URL, an existing crewflow_owner URL in PG_DATABASE_URL, or the bundled db). The API builds the crewflow_owner URL from the target and password files db-setup writes. Value not shown. Refusing to start.'
-fi
-unset PG_DATABASE_URL
-export CREWFLOW_DB_TARGET_FILE="$DB_TARGET_FILE"
-DB_SETUP_ATTEMPTS=$(( (DB_SETUP_WAIT_SECONDS + 1) / 2 ))
-if [ "$DB_SETUP_ATTEMPTS" -lt 1 ]; then DB_SETUP_ATTEMPTS=1; fi
-ATTEMPT=0
-while :; do
-  ATTEMPT=$((ATTEMPT + 1))
-  STATUS=0
-  RUNTIME_URL="$(CREWFLOW_RUNTIME_URL_FD=4 node "$DERIVE_RUNTIME_URL" 4>&1 1>&2)" || STATUS=$?
-  if [ "$STATUS" -ne 75 ]; then break; fi
-  RUNTIME_URL=""
-  if [ "$ATTEMPT" -ge "$DB_SETUP_ATTEMPTS" ]; then
-    fail_after_delay 75 "the database target file did not appear within ${DB_SETUP_WAIT_SECONDS}s: db-setup (the only service with the admin URL) has not completed"
+case "$PG_DATABASE_URL" in
+  *://crewflow_owner:@*)
+    refuse 'PG_DATABASE_URL has an empty crewflow_owner password: for the bundled db set PG_DATABASE_APP_PASSWORD (openssl rand -hex 32); with your own database put the crewflow_owner password in PG_DATABASE_URL. Value not shown. Refusing to start.' ;;
+esac
+# BEGIN crewflow owner-login check
+# Security review of PR #246, L2: a pure userinfo parse of a database URL ($1), before any node process runs. Returns 0 only
+# when the URL's login is crewflow_owner (or its percent-encoded underscore form, crewflow%5Fowner / crewflow%5fowner); a URL
+# without userinfo is not crewflow_owner. Never connects, never prints or keeps the value. The block is identical in
+# api-prestart.sh, worker-start.sh and db-setup.sh (run-prestart-shell-tests.cjs compares them).
+crewflow_is_owner_login() {
+  ol_rest="${1#*://}"
+  ol_authority="${ol_rest%%[/?#]*}"
+  case "$ol_authority" in
+    *@*)
+      ol_login="${ol_authority%@*}"
+      ol_login="${ol_login%%:*}"
+      ;;
+    *) ol_login='' ;;
+  esac
+  case "$ol_login" in
+    crewflow_owner | crewflow%5Fowner | crewflow%5fowner) ol_rc=0 ;;
+    *) ol_rc=1 ;;
+  esac
+  unset ol_rest ol_authority ol_login
+  if [ "$ol_rc" = 0 ]; then
+    unset ol_rc
+    return 0
   fi
-  echo "api-prestart: waiting for db-setup: the database target file is not there yet (attempt ${ATTEMPT} of ${DB_SETUP_ATTEMPTS}, 2 s apart)"
-  run_step sleep 2 || true
-done
-if [ "$STATUS" -ne 0 ]; then
-  RUNTIME_URL=""
-  fail_after_delay "$STATUS" "could not build the crewflow_owner connection (see the derive-runtime-url line above)"
+  unset ol_rc
+  return 1
+}
+# END crewflow owner-login check
+if ! crewflow_is_owner_login "$PG_DATABASE_URL"; then
+  refuse 'PG_DATABASE_URL does not log in as crewflow_owner: it is always the crewflow_owner URL. An admin URL belongs only in PG_ADMIN_URL of db-setup (a compose.env from before 2026-11-18 had the admin URL in PG_DATABASE_URL: move it to PG_ADMIN_URL and put the crewflow_owner URL in PG_DATABASE_URL). Value not shown. Refusing to start.'
 fi
-if [ -z "$RUNTIME_URL" ]; then
-  fail_after_delay 70 'the derive step returned an empty crewflow_owner connection'
-fi
-export PG_DATABASE_URL="$RUNTIME_URL"
-unset RUNTIME_URL PG_DATABASE_PASSWORD CREWFLOW_DB_TARGET_FILE
+export PG_DATABASE_URL
 crewflow_bundled_db_ca "$PG_DATABASE_URL"
 # The owner CLI one-off: no migrate child, no scheduler registration, no API; the cleaned environment only.
 if [ "$#" -gt 0 ]; then

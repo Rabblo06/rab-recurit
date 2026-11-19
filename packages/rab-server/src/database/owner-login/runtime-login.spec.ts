@@ -3,7 +3,7 @@ import * as path from 'path';
 
 import { OWNER_LOGIN_ROLE } from '../boot-checks/owner-login-posture';
 import { assertRuntimeDatabaseIdentity, resolveRuntimeDatabase, RuntimeDbError } from '../typeorm/core/runtime-database-guard';
-import { buildRuntimeDatabaseUrl, generateOwnerPassword, OWNER_LOGIN } from './owner-credential';
+import { OWNER_LOGIN } from './owner-credential';
 import { checkRuntimeLogin, readRuntimeDbConfig, RuntimeDbConfigError, STARTUP_EXIT_CODES } from './runtime-db-config';
 
 /**
@@ -12,7 +12,7 @@ import { checkRuntimeLogin, readRuntimeDbConfig, RuntimeDbConfigError, STARTUP_E
  * (owner decision D5); every existing guard keeps its own message and order. Fake credentials only; every refusal is checked
  * for the secret, the admin login and the URL.
  */
-const SECRET = 'S3cret-PW-do-not-print';
+const SECRET = 'S3cret-PW-do-not-print-0123456789-abcdefgh';
 const ADMIN_LOGIN = 'doadmin_sentinel';
 const HOST = 'db-sentinel.example.internal';
 const ADMIN_URL = `postgres://${ADMIN_LOGIN}:${SECRET}@${HOST}:5432/crewflow?sslmode=verify-full`;
@@ -22,7 +22,13 @@ const ADMIN_URL_UNREACHABLE = `postgres://${ADMIN_LOGIN}:${SECRET}@127.0.0.1:1/c
 const OWNER_URL_UNREACHABLE = `postgres://crewflow_owner:${SECRET}@127.0.0.1:1/crewflow?sslmode=require`;
 const PROD = { NODE_ENV: 'production', RAB_RUNTIME_ENV: 'production' } as const;
 const PROCESSES = ['api', 'worker', 'migrate'] as const;
-const LOGIN_REFUSAL = /^The (api|worker|migrate) process: PG_DATABASE_URL does not log in as crewflow_owner\. In production a runtime process connects ONLY as crewflow_owner; .*Refusing to start before connecting\.$/;
+const LOGIN_REFUSAL = /^The (api|worker|migrate) process: PG_DATABASE_URL does not log in as crewflow_owner\. In production a runtime process connects ONLY as crewflow_owner: .*Refusing to start before connecting\.$/;
+const POOLER_REFUSAL = /^The (api|worker|migrate) process: PG_DATABASE_URL has a documented transaction-pooler shape\. In production PG_DATABASE_URL must name the database's DIRECT host .*Refusing to start before connecting\.$/;
+/** Documented transaction-pooler shapes (pg-url-policy.ts): Neon `-pooler` hosts, Supabase's pooler on 6543. */
+const POOLER_URLS = [
+  `postgres://crewflow_owner:${SECRET}@ep-sentinel-pooler.eu-west-2.aws.neon.tech/crewflow?sslmode=verify-full`,
+  `postgres://crewflow_owner:${SECRET}@aws-0-eu-west-2.pooler.supabase.com:6543/crewflow?sslmode=verify-full`,
+];
 
 function expectValueFree(message: string): void {
   expect(message).not.toContain(SECRET);
@@ -89,10 +95,44 @@ describe('runtime-login rule (DB-SETUP plan §2.2): production connects only as 
     }
   });
 
-  it('the runtime URL built from an admin URL and the stored password (buildRuntimeDatabaseUrl) passes in production', () => {
-    const runtimeUrl = buildRuntimeDatabaseUrl(ADMIN_URL, generateOwnerPassword());
+  it('owner decision 2026-11-18: production refuses a crewflow_owner URL with a transaction-pooler shape (exit 64), value-free', () => {
     for (const processName of PROCESSES) {
-      expect(checkRuntimeLogin({ ...PROD, PG_DATABASE_URL: runtimeUrl }, processName)).toEqual({ warning: null });
+      for (const url of POOLER_URLS) {
+        let thrown: unknown;
+        try {
+          checkRuntimeLogin({ ...PROD, PG_DATABASE_URL: url }, processName);
+        } catch (error) {
+          thrown = error;
+        }
+        expect(thrown).toBeInstanceOf(RuntimeDbConfigError);
+        expect((thrown as RuntimeDbConfigError).exitCode).toBe(STARTUP_EXIT_CODES.config);
+        expect((thrown as Error).message).toMatch(POOLER_REFUSAL);
+        expect((thrown as Error).message.startsWith(`The ${processName} process:`)).toBe(true);
+        expectValueFree((thrown as Error).message);
+        expect((thrown as Error).message).not.toMatch(/neon|supabase|pooler\./i);
+      }
+    }
+  });
+
+  it('re-review (info): production refuses a weak crewflow_owner password before connecting (the API may start before db-setup)', () => {
+    for (const weak of ['changeme', 'Short9pw1', 'ab'.repeat(20)]) {
+      const url = `postgres://crewflow_owner:${weak}@${HOST}:5432/crewflow?sslmode=verify-full`;
+      for (const processName of PROCESSES) {
+        const message = refusalOf(() => checkRuntimeLogin({ ...PROD, PG_DATABASE_URL: url }, processName));
+        expect(message).toMatch(/the crewflow_owner password inside PG_DATABASE_URL is too weak for production/);
+        expect(message).not.toContain(weak);
+        expectValueFree(message);
+      }
+      // Outside production a short password is the test / development norm.
+      expect(checkRuntimeLogin({ NODE_ENV: 'test', PG_DATABASE_URL: url }, 'api')).toEqual({ warning: null });
+    }
+  });
+
+  it('outside production a pooler-shaped crewflow_owner URL is a value-free warning, never a refusal', () => {
+    for (const url of POOLER_URLS) {
+      const { warning } = checkRuntimeLogin({ NODE_ENV: 'test', PG_DATABASE_URL: url }, 'worker');
+      expect(warning).toMatch(/^The worker process: PG_DATABASE_URL has a transaction-pooler shape\. Allowed outside production only/);
+      expectValueFree(warning!);
     }
   });
 
