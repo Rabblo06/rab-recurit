@@ -88,7 +88,8 @@ describeIfDb('C2-0 businessTables(manager) and the search_path trap (integration
     });
     expect(result.bound).toBe(schema);
     expect(result.venue).toBe(`"${schema}"."venue"`);
-    expect(result.schemas).toBe(`{${schema}}`); // search_path still bound to exactly that schema (trap off)
+    // search_path still bound to exactly that schema (trap off), plus the explicit pg_temp LAST (security review L-4).
+    expect(result.schemas).toMatch(new RegExp(`^[{]${schema}(,pg_temp_[0-9]+)?[}]$`));
     expect(result.viaPath).toBe(1);
     expect(result.viaQualified).toBe(1);
     // The row is physically in that schema (superuser fixture connection, no routing involved).

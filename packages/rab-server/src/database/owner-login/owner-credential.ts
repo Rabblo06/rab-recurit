@@ -186,6 +186,9 @@ export const ADMIN_URL_LABEL = 'PG_ADMIN_URL' as const;
 /** Earlier names of the admin URL: refused by name with a "renamed" message, never read. */
 export const RETIRED_ADMIN_URL_NAMES: readonly string[] = Object.freeze(['PG_DATABASE_ADMIN_URL']);
 
+/** The optional direct session URL beside a transaction-pooled PG_DATABASE_URL (pg-config.ts). */
+export const SESSION_URL_LABEL = 'PG_DATABASE_SESSION_URL';
+
 export const DB_SETUP_INPUT_MESSAGES = Object.freeze({
   retiredAdminName: (name: string) => `${name} was renamed to ${ADMIN_URL_LABEL} (your database's admin URL; db-setup only). Rename it. Refusing.`,
   appUrlMissing: `${URL_LABEL} is empty. It is always required: the crewflow_owner URL that rab-api and rab-worker use (bundled db: set PG_DATABASE_APP_PASSWORD; your own database: put the crewflow_owner URL in ${URL_LABEL}). Refusing.`,
@@ -194,6 +197,11 @@ export const DB_SETUP_INPUT_MESSAGES = Object.freeze({
   targetMismatch: `${ADMIN_URL_LABEL} and ${URL_LABEL} name different databases (host, port or database differ). Both must name the same database: db-setup creates crewflow_owner there, and rab-api / rab-worker connect there. Refusing.`,
   weakPassword: `The crewflow_owner password inside ${URL_LABEL} is too weak to become the schema owner's password: it must be at least ${OWNER_PASSWORD_MIN_LENGTH} characters with at least ${OWNER_PASSWORD_MIN_DISTINCT} different characters (openssl rand -hex 32). Nothing was created or changed. Refusing.`,
   // sql-injection-reviewed: an error MESSAGE (printed, never executed); the interpolations are this module's label constants.
+  // Security review L-2 (PR #258): a transaction pooler in PG_DATABASE_URL is a runtime feature only, until #259 wires the
+  // session URL into the setup step; until then db-setup / db-harden refuse it rather than connect through the pooler.
+  sessionUrlNotYetSupported: `${SESSION_URL_LABEL} is set (${URL_LABEL} is a transaction pooler). db-setup and db-harden do not support that yet: they need one real session and would connect through the pooler. For this step, set ${URL_LABEL} to the DIRECT crewflow_owner URL (the value of ${SESSION_URL_LABEL}) and unset ${SESSION_URL_LABEL}; rab-api and rab-worker keep both. Refusing.`,
+  sessionUrlNotOwner: `${SESSION_URL_LABEL} must log in as crewflow_owner, exactly like ${URL_LABEL} (the direct session connection of the same login and database). Refusing.`,
+  sessionTargetMismatch: `${ADMIN_URL_LABEL} and ${SESSION_URL_LABEL} name different databases, or ${SESSION_URL_LABEL} names another database than ${URL_LABEL}. With a transaction pooler in ${URL_LABEL}, the admin URL names the session URL's (direct) database, and the session URL the same database name as ${URL_LABEL}. Refusing.`,
   weakPasswordProduction: `The crewflow_owner password inside ${URL_LABEL} is too weak for production: it must be at least ${OWNER_PASSWORD_MIN_LENGTH} characters with at least ${OWNER_PASSWORD_MIN_DISTINCT} different characters. As your admin set a strong one (openssl rand -hex 32; ALTER ROLE crewflow_owner PASSWORD ...) and put it in ${URL_LABEL}, or set ${ADMIN_URL_LABEL} so db-setup sets it. Refusing.`,
 });
 
@@ -232,6 +240,18 @@ export function sameDatabase(a: PgTarget, b: PgTarget): boolean {
 }
 
 /** db-setup's input (see ADMIN_URL_LABEL). Pure; never connects; throws OwnerCredentialError (fixed, value-free text). */
+/**
+ * Security review L-2: the ONE database-target rule of the setup step, aligned with the compose.env lint
+ * (compose-owner-login.cjs dbSettingsProblems): with PG_DATABASE_SESSION_URL set, the admin URL must name the SESSION URL's
+ * database (host, port, database: the direct host), and the session URL the same database name as PG_DATABASE_URL (the
+ * pooler); without it, the admin URL names PG_DATABASE_URL's database. Pure; returns the fixed message or null.
+ */
+export function dbSetupTargetProblem(admin: PgTarget | null, app: PgTarget, session: PgTarget | null): string | null {
+  if (session && session.database !== app.database) return DB_SETUP_INPUT_MESSAGES.sessionTargetMismatch;
+  if (admin && !sameDatabase(admin, session ?? app)) return session ? DB_SETUP_INPUT_MESSAGES.sessionTargetMismatch : DB_SETUP_INPUT_MESSAGES.targetMismatch;
+  return null;
+}
+
 export function selectDbSetupInput(env: Record<string, string | undefined>): DbSetupInput {
   for (const name of RETIRED_ADMIN_URL_NAMES) if (presentValue(env, name) !== undefined) throw new OwnerCredentialError(DB_SETUP_INPUT_MESSAGES.retiredAdminName(name));
   const adminUrl = presentValue(env, ADMIN_URL_LABEL);
@@ -239,11 +259,23 @@ export function selectDbSetupInput(env: Record<string, string | undefined>): DbS
   if (appUrl === undefined) throw new OwnerCredentialError(DB_SETUP_INPUT_MESSAGES.appUrlMissing);
   const appPlan = planDbSetup(appUrl, URL_LABEL);
   if (appPlan.mode !== 'owner-url') throw new OwnerCredentialError(DB_SETUP_INPUT_MESSAGES.appUrlNotOwner);
+  const sessionUrl = presentValue(env, SESSION_URL_LABEL);
+  let sessionPlan: DbSetupPlan | null = null;
+  if (sessionUrl !== undefined) {
+    sessionPlan = planDbSetup(sessionUrl, SESSION_URL_LABEL);
+    if (sessionPlan.mode !== 'owner-url') throw new OwnerCredentialError(DB_SETUP_INPUT_MESSAGES.sessionUrlNotOwner);
+  }
   let adminPlan: DbSetupPlan | null = null;
   if (adminUrl !== undefined) {
     adminPlan = planDbSetup(adminUrl, ADMIN_URL_LABEL);
     if (adminPlan.mode !== 'bootstrap') throw new OwnerCredentialError(DB_SETUP_INPUT_MESSAGES.adminUrlIsOwner);
-    if (!sameDatabase(adminPlan.urlTarget, appPlan.urlTarget)) throw new OwnerCredentialError(DB_SETUP_INPUT_MESSAGES.targetMismatch);
+  }
+  const targetProblem = dbSetupTargetProblem(adminPlan?.urlTarget ?? null, appPlan.urlTarget, sessionPlan?.urlTarget ?? null);
+  if (targetProblem) throw new OwnerCredentialError(targetProblem);
+  // Security review L-2: refused until #259 connects the setup step to the session URL (after the target rule above, so a
+  // misconfiguration is still named precisely).
+  if (sessionPlan) throw new OwnerCredentialError(DB_SETUP_INPUT_MESSAGES.sessionUrlNotYetSupported);
+  if (adminPlan) {
     // M2: db-setup creates or sets this password: never a weak one, in any environment.
     if (!isStrongOwnerPassword(appPlan.ownerPassword)) throw new OwnerCredentialError(DB_SETUP_INPUT_MESSAGES.weakPassword);
   } else if (looksLikeProduction(env) && !isStrongOwnerPassword(appPlan.ownerPassword)) {

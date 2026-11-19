@@ -38,6 +38,9 @@
  *     configuration also refuses the startup `-c` settings, so it is refused at connect time as well.)
  *   - PG_DATABASE_URL_IS_DIRECT=true together with PG_DATABASE_SESSION_URL is a contradiction and is refused. The flag never
  *     skips the session probe.
+ *   - Production (security review L-1): the API / Worker 'runtime' endpoint is ALWAYS transaction-scoped, with or without
+ *     PG_DATABASE_SESSION_URL (`pooled` is then the same target as `primary`, scoped). WORKER_DISPATCH_MODE=event then
+ *     travels in the per-transaction preamble (SET LOCAL crewflow.dispatch_notify = on); behind a pooler it stays refused.
  */
 import { buildPgSsl, PgSsl, PgTlsSettings, resolvePgCaCertificate } from './pg-tls';
 import { parsePgUrl, PgConfigError, PgTarget, sameTarget } from './pg-url-policy';
@@ -478,6 +481,16 @@ export function resolvePgEnvironment(env: Env = process.env, options: ResolvePgO
       primary = direct;
     }
     lock = direct;
+  } else if (production && POOLED_RUNTIME_PROCESSES.has(processRole)) {
+    // Security review L-1: in production the API / Worker runtime pool is ALWAYS served by the transaction-scoped client,
+    // pooler or not (an undetected pooler, or a silently dropped startup option, can then never undo the per-transaction
+    // RESET ROLE + assertion). A separate endpoint object: 'primary' (boot gates, probes, the lock endpoint) stays a plain
+    // direct session with its startup settings; only 'runtime' is scoped. The NOTIFY switch travels per transaction too.
+    pooled = { ...primary, transactionScoped: true };
+  }
+  // Security review I-4: a session-role startup option can never ride on a transaction-scoped endpoint.
+  if (pooled?.target.sessionRoleOption) {
+    throw new PgConfigError('PG_DATABASE_URL carries a session role option (-c role=...), which a transaction-scoped runtime endpoint refuses. Refusing to start.');
   }
 
   return {

@@ -83,7 +83,7 @@ describe('TenantContextService', () => {
     expect(manager.query).toHaveBeenNthCalledWith(
       2,
       BIND_WITH_PATH_SQL,
-      ['org-1', WS_ID, 'user-1', 'MANAGER', '', 'core'],
+      ['org-1', WS_ID, 'user-1', 'MANAGER', '', 'core, pg_temp'],
     );
     expect(manager.query).toHaveBeenCalledTimes(2);
   });
@@ -101,7 +101,7 @@ describe('TenantContextService', () => {
     expect(manager.query).toHaveBeenNthCalledWith(
       2,
       BIND_WITH_PATH_SQL,
-      ['', '', 'super-1', 'SUPER_ADMIN', '', 'core'],
+      ['', '', 'super-1', 'SUPER_ADMIN', '', 'core, pg_temp'],
     );
   });
 
@@ -118,7 +118,7 @@ describe('TenantContextService', () => {
     expect(manager.query).toHaveBeenNthCalledWith(
       2,
       BIND_WITH_PATH_SQL,
-      ['org-1', WS_ID, '', '', 'worker', 'core'],
+      ['org-1', WS_ID, '', '', 'worker', 'core, pg_temp'],
     );
   });
 
@@ -135,7 +135,7 @@ describe('TenantContextService', () => {
     expect(sql).not.toMatch(/\$7/);
     expect(params).toHaveLength(6);
     expect(params.slice(0, 5)).toEqual(['org-1', WS_ID, 'user-1', 'STAFF', '']);
-    expect(params[5]).toBe('core');
+    expect(params[5]).toBe('core, pg_temp');
   });
 
   it('returns the callback result', async () => {
@@ -163,7 +163,7 @@ describe('TenantContextService', () => {
       await service.runInTenantContext({ organisationId: 'org-1', workspaceId: WS_ID, userId: 'user-1', role: 'MANAGER' }, async () => undefined);
 
       expect(schemaResolver.resolve).not.toHaveBeenCalled();
-      expect(manager.query).toHaveBeenNthCalledWith(2, BIND_WITH_PATH_SQL, ['org-1', WS_ID, 'user-1', 'MANAGER', '', 'core']);
+      expect(manager.query).toHaveBeenNthCalledWith(2, BIND_WITH_PATH_SQL, ['org-1', WS_ID, 'user-1', 'MANAGER', '', 'core, pg_temp']);
       expect(manager.query).toHaveBeenCalledTimes(2);
     });
 
@@ -175,7 +175,7 @@ describe('TenantContextService', () => {
       await service.runInTenantContext({ organisationId: 'org-1', workspaceId: null, userId: 'ceo-1', role: 'CEO' }, async () => undefined);
 
       expect(schemaResolver.resolve).not.toHaveBeenCalled();
-      expect(manager.query).toHaveBeenNthCalledWith(2, BIND_WITH_PATH_SQL, ['org-1', '', 'ceo-1', 'CEO', '', 'core']);
+      expect(manager.query).toHaveBeenNthCalledWith(2, BIND_WITH_PATH_SQL, ['org-1', '', 'ceo-1', 'CEO', '', 'core, pg_temp']);
       expect(manager.query).toHaveBeenCalledTimes(2);
     });
 
@@ -189,7 +189,7 @@ describe('TenantContextService', () => {
       expect(schemaResolver.resolve).toHaveBeenCalledWith(manager, WS_ID);
       // The registry is FORCE RLS: the GUCs are bound first (no path), then the separate search_path after resolve().
       expect(manager.query).toHaveBeenNthCalledWith(2, BIND_GUCS_SQL, ['org-1', WS_ID, 'user-1', 'MANAGER', '']);
-      expect(manager.query).toHaveBeenNthCalledWith(3, SEARCH_PATH_SQL, ['workspace_deadbeefdeadbeefdeadbeefdeadbeef']);
+      expect(manager.query).toHaveBeenNthCalledWith(3, SEARCH_PATH_SQL, ['workspace_deadbeefdeadbeefdeadbeefdeadbeef, pg_temp']);
     });
 
     it('C2-0 trap (test-only, NODE_ENV=test): search_path is bound to "" in both shapes, while the callback still gets the real schema', async () => {
@@ -296,7 +296,7 @@ describe('TenantContextService', () => {
       );
 
       expect(schemaResolver.resolve).not.toHaveBeenCalled();
-      expect(manager.query).toHaveBeenNthCalledWith(2, BIND_WITH_PATH_SQL, ['org-1', WS_ID, 'user-1', 'MANAGER', '', 'core']);
+      expect(manager.query).toHaveBeenNthCalledWith(2, BIND_WITH_PATH_SQL, ['org-1', WS_ID, 'user-1', 'MANAGER', '', 'core, pg_temp']);
       expect(manager.query).toHaveBeenCalledTimes(2);
       expect(result).toBe('core');
     });
@@ -313,7 +313,7 @@ describe('TenantContextService', () => {
 
       expect(schemaResolver.resolve).toHaveBeenCalledWith(manager, WS_ID);
       expect(manager.query).toHaveBeenNthCalledWith(2, BIND_GUCS_SQL, ['org-1', WS_ID, 'user-1', 'MANAGER', '']);
-      expect(manager.query).toHaveBeenNthCalledWith(3, SEARCH_PATH_SQL, ['workspace_deadbeefdeadbeefdeadbeefdeadbeef']);
+      expect(manager.query).toHaveBeenNthCalledWith(3, SEARCH_PATH_SQL, ['workspace_deadbeefdeadbeefdeadbeefdeadbeef, pg_temp']);
       expect(result).toBe('workspace_deadbeefdeadbeefdeadbeefdeadbeef');
     });
 
@@ -343,7 +343,7 @@ describe('TenantContextService', () => {
       const manager = buildManager();
       const service = new TenantContextService(buildDataSource(manager), buildSchemaResolver(), buildEnvironment(false));
       await service.runInTenantContext(CTX, async () => undefined);
-      expect(calls(manager)).toEqual([['RESET ROLE'], [BIND_WITH_PATH_SQL, ['org-1', WS_ID, 'user-1', 'MANAGER', '', 'core']]]);
+      expect(calls(manager)).toEqual([['RESET ROLE'], [BIND_WITH_PATH_SQL, ['org-1', WS_ID, 'user-1', 'MANAGER', '', 'core, pg_temp']]]);
     });
 
     it('HWS on with a workspace: RESET ROLE, the bind (no path), resolve, then the separate search_path', async () => {
@@ -362,7 +362,7 @@ describe('TenantContextService', () => {
       const service = new TenantContextService(buildDataSource(manager), schemaResolver, buildEnvironment(true));
       await service.runInTenantContext(CTX, async () => undefined);
       expect(order).toEqual(['RESET ROLE', BIND_GUCS_SQL, '<resolve>', SEARCH_PATH_SQL]);
-      expect(calls(manager)[2]).toEqual([SEARCH_PATH_SQL, [WS_SCHEMA]]);
+      expect(calls(manager)[2]).toEqual([SEARCH_PATH_SQL, [`${WS_SCHEMA}, pg_temp`]]);
     });
 
     it('readOnly (HWS off): transaction_read_only is in the SAME SELECT as the identity GUCs and the path', async () => {
@@ -371,7 +371,7 @@ describe('TenantContextService', () => {
         const service = new TenantContextService(buildDataSource(manager), buildSchemaResolver(), buildEnvironment(false));
         if (run === 'tenant') await service.runInTenantContext(CTX, async () => undefined, { readOnly: true });
         else await service.runInWorkspaceContext(CTX, async () => undefined, { readOnly: true });
-        expect(calls(manager)).toEqual([['RESET ROLE'], [BIND_WITH_PATH_READ_ONLY_SQL, ['org-1', WS_ID, 'user-1', 'MANAGER', '', 'core']]]);
+        expect(calls(manager)).toEqual([['RESET ROLE'], [BIND_WITH_PATH_READ_ONLY_SQL, ['org-1', WS_ID, 'user-1', 'MANAGER', '', 'core, pg_temp']]]);
       }
     });
 
@@ -379,7 +379,7 @@ describe('TenantContextService', () => {
       const manager = buildManager();
       const service = new TenantContextService(buildDataSource(manager), buildSchemaResolver(WS_SCHEMA), buildEnvironment(true));
       await service.runInTenantContext(CTX, async () => undefined, { readOnly: true });
-      expect(calls(manager)).toEqual([['RESET ROLE'], [BIND_READ_ONLY_SQL, ['org-1', WS_ID, 'user-1', 'MANAGER', '']], [SEARCH_PATH_SQL, [WS_SCHEMA]]]);
+      expect(calls(manager)).toEqual([['RESET ROLE'], [BIND_READ_ONLY_SQL, ['org-1', WS_ID, 'user-1', 'MANAGER', '']], [SEARCH_PATH_SQL, [`${WS_SCHEMA}, pg_temp`]]]);
     });
 
     it('Admin Inspect (CF-02) is unchanged: its own SET TRANSACTION READ ONLY stays the first statement', async () => {
@@ -389,7 +389,7 @@ describe('TenantContextService', () => {
       expect(calls(manager)).toEqual([
         ['SET TRANSACTION READ ONLY'],
         ['RESET ROLE'],
-        [BIND_WITH_PATH_SQL, ['org-1', WS_ID, 'user-1', 'MANAGER', '', 'core']],
+        [BIND_WITH_PATH_SQL, ['org-1', WS_ID, 'user-1', 'MANAGER', '', 'core, pg_temp']],
       ]);
     });
 
@@ -418,7 +418,7 @@ describe('TenantContextService', () => {
         const manager = buildManager();
         const service = new TenantContextService(buildDataSource(manager), buildSchemaResolver(), buildEnvironment(false));
         await service.runInTenantContext({ organisationId: payload, workspaceId: null, userId: payload, role: payload }, async () => undefined);
-        expect(calls(manager)[1]).toEqual([BIND_WITH_PATH_SQL, [payload, '', payload, payload, '', 'core']]);
+        expect(calls(manager)[1]).toEqual([BIND_WITH_PATH_SQL, [payload, '', payload, payload, '', 'core, pg_temp']]);
       }
     });
   });
@@ -519,7 +519,7 @@ describe('TenantContextService', () => {
       // The entity schema and search_path are the same value: the folded $6 or the separate set_config.
       const calls = (manager.query as jest.Mock).mock.calls as Array<[string, unknown[]?]>;
       const searchPath = calls.find(([sql]) => sql === SEARCH_PATH_SQL)?.[1]?.[0] ?? calls.find(([sql]) => sql.includes("set_config('search_path', $6"))?.[1]?.[5];
-      expect(searchPath).toBe(expected);
+      expect(searchPath).toBe(`${expected}, pg_temp`); // security review L-4: pg_temp explicitly last
     });
 
     it('a failed schema binding fails the transaction closed: the callback never runs', async () => {

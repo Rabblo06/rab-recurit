@@ -160,6 +160,9 @@ export function transactionScopeSettings(request: PgConnectionRequest): Transact
 function prepare(resolved: ResolvedPgEnvironment, request: PgConnectionRequest) {
   const endpoint = selectEndpoint(resolved, request);
   const sessionAffinity = request.sessionAffinity ?? (request.url === undefined && request.endpoint === 'lock');
+  if (endpoint.transactionScoped && endpoint.target.sessionRoleOption) {
+    throw new PgConfigError(`${endpoint.source} carries a session role option (-c role=...), refused on the transaction-scoped runtime endpoint. Refusing.`);
+  }
   if (sessionAffinity && endpoint.transactionScoped) {
     throw new PgConfigError(
       `${endpoint.source} is the transaction-pooled runtime connection; a session advisory lock (or any session state) needs the direct connection (PG_DATABASE_SESSION_URL). Refusing.`,
@@ -174,7 +177,7 @@ function prepare(resolved: ResolvedPgEnvironment, request: PgConnectionRequest) 
     connectTimeout,
     options: pgStartupOptions(endpoint, request, resolved.dispatchNotify === true),
     applicationName: applicationNameFor(resolved, endpoint, request),
-    transactionScope: endpoint.transactionScoped ? transactionScopeSettings(request) : null,
+    transactionScope: endpoint.transactionScoped ? { ...transactionScopeSettings(request), dispatchNotify: resolved.dispatchNotify === true } : null,
   };
 }
 

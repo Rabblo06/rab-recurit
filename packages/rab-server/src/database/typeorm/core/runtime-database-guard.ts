@@ -67,6 +67,7 @@ import {
   isRemoteDatabaseHost,
 } from '../../deployment-identity/deployment-identity';
 import { unmarkedProductionRefusal } from '../../deployment-identity/unmarked-production-endpoints';
+import { assertTlsGate, BootGateFacts, DatabaseBootGateError } from '../../boot-checks/database-boot-gate-rules';
 import { runtimeEnvRefusal } from './never-in-runtime-env';
 import { checkRuntimeLogin, RuntimeDbConfigError, runtimeDbConfigProblems } from '../../owner-login/runtime-db-config';
 
@@ -256,7 +257,9 @@ function resolveRuntimeDatabaseUnchecked(input: RuntimeDbInput): ResolvedRuntime
       (primaryValue !== undefined &&
         [dotenvValues.PG_DATABASE_URL, dotenvValues.DATABASE_URL, dotenvValues.DATABASE_DIRECT_URL, dotenvValues.DATABASE_URL_UNPOOLED].some(
           (value) => value !== undefined && value.trim() === primaryValue,
-        ))
+        )) ||
+      // Security review I-7: the session URL, too, never comes from a .env file in production.
+      dotenvValues.PG_DATABASE_SESSION_URL !== undefined
     ) {
       throw new RuntimeDbError(
         'production runtime values are present in a .env file. Production authority must come from the deployment environment. Refusing to start.',
@@ -307,6 +310,8 @@ function isLocalIdentity(identity: PgTargetIdentity): boolean {
 }
 
 export interface RuntimeIdentityProbe {
+  /** pg_stat_ssl.ssl of the probed backend (null: no row). */
+  ssl: boolean | null;
   database: string;
   systemIdentifier: string;
   currentUser: string;
@@ -337,11 +342,14 @@ export async function probeRuntimeIdentity(
     if (error instanceof PgConfigError) throw new RuntimeDbError(`${error.message} Refusing to start.`);
     throw error;
   }
-  let row: { db: string; sid: string; usr: string } | undefined;
+  let row: { db: string; sid: string; usr: string; ssl: boolean | null } | undefined;
   try {
     await client.connect();
-    const result = await client.query<{ db: string; sid: string; usr: string }>(
-      `SELECT pg_catalog.current_database() AS db, (SELECT system_identifier::text FROM pg_catalog.pg_control_system()) AS sid, current_user AS usr`,
+    // ssl: whether THIS backend's connection is TLS (pg_stat_ssl). Through a transaction pooler it is the pooler->PostgreSQL
+    // hop (security review M-1), which the client's own verify-full TLS cannot see.
+    const result = await client.query<{ db: string; sid: string; usr: string; ssl: boolean | null }>(
+      `SELECT pg_catalog.current_database() AS db, (SELECT system_identifier::text FROM pg_catalog.pg_control_system()) AS sid, current_user AS usr,
+              (SELECT s.ssl FROM pg_catalog.pg_stat_ssl s WHERE s.pid = pg_catalog.pg_backend_pid()) AS ssl`,
     );
     row = result.rows[0];
     if (!row) throw new Error('empty probe');
@@ -351,7 +359,7 @@ export async function probeRuntimeIdentity(
     throw new RuntimeDbError(`Cannot reach the ${label} database for the read-only identity probe (driver code ${code}). Refusing to start.`, code);
   }
   try {
-    const base = { database: row.db, systemIdentifier: row.sid, currentUser: row.usr };
+    const base = { database: row.db, systemIdentifier: row.sid, currentUser: row.usr, ssl: row.ssl ?? null };
     if (!identity) return { ...base, identity: 'not-checked', warnings: [] };
     const decision = await assertDeploymentIdentity(async (sql, params) => (await client.query(sql, params as unknown[])).rows, {
       processLabel: identity.processLabel,
@@ -368,6 +376,26 @@ export async function probeRuntimeIdentity(
     throw new RuntimeDbError(`The ${label} deployment identity check failed (SQLSTATE ${code}). Refusing to start.`);
   } finally {
     await client.end().catch(() => undefined);
+  }
+}
+
+/**
+ * Security review M-1: boot gate 6 (TLS, database-boot-gate-rules.ts assertTlsGate) for the transaction-scoped runtime
+ * connection. `ssl` comes from pg_stat_ssl of the backend the runtime client reached, i.e. behind a pooler the
+ * pooler->PostgreSQL hop: production refuses it when that hop is not TLS. LIMIT (THREAT-MODEL TX-POOL-1): pg_stat_ssl proves
+ * encryption on that hop, NOT that the pooler verified the server certificate (server_tls_sslmode=verify-full is the pooler
+ * operator's setting and is invisible from here).
+ */
+export function assertPooledHopTls(ssl: boolean | null, production: boolean): void {
+  try {
+    assertTlsGate({ ssl } as BootGateFacts, production);
+  } catch (error) {
+    if (error instanceof DatabaseBootGateError) {
+      throw new RuntimeDbError(
+        'the transaction-pooled runtime connection reaches PostgreSQL without TLS (pg_stat_ssl of its backend: the pooler->PostgreSQL hop). Configure the pooler to connect to PostgreSQL over verified TLS (PgBouncer: server_tls_sslmode=verify-full). Refusing to start.',
+      );
+    }
+    throw error;
   }
 }
 
@@ -433,6 +461,7 @@ export async function assertRuntimeDatabaseIdentity(
     ) {
       throw new RuntimeDbError('runtime identity mismatch between PG_DATABASE_URL (the transaction pooler) and PG_DATABASE_SESSION_URL. Refusing to start.');
     }
+    assertPooledHopTls(runtimeProbe.ssl, resolved.classification === 'PRODUCTION');
   }
   if (resolved.direct) {
     const directProbe = await probeRuntimeIdentity(resolved.pg, 'lock');

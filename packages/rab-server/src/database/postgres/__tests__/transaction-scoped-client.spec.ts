@@ -5,7 +5,9 @@ import { Client } from 'pg';
 import {
   classifyStatement,
   isTransactionScopedPool,
+  RLS_GUC_CATALOG_SQL,
   RLS_GUC_NAMES,
+  rlsGucNamesMissing,
   TransactionScopedClient,
   TransactionScopedClientError,
   transactionScopePreambleSql,
@@ -145,13 +147,19 @@ describe('transaction-scoped client: routing', () => {
 
 describe('transaction-scoped client: the preamble and the classifier', () => {
   it('the preamble: RESET ROLE, the per-transaction settings, search_path, the role assertion and the rab.* neutralisation, constants only', () => {
-    expect(PREAMBLE.startsWith('RESET ROLE; SET LOCAL statement_timeout = 30000; SET LOCAL idle_in_transaction_session_timeout = 60000; SET LOCAL search_path TO DEFAULT; DO $crewflow_scope$')).toBe(true);
+    expect(PREAMBLE.startsWith('RESET ROLE; RESET ALL; SET LOCAL statement_timeout = 30000; SET LOCAL idle_in_transaction_session_timeout = 60000; DO $crewflow_scope$')).toBe(true);
+    // Security review L-4: pg_temp explicitly LAST in search_path, so a temporary table never shadows a real one.
+    expect(PREAMBLE).toContain("PERFORM pg_catalog.set_config('search_path', CASE WHEN p OPERATOR(pg_catalog.=) '' THEN 'pg_temp' ELSE p OPERATOR(pg_catalog.||) ', pg_temp' END, true)");
+    // The NOTIFY switch travels per transaction (L-1, an always-scoped production pool), never on a read-only one.
+    expect(transactionScopePreambleSql({ ...SETTINGS, dispatchNotify: true })).toContain('SET LOCAL crewflow.dispatch_notify = on; DO');
+    expect(transactionScopePreambleSql({ ...SETTINGS, dispatchNotify: true, readOnly: true })).not.toContain('dispatch_notify');
+    expect(PREAMBLE).not.toContain('dispatch_notify');
     expect(PREAMBLE).toContain("IF current_user OPERATOR(pg_catalog.<>) session_user THEN RAISE EXCEPTION USING ERRCODE = '42501'");
     // Placeholder settings are not in pg_settings, so the RLS GUCs are cleared from an explicit list (the PgBouncer test).
     expect(PREAMBLE).toContain(`FOREACH s IN ARRAY ARRAY['rab.organisation_id', 'rab.workspace_id', 'rab.user_id', 'rab.role'`);
     expect(PREAMBLE).not.toContain('pg_settings');
     expect(PREAMBLE).toContain("PERFORM pg_catalog.set_config(s, '', true)");
-    expect(transactionScopePreambleSql({ ...SETTINGS, readOnly: true })).toContain('SET LOCAL transaction_read_only = on; SET LOCAL search_path TO DEFAULT');
+    expect(transactionScopePreambleSql({ ...SETTINGS, readOnly: true })).toContain('SET LOCAL transaction_read_only = on; DO');
     expect(transactionScopePreambleSql({ statementTimeoutMs: 0, idleInTransactionTimeoutMs: 0, readOnly: false })).toContain('SET LOCAL statement_timeout = 0;');
     expect(() => transactionScopePreambleSql({ ...SETTINGS, statementTimeoutMs: 1.5 })).toThrow();
     expect(() => transactionScopePreambleSql({ ...SETTINGS, statementTimeoutMs: -1 })).toThrow();
@@ -191,23 +199,39 @@ describe('transaction-scoped client: the preamble and the classifier', () => {
 });
 
 describe('transaction-scoped client: the RLS GUC list is complete', () => {
-  it('every rab.<name> setting the server source reads or sets is cleared by the preamble', () => {
-    const root = path.resolve(__dirname, '../../..');
+  it('every rab.<name> setting any package source (.ts, .sql) reads or sets is cleared by the preamble (security review M-2)', () => {
+    const packages = path.resolve(__dirname, '../../../../..');
     const found = new Set<string>();
     const walk = (dir: string): void => {
       for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
         const full = path.join(dir, entry.name);
         if (entry.isDirectory()) {
-          if (entry.name === 'node_modules' || entry.name === '__tests__') continue;
+          if (['node_modules', 'dist', 'dist-cjs', 'dist-esm', '__tests__', '.git'].includes(entry.name)) continue;
           walk(full);
-        } else if (entry.name.endsWith('.ts') && !entry.name.endsWith('.spec.ts')) {
+        } else if (/\.(ts|sql)$/.test(entry.name) && !/\.(spec|test)\.ts$/.test(entry.name)) {
           const text = fs.readFileSync(full, 'utf8');
           for (const m of text.matchAll(/(?:current_setting|set_config)\(\s*'(rab\.[a-z_]+)'/g)) found.add(m[1]!);
+          for (const m of text.matchAll(/SET\s+(?:LOCAL\s+|SESSION\s+)?(rab\.[a-z_]+)/gi)) found.add(m[1]!.toLowerCase());
         }
       }
     };
-    walk(root);
+    for (const pkg of fs.readdirSync(packages, { withFileTypes: true })) {
+      const src = path.join(packages, pkg.name, 'src');
+      if (pkg.isDirectory() && fs.existsSync(src)) walk(src);
+    }
     expect(found.size).toBeGreaterThan(5);
-    expect([...found].filter((n) => !(RLS_GUC_NAMES as readonly string[]).includes(n)).sort()).toEqual([]);
+    expect(rlsGucNamesMissing([...found])).toEqual([]);
+  });
+
+  it('rlsGucNamesMissing names exactly what the list does not cover (rab.test is the one test-only extra)', () => {
+    expect(rlsGucNamesMissing(['rab.organisation_id', 'rab.test', 'rab.ai_retention'])).toEqual([]);
+    expect(rlsGucNamesMissing(['rab.zz_probe', 'rab.organisation_id', 'rab.zz_probe'])).toEqual(['rab.zz_probe']);
+  });
+
+  it('the catalog query matches whole rab.<name> words in policies and in function bodies and SET clauses', () => {
+    expect(RLS_GUC_CATALOG_SQL).toContain('FROM pg_catalog.pg_policies p');
+    expect(RLS_GUC_CATALOG_SQL).toContain('f.prosrc');
+    expect(RLS_GUC_CATALOG_SQL).toContain('f.proconfig');
+    expect(RLS_GUC_CATALOG_SQL).toContain(String.raw`'\m(rab\.[a-z_]+)'`);
   });
 });

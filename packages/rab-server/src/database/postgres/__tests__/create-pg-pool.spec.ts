@@ -148,7 +148,7 @@ describe('create-pg-pool: explicit target, TLS and session settings as pg sees t
       expect(pool.host).toBe('pgbouncer.internal');
       expect(pool.Client).toBe(TransactionScopedClient);
       expect(pool).not.toHaveProperty('options');
-      expect(pool.crewflowTransactionScope).toEqual({ statementTimeoutMs: 30_000, idleInTransactionTimeoutMs: 60_000, readOnly: false });
+      expect(pool.crewflowTransactionScope).toEqual({ statementTimeoutMs: 30_000, idleInTransactionTimeoutMs: 60_000, readOnly: false, dispatchNotify: false });
       const orm = pgTypeOrmConnectionOptions(r, { endpoint: 'runtime', purpose: 'runtime' });
       expect(orm.host).toBe('pgbouncer.internal');
       expect((orm.extra as Record<string, unknown>).Client).toBe(TransactionScopedClient);

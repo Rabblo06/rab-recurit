@@ -14,6 +14,7 @@ import {
   TransactionScopedClientConfig,
 } from '../../database/postgres';
 import { coreDataSourceOptions } from '../../database/typeorm/core/core.datasource';
+import { assertPooledHopTls, probeRuntimeIdentity, RuntimeDbError } from '../../database/typeorm/core/runtime-database-guard';
 import { integrationTestDatabase } from '../../database/typeorm/core/integration-test-database-gate';
 import { EnvironmentService } from '../../engine/core-modules/environment/environment.service';
 import { SchemaResolverService } from '../../engine/core-modules/tenant/schema-resolver.service';
@@ -146,13 +147,27 @@ suite('transaction pooler: two workspaces through PgBouncer (transaction mode)',
   }
 
   /** Outside any tenant context, through the runtime pool (autocommit, wrapped by the transaction-scoped client). */
-  async function bareRead(): Promise<{ guc: string | null; cu: string; roles: number; search: string }> {
+  async function bareRead(): Promise<{ guc: string | null; cu: string; roles: number; search: string; lockTimeout: string; workMem: string }> {
     const [row] = (await runtime.query(
       `SELECT pg_catalog.current_setting('rab.organisation_id', true) AS guc, current_user::text AS cu,
               (SELECT pg_catalog.count(*)::int FROM core.role WHERE key LIKE 'pooler-test-%') AS roles,
-              pg_catalog.current_setting('search_path') AS search`,
-    )) as Array<{ guc: string | null; cu: string; roles: number; search: string }>;
+              pg_catalog.current_setting('search_path') AS search, pg_catalog.current_setting('lock_timeout') AS "lockTimeout",
+              pg_catalog.current_setting('work_mem') AS "workMem"`,
+    )) as Array<{ guc: string | null; cu: string; roles: number; search: string; lockTimeout: string; workMem: string }>;
     return row!;
+  }
+
+  /** Holds POOL_SIZE plain transactions open at once (each pins its own backend), runs `poison` in each, then COMMITs. */
+  async function poisonEveryBackend(poison: (c: Client) => Promise<void>): Promise<void> {
+    const poisoners = await Promise.all(Array.from({ length: POOL_SIZE }, () => plainBouncerClient()));
+    for (const c of poisoners) await c.query('BEGIN');
+    const pids = new Set<number>();
+    for (const c of poisoners) {
+      await poison(c);
+      pids.add(Number((await c.query('SELECT pg_catalog.pg_backend_pid() AS pid')).rows[0].pid));
+    }
+    expect(pids.size).toBe(POOL_SIZE);
+    for (const c of poisoners) await c.query('COMMIT');
   }
 
   beforeAll(async () => {
@@ -256,16 +271,13 @@ suite('transaction pooler: two workspaces through PgBouncer (transaction mode)',
   it('a poisoned backend (session SET ROLE rab_secure_owner, session rab.organisation_id, session search_path) is neutralised for every runtime transaction', async () => {
     // Poison EVERY server backend of the pool: hold POOL_SIZE plain transactions open at once (each pins its own backend),
     // set session-level state in each, then COMMIT (a non-LOCAL SET persists on the backend after COMMIT).
-    const poisoners = await Promise.all(Array.from({ length: POOL_SIZE }, () => plainBouncerClient()));
-    for (const c of poisoners) await c.query('BEGIN');
-    const pids = new Set<number>();
-    for (const c of poisoners) {
+    await poisonEveryBackend(async (c) => {
       await c.query('SET ROLE rab_secure_owner');
       await c.query(`SELECT pg_catalog.set_config('rab.organisation_id', $1, false), pg_catalog.set_config('search_path', 'pg_catalog', false)`, [orgB]);
-      pids.add(Number((await c.query('SELECT pg_catalog.pg_backend_pid() AS pid')).rows[0].pid));
-    }
-    expect(pids.size).toBe(POOL_SIZE);
-    for (const c of poisoners) await c.query('COMMIT');
+      // Settings outside the explicit lists: only the preamble's RESET ALL clears them (security review M-2).
+      await c.query(`SET lock_timeout = '7s'`);
+      await c.query(`SET work_mem = '99MB'`);
+    });
 
     // Control: the poison is real. A plain client through the same PgBouncer (no transaction-scoped client) lands on a poisoned
     // backend: it runs as rab_secure_owner with organisation B bound, though it bound nothing itself.
@@ -283,6 +295,9 @@ suite('transaction pooler: two workspaces through PgBouncer (transaction mode)',
           expect(r.guc ?? '').toBe('');
           expect(r.roles).toBe(0);
           expect(r.search).not.toBe('pg_catalog');
+          expect(r.search.endsWith(', pg_temp')).toBe(true);
+          expect(r.lockTimeout).toBe('0');
+          expect(r.workMem).not.toBe('99MB');
         }),
       );
     }
@@ -291,6 +306,38 @@ suite('transaction pooler: two workspaces through PgBouncer (transaction mode)',
     // RESET ROLE inside a COMMITTED runtime transaction is session-level: the backends it ran on are clean again afterwards.
     const after = (await control.query('SELECT current_user::text AS cu')).rows[0].cu;
     expect(after).toBe('crewflow_owner');
+  });
+
+  it('a temporary table left on a backend never shadows a real table (pg_temp is explicitly LAST in search_path; security review L-4)', async () => {
+    // Every backend gets a session temp table named like the real core.role, holding a forged row of organisation B.
+    await poisonEveryBackend(async (c) => {
+      await c.query(`CREATE TEMP TABLE IF NOT EXISTS role (organisation_id uuid, key text, name text) ON COMMIT PRESERVE ROWS`);
+      await c.query(`INSERT INTO pg_temp.role (organisation_id, key, name) VALUES ($1, 'pooler-test-forged', 'forged')`, [orgB]);
+    });
+    const work: Array<Promise<unknown>> = [];
+    for (let i = 0; i < 20; i += 1) {
+      const org = i % 2 === 0 ? orgA : orgB;
+      work.push(
+        tenant.runInTenantContext(ctx(org), async (m: EntityManager) => {
+          // UNQUALIFIED on purpose: the bound search_path decides between core.role and the temp table.
+          const rows = (await m.query(`SELECT organisation_id::text AS org, key FROM role WHERE key LIKE 'pooler-test-%'`)) as Array<{ org: string; key: string }>;
+          expect(rows.length).toBe(ROWS_PER_ORG);
+          expect(rows.every((r) => r.org === org && r.key !== 'pooler-test-forged')).toBe(true);
+          expect(((await m.query(`SELECT pg_catalog.current_setting('search_path') AS sp`)) as Array<{ sp: string }>)[0]!.sp).toBe('core, pg_temp');
+        }),
+      );
+    }
+    await Promise.all(work);
+  });
+
+  it('security review M-1: the TLS gate sees the pooler->PostgreSQL hop through the runtime client (non-TLS here: production refuses)', async () => {
+    const resolved = resolvePgEnvironment(pgEnv, { processRole: 'api' });
+    const probe = await probeRuntimeIdentity(resolved, 'runtime');
+    // The test PostgreSQL has no TLS and PgBouncer runs server_tls_sslmode=prefer: the hop is plain text.
+    expect(probe.ssl).toBe(false);
+    expect(() => assertPooledHopTls(probe.ssl, true)).toThrow(RuntimeDbError);
+    expect(() => assertPooledHopTls(probe.ssl, true)).toThrow(/pooler->PostgreSQL hop/);
+    expect(() => assertPooledHopTls(probe.ssl, false)).not.toThrow();
   });
 
   it('the per-session settings travel per transaction: a plain client through PgBouncer sees the server defaults, the runtime pool its own', async () => {

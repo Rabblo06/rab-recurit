@@ -92,7 +92,7 @@ describe('TenantContextService useReplica (B4)', () => {
     // first-statement READ ONLY is unchanged on this path (ST-02 leaves the replica path as it was).
     expect(rep.calls[2]).toContain(`set_config('search_path', $6, true)`);
     expect(rep.calls[2]).not.toContain('transaction_read_only');
-    expect((rep.manager.query as jest.Mock).mock.calls[2][1][5]).toBe('core');
+    expect((rep.manager.query as jest.Mock).mock.calls[2][1][5]).toBe('core, pg_temp');
     expect(rep.calls).toHaveLength(3);
     expect(rep.calls.join()).not.toMatch(/\bSET (SESSION|ROLE)\b|set_config\([^)]*false\)/); // nothing session-scoped
     expect(databaseMetrics.snapshot().replica.reads).toBe(1);
@@ -111,7 +111,7 @@ describe('TenantContextService useReplica (B4)', () => {
     expect(primary.calls.join()).not.toContain('search_path');
     const bind = (rep.manager.query as jest.Mock).mock.calls.find((c) => c[0].includes('search_path'));
     expect(bind[0]).toMatch(/^SELECT set_config\('rab.organisation_id'.*set_config\('search_path', \$6, true\)/);
-    expect(bind[1][5]).toBe('workspace_deadbeefdeadbeefdeadbeefdeadbeef');
+    expect(bind[1][5]).toBe('workspace_deadbeefdeadbeefdeadbeefdeadbeef, pg_temp');
     expect(rep.calls).not.toContain(`SELECT set_config('search_path', $1, true)`);
   });
 

@@ -3,7 +3,8 @@ import { Client, ClientConfig } from 'pg';
 /**
  * Transaction pooler support (owner instruction 2026-11-19, "Pooler like Twenty, only if it's safe"): the pg Client used by
  * the ONE pool that may sit behind a transaction-mode pooler (PgBouncer pool_mode=transaction, Supavisor, RDS Proxy, ...):
- * the API / Worker runtime pool, and only when PG_DATABASE_SESSION_URL names a separate direct connection (pg-config.ts).
+ * the API / Worker runtime pool: always in production (security review L-1), and outside production when
+ * PG_DATABASE_SESSION_URL names a separate direct connection (pg-config.ts).
  *
  * WHY. Behind a transaction pooler a client connection is NOT a database session: every transaction (and every statement
  * outside one) may run on a different server backend, shared with every other client of the pooler. Two things the runtime
@@ -20,17 +21,25 @@ import { Client, ClientConfig } from 'pg';
  *     (after any `SET TRANSACTION ...`, which must come first). A statement sent outside a transaction is wrapped:
  *     BEGIN; preamble; the statement; COMMIT — the caller sees its result only after COMMIT.
  *   - the preamble, one round trip, constants only:
- *       RESET ROLE                                        drops a session-level SET ROLE left on the backend;
- *       SET LOCAL statement_timeout / idle_in_transaction_session_timeout [/ transaction_read_only]
+ *       RESET ROLE                                        drops a session-level SET ROLE left on the backend (`role` is
+ *                                                         not reset by RESET ALL);
+ *       RESET ALL                                         drops every other session-level setting left on the backend:
+ *                                                         placeholder rab.* GUCs, search_path, lock_timeout, work_mem,
+ *                                                         TimeZone, ... (security review M-2, measured: see THREAT-MODEL
+ *                                                         TX-POOL-1). transaction_read_only and role are kept by design;
+ *                                                         behind a pooler, application_name becomes the pooler's own
+ *                                                         server-side value for the transaction (cosmetic);
+ *       SET LOCAL statement_timeout / idle_in_transaction_session_timeout [/ transaction_read_only] [/ dispatch_notify]
  *                                                         the per-session startup settings, now per transaction;
- *       SET LOCAL search_path TO DEFAULT                  drops a session-level search_path left on the backend;
  *       DO: current_user = session_user, else RAISE 42501 (fail closed: the transaction is aborted, so the caller's
  *           statement fails and nothing runs); then every RLS GUC (RLS_GUC_NAMES: each `rab.*` name a policy or definer
  *           reads; a spec scans the source so a new one cannot be missed) is set to '' transaction-locally, so a session-level
  *           `set_config('rab.organisation_id', ..., false)` left by an earlier client never reaches this transaction. The
  *           list is explicit because PostgreSQL does NOT list placeholder (custom, never-defined) settings in pg_settings:
  *           the first version iterated pg_settings and the PgBouncer test caught the poisoned rab.organisation_id leaking
- *           through. The tenant binding (TenantContextService) then sets its own values.
+ *           through. RESET ALL above clears them too; the list stays for a database- or role-level default (RESET ALL
+ *           restores those). Finally `pg_temp` is appended explicitly to search_path (security review L-4: a temporary
+ *           table left on the backend can then never shadow a real table). The tenant binding then sets its own values.
  *   - a pooler pins one backend for the whole transaction, so the preamble and the caller's statements share it.
  *
  * REFUSED (fail closed, an Error before anything is sent): a transaction-control statement combined with others in one
@@ -51,6 +60,11 @@ export interface TransactionScopeSettings {
   idleInTransactionTimeoutMs: number;
   /** SET LOCAL transaction_read_only = on. */
   readOnly: boolean;
+  /**
+   * SET LOCAL crewflow.dispatch_notify = on (WORKER_DISPATCH_MODE=event on a directly connected, always-scoped production
+   * runtime pool; refused behind a pooler, pg-config.ts). Optional: absent = off.
+   */
+  dispatchNotify?: boolean;
 }
 
 /** The config key that carries the settings (pg-pool passes its whole config to `new Client(config)`; pg ignores it). */
@@ -78,6 +92,25 @@ export const RLS_GUC_NAMES = Object.freeze([
   'rab.ai_usage_retention',
 ] as const);
 
+/**
+ * Security review M-2: every `rab.<name>` the DATABASE itself reads or sets (policy USING / WITH CHECK in every schema, and
+ * function bodies and SET clauses), for the catalog-backed check that RLS_GUC_NAMES is complete (the integration specs).
+ * `\m` is a word start, so a longer identifier ending in "rab" (grab.x) is not matched. Read-only.
+ */
+export const RLS_GUC_CATALOG_SQL = `SELECT DISTINCT m[1] AS name FROM (
+    SELECT pg_catalog.regexp_matches(COALESCE(p.qual, '') || ' ' || COALESCE(p.with_check, ''), '\\m(rab\\.[a-z_]+)', 'g') AS m
+      FROM pg_catalog.pg_policies p
+    UNION ALL
+    SELECT pg_catalog.regexp_matches(COALESCE(f.prosrc, '') || ' ' || COALESCE(pg_catalog.array_to_string(f.proconfig, ' '), ''), '\\m(rab\\.[a-z_]+)', 'g')
+      FROM pg_catalog.pg_proc f
+  ) x ORDER BY 1`;
+
+/** The catalog names RLS_GUC_NAMES (plus the test-only rab.test) does not cover; [] when complete. Pure. */
+export function rlsGucNamesMissing(names: readonly string[]): string[] {
+  const known = new Set<string>([...RLS_GUC_NAMES, 'rab.test']);
+  return [...new Set(names)].filter((n) => !known.has(n)).sort();
+}
+
 /** SQLSTATE of the preamble's role assertion (insufficient_privilege): the transaction is aborted, nothing else runs. */
 export const TRANSACTION_SCOPE_ROLE_SQLSTATE = '42501';
 export const TRANSACTION_SCOPE_ROLE_MESSAGE = 'crewflow pool safety: the session still acts as another role after RESET ROLE; refusing the transaction';
@@ -94,15 +127,19 @@ export function transactionScopePreambleSql(settings: TransactionScopeSettings):
   const idle = integerMs('idleInTransactionTimeoutMs', settings.idleInTransactionTimeoutMs);
   return [
     'RESET ROLE',
+    'RESET ALL',
     `SET LOCAL statement_timeout = ${statement}`,
     `SET LOCAL idle_in_transaction_session_timeout = ${idle}`,
     ...(settings.readOnly ? ['SET LOCAL transaction_read_only = on'] : []),
-    'SET LOCAL search_path TO DEFAULT',
-    `DO $crewflow_scope$ DECLARE s text; BEGIN ` +
+    ...(settings.dispatchNotify && !settings.readOnly ? ['SET LOCAL crewflow.dispatch_notify = on'] : []),
+    `DO $crewflow_scope$ DECLARE s text; p text; BEGIN ` +
       `IF current_user OPERATOR(pg_catalog.<>) session_user THEN ` +
       `RAISE EXCEPTION USING ERRCODE = '${TRANSACTION_SCOPE_ROLE_SQLSTATE}', MESSAGE = '${TRANSACTION_SCOPE_ROLE_MESSAGE}'; END IF; ` +
       `FOREACH s IN ARRAY ARRAY[${RLS_GUC_NAMES.map((n) => `'${n}'`).join(', ')}]::text[] LOOP ` +
-      `PERFORM pg_catalog.set_config(s, '', true); END LOOP; END $crewflow_scope$`,
+      `PERFORM pg_catalog.set_config(s, '', true); END LOOP; ` +
+      `p := pg_catalog.current_setting('search_path'); ` +
+      `PERFORM pg_catalog.set_config('search_path', CASE WHEN p OPERATOR(pg_catalog.=) '' THEN 'pg_temp' ELSE p OPERATOR(pg_catalog.||) ', pg_temp' END, true); ` +
+      `END $crewflow_scope$`,
   ].join('; ');
 }
 

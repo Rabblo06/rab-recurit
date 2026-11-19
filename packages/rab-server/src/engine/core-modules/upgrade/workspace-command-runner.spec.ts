@@ -305,8 +305,9 @@ describe('Part D (review N3): the session checks know every rab.* setting the co
     const seen = new Set<string>();
     for (const f of all(SRC)) for (const m of readFileSync(f, 'utf8').matchAll(/'(rab\.[a-z_]+)'/g)) seen.add(m[1]!);
     const known = new Set<string>(KNOWN_RAB_SETTINGS);
-    // 'rab.com' is an e-mail / host name in fixtures, not a setting.
-    expect([...seen].filter((n) => !known.has(n) && n !== 'rab.com').sort()).toEqual([]);
+    // 'rab.com' is an e-mail / host name in fixtures, not a setting; 'rab.zz_*' are the deliberately UNKNOWN names the
+    // RLS GUC catalog check's fail-first case plants (transaction-pooler / rls-guc-names specs).
+    expect([...seen].filter((n) => !known.has(n) && n !== 'rab.com' && !n.startsWith('rab.zz_')).sort()).toEqual([]);
   });
 });
 

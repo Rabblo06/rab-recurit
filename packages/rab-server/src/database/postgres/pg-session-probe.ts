@@ -5,8 +5,8 @@
  * THE pooler check: no host name is matched anywhere; a pooler is supported only as PG_DATABASE_URL with
  * PG_DATABASE_SESSION_URL set (pg-config.ts).
  *
- * Why: a session advisory lock belongs to one server backend. Behind a transaction-mode pooler (PgBouncer, Supavisor
- * :6543, Neon -pooler, a DigitalOcean pool, RDS Proxy) one client connection is served by different backends from one
+ * Why: a session advisory lock belongs to one server backend. Behind a transaction-mode pooler (PgBouncer, Supavisor, RDS
+ * Proxy, a managed provider's pool, ...; no host name or port is recognised) one client connection is served by different backends from one
  * transaction to the next, so a lock can be taken on one backend, "released" on another (a no-op plus a warning) and
  * leaked, or re-entered by a second client that happens to land on the holder's backend. This probe decides by behaviour.
  * Callers build its connections with `sessionSettings: false` (no startup `-c` settings), so it can connect through a pooler

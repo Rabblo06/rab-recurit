@@ -38,8 +38,7 @@ function refuseStartup(error: unknown): never {
 async function bootstrap(): Promise<void> {
   // RUNTIME boundary: the database identity is verified BEFORE NestFactory opens any connection or any listener.
   await assertRuntimeDatabaseIdentity('api').catch(refuseStartup);
-  // Phase B boot gates (role, version, extensions, deployment identity, FORCE RLS, TLS, pending migrations), before Nest.
-  const gateReport = await runDatabaseBootGates('api').catch(refuseStartup);
+  // Security review L-1: BEFORE the boot gates, so a pooler is reported as such, never as a gate failure.
   // Transaction pooler, decided by CAPABILITY (owner instruction 2026-11-19; no host-name matching): the API's session
   // connection (PG_DATABASE_SESSION_URL when set, else PG_DATABASE_URL) must be a real session. Without
   // PG_DATABASE_SESSION_URL this is what refuses a PG_DATABASE_URL that is a transaction pooler: only the transaction-scoped
@@ -54,6 +53,8 @@ async function bootstrap(): Promise<void> {
     }),
     { label: 'the API session connection' },
   ).catch(refuseStartup);
+  // Phase B boot gates (role, version, extensions, deployment identity, FORCE RLS, TLS, pending migrations), before Nest.
+  const gateReport = await runDatabaseBootGates('api').catch(refuseStartup);
   const app = await NestFactory.create(AppModule);
   await assertRuntimeDbRole(app.get(DataSource), 'API server');
   // Owner-login architecture (Agent 3's controls): RESET ROLE on every checkout of the request pool (idempotent; the

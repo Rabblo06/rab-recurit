@@ -237,7 +237,7 @@ describe('Workspace registry, SchemaResolver and WorkspaceExecutionContext (inte
 
   it('search_path is EXACTLY the trusted workspace schema (no core, no public)', async () => {
     const [{ search_path }] = await execCtx.run(ctxOf(ORG_A, WS_A, USER_A), (m) => m.query(`SHOW search_path`));
-    expect(search_path).toBe(SCHEMA_A);
+    expect(search_path).toBe(`${SCHEMA_A}, pg_temp`);
   });
 
   it('C2-0 trap (test-only): search_path is empty, so the unqualified probe fails 42P01 while the explicitly qualified one answers', async () => {
@@ -334,7 +334,7 @@ describe('Workspace registry, SchemaResolver and WorkspaceExecutionContext (inte
         expect(r.label).toBe(`${r.tag}-row`);
         expect(r.w).toBe(r.tag === 'A' ? WS_A : WS_B);
         expect(r.u).toBe(r.tag === 'A' ? USER_A : USER_B);
-        expect(r.sp).toBe(r.tag === 'A' ? SCHEMA_A : SCHEMA_B);
+        expect(r.sp).toBe(`${r.tag === 'A' ? SCHEMA_A : SCHEMA_B}, pg_temp`);
       }
       expect(clean(await routingState())).toBe(true);
     });

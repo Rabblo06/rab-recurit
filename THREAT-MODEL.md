@@ -9624,19 +9624,47 @@ Decision:   allow a transaction pooler in front of the API / Worker request pool
 Reason:     owner instructions 2026-11-19 ("Pooler like Twenty, only if it's safe"; "no provider-specific code, decide by
             capability").
 Risk:       (1) a poisoned backend is now SHARED by every client of the pooler (API and Worker replicas), not one pool
-            connection: the preamble neutralises the role, the rab.* GUCs and search_path per transaction, but any OTHER
-            session-level setting an injected statement leaves behind (a session lock_timeout, work_mem, a temporary object)
-            reaches later transactions of other clients. (2) A multi-statement string whose later part is `ROLLBACK; <more
+            connection: the preamble neutralises the role (RESET ROLE + assertion), every other session SETTING (RESET ALL,
+            review M-2: measured to clear placeholder rab.*, lock_timeout, work_mem, search_path, TimeZone), the RLS GUCs
+            by name, and puts pg_temp last in search_path (review L-4). Still reachable across clients: session OBJECTS an
+            injected statement leaves (a temporary function, an open cursor WITH HOLD, a prepared statement, LISTEN) and
+            session advisory locks; none is consulted by the runtime by name (temp tables can no longer shadow; functions
+            and operators are never resolved from pg_temp). (2) A multi-statement string whose later part is `ROLLBACK; <more
             SQL>` reverts the preamble's RESET ROLE for that tail; no code sends one, only injected SQL could, which can
             already act in its own transaction. (3) Without PG_DATABASE_SESSION_URL, a pooler that SILENTLY drops startup
             options (PgBouncer `ignore_startup_parameters = options`) behind PG_DATABASE_URL is caught only by the boot probe
             (strong evidence, not proof). (4) Cost on the pooled pool only: a statement outside a transaction becomes 3 round
-            trips (BEGIN + preamble, statement, COMMIT) and every transaction 1 more.
+            trips (BEGIN + preamble, statement, COMMIT) and every transaction 1 more. (5) Review M-1: the TLS gate now checks
+            the pooler->PostgreSQL hop (pg_stat_ssl of the runtime client's backend; production refuses plain text), but it
+            CANNOT prove that the pooler VERIFIED the server certificate on that hop (PgBouncer server_tls_sslmode=verify-full
+            vs require is invisible from PostgreSQL): that is the pooler operator's configuration, recorded here as accepted.
+            (6) RESET ALL sets application_name, for the transaction, to the pooler's own server-side value (cosmetic:
+            pg_stat_activity shows the pooler's name, not crewflow-api).
 Mitigation: role assertion fail-closed in the same transaction; GUC / search_path neutralisation; event dispatch refused with a
             pooler; session-affine use of the pooled endpoint refused at the factory, at withAdvisoryLock and by the probe;
             both connections' identity compared at boot; the integration test above runs the poisoned-backend case.
 Reversal:   unset PG_DATABASE_SESSION_URL and point PG_DATABASE_URL at the direct host (the probe then enforces it).
 ```
+
+- **Security review of #258 at 58ab6ac9 (APPROVE WITH NITS), follow-ups.** M-1: the pooled runtime connection is probed
+  through the transaction-scoped client and boot gate 6 (assertTlsGate) runs on its pg_stat_ssl (`assertPooledHopTls`);
+  PgBouncer `server_tls_sslmode=prefer` against a non-TLS database is refused under production classification (integration +
+  unit). M-2: `RESET ALL` added to the preamble after measuring it (direct and through PgBouncer: it clears a session
+  placeholder `rab.organisation_id`, `lock_timeout`, `work_mem`, `search_path`, `TimeZone`; keeps `transaction_read_only` of a
+  READ ONLY transaction; `role` is never reset by it, hence RESET ROLE stays first); the RLS GUC list is checked against the
+  catalog (`RLS_GUC_CATALOG_SQL`: every `rab.<name>` in pg_policies USING / WITH CHECK and pg_proc body / SET clauses must be in
+  RLS_GUC_NAMES; fail-first with a planted policy and function on `rab.zz_*`), the source scan covers every package (`.ts`,
+  `.sql`), and KNOWN_RAB_SETTINGS (the upgrade runner's session checks) derives from the same list. L-1: in production the
+  API / Worker runtime pool is ALWAYS transaction-scoped (pooler or not; event dispatch then travels in the preamble), and the
+  API's session probe runs before the boot gates. L-2: db-setup / db-harden refuse PG_DATABASE_SESSION_URL with a fixed message
+  until #259 connects the setup step to it; the target rule (admin = the session URL's database when set) is shared with the
+  compose lint. L-3: the boot gates bind the deployment marker check to the endpoint they actually connect to (the session URL
+  when set). L-4: every tenant binding's search_path ends with an explicit `pg_temp` (businessSearchPath; the preamble too), and
+  a poisoned-backend test plants a temp table shadowing core.role. Nothing in the runtime creates temporary tables (grep of
+  rab-server / rab-worker sources: no CREATE TEMP / TEMPORARY outside migrations, scripts and tests), so REVOKE TEMPORARY from
+  crewflow_owner is possible later; not done here (owner decision pending). I-4: a session-role startup option is refused on a
+  transaction-scoped endpoint. I-5: the login health check also probes the pooled endpoint. I-7: a production
+  PG_DATABASE_SESSION_URL from a .env file is refused.
 
 - **Not changed / follow-ups (coordinated with other branches).** `WORKER_DISPATCH_MODE=event` stays refused with a pooler (its
   NOTIFY switch is a startup setting; boot gate 1c, `feat/twenty-ssl-boot`). db-setup / db-harden (`owner-bootstrap*`,
