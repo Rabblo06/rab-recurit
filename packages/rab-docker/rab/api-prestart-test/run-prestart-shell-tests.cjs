@@ -171,6 +171,12 @@ check('1b no migration / bootstrap entrypoint ran', noMigration(r.out), r.out);
 // DB-SETUP PID 1: the script execs tini (PID 1 from then on), which runs main.js as its child.
 const underTini = (out, who) => /STUB tini pid=1 /.test(out) && / ppid=1 /.test(line(out, who)) && !/ pid=1 /.test(line(out, who));
 check('1c tini is PID 1 after exec, main.js its child, with the runtime environment', underTini(r.out, 'main') && keysOf(main, 'self').includes('APP_SECRET') && keysOf(main, 'self').includes('PG_DATABASE_URL'), r.out);
+// 1d. First platform administrator at boot (2026-11-19): the five rab-api inputs are allowed and reach main.js unchanged.
+const BOOTSTRAP_INPUTS = { BOOTSTRAP_ADMIN_EMAIL: 'admin@example.test', BOOTSTRAP_ADMIN_FIRST_NAME: 'First', BOOTSTRAP_ADMIN_LAST_NAME: 'Admin', BOOTSTRAP_ADMIN_ORG_SLUG: 'platform', BOOTSTRAP_ADMIN_ORG_NAME: 'Platform' };
+r = run('bootstrap-inputs', { ...BASE, ...BOOTSTRAP_INPUTS });
+check('1d BOOTSTRAP_ADMIN_EMAIL and the optional name / organisation inputs are accepted and reach main.js', r.code === 0 && Object.keys(BOOTSTRAP_INPUTS).every((k) => keysOf(line(r.out, 'main'), 'self').includes(k)), r.out);
+r = run('bootstrap-inputs-password', { ...BASE, ...BOOTSTRAP_INPUTS, BOOTSTRAP_ADMIN_PASSWORD: 'x' });
+check('1e ...but never with BOOTSTRAP_ADMIN_PASSWORD -> refused (64), nothing ran', r.code === 64 && !line(r.out, 'main') && /BOOTSTRAP_ADMIN_PASSWORD must never be set/.test(r.out) && !/STUB tini/.test(r.out), r.out);
 
 // 2. Pending migrations (the restricted check fails) -> refused, main never starts, still nothing migrates.
 r = run('pending', BASE, { ctl: { check: 1 } });
@@ -191,6 +197,8 @@ const FORBIDDEN = [
   // ASSERTION CHANGE (owner decision C1, 2026-11-05): DISABLE_DB_MIGRATIONS left this list — it is accepted (case 9).
   // CREWFLOW_UPGRADE_INCOMPLETE is retired (OWNER-DB-ULTIMATE Part B3): an inherited value is refused.
   'CREWFLOW_UPGRADE_INCOMPLETE',
+  // First platform administrator at boot (2026-11-19): there is no bootstrap password; one is refused.
+  'BOOTSTRAP_ADMIN_PASSWORD',
 ];
 // Final review F5: the approval is now a token naming the exact pending set (pending-<count>-<sha256>); a well-formed token
 // is refused on the API exactly like any other value (by name), and so is the retired constant.
@@ -555,7 +563,7 @@ check('13a one-off: tini (PID 1, clean) runs the command with exactly the given 
   /STUB tini pid=1 admin=absent pgpw=absent argc=3/.test(r.out) && / ppid=1 /.test(cmdLine) && field(cmdLine, 'admin') === 'absent' && field(cmdLine, 'admin1') === 'absent' &&
   field(cmdLine, 'url') === hash(RUNTIME_URL) && !line(r.out, 'bootstrap') && !line(r.out, 'twentymigrate') && !line(r.out, 'check') && !line(r.out, 'register') && !line(r.out, 'main') &&
   /one-off command: running it as crewflow_owner/.test(r.out), r.out);
-for (const [name, value] of [['CREWFLOW_MIGRATION_DATABASE_URL', 'postgres://x@db/rab'], ['PG_DATABASE_PASSWORD', 'x'.repeat(40)], ['PG_DATABASE_APP_PASSWORD', 'x'.repeat(40)], ['CREWFLOW_OPS_RUN', 'one-off'], ['CREWFLOW_MIGRATION_APPROVED', `pending-1-${'0'.repeat(64)}`]]) {
+for (const [name, value] of [['CREWFLOW_MIGRATION_DATABASE_URL', 'postgres://x@db/rab'], ['PG_DATABASE_PASSWORD', 'x'.repeat(40)], ['PG_DATABASE_APP_PASSWORD', 'x'.repeat(40)], ['CREWFLOW_OPS_RUN', 'one-off'], ['CREWFLOW_MIGRATION_APPROVED', `pending-1-${'0'.repeat(64)}`], ['BOOTSTRAP_ADMIN_PASSWORD', 'x']]) {
   r = run(`oneoff-forbidden-${name}`, { ...BASE, [name]: value }, { entry: ONEOFF });
   check(`13b one-off: every other refusal still applies (${name} refused, 64), nothing ran`, r.code === 64 && !line(r.out, 'command') && !/STUB tini/.test(r.out), r.out);
 }

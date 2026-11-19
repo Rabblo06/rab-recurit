@@ -256,9 +256,32 @@ const FORBIDDEN_PATTERNS = Object.freeze([
   [/^CREWFLOW_MIGRATION_TEST_/, 'a migration test seam (test harnesses only; never in a compose or env file)'],
   [/^(CREWFLOW_OPS_|PG_OPS_)/, 'a retired separated-mode operations variable (rab-ops was removed; never valid)'],
   [/^CREWFLOW_.*BOOTSTRAP_PASSWORD$/, 'a role password (role passwords never belong in app config)'],
-  [/^BOOTSTRAP_ADMIN_/, 'bootstrap-admin input (a one-off operator command, never a runtime variable)'],
+  // First platform administrator at boot (2026-11-19): the five RAB_API_BOOTSTRAP_ADMIN_KEYS are allowed on rab-api only
+  // (bootstrapAdminPlacementProblem); a bootstrap password, or any other BOOTSTRAP_ADMIN_* name, is refused everywhere.
+  [/^BOOTSTRAP_ADMIN_PASSWORD$/, 'a bootstrap password (the first platform administrator is created without one and activates through an emailed, expiring link; nothing reads it)'],
+  [/^BOOTSTRAP_ADMIN_(?!(EMAIL|FIRST_NAME|LAST_NAME|ORG_SLUG|ORG_NAME)$)/, `an unknown bootstrap-admin input (rab-api reads only BOOTSTRAP_ADMIN_EMAIL, _FIRST_NAME, _LAST_NAME, _ORG_SLUG and _ORG_NAME)`],
   [/^AUTH_.*_ISSUER_URL$/, 'a test-only issuer override'],
 ]);
+/**
+ * First platform administrator at boot (owner request 2026-11-19): rab-api creates the first platform admin at start from
+ * these (PlatformAdminBootstrapOnBoot, the bootstrap-admin command's own code path). They belong to rab-api ONLY: never on
+ * another service, and never in database.env / runtime.env (both reach rab-worker too). compose.env, the interpolation
+ * file, may carry them for rab-api's committed `${BOOTSTRAP_ADMIN_*:-}` expressions; a platform (OpenShip) sets them as
+ * rab-api variables. No password variable exists (FORBIDDEN_PATTERNS refuses BOOTSTRAP_ADMIN_PASSWORD).
+ */
+const RAB_API_BOOTSTRAP_ADMIN_KEYS = Object.freeze([
+  'BOOTSTRAP_ADMIN_EMAIL', 'BOOTSTRAP_ADMIN_FIRST_NAME', 'BOOTSTRAP_ADMIN_LAST_NAME', 'BOOTSTRAP_ADMIN_ORG_SLUG', 'BOOTSTRAP_ADMIN_ORG_NAME',
+]);
+/**
+ * Where a RAB_API_BOOTSTRAP_ADMIN_KEYS name may appear: a compose service (`service`: its name) or an env file (`envKind`).
+ * Returns the problem text, or null when the placement is allowed (rab-api; compose.env) or the key is not one of them.
+ */
+function bootstrapAdminPlacementProblem(key, { service, envKind } = {}) {
+  if (!RAB_API_BOOTSTRAP_ADMIN_KEYS.includes(key)) return null;
+  if (service !== undefined) return service === 'rab-api' ? null : `rab-api only (the first-platform-admin bootstrap runs in the API; ${service} never reads it)`;
+  if (envKind === 'compose') return null;
+  return 'rab-api only: set it in compose.env (interpolated into rab-api\'s committed expression) or as the platform\'s rab-api variable; database.env and runtime.env also reach rab-worker';
+}
 const URL_KEY = 'PG_DATABASE_URL';
 /** Keys the compose files commit; an env file must not re-enter them. */
 const COMMITTED_KEYS = Object.freeze([
@@ -1121,6 +1144,8 @@ function checkModel(model, combo) {
       const setupKey = ADMIN_SERVICES.includes(name) && DB_SETUP_DB_KEYS.includes(key);
       const why = setupKey ? null : forbiddenReason(key);
       if (why) p(`${name}: environment has ${key} (${why})`);
+      const placement = bootstrapAdminPlacementProblem(key, { service: name });
+      if (placement) p(`${name}: environment has ${key} (${placement})`);
       if (key !== URL_KEY && !setupKey && isPgUrl(value)) p(`${name}: environment ${key} holds a PostgreSQL URL (a second database identity)`);
     }
     if (!ADMIN_SERVICES.includes(name) && ADMIN_URL_KEY in env && !(appServices.includes(name) && env[ADMIN_URL_KEY] === '')) p(`${name}: has ${ADMIN_URL_KEY} (db-setup and db-harden only; rab-api / rab-worker pin it to "")`);
@@ -1327,6 +1352,8 @@ function lintEnvText(kind, text, { template = false } = {}) {
     seen.add(key);
     const why = kind === 'compose' && (key === DB_PASSWORD_KEY || key === APP_PASSWORD_KEY) ? null : forbiddenReason(key);
     if (why) problems.push(`${key}: ${why}`);
+    const bootstrapPlacement = bootstrapAdminPlacementProblem(key, { envKind: kind });
+    if (bootstrapPlacement) problems.push(`${key}: ${bootstrapPlacement}`);
     if (kind !== 'compose' && key === HARDEN_TIMEOUT_KEY) problems.push(`${key}: set it in compose.env (the interpolation file): db-harden's committed ${HARDEN_TIMEOUT_EXPR} would silently override a value here`);
     if (kind !== 'compose' && key === ADMIN_URL_KEY) problems.push(`${key}: set it in compose.env (the interpolation file): it belongs to db-setup only, and rab-api / rab-worker refuse it (an env file here would hand the admin URL to them)`);
     if (COMMITTED_KEYS.includes(key)) problems.push(`${key}: committed in the compose files; never re-enter it in an env file`);
@@ -1359,7 +1386,9 @@ function lintEnvText(kind, text, { template = false } = {}) {
       // DB-SETUP (T-1 / T-2): the two database values are the only secrets compose.env holds; everything else stays
       // CREWFLOW_* and secret-free.
       const dbKey = COMPOSE_DATABASE_KEYS.includes(key);
-      if (!key.startsWith('CREWFLOW_') && !dbKey) problems.push(`${key}: compose.env holds only CREWFLOW_* interpolation values (and ${COMPOSE_DATABASE_KEYS.join(', ')})`);
+      // First platform administrator at boot: rab-api's BOOTSTRAP_ADMIN_* inputs are interpolation values too (no secret).
+      const bootstrapKey = RAB_API_BOOTSTRAP_ADMIN_KEYS.includes(key);
+      if (!key.startsWith('CREWFLOW_') && !dbKey && !bootstrapKey) problems.push(`${key}: compose.env holds only CREWFLOW_* interpolation values (and ${COMPOSE_DATABASE_KEYS.join(', ')}, and rab-api's ${RAB_API_BOOTSTRAP_ADMIN_KEYS.join(', ')})`);
       // CREWFLOW_SECRETS_DIR names a directory, not a secret.
       if (key !== 'CREWFLOW_SECRETS_DIR' && !dbKey && /PASSWORD|SECRET|TOKEN|APPROVED|_URL$|_KEY$/.test(key)) problems.push(`${key}: a secret-like name in the interpolation file`);
       if (!dbKey && /:\/\/[^/\s]*@/.test(value)) problems.push(`${key}: a URL with credentials in the interpolation file`);
@@ -1631,6 +1660,6 @@ module.exports = {
   DB_HARDEN_SERVICE, ADMIN_SERVICES, HARDEN_TIMEOUT_KEY, HARDEN_TIMEOUT_EXPR, HARDEN_ENTRYPOINT, dbHardenProblems, hardenTimeoutOk,
   FILES, TEMPLATES, COMBOS, STATIC_COMBO, DB_SERVICE, DB_SETUP_SERVICE, DB_TARGET_VOLUME, DB_TARGET_DIR, SENTINEL_ADMIN_PW, SENTINEL_ADMIN_URL, dbSetupProblems, appCredentialProblems, credentialMountProblems, topLevelVolumeProblems, bundledDbEnvironmentProblems, DB_INITDB_ARGS, DB_ENV_KEYS, DB_PASSWORD_KEY, BUNDLED_DB_KEY, bundledDbProblems, SENTINEL_DB_PW, BUNDLED_URL, NOT_THE_APP_LOGIN, NOTIFICATION_DELIVERY, PHASE_D_SWITCHES, PHASE_D_UNCHANGED, STATEMENT_DISPATCH, FEATURE_SWEEPS, SWITCH_VALUES, STRICT_SWITCHES, X31_SWITCHES, scanStrictSwitches, ENVIRONMENT_VARIABLES_TS, strictSwitchProblems, featureSweepProblems, composeEnvValue, AUDIT_SINK_MODES, AUDIT_SINK_PRODUCTION_MODES, AUDIT_SINK_FAILURES,
   AUDIT_SINK_PRODUCTION_FAILURES, SENTINEL_URL, SENTINEL_OWNER_PW, SENTINEL_APP_SECRET,
-  SENTINEL_REDIS_PW, SENTINEL_LEGACY_PW, forbiddenReason, durationSeconds, checkModel, checkStaticModel, parseEnvText,
+  SENTINEL_REDIS_PW, SENTINEL_LEGACY_PW, forbiddenReason, RAB_API_BOOTSTRAP_ADMIN_KEYS, bootstrapAdminPlacementProblem, durationSeconds, checkModel, checkStaticModel, parseEnvText,
   lintEnvText, lintComposeText, databaseExpressionProblems, PRODUCTION_FILE, renderModels, staticProblems, main,
 };

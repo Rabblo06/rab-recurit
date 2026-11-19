@@ -238,6 +238,14 @@ for name in PG_ADMIN_URL PG_DATABASE_ADMIN_URL CREWFLOW_BUNDLED_DB_ADMIN_URL; do
   eval "value=\${$name:-}"
   if [ -n "$value" ]; then refuse "$name must never be set on the api service: it is the database admin URL, read only by the one-shot db-setup service (which creates crewflow_owner). The API connects only as crewflow_owner. Value not shown."; fi
 done
+# First platform administrator at boot (2026-11-19): the API reads BOOTSTRAP_ADMIN_EMAIL and the optional
+# BOOTSTRAP_ADMIN_FIRST_NAME / _LAST_NAME / _ORG_SLUG / _ORG_NAME (allowed here). There is NO bootstrap password: the
+# administrator is created without one and activates through an emailed, expiring link. A password variable is refused on
+# the API start AND on the one-off CLI form (the bootstrap-admin command never reads it either).
+for name in BOOTSTRAP_ADMIN_PASSWORD; do
+  eval "value=\${$name:-}"
+  if [ -n "$value" ]; then refuse "$name must never be set on the api service: the first platform administrator is created without a password and activates through an emailed, expiring link. Remove it. Value not shown."; fi
+done
 # Security review of PR #230, L-1: an admin URL under ANY other name. No variable of the API but its own PG_DATABASE_URL may
 # hold a PostgreSQL URL: every other name whose value starts with postgres:// or postgresql:// (any case) is refused. Names
 # only; the value is never printed.

@@ -50,7 +50,7 @@ test('forbidden names: every second database identity, role password, authority 
     'PG_OPS_APP_DATABASE_URL', 'POSTURE_DATABASE_URL', 'DRIFT_DATABASE_URL', 'SOME_OTHER_DATABASE_URL', 'TEST_DATABASE_URL',
     'CREWFLOW_MIGRATION_APPROVED', 'CREWFLOW_BOOTSTRAP_PASSWORD', 'CREWFLOW_APP_BOOTSTRAP_PASSWORD', 'CREWFLOW_WORKER_BOOTSTRAP_PASSWORD',
     'CREWFLOW_MIGRATOR_PASSWORD', 'CREWFLOW_OPS_RUN', 'ALLOW_PRODUCTION_DB_COMMANDS', 'DB_TARGET', 'CREWFLOW_DB_MODE', 'PGPASSWORD',
-    'PGHOST', 'PGCONNECT_TIMEOUT', 'NODE_OPTIONS', 'BOOTSTRAP_ADMIN_EMAIL', 'WORKER_CLAIM_MODE', 'CREWFLOW_PROVISIONER_ENABLED',
+    'PGHOST', 'PGCONNECT_TIMEOUT', 'NODE_OPTIONS', 'BOOTSTRAP_ADMIN_PASSWORD', 'BOOTSTRAP_ADMIN_ROLE', 'WORKER_CLAIM_MODE', 'CREWFLOW_PROVISIONER_ENABLED',
   ]) {
     assert.ok(forbiddenReason(name), `${name} must be forbidden`);
   }
@@ -543,12 +543,38 @@ test('Phase D switches: the gate and the image-compose verifier enforce the same
   assert.deepEqual({ ...verifier.NOTIFICATION_DELIVERY }, { ...gate.NOTIFICATION_DELIVERY });
 });
 
-test('bootstrap-admin authority and inputs are one-off `run -e` values only: refused in every env file', () => {
+test('command authority and a bootstrap password are refused in every env file and on every service', () => {
   for (const kind of ['database', 'runtime', 'compose']) {
-    for (const name of ['DB_TARGET', 'ALLOW_PRODUCTION_DB_COMMANDS', 'BOOTSTRAP_ADMIN_EMAIL', 'BOOTSTRAP_ADMIN_ORG_SLUG', 'BOOTSTRAP_ADMIN_PASSWORD']) {
+    for (const name of ['DB_TARGET', 'ALLOW_PRODUCTION_DB_COMMANDS', 'BOOTSTRAP_ADMIN_PASSWORD', 'BOOTSTRAP_ADMIN_ROLE']) {
       assertRefused(lintEnvText(kind, `${name}=x`), new RegExp(`${name}: `));
     }
   }
+  assert.match(forbiddenReason('BOOTSTRAP_ADMIN_PASSWORD'), /a bootstrap password/);
+  assert.match(forbiddenReason('BOOTSTRAP_ADMIN_ROLE'), /unknown bootstrap-admin input/);
+  for (const service of ['rab-api', 'rab-worker']) {
+    for (const name of ['DB_TARGET', 'ALLOW_PRODUCTION_DB_COMMANDS', 'BOOTSTRAP_ADMIN_PASSWORD']) assert.ok(forbiddenReason(name), `${name} on ${service}`);
+  }
+});
+
+test('first platform admin at boot (2026-11-19): the five BOOTSTRAP_ADMIN_* inputs are allowed for rab-api only', () => {
+  assert.deepEqual([...gate.RAB_API_BOOTSTRAP_ADMIN_KEYS], [
+    'BOOTSTRAP_ADMIN_EMAIL', 'BOOTSTRAP_ADMIN_FIRST_NAME', 'BOOTSTRAP_ADMIN_LAST_NAME', 'BOOTSTRAP_ADMIN_ORG_SLUG', 'BOOTSTRAP_ADMIN_ORG_NAME',
+  ]);
+  for (const name of gate.RAB_API_BOOTSTRAP_ADMIN_KEYS) {
+    assert.equal(forbiddenReason(name), null, name);
+    // On rab-api: allowed. On any other service: refused.
+    assert.equal(gate.bootstrapAdminPlacementProblem(name, { service: 'rab-api' }), null);
+    for (const service of ['rab-worker', 'db-setup', 'db-harden', 'rab-redis']) {
+      assert.match(gate.bootstrapAdminPlacementProblem(name, { service }), /rab-api only/, `${name} on ${service}`);
+    }
+    // compose.env (the interpolation file) may carry it for rab-api's committed expression; database.env and runtime.env
+    // reach rab-worker as well, so they may not.
+    assert.deepEqual(lintEnvText('compose', `${COMPOSE_OK}
+${name}=admin@example.test`), []);
+    for (const kind of ['database', 'runtime']) assertRefused(lintEnvText(kind, `${name}=x`), new RegExp(`${name}: rab-api only`));
+  }
+  // Not one of the five: never placement-checked (forbiddenReason decides).
+  assert.equal(gate.bootstrapAdminPlacementProblem('APP_SECRET', { service: 'rab-worker' }), null);
 });
 
 test('compose env: interpolation values only, digests, never a secret, never every interface', () => {
