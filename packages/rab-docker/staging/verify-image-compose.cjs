@@ -270,7 +270,8 @@ function pid1Problems(services, where = '') {
   for (const [name, script] of Object.entries(PID1_ENTRYPOINTS)) {
     const svc = services[name];
     if (!svc) continue;
-    if (stable(svc.entrypoint) !== stable([script])) out.push(`${name}: entrypoint is not exactly ${script}${where} (DB-SETUP PID 1)`);
+    // db-setup: the wait-for-db wrapper execs ./db-setup.sh as the same PID 1 (checked exactly by dbSetupStartProblems).
+    if (name !== DB_SETUP_SERVICE && stable(svc.entrypoint) !== stable([script])) out.push(`${name}: entrypoint is not exactly ${script}${where} (DB-SETUP PID 1)`);
     if (hasCommand(svc)) out.push(`${name}: has a command${where} (${script}, the entrypoint, takes none)`);
     if (svc.init === true) out.push(`${name}: init: true${where} (docker-init would be PID 1 with the admin URL)`);
   }

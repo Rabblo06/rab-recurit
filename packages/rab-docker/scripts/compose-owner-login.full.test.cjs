@@ -131,10 +131,7 @@ test('DENIAL option A: db-setup must keep exactly its one-shot shape', { skip },
       // Owner instruction 2026-11-18: the wait-for-db wrapper is required here (the plain start would need depends_on: db).
       [(s) => { s[SETUP].entrypoint = ['./db-setup.sh']; }, /db-setup: must start through the wait-for-db wrapper/],
       [(s) => { s[SETUP].entrypoint = s[SETUP].entrypoint.map((t) => String(t).replace('exec ./db-setup.sh', 'exec ./api-prestart.sh')); }, /db-setup: entrypoint is neither/],
-      [(s) => { s[SETUP].entrypoint = s[SETUP].entrypoint.map((t) => String(t).replace(/
-crewflow_wait_for_db
-/, '
-')); }, /db-setup: entrypoint is neither/],
+      [(s) => { s[SETUP].entrypoint = s[SETUP].entrypoint.map((t) => String(t).replace(/\ncrewflow_wait_for_db\n/, '\n')); }, /db-setup: entrypoint is neither/],
       [(s) => { s[SETUP].entrypoint = s[SETUP].entrypoint.map((t) => String(t).replace('"57P03"', '"57P04"')); }, /db-setup: entrypoint is neither/],
       [(s) => { delete s[SETUP].environment.CREWFLOW_DB_WAIT_SECONDS; }, /db-setup: CREWFLOW_DB_WAIT_SECONDS is missing/],
       [(s) => { s[SETUP].environment.CREWFLOW_DB_WAIT_SECONDS = '0'; }, /db-setup: CREWFLOW_DB_WAIT_SECONDS is not the committed/],
