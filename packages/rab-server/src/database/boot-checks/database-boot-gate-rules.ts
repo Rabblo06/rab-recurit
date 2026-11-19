@@ -8,7 +8,14 @@ import { assertDeploymentIdentity, DeploymentIdentityError, Query } from '../dep
 import { dispatchNotifyFor } from '../postgres/pg-config';
 import { PgConfigError } from '../postgres/pg-url-policy';
 import { isSupportedPostgresMajor, postgresMajorFromVersionNum, SupportedPostgresMajor, unsupportedPostgresMessage } from '../postgres/supported-majors';
-import { createRoleMarkColumnsSql, OWNER_LOGIN_ROLE, ownerLoginObjectPostureProblems, ownerLoginRolePostureProblems } from './owner-login-posture';
+import {
+  createRoleMarkColumnsSql,
+  DATABASE_OWNERSHIP_COLUMNS_SQL,
+  OWNER_LOGIN_ROLE,
+  ownerLoginDatabaseOwnershipProblems,
+  ownerLoginObjectPostureProblems,
+  ownerLoginRolePostureProblems,
+} from './owner-login-posture';
 import { SchemaCompatibilityError } from './schema-compatibility';
 
 export type BootProcess = 'api' | 'worker' | 'cli' | 'provisioner';
@@ -94,6 +101,16 @@ export interface BootGateFacts {
   /** null when pg_stat_ssl has no row for this backend. */
   ssl: boolean | null;
   /**
+   * Owner decision 2026-11-19: the LOGIN owns the current database directly, is a member of its owner role, or is a member
+   * of pg_database_owner (owner-login-posture.ts DATABASE_OWNERSHIP_COLUMNS_SQL). Fail closed: anything but an explicit
+   * false from the query reads as true.
+   */
+  ownsDatabase: boolean;
+  memberOfDatabaseOwner: boolean;
+  databaseOwnerRole: boolean;
+  /** The current database's owner role name (for the refusal message), or null. */
+  databaseOwner: string | null;
+  /**
    * Phase D: the login (or the role it acts as) is crewflow_worker or a member of it (any membership). False when the
    * crewflow_worker role does not exist. A non-Worker process with this set could reach the dispatch-claim grants.
    */
@@ -127,7 +144,8 @@ SELECT current_user::text AS who,
        pg_catalog.current_setting('server_version_num')::int AS server_version_num,
        pg_catalog.current_database()::text AS database,
        (SELECT pg_catalog.string_agg(e.extname::text, ',' ORDER BY e.extname) FROM pg_catalog.pg_extension e) AS extensions,
-       (SELECT s.ssl FROM pg_catalog.pg_stat_ssl s WHERE s.pid = pg_catalog.pg_backend_pid()) AS ssl
+       (SELECT s.ssl FROM pg_catalog.pg_stat_ssl s WHERE s.pid = pg_catalog.pg_backend_pid()) AS ssl,
+       ${DATABASE_OWNERSHIP_COLUMNS_SQL}
   FROM pg_catalog.pg_roles r WHERE r.rolname = current_user`;
 
 export const FORCE_RLS_SQL = `
@@ -186,7 +204,33 @@ export function parseBootFacts(row: Record<string, unknown> | undefined): BootGa
     extensions: row.extensions ? String(row.extensions).split(',') : [],
     ssl: row.ssl === null || row.ssl === undefined ? null : row.ssl === true,
     workerMember: row.worker_member === true,
+    ownsDatabase: row.owns_database !== false,
+    memberOfDatabaseOwner: row.member_of_database_owner !== false,
+    databaseOwnerRole: row.database_owner_role !== false,
+    databaseOwner: row.database_owner === null || row.database_owner === undefined ? null : String(row.database_owner),
   };
+}
+
+/**
+ * Gate 1, database ownership (owner decision 2026-11-19, "refuse to start if the login ... owns the database"): in
+ * PRODUCTION the login must not own the current database: directly, through any role it is a member of, or as a member of
+ * pg_database_owner. Outside production development and test databases are owned by rab_owner (postgres-init/01-roles.sql),
+ * which the owner login is a member of, so nothing is said there. Pure.
+ */
+export function assertDatabaseOwnershipGate(
+  facts: Pick<BootGateFacts, 'who' | 'ownsDatabase' | 'memberOfDatabaseOwner' | 'databaseOwnerRole' | 'databaseOwner'>,
+  production: boolean,
+  label: string,
+): void {
+  if (!production) return;
+  const problems = ownerLoginDatabaseOwnershipProblems({
+    login: facts.who,
+    owns_database: facts.ownsDatabase,
+    member_of_database_owner: facts.memberOfDatabaseOwner,
+    database_owner_role: facts.databaseOwnerRole,
+    database_owner: facts.databaseOwner,
+  });
+  if (problems.length) throw new DatabaseBootGateError('role', `the ${label} login owns the database it serves: ${problems.join('; ')}.`);
 }
 
 /**
@@ -268,11 +312,12 @@ export function assertCreateRoleGate(
 
 /**
  * Gate 1 (asynchronous part, after gate 2 — it reads PG16 pg_auth_members columns): nothing dangerous is reachable from
- * the owner login (MEMBER semantics: INHERIT, SET and ADMIN-only edges, indirect, predefined and provider-admin roles) and
+ * the owner login (MEMBER semantics: INHERIT, SET and ADMIN-only edges, indirect, predefined and provider-admin roles,
+ * roles with SUPERUSER / BYPASSRLS / CREATEDB / CREATEROLE / REPLICATION), in production it does not own the database, and
  * the role layout is exactly the reviewed owner-login inventory (owner-login-posture.ts).
  */
-export async function assertOwnerLoginRoleGate(query: Query, label: string): Promise<void> {
-  const problems = await ownerLoginRolePostureProblems(query);
+export async function assertOwnerLoginRoleGate(query: Query, label: string, production = false): Promise<void> {
+  const problems = await ownerLoginRolePostureProblems(query, { refuseDatabaseOwnership: production });
   if (problems.length) {
     throw new DatabaseBootGateError('role', `the ${label} role posture is not the reviewed owner-login layout: ${problems.join('; ')}. Do not serve; investigate the roles.`);
   }
@@ -502,11 +547,38 @@ export function assertForceRlsGate(rows: Array<Record<string, unknown>>, disable
   }
 }
 
-/** Gate 6. */
-export function assertTlsGate(facts: BootGateFacts, production: boolean): void {
-  if (production && facts.ssl !== true) {
-    throw new DatabaseBootGateError('tls', 'the production database connection is not using TLS (pg_stat_ssl). Configure verified TLS for the database URL.');
+/** What the gate's own pg client socket reports after the handshake (database-boot-gates.ts reads it). */
+export interface ClientTlsState {
+  /** The socket is a TLSSocket (the client negotiated TLS). */
+  encrypted: boolean;
+  /** Node verified the certificate chain and the host name (rejectUnauthorized + checkServerIdentity passed). */
+  authorized: boolean;
+  /**
+   * The connection's own `ssl` config demanded verification: `rejectUnauthorized: true` and no host-name check switched off
+   * (pg-tls.ts verify-full: Node's default check, or the IP-bound one). Without it `authorized` alone is not trusted.
+   */
+  verifyFullConfigured: boolean;
+}
+
+/**
+ * Gate 6 (owner instruction 2026-11-19: "trust our side of the connection ... No proxy-specific exceptions"). In production
+ * the gate's connection must be encrypted. Satisfied when EITHER this session's own client socket is TLS that Node verified
+ * (`authorized`: certificate chain AND host name) under a config that demanded it (`verifyFullConfigured`), whatever
+ * pg_stat_ssl says (a provider's TLS-terminating proxy makes the backend report ssl=false) — OR the backend itself reports
+ * ssl=true. Anything else refuses. Provider-neutral: no host, provider name or flag plays any part. Returns the warnings
+ * (one line when pg_stat_ssl disagreed with the verified client side). Pure.
+ */
+export function assertTlsGate(facts: BootGateFacts, production: boolean, context: { clientTls?: ClientTlsState | null } = {}): string[] {
+  if (!production) return [];
+  const tls = context.clientTls;
+  const verifiedClientTls = !!tls && tls.encrypted === true && tls.authorized === true && tls.verifyFullConfigured === true;
+  if (verifiedClientTls) {
+    return facts.ssl === true
+      ? []
+      : ['the database backend reports no TLS (pg_stat_ssl, e.g. behind a TLS-terminating proxy); this connection is verified TLS on the client side (certificate chain and host name), which is what gate 6 trusts.'];
   }
+  if (facts.ssl === true) return [];
+  throw new DatabaseBootGateError('tls', 'the production database connection is not using TLS (pg_stat_ssl). Configure verified TLS for the database URL.');
 }
 
 export interface EvaluateBootGatesInput {
@@ -524,6 +596,8 @@ export interface EvaluateBootGatesInput {
    * is accepted only at the host it was bound at (owner decision A: a restore / clone / fork elsewhere is refused).
    */
   connectionHost: string;
+  /** The gate session's client-side TLS state (gate 6); null or absent = unknown (then pg_stat_ssl must say TLS). */
+  clientTls?: ClientTlsState | null;
 }
 
 export interface BootGateReport {
@@ -562,9 +636,10 @@ export async function evaluateBootGates(input: EvaluateBootGatesInput): Promise<
   const facts = parseBootFacts(factsRow);
   assertRoleGate(facts, expectedRolesFor(processName, input.cliCommand, claimMode), label);
   const createRoleWarnings = assertCreateRoleGate(facts, production, label);
+  assertDatabaseOwnershipGate(facts, production, label);
   assertVersionGate(facts);
   // After the version gate: the walk and the inventory read PG16-only pg_auth_members columns (D10: < 16 is refused).
-  await assertOwnerLoginRoleGate(query, label);
+  await assertOwnerLoginRoleGate(query, label, production);
   // Gate 1c (Phase D wave 3): no stored crewflow.dispatch_notify; the session value matches the process's mode.
   const dispatchNotify = assertDispatchNotifyGate(await query(DISPATCH_NOTIFY_STORED_SQL), (await query(DISPATCH_NOTIFY_SESSION_SQL))[0], {
     expectOn: expectDispatchNotify,
@@ -592,7 +667,7 @@ export async function evaluateBootGates(input: EvaluateBootGatesInput): Promise<
   const disabled = (await query(RLS_DISABLED_TENANT_TABLES_SQL)).map((r) => String(r.relname));
   assertForceRlsGate(forceRows, disabled);
 
-  assertTlsGate(facts, production);
+  const tlsWarnings = assertTlsGate(facts, production, { clientTls: input.clientTls });
 
   let compatibilityWarnings: readonly string[] = [];
   try {
@@ -622,7 +697,7 @@ export async function evaluateBootGates(input: EvaluateBootGatesInput): Promise<
     identity: identity.summary,
     tls: facts.ssl,
     forceRlsTables: FORCE_RLS_SPOT_CHECK_TABLES.length,
-    warnings: [...createRoleWarnings, ...identity.warnings, ...compatibilityWarnings, ...grantWarnings],
+    warnings: [...createRoleWarnings, ...tlsWarnings, ...identity.warnings, ...compatibilityWarnings, ...grantWarnings],
   };
 }
 

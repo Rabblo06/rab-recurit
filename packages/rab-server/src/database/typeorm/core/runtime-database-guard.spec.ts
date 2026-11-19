@@ -82,7 +82,7 @@ describe('runtime database identity guard (API, worker and provisioner boot)', (
     expectRefused('worker', PROD_ENV({ DB_POOL_MAX: '10' }), /refuses the legacy database variable\(s\) DB_POOL_MAX/);
     expectRefused('api', PROD_ENV({ PGPASSWORD: 'x' }), /libpq environment variable\(s\) PGPASSWORD/);
     expectRefused('api', PROD_ENV({ PG_DATABASE_URL: undefined, DATABASE_URL: PROD_APP }), /^DATABASE_URL is present in the api process's environment\. It is the retired name/);
-    expectRefused('api', PROD_ENV({ PG_DATABASE_URL: PROD_APP.replace('sslmode=require', 'sslmode=disable') }), /sslmode=disable, which production refuses/);
+    expectRefused('api', PROD_ENV({ PG_DATABASE_URL: PROD_APP.replace('sslmode=require', 'sslmode=disable') }), /must set sslmode=require, verify-ca or verify-full in production/);
   });
 
   it('4c. Phase B: the Worker and the provisioner (session locks) refuse a transaction-pooler URL; since owner decision 2026-11-18 the production API refuses it too (runtime-db-config.ts checkRuntimeLogin)', () => {

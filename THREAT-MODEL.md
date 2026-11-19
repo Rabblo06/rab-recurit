@@ -9564,3 +9564,149 @@ Reversal:   a secret store mounted as a file per process (Docker secrets / Kuber
   every new refusal. Live (InstaBox, PG16/17/18 + PG15 refusal): the harness incl. M2, L1, L4, the expiry, db-harden happy /
   already / timeout / other-database / mode c, and the CREATEROLE lifecycle with the real migrate child. Docker suites (CI):
   run-prestart-shell-tests (L2, harden mode), the compose gates (db-harden).
+
+## SSL like Twenty, and the extra boot refusals (branch feat/twenty-ssl-boot, owner instruction 2026-11-19; read-only SQL only, no migration)
+
+- **sslmode (every URL the code parses: PG_DATABASE_URL, PG_DATABASE_REPLICA_URL, and PG_ADMIN_URL through the same
+  policy).** Production accepts exactly `sslmode=require`, `verify-ca` and `verify-full`, and all three build the SAME
+  verify-full `ssl` object (certificate chain against PG_SSL_CA_CERT / PG_SSL_CA_CERT_PATH or the system store, AND the host
+  name; bound to the IP for an IP host). `require` and `verify-ca` are therefore STRONGER than libpq's (no verification / no
+  host name). `disable`, `allow`, `prefer`, `no-verify` and a MISSING sslmode are refused in production with one fixed message
+  (pg-tls.ts PG_SSLMODE_PRODUCTION_REFUSAL). Behaviour change: a production URL without sslmode used to mean verify-full and
+  is now refused. Outside production nothing changes. Proved through a real TLS handshake (pg-tls-ca.integration.spec.ts):
+  with `sslmode=require` (and verify-ca, each with and without `channel_binding=require`) a wrong CA, a self-signed server,
+  the system store only, and a host the certificate does not name (127.0.0.1, ::1) are all refused; the right CA + host works.
+- **channel_binding=require.** Accepted and passed to pg as `enableChannelBinding` (SCRAM-SHA-256-PLUS whenever the server
+  offers it). Refused on a connection without TLS (outside production only; production always has TLS).
+
+```
+SECURITY TRADE-OFF (TLS-1)
+Decision:   channel_binding=require is accepted although pg 8.23 cannot REQUIRE channel binding: when the server does not
+            offer SCRAM-SHA-256-PLUS (or does not use SCRAM at all) pg silently authenticates without it
+            (pg/lib/crypto/sasl.js startSession).
+Reason:     owner instruction 2026-11-19 (accept the provider string as pasted, e.g. Neon's
+            sslmode=require&channel_binding=require); refusing it would break every pasted Neon URL.
+Risk:       a man in the middle who could terminate TLS could downgrade SCRAM-PLUS to SCRAM. He cannot terminate TLS: every
+            production connection verifies the certificate chain and the host name (above), which is what authenticates the
+            server; channel binding would be a second, redundant proof.
+Mitigation: verify-full on every accepted sslmode; channel_binding=require without TLS is refused.
+Reversal:   enforce it in the connection factory (refuse authenticationOk unless the session's SASL mechanism was
+            SCRAM-SHA-256-PLUS) once pg exposes it, or with a Client subclass.
+```
+
+- **Gate 6 (TLS in use), provider-neutral (owner instruction 2026-11-19: "trust our side of the connection ... No
+  proxy-specific exceptions").** In production the gate's connection must be encrypted. It is satisfied when the gate
+  session's own pg socket is a TLSSocket that Node marked `authorized` (certificate chain AND host name verified) under a
+  config that demanded it (`rejectUnauthorized: true`, and either Node's default host-name check or pg-tls.ts's own IP-bound
+  one: isVerifyFullSsl), whatever `pg_stat_ssl` says behind a TLS-terminating proxy (one warning line then); or when the
+  backend itself reports `pg_stat_ssl.ssl = true`. Otherwise refused, as before. No host, provider name or flag is read. The
+  replica validation keeps the server-side rule.
+
+```
+SECURITY TRADE-OFF (TLS-2)
+Decision:   verified client-side TLS satisfies gate 6 even when the backend reports pg_stat_ssl.ssl=false.
+Reason:     owner instruction 2026-11-19; a provider's TLS-terminating proxy (Neon's, for one) makes every backend report
+            ssl=false, which refused every such production start.
+Risk:       the hop between a terminating proxy and the backend is not visible to us; if the operator points the URL at a
+            TLS terminator they run themselves, that hop is theirs to protect.
+Mitigation: only a socket Node verified (chain + host name) under a verify-full config counts; production refuses every
+            config that could produce an unverified socket (PG_SSL_ALLOW_SELF_SIGNED, no-verify, disable, no sslmode); an
+            unverified or unknown client state falls back to the server-side requirement.
+Reversal:   drop the client-side branch of assertTlsGate (database-boot-gate-rules.ts).
+```
+
+- **Boot refusals added (API, Worker, CLI; production; read-only catalog queries).** The login (crewflow_owner) must not own
+  the current database: directly (`datdba`), through any role it is a member of (`pg_has_role(..., 'MEMBER')`, whatever the
+  INHERIT / SET / ADMIN options), or as a member of `pg_database_owner`. Refused in gate 1 (BOOT_FACTS_SQL, fail closed: a
+  missing column counts as ownership) and in posture rule 1 when production (the boot gate and the posture monitor, so a later
+  `ALTER DATABASE ... OWNER TO` is caught too). Outside production it is not checked (dev/test databases are owned by
+  rab_owner, postgres-init/01-roles.sql). Behaviour change: a production install that came from separated mode with rab_owner
+  still owning the database is refused until the admin runs `ALTER DATABASE <db> OWNER TO <admin>`. In every environment the
+  reachability walk now also refuses a reachable role with CREATEROLE (the login's own CREATEROLE keeps its mark rule). The
+  role-name lists are one shared module (database/owner-login/privileged-roles.ts), with `pg_checkpoint`,
+  `pg_use_reserved_connections`, `alloydbsuperuser` and `tsdbadmin` added; db-setup is to switch to it separately.
+- **Tests.** Unit: pg-tls-sslmode.spec (the full sslmode x environment x channel_binding matrix), pg-config.spec, the boot-gate
+  spec (each ownership refusal, fail closed, the client-side gate 6 rule and its four denials), owner-login-posture.spec. Real
+  PostgreSQL (InstaBox): pg-tls-ca.integration.spec (wrong CA / wrong host refused with sslmode=require; gate 6 behind a real
+  TLS-terminating proxy: verified client TLS accepted with pg_stat_ssl.ssl=false, unverified refused), and
+  owner-login-boot-refusals.integration.spec (direct and role ownership, a reachable CREATEROLE role, the added predefined and
+  provider roles, each planted in a rolled-back transaction).
+
+## db-setup, provider-neutral: the password form and a pooled admin URL decided by capability (branch feat/twenty-neon-setup, owner decisions 2026-11-19; SQL listed in the PR)
+
+Trigger: the published 0.6.0 db-setup, against a managed PostgreSQL that refuses pre-hashed role passwords, looped "crewflow_owner
+was being created by another start" three times and exited 70. The server refused the SCRAM verifier at COMMIT with SQLSTATE
+XX000, and XX000 was in the race set. Owner rules: no provider-specific code (no host matching, no provider flag), decide by
+capability at run time, the same code everywhere; and (option 1, "Create login, you set password") Crewflow never sends a
+plain-text password.
+
+- **Who can call this?** Only the one-shot db-setup / db-harden services. They alone hold `PG_ADMIN_URL` and
+  `PG_ADMIN_DIRECT_URL`. rab-api / rab-worker refuse both by name (`never-in-runtime-env.ts`, `api-prestart.sh`,
+  `worker-start.sh`) and pin them to "" in both compose files; the placement lint allows exactly that pin.
+- **Whose data?** The crewflow_owner credential (the schema owner of every tenant) and the admin login.
+- **A server that refuses pre-hashed passwords (option 1).** The verifier is always sent first. A refusal of the password FORM
+  switches to the passwordless path. A refusal of the form is 22023 / 28P01 / 0A000 / XX000 (not "tuple concurrently
+  updated") from the CREATE / ALTER ROLE step (fixed DO-block HINT `crewflow-stage=role`) or from the COMMIT of a
+  transaction that set a password. Never 42501, never the DO block's own shape check, never a grant-only transaction.
+  The passwordless path runs under the same advisory lock and the same refusals:
+  - a missing crewflow_owner is created WITHOUT a password and NOLOGIN (`CREATE ROLE crewflow_owner NOLOGIN ...` with no
+    PASSWORD), marked `crewflow:awaiting-password:<unix expiry>` (security re-review R1: a pg_hba trust / peer / cert / ldap
+    rule could otherwise let anyone in as a passwordless CREATEROLE login). The mark expires after 24 h (server clock, like the
+    CREATEROLE mark; independent review L1). No secret leaves db-setup. Q2, both DO blocks and the re-checks accept a NOLOGIN
+    crewflow_owner ONLY with an unexpired mark; a NOLOGIN crewflow_owner with an expired mark is refused (64) with no ALTER
+    ROLE (an admin may have disabled it on purpose), and any other NOLOGIN crewflow_owner stays refused;
+  - an existing role's password is never written;
+  - the grant is added;
+  - exit 64 with fixed steps. The operator runs, once in the provider's SQL editor as the admin login, exactly
+    `DO $$BEGIN EXECUTE pg_catalog.format('ALTER ROLE crewflow_owner LOGIN PASSWORD %L', '<PG_DATABASE_APP_PASSWORD>'); COMMENT ON ROLE crewflow_owner IS NULL; END$$;`
+    with the placeholder replaced by that value (the 32-character floor; never a console reset). format(%L) quotes the value,
+    and the same statement removes the mark (independent review M1).
+  The next run's login probe decides: it logs in, so no write and setup continues; or it still does not, so the steps again,
+  with no password write, so never a loop.
+  If the server refuses the passwordless login role too, nothing is created and the reviewed CREATE ROLE + GRANT is printed
+  with a placeholder (option 2).
+- **Residual: the operator's statement** (independent review M1). The plain value typed in the provider's SQL editor (inside
+  the DO block's literal, so `log_statement = ddl` does not log it but `all` does) can remain in: the server log
+  (`log_statement = all`, or any error that quotes the statement), `pg_stat_statements` (the full DO text), `pg_stat_activity`
+  while it runs (visible to the admin's own role and to pg_read_all_stats members), and the provider's own logs, audit and
+  SQL-editor history. The printed steps say exactly that, and: if pg_stat_statements is installed, run
+  `SELECT pg_stat_statements_reset();` afterwards where permitted, otherwise treat the value as visible to anyone who can read
+  query statistics. The earlier advice to run `SET log_statement = 'none'` first is removed (a non-superuser cannot set it on
+  most providers, and it never covered pg_stat_statements or pg_stat_activity). A provider-generated password is NOT accepted
+  instead (owner decision). That is the provider's tool, outside Crewflow; the same as `own-database-app-login.sql`'s manual
+  path. The plain-text trade-off of the earlier draft (a plain-text fallback sent
+  by db-setup, G1/G2/L1 log guards) is REMOVED.
+- **Between the two runs the role is NOLOGIN** (re-review R1), so no pg_hba rule can let anyone log in as it. Independently, a
+  login probe that succeeds is trusted only if a deliberately WRONG password fails too; otherwise db-setup refuses (64) "the
+  server lets crewflow_owner log in WITHOUT its password" (trust / peer / cert / similar). Independent review L4: that
+  wrong-password login runs only when it can matter: after this run created the role or changed its password (after COMMIT),
+  or, for an existing role that logs in, while the schema bootstrap is pending (CREATEROLE without its pending mark: a role
+  just created, adopted, or just made LOGIN by the operator) or a stale awaiting mark is left. Otherwise it is skipped and
+  logged, so repeated deploys never add failed logins toward a provider's lockout.
+- **Role squatting** (independent review L2). Q2 counts the members OF crewflow_owner other than this admin's own ADMIN-only
+  grant (admin_option, no inherit, no set: createrole_self_grant is emptied in the same transaction). Any such member is
+  refused (64) before any probe or write, and again under the advisory lock (Q4 facts), because whoever holds that membership
+  could reset or use the app login. Fix: `REVOKE crewflow_owner FROM <that role>`, or drop crewflow_owner.
+  Re-review N1/N2: only a 28P01 / 28000 refusal of the wrong-password login counts as "password required" (any other
+  failure exits 70, never a pass), and a LOGIN crewflow_owner never keeps the awaiting-password mark (removed under the lock
+  in the CREATEROLE step), so a later NOLOGIN can never count as "awaiting its password".
+- **Verifier and lock waits (re-review F1 remainder).** Before the verifier DO block sets a password, the transaction's
+  lock_timeout is set below deadlock_timeout, so a blocked ALTER ROLE fails (55P03, caught) before `log_lock_waits` could
+  quote the EXECUTEd text with the verifier.
+- **Tampering / a hostile server.** A server that falsely refuses the verifier gains nothing: no password is sent.
+- **A pooled admin URL.** Refused by behaviour, before any read or write, in db-setup AND db-harden: the startup options
+  db-setup sends are refused (08P01), or the two-connection session-affinity probe (pg-session-probe.ts) fails. Never by its
+  address in db-setup's code or the compose.env lint. On this base, owner-credential / pg-url-policy still match documented
+  pooler host shapes; #258 removes that. `PG_ADMIN_DIRECT_URL` must name the same login and database as `PG_ADMIN_URL`.
+- **Races.** The genuine concurrent-update race is still retried (PostgreSQL's fixed text, compared, never printed); every
+  retry and exhaustion line names the SQLSTATE and the stage. Both DO blocks catch `query_canceled` too.
+- **Failure halfway.** Every write runs in one transaction under the advisory lock; a refusal at COMMIT rolls everything
+  back.
+- **Mode c and a crewflow_owner that owns the database** (lead audit item 6): NOT changed. The reviewed N1 rule keeps mode c
+  the supported path for a transition-shaped database; owner decision.
+- **Shared password ("You set one shared password").** compose builds `PG_DATABASE_URL` from `PG_DATABASE_APP_PASSWORD` and
+  `PG_DATABASE_HOST` / `_PORT` / `_NAME` for db-setup, rab-api and rab-worker alike; an explicit `PG_DATABASE_URL` is the
+  documented alternative, and the compose.env lint refuses both together. db-setup refuses an app URL that names another
+  host, port or database than the admin (direct) URL, and a password below the M2 floor. db-setup.sh checks a built URL's
+  parts at run time (`[A-Za-z0-9_-]{32,}` password; no `$ { } @ # / ?` in host or database; a port of 1 to 5 digits,
+  independent review I4).

@@ -1,11 +1,18 @@
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
-import { healthyOwnerLoginPosture } from '../../__tests__/helpers/owner-login-posture-fake';
+import { healthyOwnerLoginPosture, ownerLoginPostureAnswer } from '../../__tests__/helpers/owner-login-posture-fake';
 import { NEEDS_OWNER_APPROVAL_IDS, OWNER_LOGIN_BEHAVIOUR_CATALOGUE, PR9_TRACKED_ACCEPTED_IDS } from './owner-login-behaviour-catalogue';
+import * as privilegedRoles from '../owner-login/privileged-roles';
+import { clientTlsOf } from './database-boot-gates';
+import { BOOT_FACTS_SQL } from './database-boot-gate-rules';
+import { buildPgSsl, isVerifyFullSsl } from '../postgres/pg-tls';
 import {
   DANGEROUS_PREDEFINED_ROLES,
+  OWNER_LOGIN_FACTS_SQL,
   OWNER_LOGIN_REACHABILITY_SQL,
+  ownerLoginDatabaseOwnershipProblems,
+  ownerLoginRolePostureProblems,
   ownerLoginInventoryProblems,
   ownerLoginProblems,
   ownerLoginReachabilityProblems,
@@ -40,12 +47,24 @@ describe('owner-login posture: rule 2 (reachability, MEMBER semantics)', () => {
     [{ bypassrls: true }, /BYPASSRLS/],
     [{ createdb: true }, /CREATEDB/],
     [{ replication: true }, /REPLICATION/],
+    // Owner decision 2026-11-19: a reachable CREATEROLE role (the login could SET ROLE to it, or grant itself that) is refused.
+    [{ createrole: true }, /"x" has CREATEROLE and is reachable from crewflow_owner \(crewflow_owner>y>x\)/],
   ])('refuses a reachable role with %p (indirect path named)', (over, pattern) => expect(ownerLoginReachabilityProblems(extra(over)).join()).toMatch(pattern));
   it.each([...DANGEROUS_PREDEFINED_ROLES])('refuses the predefined role %s', (role) => {
     expect(ownerLoginReachabilityProblems(extra({ role })).join()).toMatch(new RegExp(`predefined role "${role}"`));
   });
   it.each(['neon_superuser', 'rds_superuser', 'cloudsqlsuperuser', 'azure_pg_admin', 'supabase_admin'])('refuses the provider admin role %s', (role) => {
     expect(PROVIDER_ADMIN_ROLES).toContain(role);
+    expect(ownerLoginReachabilityProblems(extra({ role })).join()).toMatch(/provider administrator role/);
+  });
+  it("the login's OWN CREATEROLE is not judged by the walk (its mark rule is assertCreateRoleGate)", () => {
+    expect(ownerLoginReachabilityProblems(reach.map((r) => (r.is_login ? { ...r, createrole: true } : r)))).toEqual([]);
+    expect(OWNER_LOGIN_REACHABILITY_SQL).toMatch(/r\.rolcreaterole AS createrole/);
+  });
+  it.each(['pg_checkpoint', 'pg_use_reserved_connections'])('refuses the added predefined role %s', (role) => {
+    expect(ownerLoginReachabilityProblems(extra({ role })).join()).toMatch(new RegExp(`predefined role "${role}"`));
+  });
+  it.each(['doadmin', 'alloydbsuperuser', 'tsdbadmin'])('refuses the provider admin role %s (added to the shared list)', (role) => {
     expect(ownerLoginReachabilityProblems(extra({ role })).join()).toMatch(/provider administrator role/);
   });
   it('the SQL walks every pg_auth_members edge (no INHERIT / SET / ADMIN filter) and cross-checks pg_has_role MEMBER', () => {
@@ -130,5 +149,91 @@ describe('owner-login behaviour-change catalogue', () => {
       const titled = spec.includes(`it('${e.id}: `) || spec.includes(`it('${e.id} (NEEDS OWNER APPROVAL): `);
       expect({ id: e.id, titled }).toEqual({ id: e.id, titled: true });
     }
+  });
+});
+
+describe('the shared privileged-role list (owner-login/privileged-roles.ts)', () => {
+  it('is the very list the runtime posture uses (one module, re-exported)', () => {
+    expect(DANGEROUS_PREDEFINED_ROLES).toBe(privilegedRoles.DANGEROUS_PREDEFINED_ROLES);
+    expect(PROVIDER_ADMIN_ROLES).toBe(privilegedRoles.PROVIDER_ADMIN_ROLES);
+  });
+  it('holds every role the owner listed and db-setup listed', () => {
+    for (const role of [
+      'pg_read_all_data',
+      'pg_write_all_data',
+      'pg_execute_server_program',
+      'pg_read_server_files',
+      'pg_write_server_files',
+      'pg_create_subscription',
+      'pg_signal_backend',
+      'pg_checkpoint',
+      'pg_maintain',
+      'pg_use_reserved_connections',
+    ]) {
+      expect(DANGEROUS_PREDEFINED_ROLES).toContain(role);
+    }
+    for (const role of ['neon_superuser', 'rds_superuser', 'cloudsqlsuperuser', 'azure_pg_admin', 'supabase_admin', 'doadmin', 'alloydbsuperuser', 'tsdbadmin']) {
+      expect(PROVIDER_ADMIN_ROLES).toContain(role);
+    }
+    expect(Object.isFrozen(privilegedRoles.PRIVILEGED_ROLE_NAMES)).toBe(true);
+  });
+});
+
+describe('owner-login posture: database ownership (owner decision 2026-11-19)', () => {
+  const login = healthyOwnerLoginPosture().login;
+  it('a login that owns nothing passes', () => expect(ownerLoginDatabaseOwnershipProblems(login)).toEqual([]));
+  it.each([
+    [{ owns_database: true, member_of_database_owner: true, database_owner_role: true }, /"crewflow_owner" owns the current database/],
+    [{ member_of_database_owner: true, database_owner: 'rab_owner' }, /member of "rab_owner", the owner of the current database/],
+    [{ database_owner_role: true }, /member of pg_database_owner/],
+    [{ owns_database: null }, /owns the current database/],
+  ])('refuses %p, naming the fix', (over, pattern) => {
+    const out = ownerLoginDatabaseOwnershipProblems({ ...login, ...over }).join('; ');
+    expect(out).toMatch(pattern);
+    expect(out).toMatch(/ALTER DATABASE <database> OWNER TO <admin>/);
+  });
+  it('rule 1 applies it only when asked (production); the default keeps dev/test databases owned by rab_owner bootable', () => {
+    const owned = { ...login, member_of_database_owner: true, database_owner_role: true, database_owner: 'rab_owner' };
+    expect(ownerLoginProblems(owned)).toEqual([]);
+    expect(ownerLoginProblems(owned, { refuseDatabaseOwnership: true }).join()).toMatch(/owner of the current database/);
+  });
+  it('ownerLoginRolePostureProblems passes the option through (the boot gate and the production posture monitor)', async () => {
+    const f = healthyOwnerLoginPosture();
+    f.login = { ...f.login, owns_database: true, member_of_database_owner: true, database_owner_role: true };
+    const query = async (sql: string) => ownerLoginPostureAnswer(sql, f) ?? [];
+    expect(await ownerLoginRolePostureProblems(query)).toEqual([]);
+    expect((await ownerLoginRolePostureProblems(query, { refuseDatabaseOwnership: true })).join()).toMatch(/owns the current database/);
+  });
+  it('both fact queries read ownership with MEMBER semantics, and pg_database_owner', () => {
+    for (const sql of [OWNER_LOGIN_FACTS_SQL, BOOT_FACTS_SQL]) {
+      expect(sql).toMatch(/d\.datdba = s\.oid/);
+      expect(sql).toMatch(/pg_has_role\(session_user, d\.datdba, 'MEMBER'\)/);
+      expect(sql).toMatch(/o\.rolname = 'pg_database_owner'/);
+    }
+  });
+});
+
+describe('gate 6 helpers: the client socket and the verify-full config', () => {
+  const PROD = { production: true, caPem: null, caSource: null, allowSelfSigned: false } as const;
+  it('isVerifyFullSsl: true for what pg-tls builds for require / verify-ca / verify-full (DNS and IP hosts), false otherwise', () => {
+    for (const mode of ['require', 'verify-ca', 'verify-full'] as const) {
+      expect(isVerifyFullSsl(buildPgSsl(mode, PROD, 'PG_DATABASE_URL', 'db.example.internal'))).toBe(true);
+      expect(isVerifyFullSsl(buildPgSsl(mode, PROD, 'PG_DATABASE_URL', '10.1.2.3'))).toBe(true);
+    }
+    expect(isVerifyFullSsl(false)).toBe(false);
+    expect(isVerifyFullSsl({ rejectUnauthorized: false })).toBe(false);
+    // A host-name check that is not pg-tls's own (e.g. one that accepts anything) is not trusted.
+    expect(isVerifyFullSsl({ rejectUnauthorized: true, checkServerIdentity: () => undefined })).toBe(false);
+  });
+  it('clientTlsOf reads the pg socket of a TypeORM query runner or a pg Client; anything else is unknown (null)', () => {
+    const ssl = buildPgSsl('verify-full', PROD, 'PG_DATABASE_URL', 'db.example.internal');
+    const verified = { encrypted: true, authorized: true, verifyFullConfigured: true };
+    expect(clientTlsOf({ databaseConnection: { connection: { stream: { encrypted: true, authorized: true } } } }, ssl)).toEqual(verified);
+    expect(clientTlsOf({ connection: { stream: { encrypted: true, authorized: true } } }, ssl)).toEqual(verified);
+    expect(clientTlsOf({ connection: { stream: { encrypted: true, authorized: true } } }, { rejectUnauthorized: false })).toEqual({ ...verified, verifyFullConfigured: false });
+    expect(clientTlsOf({ databaseConnection: { connection: { stream: { encrypted: true, authorized: 'yes' } } } }, ssl)).toEqual({ ...verified, authorized: false });
+    expect(clientTlsOf({ databaseConnection: { connection: { stream: {} } } }, ssl)).toEqual({ encrypted: false, authorized: false, verifyFullConfigured: true });
+    expect(clientTlsOf({}, ssl)).toBeNull();
+    expect(clientTlsOf(null, ssl)).toBeNull();
   });
 });

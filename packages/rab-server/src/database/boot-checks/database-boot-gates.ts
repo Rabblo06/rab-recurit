@@ -14,7 +14,8 @@
  *                legacy schema-role login (crewflow_app, crewflow_worker, crewflow) is refused; the login is not SUPERUSER,
  *                BYPASSRLS, REPLICATION or CREATEDB and not a member of crewflow_worker. After gate 2: a MEMBER-semantics
  *                walk (INHERIT, SET and ADMIN-only edges, indirect, predefined and provider-admin roles) reaches nothing
- *                SUPERUSER / BYPASSRLS / CREATEDB / REPLICATION or dangerous, and the role layout is exactly the reviewed
+ *                SUPERUSER / BYPASSRLS / CREATEDB / CREATEROLE / REPLICATION or dangerous, in production the login does not own
+ *                the current database (directly, through a role, or as pg_database_owner), and the role layout is exactly the reviewed
  *                owner-login inventory (owner-login-posture.ts). Membership of the owner roles is expected (catalogue BC-01).
  *   2. version   the server major is one of database/postgres/supported-majors.ts (16, 17, 18): below 16 the PG16
  *                role-membership semantics are missing, above 18 no reviewed workspace fingerprints / goldens exist.
@@ -30,6 +31,8 @@
  *   5. force-rls FORCE ROW LEVEL SECURITY spot check on a fixed set of tenant tables, and every core table with an
  *                organisation_id has RLS enabled. (The exhaustive model stays in CI: check-rls-coverage + the posture golden.)
  *   6. tls       in production the gate's own backend must be on TLS (pg_stat_ssl.ssl for pg_backend_pid()).
+ *                Or, whatever pg_stat_ssl says (a TLS-terminating proxy): the gate session's own client socket is TLS
+ *                that Node verified (chain + host name) under a verify-full config (database-boot-gate-rules.ts assertTlsGate).
  *   7. pending / schema-compatibility   no pending migrations, and the schema is compatible with this process
  *                (assert-no-pending-migrations.ts → schema-compatibility.ts, same rule as the API prestart): unknown ledger
  *                names interleaved with the code's refuse everywhere; a ledger AHEAD (image rollback) warns for
@@ -58,11 +61,13 @@
 import { DataSourceOptions } from 'typeorm';
 
 import { createPgDataSource, PgConfigError, resolvePgEnvironmentCached } from '../postgres';
+import { isVerifyFullSsl, type PgSsl } from '../postgres/pg-tls';
 import { selectWorkspaceFingerprintMajor, UnsupportedPostgresVersionError } from '../typeorm/workspace-schema/v1/expected-fingerprints';
 import { coreDataSourceOptions } from '../typeorm/core/core.datasource';
 import {
   BootGateReport,
   BootProcess,
+  ClientTlsState,
   DatabaseBootGateError,
   evaluateBootGates,
   isProductionProcess,
@@ -99,6 +104,21 @@ export interface RunBootGatesOptions {
 }
 
 let gateDataSourceSeq = 0;
+
+/**
+ * Gate 6's client-side evidence: what the gate session's own pg socket reports after the handshake (a TLSSocket that Node
+ * verified: chain and host name), and whether the connection's `ssl` config demanded that verification (pg-tls.ts: verify-full
+ * is `rejectUnauthorized: true` with Node's default host-name check, or the IP-bound one). `session` is TypeORM's query runner
+ * (`databaseConnection` is the pg Client once connected), or a pg Client itself. Anything unexpected reads as null (unknown),
+ * which gate 6 treats as "not verified".
+ */
+export function clientTlsOf(session: unknown, ssl: PgSsl): ClientTlsState | null {
+  type Stream = { encrypted?: unknown; authorized?: unknown };
+  const s = session as { databaseConnection?: { connection?: { stream?: Stream } }; connection?: { stream?: Stream } } | null;
+  const stream = s?.databaseConnection?.connection?.stream ?? s?.connection?.stream;
+  if (!stream) return null;
+  return { encrypted: stream.encrypted === true, authorized: stream.authorized === true, verifyFullConfigured: isVerifyFullSsl(ssl) };
+}
 
 /**
  * The single call each entrypoint makes. Throws DatabaseBootGateError (the caller prints the message and exits non-zero).
@@ -149,6 +169,7 @@ export async function runDatabaseBootGates(processName: BootProcess, options: Ru
           env,
           cliCommand: options.cliCommand,
           connectionHost: endpointTarget.target.host,
+          clientTls: clientTlsOf(session, endpointTarget.ssl),
           query,
           checkPendingMigrations: async ({ production }) => {
             return checkSchemaCompatibility(query, {

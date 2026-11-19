@@ -33,11 +33,17 @@
 #       postgresql://crewflow_owner:<PG_DATABASE_APP_PASSWORD>@db:5432/crewflow?sslmode=verify-full for db-setup, rab-api
 #       and rab-worker alike, and db-setup creates crewflow_owner with that password as the bundled superuser (db makes its
 #       own CA). Both passwords are required ONLY here (db, db-setup, the entrypoints and the lints check them).
-#   (b) your own database with an admin login: CREWFLOW_BUNDLED_DB=0 + PG_ADMIN_URL (its admin URL, db-setup only) +
-#       PG_DATABASE_URL (the crewflow_owner URL, password of your choice), both on the DIRECT host, sslmode=verify-full, the
-#       same database (the CA file through CREWFLOW_PG_CA_FILE + PG_SSL_CA_CERT_PATH=/run/crewflow/pg-ca.crt in
-#       database.env when the system store does not hold it): db-setup creates crewflow_owner with that password, or sets it
-#       when crewflow_owner exists and it does not log in; `db` never starts (Twenty's Helm db.enabled=false).
+#   (b) your own database, with an admin login (owner decision 2026-11-19, "You set one shared password"): CREWFLOW_BUNDLED_DB=0
+#       + PG_ADMIN_URL (its admin URL pasted as-is; db-setup ONLY) + PG_DATABASE_APP_PASSWORD (`openssl rand -hex 32`) +
+#       PG_DATABASE_HOST / PG_DATABASE_PORT / PG_DATABASE_NAME (the database's DIRECT address, copied from the admin URL):
+#       compose builds the crewflow_owner URL from them for db-setup, rab-api and rab-worker alike; or set the whole
+#       PG_DATABASE_URL yourself instead (never both). db-setup creates crewflow_owner with that password (pre-hashed; a
+#       server that refuses pre-hashed passwords gets crewflow_owner WITHOUT a password, NOLOGIN, and db-setup stops with fixed steps:
+#       set the password once in the provider's SQL editor with the printed DO block, then redeploy; Crewflow never sends
+#       a plain-text password; the typed value can stay in server logs, pg_stat_statements, pg_stat_activity, provider logs)
+#       and sets it when the password does not log in. A pooled PG_ADMIN_URL is refused by what it does; then
+#       add PG_ADMIN_DIRECT_URL (the direct address of the same login and database; db-setup and db-harden only).
+#       sslmode require, verify-ca or verify-full (all full verification). No PG_DATABASE_PASSWORD.
 #   (c) your own database where you created crewflow_owner yourself: CREWFLOW_BUNDLED_DB=0 + PG_DATABASE_URL only:
 #       db-setup only checks it (read-only); the database is never written to and the password never changed.
 #   PG_DATABASE_URL with any login but crewflow_owner is REFUSED, and so is a PG_ADMIN_URL that logs in as crewflow_owner
@@ -501,9 +507,11 @@ services:
       #   (b) PG_ADMIN_URL: your own database's admin URL (DIRECT host, sslmode=verify-full; CREWFLOW_BUNDLED_DB=0), THIS
       #       SERVICE ONLY: db-setup creates crewflow_owner with it. rab-api and rab-worker NEVER receive it (pinned "").
       PG_ADMIN_URL: ${PG_ADMIN_URL:-}
+      PG_ADMIN_DIRECT_URL: ${PG_ADMIN_DIRECT_URL:-}
+      PG_DATABASE_HOST: ${PG_DATABASE_HOST:-}
       #   ALWAYS: the crewflow_owner URL, the very expression rab-api and rab-worker receive: your crewflow_owner URL (b, c),
       #   or the bundled db's built from PG_DATABASE_APP_PASSWORD (a).
-      PG_DATABASE_URL: ${PG_DATABASE_URL:-postgresql://crewflow_owner:${PG_DATABASE_APP_PASSWORD:-}@db:5432/crewflow?sslmode=verify-full}
+      PG_DATABASE_URL: ${PG_DATABASE_URL:-postgresql://crewflow_owner:${PG_DATABASE_APP_PASSWORD:-}@${PG_DATABASE_HOST:-db}:${PG_DATABASE_PORT:-5432}/${PG_DATABASE_NAME:-crewflow}?sslmode=verify-full}
       #   (a) no PG_ADMIN_URL and CREWFLOW_BUNDLED_DB 1 (the default): the admin is the bundled db's superuser, built here from
       #       PG_DATABASE_PASSWORD; db-setup.sh refuses an empty password (no `:?` here: PG_DATABASE_PASSWORD is not required
       #       with your own database). (c) CREWFLOW_BUNDLED_DB=0 and no PG_ADMIN_URL: read-only checks.
@@ -561,7 +569,9 @@ services:
       # db-setup's database settings, exactly (the same modes and refusals). rab-api and rab-worker NEVER receive the admin
       # login.
       PG_ADMIN_URL: ${PG_ADMIN_URL:-}
-      PG_DATABASE_URL: ${PG_DATABASE_URL:-postgresql://crewflow_owner:${PG_DATABASE_APP_PASSWORD:-}@db:5432/crewflow?sslmode=verify-full}
+      PG_ADMIN_DIRECT_URL: ${PG_ADMIN_DIRECT_URL:-}
+      PG_DATABASE_HOST: ${PG_DATABASE_HOST:-}
+      PG_DATABASE_URL: ${PG_DATABASE_URL:-postgresql://crewflow_owner:${PG_DATABASE_APP_PASSWORD:-}@${PG_DATABASE_HOST:-db}:${PG_DATABASE_PORT:-5432}/${PG_DATABASE_NAME:-crewflow}?sslmode=verify-full}
       CREWFLOW_BUNDLED_DB: ${CREWFLOW_BUNDLED_DB:-1}
       CREWFLOW_BUNDLED_DB_ADMIN_URL: postgresql://postgres:${PG_DATABASE_PASSWORD:-}@db:5432/crewflow?sslmode=verify-full
       # How long it waits (read-only polls) for the ledger to hold every migration of this image: 60-7200 s.
@@ -635,11 +645,12 @@ services:
       # rab-worker, from compose.env: your crewflow_owner URL (modes b and c), or, unset, the bundled db's built from
       # PG_DATABASE_APP_PASSWORD (mode a). Set here, so a PG_DATABASE_URL in database.env / runtime.env can never win (the
       # gate refuses it there too). An empty URL or password refuses to start (exit 64).
-      PG_DATABASE_URL: ${PG_DATABASE_URL:-postgresql://crewflow_owner:${PG_DATABASE_APP_PASSWORD:-}@db:5432/crewflow?sslmode=verify-full}
+      PG_DATABASE_URL: ${PG_DATABASE_URL:-postgresql://crewflow_owner:${PG_DATABASE_APP_PASSWORD:-}@${PG_DATABASE_HOST:-db}:${PG_DATABASE_PORT:-5432}/${PG_DATABASE_NAME:-crewflow}?sslmode=verify-full}
       # Owner decision L-2 (review of PR #230): PINNED EMPTY, a literal, like PG_DATABASE_URL, so a PG_ADMIN_URL put in an env
       # file or a platform UI can never reach this container. The entrypoint refuses any non-empty value (exit 64); the gates
       # accept exactly this empty literal here and refuse any other value. The admin URL reaches db-setup only.
       PG_ADMIN_URL: ""
+      PG_ADMIN_DIRECT_URL: ""
       NODE_ENV: production
       RAB_RUNTIME_ENV: production
       AI_ENABLED: 'false'
@@ -769,11 +780,12 @@ services:
       # rab-worker, from compose.env: your crewflow_owner URL (modes b and c), or, unset, the bundled db's built from
       # PG_DATABASE_APP_PASSWORD (mode a). Set here, so a PG_DATABASE_URL in database.env / runtime.env can never win (the
       # gate refuses it there too). An empty URL or password refuses to start (exit 64).
-      PG_DATABASE_URL: ${PG_DATABASE_URL:-postgresql://crewflow_owner:${PG_DATABASE_APP_PASSWORD:-}@db:5432/crewflow?sslmode=verify-full}
+      PG_DATABASE_URL: ${PG_DATABASE_URL:-postgresql://crewflow_owner:${PG_DATABASE_APP_PASSWORD:-}@${PG_DATABASE_HOST:-db}:${PG_DATABASE_PORT:-5432}/${PG_DATABASE_NAME:-crewflow}?sslmode=verify-full}
       # Owner decision L-2 (review of PR #230): PINNED EMPTY, a literal, like PG_DATABASE_URL, so a PG_ADMIN_URL put in an env
       # file or a platform UI can never reach this container. The entrypoint refuses any non-empty value (exit 64); the gates
       # accept exactly this empty literal here and refuse any other value. The admin URL reaches db-setup only.
       PG_ADMIN_URL: ""
+      PG_ADMIN_DIRECT_URL: ""
       NODE_ENV: production
       RAB_RUNTIME_ENV: production
       AI_ENABLED: 'false'

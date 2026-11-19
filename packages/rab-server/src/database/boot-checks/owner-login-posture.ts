@@ -17,9 +17,14 @@
  *  2. reachability — a walk over pg_auth_members from the login with MEMBER semantics: every edge counts, whatever its
  *                    INHERIT / SET / ADMIN options (an ADMIN-only edge lets the login grant itself SET later: G-12), direct
  *                    and indirect. Cross-checked with pg_has_role(…, 'MEMBER') over every role (catches implicit
- *                    memberships the walk cannot see). No reached role may be SUPERUSER, BYPASSRLS, CREATEDB or
- *                    REPLICATION, a dangerous predefined role (data, server files, program execution, backend signals,
- *                    subscriptions, maintain) or a known provider administrator role.
+ *                    memberships the walk cannot see). No reached role may be SUPERUSER, BYPASSRLS, CREATEDB, CREATEROLE
+ *                    or REPLICATION, a dangerous predefined role (data, server files, program execution, backend signals,
+ *                    subscriptions, maintain) or a known provider administrator role. CREATEROLE on a REACHED role is
+ *                    refused since owner decision 2026-11-19 (a member that can SET ROLE to it, or grant itself that,
+ *                    administers roles); the login's OWN CREATEROLE keeps its mark rule (assertCreateRoleGate).
+ *                    Ownership of the current database (directly, through a role, or as pg_database_owner) is refused
+ *                    in production by the boot gate (database-boot-gate-rules.ts assertDatabaseOwnershipGate), not here:
+ *                    development and test databases are owned by rab_owner (postgres-init/01-roles.sql).
  *  3. inventory    — the exact Option A role layout (M0 §3.1 / §5.2, the rolemaker bootstrap): which roles the login is a
  *                    member of, who else is a member of rab_secure_owner / crewflow / rab_owner / rab_app / crewflow_app /
  *                    crewflow_worker / crewflow_owner, no unexpected LOGIN role able to act as any of them, and NOLOGIN
@@ -36,6 +41,7 @@
  * crewflow_worker) are not readable without superuser (pg_authid), so a password set on one of them is NOT detected here.
  */
 
+import { DANGEROUS_PREDEFINED_ROLES, PROVIDER_ADMIN_ROLES } from '../owner-login/privileged-roles';
 import { PREAUTH_DEFINER_EXPRESSION, PREAUTH_FORCE_TABLES, preauthDefinerPolicyName } from '../typeorm/core/preauth-force-sql';
 
 export const OWNER_LOGIN_ROLE = 'crewflow_owner';
@@ -112,54 +118,53 @@ export const NOLOGIN_SCHEMA_ROLES: readonly string[] = ['rab_owner', 'rab_app', 
 export const EXPECTED_LOGIN_ROLES: readonly string[] = [OWNER_LOGIN_ROLE, 'crewflow', 'crewflow_app', 'crewflow_worker'];
 
 /**
- * Predefined roles that confer data access beyond RLS, server file / program access, backend signalling, outbound
- * subscriptions or table maintenance. The first six are the M0 list; `pg_create_subscription` (PG16) and `pg_maintain`
- * (PG17+) are stricter additions. Matched by name: a role that does not exist on this major is simply never reached.
+ * The roles refused by name (predefined and managed-provider administrator roles) live in ONE shared module,
+ * owner-login/privileged-roles.ts, which db-setup uses too. Re-exported here for the existing importers.
  */
-export const DANGEROUS_PREDEFINED_ROLES: readonly string[] = [
-  'pg_read_all_data',
-  'pg_write_all_data',
-  'pg_read_server_files',
-  'pg_write_server_files',
-  'pg_execute_server_program',
-  'pg_signal_backend',
-  'pg_create_subscription',
-  'pg_maintain',
-];
-
-/**
- * Managed-provider administrator roles (M0 §3.5 / E): none of them may be reachable from the app login. Their dangerous
- * attributes are usually also caught by rule 2 (BYPASSRLS / REPLICATION / CREATEDB), but some are plain NOLOGIN roles that
- * carry predefined-role memberships or provider hooks, so they are refused by name as well.
- */
-export const PROVIDER_ADMIN_ROLES: readonly string[] = [
-  'neon_superuser',
-  'rds_superuser',
-  'rds_replication',
-  'rds_password',
-  'rdsadmin',
-  'rds_ad',
-  'cloudsqlsuperuser',
-  'cloudsqladmin',
-  'cloudsqlreplica',
-  'azure_pg_admin',
-  'azure_superuser',
-  'azuresu',
-  'supabase_admin',
-  'supabase_replication_admin',
-  'supabase_storage_admin',
-  'supabase_auth_admin',
-  'doadmin',
-];
+export { DANGEROUS_PREDEFINED_ROLES, PROVIDER_ADMIN_ROLES } from '../owner-login/privileged-roles';
 
 const sqlList = (names: readonly string[]) => names.map((n) => `'${n}'`).join(', ');
 const LAYOUT_AND_LOGIN = [OWNER_LOGIN_ROLE, ...LAYOUT_SCHEMA_ROLES];
+
+/**
+ * Owner decision 2026-11-19: the login must not own the CURRENT database, neither directly (datdba), nor through a role it
+ * is a member of (pg_has_role MEMBER: any membership, whatever its INHERIT / SET / ADMIN options), nor as a member of
+ * pg_database_owner (which PostgreSQL grants implicitly to exactly the database owner's members). A database owner can
+ * ALTER DATABASE (SET search_path / session settings for every role), grant CONNECT / CREATE / TEMPORARY to anyone and drop
+ * the database. Three read-only columns, NULL-free (COALESCE false only where the row legitimately cannot exist).
+ * Shared by rule 1 (OWNER_LOGIN_FACTS_SQL, the posture monitor too) and the boot gate (BOOT_FACTS_SQL).
+ */
+export const DATABASE_OWNERSHIP_COLUMNS_SQL = `(SELECT d.datdba = s.oid FROM pg_catalog.pg_database d, pg_catalog.pg_roles s
+         WHERE d.datname = pg_catalog.current_database() AND s.rolname = session_user) AS owns_database,
+       (SELECT pg_catalog.pg_has_role(session_user, d.datdba, 'MEMBER') FROM pg_catalog.pg_database d
+         WHERE d.datname = pg_catalog.current_database()) AS member_of_database_owner,
+       COALESCE((SELECT pg_catalog.pg_has_role(session_user, o.oid, 'MEMBER') FROM pg_catalog.pg_roles o
+                  WHERE o.rolname = 'pg_database_owner'), false) AS database_owner_role,
+       (SELECT pg_catalog.pg_get_userbyid(d.datdba)::text FROM pg_catalog.pg_database d
+         WHERE d.datname = pg_catalog.current_database()) AS database_owner`;
+
+/**
+ * Pure: the problems the ownership columns describe. Fail closed: a column that is not exactly false (NULL, missing) counts
+ * as ownership, so a row this rule cannot read is refused rather than passed.
+ */
+export function ownerLoginDatabaseOwnershipProblems(row: Row | undefined): string[] {
+  if (!row) return ['the database ownership of the connecting login could not be read'];
+  const login = String(row.login ?? OWNER_LOGIN_ROLE);
+  const owner = row.database_owner === null || row.database_owner === undefined ? '(unknown)' : `"${String(row.database_owner)}"`;
+  const p: string[] = [];
+  if (row.owns_database !== false) p.push(`"${login}" owns the current database`);
+  else if (row.member_of_database_owner !== false) p.push(`"${login}" is a member of ${owner}, the owner of the current database`);
+  if (row.database_owner_role !== false) p.push(`"${login}" is a member of pg_database_owner (it owns the current database, directly or through a role)`);
+  if (p.length) p.push(`the database must be owned by your admin, never by the app login: as the admin run ALTER DATABASE <database> OWNER TO <admin>`);
+  return p;
+}
 
 /** Rule 1: the login itself. */
 export const OWNER_LOGIN_FACTS_SQL = `
 SELECT current_user::text AS who, session_user::text AS login,
        r.rolsuper AS super, r.rolbypassrls AS bypassrls, r.rolreplication AS replication, r.rolcreatedb AS createdb,
-       r.rolcreaterole AS createrole, r.rolcanlogin AS canlogin, r.rolinherit AS inherit
+       r.rolcreaterole AS createrole, r.rolcanlogin AS canlogin, r.rolinherit AS inherit,
+       ${DATABASE_OWNERSHIP_COLUMNS_SQL}
   FROM pg_catalog.pg_roles r WHERE r.rolname = session_user`;
 
 /**
@@ -185,7 +190,7 @@ reached AS (
    WHERE pg_catalog.pg_has_role(session_user, r.oid, 'MEMBER') AND r.oid NOT IN (SELECT w.oid FROM walk w)
 )
 SELECT r.rolname::text AS role, x.path, r.rolsuper AS super, r.rolbypassrls AS bypassrls, r.rolcreatedb AS createdb,
-       r.rolreplication AS replication, r.rolcanlogin AS canlogin, (r.rolname = session_user) AS is_login
+       r.rolcreaterole AS createrole, r.rolreplication AS replication, r.rolcanlogin AS canlogin, (r.rolname = session_user) AS is_login
   FROM reached x JOIN pg_catalog.pg_roles r ON r.oid = x.oid
  ORDER BY 1`;
 
@@ -226,8 +231,16 @@ export type PostureQuery = (sql: string, params?: unknown[]) => Promise<Row[]>;
 
 const yes = (v: unknown) => v === true;
 
+export interface OwnerLoginPostureOptions {
+  /**
+   * Refuse ownership of the current database (ownerLoginDatabaseOwnershipProblems). True in production; development and
+   * test databases are owned by rab_owner (postgres-init/01-roles.sql), which the owner login is a member of.
+   */
+  refuseDatabaseOwnership?: boolean;
+}
+
 /** Rule 1 (pure). */
-export function ownerLoginProblems(row: Row | undefined): string[] {
+export function ownerLoginProblems(row: Row | undefined, options: OwnerLoginPostureOptions = {}): string[] {
   if (!row) return ['the connecting login could not be read'];
   const p: string[] = [];
   if (row.login !== OWNER_LOGIN_ROLE) p.push(`the database login is "${String(row.login)}", expected "${OWNER_LOGIN_ROLE}"`);
@@ -236,6 +249,7 @@ export function ownerLoginProblems(row: Row | undefined): string[] {
   if (yes(row.bypassrls)) p.push(`"${String(row.login)}" has BYPASSRLS`);
   if (yes(row.replication)) p.push(`"${String(row.login)}" has REPLICATION`);
   if (yes(row.createdb)) p.push(`"${String(row.login)}" has CREATEDB`);
+  if (options.refuseDatabaseOwnership) p.push(...ownerLoginDatabaseOwnershipProblems(row));
   return p;
 }
 
@@ -246,7 +260,13 @@ export function ownerLoginReachabilityProblems(rows: Row[]): string[] {
     if (yes(r.is_login)) continue;
     const name = String(r.role);
     const via = `reachable from ${OWNER_LOGIN_ROLE} (${String(r.path)})`;
-    const attrs = [yes(r.super) && 'SUPERUSER', yes(r.bypassrls) && 'BYPASSRLS', yes(r.createdb) && 'CREATEDB', yes(r.replication) && 'REPLICATION'].filter(Boolean);
+    const attrs = [
+      yes(r.super) && 'SUPERUSER',
+      yes(r.bypassrls) && 'BYPASSRLS',
+      yes(r.createdb) && 'CREATEDB',
+      yes(r.createrole) && 'CREATEROLE',
+      yes(r.replication) && 'REPLICATION',
+    ].filter(Boolean);
     if (attrs.length) p.push(`role "${name}" has ${attrs.join('/')} and is ${via}`);
     if (DANGEROUS_PREDEFINED_ROLES.includes(name)) p.push(`predefined role "${name}" is ${via}`);
     if (PROVIDER_ADMIN_ROLES.includes(name)) p.push(`provider administrator role "${name}" is ${via}`);
@@ -305,10 +325,10 @@ export function ownerLoginInventoryProblems(memberships: Row[], layoutRoles: Row
 }
 
 /** Rules 1–3 over one connection. Run AFTER the version gate (PG16 pg_auth_members columns). Empty = the posture holds. */
-export async function ownerLoginRolePostureProblems(query: PostureQuery): Promise<string[]> {
+export async function ownerLoginRolePostureProblems(query: PostureQuery, options: OwnerLoginPostureOptions = {}): Promise<string[]> {
   const [login] = await query(OWNER_LOGIN_FACTS_SQL);
   return [
-    ...ownerLoginProblems(login),
+    ...ownerLoginProblems(login, options),
     ...ownerLoginReachabilityProblems(await query(OWNER_LOGIN_REACHABILITY_SQL)),
     ...ownerLoginInventoryProblems(await query(OWNER_LOGIN_MEMBERSHIPS_SQL), await query(LAYOUT_SCHEMA_ROLES_SQL), await query(OWNER_LOGIN_FOREIGN_LOGINS_SQL)),
   ];
