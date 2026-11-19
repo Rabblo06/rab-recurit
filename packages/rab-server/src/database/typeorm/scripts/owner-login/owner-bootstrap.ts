@@ -57,6 +57,7 @@ import {
 import { pgClientConfig, PgConfigError, PgDriverConfig, resolvePgEnvironment, ResolvedPgEnvironment, sameTarget } from '../../../postgres';
 import { isSupportedPostgresMajor, postgresMajorFromVersionNum, unsupportedPostgresMessage } from '../../../postgres/supported-majors';
 import { OWNER_CREATEROLE_MARK_PREFIX } from '../../../boot-checks/owner-login-posture';
+import { LEGACY_NOLOGIN_SQL } from '../migrate/owner-login/legacy-logins';
 import {
   OWNER_BOOTSTRAP_BEGIN,
   OWNER_BOOTSTRAP_COMMIT,
@@ -73,6 +74,7 @@ import {
   OWNER_BOOTSTRAP_ROLLBACK,
   OWNER_HARDEN_H1_NOCREATEROLE,
   OWNER_HARDEN_H2_CLEAR_MARK,
+  OWNER_HARDEN_R1_LEGACY_LOGINS,
   OWNER_HARDEN_M1_TRY_MIGRATION_LOCK,
   OWNER_HARDEN_M2_RELEASE_MIGRATION_LOCK,
   OWNER_HARDEN_H3_MARK_PENDING,
@@ -187,6 +189,10 @@ export const OWNER_BOOTSTRAP_MESSAGES = Object.freeze({
   hardenWaitingForRole: 'Waiting for db-setup: crewflow_owner does not exist yet.',
   hardenWaitingForSchema: 'Waiting for the schema bootstrap: the ledger does not hold every migration of this image yet (read-only, polled).',
   hardenAlready: 'crewflow_owner is already NOCREATEROLE and unmarked: nothing to harden.',
+  legacyLoginsDisabled: (count: number) =>
+    `${count} legacy login(s) (crewflow / crewflow_app) were still LOGIN: made NOLOGIN, password removed, as the admin, before removing CREATEROLE (BC-17).`,
+  legacyLoginsNoRights:
+    "crewflow / crewflow_app are still LOGIN, and once CREATEROLE is removed crewflow_owner can no longer change that, but the PG_ADMIN_URL login cannot make them NOLOGIN (it needs superuser, or CREATEROLE and ADMIN OPTION on them). Nothing was changed; CREATEROLE stays. As a superuser run: ALTER ROLE crewflow NOLOGIN PASSWORD NULL; ALTER ROLE crewflow_app NOLOGIN PASSWORD NULL; Refusing.",
   hardenWaitingForMigration: 'Waiting for the running migration to finish (its lock is held): CREATEROLE is removed only after the migrate child has finished.',
   createRoleBusyKept:
     'The schema is complete, but a migration is running right now (its lock is held), so CREATEROLE is kept this time; db-harden (or the next db-setup run) removes it.',
@@ -709,6 +715,20 @@ async function applyCreateRoleTransaction(session: SqlSession, io: OwnerBootstra
     // CREATEROLE, its mark) runs only when no other database of the cluster uses crewflow_owner (Q2b, under the lock).
     await assertNoOtherDatabase(session, OWNER_BOOTSTRAP_MESSAGES.createRoleOtherDatabase);
     if (action === 'remove') {
+      // Re-review R1: the legacy logins first (crewflow_owner could make them NOLOGIN only while it has CREATEROLE).
+      const legacy = (await session.query(OWNER_HARDEN_R1_LEGACY_LOGINS)).rows.map((r) => String(r.name));
+      for (const name of legacy) {
+        const statement = LEGACY_NOLOGIN_SQL[name];
+        if (!statement) throw new OwnerBootstrapFailure(OWNER_BOOTSTRAP_MESSAGES.unexpected('legacy login'));
+        try {
+          await session.query(statement);
+        } catch (error) {
+          if (errorCode(error) === '42501') throw new OwnerBootstrapRefusal(OWNER_BOOTSTRAP_MESSAGES.legacyLoginsNoRights, '42501');
+          throw error;
+        }
+      }
+      if ((await session.query(OWNER_HARDEN_R1_LEGACY_LOGINS)).rows.length !== 0) throw new OwnerBootstrapFailure(OWNER_BOOTSTRAP_MESSAGES.reverifyFailed);
+      if (legacy.length) io.log(OWNER_BOOTSTRAP_MESSAGES.legacyLoginsDisabled(legacy.length));
       await session.query(OWNER_HARDEN_H1_NOCREATEROLE);
       if (f.oCreateRolePending) await session.query(OWNER_HARDEN_H2_CLEAR_MARK);
     } else if (action === 'clear-mark') {

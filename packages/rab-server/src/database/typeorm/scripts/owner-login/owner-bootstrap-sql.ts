@@ -236,6 +236,16 @@ export const OWNER_HARDEN_M1_TRY_MIGRATION_LOCK = `SELECT pg_catalog.pg_try_advi
 // sql-injection-reviewed: MIGRATION_LOCK_KEY_DECIMAL is this module's numeric string constant, never input.
 export const OWNER_HARDEN_M2_RELEASE_MIGRATION_LOCK = `SELECT pg_catalog.pg_advisory_unlock(${MIGRATION_LOCK_KEY_DECIMAL}) AS released;`;
 
+/**
+ * Re-review R1 (admin, in the removal transaction, under the lock, before H1): the legacy logins that are still LOGIN. The
+ * migrate child makes crewflow and crewflow_app NOLOGIN after a fresh install (legacy-logins.ts, BC-17), using crewflow_owner's
+ * CREATEROLE; once CREATEROLE is gone it no longer can. So the removal first makes them NOLOGIN itself, AS THE ADMIN, with the
+ * same reviewed statements (LEGACY_NOLOGIN_SQL), in the same transaction; an admin that cannot (42501) rolls everything back
+ * and CREATEROLE stays.
+ */
+export const OWNER_HARDEN_R1_LEGACY_LOGINS = `SELECT r.rolname::text AS name FROM pg_catalog.pg_roles r
+ WHERE r.rolname IN ('crewflow', 'crewflow_app') AND r.rolcanlogin ORDER BY 1;`;
+
 /** H1 (admin, in a transaction under OWNER_BOOTSTRAP_Q4A_LOCK): the hardening itself. */
 export const OWNER_HARDEN_H1_NOCREATEROLE = `ALTER ROLE crewflow_owner NOCREATEROLE;`;
 
@@ -262,6 +272,9 @@ export const OWNER_HARDEN_ADMIN_STATEMENTS = [
   OWNER_BOOTSTRAP_Q4A_LOCK,
   OWNER_BOOTSTRAP_Q2_FACTS,
   OWNER_BOOTSTRAP_Q2B_OTHER_DATABASES,
+  OWNER_HARDEN_R1_LEGACY_LOGINS,
+  'ALTER ROLE crewflow NOLOGIN PASSWORD NULL',
+  'ALTER ROLE crewflow_app NOLOGIN PASSWORD NULL',
   OWNER_HARDEN_H1_NOCREATEROLE,
   OWNER_HARDEN_H2_CLEAR_MARK,
   OWNER_HARDEN_H3_MARK_PENDING,

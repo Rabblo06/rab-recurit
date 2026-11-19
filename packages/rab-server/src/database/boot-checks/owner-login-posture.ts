@@ -58,20 +58,45 @@ export const OWNER_CREATEROLE_GRACE_SECONDS = 86400;
 export const OWNER_CREATEROLE_MARK_SQL_RE = '^crewflow:createrole-until-schema-current:[0-9]{1,12}$';
 
 /**
+ * Re-review R2: an expiry further ahead than the grace period plus this slack (an admin's hand-written mark, a clock step)
+ * is not a grace period: it counts as EXPIRED, so a mark cannot be made to last for weeks.
+ */
+export const OWNER_CREATEROLE_MARK_SLACK_SECONDS = 300;
+
+/**
  * Two SQL column expressions over a role's COMMENT expression (`comment` is SQL text such as
- * `pg_catalog.shobj_description(o.oid, 'pg_authid')`, a code constant): is it a valid mark, and has it expired (server clock).
- * Both are never NULL. The expiry is parsed only when the mark matches, so a foreign comment never fails the cast.
+ * `pg_catalog.shobj_description(o.oid, 'pg_authid')`, a code constant): is it a valid mark, and is it EXPIRED by the server
+ * clock (its expiry has passed, OR it lies more than OWNER_CREATEROLE_GRACE_SECONDS + OWNER_CREATEROLE_MARK_SLACK_SECONDS in
+ * the future: re-review R2). Both are never NULL. The expiry is parsed only when the mark matches, so a foreign comment never
+ * fails the cast.
  */
 export function createRoleMarkColumnsSql(comment: string, pendingAlias: string, expiredAlias: string): string {
+  const expiry = `pg_catalog.split_part(${comment}, ':', 3)::bigint`;
+  const now = `pg_catalog.date_part('epoch', pg_catalog.now())::bigint`;
   return (
-    `COALESCE(${comment} OPERATOR(pg_catalog.~) '${OWNER_CREATEROLE_MARK_SQL_RE}', false) AS ${pendingAlias},
-` +
-    `       COALESCE(CASE WHEN ${comment} OPERATOR(pg_catalog.~) '${OWNER_CREATEROLE_MARK_SQL_RE}'
-` +
-    `                     THEN pg_catalog.split_part(${comment}, ':', 3)::bigint <= pg_catalog.date_part('epoch', pg_catalog.now())::bigint END,
-` +
+    `COALESCE(${comment} OPERATOR(pg_catalog.~) '${OWNER_CREATEROLE_MARK_SQL_RE}', false) AS ${pendingAlias},\n` +
+    `       COALESCE(CASE WHEN ${comment} OPERATOR(pg_catalog.~) '${OWNER_CREATEROLE_MARK_SQL_RE}'\n` +
+    `                     THEN ${expiry} <= ${now} OR ${expiry} > ${now} + ${OWNER_CREATEROLE_GRACE_SECONDS + OWNER_CREATEROLE_MARK_SLACK_SECONDS} END,\n` +
     `                false) AS ${expiredAlias}`
   );
+}
+
+/**
+ * Re-review R3: the session login's CREATEROLE and its mark, for the periodic posture monitor (a long-running API / Worker
+ * must not keep running silently on a CREATEROLE whose grace period has expired). Read-only.
+ */
+// sql-injection-reviewed: the only interpolation is createRoleMarkColumnsSql over a fixed column expression and quote-free code constants.
+export const OWNER_LOGIN_CREATEROLE_MARK_SQL = `
+SELECT r.rolcreaterole AS createrole,
+       ${createRoleMarkColumnsSql("pg_catalog.shobj_description(r.oid, 'pg_authid')", 'mark_pending', 'mark_expired')}
+  FROM pg_catalog.pg_roles r WHERE r.rolname = session_user`;
+
+/** Re-review R3 (pure): a problem line when the login has CREATEROLE and its mark has expired; otherwise none. */
+export function ownerLoginCreateRoleExpiryProblems(row: Row | undefined): string[] {
+  if (!row || row.createrole !== true || row.mark_expired !== true) return [];
+  return [
+    `${OWNER_LOGIN_ROLE} still has CREATEROLE and its grace period (the admin's mark) has expired: as the admin run ALTER ROLE ${OWNER_LOGIN_ROLE} NOCREATEROLE; COMMENT ON ROLE ${OWNER_LOGIN_ROLE} IS NULL;`,
+  ];
 }
 
 /** The roles the Option A bootstrap creates (M0 §5.2). */

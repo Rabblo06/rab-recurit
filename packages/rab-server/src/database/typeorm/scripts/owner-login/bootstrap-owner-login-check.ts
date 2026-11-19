@@ -1175,6 +1175,11 @@ const SCENARIOS: Scenario[] = [
       await markPending(ctx, 3600);
       const live = await bootCreateRoleRule(ctx, own, db1);
       expect(!live.refused && live.warnings.length === 1, 'an unexpired mark: the boot rule did not accept it with one warning');
+      // R2: an expiry far beyond now + 24 h (+ 300 s slack) is not a grace period; it is treated as expired.
+      await markPending(ctx, 30 * 86400);
+      const farFuture = await bootCreateRoleRule(ctx, own, db1);
+      expect(farFuture.refused, 'a mark expiring now + 30 days was NOT refused by the boot rule');
+      expect(farFuture.message.includes('NOCREATEROLE'), 'the far-future-mark refusal does not name NOCREATEROLE');
       // Drop db1 (its grant would make Q2b see "another database" for db2), then an incomplete db2.
       await sql(ctx.admin, 'postgres', `DROP DATABASE ${ident(db1)} WITH (FORCE)`);
       ctx.dbs.splice(ctx.dbs.indexOf(db1), 1);
@@ -1193,7 +1198,7 @@ const SCENARIOS: Scenario[] = [
       const after = await ownerState(ctx.admin);
       expect(after.attrs === EXACT_01, 'the re-mark changed CREATEROLE');
       await expectFreshMark(ctx, after.comment, 'admin re-mark');
-      return ['expired + complete: boot refused (names both statements), mode c 64; unexpired: one warning; mode c incomplete + expired 64; admin re-marked now + 24 h'];
+      return ['expired + complete: boot refused (names both statements), mode c 64; unexpired: one warning; now + 30 days: refused; mode c incomplete + expired 64; admin re-marked now + 24 h'];
     },
   },
   {
@@ -1255,7 +1260,7 @@ const SCENARIOS: Scenario[] = [
   {
     id: 'createrole-lifecycle',
     covers:
-      'CREATEROLE end to end: fresh -> marked (boot rule: accepted with a warning); the REAL migrate child completes the schema; db-setup again -> NOCREATEROLE, mark cleared (boot rule: nothing to say); an admin re-grants CREATEROLE -> the boot rule refuses it; db-setup again -> removed again; restart none; mode c passes on the hardened schema',
+      'CREATEROLE end to end: fresh -> marked (boot rule: accepted with a warning); the REAL migrate child completes the schema; crewflow_app turned back to LOGIN; db-setup again -> crewflow_app NOLOGIN, then NOCREATEROLE, mark cleared (boot rule: nothing to say); an admin re-grants CREATEROLE -> the boot rule refuses it; db-setup again -> removed again; restart none; mode c passes on the hardened schema',
     async run(ctx) {
       const db = await createDb(ctx, 'life');
       await sql(ctx.admin, 'postgres', `ALTER DATABASE ${ident(db)} SET crewflow.disposable_test_database = 'true'`);
@@ -1266,10 +1271,16 @@ const SCENARIOS: Scenario[] = [
       const app = ownerUrl(ctx, fresh.password, db);
       const migrated = await runMigrateChild(app);
       expect(migrated === 0, `the migrate child exited ${migrated}`);
+      // R1: a legacy login turned back on after the migrate chain must be made NOLOGIN in the
+      // same transaction, before NOCREATEROLE (CREATEROLE is the only way to fix it later).
+      await sql(ctx.admin, 'postgres', `ALTER ROLE crewflow_app LOGIN`);
       const harden = await runChild({ admin: url, app });
       assertCleanOutput(harden);
       expectResult(harden, 0, 'unchanged', 'after the bootstrap', 'removed');
       expectLine(harden, OWNER_BOOTSTRAP_MESSAGES.createRoleRemoved, 'after the bootstrap');
+      expectLine(harden, OWNER_BOOTSTRAP_MESSAGES.legacyLoginsDisabled(1), 'after the bootstrap (legacy login)');
+      const legacyLeft = await sql(ctx.admin, 'postgres', `SELECT count(*)::int AS n FROM pg_roles WHERE rolname IN ('crewflow', 'crewflow_app') AND rolcanlogin`);
+      expect(Number(legacyLeft[0]?.n) === 0, 'after the bootstrap: crewflow / crewflow_app can still log in');
       let state = await ownerState(ctx.admin);
       expect(state.attrs === EXACT_HARDENED && state.comment === null, 'after the bootstrap: CREATEROLE or the mark is still there');
       const hardened = await bootCreateRoleRule(ctx, fresh.password, db);

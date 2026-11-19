@@ -39,7 +39,7 @@
  */
 
 import { readPrimaryDatabaseUrl } from '../postgres/pg-config';
-import { OWNER_LOGIN, OwnerCredentialError, runtimeUrlFacts } from './owner-credential';
+import { OWNER_LOGIN, OWNER_PASSWORD_MIN_DISTINCT, OWNER_PASSWORD_MIN_LENGTH, OwnerCredentialError, runtimeUrlFacts } from './owner-credential';
 
 export type MigrationApprovalMode = 'none' | 'token';
 
@@ -232,7 +232,7 @@ export function checkRuntimeLogin(env: Env, processName: RuntimeLoginProcess): R
   const value = readPrimaryDatabaseUrl(env)?.value ?? '';
   if (value === '') return { warning: null };
   const production = looksLikeProduction(env);
-  let facts: { owner: boolean; transactionPooler: boolean };
+  let facts: { owner: boolean; transactionPooler: boolean; strongPassword: boolean };
   try {
     facts = runtimeUrlFacts(value);
   } catch (error) {
@@ -257,6 +257,13 @@ export function checkRuntimeLogin(env: Env, processName: RuntimeLoginProcess): R
       );
     }
     return { warning: `The ${processName} process: PG_DATABASE_URL has a transaction-pooler shape. Allowed outside production only; production refuses it before connecting.` };
+  }
+  // Re-review (info): the M2 floor at the runtime too, so a weak mode-c password is refused even when a platform starts the
+  // API before db-setup (OpenShip ignores depends_on conditions). Production only: test and development databases use short ones.
+  if (production && !facts.strongPassword) {
+    throw new RuntimeDbConfigError(
+      `The ${processName} process: the crewflow_owner password inside PG_DATABASE_URL is too weak for production (at least ${OWNER_PASSWORD_MIN_LENGTH} characters with at least ${OWNER_PASSWORD_MIN_DISTINCT} different characters; openssl rand -hex 32). Value not shown. Refusing to start before connecting.`,
+    );
   }
   return { warning: null };
 }

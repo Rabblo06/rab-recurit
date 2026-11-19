@@ -65,6 +65,7 @@ import {
   OWNER_HARDEN_H3_MARK_PENDING,
   OWNER_HARDEN_M1_TRY_MIGRATION_LOCK,
   OWNER_HARDEN_M2_RELEASE_MIGRATION_LOCK,
+  OWNER_HARDEN_R1_LEGACY_LOGINS,
   MIGRATION_LOCK_KEY_DECIMAL,
   OWNER_SCHEMA_S1_HAS_LEDGER,
   OWNER_SCHEMA_S2_LEDGER,
@@ -280,13 +281,14 @@ type Probe = { ok: true } | { ok: false; code: string };
 function fakeIo(
   facts: OwnerFacts[],
   probes: Probe[],
-  opts: { failOn?: string; failCode?: string; failTimes?: number; openErrors?: string[]; otherDatabase?: unknown; schemaComplete?: boolean; migrationBusy?: boolean } = {},
+  opts: { failOn?: string; failCode?: string; failTimes?: number; openErrors?: string[]; otherDatabase?: unknown; schemaComplete?: boolean; migrationBusy?: boolean; legacyLogin?: string[] } = {},
 ) {
   const sent: Array<{ text: string; values?: unknown[] }> = [];
   const lines: string[] = [];
   let clock = 0;
   let failures = opts.failTimes ?? Number.POSITIVE_INFINITY;
   const openErrors = [...(opts.openErrors ?? [])];
+  let legacyLeft = [...(opts.legacyLogin ?? [])];
   const session: SqlSession = {
     async query(text, values) {
       sent.push({ text, values });
@@ -301,6 +303,9 @@ function fakeIo(
       if (text === OWNER_BOOTSTRAP_Q4D_REVERIFY) return { rows: [{ ok: true }] };
       if (text === OWNER_BOOTSTRAP_Q2B_OTHER_DATABASES) return { rows: [{ o_other_database: 'otherDatabase' in opts ? opts.otherDatabase : false }] };
       if (text === OWNER_HARDEN_M1_TRY_MIGRATION_LOCK) return { rows: [{ got: !opts.migrationBusy }] };
+      // Re-review R1: the legacy logins still LOGIN until the admin's NOLOGIN statements ran.
+      if (text === OWNER_HARDEN_R1_LEGACY_LOGINS) return { rows: legacyLeft.map((name) => ({ name })) };
+      if (text.startsWith('ALTER ROLE crewflow') && text.includes('NOLOGIN PASSWORD NULL')) legacyLeft = legacyLeft.filter((n) => !text.includes(`ROLE ${n} `));
       if (text === OWNER_HARDEN_M2_RELEASE_MIGRATION_LOCK) return { rows: [{ released: true }] };
       return { rows: [] };
     },
@@ -1401,5 +1406,40 @@ describe('the CREATEROLE removal waits for a running migration (review race: dis
     const { io, texts } = fakeIo([existing, existing, existing, { ...existing, oCreateRolePending: true }], [{ ok: true }], { schemaComplete: false, migrationBusy: true });
     expect(await bootstrapOwnerWithIo(io)).toMatchObject({ createRole: 'marked' });
     expect(texts()).not.toContain(OWNER_HARDEN_M1_TRY_MIGRATION_LOCK);
+  });
+});
+
+describe('re-review R1: the CREATEROLE removal never leaves a legacy login LOGIN (BC-17)', () => {
+  const hardened: OwnerFacts = { ...existing, oCreateRole: false, oCreateRolePending: false };
+  const APP_NOLOGIN = 'ALTER ROLE crewflow_app NOLOGIN PASSWORD NULL';
+  const CF_NOLOGIN = 'ALTER ROLE crewflow NOLOGIN PASSWORD NULL';
+
+  it('ledger complete + crewflow_app still LOGIN -> the admin makes it NOLOGIN in the same transaction, BEFORE NOCREATEROLE', async () => {
+    const { io, texts, lines } = fakeIo([existing, existing, existing, hardened], [{ ok: true }], { schemaComplete: true, legacyLogin: ['crewflow_app'] });
+    expect(await bootstrapOwnerWithIo(io)).toMatchObject({ exitCode: 0, createRole: 'removed' });
+    const t = texts();
+    const begin = t.lastIndexOf(OWNER_BOOTSTRAP_BEGIN);
+    expect(t.indexOf(APP_NOLOGIN)).toBeGreaterThan(begin);
+    expect(t.indexOf(OWNER_HARDEN_H1_NOCREATEROLE)).toBeGreaterThan(t.indexOf(APP_NOLOGIN));
+    expect(t).not.toContain(CF_NOLOGIN);
+    expect(lines).toContain(OWNER_BOOTSTRAP_MESSAGES.legacyLoginsDisabled(1));
+  });
+
+  it('DENIAL: the admin cannot make it NOLOGIN (42501) -> refusal 64, ROLLBACK, NO NOCREATEROLE', async () => {
+    const { io, texts } = fakeIo([existing], [{ ok: true }], { schemaComplete: true, legacyLogin: ['crewflow', 'crewflow_app'], failOn: CF_NOLOGIN, failCode: '42501' });
+    const error = await bootstrapOwnerWithIo(io).catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(OwnerBootstrapRefusal);
+    expect((error as Error).message).toBe(OWNER_BOOTSTRAP_MESSAGES.legacyLoginsNoRights);
+    expect(texts()).not.toContain(OWNER_HARDEN_H1_NOCREATEROLE);
+    expect(lastTx(texts())).toBe(OWNER_BOOTSTRAP_ROLLBACK);
+  });
+
+  it('no legacy login LOGIN -> no ALTER ROLE on them; marking (incomplete schema) never touches them', async () => {
+    const a = fakeIo([existing, existing, existing, hardened], [{ ok: true }], { schemaComplete: true });
+    expect(await bootstrapOwnerWithIo(a.io)).toMatchObject({ createRole: 'removed' });
+    expect(a.texts().filter((x) => x.includes('NOLOGIN'))).toEqual([]);
+    const b = fakeIo([existing, existing, existing, { ...existing, oCreateRolePending: true }], [{ ok: true }], { schemaComplete: false, legacyLogin: ['crewflow_app'] });
+    expect(await bootstrapOwnerWithIo(b.io)).toMatchObject({ createRole: 'marked' });
+    expect(b.texts()).not.toContain(OWNER_HARDEN_R1_LEGACY_LOGINS);
   });
 });

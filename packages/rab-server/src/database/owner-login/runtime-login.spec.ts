@@ -12,7 +12,7 @@ import { checkRuntimeLogin, readRuntimeDbConfig, RuntimeDbConfigError, STARTUP_E
  * (owner decision D5); every existing guard keeps its own message and order. Fake credentials only; every refusal is checked
  * for the secret, the admin login and the URL.
  */
-const SECRET = 'S3cret-PW-do-not-print';
+const SECRET = 'S3cret-PW-do-not-print-0123456789-abcdefgh';
 const ADMIN_LOGIN = 'doadmin_sentinel';
 const HOST = 'db-sentinel.example.internal';
 const ADMIN_URL = `postgres://${ADMIN_LOGIN}:${SECRET}@${HOST}:5432/crewflow?sslmode=verify-full`;
@@ -111,6 +111,20 @@ describe('runtime-login rule (DB-SETUP plan §2.2): production connects only as 
         expectValueFree((thrown as Error).message);
         expect((thrown as Error).message).not.toMatch(/neon|supabase|pooler\./i);
       }
+    }
+  });
+
+  it('re-review (info): production refuses a weak crewflow_owner password before connecting (the API may start before db-setup)', () => {
+    for (const weak of ['changeme', 'Short9pw1', 'ab'.repeat(20)]) {
+      const url = `postgres://crewflow_owner:${weak}@${HOST}:5432/crewflow?sslmode=verify-full`;
+      for (const processName of PROCESSES) {
+        const message = refusalOf(() => checkRuntimeLogin({ ...PROD, PG_DATABASE_URL: url }, processName));
+        expect(message).toMatch(/the crewflow_owner password inside PG_DATABASE_URL is too weak for production/);
+        expect(message).not.toContain(weak);
+        expectValueFree(message);
+      }
+      // Outside production a short password is the test / development norm.
+      expect(checkRuntimeLogin({ NODE_ENV: 'test', PG_DATABASE_URL: url }, 'api')).toEqual({ warning: null });
     }
   });
 

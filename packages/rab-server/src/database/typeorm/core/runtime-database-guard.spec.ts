@@ -2,7 +2,7 @@ import { ALLOW_PRODUCTION_DB_COMMANDS } from './database-target';
 import { assertRuntimeDatabaseIdentity, RuntimeDbError, resolveRuntimeDatabase } from './runtime-database-guard';
 
 // Fake credentials only. Every refusal asserts this never appears in the message.
-const SECRET = 'S3cret-PW-do-not-print';
+const SECRET = 'S3cret-PW-do-not-print-0123456789-abcdefgh';
 const PROD_POOLED = `postgres://rab_app:${SECRET}@ep-round-rain-aess0njf-pooler.c-2.us-east-2.aws.neon.tech/neondb?sslmode=require`;
 const PROD_DIRECT = `postgres://rab_owner:${SECRET}@ep-round-rain-aess0njf.c-2.us-east-2.aws.neon.tech/neondb?sslmode=require`;
 const OTHER_NEON = `postgres://rab_owner:${SECRET}@ep-other-endpoint-xyz.c-2.us-east-2.aws.neon.tech/neondb?sslmode=require`;

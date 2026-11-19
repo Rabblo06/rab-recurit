@@ -118,9 +118,13 @@ export function isOwnerLoginUrl(databaseUrl: string): boolean {
  * The runtime-login facts of a (policy-valid) PG_DATABASE_URL, for runtime-db-config.ts checkRuntimeLogin: is its login
  * crewflow_owner, and does it have a documented transaction-pooler shape. Refuses an invalid URL. Never returns a value.
  */
-export function runtimeUrlFacts(databaseUrl: string): { owner: boolean; transactionPooler: boolean } {
+export function runtimeUrlFacts(databaseUrl: string): { owner: boolean; transactionPooler: boolean; strongPassword: boolean } {
   const target = parseTarget(databaseUrl, URL_LABEL);
-  return { owner: target.user === OWNER_LOGIN, transactionPooler: target.transactionPooler !== null };
+  return {
+    owner: target.user === OWNER_LOGIN,
+    transactionPooler: target.transactionPooler !== null,
+    strongPassword: typeof target.password === 'string' && isStrongOwnerPassword(target.password),
+  };
 }
 
 /**

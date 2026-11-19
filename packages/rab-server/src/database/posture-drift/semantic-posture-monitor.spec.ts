@@ -6,6 +6,7 @@
  */
 import type { SecurityAuditSink } from '../../engine/core-modules/audit-sink/security-audit-sink';
 import { ownerLoginPostureAnswer } from '../../__tests__/helpers/owner-login-posture-fake';
+import { OWNER_LOGIN_CREATEROLE_MARK_SQL } from '../boot-checks/owner-login-posture';
 import { SemanticPostureMonitor } from './semantic-posture-monitor';
 import { isCreateRoleHardeningOnly, readSemanticPosture, SEMANTIC_OBJECT_SQL, SEMANTIC_ROLE_SQL, SemanticDrift } from './semantic-posture';
 
@@ -17,12 +18,18 @@ const CORE = ['policy|core.organisation|org_isolation|PERMISSIVE|ALL|-|USING:x|C
 
 /** A fake database: `state` can be changed between checks. */
 function fakeDb(initial: { roles: string[]; core?: string[] }) {
-  const state = { roles: [...initial.roles], core: [...(initial.core ?? CORE)] };
+  const state = {
+    roles: [...initial.roles],
+    core: [...(initial.core ?? CORE)],
+    /** The login's CREATEROLE and its mark (re-review R3). */
+    mark: { createrole: false, mark_pending: false, mark_expired: false } as Record<string, boolean>,
+  };
   const query = async (sql: string) => {
     if (sql === 'BEGIN READ ONLY' || sql === 'ROLLBACK') return [];
     if (sql.includes("current_setting('server_version_num')")) return [{ v: 160016 }];
     if (sql === SEMANTIC_OBJECT_SQL) return state.core.map((line) => ({ schema: 'core', line }));
     if (sql === SEMANTIC_ROLE_SQL) return state.roles.map((line) => ({ line }));
+    if (sql === OWNER_LOGIN_CREATEROLE_MARK_SQL) return [state.mark];
     const posture = ownerLoginPostureAnswer(sql);
     if (posture) return posture;
     throw new Error(`unexpected SQL ${sql.slice(0, 40)}`);
@@ -105,5 +112,29 @@ describe('SemanticPostureMonitor: the expected CREATEROLE removal is not drift (
     expect(lines.filter((l) => l.includes('SECURITY ALERT'))).toHaveLength(1);
     expect(lines.some((l) => l.includes('the expected hardening'))).toBe(false);
     expect(events).toHaveLength(1);
+  });
+});
+
+describe('re-review R3: an expired CREATEROLE grace period is reported by the running monitor', () => {
+  it('CREATEROLE + an expired mark -> readiness false, one alert, one security.posture.drift event; an unexpired mark or NOCREATEROLE -> nothing', async () => {
+    const db = fakeDb({ roles: [ownerLine(true)] });
+    db.state.mark = { createrole: true, mark_pending: true, mark_expired: false };
+    const { monitor, lines, events } = await monitorOn(db);
+    expect((await monitor.checkOnce()).ready).toBe(true);
+    expect(events).toHaveLength(0);
+    db.state.mark = { createrole: true, mark_pending: true, mark_expired: true };
+    const state = await monitor.checkOnce();
+    expect(state.ready).toBe(false);
+    expect(state.lastRoleProblems.join(' ')).toMatch(/still has CREATEROLE and its grace period \(the admin's mark\) has expired/);
+    expect(lines.some((l) => l.includes('SECURITY ALERT'))).toBe(true);
+    expect(events).toEqual([expect.objectContaining({ type: 'security.posture.drift' })]);
+  });
+
+  it('an expired mark WITHOUT CREATEROLE (a leftover) is not a problem', async () => {
+    const db = fakeDb({ roles: [ownerLine(false)] });
+    db.state.mark = { createrole: false, mark_pending: true, mark_expired: true };
+    const { monitor, events } = await monitorOn(db);
+    expect((await monitor.checkOnce()).ready).toBe(true);
+    expect(events).toHaveLength(0);
   });
 });

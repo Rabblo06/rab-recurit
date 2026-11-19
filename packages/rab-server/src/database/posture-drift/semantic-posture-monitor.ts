@@ -10,7 +10,7 @@ import {
   SemanticQuery,
 } from './semantic-posture';
 import { SEMANTIC_GOLDEN_BY_MAJOR } from './semantic-golden';
-import { ownerLoginRolePostureProblems } from '../boot-checks/owner-login-posture';
+import { OWNER_LOGIN_CREATEROLE_MARK_SQL, ownerLoginCreateRoleExpiryProblems, ownerLoginRolePostureProblems } from '../boot-checks/owner-login-posture';
 
 /**
  * The semantic posture check at boot and on a timer (M0 §6.4 control 4). READ ONLY: it never rewrites, re-grants or
@@ -130,7 +130,11 @@ export class SemanticPostureMonitor {
       session = await this.options.session();
       const now = await readSemanticPosture(session.query);
       const drift = semanticDriftFromSnapshot(this.baseline, now);
-      const roleProblems = await ownerLoginRolePostureProblems(session.query);
+      // Re-review R3: an expired CREATEROLE grace period is a role problem too (readiness false, one alert, one event).
+      const roleProblems = [
+        ...(await ownerLoginRolePostureProblems(session.query)),
+        ...ownerLoginCreateRoleExpiryProblems((await session.query(OWNER_LOGIN_CREATEROLE_MARK_SQL))[0]),
+      ];
       this.state.lastCheckAt = new Date();
       this.state.checks += 1;
       if (!roleProblems.length && isCreateRoleHardeningOnly(drift)) {
