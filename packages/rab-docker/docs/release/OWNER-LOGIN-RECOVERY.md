@@ -105,7 +105,7 @@ Restore into a **fresh** cluster or volume. That is the proven path, and the **o
    grep -v -E '^(CREATE|ALTER) ROLE <cluster-superuser>[ ;]' roles.sql > roles-restore.sql
    psql -X -v ON_ERROR_STOP=1 -U <cluster-superuser> -d postgres -f roles-restore.sql
    ```
-   **Bundled database, NOT TESTED:** the bundled `db` has no init script since DB-SETUP, but `db-setup` creates `crewflow_owner` on the first `up`. Restore with only `db` started (`$P up -d db`), before `db-setup` runs; otherwise exclude that role's `CREATE ROLE` line as well (keep its `ALTER ROLE`). After the restore, `$P up -d` lets `db-setup` set `crewflow_owner`'s password back to `PG_DATABASE_APP_PASSWORD`<!-- VERIFY against feat/twenty-style-db-url --> (the restored roles carry the old one).
+   **Bundled database, NOT TESTED:** the bundled `db` has no init script since DB-SETUP, but `db-setup` creates `crewflow_owner` on the first `up`. Restore with only `db` started (`$P up -d db`), before `db-setup` runs; otherwise exclude that role's `CREATE ROLE` line as well (keep its `ALTER ROLE`). After the restore, `$P up -d` lets `db-setup` set `crewflow_owner`'s password back to `PG_DATABASE_APP_PASSWORD` (the restored roles carry the old one).
 4. **Restore the database:**
    ```bash
    pg_restore -U <cluster-superuser> --create -d postgres --exit-on-error db.dump
