@@ -9591,7 +9591,7 @@ plain-text password.
   - an existing role's password is never written;
   - the grant is added;
   - exit 64 with fixed steps. The operator runs, once, as the admin login, all the printed lines together in one go
-    (one session, one transaction; psql if the SQL editor runs lines separately): `BEGIN;`, then
+    (a fresh session, one transaction; psql if the SQL editor runs lines separately): `BEGIN;`, then
     `SELECT pg_catalog.set_config('crewflow.pw', '<PG_DATABASE_APP_PASSWORD>', true);` with the placeholder replaced by that
     value, then a DO block that reads the value from that setting (never from its own text), runs
     `ALTER ROLE crewflow_owner LOGIN PASSWORD %L` through format() and removes the mark, re-raising any inner error with its
