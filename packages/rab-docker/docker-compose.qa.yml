@@ -172,9 +172,11 @@ services:
       retries: 30
       start_period: 60s
     # Twenty's Helm `db.enabled`: CREWFLOW_BUNDLED_DB (compose.env) 1 = run this bundled db (the default); 0 = your own
-    # database in PG_ADMIN_URL or PG_DATABASE_URL: no db container is created, and Compose skips the wait on a dependency
-    # that has 0 replicas (db-setup and rab-api start without it). 0 without your own database fails closed: db-setup refuses
-    # (exit 64: neither URL set) and rab-api never starts. The compose.env lint and the --environment preflight accept only
+    # database in PG_ADMIN_URL or PG_DATABASE_URL: no db container is created. In docker-compose.production.yml and
+    # docker-compose.image.yml nothing depends on db (owner instruction 2026-11-18, Twenty's Helm wait-for-db): db-setup waits
+    # for the database itself (OpenShip skips a dependent of a service without a container). OpenShip ignores
+    # deploy.replicas: there, switch the db service off in OpenShip itself. 0 without your own database fails closed: db-setup
+    # refuses (exit 64: neither URL set) and rab-api never starts. The compose.env lint and the --environment preflight accept only
     # 0 or 1, and 0 only with exactly one of PG_ADMIN_URL / PG_DATABASE_URL whose host is not `db`.
     # Development and QA never set it (they have no external database).
     deploy:

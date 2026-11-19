@@ -8,6 +8,7 @@ const os = require('node:os');
 const path = require('node:path');
 const test = require('node:test');
 const { checkModel, checkRedisPrivate, render, DEPLOY_COMBOS, REDIS_ONLY_COMBOS } = require('./compose-one-image.cjs');
+const { waitWrapperScript, WAIT_SECONDS_EXPR } = require('./db-setup-wait.cjs');
 
 const IMG = '${CREWFLOW_IMAGE_REPOSITORY:-adhin007/adolphus}@${CREWFLOW_IMAGE_TAG:?CREWFLOW_IMAGE_TAG must be a digest}';
 
@@ -20,13 +21,14 @@ function good() {
         image: IMG,
         entrypoint: ['./api-prestart.sh'],
         environment: { CREWFLOW_MIGRATE_ON_START: 'true' },
-        depends_on: { 'rab-redis': { condition: 'service_healthy' }, db: { condition: 'service_healthy' }, 'db-setup': { condition: 'service_completed_successfully' } },
+        depends_on: { 'rab-redis': { condition: 'service_healthy' }, 'db-setup': { condition: 'service_completed_successfully' } },
         stop_grace_period: '40s',
       },
       'db-setup': {
         image: IMG,
-        entrypoint: ['./db-setup.sh'],
-        depends_on: { db: { condition: 'service_healthy' } },
+        // Owner instruction 2026-11-18: the wait-for-db wrapper, no depends_on (as `config --no-interpolate` renders it).
+        entrypoint: ['/bin/sh', '-c', waitWrapperScript().split('$').join('$$'), 'db-setup'],
+        environment: { CREWFLOW_DB_WAIT_SECONDS: WAIT_SECONDS_EXPR },
       },
       'rab-worker': {
         image: IMG,
@@ -524,13 +526,13 @@ test('DENIAL DB-SETUP: no bundled db, a db image by tag / from another repositor
   refused(m, /db: has a build section/);
 });
 
-test('DENIAL DB-SETUP: rab-api not waiting for a healthy db; the Worker started without worker-start.sh', () => {
+test('DENIAL DB-SETUP: a service depending on db; the Worker started without worker-start.sh', () => {
   let m = good();
-  delete m.services['rab-api'].depends_on.db;
-  refused(m, /rab-api: must depend on db with condition service_healthy/);
-  m = good();
-  m.services['rab-api'].depends_on.db.condition = 'service_started';
-  refused(m, /rab-api: must depend on db/);
+  for (const svc of ['rab-api', 'rab-worker', 'db-setup']) {
+    m = good();
+    m.services[svc].depends_on = { ...(m.services[svc].depends_on ?? {}), db: { condition: 'service_healthy' } };
+    refused(m, new RegExp(`${svc}: must not depend on db`));
+  }
   // DB-SETUP PID 1: the cleaning scripts are the entrypoint; no command; no compose init.
   for (const [svc, script] of [['rab-api', './api-prestart.sh'], ['rab-worker', './worker-start.sh']]) {
     for (const ep of [undefined, ['/sbin/tini', '-s', '--'], ['/sbin/tini', '-s', '--', script], ['sh', '-c', script], ['node', 'x.js']]) {
@@ -630,7 +632,17 @@ test('DENIAL option A: db-setup missing, on another image, with another entrypoi
   refused(m, /db-setup: image/);
   m = good();
   m.services['db-setup'].entrypoint = ['./api-prestart.sh'];
-  refused(m, /db-setup: entrypoint must be exactly \["\.\/db-setup\.sh"\]/);
+  refused(m, /db-setup: entrypoint is neither exactly \.\/db-setup\.sh nor exactly the wait-for-db wrapper/);
+  // Owner instruction 2026-11-18: the deploy files must start db-setup through the wait (no depends_on: db any more).
+  m = good();
+  m.services['db-setup'].entrypoint = ['./db-setup.sh'];
+  refused(m, /db-setup: must start through the wait-for-db wrapper/);
+  m = good();
+  m.services['db-setup'].entrypoint[2] = m.services['db-setup'].entrypoint[2].replace('exec ./db-setup.sh', 'exec ./api-prestart.sh');
+  refused(m, /db-setup: entrypoint is neither/);
+  m = good();
+  m.services['db-setup'].environment.CREWFLOW_DB_WAIT_SECONDS = '${CREWFLOW_DB_WAIT_SECONDS:-5}';
+  refused(m, /db-setup: CREWFLOW_DB_WAIT_SECONDS is not the committed/);
   m = good();
   m.services['db-setup'].init = true;
   refused(m, /db-setup: init: true is refused/);
@@ -641,6 +653,6 @@ test('DENIAL option A: db-setup missing, on another image, with another entrypoi
   m.services['rab-api'].depends_on['db-setup'].condition = 'service_started';
   refused(m, /rab-api: must depend on db-setup/);
   m = good();
-  delete m.services['db-setup'].depends_on;
-  refused(m, /db-setup: must depend on db with condition service_healthy/);
+  m.services['db-setup'].depends_on = { 'rab-redis': { condition: 'service_healthy' } };
+  refused(m, /db-setup: has depends_on \(rab-redis\)/);
 });

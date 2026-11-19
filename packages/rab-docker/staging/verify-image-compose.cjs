@@ -28,7 +28,9 @@
  * IDENTICAL in the two files. PR #125 option 2 + PG_ADMIN_URL (owner decision 2026-11-17): the database settings
  * (PG_ADMIN_URL = an admin URL; PG_DATABASE_URL = ALWAYS crewflow_owner; neither = the bundled db, from
  * PG_DATABASE_PASSWORD) are committed ONLY on the one-shot db-setup service (compose.env); db-setup's database environment,
- * runtime keys, volumes and depends_on are identical in the two files. rab-api and rab-worker never have a PG_ADMIN_URL key,
+ * runtime keys, volumes and depends_on are identical in the two files; db-setup starts through the wait-for-db wrapper with
+ * NO depends_on and nothing depends on db (owner instruction 2026-11-18, Twenty's Helm wait-for-db; db-setup-wait.cjs).
+ * rab-api and rab-worker never have a PG_ADMIN_URL key,
  * pin PG_DATABASE_URL to the literal empty string (never a URL, the crewflow_owner one included) and hold no postgres://
  * value anywhere in their definition (they read db-setup's target volume, read-only). Neither URL may come from an env
  * file; in the deployed model the --environment preflight applies compose-owner-login.cjs dbSettingsProblems (the three
@@ -47,6 +49,7 @@ const REPO = path.resolve(__dirname, '../../..');
 // The bundled db's environment rules, one definition for the committed and the deployed model (PR #125 review, finding 6).
 const { bundledDbEnvironmentProblems, credentialMountProblems, topLevelVolumeProblems, strictSwitchProblems, dbSettingsProblems, DB_SETUP_DB_KEYS, ADMIN_URL_KEY, RETIRED_ADMIN_URL_KEYS } = require('../scripts/compose-owner-login.cjs');
 const { pgCaFileProblem } = require('../scripts/pg-ca-pem.cjs');
+const { dbSetupStartProblems, WAIT_SECONDS_KEY, WAIT_SECONDS_DEFAULT } = require('../scripts/db-setup-wait.cjs');
 const VARIANT = path.join(REPO, 'packages/rab-docker/docker-compose.image.yml');
 const PRODUCTION = path.join(REPO, 'packages/rab-docker/docker-compose.production.yml');
 
@@ -215,7 +218,7 @@ const isPgUrlText = (v) => /postgres(ql)?:\/\//i.test(String(v ?? ''));
  * URL included, is refused) and nothing in their definition holds a postgres:// value; they mount the target volume
  * read-only. db-setup mounts it writable, restart "no", rab-api waits for it.
  */
-function optionAProblems(services, where = '') {
+function optionAProblems(services, where = '', { renderedWait = WAIT_SECONDS_DEFAULT } = {}) {
   const out = [];
   for (const name of ['rab-api', 'rab-worker']) {
     const svc = services[name];
@@ -239,8 +242,9 @@ function optionAProblems(services, where = '') {
     if (setup.restart !== 'no') out.push(`${DB_SETUP_SERVICE}: restart is not "no"${where} (a one-shot)`);
     if ((setup.ports ?? []).length) out.push(`${DB_SETUP_SERVICE}: publishes a port${where}`);
     if (!(setup.volumes ?? []).some((v) => v.type === 'volume' && v.source === DB_TARGET_VOLUME && v.target === DB_TARGET_DIR && v.read_only !== true)) out.push(`${DB_SETUP_SERVICE}: does not mount the target volume writable${where}`);
-    const deps = setup.depends_on ?? {};
-    if (stable(Object.keys(deps)) !== stable([DB_SERVICE]) || deps[DB_SERVICE]?.condition !== 'service_healthy') out.push(`${DB_SETUP_SERVICE}: depends_on must be exactly a healthy ${DB_SERVICE}${where}`);
+    // Owner instruction 2026-11-18 (Twenty's Helm wait-for-db): the wait-for-db wrapper (db-setup-wait.cjs), NO depends_on,
+    // and rab-api never depends on db (with CREWFLOW_BUNDLED_DB=0 there is no db container; OpenShip skipped the dependent).
+    out.push(...dbSetupStartProblems(services, { requireWait: true, renderedWait, where }));
     if (setup.image !== services['rab-api']?.image) out.push(`${DB_SETUP_SERVICE}: image differs from rab-api's${where} (O2: one image)`);
     // Twenty Helm model (OWNER-DB-FINAL.md Part A): APP_SECRET is never part of a database credential; db-setup never has it.
     if (Object.prototype.hasOwnProperty.call(envOf(setup), 'APP_SECRET')) out.push(`${DB_SETUP_SERVICE}: has APP_SECRET${where} (never part of a database credential)`);
@@ -266,7 +270,8 @@ function pid1Problems(services, where = '') {
   for (const [name, script] of Object.entries(PID1_ENTRYPOINTS)) {
     const svc = services[name];
     if (!svc) continue;
-    if (stable(svc.entrypoint) !== stable([script])) out.push(`${name}: entrypoint is not exactly ${script}${where} (DB-SETUP PID 1)`);
+    // db-setup: the wait-for-db wrapper execs ./db-setup.sh as the same PID 1 (checked exactly by dbSetupStartProblems).
+    if (name !== DB_SETUP_SERVICE && stable(svc.entrypoint) !== stable([script])) out.push(`${name}: entrypoint is not exactly ${script}${where} (DB-SETUP PID 1)`);
     if (hasCommand(svc)) out.push(`${name}: has a command${where} (${script}, the entrypoint, takes none)`);
     if (svc.init === true) out.push(`${name}: init: true${where} (docker-init would be PID 1 with the admin URL)`);
   }
@@ -394,7 +399,7 @@ function checkVariant(variant, production, variantFiles = variant) {
       const bv = key === 'volumes' ? withoutCa(pset.volumes) : pset[key];
       if (stable(av) !== stable(bv)) fail(`${DB_SETUP_SERVICE}.${key} differs from docker-compose.production.yml: ${stable(av)} vs ${stable(bv)}`);
     }
-    for (const key of [...DB_SETUP_DB_KEYS, 'NODE_ENV', 'RAB_RUNTIME_ENV']) if (stable(envOf(vset)[key]) !== stable(envOf(pset)[key])) fail(`${DB_SETUP_SERVICE}.environment.${key} differs from docker-compose.production.yml`);
+    for (const key of [...DB_SETUP_DB_KEYS, WAIT_SECONDS_KEY, 'NODE_ENV', 'RAB_RUNTIME_ENV']) if (stable(envOf(vset)[key]) !== stable(envOf(pset)[key])) fail(`${DB_SETUP_SERVICE}.environment.${key} differs from docker-compose.production.yml`);
     const deps = (x) => Object.fromEntries(Object.entries(x.depends_on ?? {}).map(([k, v]) => [k, v.condition]));
     if (stable(deps(vset)) !== stable(deps(pset))) fail(`${DB_SETUP_SERVICE}.depends_on differs from docker-compose.production.yml`);
     const files = envFiles(DB_SETUP_SERVICE).map(baseName);
@@ -672,7 +677,7 @@ function checkDeployment(merged, production, envFileKeys = {}, { dockerRoot = un
   }
   if (String(envOf(services['rab-api']).PG_DATABASE_URL ?? '') !== String(envOf(services['rab-worker']).PG_DATABASE_URL ?? '')) fail('PG_DATABASE_URL differs between rab-api and rab-worker in the deployed model');
   // PR #125 option 2: the app services never hold a database URL; db-setup alone carries it.
-  for (const pr of optionAProblems(services, ' in the deployed model')) fail(pr);
+  for (const pr of optionAProblems(services, ' in the deployed model', { renderedWait: null })) fail(pr);
   for (const pr of credentialMountProblems(services, ' in the deployed model')) fail(pr);
   // Security re-review F2: an override may add services; none of them may run as root or as uid 1000 (the owner of the
   // crewflow_owner password file), whatever it mounts.

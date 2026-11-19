@@ -21,9 +21,11 @@
  *   - rab-api's stop_grace_period is below 40 s;
  *   - DB-SETUP (owner decisions D1 a / D3): the bundled database `db` is missing, its image is not EXACTLY
  *     ${CREWFLOW_POSTGRES_IMAGE:-postgres@sha256:<64 hex>} (the one non-app image allowed a committed default: the official
- *     postgres repository by digest, never a tag), rab-api does not wait for it healthy, or the PID 1 shape is not exact:
- *     rab-api's entrypoint ./api-prestart.sh and rab-worker's ./worker-start.sh, no command, no compose init (each script
- *     cleans the environment, then execs the image's tini; T-5);
+ *     postgres repository by digest, never a tag), any service depends on it (owner instruction 2026-11-18, Twenty's Helm
+ *     wait-for-db: with CREWFLOW_BUNDLED_DB=0 it has no container), db-setup does not start through the wait-for-db wrapper
+ *     with no depends_on (db-setup-wait.cjs), or the PID 1 shape is not exact: rab-api's entrypoint ./api-prestart.sh and
+ *     rab-worker's ./worker-start.sh, no command, no compose init (each script cleans the environment, then execs the
+ *     image's tini; T-5);
  *   - a `rab-ops` service, or any service under an `ops` profile, is present. The separated operations container was
  *     removed (rab-ops removal, PR 2); operations run as one-off owner-login commands of the API image
  *     (`docker compose run --rm --no-deps rab-api node packages/rab-server/dist/command/main.js <command>`), so the
@@ -53,6 +55,7 @@
  */
 const { execFileSync } = require('node:child_process');
 const path = require('node:path');
+const { dbSetupStartProblems } = require('./db-setup-wait.cjs');
 
 const DOCKER_DIR = path.resolve(__dirname, '..');
 
@@ -165,15 +168,20 @@ function checkModel(model, label, { allowDefaultDigest = false } = {}) {
     if (db.build !== undefined) p('db: has a build section');
     if (!DB_IMAGE_REF.test(String(db.image ?? ''))) p(`db: image must be \${CREWFLOW_POSTGRES_IMAGE:-postgres@sha256:<64 hex>} (the official postgres repository by digest), got ${JSON.stringify(db.image)}`);
   }
-  if (api.depends_on?.db?.condition !== 'service_healthy') p('rab-api: must depend on db with condition service_healthy');
+  // Owner instruction 2026-11-18 (Twenty's Helm wait-for-db): nothing depends on db; db-setup waits for the database itself.
+  for (const [name, svc] of Object.entries(services)) {
+    const deps = svc?.depends_on ?? {};
+    if ((Array.isArray(deps) ? deps : Object.keys(deps)).includes('db')) p(`${name}: must not depend on db (with CREWFLOW_BUNDLED_DB=0 it has no container; db-setup waits for the database itself)`);
+  }
   if (api.depends_on?.['db-setup']?.condition !== 'service_completed_successfully') p('rab-api: must depend on db-setup with condition service_completed_successfully (option A: crewflow_owner exists and the target file is written)');
-  if (services['db-setup'] && services['db-setup'].depends_on?.db?.condition !== 'service_healthy') p('db-setup: must depend on db with condition service_healthy');
+  for (const msg of dbSetupStartProblems(services, { requireWait: true })) p(msg);
   // DB-SETUP PID 1 (lead decision 2026-11-12): the cleaning scripts are the ENTRYPOINT (PID 1) and exec the image's tini only
   // once the environment is clean; no command, no compose init (docker-init would keep the admin URL at PID 1).
   for (const [name, script] of [['rab-api', './api-prestart.sh'], ['rab-worker', './worker-start.sh'], ['db-setup', './db-setup.sh']]) {
     const s = services[name];
     if (!s) continue;
-    if (JSON.stringify(s.entrypoint ?? null) !== JSON.stringify([script])) p(`${name}: entrypoint must be exactly ["${script}"] (DB-SETUP: PID 1 cleans the environment before the init starts)`);
+    // db-setup: the wait-for-db wrapper (checked exactly by dbSetupStartProblems above) execs ./db-setup.sh as the same PID 1.
+    if (name !== 'db-setup' && JSON.stringify(s.entrypoint ?? null) !== JSON.stringify([script])) p(`${name}: entrypoint must be exactly ["${script}"] (DB-SETUP: PID 1 cleans the environment before the init starts)`);
     if (Array.isArray(s.command) ? s.command.length > 0 : (s.command !== undefined && s.command !== null)) p(`${name}: must have no command (${script}, the entrypoint, takes none)`);
     if (s.init === true) p(`${name}: init: true is refused (docker-init would be PID 1 with the admin URL)`);
   }

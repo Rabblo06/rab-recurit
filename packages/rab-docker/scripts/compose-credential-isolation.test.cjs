@@ -134,11 +134,12 @@ test('DENIAL (Part F2): a missing db-setup, or one that is not the one-shot ./db
   delete none['db-setup'];
   refusedBy(isolation.dbSetupContractChecks('f.yml', none, RUNTIME), /has the one-shot db-setup service/);
   const cases = [
-    [(s) => { s['db-setup'].entrypoint = ['node', 'x.js']; }, /db-setup runs exactly \.\/db-setup\.sh/],
-    [(s) => { s['db-setup'].command = ['sh']; }, /db-setup runs exactly \.\/db-setup\.sh/],
+    [(s) => { s['db-setup'].entrypoint = ['node', 'x.js']; }, /db-setup runs exactly \.\/db-setup\.sh or exactly the wait-for-db wrapper/],
+    [(s) => { s['db-setup'].command = ['sh']; }, /db-setup runs exactly \.\/db-setup\.sh or exactly the wait-for-db wrapper/],
+    [(s) => { s['db-setup'].entrypoint = ['/bin/sh', '-c', 'exec ./db-setup.sh', 'db-setup']; }, /db-setup runs exactly \.\/db-setup\.sh or exactly the wait-for-db wrapper/],
     [(s) => { s['db-setup'].restart = 'unless-stopped'; }, /db-setup restart is "no"/],
     [(s) => { s['db-setup'].ports = [{ target: 5432 }]; }, /db-setup publishes no port/],
-    [(s) => { delete s['db-setup'].depends_on; }, /db-setup starts after a healthy db/],
+    [(s) => { delete s['db-setup'].depends_on; }, /db-setup waits for the database itself .* or starts after a healthy db \(db-setup: depends_on must be exactly a healthy db/],
     [(s) => { s['db-setup'].volumes[1].read_only = true; }, /db-setup mounts the target volume writable/],
     [(s) => { s['db-setup'].volumes[0].read_only = false; }, /db-setup mounts the db CA read-only/],
     [(s) => { s['db-setup'].environment.APP_SECRET = ''; }, /db-setup has no APP_SECRET/],
@@ -146,6 +147,32 @@ test('DENIAL (Part F2): a missing db-setup, or one that is not the one-shot ./db
   ];
   for (const [edit, re] of cases) {
     const s = partA();
+    edit(s);
+    refusedBy(isolation.dbSetupContractChecks('f.yml', s, RUNTIME), re);
+  }
+});
+
+// Owner instruction 2026-11-18 (Twenty's Helm wait-for-db): the wrapper form, with no depends_on; required in production.
+test('db-setup wait-for-db: the wrapper with no depends_on passes; with depends_on, a stale block, or a db edge on the API it fails', () => {
+  const wait = require('./db-setup-wait.cjs');
+  const wrapped = () => {
+    const s = partA();
+    s['db-setup'].entrypoint = ['/bin/sh', '-c', wait.waitWrapperScript().split('$').join('$$'), 'db-setup'];
+    s['db-setup'].environment.CREWFLOW_DB_WAIT_SECONDS = '300';
+    delete s['db-setup'].depends_on;
+    return s;
+  };
+  assert.deepEqual(failedLabels(isolation.dbSetupContractChecks('f.yml', wrapped(), RUNTIME)), []);
+  // Production must use the wrapper; the plain start is refused there.
+  refusedBy(isolation.dbSetupContractChecks(isolation.PRODUCTION_FILE, partA(), RUNTIME), /must start through the wait-for-db wrapper/);
+  for (const [edit, re] of [
+    [(s) => { s['db-setup'].depends_on = { db: { condition: 'service_healthy' } }; }, /db-setup: has depends_on \(db\)/],
+    [(s) => { s['db-setup'].entrypoint[2] = s['db-setup'].entrypoint[2].replace('"57P03"', '"00000"'); }, /db-setup runs exactly \.\/db-setup\.sh or exactly the wait-for-db wrapper/],
+    [(s) => { s['db-setup'].entrypoint[2] = s['db-setup'].entrypoint[2].replace('exec ./db-setup.sh', 'exec ./db-setup.sh; true'); }, /db-setup runs exactly/],
+    [(s) => { s['rab-api'] = { depends_on: { db: { condition: 'service_healthy' } } }; }, /rab-api: depends on db/],
+    [(s) => { delete s['db-setup'].environment.CREWFLOW_DB_WAIT_SECONDS; }, /CREWFLOW_DB_WAIT_SECONDS is missing/],
+  ]) {
+    const s = wrapped();
     edit(s);
     refusedBy(isolation.dbSetupContractChecks('f.yml', s, RUNTIME), re);
   }

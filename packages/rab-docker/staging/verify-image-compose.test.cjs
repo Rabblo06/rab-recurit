@@ -94,6 +94,13 @@ const weakenings = [
   ['migration credential reaches the API', (v) => { v.services['rab-api'].environment.PG_DATABASE_URL = `postgresql://crewflow_migrator:${SENTINEL_MIGRATOR_PW}@h:5432/rab`; }, /rab-api: PG_DATABASE_URL carries a migration\/ops credential/],
   ['migration approval on the Worker', (v) => { v.services['rab-worker'].environment.CREWFLOW_MIGRATION_APPROVED = 'pending-1-x'; }, /rab-worker: sets CREWFLOW_MIGRATION_APPROVED/],
   ['API reads .env.migrate', (_v, f) => { f.services['rab-api'].env_file = [{ path: '/x/.env.migrate' }]; }, /rab-api: names \.env\.migrate/],
+  // Owner instruction 2026-11-18 (Twenty's Helm wait-for-db): db-setup waits for the database itself; nothing depends on db.
+  ['db-setup depends on db again', (v) => { v.services['db-setup'].depends_on = { db: { condition: 'service_healthy', required: true } }; }, /db-setup: has depends_on \(db\)/],
+  ['db-setup and production both depend on db again', (v, _f, p) => { for (const m of [v, p]) m.services['db-setup'].depends_on = { db: { condition: 'service_healthy', required: true } }; }, /db-setup: has depends_on \(db\)/],
+  ['rab-api depends on db again', (v) => { v.services['rab-api'].depends_on.db = { condition: 'service_healthy', required: true }; }, /rab-api: depends on db/],
+  ['db-setup started directly, without the wait', (v) => { v.services['db-setup'].entrypoint = ['./db-setup.sh']; }, /db-setup: must start through the wait-for-db wrapper/],
+  ['the wait block edited in the compose wrapper', (v) => { v.services['db-setup'].entrypoint = v.services['db-setup'].entrypoint.map((x) => String(x).replace('"57P03"', '"57P04"')); }, /db-setup: entrypoint is neither exactly \.\/db-setup\.sh nor exactly the wait-for-db wrapper/],
+  ['the wait bound changed in one file', (v) => { v.services['db-setup'].environment.CREWFLOW_DB_WAIT_SECONDS = '30'; }, /db-setup: CREWFLOW_DB_WAIT_SECONDS is not the committed|db-setup\.environment\.CREWFLOW_DB_WAIT_SECONDS differs/],
   ['the API waits for a rab-migrate again', (v) => { v.services['rab-api'].depends_on['rab-migrate'] = { condition: 'service_completed_successfully' }; }, /rab-api: depends on rab-migrate|rab-api\.depends_on differs/],
   ['API no longer migrates on start (O3 C1)', (v) => { v.services['rab-api'].environment.CREWFLOW_MIGRATE_ON_START = 'false'; }, /rab-api: CREWFLOW_MIGRATE_ON_START is not "true"/],
   ['a bogus approval mode', (v) => { v.services['rab-api'].environment.CREWFLOW_MIGRATION_APPROVAL_MODE = 'off'; }, /rab-api: CREWFLOW_MIGRATION_APPROVAL_MODE is not none or token/],

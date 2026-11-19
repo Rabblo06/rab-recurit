@@ -9425,3 +9425,36 @@ Reversal:   Upgrade / `resolutions` override (documented in "//resolutions") as 
   copy with a pause between the two statements): two commits ended at version 1; with the fix, 2. Semantic goldens
   (PG16/17/18): only the `metadata_version_bump()` body hash changes (5f6076df… → ccfd284e…); security-posture golden and
   the restricted-migrator drift review unchanged (a function body is not a privilege line).
+
+## db-setup waits for the database itself; no `depends_on: db` (branch fix/db-setup-waits-for-db, 2026-11-18; no SQL)
+- **What changed.** `docker-compose.production.yml` / `docker-compose.image.yml`: db-setup has no `depends_on`, rab-api no
+  longer depends on `db` (it keeps db-setup `service_completed_successfully` and rab-redis `service_healthy`). OpenShip
+  (v0.9.12+) skipped db-setup when `db` had no container (`CREWFLOW_BUNDLED_DB=0`). db-setup now waits, bounded
+  (`CREWFLOW_DB_WAIT_SECONDS`, default 300, 0-900), for the database it uses: Twenty's Helm wait-for-db init container,
+  re-implemented. The block lives in `rab/db-setup.sh` and, byte-identical, in a compose wrapper (`/bin/sh -c '<block>;
+  exec ./db-setup.sh'`) because the published 0.6.0 image has no wait. Gates: `scripts/db-setup-wait.cjs` (shared by
+  compose-owner-login, compose-credential-isolation, compose-one-image, verify-image-compose).
+- **Credentials.** The probe reads only the host and port of the URL db-setup already holds (bundled URL, PG_ADMIN_URL
+  or PG_DATABASE_URL); it never authenticates, never runs a query, never prints the URL, host, login or password (fixed
+  lines only; tests 15b/15c/15g/15h scan for the sentinel). The URL reaches the probe as an environment variable of its own
+  process (never argv); nothing but its host and port is used. No new service receives a URL.
+- **Security trade-off (convenience over a stricter control; §5.8, for veto).** The probe is pg_isready's check, not a
+  verify-full login: a plain-TCP protocol-3.0 startup message with the fixed placeholder login `crewflow_wait_for_db`, no
+  TLS, no password. Chosen because the image has no `pg_isready`, because it needs no credential and no CA (so it cannot
+  leak or misuse one), and because the real connection follows at once. What an on-path attacker gains: it can make the wait
+  end early (fake "ready") or last until the bound (drop packets); either way the bootstrap child's own verify-full
+  connection decides, exactly as before this change. It learns the placeholder name only. The server logs one
+  `no pg_hba.conf entry ... crewflow_wait_for_db ... no encryption` FATAL (bundled db: hostssl only) or an authentication
+  start per successful probe; nothing is authorised, so the admin-connection audit (run-db-setup-tests.cjs) is unchanged.
+- **Fail closed.** Timeout: one fixed line, exit 70, nothing changed (the child never ran; rab-api is not started).
+  An invalid bound: exit 64 before anything connects. A setting db-setup.sh refuses (both URLs, neither with
+  CREWFLOW_BUNDLED_DB=0, the bundled db without its password, an unparseable URL) is not waited for: the refusal is
+  immediate. TERM during the wait exits 143 at once. The wrapper is checked exactly (any edit fails the gates).
+- **Residual (OpenShip).** OpenShip waits at most 180 s (db-setup has no health check) for db-setup to complete before it
+  fails rab-api; a database slower than that means a redeploy (api-prestart.sh's own 120 s wait for db-setup's files is
+  unchanged). OpenShip ignores `deploy.replicas`, so `CREWFLOW_BUNDLED_DB=0` there needs the db service switched off in
+  OpenShip; otherwise the bundled db starts without a password, refuses (exit 64) and restarts, while db-setup and the app
+  use your database regardless.
+- **Tests.** run-prestart-shell-tests.cjs section 15 (slow database 57P03 then ready, unreachable timeout, 28000 counts as
+  up, bounds 0-900, 0 = no wait, the compose wrapper path incl. mode a by host db, refusals not waited for, TERM); the four
+  compose gates and their tests; real containers on InstaBox with the published 0.6.0 image (PR body).

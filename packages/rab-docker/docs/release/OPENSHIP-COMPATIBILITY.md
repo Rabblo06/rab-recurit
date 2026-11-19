@@ -7,6 +7,19 @@
 Status: analysis from public source, 2026-11-03. Owner decision R5: verify every H6 restriction against OpenShip and
 never drop a security setting silently. Nothing was deployed, imported or connected.
 
+> **`depends_on`, one-shot services and `deploy.replicas` (re-checked 2026-11-18 from source, OpenShip main `1c455e4b`, release
+> v1.0.1 `3d2c1eae`; read-only, nothing deployed).** Since v0.9.12 (commit `2aef5b84`) OpenShip honours `service_healthy`
+> and `service_completed_successfully` (`packages/platform/src/engine/modules/deployments/dependency-readiness.ts`;
+> gate in `.../deployments/compose/deploy.service.ts:2774-2834`). A dependency with a condition but no container fails the
+> dependent ("Service "db-setup" skipped: Dependency "db" has no container for service_healthy", `deploy.service.ts:2785`),
+> and its dependents are skipped in turn. `deploy.replicas` is not modelled at all (`compose-parser.ts:856-871`, `962-987`):
+> `replicas: 0` still creates the container; the `db` service must be switched off in OpenShip. `restart: true` and
+> `required: false` inside `depends_on` are ignored with a warning (`compose-parser.ts:646-649`). The wait for a
+> `service_completed_successfully` / `service_healthy` dependency is `max(120 s, start_period + retries x (interval +
+> timeout))` of the DEPENDENCY's health check (`deploy.service.ts:2789-2796`): 180 s for db-setup (no health check), 1125 s
+> for rab-api (rab-worker's wait). Hence db-setup has no `depends_on` and waits for the database itself (wait-for-db).
+> The rows below about `depends_on` describe v0.9.8.
+
 ## 1. What was checked, and the gap
 
 | Item | Value |
