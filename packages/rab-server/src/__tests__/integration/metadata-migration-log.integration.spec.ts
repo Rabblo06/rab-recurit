@@ -355,18 +355,19 @@ describeIfLog('metadata engine M2 phase 1: core.metadata_migration, insert-only,
   });
 
   it('ML-10 release-2 dependency: a workspace first-ever change (version 0 → 1) can never be logged (23514); E2 sync must seed version 1 first', async () => {
+    const bareOwner = await createUser(A1.org, 'bare-owner');
     const bare = await asAdmin(async (c) => {
       const workspace = (
         await c.query<{ id: string }>("INSERT INTO core.manager_workspace (organisation_id, owner_user_id, name, subdomain, status) VALUES ($1, $2, $3, $4, 'active') RETURNING id::text", [
           A1.org,
-          A1.owner,
+          bareOwner,
           'ML bare',
           `ml-${RUN_ID}-bare`,
         ])
       ).rows[0]!.id;
       return workspace;
     });
-    const r = await bound({ org: A1.org, workspace: bare }, A1.owner, async (c) => {
+    const r = await bound({ org: A1.org, workspace: bare }, bareOwner, async (c) => {
       const before = (await c.query('SELECT 1 FROM core.workspace_metadata_state WHERE workspace_id = $1', [bare])).rowCount;
       const object = (
         await c.query<{ id: string }>(
@@ -376,7 +377,7 @@ describeIfLog('metadata engine M2 phase 1: core.metadata_migration, insert-only,
         )
       ).rows[0]!.id;
       const v = (await c.query<{ v: string }>('SELECT metadata_version::text AS v FROM core.workspace_metadata_state WHERE workspace_id = $1', [bare])).rows[0]!.v;
-      const out = await attempt(c, INSERT_LOG, logParams({ tag: 'bare', org: A1.org, owner: A1.owner, workspace: bare, object }, '0', '1'));
+      const out = await attempt(c, INSERT_LOG, logParams({ tag: 'bare', org: A1.org, owner: bareOwner, workspace: bare, object }, '0', '1'));
       return { before, v, code: out.code, constraint: out.constraint };
     });
     expect(r).toEqual({ before: 0, v: '1', code: '23514', constraint: 'metadata_migration_version_step_ck' });
